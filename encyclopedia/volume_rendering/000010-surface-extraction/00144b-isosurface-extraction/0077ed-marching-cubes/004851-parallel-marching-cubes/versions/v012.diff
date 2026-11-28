@@ -1,0 +1,69 @@
+--- v011.md
++++ v012.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Parallel Marching Cubes is a parallel isosurface extraction technique designed to compute surfaces of huge datasets that cannot fit entirely into a single machine's physical memory [S1, unofficial]. It solves the memory bottleneck of traditional marching cubes by using a piecewise slice strategy along the k-direction, requiring only that at least two slices fit into memory [S1, unofficial]. Unlike siblings that assume full volume residency, this method partitions the workload across multiple processes (using `fork`, `sproc`, or `pthreads`) to process grid slices concurrently [S1, unofficial].
++Parallel Marching Cubes is a parallel isosurface extraction technique designed to compute surfaces of huge datasets that cannot fit entirely into a single machine's physical memory [S1, unofficial]. It solves the memory bottleneck of traditional marching cubes by using a piecewise slice strategy along the k-direction, requiring only that at least two slices fit into memory [S1, unofficial]. Unlike siblings that assume full volume residency, this method partitions the workload across multiple processes to process grid slices concurrently [S1, unofficial].
+ 
+ ## How it works
+@@ -20,6 +20,6 @@
+ **Numbered Steps**
+ 1.  **Initialization**: The parent process opens the grid and solution files to read header information, specifically the number of grids (expected to be one) and dimensions in $i, j, k$ directions [S1, unofficial].
+-2.  **Partitioning**: The parent calls a partitioning routine to divide the workload. The grid is sliced in the $k$-direction based on the `Kstep` parameter (number of planes to step) and `Num_procs` (number of processes) [S1, unofficial].
+-3.  **Process Creation**: The parent creates child processes equal to `Num_procs`. The mechanism depends on the platform: `fork` on SGI/Sun, `sproc` on SGI, or `pthreads` on KSR1 [S1, unofficial].
++2.  **Partitioning**: The parent calls a partitioning routine to divide the workload [S1, unofficial]. The grid is sliced in the $k$-direction based on the `Kstep` parameter (number of planes to step) and `Num_procs` (number of processes) [S1, unofficial].
++3.  **Process Creation**: The parent creates child processes equal to `Num_procs` [S1, unofficial]. The mechanism depends on the platform: `fork` on SGI/Sun, `sproc` on SGI, or `pthreads` on KSR1 [S1, unofficial].
+     *   *Note on Memory*: `fork` uses copy-on-write (writes not visible to other processes); `sproc` shares the virtual address space (shared memory) [S1, unofficial].
+ 4.  **Slice Loading**: Each child process reads its assigned slice of the grid and solution data into local memory [S1, unofficial].
+@@ -28,5 +28,5 @@
+     *   Look up the topology in a table of 15 major cases (reduced from 256 via symmetry) [S1, unofficial].
+     *   Use linear interpolation to determine exact intersection points on cube edges [S1, unofficial].
+-6.  **Serialization**: Child processes write generated polygon data to the output Bop file. To prevent collisions from simultaneous writes, semaphores enforce mutual exclusion, allowing only one child to write or network polygons at a time [S1, unofficial].
++6.  **Serialization**: Child processes write generated polygon data to the output Bop file [S1, unofficial]. To prevent collisions from simultaneous writes, semaphores enforce mutual exclusion, allowing only one child to write or network polygons at a time [S1, unofficial].
+ 7.  **Completion**: Children with smaller or no output complete execution before those with larger output requirements [S1, unofficial].
+ 
+@@ -85,10 +85,10 @@
+                 verts = []
+                 for d in range(8):
+-                    vi = i + ((d >> 0) & 1)
++                    vi = i + (d & 1)
+                     vj = j + ((d >> 1) & 1)
+                     vk = k + ((d >> 2) & 1)
+                     verts.append(grid_coords[vk, vj, vi])
+ 
+-                case_idx = compute_case_index([sol_values[k, j, i + d] for d in range(8)], isovalue)
++                case_idx = compute_case_index([sol_values[k + ((d >> 2) & 1), j + ((d >> 1) & 1), i + (d & 1)] for d in range(8)], isovalue)
+                 major_case = case_idx % 15
+ 
+@@ -106,7 +106,9 @@
+                         map_a = map_values[k + ((v_b >> 2) & 1), j + ((v_b >> 1) & 1), i + (v_b & 1)]
+                         map_b = map_values[k + ((v_a >> 2) & 1), j + ((v_a >> 1) & 1), i + (v_a & 1)]
+-                        poly.vertices.append((pt[0], pt[1], pt[2], lerp(map_a, map_b, 0.5)))
++                        t = (isovalue - val_a) / (val_b - val_a) if abs(val_b - val_a) > 1e-9 else 0.5
++                        poly.vertices.append((pt[0], pt[1], pt[2], lerp(map_a, map_b, t)))
+                     polygons.append(poly)
+ 
++    # OS-specific semaphore acquisition [G]
+     write_lock.acquire()
+     try:
+@@ -165,6 +167,6 @@
+ 
+ **Edge Cases and Pitfalls**
+-*   **Grid Orientation**: The grid must be oriented such that it can be sliced in the k-direction. If the grid orientation does not accommodate this slicing strategy, the method may fail or require preprocessing [S1, unofficial].
+-*   **Write Collisions**: Simultaneous writes by multiple child processes to the Bop format cause collisions. This is handled by semaphores that enforce mutual exclusion [S1, unofficial].
++*   **Grid Orientation**: The grid must be oriented such that it can be sliced in the k-direction [S1, unofficial]. If the grid orientation does not accommodate this slicing strategy, the method may fail or require preprocessing [S1, unofficial].
++*   **Write Collisions**: Simultaneous writes by multiple child processes to the Bop format cause collisions [S1, unofficial]. This is handled by semaphores that enforce mutual exclusion [S1, unofficial].
+ *   **Memory Constraint**: Requires at least two slices to fit into physical memory [S1, unofficial].
+ 
+@@ -172,7 +174,7 @@
+ *   **Time Complexity**: Linear with respect to the number of voxels processed per slice [S1, unofficial]. Total wall-clock time is significantly reduced compared to serial execution; for a ~2.2M grid dataset, time reduced from ~20 min to ~90 s [S1, unofficial].
+ *   **Memory Complexity**: $O(S)$, where $S$ is the size of a single slice (or two slices) [S1, unofficial].
+-*   **Performance**: Tested on SUN4 (2 processors), SGI Challenge (8 processors), and KSR1 (8 processors); timings include I/O overhead [S1, unofficial].
+-*   **Strengths**: Handles huge datasets; machine-independent parallel execution; supports irregular grids [S1, unofficial].
+-*   **Limitations**: Requires specific grid orientation (k-slice); serialization bottleneck during output writing; platform-specific process creation (`sproc` vs `fork`) [S1, unofficial].
++*   **Performance**: Tested on SUN4 (2 processors), SGI Challenge (8 processors), and KSR1 (8 processors); timings include I/O overhead [S1, unofficial]. On an nCUBE 2, a 10x10x10 dataset took 0.06 s local time and 0.055 s host communication time with 1 processor, while a 66x66x50 dataset took 0.002 s local time and 4.05 s host communication time with 64 processors [S2, unofficial].
++*   **Strengths**: Handles huge datasets; machine-independent parallel execution; supports irregular grids [S1, unofficial]. Object-space methods are inherently parallel and simpler to parallelize than image-space methods [S2, unofficial].
++*   **Limitations**: Requires specific grid orientation (k-slice); serialization bottleneck during output writing; platform-specific process creation (`sproc` vs `fork`) [S1, unofficial]. The isosurface composition phase is a significant communications bottleneck because it is entirely sequential, causing total communication time to increase as processor count increases [S2, unofficial]. Load imbalance occurs because different hypercube dimensions result in different data distributions, causing processors with small isosurface portions to wait for those with larger portions [S2, unofficial].
+ 
+ ## Background

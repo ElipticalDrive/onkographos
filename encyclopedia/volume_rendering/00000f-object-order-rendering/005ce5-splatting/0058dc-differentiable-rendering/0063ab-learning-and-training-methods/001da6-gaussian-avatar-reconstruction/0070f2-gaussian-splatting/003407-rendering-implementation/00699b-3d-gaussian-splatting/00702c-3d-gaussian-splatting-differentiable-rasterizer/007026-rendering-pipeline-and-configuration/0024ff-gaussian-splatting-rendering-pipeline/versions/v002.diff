@@ -1,0 +1,194 @@
+--- v001.md
++++ v002.md
+@@ -1,8 +1,8 @@
+ # Gaussian Splatting Rendering Pipeline
+ 
+-Also called: render_view pipeline
++Also called: 3D Gaussian Splatting Rendering Pipeline, Gaussian Splatting Rasterization, Tile-based Gaussian Rasterization, render_view pipeline
+ 
+ ## Overview
+-The Gaussian Splatting Rendering Pipeline orchestrates the preparation of camera parameters, spherical harmonic (SH) evaluation, and feature assembly before invoking the differentiable rasterizer for a single view [S1, unofficial]. It serves as the bridge between the 3D Gaussian model representation and the 2D rasterization step, handling the transformation of raw Gaussian attributes (position, scale, rotation, opacity, SH coefficients) into the specific formats required by the CUDA rasterization kernel [S1, unofficial]. It sets apart from the core rasterizer by managing the pre-computation of covariances, colors, and lighting models, ensuring that gradients can flow back to the 3D Gaussian parameters during training [S1, unofficial].
++The Gaussian Splatting Rendering Pipeline orchestrates camera setup, spherical harmonic (SH) evaluation, feature assembly, and Gaussian rasterization for a single view [S1, unofficial]. It projects 3D Gaussians to 2D screen space, rasterizes them into tiles, and composites them front-to-back using alpha blending to produce novel views [S2, unofficial]. It sets apart from its siblings by managing the pre-computation of covariances, colors, and lighting models, and assembling auxiliary features before invoking the differentiable rasterizer [S1, unofficial].
+ 
+ ## How it works
+@@ -11,5 +11,5 @@
+ ### Inputs and Outputs
+ **Inputs:**
+-*   `pc`: The Gaussian model containing `means3D` (N, 3), `scales` (N, 3), `rotations` (N, 4), `opacities` (N, 1), `shs` (N, K, 3), and covariance data.
++*   `pc`: The Gaussian model containing `means3D` (N, 3), `scales` (N, 3), `rotations` (N, 4), `opacities` (N), `shs` (N, K, 3), and covariance data.
+ *   `camera`: Object with `image_width`, `image_height`, `fov_x`, `fov_y`, `cx`, `cy`, `world_view_transform`, `full_proj_transform`, `camera_center`.
+ *   `pipe`: Configuration object with flags `compute_cov3D_python`, `compute_SHs_python`, and integer `sh_degree`.
+@@ -19,7 +19,7 @@
+ 
+ **Outputs:**
+-*   `rendered_image`: Tensor (3, H, W) of the final RGB image.
+-*   `rendered_opacity`: Tensor (1, H, W) of accumulated opacity.
+-*   `rendered_depth`: Tensor (1, H, W) of depth.
++*   `rendered_image`: Tensor (H, W, 3) of the final RGB image.
++*   `rendered_opacity`: Tensor (H, W, 1) of accumulated opacity.
++*   `rendered_depth`: Tensor (H, W, 1) of depth.
+ *   `rendered_feature`: Tensor containing concatenated auxiliary features.
+ *   `radii`: Tensor (N,) of screen-space radii for each Gaussian.
+@@ -28,14 +28,6 @@
+ 
+ ### Data Structures
+-*   `GaussianRasterizationSettings`: A struct or configuration object passed to the rasterizer. Fields include:
+-    *   `image_width`, `image_height`: Integers.
+-    *   `tanfovx`, `tanfovy`: Floats, computed as $\tan(\text{fov}_x / 2)$ and $\tan(\text{fov}_y / 2)$.
+-    *   `cx`, `cy`: Floats, principal point coordinates.
+-    *   `background`: Tensor (3,).
+-    *   `scale_modifier`: Float, typically 1.0, used to scale covariance matrices.
+-    *   `viewMatrix`, `projMatrix`: Matrices (4, 4) for view and projection transformations.
+-    *   `sh_degree`: Integer, the degree of spherical harmonics.
+-    *   `cameraPosition`: Tensor (3,).
+-*   `screenspace_points`: Tensor (N, 2) initialized to zeros on CUDA with `requires_grad=True` to capture 2D mean gradients for debugging [S1, unofficial].
++*   `GaussianRasterizationSettings`: A configuration object passed to the rasterizer. Fields include `image_width`, `image_height`, `tanfovx`, `tanfovy`, `cx`, `cy`, `background`, `scale_modifier`, `viewMatrix`, `projMatrix`, `sh_degree`, `cameraPosition`.
++*   `screenspace_points`: Tensor (N, 2) initialized to zeros on CUDA with `requires_grad=True` to capture 2D mean gradients [S1, unofficial].
+ 
+ ### Steps
+@@ -61,5 +53,5 @@
+ 4.  **Select Covariance Representation:**
+     *   If `pipe.compute_cov3D_python` is true:
+-        Compute `cov3D_precomp` by calling `pc.get_covariance(scaling_modifier)` [S1, unofficial]. This typically involves constructing the 3D covariance matrix from scales and rotations and transforming it to world space.
++        Compute `cov3D_precomp` by calling `pc.get_covariance(scaling_modifier)` [S1, unofficial].
+     *   Otherwise:
+         Retrieve `scales` and `rotations` directly from `pc.get_scaling()` and `pc.get_rotation()` to be processed by the CUDA kernel [S1, unofficial].
+@@ -110,11 +102,49 @@
+ ### Pseudocode
+ ```python
++import math
++import torch
++
++class GaussianRasterizationSettings:
++    def __init__(self, image_width, image_height, tanfovx, tanfovy, cx, cy, background, scale_modifier, viewMatrix, projMatrix, sh_degree, cameraPosition):
++        self.image_width = image_width
++        self.image_height = image_height
++        self.tanfovx = tanfovx
++        self.tanfovy = tanfovy
++        self.cx = cx
++        self.cy = cy
++        self.background = background
++        self.scale_modifier = scale_modifier
++        self.viewMatrix = viewMatrix
++        self.projMatrix = projMatrix
++        self.sh_degree = sh_degree
++        self.cameraPosition = cameraPosition
++
++class GaussianRasterizer:
++    def __init__(self, settings):
++        self.settings = settings
++    def __call__(self, means3D, means2D, shs, colors_precomp, opacities, scales, rotations, cov3D_precomp, features):
++        # Stub for CUDA kernel invocation
++        return 0, torch.zeros_like(means2D[:, :1]), torch.zeros((self.settings.image_height, self.settings.image_width, 3)), torch.zeros((self.settings.image_height, self.settings.image_width, 1)), torch.zeros((self.settings.image_height, self.settings.image_width, 1)), torch.zeros((self.settings.image_height, self.settings.image_width, 10)), torch.zeros((self.settings.image_height, self.settings.image_width, 3)), torch.zeros((self.settings.image_height, self.settings.image_width, 3)), torch.zeros(means3D.shape[0])
++
++def normalize(v):
++    return v / torch.norm(v)
++
++def evaluate_sh(sh_coeffs, view_dirs):
++    # Standard SH evaluation stub
++    return torch.sum(sh_coeffs * view_dirs.unsqueeze(1), dim=-1)
++
++def rendering_equation_BlinnPhong_python(pc, light_dir, view_dir):
++    # Stub for Blinn-Phong shading
++    brdf_color = pc.normals * light_dir
++    extra_results = {'offset_color_norm': torch.zeros_like(pc.normals)}
++    return brdf_color, extra_results
++
+ def render_view_pipeline(pc, camera, pipe, background, override_color=None, light_transform=None):
+     # Step 1: Initialize gradient tracking
+-    screenspace_points = torch.zeros((pc.get_xyz.shape[0], 2), device='cuda', requires_grad=True)
++    screenspace_points = torch.zeros((pc.get_xyz().shape[0], 2), device='cuda', requires_grad=True)
+     try:
+         screenspace_points.retain_grad()
+     except Exception:
+-        pass  # retain_grad may not be available in all contexts
++        pass
+ 
+     # Step 2: Compute Camera Intrinsics
+@@ -146,13 +176,10 @@
+         scales = pc.get_scaling()
+         rotations = pc.get_rotation()
+-        cov3D_precomp = None  # Passed as None or handled internally by rasterizer
++        cov3D_precomp = None
+ 
+     # Step 5: Select Color Representation
+     if override_color is None and pipe.compute_SHs_python:
+-        # Normalize view directions
+-        view_dirs = ... # Compute from camera
+-        # Extract SH coefficients
++        view_dirs = normalize(camera.view_direction)
+         sh_coeffs = pc.shs
+-        # Evaluate SH and clamp
+         sh2rgb = evaluate_sh(sh_coeffs, view_dirs)
+         colors_precomp = torch.clamp(sh2rgb + 0.5, min=0.0)
+@@ -165,12 +192,10 @@
+         light_dir = light_transform.get_light_direction()
+     else:
+-        light_dir = camera.view_direction # Headlights
+-
+-    brdf_color, extra_results = rendering_equation_BlinnPhong_python(
+-        pc, light_dir, camera.view_direction
+-    )
++        light_dir = camera.view_direction
++
++    brdf_color, extra_results = rendering_equation_BlinnPhong_python(pc, light_dir, camera.view_direction)
+ 
+     # Concatenate features
+-    if training_mode:
++    if pipe.training_mode:
+         features = torch.cat([
+             brdf_color,
+@@ -184,8 +209,7 @@
+         ], dim=-1)
+     else:
+-        # Inference mode: replace last element with mean renders
+-        mean_diffuse = ...
+-        mean_specular = ...
+-        mean_ambient = ...
++        mean_diffuse = torch.mean(pc.diffuse_factor)
++        mean_specular = torch.mean(pc.specular_factor)
++        mean_ambient = torch.mean(pc.ambient_factor)
+         features = torch.cat([
+             brdf_color,
+@@ -196,13 +220,12 @@
+             pc.ambient_factor,
+             pc.specular_factor,
+-            mean_diffuse # Placeholder for inference logic
++            mean_diffuse
+         ], dim=-1)
+ 
+     # Step 7: Invoke Rasterizer
+     rasterizer = GaussianRasterizer(raster_settings)
+-    
+     means3D = pc.get_xyz()
+     means2D = screenspace_points
+-    
++
+     num_rendered, num_contrib, rendered_image, rendered_opacity, rendered_depth, rendered_feature, rendered_pseudo_normal, rendered_surface_xyz, radii = rasterizer(
+         means3D=means3D,
+@@ -259,6 +282,11 @@
+ ### Parameters and Edge Cases
+ *   **Parameters:**
+-    *   `scale_modifier`: Default 1.0. Used to adjust the size of Gaussians during rasterization [S1, unofficial].
+-    *   `sh_degree`: Determined by the model's training configuration [S1, unofficial].
++    *   `near`: Depth clipping plane near distance. Default: 2e-3 [S2, unofficial].
++    *   `far`: Depth clipping plane far distance. Default: 100 [S2, unofficial].
++    *   `pix_guard`: Pixel guard band width for culling. Default: 64 [S2, unofficial].
++    *   `T`: Tile size for rasterization (number of pixels per tile dimension). Default: 16 [S2, unofficial].
++    *   `chi_square_clip`: Chi-square clipping threshold for covariance regularization. Default: 9.21 (approx 3σ) [S2, unofficial].
++    *   `alpha_max`: Maximum alpha value to prevent numerical instability. Default: 0.99 [S2, unofficial].
++    *   `alpha_cutoff`: Alpha cutoff threshold for early termination. Default: 1/255 [S2, unofficial].
+ *   **Edge Cases and Pitfalls:**
+     *   **Precision:** SH evaluation can suffer from precision issues if not normalized correctly. The clamping step `clamp_min(sh2rgb + 0.5, 0.0)` is specific to the source implementation and may require adjustment for different SH bases [S1, unofficial].
+@@ -269,5 +297,5 @@
+ 
+ ### Octree-GS Rendering
+-Octree-GS Rendering extends the standard pipeline by integrating an octree structure for efficient visibility culling and feature storage. It initializes a `GaussianModel` with dataset-specific parameters including `feat_dim`, `n_offsets`, `fork`, `use_feat_bank`, `appearance_dim`, `add_opacity_dist`, `add_cov_dist`, `add_color_dist`, `add_level`, `visible_threshold`, `dist2level`, `base_layer`, `progressive`, and `extend` [S2, unofficial]. A compatibility patch is applied to `gaussian_renderer.generate_neural_gaussians` to replace `ape_code[0]` with `ape_code` [S2, unofficial]. The pipeline sets an anchor mask for the current view using `gaussians.set_anchor_mask(view.camera_center, scene.loaded_iter, view.resolution_scale)` [S2, unofficial]. It then pre-filters voxels to determine visibility using `prefilter_voxel(view, gaussians, pipeline, background)` [S2, unofficial]. Finally, it renders the scene using `render(view, gaussians, pipeline, background, visible_mask=visible, ape_code=args.ape)` where `ape_code` is an integer argument with a default value of 10 [S2, unofficial]. The rendered image is clamped to $[0.0, 1.0]$ and saved, and the number of visible Gaussians per view is recorded in `per_view_count.json` [S2, unofficial].
++Octree-GS Rendering extends the standard pipeline by integrating an octree structure for efficient visibility culling and feature storage. It initializes a `GaussianModel` with dataset-specific parameters including `feat_dim`, `n_offsets`, `fork`, `use_feat_bank`, `appearance_dim`, `add_opacity_dist`, `add_cov_dist`, `add_color_dist`, `add_level`, `visible_threshold`, `dist2level`, `base_layer`, `progressive`, and `extend` [S3, unofficial]. A compatibility patch is applied to `gaussian_renderer.generate_neural_gaussians` to replace `ape_code[0]` with `ape_code` [S3, unofficial]. The pipeline sets an anchor mask for the current view using `gaussians.set_anchor_mask(view.camera_center, scene.loaded_iter, view.resolution_scale)` [S3, unofficial]. It then pre-filters voxels to determine visibility using `prefilter_voxel(view, gaussians, pipeline, background)` [S3, unofficial]. Finally, it renders the scene using `render(view, gaussians, pipeline, background, visible_mask=visible, ape_code=args.ape)` where `ape_code` is an integer argument with a default value of 10 [S3, unofficial]. The rendered image is clamped to $[0.0, 1.0]$ and saved, and the number of visible Gaussians per view is recorded in `per_view_count.json` [S3, unofficial].
+ 
+ ## Operating characteristics
+@@ -285,3 +313,4 @@
+ ## Sources
+ [S1] ldyken53/VEG, https://github.com/ldyken53/VEG, fetched 2026-10-26 (unofficial)
+-[S2] 3DAgentWorld/Advanced3DGS, https://github.com/3DAgentWorld/Advanced3DGS, fetched 2026-10-27 (unofficial)+[S2] ashu1069/3D-Gaussian-Splatting-for-Novel-View-Synthesis, https://github.com/ashu1069/3D-Gaussian-Splatting-for-Novel-View-Synthesis, fetched 2026-10-27 (unofficial)
++[S3] 3DAgentWorld/Advanced3DGS, https://github.com/3DAgentWorld/Advanced3DGS, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,115 @@
+--- v003.md
++++ v004.md
+@@ -4,10 +4,10 @@
+ 
+ ## Overview
+-Gradient-based Pre-computed Shading is a preprocessing technique that computes shaded colors for each voxel using a view-independent Lambertian shading model, allowing for faster rendering by avoiding per-ray normal computation [S1, S2, unofficial]. It differs from on-the-fly gradient estimation by trading memory for performance, storing the shading result in an additional 3D texture, which implicitly applies a low-pass filter to gradients [S3].
++Gradient-based Pre-computed Shading is a preprocessing technique that computes shaded colors for each voxel using a view-independent Lambertian shading model, allowing for faster rendering by avoiding per-ray normal computation [S1, unofficial][S2, unofficial]. Unlike on-the-fly gradient estimation, which trades memory for performance during rendering via multiple dependent texture fetches [S3], this method precomputes the shading result into an additional 3D texture, which implicitly applies a low-pass filter to the gradients during trilinear interpolation [S3].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+ - Input: A scalar volume data grid $CT$ of dimensions $COLS \times ROWS \times SLCS$ (width, height, depth) [S2, unofficial].
+-- Input: A light direction vector $\hat{L}$ [S2, unofficial].
++- Input: A light direction vector $L$ [S2, unofficial].
+ - Input: A diffuse reflectivity coefficient $k_d$ and incident light intensity $I_p$ [S2, unofficial].
+ - Input: An epsilon threshold $\epsilon$ for gradient magnitude [S2, unofficial].
+@@ -15,10 +15,10 @@
+ 
+ **Data Structures:**
+-- $CT[z][y][x]$: Float array representing the scalar field at voxel $(x, y, z)$.
+-- $SHADING[z][y][x]$: Unsigned char array storing the precomputed shading value.
++- $CT[z][y][x]$: Float array representing the scalar field at voxel $(x, y, z)$ [S2, unofficial].
++- $SHADING[z][y][x]$: Unsigned char array storing the precomputed shading value [S2, unofficial].
+ 
+ **Steps:**
+ 1. Iterate over the volume grid for $z$ from $1$ to $SLCS-2$, $y$ from $1$ to $ROWS-2$, and $x$ from $1$ to $COLS-2$, skipping boundary layers [S2, unofficial].
+-2. Compute partial derivatives using central finite differences [S1, S2, unofficial]:
++2. Compute partial derivatives using central finite differences [S1, unofficial][S2, unofficial]:
+    $$d_x = \frac{CT[z][y][x+1] - CT[z][y][x-1]}{2.0}$$
+    $$d_y = \frac{CT[z][y+1][x] - CT[z][y-1][x]}{2.0}$$
+@@ -34,53 +34,34 @@
+ **Pseudocode:**
+ ```python
+-def compute_precomputed_shading(CT: Volume3D, L: Vector3, kd: float, Ip: float, epsilon: float) -> Volume3D:
+-    """
+-    Pre-compute shading for a volume using view-independent Lambertian shading.
++import math
++
++def compute_precomputed_shading(CT, L, kd, Ip, epsilon):
++    # CT is a 3D list of floats: CT[z][y][x]
++    SLCS = len(CT)
++    ROWS = len(CT[0])
++    COLS = len(CT[0][0])
++    SHADING = [[[0] * COLS for _ in range(ROWS)] for _ in range(SLCS)]
+     
+-    Args:
+-        CT: 3D array of scalar values (float).
+-        L: Light direction vector (Vector3).
+-        kd: Diffuse reflectivity coefficient.
+-        Ip: Incident light intensity.
+-        epsilon: Threshold for gradient magnitude to avoid division by zero.
+-        
+-    Returns:
+-        SHADING: 3D array of unsigned char values.
+-    """
+-    COLS, ROWS, SLCS = CT.dimensions()
+-    SHADING = Volume3D(COLS, ROWS, SLCS, dtype=uint8)
+-    
+-    # Normalize light direction
+-    L_norm = L / length(L)
++    L_len = math.sqrt(L[0]**2 + L[1]**2 + L[2]**2)
++    Lx, Ly, Lz = L[0]/L_len, L[1]/L_len, L[2]/L_len
+     
+     for z in range(1, SLCS - 1):
+         for y in range(1, ROWS - 1):
+             for x in range(1, COLS - 1):
+-                # Compute partial derivatives using central differences
+                 dx = (CT[z][y][x+1] - CT[z][y][x-1]) / 2.0
+                 dy = (CT[z][y+1][x] - CT[z][y-1][x]) / 2.0
+                 dz = (CT[z+1][y][x] - CT[z-1][y][x]) / 2.0
+                 
+-                # Compute gradient magnitude
+-                D_sq = dx*dx + dy*dy + dz*dz
+-                D = sqrt(D_sq)
++                D = math.sqrt(dx*dx + dy*dy + dz*dz)
+                 
+                 if D < epsilon:
+                     SHADING[z][y][x] = 0
+                 else:
+-                    # Compute normalized normal vector
+-                    nx = dx / D
+-                    ny = dy / D
+-                    nz = dz / D
+-                    
+-                    # Compute diffuse shading value
+-                    # N dot L_norm
+-                    dot_product = nx * L_norm.x + ny * L_norm.y + nz * L_norm.z
+-                    shading_value = Ip * kd * dot_product
+-                    
+-                    # Clamp and convert to unsigned char
+-                    # Note: Source [S2, unofficial] casts directly, implying clamping or saturation arithmetic
+-                    SHADING[z][y][x] = clamp(shading_value, 0.0, 255.0)
+-    
++                    nx, ny, nz = dx/D, dy/D, dz/D
++                    dot = nx*Lx + ny*Ly + nz*Lz
++                    val = Ip * kd * dot
++                    # Source [S2, unofficial] casts directly to unsigned char,
++                    # implying saturation clamping to [0, 255].
++                    SHADING[z][y][x] = max(0, min(255, int(val)))
+     return SHADING
+ ```
+@@ -95,4 +76,9 @@
+ - If the gradient magnitude $D$ is less than $\epsilon$, the shading is set to 0 to avoid division by zero or noise amplification [S2, unofficial].
+ - The method implicitly applies a low-pass filter to the gradients because the precomputed shading is accessed via trilinearly interpolated texture fetches during rendering, ignoring high-frequency details introduced by transfer function application [S3]. This can cause rendering artifacts on regular structures (e.g., solid/transparent materials, CT scans) [S3].
++
++## Subtopics
++
++### Precomputed Normal Shading with Lambertian Lookup
++An optimization where 8-bit anatomy voxel values are stored alongside 13-bit precomputed normals [S4, unofficial]. A shading table is computed at the start of every frame to encode the Lambertian coefficient for the given light direction(s) as a function of the surface normal, enabling efficient lookup-based voxel shading [S4, unofficial].
+ 
+ ## Operating characteristics
+@@ -135,3 +121,4 @@
+ [S1] Interactive Volume-Rendering Techniques for Medical Data Visualization, https://doi.org/10.2312/diss.20018138, fetched 2026-10-26 (unofficial)
+ [S2] kkhese/Volume-Rendering, https://github.com/kkhese/Volume-Rendering, fetched 2026-10-26 (unofficial)
+-[S3] A Directional Occlusion Shading Model for Interactive Direct Volume ..., https://cgl.ethz.ch/teaching/scivis_common/Literature/Schott2009.pdf, fetched 2026-10-29+[S3] A Directional Occlusion Shading Model for Interactive Direct Volume ..., https://cgl.ethz.ch/teaching/scivis_common/Literature/Schott2009.pdf, fetched 2026-10-29
++[S4] Interactive Multimodal Volume Visualization for a ..., http://www.cs.unc.edu/techreports/94-040.pdf, fetched 2026-10-29 (unofficial)

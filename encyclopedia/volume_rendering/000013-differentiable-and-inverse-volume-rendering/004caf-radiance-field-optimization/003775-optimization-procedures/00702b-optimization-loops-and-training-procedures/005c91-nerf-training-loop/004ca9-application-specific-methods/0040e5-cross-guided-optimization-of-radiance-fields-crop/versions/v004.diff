@@ -1,0 +1,163 @@
+--- v003.md
++++ v004.md
+@@ -7,6 +7,6 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** A set of $K$ low-resolution training-view images $\{I_i^{gt}\}_{i=1}^K$ with known camera poses.
+-*   **Outputs:** An optimized radiance field (MLP parameters) and a set of super-resolved training-view images $\{I_i^{SR}\}_{i=1}^K$ that maintain multi-view consistency.
++*   **Inputs:** A set of $K$ low-resolution training-view images $\{I_i^{gt}\}_{i=1}^K$ with known camera poses [S1].
++*   **Outputs:** An optimized radiance field (MLP parameters) and a set of super-resolved training-view images $\{I_i^{SR}\}_{i=1}^K$ that maintain multi-view consistency [S1].
+ 
+ **Data Structures:**
+@@ -45,81 +45,68 @@
+ 4.  **Uncertainty Map Generation:** Generate an uncertainty map $U_i$ for each view by aggregating voxel-based uncertainty from the neighborhood voxels of sampled ray points $P_i^{tv}$ corresponding to rays $R_i^{tv}$ [S1].
+ 5.  **SR Update:** Generate the updated SR image $I_i^{l+1}$ through the SR update module (SUM) using the rendered train-view RGB images $S_i^{tv}$, the uncertainty map $U_i$, and the SISR network feature $F_i^{SISR}$ [S1].
+-6.  **Iteration:** Continue optimizing the radiance fields using the updated SR images $I_i^{l+1}$. Repeat steps 3-6 iteratively [S1].
++6.  **Iteration:** Continue optimizing the radiance fields using the updated SR images $I_i^{l+1}$ [S1]. Repeat steps 3-6 iteratively [S1].
+ 
+ **Pseudocode:**
+ ```python
+-def crop_optimization(K, N, max_iterations):
+-    # 1. Initialization
+-    # I_gt is a list of K low-res images
+-    I_sr = [sISR_backbone(img) for img in I_gt]
+-    
+-    # Initialize radiance field MLP
+-    nerf_mlp = initialize_nerf_mlp()
+-    
++def crop_optimization(K, N, max_iterations, Nx, Ny, Nz, camera_poses, I_gt):
++    # 1. Initialization: Pass each low-res input through the SISR backbone network [S1]
++    I_sr = [apply_sisr_network(img) for img in I_gt]  # [G] standard SISR forward pass
++
++    # Initialize radiance field MLP mapping (x,y,z,theta,phi) -> (sigma, c) [S1]
++    nerf_mlp = NeuralRadianceFieldMLP()
++
+     for l in range(max_iterations):
+-        # 2. Radiance Field Optimization
+-        # Render images using current SR images as ground truth targets
+-        # This step typically involves gradient descent on nerf_mlp parameters
+-        # minimizing L_photo between rendered S_tv and I_sr
++        # 2. Radiance Field Optimization: Render train-view RGB images S_i^{tv} [S1]
+         S_tv = []
+         for i in range(K):
+-            rays = generate_rays(camera_poses[i])
+-            # Sample N points along each ray
+-            points, directions = sample_points(rays, N)
++            rays = generate_rays_from_poses(camera_poses[i])
++            points, directions = sample_along_rays(rays, N)  # [G] standard ray marching
+             sigma, color = nerf_mlp.query(points, directions)
+-            # Volume rendering to get image
+-            image = volume_render(points, sigma, color, rays)
++            # Volume rendering: C_hat(r) = sum_{i=1}^N T_i alpha_i c_i [S1]
++            transmittance = compute_transmittance(sigma, points, directions)
++            alpha = 1.0 - torch.exp(-sigma * torch.diff(points, dim=-1, prepend=points[:1]))
++            image = torch.sum(transmittance * alpha * color, dim=1)
+             S_tv.append(image)
+-        
+-        # Backpropagate loss to update nerf_mlp
+-        # Loss = Mean Squared Error between S_tv and I_sr
+-        optimize_nerf(nerf_mlp, S_tv, I_sr)
+-        
+-        # 3. Generate Voxel-based Uncertainty Field
+-        # Initialize empty 4D tensor V_unc with shape (1, Nx, Ny, Nz)
+-        V_unc = zeros((1, Nx, Ny, Nz))
+-        
+-        # For each voxel, calculate integrated error from neighboring rays
+-        for voxel in voxels:
+-            # Get points P_tv inside neighborhood of voxel
+-            P_tv = get_points_in_neighborhood(voxel)
+-            # Get corresponding rays R_tv
++
++        # Backpropagate photometric loss L_photo = (1/|R|) sum ||C(r) - C_hat(r)||_2^2 [S1]
++        loss = mean_squared_error(S_tv, I_sr)
++        nerf_mlp.backward(loss)
++        nerf_mlp.step()
++
++        # 3. Uncertainty Field Generation: Calculate integrated error for voxel grid V^{(unc)} [S1]
++        V_unc = torch.zeros((1, Nx, Ny, Nz))
++        for voxel_idx in all_voxels:
++            # Identify sampled ray points P_i^{tv} inside neighborhood voxels of voxel_idx [S1]
++            P_tv = get_points_in_neighborhood(voxel_idx, points)
++            if not P_tv: continue
+             R_tv = get_rays_for_points(P_tv)
+-            
+-            # Get rendered colors C from S_tv
+-            C = render_colors(S_tv, R_tv)
+-            # Get SR colors from I_sr
++            # Get rendered RGB values C from S_tv and SR values C_hat from I_sr [S1]
++            C = render_colors_at_points(S_tv, R_tv)
+             C_sr = get_colors_from_images(I_sr, R_tv)
+-            
+-            # Calculate point-wise errors
++
++            # Calculate point-wise error e_{ij}^{tv} = T_{ij} alpha_{ij} ||c_{ij} - c_hat_{ij}||_1 [S1]
+             errors = []
+             for j, p in enumerate(P_tv):
+-                T_ij, alpha_ij = compute_transmittance_alpha(p, nerf_mlp)
+-                # L1 norm of color difference
+-                err = T_ij * alpha_ij * L1_norm(C[j] - C_sr[j])
++                T_ij = transmittance_at_point(p, nerf_mlp)
++                alpha_ij = 1.0 - torch.exp(-nerf_mlp.density(p) * ray_step_size)
++                err = T_ij * alpha_ij * torch.norm(C[j] - C_sr[j], p=1)
+                 errors.append(err)
+-            
+-            # Aggregate errors into voxel
+-            V_unc[voxel] = sum(errors)
+-            
+-        # 4. Generate Uncertainty Maps
++            V_unc[voxel_idx] = sum(errors)
++
++        # 4. Uncertainty Map Generation: Aggregate voxel uncertainty for each view [S1]
+         U = []
+         for i in range(K):
+-            # Aggregate voxel uncertainty from neighborhood of sampled ray points
+-            # P_tv corresponds to rays R_tv for view i
+-            U_i = aggregate_voxel_uncertainty(V_unc, P_tv)
++            # Aggregate from neighborhood voxels of sampled ray points P_i^{tv} [S1]
++            U_i = aggregate_voxel_uncertainty(V_unc, points_for_view_i)
+             U.append(U_i)
+-            
+-        # 5. SR Update
+-        # Get SISR features for current SR images
+-        F_sisr = [sISR_feature_extractor(img) for img in I_sr]
+-        
+-        # Update SR images using SUM
+-        # SUM takes S_tv, U, and F_sisr as input
++
++        # 5. SR Update: Generate updated SR image I_i^{l+1} using SUM [S1]
++        F_sisr = [sisr_feature_extractor(img) for img in I_sr]  # [G] standard feature extraction
+         I_sr_new = []
+         for i in range(K):
++            # SUM fuses S_i^{tv}, U_i, and F_i^{SISR} [S1]
+             I_sr_new.append(SR_Update_Module(S_tv[i], U[i], F_sisr[i]))
+         I_sr = I_sr_new
+-        
++
+     return nerf_mlp, I_sr
+ ```
+@@ -128,17 +115,17 @@
+ *   **Ill-posed SISR:** Single-image super-resolution is an ill-posed problem where multiple solutions exist, potentially producing blurry images or lacking multi-view consistency when images are processed separately [S1].
+ *   **Radiance Field Limitations:** Radiance fields rely heavily on the spectral characteristics of coordinate-based networks, limiting their ability to perform super-resolution and synthesize high-frequency details independently [S1].
+-*   **Uncertainty Trust:** Synthesized train-view outputs cannot be trusted completely because they are predicted SR outputs, not ground truth [S1]. The uncertainty field is crucial to guide the SR update module away from erroneous high-frequency details that are not consistent across views.
++*   **Uncertainty Trust:** Synthesized train-view outputs cannot be trusted completely because they are predicted SR outputs, not ground truth [S1]. If the integrated error of pixels rendered from rays passing through a certain 3D point is high, the RGB values sampled at that point have high uncertainty, which the uncertainty field uses to guide the SR update module away from erroneous high-frequency details that are not consistent across views [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The method involves iterative optimization of both the radiance field and the SR images. Each iteration requires rendering $K$ views with $N$ samples per ray, calculating voxel-based uncertainties, and running the SR update module. This is computationally more expensive than standard NeRF training due to the additional SR and uncertainty calculation steps.
+-*   **Memory Complexity:** Requires storing the radiance field MLP, the voxel-based uncertainty field $V^{(unc)}$ of size $1 \times N_x \times N_y \times N_z$, and the SR images for all $K$ views.
++*   **Time Complexity:** Not given in the sources. The method involves iterative optimization of both the radiance field and the SR images [S1].
++*   **Memory Complexity:** Not given in the sources. Requires storing the radiance field MLP, the voxel-based uncertainty field $V^{(unc)}$ of size $1 \times N_x \times N_y \times N_z$, and the SR images for all $K$ views [S1].
+ *   **Strengths:** Significantly improves the performance of high-resolution novel view synthesis (HRNVS) and multi-view image super-resolution (MVSR) compared to existing methods [S1]. It breaks away from methodologies that depend solely on the characteristics of implicit neural representations (INR) by leveraging the strengths of 2D SISR [S1].
+-*   **Limitations:** The method is complex to implement due to the coupling between 2D SISR and 5D radiance fields. The quality of the SR update depends on the accuracy of the uncertainty field.
+-*   **When to use:** When the goal is high-resolution novel view synthesis and the input training images are low-resolution, and multi-view consistency is critical.
+-*   **When not to use:** When computational resources are limited, or when the input images are already high-resolution and the primary challenge is not super-resolution.
++*   **Limitations:** Not given in the sources. The method is complex to implement due to the coupling between 2D SISR and 5D radiance fields [S1]. The quality of the SR update depends on the accuracy of the uncertainty field [S1].
++*   **When to use:** Not given in the sources.
++*   **When not to use:** Not given in the sources.
+ 
+ ## Background
+-*   **Origin:** Proposed by Yoon et al. in 2023 [S1].
+-*   **History:** The method addresses the limitations of NeRF in handling high-frequency details and super-resolution. It builds on the idea that SISR can specialize in learning the inverse function of image degradation, while radiance fields can find scene geometry [S1]. Previous methods like Mip-NeRF [2] and NeRF-SR [39] attempted to improve multi-scale representation or super-sampling, but CROP introduces a cross-guided optimization framework [S1].
++*   **Origin:** Not given in the sources.
++*   **History:** The method addresses the limitations of NeRF in handling high-frequency details and super-resolution [S1]. It builds on the idea that SISR can specialize in learning the inverse function of image degradation, while radiance fields can find scene geometry [S1]. Previous methods like Mip-NeRF [2] and NeRF-SR [39] attempted to improve multi-scale representation or super-sampling, but CROP introduces a cross-guided optimization framework [S1].
+ *   **Usage:** Used in applications requiring high-resolution novel view synthesis, such as street-view navigation, AR/VR, and robotics [S1].
+ 

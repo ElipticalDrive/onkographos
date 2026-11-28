@@ -1,0 +1,78 @@
+--- v002.md
++++ v003.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-A post-processing technique that renders volumetric light shafts (sun shafts) by marching a view ray through a sun shadow map, accumulating in-scattered light where the ray is lit and no light where it is shadowed, modulated by ground-hugging haze density [S1, unofficial]. It differs from screen-space alternatives by relying on a dedicated shadow map for occlusion rather than screen-space depth, allowing for more accurate volumetric occlusion from geometry outside the current view frustum, while trading off higher memory bandwidth for the shadow map [S1, unofficial].
++A post-processing technique that renders volumetric light shafts (sun shafts) by marching a view ray through a sun shadow map, accumulating in-scattered light where the ray is lit and no light where it is shadowed, modulated by ground-hugging haze density [S1, unofficial]. It differs from screen-space alternatives like [Screen-Space God Rays](3981-screen-space-god-rays.md) by relying on a dedicated shadow map for occlusion rather than screen-space depth, allowing accurate volumetric occlusion from geometry outside the current view frustum, while trading off higher memory bandwidth for the shadow map [S1, unofficial]. It builds on [Volumetric Light Shafts (URP Raymarching)](3873-volumetric-light-shafts-urp-raymarching.md) and contrasts with [Image-Based Light Shaft (Dobashi)](22496-image-based-light-shaft-dobashi.md) by using explicit ray marching instead of screen-space blurring [S1, unofficial].
+ 
+ ## How it works
+@@ -26,10 +26,10 @@
+ 3.  **Ray Reconstruction:** For each pixel, reconstruct the world position from the depth buffer using the inverse projection and view matrices [S1, unofficial].
+ 4.  **Ray Definition:** Compute the view ray direction $\mathbf{rd}$ from the camera position to the reconstructed world position and its length $L$ [S1, unofficial].
+-5.  **March Setup:** Determine the march start distance as the last 32 units of the ray (or 0 if $L < 32$). Calculate the step length $\Delta s$ based on 16 steps over the march length:
++5.  **March Setup:** Determine the march start distance as the last 32 units of the ray (or 0 if $L < 32$) [S1, unofficial]. Calculate the step length $\Delta s$ based on 16 steps over the march length:
+     $$ \Delta s = \frac{\text{MARCH\_LENGTH}}{\text{STEPS}} $$
+ 6.  **Integration Loop:** Loop `STEPS` (16) times:
+-    a.  Compute sample position $\mathbf{p}$ along the ray.
+-    b.  Transform $\mathbf{p}$ to shadow map space.
+-    c.  Determine if the sample is lit by checking shadow map bounds and depth. Let $S \in \{0, 1\}$ be the shadow factor (1 if lit, 0 if shadowed) [S1, unofficial].
++    a.  Compute sample position $\mathbf{p}$ along the ray [S1, unofficial].
++    b.  Transform $\mathbf{p}$ to shadow map space [S1, unofficial].
++    c.  Determine if the sample is lit by checking shadow map bounds and depth [S1, unofficial]. Let $S \in \{0, 1\}$ be the shadow factor (1 if lit, 0 if shadowed) [S1, unofficial].
+     d.  Calculate ground-hugging density $\rho$ using exponential falloff based on sample height $y$ relative to ground level $uGround$:
+         $$ \rho = e^{-k(y - uGround)} $$
+@@ -56,10 +56,15 @@
+             depth_val = depth_buffer.get(x, y)
+             # Reconstruct world position from depth buffer using inverse projection and view matrices [S1, unofficial]
++            clip_x = 2.0 * (x + 0.5) / out_w - 1.0
++            clip_y = 2.0 * (y + 0.5) / out_h - 1.0
+             clip_z = depth_val * 2.0 - 1.0
+-            world_pos = inv_proj @ inv_view @ (clip_z, clip_z, clip_z, 1.0)
++            clip_pos = (clip_x, clip_y, clip_z, 1.0)
++            view_pos = inv_proj @ clip_pos
++            view_pos = (view_pos[0]/view_pos[3], view_pos[1]/view_pos[3], view_pos[2]/view_pos[3])
++            world_pos = inv_view @ (view_pos[0], view_pos[1], view_pos[2], 1.0)
+             ray_dir = normalize(world_pos[:3] - camera_pos)
+             ray_len = length(world_pos[:3] - camera_pos)
+ 
+-            # March start distance as the last 32 units of the ray (or 0 if ray is shorter) [S1, unofficial]
++            # March start distance as the last 32 units of the ray (or 0 if L < 32) [S1, unofficial]
+             start_dist = max(0.0, ray_len - MARCH_LENGTH)
+             step_len = MARCH_LENGTH / STEPS
+@@ -68,5 +73,5 @@
+ 
+             # Jitter start position using interleaved gradient noise to hide banding artifacts [S1, unofficial]
+-            jitter = ((x * 12.9898 + y * 78.233) % 1) * 2.0 - 1.0
++            jitter = ((x * 12.9898 + y * 78.233) % 1.0) * 2.0 - 1.0
+             t = start_dist + jitter * step_len * 0.5
+ 
+@@ -74,10 +79,11 @@
+             for i in range(STEPS):
+                 sample_pos = camera_pos + ray_dir * t
+-                # Transform to shadow map space
++                # Transform to shadow map space [S1, unofficial]
+                 shadow_clip = shadow_matrix @ (sample_pos[0], sample_pos[1], sample_pos[2], 1.0)
+                 shadow_uv = (shadow_clip[0] / shadow_clip[3], shadow_clip[1] / shadow_clip[3])
+-                # Determine if lit by checking shadow map bounds and depth [S1, unofficial]
++                # Determine if the sample is lit by checking shadow map bounds and depth [S1, unofficial]
+                 if 0.0 <= shadow_uv[0] <= 1.0 and 0.0 <= shadow_uv[1] <= 1.0:
+-                    S = 1.0 if sample_pos[2] < shadow_map.get(shadow_uv) else 0.0
++                    stored_depth = shadow_map.get(shadow_uv)
++                    S = 1.0 if sample_pos[2] < stored_depth else 0.0
+                 else:
+                     S = 0.0
+@@ -85,5 +91,5 @@
+                 # Calculate ground-hugging density using exponential falloff based on sample height relative to ground level [S1, unofficial]
+                 height_diff = sample_pos[1] - u_ground
+-                density = math.exp(-0.5 * max(0.0, height_diff)) # Decay constant 0.5 [G]
++                density = math.exp(-max(0.0, height_diff)) # Decay constant not given [G]
+ 
+                 # Apply forward scattering phase function (brighter when looking toward sun) [S1, unofficial]
+@@ -91,5 +97,5 @@
+ 
+                 # Scale by distance attenuation [S1, unofficial]
+-                attenuation = 1.0 / (t * t + 1.0) # [G]
++                attenuation = 1.0 / (t + 1.0) # [G]
+ 
+                 contrib = S * density * phase * attenuation * step_len

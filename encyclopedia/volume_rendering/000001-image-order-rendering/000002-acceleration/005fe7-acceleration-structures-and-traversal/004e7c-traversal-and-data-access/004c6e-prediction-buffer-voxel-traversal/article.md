@@ -1,0 +1,241 @@
+# Prediction Buffer Voxel Traversal
+
+Also called: Local Traversal, Modified Depth Buffer Traversal, Prediction Buffer, Sparse Traversal
+
+## Overview
+Prediction Buffer Voxel Traversal is a GPU-accelerated dataset traversal technique that exploits frame-to-frame coherence during camera rotation to accelerate isosurface volume rendering [S1, unofficial]. It uses a modified depth buffer, called the prediction buffer, to store ray-cast results from the previous frame, allowing the renderer to skip large portions of the volume or refine local searches instead of performing a full traversal for every pixel [S1, unofficial]. Unlike C-buffer or image cache techniques that store coordinates or iso-maps and suffer from aliasing or lack data parallelism on GPUs, the prediction buffer stores depth distances and is designed for high-performance GPU parallelism [S1, unofficial].
+
+## How it works
+
+### Inputs and Outputs
+*   **Inputs:**
+    *   Ray $\mathbf{R}$ for each pixel, defined by origin $\mathbf{o}$ and direction $\mathbf{d}$ [S1, unofficial].
+    *   Volume dataset with bounding box defined by $t_{min}$ and $t_{max}$ [S1, unofficial].
+    *   Isosurface value $\rho_{iso}$ [S1, unofficial].
+    *   Prediction buffer from the previous frame [S1, unofficial].
+    *   Step size parameter $dt$ (adaptive based on data variance) [S1, unofficial].
+*   **Outputs:**
+    *   Intersection distance $t$ along the ray where $\rho(t) = \rho_{iso}$ [S1, unofficial].
+    *   Updated prediction buffer for the current frame [S1, unofficial].
+
+### Data Structures
+**Prediction Buffer:** A 2D array (one value per pixel) storing a single floating-point value $d_{ij}$ for pixel $p_{ij}$ [S1, unofficial]. The value represents the distance from the eye to the interaction point along the ray [S1, unofficial]. The value types are:
+1.  **Positive number ($d_{ij} > 0$):** The ray hit the isosurface in the previous frame [S1, unofficial].
+2.  **Negative flag ($d_{hitBoxMissSurf}$):** The ray missed the isosurface but hit the volume bounding box in the previous frame [S1, unofficial].
+3.  **Negative flag ($d_{missBox}$):** The ray missed the volume bounding box completely in the previous frame [S1, unofficial].
+4.  **No information ($d_{noInfo}$):** No data available (e.g., first frame) [S1, unofficial].
+
+### Parameters
+*   **$\kappa_{max}, \kappa_{min}$:** Experimentally determined constants for adaptive step size. Typical values are $\kappa_{max} = 0.3$ and $\kappa_{min} = 0.1$ [S1, unofficial].
+*   **$\alpha$:** Frequency of full traversal to correct errors. Typical value is $\alpha = 10$ (perform full traversal every 10 frames) [S1, unofficial].
+*   **$dt$:** Step size for sparse traversal, calculated based on local data variance [S1, unofficial].
+
+### Algorithm Steps
+1.  **Ray Casting:** Cast one ray for each pixel in the final rendered image [S1, unofficial].
+2.  **Prediction Retrieval:** Retrieve the prediction buffer value $d_{ij}$ for the current pixel from the previous frame [S1, unofficial].
+3.  **Traversal Mode Selection:**
+    *   If $d_{ij} = d_{missBox}$ or $d_{ij} = d_{noInfo}$, perform **Full Traversal** (standard DDA or dense sampling) [S1, unofficial].
+    *   If $d_{ij} = d_{hitBoxMissSurf}$, perform **Local Traversal** (refine search near bounding box entry) [S1, unofficial].
+    *   If $d_{ij} > 0$, perform **Sparse Traversal** (skip to predicted depth) [S1, unofficial].
+    *   Every $\alpha$ frames, force Full Traversal for all pixels to prevent error accumulation [S1, unofficial].
+4.  **Adaptive Step Size Calculation:** Calculate $dt$ using the variance $v$ of the data in the current brick/region, and global min/max variances $v_{min}, v_{max}$:
+    $$ dt = \kappa_{min} + (\kappa_{max} - \kappa_{min}) \frac{v - v_{min}}{v_{max} - v_{min}} $$
+    [S1, unofficial]
+5.  **Traversal Execution:**
+    *   **Sparse Traversal:** Start at $t_{start} = t_{min} + d_{ij}$ [S1, unofficial]. Use the algorithm below to find the intersection [S1, unofficial].
+    *   **Local Traversal:** Start at $t_{start} = d_{ij}$ [S1, unofficial]. Search in both forward and backward directions from $t_{start}$ until the isosurface is found or volume bounds are exceeded [S1, unofficial].
+6.  **Prediction Buffer Update:** Store the result of the current frame's ray cast into the prediction buffer for the next frame [S1, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Constants for prediction buffer states
+d_missBox = -2.0
+d_hitBoxMissSurf = -1.0
+d_noInfo = 0.0
+
+def prediction_buffer_traversal(ray_o, ray_d, t_min, t_max, rho_iso, 
+                                prediction_buffer, frame_count, alpha, 
+                                v, v_min, v_max):
+    """
+    Main entry point for prediction buffer voxel traversal.
+    """
+    pixel_id = get_pixel_id_from_ray(ray_o, ray_d)
+    
+    # Force full traversal periodically to correct drift
+    if frame_count % alpha == 0:
+        return full_traversal(ray_o, ray_d, t_min, t_max, rho_iso)
+
+    # Retrieve prediction
+    d_prev = prediction_buffer[pixel_id]
+
+    # Determine traversal mode
+    if d_prev == d_missBox or d_prev == d_noInfo:
+        return full_traversal(ray_o, ray_d, t_min, t_max, rho_iso)
+    elif d_prev == d_hitBoxMissSurf:
+        return local_traversal(ray_o, ray_d, t_min, t_max, rho_iso, d_prev)
+    else:
+        # d_prev > 0 (hit isosurface)
+        return sparse_traversal(ray_o, ray_d, t_min, t_max, rho_iso, d_prev)
+
+def sparse_traversal(ray_o, ray_d, t_min, t_max, rho_iso, d_prev):
+    """
+    Sparse traversal starting from predicted depth.
+    """
+    dt = calculate_adaptive_dt(v, v_min, v_max)
+    
+    # Start traversal from the predicted hit point
+    t_start = t_min + d_prev
+    t_start = max(t_min, min(t_max, t_start))
+    
+    t_prev = t_start
+    t_curr = t_start + dt
+    if t_curr > t_max:
+        t_curr = t_max
+        
+    rho_prev = trilinear_sample(ray_o, ray_d, t_prev)
+    rho_curr = trilinear_sample(ray_o, ray_d, t_curr)
+    
+    while t_curr <= t_max:
+        if min(rho_prev, rho_curr) <= rho_iso <= max(rho_prev, rho_curr):
+            return bisection_find(t_prev, t_curr, rho_iso)
+        
+        t_prev = t_curr
+        t_curr = t_prev + dt
+        if t_curr > t_max:
+            t_curr = t_max
+            
+        rho_prev = rho_curr
+        rho_curr = trilinear_sample(ray_o, ray_d, t_curr)
+        
+    return -1.0
+
+def local_traversal(ray_o, ray_d, t_min, t_max, rho_iso, d_prev):
+    """
+    Local traversal starting from predicted depth, searching both forward and backward.
+    """
+    dt = calculate_adaptive_dt(v, v_min, v_max)
+    
+    t_start = d_prev
+    t_start = max(t_min, min(t_max, t_start))
+    
+    # Forward search
+    t_prev_fwd = t_start
+    t_curr_fwd = t_start + dt
+    if t_curr_fwd > t_max:
+        t_curr_fwd = t_max
+        
+    rho_prev_fwd = trilinear_sample(ray_o, ray_d, t_prev_fwd)
+    rho_curr_fwd = trilinear_sample(ray_o, ray_d, t_curr_fwd)
+    
+    while t_curr_fwd <= t_max:
+        if min(rho_prev_fwd, rho_curr_fwd) <= rho_iso <= max(rho_prev_fwd, rho_curr_fwd):
+            return bisection_find(t_prev_fwd, t_curr_fwd, rho_iso)
+        t_prev_fwd = t_curr_fwd
+        t_curr_fwd = t_prev_fwd + dt
+        if t_curr_fwd > t_max:
+            t_curr_fwd = t_max
+        rho_prev_fwd = rho_curr_fwd
+        rho_curr_fwd = trilinear_sample(ray_o, ray_d, t_curr_fwd)
+
+    # Backward search (if forward failed)
+    t_prev_bwd = t_start
+    t_curr_bwd = t_start - dt
+    if t_curr_bwd < t_min:
+        t_curr_bwd = t_min
+        
+    rho_prev_bwd = trilinear_sample(ray_o, ray_d, t_prev_bwd)
+    rho_curr_bwd = trilinear_sample(ray_o, ray_d, t_curr_bwd)
+    
+    while t_curr_bwd >= t_min:
+        if min(rho_prev_bwd, rho_curr_bwd) <= rho_iso <= max(rho_prev_bwd, rho_curr_bwd):
+            return bisection_find(t_curr_bwd, t_prev_bwd, rho_iso)
+        t_prev_bwd = t_curr_bwd
+        t_curr_bwd = t_prev_bwd - dt
+        if t_curr_bwd < t_min:
+            t_curr_bwd = t_min
+        rho_prev_bwd = rho_curr_bwd
+        rho_curr_bwd = trilinear_sample(ray_o, ray_d, t_curr_bwd)
+        
+    return -1.0
+
+def full_traversal(ray_o, ray_d, t_min, t_max, rho_iso):
+    """
+    Standard dense traversal (e.g., DDA) [G].
+    """
+    # Compute ray step per voxel [G]
+    inv_d = 1.0 / ray_d
+    t_min_voxel = (t_min - ray_o) * inv_d
+    t_max_voxel = (t_max - ray_o) * inv_d
+    t_entry = max(t_min_voxel)
+    t_exit = min(t_max_voxel)
+    if t_entry > t_exit:
+        return -1.0
+    
+    # Traverse voxels [G]
+    t = t_entry
+    while t <= t_exit:
+        rho = trilinear_sample(ray_o, ray_d, t)
+        if rho == rho_iso:
+            return t
+        t += 1.0 / max(abs(inv_d))
+    return -1.0
+
+def calculate_adaptive_dt(v, v_min, v_max):
+    """
+    Calculate step size based on data variance [S1, unofficial].
+    """
+    if v_max == v_min:
+        return 0.1
+    return 0.1 + (0.3 - 0.1) * (v - v_min) / (v_max - v_min)
+
+def trilinear_sample(ray_o, ray_d, t):
+    """
+    Sample volume data at ray position t using trilinear interpolation [G].
+    """
+    pos = ray_o + ray_d * t
+    return volume_texture_sample(pos)
+
+def bisection_find(t_a, t_b, rho_iso):
+    """
+    Find exact intersection using bisection [G].
+    """
+    rho_a = trilinear_sample(ray_o, ray_d, t_a)
+    rho_b = trilinear_sample(ray_o, ray_d, t_b)
+    
+    for _ in range(10):
+        t_mid = (t_a + t_b) / 2
+        rho_mid = trilinear_sample(ray_o, ray_d, t_mid)
+        if abs(rho_mid - rho_iso) < 1e-6:
+            return t_mid
+        if (rho_mid - rho_iso) * (rho_a - rho_iso) < 0:
+            t_b = t_mid
+            rho_b = rho_mid
+        else:
+            t_a = t_mid
+            rho_a = rho_mid
+    return (t_a + t_b) / 2
+```
+
+### Edge Cases and Pitfalls
+*   **Skipping Isosurface:** Sparse traversal may skip an isosurface if $dt$ is too large, introducing artifacts [S1, unofficial].
+*   **Local Traversal Failure:** Local traversal may fail to find the isosurface if the surface moves significantly between frames or if the local search exits volume bounds before finding the surface, producing incorrect results compared to Full Traversal [S1, unofficial].
+*   **Error Accumulation:** To remedy the risk of missing surfaces due to coherence errors, the method performs a full traversal every $\alpha$ frames [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Significantly faster than full traversal during camera rotation due to skipped voxels [S1, unofficial].
+*   **Memory Complexity:** Requires one additional floating-point value per pixel for the prediction buffer [S1, unofficial].
+*   **Performance:** The method can double the rendering speed compared to standard techniques [S1, unofficial].
+*   **Strengths:** High parallelism on GPUs; no divergent branching in sparse traversal; effective for interactive rotation [S1, unofficial].
+*   **Limitations:** Not suitable for large camera movements (coherence breaks); potential for visual artifacts if $dt$ is poorly chosen or if the surface moves rapidly; requires periodic full traversal to correct errors [S1, unofficial].
+*   **When to use:** Interactive volume rendering with small camera rotations on GPU architectures [S1, unofficial].
+*   **When not to use:** Large viewpoint changes, static scenes with no coherence, or when strict visual accuracy is required without periodic correction [S1, unofficial].
+
+## Background
+*   **Origin:** The technique was proposed by Braley et al. in "GPU Accelerated Voxel Traversal using the Prediction Buffer" [S1, unofficial].
+*   **History:** It builds upon earlier work on C-buffers and image caches [Yoon et al. 1997], which were not suited for GPU architectures due to lack of data parallelism [S1, unofficial]. It also relates to temporal coherence techniques by Klein et al. [2005] [S1, unofficial].
+*   **Usage:** Implemented using NVIDIA's CUDA toolkit (version 2.2 in the source) for massively parallel isosurface volume rendering [S1, unofficial].
+
+## Sources
+[S1] GPU Accelerated Voxel Traversal using the Prediction Buffer, https://people.cs.vt.edu/yongcao/publication/pdf/Braley10.pdf, fetched 2026-10-25 (unofficial)

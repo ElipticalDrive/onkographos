@@ -1,0 +1,426 @@
+Calibration companion for volumetric_kit: diagnostics, acquisition guidance, and a requirements solver - feat(solve): a tracked camera's world from its stills of the origin tag; register_tracked; 0.9.0 by taojin-6 · Pull Request #69 · taojin-6/volumetric_kit_calib
+
+feat(solve): a tracked camera's world from its stills of the origin tag; register_tracked; 0.9.0 by taojin-6 · Pull Request #69 · taojin-6/volumetric_kit_calib · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+taojin-6
+commented
+Nov 3, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Header
+include/volumetric_kit/calib/solve/tracked_world.hpp (new, calib_solve, on the stable API: README's Solve row):
+```
+namespace volumetric_kit::calib::solve {
+
+struct TrackedTagView {
+  std::string still;                       // its name, unique: its file's
+  sensor::camera::ImageSize image_size;    // its model's size
+  sensor::camera::CameraModel model;       // a pinhole for ARKit
+  sensor::camera::Mat4d cam_to_tracking{1.0};  // the still's recorded pose; rigid
+  DetectedMarker marker;                   // as detect::detect_tag finds it
+};
+
+struct TrackedWorldOptions {
+  sensor::camera::Vec3d up{0.0, 1.0, 0.0};  // the tracking world's up: ARKit's +y
+};
+
+inline constexpr double kMaxTrackedRmsPx = 12.0;  // a fit above is a PoorFit
+inline constexpr double kMaxTrackedSeedGapM = 0.03;  // a camera farther from the seed's is a PoorFit
+
+struct TrackedStillFit { std::string still; double rms_px, worst_px, range_m, off_normal_deg; };
+struct TrackedTagFit {
+  sensor::camera::Mat4d tracking_to_world{1.0};  // rigid; the tracking's up to +z
+  double rms_px, worst_px, edge_m;
+  std::vector<TrackedStillFit> stills;  // by name
+};
+struct TrackedWorld {
+  OriginTag sought;
+  std::optional<TrackedTagFit> fit;  // empty on a miss
+  TagMiss miss = TagMiss::NotSeen;   // NotSeen, CameraBelowTag, Numerical or PoorFit
+  std::string still;                 // the still a CameraBelowTag miss names
+  std::string reason;
+};
+
+core::Result<TrackedWorld> tracked_world_from_tag(
+    const std::vector<TrackedTagView>& views, const OriginTag& tag, double edge_m,
+    const TrackedWorldOptions& options = {});
+
+core::Result<sensor::camera::TrackedRegistration> register_tracked(
+    const sensor::camera::TrackedStills& stills, const sensor::camera::WorldFrame& world,
+    const TrackedWorld& found);
+
+}  // namespace volumetric_kit::calib::solve
+```
+world_tag.hpp: TagMiss's brief also names tracked_world_from_tag (doc only).
+The sample program, examples/03_register_tracked/main.cpp, as it lands but for the window and the includes:
+```
+// register_tracked <array_calibration.json> <stills.json> <edge mm> <out.json> [<from s> <to s>]
+VKC_ASSIGN(const camera::ArrayCalibration array, camera::read_array_calibration(argv[1]));
+VKC_ASSIGN(const camera::TrackedStills stills, camera::read_tracked_stills(argv[2]));
+std::vector<calib::solve::TrackedTagView> views;
+for (const camera::TrackedStill& s : stills.stills) {
+  const cv::Mat grey = cv::imread(beside(argv[2], s.image), cv::IMREAD_GRAYSCALE);
+  const camera::ImageSize size{std::uint32_t(grey.cols), std::uint32_t(grey.rows)};
+  VKC_ASSIGN(const calib::detect::MarkerSearch search,
+             calib::detect::detect_tag({size.width, size.height, grey.step, grey.data},
+                                       calib::kOriginTag));
+  if (search.found) views.push_back({s.image, size, s.model, s.cam_to_tracking, *search.found});
+}
+VKC_ASSIGN(const calib::solve::TrackedWorld found,
+           calib::solve::tracked_world_from_tag(views, calib::kOriginTag, edge_mm / 1000.0));
+VKC_ASSIGN(const camera::TrackedRegistration reg,
+           calib::solve::register_tracked(stills, array.world, found));  // a miss: its reason
+return camera::write_tracked_registration(argv[4], reg, core::WriteMode::CreateNew);
+```
+How
+A tracked camera (ARKit) poses every frame in a gravity-aligned world of its own. Its stills of the origin tag fix
+tracking_to_world = [Rz(yaw) A | t], A turning the tracking's up onto the tag's +z. The tracking gives the tilt, so
+the fit solves the yaw and the translation alone ("g4"):
+Seed, each still alone, in closed form: in the tracking world turned up to +z the tag's plane is level, the
+corners' rays meet it at c + H e_k (e_k a ray's level part over its rise, H the plane's height below the
+camera), and the square's corners are a similarity of the e_k. Its turn is the yaw, its scale H, its shift the
+rest of t. The median over the stills.
+Fit on cv::LevMarq, 4 parameters: every still's squared corner residuals through its whole lens, against a
+square of the edge the rig measured (TagWorld::edge_m, an argument; 147.25 mm today), never the printed one.
+The corners go into each camera in double, with no Rodrigues round trip (detail::project, the tier's one
+projection). No still is dropped; each still's fit is reported.
+Guard: every still's camera above the tag's plane, else CameraBelowTag naming the still; the reason asks
+whether the poses are in sensor's camera axes (cv_from_gl_camera for ARKit's) and options.up is the tracking
+world's up.
+Gate: RMS at most kMaxTrackedRmsPx (12 px), and no still's camera farther than kMaxTrackedSeedGapM
+(3 cm) from where the seed places it; else PoorFit, with the RMS or the gap in the reason.
+Misses are values, reusing TagMiss. register_tracked copies the fit (transform, RMS, still count, edge) and the
+stills' sensor, session and epoch into sensor's TrackedRegistration, after checking the array's world is the tag
+sought (family, id, printed size), the stills pass validate_tracked_stills, and every still of the fit is one of
+the stills' images; it ends on validate_tracked_registration.
+Deviations from the agreed header (written into the notes before the code)
+A still's pose is its session's recorded pose. Wording only: S3's review moved cam_to_tracking from "as the
+tracking gave it" to the frame's recorded pose (sensor's TrackedStill::cam_to_tracking), and this header follows.
+The seed is the closed form above, not each still's two IPPE square poses. In the marker's frame (z out of the
+face) a face-on view is exactly a half turn, whatever its roll, and calib already works around two OpenCV 5.0.0
+IPPE faults there (view_pose.cpp: rot2vec near a half turn, and no pose for a face-on view on the axis). The
+tests ask for face-on stills, exact and in the bars. With the tilt given, one still's yaw and position have a
+closed form, exact on clean corners, with no pose solver. The header's step 1 says so, and names the seed's two
+Numerical misses: corners that make no convex quadrilateral (collinear ones), and rays that meet the plane on
+both sides of the camera.
+The fit gate is a new kMaxTrackedRmsPx = 12 px, not the rig's kMaxTagWorldRmsPx = 3 px. Found running the
+bars: on the tests' own model (the tracking off 0.1° / 2 mm per still), 3 px refused 1021 of 2100 holds. The
+planning simulation's model gives the same (RMS p50 2.7–3.6 px at 1.2 m). The rig's cameras are solved together
+to a fraction of a pixel; a tracked still carries the tracker's own pose error. On the bars' 2100 holds the RMS
+peaks at 9.2 px (1.2 m); one still moved 10 cm fits at 48 px or more from 1.2 m.
+tracked_world links calib_detect too, for its test on the real detector.
+(Review fix) A second gate, in metres: kMaxTrackedSeedGapM = 3 cm. The RMS gate alone let fits far outside
+the basin through from 2.2 m: a camera's range along its line of sight shows only in the tag's apparent size
+(about 0.5 px per cm there), so one still a few cm off pulls every camera along its line of sight at under 12 px
+(exact corners, 4 stills from 2.2 m, one moved 3 cm: 8.0 px RMS, every camera 14 cm off). The fit may now place
+no still's camera farther than 3 cm from where the seed, the median of the stills alone, places it. Sweep on the
+bars' noise, 300 holds a row, one still's recorded position moved 3 cm:
+Hold
+Out of the basin, RMS gate only
+Out of the basin, both gates
+Clean holds kept (both gates)
+1.2 m, 40°, 2 or 4 stills
+0
+0
+300, 300
+2.2 m, 55°, 4 stills
+84
+0
+300
+2.2 m, 55°, 2 stills
+124
+1
+300
+2.2 m, 55°, 10 stills
+4
+0
+300
+2.2 m, 55°, 4 stills, tag 0.65° off level
+112
+8
+298
+2.2 m, 75°, 4 stills
+97
+0
+288
+3.0 m, 60°, 4 stills
+134
+0
+290
+Out of the basin is yaw over 1° or a good still's camera over 5 cm. The tilt rows' leaks are the tilt's own error
+(25 mm at 2.2 m), which neither gate sees. At 2 cm up to 6 % of clean 2.2 m holds are refused; at 4 cm 6 of 131
+accepted 2-still holds are out of the basin. The bars test allows at most 3 of 300 gap refusals a case; 1 of its
+2100 holds is refused (2.2 m, 2 stills, a 38 mm gap).
+(Review fix) §3's "mirrored corners give CameraBelowTag" does not hold with gravity given: mirrored corners
+fit at 99–122 px and give PoorFit. CameraBelowTag comes from a camera below the tag's plane, such as ARKit's
+camera poses passed without cv_from_gl_camera (47 m below). The tests cover both.
+Tests
+tests/tracked_world_test.cpp (new), host only, every leg. The corners are test support's floor_tag_corners,
+never the solver's square; new test support: tracked_pinhole() (1920×1440, fx 1600), camera_over_tag() and
+floor_tag_print() (the homography draw_marker takes for a pinhole).
+Exact. Clean corners from three cameras (1.2 m at 40°, 2.2 m at 55°, face-on), the tracking's up +y, +z,
++y×1e300 and +z×1e-170 (lengths whose squares overflow and underflow): yaw within 1e-7°, t within 1e-7 m, up to
++z within 1e-12, RMS below 1e-6 px, each still's range and angle,
+each still alone exact too (face-on included), and the views shuffled give the same matrix exactly.
+On the detector. Tag 0 drawn through the pinhole's homography into two 1920×1440 stills, blurred and noisy,
+found by detect_tag: yaw within 0.1°, each camera within 5 mm, RMS below 0.5 px.
+Bars, p95 over 300 holds a case, cv::RNG-seeded (the same samples on every leg): fx 1600 at 1920×1440, edge
+0.14725 m, corner noise 0.5 px, hand tremor 1 cm / 0.5°, the tracking off 0.1° / 2 mm per still, each hold its own
+yaw, translation, azimuth, roll (and tilt direction). Every hold must fit, but the seed-gap gate may refuse at
+most 3 of 300 (it refuses 1 of 2100: 2.2 m, 2 stills). "Camera" is the fit's error at the stills' own camera
+centres:
+Hold
+Stills
+Gravity vs tag z
+Bar
+Measured (p95)
+Planning sim
+1.2 m, 40°
+2
+0
+yaw ≤ 0.5°, camera ≤ 2 cm
+0.171°, 7.5 mm
+0.12°
+1.2 m, 40°
+4
+0
+yaw ≤ 0.5°, camera ≤ 2 cm
+0.117°, 7.5 mm
+0.12°
+2.2 m, 55°
+4
+0
+yaw ≤ 0.5°, camera ≤ 2 cm
+0.246°, 15.1 mm
+0.24–0.26°, 16.9 mm
+2.2 m, 55°
+2
+0
+yaw ≤ 0.5°, camera ≤ 5 cm
+0.339°, 20.7 mm
+0.32°, 20.6 mm
+1.2 m, face-on
+4
+0
+yaw ≤ 0.5°, camera ≤ 2 cm
+0.100°, 6.1 mm
+0.11°
+1.2 m, 40°
+4
+0.65°
+yaw ≤ 0.5°, rotation 0.65 ± 0.15°, camera ≤ 5 cm
+0.260°, 0.650–0.701°, 17.6 mm
+0.27°
+2.2 m, 55°
+4
+0.65°
+yaw ≤ 0.5°, rotation 0.65 ± 0.15°, camera ≤ 5 cm
+0.388°, 0.650–0.756°, 31.8 mm
+0.36–0.39°, 31.7 mm
+The rotation is its p5–p95. The fit's RMS peaks at 9.23 px (1.2 m, 4 stills), p95 3.9–5.9 px. The same numbers,
+to the digit, in Release and under ThreadSanitizer.
+Misses: no still gives NotSeen; a camera below the tag's plane looking up gives CameraBelowTag naming the
+still, and so do ARKit's GL camera poses, the reason naming cv_from_gl_camera; PoorFit for one still's pose
+moved 10 cm from 1.2 m or one still's corners mirrored (the RMS in the reason), and for one of 4 stills from
+2.2 m moved 3 cm (8.0 px RMS; the gap in the reason); Numerical, naming the still, for collinear corners and
+for rays that meet the plane on both sides of the camera.
+Refusals, each named: up zero or NaN, an edge of 0 or NaN, a bad tag, another marker, a still named twice, a
+bad model, an image not its model's size, a pose not rigid, a NaN corner.
+register_tracked: sensor writes the registration and reads it back; it places each still's camera where the
+fit does to 1e-9 m, with sensor, session, epoch, world, views, edge and RMS as given. Refused: a miss (its reason
+passed on), a sensor world, another tag id, another printed size, stills with an all-zero session, a fit of a
+still that is none of the stills' images (another take's).
+solve_oom adds both calls (a fit, a miss and a refusal; a registration and two refusals). api runs
+main 4 on two drawn stills. register_tracked.arguments checks the usage and a missing file.
+Times, wall seconds per binary (M5 Max, maclock --time, 3 runs). "Before" is #68's binary in Release, and under
+ThreadSanitizer this build with the new case filtered out:
+Test
+Release before
+Release after
+TSan (RelWithDebInfo) before
+TSan after
+tracked_world (new, 10 cases)
+–
+0.24–0.31
+–
+0.74–0.83
+api
+0.42–0.43
+0.44–0.50
+0.91–1.00
+1.00–1.02
+solve_oom, every case (one process each)
+6.40–6.46
+6.55–6.68
+not run
+not run
+of which the two new cases
+–
+0.10
+–
+0.18–0.19
+register_tracked.arguments (new)
+–
+0.27–0.36
+–
+–
+The review fix (ef47f98) changed tracked_world only (4 new checks in existing cases). "Before" is 7e6a5b0:
+Release from the table above, ThreadSanitizer that binary rerun now. "After" is ef47f98, the same way:
+Test
+Release before
+Release after
+TSan before
+TSan after
+tracked_world
+0.24–0.31
+0.25–0.26
+0.73–0.97
+0.72–0.74
+api (unchanged)
+0.44–0.50
+0.44–0.45
+1.00–1.02
+0.98–1.08
+solve_oom, the two tracked cases (unchanged)
+0.10
+0.10
+0.18–0.19
+0.17–0.18
+register_tracked.arguments (unchanged)
+0.27–0.36
+0.27–0.32
+–
+–
+Mutants (each failed the suite; the source restored by cp and checked with cmp)
+The solver's square starts at corner 1: IsExactWithoutNoise comes out 90.0° off (and the detector and bars
+tests fail).
+register_tracked writes rigid_inverse(tracking_to_world): RegisterTracked.PlacesTheStillsWhereTheFitDoes
+and Api.RegistersATrackedCamera fail.
+The fit uses the tag's printed 0.15 m, not edge_m: the camera bar fails on six of seven cases (2.2 m, 55°,
+4 stills: 53.6 mm against 20 mm), and the exact and detector tests fail.
+The review fix's three (each caught, restored the same way):
+The seed-gap gate never refuses: TrackedWorld.RefusesAPoorFit fails (the 3 cm still is accepted).
+register_tracked skips the check of the fit's stills: RegisterTracked.RefusesAMissAndAnotherWorld fails.
+up normalized without scaling first: TrackedWorld.IsExactWithoutNoise fails (the 1e300 up gives no fit).
+Evidence
+Mac (M5 Max), Release, brain build with tests: the default suite 67 of 67 (-LE "slow|package"). The rig tiers,
+calib_rig, slow and package run on CI's legs; no rig code changed, only the sensor pin (build: drop the install path; test time and CI legs #48 adds a camera-tier
+header and refactor(solve): one home for the median #42's pattern reader on sensor main).
+pre-commit run --files <changed> and git diff --check pass.
+Privacy scanner: exit 0 ("clear: 87 text(s) scanned"), no acknowledgements; on ef47f98 with this body, exit 0
+("clear: 128 text(s) scanned"), no acknowledgements.
+Review fix ef47f98: the Mac Release default suite 67 of 67 again, and tracked_world under ThreadSanitizer
+(RelWithDebInfo) 10 of 10, the bars' numbers to the digit as in Release.
+CI: run 41625693195 on 7e6a5b0, green on the first run, no reruns: macOS Release rig 126 of 126 (slow and
+package included), the ThreadSanitizer leg 7 of 7, ubuntu-24.04 67 of 67 (DeckLink arm built), ubuntu-26.04
+shared 67 of 67, ASan/UBSan/LSan rig 98 of 98 (tracked_world 3.2 s there), lint, required. (An earlier run on
+80014d4 was cancelled by the doc-only push.)
+CI on the review fix ef47f98: run 41636493951, green on the first run, no reruns: macOS Release rig 126 of 126,
+the ThreadSanitizer leg 7 of 7, ubuntu-24.04 67 of 67, ubuntu-26.04 67 of 67, ASan/UBSan/LSan 98 of 98
+(tracked_world 3.3 s there, 0.5–1.0 s on the other legs), lint, required.
+Host only; no device, as planned: one fit per hold over a few stills, on the CPU like every calib solve.
+Stack and versions
+Stacked on build: re-pin sensor and core; calib's device_picture copy goes; calib 0.8.0 #68 (HV8, the sensor and core re-pin, 0.8.0). This PR merges main in once build: re-pin sensor and core; calib's device_picture copy goes; calib 0.8.0 #68 merges.
+Sensor is pinned at sensor build: drop the install path; test time and CI legs #48's head (dfe6111, the tracked stills, 0.40.0), as is its Orbbec SDK action in
+CI, and VC_SENSOR_MIN_VERSION is 0.40.0. The pin moves to build: drop the install path; test time and CI legs #48's merge commit on sensor main before this PR
+merges (a // TODO: marks it in third_party/CMakeLists.txt).
+calib main is 0.6.0; open fix(capture): write the session files with calib's JsonWriter; calib 0.7.0 #66 takes 0.7.0 and build: re-pin sensor and core; calib's device_picture copy goes; calib 0.8.0 #68 0.8.0, so this PR takes 0.9.0. Whichever merges out of order
+merges main in and takes the next free minor. This PR shares CHANGELOG.md and project(VERSION) with fix(capture): write the session files with calib's JsonWriter; calib 0.7.0 #66 and
+build: re-pin sensor and core; calib's device_picture copy goes; calib 0.8.0 #68 and touches no other file of fix(capture): write the session files with calib's JsonWriter; calib 0.7.0 #66's.
+Owner items
+The real tag take (Lab 1, L2/L3, the iPad): run example 03 on the take's stills once per hold window, with the
+latest Calibrate report's world.located.mean_edge_mm (147.25 mm if the tag has not moved). Pass: the basin,
+1° of yaw / 5 cm, against E1's rig-model fit of the first wall-rich window; 0.5° / 2 cm reported as the target.
+L2's "RMS at most 3 px" bar should follow the gate: at most 12 px, or reported only. 0b's real end fix fitted
+at 2.4–5.0 px.
+Sign-off on the seed-gap gate's 3 cm (deviation 5): 2 cm refuses more clean holds from 2.2 m (up to 6 %),
+4 cm lets more bad ones through. Both gates are tuned for fx 1600 at 1920×1440 (ARKit's stills).
+Merge order: sensor build: drop the install path; test time and CI legs #48, then build: re-pin sensor and core; calib's device_picture copy goes; calib 0.8.0 #68, then this PR (re-pinned to build: drop the install path; test time and CI legs #48's merge).
+🤖 Generated with Claude Code
+feat(solve): a tracked camera's world from its stills of the origin t…
+…
+80014d4
+```
+…ag; register_tracked
+
+solve/tracked_world.hpp: tracked_world_from_tag places a tracked camera's
+world (ARKit's) in the origin tag's from its stills of the tag, at the poses
+its session records for them. The tracking's gravity gives the tilt; one
+least-squares fit on cv::LevMarq solves the yaw and the translation over
+every still's corners, through each still's lens, against a square of the
+edge the rig measured. The seed is each still's closed form (the level
+plane's similarity), not IPPE, whose face-on marker poses are a half turn.
+Misses are TagMiss values (NotSeen, CameraBelowTag, Numerical, PoorFit above
+kMaxTrackedRmsPx, 12 px: a still carries the tracker's own pose error).
+register_tracked turns the fit into sensor's TrackedRegistration.
+
+examples/03_register_tracked writes the registration from a calibration, a
+stills file and the measured edge, optionally from one hold's window.
+
+Sensor is pinned at its tracked stills (dfe6111, 0.40.0), which calib now
+needs; calib 0.9.0.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+taojin-6
+self-assigned this
+Nov 3, 2026
+taojin-6
+and others
+added 2 commits
+November 3, 2026 06:12
+docs(solve): kMaxTrackedRmsPx's 3 m figure as measured, 18.9 px
+…
+7e6a5b0
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+fix(solve): a tracked fit is also gated in metres; register_tracked c…
+…
+ef47f98
+```
+…hecks the fit's stills
+
+From the review of #69:
+
+- A fit that places a still's camera over kMaxTrackedSeedGapM (3 cm) from
+  where the seed (the stills' median) places it is a PoorFit. From 2.2 m one
+  still a few cm off pulls every camera 6-19 cm along its line of sight at
+  under 12 px RMS. On the bars' noise with one still 3 cm off, the RMS gate
+  alone let 28-41 % of 2.2 m holds out of the basin; with this gate 0-1 %
+  (3 % with the tag 0.65 deg off level). The bars test allows at most 3 of
+  300 gap refusals a case (1 of 2100 refused).
+- register_tracked refuses a fit of a still that is none of the stills'
+  images.
+- CameraBelowTag's reason asks whether the poses are in sensor's camera
+  axes (cv_from_gl_camera) and options.up is the tracking world's up: with
+  gravity given, mirrored corners fit poorly instead. Tests: ARKit's GL
+  poses, mirrored corners, rays on both sides of a camera.
+- options.up is scaled by its largest component, so a length that
+  overflows or underflows is taken; kMaxTrackedRmsPx's doc states its
+  fx 1600 still; step 4 is the Gate; a TODO for one cv::LevMarq driver.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

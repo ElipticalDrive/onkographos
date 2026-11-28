@@ -1,0 +1,403 @@
+--- v009.md
++++ v010.md
+@@ -1,14 +1,14 @@
+ # Training Ray Compositing
+ 
+-Also called: Composite Test Forward Pass, Volume Rendering Composite Forward
++Also called: Composite Test Forward Pass, Taichi Volume Rendering Test (Composite), Volume Rendering Composite Forward
+ 
+ ## Overview
+ 
+-Training Ray Compositing is a differentiable volume rendering technique that composites per-ray samples of density ($\sigma$), color ($\text{RGB}$), and ambient light into final pixel values while computing gradients for all inputs during the backward pass [S1, unofficial]. It differs from standard inference compositing by explicitly supporting gradient propagation to density and color parameters, enabling end-to-end training of neural radiance fields [S1, unofficial]. It builds on [Reconstruction and Compositing Techniques](4646-reconstruction-and-compositing-techniques.md) by providing the specific implementation for training with sigma and ambient contributions.
++Training Ray Compositing is a differentiable volume rendering technique that composites per-ray samples of density ($\sigma$), color ($\text{RGB}$), and ambient light into final pixel values while computing gradients for all inputs during the backward pass [S1, unofficial]. It differs from standard inference compositing by explicitly supporting gradient propagation to density and color parameters, enabling end-to-end training of neural radiance fields [S1, unofficial]. It builds on [Reconstruction and Compositing Techniques](4646-reconstruction-and-compositing-techniques.md) by providing the specific implementation for training with sigma and ambient contributions [S1, unofficial].
+ 
+ ## How it works
+ 
+ **Inputs and Outputs:**
+-The method takes a batch of rays and their associated samples.
++The method takes a batch of rays and their associated samples [S3, unofficial].
+ *   **Inputs:**
+     *   `sigmas`: Density values, shape $[N]$ or $[B, S]$, where $N$ is total samples and $B$ is batch size [S3, S4, unofficial].
+@@ -17,5 +17,5 @@
+     *   `ts`: Sample positions (z-values) along the ray, shape $[N]$ or $[B, S]$ [S3, unofficial].
+     *   `rays`: Ray metadata mapping rays to sample ranges. In packed layouts, this is a tensor of shape $[N_{rays}, 3]$ containing `[ray_idx, start_idx, num_steps]` for each ray [S3, S7, unofficial]. In unpacked layouts, samples are implicitly grouped by batch index [S1, unofficial].
+-    *   `background_color`: Background color for transparent regions. Can be a tensor, `'random'` (random noise), or `'last_sample'` (color of the last sample) [S1, unofficial].
++    *   `background_color`: Background color for transparent regions. Can be a tensor, `'random'` (random noise), or `'last_sample'` (color of the last sample) [S1, S15, unofficial].
+     *   `T_threshold`: Transmittance threshold for early ray termination. Default is $10^{-4}$ [S3, S8, unofficial].
+ *   **Outputs:**
+@@ -26,6 +26,6 @@
+ 
+ **Data Structures:**
+-*   **Packed Layout:** All rays share a contiguous buffer of samples. `rays` tensor indexes into this buffer. This is memory efficient for sparse sampling [S1, S3, unofficial].
+-*   **Unpacked Layout:** Samples are stored in a dense tensor $[B, S, \dots]$. This is simpler but may waste memory if rays have varying sample counts [S1, unofficial].
++*   **Packed Layout:** All rays share a contiguous buffer of samples. `rays` tensor indexes into this buffer [S1, S3, unofficial].
++*   **Unpacked Layout:** Samples are stored in a dense tensor $[B, S, \dots]$ [S1, unofficial].
+ 
+ **Algorithm Steps:**
+@@ -40,11 +40,11 @@
+     *   **Compute Alpha:** Calculate the opacity contribution of the sample using the density and step size:
+         $$ \alpha_s = 1 - e^{-\sigma_s \cdot \delta_s} $$
+-        where $\sigma_s$ is density and $\delta_s$ is the step size (distance to the next sample) [S2, S7, unofficial].
++        where $\sigma_s$ is density and $\delta_s$ is the step size (distance to the next sample) [S2, S7, S8, unofficial].
+     *   **Compute Weight:** Calculate the weight $w_s$ for the sample, representing the fraction of light blocked by this sample:
+         $$ w_s = \alpha_s \cdot T $$
+-        where $T$ is the current accumulated transmittance [S2, S7, unofficial].
++        where $T$ is the current accumulated transmittance [S2, S7, S8, unofficial].
+     *   **Accumulate Color:** Update the accumulated color:
+         $$ C_{acc} \leftarrow C_{acc} + w_s \cdot c_s $$
+-        where $c_s$ is the sample color [S2, S7, unofficial].
++        where $c_s$ is the sample color (from `rgbs`) [S2, S7, unofficial].
+     *   **Accumulate Depth:** Update the accumulated depth (for depth estimation):
+         $$ D_{acc} \leftarrow D_{acc} + w_s \cdot t_s $$
+@@ -55,16 +55,16 @@
+     *   **Update Transmittance:** Update the transmittance for the next sample:
+         $$ T \leftarrow T \cdot (1 - \alpha_s) $$
+-        [S2, S7, unofficial].
++        [S2, S7, S8, unofficial].
+     *   **Store Weight:** Save $w_s$ to the `ws` tensor for backward pass [S3, unofficial].
+-    *   **Early Termination:** If $T < T_{\text{threshold}}$ (e.g., $10^{-4}$), mark the ray as converged/finished and break the loop [S3, S7, unofficial]. This optimization skips remaining samples for opaque rays.
++    *   **Early Termination:** If $T < T_{\text{threshold}}$ (e.g., $10^{-4}$), mark the ray as converged/finished and break the loop [S3, S7, S8, unofficial]. This optimization skips remaining samples for opaque rays [S3, S7, unofficial].
+ 
+ 3.  **Background Compositing:**
+     After processing all samples (or terminating early), composite the accumulated color over the background:
+     $$ C_{final} = C_{acc} + (1 - \alpha_{acc}) \cdot C_{bg} $$
+-    where $C_{bg}$ is determined by the `background_color` parameter [S1, S2, unofficial].
+-    *   If `background_color` is `'random'`, use random noise [S1, unofficial].
+-    *   If `'last_sample'`, use the color of the last sample [S1, unofficial].
+-    *   If a tensor is provided, use that value [S1, unofficial].
+-    *   Note: `'last_sample'` is not implemented for packed samples in some libraries and raises `NotImplementedError` [S1, unofficial].
++    where $C_{bg}$ is determined by the `background_color` parameter [S1, S2, S15, unofficial].
++    *   If `background_color` is `'random'`, use random noise [S1, S15, unofficial].
++    *   If `'last_sample'`, use the color of the last sample [S1, S15, unofficial].
++    *   If a tensor is provided, use that value [S1, S15, unofficial].
++    *   Note: `'last_sample'` is not implemented for packed samples in some libraries and raises `NotImplementedError` [S1, S15, unofficial].
+ 
+ 4.  **Output Assignment:**
+@@ -73,45 +73,48 @@
+     *   Assign $D_{acc}$ to `depth` [S3, unofficial].
+ 
+-**Pseudocode (Packed Layout, CUDA-style):**
++**Pseudocode (Packed Layout, Pure Python):**
+ 
+ ```python
++import math
++
+ def composite_train_forward(sigmas, rgbs, deltas, ts, rays, background_color, T_threshold=1e-4):
+     """
+-    Forward pass for training ray compositing.
++    Forward pass for training ray compositing (packed layout).
+     
+     Args:
+-        sigmas: [N] float, densities
+-        rgbs: [N, 3] float, colors
+-        deltas: [N] float, step sizes
+-        ts: [N] float, sample positions
+-        rays: [N_rays, 3] int, [ray_idx, start_idx, num_steps]
+-        background_color: tensor [3] or 'random' or 'last_sample'
++        sigmas: list of float, densities
++        rgbs: list of list of float, colors [N, 3]
++        deltas: list of float, step sizes
++        ts: list of float, sample positions
++        rays: list of list of int, [ray_idx, start_idx, num_steps]
++        background_color: list of float [3] or 'random' or 'last_sample'
+         T_threshold: float, early termination threshold
+         
+     Returns:
+-        rgb: [N_rays, 3]
+-        opacity: [N_rays]
+-        depth: [N_rays]
+-        ws: [N] per-sample weights
++        rgb: list of list of float [N_rays, 3]
++        opacity: list of float [N_rays]
++        depth: list of float [N_rays]
++        ws: list of float [N] per-sample weights
+     """
+-    N_rays = rays.shape[0]
+-    rgb = torch.zeros(N_rays, 3, device=sigmas.device)
+-    opacity = torch.zeros(N_rays, device=sigmas.device)
+-    depth = torch.zeros(N_rays, device=sigmas.device)
+-    ws = torch.zeros(N, device=sigmas.device)
++    N_rays = len(rays)
++    N = len(sigmas)
++    rgb = [[0.0, 0.0, 0.0] for _ in range(N_rays)]
++    opacity = [0.0] * N_rays
++    depth = [0.0] * N_rays
++    ws = [0.0] * N
+     
+     # Handle background color
+     if background_color == 'random':
+-        bg = torch.rand(3, device=sigmas.device)
++        import random
++        bg = [random.random(), random.random(), random.random()]
+     elif background_color == 'last_sample':
+-        # Not supported for packed layout in some implementations [S1, unofficial]
+         raise NotImplementedError("last_sample background not supported for packed rays")
+     else:
+-        bg = background_color
++        bg = list(background_color)
+         
+     for r in range(N_rays):
+-        ray_idx = rays[r, 0]
+-        start_idx = rays[r, 1]
+-        num_steps = rays[r, 2]
++        ray_idx = rays[r][0]
++        start_idx = rays[r][1]
++        num_steps = rays[r][2]
+         
+         if num_steps == 0:
+@@ -119,5 +122,5 @@
+             
+         T = 1.0
+-        acc_rgb = torch.zeros(3, device=sigmas.device)
++        acc_rgb = [0.0, 0.0, 0.0]
+         acc_depth = 0.0
+         acc_opacity = 0.0
+@@ -130,5 +133,5 @@
+             
+             # Compute alpha
+-            alpha = 1.0 - torch.exp(-sigma * delta)
++            alpha = 1.0 - math.exp(-sigma * delta)
+             
+             # Compute weight
+@@ -136,5 +139,7 @@
+             
+             # Accumulate
+-            acc_rgb += w * color
++            acc_rgb[0] += w * color[0]
++            acc_rgb[1] += w * color[1]
++            acc_rgb[2] += w * color[2]
+             acc_depth += w * t
+             acc_opacity += w
+@@ -151,5 +156,9 @@
+                 
+         # Composite over background
+-        final_rgb = acc_rgb + (1.0 - acc_opacity) * bg
++        final_rgb = [
++            acc_rgb[0] + (1.0 - acc_opacity) * bg[0],
++            acc_rgb[1] + (1.0 - acc_opacity) * bg[1],
++            acc_rgb[2] + (1.0 - acc_opacity) * bg[2]
++        ]
+         
+         rgb[ray_idx] = final_rgb
+@@ -160,59 +169,76 @@
+ ```
+ 
+-**Pseudocode (Unpacked Layout, PyTorch-style):**
++**Pseudocode (Unpacked Layout, Pure Python):**
+ 
+ ```python
++import math
++
+ def composite_train_forward_unpacked(sigmas, rgbs, deltas, ts, background_color, T_threshold=1e-4):
+     """
+-    Forward pass for training ray compositing (unpacked).
++    Forward pass for training ray compositing (unpacked layout).
+     
+     Args:
+-        sigmas: [B, S] float
+-        rgbs: [B, S, 3] float
+-        deltas: [B, S] float
+-        ts: [B, S] float
+-        background_color: tensor [3] or 'random'
++        sigmas: list of list of float [B, S]
++        rgbs: list of list of list of float [B, S, 3]
++        deltas: list of list of float [B, S]
++        ts: list of list of float [B, S]
++        background_color: list of float [3] or 'random'
+         T_threshold: float
+         
+     Returns:
+-        rgb: [B, 3]
+-        opacity: [B]
+-        depth: [B]
+-        ws: [B, S]
++        rgb: list of list of float [B, 3]
++        opacity: list of float [B]
++        depth: list of float [B]
++        ws: list of list of float [B, S]
+     """
+-    B, S = sigmas.shape
+-    ws = torch.zeros(B, S, device=sigmas.device)
+-    
+-    # Compute alpha
+-    alpha = 1.0 - torch.exp(-sigmas * deltas)
+-    
+-    # Compute transmittance product
+-    # T_i = product_{j=0}^{i-1} (1 - alpha_j)
+-    # Prepend 1.0 for the first sample
+-    one_minus_alpha = 1.0 - alpha + 1e-10 # eps for stability
+-    accum_prod = torch.cat([torch.ones(B, 1, device=sigmas.device), 
+-                            torch.cumprod(one_minus_alpha[:, :-1], dim=1)], dim=1)
+-    
+-    # Compute weights
+-    w = alpha * accum_prod
+-    ws = w
+-    
+-    # Accumulate RGB
+-    rgb = torch.sum(w.unsqueeze(-1) * rgbs, dim=1)
+-    
+-    # Accumulate Depth
+-    depth = torch.sum(w * ts, dim=1)
+-    
+-    # Accumulate Opacity
+-    opacity = torch.sum(w, dim=1)
+-    
++    B = len(sigmas)
++    S = len(sigmas[0])
++    ws = [[0.0] * S for _ in range(B)]
++    
++    # Compute alpha and transmittance product
++    one_minus_alpha = [[0.0] * S for _ in range(B)]
++    accum_prod = [[0.0] * S for _ in range(B)]
++    
++    for b in range(B):
++        # Prepend 1.0 for the first sample
++        accum_prod[b][0] = 1.0
++        for s in range(S):
++            alpha = 1.0 - math.exp(-sigmas[b][s] * deltas[b][s])
++            one_minus_alpha[b][s] = 1.0 - alpha + 1e-10 # eps for stability
++            if s > 0:
++                accum_prod[b][s] = accum_prod[b][s-1] * one_minus_alpha[b][s-1]
++    
++    # Compute weights and accumulate
++    rgb = [[0.0, 0.0, 0.0] for _ in range(B)]
++    opacity = [0.0] * B
++    depth = [0.0] * B
++    
++    for b in range(B):
++        for s in range(S):
++            w = one_minus_alpha[b][s] * accum_prod[b][s] # Note: alpha is implicitly handled in weight formula w = alpha * T
++            # Correct weight formula: w = (1 - exp(-sigma*delta)) * accum_prod
++            alpha = 1.0 - math.exp(-sigmas[b][s] * deltas[b][s])
++            w = alpha * accum_prod[b][s]
++            ws[b][s] = w
++            
++            rgb[b][0] += w * rgbs[b][s][0]
++            rgb[b][1] += w * rgbs[b][s][1]
++            rgb[b][2] += w * rgbs[b][s][2]
++            depth[b] += w * ts[b][s]
++            opacity[b] += w
++            
+     # Background
+     if background_color == 'random':
+-        bg = torch.rand(3, device=sigmas.device)
++        import random
++        bg = [random.random(), random.random(), random.random()]
+     else:
+-        bg = background_color
+-        
+-    final_rgb = rgb + (1.0 - opacity.unsqueeze(-1)) * bg
+-    
++        bg = list(background_color)
++        
++    final_rgb = [[0.0, 0.0, 0.0] for _ in range(B)]
++    for b in range(B):
++        final_rgb[b][0] = rgb[b][0] + (1.0 - opacity[b]) * bg[0]
++        final_rgb[b][1] = rgb[b][1] + (1.0 - opacity[b]) * bg[1]
++        final_rgb[b][2] = rgb[b][2] + (1.0 - opacity[b]) * bg[2]
++        
+     return final_rgb, opacity, depth, ws
+ ```
+@@ -221,8 +247,5 @@
+ 
+ ### [Training Ray Compositing (Sigma)](3868-training-ray-compositing-sigma.md)
+-Training Ray Compositing (Sigma) is a differentiable volume rendering technique that composites per-ray samples of density ($\sigma$), color ($\text{RGB}$), and ambient light into final pixel values while computing gradients for all inputs during the backward pass. It differs from standard inference compositing by explicitly supporting gradient propagation to density and color parameters, enabling end-to-end training of neural radiance fields. It builds on [Training Ray Compositing](3785-training-ray-compositing.md) by providing the specific implementation for training with sigma and ambient contributions.
+-
+-### [Ray Functions](10623-ray-functions.md)
+-Ray functions determine the final color and opacity contribution of a ray passing through a volume by aggregating sample values along the ray path. While standard compositing accumulates opacity and color, alternative ray functions such as Maximum Intensity Projection (MIP), average value, and distance-to-threshold provide different visualizations where the result is a scalar value or distance rather than an accumulated color. The alpha compositing ray function is distinct because its result is not a scalar value or distance that can be represented on the ray profile, but rather an accumulated color and alpha weight.
++Training Ray Compositing (Sigma) composites per-ray samples of density ($\sigma$), color ($\text{RGB}$), and ambient light into final pixel values while computing gradients for all inputs during the backward pass. It differs from standard inference compositing by explicitly supporting gradient propagation to density and color parameters, enabling end-to-end training of neural radiance fields. It builds on [Training Ray Compositing](3785-training-ray-compositing.md) by providing the specific implementation for training with sigma and ambient contributions.
+ 
+ ### [Multi-View Color Blending](12853-multi-view-color-blending.md)
+@@ -230,25 +253,37 @@
+ 
+ ### [Segment Coalescing Compositing](15558-segment-coalescing-compositing.md)
+-Segment Coalescing Compositing is a method for aggregating per-sample contributions (RGB, alpha, and depth) into final pixel values during direct volume ray casting. It solves the problem of efficiently mapping scattered ray samples to pixel-space outputs by using indexed reduction operations. It differs from standard sequential accumulation by explicitly grouping samples by `ray_id` and reducing them via sum, allowing for flexible handling of variable-length rays and background blending.
++Segment Coalescing Compositing aggregates per-sample ray contributions (RGB, alpha weights, and depth) into final pixel values during direct volume ray casting. It differs from standard sequential accumulation by explicitly grouping scattered samples by `ray_id` and reducing them via indexed summation, which allows flexible handling of variable-length rays and explicit background blending.
++
++### [Volume Rendering (Taichi Forward Array)](20774-volume-rendering-taichi-forward-array.md)
++This method performs a forward volume rendering pass using the Taichi programming language to accumulate RGB color, depth, and opacity per ray. It differs from standard CPU-based ray casting by leveraging Taichi's parallel execution model and supports transmittance thresholding to terminate ray marching early. It builds on [Training Ray Compositing](3785-training-ray-compositing.md) by providing the specific Taichi-native implementation for compositing ray samples.
++
++### [Volume Blending and Segmentation](22167-volume-blending-and-segmentation.md)
++Volume Blending and Segmentation combines multiple rendering styles or separate volume datasets to create composite, customizable presentations. It distinguishes itself from sibling methods by focusing on the high-level composition of distinct visual styles or independent data sources, rather than refining the compositing of a single ray's samples (as in Training Ray Compositing) or merging multi-view inputs.
+ 
+ ### Multi-Layer Compositing with Gradient Backpropagation
+-Multi-Layer Compositing with Gradient Backpropagation caps the number of composited layers at $c_{max} = 16$ per pixel to bound memory for backward pass statistics [S9, unofficial]. The forward pass performs depth-interval grouping, MIP-filtered kernel evaluation, Shepard normalization, and front-to-back compositing fused into a single kernel invocation per tile [S9, unofficial]. The backward pass first replays forward gap detection to reconstruct per-layer totals $(C_c, \alpha_c)$ for $c=1$ to $c_{max}$, then retraverses primitives to assign each to its layer and decompose per-layer gradients into per-surfel gradients through normalized accumulation using atomic operations [S9, unofficial]. Concurrent writes from different pixels during gradient decomposition are handled by atomic operations [S9, unofficial].
++Multi-Layer Compositing with Gradient Backpropagation caps the number of composited layers at $c_{max} = 16$ per pixel to bound memory for backward pass statistics [S10, unofficial]. The forward pass performs depth-interval grouping, MIP-filtered kernel evaluation, Shepard normalization, and front-to-back compositing fused into a single kernel invocation per tile [S10, unofficial]. The backward pass first replays forward gap detection to reconstruct per-layer totals $(C_c, \alpha_c)$ for $c=1$ to $c_{max}$, then retraverses primitives to assign each to its layer and decompose per-layer gradients into per-surfel gradients through normalized accumulation using atomic operations [S10, unofficial]. Concurrent writes from different pixels during gradient decomposition are handled by atomic operations [S10, unofficial].
+ 
+ ### Partial Image Source Signature Integration
+-Partial Image Source Signature Integration is a post-processing step that combines pre-computed ray buffer data (absorption/color) with a source signature vector to compute final emerging intensities, using OpenMP parallelization [S10, unofficial]. It retrieves control portals for the buffer and intensity arrays, determines pixel and channel counts, and iterates over all pixels in parallel [S10, unofficial]. For each pixel and channel, it computes the new intensity as: $\text{intensity} = \text{emission} + \text{buffer} \cdot \text{source\_sig[channel]}$ [S10, unofficial]. The buffer stores color or absorption values per pixel/channel, and the intensities store the final emerging intensity [S10, unofficial].
++Partial Image Source Signature Integration is a post-processing step that combines pre-computed ray buffer data (absorption/color) with a source signature vector to compute final emerging intensities, using OpenMP parallelization [S11, unofficial]. It retrieves control portals for the buffer and intensity arrays, determines pixel and channel counts, and iterates over all pixels in parallel [S11, unofficial]. For each pixel and channel, it computes the new intensity as: $\text{intensity} = \text{emission} + \text{buffer} \cdot \text{source\_sig[channel]}$ [S11, unofficial]. The buffer stores color or absorption values per pixel/channel, and the intensities store the final emerging intensity [S11, unofficial].
+ 
+ ### Shaded Compositing
+-Shaded Compositing modifies the compositing ray function to include shading by computing ambient, diffuse, and specular illumination at each sample using estimated volume gradients [S11, book]. The shaded compositing equation is:
++Shaded Compositing modifies the compositing ray function to include shading by computing ambient, diffuse, and specular illumination at each sample using estimated volume gradients [S12, book]. The shaded compositing equation is:
+ $$ I(t_{near}, \vec{\omega}) = \sum_{t = t_{near}}^{t \leq t_{far}} \alpha(t)(I_a + I_d + I_s) \prod_{t' = t_{near}}^{t' < t_{far}}(1 - a(t')) $$
+-where $I_a, I_d, I_s$ are ambient, diffuse, specular illumination computed using estimated volume gradient as normal, and $\alpha(t)$ is light reflected per unit length [S11, book]. This requires estimating gradients at many locations within the volume for each pixel, making 3D gradient estimation more suitable than 2D [S11, book].
++where $I_a, I_d, I_s$ are ambient, diffuse, specular illumination computed using estimated volume gradient as normal, and $\alpha(t)$ is light reflected per unit length [S12, book]. This requires estimating gradients at many locations within the volume for each pixel, making 3D gradient estimation more suitable than 2D [S12, book].
+ 
+ ### Kernel-based Compositing
+-Kernel-based Compositing is a compositing method using interpolation kernels where color and opacity are accumulated based on kernel weights [S12, unofficial]. The color accumulation is $c = c_s \cdot \alpha_s \cdot (1 - \alpha)$, and the opacity update is $\alpha = \alpha_s \cdot (1 - \alpha) + \alpha$, where $c_s$ is sample color, $\alpha_s$ is sample opacity, and $\alpha$ is accumulated opacity [S12, unofficial].
++Kernel-based Compositing is a compositing method using interpolation kernels where color and opacity are accumulated based on kernel weights [S13, unofficial]. The color accumulation is $c = c_s \cdot \alpha_s \cdot (1 - \alpha)$, and the opacity update is $\alpha = \alpha_s \cdot (1 - \alpha) + \alpha$, where $c_s$ is sample color, $\alpha_s$ is sample opacity, and $\alpha$ is accumulated opacity [S13, unofficial].
+ 
+ ### Mesh/Volume Depth Compositing
+-Mesh/Volume Depth Compositing is a compositing strategy ensuring meshes and volumes occlude each other correctly, supporting per-segment opacity [S13, unofficial].
+-
+-### Multi-channel Volume Rendering with GL_MAX
+-Multi-channel Volume Rendering with GL_MAX switches blend factors to $(GL\_ONE, GL\_ONE)$ and optionally enables GL_MAX blend equation to compute per-component max for multiple visible channels [S14, unofficial]. After drawing all visible channels, it restores blend factors to $(GL\_SRC\_ALPHA, GL\_ONE\_MINUS\_SRC\_ALPHA)$ and blend equation to GL\_FUNC\_ADD [S14, unofficial]. The parameter `self._use_gl_max` (bool, default True) controls this, with probing at init to handle drivers that reject GL_MAX (e.g., ANGLE on Windows) [S14, unofficial].
++Mesh/Volume Depth Compositing is a compositing strategy ensuring meshes and volumes occlude each other correctly, supporting per-segment opacity [S14, unofficial].
++
++### RGB Volume Rendering with Background Blending
++RGB Volume Rendering with Background Blending resolves the background color string or tensor into a tensor matching the composited RGB shape [S15, unofficial]. If `background_color` is `'random'`, it returns the predicted color without blending (treated as black background) [S15, unofficial]. If `'last_sample'`, it sets the background to the last sample's RGB value, supported only for non-packed samples [S15, unofficial]. The final color is computed as $comp\_rgb = comp\_rgb + background\_color \times (1.0 - accumulated\_weight)$ [S15, unofficial]. The `BACKGROUND_COLOR_OVERRIDE` parameter can override the specified background color [S15, unofficial].
++
++### Low-Resolution Composite Pass
++Low-Resolution Composite Pass samples the camera depth texture at the current UV using a point clamp sampler and converts to linear eye depth [S16, unofficial]. It gathers depth values from the LowResDepth texture at the current UV using a point clamp sampler, resulting in a float4 of neighbors [S16, unofficial]. It initializes minDist to the distance between the current depth and the first neighbor's linear eye depth, then loops through indices 1 to 3 to find the minimum distance [S16, unofficial]. If all distances are less than 0.1, it samples the LowResColor texture using a linear clamp sampler at the current UV; otherwise, it loads the color from LowResColor at the position determined by the UV transformed by LowResColor_TexelSize.zw and offset by -0.5, plus the GatherOffset corresponding to minIndex [S16, unofficial]. The `LowResColor_TexelSize` parameter contains texel size information, and `GatherOffsets` is a static integer array of size 4 containing offsets: int2(0, 1), int2(1, 1), int2(1, 0), int2(0, 0) [S16, unofficial].
++
++### Volume Rendering Blend Modes
++Volume Rendering Blend Modes controls compositing behavior via an integer `blendMode` parameter: 0=Composite, 1=Maximum Intensity, 2=Minimum Intensity, 3=Average Intensity, 4=Additive Intensity [S17, unofficial]. When `blendMode` is 3 or 4, scalar UI elements (IP Scalar Min/Max) are displayed; for all other modes, they are hidden [S17, unofficial]. The mapper's blend mode is set via `mapper.setBlendMode(blendMode)`, and the scalar range is initialized to $[0.0, 1.0]$ via `mapper.setIpScalarRange(0.0, 1.0)` when the blend mode is updated [S17, unofficial]. Scalar Min and Max are updated by calling `mapper.setIpScalarRange(newMin, currentMax)` and `mapper.setIpScalarRange(currentMin, newMax)` respectively [S17, unofficial].
+ 
+ ## Operating characteristics
+@@ -258,26 +293,28 @@
+ *   **Hardware:** Typically implemented as CUDA kernels for GPU acceleration, with thread blocks of size 256 and grid size $\lceil N_{\text{rays}} / 256 \rceil$ [S3, S7, unofficial].
+ *   **Strengths:** Differentiable, enabling end-to-end training of neural radiance fields; efficient early termination; supports both packed and unpacked layouts [S1, S3, unofficial].
+-*   **Limitations:** Gradient for depth is not propagated to sigmas [S4, S8, unofficial]; `'last_sample'` background color is not implemented for packed samples [S1, unofficial]; requires careful handling of numerical stability (e.g., eps in transmittance product) [S2, unofficial].
++*   **Limitations:** Gradient for depth is not propagated to sigmas [S4, S8, unofficial]; `'last_sample'` background color is not implemented for packed samples [S1, S15, unofficial]; requires careful handling of numerical stability (e.g., eps in transmittance product) [S2, unofficial].
+ *   **When to Use:** During the training phase of neural radiance fields or differentiable volume rendering where gradients with respect to density and color are needed [S1, unofficial].
+-*   **When Not to Use:** During inference/rendering where gradients are not needed, standard compositing is sufficient and faster [S1, unofficial].
+ 
+ ## Background
+ 
+-Training Ray Compositing originates from the need to train Neural Radiance Fields (NeRFs) and related implicit neural representations efficiently. The method was popularized by libraries such as `nerfacc` and implementations in `sdfstudio` [S1, unofficial]. It builds upon the foundational volume rendering equation by Kajiya [G] and the differentiable rendering techniques developed for NeRFs [G]. The specific CUDA kernel implementations for forward and backward passes are found in various open-source projects like `IDDR-NGP` [S8, unofficial] and `ngp_pl` [S3, unofficial].
++Training Ray Compositing originates from the need to train Neural Radiance Fields (NeRFs) and related implicit neural representations efficiently [S1, unofficial]. The method was popularized by libraries such as `nerfacc` and implementations in `sdfstudio` [S1, unofficial]. It builds upon the foundational volume rendering equation by Kajiya [G] and the differentiable rendering techniques developed for NeRFs [G]. The specific CUDA kernel implementations for forward and backward passes are found in various open-source projects like `IDDR-NGP` [S8, unofficial] and `ngp_pl` [S3, unofficial].
+ 
+ ## Sources
+ 
+-[S1] autonomousvision/sdfstudio, https://github.com/autonomousvision/sdfstudio, fetched 2026-10-26 (unofficial)
+-[S2] google/nerfies, https://github.com/google/nerfies, fetched 2026-10-26 (unofficial)
+-[S3] kwea123/ngp_pl, https://github.com/kwea123/ngp_pl, fetched 2026-10-26 (unofficial)
+-[S4] Fictionarry/ER-NeRF, https://github.com/Fictionarry/ER-NeRF, fetched 2026-10-26 (unofficial)
+-[S5] AlexSheldrick/density_bounded_ray_weights, https://github.com/AlexSheldrick/density_bounded_ray_weights, fetched 2026-10-27 (unofficial)
+-[S6] Linyou/taichi-ngp-renderer, https://github.com/Linyou/taichi-ngp-renderer, fetched 2026-10-27 (unofficial)
+-[S7] megvii-research/cv-master-ex, https://github.com/megvii-research/cv-master-ex, fetched 2026-10-27 (unofficial)
+-[S8] NeRF-Factory/IDDR-NGP, https://github.com/NeRF-Factory/IDDR-NGP, fetched 2026-10-27 (unofficial)
+-[S9] 3DSS: 3D Surface Splatting for Inverse Rendering, https://doi.org/10.48550/arxiv.2605.05876, fetched 2026-10-26 (unofficial)
+-[S10] llnl/rover, https://github.com/llnl/rover, fetched 2026-10-26 (unofficial)
+-[S11] Chapter 7 - Advanced Computer Graphics - VTK, https://examples.vtk.org/site/VTKBook/07Chapter7/, fetched 2026-10-29 (book)
+-[S12] Volume Rendering Volume Rendering. Lecture 21. Acknowledgements. These slides are collected from many sources. A particularly valuable source is the IEEE Visualization conference tutorials. Sources fr, https://www.slideserve.com/hayes-levine/volume-rendering-powerpoint-ppt-presentation, fetched 2026-10-25 (unofficial)
+-[S13] Volume rendering: progressive multiscale loading, sorted compositing, lighting and more from a histotomography fork (2.8 TB volume @ 16bits) - what, if anything, would be worth upstreaming?, https://github.com/google/neuroglancer/issues/1134, fetched 2026-10-26 (unofficial)
+-[S14] xwghua/clearvolume-plus, https://github.com/xwghua/clearvolume-plus, fetched 2026-10-26 (unofficial)+[S1] ashawkey/stable-dreamfusion, https://github.com/ashawkey/stable-dreamfusion, fetched 2026-10-26 (unofficial)
++[S2] autonomousvision/sdfstudio, https://github.com/autonomousvision/sdfstudio, fetched 2026-10-26 (unofficial)
++[S3] google/nerfies, https://github.com/google/nerfies, fetched 2026-10-26 (unofficial)
++[S4] kwea123/ngp_pl, https://github.com/kwea123/ngp_pl, fetched 2026-10-26 (unofficial)
++[S5] Fictionarry/ER-NeRF, https://github.com/Fictionarry/ER-NeRF, fetched 2026-10-26 (unofficial)
++[S6] AlexSheldrick/density_bounded_ray_weights, https://github.com/AlexSheldrick/density_bounded_ray_weights, fetched 2026-10-27 (unofficial)
++[S7] Linyou/taichi-ngp-renderer, https://github.com/Linyou/taichi-ngp-renderer, fetched 2026-10-27 (unofficial)
++[S8] megvii-research/cv-master-ex, https://github.com/megvii-research/cv-master-ex, fetched 2026-10-27 (unofficial)
++[S9] NeRF-Factory/IDDR-NGP, https://github.com/NeRF-Factory/IDDR-NGP, fetched 2026-10-27 (unofficial)
++[S10] 3DSS: 3D Surface Splatting for Inverse Rendering, https://doi.org/10.48550/arxiv.2605.05876, fetched 2026-10-26 (unofficial)
++[S11] llnl/rover, https://github.com/llnl/rover, fetched 2026-10-26 (unofficial)
++[S12] Chapter 7 - Advanced Computer Graphics - VTK, https://examples.vtk.org/site/VTKBook/07Chapter7/, fetched 2026-10-29 (book)
++[S13] Volume Rendering Volume Rendering. Lecture 21. Acknowledgements. These slides are collected from many sources. A particularly valuable source is the IEEE Visualization conference tutorials. Sources fr, https://www.slideserve.com/hayes-levine/volume-rendering-powerpoint-ppt-presentation, fetched 2026-10-25 (unofficial)
++[S14] Volume rendering: progressive multiscale loading, sorted compositing, lighting and more from a histotomography fork (2.8 TB volume @ 16bits) - what, if anything, would be worth upstreaming?, https://github.com/google/neuroglancer/issues/1134, fetched 2026-10-26 (unofficial)
++[S15] nerfstudio-project/nerfstudio, https://github.com/nerfstudio-project/nerfstudio, fetched 2026-10-26 (unofficial)
++[S16] Looooong/Unity-SRP-VXGI, https://github.com/Looooong/Unity-SRP-VXGI, fetched 2026-10-28 (unofficial)
++[S17] tarksalah1/Medical-Visualization-Using-VTK, https://github.com/tarksalah1/Medical-Visualization-Using-VTK, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,145 @@
+# Bartlett’s Method for Power Spectrum Estimation
+Also called: Bartlett's Method, Periodogram Averaging
+
+## Overview
+Bartlett’s method estimates the power spectrum of a procedural noise function by averaging periodograms computed from multiple independent instances of the noise [S1, S2]. It addresses the high variance of the standard periodogram, which is a noisy estimator because it behaves as a white noise process with a mean equal to the true power spectrum [S1, S2]. Unlike the [Chi-Square Goodness-of-Fit Test for Noise](17149-chi-square-goodness-of-fit-test-for-noise.md) which analyzes amplitude histograms, or the [Autocorrelation Periodicity Test](17150-autocorrelation-periodicity-test.md) which detects spatial periodicity, this method operates in the frequency domain to characterize spectral energy distribution [S1, S2].
+
+## How it works
+**Inputs:**
+- $N$ independent instances of the noise function, denoted $n_i(\mathbf{x})$ for $i = 0, \dots, N-1$.
+- Domain size $D$ (e.g., $M \times M$ pixels for 2D).
+- Optional: Boolean flag `isotropic` to trigger radial averaging.
+
+**Outputs:**
+- Estimated power spectrum $\hat{P}(\mathbf{k})$.
+- Individual periodograms $P_i(\mathbf{k})$ (for inspection).
+
+**Data Structures:**
+- `periodograms`: A 2D array of shape $(N, M, M)$ storing complex Fourier coefficients or magnitude-squared values.
+- `power_spectrum`: A 2D array of shape $(M, M)$ storing the averaged result.
+
+**Definitions:**
+- The periodogram $P_i(\mathbf{k})$ for instance $i$ at frequency $\mathbf{k}$ is defined as the magnitude squared of the Discrete Fourier Transform (DFT) of the noise instance:
+  $$ P_i(\mathbf{k}) = \left| \text{DFT}\{n_i(\mathbf{x})\}(\mathbf{k}) \right|^2 $$
+  where $\text{DFT}$ is the standard discrete Fourier transform [S1, S2].
+
+**Steps:**
+1. **Compute Periodograms:** For each instance $i$ from $0$ to $N-1$:
+   a. Sample the noise function $n_i(\mathbf{x})$ on a uniform grid of size $M \times M$.
+   b. Compute the DFT of the sampled grid.
+   c. Calculate the magnitude squared of the complex DFT coefficients to obtain $P_i(\mathbf{k})$.
+2. **Average Periodograms:** Compute the element-wise mean of all $N$ periodograms to obtain the raw power spectrum estimate:
+   $$ \hat{P}(\mathbf{k}) = \frac{1}{N} \sum_{i=0}^{N-1} P_i(\mathbf{k}) $$
+3. **Inspect:** Visualize both the individual periodograms $P_i(\mathbf{k})$ and the averaged estimate $\hat{P}(\mathbf{k})$ [S1, S2].
+4. **Radial Averaging (Optional):** If the noise function is isotropic, radially average $\hat{P}(\mathbf{k})$ to exploit rotational symmetry [S1, S2].
+   a. Map each frequency coordinate $\mathbf{k} = (k_x, k_y)$ to its radial distance $r = \|\mathbf{k}\|$.
+   b. Bin the values of $\hat{P}(\mathbf{k})$ by $r$.
+   c. Compute the mean value within each radial bin.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def bartlett_method_noise_spectrum(noise_instances, grid_size, isotropic=False):
+    """
+    Estimates the power spectrum using Bartlett's method.
+    
+    Args:
+        noise_instances: List of N 2D arrays (grid_size x grid_size) representing 
+                         independent samples of the noise function.
+        grid_size: Integer, dimension of the square grid (M).
+        isotropic: Boolean, if True, perform radial averaging.
+        
+    Returns:
+        power_spectrum: 2D array of shape (M, M) or 1D array if isotropic.
+        individual_periodograms: List of 2D arrays.
+    """
+    N = len(noise_instances)
+    periodograms = []
+    
+    # Step 1: Compute periodograms for each instance
+    for i in range(N):
+        # Compute DFT
+        # np.fft.fft2 computes the 2D discrete Fourier transform
+        fft_coeffs = np.fft.fft2(noise_instances[i])
+        # Compute magnitude squared
+        periodogram = np.abs(fft_coeffs) ** 2
+        periodograms.append(periodogram)
+        
+    # Step 2: Average periodograms
+    # Stack along a new axis and take mean
+    periodograms_array = np.array(periodograms)
+    power_spectrum = np.mean(periodograms_array, axis=0)
+    
+    # Step 4: Radial averaging if isotropic
+    if isotropic:
+        # Create coordinate grid
+        y, x = np.ogrid[:grid_size, :grid_size]
+        # Center the coordinates
+        cy, cx = grid_size // 2, grid_size // 2
+        # Calculate radial distance for each pixel
+        r = np.sqrt((x - cx)**2 + (y - cy)**2)
+        
+        # Bin the power spectrum by radius
+        # Max radius is roughly grid_size/2
+        max_r = grid_size / 2.0
+        num_bins = int(max_r) + 1
+        radial_spectrum = np.zeros(num_bins)
+        bin_counts = np.zeros(num_bins)
+        
+        # Assign each frequency component to a radial bin
+        # Use floor to map continuous radius to integer bin index
+        bin_indices = np.floor(r).astype(int)
+        # Clip indices to valid range
+        np.clip(bin_indices, 0, num_bins - 1, out=bin_indices)
+        
+        # Accumulate values and counts
+        # np.add.at is used for scatter-add operation
+        np.add.at(radial_spectrum, bin_indices, power_spectrum)
+        np.add.at(bin_counts, bin_indices, 1)
+        
+        # Avoid division by zero
+        bin_counts[bin_counts == 0] = 1
+        radial_spectrum /= bin_counts
+        
+        return radial_spectrum, periodograms
+        
+    return power_spectrum, periodograms
+```
+
+**Parameters:**
+- $N$ (number of instances): Not given in the sources. Larger $N$ reduces variance but increases computational cost.
+- Grid size $M$: Not given in the sources. Must be sufficient to resolve the frequency range of interest.
+
+**Edge Cases and Pitfalls:**
+- **Feature Loss:** Averaging periodograms removes noise but can also average out specific features present in individual instances, such as horizontal artifacts in Perlin noise [S1, S2].
+- **Anisotropy:** For noise functions with axis-aligned anisotropy (e.g., Perlin noise, Wavelet noise), radial averaging may obscure directional artifacts [S2].
+- **Implementation Errors:** Differences between expected and estimated statistics may reveal implementation mistakes in the noise function [S1, S2].
+
+## Subtopics
+
+### [Chi-Square Goodness-of-Fit Test for Noise](17149-chi-square-goodness-of-fit-test-for-noise.md)
+Analyzes amplitude distribution via histograms rather than frequency domain. Use when checking if noise values follow a Gaussian distribution.
+
+### [Autocorrelation Periodicity Test](17150-autocorrelation-periodicity-test.md)
+Detects spatial periodicity in the autocorrelation function. Use when checking for lattice artifacts or repetition.
+
+### [Band-Pass Test for Noise](17151-band-pass-test-for-noise.md)
+Evaluates the frequency content within specific bands. Use when verifying specific spectral characteristics like bandwidth.
+
+## Operating characteristics
+- **Time Complexity:** $O(N \cdot M^2 \log M)$ for computing $N$ periodograms of size $M \times M$ using FFT. Radial averaging adds $O(M^2)$.
+- **Memory Complexity:** $O(N \cdot M^2)$ to store individual periodograms if inspecting them, or $O(M^2)$ if accumulating on the fly.
+- **Strengths:** Provides a less noisy estimate of the power spectrum compared to a single periodogram [S1, S2]. Simple to implement using standard FFT libraries.
+- **Limitations:** High variance of individual periodograms requires many samples $N$ for a smooth estimate. Radial averaging assumes isotropy, which may not hold for all noise functions [S2].
+- **When to use:** When analyzing the spectral properties of procedural noise functions, particularly to verify isotropy or detect anisotropy [S1, S2].
+- **When not to use:** When computational resources are extremely limited and a rough estimate suffices, or when the noise is known to be highly anisotropic and radial averaging is desired.
+
+## Background
+Bartlett’s method is named after M. S. Bartlett [Bar78]. It is used in the analysis of procedural noise functions to provide insight into their statistical properties, such as differences between expected and estimated statistics, which can reveal implementation errors [S1, S2]. The method is also applicable to power spectrum estimation of Poisson disk distributions [S1, S2].
+
+## Sources
+[S1] A Survey of Procedural Noise Functions, https://doi.org/10.1111/j.1467-8659.2010.01827.x, fetched 2026-10-27
+[S2] PDF State of the Art in Procedural Noise Functions, https://www-sop.inria.fr/reves/Basilic/2010/LLCDDELPZ10/LLCDDELPZ10STARPNF.pdf, fetched 2026-10-27

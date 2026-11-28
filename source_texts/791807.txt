@@ -1,0 +1,217 @@
+Hello World~ 欢迎来到 Zerl'TA Blog。作为一名拥有多年3D美术底蕴的 Technical Artist，我在这里专注分享图形学算法、实时渲染前沿技术、Shader 开发与 AIGC 工作流实践，持续探索感性美学与理性代码的完美交融。
+
+体积云实时渲染解析 | Zerl'TA Blog
+搜索
+Ctrl K
+图形学
+美学
+AIGC
+札记
+Shows
+Now
+体积云实时渲染解析
+发布于 2026-03-15 · 更新于2026-03-15
+2:33阅读
+体积渲染RayMarching
+笔者 3 月份参考不同体积云项目和各种论文实现了一套基于物理的体积云 Unity URP渲染系统，现在就一些核心实现进行梳理。
+理论细节见下述链接：
+Horizon: Zero Dawn 体积云系统解析
+概述
+体积云渲染的核心在于模拟光线与云层介质（微小水滴或冰晶）之间的物理交互。通过 体积光线步进（Volumetric Raymarching），我们可以将复杂的物理现象简化为两个关键指标的计算：
+透射率（Transmittance）：衡量光线穿过云层后剩余能量的比例。它遵循比尔-朗伯定律（Beer-Lambert Law）。随着云层密度或步进距离的增加，能量呈指数级衰减，产生“吸收”和“遮挡”的效果。
+散射（Scattering）：云层并非只是吸收光线，它还会被光源照亮。
+内散射（In-Scattering）：外界光源（如太阳）进入云层内部，经过多次碰撞后转向观察者的方向，使云朵看起来洁白或发光。
+相函数（Phase Function）：决定光线散射的方向性（例如前向散射会产生明亮的边缘晕光）。
+在光线从点 （远端）步进到点 （观察点）的过程中，最终亮度由两部分组成：
+背景光的衰减：背景色 累积透射率。
+散射光的累积：每一步步进点产生的散射光 该点到相机的透射率。
+简要的渲染方程可以理解为：
+```
+1
+```
+```
+float3 finalColor = transmittance * skyBakgroundColor + scattering;
+```
+主要渲染流程伪代码如下：
+RenderCloud
+```
+123456789101112131415161718192021222324252627282930313233343536373839404142434445464748495051525354555657585960616263646566676869707172737475767778
+```
+```
+// See http://www.pbr-book.org/3ed-2018/Volume_Scattering/Phase_Functions.htmlfloat hgPhase(float g, float cosTheta){  float numer = 1.0f - g * g;  float denom = 1.0f + g * g + 2.0f * g * cosTheta;  return numer / (4.0f * kPI * denom * sqrt(denom));}float dualLobPhase(float g0, float g1, float w, float cosTheta){  return mix(hgPhase(g0, cosTheta), hgPhase(g1, cosTheta), w);}//================================= Render Cloud =================================float transmittance = 1.0f;vec3 scattering = vec3(0.0f);vec3 rayHitPos = vec3(0.0);float rayHitPosWeight = 0.0;vec3 stepPosition = a;while(a->b){  //--------------------- Compute transmittance ----------------------  float stepCloudDensity = sampleCloud(stepPosition); // 采样体积云的密度  float stepTransmittance = exp(-stepCloudDensity * dt); //比尔定律（Beer's Law）  //------------------------------------------------------------------  //------------------------大气透视 ------------------------------  rayHitPos += samplePos * transmittance;  rayHitPosWeight += transmittance;    //----------------计算太阳可见度 Sun Visibility ------------------------  //  float sunPhase = dualLobPhase(0.5, -0.5, 0.2, -VoL);  vec3 sunVisStep = stepPosition;  float sunVisibility = 1.0f;  for(uint j = 0; j < kStepLight; j++)  {    float stepLitDensity = sampleDensity(sunVisStep);    sunVisibility *= exp(-stepLitDensity * dStepLight);    sunVisStep += dStepLight * sunDirection;  }    //--------------------- Scattering -----------------------------  vec3 stepScattering = sunColor * sunAtmosphereTransmittance * sunPhase * sunVisibility;  vec3 sigmaS = vec3(stepCloudDensity);  // b->P transmittance` in step.  // NOTE: need * (sigmaS * dt) optical depth.  // scattering += stepScattering * transmittance * (sigmaS * dt);  vec3 sigmaS = vec3(stepCloudDensity);  const float sigmaA = 0.0;  vec3 sigmaE = max(vec3(1e-8f), sigmaA + sigmaS);  vec3 sactterLitStep = stepScattering * sigmaS;  sactterLitStep = transmittance * (sactterLitStep - sactterLitStep * stepTransmittance);  sactterLitStep /= sigmaE;  scattering += sactterLitStep;  //寒霜引擎 2017 scattering积分公式  //------------------ Compute transmittance ---------------  stepPosition += dt * dir;  transmittance *= stepTransmittance;}//------------------------大气透视 --------------------------rayHitPos /= rayHitPosWeight;//------------------------FinalColor---------------// transmittance b->avec3 finalColor = transmittance * skyBakgroundColor + scattering;//=================== End ================================
+```
+注：寒霜引擎 (Frostbite) 在 2017 年提出的能量守恒解析积分公式
+一、 云的形态与密度建模 (Procedural Density Modeling)
+体积云并非使用网格模型，而是通过数学公式在三维空间中实时“雕刻”出的密度场。项目通过多层数据叠加来定义任意一点的云密度：
+宏观分布与天气图 (Weather Map & Curl Noise)： ``，云层的分布由一张 2D 的天气图（Weather Texture）控制，其 R 通道定义了基础覆盖率。为了打破分布的均匀感，引入了 Curl Noise（旋涡噪声）进行低频的局部扰动，使云团分布更加自然。
+基础形状 (Base Shape)： 使用预计算的 3D Perlin-Worley 噪声纹理。Perlin 噪声提供连绵的起伏感，Worley 噪声产生细胞状的团块，两者结合构成了积云厚重的大尺度轮廓。
+边缘侵蚀与高度调制 (Detail Erosion & Height Gradient)： 高频的 3D Worley 噪声用于刻画云的边缘细节。这里采用高度变量（normalizeHeight）：在云层底部，细节噪声正向叠加，增加云底的厚重与蓬松感；而在高空，噪声被反转（1 - detailNoiseComposite），从而“侵蚀”出破碎、絮状的卷云边缘。
+云层垂直剖面： 通过定义不同高度下的密度映射，使得云底（010%）快速变厚，云顶（80%100%）平滑淡出，形成了典型的积雨云“砧状”结构。
+这里的实现相对于 地平线方案有一定简化，后续可以细化。
+SampleCloudDensity
+```
+123456789101112131415161718192021222324252627282930313233343536373839404142434445464748495051525354555657585960616263
+```
+```
+float remap(float value, float orignalMin, float orignalMax, float newMin, float newMax){	return newMin + (saturate((value - orignalMin) / (orignalMax - orignalMin)) * (newMax - newMin));}float SampleCloudDensity(float3 worldPos, float normalizeHeight){    const float kCoverage = frameData.sky.cloudConfig.CloudCoverage; // 全局云覆盖率 [0,1]    const float kDensity = frameData.sky.cloudConfig.CloudDensity; // 全局云密度缩放    const float kCloudNoiseScale = frameData.sky.cloudConfig.CloudNoiseScale;    const float3 windDirection = normalize(frameData.sky.cloudConfig.CloudDirection); // 风向（归一化）    const float cloudSpeed = frameData.sky.cloudConfig.CloudSpeed; // 风速    float3 posMeter = worldPos + windDirection * normalizeHeight * 500.0f;    float3 windOffset = (windDirection + float3(0.0, 0.1, 0.0)) * _Time.y * cloudSpeed;    float3 posKm = posMeter * 0.001; // 转换为千米，便于全局噪声尺度采样          float2 sampleUv = kCloudNoiseScale * posKm.xz * frameData.sky.cloudConfig.CloudWeatherUVScale * 0.01 + windOffset.xz * 0.001; // 天气图采样UV，加入风速偏移    float4 weatherValue = inWeatherTexture.SampleLevel(linearRepeatSampler, sampleUv, 0);    // --- 局部覆盖率扰动 ---    // 用大尺度 Curl 噪声产生云团疏密变化，避免覆盖率过于均匀    float localCoverage = inCloudCurlNoise.SampleLevel(linearRepeatSampler,(kCloudNoiseScale * _Time.y * cloudSpeed * 50.0 + posMeter.xz) * 0.000001 + 0.5, 0).x;    localCoverage = saturate(localCoverage * 3.0 - 0.75) * 0.2; // 压缩到小幅扰动范围    // 最终覆盖率 = 全局覆盖率 × (局部扰动 + 天气图覆盖率)    float coverage = saturate(kCoverage * (localCoverage + weatherValue.x));    // --- 高度梯度遮罩 ---    // 云底（0~10%）由薄到厚，云顶（10%~80%）由厚渐薄，使云层呈典型砧状或积云轮廓    float gradienShape = remap(normalizeHeight, 0.00, 0.10, 0.1, 1.0) * remap(normalizeHeight, 0.10, 0.80, 1.0, 0.2);    // --- 基础噪声采样 ---    float cloudBasicNoiseScale = frameData.sky.cloudConfig.CloudBasicNoiseScale;    float basicNoise = inBasicNoise.SampleLevel(sampler_TrilinearRepeat, kCloudNoiseScale * posKm * cloudBasicNoiseScale + windOffset, 0).r;    float basicCloudNoise = gradienShape * basicNoise; // 高度梯度调制基础噪声    // basicCloudNoise =basicNoise;    // 使用 remap 将基础噪声在覆盖率阈值以下裁掉，实现硬边界云团    float basicCloudWithCoverage = coverage * remap(basicCloudNoise, 1.0 - coverage, 1, 0, 1);    // --- 细节噪声采样 ---    // 细节噪声偏移方向与基础噪声相反，速度更慢，模拟云边缘的细碎蓬松感    float3 sampleDetailNoise = posKm - windOffset * 0.15;    float cloudDetailNoiseScale = frameData.sky.cloudConfig.CloudDetailNoiseScale;    float detailNoiseComposite = inDetailNoise.SampleLevel(linearRepeatSampler, kCloudNoiseScale * sampleDetailNoise * cloudDetailNoiseScale, 0).r;    // float detailNoiseComposite =SAMPLE_TEXTURE2D_X(inDetailNoise,linearRepeatSampler,kCloudNoiseScale * sampleDetailNoise * cloudDetailNoiseScale).r;    // 低高度处用正向细节（增加蓬松），高处翻转（产生卷云/薄云效果）    float detailNoiseMixByHeight = 0.2 * lerp(detailNoiseComposite, 1 - detailNoiseComposite, saturate(normalizeHeight * 10.0));    // --- 密度形状遮罩 ---    // 云底（0~10%）和云顶（80%~100%）平滑淡出，中间层密度最高    float densityShape = saturate(0.01 + normalizeHeight * 1.15) * kDensity *        remap(normalizeHeight, 0.0, 0.1, 0.0, 1.0) *        remap(normalizeHeight, 0.8, 1.0, 1.0, 0.0);    float cloudDensity = remap(basicCloudWithCoverage, detailNoiseMixByHeight, 1.0, 0.0, 1.0);    float density = saturate(pow(cloudDensity * densityShape, 2.0));    density = pow((saturate(density)), 2);    return density;}
+```
+二、 基于物理的体积光照 (Volumetric Lighting Model)
+云的光照基于辐射传输方程（Radiative Transfer Equation），但完整求解代价极高，我们采用了多种极其精妙的近似算法来模拟光线在水滴微粒间的复杂散射。
+改进的比尔定律 (Beer-Lambert Law)：
+纯 Beer’s Law光线衰减遵循 。而在工程实践中，为了改善云层边缘过渡死板的问题，引入了 Siggraph 2017 提出的改良版公式：max(exp(-opticalDepth), exp(-opticalDepth * 0.25) * 0.7)，让云层边缘更具透光性。：
+```
+123456
+```
+```
+// Siggraph 2017 Decima 引擎改良：// 将标准 Beer 与低权重 Beer 混合，在透射率不为零处保留一定最小亮度float stepTransmittance = max(  exp(-opticalDepth),  exp(-opticalDepth * 0.25) * 0.7);
+```
+双叶相函数 (Dual-Lobe Henyey-Greenstein)：
+真实云朵同时具备强烈的前向散射和一定的后向散射。系统混合了两个 HG 相函数：强前向散射产生云边缘面对太阳时的“银边”（Silver Lining）高光；后向散射则保留了云层背光面的柔和体积感。
+```
+123456789101112
+```
+```
+// See http://www.pbr-book.org/3ed-2018/Volume_Scattering/Phase_Functions.htmlfloat hgPhase(float g, float cosTheta){	float numer = 1.0f - g * g;	float denom = 1.0f + g * g + 2.0f * g * cosTheta;	return numer / (4.0f * kPI * denom * sqrt(denom));}float dualLobPhase(float g0, float g1, float w, float cosTheta){	return lerp(hgPhase(g0, cosTheta), hgPhase(g1, cosTheta), w);}
+```
+粉末效应 (Powder Effect)：
+粉末效应是指云层边缘因为多重散射较弱，反而看起来发黑的物理现象； 由于单次散射在浓密云层中会导致核心过度黑暗，地平线引入了 Powder Effect 来模拟多次散射带来的内部亮度。项目中基于光照角度和深度概率计算出该修正因子，使得云层内部看起来更加“通透”和“蓬松”。
+```
+1234567891011121314151617181920
+```
+```
+// cloud_common.hlsl — Powder Effectfloat powderEffectNew(float depth, float height, float VoL){  float r = VoL * 0.5 + 0.5;  r = r * r;  height = height * (1.0 - r) + r;  return depth * height;}float powderEffect;{    // 深度概率：密度越高、偏离中间高度越远，粉末效应越强    float depthProbability = pow(        clamp(stepCloudDensity * 10.0, 0.0, 1.0),         remap(normalizeHeight, 0.3, 0.85, 0.5, 2.0));    depthProbability += 0.05;    // 垂直概率：云底（0.07~0.22 归一化高度）粉末效应最强    float verticalProbability = pow(remap(normalizeHeight, 0.07, 0.22, 0.1, 1.0), 0.8);    powderEffect =  powderEffectNew(depthProbability, verticalProbability, VoL);}
+```
+视觉效果：粉末效应让积云底部呈现真实的深色平台，而云边缘（侧光）产生”糖粉”般的细腻明暗变化。CloudPowderScale和CloudPowderPow两个参数可在 Inspector 实时调节。
+多重散射积分 (Multiple Scattering Octaves)
+真实云的白色来自光在无数水滴间的多重散射。单次散射会让云看起来过暗，多重散射近似是解决方案。
+本项目采用基于层级（Octaves）的经验模型：每一级散射使得消光系数呈指数降低（光遇到的阻力变小）。同时，利用能量守恒积分替代了简单的步进累加，大幅消除了噪点瑕疵。
+```
+12345678910111213141516171819202122232425
+```
+```
+// cloud_common.hlsl — 多重散射预计算float sigmaS = stepCloudDensity;         // 散射系数float sigmaE = max(sigmaS, 1e-8f);       // 衰减系数（云中无吸收，衰减=散射）scatteringCoefficients[0] = sigmaS * CloudAlbedo;extinctionCoefficients[0] = sigmaE;float MsExtinctionFactor = CloudMultiScatterExtinction; // 默认 0.5float MsScatterFactor    = CloudMultiScatterScatter;    // 默认 0.5// 预计算各 Octave 参数（平方级指数衰减）for (int ms = 1; ms < kMsCount; ms++) {  extinctionCoefficients[ms] = extinctionCoefficients[ms-1] * MsExtinctionFactor;  scatteringCoefficients[ms] = scatteringCoefficients[ms-1] * MsScatterFactor;  MsExtinctionFactor *= MsExtinctionFactor; // 平方加速衰减  MsScatterFactor    *= MsScatterFactor;}// 同时采样垂直方向的环境光贡献（地面反弹光）if (CloudEnableGroundContribution != 0) {  participatingMediaAmbient = GetLightTransmittance(    samplePos, float3(0, 1, 0), -1, kSkyMsExition  );}
+```
+物理解释：弹射次数越多（ms 越大），光感受到的”阻力”越小——这正解释了为什么厚云的边缘由于多次内部折射而透亮。kMsCount（通常 2–3）是性能与质量的权衡旋钮。
+空气透视融合 (Aerial Perspective)
+最后，利用步进累加出的深度值，采样大气散射预计算的 3D LUT，将大气雾的颜色与云层混合，使云完美融入天际线，并在 Opaque 物体前进行正确的深度剔除与 Alpha 预乘合成。
+GLSL
+```
+1234567891011121314151617181920212223242526272829303132333435363738394041424344
+```
+```
+if (rayHitPosWeight > 0.0f){  rayHitPos /= rayHitPosWeight; // 计算加权平均云深度位置  //  //     // 将命中位置转换回相机空间以求取屏幕 Z 值，方便与其他对象正确遮挡  float3 rayHitInRender = convertToCameraUnit(rayHitPos - float3(0.0, earthRadius, 0.0));  float4 rayInH = mul(_PreviousCameraVP, float4(rayHitInRender, 1.0)); // 矩阵乘法改为 mul()  cloudZ = rayInH.z / rayInH.w ;  // cloudZ =1.0;  rayHitPos -= worldPos;  float rayHitHeight = length(rayHitPos);  {    float dis = length(rayHitPos *1000.0f - _WorldSpaceCameraPos);    // 体素 slice 计算    float dis01 = saturate(dis / _AerialPerspectiveDistance);    float dis0Z = dis01 * (_AerialPerspectiveVoxelSize.z - 1); // [0 ~ SizeZ-1]    float slice = floor(dis0Z);    float weight =1.0;    if (slice < 0.5)    {      weight = saturate(slice *2.0);      slice =0.5;    }    float nextSlice = min(slice + 1, _AerialPerspectiveVoxelSize.z - 1);    float lerpFactor = dis0Z - floor(dis0Z);    uv.x /= _AerialPerspectiveVoxelSize.x;    // 采样 AerialPerspectiveVoxel    float2 uv1 = float2(uv.x + slice / _AerialPerspectiveVoxelSize.z, uv.y);    float2 uv2 = float2(uv.x + nextSlice / _AerialPerspectiveVoxelSize.z, uv.y);    float4 data1 = SAMPLE_TEXTURE2D(_aerialPerspectiveLut, sampler_LinearClamp, uv1);    float4 data2 = SAMPLE_TEXTURE2D(_aerialPerspectiveLut, sampler_LinearClamp, uv2);    float4 airPerspective =weight * lerp(data1, data2, lerpFactor);    // 将大气雾的颜色与云的颜色进行混合    airPerspective.a =saturate(airPerspective.a -0.6f);    scatteredLight = scatteredLight * (1.0 - airPerspective.a) + airPerspective.rgb * (1.0 - transmittance);    // scatteredLight =  airPerspective.rgb   * (1.0 - airPerspective.a) + scatteredLight * (1.0 - transmittance);  }}
+```
+三、 渲染管线与性能优化 (Pipeline & Optimization)
+这套渲染流程执行在渲染天空盒后，包含了 3Pass。同时因为纯粹的光线步进开销极大，这套方案在 Unity URP 中的工程实现展现了激进的优化策略。
+Cloud Marching
+三级 Early Exit
+```
+12345678
+```
+```
+// 级别 1：射线求交阶段 — 完全不命中云层，直接返回if (bEarlyOutCloud) return half4(0, 0, 0, 1);// 级别 2：密度采样阶段 — 基础形状为零，跳过高频细节采样if (basicCloudWithCoverage <= 0.0) return 0.0; // 在 SampleCloudDensity 内// 级别 3：步进主循环 — 透射率极低，云已不透明，终止步进if (transmittance <= 0.001) break;
+```
+球面相交与自适应步长
+系统构建了一个包裹星球的大气球壳。发射射线时，首先通过hitSphereInside/hitSphereOutside精确计算射线进入和离开云层的距离，严格限制步进范围。向太阳步进采样阴影时，步长（stepL）会成倍增加，快速跳出云层以节省算力。
+GLSL
+```
+1234567891011121314151617181920212223242526272829303132333435363738394041424344454647484950515253545556575859606162636465666768697071
+```
+```
+// ==========================================// 第一阶段：射线与云层球体包围盒求交 (Ray-Sphere Intersection)// ==========================================float tMin; // 射线进入云层的距离float tMax; // 射线穿出云层的距离bool bEarlyOutCloud = false; // 是否可以直接跳过云层渲染{    if (viewHeight < radiusCloudStart)    {        // 1. 相机在云层下方 (地面上)        if (hitSphereNearest(CameraPosWSEarthKm, worldDir, earthRadius) > 0.0)        {            // 射线打到了地面，提前结束（比如低头看地）            bEarlyOutCloud = true;        }        // 计算与云层下边缘和上边缘的交点        tMin = hitSphereInside(CameraPosWSEarthKm, worldDir, radiusCloudStart);        tMax = hitSphereInside(CameraPosWSEarthKm, worldDir, radiusCloudEnd);    }    else if (viewHeight > radiusCloudEnd)    {        // 2. 相机在云层上方 (太空中)        float2 tEnd = float2(0.0, 0.0);        if (!hitSphereOutside(CameraPosWSEarthKm, worldDir, radiusCloudEnd, tEnd))        {            // 射线完全没碰到云层外边缘，提前结束（比如抬头看宇宙）            bEarlyOutCloud = true;        }        else        {            float2 tStartOuter = float2(0.0, 0.0);            if (hitSphereOutside(CameraPosWSEarthKm, worldDir, radiusCloudStart, tStartOuter))            {                // 射线穿过了整个云层（从上往下看，穿透上下边缘）                tMin = tEnd.x;                tMax = tStartOuter.x;            }            else            {                // 射线只是擦过了云层外边缘，没有触及内边缘（视线掠角）                tMin = tEnd.x;                tMax = tEnd.y;            }        }    }    else    {        // 3. 相机就在云层内部        float tHitStart = hitSphereNearest(CameraPosWSEarthKm, worldDir, radiusCloudStart);        if (tHitStart > 0.0)        {            // 视线向下看，打到云底            tMax = tHitStart;        }        else        {            // 视线向上看，打到云顶            tMax = hitSphereInside(CameraPosWSEarthKm, worldDir, radiusCloudEnd);        }        tMin = 0.0f; // 起点就是相机位置    }    // 钳制负值    tMin = max(tMin, 0.0);    tMax = max(tMax, 0.0);    // 如果交点错误，或者云层离相机太远超过了最大追踪距离，则跳过    if (tMax <= tMin || tMin > (frameData.sky.cloudConfig.CloudTracingStartMaxDistance))    {        bEarlyOutCloud = true;    }}
+```
+蓝噪声抖动 (Blue Noise Dithering)
+射线步进的起始位置加入了一个微小的蓝噪声偏移。这把严重的光栅化断层（Banding）打散成了高频的细碎噪点，极大地提高了视觉质量，并为后续的时域抗锯齿做准备。
+```
+123456789101112131415
+```
+```
+// Offset retarget for new seeds each frameuint2 offset = uint2(float2(0.754877669, 0.569840296) * (frameData.frameIndex.x) * uint2(_ScreenParams.xy));uint2 pixelCoord = uint2(uv * _ScreenParams.xy);uint2 offsetId = pixelCoord + offset;offsetId.x = offsetId.x % BLUE_SIZE;offsetId.y = offsetId.y % BLUE_SIZE;float blueNoise = inBlueNoise.SampleLevel(linearRepeatSampler, offsetId / BLUE_SIZE, 0).r;const uint stepCountUnit = frameData.sky.cloudConfig.CloudMarchingStepNum;const float stepCount = float(stepCountUnit);float stepT = (tMax - tMin) / stepCount + 0.001; // 计算单步步长float sampleT = tMin + 0.001 * stepT; // 加上一个微小的偏移，避免自相交// 结合蓝噪声进行起点抖动，把严重的 Banding 变成细微的 NoisesampleT += stepT * blueNoise;
+```
+锥形光照采样
+直接向太阳方向步进 32+ 次代价极高，锥形采样用 6 次 + 递增步长 近似：
+```
+12345678910111213
+```
+```
+// cloud_common.hlsl — GetLightTransmittance()// 步长按倍数增加（CloudLightStepMul 默认 2.0）// 近处精确，远处快速跳出云层float d     = stepL * 0.5;                   // 中心采样偏移float stepL = CloudLightBasicStep;           // 初始步长（默认 100m）for (uint j = 0; j < kStepLight; j++) {     // kStepLight = 6  float3 samplePosKm = posKm + sunDirection * d;  extinctionAccumulation[0] += SampleCloudDensity(...) * stepL;  d     += stepL;  stepL *= kStepLMul;  // 步长按倍数增大，越往光源越粗糙}
+```
+大气透射率 LUT 插值优化
+大气透射率的完整求解需要对 LUT 进行 per-step 采样，关键优化：只在起点和终点各采样一次，循环内线性插值：
+```
+12345678910
+```
+```
+// 循环外：仅采样两端（开销集中在此）float3 atmosphereTransmittance0 = inTransmittanceLut.SampleLevel(...); // tMinfloat3 atmosphereTransmittance1 = inTransmittanceLut.SampleLevel(...); // tMax// 循环内：MAD 指令，极低开销float3 atmosphereTransmittance = lerp(  atmosphereTransmittance0,  atmosphereTransmittance1,  saturate(sampleT / marchingDistance));
+```
+Cloud Reconstruction Pass
+时间重投影与时域重建 (Temporal Reconstruction) 是系统性能的核心。主光线步进仅在 1/4 分辨率 下执行。在全分辨率合成阶段，将 1/4 低分辨率 的当前帧云层渲染结果，结合全分辨率的历史帧，通过时间重投影（Temporal Reprojection）、Bayer 矩阵分帧更新和3x3 邻域方差裁剪（AABB Clipping），重建出平滑、无拖尾的全分辨率云层图像。
+如果发现深度突变（如云边缘快速移动），则立刻丢弃历史缓冲防止拖尾残影,相当于 16 帧渲染完一次体积云。
+核心算法流程解析
+第一步：运动向量与历史 UV 计算
+原理：利用当前像素的屏幕坐标uv和深度curDepthZ，反推出世界空间坐标worldPosCur。
+重投影：将世界坐标乘以上一帧的 VP 矩阵 (_PreviousCameraVP)，计算出该像素在上一帧屏幕上的位置uvPrev。
+有效性检测：检查uvPrev是否在屏幕范围内[0, 1]，且当前帧没有发生相机切换（bCameraCut）。如果不满足，则判定历史失效。
+第二步：深度断层剔除 (Anti-Ghosting)
+代码：if (abs(preDepthZ - curDepthZ) > 0.05)
+作用：非常关键的防拖尾策略。当云层边缘移动过快，或者前后景发生遮挡时，当前深度与历史深度差异过大，此时强行混合会产生严重的残影（Ghosting）。遇到这种情况，直接丢弃历史帧，100% 使用当前帧数据。
+第三步：Bayer 矩阵交错更新 (Temporal Upsampling)
+原理：为了节省性能，当前帧只在 1/4 分辨率下渲染。代码通过一个 的 Bayer 矩阵（kBayerMatrix16），将全分辨率屏幕划分为 的区块。
+策略：每帧在 的区块中，只有 1 个像素（bUpdateEvaluate为 true 时）会执行高代价的 邻域采样和完整的 TAA 混合逻辑。这意味着一个像素完整的物理更新周期是 16 帧。
+第四步：3x3 邻域方差裁剪 (Variance Clipping)
+触发条件：当轮到当前像素更新时（bUpdateEvaluate == true）。
+过程：
+统计量计算
+加权求和：以高斯权重（）对当前帧低分辨率图像进行 邻域采样。
+期望与标准差：
+颜色均值(Ex)：
+颜色平方的均值(Ex2)：
+标准差(Dev)：
+构建颜色包围盒（AABB）：
+注意：代码中boxSize = 2.5是一个经验参数。值越小，抗拖尾越强（但易闪烁）；值越大，画面更稳（但易产生鬼影）。
+将历史颜色 **preColor** 限制（Clamp）在这个包围盒内。
+```
+12
+```
+```
+float4 clampColorHistory = clamp(preColor, nmin, nmax);finalColor = lerp(clampColorHistory, curColor, 0.5);
+```
+目的：确保历史颜色不会偏离当前帧邻域颜色太多，这是 TAA 算法中消除残影的核心技术。最后将 Clamp 后的历史颜色与当前颜色按 5:5 混合（lerp(..., 0.5)）。
+第五步：EMA 滤波平滑 (防马赛克/噪点)
+触发条件：未轮到当前像素更新时。
+代码：finalColor = lerp(preColor, curColor, 0.03)
+作用：即使像素这帧不进行完整的方差裁剪计算，也强制拉取 3% 的当前帧颜色进行指数移动平均（EMA）融合。
+亮点：如果仅依靠 Bayer 矩阵更新，相机静止时画面容易卡在旧状态，产生明显的点状抖动（Stippling）或棋盘格马赛克。这 3% 的微小冲刷可以持续柔和地刷新画面，提升静止画面的平滑度。
+EMA，全称 Exponential Moving Average（指数移动平均），是一种在序列数据中极其常用的平滑滤波算法。它的核心思想是：给予近期的数据更高的权重，而历史数据的权重会随着时间推移呈“指数级”衰减。
+与简单的算术平均（SMA，把所有历史数据加起来除以数据个数）不同，EMA 认为“越老的数据参考价值越低，越新的数据越能反映当前状态”。
+数学公式与原理
+EMA 的计算是一个不断迭代的过程，它的标准数学公式如下：
+：当前时刻计算出的 EMA 值。
+：当前时刻获取的新数据（比如当前帧的颜色、当天的股价）。
+：上一时刻的 EMA 值（代表了历史数据的累积）。
+：平滑系数（Smoothing Factor），取值范围在 到 之间。它决定了“新数据”在当前结果中占多大比重。
+总的来说 Cloud Reconstruction Pass 平衡了渲染开销与画面质量。它通过降低每帧的实际渲染像素数（1/4），利用时间维度的积累（History）和空间维度的校验（3x3 Variance Clipping）来弥补细节，是目前主流 3D 游戏引擎处理体积云、体积雾等昂贵效果的标准范式。
+CloudReconstructionPass
+```
+123456789101112131415161718192021222324252627282930313233343536373839404142434445464748495051525354555657585960616263646566676869707172737475767778798081828384858687888990919293949596979899100101102103104105106107108109110111
+```
+```
+// --- 纹理与采样器声明 ---// 1/4 分辨率输入 (来自 Pass 0)TEXTURE2D(inCloudRenderTexture);                            SAMPLER(sampler_inCloudRenderTexture);TEXTURE2D(inCloudDepthTexture);                             SAMPLER(sampler_inCloudDepthTexture);// 全分辨率历史帧输入 (来自上一帧的 Pass 1 结果)TEXTURE2D(inCloudReconstructionTextureHistory);             SAMPLER(sampler_inCloudReconstructionTextureHistory);TEXTURE2D(inCloudDepthReconstructionTextureHistory);        SAMPLER(sampler_inCloudDepthReconstructionTextureHistory);// MRT 输出结构struct FragmentOutput{  half4 color : SV_Target0;  float depth : SV_Target1;};FragmentOutput fragReconstruct(Varyings IN){  FragmentOutput output;  float2 uv = IN.texcoord;  int2 texSize = int2(_ScreenParams.xy);  int2 workPos = int2(uv * texSize);  // 手动计算 1/4 分辨率的 Texel Size，确保 3x3 采样准确  float2 texelSizeQuarter = 4.0 / _ScreenParams.xy;  float curDepthZ = SAMPLE_TEXTURE2D(inCloudDepthTexture, sampler_PointClamp, uv).r;  half4 curColor = SAMPLE_TEXTURE2D(inCloudRenderTexture, sampler_LinearClamp, uv);  // 3. 历史重投影  float3 worldPosCur = ComputeWorldSpacePosition(uv, curDepthZ, UNITY_MATRIX_I_VP);  float4 projPosPrev = mul(_PreviousCameraVP, float4(worldPosCur, 1.0));  float2 uvPrev = (projPosPrev.xy / projPosPrev.w) * 0.5 + 0.5;  bool bCameraCut = frameData.bCameraCut != 0;  bool bPrevUvValid = all(uvPrev >= 0.0 && uvPrev <= 1.0) && !bCameraCut;  half4 finalColor = half4(0, 0, 0, 0);  float finalDepth = curDepthZ;  if (bPrevUvValid)  {    float preDepthZ = SAMPLE_TEXTURE2D(inCloudDepthReconstructionTextureHistory, sampler_PointClamp, uvPrev).r;    half4 preColor = SAMPLE_TEXTURE2D(inCloudReconstructionTextureHistory, sampler_LinearClamp, uvPrev);    uint bayerIndex = frameData.frameIndex.x % 16;    int2 bayerOffset = int2(kBayerMatrix16[bayerIndex] % 4, kBayerMatrix16[bayerIndex] / 4);    int2 workDeltaPos = workPos % 4;    bool bUpdateEvaluate = (workDeltaPos.x == bayerOffset.x) && (workDeltaPos.y == bayerOffset.y);    // 将深度判断提到外面。云边缘移动产生严重深度断层时，立刻丢弃历史，防止拖尾残影    if (abs(preDepthZ - curDepthZ) > 0.05)    {      finalColor = curColor;      finalDepth = curDepthZ;    }    else if (bUpdateEvaluate)    {      // 轮到当前像素更新，执行完整的 3x3 邻域方差裁剪      finalDepth = curDepthZ;      float wsum = 0.0;      float4 vsum = 0.0;      float4 vsum2 = 0.0;      for (int y = -1; y <= 1; ++y)      {        for (int x = -1; x <= 1; ++x)        {          float2 neighborUv = uv + texelSizeQuarter * float2(x, y);          float4 neigh = SAMPLE_TEXTURE2D(inCloudRenderTexture, sampler_PointClamp, neighborUv);          float w = exp(-0.75 * (x * x + y * y));          vsum += neigh * w;          vsum2 += neigh * neigh * w;          wsum += w;        }      }      float4 ex = vsum / wsum;      float4 ex2 = vsum2 / wsum;      float4 dev = sqrt(max(ex2 - ex * ex, 0.0));      float boxSize = 2.5;      float4 nmin = ex - dev * boxSize;      float4 nmax = ex + dev * boxSize;      float4 clampColorHistory = clamp(preColor, nmin, nmax);      finalColor = lerp(clampColorHistory, curColor, 0.5);    }    else    {      // 消除点状纹的ticker。      // 即便没轮到更新，也微微拉取 3% 的当前帧颜色(EMA 滤波)。      // 这样在相机静止时，历史帧会被持续柔和地冲刷，防止像素卡在旧状态形成马赛克。      finalColor = lerp(preColor, curColor, 0.03);       finalDepth = preDepthZ;    }  }  else  {    // 历史失效（如屏幕边缘新出现的云）    finalColor = curColor;    finalDepth = curDepthZ;  }  output.color = finalColor;  output.depth = finalDepth;  return output;}
+```
+Cloud Compite Pass
+//TODO
+总结
+这套系统的主要工作在于将三个目标的有机整合：
+物理正确的理论近似：每个近似（Decima Beer’s Law、Frostbite 积分、多 Octave 散射）都有清晰的物理动机，而不是纯粹经验调参。
+激进的性能优化：从三级 Early Exit 到 6 步锥形采样，每一项优化都有可量化的提速倍数，并在视觉质量与性能之间找到了可接受的权衡点。
+友好的美术工作流：Weather Texture 的通道设计、ScriptableObject 参数暴露、运行时 GUI 调试——美术师可以在不了解底层技术的情况下直观地控制云的外观。
+上一篇
+大世界渲染：从四叉树剔除到 GPU-Driven Terrain
+下一篇
+FFT 海洋模拟：从频谱推导到 GPU 实时渲染
+体积渲染RayMarching
+大气散射渲染实战
+大世界渲染：从四叉树剔除到 GPU-Driven Terrain
+DDGI「动态漫反射全局光照」：架构与工程概览
+PRTGI「预计算辐照度全局光照」：从理论到工程实践
+Zerl'TA Blog | 由 Hexo 驱动

@@ -1,0 +1,218 @@
+# Deferred Shading with Alpha-Blended Feature Maps
+
+Also called: Deferred Shading (Gaussian Splatting), Deferred Shading with Aggregated Feature Maps, G-buffer shading, deferred pipeline
+
+## Overview
+Deferred Shading with Alpha-Blended Feature Maps is a rendering approach where material properties (albedo, metallic, roughness, normal) are aggregated into pixel-level feature maps via alpha-blending of 2D Gaussians, and the rendering equation is applied in a deferred shading pass [S1, unofficial]. This method treats alpha-blending as a smoothing filter to stabilize optimization and produce cohesive results, unlike shading directly on Gaussians before blending [S1, unofficial]. It differs from per-Gaussian shading by performing complex shading calculations on a per-pixel basis rather than a per-Gaussian basis, which significantly enhances rendering quality and performance for complex materials [S2, unofficial].
+
+## How it works
+The method operates in two distinct passes: a Geometry Pass to populate G-buffers and a Shading Pass to compute final radiance.
+
+**Inputs and Outputs**
+*   **Inputs:** A set of $N$ 3D Gaussians, each defined by position, covariance, opacity $\alpha_i$, and material attributes: albedo $\lambda_i \in [0, 1]^3$, metallic $m_i \in [0, 1]$, roughness $r_i \in [0, 1]$, and tangential vectors $t_{u,i}, t_{v,i}$ [S1, unofficial].
+*   **Outputs:** Final screen-space RGB image $I_{RGB}$ [S3].
+
+**Data Structures**
+1.  **G-Buffer (Feature Maps):** A set of 2D screen-space buffers storing aggregated attributes.
+    *   $\mathbf{X} = [\Lambda, M, R, N]^T$
+    *   $\Lambda$: Albedo map (3 channels, float)
+    *   $M$: Metallic map (1 channel, float)
+    *   $R$: Roughness map (1 channel, float)
+    *   $N$: Normal map (3 channels, float, normalized)
+2.  **Lookup Textures:**
+    *   2D texture map for the first term of the split-sum approximation (dependent on $\omega_i \cdot N$ and roughness $R$) [S1, unofficial].
+    *   Series of cubemaps for the second term of the split-sum approximation (incident radiance) [S1, unofficial].
+
+**Step 1: Compute Per-Gaussian Normals**
+For each Gaussian $i$, derive the normal vector $\mathbf{n}_i$ from its tangential vectors $t_{u,i}$ and $t_{v,i}$ using the cross product [S1, unofficial]:
+$$ \mathbf{n}_i = t_{u,i} \times t_{v,i} $$
+Normalize $\mathbf{n}_i$ to unit length [G].
+
+**Step 2: Geometry Pass (Rasterization)**
+Rasterize the scene attributes of the nearest surface into the G-buffers. For each pixel $p$ in the screen space, compute the aggregated feature map $\mathbf{X}_p$ by alpha-blending the per-Gaussian features $\mathbf{x}_i$ projected onto that pixel. The aggregation follows the standard alpha-blending order (front-to-back) [S1, unofficial]:
+
+$$ \mathbf{X}_p = \sum_{i=1}^{N_p} \mathbf{x}_{i,p} \alpha_{i,p} \prod_{j=1}^{i-1} (1 - \alpha_{j,p}) $$
+
+Where:
+*   $N_p$ is the number of Gaussians covering pixel $p$.
+*   $\mathbf{x}_{i,p} = [\lambda_{i,p}, m_{i,p}, r_{i,p}, \mathbf{n}_{i,p}]^T$ are the per-Gaussian values interpolated or sampled at the pixel location.
+*   $\alpha_{i,p}$ is the projected opacity of Gaussian $i$ at pixel $p$.
+*   The product term $\prod_{j=1}^{i-1} (1 - \alpha_{j,p})$ represents the accumulated transparency from previous (front) Gaussians [S1, unofficial].
+
+The resulting $\mathbf{X}_p$ contains the aggregated albedo $\Lambda_p$, metallic $M_p$, roughness $R_p$, and normal $N_p$ for the pixel [S1, unofficial].
+
+**Step 3: Shading Pass (Per-Pixel Lighting)**
+Execute a per-pixel shading program that reads the G-buffers to compute the final color [S2, unofficial]. The outgoing radiance $L(\omega_o)$ is calculated using the rendering equation [S1, unofficial]:
+
+$$ L(\omega_o) = \int_{\Omega} L_i(\omega_i) f(\omega_i, \omega_o) (\omega_i \cdot \mathbf{N}_p) \, d\omega_i $$
+
+Where:
+*   $L_i(\omega_i)$ is the incident radiance from direction $\omega_i$.
+*   $f(\omega_i, \omega_o)$ is the Bidirectional Reflectance Distribution Function (BRDF).
+*   $\mathbf{N}_p$ is the aggregated normal from the G-buffer.
+*   $\Omega$ is the hemisphere of incident directions.
+
+**Step 4: Split-Sum Approximation for Specular Term**
+To compute the specular component efficiently, the split-sum approximation is adopted [S1, unofficial]:
+
+$$ L_s(\omega_o) \approx \left( \int_{\Omega} f_s(\omega_i, \omega_o) (\omega_i \cdot \mathbf{N}_p) d\omega_i \right) \cdot \left( \int_{\Omega} L_i(\omega_i) D(\omega_i, \omega_o) (\omega_i \cdot \mathbf{N}_p) d\omega_i \right) $$
+
+Where $f_s$ is the specular BRDF term defined by the GGX model [S1, unofficial]:
+
+$$ f_s(\omega_i, \omega_o) = \frac{D G F}{4(\omega_o \cdot \mathbf{N}_p)(\omega_i \cdot \mathbf{N}_p)} $$
+
+*   $D$: GGX normal distribution function.
+*   $F$: Fresnel term.
+*   $G$: Shadowing-masking term.
+
+**Step 5: Precomputation and Lookup**
+1.  **First Term (BRDF Integral):** The first term depends solely on $(\omega_i \cdot N)$ and roughness $R_p$. It is precomputed and stored in a 2D lookup texture map [S1, unofficial]. During rendering, this term is queried using the roughness $R_p$ and the dot product.
+2.  **Second Term (Environment Map):** The second term represents the integral of incident radiance over the specular lobe. It is pre-integrated at the beginning of each training iteration for different roughness levels [S1, unofficial]. This is represented by a series of cubemaps. During rendering, trilinear interpolation is performed using the reflected direction and the roughness $R_p$ as parameters to sample the appropriate cubemap [S1, unofficial].
+
+**Step 6: Diffuse Term**
+The diffuse term is computed by querying a pre-integrated environment map using the normal $N_p$ and multiplying by the material terms (albedo $\Lambda_p$, metallic $M_p$, roughness $R_p$) [S1, unofficial].
+
+**Pseudocode**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def compute_normal(t_u, t_v):
+    """Compute normal from tangential vectors."""
+    return np.cross(t_u, t_v)
+
+def alpha_blend_features(gaussians_covering_pixel):
+    """
+    Aggregate per-Gaussian features into a single pixel feature vector X.
+    gaussians_covering_pixel: List of dicts with keys:
+        'lambda': albedo (3,), 'm': metallic (1,), 'r': roughness (1,),
+        'n': normal (3,), 'alpha': opacity (1,)
+    Returns: X = [Lambda, M, R, N]
+    """
+    X = np.zeros(8) # [3 albedo, 1 metal, 1 rough, 3 normal]
+    accumulated_alpha = 0.0
+    
+    # Sort gaussians by depth (front-to-back) if not already sorted
+    # [G] Implementation detail: Depth sorting is required for correct alpha blending
+    
+    for g in gaussians_covering_pixel:
+        alpha = g['alpha']
+        # Contribution: x_i * alpha_i * product(1 - alpha_j) for j < i
+        # product(1 - alpha_j) is equivalent to (1 - accumulated_alpha)
+        weight = alpha * (1.0 - accumulated_alpha)
+        
+        X[0:3] += g['lambda'] * weight
+        X[3] += g['m'] * weight
+        X[4] += g['r'] * weight
+        X[5:8] += g['n'] * weight
+        
+        accumulated_alpha += alpha * (1.0 - accumulated_alpha) # Note: standard alpha blending accumulates alpha differently, 
+        # but the formula in [S1, unofficial] uses the product term explicitly. 
+        # Standard alpha blend: C_out = C_in + (C_new - C_in) * alpha_new * (1 - alpha_accum)
+        # The formula in [S1, unofficial] is a direct weighted sum. 
+        # To strictly follow [S1, unofficial]: X = sum(x_i * alpha_i * prod_{j<i}(1-alpha_j))
+        # We must track the product term explicitly.
+        
+    # Correction to strictly follow [S1, unofficial] formula structure:
+    # Re-implementing with explicit product tracking
+    X = np.zeros(8)
+    prod_term = 1.0
+    for g in gaussians_covering_pixel:
+        alpha = g['alpha']
+        contribution = g['feature_vector'] * alpha * prod_term
+        X += contribution
+        prod_term *= (1.0 - alpha)
+        
+    # Normalize normal vector
+    X[5:8] /= np.linalg.norm(X[5:8])
+    
+    return X
+
+def split_sum_specular(N, R, roughness_levels, env_cubemaps):
+    """
+    Compute specular radiance using split-sum approximation.
+    N: Normal vector
+    R: Roughness value
+    roughness_levels: Array of roughness values for precomputed textures
+    env_cubemaps: List of cubemaps for different roughness levels
+    """
+    # First term: BRDF integral (precomputed 2D lookup)
+    # [G] Implementation detail: Query 2D texture with (N dot V, R)
+    brdf_term = query_brdf_lookup(N, R) 
+    
+    # Second term: Environment integral (precomputed cubemaps)
+    # [G] Implementation detail: Reflect view vector V around N to get R_dir
+    # Sample cubemap at R_dir with interpolation based on R
+    reflected_dir = reflect(-view_dir, N)
+    env_term = sample_cubemap_series(env_cubemaps, reflected_dir, R)
+    
+    return brdf_term * env_term
+
+def render_deferred(gaussians, camera, env_light, brdf_lookup, cubemaps):
+    """
+    Main rendering loop.
+    """
+    # Initialize G-buffers
+    width, height = camera.resolution
+    g_buffer = np.zeros((height, width, 8)) # [Lambda(3), M(1), R(1), N(3)]
+    
+    # Pass 1: Geometry Pass
+    for pixel in screen_pixels:
+        covering_gaussians = get_gaussians_covering_pixel(pixel, gaussians, camera)
+        if covering_gaussians:
+            # Compute normals for each gaussian if not precomputed
+            for g in covering_gaussians:
+                if 'n' not in g:
+                    g['n'] = compute_normal(g['t_u'], g['t_v'])
+                g['feature_vector'] = np.concatenate([g['lambda'], [g['m']], [g['r']], g['n']])
+            
+            # Aggregate features
+            X = alpha_blend_features(covering_gaussians)
+            g_buffer[pixel.y, pixel.x] = X
+            
+    # Pass 2: Shading Pass
+    final_image = np.zeros((height, width, 3))
+    for pixel in screen_pixels:
+        X = g_buffer[pixel.y, pixel.x]
+        Lambda = X[0:3]
+        M = X[3]
+        R = X[4]
+        N = X[5:8]
+        
+        # Compute Diffuse
+        # [G] Implementation detail: Query pre-integrated env map for diffuse
+        diffuse = query_diffuse_env_map(N, Lambda, M, R)
+        
+        # Compute Specular
+        specular = split_sum_specular(N, R, roughness_levels, cubemaps)
+        
+        final_image[pixel.y, pixel.x] = diffuse + specular
+        
+    return final_image
+```
+
+## Subtopics
+
+### GeoSplatting Appearance Refinement (Deferred Shading)
+A post-training optimization step that switches from forward shading to deferred shading to refine appearance by optimizing 3DGS attributes (displacement, scales, rotations, opacities) [S3]. It renders per-Gaussian attributes into screen-space maps ($I_\mu, I_n, I_a, I_\rho, I_m$) and computes the final RGB image in screen space via PBR [S3]. Optimization is performed with a learning rate of 0.001 for 100 steps (~1 minute), unlocking geometry constraints to allow modification of positions, scales, rotations, normals, and opacities [S3]. On the TensoIR Synthetic Dataset, average L1 differences after optimization are: positions 0.0014, scales 0.0003, rotations 0.0148, opacities 0.0131, normals 0.0146 [S3].
+
+### DeferredGS
+A method that observes that geometry attributes of 3D Gaussians like opacity overfit to the input lighting condition and exhibit blending artifacts when they are relit [S4, unofficial]. It distills geometry attributes of a signed distance function to 3D Gaussians and introduces the deferred shading technique into the rendering of 3D Gaussians to avoid blending artifacts caused by multiple shading calculations [S4, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** The geometry pass is $O(N \cdot A)$ where $N$ is the number of Gaussians and $A$ is the average number of Gaussians per pixel (rasterization cost). The shading pass is $O(W \cdot H)$ where $W, H$ are screen dimensions, as shading is per-pixel [S2, unofficial].
+*   **Memory Complexity:** Requires storage for G-buffers (albedo, normal, roughness, metallic, depth) proportional to screen resolution $W \times H$ [S2, unofficial]. Additional memory for precomputed lookup textures and cubemaps [S1, unofficial].
+*   **Performance:** Significantly enhances rendering quality and performance for complex materials compared to per-Gaussian shading [S2, unofficial]. The split-sum approximation allows real-time rendering by avoiding expensive Monte Carlo sampling [S1, unofficial].
+*   **Strengths:** Stabilizes optimization of features by treating alpha-blending as a smoothing filter [S1, unofficial]. Efficiently renders high-frequency, view-dependent effects [S2, unofficial]. Avoids blending artifacts caused by multiple shading calculations [S4, unofficial].
+*   **Limitations:** Requires precomputation of lookup textures and cubemaps, which may increase training time or memory usage [S1, unofficial]. The transition from forward to deferred shading may introduce artifacts if not optimized [S3].
+
+## Background
+Deferred shading is a two-pass rendering technique that decouples geometry processing from lighting and material computations [S2, unofficial]. It has been successfully adapted to Gaussian Splatting to efficiently render high-frequency, view-dependent effects [S2, unofficial]. The specific application to 3D Gaussian Splatting with alpha-blended feature maps was introduced in "Reflective Gaussian Splatting" [S1, unofficial]. Variants like GeoSplatting and DeferredGS have further refined this approach for inverse rendering and artifact reduction [S3][S4, unofficial].
+
+## Sources
+[S1] Reflective Gaussian Splatting, https://doi.org/10.48550/arxiv.2412.19282, fetched 2026-10-26 (unofficial)
+[S2] RT-Splatting: Joint Reflection-Transmission Modeling with Gaussian Splatting, https://github.com/WoojunePark/splat_papers/issues/71, fetched 2026-10-27 (unofficial)
+[S3] GeoSplatting: Towards Geometry Guided Gaussian Splatting for Physically-Based Inverse Rendering, https://doi.org/10.1109/ICCV51701.2025.02692, fetched 2026-10-30
+[S4] PDF Recent advances in 3D Gaussian splatting - Springer, https://link.springer.com/content/pdf/10.1007/s41095-024-0436-y.pdf, fetched 2026-10-29 (unofficial)

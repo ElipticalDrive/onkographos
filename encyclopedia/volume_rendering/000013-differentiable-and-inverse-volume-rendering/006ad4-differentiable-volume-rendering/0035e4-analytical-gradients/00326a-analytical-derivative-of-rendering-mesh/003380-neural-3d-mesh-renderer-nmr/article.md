@@ -1,0 +1,154 @@
+# Neural 3D Mesh Renderer (NMR)
+
+Also called: Differentiable Mesh Renderer, Kato et al, NMR (Neural 3D Mesh Renderer) Rasterization, Neural 3D Mesh Renderer Rasterization, Neural Renderer
+
+## Overview
+Neural 3D Mesh Renderer (NMR) is a differentiable rendering method for 3D polygon meshes that enables end-to-end training via back-propagation by approximating the non-differentiable rasterization step [S4, unofficial]. It solves the discontinuity problem of standard rasterization by replacing sudden visibility changes with linear interpolations, allowing gradients to flow from pixel colors to geometry vertices, textures, and lighting parameters [S1][S3]. Unlike local gradient approximations such as OpenDR, NMR provides non-local gradients that allow pixels beyond the boundary to influence vertices, avoiding poor local minima [S2, unofficial][S3]. It is distinguished from siblings like SoftRas by retaining standard z-culling, which saves computation but prevents gradient flow to occluded triangles [S1][S3].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D mesh defined by object-space vertices $V^o = \{v_1^o, \dots, v_{N_v}^o\}$ where $v_i^o \in \mathbb{R}^3$, and faces $F = \{f_1, \dots, f_{N_f}\}$ where $f_j \in \mathbb{R}^3$ represents the three vertex indices of the $j$-th triangle [S4, unofficial]. Camera parameters (view/projection matrices) and lighting parameters ($l^a, l^d, \boldsymbol{n}^d$) [S4, unofficial].
+*   **Output:** A rendered image $I \in \mathbb{R}^{H \times W \times C}$ and gradients $\frac{\partial L}{\partial v_i^o}$, $\frac{\partial L}{\partial \text{texture}}$, $\frac{\partial L}{\partial \text{light}}$ [S1][S4, unofficial].
+
+**Data Structures:**
+*   **Mesh:** List of vertices and face connectivity. In reconstruction applications, a template mesh (e.g., an isotropic sphere with 642 vertices) is deformed by adding local bias vectors $\boldsymbol{b}_i \in \mathbb{R}^3$ and a global bias vector $\boldsymbol{c} \in \mathbb{R}^3$ to each vertex: $v_i = v_i^o + \boldsymbol{b}_i + \boldsymbol{c}$ [S4, unofficial].
+*   **Texture:** Each face can hold a texture image of size $s_t \times s_t \times C$ [S4, unofficial].
+
+**Steps:**
+
+1.  **Transformation:** Transform object-space vertices $V^o$ to screen-space vertices $V^s = \{v_1^s, \dots, v_{N_v}^s\}$ where $v_i^s \in \mathbb{R}^2$ using a composition of differentiable transformations (projection and viewport) [S4, unofficial].
+
+2.  **Rasterization (Forward Pass):**
+    *   For each pixel $P_j$ in the image, determine if its center lies inside a face $f_k$ [S4, unofficial].
+    *   If multiple faces overlap, draw only the front-most face (z-culling) [S4, unofficial].
+    *   Assign the color $I_{kj}$ of the overlapping face to the pixel color $I_j$ [S4, unofficial].
+    *   *Note:* This step is discrete. Standard gradients $\frac{\partial I_j}{\partial v_i}$ are zero almost everywhere because the assignment is binary [S4, unofficial].
+
+3.  **Shading:**
+    *   Compute pixel color $I_j^l$ based on lighting and texture [S4, unofficial].
+    *   Define ambient light intensity $l^a$ and directional light intensity $l^d$ with direction unit vector $\boldsymbol{n}^d$ [S4, unofficial].
+    *   For face $j$ with normal $\boldsymbol{n}_j$, the color is:
+        $$ I_j^l = (l^a + (\boldsymbol{n}^d \cdot \boldsymbol{n}_j) l^d) I_j $$
+        where $I_j$ is the base color (possibly from texture sampling) [S4, unofficial].
+    *   Gradients flow to $l^a$, $l^d$, and $\boldsymbol{n}^d$ [S4, unofficial].
+    *   Texture sampling uses bilinear interpolation based on barycentric coordinates [S4, unofficial].
+
+4.  **Gradient Approximation (Backward Pass):**
+    *   Replace the sudden change in visibility with linear interpolation to allow gradients to flow [S1][S3].
+    *   For a vertex $v_i$ moving by $\delta_i^x$ in screen space, causing a color change $\delta_j^I$ at pixel $P_j$:
+        *   Let $\delta_j^P$ be the gradient of the loss $L$ with respect to pixel $P_j$ (backpropagated from the loss function) [S2, unofficial][S4, unofficial].
+        *   The gradient $\frac{\partial I_j}{\partial v_i}$ is defined based on the sign agreement between the loss gradient and the color change direction [S4, unofficial]:
+            $$ \frac{\partial I_j}{\partial v_i} = \begin{cases} \frac{\delta_j^I}{\delta_i^x} & \text{if } \delta_j^P \cdot \delta_j^I < 0 \\ 0 & \text{if } \delta_j^P \cdot \delta_j^I > 0 \end{cases} $$
+            *   If $\delta_j^P > 0$ (loss increases if pixel brightens) and $\delta_j^I > 0$ (vertex movement brightens pixel), the product is positive, and gradient is 0 (movement does not help minimize loss) [S4, unofficial].
+            *   If $\delta_j^P > 0$ and $\delta_j^I < 0$ (movement darkens pixel, helping minimize loss), the product is negative, and gradient flows [S4, unofficial].
+    *   If the vertex is inside the face, compute gradients for movements in both directions (left/right, up/down) and sum them [S4, unofficial].
+    *   **Z-culling Limitation:** Only the closest triangle affects pixel color. Gradients do not flow to occluded triangles [S1][S3].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def nmr_forward(vertices_screen, faces, H, W):
+    """Forward rasterization: returns pixel_face_map and barycentric_coords."""
+    pixel_face_map = [[-1 for _ in range(W)] for _ in range(H)]
+    barycentric_coords = [[[0.0, 0.0, 0.0] for _ in range(W)] for _ in range(H)]
+    
+    for f_idx, (v0, v1, v2) in enumerate(faces):
+        for y in range(H):
+            for x in range(W):
+                p = [float(x), float(y)]
+                w = compute_barycentric(p, v0, v1, v2)
+                if w[0] >= 0 and w[1] >= 0 and w[2] >= 0:
+                    if pixel_face_map[y][x] == -1:
+                        pixel_face_map[y][x] = f_idx
+                        barycentric_coords[y][x] = w
+    return pixel_face_map, barycentric_coords
+
+def compute_barycentric(p, v0, v1, v2):
+    v0v1 = [v1[0]-v0[0], v1[1]-v0[1]]
+    v0v2 = [v2[0]-v0[0], v2[1]-v0[1]]
+    v0p  = [p[0]-v0[0], p[1]-v0[1]]
+    dot00 = v0v1[0]*v0v1[0] + v0v1[1]*v0v1[1]
+    dot01 = v0v1[0]*v0v2[0] + v0v1[1]*v0v2[1]
+    dot02 = v0v1[0]*v0p[0]  + v0v1[1]*v0p[1]
+    dot11 = v0v2[0]*v0v2[0] + v0v2[1]*v0v2[1]
+    dot12 = v0v2[0]*v0p[0]  + v0v2[1]*v0p[1]
+    inv = 1.0 / (dot00 * dot11 - dot01 * dot01)
+    u = (dot11 * dot02 - dot01 * dot12) * inv
+    v = (dot00 * dot12 - dot01 * dot02) * inv
+    w = 1.0 - u - v
+    return [w, u, v]
+
+def nmr_backward(vertices_screen, faces, pixel_face_map, barycentric_coords,
+                 pixel_loss_gradients, face_colors, H, W):
+    """Compute gradients for screen-space vertices."""
+    N_v = len(vertices_screen)
+    vertex_gradients = [[0.0, 0.0] for _ in range(N_v)]
+
+    for y in range(H):
+        for x in range(W):
+            f_idx = pixel_face_map[y][x]
+            if f_idx == -1:
+                continue
+            loss_grad = pixel_loss_gradients[y][x]
+            face_color = face_colors[f_idx]
+            w = barycentric_coords[y][x]
+
+            v0, v1, v2 = faces[f_idx]
+            verts = [v0, v1, v2]
+
+            for k in range(3):
+                v = verts[k]
+                # delta_I: color change if vertex moves to uncover pixel
+                delta_I = -face_color
+                
+                # Objective-aware gate: gradient flows only if movement helps minimize loss
+                gate = 1.0 if loss_grad * delta_I < 0 else 0.0
+                
+                # Approximate gradient magnitude using barycentric coordinate as distance proxy
+                # NMR uses linear interpolation: grad = delta_I / delta_v
+                dx_grad = gate * delta_I * w[k]
+                dy_grad = gate * delta_I * w[k]
+                
+                vertex_gradients[verts[k]][0] += dx_grad
+                vertex_gradients[verts[k]][1] += dy_grad
+
+    return vertex_gradients
+```
+
+**Parameters:**
+*   **Lighting:** Ambient intensity $l^a = 0.5$, directional intensity $l^d = 0.5$ [S4, unofficial]. Direction $\boldsymbol{n}^d$ can be random or optimized [S4, unofficial].
+*   **Optimizer:** Adam ($\alpha=0.0001, \beta_1=0.9, \beta_2=0.999$) for reconstruction; $\alpha=2.5e-4$ for vertices and $5e-2$ for textures in style transfer [S4, unofficial].
+*   **Resolution:** 128x128 for reconstruction, 448x448 for style transfer [S4, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Z-culling:** Gradients do not flow to occluded triangles. This saves computation but may hinder geometry optimization if occluded geometry is relevant [S1][S3].
+*   **Gradient Gating:** The gradient is strictly zero if the product of the loss gradient and the color change direction is positive, meaning vertex movement does not help minimize the loss [S4, unofficial].
+*   **Precision:** Linear interpolation approximation may introduce artifacts near boundaries if not carefully implemented [S1].
+
+## Subtopics
+
+### DIB-R
+A differentiable rendering technique for meshes that computes exact gradients of the output image with respect to input parameters by analytically differentiating the rendering pipeline steps, excluding the discrete triangle selection step. It sets itself apart by focusing on analytical derivatives for mesh parameters and is chosen when precise gradient computation for shape, camera, material, and lighting is required. [DIB-R](6798-dib-r.md)
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of pixels and faces. Jrender's optimized implementation is ~10x faster than the official implementation [S1][S3].
+*   **Memory Complexity:** Linear with respect to mesh size and image resolution.
+*   **Performance:** On a 280-triangle bowl at 256x256 resolution, Jrender's NMR takes 7.5ms (forward + gradient) vs 8.1ms for official NMR [S3].
+*   **Strengths:** Supports fragment shading (textures, complex lighting); non-local gradients avoid local minima; efficient z-culling [S1][S3].
+*   **Limitations:** Cannot optimize occluded geometry; approximation may be inaccurate for complex mutual occlusions compared to SoftRas [S1][S3].
+*   **When to use:** General-purpose differentiable mesh rendering, single-image 3D reconstruction, style transfer [S1][S4, unofficial].
+*   **When not to use:** When gradients to occluded geometry are critical (use SoftRas) [S3].
+
+## Background
+*   **Origin:** Introduced by Kato et al. in 2017 (arXiv:1711.07566) and published at CVPR 2018 [S4, unofficial].
+*   **History:** Developed to overcome limitations of OpenDR, specifically localness and lack of objective awareness [S2, unofficial]. It integrates 3D mesh rendering into neural networks for tasks like 3D reconstruction and editing [S4, unofficial].
+*   **Usage:** Single-image 3D reconstruction, 3D mesh style editing, 3D Deep Dream [S1][S4, unofficial].
+
+## Sources
+
+[S1] Jrender: An efficient differentiable rendering library based on Jittor, https://doi.org/10.1016/j.gmod.2023.101202, fetched 2026-10-27
+[S2] Differentiable Rendering: A Survey, https://doi.org/10.48550/arxiv.2006.12057, fetched 2026-10-26 (unofficial)
+[S3] Jrender: An efficient differentiable rendering library based on Jittor, https://www.sciencedirect.com/science/article/pii/S1524070323000322, fetched 2026-11-01
+[S4] Neural 3D Mesh Rendererのメモ, https://qiita.com/exp/items/0a2eb5d5c6af4d2c4f05, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,303 @@
+# Adaptive Particle System Surface Extraction
+
+Also called: Adaptive surface sampling algorithm based on a particle system, PS(Adaptive)
+
+## Overview
+Adaptive Particle System Surface Extraction is an algorithm that generates high-quality, adaptive sampling point clouds from industrial CT data by decoupling force mechanisms and using adaptive weighted projection to drive particles to precise edges [S1, unofficial]. It sets itself apart from sibling methods like Manifold Dual Marching Cubes by replacing fixed-grid topological construction with an iterative, physics-based particle optimization process that adapts sampling density to local curvature, significantly reducing vertex count while improving distribution uniformity [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Industrial CT slice data (grayscale volume).
+*   **Output:** A set of 3D points representing the isosurface, optimized for uniform distribution and precise edge sampling.
+
+**Data Structures:**
+1.  **Multi-scale Voxel Pyramid:** A hierarchy of voxel grids constructed from the CT data.
+    *   **Construction:** Built via edge-preserving filtering and downsampling [S1, unofficial].
+    *   **Fields:** Each voxel unit stores its spatial position, refinement level, and associated curvature information [S1, unofficial].
+    *   **Refinement:** Voxels are adaptively subdivided in a coarse-to-fine manner based on mean curvature [S1, unofficial].
+2.  **Particle System:**
+    *   **Particle State:** Position $\mathbf{p}$, velocity (implicit in iterative update), and current voxel container.
+    *   **Voxel Container:** Acts as the fundamental unit for particle behavior, controlling parameters such as the number of internal particles and repulsion radius based on its refinement degree [S1, unofficial].
+
+**Parameters:**
+*   **Neighbor Search Radius:** Defined as the 26-neighborhood of the voxel unit containing the target particle [S1, unofficial].
+*   **Pyramid Levels:** The number of scales in the voxel pyramid. Too many levels cause blurring at coarse scales [S1, unofficial].
+
+**Steps:**
+
+1.  **Construct Multi-scale Voxel Pyramid:**
+    *   Apply edge-preserving filtering to the input CT slice data.
+    *   Perform downsampling to create a hierarchy of voxel grids (pyramid levels) [S1, unofficial].
+    *   Calculate the mean curvature field for each level [S1, unofficial].
+
+2.  **Adaptive Refinement:**
+    *   Iterate through the pyramid levels from coarse to fine.
+    *   Subdivide voxel units based on their mean curvature values. High-curvature regions are refined more aggressively [S1, unofficial].
+    *   The refined voxel units become the basic containers for particle placement and behavior [S1, unofficial].
+
+3.  **Initialize Particles:**
+    *   Place initial particles within the refined voxel units. The number of particles per voxel is controlled by the voxel's refinement degree [S1, unofficial].
+
+4.  **Iterative Force Optimization (Decoupled in Time Domain):**
+    *   The algorithm decouples attractive and repulsive forces in the time domain to improve stability and efficiency [S1, unofficial].
+    *   **Attractive Force (Weighted Projection):**
+        *   Replace traditional isosurface gravitational attraction with an adaptive weighted projection based on grayscale and second-order gradient [S1, unofficial].
+        *   This force drives particles toward precise edges of the isosurface.
+        *   Formula: The displacement $\Delta \mathbf{p}$ is proportional to a weighted combination of the grayscale value $I$ and the second-order gradient $\nabla^2 I$. (Exact weighting formula not provided in sources; described as "adaptive weighted projection" [S1, unofficial]).
+    *   **Repulsive Force (Local Short-range):**
+        *   Treat repulsion as a local short-range force to improve computational efficiency [S1, unofficial].
+        *   For each particle, search for interacting particles within the 26-neighborhood of its containing voxel unit [S1, unofficial].
+        *   Calculate repulsive forces between the target particle and its neighbors [S1, unofficial].
+        *   **Tangential Extraction:** Extract the tangential component of the repulsive force relative to the surface normal. This enhances particle distribution uniformity while reducing the impact on projection accuracy (preventing particles from being pushed away from the surface) [S1, unofficial].
+        *   Update particle positions based on the combined attractive and tangential repulsive forces [S1, unofficial].
+    *   Repeat the force calculation and position update until the system approaches equilibrium [S1, unofficial].
+
+5.  **Incremental Particle Insertion (Voronoi-based):**
+    *   After iteration approaches equilibrium, estimate regions with sparse particle distribution [S1, unofficial].
+    *   Use a local Voronoi diagram to identify sparse regions [S1, unofficial].
+    *   Insert new particles incrementally in a manner that minimizes system energy variation [S1, unofficial].
+    *   Re-run the force optimization for the newly inserted particles [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Pyramid Level Excess:** If the number of pyramid levels is too high, coarse scales become blurred due to downsampling, losing detailed information and constraining subsequent progressive refinement [S1, unofficial].
+*   **Noise Sensitivity:** The second-order gradient used in the attractive force is sensitive to noise, which may sacrifice surface flatness. However, the multi-scale pyramid and improved weighted projection mitigate this to some extent [S1, unofficial].
+*   **Memory Usage:** Storing voxel, gradient, and curvature information at each level of the voxel pyramid imposes high demands on runtime memory [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def adaptive_particle_surface_extraction(ct_data):
+    """
+    Extracts surface points from CT data using an adaptive particle system.
+    
+    Args:
+        ct_data: 3D numpy array of grayscale values from CT slices.
+        
+    Returns:
+        points: List of 3D points representing the extracted surface.
+    """
+    # Step 1: Construct Multi-scale Voxel Pyramid
+    # Apply edge-preserving filtering
+    filtered_data = edge_preserving_filter(ct_data)
+    
+    # Create pyramid levels via downsampling
+    pyramid_levels = []
+    current_data = filtered_data
+    while current_data.shape[0] > 1: # Simplified termination condition
+        pyramid_levels.append(current_data)
+        current_data = downsample(current_data)
+    pyramid_levels.append(current_data) # Add the coarsest level
+    
+    # Calculate curvature for each level
+    curvature_fields = []
+    for level_data in pyramid_levels:
+        curvature = calculate_mean_curvature(level_data)
+        curvature_fields.append(curvature)
+        
+    # Step 2: Adaptive Refinement
+    # Define voxel units based on curvature
+    voxel_units = []
+    for level_idx, level_data in enumerate(pyramid_levels):
+        # Subdivide voxels based on curvature at this level
+        # Higher curvature -> smaller voxels / more subdivisions
+        refined_voxels = adaptive_subdivide(level_data, curvature_fields[level_idx])
+        voxel_units.append(refined_voxels)
+        
+    # Step 3: Initialize Particles
+    particles = []
+    for level_idx, voxels in enumerate(voxel_units):
+        for voxel in voxels:
+            # Number of particles per voxel depends on refinement degree
+            num_particles = get_particle_count_for_voxel(voxel)
+            for _ in range(num_particles):
+                # Initialize particle position within voxel
+                p = random_point_in_voxel(voxel)
+                particles.append({'pos': p, 'voxel_idx': level_idx, 'voxel_id': voxel.id})
+                
+    # Step 4: Iterative Force Optimization
+    max_iterations = 1000
+    convergence_threshold = 1e-6
+    
+    for iteration in range(max_iterations):
+        total_displacement = 0
+        
+        for particle in particles:
+            pos = particle['pos']
+            voxel_idx = particle['voxel_idx']
+            
+            # A. Attractive Force: Grayscale-Second-Order Gradient Weighted Projection
+            # Drive particle to precise edge
+            # Note: Exact formula for weighted projection not provided in sources [S1, unofficial]
+            # Placeholder for the specific weighted projection logic
+            attractive_force = compute_weighted_projection_force(pos, ct_data, curvature_fields[voxel_idx])
+            
+            # B. Repulsive Force: Local Short-range (26-neighborhood)
+            # Search for interacting particles within the 26-neighborhood of the containing voxel
+            neighbor_particles = find_neighbors_in_26_neighborhood(particle, particles, voxel_idx)
+            
+            repulsive_force = np.zeros(3)
+            for neighbor in neighbor_particles:
+                if neighbor is particle:
+                    continue
+                dist = np.linalg.norm(neighbor['pos'] - pos)
+                if dist < repulsion_radius: # repulsion_radius is voxel-dependent
+                    # Calculate repulsive force
+                    force_vec = normalize(neighbor['pos'] - pos) / (dist ** 2) # Inverse square law, typical for repulsion
+                    repulsive_force += force_vec
+            
+            # Extract tangential component of repulsive force
+            # Estimate surface normal at particle position (e.g., from gradient)
+            normal = estimate_surface_normal(pos, ct_data)
+            # Project repulsive force onto the tangent plane
+            repulsive_tangential = repulsive_force - np.dot(repulsive_force, normal) * normal
+            
+            # Combine forces
+            # Decoupled in time domain: likely means separate update steps or weights
+            # Assuming additive combination for displacement
+            displacement = attractive_force + repulsive_tangential
+            
+            # Update position
+            step_size = get_step_size(particle) # May depend on voxel refinement
+            new_pos = pos + step_size * displacement
+            particle['pos'] = new_pos
+            total_displacement += np.linalg.norm(displacement)
+            
+        if total_displacement < convergence_threshold:
+            break
+            
+    # Step 5: Incremental Particle Insertion (Voronoi-based)
+    # Estimate sparse regions
+    voronoi_diagram = compute_local_voronoi(particles)
+    sparse_regions = identify_sparse_regions(voronoi_diagram)
+    
+    for region in sparse_regions:
+        # Insert new particle minimizing system energy
+        new_particle_pos = insert_particle_in_region(region, particles)
+        new_particle = {'pos': new_particle_pos, 'voxel_idx': get_voxel_for_point(new_particle_pos, voxel_units), 'voxel_id': None}
+        particles.append(new_particle)
+        
+        # Re-optimize for new particle
+        # Simplified: run one iteration of force optimization for new particle
+        pos = new_particle_pos
+        voxel_idx = new_particle['voxel_idx']
+        attractive_force = compute_weighted_projection_force(pos, ct_data, curvature_fields[voxel_idx])
+        neighbor_particles = find_neighbors_in_26_neighborhood(new_particle, particles, voxel_idx)
+        repulsive_force = np.zeros(3)
+        for neighbor in neighbor_particles:
+            if neighbor is new_particle:
+                continue
+            dist = np.linalg.norm(neighbor['pos'] - pos)
+            if dist < repulsion_radius:
+                force_vec = normalize(neighbor['pos'] - pos) / (dist ** 2)
+                repulsive_force += force_vec
+        normal = estimate_surface_normal(pos, ct_data)
+        repulsive_tangential = repulsive_force - np.dot(repulsive_force, normal) * normal
+        new_particle['pos'] = pos + get_step_size(new_particle) * (attractive_force + repulsive_tangential)
+        
+    # Extract final points
+    points = [p['pos'] for p in particles]
+    return points
+
+def edge_preserving_filter(data):
+    # Implementation of edge-preserving filter (e.g., Bilateral Filter or Anisotropic Diffusion)
+    # Not specified in sources [S1, unofficial]
+    pass
+
+def downsample(data):
+    # Simple average pooling or similar
+    return data[::2, ::2, ::2]
+
+def calculate_mean_curvature(volume):
+    # Calculate mean curvature from volume data
+    # Not specified in sources [S1, unofficial]
+    pass
+
+def adaptive_subdivide(volume, curvature):
+    # Subdivide voxels based on curvature threshold
+    # Not specified in sources [S1, unofficial]
+    pass
+
+def get_particle_count_for_voxel(voxel):
+    # Determine number of particles based on voxel refinement
+    # Not specified in sources [S1, unofficial]
+    pass
+
+def random_point_in_voxel(voxel):
+    # Generate random point within voxel bounds
+    pass
+
+def find_neighbors_in_26_neighborhood(particle, particles, voxel_idx):
+    # Find particles in the same or adjacent voxels (26-neighborhood)
+    # Not specified in sources [S1, unofficial]
+    pass
+
+def compute_weighted_projection_force(pos, ct_data, curvature):
+    # Compute attractive force based on grayscale and second-order gradient
+    # Exact formula not provided [S1, unofficial]
+    pass
+
+def estimate_surface_normal(pos, ct_data):
+    # Estimate normal from gradient of CT data
+    pass
+
+def get_step_size(particle):
+    # Step size may depend on voxel refinement
+    pass
+
+def compute_local_voronoi(particles):
+    # Compute Voronoi diagram for particles
+    pass
+
+def identify_sparse_regions(voronoi_diagram):
+    # Identify regions with large Voronoi cells
+    pass
+
+def insert_particle_in_region(region, particles):
+    # Insert new particle in sparse region
+    pass
+
+def get_voxel_for_point(pos, voxel_units):
+    # Find which voxel unit contains the point
+    pass
+```
+
+## Subtopics
+
+### Dual Marching Cubes with Adaptive Octree and QEF Feature Isolation
+Uses an adaptive octree and Quadratic Error Function for feature isolation, focusing on hierarchical grid refinement rather than particle dynamics. [Link](2291-dual-marching-cubes-with-adaptive-octree-and-qef-feature-iso.md)
+
+### Dual Isosurfacing with Analytical Trilinear Intersection
+Employs analytical solutions for trilinear intersections within dual grid cells, offering precise geometric accuracy without iterative particle optimization. [Link](3798-dual-isosurfacing-with-analytical-trilinear-intersection.md)
+
+### Curvature/Normal Similarity Loss
+A loss function used in learning-based surface extraction to preserve geometric features, not a direct surface extraction algorithm. [Link](4354-curvature-normal-similarity-loss.md)
+
+### Geometric Self-Intersection Elimination
+A post-processing or constraint-based method to resolve topological errors, applicable to various surface extraction outputs. [Link](4757-geometric-self-intersection-elimination.md)
+
+### Parallel Processing and Pipeline Optimization
+General techniques for accelerating surface extraction algorithms, including particle systems, on GPUs. [Link](6411-parallel-processing-and-pipeline-optimization.md)
+
+### Dual Nodes Generation with Connectivity Inversion
+A specific step in Dual Marching Cubes for generating dual nodes and handling connectivity, distinct from particle-based sampling. [Link](7685-dual-nodes-generation-with-connectivity-inversion.md)
+
+## Operating characteristics
+*   **Time Complexity:** The algorithm involves iterative force calculations. The repulsive force calculation is optimized by limiting the search to the 26-neighborhood of the containing voxel, reducing complexity from $O(N^2)$ to approximately $O(N)$ per iteration, where $N$ is the number of particles [S1, unofficial]. However, the iterative nature and Voronoi-based insertion add overhead. Sampling times reported are significantly higher than MC/DMC (e.g., 2281s vs 5s for Sample 1), indicating high computational cost [S1, unofficial].
+*   **Memory Complexity:** High memory demand due to storing voxel, gradient, and curvature information at each level of the voxel pyramid [S1, unofficial].
+*   **Measured Performance:**
+    *   **Vertex Count:** Reduces the number of vertices by approximately 70% compared to traditional surface extraction algorithms (MC, DMC) [S1, unofficial].
+    *   **Sampling Time:** Significantly slower than MC and DMC. For Sample 1, MC took 5.046s, DMC 4.698s, while the proposed method took 2281.178s [S1, unofficial].
+    *   **Distribution Quality:** Achieves significantly better sampling distribution quality than MC (which exhibits clustering) and DMC (moderate improvement) due to iterative repulsion optimization [S1, unofficial].
+    *   **Accuracy:** Improves dimensional accuracy via second-order gradient correction but may sacrifice surface flatness; multi-scale pyramid and weighted projection mitigate this [S1, unofficial].
+*   **Strengths:** High-quality adaptive sampling, robust against noise/artifacts, superior distribution uniformity, reduced storage burden (fewer vertices).
+*   **Limitations:** High computational cost, high memory usage, sensitivity to pyramid level settings (too many levels cause blurring), potential sacrifice of surface flatness due to second-order gradient noise sensitivity.
+*   **When to Use:** Industrial metrological CT data analysis where high-precision, adaptive point clouds are needed for subsequent mesh fitting, and computational time is less critical than sampling quality and vertex reduction.
+*   **When Not to Use:** Real-time applications, scenes with very fine details that require many pyramid levels (risk of blurring), or when surface flatness is more critical than dimensional accuracy.
+
+## Background
+The method was proposed by researchers from Dalian University of Technology, China, in a paper titled "Surface Extraction for Industrial CT Based On Adaptive Particle System" [S1, unofficial]. It builds upon traditional particle system-based surface extraction methods by introducing multi-scale pyramid characteristics and a decoupled force mechanism [S1, unofficial]. The authors suggest future work could reference the topological construction approach of the Dual Marching Cubes (DMC) algorithm to build a rough mesh model with complete topological information [S1, unofficial].
+
+## Sources
+[S1] Surface Extraction for Industrial CT Based On Adaptive Particle System, https://doi.org/10.21203/rs.3.rs-9502773/v1, fetched 2026-10-26 (unofficial)

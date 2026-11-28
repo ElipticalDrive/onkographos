@@ -1,0 +1,149 @@
+--- v003.md
++++ v004.md
+@@ -4,32 +4,32 @@
+ 
+ ## Overview
+-Light Space Rasterization computes $T_{light}$, the front-facing occlusion transmittance for each Gaussian along a directional sun direction, enabling physically based self-shadowing in 3D Gaussian Splatting. It differs from voxel-based fallbacks by providing full continuous gradients and zero EWA expansion by default, avoiding the inversion artifacts associated with early-termination in deep occlusion [S1, unofficial].
++Light Space Rasterization computes $T_{light}$, the front-facing occlusion transmittance for each Gaussian along a directional sun direction, enabling physically based self-shadowing in 3D Gaussian Splatting [S1, unofficial]. It differs from voxel-based fallbacks by providing full continuous gradients and zero EWA expansion by default, avoiding the inversion artifacts associated with early-termination in deep occlusion [S1, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-*   3D Gaussian primitives (position, covariance, opacity, color).
+-*   Sun direction vector.
+-*   Camera parameters for the "sun camera" (see below).
++*   3D Gaussian primitives (position, covariance, opacity, color) [G].
++*   Sun direction vector [S1, unofficial].
++*   Camera parameters for the "sun camera" (see below) [S1, unofficial].
+ 
+ **Outputs:**
+-*   $T_{light}$ value for each Gaussian (or pixel coverage thereof).
+-*   Shadowed RGB image.
++*   $T_{light}$ value for each Gaussian (or pixel coverage thereof) [S1, unofficial].
++*   Shadowed RGB image [G].
+ 
+ **Data Structures:**
+ *   **Sun Camera:** A perspective camera with a narrow Field of View (FOV) placed at a large distance to simulate parallel sun rays. The parallax error is kept below 2% to avoid changing the EWA Jacobian [S1, unofficial].
+-*   **Splat Buffer:** Standard Gaussian splat attributes.
++*   **Splat Buffer:** Standard Gaussian splat attributes [G].
+ *   **Material Buffer:** Parallel buffer storing normal, roughness, reflectance, and albedo for relighting [4464-ref-gaussian-deferred-surfel-rendering-with-split-sum-ibl.md].
+-*   **T_light Buffer:** Stores the computed front tau ($\tau$) and transmittance.
++*   **T_light Buffer:** Stores the computed front tau ($\tau$) and transmittance [S1, unofficial].
+ 
+ **Steps:**
+ 1.  **Camera Setup:** Construct the sun camera. The framing, sorting, coverage, and threshold branches are treated as constants during the pass to prevent incorrect gradient propagation [S1, unofficial].
+-2.  **Sorting:** Sort Gaussians by depth relative to the sun camera. This ensures correct front-to-back accumulation for shadowing [4487-3d-gaussian-splatting-self-shadowing-t_light.md, 4489-light-space-rasterization-for-t_light.md].
++2.  **Sorting:** Sort Gaussians by depth relative to the sun camera. This ensures correct front-to-back accumulation for shadowing [S1, unofficial].
+ 3.  **Rasterization Pass:**
+     *   Project Gaussians into light space.
+-    *   **Crucial Difference:** Do **not** expand the projection covariance by $0.3I$ and do **not** apply amplitude compensation. This preserves the main camera pass's sampling expansion [4487-3d-gaussian-splatting-self-shadowing-t_light.md].
++    *   **Crucial Difference:** Do **not** expand the projection covariance by $0.3I$ and do **not** apply amplitude compensation. This preserves the main camera pass's sampling expansion [S1, unofficial].
+     *   Traverse Gaussians in depth order.
+     *   For each Gaussian, accumulate front $\tau$ (optical depth) weighted by $\alpha \cdot T$. This is an energy-weighted mean over the entire sun-facing footprint, not a center-point sample [S1, unofficial].
+-    *   Use the `record_front_tau` channel logic.
+-4.  **Shadow Application:** Combine $T_{light}$ with the base color.
++    *   Use the `record_front_tau` channel logic [S1, unofficial].
++4.  **Shadow Application:** Combine $T_{light}$ with the base color [G].
+     *   **Pitfall Handling:** Deeply buried Gaussians (where early-termination results in $wsum=0$) are explicitly mapped to full shadow to prevent inversion artifacts [S1, unofficial].
+ 
+@@ -37,51 +37,43 @@
+ ```python
+ def compute_t_light(gaussians, sun_direction, sun_camera):
+-    """
+-    Compute T_light using light space rasterization.
+-    """
+-    # 1. Setup Sun Camera
+-    # sun_camera is a perspective camera with narrow FOV, large distance
+-    # Parallax error < 2%
+-    
+-    # 2. Sort Gaussians by depth in sun space
+-    sorted_gaussians = sort_by_depth(gaussians, sun_camera)
+-    
++    # 1. Camera Setup: narrow FOV perspective camera at large distance
++    # Parallax error < 2% [S1, unofficial]
++    # 2. Sorting: depth-ordered traversal relative to sun camera [S1, unofficial]
++    sorted_gaussians = sorted(gaussians, key=lambda g: dot(g.position, sun_camera.view_direction))
+     # 3. Initialize T_light buffer
+-    t_light_buffer = zeros_like(gaussians)
+-    
+-    # 4. Rasterization
+-    for gaussian in sorted_gaussians:
++    t_light_buffer = [0.0] * len(gaussians)
++    # 4. Rasterization Pass
++    for g in sorted_gaussians:
+         # Project to light space
+-        pos_light = sun_camera.project(gaussian.position)
+-        
+-        # Compute covariance in light space
+-        # NOTE: Do NOT expand covariance by 0.3*I
+-        # NOTE: Do NOT apply amplitude compensation
+-        cov_light = transform_covariance(gaussian.covariance, sun_camera.rotation)
+-        
++        pos_light = sun_camera.project(g.position)
++        # Transform covariance: do NOT expand by 0.3*I, do NOT apply amplitude compensation [S1, unofficial]
++        cov_light = transform_covariance_2d(g.covariance_3d, sun_camera.rotation_matrix)
+         # Compute coverage and alpha
+-        alpha = compute_gaussian_alpha(pos_light, cov_light, gaussian.opacity)
+-        
+-        # Accumulate front tau
+-        # Weighted by alpha * T (transmittance from previous steps)
+-        # This is an energy-weighted mean over the footprint
+-        tau_contribution = alpha * gaussian.density * gaussian.scale_factor
+-        
+-        # Update transmittance
+-        # T_light = exp(-tau)
+-        t_light_buffer[gaussian.id] = compute_transmittance(tau_contribution)
+-        
+-    # 5. Handle Deep Occlusion
+-    # Map deeply buried Gaussians (wsum ~ 0) to full shadow
+-    for gaussian in gaussians:
+-        if t_light_buffer[gaussian.id] < threshold:
+-            t_light_buffer[gaussian.id] = 0.0
+-            
++        alpha = evaluate_2d_gaussian(pos_light, cov_light, g.opacity)
++        # Accumulate front tau weighted by alpha * T
++        # Energy-weighted mean over footprint, not center-point [S1, unofficial]
++        tau_contribution = alpha * g.density * g.scale_factor
++        # Update transmittance and tau
++        g.tau_accum += tau_contribution
++        g.transmittance_accum *= exp(-tau_contribution)
++    # 5. Shadow Application & Pitfall Handling
++    for g in gaussians:
++        t_light_buffer[g.id] = exp(-g.tau_accum)
++        # Deeply buried Gaussians (early-termination resulting in wsum=0)
++        # are explicitly mapped to full shadow to prevent inversion artifacts [S1, unofficial]
++        if t_light_buffer[g.id] < 1e-6:
++            t_light_buffer[g.id] = 0.0
+     return t_light_buffer
++
++# Standard helper operations
++def dot(v1, v2): return sum(a * b for a, b in zip(v1, v2))
++def exp(x): return math.exp(x)
++def transform_covariance_2d(cov_3d, rot_mat): return rot_mat[:2, :2] @ cov_3d[:2, :2] @ rot_mat[:2, :2].T
++def evaluate_2d_gaussian(pos, cov, opacity): return opacity * exp(-0.5 * dot(pos, pos)) / (2 * math.pi * math.sqrt(max(cov[0][0] * cov[1][1] - cov[0][1]**2, 1e-8)))
+ ```
+ 
+ **Parameters:**
+-*   **Sun Camera FOV:** Narrow, to approximate parallel rays.
+-*   **Sun Camera Distance:** Large, to minimize parallax.
++*   **Sun Camera FOV:** Narrow, to approximate parallel rays [S1, unofficial].
++*   **Sun Camera Distance:** Large, to minimize parallax [S1, unofficial].
+ *   **Covariance Expansion:** None (0.0) for this pass [S1, unofficial].
+ *   **Amplitude Compensation:** None [S1, unofficial].
+@@ -92,12 +84,12 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N \log N)$ for sorting, $O(N)$ for rasterization, where $N$ is the number of Gaussians.
+-*   **Memory Complexity:** $O(N)$ for storing $T_{light}$ and sorted indices.
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
+ *   **Performance:** Provides full continuous gradients and zero expansion by default, which is more accurate than voxel fallbacks [S1, unofficial].
+-*   **Strengths:** Physically plausible self-shadowing, differentiable, no need for specific training parameters like voxelization.
+-*   **Limitations:** Requires an additional rasterization pass. Sensitive to sun camera placement (parallax error).
++*   **Strengths:** Physically plausible self-shadowing, differentiable, no need for specific training parameters like voxelization [S1, unofficial].
++*   **Limitations:** Requires an additional rasterization pass [G]. Sensitive to sun camera placement (parallax error) [S1, unofficial].
+ 
+ ## Background
+-This method is part of the 4DGS-Volume-Cloud framework for rendering volumetric clouds with 3D Gaussian Splatting. It enables relighting and self-shadowing, which are not possible with pure emission SH reconstruction (VPRF) [S1, unofficial]. The method was introduced in the context of training on datasets like `CloudDatasetUniform` with held-out sun directions for generalization testing [S1, unofficial].
++This method is part of the 4DGS-Volume-Cloud framework for rendering volumetric clouds with 3D Gaussian Splatting [S1, unofficial]. It enables relighting and self-shadowing, which are not possible with pure emission SH reconstruction (VPRF) [S1, unofficial]. The method was introduced in the context of training on datasets like `CloudDatasetUniform` with held-out sun directions for generalization testing [S1, unofficial].
+ 
+ ## Sources

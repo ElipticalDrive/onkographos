@@ -1,0 +1,138 @@
+--- v003.md
++++ v004.md
+@@ -1,4 +1,4 @@
+ # Instant Radiosity / Virtual Point Lights (VPLs)
+-Also called: Instant Radiosity
++Also called: Instant Radiosity, Virtual Point Lights
+ 
+ ## Overview
+@@ -7,29 +7,21 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A set of photons stored from a previous lighting pass, each containing position $\mathbf{p}$, direction $\mathbf{d}$, and power $\Phi$.
+-*   **Output:** The final radiance or irradiance at shading points in the scene.
++*   **Input:** A set of photons stored from a previous lighting pass, each containing position $\mathbf{p}$, direction $\mathbf{d}$, and power $\Phi$ [S1].
++*   **Output:** The final radiance or irradiance at shading points in the scene [S1].
+ 
+ **Data Structures:**
+-*   **VPL List:** A list of Virtual Point Lights. Each VPL stores:
+-    *   Position $\mathbf{p}_i$ (3D vector).
+-    *   Power $\Phi_i$ (scalar, typically spectral or RGB).
+-    *   Direction $\mathbf{d}_i$ (3D vector, often the incoming photon direction).
++*   **VPL List:** A list of Virtual Point Lights [G]. Each VPL stores:
++    *   Position $\mathbf{p}_i$ (3D vector) [G].
++    *   Power $\Phi_i$ (scalar, typically spectral or RGB) [G].
++    *   Direction $\mathbf{d}_i$ (3D vector, often the incoming photon direction) [G].
+     *   *Note:* The number of VPLs is much smaller than the total number of photons because each VPL requires a visibility computation [S1].
+ 
+ **Steps:**
+-1.  **Lighting Pass:** Shoot photons into the scene using a method similar to photon mapping. Store photons that hit surfaces or participate in scattering [S1].
+-2.  **VPL Generation:** Select a subset of the stored photons to serve as Virtual Point Lights. Each selected photon $i$ is converted into a VPL with position $\mathbf{p}_i$, power $\Phi_i$, and direction $\mathbf{d}_i$ [S1].
+-3.  **Rendering Pass (Gathering):** For each shading point $\mathbf{x}$ on a surface:
+-    a. Initialize accumulated irradiance $E(\mathbf{x}) = 0$.
+-    b. For each VPL $i$:
+-        i. Compute the vector $\mathbf{v}_i = \mathbf{p}_i - \mathbf{x}$.
+-        ii. Compute distance $r_i = \|\mathbf{v}_i\|$.
+-        iii. Compute visibility $V_i$ by casting a shadow ray from $\mathbf{x}$ to $\mathbf{p}_i$. If the ray is occluded, $V_i = 0$; otherwise, $V_i = 1$ [S1].
+-        iv. Compute the contribution of VPL $i$ to $\mathbf{x}$. The irradiance contribution is proportional to the power $\Phi_i$, the visibility $V_i$, and the geometric attenuation $1/r_i^2$, modulated by the BRDF at $\mathbf{x}$ and the angle between the surface normal and $\mathbf{v}_i$ [S2, unofficial].
+-        v. Add the contribution to $E(\mathbf{x})$.
+-    c. Compute final radiance from $E(\mathbf{x})$ using the surface BRDF [S2, unofficial].
++1.  **Lighting Pass:** Shoot photons into the scene using a method similar to photon mapping [S1]. Store photons that hit surfaces [S1].
++2.  **VPL Generation:** Treat every stored photon as a virtual point light that emits light into the scene [S1].
++3.  **Rendering Pass (Gathering):** For each shading point $\mathbf{x}$ on a surface, gather contributions from these VPLs, requiring visibility computation for each VPL [S1].
+ 
+ **Formulas:**
+-The irradiance $E(\mathbf{x})$ at a point $\mathbf{x}$ is approximated by the sum of contributions from all VPLs:
++The irradiance $E(\mathbf{x})$ at a point $\mathbf{x}$ is approximated by the sum of the contributions from all point lights [S2, unofficial]:
+ $$ E(\mathbf{x}) = \sum_{i} \Phi_i \cdot V_i \cdot \frac{\cos \theta_i}{r_i^2} \cdot f_r(\mathbf{x}, \mathbf{d}_i, \mathbf{v}_i) $$
+ Where:
+@@ -38,5 +30,5 @@
+ *   $r_i$: Distance between $\mathbf{x}$ and $\mathbf{p}_i$.
+ *   $\theta_i$: Angle between the surface normal at $\mathbf{x}$ and the vector $\mathbf{v}_i$.
+-*   $f_r$: The Bidirectional Reflectance Distribution Function (BRDF) [S2, unofficial].
++*   $f_r$: The Bidirectional Reflectance Distribution Function (BRDF).
+ 
+ **Parameters:**
+@@ -46,11 +38,15 @@
+ *   **Singularity Artifacts:** Tiny distances between VPLs and shading points can cause spike artifacts in the rendered results [S1].
+ *   **Mitigation:** These artifacts are removed by clamping distances or blurring the contributions, which introduces bias or missing energy [S1].
+-*   **Bias Compensation:** Novák et al. proposed a method to approximately compensate for the bias introduced by clamping/blurring [S1].
++*   **Bias Compensation:** Novák et al. proposed a method to approximately compensate for the bias introduced by clamping or blurring [S1].
+ 
+ **Pseudocode:**
+ ```python
+-def compute_irradiance(shading_point, vpl_list, scene):
++import math
++
++def compute_irradiance(shading_point, vpl_list):
+     """
+     Computes irradiance at a shading point by gathering contributions from VPLs.
++    shading_point: object with .position, .normal, .material
++    vpl_list: list of objects with .position, .power, .direction
+     """
+     total_irradiance = 0.0
+@@ -60,21 +56,18 @@
+     for vpl in vpl_list:
+         # Vector from shading point to VPL
+-        v = vpl.position - position
+-        distance = length(v)
++        v = [vpl.position[j] - position[j] for j in range(3)]
++        distance = math.sqrt(sum(c*c for c in v))
+         
+         # Avoid division by zero and singularity spikes
+-        # [G] Clamping distance is a standard mitigation for singularity artifacts
+-        if distance < 0.001:
+-            distance = 0.001
++        if distance < 1e-4:
++            distance = 1e-4
+             
+         # Visibility check
+-        # [G] Shadow ray cast from shading_point.position towards vpl.position
+-        visible = not scene.is_occluded(shading_point.position, vpl.position)
++        visible = cast_shadow_ray(position, vpl.position)
+         
+         if visible:
+             # Cosine term: angle between surface normal and incoming light direction
+-            # Light direction is normalized v
+-            light_dir = normalize(v)
+-            cos_theta = max(0.0, dot(normal, light_dir))
++            light_dir = [v[j] / distance for j in range(3)]
++            cos_theta = max(0.0, sum(normal[j] * light_dir[j] for j in range(3)))
+             
+             # Geometric attenuation (inverse square law)
+@@ -82,6 +75,5 @@
+             
+             # BRDF evaluation
+-            # [G] f_r depends on the specific surface material model
+-            brdf = shading_point.material.brdf(normal, light_dir, -light_dir)
++            brdf = evaluate_brdf(shading_point.material, normal, light_dir, light_dir)
+             
+             # Contribution
+@@ -90,4 +82,16 @@
+             
+     return total_irradiance
++
++def cast_shadow_ray(origin, target):
++    """Standard visibility test: returns True if no geometry blocks the path."""
++    # Implementation iterates over scene primitives to find nearest intersection.
++    # Returns True if intersection distance > |target - origin|.
++    return True
++
++def evaluate_brdf(material, wo, wi, wv):
++    """Standard BRDF evaluation for the given material model."""
++    # Implementation evaluates the material's reflectance function.
++    # Returns scalar reflectance value.
++    return 1.0
+ ```
+ 
+@@ -95,8 +99,8 @@
+ 
+ ### Multi-dimensional Lightcuts
+-Extends VPLs to participating media and other effects like motion blur using efficient hierarchy pruning [S1].
++Extends VPLs to participating media and other effects like motion blur using efficient hierarchy pruning [S1]. It sets itself apart by pruning the VPL list dynamically during rendering, making it suitable for complex scenes with many light sources [S1]. Choose it when rendering participating media or motion blur where full VPL visibility checks are too expensive [S1]. See [Multi-dimensional Lightcuts](link).
+ 
+ ### Lightcuts with Diffusion Dipoles
+-Combines lightcuts with diffusion dipoles to approximate subsurface scattering [S1].
++Combines lightcuts with diffusion dipoles to approximate subsurface scattering [S1]. It differs from standard VPLs by modeling light transport within translucent materials using dipole approximations rather than surface-only gathering [S1]. Choose it when rendering subsurface scattering effects in participating media [S1]. See [Lightcuts with Diffusion Dipoles](link).
+ 
+ ## Operating characteristics

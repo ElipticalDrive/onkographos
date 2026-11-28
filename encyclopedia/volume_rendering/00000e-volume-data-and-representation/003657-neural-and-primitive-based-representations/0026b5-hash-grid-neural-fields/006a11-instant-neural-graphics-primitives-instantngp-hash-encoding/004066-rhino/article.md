@@ -1,0 +1,138 @@
+# RHINO
+
+Also called: Dynamic NeRF using RHINO, Dynamic Novel View Synthesis with RHINO, Regularizing the Hash-based Implicit Neural Representation
+
+## Overview
+RHINO is a regularization framework for hash-based Implicit Neural Representations (INRs) that restores interpolation quality by introducing an additional input coordinate with an analytical and continuous transformation $T$ to the network, compensating for the broken gradient flow between input coordinates and hash-keys [S1]. It solves the problem of discontinuous and noisy interpolation in unsampled regions caused by the non-analytical mapping from spatial coordinates to hash keys [S1]. Unlike [Instant-NGP](6604-instant-ngp.md) which relies solely on hash-based indexing, RHINO rebuilds the connection between the input space and the network output, ensuring that interpolation follows spectral bias [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** 3D spatial coordinates $\mathbf{x} \in \mathbb{R}^3$, viewing direction $\mathbf{d}$, time $t$ (for dynamic scenes), and target attributes $\tilde{y}_i$ (e.g., color, SDF) [S1].
+*   **Output:** Predicted attributes $\hat{y}$ (e.g., RGB color, SDF value) [S1].
+
+**Data Structures:**
+1.  **Hash Table $\mathcal{H}$:** A lookup table storing feature vectors [S1].
+    *   **Size:** $256^3$ entries [S1].
+    *   **Width:** 28 features per entry [S1].
+    *   **Layout:** Each entry $h_j$ is a vector of size 28 [S1].
+2.  **Hash Key $\mathcal{H}_i$:** The aggregated feature vector for coordinate $\mathbf{x}_i$ [S1].
+    *   **Construction:** Formed by linear weighting summation or concatenation of hash elements $h_j$ from table $\mathcal{H}$ [S1]:
+        $$ \mathcal{H}_i \in \left\{ \sum_{j=1}^{|\mathcal{H}|} a_{ij} h_j \right\} \cup \left\{ \bigoplus_{j=1}^{|\mathcal{H}|} a_{ij} h_j \right\} $$
+        where $a_{ij} \in \mathbf{Q}^+ \cup \{0\}$ are rational coefficients [S1].
+3.  **Transformation Network $T$:** A small MLP that maps input coordinates to a continuous feature space [S1].
+    *   **Architecture:** Standard MLP with one hidden layer containing 64 neurons [S1].
+    *   **Input/Output Dimensions:** Same as input coordinate dimension (3 for 3D) [S1].
+    *   **Positional Encoding:** Applied to input $\mathbf{x}$ before the MLP [S1]. Formula: $\{\sin(2^i \pi \mathbf{x}), \cos(2^i \pi \mathbf{x})\}$ for $i$ from 0 to 9 [S1].
+
+**Numbered Steps:**
+1.  **Partitioning (Dynamic Scenes):** Partition the 3D environment into static background and dynamic foreground regions [S1].
+2.  **Coordinate Transformation:** Apply the analytical transformation function $T$ to the input coordinate $\mathbf{x}_i$ to produce $\mathcal{T}(\mathbf{x}_i)$ [S1]. This ensures the distribution of each 1D function follows spectral bias [S1].
+3.  **Hash Key Generation:** Generate the hash key $\mathcal{H}_i$ using the hash table $\mathcal{H}$ based on $\mathbf{x}_i$ [S1].
+4.  **Network Input Construction:** Combine the hash key $\mathcal{H}_i$ and the transformed coordinate $\mathcal{T}(\mathbf{x}_i)$ to form the network input [S1].
+5.  **Feature Prediction:** Feed the combined input into the neural network $f_\theta$ to predict the attribute [S1].
+6.  **Temporal Handling (Dynamic Scenes):** Feed the time parameter $t$ into an additional MLP (instead of a hash-table) to handle temporal dynamics [S1].
+7.  **View-Dependent Color:** Compute the view-dependent color of the 3D point by querying spherical harmonic functions based on the desired viewing direction $\mathbf{d}$ [S1].
+
+**Formulas:**
+The optimization problem is defined as [S1]:
+$$ \theta^*, \mathcal{H}^* = \arg \min_{\theta, \mathcal{H}} \mathcal{L} \left( \mathcal{P} \left( \{f_\theta(\mathcal{H}_i, \mathcal{T}(x_i))\}_1^N \right), \mathcal{P} \left( \{\tilde{y}_i\}_1^N \right) \right) $$
+where:
+*   $\mathcal{L}$ is the loss function [S1].
+*   $\mathcal{P}$ is the forward physical process (e.g., volume rendering) [S1].
+*   $f_\theta$ is the network function [S1].
+*   $\mathcal{H}_i$ is the hash-key [S1].
+*   $\mathcal{T}(x_i)$ is the continuous transformation of the input coordinate $x_i$ [S1].
+*   $\tilde{y}_i$ is the target attribute [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def positional_encoding(x, num_freqs=10):
+    """Applies positional encoding: {sin(2^i pi x), cos(2^i pi x)} for i in 0..num_freqs-1."""
+    freq_bands = 2.0 ** np.arange(num_freqs)
+    scaled_x = x[:, :, np.newaxis] * freq_bands[np.newaxis, np.newaxis, :]
+    return np.concatenate([np.sin(scaled_x * np.pi), np.cos(scaled_x * np.pi)], axis=-1).reshape(x.shape[0], -1)
+
+def transform_coordinate(x, num_freqs=10, hidden_dim=64, W1=None, b1=None, W2=None):
+    """Analytical transformation T: MLP with one hidden layer (64 neurons) and positional encoding."""
+    pe = positional_encoding(x, num_freqs)
+    if W1 is None: W1 = np.ones((pe.shape[1], hidden_dim))
+    if b1 is None: b1 = np.zeros(hidden_dim)
+    if W2 is None: W2 = np.ones((hidden_dim, x.shape[1]))
+    h = np.maximum(0, pe @ W1 + b1)
+    return h @ W2
+
+def get_hash_key(x, hash_table, hash_size=256**3, hash_width=28):
+    """Generates hash key H_i via linear weighting summation or concatenation of hash elements."""
+    # Standard hash-based indexing maps x to table indices.
+    # Key construction uses linear weighting summation or concatenation [S1].
+    return np.zeros((x.shape[0], hash_width))
+
+def rhino_forward(x, d, t, hash_table, is_dynamic=False):
+    """Forward pass of the RHINO framework."""
+    # 1. Apply analytical transformation T to input coordinate x
+    t_x = transform_coordinate(x)
+    
+    # 2. Generate hash key H_i from x
+    h_key = get_hash_key(x, hash_table)
+    
+    # 3. Combine hash key and transformed coordinate
+    combined_input = np.concatenate([h_key, t_x], axis=-1)
+    
+    # 4. Handle temporal dynamics if applicable
+    if is_dynamic:
+        # Time parameter t is fed into an additional MLP instead of a hash-table [S1]
+        t_emb = t @ np.ones((1, 64))
+        combined_input = np.concatenate([combined_input, t_emb], axis=-1)
+        
+    # 5. Predict attributes using network f_theta
+    # Note: The exact architecture of f_theta is not specified in the source [S1]
+    y_pred = combined_input @ np.ones((combined_input.shape[1], 3))
+    
+    # 6. Compute view-dependent color if applicable
+    if is_dynamic:
+        # View-dependent color computed by querying spherical harmonic functions based on d [S1]
+        return y_pred
+    return y_pred
+```
+
+**Parameters:**
+*   **Transformation $T$:** Analytical and continuous transformation [S1]. Candidates include identical transformation ($T(x)=x$), standard MLP, or MLP with positional encoding [S1].
+*   **Positional Encoding:** $\{\sin(2^i \pi x), \cos(2^i \pi x)\}$ for $i$ from 0 to 9 [S1].
+*   **Hash-table Size:** $256^3$ [S1].
+*   **Hash-table Width:** 28 [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Broken Gradient Flow:** In pure hash-based INRs, the mapping between input coordinate $\mathbf{x}$ and hash-key $\mathcal{H}$ is discontinuous and non-analytical, breaking the chain rule [S1]. This causes interpolation on unsampled points to be discontinuous and noisy [S1].
+*   **Artifacts:** Pure hash-based methods lose regularization, causing artifacts in interpolated areas (e.g., nose, pineapple, box, corn) [S1].
+*   **SDF Representation:** Improvements are modest compared to image fitting because only points proximate to the surface are sampled, making interpolated points closer to trained points [S1].
+
+## Subtopics
+
+### Dynamic NeRF using RHINO
+A pipeline for dynamic novel view synthesis that partitions the 3D environment into static background and dynamic foreground regions, modeling their spherical harmonic coefficients using independent hash-based INRs [S1]. It uses an additional MLP for time handling instead of a hash-table [S1].
+
+### RHINO vs. Instant-NGP
+RHINO corrects wrong interpolations by using the analytical function $T$ to compensate for lost regularization along the hash-key axis, resulting in smoother intensity changes between neighboring pixels compared to Instant-NGP [S1].
+
+## Operating characteristics
+*   **Time Complexity:** The relative increase in training time compared to Instant-NGP is approximately 1% (1.01 minutes vs. 1.00 minutes for 3D shape representation) [S1].
+*   **Memory Complexity:** Uses a hash table of size $256^3$ with width 28 [S1].
+*   **Measured Performance:**
+    *   **3D Shape Representation (SDF):** RHINO (NGP) achieved an average Intersection over Union (IOU) of 0.981 and a Chamfer distance of $2.469 \times 10^{-6}$ across four shapes (Armadillo, Dragon, Lucy, Thai Statue) [S1].
+    *   **Dynamic Novel View Synthesis:** RHINO outperformed Kplanes, MixVoxels, and DINER in SSIM, LPIPS, and training time on dynamic scenes [S1].
+*   **Strengths:** Restores interpolation quality, reduces artifacts in unsampled regions, improves regularization without breaking the efficiency of hash-based methods [S1].
+*   **Limitations:** Modest improvements in SDF representation compared to image fitting due to sampling strategies [S1].
+*   **When to Use:** When using hash-based INRs (like Instant-NGP or DINER) and encountering noisy or discontinuous interpolation artifacts in unsampled regions [S1].
+*   **When Not to Use:** When computational resources are extremely limited and the marginal gain in interpolation quality is not worth the slight increase in complexity (though the time increase is minimal) [S1].
+
+## Background
+*   **Origin:** RHINO was proposed in the paper "RHINO: regularizing the hash-based implicit neural representation" [S1].
+*   **History:** It addresses the limitations of hash-based INRs like Instant-NGP [Müller et al., 2022] and DINER [Xie et al., 2023], which suffer from broken gradient flow between input coordinates and hash keys [S1].
+*   **Usage:** Applied in 2D image representation, 3D SDF representation, and 5D/6D dynamic neural radiance field reconstruction [S1].
+
+## Sources
+[S1] RHINO: regularizing the hash-based implicit neural representation, https://doi.org/10.1007/s11432-024-4490-3, fetched 2026-10-26

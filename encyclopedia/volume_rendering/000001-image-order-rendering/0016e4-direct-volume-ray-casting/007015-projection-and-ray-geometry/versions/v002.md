@@ -1,0 +1,47 @@
+# Projection and Ray Geometry
+
+Also called: Ray Definition, Camera Model, Projection Types
+
+## Overview
+Projection and Ray Geometry defines the mathematical relationship between the 3D volume data and the 2D image plane by establishing the origin, direction, and traversal parameters of the rays used in direct volume ray casting [G]. It solves the problem of mapping pixel coordinates to volumetric space, determining which voxels contribute to which pixels [G]. It is distinguished from sibling methods by its foundational role: while [Standard Ray Casting](12643-standard-ray-casting.md) implements the sampling loop, this family defines the coordinate systems (perspective vs. parallel) and ray generation logic that precede sampling [G].
+
+## Shared principles
+All direct volume ray casting methods share the following core mechanism:
+
+1.  **Ray Definition**: For each pixel $(x, y)$ in the image plane, a ray $r(t) = \mathbf{o} + t\mathbf{d}$ is defined, where $\mathbf{o}$ is the camera origin and $\mathbf{d}$ is the viewing direction [G]. The ray is intersected with the volume bounding box to determine the entry parameter $t_{near}$ and exit parameter $t_{far}$ [G].
+2.  **Sampling**: The ray segment $[t_{near}, t_{far}]$ is discretized into $N$ samples at positions $t_i = t_{near} + i \cdot \Delta t$, where $\Delta t = (t_{far} - t_{near}) / N$ [G]. At each sample position $\mathbf{p}_i = r(t_i)$, the scalar volume value $V(\mathbf{p}_i)$ is retrieved, typically via trilinear interpolation of the surrounding voxels [G].
+3.  **Classification (Transfer Function)**: The scalar value $V(\mathbf{p}_i)$ is mapped to optical properties: a color vector $\mathbf{c}_i$ (RGB) and an opacity scalar $\alpha_i$ (A) [G]. This mapping is defined by a transfer function $T(V) \rightarrow (\mathbf{c}, \alpha)$ [S1]. The opacity is often corrected for the step size $\Delta t$ to approximate continuous attenuation, using models such as Beer-Lambert: $\alpha_i = 1 - e^{-\sigma_i \Delta t}$, where $\sigma_i$ is the extinction coefficient derived from $V(\mathbf{p}_i)$ [G].
+4.  **Compositing (Integration)**: The samples are composited into the final pixel color $\mathbf{C}_{out}$ and accumulated opacity $\alpha_{out}$ using the front-to-back volume rendering equation [G]:
+    $$
+    \mathbf{C}_{out} = \sum_{i=1}^{N} \mathbf{c}_i \alpha_i \prod_{j=1}^{i-1} (1 - \alpha_j)
+    $$
+    $$
+    \alpha_{out} = 1 - \prod_{i=1}^{N} (1 - \alpha_i)
+    $$
+    In iterative form, for each sample $i$:
+    $$
+    \mathbf{C}_{acc} \leftarrow \mathbf{C}_{acc} + (1 - \alpha_{acc}) \cdot \mathbf{c}_i \cdot \alpha_i
+    $$
+    $$
+    \alpha_{acc} \leftarrow \alpha_{acc} + (1 - \alpha_{acc}) \cdot \alpha_i
+    $$
+    where $\mathbf{C}_{acc}$ and $\alpha_{acc}$ are initialized to $(0, 0)$ [G].
+5.  **Shading**: At each sample, a shading model (e.g., Phong, Blinn-Phong) may be applied to compute the base color $\mathbf{c}_i$ based on the local gradient $\nabla V(\mathbf{p}_i)$, which serves as the surface normal [G].
+
+## Subtopics
+
+### [Forward Projection (aTx)](1492-forward-projection-atx.md)
+A composition scheme where interpolated samples are summed to mimic X-ray attenuation, losing depth cues.
+
+### [Forward Mapping](2913-forward-mapping.md)
+An object-order technique projecting voxels directly to the image plane via splatting, relying on traversal order for hidden surface removal.
+
+#### Parallel Projection
+- **Definition**: A ray-tracing projection where every ray follows a trajectory parallel to all other rays, maintaining constant direction and spacing throughout the volume [S1].
+- **Step**: Rays are shot through the spectral cube, and pixel values are calculated based on voxel values encountered along each ray's path. A transfer function combines the sampled voxel values into the final pixel's color and transparency values [S1].
+
+## Background
+The distinction between parallel (orthographic) and perspective projection is fundamental to ray-tracing volume rendering [G]. For a parallel projection, each ray has a trajectory that is parallel to other rays, while for a perspective projection, all ray trajectories diverge from a focal point that corresponds to the observer's eye [S1]. The geometric setup determines how ray origins and directions are computed from camera parameters [G].
+
+## Sources
+[S1] Real-time colouring and filtering with graphics shaders, https://doi.org/10.1093/mnras/stx1676, fetched 2026-10-26

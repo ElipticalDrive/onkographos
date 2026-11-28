@@ -1,0 +1,324 @@
+Embedding Atlas is a tool that provides interactive visualizations for large embeddings. It allows you to visualize, cross-filter, and search embeddings and metadata. - Add end-to-end 3D point cloud support to the embedding view by Imogenmoy · Pull Request #229 · apple/embedding-atlas
+
+Add end-to-end 3D point cloud support to the embedding view by Imogenmoy · Pull Request #229 · apple/embedding-atlas · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Imogenmoy
+commented
+Jul 15, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Summary
+Adds a full 3D point cloud extension to the embedding view — camera-controlled point-cloud
+rendering, picking, and lasso/marquee selection — alongside the existing 2D view, and
+demonstrates it end-to-end with real astronomical data pulled live from
+LSDB (Gaia DR3 and Euclid Q1).
+A chart renders in 3D automatically whenever it has a z field; a "Switch to 2D" / "Switch to
+3D" button below the view lets users flip between a flat projection and the full 3D cloud at
+any time, without losing the current selection/filter state.
+Rebased onto the new embedding pipeline
+Upstream's refactor of the in-browser embedding pipeline (computeEmbedding →
+createEmbeddingProjector / createEmbeddingScorer, with the orchestration moved into
+app/compute_projection.ts) landed while this PR was open, so the 3D path has been ported
+to the new structure:
+EmbeddingProjector.umap() takes an outputDim: number = 2 param, passed as the 3rd
+argument to createUMAP() instead of the hardcoded 2.
+computeProjection() takes an optional zColumn, derives
+outputDim = zColumn != null ? 3 : 2, and conditionally ALTER TABLE / UPDATEs the z
+column in the SQL write-back.
+FileViewer.svelte passes zColumn through, computed from
+spec.embedding.compute.dimensions === 3.
+embedding/index.ts and embedding.worker.ts are upstream's versions unmodified — no
+3D-specific code belongs in either file anymore.
+History is also cleaned up: rebased onto current main, no merge commits, no unrelated
+README changes, and the demo .parquet binaries are gitignored rather than committed.
+What's included
+3D view (packages/component)
+EmbeddingView3D / EmbeddingView3DMosaic: a three.js-based 3D point cloud view (orbit/pan/
+zoom with damping, auto-fit on first load only, reset-camera button, fly-to animation on
+point focus), wired into the standard Mosaic cross-filter/selection machinery the same way
+the 2D view is.
+Hover tooltip + click-to-select (raycaster-based picking) that highlights the point and jumps
+to its row in the data table.
+Marquee/lasso drag-select in 3D screen space, resolved to a real SQL filter (via row
+identifier when available, coordinate matching otherwise) and applied through Mosaic —
+visible immediately in histograms and the data table. Since 3D has no persistent brush
+outline to redraw as the camera moves, an active filter shows a "Filter active" badge in the
+status bar instead.
+Cone-of-view (camera-frustum) culling for large datasets: idle-scheduled, chunked, cancellable
+downsampling (downsample_3d.ts, reservoir-sampled) so panning a large point cloud stays
+responsive. Points render as anti-aliased circles (canvas-generated sprite texture) at a
+density-aware size (scaled to average inter-point spacing, not just bounding radius), matching
+the look of the 2D view.
+Bundle size: three.js is not a static import. It's dynamically imported inside onMount,
+only once a 3D view actually mounts, so 2D-only sessions never download it — confirmed via a
+built-output check (main chunk 870KB → 244KB, three.js split into its own 871KB chunk fetched
+on demand) and a live network-request check (2D session: zero three.js requests).
+Backend (packages/backend)
+--z <column> (precomputed 3D coordinate) and --umap-n-components 3 CLI flags, threaded
+through compute_projection/async_compute_projection and EmbeddingAtlasOptions.
+In-browser (Transformers.js/WASM) embedding pipeline also supports computing a 3D UMAP
+projection, exposed via a "Compute a 3D projection" option in the settings/chart-builder UI.
+Testing
+New packages/component/test/downsample_3d.test.ts (vitest, 7 cases): frustum culling,
+maxPoints cap, multi-chunk idle scheduling, empty-dataset and isStale-cancellation edge
+cases. downsample_3d.ts itself was decoupled from three.js (a structural FrustumLike
+interface instead of THREE.Frustum) so the algorithm is testable without a three.js
+dependency at all.
+New packages/backend/tests/test_projection.py cases for the 3D projection path.
+Demo: real LSDB astronomical data
+Two independent real catalogs, fetched live from LSDB's public HATS server
+(server.data.lsdb.io), demonstrate the feature end-to-end:
+Gaia DR3: a 9°-radius cone search (~357k raw stars), thinned via a single 3D ellipsoidal
+Gaussian (not independent per-axis falloffs, which produced an unrealistic, lumpy shape) down
+to ~5,340 stars, with positional jitter to blur out real small-scale catalog structure that
+thinning alone can't remove.
+Example screenshots:3D/2D
+Euclid Q1: the EDF-North deep field (~9,733 raw objects → ~1,720 after the same
+thinning), using a brightness-based Z-depth proxy (documented as such — Euclid Q1's base
+catalog has no distance/redshift column, this is a visualization convenience, not a real
+measurement).
+Example screenshots:
+Fetch/prep scripts (get_real_stars.py, prepare_stars_parquet.py, get_euclid_data.py,
+prepare_euclid_xyz.py) regenerate the demo data locally on demand — the generated .parquet
+files themselves are gitignored, not committed.
+Status & testing
+npm run check (component + viewer + embedding-atlas + examples + backend): 0 errors.
+npm run test:js (includes the new packages/component vitest suite): all passing (7/7 new
+cases).
+packages/backend pytest suite: passing, including 2 new 3D-projection cases.
+Manual/automated browser verification (headless Chromium, software WebGL): both real datasets
+load with zero console/page errors; hover tooltip, click-to-select → table row, camera reset,
+marquee-lasso → Mosaic filter → "Filter active" badge, and the 2D/3D toggle (preserving the
+active selection across the switch) all verified working against live data.
+The in-browser compute-a-3D-projection path was exercised end-to-end through the new
+EmbeddingProjector, producing distinct _proj_x/y/z per row and a correctly-rendered 3D
+chart. Caveat: my environment can't run real UMAP WASM or transformer inference, so those two
+were stubbed for that run — the wiring and data flow are verified, but the actual
+outputDim = 3 UMAP output would benefit from a check in a real environment.
+Points render as soft anti-aliased circles (canvas sprite texture + alphaTest), not the WebGL
+default hard-edged squares, matching the 2D view's look.
+Development note
+Not yet run against the full test:rust/Cargo suite (no Rust code touched by this change, so
+not expected to be affected).
+The 3D feature is purely additive (new components/files + a few threaded-through optional
+parameters); no existing 2D code paths were removed or restructured, and 2D remains the
+default when no z field/column is present.
+domoritz
+marked this pull request as draft
+July 15, 2026 20:33
+Imogenmoy
+and others
+added 8 commits
+August 7, 2026 18:14
+Implement star data retrieval and processing
+…
+9839b6a
+```
+Connects to LSDB Gaia DR3, performs a cone search for stars, filters and classifies them, and saves the results to a Parquet file.
+```
+feat: add 3D embedding view support with real LSDB star data
+…
+87fe129
+```
+Adds a three.js-based 3D point cloud renderer (EmbeddingView3D/
+EmbeddingView3DMosaic) alongside the existing 2D WebGPU/WebGL2 view,
+selected automatically when a chart's data has a z column. Includes
+orbit/pan/zoom with inertia, click-to-select (wired into the data
+table), hover tooltips, animated camera reset/focus, cone-of-view
+downsampling (idle-scheduled, cancellable), and a status bar with a
+non-silent active-filter indicator.
+
+Threads an optional --z column through the CLI/backend props and the
+viewer's EmbeddingSpec, and adds real Gaia DR3 star data (via LSDB)
+plus conversion scripts as a live demo dataset.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+```
+feat: UMAP 3D, 3D lasso/marquee selection, Euclid Q1 catalog, density…
+…
+8798021
+```
+…/shape fixes
+
+Backend: --umap-n-components 3 CLI flag threading through compute_projection to
+extract a 3rd UMAP dimension into the z column, with tests.
+
+In-browser UMAP: embedding.worker.ts/index.ts now support a 3D output dimension
+end to end (worker -> setResultColumns), with a "Compute a 3D projection" toggle
+and a Z dropdown in SettingsView.
+
+Chart builder: "Z Field (optional)" selector - picking Z switches a chart to 3D.
+
+3D marquee/lasso selection: drag-to-select in screen space, resolved to a real
+Mosaic filter predicate (identifier or coordinate-based), with a status-bar
+toggle and an active-filter badge (fixed a bug where the badge never updated,
+since Mosaic Selection.clauses isn't Svelte-reactive on its own).
+
+Second real LSDB catalog (Euclid Q1, EDF-North deep field) alongside Gaia DR3,
+demonstrating the 3D view against independently-verified real survey data.
+
+Data density/shape: replaced 2D-sky-plane-plus-independent-Z thinning with a
+single 3D ellipsoidal Gaussian (applied to x, y, z together) plus positional
+jitter, which blurs out real small-scale density structure that a probabilistic
+thin alone can't remove - fixes both "too dense" and an asymmetric notched shape
+that turned out to be genuine structure in this sky field, not a bug. Point
+rendering size is now based on average inter-point spacing rather than just the
+bounding radius, since the camera's auto-fit otherwise cancels out any gain from
+spreading the data over a wider area.
+
+README updated to document the extension end to end.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+```
+perf: lazy-load three.js via dynamic import, add vitest unit tests
+…
+f540986
+```
+Addresses the maintainer's bundle-size concern from PR review: three.js
+(~870KB) was statically imported at the top of EmbeddingView3D.svelte,
+so every user downloaded it even if they never opened a 3D chart.
+
+- EmbeddingView3D.svelte: three.js/OrbitControls are now loaded via
+  dynamic import() inside onMount, only when a 3D view actually mounts.
+  Type annotations stay fully typed via `typeof import("three")` and
+  indexed-access aliases (zero runtime cost); all existing `new THREE.X`
+  call sites are unchanged since they only run after the load resolves.
+- downsample_3d.ts: removed its own static three.js import too (it was
+  imported statically by EmbeddingView3D.svelte, so leaving it would
+  have defeated the code-splitting) by replacing THREE.Frustum/Vector3
+  with minimal structural types (FrustumLike/Point3) - a real
+  THREE.Frustum still satisfies FrustumLike with no cast needed, and
+  this makes the algorithm trivially unit-testable with no three.js
+  dependency at all.
+- Confirmed via build output: dist/index.js dropped from 870KB to
+  244KB, with three.module-*.js (871KB) and OrbitControls-*.js (23KB)
+  now separate, lazily-fetched chunks. Verified live in a browser that
+  the chunk is fetched exactly when a 3D chart mounts, and re-ran the
+  full functional regression suite (hover, click-to-select, camera
+  reset, marquee selection -> Mosaic filter) with no errors.
+- Added vitest to packages/component for the first time (mirroring
+  packages/utils's config, wired into the root test:js script) with 7
+  unit tests for the downsampling algorithm: frustum culling,
+  maxPoints capping, multi-chunk idle-scheduled processing, isStale
+  cancellation, and empty/all-visible edge cases.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+```
+fix: render 3D points as anti-aliased circles instead of squares
+…
+4739d94
+```
+Apply a canvas-generated radial-gradient sprite texture (with alphaTest)
+to both PointsMaterial instances so the point cloud matches the smooth,
+round look of the 2D view instead of WebGL's hard-edged square points.
+The texture is generated once, lazily alongside three.js, and reused
+across geometry rebuilds.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+```
+fix: LSDB _healpix_29 sets the DataFrame index, not a column
+…
+b7816ca
+```
+cone.compute() returns an LSDB NestedFrame with `_healpix_29` (an internal
+spatial-partitioning index) as the DataFrame's *index*, not a column -
+`df.drop(columns=["_healpix_29"], errors="ignore")` silently no-ops on it,
+and to_parquet() then serializes the named index back as a real column.
+Its int64 values exceed JavaScript's safe integer range (2^53), crashing
+the viewer's Arrow/BigInt-to-Number conversion and leaving the data table
+stuck on "Loading...".
+
+Reset the index and convert to a plain pandas DataFrame (NestedFrame's
+to_parquet override doesn't accept index=False) before writing, in both
+fetch scripts and their derived xyz-parquet writers.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+```
+chore: gitignore generated .parquet demo data
+…
+80f55f2
+```
+Keeps the demo .parquet files (regenerable locally via the LSDB fetch
+scripts) out of git tracking, consistent with the rest of this history.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+```
+feat: thread EmbeddingView3D/EmbeddingView3DMosaic through the public…
+…
+6a5668a
+```
+… embedding-atlas package
+
+The 3D components were exported from @embedding-atlas/component but never
+re-exported through the top-level embedding-atlas package (component.ts,
+svelte/index.js, and the thin per-component wrapper files that the rest of
+EmbeddingView/EmbeddingViewMosaic already had), so consumers of the public
+package - including our own examples app - couldn't actually reach them.
+
+Also fixes EmbeddingView3DExample.svelte, which was reaching directly into
+component's raw src/ (violating the package boundary and breaking svelte-check's
+composite-project file list) instead of importing through embedding-atlas/svelte
+like every other example does, and hardens its stars-data $derived against a
+narrowing edge case (stars != null in a ternary was resolving to type never in
+this package's stricter tsconfig) with an explicit local-binding early return.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+```
+Imogenmoy
+force-pushed
+the
+main
+branch
+from
+ee2b5b7 to
+6a5668a
+Compare
+August 7, 2026 10:56
+Imogenmoy
+marked this pull request as ready for review
+August 7, 2026 17:55
+Imogenmoy
+marked this pull request as draft
+August 7, 2026 18:03
+Imogenmoy
+marked this pull request as ready for review
+August 7, 2026 18:11
+Imogenmoy
+commented
+Aug 8, 2026
+Copy link
+Copy Markdown
+Author
+@domoritz Rebased this onto current main — conflicts are resolved and it's out of draft now.
+The embedding-pipeline refactor (computeEmbedding → createEmbeddingProjector /
+computeProjection) landed while this was open, so the 3D path is ported to the new
+structure: EmbeddingProjector.umap() takes an outputDim param instead of the hardcoded
+2, and computeProjection() handles an optional zColumn. I also cleaned up the history —
+no merge commits, no unrelated README changes, and the demo .parquet files are gitignored
+rather than committed.
+npm run check, test:js, and the backend pytest suite all pass. Screenshots are in the
+description. One caveat noted there: my environment can't run real UMAP WASM inference, so
+that part was stubbed in the browser test — worth a look on your end.
+This branch has not been deployed
+No deployments
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

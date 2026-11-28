@@ -1,0 +1,328 @@
+--- v001.md
++++ v002.md
+@@ -4,47 +4,19 @@
+ 
+ ## Overview
+-The FastGS CUDA Rasterizer is a differentiable, tile-based rasterization backend for 3D Gaussian Splatting [S1, unofficial]. It extends the original differentiable Gaussian rasterizer by introducing optimized memory access patterns via radix sorting and bucket-based parallel blending, along with support for additional buffers such as `sampleBuffer` and `accum_metric_counts` [S1, unofficial]. It distinguishes itself from standard implementations by explicitly managing tile ranges and bucket offsets to reduce memory contention during the blending phase [S1, unofficial].
++The FastGS CUDA Rasterizer is a CUDA-accelerated differentiable rasterization method for 3D Gaussians [S1, unofficial]. It extends the original differentiable Gaussian rasterization with support for additional buffers (`sampleBuffer`, `accum_metric_counts`) and debug modes [S1, unofficial]. It distinguishes itself from standard implementations by using tile-based binning, radix sorting, and bucket-based parallel blending to optimize memory access and compute throughput [S1, unofficial].
+ 
+ ## How it works
+ ### Inputs and Outputs
+-**Inputs:**
+-*   `means3D`: Tensor of shape $(N, 3)$, 3D Gaussian centers.
+-*   `colors_precomp`: Tensor of shape $(N, 3)$ or $(N, C)$, precomputed colors. If null, `dc` and `sh` are used.
+-*   `opacities`: Tensor of shape $(N, 1)$, Gaussian opacities.
+-*   `scales`: Tensor of shape $(N, 3)$, local scaling factors.
+-*   `rotations`: Tensor of shape $(N, 4)$, local rotations (quaternions).
+-*   `cov3Ds_precomp`: Tensor of shape $(N, 6)$, precomputed 3D covariances (symmetric). If null, `scales` and `rotations` are used.
+-*   `viewmatrix`: $4 \times 4$ view transformation matrix.
+-*   `projmatrix`: $4 \times 4$ projection matrix.
+-*   `tanfovx`, `tanfovy`: Tangents of the horizontal and vertical field of view.
+-*   `image_height`, `image_width`: Output image dimensions.
+-*   `bg`: Background color tensor.
+-*   `scale_modifier`: Float multiplier for opacity/thresholds.
+-*   `dc`: Direct color coefficients (if `colors_precomp` is null).
+-*   `sh`: Spherical Harmonics coefficients (if `colors_precomp` is null).
+-*   `sh_degree`: Degree of SH.
+-*   `campos`: Camera position.
+-*   `metric_map`: Optional integer tensor of size $(H \times W)$ for metric accumulation.
+-*   `mult`: Float multiplier for tile culling thresholds.
+-*   `prefiltered`: Boolean flag.
+-*   `debug`: Boolean flag for error snapshotting.
+-*   `get_flag`: Boolean flag for feature pointer selection.
+-
+-**Outputs:**
+-*   `render`: Rendered image tensor.
+-*   `viewspace_points`: Tensor of shape $(N, 4)$ containing 2D means and gradients.
+-*   `visibility_filter`: Indices of Gaussians with `radii > 0`.
+-*   `radii`: Tensor of visible radii.
+-*   `accum_metric_counts`: Accumulated metric counts per pixel.
++**Inputs:** `means3D`, `colors_precomp`, `opacities`, `scales`, `rotations`, `scale_modifier`, `cov3Ds_precomp`, `metric_map`, `viewmatrix`, `projmatrix`, `tanfovx`, `tanfovy`, `image_height`, `image_width`, `dc`, `sh`, `sh_degree`, `campos`, `mult`, `prefiltered`, `debug`, `get_flag` [S1, unofficial].
++**Outputs:** `render` (image tensor), `viewspace_points` (gradient tensor), `visibility_filter` (nonzero indices of radii > 0), `radii` (tensor), `accum_metric_counts` (tensor) [S1, unofficial].
+ 
+ ### Data Structures
+-*   **GaussianRasterizationSettings**: Named tuple containing `image_height`, `image_width`, `tanfovx`, `tanfovy`, `bg`, `scale_modifier`, `viewmatrix`, `projmatrix`, `sh_degree`, `campos`, `mult`, `prefiltered`, `debug`, `get_flag`, `metric_map`.
+-*   **SampleState**: Stores bucket-to-tile mappings, tile boundaries (`T`), and aspect ratios (`ar`).
+-*   **ImgState**: Stores tile ranges, bucket offsets, accumulated alpha, contribution counts (`n_contrib`, `max_contrib`), pixel colors, and scan buffers.
+-*   **BinningState**: Stores the sorted point list (`point_list`) and unsorted keys/values.
+-*   **GeomState**: Stores 2D means (`means2D`), conic matrices (`conic_opacity`), and clamping flags.
++*   **GaussianRasterizationSettings**: NamedTuple fields: `image_height` (int), `image_width` (int), `tanfovx` (float), `tanfovy` (float), `bg` (torch.Tensor), `scale_modifier` (float), `viewmatrix` (torch.Tensor), `projmatrix` (torch.Tensor), `sh_degree` (int), `campos` (torch.Tensor), `mult` (float), `prefiltered` (bool), `debug` (bool), `get_flag` (bool), `metric_map` (torch.Tensor) [S1, unofficial].
++*   **SampleState**: Stores bucket-to-tile mappings, tile boundaries (`T`), and aspect ratios (`ar`) [S1, unofficial].
++*   **ImgState**: Stores tile ranges, bucket offsets, accumulated alpha, contribution counts (`n_contrib`, `max_contrib`), pixel colors, and scan buffers [S1, unofficial].
++*   **BinningState**: Stores the sorted point list (`point_list`) and unsorted keys/values [S1, unofficial].
++*   **GeomState**: Stores 2D means (`means2D`), conic matrices (`conic_opacity`), and clamping flags [S1, unofficial].
+ 
+ ### Pseudocode
+-
+ ```python
+ import torch
+@@ -56,11 +28,8 @@
+                    sh_degree, campos, mult, prefiltered, debug, get_flag, 
+                    metric_map=None):
+-    """
+-    Forward pass for FastGS CUDA Rasterizer.
+-    """
+-    # 1. Initialize screenspace_points
++    # 1. Initialize screenspace_points tensor with shape (num_gaussians, 4) and requires_grad=True
+     screenspace_points = torch.zeros(means3D.shape[0], 4, requires_grad=True, device=means3D.device)
+     
+-    # 2. Calculate focal lengths
++    # 2. Calculate focal lengths from image dimensions and tangent field-of-view
+     focal_y = image_height / (2.0 * tanfovy)
+     focal_x = image_width / (2.0 * tanfovx)
+@@ -70,34 +39,24 @@
+         metric_map = torch.zeros(image_height * image_width, dtype=torch.int, device=means3D.device)
+         
+-    # 4. Configure Rasterization Settings
++    # 4. Configure GaussianRasterizationSettings
+     raster_settings = {
+-        'image_height': image_height,
+-        'image_width': image_width,
+-        'tanfovx': tanfovx,
+-        'tanfovy': tanfovy,
+-        'bg': bg,
+-        'scale_modifier': scale_modifier,
+-        'viewmatrix': viewmatrix,
+-        'projmatrix': projmatrix,
+-        'sh_degree': sh_degree,
+-        'campos': campos,
+-        'mult': mult,
+-        'prefiltered': prefiltered,
+-        'debug': debug,
+-        'get_flag': get_flag,
+-        'metric_map': metric_map
++        'image_height': image_height, 'image_width': image_width,
++        'tanfovx': tanfovx, 'tanfovy': tanfovy, 'bg': bg,
++        'scale_modifier': scale_modifier, 'viewmatrix': viewmatrix,
++        'projmatrix': projmatrix, 'sh_degree': sh_degree, 'campos': campos,
++        'mult': mult, 'prefiltered': prefiltered, 'debug': debug,
++        'get_flag': get_flag, 'metric_map': metric_map
+     }
+     
+     # 5. Handle Covariance and Color Precomputation
+-    if raster_settings['compute_cov3D_python']:
++    if raster_settings.get('compute_cov3D_python', False):
+         cov3D_precomp = compute_cov3D_from_scales_rotations(scales, rotations)
+     else:
+         cov3D_precomp = cov3Ds_precomp
+         
+-    if raster_settings['convert_SHs_python']:
++    if raster_settings.get('convert_SHs_python', False):
+         colors_precomp = evaluate_SHs(dc, sh, sh_degree, means3D)
+     else:
+-        # Pass dc and sh to kernel; kernel handles SH evaluation
+-        pass
++        pass # Pass dc and sh to kernel
+ 
+     # 6. Prepare Args for CUDA Kernel
+@@ -110,5 +69,4 @@
+     
+     # 7. Invoke CUDA Kernel
+-    # Note: This is a conceptual representation of the C++/CUDA invocation
+     rendered_image, radii, accum_metric_counts = render_fastgs_cuda(*args)
+     
+@@ -122,28 +80,22 @@
+ 
+ def fastgs_backward(grad_out_color, context_tensors):
+-    """
+-    Backward pass for FastGS CUDA Rasterizer.
+-    """
+-    # 1. Restore saved tensors from context
++    # 1. Restore saved tensors (colors_precomp, means3D, scales, rotations, cov3Ds_precomp, radii, dc, sh, geomBuffer, binningBuffer, imgBuffer, sampleBuffer) and raster_settings from context
+     (colors_precomp, means3D, scales, rotations, cov3Ds_precomp, 
+-     radii, dc, sh, geomBuffer, binningBuffer, imgBuffer, sampleBuffer) = context_tensors
+-     
+-    # 2. Restore raster_settings
+-    raster_settings = context_tensors['raster_settings']
+-    
+-    # 3. Restructure backward arguments
++     radii, dc, sh, geomBuffer, binningBuffer, imgBuffer, sampleBuffer) = context_tensors[:12]
++    raster_settings = context_tensors[12]
++    
++    # 2. Restructure backward arguments
+     args_bw = (
+         raster_settings['bg'], means3D, radii, colors_precomp, scales, 
+-        rotations, scale_modifier, cov3Ds_precomp, viewmatrix, projmatrix, 
+-        tanfovx, tanfovy, grad_out_color, dc, sh, sh_degree, campos, 
++        rotations, raster_settings['scale_modifier'], cov3Ds_precomp, 
++        raster_settings['viewmatrix'], raster_settings['projmatrix'], 
++        raster_settings['tanfovx'], raster_settings['tanfovy'], grad_out_color, 
++        dc, sh, raster_settings['sh_degree'], raster_settings['campos'], 
+         geomBuffer, context_tensors['num_rendered'], binningBuffer, 
+         context_tensors['num_buckets'], sampleBuffer, raster_settings['debug']
+     )
+     
+-    # 4. Invoke Backward Kernel
+-    # Computes gradients for means2D, colors_precomp, opacities, means3D, 
+-    # cov3Ds_precomp, dc, sh, scales, rotations
++    # 3. Invoke backward kernel to compute gradients for means2D, colors_precomp, opacities, means3D, cov3Ds_precomp, dc, sh, scales, rotations
+     grads = rasterize_gaussians_backward_cuda(*args_bw)
+-    
+     return grads
+ 
+@@ -152,11 +104,8 @@
+                        projmatrix, tanfovx, tanfovy, image_height, image_width, 
+                        dc, sh, sh_degree, campos, mult, prefiltered, debug, get_flag):
+-    """
+-    Core CUDA kernel logic (conceptual Python representation).
+-    """
+     N = means3D.shape[0]
+     
+-    # 1. Mark visible Gaussians (checkFrustum)
+-    # Transform means to view space
++    # 1. Mark visible Gaussians: checkFrustum kernel
++    # Transform means to view space using 4x3 matrix (rotation + translation)
+     means_view = transform_point_4x3(viewmatrix, means3D)
+     # Check frustum: p_view.z > 0.2f
+@@ -164,9 +113,6 @@
+     present = in_frustum.int()
+     
+-    if prefiltered and not present.any():
+-        raise AssertionError("All points filtered")
+-        
+-    # 2. Preprocess Gaussians (FORWARD::preprocess)
+-    # Transform to screen space, compute 2D covariances, clamp, determine tiles_touched
++    # 2. Preprocess Gaussians: FORWARD::preprocess kernel
++    # Transform to screen space, compute covariances, clamp, determine tiles_touched
+     means2D, conic_opacity, tiles_touched = preprocess_gaussians(
+         means3D, cov3Ds_precomp, opacities, viewmatrix, projmatrix, 
+@@ -174,8 +120,8 @@
+     )
+     
+-    # 3. Compute prefix sums (cub::DeviceScan::InclusiveSum)
++    # 3. Compute prefix sums: cub::DeviceScan::InclusiveSum on tiles_touched
+     point_offsets = inclusive_sum(tiles_touched)
+     
+-    # 4. Duplicate and Key Generation (duplicateWithKeys)
++    # 4. Duplicate and Key Generation: duplicateWithKeys kernel
+     # Generate 64-bit key: (tile_id << 32) | depth
+     gaussian_keys_unsorted, gaussian_values_unsorted = duplicate_with_keys(
+@@ -183,20 +129,20 @@
+     )
+     
+-    # 5. Radix Sort (cub::DeviceRadixSort::SortPairs)
+-    # Sort by keys. Bit depth = 32 + MSB(tile_count)
++    # 5. Radix Sort: cub::DeviceRadixSort::SortPairs
++    # Sort range determined by num_rendered. Bit depth = 32 + MSB(tile_count)
+     num_rendered = present.sum()
+     sorted_keys, sorted_values = radix_sort_pairs(gaussian_keys_unsorted, gaussian_values_unsorted, num_rendered)
+     
+-    # 6. Identify Tile Ranges (identifyTileRanges)
++    # 6. Identify Tile Ranges: identifyTileRanges kernel
+     ranges = identify_tile_ranges(sorted_keys)
+     
+-    # 7. Bucket Counting (perTileBucketCount)
++    # 7. Bucket Counting: perTileBucketCount kernel
+     # num_buckets = (num_splats + 31) / 32
+     bucket_count = (ranges.diff() + 31) // 32
+     
+-    # 8. Bucket Offset Calculation (cub::DeviceScan::InclusiveSum)
++    # 8. Bucket Offset Calculation: cub::DeviceScan::InclusiveSum on bucket_count
+     bucket_offsets = inclusive_sum(bucket_count)
+     
+-    # 9. Parallel Rendering (FORWARD::render)
++    # 9. Parallel Rendering: FORWARD::render kernel
+     # Initialize sample buffer state
+     sample_chunk_size = required_size_for_buckets(bucket_offsets[-1] if len(bucket_offsets) > 0 else 0)
+@@ -237,31 +183,21 @@
+ def preprocess_gaussians(means3D, cov3Ds_precomp, opacities, viewmatrix, projmatrix, 
+                          tanfovx, tanfovy, image_height, image_width, scale_modifier):
+-    """
+-    Transforms 3D Gaussians to 2D screen space.
+-    """
+     # Transform 3D means to view space
+     means_view = transform_point_4x3(viewmatrix, means3D)
+-    
+-    # Project to NDC
++    # Project to NDC using 4x4 matrix
+     means_hom = transform_point_4x4(projmatrix, means_view)
+-    # Handle near-zero w
++    # Handle near-zero w by adding 0.0000001f
+     w = means_hom[:, 3] + 1e-7
+     means_ndc = means_hom[:, :3] / w.unsqueeze(1)
+     
+-    # NDC to Pixel
+-    # pix = ((v + 1.0) * S - 1.0) * 0.5
++    # NDC to Pixel conversion: pix = ((v + 1.0) * S - 1.0) * 0.5
+     pix_x = ((means_ndc[:, 0] + 1.0) * image_width - 1.0) * 0.5
+     pix_y = ((means_ndc[:, 1] + 1.0) * image_height - 1.0) * 0.5
+     means2D = torch.stack([pix_x, pix_y, means_ndc[:, 2]], dim=1)
+     
+-    # Compute 2D Covariance
+-    # J = d(pix)/d(means_view) * J_view_to_ndc ...
+-    # Simplified: Project 3D covariance to 2D
+-    # L = Jacobian of projection
+-    # Sigma_2D = L @ Sigma_3D @ L^T
+-    # Clamp values for stability
++    # Compute 2D Covariance and clamp
+     conic_opacity = compute_conic_covariance(means2D, cov3Ds_precomp, scale_modifier)
+     
+-    # Determine tiles touched
++    # Determine tiles touched using tile bounding box calculation
+     BLOCK_X = 16 # Example block size
+     BLOCK_Y = 16
+@@ -276,48 +212,42 @@
+ 
+ def compute_conic_covariance(means2D, cov3D, scale_modifier):
+-    """
+-    Computes the 2D conic matrix (inverse covariance) for blending.
+-    """
+     # Extract 2D submatrix from 3D covariance
+     # Apply scale modifier to opacity
+     # Return conic matrix and scaled opacity
+-    pass
++    pass # Implementation details omitted as per standard graphics knowledge [G]
+ 
+ def compute_max_radius(conic_opacity):
+-    """
+-    Computes the bounding radius of the Gaussian ellipse.
+-    """
+-    # h = coord - p_u
++    # Ellipse intersection calculation: h = coord - p_u
+     # sqrt_term = sqrt(disc * h^2 + t * coeff)
+     # x = (-con_o.y * h - sqrt_term) / coeff + p_v
+     # y = (-con_o.y * h + sqrt_term) / coeff + p_v
+     # Return max distance
+-    pass
++    pass # Implementation details omitted as per standard graphics knowledge [G]
+ ```
+ 
+ ### Parameters
+-*   `mult`: Multiplier for the compact box to control the tile number of each splat. Default: `0.5` [S1, unofficial].
+-*   `SH_C0`: `0.28209479177387814f` [S1, unofficial].
+-*   `SH_C1`: `0.4886025119029199f` [S1, unofficial].
+-*   `SH_C2`: `{1.0925484305920792f, -1.0925484305920792f, 0.31539156525252005f, -1.0925484305920792f, 0.5462742152960396f}` [S1, unofficial].
+-*   `SH_C3`: `{-0.5900435899266435f, 2.890611442640554f, -0.4570457994644658f, 0.3731763325901154f, -0.4570457994644658f, 1.445305721320277f, -0.5900435899266435f}` [S1, unofficial].
+-*   `BLOCK_SIZE`: `BLOCK_X * BLOCK_Y` [S1, unofficial].
+-*   `NUM_WARPS`: `BLOCK_SIZE / 32` [S1, unofficial].
++*   `mult`: Multiplier for the compact box to control the tile number of each splat [S1, unofficial].
++*   `SH_C0`: Spherical Harmonics coefficient constant, value `0.28209479177387814f` [S1, unofficial].
++*   `SH_C1`: Spherical Harmonics coefficient constant, value `0.4886025119029199f` [S1, unofficial].
++*   `SH_C2`: Spherical Harmonics coefficients array, values `{1.0925484305920792f, -1.0925484305920792f, 0.31539156525252005f, -1.0925484305920792f, 0.5462742152960396f}` [S1, unofficial].
++*   `SH_C3`: Spherical Harmonics coefficients array, values `{-0.5900435899266435f, 2.890611442640554f, -0.4570457994644658f, 0.3731763325901154f, -0.4570457994644658f, 1.445305721320277f, -0.5900435899266435f}` [S1, unofficial].
++*   `BLOCK_SIZE`: Defined as `BLOCK_X * BLOCK_Y` [S1, unofficial].
++*   `NUM_WARPS`: Defined as `BLOCK_SIZE / 32` [S1, unofficial].
+ 
+ ### Edge Cases and Pitfalls
+ *   **Input Validation**: Exactly one of `SHs` or `precomputed colors` must be provided. Exactly one of `scale/rotation` pair or `precomputed 3D covariance` must be provided [S1, unofficial].
+-*   **Frustum Culling**: Uses a near plane threshold of `0.2f`. Points behind this are discarded. If `prefiltered` is true and a point is filtered, an assertion trap is triggered [S1, unofficial].
++*   **Frustum Culling**: Uses a near plane threshold of `0.2f`. Points behind this are discarded [S1, unofficial].
+ *   **Homogeneous Division**: Near-zero `w` is handled by adding `0.0000001f` to prevent division by zero [S1, unofficial].
+ *   **Debug Mode**: If `debug` is true, tensors are copied to CPU before CUDA invocation to allow snapshotting on error. Errors save `snapshot_fw.dump` or `snapshot_bw.dump` [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: Dominated by the radix sort and bucket-based blending. Sorting is $O(N \log N)$ where $N$ is the number of visible Gaussians. Blending is linear in the number of splats per tile.
+-*   **Memory Complexity**: Requires buffers for sorted keys/values, tile ranges, bucket offsets, and sample states. Memory usage scales with the number of Gaussians and image resolution.
++*   **Time Complexity**: Dominated by the radix sort and bucket-based blending [S1, unofficial].
++*   **Memory Complexity**: Requires buffers for sorted keys/values, tile ranges, bucket offsets, and sample states [S1, unofficial].
+ *   **Performance**: Optimized for high throughput on CUDA-capable GPUs by minimizing memory contention through tile-based binning and radix sorting [S1, unofficial].
+-*   **Strengths**: High rendering speed, differentiable, supports additional metric buffers.
+-*   **Limitations**: High memory overhead for large scenes due to sorting and bucketing. Debug mode is slow.
++*   **Strengths**: High rendering speed, differentiable, supports additional metric buffers [S1, unofficial].
++*   **Limitations**: High memory overhead for large scenes due to sorting and bucketing [S1, unofficial].
+ 
+ ## Background
+-The FastGS CUDA Rasterizer is part of the FastGS project, an unofficial extension of 3D Gaussian Splatting [S1, unofficial]. It builds upon the original differentiable Gaussian rasterizer by Inria [S1, unofficial], adding optimizations for tile-based rendering and additional debugging features. It is used in training and rendering pipelines for 3D Gaussian Avatar Reconstruction and Gaussian Splatting [S1, unofficial].
++The FastGS CUDA Rasterizer is part of the FastGS project, an unofficial extension of 3D Gaussian Splatting [S1, unofficial]. It builds upon the original differentiable Gaussian rasterizer by Inria, adding optimizations for tile-based rendering and additional debugging features [S1, unofficial]. It is used in training and rendering pipelines for 3D Gaussian Splatting [S1, unofficial].
+ 
+ ## Sources

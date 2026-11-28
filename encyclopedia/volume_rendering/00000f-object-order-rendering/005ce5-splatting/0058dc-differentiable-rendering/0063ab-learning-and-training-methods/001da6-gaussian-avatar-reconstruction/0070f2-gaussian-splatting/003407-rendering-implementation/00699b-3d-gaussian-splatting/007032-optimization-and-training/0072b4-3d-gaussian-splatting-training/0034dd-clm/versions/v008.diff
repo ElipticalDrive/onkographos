@@ -1,0 +1,112 @@
+--- v007.md
++++ v008.md
+@@ -1,5 +1,5 @@
+ # CLM
+ 
+-Also called: Early Adam Update, CLM Pipelining, CPU-GPU Memory Barrier Removal, Smart Caching Policy for Gaussian States
++Also called: CLM (CPU-Local Memory) / Early Adam Update, CLM Pipelining, CPU-GPU Memory Barrier Removal, CPU-Local Memory, Early Adam Update, Smart Caching Policy for Gaussian States
+ 
+ ## Overview
+@@ -8,9 +8,9 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A batch of training views (microbatches), the current set of 3D Gaussian parameters $\theta$ (position, covariance, opacity, SH coefficients), and the Adam optimizer state.
+-*   **Output:** Updated Gaussian parameters $\theta'$ and rendered images.
++*   **Input:** A batch of training views (microbatches), the current set of 3D Gaussian parameters $\theta$ (position, covariance, opacity, SH coefficients), and the Adam optimizer state [S2].
++*   **Output:** Updated Gaussian parameters $\theta'$ and rendered images [S2].
+ 
+ **Data Structures:**
+-1.  **CPU Memory Buffer:** Stores the full set of Gaussian attributes. Attributes are concatenated and padded to be contiguous and cache-line aligned [S2].
++1.  **CPU Memory Buffer:** Stores the full set of Gaussian attributes in pinned CPU memory, concatenated and padded to be contiguous and cache-line aligned [S2].
+ 2.  **GPU Memory Buffer:** Stores a subset of "in-frustum" Gaussians required for the current microbatch [S2].
+ 3.  **Double Buffer:** Used in the pipelining stage to enable parameter prefetching and delayed gradient offloading [S2].
+@@ -20,5 +20,5 @@
+ 
+ 1.  **Pre-compute Finalization Microbatch ($L_g$):**
+-    For each Gaussian $g$ in the scene, determine the microbatch index $L_g$ at which it is "finalized." A Gaussian is finalized in microbatch $j$ if it is accessed in microbatch $j$ but not in any subsequent microbatch $k > j$ within the current training batch $B$.
++    For each Gaussian $g$ in the scene, determine the microbatch index $L_g$ at which it is "finalized." A Gaussian is finalized in microbatch $j$ if it is accessed in microbatch $j$ but not in any subsequent microbatch $k > j$ within the current training batch $B$ [S2].
+     $$ L_g = \max \{ i \mid g \in S_i \} $$
+     where $S_i$ is the set of Gaussians accessed in microbatch $i$. If $g$ is not accessed in the batch, $L_g = 0$ [S2].
+@@ -38,5 +38,5 @@
+ 
+ 5.  **Gradient Offloading:**
+-    A custom kernel transfers gradients from GPU memory to CPU memory. The kernel fetches previously accumulated gradients, adds the new gradients in CUDA registers, and stores the sum back to CPU memory [S2].
++    A custom kernel transfers gradients from GPU memory to CPU memory [S2]. The kernel fetches previously accumulated gradients, adds the new gradients in CUDA registers, and stores the sum back to CPU memory [S2].
+ 
+ 6.  **Early CPU Adam Update:**
+@@ -48,5 +48,5 @@
+ 
+ 7.  **Caching Policy:**
+-    The system maintains a cache of frequently updated Gaussians on the GPU. Gaussians not in the cache are streamed from CPU memory as needed [S1, unofficial][S2].
++    The system maintains a cache of frequently updated Gaussians on the GPU [S1, unofficial][S2]. Gaussians not in the cache are streamed from CPU memory as needed [S2].
+ 
+ **Pseudocode:**
+@@ -55,26 +55,23 @@
+ def train_batch(batch_views, gaussians, optimizer_state):
+     # 1. Determine finalization microbatch for each Gaussian
+-    # S_i is the set of Gaussians accessed in microbatch i
+     L_g = {}
+     for g in gaussians:
+         accessed_microbatches = [i for i, view in enumerate(batch_views) if g in view.frustum_gaussians]
+-        if accessed_microbatches:
+-            L_g[g] = max(accessed_microbatches)
+-        else:
+-            L_g[g] = 0
++        L_g[g] = max(accessed_microbatches) if accessed_microbatches else 0
+ 
+-    # 2. Schedule microbatches to maximize overlap (implementation detail omitted)
+-    scheduled_views = schedule_microbatches(batch_views)
++    # 2. Schedule microbatches to maximize spatial locality and early finalization overlap [S2]
++    # Heuristic: order views to maximize |S_{i+1} ∩ S_i| and push finalizations earlier
++    scheduled_views = batch_views  # Real implementation applies heuristic scheduler
+ 
+     # 3. Initialize double buffers for pipelining
+-    gpu_params_buffer = allocate_gpu_buffer()
+-    cpu_grad_buffer = allocate_cpu_pinned_buffer()
+-    
++    gpu_params_buffer = []
++    cpu_grad_buffer = {}
++
+     # 4. Process microbatches
+     for j, view in enumerate(scheduled_views):
+-        # Selective Loading: Load in-frustum Gaussians from CPU to GPU
+-        # Initiated by GPU kernel to avoid CPU-GPU coordination
+-        in_frustum_gaussians = get_in_frustum_gaussians(view, L_g)
+-        selective_load_kernel(in_frustum_gaussians, gpu_params_buffer)
++        # Selective Loading: GPU-initiated kernel loads from pinned CPU memory to GPU registers, then GPU memory
++        # Splits contiguous CPU buffer and concatenates only in-frustum attributes
++        in_frustum_gaussians = [g for g in gaussians if is_in_frustum(g, view)]
++        gpu_params_buffer = selective_load(in_frustum_gaussians)
+ 
+         # Forward and Backward Pass
+@@ -82,18 +79,23 @@
+         gradients = backward_pass(render_output, view)
+ 
+-        # Gradient Offloading: Accumulate gradients in CPU memory
+-        # Kernel adds new gradients to existing accumulated gradients
+-        accumulate_gradients_kernel(gradients, cpu_grad_buffer)
++        # Gradient Offloading: Kernel fetches previously accumulated gradients, adds new ones in registers, stores sum to CPU
++        cpu_grad_buffer = accumulate_gradients(cpu_grad_buffer, gradients)
+ 
+-        # Signal GPU communication stream completion
++        # Signal GPU communication stream completion via DMA [S2]
+         signal_buffer.set_signal()
+ 
+-        # Early CPU Adam Update
+-        # Update Gaussians finalized in this microbatch
++        # Early CPU Adam Update: Dedicated CPU thread updates Gaussians finalized in this microbatch [S2]
+         gaussians_to_update = [g for g, l in L_g.items() if l == j]
+         if gaussians_to_update:
+-            cpu_adam_thread.update(gaussians_to_update, cpu_grad_buffer, optimizer_state)
++            cpu_adam_update(gaussians_to_update, cpu_grad_buffer, optimizer_state)
+ 
+     return gaussians
++
++def is_in_frustum(g, view): return g.position in view.frustum # [G]
++def selective_load(gaussians): return [g.attributes for g in gaussians] # [G]
++def forward_pass(params, view): return splat(params, view) # [G]
++def backward_pass(render, view): return compute_loss_grad(render, view) # [G]
++def accumulate_gradients(existing, new): return {k: existing.get(k, 0) + v for k, v in new.items()} # [G]
++def cpu_adam_update(gaussians, grads, state): pass # [G]
+ ```
+ 

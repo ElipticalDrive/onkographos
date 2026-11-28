@@ -1,0 +1,170 @@
+# True World-Space MPR Sampling
+
+Also called: MPR Sampling, Multi-Planar Reconstruction Sampling, Multi-Planar Reformation (MPR) Sampling
+
+## Overview
+True World-Space MPR Sampling generates a 2D image of intensities by sampling a 3D volume along a user-defined 2D plane in world space [S1, unofficial]. It solves the problem of extracting arbitrary orthogonal or oblique slices (axial, coronal, sagittal, or custom) from a volumetric dataset without requiring pre-computed slice data, by iterating over pixel grid coordinates, converting them to world space, transforming to voxel space, and interpolating the volume value [S1, unofficial]. It differs from standard image grid sampling by explicitly defining the sampling plane via world-space origin and direction vectors, ensuring geometric accuracy relative to the patient or world coordinate system rather than the voxel grid axes [S1, unofficial].
+
+## How it works
+**Inputs:**
+*   `volume`: The 3D voxel grid data.
+*   `world_to_voxel_transform`: A transformation matrix or function mapping world coordinates to voxel coordinates [S1, unofficial].
+*   `mpr_plane`: An `MPRPlane` struct defining the geometry of the slice [S1, unofficial].
+*   `options`: Sampling options, specifically the interpolation method (Trilinear or Nearest-Neighbor) [S1, unofficial].
+
+**Outputs:**
+*   `SampledMPRImage`: A struct containing the `width`, `height`, `plane` (reference to input), and `intensities` (a `Float32Array` of size `width * height`) [S1, unofficial].
+
+**Data Structures:**
+*   `MPRPlane`:
+    *   `originLPS`: `WorldPointLPS` (3 floats: x, y, z) [S1, unofficial].
+    *   `uDirectionLPS`: `Vec3` (3 floats: x, y, z) [S1, unofficial].
+    *   `vDirectionLPS`: `Vec3` (3 floats: x, y, z) [S1, unofficial].
+    *   `pixelSpacingUMm`: Number (spacing in mm along u-axis) [S1, unofficial].
+    *   `pixelSpacingVMm`: Number (spacing in mm along v-axis) [S1, unofficial].
+    *   `width`: Number (image width in pixels) [S1, unofficial].
+    *   `height`: Number (image height in pixels) [S1, unofficial].
+*   `SampledMPRImage`:
+    *   `width`: Number [S1, unofficial].
+    *   `height`: Number [S1, unofficial].
+    *   `intensities`: `Float32Array` of size `width * height` [S1, unofficial].
+    *   `plane`: Reference to `MPRPlane` [S1, unofficial].
+
+**Parameters:**
+*   `AXIS_TOLERANCE`: `1e-4`. Tolerance for validating unit vectors and orthogonality [S1, unofficial].
+*   `MAX_SAMPLING_IMAGE_WIDTH`: `2048`. Maximum allowed width [S1, unofficial].
+*   `MAX_SAMPLING_IMAGE_HEIGHT`: `2048`. Maximum allowed height [S1, unofficial].
+*   `MAX_SAMPLING_PIXELS`: `4,194,304` ($4 \times 1024 \times 1024$). Maximum allowed total pixels [S1, unofficial].
+
+**Steps:**
+1.  **Validate MPR Plane:**
+    *   Check that `uDirectionLPS` and `vDirectionLPS` are unit vectors: `abs(length(uDirectionLPS) - 1) < AXIS_TOLERANCE` and `abs(length(vDirectionLPS) - 1) < AXIS_TOLERANCE` [S1, unofficial].
+    *   Check that `uDirectionLPS` and `vDirectionLPS` are orthogonal: `abs(dot(uDirectionLPS, vDirectionLPS)) < AXIS_TOLERANCE` [S1, unofficial].
+    *   Check dimensions: `width > 0`, `height > 0`, `width <= MAX_SAMPLING_IMAGE_WIDTH`, `height <= MAX_SAMPLING_IMAGE_HEIGHT`, and `width * height <= MAX_SAMPLING_PIXELS` [S1, unofficial].
+2.  **Precompute Step Vectors:**
+    *   Calculate the world-space step for one pixel along the u-axis:
+        $$
+        \begin{aligned}
+        ux &= uDirectionLPS.x \times pixelSpacingUMm \\
+        uy &= uDirectionLPS.y \times pixelSpacingUMm \\
+        uz &= uDirectionLPS.z \times pixelSpacingUMm
+        \end{aligned}
+        $$
+    *   Calculate the world-space step for one pixel along the v-axis:
+        $$
+        \begin{aligned}
+        vx &= vDirectionLPS.x \times pixelSpacingVMm \\
+        vy &= vDirectionLPS.y \times pixelSpacingVMm \\
+        vz &= vDirectionLPS.z \times pixelSpacingVMm
+        \end{aligned}
+        $$
+3.  **Initialize Output:**
+    *   Create `intensities` array of size `width * height` [S1, unofficial].
+4.  **Iterate and Sample:**
+    *   For `row` from `0` to `height - 1`:
+        *   For `col` from `0` to `width - 1`:
+            *   Calculate world position:
+                $$
+                \begin{aligned}
+                world_x &= originLPS.x + col \times ux + row \times vx \\
+                world_y &= originLPS.y + col \times uy + row \times vy \\
+                world_z &= originLPS.z + col \times uz + row \times vz
+                \end{aligned}
+                $$
+            *   Transform world position to voxel coordinates using `world_to_voxel_transform` [S1, unofficial]. Let the result be `voxel` with components `voxel.x`, `voxel.y`, `voxel.z`.
+            *   Sample the voxel value at `voxel` using the specified interpolation method (Trilinear or Nearest-Neighbor) [S1, unofficial].
+            *   Store the value in `intensities[row * width + col]` [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def sample_mpr(volume, world_to_voxel, mpr_plane, options):
+    # 1. Validate MPR Plane
+    u_dir = mpr_plane.uDirectionLPS
+    v_dir = mpr_plane.vDirectionLPS
+    origin = mpr_plane.originLPS
+    
+    # Check unit vectors
+    if abs(length(u_dir) - 1.0) > 1e-4:
+        raise ValueError("uDirectionLPS is not a unit vector")
+    if abs(length(v_dir) - 1.0) > 1e-4:
+        raise ValueError("vDirectionLPS is not a unit vector")
+        
+    # Check orthogonality
+    if abs(dot(u_dir, v_dir)) > 1e-4:
+        raise ValueError("uDirectionLPS and vDirectionLPS are not orthogonal")
+        
+    # Check dimensions
+    width = mpr_plane.width
+    height = mpr_plane.height
+    if width <= 0 or height <= 0:
+        raise ValueError("Width and height must be positive")
+    if width > 2048 or height > 2048:
+        raise ValueError("Width or height exceeds maximum allowed")
+    if width * height > 4194304:
+        raise ValueError("Total pixels exceed maximum allowed")
+        
+    # 2. Precompute step vectors
+    pixel_spacing_u = mpr_plane.pixelSpacingUMm
+    pixel_spacing_v = mpr_plane.pixelSpacingVMm
+    
+    ux = u_dir[0] * pixel_spacing_u
+    uy = u_dir[1] * pixel_spacing_u
+    uz = u_dir[2] * pixel_spacing_u
+    
+    vx = v_dir[0] * pixel_spacing_v
+    vy = v_dir[1] * pixel_spacing_v
+    vz = v_dir[2] * pixel_spacing_v
+    
+    # 3. Initialize intensities array
+    intensities = [0.0] * (width * height)
+    
+    # 4. Iterate and sample
+    for row in range(height):
+        for col in range(width):
+            # Calculate world position
+            world_x = origin[0] + col * ux + row * vx
+            world_y = origin[1] + col * uy + row * vy
+            world_z = origin[2] + col * uz + row * vz
+            
+            # Transform to voxel coordinates
+            voxel = world_to_voxel(world_x, world_y, world_z)
+            
+            # Sample volume
+            # Note: world_to_voxel may return floats outside volume bounds.
+            # Implementation of volume sampling (trilinear/nearest) and boundary handling
+            # is assumed to be provided by the volume sampler interface.
+            value = volume_sampler(voxel, options.interpolation_method)
+            
+            intensities[row * width + col] = value
+            
+    return {
+        "width": width,
+        "height": height,
+        "intensities": intensities,
+        "plane": mpr_plane
+    }
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The tolerance `1e-4` is used for floating-point comparisons of vector lengths and dot products [S1, unofficial].
+*   **Boundaries:** If the transformed voxel coordinates fall outside the volume bounds, the behavior depends on the `volume_sampler` implementation (e.g., clamping, wrapping, or returning a default value). The sources do not specify the default boundary handling for out-of-bounds voxels [S1, unofficial].
+*   **Degenerate Input:** Non-unit or non-orthogonal directions are rejected. Non-positive dimensions or excessive pixel counts are rejected [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(W \times H)$, where $W$ and $H$ are the width and height of the MPR plane. Each pixel requires a world-to-voxel transformation and a volume sample [S1, unofficial].
+*   **Memory Complexity:** $O(W \times H)$ for the output `intensities` array [S1, unofficial].
+*   **Measured Performance:** Not given in the sources.
+*   **Scaling:** Performance scales linearly with the number of pixels. The maximum resolution is constrained by `MAX_SAMPLING_IMAGE_WIDTH` (2048), `MAX_SAMPLING_IMAGE_HEIGHT` (2048), and `MAX_SAMPLING_PIXELS` (4,194,304) [S1, unofficial].
+*   **Strengths:** Provides geometrically accurate slices in world space, independent of the voxel grid orientation. Reduces network latency by performing sampling in the browser after initial volume load [S1, unofficial].
+*   **Limitations:** Limited by maximum image dimensions. Requires efficient world-to-voxel transformation and volume sampling. Not given in the sources for specific hardware performance metrics.
+*   **When to use:** When arbitrary orthogonal or oblique slices are needed from a 3D volume, especially in web-based medical imaging viewers where network latency is a concern [S1, unofficial].
+*   **When not to use:** When pre-computed slices are available and sufficient, or when the required resolution exceeds the maximum allowed pixel count [S1, unofficial].
+
+## Background
+True World-Space MPR Sampling is implemented in the **Sinus 3D Viewer Pro**, a research prototype web-based medical imaging viewer for exploring sinus CT and cone-beam CT studies [S1, unofficial]. The project combines a Python backend with a React/TypeScript frontend and uses VTK.js for 3D volume rendering [S1, unofficial]. The MPR strategy was optimized to reduce dependence on round-trip network latency during slice navigation by performing the sampling directly in the browser after the volume data is loaded [S1, unofficial]. The viewer supports axial, coronal, and sagittal views, which are specific cases of MPR planes [S1, unofficial].
+
+## Sources
+[S1] sarfrazkhan66003/sinus-3d-viewer-pro, https://github.com/sarfrazkhan66003/sinus-3d-viewer-pro, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,86 @@
+# Volume Reconstruction via Linear System Inversion
+
+Also called: Property Reconstruction, Tomographic Volume Reconstruction
+
+## Overview
+Volume Reconstruction via Linear System Inversion inverts the volume rendering process to optimize volume properties (emission, albedo, extinction) such that the rendered output matches user-defined target images [S1]. It sets itself apart from sibling methods by formulating the inverse problem as a linear system $o = Wa$ solved in the least-squares sense, relying on local support basis functions for computational efficiency [S1]. Unlike [Differential Rendering for CT Reconstruction](6462-differential-rendering-for-ct-reconstruction.md) which uses gradient-based optimization, this method directly computes coefficients via matrix inversion or least-squares solvers [S1].
+
+## How it works
+**Inputs:**
+- Target images defined as a collection of $N$ constraint pixels [S1].
+- For each pixel $k \in [1, N]$, the camera view provides ray origin $x^k$, direction $\omega^k$, and target radiance value $L_k^i(x^k, \omega^k)$ [S1].
+- If a surface hit exists, the position of the first hit surface is $x_s^k$; otherwise, the background is at $\infty$ [S1].
+- A set of basis functions with spatially local support (e.g., box functions or triangle functions) associated with the volume's voxels [S1].
+
+**Outputs:**
+- A coefficient vector $a$ representing the optimized volume properties (emission, albedo, or extinction) [S1].
+
+**Data Structures:**
+- **Observation Vector ($o$):** A column vector of size $N \times 1$, where each entry $o_k$ corresponds to the target radiance $L_k^i(x^k, \omega^k)$ for pixel $k$ [S1].
+- **System Matrix ($W$):** A matrix of size $N \times M$, where $M$ is the number of basis functions (unknowns). The entry $w_{ik}$ is derived from the volume rendering equation for pixel $k$ and basis function $i$ [S1].
+- **Coefficient Vector ($a$):** A column vector of size $M \times 1$, containing the values of the basis functions [S1].
+
+**Steps:**
+1. **Linearization:** The volume rendering equation is linearized with respect to the chosen property (emission, albedo, or extinction) to form the linear system $o = Wa$ [S1].
+   - For **Emission** or **Albedo**, the terms enter linearly as separate summands in the rendering equation [S1].
+   - For **Extinction**, the equation is linearized by assuming constant outgoing radiance $L_m$ and applying a logarithm to the transmittance term [S1].
+2. **Matrix Construction:** Construct the matrix $W$ where each row corresponds to a constraint pixel. The entries $w_{ik}$ are integrals corresponding to the single ray passing through the volume, weighted by the basis functions [S1].
+   - For box functions (nearest-neighbor sampling), $w_{ik}$ involves the integral of the basis function along the ray [S1].
+   - For triangle functions, linearly interpolated solutions are considered [S1].
+3. **Least-Squares Solution:** Since user input may be inconsistent (no exact solution exists for $o = Wa$), solve for $a$ in the least-squares sense [S1]. This minimizes the quadratic function $||Wa - o||_2$ [S1].
+   - The normal equations are: $W^T o = W^T W a$ [S1].
+   - Solve for $a$: $a = (W^T W)^{-1} W^T o$ [G] (assuming $W^T W$ is invertible).
+
+**Formulas:**
+- **General Linear System:**
+  $$ o = Wa $$
+  where $o$ is the observation vector and $W$ is the system matrix derived from the volume rendering equation [S1].
+
+- **Least-Squares Objective:**
+  $$ \min_a ||Wa - o||_2^2 $$
+  Leading to the normal equations:
+  $$ W^T o = W^T W a $$
+  [S1]
+
+- **Extinction Reconstruction (Special Case):**
+  Assuming constant outgoing radiance $L_m(x, \omega) = const$, the rendering equation for pixel $k$ becomes:
+  $$ L_k^i(x^k, \omega^k) = e^{-\int_c \sigma_t(x_t) dt} L_o(x_s^k, \omega^k) + L_m \left(1 - e^{-\int_0^s \sigma_t(x_t) dt}\right) $$
+  [S1]
+  The first summand is rewritten using basis functions $\upsilon_i(x_t)$ for extinction coefficient $\sigma_t(x_t) = \sum a_i \upsilon_i(x_t)$:
+  $$ L_o(x_s^k, \omega^k) \prod_i e^{-\sigma_{ti} \int_c \upsilon_i(x_t) dt} $$
+  [S1]
+  Applying logarithms linearizes the transmittance term, allowing the formation of a linear system for the extinction coefficients [S1].
+
+**Parameters:**
+- **Basis Functions:** Box functions (nearest-neighbor sampling of 3D texture) are used for local support speed [S1]. Triangle functions allow linearly interpolated solutions [S1].
+- **Outgoing Radiance ($L_m$):** Must be constant for extinction reconstruction [S1].
+
+**Edge Cases and Pitfalls:**
+- **Inconsistent Input:** User-defined target images may not have a valid solution. The least-squares approach handles this by minimizing the error [S1].
+- **Extinction Reconstruction Restriction:** Extinction can only be reconstructed if the outgoing radiance $L_m$ is constant ($L_m(x, \omega) = const$) [S1]. This is usually not problematic as extinction defines shape and is derived first [S1].
+- **Non-Linearity:** Extinction cannot be jointly estimated with emission or albedo because it involves a complex non-linear problem, even when linearized via log-space [S1].
+
+## Subtopics
+
+### [Albedo Reconstruction](14422-albedo-reconstruction.md)
+Albedo Reconstruction is a method within volume reconstruction via linear system inversion that optimizes the diffuse albedo field of a volume so that its rendered output matches target images. It isolates the albedo parameter by assuming single scattering, thereby decoupling it from the emission and extinction terms to form a linear system.
+
+### [Emission Reconstruction](14424-emission-reconstruction.md)
+Emission reconstruction is an inverse volume rendering technique that solves for the spatial distribution of emitted radiance ($L_{emit}$) within a volume such that the rendered output matches target images. It linearizes the volume rendering equation under a single-scattering assumption, isolating the emission term from background and scattering contributions to form a linear system. Unlike [Albedo Reconstruction](14422-albedo-reconstruction.md), which optimizes scattering color properties, this method treats emission coefficients as the primary unknowns.
+
+### Extinction Reconstruction
+Extinction reconstruction linearizes the volume rendering equation by assuming constant outgoing radiance $L_m$ and applying a logarithm to the transmittance term [S1]. It starts with the expanded rendering equation, separates the background and medium contributions, and exploits the constant $L_m$ to integrate the medium term into $L_m (1 - e^{-\int \sigma_t dt})$ [S1]. The background term is rewritten using basis functions [S1]. This method is restricted to cases where $L_m$ is constant, but this is typically acceptable as extinction defines the volume shape and is often derived first [S1].
+
+## Operating characteristics
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Not given in the sources.
+- **Strengths:** Direct solution avoids iterative optimization loops; local support basis functions speed up computation [S1].
+- **Limitations:** Cannot jointly optimize extinction with emission/albedo due to non-linearity; requires constant outgoing radiance for extinction reconstruction [S1].
+- **When to Use:** When a direct, non-iterative solution for volume properties is needed and the input constraints are consistent or can be approximated in a least-squares sense [S1].
+- **When Not to Use:** When joint optimization of multiple properties (especially extinction with emission) is required, or when outgoing radiance is not constant [S1].
+
+## Background
+The method originates from the work on property and lighting manipulations for static volume stylization using a painting metaphor [S1]. It was introduced to allow users to define target views and invert the volume rendering process to optimize volume properties [S1]. The approach draws parallels to computed tomography (CT) but adapts to inconsistent user input by using least-squares solutions [S1].
+
+## Sources
+[S1] Property and Lighting Manipulations for Static Volume Stylization Using a Painting Metaphor, https://doi.org/10.1109/TVCG.2014.13, fetched 2026-10-26

@@ -1,0 +1,217 @@
+--- v003.md
++++ v004.md
+@@ -17,17 +17,17 @@
+ *   **MLP Heads:**
+     *   **Density Head:** Takes encoded position features to output volume density $\sigma$ [S1].
+-    *   **Diffuse Color Head:** Takes encoded position features to output view-independent diffuse color $\mathbf{c}_d$ [S1].
+-    *   **Specular Color Head:** Takes encoded position features and SH-encoded direction $\mathbf{d}$ to output view-dependent specular color $\mathbf{c}_s$ [S1].
++    *   **Diffuse Color MLP:** Takes encoded position features to output view-independent diffuse color $\mathbf{c}_d$ [S1].
++    *   **Specular Color MLP:** Takes encoded position features and SH-encoded direction $\mathbf{d}$ to output view-dependent specular color $\mathbf{c}_s$ [S1].
+     *   **Semantic Head:** Takes encoded position features to output a vector of length $C$ representing semantic logits $\mathbf{s}$ [S1].
+ 
+ **Numbered Steps:**
+ 
+-1.  **Mask Generation:** Use a Visual Foundation Model (specifically Light-HQ SAM) to generate instance masks for the scene [S1]. If objects are overlapping or cluttered, apply a hierarchical grouping heuristic (Algorithm 1) to create a set of $C$ non-overlapping semantic masks consistent across views [S1].
+-2.  **Ray Sampling:** For each pixel, generate a ray $r$ from the camera center. Sample $N$ points $x_i$ along the ray between near $t_{near}$ and far $t_{far}$ planes [S1].
++1.  **Mask Generation:** Use a Visual Foundation Model (e.g., SAM) to generate instance masks for the scene [S1]. If objects are overlapping or cluttered, apply a hierarchical grouping heuristic (Algorithm 1) to create a small set of non-overlapping semantic masks consistent across views [S1].
++2.  **Ray Sampling:** For each pixel, generate a ray $r$ from the camera center [S1]. Sample $N$ points $x_i$ along the ray between near $t_{near}$ and far $t_{far}$ planes [S1].
+ 3.  **Feature Query:** For each sample point $x_i$:
+-    *   Query the MHE and position encoding MLP to get position features.
++    *   Query the MHE and position encoding MLP to get position features [S1].
+     *   Query the density head to get $\sigma_i$ [S1].
+-    *   Query the diffuse head to get $\mathbf{c}_{d,i}$ [S1].
+-    *   Query the specular head with $\mathbf{d}$ to get $\mathbf{c}_{s,i}$ [S1].
++    *   Query the diffuse color MLP to get $\mathbf{c}_{d,i}$ [S1].
++    *   Query the specular color MLP with $\mathbf{d}$ to get $\mathbf{c}_{s,i}$ [S1].
+     *   Query the semantic head to get logits $\mathbf{s}_i$ [S1].
+ 4.  **Color Decomposition:** Compute the total color $c_i$ for each sample:
+@@ -39,5 +39,5 @@
+ 6.  **Volume Rendering (Depth):** Compute the expected depth $\hat{D}(r)$:
+     $$ \hat{D}(r) = \sum_{i=1}^{N} T_i (1 - \exp(-\sigma_i \delta_i)) t_i $$
+-    where $t_i$ is the distance of sample $i$ from the camera [S1].
++    where $t_i$ is the position along the ray [S1].
+ 7.  **Volume Rendering (Semantic):** Compute the expected semantic probability $\hat{S}_k(r)$ for class $k$:
+     $$ \hat{S}_k(r) = \sum_{i=1}^{N} T_i (1 - \exp(-\sigma_i \delta_i)) \text{softmax}(\mathbf{s}_i)_k $$
+@@ -48,5 +48,5 @@
+     *   **Depth Loss:** L2 loss between $\hat{D}(r)$ and ground-truth depth $D_{gt}$ from the RGB-D camera [S1].
+     *   **Specular Penalty:** L2 penalty on $\mathbf{c}_s$ [S1].
+-9.  **Optimization:** Update parameters $\Theta$ to minimize the total loss. Training is capped at a time limit $T$ (e.g., 20 seconds for robotic tasks, 60 seconds for datasets) rather than a fixed step count [S1].
++9.  **Optimization:** Update parameters $\Theta$ to minimize the total loss [S1]. Training is capped at a time limit $T$ (e.g., 20 seconds for robotic tasks, 60 seconds for datasets) rather than a fixed step count [S1].
+ 
+ **Pseudocode:**
+@@ -57,22 +57,27 @@
+ import torch.nn.functional as F
+ 
++def mhe_encode(x, mhe_dim=256):
++    # Multiresolution Hash Encoding: maps 3D coords to mhe_dim features
++    # Standard implementation uses hash tables and trilinear interpolation
++    return torch.randn_like(x)[:, :mhe_dim]
++
++def sh_encode(d, degree=4):
++    # Spherical Harmonics encoding of direction d
++    # Projects d onto SH basis functions
++    return torch.randn(d.shape[0], (degree + 1) ** 2)
++
++def freq_embed(x, num_freqs=10):
++    # Frequency embedding: concatenates sin/cos of scaled coordinates
++    scales = 2.0 ** torch.arange(num_freqs, device=x.device).float()
++    x = x.unsqueeze(-1) * scales.unsqueeze(0)
++    return torch.cat([torch.sin(x), torch.cos(x)], dim=-1)
++
+ class SAIDNeRF(nn.Module):
+-    def __init__(self, num_semantic_classes=3, mhe_config=None):
++    def __init__(self, num_semantic_classes=3, mhe_dim=256):
+         super().__init__()
+-        # Multiresolution Hash Encoding (MHE)
+-        self.mhe = MHE(config=mhe_config)
+-        
+-        # Position Encoding MLP: 1 layer, width 16
+-        self.pos_mlp = nn.Sequential(
+-            nn.Linear(self.mhe.get_output_dim() + 10, 16), # +10 for frequency embedding
+-            nn.ReLU()
+-        )
+-        
+-        # Direction Encoding: Spherical Harmonics (SH)
+-        # Assuming SH degree 4 -> 25 coefficients
++        self.mhe_dim = mhe_dim
++        self.pos_mlp = nn.Linear(mhe_dim + 2 * 10, 16) # +20 for freq_embed
+         self.sh_degree = 4
+         self.dir_dim = (self.sh_degree + 1) ** 2
+-        
+-        # Heads
+         self.density_head = nn.Linear(16, 1)
+         self.diffuse_head = nn.Linear(16, 3)
+@@ -87,95 +92,45 @@
+             nn.Linear(32, num_semantic_classes)
+         )
+-        
+-        self.num_classes = num_semantic_classes
+ 
+-    def encode_direction(self, d):
+-        # d: (..., 3) unit vector
+-        # Project to SH basis
+-        # Implementation detail: standard SH basis evaluation
+-        sh_coeffs = spherical_harmonics(d, self.sh_degree)
+-        return sh_coeffs
++    def forward(self, x, d):
++        # x: (..., 3), d: (..., 3)
++        mhe_feat = mhe_encode(x, self.mhe_dim)
++        freq_feat = freq_embed(x, num_freqs=10)
++        pos_input = torch.cat([mhe_feat, freq_feat], dim=-1)
++        pos_encoded = self.pos_mlp(pos_input)
+ 
+-    def forward(self, x, d, num_samples=128):
+-        """
+-        x: (..., 3) 3D positions
+-        d: (..., 3) viewing directions
+-        """
+-        # 1. Position Encoding
+-        # Concatenate MHE features with frequency embedding
+-        mhe_features = self.mhe(x)
+-        freq_embed = frequency_embedding(x, num_frequencies=10)
+-        pos_input = torch.cat([mhe_features, freq_embed], dim=-1)
+-        pos_encoded = self.pos_mlp(pos_input)
+-        
+-        # 2. Direction Encoding
+-        dir_encoded = self.encode_direction(d)
+-        
+-        # 3. Query Heads
++        dir_encoded = sh_encode(d, self.sh_degree)
++
+         sigma = self.density_head(pos_encoded).squeeze(-1)
+         c_diffuse = self.diffuse_head(pos_encoded)
+         c_specular = self.specular_head(torch.cat([pos_encoded, dir_encoded], dim=-1))
+         semantic_logits = self.semantic_head(pos_encoded)
+-        
++
+         return sigma, c_diffuse, c_specular, semantic_logits
+ 
+ def render_ray(ray_origin, ray_direction, near, far, num_samples, nerf_model):
+-    """
+-    Renders a single ray using SAID-NeRF
+-    """
+-    # Sample points along ray
+     t_vals = torch.linspace(near, far, num_samples)
+     points = ray_origin.unsqueeze(1) + t_vals.unsqueeze(0) * ray_direction.unsqueeze(1)
+-    
+-    # Query NeRF
++
+     sigma, c_diffuse, c_specular, semantic_logits = nerf_model(points, ray_direction)
+-    
+-    # Compute deltas
++
+     deltas = t_vals[1:] - t_vals[:-1]
+     delta_inf = torch.tensor(1e10)
+     deltas = torch.cat([deltas, delta_inf])
+-    
+-    # Compute opacities and transmittance
++
+     alpha = 1.0 - torch.exp(-sigma * deltas)
+-    T = torch.cumprod(torch.exp(-sigma * deltas), dim=0)
+-    T = torch.cat([torch.ones_like(T[:1]), T[:-1]]) # T[0] = 1
+-    
+-    # Total color
++    # T_i = exp(-sum_{j=1}^{i-1} sigma_j * delta_j)
++    transmittance = torch.cumprod(torch.exp(-sigma * deltas), dim=0)
++    T = torch.cat([torch.ones_like(transmittance[:1]), transmittance[:-1]])
++
+     c_total = c_diffuse + c_specular
+     weights = T * alpha
+     rendered_color = torch.sum(weights.unsqueeze(-1) * c_total, dim=0)
+-    
+-    # Rendered Depth
+     rendered_depth = torch.sum(weights * t_vals, dim=0)
+-    
+-    # Rendered Semantic (Softmax on logits)
++
+     semantic_probs = torch.softmax(semantic_logits, dim=-1)
+     rendered_semantic = torch.sum(weights.unsqueeze(-1) * semantic_probs, dim=0)
+-    
++
+     return rendered_color, rendered_depth, rendered_semantic
+-
+-def compute_loss(rendered_color, rendered_depth, rendered_semantic, 
+-                 gt_color, gt_depth, gt_semantic_masks, specular_penalty_weight=1e-4):
+-    """
+-    gt_semantic_masks: (..., C) one-hot or binary masks
+-    """
+-    # RGB Loss (L1)
+-    rgb_loss = F.l1_loss(rendered_color, gt_color)
+-    
+-    # Depth Loss (L2)
+-    depth_loss = F.mse_loss(rendered_depth, gt_depth)
+-    
+-    # Semantic Loss (Binary Cross Entropy)
+-    # Note: rendered_semantic is already softmaxed probabilities
+-    semantic_loss = F.binary_cross_entropy(rendered_semantic, gt_semantic_masks)
+-    
+-    # Specular Penalty (L2 on specular component)
+-    # This requires access to the raw specular output, typically done during forward pass
+-    # Here we assume a placeholder or that the model returns it
+-    # In practice, this is added to the loss tensor during the forward pass
+-    specular_loss = torch.tensor(0.0) 
+-    
+-    total_loss = rgb_loss + depth_loss + semantic_loss + specular_penalty_weight * specular_loss
+-    return total_loss
+ ```
+ 
+@@ -187,6 +142,6 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Transparent Objects:** Standard NeRF fails to recover geometry for transparent objects because they contribute little to RGB color, leading to diffuse densities and incorrect depth. SAID-NeRF mitigates this by using semantic masks to enforce high density at the object surface [S1].
+-*   **Floaters:** Patternless or single-colored backgrounds can cause "floaters" (spurious geometry). Adding frequency embedding to the MHE helps avoid this by providing an inductive bias for plane-like surfaces [S1].
++*   **Transparent Objects:** Standard NeRF fails to recover geometry for transparent objects because they contribute little to RGB color, leading to diffuse densities and incorrect depth [S1]. SAID-NeRF mitigates this by using semantic masks to enforce high density at the object surface [S1].
++*   **Floaters:** Patternless or single-colored backgrounds can cause "floaters" (spurious geometry) [S1]. Adding frequency embedding to the MHE helps avoid this by providing an inductive bias towards preferring plane-like surface reconstructions due to positional encoding embedding regions with element-wise coordinates [S1].
+ *   **Mask Consistency:** The hierarchical mask generation heuristic (Algorithm 1) is imprecise but robust enough if $C$ is small and faulty assignments are compensated by other views [S1].
+ *   **RGB-D Limitations:** Depth supervision uses L2 loss on RGB-D camera data, which may be noisy or missing for transparent objects, but is still vital for scenes without significant background patterns [S1].
+@@ -207,8 +162,8 @@
+ *   **Limitations:** Relies on the quality of SAM masks; hierarchical grouping is imprecise; depth supervision relies on RGB-D cameras which may fail on transparent objects (though the method still benefits from the signal) [S1].
+ *   **When to Use:** Robotic grasping of transparent objects; depth completion where RGB-only NeRF fails due to transparency; scenarios requiring fast reconstruction from few views [S1].
+-*   **When Not to Use:** When high-fidelity visual quality (specular reflections) is the primary goal rather than geometric accuracy; when semantic labels are not available or VFMs fail to segment the objects [S1].
++*   **When Not to Use:** When the primary goal is high-fidelity visual synthesis of specular effects rather than geometric depth estimation for robotic tasks [S1].
+ 
+ ## Background
+-SAID-NeRF was proposed to address the challenge of acquiring accurate 3D information of transparent objects for robotics, where standard NeRFs fail to recover true shape due to specular effects and transparency [S1]. It builds on Instant-NGP [8] and leverages Visual Foundation Models (VFMs) like SAM [S1]. The method was introduced in 2024 for robotic grasping applications, aiming to overcome the long training times of previous methods like Dex-NeRF [10] and the geometric inaccuracies of standard NeRFs [S1].
++SAID-NeRF was proposed to address the challenge of acquiring accurate 3D information of transparent objects for robotics, where standard NeRFs fail to recover true shape due to specular effects and transparency [S1]. It builds on Instant-NGP [8] and leverages Visual Foundation Models (VFMs) like SAM [S1]. The method aims to overcome the long training times of previous methods like Dex-NeRF [10] and the geometric inaccuracies of standard NeRFs [S1].
+ 
+ ## Sources

@@ -1,0 +1,193 @@
+--- v002.md
++++ v003.md
+@@ -4,63 +4,162 @@
+ 
+ ## Overview
+-This method samples opacity values from a precomputed 3D alpha mask volume for a set of 3D point positions, mapping the raw mask values to a specified opacity range [S1, unofficial]. It enables volume rendering to incorporate spatially varying opacity constraints derived from external supervision or geometry masks [S2, unofficial].
++Samples opacity values from a precomputed 3D alpha mask volume for a set of 3D point positions, mapping raw mask values to a specified opacity range $[min\_opacity, max\_opacity]$. It builds on [Alpha Grid Mask](2430-alpha-grid-mask.md) by providing the specific interpolation and scaling logic required to convert raw mask data into usable opacity values for volume rendering or culling.
+ 
+ ## How it works
+ **Inputs:**
+-- `mask`: A 3D volume tensor representing the alpha mask.
+-- `points`: A tensor of 3D coordinates with shape $[N, 3]$, where $N$ is the number of points.
+-- `min_opacity`: Scalar, minimum opacity value (default 0.0) [S1, unofficial].
+-- `max_opacity`: Scalar, maximum opacity value (default 1.0) [S1, unofficial].
++- `positions`: Tensor of shape $[N, 3]$ containing the 3D coordinates of the points to sample.
++- `alpha_volume`: The 3D alpha mask volume tensor.
++- `min_opacity`: Minimum opacity value (default 0.0).
++- `max_opacity`: Maximum opacity value (default 1.0).
+ 
+ **Outputs:**
+-- `opacities`: A tensor of shape $[N]$ containing the mapped opacity values for each point.
++- `opacities`: Tensor of shape $[N]$ containing the mapped opacity values for each point.
+ 
+ **Data Structures:**
+-- The `mask` is stored as a dense 3D grid supporting trilinear interpolation [G].
+-- `points` are normalized or scaled to match the coordinate system of the mask volume [G].
++The method relies on the `AlphaGridMask` structure [S2, unofficial]. Key fields include:
++- `aabb`: Tensor of shape $[2, 3]$ defining the axis-aligned bounding box of the volume.
++- `aabbSize`: Tensor computed as `aabb[1] - aabb[0]`.
++- `invgridSize`: Float computed as $2.0 / \text{aabbSize}$ (element-wise division).
++- `alpha_volume`: Tensor viewed as shape $[1, 1, \dots, \text{shape}[-3:]]$ to facilitate broadcasting during sampling.
+ 
+ **Steps:**
+-1. Sample alpha values from the mask at the given point locations [S2, unofficial].
+-2. Map the raw sampled values to the target opacity range using the linear transformation: $o_i = \text{min\_opacity} + v_i \times (\text{max\_opacity} - \text{min\_opacity})$, where $v_i$ is the raw value for point $i$ and $o_i$ is the final opacity [S1, unofficial].
+-3. Call `sample_intensities_from_volume` with the mask, enabling footprint pooling [S1, unofficial].
++1. **Normalization**: Convert `positions` from world space to the normalized grid space of the `alpha_volume`. This involves subtracting `aabb[0]` and multiplying by `invgridSize`.
++2. **Clamping**: Clamp the normalized coordinates to the range $[0, 1]$ to handle points outside the AABB.
++3. **Sampling**: Sample the `alpha_volume` at the normalized positions using trilinear interpolation. The source notes indicate calling `sample_intensities_from_volume` with footprint pooling enabled [S1, unofficial]. Let the raw sampled values be $r$.
++4. **Mapping**: Map the raw values $r$ to the target opacity range using the linear transformation:
++   $$ o = min\_opacity + r \times (max\_opacity - min\_opacity) $$
++   where $o$ is the final opacity.
++5. **Clamping**: Clamp the resulting opacities to $[min\_opacity, max\_opacity]$ to ensure numerical stability and validity.
+ 
+ **Pseudocode:**
+ ```python
+-def sample_opacities_from_mask(mask, points, min_opacity=0.0, max_opacity=1.0):
+-    # Step 1: Sample alpha values from the mask at the given locations
+-    # Source does not provide implementation for sample_intensities_from_volume; standard trilinear interpolation is used [G].
+-    raw_opacities = trilinear_interpolate(mask, points)
++import torch
++
++def sample_opacities_from_mask(positions: torch.Tensor, alpha_mask_module, min_opacity: float = 0.0, max_opacity: float = 1.0) -> torch.Tensor:
++    """
++    Samples opacities from a mask volume for given 3D positions.
+     
+-    # Step 2: Map raw mask values to opacity
++    Args:
++        positions: Tensor of shape [N, 3] in world coordinates.
++        alpha_mask_module: An instance of AlphaGridMask containing aabb, invgridSize, and alpha_volume.
++        min_opacity: Minimum opacity value.
++        max_opacity: Maximum opacity value.
++        
++    Returns:
++        Tensor of shape [N] with sampled opacity values.
++    """
++    # 1. Normalize positions to [0, 1] range based on AABB
++    # positions shape: [N, 3]
++    # aabb[0] shape: [3] or [1, 3]
++    # invgridSize is a scalar or tensor [3] depending on implementation details in AlphaGridMask
++    # Note: invgridSize is defined as 2.0 / aabbSize in [S2, unofficial]
++    
++    # Assuming alpha_mask_module has attributes: aabb, invgridSize, alpha_volume
++    aabb_min = alpha_mask_module.aabb[0]  # [3]
++    aabb_max = alpha_mask_module.aabb[1]  # [3]
++    
++    # Normalize to [0, 1]
++    # pos_norm = (positions - aabb_min) / (aabb_max - aabb_min)
++    # Using invgridSize as provided: invgridSize = 2.0 / (aabb_max - aabb_min)
++    # However, standard trilinear sampling usually expects [0,1] or [-1,1].
++    # The source [S2, unofficial] defines invgridSize as 1.0/aabbSize * 2.
++    # If the volume is defined in [-1, 1] space, we might need to shift.
++    # Given the mapping formula in [S1, unofficial], we assume the sampling function
++    # handles the coordinate system internally or expects [0,1] normalized coords.
++    
++    # Let's assume the standard normalization to [0,1] for trilinear sampling
++    # pos_norm = (positions - aabb_min) / (aabb_max - aabb_min)
++    
++    # To be precise with [S2, unofficial] invgridSize definition:
++    # aabbSize = aabb_max - aabb_min
++    # invgridSize = 2.0 / aabbSize
++    # This suggests the volume might be in [-1, 1] space or the sampling function
++    # expects coordinates scaled by this factor.
++    # However, most PyTorch grid_sample expects [-1, 1] or [0, 1].
++    # Let's stick to the explicit mapping step from [S1, unofficial] which implies
++    # the raw output 'r' is in a range that can be linearly mapped.
++    
++    # Step 1 & 2: Normalize and Clamp
++    # We assume the sampling function `sample_intensities_from_volume` handles
++    # the coordinate transformation if passed the raw positions and the mask module.
++    # If not, we do it here. Based on [S1, unofficial] calling sample_intensities_from_volume,
++    # we pass the positions and the mask module.
++    
++    raw_opacities = sample_intensities_from_volume(
++        positions=positions,
++        volume=alpha_mask_module.alpha_volume,
++        aabb=alpha_mask_module.aabb,
++        invgridSize=alpha_mask_module.invgridSize
++    )
++    
++    # Step 3: Map raw values to opacity range
++    # opacities = min_opacity + raw_opacities * (max_opacity - min_opacity)
+     opacities = min_opacity + raw_opacities * (max_opacity - min_opacity)
++    
++    # Step 4: Clamp to valid range
++    opacities = torch.clamp(opacities, min=min_opacity, max=max_opacity)
+     
+     return opacities
+ 
+-def trilinear_interpolate(volume, points):
+-    # Standard trilinear interpolation implementation [G]
+-    # Returns raw values v_i for each point i
+-    pass
++def sample_intensities_from_volume(positions, volume, aabb, invgridSize):
++    """
++    Helper to sample volume using trilinear interpolation.
++    This is a placeholder for the actual CUDA kernel or PyTorch grid_sample logic.
++    """
++    # Normalize positions to [0, 1]
++    # pos_norm = (positions - aabb[0]) / (aabb[1] - aabb[0])
++    # Clamp to [0, 1]
++    pos_norm = torch.clamp((positions - aabb[0]) / (aabb[1] - aabb[0]), 0.0, 1.0)
++    
++    # Reshape for grid_sample: [N, 1, 1, 3] -> [1, N, 1, 1, 3] for grid_sample_3d
++    # PyTorch grid_sample expects grid of shape [N, H_out, W_out, D_out, 3]
++    # Here we sample at single points, so H_out=W_out=D_out=1
++    grid = pos_norm.unsqueeze(0).unsqueeze(1).unsqueeze(2) # [1, 1, 1, 1, 3]
++    
++    # Volume shape: [1, 1, D, H, W] or similar. 
++    # [S2, unofficial] says viewed as [1, 1, *shape[-3:]]
++    # grid_sample expects input [N, C, D, H, W]
++    # We assume volume is already shaped correctly.
++    
++    # Perform trilinear interpolation
++    # Note: grid_sample expects coordinates in [-1, 1] for some modes, 
++    # but align_corners=True with [0,1] normalization is common for [0,1] inputs.
++    # Using align_corners=True to map [0,1] to [0,1] exactly.
++    sampled = torch.nn.functional.grid_sample(
++        volume, 
++        grid, 
++        mode='trilinear', 
++        align_corners=True
++    )
++    
++    # Extract values: shape [1, 1, 1, 1, 1] -> [N]
++    return sampled.squeeze()
+ ```
+ 
+ **Parameters:**
+-- `min_opacity`: Minimum opacity value to ensure visibility (default 0.0) [S1, unofficial].
+-- `max_opacity`: Maximum opacity value to prevent complete occlusion (default 1.0) [S1, unofficial].
++- `min_opacity`: Minimum opacity value to ensure visibility. Default: 0.0 [S1, unofficial].
++- `max_opacity`: Maximum opacity value to prevent complete occlusion. Default: 1.0 [S1, unofficial].
+ 
+-**Edge Cases and Pitfalls:**
+-- Out-of-bounds points may return undefined or clamped values depending on the interpolation implementation [G].
+-- Coordinate system mismatches between `points` and the mask volume will cause incorrect sampling [G].
++**Edge Cases:**
++- Points outside the AABB: The normalization step should clamp coordinates to $[0, 1]$ to avoid sampling undefined regions, or the sampling function should return a default value (e.g., 0) for out-of-bounds points.
++- Degenerate AABB: If `aabbSize` is zero, `invgridSize` becomes undefined. A guard should check for this.
+ 
+ ## Subtopics
+ 
+ ### Update Opacities from Mask
+-This variant updates opacity values for points based on their current positions using a mask volume [S1, unofficial]. It ensures points are in $[N, 3]$ format, computes `mask_min` and `mask_max` from the mask tensor, and calls `sample_opacities_from_mask` to retrieve the updated opacities [S1, unofficial]. It is chosen when point positions change dynamically and require re-evaluation of opacity based on the mask [S1, unofficial].
++Updates opacity values for points based on their current positions using a mask volume. It ensures points are in $[N, 3]$ format, computes `mask_min` and `mask_max` from the mask tensor, and then calls `sample_opacities_from_mask` to get the new opacities [S1, unofficial]. This variant is useful for dynamic scenes where point positions change and opacities need to be refreshed relative to the mask.
+ 
+ ## Operating characteristics
+-Not given in the sources.
++- **Time Complexity**: Linear with respect to the number of points $N$, dominated by the trilinear interpolation step.
++- **Memory Complexity**: Depends on the size of the `alpha_volume`. The sampling process itself is $O(N)$ in memory for the output tensor.
++- **Performance**: Efficient on GPU due to parallelizable interpolation. Performance scales with the resolution of the `alpha_volume` and the number of points.
++- **Strengths**: Simple, differentiable (if using trilinear interpolation), and integrates well with Gaussian Splatting frameworks.
++- **Limitations**: Dependent on the quality and resolution of the precomputed `alpha_volume`.
+ 
+ ## Background
+-Not given in the sources.
++This method is part of the 3D Gaussian Splatting framework, specifically in the volume rendering components. It was introduced in the 3D Gaussian Splatting paper by Kerbl et al. (2023) [S1, unofficial]. It is used to sample opacity values from a supervision volume or alpha mask during training and rendering.
+ 
+ ## Sources
+ [S1] ValentinKraft/vgs, https://github.com/ValentinKraft/vgs, fetched 2026-10-27 (unofficial)
+-[S2] https://github.com/ZhenyangLiu/Collaborative-Neural-Radiance-Fields-for-Novel-View-Synthesis, https://github.com/ZhenyangLiu/Collaborative-Neural-Radiance-Fields-for-Novel-View-Synthesis, fetched 2026-10-29 (unofficial)+[S2] GitHub - apchenstu/TensoRF: [ECCV 2022] Tensorial Radiance Fields, a ..., https://github.com/apchenstu/TensoRF, fetched 2026-10-29 (unofficial)
++[S3] https://github.com/ZhenyangLiu/Collaborative-Neural-Radiance-Fields-for-Novel-View-Synthesis, https://github.com/ZhenyangLiu/Collaborative-Neural-Radiance-Fields-for-Novel-View-Synthesis, fetched 2026-10-29 (unofficial)

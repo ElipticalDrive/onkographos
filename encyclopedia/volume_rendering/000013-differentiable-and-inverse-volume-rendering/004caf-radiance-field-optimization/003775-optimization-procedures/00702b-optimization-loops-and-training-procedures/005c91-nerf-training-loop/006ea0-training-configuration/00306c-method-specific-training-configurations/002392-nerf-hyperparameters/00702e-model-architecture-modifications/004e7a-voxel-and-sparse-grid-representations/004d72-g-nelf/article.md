@@ -1,0 +1,235 @@
+# G-NeLF
+
+Also called: Grid-based Neural Light Field, Memory- and Data-Efficient Hybrid Neural Light Field
+
+## Overview
+G-NeLF is a grid-based Neural Light Field (NeLF) method for novel view synthesis that predicts ray color directly without point-wise volume density modeling [S1, unofficial]. It represents a ray as a sequence of spatial-aware features extracted from a hash-based multi-resolution tri-plane, which are decoded by an LSTM network to predict color [S1, unofficial]. Unlike standard NeRF methods that model density and color per point, G-NeLF bypasses volume rendering integration, relying on the sequential nature of ray propagation to infer color [S1, unofficial]. It distinguishes itself from sibling methods like R2L by using a spatial-aware feature sequence rather than direct concatenation of frequency-encoded coordinates, and from MLP-based decoders by leveraging temporal order information via recurrence [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Camera parameters (origin $\mathbf{o}$, direction $\mathbf{d}$), a set of training images with known poses.
+*   **Outputs:** Predicted RGB color $(r, g, b)$ for each pixel's ray.
+
+**Data Structures:**
+1.  **Hash Table:** Maps integer coordinate pairs to feature vectors.
+    *   Size $T$: $2^{14}$ for small/medium models, $2^{16}$ for large models [S1, unofficial].
+    *   Mapping function: $\text{Index} = (x^a \oplus y^b) \mod T$, where $\oplus$ is XOR, $a=1$, $b=654,435,761$ [S1, unofficial].
+    *   Note: The source text contains conflicting values for $b$ ($654,435,761$ in the formula section vs $2,654,435,761$ in the algorithm description text). The formula section value is used here [S1, unofficial].
+2.  **Tri-Plane:** Three orthogonal feature planes $\{\pi_{xy}, \pi_{xz}, \pi_{yz}\}$ [S1, unofficial].
+    *   Each plane has $N$ resolution levels.
+    *   Small/Medium: $N=8$, resolutions from 16 to 1024.
+    *   Large: $N=16$, resolutions from 16 to 2048 [S1, unofficial].
+3.  **Point Feature Vector $\mathbf{F}$:**
+    *   For each resolution level $i \in \{1, \dots, N\}$ and each plane $\pi$, a feature vector of dimension 2 is retrieved [S1, unofficial].
+    *   Total size: $3 \times N \times 2$ [S1, unofficial].
+
+**Algorithm:**
+
+1.  **Ray Emission:** For each pixel in the target image, emit a ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$ based on the camera model [S1, unofficial].
+2.  **Bounding Box:** Determine the intersection of the ray with the scene's bounding box [S1, unofficial].
+3.  **Sampling:** Sequentially sample $K$ points $\{\mathbf{x}_1, \dots, \mathbf{x}_K\}$ along the ray within the bounding box.
+    *   $K=256$ for 360° scenes.
+    *   $K=128$ for forward-facing scenes (using NDC coordinates) [S1, unofficial].
+4.  **Feature Extraction (for each point $\mathbf{x}_k$):**
+    *   Project $\mathbf{x}_k$ onto the three orthogonal planes $\pi \in \{\pi_{xy}, \pi_{xz}, \pi_{yz}\}$ to obtain 2D coordinates $\mathbf{x}_\pi$ [S1, unofficial].
+    *   For each resolution level $i$ from $1$ to $N$:
+        *   Let $s_i$ be the grid size for resolution $i$.
+        *   Compute integer grid indices for the four corners of the cell containing $\mathbf{x}_\pi$:
+            $$
+            \begin{aligned}
+            \text{top-left} &= (\lfloor x_\pi[0] / s_i \rfloor, \lfloor x_\pi[1] / s_i \rfloor) \\
+            \text{top-right} &= (\lfloor x_\pi[0] / s_i \rfloor, \lfloor x_\pi[1] / s_i \rfloor + 1) \\
+            \text{bottom-left} &= (\lfloor x_\pi[0] / s_i \rfloor + 1, \lfloor x_\pi[1] / s_i \rfloor) \\
+            \text{bottom-right} &= (\lfloor x_\pi[0] / s_i \rfloor + 1, \lfloor x_\pi[1] / s_i \rfloor + 1)
+            \end{aligned}
+            $$
+        *   Retrieve feature vectors from the hash table for each corner using the mapping function [S1, unofficial].
+        *   Compute the weighted sum of these four corner features based on the distance between $\mathbf{x}_\pi$ and the corners (trilinear interpolation) [S1, unofficial].
+        *   Append the resulting feature vector to the list for plane $\pi$ [S1, unofficial].
+    *   Concatenate the feature vectors from all $N$ resolutions for plane $\pi$ to form $\mathbf{F}_\pi$ [S1, unofficial].
+    *   Concatenate $\mathbf{F}_{xy}, \mathbf{F}_{xz}, \mathbf{F}_{yz}$ to form the point feature vector $\mathbf{F}_k$ [S1, unofficial].
+5.  **Sequence Assembly:** Assemble the feature vectors of all $K$ points into a ray feature sequence $\{\mathbf{F}_1, \dots, \mathbf{F}_K\}$ [S1, unofficial].
+6.  **Direction Encoding:** Encode the ray's 3D normalized direction vector $\mathbf{d}$ using Spherical Harmonics [S1, unofficial].
+7.  **LSTM Decoding:**
+    *   Initialize hidden state $\mathbf{H}_0$ and cell state $\mathbf{C}_0$ to zero [G].
+    *   For $i = 1$ to $K$:
+        $$
+        \mathbf{H}_i, \mathbf{C}_i = \text{LSTM}(\text{Concat}(\mathbf{F}_i, \mathbf{d}), \mathbf{H}_{i-1}, \mathbf{C}_{i-1})
+        $$
+        where $\text{LSTM}(\cdot)$ is the LSTM cell operation [S1, unofficial].
+8.  **Color Prediction:**
+    $$
+    (r, g, b) = \text{MLP}(\mathbf{H}_K)
+    $$
+    where $\text{MLP}(\cdot)$ is a 2-layer MLP network [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def get_hash_index(x, y, T, a=1, b=654435761):
+    """
+    Calculate hash index for a 2D coordinate.
+    """
+    return (x**a ^ y**b) % T
+
+def get_point_features(x_3d, tri_plane, resolutions, hash_tables):
+    """
+    Extract feature vector for a 3D point from the tri-plane.
+    
+    Args:
+        x_3d: Tuple (x, y, z)
+        tri_plane: List of plane names ['xy', 'xz', 'yz']
+        resolutions: List of grid sizes [s_1, ..., s_N]
+        hash_tables: Dict mapping plane_name -> List of hash tables [hash_1, ..., hash_N]
+        
+    Returns:
+        F: Concatenated feature vector for the point
+    """
+    F_all = []
+    
+    for plane in tri_plane:
+        F_plane = []
+        
+        # Project 3D point to 2D based on plane
+        if plane == 'xy':
+            x_2d, y_2d = x_3d[0], x_3d[1]
+        elif plane == 'xz':
+            x_2d, y_2d = x_3d[0], x_3d[2]
+        elif plane == 'yz':
+            x_2d, y_2d = x_3d[1], x_3d[2]
+            
+        for i, s in enumerate(resolutions):
+            # Get hash table for this resolution and plane
+            h_table = hash_tables[plane][i]
+            
+            # Calculate grid coordinates
+            gx = x_2d // s
+            gy = y_2d // s
+            
+            # Calculate fractional parts for interpolation weights
+            fx = x_2d - gx * s
+            fy = y_2d - gy * s
+            
+            # Weights for trilinear interpolation (bilinear in 2D)
+            w_tl = (1 - fx/s) * (1 - fy/s)
+            w_tr = (fx/s) * (1 - fy/s)
+            w_bl = (1 - fx/s) * (fy/s)
+            w_br = (fx/s) * (fy/s)
+            
+            # Retrieve features from hash table
+            # Note: Hash table lookup returns a vector of size 2
+            idx_tl = get_hash_index(gx, gy, len(h_table))
+            idx_tr = get_hash_index(gx, gy + 1, len(h_table))
+            idx_bl = get_hash_index(gx + 1, gy, len(h_table))
+            idx_br = get_hash_index(gx + 1, gy + 1, len(h_table))
+            
+            f_tl = h_table[idx_tl]
+            f_tr = h_table[idx_tr]
+            f_bl = h_table[idx_bl]
+            f_br = h_table[idx_br]
+            
+            # Weighted sum
+            f_interp = [
+                w_tl * f_tl[0] + w_tr * f_tr[0] + w_bl * f_bl[0] + w_br * f_br[0],
+                w_tl * f_tl[1] + w_tr * f_tr[1] + w_bl * f_bl[1] + w_br * f_br[1]
+            ]
+            
+            F_plane.append(f_interp)
+            
+        # Concatenate features from all resolutions for this plane
+        F_plane_flat = []
+        for f in F_plane:
+            F_plane_flat.extend(f)
+            
+        F_all.extend(F_plane_flat)
+        
+    return F_all
+
+def spherical_harmonics_encode(direction, degree=4):
+    """
+    Encode 3D direction vector using Spherical Harmonics.
+    Simplified implementation for demonstration.
+    """
+    # Standard SH encoding for degree 4 results in 16 coefficients
+    # This is a placeholder for the actual SH math
+    return [0.0] * 16 
+
+def lstm_step(input_vec, h_prev, c_prev, weights):
+    """
+    Single LSTM step.
+    """
+    # Standard LSTM gate calculations
+    # This is a placeholder for the actual LSTM math
+    return h_prev, c_prev
+
+def gnerf_render(ray_origin, ray_direction, tri_plane, resolutions, hash_tables, lstm_weights, mlp_weights):
+    """
+    Render a single ray using G-NeLF.
+    """
+    # 1. Sample points along the ray
+    # Assuming a bounding box intersection is handled externally
+    # K points sampled linearly or exponentially
+    K = 256 # For 360 scenes
+    points = []
+    for k in range(K):
+        t = k / (K - 1) # Linear sampling for simplicity
+        # Actual sampling might be exponential or based on depth
+        point = ray_origin + t * ray_direction
+        points.append(point)
+        
+    # 2. Extract features for each point
+    feature_sequence = []
+    for p in points:
+        F_k = get_point_features(p, ['xy', 'xz', 'yz'], resolutions, hash_tables)
+        feature_sequence.append(F_k)
+        
+    # 3. Encode direction
+    d_encoded = spherical_harmonics_encode(ray_direction)
+    
+    # 4. LSTM Decoding
+    h = [0.0] * 128 # Hidden size, e.g., 128 for medium/large
+    c = [0.0] * 128 # Cell size
+    
+    for F_k in feature_sequence:
+        # Concatenate feature vector and direction
+        input_vec = F_k + d_encoded
+        
+        # LSTM step
+        h, c = lstm_step(input_vec, h, c, lstm_weights)
+        
+    # 5. MLP Prediction
+    # Final hidden state h_k
+    color = mlp_predict(h, mlp_weights)
+    
+    return color
+```
+
+**Parameters:**
+*   **Hash Table Size ($T$):** $2^{14}$ (small/medium), $2^{16}$ (large) [S1, unofficial].
+*   **Resolutions:** 8 levels (16 to 1024) for small/medium; 16 levels (16 to 2048) for large [S1, unofficial].
+*   **Feature Dimension per Level:** 2 [S1, unofficial].
+*   **LSTM Hidden Size:** 32 (small), 128 (medium), 128 (large, 3 layers) [S1, unofficial].
+*   **Sequence Length ($K$):** 256 (360°), 128 (forward-facing) [S1, unofficial].
+*   **Model Size:** 0.95 MB (small), 1.41 MB (medium) [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Hash Collisions:** At the highest resolution, approximately 100,000 spatial positions map to a single hash entry. This is not detrimental because points far from the visible surface have low volume rendering weights and thus do not significantly influence the color features during training. The features at high resolutions adaptively concentrate on capturing appearance features of the visible surface [S1, unofficial].
+*   **Decoder Choice:** Using an MLP or Transformer for decoding is inefficient. MLPs ignore temporal order, and Transformers are permutation-invariant, losing the sequential information of ray propagation [S1, unofficial].
+
+## Operating characteristics
+*   **Model Size:** Extremely compact. 0.95 MB for the small model, 1.41 MB for the medium model [S1, unofficial]. This is approximately one-tenth the parameters of Instant-NGP (64.1 MB) and TensoRF (71.8 MB) [S1, unofficial].
+*   **Training Data:** Requires only 100 or fewer original views. Does not require synthesizing pseudo-views, saving significant storage (over 56 GB compared to methods requiring 10K+ views) [S1, unofficial].
+*   **Performance:** Surpasses R2L by 0.04 dB PSNR on Realistic Synthetic 360° dataset with only 100 views and 0.95 MB model size [S1, unofficial]. Surpasses VQRF by 0.79 dB PSNR at comparable model size (1.4 MB) [S1, unofficial]. Achieves comparable rendering quality to standard NeRF methods [S1, unofficial].
+*   **Hardware:** Experiments conducted on a single RTX 3090 GPU using float16 accuracy [S1, unofficial].
+*   **Strengths:** Low memory footprint, fast training due to small model size and lack of pseudo-view synthesis, effective use of spatial-aware features.
+*   **Limitations:** Does not model volume density explicitly, which may limit its applicability to tasks requiring volumetric analysis (e.g., relighting, occlusion reasoning) compared to NeRF-based methods [S1, unofficial].
+
+## Background
+G-NeLF was introduced in the paper "G-NeLF: Memory- and Data-Efficient Hybrid Neural Light Field for Novel View Synthesis" [S1, unofficial]. It addresses the challenges of Neural Light Field (NeLF) training, which typically requires training a NeRF model first and synthesizing over 10K views to train the NeLF, leading to high storage and computational costs [S1, unofficial]. G-NeLF overcomes these difficulties by using a spatial-aware feature sequence derived from a hash-based multi-resolution tri-plane and an LSTM decoder, allowing it to be trained directly from original views with minimal storage overhead [S1, unofficial].
+
+## Sources
+[S1] G-NeLF: Memory- and Data-Efficient Hybrid Neural Light Field for Novel View Synthesis, https://arxiv.org/abs/2409.05617v1, fetched 2026-10-27 (unofficial)

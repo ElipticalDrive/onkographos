@@ -1,0 +1,111 @@
+# Billboard Voxelization
+Also called: firstVoxelize, instanced billboard voxelization
+
+## Overview
+Billboard Voxelization is a two-pass rasterization-based technique that converts polygonal geometry into a 3D voxel grid by rendering instanced quads (billboards) into a position map [S1, unofficial]. It explicitly generates voxel-sized quads for each potential voxel location to initialize voxel positions directly during the rasterization pass [S1, unofficial].
+
+## How it works
+**Inputs:**
+* Polygonal mesh (vertices, normals) [G].
+* Volume bounds: $[x_{min}, x_{max}]$, $[y_{min}, y_{max}]$, $[z_{min}, z_{max}]$ [G].
+* Volume resolution: `voxelDim` (assumed uniform) [G].
+* Camera matrices: Projection ($P$), View ($V$) [S1, unofficial].
+* Voxel size vector: `voxelSize` ($s_x, s_y, s_z$) [S1, unofficial].
+* A 3D texture (or volume buffer) where each voxel contains initialized data (e.g., density, color) and position information [G].
+
+**Outputs:**
+* Populated 3D voxel grid [S1, unofficial].
+
+**Data Structures:**
+* **Position Map FBO:** A Framebuffer Object with a color attachment (typically `rgba32f` for high precision) storing world-space positions and a depth attachment for occlusion culling [G].
+* **Voxel Grid:** A 3D texture or buffer indexed by $(x, y, z)$ [G].
+
+**Steps:**
+1. **Setup:** Bind the Position Map FBO and clear color and depth buffers to 0 [S1, unofficial].
+2. **Matrix Preparation:** Load light/camera projection matrix $P$ and view matrix $V$ [S1, unofficial]. Compute modified inverse view matrix $V_i$ by zeroing out the translation components of $V$, then transposing the remaining rotation/scaling submatrix [S1, unofficial].
+3. **Uniform Loading:** Load $P$, $V$, $V_i$, light near plane, clip distance, volume position, and `voxelSize` into the shader [S1, unofficial].
+4. **Rendering Pass (Billboard Generation):** Render instanced quads where each instance corresponds to a voxel in the grid [S1, unofficial]. The vertex shader transforms the quad's local position into world space using `voxelPosition` and `voxelSize`, then projects it using $P \times V$ [S1, unofficial]. The fragment shader writes the world-space position of the fragment to the position map color attachment [G]. Depth testing ensures only the nearest surface fragment is recorded [G].
+5. **Volume Population:** Unbind the VAO, volume, shader, and framebuffer [S1, unofficial]. Render a full-screen quad [G]. Sample the position map to retrieve world-space positions [G]. Convert world-space positions to voxel indices using the formula provided in the parent article [G]. Write the sampled data (or derived density) to the 3D voxel grid [G].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def billboard_voxelization(mesh, volume_bounds, voxel_dim, camera):
+    # 1. Setup Position Map FBO
+    fbo = create_fbo(width=volume_bounds.resolution, height=volume_bounds.resolution, format='rgba32f')
+    bind_fbo(fbo)
+    clear_buffers(color=0.0, depth=1.0)
+
+    # 2. Prepare Matrices
+    P = camera.projection_matrix
+    V = camera.view_matrix
+    # Compute Vi: zero translation in V, then transpose the rotation submatrix
+    V_inv_rot = transpose(V[0:3, 0:3])
+    Vi = identity_matrix()
+    Vi[0:3, 0:3] = V_inv_rot
+
+    # 3. Load Uniforms
+    shader.set_uniform('P', P)
+    shader.set_uniform('V', V)
+    shader.set_uniform('Vi', Vi)
+    shader.set_uniform('voxelSize', vec3(voxel_dim))
+    shader.set_uniform('volumeBounds', volume_bounds)
+
+    # 4. Render Instanced Billboards
+    # Generate instance data for every voxel in the grid
+    instance_positions = []
+    instance_data = []
+    for z in range(volume_bounds.resolution):
+        for y in range(volume_bounds.resolution):
+            for x in range(volume_bounds.resolution):
+                instance_positions.append(vec3(
+                    volume_bounds.x_min + (x + 0.5) * voxel_dim,
+                    volume_bounds.y_min + (y + 0.5) * voxel_dim,
+                    volume_bounds.z_min + (z + 0.5) * voxel_dim
+                ))
+                instance_data.append(1.0)
+    shader.set_instance_attributes('voxelPosition', instance_positions)
+    shader.set_instance_attributes('voxelData', instance_data)
+    draw_quad_instanced(count=len(instance_positions))
+
+    # 5. Unbind and Process
+    unbind_fbo()
+    unbind_vao()
+    unbind_shader()
+
+    # 6. Volume Population (Full Screen Quad)
+    bind_fbo(None)
+    render_fullscreen_quad()
+    # Fragment shader samples position map and converts to voxel indices
+    pos = sample_position_map(gl_FragCoord.xy)
+    x = voxel_dim * (pos.x - volume_bounds.x_min) / (volume_bounds.x_max - volume_bounds.x_min)
+    y = voxel_dim * (pos.y - volume_bounds.y_min) / (volume_bounds.y_max - volume_bounds.y_min)
+    z = voxel_dim * (pos.z - volume_bounds.z_min) / (volume_bounds.z_max - volume_bounds.z_min)
+    write_to_voxel_grid(ivec3(x, y, z), pos)
+
+def draw_quad_instanced(count):
+    # Renders a unit quad (-0.5 to 0.5) for each instance, 
+    # applying the model matrix M built from voxelPosition and voxelSize in the vertex shader.
+    glDrawArraysInstanced(GL_TRIANGLES, 0, 6, count)
+```
+
+**Edge Cases and Pitfalls:**
+* **Precision:** Insufficient precision in the position map leads to incorrect voxel indexing [G].
+* **Boundary Conditions:** Positions outside the volume bounds result in negative or out-of-bounds indices. Explicit clamping is required [G].
+* **Aliasing:** Solid voxelization of closed polygonal models may exhibit aliasing effects, appearing as prolonged lines where some voxels are missing at the rasterization stage [G].
+
+## Subtopics
+
+### [Position Map FBO Setup](2749-position-map-fbo-setup.md)
+Creates a Framebuffer Object (FBO) with a color attachment (position map) and a depth attachment for voxelization rendering. It prepares the GPU state for the first pass of billboard voxelization, where instanced quads are rendered to initialize voxel positions in a 3D texture.
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+Billboard Voxelization is a technique used in cloud rendering and other volume visualization applications [S1, unofficial]. It was popularized by implementations such as the Cloud-Renderer project, which utilizes instanced rendering to efficiently populate voxel grids [S1, unofficial].
+
+## Sources
+[S1] jaafersheriff/Cloud-Renderer, https://github.com/jaafersheriff/Cloud-Renderer, fetched 2026-10-27 (unofficial)

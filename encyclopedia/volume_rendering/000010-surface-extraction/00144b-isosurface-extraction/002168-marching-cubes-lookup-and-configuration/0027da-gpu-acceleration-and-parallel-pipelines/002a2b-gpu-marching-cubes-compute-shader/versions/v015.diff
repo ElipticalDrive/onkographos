@@ -1,0 +1,281 @@
+--- v014.md
++++ v015.md
+@@ -3,188 +3,118 @@
+ 
+ ## Overview
+-This method extracts an isosurface from a 3D scalar field by executing the Marching Cubes algorithm within a GPU compute shader, utilizing append buffers for dynamic triangle generation and indirect draw calls for rendering [S1, unofficial]. It differs from CPU-based implementations by offloading the voxel traversal and topology lookup to the GPU, and from other GPU variants by relying on a barebone append buffer structure rather than hierarchical data structures like histogram pyramids [S1, unofficial]. The approach is designed for real-time applications within the Unity engine, assuming DX11 hardware support [S1, unofficial].
++A GPU-based implementation of the Marching Cubes algorithm that offloads isosurface extraction from the CPU to a compute shader, typically within a framework like Unity [S1, unofficial]. It solves the performance bottleneck of CPU-based volume rendering by parallelizing voxel processing across the GPU [S1, unofficial]. It differs from CPU immediate mode implementations by using append buffers and indirect draw calls to handle variable triangle counts per voxel without CPU-GPU synchronization overhead [S1, unofficial].
+ 
+ ## How it works
+-The implementation processes a 3D grid of voxels in parallel. Each thread group handles a sub-volume of the grid, determining the intersection case for each voxel, looking up the corresponding triangle configuration, computing vertex positions and normals, and appending the resulting geometry to a global buffer.
++**Inputs and Outputs:**
++*   **Input:** A 3D scalar field (density texture) of resolution $N \times N \times N$, an isovalue $I$, and the Marching Cubes lookup tables (`edgeTable`, `triangleTable`) embedded in the shader [S1, unofficial].
++*   **Output:** A mesh representing the isosurface, generated as a stream of triangles [S1, unofficial].
+ 
+-### Inputs and Outputs
+-**Inputs:**
+-*   `DensityTexture`: A `Texture3D` containing the scalar field values. The source example uses `TextureFormat.RFloat` [S1, unofficial].
+-*   `Resolution`: An integer defining the dimensions of the cubic grid ($N \times N \times N$) [S1, unofficial].
+-*   `isoLevel`: The scalar threshold for surface extraction. Default value is $0.5$ [S1, unofficial].
+-*   `edgeTable`: A static constant array of 256 integers (hex values), representing the 12-bit bitmask for edge intersections [S1, unofficial].
+-*   `triTable`: A static constant 2D array of size $256 \times 16$, storing triangle indices for each of the 256 cases, terminated by `-1` [S1, unofficial].
++**Data Structures:**
++1.  **Append Vertex Buffer (`appendVertexBuffer`):** A `ComputeBuffer` of type `Append`.
++    *   **Capacity:** $(N-1) \times (N-1) \times (N-1) \times 5$ elements [S1, unofficial]. This accounts for the maximum 5 triangles per voxel [Lookup Table and Ambiguity Handling].
++    *   **Element Size:** 18 bytes per element. Each element represents one triangle, defined by 3 vertices. Each vertex has 2 attributes (position `float3`, normal `float3`), totaling 6 floats ($6 \times 4$ bytes = 24 bytes) or potentially packed. The source specifies `sizeof(float) * 18`, implying a specific packing or attribute set (e.g., position only, or specific shader requirements) [S1, unofficial]. *Note: The source code comment says "3 triangles * 3 vertices * 2 floats per vertex attribute * 2 attributes" which equals 36, but the allocation is 18. The struct definition says `Triangle` contains 3 `Vertex` structs, each with `float3 vPosition` and `float3 vNormal`. This is 6 floats = 24 bytes. The source text contains a contradiction regarding the byte size (18 vs 24). We follow the explicit allocation code: `sizeof(float) * 18` [S1, unofficial].*
++2.  **Argument Buffer (`argBuffer`):** A `ComputeBuffer` of type `IndirectArguments`.
++    *   **Size:** 4 integers (16 bytes) [S1, unofficial].
++    *   **Layout:** `[vertexCount, instanceCount, startVertex, startInstance]` [S1, unofficial].
+ 
+-**Outputs:**
+-*   `appendVertexBuffer`: An `AppendStructuredBuffer` containing the generated triangles. Each element is a `Triangle` struct, which contains 3 `Vertex` structs. Each `Vertex` struct contains `float3 vPosition` and `float3 vNormal` [S1, unofficial].
+-
+-### Data Structures
+-1.  **Append Vertex Buffer**:
+-    *   Type: `ComputeBufferType.Append`
+-    *   Size: $(Resolution - 1)^3 \times 5$ elements. This capacity assumes the maximum of 5 triangles per voxel [S1, unofficial].
+-    *   Element Size: $18$ bytes ($3 \text{ vertices} \times 2 \text{ attributes} \times 3 \text{ floats/attribute}$) [S1, unofficial].
+-    *   Layout: Sequential storage of `Triangle` structs.
+-
+-2.  **Argument Buffer**:
+-    *   Type: `ComputeBufferType.IndirectArguments`
+-    *   Size: 4 integers (16 bytes) [S1, unofficial].
+-    *   Layout: `[vertexCount, instanceCount, startVertex, startInstance]`. Used to pass the dynamic triangle count from the compute shader to the draw call [S1, unofficial].
+-
+-### Algorithm Steps
+-1.  **Initialization**:
+-    *   Find the compute shader kernel named `"MarchingCubes"` [S1, unofficial].
+-    *   Allocate `appendVertexBuffer` with capacity $(Resolution - 1)^3 \times 5$ elements of 18 bytes each [S1, unofficial].
++**Numbered Steps:**
++1.  **Initialization:** Locate the compute shader kernel named "MarchingCubes" [S1, unofficial].
++2.  **Buffer Allocation:**
++    *   Allocate `appendVertexBuffer` with capacity $(N-1)^3 \times 5$ and element size 18 bytes [S1, unofficial].
+     *   Allocate `argBuffer` with 4 integers [S1, unofficial].
+-    *   Set shader parameters: `_gridSize` to `Resolution`, `_isoLevel` to the threshold value [S1, unofficial].
+-    *   Bind `appendVertexBuffer` to the `"triangleRW"` buffer in the kernel [S1, unofficial].
+-
+-2.  **Dispatch**:
+-    *   Reset the append buffer counter to 0 using `SetCounterValue(0)` to clear previous frame output [S1, unofficial].
+-    *   Dispatch the compute shader with thread groups of size $(Resolution/8, Resolution/8, Resolution/8)$. This implies 8x8x8 threads per group [S1, unofficial].
+-
+-3.  **Compute Shader Kernel Execution** (per voxel):
+-    *   Calculate global voxel coordinates $(x, y, z)$ from thread IDs.
+-    *   Sample the 8 corner values of the voxel from `DensityTexture`.
+-    *   Compute the case index $C$ by comparing corner values against `isoLevel`. If $V(v_i) < isoLevel$, set bit $i$ of $C$ to 1 [G].
+-    *   Check `edgeTable[C]`. If 0, no intersection; exit.
+-    *   Retrieve triangle indices from `triTable[C]`. Iterate through triplets until `-1` is encountered.
+-    *   For each intersected edge, compute the intersection point using linear interpolation:
+-        $$ P = V_1 + \frac{isoLevel - V_1}{V_2 - V_1} (V_2 - V_1) $$
+-        where $V_1, V_2$ are the scalar values at the edge endpoints [G].
+-    *   Compute the vertex normal by sampling the gradient of the scalar field at the intersection point [S1, unofficial].
+-    *   Append the resulting triangle (3 vertices with position and normal) to `triangleRW` [S1, unofficial].
+-
+-4.  **Readback and Rendering**:
++3.  **Parameter Setup:**
++    *   Set `_gridSize` to $N$ [S1, unofficial].
++    *   Set `_isoLevel` to the threshold (default 0.5) [S1, unofficial].
++    *   Bind the input density texture (e.g., `Texture3D`) [S1, unofficial].
++    *   Bind `appendVertexBuffer` to the shader's `triangleRW` buffer [S1, unofficial].
++4.  **Reset Counter:** Call `appendVertexBuffer.SetCounterValue(0)` to clear the append buffer count from previous frames [S1, unofficial].
++5.  **Dispatch:** Dispatch the compute shader kernel with thread groups sized $(N/8, N/8, N/8)$, assuming 8x8x8 threads per group [S1, unofficial].
++6.  **Read Count:**
+     *   Initialize `argBuffer` with `{0, 1, 0, 0}` [S1, unofficial].
+-    *   Use `ComputeBuffer.CopyCount` to copy the current count of `appendVertexBuffer` to `argBuffer[0]` [S1, unofficial].
++    *   Use `ComputeBuffer.CopyCount` to copy the append buffer's current count to `argBuffer` at offset 0 [S1, unofficial].
+     *   Read back the count from `argBuffer` to the CPU [S1, unofficial].
+-    *   Update `argBuffer[0]` by multiplying the vertex count by 3 (indices per triangle) [S1, unofficial].
+-    *   Bind `appendVertexBuffer` to the `"triangles"` buffer in the rendering shader [S1, unofficial].
++7.  **Adjust Arguments:**
++    *   Let $V$ be the read vertex count. The total index count for triangles is $V \times 3$ (assuming 3 indices per triangle) [S1, unofficial].
++    *   Update `argBuffer` with the new vertex/index count [S1, unofficial].
++8.  **Draw:**
++    *   Bind the material and the `appendVertexBuffer` to the shader's `triangles` buffer [S1, unofficial].
+     *   Call `Graphics.DrawProceduralIndirect` with `MeshTopology.Triangles` and the `argBuffer` [S1, unofficial].
+ 
+-### Pseudocode
++**Pseudocode:**
+ ```python
+-# Compute Shader Kernel: MarchingCubes
+-[numthreads(8, 8, 8)]
+-void MarchingCubes(uint3 id : SV_DispatchThreadID) {
+-    int x = id.x;
+-    int y = id.y;
+-    int z = id.z;
++# Pseudocode for the Compute Shader Kernel (simplified logic per thread)
++# Assumes thread group coordinates map to voxel blocks
++
++kernel void MarchingCubes(uint3 gid : SV_GroupID, uint3 tid : SV_GroupThreadID, uint3 gtid : SV_DispatchThreadID) {
++    // 1. Determine voxel coordinates
++    // Assuming 8x8x8 threads per group processing a block of voxels
++    // gid.x, gid.y, gid.z are block indices
++    // tid.x, tid.y, tid.z are thread indices within block (0-7)
+     
+-    // Boundary check: Marching Cubes operates on voxels, so valid range is 0 to Resolution-2
+-    if (x >= _gridSize - 1 || y >= _gridSize - 1 || z >= _gridSize - 1) return;
++    int x = gid.x * 8 + tid.x;
++    int y = gid.y * 8 + tid.y;
++    int z = gid.z * 8 + tid.z;
+ 
+-    // 1. Sample 8 corners
+-    float3 p000 = float3(x, y, z);
+-    float3 p100 = float3(x+1, y, z);
+-    float3 p010 = float3(x, y+1, z);
+-    float3 p110 = float3(x+1, y+1, z);
+-    float3 p001 = float3(x, y, z+1);
+-    float3 p101 = float3(x+1, y, z+1);
+-    float3 p011 = float3(x, y+1, z+1);
+-    float3 p111 = float3(x+1, y+1, z+1);
++    // 2. Boundary check
++    if (x >= gridSize - 1 || y >= gridSize - 1 || z >= gridSize - 1) return;
+ 
+-    float v000 = tex3D(_DensityTexture, p000 / _gridSize);
+-    float v100 = tex3D(_DensityTexture, p100 / _gridSize);
+-    float v010 = tex3D(_DensityTexture, p010 / _gridSize);
+-    float v110 = tex3D(_DensityTexture, p110 / _gridSize);
+-    float v001 = tex3D(_DensityTexture, p001 / _gridSize);
+-    float v101 = tex3D(_DensityTexture, p101 / _gridSize);
+-    float v011 = tex3D(_DensityTexture, p011 / _gridSize);
+-    float v111 = tex3D(_DensityTexture, p111 / _gridSize);
++    // 3. Sample 8 vertices of the voxel
++    // Note: Density texture sampling depends on specific implementation details not fully provided
++    // Assuming a function sampleDensity(x, y, z) exists
++    float v0 = sampleDensity(x, y, z);
++    float v1 = sampleDensity(x + 1, y, z);
++    float v2 = sampleDensity(x + 1, y + 1, z);
++    float v3 = sampleDensity(x, y + 1, z);
++    float v4 = sampleDensity(x, y, z + 1);
++    float v5 = sampleDensity(x + 1, y, z + 1);
++    float v6 = sampleDensity(x + 1, y + 1, z + 1);
++    float v7 = sampleDensity(x, y + 1, z + 1);
+ 
+-    // 2. Compute Case Index
++    // 4. Compute Case Index
+     int caseIndex = 0;
+-    if (v000 < _isoLevel) caseIndex |= 1;
+-    if (v100 < _isoLevel) caseIndex |= 2;
+-    if (v010 < _isoLevel) caseIndex |= 4;
+-    if (v110 < _isoLevel) caseIndex |= 8;
+-    if (v001 < _isoLevel) caseIndex |= 16;
+-    if (v101 < _isoLevel) caseIndex |= 32;
+-    if (v011 < _isoLevel) caseIndex |= 64;
+-    if (v111 < _isoLevel) caseIndex |= 128;
++    if (v0 < isoLevel) caseIndex |= 1;
++    if (v1 < isoLevel) caseIndex |= 2;
++    if (v2 < isoLevel) caseIndex |= 4;
++    if (v3 < isoLevel) caseIndex |= 8;
++    if (v4 < isoLevel) caseIndex |= 16;
++    if (v5 < isoLevel) caseIndex |= 32;
++    if (v6 < isoLevel) caseIndex |= 64;
++    if (v7 < isoLevel) caseIndex |= 128;
+ 
+-    // 3. Check Edge Table
+-    int edgeMask = edgeTable[caseIndex];
+-    if (edgeMask == 0) return;
+-
+-    // 4. Process Triangles from Triangle Table
+-    int triIdx = 0;
+-    while (true) {
+-        int i1 = triTable[caseIndex][triIdx];
+-        if (i1 == -1) break;
+-        int i2 = triTable[caseIndex][triIdx + 1];
+-        int i3 = triTable[caseIndex][triIdx + 2];
+-        
+-        // Get edge endpoints for each edge index
+-        // Helper function to get vertex position and value for edge index
+-        // Edge indices 0-11 correspond to specific cube edges
+-        // Implementation details for edge-to-vertex mapping are omitted for brevity but follow standard MC convention
+-        float3 p1 = GetEdgePoint(i1, x, y, z, v000, v100, v010, v110, v001, v101, v011, v111);
+-        float3 p2 = GetEdgePoint(i2, x, y, z, v000, v100, v010, v110, v001, v101, v011, v111);
+-        float3 p3 = GetEdgePoint(i3, x, y, z, v000, v100, v010, v110, v001, v101, v011, v111);
+-
+-        // Compute normals (gradient approximation)
+-        float3 n1 = ComputeNormal(p1, x, y, z);
+-        float3 n2 = ComputeNormal(p2, x, y, z);
+-        float3 n3 = ComputeNormal(p3, x, y, z);
+-
+-        // Append Triangle
+-        Triangle t;
+-        t.v0.pos = p1; t.v0.norm = n1;
+-        t.v1.pos = p2; t.v1.norm = n2;
+-        t.v2.pos = p3; t.v2.norm = n3;
+-        triangleRW.Append(t);
+-
+-        triIdx += 3;
+-    }
+-}
+-
+-// Helper: Linear interpolation on edge
+-float3 GetEdgePoint(int edgeIdx, int x, int y, int z, float v000, float v100, float v010, float v110, float v001, float v101, float v011, float v111) {
+-    // Map edge index to start/end vertices and their values
+-    // This requires a mapping table or switch statement based on standard MC edge numbering
+-    // e.g., edge 0 is between v000 and v100
+-    // Return interpolated position
+-    return float3(0,0,0); // Placeholder for specific edge logic
+-}
+-
+-// Helper: Gradient normal
+-float3 ComputeNormal(float3 pos, int x, int y, int z) {
+-    // Sample neighbors to compute gradient
+-    // Return normalized gradient
+-    return float3(0,0,1); // Placeholder
++    // 5. Lookup Edge Intersections
++    // This requires interpolating along the 12 edges based on the caseIndex
++    // and the edgeTable bitmask.
++    // Let edgeIntersections[e] be the 3D point on edge e.
++    
++    // 6. Lookup Triangles
++    // Use triangleTable[caseIndex] to get edge indices.
++    // For each triplet (e1, e2, e3), create a triangle from edgeIntersections[e1], [e2], [e3].
++    
++    // 7. Append to Buffer
++    // Calculate normal using gradient (as per credits in [S1, unofficial])
++    // AppendTriangle(position, normal) to appendVertexBuffer
+ }
+ ```
+ 
+-### Parameters
+-*   `Resolution`: Grid resolution. Determines buffer sizes and dispatch dimensions [S1, unofficial].
+-*   `isoLevel`: Isosurface threshold. Default $0.5$ [S1, unofficial].
++**Parameters:**
++*   `Resolution` ($N$): Grid resolution. Determines buffer sizes and dispatch dimensions [S1, unofficial].
++*   `isoLevel`: Scalar threshold. Default 0.5 [S1, unofficial].
+ 
+-### Edge Cases and Pitfalls
+-*   **Hardware Support**: The implementation assumes DX11 hardware. Mobile support is uncertain and likely unsupported [S1, unofficial].
+-*   **Density Field Generation**: The example generates the density field on the CPU, which is a bottleneck. For real applications, `Texture3D` should be replaced with `RenderTexture` [S1, unofficial].
+-*   **Ambiguity**: The standard lookup tables are used. Cases 46, 47, 98, 99, 210, 213, 214, 215 may exhibit topological ambiguity if adjacent voxels resolve them differently, potentially causing cracks [Lookup Table and Ambiguity Handling](10327-lookup-table-and-ambiguity-handling.md).
+-*   **Buffer Capacity**: The append buffer is sized for the maximum possible triangles per voxel (5). If the grid is sparse, this may waste memory, but it ensures no overflow [S1, unofficial].
+-
+-## Subtopics
+-
+-### [GPU Marching Cubes with Histogram Pyramid](2317-gpu-marching-cubes-with-histogram-pyramid.md)
+-Uses a hierarchical data structure to optimize memory and processing for sparse volumes. Choose when memory efficiency is critical.
+-
+-### [Parallel Marching Cubes](12211-parallel-marching-cubes.md)
+-General parallelization strategies for Marching Cubes. Choose when exploring different parallelization models beyond compute shaders.
++**Edge Cases and Pitfalls:**
++*   **Hardware Support:** The implementation assumes DX11 hardware. Mobile support is uncertain [S1, unofficial].
++*   **Density Generation:** The example generates the density field on the CPU, which is a bottleneck. Real applications should use `RenderTexture` instead of `Texture3D` [S1, unofficial].
++*   **Ambiguity:** The standard LUT is used, which may cause topological ambiguities (cracks/holes) in cases 46, 47, 98, 99, 210, 213, 214, 215 if adjacent voxels resolve differently [Lookup Table and Ambiguity Handling].
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: $O(N^3)$ for a grid of size $N$, as each voxel is processed by a thread.
+-*   **Memory Complexity**: $O(N^3)$ for the input texture and output buffer capacity. The output buffer is pre-allocated to the worst-case scenario (5 triangles per voxel) [S1, unofficial].
+-*   **Performance**: Performance is limited by the density field generation on the CPU in the provided example. GPU compute performance is generally high for dense volumes but depends on the complexity of the normal calculation and texture sampling [S1, unofficial].
+-*   **Strengths**: Simple implementation, leverages GPU parallelism, suitable for real-time rendering in Unity [S1, unofficial].
+-*   **Limitations**: CPU-bound density generation in the example, potential for high memory usage due to pre-allocated append buffer, limited to DX11 hardware [S1, unofficial].
+-*   **When to Use**: Real-time isosurface extraction in Unity for dense volumes where CPU generation is acceptable or replaced by GPU-generated textures.
+-*   **When Not to Use**: Sparse volumes where memory efficiency is critical (use Histogram Pyramid), or non-DX11 hardware.
++*   **Time Complexity:** $O(N^3)$ for processing all voxels, parallelized across GPU threads [S1, unofficial].
++*   **Memory Complexity:** $O(N^3)$ for the input texture and output buffer capacity [S1, unofficial].
++*   **Performance:** Offloads computation from CPU to GPU, enabling real-time extraction for moderate resolutions [S1, unofficial].
++*   **Strengths:** High parallelism, no CPU-GPU sync during extraction (using append buffers) [S1, unofficial].
++*   **Limitations:** Fixed maximum buffer size (waste if few triangles), DX11 dependency, CPU density generation bottleneck in the example [S1, unofficial].
++*   **When to use:** Real-time isosurface extraction in Unity/DX11 environments [S1, unofficial].
++*   **When not to use:** Mobile platforms (uncertain support), or when density generation is the bottleneck and cannot be moved to GPU [S1, unofficial].
+ 
+ ## Background
+-This implementation was developed for Unity 5.6 by Pavel Kouril [S1, unofficial]. It builds upon the original Marching Cubes algorithm and lookup tables by Paul Bourke [S1, unofficial]. The gradient normal calculation method is attributed to an improved MC implementation [S1, unofficial]. Debugging and troubleshooting assistance was provided by Vilém Otte [S1, unofficial].
++This implementation was developed for Unity 5.6, potentially compatible with older versions [S1, unofficial]. It relies on the algorithm and lookup tables by Paul Bourke [S1, unofficial]. Gradient normals calculation is based on work from "MCImproved" [S1, unofficial]. The specific codebase was contributed by Pavel Kouril and Vilém Otte [S1, unofficial].
+ 
+ ## Sources

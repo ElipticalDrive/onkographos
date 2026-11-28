@@ -1,0 +1,152 @@
+# Diffusion Model Preprocessing & Training Setup
+
+Also called: SDG Preprocessing, Stable Diffusion Training Setup
+
+## Overview
+This method defines the data preprocessing pipeline and hyperparameter configuration required to fine-tune a 2D diffusion model (specifically Stable Diffusion 1.5) to serve as a semantic prior for radiance field optimization [S1]. It solves the problem of overfitting to specific camera viewpoints and occlusion artifacts by decoupling semantic identity learning from spatial pose control, ensuring the model generalizes to novel views [S1]. It sets itself apart from methods like ReconFusion by explicitly managing the perspective gap between reference and training images through distinct cropping strategies [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Raw images from the KITTI-360 dataset (original resolution $1408 \times 376$), LiDAR point clouds, and text prompts.
+*   **Output:** Preprocessed image tensors ($512 \times 512$), masked depth maps, and a fine-tuned Stable Diffusion 1.5 model ready for classifier-free guidance [S1].
+
+**Data Structures:**
+*   **Image Tensor:** $H \times W \times C$ float32, normalized to $[0, 1]$.
+*   **Depth Mask:** Boolean mask of size $H \times W$, where the top 80 rows are `True` (masked) and the rest are `False` [S1].
+
+**Steps:**
+
+1.  **Preprocessing (Training Data):**
+    *   **Crop:** Apply a center crop to the original $1408 \times 376$ image to obtain $600 \times 376$. This step avoids over-distortion during the subsequent resize [S1].
+    *   **Resize:** Resize the $600 \times 376$ image to $512 \times 512$ [S1].
+    *   **Masking:** Apply the depth mask to the corresponding depth map, setting the top 80 rows to invalid/empty values to account for LiDAR height limitations [S1].
+
+2.  **Reference Image Selection (Training):**
+    *   During training, reference images are selected from the temporal sequence.
+    *   Randomly choose one frame from the five frames preceding the current training image.
+    *   Randomly choose one frame from the five frames succeeding the current training image [S1].
+    *   **Crop:** Apply a **random crop** to these reference images (before resizing to $512 \times 512$) to ensure a perspective gap between the reference and the training image [S1].
+
+3.  **Reference Image Selection (Inference):**
+    *   **Standard Inference:** Apply a **center crop** to the reference images before resizing to $512 \times 512$ [S1].
+    *   **Novel View Inference:** Identify the closest training viewpoint to the desired novel viewpoint. Use the adjacent frames of this closest training viewpoint as the reference images. Apply center crop and resize as above [S1].
+
+4.  **Training Configuration (Classifier-Free Guidance):**
+    *   To enable classifier-free guidance, randomly set both the text prompt and the reference images to empty/null with a probability of $10\%$ during training [S1].
+
+5.  **Model Initialization:**
+    *   Initialize the model with pre-trained Stable Diffusion 1.5 weights [S1].
+    *   Fine-tune on approximately 12,000 images [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def preprocess_training_image(image_raw, depth_raw):
+    """
+    Preprocesses a single training image and its depth map.
+    image_raw: numpy array of shape (376, 1408, 3)
+    depth_raw: numpy array of shape (376, 1408)
+    Returns: processed_image (512, 512, 3), processed_depth (512, 512)
+    """
+    # Step 1: Center crop to 600x376 to avoid distortion
+    h, w = image_raw.shape[0], image_raw.shape[1]
+    new_w = 600
+    start_x = (w - new_w) // 2
+    image_cropped = image_raw[:, start_x:start_x+new_w, :]
+    depth_cropped = depth_raw[:, start_x:start_x+new_w]
+    
+    # Step 2: Resize to 512x512
+    image_resized = resize(image_cropped, (512, 512))
+    depth_resized = resize(depth_cropped, (512, 512))
+    
+    # Step 3: Apply depth mask (top 80 rows)
+    depth_mask = np.zeros((512, 512), dtype=bool)
+    depth_mask[:80, :] = True
+    processed_depth = np.where(depth_mask, np.nan, depth_resized)
+    
+    return image_resized, processed_depth
+
+def select_and_preprocess_reference(reference_images_raw):
+    """
+    Selects and preprocesses reference images for training.
+    reference_images_raw: list of raw images (376, 1408, 3)
+    Returns: list of processed reference images (512, 512, 3)
+    """
+    processed_refs = []
+    for ref_img in reference_images_raw:
+        # Random crop is applied to reference images during training
+        # to ensure perspective gap.
+        # Note: Exact random crop logic depends on implementation, 
+        # but must result in a crop that is then resized to 512x512.
+        # We assume a random crop of size 600x376 is taken first, 
+        # similar to training image, but with random offset.
+        h, w = ref_img.shape[0], ref_img.shape[1]
+        new_w = 600
+        start_x = random.randint(0, w - new_w)
+        ref_cropped = ref_img[:, start_x:start_x+new_w, :]
+        ref_resized = resize(ref_cropped, (512, 512))
+        processed_refs.append(ref_resized)
+    return processed_refs
+
+def select_reference_for_inference(reference_images_raw, is_novel_view, closest_training_view_refs):
+    """
+    Selects reference images for inference.
+    Returns: list of processed reference images (512, 512, 3)
+    """
+    if is_novel_view:
+        # Use adjacent frames of the closest training viewpoint
+        raw_refs = closest_training_view_refs
+    else:
+        # Use pre-selected adjacent frames from the sequence
+        raw_refs = reference_images_raw
+        
+    processed_refs = []
+    for ref_img in raw_refs:
+        # Center crop for inference
+        h, w = ref_img.shape[0], ref_img.shape[1]
+        new_w = 600
+        start_x = (w - new_w) // 2
+        ref_cropped = ref_img[:, start_x:start_x+new_w, :]
+        ref_resized = resize(ref_cropped, (512, 512))
+        processed_refs.append(ref_resized)
+    return processed_refs
+
+def apply_classifier_free_guidance_conditioning(text_prompt, reference_images, training=True):
+    """
+    Applies CFG conditioning.
+    Returns: modified_text_prompt, modified_reference_images
+    """
+    if training and random.random() < 0.1:
+        # 10% probability to empty both for CFG
+        return "", []
+    return text_prompt, reference_images
+```
+
+## Subtopics
+
+### [Image-Conditioned Diffusion Fine-Tuning](15523-image-conditioned-diffusion-fine-tuning.md)
+Image-Conditioned Diffusion Fine-Tuning is the first stage of a two-step procedure that adapts a pre-trained 2D diffusion model (specifically Stable Diffusion 1.5) to learn high-level semantic content of a specific scene from adjacent reference images, without using pose information. It sets itself apart from methods like ReconFusion by decoupling semantic identity learning from spatial pose control, thereby preventing the model from overfitting to specific camera viewpoints or occlusion artifacts common in complex driving scenes.
+
+### [StableMaterial Training Configuration](19403-stablematerial-training-configuration.md)
+StableMaterial Training Configuration defines the hyperparameters and data pipeline for finetuning a 2D diffusion model prior to estimate physically plausible material properties (albedo and ORM) from input images. It adapts a pretrained Stable Diffusion UNet by freezing the backbone and training only a custom adapter and the UNet weights, reducing computational requirements compared to full model training. This configuration serves as the foundation for the StableMaterial model, which provides strong material priors for inverse rendering pipelines like MaterialFusion.
+
+### DeepFloyd IF 2D Guidance
+DeepFloyd IF 2D Guidance is a text-to-image guidance approach using DeepFloyd IF, which features an Imagen-like architecture and a T-5 text encoder for stronger text understanding [S2]. It requires downsampling the input image to $64 \times 64$ pixels before passing it to the model due to its modular cascaded design [S2]. It produces better text-3D alignment than StableDiffusion due to the T-5 encoder, but yields blurrier assets because of the mandatory $64 \times 64$ downsampling [S2].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** The method is trained on 12,000 images from the KITTI-360 dataset [S1]. The 3D Gaussian Splatting model is trained for 50,000 iterations [S1].
+*   **Strengths:** Prevents overfitting to training views by ensuring a perspective gap between reference and training images [S1]. Effectively handles missing depth data in the top 80 rows via inpainting capabilities [S1].
+*   **Limitations:** The preprocessing steps (cropping and resizing) may introduce geometric distortions if not handled carefully, though the preliminary crop to $600 \times 376$ mitigates this [S1].
+*   **When to use:** When using Stable Diffusion 1.5 as a prior for street view synthesis or radiance field optimization where viewpoint generalization is critical [S1].
+*   **When not to use:** When high-fidelity text alignment is required without blur, in which case DeepFloyd IF might be considered despite its blur [S2].
+
+## Background
+The method originates from the SGD (Street View Synthesis with Gaussian Splatting and Diffusion Prior) paper, which adapts Stable Diffusion 1.5 for 3D scene synthesis [S1]. It builds on the need to overcome overfitting in diffusion-guided radiance field optimization by introducing specific data augmentation and conditioning strategies [S1].
+
+## Sources
+[S1] SGD: Street View Synthesis with Gaussian Splatting and Diffusion Prior, https://doi.org/10.1109/wacv61041.2025.00375, fetched 2026-10-27
+[S2] Text-to-3D using Gaussian Splatting, https://doi.org/10.1109/cvpr52733.2024.02022, fetched 2026-10-26

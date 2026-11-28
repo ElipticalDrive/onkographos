@@ -1,0 +1,187 @@
+--- v006.md
++++ v007.md
+@@ -1,70 +1,146 @@
+ # Data Structure and Indexing
+ 
++Also called: Hierarchical Indexing, Spatial Index Structures
+ 
+ ## Overview
+-This family defines how hierarchical spatial data (such as octrees, KD-trees, or patch hierarchies) is organized in memory and indexed to enable efficient ray-grid traversal in volume rendering. It solves the problem of navigating complex, view-dependent, or multi-resolution data structures without excessive memory overhead or traversal latency. What sets this family apart from its siblings is the focus on the low-level encoding, pointer management, and array indexing schemes that underpin higher-level acceleration structures, rather than the traversal algorithm itself or the specific spatial partitioning logic.
++Data Structure and Indexing provides the memory layout and access mechanisms for hierarchical volume representations, enabling efficient ray traversal by mapping spatial relationships to hardware-friendly formats. It differs from sibling methods primarily in its focus on the low-level encoding (e.g., texture formats, pointer schemes) and specific traversal optimizations (e.g., neighbor pointers, perspective correction) rather than the high-level tree construction or compression algorithms.
+ 
+ ## Shared principles
+-The core mechanism across all variants is the mapping of a hierarchical tree structure into a linear or texture-based memory layout that supports fast random access during rendering.
++All methods in this family share the core mechanism of hierarchical descent and ascent [G]. The traversal begins at the root of the octree and determines which of the eight children (octants) the ray intersects. This is typically done by comparing the ray's position relative to the center of the current node's bounding box [S1][S2, unofficial][G].
+ 
+-1.  **Hierarchical Indexing**: Nodes are identified by unique IDs or offsets. In array-based schemes (e.g., binary tree indexing), a fixed-size 1D array maps parent-child relationships implicitly or explicitly [S3]. In texture-based schemes (e.g., octree with neighbor pointers), nodes are encoded into texels, where specific components (RGB/A) store pointers, tags, or data offsets [S2, unofficial].
+-2.  **Node Tagging**: Each node carries metadata indicating its type. Common tags include:
+-    *   **Inner/Non-Leaf**: Indicates the node has children [S2, unofficial].
+-    *   **Leaf/Data**: Indicates the node contains actual volume data or surface information [S2, unofficial].
+-    *   **Empty**: Indicates the node contains no relevant data, allowing traversal to skip it [S2, unofficial].
+-3.  **Pointer Encoding**: To minimize memory footprint, pointers are often encoded as offsets relative to a base address or as indices into a compact array. In GPU-friendly encodings, these pointers are stored in texture channels (e.g., RGB) to allow parallel access [S2, unofficial].
+-4.  **View-Dependence**: Many structures support dynamic refinement. The data structure must support on-the-fly construction or update, often using breadth-first or bottom-up propagation to maintain consistency between parent and child nodes [S1][S2, unofficial].
++1.  **Child Selection:** For a node with center $\mathbf{c}$ and half-extent $s$, the ray position $\mathbf{p}$ determines the child index $k \in \{0, \dots, 7\}$:
++    $$
++    k = 4 \cdot \mathbb{I}(p_x \ge c_x) + 2 \cdot \mathbb{I}(p_y \ge c_y) + 1 \cdot \mathbb{I}(p_z \ge c_z)
++    $$
++    where $\mathbb{I}(\cdot)$ is the indicator function [S1][S2, unofficial][G].
++
++2.  **Empty Space Skipping:** If the selected child is marked as empty (or uniform), the traversal skips the subtree [G]. This is achieved by advancing the ray parameter $t$ to the exit of the current node or using neighbor pointers to jump to the next potentially occupied node [S1][G].
++
++3.  **Leaf Handling:** Upon reaching a leaf node, the method typically switches to a fixed-step traversal (like DDA) within the leaf's voxel grid to sample the volume data [S1][G].
++
++4.  **Backtracking:** Because octrees are sparse and irregular, traversal often requires backtracking to the parent node when a ray exits a subtree or encounters an empty branch [G]. This is implemented using an explicit stack (on GPU) or recursion (on CPU) [G].
+ 
+ ## Subtopics
+ 
+ ### [Octree with Neighbor Pointers](5699-octree-with-neighbor-pointers.md)
+-This method augments a branch-on-need octree with explicit links to adjacent nodes, enabling direct traversal to neighboring spatial regions without backtracking through the parent hierarchy. It solves the latency penalty of recursive ascent in sparse octrees by allowing rays to jump horizontally across node boundaries. Unlike structures that maintain full 26-neighbor connectivity, this variant typically restricts pointers to the X-axis (or specific face directions) to minimize memory overhead, distinguishing it from comprehensive adjacency graphs.
++The Octree with Neighbor Pointers is a spatial index structure that augments a branch-on-need octree with direct links to adjacent nodes, enabling accelerated ray traversal in volume rendering by allowing direct jumps to neighboring cells without backtracking. It differs from standard octree traversals by maintaining explicit adjacency information, and specifically differs from Zhou et al. [2010] by storing only x-neighbor pointers rather than pointers to all 26 neighbors, optimizing for specific traversal patterns.
+ 
+-### [Hierarchical Spatial Enumeration Optimization](1663-hierarchical-spatial-enumeration-optimization.md)
+-Not given in the sources.
++**Data Structures and Layout:**
++The structure is encoded into an 8-bit RGBA 3D texture. Each octree node is encoded in 8 consecutive texels arranged in the x-direction. The encoding uses a "tagged pointer" scheme where the Alpha (A) component determines the node kind, and the Red, Green, Blue (RGB) components store pointers.
+ 
+-### [Jiang et al. Acceleration Structure](1673-jiang-et-al-acceleration-structure.md)
+-Not given in the sources.
++*   **Node Kind (A component):**
++    *   $A = 1.0$: Inner (non-leaf) node.
++    *   $A = 0.5$: Data (leaf) node.
++    *   $A = 0.0$: Empty node.
++*   **Pointer Encoding (RGB components):**
++    *   **Inner Nodes:** RGB points to the first of 8 children, which are arranged consecutively in the x-direction.
++    *   **Leaf Nodes:** RGB points to leaf info. This info consists of a data pointer (if not empty) and 6 consecutive texels storing neighbor pointers. The last leaf data texel contains a NULL pointer.
++    *   **Neighbor Pointers:** The A value of a neighbor pointer texel encodes the octree level of the neighbor.
+ 
+-### [Silhouette Image Space Acceleration Structure (Mip Pyramid)](3731-silhouette-image-space-acceleration-structure-mip-pyramid.md)
+-Not given in the sources.
++**Construction Algorithm:**
++The structure is created on-the-fly at each frame directly from the view-dependent octree. The construction proceeds bottom-up in a breadth-first fashion using Morton ordering.
+ 
+-### [Flex-block tree](9716-flex-block-tree.md)
+-Not given in the sources.
++1.  **Initialization:** Create all nodes at the top level $n$ (typically two levels below the root to speed up traversal). Establish x-neighbor pointers for all adjacent nodes at this level.
++2.  **Propagation:** Propagate x-neighbor pointers from nodes in level $i$ to their child nodes in level $i-1$. Specifically, link adjacent level-$(i-1)$ nodes that have different parent nodes.
++3.  **Texture Encoding:** Encode the resulting structure into the 3D texture. Update the GPU texture using `glTexSubImage`.
+ 
+-### [Spatial Hierarchies](13154-spatial-hierarchies.md)
+-Not given in the sources.
++**Neighbor Linking Logic:**
++Neighbor pointers link each leaf node of the octree via its six faces directly to the corresponding adjacent node of that face, or to the smallest node enclosing all adjacent nodes if there are multiple ones.
+ 
+-### [Brick-of-Bricks Decomposition](13647-brick-of-bricks-decomposition.md)
+-Not given in the sources.
++**Pseudocode:**
++```python
++def build_octree_with_neighbors(view_dependent_octree):
++    """
++    Constructs the spatial index texture for ray traversal.
++    """
++    # 1. Initialize top level nodes
++    # Assume top level is n. Create all nodes at level n.
++    top_level_nodes = create_all_nodes_at_level(view_dependent_octree, level=n)
++    
++    # Establish x-neighbor pointers for adjacent nodes at top level
++    for node in top_level_nodes:
++        node.x_neighbor = get_adjacent_node(node, direction='x')
++        
++    # 2. Propagate pointers bottom-up
++    # Iterate from level n down to 0
++    for current_level in range(n, -1, -1):
++        parent_level = current_level + 1
++        children = get_children_of_level(current_level)
++        parents = get_children_of_level(parent_level)
++        
++        for child in children:
++            # Link adjacent children with different parents
++            if child.parent != child.x_neighbor.parent:
++                child.x_neighbor = get_adjacent_node(child, direction='x')
++                
++    # 3. Encode into 3D texture
++    texture = allocate_3d_texture(width, height, depth, format=RGBA8)
++    
++    for node in view_dependent_octree.all_nodes:
++        texels = get_texel_block_for_node(node) # 8 consecutive texels in x
++        
++        if node.is_inner():
++            # A=1.0, RGB points to first child
++            set_texel_alpha(texels[0], 1.0)
++            set_texel_rgb(texels[0], get_pointer_to_first_child(node))
++            # Fill remaining 7 texels as needed for layout consistency
++        elif node.is_leaf():
++            # A=0.5, RGB points to leaf info (data + 6 neighbor pointers)
++            set_texel_alpha(texels[0], 0.5)
++            leaf_info_pointer = allocate_leaf_info_block()
++            set_texel_rgb(texels[0], leaf_info_pointer)
++            
++            # Store data pointer if not empty
++            if not node.is_empty():
++                set_texel_rgb(leaf_info_pointer, get_data_pointer(node))
++            else:
++                set_texel_rgb(leaf_info_pointer, NULL_POINTER)
++                
++            # Store 6 neighbor pointers
++            for i, direction in enumerate(['+x', '-x', '+y', '-y', '+z', '-z']):
++                neighbor = get_neighbor_node(node, direction)
++                neighbor_texel = leaf_info_pointer + (i + 1) # Consecutive texels
++                set_texel_rgb(neighbor_texel, get_pointer_to_node(neighbor))
++                # Encode level in A component
++                set_texel_alpha(neighbor_texel, get_octree_level(neighbor))
++                
++            # Last leaf data texel contains NULL pointer
++            set_texel_rgb(leaf_info_pointer + 7, NULL_POINTER)
++        else: # Empty
++            # A=0.0
++            set_texel_alpha(texels[0], 0.0)
++            
++    # Update GPU texture
++    glTexSubImage3D(GL_TEXTURE_3D, 0, 0, 0, 0, width, height, depth, GL_RGBA, GL_UNSIGNED_BYTE, texture.data)
++    
++    return texture
++```
+ 
+ ### Perspective-Correct AMR Patch Traversal
+-*   **Definition**: A hybrid CPU-GPU traversal strategy where the CPU traverses the KD-tree of AMR patches back-to-front, and the GPU traverses cells within a patch. Sub-patches are generated to ensure perspective-correct sorting of cells relative to the observer [S1].
+-*   **Step**:
+-    1.  The CPU traverses the KD-tree hierarchy in a back-to-front fashion, choosing the appropriate order at each internal node until a leaf node (patch) is found [S1].
+-    2.  A series of consecutive indices matching the number of cells in the current patch is sent to the vertex shader [S1].
+-    3.  The vertex shader modifies each index according to the current observer position to generate proper cell ordering, ensuring perspective-correct sorting [S1].
+-    4.  The modified index is used to access a vertex texture holding cell data, which is then passed to the geometry shader for visibility checks [S1].
++A hybrid CPU-GPU traversal strategy where the CPU traverses the KD-tree of AMR patches back-to-front, and the GPU traverses cells within a patch. Sub-patches are generated to ensure perspective-correct sorting of cells relative to the observer [S1].
++
++*   CPU traverses the KD-tree hierarchy in back-to-front fashion, choosing the appropriate order at each internal node until a leaf node (patch) is found [S1].
++*   Vertex shader modifies each index according to the current observer position to generate proper cell ordering, ensuring perspective-correct sorting [S1].
+ 
+ ### Gradient Octree Transfer
+-*   **Step**: Transfers gradient octrees computed on the server side to a rendering client to reduce network traffic and avoid the need to compute gradients on the client [S2, unofficial].
++Transfers gradient octrees computed on the server side to a rendering client to reduce network traffic and avoid the need to compute gradients on the client [S2, unofficial].
+ 
+ ### Binary Tree Indexing
+-*   **Definition**: A simple binary tree indexing scheme to identify and organize patches in a breadth-first manner (coarse to fine). It allows quick identification of cousin patches. View-dependent mesh generation uses recursive traversal over the patch hierarchy by indexing into a fixed-size 1D array of patches, accumulating patch IDs for later decompression and rendering [S3].
++A simple binary tree indexing scheme to identify and organize patches in a breadth-first manner (coarse to fine). Allows quick identification of cousin patches. View-dependent mesh generation uses recursive traversal over the patch hierarchy by indexing into a fixed-size 1D array of patches, accumulating patch IDs for later decompression and rendering [S3].
+ 
+ ### Point Octree
+-*   **Definition**: A recursive octree data structure for managing 3D points, supporting insertion, removal, retrieval, movement, and spatial queries (nearest neighbor, radius search) [S4, unofficial].
+-*   **Step**:
+-    *   **Insertion (`set`)**: Recursively finds the leaf octant containing the point. If the leaf is full and depth < maxDepth, it calls `split()` and `redistribute()`. If the point already exists, it updates the data array. Otherwise, it appends the point and data to the leaf arrays [S4, unofficial].
+-    *   **Radius Search (`findPoints`)**: Recursively traverses child octants that intersect the query sphere. In leaf nodes, it computes squared distance `dSq` and compares against `radius * radius` to filter points [S4, unofficial].
+-*   **Parameter**:
++A recursive octree data structure for managing 3D points, supporting insertion, removal, retrieval, movement, and spatial queries (nearest neighbor, radius search) [S4, unofficial].
++
++*   **Insertion (`set`):** Recursively finds the leaf octant containing the point. If the leaf is full and depth < maxDepth, it calls `split()` and `redistribute()`. If the point already exists, it updates the data array. Otherwise, it appends the point and data to the leaf arrays [S4, unofficial].
++*   **Radius Search (`findPoints`):** Recursively traverses child octants that intersect the query sphere. In leaf nodes, computes squared distance `dSq` and compares against `radius * radius` to filter points [S4, unofficial].
++*   **Parameters:**
+     *   `bias`: Octant boundary bias. Values > 0 make the octree "loose" to handle points near boundaries [S4, unofficial].
+     *   `maxPoints`: Maximum number of distinct points allowed per leaf octant before triggering a split [S4, unofficial].
+     *   `maxDepth`: Maximum recursion depth for the tree. Prevents infinite subdivision [S4, unofficial].
+-*   **Layout**: `PointData<T>` stores two parallel arrays: `points: Vector3[]` for coordinates and `data: T[]` for associated user data [S4, unofficial].
+-*   **Pitfall**: `maxDepth` acts as a hard limit to prevent infinite recursion and poor performance from infinitely small octants [S4, unofficial].
++*   **Layout:** `PointData<T>` stores two parallel arrays: `points: Vector3[]` for coordinates and `data: T[]` for associated user data [S4, unofficial].
++*   **Pitfall:** `maxDepth` acts as a hard limit to prevent infinite recursion and poor performance from infinitely small octants [S4, unofficial].
+ 
+ ## Background
+-The need for efficient data structures in volume rendering stems from the exponential growth of multi-resolution datasets (e.g., AMR, adaptive meshes) and the computational cost of ray traversal. Early approaches relied on simple grid structures, but as data became sparse and hierarchical, tree-based structures like octrees and KD-trees became standard. The specific encoding of these trees into GPU textures (e.g., 3D RGBA textures for neighbor pointers) emerged to leverage parallel hardware for traversal [S2, unofficial]. Hybrid CPU-GPU strategies were developed to handle view-dependent refinement, where the CPU manages the coarse hierarchy and the GPU handles fine-grained cell traversal [S1]. The use of binary tree indexing for terrain and patch-based rendering provided a simple, memory-efficient alternative for view-dependent LOD systems [S3]. Point octrees, while less common in pure volume rendering, offer a flexible structure for particle-based or sparse point-cloud volumes [S4, unofficial].
++Hierarchical data structures for volume rendering have evolved from simple uniform grids to complex adaptive structures to handle large datasets. The use of octrees for spatial indexing in volume rendering was popularized in the early 2000s, with significant contributions from researchers like Kindermann, Hauser, and others who explored branch-on-need octrees [G]. The integration of neighbor pointers to accelerate traversal without backtracking was notably advanced by Zhou et al. [2010] and later adapted for GPU-based texture encoding [S2, unofficial]. AMR (Adaptive Mesh Refinement) structures, originally developed for CFD simulations, were adapted for volume rendering to handle multi-resolution data, with hybrid CPU-GPU traversal strategies emerging to manage the complexity of perspective-correct rendering [S1]. The Point Octree structure is a general-purpose spatial index often used in graphics engines for point cloud management [S4, unofficial].
+ 
+ ## Sources

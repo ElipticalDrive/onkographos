@@ -1,0 +1,98 @@
+--- v005.md
++++ v006.md
+@@ -1,45 +1,71 @@
+ # Mixture-of-Experts and Modular Architectures
+ 
+-Also called: MoE-NeRF, Modular NeRF, Expert Decomposition
++Also called: MoE-NeRF, Switch-NeRF, MIMO-NeRF, MoE-INR
+ 
+ ## Overview
+-Mixture-of-Experts (MoE) and Modular Architectures decompose the single monolithic neural network of a standard NeRF into multiple specialized sub-networks (experts) to improve scalability, training speed, or representation capacity for complex scenes [S1, S2]. Unlike the standard NeRF architecture which uses a single MLP for all spatial locations, these methods introduce a gating or routing mechanism to assign input coordinates to specific experts, or partition the network structure to reduce computational redundancy [S1, S2]. They set themselves apart from sibling methods like [Voxel and Sparse Grid Representations](13738-voxel-and-sparse-grid-representations.md) by maintaining continuous implicit representations without explicit grid discretization, and from [MIMO-NeRF](11400-mimo-nerf-self-r2.md) by focusing on expert specialization rather than parallel MLP reformulation.
++Mixture-of-Experts (MoE) and Modular Architectures address the computational bottleneck and memory constraints of monolithic Neural Radiance Fields (NeRFs) by decomposing the scene representation into specialized sub-networks (experts) that are dynamically activated based on input characteristics. Unlike standard NeRFs that use a single global function for all spatial locations and viewing directions, these methods partition the input space—whether spatial, temporal, or feature-based—and route queries to a subset of experts, thereby reducing per-ray computation while maintaining high fidelity [S1][S2]. This approach is distinct from simple parallelization (like MIMO-NeRF's batch processing) or explicit grid decompositions (like Voxel Grids) by using learned gating mechanisms to handle irregular data distributions and boundary continuity issues automatically [S1][S2].
+ 
+ ## Shared principles
+-The core task of a NeRF network architecture is to learn a continuous volumetric scene representation $F_\Theta: (\mathbf{x}, \mathbf{d}) \rightarrow (\sigma, \mathbf{c})$, where $\mathbf{x} \in \mathbb{R}^3$ is the spatial position, $\mathbf{d} \in \mathbb{R}^3$ is the viewing direction, $\sigma$ is the volume density, and $\mathbf{c}$ is the view-dependent color. The rendering process integrates these outputs along rays using standard volume rendering equations.
++The family shares a core architectural pattern that replaces or augments the monolithic MLP $F_\Theta$ with a routing mechanism and a set of expert networks.
+ 
+-In MoE architectures, the function $F_\Theta$ is approximated by a set of $k$ expert networks $E_j$ and a gating/routing mechanism $G$. For an input coordinate $\mathbf{x}$, the gating mechanism produces weights or probabilities $w_j(\mathbf{x})$ (or a single selected expert index $j^*$). The output is typically a weighted combination of expert predictions or the prediction of a single selected expert:
+-$$
+-F_\Theta(\mathbf{x}) = \sum_{j=1}^k w_j(\mathbf{x}) E_j(\mathbf{x}) \quad \text{or} \quad F_\Theta(\mathbf{x}) = E_{j^*}(\mathbf{x})
+-$$
+-where $\sum w_j(\mathbf{x}) = 1$.
++1.  **Gating/Policy Network:** A lightweight network (often an MLP) that takes the input coordinate $\mathbf{x}$ (and potentially viewing direction $\mathbf{d}$ or encoded features $\mathbf{h}$) and outputs a probability distribution $\mathbf{p}$ over $k$ experts. The gating function is typically:
++    $$
++    \mathbf{p} = \text{Softmax}(G(\mathbf{x}))
++    $$
++    where $G$ is the policy network [S1][S2].
+ 
+-Key shared components include:
+-1.  **Experts:** Multiple neural networks (often MLPs) that specialize in different regions of the input space or different features.
+-2.  **Gating/Policy Network:** A network that determines which expert(s) should process a given input. This can be based on spatial coordinates, learned features, or clustering.
+-3.  **Shared Components:** Many architectures (e.g., MoE-INR) use a shared encoder to process input coordinates before passing features to experts, ensuring continuity across expert boundaries [S1].
+-4.  **Routing Strategy:** The method of assigning inputs to experts, which can be hard (single expert) or soft (weighted sum), and may involve capacity constraints or load balancing [S1, S2].
++2.  **Expert Networks:** A set of $k$ specialized networks $\{E_1, \dots, E_k\}$. Each expert $E_j$ is responsible for modeling a specific subset of the input space (e.g., a spatial region, a time interval, or a frequency band). Experts may share weights or have distinct parameters [S1][S2].
++
++3.  **Routing/Dispatch:**
++    *   **Hard Routing (Top-1):** During inference, the expert with the highest probability is selected: $j^* = \arg\max_j p_j$. The output is $v = E_{j^*}(\mathbf{x})$ [S1].
++    *   **Soft Routing (Weighted):** During training, outputs from all experts (or top-$k$ experts) are combined using the gating probabilities to allow gradient flow to non-selected experts:
++        $$
++        v_{pred} = \sum_{j=1}^k p_j E_j(\mathbf{x})
++        $$
++        This acts as a soft-MoE, preventing experts from becoming "dead" [S1].
++
++4.  **Shared Encoder (Optional but common in INR variants):** To maintain continuity across expert boundaries and reduce redundancy, a shared encoder processes the input coordinates into a high-dimensional feature vector $\mathbf{h}$ before routing. This prevents the "boundary discontinuity" artifact common in grid-based decompositions [S1].
++
++5.  **Load Balancing:** To prevent expert collapse (where one expert handles most data), auxiliary loss terms or capacity constraints are often used. For example, a load balancing loss $\mathcal{L}_{lb}$ encourages uniform distribution of coordinates:
++    $$
++    \mathcal{L}_{lb} = \frac{1}{N^2} \sum_{j=1}^k c_j s_j
++    $$
++    where $c_j$ is the count of coordinates assigned to expert $j$, and $s_j$ is the sum of assignment probabilities for expert $j$ [S1].
+ 
+ ## Subtopics
+ 
+ ### [MIMO-NeRF-self-R2](11400-mimo-nerf-self-r2.md)
+-MIMO-NeRF-self-R2 is a specific configuration of the MIMO-NeRF architecture that utilizes two reformulated Multi-Input Multi-Output (MIMO) Multi-Layer Perceptrons (MLPs) to accelerate training while maintaining rendering quality. It solves the problem of high computational cost in standard NeRF by reducing the number of parallel MLP evaluations per batch. It sets itself apart from the base MIMO-NeRF-naive approach by using a structured reformulation strategy rather than simple parallelization, and from MIMO-NeRF-self-R1 by employing identical reduction factors for its two MLP stages.
++A variant of the MIMO-NeRF framework that employs two reformulated Multi-Input Multi-Output (MIMO) Multi-Layer Perceptrons (MLPs) with reduction factors $R^1=1$ and $R^2=1$. It reduces training time by processing multiple rays in parallel while maintaining rendering quality comparable to the original NeRF. It is distinguished from other variants (R1, R3–R6) by its specific reduction factors and number of MLPs.
+ 
+ ### [Mixture-of-Experts Implicit Neural Representation](13765-mixture-of-experts-implicit-neural-representation.md)
+-Mixture-of-Experts Implicit Neural Representation (MoE-INR) is an architecture for time-varying volumetric data compression that automatically subdivides spatiotemporal fields and dynamically assigns input coordinates to specialized expert networks. It solves the limitations of conventional INRs (which use a single network for the entire field) and grid-based INRs (which manually decompose the field, causing boundary discontinuities) by using a shared encoder to maintain cross-boundary continuity while allowing experts to specialize in distinct subdomains. Unlike siblings like [MIMO-NeRF-self-R2](11400-mimo-nerf-self-r2.md) which may use different routing or aggregation strategies, MoE-INR specifically targets scientific visualization datasets with a policy network that selects a single expert decoder per coordinate during inference, while using a weighted loss during training.
++Mixture-of-Experts Implicit Neural Representation (MoE-INR) is an architecture for time-varying volumetric data compression that uses a mixture-of-experts framework to automatically subdivide spatiotemporal fields and dynamically assign input coordinates to specialized expert networks. Unlike conventional INRs that use a single network for the entire field or grid-based INRs that manually decompose the field into spatial blocks (causing boundary discontinuity), MoE-INR automates irregular subdivisions and uses a shared encoder to maintain cross-boundary continuity. It serves as a unified framework that can function as a conventional INR (with $k=1$), a grid-based INR (with spatial pre-training), or an ensemble INR (by averaging multiple experts), while typically operating as a single-expert selection model for efficiency.
+ 
+-### Uniform Dispatch with Capacity Factor
+-Uniform Dispatch with Capacity Factor is a dispatching strategy for MLP-based gating that limits the number of input samples per NeRF expert to ensure uniform tensor dimensions, balanced computation, and predictable communication overheads, dropping overflow points and zero-padding unused capacity [S2]. It sets itself apart from full dispatch strategies by enforcing strict capacity limits during training to optimize hardware utilization, but requires careful handling during inference to avoid artifacts [S2].
++### [Mixture-of-Experts Implicit Neural Representation](13765-mixture-of-experts-implicit-neural-representation.md)
++*Note: Switch-NeRF is the primary implementation of MLP-based MoE in. Its specific dispatch mechanism is detailed below.*
++
++#### Uniform Dispatch with Capacity Factor
++*   **Definition:** A dispatching strategy for MLP-based gating that limits the number of input samples per NeRF expert to ensure uniform tensor dimensions, balanced computation, and predictable communication overheads, dropping overflow points and zero-padding unused capacity [S2].
++*   **Mechanism:** Dispatch points to experts based on gating indexes. If an expert's capacity is exceeded, drop overflow points. If capacity is not fully used, zero-pad the tensor to maintain uniform shape [S2].
++*   **Formula:** Maximum samples per expert $kBC_e = \lceil \frac{B}{n} C_f \rceil$, where $B$ is total batch size, $n$ is number of NeRF experts, and $k$ is number of chosen experts per sample [S2].
++*   **Parameters:** Capacity factor $C_f$: limits input sample number per expert. Empirically set to 1.0 in training to avoid consuming extra memory [S2].
++*   **Pitfalls:** Using uniform dispatch during inference causes accuracy degradation and rendering artifacts due to dropped sample points, because the single gate network is less robust to point dropping than stacked MoE layers [S2].
+ 
+ #### MIMO-NeRF-self-R3
+-- [S1] A variant employing $N_p-1$ reformulated MIMO MLPs with reduction factors $R^1=1, \dots, R^{N_p-1}=1$.
+-- [S1] The total number of MLPs running is calculated as $\sum_{m=1}^{N_p-1} \frac{N}{N_p} R^m = N \frac{N_p-1}{N_p} < N$.
+-- [S1] On the Blender dataset with $N_p=4$, MIMO-NeRF-self-R3 achieves PSNR 30.89, SSIM 0.949, LPIPS 0.060, and T-time 5.05h.
+-- [S1] On the LLFF dataset with $N_p=4$, MIMO-NeRF-self-R3 achieves PSNR 27.27, SSIM 0.860, LPIPS 0.171, and T-time 3.78h.
+-- [S1] On the Blender dataset with $N_p=8$, MIMO-NeRF-self-R3 achieves PSNR 29.88, SSIM 0.937, LPIPS 0.080, and T-time 7.75h.
+-- [S1] On the LLFF dataset with $N_p=8$, MIMO-NeRF-self-R3 achieves PSNR 25.66, SSIM 0.797, LPIPS 0.243, and T-time 5.97h.
++*   **Definition:** A variant employing $N_p-1$ reformulated MIMO MLPs with reduction factors $R^1=1, \dots, R^{N_p-1}=1$ [S1].
++*   **Formula:** The total number of MLPs running is calculated as $\sum_{m=1}^{N_p-1} \frac{N}{N_p} R^m = N \frac{N_p-1}{N_p} < N$ [S1].
++*   **Performance:**
++    *   Blender ($N_p=4$): PSNR 30.89, SSIM 0.949, LPIPS 0.060, T-time 5.05h [S1].
++    *   LLFF ($N_p=4$): PSNR 27.27, SSIM 0.860, LPIPS 0.171, T-time 3.78h [S1].
++    *   Blender ($N_p=8$): PSNR 29.88, SSIM 0.937, LPIPS 0.080, T-time 7.75h [S1].
++    *   LLFF ($N_p=8$): PSNR 25.66, SSIM 0.797, LPIPS 0.243, T-time 5.97h [S1].
+ 
+ ## Background
+-The concept of Mixture-of-Experts originates from classical machine learning and has been adapted for Neural Radiance Fields to address scalability and representation limits. MIMO-NeRF [S1] was introduced to accelerate NeRF training by reformulating the parallel evaluation of MLPs, reducing the effective number of parallel computations. MoE-INR [S1] was developed for scientific visualization of time-varying volumetric data, addressing boundary discontinuities in grid-based methods by using a shared encoder and expert decomposition. Switch-NeRF [S2] introduced uniform dispatch with a capacity factor for large-scale neural radiance fields, optimizing memory and computation by limiting expert capacity during training.
++The concept of Mixture-of-Experts originates from classical machine learning and has been adapted for NeRFs to handle large-scale scenes and complex data distributions.
++
++*   **MIMO-NeRF:** Introduced in 2023, MIMO-NeRF focuses on parallelizing ray processing using Multi-Input Multi-Output MLPs to accelerate training without sacrificing quality [S1].
++*   **MoE-INR:** Developed for time-varying volumetric data, MoE-INR addresses the limitations of static INRs by using a policy network to route spatiotemporal coordinates to specialized experts, improving compression and reconstruction accuracy [S1].
++*   **Switch-NeRF:** Proposed to handle large-scale scenes by partitioning the scene into heterogeneous experts. It introduces capacity-constrained dispatching to manage memory and computation efficiently [S2].
++
++These methods are used in applications requiring high-fidelity rendering of large-scale environments, dynamic scenes, and efficient training of neural radiance fields.
+ 
+ ## Sources

@@ -1,0 +1,214 @@
+--- v001.md
++++ v002.md
+@@ -4,15 +4,15 @@
+ 
+ ## Overview
+-Switch-NeRF++ is a large-scale Neural Radiance Field method that uses a trainable decomposition and heterogeneous representation to scale NeRF to large scenes, extending Switch-NeRF with hash-based networks and heterogeneous experts [S1]. It employs a Heterogeneous Mixture of Hash Experts (HMoHE) framework where both the gating network and the experts are hash-based, allowing the network to select a suitable resolution range for each scene part [S1]. Unlike Switch-NeRF which uses homogeneous experts and an MLP-based gating network, Switch-NeRF++ uses heterogeneous hash experts and a hash-based gating network to learn heterogeneous decomposition and representation efficiently [S1].
++Switch-NeRF++ is a large-scale Neural Radiance Field method that uses a trainable decomposition and heterogeneous representation to scale NeRF to large scenes, extending Switch-NeRF with hash-based networks and heterogeneous experts [S1]. It employs a Heterogeneous Mixture of Hash Experts (HMoHE) framework where a hash-based gating network dynamically routes 3D points to specialized hash experts with varying resolution ranges, allowing the network to select a suitable resolution range for each scene part [S1]. Unlike Switch-NeRF which uses homogeneous experts and an MLP-based gating network, Switch-NeRF++ uses heterogeneous hash experts and a hash-based gating network to learn heterogeneous decomposition and representation efficiently [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** 3D point coordinates $\mathbf{x} \in \mathbb{R}^3$, view direction $\mathbf{d} \in \mathbb{R}^3$, and an appearance embedding $\mathbf{a}$.
+-*   **Outputs:** Volume density $\sigma$ and RGB color $\mathbf{c}$ for the point $\mathbf{x}$.
++*   **Inputs:** 3D point coordinates $\mathbf{x} \in \mathbb{R}^3$, view direction $\mathbf{d} \in \mathbb{R}^3$, and an appearance embedding $\mathbf{a}$ [S1].
++*   **Outputs:** Volume density $\sigma$ and RGB color $\mathbf{c}$ for the point $\mathbf{x}$ [S1].
+ 
+ **Data Structures:**
+-*   **Hash Experts:** There are $N$ hash experts. Each expert $i$ consists of a multi-resolution hash encoding grid with a distinct resolution range. The minimum resolutions of the experts exponentially increase from 16 to 512, and maximum resolutions from 2048 to 16384 [S1].
++*   **Hash Experts:** There are $N$ hash experts [S1]. Each expert $i$ consists of a multi-resolution hash encoding grid with a distinct resolution range [S1].
+ *   **Gating Network:** A hash-based gating network $G$ that maps point features into gate values $G(\mathbf{x})$ [S1].
+-*   **Prediction Heads:** Small MLPs for density and color prediction.
++*   **Prediction Heads:** Small MLPs for density and color prediction [S1].
+ 
+ **Numbered Steps:**
+@@ -43,23 +43,53 @@
+ **Pitfalls:**
+ *   The discrete selection operation of experts is not differentiable, and gradients cannot be back-propagated through it into the gating network [S1]. This is addressed by multiplying gate values to the expert outputs [S1].
+-*   Using more gating networks increases memory and computation cost significantly [S1].
++*   A single gating network is used to avoid large increases in memory and computation cost [S1].
+ 
+ **Pseudocode:**
+ ```python
++import math
++
++def softmax(x):
++    max_x = max(x)
++    exp_x = [math.exp(xi - max_x) for xi in x]
++    sum_exp = sum(exp_x)
++    return [e / sum_exp for e in exp_x]
++
++def spherical_harmonics(d, degree=4):
++    # Standard spherical harmonics encoding for direction d [G]
++    sh = []
++    dx, dy, dz = d
++    for l in range(degree + 1):
++        for m in range(-l, l + 1):
++            sh.append(math.sin(l * math.atan2(math.sqrt(dx**2 + dy**2), dz)) * math.cos(m * math.atan2(dy, dx)))
++    return sh
++
++def concatenate(lists):
++    return [item for sublist in lists for item in sublist]
++
++def diff(t, prepend=None):
++    if prepend is not None:
++        t = [prepend] + t
++    return [t[i] - t[i-1] for i in range(1, len(t))]
++
++def cumsum(x):
++    res = []
++    s = 0.0
++    for xi in x:
++        s += xi
++        res.append(s)
++    return res
++
++def linspace(start, stop, num):
++    if num == 1: return [start]
++    step = (stop - start) / (num - 1)
++    return [start + i * step for i in range(num)]
++
++def ones_like(x):
++    return [1.0] * len(x)
++
+ def switch_nerf_forward(x, d, a, gating_hash, experts, density_head, color_head):
+-    """
+-    x: 3D point coordinates (N, 3)
+-    d: View direction (N, 3)
+-    a: Appearance embedding (N, D_a)
+-    gating_hash: Hash grid for gating network
+-    experts: List of N hash grids for experts
+-    density_head: MLP for density prediction
+-    color_head: MLP for color prediction
+-    """
+     # 1. Gating Network Evaluation
+-    # Lookup feature encoding fg in gating_hash using hash of x
+-    fg = lookup_hash(gating_hash, x)
+-    # Predict gating values using small MLP
+-    gate_values = small_mlp(fg)
++    fg = lookup_hash(gating_hash, x)  # Hash lookup operation [S1]
++    gate_values = small_mlp(fg)       # Small MLP prediction [S1]
+     
+     # 2. Gate Normalization
+@@ -67,18 +97,12 @@
+     
+     # 3. Expert Selection (Top-1)
+-    # Note: In practice, this is integrated into CUDA implementation
+-    # For pseudocode, we assume a differentiable approximation or straight-through estimator
+-    # is used for training, but the selection logic is:
+-    i = argmax(G, dim=1)
++    i = G.index(max(G))
+     
+     # 4. Expert Feature Encoding
+-    # Lookup feature encoding Ei(x) in the selected expert's hash grid
+-    # This requires gathering features from different hash grids based on i
+-    Ei_x = gather_expert_features(experts, x, i)
++    Ei_x = lookup_hash(experts[i], x)  # Hash lookup operation [S1]
+     
+     # 5. Gate Application
+-    # Multiply gate value by expert output
+-    Gi = gather_gate_values(G, i)
+-    E_hat_i_x = Gi * Ei_x
++    Gi = G[i]
++    E_hat_i_x = [Gi * val for val in Ei_x]
+     
+     # 6. Direction Encoding
+@@ -86,79 +110,50 @@
+     
+     # 7. Feature Concatenation
+-    f_final = concatenate([E_hat_i_x, SH_d, a], dim=-1)
++    f_final = concatenate([E_hat_i_x, SH_d, a])
+     
+     # 8. Density Prediction
+-    sigma = density_head(E_hat_i_x)
++    sigma = density_head(E_hat_i_x)  # Returns scalar [S1]
+     
+     # 9. Color Prediction
+-    c = color_head(E_hat_i_x)
++    c = color_head(E_hat_i_x)        # Returns list of 3 [S1]
+     
+     return sigma, c
+ 
+-def render_ray(ray_origin, ray_direction, near, far, num_samples, switch_nerf_forward):
+-    """
+-    ray_origin: Origin of the ray (3,)
+-    ray_direction: Direction of the ray (3,)
+-    near: Near plane distance
+-    far: Far plane distance
+-    num_samples: Number of samples along the ray
+-    switch_nerf_forward: The Switch-NeRF++ forward function
+-    """
+-    # Generate samples along the ray
++def render_ray(ray_origin, ray_direction, near, far, num_samples, gating_hash, experts, density_head, color_head, appearance_embedding):
+     t = linspace(near, far, num_samples)
+-    points = ray_origin + t[:, None] * ray_direction
++    points = [[ray_origin[j] + t[k] * ray_direction[j] for j in range(3)] for k in range(num_samples)]
+     
+-    # Get density and color for each sample
+     sigma_list = []
+     c_list = []
+     for point in points:
+-        # Assume d and a are constant for the ray or computed per point
+-        # For simplicity, we assume d and a are passed or computed
+-        sigma, c = switch_nerf_forward(point, ray_direction, appearance_embedding)
++        sigma, c = switch_nerf_forward(point, ray_direction, appearance_embedding, gating_hash, experts, density_head, color_head)
+         sigma_list.append(sigma)
+         c_list.append(c)
+     
+-    sigma = stack(sigma_list)
+-    c = stack(c_list)
++    # Volume Rendering
++    delta = diff(t, prepend=near)
++    if len(delta) < len(sigma_list):
++        delta.append(delta[-1])
++        
++    alpha = [1.0 - math.exp(-sigma_list[k] * delta[k]) for k in range(len(sigma_list))]
++    transmittance_exponents = cumsum([sigma_list[k] * delta[k] for k in range(len(sigma_list))])
++    T = [math.exp(-exponent) for exponent in transmittance_exponents]
++    # Shift T right to get transmittance BEFORE each sample: T_i = exp(-sum_{j=1}^{i-1} sigma_j delta_j)
++    T = [1.0] + T[:-1]
+     
+-    # Volume Rendering
+-    # Compute delta distances
+-    delta = diff(t, prepend=near)
+-    
+-    # Compute transmittance
+-    # T_i = exp(-sum_{j=1}^{i-1} sigma_j * delta_j)
+-    # Using cumulative sum
+-    alpha = 1 - exp(-sigma * delta)
+-    T = exp(-cumsum(sigma * delta))
+-    T = concatenate([ones_like(T[:1]), T[:-1]]) # T_1 = 1
+-    
+-    # Rendered color
+-    C = sum(T * alpha * c, axis=0)
+-    
+-    return C
++    rendered_color = [sum(T[k] * alpha[k] * c_list[k][j] for k in range(len(sigma_list))) for j in range(3)]
++    return rendered_color
+ ```
+-
+-## Subtopics
+-
+-### Switch-NeRF
+-Uses an MLP-based gating network and homogeneous experts. It was the first large-scale NeRF framework to automatically learn scene decomposition in an end-to-end manner without heuristic supervision. [Switch-NeRF](14964-suds.md)
+-
+-### Switch-NeRF++ (Homo.)
+-Uses a hash-based gating network but homogeneous experts with default Instant-NGP settings for all experts. It is less effective than the heterogeneous version on complex scenes. [Switch-NeRF++ (Homo.)](14964-suds.md)
+-
+-### Switch-NeRF++ (Heter.)
+-Uses a hash-based gating network and heterogeneous hash experts with varying resolution ranges. It achieves state-of-the-art results on large-scale scenes. [Switch-NeRF++ (Heter.)](14964-suds.md)
+ 
+ ## Operating characteristics
+ *   **Time Complexity:** Switch-NeRF++ achieves an 8x acceleration in training and a 16x acceleration in rendering compared to Switch-NeRF [S1]. It achieves state-of-the-art results with 5.5h training (50k steps), which is 8x faster than Switch-NeRF (44h) and 5x faster than Mega-NeRF (30h) [S1].
+ *   **Memory Complexity:** Hash dispatching uses less GPU memory in training compared to MoE dispatching [S1].
+-*   **Measured Performance:** On the UrbanBIS scene (6.5km2, 13k images), Switch-NeRF++ achieved a PSNR of 20.76, compared to 19.58 for INGP [S1].
++*   **Measured Performance:** On the UrbanBIS scene (6.5km², 13k images), Switch-NeRF++ achieved a PSNR of 20.76, compared to 19.58 for INGP [S1].
+ *   **Strengths:** Highly scalable to large-scale scenes, end-to-end trainable, efficient hash-based gating and dispatching, heterogeneous representation for diverse scene parts [S1].
+-*   **Limitations:** Requires careful tuning of expert resolution ranges for optimal performance [S1].
+ *   **When to use:** Large-scale scene modeling where scalability and efficiency are critical [S1].
+ *   **When not to use:** Small-scale scenes where simpler methods like Instant-NGP might be sufficient [S1].
+ 
+ ## Background
+-Switch-NeRF++ was introduced in a paper published in IEEE Transactions on Pattern Analysis and Machine Intelligence in 2025 [S1]. It extends the previous Switch-NeRF method [S1]. The method is evaluated on Mega-NeRF, UrbanBIS, Block-NeRF, and MatrixCity datasets [S1].
++Switch-NeRF++ was introduced in [S1]. It extends the previous Switch-NeRF method [S1]. The method is evaluated on Mega-NeRF, UrbanBIS, Block-NeRF, and MatrixCity datasets [S1].
+ 
+ ## Sources

@@ -1,0 +1,303 @@
+--- v003.md
++++ v004.md
+@@ -1,134 +1,135 @@
+ # Epipolar Ray Intersection
+ 
+-Also called: Lift 2D Points to 3D via Epipolar Lines, depth from 2D points, lift_to_3d / get_depth
++Also called: Epipolar 3D Lifting and Depth Computation, Get Depth, Lift 2D Points to 3D via Epipolar Lines, Lift to 3D, depth from 2D points, lift_to_3d / get_depth
+ 
+ ## Overview
+-Epipolar Ray Intersection calculates the 3D positions and depths corresponding to specified 2D points on epipolar lines defined by camera origins and directions, using image extrinsics and intrinsics [S1, unofficial][S2, unofficial]. It constructs rays from 2D points in their respective camera frames and intersects them with given world-space rays to resolve the depth ambiguity inherent in single-view reconstruction [S1, unofficial]. Unlike [Camera Ray Generation](7456-camera-ray-generation.md) which generates rays for volume traversal, this method specifically solves for the geometric intersection between a known world-space ray and a ray projected from a 2D image point, serving as the geometric foundation for initializing point clouds in neural rendering pipelines [S1, unofficial][S2, unofficial].
++Epipolar Ray Intersection lifts 2D image points to 3D space by intersecting rays projected from those points with a set of input world-space rays, computing the resulting 3D positions and depths [S1, unofficial][S2, unofficial][S3, unofficial]. It differs from [Camera Ray Generation](7456-camera-ray-generation.md) by specifically solving for the intersection between a user-defined set of rays and rays derived from 2D pixel coordinates, rather than generating primary camera rays from scratch. It is distinct from [Depth to 3D Points Conversion](7929-depth-to-3d-points-conversion.md) because it relies on ray-ray intersection geometry rather than explicit backprojection of a depth map, and from [Point Cloud Generation and Refinement](8042-point-cloud-generation-and-refinement.md) by focusing on the geometric lifting step without implicit field refinement [S1, unofficial][S2, unofficial][S3, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- `xy`: Tensor of 2D points with shape `(N, 2)` representing pixel coordinates $(u, v)$ in the image plane.
+-- `extrinsics`: Camera extrinsic matrix (world-to-camera or camera-to-world depending on convention, typically $4 \times 4$) defining the camera pose.
+-- `intrinsics`: Camera intrinsic matrix ($3 \times 3$) defining focal length and principal point.
+-- `world_origins`: Tensor of ray origins in world space with shape `(M, 3)`.
+-- `world_directions`: Tensor of ray directions in world space with shape `(M, 3)`.
++- `origins`: Float tensor of shape `(*#batch, 3)`, representing ray origins in world space [S1, unofficial].
++- `directions`: Float tensor of shape `(*#batch, 3)`, representing ray directions in world space [S1, unofficial].
++- `xy`: Float tensor of shape `(*#batch, 2)`, representing 2D image coordinates [S1, unofficial].
++- `extrinsics`: Float tensor of shape `(*#batch, 4, 4)`, camera extrinsic matrices [S2, unofficial][S3, unofficial].
++- `intrinsics`: Float tensor of shape `(*#batch, 3, 3)`, camera intrinsic matrices [S2, unofficial][S3, unofficial].
+ 
+ **Outputs:**
+-- `xyz`: Tensor of 3D intersection points with shape `(N, 3)` (or `(N, M)` if intersecting with multiple rays).
+-- `depth`: Optional scalar or tensor representing the Euclidean distance from the camera center to the 3D point.
++- `xyz`: Float tensor of shape `(*#batch, 3)`, the 3D intersection points [S2, unofficial][S3, unofficial].
++- `depth`: Float tensor of shape `(*#batch)`, the distance from the ray origin to the intersection point [S1, unofficial][S3, unofficial].
+ 
+ **Data Structures:**
+-- Ray representation: A ray is defined by an origin $\mathbf{o}$ and a direction $\mathbf{d}$ (normalized).
+-- Camera matrices: Standard pinhole camera model parameters.
++- `xy_origins`: Float tensor of shape `(*#batch, 3)`, computed ray origins for the 2D points in world space.
++- `xy_directions`: Float tensor of shape `(*#batch, 3)`, computed ray directions for the 2D points in world space.
+ 
+ **Steps:**
+-1. **Convert 2D Points to World-Space Rays:**
+-   For each 2D point $\mathbf{xy}_i = (u_i, v_i)$, compute the corresponding ray origin $\mathbf{o}_{xy}$ and direction $\mathbf{d}_{xy}$ in world space using the camera's extrinsic and intrinsic parameters. This is typically done by unprojecting the pixel coordinates through the inverse intrinsic matrix and applying the extrinsic transformation.
+-   $$ \mathbf{o}_{xy} = \mathbf{C} $$
+-   $$ \mathbf{d}_{xy} = \text{normalize}(\mathbf{K}^{-1} \begin{bmatrix} u_i \\ v_i \\ 1 \end{bmatrix}) \text{ transformed to world space} $$
+-   Where $\mathbf{C}$ is the camera center and $\mathbf{K}$ is the intrinsic matrix [S1, unofficial].
++1. **Compute World Rays from 2D Points:** Convert the 2D image coordinates `xy` and camera parameters (`extrinsics`, `intrinsics`) into world-space ray origins and directions. This is typically done using a helper function `get_world_rays` [S1, unofficial][S2, unofficial][S3, unofficial].
++   - Let `xy_origins, xy_directions = get_world_rays(xy, extrinsics, intrinsics)` [S1, unofficial][S2, unofficial].
++   - *Note:* Before intersection, it is common to validate that `xy` is within bounds (e.g., `xy >= -epsilon` and `xy <= 1 + epsilon`) and that the resulting Z-coordinate in camera space is positive (in front of the camera) [S3, unofficial].
+ 
+-2. **Intersect Rays:**
+-   Intersect the newly created rays $(\mathbf{o}_{xy}, \mathbf{d}_{xy})$ with the input world-space rays $(\mathbf{o}_{w}, \mathbf{d}_{w})$. Since these rays are generally skew (non-intersecting) in 3D space, the intersection is computed as the midpoint of the shortest line segment connecting the two rays.
+-   Let $\mathbf{r}_1(t) = \mathbf{o}_{xy} + t \mathbf{d}_{xy}$ and $\mathbf{r}_2(s) = \mathbf{o}_{w} + s \mathbf{d}_{w}$.
+-   The intersection point $\mathbf{xyz}$ is the midpoint of the segment connecting the closest points on both rays:
+-   $$ t = \frac{(\mathbf{o}_{w} - \mathbf{o}_{xy}) \cdot (\mathbf{d}_{w} \times \mathbf{d}_{xy}) \times \mathbf{d}_{w}}{\|\mathbf{d}_{w} \times \mathbf{d}_{xy}\|^2} $$
+-   $$ s = \frac{(\mathbf{o}_{w} - \mathbf{o}_{xy}) \cdot (\mathbf{d}_{w} \times \mathbf{d}_{xy}) \times \mathbf{d}_{xy}}{\|\mathbf{d}_{w} \times \mathbf{d}_{xy}\|^2} $$
+-   $$ \mathbf{xyz} = \frac{1}{2} (\mathbf{r}_1(t) + \mathbf{r}_2(s)) $$
+-   [S1, unofficial]. Note: If the rays are parallel, the cross product is zero, requiring a fallback (e.g., projecting one origin onto the other ray).
++2. **Intersect Rays:** Intersect the input world-space rays (`origins`, `directions`) with the newly created rays from the 2D points (`xy_origins`, `xy_directions`) [S1, unofficial][S2, unofficial][S3, unofficial].
++   - Let `xyz = intersect_rays(origins, directions, xy_origins, xy_directions)` [S1, unofficial][S2, unofficial].
++   - The intersection of two rays in 3D space is generally found by minimizing the distance between them. If the rays are skew, the intersection point is the midpoint of the shortest segment connecting them. If they intersect exactly, the distance is zero.
++   - *Validation:* Ensure the intersection parameter `t` is positive (ray direction) [S3, unofficial].
+ 
+-3. **Compute Depth (Optional):**
+-   If depth is required, compute the Euclidean distance from the camera center $\mathbf{C}$ to the computed 3D point $\mathbf{xyz}$:
+-   $$ \text{depth} = \|\mathbf{xyz} - \mathbf{C}\|_2 $$
+-   [S2, unofficial].
++3. **Compute Depth:** Calculate the depth as the L2 norm (Euclidean distance) between the computed 3D point `xyz` and the original ray `origins` [S1, unofficial][S2, unofficial][S3, unofficial].
++   - Formula: $$depth = \|xyz - origins\|$$ [S3, unofficial].
++   - In code: `depth = (xyz - origins).norm(dim=-1)` [S1, unofficial][S2, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+ import torch
+-import torch.linalg
++import torch.nn.functional as F
+ 
+-def get_world_rays(xy, extrinsics, intrinsics):
++def get_world_rays(xy: torch.Tensor, extrinsics: torch.Tensor, intrinsics: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+     """
+-    Converts 2D pixel coordinates to world-space rays.
+-    xy: (N, 2) tensor of (u, v) coordinates.
+-    extrinsics: (4, 4) camera-to-world matrix.
+-    intrinsics: (3, 3) camera intrinsic matrix.
+-    Returns: origins (N, 3), directions (N, 3)
++    Converts 2D image coordinates to world-space ray origins and directions.
++    xy: (*batch, 2)
++    extrinsics: (*batch, 4, 4)
++    intrinsics: (*batch, 3, 3)
++    Returns:
++        origins: (*batch, 3)
++        directions: (*batch, 3)
+     """
+-    # Unproject to camera space
+-    # xy_homogeneous: (N, 3)
+-    xy_homogeneous = torch.cat([xy, torch.ones_like(xy[:, :1])], dim=1)
++    # Normalize xy to [-1, 1] if they are in [0, 1] or pixel coordinates, 
++    # depending on the specific convention of the intrinsic matrix. 
++    # Assuming xy is in pixel coordinates or normalized device coordinates as per the specific implementation.
++    # Standard backprojection:
++    # 1. Unproject xy to camera space.
++    # 2. Transform to world space using extrinsics.
+     
+-    # Inverse intrinsics
+-    K_inv = torch.linalg.inv(intrinsics)
++    # Reshape for matrix multiplication
++    # Assuming xy is (N, 2) and needs to be homogeneous (N, 3)
++    xy_homo = torch.cat([xy, torch.ones_like(xy[..., :1])], dim=-1) # (N, 3)
+     
+-    # Ray directions in camera space
+-    directions_cam = torch.matmul(K_inv, xy_homogeneous.t()).t() # (N, 3)
++    # Invert intrinsics to go from pixel to camera coordinates
++    # K_inv @ [u, v, 1]^T
++    K_inv = torch.inverse(intrinsics) # (N, 3, 3)
++    cam_coords = torch.bmm(K_inv, xy_homo.unsqueeze(-1)).squeeze(-1) # (N, 3)
++    
++    # Transform to world space
++    # R @ cam_coords + t
++    R = extrinsics[..., :3, :3] # (N, 3, 3)
++    t = extrinsics[..., :3, 3] # (N, 3)
++    
++    origins = t # The camera center is the origin of the ray in world space
++    directions = torch.bmm(R, cam_coords.unsqueeze(-1)).squeeze(-1) # (N, 3)
+     
+     # Normalize directions
+-    directions_cam = torch.nn.functional.normalize(directions_cam, dim=1)
++    directions = F.normalize(directions, dim=-1)
+     
+-    # Transform to world space
+-    # Extrinsics: (4, 4) matrix [R|t; 0 0 0 1]
+-    R = extrinsics[:3, :3]
+-    t = extrinsics[:3, 3]
+-    
+-    origins_world = t.unsqueeze(0).expand(xy.shape[0], -1) # Camera center in world
+-    directions_world = torch.matmul(directions_cam, R.t()) # (N, 3)
+-    
+-    return origins_world, directions_world
++    return origins, directions
+ 
+-def intersect_rays(origins1, directions1, origins2, directions2):
++def intersect_rays(origins1: torch.Tensor, directions1: torch.Tensor, 
++                   origins2: torch.Tensor, directions2: torch.Tensor) -> torch.Tensor:
+     """
+-    Computes the midpoint of the shortest segment between two skew rays.
+-    origins1, directions1: (N, 3)
+-    origins2, directions2: (N, 3)
+-    Returns: intersection points (N, 3)
++    Computes the midpoint of the shortest segment between two rays.
++    origins1, directions1: (*batch, 3)
++    origins2, directions2: (*batch, 3)
++    Returns:
++        xyz: (*batch, 3)
+     """
+     # Vector between origins
+-    diff = origins2 - origins1 # (N, 3)
++    d_o = origins2 - origins1 # (N, 3)
+     
+     # Cross product of directions
+-    cross = torch.cross(directions1, directions2, dim=1) # (N, 3)
+-    cross_norm_sq = torch.sum(cross ** 2, dim=1, keepdim=True) # (N, 1)
++    n1 = torch.cross(directions1, directions2, dim=-1) # (N, 3)
++    n2 = torch.cross(directions2, directions1, dim=-1) # (N, 3)
+     
+-    # Avoid division by zero for parallel rays
+-    # [G] In practice, add a small epsilon to cross_norm_sq to prevent NaNs
+-    epsilon = 1e-8
+-    cross_norm_sq = torch.clamp(cross_norm_sq, min=epsilon)
++    # Denominator
++    denom = torch.sum(n1 * n1, dim=-1) # (N,)
+     
+-    # Compute parameters t and s for the closest points
+-    # t = dot(diff, cross x d2) / |cross|^2
+-    # s = dot(diff, cross x d1) / |cross|^2
++    # Avoid division by zero
++    denom = torch.clamp(denom, min=1e-8)
+     
+-    cross_x_d2 = torch.cross(cross, directions2, dim=1)
+-    cross_x_d1 = torch.cross(cross, directions1, dim=1)
++    # Project d_o onto the normal plane
++    # t1 = dot(d_o, n2) / dot(n1, n1)
++    # t2 = dot(d_o, n1) / dot(n1, n1)
+     
+-    t = torch.sum(diff * cross_x_d2, dim=1, keepdim=True) / cross_norm_sq
+-    s = torch.sum(diff * cross_x_d1, dim=1, keepdim=True) / cross_norm_sq
++    t1 = torch.sum(d_o * n2, dim=-1) / denom # (N,)
++    t2 = torch.sum(d_o * n1, dim=-1) / denom # (N,)
+     
+-    # Closest points on each ray
+-    point1 = origins1 + directions1 * t
+-    point2 = origins2 + directions2 * s
++    # Points on each ray
++    p1 = origins1 + directions1 * t1.unsqueeze(-1) # (N, 3)
++    p2 = origins2 + directions2 * t2.unsqueeze(-1) # (N, 3)
+     
+     # Midpoint
+-    intersection = (point1 + point2) / 2.0
++    xyz = (p1 + p2) / 2.0
+     
+-    return intersection
++    return xyz
+ 
+-def epipolar_ray_intersection(xy, extrinsics, intrinsics, world_origins, world_directions):
++def epipolar_ray_intersection(origins: torch.Tensor, directions: torch.Tensor, 
++                              xy: torch.Tensor, extrinsics: torch.Tensor, 
++                              intrinsics: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+     """
+-    Main function to perform epipolar ray intersection.
++    Lifts 2D points to 3D via epipolar ray intersection.
+     """
+-    # Step 1: Get rays from 2D points
++    # Step 1: Get world rays from 2D points
+     xy_origins, xy_directions = get_world_rays(xy, extrinsics, intrinsics)
+     
+-    # Step 2: Intersect with world rays
+-    xyz = intersect_rays(xy_origins, xy_directions, world_origins, world_directions)
++    # Step 2: Intersect rays
++    xyz = intersect_rays(origins, directions, xy_origins, xy_directions)
+     
+-    # Step 3: Compute depth (optional)
+-    # [G] Assuming extrinsics includes the camera center at extrinsics[:3, 3]
+-    camera_center = extrinsics[:3, 3].unsqueeze(0).expand(xyz.shape[0], -1)
+-    depth = torch.linalg.norm(xyz - camera_center, dim=1)
++    # Step 3: Compute depth
++    depth = torch.norm(xyz - origins, dim=-1)
+     
+     return xyz, depth
+@@ -136,32 +137,61 @@
+ 
+ **Parameters:**
+-- `xy`: Pixel coordinates. Typical values depend on image resolution (e.g., $[0, W-1], [0, H-1]$).
+-- `extrinsics`: $4 \times 4$ matrix.
+-- `intrinsics`: $3 \times 3$ matrix.
++- `origins`: Ray origins in world space. Shape: `Float[Tensor, "*#batch 3"]` [S1, unofficial].
++- `directions`: Ray directions in world space. Shape: `Float[Tensor, "*#batch 3"]` [S1, unofficial].
++- `xy`: 2D image coordinates. Shape: `Float[Tensor, "*#batch 2"]` [S1, unofficial].
++- `extrinsics`: Camera extrinsic matrices. Shape: `Float[Tensor, "batch _ 4 4"]` [S1, unofficial].
++- `intrinsics`: Camera intrinsic matrices. Shape: `Float[Tensor, "batch _ 3 3"]` [S1, unofficial].
+ 
+-**Edge Cases:**
+-- **Parallel Rays:** If the 2D ray and world ray are parallel, the cross product norm is zero. The intersection is undefined or requires a specific fallback (e.g., projecting one origin onto the other). [G] Add epsilon to denominator.
+-- **Degenerate Intrinsics:** If the intrinsic matrix is singular (e.g., zero focal length), unprojection fails.
++**Edge Cases and Pitfalls:**
++- **Parallel/Skew Rays:** If the two rays are parallel or nearly parallel, the cross product of their directions will be near zero, leading to numerical instability in the intersection calculation. A small epsilon should be used to clamp the denominator [S3, unofficial].
++- **Out of Bounds:** 2D coordinates `xy` should be validated to ensure they are within the image bounds (e.g., normalized 0 to 1 with some epsilon tolerance) [S3, unofficial].
++- **Behind Camera:** Points must be in front of the camera. The Z-coordinate in camera space should be greater than `-epsilon` [S3, unofficial].
++- **Negative t:** The intersection parameter `t` should be positive to ensure the intersection lies in the direction of the ray [S3, unofficial].
+ 
+ ## Subtopics
+ 
++### [Depth to 3D Points Conversion](7929-depth-to-3d-points-conversion.md)
++This method converts 2D depth maps and camera parameters into a 3D point cloud, serving as the geometric foundation for initializing point clouds in neural rendering pipelines. It differs from its sibling [Point Cloud Generation and Refinement](8042-point-cloud-generation-and-refinement.md) by relying on explicit geometric backprojection rather than implicit field refinement, and from [Fixed-size initialization from RGB-D backprojection](10155-fixed-size-initialization-from-rgb-d-backprojection.md) by focusing on the core coordinate transformation without necessarily incorporating color or specific downsampling strategies in the base definition. It solves the problem of lifting 2D image data into 3D space for subsequent volume rendering or Gaussian splatting operations.
++
+ ### Depth Labeling on Epipolar Lines
+-This variant focuses on rendering depth labels along epipolar lines for visualization or annotation purposes [S2, unofficial]. It interpolates epipolar line endpoints in pixel space and computes depth as the Euclidean distance from the camera center to the 3D point. The depth labels are rendered with white backer rectangles and rotated text [S2, unofficial].
+-- **Step:** Interpolate epipolar line endpoints: $\mathbf{pt} = \mathbf{xy}_{min} \cdot t + (1 - t) \cdot \mathbf{xy}_{max}$ for $t \in [0, 1]$.
+-- **Step:** Compute depth: $\text{depth} = \|\mathbf{xyz} - \mathbf{extrinsics}[0, :3, 3]\|_2$.
+-- **Step:** Render depth labels along the epipolar line with white backer rectangles and rotated text [S2, unofficial].
++This variant involves interpolating epipolar line endpoints in pixel space and rendering depth labels along the epipolar line.
++- **Steps:**
++  1. Interpolate epipolar line endpoints in pixel space: `pt = projection["xy_min"] * t + (1 - t) * projection["xy_max"]` for `t` in `[0, 1]` [S4, unofficial].
++  2. Compute depth as Euclidean distance from camera center to 3D point: `depth = (xyz - extrinsics[0, :3, 3]).norm(dim=-1)` [S4, unofficial].
++  3. Render depth labels along the epipolar line with white backer rectangles and rotated text [S4, unofficial].
++
++### Epipolar Line Projection
++This variant focuses on validating the projection of points onto epipolar lines.
++- **Steps:**
++  1. Check if XY coordinates are in bounds (normalized 0 to 1) by verifying `xy >= -epsilon` and `xy <= 1 + epsilon` for all dimensions [S3, unofficial].
++  2. Check if points are in front of the camera by verifying the Z coordinate is greater than `-epsilon` [S3, unofficial].
++  3. Check if ray parameter `t` is positive by verifying `t > -epsilon` [S3, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N)$ where $N$ is the number of 2D points, assuming constant-time ray intersection.
+-- **Memory Complexity:** $O(N)$ to store the 3D points and depths.
+-- **Strengths:** Provides exact geometric backprojection, which is crucial for initializing point clouds in neural rendering pipelines [S1, unofficial][S2, unofficial]. It is computationally efficient compared to iterative depth estimation methods.
+-- **Limitations:** Relies on accurate camera parameters (intrinsics and extrinsics). Errors in calibration propagate directly to the 3D positions. It does not handle occlusions or multi-view consistency inherently; it simply finds the geometric intersection.
+-- **When to use:** When initializing 3D points from 2D correspondences in multi-view stereo or neural rendering pipelines where geometric accuracy is prioritized over learned priors.
+-- **When not to use:** When camera parameters are unknown or inaccurate, or when dealing with scenes where occlusions make simple ray intersection ambiguous.
++**Time and Memory Complexity:**
++- The complexity is dominated by the matrix inversions and multiplications in `get_world_rays` and the vector operations in `intersect_rays`. For `N` points, the time complexity is $O(N)$ with a small constant factor due to fixed-size matrix operations. Memory complexity is also $O(N)$ to store the intermediate tensors.
++
++**Measured Performance:**
++- Not given in the sources.
++
++**Scaling:**
++- The method scales linearly with the number of points. It is suitable for GPU acceleration due to the tensor operations involved.
++
++**Strengths and Limitations:**
++- **Strengths:** Provides a geometrically consistent way to lift 2D points to 3D using epipolar geometry. It is robust to noise if the rays are well-conditioned.
++- **Limitations:** Sensitive to the accuracy of the camera parameters (intrinsics and extrinsics). If the rays are nearly parallel, the intersection becomes unstable.
++
++**When to Use:**
++- Use when you need to lift 2D points to 3D space using known camera parameters and a set of reference rays. It is particularly useful in multi-view stereo and neural rendering pipelines.
++
++**When Not to Use:**
++- Avoid if the camera parameters are inaccurate or if the rays are nearly parallel, leading to numerical instability.
+ 
+ ## Background
+-Epipolar geometry is a fundamental concept in computer vision, describing the geometric relationship between two views of the same scene [S1, unofficial][S2, unofficial]. The method of lifting 2D points to 3D via epipolar lines is a direct application of this principle, used in various neural rendering and multi-view stereo pipelines. The specific implementation details described here are derived from open-source repositories such as VolSplat and PixelSplat, which utilize this technique for point cloud initialization [S1, unofficial][S2, unofficial].
++Epipolar Ray Intersection is a fundamental technique in computer vision and graphics for relating 2D image points to 3D space. It is commonly used in multi-view stereo, structure from motion, and neural rendering pipelines. The method leverages the epipolar geometry between two or more views to constrain the possible 3D locations of a point.
+ 
+ ## Sources
+-[S1] ziplab/VolSplat, https://github.com/ziplab/VolSplat, fetched 2026-10-27 (unofficial)
+-[S2] dcharatan/pixelsplat, https://github.com/dcharatan/pixelsplat, fetched 2026-10-27 (unofficial)+[S1] cvg/NoPoSplat, https://github.com/cvg/NoPoSplat, fetched 2026-10-27 (unofficial)
++[S2] ziplab/VolSplat, https://github.com/ziplab/VolSplat, fetched 2026-10-27 (unofficial)
++[S3] pulangk97/VoLoDSplat, https://github.com/pulangk97/VoLoDSplat, fetched 2026-10-27 (unofficial)
++[S4] dcharatan/pixelsplat, https://github.com/dcharatan/pixelsplat, fetched 2026-10-27 (unofficial)

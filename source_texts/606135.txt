@@ -1,0 +1,96 @@
+Summary: Currently, the functionality of the culling system is spread out over several places. It has responsibilities that go beyond just culling (like LOD selection and submitting draw packets). This makes it less flexible and more err...
+
+Proposed RFC Feature =Culling System Refactor= · Issue #85 · o3de/sig-graphics-audio · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Proposed RFC Feature =Culling System Refactor= #85
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Proposed RFC Feature =Culling System Refactor=#85
+Copy link
+Labels
+rfc-featureRequest for Comments for a FeatureRequest for Comments for a Feature
+Description
+invertednormal
+opened on Oct 10, 2022
+Issue body actions
+Summary:
+Currently, the functionality of the culling system is spread out over several places. It has responsibilities that go beyond just culling (like LOD selection and submitting draw packets). This makes it less flexible and more error prone than it could be. This proposal is to refactor the culling system so that its only responsibility is culling and allows other systems to use the results of culling for whatever they need. For instance, the mesh feature processor could take the results of culling and use that to decide which draw packets need to be submitted.
+What is the relevance of this feature?
+Currently the culling system also handles what happens to data in a visibility entry after it is culled. Initially this just meant that it knew about mesh draw packets and LODs, but over time more systems have added more and more data to the Cullable data object. This means that the culling system can only handle one type of visibility entry from the visibility system, and if systems wanted to opt-in to culling, they would need to add their data onto the Cullable object. This means it's often impossible for gems to even use the culling system, since they would need to modify the Cullable's structure directly, which is owned by the culling system.
+Instead, the culling system shouldn't care about the data attached to the visibility entry. It should only handle culling the entries, and then individual systems with their own data can get the list of culled items and submit them.
+Overview of how the culling system currently works
+Currently there's a bit of a dance between the culling system and other systems each frame to make culling happen
+First, a few operations are frame independent
+RegisterOrUpdateCullable() and UnregisterCullable() are called to register/unregister something for the culling system to cull. Currently this is done by meshes, reflection probes, and the diffuse probe grid.
+Activate() and Deactivate() are called by the RPI::Scene which owns the pointer to the culling system.
+Each frame, the following happens in order:
+Feature processors interact with the culling system in their simulate calls, which may include
+Registering or unregistering cullables (see above).
+Setting occlusion planes. Whenever any occlusion planes change, all occlusion planes are copied to the culling system.
+Scene calls BeginCulling() on the culling system
+This sets a soft lock in the culling system to prevent cullables from being added / removed.
+Culling then creates jobs or tasks for each view, which call BeginCulling() on their respective view
+The view just calls ClearBuffer() on the masked occlusion culling system
+Scene creates tasks for each view which call ProcessCullablesTG() on the culling system for the respective view.
+ProcessCullablesTG() enumerates on the IVisibilityScene using the view's frustum
+For each node visited, it's added to a work list
+When the work list reaches capacity (currently 5 items), a new task is spawned to call ProcessWorklist().
+ProcessWorklist() optionally does fine-grained culling on items in the node when necessary, then for each item
+Checks the item against occlusion culling
+Submits draws for specific LODs of appropriate items.
+Scene calls EndCulling() on the culling system
+This just unlocks the lock from BeginCulling()
+Current responsibilities of the culling system
+Actually doing view-frustum culling (This is OK!)
+Querying occlusion culling for visibility entries that pass the frustum test (This is OK!)
+Gatekeeper for data going into Intel Occlusion culling. (Not OK)
+Gatekeeper on adding TYPE_RPI_Cullable to the IVisibilityScene even though it has no control over how the cullable is actually created. Cullables are constructed directly by individual systems and there's a lot they need to get right or the culling system could crash. (Not OK)
+Calculates the correct LOD and submits draw packets even though different feature processors may want to handle this directly or may have not even have a concept of LODs. (Not OK)
+Proposal for changes
+The RPI::Scene will own the IVisibilityScene used for culling. We may eventually have two scenes - one for static and one for dynamic objects. (This change is already happening as part of light-type shader variant selection PR)
+Systems that want to take part in culling will add their own VisibilityEntry to the IVisibilityScene. It can set whatever type it would like to in m_typeFlags, but the type should correspond to the c++ type of data in m_userData.
+m_typeFlags on VisibilityEntry will be used as a tag type, managed by a TagRegistry on the scene. This will allow external systems to add their own tags.
+The culling system will not use any user data and will do culling only with data available in the VisibilityEntry
+Each frame, the culling system will generate lists per-view and per-tag of VisibilityEntry items that are contained inside that view and pass the occlusion test. This will happen after feature processor simulate, and before feature processor render. VisibilityEntry is only 64 bytes so it’s a cheap copy, but it may contain a pointer to user data owned by a feature. As with the current culling system, it will parallelize this work as much as possible.
+Feature processors can then read from these lists in their Render() function and process the items, which may include LOD selection, skipping items, submitting draws, etc. For instance, the MeshFeatureProcessor could call something like cullingSystem.GetVisibleEntries(viewPtr, AZ::Name(“Model”)); then submit draws for each entry in the list. Because the tag "Model" is associated with the m_userData that the MeshFeatureProcessor expects, it can safely cast m_userData to its own type to reference back to the AZ::Model that needs to be submitted. Render() is already called in parallel on all feature processors, but feature processors can parallelize further by processing multiple views or groups of items simultaneously.
+The occlusion culling system can render occlusion meshes to each view's occlusion culling directly, no need to go through the culling system. The culling system will still check occlusion culling as part of its culling process, but it won't be responsible for the data submitted to occlusion culling.
+👍React with 👍6Reacted by galibzon, rgba16f, Tommy Walton, Alex Peterson, Kyler Bessert and moudgils
+Activity
+invertednormal
+added
+rfc-featureRequest for Comments for a FeatureRequest for Comments for a Feature
+on Oct 10, 2022
+moudgils commented on Apr 12, 2023
+moudgils
+on Apr 12, 2023
+Contributor
+More actions
+Since this RFC is accepted please open a PR and move this RFC to this folder - https://github.com/o3de/sig-graphics-audio/tree/main/rfcs where we will track all the new RFCs. Thanks.
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+rfc-featureRequest for Comments for a FeatureRequest for Comments for a Feature
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

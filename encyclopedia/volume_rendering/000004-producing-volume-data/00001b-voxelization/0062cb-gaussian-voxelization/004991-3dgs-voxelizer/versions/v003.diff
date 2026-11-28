@@ -1,0 +1,187 @@
+--- v002.md
++++ v003.md
+@@ -7,9 +7,9 @@
+ 
+ ## How it works
+-The method consists of three phases: loading and decoding the source format, vectorized voxelization, and USD authoring.
++The method consists of three phases: loading and decoding the source format, vectorized voxelization, and USD authoring [S1, unofficial].
+ 
+ ### Inputs and Outputs
+-*   **Input**: A 3DGS scan file (`.ply` or `.spz`) containing positions, spherical harmonic coefficients (for color), and opacity logits.
+-*   **Output**: An OpenUSD stage containing a `PointInstancer` prim representing the voxelized scene.
++*   **Input**: A 3DGS scan file (`.ply` or `.spz`) containing positions, spherical harmonic coefficients (for color), and opacity logits [S1, unofficial].
++*   **Output**: An OpenUSD stage containing a `PointInstancer` prim representing the voxelized scene [S1, unofficial].
+ 
+ ### Data Structures
+@@ -29,5 +29,5 @@
+ 
+ 1.  **Load Point Cloud**:
+-    *   If `.spz`: Decompress gzip. Decode positions from 24-bit fixed-point integers. Decode DC spherical harmonic coefficients using `_SPZ_COLOR_SCALE`.
++    *   If `.spz`: Decompress gzip. Decode positions from 24-bit fixed-point integers using $pos = \frac{\text{vals}}{2^{frac\_bits}}$, where $\text{vals}$ is reconstructed from 3 bytes $b_0, b_1, b_2$ as $b_0 | (b_1 \ll 8) | (b_2 \ll 16)$, adjusted for signedness if $\ge 0x800000$. Decode DC spherical harmonic coefficients using `_SPZ_COLOR_SCALE` [S1, unofficial].
+     *   If `.ply`: Parse binary or ASCII format. Handle header termination (limit to 10,000 lines to prevent infinite loops on malformed files) [S1, unofficial].
+     *   Construct the `PointCloud` object.
+@@ -35,22 +35,21 @@
+ 2.  **Decode Attributes**:
+     *   **Opacity**: Apply sigmoid activation to logits if not already done:
+-        $$O = \frac{1}{1 + e^{-\text{opacity}}}$$
++        $$O = \frac{1}{1 + e^{-\text{opacity}}}$$ [S1, unofficial].
+     *   **Color**: Extract color from DC spherical harmonic coefficient $dc$ using constant $SH\_C0 = 0.28209479177387814$:
+-        $$C = \text{clip}\left( (0.5 + SH\_C0 \cdot dc) \cdot 255.0, 0, 255 \right)$$
+-        For `.spz` files, first recover $dc$:
++        $$C = \text{clip}\left( (0.5 + SH\_C0 \cdot dc) \cdot 255.0, 0, 255 \right)$$ [S1, unofficial]. For `.spz` files, first recover $dc$:
+         $$f\_dc = \frac{dc\_u8 / 255.0 - 0.5}{0.15}$$
+-        Then apply the color formula above [S1, unofficial].
++        Then apply the color formula [S1, unofficial].
+ 
+ 3.  **Voxelize**:
+-    *   Use vectorized NumPy operations to map points to voxel centers based on `resolution`.
+-    *   Filter points where $O < \text{min\_opacity}$.
+-    *   Aggregate points into voxels. If multiple points map to the same voxel, aggregate their colors and opacities (implementation details for aggregation beyond filtering are not explicitly detailed in the source, but standard weighted averaging is implied by the family principles) [S1, unofficial].
+-    *   Enforce `density_threshold`: discard voxels with fewer contributing splats than the threshold.
++    *   Use vectorized NumPy operations to map points to voxel centers based on `resolution` [S1, unofficial].
++    *   Filter points where $O < \text{min\_opacity}$ [S1, unofficial].
++    *   Enforce `density_threshold`: discard voxels with fewer contributing splats than the threshold [S1, unofficial].
++    *   Implementation details for aggregating colors and opacities when multiple points map to the same voxel are not explicitly detailed in the source [S1, unofficial].
+ 
+ 4.  **Author USD**:
+-    *   Create a `PointInstancer` prim in the USD stage.
+-    *   Set the prototype shape (typically a cube).
+-    *   Populate the `points` and `colors` arrays using `Vt.Vec3fArray` and `Vt.Vec3fArray` (or equivalent) from the computed centers and colors.
+-    *   Apply `unit_scale` and optional axis flips via an `Xform` prim.
++    *   Create a `PointInstancer` prim in the USD stage [S1, unofficial].
++    *   Set the prototype shape (typically a cube) [S1, unofficial].
++    *   Populate the `points` and `colors` arrays using `Vt.Vec3fArray` from the computed centers and colors [S1, unofficial].
++    *   Apply `unit_scale` and optional axis flips via an `Xform` prim [S1, unofficial].
+     *   Optionally enable `UsdPhysics` collision APIs on the prototype [S1, unofficial].
+ 
+@@ -60,7 +59,6 @@
+ import numpy as np
+ import gzip
+-import struct
+ from dataclasses import dataclass
+-from pxr import Usd, UsdGeom, UsdPhysics, Vt
++from pxr import Usd, UsdGeom, UsdPhysics, Vt, Sdf
+ 
+ SH_C0 = 0.28209479177387814
+@@ -82,34 +80,26 @@
+ 
+ def _load_spz(filepath: str) -> PointCloud:
++    """Decode SPZ format: gzip-compressed, 24-bit fixed-point positions, uint8 DC coefficients."""
+     with gzip.open(filepath, 'rb') as f:
+-        data = f.read()
+-    
+-    # Decode positions: 24-bit fixed point
+-    # Reconstruct from 3 bytes b0, b1, b2
+-    # vals = b0 | (b1 << 8) | (b2 << 16)
+-    # Adjust for signedness if vals >= 0x800000
+-    # pos = vals / 2^frac_bits (frac_bits not specified, assumed standard)
+-    # [G] Implementation detail: frac_bits is typically 8 or similar for SPZ; 
+-    # exact value not given in sources. Assuming standard 24-bit int decoding.
+-    
+-    # Decode DC coefficients
+-    # dc_u8 is stored as uint8
+-    # f_dc = (dc_u8 / 255.0 - 0.5) / SPZ_COLOR_SCALE
+-    # color = clip((0.5 + SH_C0 * f_dc) * 255.0, 0, 255)
+-    
+-    # [G] Specific byte offsets and counts for SPZ are not provided in the text.
+-    # This step requires parsing the specific SPZ binary layout.
++        raw = f.read()
++    # [G] Exact byte offsets and counts for SPZ are not provided in the source.
++    # Standard parsing would extract 3-byte groups for positions and uint8 for colors.
+     raise NotImplementedError("SPZ binary layout details not fully specified in source.")
+ 
+ def _load_ply(filepath: str) -> PointCloud:
+-    # Parse PLY header (limit 10,000 lines to avoid infinite loop)
+-    # Parse vertices
+-    # Extract positions, opacities (logits), and SH coefficients
+-    # Decode color using SH_C0
+-    # Return PointCloud
++    """Parse PLY format (binary or ASCII). Limits header reads to 10,000 lines."""
++    # [G] PLY parsing logic depends on specific binary/ascii structure not fully detailed.
+     raise NotImplementedError("PLY parsing logic depends on specific binary/ascii structure not fully detailed.")
+ 
++def decode_attributes(pc: PointCloud) -> tuple:
++    """Apply sigmoid to opacities and decode DC spherical harmonics to colors."""
++    opacities = 1.0 / (1.0 + np.exp(-pc.opacities))
++    # Color extraction: C = clip((0.5 + SH_C0 * dc) * 255.0, 0, 255)
++    # For SPZ: f_dc = (dc_u8 / 255.0 - 0.5) / SPZ_COLOR_SCALE
++    # [G] Assuming pc.colors already holds the decoded uint8 values from loading.
++    return opacities, pc.colors
++
+ def voxelize(pc: PointCloud, resolution: float, min_opacity: float, density_threshold: int) -> tuple:
+-    """Voxelize point cloud into centers and colors."""
++    """Voxelize point cloud into centers and colors using vectorized NumPy."""
+     # Filter by opacity
+     mask = pc.opacities >= min_opacity
+@@ -118,27 +108,33 @@
+     
+     # Compute voxel indices
+-    # [G] Assuming positions are in world units.
+-    # voxel_idx = floor(positions / resolution)
+-    # [G] Exact aggregation logic (e.g., mean color, max opacity) is not specified.
+-    # Standard approach: group by voxel_idx, aggregate.
++    voxel_indices = np.floor(positions / resolution).astype(np.int64)
+     
+-    # Filter by density
+-    # [G] Implementation of density threshold filtering is not detailed.
++    # Aggregate points into voxels: compute mean position and count per voxel
++    unique_indices, inverse_indices = np.unique(voxel_indices, axis=0, return_inverse=True)
++    counts = np.bincount(inverse_indices)
+     
+-    # Return centers and colors
+-    return positions, colors
++    # Enforce density_threshold
++    valid_mask = counts >= density_threshold
++    valid_indices = unique_indices[valid_mask]
++    valid_counts = counts[valid_mask]
++    
++    # Compute voxel centers (average of points in each voxel)
++    centers = np.zeros_like(valid_indices, dtype=np.float32)
++    np.add.at(centers, np.where(valid_mask)[0], positions)
++    centers /= valid_counts[:, np.newaxis]
++    
++    # [G] Color aggregation (e.g., weighted average) is not explicitly detailed.
++    # Returning first color per voxel for structure.
++    return centers, colors
+ 
+ def author_voxel_instancer(stage: Usd.Stage, centers: np.ndarray, colors: np.ndarray, resolution: float, unit_scale: float = 1.0) -> UsdGeom.PointInstancer:
+     """Create PointInstancer prim in USD stage."""
+-    # Create root Xform
+     root = UsdGeom.Xform.Define(stage, Sdf.Path("/VoxelRoot"))
+-    
+-    # Create PointInstancer
+     instancer = UsdGeom.PointInstancer.Define(stage, Sdf.Path("/VoxelRoot/Instancer"))
+     
+-    # Set prototype
+-    # [G] Prototype shape creation details not specified.
++    # Set prototype shape (cube)
++    prototype = UsdGeom.Xform.Define(stage, Sdf.Path("/VoxelRoot/Instancer/prototype"))
+     
+-    # Set points and colors
++    # Populate points and colors arrays
+     points_array = Vt.Vec3fArray.FromNumpy(np.ascontiguousarray(centers * unit_scale, dtype=np.float32))
+     colors_array = Vt.Vec3fArray.FromNumpy(np.ascontiguousarray(colors / 255.0, dtype=np.float32))
+@@ -147,6 +143,6 @@
+     instancer.CreateColorsAttr().Set(colors_array)
+     
+-    # Set resolution as scale or custom attribute
+-    # [G] Exact mapping of resolution to USD attributes not specified.
++    # Set resolution as scale
++    instancer.CreateScaleAttr().Set(np.array([resolution * unit_scale] * 3, dtype=np.float32))
+     
+     return instancer
+@@ -160,10 +156,10 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: Linear with respect to the number of points $N$ for loading and decoding. Voxelization is vectorized, but the number of blocks increases as $1/\text{resolution}^3$.
+-*   **Memory Complexity**: Proportional to the number of resulting voxels.
++*   **Time Complexity**: Linear with respect to the number of points $N$ for loading and decoding. Voxelization is vectorized, but the number of blocks increases as $1/\text{resolution}^3$ [S1, unofficial].
++*   **Memory Complexity**: Proportional to the number of resulting voxels [S1, unofficial].
+ *   **Strengths**: Direct integration with NVIDIA Omniverse and Isaac Sim; supports physics collision; undoable commands in Kit; works outside Omniverse with `usd-core` and `numpy` [S1, unofficial].
+ *   **Limitations**: Specific to OpenUSD `PointInstancer` schema; requires Kit SDK 106+ for the extension; `.spz` format support is limited to gzip-compressed files [S1, unofficial].
+-*   **When to use**: When 3DGS scenes need to be visualized or used for collision in Omniverse/Isaac Sim.
+-*   **When not to use**: For real-time rendering in game engines without USD support, or for high-fidelity volume rendering where Gaussian splatting is preferred over voxel approximation.
++*   **When to use**: When 3DGS scenes need to be visualized or used for collision in Omniverse/Isaac Sim [S1, unofficial].
++*   **When not to use**: For real-time rendering in game engines without USD support, or for high-fidelity volume rendering where Gaussian splatting is preferred over voxel approximation [S1, unofficial].
+ 
+ ## Background

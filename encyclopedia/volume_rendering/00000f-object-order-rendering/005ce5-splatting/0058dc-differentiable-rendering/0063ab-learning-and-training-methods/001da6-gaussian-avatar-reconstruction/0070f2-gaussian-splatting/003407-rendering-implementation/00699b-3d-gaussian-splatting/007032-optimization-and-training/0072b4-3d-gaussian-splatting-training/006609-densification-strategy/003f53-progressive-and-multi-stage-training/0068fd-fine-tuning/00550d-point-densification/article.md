@@ -1,0 +1,109 @@
+# Point Densification
+
+Also called: Clone and Split, Densification Strategies, Point Densitification
+
+## Overview
+Point densification is an adaptive optimization strategy in 3D Gaussian Splatting that dynamically controls the number of Gaussian primitives by converting a sparse initial set into a denser representation [S2]. It distinguishes between splitting large Gaussians for background reconstruction and cloning small Gaussians for thin structures [S1]. Later variants like HO-Gaussian apply densification at regular intervals to populate regions where sparse SfM initialization leaves holes [S2].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Current set of 3D Gaussians $\{G_i\}$ with position $\mathbf{p}_i$, rotation $\mathbf{q}_i$, scale $\mathbf{s}_i$, opacity $\alpha_i$, and color coefficients $\mathbf{c}_i$, plus accumulated position and opacity gradients $\mathbf{g}_{p,i}$ and $\mathbf{g}_{\alpha,i}$ [G].
+*   **Output:** Updated Gaussian set with modified count and parameters [S1].
+
+**Data Structures:**
+*   Arrays storing $\mathbf{p} \in \mathbb{R}^3$, $\mathbf{q} \in \mathbb{R}^4$, $\mathbf{s} \in \mathbb{R}^3$, $\alpha \in \mathbb{R}$, $\mathbf{c} \in \mathbb{R}^k$, and gradient accumulators $\mathbf{g}_p, \mathbf{g}_\alpha$ [G].
+
+**Parameters:**
+*   $N_{clone}$: Position gradient magnitude threshold to trigger cloning [S1].
+*   $N_{split}$: Position gradient magnitude threshold to trigger splitting [S1].
+*   $T_{interval}$: Number of training steps between densification checks [S2].
+*   *Note: Exact numerical values for thresholds are not given in the sources [S1, S2].*
+
+**Steps:**
+1.  **Accumulate Gradients:** During rendering, accumulate gradients for position and opacity for each Gaussian visible in the training views [S1].
+2.  **Check Interval:** If current step $t$ is a multiple of $T_{interval}$, proceed to densification; otherwise, skip [S2].
+3.  **Identify Candidates:**
+    *   **Clone Candidates:** Gaussians with high position gradient magnitude ($\|\mathbf{g}_p\| > N_{clone}$) and small scale/volume [S1].
+    *   **Split Candidates:** Gaussians with high position gradient magnitude ($\|\mathbf{g}_p\| > N_{split}$) and large scale/volume [S1].
+4.  **Execute Clone:** For each clone candidate $G_i$: duplicate the Gaussian, slightly perturb its position, reset opacity to a low initial value, and add to the set [G].
+5.  **Execute Split:** For each split candidate $G_i$: remove the original Gaussian, create two children at offset positions along a random direction, reduce their scale by a factor (e.g., 1.6), copy color and opacity, and add to the set [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import random
+
+def densify_gaussians(gaussians, gradients, step, interval, clone_thresh, split_thresh, clone_vol_thresh, split_vol_thresh):
+    if step % interval != 0:
+        return gaussians
+
+    to_clone = []
+    to_split = []
+
+    for g in gaussians:
+        grad_norm = math.sqrt(sum(x**2 for x in gradients.position[g.id]))
+        vol = math.prod(g.scale)
+
+        if grad_norm > clone_thresh and vol < clone_vol_thresh:
+            to_clone.append(g)
+        elif grad_norm > split_thresh and vol > split_vol_thresh:
+            to_split.append(g)
+
+    new_gaussians = []
+    for g in gaussians:
+        if g in to_clone:
+            new_g = copy(g)
+            new_g.position = [new_g.position[i] + random.uniform(-0.001, 0.001) for i in range(3)]
+            new_g.opacity = 0.01
+            new_gaussians.append(new_g)
+        elif g in to_split:
+            raw_v = [random.uniform(-1, 1) for _ in range(3)]
+            v = [x / math.sqrt(sum(x**2 for x in raw_v)) for x in raw_v]
+            offset = 0.001
+            g1 = copy(g)
+            g2 = copy(g)
+            g1.position = [g1.position[i] + v[i]*offset for i in range(3)]
+            g2.position = [g2.position[i] - v[i]*offset for i in range(3)]
+            g1.scale = [s/1.6 for s in g1.scale]
+            g2.scale = [s/1.6 for s in g2.scale]
+            new_gaussians.append(g1)
+            new_gaussians.append(g2)
+        else:
+            new_gaussians.append(g)
+
+    return new_gaussians
+```
+
+## Subtopics
+
+### Exponentially Ascending Gradient Threshold
+Uses a dynamic threshold that increases over time to control densification rate, differing from fixed thresholds [G]. Choose it when scene complexity varies significantly across training steps [G]. [Link](9684-exponentially-ascending-gradient-threshold.md)
+
+### SplatFormer Training Objective & Refinement
+Integrates densification with a transformer-based refinement, focusing on structural consistency rather than just gradient magnitude [G]. Choose it when geometric coherence is prioritized over raw gradient signals [G]. [Link](11745-splatformer-training-objective-refinement.md)
+
+### MCMC-based 3DGS / SGLD for 3DGS
+Uses stochastic gradient Langevin dynamics for densification, providing a probabilistic approach to point placement [G]. Choose it when avoiding local minima in sparse initialization is critical [G]. [Link](11917-mcmc-based-3dgs-sgld-for-3dgs.md)
+
+### Error-Guided Redistribution
+Densifies points based on rendering error maps rather than gradients, targeting visible artifacts directly [G]. Choose it when perceptual quality and artifact reduction are primary goals [G]. [Link](14037-error-guided-redistribution.md)
+
+### Localized Point Management (LPM)
+Manages point density locally using spatial hashing, reducing global memory overhead during densification [G]. Choose it for large-scale scenes where global memory allocation is prohibitive [G]. [Link](17850-localized-point-management-lpm.md)
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ per densification step, where $N$ is the number of Gaussians [G]. Densification occurs only at intervals $T_{interval}$, so average cost is $O(N / T_{interval})$ per step [G].
+*   **Memory Complexity:** Increases linearly with the number of cloned/split Gaussians [G].
+*   **Strengths:** Fast convergence for thin structures via cloning [S1].
+*   **Limitations:** Struggles with sky/distant areas if initialization is poor [S2].
+*   **When to use:** When initial SfM points are sparse or unevenly distributed; when thin structures are present [S1, S2].
+*   **When not to use:** When initialization is dense and uniform; when computational budget is extremely tight [G].
+
+## Background
+Point densification was introduced as a key contribution in the original 3D Gaussian Splatting paper [S1]. It was designed to allow the Gaussian set to adaptively grow by distinguishing between splitting (for background/geometry) and cloning (for thin structures/convergence speed) [S1]. Later works like HO-Gaussian noted that the original method relies on accurate initialization and can leave holes in low-texture or sky regions, leading to hybrid optimization approaches that incorporate densification at regular intervals to populate problematic regions [S2].
+
+## Sources
+[S1] 3D Gaussian Splatting for Real-Time Radiance Field Rendering, https://arxiv.org/abs/2308.04079, fetched 2026-10-26
+[S2] HO-Gaussian: Hybrid Optimization of 3D Gaussian Splatting for Urban Scenes, https://doi.org/10.1007/978-3-031-73027-6_2, fetched 2026-10-26

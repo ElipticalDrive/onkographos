@@ -1,0 +1,108 @@
+--- v011.md
++++ v012.md
+@@ -57,31 +57,23 @@
+ 
+ def trace_ray(origin, direction, max_dist):
+-    # Standard ray-scene intersection. Returns HitRecord or None.
+-    # Implementation details omitted as they are scene-specific [G].
++    # Returns HitRecord or None. Implementation depends on scene [G].
+     pass
+ 
+-def compute_transmittance_16_steps(origin, direction, distance):
++def sample_hemisphere(origin, ray_direction):
++    # Samples a direction on the hemisphere oriented around ray_direction [G].
++    pass
++
++def compute_transmittance_16_steps(origin, direction, distance, sigma_t_sampler):
+     # 16-step integration of extinction coefficient along the path [S1, unofficial]
+-    sigma_t = 0.05 + 0.1  # mu_a + mu_s as default base coefficients [S1, unofficial]
+     step_size = distance / 16.0
+     optical_depth = 0.0
+     for i in range(16):
+         t = (i + 0.5) * step_size
+-        # In a real heterogeneous volume, sigma_t would be sampled at t
++        sigma_t = sigma_t_sampler(t)
+         optical_depth += sigma_t * step_size
+     return math.exp(-optical_depth)
+ 
+-def sample_hemisphere(origin, ray_direction):
+-    # Samples a direction on the hemisphere oriented around ray_direction [G]
+-    # Returns a normalized Vector3D
+-    pass
+-
+-def shade_surface(hit, depth, max_depth, mu_a, mu_s):
+-    # Computes reflected radiance (direct + indirect) at the hit point [S1, unofficial]
+-    # Implementation depends on scene shading model [G]
+-    pass
+-
+-def compute_inscattering(ray_origin, ray_direction, depth, max_depth, mu_a, mu_s):
+-    sigma_t = mu_a + mu_s
++def compute_inscattering(ray_origin, ray_direction, depth, max_depth, mu_a, mu_s, sigma_t_sampler):
++    sigma_t = sigma_t_sampler(0.0)
+     if sigma_t < 0.0001:
+         return Vector3D(0, 0, 0)
+@@ -96,5 +88,5 @@
+         
+         if not trace_ray(ray_origin, light_dir, dist_to_light):
+-            T_to_light = compute_transmittance_16_steps(ray_origin, light_dir, dist_to_light)
++            T_to_light = compute_transmittance_16_steps(ray_origin, light_dir, dist_to_light, sigma_t_sampler)
+             phase = 1.0 / (4.0 * PI)
+             geometric = 1.0 / (dist_to_light ** 2)
+@@ -106,6 +98,6 @@
+         hit = trace_ray(ray_origin, omega_ind, max_dist=1000.0)
+         if hit is not None:
+-            T_to_scatter = compute_transmittance_16_steps(ray_origin, omega_ind, hit.distance)
+-            L_indirect_at_surface = compute_inscattering(ray_origin, omega_ind, depth + 1, max_depth, mu_a, mu_s)
++            T_to_scatter = compute_transmittance_16_steps(ray_origin, omega_ind, hit.distance, sigma_t_sampler)
++            L_indirect_at_surface = compute_inscattering(ray_origin, omega_ind, depth + 1, max_depth, mu_a, mu_s, sigma_t_sampler)
+             albedo = hit.material.albedo
+             L_indirect += L_indirect_at_surface * albedo * T_to_scatter * (1.0 / (4.0 * PI))
+@@ -113,5 +105,5 @@
+     return L_direct + L_indirect
+ 
+-def compute_heterogeneous_radiance(ray_origin, ray_direction, depth, max_depth, mu_a, mu_s):
++def compute_heterogeneous_radiance(ray_origin, ray_direction, depth, max_depth, mu_a, mu_s, sigma_t_sampler):
+     hit = trace_ray(ray_origin, ray_direction, max_dist=1000.0)
+     
+@@ -122,17 +114,30 @@
+         return max(L_bg, Vector3D(0.2, 0.2, 0.2))
+     
+-    L_inscatter = compute_inscattering(ray_origin, ray_direction, depth, max_depth, mu_a, mu_s)
+-    T_surface = compute_transmittance_16_steps(ray_origin, ray_direction, hit.distance)
++    L_inscatter = compute_inscattering(ray_origin, ray_direction, depth, max_depth, mu_a, mu_s, sigma_t_sampler)
++    T_surface = compute_transmittance_16_steps(ray_origin, ray_direction, hit.distance, sigma_t_sampler)
+     L_emission = hit.material.emissive_radiance * T_surface
+     
+     L_reflected = Vector3D(0, 0, 0)
+     if depth < max_depth:
+-        L_reflected = shade_surface(hit, depth + 1, max_depth, mu_a, mu_s) * T_surface
++        # Compute reflected radiance (direct + indirect) at hit point and multiply by T [S1, unofficial]
++        L_reflected = shade_surface(hit, depth + 1, max_depth, mu_a, mu_s, sigma_t_sampler) * T_surface
+         
+     return L_inscatter + L_emission + L_reflected
++
++def shade_surface(hit, depth, max_depth, mu_a, mu_s, sigma_t_sampler):
++    # Computes reflected radiance (direct + indirect) at the hit point [S1, unofficial]
++    # Implementation depends on scene shading model [G]
++    pass
++
++# Global scene context required by the algorithm
++scene = type('Scene', (), {
++    'lights': [],
++    'ambient': Vector3D(0.1, 0.1, 0.1),
++    'bg_color': Vector3D(0.5, 0.5, 0.5)
++})()
+ ```
+ 
+ ### Edge Cases and Pitfalls
+-*   **Isotropic Phase Function:** The implementation uses a hardcoded isotropic phase function ($1/4\pi$) for both direct and indirect scattering contributions, ignoring the material's actual phase function [S1, unofficial]. This is a significant simplification that may reduce accuracy for forward-scattering media.
++*   **Isotropic Phase Function:** The implementation uses a hardcoded isotropic phase function ($1/4\pi$) for both direct and indirect scattering contributions, ignoring the material's actual phase function [S1, unofficial]. This is a significant simplification that may reduce accuracy for forward-scattering media [S1, unofficial].
+ *   **Energy Loss:** Simulating multiple scattering via octave approximation can result in energy loss, requiring compensation via the `Cloud Scattering Luminance Scale` parameter [S2].
+ *   **Precision:** The transmittance calculation uses 16-step integration, which may introduce errors in highly heterogeneous volumes if the step size is not adaptive [S1, unofficial].
+@@ -164,5 +169,5 @@
+ *   **Time Complexity:** Exponential with respect to recursion depth due to the branching of indirect scattering rays [S1, unofficial]. The use of 16-step integration for transmittance adds a constant factor per light source per bounce [S1, unofficial].
+ *   **Memory Complexity:** Linear with respect to the number of light sources and the depth of the recursion stack [S1, unofficial].
+-*   **Measured Performance:** Not given in the sources. However, higher octaves and deeper recursion increase shader expense [S2].
++*   **Measured Performance:** Not given in the sources [S1, unofficial][S2]. However, higher octaves and deeper recursion increase shader expense [S2].
+ *   **Scaling:** Performance degrades significantly with increased volume density and number of light sources [S1, unofficial].
+ *   **Strengths:** Handles heterogeneous volumes; compensates for energy loss with luminance scaling; provides a real-time approximation for multiple scattering [S1, unofficial][S2].

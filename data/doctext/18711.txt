@@ -1,0 +1,342 @@
+# Photon Field Networks for Dynamic Real-Time Volumetric Global Illumination
+
+[David Bauer](https://orcid.org/0000-0002-1327-3054) , [Qi Wu](https://orcid.org/0000-0002-1825-0097) , and [Kwan-Liu Ma](https://orcid.org/0000-0000-0000-0000)
+
+
+
+Fig. 1: Our photon field networks replace the global illumination term of the rendering equation. With our approach we are able to achieve comparable results for volumetric rendering in a fraction of the time it takes a conventional path tracer. The photon fields are light-weight and can be trained in seconds.
+
+Abstract—Volume data is commonly found in many scientific disciplines, like medicine, physics, and biology. Experts rely on robust scientific visualization techniques to extract valuable insights from the data. Recent years have shown path tracing to be the preferred approach for volumetric rendering, given its high levels of realism. However, real-time volumetric path tracing often suffers from stochastic noise and long convergence times, limiting interactive exploration. In this paper, we present a novel method to enable real-time global illumination for volume data visualization. We develop Photon Field Networks—a phase-function-aware, multi-light neural representation of indirect volumetric global illumination. The fields are trained on multi-phase photon caches that we compute a priori. Training can be done within seconds, after which the fields can be used in various rendering tasks. To showcase their potential, we develop a custom neural path tracer, with which our photon fields achieve interactive framerates even on large datasets. We conduct in-depth evaluations of the method's performance, including visual quality, stochastic noise, inference and rendering speeds, and accuracy regarding illumination and phase function awareness. Results are compared to ray marching, path tracing and photon mapping. Our findings show that Photon Field Networks can faithfully represent indirect global illumination across the phase spectrum while exhibiting less stochastic noise and rendering at a significantly faster rate than traditional methods.
+
+Index Terms—Volume data, volume rendering, volume visualization, deep learning, global illumination, neural rendering, path tracing
+
+# 1 INTRODUCTION
+
+Volume data is generated in various scientific settings like large-scale physical simulations, medical and biological scans, or astronomical observations. Researchers in these domains rely on robust and highfidelity rendering techniques to visualize and extract valuable insights from their data. When it comes to visualizing the data, there is a wide array of rendering techniques ranging from unshaded ray marching to full global illumination path tracing. In many applications, simple local illumination rendering is not ideal for visualizing complex volume data, making it hard to study the shape, size, and spatial relations of features in the data. Providing higher levels of realism and visual fidelity generally aids analysis. However, a rendering technique's visual quality and realism closely correlate with its computational cost as it involves casting additional rays to sample the environment. On the other hand, one of the main objectives when developing visualization applications for researchers is providing systems with high interactivity and image quality to facilitate analysis. These requirements put many advanced global illumination effects out of reach for interactive applications. This is especially true for path-traced applications where several light bounces per ray must be computed to achieve realistic global illumination. At the same time, tracing these paths is prone to stochastic noise, requiring numerous samples per pixel (SPP) and smart sampling decisions to achieve acceptable image quality.
+
+In this work, we introduce a method that meets the interactivity requirement of scientific visualization applications without sacrificing realistic global illumination effects. To enable real-time volumetric global illumination for scientific data, we develop the concept of photon fields that allow us to represent phase-dependent, volumetric global illumination as a neural field, through which we can parameterize scene radiance using 6-dimensional coordinates. At the same time, the field can be queried in real time at several SPP. This eliminates the need to construct long paths through the volume and reduces the complexity to a single query to the photon field plus the computation of direct illumination. We implement a neural path tracer that combines traditional direct illumination with photon field queries to showcase our method.
+
+With the implementation, we conduct an extensive evaluation of the photon field renderer involving a priori tracing and training performance, rendering speed, image quality, and sensitivity to phase
+
+• Authors are with the University of California, Davis. E-mail: {davbauer| qadwu | klma}@ucdavis.edu .
+
+function changes. The test results show that photon field networks can faithfully represent implicit phase-function-dependent scene radiance while rendering significantly faster and with less stochastic noise than conventional methods.
+
+## 2 RELATED WORK
+
+Our work is related to topics in volume rendering, global illumination for volume rendering, and deep learning methods in computer graphics. In this section, we discuss related works in these fields.
+
+Volumetric Global Illumination In 1995, Max et al. [28] expertly compiled several optical models that allow the realistic rendering of volumetric data. Ever since, these techniques have been at the core of work in the scientific visualization community. Today, two common rendering methods found in scientific rendering are direct volume rendering via ray marching and ray tracing using volumetric path tracing algorithms. Although different in their approach and areas of use, both directions have ways of introducing global illumination (GI) effects such as shadows, ambient occlusion, or, more generally, multiplescattering effects. In the context of scientific visualization, adding such effects aids users in analyzing their data as these techniques help bring out details and accentuate the spatial properties of the dataset. On the other hand, these effects can also serve purely aesthetic ends when the purpose of the visualization is to illustrate, promote, or communicate in a general-public setting.
+
+One of the challenges of volumetric global illumination is performance. Rendering methods tend to require large numbers of samples and computations to achieve high-fidelity rendering. Over the years, extensive work has been done to approximate these GI effects while saving computational resources. A notable method to add depth to volumetric rendering is ambient occlusion [5, 11, 25, 35–37, 40], which approximates GI by sampling light extinction in a local neighborhood. The logical next step on the realism scale is to compute global shadows. These consider the global attenuation between samplings points and light sources and represent single-scattering illumination reaching a point. Efficient computation of global shadows requires optimizations over naïve extinction sampling. Notable examples include cone tracing [38], plane sweep [42], half-angle slicing [21, 22], and light volumes [54]. Finally, with volumetric path tracing, ray tracing, and photon mapping, we can compute the full multiple-scattering GI model [4, 24, 26, 34, 53]. However, the computational cost of the algorithms increases when high-resolution data and complex lighting conditions are at play. Consequently, the rendering performance of these methods can deteriorate swiftly. For the purpose of this work, we highlight bidirectional methods as they inform the fundamental structure of our design.
+
+Bidirectional Rendering and Photon Mapping In bi-directional path tracing [43], light paths are not only traced from the camera but simultaneously from the light source. Paths are terminated once a certain threshold of bounces is exceeded or if the ray exits the medium. At this point, the two partial paths —one from the camera and one from the light source—are connected to form a full path between the viewer and the light source. This guarantees that each path meaningfully contributes to the final rendering. In its pure form, bi-directional path tracing is unbiased.
+
+Photon mapping [16] is a type of biased bi-directional rendering in which the tracing steps are more strictly separated. Paths starting at the light source are traced offline in a pre-computation step. Later, this partial information is used when tracing paths from the camera. The incident radiance at a sampling point can be queried from the previously computed light paths. In volumetric photon mapping [17], light propagation is simulated by generating and tracing photons from a light source and recording their path through a participating medium. These photon records are stored in what is called a photon map. Such maps are usually represented using a spatial partitioning structure like a kd-tree [2] to allow for faster data access and efficient range queries. When rendering with photon maps, we traverse the volume, estimating the photon density each step of the way. Using these density estimates, we can reconstruct the radiance for each pixel of the image. The density estimation step introduces bias but also smooths the overall radiance contribution, making the method suitable for scenarios in which mostly low-frequency radiance can be expected and where the bias characteristics of the estimator are of secondary concern.
+
+There are several ways to estimate local radiance in photon maps that depend on the photon representation and sampling technique. Jensen et al. [16, 17] use a k-nearest-neighbor (KNN) range query around a sample point, which remains the simplest and universally applicable method for photon density estimation. Beyond this, Jarosz et al. [15] explore beam-shaped queries, replacing point samples. They generalize this approach to include beam-like photons in a follow-up work [14]. Finally, Bitterli et al. [3] extend this thought to higher-dimensional space where photons and radiance queries can be represented as points, beams, or even high-dimensional shapes. Generally, higher dimensions yield better results at the same cost. We refer the interested reader to Kˇrivánek et al.'s [23] excellent survey of advanced photon density estimation techniques. A common caveat of these higher-dimensional estimators is that they require knowledge of the transmittance properties of a medium. On the one hand, this makes them ideal for homogeneous media as the transmittance can be determined analytically. In heterogeneous media, however, we have to resort to ray marching or monte carlo integration to determine transmittance, which diminishes the returns of such methods. In our work, and as a proof of concept, we choose KNN queries due to their simplicity and universality when it comes to non-homogeneous media. Futhermore, we discuss potential ways to incorporate higher-dimensional estimates in future work.
+
+Neural Rendering and Neural Fields The rapid development of artificial intelligence research has given rise to many exciting applications in the graphics and visualization domain. Naturally, we only cover a relevant fraction of this body of work here.
+
+In the field of scientific visualization, there are several notable examples of how we can address crucial challenges through the use of machine learning. The works by Weiss et al. [48, 50] introduce screenspace methods to learn super-resolution, sampling, and reconstruction of different volume visualization methods. Bauer et al. [1] introduce a method—also operating in screen space —that enables faster volume rendering through sparse sampling and neural reconstruction. Finally, Engel et al. [6] introduce a network that learns a transfer-functionaware neural representation of a dataset's ambient occlusion volume, allowing faster rendering through single-shot inference. Lu et al. [27] and many others [8, 49, 52] developed volumetric neural representation that can reduce the size of volume data by over 1000× while still preserving high-frequency details. We refer to Wang et al. [47] for a comprehensive survey in this area.
+
+Aside from data visualization, neural rendering—as it is termed now—has found applications in almost every area of computer graphics. We highlight several works related to this project, specifically those targeting indirect global illumination. For path tracing, Kallweit et al. [19] develop a neural network for offline path tracing that can predict incident radiance in cloud-like volumes. It works by building local descriptors at volume sampling points which are then processed by a neural network. For scenarios without participating media, Gao et al. [7] propose a screen-space method to predict the indirect illumination in a scene based on direct illumination and auxiliary features like scene depth. Lastly, Zhu et al. [55] address issues in photon mapping. They build a neural radiance estimator that replaces conventional photon density estimates discussed in the previous section. Through this they achieve similar quality with significantly fewer traced photons.
+
+Parallel to these developments, we observe a return to more traditional forms of machine learning models like the multi-layer perceptron. This trend was fueled by the introduction of neural radiance fields [29], or NeRFs for short. At their core, NeRFs are compact multi-layer perceptrons (MLPs) that can implicitly represent dense field data in 5-dimensional function space. In practice, this means that they approximate a function that maps position and view direction to color and
+
+
+
+Fig. 2: Overview of our pipeline. First, multi-phase photon maps are traced and used to train the photon field network. The field is used during path tracing to provide phase-function-dependent indirect illumination, and it can be retrained on demand when transfer function or lighting conditions change.
+
+density:
+
+| $F_{\Phi}(x, y, z, \theta, \phi) = (R, G, B, \sigma)$ | (1) |
+|-------------------------------------------------------|-----|
+|-------------------------------------------------------|-----|
+
+One of the factors that stalled the successful appropriation of NeRFs in graphics and visualization was the model's practical performance. It entailed long training times and slow inference and rendering speeds. This drawback was soon addressed by Müller et al. [30, 33], who introduced a low-level GPU implementation of MLP networks combined with trainable hashgrid encodings [31]. These instant neural graphics primitives [31] were shown to converge within seconds and can be inferred in real-time. Wu et al. [52] introduced such primitives to the field of scientific visualization for interactive visualization of volumetric neural representation.
+
+In this work, we leverage the simple design of NeRFs [29] and the performance of fast neural representations [30, 52] to implement photon fields. Furthermore, we take inspiration from neural rendering approaches [7, 19] that focus on indirect global illumination to speed up the otherwise costly path-tracing procedure.
+
+## 3 METHODOLOGY
+
+Our goal is to provide a way to eliminate costly, data-dependent sampling steps involved in realizing global illumination in scientific volume rendering. We replace this step with a constant-time neural network inference that scales at a much slower pace compared to baseline methods. To this end, we introduce photon field networks that implicitly represent a 6-dimensional illumination volume that can be characterized as a functional mapping from sample position, direction, and phase function coefficient to directional post-integrated photon density. The fields can be used during rendering to substitute the costly evaluation of long scattering paths. Figure 2 gives an overview of the complete pipeline.
+
+
+
+# 3.1 Photon Fields
+
+We introduce the concept of photon fields. These fields approximate the continuous function of local post-estimation radiance density parameterized for the phase function coefficient.
+
+A photon field *P*φ establishes the following mapping:
+
+$$P_{\phi}(x, g, \vec{\omega}) = (R, G, B) \quad (2)$$
+
+where x ∈ [0,1] 3 is a position in space, g ∈ [−1,1] is a coefficient determining the scattering behavior of light ranging from strong backward (g = −1.0) to forward (g = 1.0) scattering (Figure 3\), and ω~ is a view direction represented in normalized spherical coordinates.
+
+We propose to use this mapping to represent phase-functionsensitive, indirect, in-scattered radiance (i.e., the indirect global illumination component of the volumetric rendering equation), such that the photon field represents the multiple-scattering term Li of the rendering equation:
+
+| $L(x, \vec{\omega}) = L_d(x, \vec{\omega}) + L_i(x, \vec{\omega})$ | (3) |
+|--------------------------------------------------------------------|-----|
+|--------------------------------------------------------------------|-----|
+
+where L is the total radiance at point x in direction ω~ , and Ld represents the direct illumination component while Li stands for the indirect radiance. Thus, the photon field *P*φ can be written as:
+
+$$P_{\phi}(x, g, \vec{\omega}) \approx L_i(x, \vec{\omega}) = \int_{\Omega_{4\pi}} p_g(x, \vec{\omega}, \vec{\omega}_i) L(x, \vec{\omega}_i) d\omega_i \quad (4)$$
+
+Note that the field's parameter g implicitly represents the chosen phase pg. This means the field does not only represent the indirect global illumination but does so for all possible phase-dependent illumination states of a volume on a continuous scale of phase function coefficients.
+
+## 3.2 Multi-Phase Photon Tracing
+
+In order to generate photon fields, we need baseline data. Our approach uses photon maps to represent indirect global illumination at various phase function settings to train our photon fields. The rationale behind choosing photon maps for this work is twofold. One, unlike monte carlo methods, photon mapping, although biased, suffers from little to no stochastic noise. This makes it ideal for our use case since it produces high-quality, noise-free images faster. At the same time, since indirect illumination tends to be lower frequency than direct lighting, the method's bias—caused by the blurring of the radiance estimate only has a negligible impact on the final image quality. The second reason for choosing photon maps is that they capture the global state of irradiance in a volume, which is by nature view-independent. This quality of photon maps allows us to train a representation just once and use it to render the volume from any viewpoint using arbitrary camera and light scattering parameters. This global state contrasts many methods like path guiding, which are heavily view-dependent and in which the model must continuously adapt to new views on the data.
+
+Fig. 3: The Henyey-Greenstein phase function [9] at different scattering coefficients for backscattering (red), isotropic scattering (blue), and forward scattering (green). Degrees denote deviation from incoming directions while the radial axis shows the probability density. For instance, at g = −1.0 rays have a p = 100% probability of being perfectly reflected while g = 0.0 means that they will scatter in any random direction (p = 4π ).
+
+To enable the training of phase-variable photon fields, we modify the traditional photon tracing algorithm to work on multiple levels of anisotropy simultaneously. We use the Henyey-Greenstein (HG) phase function [9] since it is easy to compute and allows parameterization of the scattering direction by a single coefficient g ∈ [−1,1] (Figure 3\). The idea is to capture a single photon map that represents the characteristics of multiple phases. To that end, we randomly assign each
+
+
+
+Fig. 4: Photons are traced through the volume at discrete phase function coefficients of the Henyey-Greenstein phase function [9]. Photon queries can be performed to filter for a specific type of scattering selectively.
+
+photon a scattering coefficient g ∈ G from a pool of discrete possible coefficients (Figure 4\). The values in G divide the full phase spectrum into evenly spaced bins. The choice of G can be made arbitrarily, but we found the set G = {−0.75,0.0,0.75} to be the best compromise between tracing and training speed and final field quality.
+
+With these considerations, we generate photon maps by tracing photons from each light source as described in Algorithm 1, which illustrates our version of volumetric photon mapping in heterogeneous media. Since the goal is to capture indirect light transport, we only store photons past their first interaction with the medium.
+
+## Algorithm 1 Multi-phase photon tracing in heterogeneous media
+
+n\_photons ← 0 photonmap ← /0 while n\_photons < max\_n\_photons do bounces ← 0 throughput ← 1 photon ← generate from random light source photon.g ← random pick out of G while bounces < max\_bounces do compute sample distance via delta tracking [51] if no interaction via delta tracking then break . photon left the volume end if photon.position ← interaction location photon.direction ← PHASE(g, photon.direction) sample ← VOLUME(x, y,z) albedo ← TRANSFERFUNCTION(sample) throughput ← throughput · albedo.alpha · albedo.rgb photon.intensity ← light.intensity · throughput if bounces++ ≥ 1 then . skip first interaction photonmap[n\_photons++] ← photon end if if russian roulette termination then break end if end while end while
+
+# 3.3 Data Sampling
+
+Training the photon field networks requires generating appropriate samples that cover the problem input domain (x,g,ω~ ). To this end, the previously generated multi-phase maps are transferred to the GPU, where a kd-tree is constructed. We then generate batches of samples. Samples can be generated in parallel, making this step fast enough to facilitate quasi-online training. We use a batch size of 2 16. Each batch contains a uniformly sampled set of grid coordinates x ∈ [0,1], random uniform directions ω~ , and phase function coefficients g randomly
+
+## 3.3.1 Radiance Estimation
+
+Using the generated input samples, we compute the ground truth radiance for each sample point. For this, we develop a phase-specific k-nearest-neighbor (KNN) range query around the sample point (Figure 4\). This will only consider photons of phase g and is otherwise equivalent to queries suggested by Jensen et al. [17]. The value for K is 1024 and a maximum query radius r is chosen to limit the number of queried photons as needed. This value is provided by our custom training schedule that will be discussed in Section 3.5.
+
+The final radiance value Li(x,ω~ ) is computed using the KNN adaptive radius radiance estimator [17]:
+
+
+$$L(i(x, \vec{\omega})) \approx \sum_{n=1}^K p_g(x, \vec{\omega}, \vec{\omega}_n) \frac{\Phi_n}{4\pi r^3} \quad (5)$$
+
+where r is the distance to the farthest photon found in the KNN query, Φ*n* ∈ R 3 and ω~n are the i-th photon's intensity and direction, and pg is the HG phase function as determined by the value chosen for g.
+
+## 3.3.2 Target Encoding
+
+Neural network training benefits from data normalization. This usually means mapping the network inputs and targets to common intervals like [−1,1] or [0,1]. In our case, the inputs are already in this range. However, there are no practical bounds for values of Li(x,ω~ ) (Equation 5\), and its value is largely dependent on the local volume density and intensity of photons at a given sample point.
+
+Given the number of factors that contribute to the final value of a sample radiance estimate, it is hard to determine the exact global value bounds without densely sampling across the entire input domain. In most cases, this is not feasible due to the relatively high cost of wide-range KNN queries.
+
+To address this issue, we propose a logarithmic network target and output encoding that has the network predict normalized radiance exponents instead of Li(x,ω~ ) directly. These exponents can be easily bounded by determining the maximum desirable floating point precision. They are easy to compute, reversible, and do not overly skew the input domain given reasonable precision constraints. Assuming that all values for Li(x,ω~ ) ≥ 0, we can compute the transformed values L 0 i (x,ω~ ) as follows.
+
+$$L_i'(x, \vec{\omega}) = \begin{cases} -\frac{\log_{10}(L_i(x, \vec{\omega}))}{\psi} & \text{if } L_i(x, \vec{\omega}) > \frac{1}{10^{\psi}} \\ 1 & \text{otherwise} \end{cases} \quad (6)$$
+
+where ψ is the maximum desired floating point precision in the number of digits beyond zero. This guarantees that all target values L 0 i (x,ω~ ) ∈ [0,1] with a more evenly spaced distance between very bright and dark areas. Values below the precision threshold ψ are implicitly clamped to zero. We found values of 4 to 6 for ψ to be sufficient. To restore Li(x,ω~ ), we apply the following inverse transformation:
+
+
+$$L_i(x, \vec{\omega}) = 10^{-L_i'(x, \vec{\omega})} \cdot \Psi \quad (7)$$
+
+The complete sample generation process leaves us with 2 16 of such [(x,g,ω~ ),L 0 i (x,ω~ )] training tuples. We pass the full batch to the network during training and regenerate a new batch of 2 16 values for every training step.
+
+# 3.4 Model
+
+The underlying machine learning model that represents the photon field comprises several modules. Figure 5 shows an overview of the full architecture. There are encoding, network, and decoding components. The encoding layer (Figure 5 (left)) decomposes the field's input into positional, directional, and phase components. Positions and directions are transformed using a 3- and 2-dimensional hashgrid encoding [31] respectively. There are other forms of positional encodings like the frequency encoding used by Mildenhall et al. [29] or the OneBlob encoding suggested by Müller et al. [32]. However, the hashgrid method
+
+has been shown to converge faster [31], and its computational overhead is well within our performance budget. The phase is left untouched as it represents a unitless scale and would not benefit from further encoding. Our encoding uses 16 grid levels with 8 features each, a 2× scaling factor between levels, and a hash table size of 2 19. We encode positions and directions separately to decouple their effects on the value of Li(x,ω~ ), which is important for heavily view-dependent phase values g.
+
+The network layer (Figure 5 (middle)) is a 5-layer perceptron with 64 neurons per layer, ReLU activations between the hidden layers, and no output activation. It takes the encoded inputs from the previous step and processes them to produce a prediction of the log-encoded radiance L 0 i (x,ω~ ). Finally, the exponential decode step (Figure 5 (right)) transforms L 0 (x,ω~ ) to Li(x,ω~ ) using Equation 7.
+
+i In contrast to most neural field methods, photon fields do not solely contribute to the appearance of the final image as they produce only the indirect in-scattering term of the rendering equation. These terms tend to be lower-frequency fields and allow for the use of smaller, faster networks compared to approaches that require highly-detailed spatial features.
+
+## 3.5 Training
+
+When it comes to optimizing the photon field, we employ a relatively simple training framework consisting of a single loss term with appropriate hyperparameter settings to regularize training. We develop a custom staggered training schedule to improve the overall time to convergence.
+
+## 3.5.1 Hyperparameters and Loss
+
+During training, we use the Adam [20] optimizer with settings for β1 = 0.9, β2 = 0.99, no *L*2 regularization. The learning rate is set to 9 −4 with an exponential decay of 0.92 starting at 70% of the total number of training steps and decay triggers at every subsequent 25 steps. The relative mean square error (rMSE) serves as the training loss, which is applied to each set of outputs individually. We found training sessions between 2000 and 3000 steps to be most effective.
+
+#### 3.5.2 Staggered KNN Schedule
+
+A downside of the KNN estimator is the need to sample for a relatively large number of photons (i.e., large values for K) to generate good estimates for Li(x,ω~ ). Performing these range queries is costly and can quickly deteriorate performance. This is one of the reasons why photon mapping did not enjoy widespread popularity in the past. We rely on these queries only during training, which somewhat lifts the burden of finding performant estimators. There is, however, a remaining concern about making the training step as fast and unobtrusive as possible. To that end, we propose a staggered training schedule to improve time to convergence.
+
+For each photon field, we define a sequence of increasing KNN query radii ri that approach a target radius r. The sequence is queried during training to determine the current step's sampling radius (Figure 6\). The idea is to quickly accommodate the field to the overall characteristics of the dataset in the early stages with smaller radii and leave the refinement of visual details for later in training. This works because restricting the radius causes the query to return k < K samples given a large enough K. The larger the radii become, the more likely it is that k = K at which point the queries are saturated and take the maximum time as constrained by K.
+
+## 3.6 Rendering
+
+The trained photon field can be used to render volumes with volumetric global illumination. Since the field represents Li , we can use it to replace the multiple-scattering term in either path tracing or ray marching.
+
+We implement a wavefront path tracer inspired by Wu et al.'s work [52] to render datasets using pre-trained photon fields. The rendering process differs from traditional volume path tracing in that we compute only the first interaction with the volume. We use this set of sample points to estimate direct illumination via delta tracking [51] and
+
+query the photon field at the resulting interaction positions to obtain the contribution of indirect global illumination.
+
+Algorithm 2 outlines the parallel neural photon field rendering algorithm. The process is designed as a GPU path tracer and is split into multiple device kernels. We provide details about each kernel in the following.
+
+#### Algorithm 2 Volumetric path tracing with neural photon fields
+
+Input camera, N Output L rays ← /0 samples ← /0 spp ← N
+
+rays ← RAYGENERATION (camera) samples ← VOLUMESAMPLING (rays, spp)
+
+L pred
+
+i ← DECODE(P*φ (*samples)) Ld ← DIRECTILLUMINATION (samples)
+
+L ← COMPOSE (Ld, L
+
+pred i
+
+, samples, spp)
+
+Ray Generation Based on the camera parameters provided to the renderer, we spawn view rays and perform basic intersection testing. If the ray intersects the volume, we store its information in a buffer rays, which will be used in later steps.
+
+Volume Sampling We use the results of the previous kernel to generate spp number of interactions in the volume. Since most scientific volumetric datasets are heterogeneous media, we use delta tracking [51] to estimate the depth of the first interaction. For each sample on a ray, we use identical ray parameters to simulate multiple "first" interactions with the medium. This is equivalent to performing multiple rendering passes in traditional path tracing and storing only their first interaction. The maximum number of samples |samples|max generated in this step is spp×|rays|. Samples are stored in a buffer of size |samples|max and invalid interactions are left blank.
+
+Photon Field Prediction and Decoding The normalized radiance exponent is obtained by inferring the neural field at all values in samples. The final predicted radiance L pred i can be decoded simply by performing the operation described in Equation 7. With our design, we are able to batch all |samples| number of samples into a single neural network inference step which significantly reduces computational overhead compared to naïve, per-sample or per-ray inference. To improve performance further, we compact the samples buffer, discarding samples where the delta tracking step did not generate a valid interaction, thus removing 'holes' in the uncompacted buffer.
+
+Direct Illumination Samples generated in the sampling step are also used to sample direct light. We use next-event estimation (NEE) and delta tracking [51] to sample the light sources directly. This is equivalent to performing single-bounce illumination in a traditional path tracer.
+
+Composition This kernel combines direct and indirect light contributions. It computes the scattering probability σ*s* at each given sample point in the volume and determines the multiple importance sampling weights (MIS) [44] for direct lighting and phase function sampling. With these values, it composes the total illumination for each ray as follows.
+
+$$L = \frac{1}{SPP} \sum_{k=1}^{SPP} w_d L_{d_k} + w_i \sigma_{s_k} L_{i_k}^{pred}$$
+
+where wd and wi are the MIS [44] weights for NEE and the continued path sampling, which is represented by the network prediction in this case. This leaves us with the final value for L. It can be displayed directly, used for frame accumulation, or denoised to reduce the remaining noise caused by the initial sampling step.
+
+
+
+Fig. 5: Network architecture of our neural photon fields. 6-dimensional inputs are first separately encoded before being passed to the network. We use the hashgrid method [31] for both positional encodings. The main network is a lightweight MLP with ReLU activation, which produces the log-encoded target values. Decoding them produces the final radiance Li at x in direction ω~ at phase coefficient g.
+
+
+
+Fig. 6: Sampling radii for the KNN queries during training are determined by a custom sampling schedule. The schedule determines the maximum query radius for the current training step (1). The resulting radius (2) is used by the KNN sampler to produce samples (3) which are used for the next training step.
+
+# 4.1 System Setup
+
+We use C++ backends for both the OpenVKL [13] and oneTBB [12] libraries to implement the photon tracer. Photon maps are built on the GPU using a version of the cuKD-Tree [46] implementation that was adapted by us to support selective queries. We chose this library as it operates stackless and without recursion, allowing for much larger photon maps that exceed the maximum recursion depth or stack size imposed by the GPU. Training and inference of photon fields was realized using the Tiny CUDA Neural Networks [30] library using fullyfused MLPs at fp16 half-precision. Finally, we implement baseline rendering and sampling methods in both CUDA and OpenVKL [13]. Neural rendering involving photon field sampling was written in CUDA. All computations and evaluations, including the photon tracing, training of the photon fields, and rendering the final images was done on an end-user machine with two Intel Xeon Gold 5220 CPUs, 256 gigabytes of RAM and an NVIDIA GeForce RTX 3090. The system runs Ubuntu 20.04 LTS and all parts of the project were compiled using GCC 8.4 through NVCC running CUDA 11.6. All data is recorded at 720p unless otherwise specified.
+
+# 4.2 Training Performance
+
+The initial generation of photon fields is an important part of the proposed pipeline. In this section, we evaluate training speed at different capture settings. Furthermore, we analyze the loss progressions for our staggered training schedule.
+
+First, we show data for a representative training on the VORTICES dataset. The training was performed on multiple photon maps containing increasing number of photons. Figure 7 shows data for trainings on 1*M*, 3*M*, 6*M*, and 12*M* photons. The number of photons denote the total number of particles in the map, which means there are x |G| photons per phase. Here, we chose a 40/30/30/10 split for the staggered train-
+
+
+
+Fig. 7: Example of a representative training on the Vortices dataset. The photon field is trained for 3000 steps at 2 16 samples per step. Training is performed on multiple maps with increasing number of total photons. The top chart shows our staggered training with vertical lines indicating radius changes while the bottom shows a naïve run. Both reach comparable final quality while the staggered approach takes significantly less time to complete.
+
+ing schedule. Schedule shifts are indicated by vertical lines and specific target radii are listed in Table 1. The radii are adjusted to roughly match the data size; however, we do not prescribe optimal settings for this step. They can be changed as needed to balance quality and training time. Longer trainings warrant the choice of more intermediate radii. Ultimately, we found the exact design of the KNN schedule to be an empirical matter which largely depends on the dataset, lighting conditions, and transfer function. Please find the full list of training data, loss curves, and KNN schedules for all datasets in the supplemental material.
+
+Table 1: Example of a four-step staggered KNN schedule. Values shown here were used to conduct the training in Figure 7.
+
+| Photons |   | 0–36% |   | 37–63% |   | 64–90% |   | 91–100% |
+|---------|---|-------|---|--------|---|--------|---|---------|
+| 1M      | 0 | 25    | 0 | 50     | 2 | 50     | 5 | 0       |
+| 3M      | 0 | 25    | 0 | 50     | 2 | 00     | 4 | 0       |
+| 6M      | 0 | 25    | 0 | 50     | 1 | 50     | 3 | 0       |
+| 12M     | 0 | 25    | 0 | 50     | 1 | 00     | 2 | 0       |
+
+The bottom of Figure 7 includes a comparison to a naïve training run. At first sight, both trainings seem to arrive at similar losses and produce similar visual quality. However, timing data shown in Figure 9 reveals that the staggered training takes only a fraction of the time it takes the
+
+
+
+Fig. 8: Visual quality of our approach compared to two rendering methods often used in scientific visualization—path tracing and ray marching. We show decomposed views to highlight the contribution of Li and how it compares to the baseline photon mapping and path tracer. Overall, our method faithfully represents the baseline while successfully emulating the look of the path tracer.
+
+naïve approach to complete. Over all datasets, we see approximately 2–3× improvement in training speed using our staggered training.
+
+
+
+Fig. 9: Average timings of trainings on all datasets over 3000 steps comparing the effects of using our KNN schedule on training time. Naïve trainings (yellow) were conducted using the target radius r directly, while our schedule (blue) approaches r incrementally.
+
+# 4.3 Rendering Results
+
+In this section we evaluate the performance and visual quality of our method. To put them into context, we compare our results against several baseline methods that are commonly found in scientific visualization. First, we consider a direct comparison with the underlying photon mapping method to showcase the reconstruction quality of our fields. Furthermore, we show data from a ray marcher with single-light
+
+global shadows. Lastly, we implement a path tracer with full global illumination using next-event estimation (NEE) and multiple importance sampling (MIS) to show how our method compares to the effects that it aims to emulate.
+
+# 4.3.1 Rendering Performance
+
+To determine the performance of our method we gather the per-frame timings of the rendering pipeline components. Data is recorded at 1SPP across all datasets. The timings are an average over a 2000-frame flythrough sequence that captures the dataset from various angles and at different distances from the volume. We measure the relative speedup of generating Li and L using our photon field method as compared to a full path tracer. The data is shown in Table 2. All values were generated with a maximum path length of 16. Data for the underlying photon mapping rendering pipeline is omitted as the KNN queries are magnitudes slower than both the path tracer and our method.
+
+The data shows that by cutting paths short and instead using the photon field to determine Li saves a significant amount of time. Our approach outperforms the path tracer by 4–5× on average and by as much as 13× when considering only the relevant sub-process of generating the indirect illumination term. Throughout most datasets, we observe a strong correlation between the screen fill ratio of the rendered volume to the overall frame time speedup. We attribute this to the exponential difference in the number of secondary rays used to path trace Li compared to the linear increase in network inferences when using our photon fields.
+
+# 4.3.2 Image Quality
+
+To evaluate the visual quality of our neural path tracer, we compare it against the baseline photon maps and place it side-by-side with a conventional path tracer and ray marcher (Figure 8\). Decomposed
+
+Table 2: Render timings averaged over a screen-filling, 2000-frame fly-through sequence. We compare our photon field renderer against a conventional path tracer. Values for L include additional time for ray generation and other smaller processses.
+
+|   | Dataset    | L d [ ms | ] L i [ ms ] | Ours L [ ms ] | L d [ ms ] | Path L i [ ms ] | Tracer L [ ms ] | Speedup | L Speedup | L i |
+|---|------------|----------|--------------|---------------|------------|-----------------|-----------------|---------|-----------|-----|
+| C | HAMELEON   | 14.56    | 4.57         | 19.40         | 16.98      | 57.56           | 74.74           | 3.85    | × 12.59   | ×   |
+| F | ULL B ODY  | 9.18     | 5.03         | 14.45         | 8.95       | 66.33           | 75.47           | 5.22    | × 13.18   | ×   |
+| H | EPTANE     | 6.95     | 4.92         | 12.16         | 6.84       | 67.26           | 74.33           | 6.11    | × 13.67   | ×   |
+| M | ECH .H AND | 3.73     | 5.35         | 9.40          | 3.69       | 35.72           | 39.63           | 4.22    | × 6.68    | ×   |
+| S | UPERNOVA   | 5.69     | 5.57         | 11.55         | 5.61       | 58.87           | 64.68           | 5.60    | × 10.57   | ×   |
+| V | ORTICES    | 1.56     | 5.74         | 7.57          | 1.85       | 14.47           | 16.61           | 2.19    | × 2.52    | ×   |
+| Z | EBRAFISH   | 7.87     | 4.29         | 12.45         | 7.77       | 52.37           | 60.32           | 4.85    | × 12.22   | ×   |
+| O | VERALL     | 7.08     | 5.07         | 12.42         | 7.38       | 50.37           | 57.97           | 4.58    | × 10.20   | ×   |
+
+
+
+Direct+ PFFig. 10: Phase function awareness analysis for photon field networks trained on the MECHANICALHAND dataset using G = {−0.75,0.00,0.75}. We show the neural rendering output (first row) and the ground truth data (second row). Data for g ∈ {−0.35,0.35} was not part of the training set G. Each pair of images is evaluated using MSSSIM, LPIPS, and relative square error (third row).
+
+views of the data are provided to highlight the contribution of Li(x,ω~ ). We compute perceptual metrics comparing Li of the baseline photon map against the field's output. This test is indicative of the quality of the network. We abstained from computing metrics comparing the method against the path tracer or ray marcher since they are different rendering methods. While photon mapping—and in extension our photon fields approach—emulates the visual characteristics of path tracing, it is not equivalent. Thus, the metrics do not constitute a fair apples-to-apples comparison. Note that the maximum quality of our method is limited by the quality of the multi-phase photon maps. In this study, we use data from 12M photon maps, with 4M photons per phase which provides fairly good quality but comes at a one-time cost when computing the maps (Section 4.4\). We will discuss how future work can handle this quality constraint more gracefully and with less pre-computation time. The quality study results in Figure 8 indicate that our approach is able to faithfully reconstruct the radiance represented by the baseline, and despite learning the bias inherent to photon mapping, it closely matches the results of the full volumetric path tracer. For a more exhaustive collection of visual analyses, please refer to the supplemental material.
+
+## 4.3.3 Stochastic Noise
+
+Another advantage of our approach is that it does not suffer from stochastic noise beyond the initial delta tracking sampling step. This results in a much better noise profile when compared to the conventional path tracer. In Figure 11 we show a crop from the CHAMELEON dataset captured at different SPP and compare our approach against the path tracer. It becomes clear that at the same number of samples, photon
+
+fields suffer from significantly less noise. Note how our method is consistently better than the path tracer even when doubling or quadrupling the SPP (i.e. compare path tracer at 4 and 8 SPP against ours at 1 and 4 SPP). Generally, we observe that the greater the contribution of Li and the smaller the contribution of Ld to a pixel's L, the more significant the benefit of this effect becomes. As SPP increase, both methods approach similar levels of quality. This fact allows us to produce high quality images much faster, as lower SPP are needed to reach acceptable levels of convergence. Similarly, in cases where a denoiser is employed, our method will produce higher quality sooner.
+
+
+
+Fig. 11: The crest around the CHAMELEON's eye cause notable scattering and therefore indirect illumination. The scene is captured at 1, 4, 8, and 1024 SPP using our method and the reference path tracer. The photon fields exhibit noticeably less noise at lower SPP.
+
+#### 4.3.4 Phase Function Awareness
+
+Photon fields capture Li(x,ω~ ) along the continuum of phase function coefficients g ∈ [−1,1]. To evaluate their capability of capturing the mapping, we compare outputs of a field trained on a set G. We show outputs for g ∈ G as well as g ∈/ G. Results for this test are shown in Figure 10. The starred values indicate g ∈/ G, highlighting the photon field's capability to generalize across the phase spectrum as shown by the structural and perceptual image metrics. Note that there is an inherent error when comparing to unseen data as the photon field learns the bias of the initial set G (Figure 10 (rSE)). Due to the stochastic and biased nature of photon tracing, we find this error even when comparing equivalent baseline images derived from different traces. This means that the results for g ∈/ G are a compound of prediction and photon tracing errors. Fortunately, the latter does not drastically impact the perceptual quality of the resulting images as indicated by the other metrics (MSSSIM and LPIPS). Please refer to the supplemental material for an evaluation among equivalent baseline photon maps to showcase the tracing error. We discuss potential future directions to mitigate the influence of estimator bias and tracing error in Section 5. To get a better sense of how the phase function parameterization influences the visual output, please refer to the supplemental video.
+
+#### 4.4 Photon Tracing Performance
+
+Creating multi-phase photon maps is an a priori step necessary to build the photon field. Ideally, high-quality photon tracing is employed sparsely, as it constitutes the most cost-intensive task in the whole process. Although not part of our contribution, we deem it important to understand the initial cost of generating baseline data. We do not claim optimality for this step. We discuss potentials for interactive tracing in Section 5. The deciding factors for tracing speed are the volume's size, density distribution, and the number of photons traced. We have little influence over the former two, so our evaluation focuses on the latter. Table 3 shows an overview of tracing times for different datasets. All times were generated on the CPU using a parallelized tracing procedure. The number of photons indicated is the total number of photons traced in the scene. The photons are equally distributed over the number of lights |L| and the number of phases |G|. We see that, as expected, number of photons strongly correlates with target time. However, the volume size is not always indicative of tracing time due to varying density distributions and the resulting differences in trace lengths at different phase coefficients. To achieve good results, traces of 1M up to 12M photons are necessary to achieve high visual quality for the photon fields. Traces can be created a priori and stored on disk for repeated use during trainings.
+
+Table 3: Tracing speed at different capture settings. We show the tracing speed over all datasets used in the study and report numbers at different levels of quality ranging from 1M to 12M photons.
+
+|   | Dataset    | Size |      |      | 1M   | Tracing 3M | Time 6M | [s] 12M |
+|---|------------|------|------|------|------|------------|---------|---------|
+| V | ORTICES    | 128  | 128  | 128  | 4.2  | 6.2        | 23.8    | 24.4    |
+| H | EPTANE     | 302  | 302  | 302  | 4.9  | 13.2       | 29.5    | 54.3    |
+| M | ECH .H AND | 640  | 220  | 229  | 4.1  | 9.2        | 23.9    | 40.1    |
+| S | UPERNOVA   | 432  | 432  | 432  | 12.2 | 35.8       | 72.7    | 142     |
+| Z | EBRA F ISH | 592  | 413  | 956  | 23.8 | 70.9       | 140.5   | 282     |
+| F | ULL B ODY  | 512  | 512  | 1299 | 4.6  | 13.3       | 26.8    | 52.6    |
+| C | HAMELEON   | 1024 | 1024 | 1080 | 7.6  | 19.6       | 38.6    | 76.7    |
+
+## 5 LIMITATIONS AND FUTURE DIRECTIONS
+
+Photon field networks perform exceedingly well in a wide range of scenarios. Naturally, there are limitations to the approach. In this section we identify and discuss some of them. We provide perspectives on how to overcome these limitations and identify potentials to further extend our method.
+
+Low Opacity Volumes and Boundary Gradients One drawback of photon tracing in conjunction with delta tracking and KNN radiance estimation is its failure to capture illumination in highly transparent regions and areas with high density gradients such a air-surface boundaries. This is due to the limited number of photons we can process and, in turn, the estimators nature of averaging over the entire spherical domain around a sample. This can lead to areas receiving less average radiance than needed to faithfully represent them when there are few or no photons in their vicinity. We identify this as a limitation of the underlying method and, in the following paragraphs, discuss potentials to extend this work by employing more efficient estimation techniques that will at the same time improve performance.
+
+Faster Photon Map Retracing One bottleneck of our approach is the regeneration of the multi-phase photon traces when scene parameters like transfer function or lighting change. One possible direction to address this issue is to only retrace the parts of the map that have become sufficiently different as a consequence of the scene adjustments. Such an approach has been proposed for traditional photon mapping by Jönsson et al. [18] and we are confident that this can be adapted for our multi-phase maps in the future.
+
+Beyond Point Samples Another way to reduce computational costs associated with tracing and sampling photon data is to reduce the need for high photon counts. As discussed in related work, some of the higher-dimensional estimates require more work to be adapted for an approach like this. One possible candidate for an extension to this work could be the beam radiance estimate [14, 15] which gathers radiance along a ray instead of a sampling point. Subsequently, our photon fields could be adapted to work as a form of light field network [39,41] which, instead of predicting point samples, is trained to produce per-ray radiance data. At the same time, neural estimators like the one proposed by Zhu et al. [55] achieve high quality with significantly less photon samples. This can be used during photon field training to manage effectively with much smaller maps. These directions would allow re-tracing and fine-tuning of an existing field at interactive rates.
+
+Opportunities Beyond Rendering In this paper, we show the merits of photon field networks in volumetric rendering applications. However, there are potential uses for this approach outside of image generation. Most notably, we see considerable need for fast radiance estimates in the field of path guiding. In this line of research, radiance samples are used to optimize scattering distributions for improving the quality of path tracing samples and reducing overall variance of the estimator [10, 45]. Using photon fields can support efforts that rely on photon traces like Herholz et al.'s work [10] by providing fast estimates that are trained once and can be evaluated in a fraction of the time it would take conventional estimators to do the same.
+
+## 6 CONCLUSION
+
+We introduce photon field networks—a neural rendering method to enable real-time global illumination for scientific volume data. The fields can be trained in seconds, and allow for significantly faster rendering compared to conventional methods like ray marching or path tracing. Our design produces high visual quality with low levels of stochastic noise even at low sample rates. At the same time, the photon fields capture the global illumination along a scale of anisotropic scattering. We show that photon field networks are able to produce global illumination effects as much as 13× faster than a comparable path tracer, all the while producing images that closely match the more expensive approach. In future iterations, we plan to extend our design to accommodate more cost-effective photon estimation techniques like the beam radiance estimate [14, 15] to further improve rendering times and reduce the cost of baseline data generation. This will pave the way to near-seamless relighting with all the benefits that already come with photon fields.
+
+In this work, our goal was to demonstrate how machine learning methods can enhance scientific visualization. We see encouraging results from adjacent fields like computer graphics and there are countless opportunities to extend and augment our community's well-established rendering paradigms. We hope to motivate the visualization community to pursue this direction and push the boundaries of what is possible in real-time, high-fidelity volume visualization.
+
+## REFERENCES
+
+- [1] D. Bauer, Q. Wu, and K.-L. Ma. Fovolnet: Fast volume rendering using foveated deep neural networks. IEEE Transactions on Visualization and Computer Graphics, 29(1):515–525, 2023. doi: 10.1109/TVCG.2022. 3209498 2 [2] J. L. Bentley. Multidimensional binary search trees used for associative searching. Communications of the ACM, 18(9):509–517, 1975. doi: 10. 1145/361002.361007 2 [3] B. Bitterli and W. Jarosz. Beyond points and beams: Higher-dimensional photon samples for volumetric light transport. ACM Transactions on Graphics (TOG), 36(4), 2017. doi: 10.1145/3072959.3073698 2 [4] E. Dappa, K. Higashigaito, J. Fornaro, S. Leschka, S. Wildermuth, and
+- H. Alkadhi. Cinematic rendering–an alternative to volume rendering for 3d computed tomography imaging. Insights Into Imaging, 7(6):849–856, 2016. doi: 10.1007/s13244-016-0518-1 2 [5] J. Díaz, P.-P. Vázquez, I. Navazo, and F. Duguet. Real-time ambient occlusion and halos with summed area tables. Computers & Graphics, 34(4):337–350, 2010. doi: 10.1016/j.cag.2010.03.005 2 [6] D. Engel and T. Ropinski. Deep volumetric ambient occlusion. IEEE Transactions on Visualization and Computer Graphics, 27(2):1268–1278, 2021. doi: 10.1109/TVCG.2020.3030344 2 [7] D. Gao, H. Mu, and K. Xu. Neural global illumination: Interactive indirect illumination prediction under dynamic area lights. IEEE Transactions on Visualization and Computer Graphics, 2022. 2, 3 [8] J. Han and C. Wang. Coordnet: Data generation and visualization generation for time-varying volumes via a coordinate-based neural network. IEEE Transactions on Visualization and Computer Graphics, pp. 1–12, 2022. doi: 10.1109/TVCG.2022.3197203 2 [9] L. G. Henyey and J. L. Greenstein. Diffuse radiation in the Galaxy. apj, 93:70–83, 1941. doi: 10.1086/144246 3, 4 [10] S. Herholz, Y. Zhao, O. Elek, D. Nowrouzezahrai, H. P. A. Lensch, and
+- J. Kˇrivánek. Volume path guiding based on zero-variance random walk theory. ACM Transactions on Graphics (TOG), 38(3), 2019. doi: 10. 1145/3230635 9 [11] F. Hernell, P. Ljung, and A. Ynnerman. Local ambient occlusion in direct volume rendering. IEEE Transactions on Visualization and Computer Graphics, 16(4):548–559, 2009. 2 [12] Intel Corporation. oneTBB, 2020 (Online). https://github.com/oneapisrc/oneTBB. 6 [13] Intel Corporation. OpenVKL, 2022 (Online). https://github.com/openvkl/openvkl. 6 [14] W. Jarosz, D. Nowrouzezahrai, I. Sadeghi, and H. W. Jensen. A comprehensive theory of volumetric radiance estimation using photon points and beams. ACM Transactions on Graphics (TOG), 30(1):1–19, 2011. doi: 10. 1145/1899404.1899409 2, 9 [15] W. Jarosz, M. Zwicker, and H. W. Jensen. The beam radiance estimate for volumetric photon mapping. In ACM SIGGRAPH 2008 Classes, SIG-GRAPH '08, 2008. doi: 10.1145/1401132.1401137 2, 9 [16] H. W. Jensen. Global illumination using photon maps. In Rendering Techniques' 96: Proceedings of the Eurographics Workshop in Porto, Portugal, June 17–19, 1996 7, pp. 21–30. Springer, 1996. 2 [17] H. W. Jensen and P. H. Christensen. Efficient simulation of light transport in scenes with participating media using photon maps. In Proceedings of the 25th Annual Conference on Computer Graphics and Interactive Techniques, SIGGRAPH '98, p. 311–320. Association for Computing Machinery, 1998. doi: 10.1145/280814.280925 2, 4 [18] D. Jönsson and A. Ynnerman. Correlated photon mapping for interactive global illumination of time-varying volumetric data. IEEE Transactions on Visualization and Computer Graphics, 23(1):901–910, 2017. doi: 10. 1109/TVCG.2016.2598430 9 [19] S. Kallweit, T. Müller, B. Mcwilliams, M. Gross, and J. Novák. Deep scattering: Rendering atmospheric clouds with radiance-predicting neural networks. ACM Transactions on Graphics (TOG), 36(6), 2017. doi: 10. 1145/3130800.3130880 2, 3 [20] D. P. Kingma and J. Ba. Adam: A method for stochastic optimization. In
+- Y. Bengio and Y. LeCun, eds., 3rd International Conference on Learning Representations, Conference Track Proceedings, 2015. doi: arXiv:1412. 6980 5 [21] J. Kniss, S. Premoze, C. Hansen, and D. Ebert. Interactive translucent volume rendering and procedural modeling. In IEEE Visualization, pp. 109–116, 2002. doi: 10.1109/VISUAL.2002.1183764 2 [22] J. Kniss, S. Premoze, C. Hansen, P. Shirley, and A. McPherson. A model for volume lighting and modeling. IEEE Transactions on Visualization and Computer Graphics, 9(2):150–162, 2003. doi: 10.1109/TVCG.2003. 1196003 2 [23] J. Kˇrivánek, I. Georgiev, T. Hachisuka, P. Vévoda, M. Šik,
+  - D. Nowrouzezahrai, and W. Jarosz. Unifying points, beams, and paths in volumetric light transport simulation. ACM Transactions on Graphics (TOG), 33(4):1–13, 2014. 2 [24] T. Kroes, F. H. Post, and C. P. Botha. Exposure render: an interactive photo-realistic volume rendering framework. PLoS ONE, 7(7):e38586, 2012. doi: 10.1371/journal.pone.0038586 2 [25] T. Kroes, D. Schut, and E. Eisemann. Smooth probabilistic ambient occlusion for volume rendering. GPU Pro 6: Advanced Rendering Techniques,
+  - p. 475, 2015. doi: 10.1201/9781351052108-17 2 [26] N. Liu, D. Zhu, Z. Wang, Y. Wei, and M. Shi. Progressive light volume for interactive volumetric illumination. Computer Animation and Virtual Worlds, 27(3-4):394–404, 2016. doi: 10.1002/cav.1706 2 [27] Y. Lu, K. Jiang, J. A. Levine, and M. Berger. Compressive neural representations of volumetric scalar fields. vol. 40, pp. 135–146, 2021. doi: 10. 1111/cgf.14295 2 [28] N. Max. Optical models for direct volume rendering. IEEE Transactions on Visualization and Computer Graphics, 1(2):99–108, 1995. doi: 10. 1109/2945.468400 2 [29] B. Mildenhall, P. P. Srinivasan, M. Tancik, J. T. Barron, R. Ramamoorthi, and R. Ng. Nerf: Representing scenes as neural radiance fields for view synthesis. Communications of the ACM, 65(1):99–106, 2021. doi: 10. 1145/3503250 2, 3, 4 [30] T. Müller. Tiny CUDA neural network framework, 2021 (Online). https://github.com/nvlabs/tiny-cuda-nn. 3, 6 [31] T. Müller, A. Evans, C. Schied, and A. Keller. Instant neural graphics primitives with a multiresolution hash encoding. ACM Transactions on Graphics (TOG), 41(4), 2022. doi: 10.1145/3528223.3530127 3, 4, 5, 6 [32] T. Müller, B. Mcwilliams, F. Rousselle, M. Gross, and J. Novák. Neural importance sampling. ACM Transactions on Graphics (TOG), 38(5), 2019. doi: 10.1145/3341156 4 [33] T. Müller, F. Rousselle, J. Novák, and A. Keller. Real-time neural radiance caching for path tracing. ACM Transactions on Graphics, 40(4), 2021. doi: 10.1145/3450626.3459812 3 [34] G. Paladini, K. Petkov, J. Paulus, and K. Engel. Optimization techniques for cloud based interactive volumetric monte carlo path tracing. Industrial Talk, EG/VGTC EuroVis, 2015. 2 [35] T. Ropinski, J. Meyer-Spradow, S. Diepenbrock, J. Mensmann, and K. Hinrichs. Interactive volume rendering with dynamic ambient occlusion and color bleeding. Computer Graphics Forum, 27(2):567–576, 2008. doi: 10. 1111/j.1467-8659.2008.01154.x 2 [36] M. Ruiz, I. Boada, I. Viola, S. Bruckner, M. Feixas, and M. Sbert. Obscurance-based volume rendering framework. In H.-C. Hege, D. Laidlaw, R. Pajarola, and O. Staadt, eds., IEEE/ EG Symposium on Volume and Point-Based Graphics, pp. 113–120. The Eurographics Association, 2008. doi: 10.2312/VG/VG-PBG08/113-120 2 [37] M. Schott, V. Pegoraro, C. Hansen, K. Boulanger, and K. Bouatouch. A directional occlusion shading model for interactive direct volume rendering. Computer Graphics Forum, 28(3):855–862, 2009. doi: 10.1111/j. 1467-8659.2009.01464.x 2 [38] M. Shih, S. Rizzi, J. Insley, T. Uram, V. Vishwanath, M. Hereld, M. E. Papka, and K.-L. Ma. Parallel distributed, gpu-accelerated, advanced lighting calculations for large-scale volume visualization. In 2016 IEEE 6th Symposium on Large Data Analysis and Visualization (LDAV), pp. 47–55, 2016. doi: 10.1109/LDAV.2016.7874309 2 [39] V. Sitzmann, S. Rezchikov, B. Freeman, J. Tenenbaum, and F. Durand. Light field networks: Neural scene representations with single-evaluation rendering. Advances in Neural Information Processing Systems, 34:19313– 19325, 2021. 9 [40] V. Šoltészová, D. Patel, S. Bruckner, and I. Viola. A multidirectional occlusion shading model for direct volume rendering. Computer Graphics Forum, 29(3):883–891, 2010. doi: 10.1111/j.1467-8659.2009.01695.x 2 [41] M. Suhail, C. Esteves, L. Sigal, and A. Makadia. Light field neural rendering. In 2022 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pp. 8259–8269, 2022. doi: 10.1109/CVPR52688. 2022.00809 9 [42] E. Sundén, A. Ynnerman, and T. Ropinski. Image plane sweep volume illumination. IEEE Transactions on Visualization and Computer Graphics, 17(12):2125–2134, 2011. doi: 10.1109/TVCG.2011.211 2 [43] E. Veach and L. Guibas. Bidirectional estimators for light transport. In
+
+Photorealistic Rendering Techniques, pp. 145–167. Springer, 1995. 2 [44] E. Veach and L. J. Guibas. Optimally combining sampling techniques for monte carlo rendering. In Proceedings of the 22nd annual conference on Computer graphics and interactive techniques, pp. 419–428, 1995. 5 [45] J. Vorba, J. Hanika, S. Herholz, T. Müller, J. Kˇrivánek, and A. Keller. Path guiding in production. SIGGRAPH '19. Association for Computing Machinery, 2019. doi: 10.1145/3305366.3328091 9 [46] I. Wald. A stack-free traversal algorithm for left-balanced k-d trees, 2022. doi: 10.48550/ARXIV.2210.12859 6 [47] C. Wang and J. Han. Dl4scivis: A state-of-the-art survey on deep learning for scientific visualization. IEEE Transactions on Visualization and Computer Graphics, pp. 1–1, 2022. doi: 10.1109/TVCG.2022.3167896 2 [48] S. Weiss, M. Chu, N. Thuerey, and R. Westermann. Volumetric isosurface rendering with deep learning-based super-resolution. IEEE Transactions on Visualization and Computer Graphics, 27(6):3064–3078, 2021. doi: 10 .1109/TVCG.2019.2956697 2 [49] S. Weiss, P. Hermüller, and R. Westermann. Fast neural representations for direct volume rendering. Computer Graphics Forum, 41(6):196–211, 2022. doi: 10.1111/cgf.14578 2 [50] S. Weiss, M. I¸sIk, J. Thies, and R. Westermann. Learning adaptive sampling and reconstruction for volume visualization. IEEE Transactions on Visualization and Computer Graphics, 28(7):2654–2667, 2022. doi: 10. 1109/TVCG.2020.3039340 2 [51] E. Woodock, T. Murphy, H. P., and L. T.C. Techniques used in the GEM code for Monte Carlo neutronics calculation in reactors and other systems of complex geometry. Technical report, Argonne National Laboratory, 1965. 4, 5 [52] Q. Wu, D. Bauer, M. J. Doyle, and K.-L. Ma. Instant neural representation for interactive volume rendering. arXiv, 2022. doi: arXiv:2207.11620 2, 3, 5 [53] Y. Zhang, Z. Dong, and K.-L. Ma. Real-time volume rendering in dynamic lighting environments using precomputed photon mapping. IEEE Transactions on Visualization and Computer Graphics, 19(8):1317–1330, 2013. doi: 10.1109/TVCG.2013.17 2 [54] Y. Zhang and K.-L. Ma. Fast global illumination for interactive volume visualization. In Proceedings of the ACM SIGGRAPH Symposium on Interactive 3D Graphics and Games, I3D '13, p. 55–62, 2013. doi: 10. 1145/2448196.2448205 2 [55] S. Zhu, Z. Xu, H. W. Jensen, H. Su, and R. Ramamoorthi. Deep photon mapping. arXiv preprint arXiv:2004.12069, 2020. doi: arXiv:2004.12069 2, 9

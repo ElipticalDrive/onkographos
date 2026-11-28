@@ -1,0 +1,142 @@
+# Brick Index Computation
+
+Also called: Cache-Optimized Index Mapping, Index Table Lookup for 3D Array Addressing, Tabulated Index Computation
+
+## Overview
+Brick Index Computation is a method for mapping 3D voxel coordinates $(x, y, z)$ to a linear array index in datasets organized into brick structures, avoiding expensive integer division and modulus operations at runtime [S1, unofficial]. It differs from standard linear indexing by decomposing the stride calculation into precomputed lookup tables for each dimension, which fits within the processor's primary data cache even for large datasets [S1, unofficial]. Unlike incremental index computation, it avoids branch prediction penalties associated with tracking multiple counters [S1, unofficial].
+
+## How it works
+**Inputs:**
+- Grid dimensions: $N_x, N_y, N_z$ (integers).
+- Brick sub-cell dimensions: $n, m$ (integers, typically powers of two for optimization, though ideal sizes may not be [S1, unofficial]).
+- Target voxel coordinates: $x \in [0, N_x), y \in [0, N_y), z \in [0, N_z)$.
+
+**Outputs:**
+- Linear index $q$ into the bricked data array.
+
+**Data Structures:**
+Three lookup tables storing integer offsets:
+1.  Table $F_x$ of size $N_x$.
+2.  Table $F_y$ of size $N_y$.
+3.  Table $F_z$ of size $N_z$.
+
+**Formulas:**
+The linear index is computed as the sum of three components:
+$$ q = F_x(x) + F_y(y) + F_z(z) $$
+
+The components are defined as:
+$$
+\begin{aligned}
+F_x(x) &= \left(\left\lfloor \frac{x}{n} \right\rfloor \div m\right) n^3 m^3 \left(\left\lfloor \frac{N_z}{n} \right\rfloor \div m\right) \left(\left\lfloor \frac{N_y}{n} \right\rfloor \div m\right) + \left(\left\lfloor \frac{x}{n} \right\rfloor \bmod m\right) n^3 m^2 + (x \bmod n \times n) n^2 \\
+F_y(y) &= \left(\left\lfloor \frac{y}{n} \right\rfloor \div m\right) n^3 m^3 \left(\left\lfloor \frac{N_z}{n} \right\rfloor \div m\right) + \left(\left\lfloor \frac{y}{n} \right\rfloor \bmod m\right) n^3 m + (y \bmod n) \times n \\
+F_z(z) &= \left(\left\lfloor \frac{z}{n} \right\rfloor \div m\right) n^3 m^3 + \left(\left\lfloor \frac{z}{n} \right\rfloor \bmod m\right) n^3 + (z \bmod n)
+\end{aligned}
+$$
+*Note: The source uses integer division notation $\div$ and modulus $\bmod$. In implementation, these correspond to integer division and remainder operations [S1, unofficial].*
+
+**Precomputation Steps:**
+1.  Calculate constant terms involving $N_x, N_y, N_z, n, m$. Specifically, compute:
+    -   $C_{xy} = \left(\left\lfloor \frac{N_z}{n} \right\rfloor \div m\right) \left(\left\lfloor \frac{N_y}{n} \right\rfloor \div m\right)$
+    -   $C_{z} = \left(\left\lfloor \frac{N_z}{n} \right\rfloor \div m\right)$
+    -   $K_1 = n^3 m^3$
+    -   $K_2 = n^3 m^2$
+    -   $K_3 = n^2$
+    -   $K_4 = n^3 m$
+    -   $K_5 = n^3$
+2.  Populate Table $F_x$ for all $x \in [0, N_x)$:
+    -   $bx = \lfloor x / n \rfloor$
+    -   $mx = bx \div m$
+    -   $rx = bx \bmod m$
+    -   $rxn = x \bmod n$
+    -   $F_x[x] = (mx \cdot K_1 \cdot C_{xy}) + (rx \cdot K_2) + (rxn \cdot n \cdot K_3)$
+3.  Populate Table $F_y$ for all $y \in [0, N_y)$:
+    -   $by = \lfloor y / n \rfloor$
+    -   $my = by \div m$
+    -   $ry = by \bmod m$
+    -   $ryn = y \bmod n$
+    -   $F_y[y] = (my \cdot K_1 \cdot C_{z}) + (ry \cdot K_4) + (ryn \cdot n)$
+4.  Populate Table $F_z$ for all $z \in [0, N_z)$:
+    -   $bz = \lfloor z / n \rfloor$
+    -   $mz = bz \div m$
+    -   $rz = bz \bmod m$
+    -   $rzn = z \bmod n$
+    -   $F_z[z] = (mz \cdot K_1) + (rz \cdot K_5) + rzn$
+
+**Runtime Steps:**
+1.  Retrieve $val_x = F_x[x]$.
+2.  Retrieve $val_y = F_y[y]$.
+3.  Retrieve $val_z = F_z[z]$.
+4.  Compute $q = val_x + val_y + val_z$.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def precompute_brick_tables(Nx, Ny, Nz, n, m):
+    # Constants
+    # Note: Integer division // and modulus %
+    Nz_brick_z = (Nz // n) // m
+    Ny_brick_z = (Ny // n) // m
+    
+    K1 = n**3 * m**3
+    K2 = n**3 * m**2
+    K3 = n**2
+    K4 = n**3 * m
+    K5 = n**3
+    
+    C_xy = Nz_brick_z * Ny_brick_z
+    C_z = Nz_brick_z
+    
+    # Table Fx
+    Fx = [0] * Nx
+    for x in range(Nx):
+        bx = x // n
+        mx = bx // m
+        rx = bx % m
+        rxn = x % n
+        Fx[x] = (mx * K1 * C_xy) + (rx * K2) + (rxn * n * K3)
+        
+    # Table Fy
+    Fy = [0] * Ny
+    for y in range(Ny):
+        by = y // n
+        my = by // m
+        ry = by % m
+        ryn = y % n
+        Fy[y] = (my * K1 * C_z) + (ry * K4) + (ryn * n)
+        
+    # Table Fz
+    Fz = [0] * Nz
+    for z in range(Nz):
+        bz = z // n
+        mz = bz // m
+        rz = bz % m
+        rzn = z % n
+        Fz[z] = (mz * K1) + (rz * K5) + rzn
+        
+    return Fx, Fy, Fz
+
+def get_brick_index(x, y, z, Fx, Fy, Fz):
+    return Fx[x] + Fy[y] + Fz[z]
+```
+
+**Isosurfacing Optimization:**
+When computing indices for the 8 corners of a cell during isosurfacing, only 6 table lookups are required instead of 8 data accesses plus index computations:
+-   Lookups: $F_x(x), F_x(x+1), F_y(y), F_y(y+1), F_z(z), F_z(z+1)$ [S1, unofficial].
+-   This results in a ratio of 6 index table lookups for every 8 data value lookups [S1, unofficial].
+
+**Macrocells:**
+For macrocells, the same logic applies but with 3 table lookups per macrocell instead of per voxel, making the bricking effect negligible due to the smaller memory footprint [S1, unofficial].
+
+## Operating characteristics
+-   **Time Complexity:** $O(1)$ per index lookup after $O(N_x + N_y + N_z)$ precomputation.
+-   **Memory Complexity:** $O(N_x + N_y + N_z)$ integers for the lookup tables. The total size fits in the primary data cache for very large datasets [S1, unofficial].
+-   **Performance:** Avoids expensive integer division and modulus operations (which cost 32+ cycles on older architectures like MIPS R10000) [S1, unofficial]. Bit-shifts can optimize powers of two, but ideal brick sizes are not always powers of two [S1, unofficial].
+-   **Strengths:** Cache-friendly; avoids branch prediction penalties associated with incremental counter tracking [S1, unofficial].
+-   **Limitations:** Requires precomputation memory; complex to extend to more than two levels of bricking without obvious cache utilization benefits [S1, unofficial].
+
+## Background
+The method was described in the context of interactive ray tracing for isosurface rendering, addressing the computational cost of voxel traversal and data access [S1, unofficial]. It was proposed as an alternative to incremental index computation which suffered from poor branch prediction due to tracking 9 counters [S1, unofficial].
+
+## Sources
+[S1] Interactive Ray Tracing for Isosurface Rendering To appear ..., https://www.ppsloan.org/publications/iso98.pdf, fetched 2026-10-27 (unofficial)

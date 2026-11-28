@@ -1,0 +1,211 @@
+--- v006.md
++++ v007.md
+@@ -4,102 +4,102 @@
+ 
+ ## Overview
+-This method anchors 3D Gaussians to a triangle mesh using barycentric coordinates and normal displacement, enabling deformation tracking through mesh topology rather than direct vertex positions [S1, unofficial]. It solves the problem of Gaussians drifting off-mesh or piling up at triangle edges during optimization and animation by defining a local triangle space [S1, unofficial]. Unlike methods relying on precise mesh accuracy, it ensures robust results even with inaccurate meshes by binding Gaussians to the surface .
++This method initializes and deforms 3D Gaussians by anchoring them to a canonical triangle mesh $\mathcal{M}$ using barycentric coordinates and normal displacement [S1, unofficial]. It solves the problem of maintaining geometric coherence and differentiability during mesh deformation (e.g., animation) by tracking Gaussians through mesh topology rather than direct vertex positions [S1, unofficial]. It sets itself apart from direct Gaussian optimization by binding Gaussians to the surface, ensuring they follow mesh deformations naturally, though it requires handling cross-triangle boundaries to prevent Gaussians from sticking to edges [Parent].
+ 
+ ## How it works
+-**Inputs:** Canonical triangle mesh (vertices $V$, normals $n$, indices), initial Gaussian count (e.g., 10,000).
+-**Outputs:** Set of Gaussians defined by embedding $E_i = \{k, u, v, d\}$ and canonical parameters $\bar{q}, \bar{s}$.
++**Inputs and Outputs:**
++*   **Input:** Canonical triangle mesh $\mathcal{M}$ with vertices $V$, per-vertex normals $n$, and faces $F$; deformation function $\text{Deform}(\cdot)$; initial canonical Gaussian rotation $\bar{q}$ and scale $\bar{s}$.
++*   **Output:** Posed Gaussian parameters: mean $\mu_{pose}$, rotation $q_{pose}$, scale $s_{pose}$, and color (Spherical Harmonics disabled for simplicity [S1, unofficial]).
+ 
+ **Data Structures:**
+-*   **Mesh:** Array of vertices $V_i \in \mathbb{R}^3$, normals $n_i \in \mathbb{R}^3$, and triangles $T_k = (V_1, V_2, V_3)$.
+-*   **Embedding:** For each Gaussian $i$, store triangle index $k$, barycentric coordinates $(u, v)$, and normal displacement $d$.
+-*   **Per-Vertex Quaternions:** $q_V$ for each mesh vertex, computed via area-weighted average of surrounding neighbor triangles [S1, unofficial].
++Each Gaussian $i$ is defined by an embedding tuple $E_i = \{k, u, v, d\}$:
++*   $k$: Index of the triangle $k \in F$ in the canonical mesh.
++*   $(u, v)$: Barycentric coordinates within triangle $k$, such that $u \ge 0, v \ge 0, u+v \le 1$.
++*   $d$: Normal displacement along the interpolated surface normal.
+ 
+-**Steps:**
++**Canonical Position and Normal:**
++The canonical mean $\mu_{cano}$ and normal $n_{cano}$ are computed via Phong interpolation on the canonical mesh [Parent, S1, unofficial]:
++$$
++\mu_{cano} = \mathcal{V}(k, u, v) = u V_1 + v V_2 + (1 - u - v) V_3
++$$
++$$
++n_{cano} = \mathcal{N}(k, u, v) = u n_1 + v n_2 + (1 - u - v) n_3
++$$
++where $V_j$ and $n_j$ are the vertices and per-vertex normals of triangle $k$ [Parent, S1, unofficial].
+ 
+-1.  **Initialization:**
+-    *   Randomly select 10,000 pairs of triangle indices $k$ and barycentric coordinates $(u, v)$ on the canonical mesh [S1, unofficial].
+-    *   Initialize normal displacement $d = 0$ for all Gaussians [S1, unofficial].
+-    *   Compute per-vertex quaternions $q_V$ for the mesh vertices using area-weighted averaging from surrounding triangles [S1, unofficial].
++**Posed State Computation:**
++When the mesh is deformed, the posed position $\mu_{pose}$ is derived by applying the mesh deformation function $\text{Deform}(\cdot)$ to the displaced canonical position [Parent]:
++$$
++\mu_{pose} = \text{Deform}(\mu_{cano} + d \cdot n_{cano})
++$$
++The posed rotation $q_{pose}$ and scale $s_{pose}$ are derived from mesh attributes to maintain coherence [Parent, S1, unofficial]:
++*   **Rotation:** Interpolate per-vertex quaternions $q_1, q_2, q_3$ using barycentric weights to get $\delta q$, then combine with canonical rotation $\bar{q}$:
++    $$
++    q_{pose} = \delta q * \bar{q}, \quad \delta q = u q_1 + v q_2 + (1 - u - v) q_3
++    $$
++*   **Scale:** Scale is proportional to the area change of the embedded triangle relative to the canonical state:
++    $$
++    s_{pose} = \left( \frac{A_{pose}}{A_{cano}} \right) \bar{s}
++    $$
++    where $A_{pose}$ and $A_{cano}$ are the areas of the triangle in the posed and canonical states, respectively [Parent, S1, unofficial].
+ 
+-2.  **Canonical Position and Normal:**
+-    *   Calculate the canonical position $P$ and normal $n$ on triangle $k$ using Phong interpolation [S1, unofficial]:
+-        $$ P = \mathcal{V}(k, u, v) = u V_1 + v V_2 + (1 - u - v) V_3 $$
+-        $$ n = \mathcal{N}(k, u, v) = u n_1 + v n_2 + (1 - u - v) n_3 $$
+-    *   The canonical mean $\mu_{cano}$ is displaced along the normal:
+-        $$ \mu_{cano} = P + d \cdot n $$
++**Initialization:**
++1.  Randomly select $N$ pairs of triangle indices and barycentric coordinates on the canonical mesh (e.g., $N=10,000$) [S1, unofficial].
++2.  Set the initial barycentric coordinates $(u, v)$ for each Gaussian.
++3.  Initialize all normal displacements $d$ to zero [S1, unofficial].
++4.  Compute canonical positions $\mu_{cano}$ and normals $n_{cano}$ for all Gaussians.
++5.  Initialize other Gaussian properties (opacity, color) based on the canonical state [S1, unofficial].
+ 
+-3.  **Deformation (Posed State):**
+-    *   For a posed frame $t$, compute the rotation matrix $R_k$ from the triangle's tangent, bitangent, and normal to track rotation from canonical to pose [S1, unofficial]. Convert to quaternion.
+-    *   Compute the barycentric interpolated rotation $\delta q_{i,t}$ using per-vertex quaternions $q_1, q_2, q_3$ of the triangle vertices:
+-        $$ \delta q_{i,t} = u q_1 + v q_2 + (1 - u - v) q_3 $$
+-    *   The posed rotation $q_{pose}$ combines the interpolated rotation with the canonical Gaussian rotation $\bar{q}$:
+-        $$ q_{pose} = \delta q_{i,t} * \bar{q} $$
+-    *   The posed scale $s_{pose}$ is derived from the area change of the embedded triangle:
+-        $$ s_{pose} = \left( \frac{A_{pose}}{A_{cano}} \right) \bar{s} $$
+-        where $A_{pose}$ and $A_{cano}$ are the areas of the triangle in the posed and canonical states, respectively [S1, unofficial].
+-
+-4.  **Boundary Handling:**
+-    *   If optimization moves the embedding point across a triangle boundary ($u < 0$, $v < 0$, or $u+v > 1$), re-express the embedding in the neighboring triangle to maintain differentiability [S1, unofficial]. Failure to do so causes Gaussians to stick to boundaries and pile up [S1, unofficial].
+-
+-**Parameters:**
+-*   **Color:** Spherical harmonics are turned off for simplicity [S1, unofficial].
+-*   **Initialization Count:** 10,000 Gaussians [S1, unofficial].
++**Cross-Triangle Handling:**
++Barycentric coordinates are only differentiable within a single triangle. If optimization moves an embedding point across a boundary ($u < 0$, $v < 0$, or $u+v > 1$), the embedding must be re-expressed in the neighboring triangle to maintain differentiability [Parent, S1, unofficial]. Failure to handle this causes Gaussians to stick to boundaries and pile up [Parent]. This is often managed by constraint mechanisms like "Walking on Triangle" [Subtopics].
+ 
+ **Pseudocode:**
+ ```python
++def compute_posed_gaussian(E, mesh, deformation_func, canonical_q, canonical_s):
++    """
++    E: tuple (k, u, v, d)
++    mesh: object with vertices V, normals n, faces F, and method to get area
++    deformation_func: function that deforms a point
++    canonical_q: quaternion q_bar
++    canonical_s: scalar s_bar
++    """
++    k, u, v, d = E
++    
++    # Get triangle vertices and normals
++    V1, V2, V3 = mesh.get_triangle_vertices(k)
++    n1, n2, n3 = mesh.get_triangle_normals(k)
++    
++    # Canonical position and normal (Phong interpolation)
++    mu_cano = u * V1 + v * V2 + (1 - u - v) * V3
++    n_cano = u * n1 + v * n2 + (1 - u - v) * n3
++    
++    # Displaced canonical position
++    mu_displaced = mu_cano + d * n_cano
++    
++    # Posed position
++    mu_pose = deformation_func(mu_displaced)
++    
++    # Posed rotation
++    q1, q2, q3 = mesh.get_triangle_quaternions(k)
++    delta_q = u * q1 + v * q2 + (1 - u - v) * q3
++    q_pose = delta_q * canonical_q
++    
++    # Posed scale
++    A_cano = mesh.get_triangle_area(k, canonical=True)
++    A_pose = mesh.get_triangle_area(k, canonical=False)
++    s_pose = (A_pose / A_cano) * canonical_s
++    
++    return mu_pose, q_pose, s_pose
++
+ def initialize_gaussians(mesh, num_gaussians=10000):
+-    # mesh: object with vertices, normals, triangles
+-    # Returns list of embeddings and canonical params
+-    
+-    gaussians = []
++    """
++    Initialize Gaussians on the canonical mesh.
++    """
++    embeddings = []
+     for i in range(num_gaussians):
+-        # Step 1: Random selection
+-        k = random_triangle_index(mesh)
++        k = random.choice(mesh.faces)
+         u, v = random_barycentric_coords()
+         d = 0.0
+-        
+-        # Get vertices and normals for triangle k
+-        V1, V2, V3 = mesh.vertices[k]
+-        n1, n2, n3 = mesh.normals[k]
+-        
+-        # Step 2: Canonical Position
+-        P = u * V1 + v * V2 + (1 - u - v) * V3
+-        n = u * n1 + v * n2 + (1 - u - v) * n3
+-        mu_cano = P + d * n
+-        
+-        # Canonical rotation and scale (initialized randomly or from mesh)
+-        q_cano = identity_quaternion() # [G]
+-        s_cano = 1.0 # [G]
+-        
+-        gaussians.append({
+-            'k': k, 'u': u, 'v': v, 'd': d,
+-            'mu_cano': mu_cano,
+-            'q_cano': q_cano,
+-            's_cano': s_cano
+-        })
+-    return gaussians
+-
+-def deform_gaussian(gaussian, mesh, frame_t):
+-    # Step 3: Deformation
+-    k = gaussian['k']
+-    u = gaussian['u']
+-    v = gaussian['v']
+-    
+-    # Get posed vertices and normals
+-    V1_p, V2_p, V3_p = mesh.get_posed_vertices(k, frame_t)
+-    n1_p, n2_p, n3_p = mesh.get_posed_normals(k, frame_t)
+-    
+-    # Interpolate rotation
+-    q1, q2, q3 = mesh.get_posed_vertex_quaternions(k, frame_t)
+-    delta_q = u * q1 + v * q2 + (1 - u - v) * q3
+-    
+-    q_pose = delta_q * gaussian['q_cano']
+-    
+-    # Compute scale from area change
+-    A_cano = triangle_area(V1, V2, V3) # From canonical vertices
+-    A_pose = triangle_area(V1_p, V2_p, V3_p)
+-    s_pose = (A_pose / A_cano) * gaussian['s_cano']
+-    
+-    return q_pose, s_pose
++        embeddings.append((k, u, v, d))
++    return embeddings
+ ```
+ 
+@@ -107,14 +107,16 @@
+ 
+ ### [Walking on Triangle](9700-walking-on-triangle.md)
+-A constraint mechanism that binds Gaussians to triangle boundaries, ensuring they remain within their corresponding triangles during optimization and deformation. It prevents drifting and piling up, offering robustness even with inaccurate meshes.
++A constraint mechanism that binds Gaussians to the surface of a triangle mesh, ensuring they remain within the boundaries of their corresponding triangles during optimization and deformation. It solves the problem of Gaussians drifting off-mesh or piling up at triangle edges when the underlying mesh is manipulated, animated, or deformed. Unlike methods that rely heavily on precise mesh accuracy, it defines a local triangle space to ensure robust results even with inaccurate meshes.
+ 
+ ## Operating characteristics
+-*   **Complexity:** Linear in the number of Gaussians for initialization and deformation. Triangle lookup and barycentric interpolation are constant time per Gaussian.
+-*   **Strengths:** Enables efficient deformation tracking via mesh topology; avoids the need to optimize per-vertex positions for every Gaussian [S1, unofficial].
+-*   **Limitations:** Requires handling boundary crossings to maintain differentiability; performance depends on mesh quality and triangle distribution [S1, unofficial].
+-*   **When to use:** When animating or deforming a mesh-based avatar or object and wanting to maintain surface consistency [S1, unofficial].
++*   **Time Complexity:** Initialization is $O(N)$ where $N$ is the number of Gaussians. Posed state computation is $O(1)$ per Gaussian per frame, assuming mesh queries are $O(1)$.
++*   **Memory Complexity:** $O(N)$ for storing embeddings and Gaussian parameters.
++*   **Strengths:** Ensures Gaussians follow mesh deformations naturally; reduces the number of parameters to optimize (only $d$ and potentially $u, v$ if allowed to move); robust to mesh inaccuracies when combined with constraints .
++*   **Limitations:** Requires a valid triangle mesh; differentiability issues at triangle boundaries if not handled; limited to surface geometries unless displacement $d$ is large [S1, unofficial].
++*   **When to use:** When rendering animated or deforming meshes where Gaussians should stick to the surface.
++*   **When not to use:** For static scenes where direct Gaussian optimization is simpler; for volumetric data not easily represented as a surface mesh.
+ 
+ ## Background
+-Originated in SplattingAvatar, which introduced Gaussian embeddings on triangle meshes for dynamic human avatars [S1, unofficial]. It builds on Phong interpolation for surface definition and quaternion averaging for rotation [S1, unofficial].
++This method originates from the SplattingAvatar paper, which introduced Gaussian Embedding for animatable human avatars [S1, unofficial]. It builds on the principles of Mesh-embedded representation [Parent] and adapts them for differentiable rendering of dynamic scenes. The approach leverages the efficiency of Gaussian Splatting [23] while incorporating the geometric priors of triangle meshes [S1, unofficial].
+ 
+ ## Sources

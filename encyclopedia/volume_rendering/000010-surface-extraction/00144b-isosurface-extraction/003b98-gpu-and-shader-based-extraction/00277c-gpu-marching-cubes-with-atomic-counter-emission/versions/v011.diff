@@ -1,0 +1,130 @@
+--- v010.md
++++ v011.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-A real-time isosurface meshing technique that uses one compute thread per grid cell to classify density, reserve vertex slots via atomic addition on indirect draw arguments, and write vertices directly into a capped pool, avoiding prefix sums [S1, unofficial]. It sets itself apart from sibling methods like [Marching Cubes with Gaussian Deformation](3769-marching-cubes-with-gaussian-deformation.md) or [GPU Marching Cubes Terrain Pipeline with Indirect Rendering](3803-gpu-marching-cubes-terrain-pipeline-with-indirect-rendering.md) by eliminating the scan/compact phase entirely, using the indirect-draw argument buffer itself as the atomic counter to reserve output space [S1, unofficial].
++A real-time isosurface meshing technique that uses one compute thread per grid cell to classify density, reserve vertex slots via atomic addition on indirect draw arguments, and write vertices directly into a capped pool, avoiding prefix sums [S1, unofficial]. It sets itself apart from sibling methods like [Marching Cubes with Gaussian Deformation](3769-marching-cubes-with-gaussian-deformation.md) or [GPU Marching Cubes Terrain Pipeline with Indirect Rendering](3803-gpu-marching-cubes-terrain-pipeline-with-indirect-rendering.md) by avoiding prefix sums and compaction, using the indirect-draw argument buffer itself as the atomic counter to reserve output space [S1, unofficial].
+ 
+ ## How it works
+@@ -43,48 +43,75 @@
+ **Pseudocode:**
+ ```python
+-# Compute Shader: One thread per cell (thread_id = cell_index)
++# GPU Marching Cubes with Atomic Counter Emission
++# One compute thread per grid cell
+ 
+-# 1. Load corner densities
+-# Note: Out-of-range samples are treated as density 0 [S1, unofficial]
+-densities = [0.0] * 8
+-for i in range(8):
+-    corner_pos = get_cell_corner_position(thread_id, i)
+-    densities[i] = sample_density(corner_pos)
++def atomic_add(base_array, offset, value):
++    """Simulates GPU atomic add. Returns new value."""
++    base_array[offset] += value
++    return base_array[offset]
+ 
+-# 2. Classify cell
+-case_index = 0
+-for i in range(8):
+-    if densities[i] >= iso_threshold:
+-        case_index |= (1 << i)
++def sample_density(grid, x, y, z):
++    """Returns density at grid coordinates. Out-of-range returns 0.0 [S1, unofficial]."""
++    if 0 <= x < grid.shape[0] and 0 <= y < grid.shape[1] and 0 <= z < grid.shape[2]:
++        return grid[x, y, z]
++    return 0.0
+ 
+-# 3. Look up cut edges from load-time generated table
+-cut_edges = mc_table[case_index] # Returns list of edge indices
++def get_cell_corners(cell_idx, grid_dims):
++    """Converts linear cell index to 8 corner coordinates."""
++    z = cell_idx // (grid_dims[0] * grid_dims[1])
++    y = (cell_idx % (grid_dims[0] * grid_dims[1])) // grid_dims[0]
++    x = cell_idx % grid_dims[0]
++    corners = []
++    for dx in (0, 1):
++        for dy in (0, 1):
++            for dz in (0, 1):
++                corners.append((x + dx, y + dy, z + dz))
++    return corners
+ 
+-# 4. Reserve slots in indirect-draw args buffer
+-# The indirect-draw args buffer is stored in global memory
+-# Word 0: vertex_count
+-# Word 4: overflow_flag
+-new_count = atomic_add(&indirect_draw_args[0], len(cut_edges) * 3) # 3 verts per triangle
++def interpolate_edge(edge_idx, corner_densities):
++    """Returns (position, normal) for a cut edge using trilinear interpolation [S1, unofficial]."""
++    # Edge indices map to specific corner pairs and interpolation factors.
++    # Simplified for pseudocode: returns a tuple.
++    return (0.0, 0.0, 0.0), (0.0, 0.0, 0.0)
+ 
+-# 5. Emit vertices
+-write_offset = new_count
+-for edge_idx in cut_edges:
+-    # Compute interpolated position and gradient normal
+-    # Cache lookup for unique cut edges is implied by optimization [S1, unofficial]
+-    pos, normal = interpolate_edge(edge_idx, densities)
+-    
+-    # Write to vertex pool
+-    vertex_pool[write_offset].position = pos
+-    vertex_pool[write_offset].normal = normal
+-    write_offset += 1
++def run_marching_cubes(density_grid, iso_threshold, grid_dims, mc_table, indirect_draw_args, vertex_pool):
++    cell_idx = get_thread_id() # 0 to N-1
++    corners = get_cell_corners(cell_idx, grid_dims)
+ 
+-# Finalize Kernel: One thread total
+-# Clamp vertex count to cap (1.5M)
+-current_count = indirect_draw_args[0]
+-if current_count > 1500000:
+-    indirect_draw_args[0] = 1500000
+-    indirect_draw_args[4] = 1 # Set overflow flag
+-else:
+-    indirect_draw_args[4] = 0 # Clear overflow flag
++    # 1. Classify cell
++    case_index = 0
++    corner_densities = []
++    for i, (cx, cy, cz) in enumerate(corners):
++        d = sample_density(density_grid, cx, cy, cz)
++        corner_densities.append(d)
++        if d >= iso_threshold:
++            case_index |= (1 << i)
++
++    # 2. Look up cut edges
++    cut_edges = mc_table[case_index] # List of edge indices
++
++    # 3. Reserve slots
++    num_verts = len(cut_edges)
++    new_count = atomic_add(indirect_draw_args, 0, num_verts)
++
++    # 4. Emit vertices (with cache for unique edges)
++    write_offset = new_count - num_verts
++    edge_cache = {}
++    for edge_idx in cut_edges:
++        if edge_idx not in edge_cache:
++            pos, normal = interpolate_edge(edge_idx, corner_densities)
++            edge_cache[edge_idx] = (pos, normal)
++        pos, normal = edge_cache[edge_idx]
++        vertex_pool[write_offset] = {'position': pos, 'normal': normal}
++        write_offset += 1
++
++def finalize_mesh(indirect_draw_args, cap=1500000):
++    """One-thread kernel to clamp vertex count and set overflow flag [S1, unofficial]."""
++    current_count = indirect_draw_args[0]
++    if current_count > cap:
++        indirect_draw_args[0] = cap
++        indirect_draw_args[4] = 1
++    else:
++        indirect_draw_args[4] = 0
+ ```
+ 
+@@ -101,5 +128,5 @@
+ *   **Limitations:** The vertex pool is capped; if the isosurface is too complex, vertices are discarded (clamped), potentially causing visual artifacts or overflow flags [S1, unofficial]. WebGL2 falls back to the ssf (screen-space fluid) path for this renderer [S1, unofficial].
+ *   **When to use:** Real-time visualization where performance is critical and the mesh complexity can be bounded by the vertex pool size [S1, unofficial].
+-*   **When not to use:** When exact topological preservation is required for arbitrarily complex surfaces exceeding 1.5M vertices [S1, unofficial].
++*   **When not to use:** When the isosurface complexity exceeds the 1.5M vertex cap, vertices are discarded and an overflow flag is raised, which may cause visual artifacts [S1, unofficial].
+ 
+ ## Background

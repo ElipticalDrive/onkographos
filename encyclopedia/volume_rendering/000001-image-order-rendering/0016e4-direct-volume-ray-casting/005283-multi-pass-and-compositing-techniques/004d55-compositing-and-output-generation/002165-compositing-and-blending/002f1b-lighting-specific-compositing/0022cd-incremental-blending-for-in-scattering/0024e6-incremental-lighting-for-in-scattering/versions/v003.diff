@@ -1,0 +1,251 @@
+--- v002.md
++++ v003.md
+@@ -4,154 +4,120 @@
+ 
+ ## Overview
+-Incremental Lighting for In-Scattering is a screen-space technique that approximates volumetric light scattering (translucency) by propagating and blurring indirect lighting components across volume slices [S1]. It extends the base incremental blending method by introducing per-channel indirect attenuation parameters and a blur operation, allowing light to change color as it penetrates deeper into the volume [S1].
++Incremental Lighting for In-Scattering is a method for approximating light scattering (translucency) in volume rendering by propagating and blurring indirect lighting components from slice to slice, considering only incoming light within a cone in the direction of the light source [S1]. It solves the problem of computing indirect illumination in a single-pass rendering pipeline by discarding backward-directed light relative to the light source, thereby accommodating the lack of knowledge about future slices during a front-to-back traversal [15652-forward-scattered-intensity-transport.md]. It differs from full scattering models by ignoring back-scattering during the intensity transport phase, which simplifies the hardware implementation at the cost of accuracy in dense, deep regions of the volume [15652-forward-scattered-intensity-transport.md]. It builds on [Incremental Blending for In-scattering](2880-incremental-blending-for-in-scattering.md) by introducing indirect attenuation parameters and a dedicated light buffer for scattering propagation.
+ 
+ ## How it works
+-This method builds on [Incremental Blending for In-scattering](2880-incremental-blending-for-in-scattering.md) by modifying the light buffer initialization, the compositing blend function, and the data flow to support spatial blurring of indirect attenuation [S1].
++**Inputs and Outputs:**
++*   **Inputs:** Volume density field, volume opacity/alpha values ($A$), indirect attenuation parameters ($A_i$) for each RGB channel, light color ($C_L$), sample distance ($d$), blur angle parameter.
++*   **Outputs:** Final rendered image with translucent lighting effects.
+ 
+-### Inputs and Outputs
+-*   **Inputs:**
+-    *   Volume data (density, color) [S1].
+-    *   Indirect attenuation parameters $A_i$: Alpha values for each RGB color channel, distinct from the standard alpha $A$ used in the eye pass [S1].
+-    *   Light color $C_L$ [S1].
+-    *   Sample distance $d$ [S1].
+-    *   Blur angle: A user-defined parameter scaling the perturbation radius [S1].
+-    *   Perturbation texture: A 2D texture storing offset vectors used to modify texture coordinates for blurring [S1].
+-*   **Outputs:**
+-    *   Final rendered image with translucent lighting effects [S1].
++**Data Structures:**
++*   **Light Buffer:** A 2D texture buffer storing indirect attenuation values. Initialized with $1 - C_L$. Uses alternating double-buffering (current and next buffers) to support read/write operations during blur.
++*   **Perturbation Texture:** A texture used to modify texture coordinates for sampling the light buffer during the blur operation.
++*   **Frame Buffer:** Standard render target for the final image.
+ 
+-### Data Structures
+-*   **Light Buffers:** Two framebuffers (or textures) are used in an alternating fashion [S1].
+-    *   $L_{current}$: Stores the indirect attenuation state for the current slice iteration [S1].
+-    *   $L_{next}$: The render target for the updated attenuation state after blurring and blending [S1].
+-*   **Perturbation Texture:** A texture containing offset data used to perturb texture coordinates for the blur sampling [S1].
++**Numbered Steps:**
++1.  **Initialization:** Initialize the light buffer with values $1 - C_L$ for each pixel, where $C_L$ is the light color [S1].
++2.  **Pass 1 (Eye Contribution):** For each sample along the ray:
++    *   Read the current indirect attenuation value $A_i$ from the light buffer using standard texture coordinates [S1].
++    *   Multiply the reflective color $C$ of the current sample by $(1 - A_i)$ [S1].
++    *   Composite this result into the frame buffer using the standard Over operator [S1].
++3.  **Pass 2 (Light Contribution & Blur):**
++    *   Set the fragment shader output color to $A_i$ (the indirect attenuation parameter) instead of 0 [S1].
++    *   Modify texture coordinates for the current light buffer using a perturbation texture to sample indirect components for blur [S1]. The radius of the blur circle is calculated using the user-defined blur angle and sample distance $d$ [S1].
++    *   Read the current light buffer using the modified texture coordinates [S1].
++    *   Compute the blurred attenuation as a weighted sum of the values read from the light buffer [S1].
++    *   Blend the result into the *next* light buffer using the Light Buffer Compositing operation [S1].
++    *   Swap the current and next light buffers for the next slice [S1].
+ 
+-### Algorithm Steps
+-The method modifies the standard incremental ray casting loop as follows:
++**Formulas:**
++*   **Light Buffer Compositing (Equation 8):**
++    $$C_{out} = C_{in} * (1 - C_{target}) + C_{target} * (1 - A_{in})$$
++    Where:
++    *   $C_{out}$ is the resulting color in the target buffer.
++    *   $C_{in}$ is the color of the incoming fragment (from the fragment shader, set to $A_i$).
++    *   $C_{target}$ is the color currently in the target render buffer (the next light buffer).
++    *   $A_{in}$ is the incoming fragment alpha (implicit in the context of $A_i$) [S1].
++    *   *Note:* The source text defines $C_1$ as incoming fragment color and $C_0$ as color in target buffer for Equation 8, but does not provide the explicit LaTeX formula, only the name [S1]. The formula above is derived from the description.
+ 
+-1.  **Initialization:** Initialize the light buffer ($L_{current}$) with the value $1 - C_L$ instead of the standard light color $C_L$ [S1].
+-2.  **Per-Slice Loop:** For each volume slice, perform the following:
+-    3.  **Eye Pass (Pass 1):**
+-        *   Sample the volume to obtain the direct fragment color $C$ [S1].
+-        *   Read the indirect attenuation value $A_{in}$ from $L_{current}$ [S1].
+-        *   Multiply the fragment color by the remaining indirect transmission: $C_{final} = C \times (1 - A_{in})$ [S1].
+-        *   Output $C_{final}$ to the color buffer [S1].
+-    4.  **Light Pass (Pass 2):**
+-        *   Set the fragment shader color to $A_i$ instead of $0$ [S1].
+-        *   Replace the standard Over operator with the Light Buffer Compositing blend defined in Equation 8 [S1].
+-        *   Modify the texture coordinates for sampling $L_{current}$ using the perturbation texture [S1].
+-        *   Calculate the blur radius $R$ scaled by the sample distance $d$ and the blur angle [S1].
+-        *   Sample $L_{current}$ multiple times using the modified texture coordinates [S1].
+-        *   Compute the blurred attenuation as a weighted sum of the sampled values [S1].
+-        *   Blend the blurred attenuation into $L_{next}$ using the Light Buffer Compositing operation [S1].
+-    5.  **Buffer Swap:** After processing the slice, swap $L_{current}$ and $L_{next}$ so that the updated buffer becomes the source for the next slice's Eye Pass [S1].
++*   **Blur Radius (Equation 9):**
++    $$R = \text{blur\_angle} * d$$
++    Where:
++    *   $R$ is the blur radius.
++    *   $d$ is the sample distance [S1].
+ 
+-### Pseudocode
++**Parameters:**
++*   $A_i$: Indirect attenuation parameters, alpha values for each RGB color channel. Used instead of single alpha $A$ [S1].
++*   $d$: The sample distance, used to calculate blur radius [S1].
++*   Blur angle: User-defined parameter scaling the perturbation radius [S1].
++
++**Edge Cases and Pitfalls:**
++*   **Color-Changing Penetration:** To achieve effects like white light turning red as it penetrates deeper (similar to holding a flashlight under a hand), set $A_i$ for red smaller than $A_i$ for green and blue. This results in lower attenuation of the red component [S1].
++*   **Precision:** The method relies on 2D buffer resolution matching the viewport to produce crisp shadows with minimal aliasing artifacts [S1].
++*   **Back-Scattering Ignored:** The method approximates scattering by considering only incoming light within a cone in the direction of the light source. Back-scattering is ignored, which may reduce accuracy in dense, deep regions [15652-forward-scattered-intensity-transport.md].
++
++**Pseudocode:**
+ ```python
+ # Initialization
+-L_buffers = [create_2d_texture(width, height), create_2d_texture(width, height)]
+-L_current = L_buffers[0]
+-L_next = L_buffers[1]
+-L_current.fill(1.0 - C_L)  # Initialize with 1 - Light Color [S1]
++light_buffer_current = texture(width, height, 1.0 - light_color)
++light_buffer_next = texture(width, height, 0.0)
+ 
+-# Per-Slice Loop
+-for slice in volume_slices:
+-    # Pass 1: Eye Pass
+-    for fragment in slice:
+-        # Standard volume sampling to get direct color C and standard alpha A [G]
+-        C_direct, A_standard = sample_volume(fragment)
++# For each slice along the ray
++for slice in slices:
++    # Pass 1: Eye Contribution
++    for pixel in pixels:
++        ray_sample = sample_volume(ray, slice)
++        A_i = light_buffer_current.sample(pixel.uv)
++        C_reflective = ray_sample.color
++        C_contrib = C_reflective * (1.0 - A_i)
++        frame_buffer.composite_over(pixel.uv, C_contrib, ray_sample.alpha)
++
++    # Pass 2: Light Contribution & Blur
++    for pixel in pixels:
++        # Get indirect attenuation parameter for this slice
++        A_i_param = slice.indirect_attenuation # A_i for RGB channels
+         
+-        # Read indirect attenuation from current light buffer [S1]
+-        A_indirect = L_current.sample(fragment.uv)
++        # Calculate perturbed UVs for blur
++        blur_radius = blur_angle * sample_distance
++        perturbed_uvs = get_perturbed_uvs(pixel.uv, blur_radius, perturbation_texture)
+         
+-        # Multiply direct color by remaining indirect transmission [S1]
+-        C_final = C_direct * (1.0 - A_indirect)
++        # Sample light buffer with perturbed UVs
++        blurred_attenuation = 0.0
++        for uv in perturbed_uvs:
++            val = light_buffer_current.sample(uv)
++            blurred_attenuation += weight * val
++        blurred_attenuation /= sum(weights)
+         
+-        output_color_buffer(fragment.uv, C_final)
++        # Light Buffer Compositing
++        C_in = A_i_param # Fragment shader color set to A_i
++        C_target = light_buffer_next.sample(pixel.uv)
++        C_out = C_in * (1.0 - C_target) + C_target * (1.0 - C_in)
++        
++        light_buffer_next.write(pixel.uv, C_out)
+ 
+-    # Pass 2: Light Pass (Update and Blur Light Buffer)
+-    L_next.clear()
+-    
+-    # Blur radius scales with sample distance d and blur angle [S1]
+-    R = d * blur_angle
+-    
+-    for fragment in slice:
+-        # 1. Compute Blurred Indirect Attenuation
+-        blurred_A = 0.0
+-        weight_sum = 0.0
+-        
+-        # Sample current light buffer multiple times with perturbed coordinates [S1]
+-        for k in range(blur_samples):
+-            # Perturb UV using perturbation texture scaled by R [S1]
+-            perturbation = perturbation_texture.sample(fragment.uv)
+-            uv_perturbed = fragment.uv + perturbation * R
+-            
+-            # Sample the current light buffer
+-            val = L_current.sample(uv_perturbed)
+-            
+-            # Weighted sum using a standard normalized box kernel [G]
+-            w = 1.0 / blur_samples
+-            blurred_A += val * w
+-            weight_sum += w
+-            
+-        blurred_A /= weight_sum
+-        
+-        # 2. Compute Incoming Fragment Color for Light Buffer
+-        # The fragment shader color is set to Ai instead of 0 [S1]
+-        C_in = A_indirect
+-        A_in = A_indirect
+-        
+-        # 3. Apply Light Buffer Compositing (Equation 8) [S1]
+-        # C0 is the color currently in the target render buffer (L_next)
+-        C_target = L_next.sample(fragment.uv)
+-        
+-        # Equation 8: C_out = C_in * (1 - C_target) + C_target * (1 - A_in)
+-        C_out = C_in * (1.0 - C_target) + C_target * (1.0 - A_in)
+-        
+-        L_next.set_pixel(fragment.uv, C_out)
+-
+-    # Swap buffers after each slice [S1]
+-    L_current, L_next = L_next, L_current
+-
+-# Helper definitions for self-contained implementation
+-def create_2d_texture(w, h):
+-    return [[0.0 for _ in range(w)] for _ in range(h)]
+-
+-def sample_volume(fragment):
+-    # Returns direct color and standard alpha from volume data at fragment position [G]
+-    return fragment.color, fragment.alpha
+-
+-def output_color_buffer(uv, color):
+-    # Writes color to the final render target at uv [G]
+-    pass
+-
+-def gaussian_weight(k, R):
+-    # Returns normalized weight for blur sample k [G]
+-    return 1.0 / blur_samples
++    # Swap buffers
++    light_buffer_current, light_buffer_next = light_buffer_next, light_buffer_current
+ ```
+ 
+-### Parameters
+-*   **$A_i$**: Indirect attenuation parameters, alpha values for each RGB channel. Must be set independently per channel to achieve color-changing penetration [S1].
+-*   **$d$**: Sample distance, used to calculate the blur radius [S1].
+-*   **Blur Angle**: User-defined parameter scaling the perturbation radius [S1].
++## Subtopics
+ 
+-### Edge Cases and Pitfalls
+-*   **Color-Changing Penetration:** To achieve effects like white light turning red as it penetrates (e.g., flashlight under hand), set the $A_i$ value for red smaller than the $A_i$ values for green and blue. This results in lower attenuation of the red component, allowing more red light to pass through deeper layers [S1].
+-*   **Precision:** The method relies on screen-space buffers. Matching the resolution of light propagation to the viewport produces crisp shadows with minimal aliasing artifacts [S1].
+-*   **Decoupling:** The resolution of light transport is decoupled from the 3D data grid, allowing accurate lighting of volumes without increasing the 3D sampling density [S1].
++### [Forward-Scattered Intensity Transport](15652-forward-scattered-intensity-transport.md)
++Forward-Scattered Intensity Transport is a method for approximating in-scattering (translucency) in volume rendering by propagating light intensity through a volume using a dedicated light buffer. It solves the problem of computing indirect illumination in a single-pass rendering pipeline by discarding backward-directed light relative to the light source, thereby accommodating the lack of knowledge about future slices during a front-to-back traversal. It differs from full scattering models by ignoring back-scattering during the intensity transport phase, which simplifies the hardware implementation at the cost of accuracy in dense, deep regions of the volume [15652-forward-scattered-intensity-transport.md].
++
++### Recursive Slice-Blurring
++Recursive Slice-Blurring is a single-pass algorithm approximating light scattering within a volume by a recursive slice-blurring operation starting at the light source [S2, unofficial]. At each path increment, energy is transferred from the light buffer to the frame buffer [S2, unofficial]. The profile of the blurring filter is determined by the user-specified phase function [S2, unofficial]. It uses a dual image buffer: one repeatedly blurred (light) buffer for transported/scattered light energy away from the source, and one (frame) buffer for energy headed for the eye, attenuated by densities along the path [S2, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear with respect to the number of volume samples and slices, plus the cost of the blur operation (multiple samples per fragment in Pass 2) [S1].
+-*   **Memory Complexity:** Requires two additional light buffers (framebuffers) in addition to standard color and depth buffers [S1].
+-*   **Strengths:**
+-    *   Produces convincing translucent effects for clouds and atmospheric phenomena [S1].
+-    *   Decouples light transport resolution from 3D data grid resolution [S1].
+-    *   Matches light propagation resolution to viewport, reducing aliasing in shadows [S1].
+-*   **Limitations:**
+-    *   Approximation: Relies on local neighborhood blurring, which may not capture complex global light transport accurately [G].
+-    *   Requires additional buffer management and passes [G].
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Requires additional 2D buffers for the light buffer (double-buffered) and perturbation texture. The resolution of light propagation matches the viewport, decoupling it from the 3D data grid [S1].
++*   **Measured Performance:** Runs at interactive frame rates when exploiting 3D texture mapping hardware in conjunction with a dual image buffer [S2, unofficial].
++*   **Strengths:** Decouples the resolution of light transport from the 3D data grid, permitting accurate lighting of volumes. Produces crisp shadows with minimal aliasing artifacts by matching light propagation resolution to the viewport [S1]. Allows control over color-changing penetration effects by specifying independent alpha for each color channel [S1].
++*   **Limitations:** Ignores back-scattering, which may reduce accuracy in dense, deep regions of the volume [15652-forward-scattered-intensity-transport.md]. Approximates scattering rather than computing it exactly.
++*   **When to Use:** When creating convincing images of clouds and other atmospheric phenomena where translucency effects are important [S1]. When interactive frame rates are required and hardware supports 3D texture mapping and dual image buffers [S2, unofficial].
++*   **When Not to Use:** When high accuracy in dense, deep regions is required and back-scattering effects are significant [15652-forward-scattered-intensity-transport.md].
+ 
+ ## Background
+-This technique is described in *GPU Gems*, Chapter 39, "Volume Rendering Techniques" [S1]. It is used for creating convincing images of clouds and other atmospheric phenomena [S1].
++The method was described in the context of GPU Gems Chapter 39, "Volume Rendering Techniques" [S1]. It is an extension of incremental lighting that approximates light scattering by propagating and blurring indirect lighting components from slice to slice [S1]. The technique is important for creating convincing images of clouds and other atmospheric phenomena [S1]. The high computational cost of direct volume rendering makes it difficult for sequential implementations, but advances in commodity graphics hardware have started to blur these boundaries [S2, unofficial]. The method exploits 3D texture mapping hardware in conjunction with a dual image buffer [S2, unofficial].
+ 
+ ## Sources
+-[S1] GPU Gems ch39, Volume rendering techniques, https://developer.nvidia.com/sites/all/modules/custom/gpugems/books/GPUGems/gpugems_ch39.html, fetched 2026-10-29+[S1] GPU Gems ch39, Volume rendering techniques, https://developer.nvidia.com/sites/all/modules/custom/gpugems/books/GPUGems/gpugems_ch39.html, fetched 2026-10-29
++[S2] Overview of Volume Rendering - Stony Brook Computer Science, https://www3.cs.stonybrook.edu/~mueller/papers/volvisOverview.pdf, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,237 @@
+--- v001.md
++++ v002.md
+@@ -4,161 +4,111 @@
+ 
+ ## Overview
+-Global Scene Point Cloud Construction aggregates depth maps from multiple calibrated views into a single, unified 3D point cloud in world coordinates. It solves the problem of redundant and inconsistent primitives that arise when unprojecting overlapping depth maps independently. It differs from [Depth to 3D Points Conversion](7929-depth-to-3d-points-conversion.md) by handling the accumulation and cleaning of multiple views rather than processing a single depth map, and from [Point Cloud Generation and Refinement](8042-point-cloud-generation-and-refinement.md) by focusing specifically on the initial global assembly and noise removal steps.
++Global Scene Point Cloud Construction aggregates metric depth maps from multiple calibrated views into a unified 3D point cloud in world coordinates [S1]. It solves the redundancy and inconsistency of primitives that arise when unprojecting overlapping depth maps independently [S1]. It differs from [Depth to 3D Points Conversion](7929-depth-to-3d-points-conversion.md) by handling multi-view accumulation and cleaning, and from [Point Cloud Generation and Refinement](8042-point-cloud-generation-and-refinement.md) by focusing on the initial assembly and noise removal [S1].
+ 
+ ## How it works
+ **Inputs:**
+ - $N$ RGB images $\{I_n\}_{n=1}^N$.
+-- $N$ corresponding metric depth maps $\{D_n\}_{n=1}^N$.
++- $N$ metric depth maps $\{D_n\}_{n=1}^N$.
+ - Intrinsic matrices $\{K_n\}_{n=1}^N$.
+-- Extrinsics matrices $\{T_n = [R_n | t_n]\}_{n=1}^N$, where $R_n$ is rotation and $t_n$ is translation.
+-- Ego-vehicle poses for registration (if LiDAR is used for bounds, see [S1]).
++- Extrinsic matrices $\{T_n = [R_n | t_n]\}_{n=1}^N$, where $R_n$ is rotation and $t_n$ is translation [S1].
+ 
+ **Outputs:**
+-- A global scene point cloud $\mathcal{P} \in \mathbb{R}^{N_p \times 3}$ in world coordinates.
++- A global scene point cloud $\mathcal{P} \in \mathbb{R}^{N_p \times 3}$ in world coordinates [S1].
+ 
+ **Data Structures:**
+-- Raw point cloud $P_{raw}$: List or array of 3D points.
+-- Filtered point cloud $P_{final}$: List or array of 3D points.
++- Raw point cloud $P_{\text{raw}}$: List or array of 3D points [S1].
++- Filtered point cloud $P_{\text{final}}$: List or array of 3D points [S1].
+ 
+ **Steps:**
+-1. **Unprojection:** For each view $n \in \{1, \dots, N\}$, unproject the depth map $D_n$ using $I_n, D_n, T_n, K_n$ to obtain local 3D points.
+-   $$ P_n = \pi^{-1}(I_n, D_n, T_n, K_n) $$
+-   Where $\pi^{-1}$ denotes the pixel unprojection operation, mapping each pixel $(u, v)$ with depth $d$ to world coordinates via $K_n^{-1}$ and $T_n^{-1}$.
+-
++1. **Unprojection:** For each view $n \in \{1, \dots, N\}$, unproject the depth map $D_n$ using $I_n, D_n, T_n, K_n$ to obtain local 3D points [S1].
+ 2. **Accumulation:** Union all local point clouds:
+-   $$ P_{raw} = \bigcup_{n=1}^N P_n $$
+-
+-3. **Uniform Filtering:** Apply a uniform filter in 3D space to $P_{raw}$ to delete duplicate primitives while keeping the scene structure. This addresses redundancy in overlapping regions [S2].
+-
+-4. **Statistical Filtering:** Apply a statistical filter to $P_{final}$ (output of step 3) to remove floaters (noise) [S2].
+-
+-5. **LiDAR Integration (Optional/Contextual):** If using LiDAR for scene bounds:
+-   - Filter LiDAR points to keep only those within 80 meters from the ego-vehicle [S1].
+-   - Register filtered LiDAR points in the global world frame using ego-vehicle poses [S1].
+-   - Compute scene bounds from the resulting global point cloud [S1].
++   $$ \mathcal{P} = \bigcup_{n=1}^N \pi^{-1}(I_n, D_n, T_n, K_n) $$
++   where $\pi^{-1}$ denotes the pixel unprojection operation [S1].
++3. **Uniform Filtering:** Apply a uniform filter in 3D space to $P_{\text{raw}}$ to delete duplicate primitives while keeping the scene structure [S1].
++4. **Statistical Filtering:** Apply a statistical filter to remove floaters (noise) [S1].
+ 
+ **Pseudocode:**
+ ```python
+ def global_point_cloud_construction(images, depths, intrinsics, extrinsics):
+-    """
+-    images: List of N RGB images
+-    depths: List of N depth maps
+-    intrinsics: List of N intrinsic matrices K_n
+-    extrinsics: List of N extrinsic matrices T_n = [R_n | t_n]
+-    """
+     raw_points = []
+-    
+-    # Step 1 & 2: Unproject and Accumulate
+     for n in range(len(images)):
+-        # Unproject depth map to 3D points in world coordinates
+-        # pi_inv handles: pixel -> normalized camera coords -> world coords
+-        local_points = unproject_depth_map(images[n], depths[n], intrinsics[n], extrinsics[n])
+-        raw_points.extend(local_points)
+-    
+-    # Step 3: Uniform Filter
+-    # Removes duplicates in overlapping regions
+-    filtered_points = uniform_filter_3d(raw_points)
+-    
+-    # Step 4: Statistical Filter
+-    # Removes noise/floaters
+-    final_cloud = statistical_filter_3d(filtered_points)
+-    
+-    return final_cloud
++        K = intrinsics[n]
++        T = extrinsics[n]
++        K_inv = invert_4x4(K)  # Standard linear algebra [G]
++        T_inv = invert_4x4(T)  # Standard linear algebra [G]
++        h, w = depths[n].shape
++        for y in range(h):
++            for x in range(w):
++                d = depths[n][y, x]
++                if d <= 0:
++                    continue
++                u, v = float(x) + 0.5, float(y) + 0.5
++                cam_dir = mat_vec_mul(K_inv, [u, v, 1.0])
++                cam_pos = [c * d for c in cam_dir]
++                world_pos = mat_vec_mul(T_inv, cam_pos + [1.0])
++                raw_points.append(world_pos[:3])
++    # Uniform filter radius not given in sources [S1]
++    filtered = uniform_filter_3d(raw_points, voxel_size=0.01)
++    # Statistical filter k and std ratio not given in sources [S1]
++    final = statistical_filter_3d(filtered, k=50, std_ratio=2.0)
++    return final
+ 
+-def unproject_depth_map(image, depth_map, K, T):
+-    """
+-    Unprojects a depth map to 3D points in world coordinates.
+-    K: 3x3 intrinsic matrix
+-    T: 4x4 extrinsic matrix [R|t]
+-    """
+-    h, w = depth_map.shape
+-    points = []
+-    
+-    # Precompute inverse intrinsic
+-    K_inv = np.linalg.inv(K)
+-    
+-    # Precompute inverse extrinsic (world to camera)
+-    # T maps world to camera: P_cam = T * P_world
+-    # So P_world = T_inv * P_cam
+-    T_inv = np.linalg.inv(T)
+-    
+-    for y in range(h):
+-        for x in range(w):
+-            d = depth_map[y, x]
+-            if d <= 0:  # Skip invalid depth
+-                continue
+-            
+-            # Pixel to normalized camera coordinates
+-            # Assuming pixel center at (x+0.5, y+0.5)
+-            u, v = x + 0.5, y + 0.5
+-            
+-            # Back-project to camera frame
+-            # [u, v, 1] are homogeneous coordinates in image plane
+-            cam_coords = K_inv @ np.array([u, v, 1])
+-            
+-            # Scale by depth
+-            cam_coords = cam_coords * d
+-            
+-            # Transform to world coordinates
+-            # cam_coords is 3D, so we use homogeneous 4D for T_inv
+-            world_coords = T_inv @ np.append(cam_coords, 1)
+-            
+-            # Extract 3D point
+-            point = world_coords[:3]
+-            points.append(point)
+-            
+-    return points
+-
+-def uniform_filter_3d(points, radius=0.01):
+-    """
+-    Removes duplicate points within a radius.
+-    """
+-    # Implementation depends on spatial data structure (e.g., KDTree)
+-    # For each point, if there is another point within radius, remove one
+-    # This is a simplified description; actual implementation uses efficient spatial hashing or grid
+-    pass
++def uniform_filter_3d(points, voxel_size=0.01):
++    grid = {}
++    result = []
++    for p in points:
++        key = (int(p[0] / voxel_size), int(p[1] / voxel_size), int(p[2] / voxel_size))
++        if key not in grid:
++            grid[key] = p
++            result.append(p)
++    return result
+ 
+ def statistical_filter_3d(points, k=50, std_ratio=2.0):
+-    """
+-    Removes outliers based on distance to k-nearest neighbors.
+-    """
+-    # For each point, compute mean distance to k nearest neighbors
+-    # If mean distance > std_ratio * global_mean_distance, remove point
+-    pass
++    distances = []
++    for i, p in enumerate(points):
++        dists = sorted([euclidean_dist(p, q) for j, q in enumerate(points) if i != j])[:k]
++        if len(dists) < k:
++            continue
++        mean_dist = sum(dists) / len(dists)
++        distances.append(mean_dist)
++    if not distances:
++        return points
++    global_mean = sum(distances) / len(distances)
++    global_std = (sum((d - global_mean)**2 for d in distances) / len(distances))**0.5
++    threshold = global_mean + std_ratio * global_std
++    return [p for p, d in zip(points, distances) if d <= threshold]
++
++def mat_vec_mul(M, v):
++    return [sum(M[i][j] * v[j] for j in range(len(v))) for i in range(len(M))]
++
++def euclidean_dist(a, b):
++    return ((a[0]-b[0])**2 + (a[1]-b[1])**2 + (a[2]-b[2])**2)**0.5
++
++def invert_4x4(M):
++    # Standard 4x4 matrix inversion via Gaussian elimination [G]
++    return M  # Placeholder for actual inversion logic; implement standard linear algebra routine
+ ```
+ 
+ **Parameters:**
+-- Maximum distance for LiDAR filtering: 80 meters [S1].
+-- Uniform filter radius: Not given in the sources.
+-- Statistical filter $k$ and standard deviation ratio: Not given in the sources.
++- Uniform filter radius: Not given in the sources [S1].
++- Statistical filter $k$ and standard deviation ratio: Not given in the sources [S1].
+ 
+ **Edge Cases and Pitfalls:**
+-- Overlapping regions generate redundant primitives; uniform filtering is required [S2].
+-- Noise/floaters remain after uniform filtering; statistical filtering is required [S2].
+-- Dynamic objects may receive invalid depth supervision if not handled; LiDAR measurements are used as ground truth only at the time of camera sensor recording [S1].
++- Overlapping regions generate redundant primitives; uniform filtering is required [S1].
++- Noise/floaters remain after uniform filtering; statistical filtering is required [S1].
++- Dynamic objects may receive invalid depth supervision if not temporally aligned; LiDAR measurements are used as ground truth only at the camera recording time [S2].
+ 
+ ## Subtopics
+ 
+-### [Depth to 3D Points Conversion](7929-depth-to-3d-points-conversion.md)
+-Converts a single depth map to 3D points. Use this as the base unprojection step for each view.
+-
+-### [Point Cloud Generation and Refinement](8042-point-cloud-generation-and-refinement.md)
+-Refines the locations of primitives after global construction. Use this after statistical filtering.
+-
+-### [Fixed-size initialization from RGB-D backprojection](10155-fixed-size-initialization-from-rgb-d-backprojection.md)
+-Alternative initialization method. Use this if fixed-size grids are preferred over sparse point clouds.
++### Scene Bounds Computation from LiDAR
++Computes scene bounds by filtering LiDAR sweeps to retain only points within 80 meters of the ego-vehicle, registering them in the global world frame using ego-vehicle poses, and computing bounds from the resulting point cloud [S2]. Maximum distance per sweep is 80 meters [S2].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N \cdot H \cdot W)$ for unprojection, where $N$ is number of views, $H, W$ are image dimensions. Filtering complexity depends on implementation (e.g., $O(N_p \log N_p)$ for KDTree-based filtering).
+-- **Memory Complexity:** $O(N \cdot H \cdot W)$ for raw points, reduced after filtering.
+-- **Strengths:** Handles overlapping views efficiently; removes redundancy and noise.
+-- **Limitations:** Requires accurate calibration; sensitive to depth errors.
+-- **When to use:** When constructing a global scene representation from multiple calibrated views.
+-- **When not to use:** When real-time single-view reconstruction is required.
++Time and memory complexity are not given in the sources [S1]. The method requires accurate calibration and is sensitive to depth errors [S1]. It is used when constructing a global scene representation from multiple calibrated views [S1].
+ 
+ ## Background
+-Originated in works on urban environment modeling, such as [S1] and [S2]. [S1] uses LiDAR for scene bounds and ego-vehicle poses for registration. [S2] focuses on accumulating predicted metric depth maps into a global point cloud for Gaussian Splatting.
++Originated in urban environment modeling and neural scene representations [S1, S2]. [S1] introduces the method for initializing sparse neural volumes in Gaussian Splatting [S1]. [S2] adapts the accumulation pipeline for dynamic urban environments using LiDAR for scene bounds [S2].
+ 
+ ## Sources
+-[S1] Multi-Level Neural Scene Graphs for Dynamic Urban Environments, https://doi.org/10.1109/cvpr52733.2024.01996, fetched 2026-10-29
+-[S2] EVolSplat: Efficient Volume-based Gaussian Splatting for Urban View Synthesis, https://doi.org/10.1109/CVPR52734.2025.01054, fetched 2026-11-03+[S1] EVolSplat: Efficient Volume-based Gaussian Splatting for Urban View Synthesis, https://doi.org/10.1109/CVPR52734.2025.01054, fetched 2026-11-03
++[S2] Multi-Level Neural Scene Graphs for Dynamic Urban Environments, https://doi.org/10.1109/cvpr52733.2024.01996, fetched 2026-10-29

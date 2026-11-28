@@ -1,0 +1,91 @@
+# PCA-based TSDF Compression
+Also called: Linear TSDF compression, PCA compression
+## Overview
+This method compresses Truncated Signed Distance Field (TSDF) voxel blocks by projecting them onto a low-dimensional feature space defined by principal component vectors derived from a training dataset [S1]. It applies the general statistical technique specifically to volumetric TSDF data structures [S1]. The approach preserves important structural information while filtering noise, which stabilizes camera tracking against the compressed model [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A voxel block $p$ unrolled into a vector of dimension $N=4096$ [S1].
+*   **Output:** A compressed descriptor vector $d_p$ of reduced dimensionality, and the ability to reconstruct an approximation $\hat{p}$ [S1].
+*   **Training Data:** A large dataset of sample TSDF reconstructions used to derive the basis [S1].
+
+**Data Structures:**
+*   **Mean Vector ($a_0$):** A vector of size $4096 \times 1$ representing the mean of the training dataset [S1].
+*   **Principal Component Matrix ($A$):** A matrix of size $4096 \times 4096$ before reduction, containing the principal components corresponding to the singular values [S1]. The reduced basis matrix has size $4096 \times K$ [S1].
+
+**Steps:**
+1.  **Centering:** Subtract the mean vector $a_0$ from each sample in the training dataset to obtain the centered data matrix $Y_0$ [S1]. For a single input sample, the centered vector is $p - a_0$ [S1].
+2.  **Basis Derivation (Training Phase):** Compute the Singular Value Decomposition (SVD) of the centered data matrix: $[U, \Sigma, V] = \text{svd}(Y_0)$ [S1]. Construct the principal component matrix $A = U\Sigma$ [S1].
+3.  **Basis Reduction:** Select a subset of columns from $A$ corresponding to the largest singular values to form the reduced basis matrix [S1]. The smallest singular values are typically close to zero, and their associated columns are removed [S1].
+4.  **Encoding:** Compute the descriptor $d_p$ by projecting the centered input vector onto the reduced basis: $d_p = A^T (p - a_0)$ [S1].
+5.  **Decoding:** Reconstruct the voxel block $\hat{p}$ by mapping the descriptor back to the input space: $\hat{p} = a_0 + A d_p$ [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def train_pca(tsdf_samples):
+    """
+    tsdf_samples: list of vectors, each of length 4096.
+    Returns: mean_vector (4096,), basis_matrix (4096, K)
+    """
+    Y = np.array(tsdf_samples)
+    mean_vector = np.mean(Y, axis=0)
+    Y_centered = Y - mean_vector
+    U, Sigma, Vt = np.linalg.svd(Y_centered, full_matrices=False)
+    A_full = U * Sigma[np.newaxis, :]
+    # The sources do not specify how to choose K or the threshold for singular values.
+    # Standard practice selects top K columns corresponding to the largest singular values.
+    K = A_full.shape[1]  # Default to full rank if not specified; reduce as needed.
+    basis_matrix = A_full[:, :K]
+    return mean_vector, basis_matrix
+
+def encode_pca(voxel_block, mean_vector, basis_matrix):
+    """
+    voxel_block: vector of length 4096
+    Returns: descriptor vector of length K
+    """
+    centered_block = voxel_block - mean_vector
+    descriptor = np.dot(basis_matrix.T, centered_block)
+    return descriptor
+
+def decode_pca(descriptor, mean_vector, basis_matrix):
+    """
+    descriptor: vector of length K
+    Returns: reconstructed voxel block vector of length 4096
+    """
+    reconstruction = np.dot(basis_matrix, descriptor) + mean_vector
+    return reconstruction
+```
+
+**Parameters:**
+*   **Input Vector Dimension:** 4096 elements [S1].
+*   **Reduced Dimension ($K$):** Not given in the sources [S1].
+*   **Singular Value Threshold:** Not given in the sources [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The method filters out noise, which benefits tracking stability [S1].
+*   **Boundaries:** The method assumes a fixed-size voxel block of 4096 elements [S1]. Handling different sizes requires padding or cropping, which is not specified in the source [G].
+*   **Degenerate Input:** If the training data does not cover the variance of the test data, the reconstruction error will be high [G].
+
+## Subtopics
+
+### [SVD-based Cloud Volume Compression](13407-svd-based-cloud-volume-compression.md)
+This method compresses extracted cloud volumes by projecting voxel density vectors onto a low-dimensional subspace. It differs from its parent, [PCA-based TSDF Compression](12932-pca-based-tsdf-compression.md), by operating directly on raw voxel density values rather than TSDF representations. Choose it when working with volumetric cloud data instead of surface distance fields.
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources [S1].
+*   **Memory Complexity:** Not given in the sources [S1].
+*   **Measured Performance:** The method compares favorably to nonlinear methods based on auto-encoders in terms of compression [S1]. It allows for more stable camera tracking using the SDF Tracker algorithm [S1].
+*   **Strengths:** The approach preserves important structures in the data while filtering out noise [S1]. It relies on simple linear projection [S1].
+*   **Limitations:** The method assumes sample points are on or near a linear subspace [S1].
+*   **When to use:** Use the method when computational simplicity is preferred and the data exhibits strong linear correlations [S1].
+*   **When not to use:** Avoid the method when the data contains complex non-linear structures that a global linear basis cannot capture efficiently [G].
+
+## Background
+The method was proposed in 2017 by researchers addressing the memory cost of volumetric distance fields in robotics applications [S1]. It was introduced as an alternative to existing compression strategies, leveraging unsupervised learning via principal component analysis to encode TSDF data in a low-dimensional feature space [S1]. The work highlights the utility of this compression for stabilizing camera tracking against the model using the SDF Tracker algorithm [S1].
+
+## Sources
+[S1] Compressed Voxel-Based Mapping Using Unsupervised Learning, https://doi.org/10.3390/robotics6030015, fetched 2026-10-26

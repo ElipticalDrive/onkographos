@@ -1,0 +1,2222 @@
+### src/main.cc
+```
+#include <algorithm>
+#include <cmath>
+#include <iostream>
+
+#include "box.hh"
+#include "camera.hh"
+#include "diffuse_light.hh"
+#include "henyey_greenstein.hh"
+#include "heterogeneous_volume.hh"
+#include "image.hh"
+#include "metal.hh"
+#include "perlin.hh"
+#include "point3.hh"
+#include "renderer.hh"
+#include "scene.hh"
+#include "solid_color.hh"
+#include "vector3.hh"
+
+inline double smoothstep(double edge0, double edge1, double x)
+{
+    double t = std::clamp((x - edge0) / (edge1 - edge0), 0.0, 1.0);
+    return t * t * (3.0 - 2.0 * t);
+}
+
+double dist_sq_point_segment(const Vector3 &p, const Vector3 &a,
+                             const Vector3 &b)
+{
+    Vector3 ab = b - a;
+    Vector3 ap = p - a;
+    double t = ap.dot(ab) / ab.dot(ab);
+    t = std::clamp(t, 0.0, 1.0);
+    Vector3 closest = a + ab * t;
+    return (p - closest).dot(p - closest);
+}
+
+class SkyGradientTexture : public Texture
+{
+public:
+    RGB value(const Point3 &p) const override
+    {
+        Vector3 dir = Vector3(p).normalize();
+
+        double t = 0.5 * (dir.y + 1.0);
+
+        RGB color_bottom(255, 100, 80);
+        RGB color_top(10, 20, 60);
+
+        return color_bottom * (1.0 - t) + color_top * t;
+    }
+};
+
+class IsimColorTexture : public Texture
+{
+public:
+    RGB value(const Point3 &p) const override
+    {
+        if (p.x < -2.5)
+            return RGB(0, 200, 255);
+        if (p.x < -0.5)
+            return RGB(255, 50, 150);
+        if (p.x < 1.5)
+            return RGB(255, 220, 0);
+        return RGB(50, 255, 100);
+    }
+};
+
+class IsimCloudTexture : public Texture
+{
+public:
+    IsimCloudTexture(Point3 box_min, Point3 box_max, double cloud_scale)
+        : box_min_(box_min)
+        , box_max_(box_max)
+        , cloud_scale_(cloud_scale)
+    {
+        define_letters_segments();
+    }
+
+    RGB value(const Point3 &p) const override
+    {
+        if (p.x < box_min_.x || p.x > box_max_.x || p.y < box_min_.y
+            || p.y > box_max_.y || p.z < box_min_.z || p.z > box_max_.z)
+        {
+            return RGB(0, 0, 0);
+        }
+
+        const double letter_radius = 0.25;
+        const double smooth_width = 0.2;
+
+        double text_density = 0.0;
+        Vector3 p_vec(p);
+
+        for (const auto &segment : segments_)
+        {
+            double d_sq =
+                dist_sq_point_segment(p_vec, segment.first, segment.second);
+            if (d_sq < (letter_radius + smooth_width)
+                    * (letter_radius + smooth_width))
+            {
+                double d = std::sqrt(d_sq);
+                text_density = std::max(
+                    text_density,
+                    smoothstep(letter_radius + smooth_width, letter_radius, d));
+            }
+        }
+
+        if (text_density < 0.001)
+            return RGB(0, 0, 0);
+
+        double n = noise_.fbm(p * cloud_scale_, 5);
+        double cloud_noise = std::clamp((n - 0.3) * 3.0, 0.0, 1.0);
+
+        double final_density = text_density * cloud_noise;
+
+        double center_z = (box_min_.z + box_max_.z) * 0.5;
+        double depth_fade = smoothstep(1.5, 0.5, std::abs(p.z - center_z));
+
+        final_density *= depth_fade;
+        return RGB(final_density, final_density, final_density);
+    }
+
+private:
+    Point3 box_min_, box_max_;
+    double cloud_scale_;
+    Perlin noise_;
+    std::vector<std::pair<Vector3, Vector3>> segments_;
+
+    void define_letters_segments()
+    {
+        segments_.push_back(
+            { Vector3(-3.5, 1.5, -2.5), Vector3(-3.5, 3.5, -2.5) });
+        segments_.push_back(
+            { Vector3(-3.8, 1.5, -2.5), Vector3(-3.2, 1.5, -2.5) });
+        segments_.push_back(
+            { Vector3(-3.8, 3.5, -2.5), Vector3(-3.2, 3.5, -2.5) });
+
+        segments_.push_back(
+            { Vector3(-2.0, 3.5, -2.5), Vector3(-1.0, 3.5, -2.5) });
+        segments_.push_back(
+            { Vector3(-2.0, 3.5, -2.5), Vector3(-2.0, 2.5, -2.5) });
+        segments_.push_back(
+            { Vector3(-2.0, 2.5, -2.5), Vector3(-1.0, 2.5, -2.5) });
+        segments_.push_back(
+            { Vector3(-1.0, 2.5, -2.5), Vector3(-1.0, 1.5, -2.5) });
+        segments_.push_back(
+            { Vector3(-2.0, 1.5, -2.5), Vector3(-1.0, 1.5, -2.5) });
+
+        segments_.push_back(
+            { Vector3(0.5, 1.5, -2.5), Vector3(0.5, 3.5, -2.5) });
+        segments_.push_back(
+            { Vector3(0.2, 1.5, -2.5), Vector3(0.8, 1.5, -2.5) });
+        segments_.push_back(
+            { Vector3(0.2, 3.5, -2.5), Vector3(0.8, 3.5, -2.5) });
+
+        segments_.push_back(
+            { Vector3(2.0, 1.5, -2.5), Vector3(2.0, 3.5, -2.5) });
+        segments_.push_back(
+            { Vector3(3.0, 1.5, -2.5), Vector3(3.0, 3.5, -2.5) });
+        segments_.push_back(
+            { Vector3(2.0, 3.5, -2.5), Vector3(2.5, 2.5, -2.5) });
+        segments_.push_back(
+            { Vector3(3.0, 3.5, -2.5), Vector3(2.5, 2.5, -2.5) });
+    }
+};
+
+int main()
+{
+    Scene scene;
+
+    auto *sky_mat = new DiffuseLight(new SkyGradientTexture(), 1.2);
+    scene.addObject(new Box(Point3(-50.0, -10.0, -50.0),
+                            Point3(50.0, 50.0, 50.0), sky_mat));
+
+    auto *sol_mat = new Metal(new SolidColor(RGB(15, 15, 20)));
+    scene.addObject(
+        new Box(Point3(-40.0, -0.5, -40.0), Point3(40.0, 0.0, 40.0), sol_mat));
+
+    auto *soleil_mat =
+        new DiffuseLight(new SolidColor(RGB(255, 240, 220)), 30.0);
+    scene.addLight(new Box(Point3(-10.0, 20.0, -10.0), Point3(10.0, 20.1, 10.0),
+                           soleil_mat));
+
+    Point3 vol_min(-5.0, 1.0, -4.0);
+    Point3 vol_max(5.0, 4.0, -1.0);
+
+    auto *isim_shape_tex = new IsimCloudTexture(vol_min, vol_max, 6.0);
+
+    auto *isim_color_tex = new IsimColorTexture();
+
+    auto *cloud_mat = new HenyeyGreenstein(isim_color_tex, 0.5);
+
+    auto *boundary = new Box(vol_min, vol_max, nullptr);
+
+    scene.addObject(
+        new HeterogeneousVolume(boundary, 30.0, isim_shape_tex, cloud_mat));
+
+    constexpr int width = 500;
+    constexpr int height = 500;
+    Image image(width, height);
+
+    Camera camera(Point3(0.0, 3.0, 7.0), Point3(0.0, 2.5, -2.5),
+                  Vector3(0.0, 1.0, 0.0), 60.0, 1.0, 1.0);
+
+    Renderer renderer;
+    renderer.maxDepth = 20;
+
+    renderer.samplesPerPixel = 100;
+
+    std::cout << "Demarrage du rendu 'ISIM Multicolore'...\n";
+    renderer.render(scene, camera, image);
+    image.save("isim_colors.ppm");
+
+    std::cout << "Image sauvegardee dans isim_colors.ppm\n";
+
+    return 0;
+}
+```
+
+### src/core/hit.hh
+```
+#pragma once
+
+#include "point3.hh"
+#include "ray.hh"
+#include "vector3.hh"
+
+class Material;
+
+class Hit
+{
+public:
+    Point3 point;
+    Vector3 normal;
+    double t;
+    bool front_face;
+    Material *material;
+    double transmittance;
+    bool is_transmission;
+
+    Hit()
+        : point()
+        , normal()
+        , t(0.0)
+        , front_face(false)
+        , material(nullptr)
+        , transmittance(1.0)
+    {}
+
+    Hit(Point3 point, Vector3 normal, double t, Material *mat = nullptr)
+        : point(point)
+        , normal(normal)
+        , t(t)
+        , front_face(false)
+        , material(mat)
+        , transmittance(1.0)
+    {}
+
+    void set_face_normal(const Ray &ray, const Vector3 &outward_normal)
+    {
+        front_face = ray.direction.dot(outward_normal) < 0;
+        normal = front_face ? outward_normal : -outward_normal;
+    }
+};
+```
+
+### src/core/interval.hh
+```
+#pragma once
+
+#include <limits>
+
+static constexpr double infinity = std::numeric_limits<double>::infinity();
+
+class interval
+{
+public:
+    double min, max;
+    static const interval empty, universe;
+
+    interval()
+        : min(+infinity)
+        , max(-infinity)
+    {}
+
+    interval(double min, double max)
+        : min(min)
+        , max(max)
+    {}
+
+    interval(const interval &a, const interval &b)
+    {
+        min = a.min <= b.min ? a.min : b.min;
+        max = a.max >= b.max ? a.max : b.max;
+    }
+
+    double size() const
+    {
+        return max - min;
+    }
+
+    bool contains(double x) const
+    {
+        return min <= x && x <= max;
+    }
+
+    bool surrounds(double x) const
+    {
+        return min < x && x < max;
+    }
+
+    double clamp(double x) const
+    {
+        if (x < min)
+            return min;
+        if (x > max)
+            return max;
+        return x;
+    }
+
+    interval expand(double delta) const
+    {
+        auto padding = delta / 2;
+        return interval(min - padding, max + padding);
+    }
+};
+
+inline const interval interval::empty = interval(+infinity, -infinity);
+inline const interval interval::universe = interval(-infinity, +infinity);
+
+inline interval operator+(const interval &ival, double displacement)
+{
+    return interval(ival.min + displacement, ival.max + displacement);
+}
+
+inline interval operator+(double displacement, const interval &ival)
+{
+    return ival + displacement;
+}
+```
+
+### src/core/material.hh
+```
+#pragma once
+
+#include "image.hh"
+#include "point3.hh"
+
+class Ray;
+class Hit;
+
+class Material
+{
+public:
+    virtual ~Material() = default;
+
+    virtual bool scatter(const Ray &ray, const Hit &hit, RGB &attenuation,
+                         Ray &scattered) const = 0;
+
+    virtual RGB emitted(const Point3 & /*point*/) const
+    {
+        return RGB(0, 0, 0);
+    }
+};
+```
+
+### src/core/object.hh
+```
+#pragma once
+
+#include <optional>
+
+#include "hit.hh"
+#include "interval.hh"
+#include "ray.hh"
+
+class Object
+{
+public:
+    explicit Object(Material *material = nullptr)
+        : material_(material)
+    {}
+
+    virtual ~Object() = default;
+
+    virtual std::optional<Hit> intersect(const Ray &ray,
+                                         const interval &ray_int) const = 0;
+    Material *getMaterial() const
+    {
+        return material_;
+    }
+    virtual Vector3 random(const Point3 & /*origin*/) const
+    {
+        return Vector3(1, 0, 0);
+    }
+    virtual double pdf_value(const Point3 & /*origin*/,
+                             const Vector3 & /*direction*/) const
+    {
+        return 0.0;
+    }
+
+protected:
+    Material *material_;
+};
+```
+
+### src/core/ray.cc
+```
+#include "ray.hh"
+
+Point3 Ray::at(double t) const
+{
+    return { origin.x + t * direction.x, origin.y + t * direction.y,
+             origin.z + t * direction.z };
+}
+```
+
+### src/core/ray.hh
+```
+#pragma once
+
+#include "point3.hh"
+#include "vector3.hh"
+
+class Ray
+{
+public:
+    Point3 origin;
+    Vector3 direction;
+    double time;
+
+    Ray() = default;
+
+    Ray(const Point3 &origin, const Vector3 &direction)
+        : origin(origin)
+        , direction(direction)
+        , time(0)
+    {}
+
+    Ray(const Point3 &origin, const Vector3 &direction, double time)
+        : origin(origin)
+        , direction(direction)
+        , time(time)
+    {}
+
+    Point3 at(double t) const;
+};
+```
+
+### src/core/texture.hh
+```
+#pragma once
+
+#include "image.hh"
+#include "point3.hh"
+
+class Texture
+{
+public:
+    virtual ~Texture() = default;
+    virtual RGB value(const Point3 &point) const = 0;
+};
+```
+
+### src/materials/dielectric.cc
+```
+#include "dielectric.hh"
+
+#include "hit.hh"
+#include "ray.hh"
+#include "utils.hh"
+#include "vector3.hh"
+
+bool Dielectric::scatter(const Ray &ray, const Hit &hit, RGB &attenuation,
+                         Ray &scattered) const
+{
+    attenuation = RGB(255, 255, 255);
+    double ri = hit.front_face ? (1.0 / refraction_index_) : refraction_index_;
+
+    Vector3 unit_direction = ray.direction.normalize();
+    Vector3 refracted = refract(unit_direction, hit.normal, ri);
+
+    scattered = Ray(hit.point, refracted);
+    return true;
+}
+```
+
+### src/materials/dielectric.hh
+```
+#pragma once
+
+#include "material.hh"
+
+class Dielectric : public Material
+{
+public:
+    explicit Dielectric(double refraction_index)
+        : refraction_index_(refraction_index)
+    {}
+
+    bool scatter(const Ray &ray, const Hit &hit, RGB &attenuation,
+                 Ray &scattered) const override;
+
+private:
+    double refraction_index_;
+};
+```
+
+### src/materials/diffuse_light.hh
+```
+#pragma once
+
+#include "material.hh"
+#include "texture.hh"
+
+class DiffuseLight : public Material
+{
+public:
+    DiffuseLight(Texture *texture, double intensity = 1.0)
+        : texture_(texture)
+        , intensity_(intensity)
+    {}
+
+    bool scatter(const Ray & /*ray*/, const Hit & /*hit*/,
+                 RGB & /*attenuation*/, Ray & /*scattered*/) const override
+    {
+        return false;
+    }
+
+    RGB emitted(const Point3 &point) const override
+    {
+        RGB c = texture_->value(point);
+        return RGB(c.r * intensity_, c.g * intensity_, c.b * intensity_);
+    }
+
+private:
+    Texture *texture_;
+    double intensity_;
+};
+```
+
+### src/materials/henyey_greenstein.cc
+```
+#include "henyey_greenstein.hh"
+
+#include <cmath>
+
+#include "hit.hh"
+#include "ray.hh"
+#include "utils.hh"
+#include "vector3.hh"
+
+// Échantillonne une direction selon la fonction de phase henyey_greenstein
+Vector3 hg_sample(const Vector3 direction, double g)
+{
+    // On échantillonne cos(Theta) selon la distribution HG
+    double cosTheta;
+    if (std::abs(g) < 1e-3)
+        cosTheta = 1.0 - 2.0 * random_double();
+    else
+    {
+        double sqr = (1.0 - g * g) / (1.0 - g + 2.0 * g * random_double());
+        cosTheta = (1.0 + g * g - sqr * sqr) / (2.0 * g);
+    }
+
+    // Conversion en coordonnées sphériques
+    double sin_theta = std::sqrt(std::max(0.0, 1.0 - cosTheta * cosTheta));
+    double phi = 2.0 * M_PI * random_double();
+
+    // Construction de la base orthonormée
+    Vector3 w = direction.normalize();
+    Vector3 helper =
+        (std::abs(w.x) > 0.9) ? Vector3(0, 1, 0) : Vector3(1, 0, 0);
+    Vector3 u = w.cross(helper).normalize();
+    Vector3 v = w.cross(u);
+
+    // Direction finale
+    return u * sin_theta * std::cos(phi) + v * sin_theta * std::sin(phi)
+        + w * cosTheta;
+}
+
+bool HenyeyGreenstein::scatter(const Ray &ray, const Hit &hit, RGB &attenuation,
+                               Ray &scattered) const
+{
+    Vector3 dir = hg_sample(ray.direction, g_);
+    scattered = Ray(hit.point, dir, ray.time);
+    attenuation = texture_->value(hit.point);
+    return true;
+}
+```
+
+### src/materials/henyey_greenstein.hh
+```
+#pragma once
+
+#include "material.hh"
+#include "texture.hh"
+
+class HenyeyGreenstein : public Material
+{
+public:
+    explicit HenyeyGreenstein(Texture *texture, double g)
+        : texture_(texture)
+        , g_(g)
+    {}
+
+    bool scatter(const Ray &ray, const Hit &hit, RGB &attenuation,
+                 Ray &scattered) const override;
+
+private:
+    Texture *texture_;
+    double g_;
+};
+```
+
+### src/materials/isotropic.cc
+```
+#include "isotropic.hh"
+
+#include "hit.hh"
+#include "ray.hh"
+#include "vector3.hh"
+
+bool Isotropic::scatter(const Ray &ray, const Hit &hit, RGB &attenuation,
+                        Ray &scattered) const
+{
+    scattered = Ray(hit.point, Vector3::random_unit_vector(), ray.time);
+    attenuation = texture_->value(hit.point);
+    return true;
+}
+```
+
+### src/materials/isotropic.hh
+```
+#pragma once
+
+#include "material.hh"
+#include "texture.hh"
+
+class Isotropic : public Material
+{
+public:
+    explicit Isotropic(Texture *texture)
+        : texture_(texture)
+    {}
+
+    bool scatter(const Ray &ray, const Hit &hit, RGB &attenuation,
+                 Ray &scattered) const override;
+
+private:
+    Texture *texture_;
+};
+```
+
+### src/materials/lambertian.cc
+```
+#include "lambertian.hh"
+
+#include <cmath>
+
+#include "hit.hh"
+#include "ray.hh"
+#include "vector3.hh"
+
+bool Lambertian::scatter(const Ray & /*ray*/, const Hit &hit, RGB &attenuation,
+                         Ray &scattered) const
+{
+    Vector3 scatterDir = hit.normal + Vector3::random_unit_vector();
+
+    if (fabs(scatterDir.x) < 1e-8 && fabs(scatterDir.y) < 1e-8
+        && fabs(scatterDir.z) < 1e-8)
+        scatterDir = hit.normal;
+
+    scattered = Ray(hit.point, scatterDir);
+    attenuation = texture_->value(hit.point);
+
+    return true;
+}
+```
+
+### src/materials/lambertian.hh
+```
+#pragma once
+
+#include "material.hh"
+#include "texture.hh"
+
+class Lambertian : public Material
+{
+public:
+    explicit Lambertian(Texture *texture)
+        : texture_(texture)
+    {}
+
+    bool scatter(const Ray &ray, const Hit &hit, RGB &attenuation,
+                 Ray &scattered) const override;
+
+private:
+    Texture *texture_;
+};
+```
+
+### src/materials/metal.cc
+```
+#include "metal.hh"
+
+#include <cmath>
+
+#include "hit.hh"
+#include "ray.hh"
+#include "utils.hh"
+#include "vector3.hh"
+
+bool Metal::scatter(const Ray &ray, const Hit &hit, RGB &attenuation,
+                    Ray &scattered) const
+{
+    Vector3 scatterDir = reflect(ray.direction, hit.normal);
+
+    if (fabs(scatterDir.x) < 1e-8 && fabs(scatterDir.y) < 1e-8
+        && fabs(scatterDir.z) < 1e-8)
+        scatterDir = hit.normal;
+
+    scattered = Ray(hit.point, scatterDir);
+    attenuation = texture_->value(hit.point);
+
+    return true;
+}
+```
+
+### src/materials/metal.hh
+```
+#pragma once
+
+#include "material.hh"
+#include "texture.hh"
+
+class Metal : public Material
+{
+public:
+    explicit Metal(Texture *texture)
+        : texture_(texture)
+    {}
+
+    bool scatter(const Ray &ray, const Hit &hit, RGB &attenuation,
+                 Ray &scattered) const override;
+
+private:
+    Texture *texture_;
+};
+```
+
+### src/math/perlin.cc
+```
+#include "perlin.hh"
+
+#include <cmath>
+
+#include "utils.hh"
+
+Perlin::Perlin()
+{
+    ranvec = new Vector3[point_count];
+    for (int i = 0; i < point_count; ++i)
+        ranvec[i] = random_vector(-1.0, 1.0).normalize();
+
+    perm_x = perlin_generate_perm();
+    perm_y = perlin_generate_perm();
+    perm_z = perlin_generate_perm();
+}
+
+int *Perlin::perlin_generate_perm()
+{
+    int *p = new int[point_count];
+    for (int i = 0; i < point_count; i++)
+        p[i] = i;
+    permute(p);
+    return p;
+}
+
+void Perlin::permute(int *p)
+{
+    // on mélange la liste
+    for (int i = point_count - 1; i > 0; i--)
+    {
+        int target = static_cast<int>(random_double(0, i + 1));
+        int tmp = p[i];
+        p[i] = p[target];
+        p[target] = tmp;
+    }
+}
+
+double Perlin::noise(const Point3 &point) const
+{
+    // normalisation des coordonnées du point (coordonnées entre 0 et 1)
+    double u = point.x - std::floor(point.x);
+    double v = point.y - std::floor(point.y);
+    double w = point.z - std::floor(point.z);
+
+    // bas gauche du sous-cube du rubiks cube
+    int i = static_cast<int>(std::floor(point.x));
+    int j = static_cast<int>(std::floor(point.y));
+    int k = static_cast<int>(std::floor(point.z));
+
+    // on get les 8 valeurs random des 8 coins
+    Vector3 c[2][2][2];
+    for (int di = 0; di < 2; di++)
+    {
+        for (int dj = 0; dj < 2; dj++)
+        {
+            for (int dk = 0; dk < 2; dk++)
+            {
+                int index_x = perm_x[(i + di) & 255];
+                int index_y = perm_y[(j + dj) & 255];
+                int index_z = perm_z[(k + dk) & 255];
+
+                c[di][dj][dk] = ranvec[index_x ^ index_y ^ index_z];
+            }
+        }
+    }
+
+    return trilinear_interpolation(c, u, v, w);
+}
+
+double Perlin::trilinear_interpolation(Vector3 c[2][2][2], double u, double v,
+                                       double w)
+{
+    double uu = u * u * (3 - 2 * u);
+    double vv = v * v * (3 - 2 * v);
+    double ww = w * w * (3 - 2 * w);
+
+    double accum = 0.0;
+
+    // moyenne pondérée des 8 coins
+    for (int i = 0; i < 2; i++)
+    {
+        for (int j = 0; j < 2; j++)
+        {
+            for (int k = 0; k < 2; k++)
+            {
+                Vector3 weight_v(u - i, v - j, w - k);
+
+                double dot_product = c[i][j][k].dot(weight_v);
+
+                accum += (i * uu + (1 - i) * (1 - uu))
+                    * (j * vv + (1 - j) * (1 - vv))
+                    * (k * ww + (1 - k) * (1 - ww)) * dot_product;
+            }
+        }
+    }
+    return accum;
+}
+
+double Perlin::fbm(const Point3 &p, int depth) const
+{
+    double value = 0.0;
+    double amplitude = 1.0;
+    Point3 temp_p = p;
+
+    for (int i = 0; i < depth; i++)
+    {
+        value += amplitude * std::abs(noise(temp_p));
+        amplitude *= 0.5;
+        temp_p = temp_p * 2;
+    }
+
+    return value;
+}
+```
+
+### src/math/perlin.hh
+```
+#pragma once
+
+#include "point3.hh"
+#include "vector3.hh"
+
+class Perlin
+{
+public:
+    Perlin();
+    double noise(const Point3 &p) const;
+
+    static const int point_count = 256;
+
+    Vector3 *ranvec;
+
+    int *perm_x;
+    int *perm_y;
+    int *perm_z;
+
+    static int *perlin_generate_perm();
+    static void permute(int *p);
+
+    static double trilinear_interpolation(Vector3 c[2][2][2], double u,
+                                          double v, double w);
+    double turbulance(const Point3 &p, int depth) const;
+    double fbm(const Point3 &p, int depth = 7) const;
+};
+```
+
+### src/math/point3.cc
+```
+#include "point3.hh"
+
+#include "vector3.hh"
+
+Point3::Point3(const Vector3 &v)
+    : x(v.x)
+    , y(v.y)
+    , z(v.z)
+{}
+
+Point3 Point3::operator+(double s) const
+{
+    return { x + s, y + s, z + s };
+}
+Point3 Point3::operator-(double s) const
+{
+    return { x - s, y - s, z - s };
+}
+Point3 Point3::operator*(double s) const
+{
+    return { x * s, y * s, z * s };
+}
+Point3 Point3::operator/(double s) const
+{
+    if (s == 0.0f)
+        throw std::runtime_error("Point3: division by zero.");
+    return { x / s, y / s, z / s };
+}
+
+Point3 Point3::operator+(const Point3 &p) const
+{
+    return { x + p.x, y + p.y, z + p.z };
+}
+Vector3 Point3::operator-(const Point3 &p) const
+{
+    return { x - p.x, y - p.y, z - p.z };
+}
+Point3 Point3::operator*(const Point3 &p) const
+{
+    return { x * p.x, y * p.y, z * p.z };
+}
+Point3 Point3::operator/(const Point3 &p) const
+{
+    if (p.x == 0.0f || p.y == 0.0f || p.z == 0.0f)
+        throw std::runtime_error("Point3: division by zero.");
+    return { x / p.x, y / p.y, z / p.z };
+}
+
+Point3 Point3::operator+(const Vector3 &v) const
+{
+    return { x + v.x, y + v.y, z + v.z };
+}
+Vector3 Point3::operator-(const Vector3 &v) const
+{
+    return { x - v.x, y - v.y, z - v.z };
+}
+
+std::ostream &operator<<(std::ostream &out, const Point3 &p)
+{
+    return out << '(' << p.x << ", " << p.y << ", " << p.z << ')';
+}
+```
+
+### src/math/point3.hh
+```
+#pragma once
+
+#include <ostream>
+
+class Vector3;
+
+class Point3
+{
+public:
+    double x, y, z;
+
+    Point3(double x = 0.0, double y = 0.0, double z = 0.0)
+        : x(x)
+        , y(y)
+        , z(z)
+    {}
+
+    explicit Point3(const Vector3 &v);
+
+    Point3 operator+(double scalar) const;
+    Point3 operator-(double scalar) const;
+    Point3 operator*(double scalar) const;
+    Point3 operator/(double scalar) const;
+
+    Point3 operator+(const Point3 &other) const;
+    Vector3 operator-(const Point3 &other) const;
+    Point3 operator*(const Point3 &other) const;
+    Point3 operator/(const Point3 &other) const;
+
+    Point3 operator+(const Vector3 &v) const;
+    Vector3 operator-(const Vector3 &v) const;
+
+    friend std::ostream &operator<<(std::ostream &out, const Point3 &p);
+};
+```
+
+### src/math/utils.hh
+```
+#pragma once
+
+#include <cmath>
+#include <random>
+
+#include "vector3.hh"
+
+inline double random_double()
+{
+    thread_local std::mt19937 generator(std::random_device{}());
+    thread_local std::uniform_real_distribution<double> distribution(0.0, 1.0);
+    return distribution(generator);
+}
+
+inline double random_double(double min, double max)
+{
+    return min + (max - min) * random_double();
+}
+
+inline double linear_to_gamma(double linear_component)
+{
+    return (linear_component > 0.0) ? sqrt(linear_component) : 0.0;
+}
+
+inline Vector3 reflect(Vector3 v, Vector3 n)
+{
+    return v - n * v.dot(n) * 2;
+}
+
+inline Vector3 refract(Vector3 v, Vector3 n, double eta)
+{
+    double cos_theta = fmin((-v).dot(n), 1.0);
+    Vector3 ray_out_perpendicular = (v + n * cos_theta) * eta;
+    Vector3 ray_out_parallel = n
+        * (-sqrt(
+            fabs(-ray_out_perpendicular.dot(ray_out_perpendicular) + 1.0)));
+    return ray_out_perpendicular + ray_out_parallel;
+}
+```
+
+### src/math/vector3.cc
+```
+#include "vector3.hh"
+
+#include <cmath>
+
+#include "point3.hh"
+#include "utils.hh"
+
+Vector3::Vector3(const Point3 &p)
+    : x(p.x)
+    , y(p.y)
+    , z(p.z)
+{}
+
+Vector3 Vector3::operator+(double s) const
+{
+    return { x + s, y + s, z + s };
+}
+Vector3 Vector3::operator-(double s) const
+{
+    return { x - s, y - s, z - s };
+}
+Vector3 Vector3::operator*(double s) const
+{
+    return { x * s, y * s, z * s };
+}
+Vector3 Vector3::operator/(double s) const
+{
+    if (s == 0.0f)
+        throw std::runtime_error("Vector3: division by zero.");
+    return { x / s, y / s, z / s };
+}
+
+Vector3 Vector3::operator+(const Vector3 &v) const
+{
+    return { x + v.x, y + v.y, z + v.z };
+}
+Vector3 Vector3::operator-(const Vector3 &v) const
+{
+    return { x - v.x, y - v.y, z - v.z };
+}
+Vector3 Vector3::operator*(const Vector3 &v) const
+{
+    return { x * v.x, y * v.y, z * v.z };
+}
+Vector3 Vector3::operator/(const Vector3 &v) const
+{
+    if (v.x == 0.0f || v.y == 0.0f || v.z == 0.0f)
+        throw std::runtime_error("Vector3: division by zero.");
+    return { x / v.x, y / v.y, z / v.z };
+}
+
+Vector3 Vector3::operator-() const
+{
+    return { -x, -y, -z };
+}
+
+double Vector3::dot(const Vector3 &v) const
+{
+    return x * v.x + y * v.y + z * v.z;
+}
+
+double Vector3::norm() const
+{
+    return std::sqrt(x * x + y * y + z * z);
+}
+
+Vector3 Vector3::normalize() const
+{
+    const double n = norm();
+    if (n == 0.0f)
+        throw std::runtime_error("Vector3::normalize: null vector.");
+    return { x / n, y / n, z / n };
+}
+
+Vector3 random_vector()
+{
+    return Vector3(random_double(), random_double(), random_double());
+}
+
+Vector3 random_vector(double min, double max)
+{
+    return Vector3(random_double(min, max), random_double(min, max),
+                   random_double(min, max));
+}
+
+Vector3 Vector3::random_unit_vector()
+{
+    while (true)
+    {
+        Vector3 r = random_vector(-1.0, 1.0);
+        double lensq = r.dot(r);
+        if (1e-160 < lensq && lensq <= 1)
+            return r / sqrt(lensq);
+    }
+}
+
+Vector3 Vector3::random_on_hemisphere(const Vector3 &normal)
+{
+    Vector3 r = random_unit_vector();
+    if (r.dot(normal) > 0.0)
+        return r;
+    else
+        return -r;
+}
+
+Vector3 Vector3::cross(const Vector3 &v) const
+{
+    return { y * v.z - z * v.y, z * v.x - x * v.z, x * v.y - y * v.x };
+}
+
+std::ostream &operator<<(std::ostream &out, const Vector3 &v)
+{
+    return out << '<' << v.x << ", " << v.y << ", " << v.z << '>';
+}
+```
+
+### src/math/vector3.hh
+```
+#pragma once
+
+#include <ostream>
+
+class Point3;
+
+class Vector3
+{
+public:
+    double x, y, z;
+
+    Vector3(double x = 0.0f, double y = 0.0f, double z = 0.0f)
+        : x(x)
+        , y(y)
+        , z(z)
+    {}
+
+    explicit Vector3(const Point3 &p);
+
+    Vector3 operator+(double scalar) const;
+    Vector3 operator-(double scalar) const;
+    Vector3 operator*(double scalar) const;
+    Vector3 operator/(double scalar) const;
+
+    Vector3 operator+(const Vector3 &v) const;
+    Vector3 operator-(const Vector3 &v) const;
+    Vector3 operator*(const Vector3 &v) const;
+    Vector3 operator/(const Vector3 &v) const;
+
+    Vector3 operator-() const;
+
+    double dot(const Vector3 &v) const;
+    double norm() const;
+    Vector3 normalize() const;
+    static Vector3 random_unit_vector();
+    static Vector3 random_on_hemisphere(const Vector3 &normal);
+    Vector3 reflect(Vector3 v, Vector3 n) const;
+    Vector3 cross(const Vector3 &v) const;
+
+    friend std::ostream &operator<<(std::ostream &out, const Vector3 &v);
+};
+
+Vector3 random_vector();
+Vector3 random_vector(double min, double max);
+```
+
+### src/rendering/camera.hh
+```
+#pragma once
+
+#include "point3.hh"
+#include "vector3.hh"
+
+class Camera
+{
+public:
+    Point3 center;
+    Point3 target;
+    Vector3 up;
+
+    double alpha;
+    double beta;
+    double z_min;
+
+    Camera()
+        : center(0.0, 0.0, 0.0)
+        , target(0.0, 0.0, -1.0)
+        , up(0.0, 1.0, 0.0)
+        , alpha(90.0)
+        , beta(90.0)
+        , z_min(1.0)
+    {}
+
+    Camera(double alpha, double beta, double z_min)
+        : center(0.0, 0.0, 0.0)
+        , target(0.0, 0.0, -1.0)
+        , up(0.0, 1.0, 0.0)
+        , alpha(alpha)
+        , beta(beta)
+        , z_min(z_min)
+    {}
+
+    Camera(const Point3 &center, const Point3 &target, const Vector3 &up,
+           double alpha, double beta, double z_min)
+        : center(center)
+        , target(target)
+        , up(up)
+        , alpha(alpha)
+        , beta(beta)
+        , z_min(z_min)
+    {}
+};
+```
+
+### src/rendering/image.cc
+```
+#include "image.hh"
+
+#include <cmath>
+#include <fstream>
+#include <stdexcept>
+
+void Image::checkBounds(int x, int y) const
+{
+    if (x < 0 || x >= width || y < 0 || y >= height)
+        throw std::out_of_range(
+            "Image::checkBounds: coordinates out of range.");
+}
+
+RGB &Image::get(int x, int y)
+{
+    checkBounds(x, y);
+    return pixels_[y * width + x];
+}
+
+const RGB &Image::get(int x, int y) const
+{
+    checkBounds(x, y);
+    return pixels_[y * width + x];
+}
+
+void Image::set(int x, int y, const RGB &value)
+{
+    checkBounds(x, y);
+    pixels_[y * width + x] = value;
+}
+
+void Image::save(const std::string &filepath) const
+{
+    std::ofstream file(filepath);
+    if (!file)
+        throw std::runtime_error("Image::save: cannot open file \"" + filepath
+                                 + "\".");
+
+    file << "P3\n" << width << ' ' << height << "\n255\n";
+
+    for (int j = 0; j < height; ++j)
+    {
+        for (int i = 0; i < width; ++i)
+        {
+            const RGB &p = get(i, j);
+            double r_norm = p.r / 255.0;
+            double g_norm = p.g / 255.0;
+            double b_norm = p.b / 255.0;
+
+            // gamma correction
+            r_norm = std::sqrt(std::max(0.0, r_norm));
+            g_norm = std::sqrt(std::max(0.0, g_norm));
+            b_norm = std::sqrt(std::max(0.0, b_norm));
+
+            int ir = static_cast<int>(
+                std::max(0.0, std::min(255.0, r_norm * 255.0)));
+            int ig = static_cast<int>(
+                std::max(0.0, std::min(255.0, g_norm * 255.0)));
+            int ib = static_cast<int>(
+                std::max(0.0, std::min(255.0, b_norm * 255.0)));
+
+            file << ir << ' ' << ig << ' ' << ib << '\n';
+        }
+    }
+}
+
+RGB RGB::operator+(const RGB &other) const
+{
+    return RGB(r + other.r, g + other.g, b + other.b);
+}
+
+RGB RGB::operator*(const RGB &other) const
+{
+    return RGB((r * other.r) / 255.0, (g * other.g) / 255.0,
+               (b * other.b) / 255.0);
+}
+
+RGB RGB::operator*(double scalar) const
+{
+    return RGB(r * scalar, g * scalar, b * scalar);
+}
+
+RGB RGB::operator/(double scalar) const
+{
+    if (scalar == 0.0)
+        return RGB(0, 0, 0);
+    return RGB(r / scalar, g / scalar, b / scalar);
+}
+```
+
+### src/rendering/image.hh
+```
+#pragma once
+
+#include <string>
+#include <vector>
+
+struct RGB
+{
+    double r, g, b;
+
+    RGB(double r = 0, double g = 0, double b = 0)
+        : r(r)
+        , g(g)
+        , b(b)
+    {}
+
+    RGB operator+(const RGB &other) const;
+    RGB operator*(const RGB &other) const;
+    RGB operator*(double scalar) const;
+    RGB operator/(double scalar) const;
+};
+
+class Image
+{
+public:
+    int width;
+    int height;
+
+    Image(int width, int height)
+        : width(width)
+        , height(height)
+        , pixels_(width * height)
+    {}
+
+    Image(int width, int height, const std::vector<RGB> &pixels)
+        : width(width)
+        , height(height)
+        , pixels_(pixels)
+    {}
+
+    RGB &get(int x, int y);
+    const RGB &get(int x, int y) const;
+    void set(int x, int y, const RGB &value);
+    void save(const std::string &filepath) const;
+
+private:
+    std::vector<RGB> pixels_;
+
+    void checkBounds(int x, int y) const;
+};
+```
+
+### src/rendering/light.hh
+```
+#pragma once
+
+#include "image.hh"
+#include "point3.hh"
+#include "vector3.hh"
+
+class Light
+{
+public:
+    double intensity;
+    RGB color;
+
+    Light(double intensity = 1.0, const RGB &color = RGB(255, 255, 255))
+        : intensity(intensity)
+        , color(color)
+    {}
+
+    virtual ~Light() = default;
+
+    virtual Vector3 getDirection(const Point3 &point) const = 0;
+};
+```
+
+### src/rendering/renderer.cc
+```
+#include "renderer.hh"
+
+#include <iostream>
+
+#include "interval.hh"
+#include "material.hh"
+#include "utils.hh"
+
+RGB Renderer::rayColor(const Ray &ray, const Scene &scene, int depth) const
+{
+    if (depth <= 0)
+        return RGB(0, 0, 0);
+
+    interval ray_int(0.001, infinity);
+    Hit closestHit;
+    bool hitAnything = false;
+
+    for (Object *obj : scene.objects)
+    {
+        std::optional<Hit> result = obj->intersect(ray, ray_int);
+        if (result)
+        {
+            ray_int.max = result->t;
+            closestHit = *result;
+            hitAnything = true;
+        }
+    }
+
+    if (!hitAnything)
+        return background;
+
+    Material *material = closestHit.material;
+    RGB emitted = material->emitted(closestHit.point);
+    RGB attenuation;
+    Ray scattered;
+
+    if (closestHit.is_transmission)
+    {
+        return emitted
+            + rayColor(Ray(closestHit.point, ray.direction, ray.time), scene,
+                       depth - 1)
+            * closestHit.transmittance;
+    }
+
+    // NEE
+    if (!material->scatter(ray, closestHit, attenuation,
+                           scattered)) // si c'est une lumière
+        return emitted;
+
+    RGB direct_light(0, 0, 0);
+
+    if (!scene.lights.empty())
+    {
+        Object *light = scene.lights[0];
+
+        // échantillonne un point sur la lumière
+        Vector3 to_light = light->random(closestHit.point);
+        double distance_to_light = to_light.norm();
+        Vector3 light_dir = to_light.normalize();
+
+        Ray shadow_ray(closestHit.point, light_dir, ray.time);
+        interval shadow_int(0.001, distance_to_light - 0.001);
+
+        // si un objet devant
+        bool in_shadow = false;
+        for (Object *obj : scene.objects)
+        {
+            if (obj->intersect(shadow_ray, shadow_int))
+            {
+                in_shadow = true;
+                break;
+            }
+        }
+
+        // calcul de la contribution directe
+        if (!in_shadow)
+        {
+            double pdf = light->pdf_value(closestHit.point, light_dir);
+            if (pdf > 0.0)
+            {
+                double cosine = std::max(0.0, closestHit.normal.dot(light_dir));
+                Point3 point_on_light = closestHit.point + to_light;
+
+                RGB light_color = light->getMaterial()->emitted(point_on_light);
+
+                // BSDF (Bidirectional Scattering Distribution Function)
+                // bsdf * light * cos(tetha) * pi / pdf
+                direct_light = RGB((attenuation.r / 255.0) * light_color.r
+                                       * cosine / (M_PI * pdf),
+                                   (attenuation.g / 255.0) * light_color.g
+                                       * cosine / (M_PI * pdf),
+                                   (attenuation.b / 255.0) * light_color.b
+                                       * cosine / (M_PI * pdf));
+            }
+        }
+    }
+
+    RGB indirect_light = attenuation * rayColor(scattered, scene, depth - 1);
+
+    return emitted + direct_light + indirect_light;
+}
+
+void Renderer::render(const Scene &scene, const Camera &camera,
+                      Image &image) const
+{
+    const int width = image.width;
+    const int height = image.height;
+
+    constexpr double focalLength = 1.0;
+    constexpr double viewportHeight = 2.0;
+    constexpr double viewportWidth = viewportHeight;
+
+    const Vector3 viewportU = Vector3(viewportWidth, 0.0, 0.0);
+    const Vector3 viewportV = Vector3(0.0, -viewportHeight, 0.0);
+    const Vector3 pixelDeltaU = viewportU / static_cast<double>(width);
+    const Vector3 pixelDeltaV = viewportV / static_cast<double>(height);
+
+    const Vector3 viewportUpperLeft = Vector3(camera.center)
+        - Vector3(0.0, 0.0, focalLength) - viewportU / 2.0 - viewportV / 2.0;
+
+    const Vector3 pixel00 =
+        viewportUpperLeft + (pixelDeltaU + pixelDeltaV) * 0.5;
+
+    std::cout << "Rendu: " << width << "x" << height << " pixels." << std::endl;
+
+#pragma omp parallel for schedule(dynamic)
+    for (int j = 0; j < height; ++j)
+    {
+        std::cout << "\rLignes restantes : " << (height - j) << ' '
+                  << std::flush;
+        for (int i = 0; i < width; ++i)
+        {
+            double r = 0, g = 0, b = 0;
+            for (int s = 0; s < samplesPerPixel; ++s)
+            {
+                double u = static_cast<double>(i) + random_double();
+                double v = static_cast<double>(j) + random_double();
+                const Vector3 pixelPos =
+                    pixel00 + pixelDeltaU * u + pixelDeltaV * v;
+                Vector3 direction = pixelPos - Vector3(camera.center);
+                direction = direction.normalize();
+                const Ray ray(camera.center, direction);
+
+                RGB c = rayColor(ray, scene, maxDepth);
+                r += c.r;
+                g += c.g;
+                b += c.b;
+            }
+            image.set(i, j,
+                      RGB(r / samplesPerPixel, g / samplesPerPixel,
+                          b / samplesPerPixel));
+        }
+    }
+
+    std::cout << "\nRendu terminé\n";
+}
+```
+
+### src/rendering/renderer.hh
+```
+#pragma once
+
+#include "camera.hh"
+#include "image.hh"
+#include "ray.hh"
+#include "scene.hh"
+
+class Renderer
+{
+public:
+    int maxDepth = 100;
+    int samplesPerPixel = 500;
+    RGB background{ 0, 0, 0 };
+
+    RGB rayColor(const Ray &ray, const Scene &scene, int depth) const;
+    void render(const Scene &scene, const Camera &camera, Image &image) const;
+};
+```
+
+### src/rendering/scene.hh
+```
+#pragma once
+
+#include <vector>
+
+#include "camera.hh"
+#include "object.hh"
+
+class Scene
+{
+public:
+    std::vector<Object *> objects;
+    std::vector<Object *> lights;
+    Camera camera;
+
+    Scene() = default;
+    ~Scene() = default;
+
+    void addObject(Object *object)
+    {
+        objects.push_back(object);
+    }
+    void addLight(Object *light)
+    {
+        objects.push_back(light);
+        lights.push_back(light);
+    }
+};
+```
+
+### src/shapes/box.cc
+```
+#include "box.hh"
+
+#include <algorithm>
+
+#include "utils.hh"
+
+std::optional<Hit> Box::intersect(const Ray &ray, const interval &ray_int) const
+{
+    double tMin_x, tMax_x, tMin_y, tMax_y, tMin_z, tMax_z;
+
+    if (std::abs(ray.direction.x) < 1e-8)
+    {
+        if (ray.origin.x < min_bound.x || ray.origin.x > max_bound.x)
+            return std::nullopt;
+        tMin_x = -1e10;
+        tMax_x = 1e10;
+    }
+    else
+    {
+        tMin_x = (min_bound.x - ray.origin.x) / ray.direction.x;
+        tMax_x = (max_bound.x - ray.origin.x) / ray.direction.x;
+        if (tMin_x > tMax_x)
+            std::swap(tMin_x, tMax_x);
+    }
+
+    if (std::abs(ray.direction.y) < 1e-8)
+    {
+        if (ray.origin.y < min_bound.y || ray.origin.y > max_bound.y)
+            return std::nullopt;
+        tMin_y = -1e10;
+        tMax_y = 1e10;
+    }
+    else
+    {
+        tMin_y = (min_bound.y - ray.origin.y) / ray.direction.y;
+        tMax_y = (max_bound.y - ray.origin.y) / ray.direction.y;
+        if (tMin_y > tMax_y)
+            std::swap(tMin_y, tMax_y);
+    }
+
+    if (std::abs(ray.direction.z) < 1e-8)
+    {
+        if (ray.origin.z < min_bound.z || ray.origin.z > max_bound.z)
+            return std::nullopt;
+        tMin_z = -1e10;
+        tMax_z = 1e10;
+    }
+    else
+    {
+        tMin_z = (min_bound.z - ray.origin.z) / ray.direction.z;
+        tMax_z = (max_bound.z - ray.origin.z) / ray.direction.z;
+        if (tMin_z > tMax_z)
+            std::swap(tMin_z, tMax_z);
+    }
+
+    double tMin = std::max({ tMin_x, tMin_y, tMin_z });
+    double tMax = std::min({ tMax_x, tMax_y, tMax_z });
+
+    if (tMin > tMax)
+        return std::nullopt;
+
+    if (!ray_int.surrounds(tMin))
+    {
+        tMin = tMax;
+        if (!ray_int.surrounds(tMin))
+            return std::nullopt;
+    }
+
+    Point3 impact = ray.at(tMin);
+    Vector3 n = computeNormal(impact);
+
+    Hit hit(impact, n, tMin, material_);
+    hit.set_face_normal(ray, n);
+
+    return hit;
+}
+
+Vector3 Box::computeNormal(const Point3 &point) const
+{
+    if (std::abs(point.x - min_bound.x) < 0.001)
+        return Vector3(-1, 0, 0);
+    if (std::abs(point.x - max_bound.x) < 0.001)
+        return Vector3(1, 0, 0);
+    if (std::abs(point.y - min_bound.y) < 0.001)
+        return Vector3(0, -1, 0);
+    if (std::abs(point.y - max_bound.y) < 0.001)
+        return Vector3(0, 1, 0);
+    if (std::abs(point.z - min_bound.z) < 0.001)
+        return Vector3(0, 0, -1);
+    if (std::abs(point.z - max_bound.z) < 0.001)
+        return Vector3(0, 0, 1);
+    return Vector3(0, 1, 0);
+}
+Vector3 Box::random(const Point3 &origin) const
+{
+    // point random face du bas
+    Point3 random_point;
+    random_point.x = random_double(min_bound.x, max_bound.x);
+    random_point.y = min_bound.y;
+    random_point.z = random_double(min_bound.z, max_bound.z);
+
+    return random_point - origin;
+}
+
+double Box::pdf_value(const Point3 &origin, const Vector3 &direction) const
+{
+    // proba d'avoir tiré ce rayon vu qu'on force l'aléatoire (pour pas détruire
+    // la moyenne)
+    std::optional<Hit> rec =
+        this->intersect(Ray(origin, direction), interval(0.001, infinity));
+
+    // si on rate la boite ou touche le dessous
+    if (!rec || std::abs(rec->normal.y + 1.0) > 1e-3)
+        return 0;
+
+    // surface de la face du bas
+    double area_y_bottom =
+        (max_bound.x - min_bound.x) * (max_bound.z - min_bound.z);
+
+    double distance_squared = rec->t * rec->t * direction.dot(direction);
+    double cosine = std::fabs(direction.normalize().dot(rec->normal));
+
+    if (cosine < 1e-8)
+        return 0;
+
+    return distance_squared / (cosine * area_y_bottom);
+}
+```
+
+### src/shapes/box.hh
+```
+#pragma once
+
+#include <cmath>
+
+#include "hit.hh"
+#include "interval.hh"
+#include "material.hh"
+#include "object.hh"
+#include "point3.hh"
+
+class Box : public Object
+{
+public:
+    Box()
+        : Object(nullptr)
+        , min_bound(0.0, 0.0, 0.0)
+        , max_bound(1.0, 1.0, 1.0)
+    {}
+
+    Box(const Point3 &min_bound, const Point3 &max_bound, Material *material)
+        : Object(material)
+        , min_bound(min_bound)
+        , max_bound(max_bound)
+    {}
+
+    Point3 getMinBound() const
+    {
+        return min_bound;
+    };
+    Point3 getMaxBound() const
+    {
+        return max_bound;
+    };
+
+    std::optional<Hit> intersect(const Ray &ray,
+                                 const interval &ray_int) const override;
+
+    Vector3 computeNormal(const Point3 &point) const;
+    Vector3 random(const Point3 &origin) const override;
+    double pdf_value(const Point3 &origin,
+                     const Vector3 &direction) const override;
+
+private:
+    Point3 min_bound;
+    Point3 max_bound;
+};
+```
+
+### src/shapes/sphere.cc
+```
+#include "sphere.hh"
+
+std::optional<Hit> Sphere::intersect(const Ray &ray,
+                                     const interval &ray_int) const
+{
+    Vector3 oc = center - ray.origin;
+    double a = ray.direction.dot(ray.direction);
+    double h = ray.direction.dot(oc);
+    double c = oc.dot(oc) - radius * radius;
+    double discriminant = h * h - a * c;
+
+    if (discriminant < 0)
+    {
+        return std::nullopt;
+    }
+
+    double sqrtd = std::sqrt(discriminant);
+    double t = (h - sqrtd) / a;
+    if (!ray_int.surrounds(t))
+    {
+        t = (h + sqrtd) / a;
+
+        if (!ray_int.surrounds(t))
+            return std::nullopt;
+    }
+
+    Point3 point = ray.at(t);
+    Vector3 n = computeNormal(point);
+
+    Hit hit(point, n, t, material_);
+    hit.set_face_normal(ray, n);
+
+    return hit;
+}
+
+Vector3 Sphere::computeNormal(const Point3 &point) const
+{
+    return (point - center) / radius;
+}
+```
+
+### src/shapes/sphere.hh
+```
+#pragma once
+
+#include <cmath>
+
+#include "hit.hh"
+#include "material.hh"
+#include "object.hh"
+#include "point3.hh"
+
+class Sphere : public Object
+{
+public:
+    Sphere()
+        : Object(nullptr)
+        , center(0.0, 0.0, 0.0)
+        , radius(1.0)
+    {}
+
+    Sphere(const Point3 &center, double radius, Material *material)
+        : Object(material)
+        , center(center)
+        , radius(radius)
+    {}
+
+    std::optional<Hit> intersect(const Ray &ray,
+                                 const interval &ray_int) const override;
+
+private:
+    Point3 center;
+    double radius;
+
+    Vector3 computeNormal(const Point3 &point) const;
+};
+```
+
+### src/textures/noise_texture.cc
+```
+#include "noise_texture.hh"
+
+#include <algorithm>
+#include <cmath>
+
+#include "noise_texture.hh"
+
+double smoothstep(double edge0, double edge1, double x)
+{
+    double t = std::clamp((x - edge0) / (edge1 - edge0), 0.0, 1.0);
+    return t * t * (3.0 - 2.0 * t);
+}
+
+Vector3 vector_fbm(const Perlin &noise, const Point3 &p, int octaves)
+{
+    return Vector3(noise.fbm(p, octaves),
+                   noise.fbm(p + Point3(5.2, 1.3, 2.8), octaves),
+                   noise.fbm(p + Point3(10.4, 2.6, 5.6), octaves));
+}
+// RGB NoiseTexture::value(const Point3 &point) const
+// {
+//     double nx =
+//         2.0 * (point.x - min_bound_.x) / (max_bound_.x - min_bound_.x) - 1.0;
+//     double ny =
+//         2.0 * (point.y - min_bound_.y) / (max_bound_.y - min_bound_.y) - 1.0;
+//     double nz =
+//         2.0 * (point.z - min_bound_.z) / (max_bound_.z - min_bound_.z) - 1.0;
+//
+//     // distance du centre
+//     double d = std::sqrt(nx * nx + ny * ny + nz * nz);
+//
+//     double fade = smoothstep(1.0, 0.4, d);
+//
+//     Vector3 warp1 = vector_fbm(noise_, point * scale_ * 0.5, 4);
+//     Point3 warped_p1 = point + warp1 * 2.0;
+//
+//     Vector3 warp2 = vector_fbm(noise_, warped_p1 * scale_ * 1.5, 4);
+//     Point3 deeply_warped_p = warped_p1 + warp2 * 1.0;
+//
+//     double n = 0.5
+//         * (1.0
+//            + std::sin(scale_ * deeply_warped_p.z
+//                       + 10.0 * noise_.fbm(deeply_warped_p, 7)));
+//
+//     double final_n = n * fade;
+//
+//     final_n = std::clamp(final_n, 0.0, 1.0);
+//     return RGB(color_.r * final_n, color_.g * final_n, color_.b * final_n);
+// }
+
+RGB NoiseTexture::value(const Point3 &point) const
+{
+    double u = (point.x - min_bound_.x) / (max_bound_.x - min_bound_.x);
+    double v = (point.y - min_bound_.y) / (max_bound_.y - min_bound_.y);
+    double w = (point.z - min_bound_.z) / (max_bound_.z - min_bound_.z);
+
+    double dist_xz =
+        std::sqrt(std::pow(u - 0.5, 2) + std::pow(w - 0.5, 2)) * 2.0;
+    double radius_at_height = 0.1 + 0.9 * v;
+
+    double horizontal_fade =
+        smoothstep(radius_at_height, radius_at_height * 0.4, dist_xz);
+    double vertical_fade = smoothstep(1.0, 0.4, v);
+    double fade = horizontal_fade * vertical_fade;
+
+    if (fade < 0.001)
+        return RGB(0, 0, 0);
+
+    Vector3 warp1 = vector_fbm(noise_, point * scale_ * 0.5, 2);
+    Point3 warped_p1 = point + warp1 * 2.0;
+
+    Vector3 warp2 = vector_fbm(noise_, warped_p1 * scale_ * 1.5, 2);
+    Point3 deeply_warped_p = warped_p1 + warp2 * 1.0;
+
+    double n = 0.5
+        * (1.0
+           + std::sin(scale_ * deeply_warped_p.z
+                      + 10.0 * noise_.fbm(deeply_warped_p, 3)));
+
+    double final_n = n * fade;
+
+    final_n = std::clamp(final_n, 0.0, 1.0);
+    return RGB(color_.r * final_n, color_.g * final_n, color_.b * final_n);
+}
+```
+
+### src/textures/noise_texture.hh
+```
+#pragma once
+
+#include "perlin.hh"
+#include "texture.hh"
+
+class NoiseTexture : public Texture
+{
+public:
+    explicit NoiseTexture(const RGB &color, const Point3 &min_bound,
+                          const Point3 &max_bound, double scale = 1.0)
+        : color_(color)
+        , min_bound_(min_bound)
+        , max_bound_(max_bound)
+        , scale_(scale)
+    {}
+
+    RGB value(const Point3 &point) const override;
+
+private:
+    RGB color_;
+    Point3 min_bound_;
+    Point3 max_bound_;
+    double scale_;
+    Perlin noise_;
+};
+```
+
+### src/textures/solid_color.hh
+```
+#pragma once
+
+#include "texture.hh"
+
+class SolidColor : public Texture
+{
+public:
+    explicit SolidColor(const RGB &color)
+        : color_(color)
+    {}
+
+    RGB value(const Point3 & /*point*/) const override
+    {
+        return color_;
+    }
+
+private:
+    RGB color_;
+};
+```
+
+### src/volumes/heterogeneous_volume.cc
+```
+#include "heterogeneous_volume.hh"
+
+#include <cmath>
+
+#include "utils.hh"
+
+std::optional<Hit> HeterogeneousVolume::intersect(const Ray &ray,
+                                                  const interval &ray_int) const
+{
+    std::optional<Hit> hit_in = boundary_->intersect(ray, interval::universe);
+    if (!hit_in)
+        return std::nullopt;
+
+    std::optional<Hit> hit_out =
+        boundary_->intersect(ray, interval(hit_in->t + 0.0001, infinity));
+    if (!hit_out)
+        return std::nullopt;
+
+    if (hit_in->t < ray_int.min)
+        hit_in->t = ray_int.min;
+    if (hit_out->t > ray_int.max)
+        hit_out->t = ray_int.max;
+    if (hit_in->t >= hit_out->t)
+        return std::nullopt;
+    if (hit_in->t < 0)
+        hit_in->t = 0;
+
+    double ray_length = ray.direction.norm();
+    double t_current = hit_in->t;
+
+    while (true)
+    {
+        double dt = -std::log(random_double()) / density_majorant_;
+        t_current += dt / ray_length;
+
+        if (t_current >= hit_out->t)
+        {
+            Hit hit(ray.at(hit_out->t), Vector3(1, 0, 0), hit_out->t,
+                    material_);
+            hit.front_face = true;
+            hit.transmittance = 1.0;
+            hit.is_transmission = true;
+            return hit;
+        }
+
+        Point3 p = ray.at(t_current);
+        RGB tex_val = density_texture_->value(p);
+        double local_density =
+            density_majorant_ * (tex_val.r + tex_val.g + tex_val.b) / 3.0;
+
+        if (random_double() < local_density / density_majorant_)
+        {
+            Hit hit(p, Vector3(1, 0, 0), t_current, material_);
+            hit.front_face = true;
+            hit.transmittance = 1.0;
+            hit.is_transmission = false;
+            return hit;
+        }
+    }
+}
+```
+
+### src/volumes/heterogeneous_volume.hh
+```
+#pragma once
+
+#include "hit.hh"
+#include "interval.hh"
+#include "material.hh"
+#include "object.hh"
+#include "texture.hh"
+
+class HeterogeneousVolume : public Object
+{
+public:
+    HeterogeneousVolume(Object *boundary, double density_majorant,
+                        Texture *density_texture, Material *material)
+        : Object(material)
+        , boundary_(boundary)
+        , density_majorant_(density_majorant)
+        , density_texture_(density_texture)
+    {}
+
+    std::optional<Hit> intersect(const Ray &ray,
+                                 const interval &ray_int) const override;
+
+private:
+    Object *boundary_;
+    double density_majorant_;
+    Texture *density_texture_;
+};
+```
+
+### src/volumes/homogeneous_volume.cc
+```
+#include "homogeneous_volume.hh"
+
+#include <cmath>
+
+#include "utils.hh"
+
+std::optional<Hit> HomogeneousVolume::intersect(const Ray &ray,
+                                                const interval &ray_int) const
+{
+    std::optional<Hit> hit_in = boundary_->intersect(ray, interval::universe);
+    if (!hit_in)
+        return std::nullopt;
+
+    std::optional<Hit> hit_out =
+        boundary_->intersect(ray, interval(hit_in->t + 0.0001, infinity));
+    if (!hit_out)
+        return std::nullopt;
+
+    if (hit_in->t < ray_int.min)
+        hit_in->t = ray_int.min;
+    if (hit_out->t > ray_int.max)
+        hit_out->t = ray_int.max;
+
+    if (hit_in->t >= hit_out->t)
+        return std::nullopt;
+
+    if (hit_in->t < 0)
+        hit_in->t = 0;
+
+    double ray_length = ray.direction.norm();
+    double distance_inside_boundary = (hit_out->t - hit_in->t) * ray_length;
+    double hit_distance = -1.0 / density_ * std::log(random_double());
+
+    if (hit_distance > distance_inside_boundary)
+    {
+        double T = std::exp(-density_ * distance_inside_boundary);
+
+        Hit hit(ray.at(hit_out->t), Vector3(1, 0, 0), hit_out->t, material_);
+        hit.front_face = true;
+        hit.transmittance = T;
+        hit.is_transmission = true;
+        return hit;
+    }
+
+    double t = hit_in->t + hit_distance / ray_length;
+    Point3 point = ray.at(t);
+    Vector3 n = Vector3(1, 0, 0);
+
+    Hit hit(point, n, t, material_);
+    hit.front_face = true;
+    hit.transmittance = std::exp(-density_ * hit_distance);
+    hit.is_transmission = false;
+
+    return hit;
+}
+```
+
+### src/volumes/homogeneous_volume.hh
+```
+#pragma once
+
+#include "hit.hh"
+#include "interval.hh"
+#include "material.hh"
+#include "object.hh"
+
+class HomogeneousVolume : public Object
+{
+public:
+    HomogeneousVolume(Object *boundary, double density, Material *material)
+        : Object(material)
+        , boundary_(boundary)
+        , density_(density)
+    {}
+
+    std::optional<Hit> intersect(const Ray &ray,
+                                 const interval &ray_int) const override;
+
+private:
+    Object *boundary_;
+    double density_;
+};
+```

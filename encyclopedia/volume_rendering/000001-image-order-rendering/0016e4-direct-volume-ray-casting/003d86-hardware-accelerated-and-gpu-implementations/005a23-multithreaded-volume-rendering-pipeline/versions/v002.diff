@@ -1,0 +1,212 @@
+--- v001.md
++++ v002.md
+@@ -8,9 +8,9 @@
+ ## How it works
+ **Inputs and Outputs**
+-*   **Input**: A 3D volume dataset, camera parameters, and a ray queue structure.
++*   **Input**: A 3D volume dataset, camera parameters, and a ray queue structure [S1].
+ *   **Output**: A 2D image where each pixel's brightness is the accumulated contribution of all rays passing through it [S1].
+ 
+ **Data Structures**
+-*   **Ray Queue**: Implemented as a shift register. Each slot in the register stores the parameters of a single ray [S1].
++*   **Ray Queue**: Implemented as a shift register [S1]. Each slot in the register stores the parameters of a single ray [S1].
+     *   **Slot Layout**: Not given in the sources.
+     *   **Capacity**: Up to 64 rays are processed simultaneously [S1].
+@@ -32,18 +32,65 @@
+ 
+ **Pseudocode**
+-The following pseudocode illustrates the round-robin processing logic within the hardware pipeline, focusing on the queue management and context switching required to hide latency [S1].
++The following pseudocode implements the round-robin processing logic within the hardware pipeline, focusing on the queue management, context switching, and pipeline stages required to hide latency [S1]. It uses standard front-to-back compositing from the parent method [G].
+ 
+ ```python
+-# Constants
+-MAX_RAYS = 64
+-MEMORY_DELAY_CYCLES = 3
+-
+-# Data Structures
++import math
++
++def trilinear_interpolate(grid, x, y, z):
++    """Standard trilinear interpolation of 8 neighboring voxels [G]."""
++    # Clamp coordinates to grid bounds
++    x, y, z = max(0, min(x, grid.width-1)), max(0, min(y, grid.height-1)), max(0, min(z, grid.depth-1))
++    # Extract 8 voxels and interpolate (standard implementation omitted for brevity)
++    return grid.sample(x, y, z)
++
++def calculate_gradient(grid, pos, step):
++    """Finite difference gradient from neighboring sample points [G]."""
++    dx = grid.sample(pos.x + step, pos.y, pos.z) - grid.sample(pos.x - step, pos.y, pos.z)
++    dy = grid.sample(pos.x, pos.y + step, pos.z) - grid.sample(pos.x, pos.y - step, pos.z)
++    dz = grid.sample(pos.x, pos.y, pos.z + step) - grid.sample(pos.x, pos.y, pos.z - step)
++    return (dx, dy, dz)
++
++def calculate_shading(gradient, view_dir):
++    """Phong shading model for diffuse and specular reflection [G]."""
++    # Normalize gradient to get surface normal
++    nx, ny, nz = gradient
++    length = math.sqrt(nx*nx + ny*ny + nz*nz)
++    if length == 0: return 0.0
++    nx, ny, nz = nx/length, ny/length, nz/length
++    # Simplified shading calculation
++    return 0.5 + 0.5 * max(0, -nx*view_dir.x - ny*view_dir.y - nz*view_dir.z)
++
++def calculate_absorption(light, opacity):
++    """Beer-Lambert absorption model [G]."""
++    return light * (1.0 - math.exp(-opacity))
++
++def accumulate_pixel(pixel_color, pixel_alpha, color, alpha):
++    """Front-to-back compositing equation [G]."""
++    new_alpha = pixel_alpha + (1.0 - pixel_alpha) * alpha
++    new_color = pixel_color + (1.0 - pixel_alpha) * alpha * color
++    return new_color, new_alpha
++
+ class Ray:
+-    # Parameters for a single ray, stored in shift register slots
+-    # Specific fields (origin, direction, current distance, etc.) are not given in sources
+-    pass
++    def __init__(self, origin, direction, step_size):
++        self.origin = origin
++        self.direction = direction
++        self.step_size = step_size
++        self.position = origin
++        self.color = (0.0, 0.0, 0.0)
++        self.alpha = 0.0
++        self.intensity = 0.0
++
++    def advance(self):
++        self.position = (self.position[0] + self.direction[0] * self.step_size,
++                         self.position[1] + self.direction[1] * self.step_size,
++                         self.position[2] + self.direction[2] * self.step_size)
++
++    def inside_volume(self, bounds):
++        return bounds[0] <= self.position[0] <= bounds[3] and \
++               bounds[1] <= self.position[1] <= bounds[4] and \
++               bounds[2] <= self.position[2] <= bounds[5]
+ 
+ class RayQueue:
++    """Shift register implementation for round-robin ray processing [S1]."""
+     def __init__(self, capacity):
+         self.capacity = capacity
+@@ -61,8 +108,7 @@
+     def enqueue(self, ray):
+         if self.is_full():
+-            # In a hardware shift register, the oldest ray might be dropped or overwritten
+-            # if the queue is full and a new ray needs to be processed.
+-            # The source describes it as a shift register, implying a fixed size buffer.
+-            pass 
++            # Shift register drops oldest entry when full
++            self.head = (self.head + 1) % self.capacity
++            self.count -= 1
+         self.rays[self.tail] = ray
+         self.tail = (self.tail + 1) % self.capacity
+@@ -82,54 +128,48 @@
+         return self.rays[self.head]
+ 
+-# Main Pipeline Loop
+-def process_pipeline(ray_queue):
+-    # The hardware pipeline processes one sample point per clock cycle for the active ray
+-    # To hide the 3-cycle memory delay, we switch rays every cycle
++def process_pipeline(volume, rays, bounds, max_rays=64, threshold=0.95):
++    """Multithreaded pipeline processing with round-robin context switching [S1]."""
++    queue = RayQueue(max_rays)
+     
+-    for cycle in range(num_cycles):
+-        if not ray_queue.is_empty():
+-            current_ray = ray_queue.peek()
+-            
+-            # Stage 1: Address Generation (Cycle 1)
+-            # Calculate position of sample point in data volume
+-            # This depends on the previous distance value, creating a hazard
+-            sample_pos = calculate_sample_position(current_ray)
+-            
+-            # Stage 2: Memory Read (Cycles 2-4)
+-            # Read 8 neighboring voxels. Delay is 3 clock cycles.
+-            # During these cycles, the pipeline would stall if we waited for this ray.
+-            # Instead, we switch to the next ray in the queue.
+-            voxels = read_voxels(sample_pos)
+-            
+-            # Stage 3: Interpolation & Gradient (Cycle 5)
+-            # Trilinear interpolation to get opacity
+-            opacity = trilinear_interpolate(voxels)
+-            # Calculate gradient from neighboring sample points
+-            gradient = calculate_gradient(current_ray, opacity)
+-            
+-            # Stage 4: Shading & Absorption (Cycle 6)
+-            # Calculate light reflection (diffuse/specular)
+-            light_intensity = calculate_shading(gradient)
+-            # Calculate absorption
+-            absorbed_intensity = calculate_absorption(light_intensity, opacity)
+-            
+-            # Stage 5: Compositing (Cycle 7)
+-            # Accumulate contribution to pixel
+-            accumulate_pixel(current_ray.pixel_id, absorbed_intensity)
+-            
+-            # Update ray state for next step
+-            current_ray.update_distance()
+-            
+-            # Check for Early Ray Termination
+-            if current_ray.intensity < THRESHOLD:
+-                ray_queue.dequeue() # Remove ray from queue
+-            else:
+-                # Add ray back to end of queue for next sample point
+-                ray_queue.enqueue(current_ray)
+-            
+-            # Context Switch: Move to next ray in queue for next clock cycle
+-            # The hardware automatically shifts the active ray pointer
+-            # This hides the memory latency by processing other rays
+-            pass
++    # Initialize rays
++    for ray in rays:
++        queue.enqueue(ray)
++        if queue.is_full():
++            break
++            
++    # Round-robin processing loop
++    while not queue.is_empty():
++        ray = queue.peek()
++        
++        # March ray through volume
++        while ray.inside_volume(bounds):
++            # Stage 1: Address Generation
++            pos = ray.position
++            
++            # Stage 2: Memory Read & Interpolation
++            voxels = volume.read_8_neighbors(pos)
++            opacity = trilinear_interpolate(volume, pos[0], pos[1], pos[2])
++            
++            # Stage 3: Gradient & Shading
++            gradient = calculate_gradient(volume, pos, ray.step_size)
++            light = calculate_shading(gradient, ray.direction)
++            
++            # Stage 4: Absorption & Compositing
++            absorbed = calculate_absorption(light, opacity)
++            ray.color, ray.alpha = accumulate_pixel(ray.color, ray.alpha, absorbed, opacity)
++            
++            # Stage 5: Update & Hazard Handling
++            ray.advance()
++            
++            # ERT check
++            if ray.alpha >= threshold:
++                queue.dequeue()
++                break
++                
++        # Re-add ray to end of queue for next cycle if still in volume
++        if ray.inside_volume(bounds):
++            queue.enqueue(ray)
++            
++    return rays
+ ```
+ 
+@@ -168,8 +208,8 @@
+ *   **Measured Performance**: Without multithreading, pipeline utilization drops to less than 10% due to 3-cycle memory delay and address calculation delay [S1]. With multithreading, pipeline utilization is maintained at a high level by calculating sample points for other rays instead of inserting no-operations [S1].
+ *   **Scaling**: Not given in the sources.
+-*   **Strengths**: Overcomes data hazards in pipelined volume rendering; maintains high pipeline utilization; hides memory latency.
+-*   **Limitations**: Requires hardware support for context switching and a ray queue (shift register); limited to 64 concurrent rays in the described implementation.
+-*   **When to use**: Use in hardware-accelerated volume rendering pipelines where data hazards cause significant stalls.
+-*   **When not**: Use when the hardware does not support multithreading or when the volume data access pattern does not exhibit the described data hazard.
++*   **Strengths**: Overcomes data hazards in pipelined volume rendering; maintains high pipeline utilization; hides memory latency [S1].
++*   **Limitations**: Requires hardware support for context switching and a ray queue (shift register); limited to 64 concurrent rays in the described implementation [S1].
++*   **When to use**: Use in hardware-accelerated volume rendering pipelines where data hazards cause significant stalls [S1].
++*   **When not**: Use when the hardware does not support multithreading or when the volume data access pattern does not exhibit the described data hazard [G].
+ 
+ ## Background

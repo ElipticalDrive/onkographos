@@ -1,0 +1,365 @@
+--- v006.md
++++ v007.md
+@@ -1,96 +1,283 @@
+ # SUDS
+-Also called: SUDS, Scalable Urban Dynamic Scenes
++Also called: Scalable Urban Dynamic Scenes
+ 
+ ## Overview
+-SUDS is a 4D radiance field representation designed for large-scale dynamic urban scenes that factorizes the scene into three separate multi-resolution hash table structures to efficiently encode static, dynamic, and far-field radiance fields [S1]. It solves the problem of scaling neural reconstruction to city-level environments with significant dynamism and multi-video inputs by using unlabeled target signals (RGB, sparse LiDAR, 2D descriptors, and 2D optical flow) for supervision, eliminating the need for expensive 3D bounding box or panoptic segmentation annotations [S1]. Unlike sibling methods that rely on per-object NeRFs or supervised labels, SUDS handles ego-motion and multi-video representations by decomposing the world into stationary topography, transient/dynamic objects, and an environment map, enabling free-viewpoint rendering, semantic decomposition, and 3D scene flow estimation at arbitrary poses and time steps [S1].
++SUDS is a 4D radiance field representation designed for large-scale dynamic urban scenes that factorizes the scene into three separate multi-resolution hash table data structures to efficiently encode static, dynamic, and far-field radiance fields [S1]. It solves the problem of scaling neural reconstruction to city-level environments with significant dynamism and ego-motion by using unlabeled target signals (RGB, sparse LiDAR, 2D descriptors, 2D optical flow) for supervision, avoiding the need for expensive 3D bounding box or panoptic segmentation annotations [S1]. Unlike sibling methods that rely on per-object NeRFs or supervised labels, SUDS handles multi-video representations and ego-motion while maintaining memory efficiency through spatial partitioning and hash-based feature storage [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+ *   **Inputs:** Ordered RGB images from $N$ videos taken at different days with diverse weather/lighting, associated camera poses, aligned sparse LiDAR depth measurements, 2D self-supervised DINO descriptors, and 2D optical flow predictions [S1].
+-*   **Outputs:** Rendered RGB color $\hat{C}$, rendered semantic features $\hat{F}$, predicted density $\sigma$, predicted 3D scene flow vectors $s_{t0}$, and shadow ratio $\rho_d$ [S1].
++*   **Outputs:** View-dependent color $\mathbf{c}$, volume density $\sigma$, semantic features $\Phi$, and 3D scene flow vectors $\mathbf{s}$ for any position $\mathbf{x}$, viewing direction $\mathbf{d}$, time $t$, and video ID $vid$ [S1].
+ 
+ **Data Structures:**
+-The representation is partitioned into $K$ spatial cells, each trained independently. Each cell contains three branches: Static, Dynamic, and Far-field. Each branch uses a multi-resolution hash table hierarchy.
+-*   **Hash Tables:** For each branch $b \in \{s, d, e\}$ (static, dynamic, environment) and resolution level $l \in \{0, \dots, L-1\}$, features are stored in a hash table.
+-*   **Feature Vector:** Each hash entry stores a feature vector $f \in \mathbb{R}^F$.
+-*   **Hash Indexing:** Instead of storing features at voxel corners, indices are computed via hash functions:
+-    *   Static: $i_{l,s} = \text{static\_hash}(\text{space}(v_{l,s}))$
+-    *   Dynamic: $i_{l,d} = \text{dynamic\_hash}(\text{space}(v_{l,d}), \text{time}(v_{l,d}), \text{vid})$
+-    *   Environment: $i_{l,e} = \text{env\_hash}(\text{dir}(v_{l,e}), \text{vid})$
+-    *   Where $v_{l,s}$ are 3D spatial voxels, $v_{l,d}$ are 4D spacetime voxels, and $v_{l,e}$ are 3D direction voxels [S1].
+-*   **Hash Collisions:** Handled via gradient averaging [S1].
+-
+-**Numbered Steps:**
+-
+-1.  **Spatial Partitioning:** Split the scene into $K$ spatial cells with centroids $k \in \mathbb{R}^3$. Generate training datasets for each cell by including only datapoints whose camera rays intersect the cell. Prune irrelevant rays using LiDAR depth measurements to ensure visibility [S1].
+-2.  **Voxel Lookup:** For an input coordinate $(x, d, t, \text{vid})$ where $x \in \mathbb{R}^3$ is position, $d \in \mathbb{R}^3$ is viewing direction, $t$ is frame index, and $\text{vid} \in \{1, \dots, N\}$ is video ID, find surrounding voxels at $L$ resolution levels for the static ($v_{l,s}$), dynamic ($v_{l,d}$), and far-field ($v_{l,e}$) branches. Resolution doubles between levels [S1].
+-3.  **Hash Indexing:** Compute hash indices for the corners of the surrounding voxels using the specific hash functions defined above. The video ID is used as an auxiliary input to index separate interpolating functions for each video without linear memory growth [S1].
+-4.  **Feature Interpolation:**
+-    *   Look up feature vectors corresponding to the corners.
+-    *   Perform linear interpolation for the static branch.
+-    *   Perform quadlinear interpolation for the dynamic 4D branch.
+-    *   Concatenate the interpolated features from all $L$ levels into a feature vector $f \in \mathbb{R}^{LF}$ [S1].
+-5.  **MLP Evaluation (Per Branch):** Pass the concatenated feature vector $f$ and auxiliary inputs into branch-specific MLPs to obtain outputs:
+-    *   **Static Branch:** View-dependent color $c_s(x, d, A_{\text{vid}} F(t)) \in \mathbb{R}^3$ and view-independent density $\sigma_s(x) \in \mathbb{R}$. Lighting variations are modeled by conditioning on a latent embedding $A_{\text{vid}} F(t)$, where $A_{\text{vid}}$ is a video-specific matrix and $F(t)$ is a Fourier-encoded time index [S1].
+-    *   **Dynamic Branch:** Time/video-dependent density $\sigma_d(x, t, \text{vid}) \in \mathbb{R}$, color $c_d(x, t, \text{vid}, d) \in \mathbb{R}^3$, scalar shadow ratio $\rho_d(x, t, \text{vid}) \in [0, 1]$, and 3D scene flow vectors $s_{t0}(x, t, \text{vid}) \in \mathbb{R}^3$ (forward and backward, values in $[-1, 1]$) [S1].
+-    *   **Far-field Branch:** Environment map color $c_e(d, \text{vid}) \in \mathbb{R}^3$ [S1].
+-    *   **Semantic Heads:** Each branch outputs $C$-dimensional semantic features $\Phi_s(x)$, $\Phi_d(x, t, \text{vid})$, and $\Phi_e(d, \text{vid})$ to distill DINO features [S1].
+-6.  **Density and Radiance Combination:**
+-    *   Compute total density: $\sigma(x, t, \text{vid}) = \sigma_s(x) + \sigma_d(x, t, \text{vid})$ [S1].
+-    *   Compute total radiance:
+-        $$ c(x, t, \text{vid}, d) = \frac{(1 - \rho_d)\sigma_s c_s(x, d, A_{\text{vid}} F(t)) + \sigma_d c_d(x, t, \text{vid}, d)}{\sigma} $$
+-        The shadow ratio $\rho_d$ scales down the static color to model shadows [S1].
+-7.  **Rendering:** For a camera ray $r$ with direction $d$ at frame $t$ and video $\text{vid}$, accumulate transmittance $T(t)$ and radiance along sampled points $r(t)$:
+-    $$ \hat{C}(r, t, \text{vid}) = \int_0^{+\infty} T(t) \sigma(r(t), t, \text{vid}) c(r(t), t, \text{vid}, d) dt + T(+\infty) c_e(d, \text{vid}) $$
+-    where $T(t) = \exp\left(-\int_0^t \sigma(r(s), t, \text{vid}) ds\right)$. If the ray does not hit geometry within the foreground, it intersects the far-field environment map [S1].
+-8.  **Loss Calculation:** Minimize the total loss $\mathcal{L}$, which is a weighted sum of reconstruction, warping, flow, regularization, and factorization losses (see formulas below) [S1].
+-
+-**Formulas:**
+-
+-*   **Reconstruction Losses:**
+-    *   Photometric (L2): $\mathcal{L}_c(r) = \| C(r) - \hat{C}(r) \|^2$ [S1].
+-    *   Feature (L1): $\mathcal{L}_f(r) = \| F(r) - \hat{F}(r) \|_1$ [S1].
+-    *   Depth (L2): $\mathcal{L}_d(r) = \| D(r) - \hat{D}(r) \|^2$, where $\hat{D}(r) = \int_0^{+\infty} T(s) \sigma(r(s)) ds$ [S1].
+-
+-*   **Flow Losses:**
+-    *   Predict 3D position $\hat{X}_{t0}(r) = \int_0^{+\infty} T(t) \sigma(r(t)) (r(t) + s_{t0}(r(t))) dt$. Render to 2D using neighboring camera matrix. Minimize distance from observed optical flow $O$: $\mathcal{L}_o(r) = \sum_{t0} \| X(o) - \hat{X}_{t0}(r) \|_1$ [S1].
+-    *   Cycle Consistency: $\mathcal{L}_{cyc}(r) = \sum_{t0} \sum_x w_{t0}(x,t) \| s_{t0}(x,t) + s_t(x+s_{t0}, t-t0) \|_1$ [S1].
+-    *   Spatial/Temporal Smoothness: $\mathcal{L}_{sm}$ [S1].
+-    *   Static Scene Prior: $\mathcal{L}_{slo} = \sum_{t0} \sum_x \| s_{t0}(x,t) \|_1$ [S1].
+-
+-*   **Warping Losses:**
+-    *   Advect samples using predicted flow $s_{t0}$ to get warped density $\sigma^w$, color $c^w$, features $\Phi^w$. Render warped color $\hat{C}^w$ and feature $\hat{F}^w$.
+-    *   Downweight loss in ambiguous regions using weight $W_{t0}(r)$ derived from dynamic geometry difference.
+-    *   $\mathcal{L}_c^w(r) = \sum_{t0 \in [-1,1]} (1 - W_{t0})(r) \| C(r) - \hat{C}_{t0}^w(r) \|^2$ [S1].
+-    *   $\mathcal{L}_f^w(r) = \sum_{t0 \in [-1,1]} (1 - W_{t0})(r) \| F(r) - \hat{F}_{t0}^w(r) \|_1$ [S1].
+-
+-*   **Static-Dynamic Factorization Losses:**
+-    *   Skewed Binary Entropy: $\mathcal{L}_e(r) = \int_0^{+\infty} H\left(\frac{\sigma_d(r(t))}{\sigma_s(r(t)) + \sigma_d(r(t))}\right) dt$ with $k=1.75$, where $H(x) = -(x \log x + (1-x) \log (1-x))$ [S1].
+-    *   Max Dynamic Ratio: $\mathcal{L}_d(r) = \max_{r(t)} \frac{\sigma_d(r(t))}{\sigma_s(r(t)) + \sigma_d(r(t))}$ [S1].
+-    *   Shadow Loss: $\mathcal{L}_\rho(r) = \int_0^{+\infty} \rho_d(r(t))^2 dt$ [S1].
++The scene is decomposed into $K$ spatial cells with centroids $\mathbf{k} \in \mathbb{R}^3$. Each cell contains three branches, each modeled by a multi-resolution hash table hierarchy with $L$ levels, where resolution doubles between levels [S1].
++1.  **Static Branch:** Stores 3D spatial voxels $\mathbf{v}_{l,s}$. Features are indexed by spatial position only.
++2.  **Dynamic Branch:** Stores 4D spacetime voxels $\mathbf{v}_{l,d}$. Features are indexed by spatial position, time, and video ID.
++3.  **Far-field Branch:** Stores 3D voxels $\mathbf{v}_{l,e}$ indexed by normalized 3D direction vectors $\mathbf{d}$ and video ID, modeling the environment map [S1].
++
++Each voxel corner in the hash tables stores a feature vector $\mathbf{f} \in \mathbb{R}^F$, where $F$ is the feature dimensionality [S1]. Hash collisions are handled via gradient averaging [S1].
+ 
+ **Parameters:**
+-*   $F$: Dimensionality of feature vectors in hash tables.
+-*   $L$: Number of resolution levels in hash table hierarchy (resolution doubles between levels).
+-*   $N$: Number of input videos.
+-*   $C$: Dimensionality of DINO feature grid output ($\mathbb{R}^{H \times W \times C}$).
+-*   $k$: Constant set to 1.75 in skewed binary entropy loss [S1].
+-*   Training: 250,000 iterations, 4098 rays per batch, Adam optimizer, initial learning rate $5 \times 10^{-3}$ decaying to $5 \times 10^{-4}$ [S1].
+-
+-**Edge Cases and Pitfalls:**
+-*   **Hash Collisions:** Handled via gradient averaging, which may introduce noise if collisions are frequent [S1].
+-*   **Ambiguous Regions:** Warping losses must be downweighted in regions with occlusions or ambiguous dynamic geometry to prevent incorrect flow supervision [S1].
+-*   **Shadow Over-explanation:** The shadow loss penalizes the squared magnitude of the shadow ratio to prevent the model from using shadows to explain dark regions incorrectly [S1].
+-*   **Memory Growth:** Video ID is used in hashing but not interpolation to avoid linear memory growth with the number of videos [S1].
++*   $L$: Number of resolution levels in the hash table hierarchy [S1].
++*   $F$: Dimensionality of feature vectors in the hash tables [S1].
++*   $N$: Number of input videos [S1].
++*   $C$: Dimensionality of the DINO feature grid output ($\mathbb{R}^{H \times W \times C}$) [S1].
++*   $k$: Constant set to 1.75 in the skewed binary entropy loss [S1].
++*   Training: 250,000 iterations, 4098 rays per batch, Adam optimizer with learning rate decaying from $5 \times 10^{-3}$ to $5 \times 10^{-4}$ [S1].
++
++**Algorithm Steps:**
++
++1.  **Spatial Partitioning and Data Preparation:**
++    Split the scene into $K$ spatial cells. For each cell, generate a training dataset including only datapoints whose camera rays intersect the cell. Prune irrelevant rays using LiDAR depth measurements to ensure visibility [S1].
++
++2.  **Hash Indexing:**
++    For an input coordinate $(\mathbf{x}, \mathbf{d}, t, vid)$, find surrounding voxels at $L$ resolution levels for the static ($\mathbf{v}_{l,s}$), dynamic ($\mathbf{v}_{l,d}$), and far-field ($\mathbf{v}_{l,e}$) branches. Compute hash indices for the corners of these voxels:
++    $$ i_{l,s} = \text{static\_hash}(\text{space}(\mathbf{v}_{l,s})) $$
++    $$ i_{l,d} = \text{dynamic\_hash}(\text{space}(\mathbf{v}_{l,d}), \text{time}(\mathbf{v}_{l,d}), vid) $$
++    $$ i_{l,e} = \text{env\_hash}(\text{dir}(\mathbf{v}_{l,e}), vid) $$
++    [S1]
++
++3.  **Feature Interpolation:**
++    Look up feature vectors corresponding to the hashed corners. Linearly interpolate features for the static branch. Use quadlinear interpolation for the dynamic 4D branch. Concatenate the interpolated features from all $L$ levels into a feature vector $\mathbf{f} \in \mathbb{R}^{LF}$ [S1].
++
++4.  **Branch Evaluation (MLP):**
++    Pass $\mathbf{f}$ and auxiliary inputs into separate MLPs for each branch:
++    *   **Static Branch:** Compute view-dependent color $\mathbf{c}_s(\mathbf{x}, \mathbf{d}, \mathbf{A}_{vid}\mathbf{F}(t)) \in \mathbb{R}^3$ and view-independent density $\sigma_s(\mathbf{x}) \in \mathbb{R}$. Lighting variations are conditioned using a video-specific matrix $\mathbf{A}_{vid}$ and Fourier-encoded time index $\mathbf{F}(t)$ [S1].
++    *   **Dynamic Branch:** Compute time/video-dependent density $\sigma_d(\mathbf{x}, t, vid) \in \mathbb{R}$, color $\mathbf{c}_d(\mathbf{x}, t, vid, \mathbf{d}) \in \mathbb{R}^3$, and scalar shadow ratio $\rho_d(\mathbf{x}, t, vid) \in [0, 1]$. Also predict forward/backward 3D scene flow $\mathbf{s}_{t0}(\mathbf{x}, t, vid) \in \mathbb{R}^3$ with values in $[-1, 1]$ [S1].
++    *   **Far-field Branch:** Model far-field radiance with environment map $\mathbf{c}_e(\mathbf{d}, vid) \in \mathbb{R}^3$ [S1].
++    *   **Semantic Heads:** Each branch outputs $C$-dimensional semantic features $\Phi_s, \Phi_d, \Phi_e$ to distill DINO features [S1].
++
++5.  **Density and Radiance Combination:**
++    Compute total density:
++    $$ \sigma(\mathbf{x}, t, vid) = \sigma_s(\mathbf{x}) + \sigma_d(\mathbf{x}, t, vid) $$
++    Compute total radiance, scaling static color by the shadow ratio:
++    $$ \mathbf{c}(\mathbf{x}, t, vid, \mathbf{d}) = \frac{(1 - \rho_d)\sigma_s \mathbf{c}_s + \sigma_d \mathbf{c}_d}{\sigma} $$
++    [S1]
++
++6.  **Rendering:**
++    Render color $\hat{\mathbf{C}}$ for a camera ray $\mathbf{r}$ by accumulating transmittance along sampled points $\mathbf{r}(t)$:
++    $$ \hat{\mathbf{C}}(\mathbf{r}, t, vid) = \int_0^{+\infty} T(t)\sigma(\mathbf{r}(t), t, vid)\mathbf{c}(\mathbf{r}(t), t, vid, \mathbf{d}) dt + T(+\infty)\mathbf{c}_e(\mathbf{d}, vid) $$
++    where $T(t) = \exp\left(-\int_0^t \sigma(\mathbf{r}(s), t, vid) ds\right)$ [S1].
++
++7.  **Loss Calculation:**
++    Minimize the following losses:
++    *   **Reconstruction:** L2 photometric loss $\mathcal{L}_c(\mathbf{r}) = \|\mathbf{C}(\mathbf{r}) - \hat{\mathbf{C}}(\mathbf{r})\|^2$ and L1 feature loss $\mathcal{L}_f(\mathbf{r}) = \|\mathbf{F}(\mathbf{r}) - \hat{\mathbf{F}}(\mathbf{r})\|_1$ [S1].
++    *   **Depth:** L2 loss between rendered depth $\hat{D}(\mathbf{r})$ and LiDAR depth $D(\mathbf{r})$ [S1].
++    *   **Flow:** Render 2D optical flow from predicted 3D scene flow $\hat{\mathbf{X}}_{t0}$ and minimize L1 distance to observed optical flow $\mathbf{O}$ [S1].
++    *   **Warping:** Advect samples using predicted flow to warp density, color, and features. Render warped color $\hat{\mathbf{C}}^w$ and feature $\hat{\mathbf{F}}^w$. Minimize L2/L1 losses downweighted by a weight $W_{t0}(\mathbf{r})$ derived from dynamic geometry difference [S1].
++    *   **Flow Regularization:** Cycle consistency $\mathcal{L}_{cyc}$, spatial/temporal smoothness $\mathcal{L}_{sm}$, and static scene prior $\mathcal{L}_{slo}$ (penalizing flow in static regions) [S1].
++    *   **Static-Dynamic Factorization:** Skewed binary entropy loss $\mathcal{L}_e(\mathbf{r}) = \int_0^{+\infty} H\left(\frac{\sigma_d}{\sigma_s + \sigma_d}\right)^k dt$ with $k=1.75$, and penalty on max dynamic ratio $\mathcal{L}_d$ [S1].
++    *   **Shadow Loss:** Penalize squared magnitude of shadow ratio $\mathcal{L}_\rho$ [S1].
++
++**Pseudocode:**
++
++```python
++import numpy as np
++
++def static_hash(space_voxel):
++    # Hash function for static branch based on spatial position
++    return hash(space_voxel)
++
++def dynamic_hash(space_voxel, time_val, vid):
++    # Hash function for dynamic branch based on space, time, and video ID
++    return hash((space_voxel, time_val, vid))
++
++def env_hash(dir_voxel, vid):
++    # Hash function for far-field branch based on direction and video ID
++    return hash((dir_voxel, vid))
++
++def quadlinear_interpolation(features, coords):
++    # Linear interpolation for 4D dynamic branch
++    # features: array of corner features
++    # coords: relative position within voxel
++    return np.mean(features) # Simplified; actual implementation requires trilinear/quadlinear logic
++
++def interpolate_features(hash_indices, voxel_corners, is_dynamic):
++    # Look up features and interpolate
++    features = []
++    for idx in hash_indices:
++        # Retrieve feature vector from hash table
++        feat = get_feature_from_hash_table(idx)
++        features.append(feat)
++    
++    if is_dynamic:
++        # Quadlinear interpolation for 4D
++        interpolated = quadlinear_interpolation(features, voxel_corners)
++    else:
++        # Linear interpolation for 3D
++        interpolated = np.mean(features, axis=0)
++    return interpolated
++
++def fourier_encode_time(t, num_freq_bands=10):
++    # Fourier encoding of time index
++    t = t.reshape(-1, 1)
++    scales = np.array([2**i for i in range(num_freq_bands)])
++    emb = np.sin(np.concatenate([t * s for s in scales], axis=1))
++    return emb
++
++def compute_lighting_embedding(vid, t, A_vid):
++    # Compute latent embedding for lighting variations
++    F_t = fourier_encode_time(t)
++    return A_vid @ F_t
++
++def evaluate_static_branch(f_static, d, vid, t, A_vid):
++    # Static branch MLP
++    lighting_emb = compute_lighting_embedding(vid, t, A_vid)
++    # Concatenate f_static, d, lighting_emb
++    input_vec = np.concatenate([f_static, d, lighting_emb])
++    # Pass through MLP
++    sigma_s = mlp_static_sigma(input_vec)
++    c_s = mlp_static_color(input_vec)
++    phi_s = mlp_static_semantic(input_vec)
++    return sigma_s, c_s, phi_s
++
++def evaluate_dynamic_branch(f_dynamic, d, vid, t):
++    # Dynamic branch MLP
++    # Concatenate f_dynamic, d
++    input_vec = np.concatenate([f_dynamic, d])
++    # Pass through MLP
++    sigma_d = mlp_dynamic_sigma(input_vec)
++    c_d = mlp_dynamic_color(input_vec)
++    rho_d = mlp_dynamic_shadow(input_vec)
++    s_flow = mlp_dynamic_flow(input_vec)
++    phi_d = mlp_dynamic_semantic(input_vec)
++    return sigma_d, c_d, rho_d, s_flow, phi_d
++
++def evaluate_far_field_branch(f_far, d, vid):
++    # Far-field branch (Environment Map)
++    # Concatenate f_far, d
++    input_vec = np.concatenate([f_far, d])
++    c_e = mlp_far_field_color(input_vec)
++    phi_e = mlp_far_field_semantic(input_vec)
++    return c_e, phi_e
++
++def render_ray(r, t, vid, K_cells, A_vids):
++    # r: ray origin and direction
++    # t: time index
++    # vid: video ID
++    # K_cells: list of spatial cell objects
++    
++    sigma_total = 0.0
++    c_total = np.zeros(3)
++    phi_total = np.zeros(C)
++    T = 1.0
++    
++    # Sample points along ray
++    for z in sample_points_along_ray(r):
++        x = r.origin + z * r.direction
++        
++        # Determine which cell x belongs to
++        cell = find_cell(x, K_cells)
++        
++        # Find surrounding voxels at L levels for static, dynamic, far-field
++        # This involves finding voxel corners for each level l in 0..L-1
++        static_voxels = get_voxel_corners(x, level=L, type='static')
++        dynamic_voxels = get_voxel_corners(x, level=L, type='dynamic')
++        far_voxels = get_voxel_corners(x, level=L, type='far')
++        
++        # Hash indices
++        static_indices = [static_hash(v.space) for v in static_voxels]
++        dynamic_indices = [dynamic_hash(v.space, t, vid) for v in dynamic_voxels]
++        far_indices = [env_hash(v.dir, vid) for v in far_voxels]
++        
++        # Interpolate features
++        f_static = interpolate_features(static_indices, static_voxels, is_dynamic=False)
++        f_dynamic = interpolate_features(dynamic_indices, dynamic_voxels, is_dynamic=True)
++        f_far = interpolate_features(far_indices, far_voxels, is_dynamic=False)
++        
++        # Evaluate branches
++        sigma_s, c_s, phi_s = evaluate_static_branch(f_static, r.direction, vid, t, A_vids[vid])
++        sigma_d, c_d, rho_d, s_flow, phi_d = evaluate_dynamic_branch(f_dynamic, r.direction, vid, t)
++        c_e, phi_e = evaluate_far_field_branch(f_far, r.direction, vid)
++        
++        # Combine densities
++        sigma = sigma_s + sigma_d
++        
++        # Combine colors
++        # c = ((1 - rho_d)*sigma_s*c_s + sigma_d*c_d) / sigma
++        if sigma > 1e-5:
++            c_branch = ((1 - rho_d) * sigma_s * c_s + sigma_d * c_d) / sigma
++        else:
++            c_branch = c_e
++            
++        # Combine semantics
++        phi_branch = ((sigma_s * phi_s + sigma_d * phi_d) / sigma) if sigma > 1e-5 else phi_e
++        
++        # Accumulate
++        weight = T * sigma
++        c_total += weight * c_branch
++        phi_total += weight * phi_branch
++        T *= (1.0 - sigma)
++        
++        if T < 1e-4:
++            break
++            
++    # Add far-field contribution if ray escapes
++    c_total += T * c_e
++    phi_total += T * phi_e
++    
++    return c_total, phi_total, sigma, s_flow
++
++def compute_losses(rendered_color, rendered_feature, gt_color, gt_feature, gt_depth, gt_flow, sigma_s, sigma_d, rho_d, s_flow, vid, t):
++    # Reconstruction Losses
++    L_c = np.mean((rendered_color - gt_color)**2)
++    L_f = np.mean(np.abs(rendered_feature - gt_feature))
++    
++    # Depth Loss
++    rendered_depth = compute_rendered_depth(sigma_s, sigma_d)
++    L_d = np.mean((rendered_depth - gt_depth)**2)
++    
++    # Flow Loss
++    # Predict 3D position from flow and render to 2D
++    predicted_2d_flow = project_3d_flow_to_2d(s_flow)
++    L_o = np.mean(np.abs(predicted_2d_flow - gt_flow))
++    
++    # Warping Loss
++    # Advect samples using s_flow
++    warped_sigma, warped_color, warped_feature = advect_samples(sigma_s, sigma_d, rendered_color, rendered_feature, s_flow)
++    # Downweight in ambiguous regions
++    W = compute_warping_weight(sigma_s, sigma_d)
++    L_w_c = np.mean((1 - W) * (warped_color - gt_color)**2)
++    L_w_f = np.mean((1 - W) * np.abs(warped_feature - gt_feature))
++    
++    # Flow Regularization
++    L_cyc = compute_cycle_consistency(s_flow)
++    L_sm = compute_smoothness(s_flow)
++    L_slo = np.mean(np.abs(s_flow)) # Static scene prior
++    
++    # Static-Dynamic Factorization
++    # Skewed binary entropy
++    ratio = sigma_d / (sigma_s + sigma_d + 1e-5)
++    H = -(ratio * np.log(ratio + 1e-5) + (1 - ratio) * np.log(1 - ratio + 1e-5))
++    L_e = np.mean(H**1.75) # k=1.75
++    L_d_ratio = np.mean(np.max(ratio))
++    
++    # Shadow Loss
++    L_rho = np.mean(rho_d**2)
++    
++    total_loss = L_c + L_f + L_d + L_o + L_w_c + L_w_f + L_cyc + L_sm + L_slo + L_e + L_d_ratio + L_rho
++    return total_loss
++```
++
++## Subtopics
++
++### Spatial Partitioning
++Splits the scene into $K$ cells to enable parallel training and memory efficiency. It uses visibility reasoning with LiDAR depth to prune irrelevant rays for each cell, ensuring that occluded regions are not processed [S1].
++
++### Multi-Video Hashing
++Uses video ID ($vid$) as an auxiliary input to the hash function to index separate interpolating functions for each video. This allows the model to handle distinct moving objects and illumination conditions across videos without linear memory growth [S1].
++
++### Shadow Modeling
++Explicitly models a shadow field $\rho_d$ in the dynamic branch to scale down static color. This improves depth reconstruction and static/dynamic factorization by accounting for shadows cast by dynamic objects [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Training is 10x quicker than state-of-the-art methods relying on ground truth 3D bounding box annotations [S1].
+-*   **Memory Complexity:** Scales to tens of thousands of objects across 1.2 million frames from 1700 videos spanning hundreds of kilometers. Memory usage is managed via spatial partitioning into $K$ cells and multi-resolution hash tables, avoiding the per-object memory constraints of methods like NSG (which required >1TB for 30s video) [S1].
+-*   **Scaling:** Scales to city-level environments ($>100 \text{ km}^2$) through spatial partitioning and hash table representations [S1].
+-*   **Strengths:** Handles ego-motion, multi-video representations, and large-scale dynamism without supervised 3D labels. Enables unsupervised 3D instance segmentation and scene flow [S1].
+-*   **Limitations:** Relies on the quality of self-supervised 2D descriptors and optical flow. Performance depends on the accuracy of sparse LiDAR depth for visibility pruning [S1].
++*   **Time Complexity:** Training is 10x quicker than state-of-the-art methods that rely on ground truth 3D bounding box annotations [S1].
++*   **Memory Complexity:** Scales to tens of thousands of objects across 1.2 million frames from 1700 videos spanning hundreds of kilometers. Memory usage is controlled by multi-resolution hash tables and spatial partitioning, avoiding the >1TB memory requirement of per-object NeRFs like NSG for similar durations [S1].
++*   **Performance:** Surpasses state-of-the-art methods on KITTI and Virtual KITTI 2 datasets [S1].
++*   **Strengths:** Handles ego-motion, multi-video representations, and large-scale dynamic scenes without supervised 3D labels. Enables free-viewpoint rendering, semantic decomposition, and 3D scene flow [S1].
++*   **Limitations:** Relies on self-supervised 2D descriptors (DINO) and optical flow, which may be less robust than explicit 3D labels in highly ambiguous regions. Requires careful tuning of loss weights for flow and factorization [S1].
+ 
+ ## Background
+-SUDS was introduced in the paper "SUDS: Scalable Urban Dynamic Scenes" [S1]. It addresses the limitations of prior dynamic scene representations that required supervised inputs like panoptic segmentation labels or bounding boxes, which are difficult to acquire for in-the-wild captures. It builds on ideas from Instant-NGP [S1] for hash table encoding and MegaNeRF [S1] for spatial partitioning. It is used for free-viewpoint synthesis of dynamic urban scenes, unsupervised 3D instance segmentation, and 3D cuboid detection [S1].
++SUDS (Scalable Urban Dynamic Scenes) was introduced in 2023 by the authors of the paper "SUDS: Scalable Urban Dynamic Scenes" [S1]. It addresses the limitations of prior dynamic scene representations that required supervised inputs like panoptic segmentation labels or bounding boxes, which are difficult to acquire for in-the-wild captures. SUDS builds on the multi-resolution hash table concept from Instant-NGP [S1] and extends it to 4D with a three-branch decomposition (static, dynamic, far-field) to handle city-scale environments. It is used for novel-view synthesis of dynamic urban scenes, unsupervised 3D instance segmentation, and 3D cuboid detection [S1].
+ 
+ ## Sources

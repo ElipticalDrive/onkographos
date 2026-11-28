@@ -1,0 +1,32 @@
+# SLAM and Tracking
+
+Also called: Online 3D Gaussian Splatting SLAM, Gaussian SLAM, RGB-D Gaussian SLAM
+
+## Overview
+SLAM and Tracking in the context of 3D Gaussian Splatting (3DGS) enables simultaneous localization and mapping by jointly optimizing camera poses and Gaussian parameters from a stream of incoming images [S1, unofficial][S2]. It solves the problem of reconstructing dynamic or large-scale scenes in real-time or near-real-time, where traditional batch optimization is infeasible [S1, unofficial][S2]. What sets it apart from offline 3DGS is the use of a sliding window of keyframes and incremental updates, allowing the system to maintain a consistent map while tracking camera motion without re-optimizing the entire history [S1, unofficial][S2].
+
+## Shared principles
+The core mechanism relies on maintaining a sparse set of keyframes $W_k$ that span a wide baseline to provide multiview constraints, while discarding redundant frames with low overlap [S1, unofficial][S2]. The system performs joint optimization of camera poses and Gaussian attributes within this window [S1, unofficial][S2]. Key principles include:
+
+1.  **Keyframe Selection:** Frames are selected as keyframes based on covisibility metrics or geometric displacement, ensuring sufficient parallax for robust pose estimation [S1, unofficial][S2].
+2.  **Incremental Mapping:** New Gaussians are initialized from new keyframes, often via back-projection of depth or rendering with low variance [S1, unofficial][S2].
+3.  **Sliding Window Optimization:** Only the Gaussians and poses within the current keyframe window are jointly optimized, mitigating catastrophic forgetting and computational cost [S1, unofficial][S2].
+4.  **Visibility-Aware Tracking:** Tracking utilizes the Gaussian rasterization visibility (accumulated alpha $\alpha < 0.5$) to handle occlusions naturally [S1, unofficial][S2].
+
+## Subtopics
+
+### [Keyframe Management](10081-keyframe-management.md)
+Keyframe management maintains a small, computationally feasible sliding window $W_k$ of camera poses and corresponding Gaussian states to enable joint optimization in online 3D Gaussian Splatting SLAM. It solves the infeasibility of jointly optimizing all captured frames by selecting non-redundant keyframes that span a wide baseline for multiview constraints while discarding those with low overlap. It differs from fixed-interval or purely heuristic insertion by explicitly measuring covisibility via Gaussian rasterization visibility or voxel allocation ratios. See [Keyframe Management](10081-keyframe-management.md) for algorithmic details.
+
+### WildGS-SLAM
+A robust monocular RGB 3DGS-SLAM for dynamic in-the-wild scenes [S1, unofficial]. Uses a shallow MLP over DINOv2 features to predict an uncertainty map that guides dynamic-object removal during tracking and mapping, feeding uncertainty-aware dense bundle adjustment and Gaussian-map optimization [S1, unofficial]. Marked as 2026 SOTA update [S1, unofficial].
+
+### GPS-SLAM
+An RGB-D SLAM method that represents a scene with a truncated SDF volume and a thin layer of 3D Gaussians near the surface for high-frequency appearance residuals [S2]. At render time, raycasts the SDF for depth plus a base color [S2]. Splats only the surface-near Gaussians with SDF-guided depth culling and order-independent blending [S2]. Mixes the two images to avoid expensive NeRF-style volumetric sampling and remove the Gaussian depth sorting step [S2].
+
+## Background
+Originating from the need to extend 3DGS from static batch reconstruction to online, real-time applications, SLAM methods leverage the differentiability of Gaussian splatting for tracking [S1, unofficial][S2]. Early works like NeRF-SLAM struggled with local editing and dynamic scenes [S1, unofficial]. The introduction of keyframe-based sliding window optimization allowed for efficient joint optimization of poses and Gaussians [S1, unofficial][S2]. Recent developments include hybrid representations like GPS-SLAM, which combines SDFs for geometry with Gaussians for appearance, and uncertainty-aware methods like WildGS-SLAM for dynamic environments [S1, unofficial][S2].
+
+## Sources
+[S1] Gaussian Splatting — All Variants Cheat Sheet, https://www.chengjianglong.com/ml/3D-Gaussian_Splatting_SOTA_Updated.html, fetched 2026-10-27 (unofficial)
+[S2] Neural Radiance Fields in 3D Vision: A Comprehensive Review, https://doi.org/10.26599/cvm.2026.9450535, fetched 2026-10-28

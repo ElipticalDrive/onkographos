@@ -1,0 +1,244 @@
+# 2-Pass Distance Transformation
+
+Also called: Borgefors 2-pass Distance Transformation, Borgefors distance transform, DT-based Wall Thickness, DT-based reasoning, Quantitative Wall Thickness Evaluation
+
+## Overview
+The 2-Pass Distance Transformation computes the shortest distance from every voxel in a volume to the nearest object boundary, enabling quantitative wall thickness evaluation in manufacturing contexts such as die casting [S1, unofficial]. It distinguishes itself from standard distance transforms by simultaneously processing both the part and the die within a single voxel volume, using bit-level tagging to distinguish ownership [S1, unofficial]. Unlike [Sphere Assisted Raymarching](4497-sphere-assisted-raymarching.md) which uses geometric primitives for acceleration, or [STEVE 4D Normal Vector Computation](16340-steve-4d-normal-vector-computation.md) which focuses on normal estimation, this method relies on discrete grid propagation to derive scalar field values for thickness analysis [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D voxel grid representing the part and the die.
+*   **Output:** A distance field where each voxel contains the shortest distance to the boundary between the part and the die.
+
+**Data Structures:**
+*   **Voxel Grid:** A 3D array of integers.
+*   **Voxel Value Layout:**
+    *   The least significant bit (LSB) indicates ownership: `1` (odd) for part voxels, `0` (even) for die voxels [S1, unofficial].
+    *   The remaining bits store the distance value [S1, unofficial].
+    *   Memory usage is typically 2-3 bytes per voxel [S1, unofficial].
+
+**Algorithm Steps:**
+1.  **Initialization:**
+    *   Identify all boundary voxels during the scan-conversion of the CAD model into voxels [S1, unofficial].
+    *   Assign a value of `0` to all boundary voxels [S1, unofficial].
+    *   Initialize all non-boundary voxels to the largest possible distance value representable in the voxel type (e.g., 255 for 8-bit, or max integer for larger types) [S1, unofficial].
+    *   Set the LSB of each voxel to indicate its material (part or die) [S1, unofficial].
+
+2.  **Forward Pass:**
+    *   Traverse the volume in a specific order (e.g., $x, y, z$ increasing).
+    *   For each voxel, compare its current value with the values of its neighbors defined by the forward mask.
+    *   Update the voxel value to the minimum of its current value and the neighbor's value plus the mask constant [S1, unofficial].
+
+3.  **Backward Pass:**
+    *   Traverse the volume in the reverse order (e.g., $x, y, z$ decreasing).
+    *   For each voxel, compare its current value with the values of its neighbors defined by the backward mask.
+    *   Update the voxel value to the minimum of its current value and the neighbor's value plus the mask constant [S1, unofficial].
+
+4.  **Result Extraction:**
+    *   The distance value for a voxel is derived from the propagated values. The wall thickness is approximated as twice the maximum distance value found in the part voxels [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_distance_transform(volume, shape, metric_mask):
+    """
+    Computes the 2-pass distance transform for a part/die volume.
+    
+    Args:
+        volume: 3D numpy array or list of lists of lists.
+        shape: Tuple (D, H, W) dimensions of the volume.
+        metric_mask: Dictionary containing 'forward' and 'backward' masks.
+                     Each mask is a list of (dx, dy, dz, weight) tuples.
+    
+    Returns:
+        distance_volume: 3D array with distance values.
+    """
+    D, H, W = shape
+    
+    # Initialize distance volume
+    # Use a large number for non-boundary voxels
+    MAX_DIST = 2**31 - 1 
+    distance_volume = [[[MAX_DIST for _ in range(W)] for _ in range(H)] for _ in range(D)]
+    
+    # Identify boundary voxels and initialize
+    # Note: In practice, boundary identification happens during scan-conversion.
+    # Here we assume a function get_boundary_voxels exists or is pre-computed.
+    boundary_voxels = get_boundary_voxels(volume) # [G] Helper to identify boundaries
+    
+    for (d, h, w) in boundary_voxels:
+        distance_volume[d][h][w] = 0
+        
+    # Set ownership bit (LSB)
+    # 1 for part, 0 for die. This is stored in the lower bits.
+    # For simplicity, we assume the input 'volume' has material info.
+    # We will store distance in the upper bits and ownership in LSB.
+    # However, the algorithm updates the distance value. 
+    # The LSB must be preserved or re-applied after updates if it's part of the value.
+    # The source says "use the last bit... to distinguish". 
+    # This implies the value stored is (distance << 1) | ownership.
+    # But the initialization says "assign 0" to boundary. 
+    # If boundary is 0, LSB is 0. 
+    # If part voxel is initialized to MAX, LSB is 1 (if MAX is odd).
+    # Let's assume the value stored is the distance, and ownership is tracked separately 
+    # or via parity of the distance value itself as per source.
+    # Source: "odd = part, even = die".
+    # So, if a voxel is part, its distance value should be odd? 
+    # Or is the ownership bit separate? 
+    # "use the last bit of the voxel value to distinguish... odd vs even".
+    # This implies the distance value itself carries the parity.
+    # But distance 0 is even. Boundary voxels are 0. 
+    # If boundary is part, it should be odd? 
+    # The source says: "all voxels which belong to the die have initial value 0... rest (part) ... 255".
+    # 0 is even (die). 255 is odd (part).
+    # So, initialization:
+    # Die boundary: 0
+    # Part boundary: 1? Or is boundary always 0?
+    # "boundary voxels are assigned the value 0".
+    # If a boundary voxel is part, it is 0. 0 is even. This contradicts "odd=part".
+    # Re-reading: "use the last bit... to distinguish the voxels of the part from ones of the die".
+    # Maybe the ownership is stored in a separate flag, or the distance is shifted?
+    # "In this way, after 2 traversals... voxels of both die and part will have a distance value".
+    # If the value is just distance, how is ownership preserved if distance changes?
+    # Perhaps the ownership is determined by the *initial* state, or the distance calculation 
+    # doesn't overwrite the LSB?
+    # Let's assume the standard Borgefors algorithm updates the distance.
+    # The ownership bit might be a separate channel or the source implies that 
+    # the distance value *plus* the ownership bit is the stored integer.
+    # Given the ambiguity, we store distance in upper bits and ownership in LSB.
+    
+    # Re-initialization with combined value
+    combined_volume = [[[0 for _ in range(W)] for _ in range(H)] for _ in range(D)]
+    
+    for d in range(D):
+        for h in range(H):
+            for w in range(W):
+                is_part = volume[d][h][w] == PART_MATERIAL # [G] Assuming material map
+                is_boundary = (d,h,w) in boundary_voxels
+                
+                if is_boundary:
+                    dist = 0
+                else:
+                    dist = MAX_DIST
+                    
+                ownership_bit = 1 if is_part else 0
+                # Store as (dist << 1) | ownership_bit to preserve ownership
+                # However, source says "odd=part". 
+                # If dist=0, val=0 (even). If part boundary, should be odd?
+                # Source says "boundary voxels assigned 0".
+                # This suggests the ownership bit might not be strictly LSB of the distance 
+                # if distance 0 is used for both.
+                # Let's stick to the source's explicit instruction: 
+                # "use the last bit... odd=part, even=die".
+                # And "boundary voxels assigned 0".
+                # This is a contradiction if a part boundary voxel is 0.
+                # Perhaps "boundary" refers to the interface, and one side is 0, 
+                # the other is 1? 
+                # "all voxels which belong to the die have initial value 0 while the rest ... 255".
+                # This implies Die=0, Part=255.
+                # So Part boundary is 255? No, "boundary voxels assigned 0".
+                # Maybe only Die boundary is 0? 
+                # "distance from each voxel in the part to its closest voxel(s) in the die".
+                # If we only care about Part-to-Die distance, we only need Part voxels to have values.
+                # But source says "voxels of both die and part will have a distance value".
+                
+                # Implementation Strategy based on "odd=part, even=die":
+                # If a voxel is Part, ensure its value is odd.
+                # If a voxel is Die, ensure its value is even.
+                # Boundary voxels are 0. 
+                # If a boundary voxel is Part, set to 1? 
+                # Source says "assigned 0". 
+                # We will follow the "odd/even" rule for non-boundary, 
+                # and assume boundary 0 is Die. Part boundaries might be handled differently 
+                # or the source implies the distance is calculated relative to the *other* object.
+                
+                # Let's assume the standard approach:
+                # Value = Distance.
+                # Ownership is tracked separately or via parity of the *initial* seed.
+                # For the purpose of the algorithm, we propagate distances.
+                
+                combined_volume[d][h][w] = dist << 1 | ownership_bit
+
+    # Forward Pass
+    for d in range(D):
+        for h in range(H):
+            for w in range(W):
+                current_val = combined_volume[d][h][w]
+                current_dist = current_val >> 1
+                current_own = current_val & 1
+                
+                for (dx, dy, dz, weight) in metric_mask['forward']:
+                    nd, nh, nw = d + dz, h + dy, w + dx # Note: z is depth, y is height, x is width? 
+                    # Standard 3D: z=depth, y=row, x=col. 
+                    # Let's assume indices are (z, y, x) or (d, h, w).
+                    # Mask offsets are usually (dx, dy, dz).
+                    # Let's assume mask is (x, y, z) offsets.
+                    # Volume is [z][y][x].
+                    # So neighbor is [d+dz][h+dy][w+dx].
+                    
+                    if 0 <= nd < D and 0 <= nh < H and 0 <= nw < W:
+                        neighbor_val = combined_volume[nd][nh][nw]
+                        neighbor_dist = neighbor_val >> 1
+                        # Update distance
+                        new_dist = min(current_dist, neighbor_dist + weight)
+                        # Preserve ownership
+                        combined_volume[d][h][w] = (new_dist << 1) | current_own
+
+    # Backward Pass
+    for d in range(D - 1, -1, -1):
+        for h in range(H - 1, -1, -1):
+            for w in range(W - 1, -1, -1):
+                current_val = combined_volume[d][h][w]
+                current_dist = current_val >> 1
+                current_own = current_val & 1
+                
+                for (dx, dy, dz, weight) in metric_mask['backward']:
+                    nd, nh, nw = d + dz, h + dy, w + dx
+                    
+                    if 0 <= nd < D and 0 <= nh < H and 0 <= nw < W:
+                        neighbor_val = combined_volume[nd][nh][nw]
+                        neighbor_dist = neighbor_val >> 1
+                        new_dist = min(current_dist, neighbor_dist + weight)
+                        combined_volume[d][h][w] = (new_dist << 1) | current_own
+
+    # Extract distances
+    distance_volume = [[[0 for _ in range(W)] for _ in range(H)] for _ in range(D)]
+    for d in range(D):
+        for h in range(H):
+            for w in range(W):
+                distance_volume[d][h][w] = combined_volume[d][h][w] >> 1
+                
+    return distance_volume
+```
+
+**Parameters:**
+*   **Metric:** A 3x3x3 integer-based chamfer metric is recommended to better approximate Euclidean distance than city-block or chess-board metrics [S1, unofficial].
+*   **Initial Value (Non-boundary):** Largest possible distance value (e.g., 255 for 8-bit) [S1, unofficial].
+*   **Initial Value (Boundary):** 0 [S1, unofficial].
+*   **Memory:** 2-3 bytes per voxel [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Resolution Error Type 1:** The distance is computed only at voxel grid points. The actual maximum inscribed sphere may not be centered at a voxel, so the local maximum in DT may not represent the true radius [S1, unofficial].
+*   **Resolution Error Type 2:** Voxelization approximates the boundary. The error from binary voxel approximation can be up to $\sqrt{3}/2$ times voxel size [S1, unofficial].
+*   **Total Error Bounds:** Actual wall thickness can be up to $\sqrt{3}$ times voxel size larger than DT-based thickness, or up to $\sqrt{3}/2$ times voxel size smaller [S1, unofficial].
+*   **Thin Region Detection:** Applying heavy-mass extraction to thin regions incorrectly selects all boundary voxels as thin. This is solved by restricting thin-region detection to medial surface voxels with small inscribed sphere radii [S1, unofficial].
+*   **Memory Efficiency:** For elongated objects, use non-cubic volumes to avoid empty voxels. Use coarse resolution as a filter for regions of interest, then apply fine resolution locally [S1, unofficial].
+
+## Subtopics
+
+### Threshold-Based Animation for Defect Visualization
+A visualization technique using animation of thresholded distance transforms to identify heavy mass (thick) and thin sections in die casting parts [S1, unofficial]. It highlights regions in red based on a threshold; as the threshold varies, red regions appear to shrink or erode, indicating thick sections [S1, unofficial]. Breaks in the red core pattern indicate non-uniformity in wall thickness [S1, unofficial]. Places where red regions vanish and turn completely gray are thin regions [S1, unofficial]. If 3-D thinning analysis is performed, skeletal voxels (thin sections) stand out explicitly with a green color once the shrinking core reaches the medial surface [S1, unofficial]. The threshold value is dynamically adjusted based on the average distance value of all voxels in the part or the average DT of skeletal points only [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ where $N$ is the number of voxels, as it requires two full traversals of the volume [S1, unofficial].
+*   **Memory Complexity:** $O(N)$, requiring 2-3 bytes per voxel [S1, unofficial]. For a $300^3$ volume, memory demand is at least 54 M-Bytes [S1, unofficial].
+*   **Strengths:** Efficient for quantitative wall thickness evaluation; handles both part and die in a single pass; allows for dynamic thresholding and animation for defect visualization [S1, unofficial].
+*   **Limitations:** Accuracy is limited by voxel resolution; errors can be up to $\sqrt{3}$ times voxel size [S1, unofficial]; not suitable for arbitrarily high precision without adaptive refinement [S1, unofficial].
+*   **When to Use:** When quantitative wall thickness analysis is needed for die casting parts and computational efficiency is prioritized over sub-voxel accuracy [S1, unofficial].
+*   **When Not to Use:** When sub-voxel precision is required without adaptive refinement, or for objects with complex geometries where voxelization errors are unacceptable [S1, unofficial].
+
+## Background
+The method is based on the Borgefors 2-pass distance transformation algorithm, extended to handle both part and die volumes simultaneously [S1, unofficial]. It was developed for die casting part and die design analysis to quantitatively identify thick and thin sections [S1, unofficial]. The approach addresses the limitations of city-block and chess-board metrics by using chamfer metrics to better approximate Euclidean distance [S1, unofficial].
+
+## Sources
+[S1] Simple visualization techniques for die casting part and die design. Final report, July 1, 1995--September 30, 1997, https://digital.library.unt.edu/ark:/67531/metadc690873/?q=voxelization triangle mesh, fetched 2026-10-28 (unofficial)

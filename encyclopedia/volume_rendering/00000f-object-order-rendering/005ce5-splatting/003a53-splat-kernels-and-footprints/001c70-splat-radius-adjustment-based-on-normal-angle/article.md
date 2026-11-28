@@ -1,0 +1,56 @@
+# Splat Radius Adjustment Based on Normal Angle
+
+Also called: Angle-dependent Splat Radius, Normal-based Splat Radius Adjustment
+
+## Overview
+This method adjusts the radius of individual splats to prevent visual holes that occur when surface samples are elevated in the normal direction of their base plane [S1, unofficial]. It scales the splat radius based on the angle between the splat's local normal and the base plane's normal, ensuring coverage increases where surface variance is high [S1, unofficial]. Unlike fixed-radius splatting, which risks gaps on uneven surfaces, or complex adaptive methods, this approach provides a direct, computationally inexpensive geometric correction [S1, unofficial].
+
+## How it works
+**Inputs:**
+*   $\mu$: The sampling step size of the regular grid on the base plane [S1, unofficial].
+*   $n$: The normal vector of the splat (local surface normal) [S1, unofficial].
+*   $n_B$: The normal vector of the base plane [S1, unofficial].
+
+**Outputs:**
+*   $r$: The adjusted splat radius [S1, unofficial].
+
+**Data Structures:**
+*   Vectors $n$ and $n_B$ are typically 3D unit vectors.
+*   The radius $r$ is a scalar float.
+
+**Algorithm:**
+1.  Compute the dot product between the splat normal and the base plane normal: $d = \langle n, n_B \rangle$.
+2.  Calculate the denominator using the scaling constants: $denom = 0.1 + 0.9 \times d$.
+3.  Compute the base radius: $r_{base} = \frac{1}{2}\sqrt{2}\mu$.
+4.  Calculate the final radius: $r = \frac{r_{base}}{denom}$.
+
+**Formula:**
+$$r = \frac{\frac{1}{2}\sqrt{2}\mu}{0.1 + 0.9\langle n, n_B \rangle} \quad (1)$$
+
+**Parameters:**
+*   **0.1**: A constant in the denominator that establishes scaling and prevents division by zero or excessively large radii when the dot product is small [S1, unofficial].
+*   **0.9**: A constant that controls the maximal radius increase [S1, unofficial]. When $\langle n, n_B \rangle = 1$ (normals are aligned), the denominator becomes $1.0$, and $r = \frac{1}{2}\sqrt{2}\mu$, which is the standard radius for a flat grid [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Holes:** If samples are elevated in the normal direction of the plane and radii are not adjusted, holes may occur between splats [S1, unofficial].
+*   **Large Angles:** A large angle between the splat normal and the plane normal indicates large variance between neighboring elevation values, resulting in increased spatial gaps [S1, unofficial]. The formula accounts for this by increasing $r$ as the dot product decreases.
+*   **Division by Zero:** The constant 0.1 ensures the denominator never reaches zero, even if $n$ and $n_B$ are orthogonal ($\langle n, n_B \rangle = 0$), where the denominator would be 0.1 [S1, unofficial].
+
+## Subtopics
+
+### [Automatic Size and Variance Determination for Surface Splatting](7363-automatic-size-and-variance-determination-for-surface-splatt.md)
+This method improves the visual quality of surface splatting on close-up views by automatically computing the radius ($r_i$) and variance ($v_i$) for each splat to ensure hole-free rendering and smooth blending, comparable to polygon rendering. Unlike methods that use global or fixed local variance and size, this approach calculates these parameters per-splat based on local point density, balancing blurriness and aliasing without manual user adjustment. It builds on [Splat Radius Adjustment Based on Normal Angle](1264-splat-radius-adjustment-based-on-normal-angle.md) by providing the specific automatic formulas for size and variance that prevent the discontinuities and artifacts associated with improper parameter choices.
+
+## Operating characteristics
+*   **Time Complexity:** $O(1)$ per splat for radius calculation. The dot product and arithmetic operations are constant time.
+*   **Memory Complexity:** $O(1)$ additional memory per splat to store the computed radius.
+*   **Strengths:** Simple to implement; effectively prevents holes on elevated surfaces; computationally inexpensive.
+*   **Limitations:** Relies on the assumption that normal deviation correlates with elevation variance; may over-radius splats in areas with high normal variation but low elevation variance.
+*   **When to use:** Surface splatting where samples are elevated in the normal direction of a base plane and fixed radii cause visible gaps.
+*   **When not to use:** Flat surfaces where fixed radii are sufficient; scenes where performance is critical and the overhead of normal calculation is prohibitive (though the radius calculation itself is cheap).
+
+## Background
+This method was proposed in the context of single-pass high-quality splatting for point-based rendering [S1, unofficial]. It addresses the specific issue of hole formation in surface splatting when the underlying surface is not perfectly flat relative to the base plane grid [S1, unofficial]. The approach is part of a framework that uses regular grids on base planes and elevates samples in the normal direction [S1, unofficial].
+
+## Sources
+[S1] Single-Pass High-Quality Splatting, http://nbn-resolving.de/urn:nbn:de:bsz:352-opus-22395, fetched 2026-10-26 (unofficial)

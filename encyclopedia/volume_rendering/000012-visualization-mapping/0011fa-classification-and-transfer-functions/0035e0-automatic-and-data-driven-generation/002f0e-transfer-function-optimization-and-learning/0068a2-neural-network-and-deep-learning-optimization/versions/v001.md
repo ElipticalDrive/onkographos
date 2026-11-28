@@ -1,0 +1,33 @@
+# Neural Network and Deep Learning Optimization
+
+Also called: Deep Direct Volume Rendering (DeepDVR), Image-based TF Optimization
+
+## Overview
+Neural Network and Deep Learning Optimization uses neural networks to learn transfer functions (TFs) or optimize TF parameters directly from image data, bypassing manual tuning or differentiable volume rendering gradients. It is distinct from gradient-based optimization methods like [Transfer Function Reconstruction Loss](1199-transfer-function-reconstruction-loss.md) because it often relies on pre-trained models or direct image-space loss minimization without explicit volume integration gradients.
+
+## Shared principles
+The family shares the use of neural networks to represent or guide the transfer function. Common mechanisms include:
+- **Representation:** TFs are represented as neural network outputs (e.g., MLP, Lookup Table) or predicted parameters.
+- **Loss Function:** Optimization typically minimizes a loss between rendered images and target images (e.g., MSE, SSIM, FID, LPIPS) [S1, unofficial].
+- **Sampling:** Ray jittering is used to ensure coverage of 3D space during training, especially at low sampling rates [S1, unofficial].
+- **Evaluation:** Performance is measured using visual metrics (FID, LPIPS) and training time [S1, unofficial].
+
+## Subtopics
+
+### [AI-Based Transfer Function Peak Prediction](2921-ai-based-transfer-function-peak-prediction.md)
+Automates `peak` parameter selection using a pre-trained MobileNetV3-Small model on rendered frames. Distinct because it uses a fixed, pre-trained model for prediction rather than training a new network per dataset.
+
+### [MLLM-Guided Transfer Function Optimization](17715-mllm-guided-transfer-function-optimization.md)
+Uses a Multimodal Large Language Model (MLLM) as a perceptual evaluator in an evolutionary loop. Distinct because it handles subjective user intent (text/images) via pairwise comparisons and Elo ratings, rather than pixel-wise loss.
+
+### MLP Transfer Function Optimization
+- **Definition:** Optimizes a TF using an MLP with two hidden layers, trained with ray jittering [S1, unofficial].
+- **Parameters:** MLP hidden layers: 2; Learning rate: 0.05 [S1, unofficial].
+- **Pitfall:** MLPs can converge to a fully transparent (black image) state, a strong local minimum of the MSE loss. Once transparent, no samples contribute to color, so no gradient propagates back to the TF, preventing recovery [S1, unofficial].
+- **Comparison:** Performs considerably worse than trained Lookup tables for scalar-valued feature spaces. Average training time increases by a factor of 2.0 ($s=0.25$) to 6.19 ($s=2.0$). High variability due to random initialization [S1, unofficial].
+
+## Background
+Originated with "Deep Direct Volume Rendering" (DeepDVR) [S1, unofficial]. The method analyzes the training behavior of image-based TF optimization with respect to parameters like sampling rate and learning rate. It evaluates MLP vs. Lookup Table representations, using metrics like SSIM, FID, and LPIPS. The approach highlights the susceptibility of image-based optimization to local minima (e.g., transparency) and the computational cost of MLPs compared to Lookup Tables [S1, unofficial].
+
+## Sources
+[S1] Deep Direct Volume Rendering: Learning Visual Feature Mappings From Exemplary Images, https://doi.org/10.48550/arxiv.2106.05429, fetched 2026-10-26 (unofficial)

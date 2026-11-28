@@ -1,0 +1,129 @@
+# Coarse-to-Fine Densification
+
+Also called: Mesh densification, Progressive mesh refinement
+
+## Overview
+Coarse-to-Fine Densification is a training strategy for primitive-based neural reconstruction that progressively refines a sparse mesh by inserting new vertices at high-error locations [S1]. It solves the challenge of initializing and densifying a mesh representation without manual tuning, ensuring uniform distribution of vertices proportional to their spatial impact on the rendered image [S1]. Unlike single-stage training, it decouples initialization from refinement, allowing the mesh topology to adapt to the scene's complexity over time [S1].
+
+## How it works
+**Inputs:** Target image (or batch), initial sparse mesh (vertices and triangles), rendering parameters [G].
+**Outputs:** Refined mesh (vertices, features, topology) after densification steps [G].
+
+**Data Structures:**
+*   **Mesh:** Set of vertices $V$ and triangles $T$. Each vertex $v \in V$ has position $\mathbf{p}_v$ and feature vector $\mathbf{f}_v$ [G].
+*   **Triangle Score:** Scalar value $\text{score}_t$ for each $t \in T$ [S1].
+*   **Pixel Count:** $|\text{pixels}_t|$ number of pixels covered by triangle $t$ during rasterization [S1].
+
+**Steps:**
+
+1.  **Initialization:**
+    a. Downsample the target image [S1].
+    b. Compute Sobel gradient magnitudes on the downsampled image [S1].
+    c. Sample initial vertex positions proportionally to edge strength, applying a small uniform floor to ensure coverage [S1].
+    d. Create a Delaunay triangulation of the sampled points [S1].
+    e. Add boundary vertices to ensure full image coverage [S1].
+    f. Initialize vertex features (e.g., color, opacity) based on the target image at the vertex positions [G].
+
+2.  **Iterative Densification:**
+    For each densification step (every 500 iterations, starting at iteration 1,500 and ending at 15,000) [S1]:
+    a. **Score Triangles:** For each triangle $t$ in the current mesh:
+        i. Calculate $\overline{\text{DSSIM}}_t$, the mean DSSIM (structural dissimilarity) of pixels covered by $t$ [S1].
+        ii. Count $|\text{pixels}_t|$, the number of pixels covered by $t$ [S1].
+        iii. If $|\text{pixels}_t| < 3$, exclude $t$ from scoring [S1].
+        iv. Compute score:
+        $$ \text{score}_t = \overline{\text{DSSIM}}_t \cdot |\text{pixels}_t|^\alpha $$
+        where $\alpha = 0.75$ [S1].
+    b. **Select Triangles:** Sort triangles by $\text{score}_t$ descending. Select the top-scoring triangles such that the total number of new vertices does not exceed $0.35 \times V$, where $V$ is the current number of vertices [S1].
+    c. **Insert Vertices:** For each selected triangle $t$:
+        i. Compute the centroid position $\mathbf{p}_{new} = \frac{1}{3} \sum_{v \in t} \mathbf{p}_v$ [S1].
+        ii. Initialize new vertex features $\mathbf{f}_{new}$ by averaging the features of the parent triangle's vertices: $\mathbf{f}_{new} = \frac{1}{3} \sum_{v \in t} \mathbf{f}_v$ [S1].
+        iii. Add $\mathbf{p}_{new}$ and $\mathbf{f}_{new}$ to the vertex set [S1].
+    d. **Re-triangulate:** Re-run Delaunay triangulation on the full updated vertex set [S1].
+    e. **Degeneracy Check:** Detect if the mesh is degenerate (e.g., colinear vertices). If so, re-mesh. This rarely occurs in practice [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def coarse_to_fine_densification(mesh, target_image, start_iter=1500, end_iter=15000, step=500):
+    # Initialization
+    downsampled_img = target_image[::4, ::4]  # Standard downsampling [G]
+    gradients = standard_sobel_magnitude(downsampled_img)  # Standard Sobel filter [G]
+    vertices = sample_proportional_to_gradient(gradients, floor=0.01)  # Sample + uniform floor [S1]
+    mesh.vertices = vertices
+    mesh.triangles = standard_delaunay_triangulation(vertices)  # Standard Delaunay [G]
+    mesh.add_boundary_vertices()  # Ensure full coverage [S1]
+    for v in mesh.vertices: v.features = sample_image_at_coords(target_image, v.position)  # Feature init [G]
+
+    for i in range(start_iter, end_iter + 1, step):
+        scores = {}
+        for t in mesh.triangles:
+            pixels = get_covered_pixel_coords(t)  # Rasterize triangle [G]
+            if len(pixels) < 3: continue
+            dssim = mean([compute_dssim(p) for p in pixels])  # Mean DSSIM [S1]
+            scores[t] = dssim * (len(pixels) ** 0.75)
+
+        sorted_triangles = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+        max_new = 0.35 * len(mesh.vertices)
+        split_triangles = []
+        count = 0
+        for t, _ in sorted_triangles:
+            if count >= max_new: break
+            split_triangles.append(t)
+            count += 1
+
+        new_verts = []
+        for t in split_triangles:
+            pos = mean([v.position for v in t.vertices])  # Centroid [S1]
+            feat = mean([v.features for v in t.vertices])  # Feature average [S1]
+            new_verts.append(Vertex(position=pos, features=feat))
+        mesh.vertices.extend(new_verts)
+        mesh.triangles = standard_delaunay_triangulation(mesh.vertices)  # Re-triangulate [S1]
+
+        if any(is_colinear(v) for v in mesh.vertices):  # Degeneracy check [S1]
+            mesh = coarse_to_fine_densification(mesh=None, target_image=target_image, start_iter=0, end_iter=0, step=0)  # Re-mesh [S1]
+
+# Standard helper definitions
+def standard_sobel_magnitude(img): return convolve(img, sobel_kernel)
+def sample_proportional_to_gradient(grads, floor): return sample_points_from_map(grads, min_prob=floor)
+def standard_delaunay_triangulation(points): return compute_delaunay_mesh(points)
+def sample_image_at_coords(img, coords): return bilinear_sample(img, coords)
+def get_covered_pixel_coords(tri): return rasterize_triangle_to_pixel_list(tri)
+def compute_dssim(p): return structural_dissimilarity_metric(p)
+def mean(vecs): return sum(vecs) / len(vecs)
+def is_colinear(v): return check_vertex_colinearity(v)
+```
+
+**Parameters:**
+*   $\alpha = 0.75$: Area-weighting exponent [S1].
+*   Densification interval: Every 500 iterations [S1].
+*   Start iteration: 1,500 [S1].
+*   End iteration: 15,000 [S1].
+*   Max new vertices: $0.35 \times V$ per step [S1].
+*   Minimum pixels for scoring: 3 [S1].
+
+**Edge Cases:**
+*   **Degeneracy:** Vertices may become colinear, causing mesh degeneracy. Re-meshing is required, though rare [S1].
+*   **Small Triangles:** Triangles with fewer than 3 pixels are excluded to prevent over-densification of tiny areas [S1].
+*   **Precision:** Not given in the sources.
+
+## Subtopics
+
+### [Coarse-to-fine Centroidal Voronoi Tesselation (CVT)](20380-coarse-to-fine-centroidal-voronoi-tesselation-cvt.md)
+Coarse-to-fine Centroidal Voronoi Tesselation (CVT) is a method for densifying continuous Signed Distance Function (SDF) discretization near a surface by simultaneously optimizing SDF values and their discretization sites. It solves the challenge of generating high-quality 3D reconstructions with millions of sites without the computational prohibitions of explicit Voronoi diagram computation. Unlike its sibling method DMTet, which relies on a known true SDF, this approach adapts locally to the optimized SDF field, ensuring vertices are uniformly distributed to reduce sampling artifacts.
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:** Training takes 1-3 minutes on an RTX A6000 [S1].
+*   **Strengths:** Automatic initialization, uniform vertex distribution, prevents over-densification of small areas [S1].
+*   **Limitations:** Requires Delaunay triangulation, which can be computationally expensive for very large meshes. Degeneracy handling is necessary but rare [S1].
+*   **When to Use:** When initializing a mesh-based neural reconstruction without manual seed placement [S1].
+*   **When Not to Use:** When real-time densification is required during training (it is periodic) [S1].
+
+## Background
+Coarse-to-Fine Densification was introduced in "Neural Harmonic Textures for High-Quality Primitive Based Neural Reconstruction" [S1]. It addresses the need for robust mesh initialization and refinement in primitive-based neural reconstruction methods. The method uses structural dissimilarity (DSSIM) and area weighting to guide densification, ensuring that vertices are placed where they contribute most to image fidelity [S1].
+
+## Sources
+[S1] Neural Harmonic Textures for High-Quality Primitive Based Neural Reconstruction, https://doi.org/10.1007/978-3-032-37032-7_18, fetched 2026-10-26

@@ -1,0 +1,197 @@
+# SVO Node Location
+## Overview
+SVO Node Location is the core traversal routine for Sparse Voxel Octree (SVO) ray tracing, responsible for locating the specific octree node (internal or leaf) that contains a given ray position within the volume bounds [S1, unofficial]. It solves the problem of mapping a continuous 3D ray coordinate to a discrete sparse tree index, enabling subsequent shading or data retrieval [S1, unofficial]. It differs from [Octree Node Lookup by Voxel](5120-octree-node-lookup-by-voxel.md) by operating on continuous ray positions and bounding box intersections rather than discrete integer voxel coordinates, and from [Sparse Voxel Octree Ray Traversal](2451-sparse-voxel-octree-ray-traversal.md) by focusing solely on the node identification step rather than the full traversal loop or stack management for empty space skipping [S1, unofficial].
+## How it works
+### Inputs and Outputs
+**Inputs:**
+- `raypos`: 3D vector, the origin of the ray in world space [S1, unofficial].
+- `raydir`: 3D vector, the direction of the ray [S1, unofficial].
+- `root_lower`: 3D vector, the lower bound (min corner) of the root node's bounding box [S1, unofficial].
+- `root_scale`: scalar, the side length of the root node's bounding box [S1, unofficial].
+- `max_depth`: integer, the maximum traversal depth. If 0, traverse until a leaf node is reached [S1, unofficial].
+- `address_space`: memory buffer/array containing the SVO node data (indices, child pointers, etc.) [S1, unofficial].
+- `stack`: array/structure used to record the traversal path for later reconstruction or backtracking [S1, unofficial].
+
+**Outputs:**
+- `located_node`: A structure containing the index of the located node in the `address_space` and its bounding box information (lower bound, scale) [S1, unofficial]. If the ray is outside the root bounds or no child exists at a step, a null/invalid node indicator is returned [S1, unofficial].
+
+### Data Structures
+- **Node Index**: An integer identifier for a node within the `address_space` buffer [S1, unofficial].
+- **Bounding Box**: Defined by `lower` (3D vector, min corner) and `scale` (scalar, side length) [S1, unofficial].
+- **Corner Indices**: 3-bit integer (0-7) representing the child octant. Bit 0 is X (0=low, 1=high), Bit 1 is Y, Bit 2 is Z [S1, unofficial].
+- **first_node_t**: A structure returned by `svo_select_first_node_f3` containing:
+  - `node_info`: The index of the selected child node in `address_space` [S1, unofficial].
+  - `best_corner`: The 3-bit corner index of the selected child [S1, unofficial].
+  - `lower`: The 3D lower bound of the selected child node [S1, unofficial].
+
+### Steps
+1. **Initialization**:
+   - Set `pos = raypos` [S1, unofficial].
+   - Set `lower = root_lower` [S1, unofficial].
+   - Set `upper = root_lower + root_scale` [S1, unofficial].
+   - Set `center = lower + (root_scale / 2.0)` [S1, unofficial].
+   - Set `scale = root_scale / 2.0` [S1, unofficial].
+   - Set `depth = 0` [S1, unofficial].
+   - Select the first child node to enter using `svo_select_first_node_f3` (see Subtopics) [S1, unofficial].
+   - Initialize `current_node` with the result of `svo_select_first_node_f3` [S1, unofficial].
+   - If `current_node` is invalid (no intersection with root), return null [S1, unofficial].
+
+2. **Traversal Loop**:
+   - While `(max_depth == 0 || depth < max_depth)`:
+     - Determine the child corner index `corner_idx` based on `pos` relative to `center`:
+       - `x_bit = 1` if `pos.x >= center.x`, else `0` [S1, unofficial].
+       - `y_bit = 1` if `pos.y >= center.y`, else `0` [S1, unofficial].
+       - `z_bit = 1` if `pos.z >= center.z`, else `0` [S1, unofficial].
+       - `corner_idx = (z_bit << 2) | (y_bit << 1) | x_bit` [S1, unofficial].
+     - Retrieve the child node info from `address_space` using `current_node` and `corner_idx` [S1, unofficial].
+     - If the child node does not exist (is empty/null):
+       - Break the loop [S1, unofficial].
+     - Push `current_node` onto `stack` [S1, unofficial].
+     - Update `lower` and `upper` for the child node:
+       - `child_scale = scale / 2.0` [S1, unofficial].
+       - `lower = lower + (corner_idx & 1) * child_scale, (corner_idx & 2) * child_scale, (corner_idx & 4) * child_scale` [S1, unofficial].
+       - `upper = lower + child_scale` [S1, unofficial].
+       - `center = lower + (child_scale / 2.0)` [S1, unofficial].
+     - Update `current_node` to the child node index [S1, unofficial].
+     - Increment `depth` [S1, unofficial].
+
+3. **Return**:
+   - Return `current_node` and its associated bounding box (`lower`, `scale`) [S1, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def svo_locate_node(raypos, raydir, root_lower, root_scale, max_depth, address_space, stack):
+    # Initialization
+    pos = raypos
+    lower = root_lower
+    upper = root_lower + vec3(root_scale)
+    center = lower + vec3(root_scale / 2.0)
+    scale = root_scale / 2.0
+    depth = 0
+    
+    # Select first node
+    first_node = svo_select_first_node_f3(root_lower, scale, raypos, raydir, address_space)
+    
+    # Check if ray intersects root
+    if first_node is null:
+        return null
+    
+    current_node = first_node.node_info
+    lower = first_node.lower
+    scale = root_scale / 2.0 # Child scale
+    
+    # Traverse
+    while max_depth == 0 or depth < max_depth:
+        # Determine corner
+        x_bit = 1 if pos.x >= center.x else 0
+        y_bit = 1 if pos.y >= center.y else 0
+        z_bit = 1 if pos.z >= center.z else 0
+        corner_idx = (z_bit << 2) | (y_bit << 1) | x_bit
+        
+        # Get child
+        child_node = get_child_node(current_node, corner_idx, address_space)
+        
+        # If no child, break
+        if child_node is null:
+            break
+            
+        # Push to stack
+        stack.push(current_node)
+        
+        # Update bounds
+        child_scale = scale / 2.0
+        offset = vec3(
+            (corner_idx & 1) * child_scale,
+            (corner_idx & 2) * child_scale,
+            (corner_idx & 4) * child_scale
+        )
+        lower = lower + offset
+        center = lower + vec3(child_scale / 2.0)
+        scale = child_scale
+        
+        current_node = child_node
+        depth += 1
+        
+    return {
+        'node': current_node,
+        'lower': lower,
+        'scale': scale
+    }
+
+def get_child_node(parent_node, corner_idx, address_space):
+    # Implementation depends on specific SVO layout.
+    # Typically: address_space[parent_node.child_ptr + corner_idx]
+    # Returns null if child is empty.
+    pass
+```
+
+### Parameters
+- `max_depth`: Typical values depend on the SVO depth. If 0, traverse to leaf [S1, unofficial].
+- `root_scale`: Depends on the world volume size. Typically 1.0 for normalized coordinates [S1, unofficial].
+
+### Edge Cases and Pitfalls
+- **Ray Outside Root**: If `raypos` is not within `[root_lower, root_lower + root_scale]`, return a null located node immediately [S1, unofficial].
+- **Empty Children**: If the calculated child node does not exist in the SVO, the traversal stops at the current parent node [S1, unofficial].
+- **Precision**: Floating-point comparisons for `pos.x >= center.x` should be handled carefully to avoid jitter at boundaries [G].
+
+## Subtopics
+
+### SVO First Node Selection
+SVO First Node Selection determines the initial child node of the root (or any node) that the ray enters, optimizing the start of the traversal by finding the closest intersecting child [S1, unofficial]. It differs from standard corner-based lookup by explicitly checking ray-cube intersections for all 8 children and selecting the one with the minimum exit distance [S1, unofficial]. Choose this when the ray origin is outside the current node's bounding box or when entering a node from an arbitrary direction [S1, unofficial]. Link: [S1, unofficial].
+
+**Steps:**
+1. Initialize `best_corner` to null, `best_distance` to infinity, `best_child_lower` to `lower` [S1, unofficial].
+2. Loop `corneri` from 0 to 7:
+   - Calculate `child_scale = scale / 2.0` [S1, unofficial].
+   - Calculate `child_lower = lower + corner_offset(corneri) * child_scale` [S1, unofficial].
+   - Calculate `child_upper = child_lower + child_scale` [S1, unofficial].
+   - Check if ray intersects `child_lower` to `child_upper` using `svo_fast_forward_intersects_f3` [S1, unofficial].
+   - If no intersection, continue [S1, unofficial].
+   - Calculate `dir_bounds` for the child cube [S1, unofficial].
+   - Calculate exit point `t1` and exit face `outface` using `calculate_t1_f3(raypos, raydir, dir_bounds.upper)` [S1, unofficial].
+   - Calculate `distance = t1 * length(raydir)` [S1, unofficial].
+   - If `distance < best_distance`:
+     - `best_distance = distance`
+     - `best_corner = corneri`
+     - `best_child_lower = child_lower`
+3. Return `first_node_t` with `node_info` (root_cd_goffset + best_corner), `best_corner`, and `best_child_lower` [S1, unofficial].
+
+**Pitfalls:**
+- If `outface` is null (no intersection), skip the child [S1, unofficial].
+
+### SVO Point Location
+SVO Point Location traverses the SVO from the root to find the leaf node containing a specific 3D position [S2, unofficial]. It differs from SVO Node Location by using discrete binary mapping based on the position relative to the center, rather than ray intersection [S2, unofficial]. Choose this when mapping a known voxel coordinate to a tree index [S2, unofficial]. Link: [S2, unofficial].
+
+**Steps:**
+1. If position is outside volume bounds, return `INDEX_NONE` [S2, unofficial].
+2. Start at root node index [S2, unofficial].
+3. While current node is not a leaf:
+   - Compute child index using binary mapping: front=1, back=0 for X, Y, Z axes [S2, unofficial].
+   - Update `NodeIndex` to the child index [S2, unofficial].
+   - If child does not exist, return `INDEX_NONE` [S2, unofficial].
+4. Return `NodeIndex` [S2, unofficial].
+
+### Face Position Calculation
+Face Position Calculation computes the precise geometric boundary between two connected octree nodes to generate smooth continuous path coordinates from discrete voxel graph traversal [S3, unofficial]. It differs from node location by operating on the interface between two already-located nodes rather than finding a single node [S3, unofficial]. Choose this when converting discrete node paths into continuous 3D waypoints for pathfinding [S3, unofficial]. Link: [S3, unofficial].
+
+**Steps:**
+1. Given two adjacent SVO nodes `start` and `end` [S3, unofficial].
+2. Compute the exact 3D position of the shared face using `tree.face_position_between(start, end)` [S3, unofficial].
+
+## Operating characteristics
+- **Time Complexity**: O(D) where D is the depth of the SVO, as each step reduces the search space by a factor of 8 [S1, unofficial].
+- **Memory Complexity**: O(1) for the traversal itself, plus O(D) for the stack if path reconstruction is required [S1, unofficial].
+- **Strengths**: Efficiently locates nodes in sparse data structures without visiting empty space [S1, unofficial].
+- **Limitations**: Requires ray-cube intersection tests for the first node, which can be costly if not optimized [S1, unofficial].
+- **When to Use**: When ray tracing or point location within an SVO is required [S1, unofficial].
+- **When Not to Use**: When the data is dense and a linear grid lookup is faster [G].
+
+## Background
+SVO Node Location is a fundamental component of Sparse Voxel Octree ray tracing, originating from the need to efficiently traverse sparse 3D data structures in graphics and pathfinding applications [S1, S2, S3, unofficial]. It is used in real-time rendering engines and pathfinding systems that utilize SVOs for memory efficiency [S1, S2, S3, unofficial].
+
+## Sources
+[S1] realazthat/landscapes, https://github.com/realazthat/landscapes, fetched 2026-10-26 (unofficial)
+[S2] UE5 Tutorial | Simple SVO Pathfinder for 3D Pathfinding, https://www.youtube.com/watch?v=QmDbX_gZSLA, fetched 2026-10-27 (unofficial)
+[S3] mkmarek/svo-rs, https://github.com/mkmarek/svo-rs, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,1543 @@
+COMPUTER GRAPHICS forum
+Volume 0 (1981), Number 0 pp. 1–12
+An Adaptive Multigrid Solver
+for Applications in Computer Graphics
+Misha Kazhdan1 and Hugues Hoppe2
+1 Johns Hopkins University
+2 Google Inc.
+Abstract
+A key processing step in numerous computer graphics applications is the solution of a linear system discretized over a spatial
+domain. Often, the linear system can be represented using an adaptive domain tessellation, either because the solution will only
+be sampled sparsely, or because the solution is known to be “interesting” (e.g. high-frequency) only in localized regions. In this
+work, we propose an adaptive, finite-elements, multigrid solver capable of efficiently solving such linear systems. Our solver is
+designed to be general-purpose, supporting finite-elements of different degrees, across different dimensions, and supporting both
+integrated and pointwise constraints. We demonstrate the efficacy of our solver in applications including surface reconstruction,
+image stitching, and Euclidean Distance Transform calculation.
+CCS Concepts
+•Computing methodologies → Computer graphics;
+1. Introduction
+Solving linear systems is a fundamental step in numerous applications in image- and geometry-processing. For many such applications, the solution does not need to be fully resolved everywhere –
+either because the solution is only evaluated sparsely, or because the
+solution is low-frequency outside of a sparse region. For example, in
+surface reconstruction applications, the implicit function is only evaluated near the input samples. And in image-stitching applications,
+the correction is evaluated everywhere but is only high-frequency
+near the seams.
+Previous works have addressed this problem using a quadtree/octree to adapt the discretization, and using finite-differences to define
+a linear system over the adaptively discretized domain. In this work,
+we extend these approaches in two ways: (1) We describe a finiteelements formulation supporting general PDEs, and (2) we leverage
+the hierarchical structure of the quadtree/octree to design an efficient
+multigrid solver.
+Starting with the hierarchical solver presented by [KH13] for
+solving the screened-Poisson equation in 3D, we generalize the
+solver in several ways, including support for general symmetric
+positive-definite (SPD) systems:
+• in spaces of arbitrary dimension,
+• discretized using finite-elements of arbitrary degree,
+• involving arbitrary function derivatives,
+• with both pointwise and integrated constraints.
+We also generalize the solver to use a standard V-cycle solver, with
+temporally-blocked Gauss-Seidel relaxation for better runtime performance.
+© 2018 The Author(s)
+Computer Graphics Forum © 2018 The Eurographics Association and John
+Wiley & Sons Ltd. Published by John Wiley & Sons Ltd.
+Together, these generalizations provide an efficient and generalpurpose solver capable of solving a large class of linear systems in
+different dimensions. We demonstrate the effectiveness of the solver
+in applications including surface reconstruction (using both the
+Laplacian and bi-Laplacian), image-stitching (using mixed-degree
+finite-elements), and the computation of an approximate Euclidean
+Distance Transform. In each application we have found that our
+general-purpose solver outperforms state-of-the-art methods, providing a solution in less time and less memory.
+We begin our discussion by reviewing related work on adapted
+solvers in general (§2), and then focusing on the Poisson Reconstruction solver (§3). We then describe our generalization of the Poisson
+Reconstruction solver (§4) and present a method for handling the
+ringing that occurs due to the abrupt changes in resolution (§5). We
+demonstrate the utility of our solver in several graphics applications (§6) and conclude by summarizing our work and pointing to
+potential directions for future research (§7).
+2. Related work
+Much of the related work on adaptive solvers has focused on the
+problem of solving the Poisson equation in three-dimensional fluid
+simulations in order to enforce the incompressibility conditions (e.g.
+[Pop03, LGF04, FOK05, CGFO06]), though applications in other
+areas have included the solution of the Poisson equation for large image stitching [Aga07] and the solution of Laplacian and bi-Laplacian
+systems for surface reconstruction [KBH06,MGD∗ 10,CT11,KH13].
+In these contexts, solving over a regular grid is impractical as either
+the grid needs to be made too coarse to capture the fine details
+M. Kazhdan & H. Hoppe / An Adaptive Multigrid Solver
+or the linear system becomes too large to be solved in practical
+time/memory.
+Perhaps the most direct approach is to use tetrahedral meshes to
+tessellate space [FOK05, KFCO06, CGFO06, BXH10, MGD∗ 10].
+Since the size of the tets can adapt to the regions of interest, the size
+of the system can be significantly reduced. (E.g. adapting to a 2manifold in 3-space reduces the complexity from O(N) to O(N 2/3 ),
+with N the number of cells in a regular tessellation.) A further
+advantage of using tetrahedral meshes is that the faces of the tets can
+be aligned to a triangle mesh, making it easier to enforce boundary
+conditions. (Later work by Batty et al. [BXH10] shows that this
+is not a requirement, enabling less remeshing for simulations with
+dynamic boundaries.)
+In the context of shallow water simulations, tall cells have
+been used to discretize the linear system over a regular 2D grid
+[KM90, OH95]. In addition to reducing the dimensionality of the
+linear system, this approach has the advantage of using a regular grid as a data-structure, reducing neighbor lookup to simple
+indexing (and thereby enabling better memory utilization). This
+approach has been extended to shallow water simulations over general surfaces [WMT07] and has been further adapted using hybrid
+2D/3D techniques that partition the tall cells in regions of interest [IGLF06, TRS06, CM11]. However, a limitation of this approach
+is that it does not generalize to systems in which adaptivity is desired
+along multiple axes.
+A more general strategy is to partition space using an adaptive
+octree [Pop03, LGF04, KBH06, CT11, KH13, Bat17]. Similar to
+tetrahedral meshing, these approaches allow the discretization to
+adapt to regions of interest, thereby reducing the dimensionality
+of the system. Additionally, the semi-regular structure of the tree
+facilitates neighbor look up through efficient data structures [Sam90]
+and Z-curve hashing [WS93].
+Recent work has also leveraged an octree hierarchy to attain an efficient multigrid solver for the Poisson equation [SABS14, FWD14],
+defining a nesting set of sub-octrees by successively trimming off
+nodes at finer resolutions of the tree. Setaluri et al. follow the finitevolumes discretization of [LGF04] to define the Laplace operator
+while Ferstl et al. use first-order B-splines to define a finite-elements
+discretization. Both approaches are restricted to the solution of the
+Laplace operator – the finite-volumes discretization does not extend
+to higher order derivatives and the finite-elements discretization relies on the interpolatory property of first-order B-splines to remove
+“hanging” vertices.
+In contrast, the earlier work of Kazhdan et al. [KBH06] (and the
+follow-on work by Kazhdan and Hoppe [KH13]) uses a more general
+finite-elements formulation to define a multigrid solver, allowing for
+both pointwise and integrated constraints and supporting derivatives
+of arbitrary degree. We review this approach in the next section.
+3. The Poisson Reconstruction Solver
+The solver described by Kazhdan et al. [KBH06] (and extended
+in [KH13]) is designed to reconstruct a watertight surface from an
+oriented point-set. The authors reduce the problem of surface reconstruction to the solution of a Poisson equation whose right-hand-side
+encodes the divergence of the surface normal field, showing that
+the solution gives the coefficients of the indicator function of the
+shape’s interior. To do this, the authors (1) adapt an octree to the
+points, (2) define a function space over the octree, and (3) solve a
+hierarchical system to obtain the indicator function.
+3.1. Finite Elements
+Given an octree O, the authors define a function space by associating
+a second-order B-spline with every octree node. Specifically, given
+a node o ∈ O, with left/bottom/back corner co and width wo , the
+authors set Φ2o : R3 → R to be the trivariate second-order B-spline
+centered and scaled with o:
+ x
+ y
+ z
+y
+x
+z
+2
+2 q − co
+2 q − co
+2 q − co
+Φo (q) = Φ
+·Φ
+·Φ
+wo
+wo
+wo
+with Φ2 : R → R the univariate second-order B-spline:
+ 1
+1 2
+if s ∈ [−1, 0]
+
+2 +s+ 2s
+
+
+ 1 + s − s2
+if s ∈ [0, 1]
+2
+Φ2 (s) =
+1 2
+
+2 − 2s + 2 s
+if s ∈ [1, 2]
+
+
+
+0
+otherwise.
+Using these functions, the Laplacian matrix, L, is discretized by
+setting the coefficient corresponding to the pair of nodes o, õ ∈ O to
+be the integral:
+Z
+Lo,õ =
+[0,1]3
+∆Φ2o (q) · Φ2õ (q) dq.
+Note that because the functions {Φo } are compactly supported, the
+matrix L will be sparse, with Lo,õ = 0 whenever the supports of Φo
+and Φõ do not overlap.
+Kazhdan and Hoppe [KH13] extend the solver to support pointwise interpolation. This is done by augmenting the Laplacian with a
+screening term:
+So,õ = ∑ ω(p) · Φ2o (p) · Φ2õ (p)
+p∈P
+where P is the point-set and ω : P → R≥0 is a weighting function
+assigning an importance to each point constraint.
+3.2. Multigrid
+To solve the linear system MX = B, with X the solution coefficients, B the right-hand side encoding the divergence of the normal
+field, and M = L (or M = L + S in the screened system), Kazhdan et al. [KBH06] use the octree hierarchy to define a (cascadic)
+multigrid solver. Specifically, given the target number of relaxation
+iterations, ν, the solution X is obtained using the LogLinearCascadicSolver[2006] algorithm.
+The algorithm performs a coarse-to-fine iteration through the
+levels of the tree (line 2), adjusts the constraints at the given level
+to discount those constraints met at coarser resolutions (line 3), and
+refines the solution (lines 4 and 5).
+Here Λ is the depth of the octree, X ` (resp. B` ) is the sub-vector
+of X (resp. B) indexed by nodes at level `, M``˜ is the sub-matrix of
+© 2018 The Author(s)
+Computer Graphics Forum © 2018 The Eurographics Association and John Wiley & Sons Ltd.
+M. Kazhdan & H. Hoppe / An Adaptive Multigrid Solver
+LogLinearCascadicSolver[2006]( M , B , ν )
+1
+2
+3
+4
+5
+6
+X ←0
+for ` ∈ {0, . . . , Λ − 1}
+˜
+for `˜ ∈ {0, . . . , ` − 1}: B` ← B` − M`˜(X ` )
+`
+if( ` 6= 0 ) X ← Relax( M`` , X ` , B` , ν )
+else
+X ` ← Solve( M`` , B` )
+`
+initialize
+adjust
+relax
+solve
+return X
+The hierarchical solver is made more efficient in the work of
+Kazhdan and Hoppe [KH13] who observe that while one cannot
+prolong the entirety of the coarse solution without fully refining the
+octree, it suffices to prolong only the part of the coarser solution
+that is “overlapped” by the finer level. Specifically, defining two
+nodes o and õ to be overlapped when the functions Φo and Φõ
+have overlapping support, the authors propose refining the octree
+so that when a node is in the tree at level `, all overlapping nodes
+at level ` − 1 are also in the tree. The modified cascadic solver is
+summarized in the LinearCascadicSolver[2013] algorithm.
+LinearCascadicSolver[2013]( M , B , ν )
+2
+X ←0
+for ` ∈ {0, . . . , Λ − 1}
+`
+← B − M``−1 (P`−1 )
+`
+`
+3
+B
+4
+if( ` 6= 0 ) X ← Relax( M`` , X ` , B` , ν )
+else
+X ` ← Solve( M`` , B` )
+P` ← X ` + P``−1 (P`−1 )
+5
+6
+7
+4.1. Extending the System
+4.1.1. Finite Element Degree
+the (screened) Laplacian with columns indexed by nodes at level
+` and rows indexed by the nodes at level ˜`, Relax is the operator
+performing ν iterations of a conjugate-gradients solver, and Solve is
+an operator computing the exact solution of a symmetric, positive,
+semi-definite, linear system.
+1
+elements of arbitrary degrees, (2) solves general symmetric positive
+definite systems, (3) supports general integral and pointwise constraints, and (4) works in arbitrary dimensions. In addition, we
+modify the solver to support full V-cycle iterations and to use GaussSeidel relaxation.
+initialize
+adjust
+relax
+solve
+The solver in [KBH06] associates a trivariate second-order B-spline
+to each node of the tree. We extend the formulation by supporting the
+use of B-splines of any degree. This allows for trading off between
+system sparsity (lower-degree) and smoothness (higher-degree). In
+doing so, we also replace the prolongation stencils to conform with
+the chosen degree.
+Even-degree/dual elements Extending to B-splines of evendegree is straightforward as these B-splines are centered at the
+centers of grid cells.
+Odd-degree/primal elements Extending to B-splines of odddegree is more nuanced as these B-splines are centered at the corners
+of grid cells. To avoid redundant indexing, we associate each octree
+node with a single B-spline, centered at the left, bottom, back corner.
+We also extend the octree to partition the cube [0, 2] × [0, 2] × [0, 2].
+This ensures that our discretization has the ability to represent any
+B-spline centered at a corner of a grid cell. Note that though the
+new octree partitions a larger domain, integration is restricted to the
+domain [0, 1] × [0, 1] × [0, 1].
+In this case, we make a distinction between the logical depth of
+the tree (which is exposed to the user) and the actual depth of the
+tree (which is equal to the logical depth plus one, and is used for
+internal book-keeping). For the remainder of the paper, “depth” will
+be understood to refer to the logical depth.
+prolong
+return X
+After solving at a given level (lines 4 and 5), the algorithm upsamples the accumulated solution from the coarser levels and combines it with the solution at the current level (line 6). This way, when
+adjusting the constraints at a given level only the prolongation from
+the previous level needs to be considered (line 3). For an octree with
+|O| nodes, this reduces the complexity of the cascadic solve from
+O(|O| · log |O|) to O(|O|)
+Here the prolongation operator P``−1 up-samples a solution at
+level ` − 1 into a solution at level ` using the tensor-product of the
+standard second-order B-spline prolongation stencil, ( 41 , 34 , 34 , 14 ).
+(At level ` = 0 the values M``−1 (P`−1 ) and P``−1 (P`−1 ) are assumed to be zero.)
+4. Generalizing the Solver
+In this work we generalize the hierarchical solver from [KBH06]
+and [KH13] to support the solution of a much larger class of linear systems. Specifically, we develop a solver that (1) uses finite© 2018 The Author(s)
+Computer Graphics Forum © 2018 The Eurographics Association and John Wiley & Sons Ltd.
+Mixed-degree elements We also support B-splines of mixeddegree, centering these on the cells/faces/edges/vertices of the grid.
+As with odd-degree B-splines, we use the left/bottom/back association and extend the octree to partition a larger cube. For example,
+using B-splines of mixed-degree D = {2, 1, 2}, we associate the
+function ΦD
+o to the center of the bottom face of octree cell o, with:
+ x
+ y
+ z
+
+y
+x
+q − co
+q − czo
+2 q − co
+ΦD
+· Φ1
+· Φ2
+o (q) = Φ
+wo
+wo
+wo
+where Φ1 : R → R is the univariate first-order B-spline:
+
+
+ 1 + s if s ∈ [−1, 0]
+1
+1 − s if s ∈ [0, 1]
+Φ (s) =
+
+ 0
+otherwise.
+The advantage of supporting mixed-degree B-splines is that partial derivatives of uniform-degree B-splines can be expressed as
+the linear combinations of mixed-degree B-splines. The coefficients
+of these partial derivatives are given in terms of finite-differences
+of the original coefficients and are naturally stored on a staggered
+grid [HW65].
+M. Kazhdan & H. Hoppe / An Adaptive Multigrid Solver
+4.1.2. Prescribing a Linear System
+4.1.4. Dimensionality
+The solver in [KBH06] (and [KH13]) defines a (screened) Poisson
+equation, with coefficients expressed in terms of the integrated dotproduct of gradients (and weighted sum of the product of pointwise
+evaluations). We extend this formulation to support the solution
+of a more general class of linear systems. Specifically, given D =
+{dx , dy , dz } – the degrees of the system B-splines along the x, y,
+and z axes – we denote by D = [0, dx ] × [0, dy ] × [0, dz ] the set of
+all possible partial derivatives and support the construction of both
+integrated and sampled coefficients that incorporate all bilinear
+combinations of the |D| derivatives.
+The solver in [KBH06] was designed for linear systems in 3D. We
+extend the formulation by supporting the design of linear systems in
+any dimensions.
+Conceptually, this is straightforward to do because multivariate Bsplines are defined as tensor-products of univariate B-splines. Thus,
+function integration and evaluation can be performed by separately
+integrating/evaluating across the different dimensions and then multiplying. (Similarly, multivariate prolongation stencils are described
+as the tensor-products of univariate stencils.)
+We make this efficient in practice using several techniques.
+Integrated system We support the construction of general integrated linear systems by allowing the user to prescribe any symmetric, positive-semi-definite matrix, D ∈ R|D|×|D| . We then define
+the associated linear system, L ∈ R|O|×|O| , by setting:
+Lo,õ =
+Di ,ĩ ·
+∑
+Z
+(i ,i˜)∈D×D
+i
+i
+ĩ D
+∂i ΦD
+o (q) · ∂ Φõ (q) dq
+[0,1]3
+where for i = {i, j, k}, we have:
+i
+j
+k
+∂ ∂ ∂
+Φ(p).
+∂xi ∂y j ∂zk
+i
+∂i Φ(p) ≡
+Pointwise system Given a point-set P, we support the construction
+of general pointwise linear systems by allowing the user to prescribe
+a function D : P → R|D|×|D| returning a positive-semi-definite
+matrix. We then define the associated linear system, S ∈ R|O|×|O| ,
+by setting:
+So,õ =
+∑ D i,ĩ (p) · ∂i ΦDo (p) · ∂ĩ ΦDõ (p).
+∑
+(i ,ĩ )∈D×D p∈P
+4.1.3. Imposing Constraints
+In [KBH06], the constraint is given in terms of the integrated products of the gradients of the B-splines with a vector-field describing
+the normals of the point-cloud. This is extended in [KH13] to also
+constrain the solution to evaluate to 0.5 at the point samples. We
+extend this formulation to support the prescription of a more general
+family of integrated and pointwise constraints.
+Integrated constraints As above, we let D = [0, dx ] × [0, dy ] ×
+[0, dz ] denote the set of all possible partial derivatives of the system
+B-splines. We support the construction of general integrated constraints by allowing the user to prescribe the coefficients, F ∈ R|O| ,
+of a function with respect to B-splines of degree D̃ = {d˜x , d˜y , d˜z },
+as well a matrix, M ∈ R|D|×|D̃| . Then, given an octree node o ∈ O,
+we increment the o-th coefficient of the constraint vector by setting:
+Bo += ∑ Fõ ·
+õ∈O
+Mi ,ĩ ·
+∑
+(i ,ĩ )∈D×D̃
+Z
+[0,1]3
+i
+i
+ĩ D̃
+∂i ΦD
+o (q) · ∂ Φõ (q) dq.
+Pointwise constraints We support the construction of general
+pointwise constraints by allowing the user to prescribe a function
+F : P → R|D| . Then, given an octree node o ∈ O, we increment the
+o-th coefficient of the constraint vector by setting:
+Bo += ∑
+∑ ∑
+õ∈O i ∈D p∈P
+i
+F i (p) · ∂ ΦD
+õ (p).
+m-dimensional windows We define an m-dimensional window
+to be a wrapper for m-dimensional arrays of size w1 × · · · × wm
+(with wi ∈ Z≥0 a compile-time constant). The window implements functionality returning the (m − 1)-dimensional slices of size
+w1 × . . . × wm−1 and supports recursive iteration over the window
+dimensions to apply a computation kernel at the individual elements.
+Neighbor lookup As most of the computation in defining and solving the linear system requires finding the neighbors of a node, we
+design a neighbor-key data-structure to amortize the cost of neighbor
+lookup. Given an octree O of depth Λ and given a target neighbor
+window W = [−l1 , r1 ] × · · · × [−lm , rm ] (with, li , ri ∈ Z≥0 compiletime constants), we define a neighbor-key to be an array of Λ windows of size W. Since the W neighbors of a node are contained in
+the children of the W neighbors of the node’s parent, we recursively
+set the neighbor-key by setting the parent’s neighbors and using
+those to set the neighbors of the child.
+The advantage of this approach is that if we traverse the octree
+in a coherent (e.g. Morton) order, the node’s parent’s neighbors
+will likely have been set in a previous neighbor lookup and we will
+not need to traverse to the root of the tree to compute neighbors.
+Thus, the amortized cost of computing the neighbors within a fixed
+window is reduced to O(1).
+Template specialization As the size of the windows we use is
+determined by the degrees of the B-splines, which are known at
+compile-time, we implement the windowed computations using
+C++ templates specifying the degrees of the B-splines along the
+different axes. The templating of dimension of the system makes
+it easier for the compiler to inline the nested iterations (rather than
+using recursive function calls to iterate over the windows) while
+the templating of the window dimensions enables loop-unrolling,
+both of which improve the runtime performance. (Technically, we
+use variadic templates with integer parameters: The number of
+parameters defines the dimension of the Euclidean space and the
+values of the parameters give the degrees along the individual axes.)
+We note that with the exception of the specialization of the template code for the case of dimension-one (to terminate the recursive
+iteration over the window slices) the only code that we specialize is
+the isosurface extraction, which is only implemented for 3D.
+4.2. Modifying the Solver
+We modify the solver in two ways. We improve the accuracy of the
+solver by extending it to support a full V-cycle pass and we improve
+© 2018 The Author(s)
+Computer Graphics Forum © 2018 The Eurographics Association and John Wiley & Sons Ltd.
+M. Kazhdan & H. Hoppe / An Adaptive Multigrid Solver
+the memory efficiency of the solver by replacing the conjugategradients solver with a Gauss-seidel solver.
+V-Cycle Solver
+We extend the solver to support V-cycle iterations by adjusting the
+constraints at level ` using the computed solutions at both finer and
+coarser resolutions. As with the extension in [KH13], this can be
+made efficient when the octree is refined so that when a node is in
+the tree, all coarser overlapped nodes are also in the tree.
+Algorithm VCycleSolver provides pseudo-code for a solver performing n v-cycles. After relaxing the solution in the restriction
+phase (line 5), the algorithm down-samples the accumulated (dual)
+solution from the finer levels and combines it with the (dual) solution at the current level (line 6). Then, when computing the residual
+constraint (lines 4, 7, and 11), both the finer and coarser solutions
+are used to adjust the constraints. Here the restriction operator R`−1
+`
+is the transpose of P``−1 .
+VCycleSolver( M , B , n , ν )
+1
+2
+3
+4
+X, P, R ← 0
+for σ ∈ {1, . . . , n}
+// Fine-to-coarse relaxation
+for ` ∈ {Λ − 1, . . . , 1}
+Bb` ← B` − R` − M``−1 (P`−1 )
+`
+X ← Relax( M`` , X ` , Bb` , ν )
+`−1 `
+`
+R`−1 ← M`−1
+` (X ) + R` (R )
+5
+6
+initialize
+adjust
+relax
+restrict
+7
+// Apply direct solve at coarsest resolution
+Bb0 ← B0 − R0
+adjust
+8
+X 0 ← Solve( M00 , Bb0 )
+solve
+0
+0
+prolong
+11
+P ←X
+// Coarse-to-fine relaxation
+for ` ∈ {1, . . . , Λ − 1}
+Bb` ← B` − R` − M``−1 (P`−1 )
+12
+X ` ← Relax( M`` , X ` , Bb` , ν )
+relax
+9
+10
+13
+14
+`
+P ←X
+return X
+`
++ P``−1 (P`−1 )
+Figure 1: Using a regular grid to solve for the function whose gradients best-fit the gradients of a depth-5 step function results in
+ringing artifacts when solved at coarser depths. Using a depth-5
+system (bottom right), we correctly reconstruct the step function.
+5. Ringing
+As the function space we use is adaptive, our approach can only
+represent functions that are high-frequency where the grid is adaptively refined. Our initial motivation was to consider applications
+which only evaluate the solution in these high-frequency regions.
+However, a broader set of applications can be considered if we allow
+the solution to be evaluated everywhere.
+In this section, we describe the ringing problem that arises when
+evaluating away from the adaptively refined regions and provide a
+heuristic for resolving this problem.
+adjust
+prolong
+Gauss-Seidel Smoothing
+We also modify the relaxation step (lines 5 and 12 of Algorithm VCycleSolver) to use Gauss-Seidel iterations instead of
+conjugate-gradients. This allows us to leverage temporal blocking [Pfe63, DHK∗ 00, CK11] to sequentially stream in slices of the
+octree, maintaining a small working window in memory as we perform the relaxation. This improves cache coherence and reduces the
+overall memory usage by allowing us to construct the system matrix
+slice-by-slice (i.e. without ever having to store the whole matrix in
+memory). We further parallelize the relaxation by using multicolor
+Gauss-Seidel iterations within each slice, with the number of colors
+determined by the support/degree of the finite-elements.
+© 2018 The Author(s)
+Computer Graphics Forum © 2018 The Eurographics Association and John Wiley & Sons Ltd.
+5.1. Ringing in Multigrid
+To motivate the problem, we consider a simple 1D case in which
+we seek the function whose gradients best fit the gradients of a
+depth-5 Heaviside function. (This is the function whose coefficients
+are equal to 0 for the first 16 indices and equal to 1 for the second
+16 indices, visualized in the bottom right of Figure 1.)
+Figure 1 shows a visualization of the solutions obtained at different resolutions. As expected, when using the function space defined
+at depth 5, we reconstruct the original step function. However, at
+coarser depths the function spaces can no longer reproduce the
+higher-frequency components and ringing is visible.
+This ringing is not a problem for standard multigrid solvers because the solution obtained at a coarser resolution is prolonged into
+the finer-resolution space, where subsequent relaxations remove
+the high-frequency artifacts. However, when using a solver over an
+adaptive domain, not all of the solution computed at the coarser resolution can be prolonged. In particular, ringing that occurs outside the
+M. Kazhdan & H. Hoppe / An Adaptive Multigrid Solver
+support of the finer functions is not “seen” at the finer resolutions
+and cannot be removed. Figure 2 (left) shows a visualization of this
+type of ringing, when the tree is only refined near the discontinuity
+in the step function.
+5.2. Adapted Successive Under-Relaxation
+We address the ringing problem in two steps. First, we use a V-cycle
+solver, initially performing fine-to-coarse relaxations (restriction)
+and then performing coarse-to-fine relaxations (prolongation). Our
+goal in relaxing at the higher frequencies first is to resolve the
+high-frequency components of the constraints so that the restricted
+residual represents a smoother function, and can be solved at coarser
+resolutions without introducing ringing.
+On its own, we have found that using a V-cycle solver produces
+results that are worse than those obtained using a strictly coarse-tofine (cascadic) solver because the use of an adaptive grid introduces
+Dirichlet-like constraints at the higher-frequencies. (Using an adaptive solver can be thought of as using a regular solver but fixing
+the coefficients of nodes outside the adaptive region to zero.) To
+mitigate these effects, we use adapted successive under-relaxation
+in the restriction phase to down-play the contribution of nodes near
+the refinement boundary.
+Specifically, given a node o ∈ O at depth d, we measure the
+proximity of o to the boundary by measuring the ratio of integrals:
+R
+µ(o) =
+d Bo (p) d p
+RΩ
+Ω Bo (p) d p
+,
+with Bo (p) the B-spline associated with node o, Ω the working
+volume, and Ωd ⊂ Ω the subset contained within nodes at depth d.
+(As we are using B-splines of degree greater than zero, the support of
+a B-spline extends beyond the interior of the associated node.) Here
+the denominator measures the total mass of the B-spline, Bo (p),
+while the numerator measures the mass contained within the depthd nodes, so that µ(o) = 1 for nodes interior to the adaptive region
+and µ(o) < 1 for nodes near the refinement boundary.
+We then proceed as with standard Gauss-Seidel, iteratively updating the coefficient Xo by computing the correction term, Co , for
+each node n. However, instead of adding the full correction term,
+we add a fraction:
+Xo ← Xo + α · µ(o)β ·Co
+where the parameters α and β control the extent of the underrelaxation as a function of the proximity to the boundary. Figure 2
+(right) shows the results obtained when solving for the function
+whose gradients best-fit the gradients of the depth-5 Heaviside function using adapted successive under-relaxation during the restriction
+phase. As the figure shows, this heuristic effectively removes the
+ringing artifacts.
+6. Results
+To evaluate our multigrid solver, we consider three different applications: surface reconstruction, gradient-domain image stitching, and
+Euclidean Distance Transform calculation. The results described
+in this section were obtained on a PC running Windows 10, with
+Figure 2: Visualizations of the solutions obtained using a discretization where the tree is only refined near the discontinuity in the step
+function: Using a cascadic solver without adapted under-relaxation
+the solution exhibits significant ringing (left); Using a V-cycle solver
+with adapted under relaxations in the restriction phase successfully
+removes the artifacts (right). Tick marks at the bottom show how the
+interval is partitioned by the leaf nodes of the adaptive binary tree.
+an Intel Core i7-6700HQ processor and 16 GB of RAM. We used
+eight Gauss-Seidel relaxations at each hierarchy level and fixed the
+under-relaxation parameters at α = 1/8 and β = 6 for all evaluations.
+6.1. Surface Reconstruction
+In these applications, the goal is to compute a watertight mesh that
+fits an input oriented point-set. We consider two implementations,
+Screened Poisson Surface Reconstruction [KH13] and the Smoothed
+Signed Distance Reconstruction [CT11,CT12]. Both proceed by first
+computing an implicit function discretized over an octree adapted
+to the input samples, and then extracting an isosurface.
+For conciseness, we provide only a small number of reconstruction visualizations in this section. For additional results, please see
+Figure 9 in the supplemental.
+Screened Poisson Surface Reconstruction (SPR)
+This work computes the indicator function (i.e. the function that is
+zero outside of the surface and one inside) using degree-two finiteelements by solving a linear system composed of two parts: a Poisson system that seeks a function whose gradients match a smoothed
+normal field defined by the oriented points, and a screening system
+that seeks a function evaluating to 0.5 at the point samples.
+As our solver extends the solver in [KH13], it too can be used for
+computing the implicit function. Furthermore, because our solver
+supports finite-elements systems of any degree, and since the formulation of the Poisson system only requires computing first derivatives, we can implement SPR using degree-one finite-elements. (To
+extract a smooth isosurface, we use the gradients at the octree corners to define piecewise quadratic interpolants along the edges as
+in [FKG15]. Because degree-one finite elements have derivative
+discontinuities at the corners, we define the gradients by averaging
+the left- and right-sided derivatives.)
+Table 1, (left) compares the running time and memory usage of
+our solver with the implementation provided in [Kaz13]. Comparing
+the performance of the original solver with our degree-two solver,
+© 2018 The Author(s)
+Computer Graphics Forum © 2018 The Eurographics Association and John Wiley & Sons Ltd.
+M. Kazhdan & H. Hoppe / An Adaptive Multigrid Solver
+Points
+Angel
+Bunny
+Eagle
+Eagle†
+Tanagra
+King
+King†
+Thai Statue
+Guinea Pig
+Guinea Pig†
+Head
+Head†
+Broccoli
+Broccoli†
+Neptune
+Lucy
+Monk
+Monk†
+David
+Awakening
+24 K
+354 K
+778 K
+778 K
+2M
+2M
+2M
+2M
+2M
+2M
+3M
+3M
+3M
+3M
+4M
+5M
+5M
+5M
+11 M
+20 M
+Screened Poisson Reconstruction
+Original
+Ours (deg. 1) Ours (deg. 2)
+sec.
+MB sec.
+MB
+sec.
+MB
+SSD Reconstruction
+Original
+Ours
+sec. MB
+sec.
+MB
+2
+18
+49
+118
+891
+1239
+28
+57
+686
+1305
+45
+36
+1137
+933
+41
+885
+71
+1581
+37
+45
+43
+608
+753
+778
+144
+123
+2378
+992
+3
+34
+49
+58
+45
+69
+84
+72
+75
+80
+69
+84
+115
+131
+163
+161
+101
+142
+386
+576
+2
+13
+28
+33
+17
+35
+41
+28
+20
+24
+23
+27
+41
+49
+18
+22
+22
+28
+77
+43
+54
+379
+672
+731
+427
+877
+950
+696
+479
+519
+537
+582
+973
+1051
+387
+502
+499
+543
+1453
+626
+3
+19
+43
+48
+26
+56
+62
+43
+31
+36
+35
+40
+64
+71
+27
+34
+34
+39
+113
+59
+89
+542
+907
+923
+577
+1331
+1361
+1139
+617
+640
+743
+767
+1134
+1376
+601
+861
+770
+800
+1750
+880
+114
+1287
+1943
+2591
+1418
+2705
+3733
+2310
+1583
+2217
+1866
+2563
+3048
+4301
+1343
+1725
+1749
+2516
+5178
+2871
+[4] 3
+88
+[34] 13 402
+[75] 26 667
+[82] 30 695
+[51] 18 404
+[111] 36 913
+[118] 42 969
+[85] 29 842
+[64] 23 477
+[69] 28 513
+[70] 25 568
+[76] 29 609
+[124] 42 961
+[135] 49 1027
+[50] 19 450
+[68] 25 629
+[70] 26 583
+[77] 31 627
+[230] 80 1328
+[108] 46 684
+Table 1: Comparison of running time (seconds) and memory usage (MB) for the original SPR and SSD implementations [Kaz13, CMT11] with
+the implementations obtained using our adaptive solver at depth 10. Numbers in brackets give the timing for a single-threaded implementation.
+†
+Models denoted with a dagger are reconstructed with color. As in the original implementation of SPR, our implementation of SPR and SSD
+performs a single cascadic multigrid pass.
+Figure 3: Comparison of reconstruction accuracy for the original SPR and SSD implementations [Kaz13, CMT11] with the implementations
+obtained using our adaptive solver at depth 10. Accuracy is measured in RMS and is computed by using half of the points for reconstruction
+and measuring the one-sided distance from the second half of the points to the reconstructed surface.
+we see that the extension of the adaptive solver to a larger class of
+linear systems does not come at the cost of slower running times or
+larger memory usage. (Our implementation runs in 85% of the time
+and uses 80% of the memory.)
+The advantage of a general-purpose solver becomes more pronounced when we compare the original implementation to the implementation using degree-one finite elements. These elements have
+smaller support and result in a sparser linear system. As Table 1
+shows, the sparser system results in significantly improved performance. (Our implementation runs in 55% of the time and uses 60%
+of the memory.)
+Figure 4 (top) shows example close-ups from the reconstructions
+of the David head, using the original SPR algorithm and our implementation with degree-one and degree-two elements. Despite the
+© 2018 The Author(s)
+Computer Graphics Forum © 2018 The Eurographics Association and John Wiley & Sons Ltd.
+lower degree of the finite-elements, we did not find a noticeable
+difference in the quality of the reconstructed surfaces when using
+lower-degree elements. This is confirmed quantitatively in Figure 3
+which gives the root mean squared distance from the input point
+set to the reconstructed surface, and shows that the original implementation and our implementation using degree-one and degree-two
+elements produce reconstructions of similar quality.
+Smoothed Signed Distance Reconstruction (SSD)
+This work computes an approximation to the signed Euclidean
+Distance Transform (i.e. the function that gives the signed distance
+from a point in space to the nearest point on the surface) using
+degree-two finite-elements by solving a linear system composed
+of three parts: a bi-Laplacian system that seeks a function whose
+M. Kazhdan & H. Hoppe / An Adaptive Multigrid Solver
+Figure 4: Reconstructions of David’s head (left) at depth 10, comparing the original SPR implementation [Kaz13] (top left), the SPR
+implementation with our adaptive solver using degree-one elements (top center), the SPR implementation with our adaptive solver using
+degree-two elements (top right), the original SSD implementation [CMT11] (bottom left), and the SSD implementation with our adaptive
+solver (bottom right),
+gradients are as constant as possible, a value-screening system that
+seeks a function evaluating to 0 at the point samples, and a gradientscreening system that seeks a function whose gradients agree with
+the normals at the point samples.
+As our solver supports systems constraining both integrals and
+values of higher-order derivatives of functions, it can be extended to
+support the SSD reconstruction algorithm. However, as this system
+requires the computation of second-order derivatives, our implementation is constrained to use at least degree-two finite-elements.
+Table 1, (right) compares the running time and memory usage
+of our solver with the implementation provided in [CMT11]. As
+the original implementation is single-threaded, we provide running times for our implementation with and without multithreading.
+Comparing the performance of the original solver with our implementation, we see that despite the optimized implementation of
+the authors, our general-purpose solver provides an implementation
+with significantly improved running times and memory usage. (Our
+single-threaded implementation runs in 80% of the time and uses
+30% of the memory. Our multithreaded implementation runs in 30%
+of the time.)
+Color Interpolation
+We extend our implementation of SPR and SSD to support color interpolation by constructing a color function, C : [0, 1]3 → [0, 256)3 ,
+that is evaluated at the vertices of the reconstructed mesh. Our implementation follows the hierarchical push-pull approach for scattered
+data interpolation [Bur88, GGSC96].
+During the construction of the octree, we distribute each input
+point’s color into the eight corners of the octree node containing the
+point. The color is distributed using tri-linear interpolation weights
+and both the weighted color and the weights themselves are accumulated at the corners.
+Distributing at each level of the octree, we obtain piecewise trilinear functions c` (p) and w` (p) giving the accumulated color and
+weight at level `. At deeper levels of the tree (larger `) the functions
+c` and w` provide a finer representation of the color, but are not welldefined away from the input samples. At coarser levels, the functions
+provide a smoothed representation of the color that is defined further
+away from the input. We take a linear combination of these to get
+a single color and weight function, weighting the contributions to
+give preference to colors/weights at finer resolutions:
+Λ−1
+c(p) = ∑ c` (p) · κ`
+`=0
+Figure 4 (bottom) shows example close-ups from the reconstructions of the David head, using the original SSD implementation and
+our adaptive multigrid implementation using degree-two elements.
+The figure shows that the two reconstructions are qualitatively similar. This is verified empirically in Figure 3 which shows that the
+two implementations produce reconstructions with similar quality.
+(When running the implementation provided in [CMT11] we used
+a value weight that was 5 times the default. We found that this
+produced higher quality results in less time.)
+Λ−1
+and
+w(p) = ∑ w` (p) · κ`
+`=0
+with Λ the number of levels in the octree and κ the weight (fixed at
+κ = 32 in our experiments). Dividing the accumulated color by the
+accumulated weights, we get the final color function:
+C(p) = c(p)/w(p).
+Table 1 shows the performance of our degree-one and degree-two
+SPR implementations and compares the performance of our color
+SSD reconstruction with the implementation provided in [CMT11].
+© 2018 The Author(s)
+Computer Graphics Forum © 2018 The Eurographics Association and John Wiley & Sons Ltd.
+M. Kazhdan & H. Hoppe / An Adaptive Multigrid Solver
+removes the seams. This function is defined in the gradient-domain
+by setting the gradients to be equal to zero away from the seams (so
+that adding the offset leaves the interior unchanged) and setting the
+gradients to the negative of the composite’s gradient across the seam
+(so that adding the offset removes the discontinuity). This reduces
+the problem of image stitching to the solution of a Poisson equation.
+As observed by Agarwala, the offset function should only be
+high-frequency near the seams and can be well-represented using
+an adaptive quadtree. We represent the target gradient field using
+mixed-degree finite elements stored along (dual) edges.
+Figure 5: Color reconstructions of the Eagle model at depth 10,
+comparing SPR with our adaptive solver using degree-one elements
+(top center), SPR with our adaptive solver using degree-two elements
+(top right), the original SSD implementation [CMT11] (bottom left),
+and the SSD reconstruction with our adaptive solver (bottom right),
+Figure 6: Comparison of color reconstruction accuracy for our PSR
+implementation using degree-one and degree-two elements, as well
+as the original SSD [CMT11] and our SSD implementations at depth
+10. Accuracy is measured in RMS and is computed by using half of
+the points for reconstruction and measuring the one-sided difference
+from the colors associated to the second half of the points to the
+colors at the nearest point on the reconstructed surface.
+Comparing the implementations, we see that all the methods incur
+a small runtime cost for color interpolation. However, the original
+SSD implementation incurs a substantially larger memory cost.
+Figure 5 compares close-ups from the color reconstructions for
+the Eagle model. As the figure shows, the different methods all produce similar color reconstructions. This is confirmed quantitatively
+in Figure 6 which gives the root mean squared distance from the
+colors of the input point set to the colors of the reconstructed surface,
+and shows that all methods produce colors with comparable quality.
+6.2. Gradient-Domain Image Stitching
+In this application, the goal is to stitch together a panorama consisting of multiple images by removing discontinuities along seam
+boundaries. Following the approach of Agarwala [Aga07], stitching
+can be formulated as the problem of finding the offset function that
+© 2018 The Author(s)
+Computer Graphics Forum © 2018 The Eurographics Association and John Wiley & Sons Ltd.
+An example of the stitching can be seen in Figure 7. The top
+two rows show the input composite (with visible seams between
+individual images of the panorama), as well as a mask showing
+the assignment of pixels in the composite to input images. The
+bottom two rows show the results obtained using our adaptive multigrid solver. As the figure shows, without adapted successive underrelaxation (second row from bottom), ringing artifacts are prominent.
+With (bottom row), these artifacts disappear. Figure 11 in the supplemental compares the stitching results obtained with different
+under-relaxation parameters α and β.
+While it is difficult to compare directly to the method of Agarwala, we were able to compare our approach to the Distributed
+Multigrid (DMG) solver [KSH10] which was shown to outperform
+the approach of Agarwala, both in terms of running time and memory usage. Table 2 compares the running time and memory usage
+of DMG with the running time and memory usage of our adaptive
+multigrid solver. As the table shows, our solver provides significant
+performance improvements at all but the largest images. (Considering the entire time required to perform the stitching, our method
+runs in 60% of the time and uses 40% of the memory. Discounting
+the time required to read in the input pixels and labels, and to write
+the output, our method runs in 40% of the time.)
+We believe that the deteriorating performance for high-resolution
+images is due to the fact that DMG has a memory footprint that
+is linear in the width of the image while the memory footprint of
+our approach is linear in the number of seams. Assuming that the
+resolution of individual images is constant, the number of individual
+images, and hence the number of seams, grows linearly with the
+size of the panorama. Thus, the DMG implementation has a memory footprint of O(N 1/2 ) while our implementation has a memory
+footprint of O(N), where N is the number of pixels.
+See Figure 10 in the supplemental for additional results.
+6.3. Euclidean Distance Transform Computation
+In this application, the goal is to compute an approximation of the
+unsigned Euclidean Distance Transform (EDT) of a surface in 3D
+(i.e. the function giving the unsigned distance from each point in
+3D to the nearest point on the surface). Following the Geodesicsin-Heat approach of Crane et al. [CWW13], an approximation of
+the EDT can be computed by solving two linear systems. The first
+diffuses the rasterization of the surface into a 3D grid, transforming
+a compactly supported representation of the surface into a globally
+supported function. Using the fact that the gradients of the smoothed
+rasterization point away from the surface, the second system fits
+M. Kazhdan & H. Hoppe / An Adaptive Multigrid Solver
+Emilion
+Beynac
+Rainier
+PNC3
+Sedona
+Edinburgh
+Crag
+Red Rock
+Jaffa
+Black Tusk
+Douthat
+Cad Idris
+Tallinn 2
+Jerusalem
+Shenandoah
+Tallinn 7
+Old Rag
+Old City
+St. James 2
+Pixels
+Seams
+I/O
+sec.
+DMG
+sec. MB
+Ours
+sec. MB
+9 MP
+11 MP
+23 MP
+29 MP
+34 MP
+50 MP
+64 MP
+87 MP
+230 MP
+240 MP
+320 MP
+380 MP
+420 MP
+440 MP
+648 MP
+860 MP
+1 GP
+3 GP
+3 GP
+8K
+5K
+10 K
+27 K
+17 K
+68 K
+36 K
+50 K
+197 K
+143 K
+187 K
+311 K
+220 K
+277 K
+403 K
+568 K
+663 K
+2M
+3M
+1
+1
+2
+2
+4
+5
+7
+7
+17
+18
+23
+28
+27
+32
+53
+74
+93
+234
+417
+5
+6
+6
+16
+10
+13
+15
+20
+46
+46
+64
+75
+77
+85
+133
+165
+180
+555
+700
+2
+2
+4
+4
+6
+9
+10
+13
+28
+29
+38
+48
+47
+54
+87
+118
+142
+464
+760
+119
+124
+180
+183
+192
+207
+230
+253
+287
+286
+329
+339
+355
+344
+378
+369
+473
+527
+540
+13
+12
+17
+29
+21
+64
+36
+49
+158
+118
+151
+245
+178
+220
+324
+442
+513
+1517
+2687
+Table 2: Comparison of running time (seconds) and memory usage
+(MB) for the DMG solver [KSH10] with the implementations using
+our adaptive solver. (I/O times for reading/decompressing the input
+and writing/compressing the output are also provided.) For our
+implementation, the system is solved by performing a single V-cycle
+multigrid pass.
+Figure 7: Image stitching showing the composite and assignment
+mask for the individual images making up the Jerusalem panorama
+(top two rows), the results of stitching without (third row) and with
+(bottom row) adapted under-relaxation.
+a distance function to the normalized gradients of the smoothed
+rasterization. Combining the two steps, one obtains a smoothed
+approximation of the EDT, with the extent of smoothing determined
+by the diffusion time in the first step.
+As both systems use only first-order derivatives, Geodesics-inHeat can be implemented using degree-one finite-elements. Furthermore, because the smoothed rasterization and the output EDT are
+only high-frequency near the input surface, they can be compactly
+represented using an adaptive octree.
+Figure 8 (top) shows a visualization of the EDTs computed for
+the Stanford Bunny model, showing the exact EDT computed using
+the method of Saito and Toriwaki [ST94] (left) and the approximate
+EDT computed using our adaptive multigrid solver without (center)
+and with (right) adapted successive under-relaxation. For the visualizations, we extracted isosurfaces at regularly sampled isovalues
+and trimmed the isosurfaces with the yz-plane to reveal the interior surfaces. (The original surface is overlaid with transparency.)
+Figure 13 in the supplemental compares the EDTs obtained with
+different under-relaxation parameters α and β.
+The advantage of our approach is highlighted in Table 3 which
+compares the running time and memory usage of our approximate
+implementation with the implementation from [ST94], at different
+depths. The implementation of Saito and Toriwaki has linear running
+time and memory usage and provides an efficient solution at coarser
+depths/resolutions as it is trivially parallelizable and only requires
+a regular grid as a data-structure. (At depth 8 the method of Saito
+and Toriwaki runs in 40% of the time, but requires 2.5 times the
+memory.) In contrast, our approach is only linear in the number of
+octree nodes and becomes more efficient at finer depths/resolutions.
+(At depth 9 our method runs in 85% of the time and uses 1/11th of
+the memory. At depth 10 our method runs in 20% of the time and
+uses 1/27th of the memory. At depth 11 the method of Saito and
+Toriwaki cannot maintain the 20483 voxel grid in memory.)
+A further advantage of our approach is highlighted in the plot in
+Figure 8 (bottom), which shows the output level-set complexity as a
+function of the distance from the input mesh. Using a regular grid,
+the number of triangles grows with the surface area, and hence with
+distance. In contrast, using an adaptive octree, grid cells become
+larger away from the surface, resulting in larger marching-cubes
+triangles and hence lower-tessellation outputs.
+We note that our approach fails to capture the fine detail of the
+exact solution. There are two reasons for this: (1) The Geodesicsin-Heat approach computes a smoothed approximation of the EDT,
+with the extent of smoothing growing as the diffusion time is increased; (2) As our octree only adapts to the input geometry, our
+solution is necessarily smooth away from the surface and fails to
+resolve the high-frequency detail near the medial axis of the shape.
+See Figure 12 in the supplemental for additional results.
+© 2018 The Author(s)
+Computer Graphics Forum © 2018 The Eurographics Association and John Wiley & Sons Ltd.
+M. Kazhdan & H. Hoppe / An Adaptive Multigrid Solver
+Exact
+Iris
+Raptor
+Octopus
+Fish
+Stool
+Chair
+Nefertiti
+Elephant
+Hand
+Armadillo
+Fertility
+Kitten
+Dragon
+Porsche
+Bunny
+Knot
+Gargoyle
+Area
+Triangles
+sec.
+8 / 9 / 10 / 11
+0.03
+0.05
+0.10
+0.15
+0.15
+0.16
+0.19
+0.19
+0.19
+0.21
+0.21
+0.21
+0.22
+0.24
+0.30
+0.31
+0.33
+20 K
+1716 K
+276 K
+116 K
+2K
+5K
+2M
+29 K
+98 K
+338 K
+472 K
+268 K
+851 K
+6K
+204 K
+391 K
+418 K
+1 / 6 / 86 /
+1 / 6 / 78 /
+1 / 5 / 77 /
+1 / 5 / 74 /
+0 / 5 / 81 /
+0 / 5 / 81 /
+2 / 7 / 75 /
+1 / 5 / 78 /
+1 / 6 / 82 /
+1 / 6 / 80 /
+1 / 6 / 75 /
+1 / 5 / 68 /
+1 / 6 / 70 /
+0 / 5 / 67 /
+1 / 5 / 73 /
+1 / 5 / 72 /
+1 / 5 / 72 /
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+8/
+Ours
+MB
+9 / 10 / 11
+132 / 1028 / 8196 /
+171 / 1067 / 8235 /
+138 / 1034 / 8202 /
+134 / 1030 / 8198 /
+131 / 1027 / 8195 /
+131 / 1027 / 8195 /
+178 / 1074 / 8242 /
+132 / 1028 / 8196 /
+134 / 1030 / 8198 /
+139 / 1035 / 8203 /
+142 / 1039 / 8206 /
+138 / 1034 / 8202 /
+151 / 1047 / 8215 /
+131 / 1027 / 8195 /
+136 / 1032 / 8200 /
+140 / 1037 / 8204 /
+141 / 1037 / 8205 /
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+*
+sec.
+8 / 9 / 10 / 11
+1 / 2 / 4 / 13
+4 / 5 / 8 / 20
+2 / 3 / 9 / 29
+1 / 4 / 13 / 44
+1 / 3 / 11 / 41
+1 / 3 / 10 / 38
+5 / 8 / 19 / 60
+1 / 4 / 14 / 55
+1 / 4 / 14 / 55
+2 / 5 / 17 / 64
+2 / 5 / 17 / 60
+2 / 5 / 17 / 64
+3 / 7 / 20 / 71
+1 / 4 / 14 / 58
+2 / 7 / 23 / 87
+3 / 8 / 25 / 95
+3 / 8 / 26 / 99
+8/
+MB
+9 / 10 /
+11
+15 / 28 / 77 / 252
+138 / 138 / 138 / 337
+25 / 55 / 181 / 675
+28 / 78 / 272 / 1032
+28 / 75 / 255 / 940
+26 / 73 / 250 / 930
+161 / 161 / 326 / 1229
+32 / 96 / 346 / 1315
+35 / 102 / 354 / 1318
+35 / 106 / 379 / 1440
+41 / 97 / 350 / 1349
+34 / 106 / 384 / 1463
+71 / 104 / 383 / 1489
+28 / 89 / 336 / 1344
+43 / 140 / 516 / 1994
+49 / 159 / 566 / 2166
+47 / 157 / 586 / 2269
+Table 3: Comparison of running time (seconds) and memory usage (MB) for the exact Euclidean Distance Transform calculation [ST94] with
+the implementations obtained using our adaptive solver, at depths 8, 9, 10 and 11. For our implementation, the diffusion system is solved by
+performing a single V-cycle multigrid pass while the gradient-fitting system is solved by performing a single cascadic multigrid pass.
+7. Summary and future work
+We have described an extension of the solver initially presented in
+[KBH06] and [KH13] for solving the (screened) Poisson equation, to
+a general-purpose adaptive multigrid solver. We have demonstrated
+several image- and geometry-processing applications in 2D and 3D,
+and have shown that the abstraction of the solver does not come at
+the cost of either running time or memory usage.
+In the future, we would like to extend our solver in several ways:
+Boundary Conditions To support applications in fluid simulations,
+we would like to extend the solver to support boundary constraints. A
+simple approach would be to use the existing capacity for prescribing
+point-based constraints to enforce boundary conditions as a soft
+constraint. A better solution may be to enforce boundary constraints
+explicitly through integration at the finest resolution, and then using
+the Galerkin method to restrict to coarser resolutions.
+Figure 8: Top: Comparison of the EDT obtained for the Bunny
+model at resolution 5123 using the approach from [ST94] (left) with
+the one obtained by solving the Geodesics-In-Heat system over an
+octree of depth 9, without (middle) and with (right) adapted underrelaxation. The figure shows regularly sampled level sets of the
+EDT, trimmed to the yz-plane. Bottom: Output mesh complexity (in
+triangles) as a function of the distance from the surface.
+© 2018 The Author(s)
+Computer Graphics Forum © 2018 The Eurographics Association and John Wiley & Sons Ltd.
+Ringing Though our solution to the ringing problem works well
+in practice, we would like to consider more principled ways for
+resolving this phenomenon. In particular, we would like to devise
+a method that works consistently, independent of the number of
+V-cycles, the number of Gauss-Seidel iterations, the order of the
+B-spline, or the type of linear system being solved. One approach
+may be to solve an inhomogeneous system where octree nodes
+are assigned a proximity weight which is used to modulate the
+contribution of the associated integral to the linear system. This
+would encourage the solver to focus away from the refinement
+boundaries in the restriction phase, reducing the over-fitting at these
+boundaries and thereby alleviating the ringing.
+M. Kazhdan & H. Hoppe / An Adaptive Multigrid Solver
+Acknowledgements
+We are very grateful to Aseem Agarwala and Matthew Uyttendaele for sharing their image panoramas, and to the EPFL Computer Graphics and Geometry Laboratory, the Stanford 3D Scanning
+Repository, Aim@Shape, Nico Schertler, and Julie Digne for sharing their 3D data. We would also like to thank Fatih Calakli, Daniel
+Moreno, and Gabriel Taubin for sharing their SSD Surface Reconstruction implementation.
+[HW65] H ARLOW F., W ELCH J.: Numerical calculation of timedependent viscous incompressible flow of fluid with free surface. Physics
+of Fluids 8 (1965), 2182–2189. 3
+[IGLF06] I RVING G., G UENDELMAN E., L OSASSO F., F EDKIW R.:
+Efficient simulation of large bodies of water by coupling two and three
+dimensional techniques. ACM Trans. Graph. 25 (2006), 805–811. 2
+[Kaz13] K AZHDAN M.:
+Screened poisson surface reconstruction (v 5.71).
+http://www.cs.jhu.edu/~misha/Code/
+PoissonRecon/, 2013. 6, 7, 8
+This work is supported by the NSF award 1422325.
+[KBH06] K AZHDAN M., B OLITHO M., H OPPE H.: Poisson surface
+reconstruction. Symposium on Geometry processing (2006), 61–70. 1, 2,
+3, 4, 11
+References
+[KFCO06] K LINGNER B., F ELDMAN B., C HENTANEZ N., O’B RIEN J.:
+Fluid animation with dynamic meshes. ACM Trans. Graph. 25 (2006),
+820–825. 2
+[Aga07] AGARWALA A.: Efficient gradient-domain compositing using
+quadtrees. ACM Trans. Graph. 26 (2007), 94:1–94:5. 1, 9
+[Bat17] BATTY C.: A cell-centered finite volume method for the Poisson
+problem on non-graded quadtrees with second order accurate gradients. J.
+Comput. Phys. 331 (2017), 49–72. 2
+[KH13] K AZHDAN M., H OPPE H.: Screened Poisson surface reconstruction. ACM Trans. Graph. 32 (2013), 29:1–29:13. 1, 2, 3, 4, 5, 6, 11
+[KM90] K ASS M., M ILLER G.: Rapid, stable fluid dynamics for computer
+graphics. SIGGRAPH Comput. Graph. 24 (1990), 49–57. 2
+[Bur88] B URT P. J.: Moment images, polynomial fit filters and the problem of surface interpolation. In Proc. IEEE Computer Vision and Pattern
+Recognition (1988), pp. 144–152. 8
+[KSH10] K AZHDAN M., S URENDRAN D., H OPPE H.: Distributed
+gradient-domain processing of planar and spherical images. ACM Trans.
+Graph. 29 (2010), 14:1–14:11. 9, 10
+[BXH10] BATTY C., X ENOS S., H OUSTON B.: Tetrahedral embedded
+boundary methods for accurate and flexible adaptive fluids. Computer
+Graphics Forum 29 (2010), 695–704. 2
+[LGF04] L OSASSO F., G IBOU F., F EDKIW R.: Simulating water and
+smoke with an octree data structure. ACM Trans. Graph. 23 (2004),
+457–462. 1, 2
+[CGFO06] C HENTANEZ N., G OKTEKIN T., F ELDMAN B., O’B RIEN J.:
+Simultaneous coupling of fluids and deformable bodies. In Proceedings
+of the 2006 ACM SIGGRAPH/Eurographics Symposium on Computer
+Animation (2006), pp. 83–89. 1, 2
+[MGD∗ 10] M ULLEN P., G OES F. D., D ESBRUN M., C OHEN -S TEINER
+D., A LLIEZ P.: Signing the Unsigned: Robust Surface Reconstruction
+from Raw Pointsets. Computer Graphics Forum 29 (2010), 1733–1741.
+1, 2
+[CK11] C HUANG M., K AZHDAN M.: Interactive and anisotropic geometry processing using the screened Poisson equation. ACM Trans. Graph.
+30 (2011), 57:1–57:10. 5
+[OH95] O’B RIEN J., H ODGINS J.: Dynamic simulation of splashing
+fluids. In Proceedings of the Computer Animation (1995), pp. 198–205. 2
+[CM11] C HENTANEZ N., M ÜLLER M.: Real-time Eulerian water simulation using a restricted tall cell grid. ACM Trans. Graph. 30 (2011),
+82:1–82:10. 2
+[CMT11] C ALAKLI F., M ORENO D., TAUBIN G.: SSD surface reconstruction (v 3.0). http://mesh.brown.edu/ssd/software.
+html, 2011. 7, 8, 9
+[CT11] C ALAKLI F., TAUBIN G.: SSD: Smooth signed distance surface
+reconstruction. In Computer Graphics Forum (2011), vol. 30, pp. 1993–
+2002. 1, 2, 6
+[CT12] C ALAKLI F., TAUBIN G.: SSD-C: Smooth Signed Distance Colored Surface Reconstruction. Springer London, London, 2012, pp. 323–
+338. 6
+[CWW13] C RANE K., W EISCHEDEL C., WARDETZKY M.: Geodesics
+in heat: A new approach to computing distance based on heat flow. ACM
+Trans. Graph. 32 (2013), 152:1–152:11. 9
+[DHK∗ 00] D OUGLAS C., H U J., KOWARSCHIK M., RÜDE U., W EISS
+C.: Cache optimization for structured and unstructured grid multigrid.
+Electronic Transactions on Numerical Analysis 10 (2000), 21–40. 5
+[FKG15] F UHRMANN S., K AZHDAN M., G OESELE M.: Accurate isosurface interpolation with Hermite data. In Proceedings of the 2015
+International Conference on 3D Vision (2015), 3DV ’15, pp. 256–263. 6
+[FOK05] F ELDMAN B., O’B RIEN J., K LINGNER B.: Animating gases
+with hybrid meshes. ACM Trans. Graph. 24 (2005), 904–909. 1, 2
+[Pfe63] P FEIFER C.: Data flow and storage allocation for the PDQ-5
+program on the Philco-2000. Communications of the ACM 6 (1963),
+365–366. 5
+[Pop03] P OPINET S.: Gerris: A tree-based adaptive solver for the incompressible Euler equations in complex geometries. J. Comput. Phys. 190
+(2003), 572–600. 1, 2
+[SABS14] S ETALURI R., A ANJANEYA M., BAUER S., S IFAKIS E.: SPGrid: A sparse paged grid structure applied to adaptive smoke simulation.
+ACM Trans. Graph. 33 (2014), 205:1–205:12. 2
+[Sam90] S AMET H.: The design and analysis of spatial data structures.
+Addison-Wesley Longman Publishing Co., Inc., 1990. 2
+[ST94] S AITO T., T ORIWAKI J.: New algorithms for Euclidean distance
+transformation of an n-dimensional digitized picture with applications.
+Pattern Recognition 27 (1994), 1551–1565. 10, 11
+[TRS06] T HÜREY N., RÜDE U., S TAMMINGER M.: Animation of open
+water phenomena with coupled shallow water and free surface simulations.
+In Proceedings of the 2006 ACM SIGGRAPH/Eurographics Symposium
+on Computer Animation (2006), pp. 157–164. 2
+[WMT07] WANG H., M ILLER G., T URK G.: Solving general shallow wave equations on surfaces. In Proceedings of the 2007 ACM
+SIGGRAPH/Eurographics Symposium on Computer Animation (2007),
+pp. 229–238. 2
+[WS93] WARREN M., S ALMON J.: A parallel hashed oct-tree n-body
+algorithm. In Proceedings of the 1993 ACM/IEEE Conference on Supercomputing (1993), pp. 12–21. 2
+[FWD14] F ERSTL F., W ESTERMANN R., D ICK C.: Large-scale liquid
+simulation on adaptive hexahedral grids. IEEE Transactions on Visualization and Computer Graphics 20 (2014), 1405–1417. 2
+[GGSC96] G ORTLER S., G RZESZCZUK R., S ZELISKI R., C OHEN M.:
+The lumigraph. In Proc. Computer Graphics and Interactive Techniques
+(1996), pp. 43–54. 8
+© 2018 The Author(s)
+Computer Graphics Forum © 2018 The Eurographics Association and John Wiley & Sons Ltd.

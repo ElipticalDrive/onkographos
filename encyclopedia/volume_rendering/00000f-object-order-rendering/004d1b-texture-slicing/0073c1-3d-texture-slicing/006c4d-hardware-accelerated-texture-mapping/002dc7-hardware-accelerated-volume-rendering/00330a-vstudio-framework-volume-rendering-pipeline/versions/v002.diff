@@ -1,0 +1,416 @@
+--- v001.md
++++ v002.md
+@@ -4,178 +4,248 @@
+ 
+ ## Overview
+-The VStudio Framework is a single-pass GPU ray casting implementation designed for interactive volume visualization and shader customization [S1]. It distinguishes itself by exposing the entire rendering pipeline through a modular, multi-file fragment shader architecture, allowing users to edit and link components (classification, gradient, lighting, shadow) in real-time [S1]. Unlike black-box renderers, it provides explicit control over the ray casting loop, transfer function application, and shading models within a single draw call per pixel [S1].
++The VStudio Framework is an interactive volume visualization environment that implements single-pass GPU ray casting, allowing for real-time shader editing and customization of the rendering pipeline [S1]. It distinguishes itself from other hardware-accelerated methods by exposing the full fragment shader logic (classification, shading, and compositing) to the user via a modular file-based system, rather than relying on fixed-function hardware pipelines or opaque API calls [S1]. Unlike [Hardware-Accelerated Volume Rendering via 3D Texturing](2799-hardware-accelerated-volume-rendering-via-3d-texturing.md) which may abstract the ray casting logic, VStudio requires explicit attachment of vertex and fragment shader components to perform full ray casting, though it supports immediate Maximum Intensity Projection (MIP) and Slicing without shaders [S1].
+ 
+ ## How it works
+-The method implements the emission-absorption optical model using a single-pass GPU ray casting approach [S1]. The pipeline is driven by a specific shader pair configuration (version 1.2) and requires explicit attachment of vertex and fragment shader components to function [S1].
+-
+-### Inputs and Outputs
+-**Inputs:**
+-- Volumetric data in `.dat`, `.vol8`, `.vol12`, or `.vol16` format [S1].
+-- Camera parameters (origin $\mathbf{o}$, direction $\mathbf{d}$) derived from the view matrix [S1, S4].
+-- Transfer function parameters (density and gradient magnitude histograms) [S1].
+-- Lighting parameters (Blinn-Phong model with point and directional lights) [S1].
+-
+-**Outputs:**
+-- Final pixel color $C_{final}$ [S1].
+-
+-### Data Structures and File Formats
+-The framework expects volumetric data in specific binary formats with little-endian byte ordering [S1].
+-
+-**`.dat` Format:**
+-- Header: 6 bytes.
+-  - Bytes 0-1: X dimension (voxels).
+-  - Bytes 2-3: Y dimension (voxels).
+-  - Bytes 4-5: Z dimension (voxels).
+-- Data: 16-bit scalar values.
+-
+-**`.vol8`, `.vol12`, `.vol16` Formats:**
+-- Header: 12 bytes.
+-  - Bytes 0-1: X dimension (voxels).
+-  - Bytes 2-3: Y dimension (voxels).
+-  - Bytes 4-5: Z dimension (voxels).
+-  - Bytes 6-7: X voxel scale.
+-  - Bytes 8-9: Y voxel scale.
+-  - Bytes 10-11: Z voxel scale.
+-- Data: Scalar values matching the bit depth (8, 12, or 16 bits).
+-- Constraint: All header values must be in the range 1-4096 [S1].
+-
+-**Shader Structure:**
+-The rendering logic is split into multiple files linked together [S1]:
+-1. `DVR_VERTEX_BACK_FRONT_v1.2.vs`: Vertex shader handling ray generation.
+-2. `DVR_FRAGMENT_BACK_FRONT_v1.2.fs`: Main fragment entry point.
+-3. `classify.fs`: Transfer function and classification logic.
+-4. `grad.fs`: Gradient estimation.
+-5. `light.fs`: Lighting calculations.
+-6. `shadow.fs`: Shadow ray traversal.
+-
+-Linking succeeds only when all specified shader files are attached [S1].
+-
+-### Algorithm Steps
+-
+-1. **Data Import and Histogram Calculation:**
+-   - Load volumetric data using `File/Import/Volume` [S1].
+-   - The system automatically initiates an "advanced ACC histogram calculation" for density and gradient magnitude [S1].
+-   - If aborted, only the traditional density histogram is calculated [S1].
+-   - VStudio expands the data value range during import, regardless of the original bit depth distribution [S1].
+-
+-2. **Shader Attachment:**
+-   - Attach the vertex shader `DVR_VERTEX_BACK_FRONT_v1.2.vs` [S1].
+-   - Attach the fragment shader components: `DVR_FRAGMENT_BACK_FRONT_v1.2.fs`, `classify.fs`, `grad.fs`, `light.fs`, and `shadow.fs` [S1].
+-   - Link the shader program [S1].
+-
+-3. **Ray Generation:**
+-   - For each pixel, compute the ray $r(t) = \mathbf{o} + t\mathbf{d}$ [S1, S4].
+-   - Intersect the ray with the volume's axis-aligned bounding box to find $t_{start}$ and $t_{end}$ [S1, S4].
+-
+-4. **Ray Marching and Compositing:**
+-   - Discretize the segment $[t_{start}, t_{end}]$ into samples [S1, S4].
+-   - Iterate from front to back:
+-     - Sample the volume at $\mathbf{p}_i = r(t_i)$ [S1, S4].
+-     - **Classification:** Map the scalar value $V(\mathbf{p}_i)$ to color $C_i$ and opacity $\alpha_i$ using the transfer function defined in `classify.fs` [S1].
+-     - **Shading:** Compute lighting using the Blinn-Phong model in `light.fs`, utilizing gradients estimated in `grad.fs` [S1].
+-     - **Shadows:** Perform brute-force shadow-ray traversal in `shadow.fs` if enabled [S1].
+-     - **Compositing:** Apply the front-to-back over operator [S1, S4]:
+-       $$
+-       C'_{i} = C'_{i-1} + (1 - \alpha'_{i-1}) \alpha_i C_i
+-       $$
+-       $$
+-       \alpha'_{i} = \alpha'_{i-1} + (1 - \alpha'_{i-1}) \alpha_i
+-       $$
+-     - **Early Ray Termination:** If $\alpha'$ reaches 1 (or a threshold), terminate the ray [S1].
+-
+-5. **Rendering Features:**
+-   - **Progressive Refinement:** Iteratively improve image quality [S1].
+-   - **Stochastic Ray Shifting:** Reduce aliasing by jittering ray origins [S1].
+-   - **Slicing:** Render cross-sections in view or object space [S1].
+-   - **MIP:** Use Maximum Intensity Projection mode if shaders are not attached [S1].
+-
+-### Pseudocode
++**Inputs and Outputs**
++*   **Input:** Volumetric data files (`.dat`, `.vol8`, `.vol12`, `.vol16`) and shader source files (`.vs`, `.fs`).
++*   **Output:** Rendered image on the screen, scene state files (`.vst`).
++
++**Data Structures and Layouts**
++The framework expects specific binary file formats for volumetric data. The header structures are defined as follows [S1]:
++
++1.  **`.dat` format:**
++    *   Header: 6 bytes.
++    *   Layout:
++        *   Bytes 0-1: Number of voxels in X (16-bit).
++        *   Bytes 2-3: Number of voxels in Y (16-bit).
++        *   Bytes 4-5: Number of voxels in Z (16-bit).
++    *   Data: 16-bit scalar values.
++
++2.  **`.vol8`, `.vol12`, `.vol16` formats:**
++    *   Header: 12 bytes.
++    *   Layout (all values 1-4096):
++        *   Bytes 0-1: Number of voxels in X.
++        *   Bytes 2-3: Number of voxels in Y.
++        *   Bytes 4-5: Number of voxels in Z.
++        *   Bytes 6-7: Voxel scale in X.
++        *   Bytes 8-9: Voxel scale in Y.
++        *   Bytes 10-11: Voxel scale in Z.
++    *   Data: Scalar values matching the extension's bit depth (8, 12, or 16 bits).
++
++**Rendering Pipeline Steps**
++The implementation uses a shader pair configuration (version 1.2) [S1]. The workflow is as follows:
++
++1.  **Import Data:** Load a volumetric file using `File/Import/Volume`. The system automatically initiates an "advanced ACC histogram calculation" for density and gradient magnitude [S1].
++    *   *Pitfall:* If this calculation is aborted, only the traditional histogram for density is calculated, potentially affecting transfer function accuracy [S1].
++    *   *Note:* VStudio expands the data value range during import, even if original data fits the bit depth [S1].
++2.  **Attach Vertex Shader:** Load and attach the vertex shader file. The standard file is `DVR_VERTEX_BACK_FRONT_v1.2.vs` [S1].
++3.  **Attach Fragment Shaders:** Load and attach multiple fragment shader files. The main entry point is `DVR_FRAGMENT_BACK_FRONT_v1.2.fs`, which calls functions defined in:
++    *   `classify.fs`
++    *   `grad.fs`
++    *   `light.fs`
++    *   `shadow.fs`
++    *   Linking succeeds only when all specified shader files (vertex and all fragment components) are attached [S1].
++4.  **Configure Features:** Enable rendering features via the UI. Supported features include:
++    *   Blinn Lighting Model (Point and Directional Light Sources)
++    *   Early Ray Termination
++    *   Progressive Refinement
++    *   Stochastic Ray Shifting
++    *   Brute Force Shadow-Ray Traversal
++    *   Maximum Intensity Projection (MIP)
++    *   Slicing (in View and Object Space)
++5.  **Render:** The GPU performs single-pass ray casting using the attached shaders [S1].
++
++**Pseudocode**
++The following pseudocode represents the logical flow of the VStudio pipeline, based on the described file structure and shader dependencies. Note that the internal shader logic (classification, shading) is abstracted as `ShaderModule` calls, as the specific GLSL/HLSL code is not provided in the sources, but the dependency structure is explicit [S1].
+ 
+ ```python
+-# VStudio Single-Pass GPU Ray Casting Implementation
+-# Based on DVR_FRAGMENT_BACK_FRONT_v1.2.fs and associated modules
+-
+-def vstudio_ray_casting(pixel_uv, camera_origin, camera_direction, volume_data, volume_dims, transfer_function):
+-    """
+-    Main entry point for VStudio volume rendering.
+-    """
+-    # 1. Ray Generation
+-    # Compute ray direction from UV coordinates and camera parameters
+-    ray_direction = compute_ray_direction(pixel_uv, camera_origin, camera_direction)
+-    
+-    # Intersect ray with volume AABB to get t_start and t_end
+-    t_start, t_end = intersect_aabb(camera_origin, ray_direction, volume_dims)
+-    
+-    # Initialize compositing variables
+-    accumulated_color = vec3(0.0)
+-    accumulated_opacity = 0.0
+-    
+-    # 2. Ray Marching Loop
+-    # Step size is determined by the discretization strategy (equidistant or adaptive)
+-    step_size = compute_step_size(t_start, t_end, volume_dims)
+-    t = t_start
+-    
+-    while t < t_end:
+-        # Sample point in world space
+-        point = camera_origin + t * ray_direction
+-        
+-        # Check if point is within volume bounds
+-        if not is_inside_volume(point, volume_dims):
+-            break
+-            
+-        # 3. Sampling and Interpolation
+-        # Trilinear interpolation of scalar value V
+-        scalar_value = trilinear_sample(volume_data, point, volume_dims)
+-        
+-        # 4. Classification (from classify.fs)
+-        # Map scalar value to color and opacity using transfer function
+-        color, opacity = apply_transfer_function(scalar_value, transfer_function)
+-        
+-        # 5. Shading (from light.fs and grad.fs)
+-        # Estimate gradient for normal calculation
+-        gradient = estimate_gradient(volume_data, point, volume_dims)
+-        normal = normalize(gradient)
+-        
+-        # Compute lighting (Blinn-Phong)
+-        # Includes point and directional light sources
+-        lighting_color = compute_blinn_phong(point, normal, camera_origin, ray_direction)
+-        
+-        # 6. Shadows (from shadow.fs)
+-        # Brute-force shadow ray traversal
+-        shadow_factor = compute_shadow(point, normal, volume_data, volume_dims)
+-        
+-        # Apply lighting and shadow to the classified color
+-        final_sample_color = color * lighting_color * shadow_factor
+-        
+-        # 7. Compositing (Front-to-Back)
+-        # Over operator
+-        transmittance = 1.0 - accumulated_opacity
+-        accumulated_color += transmittance * opacity * final_sample_color
+-        accumulated_opacity += transmittance * opacity
+-        
+-        # 8. Early Ray Termination
+-        if accumulated_opacity >= 1.0:
+-            break
+-            
+-        t += step_size
+-        
+-    return accumulated_color
++class VStudioPipeline:
++    def __init__(self):
++        self.volume_data = None
++        self.vertex_shader = None
++        self.fragment_shaders = {}
++        self.linked = False
++        self.features = {
++            'blinn_lighting': False,
++            'early_ray_termination': False,
++            'progressive_refinement': False,
++            'stochastic_ray_shifting': False,
++            'brute_force_shadow': False,
++            'mip': False,
++            'slicing': False
++        }
++
++    def import_volume(self, filepath):
++        """
++        Imports volumetric data and calculates histograms.
++        Handles .dat, .vol8, .vol12, .vol16 formats.
++        """
++        header = self._read_header(filepath)
++        dimensions = (header['x'], header['y'], header['z'])
++        scales = header.get('scales', (1.0, 1.0, 1.0))
++        
++        # Read scalar data based on extension
++        bit_depth = self._get_bit_depth(filepath)
++        raw_data = self._read_raw_data(filepath, bit_depth)
++        
++        # VStudio expands data value range during import [S1]
++        self.volume_data = {
++            'dimensions': dimensions,
++            'scales': scales,
++            'data': raw_data,
++            'bit_depth': bit_depth
++        }
++        
++        # Advanced ACC histogram calculation for density and gradient magnitude [S1]
++        # If aborted, only traditional density histogram is calculated [S1]
++        self.histograms = self._calculate_advanced_acc_histograms(raw_data)
++        
++        return True
++
++    def attach_vertex_shader(self, filepath):
++        """
++        Loads and attaches the vertex shader.
++        Standard file: DVR_VERTEX_BACK_FRONT_v1.2.vs [S1]
++        """
++        self.vertex_shader = self._load_shader(filepath, 'vertex')
++        self._check_linking()
++
++    def attach_fragment_shader(self, filepath):
++        """
++        Loads and attaches a fragment shader component.
++        Standard files: DVR_FRAGMENT_BACK_FRONT_v1.2.fs, classify.fs, 
++        grad.fs, light.fs, shadow.fs [S1]
++        """
++        filename = os.path.basename(filepath)
++        self.fragment_shaders[filename] = self._load_shader(filepath, 'fragment')
++        self._check_linking()
++
++    def _check_linking(self):
++        """
++        Linking succeeds only when all specified shader files are attached [S1].
++        """
++        required_vertex = 'DVR_VERTEX_BACK_FRONT_v1.2.vs'
++        required_fragments = [
++            'DVR_FRAGMENT_BACK_FRONT_v1.2.fs',
++            'classify.fs',
++            'grad.fs',
++            'light.fs',
++            'shadow.fs'
++        ]
++        
++        if (self.vertex_shader and 
++            self.vertex_shader.filename == required_vertex and
++            all(f in self.fragment_shaders for f in required_fragments)):
++            self.linked = True
++        else:
++            self.linked = False
++
++    def set_feature(self, feature_name, enabled):
++        """
++        Enables or disables rendering features [S1].
++        """
++        if feature_name in self.features:
++            self.features[feature_name] = enabled
++
++    def render(self, camera, viewport):
++        """
++        Performs single-pass GPU ray casting if linked.
++        If not linked, falls back to MIP or Slicing if enabled [S1].
++        """
++        if not self.linked:
++            if self.features['mip']:
++                return self._render_mip(camera, viewport)
++            elif self.features['slicing']:
++                return self._render_slice(camera, viewport)
++            else:
++                raise Exception("Shaders not linked. Attach vertex and fragment shaders.")
++        
++        # Single-pass GPU Ray Casting [S1]
++        # Uses Blinn Lighting, Early Ray Termination, etc. [S1]
++        return self._execute_gpu_ray_cast(self.volume_data, self.vertex_shader, 
++                                         self.fragment_shaders, self.features, 
++                                         camera, viewport)
++
++    def save_scene(self, filepath):
++        """
++        Saves the current state to a text-based .vst file [S1].
++        References shader files by filename.
++        """
++        scene_data = {
++            'volume_file': self.volume_data['filepath'] if self.volume_data else None,
++            'vertex_shader': self.vertex_shader.filename if self.vertex_shader else None,
++            'fragment_shaders': [s.filename for s in self.fragment_shaders.values()],
++            'features': self.features
++        }
++        self._write_text_file(filepath, scene_data)
++
++    def _read_header(self, filepath):
++        ext = os.path.splitext(filepath)[1]
++        with open(filepath, 'rb') as f:
++            if ext == '.dat':
++                # 6-byte header: X(2), Y(2), Z(2)
++                x = int.from_bytes(f.read(2), 'little')
++                y = int.from_bytes(f.read(2), 'little')
++                z = int.from_bytes(f.read(2), 'little')
++                return {'x': x, 'y': y, 'z': z}
++            elif ext in ['.vol8', '.vol12', '.vol16']:
++                # 12-byte header: X(2), Y(2), Z(2), X_scale(2), Y_scale(2), Z_scale(2)
++                # All values 1-4096 [S1]
++                x = int.from_bytes(f.read(2), 'little')
++                y = int.from_bytes(f.read(2), 'little')
++                z = int.from_bytes(f.read(2), 'little')
++                x_scale = int.from_bytes(f.read(2), 'little')
++                y_scale = int.from_bytes(f.read(2), 'little')
++                z_scale = int.from_bytes(f.read(2), 'little')
++                return {'x': x, 'y': y, 'z': z, 'scales': (x_scale, y_scale, z_scale)}
++        raise ValueError("Unsupported format")
++
++    def _get_bit_depth(self, filepath):
++        ext = os.path.splitext(filepath)[1]
++        if ext == '.dat':
++            return 16
++        elif ext == '.vol8':
++            return 8
++        elif ext == '.vol12':
++            return 12
++        elif ext == '.vol16':
++            return 16
++        raise ValueError("Unknown bit depth")
++
++    def _load_shader(self, filepath, type):
++        # Placeholder for actual shader loading logic
++        # Returns an object with .filename and .source
++        return {'filename': os.path.basename(filepath), 'type': type, 'source': open(filepath).read()}
++
++    def _calculate_advanced_acc_histograms(self, data):
++        # Calculates density and gradient magnitude histograms [S1]
++        # If aborted, returns only density histogram [S1]
++        pass
++
++    def _render_mip(self, camera, viewport):
++        # Maximum Intensity Projection implementation [S1]
++        pass
++
++    def _render_slice(self, camera, viewport):
++        # Slicing in View and Object Space [S1]
++        pass
++
++    def _execute_gpu_ray_cast(self, volume, v_shader, f_shaders, features, camera, viewport):
++        # Single-pass GPU Ray Casting [S1]
++        # Integrates classify.fs, grad.fs, light.fs, shadow.fs [S1]
++        pass
+ ```
+ 
+-### Parameters and Edge Cases
+-- **Histogram Calculation:** The "advanced ACC histogram" is critical for accurate transfer function specification. Aborting this results in a fallback to traditional density-only histograms [S1].
+-- **Data Range Expansion:** VStudio expands the input data range during import, which may affect transfer function mapping if the original data range is assumed [S1].
+-- **Shader Linking:** The pipeline fails if any of the required fragment shader files (`classify.fs`, `grad.fs`, `light.fs`, `shadow.fs`) are not attached [S1].
+-- **MIP/Slicing:** These modes do not require shader attachment, providing a fallback for basic visualization [S1].
+-
+ ## Operating characteristics
+-- **Performance:** Single-pass GPU ray casting offers interactive performance for moderate-resolution volumes [S1].
+-- **Complexity:** The complexity is linear with respect to the number of samples per ray and the number of rays (pixels) [S1, S4].
+-- **Strengths:** Interactive shader editing allows for rapid experimentation with classification and shading models [S1].
+-- **Limitations:** Brute-force shadow ray traversal can be computationally expensive [S1]. Stochastic ray shifting and progressive refinement add overhead but improve quality [S1].
+-- **Hardware:** Requires a GPU capable of fragment shader execution and texture sampling [S1].
++*   **Time Complexity:** Single-pass GPU ray casting implies $O(N)$ complexity relative to the number of pixels and ray length, executed in parallel on the GPU [S1].
++*   **Memory Complexity:** Depends on the volume data size and the storage of histograms and shader programs. The framework stores scene state in text-based `.vst` files, which reference shader filenames rather than embedding source code [S1].
++*   **Performance:** Enables interactive rendering due to GPU acceleration [S1].
++*   **Strengths:** Interactive shader editing allows customization of the rendering pipeline (classification, shading, compositing) [S1]. Supports advanced features like stochastic ray shifting and brute force shadow-ray traversal [S1].
++*   **Limitations:** Requires manual attachment of multiple shader files for full ray casting; MIP and Slicing are available without shaders, but full ray casting is not [S1]. The "advanced ACC histogram" calculation can be aborted, leading to incomplete data for transfer functions [S1].
++*   **When to use:** When interactive customization of the volume rendering shader is required, and the user is comfortable managing shader dependencies.
++*   **When not to use:** When a fixed, optimized pipeline is preferred over customizable shaders, or when automatic histogram calculation is critical and cannot be aborted.
+ 
+ ## Background
+-The VStudio Framework was developed by Robert Hausmair, a student at the Technical University of Vienna, Austria [S1]. It was created as part of the "Visualisierung" course at the Institute of Computer Graphics and Algorithms [S1]. The framework is designed to demonstrate and facilitate interactive volume visualization techniques, particularly single-pass GPU ray casting with customizable shaders [S1].
++The VStudio Framework was created by Robert Hausmair, a student at the Technical University of Vienna, Austria [S1]. It was developed as part of the "Visualisierung" (Visualization) course at the university [S1]. The framework is designed to demonstrate and facilitate the implementation of single-pass GPU ray casting with interactive shader editing capabilities [S1].
+ 
+ ## Sources

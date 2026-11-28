@@ -1,0 +1,135 @@
+# Structured Camera Batch Generation
+
+Also called: Camera Sample Generation, Camera Setup and Sampling, HoliCity Perspective View Extraction, HoliCity View Generation
+
+## Overview
+Generates a list of camera samples (positions) for a 3D dataset, distributing them between close-up views and general views based on a ratio, and sampling directions uniformly or within a hemisphere [S2, unofficial]. It differs from its parent [Random Camera Sampling](15470-random-camera-sampling.md) by enforcing a structured ratio of close-up to general views rather than purely random selection, and from siblings like [Elliptic Cylinder Sampled Views](17402-elliptic-cylinder-sampled-views.md) by using spherical radius constraints rather than elliptic cylinder geometry [S2, unofficial].
+
+## How it works
+**Inputs:**
+- `total_frames`: Integer, total number of camera samples to generate.
+- `close_up_ratio`: Float, fraction of `total_frames` designated as close-up views.
+- `min_radius`: Float, minimum distance from the center for any camera.
+- `max_radius`: Float, maximum distance from the center for general views.
+- `view_distribution`: String, specifying "uniform" (full sphere) or "hemisphere" (upper/lower half).
+- `rng`: Random number generator instance. If `None`, a new default RNG is initialized [S2, unofficial].
+
+**Outputs:**
+- A list of `CameraSample` objects, each containing:
+  - `position`: 3D vector $(x, y, z)$ representing the camera location.
+  - `is_close_up`: Boolean flag indicating if the sample is a close-up view.
+
+**Data Structures:**
+- `CameraSample`: A simple struct or class with fields `position` (vec3) and `is_close_up` (bool).
+- `samples`: A list of `CameraSample` objects.
+
+**Parameters:**
+- `CLOSE_UP_BAND_FRACTION`: Constant fraction of the radius span used to determine the maximum radius for close-up views. Default value is 0.15 [S2, unofficial].
+
+**Steps:**
+1. Initialize `rng` if it is `None` [S2, unofficial].
+2. Calculate `close_up_count` as `int(round(total_frames * close_up_ratio))` [S2, unofficial].
+3. Calculate `close_up_max_radius` using `CLOSE_UP_BAND_FRACTION` to define the radius span boundary for close-up views [S2, unofficial].
+4. Initialize an empty list `samples` [S2, unofficial].
+5. Loop `index` from 0 to `total_frames - 1`:
+   a. Determine if the current frame is a close-up view: `is_close_up = (index < close_up_count)` [S2, unofficial].
+   b. Determine the radius bounds:
+      - If `is_close_up` is true, set `radius_min = min_radius` and `radius_max = close_up_max_radius`.
+      - If `is_close_up` is false, set `radius_min = close_up_max_radius` and `radius_max = max_radius` [G].
+   c. Sample `radius` uniformly in `[radius_min, radius_max]` [S2, unofficial].
+   d. Sample `direction` uniformly on the sphere or hemisphere based on `view_distribution` [S2, unofficial].
+   e. Compute `position = direction * radius` [G].
+   f. Create a `CameraSample` with `position` and `is_close_up` [S2, unofficial].
+   g. Append the sample to `samples` [S2, unofficial].
+6. Shuffle the `samples` list in place using `rng` [S2, unofficial].
+7. Return `samples` [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+- If `total_frames` is 0, return an empty list [G].
+- If `close_up_ratio` is 0, `close_up_count` is 0, and all samples are general views [G].
+- If `close_up_ratio` is 1, `close_up_count` equals `total_frames`, and all samples are close-up views [G].
+- Precision issues may arise if `min_radius` equals `max_radius`; in this case, the radius is constant [G].
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import random
+import math
+
+def structured_camera_batch_generation(
+    total_frames: int,
+    close_up_ratio: float,
+    min_radius: float,
+    max_radius: float,
+    view_distribution: str,
+    rng: random.Random = None
+) -> list:
+    if rng is None:
+        rng = random.Random()
+        
+    close_up_count = int(round(total_frames * close_up_ratio))
+    close_up_band_fraction = 0.15
+    radius_span = max_radius - min_radius
+    close_up_max_radius = min_radius + radius_span * close_up_band_fraction
+    
+    samples = []
+    
+    for index in range(total_frames):
+        is_close_up = index < close_up_count
+        
+        if is_close_up:
+            r_min = min_radius
+            r_max = close_up_max_radius
+        else:
+            r_min = close_up_max_radius
+            r_max = max_radius
+            
+        radius = rng.uniform(r_min, r_max)
+        
+        if view_distribution == "uniform":
+            direction = _sample_sphere_direction(rng)
+        elif view_distribution == "hemisphere":
+            direction = _sample_hemisphere_direction(rng)
+        else:
+            raise ValueError(f"Unknown view_distribution: {view_distribution}")
+            
+        position = [direction[i] * radius for i in range(3)]
+        samples.append({"position": position, "is_close_up": is_close_up})
+        
+    rng.shuffle(samples)
+    return samples
+
+def _sample_sphere_direction(rng: random.Random) -> list:
+    x = rng.gauss(0, 1)
+    y = rng.gauss(0, 1)
+    z = rng.gauss(0, 1)
+    norm = math.sqrt(x*x + y*y + z*z)
+    return [x/norm, y/norm, z/norm]
+
+def _sample_hemisphere_direction(rng: random.Random) -> list:
+    while True:
+        x = rng.uniform(-1, 1)
+        y = rng.uniform(-1, 1)
+        z = rng.uniform(0, 1)
+        norm = math.sqrt(x*x + y*y + z*z)
+        if norm > 0:
+            return [x/norm, y/norm, z/norm]
+```
+
+## Subtopics
+
+### [Error-aware View Sampling](18887-error-aware-view-sampling.md)
+Error-aware view sampling is a dynamic camera trajectory generation method that refines camera positions based on the current rendering error, ensuring focused coverage of complex or poorly reconstructed regions. Unlike static structured batches, it adapts to the optimization state by targeting areas of high discrepancy between rendered and reference images [G].
+
+## Operating characteristics
+- **Strengths:** Ensures balanced coverage of close-up and general views [S2, unofficial]. The shuffle step randomizes output order [S2, unofficial].
+- **Limitations:** Does not adapt to scene content during generation [S2, unofficial].
+- **When to use:** When a balanced dataset of close-up and general views is required [S2, unofficial].
+
+## Background
+Originated in the context of 3D Gaussian Splatting dataset generation, specifically in the `3dgs-dataset-builder` tool [S2, unofficial]. It addresses the need for structured camera trajectories that provide both detailed close-ups and broader context views [S2, unofficial].
+
+## Sources
+[S1] SceneSplat++: A Large Dataset and Comprehensive Benchmark for Language Gaussian Splatting, https://zenodo.org/records/19113098, fetched 2026-10-26
+[S2] yumehiko/3dgs-dataset-builder, https://github.com/yumehiko/3dgs-dataset-builder, fetched 2026-10-27 (unofficial)
+[S3] RealFusion 360° Reconstruction of Any Object from a Single Image, https://doi.org/10.1109/cvpr52729.2023.00816, fetched 2026-10-30

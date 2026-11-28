@@ -1,0 +1,318 @@
+--- v004.md
++++ v005.md
+@@ -4,184 +4,180 @@
+ 
+ ## Overview
+-DashGaussian is a scheduling scheme for 3D Gaussian Splatting (3DGS) that accelerates optimization by reformulating the process as a frequency component fitting task [S1]. It cooperatively allocates rendering resolution and primitive count to strip redundant complexity, allowing the model to progressively fit higher frequency components while synchronizing primitive growth with rendering resolution [S1]. Unlike standard 3DGS which applies densification simultaneously based on static thresholds, DashGaussian decouples these operations via a dynamic resolution schedule and a momentum-based primitive budgeting method, yielding fewer primitives and faster convergence without trading off rendering quality [S1].
++DashGaussian is a scheduling scheme for 3D Gaussian Splatting (3DGS) optimization that accelerates training by reformulating the process as a progressive fitting of higher frequency components [S1]. It cooperatively allocates rendering resolution and primitive count to strip redundant computational complexity, distinguishing itself from vanilla 3DGS and other backbones by producing a concave-up primitive growth curve that spans the entire optimization process [S1]. Unlike methods that peak in primitive count at half-iteration or use concave-down curves, DashGaussian synchronizes primitive growth with dynamically increasing rendering resolution to balance computing redundancy and fitting quality [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A 3DGS backbone (e.g., Taming-3DGS, Mip-Splatting), training images $I$, camera poses, and initial SfM points.
+-*   **Output:** Optimized Gaussian primitives $\{G_i\}_{i=1}^{P_{fin}}$ with parameters (position, covariance, opacity, spherical harmonics coefficients).
++*   **Input:** A set of training views, an initial set of 3D Gaussian primitives, and a target optimization time (e.g., 200 seconds) [S1].
++*   **Output:** Optimized 3D Gaussian parameters (position, scale, rotation, opacity, spherical harmonics coefficients) and a final primitive count significantly lower than standard 3DGS [S1].
+ 
+ **Data Structures:**
+-*   **Gaussian Primitives:** Each primitive $i$ is defined by position $\mu_i$, covariance matrix $\Sigma_i$ (or scale/rotation), opacity $\alpha_i$, and color coefficients $c_i$.
+-*   **Resolution Factor:** A continuous scalar $r(i)$ at iteration $i$, where the effective rendering resolution is $H/r(i) \times W/r(i)$.
+-*   **Primitive Budget:** A dynamic maximum primitive count $P_{max}(i)$ estimated via momentum.
++The method relies on the standard 3DGS primitive representation. Each primitive $i$ is defined by:
++*   Position $\mathbf{p}_i \in \mathbb{R}^3$
++*   Scale $\mathbf{s}_i \in \mathbb{R}^3$
++*   Rotation $\mathbf{q}_i \in \mathbb{R}^4$ (quaternion)
++*   Opacity $\alpha_i \in [0, 1]$
++*   Color coefficients $\mathbf{c}_i$ (Spherical Harmonics)
++
++The rendering resolution is tracked as a continuous scalar $r(i)$ modulated to an integer for rasterization [S1].
+ 
+ **Formulas:**
+-The rendering equation for a pixel $u$ remains standard [S1]:
++The rendering equation for a pixel $u$ remains the standard volume rendering integral discretized over primitives [S1]:
+ $$ C(u) = \sum_{i=1}^P T_i(u) \cdot w_i(u) \cdot c_i $$
+-where $T_i(u) = \prod_{j=1}^{i-1} (1 - w_j(u))$ is the transmittance, and $w_i(u) = \alpha_i G_{i2D}(u)$ is the weight, with $G_{i2D}(u)$ being the 2D Gaussian splatted to the image plane.
++where:
++*   $P$ is the total number of active primitives.
++*   $T_i(u) = \prod_{j=1}^{i-1} (1 - w_j(u))$ is the transmittance.
++*   $w_i(u) = o_i G_{i2D}(u)$ is the weight, with $o_i$ being the opacity and $G_{i2D}(u)$ the 2D Gaussian projected to the image plane.
++*   $c_i$ is the color of the $i$-th primitive.
+ 
+-The optimization complexity is defined as the collective rendering resolution and number of Gaussian primitives [S1]. DashGaussian formulates optimization as progressively fitting 3DGS to higher levels of frequency components in the training views [S1].
++**Optimization Complexity:**
++The method defines "optimization complexity" as the collective product of rendering resolution and the number of Gaussian primitives, which dominate time costs [S1].
+ 
+-**Parameters:**
+-*   **Target Optimization Time:** 200 seconds (achieved on consumer-grade GPUs with Taming-3DGS backbone) [S1].
+-*   **Resolution Modulation:** The continuous $r(i)$ is modulated to integer steps: $r_{step}(i) = \lfloor r(i) \rfloor$ [S1]. This encourages primitives to grow relatively faster to optimize each primitive more sufficiently [S1].
++**Step-by-Step Method:**
+ 
+-**Steps:**
+-
+-1.  **Initialize:** Start with initial SfM points. Set iteration $t=0$. Initialize momentum buffer for primitive budget $M_0 = 0$.
+-2.  **Compute Resolution Factor:** Determine the dynamic rendering resolution factor $r(t)$ for the current iteration. This factor is scene-adaptive and increases over time to fit higher frequencies [S1].
+-3.  **Downsample Training Images:** To avoid 3D aliasing and artifacts, apply anti-aliasing downsampling to the training images $I$ using the factor $r_{step}(t) = \lfloor r(t) \rfloor$ [S1].
+-    *   *Implementation Note:* Center crop the Fourier transform $F$ of the image to size $(H/r_{step}, W/r_{step})$, scale numerical values by $1/r_{step}^2$, then inverse transform to obtain the low-resolution image $I_r$ [S1].
+-4.  **Render and Compute Loss:** Render the scene using the current primitives and the downsampled resolution $r_{step}(t)$. Compute the loss (e.g., L1 + SSIM) between the rendered image and $I_r$ [S1].
+-5.  **Backpropagate:** Compute gradients $\nabla G_t$ for the Gaussian parameters with respect to the loss [S1].
+-6.  **Update Primitives:** Perform the standard 3DGS update step (Split and Clone operations) based on gradients [S1].
+-7.  **Estimate Primitive Budget:** Use a momentum-based method to adaptively estimate the maximum number of primitives $P_{max}(t)$ for the current growth curve, avoiding dataset priors [S1].
+-    *   *Note:* The sources describe the scheduler producing a "concave-up curve" for primitive growth spanning the entire process, contrasting with concave-down or peak-at-half curves in other methods [S1]. The exact momentum update formula is not provided in the text, but it is used to bound the primitive count [S1].
+-8.  **Prune if Necessary:** If the current number of primitives exceeds $P_{max}(t)$, prune primitives based on opacity or other standard criteria to maintain the budget [S1].
+-9.  **Increment:** $t \leftarrow t + 1$. Repeat until convergence or target time reached.
+-
+-**Edge Cases and Pitfalls:**
+-*   **Aliasing:** Simply reducing resolution without anti-aliasing causes 3D aliasing, sacrificing fidelity at the original resolution [S1].
+-*   **Low-Frequency Loss:** Improper downsampling can disturb recoverable low-frequency components [S1]. The low-pass filter (via Fourier cropping) is critical [S1].
+-*   **Primitive Count:** Without the momentum-based budgeting, the method might rely on dataset priors, which are not scene-adaptive [S1].
++1.  **Frequency Formulation:** Formulate the optimization as progressively fitting the 3DGS to higher levels of frequency components in the training views. This is achieved by gradually increasing the rendering resolution during training [S1].
++2.  **Dynamic Rendering Resolution:** Apply a dynamic rendering resolution scheme.
++    *   Let $r(i)$ be the continuous resolution downsampling factor at iteration $i$.
++    *   In practice, modulate this factor to an integer: $r_{int}(i) = \lfloor r(i) \rfloor$ [S1].
++    *   To avoid 3D aliasing artifacts when downsampling, apply a low-pass filter before downsampling the image features or use center-cropping with value scaling ($1/r^2$) if operating in frequency domain, though the text emphasizes anti-aliasing downsampling to preserve low-frequency components [S1].
++    *   The resolution increases over time, allowing the model to fit high-frequency details only after low-frequency structures are established [S1].
++3.  **Primitive Scheduling (Concave-Up Growth):** Schedule the growth of primitives to synchronize with the rendering resolution.
++    *   The primitive count follows a concave-up curve, meaning growth accelerates over time, spanning the entire optimization process [S1].
++    *   This contrasts with concave-down curves or peaks at half-iterations found in other methods [S1].
++    *   The growth is coupled with the rendering resolution via a numerical constraint to balance computing redundancy and fitting quality [S1].
++4.  **Momentum-Based Budgeting:** Estimate the maximum number of primitives ($P_{max}$) adaptively using a momentum-based method.
++    *   This avoids relying on dataset priors for the final primitive count [S1].
++    *   The budget adapts to the scene's complexity and the current optimization stage [S1].
++5.  **Optimization Loop:**
++    *   Render the scene at the current dynamic resolution $r_{int}(i)$.
++    *   Compute loss against the training views.
++    *   Backpropagate gradients.
++    *   Update primitive parameters.
++    *   Apply densification (split/clone) and pruning according to the scheduled primitive budget and resolution [S1].
++    *   Repeat until convergence or target time is reached.
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def dash_gaussian_optimize(backbone, images, poses, initial_points, total_iterations):
++def dashgaussian_optimize(training_views, initial_primitives, target_time_seconds=200):
+     """
+     Optimizes 3D Gaussian Splatting using DashGaussian scheduling.
+     
+     Args:
+-        backbone: The 3DGS backbone implementation (e.g., Taming-3DGS).
+-        images: List of training images.
+-        poses: List of camera poses.
+-        initial_points: Initial SfM points.
+-        total_iterations: Total number of optimization steps.
++        training_views: List of camera poses and target images.
++        initial_primitives: Initial set of 3D Gaussians.
++        target_time_seconds: Target optimization duration.
+         
+     Returns:
+-        Optimized Gaussian primitives.
++        Optimized primitives.
+     """
+-    # Initialize Gaussians from SfM
+-    gaussians = initialize_gaussians(initial_points)
++    # Initialize state
++    primitives = initial_primitives
++    iteration = 0
++    total_iterations = estimate_total_iterations(target_time_seconds)
+     
+-    # Momentum buffer for primitive budget estimation
+-    # [G] Initialized to zero; exact formula for momentum update not provided in sources.
++    # Momentum buffer for primitive budgeting
+     momentum_buffer = 0.0
++    momentum_decay = 0.9
+     
+-    for t in range(total_iterations):
+-        # 1. Compute dynamic resolution factor r(t)
+-        # [G] The specific function for r(t) is scene-adaptive and not explicitly defined in the text.
+-        # It is assumed to be a function of t and scene frequency content.
+-        r_t = compute_resolution_factor(t, images)
++    # Resolution scheduler parameters
++    # r(i) starts low (high downsampling) and increases to 1.0 (full resolution)
++    # The exact function for r(i) is scene-adaptive, but generally increases monotonically.
++    
++    while iteration < total_iterations:
++        # 1. Calculate Dynamic Resolution
++        # r_cont is a continuous scalar between 0.0 and 1.0 (or inverse scale)
++        # Assuming r(i) represents the scale factor relative to original resolution.
++        # If r(i) < 1, we downsample. If r(i) = 1, full res.
++        # The text says r(i) is a continuous scalar modulated by floor.
++        # Let's assume r(i) goes from small (e.g., 0.5) to 1.0.
+         
+-        # 2. Modulate to integer step
+-        r_step = floor(r_t)
++        progress = iteration / total_iterations
++        r_cont = calculate_resolution_factor(progress, scene_frequency_estimate)
+         
+-        # 3. Anti-aliasing downsampling
+-        # Center crop Fourier transform, scale by 1/r_step^2, inverse transform
+-        low_res_images = []
+-        for img in images:
+-            F = fft2(img)
+-            H, W = F.shape
+-            crop_H, crop_W = H // r_step, W // r_step
+-            # Center crop
+-            start_h, start_w = (H - crop_H) // 2, (W - crop_W) // 2
+-            F_cropped = F[start_h:start_h+crop_H, start_w:start_w+crop_W]
+-            # Scale and inverse transform
+-            F_scaled = F_cropped / (r_step ** 2)
+-            img_lr = ifft2(F_scaled).real
+-            low_res_images.append(img_lr)
++        # Modulate to integer downsampling factor
++        # If r_cont = 0.5, we might render at half resolution.
++        # The text says r(i) = floor(r(i)). This implies r(i) might be an integer factor 
++        # or the text implies a specific mapping. 
++        # Based on "center crop ... to size (H/r, W/r)", r is the downsampling factor.
++        # So if r=2, resolution is H/2, W/2.
++        # We assume r_cont starts > 1 and decreases to 1? 
++        # Text: "increasing the rendering resolution ... is equivalent to gradually fitting ... higher levels"
++        # So resolution increases. Downsampling factor r decreases from high to 1.
++        
++        r_downsample = max(1, int(r_cont)) # Ensure at least 1x resolution
++        
++        # 2. Render at Dynamic Resolution
++        # Apply anti-aliasing if downsampling
++        if r_downsample > 1:
++            rendered_images = render_with_antialiasing(primitives, training_views, r_downsample)
++        else:
++            rendered_images = render(primitives, training_views)
+             
+-        # 4. Render and Compute Loss
+-        # Render using current gaussians and low_res_images
+-        rendered_images = backbone.render(gaussians, poses, resolution_factor=r_step)
+-        loss = compute_loss(rendered_images, low_res_images)
++        # 3. Compute Loss and Backprop
++        loss = compute_loss(rendered_images, training_views.targets)
++        gradients = backpropagate(loss, primitives)
+         
+-        # 5. Backpropagate
+-        gradients = backbone.backward(loss, gaussians)
++        # 4. Update Primitives
++        update_parameters(primitives, gradients)
+         
+-        # 6. Update Primitives (Split/Clone)
+-        # Standard 3DGS densification logic
+-        gaussians = backbone.update(gaussians, gradients)
++        # 5. Primitive Scheduling and Budgeting
++        # Estimate current primitive count momentum
++        current_count = len(primitives)
++        momentum_buffer = momentum_decay * momentum_buffer + (1 - momentum_decay) * current_count
+         
+-        # 7. Estimate Primitive Budget
+-        # [G] Momentum-based estimation logic is not explicitly detailed in the source text.
+-        # It is described as adapting the maximum number of primitives in the growth curve.
+-        # We assume a placeholder update for the momentum buffer and budget calculation.
+-        current_primitive_count = len(gaussians)
+-        momentum_buffer = update_momentum(momentum_buffer, current_primitive_count)
+-        p_max = estimate_budget(momentum_buffer)
++        # Determine max primitive budget for this step based on momentum
++        # The budget follows a concave-up curve.
++        # P_max(t) increases over time.
++        max_primitives = calculate_concave_up_budget(iteration, total_iterations, momentum_buffer)
+         
+-        # 8. Prune if necessary
+-        if current_primitive_count > p_max:
+-            gaussians = prune_gaussians(gaussians, p_max)
+-            
+-    return gaussians
++        # Apply Densification/Pruning constrained by budget
++        # Split/Clone if count < max_primitives and density criteria met
++        # Prune if count > max_primitives or opacity too low
++        primitives = densify_and_prune(primitives, max_primitives, training_views)
++        
++        iteration += 1
++        
++    return primitives
+ 
+-def compute_resolution_factor(t, images):
++def calculate_resolution_factor(progress, scene_frequency):
+     """
+-    Computes the scene-adaptive resolution factor.
+-    [G] The exact mathematical formulation of this function is not provided in the source.
+-    It is described as a continuous scalar that increases over time.
++    Returns the downsampling factor r.
++    Starts high (low res) and decreases to 1 (full res).
+     """
+-    # Placeholder for scene-adaptive frequency analysis
+-    # In practice, this might involve analyzing the frequency content of the images
+-    # or a predefined schedule that adapts to scene complexity.
+-    return 1.0 + (t / total_iterations) * 2.0 # Example placeholder
++    # Placeholder for scene-adaptive logic.
++    # Typically: r = 1 + (r_start - 1) * (1 - progress)^k
++    # where k controls the curve.
++    return 1.0 # Simplified for structure
+ 
+-def update_momentum(buffer, value):
++def calculate_concave_up_budget(iteration, total, momentum):
+     """
+-    Updates the momentum buffer.
+-    [G] The specific momentum formula is not provided in the source.
++    Returns the maximum allowed primitives.
++    Concave-up means acceleration in growth.
+     """
+-    return 0.9 * buffer + 0.1 * value
+-
+-def estimate_budget(momentum_buffer):
+-    """
+-    Estimates the maximum primitive count based on momentum.
+-    [G] The specific mapping from momentum to budget is not provided in the source.
+-    """
+-    return int(momentum_buffer * 1000000) # Placeholder scaling
+-
+-def prune_gaussians(gaussians, max_count):
+-    """
+-    Prunes Gaussians to stay within the budget.
+-    [G] Standard pruning based on opacity or gradient magnitude is assumed.
+-    """
+-    # Sort by opacity and remove the lowest opacity primitives
+-    opacities = [g.opacity for g in gaussians]
+-    indices = sorted(range(len(opacities)), key=lambda k: opacities[k])
+-    num_to_remove = len(gaussians) - max_count
+-    if num_to_remove > 0:
+-        gaussians = [g for i, g in enumerate(gaussians) if i not in indices[:num_to_remove]]
+-    return gaussians
++    # P(t) ~ t^2 or similar convex function
++    # Base growth
++    base_budget = initial_primitives + (final_primitives - initial_primitives) * (iteration/total)**2
++    # Adjust by momentum if needed
++    return int(base_budget)
+ ```
+ 
+-## Subtopics
++**Parameters:**
++*   **Target Optimization Time:** Typically 200 seconds on consumer-grade GPUs when applied to Taming-3DGS [S1].
++*   **Resolution Modulation:** The continuous resolution factor $r(i)$ is modulated using the floor function $\lfloor r(i) \rfloor$ to encourage faster primitive growth relative to unmodulated cases, optimizing primitives more sufficiently [S1].
++*   **Momentum Decay:** Not explicitly given, but a momentum-based method is used for budgeting [S1].
+ 
+-### Error-Driven 2D Gaussian Training
+-Focuses on 2D Gaussian representations and error-driven densification. DashGaussian is a scheduling method applicable to 3DGS backbones, including those that might use 2D approximations, but its core contribution is the frequency-based resolution and primitive scheduling rather than the primitive representation itself. [Link](13985-error-driven-2d-gaussian-training.md)
++**Edge Cases and Pitfalls:**
++*   **Aliasing:** Simply reducing resolution causes 3D aliasing, sacrificing fidelity at original resolution. Anti-aliasing downsampling (low-pass filtering) is required before downsampling to avoid disturbing recoverable low-frequency components [S1].
++*   **Primitive Count:** The method yields fewer primitives than vanilla 3DGS. If the scene requires high detail, the concave-up growth must be sufficient to capture it by the end of optimization [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** DashGaussian reduces the per-iteration elapsed time for forward rendering, gradient back-propagation, and primitive optimization by lowering the effective resolution in early stages [S1].
+-*   **Memory Complexity:** By scheduling primitive growth and using a momentum-based budget, it maintains a lower average primitive count compared to vanilla 3DGS, reducing memory usage [S1].
+-*   **Measured Performance:**
+-    *   Average acceleration rate across tested backbones: 45.7% [S1].
+-    *   Optimization time reduction for Taming-3DGS backbone: 41.3% [S1].
+-    *   Achieves optimization in 200 seconds on a consumer-grade GPU for scenes with millions of primitives [S1].
+-*   **Scaling:** The method is plug-and-play and generalizes to various backbones (Mip-Splatting, Revising-3DGS, Taming-3DGS) with different optimizers and primitive representations [S1].
+-*   **Strengths:**
+-    *   Preserves or improves rendering quality (PSNR, SSIM) while significantly reducing training time [S1].
+-    *   Scene-adaptive scheduling avoids dataset priors [S1].
+-    *   Concave-up primitive growth curve spans the entire optimization process, providing better balance than concave-down or peak-at-half curves [S1].
+-*   **Limitations:**
+-    *   Requires careful implementation of anti-aliasing downsampling to avoid artifacts [S1].
+-    *   The exact formula for the resolution factor $r(t)$ and the momentum-based budget estimation are not explicitly detailed in the source, requiring implementation inference [S1].
+-*   **When to Use:** When training speed is critical and a 3DGS backbone is being used. It is particularly effective for large-scale or time-intensive reconstruction tasks [S1].
+-*   **When Not to Use:** If the target hardware cannot support the dynamic resolution changes or if the exact implementation details of the schedulers are not available and cannot be inferred.
++*   **Time Complexity:** Significantly reduced. DashGaussian accelerates optimization by 45.7% on average across tested backbones [S1]. Specifically, it reduces optimization time for Taming-3DGS by 41.3% [S1].
++*   **Memory Complexity:** Reduced primitive count leads to lower memory usage compared to standard 3DGS [S1].
++*   **Performance:** Achieves SOTA rendering quality among accelerated methods, often improving PSNR/SSIM while using fewer primitives [S1].
++*   **Strengths:** Plug-and-play integration with existing backbones (3DGS, Mip-Splatting, Revising-3DGS, Taming-3DGS) [S1]. Scene-adaptive scheduling handles diverse frequency information [S1].
++*   **Limitations:** Requires careful tuning of the resolution scheduler and momentum budgeting parameters. Relies on the assumption that low-frequency components are fitted first, which may not hold for all scene types (though it is scene-adaptive) [S1].
+ 
+ ## Background
+-DashGaussian was proposed by Youyu Chen, Junjun Jiang, Kui Jiang, Xiao Tang, Zhihao Li, Xianming Liu, and Yinyu Nie from Harbin Institute of Technology and Huawei Noah’s Ark Lab [S1]. It was published in CVPR 2025 (arXiv:2503.18402v2, March 26, 2025) [S1]. The work addresses the high computational cost of 3D Gaussian Splatting optimization by treating it as a frequency component fitting problem [S1]. It builds on the principles of 3DGS densification but introduces a novel scheduling mechanism to optimize the trade-off between resolution and primitive count [S1].
++DashGaussian was proposed by Youyu Chen, Junjun Jiang, Kui Jiang, et al. from Harbin Institute of Technology and Huawei Noah’s Ark Lab [S1]. It was published in CVPR 2025 (arXiv:2503.18402v2, March 26, 2025) [S1]. The work addresses the high computational cost of 3D Gaussian Splatting optimization by treating it as a resource allocation problem, building on the observation that optimization complexity is dominated by rendering resolution and primitive count [S1].
+ 
+ ## Sources

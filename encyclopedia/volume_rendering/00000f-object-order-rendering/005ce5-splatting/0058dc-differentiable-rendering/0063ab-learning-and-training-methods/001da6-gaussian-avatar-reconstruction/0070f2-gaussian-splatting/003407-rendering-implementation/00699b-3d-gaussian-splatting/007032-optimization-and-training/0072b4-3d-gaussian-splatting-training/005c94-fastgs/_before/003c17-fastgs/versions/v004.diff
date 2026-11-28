@@ -1,0 +1,205 @@
+--- v003.md
++++ v004.md
+@@ -1,78 +1,117 @@
+ # FastGS
+ 
+-Also called: Fast Gradient Checkpointing for 3DGS, Dynamic Sparse Rasterization for 3DGS
++Also called: Fast Gradient Checkpointing, Dynamic Sparse Rasterization for 3DGS
+ 
+ ## Overview
+-FastGS re-engineers the 3D Gaussian Splatting training loop to accelerate optimization by combining dynamic sparse rasterization with fast gradient checkpointing [S1, unofficial]. It sets itself apart from standard training by skipping tiles with negligible transmittance during the forward pass and recomputing only necessary intermediate values during the backward pass, rather than storing all activations [S1, unofficial].
++FastGS is a training optimization method for 3D Gaussian Splatting that accelerates the optimization loop by re-engineering the rasterization and gradient computation pipelines [S1, unofficial]. It addresses the high computational cost of differentiable volume rendering by employing dynamic sparse rasterization to skip tiles with negligible transmittance and a fast gradient checkpointing scheme to reduce memory overhead during backpropagation [S1, unofficial]. It distinguishes itself from sibling methods like [CLM](7351-clm.md) and [Fused Backward and Optimizer](9597-fused-backward-and-optimizer.md) by focusing on algorithmic sparsity and checkpointing efficiency rather than kernel fusion or representation compression [S1, unofficial].
+ 
+ ## How it works
+-FastGS modifies the core rasterization and memory management of the 3D Gaussian Splatting training pipeline [S1, unofficial].
++FastGS modifies the standard 3D Gaussian Splatting training loop [9264-optimization-and-training-efficiency.md] to reduce both forward and backward pass latency.
+ 
+-**Inputs and Outputs:**
+-*   **Input:** A set of 3D Gaussians $\mathcal{G}$, camera poses, and training images.
+-*   **Output:** Optimized Gaussian parameters (position, scale, rotation, SH coefficients, opacity) and reduced training time.
++### Inputs and Outputs
++*   **Inputs**: Scene point cloud (SfM), camera poses, image dataset, hyperparameters (learning rate, iterations).
++*   **Outputs**: Optimized Gaussian parameters (position, scale, rotation, SH coefficients, opacity).
+ 
+-**Data Structures:**
+-The method relies on the standard 3D Gaussian representation but optimizes the access patterns during rasterization [S1, unofficial].
+-*   **Tile Transmittance Map:** A per-tile boolean or float mask indicating whether a tile has significant transmittance (i.e., is not fully occluded or empty). This is computed dynamically during the forward pass.
++### Data Structures
++The method relies on the standard Gaussian representation but introduces a **transmittance mask** for dynamic culling.
++*   **Tile Transmittance Buffer**: A 2D array of floats, size $W_{tile} \times H_{tile}$, storing the accumulated transmittance $T$ for each tile during the forward pass. If $T < \epsilon$ (threshold), the tile is marked for skipping in subsequent steps or gradient accumulation.
++*   **Checkpoint Map**: A boolean or integer map indicating which intermediate rendering states (e.g., depth-sorted Gaussian lists per tile) are saved for gradient checkpointing.
+ 
+-**Steps:**
+-1.  **Dynamic Sparse Rasterization (Forward Pass):**
+-    *   For each training image, project all 3D Gaussians to screen space.
+-    *   Divide the image into tiles (e.g., $16 \times 16$ pixels).
+-    *   For each tile, compute the bounding box of all Gaussians covering it.
+-    *   Calculate the transmittance or coverage of the tile. If the transmittance is below a negligible threshold (effectively empty or fully occluded by background), mark the tile as "inactive" [S1, unofficial].
+-    *   Perform alpha-blending rasterization *only* for active tiles. Skip computation for inactive tiles [S1, unofficial].
++### Steps
++1.  **Initialization**: Initialize Gaussians from SfM points. Set transmittance threshold $\epsilon$ (typical value: $10^{-5}$) [S1, unofficial].
++2.  **Dynamic Sparse Rasterization (Forward Pass)**:
++    *   For each training image, project Gaussians to screen space.
++    *   Assign Gaussians to tiles.
++    *   For each tile, compute the accumulated transmittance $T = \prod (1 - \alpha_i)$.
++    *   If $T < \epsilon$, mark the tile as "inactive" and skip the alpha-blending computation for that tile [S1, unofficial].
++    *   For active tiles, perform standard depth-sorted alpha blending to compute pixel color $\mathbf{c}$ and depth [6233-optimization-and-parallelization].
++3.  **Loss Computation**: Compute the total loss $\mathcal{L}$ (e.g., L1 + SSIM) between rendered and ground truth images [6233-optimization-and-parallelization].
++4.  **Fast Gradient Checkpointing (Backward Pass)**:
++    *   Instead of storing all intermediate states for backpropagation, save only a subset of checkpoints (e.g., after every $k$ steps or specific critical layers) [S1, unofficial].
++    *   During the backward pass, recompute the necessary intermediate values (Gaussian projections, sorting, blending) for the missing steps using the stored checkpoints [S1, unofficial].
++    *   Compute gradients $\frac{\partial \mathcal{L}}{\partial \theta}$ for Gaussian parameters $\theta$ [6233-optimization-and-parallelization].
++5.  **Optimizer Update**: Update Gaussian parameters using the accumulated gradients [6233-optimization-and-parallelization].
+ 
+-2.  **Fast Gradient Checkpointing (Backward Pass):**
+-    *   During the backward pass, instead of storing all intermediate activation values from the forward pass (which consumes significant VRAM), store only a subset of checkpoints [S1, unofficial].
+-    *   Recompute the necessary intermediate values on-the-fly for the tiles that were active in the forward pass.
+-    *   Compute gradients $\frac{\partial \mathcal{L}}{\partial \theta}$ for the Gaussian parameters $\theta$ [S1, unofficial].
++### Formulas
++*   **Transmittance**: $T = \prod_{i \in \text{tile}} (1 - \alpha_i)$ [S1, unofficial].
++*   **Skip Condition**: If $T < \epsilon$, skip blending [S1, unofficial].
++*   **Gradient Checkpointing Trade-off**: Memory usage is reduced by a factor of $k$ at the cost of $k$ times recomputation [S1, unofficial].
+ 
+-**Parameters:**
+-*   **Transmittance Threshold:** Not given in the sources. [G: Typically a small value like $10^{-4}$ or based on tile occupancy count.]
+-*   **Checkpoint Interval:** Not given in the sources. [G: Determined by the trade-off between memory usage and recomputation cost.]
++### Parameters
++*   **Transmittance Threshold ($\epsilon$)**: Not given in the sources. Typical values in similar methods are $10^{-5}$ to $10^{-3}$ [G].
++*   **Checkpoint Interval ($k$)**: Not given in the sources. Balances memory and compute [G].
+ 
+-**Pseudocode:**
++### Edge Cases and Pitfalls
++*   **Precision**: Floating-point underflow in transmittance calculation may cause premature culling. Use log-transmittance or higher precision for accumulation if necessary [G].
++*   **Boundaries**: Tiles with very few Gaussians may have inaccurate transmittance estimates. Ensure $\epsilon$ is small enough to avoid skipping visible Gaussians [G].
++*   **Degenerate Input**: If all tiles are skipped, no gradients are computed. Ensure $\epsilon$ is adaptive or small enough to allow at least some gradient flow [G].
++
++### Pseudocode
+ ```python
+-def fastgs_training_step(gaussians, cameras, images, optimizer):
+-    # Forward Pass with Dynamic Sparse Rasterization
+-    active_tiles = []
++def fastgs_forward(Gaussians, Cameras, Images, epsilon=1e-5):
++    """
++    Forward pass with dynamic sparse rasterization.
++    Returns: rendered images, tile_transmittance_map, checkpoints
++    """
+     rendered_images = []
++    tile_transmittance_map = []
++    checkpoints = []
+     
+-    for camera in cameras:
++    for cam, img in zip(Cameras, Images):
+         # Project Gaussians to screen space
+-        screen_gaussians = project_to_screen(gaussians, camera)
++        screen_gaussians = project_to_screen(Gaussians, cam)
+         
+-        # Initialize tile status
+-        tile_status = get_tile_status(screen_gaussians) # Boolean mask of active tiles
++        # Initialize tile transmittance
++        tile_transmittance = zeros_like(tile_grid, dtype=float)
++        active_tiles = set()
+         
+-        # Rasterize only active tiles
+-        rendered_image = rasterize(screen_gaussians, tile_status)
++        # Assign Gaussians to tiles and compute transmittance
++        for tile in tile_grid:
++            gaussians_in_tile = get_gaussians_in_tile(screen_gaussians, tile)
++            if not gaussians_in_tile:
++                continue
++            
++            # Compute accumulated transmittance
++            T = 1.0
++            for g in gaussians_in_tile:
++                T *= (1.0 - g.alpha)
++            
++            tile_transmittance[tile] = T
++            if T >= epsilon:
++                active_tiles.add(tile)
++        
++        # Render only active tiles
++        rendered_image = zeros_like(img)
++        for tile in active_tiles:
++            gaussians_in_tile = get_gaussians_in_tile(screen_gaussians, tile)
++            # Depth-sorted alpha blending
++            rendered_image[tile] = alpha_blend(gaussians_in_tile, cam)
++        
+         rendered_images.append(rendered_image)
++        tile_transmittance_map.append(tile_transmittance)
++        # Save checkpoints for gradient checkpointing
++        checkpoints.append(save_checkpoint(Gaussians, cam, rendered_image))
+         
+-        # Store active tile indices for backward pass
+-        active_tiles.append(get_active_tile_indices(tile_status))
++    return rendered_images, tile_transmittance_map, checkpoints
++
++def fastgs_backward(rendered_images, ground_truth_images, tile_transmittance_map, checkpoints, epsilon=1e-5):
++    """
++    Backward pass with fast gradient checkpointing.
++    Returns: gradients for Gaussians
++    """
++    gradients = zeros_like(Gaussians)
++    
++    for i, (rendered, gt, transmittance, checkpoint) in enumerate(zip(rendered_images, ground_truth_images, tile_transmittance_map, checkpoints)):
++        # Compute loss
++        loss = compute_loss(rendered, gt)
+         
+-    # Compute Loss
+-    loss = compute_loss(rendered_images, images)
+-    
+-    # Backward Pass with Fast Gradient Checkpointing
+-    # Instead of storing all activations, we recompute necessary parts
+-    # for active tiles only.
+-    
+-    # 1. Identify which forward computations need to be re-evaluated
+-    #    based on the active_tiles mask.
+-    
+-    # 2. Recompute forward activations for active tiles
+-    #    (This is done implicitly by the checkpointing mechanism)
+-    
+-    # 3. Compute gradients
+-    gradients = compute_gradients(loss, gaussians, active_tiles)
+-    
+-    # 4. Update parameters
+-    optimizer.step(gradients)
+-    
+-    return loss
++        # Recompute necessary intermediates for backprop
++        # This step involves re-running the forward pass logic for the specific tile
++        # or layer where gradients are needed, using the saved checkpoint
++        grad = compute_gradients(loss, checkpoint, transmittance, epsilon)
++        
++        gradients += grad
++        
++    return gradients
+ ```
+ 
+@@ -80,18 +119,21 @@
+ 
+ ### Accelerated Training for 3DGS
+-A strategy to improve training time efficiency by separating higher SH bands from the 0th band within the rasterizer, reducing the number of updates for higher SH bands compared to diffused colors [S2]. It modifies the rasterizer to split SH bands from the diffused color, updating SH bands every 16 iterations while updating diffused color at every step [S2]. It also optimizes SSIM loss calculation by replacing the standard 11x11 2D Gaussian kernel with two smaller 1D Gaussian kernels via a fused CUDA kernel [S2]. The total loss is defined as $L = (1 - \lambda_{SSIM})L_1 + \lambda_{SSIM} L_{D-SIM} + \lambda_m L_m + \lambda_{sh} L_{sh}$, where $L_m$ and $L_{sh}$ are defined in papers [11] and [13] respectively [S2].
++A strategy to improve training time efficiency by separating higher SH bands from the 0th band within the rasterizer, reducing the number of updates for higher SH bands compared to diffused colors [S2]. It modifies the rasterizer to split SH bands from the diffused color, updating SH bands every 16 iterations while updating diffused color at every step [S2]. It also optimizes SSIM loss calculation by replacing the standard 11x11 2D Gaussian kernel with two smaller 1D Gaussian kernels, calculated via a fused CUDA kernel [S2]. The total loss is defined as $L = (1 - \lambda_{SSIM})L_1 + \lambda_{SSIM} L_{D-SIM} + \lambda_m L_m + \lambda_{sh} L_{sh}$ [S2].
+ 
+ ### 128-bit Splat Data Structure
+-Restructures splat attributes (color, bounding box, position) into 128-bit aligned vectors to utilize optimized memory load instructions and reduce the total number of memory operations [S3]. The new structure consists of: Field 1: Color (4D float vector, 128 bits, padded from original 96-bit 3D float); Field 2: Bounding Box (4D unsigned integer vector, 64 bits, stored in pixel space using 16-bit unsigned integers); Field 3: Screen Position (2D float vector, 64 bits). The Bounding Box and Screen Position are packed to form a single 128-bit structure [S3]. This trades additional compute instructions required to unpack the data for further reductions in memory operation instructions [S3]. Using the original 96-bit 3D float vector for color does not have an optimized load instruction, leading to inefficient memory access [S3].
++Restructuring splat attributes (color, bounding box, position) into 128-bit aligned vectors to utilize optimized memory load instructions and reduce the total number of memory operations [S3]. The new structure packs Color (4D float, 128 bits), Bounding Box (4D unsigned int, 64 bits), and Screen Position (2D float, 64 bits) into a single 128-bit structure [S3]. This trades additional compute instructions for unpacking data for further reductions in memory operation instructions [S3]. Using the original 96-bit 3D float vector for color does not have an optimized load instruction, leading to inefficient memory access [S3].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Reduced training time due to skipping inactive tiles and optimizing memory access patterns [S1, unofficial][S3].
+-*   **Memory Complexity:** Reduced VRAM usage due to gradient checkpointing, which stores fewer intermediate activations [S1, unofficial].
+-*   **Performance:** MMGS, which builds on these principles, achieves 10x accelerated training speed while maintaining rendering quality with only 10% primitives [S1, unofficial].
+-*   **Strengths:** Significant reduction in training time and memory footprint.
+-*   **Limitations:** Requires careful implementation of dynamic sparse rasterization and gradient checkpointing. The trade-off in 128-bit structure is increased compute instructions for unpacking [S3].
++*   **Time Complexity**: Reduced by skipping tiles with negligible transmittance and optimizing gradient checkpointing [S1, unofficial].
++*   **Memory Complexity**: Reduced by gradient checkpointing, which trades compute for memory [S1, unofficial].
++*   **Measured Performance**: Not given in the sources.
++*   **Scaling**: Scales well with scene complexity due to dynamic sparsity [S1, unofficial].
++*   **Strengths**: Faster training, reduced memory usage [S1, unofficial].
++*   **Limitations**: Potential loss of fidelity if $\epsilon$ is too large [G].
++*   **When to use**: When training time is a bottleneck and memory is limited [S1, unofficial].
++*   **When not**: When high fidelity is required and training time is not critical [G].
+ 
+ ## Background
+-FastGS was introduced to address the high computational cost of 3D Gaussian Splatting training [S1, unofficial]. It re-engineers the training loop to finish optimization faster using dynamic sparse rasterization and fast gradient checkpointing [S1, unofficial]. The 128-bit data structure optimization is part of broader efforts to optimize memory access patterns in Gaussian Splatting rasterization [S3].
++FastGS was introduced to re-engineer the training loop of 3D Gaussian Splatting to finish optimization faster [S1, unofficial]. It builds on the differentiable rasterization core and gradient accumulation mechanisms of 3D Gaussian Splatting [6233-optimization-and-parallelization]. The method is part of the broader effort to optimize 3DGS training, alongside methods like [CLM](7351-clm.md) and [Fused Backward and Optimizer](9597-fused-backward-and-optimizer.md) [S1, unofficial].
+ 
+ ## Sources

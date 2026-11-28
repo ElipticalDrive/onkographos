@@ -1,0 +1,108 @@
+# Occlusion-Aware Visibility Filter
+
+Also called: Weight-based Visibility Filter
+
+## Overview
+The Occlusion-Aware Visibility Filter replaces the standard view-frustum test in 3D Gaussian Splatting densification with a rendering-based signal that restricts statistical updates to Gaussians that actually contribute to the final image [S1, unofficial]. Unlike sibling methods that rely on binary flags or pixel counts, this method uses the sum of blending weights to determine visibility, ensuring that occluded Gaussians do not accumulate densification statistics [S1, unofficial].
+
+## How it works
+The method operates during the training loop of 3D Gaussian Splatting, specifically modifying the Adaptive Density Control (ADC) phase [S1, unofficial]. It ensures that gradient and radius statistics are only accumulated for Gaussians that are not fully occluded by front-facing primitives [S1, unofficial].
+
+### Inputs and Outputs
+*   **Input:** The set of 3D Gaussians $\mathcal{G}$, the current camera view parameters, and the rendered image [S1, unofficial].
+*   **Output:** A boolean visibility mask or accumulated contribution metric for each Gaussian, used to gate densification statistics [S1, unofficial].
+
+### Data Structures
+*   **Gaussian State:** Each Gaussian $i$ maintains a state including its position $\mu_i$, covariance $\Sigma_i$, opacity $\alpha_i$, and color $c_i$ [G].
+*   **Contribution Accumulator:** A scalar value $W_i$ per Gaussian, initialized to zero at the start of each view or epoch, accumulating the sum of blending weights [S1, unofficial].
+*   **Statistics Buffer:** Buffers for positional gradients $g_{i,v}$ and other ADC metrics, which are conditionally updated based on the filter's output [S1, unofficial].
+
+### Algorithm Steps
+1.  **Rendering:** For each pixel $p$ in the view, render the image using front-to-back compositing [S1, unofficial]. The contribution of Gaussian $i$ to pixel $p$ is determined by its blending weight $w_{i,p}$ [S1, unofficial].
+2.  **Blending Weight Calculation:** Calculate the blending weight for Gaussian $i$ at pixel $p$:
+    $$ w_{i,p} = \alpha_{i,p} \cdot T_{i,p} $$
+    where $\alpha_{i,p}$ is the per-pixel opacity of the Gaussian and $T_{i,p}$ is the transmittance (fraction of light reaching the Gaussian from the camera) [S1, unofficial].
+3.  **Accumulation:** For each Gaussian $i$ that contributes to any pixel, add its blending weight to its total contribution accumulator $W_i$:
+    $$ W_i = \sum_{p \in \text{pixels}} w_{i,p} $$
+    Rendering typically terminates early when transmittance $T_{i,p}$ falls below a threshold (e.g., $10^{-4}$), meaning Gaussians behind this point are not rendered and contribute zero [S1, unofficial].
+4.  **Visibility Determination:** After processing all pixels for the view, determine if Gaussian $i$ is visible [S1, unofficial]:
+    *   If $W_i > 0$, the Gaussian is considered **visible** (it participated in rendering) [S1, unofficial].
+    *   If $W_i = 0$, the Gaussian is considered **occluded** (it did not contribute to the image) [S1, unofficial].
+5.  **Statistics Gating:** During the Adaptive Density Control (ADC) event [S1, unofficial]:
+    *   If Gaussian $i$ is visible ($W_i > 0$), accumulate its positional gradient $g_{i,v} = \partial L / \partial \mu_i$ and other statistics for densification decisions [S1, unofficial].
+    *   If Gaussian $i$ is occluded ($W_i = 0$), exclude it from densification statistics [S1, unofficial]. The raw view count normalizer is replaced by an average-contribution normalizer based on these filtered statistics [S1, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def occlusion_aware_filter(gaussians, pixels):
+    """
+    Filters Gaussians based on their actual contribution to the rendered view.
+    Args:
+        gaussians: List of Gaussian objects with attributes:
+                   - id: Unique identifier
+                   - w_total: Accumulated blending weight (initialized to 0.0 per view)
+                   - visible: Boolean visibility flag
+        pixels: List of pixel indices covered by the current view.
+    Returns:
+        gaussians: Updated Gaussian list with visibility flags.
+    """
+    # Step 1 & 2: Initialize accumulators
+    for g in gaussians:
+        g.w_total = 0.0
+        g.visible = False
+
+    # Step 3: Accumulate blending weights w_{i,p} over all pixels p
+    # The rasterizer provides the list of (pixel_index, w_{i,p}) pairs for each Gaussian.
+    for g in gaussians:
+        for p, w_ip in compute_blending_weights(g, pixels):
+            g.w_total += w_ip
+
+    # Step 4: Determine visibility
+    for g in gaussians:
+        g.visible = (g.w_total > 0.0)
+
+    return gaussians
+
+def compute_blending_weights(gaussian, pixels):
+    """
+    Simulates the rasterizer output: returns list of (pixel_index, blending_weight) pairs.
+    """
+    # Standard front-to-back compositing computes w_{i,p} = alpha_{i,p} * T_{i,p}
+    # This function represents the rasterizer's output for Gaussian i.
+    return [(p, gaussian.alpha * gaussian.transmittance) for p in pixels]
+
+def update_adc_statistics(gaussians, gradients):
+    """
+    Updates ADC statistics only for visible Gaussians.
+    """
+    for g in gaussians:
+        if g.visible:
+            # Accumulate gradient and other stats for densification
+            g.grad_accum += gradients[g.id]
+            g.view_count += 1
+        else:
+            # Exclude occluded Gaussians from densification statistics
+            g.grad_accum = 0.0
+            g.view_count = 0
+    return gaussians
+```
+
+### Parameters and Edge Cases
+*   **Transmittance Threshold:** Rendering terminates when $T_{i,p} < 10^{-4}$ [S1, unofficial]. This threshold implicitly defines the occlusion boundary [G].
+*   **Zero Contribution:** A Gaussian with $W_i = 0$ is strictly excluded [S1, unofficial]. This handles cases where a Gaussian is within the frustum but completely behind other opaque geometry [G].
+*   **Precision:** The sum of blending weights $W_i$ is a floating-point accumulation [G]. The binary nature of the filter (zero vs. non-zero) makes it robust to minor numerical noise, provided the threshold is strictly $>0$ [G].
+
+## Operating characteristics
+*   **Time Complexity:** The visibility filter adds negligible overhead as it reuses data already computed during the forward rendering pass (blending weights) [G]. The main cost is the conditional update of statistics, which is $O(N)$ where $N$ is the number of Gaussians [G].
+*   **Memory Complexity:** Requires storing one scalar $W_i$ per Gaussian per view or epoch, which is minimal compared to the Gaussian state itself [G].
+*   **Performance:** In occlusion-heavy scenes, this method reduces the number of Gaussians required by up to 63% compared to occlusion-blind baselines, while improving image quality metrics (e.g., up to 6% lower LPIPS) [S1, unofficial].
+*   **Strengths:** Prevents under-densification in occluded regions by ignoring irrelevant Gaussians [S1, unofficial]. It is more nuanced than binary flags because it uses the magnitude of contribution [S1, unofficial].
+*   **Limitations:** It is specific to the 3D Gaussian Splatting framework and its densification pipeline [S1, unofficial]. It does not accelerate the forward rendering itself, but rather the training efficiency and final model compactness [S1, unofficial].
+
+## Background
+The Occlusion-Aware Visibility Filter was introduced in the paper "Counting Contributions, Not Views: Occlusion-Aware Densification for 3D Gaussian Splatting" [S1, unofficial]. It addresses a limitation in standard 3D Gaussian Splatting where densification statistics are based on view-frustum tests, which count Gaussians that are potentially visible but may be fully occluded in specific views [S1, unofficial]. This leads to inefficient densification in complex, occlusion-heavy scenes [S1, unofficial]. The method replaces the frustum-based filter with a rendering-based signal, specifically the sum of blending weights, which is also used in the proposed "Average Contribution Criterion" for densification decisions [S1, unofficial]. It is integrated into a framework based on StopThePop [S1, unofficial].
+
+## Sources
+[S1] Counting Contributions, Not Views: Occlusion-Aware Densification for 3D Gaussian Splatting, https://arxiv.org/abs/2610.27108, fetched 2026-10-26 (unofficial)

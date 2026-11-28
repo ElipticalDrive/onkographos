@@ -1,0 +1,128 @@
+--- v006.md
++++ v007.md
+@@ -11,15 +11,15 @@
+ ### Inputs and Outputs
+ *   **Input:** A 3D scalar volume dataset $V$ of dimensions $D_x \times D_y \times D_z$. The data is typically padded to the nearest power of two along all three cardinal axes to facilitate straightforward octree construction [S1][S3, unofficial].
+-*   **Output:** A rendered image of the isosurface defined by a threshold value $T$.
++*   **Output:** A rendered image of the isosurface defined by a threshold value $T$ [S1].
+ 
+ ### Data Structures
+ **Min-Max Octree:**
+ The octree is built directly around voxels (as opposed to cells) [S5, unofficial]. Each node in the octree stores aggregate information derived from its children:
+-*   **Internal Nodes:** Store the minimum ($min$) and maximum ($max$) scalar values of all voxels in their subtree [S3, unofficial][S5, unofficial]. These values are used to determine if the isosurface threshold $T$ lies within the node's range [S3, unofficial]. If the threshold is outside the node's range, the node is empty with respect to the isosurface and can be skipped [S1, S2][S3, unofficial][S6].
+-*   **Leaf Nodes:** Store the actual scalar voxel values [S5, unofficial].
++*   **Internal Nodes:** Store the minimum ($min$) and maximum ($max$) scalar values of all voxels in their subtree. These values are used to determine if the isosurface threshold $T$ lies within the node's range. If the threshold $T$ falls outside the stored $[min, max]$ range, the node is pruned [G].
++*   **Leaf Nodes:** Store the actual scalar voxel values [G].
+ *   **Construction:** The octree is constructed bottom-up. A common implementation involves creating a MIP texture from a min-max texture used to determine block occupancy [S1][S3, unofficial]. The base level of the octree has equal size along all three cardinal axes [S1][S3, unofficial].
+ 
+ **Voxel Data:**
+-The scalar values are stored in a format accessible during traversal [S3, unofficial]. In some implementations, the acceleration tree and scalar data are embedded in a single structure [S4, unofficial]. For GPU implementations, the volume is often stored as a 3D texture [S6].
++The scalar values are stored in a format accessible during traversal. In some implementations, the acceleration tree and scalar data are embedded in a single structure [S4, unofficial]. For GPU implementations, the volume is often stored as a 3D texture [S6].
+ 
+ ### Algorithm Steps
+@@ -27,5 +27,5 @@
+ 1.  **Octree Construction:**
+     *   Pad volume dimensions to powers of two if necessary [S1][S3, unofficial].
+-    *   Compute min/max values for each voxel or block [S1][S3, unofficial].
++    *   Compute min/max values for each voxel or block.
+     *   Build the octree hierarchy by aggregating min/max values from children to parents [S1][S3, unofficial].
+     *   *Note:* For CPU-based implementations on large datasets, lossless compression into an octree representation can reduce memory footprint to 10–30% of the original size [S5, unofficial]. Optimized hash schemes may be used for point location and neighbor-finding [S4, unofficial].
+@@ -36,14 +36,14 @@
+ 3.  **Ray Traversal (Empty Space Skipping):**
+     *   Traverse the min-max octree from the root [S5, unofficial].
+-    *   At each node, check if the isosurface threshold $T$ is within the node's $[min, max]$ range [S3, unofficial].
+-    *   If the threshold is outside the node's range, prune the subtree (skip the node) [S1, S2][S3, unofficial].
+-    *   If the threshold is within the range, descend into the children [S3, unofficial].
+-    *   *GPU Implementation Detail:* To compute entry and exit points efficiently, cubes corresponding to one level of the min/max octree can be rendered [S6]. All vertices of a cube have the same 2D texture coordinates containing the min/max values [S6]. Exit positions are computed by rendering cubes with `glCullFace(GL FRONT)` and `glDepthFunc(GL LESS)` [S6]. Entry positions are computed by rendering cubes again with `glCullFace(GL BACK)` and `glDepthFunc(GL GREATER)` [S6]. A fragment shader discards fragments if the cube is empty or does not contain the isosurface level [S6].
++    *   At each node, check if the isosurface threshold $T$ is within the node's $[min, max]$ range.
++    *   If $T \notin [min, max]$, prune the subtree (skip the node) [G].
++    *   If $T \in [min, max]$, descend into the children.
++    *   *GPU Implementation Detail:* To compute entry and exit points efficiently, cubes corresponding to one level of the min/max octree can be rendered. All vertices of a cube have the same 2D texture coordinates containing the min/max values. Exit positions are computed by rendering cubes with `glCullFace(GL FRONT)` and `glDepthFunc(GL LESS)`. Entry positions are computed by rendering cubes again with `glCullFace(GL BACK)` and `glDepthFunc(GL GREATER)`. A fragment shader discards fragments if the cube is empty or does not contain the isosurface level [S6].
+ 
+ 4.  **Ray Marching:**
+-    *   Once a leaf node containing the isosurface is identified, march along the ray within that leaf [S1][S3, unofficial].
++    *   Once a leaf node containing the isosurface is identified, march along the ray within that leaf.
+     *   **Step Size:** Use a step size of $0.5 \times$ cell edge length [S1][S3, unofficial].
+-    *   Sample the scalar value $S$ at the current ray position [S1].
+-    *   Check for isosurface intersection: if the sign of $(S - T)$ changes between the previous and current sample, an intersection exists within the step [S1].
++    *   Sample the scalar value $S$ at the current ray position.
++    *   Check for isosurface intersection: if the sign of $(S - T)$ changes between the previous and current sample, an intersection exists within the step [G].
+ 
+ 5.  **Isosurface Refinement:**
+@@ -51,25 +51,33 @@
+     *   *Pseudocode for Refinement:*
+         ```python
++        def sample_volume(pos, volume):
++            # Performs trilinear interpolation or nearest-neighbor lookup on the volume grid
++            # Returns the scalar value at the given 3D position
++            ...
++
++        def ray_t(pos, origin, direction):
++            # Computes the ray parameter t for a point along a normalized ray
++            return (pos[0] - origin[0]) * direction[0] + \
++                   (pos[1] - origin[1]) * direction[1] + \
++                   (pos[2] - origin[2]) * direction[2]
++
+         def refine_intersection(ray_origin, ray_direction, start_pos, end_pos, threshold, iterations=3):
+-            def sample_volume(pos):
+-                # Standard trilinear interpolation or nearest-neighbor lookup in volume V
+-                return V.sample(pos)
+-                
+-            pos_a = start_pos
+-            val_a = sample_volume(pos_a)
+-            pos_b = end_pos
+-            val_b = sample_volume(pos_b)
+-            
++            t_a = ray_t(start_pos, ray_origin, ray_direction)
++            val_a = sample_volume(ray_origin + ray_direction * t_a, volume)
++            t_b = ray_t(end_pos, ray_origin, ray_direction)
++            val_b = sample_volume(ray_origin + ray_direction * t_b, volume)
++
+             for _ in range(iterations):
+-                mid_pos = (pos_a + pos_b) / 2.0
+-                val_mid = sample_volume(mid_pos)
+-                
++                t_mid = (t_a + t_b) / 2.0
++                pos_mid = ray_origin + ray_direction * t_mid
++                val_mid = sample_volume(pos_mid, volume)
++
+                 if (val_mid - threshold) * (val_a - threshold) < 0:
+-                    pos_b = mid_pos
++                    t_b = t_mid
+                     val_b = val_mid
+                 else:
+-                    pos_a = mid_pos
++                    t_a = t_mid
+                     val_a = val_mid
+-            return pos_b
++            return ray_origin + ray_direction * t_b
+         ```
+ 
+@@ -78,12 +86,10 @@
+     *   *Pseudocode for Normal:*
+         ```python
+-        def compute_normal(pos, volume):
+-            epsilon = 0.5 # or cell edge length
+-            normal = vec3(
+-                volume.sample(pos + vec3(epsilon, 0, 0)) - volume.sample(pos - vec3(epsilon, 0, 0)),
+-                volume.sample(pos + vec3(0, epsilon, 0)) - volume.sample(pos - vec3(0, epsilon, 0)),
+-                volume.sample(pos + vec3(0, 0, epsilon)) - volume.sample(pos - vec3(0, 0, epsilon))
+-            )
+-            return normalize(normal)
++        def compute_normal(pos, volume, epsilon=0.5):
++            # Central difference approximation of the gradient
++            grad_x = sample_volume(pos + vec3(epsilon, 0, 0), volume) - sample_volume(pos - vec3(epsilon, 0, 0), volume)
++            grad_y = sample_volume(pos + vec3(0, epsilon, 0), volume) - sample_volume(pos - vec3(0, epsilon, 0), volume)
++            grad_z = sample_volume(pos + vec3(0, 0, epsilon), volume) - sample_volume(pos - vec3(0, 0, epsilon), volume)
++            return normalize(vec3(grad_x, grad_y, grad_z))
+         ```
+     *   Apply Gooch shading using the computed normals [S1][S3, unofficial].
+@@ -97,6 +103,6 @@
+ ### Edge Cases and Pitfalls
+ *   **Cell Size Trade-off:** A large number of small cells induces a tight bound of the isosurface but comes with large overhead due to primitives. A small number of large cells reduces overhead but bounds the isosurface loosely [S6].
+-*   **Precision:** The binary search refinement assumes sufficient precision in volume sampling.
+-*   **Boundaries:** Ensure ray origins and directions are correctly transformed into volume space.
++*   **Precision:** The binary search refinement assumes sufficient precision in volume sampling [G].
++*   **Boundaries:** Ensure ray origins and directions are correctly transformed into volume space [G].
+ 
+ ## Subtopics

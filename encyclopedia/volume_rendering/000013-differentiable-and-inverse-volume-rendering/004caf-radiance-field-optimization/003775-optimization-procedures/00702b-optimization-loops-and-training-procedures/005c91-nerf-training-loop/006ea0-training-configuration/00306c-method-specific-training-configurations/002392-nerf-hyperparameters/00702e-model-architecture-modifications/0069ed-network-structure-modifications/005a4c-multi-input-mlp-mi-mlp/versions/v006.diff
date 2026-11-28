@@ -1,0 +1,253 @@
+--- v005.md
++++ v006.md
+@@ -3,41 +3,34 @@
+ 
+ ## Overview
+-The multi-input MLP (mi-MLP) is a network structure modification for Neural Radiance Fields that incorporates 3D location and 2D viewing direction inputs into every layer of the MLP to prevent overfitting in few-shot view synthesis without reducing model capacity [S1]. Unlike vanilla NeRF, which relies on deep implicit mappings from inputs to outputs, mi-MLP ensures each layer is explicitly aware of input embeddings, allowing shorter paths between inputs and outputs and enabling synthesis with fewer parameters while preserving the ability to synthesize high-frequency details [S1].
++The multi-input MLP (mi-MLP) is a network structure modification for Neural Radiance Fields that incorporates the raw input embeddings (3D location and viewing direction) into every layer of the MLP to prevent overfitting in few-shot view synthesis without reducing model capacity [S1]. Unlike the standard NeRF architecture which relies on a single deep path from inputs to outputs, mi-MLP creates shorter, explicit connections between the inputs and each hidden layer, allowing the model to synthesize high-frequency details with fewer effective parameters while maintaining the original network size [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- **Input:** A 5D coordinate vector $\mathbf{x}$, composed of a 3D spatial location and a 2D viewing direction.
+-- **Output:** Volume density $\sigma$ and view-dependent color $\mathbf{c}$ for the given ray point.
++*   **Input:** A 5D coordinate vector $\mathbf{x} \in \mathbb{R}^5$, composed of the 3D spatial position $\mathbf{p} \in \mathbb{R}^3$ and the 2D viewing direction $\mathbf{d} \in \mathbb{R}^2$ (normalized).
++*   **Output:** Volume density $\sigma \in \mathbb{R}$ and view-dependent color $\mathbf{c} \in \mathbb{R}^3$.
+ 
+ **Data Structures:**
+-- **Positional Encoding:** The input $\mathbf{x}$ is transformed into an embedding $\gamma_L(\mathbf{x})$ using a fixed positional encoding scheme.
+-- **Layer Weights:** For layer $i$, weights are split into $\mathbf{w}_i^{j0}$ (connecting input embeddings) and $\mathbf{w}_i^{j1}$ (connecting previous layer features).
++The network consists of $L_{layers}$ linear layers followed by activation functions. Each layer $i$ (where $i=1, \dots, L_{layers}$) has:
++*   Weight matrix $\mathbf{W}_i \in \mathbb{R}^{d_{out} \times (d_{in} + d_{enc})}$, where $d_{in}$ is the hidden dimension of the previous layer (or input dimension for $i=1$) and $d_{enc}$ is the dimension of the positional encoding.
++*   Bias vector $\mathbf{b}_i \in \mathbb{R}^{d_{out}}$.
++*   Activation function $\epsilon(\cdot)$, typically ReLU.
+ 
+ **Positional Encoding:**
+-The input $\mathbf{x}$ is encoded using $\gamma_L(\mathbf{x})$, defined as [S1]:
++The input $\mathbf{x}$ is transformed into an encoded embedding $\gamma_L(\mathbf{x})$ using a sinusoidal positional encoding with $L$ frequency bands [S1]:
+ $$
+ \gamma_L(\mathbf{x}) = (\sin(2^0 \mathbf{x}), \cos(2^0 \mathbf{x}), \dots, \sin(2^{L-1} \mathbf{x}), \cos(2^{L-1} \mathbf{x}))
+ $$
+-where $L$ is a hyperparameter controlling the number of frequency bands. The dimension of $\gamma_L(\mathbf{x})$ is $2 \cdot D \cdot L$, where $D$ is the dimension of $\mathbf{x}$ (typically $D=5$ for NeRF).
++where $L$ is a hyperparameter controlling the frequencies [S1]. The dimension of $\gamma_L(\mathbf{x})$ is $2 \cdot L \cdot \dim(\mathbf{x})$.
+ 
+-**Layer Computation:**
+-Let $f_i$ be the output feature vector of layer $i$. The computation for layer $i$ (where $i > 1$) is [S1]:
+-$$
+-f_i = \phi_i(f_{i-1}, \gamma_L(\mathbf{x}))
+-$$
+-with the first layer defined as:
+-$$
+-f_1 = \phi_1(\gamma_L(\mathbf{x}))
+-$$
+-Here, $\phi_i$ represents the transformation of the $i$-th layer. The $j$-th element of the output feature vector $f_i$, denoted $\phi_i^j$, is computed as [S1]:
+-$$
+-\phi_i^j(\gamma_L(\mathbf{x})) = \epsilon\left( \mathbf{w}_i^{j0}[\gamma_L(\mathbf{x})] + \mathbf{w}_i^{j1}[f_{i-1}] + b_i \right)
+-$$
+-where:
+-- $\epsilon$ is the activation function (default ReLU) [S1].
+-- $b_i \in \mathbb{R}^{d_2 \times 1}$ is the bias vector for layer $i$ [S1].
+-- $\mathbf{w}_i^{j0} \in \mathbb{R}^{1 \times d_1}$ are the weights connecting the input embedding to the $j$-th neuron, where $d_1$ is the dimension of $\gamma_L(\mathbf{x})$ [S1].
+-- $\mathbf{w}_i^{j1} \in \mathbb{R}^{1 \times d_2}$ are the weights connecting the previous layer's output to the $j$-th neuron, where $d_2$ is the hidden dimension of the MLP [S1].
+-- $f_{i-1}$ is the output of the previous layer, $f_{i-1} = \phi_{i-1}(\gamma_L(\mathbf{x}))$ [S1].
++**Algorithm:**
++The mi-MLP computes the output of each layer $i$ by concatenating the positional encoding $\gamma_L(\mathbf{x})$ with the output of the previous layer $\mathbf{f}_{i-1}$ and passing it through the layer's linear transformation and activation [S1].
++
++1.  Compute the positional encoding $\gamma_L(\mathbf{x})$ for the input $\mathbf{x}$.
++2.  Initialize the input feature $\mathbf{f}_0 = \gamma_L(\mathbf{x})$.
++3.  For each layer $i$ from 1 to $L_{layers}$:
++    a. Concatenate the positional encoding with the previous layer's output: $\mathbf{z}_i = [\gamma_L(\mathbf{x}); \mathbf{f}_{i-1}]$.
++    b. Compute the linear transformation: $\mathbf{a}_i = \mathbf{W}_i \mathbf{z}_i + \mathbf{b}_i$.
++    c. Apply the activation function: $\mathbf{f}_i = \epsilon(\mathbf{a}_i)$.
++4.  The final output features $\mathbf{f}_{L_{layers}}$ are passed to separate head networks (or linear layers) to predict $\sigma$ and $\mathbf{c}$.
+ 
+ **Pseudocode:**
+@@ -45,107 +38,113 @@
+ import torch
+ import torch.nn as nn
+-import math
++import torch.nn.functional as F
+ 
+ class PositionalEncoding(nn.Module):
+-    def __init__(self, num_frequencies):
++    def __init__(self, num_frequencies: int):
+         super().__init__()
+         self.num_frequencies = num_frequencies
+ 
+-    def forward(self, x):
+-        # x shape: (..., 5) for (x, y, z, theta, phi)
+-        # Output shape: (..., 2 * 5 * num_frequencies)
+-        device = x.device
+-        # Create frequency bands
+-        bands = torch.pow(2.0, torch.arange(self.num_frequencies, device=device).float())
+-        # Expand bands to match input dimensions
+-        bands = bands.view(1, 1, -1) # (1, 1, L)
+-        # Scale input
+-        scaled_x = x.unsqueeze(-1) * bands # (..., 5, L)
+-        # Apply sin and cos
+-        encoded = torch.cat([torch.sin(scaled_x), torch.cos(scaled_x)], dim=-1) # (..., 5, 2*L)
+-        return encoded.view(*x.shape[:-1], -1) # (..., 10*L)
++    def forward(self, x: torch.Tensor) -> torch.Tensor:
++        """
++        Computes the positional encoding gamma_L(x).
++        x: Tensor of shape (..., D) where D is the input dimension (5 for NeRF).
++        Returns: Tensor of shape (..., 2 * num_frequencies * D).
++        """
++        # x shape: (..., D)
++        # freq_bands shape: (num_frequencies,)
++        freq_bands = 2.0 ** torch.arange(self.num_frequencies, device=x.device, dtype=x.dtype)
++        # Expand x to (..., D, num_frequencies)
++        x_expanded = x.unsqueeze(-1) * freq_bands.unsqueeze(0).unsqueeze(0)
++        # Compute sin and cos
++        sin_vals = torch.sin(x_expanded)
++        cos_vals = torch.cos(x_expanded)
++        # Concatenate along the last dimension
++        # Result shape: (..., D * num_frequencies * 2)
++        return torch.cat([sin_vals, cos_vals], dim=-1)
+ 
+-class MiMLPLayer(nn.Module):
+-    def __init__(self, input_dim, hidden_dim):
++class MiMLP(nn.Module):
++    def __init__(self, 
++                 input_dim: int = 5, 
++                 hidden_dim: int = 256, 
++                 num_layers: int = 8, 
++                 num_frequencies: int = 10):
+         super().__init__()
+         self.input_dim = input_dim
+         self.hidden_dim = hidden_dim
+-        # w0 connects positional encoding (input_dim) to hidden_dim
+-        self.w0 = nn.Linear(input_dim, hidden_dim, bias=False)
+-        # w1 connects previous hidden state (hidden_dim) to hidden_dim
+-        self.w1 = nn.Linear(hidden_dim, hidden_dim, bias=False)
+-        self.b = nn.Parameter(torch.zeros(hidden_dim))
+-        self.activation = nn.ReLU()
+-
+-    def forward(self, prev_hidden, pos_encoding):
+-        # pos_encoding shape: (..., input_dim)
+-        # prev_hidden shape: (..., hidden_dim) or None for first layer
+-        term_input = self.w0(pos_encoding)
+-        if prev_hidden is not None:
+-            term_prev = self.w1(prev_hidden)
+-            out = self.activation(term_input + term_prev + self.b)
+-        else:
+-            out = self.activation(term_input + self.b)
+-        return out
+-
+-class MiMLP(nn.Module):
+-    def __init__(self, num_layers, hidden_dim, num_frequencies):
+-        super().__init__()
+         self.num_layers = num_layers
+-        self.hidden_dim = hidden_dim
+-        # Input dimension for positional encoding: 5 coords * 2 * L
+-        self.input_dim = 5 * 2 * num_frequencies
++        self.pos_encoding = PositionalEncoding(num_frequencies)
+         
+-        self.pos_encoder = PositionalEncoding(num_frequencies)
++        # Calculate the dimension of the positional encoding
++        # gamma_L(x) has size 2 * num_frequencies * input_dim
++        self.enc_dim = 2 * num_frequencies * input_dim
+         
+-        # Layers 1 to num_layers
+-        # Layer 1 takes only pos_encoding
++        # Define layers
++        # Layer 1 takes only the positional encoding
+         self.layers = nn.ModuleList()
+-        for i in range(num_layers):
+-            self.layers.append(MiMLPLayer(self.input_dim, self.hidden_dim))
++        
++        # First layer: input is gamma_L(x)
++        self.layers.append(nn.Linear(self.enc_dim, hidden_dim))
++        
++        # Subsequent layers: input is [gamma_L(x), f_{i-1}]
++        for _ in range(num_layers - 1):
++            # Input dimension is enc_dim + hidden_dim
++            self.layers.append(nn.Linear(self.enc_dim + hidden_dim, hidden_dim))
+             
+-        # Final output layer (standard linear layer)
+-        self.final_layer = nn.Linear(hidden_dim, 4) # 3 for color, 1 for density
+-
+-    def forward(self, x):
+-        # x shape: (..., 5)
+-        pos_encoding = self.pos_encoder(x)
++    def forward(self, x: torch.Tensor) -> torch.Tensor:
++        """
++        Forward pass of the mi-MLP.
++        x: Tensor of shape (..., 5) representing (x, y, z, theta, phi) or similar.
++        Returns: Tensor of shape (..., hidden_dim) containing the final feature vector.
++        """
++        # Compute positional encoding
++        # gamma_L(x) shape: (..., enc_dim)
++        gamma_x = self.pos_encoding(x)
+         
+-        hidden = None
++        # Initialize previous feature
++        # f_0 is not explicitly used as a variable, but the first layer takes gamma_x
++        f_prev = gamma_x
++        
+         for i, layer in enumerate(self.layers):
+             if i == 0:
+-                # First layer: no previous hidden state
+-                hidden = layer(None, pos_encoding)
++                # First layer input is just the positional encoding
++                z = f_prev
+             else:
+-                # Subsequent layers: concatenate previous hidden state
+-                hidden = layer(hidden, pos_encoding)
+-                
+-        output = self.final_layer(hidden)
+-        return output
++                # Subsequent layers concatenate gamma_x with previous output
++                # f_prev shape: (..., hidden_dim)
++                # gamma_x shape: (..., enc_dim)
++                z = torch.cat([gamma_x, f_prev], dim=-1)
++            
++            # Linear transformation
++            a = layer(z)
++            # Activation (ReLU)
++            f_curr = F.relu(a)
++            
++            # Update previous feature
++            f_prev = f_curr
++            
++        return f_prev
+ ```
+ 
+ **Parameters:**
+-- **$L$ (Number of frequencies):** Controls the resolution of the positional encoding. Not given in the sources.
+-- **Weight Initialization:** Default PyTorch initialization is used. This satisfies the condition $\|\mathbf{w}_i^{j1}\|_1 \in (0, 1]$ [S1].
+-- **Activation Function:** ReLU is the default [S1].
++*   $L$ (number of frequency bands in positional encoding): Hyperparameter. Default values are not explicitly stated in the source, but standard NeRF uses 10 [S1, G].
++*   Weight Initialization: Default PyTorch initialization is used. The source notes that this initialization satisfies the condition $\|\mathbf{w}_i^{j1}\|_1 \in (0, 1]$, which is critical for the gradient amplitude properties described below [S1].
+ 
+ **Edge Cases and Pitfalls:**
+-- **Gradient Amplitude Imbalance:** During early training, vanilla MLPs exhibit similar gradient amplitudes across all layers. In contrast, mi-MLP ensures that deeper layers (closer to the output) receive large gradients while shallower layers receive extremely small ones [S1]. This behavior is theoretically supported by the ratio of gradient amplitudes between adjacent layers [S1]:
+-  $$
+-  \| \frac{\partial \mathcal{L}}{\partial \mathbf{w}_i} \|_1 / \| \frac{\partial \mathcal{L}}{\partial \mathbf{w}_{i-1}} \|_1 = \frac{1}{d_2} \sum_{j=1}^{d_2} \frac{\|\gamma_L(\mathbf{x})\|_1 + \|f_{i-1}\|_1}{\|\sum \mathbf{w}_i^{j1}\|_1 \cdot \{\|\gamma_L(\mathbf{x})\|_1 + \|f_{i-2}\|_1\}}
+-  $$
+-  where $\mathcal{L}$ is the loss function and $d_2$ is the output dimension of the layer [S1].
+-- **Overfitting:** The primary motivation for mi-MLP is to alleviate overfitting in few-shot view synthesis by providing explicit input connections at every layer, which allows for flexible connections between inputs and outputs [S1].
++*   **Gradient Amplitude:** During early training, vanilla MLPs result in similar gradient amplitudes for all layers. In contrast, mi-MLP ensures that deeper layers (closer to the output) are updated with large gradients while shallower layers receive extremely small gradients [S1]. This behavior is derived from the ratio of gradient amplitudes between adjacent layers:
++    $$
++    \| \frac{\partial \mathcal{L}}{\partial \mathbf{w}_i} \|_1 / \| \frac{\partial \mathcal{L}}{\partial \mathbf{w}_{i-1}} \|_1 = \frac{1}{d_2} \sum_{j=1}^{d_2} \frac{\|\gamma_L(\mathbf{x})\|_1 + \|\phi_{i-1}(\gamma_L(\mathbf{x}))\|_1}{\|\sum \mathbf{w}_i^{j1}\|_1 \cdot \{\|\gamma_L(\mathbf{x})\|_1 + \|\phi_{i-2}(\gamma_L(\mathbf{x}))\|_1\}}
++    $$
++    where $d_2$ is the output dimension of the layer, $\mathbf{w}_i^{j1}$ are the weight components connecting the previous layer's output, and $\phi$ represents the layer output [S1].
++*   **Overfitting:** The primary motivation for mi-MLP is to alleviate overfitting in few-shot view synthesis. By incorporating inputs into each layer, the model avoids the need to learn the input mapping implicitly through many layers, which can lead to overfitting when data is scarce [S1].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Not given in the sources.
+-- **Memory Complexity:** Not given in the sources.
+-- **Performance:** The method boosts the PSNR of the baseline from 14.73 to 24.23 on few-shot view synthesis benchmarks [S1].
+-- **Strengths:** Prevents overfitting in few-shot scenarios without reducing model capacity; allows shorter paths between inputs and outputs; acts as a plug-and-play solution for existing NeRF pipelines [S1].
+-- **Limitations:** Not given in the sources.
+-- **When to use:** When performing few-shot view synthesis where standard NeRF overfits, but maintaining high-frequency detail synthesis capability is required [S1].
++*   **Time Complexity:** The forward pass complexity is similar to a standard MLP of the same depth, but with increased input dimensionality for each layer due to the concatenation of $\gamma_L(\mathbf{x})$. Specifically, for layer $i > 1$, the input dimension is $d_{enc} + d_{hidden}$, whereas a standard MLP has input dimension $d_{hidden}$. This increases the number of parameters and FLOPs per layer.
++*   **Memory Complexity:** The number of parameters increases compared to a standard MLP of the same depth because each layer (except the first) has weights connecting to both the previous hidden state and the positional encoding.
++*   **Performance:** The method boosts PSNR from 14.73 to 24.23 on few-shot view synthesis benchmarks compared to the baseline [S1]. It achieves state-of-the-art results on a wide range of benchmarks [S1].
++*   **Strengths:** Prevents overfitting in few-shot settings; maintains model capacity for high-frequency details; plug-and-play solution; enables shorter paths between inputs and outputs.
++*   **Limitations:** Increased parameter count per layer; requires careful initialization to maintain desired gradient properties.
+ 
+ ## Background
+-The multi-input MLP (mi-MLP) was proposed in 2024 by the authors of "Is Vanilla MLP in Neural Radiance Field Enough for Few-Shot View Synthesis?" [S1]. It addresses the observation that trivially reducing model parameters alleviates overfitting but harms detail synthesis. The method provides an orthogonal approach by modifying the network structure to incorporate inputs into each layer, revealing that explicit awareness of input embeddings at every layer alleviates overfitting while preserving capacity [S1].
++The mi-MLP was proposed in the paper "Is Vanilla MLP in Neural Radiance Field Enough for Few-Shot View Synthesis?" [S1]. The authors observed that trivially reducing the number of model parameters alleviates overfitting but harms detailed synthesis. They introduced mi-MLP as an orthogonal method from the perspective of network structure, incorporating inputs into each layer to prevent overfitting without harming detailed synthesis. The method was shown to be effective in boosting performance on few-shot view synthesis tasks.
+ 
+ ## Sources

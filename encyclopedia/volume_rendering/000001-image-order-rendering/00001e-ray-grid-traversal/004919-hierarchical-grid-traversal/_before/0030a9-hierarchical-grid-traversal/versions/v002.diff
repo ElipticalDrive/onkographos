@@ -1,0 +1,387 @@
+--- v001.md
++++ v002.md
+@@ -4,152 +4,160 @@
+ 
+ ## Overview
+-Hierarchical Grid Traversal is a ray-grid traversal method that accelerates volume rendering by stepping through a multi-resolution grid hierarchy (mipmap) rather than a single flat grid. It starts at the root level and recursively visits child voxels only if the ray intersects the parent voxel's axis-aligned bounding box (AABB), effectively skipping empty space at coarse levels before refining the search at finer levels [S1, unofficial]. Unlike flat [Digital Differential Analyzer (DDA) Traversal](3061-digital-differential-analyzer-dda-traversal.md) which samples every voxel along the ray path, this method reduces sample evaluations by leveraging the hierarchical structure to jump over inactive regions [S1, unofficial]. It differs from [Sparse Voxel Octree Ray Traversal](2451-sparse-voxel-octree-ray-traversal.md) by typically using a fixed grid topology with pre-computed lookup tables rather than dynamic tree structures [S1, unofficial].
++Hierarchical Grid Traversal accelerates volume rendering by navigating a multi-resolution grid hierarchy (mipmap) to skip empty space and reduce intersection tests [S1, unofficial][S2, unofficial]. It builds on [Ray-grid traversal](17-ray-grid-traversal.md) by replacing fixed-step DDA with level-aware traversal, allowing rays to leap over large inactive regions [S2, unofficial][S3, unofficial]. Unlike flat traversal methods, it transforms rays into local subvoxel space when entering detail voxels or rescales the grid to restart DDA at coarser levels [S1, unofficial][S4, unofficial].
+ 
+ ## How it works
+-**Inputs:** A ray defined by origin $O$ and direction $D$ (or inverse direction $I = 1/D$); a hierarchical grid structure defined by multiple resolution levels; a lookup table (or set of tables) mapping parent voxel indices to child voxel indices and coordinates.
+-**Outputs:** A list of voxel positions (or indices) at the maximum resolution level that the ray intersects.
+-
+-**Data Structures:**
+-1.  **Grid Table (`g_table`):** A 2D array where each row corresponds to a voxel at a specific level.
+-    *   Columns 0-7: Indices of the 8 child voxels in the next finer level. If a child is empty or invalid, the value is $-1$.
+-    *   Columns -3 to -1 (or 8-10): The 3D grid coordinates $(x, y, z)$ of the current voxel.
+-    *   *Note:* In some implementations (like `ray_mipmap_intersect_vectorized`), the table is constructed dynamically or accessed via a list of tables per level [S1, unofficial].
+-2.  **K-Table (`k_table`):** (Optional, for ray-based traversal) Stores active ray state.
+-    *   Columns 0-2: Ray origin $(r_{ori})$.
+-    *   Columns 3-5: Ray inverse direction $(r_{inv})$.
+-    *   Columns 6-8: Current voxel origin $(cube_{ori})$.
+-    *   Columns 9-11: Current voxel end $(cube_{end})$.
+-    *   Column -2: Ray ID $(r_{id})$.
+-    *   Column -1: Voxel ID/Row ID in the grid table.
+-3.  **HDDA State:** (In C++ implementations like HNanoSolver) A Hierarchical Digital Differential Analyzer state tracking the current position, time $t$, and step direction within the current node [S2, unofficial].
+-
+-**Parameters:**
+-*   `max_level`: The maximum depth of the mipmap hierarchy. The traversal iterates from level 0 to `max_level` inclusive [S1, unofficial].
+-*   `cube_size`: The physical size of a voxel at level $L$, calculated as $256 / 2^L$ (assuming a base resolution of 256 units) [S1, unofficial].
+-*   `Eps`: A small epsilon value (e.g., $0.000001$) added to the ray start time $t_0$ to avoid self-intersection or precision issues at the entry point [S2, unofficial].
+-*   `Delta`: A small offset (e.g., $0.01$) used to probe the next voxel position to determine if the ray has exited the current node [S2, unofficial].
+-
+-**Algorithm Steps:**
+-
+-1.  **Initialization:**
+-    *   Initialize `cube_touched_idx` with `[0]` (the root voxel index) [S1, unofficial].
+-    *   Initialize `cube_ori_list` as empty (to store final hits) [S1, unofficial].
+-    *   If using HDDA (C++ style):
+-        *   Set `mRay` to the input ray.
+-        *   Clip `mRay` to the root bounding box. If no intersection, return false [S2, unofficial].
+-        *   Set $t_0 = mRay.t_0() + Eps$ and $t_1 = mRay.t_1() - Eps$. If $t_0 > t_1$, return false [S2, unofficial].
+-        *   Initialize HDDA with $t_0, t_1$ and the root dimension [S2, unofficial].
+-
+-2.  **Traversal Loop (Level by Level):**
+-    *   For each level $L$ from 0 to `max_level`:
+-        *   Retrieve the lookup table for level $L$: `table = tables_list[L]` [S1, unofficial].
+-        *   Initialize `new_list` as empty [S1, unofficial].
+-        *   For each voxel index `i` in `cube_touched_idx`:
+-            *   Retrieve the voxel's grid coordinates: `xyz = table[i, -3:]` [S1, unofficial].
+-            *   Calculate the voxel's physical origin and end:
+-                *   $cube_{ori} = xyz \times cube\_size$
+-                *   $cube_{end} = cube_{ori} + cube\_size$
+-            *   Compute ray-AABB intersection with $[cube_{ori}, cube_{end}]$:
+-                *   Use standard ray-AABB intersection formula to get near time $t_n$ and far time $t_f$ [S1, unofficial].
+-                *   *Vectorized Note:* In `ray_mipmap_intersect_vectorized`, this is done for all rays in `cube_touched_idx` simultaneously, masking out non-intersecting rays ($t_n \le t_f$) [S1, unofficial].
+-            *   If intersection exists ($t_n \le t_f$):
+-                *   If $L == max\_level$:
+-                    *   Append `xyz` to `cube_ori_list` [S1, unofficial].
+-                *   Else:
+-                    *   Extract child indices from `table[i, 0:8]` [S1, unofficial].
+-                    *   Filter out invalid children (where index $\ne -1$) using a mask [S1, unofficial].
+-                    *   Convert valid indices to integers and add them to `new_list` [S1, unofficial].
+-        *   Update `cube_touched_idx = new_list` [S1, unofficial].
+-        *   If `cube_touched_idx` is empty, break loop [S1, unofficial].
+-
+-3.  **Return:**
+-    *   Return `cube_ori_list` containing the positions of voxels touched at the maximum level [S1, unofficial].
+-
+-**Alternative C++ HDDA-based Step Logic (from HNanoSolver):**
+-1.  `step(node, t0, t1)`:
+-    *   Set $t_0 = mT_0$.
+-    *   Get `currentNode` from acceleration structure [S2, unofficial].
+-    *   Call `mHdda.step()`. If invalid, continue [S2, unofficial].
+-    *   Calculate `nextIjk` by rounding down the ray position at $mHdda.time() + Delta$ [S2, unofficial].
+-    *   Get `nextDim` for `nextIjk` [S2, unofficial].
+-    *   Update HDDA with `nextDim` [S2, unofficial].
+-    *   Set $mT_0$ based on whether `nextDim` is a leaf level [S2, unofficial].
+-    *   If $t_0 \ge 0$:
+-        *   Set $t_1 = \min(mT_{max}, mHdda.time())$ [S2, unofficial].
+-        *   If $t_0 \ge t_1$ or `currentNode` is null, continue [S2, unofficial].
+-        *   Set `*node = currentNode` and return true [S2, unofficial].
+-    *   If loop ends, return false [S2, unofficial].
+-
+-**Pseudocode (Python-like, Table-based):**
++The method iterates through levels of a grid mipmap, starting at the root (level 0) and recursively visiting child voxels only if the ray intersects the parent voxel's axis-aligned bounding box (AABB) [S1, unofficial]. It uses lookup tables to map parent voxel indices to child voxel indices [S1, unofficial].
++
++### Inputs and Outputs
++*   **Inputs:** Ray origin $\mathbf{o}$, ray direction $\mathbf{d}$, ray near/far bounds $t_{min}, t_{max}$, hierarchical grid data structure (mipmap levels), and lookup tables mapping coarse voxels to fine children.
++*   **Outputs:** List of active voxel indices or positions at the maximum traversal level [S1, unofficial].
++
++### Data Structures
++The core data structure is a lookup table (often called `g_table` or `tables_list`) [S1, unofficial].
++*   **Table Layout:** Each row corresponds to a coarse voxel.
++    *   Columns 0–7: Indices of the 8 child voxels (or -1 if empty/invalid) [S1, unofficial].
++    *   Columns 8–10 (or -3 to -1): The 3D grid coordinates $(x, y, z)$ of the coarse voxel [S1, unofficial].
++*   **K-Table (Active Ray List):** Stores active rays during traversal [S1, unofficial].
++    *   Columns 0–2: Ray origin $\mathbf{r}_{ori}$ [S1, unofficial].
++    *   Columns 3–5: Ray inverse direction $\mathbf{r}_{inv}$ [S1, unofficial].
++    *   Columns 6–8: Current voxel origin $\mathbf{cube}_{ori}$ [S1, unofficial].
++    *   Columns 9–11: Current voxel end $\mathbf{cube}_{end}$ [S1, unofficial].
++    *   Column -2: Ray ID $\mathbf{r}_{id}$ [S1, unofficial].
++    *   Column -1: Voxel ID/Row ID in the grid table [S1, unofficial].
++
++### Parameters
++*   **max_level:** The maximum depth of the mipmap hierarchy. The loop runs from level 0 to `max_level` inclusive [S1, unofficial].
++*   **cube_size:** The physical size of a voxel at the current level, calculated as $256 / 2^{\text{level}}$ (assuming a base grid resolution of 256 units) [S1, unofficial].
++*   **Eps:** A small epsilon for clipping ray bounds, typically $10^{-6}$ [S2, unofficial].
++*   **Delta:** A small offset for determining the next voxel, typically $0.01$ [S2, unofficial].
++
++### Algorithm Steps
++The traversal can be implemented as a level-by-level iteration or a recursive descent. The following pseudocode describes the iterative level-based approach using a K-table for active rays [S1, unofficial].
+ 
+ ```python
+-def hierarchical_grid_traversal(ray_origin, ray_direction, tables_list, max_level):
+-    """
+-    Traverses a hierarchical grid using lookup tables.
++def hierarchical_grid_traversal(ray_origin, ray_direction, ray_t_min, ray_t_max, 
++                                tables_list, max_level, base_size=256):
++    """
++    Traverses a hierarchical grid mipmap.
+     
+     Args:
+-        ray_origin: (3,) array, ray origin O.
+-        ray_direction: (3,) array, ray direction D.
+-        tables_list: List of arrays, where tables_list[L] is the grid table for level L.
+-                     Each row has shape (11,): [child0..child7, x, y, z].
+-        max_level: int, the maximum level index.
++        ray_origin: (3,) array, ray origin.
++        ray_direction: (3,) array, ray direction.
++        ray_t_min: float, near bound.
++        ray_t_max: float, far bound.
++        tables_list: list of arrays, where tables_list[level] is the lookup table for that level.
++        max_level: int, maximum depth of the hierarchy.
++        base_size: float, physical size of the root grid dimension.
+         
+     Returns:
+-        cube_ori_list: List of (3,) arrays, coordinates of voxels at max_level intersected by the ray.
+-    """
+-    # Initialize with root voxel index 0
+-    cube_touched_idx = [0]
++        cube_ori_list: list of (3,) arrays, positions of voxels touched at max_level.
++    """
++    # 1. Initialize K-table with the root voxel (ID 0)
++    # Root voxel covers the entire base_size x base_size x base_size volume
++    root_origin = np.array([0.0, 0.0, 0.0])
++    root_end = np.array([base_size, base_size, base_size])
++    
++    k_table = np.zeros((1, 12)) # 12 columns: 3 ori, 3 inv, 3 cube_ori, 3 cube_end, 1 id, 1 voxel_id
++    k_table[0, 0:3] = ray_origin
++    k_table[0, 3:6] = 1.0 / ray_direction # Inverse direction
++    k_table[0, 6:9] = root_origin
++    k_table[0, 9:12] = root_end
++    k_table[0, -2] = 0 # Ray ID
++    k_table[0, -1] = 0 # Voxel ID (root)
++    
+     cube_ori_list = []
+     
+-    # Precompute inverse direction for ray-AABB intersection
+-    ray_inv_dir = 1.0 / ray_direction
+-    
++    # 2. Iterate through each level
+     for level in range(max_level + 1):
+         table = tables_list[level]
+-        new_list = []
++        new_k_table_rows = []
+         
+-        # Determine voxel size for this level (assuming base resolution 256)
+-        cube_size = 256.0 / (2 ** level)
++        # 3. Process each active ray in the current level's K-table
++        for row_idx in range(len(k_table)):
++            ray_o = k_table[row_idx, 0:3]
++            ray_inv = k_table[row_idx, 3:6]
++            cube_o = k_table[row_idx, 6:9]
++            cube_e = k_table[row_idx, 9:12]
++            voxel_id = int(k_table[row_idx, -1])
++            
++            # 4. Compute AABB intersection for the current voxel
++            # Intersect ray (ray_o, ray_inv) with box [cube_o, cube_e]
++            # Returns tn (near) and tf (far) intersection distances
++            tn, tf = intersect_ray_aabb(ray_o, ray_inv, cube_o, cube_e)
++            
++            # 5. If no intersection, skip this ray for this voxel
++            if tn > tf:
++                continue
++                
++            # 6. If at max level, record the voxel position
++            if level == max_level:
++                # Retrieve voxel coordinates from table
++                voxel_coords = table[voxel_id, -3:] # Columns -3 to -1 are x,y,z
++                # Convert grid coords to physical positions if needed, or store grid coords
++                # Assuming table stores grid indices, we might need to scale or just store indices
++                # Based on S1, cube_ori_list stores positions. 
++                # Let's store the grid coordinates as the identifier for the hit
++                cube_ori_list.append(voxel_coords)
++                continue
++            
++            # 7. If not at max level, find children
++            # Get child indices from table columns 0-7
++            child_indices = table[voxel_id, 0:8]
++            
++            # Filter out invalid children (-1)
++            mask_alive = child_indices != -1
++            alive_child_indices = child_indices[mask_alive]
++            
++            if len(alive_child_indices) == 0:
++                continue
++                
++            # 8. Compute sub-voxel geometry for children
++            voxel_size = base_size / (2 ** level)
++            sub_voxel_size = voxel_size / 2
++            
++            # Offsets for the 8 children relative to parent origin
++            # Order: 000, 001, 010, 100, 011, 110, 101, 111
++            shifts = np.array([
++                [0, 0, 0], [0, 0, 1], [0, 1, 0], [1, 0, 0],
++                [0, 1, 1], [1, 1, 0], [1, 0, 1], [1, 1, 1]
++            ])
++            
++            # Get origins of alive sub-voxels
++            # Note: alive_child_indices are row indices in the NEXT level's table
++            # But we need their physical position. 
++            # The table at the NEXT level stores the grid coordinates of those voxels.
++            # However, S1 suggests computing sub_voxel_ori from voxel_pos + shift * sub_voxel_size
++            # This assumes the current voxel is a cube of size voxel_size.
++            
++            alive_shifts = shifts[mask_alive]
++            sub_voxel_origins = cube_o + alive_shifts * sub_voxel_size
++            sub_voxel_ends = sub_voxel_origins + sub_voxel_size
++            
++            # 9. Create new K-table entries for alive children
++            for i, child_idx in enumerate(alive_child_indices):
++                new_row = np.zeros(12)
++                new_row[0:3] = ray_o
++                new_row[3:6] = ray_inv
++                new_row[6:9] = sub_voxel_origins[i]
++                new_row[9:12] = sub_voxel_ends[i]
++                new_row[-2] = k_table[row_idx, -2] # Copy Ray ID
++                new_row[-1] = child_idx # New Voxel ID
++                new_k_table_rows.append(new_row)
+         
+-        for i in cube_touched_idx:
+-            # Get voxel coordinates from table (columns -3, -2, -1)
+-            xyz = table[i, -3:]
+-            
+-            # Calculate physical bounds
+-            cube_ori = xyz * cube_size
+-            cube_end = cube_ori + cube_size
+-            
+-            # Ray-AABB Intersection
+-            tn, tf = intersect_ray_aabb(ray_origin, ray_inv_dir, cube_ori, cube_end)
+-            
+-            if tn <= tf:
+-                if level == max_level:
+-                    # Reached the finest level, record the voxel
+-                    cube_ori_list.append(xyz)
+-                else:
+-                    # Get child indices (columns 0-7)
+-                    children = table[i, :8]
+-                    
+-                    # Filter valid children (index != -1)
+-                    mask = children != -1
+-                    valid_children = children[mask]
+-                    
+-                    # Add valid children to the next level's list
+-                    new_list.extend(valid_children.tolist())
+-        
+-        cube_touched_idx = new_list
+-        if not cube_touched_idx:
+-            break
++        # 10. Update K-table for next level
++        if len(new_k_table_rows) > 0:
++            k_table = np.vstack(new_k_table_rows)
++        else:
++            break # No active rays left
+             
+     return cube_ori_list
+ 
+-def intersect_ray_aabb(origin, inv_dir, min_corner, max_corner):
+-    """
+-    Standard ray-AABB intersection.
+-    Returns (tn, tf) near and far intersection times.
+-    Returns (inf, -inf) if no intersection.
+-    """
+-    t_min = (min_corner - origin) * inv_dir
+-    t_max = (max_corner - origin) * inv_dir
++def intersect_ray_aabb(ray_o, ray_inv, box_min, box_max):
++    """
++    Standard AABB intersection test.
++    Returns (tn, tf) or (inf, -inf) if no intersection.
++    """
++    t_min = (box_min - ray_o) * ray_inv
++    t_max = (box_max - ray_o) * ray_inv
+     
+     t1 = np.minimum(t_min, t_max)
+@@ -159,14 +167,25 @@
+     tf = np.min(t2)
+     
+-    if tn > tf:
+-        return float('inf'), float('-inf')
+-        
+     return tn, tf
+ ```
+ 
++### Mipmap Table Construction
++The lookup tables are constructed from a fine grid and a coarse grid mask [S1, unofficial].
++1.  Identify occupied voxels in the fine grid and assign unique indices [S1, unofficial].
++2.  Extract the 8 sub-grid regions corresponding to the 8 children of a coarse voxel by striding the fine grid indices (e.g., `grid[0::2, 0::2, 0::2]`) [S1, unofficial].
++3.  Flatten these sub-grids and filter them using the coarse grid mask to select only children belonging to occupied coarse voxels [S1, unofficial].
++4.  Initialize the table with shape `[num_coarse_voxels, 11]` (8 child indices + 3 coordinates), filled with -1 [S1, unofficial].
++5.  Populate columns 0–7 with the filtered child indices and columns 8–10 with the coarse voxel coordinates [S1, unofficial].
++
++### Edge Cases and Pitfalls
++*   **Floating-Point Drift:** Using the formula $\mathbf{o} + t\mathbf{d}$ to switch levels does not guarantee that the ray crosses the plane due to floating-point issues, leading to outliers in depth and normal buffers [S4, unofficial].
++*   **Corner Traversal:** Allowing rays to traverse through corners can cause problems with surface normals [S4, unofficial].
++*   **Delta Sensitivity:** If the `Delta` offset used to determine the next voxel is too large, it clips corners of nodes visibly. If too small, it fails due to FP32 rounding when far from the grid [S2, unofficial].
++*   **Eps Clipping:** Tweaking the intersection span with `Eps` may clip tiny corner intersections [S2, unofficial].
++
+ ## Subtopics
+ 
+ ### [Hierarchical Voxel Traversal](2204-hierarchical-voxel-traversal.md)
+-A recursive raycasting algorithm designed to traverse nested voxel structures, such as chunks containing subvoxels, to find intersections. It distinguishes itself from flat traversal methods by transforming rays into local subvoxel space when entering a detail voxel, allowing for efficient handling of nested voxel data. Unlike [First Active Voxel Detection](4196-first-active-voxel-detection.md) which focuses on finding the first non-empty voxel, this method fully traverses the hierarchy to compute precise intersections within detail voxels.
++Hierarchical Voxel Traversal is a recursive raycasting algorithm designed to traverse nested voxel structures, such as chunks containing subvoxels, to find intersections. It distinguishes itself from flat traversal methods by transforming rays into local subvoxel space when entering a detail voxel, allowing for efficient handling of nested voxel data. Unlike [First Active Voxel Detection](4196-first-active-voxel-detection.md) which focuses on finding the first non-empty voxel, this method fully traverses the hierarchy to compute precise intersections within detail voxels.
+ 
+ ### [XBrickMap](3116-xbrickmap.md)
+@@ -177,38 +196,38 @@
+ 
+ ### [Hierarchical and Block-Based Data Structures](4392-hierarchical-and-block-based-data-structures.md)
+-This family provides acceleration structures for image-order volume rendering by organizing volumetric data into multi-resolution trees or blocks to skip empty or inactive regions during ray traversal. It serves as the foundational acceleration mechanism for sibling methods such as [Ray-marching reference (min-max octree accelerated)](1554-ray-marching-reference-min-max-octree-accelerated.md) and [ExaBricks Rendering with RTX BVH](2577-exabricks-rendering-with-rtx-bvh.md). Unlike flat grid traversal, these structures enable rays to jump over large empty spaces or identify active cells for rendering, significantly reducing computational cost.
++Hierarchical and Block-Based Data Structures organize volume data into spatial subdivisions (blocks, bricks, or octrees) to enable efficient ray traversal, empty space skipping, and multiresolution access. This family differs from flat voxel grids by storing aggregate properties (e.g., occupancy, min/max ranges) in internal nodes, allowing rays to skip inactive subtrees [Parent]. It addresses the trade-off between rasterization overhead, cache efficiency, and memory bandwidth inherent in large-volume rendering.
+ 
+ ### [Octree-based traversal](5348-octree-based-traversal.md)
+-Not given in the sources.
++Octree-based traversal accelerates volume rendering and ray tracing by navigating a hierarchical spatial decomposition (typically an octree) to skip empty space and reduce the number of ray-casting or distance-evaluation steps. It solves the performance bottleneck of non-hierarchical traversal, where every voxel along a ray must be visited, by allowing the ray to leap over large empty regions. Unlike sibling methods that may use fixed-resolution grids or brick maps, this family operates on a recursive tree structure where each parent node divides into eight equal sub-blocks ($2 \times 2 \times 2$ subdivision), enabling larger steps through empty space.
+ 
+ ### [Empty Space Skipping via Data Structures](5619-empty-space-skipping-via-data-structures.md)
+-Empty space skipping accelerates volume rendering by identifying and bypassing regions of the volume that do not contribute to the final image, thereby reducing the number of sample evaluations and shading calculations. It differs from its siblings by focusing on the identification of "active" or "significant" volume data using various data structures (bounding geometry, 2D slices, BVHs, or HistoPyramids) to define ray entry and exit bounds, whereas [Hierarchical Grid Traversal](6306-hierarchical-grid-traversal.md) focuses on the traversal logic of the grid itself. It sets itself apart from [Adaptive Multi-Step Empty Voxel Skipping](6289-adaptive-multi-step-empty-voxel-skipping.md) by typically using pre-computed or coarse structural bounds rather than adaptive step sizes based on local density gradients.
++Empty Space Skipping via Data Structures accelerates volume rendering by using secondary data structures to identify inactive regions, allowing rays to skip sampling points in empty space. It differs from [Space Leaping](5863-space-leaping.md) by relying on explicit spatial metadata rather than image-plane coherence, and from [Distance Map Acceleration](972-distance-map-acceleration.md) by using binary or bounded occupancy flags rather than distance-to-nearest-occupied-voxel metrics. It sets itself apart from sibling methods like [Hierarchical Voxel Traversal](2204-hierarchical-voxel-traversal.md) by focusing specifically on the *culling* of inactive regions via metadata queries, whereas hierarchical traversal focuses on the *navigation* of the grid hierarchy itself.
+ 
+ ### [Multi-level Grid Structures](6354-multi-level-grid-structures.md)
+-Not given in the sources.
+-
+-#### KD-Tree Partitioned Volume Rendering
+-A method to avoid computing all scalar values regardless of visibility by partitioning the volume into smaller sub-volumes with similar properties based on the transfer function [S3, unofficial]. The opacity map corresponds to a region of the frame buffer and stores the minimum opacity of the frame buffer pixels found within that region [S3, unofficial]. It groups scalar values within a certain range together based on the transfer function to define sub-volume properties, uses a kd-tree to render the partitioned volume with correct visibility order (where each node is associated with a sub-volume), and culls/clips each sub-volume against an opacity map [S3, unofficial]. Reported performance: 10 fps for the Engine data set using a 2.5 GHz Pentium-IV and a nVidia GeForce4 graphics adapter [S3, unofficial].
+-
+-#### Mipmap Table Construction
+-Constructs a lookup table for hierarchical grid traversal. It maps coarse grid voxels to their fine grid children. The table is built from a fine grid and a coarse grid mask [S1, unofficial]. It identifies occupied voxels in the fine grid, assigns unique indices, extracts the 8 sub-grid regions corresponding to the 8 children of a coarse voxel (via striding), flattens and filters them using the coarse grid mask, initializes the table with shape `[num_coarse_voxels, 11]` (8 child indices + 3 coordinates) filled with -1, populates columns 0-7 with filtered child indices, and columns 8-10 with coarse voxel coordinates [S1, unofficial].
+-
+-#### K-Table Initialization and Propagation
+-Manages a list of active rays ('k-table') during traversal. It stores ray properties and the current voxel they are in, propagating to child voxels [S1, unofficial]. It initializes `k_table` with ray origins, inverse directions, ray IDs, and the root voxel's origin/end. In `next_k_table`, for each row, it gets the current voxel ID and position, calculates voxel/sub-voxel sizes, identifies alive sub-voxels (children) from the grid table, computes their origins, creates new `k_table` rows for each alive sub-voxel, and concatenates them into a single `k_table` for the next level [S1, unofficial].
+-
+-#### Teardown Hierarchical Traversal
+-A hierarchical traversal method that uses DDA within a level and switches levels by rescaling the grid so the new level becomes a level 0 grid, restarting the DDA algorithm [S4, unofficial]. It calculates the ray position in the grid at any level using the formula: $pos = \lfloor (O + t \cdot D) / 2^{level} \rfloor$ [S4, unofficial]. Pitfalls include: using the formula $O + tD$ to switch levels does not guarantee that the ray crosses the plane due to floating-point issues, leading to outliers in depth and normal buffers; and the method allows rays to traverse through corners, which can cause problems with surface normals [S4, unofficial].
++Multi-level Grid Structures are a family of hierarchical acceleration techniques for ray-grid traversal that organize scene data into a hierarchy of grid levels (mipmaps) to skip empty space and reduce intersection tests. They differ from uniform grids by adapting resolution to local density and from pure tree structures (like Octrees) by maintaining a grid-based indexing scheme at each level, which simplifies traversal logic on GPUs. This family builds on [Hierarchical Grid Traversal](2560-hierarchical-grid-traversal.md) by providing specific implementations for constructing and traversing these hierarchical grids.
++
++### KD-Tree Partitioned Volume Rendering
++KD-Tree Partitioned Volume Rendering avoids computing all scalar values regardless of visibility by partitioning the volume into smaller sub-volumes with similar properties based on the transfer function [S3, unofficial]. The opacity map corresponds to a region of the frame buffer and stores the minimum opacity of the frame buffer pixels found within that region [S3, unofficial]. Scalar values within a certain range are grouped together to define sub-volume properties, and a kd-tree is used to render the partitioned volume with correct visibility order, where each node is associated with a sub-volume. Each sub-volume is culled and clipped against an opacity map [S3, unofficial]. Reported performance was 10 fps for the Engine data set using a 2.5 GHz Pentium-IV and a nVidia GeForce4 graphics adapter [S3, unofficial].
++
++### Mipmap Table Construction
++Mipmap Table Construction is the process of building the lookup tables used in hierarchical grid traversal. It maps coarse grid voxels to their fine grid children. The table is built from a fine grid and a coarse grid mask [S1, unofficial]. Occupied voxels in the fine grid are indexed, and the 8 sub-grid regions corresponding to the 8 children of a coarse voxel are extracted by striding. These are filtered using the coarse grid mask and populated into the table alongside the coarse voxel coordinates [S1, unofficial].
++
++### K-Table Initialization and Propagation
++K-Table Initialization and Propagation manages a list of active rays ('k-table') during traversal. It stores ray properties and the current voxel they are in, propagating to child voxels [S1, unofficial]. The K-table is initialized with ray origins, inverse directions, ray IDs, and the root voxel's origin/end. In each step, for each row in the K-table, the current voxel ID is used to find alive sub-voxels (children) from the grid table. New K-table rows are created for each alive sub-voxel, copying ray properties and updating the voxel origin/end and ID [S1, unofficial].
++
++### Teardown Hierarchical Traversal
++Teardown Hierarchical Traversal is a hierarchical traversal method that uses DDA within a level and switches levels by rescaling the grid so the new level becomes a level 0 grid, restarting the DDA algorithm [S4, unofficial]. The ray position in the grid at any level is calculated using the formula: $pos = \lfloor (O + t \cdot D) / 2^{level} \rfloor$ [S4, unofficial]. A pitfall of this method is that using the formula $O + tD$ to switch levels does not guarantee that the ray crosses the plane due to floating-point issues, leading to outliers in depth and normal buffers [S4, unofficial]. Additionally, the method allows rays to traverse through corners, which can cause problems with surface normals [S4, unofficial].
+ 
+ ## Operating characteristics
+-**Time Complexity:** Depends on the sparsity of the volume and the depth of the hierarchy. In the worst case (fully dense volume), it visits all voxels at the finest level, similar to flat traversal, but with overhead for hierarchy management. In sparse volumes, it skips large empty regions at coarse levels, offering significant speedups.
+-**Memory Complexity:** Requires storage for the hierarchical grid data and the lookup tables. The lookup tables add memory overhead proportional to the number of voxels at each level.
+-**Measured Performance:** Specific performance metrics for the general method are not given in the sources. However, a related method, KD-Tree Partitioned Volume Rendering, reported 10 fps for the Engine data set on a 2.5 GHz Pentium-IV and nVidia GeForce4 [S3, unofficial].
+-**Strengths:** Efficiently skips empty space in sparse volumes; leverages pre-computed lookup tables for fast child index retrieval; suitable for GPU implementation via vectorized operations [S1, unofficial].
+-**Limitations:** Requires pre-computation of lookup tables; floating-point precision issues can cause outliers in depth/normal buffers when switching levels (e.g., Teardown method) [S4, unofficial]; corner traversal can lead to incorrect surface normals [S4, unofficial].
+-**When to use:** Sparse hierarchical volume data where empty space skipping is beneficial.
+-**When not to use:** Dense volumes where the overhead of hierarchy traversal outweighs the benefits; when high precision at level boundaries is critical and floating-point errors are unacceptable.
++*   **Time Complexity:** $O(N)$ where $N$ is the number of active voxels visited. The hierarchical structure reduces the number of visited voxels compared to flat traversal, especially in sparse volumes.
++*   **Memory Complexity:** $O(M)$ where $M$ is the size of the lookup tables and mipmap levels. The tables store child indices and coordinates for all voxels.
++*   **Performance:** Depends heavily on the sparsity of the volume and the efficiency of the lookup table construction. [S3, unofficial] reports 10 fps for a specific dataset on older hardware.
++*   **Strengths:** Efficiently skips empty space; reduces intersection tests; suitable for sparse volumes.
++*   **Limitations:** Requires pre-computation of lookup tables; floating-point precision issues at level boundaries; corner traversal artifacts.
++*   **When to use:** Sparse volumes with significant empty space; when memory bandwidth is a bottleneck.
++*   **When not to use:** Dense volumes where most voxels are active; when pre-computation time is prohibitive.
+ 
+ ## Background
+-Hierarchical Grid Traversal is a technique used in image-order volume rendering to accelerate ray traversal through multi-resolution grid structures. It builds on the concept of ray-grid traversal [17-ray-grid-traversal.md] and utilizes lookup tables to map parent voxels to children, enabling efficient skipping of empty regions. The method is implemented in various forms, such as the table-based approach in `Jax-Volumetric-Renderer` [S1, unofficial] and the HDDA-based `TreeMarcher` in `HNanoSolver` [S2, unofficial]. The Teardown game engine also employs a variant of this method, using DDA within levels and rescaling for level transitions [S4, unofficial].
++Hierarchical Grid Traversal originates from the need to accelerate volume rendering in large, sparse datasets. It builds on the principles of ray-grid traversal [17-ray-grid-traversal.md] and multi-level grid structures [6354-multi-level-grid-structures.md]. The method has been implemented in various contexts, including the game Teardown, which uses a rescaling approach to switch between DDA levels [S4, unofficial]. The technique is also known as Ray-Mipmap Traversal and is implemented in libraries like Jax-Volumetric-Renderer [S1, unofficial] and HNanoSolver [S2, unofficial].
+ 
+ ## Sources

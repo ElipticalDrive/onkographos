@@ -1,0 +1,2436 @@
+# What is FileToVox ? 
+
+FileToVox is a console program which allow you to convert a file into a vox file (Magicavoxel).
+
+Current files support: 
+- .asc (Esri ASCII raster format)
+- .binvox
+- .fbx
+- .csv
+- .json (House-made format)
+- .obj
+- .ply (Binary and ASCII)
+- .png
+- .schematic
+- .tif
+- .qb (Qubicle)
+- .xyz (X Y Z R G B)
+- folder (of .PNG)
+
+FileToVox can import a folder of images (.PNG) where each image is a layer. (Useful for import fractals from Mandelbulb3D) 
+
+It support world region, so you can convert a terrain bigger than 126^3 voxels ! 
+
+# MeshToVox
+
+MeshToVox is an external program from FileToVox that allow you to voxelize 3D objects files. 
+
+Features:
+
+- Load OBJ, FBX, GTLF, STL files
+- Support textures and materials
+- Export directly into .vox
+
+More informations [here](https://github.com/Zarbuz/FileToVox/wiki/7.-MeshToVox)
+
+# Wiki
+
+Please read the documentation of FileToVox [here](https://github.com/Zarbuz/FileToVox/wiki/1.-Introduction)
+
+## Video Tutorials
+
+- https://www.youtube.com/watch?v=sg3z2GaMJzM
+- https://www.youtube.com/watch?v=fSo1iV1DE2U
+
+## Renders
+![](img/render.png)
+
+![](img/EKGGrQaX0AAxg56.jfif)
+
+![](img/EM3eWX2WoAABN5C.jfif)
+
+![](img/EM9l60HW4AAa2ik.jfif)
+
+### SchematicToVoxCore/Program.cs
+```
+﻿using FileToVox.Converter;
+using FileToVox.Converter.Image;
+using FileToVox.Converter.PaletteSchematic;
+using FileToVox.Converter.PointCloud;
+using FileToVoxCore.Schematics;
+using FileToVoxCore.Vox;
+using NDesk.Options;
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Reflection;
+
+namespace FileToVox
+{
+	class Program
+	{
+		private static string INPUT_PATH;
+		private static string OUTPUT_PATH;
+		private static string INPUT_COLOR_FILE;
+		private static string INPUT_PALETTE_FILE;
+
+		private static bool SHOW_HELP;
+		private static bool EXCAVATE;
+		private static bool COLOR;
+		private static bool DISABLE_QUANTIZATION;
+
+		private static float GRID_SIZE = 10;
+		private static int HEIGHT_MAP = 1;
+		private static int COLOR_LIMIT = 256;
+
+		public static void Main(string[] args)
+		{
+			OptionSet options = new OptionSet()
+			{
+				{"i|input=", "input path", v => INPUT_PATH = v},
+				{"o|output=", "output path", v => OUTPUT_PATH = v},
+				{"c|color", "enable color when generating heightmap", v => COLOR = v != null},
+				{"cm|color-from-file=", "load colors from file", v => INPUT_COLOR_FILE = v },
+				{"cl|color-limit=", "set the maximal number of colors for the palette", (int v) => COLOR_LIMIT =v },
+				{"cs|chunk-size=", "set the chunk size", (int v) => Schematic.CHUNK_SIZE = v},
+				{"e|excavate", "delete all voxels which doesn't have at least one face connected with air",  v => EXCAVATE = v != null },
+				{"h|help", "help informations", v => SHOW_HELP = v != null},
+				{"hm|heightmap=", "create voxels terrain from heightmap (only for PNG file)", (int v) => HEIGHT_MAP = v},
+				{"p|palette=", "set the palette", v => INPUT_PALETTE_FILE = v },
+				{"gs|grid-size=", "set the grid-size", (float v) => GRID_SIZE = v},
+				{"d|debug", "enable the debug mode", v => Schematic.DEBUG = v != null},
+				{"dq|disable-quantization", "Disable the quantization step ", v => DISABLE_QUANTIZATION= v != null},
+			};
+
+			try
+			{
+				List<string> extra = options.Parse(args);
+				DisplayInformations();
+				CheckHelp(options);
+				CheckArguments();
+				DisplayArguments();
+
+				bool success = false;
+				if (INPUT_PATH != null)
+				{
+					success = ProcessFile();
+				}
+
+				if (success)
+				{
+					CheckDebug();
+				}
+
+				Console.WriteLine("[INFO] Done.");
+				if (Schematic.DEBUG)
+				{
+					Console.ReadKey();
+				}
+			}
+			catch (Exception e)
+			{
+				Console.Write("FileToVox: ");
+				Console.WriteLine(e.Message);
+				Console.WriteLine("Try `FileToVox --help` for more informations.");
+				Console.ReadLine();
+			}
+		}
+
+		private static void DisplayInformations()
+		{
+			Console.WriteLine("[INFO] FileToVox v" + Assembly.GetExecutingAssembly().GetName().Version);
+			Console.WriteLine("[INFO] Author: @Zarbuz. Contact : https://twitter.com/Zarbuz");
+		}
+
+		private static void CheckHelp(OptionSet options)
+		{
+			if (SHOW_HELP)
+			{
+				ShowHelp(options);
+				Environment.Exit(0);
+			}
+		}
+
+		private static void CheckArguments()
+		{
+			if (INPUT_PATH == null)
+				throw new ArgumentNullException("[ERROR] Missing required option: --i");
+			if (OUTPUT_PATH == null)
+				throw new ArgumentNullException("[ERROR] Missing required option: --o");
+			if (GRID_SIZE < 10 || GRID_SIZE > Schematic.MAX_WORLD_LENGTH)
+				throw new ArgumentException("[ERROR] --grid-size argument must be greater than 10 and smaller than " + Schematic.MAX_WORLD_LENGTH);
+			if (HEIGHT_MAP < 1)
+				throw new ArgumentException("[ERROR] --heightmap argument must be positive");
+			if (COLOR_LIMIT < 0 || COLOR_LIMIT > 256)
+				throw new ArgumentException("[ERROR] --color-limit argument must be between 1 and 256");
+			if (Schematic.CHUNK_SIZE <= 10 || Schematic.CHUNK_SIZE > 256)
+				throw new ArgumentException("[ERROR] --chunk-size argument must be between 10 and 256");
+		}
+
+		private static void DisplayArguments()
+		{
+			if (INPUT_PATH != null)
+				Console.WriteLine("[INFO] Specified input path: " + INPUT_PATH);
+			if (OUTPUT_PATH != null)
+				Console.WriteLine("[INFO] Specified output path: " + OUTPUT_PATH);
+			if (INPUT_COLOR_FILE != null)
+				Console.WriteLine("[INFO] Specified input color file: " + INPUT_COLOR_FILE);
+			if (INPUT_PALETTE_FILE != null)
+				Console.WriteLine("[INFO] Specified palette file: " + INPUT_PALETTE_FILE);
+			if (COLOR_LIMIT != 256)
+				Console.WriteLine("[INFO] Specified color limit: " + COLOR_LIMIT);
+			if (GRID_SIZE != 10)
+				Console.WriteLine("[INFO] Specified grid size: " + GRID_SIZE);
+			if (Schematic.CHUNK_SIZE != 128)
+				Console.WriteLine("[INFO] Specified chunk size: " + Schematic.CHUNK_SIZE);
+			if (EXCAVATE)
+				Console.WriteLine("[INFO] Enabled option: excavate");
+			if (COLOR)
+				Console.WriteLine("[INFO] Enabled option: color");
+			if (HEIGHT_MAP != 1)
+				Console.WriteLine("[INFO] Enabled option: heightmap (value=" + HEIGHT_MAP + ")");
+			if (Schematic.DEBUG)
+				Console.WriteLine("[INFO] Enabled option: debug");
+			if (DISABLE_QUANTIZATION)
+				Console.WriteLine("[INFO] Enabled option: disable-quantization");
+
+			Console.WriteLine("[INFO] Specified output path: " + Path.GetFullPath(OUTPUT_PATH));
+		}
+
+		private static bool ProcessFile()
+		{
+			string path = Path.GetFullPath(INPUT_PATH);
+			bool isFolder = Directory.Exists(path);
+
+			try
+			{
+				AbstractToSchematic converter;
+				string[] files = INPUT_PATH.Split(";");
+				if (isFolder)
+				{
+					List<string> images = Directory.GetFiles(path, "*.*", SearchOption.AllDirectories).Where(s => s.EndsWith(".png") && !string.IsNullOrEmpty(s)).ToList();
+					converter = new MultipleImageToSchematic(images, EXCAVATE, INPUT_COLOR_FILE, COLOR_LIMIT);
+					return SchematicToVox(converter);
+				}
+				if (files.Length > 1)
+				{
+					converter = new MultipleImageToSchematic(files.Where(s => s.EndsWith(".png") && !string.IsNullOrEmpty(s)).ToList(), EXCAVATE, INPUT_COLOR_FILE, COLOR_LIMIT);
+					return SchematicToVox(converter);
+				}
+
+				if (!File.Exists(path))
+				{
+					throw new FileNotFoundException("[ERROR] File not found at: " + path);
+				}
+
+				converter = GetConverter(path);
+				if (converter != null)
+				{
+					return SchematicToVox(converter);
+				}
+
+				Console.WriteLine("[ERROR] Unsupported file extension !");
+			}
+			catch (Exception e)
+			{
+				Console.WriteLine(e);
+				Console.ReadLine();
+				return false;
+
+			}
+
+			return true;
+		}
+
+		private static AbstractToSchematic GetConverter(string path)
+		{
+			switch (Path.GetExtension(path))
+			{
+				case ".asc":
+					return new ASCToSchematic(path);
+				case ".binvox":
+					return new BinvoxToSchematic(path);
+				case ".csv":
+					return new CSVToSchematic(path, GRID_SIZE, COLOR_LIMIT);
+				case ".ply":
+					return new PLYToSchematic(path, GRID_SIZE, COLOR_LIMIT);
+				case ".png":
+				case ".tif":
+					return new ImageToSchematic(path, INPUT_COLOR_FILE, HEIGHT_MAP, EXCAVATE, COLOR, COLOR_LIMIT);
+				case ".qb":
+					return new QBToSchematic(path);
+				case ".schematic":
+					return new SchematicToSchematic(path, EXCAVATE);
+				case ".xyz":
+					return new XYZToSchematic(path, GRID_SIZE, COLOR_LIMIT);
+				case ".vox":
+					return new VoxToSchematic(path);
+				case ".obj":
+				case ".fbx":
+					throw new Exception("[FAILED] Voxelization of 3D models is no longer done in FileToVox but with MeshToVox. Check the url : https://github.com/Zarbuz/FileToVox/releases for download link");
+				default:
+					return null;
+			}
+		}
+
+		private static bool SchematicToVox(AbstractToSchematic converter)
+		{
+			Schematic schematic = converter.WriteSchematic();
+			Console.WriteLine($"[INFO] Vox Width: {schematic.Width}");
+			Console.WriteLine($"[INFO] Vox Length: {schematic.Length}");
+			Console.WriteLine($"[INFO] Vox Height: {schematic.Height}");
+
+			if (schematic.Width > Schematic.MAX_WORLD_WIDTH || schematic.Length > Schematic.MAX_WORLD_LENGTH || schematic.Height > Schematic.MAX_WORLD_HEIGHT)
+			{
+				Console.WriteLine("[ERROR] Model is too big ! MagicaVoxel can't support model bigger than 2000x2000x1000");
+				return false;
+			}
+
+			VoxWriter writer = new VoxWriter();
+
+			if (INPUT_PALETTE_FILE != null)
+			{
+				PaletteSchematicConverter converterPalette = new PaletteSchematicConverter(INPUT_PALETTE_FILE);
+				schematic = converterPalette.ConvertSchematic(schematic);
+				return writer.WriteModel(FormatOutputDestination(OUTPUT_PATH), converterPalette.GetPalette(), schematic);
+			}
+
+			return writer.WriteModel(FormatOutputDestination(OUTPUT_PATH), null, schematic);
+		}
+
+		private static string FormatOutputDestination(string outputPath)
+		{
+			outputPath = outputPath.Replace(".vox", "");
+			outputPath += ".vox";
+			return outputPath;
+		}
+
+		private static void ShowHelp(OptionSet p)
+		{
+			Console.WriteLine("Usage: FileToVox --i INPUT --o OUTPUT");
+			Console.WriteLine("Options: ");
+			p.WriteOptionDescriptions(Console.Out);
+		}
+
+		private static void CheckDebug()
+		{
+			if (Schematic.DEBUG)
+			{
+				VoxReader reader = new VoxReader();
+				reader.LoadModel(FormatOutputDestination(OUTPUT_PATH));
+			}
+		}
+
+		public static bool DisableQuantization()
+		{
+			return DISABLE_QUANTIZATION;
+		}
+	}
+}
+```
+
+### SchematicToVoxCore/Converter/ASCToSchematic.cs
+```
+﻿using System;
+using System.Drawing;
+using System.Globalization;
+using System.IO;
+using System.Linq;
+using FileToVox.Extensions;
+using FileToVoxCore.Schematics;
+
+namespace FileToVox.Converter
+{
+    public class ASCToSchematic : AbstractToSchematic
+    {
+        public ASCToSchematic(string path) : base(path)
+        {
+
+        }
+        public override Schematic WriteSchematic()
+        {
+            return WriteSchematicFromASC();
+        }
+
+        private Schematic WriteSchematicFromASC()
+        {
+            int nCols = 0;
+            int nRows = 0;
+            int cellSize = 0;
+            int xllcorner = 0;
+            int yllcorner = 0;
+            int nodata = -9999;
+            float[,] points = new float[0,0]; //rows, cols
+
+            using (StreamReader file = new StreamReader(PathFile))
+            {
+                string line;
+                int row = 0;
+                while ((line = file.ReadLine()) != null)
+                {
+                    string[] data = line.Split(" ").Where(d => !string.IsNullOrEmpty(d)).ToArray();
+                    switch (data[0])
+                    {
+                        case "ncols":
+                            nCols = Convert.ToInt32(data[1]);
+                            points = new float[nRows, nCols];
+                            break;
+                        case "nrows":
+                            nRows = Convert.ToInt32(data[1]);
+                            points = new float[nRows, nCols];
+                            break;
+                        case "xllcorner":
+                            xllcorner = Convert.ToInt32(data[1]);
+                            break;
+                        case "yllcorner":
+                            yllcorner = Convert.ToInt32(data[1]);
+                            break;
+                        case "cellsize":
+                            cellSize = Convert.ToInt32(data[1]);
+                            break;
+                        case "NODATA_value":
+                            nodata = Convert.ToInt32(data[1]);
+                            break;
+                        default:
+                            ProcessLine(data, row++, ref points);
+                            break;
+                    }
+                }
+            }
+
+            Schematic schematic = new Schematic();
+
+            for (int i = 0; i < points.GetLength(0); i++)
+            {
+                for (int j = 0; j < points.GetLength(1); j++)
+                {
+                    if (points[i, j] != nodata)
+                    {
+                        schematic.AddVoxel(i, (int)points[i,j], j, Color.White.ToFileToVoxCoreColor());
+                    }
+                }
+            }
+
+            return schematic;
+        }
+
+        private void ProcessLine(string[] data, int row, ref float[,] points)
+        {
+            for (int i = 0; i < data.Length; i++)
+            {
+                points[row, i] = float.Parse(data[i], CultureInfo.InvariantCulture.NumberFormat);
+            }
+
+        }
+    }
+}
+```
+
+### SchematicToVoxCore/Converter/AbstractToSchematic.cs
+```
+﻿using FileToVoxCore.Schematics;
+
+namespace FileToVox.Converter
+{
+	public abstract class AbstractToSchematic
+    {
+        protected string PathFile;
+
+        protected AbstractToSchematic(string path)
+        {
+            PathFile = path;
+        }
+
+        protected AbstractToSchematic()
+        {
+
+        }
+
+        public abstract Schematic WriteSchematic();
+
+    }
+}
+```
+
+### SchematicToVoxCore/Converter/BinvoxToSchematic.cs
+```
+﻿using System.Collections.Generic;
+using System.Diagnostics;
+using System.Drawing;
+using System.Globalization;
+using System.IO;
+using System.Text;
+using FileToVox.Extensions;
+using FileToVoxCore.Schematics;
+using FileToVoxCore.Schematics.Tools;
+
+namespace FileToVox.Converter
+{
+	public class BinvoxToSchematic : AbstractToSchematic
+    {
+        private bool mHeaderRead;
+        private bool mVoxelsRead;
+        private Vector3 mDimensions;
+        private Vector3 mTranslate;
+        private double mScale;
+        private byte[] mVoxels;
+
+        public BinvoxToSchematic(string path) : base(path)
+        {
+        }
+
+        public override Schematic WriteSchematic()
+        {
+            mVoxels = null;
+            mHeaderRead = false;
+            mVoxelsRead = false;
+            return WriteSchematicFromBinvox();
+        }
+
+        private Schematic WriteSchematicFromBinvox()
+        {
+            using (LineReader lineReader = new LineReader(File.Open(PathFile, FileMode.Open), Encoding.UTF8))
+            {
+                ReadHeader(lineReader);
+                ReadVoxels(lineReader);
+                Schematic schematic = new Schematic();
+
+                int xmult = (int)(mDimensions.Z * mDimensions.Y);
+                int zmult = (int) (mDimensions.Z);
+
+                for (int Y = 0; Y < mDimensions.Y; Y++)
+                {
+                    for (int Z = 0; Z < mDimensions.Z; Z++)
+                    {
+                        for (int X = 0; X < mDimensions.X; X++)
+                        {
+                            int index = X * xmult + Z * zmult + Y;
+                            if (mVoxels[index] == 1)
+                            {
+                                schematic.AddVoxel(X, Y, Z, Color.Wheat.ToFileToVoxCoreColor());
+                            }
+                        }
+                    }
+                }
+
+                return schematic;
+            }
+        }
+
+
+
+        private void ReadHeader(LineReader lineReader)
+        {
+            if (!mHeaderRead)
+            {
+                bool done = false;
+                while (!done)
+                {
+                    string line = lineReader.ReadLine();
+                    if (line.StartsWith("data"))
+                    {
+                        done = true;
+                        mHeaderRead = true;
+                    }
+                    else if (line.StartsWith("dim"))
+                    {
+                        string[] dimensions = line.Split(' ');
+                        mDimensions = new Vector3(int.Parse(dimensions[1]), int.Parse(dimensions[2]), int.Parse(dimensions[3]));
+                        mVoxels = new byte[(int)(mDimensions.X * mDimensions.Y * mDimensions.Z)];
+                    }
+                    else if (line.StartsWith("translate"))
+                    {
+                        string[] translations = line.Split(' ');
+                        mTranslate = new Vector3(float.Parse(translations[1], CultureInfo.InvariantCulture), float.Parse(translations[2], CultureInfo.InvariantCulture), float.Parse(translations[3], CultureInfo.InvariantCulture));
+                    }
+                    else if (line.StartsWith("scale"))
+                    {
+                        string[] scales = line.Split(' ');
+                        mScale = float.Parse(scales[1], CultureInfo.InvariantCulture);
+                    }
+                }
+            }
+        }
+
+        private void ReadVoxels(LineReader lineReader)
+        {
+            if (!mVoxelsRead)
+            {
+                int size = (int)(mDimensions.X * mDimensions.Y * mDimensions.Z);
+                byte value;
+                int count;
+                int index = 0;
+                int end_index = 0;
+
+                while (end_index < size)
+                {
+                    value = lineReader.ReadByte();
+                    count = (int)lineReader.ReadByte();
+                    end_index = index + count;
+                    for (int i = index; i < end_index; i++)
+                    {
+                        mVoxels[i] = value;
+                    }
+
+                    index = end_index;
+                }
+
+
+                mVoxelsRead = true;
+            }
+        }
+    }
+
+    public class LineReader : BinaryReader
+    {
+        private const int BufferSize = 1024;
+        private readonly char[] _lineBuffer = new char[BufferSize];
+        private readonly bool _clrf;
+
+        public LineReader(Stream stream, Encoding encoding, bool clrf = false)
+            : base(stream, encoding)
+        {
+            _clrf = clrf;
+        }
+
+        public string ReadLine()
+        {
+            int pos = 0;
+
+            char[] buf = new char[2];
+
+            StringBuilder stringBuffer = null;
+            bool lineEndFound = false;
+
+            while (base.Read(buf, 0, 1) > 0)
+            {
+                switch (buf[0])
+                {
+                    case '\r':
+                        {
+                            // grab buf[0]
+                            _lineBuffer[pos++] = buf[0];
+                            if (_clrf)
+                            {// get the '\n'
+                                char ch = base.ReadChar();
+                                Debug.Assert(ch == '\n');
+                            }
+                            lineEndFound = true;
+                            break;
+                        }
+                    case '\n':
+                        lineEndFound = true;
+                        break;
+                    default:
+                        {
+                            _lineBuffer[pos] = buf[0];
+                            pos += 1;
+
+                            if (pos >= BufferSize)
+                            {
+                                stringBuffer = new StringBuilder(BufferSize + 80);
+                                stringBuffer.Append(_lineBuffer, 0, BufferSize);
+                                pos = 0;
+                            }
+
+                            break;
+                        }
+                }
+
+                if (lineEndFound)
+                {
+                    switch (stringBuffer)
+                    {
+                        case null when pos > 0:
+                            return new string(_lineBuffer, 0, pos);
+                        case null:
+                            return string.Empty;
+                        default:
+                            {
+                                if (pos > 0)
+                                {
+                                    stringBuffer.Append(_lineBuffer, 0, pos);
+                                }
+
+                                return stringBuffer.ToString();
+                            }
+                    }
+                }
+            }
+
+            if (stringBuffer != null)
+            {
+                if (pos > 0)
+                {
+                    stringBuffer.Append(_lineBuffer, 0, pos);
+                }
+
+                return stringBuffer.ToString();
+            }
+
+            return pos > 0 ? new string(_lineBuffer, 0, pos) : null;
+        }
+
+    }
+}
+```
+
+### SchematicToVoxCore/Converter/QbToSchematic.cs
+```
+﻿using FileToVox.Extensions;
+using FileToVoxCore.Extensions;
+using FileToVoxCore.Schematics;
+using FileToVoxCore.Utils;
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Text;
+using Color = FileToVoxCore.Drawing.Color;
+using FctExtensions = FileToVox.Extensions.FctExtensions;
+
+namespace FileToVox.Converter
+{
+	public class QBToSchematic : AbstractToSchematic
+    {
+        private const int CODE_FLAG = 2;
+        private const int NEXT_SLICE_FLAG = 6;
+
+        public QBToSchematic(string path) : base(path)
+        {
+
+        }
+
+        public override Schematic WriteSchematic()
+        {
+            List<VoxelDTO> voxels = LoadVoxels();
+            return Convert(voxels);
+        }
+
+        private List<VoxelDTO> LoadVoxels()
+        {
+            List<VoxelDTO> voxels = new List<VoxelDTO>();
+            using (FileStream fs = File.OpenRead(PathFile))
+            {
+                BinaryReader reader = new BinaryReader(fs);
+                uint version = reader.ReadUInt32();
+                uint colorFormat = reader.ReadUInt32();
+                uint zAxisOrientation = reader.ReadUInt32();
+                uint compressed = reader.ReadUInt32();
+                uint visibilityMaskEncoded = reader.ReadUInt32();
+                uint numMatrices = reader.ReadUInt32();
+
+                for (int i = 0; i < numMatrices; i++)
+                {
+                    //Read matrix name
+                    byte nameLength = reader.ReadByte();
+                    string name = Encoding.UTF8.GetString(reader.ReadBytes(nameLength));
+
+                    //Read matrix size
+                    uint sizeX = reader.ReadUInt32();
+                    uint sizeY = reader.ReadUInt32();
+                    uint sizeZ = reader.ReadUInt32();
+
+                    //Read matrix position
+                    int posX = reader.ReadInt32();
+                    int posY = reader.ReadInt32();
+                    int posZ = reader.ReadInt32();
+
+                    //uint[] matrix = new uint[sizeX * sizeY * sizeZ];
+                    //matrixList.Add(matrix);
+
+                    if (compressed == 0)
+                    {
+                        for (uint z = 0; z < sizeZ; z++)
+                        {
+                            for (uint y = 0; y < sizeY; y++)
+                            {
+                                for (uint x = 0; x < sizeX; x++)
+                                {
+                                    FileToVoxCore.Drawing.Color data = reader.ReadUInt32().UIntToColor();
+                                    if (data.A != 0)
+                                    {
+                                        voxels.Add(new VoxelDTO(
+                                            (int) (zAxisOrientation == 1 ? (z + posZ) : (x + posX)),
+                                            (int) y + posY,
+                                            (int) (zAxisOrientation == 1 ? (x + posX) : (z + posZ)),
+                                            colorFormat == 0 ? data.B : data.R,
+                                            data.G,
+                                            colorFormat == 0 ? data.R : data.B,
+                                            data.A));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    else
+                    {
+                        int z = 0;
+                        while (z < sizeZ)
+                        {
+                            int index = -1;
+                            while (true)
+                            {
+                                uint data = reader.ReadUInt32();
+                                if (data == NEXT_SLICE_FLAG)
+                                {
+                                    break;
+                                }
+                                else if (data == CODE_FLAG)
+                                {
+                                    uint count = reader.ReadUInt32();
+                                    data = reader.ReadUInt32();
+
+                                    for (int j = 0; j < count; j++)
+                                    {
+                                        long x = ((index + 1) % sizeX);
+                                        long y = ~~((index + 1) / sizeX);
+                                        index++;
+                                        Color color = data.UIntToColor();
+                                        if (color.A != 0)
+                                        {
+                                            voxels.Add(new VoxelDTO(
+                                                (int)(zAxisOrientation == 1 ? (z + posZ) : (x + posX)),
+                                                (int)y,
+                                                (int)(zAxisOrientation == 1 ? (x + posX) : (z + posZ)),
+                                                colorFormat == 0 ? color.B : color.R,
+                                                color.G,
+                                                colorFormat == 0 ? color.R : color.B,
+                                                color.A));
+                                        }
+                                    }
+                                }
+                                else
+                                {
+                                    long x = ((index + 1) % sizeX);
+                                    long y = ~~((index + 1) / sizeX);
+                                    index++;
+                                    Color color = data.UIntToColor();
+                                    if (color.A != 0)
+                                    {
+                                        voxels.Add(new VoxelDTO(
+                                            (int)(zAxisOrientation == 1 ? (z + posZ) : (x + posX)),
+                                            (int)y,
+                                            (int)(zAxisOrientation == 1 ? (x + posX) : (z + posZ)),
+                                            colorFormat == 0 ? color.B : color.R,
+                                            color.G,
+                                            colorFormat == 0 ? color.R : color.B,
+                                            color.A));
+                                    }
+                                }
+                            }
+                            z++;
+                        }
+                    }
+                }
+
+                return voxels;
+            }
+        }
+
+        private Schematic Convert(List<VoxelDTO> voxels)
+        {
+            int minX = voxels.Min(x => x.X);
+            int minY = voxels.Min(x => x.Y);
+            int minZ = voxels.Min(x => x.Z);
+
+            Schematic schematic = new Schematic();
+
+            Console.WriteLine("[INFO] Started to write schematic from qb...");
+            Console.WriteLine("[INFO] Qb Width: " + schematic.Width);
+            Console.WriteLine("[INFO] Qb Length: " + schematic.Length);
+            Console.WriteLine("[INFO] Qb Height: " + schematic.Height);
+            using (ProgressBar progressbar = new ProgressBar())
+            {
+                for (var index = 0; index < voxels.Count; index++)
+                {
+                    VoxelDTO voxel = voxels[index];
+                    voxel.X -= minX;
+                    voxel.Y -= minY;
+                    voxel.Z -= minZ;
+                    ushort x = (ushort) voxel.X;
+                    ushort y = (ushort) voxel.Y;
+                    ushort z = (ushort) voxel.Z;
+                    
+                    schematic.AddVoxel(x, y, z, FctExtensions.ByteArrayToUInt(voxel.R, voxel.G, voxel.B, 1));
+                    progressbar.Report((index / (float)voxels.Count));
+                }
+            }
+            Console.WriteLine("[INFO] Done.");
+
+            return schematic;
+        }
+    }
+
+    public class VoxelDTO
+    {
+        public int X { get; set; }
+        public int Y { get; set; }
+        public int Z { get; set; }
+
+        public byte R { get; set; }
+        public byte G { get; set; }
+        public byte B { get; set; }
+        public byte A { get; set; }
+
+        public VoxelDTO(int x, int y, int z, byte r, byte g, byte b, byte a)
+        {
+            X = x;
+            Y = y;
+            Z = z;
+            R = r;
+            G = g;
+            B = b;
+            A = a;
+        }
+    }
+}
+```
+
+### SchematicToVoxCore/Converter/SchematicToSchematic.cs
+```
+﻿using fNbt;
+using System;
+using System.Collections.Generic;
+using System.Drawing;
+using System.IO;
+using FileToVox.Extensions;
+using FileToVoxCore.Extensions;
+using FileToVoxCore.Schematics;
+using FileToVoxCore.Utils;
+
+namespace FileToVox.Converter
+{
+	public class SchematicToSchematic : AbstractToSchematic
+	{
+		private readonly bool mExcavate;
+		private readonly Dictionary<Tuple<int, int>, Color> mColors = new Dictionary<Tuple<int, int>, Color>();
+
+		public SchematicToSchematic(string path, bool excavate) : base(path)
+		{
+			mExcavate = excavate;
+			LoadBlocks();
+		}
+
+		public override Schematic WriteSchematic()
+		{
+			NbtFile file = new NbtFile(PathFile);
+			return LoadSchematic(file);
+		}
+
+		private void LoadBlocks()
+		{
+			try
+			{
+				string line;
+				int counter = 0;
+				// Read the file and display it line by line.  
+				StreamReader file = new StreamReader(@"./schematics/config.txt");
+				Console.WriteLine("[INFO] Started to read config.txt for loading blocks colors");
+				while ((line = file.ReadLine()) != null)
+				{
+					if (line[0] == '#')
+						continue;
+
+					string[] values = line.Split(' '); //6 values expected
+					if (values.Length < 6)
+						throw new Exception("Line is not well formated: " + line);
+
+					int id = Convert.ToInt32(values[0]);
+					int metadata = Convert.ToInt32(values[1]);
+					int a = Convert.ToInt32(values[2]);
+					int r = Convert.ToInt32(values[3]);
+					int g = Convert.ToInt32(values[4]);
+					int b = Convert.ToInt32(values[5]);
+
+					mColors.Add(new Tuple<int, int>(id, metadata), Color.FromArgb(a, r, g, b));
+					counter++;
+				}
+				Console.WriteLine("[INFO] Loaded blocks: " + counter);
+				Console.WriteLine("[INFO] Done.");
+				file.Close();
+			}
+			catch (Exception e)
+			{
+				Console.WriteLine("[ERROR] LoadBlocks failed: " + e);
+			}
+		}
+
+		private Schematic LoadSchematic(NbtFile nbtFile)
+		{
+			RawSchematic raw = LoadRaw(nbtFile);
+			return CreateSchematic(raw);
+		}
+
+		private RawSchematic LoadRaw(NbtFile nbtFile)
+		{
+			RawSchematic raw = new RawSchematic();
+			var rootTag = nbtFile.RootTag;
+
+			foreach (NbtTag tag in rootTag.Tags)
+			{
+				switch (tag.Name)
+				{
+					case "Width": //Short
+						raw.Width = tag.ShortValue;
+						break;
+					case "Height": //Short
+						raw.Heigth = tag.ShortValue;
+						break;
+					case "Length": //Short
+						raw.Length = tag.ShortValue;
+						break;
+					case "Blocks": //ByteArray
+						raw.Blocks = tag.ByteArrayValue;
+						break;
+					case "Data": //ByteArray
+						raw.Data = tag.ByteArrayValue;
+						break;
+					case "Entities": //List
+						break; //Ignore
+					case "TileEntities": //List
+						break;
+					case "Icon": //Compound
+						break; //Ignore
+					case "SchematicaMapping": //Compound
+						tag.ToString();
+						break; //Ignore
+					default:
+						break;
+				}
+			}
+			return raw;
+		}
+
+		private Schematic CreateSchematic(RawSchematic rawSchematic)
+		{
+			Console.WriteLine("[INFO] Height: " + rawSchematic.Heigth);
+			Console.WriteLine("[INFO] Length: " + rawSchematic.Length);
+			Console.WriteLine("[INFO] Width: " + rawSchematic.Width);
+			if (rawSchematic.Heigth > Schematic.MAX_WORLD_HEIGHT || rawSchematic.Length > Schematic.MAX_WORLD_LENGTH || rawSchematic.Width > Schematic.MAX_WORLD_WIDTH)
+			{
+				throw new Exception("Schematic is too big");
+			}
+
+			Console.WriteLine($"[INFO] Started to read all blocks of the schematic...");
+
+			//Sorted by height (bottom to top) then length then width -- the index of the block at X,Y,Z is (Y×length + Z)×width + X.
+			Schematic schematic = new Schematic();
+
+			int total = (rawSchematic.Heigth) * (rawSchematic.Length) * (rawSchematic.Width);
+			int indexProgress = 0;
+			using (ProgressBar progressbar = new ProgressBar())
+			{
+				for (int y = 0; y < (rawSchematic.Heigth); y++)
+				{
+					for (int z = 0; z < (rawSchematic.Length); z++)
+					{
+						for (int x = 0; x < (rawSchematic.Width); x++)
+						{
+							int index = (y * rawSchematic.Length + z) * rawSchematic.Width + x;
+							int blockId = rawSchematic.Blocks[index];
+							if (blockId != 0)
+							{
+								Voxel voxel = new Voxel((ushort)x, (ushort)y, (ushort)z, GetBlockColor(rawSchematic.Blocks[index], rawSchematic.Data[index]).ColorToUInt());
+								if ((mExcavate && IsBlockConnectedToAir(rawSchematic, voxel) || !mExcavate))
+								{
+									schematic.AddVoxel(x, y, z, voxel.Color);
+								}
+							}
+
+							progressbar.Report(indexProgress++ / (float)total);
+						}
+					}
+				}
+			}
+
+			Console.WriteLine($"[INFO] Done.");
+			return schematic;
+		}
+
+		private bool IsBlockConnectedToAir(RawSchematic rawSchematic, Voxel voxel)
+		{
+			if (voxel.X - 1 >= 0 && voxel.X + 1 < rawSchematic.Width && voxel.Y - 1 >= 0 && voxel.Y + 1 < rawSchematic.Heigth && voxel.Z - 1 >= 0 && voxel.Z < rawSchematic.Length)
+			{
+				int indexLeftX = (voxel.Y * rawSchematic.Length + voxel.Z) * rawSchematic.Width + (voxel.X - 1);
+				int indexRightX = (voxel.Y * rawSchematic.Length + voxel.Z) * rawSchematic.Width + (voxel.X + 1);
+
+				int indexTop = ((voxel.Y + 1) * rawSchematic.Length + voxel.Z) * rawSchematic.Width + voxel.X;
+				int indexBottom = ((voxel.Y - 1) * rawSchematic.Length + voxel.Z) * rawSchematic.Width + voxel.X;
+
+				int indexAhead = (voxel.Y * rawSchematic.Length + voxel.Z + 1) * rawSchematic.Width + voxel.X;
+				int indexBehind = (voxel.Y * rawSchematic.Length + voxel.Z - 1) * rawSchematic.Width + voxel.X;
+
+				return IsBlockAccepted(rawSchematic.Blocks[indexLeftX]) ||
+					   IsBlockAccepted(rawSchematic.Blocks[indexRightX]) ||
+					   IsBlockAccepted(rawSchematic.Blocks[indexTop]) ||
+					   IsBlockAccepted(rawSchematic.Blocks[indexBottom]) ||
+					   IsBlockAccepted(rawSchematic.Blocks[indexAhead]) ||
+					   IsBlockAccepted(rawSchematic.Blocks[indexBehind]);
+
+			}
+			return false;
+		}
+
+		private static bool IsBlockAccepted(int blockID)
+		{
+			return blockID is 0 or 8 or 9;
+		}
+
+		private Color GetBlockColor(int blockID, int data)
+		{
+			if (mColors.TryGetValue(new Tuple<int, int>(blockID, data), out Color color))
+			{
+				return color;
+			}
+			return mColors[new Tuple<int, int>(blockID, 0)];
+		}
+
+
+	}
+}
+```
+
+### SchematicToVoxCore/Converter/VoxToSchematic.cs
+```
+﻿using FileToVoxCore.Extensions;
+using FileToVoxCore.Schematics;
+using FileToVoxCore.Schematics.Tools;
+using FileToVoxCore.Utils;
+using FileToVoxCore.Vox;
+using MoreLinq;
+using System.Drawing;
+using FileToVox.Extensions;
+
+namespace FileToVox.Converter
+{
+	public class VoxToSchematic : AbstractToSchematic
+	{
+		private VoxModel mVoxModel;
+		public VoxToSchematic(string path) : base(path)
+		{
+			VoxReader reader = new VoxReader();
+			mVoxModel = reader.LoadModel(path);
+		}
+
+		public override Schematic WriteSchematic()
+		{
+			Schematic schematic = new Schematic();
+			FileToVoxCore.Drawing.Color[] colorsPalette = mVoxModel.Palette;
+			using (ProgressBar progressbar = new ProgressBar())
+			{
+				int minX = (int) mVoxModel.TransformNodeChunks.MinBy(t => t.TranslationAt().X).TranslationAt().X;
+				int minY = (int) mVoxModel.TransformNodeChunks.MinBy(t => t.TranslationAt().Y).TranslationAt().Y;
+				int minZ = (int) mVoxModel.TransformNodeChunks.MinBy(t => t.TranslationAt().Z).TranslationAt().Z;
+
+				for (int i = 0; i < mVoxModel.VoxelFrames.Count; i++)
+				{
+					VoxelData data = mVoxModel.VoxelFrames[i];
+					Vector3 worldPositionFrame = mVoxModel.TransformNodeChunks[i + 1].TranslationAt();
+
+					if (worldPositionFrame == Vector3.zero)
+						continue;
+
+					for (int y = 0; y < data.VoxelsTall; y++)
+					{
+						for (int z = 0; z < data.VoxelsDeep; z++)
+						{
+							for (int x = 0; x < data.VoxelsWide; x++)
+							{
+								int indexColor = data.Get(x, y, z);
+								FileToVoxCore.Drawing.Color color = colorsPalette[indexColor];
+								if (color != FileToVoxCore.Drawing.Color.Empty)
+								{
+									schematic.AddVoxel((int)(z + worldPositionFrame.X - minX), (int)(y + (worldPositionFrame.Z - minZ)), (int)(x + worldPositionFrame.Y - minY), color.ColorToUInt());
+								}
+							}
+						}
+					}
+					progressbar.Report(i / (float)mVoxModel.VoxelFrames.Count);
+				}
+			}
+
+
+			return schematic;
+		}
+	}
+}
+```
+
+### SchematicToVoxCore/Extensions/FctExtensions.cs
+```
+﻿using ImageMagick;
+using Color = FileToVoxCore.Drawing.Color;
+
+namespace FileToVox.Extensions
+{
+	public static class FctExtensions
+    {
+		public static byte ParsedChannel(this ushort channel)
+		{
+			return (byte)((channel / (float)ushort.MaxValue) * 255);
+		}
+
+		public static System.Drawing.Color GetPixelColor(this IPixel<ushort> pixel)
+		{
+			Color color = Color.FromArgb(pixel.GetChannel(3).ParsedChannel(), pixel.GetChannel(0).ParsedChannel(), pixel.GetChannel(1).ParsedChannel(), pixel.GetChannel(2).ParsedChannel());
+			return color.ToSystemDrawingColor();
+		}
+
+		public static uint ColorToUInt(this Color color)
+        {
+            return (uint)((color.A << 24) | (color.R << 16) |
+                          (color.G << 8) | (color.B << 0));
+        }
+
+        public static uint ColorToUInt(this System.Drawing.Color color)
+        {
+	        return (uint)((color.A << 24) | (color.R << 16) |
+	                      (color.G << 8) | (color.B << 0));
+        }
+
+        public static Color ToFileToVoxCoreColor(this System.Drawing.Color color)
+        {
+	        return Color.FromArgb(color.A, color.R, color.G, color.B);
+        }
+
+        public static System.Drawing.Color ToSystemDrawingColor(this Color color)
+        {
+	        return System.Drawing.Color.FromArgb(color.A, color.R, color.G, color.B);
+        }
+
+        public static uint ByteArrayToUInt(byte r, byte g, byte b, byte a)
+        {
+            return (uint)((a << 24) | (r << 16) | (g << 8) | (b << 0));
+        }
+
+        public static Color UIntToColor(this uint color)
+        {
+            byte a = (byte)(color >> 24);
+            byte r = (byte)(color >> 16);
+            byte g = (byte)(color >> 8);
+            byte b = (byte)(color >> 0);
+            return Color.FromArgb(a, r, g, b);
+        }
+
+
+    }
+
+	
+}
+```
+
+### SchematicToVoxCore/Extensions/Quantization.cs
+```
+﻿using FileToVoxCore.Schematics;
+using FileToVoxCore.Utils;
+using ImageMagick;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using Color = FileToVoxCore.Drawing.Color;
+
+namespace FileToVox.Extensions
+{
+	public static class Quantization
+	{
+
+		public static void Quantize(MagickImage image, QuantizeSettings settings)
+		{
+			if (Program.DisableQuantization())
+			{
+				Console.WriteLine("[WARNING] By disabling quantization, only the first 255 unique colors will be taken into account");
+			}
+			image.Quantize(settings);
+		}
+
+		public static List<Voxel> ApplyQuantization(List<Voxel> voxels, int colorLimit)
+		{
+			if (voxels.Count == 0)
+			{
+				Console.WriteLine("[WARNING] No voxels to quantize, skipping this part...");
+				return voxels;
+			}
+
+			if (Program.DisableQuantization())
+			{
+				Console.WriteLine("[WARNING] By disabling quantization, only the first 255 unique colors will be taken into account");
+				return voxels;
+			}
+
+			colorLimit = Math.Min(colorLimit, 256);
+			Console.WriteLine("[INFO] Started quantization of all colors ...");
+			using (ProgressBar progressBar = new ProgressBar())
+			{
+
+				Dictionary<Color, int> histo = new Dictionary<Color, int>();
+				foreach (Color color in voxels.Select(voxel => voxel.Color.UIntToColor()))
+				{
+					if (histo.ContainsKey(color))
+					{
+						histo[color]++;
+					}
+					else
+					{
+						histo[color] = 1;
+					}
+				}
+
+				IOrderedEnumerable<KeyValuePair<Color, int>> result1 = histo.OrderByDescending(a => a.Value);
+				List<Color> mostUsedColor = result1.Select(x => x.Key).Take(colorLimit).ToList();
+				Dictionary<Color, double> dist = new Dictionary<Color, double>();
+				Dictionary<Color, Color> mapping = new Dictionary<Color, Color>();
+				foreach (KeyValuePair<Color, int> p in result1)
+				{
+					dist.Clear();
+					foreach (Color pp in mostUsedColor)
+					{
+						double temp = Math.Abs(p.Key.R - pp.R) +
+						              Math.Abs(p.Key.G - pp.G) +
+						              Math.Abs(p.Key.B - pp.B);
+						dist.Add(pp, temp);
+					}
+					KeyValuePair<Color, double> min = dist.OrderBy(k => k.Value).FirstOrDefault();
+					mapping.Add(p.Key, min.Key);
+				}
+
+				for (int i = 0; i < voxels.Count; i++)
+				{
+					Color c = voxels[i].Color.UIntToColor();
+					Color replaceColor = mapping[c];
+
+					voxels[i] = new Voxel(voxels[i].X, voxels[i].Y, voxels[i].Z, replaceColor.ColorToUInt());
+					progressBar.Report(i / (float)voxels.Count);
+				}
+
+			}
+
+			Console.WriteLine("[INFO] Done.");
+			return voxels;
+		}
+
+
+	}
+}
+```
+
+### SchematicToVoxCore/Utils/ImageUtils.cs
+```
+﻿using FileToVox.Extensions;
+using FileToVoxCore.Schematics;
+using FileToVoxCore.Utils;
+using ImageMagick;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using Color = System.Drawing.Color;
+
+namespace FileToVox.Utils
+{
+	public static class ImageUtils
+	{
+		#region PublicMethods
+
+		public static Schematic WriteSchematicFromImage(MagickImage bitmap, MagickImage colorBitmap, LoadImageParam loadImageParam)
+		{
+			if (colorBitmap != null)
+			{
+				if (bitmap.Height != colorBitmap.Height || bitmap.Width != colorBitmap.Width)
+				{
+					throw new ArgumentException("[ERROR] Image color is not the same size of the original image");
+				}
+
+				if (loadImageParam.ColorLimit != 256 || colorBitmap.UniqueColors().TotalColors > 256)
+				{
+					Quantization.Quantize(colorBitmap, new QuantizeSettings()
+					{
+						Colors = loadImageParam.ColorLimit,
+					});
+				}
+
+			}
+			else if (loadImageParam.EnableColor)
+			{
+				Quantization.Quantize(bitmap, new QuantizeSettings()
+				{
+					Colors = loadImageParam.ColorLimit,
+				});
+			}
+
+			Schematic schematic = WriteSchematicIntern(bitmap, colorBitmap, loadImageParam);
+			return schematic;
+		}
+
+		#endregion
+
+		#region PrivateMethods
+
+		private static Schematic WriteSchematicIntern(MagickImage bitmap, MagickImage bitmapColor, LoadImageParam loadImageParam)
+		{
+			Schematic schematic = new Schematic();
+
+			IPixelCollection<ushort> pixelCollectionBitmap = bitmap.GetPixels();
+			IPixelCollection<ushort> pixelCollectionBitmapColor = bitmapColor != null ? bitmapColor.GetPixels() : null;
+
+			if (bitmap.Width > Schematic.MAX_WORLD_WIDTH || bitmap.Height > Schematic.MAX_WORLD_LENGTH)
+			{
+				throw new ArgumentException($"Image is too big (max size ${Schematic.MAX_WORLD_WIDTH}x${Schematic.MAX_WORLD_LENGTH} px)");
+			}
+
+			using (ProgressBar progressbar = new ProgressBar())
+			{
+				Console.WriteLine("[INFO] Started to write schematic from picture...");
+				Console.WriteLine("[INFO] Picture Width: " + bitmap.Width);
+				Console.WriteLine("[INFO] Picture Height: " + bitmap.Height);
+
+				int size = bitmap.Width * bitmap.Height;
+				int i = 0;
+				int w = bitmap.Width;
+				int h = bitmap.Height;
+				for (int x = 0; x < w; x++)
+				{
+					for (int y = 0; y < h; y++)
+					{
+						IPixel<ushort> pixel = pixelCollectionBitmap.GetPixel(x, y);
+						Color color = pixel.GetPixelColor();
+						Color finalColor;
+
+						if (pixelCollectionBitmapColor != null)
+						{
+							IPixel<ushort> p = pixelCollectionBitmapColor.GetPixel(x, y);
+							Color c = p.GetPixelColor();
+							finalColor = c;
+						}
+						else if (loadImageParam.EnableColor)
+						{
+							finalColor = color;
+						}
+						else
+						{
+							finalColor = Color.White;
+						}
+
+						if (bitmap.HasAlpha && color.A != 0 || !bitmap.HasAlpha)
+						{
+							if (loadImageParam.Height != 1)
+							{
+								if (loadImageParam.Excavate)
+								{
+									GenerateFromMinNeighborParam param = new()
+									{
+										X = x,
+										Y = y,
+										PixelCollection = pixelCollectionBitmap,
+										GrayscaleImage = bitmap,
+										Color = finalColor,
+										Height = loadImageParam.Height
+									};
+
+									GenerateFromMinNeighbor(ref schematic, param);
+								}
+								else
+								{
+									int computeHeight = GetHeight(pixelCollectionBitmap.GetPixel(x, y), loadImageParam.Height);
+									AddMultipleVoxels(ref schematic, 0, computeHeight, x, y, finalColor);
+
+								}
+							}
+							else
+							{
+								AddSingleVoxel(ref schematic, x, h, y, finalColor);
+							}
+						}
+						progressbar.Report((i++ / (float)size));
+					}
+				}
+			}
+
+			Console.WriteLine("[INFO] Done.");
+			return schematic;
+		}
+
+		private static void AddMultipleVoxels(ref Schematic schematic, int min, int max, int x, int y, Color color)
+		{
+			for (int i = min; i < max; i++)
+			{
+				schematic.AddVoxel(new Voxel((ushort)x, (ushort)i, (ushort)y, color.ColorToUInt()));
+			}
+		}
+
+		private static void AddSingleVoxel(ref Schematic schematic, int x, int y, int z, Color color)
+		{
+			ushort finalX = (ushort)(x);
+			ushort finalY = (ushort)(y);
+			ushort finalZ = (ushort)(z);
+			Voxel voxel = new(finalX, finalY, finalZ, color.ColorToUInt());
+
+			schematic.AddVoxel(voxel);
+		}
+
+		private static void GenerateFromMinNeighbor(ref Schematic schematic, GenerateFromMinNeighborParam param)
+		{
+			int computeHeight = GetHeight(param.PixelCollection.GetPixel(param.X, param.Y), param.Height);
+			if (param.X - 1 >= 0 && param.X + 1 < param.GrayscaleImage.Width && param.Y - 1 >= 0 && param.Y + 1 < param.GrayscaleImage.Height)
+			{
+				int heightLeft = GetHeight(param.PixelCollection.GetPixel(param.X - 1, param.Y), param.Height);
+				int heightTop = GetHeight(param.PixelCollection.GetPixel(param.X, param.Y - 1), param.Height);
+				int heightRight = GetHeight( param.PixelCollection.GetPixel(param.X + 1, param.Y), param.Height);
+				int heightBottom = GetHeight( param.PixelCollection.GetPixel(param.X, param.Y + 1), param.Height);
+
+				var list = new List<int>
+				{
+					heightLeft, heightTop, heightRight, heightBottom
+				};
+
+				int min = list.Min();
+				if (min < computeHeight)
+				{
+					AddMultipleVoxels(ref schematic, min, computeHeight, param.X, param.Y, param.Color);
+				}
+				else
+				{
+					int finalHeight = (computeHeight - 1 < 0) ? 0 : computeHeight - 1;
+					AddSingleVoxel(ref schematic, param.X, finalHeight, param.Y, param.Color);
+				}
+			}
+			else
+			{
+				AddMultipleVoxels(ref schematic, 0, computeHeight, param.X, param.Y, param.Color);
+			}
+		}
+
+		private static int GetHeight(IPixel<ushort> pixel, int heightFactor)
+		{
+			int average = Math.Min(pixel.Channels, 3) * ushort.MaxValue;
+			int total = pixel.GetChannel(0) + pixel.GetChannel(1) + pixel.GetChannel(2);
+			float intensity = total / (float)average;
+			int height = (int)(intensity * heightFactor);
+			return height;
+		}
+
+
+		#endregion
+	}
+
+	public class GenerateFromMinNeighborParam
+	{
+		public MagickImage GrayscaleImage;
+		public IPixelCollection<ushort> PixelCollection;
+		public Color Color;
+		public int X;
+		public int Y;
+		public int Height;
+	}
+
+	public class LoadImageParam
+	{
+		public int Height { get; set; }
+		public bool Excavate { get; set; }
+		public bool EnableColor { get; set; }
+		public string TexturePath { get; set; }
+		public string ColorTexturePath { get; set; }
+		public int ColorLimit { get; set; }
+	}
+}
+```
+
+### SchematicToVoxCore/Converter/Image/ImageToSchematic.cs
+```
+﻿using FileToVox.Utils;
+using FileToVoxCore.Schematics;
+using ImageMagick;
+using System;
+using System.IO;
+
+namespace FileToVox.Converter.Image
+{
+	public class ImageToSchematic : AbstractToSchematic
+    {
+        protected readonly bool Excavate;
+        protected readonly int MaxHeight;
+        protected readonly bool Color;
+        protected readonly string ColorPath;
+        protected readonly int ColorLimit;
+
+        public ImageToSchematic(string path, string colorPath, int height, bool excavate, bool color, int colorLimit) : base(path)
+        {
+            ColorPath = colorPath;
+            MaxHeight = height;
+            Excavate = excavate;
+            Color = color;
+            ColorLimit = colorLimit;
+        }
+
+        public override Schematic WriteSchematic()
+        {
+	        if (!File.Exists(PathFile))
+	        {
+		        Console.WriteLine("[ERROR] The file path is invalid for path : " + PathFile);
+		        return null;
+	        }
+
+	        if (!string.IsNullOrEmpty(ColorPath) && !File.Exists(ColorPath))
+	        {
+		        Console.WriteLine("[ERROR] The color path is invalid");
+		        return null;
+	        }
+
+	        MagickImage image = new MagickImage(PathFile);
+	        MagickImage colorImage = null;
+
+			if (!string.IsNullOrEmpty(ColorPath))
+			{
+				colorImage = new MagickImage(ColorPath);
+			}
+
+			LoadImageParam loadImageParam = new LoadImageParam()
+			{
+				TexturePath = PathFile,
+				ColorLimit = ColorLimit,
+				ColorTexturePath = ColorPath,
+				EnableColor = Color,
+				Excavate = Excavate,
+				Height = MaxHeight,
+			};
+			return ImageUtils.WriteSchematicFromImage(image, colorImage, loadImageParam);
+
+		}
+	}
+}
+```
+
+### SchematicToVoxCore/Converter/Image/MultipleImageToSchematic.cs
+```
+﻿using FileToVox.Extensions;
+using FileToVoxCore.Schematics;
+using ImageMagick;
+using nQuant;
+using System;
+using System.Collections.Generic;
+using System.Drawing;
+
+namespace FileToVox.Converter.Image
+{
+	public class MultipleImageToSchematic : AbstractToSchematic
+	{
+		private readonly bool mExcavate;
+		private readonly string mInputColorFile;
+		private readonly int mColorLimit;
+		private readonly List<string> mImages;
+		public MultipleImageToSchematic(List<string> images, bool excavate, string inputColorFile, int colorLimit)
+		{
+			mImages = images;
+			mExcavate = excavate;
+			mInputColorFile = inputColorFile;
+			mColorLimit = colorLimit;
+		}
+
+		public override Schematic WriteSchematic()
+		{
+			int height = mImages.Count;
+			Console.WriteLine("[INFO] Total images to process: " + mImages.Count);
+
+			List<Voxel> blocks = new List<Voxel>();
+			IPixelCollection<ushort> pixelsColor = null;
+			int colorWidth = 0;
+			if (mInputColorFile != null)
+			{
+				MagickImage bitmapColor = new MagickImage(mInputColorFile);
+				if (bitmapColor.Width > 256 || bitmapColor.Height > 1)
+				{
+					throw new ArgumentException("[ERROR] The input color file must have a dimension of 256x1 px");
+				}
+
+				colorWidth = bitmapColor.Width;
+				pixelsColor = bitmapColor.GetPixels();
+			}
+
+			for (int i = 0; i < mImages.Count; i++)
+			{
+				string file = mImages[i];
+				Console.WriteLine("[INFO] Reading file: " + file);
+				MagickImage bitmap = new MagickImage(file);
+				IPixelCollection<ushort> pixels = bitmap.GetPixels();
+
+				for (int x = 0; x < bitmap.Width; x++)
+				{
+					for (int y = 0; y < bitmap.Height; y++)
+					{
+						IPixel<ushort> pixel = pixels.GetPixel(x, y);
+						Color color = Color.FromArgb(pixel.GetChannel(4), pixel.GetChannel(0), pixel.GetChannel(1), pixel.GetChannel(2));
+
+						if (color != Color.Empty && color != Color.Transparent && color != Color.Black && (color.R != 0 && color.G != 0 && color.B != 0))
+						{
+							if (mInputColorFile != null)
+							{
+								double distance = Math.Sqrt(Math.Pow((height / 2) - x, 2) + Math.Pow((height / 2) - y, 2));
+								float range = (float)Math.Abs(distance / (height / 2)); //
+								range = range > 1 ? 1 : range;
+								color = pixelsColor.GetPixel((int)(range * (colorWidth - 1)), 0).GetPixelColor();
+							}
+
+							if (mExcavate)
+							{
+								CheckNeighbor(ref blocks, bitmap, color, i, x, y);
+							}
+							else
+							{
+								blocks.Add(new Voxel((ushort)x, (ushort)i, (ushort)y, color.ColorToUInt()));
+							}
+						}
+					}
+				}
+			}
+
+			List<Voxel> list = Quantization.ApplyQuantization(blocks, mColorLimit);
+			Schematic schematic = new Schematic(list);
+
+			Console.WriteLine("[INFO] Done.");
+			return schematic;
+		}
+
+		private void CheckNeighbor(ref List<Voxel> blocks, MagickImage bitmap, Color color, int i, int x, int y)
+		{
+			var pixels = bitmap.GetPixels();
+
+			if (x - 1 >= 0 && x + 1 < bitmap.Width && y - 1 >= 0 && y + 1 < bitmap.Height)
+			{
+				Color left = pixels.GetPixel(x - 1, y).GetPixelColor();
+
+				Color top = pixels.GetPixel(x, y - 1).GetPixelColor();
+
+				Color right = pixels.GetPixel(x + 1, y).GetPixelColor();
+
+				Color bottom = pixels.GetPixel(x, y + 1).GetPixelColor();
+
+				bool leftColor = left != Color.Empty && left != Color.Transparent && left != Color.Black && (left.R != 0 && left.G != 0 && left.B != 0);
+				bool topColor = top != Color.Empty && top != Color.Transparent && top != Color.Black && (top.R != 0 && top.G != 0 && top.B != 0);
+				bool rightColor = right != Color.Empty && right != Color.Transparent && right != Color.Black && (right.R != 0 && right.G != 0 && right.B != 0);
+				bool bottomColor = bottom != Color.Empty && bottom != Color.Transparent && bottom != Color.Black && (bottom.R != 0 && bottom.G != 0 && bottom.B != 0);
+
+				if (!leftColor || !topColor || !rightColor || !bottomColor)
+				{
+					blocks.Add(new Voxel((ushort)x, (ushort)i, (ushort)y, color.ColorToUInt()));
+				}
+			}
+		}
+	}
+}
+```
+
+### SchematicToVoxCore/Converter/PaletteSchematic/PaletteSchematicConverter.cs
+```
+﻿using FileToVox.Extensions;
+using FileToVoxCore.Schematics;
+using FileToVoxCore.Utils;
+using System;
+using System.Collections.Generic;
+using System.Drawing;
+using System.Linq;
+using ImageMagick;
+using Color = FileToVoxCore.Drawing.Color;
+
+namespace FileToVox.Converter.PaletteSchematic
+{
+	public class PaletteSchematicConverter
+	{
+		private readonly List<Color> _colors;
+
+		public PaletteSchematicConverter(string palettePath)
+		{
+			_colors = new List<Color>();
+			MagickImage bitmap = new MagickImage(palettePath);
+			IPixelCollection<ushort> pixels = bitmap.GetPixels();
+			for (int x = 0; x < bitmap.Width; x++)
+			{
+				for (int y = 0; y < bitmap.Height; y++)
+				{
+					if (_colors.Count < 256)
+					{
+						_colors.Add(pixels.GetPixel(x, y).GetPixelColor().ToFileToVoxCoreColor());
+					}
+				}
+			}
+		}
+
+		public List<Color> GetPalette()
+		{
+			return _colors;
+		}
+
+		public List<uint> GetPaletteUint()
+		{
+			List<uint> palette = _colors.Select(color => color.ColorToUInt()).ToList();
+			return palette;
+		}
+
+		public Schematic ConvertSchematic(Schematic schematic)
+		{
+			Console.WriteLine("[INFO] Started to convert all colors of blocks to match the palette");
+			Schematic newSchematic = new Schematic(GetPaletteUint());
+			List<uint> colors = schematic.UsedColors;
+			Dictionary<uint, int> paletteDictionary = new Dictionary<uint, int>();
+			foreach (uint color in colors)
+			{
+				int index = ColorComparison.CompareColorRGB(_colors, color.UIntToColor());
+				paletteDictionary[color] = index;
+			}
+
+			using (ProgressBar progressbar = new ProgressBar())
+			{
+				int i = 0;
+				List<Voxel> allVoxels = schematic.GetAllVoxels();
+				foreach (Voxel block in allVoxels)
+				{
+					newSchematic.AddVoxel(block.X, block.Y, block.Z,
+						_colors[paletteDictionary[block.Color]].ColorToUInt());
+					progressbar.Report(i++ / (float) allVoxels.Count);
+				}
+			}
+
+			Console.WriteLine("[INFO] Done.");
+			return newSchematic;
+		}
+	}
+}
+```
+
+### SchematicToVoxCore/Converter/PointCloud/BodyDataDTO.cs
+```
+﻿using System;
+using System.Collections.Generic;
+using System.Drawing;
+using System.Text;
+using FileToVoxCore.Schematics.Tools;
+
+namespace FileToVox.Converter.PointCloud
+{
+	public class BodyDataDTO
+	{
+		public List<Vector3> BodyVertices { get; set; }
+		public List<Color> BodyColors { get; set; }
+	}
+}
+```
+
+### SchematicToVoxCore/Converter/PointCloud/CSVToSchematic.cs
+```
+﻿using System;
+using System.Collections.Generic;
+using System.Drawing;
+using System.Globalization;
+using System.IO;
+using FileToVoxCore.Schematics.Tools;
+
+namespace FileToVox.Converter.PointCloud
+{
+	public class CSVToSchematic : PointCloudToSchematic
+    {
+	    protected sealed override BodyDataDTO ReadContentFile()
+	    {
+			BodyDataDTO dataFile = new BodyDataDTO();
+
+			List<Vector3> bodyVertices = new List<Vector3>();
+			List<Color> bodyColors = new List<Color>();
+			using (StreamReader reader = new StreamReader(PathFile))
+			{
+				while (!reader.EndOfStream)
+				{
+					string line = reader.ReadLine();
+					line = line.Replace(" ", "");
+					string[] data = line.Split(',');
+					if (data.Length > 14)
+					{
+						try
+						{
+							float[] values = new float[data.Length];
+							for (int i = 0; i < data.Length; i++)
+							{
+								string s = data[i];
+								values[i] = float.Parse(s, CultureInfo.InvariantCulture);
+							}
+
+							Vector3 vertice = new Vector3(values[11], values[12], values[13]);
+							bodyVertices.Add(vertice);
+							bodyColors.Add(Color.FromArgb((byte)Math.Round(values[7] * 255),
+								(byte)Math.Round(values[8] * 255),
+								(byte)Math.Round(values[9] * 255)));
+						}
+						catch (Exception e)
+						{
+						}
+					}
+				}
+			}
+
+			dataFile.BodyColors = bodyColors;
+			dataFile.BodyVertices = bodyVertices;
+
+			return dataFile;
+	    }
+        public CSVToSchematic(string path, float scale, int colorLimit) : base(path, scale, colorLimit)
+        {
+	        BodyDataDTO data = ReadContentFile();
+			VoxelizeData(data);
+        }
+    }
+}
+```
+
+### SchematicToVoxCore/Converter/PointCloud/PLYToSchematic.cs
+```
+﻿using System;
+using System.Collections.Generic;
+using System.Drawing;
+using System.Globalization;
+using System.IO;
+using System.IO.MemoryMappedFiles;
+using FileToVoxCore.Schematics.Tools;
+using FileToVoxCore.Utils;
+
+namespace FileToVox.Converter.PointCloud
+{
+	public class PLYToSchematic : PointCloudToSchematic
+    {
+        #region Internal data structure
+
+        enum DataProperty
+        {
+            Invalid,
+            R8, G8, B8, A8,
+            R16, G16, B16, A16,
+            SingleX, SingleY, SingleZ,
+            DoubleX, DoubleY, DoubleZ,
+            Data8, Data16, Data32, Data64
+        }
+
+        static int GetPropertySize(DataProperty p)
+        {
+            switch (p)
+            {
+                case DataProperty.R8: return 1;
+                case DataProperty.G8: return 1;
+                case DataProperty.B8: return 1;
+                case DataProperty.A8: return 1;
+                case DataProperty.R16: return 2;
+                case DataProperty.G16: return 2;
+                case DataProperty.B16: return 2;
+                case DataProperty.A16: return 2;
+                case DataProperty.SingleX: return 4;
+                case DataProperty.SingleY: return 4;
+                case DataProperty.SingleZ: return 4;
+                case DataProperty.DoubleX: return 8;
+                case DataProperty.DoubleY: return 8;
+                case DataProperty.DoubleZ: return 8;
+                case DataProperty.Data8: return 1;
+                case DataProperty.Data16: return 2;
+                case DataProperty.Data32: return 4;
+                case DataProperty.Data64: return 8;
+            }
+            return 0;
+        }
+
+        class DataHeader
+        {
+            public List<DataProperty> properties = new List<DataProperty>();
+            public int vertexCount = -1;
+            public bool binary = true;
+        }
+
+        class DataBody
+        {
+            public List<Vector3> vertices;
+            public List<Color> colors;
+
+            public DataBody(int vertexCount)
+            {
+                vertices = new List<Vector3>(vertexCount);
+                colors = new List<Color>(vertexCount);
+            }
+
+            public void AddPoint(
+                float x, float y, float z,
+                byte r, byte g, byte b
+            )
+            {
+                vertices.Add(new Vector3(x, y, z));
+                colors.Add(Color.FromArgb(r, g, b));
+            }
+        }
+
+        #endregion
+
+        #region Static Methods
+        private static DataHeader ReadDataHeader(StreamReader reader)
+        {
+            DataHeader data = new DataHeader();
+            int readCount = 0;
+
+            // Magic number line ("ply")
+            string line = reader.ReadLine();
+            readCount += line.Length + 1;
+            if (line != "ply")
+                throw new ArgumentException("Magic number ('ply') mismatch.");
+
+            // Data format: check if it's binary/little endian.
+            line = reader.ReadLine();
+            readCount += line.Length + 1;
+            data.binary = line == "format binary_little_endian 1.0";
+	    
+	    if (line == "format binary_big_endian 1.0")
+	        throw new ArgumentException("Big Endian PLY files are not supported");
+
+            // Read header contents.
+            for (bool skip = false; ;)
+            {
+                // Read a line and split it with white space.
+                line = reader.ReadLine();
+                readCount += line.Length + 1;
+                if (line == "end_header") break;
+                string[] col = line.Split();
+
+                // Element declaration (unskippable)
+                if (col[0] == "element")
+                {
+                    if (col[1] == "vertex")
+                    {
+                        data.vertexCount = Convert.ToInt32(col[2]);
+                        skip = false;
+                    }
+                    else
+                    {
+                        // Don't read elements other than vertices.
+                        skip = true;
+                    }
+                }
+
+                if (skip) continue;
+
+                // Property declaration line
+                if (col[0] == "property")
+                {
+                    DataProperty prop = DataProperty.Invalid;
+
+                    // Parse the property name entry.
+                    switch (col[2])
+                    {
+                        case "red": prop = DataProperty.R8; break;
+                        case "green": prop = DataProperty.G8; break;
+                        case "blue": prop = DataProperty.B8; break;
+                        case "alpha": prop = DataProperty.A8; break;
+                        case "x": prop = DataProperty.SingleX; break;
+                        case "y": prop = DataProperty.SingleY; break;
+                        case "z": prop = DataProperty.SingleZ; break;
+                    }
+
+                    switch (col[1])
+                    {
+                        // Check the property type.
+                        case "char":
+                        case "uchar":
+                        case "int8":
+                        case "uint8":
+                            {
+                                if (prop == DataProperty.Invalid)
+                                    prop = DataProperty.Data8;
+                                else if (GetPropertySize(prop) != 1)
+                                    throw new ArgumentException("Invalid property type ('" + line + "').");
+                                break;
+                            }
+                        case "short":
+                        case "ushort":
+                        case "int16":
+                        case "uint16":
+                            {
+                                switch (prop)
+                                {
+                                    case DataProperty.Invalid: prop = DataProperty.Data16; break;
+                                    case DataProperty.R8: prop = DataProperty.R16; break;
+                                    case DataProperty.G8: prop = DataProperty.G16; break;
+                                    case DataProperty.B8: prop = DataProperty.B16; break;
+                                    case DataProperty.A8: prop = DataProperty.A16; break;
+                                }
+                                if (GetPropertySize(prop) != 2)
+                                    throw new ArgumentException("Invalid property type ('" + line + "').");
+                                break;
+                            }
+                        case "int":
+                        case "uint":
+                        case "float":
+                        case "int32":
+                        case "uint32":
+                        case "float32":
+                            {
+                                if (prop == DataProperty.Invalid)
+                                    prop = DataProperty.Data32;
+                                else if (GetPropertySize(prop) != 4)
+                                    throw new ArgumentException("Invalid property type ('" + line + "').");
+                                break;
+                            }
+                        case "int64":
+                        case "uint64":
+                        case "double":
+                        case "float64":
+                            {
+                                switch (prop)
+                                {
+                                    case DataProperty.Invalid: prop = DataProperty.Data64; break;
+                                    case DataProperty.SingleX: prop = DataProperty.DoubleX; break;
+                                    case DataProperty.SingleY: prop = DataProperty.DoubleY; break;
+                                    case DataProperty.SingleZ: prop = DataProperty.DoubleZ; break;
+                                }
+                                if (GetPropertySize(prop) != 8)
+                                    throw new ArgumentException("Invalid property type ('" + line + "').");
+                                break;
+                            }
+                        default:
+                            throw new ArgumentException("Unsupported property type ('" + line + "').");
+                    }
+
+                    data.properties.Add(prop);
+                }
+            }
+
+            // Rewind the stream back to the exact position of the reader.
+            reader.BaseStream.Position = readCount;
+
+            return data;
+        }
+
+        private static DataBody ReadDataBodyBinary(DataHeader header, BinaryReader reader)
+        {
+            DataBody data = new DataBody(header.vertexCount);
+
+            float x = 0, y = 0, z = 0;
+            byte r = 255, g = 255, b = 255, a = 255;
+
+            using (ProgressBar progressBar = new ProgressBar())
+            {
+                for (int i = 0; i < header.vertexCount; i++)
+                {
+                    foreach (DataProperty prop in header.properties)
+                    {
+                        switch (prop)
+                        {
+                            case DataProperty.R8:
+                                r = reader.ReadByte();
+                                break;
+                            case DataProperty.G8:
+                                g = reader.ReadByte();
+                                break;
+                            case DataProperty.B8:
+                                b = reader.ReadByte();
+                                break;
+                            case DataProperty.A8:
+                                a = reader.ReadByte();
+                                break;
+
+                            case DataProperty.R16:
+                                r = (byte)(reader.ReadUInt16() >> 8);
+                                break;
+                            case DataProperty.G16:
+                                g = (byte)(reader.ReadUInt16() >> 8);
+                                break;
+                            case DataProperty.B16:
+                                b = (byte)(reader.ReadUInt16() >> 8);
+                                break;
+                            case DataProperty.A16:
+                                a = (byte)(reader.ReadUInt16() >> 8);
+                                break;
+
+                            case DataProperty.SingleX:
+                                x = reader.ReadSingle();
+                                break;
+                            case DataProperty.SingleY:
+                                y = reader.ReadSingle();
+                                break;
+                            case DataProperty.SingleZ:
+                                z = reader.ReadSingle();
+                                break;
+
+                            case DataProperty.DoubleX:
+                                x = (float)reader.ReadDouble();
+                                break;
+                            case DataProperty.DoubleY:
+                                y = (float)reader.ReadDouble();
+                                break;
+                            case DataProperty.DoubleZ:
+                                z = (float)reader.ReadDouble();
+                                break;
+
+                            case DataProperty.Data8:
+                                reader.ReadByte();
+                                break;
+                            case DataProperty.Data16:
+                                reader.BaseStream.Position += 2;
+                                break;
+                            case DataProperty.Data32:
+                                reader.BaseStream.Position += 4;
+                                break;
+                            case DataProperty.Data64:
+                                reader.BaseStream.Position += 8;
+                                break;
+                        }
+                    }
+
+                    data.AddPoint(x, y, z, r, g, b);
+                    progressBar.Report(i / (float)header.vertexCount);
+                }
+            }
+
+            return data;
+        }
+
+        private static DataBody ReadDataBodyAscii(DataHeader header, StreamReader reader)
+        {
+            DataBody data = new DataBody(header.vertexCount);
+
+            string line;
+            while ((line = reader.ReadLine()) != null)
+            {
+                string[] strings = line.Split(' ');
+                if (strings.Length >= 6)
+                {
+                    try
+                    {
+                        float x = float.Parse(strings[0], CultureInfo.InvariantCulture);
+                        float y = float.Parse(strings[1], CultureInfo.InvariantCulture);
+                        float z = float.Parse(strings[2], CultureInfo.InvariantCulture);
+                        byte r = byte.Parse(strings[3], CultureInfo.InvariantCulture);
+                        byte g = byte.Parse(strings[4], CultureInfo.InvariantCulture);
+                        byte b = byte.Parse(strings[5], CultureInfo.InvariantCulture);
+
+                        data.AddPoint(x, y, z, r, g, b);
+                    }
+                    catch (Exception e)
+                    {
+                        Console.WriteLine("[ERROR] Line not well formated (Only works with CloudCompare): " + line + " " + e.Message);
+                    }
+                }
+            }
+
+            return data;
+        }
+		#endregion
+
+		protected override BodyDataDTO ReadContentFile()
+		{
+			throw new NotImplementedException();
+		}
+
+		public PLYToSchematic(string path, float scale, int colorLimit) : base(path, scale, colorLimit)
+        {
+            MemoryMappedFile mmf = MemoryMappedFile.CreateFromFile(path, FileMode.Open);
+            MemoryMappedViewStream mms = mmf.CreateViewStream();
+
+            DataHeader header = ReadDataHeader(new StreamReader(mms));
+            Console.WriteLine("[INFO] Start reading PLY data...");
+            DataBody body = header.binary ? ReadDataBodyBinary(header, new BinaryReader(mms)) : ReadDataBodyAscii(header, new StreamReader(mms));
+            mms.Close();
+            Console.WriteLine("[INFO] Done.");
+
+            VoxelizeData(new BodyDataDTO()
+            {
+				BodyVertices = body.vertices,
+				BodyColors = body.colors
+            });
+        }
+    }
+
+}
+```
+
+### SchematicToVoxCore/Converter/PointCloud/PointCloudToSchematic.cs
+```
+﻿using FileToVox.Extensions;
+using FileToVoxCore.Schematics;
+using FileToVoxCore.Schematics.Tools;
+using FileToVoxCore.Utils;
+using MoreLinq;
+using System;
+using System.Collections.Generic;
+
+namespace FileToVox.Converter.PointCloud
+{
+	public abstract class PointCloudToSchematic : AbstractToSchematic
+	{
+		protected readonly float Scale;
+		protected readonly int ColorLimit;
+		private Schematic mSchematic;
+		protected PointCloudToSchematic(string path, float scale, int colorLimit) : base(path)
+		{
+			Scale = scale;
+			ColorLimit = colorLimit;
+		}
+
+		protected abstract BodyDataDTO ReadContentFile();
+
+		protected void VoxelizeData(BodyDataDTO data)
+		{
+			mSchematic = new Schematic();
+
+			if (data.BodyVertices.Count == 0)
+			{
+				return;
+			}
+
+			Vector3 minX = data.BodyVertices.MinBy(t => t.X);
+			Vector3 minY = data.BodyVertices.MinBy(t => t.Y);
+			Vector3 minZ = data.BodyVertices.MinBy(t => t.Z);
+
+			float min = Math.Abs(Math.Min(minX.X, Math.Min(minY.Y, minZ.Z)));
+
+			for (int i = 0; i < data.BodyVertices.Count; i++)
+			{
+				data.BodyVertices[i] += new Vector3(min, min, min);
+				//data.BodyVertices[i] = new Vector3((float)Math.Truncate(data.BodyVertices[i].X * Scale), (float)Math.Truncate(data.BodyVertices[i].Y * Scale), (float)Math.Truncate(data.BodyVertices[i].Z * Scale));
+			}
+
+			Vector3 maxX = data.BodyVertices.MaxBy(t => t.X);
+			Vector3 maxY = data.BodyVertices.MaxBy(t => t.Y);
+			Vector3 maxZ = data.BodyVertices.MaxBy(t => t.Z);
+
+			Console.WriteLine("[INFO] Max X: " + maxX.X + ", Y: " + maxY.Y + ", " + maxZ.Z);
+
+			minX = data.BodyVertices.MinBy(t => t.X);
+			minY = data.BodyVertices.MinBy(t => t.Y);
+			minZ = data.BodyVertices.MinBy(t => t.Z);
+
+			Console.WriteLine("[INFO] Min X: " + minX.X + ", Y: " + minY.Y + ", " + minZ.Z);
+
+			Vector3 size = new Vector3(maxX.X - minX.X, maxY.Y - minY.Y, maxZ.Z - minZ.Z);
+
+			Console.WriteLine("[INFO] Size X: " + size.X + ", Y: " + size.Y + ", " + size.Z);
+
+			float max = Math.Max(size.X, Math.Max(size.Y, size.Z));
+			float factor = Scale / max;
+
+			for (int i = 0; i < data.BodyVertices.Count; i++)
+			{
+				data.BodyVertices[i] = new Vector3((float)Math.Truncate(data.BodyVertices[i].X * factor), (float)Math.Truncate(data.BodyVertices[i].Y * factor), (float)Math.Truncate(data.BodyVertices[i].Z * factor));
+			}
+
+			minX = data.BodyVertices.MinBy(t => t.X);
+			minY = data.BodyVertices.MinBy(t => t.Y);
+			minZ = data.BodyVertices.MinBy(t => t.Z);
+
+			//HashSet<Vector3> set = new HashSet<Vector3>();
+
+			min = Math.Min(minX.X, Math.Min(minY.Y, minZ.Z));
+
+			Console.WriteLine("[INFO] Started to voxelize data...");
+			using (ProgressBar progressbar = new ProgressBar())
+			{
+				for (int i = 0; i < data.BodyVertices.Count; i++)
+				{
+					float maxV = Math.Max(data.BodyVertices[i].X, Math.Max(data.BodyVertices[i].Y, data.BodyVertices[i].Z));
+					if (maxV - min >= 0)
+					{
+						data.BodyVertices[i] -= new Vector3(min, min, min);
+						mSchematic.AddVoxel((int)(data.BodyVertices[i].X - minX.X), (int)(data.BodyVertices[i].Y - minY.Y), (int)(data.BodyVertices[i].Z - minZ.Z), data.BodyColors[i].ColorToUInt());
+					}
+					//if (!set.Contains(data.BodyVertices[i]))
+					//{
+					//	set.Add(data.BodyVertices[i]);
+					//	//vertices.Add(data.BodyVertices[i]);
+					//	//colors.Add(data.BodyColors[i]);
+					//}
+					progressbar.Report(i / (float)data.BodyVertices.Count);
+				}
+			}
+
+			Console.WriteLine("[INFO] Done.");
+
+			//minX = vertices.MinBy(t => t.X);
+			//minY = vertices.MinBy(t => t.Y);
+			//minZ = vertices.MinBy(t => t.Z);
+
+			//for (int i = 0; i < vertices.Count; i++)
+			//{
+			//	float max = Math.Max(vertices[i].X, Math.Max(vertices[i].Y, vertices[i].Z));
+			//	if (/*max - min < 8000 && */max - min >= 0)
+			//	{
+			//		vertices[i] -= new Vector3(min, min, min);
+			//		_blocks.Add(new Voxel((ushort)vertices[i].X, (ushort)vertices[i].Y, (ushort)vertices[i].Z, colors[i].ColorToUInt()));
+			//	}
+			//}
+		}
+
+
+		public override Schematic WriteSchematic()
+		{
+			List<Voxel> list = Quantization.ApplyQuantization(mSchematic.GetAllVoxels(), ColorLimit);
+			Schematic schematic = new Schematic(list);
+			return schematic;
+		}
+
+
+	}
+}
+```
+
+### SchematicToVoxCore/Converter/PointCloud/XYZToSchematic.cs
+```
+﻿using System;
+using System.Collections.Generic;
+using System.Drawing;
+using System.Globalization;
+using System.IO;
+using FileToVoxCore.Schematics.Tools;
+
+namespace FileToVox.Converter.PointCloud
+{
+	public class XYZToSchematic : PointCloudToSchematic
+    {
+        public XYZToSchematic(string path, float scale, int colorLimit) : base(path, scale, colorLimit)
+        {
+			BodyDataDTO data = ReadContentFile();
+			VoxelizeData(data);
+        }
+
+        protected sealed override BodyDataDTO ReadContentFile()
+        {
+			BodyDataDTO dataFile = new BodyDataDTO();
+			StreamReader file = new StreamReader(PathFile);
+			string line;
+
+			List<Vector3> bodyVertices = new List<Vector3>();
+			List<Color> bodyColors = new List<Color>();
+
+			while ((line = file.ReadLine()) != null)
+			{
+				string[] data = line.Split(' ');
+				if (data.Length < 6)
+				{
+					Console.WriteLine("[ERROR] Line not well formated : " + line);
+				}
+				else
+				{
+					try
+					{
+						float x = float.Parse(data[0], CultureInfo.InvariantCulture);
+						float y = float.Parse(data[1], CultureInfo.InvariantCulture);
+						float z = float.Parse(data[2], CultureInfo.InvariantCulture);
+						int r = int.Parse(data[3], CultureInfo.InvariantCulture);
+						int g = int.Parse(data[4], CultureInfo.InvariantCulture);
+						int b = int.Parse(data[5], CultureInfo.InvariantCulture);
+
+						bodyVertices.Add(new Vector3(x, y, z));
+						bodyColors.Add(Color.FromArgb(r, g, b));
+					}
+					catch (Exception e)
+					{
+						Console.WriteLine("[ERROR] Line not well formated : " + line + " " + e.Message);
+					}
+
+				}
+			}
+
+			dataFile.BodyVertices = bodyVertices;
+			dataFile.BodyColors = bodyColors;
+			return dataFile;
+        }
+    }
+}
+```

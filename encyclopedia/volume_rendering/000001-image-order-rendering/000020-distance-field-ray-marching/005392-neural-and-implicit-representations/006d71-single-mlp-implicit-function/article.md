@@ -1,0 +1,35 @@
+# Single MLP Implicit Function
+Also called: Coordinate-based Neural Implicit, Single-Layer MLP SDF, Fixed-PE MLP
+
+## Overview
+This family encompasses methods that represent 3D geometry or volumetric properties as the output of a single Multi-Layer Perceptron (MLP) $f_\theta$ mapping 3D coordinates to a scalar value, such as a Signed Distance Function (SDF) or density . It solves the problem of discretization artifacts and storage overhead inherent in voxel grids by providing a continuous, differentiable representation . Unlike hierarchical grid-based methods (e.g., [HIGS](21357-single-mlp-implicit-function.md)) that rely on learned feature grids, this approach relies entirely on the MLP's capacity to approximate the function, often augmented with fixed positional encoding .
+
+## Shared principles
+All methods in this family share the core mechanism of evaluating a continuous function $f_\theta: \mathbb{R}^3 \rightarrow \mathbb{R}$ defined by a neural network.
+
+1.  **Coordinate Input:** The input is a 3D point $\mathbf{x} \in \mathbb{R}^3$, typically normalized to a domain such as $[-1, 1]^3$ .
+2.  **Positional Encoding:** To enable the MLP to fit high-frequency details, input coordinates are transformed via an encoding function $\gamma(\mathbf{x})$ before entering the network . Common encodings include:
+    *   **Gaussian Random Fourier Features (GRFF):**
+        $$ \gamma(\mathbf{x}) = [\cos(2\pi \kappa \mathbf{B} \mathbf{x}), \sin(2\pi \kappa \mathbf{B} \mathbf{x})] $$
+        Where $\mathbf{B}$ is a random vector sampled from $\mathcal{N}(0, I)$ and $\kappa$ is a bandwidth factor .
+    *   **Fixed Positional Encoding:** A deterministic mapping involving sines and cosines at different frequencies .
+3.  **MLP Architecture:** The network consists of fully connected layers. A common configuration is a single hidden layer with dimension 64 , though deeper networks (e.g., 4 layers) are also used .
+4.  **Activation Functions:** The choice of activation $\phi$ depends on the target property:
+    *   **Sine ($\phi = \sin$):** Used for surface reconstruction and SDFs .
+    *   **ReLU:** Used with Fourier feature mapping for image-based reconstruction .
+5.  **Output:** The network outputs a scalar value representing the physical property (e.g., SDF value, density, or Linear Attenuation Coefficient) .
+
+## Subtopics
+
+### [Ray Marching with Neural SDF](2409-ray-marching-with-neural-sdf.md)
+A rendering technique that approximates the Space Distance Field (SDF) using a deep neural network and renders images by marching rays along the estimated distance field. It is chosen when explicit ray marching integration is required for visualization.
+
+### [Implicit Neural Representation (INR)](19545-implicit-neural-representation-inr.md)
+Encodes volumetric or geometric data as the output of a continuous function, typically an MLP, mapping 3D coordinates to physical properties like density or SDF. It solves discretization artifacts and integrates seamlessly with gradient-based optimization for reconstruction from sparse projections. It is distinct from Single MLP SDF by its broader application to various physical properties and potential use of hashgrid encodings.
+
+### [Single MLP SDF](19626-single-mlp-sdf.md)
+Specifically parameterizes a Signed Distance Field (SDF) using a single MLP $f_\theta$. It is distinct from [Ray Marching with Neural SDF](2409-ray-marching-with-neural-sdf.md) in that it denotes the *decoder architecture* rather than the rendering pipeline, and from [INR](19545-implicit-neural-representation-inr.md) by its specific application to SDFs with a single-layer structure.
+
+## Background
+The concept of implicit neural representations for 3D geometry emerged as an alternative to explicit mesh or voxel representations. The use of MLPs to represent SDFs allows for continuous, resolution-independent geometry . The application of Fourier feature mappings to neural networks for high-frequency fitting was introduced in earlier works on neural radiance fields and implicit surfaces . The specific "Single MLP SDF" variant with fixed positional encoding and a single hidden layer of dimension 64 is documented in recent implementations .
+

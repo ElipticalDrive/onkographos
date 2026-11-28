@@ -1,0 +1,141 @@
+--- v001.md
++++ v002.md
+@@ -1,4 +1,3 @@
+ # Structure-View Co-learning
+-
+ 
+ ## Overview
+@@ -7,9 +6,9 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** A set of 3D Gaussians with parameters $\{x_a, \alpha, \mathbf{R}, \mathbf{s}\}$ (location, opacity, rotation, scale), a set of training views with camera poses $x_p$, and target RGB images.
+-*   **Outputs:** Optimized Gaussian parameters and rendered RGB images.
++*   **Inputs:** A set of 3D Gaussians with parameters $\{x_a, \alpha, \mathbf{R}, \mathbf{s}\}$ (location, opacity, rotation, scale), a set of training views with camera poses $x_p$, and target RGB images [S1].
++*   **Outputs:** Optimized Gaussian parameters and rendered RGB images [S1].
+ 
+ **Data Structures:**
+-Each Gaussian stores standard 3DGS parameters. SVC introduces additional learnable parameters for view-dependent color modeling. In the Spherical Voronoi variant, each Gaussian is equipped with additional parameters $\{\tau_k\}, \{s_k\}, \{c_k\}$ [S2, unofficial].
++Each Gaussian stores standard 3DGS parameters [G]. SVC introduces additional learnable parameters for view-dependent color modeling [S1]. In the Spherical Voronoi variant, each Gaussian is equipped with additional parameters $\{\tau_k\}, \{s_k\}, \{c_k\}$ [S2, unofficial].
+ *   **Spherical Voronoi Sites:** Each site $k$ stores three floats for location ($s_k \in \mathbb{R}^3$) and three floats for radiance ($c_k \in \mathbb{R}^3$) [S2, unofficial].
+ *   **Memory Footprint:** The total learnable parameters per Gaussian for the view-direction parameterization is 48 floats (16 sites $\times$ 3 floats for location + 16 sites $\times$ 3 floats for radiance) [S2, unofficial]. The temperature $\tau_k$ is not stored but computed on the fly from the site norm [S2, unofficial].
+@@ -22,59 +21,78 @@
+ **Algorithm Steps:**
+ 1.  **Initialization:** Initialize Spherical Voronoi sites uniformly using Fibonacci sampling on the sphere $S^2$ [S2, unofficial]. For 3DGS, equip each Gaussian with the additional parameters $\{\tau_k\}, \{s_k\}, \{c_k\}$ [S2, unofficial].
+-2.  **Forward Pass (Rendering):**
+-    *   For each Gaussian, evaluate the radiance $f_{SV}(\omega; \tau, s, c) : S^2 \to \mathbb{R}^3$ based on the view direction $\omega$ [S2, unofficial].
+-    *   In the weighted variant, compute the unit direction $\hat{s}_k = s_k / \|s_k\|$ and implicit temperature $\tau_k = \|s_k\|$ for each site [S2, unofficial].
+-    *   Render the image using standard alpha-blending of Gaussians.
+-3.  **Loss Computation:**
+-    *   Compute the view-dependent loss $\mathcal{L}_V$ (e.g., L1 or SSIM between rendered and target images) [S1].
+-    *   Compute the structural loss $\mathcal{L}_S$. This may involve a Cross-View Consistency Loss ($L_{CVC}$) comparing features or depths from different views [S1].
+-    *   Combine losses: $\mathcal{L} = \lambda (\lambda_V \mathcal{L}_V + \lambda_S \mathcal{L}_S)$ [S1].
+-4.  **Backpropagation and Update:**
+-    *   Compute gradients for all parameters, including Gaussian positions and the new view-dependent parameters [S1].
+-    *   Update parameters using an optimizer (e.g., Adam) [S1].
+-5.  **Cross-View Pruning (CVPM):**
+-    *   Periodically, evaluate consistency between views. If the Structural Similarity Index (SSIM) between views $i$ and $j$ is high ($> 0.6$), compute $L_{CVC}$ [S1].
+-    *   Prune unexpected Gaussians based on geometric consistency criteria, such as depth discrepancies or distance thresholds (e.g., $d_i(p) < 0.01 \land d_j(p) < 0.5 \lor d_i(p) > 3\sigma$) [S1].
++2.  **Forward Pass (Rendering):** For each Gaussian, evaluate the radiance $f_{SV}(\omega; \tau, s, c) : S^2 \to \mathbb{R}^3$ based on the view direction $\omega$ [S2, unofficial]. In the weighted variant, compute the unit direction $\hat{s}_k = s_k / \|s_k\|$ and implicit temperature $\tau_k = \|s_k\|$ for each site [S2, unofficial]. Render the image using standard alpha-blending of Gaussians [G].
++3.  **Loss Computation:** Compute the view-dependent loss $\mathcal{L}_V$ (e.g., L1 or SSIM between rendered and target images) [S1]. Compute the structural loss $\mathcal{L}_S$, which may involve a Cross-View Consistency Loss ($L_{CVC}$) comparing features or depths from different views [S1]. Combine losses: $\mathcal{L} = \lambda (\lambda_V \mathcal{L}_V + \lambda_S \mathcal{L}_S)$ [S1].
++4.  **Backpropagation and Update:** Compute gradients for all parameters, including Gaussian positions and the new view-dependent parameters [S1]. Update parameters using an optimizer (e.g., Adam) [G].
++5.  **Cross-View Pruning (CVPM):** Periodically evaluate consistency between views. If the Structural Similarity Index (SSIM) between views $i$ and $j$ is high ($> 0.6$), compute $L_{CVC}$ [S1]. Prune unexpected Gaussians based on geometric consistency criteria, such as depth discrepancies or distance thresholds (e.g., $d_i(p) < 0.01 \land d_j(p) < 0.5 \lor d_i(p) > 3\sigma$) [S1].
+ 
+ **Pseudocode:**
+ ```python
+-def structure_view_co_learning(gaussians, views, target_images, lambda_v, lambda_s, lambda_global):
+-    """
+-    Performs one step of Structure-View Co-learning.
+-    """
+-    # 1. Forward pass: Render images
++def structure_view_co_learning_step(gaussians, views, target_images, lambda_v, lambda_s, lambda_global, prune_interval, step):
++    # 1. Forward pass: Render images using standard alpha-blending [G]
+     rendered_images = []
+     for view in views:
+-        # Evaluate radiance using Spherical Voronoi if applicable
+-        # For each Gaussian, compute color based on view direction omega
+-        # f_sv = spherical_voronoi_radiance(omega, sites, colors, temperatures)
+-        image = render_gaussians(gaussians, view.camera)
++        image = np.zeros_like(target_images[0])
++        for g in gaussians:
++            # Project Gaussian to screen, compute coverage, alpha-blend [G]
++            image = alpha_blend(image, g, view.camera)
+         rendered_images.append(image)
+-    
++
+     # 2. Compute Losses
+-    # View-dependent loss (e.g., L1 or SSIM)
+-    loss_v = 0
+-    for rendered, target in zip(rendered_images, target_images):
+-        loss_v += l1_loss(rendered, target)
+-    loss_v /= len(views)
+-    
+-    # Structural loss (e.g., Cross-View Consistency)
+-    loss_s = cross_view_consistency_loss(gaussians, views)
+-    
+-    # Combined loss
++    # View-dependent loss (L1) [G]
++    loss_v = sum(np.mean(np.abs(r - t)) for r, t in zip(rendered_images, target_images)) / len(views)
++
++    # Structural loss: Cross-View Consistency Loss (L_CVC) [S1]
++    loss_s = 0.0
++    pair_count = 0
++    for i in range(len(views)):
++        for j in range(i + 1, len(views)):
++            if compute_ssim(rendered_images[i], rendered_images[j]) > 0.6:
++                loss_s += compute_l_cvc(gaussians, views[i], views[j])
++                pair_count += 1
++    loss_s /= max(1, pair_count)
++
++    # Combined loss [S1]
+     total_loss = lambda_global * (lambda_v * loss_v + lambda_s * loss_s)
+-    
+-    # 3. Backpropagation
++
++    # 3. Backpropagation and Update [G]
+     total_loss.backward()
+-    
+-    # 4. Optimization Step
+     optimizer.step()
+     optimizer.zero_grad()
+-    
+-    # 5. Pruning (optional, periodic)
++
++    # 4. Cross-View Pruning (CVPM) [S1]
+     if step % prune_interval == 0:
+-        prune_gaussians(gaussians, views, threshold=0.6)
+-        
++        for p in range(num_pixels):
++            for i in range(len(views)):
++                for j in range(i + 1, len(views)):
++                    d_i = get_depth(p, views[i])
++                    d_j = get_depth(p, views[j])
++                    sigma = get_sigma(p, views[i])
++                    if d_i < 0.01 and d_j < 0.5 or d_i > 3 * sigma:
++                        remove_gaussian(i, j, p)
+     return total_loss
++
++def alpha_blend(image, gaussian, camera):
++    # Standard 3DGS rasterization step [G]
++    return image
++
++def compute_ssim(img1, img2):
++    # Standard SSIM computation [G]
++    return 0.0
++
++def compute_l_cvc(gaussians, view1, view2):
++    # Cross-View Consistency Loss computation [S1]
++    return 0.0
++
++def get_depth(pixel, view):
++    # Retrieve depth value for pixel from view [S1]
++    return 0.0
++
++def get_sigma(pixel, view):
++    # Retrieve uncertainty/sigma for pixel from view [S1]
++    return 0.0
++
++def remove_gaussian(view_i, view_j, pixel):
++    # Prune Gaussian based on geometric inconsistency [S1]
++    pass
+ ```
+ 

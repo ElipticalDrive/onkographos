@@ -1,0 +1,42 @@
+# Cooperative Scheduling and Synchronization
+
+Also called: Cooperative Scheduling, Synchronization for Backward Pass
+
+## Overview
+Cooperative Scheduling and Synchronization addresses idle resources and gradient contention caused by uneven tile lists, variable pixel traversal, and backward propagation accumulation [S1, unofficial]. It sets itself apart from static mapping strategies by dynamically redistributing work and organizing computation to minimize global atomic updates, replacing them with local reductions or cache-cooperative operations.
+
+## Shared principles
+The core mechanism relies on two primary optimizations to handle the irregularity of 3D Gaussian Splatting rasterization:
+
+1.  **Dynamic Work Redistribution:** Static mappings of Gaussians to tiles or pixels are prone to warp divergence due to footprint coverage and early termination. Cooperative scheduling dynamically assigns tiles or Gaussians to threads/warps to balance the load, ensuring that resources remain active even when the number of pairs ($N_{pair}$) and evaluations ($N_{eval}$) is unchanged [S1, unofficial].
+2.  **Local Gradient Reduction:** Backward propagation requires accumulating gradients from many pixels into each Gaussian. Instead of performing frequent global atomic updates, these methods organize computation to combine gradients locally (within a warp, tile, or Gaussian-centric block) before writing the final result back to global memory. This reduces global atomic contention and improves memory coherency [S1, unofficial].
+
+## Subtopics
+
+### Balanced 3DGS
+Redistributes work through dynamic tile assignment and enables Gaussian parallel rendering inside a warp. See [Balanced 3DGS](10236-balanced-3dgs.md).
+
+### Local-GS
+Uses parameter hoisting, warp culling, and coherent blending to reuse data and coordinate pixel processing within tiles. See [Local-GS](10237-local-gs.md).
+
+### DISTWAR
+Combines warp reduction with cache cooperation to reduce global atomic updates and contention during backward propagation. See [DISTWAR](10238-distwar.md).
+
+### Taming 3DGS
+Organizes backward computation around Gaussians, combining gradients before writing them back, replacing some global updates with local reduction. See [Taming 3DGS](10239-taming-3dgs.md).
+
+### Faster-GS
+Combines a refined Gaussian-centric backward pass with a parameter layout that keeps spatially nearby Gaussians close in memory, reducing global updates and enabling more regular reads. See [Faster-GS](10240-faster-gs.md).
+
+## Background
+The concept emerged as a response to the inefficiencies of static rasterization schedules in 3D Gaussian Splatting. Uneven tile lists and variable pixel traversal leave GPU resources idle. The approach was developed by multiple independent research groups to optimize both forward and backward passes:
+*   **Balanced 3DGS** [15] introduced dynamic tile assignment.
+*   **Local-GS** [62] focused on warp-level coordination.
+*   **DISTWAR** [17] targeted backward propagation contention.
+*   **Taming 3DGS** [63] reorganized backward computation around Gaussians.
+*   **Faster-GS** [64] optimized parameter layout for spatial locality.
+
+These methods are cited in the broader survey "From Splats to Silicon: Rethinking Computational Efficiency of 3DGS" [S1, unofficial].
+
+## Sources
+[S1] From Splats to Silicon: Rethinking Computational Efficiency of 3DGS, https://arxiv.org/abs/2609.06157, fetched 2026-10-29 (unofficial)

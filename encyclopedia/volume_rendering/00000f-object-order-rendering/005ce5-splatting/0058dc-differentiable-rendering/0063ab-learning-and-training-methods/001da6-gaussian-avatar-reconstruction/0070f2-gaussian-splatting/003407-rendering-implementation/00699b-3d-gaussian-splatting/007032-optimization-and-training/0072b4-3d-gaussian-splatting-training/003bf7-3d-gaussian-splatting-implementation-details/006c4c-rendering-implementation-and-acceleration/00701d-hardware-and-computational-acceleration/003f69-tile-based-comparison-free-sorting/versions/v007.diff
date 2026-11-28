@@ -1,0 +1,215 @@
+--- v006.md
++++ v007.md
+@@ -4,113 +4,140 @@
+ 
+ ## Overview
+-Tile-Based Comparison-Free Sorting restricts depth sorting operations to individual image tiles to avoid global synchronization, reduce hardware complexity, and achieve fixed latency per output [S1]. Unlike full-scene sorting methods that incur high memory overhead and variable latency due to global scans and prefix sums, this method processes Gaussians locally within tiles using a deterministic, comparator-free algorithm [S1]. It is specifically designed for hardware accelerators where predictable scheduling and low power consumption are critical, such as in AR/VR rendering pipelines [S1].
++Tile-Based Comparison-Free Sorting restricts the depth sorting of 3D Gaussian primitives to individual image tiles to avoid global synchronization, reduce hardware complexity, and achieve fixed latency per output [S1]. Unlike full-scene sorting methods that incur high memory overhead and variable latency due to global resorting, this method ensures deterministic, fixed per-output latency by matching the front-to-back alpha-blending requirement locally [S1]. It is specifically designed for hardware accelerators where predictable scheduling and low power consumption are critical, such as in AR/VR applications [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A set of $N$ 3D Gaussians projected into 2D, each associated with a tile identifier and a depth value [S1]. The depth values are non-negative because near-plane culling excludes points with depth $< 0$ [S1].
+-*   **Output:** The Gaussians sorted front-to-back (increasing depth) within each tile, ready for alpha compositing [S1].
++*   **Input:** A set of 3D Gaussian primitives projected into screen space, each associated with a tile ID and a depth value. The depth values are assumed to be non-negative (points with depth < 0 are culled during near-plane culling) [S1].
++*   **Output:** The primitives sorted in front-to-back order within each tile, ready for alpha blending [S1].
+ 
+ **Data Structures:**
+-*   **Sorting Key:** A tuple $\langle \text{tile-id}, \text{depth} \rangle$ [S1].
+-*   **Element Vector Table (EVT):** A binary vector of size $N$ used to track the status of elements [S1]. It is initialized to all 1s, indicating all elements are unsorted [S1]. An element is marked as sorted by setting its corresponding bit to 0 [S1].
+-*   **Bit Width ($n$):** The number of bits used to represent the depth value [S1].
++*   **Sorting Key:** A composite key $\langle \text{tile-id}, \text{depth} \rangle$ is used for each primitive [S1].
++*   **Element Vector Table (EVT):** A bit vector of size $N$ (where $N$ is the number of primitives in the current processing scope) initialized to all 1s. It tracks which elements remain unsorted [S1].
+ 
+ **Algorithm Steps:**
+-The sorting process identifies the Largest Element (LE) iteratively $N$ times [S1]. For each iteration, the LE is removed from the unsorted set, and the process repeats until the EVT is all 0s [S1].
++The sorting process follows the parallel comparison-free algorithm [S1], optimized for hardware implementation:
+ 
+-1.  **Initialization:** Initialize the EVT of size $N$ with all bits set to 1 [S1].
+-2.  **Concurrent Phase (Bitwise Filtering):**
+-    *   Process the $N$ elements in $k$ parallel clusters [S1].
+-    *   Iterate through the bits of the depth value from the Most Significant Bit (MSB) to the Least Significant Bit (LSB) [S1].
+-    *   **Sign Bit Handling:** Skip the sign bit operation because near-plane culling ensures depth is always non-negative (sign bit is always 0) [S1].
+-    *   For each bit position, filter out elements that are smaller than the current candidate maximum using bitwise AND operations and multiplexer-based selection within cascaded blocks [S1].
+-3.  **Sequential Phase (Refinement):**
+-    *   Pass the outputs from the concurrent phase clusters to a linear array of $k$ cascaded blocks [S1].
+-    *   Further refine the selection to identify the single Largest Element (LE) among the currently unsorted elements (those with EVT bit = 1) [S1].
+-4.  **Data Conflict Resolution (Duplicate Handling):**
+-    *   If multiple elements have the same maximum depth value, the EVT might return multiple "1"s, leading to ambiguity [S1].
+-    *   Resolve conflicts using bitwise inverter, bitwise AND, and an adder to uniquely identify one instance [S1].
+-    *   Compute the new flag $FO_{NEW}$ to update the EVT:
+-        $$FO_{NEW} = Fo \ \& \ (\sim Fo + 1'b1)$$
+-        where $Fo$ is the current flag vector [S1]. This operation isolates the least significant bit of the conflict set, ensuring deterministic selection of one element among duplicates [S1].
+-5.  **Update and Iterate:**
+-    *   Set the bit corresponding to the identified LE in the EVT to 0 [S1].
+-    *   Repeat steps 2–4 until the EVT contains all 0s, indicating all $N$ elements are sorted [S1].
++1.  **Initialization:** Initialize the EVT with all 1s to indicate that all $N$ elements are unsorted [S1].
++2.  **Iterative Selection:** Repeat the following steps $N$ times until the EVT contains all 0s, indicating all elements have been sorted [S1]:
++    a.  **Concurrent Phase:** $k$ parallel clusters process partitions of the $N$ $n$-bit elements. Starting from the most significant bit (MSB), the clusters filter out smaller values through bitwise AND operations and multiplexer-based selection within cascaded blocks [S1].
++    b.  **Sequential Phase:** The outputs from the concurrent clusters pass to a linear array of $k$ cascaded blocks to further refine the selection and identify the Largest Element (LE) among the unsorted elements [S1].
++    c.  **Conflict Resolution:** If duplicate depth values result in multiple candidates for the LE (EVT returns more than one "1"), resolve the conflict using bitwise inverter, bitwise AND, and an adder to compute the unique index:
++        $$ FO_{NEW} = Fo \& (\sim Fo + 1'b1) $$
++        where $Fo$ is the output vector from the selection phase [S1].
++    d.  **Update EVT:** Mark the selected LE as sorted by updating the EVT (setting the corresponding bit to 0) [S1].
++3.  **Optimization - Sign Bit Skipping:** Since near-plane culling excludes points with depth < 0, the sign bit of the depth value is always 0. The algorithm skips operations on the sign bit to reduce unnecessary computations [S1].
+ 
+ **Pseudocode:**
+ ```python
+-def tile_based_comparison_free_sort(gaussians, n_bits):
++def tile_based_comparison_free_sort(primitives, N, n_bits, k_clusters):
+     """
+-    Sorts Gaussians within a tile using comparison-free sorting.
+-    gaussians: List of objects with attributes .depth (n-bit integer) and .id.
+-    n_bits: Total number of bits in the depth representation (includes sign bit).
+-    Returns: List of Gaussians sorted by depth (front-to-back).
++    Sorts N primitives by depth within tiles using comparison-free sorting.
++    primitives: List of objects with .tile_id and .depth (n_bits, non-negative).
++    N: Number of primitives.
++    n_bits: Bit width of depth values.
++    k_clusters: Number of parallel processing clusters.
+     """
+-    N = len(gaussians)
+-    if N == 0:
+-        return []
+-
+-    # EVT tracks unsorted elements: 1 means unsorted, 0 means sorted
++    # Initialize Element Vector Table (EVT) with 1s (all elements unsorted)
+     evt = [1] * N
+-    sorted_gaussians = []
+     
+-    # Iterate N times to extract one element per cycle
++    sorted_primitives = []
++    
++    # Repeat N times to sort all elements
+     for _ in range(N):
+-        # Concurrent Phase: Filter candidates by bits MSB to LSB
+-        candidates = [i for i in range(N) if evt[i] == 1]
+-        if not candidates:
++        # Find the Largest Element (LE) among unsorted elements
++        le_index = find_largest_element(primitives, evt, n_bits, k_clusters)
++        
++        if le_index is None:
+             break
+             
+-        # Skip sign bit (index n_bits-1) as depth is guaranteed non-negative [S1]
+-        for bit_pos in range(n_bits - 2, -1, -1):
+-            if len(candidates) <= 1:
++        # Mark element as sorted in EVT
++        evt[le_index] = 0
++        
++        # Add to sorted list (front-to-back order)
++        sorted_primitives.append(primitives[le_index])
++        
++    return sorted_primitives
++
++def find_largest_element(primitives, evt, n_bits, k_clusters):
++    """
++    Identifies the largest depth value among unsorted elements using
++    concurrent and sequential phases.
++    """
++    # Filter only unsorted elements
++    unsorted_indices = [i for i, bit in enumerate(evt) if bit == 1]
++    if not unsorted_indices:
++        return None
++        
++    # Concurrent Phase: Process partitions from MSB
++    # This step involves bitwise AND and multiplexer selection
++    # to progressively filter out smaller values.
++    # [G] Implementation detail: The hardware logic processes bits
++    # from MSB to LSB. For each bit position, it checks if any
++    # unsorted element has a 1. If so, elements with 0 at this
++    # position are discarded.
++    
++    # Simplified logical representation of the hardware flow:
++    candidates = unsorted_indices
++    for bit_pos in range(n_bits - 1, -1, -1): # Skip sign bit as it is always 0
++        if len(candidates) == 1:
++            break
++            
++        # Check MSB of current candidates
++        # [G] In hardware, this is done via parallel comparators/muxes
++        # grouped into k_clusters.
++        has_one = False
++        for idx in candidates:
++            if (primitives[idx].depth >> bit_pos) & 1:
++                has_one = True
+                 break
+-            # Hardware filters out smaller values via bitwise AND and MUX selection [S1]
+-            has_one = any((gaussians[i].depth >> bit_pos) & 1 for i in candidates)
+-            if has_one:
+-                candidates = [i for i in candidates if (gaussians[i].depth >> bit_pos) & 1]
+-            else:
+-                candidates = [i for i in candidates if not ((gaussians[i].depth >> bit_pos) & 1)]
+                 
+-        # Sequential Phase & Conflict Resolution
+-        # If multiple candidates remain (duplicate depths), isolate one deterministically [S1]
+-        if len(candidates) > 1:
+-            # Hardware uses FO_NEW = Fo & (~Fo + 1) to pick the LSB of the conflict set [S1]
+-            # Simulated here by selecting the lowest index to match the hardware behavior
+-            le_index = candidates[0]
++        if has_one:
++            # Keep only elements with 1 at this bit position
++            candidates = [idx for idx in candidates 
++                          if (primitives[idx].depth >> bit_pos) & 1]
+         else:
+-            le_index = candidates[0]
+-            
+-        # Update EVT: Mark this element as sorted
+-        evt[le_index] = 0
+-        sorted_gaussians.append(gaussians[le_index])
++            # Keep only elements with 0 at this bit position
++            candidates = [idx for idx in candidates 
++                          if not ((primitives[idx].depth >> bit_pos) & 1)]
++                          
++    # Sequential Phase: Refine selection if multiple candidates remain
++    # (Handles duplicates via Conflict Resolution)
++    if len(candidates) > 1:
++        # Conflict Resolution: FO_NEW = Fo & (~Fo + 1)
++        # [G] This logic selects a deterministic single index from duplicates.
++        # For software simulation, we pick the first one, but hardware
++        # uses the bitwise formula to ensure deterministic hardware behavior.
++        le_index = candidates[0]
++    else:
++        le_index = candidates[0]
+         
+-    return sorted_gaussians
++    return le_index
+ ```
+ 
+ **Parameters:**
+-*   $N$: Number of Gaussians in the tile [S1].
++*   $N$: Number of Gaussian points in the tile. Varies by scene and view [S1].
+ *   $n$: Bit width of the depth value [S1].
+-*   $k$: Number of parallel clusters (hardware-dependent) [S1].
++*   $k$: Number of parallel clusters [S1].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Duplicate Depths:** The algorithm must handle duplicate depth values [S1]. The conflict resolution logic ($FO_{NEW}$) is critical to ensure deterministic selection and avoid errors in the final result [S1].
+-*   **Sign Bit:** The sign bit is always 0 due to near-plane culling [S1]. Removing the sign bit operation reduces unnecessary computations [S1].
+-*   **Variable $N$:** The number of Gaussians per tile varies significantly [S1]. The algorithm must handle arbitrary $N$ without fixed-size buffers that assume a maximum scene complexity [S1].
++*   **Duplicate Depths:** The algorithm must handle duplicate depth values. Without conflict resolution, multiple elements might be identified as the "largest," leading to errors. The bitwise formula $FO_{NEW} = Fo \& (\sim Fo + 1'b1)$ ensures a single deterministic output [S1].
++*   **Negative Depth:** Points with depth < 0 are excluded by near-plane culling, ensuring the sign bit is always 0. This allows the sign bit to be skipped, simplifying the logic [S1].
+ 
+ ## Subtopics
+ 
+ ### Parallel Comparison-Free Sorting
+-A tile-based, comparison-free sorting algorithm that uses an Element Vector Table (EVT) to identify the largest element in $O(N)$ deterministic cycles, avoiding the high memory overhead of radix sort [S1]. It employs concurrent and sequential phases with bitwise operations to filter elements, making it suitable for hardware implementation where low gate count and predictable latency are required [S1].
++A tile-based, comparison-free sorting algorithm for Gaussian points that uses an Element Vector Table (EVT) to identify the largest element (LE) in $O(N)$ deterministic cycles, avoiding the high memory overhead of radix sort [S1]. It is chosen when hardware simplicity, deterministic latency, and low power consumption are prioritized over the flexibility of software-based sorting. It is the foundational algorithm for the tile-based approach described above [S1].
+ 
+ ## Operating characteristics
+ *   **Time Complexity:** $O(N)$ deterministic cycles for sorting $N$ elements [S1].
+-*   **Hardware Complexity:** Low gate count compared to radix sort, which requires parallel scans and prefix sums [S1].
+-*   **Latency:** Fixed per-output latency, avoiding the latency spikes associated with global synchronization in full-scene sorting [S1].
+-*   **Performance:** Achieves full-HD rendering at 129 FPS, offering 3× higher throughput and 5.98× smaller area compared to prior 3DGS accelerators like GSCore [S1].
+-*   **Strengths:** Predictable scheduling, low power consumption, suitability for AR/VR hardware, and efficient handling of variable Gaussian counts per tile [S1].
++*   **Memory Complexity:** Low hardware complexity compared to radix sort, which incurs high memory overhead from histograms, prefix sums, and scatters [S1].
++*   **Performance:** Achieves full-HD rendering at 129 FPS, which is 3× higher throughput and 5.98× smaller area compared to the prior 3DGS accelerator [10] (GSCore) [S1].
++*   **Strengths:** Fixed per-output latency, no global synchronization, low hardware complexity, suitable for low-power AR/VR hardware [S1].
++*   **Limitations:** Requires near-plane culling to ensure non-negative depths for sign bit skipping; performance depends on the number of primitives per tile, which can vary significantly [S1].
++*   **When to use:** Hardware accelerators for real-time 3D Gaussian Splatting where predictable latency and low area are critical.
++*   **When not to use:** Software implementations on GPUs where radix sort or other parallel sorting algorithms are more efficient due to available memory bandwidth and flexibility.
+ 
+ ## Background
+-The method originates from research into hardware accelerators for 3D Gaussian Splatting, specifically addressing the bottleneck of depth sorting in real-time rendering [S1]. Traditional sorting methods like radix sort are resource-intensive and suffer from variable latency, making them unsuitable for low-power AR/VR hardware [S1]. The tile-based comparison-free approach builds on parallel comparison-free algorithms [21, 22] (cited in [S1]) but adds optimizations such as sign bit skipping and conflict resolution for duplicate values [S1]. It was implemented in a hardware accelerator that demonstrated significant improvements in throughput and area efficiency over previous designs like GSCore [10] [S1].
++The method originates from research into hardware accelerators for 3D Gaussian Splatting (3DGS), specifically addressing the bottleneck of depth sorting millions of Gaussian points [S1]. Traditional full-scene sorting is resource-intensive and causes latency spikes due to global synchronization [S1]. The tile-based comparison-free sorting approach builds on parallel comparison-free algorithms [21, 22] to provide a hardware-friendly solution. It was proposed in the paper "A 129 FPS Full HD Real-Time Accelerator for 3D Gaussian Splatting" [S1], which demonstrated significant improvements in throughput and area efficiency over previous accelerators like GSCore [10].
+ 
+ ## Sources

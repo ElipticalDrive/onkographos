@@ -1,0 +1,150 @@
+--- v002.md
++++ v003.md
+@@ -43,42 +43,46 @@
+ **Pseudocode**
+ ```python
+-def compute_multi_view_constraint(reference_view, neighborhood_view, gaussians, K, R, t):
++def compute_multi_view_constraint(reference_image, neighborhood_image, gaussians, K, R, t):
+     """
+     Computes the Multi-View Constraint loss between a reference and neighborhood view.
+     """
+-    # 1. Render depth and normal maps for the reference view via alpha blending [S1]
+-    # Standard 3DGS alpha-blending rasterizer is used here [G]
+-    depth_map_ref, normal_map_ref = render_gaussians_alpha_blend(gaussians, reference_view)
++    # Render depth and normal maps via alpha blending [G]
++    depth_map_ref, normal_map_ref = render_gaussians_alpha_blend(gaussians, reference_image)
+ 
+     loss_mv = 0.0
+     patch_radius = 1  # Not given in the sources [G]
+ 
+-    # 2. Iterate over pixels in the reference view
+-    for p in reference_view.pixels:
+-        # 3. Get normal and depth at pixel p
+-        n = normal_map_ref[p]  # list of 3 floats
+-        d = depth_map_ref[p]   # float
++    height, width = reference_image.height, reference_image.width
+ 
+-        # 4. Compute Homography Matrix H
+-        # H = K * (R - (t outer n) / d) * K_inv
+-        t_n_T = outer_product(t, n)  # 3x3 matrix
+-        H = mat_mul(K, mat_sub(R, mat_scale(t_n_T, 1.0 / d)))
+-        H = mat_mul(H, mat_inv(K))
++    # Iterate over pixels in the reference view
++    for y in range(height):
++        for x in range(width):
++            p = (x, y)
++            # Get normal and depth at pixel p
++            n = normal_map_ref[y][x]  # list of 3 floats
++            d = depth_map_ref[y][x]   # float
+ 
+-        # 5. Warp pixel p to p' using homogeneous coordinates
+-        p_h = [p.x, p.y, 1.0]
+-        p_prime_h = mat_vec_mul(H, p_h)
+-        p_prime_h = [v / p_prime_h[2] for v in p_prime_h]  # Normalize
+-        p_prime = (p_prime_h[0], p_prime_h[1])
++            # Compute Homography Matrix H: H = K * (R - (t outer n) / d) * K_inv
++            t_n_T = outer_product(t, n)  # 3x3 matrix
++            H = mat_mul(K, mat_sub(R, mat_scale(t_n_T, 1.0 / d)))
++            H = mat_mul(H, mat_inv(K))
+ 
+-        # 6. Construct patches around p and p'
+-        patch_p = get_patch_pixels(reference_view.image, p, patch_radius)
+-        patch_p_prime = get_patch_pixels(neighborhood_view.image, p_prime, patch_radius)
++            # Warp pixel p to p' using homogeneous coordinates
++            p_h = [float(x), float(y), 1.0]
++            p_prime_h = mat_vec_mul(H, p_h)
++            if abs(p_prime_h[2]) < 1e-6:
++                continue  # Skip invalid projections
++            p_prime_h = [v / p_prime_h[2] for v in p_prime_h]
++            p_prime = (p_prime_h[0], p_prime_h[1])
+ 
+-        # 7. Evaluate NCC
+-        ncc = normalized_cross_correlation(patch_p, patch_p_prime)
++            # Construct patches around p and p'
++            patch_p = get_patch_pixels(reference_image, p, patch_radius)
++            patch_p_prime = get_patch_pixels(neighborhood_image, p_prime, patch_radius)
+ 
+-        # 8. Accumulate loss
+-        loss_mv += (1.0 - ncc)
++            # Evaluate NCC
++            ncc = normalized_cross_correlation(patch_p, patch_p_prime)
++
++            # Accumulate loss
++            loss_mv += (1.0 - ncc)
+ 
+     return loss_mv
+@@ -97,18 +101,16 @@
+ 
+ def mat_inv(M):
+-    # 3x3 inverse using cofactors
+-    det = (M[0][0] * (M[1][1]*M[2][2] - M[1][2]*M[2][1]) -
+-           M[0][1] * (M[1][0]*M[2][2] - M[1][2]*M[2][0]) +
+-           M[0][2] * (M[1][0]*M[2][1] - M[1][1]*M[2][0]))
++    a, b, c = M[0][0], M[0][1], M[0][2]
++    d, e, f = M[1][0], M[1][1], M[1][2]
++    g, h, i = M[2][0], M[2][1], M[2][2]
++    det = a*(e*i - f*h) - b*(d*i - f*g) + c*(d*h - e*g)
++    if det == 0:
++        return [[0.0]*3 for _ in range(3)]
+     inv_det = 1.0 / det
+-    return [[(M[1][1]*M[2][2] - M[1][2]*M[2][1]) * inv_det,
+-             (M[0][2]*M[2][1] - M[0][1]*M[2][2]) * inv_det,
+-             (M[0][1]*M[1][2] - M[0][2]*M[1][1]) * inv_det],
+-            [(M[1][2]*M[2][0] - M[1][0]*M[2][2]) * inv_det,
+-             (M[0][0]*M[2][2] - M[0][2]*M[2][0]) * inv_det,
+-             (M[0][2]*M[1][0] - M[0][0]*M[1][2]) * inv_det],
+-            [(M[1][0]*M[2][1] - M[1][1]*M[2][0]) * inv_det,
+-             (M[0][1]*M[2][0] - M[0][0]*M[2][1]) * inv_det,
+-             (M[0][0]*M[1][1] - M[0][1]*M[1][0]) * inv_det]]
++    return [
++        [(e*i - f*h)*inv_det, (c*h - b*i)*inv_det, (b*f - c*e)*inv_det],
++        [(f*g - d*i)*inv_det, (a*i - c*g)*inv_det, (c*d - a*f)*inv_det],
++        [(d*h - e*g)*inv_det, (b*g - a*h)*inv_det, (a*e - b*d)*inv_det]
++    ]
+ 
+ def mat_vec_mul(M, v):
+@@ -116,14 +118,18 @@
+ 
+ def get_patch_pixels(image, center, radius):
+-    # Returns list of pixel values in a square window
+     patch = []
++    cx, cy = center
+     for dy in range(-radius, radius + 1):
+         for dx in range(-radius, radius + 1):
+-            x, y = center.x + dx, center.y + dy
++            x, y = cx + dx, cy + dy
+             if 0 <= x < image.width and 0 <= y < image.height:
+-                patch.append(image.get_color(x, y))
++                color = image.get_color(x, y)
++                intensity = 0.299 * color[0] + 0.587 * color[1] + 0.114 * color[2]
++                patch.append(intensity)
+     return patch
+ 
+ def normalized_cross_correlation(patch1, patch2):
++    if len(patch1) == 0 or len(patch2) == 0:
++        return 0.0
+     n = len(patch1)
+     mean1 = sum(patch1) / n
+@@ -139,5 +145,5 @@
+ 
+ **Parameters**
+-*   **Patch Radius**: Not given in the sources. The text mentions "several neighboring pixels" [S1].
++*   **Patch Radius**: Not given in the sources. The method selects several neighboring pixels around each considered pixel [S1].
+ *   **$\lambda$**: Weight for $L_{\text{SSIM}}$ in the total loss. Not given in the sources [S1].
+ 
+@@ -153,11 +159,11 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: Not given in the sources.
+-*   **Memory Complexity**: Not given in the sources.
+-*   **Measured Performance**: Not given in the sources.
++*   **Time Complexity**: Not given in the sources. [S1]
++*   **Memory Complexity**: Not given in the sources. [S1]
++*   **Measured Performance**: Not given in the sources. [S1]
+ *   **Strengths**: Improves geometry reconstruction in textureless regions [S1]. Mitigates susceptibility to lighting variations through patch-based NCC [S1].
+ *   **Limitations**: Relies on accurate depth and normal maps, which may be poor in textureless regions [S1].
+ *   **When to Use**: When 3DGS struggles with accurate geometry in textureless regions [S1].
+-*   **When Not to Use**: Not specified.
++*   **When Not to Use**: Not specified. [S1]
+ 
+ ## Background

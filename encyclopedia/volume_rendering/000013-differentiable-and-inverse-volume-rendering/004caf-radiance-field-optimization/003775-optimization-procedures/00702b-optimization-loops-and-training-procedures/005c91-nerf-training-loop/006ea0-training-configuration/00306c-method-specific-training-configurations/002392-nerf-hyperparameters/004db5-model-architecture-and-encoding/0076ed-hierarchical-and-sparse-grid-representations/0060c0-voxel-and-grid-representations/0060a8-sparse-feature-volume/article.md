@@ -1,0 +1,151 @@
+# Sparse Feature Volume
+
+Also called: Neural Implicit Scene Representation
+
+## Overview
+Sparse Feature Volume is a method for representing 3D scenes as a sparse grid of learnable latent vectors, where each voxel stores features decoded into a continuous Signed Distance Function (SDF) and radiance field [S1, unofficial]. It solves the problem of high-fidelity surface reconstruction and online monocular 3D reconstruction by combining the efficiency of sparse voxel structures with the detail-preserving power of SDFs, distinguishing itself from dense occupancy fields and standard color-only radiance fields [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A sequence of multi-view images (or a single monocular image sequence for online reconstruction).
+*   **Output:** A sparse feature volume data structure $F_{\theta}$ containing latent vectors for each active voxel, and a decoder network capable of querying SDF $s$ and color $\mathbf{c}$ at any 3D point $\mathbf{x}$.
+
+**Data Structures:**
+The core data structure is the **Sparse Feature Volume**.
+*   **Structure:** The 3D space is divided into a hierarchy of sparse voxels organized in coarse-to-fine levels.
+*   **Levels:** Three levels are defined: coarse ($c$), middle ($m$), and fine ($f$) [S1, unofficial].
+*   **Voxel Content:** Each active voxel $v$ at level $l$ stores a feature latent vector $F_{\theta}^l$.
+*   **Storage:** The sparsity is managed using the data structure from NeuralRecon [S1, unofficial], which efficiently stores only non-empty or relevant voxels.
+
+**Parameters:**
+*   **Levels:** $l \in \{c, m, f\}$ [S1, unofficial].
+*   **Sampling Points:** $N$ points sampled along a ray for volume rendering [S1, unofficial].
+
+**Steps:**
+
+1.  **Sparse Voxel Division:** Divide the 3D scene space into a set of sparse voxels [S1, unofficial].
+2.  **Feature Fusion (2D CNN):** Encode input multi-view images using a 2D CNN-based image encoder to extract 2D features [S1, unofficial].
+3.  **Spatial-Aware Fusion:** Fuse features from multiple views into the voxel space using a transformer module. This replaces the channel-wise average fusion used in prior works (e.g., NeuralRecon) to build more expressive latent vectors [S1, unofficial].
+4.  **Temporal/Global Update:** Merge the newly fused feature latent vectors with previous latent vectors using a Gated Recurrent Unit (GRU) module, preceded by a sparse 3D CNN, to form global feature latent vectors $F_{\theta}^l$ [S1, unofficial].
+5.  **Hierarchical Construction:** Construct the sparse feature volumes $F_{\theta}^l$ for $l \in \{c, m, f\}$ in a coarse-to-fine fashion [S1, unofficial].
+6.  **Querying (Interpolation):** For a query point $\mathbf{x} \in \mathbb{R}^3$, retrieve the feature vector by trilinearly interpolating the latent vectors from the eight corners of the containing voxel in the fine-level volume $F_{\theta}^f$ [S1, unofficial].
+7.  **Decoding:**
+    *   **SDF:** Decode the signed distance $s$ using an MLP decoder $f_\theta$ [S1, unofficial].
+    *   **Color:** Decode the color $\mathbf{c}$ using a separate MLP decoder $f_\omega$ and the radiance field latent vector $F_\omega$ [S1, unofficial].
+
+**Formulas:**
+
+The SDF decoder predicts the signed distance $s$ for a query point $\mathbf{x}$:
+$$ s = f_\theta(\mathbf{x}, \text{interp}(F_{\theta}^f, \mathbf{x})) $$
+where $f_\theta$ is an MLP-based decoder, $\mathbf{x} \in \mathbb{R}^3$ is the query point, and $\text{interp}$ denotes trilinear interpolation in the fine-level sparse feature volume $F_{\theta}^f$ [S1, unofficial].
+
+The radiance decoder predicts the color $\mathbf{c}$:
+$$ \mathbf{c} = f_\omega(\mathbf{x}, \text{interp}(F_{\omega}, \mathbf{x})) $$
+where $f_\omega$ is an MLP-based radiance decoder and $F_{\omega}$ is the radiance field latent vector [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def query_sparse_feature_volume(query_point, sparse_volume, decoder_sdf, decoder_color):
+    """
+    Query the SDF and color for a given 3D point from a sparse feature volume.
+    
+    Args:
+        query_point (np.array): 3D coordinates [x, y, z].
+        sparse_volume (dict): Dictionary mapping voxel coordinates to latent vectors.
+                              Keys are voxel indices, values are feature vectors.
+        decoder_sdf (nn.Module): MLP decoder for SDF.
+        decoder_color (nn.Module): MLP decoder for color.
+        
+    Returns:
+        s (float): Signed distance.
+        c (np.array): Color vector.
+    """
+    # 1. Identify the containing voxel
+    # In a sparse grid, we must find the voxel containing query_point.
+    # This typically involves hashing or spatial indexing.
+    voxel_coords = get_containing_voxel(query_point, sparse_volume.grid_params)
+    
+    # 2. Retrieve corner features
+    # Get the 8 corner voxel indices for trilinear interpolation
+    corner_indices = get_voxel_corners(voxel_coords, query_point)
+    
+    # Retrieve latent vectors for each corner. 
+    # If a corner is outside the sparse volume or empty, handle appropriately [G].
+    corner_features = []
+    for idx in corner_indices:
+        if idx in sparse_volume:
+            corner_features.append(sparse_volume[idx])
+        else:
+            # [G] Default to zero or nearest neighbor if sparse structure allows.
+            # Standard implementation assumes valid sparse voxels for active regions.
+            corner_features.append(torch.zeros_like(sparse_volume[corner_indices[0]]))
+            
+    corner_features = torch.stack(corner_features) # Shape: [8, feature_dim]
+    
+    # 3. Trilinear Interpolation
+    # Calculate interpolation weights based on query_point's position within the voxel
+    weights = calculate_trilinear_weights(query_point, voxel_coords)
+    
+    # Interpolate the latent vector
+    latent_vector = torch.sum(weights.unsqueeze(-1) * corner_features, dim=0)
+    
+    # 4. Decode SDF
+    # Concatenate query point and latent vector as per the paper's decoder input
+    sdf_input = torch.cat([query_point, latent_vector], dim=-1)
+    s = decoder_sdf(sdf_input)
+    
+    # 5. Decode Color
+    # Note: The paper uses F_omega for color. Assuming F_omega is stored similarly
+    # or derived from F_theta. For this implementation, we assume a separate lookup
+    # or the same latent vector is used if F_omega == F_theta in simplified setups.
+    # The paper distinguishes F_theta (SDF) and F_omega (Radiance).
+    # We assume F_omega is retrieved similarly or is the same structure.
+    # If F_omega is distinct, replace sparse_volume with radiance_volume.
+    radiance_latent = latent_vector # Placeholder if F_omega == F_theta, else lookup F_omega
+    color_input = torch.cat([query_point, radiance_latent], dim=-1)
+    c = decoder_color(color_input)
+    
+    return s, c
+
+def construct_sparse_feature_volume(images, initial_volume):
+    """
+    Construct and update the sparse feature volume from multi-view images.
+    """
+    # 1. Encode images using 2D CNN
+    image_features = image_encoder(images)
+    
+    # 2. Spatial-aware feature fusion using Transformer
+    # Fuse multi-view features into voxel space
+    fused_features = transformer_fusion(image_features, initial_volume)
+    
+    # 3. Merge with previous features using GRU after Sparse 3D CNN
+    # This step updates the global feature latent vectors
+    updated_volume = sparse_3d_cnn(fused_features)
+    global_features = gru_update(updated_volume, initial_volume)
+    
+    return global_features
+```
+
+**Edge Cases and Pitfalls:**
+*   **Sparse Boundary:** If a query point falls into a region with no voxels in the sparse volume, interpolation requires a fallback strategy (e.g., zero padding, nearest neighbor, or expanding the sparse volume) [G].
+*   **Precision:** Trilinear interpolation assumes the voxel grid is regular within the sparse structure's bounding box. Irregular voxel sizes (if used) would require weighted interpolation adjustments.
+*   **Memory:** While sparse, the transformer fusion and GRU updates can be memory-intensive for large scenes. Not given in the sources.
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources. The use of sparse voxels reduces the number of queries compared to dense grids, but transformer-based fusion adds computational overhead per frame/update.
+*   **Memory Complexity:** Proportional to the number of active voxels in the sparse volume, significantly less than dense $H \times W \times D$ grids for large scenes [S1, unofficial].
+*   **Strengths:** Efficient geometry learning via volume rendering optimization in the space of latent vectors; suitable for online reconstruction; continuous SDF provides stronger detail expression than occupancy fields [S1, unofficial].
+*   **Limitations:** Requires multi-view inputs for optimal fusion (though adapted for monocular online); sparsity management adds complexity compared to dense grids [S1, unofficial].
+*   **When to use:** High-fidelity surface reconstruction, online monocular 3D reconstruction, scenes with large empty spaces where sparse representation is beneficial [S1, unofficial].
+*   **When not to use:** Scenes with uniform density where dense grids might be simpler; real-time applications where transformer fusion overhead is prohibitive.
+
+## Background
+*   **Origin:** The Sparse Feature Volume, also known as Neural Implicit Scene Representation (NISR), was introduced in "MonoNeuralFusion: Online Monocular Neural 3D Reconstruction with Geometric Priors" [S1, unofficial].
+*   **History:** It builds upon the sparse voxel structure from NeuralRecon [S1, unofficial] and improves upon it by using transformer-based spatial-aware feature fusion instead of channel-wise average fusion, and by using SDFs for geometry representation instead of continuous occupancy fields [S1, unofficial].
+*   **Usage:** Used in online monocular neural 3D reconstruction, leveraging geometric priors for high-fidelity surface reconstruction [S1, unofficial].
+
+## Sources
+[S1] MonoNeuralFusion: Online Monocular Neural 3D Reconstruction with Geometric Priors, https://doi.org/10.48550/arxiv.2209.15153, fetched 2026-10-29 (unofficial)

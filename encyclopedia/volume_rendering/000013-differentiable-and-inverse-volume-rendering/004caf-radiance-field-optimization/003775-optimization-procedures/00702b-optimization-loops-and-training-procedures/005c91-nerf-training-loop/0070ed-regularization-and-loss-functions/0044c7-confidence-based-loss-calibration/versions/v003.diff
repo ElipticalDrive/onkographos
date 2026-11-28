@@ -1,0 +1,155 @@
+--- v002.md
++++ v003.md
+@@ -1,22 +1,22 @@
+ # Confidence-Based Loss Calibration
+ 
+-Also called: ICON, Incremental CONfidence
++Also called: ICON
+ 
+ ## Overview
+-Confidence-Based Loss Calibration dynamically weights the optimization of NeRF parameters and camera poses using estimated reliability metrics, addressing the bas-relief ambiguity and registration failures in joint optimization [S1]. It sets itself apart from static regularization methods by using pose confidence to weight NeRF gradients and ray confidence to weight pose gradients, effectively decoupling error sources during training [S1].
++Confidence-Based Loss Calibration dynamically weights the optimization of NeRF parameters and camera poses using estimated reliability metrics [S1]. It sets itself apart from static regularization methods by cross-weighting gradients: pose confidence weights NeRF gradients, while ray confidence weights pose gradients [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Current NeRF parameters $\Theta$, current pose estimates $\hat{P}$, input images $I$, momentum factor $\beta$, re-initialization threshold $\lambda$, and window size $K$.
+-*   **Outputs:** Calibrated loss values $L_{NeRF}$, $L_{Pose}$, and updated parameters $\Theta, \hat{P}$.
++*   **Inputs:** Current NeRF parameters $\Theta$, current pose estimates $\hat{P}$, input images $I$, momentum factor $\beta$, re-initialization threshold $\lambda$, and window size $K$ [S1].
++*   **Outputs:** Calibrated loss values $L_{\text{NeRF}}$, $L_{\text{Pose}}$, and updated parameters $\Theta, \hat{P}$ [S1].
+ 
+ **Data Structures:**
+-*   **Pose Confidence ($\zeta_P$):** A scalar value per pose, maintained as an exponential moving average.
+-*   **Ray Confidence ($\zeta_r$):** A scalar value per ray, computed from the current step's consistency metrics.
++*   **Pose Confidence ($\zeta_P$):** A scalar value per pose, maintained as an exponential moving average [S1].
++*   **Ray Confidence ($\zeta_r$):** A scalar value per ray, computed from consistency metrics [S1].
+ 
+ **Steps:**
+-1.  **Initialize:** Set initial pose confidences $\zeta_P^{(0)}$ based on initial registration quality.
+-2.  **Sample Rays:** For each pose $P_i$, sample a set of rays $\{r_{ji}\}_{j=1}^B$.
+-3.  **Compute Ray Confidence ($\zeta_r$):** Calculate a confidence metric $\zeta_{r_{ji}}$ for each ray based on consistency (e.g., photometric or geometric consistency) [S1].
++1.  **Initialize:** Set initial pose confidences $\zeta_{P}^{(0)}$ based on the first batch's mean ray confidence [G].
++2.  **Sample Rays:** For each pose $P_i$, sample a set of $B$ rays $\{r_{ji}\}_{j=1}^B$ [S1].
++3.  **Compute Ray Confidence ($\zeta_r$):** Calculate a confidence metric $\zeta_{r_{ji}}$ for each ray based on photometric or geometric consistency [S1].
+ 4.  **Update Pose Confidence ($\zeta_P$):** Update the exponential moving average for pose $P_i$:
+     $$ \zeta_{P_i}^{(t)} = \beta \zeta_{P_i}^{(t-1)} + (1 - \beta) \frac{1}{B} \sum_{j=1}^B \zeta_{r_{ji}} $$
+@@ -24,11 +24,11 @@
+ 5.  **Compute Calibrated Losses:**
+     *   **NeRF Loss:** Weight the per-ray loss by the *pose* confidence $\zeta_{P_i}$:
+-        $$ L_{NeRF}(\Theta|\hat{P}, I) = \frac{\sum_i \sum_j L(r_{ji}) \zeta_{P_i}}{\sum_i \zeta_{P_i}} $$
+-    *   **Pose Loss:** Weight the per-ray loss by the *ray* confidence $\zeta_{r_{ji}}$:
+-        $$ L_{Pose}(\hat{P}|\Theta, I) = \frac{\sum_i \sum_j L(r_{ji}) \zeta_{r_{ji}}}{\sum_i \sum_j \zeta_{r_{ji}}} $$
++        $$ L_{\text{NeRF}}(\Theta|\hat{P}, I) = \frac{\sum_i \sum_j L(r_{ji}) \zeta_{P_i}}{\sum_i \zeta_{P_i}} $$
++    *   **Pose Loss:** Weight the per-ray loss by the *ray* confidence $\zeta_{r_{ji}}$: 
++        $$ L_{\text{Pose}}(\hat{P}|\Theta, I) = \frac{\sum_i \sum_j L(r_{ji}) \zeta_{r_{ji}}}{\sum_i \sum_j \zeta_{r_{ji}}} $$
+     *   **Total Loss:**
+-        $$ L_{all}(\Theta, \hat{P}|I) = L_{NeRF} + L_{Pose} + L_{conf} $$
+-        Where $L_{conf}$ is an additional confidence regularization term [S1].
+-6.  **Optimize:** Backpropagate gradients through $L_{all}$ to update $\Theta$ and $\hat{P}$.
++        $$ L_{\text{all}}(\Theta, \hat{P}|I) = L_{\text{NeRF}} + L_{\text{Pose}} + L_{\text{conf}} $$
++        Where $L_{\text{conf}}$ is an additional confidence regularization term [S1].
++6.  **Optimize:** Backpropagate gradients through $L_{\text{all}}$ to update $\Theta$ and $\hat{P}$ [S1].
+ 7.  **Pose Re-initialization (Guard):** If a new pose $P_i$ fails to register (abrupt confidence drop), restart from the previous pose. Failure is declared if:
+     $$ \zeta_{P_i} \le \text{mean}(\{\zeta_{P_j}\}_{j=i-K}^{i-1}) - \lambda \cdot \text{std}(\{\zeta_{P_j}\}_{j=i-K}^{i-1}) $$
+@@ -42,40 +42,34 @@
+     sum_pose_conf = 0.0
+     sum_ray_conf = 0.0
+-    ray_losses = []
+-    ray_confs = []
+     pose_confs = []
+ 
+     for i, P_i in enumerate(poses):
+-        # 1. Sample rays for current pose
+-        rays = sample_rays(P_i, images[i])
+-        
+-        # 2. Compute per-ray loss and raw confidence
++        rays = [r for r in range(B)]  # B rays sampled per pose
++        current_ray_confs = []
+         current_ray_losses = []
+-        current_ray_confs = []
+-        for r in rays:
+-            # Render and compute basic loss L(r)
+-            loss_r = compute_rendering_loss(nerf_params, P_i, r, images[i])
+-            # Compute ray confidence (e.g., consistency metric)
+-            conf_r = compute_ray_confidence(nerf_params, P_i, r, images[i])
++
++        for j, r in enumerate(rays):
++            loss_r = render_and_compute_loss(nerf_params, P_i, r, images[i])
++            conf_r = compute_consistency_confidence(nerf_params, P_i, r, images[i])
+             
+             current_ray_losses.append(loss_r)
+             current_ray_confs.append(conf_r)
+             
+-            # Accumulate for Pose Loss (weighted by ray confidence)
++            # Accumulate for Pose Loss (Eq 6)
+             L_pose += loss_r * conf_r
+             sum_ray_conf += conf_r
+ 
+-        # 3. Update Pose Confidence (Exponential Moving Average)
++        # Update Pose Confidence (Eq 4)
+         mean_ray_conf = sum(current_ray_confs) / len(current_ray_confs)
+-        prev_conf = pose_confs[i] if i < len(pose_confs) else mean_ray_conf
++        prev_conf = pose_confs[i-1] if i > 0 else mean_ray_conf
+         new_conf = beta * prev_conf + (1 - beta) * mean_ray_conf
+         pose_confs.append(new_conf)
+         
+-        # 4. Accumulate for NeRF Loss (weighted by pose confidence)
++        # Accumulate for NeRF Loss (Eq 5)
+         for loss_r in current_ray_losses:
+             L_neRF += loss_r * new_conf
+         sum_pose_conf += new_conf
+ 
+-    # 5. Normalize Losses
++    # Normalize Losses
+     if sum_pose_conf > 0:
+         L_neRF /= sum_pose_conf
+@@ -83,20 +77,26 @@
+         L_pose /= sum_ray_conf
+ 
+-    # 6. Pose Re-initialization Check
++    # Pose Re-initialization Guard
+     if i >= K:
+         window = pose_confs[i-K:i]
+         mean_w = sum(window) / len(window)
+-        std_w = sqrt(sum((x - mean_w)**2 for x in window) / len(window))
++        std_w = (sum((x - mean_w)**2 for x in window) / len(window)) ** 0.5
+         if new_conf < mean_w - lam * std_w:
+-            # Restart from previous pose
+-            poses[i] = poses[i-1]
+-            # Re-compute or reset confidence for this step
+-            pass
++            poses[i] = poses[i-1]  # Restart from previous pose
+ 
+-    # 7. Add Confidence Regularization (L_conf)
+-    L_conf = compute_confidence_regularization(pose_confs, ray_confs)
+-    
++    # Confidence regularization term (formula not provided in sources)
++    L_conf = 0.0 
++
+     total_loss = L_neRF + L_pose + L_conf
+     return total_loss, nerf_params, poses
++
++def render_and_compute_loss(nerf_params, pose, ray, image):
++    # Standard differentiable volume rendering and L2/SSIM loss computation [G]
++    rendered_color = volume_render(nerf_params, pose, ray)
++    return (rendered_color - image[ray]).pow(2).mean()
++
++def compute_consistency_confidence(nerf_params, pose, ray, image):
++    # Consistency metric (e.g., photometric or geometric) normalized to [0, 1] [G]
++    return 1.0 / (1.0 + abs(volume_render(nerf_params, pose, ray) - image[ray]))
+ ```
+ 
+@@ -107,11 +107,11 @@
+ 
+ ## Operating characteristics
+-*   **Complexity:** Adds minimal overhead to the training loop, primarily involving the computation of ray/pose confidence metrics and simple averaging operations.
+-*   **Strengths:** Mitigates the bas-relief ambiguity by down-weighting ambiguous poses [S1]. Prevents error propagation from poorly registered images by re-initializing failed poses [S1].
++*   **Complexity:** Adds minimal overhead to the training loop, primarily involving the computation of ray/pose confidence metrics and simple averaging operations [S1].
++*   **Strengths:** Prevents error propagation from poorly registered images by re-initializing failed poses [S1].
+ *   **Limitations:** Requires careful tuning of hyperparameters $\beta$, $\lambda$, and $K$ [S1]. Relies on the quality of the underlying confidence metrics [S1][S2, unofficial].
+ *   **When to use:** Joint pose and NeRF optimization where initial pose estimates may be noisy or registration fails [S1].
+ 
+ ## Background
+-Introduced in the ICON (Incremental CONfidence) paper [S1], this method draws inspiration from trial-and-error registration mechanisms in incremental SfM [S1]. It addresses the bas-relief ambiguity, a common issue in monocular NeRF optimization where depth and scale are coupled [S1].
++Introduced in the ICON (Incremental CONfidence) paper [S1], this method draws inspiration from trial-and-error registration mechanisms in incremental SfM [S1].
+ 
+ ## Sources

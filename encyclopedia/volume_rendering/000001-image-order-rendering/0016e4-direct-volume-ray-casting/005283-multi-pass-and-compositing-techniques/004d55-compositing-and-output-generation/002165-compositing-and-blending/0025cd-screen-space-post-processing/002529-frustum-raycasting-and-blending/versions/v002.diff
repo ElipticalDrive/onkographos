@@ -1,0 +1,179 @@
+--- v001.md
++++ v002.md
+@@ -4,91 +4,107 @@
+ 
+ ## Overview
+-Frustum Raycasting and Blending is a screen-space post-processing technique that casts rays from the camera through each pixel to intersect a cloud volume bounding box, blending the resulting cloud color with the original scene color [S1, unofficial]. It addresses the artifacts of standard alpha blending (incorrect transparency order) and alpha testing (hard edges) by performing a screen-space depth-difference check during the final compositing pass [S1, unofficial]. It differs from [Cloud Compositing & Tone Mapping](3628-cloud-compositing-tone-mapping.md) by explicitly using ray-box intersection logic in the fragment shader rather than pre-composited textures, and from [HDR Post-Processing Pipeline](4633-hdr-post-processing-pipeline.md) by focusing on volumetric occlusion rather than luminance scaling.
++Frustum Raycasting and Blending is a screen-space post-processing technique that casts rays from the camera through each pixel, intersects them with a cloud volume bounding box, and blends the resulting cloud color with the original scene color [S1, unofficial]. It operates as a full-screen fragment shader pass that runs after the main scene render [S1, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** Scene texture (`_MainTex`), UV coordinates (`input.uv`), camera world position (`_CameraWorldPosition`), cloud volume bounds (`_CloudVolumeMinBound`, `_CloudVolumeMaxBound`), and frustum corners (`_FrustumCornerTR`, `_FrustumCornerBR`).
+-*   **Output:** Blended color (`finalColor`).
++**Inputs and Outputs:** The shader receives the scene texture (`_MainTex`), UV coordinates (`input.uv`), camera world position (`_CameraWorldPosition`), cloud volume bounds (`_CloudVolumeMinBound`, `_CloudVolumeMaxBound`), and frustum corners (`_FrustumCornerTR`, `_FrustumCornerBR`) [S1, unofficial]. The C# script additionally passes the density threshold, scatter factor, and wind offset [S1, unofficial]. The output is the final blended color for each fragment [S1, unofficial].
+ 
+-**Data Structures:**
+-*   `Vector3`: Used for positions, directions, and bounds.
+-*   `Vector2`: Used for UV coordinates.
+-*   `float`: Used for distances and color components.
++**Data Structures:** Positions, directions, and bounds use `Vector3` types [S1, unofficial]. UV coordinates use `Vector2` types [S1, unofficial]. Distances, color components, and thresholds use `float` types [S1, unofficial].
+ 
+-**Steps:**
+-1.  **Sample Scene Color:** Retrieve the original scene color from `_MainTex` using the fragment's UV coordinates.
+-    $$ C_{scene} = \text{tex2D}(\text{_MainTex}, \text{input.uv}) $$
+-2.  **Initialize Ray:** Set the ray origin to the camera's world position.
+-    $$ O = \text{_CameraWorldPosition} $$
+-3.  **Compute Ray Direction:** Calculate the direction vector from the camera to the current pixel. Normalize this vector.
+-    $$ D = \text{normalize}(\text{direction}) $$
+-    [G] The direction is typically derived from the screen-space position transformed into world space, or by using the pre-computed frustum corners if the shader is applied as a full-screen quad.
+-4.  **Ray-Box Intersection:** Calculate the intersection of the ray $(O, D)$ with the axis-aligned bounding box defined by `_CloudVolumeMinBound` and `_CloudVolumeMaxBound`. This returns entry distance $t_{entry}$ and exit distance $t_{exit}$.
+-    $$ (t_{entry}, t_{exit}) = \text{RayBoxIntersection}(O, D, \text{_CloudVolumeMinBound}, \text{_CloudVolumeMaxBound}) $$
+-5.  **March Density:** If $t_{entry} < t_{exit}$ (indicating an intersection), march along the ray segment $[t_{entry}, t_{exit}]$ to sample the cloud density and compute the cloud color.
+-    $$ C_{cloud} = \text{MarchDensity}(t_{entry}, t_{exit}, O, D, \text{_CloudVolumeMinBound}, \text{_CloudVolumeMaxBound}) $$
+-    [G] `MarchDensity` typically involves stepping through the volume, sampling a 3D noise texture (e.g., Perlin noise) scaled by a frequency, accumulating density, and applying a scatter factor to determine opacity and color.
+-6.  **Blend:** If an intersection occurred, blend the cloud color with the scene color using the cloud's alpha.
+-    $$ C_{final} = \text{lerp}(C_{scene}, C_{cloud}, C_{cloud}.a) $$
+-    If no intersection occurred, return the original scene color.
+-    $$ C_{final} = C_{scene} $$
++**Steps:** First, the shader samples the original scene color from `_MainTex` using the fragment's UV coordinates [S1, unofficial]. Second, it sets the ray origin to the camera's world position `_CameraWorldPosition` [S1, unofficial]. Third, it calculates the ray direction vector from the camera to the current pixel and normalizes it [S1, unofficial]. Fourth, it calculates the ray-box intersection of the ray $(O, D)$ with the axis-aligned bounding box defined by `_CloudVolumeMinBound` and `_CloudVolumeMaxBound`, returning entry distance $t_{entry}$ and exit distance $t_{exit}$ [S1, unofficial]. Fifth, if $t_{entry} < t_{exit}$, it marches along the ray segment $[t_{entry}, t_{exit}]$ to sample the cloud density and compute the cloud color [S1, unofficial]. Sixth, if an intersection occurred, it blends the cloud color with the scene color using the cloud's alpha via `lerp(originalColour, cloudColour, cloudColour.a)` [S1, unofficial]. If no intersection occurred, it returns the original scene color [S1, unofficial].
+ 
+-**C# Script Setup (OnRenderImage):**
+-1.  In the `OnRenderImage` method, calculate the frustum corners at the far clip plane using `Camera.CalculateFrustumCorners`.
+-2.  Transform these corners from camera space to world space using `camera.transform.TransformDirection`.
+-3.  Pass the transformed corners to the shader as `_FrustumCornerTR` (Top-Right) and `_FrustumCornerBR` (Bottom-Right).
+-4.  Set the cloud volume bounds from the scene object's `Renderer.bounds`.
+-    ```csharp
+-    void OnRenderImage(RenderTexture source, RenderTexture destination)
++**Pseudocode:** The following Python-like implementation combines the shader logic and helper routines [S1, unofficial].
++```python
++def FrustumRaycastBlending(uv, cameraPos, frustumCorners, boundsMin, boundsMax, densityThreshold, scatterFactor, windOffset):
++    # Compute ray direction from screen UV and frustum corners [G]
++    # Standard full-screen quad mapping assumes corners are ordered [BL, BR, TL, TR]
++    pixelWorld = lerp(lerp(frustumCorners[0], frustumCorners[1], uv.x), 
++                      lerp(frustumCorners[2], frustumCorners[3], uv.x), uv.y)
++    direction = normalize(pixelWorld - cameraPos)
++    origin = cameraPos
++    
++    # Ray-box intersection [S1, unofficial]
++    tEntry, tExit = RayBoxIntersection(origin, direction, boundsMin, boundsMax)
++    
++    if tEntry < tExit:
++        cloudColour = MarchDensity(tEntry, tExit, origin, direction, boundsMin, boundsMax, densityThreshold, scatterFactor, windOffset)
++        return lerp(sceneColour, cloudColour, cloudColour.a)
++    else:
++        return sceneColour
++
++def RayBoxIntersection(origin, direction, boundsMin, boundsMax):
++    # Standard slab method for AABB intersection [G]
++    tMin = (boundsMin - origin) / direction
++    tMax = (boundsMax - origin) / direction
++    t1 = min(tMin, tMax)
++    t2 = max(tMin, tMax)
++    tEntry = max(t1.x, t1.y, t1.z)
++    tExit = min(t2.x, t2.y, t2.z)
++    return tEntry, tExit
++
++def MarchDensity(tEntry, tExit, origin, direction, boundsMin, boundsMax, densityThreshold, scatterFactor, windOffset):
++    # Step through the volume segment [S1, unofficial]
++    steps = 32 # Not given in the sources.
++    stepSize = (tExit - tEntry) / steps
++    accumulatedDensity = 0.0
++    accumulatedColor = vec3(0.0)
++    for i in range(steps):
++        t = tEntry + i * stepSize
++        samplePos = origin + direction * t
++        # Sample 3D noise (e.g., Perlin noise) scaled by frequency [S1, unofficial]
++        noiseVal = SampleNoise(samplePos + windOffset)
++        density = noiseVal * scatterFactor
++        accumulatedDensity += density
++        if accumulatedDensity > densityThreshold:
++            break
++        accumulatedColor += density
++    alpha = clamp(accumulatedDensity, 0.0, 1.0)
++    return vec4(accumulatedColor, alpha)
++```
++
++**C# Script Setup:** The Unity script initializes the material parameters each frame [S1, unofficial]. It retrieves the cloud volume bounds from a scene object's `Renderer.bounds` component [S1, unofficial]. It calculates the frustum corners at the far clip plane using `Camera.CalculateFrustumCorners` [S1, unofficial]. It transforms these corners from camera space to world space using `camera.transform.TransformDirection` [S1, unofficial]. It passes the transformed corners to the shader as `_FrustumCornerTR` and `_FrustumCornerBR` [S1, unofficial].
++```csharp
++void OnRenderImage(RenderTexture source, RenderTexture destination)
++{
++    if (CloudShaderMaterial != null && CloudVolumeBounds != null)
+     {
+-        if (CloudShaderMaterial != null && CloudVolumeBounds != null)
+-        {
+-            Bounds bounds = CloudVolumeBounds.GetComponent<Renderer>().bounds;
+-            CloudShaderMaterial.SetVector("_CloudVolumeMinBound", bounds.min);
+-            CloudShaderMaterial.SetVector("_CloudVolumeMaxBound", bounds.max);
+-            CloudShaderMaterial.SetFloat("_DensityThreshold", densityThreshold);
+-            CloudShaderMaterial.SetFloat("_ScatterFactor", scatterFactor);
+-            
+-            // Calculate and set frustum corners
+-            Camera cam = GetComponent<Camera>();
+-            Vector3[] corners = new Vector3[4];
+-            cam.CalculateFrustumCorners(new Rect(0, 0, 1, 1), cam.farClipPlane, Camera.MonoOrStereoscopicEye.Mono, corners);
+-            // Transform to world space
+-            for (int i = 0; i < 4; i++) {
+-                corners[i] = cam.transform.TransformDirection(corners[i]);
+-            }
+-            CloudShaderMaterial.SetVector("_FrustumCornerTR", corners[2]); // Top-Right
+-            CloudShaderMaterial.SetVector("_FrustumCornerBR", corners[3]); // Bottom-Right
++        Bounds bounds = CloudVolumeBounds.GetComponent<Renderer>().bounds;
++        CloudShaderMaterial.SetVector("_CloudVolumeMinBound", bounds.min);
++        CloudShaderMaterial.SetVector("_CloudVolumeMaxBound", bounds.max);
++        CloudShaderMaterial.SetFloat("_DensityThreshold", densityThreshold);
++        CloudShaderMaterial.SetFloat("_ScatterFactor", scatterFactor);
++        
++        Camera cam = GetComponent<Camera>();
++        Vector3[] corners = new Vector3[4];
++        cam.CalculateFrustumCorners(new Rect(0, 0, 1, 1), cam.farClipPlane, Camera.MonoOrStereoscopicEye.Mono, corners);
++        for (int i = 0; i < 4; i++) {
++            corners[i] = cam.transform.TransformDirection(corners[i]);
+         }
+-        Graphics.Blit(source, destination, CloudShaderMaterial);
++        CloudShaderMaterial.SetVector("_FrustumCornerTR", corners[2]);
++        CloudShaderMaterial.SetVector("_FrustumCornerBR", corners[3]);
+     }
+-    ```
++    Graphics.Blit(source, destination, CloudShaderMaterial);
++}
++```
+ 
+-**Parameters:**
+-*   `_DensityThreshold`: Threshold for density accumulation to determine opacity.
+-*   `_ScatterFactor`: Factor controlling light scattering within the volume.
+-*   `windSpeed`: Speed at which the wind offset increases, used to animate noise sampling coordinates.
++**Parameters:** The density threshold controls the accumulation cutoff for opacity [S1, unofficial]. The scatter factor scales the sampled noise values to determine opacity and color contribution [S1, unofficial]. The wind speed increments a global offset each frame to animate the noise sampling coordinates [S1, unofficial].
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Precision:** Ray-box intersection calculations can suffer from floating-point precision errors near the box boundaries.
+-*   **Degenerate Input:** If the camera is inside the cloud volume, $t_{entry}$ may be negative, requiring clamping to 0.
+-*   **Performance:** Ray marching is computationally expensive; the number of steps in `MarchDensity` must be limited.
++**Edge Cases and Pitfalls:** Ray-box intersection calculations can suffer from floating-point precision errors near the box boundaries [G]. If the camera is inside the cloud volume, $t_{entry}$ may be negative and requires clamping to zero [G]. Ray marching is computationally expensive, so the step count must be limited to maintain performance [G].
+ 
+ ## Subtopics
+ 
+ ### [Cloud-Scene Occlusion Blending](20794-cloud-scene-occlusion-blending.md)
+-A technique that uses depth information from opaque objects and the cloud layer to determine visibility, preventing clouds from appearing in front of opaque objects. It is chosen when correct occlusion is critical, unlike standard alpha blending.
++A post-processing technique that blends rendered clouds with the scene by using depth information from opaque objects and the cloud layer to determine visibility and occlusion. It prevents clouds from appearing in front of opaque objects incorrectly and is chosen when correct occlusion is critical.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N \cdot S)$, where $N$ is the number of pixels and $S$ is the number of steps in the ray march.
+-*   **Memory Complexity:** $O(1)$ per pixel, excluding the texture memory for the noise volume.
+-*   **Performance:** Dependent on the resolution and the number of marching steps. High resolutions or large volumes can cause significant performance drops.
+-*   **Strengths:** Provides accurate occlusion and blending without pre-computation; works with dynamic cloud volumes.
+-*   **Limitations:** Computationally intensive; requires careful tuning of parameters to avoid artifacts.
+-*   **When to Use:** When high-quality volumetric clouds are needed and performance allows for per-pixel ray marching.
+-*   **When Not to Use:** When performance is critical or the cloud volume is static and can be pre-composited.
++*   **Time Complexity:** $O(N \cdot S)$, where $N$ is the number of pixels and $S$ is the number of marching steps [G].
++*   **Memory Complexity:** $O(1)$ per pixel, excluding the texture memory for the noise volume [G].
++*   **Performance:** Dependent on the resolution and the number of marching steps [S1, unofficial].
++*   **Strengths:** Provides accurate occlusion and blending without pre-computation [S1, unofficial].
++*   **Limitations:** Computationally intensive and requires careful parameter tuning [S1, unofficial].
++*   **When to Use:** When high-quality volumetric clouds are needed and performance allows for per-pixel ray marching [S1, unofficial].
++*   **When Not to Use:** When performance is critical or the cloud volume is static and can be pre-composited [S1, unofficial].
+ 
+ ## Background
+-This method is part of a volumetric cloud renderer implementation, often associated with Unity shader programming. It builds on the principles of direct volume ray casting and screen-space post-processing. The use of `OnRenderImage` indicates its integration into a Unity-based rendering pipeline. The noise generation often relies on Perlin noise, as referenced in the source code comments.
++This method originates from a volumetric cloud renderer implementation designed for the Unity engine [S1, unofficial]. It builds on direct volume ray casting principles and integrates into the `OnRenderImage` post-processing pipeline [S1, unofficial]. The noise generation relies on a 3D Perlin noise implementation that uses a permutation lookup table, gradient hashing, and smooth interpolation [S1, unofficial].
+ 
+ ## Sources

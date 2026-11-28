@@ -1,0 +1,71 @@
+# StyleNeRF Architecture
+
+Also called: Style-based 3D-Aware Generator
+
+## Overview
+StyleNeRF is a generative radiance field model that synthesizes high-resolution, 3D-consistent images by integrating learned 3D features along camera rays [S1, unofficial]. It differs from standard NeRF by replacing the deterministic coordinate-based MLP with a style-based synthesis network conditioned on latent codes, enabling high-fidelity appearance control similar to StyleGAN2 [S1, unofficial]. Unlike CoRF, which modifies the generator for motion control and removes upsampling blocks, StyleNeRF relies on fixed-resolution ray sampling and standard upsampling within the synthesis backbone [S2].
+
+## How it works
+**Inputs and Outputs**
+*   **Inputs:** Camera pose (origin $\mathbf{o}$ and direction $\mathbf{d}$), latent code $\mathbf{z}$ sampled from a standard Gaussian distribution, and optionally a motion representation $\mathbf{m}$ (though the baseline StyleNeRF does not condition on $\mathbf{m}$, CoRF does [S2]).
+*   **Outputs:** An RGB image $\mathbf{I}_0$ of fixed resolution $32^2$ during training, upsampled to $256^2$ for evaluation [S1, unofficial].
+
+**Data Structures**
+*   **Mapping Network:** Processes latent codes $\mathbf{z}$ into style vectors. The output vectors are broadcast to the synthesis networks [S1, unofficial].
+*   **Synthesis Network Backbone:** Based on NeRF++ [S1, unofficial].
+    *   **Foreground NeRF:** Occupies a unit sphere. Uses an MLP to predict density $\sigma$.
+    *   **Background NeRF:** Uses inverted sphere parameterization for unbounded backgrounds. Uses an MLP with fewer parameters than the foreground to predict density [S1, unofficial].
+    *   **Shared MLP:** Predicts color (and features) for both foreground and background [S1, unofficial].
+*   **Style-Conditioned Block:** Consists of an affine transformation layer and a $1 \times 1$ Convolution layer [S1, unofficial].
+
+**Rendering Formula**
+The generator $G$ renders an image by casting rays from camera origin $\mathbf{o}$ through image plane pixels. For a ray $\mathbf{r}(t)$, the aggregated feature $\mathbf{F}_r$ is computed by integrating features $\mathbf{F}$ along the ray between near plane $t_n$ and far plane $t_f$ [S2]:
+
+$$
+\mathbf{F}_r = \int_{t_n}^{t_f} T(t)\sigma(\mathbf{r}(t))\mathbf{F}(\mathbf{r}(t), \mathbf{d}, \mathbf{m}, \mathbf{z})dt
+$$
+
+where the accumulated transmittance $T(t)$ is:
+
+$$
+T(t) = \exp\left(-\int_{t_n}^{t} \sigma(\mathbf{r}(s), \mathbf{m}, \mathbf{z})ds\right)
+$$
+
+Here, $\mathbf{d}$ is the ray direction, $\sigma$ is the density, and $\mathbf{F}$ is the feature vector [S2]. Note: In the baseline StyleNeRF, $\mathbf{m}$ is not used; CoRF embeds $\mathbf{m} \in \mathbb{R}^{50}$ via a ReLU mapping network and injects it via weight modulation [S2].
+
+**Algorithm Steps**
+1.  **Latent Processing:** Sample latent code $\mathbf{z}$ from standard Gaussian. Pass $\mathbf{z}$ through the Mapping Network to generate style vectors [S1, unofficial].
+2.  **Ray Casting:** For each pixel in the target image, define a ray $\mathbf{r}(t)$ from camera origin $\mathbf{o}$ through the pixel center with direction $\mathbf{d}$ [S2].
+3.  **Sampling:** Sample points along the ray between $t_n$ and $t_f$.
+4.  **Feature Query:** For each sample point $\mathbf{r}(t)$, query the Synthesis Network.
+    *   The network uses the style vectors from the Mapping Network.
+    *   Inside the Style-Conditioned Blocks, Conv weights are modulated with the affine-transformed styles and demodulated for computation [S1, unofficial].
+    *   Leaky ReLU is used as the non-linear activation [S1, unofficial].
+    *   The network outputs density $\sigma$ and feature $\mathbf{F}$ (and color) [S1, unofficial][S2].
+5.  **Integration:** Compute transmittance $T(t)$ and integrate $\sigma \mathbf{F}$ along the ray to obtain $\mathbf{F}_r$ [S2].
+6.  **Color Output:** Convert $\mathbf{F}_r$ to RGB color [S2].
+7.  **Upsampling:** The baseline StyleNeRF uses upsampling blocks in the synthesis network to increase resolution [S1, unofficial]. (Note: CoRF omits these and increases resolution by sampling more rays [S2]).
+
+**Parameters**
+*   **Input Resolution:** Fixed at $32^2$ for all experiments [S1, unofficial].
+*   **Motion Representation:** $\mathbf{m} \in \mathbb{R}^{50}$ (used in CoRF, not baseline StyleNeRF) [S2].
+
+**Edge Cases and Pitfalls**
+*   **Motion Conditioning:** The baseline StyleNeRF does not condition on motion. If motion control is required, the architecture must be modified to embed motion into a latent space and inject it via weight modulation, as done in CoRF [S2].
+*   **Resolution Scaling:** StyleNeRF uses upsampling blocks. CoRF avoids these, increasing resolution by sampling more rays. Implementers must choose the appropriate strategy based on the variant [S2].
+*   **3D Consistency:** Improper choice of 3D representation (e.g., using 3x3 convolutions incorrectly) can lead to 3D inconsistent artifacts where shape and appearance change constantly when the camera moves [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Determined by the number of samples per ray and the depth of the MLPs in the Synthesis Network. The use of NeRF++ adds complexity for background handling.
+*   **Memory Complexity:** Depends on the number of parameters in the foreground and background MLPs. The background network has fewer parameters than the foreground [S1, unofficial].
+*   **Strengths:** Achieves high quality and 3D consistency compared to baselines like HoloGAN, GARF, and $\pi$-GAN. Outperforms GIRAFFE in 3D consistency [S1, unofficial].
+*   **Limitations:** Training can be unstable on small datasets (e.g., FF-Archive), requiring fine-tuning from pretrained models (e.g., FFHQ) [S1, unofficial].
+*   **When to use:** When high-resolution, 3D-consistent, stylized image synthesis is required.
+*   **When not to use:** When motion control is needed without architectural modification (use CoRF instead) or when computational resources for upsampling blocks are limited.
+
+## Background
+StyleNeRF was introduced as a style-based 3D-aware generator for high-resolution image synthesis [S1, unofficial]. It builds on the success of StyleGAN2 by applying its style-based synthesis to radiance fields. The architecture uses NeRF++ to handle unbounded backgrounds, combining a foreground NeRF in a unit sphere with a background NeRF using inverted sphere parameterization [S1, unofficial]. It adopts a non-saturating GAN objective with R1 regularization and a NeRF path regularization to enforce 3D consistency [S1, unofficial].
+
+## Sources
+[S1] StyleNeRF: A Style-based 3D-Aware Generator for High-resolution Image Synthesis, https://doi.org/10.48550/arxiv.2110.08985, fetched 2026-10-26 (unofficial)
+[S2] Controllable Radiance Fields for Dynamic Face Synthesis, https://doi.org/10.1109/3dv57658.2022.00075, fetched 2026-10-29

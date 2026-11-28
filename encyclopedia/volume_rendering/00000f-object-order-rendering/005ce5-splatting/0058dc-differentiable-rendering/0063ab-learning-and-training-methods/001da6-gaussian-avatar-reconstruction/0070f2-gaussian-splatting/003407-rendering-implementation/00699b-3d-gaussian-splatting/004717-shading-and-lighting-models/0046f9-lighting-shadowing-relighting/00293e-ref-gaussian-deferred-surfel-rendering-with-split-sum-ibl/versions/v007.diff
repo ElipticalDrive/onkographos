@@ -1,0 +1,104 @@
+--- v006.md
++++ v007.md
+@@ -41,5 +41,5 @@
+ 3.  **Sorting:** Sort splats using spatial locality algorithms like Morton codes to optimize cache usage during rendering [S2, unofficial]. Apply the exact same sort indices to the Material Buffer to ensure normals and other attributes remain aligned with positions [S2, unofficial].
+ 4.  **Rasterization (G-Buffer Pass):** Project 2D Gaussians to screen space [S1, unofficial][S2, unofficial]. Rasterize splats into the G-Buffer, accumulating color, normal, and depth information [S2, unofficial]. During training, material-aware normal propagation is conducted for Gaussians with metallic >= 0.02 and roughness <= 0.1 to capture accurate geometry [S1, unofficial].
+-5.  **Shading (Split-Sum IBL Pass):** For each pixel, retrieve surfel data from the G-Buffer [S2, unofficial]. Compute the base specular reflectivity $F_0$ (see Formulas). Compute the specular term using the prefiltered environment map and BRDF LUT (see Formulas). Compute the final color (see Formulas). Do not multiply albedo by the irradiance map for diffuse color; Ref-Gaussian uses `base_color` directly for diffuse [S2, unofficial].
++5.  **Shading (Split-Sum IBL Pass):** For each pixel, retrieve surfel data from the G-Buffer [S2, unofficial]. Compute the base specular reflectivity $F_0$ (see Formulas) [S2, unofficial]. Compute the specular term using the prefiltered environment map and BRDF LUT (see Formulas) [S2, unofficial]. Compute the final color (see Formulas) [S2, unofficial]. Do not multiply albedo by the irradiance map for diffuse color [S2, unofficial]. Ref-Gaussian uses `base_color` directly for diffuse [S2, unofficial].
+ 6.  **Post-processing:** Composite the shaded result with the skybox/environment map if necessary [S2, unofficial].
+ 
+@@ -62,15 +62,46 @@
+ 
+ ### Edge Cases and Pitfalls
+-*   **Normal Map Noise:** If splats are sorted (e.g., by Morton code for cache locality) but the material buffer (containing normals) is not sorted in parallel, normals become misaligned with positions, causing rainbow noise. Fix: Apply the same sort indices to the material buffer [S2, unofficial].
+-*   **Incorrect Diffuse Lighting:** Do not multiply albedo by the irradiance map for diffuse color. Ref-Gaussian uses `base_color` directly for diffuse. Only specular is computed from the environment map [S2, unofficial].
+-*   **Coordinate System Mismatch:** If the scene data is Z-up (Blender) but the viewer assumes Y-up, objects appear rotated 90 degrees. Fix: Apply a -90° rotation around the X-axis to the camera/view matrix and adjust environment map sampling directions to match the scene's up-axis [S2, unofficial].
+-*   **Stale Binary Execution on iOS:** If iOS build fails due to type errors (e.g., Float16 bitPattern type mismatch between arm64 and x86_64 simulator), the device may run an old binary. Always check build success for the target platform before debugging logic [S2, unofficial].
+-*   **Geometric Collapse:** Smooth surfaces are prone to geometric collapse. Material-aware normal propagation addresses this [S1, unofficial].
++*   **Normal Map Noise:** If splats are sorted (e.g., by Morton code for cache locality) but the material buffer (containing normals) is not sorted in parallel, normals become misaligned with positions, causing rainbow noise [S2, unofficial].
++*   **Incorrect Diffuse Lighting:** Do not multiply albedo by the irradiance map for diffuse color [S2, unofficial].
++*   **Coordinate System Mismatch:** If the scene data is Z-up (Blender) but the viewer assumes Y-up, objects appear rotated 90 degrees [S2, unofficial].
++*   **Stale Binary Execution on iOS:** If iOS build fails due to type errors (e.g., Float16 bitPattern type mismatch between arm64 and x86_64 simulator), the device may run an old binary [S2, unofficial].
++*   **Geometric Collapse:** Smooth surfaces are prone to geometric collapse [S1, unofficial].
+ *   **Blurred Reflective Details:** Per-Gaussian rendering causes reflective details to become noticeably more blurred; deferred rendering is used to mitigate this [S1, unofficial].
+ 
+ ### Pseudocode
+ ```python
++def compute_ref_gaussian_shading(splat, env_map, brdf_lut, view_dir):
++    """Computes the final color for a single surfel using split-sum IBL."""
++    N = splat.normal / norm(splat.normal)
++    roughness = splat.roughness
++    reflectance = splat.reflectance
++    base_color = splat.albedo
++
++    # Base specular reflectivity
++    F0 = 0.04 * (1.0 - reflectance) + base_color * reflectance
++
++    # Specular term
++    R = reflect(view_dir, N)
++    mip_level = int(clamp(roughness * (env_map.max_mip - 1), 0, env_map.max_mip - 1))
++    prefiltered = texture_lookup(env_map.prefiltered, R, mip_level)
++
++    dot_NV = max(dot(N, view_dir), 0.0)
++    fg = texture_lookup(brdf_lut, vec2(roughness, dot_NV))
++
++    specular = prefiltered * (F0 * fg.x + fg.y)
++
++    # Final color: diffuse uses base_color directly, no irradiance multiplication
++    final = (1.0 - reflectance) * base_color + specular
++    return final
++
++def sort_splats_for_cache(splats, materials):
++    """Sorts splats and materials in parallel using Morton codes."""
++    # Standard 3D Morton code computation for spatial sorting [G]
++    morton_codes = [compute_morton_code(s.position) for s in splats]
++    indices = sorted(range(len(morton_codes)), key=lambda k: morton_codes[k])
++    return [splats[i] for i in indices], [materials[i] for i in indices]
++
+ def compute_morton_code(pos):
+-    """Compute 3D Morton code for spatial sorting."""
++    """Standard 3D Morton code computation for spatial sorting [G]."""
+     x, y, z = pos
+     m = 0
+@@ -82,36 +113,6 @@
+ 
+ def texture_lookup(tex, uv, mip_level=0):
+-    """Standard texture sampling with mipmapping."""
++    """Standard texture sampling with mipmapping [G]."""
+     return tex.sample(uv, mip_level)
+-
+-def compute_ref_gaussian_shading(splat, env_map, brdf_lut, view_dir):
+-    """Computes the final color for a single surfel using split-sum IBL."""
+-    N = splat.normal / norm(splat.normal)
+-    roughness = splat.roughness
+-    reflectance = splat.reflectance
+-    albedo = splat.albedo
+-
+-    # Base specular reflectivity
+-    F0 = 0.04 * (1.0 - reflectance) + albedo * reflectance
+-
+-    # Specular term
+-    R = reflect(-view_dir, N)
+-    mip_level = int(clamp(roughness * (env_map.max_mip - 1), 0, env_map.max_mip - 1))
+-    prefiltered = texture_lookup(env_map.prefiltered, R, mip_level)
+-
+-    dot_NV = max(dot(N, view_dir), 0.0)
+-    fg = texture_lookup(brdf_lut, vec2(roughness, dot_NV))
+-
+-    specular = prefiltered * (F0 * fg.x + fg.y)
+-
+-    # Final color: diffuse uses base_color directly, no irradiance multiplication
+-    final = (1.0 - reflectance) * albedo + specular
+-    return final
+-
+-def sort_splats_for_cache(splats, materials):
+-    """Sorts splats and materials in parallel using Morton codes."""
+-    morton_codes = [compute_morton_code(s.position) for s in splats]
+-    indices = sorted(range(len(morton_codes)), key=lambda k: morton_codes[k])
+-    return [splats[i] for i in indices], [materials[i] for i in indices]
+ ```
+ 
+@@ -160,3 +161,3 @@
+ 
+ [S1] Reflective Gaussian Splatting, https://doi.org/10.48550/arxiv.2412.19282, fetched 2026-10-26 (unofficial)
+-[S2] iPhoneで Gaussian Splatting モデルの反射をリアルタイムに更新する, https://qiita.com/john-rocky/items/3c452476e66bdc29c290, fetched 2026-10-29 (unofficial)+[S2] iPhoneで Gaussian Splatting モデルの反射をリアルタイムで更新する, https://qiita.com/john-rocky/items/3c452476e66bdc29c290, fetched 2026-10-29 (unofficial)

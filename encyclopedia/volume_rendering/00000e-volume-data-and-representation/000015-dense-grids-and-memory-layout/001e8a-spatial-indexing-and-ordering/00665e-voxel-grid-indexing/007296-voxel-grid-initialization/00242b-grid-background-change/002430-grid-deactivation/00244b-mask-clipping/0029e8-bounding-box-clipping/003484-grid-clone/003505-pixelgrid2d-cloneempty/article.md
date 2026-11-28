@@ -1,0 +1,60 @@
+# PixelGrid2D CloneEmpty
+
+Also called: CloneEmpty
+
+## Overview
+Creates a new `PixelGrid2D` instance initialized with the current bounding box and pixel size, effectively producing an empty grid structure ready for population [S1, unofficial]. It differs from `Grid Reinitialization` by preserving the existing grid topology and memory layout without reallocating underlying segmentation tensors or updating object counts [S2, unofficial].
+
+## How it works
+**Inputs:** The source `PixelGrid2D` instance (or `ScalarGrid3D` base class context).
+**Outputs:** A new `PixelGrid2D` object.
+
+1.  **Extract Geometry:** Retrieve the current bounding box (`BBox`) and pixel dimensions (`PixelSize`) from the source grid [S1, unofficial].
+2.  **Instantiate:** Create a new grid object using the extracted `BBox` and `PixelSize` [S1, unofficial].
+3.  **Initialize Memory:** Allocate the internal data array (e.g., `float[]` in C# context) with size equal to the product of the grid dimensions ($Size_{UVW}$) [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def clone_empty(source_grid):
+    # Extract bounding box and pixel dimensions from source
+    bbox = source_grid.bounding_box
+    pixel_dims = source_grid.pixel_dimensions
+    
+    # Create new instance with same geometry
+    new_grid = PixelGrid2D(bbox, pixel_dims)
+    
+    # Allocate internal storage based on total voxel count
+    # SizeUVW.SelfProduct() computes width * height * depth
+    total_voxels = new_grid.size_u * new_grid.size_v * new_grid.size_w
+    new_grid.grid = allocate_float_array(total_voxels)
+    
+    return new_grid
+```
+
+**Parameters:**
+- `bbox`: The spatial extent of the grid.
+- `pixel_dims`: The physical size of a single voxel/pixel in x, y, z.
+
+**Edge Cases:**
+- If `source_grid` is null, the method fails [G].
+- Precision loss may occur if `pixel_dims` are extremely small or large relative to floating-point limits [G].
+
+## Subtopics
+
+### Grid Reinitialization
+Updates the internal segmentation masks (`seg_mask_grid` and `dual_seg_mask_grid`) to match a new number of objects (`num_obj`) [S2, unofficial]. It retrieves the device from the existing grid, recreates the dense grids with `channels=num_obj` and the current `world_size` (`xyz_min`, `xyz_max`), and moves them to the correct device [S2, unofficial]. Choose this when the number of semantic classes changes, rather than when creating a fresh empty structure.
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ for `CloneEmpty` (allocation only); $O(N)$ for `Grid Reinitialization` where $N$ is the number of voxels, due to tensor recreation [S1, S2, unofficial].
+- **Memory Complexity:** `CloneEmpty` allocates memory for one grid channel; `Grid Reinitialization` allocates memory for `num_obj` channels [S1, S2, unofficial].
+- **Strengths:** `CloneEmpty` is fast and preserves spatial configuration. `Grid Reinitialization` allows dynamic adaptation of semantic capacity [S2, unofficial].
+- **Limitations:** `CloneEmpty` does not reset object counts or segmentation data, which may lead to stale state if used incorrectly [S1, S2, unofficial].
+
+## Background
+`PixelGrid2D` and `ScalarGrid3D` are part of the `voxeltools` library, a C# implementation for voxel-based geometry processing [S1, unofficial]. The `Grid Reinitialization` logic is associated with the SA3D (Segment Anything in 3D) project, which adapts 3D Gaussian Splatting for segmentation tasks [S2, unofficial].
+
+## Sources
+[S1] voxeltool, https://github.com/arendvw/voxeltools, fetched 2026-10-29 (unofficial)
+[S2] Jumpat/SegmentAnythingin3D, https://github.com/Jumpat/SegmentAnythingin3D, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,83 @@
+# PointOps2 CUDA Kernels
+
+Also called: Point Subtraction, PointOps2
+
+## Overview
+PointOps2 CUDA Kernels are a collection of GPU-accelerated operations for point cloud processing, exposed via a PyTorch C++ extension [S1, unofficial]. This article covers the Point Subtraction operation, which computes the difference between feature vectors of neighboring points and a reference point [S1, unofficial]. It solves the problem of efficiently calculating relative positional or feature offsets in non-regular volumes, a prerequisite for subsequent aggregation or interpolation steps [G]. It differs from sibling methods like [Efficient Local kNN](10975-efficient-local-knn.md) by focusing on the arithmetic difference of features rather than just the spatial search, and from [PointOps2 Aggregation Kernels](13922-pointops2-aggregation-kernels.md) by performing element-wise subtraction rather than weighted summation [G].
+
+## How it works
+The Point Subtraction method computes the difference between a reference point's features and its neighbors' features [S1, unofficial]. It is implemented using two CUDA kernels: `subtraction_forward_cuda` for the forward pass and `subtraction_backward_cuda` for the backward pass [S1, unofficial].
+
+**Inputs and Outputs:**
+*   `input1`: Reference point features, shape $(n, c)$, where $n$ is the number of points and $c$ is the feature dimension [S1, unofficial].
+*   `input2`: Neighbor point features, shape $(n, c)$ [S1, unofficial].
+*   `idx`: Neighbor indices, shape $(n, nsample)$, containing integer indices into `input2` for each of the $n$ reference points [S1, unofficial].
+*   **Output**: Difference tensor, shape $(n, nsample, c)$ [S1, unofficial]. The value at `[i, j, k]` is `input2[idx[i, j], k] - input1[i, k]` [S1, unofficial].
+
+**Data Structures:**
+*   Tensors are stored in contiguous memory (row-major for PyTorch) [G].
+*   `idx` uses 32-bit integers [G].
+*   Features use 32-bit floats [G].
+
+**Algorithm Steps:**
+1.  **Forward Pass (`subtraction_forward_cuda`):** For each point $i$ from $0$ to $n-1$, for each neighbor index $j$ from $0$ to $nsample-1$, let $k = idx[i, j]$, and for each feature dimension $d$ from $0$ to $c-1$, compute $output[i, j, d] = input2[k, d] - input1[i, d]$ [S1, unofficial].
+2.  **Backward Pass (`subtraction_backward_cuda`):** Given gradient tensor `dout` of shape $(n, nsample, c)$, initialize gradients `dinput1` and `dinput2` to zeros with shapes $(n, c)$ [G]. For each point $i$, neighbor index $j$, and feature dimension $d$, scatter gradients: $dinput2[k, d] \ += dout[i, j, d]$ and $dinput1[i, d] \ -= dout[i, j, d]$ [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def subtraction_forward_cuda(input1, input2, idx):
+    n, c = len(input1), len(input1[0])
+    nsample = len(idx[0])
+    output = [[0.0] * c for _ in range(n * nsample)]
+    for i in range(n):
+        for j in range(nsample):
+            k = idx[i][j]
+            for d in range(c):
+                output[i * nsample + j][d] = input2[k][d] - input1[i][d]
+    return output
+
+def subtraction_backward_cuda(input1, input2, idx, dout):
+    n, c = len(input1), len(input1[0])
+    nsample = len(idx[0])
+    dinput1 = [[0.0] * c for _ in range(n)]
+    dinput2 = [[0.0] * c for _ in range(n)]
+    for i in range(n):
+        for j in range(nsample):
+            k = idx[i][j]
+            for d in range(c):
+                grad = dout[i * nsample + j][d]
+                dinput2[k][d] += grad
+                dinput1[i][d] -= grad
+    return dinput1, dinput2
+```
+*(Note: The pseudocode represents the logical operation; actual CUDA kernels execute these loops in parallel across threads and blocks [G].)*
+
+**Edge Cases and Pitfalls:**
+*   **Index Out of Bounds:** `idx` must contain valid indices within $[0, n-1]$ [G].
+*   **Duplicate Indices:** If multiple neighbors point to the same index $k$, `dinput2` accumulates gradients via addition [G].
+*   **Precision:** Standard FP32 is used [G].
+
+## Subtopics
+
+### [PointOps2 Aggregation Kernels](13922-pointops2-aggregation-kernels.md)
+The PointOps2 Aggregation Kernels perform a weighted feature aggregation over a set of neighbors for each point in a point cloud, incorporating relative position offsets. It solves the problem of efficiently computing neighbor-wise feature updates on GPU by fusing the lookup, offset addition, and weighted summation into a single CUDA kernel pass. It differs from sibling methods like [Point Grouping](13932-point-grouping.md) by explicitly handling the gradient flow for relative position inputs and performing the weighted sum in a memory-coalesced manner, rather than just extracting sub-tensors [G].
+
+### [Point Grouping](13932-point-grouping.md)
+Point Grouping is a CUDA kernel operation that gathers feature vectors for neighboring points based on pre-computed neighbor indices. It solves the problem of efficiently accessing local neighborhood data in point cloud processing pipelines, specifically within the PointOps2 framework. It is distinct from [PointOps2 Aggregation Kernels](13922-pointops2-aggregation-kernels.md) in that it performs only the gathering (scattering indices to a new tensor) without applying any reduction or transformation functions to the gathered features [G].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:** Not given in the sources.
+*   **Strengths:** Efficient relative feature computation; integrates seamlessly with PyTorch autograd [G].
+*   **Limitations:** Requires pre-computed neighbor indices (`idx`). Not a search method itself [G].
+*   **When to use:** When relative features or positions are needed for aggregation or interpolation [G].
+*   **When not to use:** When only spatial search is needed (use [Efficient kNN Implementation](10966-efficient-knn-implementation.md)) [G].
+
+## Background
+PointOps2 was introduced as part of the PointNeXt framework and is widely used in point cloud deep learning [G]. The CUDA kernels are exposed via a PyTorch C++ extension [S1, unofficial]. The specific subtraction kernels are part of a broader suite including KNN, FPS, grouping, and interpolation [S1, unofficial].
+
+## Sources
+[S1] LogosIntelligenceLab/4d-gaussian-splatting, https://github.com/LogosIntelligenceLab/4d-gaussian-splatting, fetched 2026-10-27 (unofficial)

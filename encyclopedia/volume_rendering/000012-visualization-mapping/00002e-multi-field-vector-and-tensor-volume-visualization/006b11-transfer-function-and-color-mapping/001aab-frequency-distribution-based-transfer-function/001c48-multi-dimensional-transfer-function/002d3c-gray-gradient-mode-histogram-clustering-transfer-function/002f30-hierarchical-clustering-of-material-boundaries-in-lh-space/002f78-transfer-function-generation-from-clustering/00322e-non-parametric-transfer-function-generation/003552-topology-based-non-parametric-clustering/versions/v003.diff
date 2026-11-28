@@ -1,0 +1,267 @@
+--- v002.md
++++ v003.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Topology-based Non-Parametric Clustering decomposes a 2D density plot feature space into non-overlapping valley cells separated by valley lines, where each cell contains a local maximum representing a potential volumetric feature [S1]. It differs from discrete histogram-based clustering by operating on continuous density plots, thereby avoiding spurious peaks/valleys and preserving the spatial relationships of neighboring data points [S1]. Unlike frequency binning methods that consider only density magnitude, this method incorporates position in feature space via topological information, preventing disjoint segments for the same density value [S1].
++Topology-based Non-Parametric Clustering decomposes a 2D density plot feature space into non-overlapping valley cells separated by valley lines, where each cell contains a local maximum representing a potential volumetric feature [S1]. It differs from discrete histogram-based clustering by operating on continuous density plots, thereby avoiding spurious peaks and valleys while preserving the spatial relationships of neighboring data points [S1]. Unlike frequency binning methods that consider only density magnitude, this method incorporates position in feature space via topological information, preventing disjoint segments for the same density value [S1].
+ 
+ ## How it works
+@@ -13,5 +13,5 @@
+ **Data Structures**
+ 1.  **Triangular Mesh:** A tessellation of the 2D feature space domain where the density function is approximated as piecewise linear over the triangles [S1].
+-2.  **Vertex Classification:** Each vertex $v$ is classified based on its density value relative to its neighbors in its star: maximum (greater than all neighbors), minimum (smaller than all neighbors), or k-fold saddle (has $k+1$ wedges in its lower star, where a wedge is a contiguous section of the lower star; regular points have $k=0$) [S1].
++2.  **Vertex Classification:** Each vertex $v$ is classified based on its density value relative to its neighbors in its star: maximum (greater than all neighbors), minimum (smaller than all neighbors), or $k$-fold saddle (has $k+1$ wedges in its lower star, where a wedge is a contiguous section of the lower star; regular points have $k=0$) [S1].
+ 3.  **Valley Lines:** Paths connecting saddles to minima or other saddles, representing steepest descent directions [S1].
+ 4.  **Valley Cells:** Regions bounded by valley lines and minima, containing exactly one local maximum [S1].
+@@ -24,5 +24,5 @@
+ 4.  **Trace Valley Lines:** For every $k$-fold saddle, trace $k+1$ paths of steepest descent [S1]. Each path follows a sequence of steepest descent edges [S1]. Termination conditions are: (a) hitting another saddle, or (b) hitting a previously traced path at a regular point $J$ (junction), which is treated as an artificial saddle to ensure every boundary has at least one saddle [S1].
+ 5.  **Construct Valley Cells:** Use region growing (flood-fill) starting from each maximum [S1]. Recursively grow the region of neighboring triangles, stopping at valley lines or triangles whose vertices are minima [S1].
+-6.  **Saddle Duplication (Degeneracy Handling):** In degenerate cases, a single saddle may belong to more than two cells (associated with more than two maxima) [S1]. If a saddle $S$ has a connected maximum set of size $k$, duplicate $k-1$ saddles. The original saddle is replaced by $k$ distinct saddles, each associated with one of the maxima [S1].
++6.  **Saddle Duplication (Degeneracy Handling):** In degenerate cases, a single saddle may belong to more than two cells (associated with more than two maxima) [S1]. If a saddle $S$ has a connected maximum set of size $k$, duplicate $k-1$ saddles [S1]. The original saddle is replaced by $k$ distinct saddles, each associated with one of the maxima [S1].
+ 7.  **Calculate Persistence:** For each saddle, calculate its persistence $p$ as the smaller difference between the saddle value and its connected maximum value:
+     $$p = \min(|v_{saddle} - v_{max}|)$$
+@@ -36,6 +36,6 @@
+ 
+ **Pitfalls and Edge Cases**
+-*   **Degenerate Cases:** Piecewise linear discretization can cause multi-fold saddles and intersecting paths. Paths may terminate at another saddle or a previously traced path at a regular point [S1].
+-*   **Saddle Belonging to Multiple Cells:** As noted in Step 6, a saddle may be associated with more than two maxima in degenerate cases. This is resolved by saddle duplication [S1].
++*   **Degenerate Cases:** Piecewise linear discretization can cause multi-fold saddles and intersecting paths [S1]. Paths may terminate at another saddle or a previously traced path at a regular point [S1].
++*   **Saddle Belonging to Multiple Cells:** As noted in Step 6, a saddle may be associated with more than two maxima in degenerate cases [S1]. This is resolved by saddle duplication [S1].
+ *   **Junctions:** When a path hits a regular point $J$ that is the maximum vertex on a path separating regions, $J$ is treated as an artificial saddle [S1].
+ 
+@@ -62,13 +62,13 @@
+     maxima, minima, saddles = [], [], []
+     for v in vertices:
+-        neighbors = _get_adjacent_vertices(v, vertices, triangles)
+-        if all(v.density > n.density for n in neighbors):
++        lower_neighbors = [u for tri in triangles if v in tri for u in tri if u != v and u.density < v.density]
++        if not lower_neighbors:
+             v.type = 'MAX'
+             maxima.append(v)
+-        elif all(v.density < n.density for n in neighbors):
++        elif len(lower_neighbors) == len([u for tri in triangles if v in tri for u in tri if u != v]):
+             v.type = 'MIN'
+             minima.append(v)
+         else:
+-            k = _count_lower_star_wedges(v, vertices, triangles)
++            k = _count_connected_lower_wedges(v, lower_neighbors, triangles)
+             if k > 0:
+                 v.type = 'SADDLE'
+@@ -80,11 +80,11 @@
+     # Step 4: Trace Valley Lines
+     valley_lines = []
+-    traced_vertices = set()
++    traced = set()
+     for s in saddles:
+         for _ in range(s.fold + 1):
+             path = [s]
+-            current = s
++            curr = s
+             while True:
+-                neighbors = _get_adjacent_vertices(current, vertices, triangles)
++                neighbors = [u for tri in triangles if curr in tri for u in tri if u != curr]
+                 if not neighbors:
+                     break
+@@ -93,46 +93,61 @@
+                     path.append(nxt)
+                     break
+-                if nxt in traced_vertices:
++                if nxt in traced:
+                     nxt.type = 'ARTIFICIAL_SADDLE'
+                     path.append(nxt)
+                     break
+                 path.append(nxt)
+-                current = nxt
++                curr = nxt
+             valley_lines.append(path)
+             for node in path:
+-                traced_vertices.add(node)
++                traced.add(node)
+ 
+     # Step 5: Construct Valley Cells via Region Growing
+     cells = []
+-    visited_triangles = set()
++    visited_tris = set()
+     for m in maxima:
+-        cell = {'max': m, 'triangles': []}
++        cell_tris = []
+         queue = [m]
+         while queue:
+             curr = queue.pop(0)
+             for tri in triangles:
+-                if curr in tri.vertices and tri not in visited_triangles:
+-                    boundary = any(v.type in ('SADDLE', 'ARTIFICIAL_SADDLE') for v in tri.vertices)
+-                    has_min = any(v.type == 'MIN' for v in tri.vertices)
+-                    if boundary or has_min:
++                if curr in tri.vertices and tri not in visited_tris:
++                    if any(v.type in ('SADDLE', 'ARTIFICIAL_SADDLE') for v in tri.vertices) or \
++                       any(v.type == 'MIN' for v in tri.vertices):
+                         continue
+-                    cell['triangles'].append(tri)
+-                    visited_triangles.add(tri)
++                    cell_tris.append(tri)
++                    visited_tris.add(tri)
+                     for v in tri.vertices:
+-                        if v not in visited_triangles:
++                        if v not in visited_tris:
+                             queue.append(v)
+-        cells.append(cell)
+-
+-    # Step 6: Saddle Duplication
+-    for s in saddles:
+-        connected = [c['max'] for c in cells if s in _get_saddles_of_cell(c)]
+-        k = len(connected)
+-        if k > 2:
+-            for _ in range(k - 1):
++        cells.append({'max': m, 'triangles': cell_tris, 'id': len(cells)})
++
++    # Step 6: Saddle Duplication for Degenerate Cases
++    # Map each cell boundary to a unique saddle instance
++    cell_saddle_map = {c['id']: [] for c in cells}
++    for tri in visited_tris:
++        saddle_on_tri = [v for v in tri.vertices if v.type in ('SADDLE', 'ARTIFICIAL_SADDLE')]
++        if saddle_on_tri:
++            adj_cells = [c for c in cells if tri in c['triangles']]
++            for s in saddle_on_tri:
++                for c in adj_cells:
++                    cell_saddle_map[c['id']].append(s)
++
++    # Duplicate saddles if associated with >2 maxima
++    saddle_instances = {}
++    for c in cells:
++        for s in cell_saddle_map[c['id']]:
++            if s not in saddle_instances:
++                saddle_instances[s] = []
++            saddle_instances[s].append(c['id'])
++
++    for s, c_ids in saddle_instances.items():
++        if len(c_ids) > 2:
++            # Create k-1 duplicates as per topological simplification rules
++            for _ in range(len(c_ids) - 1):
+                 new_s = Vertex(s.x, s.y)
+                 new_s.type = 'SADDLE'
+                 new_s.fold = 1
+-                new_s.connected_maxima = [connected.pop(0)]
+-                s.connected_maxima.append(new_s)
++                saddle_instances[s].append(new_s)
+ 
+     # Step 7: Calculate Persistence
+@@ -142,33 +157,34 @@
+             for v in tri.vertices:
+                 if v.type in ('SADDLE', 'ARTIFICIAL_SADDLE'):
+-                    adj_cell = None
+-                    for other in cells:
+-                        if other is not c and tri in other['triangles']:
+-                            adj_cell = other
+-                            break
+-                    if adj_cell:
+-                        p = min(abs(v.density - m.density) for m in v.connected_maxima)
+-                        boundaries.append({'saddles': [v], 'persistence': p, 'cells': [c, adj_cell]})
+-
++                    adj = [other for other in cells if other is not c and tri in other['triangles']]
++                    if adj:
++                        p = min(abs(v.density - m.density) for m in [c['max'], adj[0]['max']])
++                        boundaries.append({'saddles': [v], 'persistence': p, 'cells': [c['id'], adj[0]['id']]})
++
++    # Deduplicate boundaries and take min persistence per boundary pair
++    unique_boundaries = {}
+     for b in boundaries:
+-        b['persistence'] = min(s.density - min(m.density for m in s.connected_maxima) for s in b['saddles'])
+-
+-    # Step 8: Simplify Cells
++        key = tuple(sorted(b['cells']))
++        if key not in unique_boundaries or b['persistence'] < unique_boundaries[key]['persistence']:
++            unique_boundaries[key] = b
++    boundaries = list(unique_boundaries.values())
++
++    # Step 8: Simplify and Build Hierarchy
+     boundaries.sort(key=lambda b: b['persistence'])
+-    max_p = max(b['persistence'] for b in boundaries) if boundaries else 0.0
++    max_p = max((b['persistence'] for b in boundaries), default=0.0)
+     threshold = max_p * 0.005
+-    hierarchy = {'root': None, 'nodes': []}
++    hierarchy = {'root': None, 'nodes': {}}
+ 
+     for b in boundaries:
+         if b['persistence'] > threshold:
+             break
+-        c1, c2 = b['cells']
+-        node1 = next((n for n in hierarchy['nodes'] if n['cell'] is c1), None)
+-        node2 = {'cell': c2, 'children': [], 'parent': node1}
+-        if node1:
+-            node1['children'].append(node2)
+-        hierarchy['nodes'].append(node2)
+-        if hierarchy['root'] is None or c1['max'].density > hierarchy['root']['cell']['max'].density:
+-            hierarchy['root'] = node1 if node1 else node2
++        c1_id, c2_id = b['cells']
++        # Merge adjacent cells and update parent-child relationships
++        parent = {'cell_ids': [c1_id, c2_id], 'children': [c1_id, c2_id], 'persistence': b['persistence']}
++        hierarchy['nodes'][c1_id] = parent
++        hierarchy['nodes'][c2_id] = parent
++        if hierarchy['root'] is None or c1_id == hierarchy['root']:
++            hierarchy['root'] = c1_id
++        # Note: In a full implementation, update maximum sets and boundary persistences of remaining boundaries here [S1]
+ 
+     return cells, hierarchy, threshold
+@@ -180,5 +196,4 @@
+         self.type = 'REGULAR'
+         self.fold = 0
+-        self.connected_maxima = []
+ 
+ def _tessellate_grid(bounds, res):
+@@ -196,21 +211,20 @@
+     return verts, tris
+ 
+-def _get_adjacent_vertices(v, verts, tris):
+-    return [u for tri in tris if v in tri for u in tri if u != v]
+-
+-def _count_lower_star_wedges(v, verts, tris):
+-    lower = [u for tri in tris if v in tri for u in tri if u != v and u.density < v.density]
+-    if not lower: return 0
++def _count_connected_lower_wedges(v, lower_neighbors, triangles):
++    if not lower_neighbors:
++        return 0
+     visited = set()
+     wedges = 0
+-    for start in lower:
+-        if start in visited: continue
++    for start in lower_neighbors:
++        if start in visited:
++            continue
+         wedges += 1
+         q = [start]
+         while q:
+             curr = q.pop(0)
+-            if curr in visited: continue
++            if curr in visited:
++                continue
+             visited.add(curr)
+-            for tri in tris:
++            for tri in triangles:
+                 if curr in tri:
+                     for u in tri:
+@@ -218,21 +232,13 @@
+                             q.append(u)
+     return wedges
+-
+-def _get_saddles_of_cell(c):
+-    saddles = set()
+-    for tri in c['triangles']:
+-        for v in tri:
+-            if v.type in ('SADDLE', 'ARTIFICIAL_SADDLE'):
+-                saddles.add(v)
+-    return saddles
+ ```
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The complexity is dominated by the tessellation, critical point identification, and region growing. The region growing can be carried out quickly using flood-fill [S1]. The merging process involves sorting boundaries, which is $O(B \log B)$ where $B$ is the number of boundaries [S1].
++*   **Time Complexity:** The complexity is dominated by the tessellation, critical point identification, and region growing [S1]. The region growing can be carried out quickly using flood-fill [S1]. The merging process involves sorting boundaries, which is $O(B \log B)$ where $B$ is the number of boundaries [S1].
+ *   **Memory Complexity:** Requires storage for the triangular mesh, critical points, valley lines, and the hierarchical tree [S1].
+ *   **Measured Performance:** The method was tested on the "Feet" data set [S1]. The default threshold of 0.5% of maximal persistence was found sufficient to automatically generate meaningful clusters [S1].
+ *   **Strengths:**
+     *   Non-parametric: Does not assume the number or shape of clusters [S1].
+-    *   Continuous: Avoids spurious peaks/valleys associated with discrete histograms [S1].
++    *   Continuous: Avoids spurious peaks and valleys associated with discrete histograms [S1].
+     *   Topological: Preserves spatial relationships in feature space [S1].
+     *   Hierarchical: Provides a tree structure for multi-scale exploration [S1].

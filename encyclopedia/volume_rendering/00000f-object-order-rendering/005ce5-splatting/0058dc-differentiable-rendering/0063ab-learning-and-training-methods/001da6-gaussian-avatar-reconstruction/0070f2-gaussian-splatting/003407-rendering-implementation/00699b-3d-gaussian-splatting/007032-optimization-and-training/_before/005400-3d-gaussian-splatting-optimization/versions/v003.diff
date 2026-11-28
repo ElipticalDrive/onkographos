@@ -1,0 +1,217 @@
+--- v002.md
++++ v003.md
+@@ -4,93 +4,119 @@
+ 
+ ## Overview
+-3D Gaussian Splatting Optimization is the training procedure that adjusts the parameters of 3D Gaussian primitives to minimize the difference between rendered images and ground truth observations [S1]. It solves the problem of fitting a differentiable radiance field to 2D image data by using gradient-based optimization to update geometry, color, and opacity, while dynamically controlling the number of primitives via adaptive densification [S1]. It is distinguished from sibling methods like [CoR-GS](1486-cor-gs.md) and [EffGS](3365-effgs.md) by its reliance on a specific distortion loss formulation and a fixed set of base hyperparameters where the scalar weighting factor $\gamma$ is tuned to align Gaussian counts across datasets, rather than modifying the underlying optimization framework [S1].
++3D Gaussian Splatting Optimization is the training procedure that adjusts the parameters of a collection of 3D Gaussian primitives to minimize the perceptual and geometric distortion between rendered views and ground-truth images [S1]. It solves the problem of learning scene representation by using differentiable rendering to backpropagate pixel errors through alpha compositing and projection to update Gaussian geometry, color, and opacity [S2, unofficial]. It is distinguished from its siblings by its specific reliance on adaptive densification driven by gradient magnitudes to dynamically modulate the number of Gaussians, ensuring a trade-off between reconstruction quality and representation budget [S1].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Inputs:** A set of $N$ training images with known camera poses, each represented by a ground truth pixel color $x$. The initial scene representation is a collection of 3D Gaussians $\mathcal{G} = \{G_i\}_{i=1}^M$, where each Gaussian $G_i$ is defined by parameters $\mu_i$ (center), $\Sigma_i$ (covariance), $c_i$ (color), and $\alpha_i$ (opacity) [S1].
+-*   **Outputs:** Optimized Gaussian parameters $\mathcal{G}$ that minimize the distortion loss, along with a dynamically adjusted set of Gaussians resulting from densification and pruning steps [S1].
++**Inputs and Outputs**
++*   **Inputs:** A set of $N$ training images with known camera poses and intrinsics; an initial set of 3D Gaussian primitives $G_i$ (typically initialized from Structure-from-Motion points).
++*   **Outputs:** Optimized Gaussian parameters $G_i = (\mu_i, \Sigma_i, c_i, \alpha_i)$ for all active Gaussians.
+ 
+-**Data Structures:**
+-The optimization operates on the collection of Gaussian parameters $\mathcal{G}$. Each Gaussian $G_i$ stores:
+-*   $\mu_i \in \mathbb{R}^3$: 3D position.
+-*   $\Sigma_i \in \mathbb{R}^{3 \times 3}$: Covariance matrix (often parameterized via a rotation matrix $R$ and scaling vector $S$ such that $\Sigma = RSS^T R^T$).
+-*   $c_i \in \mathbb{R}^3$: Spherical Harmonics coefficients or RGB color.
+-*   $\alpha_i \in [0, 1]$: Opacity scalar.
+-*   Additional metadata for densification tracking (e.g., accumulated gradient norms) is maintained per Gaussian [S1].
++**Data Structures**
++Each Gaussian primitive $G_i$ is defined by the following fields [S1]:
++*   $\mu_i \in \mathbb{R}^3$: The 3D center position.
++*   $\Sigma_i \in \mathbb{R}^{3 \times 3}$: The covariance matrix, often parameterized by a rotation matrix $R_i \in SO(3)$ and a scaling vector $s_i \in \mathbb{R}^3$ such that $\Sigma_i = R_i S_i S_i^T R_i^T$ where $S_i = \text{diag}(s_i)$ [S1].
++*   $c_i \in \mathbb{R}^3$: The spherical harmonic coefficients or RGB color value.
++*   $\alpha_i \in [0, 1]$: The opacity.
+ 
+-**Algorithm Steps:**
+-1.  **Random Camera Selection:** Select a single training image (camera pose) randomly for the current optimization step [S2, unofficial]. This provides stochastic flavoring to the gradient descent [S2, unofficial].
+-2.  **Differentiable Rendering:** Render the selected view by projecting all 3D Gaussians to 2D ellipses, sorting them by depth, and alpha-blending them to produce the predicted image $\hat{x}$ [S1].
+-3.  **Loss Computation:** Compute the distortion loss $D(x, \hat{x})$ between the ground truth image $x$ and the rendered image $\hat{x}$ [S1]. The total loss is $\mathcal{L} = \gamma D(x, \hat{x})$, where $\gamma$ is a scalar weighting factor [S1].
+-4.  **Backpropagation:** Propagate the pixel error backward through the differentiable rendering pipeline (alpha compositing and 2D projection) to compute gradients for every parameter of every Gaussian that contributed to the pixel values [S2, unofficial].
+-5.  **Parameter Update:** Use the Adam optimizer to update the Gaussian parameters. Adam adapts the per-parameter step size based on recent gradients, with different base learning rates for different parameter types (e.g., position vs. opacity) [S2, unofficial].
+-6.  **Adaptive Densification:** Evaluate gradient magnitudes to decide on topology changes:
+-    *   **Densification:** Introduce new Gaussian primitives in regions with high gradient magnitudes [S1].
+-    *   **Pruning:** Remove Gaussians with low opacity [S1].
+-    *   These decisions are driven by the gradients from the distortion loss, meaning the optimization objective influences the evolution of the scene representation [S1].
++**Numbered Steps**
++1.  **Random Camera Selection:** Select a single training image (camera pose and intrinsics) randomly from the training set [S2, unofficial]. This provides the stochastic flavor of Stochastic Gradient Descent (SGD) [S2, unofficial].
++2.  **Differentiable Rendering:** Render the selected view using the current set of Gaussians. This involves projecting 3D Gaussians to 2D ellipses and alpha-blending them in depth order to produce the rendered image $\hat{x}$ [S1].
++3.  **Loss Computation:** Compute the distortion loss $D(x, \hat{x})$ between the ground-truth image $x$ and the rendered image $\hat{x}$ [S1]. The total loss is defined as:
++    $$ \mathcal{L} = \gamma \, D(x, \hat{x}) $$
++    where $\gamma$ is a scalar weighting factor [S1]. Common choices for $D$ include L1 loss, L2 loss, and multi-scale structural similarity (MS-SSIM) [S1].
++4.  **Backpropagation:** Propagate the pixel error backward through the differentiable rendering pipeline (alpha compositing and 2D projection) to compute gradients for all Gaussian parameters $\mu_i, \Sigma_i, c_i, \alpha_i$ that contributed to the rendered pixels [S2, unofficial].
++5.  **Parameter Update:** Use the Adam optimizer to update the Gaussian parameters. Adam adapts the per-parameter step size based on the running mean and variance of recent gradients [S2, unofficial]. Different parameter types (e.g., position vs. opacity) use different base learning rates [S2, unofficial].
++6.  **Adaptive Densification and Pruning:** Modulate the number of Gaussians based on the gradient magnitudes and opacity values [S1]:
++    *   **Densification:** Introduce new Gaussian primitives in regions where the gradient magnitude is high, indicating insufficient representation [S1].
++    *   **Pruning:** Remove Gaussians with opacity $\alpha_i$ below a certain threshold, indicating they are not contributing to the reconstruction [S1].
++    These decisions are driven by the gradients from the distortion loss [S1].
+ 
+-**Formulas:**
+-The optimization objective is:
+-$$ \min_{\mathcal{G}} \gamma \, D(x, \hat{x}) $$
+-where $\mathcal{G}$ is the collection of Gaussian parameters, $D(\cdot)$ is the distortion computed on the rendered 2D image space, and $\gamma$ is a scalar weighting factor [S1].
+-
+-**Parameters:**
+-*   $\gamma$: Scalar weighting factor for the distortion loss. It varies across datasets to align Gaussian counts across methods, as adaptive densification relies on gradient magnitude [S1].
+-*   Optimizer: Adam, which maintains running averages of gradients and squared gradients to adapt step sizes [S2, unofficial].
+-*   Base Learning Rates: Different for position, covariance, color, and opacity [S2, unofficial].
+-
+-**Pseudocode:**
++**Pseudocode**
+ ```python
+-def optimize_3dgs(training_images, initial_gaussians, gamma, num_steps):
++def optimize_3dgs(gaussians, training_images, num_steps, gamma, adam_config):
+     """
+-    Optimizes 3D Gaussian Splatting parameters.
++    Optimizes 3D Gaussian primitives using differentiable rendering.
+     
+     Args:
+-        training_images: List of tuples (image_tensor, camera_pose).
+-        initial_gaussians: List of Gaussian objects with parameters (mu, Sigma, c, alpha).
++        gaussians: List of Gaussian objects with attributes mu, Sigma, c, alpha.
++        training_images: List of tuples (image, camera_pose, camera_intrinsics).
++        num_steps: Total number of optimization steps.
+         gamma: Scalar weighting factor for the distortion loss.
+-        num_steps: Total number of optimization steps.
++        adam_config: Configuration for the Adam optimizer (learning rates per param type).
+         
+     Returns:
+-        Optimized list of Gaussians.
++        Optimized list of Gaussian objects.
+     """
+-    gaussians = initial_gaussians
+-    optimizer = Adam(gaussians.parameters(), lr_config={"position": 1e-4, "opacity": 1e-5, ...}) # [G] Typical LR values; exact values not given in sources.
++    optimizer = AdamOptimizer(gaussians, adam_config)
+     
+     for step in range(num_steps):
+-        # 1. Random Camera Selection
+-        img, pose = random.choice(training_images)
++        # Step 1: Randomly select a training image
++        image, camera_pose, camera_intrinsics = random.choice(training_images)
+         
+-        # 2. Differentiable Rendering
+-        # Project Gaussians to 2D, sort by depth, alpha-blend
+-        rendered_img = render(gaussians, pose)
++        # Step 2: Differentiable Rendering
++        # Render the scene using current Gaussians and camera parameters
++        rendered_image = render(gaussians, camera_pose, camera_intrinsics)
+         
+-        # 3. Loss Computation
+-        # D is distortion (e.g., L1 + SSIM + LPIPS as per [S1] context, though specific D is not detailed beyond "distortion")
+-        distortion = compute_distortion(img, rendered_img)
++        # Step 3: Compute Loss
++        # D is a distortion metric (e.g., L1, MS-SSIM)
++        distortion = compute_distortion(image, rendered_image)
+         loss = gamma * distortion
+         
+-        # 4. Backpropagation
+-        loss.backward()
++        # Step 4: Backpropagation
++        # Compute gradients for all Gaussian parameters
++        gradients = compute_gradients(loss, gaussians, camera_pose, camera_intrinsics)
+         
+-        # 5. Parameter Update
+-        optimizer.step()
+-        optimizer.zero_grad()
++        # Step 5: Parameter Update
++        optimizer.step(gradients)
+         
+-        # 6. Adaptive Densification
+-        # Evaluate gradient magnitudes per Gaussian
+-        grad_norms = compute_gradient_norms(gaussians)
++        # Step 6: Adaptive Densification and Pruning
++        # This step is typically performed periodically (e.g., every 100 steps)
++        if step % densification_interval == 0:
++            gaussians = adaptive_density_control(gaussians, gradients)
++            
++    return gaussians
++
++def adaptive_density_control(gaussians, gradients):
++    """
++    Modulates the number of Gaussians based on gradient magnitudes and opacity.
++    
++    Args:
++        gaussians: List of Gaussian objects.
++        gradients: Dictionary of gradients for each Gaussian parameter type.
+         
+-        # Densification: Add new Gaussians where gradient is high
+-        new_gaussians = densify(gaussians, grad_norms, threshold_high) # [G] Thresholds not given in sources.
+-        gaussians.extend(new_gaussians)
++    Returns:
++        Updated list of Gaussian objects.
++    """
++    new_gaussians = []
++    
++    for i, gaussian in enumerate(gaussians):
++        # Pruning: Remove low-opacity Gaussians
++        if gaussian.alpha < opacity_threshold:
++            continue
++            
++        # Densification: Split or clone Gaussians with high gradient magnitude
++        gradient_magnitude = compute_gradient_magnitude(gradients[i])
++        if gradient_magnitude > gradient_threshold:
++            # Clone the Gaussian with slight perturbations to cover the high-error region
++            cloned_gaussian = clone_and_perturb(gaussian)
++            new_gaussians.append(cloned_gaussian)
++            
++        new_gaussians.append(gaussian)
+         
+-        # Pruning: Remove Gaussians with low opacity
+-        gaussians = prune(gaussians, threshold_opacity_low) # [G] Threshold not given in sources.
+-        
+-    return gaussians
++    return new_gaussians
+ ```
+ 
++**Parameters**
++*   $\gamma$: Scalar weighting factor for the distortion loss. It varies across datasets to align Gaussian counts across methods, as adaptive densification relies on gradient magnitude [S1].
++*   Optimizer: Adam, which keeps a running sense of each parameter's recent gradients and adapts a per-parameter step size [S2, unofficial]. Different parameter types (e.g., position vs. opacity) get different base learning rates [S2, unofficial].
++
++**Edge Cases and Pitfalls**
++*   **Precision:** The differentiable rendering pipeline must maintain numerical stability during alpha compositing, especially when dealing with many overlapping Gaussians [S2, unofficial].
++*   **Boundaries:** The adaptive densification strategy must handle boundary conditions carefully to avoid creating Gaussians outside the scene bounds or in empty space [S1].
++*   **Degenerate Input:** If the initial Gaussian set is too sparse, the optimization may fail to converge to a high-quality reconstruction [S1].
++
+ ## Subtopics
++
++### [GS-SLAM](9192-gs-slam.md)
++GS-SLAM is a Simultaneous Localization and Mapping (SLAM) method that simultaneously estimates camera poses and reconstructs 3D scenes using 3D Gaussians. It distinguishes itself from other radiance-field SLAM approaches by employing an adaptive 3D Gaussian expanding strategy to dynamically add new Gaussians and delete unreliable ones based on captured depth and rendered opacity.
+ 
+ ### [SplaTAM](9193-splatam.md)
+@@ -106,22 +132,18 @@
+ Differentiable Pose Estimation optimizes camera poses by backpropagating photometric loss gradients through a 3D Gaussian Splatting (3DGS) renderer. It solves the problem of recovering accurate camera extrinsics when initial poses are noisy or unknown, specifically enabling applications like motion deblurring where camera motion during exposure must be modeled. It distinguishes itself from SLAM-based siblings like [SplaTAM](9193-splatam.md) and [Gaussian-SLAM](9195-gaussian-slam.md) by focusing on batch optimization of poses for a static scene (or trajectory) rather than incremental online tracking, often leveraging the equivalence between camera transformation and Gaussian position transformation to simplify gradient computation.
+ 
+-### GS-SLAM
+-GS-SLAM is a SLAM method that proposes an adaptive 3D Gaussian expanding strategy to add new 3D Gaussians into the training stage and delete unreliable ones with captured depths and rendered opacity values [S3]. On the Replica dataset, GS-SLAM achieves PSNR 31.56, SSIM 0.97, and LPIPS 0.094 [S3].
+-
+ ## Operating characteristics
+-*   **Time Complexity:** Each optimization step involves rendering all Gaussians for a single camera view and backpropagating gradients. The complexity is linear with respect to the number of Gaussians $M$ and the number of pixels $P$ in the view, i.e., $O(M \cdot P)$ per step [S1][S2, unofficial].
+-*   **Memory Complexity:** Memory usage is dominated by storing the parameters of all Gaussians ($O(M)$) and intermediate rendering buffers ($O(P)$) [S1].
+-*   **Measured Performance:** Not given in the sources.
+-*   **Scaling:** The method scales to large scenes by managing the number of Gaussians via adaptive densification and pruning [S1]. The scalar weighting factor $\gamma$ is tuned to align Gaussian counts across datasets, ensuring fair comparison under similar representation budgets [S1].
+-*   **Strengths:** Real-time rendering capabilities due to the efficient rasterization of 2D splats; high-fidelity reconstruction via differentiable optimization [S1].
+-*   **Limitations:** The number of Gaussians can grow large, requiring careful densification control; performance depends on the initial SfM points [S1].
+-*   **When to use:** When real-time novel view synthesis and high-quality reconstruction from sparse or dense image collections are required [S1].
+-*   **When not:** When memory constraints are extremely tight and cannot accommodate the Gaussian count, or when the scene is highly dynamic without extensions like [Dynamic 3D Gaussian Splatting](5703-dynamic-3d-gaussian-splatting.md) [S1].
++*   **Time Complexity:** The optimization is iterative, with each step involving a forward render and a backward pass. The complexity per step is proportional to the number of Gaussians and the number of pixels in the selected image [S2, unofficial].
++*   **Memory Complexity:** Memory usage is proportional to the number of Gaussians and their parameters [S1].
++*   **Measured Performance:** The method can converge to high-quality reconstructions in tens of thousands of steps [S2, unofficial].
++*   **Scaling:** The method scales well with the number of Gaussians, but adaptive densification can lead to a large number of primitives in complex scenes [S1].
++*   **Strengths:** Differentiable rendering allows for end-to-end optimization of scene representation [S2, unofficial]. Adaptive densification ensures efficient use of Gaussians [S1].
++*   **Limitations:** The quality of the initial Gaussian set is critical [S1]. The method can be sensitive to the choice of hyperparameters, such as $\gamma$ and learning rates [S1].
++*   **When to use:** When high-quality, photorealistic 3D scene reconstruction is required from a set of images [S1].
++*   **When not to use:** When real-time performance is critical and the scene is very large, as the number of Gaussians can become prohibitive [S1].
+ 
+ ## Background
+-3D Gaussian Splatting Optimization was introduced in the original 3D Gaussian Splatting paper [S1]. It builds on the concept of representing scenes as differentiable 3D Gaussian primitives, allowing for gradient-based optimization using standard distortion losses [S1]. The method has since been extended to various applications, including SLAM [S3], compression [S1], and dynamic scenes [S1].
++3D Gaussian Splatting Optimization was introduced in the original 3D Gaussian Splatting paper [S1]. It builds on the idea of using 3D Gaussians as a scene representation and differentiable rendering to optimize their parameters [S1]. The method has since been widely adopted in various applications, including SLAM, pose estimation, and scene compression [S1].
+ 
+ ## Sources
+ [S1] Drop-In Perceptual Optimization for 3D Gaussian Splatting, https://doi.org/10.1007/978-3-032-37350-2_25, fetched 2026-10-30
+-[S2] Gaussian Splats Part 2: From Photos to a Trained Model, https://alphapixeldev.com/gaussian-splats-part-2-creating-gaussian-splats/, fetched 2026-10-29 (unofficial)
+-[S3] Recent advances in 3D Gaussian splatting, https://doi.org/10.1007/s41095-024-0436-y, fetched 2026-10-26+[S2] Gaussian Splats Part 2: From Photos to a Trained Model, https://alphapixeldev.com/gaussian-splats-part-2-creating-gaussian-splats/, fetched 2026-10-29 (unofficial)

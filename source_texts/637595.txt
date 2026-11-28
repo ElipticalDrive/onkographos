@@ -1,0 +1,133 @@
+Problem and dependencies A one-voxel translation describes different physical motion on grids with different spacing/orientation. Callers with a world-space matrix should be able to apply it to a volume, masks and keypoints without dupli...
+
+[Proposal] Apply world-space affine mappings on an explicitly declared 3D grid · Issue #527 · albumentations-team/AlbumentationsX · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+[Proposal] Apply world-space affine mappings on an explicitly declared 3D grid #527
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+[Proposal] Apply world-space affine mappings on an explicitly declared 3D grid#527
+Copy link
+Description
+ayasyrev
+opened on Sep 22, 2026
+Issue body actions
+Problem and dependencies
+A one-voxel translation describes different physical motion on grids with
+different spacing/orientation. Callers with a world-space matrix should be able
+to apply it to a volume, masks and keypoints without duplicating coordinate
+conversion and target binding.
+This is a dependent consumer of
+#397 and the
+supplied-matrix Affine3D design proposal. Those decisions determine the metadata
+transport and affine entry point. This proposal adds a world mode to that entry
+point; it does not introduce a second resampling implementation.
+Proposed fixed-grid operation
+The operation actively moves content on the same declared output grid. It keeps
+spatial shape and geometry unchanged. For voxel-to-world affines A_in, A_out
+and a forward world mapping T:
+```
+w_out = T @ w_in
+voxel_pull = inv(A_in) @ inv(T) @ A_out
+keypoint_forward = inv(A_out) @ T @ A_in
+A_out = A_in  # Initial fixed-grid contract.
+```
+Do not replace the output geometry with T @ A_in. The full affine is required:
+dividing translations by a spacing tuple is insufficient on oblique/sheared grids.
+Matrices include their pivot; no extra centering is applied.
+Illustrative new API names, not available today:
+```
+import albumentations as A
+import numpy as np
+
+translation = np.eye(4, dtype=np.float64)
+translation[0, 3] = 1.6
+world_mapping = {"matrix": translation, "world_frame": "RAS", "units": "mm"}
+transform = A.Affine3D(
+    matrix_source="fixed", matrix_space="world", matrix=world_mapping, p=1,
+)
+# Execute inside the geometry-enabled Compose contract chosen in #397.
+```
+The fixed source accepts this public compact mapping. The external source reads
+the same mapping from its user_data[matrix_key]. Require an explicit world frame
+and millimeter units that match the bound geometry; do not infer them from matrix
+signs or inherit them from an unrelated target. Initially accept RAS/LPS as
+proposed in #397. Conversion between conventions stays at an explicit boundary.
+For two axis-aligned grids with X spacing 0.8 mm and 1.6 mm, the same +1.6 mm
+world translation moves an interior landmark by +2 and +1 voxels respectively.
+Both results represent the same declared world displacement. Compare world
+coordinates, not the two unrelated output arrays.
+Targets, borders and numerical behavior
+Initially use one explicitly bound aligned group; reject mismatched or missing
+geometry, unsupported batches, world-coordinate keypoints and vector fields.
+Existing XYZ keypoints are voxel coordinates and use the forward formula above.
+All targets share one realized mapping. Adopt the matrix proposal's mask
+contract: categorical uint8/int16/uint16 use nearest and representable integer
+fills; other integer dtypes are rejected in the new mode. Continuous float32
+masks may interpolate without a categorical-label guarantee.
+Adopt its named mask target_overrides: annotation may use constant 255 while
+coverage uses constant zero, even when the volume border replicates. A single
+global fill_mask is not enough for that combination.
+Normalize finite homogeneous 4×4 matrices in float64, require bottom row
+[0, 0, 0, 1], invertibility and finite maps after conversion to the sampler's
+control dtype. Reject invalid controls
+on the applied path; a probability-skipped node needs no external matrix.
+Preserve the existing volume dtype/layout rules. Geometry algebra uses float64;
+interpolation precision and tolerances follow the accepted sampler contract.
+Numerical equivalence to another resampler must be measured, not inferred.
+Preserve caller arrays and metadata. Invocation matrices/grids do not belong
+in mutable configured-instance fields. Existing array-only defaults remain.
+Persistence and acceptance
+Constructor serialization preserves the source policy. Applied configuration
+stores the realized world mapping in public matrix, switches to fixed source
+and clears matrix_key; fresh compatible geometry is still required. Applying
+that fixed world operator to a different grid is not exact pixel replay.
+ReplayCompose stores the consumed mapping, canonical input geometry and compact
+sampling controls. Require fresh matching geometry; restore omitted matrix
+control internally or reject conflicting canonical matrix/frame/units. Enforce
+these checks on the replay path, without new sampling or serialized raster arrays.
+Acceptance includes the two-spacing example and the crop → world affine → external
+Normalize chain proposed in #397. Cover nonzero origin, signed/permuted axes,
+oblique/sheared grids, reflection, a non-origin pivot, non-cubic/singleton shapes,
+boundary fills, keypoint visibility and matrix-direction mistakes. Test ownership,
+NumPy/CPU Tensor and all three persistence paths across strict JSON.
+Benchmark against an equivalent caller-converted voxel matrix, including
+conversion, full Compose and peak memory for one/multiple targets. Shared-grid
+optimization follows the AX/Albucore boundary decided by the matrix proposal.
+Changing output spacing/FOV, anatomical registration, medical I/O and dense
+deformation fields are out of scope. Implementation follows the accepted #397
+and supplied-matrix contracts; their acceptance is not implied by this draft.
+Related proposals
+Fixed and per-call affine matrices (#525)
+Explicit-origin Crop3D (#526)
+External-statistics Normalize (#524)
+Geometry3D contract proposal in #397
+Activity
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

@@ -1,0 +1,140 @@
+# Two-stage Accurate Intersection Test (TAIT)
+Also called: Coarse-to-fine intersection test
+
+## Overview
+TAIT is a two-stage culling method used in 3D Gaussian Splatting rasterization to accurately determine overlaps between projected Gaussians and rasterization tiles, reducing false positives from the standard Axis-Aligned Bounding Box (AABB) test which overestimates coverage [S1]. It builds on [2D Axis-Aligned Bounding Box (AABB) Intersection](4027-2d-axis-aligned-bounding-box-aabb-intersection.md) by introducing a tighter bounding box approximation in Stage 1 and a geometric line-distance check in Stage 2, balancing accuracy and computational cost [S1].
+
+## How it works
+**Inputs:**
+- Projected Gaussian center $(c_x, c_y)$ [S1].
+- Original opacity $o_i$ [S1].
+- Eigenvalues $\lambda_1, \lambda_2$ of the 2D projection covariance matrix, with $\lambda_1 > \lambda_2$ [S1].
+- Diagonal components $\Sigma'_X, \Sigma'_Y$ of the projection covariance matrix in the x and y directions [S1].
+- Tile geometry (center coordinates, width, height) [S1].
+
+**Outputs:**
+- Boolean flag indicating if the Gaussian intersects the tile [S1].
+
+**Data Structures:**
+- The method operates on scalar values derived from the Gaussian's projection and tile geometry [S1].
+
+**Parameters:**
+- Opacity threshold $\tau = 1/255$ [S1].
+- Tile circumcircle radius $r$ [S1].
+
+**Steps:**
+
+1.  **Stage 1: Coarse Bounding Box Calculation**
+    Model the opacity falloff of the Gaussian as a function of distance $d$ from its projected center:
+    $$ \alpha_i = o_i e^{-d^2 / 2\lambda} $$
+    [S1]
+
+    Calculate the effective semi-major axis $R_{major}$ and semi-minor axis $R_{minor}$ lengths, defined as the distances at which opacity decays to $\tau$:
+    $$ R_{major} = \sqrt{2 \lambda_1 \ln(o_i / \tau)} $$
+    $$ R_{minor} = \sqrt{2 \lambda_2 \ln(o_i / \tau)} $$
+    [S1]
+
+    Calculate the width $W$ and height $H$ of the tight bounding box for the ellipse using $R_{major}$ and the covariance components:
+    $$ W = 2 R_{major} \sqrt{\Sigma'_X / \lambda_1} $$
+    $$ H = 2 R_{major} \sqrt{\Sigma'_Y / \lambda_2} $$
+    [S1]
+
+    Perform a standard AABB test using the bounding box defined by $W$ and $H$ centered at $(c_x, c_y)$. If the tile does not intersect this box, discard the pair [S1].
+
+2.  **Stage 2: Fine Geometric Culling**
+    For tiles passing Stage 1, perform a finer check to eliminate false positives caused by the mismatch between the elliptical Gaussian shape and the rectangular bounding box [S1].
+
+    Define $l$ as the vector connecting the center of the tile to the center of the ellipse [S1].
+    Define $\theta$ as the angle between $l$ and the semi-minor axis of the ellipse [S1].
+    Define $r$ as the circumcircle radius of the tile [S1].
+
+    Classify the tile as non-intersecting if:
+    $$ |l| \cos \theta + r > R_{minor} $$
+    [S1]
+
+    If the condition is not met, the Gaussian intersects the tile [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def tait_intersection(cx, cy, oi, lambda1, lambda2, sigma_x, sigma_y, 
+                      tx, ty, tw, th):
+    """
+    Two-stage Accurate Intersection Test.
+    
+    cx, cy: float, Gaussian center
+    oi: float, original opacity
+    lambda1, lambda2: float, eigenvalues (lambda1 > lambda2)
+    sigma_x, sigma_y: float, diagonal covariance components
+    tx, ty: float, tile center
+    tw, th: float, tile width and height (full extents)
+    
+    Returns: True if intersecting, False otherwise.
+    """
+    tau = 1.0 / 255.0
+    
+    # Stage 1: Effective axes and tight bounding box
+    r_major = math.sqrt(2 * lambda1 * math.log(oi / tau))
+    r_minor = math.sqrt(2 * lambda2 * math.log(oi / tau))
+    
+    w = 2 * r_major * math.sqrt(sigma_x / lambda1)
+    h = 2 * r_major * math.sqrt(sigma_y / lambda2)
+    
+    # AABB check against tight bounding box
+    if cx + w / 2 < tx - tw / 2 or cx - w / 2 > tx + tw / 2:
+        return False
+    if cy + h / 2 < ty - th / 2 or cy - h / 2 > ty + th / 2:
+        return False
+        
+    # Stage 2: Fine geometric culling
+    # Vector from tile center to Gaussian center
+    dx = cx - tx
+    dy = cy - ty
+    l_dist = math.sqrt(dx * dx + dy * dy)
+    
+    # Compute unit vector of semi-minor axis [G]
+    # For 2x2 symmetric covariance C = [[cxx, cxy], [cxy, cyy]],
+    # eigenvector for lambda2 is [lambda2 - cyy, cxy].
+    # Assuming axis-aligned covariance (cxy = 0) based on provided inputs.
+    if lambda2 > sigma_y:
+        ux, uy = 1.0, 0.0
+    else:
+        ux, uy = 0.0, 1.0
+        
+    # cos(theta) between center vector and minor axis
+    if l_dist == 0:
+        cos_theta = 1.0
+    else:
+        cos_theta = (dx * ux + dy * uy) / l_dist
+        
+    # Tile circumcircle radius
+    r = 0.5 * math.sqrt(tw * tw + th * th)
+    
+    # Non-intersection condition
+    if l_dist * abs(cos_theta) + r > r_minor:
+        return False
+        
+    return True
+```
+
+## Subtopics
+
+### Two-Stage Ellipse Intersection Test
+A variant that retains substantially fewer Gaussian-tile pairs than GSCore’s OOBB bounding box and introduces negligible redundancy compared to FlashGS while significantly reducing computational cost [S1]. It uses the same Stage 1 bounding box calculation but defines Stage 2 culling using the line $l$ connecting the tile center to the ellipse center projected onto the short axis, classifying non-intersection if $|l| \cos \theta + r > R_{minor}$ [S1].
+
+## Operating characteristics
+- **Time Complexity:** Minimal computational cost per test, involving square roots, logarithms, and a single distance comparison [S1].
+- **Memory Complexity:** $O(1)$ auxiliary memory per test [S1].
+- **Performance:** Achieves optimal speedup across various scenes by reducing false positives compared to standard AABB and GSCore’s OOBB, while avoiding the high cost of complex geometric operations used in FlashGS [S1].
+- **Strengths:** Significantly reduces the number of Gaussian-tile pairs processed in later stages, mitigating kernel idle caused by load imbalance [S1].
+- **Limitations:** Requires calculation of eigenvalues and covariance components, adding overhead compared to simple AABB [S1].
+
+## Background
+TAIT was proposed to address the inefficiencies of standard AABB tests in 3D Gaussian Splatting rasterization, which overestimate coverage and cause excessive tile assignments [S1]. It was introduced in the paper "No Redundancy, No Stall: Lightweight Streaming 3D Gaussian Splatting for Real-time Rendering" [S1].
+
+## Sources
+[S1] No Redundancy, No Stall: Lightweight Streaming 3D Gaussian Splatting for Real-time Rendering, https://doi.org/10.1109/iccad66269.2025.11240950, fetched 2026-10-30

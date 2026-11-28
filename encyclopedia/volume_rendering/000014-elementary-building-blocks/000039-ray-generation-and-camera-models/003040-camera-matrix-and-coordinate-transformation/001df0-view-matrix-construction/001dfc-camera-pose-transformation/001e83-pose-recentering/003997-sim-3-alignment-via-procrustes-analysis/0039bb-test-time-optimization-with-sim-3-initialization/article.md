@@ -1,0 +1,51 @@
+# Test-time Optimization with Sim(3) Initialization
+
+Also called: BARF test optimization, Sim(3) + opt
+
+## Overview
+A testing procedure that initializes test camera poses using a Sim(3) alignment derived from training data, followed by additional test-time optimization to refine those poses for novel view synthesis [S1, unofficial]. It sets itself apart from sibling methods by decoupling the frozen scene representation from the camera parameters, using a global similarity transformation to bootstrap poses rather than relying on local neighbor proximity or unoptimized estimated poses [S1, unofficial].
+
+## How it works
+**Inputs:**
+- Estimated camera poses for training images and ground truth poses for training images [S1, unofficial].
+- Estimated camera poses for test images [S1, unofficial].
+- A NeRF model (or similar implicit representation) and a photometric loss function [G].
+
+**Outputs:**
+- Optimized camera poses for test images [S1, unofficial].
+
+**Data Structures:**
+- Camera pose $P_i$ represented as a $4 \times 4$ transformation matrix or a tuple $(R_i, t_i)$ where $R_i \in SO(3)$ and $t_i \in \mathbb{R}^3$ [G].
+
+**Steps:**
+1. **Sim(3) Initialization:** Compute a Sim(3) transformation matrix $T_{\text{sim3}}$ using Procrustes analysis on the camera pose locations (centers) of the training images. Apply this transformation to the estimated test poses: $P_{\text{test}}^{\text{init}} = T_{\text{sim3}} \cdot P_{\text{test}}$. This aligns the test poses to the coordinate system of the ground truth training poses [S1, unofficial].
+2. **Test-time Optimization:** Optimize the parameters of $P_{\text{test}}^{\text{init}}$ by minimizing the photometric loss $\mathcal{L}_{\text{photo}}$ between rendered images and ground truth test images. The optimization updates the rotation and translation components of the test poses [S1, unofficial].
+
+**Parameters:**
+- Test-optimization iteration count: 100 iterations for methods other than NoPe-NeRF [S1, unofficial].
+
+**Pitfalls:**
+- Incorrect pose estimations can affect the Sim(3) alignment, causing the initialization to fail [S1, unofficial].
+
+## Subtopics
+
+### SAMURAI Initialization
+A variant using specific initialization schemes for direction vectors. Fixed initialization sets all initial directions to [Center, Above, Center] (North pole). When optimizing poses in SO(3), predicted camera locations are overwritten using $t_i = -R_i \times T_i$. Manual initialization allows specifying each view direction with a triplet [Left/Center/Right, Above/Center/Below, Front/Center/Back], excluding [Center, Center, Center], yielding 26 possible initial directions [S2].
+
+### [Test-time Pose Optimization](20112-test-time-pose-optimization.md)
+A procedure to obtain accurate camera poses for testing views by freezing a pre-trained 3D Gaussian Splatting model and optimizing only the test view poses via photometric error minimization. It sets itself apart from sibling methods by decoupling the scene representation from the camera parameters, specifically addressing pose errors that degrade novel view synthesis quality. It builds on this method by applying optimization to the final test poses.
+
+## Operating characteristics
+- **Time Complexity:** Depends on the number of optimization iterations and the cost of rendering per iteration. Standard implementations use 100 iterations [S1, unofficial].
+- **Memory Complexity:** Low, as it only stores pose parameters and the existing scene representation model [G].
+- **Strengths:** Effective when estimated poses can be aligned precisely to ground truth poses [S1, unofficial].
+- **Limitations:** Sensitive to incorrect pose estimations that disrupt the Sim(3) alignment [S1, unofficial].
+- **When to use:** When global alignment of test poses to training poses is feasible and the estimated poses are reasonably accurate [S1, unofficial].
+- **When not to use:** When estimated poses are highly inaccurate, as this degrades the Procrustes alignment [S1, unofficial].
+
+## Background
+Originated from the BARF (Blending Aliased Reconstructions for Forward Modeling) approach [S1, unofficial]. The Sim(3) alignment approach is derived from the official open-source version of BARF [S1, unofficial]. It is used in evaluating novel view synthesis on datasets like NeRFBuster and Free-Dataset [S1, unofficial].
+
+## Sources
+[S1] CT-NeRF: Incremental Optimizing Neural Radiance Field and Poses with Complex Trajectory, https://doi.org/10.48550/arxiv.2404.13896, fetched 2026-10-26 (unofficial)
+[S2] MELON: NeRF with Unposed Images in SO(3), https://doi.org/10.1109/3dv62453.2024.00084, fetched 2026-10-30

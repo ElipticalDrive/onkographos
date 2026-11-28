@@ -1,0 +1,138 @@
+# GPU-Based Voxel Carving with Systematic Occlusion Handling
+
+Also called: Direct Voxel Carving, GPU-based Voxel Carving, Visual Hull Carving with Occlusion Maps, Voxel Carving Kernel with Systematic Occlusion Handling, Voxel Carving with Systematic Occlusion Handling
+
+## Overview
+This method computes the minimal visual hull of multiple people in real-time within multi-camera environments containing static occlusions [S1]. It solves the problem of incorrect voxel removal (carving) when foreground subjects are partially hidden by static background objects (e.g., tables) by integrating depth-based occlusion maps into the silhouette projection process [S1]. Unlike standard voxel carving which removes any voxel outside a silhouette, this method preserves voxels that are occluded by known foreground/occluder geometry, ensuring the resulting hull is both correct and minimal [S1]. It builds on [GPU Evaluation and Occupancy Assembly](19172-gpu-evaluation-and-occupancy-assembly.md) by providing the specific kernel logic for occlusion-aware carving.
+
+## How it works
+**Inputs:**
+*   A 3D voxel grid $V$ defined by a cubic grid with $k$ entries along each axis, resulting in $k^3$ voxels. Voxels are cubes with side length $c \in \mathbb{R}$ [S1].
+*   $N$ camera views. For each view $j$, the following data is required:
+    *   Camera projection parameters (stored in constant memory) [S1].
+    *   A binary silhouette image $S_j$ (stored in texture memory) [S1].
+    *   An occlusion map $O_j$ (stored in texture memory), a 2D array with the same dimensions as the camera image, storing the distance to the nearest occluding object for each pixel (or infinity if no occlusion) [S1].
+
+**Outputs:**
+*   A visual hull array containing the IDs of voxels that remain uncarved (i.e., voxels that are part of the visual hull) [S1].
+
+**Data Structures:**
+*   **Voxel Grid:** Defined as $V = \{(x, y, z) \in \mathbb{R}^3 \mid \exists k_1, k_2, k_3 \in \mathbb{Z} : x = k_1 c \land y = k_2 c \land z = k_3 c\}$ [S1].
+*   **Occlusion Map:** $O_j(x, y)$ stores the distance $d_j(y)$ to the closest occluder $y$ at pixel $(x,y)$ in view $j$ [S1].
+*   **Visual Hull Array:** A dynamic array on the GPU used to store voxel IDs. Access is managed via atomic operations [S1].
+
+**Definitions:**
+*   Let $p_j: V \to \mathbb{N}_0 \times \mathbb{N}_0$ be the projection function from voxel space to the image plane of camera $j$ [S1].
+*   Let $d_j(x)$ be the Euclidean distance from voxel $x$ to the camera center of view $j$ [S1].
+*   The set of occluded voxels for camera $j$ is $M_j = \{x \in V \mid \exists y \in O : p_j(x) = p_j(y) \land d_j(y) < d_j(x)\}$, where $O$ is the set of 3D points occupied by occluders [S1].
+*   The modified visual hull is defined as $H = \{x \in V \mid \forall j : (p_j(x) \in S_j \lor \exists y \in M_j : x = y)\} \setminus O$ [S1].
+
+**Algorithm Steps:**
+1.  **Initialization:** Initialize a visual hull array on the host and transfer it to the GPU. Initialize an index counter for this array to 0 [S1].
+2.  **Kernel Launch:** Launch a CUDA kernel where each thread block processes a subset of voxels. The kernel configuration typically uses 512 threads per block [S1].
+3.  **Voxel Identification:** Each thread identifies a unique voxel ID. In the standard configuration, one thread processes one voxel. In optimized configurations, a thread may process multiple voxels [S1].
+4.  **Iteration over Views:** For the current voxel $x$, iterate through all camera views $j = 1 \dots N$:
+    a.  **Projection:** Project the voxel center to 2D coordinates $(u, v)$ in image $j$ using camera parameters [S1].
+    b.  **Distance Calculation:** Calculate $d_j(x)$, the distance from voxel $x$ to camera $j$ [S1].
+    c.  **Silhouette Check:** Check if $(u, v)$ is inside the silhouette $S_j$ (i.e., $p_j(x) \in S_j$) [S1].
+    d.  **Occlusion Check:** If the voxel is *not* in the silhouette, retrieve the occlusion depth $d_{occ} = O_j(u, v)$ from the occlusion map [S1].
+    e.  **Carving Decision:**
+        *   If the voxel is inside the silhouette ($p_j(x) \in S_j$), it passes this view. Continue to the next view [S1].
+        *   If the voxel is outside the silhouette AND $d_j(x) > d_{occ}$ (voxel is further than the occluder), the voxel is considered occluded by a foreground object. It passes this view. Continue to the next view [S1].
+        *   If the voxel is outside the silhouette AND $d_j(x) \le d_{occ}$ (voxel is in free space or behind background), the voxel is carved. Terminate processing for this voxel immediately (early termination) [S1].
+5.  **Result Storage:** If the voxel passes all camera views (i.e., it was never carved), it is added to the visual hull array [S1].
+    *   **Atomic Insertion:** Use an atomic add operation to increment the global index and insert the voxel ID into the visual hull array to handle concurrent writes from multiple threads [S1].
+6.  **Optimization - True Silhouette Hit:** To prevent reconstructing large areas that are occluded in *every* view (which would result in a hollow shell of occluded space), require at least one view $j$ where the voxel is inside the silhouette ($p_j(x) \in S_j$) to consider it part of the visual hull [S1]. If no such "true silhouette hit" occurs, the voxel is discarded even if it passed all occlusion checks [S1].
+7.  **Optimization - Batching:** To reduce atomic operation bottlenecks, threads can check multiple voxels and insert uncarved voxels in batches into the visual hull vector [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Global variables assumed:
+# visualHullArray: Global memory array for storing voxel IDs
+# hullIndex: Global atomic integer for tracking insertion position
+# silhouettes: Texture memory array of binary silhouettes
+# occlusionMaps: Texture memory array of depth maps
+# cameraParams: Constant memory array of projection matrices
+
+def voxelCarvingKernel():
+    # Identify unique voxel ID based on block and thread indices
+    # Note: getVoxel maps (blockIdx.x, threadIdx.x) to a specific (x,y,z) in V
+    voxel = getVoxel(blockIdx.x, threadIdx.x)
+    
+    hasTrueSilhouetteHit = False
+    
+    # Iterate over all camera views
+    for j in range(numCameras):
+        # Project voxel center to 2D image coordinates
+        u, v = projectVoxel(voxel, cameraParams[j])
+        
+        # Calculate distance from voxel to camera j
+        voxelDist = distanceToCam(voxel, cameraParams[j])
+        
+        # Check if voxel is inside the silhouette
+        isSilhouetteHit = isInsideSilhouette(silhouettes[j], u, v)
+        
+        if isSilhouetteHit:
+            hasTrueSilhouetteHit = True
+            # Voxel is in silhouette, so it passes this view.
+            # Continue to next view.
+            continue
+        else:
+            # Voxel is outside silhouette. Check occlusion map.
+            # Retrieve distance to closest occluder at pixel (u, v)
+            occluderDist = sampleOcclusionMap(occlusionMaps[j], u, v)
+            
+            # If voxel is further away than the occluder, it is occluded.
+            # If voxel is closer or equal, it is in free space and should be carved.
+            if voxelDist > occluderDist:
+                # Voxel is occluded by a foreground object.
+                # It passes this view.
+                continue
+            else:
+                # Voxel is not in silhouette and not occluded by a foreground object.
+                # It is in free space. Carve this voxel.
+                return # Early termination: voxel is removed
+
+    # If we reached here, the voxel passed all views.
+    # Apply optimization: require at least one true silhouette hit.
+    if hasTrueSilhouetteHit:
+        # Insert voxel ID into visual hull array using atomic operation
+        idx = atomicAdd(hullIndex, 1)
+        visualHullArray[idx] = voxel.id
+```
+
+**Parameters:**
+*   **Grid Resolution:** $k^3$ voxels. Typical values: $64^3$ for Middlebury dataset, $256^3$ for multi-camera environment [S1].
+*   **Voxel Size:** $c^3$. Typical value: $1.8 \text{ cm}^3$ in multi-camera setup [S1].
+*   **Kernel Configuration:** 512 threads per block [S1].
+    *   Middlebury evaluation: Each thread checked 64 voxels [S1].
+    *   Multi-camera environment: One thread per voxel [S1].
+*   **Occlusion Map:** Distance buffer per camera view [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Atomic Bottleneck:** Large numbers of threads accessing the result array simultaneously cause contention due to `atomicAdd` operations. Mitigated by batching voxel insertions [S1].
+*   **Incorrect Carving without Occlusion:** Without occlusion handling, voxels under static occluders (e.g., a table) are incorrectly carved because they appear outside the silhouette in occluded views. The occlusion map prevents this by allowing the algorithm to reason that the voxel is behind a foreground object [S1].
+*   **Hollow Occluded Volumes:** Without the "true silhouette hit" optimization, large areas occluded in every view are reconstructed as solid blocks. This is avoided by requiring at least one view where the voxel is inside the silhouette [S1].
+*   **Precision:** The method projects voxel centers. For coarser resolutions where volumetric nature must be maintained, corners should be projected and integral images used for silhouette lookups [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of voxels $|V|$ and the number of camera views $N$. Early termination reduces average case complexity.
+*   **Memory Complexity:** $O(|V|)$ for the voxel grid and result array. $O(N \cdot W \cdot H)$ for silhouette and occlusion maps, where $W, H$ are image dimensions.
+*   **Performance:** Up to 50 fps for multiple people on off-the-shelf hardware [S1].
+    *   **Hardware:** Tested on NVIDIA GTX280 (30 multiprocessors) and NVIDIA NVS290 (2 multiprocessors) [S1].
+    *   **Middlebury Dataset:** Grid resolution $64^3$. GTX280 constructs the visual hull approximately 15 times faster than NVS290 [S1].
+    *   **Multi-camera Environment:** 4 AXIS 210 cameras, 640x480px RGB, 30fps. Grid resolution $256^3$. Runtime 17-45ms (20-50 fps) for 1-3 people [S1].
+*   **Scaling:** The algorithm scales well with future graphic chips without additional modifications [S1].
+*   **Strengths:** Real-time performance, robustness to static occlusions, minimal visual hull generation.
+*   **Limitations:** Concavities are not reconstructed due to the nature of voxel carving. Performance is limited by atomic operation bottlenecks if not optimized with batching.
+
+## Background
+*   **Origin:** The method was presented by Alexander Schick, Volker Blanz, and Rainer Stiefelhagen from Fraunhofer IITB Karlsruhe and Universität Karlsruhe (TH) [S1].
+*   **Paper:** "Real-Time GPU-Based Voxel Carving with Systematic Occlusion Handling" [S1].
+*   **Context:** Developed for analyzing people interacting in multi-camera environments like smart rooms. It addresses the limitation of standard foreground segmentation which fails to account for static objects that are part of the background but occlude foreground subjects [S1].
+*   **Comparison:** Compared to Ladikos et al. [6], which used 4 PCs with NVIDIA 8800 GTX, this algorithm runs on one PC with GTX280 and is faster than their direct algorithm (GPU2) and comparable to their octree-based approach (GPU2 OT) [S1].
+
+## Sources
+[S1] Real-Time GPU-Based Voxel Carving with Systematic Occlusion Handling, https://doi.org/10.1007/978-3-642-03798-6_38, fetched 2026-10-26

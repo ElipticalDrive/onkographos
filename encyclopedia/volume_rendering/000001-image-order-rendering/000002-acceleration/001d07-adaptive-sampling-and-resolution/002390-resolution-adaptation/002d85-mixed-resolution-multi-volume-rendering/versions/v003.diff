@@ -1,0 +1,200 @@
+--- v002.md
++++ v003.md
+@@ -1,128 +1,96 @@
+ # Mixed-Resolution Multi-Volume Rendering
+ Also called: Per-channel resolution selection
++
+ ## Overview
+-Mixed-resolution multi-volume rendering is a technique where different channels of a multi-volume dataset are rendered at different resolution levels to save memory and reduce sample evaluation [S1, unofficial][S2]. It addresses the inefficiency of rendering all channels at the highest resolution when some channels have lower frequency content or lower visual importance [S1, unofficial][S2]. It is distinct from [Level-of-detail (LOD) methods](1007-level-of-detail-lod-methods.md) which typically apply uniform resolution changes across the entire volume, and from [Dynamic Volume Resolution & Alpha Mask Update](2539-dynamic-volume-resolution-alpha-mask-update.md) which focuses on global resolution updates based on occupancy [S1, unofficial][S2].
++Mixed-resolution multi-volume rendering is a technique where different channels of a multi-volume dataset are rendered at different spatial resolution levels to save memory and reduce sample evaluation costs [S1, unofficial][S2]. It addresses the inefficiency of rendering all channels at the highest resolution when some channels have lower frequency content or lower visual importance [S1, unofficial][S2]. It is distinct from sibling methods like Level-of-detail (LOD) methods, which typically adjust resolution based on distance for the entire volume, and Dynamic Volume Resolution & Alpha Mask Update, which adjusts resolution based on occupancy or alpha thresholds [1007-level-of-detail-lod-methods.md][2539-dynamic-volume-resolution-alpha-mask-update.md].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: A multi-volume dataset with $N$ channels, each having a multi-resolution hierarchy (levels $l_0$ to $l_{max}$, where $l_0$ is highest resolution).
+-- Input: Viewing parameters (camera position, ray direction).
+-- Input: Per-channel resolution constraint functions.
+-- Output: Rendered image with each channel sampled at its selected resolution level.
++*   **Input:** A multi-volume dataset with $N$ channels, where each channel $i$ has a multi-resolution hierarchy (e.g., a brick hierarchy or octree) with resolution levels $l_0$ (highest) to $l_{max}$ (lowest). Viewing parameters (camera position, ray direction).
++*   **Output:** A rendered image where each pixel's color is computed by integrating contributions from all channels, sampled at their respective selected resolution levels.
+ 
+ **Data Structures:**
+-- **Channel Resolution Map**: A mapping from channel index $c$ to a selected resolution level $l_c$. This can be static or dynamic.
+-- **Resolution Constraint Function**: A function $f_c(view\_params)$ that returns a valid resolution level or range for channel $c$.
++*   **Channel Resolution Constraint Function:** For each channel $i$, a function $f_i(\mathbf{p}, \mathbf{v}, \dots)$ that returns a valid resolution level $l_i \in [l_{min}, l_{max}]$. The inputs $\mathbf{p}$ (position), $\mathbf{v}$ (viewing parameters), and potentially frequency content or transfer function properties [S1, unofficial][S2].
++*   **Multi-resolution Hierarchy:** Each channel's data is stored in a hierarchy of resolution levels. Level $l_0$ is the finest, and higher $l$ values represent coarser resolutions [S1, unofficial][S2].
+ 
+ **Steps:**
+-1. **Initialize**: For each ray, determine the viewing parameters (e.g., distance to camera for each sample point).
+-2. **Select Resolution**: For each channel $c$, evaluate its constraint function $f_c$ to determine the resolution level $l_c$ to use. The function may consider:
+-   - Frequency content of the channel [S1, unofficial][S2].
+-   - Viewing parameters (e.g., distance to camera) [S1, unofficial][S2].
+-   - Transfer functions [S1, unofficial][S2].
+-   - User-defined bounds [S1, unofficial][S2].
+-3. **Upload Data**: Upload only the bricks/data for the selected resolution level $l_c$ for each channel $c$ to the GPU [S1, unofficial][S2]. This limits the range of resolutions uploaded per channel [S1, unofficial][S2].
+-4. **Sample**: For each ray sample, sample channel $c$ at resolution $l_c$. The sampling rate may vary per channel; e.g., high-frequency channels may require sampling at every step, while low-frequency channels may be sampled every second step [S1, unofficial][S2].
+-5. **Composite**: Composite the samples from all channels at their respective resolutions to form the final pixel color.
+-
+-**Formulas:**
+-- Resolution Level Selection: $l_c = f_c(view\_params)$
+-- Sampling Rate: $s_c$ samples per unit distance for channel $c$, where $s_c$ may depend on $l_c$ and frequency content [S1, unofficial][S2].
+-
+-**Parameters:**
+-- Resolution Levels: $l_0$ (highest), $l_1$, ..., $l_{max}$ (lowest). Typical values depend on the dataset; e.g., $l_0$ to $l_5$ [S1, unofficial].
+-- Sampling Rate: Can be fixed per channel or adaptive. Example: high-frequency channel sampled every step, low-frequency every second step [S1, unofficial][S2].
+-
+-**Edge Cases and Pitfalls:**
+-- **High-Frequency Content**: A channel with high-frequency content may require a higher sampling rate or higher resolution level to avoid aliasing [S1, unofficial][S2].
+-- **Boundary Conditions**: Ensure that the resolution constraint function handles edge cases, such as when the camera is very close or far [S1, unofficial][S2].
+-- **Memory Management**: Limiting the range of resolutions uploaded per channel helps manage GPU memory, but requires careful management of data loading/unloading [S1, unofficial][S2].
++1.  **Initialize Ray:** For each pixel, cast a ray into the volume.
++2.  **Determine Resolution per Channel:** For each channel $i$, evaluate the constraint function $f_i$ using the current ray sample position and viewing parameters to determine the resolution level $l_i$ to use for that channel [S1, unofficial][S2].
++    *   *Note:* The function can be user-defined, based on distance to camera, frequency content, or transfer function importance [S1, unofficial][S2].
++3.  **Sample Data:** For each channel $i$, sample the volume data at the determined resolution level $l_i$. This may involve different step sizes along the ray for different channels, or simply accessing coarser data structures [S1, unofficial][S2].
++    *   *Pitfall:* A channel with high-frequency content may require a higher sampling rate (lower $l$), while another may only need sampling at every second step (higher $l$) [S1, unofficial][S2].
++4.  **Integrate:** Compute the volume rendering integral for each channel using the sampled data at their respective resolutions. Combine the contributions from all channels to form the final pixel color [S1, unofficial][S2].
++5.  **Memory Management:** Limit the range of resolutions uploaded to the GPU on a per-channel basis to save memory [S1, unofficial][S2].
+ 
+ **Pseudocode:**
+ ```python
+-def render_mixed_resolution_volume(rays, channels, resolution_functions):
++def render_mixed_resolution_multi_volume(ray, channels, camera):
+     """
+-    rays: list of ray objects, each with position and direction
+-    channels: list of channel objects, each with multi-resolution data
+-    resolution_functions: list of functions, one per channel, taking view_params and returning resolution level
++    ray: Ray object with origin and direction
++    channels: List of Channel objects, each with a multi-resolution hierarchy and a resolution constraint function
++    camera: Camera object with position and view parameters
+     """
+-    image = zeros_like(rays)
++    final_color = [0.0, 0.0, 0.0, 0.0]
+     
+-    for ray in rays:
+-        # Determine view parameters for this ray
+-        view_params = get_view_params(ray)
++    # Initialize ray marching parameters
++    t = ray.origin
++    dt = initial_step_size # Not given in sources, typically based on bounding box or highest resolution
++    
++    while t is within volume bounds:
++        # Determine resolution for each channel at current position
++        channel_resolutions = []
++        for channel in channels:
++            # Evaluate constraint function based on position, camera, etc.
++            # f_i can consider distance to camera, frequency content, transfer function
++            l_i = channel.constraint_function(t, camera)
++            channel_resolutions.append(l_i)
+         
+-        # Initialize accumulated color and alpha
+-        acc_color = vec3(0.0)
+-        acc_alpha = 0.0
++        # Sample and integrate each channel at its selected resolution
++        for i, channel in enumerate(channels):
++            l_i = channel_resolutions[i]
++            
++            # Sample data at resolution level l_i
++            # This may involve accessing a coarser brick or octree node
++            # The step size for this channel might be adjusted based on l_i
++            # If l_i is coarse, we might sample less frequently or use larger steps
++            # However, the core idea is accessing the data at the correct resolution
++            
++            # Get density and color at current t for channel i at resolution l_i
++            # This function handles the specific data structure lookup for level l_i
++            density, color = channel.sample_at(t, l_i)
++            
++            # Accumulate contribution to final color
++            # Standard volume rendering accumulation
++            alpha = 1.0 - exp(-density * dt)
++            final_color = final_color + color * alpha * (1.0 - final_color[3])
++            final_color[3] = final_color[3] + alpha * (1.0 - final_color[3])
++            
++        # Advance ray
++        # Note: Step size dt might be adjusted per channel, but for simplicity,
++        # we assume a common step size or that the sampling function handles internal stepping
++        # In practice, if channels have different resolutions, the effective step size
++        # for data access might differ, but the ray position t advances uniformly
++        t = t + ray.direction * dt
+         
+-        # Determine sampling parameters for each channel
+-        channel_params = []
+-        for c_idx, channel in enumerate(channels):
+-            # Select resolution level for this channel
+-            l_c = resolution_functions[c_idx](view_params)
+-            
+-            # Determine sampling rate based on resolution and frequency content
+-            # [G] Assuming a simple heuristic: higher resolution -> higher sampling rate
+-            # This is a placeholder for the actual logic described in [S1, unofficial][S2]
+-            sampling_rate = get_sampling_rate(channel, l_c)
+-            
+-            channel_params.append({
+-                'channel': channel,
+-                'resolution_level': l_c,
+-                'sampling_rate': sampling_rate
+-            })
+-        
+-        # Sample along the ray
+-        t = ray.origin
+-        dt = get_step_size(ray, max(channel_params, key=lambda x: x['sampling_rate'])['sampling_rate'])
+-        
+-        while t < ray.far_plane:
+-            # Evaluate all channels at current t
+-            for cp in channel_params:
+-                channel = cp['channel']
+-                l_c = cp['resolution_level']
+-                sampling_rate = cp['sampling_rate']
+-                
+-                # Sample the channel at the selected resolution
+-                # [G] Assuming a function to sample a channel at a specific resolution
+-                value = sample_channel_at_resolution(channel, l_c, t)
+-                
+-                # Get transfer function value
+-                color, alpha = apply_transfer_function(value)
+-                
+-                # Composite
+-                # [G] Standard front-to-back compositing
+-                weight = alpha * (1.0 - acc_alpha)
+-                acc_color += weight * color
+-                acc_alpha += weight
+-                
+-                if acc_alpha > 0.99:
+-                    break
+-            
+-            t += dt
+-        
+-        image[ray.id] = acc_color
+-    
+-    return image
++    return final_color
+ ```
+ 
+-## Subtopics
++**Parameters:**
++*   **Resolution Levels:** Discrete levels $l_0, \dots, l_{max}$. $l_0$ is highest resolution [S1, unofficial][S2].
++*   **Constraint Function Inputs:** Distance to camera, frequency content, transfer function properties [S1, unofficial][S2].
+ 
+-### Per-Channel Resolution Selection
+-The core mechanism of assigning different resolution levels to different channels based on their content and importance. [Link](#)
+-
+-### Dynamic Resolution Adjustment
+-Adjusting resolution levels based on viewing parameters like distance to the camera. [Link](#)
++**Edge Cases and Pitfalls:**
++*   **Frequency Mismatch:** A channel with high-frequency content may require a higher sampling rate, while another may only need sampling at every second step [S1, unofficial][S2].
++*   **Memory Management:** Limiting the range of resolutions uploaded to the GPU is crucial for out-of-core rendering [S1, unofficial][S2].
+ 
+ ## Operating characteristics
+-- **Time Complexity**: Depends on the number of channels and the selected resolution levels. Lower resolution levels reduce the number of samples and data transfer, improving performance [S1, unofficial][S2].
+-- **Memory Complexity**: Reduced by uploading only the necessary resolution levels per channel to the GPU [S1, unofficial][S2].
+-- **Performance**: Significant memory savings and reduced sample evaluation for channels with lower frequency content or importance [S1, unofficial][S2].
+-- **Strengths**: Efficient rendering of large-scale multi-volume data by exploiting differences in channel frequency and importance [S1, unofficial][S2].
+-- **Limitations**: Requires careful selection of resolution levels and sampling rates to avoid visual artifacts, especially for high-frequency channels [S1, unofficial][S2].
++*   **Time Complexity:** Depends on the number of channels and the selected resolution levels. Rendering at lower resolutions for some channels reduces the number of samples evaluated [S1, unofficial][S2].
++*   **Memory Complexity:** Reduces memory usage by limiting the range of resolutions uploaded to the GPU on a per-channel basis [S1, unofficial][S2].
++*   **Strengths:** Saves memory and reduces computational cost for multi-volume datasets where channels have varying importance or frequency content [S1, unofficial][S2].
++*   **Limitations:** Requires a multi-resolution hierarchy for each channel and a mechanism to determine the appropriate resolution level per channel [S1, unofficial][S2].
++*   **When to Use:** Large-scale multi-volume data where some channels have lower frequency content or are less important for the user [S1, unofficial][S2].
+ 
+ ## Background
+-Mixed-resolution multi-volume rendering was introduced in the context of scalable web-based volume rendering of large biomedical datasets [S1, unofficial][S2]. It leverages multi-resolution hierarchies and out-of-core methods to manage memory and computational load [S1, unofficial][S2]. The technique is particularly useful for datasets with multiple channels where not all channels require the same level of detail [S1, unofficial][S2].
++Mixed-resolution multi-volume rendering was introduced in the context of scalable web-based volume rendering of large biomedicine datasets [S1, unofficial][S2]. It is part of a system that uses out-of-core methods and multi-resolution hierarchies (e.g., OME-Zarr files) to handle large data volumes [S2]. The technique allows for flexible resolution selection per channel based on viewing parameters and data characteristics [S1, unofficial][S2].
+ 
+ ## Sources

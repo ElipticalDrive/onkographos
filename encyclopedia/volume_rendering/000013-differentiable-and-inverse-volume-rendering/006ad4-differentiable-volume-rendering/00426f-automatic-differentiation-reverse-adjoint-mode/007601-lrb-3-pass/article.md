@@ -1,0 +1,113 @@
+# LRB-3-pass
+Also called: LRB-3-pass (Light Tracing with Backpropagation, 3-pass)
+
+## Overview
+LRB-3-pass is a constant-memory reverse-mode differentiable light tracing method that retains all per-path sensor connections by introducing a third traversal to precompute and consume adjoint-weighted radiance sums [S1, unofficial]. It matches naive reverse-mode automatic differentiation in gradient quality (expectation) without the variance penalty of reservoir-based approximations, at the cost of an additional path replay [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- **Inputs:** Ray seeds, scene geometry/materials, loss function gradient on the image plane ($\delta I$).
+- **Outputs:** Gradients with respect to scene parameters ($\nabla_\theta$).
+
+**Data Structures:**
+- **Accumulators:** A constant number of fixed-size accumulators per sample.
+  - $\delta_{\text{total}}$: Scalar (or spectral vector) sum of adjoint-weighted radiance.
+  - $\delta_{\text{rem}}$: Scalar (or spectral vector) remaining downstream adjoint sum.
+  - (Attached Formulation only) $A_{\text{pos}}$: Position adjoint accumulator.
+- **Lookup Tensor:** $\delta I$, the image-space gradient of the loss, stored as a tensor indexed by sensor coordinates.
+
+**Numbered Steps:**
+
+1.  **Pass 1 (Primal Trace):** Trace light paths from emitters. For each vertex $x_i$ with a valid sensor connection, splat radiance $L_i$ to the image at coordinate $u_i$ using the reconstruction filter. Store the path geometry and radiance contributions for replay.
+2.  **Gradient Computation:** Compute the image-space gradient of the loss with respect to the image buffer, resulting in the lookup tensor $\delta I$.
+3.  **Pass 2 (Accumulation):** Re-trace each path from the same seed. At every vertex $x_i$ with a valid sensor connection:
+    - Read the image-space adjoint $\bar{L}_i$ from $\delta I$ at sensor coordinate $u_i$ using a filter-weighted lookup matching the reconstruction filter used during splatting [S1, unofficial].
+    - Accumulate the product of the adjoint and local radiance into a running per-sample sum:
+      $$ \delta_{\text{total}} = \sum_{i=1}^k \bar{L}_i \cdot L_i $$
+      where $k$ is the number of sensor connections on the path. Note: This is the sum of element-wise products, not the product of separate sums [S1, unofficial].
+4.  **Pass 3 (Backward/Backpropagation):** Re-trace the path a third time. Initialize $\delta_{\text{rem}} = \delta_{\text{total}}$. At each vertex $x_i$:
+    - Read the per-vertex adjoint $\bar{L}_i$ from $\delta I$ at $u_i$.
+    - Perform the first backward operation: compute the gradient contribution from the splat position/geometry using $\bar{L}_i$:
+      $$ \nabla_{\theta} f_{\text{splat}}^{(i)} \cdot \bar{L}_i $$
+    - Subtract the current vertex's contribution from the remaining sum:
+      $$ \delta_{\text{rem}} \leftarrow \delta_{\text{rem}} - \bar{L}_i \cdot L_i $$
+      This leaves $\delta_{\text{rem}} = \sum_{j>i} \bar{L}_j \cdot L_j$, the downstream adjoint sum [S1, unofficial].
+    - Perform the second backward operation: apply the log-derivative identity using $\delta_{\text{rem}}$ as the weight:
+      $$ \nabla_{\theta} f_s^{(i)} \cdot \frac{\delta_{\text{rem}}}{f_s^{(i)}} $$
+      where $f_s^{(i)}$ is the scattering function value at vertex $i$. Because $\delta_{\text{rem}}$ already contains the radiance weighting $L_j$, a separate remaining-radiance factor is not needed [S1, unofficial].
+    - Discard the AD graph for vertex $x_i$.
+    - Advance the path.
+
+**Parameters:**
+- **Accumulators:** One pair of scalar accumulators per sample (or one spectral value per sample) [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Precision:** The accumulator $\delta_{\text{total}}$ is a sum of element-wise products. Cross-terms grow with path length, so precision loss is possible if dynamic range is large [S1, unofficial].
+- **Boundaries:** The lookup $\bar{L}_i$ must use the same reconstruction filter as the primal splatting to ensure consistency [S1, unofficial].
+- **Degenerate Input:** If a vertex has no valid sensor connection, it is skipped in Pass 2 and Pass 3.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def lrb_3pass_backward(seed, scene, delta_I):
+    # Pass 2: Accumulate delta_total
+    delta_total = 0.0
+    path = trace_path(seed, scene) # Reconstruct path geometry
+    
+    for vertex in path:
+        if vertex.has_sensor_connection:
+            u = vertex.sensor_coordinate
+            L = vertex.radiance_contribution
+            # Read adjoint from image gradient tensor using filter-weighted lookup
+            L_bar = read_adjoint(delta_I, u)
+            # Accumulate sum of element-wise products
+            delta_total += dot(L_bar, L)
+            
+    # Pass 3: Backward
+    delta_rem = delta_total
+    path = trace_path(seed, scene) # Re-trace from same seed
+    
+    for vertex in path:
+        if vertex.has_sensor_connection:
+            u = vertex.sensor_coordinate
+            L = vertex.radiance_contribution
+            L_bar = read_adjoint(delta_I, u)
+            
+            # First backward: splat position/geometry gradient
+            grad_splat = compute_gradient(vertex.splat_function, L_bar)
+            accumulate_gradient(grad_splat)
+            
+            # Subtract current contribution
+            delta_rem -= dot(L_bar, L)
+            
+            # Second backward: scattering function gradient using log-derivative
+            # delta_rem is the downstream adjoint sum
+            if vertex.scattering_function_value != 0:
+                grad_scatter = compute_gradient(vertex.scattering_function, delta_rem / vertex.scattering_function_value)
+                accumulate_gradient(grad_scatter)
+                
+            # Discard AD graph for this vertex
+            discard_ad_graph(vertex)
+            
+        advance_path(vertex)
+```
+
+## Subtopics
+
+### [Attached Formulation (ResLRB Attached / LRB-3-pass Attached)](23413-attached-formulation-reslrb-attached-lrb-3-pass-attached.md)
+Extends LRB-3-pass to support gradients with respect to geometric parameters that move vertices, such as lens surfaces or specular mirrors. It tracks how geometric perturbations propagate through ray segments to shift downstream vertices and sensor coordinates. Essential for optimizing geometry in specular transport.
+
+## Operating characteristics
+- **Time Complexity:** Three path traversals per gradient evaluation. Faster than ResLRB in most configurations, but slower than naive AD at low path lengths due to replay overhead [S1, unofficial].
+- **Memory Complexity:** Constant with respect to path length. Stores only the adjoint tensor $\delta I$ and scalar accumulators per sample [S1, unofficial].
+- **Measured Performance:** On consumer hardware, LRB-3-pass maintains a flat memory profile across all tested path lengths. At low path lengths, naive AD is fastest. Among adjoint methods, LRB-3-pass is generally fastest, followed by ResLRB and then LRB-2pass. The gap widens at greater path lengths where LRB-2pass buffer overhead and LRB-3pass third traversal become significant [S1, unofficial].
+- **Strengths:** Matches naive AD in gradient quality (no additional variance). Constant memory usage allows differentiable light tracing at path lengths where AD-based approaches are not feasible on consumer hardware [S1, unofficial].
+- **Limitations:** Requires three path traversals, increasing computation time compared to two-pass methods. The attached formulation is considerably slower due to forward ray Jacobian computation [S1, unofficial].
+- **When to use:** Default choice for most practical settings where memory is constrained but gradient fidelity is critical. Use when naive AD is too memory-intensive and ResLRB variance is unacceptable.
+
+## Background
+LRB-3-pass was introduced by Linas Beresna and Eugene Fiume from Simon Fraser University in the paper "Constant-Memory Differentiable Light Tracing" (2026) [S1, unofficial]. It was developed to address the two-pass obstruction in differentiable light tracing, where retaining all sensor connections typically requires linear memory. The method extends the remaining-radiance pattern of PRB (Path Replay Backpropagation) to light tracing by precomputing the downstream adjoint sum over all sensor connections.
+
+## Sources
+[S1] Constant-Memory Differentiable Light Tracing, https://arxiv.org/abs/2609.32920, fetched 2026-10-29 (unofficial)

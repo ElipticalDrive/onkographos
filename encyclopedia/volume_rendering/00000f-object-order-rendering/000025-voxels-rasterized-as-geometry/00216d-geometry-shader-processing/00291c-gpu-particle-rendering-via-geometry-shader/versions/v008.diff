@@ -1,0 +1,101 @@
+--- v007.md
++++ v008.md
+@@ -4,12 +4,12 @@
+ 
+ ## Overview
+-A rendering technique that generates 2D sprite quads from point primitives using a Geometry Shader (GS), allowing for efficient particle rendering on the GPU without CPU-side mesh generation [G]. It solves the problem of rendering large numbers of billboarded particles efficiently by expanding points into screen-aligned quads in a single draw call per particle type, often incorporating distance-based culling [S2, unofficial]. It sets itself apart from hardware instancing by performing object, world, view, and projection transformations programmatically within the geometry stage, keeping the geometry description in a user-defined shader program rather than relying on fixed-function repetition [G].
++A rendering technique that generates 2D sprite quads from point primitives using a Geometry Shader (GS), allowing for efficient particle rendering on the GPU without CPU-side mesh generation [S1, unofficial]. It solves the problem of rendering large numbers of billboarded particles efficiently by expanding points into screen-aligned quads in a single draw call per particle type, often incorporating distance-based culling [S2, unofficial]. It sets itself apart from hardware instancing by performing object, world, view, and projection transformations programmatically within the geometry stage, keeping the geometry description in a user-defined shader program rather than relying on fixed-function repetition [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-The method takes a stream of point primitives as input, where each point represents a particle [G]. The output is a stream of triangle strips (or independent triangles) representing billboarded quads [G].
++The method takes a stream of point primitives as input, where each point represents a particle [S2, unofficial]. The output is a stream of triangle strips (or independent triangles) representing billboarded quads [S1, unofficial].
+ 
+ **Data Structures:**
+-The vertex shader input structure (`vs_in`) contains the following fields [G]:
++The vertex shader input structure (`vs_in`) contains the following fields [S1, unofficial]:
+ *   `pos`: `float4` (POSITION) – Particle position in object or world space.
+ *   `uv`: `float4` (TEXCOORD0) – Texture coordinates passed through to the fragment stage.
+@@ -17,5 +17,5 @@
+ *   `col`: `float4` (COLOR) – Particle color.
+ 
+-The geometry shader output structure (`gs_out`) contains [G]:
++The geometry shader output structure (`gs_out`) contains [S1, unofficial]:
+ *   `pos`: `float4` (SV_POSITION) – Clip-space position.
+ *   `uv`: `float2` (TEXCOORD0) – Interpolated texture coordinates for the quad.
+@@ -28,19 +28,19 @@
+ 
+ **Steps:**
+-1.  **Vertex Shader:** Passes input position, UV, size, and color directly to the output structure without modification [S1, unofficial].
+-2.  **Geometry Shader Input:** Receives a single point primitive [G].
+-3.  **Clip Space Transformation:** Transforms the input point position to clip space using the model-view-projection matrix ($MVP$) [S1, unofficial]:
++1.  **CPU Update:** Update particle positions, velocities, and colors on the CPU rendering thread before each frame [S2, unofficial].
++2.  **Vertex Shader:** Passes input position, UV, size, and color directly to the output structure without modification [S1, unofficial].
++3.  **Geometry Shader Input:** Receives a single point primitive per particle [S1, unofficial].
++4.  **Clip Space Transformation:** Transforms the input point position to clip space using the model-view-projection matrix ($MVP$) [S1, unofficial]:
+     $$ corLoc = MVP \times input[0].pos $$
+-4.  **Screen-Space Offset Calculation:** Calculates screen-space offsets $dx$ and $dy$ based on the `_Size` parameter and screen aspect ratio to maintain square sprites in screen space [S1, unofficial]:
++5.  **Screen-Space Offset Calculation:** Calculates screen-space offsets $dx$ and $dy$ based on the `_Size` parameter and screen aspect ratio to maintain square sprites in screen space [S1, unofficial]:
+     $$ dx = \text{Size} $$
+     $$ dy = \text{Size} \times \frac{\text{ScreenWidth}}{\text{ScreenHeight}} $$
+-    *Note: Sources indicate $dy$ uses the aspect ratio while $dx$ does not, which can create rectangular quads if not handled consistently [S1, unofficial].*
+-5.  **Quad Generation:** Generates 4 vertices for a quad by adding/subtracting $dx$ and $dy$ to $corLoc$. The vertices are appended in the following order to form an independent triangle strip (or two triangles) [S1, unofficial]:
++6.  **Quad Generation:** Generates 4 vertices for a quad by adding/subtracting $dx$ and $dy$ to $corLoc$. The vertices are appended in the following order to form an independent triangle strip (or two triangles) [S1, unofficial]:
+     *   Vertex 0: $(-dx, dy)$, UV $(0, 0)$
+     *   Vertex 1: $(dx, dy)$, UV $(1, 0)$
+     *   Vertex 2: $(-dx, -dy)$, UV $(0, 1)$
+     *   Vertex 3: $(dx, -dy)$, UV $(1, 1)$
+-6.  **Stream Restart:** Calls a primitive restart marker after appending all 4 vertices to ensure the quad is rendered as an independent primitive [G].
+-7.  **Fragment Shader:** Samples the sprite texture using the interpolated UVs and multiplies by the vertex color [S1, unofficial]:
++7.  **Stream Restart:** Calls a primitive restart marker after appending all 4 vertices to ensure the quad is rendered as an independent primitive [S1, unofficial].
++8.  **Fragment Shader:** Samples the sprite texture using the interpolated UVs and multiplies by the vertex color [S1, unofficial]:
+     $$ col = \text{tex2D}(\_Sprite, i.uv) \times i.col $$
+ 
+@@ -54,7 +54,8 @@
+     """Expands point primitives into billboarded quads."""
+     output_vertices = []
++    restart_indices = []
+     for p in points:
+         # Clip space transformation
+-        cor_loc = mvp_matrix @ p['pos']
++        cor_loc = [sum(mvp_matrix[i][j] * p['pos'][j] for j in range(4)) for i in range(4)]
+         
+         # Screen-space offset calculation
+@@ -68,13 +69,14 @@
+         uvs = [(0, 0), (1, 0), (0, 1), (1, 1)]
+         
++        start_idx = len(output_vertices)
+         for i, (off_x, off_y) in enumerate(offsets):
+             output_vertices.append({
+-                'pos': cor_loc + [off_x, off_y, 0, 0],
++                'pos': [cor_loc[0] + off_x, cor_loc[1] + off_y, cor_loc[2], cor_loc[3]],
+                 'uv': uvs[i],
+                 'col': p['col']
+             })
+         # Stream restart marker for independent primitive
+-        output_vertices.append({'restart': True})
+-    return output_vertices
++        restart_indices.append(start_idx)
++    return output_vertices, restart_indices
+ 
+ def fragment_shader(uv, col, sprite_texture):
+@@ -88,4 +90,5 @@
+ *   **Topology Mismatch:** Some implementations may incorrectly use `MeshTopology.LineStrip` for drawing, which is inconsistent with the quad generation logic in the geometry shader [S1, unofficial].
+ *   **Distance Culling:** To optimize performance, particles should be culled based on their distance from the camera before rendering [S2, unofficial].
++*   **Texture Atlas Interpolation:** When using a texture atlas for animation, a single integer tracks the current atlas texture index, which is interpolated with the next texture index to create smooth transitions [S2, unofficial].
+ 
+ ## Subtopics
+@@ -95,5 +98,5 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$ where $N$ is the number of particles, as each particle requires a single draw call (or a single draw call for all particles if instanced/point lists are used) [G].
++*   **Time Complexity:** $O(N)$ where $N$ is the number of particles, as each particle requires a single draw call (or a single draw call for all particles if point lists are used) [G].
+ *   **Memory Complexity:** $O(N)$ for storing particle data (position, size, color) on the GPU [G].
+ *   **Performance:** Efficient for large numbers of particles due to the single draw call per particle type and GPU-side expansion [S2, unofficial].
+@@ -104,5 +107,5 @@
+ 
+ ## Background
+-This technique is part of the broader field of GPU-based particle rendering and geometry shader processing. It leverages the programmability of the geometry shader to expand point primitives into screen-aligned quads, a common approach in real-time graphics engines like Unity and custom voxel engines [S1, unofficial][S2, unofficial].
++This technique is part of the broader field of GPU-based particle rendering and geometry shader processing [S1, unofficial][S2, unofficial]. It leverages the programmability of the geometry shader to expand point primitives into screen-aligned quads, a common approach in real-time graphics engines like Unity and custom voxel engines [S1, unofficial][S2, unofficial].
+ 
+ ## Sources

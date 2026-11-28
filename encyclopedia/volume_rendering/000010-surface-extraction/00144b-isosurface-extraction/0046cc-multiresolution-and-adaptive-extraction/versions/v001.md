@@ -1,0 +1,31 @@
+# Multiresolution and Adaptive Extraction
+
+Also called: Adaptive Multiresolution Isosurfacing, View-Dependent Isosurface Extraction
+
+## Overview
+This family addresses the computational cost and visual fidelity trade-off in isosurface extraction by varying the resolution of the output mesh based on geometric complexity and view importance. Unlike fixed-resolution methods, these techniques dynamically adjust the level of detail (LOD) to maintain interactive frame rates while preserving critical surface features [S1]. The core distinction lies in how they manage the boundary between different resolution levels: some methods avoid reconnection entirely to maximize speed, while others use explicit patching or oracle-driven traversal to ensure watertightness.
+
+## Shared principles
+All methods in this family operate on a discretized domain, typically a regular grid (Cartesian, octree, or tetrahedral) where each cell contains scalar values or occupancy states at its vertices or centers. The core mechanism involves traversing the grid cells and evaluating the data to determine which parts of the domain constitute the surface [G].
+
+1.  **Domain Traversal**: The algorithm iterates over the volume data structure [G]. For regular grids, this often involves checking each cell or voxel [G].
+2.  **Surface Determination**: A criterion is applied to identify surface locations. In isosurface methods, this involves comparing scalar values against a threshold (isovalue) to detect sign changes or equality [30-isosurface-extraction.md]. In blocky meshing, this involves checking occupancy states or material IDs to identify exposed boundaries [31-blocky-meshing.md].
+3.  **Primitive Generation**: Geometric primitives (vertices, edges, faces) are generated based on the determined surface locations [G].
+4.  **Mesh Coherence**: Adjacent primitives are merged or connected to form a coherent mesh, often requiring vertex merging to avoid duplicates and ensure watertightness [30-isosurface-extraction.md].
+
+## Subtopics
+
+### [Adaptive Minimum Projected Size Adjustment](7457-adaptive-minimum-projected-size-adjustment.md)
+A dynamic control mechanism that adjusts the minimum projected size of surface elements frame-to-frame to maintain a target framerate. It differs from static LOD approaches by reacting to actual frame timing rather than just camera distance, using a cubic weighting of time deviations to prevent oscillation. Choose this when interactive performance stability is prioritized over absolute geometric consistency across frames.
+
+### [Non-reconnected Multiresolution Isosurfacing](7512-non-reconnected-multiresolution-isosurfacing.md)
+A method that intentionally omits surface reconnection between adjacent cells of different resolutions. It relies on sufficient polygon density to make cracks visually negligible, trading visual perfection for interactive frame rates by avoiding the overhead of neighbor tracking. Choose this for real-time applications where minor gaps are acceptable and performance is critical.
+
+### [Adaptive Multiresolution Extraction with Oracle](11830-adaptive-multiresolution-extraction-with-oracle.md)
+An acceleration technique that extracts geometry from coarser-resolution octree nodes rather than always traversing to the deepest leaf level. It uses a pre-computed "oracle" structure to determine optimal traversal depth based on view-dependent and geometric criteria, explicitly patching junctions to guarantee continuity. Choose this when a watertight, crack-free mesh is required at high performance levels.
+
+## Background
+The need for multiresolution extraction arises from the high computational cost of extracting detailed isosurfaces from large volumetric datasets in real-time. Early approaches often used fixed grids, leading to either excessive detail in flat regions or insufficient detail in complex areas. The development of adaptive methods, particularly those utilizing octrees and view-dependent criteria, allowed for efficient rendering of complex surfaces. The specific techniques described here, including the use of oracles and projected size adjustments, were developed to address the specific challenges of interactive sculpting and visualization, where frame rate stability and visual continuity are paramount [S1].
+
+## Sources
+[S1] Notes on Multiresolution and Adaptive Extraction, provided in prompt.

@@ -1,0 +1,196 @@
+--- v003.md
++++ v004.md
+@@ -4,160 +4,52 @@
+ 
+ ## Overview
+-Keyframe management maintains a sparse sliding window $W_k$ of camera poses and associated 3D Gaussians to enable efficient joint optimization in online SLAM systems [S1, unofficial][S2]. It solves the computational infeasibility of optimizing over all historical frames by selecting non-redundant keyframes that span a wide baseline, providing robust multiview constraints while discarding frames with low overlap [S1, unofficial][S2]. It distinguishes itself from fixed-interval or purely heuristic methods by utilizing explicit Gaussian covisibility metrics or voxel-based intersection tests to determine frame redundancy and map consistency [S1, unofficial][S2].
++Keyframe Management maintains a sparse sliding window $W_k$ of keyframes to enable efficient joint optimization of camera poses and 3D Gaussian attributes in online SLAM systems [S1, unofficial]. It solves the problem of computational infeasibility when processing full video streams by discarding redundant frames with low overlap while ensuring sufficient parallax for robust pose estimation [S1, unofficial]. Unlike fixed-interval strategies, this method uses explicit covisibility metrics and geometric displacement to dynamically insert and remove keyframes [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:** Current tracked frame $i$, last keyframe $j$, current keyframe window $W_k$, and scene representation (Gaussians or voxel map).
++**Inputs:** Current camera frame $i$, last keyframe $j$, current keyframe window $W_k$, median scene depth $d_{med}$.
+ **Outputs:** Updated window $W_k$, boolean flag indicating if frame $i$ is registered as a new keyframe.
+ 
+ **Data Structures:**
+-*   **Keyframe Window $W_k$:** A list or queue of keyframe indices and their associated camera poses.
+-*   **Gaussian Visibility State:** For each Gaussian, a boolean flag or counter indicating if it was used in rasterization and if the accumulated alpha $\alpha$ along the ray is $< 0.5$ [S1, unofficial].
+-*   **Voxel Map (Variant):** A sparse voxel grid tracking allocated and observed voxels [S2].
++*   $W_k$: A list of keyframe indices.
++*   Visible Gaussians: A set of Gaussian indices marked as visible during rasterization. A Gaussian is visible if it is used in rasterization and the accumulated alpha $\alpha$ along the ray has not reached 0.5 [S1, unofficial].
++
++**Steps:**
++1.  **Compute Covisibility:** Calculate the Intersection over Union (IoU) of visible Gaussians between the current frame $i$ and the last keyframe $j$. Let $V_i$ be the set of visible Gaussians in frame $i$ and $V_j$ be the set in frame $j$. The covisibility score $C_{ij}$ is:
++    $$ C_{ij} = \frac{|V_i \cap V_j|}{|V_i \cup V_j|} $$
++    [S1, unofficial]
++
++2.  **Compute Geometric Displacement:** Calculate the relative translation magnitude $t_{ij} = \|T_i - T_j\|$ between the current frame and the last keyframe [S1, unofficial].
++
++3.  **Keyframe Registration:** Register frame $i$ as a new keyframe if either condition is met:
++    *   $C_{ij} < \tau_{cov}$ (covisibility drops below threshold $\tau_{cov}$)
++    *   $t_{ij} > \tau_{geo} \cdot d_{med}$ (relative translation is large with respect to median depth $d_{med}$)
++    [S1, unofficial]
++
++4.  **Keyframe Removal:** If a new keyframe is added, remove the oldest keyframe $k \in W_k$ if its overlap coefficient with the latest keyframe drops below a threshold. The overlap coefficient is defined similarly to covisibility but measures spatial overlap between keyframes [S1, unofficial].
++
++5.  **Gaussian Insertion:** Upon registering a new keyframe, initialize new Gaussians. If depth is available, back-project depth measurements to initialize means $\mu_W$. In monocular cases, render depth and initialize Gaussians around low-variance depth estimates [S1, unofficial].
+ 
+ **Parameters:**
+-*   $\tau_{cov}$: Covisibility threshold (IoU) [S1, unofficial].
+-*   $\tau_{trans}$: Translation threshold relative to median depth [S1, unofficial].
+-*   $\tau_{overlap}$: Overlap coefficient threshold for removal [S1, unofficial].
+-*   $N_{max}$: Maximum interval between keyframe insertions [S2].
+-*   $\tau_{ratio}$: Threshold for voxel allocation ratio [S2].
++*   $\tau_{cov}$: Covisibility threshold. Not given in the sources.
++*   $\tau_{geo}$: Geometric displacement threshold factor. Not given in the sources.
++*   Overlap threshold for removal: Not given in the sources.
+ 
+-**Steps:**
+-
+-1.  **Estimate Covisibility:**
+-    Calculate the intersection over union (IoU) of observed Gaussians between the current frame $i$ and the last keyframe $j$ [S1, unofficial].
+-    *   *Gaussian Visibility:* A Gaussian is considered "observed" by a view if it was used in the rasterization process and the accumulated alpha $\alpha$ along the ray has not reached 0.5 [S1, unofficial]. This leverages the depth-sorting of Gaussians to naturally handle occlusions [S1, unofficial].
+-    *   *Formula:* Let $V_i$ be the set of visible Gaussians in frame $i$ and $V_j$ be the set in keyframe $j$.
+-        $$ \text{Covisibility} = \frac{|V_i \cap V_j|}{|V_i \cup V_j|} $$
+-
+-2.  **Evaluate Keyframe Registration:**
+-    Register frame $i$ as a new keyframe if either of the following conditions is met:
+-    *   **Covisibility Drop:** The calculated covisibility drops below $\tau_{cov}$ [S1, unofficial].
+-    *   **Large Displacement:** The relative translation $t_{ij}$ between frame $i$ and keyframe $j$ is large with respect to the median depth of the scene [S1, unofficial].
+-    *   *Voxel Variant:* If using a voxel map, calculate $N_c$ (number of voxels that would be allocated if $i$ becomes a keyframe) and $N_o$ (currently observed voxels). Insert if $p_{kf} = N_c / N_o > \tau_{ratio}$ [S2].
+-
+-3.  **Enforce Maximum Interval (Voxel Variant):**
+-    If no keyframe has been created for the past $N_{max}$ frames, force the creation of a new keyframe to prevent missing parts in loopy camera motions [S2].
+-
+-4.  **Manage Window Size:**
+-    *   Add the new keyframe to $W_k$.
+-    *   Remove the oldest keyframe from $W_k$ if its overlap coefficient with the latest keyframe drops below $\tau_{overlap}$ [S1, unofficial]. This maintains a small window to mitigate catastrophic forgetting and reduce optimization cost [S1, unofficial][S2].
+-
+-5.  **Initialize New Gaussians (Upon Registration):**
+-    When a new keyframe is registered, initialize new Gaussians for newly visible areas [S1, unofficial].
+-    *   *With Depth:* Back-project depth measurements to initialize Gaussian means $\mu_W$ [S1, unofficial].
+-    *   *Monocular:* Render depth at the current frame; initialize $\mu_W$ around depth estimates with low variance [S1, unofficial].
+-
+-**Pseudocode:**
+-
+-```python
+-def update_keyframe_window(current_frame, last_keyframe, window, scene):
+-    """
+-    current_frame: The newly tracked frame.
+-    last_keyframe: The most recent keyframe in the window.
+-    window: List of active keyframes.
+-    scene: Object containing Gaussian visibility states or voxel map.
+-    """
+-    # Step 1: Estimate Covisibility
+-    visible_gaussians_current = get_visible_gaussians(current_frame, scene)
+-    visible_gaussians_last = get_visible_gaussians(last_keyframe, scene)
+-    
+-    intersection = len(visible_gaussians_current & visible_gaussians_last)
+-    union = len(visible_gaussians_current | visible_gaussians_last)
+-    
+-    if union == 0:
+-        covisibility = 0.0
+-    else:
+-        covisibility = intersection / union
+-
+-    # Step 2: Evaluate Registration Criteria
+-    is_new_keyframe = False
+-    
+-    # Criterion A: Covisibility threshold (Gaussian-based)
+-    if covisibility < COVISIBILITY_THRESHOLD:
+-        is_new_keyframe = True
+-        
+-    # Criterion B: Large translation (Gaussian-based)
+-    translation_magnitude = get_translation_magnitude(current_frame, last_keyframe)
+-    median_depth = get_median_depth(scene)
+-    if translation_magnitude > TRANSLATION_THRESHOLD * median_depth:
+-        is_new_keyframe = True
+-
+-    # Criterion C: Voxel-based allocation ratio (if applicable)
+-    # Note: Sources [S1, unofficial] and [S2] describe different variants. 
+-    # Implementer should check if voxel map is active.
+-    if scene.has_voxel_map():
+-        N_c = count_potential_new_voxels(current_frame, scene)
+-        N_o = count_observed_voxels(scene)
+-        if N_o > 0 and (N_c / N_o) > VOXEL_RATIO_THRESHOLD:
+-            is_new_keyframe = True
+-            
+-    # Criterion D: Maximum interval (Voxel-based variant)
+-    if frames_since_last_keyframe > MAX_INTERVAL:
+-        is_new_keyframe = True
+-
+-    if is_new_keyframe:
+-        # Register new keyframe
+-        window.append(current_frame)
+-        
+-        # Initialize new Gaussians
+-        if scene.has_depth():
+-            initialize_gaussians_from_depth(current_frame, scene)
+-        else:
+-            initialize_gaussians_from_rendered_depth(current_frame, scene)
+-            
+-        # Step 4: Manage Window Size
+-        remove_old_keyframes_if_needed(window)
+-        
+-        reset_frames_since_last_keyframe_counter()
+-    else:
+-        increment_frames_since_last_keyframe_counter()
+-
+-    return is_new_keyframe
+-
+-def get_visible_gaussians(frame, scene):
+-    """
+-    Returns set of Gaussian indices visible in the frame.
+-    A Gaussian is visible if used in rasterization and accumulated alpha < 0.5.
+-    """
+-    visible = set()
+-    for gaussian in scene.gaussians:
+-        if gaussian.used_in_rasterization(frame) and gaussian.accumulated_alpha(frame) < 0.5:
+-            visible.add(gaussian.id)
+-    return visible
+-
+-def remove_old_keyframes_if_needed(window):
+-    """
+-    Remove keyframes if overlap with the latest keyframe is too low.
+-    """
+-    if len(window) < 2:
+-        return
+-    
+-    latest = window[-1]
+-    # Iterate backwards to remove oldest first if needed, 
+-    # though typically only the oldest is removed in a sliding window.
+-    for i in range(len(window) - 2, -1, -1):
+-        kf = window[i]
+-        overlap = calculate_overlap_coefficient(kf, latest)
+-        if overlap < OVERLAP_REMOVAL_THRESHOLD:
+-            window.pop(i)
+-```
++**Edge Cases:**
++*   **Occlusion:** Handled naturally by the visibility ordering of 3D Gaussians along the camera ray; occluded Gaussians are not counted in $V_i$ [S1, unofficial].
++*   **Degenerate Input:** If median depth $d_{med}$ is zero or undefined, the geometric displacement check should be skipped or handled with a fallback threshold [G].
+ 
+ ## Subtopics
+ 
+-### Keyframe Selection
+-A strategy used in voxel-based SLAM systems (e.g., Vox-Fusion) to ensure long-term map consistency [S2]. Unlike Gaussian covisibility, it tests tracked frames against an existing voxel map to count allocatable voxels $N_c$ [S2]. A keyframe is inserted if the ratio $p_{kf} = N_c / N_o$ exceeds a threshold, where $N_o$ is the number of currently observed voxels [S2]. It also enforces a maximum interval $N$ between keyframes to handle loopy camera motions where the camera repeatedly views the same existing model, preventing missing parts in the map [S2].
+-
+ ## Operating characteristics
+-*   **Time Complexity:** $O(K)$ per frame, where $K$ is the number of Gaussians or voxels in the current window. Covisibility calculation requires iterating over visible primitives [S1, unofficial].
+-*   **Memory Complexity:** Proportional to the size of the keyframe window $W_k$ and the number of Gaussians/voxels associated with them [S1, unofficial][S2].
+-*   **Strengths:** Significantly reduces computational load compared to global optimization [S1, unofficial]. Handles occlusions naturally via alpha accumulation [S1, unofficial]. Prevents catastrophic forgetting by limiting the optimization scope [S1, unofficial][S2].
+-*   **Limitations:** Performance depends on the accuracy of covisibility estimation [S1, unofficial]. In monocular settings, depth initialization relies on rendered depth estimates which may have variance [S1, unofficial]. Voxel-based methods require managing voxel allocation thresholds [S2].
+-*   **When to use:** Online SLAM with limited computational resources or real-time requirements [S1, unofficial][S2].
+-*   **When not to use:** Offline batch optimization where global consistency is prioritized over speed [S1, unofficial].
++*   **Time Complexity:** Linear with respect to the number of visible Gaussians for covisibility calculation. Joint optimization is limited to the small window $W_k$, reducing complexity from $O(N)$ to $O(|W_k|)$ where $N$ is total frames [S1, unofficial].
++*   **Memory Complexity:** Proportional to the size of $W_k$ and the number of Gaussians visible in those frames [S1, unofficial].
++*   **Strengths:** Prevents catastrophic forgetting; maintains multiview constraints via wide-baseline keyframes; handles occlusions without extra heuristics [S1, unofficial].
++*   **Limitations:** Relies on accurate covisibility estimation; performance degrades if covisibility thresholds are poorly tuned [S1, unofficial].
++*   **When to use:** Online SLAM systems with limited computational resources [S1, unofficial].
++*   **When not to use:** Offline batch processing where all frames can be optimized jointly [S1, unofficial].
+ 
+ ## Background
+-Keyframe management in Gaussian Splatting SLAM builds on principles from traditional visual SLAM systems like DSO, which use small windows of keyframes based on covisibility [S1, unofficial]. The adaptation to 3D Gaussian Splatting leverages the explicit visibility ordering of Gaussians (sorted along camera rays) to simplify covisibility estimation without additional heuristics [S1, unofficial]. The voxel-based variant originates from dense tracking and mapping methods using neural implicit representations, where voxel allocation ratios are used to maintain map consistency [S2].
++Originated in Gaussian Splatting SLAM (2023) [S1, unofficial]. It adapts keyframe management heuristics from Direct Sparse Odometry (DSO) [S1, unofficial] to the context of 3D Gaussian Splatting, leveraging the inherent visibility ordering of splatted Gaussians.
+ 
+ ## Sources
+-[S1] Gaussian Splatting SLAM, https://arxiv.org/abs/2312.06741, fetched 2026-10-27 (unofficial)
+-[S2] Vox-Fusion: Dense Tracking and Mapping with Voxel-based Neural Implicit Representation, https://doi.org/10.1109/ismar55827.2022.00066, fetched 2026-10-26+[S1] Gaussian Splatting SLAM, https://arxiv.org/abs/2312.06741, fetched 2026-10-27 (unofficial)

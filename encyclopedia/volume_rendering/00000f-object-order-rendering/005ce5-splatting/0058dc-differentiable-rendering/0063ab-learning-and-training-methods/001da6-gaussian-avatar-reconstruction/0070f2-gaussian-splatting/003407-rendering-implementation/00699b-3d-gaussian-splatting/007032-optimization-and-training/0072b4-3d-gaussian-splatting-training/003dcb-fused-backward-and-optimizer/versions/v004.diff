@@ -1,0 +1,158 @@
+--- v003.md
++++ v004.md
+@@ -4,96 +4,84 @@
+ 
+ ## Overview
+-Fused Backward and Optimizer is a training optimization technique for 3D Gaussian Splatting that integrates the parameter update step of the Adam optimizer directly into the backward pass of the differentiable rasterization module [S1, unofficial]. It solves the problem of high VRAM consumption and computational overhead caused by separate memory buffers for optimizer states and redundant parameter updates for invisible Gaussians [S1, unofficial]. It sets itself apart from standard implementations by eliminating the need for intermediate parameter buffers during the gradient step, though it requires updating parameters even when gradients are zero to maintain Adam's internal state consistency [S1, unofficial].
++Fused Backward and Optimizer is a training optimization technique for 3D Gaussian Splatting that integrates the Adam optimizer step directly into the backward pass of the differentiable rasterizer [S1, unofficial]. It solves the bottleneck where parameter updates consume 40–60% of training time by eliminating separate optimizer kernels and reducing VRAM usage through the avoidance of intermediate parameter buffers [S1, unofficial]. It differs from sibling methods like [FastGS](9177-fastgs.md) by prioritizing memory efficiency and correctness over maximum speed, whereas [FastGS](9177-fastgs.md) and [CLM](7351-clm.md) focus on skipping computations for invisible Gaussians to achieve higher speedups at the cost of potential quality degradation or inconsistency [S1, unofficial].
+ 
+ ## How it works
+-The method fuses the Adam optimizer logic into the rasterizer's backward pass. Instead of computing gradients and then calling a separate optimizer routine, the kernel loads the current moments (first and second order statistics) and computes the parameter updates immediately during gradient accumulation.
+-
+ **Inputs and Outputs:**
+-*   **Inputs:** Current Gaussian parameters $\theta$, Adam moments $m_t$ (first moment) and $v_t$ (second moment), learning rate $\eta$, Adam hyperparameters $\beta_1, \beta_2, \epsilon$, and gradients $\frac{\partial \mathcal{L}}{\partial \theta}$ (which may be zero for invisible Gaussians).
+-*   **Outputs:** Updated parameters $\theta_{t+1}$, updated moments $m_{t+1}, v_{t+1}$.
++- **Inputs:** Gradients $\frac{\partial \mathcal{L}}{\partial \theta}$ computed by the rasterizer's backward pass; current first and second moment estimates $m_t, v_t$ for Adam; hyperparameters $\alpha$ (learning rate), $\beta_1, \beta_2, \epsilon$.
++- **Outputs:** Updated Gaussian parameters $\theta_{t+1}$; updated moments $m_{t+1}, v_{t+1}$.
+ 
+ **Data Structures:**
+-*   **Gaussian Parameters:** Stored in global memory. Layout depends on the specific Gaussian representation (position, scale, rotation, SH coefficients).
+-*   **Adam Moments:** Stored in global memory. Two buffers per parameter group (or per Gaussian) for $m$ and $v$.
+-*   **Gradients:** Computed by the rasterizer backward pass.
++- **Gaussian Parameters:** Stored in contiguous GPU memory. Fields include position, covariance (6 values), opacity, and spherical harmonics coefficients.
++- **Adam Moments:** Two buffers per parameter set, matching the size of the parameters, storing $m_t$ and $v_t$.
++- **Gradients:** Buffer matching parameter size, populated by the rasterizer backward pass.
+ 
+ **Numbered Steps:**
+-1.  **Gradient Computation:** The differentiable rasterizer computes the loss $\mathcal{L}$ and its gradients $\frac{\partial \mathcal{L}}{\partial \theta}$ for all visible Gaussians. For Gaussians outside the viewing frustum, the gradient is explicitly set to zero [S1, unofficial].
+-2.  **Moment Loading:** The fused kernel loads the current first moment $m_t$ and second moment $v_t$ for the parameters being updated [S1, unofficial].
+-3.  **Moment Update:** Update the moments using the standard Adam formulas:
+-    $$ m_{t+1} = \beta_1 m_t + (1 - \beta_1) \frac{\partial \mathcal{L}}{\partial \theta} $$
+-    $$ v_{t+1} = \beta_2 v_t + (1 - \beta_2) \left(\frac{\partial \mathcal{L}}{\partial \theta}\right)^2 $$
+-    [S1, unofficial]
+-4.  **Bias Correction:** Apply bias correction to the moments:
+-    $$ \hat{m}_{t+1} = \frac{m_{t+1}}{1 - \beta_1^{t+1}} $$
+-    $$ \hat{v}_{t+1} = \frac{v_{t+1}}{1 - \beta_2^{t+1}} $$
+-    [S1, unofficial]
+-5.  **Parameter Update:** Compute the update step and apply it to the parameters:
+-    $$ \theta_{t+1} = \theta_t - \eta \frac{\hat{m}_{t+1}}{\sqrt{\hat{v}_{t+1}} + \epsilon} $$
+-    [S1, unofficial]
+-6.  **Memory Store:** Store the updated parameters $\theta_{t+1}$ and moments $m_{t+1}, v_{t+1}$ back to global memory [S1, unofficial].
+-
+-**Parameters:**
+-*   $\beta_1$: Exponential decay rate for first moment. Typical value: 0.9.
+-*   $\beta_2$: Exponential decay rate for second moment. Typical value: 0.999.
+-*   $\epsilon$: Term for numerical stability. Typical value: $10^{-8}$.
+-*   $\eta$: Learning rate. Varies by scene and resolution.
+-
+-**Edge Cases and Pitfalls:**
+-*   **Zero Gradients:** To maintain correctness with respect to the Adam step, parameter updates must be performed for parameters receiving a gradient of zero in a given iteration (e.g., Gaussians outside the viewing frustum) [S1, unofficial]. Skipping these updates would cause inconsistencies in the moment statistics compared to the original 3DGS implementation [S1, unofficial].
+-*   **Extensibility:** Fusing the optimizer reduces extensibility because the optimizer logic is hardcoded into the rasterizer kernel [S1, unofficial].
+-*   **Bottleneck:** After integration, computing parameter updates remains the main bottleneck of training [S1, unofficial].
++1. **Gradient Computation:** The differentiable rasterizer computes pixel colors and gradients $\frac{\partial \mathcal{L}}{\partial \theta}$ for all visible Gaussians. For Gaussians outside the viewing frustum, gradients are explicitly set to zero [S1, unofficial].
++2. **Moment Loading:** Load current first and second moment estimates $m_t$ and $v_t$ from global memory into registers or shared memory for the active Gaussians [S1, unofficial].
++3. **Fused Update Kernel:** Launch a single CUDA kernel that performs the Adam update logic for all parameters in parallel:
++   - Compute biased first moment: $m_{t+1} = \beta_1 m_t + (1 - \beta_1) \frac{\partial \mathcal{L}}{\partial \theta}$ [S1, unofficial].
++   - Compute biased second moment: $v_{t+1} = \beta_2 v_t + (1 - \beta_2) \left(\frac{\partial \mathcal{L}}{\partial \theta}\right)^2$ [S1, unofficial].
++   - Compute bias-corrected estimates: $\hat{m}_{t+1} = \frac{m_{t+1}}{1 - \beta_1^{t+1}}$, $\hat{v}_{t+1} = \frac{v_{t+1}}{1 - \beta_2^{t+1}}$ [S1, unofficial].
++   - Update parameters: $\theta_{t+1} = \theta_t - \alpha \frac{\hat{m}_{t+1}}{\sqrt{\hat{v}_{t+1}} + \epsilon}$ [S1, unofficial].
++   - Write updated moments $m_{t+1}, v_{t+1}$ and parameters $\theta_{t+1}$ back to global memory [S1, unofficial].
++4. **Memory Management:** No intermediate buffers for raw parameters are allocated during the update, as updates are written directly to the parameter storage [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def fused_adam_backward(gaussian_params, moments, gradients, beta1, beta2, eta, epsilon, t):
++def fused_adam_backward(grads, params, m, v, alpha, beta1, beta2, eps, t):
+     """
+-    Fuses the Adam optimizer step into the backward pass.
++    Fuses Adam update into the backward pass.
++    grads: Tensor of gradients dL/dtheta.
++    params: Tensor of current parameters theta_t.
++    m: Tensor of first moment estimates m_t.
++    v: Tensor of second moment estimates v_t.
++    alpha: Learning rate.
++    beta1, beta2: Adam decay rates.
++    eps: Adam epsilon.
++    t: Current training step index (1-based).
++    """
++    # Compute bias correction terms
++    bias1 = 1.0 - beta1 ** t
++    bias2 = 1.0 - beta2 ** t
+     
+-    Args:
+-        gaussian_params: Current parameters theta_t.
+-        moments: Tuple (m_t, v_t) of first and second moments.
+-        gradients: Gradients dL/dtheta (zero for invisible Gaussians).
+-        beta1, beta2: Adam decay rates.
+-        eta: Learning rate.
+-        epsilon: Numerical stability term.
+-        t: Current training step index (1-based).
+-        
+-    Returns:
+-        Updated parameters theta_{t+1}, updated moments m_{t+1}, v_{t+1}.
+-    """
+-    m_t, v_t = moments
++    # Update first moment
++    m_new = beta1 * m + (1.0 - beta1) * grads
+     
+-    # Step 3: Update moments
+-    m_t_plus_1 = beta1 * m_t + (1 - beta1) * gradients
+-    v_t_plus_1 = beta2 * v_t + (1 - beta2) * (gradients ** 2)
++    # Update second moment
++    v_new = beta2 * v + (1.0 - beta2) * (grads ** 2)
+     
+-    # Step 4: Bias correction
+-    # Note: In practice, bias correction is often applied during the update step
+-    # or handled via a running counter. Here we compute it explicitly.
+-    bias_correction_1 = 1 - beta1 ** t
+-    bias_correction_2 = 1 - beta2 ** t
++    # Bias-corrected moments
++    m_hat = m_new / bias1
++    v_hat = v_new / bias2
+     
+-    m_hat = m_t_plus_1 / bias_correction_1
+-    v_hat = v_t_plus_1 / bias_correction_2
++    # Parameter update
++    params_new = params - alpha * (m_hat / (sqrt(v_hat) + eps))
+     
+-    # Step 5: Parameter update
+-    # Step 6: Store results (implicit in return for this function signature)
+-    theta_t_plus_1 = gaussian_params - eta * (m_hat / (sqrt(v_hat) + epsilon))
+-    
+-    return theta_t_plus_1, (m_t_plus_1, v_t_plus_1)
++    # Write back
++    m[:] = m_new
++    v[:] = v_new
++    params[:] = params_new
+ ```
+ 
++**Parameters:**
++- $\alpha$: Learning rate (typically $1.6 \times 10^{-2}$ for position, $1.0 \times 10^{-3}$ for other parameters in standard 3DGS, but specific values for the fused variant are not explicitly differentiated in the source) [S1, unofficial].
++- $\beta_1, \beta_2$: Adam momentum coefficients (typically $0.9, 0.999$) [S1, unofficial].
++- $\epsilon$: Adam epsilon (typically $10^{-15}$) [S1, unofficial].
++
++**Edge Cases and Pitfalls:**
++- **Zero Gradients:** To maintain correctness with respect to the original Adam step, parameter updates must be performed even for parameters receiving a gradient of zero (e.g., Gaussians outside the viewing frustum) [S1, unofficial]. Skipping these updates breaks the moment estimation consistency.
++- **Performance Trade-off:** While this approach reduces VRAM, it does not skip computations for invisible Gaussians, limiting the speedup compared to methods that do skip them [S1, unofficial].
++
+ ## Operating characteristics
+-*   **Time Complexity:** Reduces training time by eliminating the overhead of a separate optimizer kernel launch and memory transfers. On Mip-NeRF360 outdoor scenes with an RTX 4090, it reduces training time from 5m31s to 5m04s [S1, unofficial].
+-*   **Memory Complexity:** Reduces VRAM requirements because no additional buffers for parameters are necessary during the update step. On the same hardware and scenes, it reduces VRAM from 6.0GiB to 5.6GiB [S1, unofficial].
+-*   **Performance:** Provides a small speedup and VRAM reduction over the full version but reduces extensibility [S1, unofficial]. Attainable performance improvements are reduced compared to skipping updates for invisible Gaussians [S1, unofficial].
+-*   **Strengths:** Lower VRAM usage, slightly faster training, reduced kernel launch overhead.
+-*   **Limitations:** Reduced extensibility, parameter updates remain the main bottleneck, requires updating zero-gradient parameters which limits potential speedups from skipping invisible Gaussians [S1, unofficial].
+-*   **When to use:** When VRAM is constrained and slight training speedups are desired without sacrificing the correctness of the Adam optimizer's internal state.
+-*   **When not to use:** When maximum training speed is required and the potential quality degradation or inconsistency from skipping updates for invisible Gaussians is acceptable (in which case, combining with skipping updates is recommended) [S1, unofficial].
++- **Time Complexity:** $O(N)$ where $N$ is the number of Gaussian parameters. The fused kernel reduces kernel launch overhead and memory bandwidth pressure by combining gradient accumulation and update into one pass.
++- **Memory Complexity:** $O(N)$ for parameters and moments. VRAM is reduced because no additional buffers for intermediate parameter states are required during the update step [S1, unofficial].
++- **Measured Performance:** On Mip-NeRF360 outdoor scenes with an RTX 4090, training time reduced from 5m31s to 5m04s, and VRAM usage decreased from 6.0GiB to 5.6GiB, with PSNR increasing slightly from 24.72 to 24.73 [S1, unofficial].
++- **Strengths:** Significant VRAM reduction, especially beneficial for large scenes with many Gaussians. Maintains strict numerical equivalence with the standard Adam optimizer.
++- **Limitations:** Attainable performance improvements are smaller compared to methods that skip updates for invisible Gaussians. After integration, parameter updates remain a significant bottleneck, consuming a large fraction of the remaining runtime [S1, unofficial].
++- **When to Use:** When VRAM is the primary constraint or when strict adherence to the original 3DGS optimization trajectory is required without risking quality degradation from skipped updates.
++- **When Not to Use:** When maximum training speed is the priority and slight quality inconsistencies are acceptable; in such cases, skipping updates for invisible Gaussians (as in [FastGS](9177-fastgs.md)) is preferred.
+ 
+ ## Background
+-The method was introduced in "Faster-GS: Analyzing and Improving Gaussian Splatting Optimization" [S1, unofficial]. The authors identified that the GPU spends between 40% and 60% of the total training time on the optimized Adam update routine in the original 3DGS implementation [S1, unofficial]. This fusion technique was proposed to alleviate this bottleneck by integrating the optimizer step directly into the rasterizer's backward pass [S1, unofficial].
++The method was introduced in "Faster-GS: Analyzing and Improving Gaussian Splatting Optimization" [S1, unofficial]. Profiling of the original 3DGS implementation revealed that the Adam update routine consumed 40–60% of total training time [S1, unofficial]. The authors proposed fusing the optimizer step into the rasterizer's backward pass to alleviate this bottleneck [S1, unofficial]. The approach is presented as a foundational optimization that can be combined with other techniques like skipping invisible Gaussian updates, though the latter is noted as an optional extension that may introduce inconsistencies [S1, unofficial].
+ 
+ ## Sources

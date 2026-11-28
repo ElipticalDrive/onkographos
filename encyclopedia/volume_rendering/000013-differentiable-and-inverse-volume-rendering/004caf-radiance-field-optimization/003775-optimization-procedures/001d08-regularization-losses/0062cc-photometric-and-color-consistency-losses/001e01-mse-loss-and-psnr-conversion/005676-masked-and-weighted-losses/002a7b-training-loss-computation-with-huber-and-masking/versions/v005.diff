@@ -1,0 +1,141 @@
+--- v004.md
++++ v005.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-This method computes the primary photometric loss for training differentiable volume rendering models, specifically those utilizing sparse voxel grids or neural radiance fields [S1, unofficial][S2]. It calculates the discrepancy between rendered and ground-truth RGB values using a Huber loss, masked by ray validity to exclude invalid or background-only rays [S1, unofficial]. It differs from standard MSE loss by being more robust to outliers while maintaining differentiability, and explicitly handles valid ray aggregation to prevent bias from empty space [S1, G, unofficial].
++This method computes the photometric training loss for differentiable volume rendering by comparing rendered and ground-truth RGB values using a Huber loss [S1, unofficial]. It masks the loss with a ray validity flag to exclude invalid or background-only rays, then averages the result over valid rays to prevent bias from empty space [S1, unofficial]. It differs from standard MSE loss by being more robust to outliers while maintaining differentiability [G].
+ 
+ ## How it works
+@@ -13,9 +13,9 @@
+ - `gt_rgba_f32`: Ground truth RGBA image array (float32) [S1, unofficial].
+ - `bg`: Background color tensor [S1, unofficial].
+-- `batch_metrics`: Dictionary containing `ray_is_valid` (boolean mask of shape $(N,)$) and `n_valid_rays` (scalar count of valid rays) [S1, unofficial].
+-- `loss`: Accumulator for loss components from previous regularization steps [S1, unofficial].
++- `batch_metrics`: Dictionary containing `ray_is_valid` (boolean mask of shape $(N,)$), `n_valid_rays` (scalar count of valid rays), and `loss` (accumulator tree) [S1, unofficial].
++- `render_rays_train`: Function that integrates density and color along worldspace rays with appearance embeddings and background [S1, unofficial].
+ 
+ **Outputs:**
+-- `loss`: Scalar total loss value including the RGB Huber loss [S1, unofficial].
++- `loss`: Scalar total loss value including the RGB Huber loss and aggregated components [S1, unofficial].
+ 
+ ### Data Structures
+@@ -24,15 +24,12 @@
+ 
+ ### Steps
+-1. **Render Predictions**: Generate predicted RGB and depth values for the current batch of rays using a volume rendering function [S1, unofficial].
+-2. **Split Predictions**: Separate the packed prediction tensor into RGB and depth components, where the RGB component occupies the first 3 channels [S1, unofficial].
+-3. **Blend Ground Truth**: Blend the ground truth RGB with the background color to match the rendering conditions [S1, unofficial].
+-4. **Compute Huber Loss**: Calculate the per-ray Huber loss between predicted and ground truth RGB values using a delta parameter ($\delta$) to switch between L2 and L1 behavior [S1, unofficial].
+-5. **Mask and Average**: Apply the `ray_is_valid` mask to the per-ray loss and average the result over the number of valid rays [S1, unofficial].
+-6. **Aggregate**: Add the computed RGB loss to the existing loss accumulator containing regularization terms [S1, unofficial].
++1. **Render Predictions**: Generate predicted RGB and depth values for the current batch of rays by calling `render_rays_train` with worldspace rays, appearance embeddings, background, and total samples [S1, unofficial].
++2. **Split Predictions**: Separate the packed prediction tensor into RGB and depth components using an array split at index 3 along the last axis [S1, unofficial].
++3. **Blend Ground Truth**: Blend the ground truth RGBA image with the background color using alpha compositing to match rendering conditions [S1, unofficial].
++4. **Compute Huber Loss**: Calculate the per-ray Huber loss between predicted and ground truth RGB values with $\delta=0.1$, mask it with `ray_is_valid`, and average over valid rays [S1, unofficial].
++5. **Aggregate**: Add the computed RGB loss to the existing loss accumulator tree using a tree reduction operation [S1, unofficial].
+ 
+ ### Pseudocode
+ ```python
+-import numpy as np
+-
+ def compute_training_loss(pred_rgbds, gt_rgba_f32, bg, batch_metrics):
+     """
+@@ -43,10 +40,10 @@
+         gt_rgba_f32: Array of shape (H, W, 4), ground truth RGBA.
+         bg: Array of shape (3,), background color.
+-        batch_metrics: Dict with 'ray_is_valid' (N,) bool, 'n_valid_rays' (int), 'loss' (tree/structure).
++        batch_metrics: Dict with 'ray_is_valid' (N,), 'n_valid_rays' (scalar), 'loss' (tree).
+         
+     Returns:
+         loss: Scalar total loss.
+     """
+-    # Step 1 & 2: Split predictions into RGB and Depth
++    # Step 2: Split predictions into RGB and Depth
+     pred_rgbs = pred_rgbds[:, :3]
+     
+@@ -55,38 +52,41 @@
+     gt_alpha = gt_rgba_f32[:, :, 3:4]
+     gt_rgbs = gt_rgb * gt_alpha + bg * (1.0 - gt_alpha)
+-    gt_rgbs = gt_rgbs.reshape(-1, 3)
++    gt_rgbs = gt_rgbs.reshape(-1, 3)  # Flatten to (N, 3)
+     
+-    # Step 4 & 5: Compute Huber Loss with masking
++    # Step 4: Compute Huber Loss with masking
+     delta = 0.1
+     ray_is_valid = batch_metrics["ray_is_valid"]
+     n_valid_rays = batch_metrics["n_valid_rays"]
+     
+-    diff = pred_rgbs - gt_rgbs
+-    abs_diff = np.abs(diff)
+-    huber_per_channel = np.where(abs_diff <= delta, 0.5 * diff**2, delta * (abs_diff - 0.5 * delta))
+-    per_ray_loss = huber_per_channel.mean(axis=-1)
++    # Huber loss function (element-wise over channels, then mean over channels)
++    def huber_loss(pred, target, delta):
++        diff = pred - target
++        diff = diff if diff >= 0 else -diff
++        quadratic = diff if diff <= delta else delta
++        linear = diff - quadratic
++        return 0.5 * quadratic**2 + delta * linear
+     
+-    masked_loss = np.where(ray_is_valid, per_ray_loss, 0.0)
++    per_pixel_loss = huber_loss(pred_rgbs, gt_rgbs, delta)
++    per_ray_loss = sum(per_pixel_loss[i][j] for j in range(3)) / 3.0  # Mean over channels
+     
++    # Mask and average
++    masked_loss = per_ray_loss * ray_is_valid
+     if n_valid_rays > 0:
+-        loss_rgb = masked_loss.sum() / n_valid_rays
++        loss_rgb = sum(masked_loss) / n_valid_rays
+     else:
+         loss_rgb = 0.0
+         
+-    # Step 6: Aggregate with existing loss components
+-    loss = tree_reduce_sum(batch_metrics["loss"])
+-    loss = loss + loss_rgb
+-    
++    # Step 5: Aggregate with existing loss components
++    def sum_tree(tree):
++        if isinstance(tree, (int, float)):
++            return tree
++        if isinstance(tree, dict):
++            return sum(sum_tree(v) for v in tree.values())
++        if isinstance(tree, (list, tuple)):
++            return sum(sum_tree(v) for v in tree)
++        return tree
++        
++    loss = sum_tree(batch_metrics["loss"]) + loss_rgb
+     return loss
+-
+-def tree_reduce_sum(tree):
+-    """Sums all numeric leaves in a nested structure, equivalent to jax.tree_util.tree_reduce(lambda x, y: x + y, tree)."""
+-    if isinstance(tree, (int, float)):
+-        return tree
+-    if isinstance(tree, dict):
+-        return sum(tree_reduce_sum(v) for v in tree.values())
+-    if isinstance(tree, (list, tuple)):
+-        return sum(tree_reduce_sum(v) for v in tree)
+-    return 0.0
+ ```
+ 
+@@ -98,7 +98,7 @@
+ 
+ ### Edge Cases and Pitfalls
+-- **No Valid Rays**: If `n_valid_rays` is zero, division by zero occurs [G]. The pseudocode guards against this by setting `loss_rgb` to $0.0$ [G].
++- **No Valid Rays**: If `n_valid_rays` is zero, division by zero occurs [S1, unofficial]. The pseudocode guards against this by setting `loss_rgb` to $0.0$ [S1, unofficial].
+ - **Masking Accuracy**: The `ray_is_valid` mask must correctly identify rays that intersect the scene [G]. Invalid rays (e.g., those hitting only the background) should be excluded to prevent the model from optimizing for background colors that are already fixed [G].
+-- **Precision**: Use float32 for RGB values to maintain gradient stability [G]. The Huber loss is continuous and differentiable everywhere, avoiding gradient vanishing or exploding issues associated with pure L1 or L2 at the boundary [G].
++- **Precision**: Use float32 for RGB values to maintain gradient stability [G]. The Huber loss is continuous and differentiable everywhere, avoiding gradient vanishing/exploding issues associated with pure L1 or L2 at the boundary [G].
+ 
+ ## Subtopics
+@@ -111,7 +111,7 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity**: $O(N)$ where $N$ is the number of rays, as it involves element-wise operations and a sum [G].
+-- **Memory Complexity**: $O(N)$ for storing per-ray losses [G].
+-- **Performance**: The Huber loss is computationally similar to MSE but provides better robustness to outliers [G]. The masking step adds negligible overhead [G].
++- **Time Complexity**: Not given in the sources.
++- **Memory Complexity**: Not given in the sources.
++- **Performance**: Not given in the sources.
+ - **Strengths**: Robust to saturated pixels and noise; handles invalid rays explicitly; differentiable [G].
+ - **Limitations**: Requires a valid mask; delta parameter needs tuning for specific datasets [G].

@@ -1,0 +1,139 @@
+Contribute to ucsc-redwood/better-together development by creating an account on GitHub.
+
+vulkan: faster dense conv, linear_bt and radix sort (per-device measured) by xuyanwen2012 · Pull Request #26 · ucsc-redwood/better-together · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+xuyanwen2012
+commented
+Oct 16, 2026
+Copy link
+Copy Markdown
+Contributor
+Summary
+Stacked on #25 (#23 -> #24 -> #25 -> this); retarget as those merge. One commit. Items 2-4 of the ranking in docs/reports-for-human/2026-10-15-vk-shader-profile.md.
+The speed-ups are device dependent, so each was measured on the phones (3 rounds interleaved, 20 s between runs; the profiler was not run on rocky). Base = the commit before this one.
+change
+Pixel 7a (Mali, subgroup 16)
+Samsung (Xclipse 940, subgroup 64)
+dense conv k3s1p1
+unchanged (old kernel runs)
+stages 1/3/5/6/7: -5 / -24 / -50 / -45 / -55 %; app sum 30.1 -> 18.8 ms
+linear_bt FC1/FC2, sparse (N=128)
+-33 % / -32 %
+-47 % / -47 %
+linear_bt FC1/FC2, dense (N=16)
+-15 % / -11 % (noisy)
+-36 % / -40 %
+linear_bt FC3 (10 outputs)
++28..32 % (+0.2 ms)
++29..40 % (+0.15..0.3 ms)
+radix sort (tree stage 2)
+-20 %
+-42 %
+Dense conv picks its path from SUBGROUP_SIZE (spec constant 0, the algorithm is now subgroup_size_dependent): >= 32 gets clamped no-branch loads and a subgroup-uniform weight base (guarded by subgroupAllEqual, per-lane fallback); < 32 keeps the previous kernel verbatim. The profile's prototype (OC_TILE 8) was -52 % on the 780M but +9 % on the Samsung; OC_TILE 4 with the same code is -45 % on the Samsung but +12 % on the Pixel (Mali has no scalar unit), hence the split.
+linear_bt: two output features per row-group and a remapped workgroup grid. 32 features per workgroup now (was 16); kiss_vk::kLinearBtFeaturesPerGroup / kLinearBtBatchTile live in platform/engine/vulkan/shaders/linear_bt_contract.hpp and both apps' dispatchers use it. Known regression: FC3 (10 outputs) is slower because only 5 of 16 row-groups have work. A one-feature-per-row-group variant for out_features <= 16 would fix it; not done (0.15-0.3 ms against 1.5-9 ms gains).
+Radix sort: kRadixNumWorkgroups 256 -> 64.
+The same measurements show PR #25's sparse conv change: Samsung -42 %, Pixel unchanged (now noted in the report, section 8).
+Tests
+New: DenseConvK3S1P1 (6x6 maps force the per-lane fallback, 8x8 the uniform path; fails with an unguarded broadcast) and LinearBt.RaggedFeatureBatchAndChunkEdges (odd feature count, ragged batch tile and input chunk; fails if the dispatcher constant disagrees with the shader). Both mutation-checked.
+local: dense 15/15, sparse 16/16, tree 17, e2e 5
+rocky (native build): kiss 29, tree 17, cifar-dense 15, cifar-sparse 16, e2e 5 and 3
+Pixel 7a and Samsung: kiss 28, tree 17, cifar-dense 15, cifar-sparse 16; exit 0
+Not run: sync-val, Jetson (CUDA untouched), a Mali device with subgroup 32.
+🤖 Generated with Claude Code
+xuyanwen2012
+and others
+added 2 commits
+October 15, 2026 16:15
+vulkan: faster sparse CSR 3x3 conv (-45% of the cifar-sparse stage su…
+…
+db7b428
+```
+…m on the 780M)
+
+new_cifar_sparse_conv2d_k3s1p1 takes a fast path in a subgroup whose active lanes share one
+output channel (subgroupAllEqual): the CSR row bounds come from subgroupBroadcastFirst, so the
+decode and the col_idx/weight loads are scalar; taps load on a clamped index with no divergent
+branch; four accumulators. Any other subgroup runs the previous per-lane walk, so correctness
+does not depend on the subgroup size or on out_h*out_w -- no dispatcher guard needed.
+
+Tests: SparseConvK3S1P1 covers the fallback (6x6 maps, hand-made CSR with an empty row, double
+reference; it fails on an unguarded broadcast) and the fast path (8x8).
+rocky (3 interleaved rounds, spread < 1%): conv stages -37..-52%, sum of stages 121.71 -> 66.44 ms.
+Phones (Pixel 7a sub 16, Samsung sub 64): 28/17/13/15.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+```
+vulkan: faster dense conv (AMD-style GPUs), linear_bt and radix sort;…
+…
+7826169
+```
+… per-device measured
+
+- new_cifar_dense_conv2d_k3s1p1: with subgroup >= 32 (Radeon 780M, Xclipse) every tap loads on
+  a clamped index with no divergent branch and the weight base is subgroup-uniform when all
+  lanes share the output-channel block (subgroupAllEqual guard, per-lane fallback). Mali
+  (subgroup 16) keeps the previous kernel verbatim: the scalar form is 12% slower there.
+  Chosen by SUBGROUP_SIZE (spec constant 0). Xclipse 940: five convs -24..-55%, app sum -38%.
+- new_cifar_dense_linear_bt: two output features per row-group and a remapped workgroup grid
+  (batch tiles sharing a weight slice are adjacent). Launch geometry lives in
+  linear_bt_contract.hpp, used by both apps' dispatchers. FC1/FC2 -33..-47% (sparse),
+  -11..-40% (dense); FC3 (10 outputs) is +0.15..0.3 ms slower, recorded in the report.
+- apps/tree: kRadixNumWorkgroups 256 -> 64: radix-sort stage -20% (Pixel), -42% (Xclipse).
+
+Tests: DenseConvK3S1P1 (6x6 forces the per-lane fallback, 8x8 the uniform path; fails on an
+unguarded broadcast) and LinearBt.RaggedFeatureBatchAndChunkEdges (odd feature count, ragged
+batch tile and input chunk; fails if the dispatcher constant disagrees with the shader).
+Gate: local 15/16; rocky 29/17/15/16 + e2e 5/3; Pixel 7a and Samsung 28/17/15/16.
+Measurements are in docs/reports-for-human/2026-10-15-vk-shader-profile.md (sections 8, 9).
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+```
+xuyanwen2012
+changed the base branch from
+campaign2/vk-sparse-conv
+to
+dev
+October 16, 2026 02:42
+xuyanwen2012
+closed this
+Oct 16, 2026
+xuyanwen2012
+reopened this
+Oct 16, 2026
+Hide details
+View details
+xuyanwen2012
+merged commit 7d0dd4f
+into
+dev
+Oct 16, 2026
+6 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+xuyanwen2012
+deleted the
+campaign2/vk-dense-linear-sort
+branch
+October 16, 2026 06:17
+xuyanwen2012
+mentioned this pull request
+Oct 17, 2026
+openspec: plan occasional-host-reads and cpu-chunk-costs; phone gates for tree; archive two changes
+#32
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

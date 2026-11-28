@@ -1,0 +1,150 @@
+# Weyrich et al. Splat Extent Calculation
+
+Also called: Projective bounding rectangle, Splat bounding box computation, Tangent plane method, Tight Axis-Aligned Bounding Rectangle for EWA Splatting
+
+## Overview
+This method computes a tight axis-aligned bounding rectangle (AABB) for a projected Ellipsoid-Wise Adaptive (EWA) splat in screen space, along with its depth range, without using matrix inversions or conic centralization [S1]. It solves the problem of numerical instability and excessive overestimation found in previous bounding box algorithms, particularly near object silhouettes or for near-degenerate splats [S1]. Unlike conic-based approaches that suffer from severe instabilities or square approximations that overestimate area by a factor of four, this tangent plane method remains stable and tight [S1]. It yields results in normalized device coordinates (NDC), meaning the bounding box cannot be clipped against the view frustum in screen space [S2, unofficial].
+
+## How it works
+The method treats the splat as a degenerate ellipsoid in local coordinates and exploits the property that normal vectors transform via the inverse transpose of a mapping to find tangent planes in screen space [S1][S2, unofficial].
+
+**Inputs:**
+*   Splat center in camera space: $\mathbf{c}$ (3D vector) [S1].
+*   Splat orientation vectors in camera space: $\mathbf{u}_0, \mathbf{v}_0$ (3D vectors) [S1].
+*   Projective transformation matrix: $P$ (4x4 matrix) [S1].
+*   Splat scaling/rotation matrix in camera space: $S$ (4x4 matrix, constructed from $\mathbf{u}_0, \mathbf{v}_0, \mathbf{c}$) [S1].
+
+**Outputs:**
+*   Screen-space bounding box: $(x_{min}, y_{min}, x_{max}, y_{max})$ in NDC [S1][S2, unofficial].
+*   Depth range: $(z_{min}, z_{max})$ in NDC [S1].
+
+**Data Structures:**
+*   Homogeneous plane representation: $\mathbf{h} = (a, b, c, d)^T$ representing the plane equation $ax+by+cz+d=0$ [G].
+
+**Steps:**
+
+1.  **Construct the Splat Matrix $S$**:
+    The splat in clip space is built by mapping the unit sphere under the projective mapping $P$ with matrix $S$ [S1]. The matrix $S$ is constructed from the splat's center $\mathbf{c}$ and orientation vectors $\mathbf{u}_0, \mathbf{v}_0$:
+    $$ S = \begin{pmatrix} \mathbf{u}' & \mathbf{v}' & \mathbf{0} & \mathbf{c}' \end{pmatrix} $$
+    Where $\mathbf{u}', \mathbf{v}', \mathbf{c}'$ are the homogeneous representations of the vectors [S1]. As an optimization, the third, degenerate column (corresponding to the $w_0$ dimension reduced to zero length) is removed or ignored [S1].
+
+2.  **Define Clip-Space Tangent Planes**:
+    Identify the planes in clip space that are adjacent to the splat's extent along the screen axes [S1]. For the x and y extents, define planes $\mathbf{h}_x$ and $\mathbf{h}_y$:
+    $$ \mathbf{h}_x = (-1, 0, 0, x)^T $$
+    $$ \mathbf{h}_y = (0, -1, 0, y)^T $$
+    Here, $x$ and $y$ are the unknown clip-space coordinates of the tangent planes [S1]. Similarly, for depth, define $\mathbf{h}_z = (0, 0, -1, z)^T$ [S1].
+
+3.  **Map Planes to Local Splat Coordinates**:
+    Transform the clip-space planes $\mathbf{h}_c$ (for $c \in \{x, y, z\}$) into the local splat coordinate system $(u_0, v_0, w_0)$ [S1]. This is done by multiplying by the transpose of the combined transformation $(PS)$:
+    $$ \bar{\mathbf{h}}_c = (PS)^T \mathbf{h}_c $$
+    This step avoids explicit inversion of $S$ or $P$, ensuring stability for near-degenerate cases [S1][S2, unofficial].
+
+4.  **Solve for Extents**:
+    The transformed planes $\bar{\mathbf{h}}_x$ and $\bar{\mathbf{h}}_y$ must be tangent to the unit sphere in the local splat coordinate system [S1]. A plane $\mathbf{n}^T \mathbf{x} + d = 0$ is tangent to the unit sphere if the distance from the origin to the plane is 1 [G].
+    For $\bar{\mathbf{h}}_x = (a_x, b_x, c_x, d_x)^T$, the condition is:
+    $$ \frac{|d_x|}{\sqrt{a_x^2 + b_x^2 + c_x^2}} = 1 \implies d_x^2 = a_x^2 + b_x^2 + c_x^2 $$
+    Since $d_x$ depends linearly on the unknown $x$ (from $\mathbf{h}_x$), this results in a quadratic equation in $x$ [S1]. Solving this quadratic yields two values for $x$, corresponding to $x_{min}$ and $x_{max}$ [S1]. Repeat the same process for $\mathbf{h}_y$ to find $y_{min}$ and $y_{max}$, and for $\mathbf{h}_z$ to find $z_{min}$ and $z_{max}$ [S1][S2, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def dot(v1, v2):
+    return sum(a * b for a, b in zip(v1, v2))
+
+def mat_vec_mul(M, v):
+    return [dot(row, v) for row in M]
+
+def compute_splat_extent(c, u0, v0, P):
+    """
+    Computes the tight AABB and depth range for a splat.
+    
+    Args:
+        c: Camera-space center (3,)
+        u0: Camera-space u-vector (3,)
+        v0: Camera-space v-vector (3,)
+        P: 4x4 Projective matrix (list of 4 lists)
+        
+    Returns:
+        (x_min, y_min, x_max, y_max, z_min, z_max) in NDC
+    """
+    # Homogeneous extensions
+    u_h = u0 + (0.0,)
+    v_h = v0 + (0.0,)
+    c_h = c + (1.0,)
+    zero_h = (0.0, 0.0, 0.0, 0.0)
+
+    # S = [u_h, v_h, zero_h, c_h] as columns
+    # M = P @ S. We compute M columns directly to avoid constructing full S
+    M = [mat_vec_mul(P, col) for col in [u_h, v_h, zero_h, c_h]]
+
+    def solve_extent(plane_idx):
+        # plane_idx: 0 for x, 1 for y, 2 for z
+        if plane_idx == 0:
+            h_base = (-1.0, 0.0, 0.0, 0.0)
+        elif plane_idx == 1:
+            h_base = (0.0, -1.0, 0.0, 0.0)
+        else:
+            h_base = (0.0, 0.0, -1.0, 0.0)
+        h_var = (0.0, 0.0, 0.0, 1.0)
+
+        # h_local = M^T @ (h_base + k * h_var)
+        # M^T rows are M columns
+        A = (dot(M[0], h_base), dot(M[1], h_base), dot(M[2], h_base), dot(M[3], h_base))
+        B = (dot(M[0], h_var), dot(M[1], h_var), dot(M[2], h_var), dot(M[3], h_var))
+
+        # Quadratic: a*k^2 + b*k + c = 0
+        # Derived from (Aw + k*Bw)^2 = (Ax+k*Bx)^2 + (Ay+k*By)^2 + (Az+k*Bz)^2
+        a = B[3]**2 - (B[0]**2 + B[1]**2 + B[2]**2)
+        b = 2.0 * (A[3]*B[3] - (A[0]*B[0] + A[1]*B[1] + A[2]*B[2]))
+        c = A[3]**2 - (A[0]**2 + A[1]**2 + A[2]**2)
+
+        if abs(a) < 1e-9:
+            if abs(b) < 1e-9:
+                return 0.0, 0.0
+            k = -c / b
+            return k, k
+
+        disc = b**2 - 4*a*c
+        if disc < 0:
+            return 0.0, 0.0
+
+        sqrt_d = math.sqrt(disc)
+        k1 = (-b - sqrt_d) / (2 * a)
+        k2 = (-b + sqrt_d) / (2 * a)
+        return min(k1, k2), max(k1, k2)
+
+    x_min, x_max = solve_extent(0)
+    y_min, y_max = solve_extent(1)
+    z_min, z_max = solve_extent(2)
+    return (x_min, y_min, x_max, y_max, z_min, z_max)
+```
+
+**Edge Cases and Pitfalls:**
+*   **Parabola/Hyperbola Projection:** If the projected ellipse becomes a parabola or hyperbola (e.g., splat intersects the view plane), the method fails because the quadratic equation may not yield a valid bounding box for an open curve [S2, unofficial].
+*   **View Frustum Clipping:** The output is in NDC, so the bounding box cannot be clipped against the view frustum in screen space [S2, unofficial]. Implementations often pre-filter splats by checking if their bounding sphere intersects the view frustum in camera space [S2, unofficial].
+*   **Degenerate Splats:** The method is designed to remain stable for near-degenerate splats (where the splat is very thin or flat) by avoiding matrix inversion [S1].
+
+## Subtopics
+
+### [Hartley-Hartley Tangent Vector Formula](13494-hartley-hartley-tangent-vector-formula.md)
+Computes tangent/bitangent vectors from a normal using Householder reflections. Chosen for efficiency on sparse/noisy data where shape-aware methods fail.
+
+## Operating characteristics
+*   **Time Complexity:** $O(1)$ per splat [G]. It involves a fixed number of matrix-vector multiplications and solving two quadratic equations [S1].
+*   **Memory Complexity:** $O(1)$ auxiliary memory [G].
+*   **Performance:** Significantly faster than conic-based approaches due to the avoidance of matrix inversions and conic centralization [S1]. It provides tighter bounds than square approximations, reducing overdraw and rasterization cost [S1].
+*   **Strengths:** Numerical stability for near-degenerate splats; no matrix inversion required; tight bounds [S1].
+*   **Limitations:** Fails if the projection results in a parabola or hyperbola; bounding box is in NDC and cannot be frustum-clipped in screen space [S2, unofficial].
+*   **When to use:** When rendering EWA splats on GPUs where setup cost is critical and numerical stability is required for thin/degenerate primitives [S1].
+*   **When not to use:** If the splats are likely to intersect the view plane causing parabolic/hyperbolic projections, or if frustum clipping in screen space is required [S2, unofficial].
+
+## Background
+The method was introduced by Weyrich et al. in their work on hardware architecture for surface splatting [S1]. It was adapted from a general technique for raycasting quadric surfaces noted by Sigg et al., which uses the inverse transpose of the mapping to find tangent planes to a unit sphere [S2, unofficial]. Previous methods included centralized conic representations [Zwicker et al. 2004] and conservative square approximations [Botsch et al. 2004], which suffered from overestimation or instability [S1].
+
+## Sources
+[S1] A hardware architecture for surface splatting, https://doi.org/10.1145/1275808.1276490, fetched 2026-10-28
+[S2] sebastianlipponer/surface_splatting, https://github.com/sebastianlipponer/surface_splatting, fetched 2026-10-28 (unofficial)

@@ -1,0 +1,135 @@
+# Tabulated BSSRDF
+
+
+## Overview
+The Tabulated BSSRDF method approximates the single-scattering profile $S_r$ for subsurface scattering by precomputing a lookup table parameterized by albedo $\rho$ and optical radius $r_{optical}$ [S1, unofficial]. It reduces the full five-dimensional BSSRDF $S_r(\eta, g, \rho, \sigma_t, r)$ by fixing the refractive index $\eta$ and asymmetry coefficient $g$, and merging the extinction coefficient $\sigma_t$ and distance $r$ into the dimensionless optical radius $r_{optical} = \sigma_t r$ [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Distance $r = ||p_o - p_i||$, spectral albedo $\rho$, and spectral extinction coefficient $\sigma_t$ [S1, unofficial].
+*   **Output:** Spectrum $S_r(r)$ representing the single-scattering contribution [S1, unofficial].
+
+**Data Structures:**
+The core data structure is `BSSRDFTable` [S1, unofficial]:
+*   `nRhoSamples` (int): Number of albedo samples [S1, unofficial].
+*   `nRadiusSamples` (int): Number of optical radius samples [S1, unofficial].
+*   `rhoSamples` (unique_ptr<Float[]>): Array of albedo values [S1, unofficial].
+*   `radiusSamples` (unique_ptr<Float[]>): Array of optical radius values [S1, unofficial].
+*   `profile` (unique_ptr<Float[]>): 2D grid of size `nRhoSamples * nRadiusSamples` storing precomputed profile values [S1, unofficial].
+*   `rhoEff` (unique_ptr<Float[]>): Effective albedo values [S1, unofficial].
+*   `profileCDF` (unique_ptr<Float[]>): Cumulative distribution function [S1, unofficial].
+
+**Method Steps:**
+1.  **Precomputation:** The sources do not specify how the table is populated [S1, unofficial].
+2.  **Evaluation:** For each spectrum channel `ch`:
+    *   Compute optical radius: $r_{optical} = r \cdot \sigma_t[ch]$ [S1, unofficial].
+    *   Compute interpolation weights for $\rho$ and $r_{optical}$ using `CatmullRomWeights` [S1, unofficial].
+    *   If weights cannot be computed (out of bounds), skip the channel [S1, unofficial].
+    *   Perform 2D interpolation over the `profile` table using the 4 nearest neighbors in each dimension [S1, unofficial].
+    *   If $r_{optical} \neq 0$, divide the interpolated sum by $2 \pi r_{optical}$ [S1, unofficial].
+    *   Multiply the result by $\sigma_t[ch]^2$ to compensate for the parameter transformation from $r$ to $r_{optical}$ [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def CatmullRomWeights(n_samples, samples, value):
+    """
+    Compute Catmull-Rom spline weights for a 1D lookup.
+    Returns (offset, weights) or None if value is out of bounds.
+    """
+    if value < samples[0] or value >= samples[-1]:
+        return None
+    i = 0
+    while i < n_samples - 1 and samples[i+1] <= value:
+        i += 1
+    offset = max(0, i - 1)
+    t = (value - samples[i]) / (samples[i+1] - samples[i])
+    t2 = t * t
+    t3 = t2 * t
+    weights = [
+        -0.5 * t3 + t2 - 0.5 * t,
+        1.5 * t3 - 2.5 * t2 + 1.0,
+        -1.5 * t3 + 2.0 * t2 + 0.5 * t,
+        0.5 * t3 - 0.5 * t2
+    ]
+    return offset, weights
+
+def EvalProfile(table, rho_index, radius_index):
+    """Access the precomputed profile value."""
+    return table.profile[rho_index * table.nRadiusSamples + radius_index]
+
+def TabulatedBSSRDF_Sr(table, sigma_t, rho, r):
+    """
+    Evaluate the tabulated BSSRDF for a given distance r.
+    
+    Args:
+        table: BSSRDFTable object
+        sigma_t: Array of extinction coefficients per spectrum channel
+        rho: Array of albedo values per spectrum channel
+        r: Distance ||p_o - p_i||
+        
+    Returns:
+        list: The BSSRDF spectrum values
+    """
+    n_channels = len(sigma_t)
+    Sr = [0.0] * n_channels
+
+    for ch in range(n_channels):
+        r_optical = r * sigma_t[ch]
+        
+        rho_result = CatmullRomWeights(table.nRhoSamples, table.rhoSamples, rho[ch])
+        radius_result = CatmullRomWeights(table.nRadiusSamples, table.radiusSamples, r_optical)
+        
+        if rho_result is None or radius_result is None:
+            continue
+                
+        rho_offset, rho_weights = rho_result
+        radius_offset, radius_weights = radius_result
+        
+        sr = 0.0
+        for i in range(4):
+            for j in range(4):
+                weight = rho_weights[i] * radius_weights[j]
+                if weight != 0:
+                    sr += weight * EvalProfile(table, rho_offset + i, radius_offset + j)
+                        
+        if r_optical != 0:
+            sr /= (2.0 * math.pi * r_optical)
+                
+        Sr[ch] = sr
+
+    # Apply sigma_t^2 scaling to the whole spectrum
+    for ch in range(n_channels):
+        Sr[ch] *= sigma_t[ch] * sigma_t[ch]
+
+    # Clamp values to avoid negative or NaN results
+    Sr = [max(0.0, min(1.0, val)) for val in Sr]
+    return Sr
+```
+
+**Parameters:**
+*   `nRhoSamples`, `nRadiusSamples`: Resolution of the table [S1, unofficial].
+*   Fixed $\eta$ and $g$: Must match the material being simulated [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Out of Bounds:** If $\rho$ or $r_{optical}$ falls outside the table's range, `CatmullRomWeights` returns `None` and the channel is skipped [S1, unofficial].
+*   **Zero Optical Radius:** Division by $r_{optical}$ is guarded by an explicit `!= 0` check [S1, unofficial].
+
+## Operating characteristics
+**Time Complexity:** Not given in the sources [S1, unofficial].
+**Memory Complexity:** Not given in the sources [S1, unofficial].
+**Measured Performance:** Not given in the sources [S1, unofficial].
+**Scaling:** Not given in the sources [S1, unofficial].
+**Strengths:** Not given in the sources [S1, unofficial].
+**Limitations:** Not given in the sources [S1, unofficial].
+**When to Use:** Not given in the sources [S1, unofficial].
+**When Not to Use:** Not given in the sources [S1, unofficial].
+
+## Background
+The method is described in the context of physically based rendering for volume scattering [S1, unofficial]. It addresses the five-dimensional BSSRDF $S_r(\eta, g, \rho, \sigma_t, r)$ by fixing $\eta$ and $g$, and combining $\sigma_t$ and $r$ into the dimensionless optical radius $r_{optical} = \sigma_t r$ [S1, unofficial].
+
+## Sources
+[S1] Physically Based Rendering：体积散射 - YangWC's Blog, https://yangwc.com/2020/04/19/VolumeScattering/, fetched 2026-10-30 (unofficial)

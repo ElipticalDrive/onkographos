@@ -1,0 +1,741 @@
+I'm experiencing issues when attempting to create vertex buffers for a mesh composed of voxels. Code Snippet: result.vertexBuffer = sg.makeBuffer(BufferDesc( data: sg.Range( addr: chunkMesh.vertices.addr, size: chunkMesh.vertices.sizeof ...
+
+SIGSEGV: Illegal storage access. (Attempt to read from nil?) while making buffer · Issue #34 · floooh/sokol-nim · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+SIGSEGV: Illegal storage access. (Attempt to read from nil?) while making buffer #34
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+SIGSEGV: Illegal storage access. (Attempt to read from nil?) while making buffer#34
+Copy link
+Description
+ReallyNecessarySherbert
+opened on Jan 12, 2025
+Issue body actions
+I'm experiencing issues when attempting to create vertex buffers for a mesh composed of voxels.
+Code Snippet:
+```
+result.vertexBuffer = sg.makeBuffer(BufferDesc(
+    data: sg.Range(
+      addr: chunkMesh.vertices.addr,
+      size: chunkMesh.vertices.sizeof
+    )
+))
+```
+I tried an alternative approach suggested here #32:
+addr: chunkMesh.vertices[0].addr
+However, this approach did not resolve the issue.
+Full code:
+chunk_renderer.nim:
+```
+import sokol/gfx as sg
+import shaders/chunk_mesh as chunkShader
+import sokol/app as sapp
+import camera
+import glm
+import chunk
+import types
+
+type
+  ChunkRenderer* = object
+    shader*: Shader
+    pipeline*: Pipeline
+    vertexBuffer*: Buffer
+    blockIdBuffer*: Buffer
+    indexBuffer*: Buffer
+    bindings*: Bindings
+    chunkMesh*: ChunkMesh
+
+proc make_pipline_util*(shader: Shader, attrs: array[0..15, VertexAttrState], buffers: array[0..7, VertexBufferLayoutState], cullMode: sg.CullMode, indexType: sg.IndexType, depth: DepthState): Pipeline =
+    return makePipeline(PipelineDesc(shader: shader, 
+        layout: VertexLayoutState(
+            buffers: buffers,
+            attrs: attrs
+        ),
+        cullMode: cullMode,
+        indexType: indexType,
+        depth: depth
+    ))
+proc mesh_init*(chunkMesh: ChunkMesh): ChunkRenderer =
+  result.chunkMesh = chunkMesh
+  
+  # Debug prints
+  echo "Vertices count: ", chunkMesh.vertices.len
+  echo "Indices count: ", chunkMesh.indices.len
+  echo "IDs count: ", chunkMesh.ids.len
+
+  result.shader = sg.makeShader(chunkShader.chunkShaderShaderDesc(sg.queryBackend()))
+  
+  result.pipeline = make_pipline_util(
+    result.shader, 
+    [
+      VertexAttrState(
+        bufferIndex: 0, 
+        offset: 0, 
+        format: vertexFormatFloat3
+      ),
+      VertexAttrState(
+        bufferIndex: 1, 
+        offset: 0, 
+        format: vertexFormatFloat
+      )
+    ],
+    [
+      VertexBufferLayoutState(stride: 12),  # Vertex position stride
+      VertexBufferLayoutState(stride: 4)    # Block ID stride
+    ],
+    cullModeBack,
+    indexTypeUint32,
+    DepthState(
+      compare: compareFuncLessEqual,
+      writeEnabled: true
+    )
+  )
+  
+  # Ensure we have data to create buffers
+  if chunkMesh.vertices.len == 0 or chunkMesh.indices.len == 0 or chunkMesh.ids.len == 0:
+    echo "Empty mesh data"
+    return result
+
+  # Create vertex buffer
+  result.vertexBuffer = sg.makeBuffer(BufferDesc(
+    data: sg.Range(
+      addr: chunkMesh.vertices.addr,
+      size: chunkMesh.vertices.sizeof
+    )
+  ))
+
+  # Create block ID buffer
+  result.blockIdBuffer = sg.makeBuffer(BufferDesc(
+    data: sg.Range(
+      addr: chunkMesh.ids.addr,
+      size: chunkMesh.ids.sizeof
+    )
+  ))
+
+  # Create index buffer
+  result.indexBuffer = sg.makeBuffer(BufferDesc(
+    type: bufferTypeIndexBuffer,
+    data: sg.Range(
+      addr: chunkMesh.indices.addr,
+      size: chunkMesh.indices.sizeof
+    )
+  ))
+
+  # Create bindings
+  result.bindings.vertexBuffers[0] = result.vertexBuffer
+  result.bindings.vertexBuffers[1] = result.blockIdBuffer
+  result.bindings.indexBuffer = result.indexBuffer
+
+  return result
+```
+chunk.nim:
+```
+import glm
+import std/random
+
+
+
+
+const CHUNK_SIZE = 3
+const CHUNK_HEIGHT = 1
+
+randomize()
+type
+  Block = object
+    id*: int
+    light*: int
+    ch_x*: int
+    ch_y*: int
+    ch_z*: int
+type
+  Chunk* = object
+    blocks*: array[CHUNK_SIZE, array[CHUNK_HEIGHT, array[CHUNK_SIZE, Block]]]
+    x*: int
+    z*: int
+    loaded*: bool = false
+    changed*: bool
+    visible*: bool
+type
+  ChunkMesh* = object
+    vertices*: seq[float32]
+    indices*: seq[uint32]
+    ids*: seq[float32]
+    sides*: seq[uint8]
+    verticesCount*: uint64
+proc gen_test_chunk*(x, z: int): Chunk =
+  result.x = x
+  result.z = z
+  for i in 0..<CHUNK_SIZE:
+    for j in 0..<CHUNK_HEIGHT:
+      for k in 0..<CHUNK_SIZE:
+        #random id here
+        result.blocks[i][j][k].id = rand(0..10)
+        result.blocks[i][j][k].light = 0
+proc is_void*(chunk: Chunk, x: int, y: int, z: int, face: int): bool =
+  case face
+  of 0: # front face
+    if z + 1 >= CHUNK_SIZE: return true
+    return chunk.blocks[x][y][z + 1].id == 0
+  of 1: # back face
+    if z - 1 < 0: return true
+    return chunk.blocks[x][y][z - 1].id == 0
+  of 2: # top face
+    if y + 1 >= CHUNK_HEIGHT: return true
+    return chunk.blocks[x][y + 1][z].id == 0
+  of 3: # bottom face
+    if y - 1 < 0: return true
+    return chunk.blocks[x][y - 1][z].id == 0
+  of 4: # right face
+    if x + 1 >= CHUNK_SIZE: return true
+    return chunk.blocks[x + 1][y][z].id == 0
+  of 5: # left face
+    if x - 1 < 0: return true
+    return chunk.blocks[x - 1][y][z].id == 0
+  else:
+    return false
+
+proc genChunkMesh*(chunk: Chunk): ChunkMesh =
+  result.vertices = @[]
+  result.indices = @[]
+  result.ids = @[]
+  result.sides = @[]
+  result.verticesCount = 0'u64
+  var vertexCount = 0'u16
+
+  for i in 0..<CHUNK_SIZE:
+    for j in 0..<CHUNK_HEIGHT:
+      for k in 0..<CHUNK_SIZE:
+        let bl = chunk.blocks[i][j][k]
+        if bl.id == 0:
+          continue
+
+        # Front face
+        if is_void(chunk, i, j, k, 0):
+          let baseIndex = vertexCount
+          result.vertices.add(float32(i) - 0.5'f32)
+          result.vertices.add(float32(j) - 0.5'f32)
+          result.vertices.add(float32(k) + 0.5'f32)
+          result.vertices.add(float32(i) + 0.5'f32)
+          result.vertices.add(float32(j) - 0.5'f32)
+          result.vertices.add(float32(k) + 0.5'f32)
+          result.vertices.add(float32(i) + 0.5'f32)
+          result.vertices.add(float32(j) + 0.5'f32)
+          result.vertices.add(float32(k) + 0.5'f32)
+          result.vertices.add(float32(i) - 0.5'f32)
+          result.vertices.add(float32(j) + 0.5'f32)
+          result.vertices.add(float32(k) + 0.5'f32)
+          
+          result.indices.add(baseIndex)
+          result.indices.add(baseIndex + 2)
+          result.indices.add(baseIndex + 1)
+          result.indices.add(baseIndex)
+          result.indices.add(baseIndex + 3)
+          result.indices.add(baseIndex + 2)
+          
+          result.ids.add(float32(bl.id))
+          result.ids.add(float32(bl.id))
+          result.ids.add(float32(bl.id))
+          result.ids.add(float32(bl.id))
+          
+          vertexCount += 4
+          result.verticesCount += 6
+
+        # Back face
+        if is_void(chunk, i, j, k, 1):
+          let baseIndex = vertexCount
+          result.vertices.add(float32(i) - 0.5'f32)
+          result.vertices.add(float32(j) - 0.5'f32)
+          result.vertices.add(float32(k) - 0.5'f32)
+          result.vertices.add(float32(i) + 0.5'f32)
+          result.vertices.add(float32(j) - 0.5'f32)
+          result.vertices.add(float32(k) - 0.5'f32)
+          result.vertices.add(float32(i) + 0.5'f32)
+          result.vertices.add(float32(j) + 0.5'f32)
+          result.vertices.add(float32(k) - 0.5'f32)
+          result.vertices.add(float32(i) - 0.5'f32)
+          result.vertices.add(float32(j) + 0.5'f32)
+          result.vertices.add(float32(k) - 0.5'f32)
+          
+          result.indices.add(baseIndex)
+          result.indices.add(baseIndex + 2)
+          result.indices.add(baseIndex + 1)
+          result.indices.add(baseIndex)
+          result.indices.add(baseIndex + 3)
+          result.indices.add(baseIndex + 2)
+          
+          result.ids.add(float32(bl.id))
+          result.ids.add(float32(bl.id))
+          result.ids.add(float32(bl.id))
+          result.ids.add(float32(bl.id))
+          
+          vertexCount += 4
+          result.verticesCount += 6
+
+        # Top face
+        if is_void(chunk, i, j, k, 2):
+          let baseIndex = vertexCount
+          result.vertices.add(float32(i) - 0.5'f32)
+          result.vertices.add(float32(j) + 0.5'f32)
+          result.vertices.add(float32(k) - 0.5'f32)
+          result.vertices.add(float32(i) + 0.5'f32)
+          result.vertices.add(float32(j) + 0.5'f32)
+          result.vertices.add(float32(k) - 0.5'f32)
+          result.vertices.add(float32(i) + 0.5'f32)
+          result.vertices.add(float32(j) + 0.5'f32)
+          result.vertices.add(float32(k) + 0.5'f32)
+          result.vertices.add(float32(i) - 0.5'f32)
+          result.vertices.add(float32(j) + 0.5'f32)
+          result.vertices.add(float32(k) + 0.5'f32)
+          
+          result.indices.add(baseIndex)
+          result.indices.add(baseIndex + 2)
+          result.indices.add(baseIndex + 1)
+          result.indices.add(baseIndex)
+          result.indices.add(baseIndex + 3)
+          result.indices.add(baseIndex + 2)
+          
+          result.ids.add(float32(bl.id))
+          result.ids.add(float32(bl.id))
+          result.ids.add(float32(bl.id))
+          result.ids.add(float32(bl.id))
+          
+          vertexCount += 4
+          result.verticesCount += 6
+
+        # Bottom face
+        if is_void(chunk, i, j, k, 3):
+          let baseIndex = vertexCount
+          result.vertices.add(float32(i) - 0.5'f32)
+          result.vertices.add(float32(j) - 0.5'f32)
+          result.vertices.add(float32(k) + 0.5'f32)
+          result.vertices.add(float32(i) + 0.5'f32)
+          result.vertices.add(float32(j) - 0.5'f32)
+          result.vertices.add(float32(k) + 0.5'f32)
+          result.vertices.add(float32(i) + 0.5'f32)
+          result.vertices.add(float32(j) - 0.5'f32)
+          result.vertices.add(float32(k) - 0.5'f32)
+          result.vertices.add(float32(i) - 0.5'f32)
+          result.vertices.add(float32(j) - 0.5'f32)
+          result.vertices.add(float32(k) - 0.5'f32)
+          
+          result.indices.add(baseIndex)
+          result.indices.add(baseIndex + 2)
+          result.indices.add(baseIndex + 1)
+          result.indices.add(baseIndex)
+          result.indices.add(baseIndex + 3)
+          result.indices.add(baseIndex + 2)
+          
+          result.ids.add(float32(bl.id))
+          result.ids.add(float32(bl.id))
+          result.ids.add(float32(bl.id))
+          result.ids.add(float32(bl.id))
+          
+          vertexCount += 4
+          result.verticesCount += 6
+
+        # Right face
+        if is_void(chunk, i, j, k, 4):
+          let baseIndex = vertexCount
+          result.vertices.add(float32(i) + 0.5'f32)
+          result.vertices.add(float32(j) - 0.5'f32)
+          result.vertices.add(float32(k) + 0.5'f32)
+          result.vertices.add(float32(i) + 0.5'f32)
+          result.vertices.add(float32(j) - 0.5'f32)
+          result.vertices.add(float32(k) - 0.5'f32)
+          result.vertices.add(float32(i) + 0.5'f32)
+          result.vertices.add(float32(j) + 0.5'f32)
+          result.vertices.add(float32(k) - 0.5'f32)
+          result.vertices.add(float32(i) + 0.5'f32)
+          result.vertices.add(float32(j) + 0.5'f32)
+          result.vertices.add(float32(k) + 0.5'f32)
+          result.vertices.add(float32(i) + 0.5'f32)
+          result.vertices.add(float32(j) - 0.5'f32)
+          result.vertices.add(float32(k) + 0.5'f32)
+          
+          result.indices.add(baseIndex)
+          result.indices.add(baseIndex + 2)
+          result.indices.add(baseIndex + 1)
+          result.indices.add(baseIndex)
+          result.indices.add(baseIndex + 3)
+          result.indices.add(baseIndex + 2)
+          
+          result.ids.add(float32(bl.id))
+          result.ids.add(float32(bl.id))
+          result.ids.add(float32(bl.id))
+          result.ids.add(float32(bl.id))
+          
+          vertexCount += 4
+          result.verticesCount += 6
+
+        # Left face
+        if is_void(chunk, i, j, k, 5):
+          let baseIndex = vertexCount
+          result.vertices.add(float32(i) - 0.5'f32)
+          result.vertices.add(float32(j) - 0.5'f32)
+          result.vertices.add(float32(k) - 0.5'f32)
+          result.vertices.add(float32(i) - 0.5'f32)
+          result.vertices.add(float32(j) - 0.5'f32)
+          result.vertices.add(float32(k) + 0.5'f32)
+          result.vertices.add(float32(i) - 0.5'f32)
+          result.vertices.add(float32(j) + 0.5'f32)
+          result.vertices.add(float32(k) + 0.5'f32)
+          result.vertices.add(float32(i) - 0.5'f32)
+          result.vertices.add(float32(j) + 0.5'f32)
+          result.vertices.add(float32(k) - 0.5'f32)
+          
+          result.indices.add(baseIndex)
+          result.indices.add(baseIndex + 2)
+          result.indices.add(baseIndex + 1)
+          result.indices.add(baseIndex)
+          result.indices.add(baseIndex + 3)
+          result.indices.add(baseIndex + 2)
+          
+          result.ids.add(float32(bl.id))
+          result.ids.add(float32(bl.id))
+          result.ids.add(float32(bl.id))
+          result.ids.add(float32(bl.id))
+          
+          vertexCount += 4
+          result.verticesCount += 6
+```
+shader_code:
+```
+@header import glm
+@ctype mat4 Mat4[float32]
+
+@block uniforms
+layout(binding=0) uniform vs_params {
+    mat4 model;
+    mat4 view;
+    mat4 projection;
+};
+@end
+
+@vs vs
+@include_block uniforms
+
+in vec3 position;
+in float block_id;
+
+out float v_block_id;
+
+void main() {
+    vec4 pos = vec4(position, 1.0);
+    vec4 transformed_pos = projection * view * model * pos;
+    gl_Position = transformed_pos;
+    v_block_id = block_id;
+}
+@end
+
+@fs fs
+in float v_block_id;
+out vec4 frag_color;
+
+
+void main() {
+    vec3 block_colors[11] = vec3[](
+        vec3(0.0, 0.0, 0.0),   // Air/void
+        vec3(0.5, 0.5, 0.5),   // Stone
+        vec3(0.3, 0.7, 0.3),   // Grass
+        vec3(0.6, 0.4, 0.2),   // Dirt
+        vec3(0.0, 0.5, 1.0),   // Water
+        vec3(0.7, 0.7, 0.7),   // White
+        vec3(1.0, 0.0, 0.0),   // Red
+        vec3(0.0, 1.0, 0.0),   // Green
+        vec3(0.0, 0.0, 1.0),   // Blue
+        vec3(1.0, 1.0, 0.0),   // Yellow
+        vec3(1.0, 0.0, 1.0)    // Magenta
+    );
+
+    int id = int(v_block_id);
+    vec3 color = block_colors[min(id, 10)];
+    frag_color = vec4(color, 1.0);
+
+    // vec2 tex_coord = vec2(v_block_id / 10.0, 0.0);
+    // frag_color = texture(tex_atlas, tex_coord);
+}
+@end
+
+@program chunk_shader vs fs
+```
+engine.nim:
+```
+import sokol/log as slog
+import sokol/app as sapp
+import sokol/gfx as sg
+import sokol/glue as sglue
+import shaders/tri as shd
+import shaders/textured as textured
+import shaders/chunk_mesh as chunkShader
+import sokol/debugtext as sdtx
+import chunk_renderer as ch_r
+import chunk
+import glm
+import times
+import camera as cm
+import cube
+import types
+
+var 
+  frameCount: int = 0
+  lastFpsUpdateTime: float64 = 0.0
+var eng = Engine()
+var chunkRenderer: ChunkRenderer
+
+proc drawChunkMesh*(engine: Engine, renderer: ChunkRenderer, position: Vec3[float32]) =
+  echo renderer.pipeline
+  echo renderer.bindings
+  # Apply pipeline and bindings
+  sg.applyPipeline(renderer.pipeline)
+  sg.applyBindings(renderer.bindings)
+  
+  # Model matrix (translate chunk)
+  let model = glm.translate(glm.mat4(1.0f), position)
+  
+  # Prepare uniforms
+  var vsParams = chunkShader.VsParams(
+    model: model,
+    view: lookAtRH(engine.camera.position, engine.camera.position + engine.camera.front, engine.camera.up),
+    projection: perspectiveRH(engine.camera.fow, sapp.width() / sapp.height(), 0.1f, 100.0f)
+  )
+  
+  # Apply uniforms
+  sg.applyUniforms(chunkShader.ubVsParams, sg.Range(addr: vsParams.addr, size: vsParams.sizeof))
+  
+  # Draw chunk
+  sg.draw(0.int32, renderer.chunkMesh.indices.len.int32, 1.int32)
+proc updateFPS(engine: var Engine) =
+  let currentTime = epochTime()
+  inc(frameCount)
+
+  # Update FPS every second
+  if currentTime - lastFpsUpdateTime >= 1.0:
+    engine.fps = frameCount
+    frameCount = 0
+    lastFpsUpdateTime = currentTime
+proc printFont(fontIndex: int32, title: cstring, r: uint8, g: uint8, b: uint8) =
+  sdtx.font(fontIndex)
+  sdtx.color3b(r, g, b)
+  sdtx.puts(title)
+  sdtx.crlf()
+proc pre_init*() {.cdecl.} =
+  # Camera setup
+  eng.camera = cm.Camera()
+  eng.camera.position = glm.vec3(0.0f, 0.0f, 3.0f)
+  eng.camera.front = glm.vec3(0.0f, 0.0f, -1.0f)
+  eng.camera.up = glm.vec3(0.0f, 1.0f, 0.0f)
+  eng.camera.yaw = -90.0f
+  eng.camera.pitch = 0.0f
+  eng.camera.fow = 45.0f
+
+  let testChunk = gen_test_chunk(0, 0)
+  let chunkMesh = genChunkMesh(testChunk)
+  chunkRenderer = mesh_init(chunkMesh)
+
+
+proc make_pipline_util*(shader: Shader, attrs: array[0..15, VertexAttrState], buffers: array[0..7, VertexBufferLayoutState], cullMode: sg.CullMode, indexType: sg.IndexType, depth: DepthState): Pipeline =
+    return makePipeline(PipelineDesc(shader: shader, 
+        layout: VertexLayoutState(
+            buffers: buffers,
+            attrs: attrs
+        ),
+        cullMode: cullMode,
+        indexType: indexType,
+        depth: depth
+    ))
+var bindings1: Bindings
+proc init*() {.cdecl.} =
+  sg.setup(sg.Desc(
+    environment: sglue.environment(),
+    logger: sg.Logger(fn: slog.fn),
+  ))
+  sdtx.setup(sdtx.Desc(
+    fonts: [
+      sdtx.fontKc853(),
+      sdtx.fontKc854(),
+      sdtx.fontZ1013(),
+      sdtx.fontCpc(),
+      sdtx.fontC64(),
+      sdtx.fontOric()
+    ],
+    logger: sdtx.Logger(fn: slog.fn),
+  ))
+  #shader setup
+  let sh = sg.makeShader(shd.testShaderDesc(sg.queryBackend()))
+  #var vertices = [
+  #  # positions         colors
+  #  -0.5'f32, 0.5, 0.5, 1.0, 0.0, 0.0, 1.0,
+  #   0.5, 0.5, 0.5,     0.0, 1.0, 0.0, 1.0,
+  #   0.5, -0.5, 0.5,    0.0, 0.0, 1.0, 1.0,
+  #  -0.5, -0.5, 0.5,    1.0, 1.0, 0.0, 1.0
+  #]
+  #bindings1.vertexBuffers[0] = sg.makeBuffer(BufferDesc(
+  #  data: sg.Range(addr: vertices.addr, size: vertices.sizeof)
+  #))
+  #const indices = [ 0'u16, 1, 2, 0, 2, 3 ]
+  #bindings1.indexBuffer = sg.makeBuffer(BufferDesc(
+  #  type: bufferTypeIndexBuffer,
+  #  data: sg.Range(addr: indices.addr, size: indices.sizeof)
+  #))
+  #pipeline setup
+  eng.pip = make_pipline_util(
+    sh, 
+    [
+        VertexAttrState(bufferIndex: 0, offset: 0,  format: vertexFormatFloat3),
+        VertexAttrState(bufferIndex: 0, offset: 12, format: vertexFormatFloat4),
+    ],
+    [
+      VertexBufferLayoutState(stride: 28),
+    ],
+    cullModeBack,
+    indexTypeUint16,
+    DepthState(
+      compare: compareFuncLessEqual,
+      writeEnabled: true,
+    )
+    )
+  bindings1 = getCube(vec3(0.0f,0.0f,0.0f), true, true, true, true, true, true)
+  
+  # Record initial frame time
+  eng.lastFrameTime = epochTime()
+proc frame*() {.cdecl.} =
+  let currentTime = epochTime()
+  eng.deltaTime = currentTime - eng.lastFrameTime
+  eng.lastFrameTime = currentTime
+  updateFPS(eng)
+
+  #let model = glm.mat4(1.0f)  # Identity matrix for now
+  #let view = lookAtRH(eng.camera.position, eng.camera.position + eng.camera.front, eng.camera.up);
+  #let projection = perspectiveRH(eng.camera.fow, sapp.width() / sapp.height(), 0.1f, 100.0f);
+  #
+  sg.beginPass(sg.Pass(swapchain: sglue.swapchain()))
+  #sg.applyPipeline(eng.pip)
+  #sg.applyBindings(bindings1)
+  #var vsParams = shd.VsParams(
+  #  model: model,
+  #  view: view,
+  #  projection: projection
+  #)
+  #sg.applyUniforms(shd.ubVsParams, sg.Range(addr: vsParams.addr, size: vsParams.sizeof))
+  #sg.draw(0, 36, 1)
+  echo eng.camera.position
+
+  # Draw the chunk mesh
+  drawChunkMesh(eng, chunkRenderer, vec3(0.0f, 0.0f, -5.0f))
+
+  sg.endPass()
+  sg.commit()
+proc cleanup() {.cdecl.} =
+  sg.shutdown()
+proc event(e: ptr sapp.Event) {.cdecl.} =
+  if e[].type == sapp.eventTypeKeyDown:
+    if e[].keyCode == sapp.keyCodeEscape:
+      sapp.requestQuit()
+    if e[].keyCode == sapp.keyCodeW:
+      let offset = eng.camera.front * 5.0f * eng.deltaTime
+      eng.camera.position += offset
+    if e[].keyCode == sapp.keyCodeS:
+      let offset = eng.camera.front * 5.0f * eng.deltaTime
+      eng.camera.position -= offset
+    if e[].keyCode == sapp.keyCodeA:
+      let offset = glm.normalize(glm.cross(eng.camera.front, eng.camera.up)) * 5.0f * eng.deltaTime
+      eng.camera.position -= offset
+    if e[].keyCode == sapp.keyCodeD:
+      let offset = glm.normalize(glm.cross(eng.camera.front, eng.camera.up)) * 5.0f * eng.deltaTime
+      eng.camera.position += offset
+  if e[].type == sapp.eventTypeMouseMove:
+    let sensetivity = 0.1f
+    eng.camera.yaw   += e[].mouseDX*sensetivity
+    eng.camera.pitch -= e[].mouseDY*sensetivity
+    if eng.camera.pitch > 89.0f:
+      eng.camera.pitch = 89.0f
+    if eng.camera.pitch < -89.0f:
+      eng.camera.pitch = -89.0f
+    let front = glm.vec3(
+      cos(glm.radians(eng.camera.yaw)) * cos(glm.radians(eng.camera.pitch)),
+      sin(glm.radians(eng.camera.pitch)),
+      sin(glm.radians(eng.camera.yaw)) * cos(glm.radians(eng.camera.pitch))
+    )
+    eng.camera.front = glm.normalize(front)
+proc run*() =
+  pre_init()
+  sapp.run(sapp.Desc(
+    initCb: init,
+    frameCb: frame,
+    cleanupCb: cleanup,
+    eventCb: event,
+    windowTitle: "WoW",
+    width: 800,
+    height: 600,
+    sampleCount: 4,
+    highDpi: true,
+    icon: IconDesc(sokol_default: true),
+    logger: sapp.Logger(fn: slog.fn),
+  ))
+```
+types.nim:
+```
+import camera
+import sokol/gfx as sg
+
+type
+  Engine* = object
+    pip*: Pipeline
+    camera*: Camera
+    lastFrameTime*: float64 = 0.0
+    deltaTime*: float64 = 0.0
+    fps*: int = 0
+```
+main.nim:
+```
+import engine as en
+
+run()
+```
+I think I just did some stupid mistake or misunderstood something. If someone sees some improvements not related to issuse(they would be helpful as well).
+Thanks!
+Activity
+floooh commented on Jan 13, 2025
+floooh
+on Jan 13, 2025
+Owner
+More actions
+I don't know Nim's memory management well enough to remote-diagnose the problem (I guess it's related to Nim's automatic memory management, which tbh is quite opaque to me). But maybe someone else with more Nim experience can chime in.
+(to diagnose, I would debug-step into the problematic code to check where the corruption is actually happening).
+haoyu234 commented on May 28, 2025
+haoyu234
+on May 28, 2025
+More actions
+https://github.com/nim-lang/Nim/blob/db5973361f3387bf3d559f101e44196df246d7d7/lib/system/seqs_v2.nim#L28-L31
+seq is a fat pointer containing ptr and len . Similar to the std::vector type in C++. You should not take its address or use sizeof on it.
+The correct approach is to:
+1. Take the address of the first element: chunkMesh.vertices[0].addr
+2. Calculate the total size by multiplying the size of a single element by the number of elements:
+sizeof(chunkMesh.vertices[0]) * len(chunkMesh.vertices)
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

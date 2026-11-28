@@ -1,0 +1,109 @@
+# CUDA Streams and Pinned Memory Optimization
+
+Also called: Final Pinned Memory and CUDA Streams, Pinned Memory and CUDA Streams Optimization, VolRec Pinned Memory and CUDA Streams Optimization, VolRec Pipeline Latency
+
+## Overview
+This method optimizes GPU-accelerated volumetric reconstruction by overlapping device-to-host data transfers with GPU kernel computation using CUDA streams and page-locked (pinned) host memory [S1]. It sets itself apart from naive CUDA implementations by eliminating driver-level synchronization stalls caused by pageable memory, thereby maximizing throughput for real-time processing [S1]. It serves as the final optimization layer in the VolRec pipeline, enabling the system to process more than 25 volumes per second with a total latency of no more than 100 ms [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Raw OCT data (B-scans), GPU device pointer, host memory buffers.
+*   **Output:** Reconstructed volumetric data on the host, processed in real-time.
+
+**Data Structures:**
+1.  **Pinned Memory Buffer:** A contiguous region of host memory allocated in "page-locked" mode. This buffer holds data for all transfers between the host and the device [S1].
+2.  **CUDA Streams:** Multiple independent execution contexts (streams) assigned to different B-scans or volume portions [S1].
+
+**Parameters:**
+*   **Stream Count:** One stream per B-scan or parallel processing unit [S1].
+*   **Memory Allocation:** Direct allocation into pinned memory is required to avoid implicit copies [S1].
+
+**Steps:**
+1.  **Allocate Pinned Memory:** Allocate host memory regions in a temporary page-locked mode using `cudaMallocHost` (or equivalent) for all data copies between host and device [S1]. Data must be allocated directly into this pinned memory to avoid implicit copies from pinned to pageable memory, which would cause driver synchronization and break asynchronous behavior [S1].
+2.  **Initialize CUDA Streams:** Create multiple CUDA streams to allow concurrent execution of different CUDA operations [S1].
+3.  **Map B-scans to Streams:** Assign each B-scan computation to a distinct CUDA stream [S1].
+4.  **Execute Asynchronous Pipeline:** For each B-scan:
+    a.  Perform host-to-device (H2D) copy asynchronously into the device memory using the assigned stream.
+    b.  Launch the GPU kernel (e.g., convolution, interlacing) on the assigned stream.
+    c.  Perform device-to-host (D2H) copy asynchronously from the device memory back to the pinned host buffer using the assigned stream [S1].
+5.  **Overlap Operations:** Configure the streams so that kernel computation and D2H copies from one B-scan overlap with the H2D copies and computation of another B-scan [S1]. This effectively parallelizes the majority of B-scan transfers between host and device [S1].
+6.  **Calculate Latency:** The total pipeline latency is the sum of the three stages: acquisition time + preprocessing time + reconstruction time [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Assume: num_bscans, bscan_size, device_ptr, stream_count
+
+# 1. Allocate pinned memory for host buffers
+host_buffers = []
+for i in range(num_bscans):
+    # Allocate page-locked memory directly
+    buffer = cuda_malloc_host(bscan_size)
+    host_buffers.append(buffer)
+
+# 2. Create CUDA streams
+streams = []
+for i in range(stream_count):
+    stream = cuda_create_stream()
+    streams.append(stream)
+
+# 3. Process B-scans in a pipelined fashion
+# Note: In a real implementation, this loop would be driven by data availability
+# and may involve multiple threads or a producer-consumer pattern.
+for bscan_index in range(num_bscans):
+    stream_idx = bscan_index % stream_count
+    stream = streams[stream_idx]
+    host_buffer = host_buffers[bscan_index]
+    
+    # 4a. Asynchronous H2D copy
+    # Copy raw data from source to pinned host buffer first if not already there
+    # Then copy asynchronously to device
+    cuda_memcpy_async(
+        dst=device_ptr + (bscan_index * bscan_size),
+        src=host_buffer,
+        size=bscan_size,
+        direction=HOST_TO_DEVICE,
+        stream=stream
+    )
+    
+    # 4b. Launch GPU kernel for this B-scan
+    # The kernel processes the data on the device
+    launch_kernel(
+        grid=(bscan_size / block_size),
+        block=block_size,
+        stream=stream,
+        data_ptr=device_ptr + (bscan_index * bscan_size)
+    )
+    
+    # 4c. Asynchronous D2H copy
+    # Copy result back to pinned host memory
+    cuda_memcpy_async(
+        dst=host_buffer,
+        src=device_ptr + (bscan_index * bscan_size),
+        size=bscan_size,
+        direction=DEVICE_TO_HOST,
+        stream=stream
+    )
+
+# 5. Synchronize if final results are needed immediately
+# cuda_device_synchronize() 
+# Or synchronize per stream if partial results are acceptable
+```
+
+**Edge Cases and Pitfalls:**
+*   **Pageable Memory:** Allocating data in pageable host memory when using asynchronous copies causes the CUDA driver to implicitly synchronize and copy data, breaking the overlap [S1].
+*   **Latency Calculation:** The pipeline latency is the sum of acquisition, preprocessing, and reconstruction times. If any stage exceeds the others significantly, it becomes the bottleneck [S1].
+
+## Operating characteristics
+*   **Speedup:** Achieves a 3.70× speedup over the naive version for the preprocessing stage, including all H2D and D2H copies [S1]. For the final volumetric reconstruction stage, it achieves a 15.53× speedup over the naive CUDA version [S1].
+*   **Performance:** Processes each low-resolution volume in 11.2 ms in the preprocessing stage [S1]. In the final reconstruction stage, it processes each volume in 39.17 ms, enabling more than 25 volumes per second [S1].
+*   **Latency:** Total pipeline latency is no more than 100 ms, calculated as the sum of acquisition time (< 40 ms), preprocessing time (≈ 12 ms), and reconstruction time (≈ 40 ms) [S1].
+*   **Strengths:** Enables real-time processing by overlapping compute with data transfers. Maximizes throughput by utilizing pinned memory and multiple streams [S1].
+*   **Limitations:** Requires sufficient host memory for pinned allocations. Performance is dependent on the PCIe bandwidth and GPU compute capability. The naive version still performs sequential interlacing on the CPU, which this optimization overlaps but does not eliminate [S1].
+
+## Background
+This method was introduced in the VolRec project for 4D real-time volumetric reconstruction of Optical Coherence Tomography (OCT) data [S1]. It builds upon earlier optimizations such as OpenMP parallelization and naive CUDA mapping, addressing the bottleneck of data transfer and synchronization in high-throughput medical imaging [S1]. The technique is part of a broader strategy to pipeline acquisition, preprocessing, and processing stages to achieve real-time performance with low latency [S1].
+
+## Sources
+[S1] VolRec: 4D real-time volumetric reconstruction of OCT data, https://doi.org/10.1007/s11227-025-06969-6, fetched 2026-10-26

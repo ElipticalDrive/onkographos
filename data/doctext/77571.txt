@@ -1,0 +1,2258 @@
+# 3DGS Dataset Builder
+
+Language: English | [日本語](README.ja.md)
+
+3DGS Dataset Builder is a Blender 5.x addon that exports Brush-compatible training datasets from a Blender collection.
+
+Current release: `v0.3.4`
+
+## Overview
+
+This addon is built for a narrow workflow:
+
+* pick a collection in Blender
+* render randomized camera views around it
+* export matching camera transforms
+* export a surface-sampled `points3d.ply` for initialization
+
+If you want a general-purpose 3DGS exporter, this project is not aiming for that. It is currently optimized for Brush / Nerfstudio-style dataset layout.
+
+## Installation
+
+1. Download `three_dgs_dataset_builder.zip` from the project's GitHub Releases.
+2. In Blender, open `Edit > Preferences > Add-ons`.
+3. Click `Install from Disk`.
+4. Select the downloaded zip file.
+5. Enable `3DGS Dataset Builder`.
+
+## Where To Find The UI
+
+After enabling the addon:
+
+1. Open the 3D Viewport.
+2. Open the right sidebar with `N` if it is hidden.
+3. Open the `3DGS Dataset` tab.
+
+The panel path is `View3D > Sidebar > 3DGS Dataset`.
+
+## Quick Start
+
+1. Put the mesh objects you want to export into one collection.
+2. Set Blender render resolution and render engine the way you want the output images to be generated.
+3. In the addon panel, set `Save Path` and `Dataset Name`.
+4. Select `Target Collection`.
+5. Optionally select `Focus Object` if the cameras should look at a specific object instead of world origin.
+6. Adjust frame count, camera radius, and point sample count.
+7. Click `Generate Dataset`.
+8. Wait for point sampling, rendering, and final file writing to finish.
+
+## UI Reference
+
+### Dataset
+
+* `Save Path`: base directory where the dataset folder will be created
+* `Dataset Name`: output folder name created under `Save Path`
+* `Include Extension`: should stay enabled for Brush compatibility
+
+### Camera Sampling
+
+* `Target Collection`: collection whose mesh objects are rendered and sampled
+* `Focus Object`: optional object the temporary camera points at; world origin is used when empty
+* `Total Frames`: number of rendered training views
+* `View Distribution`: `Full Sphere` or `Upper Hemisphere`
+* `Min Radius` / `Max Radius`: minimum and maximum camera distance from the focus point
+* `Close-up Ratio`: fraction of views biased toward the minimum radius
+
+### Point Cloud
+
+* `Sample Count`: number of surface samples written to `points3d.ply`
+
+### Status And Actions
+
+* `Status`: shows the current phase and progress
+* `Generate Dataset`: starts export
+* `Cancel Generation`: requests cancellation after the current step finishes
+
+## Output Structure
+
+Each export creates a dataset folder at `Save Path / Dataset Name`:
+
+```text
+my_dataset/
+├── images/
+│   ├── 00000.png
+│   ├── 00001.png
+│   └── ...
+├── metadata.json
+├── points3d.ply
+├── three_dgs_dataset_builder.log
+├── transforms_test.json
+└── transforms_train.json
+```
+
+Notes:
+
+* `transforms_train.json` contains the rendered frames.
+* `transforms_test.json` is written with an empty `frames` array.
+* `metadata.json` is written only on successful export.
+* `three_dgs_dataset_builder.log` is written from export start, so it can still be shared if Blender fails mid-run.
+
+## Recommended Scene Setup
+
+The addon works best when:
+
+* the target collection actually contains mesh objects
+* meshes are UV-unwrapped
+* materials use `Principled BSDF`
+* `Base Color` comes from a flat color or a simple image texture
+
+Results are less predictable on complex node graphs, reflective or transmissive materials, procedural textures, or missing UVs.
+
+## Troubleshooting
+
+Common validation failures:
+
+* `Save Path is required.`
+* `Dataset Name is required.`
+* `Target Collection is required.`
+* `Target collection does not contain any mesh objects.`
+* `Brush compatibility requires Include Extension to be enabled.`
+* `Min Radius must be smaller than Max Radius.`
+
+If export feels stalled on a large asset, the slow part is often the one-time point-sampling preparation step before the worker process starts reporting progress, or the render pass afterward.
+
+If Blender crashes or is force-quit during export, ask for `three_dgs_dataset_builder.log` from the dataset output directory first. It now records phase transitions, texture snapshot sizes, worker startup, and Python fatal-signal traces when available.
+
+## More Documentation
+
+* Technical background and format notes: [docs/technical-background.md](docs/technical-background.md)
+* Release history: [docs/releases.md](docs/releases.md)
+* Future plans: [docs/roadmap.md](docs/roadmap.md)
+* Maintainer notes: [docs/development.md](docs/development.md)
+
+Packaging the addon with `make package` is maintainer-facing and documented in [docs/development.md](docs/development.md).
+
+### three_dgs_dataset_builder/__init__.py
+```
+"""Blender addon entrypoint for 3DGS Dataset Builder."""
+
+bl_info = {
+    "name": "3DGS Dataset Builder",
+    "author": "OpenAI Codex",
+    "version": (0, 3, 4),
+    "blender": (5, 0, 0),
+    "location": "View3D > Sidebar > 3DGS Dataset",
+    "description": "Generate randomized 3DGS training datasets from Blender collections.",
+    "category": "Import-Export",
+}
+
+try:
+    import bpy
+    from bpy.props import PointerProperty
+except ImportError:  # pragma: no cover - only executed outside Blender.
+    bpy = None
+    PointerProperty = None
+
+if bpy is not None:  # pragma: no branch - Blender runtime only.
+    from .operators import (
+        THREE_DGS_OT_cancel_dataset_generation,
+        THREE_DGS_OT_generate_dataset,
+    )
+    from .panel import THREE_DGS_PT_dataset_panel
+    from .properties import ThreeDGSSettings
+
+    CLASSES = (
+        ThreeDGSSettings,
+        THREE_DGS_OT_generate_dataset,
+        THREE_DGS_OT_cancel_dataset_generation,
+        THREE_DGS_PT_dataset_panel,
+    )
+
+
+def register():
+    if bpy is None:
+        raise RuntimeError("Blender's bpy module is required to register this addon.")
+
+    for cls in CLASSES:
+        bpy.utils.register_class(cls)
+    bpy.types.Scene.three_dgs_settings = PointerProperty(type=ThreeDGSSettings)
+
+
+def unregister():
+    if bpy is None:
+        return
+
+    if hasattr(bpy.types.Scene, "three_dgs_settings"):
+        del bpy.types.Scene.three_dgs_settings
+    for cls in reversed(CLASSES):
+        bpy.utils.unregister_class(cls)
+```
+
+### three_dgs_dataset_builder/builder.py
+```
+from __future__ import annotations
+
+import json
+import math
+import os
+import pickle
+import random
+import shutil
+import subprocess
+import sys
+import tempfile
+from array import array
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+
+import bpy
+from mathutils import Matrix, Vector
+
+from . import bl_info
+from .core.models import CameraSample, DatasetSettingsSnapshot, PointRecord, WarningRecord
+from .core.point_sampling import (
+    PlainImageData,
+    PlainMaterialData,
+    PlainTriangleData,
+    PointSamplingTaskData,
+    sample_points,
+)
+from .core.sampling import generate_camera_samples
+from .core.serialization import (
+    append_warning_once,
+    build_metadata_payload,
+    build_dummy_test_payload,
+    build_frame_path,
+    build_render_stem,
+    build_transforms_payload,
+    serialize_ply_ascii,
+)
+from .core.transforms import convert_transform_rows
+from .diagnostics import DiagnosticsSession, format_peak_rss_mb, start_diagnostics
+
+
+class DatasetBuildError(RuntimeError):
+    pass
+
+
+@dataclass(frozen=True)
+class BuildResult:
+    output_dir: Path
+    frame_count: int
+    point_count: int
+    warnings: tuple[WarningRecord, ...]
+    fallback_material_count: int
+    fallback_triangle_count: int
+
+
+@dataclass(frozen=True)
+class RenderState:
+    scene_camera: object
+    filepath: str
+    use_file_extension: bool
+    file_format: str
+    color_mode: str
+    film_transparent: bool
+    use_lock_interface: bool
+
+
+@dataclass(frozen=True)
+class MaterialInfo:
+    image: object | None
+    base_color: tuple[int, int, int]
+    material_name: str | None
+    fallback_code: str | None
+
+
+@dataclass
+class PointSamplingWorkerState:
+    process: object | None
+    temp_dir: Path
+    task_path: Path
+    progress_path: Path
+    result_path: Path
+    error_path: Path
+    stderr_path: Path
+
+
+@dataclass
+class PointSamplingState:
+    triangles: list[PlainTriangleData]
+    cumulative_areas: array
+    total_area: float
+    sample_count: int
+    materials: list[PlainMaterialData]
+    images: list[PlainImageData]
+    random_seed: int
+    texture_count: int
+    texture_bytes: int
+    fallback_triangle_count: int = 0
+    fallback_material_triangle_counts: dict[str, int] = field(default_factory=dict)
+    points: list[PointRecord] = field(default_factory=list)
+    sampled_count: int = 0
+    worker_state: PointSamplingWorkerState | None = None
+
+
+@dataclass
+class BuildSession:
+    scene: object
+    target_collection: object
+    snapshot: DatasetSettingsSnapshot
+    output_dir: Path
+    images_dir: Path
+    render_state: RenderState
+    temp_camera_obj: object
+    focus_point: Vector
+    camera_info: dict
+    diagnostics: DiagnosticsSession
+    samples: list[CameraSample]
+    frames: list[dict] = field(default_factory=list)
+    warnings: list[WarningRecord] = field(default_factory=list)
+    warning_keys: set[str] = field(default_factory=set)
+    point_state: PointSamplingState | None = None
+
+
+def build_dataset(context, settings, snapshot: DatasetSettingsSnapshot, output_dir: Path) -> BuildResult:
+    session = begin_dataset_build(context, settings, snapshot, output_dir)
+    try:
+        prepare_point_sampling(context, session)
+        run_point_sampling_sync(session)
+        while has_remaining_frames(session):
+            render_next_frame(session)
+        return write_outputs(session)
+    finally:
+        cleanup_dataset_build(session)
+
+
+def begin_dataset_build(context, settings, snapshot: DatasetSettingsSnapshot, output_dir: Path) -> BuildSession:
+    target_collection = settings.target_collection
+    if target_collection is None:
+        raise DatasetBuildError("Target Collection is required.")
+
+    mesh_objects = [obj for obj in target_collection.all_objects if obj.type == "MESH"]
+    if not mesh_objects:
+        raise DatasetBuildError("Target collection does not contain any mesh objects.")
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    images_dir = output_dir / "images"
+    images_dir.mkdir(parents=True, exist_ok=True)
+    diagnostics = start_diagnostics(output_dir, dataset_name=snapshot.dataset_name)
+
+    scene = context.scene
+    render_state = _capture_render_state(scene)
+    temp_camera_obj = _create_temp_camera(scene)
+
+    try:
+        _configure_render(scene)
+        scene.camera = temp_camera_obj
+        session = BuildSession(
+            scene=scene,
+            target_collection=target_collection,
+            snapshot=snapshot,
+            output_dir=output_dir,
+            images_dir=images_dir,
+            render_state=render_state,
+            temp_camera_obj=temp_camera_obj,
+            focus_point=_resolve_focus_point(settings.focus_object),
+            camera_info=_build_camera_info(scene, temp_camera_obj),
+            diagnostics=diagnostics,
+            samples=generate_camera_samples(
+                total_frames=snapshot.total_frames,
+                min_radius=snapshot.min_radius,
+                max_radius=snapshot.max_radius,
+                close_up_ratio=snapshot.close_up_ratio,
+                view_distribution=snapshot.view_distribution,
+                rng=random.Random(),
+            ),
+        )
+        diagnostics.info(
+            "Dataset build initialized "
+            f"(frames={snapshot.total_frames}, samples={snapshot.point_sample_count}, "
+            f"render={scene.render.engine}, resolution={int(session.camera_info['w'])}x{int(session.camera_info['h'])}, "
+            f"peak_rss={format_peak_rss_mb()})."
+        )
+    except Exception:
+        diagnostics.exception("Dataset build initialization failed.")
+        _restore_render_state(scene, render_state)
+        _cleanup_temp_camera(temp_camera_obj)
+        diagnostics.close()
+        raise
+
+    return session
+
+
+def has_remaining_frames(session: BuildSession) -> bool:
+    return len(session.frames) < len(session.samples)
+
+
+def render_next_frame(session: BuildSession) -> int:
+    frame_index = prepare_next_frame_render(session)
+    bpy.ops.render.render(write_still=True)
+    return finalize_rendered_frame(session, frame_index)
+
+
+def prepare_next_frame_render(session: BuildSession) -> int:
+    frame_index = len(session.frames)
+    if frame_index >= len(session.samples):
+        raise DatasetBuildError("No remaining frames to render.")
+    sample = session.samples[frame_index]
+    _place_camera(session.temp_camera_obj, sample.position, session.focus_point)
+    render_stem = session.images_dir / build_render_stem(frame_index)
+    session.scene.render.filepath = str(render_stem)
+    session.diagnostics.info(
+        f"Starting render for frame {frame_index + 1}/{session.snapshot.total_frames} "
+        f"(output={render_stem.name}.png, peak_rss={format_peak_rss_mb()})."
+    )
+    return frame_index
+
+
+def finalize_rendered_frame(session: BuildSession, frame_index: int) -> int:
+    if frame_index != len(session.frames):
+        raise DatasetBuildError("Rendered frame index is out of sequence.")
+    if frame_index >= len(session.samples):
+        raise DatasetBuildError("Rendered frame index exceeds planned samples.")
+    session.frames.append(
+        {
+            "file_path": build_frame_path(frame_index, session.snapshot.include_extension),
+            "transform_matrix": convert_transform_rows(_matrix_to_rows(session.temp_camera_obj.matrix_world)),
+        }
+    )
+    session.diagnostics.info(
+        f"Completed render for frame {frame_index + 1}/{session.snapshot.total_frames} "
+        f"(peak_rss={format_peak_rss_mb()})."
+    )
+    return len(session.frames)
+
+
+def prepare_point_sampling(context, session: BuildSession) -> PointSamplingState:
+    if session.point_state is not None:
+        return session.point_state
+
+    session.diagnostics.info(f"Preparing point sampling state (peak_rss={format_peak_rss_mb()}).")
+    point_state = _prepare_point_sampling_state(
+        context=context,
+        collection=session.target_collection,
+        warnings=session.warnings,
+        warning_keys=session.warning_keys,
+        sample_count=session.snapshot.point_sample_count,
+        diagnostics=session.diagnostics,
+    )
+    session.point_state = point_state
+    session.diagnostics.info(
+        "Prepared point sampling state "
+        f"(triangles={len(point_state.triangles)}, textures={point_state.texture_count}, "
+        f"texture_bytes={_format_bytes(point_state.texture_bytes)}, peak_rss={format_peak_rss_mb()})."
+    )
+    return point_state
+
+
+def sample_point_chunk(session: BuildSession, chunk_size: int = 1000) -> bool:
+    if session.point_state is None:
+        raise DatasetBuildError("Point sampling has not been prepared.")
+    run_point_sampling_sync(session)
+    return True
+
+
+def run_point_sampling_sync(session: BuildSession) -> int:
+    if session.point_state is None:
+        raise DatasetBuildError("Point sampling has not been prepared.")
+
+    point_state = session.point_state
+    if point_state.points:
+        return len(point_state.points)
+
+    session.diagnostics.info(
+        "Starting synchronous point sampling "
+        f"(samples={point_state.sample_count}, peak_rss={format_peak_rss_mb()})."
+    )
+    point_state.points = sample_points(_build_point_sampling_task_data(point_state))
+    point_state.sampled_count = len(point_state.points)
+    session.diagnostics.info(
+        f"Completed synchronous point sampling (points={point_state.sampled_count}, peak_rss={format_peak_rss_mb()})."
+    )
+    return point_state.sampled_count
+
+
+def start_point_sampling_worker(session: BuildSession) -> None:
+    if session.point_state is None:
+        raise DatasetBuildError("Point sampling has not been prepared.")
+
+    point_state = session.point_state
+    if point_state.worker_state is not None:
+        return
+
+    temp_dir = Path(tempfile.mkdtemp(prefix="three_dgs_point_sampling_"))
+    task_path = temp_dir / "task.pkl"
+    progress_path = temp_dir / "progress.json"
+    result_path = temp_dir / "result.pkl"
+    error_path = temp_dir / "error.txt"
+    stderr_path = temp_dir / "stderr.txt"
+    _write_pickle(task_path, _build_point_sampling_task_data(point_state))
+
+    python_executable = _resolve_python_executable()
+    worker_script = Path(__file__).resolve().parent / "core" / "point_sampling_worker.py"
+    worker_env = os.environ.copy()
+    addon_parent = str(Path(__file__).resolve().parent.parent)
+    existing_pythonpath = worker_env.get("PYTHONPATH", "")
+    worker_env["PYTHONPATH"] = (
+        addon_parent if not existing_pythonpath else os.pathsep.join((addon_parent, existing_pythonpath))
+    )
+
+    stderr_handle = stderr_path.open("w", encoding="utf-8")
+    try:
+        session.diagnostics.info(
+            "Starting point sampling worker "
+            f"(task_dir={temp_dir}, samples={point_state.sample_count}, peak_rss={format_peak_rss_mb()})."
+        )
+        process = subprocess.Popen(
+            [
+                python_executable,
+                str(worker_script),
+                str(task_path),
+                str(progress_path),
+                str(result_path),
+                str(error_path),
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=stderr_handle,
+            env=worker_env,
+        )
+    except Exception:
+        stderr_handle.close()
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise
+    else:
+        stderr_handle.close()
+
+    point_state.worker_state = PointSamplingWorkerState(
+        process=process,
+        temp_dir=temp_dir,
+        task_path=task_path,
+        progress_path=progress_path,
+        result_path=result_path,
+        error_path=error_path,
+        stderr_path=stderr_path,
+    )
+    _release_point_sampling_inputs(point_state)
+    session.diagnostics.info(f"Point sampling worker started (pid={process.pid}, peak_rss={format_peak_rss_mb()}).")
+
+
+def poll_point_sampling_worker(session: BuildSession) -> bool:
+    if session.point_state is None:
+        raise DatasetBuildError("Point sampling has not been prepared.")
+
+    point_state = session.point_state
+    worker_state = point_state.worker_state
+    if worker_state is None:
+        raise DatasetBuildError("Point sampling worker has not been started.")
+
+    if worker_state.progress_path.exists():
+        try:
+            progress_payload = json.loads(worker_state.progress_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            progress_payload = None
+        if isinstance(progress_payload, dict):
+            point_state.sampled_count = max(
+                point_state.sampled_count,
+                int(progress_payload.get("sampled_count", point_state.sampled_count)),
+            )
+
+    if worker_state.error_path.exists():
+        message = worker_state.error_path.read_text(encoding="utf-8").strip() or "Point sampling worker failed."
+        session.diagnostics.error(f"Point sampling worker reported an error:\n{message}")
+        raise DatasetBuildError(message)
+
+    if worker_state.result_path.exists():
+        result_payload = _read_pickle(worker_state.result_path)
+        point_state.points = list(result_payload["points"])
+        point_state.sampled_count = int(result_payload.get("sampled_count", len(point_state.points)))
+        _wait_for_worker_process(worker_state.process)
+        session.diagnostics.info(
+            f"Point sampling worker completed (points={point_state.sampled_count}, peak_rss={format_peak_rss_mb()})."
+        )
+        return True
+
+    if worker_state.process is not None:
+        return_code = worker_state.process.poll()
+        if return_code is not None and return_code != 0:
+            stderr_text = ""
+            if worker_state.stderr_path.exists():
+                stderr_text = worker_state.stderr_path.read_text(encoding="utf-8").strip()
+            message = stderr_text or "Point sampling worker exited before producing a result."
+            session.diagnostics.error(f"Point sampling worker exited with code {return_code}: {message}")
+            raise DatasetBuildError(message)
+
+    return False
+
+
+def cancel_point_sampling_worker(session: BuildSession) -> None:
+    point_state = session.point_state
+    if point_state is None or point_state.worker_state is None:
+        return
+    worker_state = point_state.worker_state
+    process = worker_state.process
+    if process is not None and process.poll() is None:
+        session.diagnostics.warning(f"Terminating point sampling worker pid={process.pid}.")
+        process.terminate()
+        try:
+            process.wait(timeout=2.0)
+        except subprocess.TimeoutExpired:
+            session.diagnostics.warning(f"Killing unresponsive point sampling worker pid={process.pid}.")
+            process.kill()
+            process.wait(timeout=2.0)
+    point_state.worker_state = None
+    shutil.rmtree(worker_state.temp_dir, ignore_errors=True)
+
+
+def write_outputs(session: BuildSession) -> BuildResult:
+    if session.point_state is None:
+        raise DatasetBuildError("Point sampling has not been prepared.")
+
+    transforms_train = build_transforms_payload(
+        camera_info=session.camera_info,
+        frames=session.frames,
+        ply_file_path="points3d.ply",
+    )
+    transforms_test = build_dummy_test_payload(
+        camera_info=session.camera_info,
+        ply_file_path="points3d.ply",
+    )
+    (session.output_dir / "transforms_train.json").write_text(
+        json.dumps(transforms_train, indent=2),
+        encoding="utf-8",
+    )
+    (session.output_dir / "transforms_test.json").write_text(
+        json.dumps(transforms_test, indent=2),
+        encoding="utf-8",
+    )
+    (session.output_dir / "points3d.ply").write_text(
+        serialize_ply_ascii(session.point_state.points),
+        encoding="utf-8",
+    )
+    (session.output_dir / "metadata.json").write_text(
+        json.dumps(
+            build_metadata_payload(
+                addon_version=_addon_version_string(),
+                export_timestamp=_export_timestamp_utc(),
+                dataset_name=session.snapshot.dataset_name,
+                target_collection=session.target_collection.name,
+                frame_count=len(session.frames),
+                point_sample_count=len(session.point_state.points),
+                image_width=int(session.camera_info["w"]),
+                image_height=int(session.camera_info["h"]),
+                render_engine=session.scene.render.engine,
+                diagnostics_log_file=session.diagnostics.log_path.name,
+                warnings=session.warnings,
+                fallback_triangle_count=session.point_state.fallback_triangle_count,
+                fallback_material_triangle_counts=session.point_state.fallback_material_triangle_counts,
+            ),
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    session.diagnostics.info(
+        "Wrote dataset outputs "
+        f"(frames={len(session.frames)}, points={len(session.point_state.points)}, peak_rss={format_peak_rss_mb()})."
+    )
+
+    return BuildResult(
+        output_dir=session.output_dir,
+        frame_count=len(session.frames),
+        point_count=len(session.point_state.points),
+        warnings=tuple(session.warnings),
+        fallback_material_count=len(session.point_state.fallback_material_triangle_counts),
+        fallback_triangle_count=session.point_state.fallback_triangle_count,
+    )
+
+
+def cleanup_dataset_build(session: BuildSession) -> None:
+    try:
+        cancel_point_sampling_worker(session)
+        _restore_render_state(session.scene, session.render_state)
+        _cleanup_temp_camera(session.temp_camera_obj)
+    finally:
+        session.diagnostics.close()
+
+
+def _capture_render_state(scene) -> RenderState:
+    return RenderState(
+        scene_camera=scene.camera,
+        filepath=scene.render.filepath,
+        use_file_extension=scene.render.use_file_extension,
+        file_format=scene.render.image_settings.file_format,
+        color_mode=scene.render.image_settings.color_mode,
+        film_transparent=scene.render.film_transparent,
+        use_lock_interface=scene.render.use_lock_interface,
+    )
+
+
+def _configure_render(scene) -> None:
+    scene.render.use_file_extension = True
+    scene.render.image_settings.file_format = "PNG"
+    scene.render.image_settings.color_mode = "RGBA"
+    scene.render.film_transparent = True
+    scene.render.use_lock_interface = False
+
+
+def _restore_render_state(scene, state: RenderState) -> None:
+    scene.camera = state.scene_camera
+    scene.render.filepath = state.filepath
+    scene.render.use_file_extension = state.use_file_extension
+    scene.render.image_settings.file_format = state.file_format
+    scene.render.image_settings.color_mode = state.color_mode
+    scene.render.film_transparent = state.film_transparent
+    scene.render.use_lock_interface = state.use_lock_interface
+
+
+def _create_temp_camera(scene):
+    camera_data = bpy.data.cameras.new("ThreeDGSDatasetCamera")
+    camera_data.type = "PERSP"
+
+    if scene.camera and scene.camera.type == "CAMERA":
+        source = scene.camera.data
+        if source.type == "PERSP":
+            camera_data.lens = source.lens
+            camera_data.sensor_fit = source.sensor_fit
+            camera_data.sensor_width = source.sensor_width
+            camera_data.sensor_height = source.sensor_height
+            camera_data.shift_x = source.shift_x
+            camera_data.shift_y = source.shift_y
+            camera_data.clip_start = source.clip_start
+            camera_data.clip_end = source.clip_end
+
+    camera_object = bpy.data.objects.new("ThreeDGSDatasetCamera", camera_data)
+    scene.collection.objects.link(camera_object)
+    return camera_object
+
+
+def _cleanup_temp_camera(camera_object) -> None:
+    camera_data = camera_object.data
+    if camera_object.users_collection:
+        for collection in list(camera_object.users_collection):
+            collection.objects.unlink(camera_object)
+    bpy.data.objects.remove(camera_object)
+    if camera_data.users == 0:
+        bpy.data.cameras.remove(camera_data)
+
+
+def _resolve_focus_point(focus_object) -> Vector:
+    if focus_object is None:
+        return Vector((0.0, 0.0, 0.0))
+    return focus_object.matrix_world.translation.copy()
+
+
+def _place_camera(camera_object, position, target: Vector) -> None:
+    position_vec = Vector(position)
+    direction = target - position_vec
+    if direction.length == 0.0:
+        raise DatasetBuildError("Camera sample coincides with focus point.")
+
+    camera_object.location = position_vec
+    camera_object.rotation_euler = direction.to_track_quat("-Z", "Y").to_euler()
+
+
+def _build_camera_info(scene, camera_object) -> dict:
+    camera = camera_object.data
+    if camera.type != "PERSP":
+        raise DatasetBuildError("3DGS export requires a perspective camera.")
+
+    width = int(scene.render.resolution_x * scene.render.resolution_percentage / 100)
+    height = int(scene.render.resolution_y * scene.render.resolution_percentage / 100)
+    pixel_aspect = scene.render.pixel_aspect_x / scene.render.pixel_aspect_y
+    sensor_fit = camera.sensor_fit
+    if sensor_fit == "AUTO":
+        sensor_fit = "HORIZONTAL" if width * pixel_aspect >= height else "VERTICAL"
+
+    if sensor_fit == "VERTICAL":
+        fl_x = camera.lens / camera.sensor_height * height * pixel_aspect
+        fl_y = camera.lens / camera.sensor_height * height
+    else:
+        fl_x = camera.lens / camera.sensor_width * width
+        fl_y = camera.lens / camera.sensor_width * width / pixel_aspect
+
+    camera_angle_x = 2.0 * math.atan(width / (2.0 * fl_x))
+    camera_angle_y = 2.0 * math.atan(height / (2.0 * fl_y))
+
+    return {
+        "camera_angle_x": camera_angle_x,
+        "camera_angle_y": camera_angle_y,
+        "fl_x": fl_x,
+        "fl_y": fl_y,
+        "cx": width / 2.0 - (camera.shift_x * width),
+        "cy": height / 2.0 + (camera.shift_y * height),
+        "w": width,
+        "h": height,
+    }
+
+
+def _matrix_to_rows(matrix: Matrix) -> list[list[float]]:
+    return [[float(value) for value in row] for row in matrix]
+
+
+def _prepare_point_sampling_state(
+    context,
+    collection,
+    warnings: list[WarningRecord],
+    warning_keys: set[str],
+    sample_count: int,
+    diagnostics: DiagnosticsSession,
+) -> PointSamplingState:
+    depsgraph = context.evaluated_depsgraph_get()
+    triangles: list[PlainTriangleData] = []
+    cumulative_areas = array("d")
+    cumulative_area = 0.0
+    fallback_triangle_count = 0
+    fallback_material_triangle_counts: dict[str, int] = {}
+    images: list[PlainImageData] = []
+    image_lookup: dict[int, int] = {}
+    materials: list[PlainMaterialData] = []
+    material_lookup: dict[tuple[tuple[int, int, int], int | None], int] = {}
+    texture_bytes = 0
+
+    for obj in collection.all_objects:
+        if obj.type != "MESH":
+            continue
+
+        evaluated_obj = obj.evaluated_get(depsgraph)
+        mesh = evaluated_obj.to_mesh(preserve_all_data_layers=True, depsgraph=depsgraph)
+        if mesh is None:
+            continue
+
+        try:
+            mesh.calc_loop_triangles()
+            if not mesh.loop_triangles:
+                continue
+
+            uv_layer = mesh.uv_layers.active.data if mesh.uv_layers.active else None
+            material_infos = [_resolve_material_info(material) for material in mesh.materials]
+            material_indices = [
+                _intern_plain_material(
+                    material_info,
+                    materials,
+                    material_lookup,
+                    images,
+                    image_lookup,
+                    diagnostics,
+                )
+                for material_info in material_infos
+            ]
+
+            for triangle in mesh.loop_triangles:
+                area = float(triangle.area)
+                if area <= 0.0:
+                    continue
+
+                material_index = triangle.material_index
+                material_info = (
+                    material_infos[material_index]
+                    if 0 <= material_index < len(material_infos)
+                    else _fallback_material_info("missing_material")
+                )
+                plain_material_index = (
+                    material_indices[material_index]
+                    if 0 <= material_index < len(material_indices)
+                    else _intern_plain_material(
+                        _fallback_material_info("missing_material"),
+                        materials,
+                        material_lookup,
+                        images,
+                        image_lookup,
+                        diagnostics,
+                    )
+                )
+                if material_info.fallback_code is not None:
+                    fallback_triangle_count += 1
+                    if material_info.material_name is not None:
+                        fallback_material_triangle_counts[material_info.material_name] = (
+                            fallback_material_triangle_counts.get(material_info.material_name, 0) + 1
+                        )
+                    _append_warning_for_material_info(
+                        material_info,
+                        warnings,
+                        warning_keys,
+                    )
+                cumulative_area += area
+                triangles.append(
+                    PlainTriangleData(
+                        vertices=tuple(
+                            _vector_to_tuple(evaluated_obj.matrix_world @ mesh.vertices[index].co)
+                            for index in triangle.vertices
+                        ),
+                        uvs=(
+                            tuple(tuple(float(v) for v in uv_layer[loop_index].uv) for loop_index in triangle.loops)
+                            if uv_layer is not None
+                            else None
+                        ),
+                        material_index=plain_material_index,
+                    )
+                )
+                cumulative_areas.append(cumulative_area)
+        finally:
+            evaluated_obj.to_mesh_clear()
+
+    texture_bytes = sum(len(image.pixels) * image.pixels.itemsize for image in images)
+
+    if not triangles:
+        raise DatasetBuildError("Target collection does not contain any renderable mesh surface.")
+
+    return PointSamplingState(
+        triangles=triangles,
+        cumulative_areas=cumulative_areas,
+        total_area=cumulative_areas[-1],
+        sample_count=sample_count,
+        materials=materials,
+        images=images,
+        random_seed=random.randrange(0, 2**32),
+        texture_count=len(images),
+        texture_bytes=texture_bytes,
+        fallback_triangle_count=fallback_triangle_count,
+        fallback_material_triangle_counts=fallback_material_triangle_counts,
+    )
+
+
+def _resolve_material_info(material) -> MaterialInfo:
+    if material is None:
+        return _fallback_material_info("no_material")
+
+    image = None
+    base_color = material.diffuse_color[:3] if hasattr(material, "diffuse_color") else (1.0, 1.0, 1.0)
+
+    if material.use_nodes and material.node_tree:
+        principled = next(
+            (node for node in material.node_tree.nodes if node.type == "BSDF_PRINCIPLED"),
+            None,
+        )
+        if principled is not None:
+            base_input = principled.inputs.get("Base Color")
+            if base_input is not None:
+                base_color = tuple(base_input.default_value[:3])
+                if base_input.is_linked:
+                    image = _find_linked_image(base_input.links[0].from_node, set())
+
+    if image is None:
+        fallback_code = "material_base_color_fallback"
+    else:
+        fallback_code = None
+
+    return MaterialInfo(
+        image=image,
+        base_color=_color_to_byte_tuple(base_color),
+        material_name=material.name,
+        fallback_code=fallback_code,
+    )
+
+
+def _fallback_material_info(key: str) -> MaterialInfo:
+    return MaterialInfo(image=None, base_color=(255, 255, 255), material_name=None, fallback_code=key)
+
+
+def _append_warning(
+    warnings: list[WarningRecord],
+    warning_keys: set[str],
+    *,
+    key: str,
+    code: str,
+    message: str,
+) -> None:
+    append_warning_once(
+        warnings,
+        warning_keys,
+        key=key,
+        code=code,
+        message=message,
+    )
+
+
+def _append_warning_for_material_info(
+    material_info: MaterialInfo,
+    warnings: list[WarningRecord],
+    warning_keys: set[str],
+) -> None:
+    if material_info.fallback_code == "material_base_color_fallback" and material_info.material_name is not None:
+        _append_warning(
+            warnings,
+            warning_keys,
+            key=f"material_base_color_fallback:{material_info.material_name}",
+            code="material_base_color_fallback",
+            message=(
+                f"Material '{material_info.material_name}' does not use a supported image texture chain; "
+                "using base color fallback."
+            ),
+        )
+    elif material_info.fallback_code == "no_material":
+        _append_warning(
+            warnings,
+            warning_keys,
+            key="no_material",
+            code="no_material",
+            message="Encountered mesh faces without an assigned material; using white fallback color.",
+        )
+    elif material_info.fallback_code == "missing_material":
+        _append_warning(
+            warnings,
+            warning_keys,
+            key="missing_material",
+            code="missing_material",
+            message="Encountered mesh faces referencing a missing material slot; using white fallback color.",
+        )
+
+
+def _addon_version_string() -> str:
+    return ".".join(str(part) for part in bl_info["version"])
+
+
+def _export_timestamp_utc() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _find_linked_image(node, visited: set) -> object | None:
+    if node is None:
+        return None
+    node_key = id(node)
+    if node_key in visited:
+        return None
+    visited.add(node_key)
+
+    if node.type == "TEX_IMAGE" and getattr(node, "image", None) is not None:
+        return node.image
+
+    for input_socket in getattr(node, "inputs", []):
+        if input_socket.is_linked:
+            for link in input_socket.links:
+                found = _find_linked_image(link.from_node, visited)
+                if found is not None:
+                    return found
+    return None
+
+
+def _build_point_sampling_task_data(point_state: PointSamplingState) -> PointSamplingTaskData:
+    return PointSamplingTaskData(
+        triangles=point_state.triangles,
+        cumulative_areas=point_state.cumulative_areas,
+        total_area=point_state.total_area,
+        sample_count=point_state.sample_count,
+        random_seed=point_state.random_seed,
+        materials=point_state.materials,
+        images=point_state.images,
+    )
+
+
+def _intern_plain_material(
+    material_info: MaterialInfo,
+    materials: list[PlainMaterialData],
+    material_lookup: dict[tuple[tuple[int, int, int], int | None], int],
+    images: list[PlainImageData],
+    image_lookup: dict[int, int],
+    diagnostics: DiagnosticsSession,
+) -> int:
+    image_index = _intern_plain_image(material_info.image, images, image_lookup, diagnostics)
+    material_key = (material_info.base_color, image_index)
+    cached_index = material_lookup.get(material_key)
+    if cached_index is not None:
+        return cached_index
+
+    material_index = len(materials)
+    materials.append(PlainMaterialData(base_color=material_info.base_color, image_index=image_index))
+    material_lookup[material_key] = material_index
+    return material_index
+
+
+def _intern_plain_image(
+    image,
+    images: list[PlainImageData],
+    image_lookup: dict[int, int],
+    diagnostics: DiagnosticsSession,
+) -> int | None:
+    if image is None:
+        return None
+    image_key = id(image)
+    cached_index = image_lookup.get(image_key)
+    if cached_index is not None:
+        return cached_index
+
+    image_index = len(images)
+    width = int(image.size[0])
+    height = int(image.size[1])
+    pixel_count = width * height * 4
+    pixels = array("f", [0.0]) * pixel_count
+    if hasattr(image.pixels, "foreach_get"):
+        image.pixels.foreach_get(pixels)
+    else:
+        pixels = array("f", image.pixels[:])
+    images.append(
+        PlainImageData(
+            width=width,
+            height=height,
+            pixels=pixels,
+        )
+    )
+    image_lookup[image_key] = image_index
+    diagnostics.info(
+        f"Snapshot image texture {image.name!r} ({width}x{height}, packed={_format_bytes(len(pixels) * pixels.itemsize)})."
+    )
+    if hasattr(image, "buffers_free"):
+        try:
+            image.buffers_free()
+        except Exception:
+            diagnostics.warning(f"Failed to free Blender buffer for image texture {image.name!r}.")
+    return image_index
+
+
+def _resolve_python_executable() -> str:
+    blender_python = getattr(bpy.app, "binary_path_python", "")
+    if blender_python:
+        return blender_python
+    if sys.executable:
+        return sys.executable
+    raise DatasetBuildError("Could not resolve a Python interpreter for point sampling.")
+
+
+def _wait_for_worker_process(process) -> None:
+    if process is None:
+        return
+    try:
+        process.wait(timeout=0.1)
+    except subprocess.TimeoutExpired:
+        return
+
+
+def _release_point_sampling_inputs(point_state: PointSamplingState) -> None:
+    point_state.triangles.clear()
+    point_state.cumulative_areas = array("d")
+    point_state.total_area = 0.0
+    point_state.materials.clear()
+    point_state.images.clear()
+
+
+def _write_pickle(path: Path, payload) -> None:
+    temp_path = path.with_suffix(path.suffix + ".tmp")
+    with temp_path.open("wb") as handle:
+        pickle.dump(payload, handle, protocol=pickle.HIGHEST_PROTOCOL)
+    temp_path.replace(path)
+
+
+def _read_pickle(path: Path):
+    with path.open("rb") as handle:
+        return pickle.load(handle)
+
+
+def _format_bytes(size: int) -> str:
+    if size < 1024:
+        return f"{size} B"
+    if size < 1024 * 1024:
+        return f"{size / 1024:.1f} KiB"
+    if size < 1024 * 1024 * 1024:
+        return f"{size / (1024 * 1024):.1f} MiB"
+    return f"{size / (1024 * 1024 * 1024):.2f} GiB"
+
+
+def _vector_to_tuple(vector: Vector) -> tuple[float, float, float]:
+    return (float(vector.x), float(vector.y), float(vector.z))
+
+
+def _color_to_byte_tuple(color) -> tuple[int, int, int]:
+    return tuple(int(round(max(0.0, min(1.0, channel)) * 255.0)) for channel in color[:3])
+```
+
+### three_dgs_dataset_builder/diagnostics.py
+```
+from __future__ import annotations
+
+import faulthandler
+import platform
+import resource
+import sys
+import traceback
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import TextIO
+
+
+@dataclass
+class DiagnosticsSession:
+    log_path: Path
+    handle: TextIO
+    faulthandler_owned: bool
+
+    def info(self, message: str) -> None:
+        self._write("INFO", message)
+
+    def warning(self, message: str) -> None:
+        self._write("WARN", message)
+
+    def error(self, message: str) -> None:
+        self._write("ERROR", message)
+
+    def exception(self, message: str) -> None:
+        self._write("ERROR", f"{message}\n{traceback.format_exc().rstrip()}")
+
+    def close(self) -> None:
+        try:
+            self.info("Diagnostics session closed.")
+        finally:
+            if self.faulthandler_owned and faulthandler.is_enabled():
+                try:
+                    faulthandler.disable()
+                except Exception:
+                    pass
+            self.handle.close()
+
+    def _write(self, level: str, message: str) -> None:
+        timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+        self.handle.write(f"{timestamp} [{level}] {message.rstrip()}\n")
+        self.handle.flush()
+
+
+def start_diagnostics(output_dir: Path, *, dataset_name: str) -> DiagnosticsSession:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    log_path = output_dir / "three_dgs_dataset_builder.log"
+    handle = log_path.open("a", encoding="utf-8", buffering=1)
+    faulthandler_owned = False
+
+    if not faulthandler.is_enabled():
+        try:
+            faulthandler.enable(handle, all_threads=True)
+            faulthandler_owned = True
+        except Exception:
+            faulthandler_owned = False
+
+    session = DiagnosticsSession(
+        log_path=log_path,
+        handle=handle,
+        faulthandler_owned=faulthandler_owned,
+    )
+    session.info(
+        "Diagnostics session started "
+        f"(dataset={dataset_name!r}, python={sys.version.split()[0]}, platform={platform.platform()})."
+    )
+    if faulthandler_owned:
+        session.info("Python faulthandler enabled for fatal signal traces.")
+    else:
+        session.warning("Python faulthandler could not be enabled; hard native crashes may not emit Python traces.")
+    return session
+
+
+def format_peak_rss_mb() -> str:
+    try:
+        usage = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    except Exception:
+        return "unknown"
+
+    if sys.platform == "darwin":
+        rss_mb = usage / (1024 * 1024)
+    else:
+        rss_mb = usage / 1024
+    return f"{rss_mb:.1f} MB"
+```
+
+### three_dgs_dataset_builder/operators.py
+```
+from pathlib import Path
+
+import bpy
+
+from .builder import (
+    BuildSession,
+    cancel_point_sampling_worker,
+    DatasetBuildError,
+    begin_dataset_build,
+    cleanup_dataset_build,
+    finalize_rendered_frame,
+    has_remaining_frames,
+    poll_point_sampling_worker,
+    prepare_point_sampling,
+    prepare_next_frame_render,
+    start_point_sampling_worker,
+    write_outputs,
+)
+from .core.models import DatasetSettingsSnapshot
+from .core.validation import validate_settings
+
+
+class THREE_DGS_OT_generate_dataset(bpy.types.Operator):
+    bl_idname = "three_dgs.generate_dataset"
+    bl_label = "Generate Dataset"
+    bl_description = "Render images, transforms JSON, and point cloud for 3DGS training"
+    bl_options = {"REGISTER"}
+
+    _timer = None
+    _session: BuildSession | None = None
+    _phase = "IDLE"
+    _pending_frame_index: int | None = None
+    _render_inflight = False
+    _render_finished = False
+    _render_cancelled = False
+
+    def invoke(self, context, event):
+        settings = context.scene.three_dgs_settings
+        if settings.is_running:
+            self.report({"WARNING"}, "Dataset generation is already running.")
+            return {"CANCELLED"}
+
+        resolved_save_path = bpy.path.abspath(settings.save_path).strip()
+        snapshot = DatasetSettingsSnapshot(
+            save_path=resolved_save_path,
+            dataset_name=settings.dataset_name.strip(),
+            include_extension=bool(settings.include_extension),
+            total_frames=int(settings.total_frames),
+            min_radius=float(settings.min_radius),
+            max_radius=float(settings.max_radius),
+            close_up_ratio=float(settings.close_up_ratio),
+            view_distribution=str(settings.view_distribution),
+            point_sample_count=int(settings.point_sample_count),
+        )
+
+        errors = validate_settings(snapshot)
+        if settings.target_collection is None:
+            errors.append("Target Collection is required.")
+
+        if errors:
+            for message in errors:
+                self.report({"ERROR"}, message)
+            return {"CANCELLED"}
+
+        output_dir = Path(snapshot.save_path).expanduser() / snapshot.dataset_name
+
+        try:
+            self._session = begin_dataset_build(
+                context=context,
+                settings=settings,
+                snapshot=snapshot,
+                output_dir=output_dir,
+            )
+        except DatasetBuildError as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        except Exception as exc:  # pragma: no cover - Blender runtime only.
+            self.report({"ERROR"}, f"Unexpected failure: {exc}")
+            return {"CANCELLED"}
+
+        self._phase = "POINTS_PREP"
+        self._pending_frame_index = None
+        self._render_inflight = False
+        self._render_finished = False
+        self._render_cancelled = False
+        _set_active_generator(self)
+        _ensure_render_handlers_registered()
+        settings.is_running = True
+        settings.cancel_requested = False
+        settings.progress_current = 0
+        settings.progress_total = snapshot.total_frames + snapshot.point_sample_count + 1
+        settings.status_text = "Preparing point sampling"
+        context.window_manager.progress_begin(0, settings.progress_total)
+        self._timer = context.window_manager.event_timer_add(0.05, window=context.window)
+        context.window_manager.modal_handler_add(self)
+        self.report({"INFO"}, f"Diagnostics log: {self._session.diagnostics.log_path}")
+        self._tag_redraw(context)
+        return {"RUNNING_MODAL"}
+
+    def execute(self, context):
+        return self.invoke(context, None)
+
+    def modal(self, context, event):
+        settings = context.scene.three_dgs_settings
+
+        if event.type == "ESC":
+            settings.cancel_requested = True
+
+        if event.type != "TIMER":
+            return {"PASS_THROUGH"}
+
+        if settings.cancel_requested and not self._render_inflight:
+            self.report({"WARNING"}, "Dataset generation cancelled.")
+            self._finish(context, cancelled=True)
+            return {"CANCELLED"}
+
+        try:
+            if self._phase == "POINTS_PREP":
+                prepare_point_sampling(context, self._session)
+                start_point_sampling_worker(self._session)
+                self._phase = "POINTS"
+                settings.status_text = (
+                    f"Sampling points 0 / {self._session.snapshot.point_sample_count}"
+                )
+
+            elif self._phase == "POINTS":
+                if settings.cancel_requested:
+                    cancel_point_sampling_worker(self._session)
+                    self.report({"WARNING"}, "Dataset generation cancelled.")
+                    self._finish(context, cancelled=True)
+                    return {"CANCELLED"}
+                complete = poll_point_sampling_worker(self._session)
+                point_state = self._session.point_state
+                settings.progress_current = point_state.sampled_count
+                settings.status_text = (
+                    f"Sampling points {point_state.sampled_count} / {self._session.snapshot.point_sample_count}"
+                )
+                context.window_manager.progress_update(settings.progress_current)
+                if complete:
+                    self._phase = "RENDER"
+
+            elif self._phase == "RENDER":
+                if self._render_inflight and _is_render_job_running():
+                    self._tag_redraw(context)
+                    return {"RUNNING_MODAL"}
+
+                if self._render_cancelled:
+                    if settings.cancel_requested:
+                        self.report({"WARNING"}, "Dataset generation cancelled.")
+                    else:
+                        self.report({"ERROR"}, "Render job was cancelled before completion.")
+                    self._finish(context, cancelled=True)
+                    return {"CANCELLED"}
+
+                if self._render_finished:
+                    if self._pending_frame_index is None:
+                        raise DatasetBuildError("Render completion was reported without a pending frame.")
+                    rendered = finalize_rendered_frame(self._session, self._pending_frame_index)
+                    self._pending_frame_index = None
+                    self._render_inflight = False
+                    self._render_finished = False
+                    settings.progress_current = self._session.snapshot.point_sample_count + rendered
+                    settings.status_text = f"Rendering {rendered} / {self._session.snapshot.total_frames}"
+                    context.window_manager.progress_update(settings.progress_current)
+                    if settings.cancel_requested:
+                        self.report({"WARNING"}, "Dataset generation cancelled.")
+                        self._finish(context, cancelled=True)
+                        return {"CANCELLED"}
+                    if not has_remaining_frames(self._session):
+                        self._phase = "WRITE"
+
+                elif not self._render_inflight:
+                    if settings.cancel_requested:
+                        self.report({"WARNING"}, "Dataset generation cancelled.")
+                        self._finish(context, cancelled=True)
+                        return {"CANCELLED"}
+                    self._start_next_render(context)
+
+            elif self._phase == "WRITE":
+                result = write_outputs(self._session)
+                settings.progress_current = settings.progress_total
+                settings.status_text = f"Completed {result.frame_count} frames / {result.point_count} points"
+                context.window_manager.progress_update(settings.progress_total)
+                for warning in result.warnings:
+                    self.report({"WARNING"}, warning.message)
+                self.report(
+                    {"INFO"},
+                    (
+                        f"Generated {result.frame_count} frames and {result.point_count} points "
+                        f"at {result.output_dir} "
+                        f"(warnings: {len(result.warnings)}, "
+                        f"fallback materials: {result.fallback_material_count}, "
+                        f"fallback triangles: {result.fallback_triangle_count})"
+                    ),
+                )
+                self._finish(context, cancelled=False)
+                return {"FINISHED"}
+
+        except DatasetBuildError as exc:
+            if self._session is not None:
+                self._session.diagnostics.error(f"Dataset build failed: {exc}")
+            self.report({"ERROR"}, str(exc))
+            self._finish(context, cancelled=True)
+            return {"CANCELLED"}
+        except Exception as exc:  # pragma: no cover - Blender runtime only.
+            if self._session is not None:
+                self._session.diagnostics.exception("Unexpected failure in modal dataset generation.")
+            self.report({"ERROR"}, f"Unexpected failure: {exc}")
+            self._finish(context, cancelled=True)
+            return {"CANCELLED"}
+
+        self._tag_redraw(context)
+        return {"RUNNING_MODAL"}
+
+    def _finish(self, context, cancelled: bool) -> None:
+        settings = context.scene.three_dgs_settings
+        if self._timer is not None:
+            context.window_manager.event_timer_remove(self._timer)
+            self._timer = None
+        context.window_manager.progress_end()
+        _clear_active_generator(self)
+        _remove_render_handlers()
+
+        if self._session is not None:
+            cleanup_dataset_build(self._session)
+            self._session = None
+
+        if cancelled:
+            settings.status_text = "Cancelled"
+        settings.is_running = False
+        settings.cancel_requested = False
+        settings.progress_current = 0 if cancelled else settings.progress_current
+        self._phase = "IDLE"
+        self._pending_frame_index = None
+        self._render_inflight = False
+        self._render_finished = False
+        self._render_cancelled = False
+        self._tag_redraw(context)
+
+    def _tag_redraw(self, context) -> None:
+        screen = context.window.screen if context.window else None
+        if screen is None:
+            return
+        for area in screen.areas:
+            if area.type == "VIEW_3D":
+                area.tag_redraw()
+
+    def _start_next_render(self, context) -> None:
+        if _is_render_job_running():
+            return
+        frame_index = prepare_next_frame_render(self._session)
+        self._pending_frame_index = frame_index
+        self._render_inflight = True
+        self._render_finished = False
+        self._render_cancelled = False
+        context.scene.three_dgs_settings.status_text = (
+            f"Rendering {frame_index + 1} / {self._session.snapshot.total_frames}"
+        )
+        result = bpy.ops.render.render("INVOKE_DEFAULT", write_still=True)
+        self._session.diagnostics.info(f"Render operator returned {sorted(result)} for frame {frame_index + 1}.")
+        if "CANCELLED" in result:
+            self._pending_frame_index = None
+            self._render_inflight = False
+            if _is_render_job_running():
+                return
+            raise DatasetBuildError("Failed to start the render job.")
+        if "FINISHED" in result:
+            self._render_finished = True
+
+
+class THREE_DGS_OT_cancel_dataset_generation(bpy.types.Operator):
+    bl_idname = "three_dgs.cancel_dataset_generation"
+    bl_label = "Cancel Generation"
+    bl_description = "Request cancellation after the current step finishes"
+
+    @classmethod
+    def poll(cls, context):
+        return bool(getattr(context.scene, "three_dgs_settings", None)) and context.scene.three_dgs_settings.is_running
+
+    def execute(self, context):
+        context.scene.three_dgs_settings.cancel_requested = True
+        context.scene.three_dgs_settings.status_text = "Cancelling..."
+        return {"FINISHED"}
+
+
+_ACTIVE_GENERATOR: THREE_DGS_OT_generate_dataset | None = None
+
+
+def _set_active_generator(operator: THREE_DGS_OT_generate_dataset) -> None:
+    global _ACTIVE_GENERATOR
+    _ACTIVE_GENERATOR = operator
+
+
+def _clear_active_generator(operator: THREE_DGS_OT_generate_dataset) -> None:
+    global _ACTIVE_GENERATOR
+    if _ACTIVE_GENERATOR is operator:
+        _ACTIVE_GENERATOR = None
+
+
+def _ensure_render_handlers_registered() -> None:
+    if _on_render_complete not in bpy.app.handlers.render_complete:
+        bpy.app.handlers.render_complete.append(_on_render_complete)
+    if _on_render_cancel not in bpy.app.handlers.render_cancel:
+        bpy.app.handlers.render_cancel.append(_on_render_cancel)
+
+
+def _remove_render_handlers() -> None:
+    if _on_render_complete in bpy.app.handlers.render_complete:
+        bpy.app.handlers.render_complete.remove(_on_render_complete)
+    if _on_render_cancel in bpy.app.handlers.render_cancel:
+        bpy.app.handlers.render_cancel.remove(_on_render_cancel)
+
+
+def _on_render_complete(*_args) -> None:
+    if _ACTIVE_GENERATOR is None or not _ACTIVE_GENERATOR._render_inflight:
+        return
+    _ACTIVE_GENERATOR._render_finished = True
+
+
+def _on_render_cancel(*_args) -> None:
+    if _ACTIVE_GENERATOR is None or not _ACTIVE_GENERATOR._render_inflight:
+        return
+    _ACTIVE_GENERATOR._render_inflight = False
+    _ACTIVE_GENERATOR._render_cancelled = True
+
+
+def _is_render_job_running() -> bool:
+    try:
+        return bool(bpy.app.is_job_running("RENDER"))
+    except Exception:
+        return False
+```
+
+### three_dgs_dataset_builder/panel.py
+```
+import bpy
+
+from . import bl_info
+
+
+class THREE_DGS_PT_dataset_panel(bpy.types.Panel):
+    bl_label = "3DGS Dataset"
+    bl_idname = "THREE_DGS_PT_dataset_panel"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "3DGS Dataset"
+
+    def draw(self, context):
+        layout = self.layout
+        settings = context.scene.three_dgs_settings
+        version = ".".join(str(part) for part in bl_info["version"])
+
+        header_box = layout.box()
+        header_box.label(text=f"Addon Version: {version}")
+
+        dataset_box = layout.box()
+        dataset_box.label(text="Dataset")
+        dataset_box.prop(settings, "save_path")
+        dataset_box.prop(settings, "dataset_name")
+        dataset_box.prop(settings, "include_extension")
+
+        camera_box = layout.box()
+        camera_box.label(text="Camera Sampling")
+        camera_box.prop(settings, "target_collection")
+        camera_box.prop(settings, "focus_object")
+        camera_box.prop(settings, "total_frames")
+        camera_box.prop(settings, "view_distribution")
+        radius_row = camera_box.row(align=True)
+        radius_row.prop(settings, "min_radius")
+        radius_row.prop(settings, "max_radius")
+        camera_box.prop(settings, "close_up_ratio")
+
+        point_box = layout.box()
+        point_box.label(text="Point Cloud")
+        point_box.prop(settings, "point_sample_count")
+
+        layout.separator()
+        status_box = layout.box()
+        status_box.label(text="Status")
+        status_box.label(text=settings.status_text or "Idle")
+        if settings.is_running and settings.progress_total > 0:
+            status_box.label(text=f"{settings.progress_current} / {settings.progress_total}")
+
+        action_row = layout.row()
+        if settings.is_running:
+            action_row.operator("three_dgs.cancel_dataset_generation", icon="CANCEL")
+        else:
+            action_row.operator("three_dgs.generate_dataset", icon="RENDER_STILL")
+```
+
+### three_dgs_dataset_builder/properties.py
+```
+import bpy
+
+
+class ThreeDGSSettings(bpy.types.PropertyGroup):
+    save_path: bpy.props.StringProperty(
+        name="Save Path",
+        subtype="DIR_PATH",
+        description="Base directory where the dataset folder will be created",
+    )
+    dataset_name: bpy.props.StringProperty(
+        name="Dataset Name",
+        default="dataset",
+        description="Output folder name inside the save path",
+    )
+    include_extension: bpy.props.BoolProperty(
+        name="Include Extension",
+        default=True,
+        description="Include .png in JSON image paths",
+    )
+    target_collection: bpy.props.PointerProperty(
+        name="Target Collection",
+        type=bpy.types.Collection,
+        description="Collection whose mesh objects are rendered and sampled",
+    )
+    focus_object: bpy.props.PointerProperty(
+        name="Focus Object",
+        type=bpy.types.Object,
+        description="Optional object for the camera to look at; uses world origin when empty",
+    )
+    total_frames: bpy.props.IntProperty(
+        name="Total Frames",
+        default=100,
+        min=1,
+        soft_max=1000,
+        description="Number of randomized camera views to render",
+    )
+    min_radius: bpy.props.FloatProperty(
+        name="Min Radius",
+        default=1.0,
+        min=0.001,
+        soft_max=100.0,
+        description="Minimum camera distance from the focus point",
+    )
+    max_radius: bpy.props.FloatProperty(
+        name="Max Radius",
+        default=2.0,
+        min=0.001,
+        soft_max=100.0,
+        description="Maximum camera distance from the focus point",
+    )
+    close_up_ratio: bpy.props.FloatProperty(
+        name="Close-up Ratio",
+        default=0.3,
+        min=0.0,
+        max=1.0,
+        subtype="FACTOR",
+        description="Fraction of frames biased toward the minimum radius",
+    )
+    view_distribution: bpy.props.EnumProperty(
+        name="View Distribution",
+        items=(
+            ("FULL_SPHERE", "Full Sphere", "Sample across the full sphere"),
+            ("UPPER_HEMISPHERE", "Upper Hemisphere", "Sample only on the +Z hemisphere"),
+        ),
+        default="FULL_SPHERE",
+        description="Spatial distribution of randomized camera viewpoints",
+    )
+    point_sample_count: bpy.props.IntProperty(
+        name="Sample Count",
+        default=50000,
+        min=1,
+        soft_max=1000000,
+        description="Number of surface samples exported to points3d.ply",
+    )
+    is_running: bpy.props.BoolProperty(
+        default=False,
+        options={"HIDDEN", "SKIP_SAVE"},
+    )
+    cancel_requested: bpy.props.BoolProperty(
+        default=False,
+        options={"HIDDEN", "SKIP_SAVE"},
+    )
+    status_text: bpy.props.StringProperty(
+        default="Idle",
+        options={"HIDDEN", "SKIP_SAVE"},
+    )
+    progress_current: bpy.props.IntProperty(
+        default=0,
+        options={"HIDDEN", "SKIP_SAVE"},
+    )
+    progress_total: bpy.props.IntProperty(
+        default=0,
+        options={"HIDDEN", "SKIP_SAVE"},
+    )
+```
+
+### three_dgs_dataset_builder/core/__init__.py
+```
+"""Pure Python helpers used by the Blender addon and unit tests."""
+```
+
+### three_dgs_dataset_builder/core/models.py
+```
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class DatasetSettingsSnapshot:
+    save_path: str
+    dataset_name: str
+    include_extension: bool
+    total_frames: int
+    min_radius: float
+    max_radius: float
+    close_up_ratio: float
+    view_distribution: str
+    point_sample_count: int
+
+
+@dataclass(frozen=True)
+class CameraSample:
+    position: tuple[float, float, float]
+    is_close_up: bool
+
+
+@dataclass(frozen=True)
+class PointRecord:
+    x: float
+    y: float
+    z: float
+    color: tuple[int, int, int]
+
+
+@dataclass(frozen=True)
+class WarningRecord:
+    code: str
+    message: str
+
+
+@dataclass(frozen=True)
+class MaterialFallbackRecord:
+    name: str
+    triangle_count: int
+```
+
+### three_dgs_dataset_builder/core/point_sampling.py
+```
+from __future__ import annotations
+
+import json
+import math
+import pickle
+import random
+import traceback
+from collections.abc import Sequence
+from bisect import bisect_left
+from dataclasses import dataclass
+from pathlib import Path
+
+from .models import PointRecord
+from .transforms import convert_point
+
+
+@dataclass(frozen=True)
+class PlainImageData:
+    width: int
+    height: int
+    pixels: Sequence[float]
+
+
+@dataclass(frozen=True)
+class PlainMaterialData:
+    base_color: tuple[int, int, int]
+    image_index: int | None
+
+
+@dataclass(frozen=True)
+class PlainTriangleData:
+    vertices: tuple[
+        tuple[float, float, float],
+        tuple[float, float, float],
+        tuple[float, float, float],
+    ]
+    uvs: (
+        tuple[
+            tuple[float, float],
+            tuple[float, float],
+            tuple[float, float],
+        ]
+        | None
+    )
+    material_index: int
+
+
+@dataclass(frozen=True)
+class PointSamplingTaskData:
+    triangles: Sequence[PlainTriangleData]
+    cumulative_areas: Sequence[float]
+    total_area: float
+    sample_count: int
+    random_seed: int
+    materials: Sequence[PlainMaterialData]
+    images: Sequence[PlainImageData]
+
+
+def sample_points(
+    task_data: PointSamplingTaskData,
+    *,
+    progress_callback=None,
+    progress_interval: int = 2048,
+) -> list[PointRecord]:
+    rng = random.Random(task_data.random_seed)
+    points: list[PointRecord] = []
+
+    for index in range(task_data.sample_count):
+        pick = rng.random() * task_data.total_area
+        triangle_index = bisect_left(task_data.cumulative_areas, pick)
+        triangle = task_data.triangles[min(triangle_index, len(task_data.triangles) - 1)]
+        material = task_data.materials[triangle.material_index]
+
+        world_point, uv = _sample_triangle(triangle.vertices, triangle.uvs, rng)
+        color = _resolve_point_color(material, task_data.images, uv)
+        converted_point = convert_point(world_point)
+        points.append(
+            PointRecord(
+                x=converted_point[0],
+                y=converted_point[1],
+                z=converted_point[2],
+                color=color,
+            )
+        )
+
+        sampled_count = index + 1
+        if progress_callback is not None and (
+            sampled_count == task_data.sample_count
+            or sampled_count % max(1, progress_interval) == 0
+        ):
+            progress_callback(sampled_count)
+
+    return points
+
+
+def run_worker(task_path: Path, progress_path: Path, result_path: Path, error_path: Path) -> int:
+    try:
+        task_data = _read_pickle(task_path)
+        points = sample_points(
+            task_data,
+            progress_callback=lambda sampled_count: _write_progress(progress_path, sampled_count),
+        )
+        result_payload = {
+            "sampled_count": len(points),
+            "points": points,
+        }
+        _write_pickle(result_path, result_payload)
+        _write_progress(progress_path, len(points))
+        return 0
+    except Exception:
+        error_path.write_text(traceback.format_exc(), encoding="utf-8")
+        return 1
+
+
+def _sample_triangle(vertices, uvs, rng: random.Random):
+    r1 = rng.random()
+    r2 = rng.random()
+    sqrt_r1 = math.sqrt(r1)
+    weight_a = 1.0 - sqrt_r1
+    weight_b = sqrt_r1 * (1.0 - r2)
+    weight_c = sqrt_r1 * r2
+
+    point = (
+        vertices[0][0] * weight_a + vertices[1][0] * weight_b + vertices[2][0] * weight_c,
+        vertices[0][1] * weight_a + vertices[1][1] * weight_b + vertices[2][1] * weight_c,
+        vertices[0][2] * weight_a + vertices[1][2] * weight_b + vertices[2][2] * weight_c,
+    )
+    if uvs is None:
+        return point, None
+
+    uv = (
+        uvs[0][0] * weight_a + uvs[1][0] * weight_b + uvs[2][0] * weight_c,
+        uvs[0][1] * weight_a + uvs[1][1] * weight_b + uvs[2][1] * weight_c,
+    )
+    return point, uv
+
+
+def _resolve_point_color(
+    material: PlainMaterialData,
+    images: Sequence[PlainImageData],
+    uv,
+) -> tuple[int, int, int]:
+    if material.image_index is None or uv is None:
+        return material.base_color
+    sampled = _sample_image(images[material.image_index], uv)
+    return sampled or material.base_color
+
+
+def _sample_image(image: PlainImageData, uv) -> tuple[int, int, int] | None:
+    width = image.width
+    height = image.height
+    if width <= 0 or height <= 0:
+        return None
+
+    u = uv[0] % 1.0
+    v = uv[1] % 1.0
+    x = min(width - 1, max(0, int(u * width)))
+    y = min(height - 1, max(0, int(v * height)))
+    index = (y * width + x) * 4
+    pixels = image.pixels
+    return _color_to_byte_tuple((pixels[index], pixels[index + 1], pixels[index + 2]))
+
+
+def _color_to_byte_tuple(color) -> tuple[int, int, int]:
+    return tuple(int(round(max(0.0, min(1.0, channel)) * 255.0)) for channel in color[:3])
+
+
+def _write_pickle(path: Path, payload) -> None:
+    temp_path = path.with_suffix(path.suffix + ".tmp")
+    with temp_path.open("wb") as handle:
+        pickle.dump(payload, handle, protocol=pickle.HIGHEST_PROTOCOL)
+    temp_path.replace(path)
+
+
+def _read_pickle(path: Path):
+    with path.open("rb") as handle:
+        return pickle.load(handle)
+
+
+def _write_progress(path: Path, sampled_count: int) -> None:
+    temp_path = path.with_suffix(path.suffix + ".tmp")
+    temp_path.write_text(
+        json.dumps({"sampled_count": sampled_count}),
+        encoding="utf-8",
+    )
+    temp_path.replace(path)
+```
+
+### three_dgs_dataset_builder/core/point_sampling_worker.py
+```
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from three_dgs_dataset_builder.core.point_sampling import run_worker
+
+
+def main(argv: list[str]) -> int:
+    if len(argv) != 5:
+        return 2
+    task_path = Path(argv[1])
+    progress_path = Path(argv[2])
+    result_path = Path(argv[3])
+    error_path = Path(argv[4])
+    return run_worker(task_path, progress_path, result_path, error_path)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))
+```
+
+### three_dgs_dataset_builder/core/sampling.py
+```
+from __future__ import annotations
+
+import math
+import random
+
+from .models import CameraSample
+
+CLOSE_UP_BAND_FRACTION = 0.15
+
+
+def generate_camera_samples(
+    total_frames: int,
+    min_radius: float,
+    max_radius: float,
+    close_up_ratio: float,
+    view_distribution: str,
+    rng: random.Random | None = None,
+) -> list[CameraSample]:
+    rng = rng or random.Random()
+    close_up_count = int(round(total_frames * close_up_ratio))
+    samples: list[CameraSample] = []
+
+    for index in range(total_frames):
+        is_close_up = index < close_up_count
+        radius = _sample_radius(
+            min_radius=min_radius,
+            max_radius=max_radius,
+            is_close_up=is_close_up,
+            rng=rng,
+        )
+        position = _sample_direction(radius=radius, view_distribution=view_distribution, rng=rng)
+        samples.append(CameraSample(position=position, is_close_up=is_close_up))
+
+    rng.shuffle(samples)
+    return samples
+
+
+def _sample_radius(min_radius: float, max_radius: float, is_close_up: bool, rng: random.Random) -> float:
+    if not is_close_up:
+        return rng.uniform(min_radius, max_radius)
+
+    span = max_radius - min_radius
+    close_up_max = min_radius + span * CLOSE_UP_BAND_FRACTION
+    return rng.uniform(min_radius, min(close_up_max, max_radius))
+
+
+def _sample_direction(radius: float, view_distribution: str, rng: random.Random) -> tuple[float, float, float]:
+    phi = rng.uniform(0.0, 2.0 * math.pi)
+    if view_distribution == "UPPER_HEMISPHERE":
+        z = rng.uniform(0.0, 1.0)
+    else:
+        z = rng.uniform(-1.0, 1.0)
+
+    horizontal = math.sqrt(max(0.0, 1.0 - z * z))
+    return (
+        radius * horizontal * math.cos(phi),
+        radius * horizontal * math.sin(phi),
+        radius * z,
+    )
+```
+
+### three_dgs_dataset_builder/core/serialization.py
+```
+from __future__ import annotations
+
+from collections.abc import Mapping, Sequence
+
+from .models import MaterialFallbackRecord, PointRecord, WarningRecord
+
+
+def build_render_stem(index: int) -> str:
+    return f"{index:05d}"
+
+
+def build_frame_path(index: int, include_extension: bool) -> str:
+    suffix = ".png" if include_extension else ""
+    return f"images/{build_render_stem(index)}{suffix}"
+
+
+def build_transforms_payload(camera_info: dict, frames: list[dict], ply_file_path: str | None = None) -> dict:
+    payload = dict(camera_info)
+    if ply_file_path is not None:
+        payload["ply_file_path"] = ply_file_path
+    payload["frames"] = frames
+    return payload
+
+
+def build_dummy_test_payload(camera_info: dict, ply_file_path: str | None = None) -> dict:
+    payload = dict(camera_info)
+    if ply_file_path is not None:
+        payload["ply_file_path"] = ply_file_path
+    payload["frames"] = []
+    return payload
+
+
+def append_warning_once(
+    warnings: list[WarningRecord],
+    seen_keys: set[str],
+    *,
+    key: str,
+    code: str,
+    message: str,
+) -> bool:
+    if key in seen_keys:
+        return False
+    warnings.append(WarningRecord(code=code, message=message))
+    seen_keys.add(key)
+    return True
+
+
+def build_materials_metadata(
+    fallback_triangle_count: int,
+    fallback_material_triangle_counts: Mapping[str, int],
+) -> dict:
+    fallback_materials = [
+        MaterialFallbackRecord(name=name, triangle_count=triangle_count)
+        for name, triangle_count in sorted(
+            fallback_material_triangle_counts.items(),
+            key=lambda item: (-item[1], item[0]),
+        )
+    ]
+    return {
+        "fallback_material_count": len(fallback_materials),
+        "fallback_triangle_count": fallback_triangle_count,
+        "fallback_materials": [
+            {
+                "name": record.name,
+                "triangle_count": record.triangle_count,
+            }
+            for record in fallback_materials
+        ],
+    }
+
+
+def build_metadata_payload(
+    *,
+    addon_version: str,
+    export_timestamp: str,
+    dataset_name: str,
+    target_collection: str,
+    frame_count: int,
+    point_sample_count: int,
+    image_width: int,
+    image_height: int,
+    render_engine: str,
+    diagnostics_log_file: str | None,
+    warnings: Sequence[WarningRecord],
+    fallback_triangle_count: int,
+    fallback_material_triangle_counts: Mapping[str, int],
+) -> dict:
+    payload = {
+        "addon_version": addon_version,
+        "export_timestamp": export_timestamp,
+        "dataset_name": dataset_name,
+        "target_collection": target_collection,
+        "frame_count": frame_count,
+        "point_sample_count": point_sample_count,
+        "image_resolution": {
+            "width": image_width,
+            "height": image_height,
+        },
+        "render_engine": render_engine,
+        "warnings": [
+            {
+                "code": warning.code,
+                "message": warning.message,
+            }
+            for warning in warnings
+        ],
+        "materials": build_materials_metadata(
+            fallback_triangle_count=fallback_triangle_count,
+            fallback_material_triangle_counts=fallback_material_triangle_counts,
+        ),
+    }
+    if diagnostics_log_file:
+        payload["diagnostics"] = {"log_file": diagnostics_log_file}
+    return payload
+
+
+def serialize_ply_ascii(points: list[PointRecord]) -> str:
+    lines = [
+        "ply",
+        "format ascii 1.0",
+        f"element vertex {len(points)}",
+        "property float x",
+        "property float y",
+        "property float z",
+        "property uchar red",
+        "property uchar green",
+        "property uchar blue",
+        "end_header",
+    ]
+
+    for point in points:
+        lines.append(
+            f"{point.x:.8f} {point.y:.8f} {point.z:.8f} {point.color[0]} {point.color[1]} {point.color[2]}"
+        )
+
+    return "\n".join(lines) + "\n"
+```
+
+### three_dgs_dataset_builder/core/transforms.py
+```
+from __future__ import annotations
+
+def convert_transform_rows(matrix_rows: list[list[float]]) -> list[list[float]]:
+    return [[float(value) for value in row] for row in matrix_rows]
+
+
+def convert_point(point: tuple[float, float, float]) -> tuple[float, float, float]:
+    return (float(point[0]), float(point[1]), float(point[2]))
+```
+
+### three_dgs_dataset_builder/core/validation.py
+```
+from __future__ import annotations
+
+from .models import DatasetSettingsSnapshot
+
+VALID_VIEW_DISTRIBUTIONS = {"FULL_SPHERE", "UPPER_HEMISPHERE"}
+
+
+def validate_settings(settings: DatasetSettingsSnapshot) -> list[str]:
+    errors: list[str] = []
+
+    if not settings.save_path:
+        errors.append("Save Path is required.")
+    if not settings.dataset_name:
+        errors.append("Dataset Name is required.")
+    if not settings.include_extension:
+        errors.append("Brush compatibility requires Include Extension to be enabled.")
+    if settings.total_frames <= 0:
+        errors.append("Total Frames must be greater than zero.")
+    if settings.point_sample_count <= 0:
+        errors.append("Sample Count must be greater than zero.")
+    if settings.min_radius <= 0.0:
+        errors.append("Min Radius must be greater than zero.")
+    if settings.max_radius <= 0.0:
+        errors.append("Max Radius must be greater than zero.")
+    if settings.min_radius >= settings.max_radius:
+        errors.append("Min Radius must be smaller than Max Radius.")
+    if not 0.0 <= settings.close_up_ratio <= 1.0:
+        errors.append("Close-up Ratio must be between 0.0 and 1.0.")
+    if settings.view_distribution not in VALID_VIEW_DISTRIBUTIONS:
+        errors.append(f"Unsupported view distribution: {settings.view_distribution}")
+
+    return errors
+```

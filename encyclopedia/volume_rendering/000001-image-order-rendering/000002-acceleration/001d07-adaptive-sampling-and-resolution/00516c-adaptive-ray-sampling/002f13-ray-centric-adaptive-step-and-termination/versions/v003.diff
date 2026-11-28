@@ -1,0 +1,81 @@
+--- v002.md
++++ v003.md
+@@ -1,5 +1,3 @@
+ # Ray-Centric Adaptive Step and Termination
+-
+-
+ ## Overview
+ Ray-Centric Adaptive Step and Termination adjusts the integration step size $\Delta t$ along a ray based on local volume properties to skip empty space and refine detail near boundaries [G]. It differs from [Adaptive Sampling](1385-adaptive-sampling.md) by dynamically changing the step size within a single ray cast rather than changing the number of rays or blocks, and from [Two-stage NeRF Rendering](925-two-stage-nerf-rendering.md) by operating on explicit volumetric data structures rather than neural uncertainty estimates [G].
+@@ -10,4 +8,60 @@
+ 2. **Termination:** The loop terminates when the accumulated opacity $\alpha$ exceeds a threshold (e.g., $1.0$) or $t$ exceeds $t_{far}$ [G].
+ 3. **Coherence:** To maintain GPU thread coherence, step sizes are often quantized or limited to a small set of discrete values, preventing divergence in warp execution [G].
++
++```python
++def adaptive_ray_march(ray_origin, ray_direction, volume_field, transfer_func, epsilon=0.01):
++    """
++    Performs adaptive ray marching using opacity and gradient information.
++    """
++    color = vec3(0.0)
++    alpha = 0.0
++    t = ray_origin.t_near
++    t_far = ray_origin.t_far
++    
++    while t < t_far and alpha < (1.0 - epsilon):
++        # Current position
++        pos = ray_origin + t * ray_direction
++        
++        # Sample scalar field
++        s = volume_field.sample(pos)
++        
++        # Get color and opacity from transfer function
++        c, alpha_local = transfer_func(s)
++        
++        # If no opacity, skip ahead using empty space skipping or large step
++        if alpha_local == 0.0:
++            # [G] In practice, use a large step or spatial acceleration structure to skip
++            t += 1.0 
++            continue
++            
++        # Compute gradient for step size adaptation
++        grad = volume_field.gradient(pos)
++        grad_mag = length(grad)
++        
++        # Adaptive step size: smaller steps for high gradients, larger for low
++        # Base step size (e.g., 1 voxel)
++        base_step = 1.0 
++        # Inverse proportionality to gradient magnitude, bounded
++        # Avoid division by zero
++        if grad_mag > 0.001:
++            step_factor = 1.0 / grad_mag
++        else:
++            step_factor = 1.0
++            
++        # Clamp step size to reasonable bounds
++        delta_t = clamp(base_step * step_factor, 0.1, 5.0)
++        
++        # Front-to-back compositing
++        alpha_new = alpha + (1.0 - alpha) * alpha_local
++        color_new = color + (1.0 - alpha) * alpha_local * c
++        
++        color = color_new
++        alpha = alpha_new
++        
++        # Advance
++        t += delta_t
++        
++    return color, alpha
++```
+ 
+ ## Subtopics
+@@ -20,8 +74,9 @@
+ 
+ ### Adaptive Sampling with Uniform Fallback
+-Samples points along rays using adaptive sampling, with a fallback to uniform sampling for rays that receive too few samples [G]. The implementation details, including ray-AABB intersection, sample counting, and tensor concatenation, are not given in the sources.
++Samples points along rays using adaptive sampling, with a fallback to uniform sampling for rays that receive too few samples [S1, unofficial]. The process computes $t_{near}$ and $t_{far}$ using ray-AABB intersection, filtering valid rays where $t_{far} > t_{near}$ [S1, unofficial]. If no valid rays exist, it returns empty tensors for $t_s$, $t_e$, `ray_idx`, and `valid` [S1, unofficial]. It calls a sampling estimator with valid ray origins, directions, bounds, and step size to obtain `ray_idx`, $t_s$, and $t_e$ [S1, unofficial]. The `ray_idx` is converted to `torch.long` [S1, unofficial]. If fallback is enabled, it counts samples per ray using `torch.bincount(ray_idx, minlength=Nv)` [S1, unofficial]. Rays with counts below `self.fallback_when_samples` are identified as `low_ids` [S1, unofficial]. For these rays, uniform samples are computed as $t_{s\_fb} = t_0[:, \text{None}] + k \cdot dt$ and $t_{e\_fb} = t_{s\_fb} + dt$, where $k$ ranges over $K$, $dt = (t_1-t_0)/K$, and the final $t_{e\_fb}$ is clamped to $t_1$ [S1, unofficial]. A `ray_idx_fb` is constructed for the fallback samples, and the adaptive and fallback samples are concatenated [S1, unofficial].
+ 
+ ## Background
+-The origin, specific historical development, and exact application domains of this family are not given in the sources. It is generally applied in real-time volume rendering to balance visual fidelity against computational cost [G].
++The origin, specific historical development, and exact application domains of this family are not given in the sources [G]. It is generally applied in real-time volume rendering to balance visual fidelity against computational cost [G].
+ 
+-## Sources+## Sources
++[S1] AlanHsu314/CoroNeRF_public, https://github.com/AlanHsu314/CoroNeRF_public, fetched 2026-10-27 (unofficial)

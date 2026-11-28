@@ -1,0 +1,41 @@
+# Depth Shading
+
+Also called: Depth-Only Shading
+
+## Overview
+Depth shading is a 2D discrete shading technique that computes pixel intensity solely from the depth coordinate of the closest surface voxel, without considering surface orientation [S2, unofficial]. It differs from gradient-based methods by ignoring normals, resulting in a simple inverse-depth mapping where closer features appear brighter and distant features appear darker [S2, unofficial].
+
+## How it works
+**Inputs:**
+1. A depth shaded pre-image: a 2D array (Z-buffer) where each pixel $(x, y)$ stores the distance to the closest non-empty surface voxel along the viewing ray [S2, unofficial].
+2. A second framebuffer for storing the pre-image data [S1].
+
+**Outputs:**
+1. A 2D intensity image where pixel brightness is determined by the stored depth value [S2, unofficial].
+
+**Data Structures:**
+- **Z-buffer:** A 2D array of depth values where each element stores a scalar distance $z$ to the closest non-empty voxel [S2, unofficial].
+
+**Steps:**
+1. **Ray Casting / Data Traversal:** Execute the underlying ray casting algorithm to identify surface voxels and yield their depth coordinates along the viewing axis [S1].
+2. **Depth Storage:** For each pixel $(x, y)$, store the distance to the closest non-empty voxel found along the viewing ray into the Z-buffer at index $(x, y)$ [S2, unofficial].
+3. **Intensity Calculation:** Compute the output intensity $I(x, y)$ for each pixel based on its depth value $z = D(x, y)$ [S2, unofficial]. The intensity is inversely proportional to the depth:
+   $$ I(x, y) \propto \frac{1}{z} $$
+   In the specific implementation described by [S1], this relationship is discretized by mapping the depth coordinate to one of 128 possible values [S1].
+4. **Lookup Table Application:** Populate a hardware output lookup table with intensity values calculated as a function of these 128 depth levels, then apply the table to the Z-buffer to generate the final shaded image [S1].
+
+**Pitfalls:**
+- **Loss of Detail:** Because surface orientation (normals) is not considered, surface discontinuities and object boundaries are lost [S2, unofficial].
+
+## Operating characteristics
+- **Complexity:** The shading step runs in $O(1)$ time per pixel once the Z-buffer is populated, as it only requires a table lookup [G].
+- **Performance:** The shading stage is computationally inexpensive because it relies on a precomputed lookup table rather than per-pixel geometric calculations [S1].
+- **Strengths:** Simple to implement; requires minimal additional computation after depth acquisition; effective for highlighting proximity to the viewer [S2, unofficial].
+- **Limitations:** Lacks geometric detail due to the absence of normal vectors; produces flat, silhouette-like shading [S2, unofficial].
+
+## Background
+It is described as a "depth shaded pre-image" technique, serving as a foundational step before more complex shading methods like binary gradient shading [S1]. It is categorized under 2D discrete shading techniques in volume visualization literature [S2, unofficial].
+
+## Sources
+[S1] Hardware Support for the Display and Manipulation of Binary Voxel Models, https://doi.org/10.2312/eggh/eggh88/103-117, fetched 2026-10-26
+[S2] Volume Visualization: Principles and Advances, https://courses.cs.duke.edu/spring03/cps296.8/papers/KaufmanVolumeVisualization.pdf, fetched 2026-10-28 (unofficial)

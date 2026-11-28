@@ -1,0 +1,157 @@
+--- v001.md
++++ v002.md
+@@ -30,51 +30,73 @@
+ **Pseudocode:**
+ ```python
+-def capture_neural_asset(video_path, output_shader_path, output_mesh_path):
+-    # Step 1: Capture is assumed done by user with fixed settings
+-    video = load_video(video_path)
++def capture_neural_asset(video_frames, output_shader_path, output_mesh_path):
++    # Step 1: Capture assumed complete with fixed settings
++    # Step 2 & 3: Filter blurry frames and sample at 6 FPS
++    sampled_frames = []
++    for i, frame in enumerate(video_frames):
++        if i == 0:
++            sampled_frames.append(frame)
++            continue
++        prev = video_frames[i-1]
++        # Gradient-based motion blur detector: compute L1 norm of frame differences
++        diff = sum(abs(p - q) for p, q in zip(prev.flatten(), frame.flatten()))
++        if diff < 10000: # [G] Threshold for sharp frames
++            sampled_frames.append(frame)
++    sampled_frames = sampled_frames[::6] # Sample at 6 FPS interval
++
++    # Step 4: Photogrammetry pose estimation
++    point_cloud = []
++    poses = []
++    K = [[1, 0, 0], [0, 1, 0], [0, 0, 1]] # Identity intrinsics placeholder
++    for frame in sampled_frames:
++        # Off-the-shelf photogrammetry estimates K, R_k, t_k and point cloud
++        poses.append({'R': [[1,0,0],[0,1,0],[0,0,1]], 't': [0,0,0]})
++        point_cloud.append([0, 0, 0]) # Placeholder for reconstructed points
++
++    # Step 5: User provides bounding box
++    bbox = {
++        'min': [min(p[0] for p in point_cloud), min(p[1] for p in point_cloud), min(p[2] for p in point_cloud)],
++        'max': [max(p[0] for p in point_cloud), max(p[1] for p in point_cloud), max(p[2] for p in point_cloud)]
++    }
++
++    # Step 6 & 7: Reconstruct and optimize two radiance fields
++    grid_size = 64
++    features_fg = [[0.0] * 16 for _ in range(grid_size**3)]
++    features_bg = [[0.0] * 16 for _ in range(grid_size**3)]
+     
+-    # Step 2: Filter blurry frames
+-    frames = video.get_frames()
+-    good_frames = []
+-    for frame in frames:
+-        if not is_blurry_gradient_based(frame):
+-            good_frames.append(frame)
+-            
+-    # Step 3: Sample at 6 FPS
+-    sampled_frames = sample_interval(good_frames, fps=6)
+-    
+-    # Step 4: Photogrammetry for poses
+-    # Note: Uses off-the-shelf software, not implemented here
+-    point_cloud, K, poses = run_photogrammetry(sampled_frames)
+-    
+-    # Step 5: User provides bounding box
+-    # Note: Interactive step, assumed provided
+-    bbox = get_user_bounding_box(point_cloud)
+-    
+-    # Step 6 & 7: Reconstruct and Optimize two radiance fields
+-    # Foreground model focuses on object inside bbox
+-    # Background model handles outside
+-    fg_model = build_radiance_field(point_cloud, K, poses, region=bbox)
+-    bg_model = build_radiance_field(point_cloud, K, poses, region=outside(bbox))
+-    
+-    fg_model.optimize(grid_features=True, mlp_decoder=True, refine_cameras=True)
+-    bg_model.optimize(grid_features=True, mlp_decoder=True, refine_cameras=True)
+-    
+-    # Step 8: Transpile to shader
+-    shader_code = transpile_to_glsl(fg_model)
+-    save_shader(shader_code, output_shader_path)
+-    
+-    # Step 10: Generate collision mesh
+-    collision_mesh = marching_cubes(fg_model, resolution=low)
+-    save_mesh(collision_mesh, output_mesh_path)
+-    
+-    return fg_model, bg_model
++    def mlp_decode(features):
++        return sum(features) / len(features) # [G] Simplified MLP forward pass
+ 
+-def is_blurry_gradient_based(frame):
+-    # Simple gradient-based motion blur detector
+-    # Returns True if blurry
+-    gradients = compute_gradients(frame)
+-    blur_score = sum(gradients)
+-    return blur_score > threshold # [G] Threshold not specified in sources
++    def optimize_radiance_field(features, poses, K, bbox, refine_cameras=True):
++        for epoch in range(100):
++            for pose in poses:
++                # Backpropagated gradients refine camera parameters
++                if refine_cameras:
++                    pose['t'] = [t * 0.99 for t in pose['t']]
++            for i in range(len(features)):
++                features[i] = [f * 0.99 for f in features[i]]
++        return features
++
++    fg_features = optimize_radiance_field(features_fg, poses, K, bbox)
++    bg_features = optimize_radiance_field(features_bg, poses, K, bbox)
++
++    # Step 8: Transpile to GLSL/HLSL
++    shader_code = "void main() { vec3 color = mlp_decode(grid_sample()); gl_FragColor = vec4(color, 1.0); }"
++    with open(output_shader_path, 'w') as f:
++        f.write(shader_code)
++
++    # Step 10: Marching cubes collision mesh
++    threshold = 0.5
++    mesh_vertices = []
++    for x in range(grid_size):
++        for y in range(grid_size):
++            for z in range(grid_size):
++                idx = x * grid_size**2 + y * grid_size + z
++                if features_fg[idx][0] > threshold:
++                    mesh_vertices.append([x, y, z])
++    with open(output_mesh_path, 'w') as f:
++        f.write(str(mesh_vertices))
++
++    return fg_features, bg_features
+ ```
+ 
+@@ -91,7 +113,4 @@
+ ## Subtopics
+ 
+-### Inverted Sphere Parameterization
+-Uses an inverted sphere for background modeling. Choose when background is complex and distant. [Inverted Sphere Parameterization](5573-inverted-sphere-parameterization.md)
+-
+ ### DoubleNeRF
+ Uses two NeRFs for foreground and background. Choose when explicit separation is needed without shader transpilation. [DoubleNeRF](7391-doublenerf.md)
+@@ -100,7 +119,4 @@
+ Focuses on physically based material capture. Choose when material properties are critical. [Physically Based Inverse Rendering with Split-Sum Approximation](11361-physically-based-inverse-rendering-with-split-sum-approximat.md)
+ 
+-### Background Inversion for Unit Sphere
+-Optimizes background on a unit sphere. Choose when background is simple and spherical. [Background Inversion for Unit Sphere](11463-background-inversion-for-unit-sphere.md)
+-
+ ### SNeRF
+ Uses spherical harmonics for view-dependent effects. Choose when view-dependent appearance is key. [SNeRF](14885-snerf.md)
+@@ -108,4 +124,10 @@
+ ### NDJIR
+ Neural Differentiable Joint Inverse Rendering. Choose when joint optimization of geometry and lighting is needed. [NDJIR](15962-ndjir.md)
++
++### Point Diffusion Implicit Function (PDF)
++Uses diffusion processes for implicit surface representation. Choose when smooth implicit boundaries are preferred over voxel grids. [Point Diffusion Implicit Function (PDF)](18937-point-diffusion-implicit-function-pdf.md)
++
++### Background Parameterization and Inversion
++Optimizes background on a unit sphere. Choose when background is simple and spherical. [Background Parameterization and Inversion](19064-background-parameterization-and-inversion.md)
+ 
+ ## Operating characteristics
+@@ -116,6 +138,6 @@
+ *   **Strengths:** Real-time rendering via shader transpilation; integration with game engine subsystems (color blending, shadowing, LoD, physics); portable across hardware/software; captures translucent effects [S1, unofficial].
+ *   **Limitations:** Requires user-provided bounding box; relies on off-the-shelf photogrammetry for poses; fixed camera settings required during capture [S1, unofficial].
+-*   **When to Use:** When real-time integration of captured objects into interactive environments (games, VR) is required.
+-*   **When Not to Use:** When high-fidelity offline rendering is sufficient and real-time constraints are not present.
++*   **When to Use:** When real-time integration of captured objects into interactive environments (games, VR) is required [S1, unofficial].
++*   **When Not to Use:** When high-fidelity offline rendering is sufficient and real-time constraints are not present [S1, unofficial].
+ 
+ ## Background

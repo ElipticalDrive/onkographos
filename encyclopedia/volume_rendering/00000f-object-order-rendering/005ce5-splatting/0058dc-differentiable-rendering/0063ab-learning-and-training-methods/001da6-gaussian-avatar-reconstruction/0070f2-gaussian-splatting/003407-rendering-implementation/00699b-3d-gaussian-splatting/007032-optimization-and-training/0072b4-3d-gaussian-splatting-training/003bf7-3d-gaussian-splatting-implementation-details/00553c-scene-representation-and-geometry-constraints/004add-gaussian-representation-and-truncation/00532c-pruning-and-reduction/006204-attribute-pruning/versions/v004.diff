@@ -1,0 +1,118 @@
+--- v003.md
++++ v004.md
+@@ -4,89 +4,49 @@
+ 
+ ## Overview
+-Attribute pruning selectively reduces the storage and computational overhead of per-Gaussian attributes, primarily spherical harmonics (SH) coefficients, to optimize memory usage and rendering efficiency [S1]. Unlike [Pruning and Reduction](14909-pruning-and-reduction.md) which focuses on removing entire primitives, attribute pruning retains the Gaussian primitives but simplifies their representation [S1]. It differs from [SplatQ](14415-splatq.md) by focusing on the dimensionality of the attribute vectors rather than quantization of the entire data structure, and from [Vertex-level Pruning in Mixed-Primitive Gaussian Splatting](13983-vertex-level-pruning-in-mixed-primitive-gaussian-splatting.md) by operating on the standard Gaussian representation without changing the primitive type [S1].
++Attribute pruning selectively reduces the storage and computational burden of per-Gaussian attributes, primarily spherical harmonics (SH) coefficients, to optimize memory usage and rendering efficiency [S1]. Unlike sibling methods that remove primitives entirely, this technique retains the geometric structure of the scene while adapting the fidelity of view-dependent color representation to local complexity [S1]. It distinguishes itself from [SplatQ](14415-splatq.md) by focusing on dynamic coefficient reduction rather than quantization, and from [Vertex-level Pruning in Mixed-Primitive Gaussian Splatting](13983-vertex-level-pruning-in-mixed-primitive-gaussian-splatting.md) by operating on the standard Gaussian representation's attribute fields rather than modifying the primitive topology.
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: A set of $N$ 3D Gaussians $\{G_i\}_{i=1}^N$, where each Gaussian $G_i$ has mean $\boldsymbol{\mu}_i$, covariance $\boldsymbol{\Sigma}_i$, opacity $\alpha_i$, and a full set of SH coefficients $\mathbf{c}_i$ [S1].
+-- Output: A pruned set of Gaussians where each $G_i$ has a reduced attribute set $\mathbf{c}'_i$ [S1].
++*   **Input:** A set of $N$ 3D Gaussians $\{G_i\}_{i=1}^N$, where each Gaussian $G_i$ has mean $\boldsymbol{\mu}_i$, covariance $\boldsymbol{\Sigma}_i$, opacity $\alpha_i$, and a vector of SH coefficients $\mathbf{c}_i$ [S1].
++*   **Output:** A modified set of Gaussians with reduced attribute storage, where the number of SH coefficients per Gaussian varies based on scene complexity [S1].
+ 
+ **Data Structures:**
+-In standard 3DGS, a Gaussian stores 59 attributes [S1]. For RGB data with SH up to degree 3, there are 48 SH coefficients (16 per channel) [S1]. These 48 coefficients consume 81% of the storage size for a single Gaussian [S1]. The remaining 11 attributes include position (3), scale (3), rotation (4), opacity (1), and base color or lower-degree SH [S1].
++Each Gaussian $G_i$ stores attributes. In standard 3DGS, SH coefficients for RGB data at degree 3 require 48 coefficients (16 per channel), consuming 81% of the single-Gaussian storage size (48 out of 59 attributes) [S1]. The pruning method modifies the size or content of the coefficient vector $\mathbf{c}_i$.
+ 
+ **Steps:**
+-1. **Evaluate Complexity:** Determine the scene complexity or view-dependent variation required for each Gaussian $G_i$ [S1].
+-2. **Assign SH Degree:**
+-   - For regions with low complexity or minimal view-dependent effects, assign a single degree of SH (basic RGB color) [S1]. This reduces the coefficient count from 48 to 3 (1 per channel) [S1].
+-   - For regions with high complexity, retain higher SH degrees (e.g., degree 1, 2, or 3) [S1].
+-3. **Store Reduced Attributes:** Replace the full SH vector $\mathbf{c}_i$ with the reduced vector $\mathbf{c}'_i$ [S1].
+-4. **Alternative Representation (Optional):** Completely remove SH coefficients and replace them with NeRF-like MLPs or classical shading models [S1]. This requires custom rendering pipelines [S1].
++1.  **Analyze Scene Complexity:** Evaluate the complexity of the region associated with each Gaussian. This is often determined by the variance of color across different viewing angles or the magnitude of higher-order SH coefficients [S1].
++2.  **Determine SH Degree:** Assign a SH degree $d_i$ to each Gaussian $G_i$ based on the analysis:
++    *   For less complex regions (e.g., uniform surfaces, low view-dependent variation), set $d_i = 0$ (basic RGB color, 3 coefficients) [S1].
++    *   For complex regions (e.g., specular highlights, intricate lighting), retain higher degrees (e.g., $d_i = 3$, 48 coefficients) [S1].
++3.  **Adjust Coefficients:** Truncate or zero-out higher-order SH coefficients for Gaussians assigned lower degrees. If $d_i < 3$, coefficients corresponding to degrees $> d_i$ are discarded or ignored during rendering [S1].
++4.  **Render:** During splatting, evaluate the color $\mathbf{c}_i(\omega)$ using only the retained SH coefficients for the assigned degree [S1].
++
++**Formulas:**
++The color contribution of a Gaussian $G_i$ at viewing direction $\omega$ is computed using the retained SH coefficients $\mathbf{c}_i^{(d_i)}$:
++$$ \mathbf{c}_i(\omega) = \sum_{l=0}^{d_i} \sum_{m=-l}^{l} c_{i,l,m} Y_{l,m}(\omega) $$
++where $Y_{l,m}$ are the spherical harmonic basis functions [S1].
+ 
+ **Parameters:**
+-- SH Degree: Typically 0 (RGB only), 1, 2, or 3 [S1]. Degree 3 results in 48 coefficients [S1].
+-- Thresholds: Not given in the sources. The decision to reduce SH degree is based on "scene complexity" or "color consistency across views" [S1, S1].
++*   **SH Degree:** Typically ranges from 0 to 3. Degree 3 is the standard in 3DGS but is often reduced to 0 or 1 for static or simple regions [S1].
++*   **Thresholds:** Not given in the sources. Implementation requires thresholds to decide when a region is "complex" enough to warrant higher SH degrees.
+ 
+ **Edge Cases and Pitfalls:**
+-- **Precision Loss:** Reducing SH degree may cause visible artifacts in regions with complex lighting or view-dependent effects [S1].
+-- **Rendering Compatibility:** Switching between Gaussians with different SH degrees requires a rendering pipeline that can handle variable attribute sizes or pad lower-degree Gaussians [S1].
+-- **Custom Rendering Overhead:** Replacing SH with MLPs or classical shading increases computational cost during rendering [S1].
+-
+-**Pseudocode:**
+-```python
+-def attribute_pruning(gaussians, complexity_map):
+-    """
+-    Prune SH attributes for each Gaussian based on local complexity.
+-    
+-    Args:
+-        gaussians: List of Gaussian objects, each with .sh_coeffs (list of floats)
+-        complexity_map: Dictionary mapping Gaussian index to complexity score (float)
+-        
+-    Returns:
+-        pruned_gaussians: List of Gaussian objects with reduced .sh_coeffs
+-    """
+-    pruned_gaussians = []
+-    
+-    for i, g in enumerate(gaussians):
+-        complexity = complexity_map.get(i, 0.5)
+-        
+-        # Determine SH degree based on complexity
+-        # Not given in the sources: specific threshold values for complexity
+-        if complexity < 0.3:
+-            # Low complexity: Use only RGB (SH degree 0)
+-            # 3 coefficients: R, G, B
+-            reduced_sh = g.sh_coeffs[0:3]
+-        elif complexity < 0.7:
+-            # Medium complexity: Use SH degree 1
+-            # 12 coefficients: 4 per channel (1 base + 3 directional)
+-            reduced_sh = g.sh_coeffs[0:12]
+-        else:
+-            # High complexity: Use full SH degree 3
+-            # 48 coefficients: 16 per channel
+-            reduced_sh = g.sh_coeffs[0:48]
+-            
+-        # Create new Gaussian with pruned attributes
+-        new_g = Gaussian(
+-            mean=g.mean,
+-            covariance=g.covariance,
+-            opacity=g.opacity,
+-            sh_coeffs=reduced_sh
+-        )
+-        pruned_gaussians.append(new_g)
+-        
+-    return pruned_gaussians
+-```
++*   **Precision Loss:** Reducing SH degree can introduce visible artifacts in regions with high-frequency view-dependent effects if the threshold is too aggressive [S1].
++*   **Uniformity:** Applying a uniform SH degree across the entire scene negates the benefits of pruning; the method requires per-Gaussian or per-region adaptation [S1].
++*   **Alternative Representations:** Completely removing SH in favor of NeRF-like MLPs or classical shading is possible but requires custom, potentially slower rendering pipelines [S1].
+ 
+ ## Subtopics
+ 
+ ### Reduced3DGS
+-Reduced3DGS is a specific implementation of attribute pruning that addresses large storage sizes by reducing primitive count, adjusting SH bands, and quantizing attributes [S1]. It extends opacity-based pruning by incorporating a redundancy score to identify regions with many low-impact primitives [S1]. For SH adjustment, it evaluates color consistency across views and reduces higher-order SH bands when view-dependent effects are minimal [S1]. Additionally, it uses K-means clustering to develop a codebook and applies 16-bit half-float quantization to remaining uncompressed floating-point values [S1].
++An approach that extends attribute pruning by combining SH band adjustment with primitive reduction and quantization [S1]. It introduces a scale- and resolution-aware redundant primitive removal method that uses a redundancy score to identify low-impact primitives, extending opacity-based pruning [S1]. For attributes, it adaptively adjusts SH bands by evaluating color consistency across views, reducing higher-order bands when view-dependent effects are minimal [S1]. It further applies K-means clustering to create a codebook and uses 16-bit half-float quantization for remaining uncompressed floating-point values [S1].
+ 
+ ## Operating characteristics
+-- **Memory Reduction:** SH coefficients consume 81% of storage for a single Gaussian at degree 3 [S1]. Reducing to degree 0 (RGB) reduces this to ~5% (3 out of 59 attributes) [S1].
+-- **Computational Efficiency:** Fewer SH coefficients reduce the number of multiplications during rendering [S1].
+-- **Quality Trade-off:** Lower SH degrees may result in loss of view-dependent detail [S1].
+-- **Hardware Impact:** Beneficial for compute-constrained devices like VR headsets [S1].
++*   **Memory:** Significantly reduces storage size. Standard 3DGS uses 48 SH coefficients for degree 3, consuming 81% of per-Gaussian storage [S1]. Pruning can reduce this to 3 coefficients (degree 0) for simple regions, offering substantial memory savings [S1].
++*   **Compute:** Reduces the number of coefficients evaluated during rendering, lowering computational cost per Gaussian [S1].
++*   **Quality:** Trade-off between memory/compute and visual fidelity. Lower SH degrees may cause blurring or loss of specular highlights in complex regions [S1].
++*   **Use Cases:** Ideal for memory-constrained devices (e.g., VR headsets) or large scenes where uniform high-fidelity SH is unnecessary [S1].
+ 
+ ## Background
+-Attribute pruning was introduced as a method to optimize the memory footprint of 3D Gaussian Splatting [S1]. The high storage cost of SH coefficients, particularly at degree 3, was identified as a major bottleneck [S1]. The method builds on the standard 3DGS representation [G].
++Attribute pruning was introduced as a method to address the large storage footprint of 3D Gaussian Splatting, where SH coefficients dominate the memory usage [S1]. It builds on the observation that not all parts of a scene require high-degree SH for accurate view-dependent rendering [S1]. The concept is discussed in the context of compression and optimization techniques for 3DGS [S1].
+ 
+ ## Sources

@@ -1,0 +1,199 @@
+--- v001.md
++++ v002.md
+@@ -4,6 +4,6 @@
+ A differentiable volume rendering technique implemented in Taichi using fixed-step ray marching and trilinear interpolation on a 3D density grid [S1, unofficial]. It differs from sibling methods by relying on a fixed-step traversal with explicit alpha accumulation rather than expected terms or thresholding, and is implemented using Taichi's autodiff engine rather than PyTorch [S1, unofficial].
+ ## How it works
+-**Inputs:** Camera position (`cam_pos`), camera rotation matrix (`cam_rot`), pixel coordinates (`pixel_coords`), and a 4D density grid (`density`) containing RGBA values.
+-**Outputs:** A rendered image (`target_image`) with RGBA channels.
++**Inputs:** Camera position (`cam_pos`), camera rotation matrix (`cam_rot`), pixel coordinates (`pixel_coords`), and a 4D density grid (`density`) containing RGBA values [S1, unofficial].
++**Outputs:** A rendered image (`target_image`) with RGBA channels [S1, unofficial].
+ 
+ **Data Structures:**
+@@ -21,8 +21,8 @@
+ 
+ **Steps:**
+-1.  For each pixel $(x, y)$ and batch index $n$:
++1.  For each pixel $(x, y)$ and batch index $n$: [S1, unofficial].
+ 2.  Compute ray direction components: $a = (y - \text{princpt}_y) / \text{focal}_y$, $b = (x - \text{princpt}_x) / \text{focal}_x$ [S1, unofficial].
+ 3.  Compute direction vector: $\mathbf{dir} = \text{cam\_rot}[n] \cdot [a, b, 1]^T$ and normalize it [S1, unofficial].
+-4.  Iterate $k$ from 0 to 299:
++4.  Iterate $k$ from 0 to 299: [S1, unofficial].
+     a. Compute sample point: $\mathbf{point} = \text{cam\_pos}[n] + (k + 1) \cdot dx \cdot \mathbf{dir}$ [S1, unofficial].
+     b. Check if $\mathbf{point}$ is inside the box $[-1, 1]^3$. If so, set `flag = 1`, else `flag = 0` [S1, unofficial].
+@@ -31,5 +31,5 @@
+     e. Compute alpha contribution: $\Delta \alpha = (\min(\text{current\_alpha} + a \cdot dx, 1.) - \text{current\_alpha}) \cdot \text{flag}$ [S1, unofficial].
+     f. Accumulate color: $\text{target\_image}[n, c, x, y] += r_c \cdot \Delta \alpha$ for $c \in \{r, g, b\}$ [S1, unofficial].
+-    g. Update alpha: $\text{target\_image}[n, 3, x, y] += \Delta \alpha$ [S1, unofficial].
++    g. Update alpha: $\text{target\_image}[n, 3, x, y] = \min(\text{current\_alpha} + a \cdot dx, 1.)$ [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -46,5 +46,4 @@
+ princpt_y = 400.
+ 
+-# Fields
+ density = ti.field(dtype=ti.f32, shape=(8, 128, 128, 128, 4))
+ target_image = ti.field(dtype=ti.f32, shape=(8, 4, 128, 128))
+@@ -63,5 +62,4 @@
+ @ti.func
+ def trilinear_interpolation(n, z, y, x, channel):
+-    # Extract integer and fractional parts
+     ix = int(x)
+     iy = int(y)
+@@ -70,11 +68,9 @@
+     fy = y - iy
+     fz = z - iz
+-    
+-    # Clip indices
++
+     ix = clip(ix)
+     iy = clip(iy)
+     iz = clip(iz)
+-    
+-    # Get 8 neighbors
++
+     c000 = density[n, ix, iy, iz, channel]
+     c100 = density[n, ix+1, iy, iz, channel]
+@@ -85,85 +81,68 @@
+     c011 = density[n, ix, iy+1, iz+1, channel]
+     c111 = density[n, ix+1, iy+1, iz+1, channel]
+-    
+-    # Interpolate
++
+     c00 = c000 * (1 - fx) + c100 * fx
+     c10 = c010 * (1 - fx) + c110 * fx
+     c01 = c001 * (1 - fx) + c101 * fx
+     c11 = c011 * (1 - fx) + c111 * fx
+-    
++
+     c0 = c00 * (1 - fy) + c10 * fy
+     c1 = c01 * (1 - fy) + c11 * fy
+-    
++
+     c = c0 * (1 - fz) + c1 * fz
+     return c
+ 
+ @ti.kernel
+-def ray_march():
+-    for n, x, y in target_image:
+-        # Initialize alpha to 0
+-        target_image[n, 3, x, y] = 0.0
+-        
+-        for pixel in range(128 * 128):
+-            px = pixel // 128
+-            py = pixel - px * 128
+-            
+-            # Get pixel coords
+-            px_val = pixel_coords[n, px, py, 0]
+-            py_val = pixel_coords[n, px, py, 1]
+-            
+-            # Compute ray direction
+-            a = (py_val - princpt_y) / focal_y
+-            b = (px_val - princpt_x) / focal_x
+-            
+-            dir_x = cam_rot[n, 0, 0] * a + cam_rot[n, 1, 0] * b + cam_rot[n, 2, 0]
+-            dir_y = cam_rot[n, 0, 1] * a + cam_rot[n, 1, 1] * b + cam_rot[n, 2, 1]
+-            dir_z = cam_rot[n, 0, 2] * a + cam_rot[n, 1, 2] * b + cam_rot[n, 2, 2]
+-            
+-            length = ti.sqrt(dir_x**2 + dir_y**2 + dir_z**2)
+-            dir_x /= length
+-            dir_y /= length
+-            dir_z /= length
+-            
+-            camera_origin_x = cam_pos[n, 0]
+-            camera_origin_y = cam_pos[n, 1]
+-            camera_origin_z = cam_pos[n, 2]
+-            
+-            current_alpha = target_image[n, 3, x, y]
+-            
++def ray_march(res: ti.i32):
++    target_image.fill(0.0)
++    for pixel in range(res * res):
++        for n in range(8):
++            xind = pixel // res
++            yind = pixel - xind * res
++
++            x = pixel_coords[n, xind, yind, 0]
++            y = pixel_coords[n, xind, yind, 1]
++
++            camera_origin = ti.Vector([cam_pos[n, 0], cam_pos[n, 1], cam_pos[n, 2]])
++
++            a = (y - princpt_y) / focal_y
++            b = (x - princpt_x) / focal_x
++
++            dir = ti.Vector([
++                cam_rot[n, 0, 0] * a + cam_rot[n, 1, 0] * b + cam_rot[n, 2, 0],
++                cam_rot[n, 0, 1] * a + cam_rot[n, 1, 1] * b + cam_rot[n, 2, 1],
++                cam_rot[n, 0, 2] * a + cam_rot[n, 1, 2] * b + cam_rot[n, 2, 2]])
++
++            length = ti.sqrt(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2])
++            dir /= length
++
+             for k in range(300):
+-                point_x = camera_origin_x + (k + 1) * dx * dir_x
+-                point_y = camera_origin_y + (k + 1) * dx * dir_y
+-                point_z = camera_origin_z + (k + 1) * dx * dir_z
+-                
++                point = camera_origin + (k + 1) * dx * dir
++
+                 flag = 0
+-                if in_box(point_x, point_y, point_z):
++                if in_box(point[0], point[1], point[2]):
+                     flag = 1
+-                
+-                template_x = (point_x + 1.) * 127 / 2.
+-                template_y = (point_y + 1.) * 127 / 2.
+-                template_z = (point_z + 1.) * 127 / 2.
+-                
++
++                template_x = (point[0] + 1.) * 127 / 2.
++                template_y = (point[1] + 1.) * 127 / 2.
++                template_z = (point[2] + 1.) * 127 / 2.
++
+                 r_interp = trilinear_interpolation(n, template_z, template_y, template_x, 0)
+                 g_interp = trilinear_interpolation(n, template_z, template_y, template_x, 1)
+                 b_interp = trilinear_interpolation(n, template_z, template_y, template_x, 2)
+                 a_interp = trilinear_interpolation(n, template_z, template_y, template_x, 3)
+-                
++
+                 contribution_r = r_interp * flag
+                 contribution_g = g_interp * flag
+                 contribution_b = b_interp * flag
+                 contribution_a = a_interp * flag
+-                
+-                # Compute alpha contribution
+-                new_alpha = ti.min(current_alpha + contribution_a * dx, 1.0)
+-                delta_alpha = new_alpha - current_alpha
+-                
+-                # Accumulate color
+-                target_image[n, 0, x, y] += contribution_r * delta_alpha
+-                target_image[n, 1, x, y] += contribution_g * delta_alpha
+-                target_image[n, 2, x, y] += contribution_b * delta_alpha
+-                
+-                # Update alpha
+-                target_image[n, 3, x, y] = new_alpha
+-                current_alpha = new_alpha
++
++                current_alpha = target_image[n, 3, xind, yind]
++                delta_alpha = (ti.min(current_alpha + contribution_a * dx, 1.0) - current_alpha) * flag
++
++                target_image[n, 0, xind, yind] += contribution_r * delta_alpha
++                target_image[n, 1, xind, yind] += contribution_g * delta_alpha
++                target_image[n, 2, xind, yind] += contribution_b * delta_alpha
++                target_image[n, 3, xind, yind] = ti.min(current_alpha + contribution_a * dx, 1.0)
+ ```
+ 
+@@ -172,5 +151,4 @@
+ *   Points outside the $[-1, 1]^3$ box are ignored via `flag` [S1, unofficial].
+ *   Grid coordinates are clipped to $[0, 127]$ to avoid out-of-bounds access [S1, unofficial].
+-
+ ## Operating characteristics
+ *   **Time Complexity:** $O(N \cdot H \cdot W \cdot K)$ where $N$ is batch size, $H, W$ are image dimensions, and $K$ is number of steps (300) [S1, unofficial].
+@@ -180,8 +158,6 @@
+ *   **When to use:** When using Taichi for differentiable volume rendering and PyTorch compatibility is not critical for gradients [S1, unofficial].
+ *   **When not to use:** When precise gradient alignment with PyTorch is required [S1, unofficial].
+-
+ ## Background
+ Originated from a GitHub issue discussing gradient mismatches between Taichi and PyTorch implementations of differentiable ray marching [S1, unofficial]. The code is based on examples from the Taichi repository [S1, unofficial].
+-
+ ## Sources
+ [S1] Gradients Computed by Taichi Don't Match Gradients Computed by PyTorch, https://github.com/taichi-dev/taichi/issues/2241, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,198 @@
+--- v001.md
++++ v002.md
+@@ -1,77 +1,147 @@
+ # Quadric Error Metrics Simplification
+ 
+-Also called: Garland and Heckbert Simplification, QEM Simplification
++Also called: QEM, QEM Simplification, Quadric Error Metrics
+ 
+ ## Overview
+-Quadric Error Metrics (QEM) Simplification is a mesh simplification algorithm that iteratively collapses edges to reduce polygon count while minimizing geometric error [S1, unofficial]. It differs from topology-preserving methods like Hoppe's Progressive Meshes by allowing non-manifold operations and prioritizing visual fidelity over strict connectivity, making it suitable for multi-resolution representations where appearance matters more than mesh validity [S1, unofficial].
++Quadric Error Metrics (QEM) Simplification is a class of surface simplification algorithms that iteratively collapses edges to reduce polygon count while minimizing local geometric error [S3, unofficial]. It measures the difference in discrete curvature between meshes locally, making it highly effective for piecewise linear surfaces where flat regions require fewer facets to represent the same shape [S3, unofficial]. Unlike strict topology-preserving progressive meshing, standard QEM prioritizes visual fidelity and error minimization over manifold connectivity, though constrained variants exist to enforce enclosure properties [S3, unofficial].
+ 
+ ## How it works
+-**Inputs:** A triangular mesh $M$ (vertices $V$, faces $F$).
+-**Outputs:** A simplified mesh $M'$ with fewer triangles.
++**Inputs:** A triangular mesh $M$ with vertex positions $V$ and face indices $F$ [G].  
++**Outputs:** A simplified mesh $M'$ with a target triangle count [G].  
+ 
+-**Data Structures:**
+-*   **Quadric $Q_i$**: A $4 \times 4$ symmetric matrix for each vertex $i$, representing the accumulated squared distance to all incident planes.
+-*   **Error Map**: Stores the minimum error for each possible edge collapse.
++**Data Structures:**  
++*   **Quadric $Q_i$**: A $4 \times 4$ symmetric matrix for each vertex $i$, accumulating the squared distance to all incident face planes [G].  
++*   **Edge Error Queue**: A priority structure storing candidate edge collapses sorted by their computed error [G].  
+ 
+-**Steps:**
+-1.  **Initialization**: For each vertex $v_i$ with position $\mathbf{p}_i = (x, y, z, 1)^T$, initialize its quadric $Q_i$ as the sum of quadrics of all incident faces. For a face with plane equation $ax+by+cz+d=0$, the plane quadric is $Q_{plane} = \mathbf{n}\mathbf{n}^T$ where $\mathbf{n} = [a, b, c, d]^T$.
+-2.  **Edge Collapse Evaluation**: For each edge $(v_i, v_j)$, calculate the error of collapsing $v_j$ into $v_i$. The error is $E = \mathbf{p}_i^T (Q_i + Q_j) \mathbf{p}_i$.
+-3.  **Selection**: Select the edge with the minimum error.
+-4.  **Collapse**: Remove $v_j$, merge its quadric into $v_i$ ($Q_i \leftarrow Q_i + Q_j$), and update the error map for adjacent edges.
+-5.  **Iteration**: Repeat until the target triangle count is reached.
++**Steps:**  
++1.  **Initialization**: For each vertex $v_i$ at homogeneous position $\mathbf{p}_i = (x, y, z, 1)^T$, initialize $Q_i$ as the zero matrix [G]. For each face, compute its plane equation $ax+by+cz+d=0$, form the normal vector $\mathbf{n} = [a, b, c, d]^T$, and add the plane quadric $Q_{plane} = \mathbf{n}\mathbf{n}^T$ to the quadrics of the face's three vertices [G].  
++2.  **Edge Evaluation**: For each edge $(v_i, v_j)$, compute the collapse error by moving $v_j$ to $v_i$'s position: $E = \mathbf{p}_i^T (Q_i + Q_j) \mathbf{p}_i$ [G].  
++3.  **Selection**: Extract the edge with the minimum error from the queue [G].  
++4.  **Collapse**: Remove $v_j$, merge its quadric into $v_i$ ($Q_i \leftarrow Q_i + Q_j$), update the mesh connectivity, and recalculate errors for affected adjacent edges [G].  
++5.  **Iteration**: Repeat until the target triangle count is reached or no valid edges remain [G].  
+ 
+-**Parameters:**
+-*   `triangle_count`: Target number of triangles. Typical value: `mesh.faces.shape[0] // 10` [S1, unofficial].
+-*   `max_error`: Maximum allowable error per collapse. Example: 40 [S1, unofficial].
+-*   `reduction_factor`: Percentage of triangles to remove. Example: 100 [S1, unofficial].
++**Parameters:**  
++*   `agressiveness`: Controls the simplification speed and quality trade-off. Default value is 7.0 [S1, unofficial]. Maps from the `quality` flag: 0 (fast) $\to$ 8.0, 1 (default) $\to$ 7.0, 2 (best) $\to$ 5.0 [S1, unofficial].  
++*   `smoothIter`: Number of Laplacian smoothing iterations applied before simplification. Default value is 0 [S1, unofficial].  
++*   `target_count`: Target number of triangles after simplification. If $\le 0$, it is computed as $\text{round}(n_{tri} \times \text{reduceFraction})$ [S1, unofficial].  
++*   `reduceFraction`: Target triangle count ratio relative to the original mesh. Typical value is 0.25 [S1, unofficial].  
++
++**Pitfalls:**  
++*   Invalid input mesh: If vertex count is less than 4 or triangle count is less than 2, the program exits with code 1 [S1, unofficial].  
++*   Simplification is skipped if `reduceFraction` $\ge 1.0$ and `quality` $\le 1$, preserving the original mesh for lossless output [S1, unofficial].  
+ 
+ **Pseudocode:**
+ ```python
+-def simplify_quadric(mesh, target_triangles):
++def simplify_quadric(vertices, faces, target_triangles):
+     # Initialize quadrics for all vertices
+-    quadrics = [zero_4x4_matrix() for _ in mesh.vertices]
+-    for face in mesh.faces:
+-        plane = get_plane_equation(face)
+-        plane_quadric = outer_product(plane, plane)
+-        for v_idx in face.vertices:
+-            quadrics[v_idx] += plane_quadric
++    quadrics = [[0.0] * 16 for _ in vertices]
++    
++    # Step 1: Initialization (sources do not provide core initialization details) [G]
++    for face in faces:
++        v0, v1, v2 = face
++        p0, p1, p2 = vertices[v0], vertices[v1], vertices[v2]
++        # Compute plane normal and d from triangle vertices
++        e1 = [p1[i] - p0[i] for i in range(3)]
++        e2 = [p2[i] - p0[i] for i in range(3)]
++        n = [e1[1]*e2[2] - e1[2]*e2[1],
++             e1[2]*e2[0] - e1[0]*e2[2],
++             e1[0]*e2[1] - e1[1]*e2[0]]
++        d = -(n[0]*p0[0] + n[1]*p0[1] + n[2]*p0[2])
++        n.append(d)
++        # Add plane quadric to incident vertices
++        for idx in face:
++            for r in range(4):
++                for c in range(4):
++                    quadrics[idx][r * 4 + c] += n[r] * n[c]
+ 
+-    # Priority queue of edge collapses sorted by error
+-    pq = PriorityQueue()
+-    for edge in mesh.edges:
+-        error = compute_edge_error(edge, quadrics)
+-        pq.push(edge, error)
++    # Build edge error queue
++    edge_queue = []
++    for i, edge in enumerate(mesh_edges(faces)):
++        v1, v2 = edge
++        p1 = vertices[v1] + [1.0]
++        Q = add_quadrics(quadrics[v1], quadrics[v2])
++        error = dot_product(p1, multiply_matrix_vector(Q, p1))
++        edge_queue.append((error, i, v1, v2))
++    edge_queue.sort(key=lambda x: x[0])
+ 
+-    while mesh.triangle_count > target_triangles and not pq.empty():
+-        edge = pq.pop_min()
+-        if edge.is_valid(mesh):
+-            collapse_edge(edge, mesh, quadrics)
+-            update_neighbors(edge, mesh, quadrics, pq)
++    # Steps 2-5: Iterative collapse
++    current_triangles = len(faces)
++    while current_triangles > target_triangles and edge_queue:
++        error, idx, v1, v2 = edge_queue.pop(0)
++        if not is_edge_valid(v1, v2, faces):
++            continue
++        # Collapse v2 into v1
++        quadrics[v1] = add_quadrics(quadrics[v1], quadrics[v2])
++        vertices[v1] = vertices[v2]
++        faces = remove_face_with_v2(faces, v2)
++        current_triangles -= 1
++        # Recalculate errors for affected edges (sources do not provide update details) [G]
++        edge_queue = rebuild_queue(faces, vertices, quadrics, edge_queue)
+ 
+-    return mesh
++    return vertices, faces
+ 
+-def compute_edge_error(edge, quadrics):
+-    v1, v2 = edge.vertices
+-    # Error of collapsing v2 into v1
+-    p1 = v1.position_homogeneous()
+-    Q = quadrics[v1] + quadrics[v2]
+-    return p1.T @ Q @ p1
++def mesh_edges(faces):
++    edges = set()
++    for f in faces:
++        for i in range(3):
++            edges.add((min(f[i], f[(i+1)%3]), max(f[i], f[(i+1)%3])))
++    return list(edges)
++
++def is_edge_valid(v1, v2, faces):
++    return any(v1 in f and v2 in f for f in faces)
++
++def add_quadrics(q1, q2):
++    return [q1[i] + q2[i] for i in range(16)]
++
++def multiply_matrix_vector(M, v):
++    return [sum(M[r*4+c] * v[c] for c in range(4)) for r in range(4)]
++
++def dot_product(u, v):
++    return sum(u[i] * v[i] for i in range(4))
++
++def remove_face_with_v2(faces, v2):
++    return [f for f in faces if v2 not in f]
++
++def rebuild_queue(faces, vertices, quadrics, old_queue):
++    new_queue = []
++    for edge in mesh_edges(faces):
++        v1, v2 = edge
++        p1 = vertices[v1] + [1.0]
++        Q = add_quadrics(quadrics[v1], quadrics[v2])
++        error = dot_product(p1, multiply_matrix_vector(Q, p1))
++        new_queue.append((error, edge))
++    new_queue.sort(key=lambda x: x[0])
++    return new_queue
+ ```
+ 
+ ## Subtopics
+ 
++### [Quadric Error Metric Parameterization](23152-quadric-error-metric-parameterization.md)
++Converts a cluster of triangle error metrics into a compact tuple $(\mathbf{A}, \mathbf{p}, \epsilon)$ that explicitly defines the optimal vertex position $\mathbf{p}$ and the resulting error $\epsilon$, while retaining the matrix $\mathbf{A}$ for further aggregation. It solves the problem of efficiently storing and merging simplification costs in [Quadric Error Metrics Simplification](16816-quadric-error-metrics-simplification.md) by providing a closed-form solution for the vertex location that minimizes the accumulated quadratic error, even when the error matrix is singular. It differs from raw quadric storage by pre-computing the minimum, allowing immediate retrieval of the simplified vertex position without re-solving the linear system during rendering or further simplification steps.
++
+ ### FQMR Simplification
+-A non-topology preserving variant derived from Fast Quadric Mesh Reduction (FQMR), useful for multi-resolution meshes where visual appearance is prioritized over connectivity [S1, unofficial]. It adapts the original QEM algorithm to allow non-manifold operations, making it faster and more robust for large-scale simplification [S1, unofficial]. It is implemented in libraries like `zmesh` via `simplify_fqmr` [S1, unofficial].
++A non-topology preserving mesh simplification algorithm derived from Fast Quadric Mesh Reduction (FQMR), useful for multi-resolution meshes where visual appearance is prioritized over connectivity [S2, unofficial]. It is adapted from `pyfqmr` (Kramer84/pyfqmr-Fast-Quadric-Mesh-Reduction), which is based on the work of Garland and Heckbert (1997) and Hoppe (1999) [S2, unofficial]. Implemented via `zmesh.simplify_fqmr` with parameters like `triangle_count` (e.g., `mesh.faces.shape[0] // 10`) [S2, unofficial].
++
++### Parallel View-Dependent Level-of-Detail Control
++A state-of-the-art method (as of 2012) for parallel view-dependent level-of-detail control, building on Hoppe's work [S3, unofficial]. Requires advanced GPU features like geometry shaders and hardware tessellation, which rules out WebGL implementation [S3, unofficial]. The method is too slow for real-time games with a 16 ms frame budget, requiring 22 ms just for geometry generation even with amortization over multiple frames [S3, unofficial]. It does not work with dynamic geometry since it requires a lot of precalculated edge collapses [S3, unofficial].
++
++### Constrained QEM
++A mesh simplification technique that modifies the standard QEM algorithm by adding an MVC (Mean Value Coordinate) penalty term to encourage the simplified cage to envelop the object geometry and minimize negative MVC weights [S4, unofficial]. Uses a two-stage process: initial constrained simplification followed by further simplification while monitoring MVC weights to balance enclosure quality and detail [S4, unofficial]. On the LEGO scene, the method makes 8.7% of MVC entries non-negative and reduces the magnitude of the smallest negative MVC weight by 99.67% [S4, unofficial]. Unlike standard QEM which produces a cage that encloses the object too tightly, this method produces superior coverage by explicitly optimizing for MVC properties [S4, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: $O(N \log N)$ or $O(N)$ depending on implementation, where $N$ is the number of triangles.
+-*   **Memory Complexity**: $O(N)$ for storing quadrics and edge errors.
+-*   **Performance**: In `zmesh`, a reduction factor of 100 with max error 40 processes ~14.4 labels per second on a specific hardware setup, compared to 433.5 for the original mesh [S1, unofficial].
+-*   **Strengths**: High visual fidelity, fast, handles large meshes well.
+-*   **Limitations**: Does not preserve topology, may produce non-manifold geometry.
++*   **Time Complexity**: Not given in the sources.
++*   **Memory Complexity**: Not given in the sources.
++*   **Performance**: Quadratic error metrics are the dominant approach to mesh simplification, having eliminated almost all other competition, with modern work focusing on implementation and optimization rather than new metric types [S3, unofficial].
++*   **Strengths**: Works exceptionally well both in theory and in practice for piecewise linear meshes, effectively reducing facets in flat regions while preserving main folds [S3, unofficial].
++*   **Limitations**: The sequential nature of edge collapses makes parallel computation difficult, especially on GPUs [S3, unofficial].
++*   **When to use**: General-purpose mesh simplification where visual fidelity and error minimization are prioritized over strict manifold constraints [S3, unofficial].
++*   **When not**: Real-time view-dependent LOD with strict frame budgets or dynamic geometry updates [S3, unofficial].
+ 
+ ## Background
+-Introduced by M. Garland and P. Heckbert in 1997 in "Surface simplification using quadric error metrics" [S1, unofficial]. Extended by H. Hoppe in 1999 with "New Quadric Metric for Simplifying Meshes with Appearance Attributes" [S1, unofficial]. The algorithm is widely used in computer graphics for level-of-detail generation and mesh compression.
++Introduced by Michael Garland and Paul Heckbert in 1997 in "Surface Simplification Using Quadratic Error Metrics" presented at SIGGRAPH 1997 [S2, unofficial][S3, unofficial]. Extended by Hugues Hoppe in 1999 with "New Quadric Metric for Simplifying Meshes with Appearance Attributes" [S2, unofficial]. The method has become the dominant approach in mesh simplification, eliminating almost all competing techniques [S3, unofficial].
+ 
+ ## Sources
+-[S1] seung-lab/zmesh, https://github.com/seung-lab/zmesh, fetched 2026-10-26 (unofficial)+[S1] neurolabusc/nii2mesh, https://github.com/neurolabusc/nii2mesh, fetched 2026-10-26 (unofficial)
++[S2] seung-lab/zmesh, https://github.com/seung-lab/zmesh, fetched 2026-10-26 (unofficial)
++[S3] July 2012 – 0 FPS, https://0fps.net/2012/07/, fetched 2026-10-30 (unofficial)
++[S4] GSDeformer: Direct Cage-based Deformation for 3D Gaussian Splatting, https://doi.org/10.48550/arXiv.2405.15491, fetched 2026-10-30 (unofficial)

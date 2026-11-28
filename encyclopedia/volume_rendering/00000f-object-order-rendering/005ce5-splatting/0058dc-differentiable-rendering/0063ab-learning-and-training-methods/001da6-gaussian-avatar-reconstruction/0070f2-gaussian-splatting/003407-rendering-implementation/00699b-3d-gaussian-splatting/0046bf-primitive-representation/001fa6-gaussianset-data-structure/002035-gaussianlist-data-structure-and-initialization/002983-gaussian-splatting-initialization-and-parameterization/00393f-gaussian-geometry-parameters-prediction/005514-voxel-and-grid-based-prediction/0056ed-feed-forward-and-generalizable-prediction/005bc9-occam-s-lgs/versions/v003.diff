@@ -1,0 +1,153 @@
+--- v002.md
++++ v003.md
+@@ -8,15 +8,15 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A trained 3D Gaussian Splatting model (providing geometry and appearance parameters) and a set of input images with known camera poses. The underlying encoder provides 2D semantic features $f \in \mathbb{R}^d$ for each pixel.
++*   **Input:** A trained 3D Gaussian Splatting model (providing geometry and appearance parameters) and a set of input images with known camera poses [S1, unofficial]. The underlying encoder provides 2D semantic features $f \in \mathbb{R}^d$ for each pixel [S1, unofficial].
+ *   **Output:** A set of 3D Gaussians $G = \{G_i\}_{i=1}^N$, where each Gaussian $G_i$ is augmented with a high-dimensional semantic feature vector $f_i \in \mathbb{R}^d$ [S1, unofficial].
+ 
+ **Data Structures:**
+ The primitive Gaussian representation is defined as $G = \{x, \Sigma, c, o\}$, where:
+-*   $x \in \mathbb{R}^3$ is the 3D position.
+-*   $\Sigma \in \mathbb{R}^{6}$ (or $\mathbb{R}^{2\times2}$ when projected) is the covariance matrix.
+-*   $c$ is the color (or Spherical Harmonics parameters).
++*   $x \in \mathbb{R}^3$ is the 3D position [S1, unofficial].
++*   $\Sigma \in \mathbb{R}^{6}$ (or $\mathbb{R}^{2\times2}$ when projected) is the covariance matrix [S1, unofficial].
++*   $c$ is the color (or Spherical Harmonics parameters) [S1, unofficial].
+ *   $o \in \mathbb{R}$ is the opacity [S1, unofficial].
+ 
+-For language splatting, this is augmented to include the semantic feature $f_i$. The rendering process uses a tile-based sorting strategy, partitioning the image into tiles typically spanning $16 \times 16$ pixels [S1, unofficial].
++For language splatting, this is augmented to include the semantic feature $f_i$ [S1, unofficial]. The rendering process uses a tile-based sorting strategy, partitioning the image into tiles typically spanning $16 \times 16$ pixels [S1, unofficial].
+ 
+ **Mathematical Formulation:**
+@@ -36,7 +36,7 @@
+ **Algorithm Steps:**
+ For each Gaussian $G_i$ in the scene:
+-1.  Identify the set of views $S_i$ where $G_i$ is visible (within the view frustum).
+-2.  For each view $s \in S_i$, determine the Gaussian’s center projected pixel location $p_{si} = \lfloor x'_i \rfloor$.
+-3.  During the standard tile-based rendering pass, record the alpha blending weight $w_{si}$ and extract the 2D feature $f_{si}$ at pixel $p_{si}$ from the pre-computed feature map.
++1.  Identify the set of views $S_i$ where $G_i$ is visible (within the view frustum) [S1, unofficial].
++2.  For each view $s \in S_i$, determine the Gaussian’s center projected pixel location $p_{si} = \lfloor x'_i \rfloor$ [S1, unofficial].
++3.  During the standard tile-based rendering pass, record the alpha blending weight $w_{si}$ and extract the 2D feature $f_{si}$ at pixel $p_{si}$ from the pre-computed feature map [S1, unofficial].
+ 4.  Compute the weighted average of the multi-view features to assign to $G_i$:
+     $$ f_i = \frac{\sum_{s \in S_i} w_{si} f_{si}}{\sum_{s \in S_i} w_{si}} $$
+@@ -45,61 +45,37 @@
+ **Pseudocode:**
+ ```python
+-def occam_lgs_lift(gaussians, views, feature_extractor):
++import numpy as np
++
++def occam_lgs_lift(gaussians, views, feature_maps):
+     """
+-    gaussians: List of Gaussian objects with attributes x, sigma, c, o.
+-    views: List of view objects with attributes camera_pose, image, feature_map.
+-    feature_extractor: Function to extract 2D features from images.
++    gaussians: List of dicts with keys 'x' (3,), 'o' (float), 'sigma_2d_inv' (2x2).
++    views: List of dicts with keys 'K_inv' (3x3), 'H', 'W', 'feature_map' (H, W, d).
++    feature_maps: List of numpy arrays matching views.
+     """
+-    # Pre-compute 2D features for all views
+-    view_features = []
+-    for view in views:
+-        # Extract high-dimensional semantic features for the entire image
+-        # Shape: (H, W, d)
+-        feats = feature_extractor(view.image)
+-        view_features.append(feats)
+-
+-    # Initialize 3D Gaussian features
+     for g in gaussians:
+-        g.semantic_feature = None
+-
+-    # Process each Gaussian
+-    for g in gaussians:
++        g['semantic_feature'] = None
+         visible_views = []
+         total_weight = 0.0
+-        weighted_feature_sum = 0.0
++        weighted_feature_sum = np.zeros(1) # Placeholder for dimension d, updated dynamically
+ 
+-        # Step 1 & 2: Identify visible views and projected locations
+-        for i, view in enumerate(views):
+-            # Project 3D center x to 2D pixel coordinates
+-            x_prime = project_3d_to_2d(g.x, view.camera_pose)
++        for view, fmap in zip(views, feature_maps):
++            # Step 1 & 2: Project 3D center to 2D pixel coordinates
++            x_3d = g['x']
++            x_2d_hom = view['K_inv'] @ np.append(x_3d, 1.0)
++            x_2d = x_2d_hom[:2] / x_2d_hom[2]
++            p_x, p_y = int(x_2d[0]), int(x_2d[1])
+             
+-            # Check if within view frustum and bounds
+-            if not is_in_frustum(x_prime, view.resolution):
++            # Check frustum bounds (is_in_frustum replacement)
++            if not (0 <= p_x < view['W'] and 0 <= p_y < view['H']):
+                 continue
++                
++            # Step 3: Compute alpha blending weight w_si (compute_alpha replacement)
++            diff = np.array([p_x - x_2d[0], p_y - x_2d[1]])
++            alpha = g['o'] * np.exp(-0.5 * diff @ g['sigma_2d_inv'] @ diff)
++            w_si = alpha # Contribution weight for the center pixel
+             
+-            # Step 2: Determine pixel location
+-            p_x, p_y = int(round(x_prime.x)), int(round(x_prime.y))
+-            
+-            # Step 3: Compute alpha blending weight w_i
+-            # Note: In standard rasterization, this requires sorting and blending.
+-            # Occam's LGS leverages the forward pass to get the effective weight.
+-            # Here we approximate by computing the Gaussian's contribution to the center pixel.
+-            # A more precise implementation would capture the exact w_i from the rasterizer.
+-            alpha = compute_alpha(g.o, x_prime, g.sigma, view.projection_matrix)
+-            
+-            # The weight w_i in the context of aggregation is the contribution
+-            # of this Gaussian to the pixel. In the absence of occlusion from other 
+-            # Gaussians at the exact center, w_i approximates alpha. 
+-            # However, the paper implies using the standard alpha blending weight.
+-            # For simplicity in this lift, we use the alpha value as the weight 
+-            # for the feature at the center, assuming the feature map is static.
+-            # A rigorous implementation would query the rasterizer's output buffer 
+-            # for the specific weight w_i associated with this Gaussian's contribution.
+-            w_i = alpha 
+-            
+-            # Extract 2D feature at the projected pixel
+-            f_i = view_features[i][p_y, p_x]
+-            
+-            visible_views.append((w_i, f_i))
++            # Extract 2D feature at projected pixel
++            f_si = fmap[p_y, p_x]
++            visible_views.append((w_si, f_si))
+ 
+         # Step 4: Compute weighted average
+@@ -108,23 +84,21 @@
+                 total_weight += w
+                 weighted_feature_sum += w * f
++            if total_weight > 0:
++                g['semantic_feature'] = weighted_feature_sum / total_weight
++            else:
++                g['semantic_feature'] = np.zeros(f.shape[0])
++        else:
++            g['semantic_feature'] = np.zeros(f.shape[0])
+             
+-            if total_weight > 0:
+-                g.semantic_feature = weighted_feature_sum / total_weight
+-            else:
+-                g.semantic_feature = 0.0 # Or handle as invisible
+-        else:
+-            g.semantic_feature = 0.0 # Invisible Gaussian
+-
+     return gaussians
+ ```
+-*[G] The pseudocode approximates the extraction of $w_i$. In a real implementation, one would modify the rasterizer to output the specific weight $w_i$ contributed by each Gaussian to the pixel, rather than recomputing it from scratch, to ensure consistency with the color rendering pass.*
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Memory/Compute:** Explicit rendering of semantics is expensive due to high dimensionality $d \gg 3$, causing cache misses in GPU shaders [S1, unofficial]. Occam's LGS avoids this by aggregating in 3D space.
+-*   **Occlusion:** The method relies on the forward rendering pass, which naturally handles occlusion via tile-based sorting. Only visible features are aggregated [S1, unofficial].
++*   **Memory/Compute:** Explicit rendering of semantics is expensive due to high dimensionality $d \gg 3$, causing cache misses in GPU shaders [S1, unofficial]. Occam's LGS avoids this by aggregating in 3D space [S1, unofficial].
++*   **Occlusion:** View frustum culling and tile-based sorting naturally handle occluded Gaussians, ensuring only visible features are aggregated [S1, unofficial].
+ *   **Precision:** Projecting 3D centers to 2D pixels involves rounding ($\lfloor x'_i \rfloor$). This discretization may introduce minor alignment errors between the feature map and the Gaussian center [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The method is training-free and requires only a single forward pass through the views. It efficiently completes the lifting of 512-dimensional features to 3D in less than one minute [S1, unofficial].
++*   **Time Complexity:** The method is training-free and requires only a single forward pass through the views [S1, unofficial]. It efficiently completes the lifting of 512-dimensional features to 3D in less than one minute [S1, unofficial].
+ *   **Memory Complexity:** It does not require storing large intermediate feature volumes for explicit rendering, reducing memory overhead compared to methods that render features per pixel [S1, unofficial].
+ *   **Performance:** Offers a speed-up of two orders of magnitude compared to existing methods that rely on cumbersome techniques like iterative optimization or quantization [S1, unofficial].

@@ -1,0 +1,63 @@
+--- v003.md
++++ v004.md
+@@ -19,5 +19,5 @@
+ - `voxel_features`: Tensor of shape $(M, C)$, where $M$ is the number of unique voxels.
+ - `voxel_centers`: Tensor of shape $(M, 3)$ representing the center coordinates of each voxel.
+-- `unique_voxel_indices`: Tensor of shape $(M, 3)$ containing the discrete grid indices for each voxel.
++- `unique_voxel_indices`: Tensor of shape $(M, D)$ containing the discrete grid indices for each voxel, where $D$ is the dimensionality after concatenation.
+ - `unique_hash`: Tensor of shape $(M,)$ containing unique hash identifiers.
+ 
+@@ -31,5 +31,5 @@
+    $$ \text{voxel\_indices}_i = \left\lfloor \frac{\text{points}_i - \text{min\_coord}}{\text{voxel\_size}} \right\rfloor $$
+    If `cat_batch_ids` is True, the batch ID is appended to the index calculation to prevent collisions between batches [S1, unofficial].
+-2. **Hash Indices**: Map the 3D voxel indices to a 1D unique hash identifier using a hash function $H$ [S1, unofficial].
++2. **Hash Indices**: Map the voxel indices to a 1D unique hash identifier using a hash function $H$ [S1, unofficial].
+    $$ \text{voxel\_hash}_i = H(\text{voxel\_indices}_i) $$
+ 3. **Identify Unique Voxels**: Find the unique hash values and map each point to its corresponding unique voxel ID [S1, unofficial].
+@@ -46,5 +46,5 @@
+    where $w_i$ is the depth confidence if provided, otherwise $w_i=1$ [G].
+ 6. **Retrieve Representative Indices**: To get the discrete grid indices for each unique voxel, find the first occurrence of each unique hash in the original point list [S1, unofficial].
+-   - Initialize `min_original_indices_per_unique_id` with a large value.
++   - Initialize `min_original_indices_per_unique_id` with a large value [S1, unofficial].
+    - Use `scatter_reduce` with `reduce='amin'` on `inverse_id` using the original point indices:
+      $$ \text{first\_occurrence\_indices}[j] = \min \{ i \mid \text{inverse\_id}_i = j \} $$
+@@ -81,5 +81,5 @@
+         voxel_features: (M, C) Aggregated features.
+         voxel_centers: (M, 3) Voxel centers.
+-        unique_voxel_indices: (M, 3) Discrete voxel indices.
++        unique_voxel_indices: (M, D) Discrete voxel indices.
+         unique_hash: (M,) Unique hash identifiers.
+     """
+@@ -126,19 +126,17 @@
+     """Computes voxel indices for points."""
+     min_coord = bounding_boxes[0]
+-    max_coord = bounding_boxes[1]
+     pts = points - min_coord if shift else points
+     indices = torch.floor(pts / voxel_size).long()
+-    indices = torch.clamp(indices, 0, ((max_coord - min_coord) / voxel_size).long())
++    max_indices = ((bounding_boxes[1] - bounding_boxes[0]) / voxel_size).long()
++    indices = torch.clamp(indices, 0, max_indices)
+     if cat_batch_ids:
+-        batch_offsets = torch.zeros_like(batch_ids, dtype=torch.long)
+-        batch_offsets[1:] = torch.cumsum(torch.bincount(batch_ids, minlength=torch.max(batch_ids) + 1)[:-1], dim=0)
+-        indices = indices + batch_offsets.unsqueeze(1)
++        indices = torch.cat([indices, batch_ids.unsqueeze(1)], dim=1)
+     return indices
+ 
+ def hash_voxel_indices(voxel_indices):
+     """Hashes voxel indices to unique identifiers."""
+-    # Standard linearization for 3D indices [G]
+-    H1, H2 = 1000000, 1000
+-    return voxel_indices[:, 0] * H1 + voxel_indices[:, 1] * H2 + voxel_indices[:, 2]
++    # Standard linearization for variable-dimensional indices [G]
++    stride = torch.cumprod(torch.cat([torch.tensor([1], device=voxel_indices.device), voxel_indices.max(dim=0)[0] + 2]), dim=0)[:-1]
++    return (voxel_indices * stride).sum(dim=1)
+ 
+ def get_vox_centers_from_points(points, depth_conf, inverse_id, num_voxels):
+@@ -185,5 +183,5 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity**: Dominated by hashing, `torch.unique`, and scatter aggregations over $N$ points and $M$ unique voxels. Not given in the sources.
++- **Time Complexity**: Not given in the sources.
+ - **Memory Complexity**: $O(N)$ for intermediate tensors and $O(M)$ for the output grid, where $M$ is the number of unique voxels [S1, unofficial].
+ - **Strengths**: Dynamically allocates only for occupied voxels, supports multi-feature aggregation, and is deterministic [S1, unofficial].

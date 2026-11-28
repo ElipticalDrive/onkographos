@@ -1,0 +1,206 @@
+--- v002.md
++++ v003.md
+@@ -3,108 +3,119 @@
+ 
+ ## Overview
+-Z-order and Hilbert encoding map $N$-dimensional spatial coordinates to a 1D linear index to optimize cache locality in volume rendering and spatial indexing [S1, S8, unofficial]. Unlike arithmetic strides which suffer from poor locality across slices, these space-filling curves ensure that points close in Euclidean distance have close linear indices [S1, S8, unofficial]. Z-order uses bit-interleaving for simplicity, while Hilbert curves provide superior locality at the cost of higher computational complexity [S1, unofficial].
++Z-Order and Hilbert encoding map $N$-dimensional voxel coordinates to 1D linear indices to optimize spatial locality in contiguous memory layouts [S1, unofficial]. Unlike Morton codes which use simple bit-interleaving, Hilbert encoding uses a recursive curve traversal to minimize the distance between adjacent linear indices, offering superior cache coherence for streaming workloads [G]. These methods solve the problem of scattered memory access during volume rendering by ensuring that spatially adjacent voxels are stored near each other in the buffer [G].
+ 
+ ## How it works
+-### Inputs and Outputs
+-- **Inputs**: $N$-dimensional integer coordinates $(x_0, x_1, \dots, x_{N-1})$ and the bit-width $B$ of the coordinate space (typically 32 or 64 bits).
+-- **Outputs**: A 1D linear index $I$ (encoded) or the original coordinates (decoded).
++**Inputs:**
++*   `coords`: An array of $N$-dimensional integer coordinates $(x_0, x_1, \dots, x_{N-1})$.
++*   `bits`: The number of bits per dimension (typically 10–16 for GPU textures).
++*   `mode`: 'z_order' or 'hilbert'.
+ 
+-### Data Structures
+-- **Encoded Index**: A single integer of width $N \times B$ bits.
+-- **Decoded Coordinates**: An array of $N$ integers, each of width $B$ bits.
++**Outputs:**
++*   `index`: A single 64-bit integer representing the linear position.
+ 
+-### Algorithm: Z-Order (Morton Code) Encoding
+-Z-order encoding interleaves the bits of the input coordinates.
++**Data Structures:**
++*   `index`: 64-bit unsigned integer.
++*   `coords`: Array of integers, each fitting within `bits`.
+ 
+-1. Initialize $I = 0$.
+-2. For each dimension $d$ from $0$ to $N-1$:
+-   - Extract the $b$-th bit of $x_d$: $bit = (x_d \gg b) \& 1$.
+-   - Set the bit at position $d + N \times b$ in $I$: $I |= (bit \ll (d + N \times b))$.
+-3. Return $I$.
++**Steps:**
+ 
+-**Pseudocode (3D, 32-bit):**
++### Z-Order (Morton Code)
++1.  **Bit Interleaving:** For each dimension $d$, extract the $b$-th bit of $x_d$.
++2.  **Pack:** Place the $b$-th bit of $x_0$ at bit position $b \cdot N$, $x_1$ at $(b \cdot N) + 1$, etc.
++3.  **Result:** The resulting integer is the Z-order code.
++
++Formula for 3D ($N=3$):
++$$ I = \sum_{b=0}^{bits-1} \left( (x_0 \gg b \& 1) \ll (3b) + (x_1 \gg b \& 1) \ll (3b+1) + (x_2 \gg b \& 1) \ll (3b+2) \right) $$
++
++### Hilbert Encoding
++1.  **Gray Code Conversion:** Convert coordinates to Gray code to ensure adjacent integers differ by one bit.
++2.  **Recursive Reflection:** Apply a transformation matrix based on the quadrant of the current sub-cube. The direction of traversal depends on the parity of the bits processed so far.
++3.  **Bit Packing:** Interleave the transformed bits similarly to Z-order.
++
++Pseudocode for Hilbert Encode (3D, 16-bit total, 5 bits per dim):
++
+ ```python
+-def z_order_encode(x, y, z):
+-    # Interleave bits of x, y, z
+-    # Assume x, y, z are 32-bit integers
+-    i = 0
+-    for b in range(32):
+-        i |= ((x & (1 << b)) << (2 * b))
+-        i |= ((y & (1 << b)) << (2 * b + 1))
+-        i |= ((z & (1 << b)) << (2 * b + 2))
+-    return i
++def hilbert_encode_3d(x, y, z, bits_per_dim=5):
++    """
++    Encodes 3D coordinates into a Hilbert index.
++    Assumes x, y, z are non-negative integers < 2^bits_per_dim.
++    """
++    n = 1 << (bits_per_dim - 1)
++    rx, ry, rz = 0, 0, 0
++    r = x | (y << 1) | (z << 2)
++    
++    for s in range(bits_per_dim - 1):
++        d = n >> s
++        rx = 1 if (x & d) else 0
++        ry = 1 if (y & d) else 0
++        rz = 1 if (z & d) else 0
++        
++        # If the right bit of x is 1, invert the order of the sub-cube
++        if rx == 1:
++            # Swap x and y
++            x, y = y, x
++            # Invert y
++            y = d - 1 - y
++        # If the right bit of y is 1, invert x and z
++        if ry == 1:
++            # Swap x and z
++            x, z = z, x
++            # Invert z
++            z = d - 1 - z
++        # If the right bit of z is 1, invert y and z
++        if rz == 1:
++            # Swap y and z
++            y, z = z, y
++            # Invert z
++            z = d - 1 - z
++            
++    # Final interleaving
++    index = 0
++    for i in range(bits_per_dim):
++        index |= ((x >> i) & 1) << (3 * i)
++        index |= ((y >> i) & 1) << (3 * i + 1)
++        index |= ((z >> i) & 1) << (3 * i + 2)
++        
++    return index
+ ```
+-*Note: The above pseudocode is a simplified bit-interleaving logic. Efficient implementations use parallel bit manipulation instructions or lookup tables [S1, unofficial].*
+ 
+-### Algorithm: Hilbert Curve Encoding
+-Hilbert encoding maps coordinates by traversing a recursive space-filling curve. The mapping depends on the dimension and the orientation of the curve at each recursive step.
+-
+-1. Initialize $I = 0$.
+-2. For each bit position $b$ from $B-1$ down to $0$:
+-   - Determine the quadrant $q$ containing the point $(x_b, y_b, z_b)$ based on the current orientation.
+-   - Update $I$ by adding the offset corresponding to quadrant $q$.
+-   - Update the coordinates $(x, y, z)$ and the orientation matrix to reflect the recursive step into the selected quadrant.
+-3. Return $I$.
+-
+-**Pseudocode (3D, simplified conceptual):**
+-```python
+-def hilbert_encode(x, y, z):
+-    n = 1 << 32  # Assuming 32-bit coordinates
+-    d = 0
+-    # Recursive logic implemented iteratively
+-    for b in range(31, -1, -1):
+-        rx = 1 & (x >> b)
+-        ry = 1 & (y >> b)
+-        rz = 1 & (z >> b)
+-        
+-        # Determine quadrant and update orientation
+-        # This involves rotating/reflection matrices based on current orientation
+-        # and the bits rx, ry, rz
+-        # ... (complex bit manipulation logic) ...
+-        
+-        # Update d (linear index)
+-        d = (d << 2) | quadrant_index
+-        
+-        # Update coordinates for next iteration
+-        x, y, z = transform(x, y, z, quadrant_index, orientation)
+-        
+-    return d
+-```
+-*Note: Exact bit-manipulation formulas for Hilbert curves are complex and dimension-dependent [S1, unofficial].*
+-
+-### Decoding
+-Decoding reverses the encoding process.
+-- **Z-Order Decoding**: Extract bits from $I$ at intervals of $N$ and distribute them to the respective coordinate dimensions.
+-- **Hilbert Decoding**: Traverse the curve in reverse, using the linear index to determine the quadrant at each step and updating the coordinates accordingly.
+-
+-### Parameters
+-- **Bit-width ($B$)**: Typically 32 or 64 bits, matching the coordinate precision.
+-- **Dimension ($N$)**: Typically 3 for volume rendering.
+-
+-### Edge Cases and Pitfalls
+-- **Precision**: Bit-interleaving requires sufficient integer width to avoid overflow. For 3D 32-bit coordinates, the Z-order code requires 96 bits, which may exceed standard integer types.
+-- **Boundaries**: Coordinates must be within the defined range $[0, 2^B - 1]$.
+-- **Degenerate Input**: Zero coordinates are handled correctly by both methods.
++**Parameters:**
++*   `bits_per_dim`: Typically 10 for 1024^3 volumes. Total index size is $3 \times bits\_per\_dim$.
++*   **Edge Cases:** Coordinates must be within bounds $[0, 2^{bits}-1]$. Negative coordinates require offsetting or two's complement handling [G].
+ 
+ ## Subtopics
+ 
+-### Morton Code Sorting for Brick Layout
+-Morton code sorting is used to organize sub-bricks within a parent brick structure to ensure spatial coherence in the output buffer [S2, unofficial]. Sub-bricks are sorted by their Morton codes within each group during construction, guaranteeing that the global buffer remains spatially coherent as bricks are added level by level [S2, unofficial]. An enumeration sort is employed, leveraging a 1:1 mapping between threads and sub-bricks, with a maximum of 64 sub-bricks per parent [S2, unofficial]. This approach optimizes cache performance during rendering by ensuring nearby threads access adjacent bricks [S2, unofficial].
++### [Morton Code Sorting for Brick Layout](9894-morton-code-sorting-for-brick-layout.md)
++Morton Code Sorting for Brick Layout organizes sub-bricks into a global buffer to maximize spatial coherence. It sets itself apart by operating iteratively at each level of the brick hierarchy, using enumeration sort to guarantee compactness. Choose this when rendering hierarchical volumes with fixed-size bricks to minimize cache misses during ray marching.
+ 
+ ### Serialized-Morton/ASTC
+-Serialized-Morton/ASTC is a variant that rearranges voxel attributes into correlations to enable the reuse of the ASTC codec for compression [S3, unofficial]. While it removes 2D layouts and reduces addressing overhead, it requires mapping voxel locations to serialized attributes for random access [S3, unofficial]. This rearrangement can weaken the spatial correlations available to UV mapping alone, potentially impacting compression efficiency compared to standard 3D layouts [S3, unofficial]. It is used in mesh texture compression where GPU-resident low-latency random-access decoding is required [S3, unofficial].
++Serialized-Morton/ASTC rearranges voxel attributes into correlations to enable ASTC codec reuse [S2, unofficial]. It differs from standard Morton layouts by prioritizing compression efficiency over pure spatial locality, requiring a mapping from voxel locations to serialized attributes for random access [S2, unofficial]. Choose this when bandwidth is the bottleneck and ASTC hardware decompression is available. Note that rearranging attributes can weaken spatial correlations available to UV mapping alone [S2, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity**: Z-order encoding/decoding is $O(B)$ where $B$ is the bit-width, often optimized to $O(1)$ with parallel bit manipulation instructions. Hilbert encoding/decoding is also $O(B)$ but with a higher constant factor due to orientation updates.
+-- **Memory Complexity**: $O(1)$ for the index itself.
+-- **Performance**: Z-order is faster to compute but has lower locality than Hilbert. Hilbert provides better cache locality, which can lead to significant performance gains in rendering and spatial queries despite higher encoding/decoding costs [S1, S2, unofficial].
+-- **Strengths**: Excellent spatial locality, compact representation, efficient for sorting and indexing.
+-- **Limitations**: Z-order locality degrades at larger distances compared to Hilbert. Hilbert computation is more complex. Both require integer coordinates.
++**Time Complexity:**
++*   Encoding/Decoding: $O(N \cdot B)$ where $N$ is dimensions and $B$ is bits per dimension.
++*   Sorting: $O(K \log K)$ or $O(K)$ with radix sort, where $K$ is the number of voxels/bricks.
++
++**Memory Complexity:**
++*   Index storage: $O(K)$ integers.
++*   Serialized-Morton/ASTC variants require more memory than 3DNTC at matched quality due to addressing overhead [S2, unofficial].
++
++**Performance:**
++*   Hilbert encoding provides better cache locality than Z-order for continuous paths, reducing cache misses in streaming renderers [G].
++*   Z-order is faster to compute due to simpler bit manipulation [G].
++*   Serialized-Morton/ASTC averages 10.8 ms per frame on MPEG and 23.1 ms on AOM for specific hardware/resolutions, with addressing accounting for a significant portion of latency [S2, unofficial].
++
++**Strengths:**
++*   Excellent spatial locality for both methods.
++*   Hilbert minimizes jumps between distant memory locations.
++
++**Limitations:**
++*   Hilbert encoding is computationally more expensive than Z-order.
++*   Serialized variants introduce addressing overhead and memory costs [S2, unofficial].
+ 
+ ## Background
+-Z-order (Morton code) was introduced by G. M. Morton in 1966 [S1, unofficial]. Hilbert curves were introduced by David Hilbert in 1891 [S1, unofficial]. These methods are widely used in volume rendering, spatial databases, and image processing to optimize data layout and access patterns [S1, S8, unofficial]. The provided sources highlight their use in GPU-based voxel rendering and texture compression [S1, S2, S3, unofficial].
++Z-order (Morton code) was introduced by G. M. Morton in 1966 [G]. Hilbert curves were used in spatial indexing by R. R. Peano and later David Hilbert [G]. Modern GPU implementations (e.g., `o-voxel-gpu`) provide optimized CUDA kernels for these encodings to support real-time volume rendering [S1, unofficial]. Serialized-Morton/ASTC was proposed in recent research to leverage texture compression hardware for mesh and volume data [S2, unofficial].
+ 
+ ## Sources
+ [S1] quantaji/o-voxel-gpu, https://github.com/quantaji/o-voxel-gpu, fetched 2026-10-29 (unofficial)
+-[S2] PDF Real-time Rendering and Construction of Signed Distance Fields, https://jambuttenshaw.github.io/devportfolio/Dissertation.pdf, fetched 2026-10-28 (unofficial)
+-[S3] Beyond UV Mapping: Mesh Texture Compression via Surface-Aligned Texture Fields, https://doi.org/10.48550/arxiv.2609.23606, fetched 2026-10-26 (unofficial)+[S2] Beyond UV Mapping: Mesh Texture Compression via Surface-Aligned Texture Fields, https://doi.org/10.48550/arxiv.2609.23606, fetched 2026-10-26 (unofficial)

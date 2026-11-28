@@ -1,0 +1,92 @@
+# Computation Reordering
+
+Also called: Out-of-order execution, Rescheduling
+
+## Overview
+Computation reordering is a performance optimization technique that reschedules independent operations to exploit data coherence, prioritizing computations on data currently in memory while delaying those requiring data from slower storage [S1, unofficial]. It solves the performance bottleneck of out-of-core rendering by maximizing the utility of cached data. Unlike [Rendering Optimization Strategies](11933-rendering-optimization-strategies.md) which may focus on algorithmic complexity, or [Lighting Model Optimization](12880-lighting-model-optimization.md) which reduces per-sample cost, this method reorders the execution sequence itself. It is distinct from [Pharr et al.'s](11933-rendering-optimization-strategies.md) ray tracing system in that it targets interactivity using an octree, whereas their system targets photorealism using a regular grid [S1, unofficial].
+
+## How it works
+**Inputs:** A set of independent rendering operations (e.g., rasterization of octree nodes or ray intersection tests); a memory hierarchy with fast on-chip memory and slower disk storage.
+**Outputs:** A final rendered image (or frame) identical to the result of in-order execution.
+
+**Data Structures:**
+1.  **Node/Primitive List:** Contains references to geometric data (octree nodes or rays).
+2.  **Memory Status Flag:** A boolean or state indicator for each node/primitive indicating if its data is currently resident in fast memory (RAM/Cache) or on disk.
+3.  **Z-Buffer:** Standard depth buffer used to resolve visibility at the pixel level [S1, unofficial].
+
+**Steps:**
+1.  **Identify Independence:** Verify that the final result does not depend on the execution order of the operations. If operations have dependencies, reordering is invalid [S1, unofficial].
+2.  **Classify Data Location:** For each operation, determine if the required data is in memory or on disk.
+3.  **Reschedule Execution:**
+    *   Prioritize operations where data is in memory.
+    *   Execute these operations immediately.
+    *   Queue operations requiring disk data for later execution.
+    *   Initiate asynchronous fetches for disk data in the background [S1, unofficial].
+4.  **Render:** Perform the rendering operations (e.g., rasterization or ray casting) in the rescheduled order.
+5.  **Resolve Visibility:** Use the Z-buffer algorithm to sort primitives at the pixel level, ensuring the final image is correct regardless of the execution order [S1, unofficial].
+6.  **Fetch and Execute:** Once disk data is fetched into memory, execute the queued operations [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_with_computation_reordering(scene_nodes):
+    # Initialize Z-buffer
+    z_buffer = initialize_z_buffer(scene.resolution)
+    
+    # Separate nodes into memory and disk queues
+    memory_queue = []
+    disk_queue = []
+    
+    for node in scene_nodes:
+        if node.data_in_memory:
+            memory_queue.append(node)
+        else:
+            disk_queue.append(node)
+            start_async_fetch(node) # [G] Initiates background I/O
+            
+    # Execute memory-resident nodes first
+    for node in memory_queue:
+        rasterize_node(node, z_buffer)
+        
+    # Wait for disk fetches and execute remaining nodes
+    # In a real system, this might be interleaved or batched
+    for node in disk_queue:
+        wait_for_fetch(node) # [G] Blocks until data is available
+        rasterize_node(node, z_buffer)
+        
+    return z_buffer.to_image()
+```
+
+**Parameters:**
+*   **Threshold for "Memory":** Not given in the sources. Typically defined by RAM capacity or cache size.
+*   **Fetch Latency:** Not given in the sources. Determines the optimal batch size for disk operations.
+
+**Edge Cases and Pitfalls:**
+*   **Dependency Violation:** If the final result depends on execution order, rescheduling produces incorrect results [S1, unofficial].
+*   **Thrashing:** If the working set exceeds memory, frequent swapping may negate performance gains. Not given in the sources.
+*   **I/O Bottleneck:** If disk fetches are slower than computation, the GPU/CPU may starve. Not given in the sources.
+
+## Subtopics
+
+### Out-of-Order Sample Issuance
+A cache-aware sample issuance mechanism that prioritizes issuing samples whose features are already on-chip (hits) while fetching missed features in parallel, hiding EMA (Empty Memory Access) delay [S2]. It receives the Computed Candidate Ray Packet (CCRP) with sample position information (CCCRP_SP) and instructs the conflict-free interpolation unit (CFIU) to prefetch necessary features for cache misses while interpolating features for cache hits [S2]. This yields an 8.45% sample point throughput improvement [S2]. It is chosen when minimizing latency from cache misses in neural rendering or feature-based volume rendering is critical [S2].
+
+## Operating characteristics
+**Time Complexity:** Not given in the sources.
+**Memory Complexity:** Depends on the size of the working set held in memory.
+**Measured Performance:**
+*   In the context of [Pharr et al.](11933-rendering-optimization-strategies.md), computation reordering achieved "large rendering speedups" for datasets larger than memory [S1, unofficial].
+*   In the context of Out-of-Order Sample Issuance, it yields an 8.45% sample point throughput improvement [S2].
+*   The system attains steady-state cache hit rates of 96.27% (micro grid bitmap), 98.65% (feature vectors), and 96.38% (MLP weights) [S2].
+**Strengths:** Exploits coherence; improves performance for out-of-core datasets; final image is unaffected by order due to Z-buffering [S1, unofficial].
+**Limitations:** Requires independent operations; relies on effective memory management [S1, unofficial].
+**When to use:** When rendering large datasets that exceed main memory and operations are independent [S1, unofficial].
+**When not to use:** When operations have strict execution dependencies [S1, unofficial].
+
+## Background
+Computation reordering was developed by Pharr et al. for a ray tracing system handling datasets larger than memory [S1, unofficial]. Their system used a regular grid and focused on photorealism [S1, unofficial]. The technique described in [S1, unofficial] adapts this idea for interactivity using an octree. The concept is also applied in modern neural rendering hardware, such as the OoO sample issuer in edge coprocessors for neural rendering [S2].
+
+## Sources
+[S1] New Techniques for Out-Of-Core Visualization of Large Datasets, https://ctsilva.github.io/thesis/wagner-correa-thesis.pdf, fetched 2026-10-30 (unofficial)
+[S2] An Energy-Efficient Edge Coprocessor for Neural Rendering With Explicit Data Reuse Strategies, https://doi.org/10.1109/tvlsi.2025.3641653, fetched 2026-10-26

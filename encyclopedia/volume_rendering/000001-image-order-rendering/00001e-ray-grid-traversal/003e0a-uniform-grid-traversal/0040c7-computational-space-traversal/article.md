@@ -1,0 +1,96 @@
+# Computational Space Traversal
+
+Also called: Frühauf's Curvilinear Grid Traversal, Frühauf's method
+
+## Overview
+Computational Space Traversal renders data on curvilinear grids by mapping the irregular physical domain to a regular computational space [S1]. It solves the difficulty of resampling scalar values along a ray in distorted geometry by performing the traversal in the regular computational space, where standard incremental grid traversal applies [S1]. Unlike [Uniform Grid Traversal](9652-uniform-grid-traversal.md), which assumes uniform spacing, this method handles arbitrary hexahedral meshes by transforming ray segments and vectors using Jacobian matrices [S1].
+
+## How it works
+**Inputs:** A curvilinear grid defined by vertex positions in physical space and their connectivity; a ray defined by origin and direction in physical space; a viewpoint [S1].
+**Outputs:** Sampled scalar values along the ray path in physical space [S1].
+
+**Data Structures:**
+*   **Grid:** Vertices with physical coordinates and computational coordinates following integer indices $(i, j, k)$ [S1]. Exact field layouts, sizes, and bit packing are Not given in the sources.
+*   **Jacobian:** Pre-computed or on-the-fly approximations at vertices or cell centers [S1]. Exact field layouts, sizes, and bit packing are Not given in the sources.
+*   **Bending Vectors:** Pre-computed vectors used to adjust the ray direction at cell boundaries [S1]. Exact field layouts, sizes, and bit packing are Not given in the sources.
+
+**Steps:**
+1.  **Locate Initial Cell:** Determine the starting hexahedral cell containing the ray origin by extracting unshared boundary faces and building a spatial index over them [S2, unofficial].
+2.  **Approximate Jacobian:** Approximate the Jacobian matrix using central differences of adjacent vertices in computational and physical space [S1][S2, unofficial].
+3.  **Transform to Computational Space:** Map the ray origin and direction from physical space to computational space using the Jacobian matrix [S1].
+4.  **Incremental Traversal:** Perform standard incremental grid traversal in the regular computational space to determine the sequence of cells and face intersections [S1].
+5.  **Bend Ray at Intersections:** At each face intersection in computational space, transform the intersection point and the ray direction back to physical space [S1]. The ray direction is bent according to pre-computed bending vectors using bilinear interpolation [S1].
+6.  **Resample Values:** Sample the scalar field values at the transformed physical positions [S1].
+7.  **Optimization (Viewpoint Update):** Store and update bending vectors along a ray only when the viewpoint changes [S1]. If mapping parameters change but the viewpoint remains the same, pre-computed ray paths can be reused directly [S1].
+
+**Formulas:**
+*   The exact transformation equations for mapping vertices, vectors, and rays between physical and computational space are Not given in the sources [S1].
+*   The exact formula for central differences is Not given in the sources [S1].
+
+**Parameters:**
+*   **Interpolation:** Bilinear interpolation is specified for determining bending vectors at face intersections [S1].
+*   **Jacobian Approximation:** Central differences are used for adjacent vertices [S1].
+*   Typical values are Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Singularity:** Degenerate cells causing singular Jacobians are not discussed in the sources.
+*   **Precision:** Floating-point errors from coordinate transformations are not discussed in the sources.
+*   **Initial Cell Location:** Finding the initial cell in a complex curvilinear mesh requires extracting boundary faces and building a spatial index, which can be expensive [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def computational_space_traversal(grid, ray_origin, ray_direction, viewpoint):
+    # 1. Locate initial cell containing ray origin [S2, unofficial]
+    current_cell = find_cell_containing_point(grid, ray_origin)
+
+    # 2. Approximate Jacobian using central differences of adjacent vertices
+    # in computational and physical space [S1][S2, unofficial]
+    # Exact formula not given in the sources. [G]
+    J = central_difference_jacobian(current_cell, grid)
+
+    # 3. Transform ray origin and direction to computational space [S1]
+    comp_origin = apply_jacobian_inverse(J, ray_origin)
+    comp_dir = apply_jacobian_inverse_vector(J, ray_direction)
+
+    # 4. Incremental grid traversal in regular computational space [S1]
+    while not ray_exits_grid(comp_origin, comp_dir):
+        # Find next face intersection in computational space
+        t, face_idx = next_regular_grid_intersection(comp_origin, comp_dir)
+        comp_hit = comp_origin + t * comp_dir
+
+        # 5. Transform intersection point back to physical space [S1]
+        phys_hit = apply_jacobian(J, comp_hit)
+
+        # Bend ray direction using pre-computed bending vectors
+        # via bilinear interpolation at the face [S1]
+        bend_vec = bilinear_interpolate_bending_vectors(face_idx, grid)
+        phys_dir = apply_bending_vector(phys_dir, bend_vec)
+
+        # 6. Resample scalar values at physical position [S1]
+        yield resample_scalar_at(grid, phys_hit)
+
+        # Advance traversal
+        comp_origin = comp_hit
+        current_cell = get_adjacent_cell(current_cell, face_idx)
+        J = central_difference_jacobian(current_cell, grid)
+```
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:** No performance measurements were reported in the original source [S1].
+*   **Strengths:** Greatly reduces the difficulties of resampling along the ray since the computational space is regular [S1].
+*   **Limitations:** Requires pre-computation of Jacobians and bending vectors [S1].
+*   **When to use:** When rendering data on curvilinear grids where resampling in physical space is complex [S1].
+*   **When not to use:** When performance measurements are critical and not available, or for uniform grids where [Uniform Grid Traversal](9652-uniform-grid-traversal.md) is simpler [S1].
+
+## Background
+*   **Origin:** Introduced by Frühauf in [Frü94] [S1].
+*   **History:** Described in the context of interactive volume rendering with ray tracing [S1].
+*   **Usage:** Used for rendering data on curvilinear grids, particularly hexahedral meshes [S1].
+
+## Sources
+[S1] Interactive Volume Rendering with Ray Tracing, https://doi.org/10.2312/egst.20061055, fetched 2026-10-24
+[S2] Interactive Volume Rendering Techniques, https://www.scribd.com/document/479714183/Interactive-Volume-Rendering-with-Ray-Tracing, fetched 2026-10-25 (unofficial)

@@ -1,0 +1,128 @@
+--- v001.md
++++ v002.md
+@@ -1,8 +1,7 @@
+ # Construction and Update of Importance Segments
+ 
+-Also called: Importance Segment Data Structure and Estimation
+ 
+ ## Overview
+-This method constructs and maintains a compact, piecewise-constant representation of the importance function $\tilde{k}(t)$ along a ray by merging newly sampled points with an existing list of segments. It solves the problem of efficiently updating the importance sampling distribution during rendering without storing every individual sample, thereby reducing memory usage and accelerating the binary search required for sampling [S1]. It differs from naive accumulation by actively discarding redundant samples and splitting segments when importance values change, ensuring the data structure remains a refined approximation of the true importance function [S1].
++This method constructs and maintains a compact, piecewise-constant representation of the importance function $\tilde{k}(t)$ along a ray by merging newly sampled points with an existing list of segments [S1]. It solves the problem of efficiently updating the importance sampling distribution during rendering without storing every individual sample, thereby reducing memory usage and accelerating the binary search required for sampling [S1]. It differs from naive accumulation by actively discarding redundant samples and splitting segments when importance values change, ensuring the data structure remains a refined approximation of the true importance function [S1].
+ 
+ ## How it works
+@@ -24,5 +23,5 @@
+ 
+ 1.  **Empty List:** If the list is empty ($n=0$), insert the candidate as the first segment and return [S1].
+-2.  **Same Importance, Close Proximity (Extension):** If the new candidate `cand` has the same importance value as the last segment in the list (`curr`), and the distance between the end of `curr` ($t_{curr} + l_{curr}$) and the start of `cand` ($t_{cand}$) is less than $d$, extend the last segment. Set the end of `curr` to the end of `cand` ($t_{curr} + l_{curr} \leftarrow t_{cand} + l_{cand}$) [S1].
++2.  **Same Importance, Close Proximity (Extension):** If the new candidate `cand` has the same importance value as the last segment in the list (`curr`), and the distance between the end of `curr` ($t_{curr} + l_{curr}$) and the start of `cand` ($t_{cand}$) is less than $d$, extend the last segment [S1]. Set the end of `curr` to the end of `cand` ($t_{curr} + l_{curr} \leftarrow t_{cand} + l_{cand}$) [S1].
+ 3.  **Same Importance, Internal (Discard):** If two existing samples form a segment (distance $< d$) and have the same importance value as the new candidate `cand`, and `cand` lies strictly between them ($t_i < t_{cand} < t_{i+1}$), discard `cand` [S1].
+ 4.  **Different Importance, Internal (Split):** If the new candidate `cand` lies on an existing segment $[t_i, t_{i+1}]$ but has a different importance value, store `cand` and split the segment $[t_i, t_{i+1}]$ into two new segments at the location of `cand` [S1].
+@@ -36,5 +35,5 @@
+ 
+ **Pseudocode**
+-The following Python-like pseudocode implements the insertion logic described in Algorithm 1 of [S1]. It assumes `list` is a list of segment objects with attributes `importance`, `right()` (end position), and `left()` (start position).
++The following Python-like pseudocode implements the insertion logic described in Algorithm 1 of [S1]. It assumes `list` is a list of segment objects with attributes `importance`, `left()` (start position), and `right()` (end position).
+ 
+ ```python
+@@ -62,33 +61,26 @@
+     # Rule 2: Same importance and close proximity -> Extend
+     if curr.importance == cand.importance:
+-        # Check if the gap between the end of the current segment and the start of the candidate is < d
+         if cand.left() - curr.right() < d:
+-            # Extend the current segment to include the candidate
+             curr.right(cand.right())
+             return None
+ 
+     # Rule 3: Same importance, internal -> Discard
+-    # Check if there is a previous segment that forms a segment with curr
+-    if n > 1:
+-        prev = list[n - 2]
+-        # If prev and curr form a segment (distance < d) and have same importance
+-        if (curr.right() - prev.right()) < d and prev.importance == curr.importance:
+-            # If cand lies between them and has same importance
+-            if prev.right() < cand.left() < curr.right() and cand.importance == curr.importance:
+-                return None # Discard cand
++    # Check if cand lies between two existing segments that form a segment
++    for i in range(n - 1):
++        seg_i = list[i]
++        seg_next = list[i + 1]
++        # Distance between starts of consecutive segments < d
++        if seg_next.left() - seg_i.left() < d and seg_i.importance == seg_next.importance:
++            if seg_i.left() < cand.left() < seg_next.left() and cand.importance == seg_i.importance:
++                return None  # Discard cand
+ 
+     # Rule 4: Different importance, internal -> Split
+-    # Check if cand lies within an existing segment
+     for i in range(n):
+         seg = list[i]
+-        # Check if cand is inside the segment [seg.left(), seg.right()]
+         if seg.left() <= cand.left() < seg.right():
+             if cand.importance != seg.importance:
+-                # Split the segment
+-                # Create new segment for the part before cand
++                # Split segment into two: [seg.left, cand.left] and [cand.left, seg.right]
+                 new_seg1 = create_segment(seg.left(), cand.left(), seg.importance)
+-                # Create new segment for the part after cand (cand itself)
+-                new_seg2 = cand
+-                # Replace the old segment with the two new ones
++                new_seg2 = create_segment(cand.left(), seg.right(), cand.importance)
+                 list[i] = new_seg1
+                 list.insert(i + 1, new_seg2)
+@@ -96,6 +88,4 @@
+ 
+     # Rule 5: Otherwise -> Insert
+-    # Insert cand into the list maintaining sorted order
+-    # Find correct position
+     insert_pos = 0
+     for i in range(n):
+@@ -105,5 +95,4 @@
+         else:
+             insert_pos = i + 1
+-            
+     list.insert(insert_pos, cand)
+     return None
+@@ -129,4 +118,37 @@
+             
+     return Segment(start, end, importance)
++
++def compute_integrals(list):
++    """
++    Precomputes accumulated integrals K_i for each segment.
++    Follows the rule: approximate gaps as mean importance, borders as 0.
++    """
++    n = len(list)
++    if n == 0:
++        return
++    
++    # Border importance at start is 0
++    prev_importance = 0.0
++    
++    for i in range(n):
++        seg = list[i]
++        # Gap before this segment (if not first)
++        if i > 0:
++            gap_start = list[i-1].right()
++            gap_end = seg.left()
++            gap_len = gap_end - gap_start
++            if gap_len > 0:
++                gap_importance = (prev_importance + seg.importance) / 2.0
++                seg.K = prev_importance + gap_importance * gap_len
++            else:
++                seg.K = prev_importance
++        else:
++            seg.K = 0.0
++            
++        # Integral over the segment itself
++        seg.K += seg.importance * seg.length
++        prev_importance = seg.importance
++        
++    # Border importance at end is 0 (handled implicitly for next ray or final accumulation)
+ ```
+ 
+@@ -144,5 +166,5 @@
+ *   **Strengths:** Reduces memory footprint; accelerates sampling via binary search on the accumulated integrals [S1].
+ *   **Limitations:** The approximation of unsampled regions using mean importance may be inaccurate for highly variable importance functions [S1].
+-*   **When to Use:** When rendering participating media with varying importance and memory is a constraint [S1].
++*   **When to Use:** When rendering participating media with varying importance and a compact data structure is required [S1].
+ *   **When Not to Use:** When the importance function is extremely complex and requires high-fidelity sampling without approximation [S1].
+ 

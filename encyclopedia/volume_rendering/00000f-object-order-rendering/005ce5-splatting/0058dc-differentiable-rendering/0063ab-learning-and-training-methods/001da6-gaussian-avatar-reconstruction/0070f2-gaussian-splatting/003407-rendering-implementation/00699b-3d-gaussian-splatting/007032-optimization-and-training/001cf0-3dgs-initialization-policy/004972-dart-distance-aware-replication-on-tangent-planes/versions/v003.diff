@@ -1,0 +1,350 @@
+--- v002.md
++++ v003.md
+@@ -1,173 +1,180 @@
+ # DART (Distance-Aware Replication on Tangent-planes)
+ ## Overview
+-DART is a pre-processing initialization method for 3D Gaussian Splatting that enriches a sparse Structure-from-Motion (SfM) point cloud by generating additional samples on local tangent planes [S1]. It addresses the problem of sparse seeding in scene peripheries and low-texture regions by assigning disk radii that grow with the point’s distance from a robust scene center [S1]. Unlike dynamic densification strategies that spawn primitives during training based on view-space gradients, DART acts once before optimization using only the initial SfM geometry, making it independent of the backbone’s densification dynamics [S1].
++DART is a pre-processing initialization policy for 3D Gaussian Splatting that enriches a sparse Structure-from-Motion (SfM) point cloud by generating additional samples on local tangent planes [S1]. It solves the problem of sparse seeding in scene peripheries and low-texture regions, which typically leads to poor reconstruction quality in those areas [S1]. Unlike dynamic densification methods that spawn primitives during training based on view-space gradients, DART acts once before optimization using only the initial SfM geometry, making it independent of the backbone’s densification dynamics [S1]. Its distinguishing feature is distance-aware replication: the radius of the tangent disk grows with the point’s distance from the scene center, providing wider spread where the SfM cloud is naturally sparser [S1].
+ 
+ ## How it works
+ **Inputs:**
+-- Initial SfM point cloud $P = \{p_i\}_{i=1}^N$, where each $p_i$ has a 3D position and color [S1].
+-- Multiplier $m$: total number of points generated per original SfM point (including the original) [S1].
+-- Radius bounds $\rho_{min}, \rho_{max}$: lower and upper bounds for the sampling disk radius, expressed as fractions of the robust scene radius $R$ [S1].
+-- $K_{nn}$: number of nearest neighbors for PCA normal estimation [S1].
+-- $T_w$: number of Weiszfeld iterations for center computation [S1].
++- Initial SfM point cloud $P = \{p_i\}_{i=1}^N$, where each $p_i$ has a 3D position and color.
++- Multiplier $m$: total number of points generated per original SfM point (including the original).
++- Radius bounds $\rho_{min}, \rho_{max}$: lower and upper bounds for the tangent disk radius, expressed as fractions of the robust scene radius $R$.
++- $K_{nn}$: number of nearest neighbors for PCA normal estimation.
++- $T_w$: number of Weiszfeld iterations for center estimation.
+ 
+ **Outputs:**
+-- Augmented point cloud $P_{aug}$ containing the original points and $m-1$ new samples per original point [S1].
++- Augmented point cloud $P_{aug}$ containing the original points and their generated replicas.
+ 
+ **Data Structures:**
+-- Points are represented as tuples $(x, y, z, r, g, b)$ [G].
+-- Vectors are 3D Euclidean vectors [G].
++- Points are represented as tuples $(x, y, z, r, g, b)$.
++- Vectors are 3D Euclidean coordinates.
+ 
+ **Steps:**
+ 
+ 1. **Compute Robust Scene Center:**
+-   Calculate the L1-median (geometric median) $c$ of the point cloud $P$ using the Weiszfeld iteration [S1]. Initialize $c^{(0)}$ as the arithmetic mean of $P$ [S1]. Iterate for $T_w$ steps:
++   Calculate the L1-median (geometric median) $c$ of the point cloud $P$ using the Weiszfeld iteration [S1]. Initialize $c^{(0)}$ as the arithmetic mean of $P$. Iterate for $T_w$ steps:
+    $$ c^{(k+1)} = \frac{\sum_{i=1}^N \frac{p_i}{\|p_i - c^{(k)}\|}}{\sum_{i=1}^N \frac{1}{\|p_i - c^{(k)}\|}} $$
+    [S1]
+ 
+ 2. **Compute Robust Scene Radius:**
+-   Calculate the robust scene radius $R$ as the 95th-percentile distance from the center $c$ [S1]:
+-   $$ R = \text{Percentile}_{95}\left(\{ \|p_i - c\| : p_i \in P \}\right) $$
++   Calculate $R$ as the 95th-percentile distance from the center $c$ [S1]:
++   $$ R = \text{Percentile}_{95}\left( \{ \|p_i - c\| : p_i \in P \} \right) $$
+    [S1]
+ 
+-3. **Initialize Augmented Cloud:**
+-   Set $P_{aug} \leftarrow P$ [S1].
+-
+-4. **Process Each Point:**
++3. **Process Each Point:**
+    For each point $p_i \in P$:
+    
+    a. **Distance Calculation:**
+-      Compute the Euclidean distance $d_i$ from the center:
++      Compute the Euclidean distance $d_i$ from the center and the normalized, clipped distance $\hat{d}_i$ [S1]:
+       $$ d_i = \|p_i - c\| $$
+-      [S1]
+-      
+-      Compute the normalized, clipped distance $\hat{d}_i$:
+-      $$ \hat{d}_i = \text{clip}\left(\frac{d_i}{R}, 0, 1\right) $$
+-      [S1]
+-      Normalizing by $R$ prevents distant outliers from collapsing the radius schedule toward $\rho_{min}$ [S1].
+-
+-   b. **Tangent-Plane Estimation:**
+-      Identify the $K_{nn}$ nearest neighbors $N_i$ of $p_i$ in $P$ using Euclidean distance [S1].
+-      Compute the centroid $\bar{p}_i$ of $N_i$:
++      $$ \hat{d}_i = \text{clip}\left( \frac{d_i}{R}, 0, 1 \right) $$
++      [S1]
++      Normalizing by $R$ (the 95th-percentile radius) prevents distant outliers from collapsing the radius schedule toward $\rho_{min}$ [S1].
++
++   b. **Tangent Plane Estimation:**
++      Identify the $K_{nn}$ nearest neighbors $N_i$ of $p_i$ in 3D space using Euclidean distance [S1]. Compute the centroid $\bar{p}_i$ of $N_i$ and the sample covariance matrix $\text{Cov}(N_i)$ [S1]:
+       $$ \bar{p}_i = \frac{1}{K_{nn}} \sum_{j \in N_i} p_j $$
+-      [S1]
+-      
+-      Compute the $3 \times 3$ sample covariance matrix $\text{Cov}(N_i)$:
+       $$ \text{Cov}(N_i) = \frac{1}{K_{nn}} \sum_{j \in N_i} (p_j - \bar{p}_i)(p_j - \bar{p}_i)^\top $$
+       [S1]
+-      
+-      Estimate the local normal $n_i$ as the unit eigenvector of $\text{Cov}(N_i)$ associated with the smallest eigenvalue:
+-      $$ n_i = \arg\min_{\|u\|_2=1} u^\top \text{Cov}(N_i) u $$
+-      [S1]
+-      
+-      Construct an orthonormal tangent basis $(e_i^{(1)}, e_i^{(2)})$ by choosing any unit vector $e_i^{(1)}$ perpendicular to $n_i$ and setting:
++      The local normal $n_i$ is the unit eigenvector of $\text{Cov}(N_i)$ associated with the smallest eigenvalue [S1]:
++      $$ n_i = \arg \min_{\|u\|_2=1} u^\top \text{Cov}(N_i) u $$
++      [S1]
++      Construct an orthonormal tangent basis $(e_i^{(1)}, e_i^{(2)})$ by choosing any unit vector $e_i^{(1)}$ perpendicular to $n_i$ and setting [S1]:
+       $$ e_i^{(2)} = n_i \times e_i^{(1)} $$
+       [S1]
+-      The normal $n_i$ is used only to construct the frame and is not stored on the replicas [S1].
+ 
+    c. **Radius Assignment:**
+-      Assign the disk radius $\rho_i$ as a linear function of $\hat{d}_i$:
++      Assign the disk radius $\rho_i$ as a linear function of $\hat{d}_i$ [S1]:
+       $$ \rho_i = R \cdot \left[ \rho_{min} + \hat{d}_i (\rho_{max} - \rho_{min}) \right] $$
+       [S1]
+-      A point at the scene center receives $\rho_i = \rho_{min} R$; a point at or beyond the 95th-percentile shell receives $\rho_i = \rho_{max} R$ [S1].
++      Points at the scene center receive radius $\rho_{min}R$; points at or beyond the 95th-percentile shell receive $\rho_{max}R$ [S1].
+ 
+    d. **Disk Sampling:**
+-      For $k$ from $1$ to $m-1$:
+-      1. Draw two independent uniform random variables $\xi_1, \xi_2 \sim \text{Uniform}[0, 1]$ [S1].
+-      2. Compute polar coordinates:
+-         $$ r = \rho_i \xi_1 $$
+-         $$ \theta = 2\pi \xi_2 $$
+-         [S1]
+-         *Note: The source explicitly defines $r = \rho_i \xi_1$ [S1].*
+-      3. Compute the new sample position $q$:
+-         $$ q = p_i + r \cos(\theta) e_i^{(1)} + r \sin(\theta) e_i^{(2)} $$
+-         [S1]
+-      4. Assign the color of the parent point to $q$: $q.\text{color} \leftarrow p_i.\text{color}$ [S1].
+-      5. Add $q$ to $P_{aug}$ [S1].
++      Generate $m-1$ new samples. For each sample $k \in \{1, \dots, m-1\}$ [S1]:
++      i. Draw two independent uniform random variables $\xi_1, \xi_2 \sim \text{Uniform}[0, 1]$ [S1].
++      ii. Compute polar coordinates [S1]:
++          $$ r = \rho_i \xi_1 $$
++          $$ \theta = 2\pi \xi_2 $$
++          [S1]
++      iii. Compute the new sample position $q$ [S1]:
++          $$ q = p_i + r \cos(\theta) e_i^{(1)} + r \sin(\theta) e_i^{(2)} $$
++          [S1]
++      iv. Assign the color of $p_i$ to $q$ [S1].
++      v. Add $q$ to $P_{aug}$ [S1].
++
++   e. Add the original $p_i$ to $P_{aug}$ [S1].
+ 
+ **Pseudocode:**
+-
+ ```python
+-import numpy as np
+-from scipy.spatial import KDTree
+-
+-def dart(P, m, rho_min, rho_max, Knn, Tw):
++def DART(P, m, rho_min, rho_max, Knn, Tw):
+     """
+-    P: list of points, each point is a dict or object with 'pos' (np.array, shape (3,)) and 'color' (np.array, shape (3,))
+-    m: multiplier
+-    rho_min: lower bound fraction
+-    rho_max: upper bound fraction
+-    Knn: number of neighbors for PCA
+-    Tw: Weiszfeld iterations
+-    Returns: list of augmented points
++    P: List of points, each with .pos (vec3) and .color (vec3)
++    Returns: Augmented list of points Paug
+     """
+-    N = len(P)
+-    positions = np.array([p['pos'] for p in P])
++    # Stage 1: Robust Center and Radius
++    # Compute arithmetic mean for initialization
++    c = sum(p.pos for p in P) / len(P)
+     
+-    # Step 1: Compute robust scene center c (L1-median via Weiszfeld)
+-    c = np.mean(positions, axis=0)  # Initialize at arithmetic mean [S1]
++    # Weiszfeld iteration for L1-median
+     for _ in range(Tw):
+-        dists = np.linalg.norm(positions - c, axis=1)
+-        dists = np.maximum(dists, 1e-8)  # Guard against division by zero [G]
+-        weights = 1.0 / dists
+-        c = np.sum(positions * weights[:, np.newaxis], axis=0) / np.sum(weights)
+-        
+-    # Step 2: Compute robust scene radius R (95th-percentile distance)
+-    dists_from_c = np.linalg.norm(positions - c, axis=1)
+-    R = np.percentile(dists_from_c, 95)  # [S1]
++        numerator = vec3(0, 0, 0)
++        denominator = 0.0
++        for p in P:
++            dist = norm(p.pos - c)
++            # Guard against division by zero if a point coincides with center
++            if dist < 1e-8:
++                dist = 1e-8
++            inv_dist = 1.0 / dist
++            numerator += p.pos * inv_dist
++            denominator += inv_dist
++        c = numerator / denominator
++
++    # Compute 95th-percentile radius
++    distances = [norm(p.pos - c) for p in P]
++    distances.sort()
++    R = distances[int(0.95 * len(distances))]
++
++    Paug = []
+     
+-    # Step 3: Initialize augmented cloud
+-    Paug = list(P)  # [S1]
++    # Pre-compute KNN indices for efficiency if possible, 
++    # but per source, we iterate and find neighbors.
++    # For implementation, assume a KNN function exists or use brute force for small N.
+     
+-    # Precompute KNN tree
+-    tree = KDTree(positions)
+-    
+-    for i, p_i in enumerate(P):
+-        pos_i = p_i['pos']
+-        
+-        # Stage (i): Distance
+-        d_i = np.linalg.norm(pos_i - c)  # [S1]
+-        d_hat_i = np.clip(d_i / R, 0, 1)  # [S1]
+-        
+-        # Stage (ii): Tangent-plane estimation
+-        # Find Knn nearest neighbors [S1]
+-        _, idx_knn = tree.query(pos_i, k=Knn)
+-        neighbors = positions[idx_knn]
+-        
+-        # Compute centroid of neighborhood
+-        p_bar_i = np.mean(neighbors, axis=0)  # [S1]
++    for p in P:
++        # Stage 2: Tangent Plane Estimation
++        # Find Knn nearest neighbors
++        neighbors = get_knn_neighbors(P, p.pos, Knn)
++        
++        # Compute centroid of neighbors
++        centroid = sum(n.pos for n in neighbors) / len(neighbors)
+         
+         # Compute covariance matrix
+-        diff = neighbors - p_bar_i
+-        Cov_Ni = (diff.T @ diff) / Knn  # [S1]
+-        
+-        # Compute normal: eigenvector corresponding to smallest eigenvalue
+-        eigenvalues, eigenvectors = np.linalg.eigh(Cov_Ni)
+-        n_i = eigenvectors[:, 0]
+-        n_i = n_i / np.linalg.norm(n_i)  # [S1]
+-        
+-        # Construct orthonormal tangent basis
+-        # Choose any unit vector e1 perpendicular to n
+-        if np.abs(n_i[0]) < 0.9:
+-            e1 = np.cross(n_i, np.array([1.0, 0.0, 0.0]))
++        cov = mat3(0,0,0, 0,0,0, 0,0,0)
++        for n in neighbors:
++            diff = n.pos - centroid
++            # Outer product diff * diff^T added to cov
++            cov[0][0] += diff.x * diff.x
++            cov[0][1] += diff.x * diff.y
++            cov[0][2] += diff.x * diff.z
++            cov[1][0] += diff.y * diff.x
++            cov[1][1] += diff.y * diff.y
++            cov[1][2] += diff.y * diff.z
++            cov[2][0] += diff.z * diff.x
++            cov[2][1] += diff.z * diff.y
++            cov[2][2] += diff.z * diff.z
++        
++        cov[0][0] /= len(neighbors)
++        cov[0][1] /= len(neighbors)
++        cov[0][2] /= len(neighbors)
++        cov[1][0] /= len(neighbors)
++        cov[1][1] /= len(neighbors)
++        cov[1][2] /= len(neighbors)
++        cov[2][0] /= len(neighbors)
++        cov[2][1] /= len(neighbors)
++        cov[2][2] /= len(neighbors)
++        
++        # Eigenvector for smallest eigenvalue (Normal)
++        # Using a standard eigendecomposition routine for 3x3 symmetric matrix
++        eigenvalues, eigenvectors = eig(cov)
++        # Find index of smallest eigenvalue
++        min_idx = argmin(eigenvalues)
++        n_i = eigenvectors[:, min_idx]
++        n_i = normalize(n_i)
++        
++        # Construct tangent basis
++        # Choose arbitrary vector perpendicular to n_i
++        # If n_i is not parallel to (1,0,0), use cross with (1,0,0)
++        if abs(n_i.x) < 0.9:
++            e1 = normalize(cross(n_i, vec3(1, 0, 0)))
+         else:
+-            e1 = np.cross(n_i, np.array([0.0, 1.0, 0.0]))
+-        e1 = e1 / np.linalg.norm(e1)
+-        e2 = np.cross(n_i, e1)  # [S1]
+-        
+-        # Stage (iii): Radius assignment
+-        rho_i = R * (rho_min + d_hat_i * (rho_max - rho_min))  # [S1]
+-        
+-        # Stage (iv): Disk sampling
+-        for k in range(m - 1):  # [S1]
+-            xi1 = np.random.uniform(0, 1)
+-            xi2 = np.random.uniform(0, 1)
++            e1 = normalize(cross(n_i, vec3(0, 1, 0)))
++        e2 = cross(n_i, e1)
++        
++        # Stage 3: Radius Assignment
++        d_i = norm(p.pos - c)
++        d_hat = min(max(d_i / R, 0.0), 1.0)
++        rho_i = R * (rho_min + d_hat * (rho_max - rho_min))
++        
++        # Add original point
++        Paug.append(Point(pos=p.pos, color=p.color))
++        
++        # Stage 4: Disk Sampling
++        for k in range(m - 1):
++            xi1 = random.uniform(0, 1)
++            xi2 = random.uniform(0, 1)
+             
+-            r = rho_i * xi1  # [S1]
+-            theta = 2 * np.pi * xi2  # [S1]
++            r = rho_i * xi1
++            theta = 2 * pi * xi2
+             
+-            q_pos = pos_i + r * np.cos(theta) * e1 + r * np.sin(theta) * e2  # [S1]
+-            q_color = p_i['color']  # [S1]
+-            
+-            Paug.append({'pos': q_pos, 'color': q_color})  # [S1]
++            q_pos = p.pos + r * cos(theta) * e1 + r * sin(theta) * e2
++            Paug.append(Point(pos=q_pos, color=p.color))
+             
+     return Paug
+@@ -176,30 +183,29 @@
+ **Parameters:**
+ - $m$: Multiplier for the number of additional samples. Total points per original point becomes $m$ [S1].
+-- $\rho_{min}$: Lower bound for the disk radius, relative to $R$ [S1].
+-- $\rho_{max}$: Upper bound for the disk radius, relative to $R$ [S1].
++- $\rho_{min}$: Lower bound for disk radius, relative to $R$ [S1].
++- $\rho_{max}$: Upper bound for disk radius, relative to $R$ [S1].
+ - $K_{nn}$: Number of nearest neighbors for PCA [S1].
+ - $T_w$: Number of Weiszfeld iterations [S1].
+ 
+ **Edge Cases and Pitfalls:**
+-- If a point $p_i$ coincides with the center $c$, the Weiszfeld iteration denominator term $\|p_i - c\|$ becomes zero. The pseudocode handles this with a small epsilon [G].
+-- The source explicitly uses $r = \rho_i \xi_1$ for disk sampling, which does not produce a uniform distribution over the disk area (standard uniform sampling uses $\sqrt{\xi_1}$) [S1]. Implementers should follow the source formula exactly [S1].
+-- The normal estimation relies on $K_{nn}$ being sufficient to define a plane. In sparse regions, this may be unstable [G].
++- **Coincident Center:** If a point $p_i$ coincides with the current Weiszfeld estimate $c$, the distance is zero, causing division by zero in the iteration. A small epsilon guard is required [G].
++- **Degenerate Neighbors:** If $K_{nn}$ neighbors are collinear or coplanar, the covariance matrix may be singular or ill-conditioned. The smallest eigenvalue eigenvector is still well-defined for planar data, but numerical stability should be monitored [G].
++- **Outliers:** Using the 95th-percentile radius $R$ instead of the maximum distance prevents a single distant outlier from collapsing the radius schedule toward $\rho_{min}$ [S1].
+ 
+ ## Subtopics
+ 
+-### Semi-Dense Point Cloud Initialization
+-Initializes point clouds using dense feature matches instead of traditional detector-based matches, balancing training time and rendering quality on textureless surfaces and unbounded backgrounds [S2, unofficial]. It extracts and aggregates dense feature correspondences using hierarchical localization, then forms the point cloud via multi-view 3D triangulation using the Direct Linear Transform (DLT) [S2, unofficial].
++### [Semi-Dense Point Cloud Initialization](14626-semi-dense-point-cloud-initialization.md)
++A method for generating the initial set of primitives for 3D Gaussian Splatting by leveraging dense feature correspondences rather than traditional sparse detector-based matches. It addresses the trade-off between training time and rendering quality, specifically improving performance on textureless surfaces and unbounded backgrounds where sparse initialization often fails. Unlike sparse methods, it provides a denser seeding that supports fixed-budget training pipelines when combined with scale-invariant density parameterization.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** The method is a pre-processing step [S1]. Computing the center and radius is $O(N)$ or $O(N \log N)$ depending on the median/percentile algorithm [G]. For each of the $N$ points, KNN search is $O(K_{nn} \log N)$ or $O(K_{nn} N)$, PCA is $O(K_{nn})$, and sampling is $O(m)$ [G]. Total complexity is roughly $O(N (K_{nn} \log N + m))$ [G].
+-- **Memory Complexity:** $O(N \cdot m)$ to store the augmented cloud [G].
+-- **Strengths:** It is independent of the backbone's densification dynamics, acting only once before training [S1]. It specifically targets sparse periphery regions by increasing disk radius with distance [S1].
+-- **Limitations:** It relies on the quality of the initial SfM point cloud. It does not address over-dense regions (which is handled by the sibling method AGE) [S1].
+-- **When to use:** When the initial SfM cloud is sparse in the periphery or low-texture areas, and a static initialization is preferred over dynamic densification for the initial spread [S1].
++- **Time Complexity:** The dominant cost is the Weiszfeld iteration ($O(N \cdot T_w)$) and the KNN search for each point ($O(N \cdot K_{nn} \cdot \log N)$ or $O(N^2 \cdot K_{nn})$ depending on implementation). The sampling step is $O(N \cdot m)$.
++- **Memory Complexity:** $O(N \cdot m)$ to store the augmented cloud.
++- **Strengths:** Independent of the backbone’s densification dynamics; acts once before optimization; distance-aware radius allocation improves coverage in sparse peripheries [S1].
++- **Limitations:** Relies on the quality of the initial SfM point cloud; does not adapt to view-dependent details during training [S1].
++- **When to use:** When the initial SfM cloud is sparse in the periphery or low-texture regions, and a fixed-budget training pipeline is desired [S1].
+ 
+ ## Background
+-DART was introduced in the paper "DART-3DGS: Distance-Aware Replication and Age-Gated Densification for 3D Gaussian Splatting" [S1]. It is designed to work with vanilla 3D Gaussian Splatting and anchor-based methods like Scaffold-GS [S1]. It is part of a pair of initialization and densification controls, with AGE (Age-Gated Eligibility) handling the opposite problem of uncontrolled cascading splits in dense regions [S1].
++DART was introduced in the paper "DART-3DGS: Distance-Aware Replication and Age-Gated Densification for 3D Gaussian Splatting" [S1]. It is designed to work with vanilla 3D Gaussian Splatting as the primary backbone, and can also be applied to anchor-based methods like Scaffold-GS [S1]. The method addresses the limitations of sparse seeding in periphery and low-texture regions by enriching the initial cloud with distance-aware tangent plane samples [S1].
+ 
+ ## Sources
+-[S1] DART-3DGS: Distance-Aware Replication and Age-Gated Densification for 3D Gaussian Splatting, https://europepmc.org/article/PMC/PMC13705904, fetched 2026-10-27
+-[S2] GauStudio: A Modular Framework for 3D Gaussian Splatting and Beyond, https://doi.org/10.48550/arXiv.2403.19632, fetched 2026-10-30 (unofficial)+[S1] DART-3DGS: Distance-Aware Replication and Age-Gated Densification for 3D Gaussian Splatting, https://europepmc.org/article/PMC/PMC13705904, fetched 2026-10-27

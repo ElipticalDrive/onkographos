@@ -1,0 +1,98 @@
+# Robust Percentile Contrast Limit Calculation
+
+Also called: Robust Contrast Limits, Percentile-based Contrast Limits
+
+## Overview
+Computes robust lower and upper contrast limits for volume rendering by ignoring non-finite values and using percentiles [S1, unofficial]. It solves the problem where single outlier voxels dominate the full [min, max] range, which would otherwise compress the visible detail of the majority of the data [S1, unofficial]. It sets itself apart from absolute min/max normalization by excluding extreme tails of the distribution, and from weighted percentiles by using uniform sampling weights [S1, unofficial].
+
+## How it works
+**Inputs:**
+- `data`: Input volume array (any numeric type).
+- `prc`: Tuple of two floats `(lower_percentile, upper_percentile)`, default `(1.0, 99.8)` [S1, unofficial].
+
+**Outputs:**
+- `lo`: Lower contrast limit (float).
+- `hi`: Upper contrast limit (float).
+
+**Data Structures:**
+- No persistent data structures. Temporary float32 array is created during processing.
+
+**Steps:**
+1. Convert `data` to `float32`.
+2. Filter out non-finite values (NaN, Inf, -Inf). Let the filtered array be $D$.
+3. If $D$ is empty, return $(0.0, 1.0)$ [S1, unofficial].
+4. Compute the $lower\_percentile$-th percentile of $D$ as $lo$.
+5. Compute the $upper\_percentile$-th percentile of $D$ as $hi$.
+6. If $lo$ or $hi$ is non-finite, or if $hi \le lo$, fallback to computing the absolute minimum and maximum of $D$. Let these be $min\_val$ and $max\_val$. Set $lo = min\_val$, $hi = max\_val$.
+7. If $lo == hi$, set $hi = lo + 1.0$ [S1, unofficial].
+8. Return $(lo, hi)$.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def robust_percentile_contrast_limits(data, prc=(1.0, 99.8)):
+    # Step 1: Convert to float32
+    data_f32 = np.asarray(data, dtype=np.float32)
+    
+    # Step 2: Filter out non-finite values
+    finite_mask = np.isfinite(data_f32)
+    D = data_f32[finite_mask]
+    
+    # Step 3: Handle empty array
+    if D.size == 0:
+        return (0.0, 1.0)
+    
+    # Step 4 & 5: Compute percentiles
+    lo = np.percentile(D, prc[0])
+    hi = np.percentile(D, prc[1])
+    
+    # Step 6: Fallback if limits are invalid
+    if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+        lo = np.min(D)
+        hi = np.max(D)
+        
+    # Step 7: Handle degenerate case where lo == hi
+    if lo == hi:
+        hi = lo + 1.0
+        
+    # Step 8: Return results
+    return (lo, hi)
+```
+
+**Parameters:**
+- `prc`: Tuple of percentiles for lower and upper bounds. Default is `(1.0, 99.8)` [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Non-finite values:** NaNs and Infs are ignored. If all values are non-finite, the function returns $(0.0, 1.0)$ [S1, unofficial].
+- **Single outlier:** A single extreme value does not distort the limits because percentiles are used instead of min/max [S1, unofficial].
+- **Degenerate data:** If all valid values are identical, $lo == hi$. The method adds 1.0 to $hi$ to ensure a valid range [S1, unofficial].
+- **Precision:** Conversion to float32 may lose precision for very large or very small integer types, but this is standard for volume rendering pipelines [S1, unofficial].
+
+## Subtopics
+
+### Percentile-based Clipping
+A function that clips outlier pixel values in a data array to the 1st and 99th percentiles to reduce the impact of noise or artifacts in visualization [S2, unofficial]. It differs from contrast limit calculation by modifying the data in place rather than returning limits for mapping. Choose it when you need to permanently remove outliers from the dataset for visualization [S2, unofficial].
+- **Definition:** Clips values outside the 1st and 99th percentiles [S2, unofficial].
+- **Steps:**
+  1. Calculate the 99th percentile: `upper = np.percentile(data, 99)` [S2, unofficial].
+  2. Calculate the 1st percentile: `lower = np.percentile(data, 1)` [S2, unofficial].
+  3. Clip values greater than `upper` to `upper`: `data[data > upper] = upper` [S2, unofficial].
+  4. Clip values less than `lower` to `lower`: `data[data < lower] = lower` [S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$ to filter non-finite values and compute percentiles, where $N$ is the number of voxels.
+- **Memory Complexity:** $O(N)$ for the temporary float32 array and the filtered array $D$.
+- **Strengths:** Robust to outliers; handles non-finite values gracefully; simple to implement.
+- **Limitations:** Does not account for weighted importance of voxels; assumes a uniform distribution within the percentile range.
+- **When to use:** When visualizing volume data with potential noise or extreme outliers that would otherwise saturate the display range.
+- **When not to use:** When preserving the absolute min/max range is critical for scientific accuracy, or when data has significant weighted importance (use Weighted Percentile Computation instead).
+
+## Background
+Originated in the context of volume rendering preprocessing pipelines to improve visualization quality by normalizing scalar fields based on robust statistical measures [S1, unofficial]. Developed as part of the `voxel` library for handling experimental setup and data normalization [S1, unofficial]. Used in tomographic reconstruction workflows to prepare data for visualization [S2, unofficial].
+
+## Sources
+[S1] stacy-zhang/voxel, https://github.com/stacy-zhang/voxel, fetched 2026-10-28 (unofficial)
+[S2] ufo-kit/tofu, https://github.com/ufo-kit/tofu, fetched 2026-10-26 (unofficial)

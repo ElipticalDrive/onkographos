@@ -1,0 +1,213 @@
+--- v003.md
++++ v004.md
+@@ -1,112 +1,138 @@
+ # Blue-Red Colormap
+ 
+-Also called: Depth Normalization & Blue-Red Colormap, Depth Visualization, Depth Visualization via Min-Max Normalization, Jet-like Colormap
++Also called: Depth Normalization & Blue-Red Colormap, Depth Visualization, Depth Visualization via Min-Max Normalization, Disparity to Color Depth Conversion, Jet-like Colormap
+ 
+ ## Overview
+-The Blue-Red Colormap normalizes scalar depth values to the range $[0, 1]$ and maps them to a piecewise linear color gradient ranging from blue at minimum depth to red at maximum depth [S1, unofficial]. It solves the problem of interpreting 3D spatial structure from rendered depth buffers by providing a high-contrast continuous representation [S1, unofficial]. Unlike the parent Cosine Palette Color Mapping which generates smooth gradients via trigonometric functions, this method uses explicit linear piecewise functions optimized for depth visualization [S1, unofficial].
++The Blue-Red Colormap is a visualization mapping technique that converts scalar depth or disparity values into a perceptually distinct blue-to-red color gradient. It solves the problem of interpreting raw depth maps by encoding distance information into color, where blue typically represents near values and red represents far values (or vice versa depending on normalization). It is distinguished from its parent [Cosine Palette Color Mapping](3359-cosine-palette-color-mapping.md) by using a piecewise linear interpolation rather than a cosine function, and from [Hue Transfer Function](4574-hue-transfer-function.md) by restricting the output to a specific two-primary channel gradient rather than a full hue spectrum.
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** A depth buffer containing raw depth values $d_{i,j}$ for each pixel $(i,j)$, and the global minimum ($d_{min}$) and maximum ($d_{max}$) depth values across the entire image [S1, unofficial][S2, unofficial].
+-*   **Output:** An RGB image where each pixel is colored according to its normalized depth value [S1, unofficial].
++The method processes raw depth or disparity data through normalization and channel-wise linear mapping.
++
++**Inputs:**
++- Raw depth map $D$ (or disparity map $disp$).
++- Near plane distance $near$ and far plane distance $far$ (for depth normalization).
++- Global minimum $min_v$ and maximum $max_v$ of the depth values (for min-max normalization).
++
++**Outputs:**
++- RGB color image $C$ with channels $R, G, B \in [0, 1]$ (or $[0, 255]$ uint8).
+ 
+ **Data Structures:**
+-*   `depth`: A 2D array or flattened vector of shape $(H, W)$ or $(H \times W)$ containing raw depth values [S2, unofficial].
+-*   `render_buffer`: A 2D array of shape $(H, W, 3)$ storing the final RGB output [S2, unofficial].
+-*   `min_v`, `max_v`: Scalar values representing the global minimum and maximum depth [S2, unofficial].
++- `depth`: 2D array of shape $(H, W)$ containing depth values.
++- `render_buffer`: 2D array of shape $(H, W, 3)$ containing normalized depth vectors or final colors.
+ 
+ **Steps:**
+ 
+-1.  **Compute Global Extents:** Determine the minimum and maximum depth values across all pixels [S2, unofficial]. Parallel implementations compute these using atomic operations across all rays [S2, unofficial].
+-    $$ d_{min} = \min_{i,j} (d_{i,j}) $$
+-    $$ d_{max} = \max_{i,j} (d_{i,j}) $$
++1. **Handle Invalid Values:**
++   Identify invalid disparity or depth values. Common sentinel values include $10^{10}$ or $2 \times 10^{10}$. These are typically set to the far plane distance or handled via a mask [S1, S2, unofficial].
+ 
+-2.  **Normalize Depth:** For each pixel, normalize the raw depth value to the range $[0, 1]$ using min-max normalization [S1, unofficial]. A small epsilon ($\epsilon = 10^{-8}$) is added to the denominator to prevent division by zero in degenerate cases [S1, unofficial].
+-    $$ x = \frac{d_{i,j} - d_{min}}{d_{max} - d_{min} + \epsilon} $$
++2. **Normalization:**
++   Normalize the depth values to the range $[0, 1]$. Two common approaches exist:
++   - **Min-Max Normalization:**
++     $$ x = \frac{depth - min_v}{max_v - min_v + \epsilon} $$
++     where $\epsilon = 10^{-8}$ prevents division by zero [S2, S3, unofficial].
++   - **Near-Far Normalization:**
++     $$ x = \frac{depth - near}{far - near} $$
++     This maps the rendering volume's near and far planes to 0 and 1 respectively [S1, unofficial].
+ 
+-3.  **Compute Color Channels:** Calculate the Red ($R$), Green ($G$), and Blue ($B$) channels using piecewise linear functions of the normalized depth $x$ [S1, unofficial]:
+-    $$ R = \text{clip}(2x - 1, 0, 1) $$
+-    $$ G = \text{clip}(1 - |2x - 1|, 0, 1) $$
+-    $$ B = \text{clip}(1 - 2x, 0, 1) $$
+-    *   When $x=0$ (near), $R=0, G=0, B=1$ (Blue) [S1, unofficial].
+-    *   When $x=0.5$ (mid), $R=0, G=1, B=0$ (Green) [S1, unofficial].
+-    *   When $x=1$ (far), $R=1, G=0, B=0$ (Red) [S1, unofficial].
++3. **Channel Computation:**
++   Compute the Red, Green, and Blue channels using piecewise linear functions of the normalized value $x \in [0, 1]$ [S2, unofficial]:
++   - **Red Channel:**
++     $$ R = \text{clip}(2x - 1, 0, 1) $$
++   - **Green Channel:**
++     $$ G = \text{clip}(1 - |2x - 1|, 0, 1) $$
++   - **Blue Channel:**
++     $$ B = \text{clip}(1 - 2x, 0, 1) $$
++   Here, $\text{clip}(v, a, b)$ clamps $v$ to the range $[a, b]$.
+ 
+-4.  **Finalize Output:** Stack the channels into an RGB vector, scale to $[0, 255]$, and cast to `uint8` for storage or display [S1, unofficial].
+-    $$ \text{Color}_{i,j} = \text{uint8}([R, G, B] \times 255) $$
++4. **Finalization:**
++   Stack the channels into an RGB image. Multiply by 255 and cast to `uint8` for standard image formats [S2, unofficial].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def blue_red_colormap(depth_buffer):
++import numpy as np
++
++def blue_red_colormap(depth, near=None, far=None, min_v=None, max_v=None, epsilon=1e-8):
+     """
+-    Applies Blue-Red colormap to a depth buffer.
++    Converts a depth map to a blue-red colormap.
+     
+     Args:
+-        depth_buffer: 2D list of shape (height, width) with raw depth values.
++        depth: 2D numpy array of depth values.
++        near: Optional near plane distance. If provided, uses near-far normalization.
++        far: Optional far plane distance.
++        min_v: Optional global minimum depth. If provided, uses min-max normalization.
++        max_v: Optional global maximum depth.
++        epsilon: Small constant to prevent division by zero.
+         
+     Returns:
+-        rgb_image: 2D list of shape (height, width, 3) with uint8 RGB values.
++        RGB image as uint8 numpy array of shape (H, W, 3).
+     """
+-    def clip(val, lo, hi):
+-        return lo if val < lo else (hi if val > hi else val)
+-
+-    # Step 1: Compute global min and max
+-    min_v = min(min(row) for row in depth_buffer)
+-    max_v = max(max(row) for row in depth_buffer)
++    # Handle invalid values (sentinels like 1e10)
++    # Assuming invalid values are masked or set to far/near before this step
++    # If not masked, we might need to handle them explicitly.
++    # For this implementation, we assume valid depth values are in [min_v, max_v] or [near, far].
+     
+-    # Step 2: Normalize depth to [0, 1]
+-    epsilon = 1e-8
+-    normalized_depth = [[(depth_buffer[r][c] - min_v) / (max_v - min_v + epsilon) 
+-                         for c in range(len(depth_buffer[0]))] 
+-                        for r in range(len(depth_buffer))]
++    if near is not None and far is not None:
++        # Near-Far Normalization
++        x = (depth - near) / (far - near + epsilon)
++    elif min_v is not None and max_v is not None:
++        # Min-Max Normalization
++        x = (depth - min_v) / (max_v - min_v + epsilon)
++    else:
++        raise ValueError("Either (near, far) or (min_v, max_v) must be provided.")
++        
++    # Clip to [0, 1] to handle boundary cases
++    x = np.clip(x, 0.0, 1.0)
+     
+-    # Step 3: Compute RGB channels
+-    height = len(normalized_depth)
+-    width = len(normalized_depth[0])
+-    rgb_image = [[[0.0, 0.0, 0.0] for _ in range(width)] for _ in range(height)]
++    # Compute channels
++    # Red: 0 at x=0, 1 at x=1 (linear ramp from 0.5 to 1)
++    # Actually, standard blue-red (jet-like) usually goes Blue(0) -> Green(0.5) -> Red(1)
++    # Let's verify the formulas from [S2, unofficial]:
++    # R = clip(2x - 1, 0, 1) -> 0 when x<=0.5, 1 when x>=1.0. Linear from 0.5 to 1.0.
++    # G = clip(1 - abs(2x - 1), 0, 1) -> 1 when x=0.5, 0 when x=0 or x=1. Triangle peak at 0.5.
++    # B = clip(1 - 2x, 0, 1) -> 1 when x=0, 0 when x>=0.5. Linear from 0 to 0.5.
+     
+-    for r in range(height):
+-        for c in range(width):
+-            x = normalized_depth[r][c]
+-            # Red channel: increases linearly from 0.5 to 1.0
+-            red = clip(2.0 * x - 1.0, 0.0, 1.0)
+-            # Green channel: triangular shape, peak at 0.5
+-            green = clip(1.0 - abs(2.0 * x - 1.0), 0.0, 1.0)
+-            # Blue channel: decreases linearly from 1.0 to 0.0
+-            blue = clip(1.0 - 2.0 * x, 0.0, 1.0)
+-            rgb_image[r][c] = [red, green, blue]
+-            
+-    # Step 4: Stack and convert to uint8
+-    final_image = [[tuple(int(ch * 255) for ch in rgb_image[r][c]) 
+-                    for c in range(width)] for r in range(height)]
++    R = np.clip(2 * x - 1, 0, 1)
++    G = np.clip(1 - np.abs(2 * x - 1), 0, 1)
++    B = np.clip(1 - 2 * x, 0, 1)
+     
+-    return final_image
++    # Stack channels
++    rgb = np.stack([R, G, B], axis=-1)
++    
++    # Convert to uint8
++    rgb_uint8 = (rgb * 255).astype(np.uint8)
++    
++    return rgb_uint8
+ ```
+ 
+ **Parameters:**
+-*   `epsilon`: Small constant for numerical stability, typically $10^{-8}$ [S1, unofficial].
+-*   `T_threshold`: Transparency threshold for ray marching termination, default $10^{-2}$ [S2, unofficial].
+-*   `max_samples_for_rendering`: Maximum samples per ray, default 100 [S2, unofficial].
+-*   `dist_to_focus`: Distance to focus for Depth of Field, default 1.2 [S2, unofficial].
+-*   `len_dis`: Lens size for Depth of Field, default 0.04 [S2, unofficial].
++- `epsilon`: Default $10^{-8}$ or $10^{-10}$ to prevent division by zero [S2, S1, unofficial].
++- `near`, `far`: Rendering plane distances, extracted from generator configuration [S1, S3, unofficial].
++- `T_threshold`: Transparency threshold for ray marching termination, default $10^{-2}$ [S3, unofficial].
++- `max_samples_for_rendering`: Maximum samples per ray, default 100 [S3, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Zero Variance:** If $d_{max} = d_{min}$, the denominator becomes zero [S1, unofficial]. The epsilon term prevents division by zero [S1, unofficial].
+-*   **Out-of-Bounds Depth:** Depth values outside the $[d_{min}, d_{max}]$ range calculated from the buffer will be clipped to 0 or 1 by the `clip` function in the channel calculations, ensuring valid RGB output [S1, unofficial].
++- **Division by Zero:** Prevented by adding $\epsilon$ to the denominator or using `max(1e-10, denominator)` [S1, S2, unofficial].
++- **Invalid Disparities:** Disparities of $10^{10}$ or $2 \times 10^{10}$ indicate no prediction. These must be handled by setting them to the far plane distance or returning a uniform color (e.g., ones) [S1, unofficial].
++- **Clipping:** Values outside $[0, 1]$ after normalization should be clipped to avoid out-of-bounds color values [S2, unofficial].
++
++## Subtopics
++
++### Disparity to Depth Conversion & Visualization
++This variant specifically handles the conversion from predicted disparity maps to color-coded depth maps. It includes steps to check for all-invalid disparities (returning ones), extract near/far planes, normalize disparity from $[-1, 1]$ to $[0, 1]$ via $disp/2 + 0.5$, convert to depth via $depth = 1/\max(10^{-10}, disp)$, set undefined values to far, normalize depth to $[0, 1]$ relative to near/far, and apply the colormap. It handles sentinel values like $10^{10}$ and $2 \times 10^{10}$ explicitly [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources [S1, unofficial][S2, unofficial].
+-*   **Memory Complexity:** Not given in the sources [S1, unofficial][S2, unofficial].
+-*   **Performance:** Not given in the sources [S1, unofficial][S2, unofficial].
+-*   **Strengths:** High contrast between near and far objects; simple piecewise linear implementation [S1, unofficial].
+-*   **Limitations:** Not perceptually uniform; the green band in the middle may obscure subtle depth variations in the mid-range [S1, unofficial].
+-*   **When to use:** Visualizing depth maps where spatial structure needs to be quickly assessed [S1, unofficial].
+-*   **When not to use:** Not given in the sources [S1, unofficial][S2, unofficial].
++- **Time Complexity:** $O(N)$ where $N$ is the number of pixels, as it involves a single pass over the depth map for normalization and channel computation.
++- **Memory Complexity:** $O(N)$ to store the output RGB image.
++- **Strengths:** Simple to implement, computationally inexpensive, provides clear visual distinction between near and far objects.
++- **Limitations:** Not perceptually uniform; the blue-to-red gradient may not represent depth differences linearly in human perception. Sensitive to the choice of normalization range (min-max vs. near-far).
++- **When to Use:** Quick visualization of depth maps, debugging ray marching, or when a simple color cue is sufficient.
++- **When Not to Use:** When perceptual uniformity is required (consider [Cosine Palette Color Mapping](3359-cosine-palette-color-mapping.md) or other perceptually uniform colormaps).
+ 
+ ## Background
+-The method is implemented in open-source repositories for 3D vision and depth visualization, such as `nerf-3d-vision` and `taichi-ngp-renderer` [S1, unofficial][S2, unofficial].
++The Blue-Red Colormap is commonly used in computer vision and graphics for visualizing depth and disparity maps. It is often referred to as a "Jet-like" colormap due to its similarity to the Jet colormap used in MATLAB and other visualization tools. The method is implemented in various open-source projects for NeRF and 3D reconstruction, such as DeepScan3D and nerf-3d-vision [S1, S2, unofficial].
+ 
+ ## Sources
+-[S1] yashtmy/nerf-3d-vision, https://github.com/yashtmy/nerf-3d-vision, fetched 2026-10-26 (unofficial)
+-[S2] Linyou/taichi-ngp-renderer, https://github.com/Linyou/taichi-ngp-renderer, fetched 2026-10-27 (unofficial)+[S1] sanchit1606/DeepScan3D-Single-X-ray-to-3D-CT-Reconstruction-using-Neural-Radiance-Fields-, https://github.com/sanchit1606/DeepScan3D-Single-X-ray-to-3D-CT-Reconstruction-using-Neural-Radiance-Fields-, fetched 2026-10-26 (unofficial)
++[S2] yashtmy/nerf-3d-vision, https://github.com/yashtmy/nerf-3d-vision, fetched 2026-10-26 (unofficial)
++[S3] Linyou/taichi-ngp-renderer, https://github.com/Linyou/taichi-ngp-renderer, fetched 2026-10-27 (unofficial)

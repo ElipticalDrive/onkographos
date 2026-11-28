@@ -1,0 +1,58 @@
+--- v009.md
++++ v010.md
+@@ -1,22 +1,25 @@
+ # Tetrahedral representation and traversal
+ 
+-Also called: Projected Tetrahedra family, Tetrahedral Volume Rendering primitives
++Also called: Projected Tetrahedra family, Cell projection via tetrahedra
+ 
+ ## Overview
+-This family encompasses methods that represent volumetric data as a collection of tetrahedral primitives, leveraging their geometric properties for rendering, isosurface extraction, or spatial traversal. Unlike voxel-based methods, tetrahedral representations handle unstructured grids natively. The core distinction among siblings is the rendering pipeline: some project primitives to 2D for rasterization ([Projected Tetrahedra](877-projected-tetrahedra.md)), others extract surfaces via topological decomposition ([Marching Tetrahedrons Algorithm](940-marching-tetrahedrons-algorithm.md)), and others use spatial structures for efficient ray traversal ([Grid-based Traversal](7083-grid-based-traversal.md)).
++This family renders volumetric data by decomposing the domain into tetrahedral cells, projecting them onto the 2D image plane, and rasterizing the resulting polygons in back-to-front order [S1, unofficial][S2][S4, S6, S7][S8, S9, S10, unofficial][S11][S12, unofficial][S14, S16][S17, S18, unofficial]. It solves the problem of efficiently rendering unstructured tetrahedral grids by leveraging hardware-accelerated rasterization, avoiding the sampling overhead of ray casting [S1, unofficial][S2][S4, S6][S8, S9, S10, unofficial][S11][S12, unofficial][S14, S16][S17, S18, unofficial]. Unlike [Tetrahedral Volume Rendering](820-tetrahedral-volume-rendering.md), which often relies on ray casting, this approach uses explicit geometric projection and scan-conversion [S2][S4, S6, S7][S12, unofficial][S14, S16]. It differs from [GPU-based Projected Tetrahedra](7484-gpu-based-projected-tetrahedra.md) in that the original algorithms perform sorting and projection in software, whereas later variants offload these steps to the GPU [S4, S7][S12, unofficial][S14, S16].
+ 
+ ## Shared principles
+-The family shares the fundamental mechanism of treating volumetric data as a set of geometric primitives that are transformed and rasterized [S1, unofficial][S3][S4, book].
++The cell projection family shares the following mechanism, terms, and math:
+ 
+-1.  **Primitive Representation:** The volume is decomposed into primitives. These may be explicit geometric shapes (cubes, cells, splats) or implicit functions sampled via texture hardware [S1, unofficial][S3][S4, book].
+-2.  **Transformation:** Primitives are transformed from volume space to screen space using the Model-View-Projection (MVP) matrix or specific factorizations (e.g., shear-warp) [S2][S3][S4, book].
+-3.  **Rasterization:** The transformed primitives are projected onto the 2D image plane. This step leverages hardware-accelerated scan-conversion, depth testing, and blending [S1, unofficial][S2][S3][S4, book].
+-4.  **Compositing:** Contributions are accumulated to form the final image. This is typically done using alpha blending in back-to-front or front-to-back order to handle transparency correctly [S1, unofficial][S2][S3, S7, unofficial].
+-5.  **Hardware Acceleration:** Most methods in this family rely on GPU rasterization pipelines for performance, enabling real-time interactivity [S1, unofficial][S2][S3].
++1.  **Primitive Representation:** The volume is decomposed into convex polyhedral cells (e.g., hexahedra, tetrahedra). For non-planar faces (common in curvilinear grids), cells are subdivided into tetrahedra with planar faces to ensure correct sorting and rasterization [S4, book].
++2.  **Projection and Subdivision:** Each cell's 3D vertices are projected to 2D screen space. The projected edges of a single cell divide the image plane into polygons. Each polygon lies within the projection of a single front-facing face and a single back-facing face of the cell [S1, unofficial][S4, book].
++3.  **Segment Length ($l$):** For orthogonal projection, the length $l$ of the viewing ray segment within the cell varies linearly across the polygon and is interpolated by hardware [S1, unofficial]. For perspective projection, $l$ varies nonlinearly; it is computed at vertices and interpolated linearly across the polygon as an approximation, or computed per-pixel if high accuracy is required [S4, book].
++4.  **Opacity Calculation:** The integrated opacity $\alpha$ for a segment of length $l$ with average differential opacity (extinction coefficient) $\tau_{avg}$ is:
++    $$ \alpha = 1 - \exp(-\tau_{avg} l) $$
++    [S1, unofficial][S4, book]. To avoid Mach bands caused by linear interpolation of $\alpha$, a 2D texture lookup is used with coordinates $(\tau_{avg}, l)$ [S1, unofficial][S2].
++5.  **Visibility Sorting:** Correct back-to-front compositing requires a global visibility ordering of cells. This is achieved via object-space algorithms (e.g., Topological Sort/MPVO) or image-space merging of ray segments [S1, unofficial][S4, book].
++6.  **Compositing:** Polygons are rasterized and composited into the image using alpha blending (Porter-Duff over operation) in back-to-front order [S1, unofficial][S4, book].
+ 
+ ## Subtopics
+ 
+ ### [Projected Tetrahedra](877-projected-tetrahedra.md)
+-Project Tetrahedra (PT) is an object-order volume rendering technique that projects volumetric primitives, specifically tetrahedra, onto the 2D image plane to leverage hardware-accelerated rasterization. It solves the problem of rendering unstructured tetrahedral grids by decomposing each 3D cell into a set of partially transparent 2D triangles, which are then composited in back-to-front order. Unlike [Tetrahedral Volume Rendering](820-tetrahedral-volume-rendering.md), which often relies on ray casting, PT uses explicit geometric projection and scan-conversion. It differs from [GPU-based Projected Tetrahedra](7484-gpu-based-projected-tetrahedra.md) in that the original PT algorithm performs sorting and projection in software, whereas later variants offload these steps to the GPU.
++Projected Tetrahedra (PT) is an object-order volume rendering technique that projects volumetric primitives, specifically tetrahedra, onto the 2D image plane to leverage hardware-accelerated rasterization. It solves the problem of rendering unstructured tetrahedral grids by decomposing each 3D cell into a set of partially transparent 2D triangles, which are then composited in back-to-front order. Unlike [Tetrahedral Volume Rendering](820-tetrahedral-volume-rendering.md), which often relies on ray casting, PT uses explicit geometric projection and scan-conversion. It differs from [GPU-based Projected Tetrahedra](7484-gpu-based-projected-tetrahedra.md) in that the original PT algorithm performs sorting and projection in software, whereas later variants offload these steps to the GPU.
+ 
+ ### [Marching Tetrahedrons Algorithm](940-marching-tetrahedrons-algorithm.md)
+@@ -43,16 +46,16 @@
+ ### Screen Space Area Calculation
+ - **Definition:** Calculates the projected area of a tetrahedron in normalized screen space to determine refinement criteria or culling. Uses cross products to compute wedge areas, which are twice the triangle area, then divides by four [S1, unofficial].
+-- **Step:** Project tetrahedron vertices $T, L, R, B$ to screen space using camera projection: $T \leftarrow \text{camera.projectPoint}(T)$, $L \leftarrow \text{camera.projectPoint}(L)$, $R \leftarrow \text{camera.projectPoint}(R)$, $B \leftarrow \text{camera.projectPoint}(B)$. Calculate area sum using cross products of vertex vectors: $\text{area} \leftarrow |(L-T)\times(R-T)| + |(R-T)\times(B-T)|$. Add remaining terms: $\text{area} \leftarrow \text{area} + |(B-T)\times(L-T)| + |(L-B)\times(R-B)|$. Return final area divided by 4: $\text{return area} / 4$ [S1, unofficial].
++- **Step:** Project tetrahedron vertices $T, L, R, B$ to screen space using camera projection: $T \leftarrow \text{camera.projectPoint}(T)$, $L \leftarrow \text{camera.projectPoint}(L)$, $R \leftarrow \text{camera.projectPoint}(R)$, $B \leftarrow \text{camera.projectPoint}(B)$. Calculate area sum using cross products of vertex vectors: $\text{area} \leftarrow |(L-T)\times(R-T)|+|(R-T)\times(B-T)|$. Add remaining terms: $\text{area} \leftarrow \text{area}+|(B-T)\times(L-T)|+|(L-B)\times(R-B)|$. Return final area divided by 4: $\text{return area} / 4$ [S1, unofficial].
+ - **Pitfall:** Triangles cover the total area twice in projection, and cross products yield wedge areas (twice triangle area), necessitating division by 4 [S1, unofficial].
+ 
+ ### Point Representation via Tetrahedra
+ - **Definition:** Representing data points as small tetrahedra to fit them into the triangular mesh framework for rendering [S2].
+-- **Parameter:** `size`: specifies the size of the point tetrahedra relative to the data ranges [S2].
++- **Parameter:** `size` specifies the size of the point tetrahedra relative to the data ranges [S2].
+ 
+ ### Delaunay Triangulation for Tetrahedral Representation
+-- **Step:** Obtain a tetrahedral representation of the Voronoi sites via Delaunay triangulation using gDel3D to accelerate computation on the GPU [S3]. Recompute the triangulation from scratch at every iteration [S3].
++- **Step:** Obtain a tetrahedral representation of the Voronoi sites via Delaunay triangulation using gDel3D [5] to accelerate computation on the GPU. Recompute the triangulation from scratch at every iteration [S3].
+ 
+ ## Background
+-The use of tetrahedra in volume rendering originated with the need to handle unstructured grids, which are common in scientific simulations (e.g., finite element analysis). The Projected Tetrahedra method was introduced to allow the use of standard graphics hardware for unstructured data by projecting tetrahedra into 2D triangles [S1, unofficial][S2, S3][S4, S6, S7]. The Marching Tetrahedrons Algorithm was developed as a robust alternative to Marching Cubes, resolving topological ambiguities by decomposing cubes into tetrahedra [S1, unofficial]. Subsequent research focused on optimizing performance through parallelization [S1, unofficial][S2], efficient data transmission via strips and fans [S1, unofficial][S2], and adaptive updates for dynamic data [S1, unofficial].
++The concept of projecting tetrahedra for volume rendering was introduced by Kindermann et al. in 2001 [S1, unofficial][S2][S4, S6, S7][S8, S9, S10, unofficial][S11][S12, unofficial][S14, S16][S17, S18, unofficial]. The method was developed to address the limitations of ray casting on unstructured grids, offering a way to utilize standard graphics hardware rasterization pipelines. Early implementations focused on software-based sorting and projection, with later research focusing on GPU acceleration, parallel processing, and efficient data structures like strips and fans [S4, S7][S12, unofficial][S14, S16]. The Marching Tetrahedrons Algorithm, while primarily for isosurface extraction, shares the underlying tetrahedral decomposition principle and is often used in conjunction with or as an alternative to volume rendering techniques on tetrahedral meshes [S1, unofficial].
+ 
+ ## Sources

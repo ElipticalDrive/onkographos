@@ -1,0 +1,111 @@
+# Weighted Photometric Loss
+
+Also called: Hard Sample Weighted Photometric Loss
+
+## Overview
+Weighted Photometric Loss is a photometric reconstruction loss that applies a per-sample re-scaling weight to focus optimization on "hard samples" (pixels with large color errors) to accelerate convergence [S1]. It differs from standard photometric loss by dynamically up-weighting difficult regions, whereas its sibling Low-frequency-aware photometric reweighting [Low-frequency-aware photometric reweighting] down-weights edges to preserve flat regions.
+
+## How it works
+**Inputs:**
+- $N$: Number of samples (pixels or rays).
+- $\hat{C}(r_i)$: Predicted color for sample $i$.
+- $C(r_i)$: Ground-truth color for sample $i$.
+- $\lambda$: Weight for the regularizer $L_r$ [S1].
+
+**Outputs:**
+- $L_p$: Weighted photometric loss value.
+- $L$: Total loss value.
+
+**Data Structures:**
+- No specific complex data structures required; standard scalar accumulation.
+
+**Steps:**
+1. Calculate the raw weight $\tilde{w}_i$ for each sample $i$:
+   $$ \tilde{w}_i = \frac{\|\hat{C}(r_i) - C(r_i)\|_2^2}{\min_{j \in \{1, \dots, N\}} \|\hat{C}(r_j) - C(r_j)\|_2^2} $$
+   [S1]
+2. Clamp the weight to the range $[1, 10]$:
+   $$ w_i = \text{clamp}(\tilde{w}_i, 1, 10) $$
+   [S1]
+3. Compute the weighted photometric loss $L_p$ using a stop-gradient operation $\langle \cdot \rangle$ on the weights to prevent gradient flow through the weighting mechanism:
+   $$ L_p = \frac{1}{N} \sum_{i=1}^{N} \langle w_i \rangle \cdot \|\hat{C}(r_i) - C(r_i)\|_2^2 $$
+   [S1]
+4. (Optional) Compute the regularizer $L_r$ on view-dependent color $c_{vd}$ if used in the total loss:
+   $$ L_r = \frac{1}{M} \sum_{j=1}^{M} \|c_{vd,j}\|_1 $$
+   [S1]
+5. Compute the total loss:
+   $$ L = L_p + \lambda L_r $$
+   [S1]
+
+**Parameters:**
+- Clamping range: $[1, 10]$ [S1].
+- $\lambda$: Regularization weight for $L_r$ [S1]. Value not given in the sources.
+
+**Edge Cases and Pitfalls:**
+- Division by zero: If the minimum error is zero, the denominator is zero. The sources do not specify a guard (e.g., adding epsilon) for this case [S1]. [G] In implementation, add a small epsilon (e.g., $10^{-8}$) to the denominator to prevent NaNs.
+- Stop-gradient: The weight $w_i$ must not receive gradients; otherwise, the loss landscape becomes unstable.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def weighted_photometric_loss(predicted_colors, ground_truth_colors, lambda_reg=0.0, view_dependent_colors=None):
+    """
+    Computes the Weighted Photometric Loss as defined in [S1].
+    
+    Args:
+        predicted_colors: Tensor of shape (N, 3) or (N,), predicted colors.
+        ground_truth_colors: Tensor of shape (N, 3) or (N,), ground truth colors.
+        lambda_reg: Weight for the L1 regularizer on view-dependent color.
+        view_dependent_colors: Tensor of view-dependent color components, if applicable.
+        
+    Returns:
+        total_loss: Scalar loss value.
+    """
+    # Step 1: Calculate squared L2 errors
+    errors = (predicted_colors - ground_truth_colors) ** 2
+    # Sum over color channels if 3D, else use as is
+    if errors.dim() > 1:
+        errors = errors.sum(dim=-1)
+    
+    # Step 2: Calculate raw weights
+    # Guard against division by zero [G]
+    min_error = errors.min() + 1e-8
+    raw_weights = errors / min_error
+    
+    # Step 3: Clamp weights to [1, 10]
+    weights = torch.clamp(raw_weights, min=1.0, max=10.0)
+    
+    # Step 4: Compute weighted photometric loss with stop-gradient on weights
+    # Note: In autograd frameworks, detach() or stop_gradient() is used.
+    weighted_errors = weights.detach() * errors
+    L_p = weighted_errors.mean()
+    
+    # Step 5: Compute regularizer if provided
+    L_r = 0.0
+    if view_dependent_colors is not None:
+        L_r = view_dependent_colors.abs().mean()
+        
+    # Step 6: Total loss
+    total_loss = L_p + lambda_reg * L_r
+    
+    return total_loss
+```
+
+## Subtopics
+
+### Low-frequency-aware photometric reweighting
+A method that redistributes per-pixel gradients by down-weighting high-Sobel (edge) pixels and up-weighting low-Sobel (flat) pixels to prevent flat regions from being under-optimized [S2, unofficial]. It uses a percentile-normalized Sobel magnitude $s(p) \in [0, 1]$ (stop-grad) to compute weights $w(p) = (\varepsilon + 1 - s(p))^{\gamma(t)}$ with $\varepsilon \approx 10^{-3}$ [S2, unofficial]. The emphasis factor $\gamma(t)$ follows a piecewise-linear schedule: $0$ if $t < t_0$; $\gamma_{\max} \frac{t - t_0}{t_1 - t_0}$ if $t_0 \leq t < t_1$; $\gamma_{\max}$ if $t \geq t_1$, with default $t_0 \approx 0.3T$, $t_1 \approx 0.6T$, $\gamma_{\max} \approx 0.6$ [S2, unofficial]. The weights are mean-normalized to prevent loss-scale drift [S2, unofficial]. When $\gamma(t)=0$, it reduces to the baseline photometric loss [S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$ for computing errors, min, and weighted sum [S1].
+- **Memory Complexity:** $O(N)$ to store errors and weights [S1].
+- **Performance:** On KITTI-360, it improves PSNR from 23.41 (NGP+L) to 23.71, SSIM from 84.60 to 85.21, and LPIPS from 30.50 to 34.27 (lower is better) [S1]. On Argoverse 2, it improves PSNR from 29.59 (Tetra-NeRF+L) to 30.62, SSIM from 84.33 to 85.59, and LPIPS from 42.68 to 38.32 [S1].
+- **Strengths:** Focuses on hard samples for faster convergence [S1].
+- **Limitations:** Requires clamping to prevent extreme weights [S1].
+
+## Background
+Originated in "Lightning NeRF: Efficient Hybrid Scene Representation for Autonomous Driving" (2024) [S1]. It is used in hybrid scene representations for autonomous driving scenarios [S1].
+
+## Sources
+[S1] Lightning NeRF: Efficient Hybrid Scene Representation for Autonomous Driving, https://doi.org/10.1109/icra57147.2024.10611130, fetched 2026-10-27
+[S2] LiteVoxel: Low-memory Intelligent Thresholding for Efficient Voxel Rasterization, https://doi.org/10.48550/arxiv.2511.02510, fetched 2026-10-26 (unofficial)

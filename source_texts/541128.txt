@@ -1,0 +1,258 @@
+/!\ Open the pdf version of this document if the equations aren't displayed properly.
+
+# Easy Differentiable Rendering
+
+This repository contains a basic implementation of a differentiable volumetric rendering algorithm, and aims to be as simple as possible.
+
+![](readme_images/window.png)
+
+# What is differentiable rendering?
+
+You are probably familiar with rendering, which is the process of creating an image from basic primitives such as textured meshes. In general, we want the rendering process to be physically-based, in order to obtain images that are undistinguishable from real-world pictures. Differentiable rendering, also called inverse rendering, aims to do the opposite of rendering. We would like to recover a 3D object just from 2D pictures of a real-world object. The word "differentiable" is important. It means that the rendering process we aim to reverse should be differentiable. The rendering process can be thought of as a big function, whose input is some representation of a scene (lights, meshes, textures, etc...) and whose output is a 2D image. Then, differentiability means that we can compute partial derivatives of this big function with respect to any of its inputs. For instance, we want to be able to compute how the rendered image will change when slighly modifying the intensity of a light, its color, location, or even deforming an object.
+
+Popular renderers such as Blender produce images with ray-tracing, they bounce rays of lights in a virtual scene to approximate light physics. Unfortunately, ray-tracing is very computationally intensive and it is difficult to compute partial derivatives due to its recursive and stochastic nature. 
+
+Thus, we would like to find a simpler rendering process than can be differentiated without too much trouble. The most popular option among state-of-the-art papers is to use volumetric rendering. Here, the scene isn't made of discrete objects such as meshes and light sources. Instead, the scene is made of a cloud-like medium that emits and absorbs light (just like a cloud) but does not scatter light. This assumption is very important since scattering is very intensive to compute and involves recursion, just like ray-tracing. The rendering function becomes a trivial loop under these assumptions:
+
+```c
+vec4 render(vec3 cam_pos, vec3 ray, float t_min, float t_max){
+    vec3 C = vec3(0.0f); // accumulated color
+    float T = 1.0f;      // transmittance
+    for(float t=t_min; t < t_max && T > 1.0E-3f; t += step){
+        vec3 world_pos = cam_pos + t * ray;
+        transparency, color = sampleVolume(world_pos);
+        C += color * (1.0f - transparency) * T;
+        T *= transparency;
+    }
+    return vec4(C, T);
+}
+```
+
+The above function shoots a ray in the cloud-like medium of the scene and accumulates color and opacity by sampling the volume at regular intervals. If we unroll the loop, we obtain a polynomial that can be differentiated without too much trouble, as we will see in the following sections.
+
+The most famous paper on the subject is [NeRF (Neural Radiance Fields)](https://www.matthewtancik.com/nerf) which uses a very similar rendering function. In their case, the cloud-like scene is parameterized by neural networks which are flexible and convenient but take a long time to train. Instead, for simplicity, we will parameterize the scene by a voxel grid. Each voxel will store 4 values: an rgb color triplet and a transparency value. All the voxels are arranged in a regular 3D grid which makes sampling at any location extremely simple.
+
+# Why differentability matters
+
+You're probably wondering why we require the rendering process to be differentiable, and here is why. Remember the problem we are trying to solve: we have pictures of an object and we would like to obtain a 3D representation of it, by inversing some rendering function of our choice. Additionally, we also assume that we now the location, rotation and focal length of the cameras for each of the pictures (for reference, these can be obtained with a structure from motion software such as the well-known [colmap](https://github.com/colmap/colmap)). Inversing the rendering function in the general case is probably impossible so we will use gradient descent, a widly known method in the context of machine learning. 
+The idea is very simple:
+- Find an initial solution. This initial solution generally does not have to be accurate. Here, we can simply initialize our voxel grid with black voxels having a low opacity, which is indeed a very poor solution.
+- Quantify the current solution. This quantification of the error is called a loss function, or a penalty function. This function simply gives a score which should be high for bad solutions and should be lower for better solutions. Here we will use the (quadratic) photometric loss: $$Loss = || C_{render} - C_{img} ||^2 $$ We compare the color given by a pixel of the input images $C_{img}$, with the color $C_{render}$ that we obtain by calling our rendering function with a ray originating from that same pixel. If our volume contains voxels such that $C_{render}$ is close to $C_{img}$, the difference will be small and the loss function will give a small number. In practice, the loss function is obtained by summing the per-pixel errors over all the pixels of all the images that we have: $$ Loss = \sum_{images} \sum_{i,j} || C_{render}(i,j) - C_{img}(i,j) ||^2  $$
+- Compute partial derivatives of the loss function with respect to the parameters. Consider a volume with 128^3 voxels, each having 4 values. That's over 8 million parameters! It may seem like a lot but we will derive a way to efficiently compute all these partial derivatives.
+- Update the parameters in order to minimize the loss function: $$ \theta_i \longleftarrow \theta_i - \lambda\frac{\partial Loss}{\partial \theta_i} \qquad \forall i$$ where $\theta_i$ is the i-th parameter and $\lambda$ is the learning rate. Actually, we use an update scheme called the ADAM optimizer, which is much more efficient than standard gradient descent for high dimensional optimization problems.
+- Repeat from step 2 until the error is low enough.
+
+As you can see, the loss function is based on our rendering equation, which needs to be differentiable so that we can compute partial derivatives. Now that we've covered the basics, you will be able to try it for yourself by reading the next section.
+
+# Usage
+
+Disclaimer: First of all, you will need an nvidia GPU (series >= 2000) with recent drivers from nvidia with about 1GB of VRAM. Make sure that the program actually runs on the discrete GPU if you also have an integrated GPU. I opted for c++ and opengl for the viewer and the optimization loop. I'm using a few nvidia-only OpenGL extensions which is why an nvidia GPU is required (the reason why will be explained later). The good news is that you don't need to have anything installed besides the graphics driver to run the program and start playing with it (on Windows).
+
+Here is how the repository is organized:
+
+- **win_binaries/** Contains precompiled binaries for Windows. Just run *EasyDifferentiableRendering.exe* and you're good to go.
+
+- **datasets/** Contains several datasets of images rendered with blender. Unzip somewhere convenient and start playing.
+
+- **resources/shaders/differentiableRendering** Contains all the OpenGL compute shaders which implement the forward and backward pass of the optimization. That's where the exciting stuff happens. The files have a *.cpp extensions so that you can open them with a regular c++ editor, even though they are written in glsl.
+
+- **src/** Contains the c++ code of the program which can be compiled using cmake. The only external dependency is glfw3. I compiled it with mingw *gcc11.3* but it should work with other compilers as well. You should be able to compile it on linux just as easily.
+
+- **script/** Contains a blender addon to generate your own dataset. See the addon section of this document for more details
+
+To run the program, make sure that the current directory contains the folder *resources*. Then, drag-and-drop the file *scene_config.txt* of the dataset of your choice on the button "Scene config file" and click "Load scene".
+![](readme_images/drag&drop.png)
+
+Then, you can enable volumetric rendering by pressing "V". Select the "*alpha*" radio button just below to show the initialized volume's transparency. The darker the color, the less transparent the volume is.
+![](readme_images/initialization.png)
+You can start the optimization by clicking the "Repeat" checkbox or by pressing "R". You should see something like this after a few seconds:
+![](readme_images/converged_result.png)
+
+# How it works
+The following sections will give an overview of how the problem of minimizing the photometric loss can be solved efficiently using a GPU. Don't hesitate to have a look at the code for implementation details.
+
+## The rendering equation
+Instead of considering the total photometric loss, let's focus on the loss given by a single ray for now. As explained before, we accumulate $N$ samples along the ray to form a color and a transmittance value. Here is what it looks like using math equations:
+$$Loss = || C_{render} - C_{img} ||^2 $$
+Our volumetric rendering equation is:
+$$ C_{render} = C_N  + T_N C_{background}$$
+Where $C_N$ is the integrated color given by the sum of the contributions of the samples (equivalent to the for-loop above): 
+$$ C_N = \sum_{i=1}^N c_i (1 - \alpha_i) T_i$$
+The weighting factor $(1 - \alpha_i) T_i$ is accounting for visibility, so that samples occluded by the previous ones contribute less. The partial transmittance $T_i$ is given by the product of all the previous transparency values $\alpha_j$:
+$$ T_i = \prod_{j=1}^{j<i}\alpha_j $$
+Note how we add the color of the background $C_{background}$ multiplied by the final transmittance value $T_N$. This blending helps to continuously estimate which parts of the images belong to the object and which parts belong to the background.
+The background can be obtained very easily with a multi-camera setup, by taking pictures when the acquisition room is empty. When taking images "in the wild" with a smartphone, we would have to rely on segmentation masks. These can be created by hand or with an A.I. such as *[segment anything](https://segment-anything.com/)*. An alternative is to also reconstruct the background, by warping the whole world $\mathbb{R}^3$ into the finite bounds of the reconstruction volume $[-1, +1]^3$. This is a common practice to handle unbounded scenes.
+
+## Partial derivatives
+
+The reconstruction problem we're trying to solve can be formulated as an optimization problem. We can solve it using (stochastic) gradient descent. All we have to do is to compute the partial derivatives of the loss with respect to all the samples colors $c_i$ and transparency values $\alpha_i$ accumulated along the ray. We will take advantage of the chain rule to break down the computation into smaller parts. Once this is done, we just have to multiply these simpler partial derivatives to obtain the completed partial derivatives.
+
+Before we start, here is a reminder on the notations used:
+- The dimensions of all quantities are indicated between brackets: $[1\times3]$ denotes a row vector for instance.
+- The derivative of a scalar with respect to a scalar is a scalar $[1\times1]$
+- The derivative of a scalar with respect to a vector is a row vector $[1\times3]$
+- The derivative of a vector with respect to a scalar is a column vector $[3\times1]$
+- The derivative of a vector with respect to a vector is a matrix $[3\times3]$
+
+Note that vectors don't have a specific orientation (either row or column), only the partial derivatives do! That's because they actually are jacobian matrices, and their dimentions matter when we multiply them together.
+
+Let's start with the loss:
+$$Loss = || C_{render} - C_{img} ||^2 $$
+$$ \frac{\partial Loss}{\partial C_{render}} = 2 \cdot (C_{render} - C_{img}) \qquad [1 \times 3]$$
+Next comes the rendered color:
+$$ C_{render} = C_N  + T_N C_{background}$$
+$$ \frac{\partial C_{render}}{\partial C_N}  = I \qquad [3 \times 3]$$
+$$ \frac{\partial C_{render}}{\partial T_N}  = C_{background} \qquad [3 \times 1] $$
+Then comes the partial transmittance for the $k$-th sample:
+$$ T_k = \prod_{j=1}^{j<k}\alpha_j $$
+$$ \frac{\partial T_k}{\partial \alpha_i} = \frac{T_k}{\alpha_i} \qquad [1\times1]$$ 
+We're assuming that $i<k$ and that $\alpha_i>0$. We can finally take care of the integrated color:
+$$ C_N = \sum_{i=1}^N c_i (1 - \alpha_i) T_i$$
+$$ \frac{\partial C_N}{\partial c_i} = (1 - \alpha_i) T_i \qquad \text{(diagonal matrix)  } [3\times3]$$
+$$ \frac{\partial C_N}{\partial \alpha_i} = - c_i T_i + \sum_{k=i+1}^N c_k (1 - \alpha_k) \frac{\partial T_k}{\partial \alpha_i} = - c_i T_i + \sum_{k=i+1}^N c_k (1 - \alpha_k) \frac{T_k}{\alpha_i} \qquad [3\times1]$$
+The last equation depends on all the samples following the $i$-th one which would be highly inefficient to compute. we can simplify this by reversing the dependency:
+$$ \frac{\partial C_N}{\partial \alpha_i} = - c_i T_i + \frac{1}{\alpha_i} \sum_{k=i+1}^N c_k (1 - \alpha_k) T_k = - c_i T_i + \frac{C_N - C_i}{\alpha_i} \qquad [3\times1]$$
+Now, the expression depends on the integrated color $C_N$ and the partial integrated color $C_i$. From this observation, we can derive a simple algorithm to compute and propagate all the partial derivatives.
+
+- Forward pass: March into the volume to build the integrated color $C_N$ and the transmittance $T_N$ and write them to an intermediary buffer. This is the forward pass, which corresponds exactly with our rendering function.
+- Compute $C_{render} = C_N + T_N C_{background}$ and the per pixel gradient $\frac{\partial Loss}{\partial C_{render}}$.
+- Backward pass: March into the volume a second time to build the partial color $C_i$ and the partial transmittance $T_i$. Compute the partial derivatives using the expressions we derived above and multiply them together according to the chain rule: $$ \frac{\partial Loss}{\partial c_i} = \frac{\partial Loss}{\partial C_{render}} \cdot \frac{\partial C_{render}}{\partial C_N} \cdot \frac{\partial C_N}{\partial c_i} $$ $$ \frac{\partial Loss}{\partial \alpha_i} = \frac{\partial Loss}{\partial C_{render}} \cdot \left( \frac{\partial C_{render}}{\partial C_N} \cdot \frac{\partial C_N}{\partial \alpha_i} + \frac{\partial C_{render}}{\partial T_N} \cdot \frac{\partial T_N}{\partial \alpha_i} \right) $$
+
+We can check that the partial derivatives have correct dimensions:
+
+$$ \frac{\partial Loss}{\partial c_i} = [1\times3] [3\times3] [3\times3] =  [1\times3]$$
+$$ \frac{\partial Loss}{\partial \alpha_i} = [1\times3] \left([3\times3] [3\times1] + [3\times1] [1\times1]\right) = [1\times1]$$
+
+And after simplifying the matrix products we get this:
+$$ \frac{\partial Loss}{\partial c_i} = 2 (C_{render} - C_{img}) (1 - \alpha_i) T_i $$
+$$ \frac{\partial Loss}{\partial \alpha_i} = 2 (C_{render} - C_{img})^T (- c_i T_i + \frac{C_N - C_i}{\alpha_i} + C_{background} \frac{T_N}{\alpha_i}) $$
+
+The last expression can be further simplified to:
+$$ \frac{\partial Loss}{\partial \alpha_i} = 2 (C_{render} - C_{img})^T (- c_i T_i + \frac{C_{render} - C_i}{\alpha_i}) $$
+
+Now we can modify our rendering algorithm to also handle the backward pass in a single function with a boolean switch.
+```c
+vec4 render(vec3 cam_pos, vec3 ray, float t_min, float t_max){
+    vec3 C = vec3(0.0f); // accumulated color
+    float T = 1.0f;      // transmittance
+    for(float t=t_min; t < t_max && T > 1.0E-3f; t += step){
+        vec3 world_pos = cam_pos + t * ray;
+        transparency, color = sampleVolume(world_pos);
+        C += color * (1.0f - transparency) * T;
+        if(backward){
+            ... // compute the partial derivatives
+            const vec4 gradient = vec4(dLoss_dcolor, dLoss_dtransparency);
+            writeGradients(worldPos, gradient); // write the gradients to global memory
+        }
+        T *= transparency;
+    }
+    return vec4(C, T);
+}
+```
+
+## Propagating the partial derivatives
+
+Shooting rays from all the pixels of all the cameras at each iteration of the gradient descent algorithm would give a very stable descent direction but would be very costly. Instead, a common practice is to perform stochastic gradient descent by sampling a few thousand rays completely randomly at each iteration. We can use one gpu thread per ray, each calling the render function with its own ray. However, we would still leave a lot of performance aside since gpu threads belonging to the same warp would sample from different locations in memory, which is very detrimental for cache coherency. 
+To tackle that problem, we're going to use workgroups of 64 rays covering squares of 8x8 pixels, so that it fits into two warps. This way, neighboring threads will samples from neighboring voxels, and even share some due to tri-linear interpolation. Consequently, we randomly sample a few images at a time instead of selecting random rays.
+
+The last thing we must address to complete our forward and backward pass is the tri-linear interpolation operator. Here is how we could write the *sampleVolume* function:
+```c
+vec4 sampleVolume(const vec3 worldPos, sampler3D voxels){
+	const vec3 coord = (worldPos * 0.5f + 0.5f) * GridResolution - 0.5f;
+	const vec3 f = fract(coord);
+	const ivec3 texel = ivec3(coord);
+    vec4 value = vec4(0.0f);
+    for(int i=0; i<8; i++){ // iterate over the 8 nearest voxels
+        // convert i to an offset along the x,y,z axes
+        const ivec3 offset = ivec3(i>>0,i>>1,i>>2)&1; 
+        // compute the interpolation weights along the x,y,z axes
+        const vec3 W = mix(f, 1.0f-f, equal(offset, ivec3(0))); 
+        // perform the weighted sum
+    	value += texelFetch(voxels, texel + offset, 0) * (W.x * W.y * W.z); 
+    }
+	return value;
+}
+```
+We convert the world coordinate to a grid coordinate by mapping the $[-1, +1]^3$ interval to $[0, \text{GridResolution}]^3$. Then, we return a weighted sum of the 8 nearest voxels with a short for-loop. The voxel indices depend on the integer part of *coord* while the interpolation weights depend on the fractional part of *coord*. We could use the hardware texture filtering unit for an extra performance boost but we need to understand how it works so that we can compute the partial derivatives of this operator during the backward pass. In practice, we would use a sparse structure for our voxel grid so we wouldn't be able to rely on hardware filtering anyway. The backward pass is actually super easy: since each sample value is the result of a linear combination of 8 voxel values, we just have to weigh the gradient by the same weights and accumulate the result to global memory:
+```c
+void writeGradients(const vec3 worldPos, const vec4 grads, layout(rgba16f) image3D voxelGrads) {
+	const vec3 coord = (worldPos * 0.5f + 0.5f) * GridResolution - 0.5f;
+	const vec3 f = fract(coord);
+	const ivec3 texel = ivec3(coord);
+    for(int i=0; i<8; i++){ // iterate over the 8 nearest voxels
+        // convert i to an offset along the x,y,z axes
+        const ivec3 offset = ivec3(i>>0,i>>1,i>>2)&1;           
+        // compute the interpolation weights along the x,y,z axes
+        const vec3 W = mix(f, 1.0f-f, equal(offset, ivec3(0))); 
+        // take the interpolation weight into account
+        const vec4 g = grads * (W.x * W.y * W.z);               
+        // accumulate to global memory with an atomic add
+        imageAtomicAdd(voxelGrads, texel + offset, f16vec4(g)); 
+    }
+}
+```
+As you can see, we iterate over exactly the same voxels as we do in the forward pass. We accumulate the gradients in an intermediary 3D grid named *voxelGrads*. Several threads could try to update the same voxel at the same time so we have to use an atomic addition. The OpenGL extension *GL_NV_shader_atomic_fp16_vector* provides such a functionality for a 4-component 3D textures through the *imageAtomicAdd* function. However, this functionality is restricted to 16 bit floats so we have to convert our *vec4* gradient to the *f16vec4* type. The loss of precision from the 32 bit to 16 bit conversion isn't a problem at all as long as the gradients aren't too small or too big. This doesn't happen as long as $\alpha$ is clampeed above a threshold since we divide by $\alpha$ when we compute the partial derivatives. 
+
+We computed the gradients using a **scattered write** algorithm: the strategy is to allocate one GPU thread per ray, to compute partial derivatives with respect to all the sampled voxels and to accumulate the gradients to global memory using atomics. We could have achieved the same using a **gathered read** algorithm: the strategy would be to allocate one GPU thread per voxel, compute and accumulate partial derivatives with respect to all the rays which happen to touch the voxel of interest, then finally write the result to global memory only once. The second option does not rely on global memory atomics but requires a lot more memory to keep track of intermediary values needed to compute the partial derivatives. Instead, the first strategy requires almost no additional memory since the partial derivatives are all computed on the fly, as the rays march through the volume.
+The main weaknesses of the first approach is that global memory atomics are very bandwidth demanding and can suffer from contention when multiple thread try to write to the same voxel at once. We can address these issues by relying on the fact that we are performing a stochastic gradient descent:
+```c
+void writeGradientsFast(const vec3 worldPos, const vec4 grads, layout(rgba16f) image3D voxelGrads) {
+	const vec3 coord = (worldPos * 0.5f + 0.5f) * GridResolution - 0.5f;
+	const ivec3 texel = ivec3(coord);
+    // generate an independent pseudo-random integer for each thread
+    const int index = rand() % 8; 
+    // select the corresponding voxel
+    const ivec3 offset = ivec3(index>>0,index>>1,index>>2)&1; 
+    // accumulate to global memory only once
+    imageAtomicAdd(voxelGrads, texel + offset, f16vec4(grads)); 
+}
+```
+We modify our *writeGradients* function to randomly select only one out of the 8 voxels to write the gradient to. The convergence is almost as good as what we get by writting 8 gradients instead of only one and the backward pass gets a 4X speedup from this small change! Ideally, the probability of selecting a particular voxel should be proportional to its interpolation weight but that's not very important for convergence.
+
+## Performance
+
+Here are a few performance metrics that I get on my laptop equipped with an RTX 3060 GPU:
+
+| Metric \ Dataset | Bust | Horse | 
+| ----------- | ----------- | ----------- |
+| Forward pass | 0.6 ms | 4.5 ms |
+| Pixel derivatives | 0.07 ms | 0.1 ms |
+| Backward pass | 1.7 ms | 17.0 ms |
+| Voxel derivatives | 0.2 ms | 1.3 ms |
+| ADAM | 0.4 ms | 2.4 ms |
+| PSNR | 36.3 | 38.0 |
+| VRAM | 110 MB | 760 MB |
+
+The first dataset has 64 images at $128^2$ resolution and a volume of $128^3$ voxels, the second one has 128 images at $256^2$ resolution and $256^3$ voxels. I used a batch size of 5 images in both cases. The "*Voxel derivatives*" entry corresponds to the computation of a volumetric smoothness regularization of the form $Loss = \gamma ||\nabla f||^2_2$ while the "*ADAM*" entry corresponds to the update of the voxels using the well-known ADAM optimizer. Please refer to the code for more details. The second dataset has 4x as many rays per batch and 8x as many voxels in total than the first one. The performance scales mostly linearly with the number of voxels since the forward pass takes about 8x longer and the backward pass takes 10x longer for the second dataset.
+
+## Further Improvements
+
+I hope I've been able to explain how differentiable rendering works in practice with this toy example. We could improve it in a few different ways:
+- The rendering function is purely volumetric so it is not possible to extract high quality meshes from the opacity field with marching cubes. The main problem is that there is no well-defined boundary between the inside and the outside of the reconstruction. Note that almost all NeRF-like approaches suffer from this problem. We can address this issue quite neatly by optimizing a signed-distance field instead of an opacity field, refer to [NeUS](https://lingjie0206.github.io/papers/NeuS/) for more details.
+- Our rendering function cannot handle reflective objects since each voxel contains a single color. An easy way to introduce view-dependent colors is to use a spherical harmonics basis, as shown in [plenoxels](https://alexyu.net/plenoxels/). The idea is to parameterize the color of each sample by the view vector $v$, expanded into a low-degree polynomial basis: $c_i(v) = \sum_{k=0}^8 \beta_{i,k} Y_{lm}(v)$. The current tendency in the state-of-the-art papers is to use small neural network to parameterize the radiance: $c_i(v) = MLP(v, \Theta_i)$ where the features $\Theta_i$ are stored in a hierarchical voxel grid or in a hierarchy of hashtables (have a look at [instant-ngp](https://nvlabs.github.io/instant-ngp/) for more details).
+- We could improve the training times by a wide margin by using a coarse-to-fine scheme: the idea is to start with low-resolution images and a low-resolution grid and to progressively double the resolution when convergence is reached at the current level of detail. This strategy can be coupled with a sparse data structure for the voxel grid so that empty regions of space don't have to be allocated.
+- Finally, as mentionned before, we could also support unbounded scene by warping the rays using a so-called inverted sphere parameterization.
+
+# Blender Addon
+
+A blender addon is provided in **scripts/**.
+Copy the "**CreateDataset**" folder to the addon's folder of Blender. For instance, this folder is located here on my computer: **C:\blender-3.6.1-windows-x64\3.6\scripts\addons**. Make sure to restart blender or reload the addons once you've moved the addon. You will also have to enable it in the "preferences" panel. Here are the steps needed to generate your dataset:
+
+- First make sure that your object fits in the $[-1, +1]^3$ range
+- Add a camera named "Camera" 
+- Go to the object properties panel
+- Scroll down and open the panel named "Create NeRF Dataset"
+- Set the output path (the output folder should be empty)
+- Set the number of images that you want, the focal length and dimensions of the images, etc...
+- Select additional options if required
+- Use an HDRI to light your object and serve as a background image
+- Press "Render images". The UI will be unresponsive while the rendering is in progress. You can run blender from the terminal if you want to follow the progress.
+
+The addon will first render backgrounds by hiding all the objects in the scene, then render the objects without the background. The camera will be placed automatically while rendering, so keeping the default focal length of 60mm is advised. Once all images are rendered, the addon will re-export the images by blending the foreground and background with the alpha-mask generated when rendering the object without the background. 
+
+![](readme_images/addon.png)
+
+<script type="text/javascript" src="http://cdn.mathjax.org/mathjax/latest/MathJax.js?config=TeX-AMS-MML_HTMLorMML"></script>
+<script type="text/x-mathjax-config">
+    MathJax.Hub.Config({ tex2jax: {inlineMath: [['$', '$']]}, messageStyle: "none" });
+</script>

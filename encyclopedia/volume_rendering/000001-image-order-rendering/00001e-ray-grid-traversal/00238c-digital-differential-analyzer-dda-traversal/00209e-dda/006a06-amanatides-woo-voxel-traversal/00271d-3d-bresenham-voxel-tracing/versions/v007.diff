@@ -1,0 +1,176 @@
+--- v006.md
++++ v007.md
+@@ -4,9 +4,9 @@
+ 
+ ## Overview
+-3D Bresenham Voxel Tracing is a discrete ray traversal algorithm that approximates a continuous ray as a sequence of adjacent voxels in a uniform 3D grid using integer arithmetic [S3, S5, unofficial]. It solves the problem of efficiently identifying which voxels a ray intersects without computing floating-point ray-AABB intersections at every step [S1, S4, unofficial]. Unlike [Amanatides-Woo Voxel Traversal](3132-amanatides-woo-voxel-traversal.md), which calculates exact distances to voxel boundaries using floating-point division, Bresenham tracing relies on error accumulation to determine the next voxel, making it computationally cheaper and immune to division-by-zero errors for axis-aligned rays [S3, S5, unofficial]. It is distinct from [Siddon's Algorithm](2590-siddon-s-algorithm.md) by avoiding floating-point slab intersection calculations entirely [S5, unofficial].
++3D Bresenham Voxel Tracing is a discrete ray traversal algorithm that approximates a continuous ray as a sequence of adjacent voxels in a uniform 3D grid using integer arithmetic [S3, S5, unofficial]. It solves the problem of efficiently identifying which voxels a ray intersects without computing floating-point ray-AABB intersections at every step [S1, S4, unofficial]. It is distinct from analytical slab-intersection methods by relying on integer error accumulation to step through adjacent voxels [S3, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Ray origin $\vec{o}$, ray direction $\vec{d}$, grid dimensions $(W, H, D)$, voxel size $s$ (typically $s=1$), and a voxel grid data structure.
++*   **Input:** Ray origin $\vec{o}$, ray direction $\vec{d}$, grid bounds (minimum and maximum coordinates), voxel size $s$ (typically $s=1$), and a voxel grid data structure [S1, S6, S9, unofficial].
+ *   **Output:** A sequence of voxel coordinates $(x, y, z)$ visited by the ray, or a hit result containing the first occupied voxel's index, normal, and distance [S6, S9, unofficial].
+ 
+@@ -15,5 +15,5 @@
+     $$ \text{index} = (z \cdot H + y) \cdot W + x $$
+     [S2, unofficial]
+-*   **State Variables:** Current voxel coordinates $(x, y, z)$, step directions $(x_{inc}, y_{inc}, z_{inc}) \in \{-1, 1\}$, and error accumulators $(c_1, c_2)$.
++*   **State Variables:** Current voxel coordinates $(x, y, z)$, step directions $(x_{inc}, y_{inc}, z_{inc}) \in \{-1, 1\}$, and error accumulators $(c_1, c_2)$ [S3, unofficial].
+ 
+ **Algorithm Steps:**
+@@ -47,42 +47,46 @@
+ **Pseudocode:**
+ ```python
+-def bresenham_voxel_tracing(ray_origin, ray_direction, grid_width, grid_height, grid_depth, voxel_size=1.0):
+-    # 1. Calculate entry/exit t-values for the grid AABB
+-    # Simplified: assume ray intersects grid. Calculate start and end voxel coordinates.
+-    # In practice, use slab intersection to find t_entry and t_exit.
+-    # f0 = ray_origin + t_entry * ray_direction
+-    # f1 = ray_origin + t_exit * ray_direction
+-    
+-    # Map world coordinates to voxel indices
+-    # i0 = floor(f0 / voxel_size)
+-    # i1 = floor(f1 / voxel_size)
+-    
+-    xi, yi, zi = i0
+-    xf, yf, zf = i1
+-    
+-    # 2. Calculate deltas and step directions
++def bresenham_voxel_tracing(ray_origin, ray_direction, grid_min, grid_max, voxel_size=1.0):
++    # 1. Slab intersection to find t_entry and t_exit
++    inv_dir = [1.0 / d if abs(d) > 1e-9 else float('inf') for d in ray_direction]
++    t0 = [(grid_min[i] - ray_origin[i]) * inv_dir[i] for i in range(3)]
++    t1 = [(grid_max[i] - ray_origin[i]) * inv_dir[i] for i in range(3)]
++    t_entry = max(min(t0), min(t1))
++    t_exit = min(max(t0), max(t1))
++    if t_entry > t_exit or t_exit < 0:
++        return # No intersection
++    # 2. Map to voxel indices with epsilon offset to avoid boundary precision issues
++    f0 = [ray_origin[i] + t_entry * ray_direction[i] + 1e-4 * ray_direction[i] for i in range(3)]
++    f1 = [ray_origin[i] + t_exit * ray_direction[i] for i in range(3)]
++    xi = int(f0[0] // voxel_size)
++    yi = int(f0[1] // voxel_size)
++    zi = int(f0[2] // voxel_size)
++    xf = int(f1[0] // voxel_size)
++    yf = int(f1[1] // voxel_size)
++    zf = int(f1[2] // voxel_size)
++    # Clamp to grid bounds
++    xi = max(0, min(xi, int(grid_max[0] // voxel_size) - 1))
++    yi = max(0, min(yi, int(grid_max[1] // voxel_size) - 1))
++    zi = max(0, min(zi, int(grid_max[2] // voxel_size) - 1))
++    xf = max(0, min(xf, int(grid_max[0] // voxel_size) - 1))
++    yf = max(0, min(yf, int(grid_max[1] // voxel_size) - 1))
++    zf = max(0, min(zf, int(grid_max[2] // voxel_size) - 1))
++
+     dx = xf - xi
+     dy = yf - yi
+     dz = zf - zi
+-    
+     xinc = 1 if dx > 0 else -1
+     yinc = 1 if dy > 0 else -1
+     zinc = 1 if dz > 0 else -1
+-    
+     abs_dx = abs(dx)
+     abs_dy = abs(dy)
+     abs_dz = abs(dz)
+-    
+-    # 3. Identify dominant axis
+-    # Initialize error accumulators
++
++    # 3. Identify dominant axis and initialize error accumulators
+     c1 = 0
+     c2 = 0
+-    
+-    # Process start voxel
+     yield (xi, yi, zi)
+-    
+-    # Determine dominant axis and iterate
++
+     if abs_dx >= abs_dy and abs_dx >= abs_dz:
+-        # X is dominant
+         c1 = abs_dx // 2
+         c2 = abs_dx // 2
+@@ -94,11 +98,9 @@
+                 yi += yinc
+             c2 += abs_dz
+-            if c2 >= abs_dx:
+-                c2 -= abs_dx
++            if c2 >= abs_dz:
++                c2 -= abs_dz
+                 zi += zinc
+             yield (xi, yi, zi)
+-            
+     elif abs_dy >= abs_dx and abs_dy >= abs_dz:
+-        # Y is dominant
+         c1 = abs_dy // 2
+         c2 = abs_dy // 2
+@@ -110,11 +112,9 @@
+                 xi += xinc
+             c2 += abs_dz
+-            if c2 >= abs_dy:
+-                c2 -= abs_dy
++            if c2 >= abs_dz:
++                c2 -= abs_dz
+                 zi += zinc
+             yield (xi, yi, zi)
+-            
+     else:
+-        # Z is dominant
+         c1 = abs_dz // 2
+         c2 = abs_dz // 2
+@@ -126,6 +126,6 @@
+                 yi += yinc
+             c2 += abs_dx
+-            if c2 >= abs_dz:
+-                c2 -= abs_dz
++            if c2 >= abs_dx:
++                c2 -= abs_dx
+                 xi += xinc
+             yield (xi, yi, zi)
+@@ -139,5 +139,5 @@
+ *   **Axis-Aligned Rays:** If a ray direction component is zero, the standard DDA division by zero is avoided in Bresenham's integer logic. However, the dominant axis selection must handle ties (e.g., if $dx=0, dy=0, dz>0$, Z is dominant) [S3, S8, unofficial].
+ *   **Boundary Conditions:** The algorithm must clamp coordinates to $[0, \text{dim}-1]$ to avoid out-of-bounds memory access [S9, unofficial].
+-*   **Connectivity:** The standard Bresenham algorithm produces a 6-connected path in 3D (moving along one axis at a time, or diagonally across faces). A 26-connected path (allowing corner crossings) may miss intersections that a 6-connected path detects, but requires less computation [S5, unofficial]. The basic integer accumulation described above yields a path that is topologically consistent with the line segment but may not visit every voxel touched by the continuous ray if the ray passes through a voxel corner [S5, S12, unofficial].
++*   **Connectivity:** The standard Bresenham algorithm produces a 6-connected path in 3D (moving along one axis at a time, or diagonally across faces). A 26-connected path (allowing corner crossings) may miss intersections that a 6-connected path detects, but requires less computation [S5, unofficial]. The basic integer accumulation described above yields a path that is topologically consistent with the line segment but may not visit every voxel touched by the continuous ray if the ray passes through a voxel corner [S5, unofficial].
+ *   **Precision:** Using integer arithmetic avoids floating-point accumulation errors, but the initial mapping from world to voxel coordinates must be precise [S1, unofficial].
+ 
+@@ -162,19 +162,24 @@
+ Template-Based Volume Viewing is a ray-grid traversal technique for parallel projection that exploits inter-ray coherence by precomputing a single sequence of voxel increments (a template) and reusing it for all rays, thereby avoiding per-ray line algorithm activation. It solves the discretization errors and performance overhead inherent in naive per-ray traversal, where varying initial positions cause voxels to be skipped or visited multiple times. Unlike siblings that recompute traversal logic per ray, this method ensures all rays share the same form regardless of length, distributing discretization error uniformly.
+ 
+-### 3D DDA Voxel Grid Tracing
+-A ray tracing method for voxel models that walks a block of a model cell by cell using the Amanatides-Woo DDA algorithm, organizing models into $8^3$ blocks within a BVH to skip empty space [S10, unofficial]. It cuts the model into $8^3$ blocks, shrinks them to voxel representations, inserts them into a BVH, and walks the grid cell by cell [S10, unofficial]. Boundary artifacts on block edges are handled by reading neighboring cells from the whole model [S10, unofficial]. Memory usage is one byte per voxel cell [S10, unofficial]. It is approximately 15% faster than quad-based tracing on the monu1 scene [S10, unofficial].
++### [Ray-Grid Boundary Intersection for First Voxel Index](18141-ray-grid-boundary-intersection-for-first-voxel-index.md)
++This method computes the initial voxel index for ray traversal by determining the exact point where a ray enters a uniform axis-aligned grid and converting that point to grid coordinates. It differs from its siblings, such as [Integer-based Amanatides and Woo Voxel Traversal](4246-integer-based-amanatides-and-woo-voxel-traversal.md) and [3D Bresenham Voxel Tracing](3949-3d-bresenham-voxel-tracing.md), by explicitly solving for the entry intersection using parametric line equations rather than relying on incremental stepping or integer arithmetic approximations. This approach is chosen when an exact geometric entry point is required before initiating a traversal algorithm, particularly for handling arbitrary ray orientations without special-casing vertical or horizontal components early in the pipeline.
+ 
+ ### Voxel-Based Lighting
+-A lighting calculation performed using the normal and position derived from the voxel traversal hit, rather than the continuous surface intersection of standard ray tracing [S11, unofficial]. It calculates the real-world position of the hit using the traversal distance `hitT` (`vec3 realPos = ro + hitT * rd;`), computes diffuse lighting intensity using the dot product of the hit normal and light position, applies ambient and diffuse scaling, and mixes between shadow and cube colors based on intensity [S11, unofficial]. Standard ambient occlusion and shadow calculations may not work correctly because they are computed on the continuous geometry rather than the voxel grid [S11, unofficial].
++A lighting calculation performed using the normal and position derived from the voxel traversal hit, rather than the continuous surface intersection of standard ray tracing [S10, unofficial]. It calculates the real-world position of the hit using the traversal distance `hitT` (`vec3 realPos = ro + hitT * rd;`), computes diffuse lighting intensity using the dot product of the hit normal and light position, applies ambient and diffuse scaling, and mixes between shadow and cube colors based on intensity [S10, unofficial]. Standard ambient occlusion and shadow calculations may not work correctly because they are computed on the continuous geometry rather than the voxel grid [S10, unofficial].
+ 
+ ### Stochastic Ray Bouncing
+-A shading technique used within the voxel tracer where rays bounce off voxel surfaces. It uses a probabilistic mix of perfect reflection and diffuse scattering to simulate indirect lighting and color bleeding, limited to a maximum of 3 bounces [S12, unofficial]. If a random number `rand > 0.9`, a perfect specular reflection is performed; otherwise, a random diffuse direction is generated, reflected if it points into the surface, and attenuated by the voxel's color [S12, unofficial]. The diffuse reflection correction is $dir_{out} = dir_{rand} - 2 \cdot (dir_{rand} \cdot normal) \cdot normal$ if $dir_{rand} \cdot normal < 0$ [S12, unofficial]. The demo has very limited denoising, resulting in extremely noisy images [S12, unofficial].
++A shading technique used within the voxel tracer where rays bounce off voxel surfaces [S11, unofficial]. It uses a probabilistic mix of perfect reflection and diffuse scattering to simulate indirect lighting and color bleeding, limited to a maximum of 3 bounces [S11, unofficial]. If a random number `rand > 0.9`, a perfect specular reflection is performed; otherwise, a random diffuse direction is generated, reflected if it points into the surface, and attenuated by the voxel's color [S11, unofficial]. The diffuse reflection correction is $dir_{out} = dir_{rand} - 2 \cdot (dir_{rand} \cdot normal) \cdot normal$ if $dir_{rand} \cdot normal < 0$ [S11, unofficial]. The demo has very limited denoising, resulting in extremely noisy images [S11, unofficial].
++
++### Integer Line Voxelization
++An integer-based line voxelization algorithm evaluated for its runtime and approximation error relative to RLV [S12, unofficial]. ILV was 20-250% slower than RLV in runtime evaluations [S12, unofficial]. The approximation error of ILV, measured by Jaccard distance, generally started at 20% and grew up towards 25% for higher voxel resolutions [S12, unofficial].
++
++### Real Line Voxelization
++An algorithm for optimal scanline voxelization of 3D models that relies on line voxelization, evaluated as the best performing method among those compared [S12, unofficial]. RLV performed better in every case compared to ILV and Bresenham; ILV was 20-250% slower and Bresenham was 20-500% slower [S12, unofficial].
+ 
+ ## Operating characteristics
+ *   **Time Complexity:** Proportional to the number of voxels traversed, bounded by the grid dimension in the worst case ($O(\max(W, H, D))$) [S9, unofficial].
+ *   **Memory Complexity:** $O(1)$ auxiliary space for the traversal state, plus $O(W \cdot H \cdot D)$ for the voxel grid [S2, unofficial].
+-*   **Performance:** Integer arithmetic is generally faster than floating-point division, making Bresenham tracing efficient on hardware without advanced FPUs or when integer units are preferred [S3, unofficial]. However, it may visit more voxels than necessary (topological incompleteness) compared to analytical methods like Amanatides-Woo or Siddon's, potentially increasing shading cost [S5, S12, unofficial].
+ *   **Strengths:** No division by zero issues for axis-aligned rays; simple integer logic; low memory overhead; easy to implement [S3, S5, unofficial].
+-*   **Limitations:** May miss voxels intersected by the ray (topological incompleteness) if the path is not 26-connected or if error accumulation is not corrected [S5, S12, unofficial]. Less precise than floating-point DDA for determining exact hit positions [S12, unofficial].
++*   **Limitations:** May miss voxels intersected by the ray (topological incompleteness) if the path is not 26-connected or if error accumulation is not corrected [S5, unofficial]. Less precise than floating-point DDA for determining exact hit positions [S12, unofficial].
+ 
+ ## Background
+@@ -191,5 +196,5 @@
+ [S8] rpereira-dev/CubeEngine, https://github.com/rpereira-dev/CubeEngine, fetched 2026-10-27 (unofficial)
+ [S9] an1pse/voxel-traversal, https://github.com/an1pse/voxel-traversal, fetched 2026-10-27 (unofficial)
+-[S10] Milestone 13: MagicaVoxel look (.vox, DDA voxel grid, sun/sky, bloom, style voxel), https://github.com/adriendjn/mypbr/pull/10, fetched 2026-10-25 (unofficial)
+-[S11] 【Ray tracing】Voxelを作ってみる, https://qiita.com/misaki_mofu/items/026cd353054856921995, fetched 2026-10-25 (unofficial)
+-[S12] newDINO/voxel_ray_demo, https://github.com/newDINO/voxel_ray_demo, fetched 2026-10-24 (unofficial)+[S10] 【Ray tracing】Voxelを作ってみる, https://qiita.com/misaki_mofu/items/026cd353054856921995, fetched 2026-10-25 (unofficial)
++[S11] newDINO/voxel_ray_demo, https://github.com/newDINO/voxel_ray_demo, fetched 2026-10-24 (unofficial)
++[S12] A Comparison of Optimal Scanline Voxelization Algorithms, http://urn.kb.se/resolve?urn=urn:nbn:se:liu:diva-168331, fetched 2026-10-24 (unofficial)

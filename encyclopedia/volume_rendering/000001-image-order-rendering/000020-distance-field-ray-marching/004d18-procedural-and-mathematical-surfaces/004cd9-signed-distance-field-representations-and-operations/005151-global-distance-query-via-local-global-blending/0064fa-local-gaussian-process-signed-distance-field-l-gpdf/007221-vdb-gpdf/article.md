@@ -1,0 +1,259 @@
+# VDB-GPDF
+
+Also called: GPDF with VDB, Online Gaussian Process Distance Field with VDB Structure, VDB-GPDF Framework, Volumetric Dynamic grid, Volumetric Dynamic grid that shares several characteristics with B+trees Gaussian Process Distance Field
+
+## Overview
+VDB-GPDF is an online incremental mapping framework that couples Gaussian Process (GP) distance fields with the OpenVDB data structure to enable fast, probabilistic queries of Euclidean distance, surface properties, and uncertainties for arbitrary points in large-scale environments [S1]. It solves the computational bottleneck of global GP regression by maintaining a temporary Local GP Signed Distance Field (L-GPDF) for local queries and fusing these results into a persistent Global GP Signed Distance Field (G-GPDF) [S1]. Unlike TSDF or occupancy fusion frameworks (e.g., VDBFusion, VDBblox) that require post-processing to approximate the Euclidean Signed Distance Field (ESDF), VDB-GPDF fuses directly on the ESDF using the L-GPDF, allowing direct querying of distance with uncertainty [S1].
+
+## How it works
+**Inputs:** Raw point cloud $C_i$ in sensor frame $C_i$ at time $i$; homogeneous transformation matrix $T_{C_i}$ from sensor to world frame $W$ [S1].
+**Outputs:** Global VDB grid containing fused distance means $D^i$, fused distance variances $V^i$, fused surface property means $\hat{c}^i$, and fused surface property variances $\hat{w}^i$; active leaf nodes marked for meshing; zero-crossing points $P_S^{0,...,i}$ for G-GPDF generation [S1].
+
+**Data Structures:**
+1.  **OpenVDB Grid:** A hybrid structure splitting space into hash tables with hierarchical trees. It consists of four layers: root nodes, leaf nodes, and two levels of internal nodes [S1].
+    *   **Leaf Node:** Contains $2^3 \times 2^3 \times 2^3$ voxels [S1].
+    *   **First-Layer Internal Node:** Contains $2^4 \times 2^4 \times 2^4$ leaf nodes [S1].
+    *   **Second-Layer Internal Node:** Contains $2^5 \times 2^5 \times 2^5$ first-layer internal nodes [S1].
+    *   **Root Node:** Contains 4 second-layer internal nodes [S1].
+    *   Access complexity is $O(1)$ on average [S1].
+2.  **L-GPDF (Local):** Temporary latent model contained in a local VDB structure. Each leaf node maintains separate GPs for distance and surface properties [S1].
+3.  **G-GPDF (Global):** Generative model maintained in the global VDB structure, trained on zero-crossing points [S1].
+
+**Parameters:**
+*   **Length Scale ($l$):** Correlates 2 to 4 voxels [S1].
+*   **Smooth Minimum Lambda ($\lambda$):** 100 [S1].
+*   **Noise Variances:** $\sigma_o^2$ for latent field, $\sigma_c^2$ for surface properties [S1].
+
+**Algorithm Steps:**
+
+1.  **Projection and Voxelization:**
+    Project raw point cloud $C_i$ to world frame $W$ using $T_{C_i}$ to obtain $P_i$. Voxelize $P_i$ into voxels $Pv_i$ using a local hierarchical VDB. Divide $Pv_i$ into local clusters maintained by VDB leaf nodes [S1].
+
+2.  **Local GP Modeling (L-GPDF Construction):**
+    For each leaf node in the local VDB:
+    *   Let $X$ be the centers of voxels in the leaf node (training points).
+    *   Let $c$ be the surface properties (e.g., color, intensity) at $X$.
+    *   Model the latent occupancy field $o \sim GP(0, k(x, x'))$.
+    *   Model surface properties $c \sim GP(0, k(x, x'))$.
+    *   This forms the temporary L-GPDF [S1].
+
+3.  **Testing Points Generation:**
+    Perform a ray-cast operation from the current sensor origin to each voxel in $Pv_i$. Generate a set of voxels $Pt_i$ as testing points. Compute the distance sign for each $x^* \in Pt_i$ relative to the sensor origin and $Pv_i$ [S1].
+
+4.  **Local Query:**
+    For each testing point $x^* \in Pt_i$:
+    *   Find the closest node in the L-GPDF.
+    *   Compute distance inference $\hat{d}_t(x^*)$, surface properties $\hat{c}_t(x^*)$, and uncertainty $\hat{v}_t(x^*)$ (and $\hat{w}_t(x^*)$ for surface) using the GP inference formulas below [S1].
+
+5.  **Probabilistic Fusion:**
+    Fuse the inferred values from the L-GPDF into the global VDB grid. Let $D^{i-1}(x^*)$ and $V^{i-1}(x^*)$ be the existing distance mean and variance in the global VDB at $x^*$.
+    *   Update distance mean:
+        $$ D^i(x^*) = \alpha \cdot \hat{d}_t(x^*) + \beta \cdot D^{i-1}(x^*) $$
+    *   Update distance variance:
+        $$ V^i(x^*) = \gamma $$
+    *   Update surface properties similarly using $\hat{c}_t(x^*)$ and $\hat{w}_t(x^*)$ [S1].
+
+    **Fusion Weights (Standard):**
+    $$ \alpha = \frac{\hat{v}_t(x^*)}{V^{i-1}(x^*) + \hat{v}_t(x^*)}, \quad \beta = \frac{V^{i-1}(x^*)}{V^{i-1}(x^*) + \hat{v}_t(x^*)}, \quad \gamma = (V^{i-1}(x^*)^{-1} + \hat{v}_t(x^*)^{-1})^{-1} $$
+    **Alternative Weights (Variance-based):**
+    $$ \alpha = \frac{1 - \hat{v}_t(x^*)}{V^{i-1}(x^*) + 1 - \hat{v}_t(x^*)}, \quad \beta = \frac{V^{i-1}(x^*)}{V^{i-1}(x^*) + 1 - \hat{v}_t(x^*)}, \quad \gamma = V^{i-1}(x^*) + 1 - \hat{v}_t(x^*) $$
+    Mark leaf nodes in the global VDB that participated in fusion as active [S1].
+
+6.  **Mesh Reconstruction:**
+    Apply the marching cubes algorithm on the active voxels in the fused global VDB ($P^{0,...,i}$) to update zero-crossing points $P_S^{0,...,i}$ and perform dense reconstruction [S1].
+
+7.  **Global GP Modeling (G-GPDF Generation):**
+    Model the global G-GPDF by training separate GPs for the zero-crossing points $P_S^{0,...,i}$ in each leaf node of the global VDB. This G-GPDF is available for downstream applications to query accurate distance and gradients [S1].
+
+**GP Inference Formulas:**
+*   **Latent Field Inference:**
+    $$ \hat{o}(x^*) = k_{x^*X} (K_{XX} + \sigma_o^2 I)^{-1} 1 $$
+    Where $k_{x^*X}$ is the kernel vector between test point $x^*$ and training points $X$, $K_{XX}$ is the kernel matrix of training points, $\sigma_o^2$ is noise variance, $I$ is identity matrix, and $1$ is a vector of ones [S1].
+*   **Latent Field Uncertainty:**
+    $$ \hat{u}(x^*) = k_{x^*x^*} + k_{x^*X} (K_{XX} + \sigma_o^2 I)^{-1} k_{Xx^*} $$
+    Where $k_{x^*x^*}$ is the kernel value at $x^*$, and $k_{Xx^*}$ is the transpose of $k_{x^*X}$ [S1].
+*   **Distance Field:**
+    $$ \hat{d}(x^*) = -2l^2 \log (\hat{o}(x^*)) $$
+    Where $l$ is the length scale [S1].
+*   **Distance Uncertainty:**
+    $$ \hat{v}(x^*) = \Lambda \hat{u}(x^*) \Lambda^\top, \quad \text{with } \Lambda = \frac{-l}{\sqrt{\hat{o}(x^*) - 2 \log (\hat{o}(x^*))}} $$
+    [S1]
+*   **Gradient Estimation:**
+    $$ \nabla \hat{d}(x^*) = \nabla k_{x^*X} (K_{XX} + \sigma_o^2 I)^{-1} 1 $$
+    Where $\nabla k_{x^*X}$ is the partial derivative of the kernel matrix with respect to $x$ [S1].
+*   **Surface Properties Inference:**
+    $$ \hat{c}_t(x^*) = k_{x^*X} (K_{XX} + \sigma_c^2 I)^{-1} c $$
+    [S1]
+
+**Global Consistency (Smooth Minimum):**
+To handle discontinuities at leaf node boundaries without overlapping, use the smooth minimum function. Let $Q$ be the number of clustered GP nodes in the map.
+$$ \hat{d}(x^*) = \frac{\sum_{q=1}^Q \hat{d}_q(x^*) \exp(\lambda \hat{d}_q(x^*))}{\sum_{q=1}^Q \exp(\lambda \hat{d}_q(x^*))} $$
+Where $\lambda = 100$ and $\hat{d}_q(x^*)$ is the distance inference from node $q$. Gradients are averaged from the $Q$ nodes [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def kernel(x1, x2, length_scale):
+    """Squared exponential kernel."""
+    dist_sq = np.sum((x1 - x2)**2, axis=-1)
+    return np.exp(-dist_sq / (2 * length_scale**2))
+
+def kernel_gradient(x1, x2, length_scale):
+    """Gradient of squared exponential kernel w.r.t x1."""
+    dist_sq = np.sum((x1 - x2)**2, axis=-1)
+    # d/dx1 exp(-||x1-x2||^2 / 2l^2) = exp(...) * (-1/l^2) * (x1-x2)
+    return -kernel(x1, x2, length_scale) * (x1 - x2) / (length_scale**2)
+
+def invert_matrix_safe(M, epsilon=1e-6):
+    """Invert matrix with regularization."""
+    return np.linalg.inv(M + epsilon * np.eye(M.shape[0]))
+
+def vdb_gpdf_step(raw_points_sensor, pose_sensor_to_world, global_vdb, length_scale, lambda_smooth):
+    """
+    One step of VDB-GPDF.
+    raw_points_sensor: Nx3 array of points in sensor frame.
+    pose_sensor_to_world: 4x4 homogeneous transformation matrix.
+    global_vdb: Object representing the global OpenVDB grid with methods get_mean, get_var, set_mean, set_var, mark_active.
+    length_scale: Float.
+    lambda_smooth: Float (100).
+    """
+    # 1. Projection
+    # Convert homogeneous to 3D for calculation, assuming points are at z=1 in sensor frame? 
+    # Actually, raw_points_sensor are 3D points. We transform them.
+    # Assuming raw_points_sensor are already 3D coordinates in sensor frame.
+    points_world = transform_points(raw_points_sensor, pose_sensor_to_world)
+    
+    # 2. Voxelization (Local VDB)
+    # Simplified: Group points into leaf nodes based on coordinates.
+    # In reality, use OpenVDB API. Here we simulate leaf node clusters.
+    local_leaf_nodes = voxelize_and_cluster(points_world)
+    
+    # 3. Local GP Modeling (L-GPDF)
+    l_gpdf_models = {}
+    for leaf_id, voxels in local_leaf_nodes.items():
+        # Training points: centers of voxels
+        X = get_voxel_centers(voxels)
+        # Surface properties c (e.g., color/intensity) associated with voxels
+        c = get_surface_properties(voxels)
+        
+        # Build Kernel Matrix K_XX
+        K_XX = np.zeros((len(X), len(X)))
+        for i in range(len(X)):
+            for j in range(len(X)):
+                K_XX[i, j] = kernel(X[i], X[j], length_scale)
+        
+        # Precompute inverse for efficiency
+        K_inv = invert_matrix_safe(K_XX)
+        
+        l_gpdf_models[leaf_id] = {
+            'X': X,
+            'K_inv': K_inv,
+            'c': c,
+            'sigma_o2': 0.01, # Example noise variance
+            'sigma_c2': 0.01  # Example noise variance
+        }
+        
+    # 4. Testing Points Generation
+    # Ray-cast from sensor origin to each voxel in Pv_i
+    sensor_origin = pose_sensor_to_world[:3, 3]
+    testing_points = ray_cast_to_voxels(sensor_origin, local_leaf_nodes)
+    
+    # 5. Local Query and Fusion
+    for x_star in testing_points:
+        # Find closest leaf node in L-GPDF
+        leaf_id = find_closest_leaf(x_star, l_gpdf_models.keys())
+        model = l_gpdf_models[leaf_id]
+        X = model['X']
+        K_inv = model['K_inv']
+        
+        # Kernel vector k_x*X
+        k_xX = np.array([kernel(x_star, x, length_scale) for x in X])
+        
+        # Latent inference o_hat
+        ones_vec = np.ones(len(X))
+        o_hat = k_xX @ K_inv @ ones_vec
+        
+        # Cap o_hat to prevent singularity in distance calculation
+        o_hat = np.clip(o_hat, 1e-6, 1 - 1e-6)
+        
+        # Distance inference d_hat
+        d_hat = -2 * length_scale**2 * np.log(o_hat)
+        
+        # Latent uncertainty u_hat
+        k_xx = kernel(x_star, x_star, length_scale)
+        k_Xx = k_xX.T
+        u_hat = k_xx + k_xX @ K_inv @ k_Xx
+        
+        # Distance uncertainty v_hat
+        # Lambda factor for Taylor expansion
+        # Lambda = -l / sqrt(o_hat - 2*log(o_hat))
+        # Note: d_hat = -2l^2 log(o_hat) => log(o_hat) = -d_hat / 2l^2
+        # o_hat - 2log(o_hat) = o_hat + d_hat/l^2
+        # However, formula uses o_hat directly.
+        denom = np.sqrt(o_hat - 2 * np.log(o_hat))
+        if denom == 0:
+            denom = 1e-6
+        Lambda = -length_scale / denom
+        v_hat = Lambda * u_hat * Lambda
+        
+        # Surface properties inference c_hat
+        c_vec = model['c']
+        c_hat = k_xX @ K_inv @ c_vec
+        
+        # Fusion into Global VDB
+        # Get existing global stats
+        D_prev = global_vdb.get_mean(x_star)
+        V_prev = global_vdb.get_var(x_star)
+        
+        # Calculate weights (Standard)
+        alpha = v_hat / (V_prev + v_hat)
+        beta = V_prev / (V_prev + v_hat)
+        gamma = 1.0 / (1.0/V_prev + 1.0/v_hat)
+        
+        # Update Global VDB
+        D_new = alpha * d_hat + beta * D_prev
+        V_new = gamma
+        
+        global_vdb.set_mean(x_star, D_new)
+        global_vdb.set_var(x_star, V_new)
+        global_vdb.mark_active(leaf_id)
+        
+    # 6. Mesh Reconstruction
+    # Marching cubes on active voxels
+    zero_crossings = marching_cubes(global_vdb)
+    
+    # 7. Global GP Modeling (G-GPDF)
+    # Train GPs on zero_crossings in each leaf node of global VDB
+    for leaf_id in global_vdb.get_active_leaves():
+        points_in_leaf = get_points_in_leaf(zero_crossings, leaf_id)
+        # Train new GP for G-GPDF (details omitted as it's for downstream query)
+        pass
+        
+    return global_vdb, zero_crossings
+
+def transform_points(points, T):
+    """Transform 3D points by 4x4 homogeneous matrix."""
+    ones = np.ones((points.shape[0], 1))
+    points_h = np.hstack([points, ones])
+    points_h_t = (T @ points_h.T).T
+    return points_h_t[:, :3]
+```
+
+## Operating characteristics
+*   **Time Complexity:** Access complexity for GP clusters in OpenVDB is $O(1)$ on average [S1]. The method avoids iterating all voxels intersected by the ray, updating only those with previous surface measurements, which is more efficient than naive ray-casting [S1].
+*   **Memory Complexity:** OpenVDB reduces CPU memory consumption by hierarchically allocating nodes, suitable for large-scale maps [S1].
+*   **Performance:** Evaluated on CPU (Intel Core i5-1245U). Demonstrated superior efficiency and accuracy of the inferred distance field compared to state-of-the-art frameworks on large-scale datasets (Newer College, Mai City) [S1].
+*   **Strengths:** Direct fusion on ESDF with uncertainty; handles dynamic changes implicitly; provides accurate distance, gradients, and surface properties; scalable to large indoor and outdoor scenes [S1].
+*   **Limitations:** Distance uncertainty $\hat{v}(x^*)$ grows indefinitely away from the surface due to the non-linear reverting operation, though it remains valid close to the surface for fusion [S1]. Singularity in distance calculation if latent field $\hat{o}(x^*)$ is not capped [S1]. Discontinuities at leaf node boundaries handled by smooth minimum, which adds computational overhead for gradient averaging [S1].
+*   **When to use:** Online incremental mapping of large-scale environments where accurate ESDF and surface properties are required for navigation, localization, and manipulation [S1].
+*   **When not to use:** When GPU acceleration is required (implementation is CPU-only in the source) or when indefinite uncertainty growth away from the surface is unacceptable without post-processing [S1].
+
+## Background
+VDB-GPDF was proposed in 2024 by researchers from UTS-RI (University of Technology Sydney, Robotics Institute) [S1]. It builds on the theoretical formulation of Gaussian Process Distance Fields [8] and the OpenVDB data structure [11, 13]. The framework addresses the computational complexity of global GP regression by introducing the local-global blending approach, where a temporary L-GPDF is fused into a persistent G-GPDF [S1]. It is implemented in C++ based on ROS1 [S1].
+
+## Sources
+[S1] VDB-GPDF: Online Gaussian Process Distance Field With VDB Structure, https://doi.org/10.1109/lra.2024.3505814, fetched 2026-10-26

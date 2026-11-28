@@ -1,0 +1,57 @@
+# Neural Scene Graph
+
+Also called: NSG
+
+## Overview
+Neural Scene Graphs (NSG) represent dynamic scenes as a hierarchical directed acyclic graph that separates static background elements from dynamic foreground objects, enabling temporal consistency and accurate modeling of moving components [S1]. Unlike Single Representation Networks (SRNs) that optimize a single static representation for all frames, or Neural Radiance Fields (NeRF) which suffer from ghosting artifacts due to camera pose changes, NSG reconstructs each object individually using shared weights by class to ensure distinct appearance and shape modeling for rigidly connected components [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A set of training images with known camera poses ($T_c^W$) and intrinsics ($K$); 3D tracking data providing object bounding boxes and poses ($p_o$); a scene graph structure $S$ [S1].
+*   **Outputs:** Rendered images (pixel colors $\hat{C}$) and learned neural fields for background and dynamic objects [S1].
+
+**Data Structures:**
+The scene is defined as a directed acyclic graph $S = (W, C, F, L, E)$ [S1]:
+*   $C$: Leaf node representing the camera, containing intrinsics $K \in \mathbb{R}^{3 \times 3}$ [S1].
+*   $F$: Leaf nodes representing representation models. $F = F_{\theta_{bckg}} \cup \{F_{\theta_c}\}_{c=1}^{N_{obj}}$, where $F_{\theta_{bckg}}$ is the static background model and $F_{\theta_c}$ are dynamic object models [S1].
+*   $L$: Leaf nodes assigning latent object codes $l_o$ to each representation leaf node. $L = \{l_o\}_{o=1}^{N_{obj}}$ [S1].
+*   $E$: Edges defining the hierarchy and transformations (e.g., camera-to-world, object pose) [S1].
+*   $W$: Implicitly defined by the graph structure and network weights [S1].
+
+**Numbered Steps:**
+1.  **Ray Generation:** For each pixel in the image of size $H \times W$, generate a ray $r = o + td$ using camera intrinsics $K$ and transformation $T_c^W$ [S1].
+2.  **Static Background Sampling:** Define $N_s$ planes parallel to the initial camera pose $T_{c,0}^W$, equispaced between near clip $d_n$ and far clip $d_f$ [S1]. Calculate intersections $\{t_i\}_{i=1}^{N_s}$ of ray $r$ with these planes [S1]. For each intersection $t_i$, compute position $x = r(t_i)$ and direction $d$ [S1].
+3.  **Dynamic Object Intersection:** For each dynamic object $o$, check for ray-box intersection in the object's local frame using an AABB-ray intersection test [S1]. If intersected, find entrance $t_{o,1}$ and exit $t_{o,N_d}$ points [S1]. Transform global points to local object frame $F_o$ [S1]. Sample $N_d$ equidistant quadrature points between entrance and exit [S1].
+4.  **Dynamic Object Evaluation:** For each sampled local point $x_o$ and corresponding local direction $d_o$, compute density and color using the dynamic representation network [S1].
+5.  **Integration:** Collect all sampling points from static planes and dynamic intersections [S1]. Order all points $t_i$ and their associated densities $\sigma_i$ and colors $c_i$ such that $t_{i-1} < t_i$ [S1]. Compute the final pixel color $\hat{C}(r)$ using volumetric rendering [S1].
+6.  **Optimization:** Minimize the loss function $\mathcal{L}$ over a batch of rays $R$ [S1]. Backpropagate gradients to all trainable nodes in $L$ and $F$ intersected by the rays [S1].
+
+**Formulas and Parameters:**
+*   **Background Model:** Density $\sigma(x)$ and intermediate feature $y(x)$ are computed from position $x$ and latent code $l_o$: $[\sigma(x), y(x)] = F_{\theta_{bckg},1}(\gamma_x(x), l_o)$ [S1]. Color $c(x)$ is computed from direction $d$ and feature $y(x)$: $c(x) = F_{\theta_{bckg},2}(\gamma_d(d), y(x))$ [S1]. $\gamma_x$ and $\gamma_d$ are Fourier encodings [S1].
+*   **Dynamic Object Model:** The transformation from global frame $F_W$ to local object frame $F_o$ is $x_o = S_o T_o x$, where $T_o$ is the transformation matrix and $S_o = \text{diag}(1/s_o)$ is a scaling matrix using bounding box size $s_o = [L_o, H_o, W_o]$ to enable size-independent learning [S1]. Sampling points are interpolated along the ray parameter: $t_{o,n} = \frac{(n-1)(t_{o,N_d} - t_{o,1})}{N_d - 1} + t_{o,1}$ for $n \in [1, N_d]$ [S1]. Density and color are computed as: $[\sigma(x_o), y(x_o)] = F_{\theta_{c},1}(\gamma_x(x_o), l_o)$ and $c(x_o) = F_{\theta_{c},2}(\gamma_d(d_o), y(x_o), p_o)$ [S1].
+*   **Volumetric Rendering:** Transmitted color is $\hat{C}(r) = \sum_{i=1}^{N_s + m_j N_d} T_i \alpha_i c_i$, where $\alpha_i = 1 - \exp(-\sigma_i \delta_i)$, $T_i = \exp(-\sum_{k=1}^{i-1} \sigma_k \delta_k)$, and $\delta_i = t_{i+1} - t_i$ [S1].
+*   **Loss Function:** $\mathcal{L} = \sum_{r \in R} \| \hat{C}(r) - C(r) \|_2^2 + \frac{1}{2\sigma^2} \| z \|_2^2$, where $C(r)$ is ground truth color, $z$ represents latent codes $l_o$, and $\sigma$ is the standard deviation of the Gaussian prior [S1].
+*   **Parameters:** $N_s = 6$ planes for static background sampling [S1]. $N_d = 7$ sampling points per dynamic object intersection [S1]. $\sigma$ is the standard deviation for the spherical covariance prior over latent codes [S1].
+
+**Pitfalls:**
+*   **Volumetric Consistency:** To ensure volumetric consistency, the pose $p_o$ is only used for emitted color to model illumination changes, not for density prediction [S1].
+*   **Precision:** Fourier encodings $\gamma_x$ and $\gamma_d$ are used to map positional and directional inputs to higher-frequency feature vectors for the MLP models [S1].
+
+## Subtopics
+
+### [Neural Scene Graph Representation and Rendering](14688-neural-scene-graph-representation-and-rendering.md)
+Renders dynamic scenes by decomposing them into a hierarchical graph of individual object nodes, separating static background from dynamic foreground without additional supervision. Unlike Single Representation Networks (SRNs) that optimize a single static representation for all frames, or Neural Radiance Fields (NeRF) which suffer from ghosting due to camera pose changes, this approach reconstructs each object individually to ensure temporal consistency. It builds on the [Neural Scene Graph](14682-neural-scene-graph.md) structure to manage scene hierarchy [G].
+
+## Operating characteristics
+*   **Time Complexity:** Rendering is efficient due to limited sampling: $N_s=6$ planes for background and $N_d=7$ points per dynamic object intersection [S1].
+*   **Memory Complexity:** Depends on the number of objects and the size of the MLPs, with latent codes stored per object [S1].
+*   **Performance:** Optimization takes approximately one full day (350k iterations) on a single NVIDIA TITAN Xp GPU [S1].
+*   **Strengths:** Handles dynamic scenes with temporal consistency, separates static and dynamic elements, shares weights by object class, and enables novel view synthesis [S1].
+*   **Limitations:** Requires 3D tracking data for object poses and bounding boxes, and is primarily evaluated on automotive datasets like KITTI and Virtual KITTI 2 [S1].
+*   **When to use:** Dynamic scene reconstruction and novel view synthesis where objects move rigidly and can be tracked [S1].
+
+## Background
+Neural Scene Graphs were introduced in 2021 in the paper "Neural Scene Graphs for Dynamic Scenes" [S1]. The method addresses limitations in existing neural rendering techniques like NeRF when applied to dynamic scenes, specifically ghosting and lack of temporal consistency [S1]. It builds upon the concept of Neural Graph Mapping by defining a specific DAG structure for dynamic environments [S1, Parent]. It has been used on automotive datasets like KITTI and Virtual KITTI 2 [S1].
+
+## Sources
+[S1] Neural Scene Graphs for Dynamic Scenes, https://doi.org/10.1109/cvpr46437.2021.00288, fetched 2026-10-26

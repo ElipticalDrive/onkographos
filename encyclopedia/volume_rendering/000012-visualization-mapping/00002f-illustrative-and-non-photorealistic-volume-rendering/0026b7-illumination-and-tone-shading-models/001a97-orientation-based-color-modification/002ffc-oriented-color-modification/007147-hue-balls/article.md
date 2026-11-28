@@ -1,0 +1,128 @@
+# Hue-Balls
+
+Also called: Direct Volume Rendering of Tensor Fields
+
+## Overview
+Hue-Balls is a volume rendering technique that visualizes the anisotropy of a symmetric second-order tensor field by color-coding the deflection of a fixed input vector after tensor multiplication, mapped onto a sphere [S1, unofficial]. It sets itself apart from sibling methods like Lit-tensors by relying on direct hue mapping of vector deflection rather than illumination and shading to convey direction and curvature [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A symmetric second-order tensor field $T(\mathbf{x})$ defined over a 3D volume, and a fixed, arbitrary input vector $\mathbf{v}_{in}$ (e.g., user-specified) [S1, unofficial].
+- Output: A color volume where each voxel is assigned a color based on the transformation of $\mathbf{v}_{in}$ by $T(\mathbf{x})$ [S1, unofficial].
+
+**Data Structures:**
+- Tensor Field: Stored as a 3D texture or grid where each voxel contains a $3 \times 3$ symmetric matrix [S2, unofficial].
+- Color Map: A mapping from the angle of deflection (or related geometric properties) to a hue value on the color sphere [S1, unofficial].
+
+**Steps:**
+1. **Define Input Vector:** Select a fixed, arbitrary input vector $\mathbf{v}_{in}$ [S1, unofficial].
+2. **Tensor Multiplication:** For each voxel $\mathbf{x}$, compute the output vector $\mathbf{v}_{out}$ by multiplying the tensor $T(\mathbf{x})$ with $\mathbf{v}_{in}$:
+   $$ \mathbf{v}_{out} = T(\mathbf{x}) \mathbf{v}_{in} $$
+3. **Compute Deflection:** Determine the relationship between $\mathbf{v}_{in}$ and $\mathbf{v}_{out}$. The deflection angle $\theta$ is typically the angle between $\mathbf{v}_{in}$ and $\mathbf{v}_{out}$ [S1, unofficial].
+4. **Map to Color:** Map the deflection angle $\theta$ to a hue value on a sphere. This color represents the anisotropy at that point [S1, unofficial].
+5. **Volume Rendering:** Render the volume using standard volume rendering techniques (e.g., ray casting), applying the computed colors and an opacity function [S1, unofficial].
+
+**Parameters:**
+- Input Vector $\mathbf{v}_{in}$: A fixed vector, such as one specified by the user [S1, unofficial].
+- Opacity Function: Can be defined using barycentric coordinates based on eigenvalues $\lambda_1, \lambda_2, \lambda_3$ (where $\lambda_1 \ge \lambda_2 \ge \lambda_3$) to emphasize important features [S1, unofficial]. For example:
+  $$ c_s = \frac{3\lambda_3}{\lambda_1 + \lambda_2 + \lambda_3} $$
+  where $c_s$ is a component of the opacity [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def hue_ball_render(tensor_field, input_vector, opacity_function):
+    """
+    Renders a tensor field using the Hue-Balls technique.
+    
+    Args:
+        tensor_field: 3D array of 3x3 symmetric matrices.
+        input_vector: 3D vector (numpy array).
+        opacity_function: Function mapping eigenvalues to opacity.
+        
+    Returns:
+        color_volume: 3D array of RGB colors.
+    """
+    # Initialize output color volume
+    height, width, depth = tensor_field.shape[0], tensor_field.shape[1], tensor_field.shape[2]
+    color_volume = np.zeros((height, width, depth, 3))
+    
+    for x in range(height):
+        for y in range(width):
+            for z in range(depth):
+                # Get tensor at voxel
+                T = tensor_field[x, y, z]
+                
+                # Multiply tensor with fixed input vector
+                v_out = T @ input_vector
+                
+                # Compute deflection angle between input and output vectors
+                # Normalize vectors to handle magnitude changes
+                v_in_norm = input_vector / np.linalg.norm(input_vector)
+                v_out_norm = v_out / np.linalg.norm(v_out)
+                
+                # Dot product gives cosine of angle
+                cos_theta = np.dot(v_in_norm, v_out_norm)
+                # Clamp to avoid numerical errors
+                cos_theta = np.clip(cos_theta, -1.0, 1.0)
+                theta = np.arccos(cos_theta)
+                
+                # Map deflection angle to hue
+                # Assuming a simple linear mapping from [0, pi] to [0, 1] hue
+                hue = theta / np.pi
+                
+                # Convert hue to RGB (simplified)
+                color = hue_to_rgb(hue)
+                
+                # Compute opacity using eigenvalues
+                eigenvalues = np.linalg.eigvalsh(T)
+                # Sort eigenvalues descending
+                eigenvalues = np.sort(eigenvalues)[::-1]
+                lambda1, lambda2, lambda3 = eigenvalues
+                
+                # Calculate opacity component cs
+                sum_eigs = lambda1 + lambda2 + lambda3
+                if sum_eigs == 0:
+                    opacity = 0.0
+                else:
+                    cs = (3 * lambda3) / sum_eigs
+                    opacity = opacity_function(cs)
+                
+                # Apply opacity to color
+                color_volume[x, y, z] = color * opacity
+                
+    return color_volume
+
+def hue_to_rgb(h):
+    """
+    Converts a hue value [0, 1] to an RGB color.
+    This is a placeholder for a standard HSV to RGB conversion.
+    """
+    # Simplified implementation for demonstration
+    # In practice, use a proper HSV to RGB conversion
+    r = 1.0
+    g = 1.0 - h
+    b = 1.0 - h
+    return np.array([r, g, b])
+```
+
+**Edge Cases and Pitfalls:**
+- **Degenerate Tensors:** At points where eigenvalues are equal (degenerate points), every vector is an eigenvector, and the deflection may be undefined or zero [S2, unofficial].
+- **Precision:** Numerical stability in computing the angle between vectors, especially when vectors are nearly parallel or anti-parallel [S1, unofficial].
+- **Boundary Conditions:** Handling tensors at the boundaries of the volume, ensuring consistent input vector definition [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$ where $N$ is the number of voxels, as each voxel requires a matrix-vector multiplication and angle computation [S1, unofficial].
+- **Memory Complexity:** $O(N)$ for storing the tensor field and the output color volume [S1, unofficial].
+- **Strengths:** Directly visualizes anisotropy through color, making it intuitive for biological applications [S1, unofficial].
+- **Limitations:** Relies on a fixed input vector, which may not capture all directional information; less effective for isotropic regions [S1, unofficial].
+- **When to Use:** When the primary goal is to visualize anisotropy in tensor fields, such as in diffusion tensor imaging [S1, unofficial].
+- **When Not to Use:** When detailed curvature or direction information is required, in which case Lit-tensors might be more appropriate [S1, unofficial].
+
+## Background
+Hue-Balls was introduced by Gordon Kindlmann and Frank Weinstein in 1999 [S1, unofficial]. It is part of a broader effort to visualize tensor fields in scientific computing, particularly in biological applications where anisotropy is a key feature [S1, unofficial]. The technique has been implemented in various visualization tools, often using 3D textures and color mapping to indicate tensor properties [S2, unofficial].
+
+## Sources
+[S1] PDF Tensor Field Visualization - ETH Z, https://cgl.ethz.ch/teaching/scivis_common/stuff/StuttgartCourse/VIS-Modules-08-Tensor_Field_Visualization.pdf, fetched 2026-10-28 (unofficial)
+[S2] PDF 716Handout7_TensorIcons - Auckland, https://www.cs.auckland.ac.nz/courses/compsci716s2t/lectures/716Handout7_TensorIcons_1up.pdf, fetched 2026-10-28 (unofficial)

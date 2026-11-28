@@ -1,0 +1,145 @@
+# Adaptive Ray Marching with Macrocell DDA
+
+Also called: Adaptive Macrocell Ray Marching, Macrocell solution
+
+## Overview
+Adaptive Ray Marching with Macrocell DDA is an empty space skipping technique that accelerates volume rendering by dividing the volume into a coarse grid of bricks (macrocells) and using a 3D Digital Differential Analyzer (3DDDA) to traverse this grid [S1][S2, unofficial]. It solves the performance bottleneck of sampling empty or low-opacity regions by maintaining minimum and maximum scalar values for each brick; if the accumulated opacity estimate for a brick is zero, the entire brick is skipped, and standard sampling is only invoked for non-empty bricks [S1][S2, unofficial]. It sets itself apart from its parent [Ray Marcher with Macrocell Empty Space Skipping](1009-ray-marcher-with-macrocell-empty-space-skipping.md) by explicitly integrating an adaptive sampling rate within the macrocell traversal loop, adjusting step sizes based on local opacity upper bounds rather than using a fixed step or simple binary skip [S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D volume dataset, a ray defined by origin $\mathbf{o}$ and direction $\mathbf{d}$, a near plane $t_{min}$, and a far plane $t_{max}$.
+*   **Output:** The accumulated color and opacity along the ray segment within $[t_{min}, t_{max}]$.
+
+**Data Structures:**
+The method requires a macrocell grid structure. Each macrocell stores the minimum and maximum scalar values of the voxels contained within it [S1].
+*   `macrocell_dims`: The dimensions of the macrocell grid in cells [S2, unofficial].
+*   `macrocell_spacings_rcp`: The reciprocal of the macrocell spacing in world units, used to transform ray parameters into macrocell space [S2, unofficial].
+*   `brick_size`: The size of each brick is defined as $dx^n \times dy^n \times dz^n$, where $dx, dy, dz$ are the volume dimensions and $n$ is a scaling parameter [S1].
+
+**Parameters:**
+*   `n`: The exponent for brick size calculation. Tested values range from 0.1 to 0.9, with best performance observed at $n=0.3$ [S1].
+*   `float_epsilon`: A small constant used to determine if a cell is empty. If the opacity upper bound $r$ satisfies $|r| \le \text{float\_epsilon}$, the cell is considered empty [S2, unofficial].
+*   `step`: The base sampling step size [S2, unofficial].
+*   `ADAPTIVE_SAMPLING`: A preprocessor macro that enables or disables the adaptive logic. If defined, adaptive sampling is used; otherwise, fixed-step marching is applied [S2, unofficial].
+
+**Algorithm Steps:**
+1.  **Macrocell Space Transformation:** Transform the ray origin and direction into macrocell space using the reciprocal spacing:
+    $$ \mathbf{m\_org} = \mathbf{o} \cdot \text{macrocell\_spacings\_rcp} $$
+    $$ \mathbf{m\_dir} = \mathbf{d} \cdot \text{macrocell\_spacings\_rcp} $$
+    [S2, unofficial]
+
+2.  **DDA Initialization:** Initialize a 3DDDA iterator with $\mathbf{m\_org}$, $\mathbf{m\_dir}$, $t_{min}$, $t_{max}$, and the macrocell dimensions [S2, unofficial]. The 3DDDA algorithm traverses the coarse grid cells [S1, S3].
+
+3.  **Cell Traversal Loop:** For each macrocell $(cell, t_0, t_1)$ returned by the DDA:
+    a.  **Opacity Estimate:** Calculate the opacity upper bound $r$ for the current cell. This is typically derived from the stored min/max scalar values and the transfer function [S1][S2, unofficial].
+    b.  **Empty Check:** If $|r| \le \text{float\_epsilon}$, the cell is empty. Skip this cell and continue to the next [S2, unofficial].
+    c.  **Step Size Calculation:** If the cell is not empty, estimate the adaptive step size $ss$:
+        $$ ss = \text{sample\_size\_scaler}(\text{adaptiveSamplingRate}(step, r), t_0, t_1) $$
+        [S2, unofficial]
+    d.  **Interval Initialization:** Initialize the sampling interval $t = (t_x, t_y)$ where $t_x = t_0$ and $t_y = \min(t_1, t_0 + ss)$ [S2, unofficial].
+    e.  **Inner Sampling Loop:** While $t_y > t_x$:
+        i.  Call the rendering body function with the current interval $t$.
+        ii. Update $t_x = t_y$.
+        iii. Update $t_y = \min(t_x + ss, t_1)$ [S2, unofficial].
+    f.  If the body function returns a termination signal (e.g., opacity reached 1.0), stop processing [S2, unofficial].
+
+4.  **Non-Adaptive Fallback:** If `ADAPTIVE_SAMPLING` is not defined, use a fixed step size:
+    a.  Initialize $t = (t_{min}, \min(t_{max}, t_{min} + step))$.
+    b.  While $t_y > t_x$ and body returns true:
+        i.  Call body($t$).
+        ii. $t_x = t_y$.
+        iii. $t_y = \min(t_x + step, t_{max})$ [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def adaptive_ray_marching_with_macrocell_dda(ray_origin, ray_direction, t_min, t_max, volume_data):
+    # 1. Transform to macrocell space
+    m_org = ray_origin * volume_data.macrocell_spacings_rcp
+    m_dir = ray_direction * volume_data.macrocell_spacings_rcp
+    
+    # 2. Initialize 3DDDA for macrocell grid
+    dda = DDA3(m_org, m_dir, t_min, t_max, volume_data.macrocell_dims)
+    
+    # 3. Traverse macrocells
+    for cell, t0, t1 in dda:
+        # 4. Calculate opacity upper bound
+        r = opacity_upper_bound(volume_data, cell)
+        
+        # 5. Skip empty cells
+        if abs(r) <= float_epsilon:
+            continue
+            
+        # 6. Determine step size
+        if ADAPTIVE_SAMPLING:
+            ss = sample_size_scaler(adaptive_sampling_rate(volume_data.step, r), t0, t1)
+        else:
+            ss = volume_data.step
+            
+        # 7. Sample within the cell
+        t_x = t0
+        t_y = min(t1, t0 + ss)
+        
+        while t_y > t_x:
+            # Render segment [t_x, t_y]
+            color, opacity = render_segment(t_x, t_y, ray_origin, ray_direction, volume_data)
+            
+            # Update interval
+            t_x = t_y
+            t_y = min(t_x + ss, t1)
+            
+            # Check for early termination (e.g., full opacity)
+            if opacity >= 1.0:
+                return color
+                
+    return final_color
+```
+
+**Edge Cases and Pitfalls:**
+*   **Dynamic Volumes:** For dynamic volumes, the macrocell structure (min/max values) must be updated every frame. This construction can be a major performance bottleneck, especially when the volume image ratio is large [S1].
+*   **Precision:** The use of `float_epsilon` for empty cell detection requires careful selection to avoid skipping cells with very low but non-zero opacity [S2, unofficial].
+*   **Boundary Conditions:** The DDA must correctly handle ray entry and exit points relative to the macrocell boundaries to avoid duplicate sampling or gaps [S3].
+
+## Subtopics
+
+### [Resumable Ray Marching Iterator](1505-resumable-ray-marching-iterator.md)
+The Resumable Ray Marching Iterator is a GPU-accelerated ray marching algorithm that enables the interruption and subsequent resumption of ray traversal within a single frame or across frames. It solves the problem of limited GPU memory bandwidth and compute time by allowing the ray marcher to pause at a specific spatial coordinate, transfer control to the CPU for data loading or structure adaptation, and resume exactly where it left off. It sets itself apart from sibling methods by explicitly exposing the traversal state (macrocell coordinates and ray parameter $t$) for external interruption, rather than relying solely on pre-loaded hierarchical structures or probabilistic culling.
+
+### [Network Ray Marching Iterator](1510-network-ray-marching-iterator.md)
+The Network Ray Marching Iterator is a ray marching algorithm designed for distributed or networked rendering environments, typically leveraging GPU ray tracing APIs such as NVIDIA OptiX. It extends the parent [Adaptive Ray Marching with Macrocell DDA](1500-adaptive-ray-marching-with-macrocell-dda.md) by introducing block-level divergence control via `block_any` to manage thread synchronization across macrocell boundaries. This method is distinct from its siblings because it explicitly tracks the "alive" status of rays in a distributed context, ensuring that inactive threads do not waste computation while maintaining adaptive sampling rates based on opacity upper bounds.
+
+### [Macrocell Grid Traversal with Majorant Densities](1528-macrocell-grid-traversal-with-majorant-densities.md)
+This method accelerates volumetric path tracing by combining a coarse spatial partition (macrocells) with Delta Tracking (Woodcock tracking) to skip empty or low-opacity regions more efficiently than fixed-step marching. It sets itself apart from its parent [Adaptive Ray Marching with Macrocell DDA](1500-adaptive-ray-marching-with-macrocell-dda.md) by explicitly using the alpha component of the transfer function as a majorant extinction coefficient to determine probabilistic free-flight distances, allowing larger steps in homogeneous cells while maintaining unbiased Monte Carlo estimation.
+
+### [Voxel Ray Marching with Cube-Level DDA](3069-voxel-ray-marching-with-cube-level-dda.md)
+Voxel Ray Marching with Cube-Level DDA is a GPU-based fragment shader technique for rendering voxel volumes by casting rays through a hierarchical grid of voxel cubes and individual voxels, using a two-level Digital Differential Analyzer (DDA) to skip empty space efficiently. It builds on [Adaptive Ray Marching with Macrocell DDA](1500-adaptive-ray-marching-with-macrocell-dda.md) by replacing the adaptive macrocell traversal with a fixed two-level DDA structure: a coarse traversal over $16 \times 16 \times 16$ voxel blocks to skip empty regions, followed by a fine traversal over individual voxels within occupied blocks to find the first opaque surface.
+
+### Space Skipping with 3DDDA
+A mechanism to skip empty regions in sparse volume data using a uniform grid and 3DDDA algorithm [S3]. The fragment shader traverses the macrocell grid using 3DDDA in an outer loop. If a macrocell is nonempty, it enters the volume rendering loop with peak finding tests between samples. To begin sampling, it finds the first $t$ to sample when entering a macrocell by solving for the maximum $x$ after $T_{enter}$: $x_{tenter} = (-b + \sqrt{b^2 + 2aT_{enter}})/a$. It then computes floor values and samples as in Equation 17 of the source [S3]. A uniform grid with 3DDDA is used, where each grid cell stores min-max values of enclosed voxels. Coarse grids (64^3 cells) work best on the GPU [S3].
+
+### Adaptive Ray Marching with Occupancy Grid
+For each ray, this method iterates through spatial steps. It checks occupancy using a bitfield: `sity_bitfield[ti.u32(idx//8)] & (1 << ti.u32(idx%8))`. If occupied, it stores the current position, direction, time, and delta into buffers and marks the ray for network evaluation. If not occupied, it calculates the distance to the next grid boundary and advances time to skip empty space until the next grid boundary is reached. It stores the total number of effective samples and marks rays as dead if no samples were collected [S4, unofficial]. The step size calculation relies on `self.exp_step_factor`, `self.grid_size`, and `self.scale` [S4, unofficial].
+
+### RayGaussX
+An extension of RayGauss with optimizations aimed at accelerating ray marching [S5]. It implements empty-space skipping, adaptive sampling, and improves ray coherence through Morton-order sorting. It also introduces a regularizer to limit anisotropic Gaussians, as they are highly inefficient since they bound Gaussians by axis-aligned bounding boxes. These additions reduce training time to be comparable with 3DGRT, but frame rates remain approximately 2.5× slower [S5].
+
+## Operating characteristics
+*   **Time Complexity:** The traversal time depends on the number of non-empty macrocells and the adaptive step size within them. In the worst case (fully dense volume), it approaches the complexity of standard ray marching. In sparse volumes, it is proportional to the number of active macrocells.
+*   **Memory Complexity:** Requires additional memory for the macrocell grid storing min/max values. The size depends on the grid resolution, which is determined by the brick size parameter $n$ [S1].
+*   **Measured Performance:** Benchmarked on Jet-Flame simulation volumes (1024×1024×512, ~512 MB per time step) [S1]. The best performance for brick size parameter $n$ was found at 0.3 [S1].
+*   **Scaling:** Performance is highly dependent on the volume image ratio. When rendering large volumes (e.g., 1024×1024×1024) into small resolution images (e.g., 256×256 or 512×512), the construction of the macrocell structure becomes a major performance bottleneck, making Warp Marching a better alternative [S1]. Conversely, at higher image resolutions (1024×1024), Macrocell DDA outperforms Warp Marching [S1].
+*   **Strengths:** Significant speedup for sparse volumes; effective empty space skipping; adaptive sampling reduces unnecessary computations in low-opacity regions.
+*   **Limitations:** High overhead for dynamic volumes due to frequent structure updates; poor performance when volume image ratio is large (small image, large volume) [S1].
+*   **When to Use:** Static volumes or dynamic volumes rendered at high image resolutions where the structure update cost is amortized over many pixels [S1].
+*   **When Not to Use:** Dynamic volumes with large volume image ratios (small image resolution) where structure update overhead dominates [S1].
+
+## Background
+The Macrocell solution was introduced by Parker et al. (2005) and Parker et al. (1998) [S1]. It builds upon the 3DDDA algorithm by Amanatides and Woo (1987) [S1, S3]. The method is part of the broader family of empty space skipping techniques that rely on additional data structures to accelerate volume rendering [S1]. It has been used in benchmarks involving dynamic volumetric data, such as the Jet-Flame simulation dataset (Attili et al., 2014) [S1].
+
+## Sources
+[S1] A cache-friendly sampling strategy for texture-based volume rendering on GPU, https://doi.org/10.1016/j.visinf.2017.08.001, fetched 2026-10-26
+[S2] VIDILabs/instantvnr, https://github.com/VIDILabs/instantvnr, fetched 2026-10-26 (unofficial)
+[S3] Volume Ray Casting with Peak Finding and Differential ..., https://www.sci.utah.edu/~knolla/avrc.pdf, fetched 2026-10-27
+[S4] Linyou/taichi-ngp-renderer, https://github.com/Linyou/taichi-ngp-renderer, fetched 2026-10-27 (unofficial)
+[S5] GRay: Ray Tracing 3D Gaussians Near the Speed of Splats, https://doi.org/10.1145/3804496, fetched 2026-10-29

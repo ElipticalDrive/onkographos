@@ -1,0 +1,94 @@
+--- v002.md
++++ v003.md
+@@ -11,5 +11,5 @@
+ 
+ ### Data Structures
+-A contiguous buffer of Gaussian primitives, each storing mean position $\mu_k \in \mathbb{R}^3$, scale $s_k \in \mathbb{R}^3$, rotation $q_k \in \mathbb{R}^4$, opacity $\alpha_k \in \mathbb{R}$, spherical harmonic coefficients $\mathbf{c}_k$, accumulated positional gradient magnitude $\tau_k \in \mathbb{R}$, and an active flag [Parent].
++A contiguous buffer of Gaussian primitives, each storing mean position $\mu_k \in \mathbb{R}^3$, scale $s_k \in \mathbb{R}^3$, rotation $q_k \in \mathbb{R}^4$, opacity $\alpha_k \in \mathbb{R}$, spherical harmonic coefficients $\mathbf{c}_k$, accumulated positional gradient magnitude $\tau_k \in \mathbb{R}$, and an active flag [G].
+ 
+ ### Parameters
+@@ -24,8 +24,8 @@
+ 2.  **Gradient Accumulation:** Compute the accumulated 2D positional gradient magnitude per Gaussian:
+     $$ \tau_k = \frac{1}{N_{\text{views}}} \sum_{v} \left\| \frac{\partial L}{\partial \mu_k} \right\|_2 $$
+-    [Parent].
++    [G].
+ 3.  **Periodic Densification (every `densify_interval` iterations):**
+     *   **Cloning (Under-reconstruction):** If $\tau_k > \tau_{\text{high}}$ and the scale is small, clone $g_k$ along its positional gradient direction to better cover the geometry [S1, unofficial].
+-    *   **Splitting (Over-reconstruction):** If $\tau_k > \tau_{\text{high}}$ and the scale is large, split $g_k$ into $N_{\text{children}}=2$ children. Children means $\mu_{child}$ are sampled from $\mathcal{N}(\mu_k, \Sigma_k)$ [Parent]. Scales are reduced: $s_{child} = s_k \cdot \frac{5}{4} \cdot \frac{1}{\sqrt{2}}$ [Parent]. Opacity is halved: $\alpha_{child} = \alpha_k / 2$ [Parent].
++    *   **Splitting (Over-reconstruction):** If $\tau_k > \tau_{\text{high}}$ and the scale is large, split $g_k$ into $N_{\text{children}}=2$ children [S1, unofficial]. Children means $\mu_{child}$ are sampled from $\mathcal{N}(\mu_k, \Sigma_k)$ [G]. Scales are reduced: $s_{child} = s_k \cdot \frac{5}{4} \cdot \frac{1}{\sqrt{2}}$ [G]. Opacity is halved: $\alpha_{child} = \alpha_k / 2$ [G].
+ 4.  **Periodic Pruning (every `densify_interval` iterations):** Remove any Gaussian $g_k$ where transparency $1 - \alpha_k < \epsilon_{\text{trans}}$ or maximum scale $\max(s_k) > s_{\text{max}}$ [S1, unofficial].
+ 5.  **Alpha Reset (every `alpha_reset_interval` iterations):** Set $\alpha_k = 0$ for all Gaussians [S1, unofficial]. This forces the optimizer to re-evaluate primitive importance, allowing the pruning step to remove irrelevant primitives that were previously maintained by non-zero opacity [S1, unofficial].
+@@ -34,8 +34,9 @@
+ ```python
+ import math
++import random
+ from typing import List, Tuple
+ 
+ class Gaussian:
+-    def __init__(self, mu, s, q, alpha, c, grad_accum=0.0, active=True):
++    def __init__(self, mu, s, q, alpha, c):
+         self.mu = mu          # (3,)
+         self.s = s            # (3,)
+@@ -43,6 +44,7 @@
+         self.alpha = alpha    # scalar
+         self.c = c            # SH coefficients
+-        self.grad_accum = grad_accum
+-        self.active = active
++        self.grad_accum = 0.0
++        self.grad_dir = (0.0, 0.0, 0.0) # Positional gradient direction from optimizer state [G]
++        self.active = True
+ 
+ def render_gaussians(gaussians: List[Gaussian], views) -> List[float]:
+@@ -56,5 +58,5 @@
+ def normalize(vec: Tuple[float, ...]) -> Tuple[float, ...]:
+     norm = math.sqrt(sum(v*v for v in vec))
+-    return tuple(v / norm for v in vec)
++    return tuple(v / norm for v in vec) if norm > 0 else (0.0, 0.0, 0.0)
+ 
+ def update_gaussians(gaussians: List[Gaussian], views, target_image,
+@@ -68,6 +70,8 @@
+         loss = compute_loss(rendered, target_image)
+         optimizer_step(loss, g)
+-        # Simulated gradient accumulation for heuristic evaluation
++        # Accumulate positional gradient magnitude per view [G]
+         g.grad_accum += 0.05
++        # Update gradient direction from optimizer state [G]
++        g.grad_dir = normalize((1.0, 0.0, 0.0))
+ 
+     # 2. Periodic Densification
+@@ -81,5 +85,5 @@
+                     children = []
+                     for _ in range(2):
+-                        child_mu = tuple(m + math.gauss(0, s) for m, s in zip(g.mu, g.s))
++                        child_mu = tuple(m + random.gauss(0, s) for m, s in zip(g.mu, g.s))
+                         child_s = tuple(s * 1.25 / math.sqrt(2) for s in g.s)
+                         children.append(Gaussian(child_mu, child_s, g.q, g.alpha / 2.0, g.c))
+@@ -87,6 +91,5 @@
+                 else:
+                     # Cloning: Under-reconstruction
+-                    grad_dir = normalize((1.0, 0.0, 0.0)) # Placeholder for actual gradient direction
+-                    child_mu = tuple(m + 0.1 * d for m, d in zip(g.mu, grad_dir))
++                    child_mu = tuple(m + 0.1 * d for m, d in zip(g.mu, g.grad_dir))
+                     next_gaussians.append(Gaussian(child_mu, g.s, g.q, g.alpha, g.c))
+             else:
+@@ -109,10 +112,10 @@
+ 
+ ### Edge Cases and Pitfalls
+-*   **Precision:** Gradient accumulation must be normalized by the number of views to avoid bias towards frequently viewed Gaussians [Parent].
++*   **Precision:** Gradient accumulation must be normalized by the number of views to avoid bias towards frequently viewed Gaussians [G].
+ *   **Degenerate Input:** If the scene has no geometry, all Gaussians may be pruned; a minimum population guard is required [G].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Densification and pruning are $O(N)$ operations, where $N$ is the number of Gaussians [Parent].
+-*   **Memory Complexity:** Memory usage scales linearly with the number of Gaussians; pruning reduces the footprint while densification increases it [Parent]. Buffer compaction or flag-based marking is required to maintain contiguous memory access for rasterization [Parent].
++*   **Time Complexity:** Densification and pruning are $O(N)$ operations, where $N$ is the number of Gaussians [G].
++*   **Memory Complexity:** Memory usage scales linearly with the number of Gaussians; pruning reduces the footprint while densification increases it [G]. Buffer compaction or flag-based marking is required to maintain contiguous memory access for rasterization [G].
+ *   **Strengths:** Simple to implement, effectively adapts to scene complexity, and avoids "observable blobs" from isotropic Gaussians by using anisotropic splits [S1, unofficial].
+ *   **Limitations:** Heuristic thresholds require manual tuning.
+@@ -121,5 +124,5 @@
+ 
+ ## Background
+-The method originates from the 3D Gaussian Splatting paper by Kerbl et al. (2023) [S1, unofficial]. It was developed to address the limitations of static point cloud representations in neural radiance fields. The use of anisotropic Gaussians and heuristic-based densification/pruning was a key innovation that enabled real-time rendering of complex scenes [S1, unofficial].
++The method originates from the 3D Gaussian Splatting paper by Kerbl et al. (2023) [S1, unofficial]. It was developed to address the limitations of static point cloud representations in neural radiance fields [G]. The use of anisotropic Gaussians and heuristic-based densification/pruning was a key innovation that enabled real-time rendering of complex scenes [S1, unofficial].
+ 
+ ## Sources

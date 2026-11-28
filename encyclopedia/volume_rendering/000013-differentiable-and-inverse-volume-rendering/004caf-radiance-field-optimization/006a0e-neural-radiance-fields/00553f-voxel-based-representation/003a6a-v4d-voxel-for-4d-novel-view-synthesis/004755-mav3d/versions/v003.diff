@@ -1,0 +1,102 @@
+--- v002.md
++++ v003.md
+@@ -11,8 +11,8 @@
+ 
+ **Data Structures:**
+-The core representation is a hexplane-based 4D structure that decomposes the spacetime volume into a set of 2D planes for efficient encoding [S1]. The exact tensor dimensions, layout, and aggregation operations are not given in the sources. Standard implementations typically use bilinear sampling across the planes and concatenate or sum the resulting feature vectors [G]. This decomposition avoids the memory explosion of a full 4D voxel grid [G].
++MAV3D uses a hexplane-based 4D representation that decomposes the spacetime volume into a set of 2D planes for efficient encoding [S1]. The exact tensor dimensions, layout, and aggregation operations are not given in the sources. Standard implementations typically use bilinear sampling across the planes and concatenate or sum the resulting feature vectors [G]. This decomposition avoids the memory explosion of a full 4D voxel grid [G].
+ 
+ **Algorithm Steps:**
+-1.  **Initialization:** Initialize the hexplane plane tensors and the MLP that maps aggregated plane features to density and color [G].
++1.  **Initialization:** Initialize the six hexplane plane tensors and the MLP that maps aggregated plane features to density and color [G].
+ 2.  **Multi-stage static-to-dynamic training:** Optimize the representation in stages, applying temporal regularization to enforce coherence across adjacent time steps [S1].
+ 3.  **Data-free supervision:** Render views from the current 4D-NeRF estimate and compute a loss against outputs from a pretrained text-to-video diffusion model guided by the input text prompt [S1].
+@@ -21,38 +21,74 @@
+ **Pseudocode:**
+ ```python
+-def train_mav3d(text_prompt, num_steps, learning_rate, static_steps, lambda_temp):
++def train_mav3d(text_prompt, num_steps, learning_rate, static_steps, lambda_temp, H, W, T, C):
+     # Initialize hexplane planes and MLP [G]
+-    P_xy, P_yz, P_xz = [torch.zeros(H, W, C) for _ in range(3)]
+-    P_xt, P_yt, P_zt = [torch.zeros(H, T, C) for _ in range(3)]
++    P_xy = torch.zeros(H, W, C)
++    P_yz = torch.zeros(H, W, C)
++    P_xz = torch.zeros(H, W, C)
++    P_xt = torch.zeros(H, T, C)
++    P_yt = torch.zeros(H, T, C)
++    P_zt = torch.zeros(H, T, C)
+     mlp = MLP()
+     diffusion_model = load_pretrained_text_to_video_diffusion()
+     
++    optimizer_static = torch.optim.Adam([P_xy, P_yz, P_xz, mlp], lr=learning_rate)
++    optimizer_dynamic = torch.optim.Adam([P_xy, P_yz, P_xz, P_xt, P_yt, P_zt, mlp], lr=learning_rate)
++
+     for step in range(num_steps):
+         # Sample time and camera [G]
+         t = torch.rand(1)
+         camera = sample_random_camera()
+-        p = sample_ray_origin_and_direction(camera)
+-        
++        ray_o, ray_d = sample_ray_origin_and_direction(camera)
++
+         # Query hexplane: bilinearly sample 6 planes and aggregate [G]
+-        features = aggregate_hexplane_features(P_xy, P_yz, P_xz, P_xt, P_yt, P_zt, p, t)
++        features = torch.zeros(C)
++        features += bilinear_sample(P_xy, ray_o[:2], ray_d[:2])
++        features += bilinear_sample(P_yz, ray_o[1:3], ray_d[1:3])
++        features += bilinear_sample(P_xz, ray_o[[0,2]], ray_d[[0,2]])
++        features += bilinear_sample(P_xt, ray_o[0], t)
++        features += bilinear_sample(P_yt, ray_o[1], t)
++        features += bilinear_sample(P_zt, ray_o[2], t)
++
+         density, color = mlp_forward(mlp, features)
+-        
++
+         # Volume render the ray [G]
+-        rendered_color = volume_render_ray(p, density, color)
+-        
++        rendered_color = volume_render_ray(ray_o, ray_d, density, color)
++
+         # Diffusion guidance: compute gradient from text-to-video model [S1]
+         diffusion_grad = compute_diffusion_guidance(rendered_color, text_prompt, diffusion_model)
+-        
++
+         # Temporal regularization: penalize feature changes across adjacent times [S1]
+         temporal_loss = compute_temporal_smoothness(P_xt, P_yt, P_zt)
+-        
++
+         # Combine losses and update [G]
+         loss = compute_loss(rendered_color, diffusion_grad) + lambda_temp * temporal_loss
+         if step < static_steps:
+-            optimize_step([P_xy, P_yz, P_xz, mlp], loss, learning_rate)
++            optimizer_static.zero_grad()
++            loss.backward()
++            optimizer_static.step()
+         else:
+-            optimize_step([P_xy, P_yz, P_xz, P_xt, P_yt, P_zt, mlp], loss, learning_rate)
+-            
++            optimizer_dynamic.zero_grad()
++            loss.backward()
++            optimizer_dynamic.step()
++
+     return P_xy, P_yz, P_xz, P_xt, P_yt, P_zt, mlp
++
++def bilinear_sample(plane, u, v):
++    # Standard bilinear interpolation [G]
++    u0, v0 = torch.floor(u).long(), torch.floor(v).long()
++    u1, v1 = u0 + 1, v0 + 1
++    w_u, w_v = u - u0, v - v0
++    return (1-w_u)*(1-w_v)*plane[u0, v0] + w_u*(1-w_v)*plane[u1, v0] + (1-w_u)*w_v*plane[u0, v1] + w_u*w_v*plane[u1, v1]
++
++def volume_render_ray(ray_o, ray_d, density, color):
++    # Standard volumetric rendering [G]
++    t_vals = torch.linspace(0, 1, 64)
++    z_vals = ray_o + t_vals * ray_d
++    raw_density = density(z_vals)
++    raw_color = color(z_vals)
++    alpha = 1 - torch.exp(-raw_density * 0.01)
++    transmittance = torch.cumprod(1 - alpha, dim=0)
++    weights = alpha * transmittance
++    return torch.sum(weights * raw_color, dim=0)
+ ```
+ 

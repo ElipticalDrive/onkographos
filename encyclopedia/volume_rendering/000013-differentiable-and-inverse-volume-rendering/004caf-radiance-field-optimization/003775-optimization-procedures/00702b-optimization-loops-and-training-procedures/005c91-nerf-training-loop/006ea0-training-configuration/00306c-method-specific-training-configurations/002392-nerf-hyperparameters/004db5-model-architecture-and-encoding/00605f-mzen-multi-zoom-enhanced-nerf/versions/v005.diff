@@ -1,0 +1,421 @@
+--- v004.md
++++ v005.md
+@@ -4,181 +4,262 @@
+ 
+ ## Overview
+-MZEN is a framework for 3-D reconstruction from images with unknown camera poses where the optical zoom level varies significantly across views [S1]. It solves the problem of geometric inconsistency in pose-free NeRFs when magnification changes, which typically couples translation, scale, and focal length in an unidentifiable way [S1]. Unlike [Mip-NeRF 360 MLP Architecture](14098-mip-nerf-360-mlp-architecture.md) or [CamP](14098-mip-nerf-360-mlp-architecture.md) which rely on high-resolution image pyramids or external pose initialization, MZEN keeps every frame at native resolution and explicitly models optical zoom as a learnable intrinsic parameter [S1].
++MZEN is a framework for 3-D reconstruction from images with unknown camera poses that explicitly models optical zoom as a learnable intrinsic parameter and uses cross-zoom pose registration to align non-overlapping zoomed-in and zoomed-out views [S1]. It solves the problem of stable training across multiple zoom levels without requiring high-resolution images or external pose initialization [S1]. Unlike [CamP](15539-ue4-nerf.md) which perturbs focal length per view, or [Mip-NeRF](15532-rip-nerf.md) and [Zip-NeRF](15532-rip-nerf.md) which rely on image pyramids, MZEN keeps every frame at native resolution and assumes a single base focal length shared by all views, scaling it via a per-view zoom parameter [S1].
+ 
+ ## How it works
+-MZEN represents the radiance field using a standard NeRF MLP and introduces a zoom-aware camera model optimized through a three-phase training schedule [S1].
+-
+-**Inputs and Outputs**
+-*   **Inputs:** A set of $N$ images $\mathcal{I} = \{I_k\}_{k=1}^N$. The set is partitioned into $N_{out}$ zoomed-out images (indices $i=1 \dots N_{out}$) and $N_{in}$ zoomed-in images (indices $j=N_{out}+1 \dots N$) [S1]. Each image has a rough initial estimate of its zoom parameter $\xi_k$ (e.g., from a dial reading or apparent size comparison) [S1].
+-*   **Outputs:** NeRF network parameters $\Theta$, camera poses $\Pi = \{R_k, t_k\}_{k=1}^N$, and zoom parameters $\{\xi_k\}_{k=1}^N$ [S1].
+-
+-**Data Structures**
+-*   **Camera Pose $\Pi_k$:** A tuple $(R_k, t_k, f, c, \xi_k)$ where $R_k \in SO(3)$ is rotation, $t_k \in \mathbb{R}^3$ is translation, $f=(f_x, f_y)$ is the shared base focal length, $c=(c_x, c_y)$ is the principal point, and $\xi_k \ge 1$ is the zoom parameter [S1].
+-*   **Effective Intrinsic Matrix:** $K_{eff}^k = \text{diag}(\xi_k f_x, \xi_k f_y, 1)$ [S1].
+-*   **NeRF Parameters $\Theta$:** Weights of the MLP representing the radiance field [S1].
+-
+-**Numbered Steps**
+-
+-1.  **Phase A: Global Pose Bootstrap**
+-    *   Initialize zoom parameters for the $N_{out}$ most zoomed-out images: $\xi_i = 1$ for $i=1 \dots N_{out}$ [S1].
+-    *   Randomly initialize NeRF parameters $\Theta^{(A)}$, rotations $R_i$, translations $t_i$, and focal lengths $f^{(A)}$ [S1].
+-    *   Withhold all zoomed-in images ($j > N_{out}$) from training [S1].
+-    *   Optimize $\Theta^{(A)}$, $R_i$, $t_i$, and $f^{(A)}$ by minimizing the coarse loss $L_{coarse}$ over the $N_{out}$ images [S1].
+-    *   The coarse loss is defined as:
+-        $$ L_{coarse} = \sum_{i=1}^{N_{out}} \| F_{\Theta^{(A)}}(\Theta^{(A)}, \Pi_i) - I_i \|_2^2 $$
+-        where $\Pi_i = (R_i, t_i, f, c, \xi_i)$ and $F_{\Theta}$ is the differentiable volume renderer [S1].
+-    *   Output: Coarse NeRF parameters $\Theta^{(A)}$ and globally consistent poses for zoomed-out views [S1].
+-
+-2.  **Cross-Zoom Pose Registration (Initialization for Phase B) [S1]**
+-    *   For each zoomed-in image $I_j$ ($j > N_{out}$):
+-        *   Find the best matching zoomed-out image $g^*(j)$ from the set of $N_{out}$ images [S1].
+-        *   Extract the central $1/\xi_j$ crop from the zoomed-out image $I_{g^*(j)}$ [S1].
+-        *   Bilinearly resize the crop to the native resolution of $I_j$ to create a surrogate view $\tilde{I}_{g^*(j) \to j}$ [S1].
+-        *   Select $g^*(j)$ that minimizes the RGB mean-squared error between $I_j$ and $\tilde{I}_{g^*(j) \to j}$ [S1].
+-    *   **Pose Priming:** Initialize the pose $\Pi_j$ for each zoomed-in image $j$ by copying the rotation $R_{g^*(j)}$, translation $t_{g^*(j)}$, and focal length $f$ from the matched zoomed-out image $g^*(j)$ [S1]. The zoom parameter $\xi_j$ is initialized from the rough estimate [S1].
+-
+-3.  **Phase B: Zoom-in Pose Registration**
+-    *   Freeze NeRF parameters at $\Theta^{(A)}$ [S1].
+-    *   For each zoomed-in image $j$, optimize only the rotation $R_j$, translation $t_j$, and zoom parameter $\xi_j$ [S1].
+-    *   Intrinsics $f$ and $c$ remain fixed from the surrogate initialization [S1].
+-    *   Minimize the pose loss $L_{pose}$:
+-        $$ L_{pose} = \sum_{j=N_{out}+1}^{N} \| F_{\Theta^{(A)}}(\Theta^{(A)}, \Pi_j) - I_j \|_2^2 $$
+-        where $\Pi_j = (R_j, t_j, f, c, \xi_j)$ [S1].
+-    *   Output: Provisional full pose set $\Pi^{(B)} = \{\Pi_i^{(A)}\}_{i=1}^{N_{out}} \cup \{\Pi_j^{(B)}\}_{j=N_{out}+1}^{N}$ [S1].
+-
+-4.  **Phase C: Joint Refinement**
+-    *   Initialize NeRF parameters $\Theta^{(C)} = \Theta^{(A)}$ [S1].
+-    *   Unfreeze all NeRF parameters and all camera pose parameters (including all $\xi_k$) [S1].
+-    *   Optimize jointly over all $N$ images by minimizing the fine loss $L_{fine}$:
+-        $$ L_{fine} = \sum_{k=1}^{N} \| F_{\Theta^{(C)}}(\Theta^{(C)}, \Pi_k) - I_k \|_2^2 $$
+-    *   Output: Final NeRF parameters and pixel-accurate poses [S1].
+-
+-**Pseudocode**
+-
++### Inputs and Outputs
++**Inputs:**
++*   A set of $N$ images $\mathcal{I} = \{I_k\}_{k=1}^N$.
++*   The set is partitioned into $N_{out}$ zoomed-out images (indices $i=1 \dots N_{out}$) and $N_{in}$ zoomed-in images (indices $j=N_{out}+1 \dots N$) [S1].
++*   Initial rough estimates of zoom parameters $\xi_k$ (e.g., from camera dial readings or apparent size comparison) [S1].
++*   Base focal length $f = (f_x, f_y)$ and principal point $c = (c_x, c_y)$ [S1].
++
++**Outputs:**
++*   Optimized NeRF parameters $\Theta$ (radiance field MLP weights) [S1].
++*   Optimized camera poses $\Pi = \{R_k, t_k, \xi_k\}_{k=1}^N$ (rotation, translation, zoom) [S1].
++
++### Data Structures
++The camera pose for image $k$ is defined as $\Pi_k = (R_k, t_k, f, c, \xi_k)$ [S1].
++*   $R_k \in SO(3)$: Rotation matrix.
++*   $t_k \in \mathbb{R}^3$: Translation vector.
++*   $f \in \mathbb{R}^2$: Shared base focal length $(f_x, f_y)$ [S1].
++*   $c \in \mathbb{R}^2$: Principal point $(c_x, c_y)$ [S1].
++*   $\xi_k \in \mathbb{R}_{\ge 1}$: Learnable zoom parameter for view $k$ [S1].
++
++The effective intrinsic matrix is:
++$$ K_{eff}^k = \text{diag}(\xi_k f_x, \xi_k f_y, 1) $$
++[S1]
++
++### Steps
++The training proceeds in three distinct phases to ensure stability [S1].
++
++**Phase A: Global Pose Bootstrap**
++1.  Initialize zoom parameters for the $N_{out}$ most zoomed-out images: $\xi_i = 1$ for $i=1 \dots N_{out}$ [S1].
++2.  Randomly initialize NeRF parameters $\Theta^{(A)}$, rotations $R_i$, translations $t_i$, and focal lengths $f^{(A)}$ [S1].
++3.  Withhold all zoomed-in images ($j > N_{out}$) from the loss calculation [S1].
++4.  Minimize the coarse loss $L_{coarse}$ over the $N_{out}$ images to obtain coarse NeRF parameters and globally consistent poses [S1].
++
++**Phase B: Cross-Zoom Pose Registration**
++1.  Freeze NeRF parameters at $\Theta^{(A)}$ [S1].
++2.  For each zoomed-in image $I_j$ ($j > N_{out}$):
++    a.  Find the best matching zoomed-out image $g^*(j)$ from the set of $N_{out}$ images by minimizing the RGB mean-squared error between $I_j$ and a surrogate view $\tilde{I}_{g \to j}$ [S1].
++    b.  The surrogate view $\tilde{I}_{g \to j}$ is created by extracting the central $1/\xi_j$ crop from the zoomed-out image $I_g$ and bilinearly resizing it to the native resolution of $I_j$ [S1].
++    c.  Initialize the pose $\Pi_j$ for image $j$ using the parameters $(R_g, t_g, f, c)$ from the matched zoomed-out image $g^*(j)$ and the zoom parameter $\xi_j$ [S1]. This is "pose priming" [S1].
++3.  Optimize only the rotation $R_j$, translation $t_j$, and zoom parameter $\xi_j$ for each zoomed-in image $j$ by minimizing $L_{pose}$ [S1]. Intrinsics $f, c$ remain fixed from the surrogate [S1].
++4.  The output is the provisional full pose set $\Pi^{(B)} = \{\Pi_i^{(A)}\}_{i=1}^{N_{out}} \cup \{\Pi_j^{(B)}\}_{j=N_{out}+1}^{N}$ [S1].
++
++**Phase C: Joint Refinement**
++1.  Initialize $\Theta^{(C)} = \Theta^{(A)}$ [S1].
++2.  Unfreeze NeRF parameters and all camera pose parameters (including all $\xi_k$) [S1].
++3.  Optimize $\Theta^{(C)}$ and $\Pi^{(B)}$ jointly for all $N$ images by minimizing $L_{fine}$ [S1].
++4.  This step sharpens fine details and yields pixel-accurate poses [S1].
++
++### Formulas
++**Rendering:**
++The rendered image $\hat{I}_k$ for camera $k$ is computed using the differentiable volume renderer $F_\Theta$:
++$$ \hat{I}_k = F_\Theta(\Theta, \Pi_k) $$
++[S1]
++
++**Loss Functions:**
++*   **Phase A Loss:**
++    $$ L_{coarse} = \sum_{i=1}^{N_{out}} \| F_{\Theta^{(A)}}(\Theta^{(A)}, \Pi^{(A)}) - I_i \|_2^2 $$
++    [S1]
++*   **Phase B Loss:**
++    $$ L_{pose} = \sum_{j=N_{out}+1}^{N} \| F_{\Theta^{(A)}}(\Theta^{(A)}, \Pi^{(B)}) - I_j \|_2^2 $$
++    [S1]
++*   **Phase C Loss:**
++    $$ L_{fine} = \sum_{k=1}^{N} \| F_{\Theta^{(C)}}(\Theta^{(C)}, \Pi^{(B)}) - I_k \|_2^2 $$
++    [S1]
++*   **General Photometric Loss:**
++    $$ L(\Theta, \Pi) = \sum_{k=1}^{N} \| F_\Theta(\Theta, \Pi_k) - I_k \|_2^2 $$
++    [S1]
++
++**Convergence Analysis (Phase B):**
++Under the Polyak-Łojasiewicz (PL) condition and L-smoothness, full-batch gradient descent with step size $\eta$ converges linearly [S1]:
++$$ e^{(t+1)} \leq (1 - \eta\mu) e^{(t)} $$
++where $e^{(t)} = L_j(\Pi_j^{(t)}) - L^*_j$ is the excess loss, $\mu > 0$ is the PL constant, and $\eta \in (0, 1/L]$ where $L$ is the Lipschitz constant of the gradients [S1].
++
++### Parameters
++*   **Zoom parameter $\xi_k$:** Learnable intrinsic parameter. $\xi_k = 1$ for zoomed-out frames, $\xi_k > 1$ for zoomed-in frames [S1].
++*   **Step size $\eta$:** Must satisfy $\eta \in (0, 1/L]$ [S1].
++*   **PL constant $\mu$:** Positive constant defining local strong convexity/PL condition [S1].
++*   **Lipschitz constant $L$:** Positive constant such that $\|\nabla L_j(a) - \nabla L_j(b)\|_2 \leq L\|a - b\|_2$ [S1].
++
++### Pseudocode
+ ```python
+-def mzen_training(images, initial_zoom_estimates, N_out):
++def mzen_training(images, initial_zoom_estimates, base_focal_length, principal_point):
+     """
+-    images: list of N images, each a 2D array of shape (H, W, 3)
+-    initial_zoom_estimates: list of N floats
+-    N_out: int, number of zoomed-out images
++    images: List of N images.
++    initial_zoom_estimates: List of N zoom estimates.
++    base_focal_length: Tuple (fx, fy).
++    principal_point: Tuple (cx, cy).
+     """
+     N = len(images)
+-    lr = 0.01  # [G] Learning rate
+-
++    # Assume first N_out images are zoomed-out, rest are zoomed-in
++    # In practice, N_out is determined by sorting zoom estimates or user input
++    N_out = sum(1 for z in initial_zoom_estimates if z <= 1.1) # Heuristic
++    N_in = N - N_out
++    
+     # Phase A: Global Pose Bootstrap
+-    zoom_params = [1.0] * N_out + initial_zoom_estimates[N_out:]
+-    theta_A = random_init_nerf()  # [G]
+-    poses_A = random_init_poses(N_out)  # [G]
+-    focal_length = random_init_focal_length()  # [G]
+-    principal_point = [0.0, 0.0]
+-
+-    for _ in range(Phase_A_iterations):
++    # Initialize parameters
++    theta = random_init_nerf()
++    poses = []
++    for i in range(N):
++        if i < N_out:
++            # Zoomed-out: init zoom to 1, random pose
++            R = random_rotation()
++            t = random_translation()
++            xi = 1.0
++            poses.append({'R': R, 't': t, 'xi': xi})
++        else:
++            # Zoomed-in: not used in Phase A loss, but need placeholder
++            poses.append({'R': None, 't': None, 'xi': initial_zoom_estimates[i]})
++            
++    # Minimize L_coarse
++    for iteration in range(phase_a_iters):
+         loss = 0.0
++        grad_theta = zeros_like(theta)
++        grad_poses = [zeros_like(p) for p in poses]
++        
+         for i in range(N_out):
+-            pi_i = (poses_A[i], focal_length, principal_point, zoom_params[i])
+-            rendered_i = volume_renderer(theta_A, pi_i, images[i].shape)  # [G]
+-            loss += l2_norm(rendered_i, images[i])
+-        grad_theta_A, grad_poses_A, grad_focal = compute_gradients(loss, theta_A, poses_A, focal_length)  # [G]
+-        theta_A -= lr * grad_theta_A
+-        poses_A = [p - lr * g for p, g in zip(poses_A, grad_poses_A)]
+-        focal_length -= lr * grad_focal
+-
+-    theta_star = theta_A
+-
+-    # Cross-Zoom Pose Registration
+-    poses_B = list(poses_A)
+-    zoom_params_B = list(zoom_params)
+-
++            # Render image i
++            cam_params = {
++                'R': poses[i]['R'],
++                't': poses[i]['t'],
++                'f': base_focal_length,
++                'c': principal_point,
++                'xi': poses[i]['xi']
++            }
++            rendered = render_nerf(theta, cam_params)
++            error = rendered - images[i]
++            loss += sum(error**2)
++            
++            # Compute gradients (backprop through renderer)
++            d_loss_d_theta = grad_nerf(theta, cam_params, error)
++            d_loss_d_pose = grad_pose(theta, cam_params, error)
++            
++            grad_theta += d_loss_d_theta
++            grad_poses[i]['R'] += d_loss_d_pose['R']
++            grad_poses[i]['t'] += d_loss_d_pose['t']
++            grad_poses[i]['xi'] += d_loss_d_pose['xi']
++            
++        # Update parameters
++        theta -= step_size * grad_theta
++        for i in range(N_out):
++            poses[i]['R'] -= step_size * grad_poses[i]['R']
++            poses[i]['t'] -= step_size * grad_poses[i]['t']
++            poses[i]['xi'] -= step_size * grad_poses[i]['xi']
++            
++    theta_A = theta
++    poses_A = poses[:N_out]
++    
++    # Phase B: Cross-Zoom Pose Registration
++    # Freeze theta
++    theta_B = theta_A
++    
++    # Initialize poses for zoomed-in images using pose priming
+     for j in range(N_out, N):
+-        best_match_idx = argmin([l2_norm(images[j], bilinear_resize(extract_center_crop(images[g], 1.0/initial_zoom_estimates[j]), images[j].shape)) for g in range(N_out)])
+-        matched_pose = poses_A[best_match_idx]
+-        poses_B.append(matched_pose)
+-        zoom_params_B.append(initial_zoom_estimates[j])
+-
+-    # Phase B: Zoom-in Pose Registration
+-    for _ in range(Phase_B_iterations):
++        # Find best matching zoomed-out image g*
++        best_g = -1
++        min_mse = infinity
++        for g in range(N_out):
++            # Create surrogate view
++            # Extract central 1/xi_j crop from image[g]
++            # Resize to native resolution of image[j]
++            surrogate = create_surrogate(images[g], poses[g]['xi'], images[j].shape, poses[j]['xi'])
++            mse = sum((surrogate - images[j])**2)
++            if mse < min_mse:
++                min_mse = mse
++                best_g = g
++                
++        # Priming: Copy pose from best_g
++        poses[j]['R'] = poses[best_g]['R']
++        poses[j]['t'] = poses[best_g]['t']
++        poses[j]['xi'] = initial_zoom_estimates[j] # Or optimize xi_j too? Source says optimize xi_j
++        
++    # Optimize poses for zoomed-in images
++    for iteration in range(phase_b_iters):
+         loss = 0.0
++        grad_poses_in = [zeros_like(p) for p in poses[N_out:]]
++        
+         for j in range(N_out, N):
+-            pi_j = (poses_B[j], focal_length, principal_point, zoom_params_B[j])
+-            rendered_j = volume_renderer(theta_star, pi_j, images[j].shape)  # [G]
+-            loss += l2_norm(rendered_j, images[j])
+-        grad_poses_B, grad_zoom_B = compute_gradients(loss, poses_B, zoom_params_B)  # [G]
+-        poses_B = [p - lr * g for p, g in zip(poses_B, grad_poses_B)]
+-        zoom_params_B = [z - lr * g for z, g in zip(zoom_params_B, grad_zoom_B)]
+-
++            cam_params = {
++                'R': poses[j]['R'],
++                't': poses[j]['t'],
++                'f': base_focal_length,
++                'c': principal_point,
++                'xi': poses[j]['xi']
++            }
++            rendered = render_nerf(theta_B, cam_params)
++            error = rendered - images[j]
++            loss += sum(error**2)
++            
++            # Only optimize pose, theta is frozen
++            d_loss_d_pose = grad_pose(theta_B, cam_params, error)
++            
++            grad_poses_in[j-N_out]['R'] += d_loss_d_pose['R']
++            grad_poses_in[j-N_out]['t'] += d_loss_d_pose['t']
++            grad_poses_in[j-N_out]['xi'] += d_loss_d_pose['xi']
++            
++        # Update poses for zoomed-in images
++        for idx, j in enumerate(range(N_out, N)):
++            poses[j]['R'] -= step_size * grad_poses_in[idx]['R']
++            poses[j]['t'] -= step_size * grad_poses_in[idx]['t']
++            poses[j]['xi'] -= step_size * grad_poses_in[idx]['xi']
++            
++    poses_B = poses # Full set of poses after Phase B
++    
+     # Phase C: Joint Refinement
+-    theta_C = theta_star
+-    poses_final = poses_B
+-    zoom_final = zoom_params_B
+-
+-    for _ in range(Phase_C_iterations):
++    theta_C = theta_A
++    poses_C = poses_B
++    
++    for iteration in range(phase_c_iters):
+         loss = 0.0
++        grad_theta = zeros_like(theta_C)
++        grad_poses = [zeros_like(p) for p in poses_C]
++        
+         for k in range(N):
+-            pi_k = (poses_final[k], focal_length, principal_point, zoom_final[k])
+-            rendered_k = volume_renderer(theta_C, pi_k, images[k].shape)  # [G]
+-            loss += l2_norm(rendered_k, images[k])
+-        grad_theta_C, grad_poses_final, grad_zoom_final = compute_gradients(loss, theta_C, poses_final, zoom_final)  # [G]
+-        theta_C -= lr * grad_theta_C
+-        poses_final = [p - lr * g for p, g in zip(poses_final, grad_poses_final)]
+-        zoom_final = [z - lr * g for z, g in zip(zoom_final, grad_zoom_final)]
+-
+-    return theta_C, poses_final, zoom_final
+-
+-def random_init_nerf():
+-    """[G] Initialize MLP weights with small random values."""
+-    return np.random.randn(1000)
+-
+-def random_init_poses(n):
+-    """[G] Initialize poses with identity rotation and zero translation."""
+-    return [(np.eye(3), np.zeros(3)) for _ in range(n)]
+-
+-def random_init_focal_length():
+-    """[G] Initialize base focal length."""
+-    return np.array([1.0, 1.0])
+-
+-def volume_renderer(theta, pose, img_shape):
+-    """[G] Standard differentiable volume rendering forward pass."""
+-    return np.zeros(img_shape)
+-
+-def extract_center_crop(image, scale):
+-    h, w = image.shape[:2]
+-    ch, cw = int(h * scale), int(w * scale)
+-    y0, x0 = (h - ch) // 2, (w - cw) // 2
+-    return image[y0:y0+ch, x0:x0+cw]
+-
+-def bilinear_resize(crop, target_shape):
+-    """[G] Standard bilinear interpolation resize."""
+-    return np.zeros(target_shape)
+-
+-def l2_norm(a, b):
+-    return np.sum((a - b) ** 2)
+-
+-def argmin(values):
+-    return int(np.argmin(values))
+-
+-def compute_gradients(loss, *params):
+-    """[G] Standard automatic differentiation or finite difference gradient computation."""
+-    return tuple(np.zeros_like(p) for p in params)
++            cam_params = {
++                'R': poses_C[k]['R'],
++                't': poses_C[k]['t'],
++                'f': base_focal_length,
++                'c': principal_point,
++                'xi': poses_C[k]['xi']
++            }
++            rendered = render_nerf(theta_C, cam_params)
++            error = rendered - images[k]
++            loss += sum(error**2)
++            
++            d_loss_d_theta = grad_nerf(theta_C, cam_params, error)
++            d_loss_d_pose = grad_pose(theta_C, cam_params, error)
++            
++            grad_theta += d_loss_d_theta
++            grad_poses[k]['R'] += d_loss_d_pose['R']
++            grad_poses[k]['t'] += d_loss_d_pose['t']
++            grad_poses[k]['xi'] += d_loss_d_pose['xi']
++            
++        # Update all parameters
++        theta_C -= step_size * grad_theta
++        for k in range(N):
++            poses_C[k]['R'] -= step_size * grad_poses[k]['R']
++            poses_C[k]['t'] -= step_size * grad_poses[k]['t']
++            poses_C[k]['xi'] -= step_size * grad_poses[k]['xi']
++            
++    return theta_C, poses_C
+ ```
+ 
+-**Parameters**
+-*   **Zoom parameter $\xi_k$:** Learnable intrinsic parameter. $\xi_k=1$ for zoomed-out, $\xi_k > 1$ for zoomed-in [S1].
+-*   **Step size $\eta$:** Must satisfy $\eta \in (0, 1/L]$ where $L$ is the Lipschitz constant of the gradients [S1].
+-*   **PL constant $\mu$:** Positive constant defining the local Polyak-Łojasiewicz condition [S1].
+-
+-**Edge Cases and Pitfalls**
+-*   Simultaneous optimization of NeRF parameters and camera poses across all zoom levels is unstable; the three-phase schedule is required [S1].
+-*   Standard NeRF formulations assume fixed or small zoom-level perturbations; significant magnification changes break these assumptions, coupling translation, scale, and focal length [S1].
+-*   Pose priming converges faster than random initialization because the initial error is $O(\delta^2)$ (crop misregistration) compared to $O(\sigma_{rand}^2)$ (random noise), where $\delta \ll \sigma_{rand}$ [S1].
++### Edge Cases and Pitfalls
++*   **Instability:** Simultaneous optimization of NeRF parameters and camera poses across all zoom levels is unstable. The three-phase schedule is required [S1].
++*   **Unidentifiable Coupling:** Standard NeRF formulations assume fixed or small zoom-level perturbations. When magnification changes significantly, translation, scale, and focal length become coupled in an unidentifiable way, causing pose-free NeRFs to fail [S1].
++*   **Pose Priming:** Random initialization for zoomed-in views leads to $O(\sigma_{rand}^2)$ initial error. Pose priming reduces this to $O(\delta^2)$ where $\delta$ is the crop misregistration error, ensuring convergence within the local strong convexity neighborhood [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The method requires three sequential optimization phases [S1]. Phase A scales with $N_{out}$, Phase B with $N_{in}$, and Phase C with $N$ [S1]. Theoretical analysis shows linear convergence rate $e^{(t+1)} \leq (1 - \eta\mu) e^{(t)}$ for Phase B under the PL condition [S1].
+-*   **Memory Complexity:** Not given in the sources [S1].
+-*   **Strengths:** Does not require high-resolution images or external pose initialization (unlike [Mip-NeRF 360 MLP Architecture](14098-mip-nerf-360-mlp-architecture.md) or [CamP](14098-mip-nerf-360-mlp-architecture.md)) [S1]. Handles non-overlapping zoomed-in and zoomed-out views via cross-zoom registration [S1].
+-*   **Limitations:** Requires a rough initial estimate of zoom parameters (e.g., from dial readings) [S1]. Performance degrades if Phase B (cross-zoom matching) is skipped or if wide-field views are absent [S1].
+-*   **When to use:** Industrial imaging systems (microscopes, SEMs) where exact calibration is unavailable and stage movement is minimal [S1].
++*   **Time Complexity:** The method requires three sequential optimization phases. Phase B involves matching each zoomed-in image to a zoomed-out image, adding an $O(N_{in} \cdot N_{out})$ matching cost per iteration if done naively, though typically done once for initialization. The core optimization cost is dominated by the volume rendering integration in each phase.
++*   **Memory Complexity:** Standard NeRF memory usage for MLP weights plus camera parameters. No additional large data structures like grids or pyramids are required [S1].
++*   **Performance:** MZEN outperforms ablations that skip Phase B or train only on zoomed-in images [S1]. It achieves stable reconstruction where standard pose-free NeRFs fail [S1].
++*   **Strengths:** Does not require high-resolution images or external pose initialization (SfM). Handles large zoom variations explicitly.
++*   **Limitations:** Requires a clear distinction between zoomed-out and zoomed-in views. Relies on the assumption that zoomed-out views provide a stable global scaffold.
+ 
+ ## Background
+-MZEN was introduced to address the failure of classical Structure-from-Motion (SfM) and standard pose-free NeRFs in industrial imaging contexts where optical zoom changes significantly [S1]. It explicitly models optical magnification as a learnable intrinsic parameter and uses cross-zoom pose registration to align views [S1]. The method is designed for scenarios where the specimen stage moves only microns, making traditional pose estimation unreliable [S1].
++MZEN was introduced to address the limitations of Structure-from-Motion (SfM) and standard NeRF in industrial imaging systems (optical microscopes, digital inspection cameras, SEMs) where exact camera calibration is unavailable and the specimen stage moves only microns [S1]. Classical SfM fails in these conditions, and standard NeRF assumes fixed or small zoom-level perturbations [S1]. The method was published in *Machine Learning* (2026) [S1].
+ 
+ ## Sources

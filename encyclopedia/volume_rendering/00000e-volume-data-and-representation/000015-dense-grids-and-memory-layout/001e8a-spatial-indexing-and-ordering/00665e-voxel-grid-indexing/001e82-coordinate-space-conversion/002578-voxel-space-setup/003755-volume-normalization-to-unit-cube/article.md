@@ -1,0 +1,145 @@
+# Volume Normalization to Unit Cube
+Also called: Volume Transform Normalization
+
+## Overview
+Volume Normalization to Unit Cube rescales and translates a voxel grid's world-space bounding box so that it fits exactly within a unit cube centered at the origin. This standardization ensures consistent rendering parameters across different scene scales. It differs from sibling methods like [Spherical Voxel Grid Setup](3883-spherical-voxel-grid-setup.md) by enforcing a Cartesian cubic domain rather than a spherical one, and from [Incremental Back-Rotation for Voxel Mapping](6759-incremental-back-rotation-for-voxel-mapping.md) by handling the global spatial transform rather than per-pixel ray mapping.
+
+## How it works
+**Inputs:**
+- `volume`: A structure containing a list of grids (`volume->grids`) and a global transform matrix (`volume->transform`).
+- `density_scale`: A scalar parameter used to adjust density values relative to spatial scale.
+
+**Outputs:**
+- Updated `volume->transform`: The composite transformation matrix mapping world coordinates to the normalized unit cube space.
+- Updated `density_scale`: The adjusted density scaling factor.
+
+**Data Structures:**
+- `bb_min`, `bb_max`: `vec3` representing the minimum and maximum coordinates of the world-space bounding box.
+- `extent`: `vec3` representing the size of the bounding box ($bb_{max} - bb_{min}$).
+- `size`: `float` representing the length of the longest axis of the bounding box.
+- `grid`: A structure containing `transform` (mat4) and `index_extent` (vec3 or similar integer/float dimensions).
+
+**Steps:**
+1. Initialize `bb_min` to $(\infty, \infty, \infty)$ and `bb_max` to $(-\infty, -\infty, -\infty)$.
+2. Iterate through each frame in `volume->grids`. For each frame:
+   a. Retrieve the density grid.
+   b. Compute the world-space position of the grid's origin: $p_{min} = grid.transform \times (0, 0, 0, 1)^T$.
+   c. Compute the world-space position of the grid's opposite corner: $p_{max} = grid.transform \times (grid.index\_extent.x, grid.index\_extent.y, grid.index\_extent.z, 1)^T$.
+   d. Update `bb_min` component-wise: $bb_{min} = \min(bb_{min}, p_{min})$.
+   e. Update `bb_max` component-wise: $bb_{max} = \max(bb_{max}, p_{max})$.
+3. Calculate the bounding box extent: $extent = bb_{max} - bb_{min}$.
+4. Calculate the maximum dimension size: $size = \max(extent.x, \max(extent.y, extent.z))$.
+5. If $size \neq 1.0$:
+   a. Construct a scaling matrix $S$ that scales by $1/size$ along all axes.
+   b. Construct a translation matrix $T$ that translates by $-(bb_{min} + 0.5 \times extent)$. This moves the center of the bounding box to the origin.
+   c. Update `volume->transform` to $T \times S$ (applied in that order, assuming column-major multiplication where the vector is on the right).
+   d. Update `density_scale` by multiplying it by the original $size$. This compensates for the spatial scaling to maintain correct density integration values.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def normalize_volume_to_unit_cube(volume, density_scale):
+    # Step 1: Initialize bounding box
+    bb_min = [float('inf'), float('inf'), float('inf')]
+    bb_max = [float('-inf'), float('-inf'), float('-inf')]
+
+    # Step 2: Iterate over grids to find global bounding box
+    for frame in volume.grids:
+        grid = frame.density_grid
+        
+        # Get grid transform and dimensions
+        transform = grid.transform
+        extent_dims = grid.index_extent # Assume vec3-like object
+        
+        # Compute world-space corners
+        # Origin (0,0,0)
+        p_min = transform * [0.0, 0.0, 0.0, 1.0]
+        
+        # Opposite corner (index_extent.x, index_extent.y, index_extent.z)
+        p_max = transform * [extent_dims.x, extent_dims.y, extent_dims.z, 1.0]
+        
+        # Update global bounding box
+        for i in range(3):
+            if p_min[i] < bb_min[i]:
+                bb_min[i] = p_min[i]
+            if p_max[i] > bb_max[i]:
+                bb_max[i] = p_max[i]
+
+    # Step 3: Calculate extent and max size
+    extent = [bb_max[i] - bb_min[i] for i in range(3)]
+    size = max(extent)
+
+    # Step 4: Apply normalization if size is not 1.0
+    if size != 1.0:
+        # Scale factor
+        scale_factor = 1.0 / size
+        
+        # Center of the bounding box
+        center = [bb_min[i] + 0.5 * extent[i] for i in range(3)]
+        
+        # Construct transformation matrix
+        # 1. Scale by 1/size
+        # 2. Translate by -center
+        # Assuming glm::translate(glm::scale(mat, vec), vec) order
+        # This results in T * S
+        
+        # Create scale matrix
+        scale_mat = [
+            [scale_factor, 0, 0, 0],
+            [0, scale_factor, 0, 0],
+            [0, 0, scale_factor, 0],
+            [0, 0, 0, 1]
+        ]
+        
+        # Create translation matrix
+        translate_mat = [
+            [1, 0, 0, -center[0]],
+            [0, 1, 0, -center[1]],
+            [0, 0, 1, -center[2]],
+            [0, 0, 0, 1]
+        ]
+        
+        # Multiply T * S
+        volume.transform = multiply_matrices(translate_mat, scale_mat)
+        
+        # Adjust density scale
+        density_scale = density_scale * size
+
+    return volume.transform, density_scale
+
+def multiply_matrices(A, B):
+    # Standard 4x4 matrix multiplication
+    C = [[0]*4 for _ in range(4)]
+    for i in range(4):
+        for j in range(4):
+            for k in range(4):
+                C[i][j] += A[i][k] * B[k][j]
+    return C
+```
+
+**Parameters:**
+- `size`: The maximum dimension of the bounding box. If `size` is 1.0, no transformation is applied.
+
+**Edge Cases:**
+- If `size` is 0.0 (degenerate volume), division by zero occurs in scaling. The source checks `size != 1.0` but does not explicitly handle 0.0, implying it may be an error condition or handled elsewhere [S1, unofficial].
+- Precision issues with `FLT_MAX` and `FLT_MIN` initialization should be managed using standard floating-point limits [S1, unofficial].
+
+## Subtopics
+
+### [Display-Space Cube Mapping](20363-display-space-cube-mapping.md)
+Transforms a voxel dataset into a fixed-size cubic display space centered on the screen. It omits perspective correction, allowing direct measurement of voxel distances from the screen at the cost of perspective distortions.
+
+## Operating characteristics
+- **Time Complexity:** Linear with respect to the number of grids in the volume, $O(N)$, where $N$ is the number of frames/grids. The bounding box calculation requires a constant number of operations per grid.
+- **Memory Complexity:** Constant, $O(1)$, as it only stores bounding box coordinates and transformation matrices.
+- **Strengths:** Ensures consistent spatial scaling for rendering, simplifying ray marching and sampling parameters.
+- **Limitations:** Does not account for aspect ratio or camera frustum, only the object's bounding box.
+
+## Background
+This method is part of the voxel space setup pipeline in the `volren` renderer. It ensures that the volume data is normalized to a unit cube, facilitating consistent rendering across different scene scales. The approach is derived from the implementation in the `volren` project [S1, unofficial].
+
+## Sources
+[S1] nihofm/volren: Simple OpenGL-based renderer for ..., https://github.com/nihofm/volren, fetched 2026-10-29 (unofficial)

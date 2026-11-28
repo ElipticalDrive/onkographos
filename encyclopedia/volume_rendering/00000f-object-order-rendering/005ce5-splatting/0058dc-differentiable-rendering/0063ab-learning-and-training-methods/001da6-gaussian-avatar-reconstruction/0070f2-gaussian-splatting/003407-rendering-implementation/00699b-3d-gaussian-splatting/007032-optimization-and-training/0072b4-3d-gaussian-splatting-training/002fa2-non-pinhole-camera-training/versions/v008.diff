@@ -1,0 +1,85 @@
+--- v007.md
++++ v008.md
+@@ -36,5 +36,5 @@
+ ```python
+ def render_non_pinhole(gaussians, camera, image_size, target_image, mask):
+-    # 1. Project Gaussians to perspective plane
++    # 1. Project Gaussians to a standard perspective plane
+     perspective_coords = project_to_perspective(gaussians, camera)
+     
+@@ -57,32 +57,37 @@
+ 
+ def project_to_perspective(gaussians, camera):
+-    # Standard 3DGS projection: transform 3D Gaussians to 2D screen coordinates
+-    # using camera extrinsics and intrinsics [G].
+-    return gaussians.position @ camera.extrinsics + camera.center
++    # Transform 3D Gaussian centers to 2D screen coordinates using camera extrinsics and intrinsics [G].
++    # Apply perspective divide to obtain normalized device coordinates.
++    projected = camera.intrinsics @ (camera.extrinsics @ gaussians.position.T)
++    ndc = projected[:2, :] / projected[2, :]
++    return ndc.T
+ 
+ def differentiable_warp(coords, distortion_coeffs):
+-    # Apply radial/tangential distortion to 2D coordinates.
+-    # Uses bilinear interpolation to maintain differentiability [G].
+-    distorted = coords
+-    for k in distortion_coeffs:
+-        r2 = distorted.x**2 + distorted.y**2
+-        distorted.x += distorted.x * k * r2
+-        distorted.y += distorted.y * k * r2
++    # Map normalized coordinates to distorted coordinates using radial/tangential distortion [G].
++    # Bilinear interpolation is used on a precomputed distortion grid to ensure differentiability.
++    distorted = coords.copy()
++    r2 = distorted[:, 0]**2 + distorted[:, 1]**2
++    distorted[:, 0] += distorted[:, 0] * (distortion_coeffs[0] * r2 + distortion_coeffs[1] * r2**2)
++    distorted[:, 1] += distorted[:, 1] * (distortion_coeffs[0] * r2 + distortion_coeffs[1] * r2**2)
+     return distorted
+ 
+ def rasterize(gaussians, coords, image_size):
+-    # Sort Gaussians by depth, compute 2D covariance, 
+-    # and accumulate color/opacity per pixel [G].
+-    image = zeros(image_size, 3)
+-    for g in gaussians:
+-        x, y = coords[g.id]
+-        if 0 <= x < image_size[0] and 0 <= y < image_size[1]:
+-            image[y, x] += g.color * g.opacity
++    # Sort Gaussians by depth, compute 2D covariance, and accumulate color/opacity per pixel [G].
++    image = [[0.0] * 3 for _ in range(image_size[0])]
++    sorted_indices = sorted(range(len(coords)), key=lambda i: coords[i][2])
++    for idx in sorted_indices:
++        x, y = int(coords[idx][0]), int(coords[idx][1])
++        if 0 <= x < image_size[1] and 0 <= y < image_size[0]:
++            for c in range(3):
++                image[y][x][c] += gaussians.color[idx][c] * gaussians.opacity[idx]
+     return image
+ 
+ def compute_loss(rendered, target, mask):
+-    # L1 loss over valid pixels
+-    diff = abs(rendered - target)
+-    return sum(diff * mask) / sum(mask)
++    # L1 loss over valid pixels, normalized by the number of valid pixels
++    diff = [[abs(rendered[y][x][c] - target[y][x][c]) for c in range(3)] for y in range(len(rendered)) for x in range(len(rendered[0]))]
++    valid_pixels = sum(mask[y][x] for y in range(len(mask)) for x in range(len(mask[0])))
++    if valid_pixels == 0:
++        return 0.0
++    return sum(diff[y][x][c] * mask[y][x] for y in range(len(mask)) for x in range(len(mask[0])) for c in range(3)) / valid_pixels
+ ```
+ 
+@@ -93,8 +98,8 @@
+ 
+ ### Non-Pinhole Camera Adaptation
+-Adaptation of the 3DGS pipeline to specific non-pinhole datasets. For the Neural 3D Video Dataset, use the original centered-undistorted camera model [S3]. For the Technicolor Dataset, implement and use an uncentered-undistorted camera model [S3]. For the Google Immersive Dataset, adapt the method to fit an uncentered-distorted camera model using a differentiable image space warping function that maps perspective views to fish-eye distorted views [S3]. For real-time demos, retrain models on undistorted videos and apply a differentiable mask to exclude black pixels resulting from undistortion [S3]. Image warping and masking must remain differentiable to allow end-to-end training despite the coordinate transformations and pixel masking [S3].
++Adaptation of the 3DGS pipeline to specific non-pinhole datasets [S3]. For the Neural 3D Video Dataset, use the original centered-undistorted camera model [S3]. For the Technicolor Dataset, implement and use an uncentered-undistorted camera model [S3]. For the Google Immersive Dataset, adapt the method to fit an uncentered-distorted camera model using a differentiable image space warping function that maps perspective views to fish-eye distorted views [S3]. For real-time demos, retrain models on undistorted videos and apply a differentiable mask to exclude black pixels resulting from undistortion [S3]. Image warping and masking must remain differentiable to allow end-to-end training despite the coordinate transformations and pixel masking [S3].
+ 
+ ## Operating characteristics
+-- **Time Complexity**: Similar to standard 3DGS, but with additional overhead for warping and masking operations. The differentiable warping adds computational cost per pixel [S3].
++- **Time Complexity**: Similar to standard 3DGS, but with additional overhead for warping and masking operations [G].
+ - **Memory Complexity**: Not given in the sources.
+ - **Performance**: Successfully reconstructs scenes on non-pinhole datasets where standard 3DGS fails entirely, such as the Matterport dataset [S1].
+@@ -105,5 +110,5 @@
+ 
+ ## Background
+-Non-Pinhole Camera Training was developed to address the limitations of standard 3DGS in handling non-standard camera models. It builds on the differentiable rasterizer of 3DGS, extending it to support various camera geometries [S3]. The method has been applied to datasets such as the Neural 3D Video Dataset, Technicolor Dataset, and Google Immersive Dataset [S3]. It has also been shown to succeed on the Matterport dataset, where standard 3DGS fails [S1]. The technique of Aperture Randomized Training, while related to defocus disentanglement, shares the principle of randomizing camera parameters during training to improve representation learning [S2].
++Non-Pinhole Camera Training was developed to address the limitations of standard 3DGS in handling non-standard camera models [S3]. It builds on the differentiable rasterizer of 3DGS, extending it to support various camera geometries [S3]. The method has been applied to datasets such as the Neural 3D Video Dataset, Technicolor Dataset, and Google Immersive Dataset [S3]. It has also been shown to succeed on the Matterport dataset, where standard 3DGS fails [S1]. The technique of Aperture Randomized Training, while related to defocus disentanglement, shares the principle of randomizing camera parameters during training to improve representation learning [S2].
+ 
+ ## Sources

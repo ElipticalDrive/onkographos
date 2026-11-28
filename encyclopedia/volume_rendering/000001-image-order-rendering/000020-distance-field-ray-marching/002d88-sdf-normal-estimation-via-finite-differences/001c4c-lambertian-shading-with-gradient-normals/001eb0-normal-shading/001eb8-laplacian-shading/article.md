@@ -1,0 +1,82 @@
+# Laplacian Shading
+
+Also called: Surface Laplacian Visualization
+
+## Overview
+Laplacian Shading visualizes the surface Laplacian of a Signed Distance Field (SDF) to highlight regions of high curvature or rapid change in the distance function. It sets itself apart from sibling methods like [Normal Shading](1831-normal-shading.md) (which visualizes first-order gradient components) by visualizing the second-order derivative (divergence of the gradient), providing insight into the local geometry's concavity and convexity.
+
+## How it works
+**Inputs and Outputs:**
+- Input: The surface Laplacian value $\Delta$ at a given point, typically computed via finite differences of the SDF gradient.
+- Output: A scalar color value in the range $[0, 1]$.
+
+**Data Structures:**
+- The Laplacian $\Delta$ is a single scalar value per sample point.
+
+**Steps:**
+1. Compute the absolute maximum of the Laplacian values over the relevant domain (e.g., the entire scene or current frame) to normalize the range. Let this be $M = \max(|\Delta|)$.
+2. Normalize the Laplacian to the range $[-1, 1]$ by dividing by $M$ and negating the sign: $v = -\frac{\Delta}{M}$.
+3. Map the range $[-1, 1]$ to $[0, 1]$ using the linear transformation: $u = \frac{v + 1}{2}$.
+4. Apply gamma correction with an exponent of $1/2.33$ to enhance contrast in darker regions.
+5. Clamp the final result to $[0, 1]$.
+
+**Formula:**
+The visualization value $L_{vis}$ is calculated as:
+$$ L_{vis} = \left( \frac{-\frac{\Delta}{\max(|\Delta|)} + 1}{2} \right)^{1/2.33} $$
+The result is clamped to $[0, 1]$.
+
+**Parameters:**
+- Gamma exponent: $1/2.33 \approx 0.429$.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def laplacian_shading(surface_laplacian: float, max_abs_laplacian: float) -> float:
+    """
+    Visualizes the surface Laplacian.
+    
+    Args:
+        surface_laplacian: The computed Laplacian value (scalar).
+        max_abs_laplacian: The maximum absolute Laplacian value in the domain.
+        
+    Returns:
+        A float in [0, 1] representing the shaded Laplacian.
+    """
+    # Normalize to [-1, 1] and flip sign
+    normalized = -surface_laplacian / max_abs_laplacian
+    
+    # Map to [0, 1]
+    mapped = (normalized + 1.0) / 2.0
+    
+    # Clamp to [0, 1] before gamma correction to avoid domain errors
+    clamped = max(0.0, min(1.0, mapped))
+    
+    # Apply gamma correction
+    gamma = 1.0 / 2.33
+    result = clamped ** gamma
+    
+    return result
+```
+
+**Edge Cases and Pitfalls:**
+- If $\max(|\Delta|)$ is zero (flat region everywhere), division by zero occurs. A small epsilon or fallback value should be used [G].
+- The Laplacian can be positive or negative; the sign flip ensures that positive Laplacians (convex regions) map to lower values and negative Laplacians (concave regions) map to higher values, or vice versa depending on interpretation, but the formula explicitly negates.
+
+## Subtopics
+
+### General Gradient Shading
+A shading method using the pre-image as input data for more general gradient shading by computing various gradient operators over depth coordinates. It uses image processing hardware to compute these operators [S2].
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ per sample for the shading calculation itself, assuming the Laplacian and its maximum are pre-computed.
+- **Memory Complexity:** $O(1)$ additional memory for the shading calculation.
+- **Strengths:** Highlights subtle geometric details and curvature changes that normal shading might miss. Differentiable implementation allows for optimization of scene parameters [S1, unofficial].
+- **Limitations:** Requires computation of second-order derivatives, which can be noisy. The normalization step requires a global or local maximum, which may need additional passes or tracking.
+
+## Background
+Laplacian Shading is part of a collection of geometrically motivated shaders for ray marching on SDFs, implemented in a PyTorch-based repository. The implementation is fully differentiable, allowing backpropagation through the rendering process to optimize scene parameters [S1, unofficial]. The repository also includes a constructive geometry system for building complex SDFs and an interactive first-person control system.
+
+## Sources
+[S1] kyle-rosa/ray_marching, https://github.com/kyle-rosa/ray_marching, fetched 2026-10-26 (unofficial)
+[S2] Hardware Support for the Display and Manipulation of Binary Voxel Models, https://doi.org/10.2312/eggh/eggh88/103-117, fetched 2026-10-26

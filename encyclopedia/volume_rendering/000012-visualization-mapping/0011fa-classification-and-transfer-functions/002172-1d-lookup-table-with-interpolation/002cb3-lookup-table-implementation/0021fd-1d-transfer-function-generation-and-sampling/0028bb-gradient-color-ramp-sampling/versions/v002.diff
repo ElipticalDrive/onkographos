@@ -1,0 +1,142 @@
+--- v001.md
++++ v002.md
+@@ -4,92 +4,80 @@
+ 
+ ## Overview
+-Gradient/Color Ramp Sampling is a method for generating a 2D color map (texture) from a set of key-value pairs defining color and opacity gradients, which is then sampled to map scalar data to RGBA values. It differs from direct 1D LUT interpolation by explicitly constructing a 2D texture where one axis represents the scalar value (mapped to color via a gradient) and the other axis often represents a secondary parameter like opacity or intensity, allowing for more complex visual mappings than simple 1D lookup [S1, unofficial].
++Gradient/Color Ramp Sampling maps scalar intensity values to RGBA colors by sampling a 2D gradient texture [S2, unofficial]. It differs from direct 1D LUT interpolation by using a 2D texture lookup where the scalar value typically drives the horizontal axis while the vertical axis is fixed or used for secondary parameters, enabling combined color and opacity mapping in a single pass [S2, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A set of gradient stops (key-value pairs) defining color and optionally opacity/intensity curves. For the specific implementation cited, this involves a "sim data" channel laid out horizontally along the X-axis (color gradient) and a vertical Y-axis mapping (opacity/intensity) [S1, unofficial].
+-*   **Output:** A 2D texture (GradientTexture2D) containing the sampled color ramp.
++*   **Input:** Scalar intensity value (often extracted from a volume texture's red channel), a 2D gradient texture, and a gamma exponent [S2, unofficial].
++*   **Output:** RGBA color value [S2, unofficial].
+ 
+ **Data Structures:**
+-*   **Gradient Stops:** Defined by position (offset) and RGBA values.
+-*   **GradientTexture2D:** A 2D texture resource. If `use_hdr` is enabled, it may store channels above 1.0 [S1, unofficial].
++*   **Gradient Stops:** Defined by position (offset) and RGBA values [G].
++*   **GradientTexture2D:** A 2D texture resource. When `use_hdr` is enabled, the texture preserves floating-point channels above 1.0 [S1, unofficial].
+ 
+ **Steps:**
+-1.  **Define Gradient Stops:** Specify the color and opacity/intensity values at specific offsets (0.0 to 1.0).
+-2.  **Construct 2D Texture:**
+-    *   Map the scalar value to the X-axis. The color gradient remaps the sim data to fire color horizontally [S1, unofficial].
+-    *   Map the opacity/intensity to the Y-axis. In "Use Own Opacity" mode, this maps to fire opacity; otherwise, it maps to fire intensity [S1, unofficial].
+-3.  **Sample the Texture:**
+-    *   Read the luminance in float format.
+-    *   Truncate each channel for the color ramp, as done in Godot's `NoiseTexture2D` implementation (color.h:106-108, image.cpp:3577-3580) [S1, unofficial].
+-    *   Run the Gradient sampler and `channelToByte` in float, as per `Gradient::get_color_at_offset` and `Color::get_r8` (gradient.h:151-235, color.h:228) [S1, unofficial].
+-4.  **Handle HDR:** If `use_hdr` is true, ensure channels above 1.0 are preserved in the output texture (gradient_texture.cpp:239-270) [S1, unofficial].
++1.  Extract intensity from the input sample (e.g., `intensity = layer_col.r`) [S2, unofficial].
++2.  Apply gamma correction: `intensity = pow(intensity, gamma)` [S2, unofficial].
++3.  Sample the 2D gradient texture using the corrected intensity as the x-coordinate and 0 as the y-coordinate: `color = texture(gradient, vec2(intensity, 0))` [S2, unofficial].
++4.  Read the luminance in float format and truncate each channel for the color ramp, as implemented in Godot [S1, unofficial].
++5.  Run the gradient sampler and channel-to-byte conversion in float precision [S1, unofficial].
++6.  If `use_hdr` is true, retain channels above 1.0 without truncation [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def sample_gradient_ramp(scalar_value, opacity_value, gradient_stops, use_hdr=False):
+-    # 1. Map scalar to X, opacity to Y
+-    x = clamp(scalar_value, 0.0, 1.0)
+-    y = clamp(opacity_value, 0.0, 1.0)
++def sample_gradient_ramp(intensity: float, gradient_stops: list, gamma: float, use_hdr: bool) -> tuple:
++    # 1. Gamma correction
++    corrected_intensity = pow(intensity, gamma)
+     
+-    # 2. Sample the 2D gradient texture
+-    # Note: In the cited implementation, the color is mapped horizontally (X)
+-    # and opacity/intensity vertically (Y).
+-    color = sample_2d_texture(x, y, gradient_stops)
++    # 2. Linear interpolation across gradient stops (standard texture sampling at y=0)
++    t = clamp(corrected_intensity, 0.0, 1.0)
++    idx = t * (len(gradient_stops) - 1)
++    i = int(idx)
++    f = idx - i
+     
++    if i >= len(gradient_stops) - 1:
++        color = gradient_stops[-1].color
++    else:
++        c0 = gradient_stops[i].color
++        c1 = gradient_stops[i+1].color
++        color = c0 + (c1 - c0) * f
++        
+     # 3. Process channels
+-    # Read luminance in float and truncate each channel
+-    r = truncate_to_byte(color.r)
+-    g = truncate_to_byte(color.g)
+-    b = truncate_to_byte(color.b)
+-    a = truncate_to_byte(color.a)
+-    
+-    # 4. Handle HDR
+     if use_hdr:
+-        # Keep channels above 1.0 if HDR is enabled
+-        # This step implies no truncation for HDR, or different handling
+-        pass
++        # Preserve floating-point values above 1.0
++        return (color.r, color.g, color.b, color.a)
+     else:
+-        # Standard truncation as per Godot's channelToByte
+-        r = channel_to_byte(r)
+-        g = channel_to_byte(g)
+-        b = channel_to_byte(b)
+-        a = channel_to_byte(a)
+-        
+-    return (r, g, b, a)
+-
+-def truncate_to_byte(value):
+-    # Truncate float to byte range [0, 255]
+-    return int(clamp(value, 0.0, 1.0) * 255)
+-
+-def channel_to_byte(value):
+-    # As per Color::get_r8
+-    return int(clamp(value, 0.0, 1.0) * 255)
++        # Truncate each channel to byte range [0, 255]
++        r = int(clamp(color.r, 0.0, 1.0) * 255)
++        g = int(clamp(color.g, 0.0, 1.0) * 255)
++        b = int(clamp(color.b, 0.0, 1.0) * 255)
++        a = int(clamp(color.a, 0.0, 1.0) * 255)
++        return (r, g, b, a)
+ ```
+ 
+ **Parameters:**
+-*   `use_hdr`: Boolean. If true, preserves channels > 1.0. Default: False [S1, unofficial].
+-*   `gradient_stops`: List of (offset, color, opacity) tuples.
++*   `gamma`: Exponent for gamma correction. Not given in the sources.
++*   `use_hdr`: Boolean. When true, preserves floating-point channels above 1.0 [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** Truncation can introduce quantization errors. Godot-measured ramp bytes off by one drop from 1212 to 0 of 2244 after fixing the ramp implementation [S1, unofficial].
+-*   **HDR:** If `use_hdr` is enabled, channels above 1.0 must be handled correctly to avoid clipping or incorrect display [S1, unofficial].
+-*   **Boundary Conditions:** Ensure scalar and opacity values are clamped to [0.0, 1.0] before sampling to avoid out-of-bounds access [S1, unofficial].
++*   **HDR Handling:** Enabling `use_hdr` preserves channels above 1.0, which requires floating-point render targets to avoid clipping [S1, unofficial].
++*   **Quantization:** Truncation introduces quantization errors; fixing the ramp implementation reduced Godot-measured off-by-one byte errors from 1212 to 0 out of 2244 samples [S1, unofficial].
++*   **Accuracy:** Mean error for `noisetexture2d` decreased from 0.776/255 to 0.735/255 after the ramp fix [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Fire Color and Opacity Curves](16944-fire-color-and-opacity-curves.md)
+-Remaps grid simulation data to render data. Sim data channel is laid out horizontally along the X axis. Color gradient remaps sim data to fire color. Curve remaps sim data to fire opacity (in Use Own Opacity mode) or fire intensity (otherwise). Opacity/intensity is mapped vertically on the Y axis.
++Remaps grid simulation data channels (e.g., Temperature or Fuel) into render-ready color and opacity values for fire visualization. It distinguishes itself from generic transfer functions by explicitly separating color mapping (via a gradient) from intensity/opacity mapping (via a curve), with specific modes for handling opacity relative to smoke.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** O(1) per sample, assuming constant-time texture lookup.
+-*   **Memory Complexity:** O(N) for the 2D texture, where N is the texture resolution.
+-*   **Performance:** The cited implementation shows significant error reduction after fixing the ramp (mean error 0.776/255 → 0.735/255 for `noisetexture2d`) [S1, unofficial].
+-*   **Strengths:** Allows for complex 2D mappings (color and opacity/intensity) in a single texture lookup.
+-*   **Limitations:** Requires pre-computation of the 2D texture. HDR handling adds complexity.
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
++*   **Measured Performance:** Fixing the ramp implementation reduced mean error for `noisetexture2d` from 0.776/255 to 0.735/255 [S1, unofficial].
++*   **Strengths:** Combines color and opacity mapping in a single texture lookup [S2, unofficial].
++*   **Limitations:** Requires pre-computed gradient stops and careful HDR handling [S1, unofficial].
+ 
+ ## Background
+-This method is used in Godot's rendering engine, specifically in `NoiseTexture2D` and `GradientTexture2D` nodes, to provide flexible color mapping for procedural textures and volumetric effects [S1, unofficial].
++Originates from Godot's procedural texture and volume layer systems, specifically implemented in `NoiseTexture2D` and `GradientTexture2D` nodes for color mapping [S1, unofficial][S2, unofficial].
+ 
+ ## Sources
+-[S1] feat(renderer): draw FogVolume and FogMaterial into the volumetric fog, https://github.com/Vortiago/textscene-inspector/pull/732, fetched 2026-10-26 (unofficial)+[S1] feat(renderer): draw FogVolume and FogMaterial into the volumetric fog, https://github.com/Vortiago/textscene-inspector/pull/732, fetched 2026-10-26 (unofficial)
++[S2] blackears/godot_volume_layers, https://github.com/blackears/godot_volume_layers, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,190 @@
+--- v001.md
++++ v002.md
+@@ -9,90 +9,70 @@
+ **Inputs:**
+ - `GridSpec`: Contains `voxel_size` (float3), `grid_min` (Int3), and `grid_max` (Int3) defining the spatial bounds and resolution [S1, unofficial].
+-- Active voxel coordinates (x, y, z) within the grid bounds [S1, unofficial].
++- Active voxel coordinates `(x, y, z)` within the grid bounds [S1, unofficial].
+ 
+ **Outputs:**
+ - A `BrickLookup` structure containing hash tables and brick data [S1, unofficial].
+-- For a given voxel, the index of its data row in the compact arrays, or -1 if inactive/out of bounds [S1, unofficial].
++- For a given voxel, the index of its data row in the compact arrays, or `-1` if inactive or out of bounds [S1, unofficial].
+ 
+ **Data Structures:**
+-1.  **Int3**: Three integers `x`, `y`, `z`. Access via `&x[i]` [S1, unofficial].
+-2.  **GridSpec**:
+-    -   `voxel_size`: float3
+-    -   `grid_min`: Int3
+-    -   `grid_max`: Int3
+-3.  **SymQEF10**: 10 floats (`q00`..`q33`) storing the upper-triangle of a symmetric 4x4 QEF matrix [S1, unofficial].
+-4.  **BrickLookup**:
+-    -   `hash_keys`: `const uint64_t*` (capacity entries)
+-    -   `hash_vals`: `const uint32_t*` (capacity entries)
+-    -   `brick_bits`: `const uint32_t*` (occupancy bitsets)
+-    -   `brick_base`: `const int64_t*` (base indices for brick data)
+-    -   `hash_capacity`: `uint64_t` (must be power of two) [S1, unofficial].
++1. **Int3**: Three integers `x`, `y`, `z`. Access via `&x[i]` [S1, unofficial].
++2. **GridSpec**: `voxel_size` (float3), `grid_min` (Int3), `grid_max` (Int3) [S1, unofficial].
++3. **SymQEF10**: 10 floats (`q00`..`q33`) storing the upper-triangle of a symmetric 4x4 QEF matrix [S1, unofficial].
++4. **BrickLookup**: `hash_keys` (`const uint64_t*`), `hash_vals` (`const uint32_t*`), `brick_bits` (`const uint32_t*`), `brick_base` (`const int64_t*`), `hash_capacity` (`uint64_t`, must be a power of two) [S1, unofficial].
+ 
+ **Parameters:**
+--   `kBrickSize`: 8 (brick dimension in voxels) [S1, unofficial].
+--   `kBrickLocalCells`: 512 (8x8x8) [S1, unofficial].
+--   `kBrickBitWords`: 16 (512/32) [S1, unofficial].
+--   `kEmptyBrickKey`: `UINT64_MAX` [S1, unofficial].
+--   `kEmptyBrickVal`: `UINT32_MAX` [S1, unofficial].
+--   `kOverflowBrickVal`: `UINT32_MAX - 1u` [S1, unofficial].
++- `kBrickSize`: 8 (brick dimension in voxels) [S1, unofficial].
++- `kBrickLocalCells`: 512 (8x8x8) [S1, unofficial].
++- `kBrickBitWords`: 16 (512/32) [S1, unofficial].
++- `kEmptyBrickKey`: `UINT64_MAX` [S1, unofficial].
++- `kEmptyBrickVal`: `UINT32_MAX` [S1, unofficial].
++- `kOverflowBrickVal`: `UINT32_MAX - 1u` [S1, unofficial].
+ 
+ **Steps:**
+ 
+-1.  **Pack Voxel Key**: Convert 3D voxel coordinates to a dense row-major 64-bit integer key relative to `grid_min` [S1, unofficial].
+-    $$
+-    \begin{aligned}
+-    sx &= grid\_max.x - grid\_min.x \\
+-    sy &= grid\_max.y - grid\_min.y \\
+-    ux &= x - grid\_min.x \\
+-    uy &= y - grid\_min.y \\
+-    uz &= z - grid\_min.z \\
+-    key &= ux + sx \times (uy + sy \times uz)
+-    \end{aligned}
+-    $$
+-    [S1, unofficial]
++1. **Pack Voxel Key**: Convert 3D voxel coordinates to a dense row-major 64-bit integer key relative to `grid_min` [S1, unofficial].
++   $$
++   \begin{aligned}
++   sx &= grid\_max.x - grid\_min.x \\
++   sy &= grid\_max.y - grid\_min.y \\
++   ux &= x - grid\_min.x \\
++   uy &= y - grid\_min.y \\
++   uz &= z - grid\_min.z \\
++   key &= ux + sx \times (uy + sy \times uz)
++   \end{aligned}
++   $$
++   [S1, unofficial]
+ 
+-2.  **Unpack Voxel Key**: Inverse of packing. Recovers `x, y, z` and adds `grid_min` [S1, unofficial].
+-    $$
+-    \begin{aligned}
+-    z &= key / (sx \times sy) \\
+-    rem &= key - z \times (sx \times sy) \\
+-    y &= rem / sx \\
+-    x &= rem - y \times sx \\
+-    x_{final} &= x + grid\_min.x \\
+-    y_{final} &= y + grid\_min.y \\
+-    z_{final} &= z + grid\_min.z
+-    \end{aligned}
+-    $$
+-    [S1, unofficial]
++2. **Unpack Voxel Key**: Inverse of packing. Recovers `x`, `y`, `z` and adds `grid_min` [S1, unofficial].
++   $$
++   \begin{aligned}
++   z &= key // (sx \times sy) \\
++   rem &= key - z \times (sx \times sy) \\
++   y &= rem // sx \\
++   x &= rem - y \times sx \\
++   x_{final} &= x + grid\_min.x \\
++   y_{final} &= y + grid\_min.y \\
++   z_{final} &= z + grid\_min.z
++   \end{aligned}
++   $$
++   [S1, unofficial]
+ 
+-3.  **Lookup Brick Bits and Base**:
+-    a. Compute brick coordinates: $bx = \lfloor x / 8 \rfloor$, $by = \lfloor y / 8 \rfloor$, $bz = \lfloor z / 8 \rfloor$ [S1, unofficial].
+-    b. Hash brick coordinates to a slot in the open-addressing hash table. Use a splitmix64-like mix:
+-       ```python
+-       slot_key ^= slot_key >> 33
+-       slot_key *= 0xff51afd7ed558ccdULL
+-       slot_key ^= slot_key >> 33
+-       slot_key *= 0xc4ceb9fe1a85ec53ULL
+-       slot_key ^= slot_key >> 33
+-       ```
+-       [S1, unofficial]
+-    c. Probe linearly: `slot = (hash + i) & (hash_capacity - 1)` until `hash_keys[slot] == kEmptyBrickKey` or `hash_keys[slot] == brick_key` [S1, unofficial].
+-    d. Return `brick_bits` pointer and `brick_base` index from `hash_vals[slot]` [S1, unofficial].
++3. **Lookup Brick Bits and Base**:
++   a. Compute brick coordinates: $bx = \lfloor x / 8 \rfloor$, $by = \lfloor y / 8 \rfloor$, $bz = \lfloor z / 8 \rfloor$ [S1, unofficial].
++   b. Hash brick coordinates to a slot in the open-addressing hash table using a splitmix64-like mix [S1, unofficial].
++   c. Probe linearly: `slot = (hash + i) & (hash_capacity - 1)` until `hash_keys[slot] == kEmptyBrickKey` or `hash_keys[slot] == brick_key` [S1, unofficial].
++   d. Return `brick_bits` pointer and `brick_base` index from `hash_vals[slot]` [S1, unofficial].
+ 
+-4.  **Lookup Voxel Row in Bricks**:
+-    a. Check bounds: if voxel outside `grid_min`/`grid_max`, return -1 [S1, unofficial].
+-    b. Compute brick coords and local voxel ID:
+-       $$
+-       local\_id = lx + 8 \times (ly + 8 \times lz)
+-       $$
+-       where $lx, ly, lz$ are local coordinates within the brick [S1, unofficial].
+-    c. Call `lookup_brick_bits_and_base` to get `bits` and `base` [S1, unofficial].
+-    d. Check occupancy: `bits[word] & (1u << bit)`, where `word = local_id // 32` and `bit = local_id % 32` [S1, unofficial]. If 0, return -1 [S1, unofficial].
+-    e. Compute rank (number of active voxels before `local_id`):
+-       $$
+-       rank = \sum_{i=0}^{word-1} \text{popc}(bits[i]) + \text{popc}(bits[word] \& ((1u << bit) - 1))
+-       $$
+-       [S1, unofficial]
+-    f. Return `base + rank` [S1, unofficial].
++4. **Lookup Voxel Row in Bricks**:
++   a. Check bounds: if voxel outside `grid_min`/`grid_max`, return `-1` [S1, unofficial].
++   b. Compute brick coords and local voxel ID: $local\_id = lx + 8 \times (ly + 8 \times lz)$, where $lx, ly, lz$ are local coordinates within the brick [S1, unofficial].
++   c. Call `lookup_brick_bits_and_base` to get `bits` and `base` [S1, unofficial].
++   d. Check occupancy: `bits[word] & (1u << bit)`, where `word = local_id // 32` and `bit = local_id % 32` [S1, unofficial]. If 0, return `-1` [S1, unofficial].
++   e. Compute rank (number of active voxels before `local_id`):
++      $$
++      rank = \sum_{i=0}^{word-1} \text{popc}(bits[i]) + \text{popc}(bits[word] \& ((1u << bit) - 1))
++      $$
++      [S1, unofficial]
++   f. Return `base + rank` [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -116,6 +96,7 @@
+ 
+ def hash_brick_key(bx, by, bz):
+-    # Simple hash for brick coordinates
+-    key = (bx << 22) | (by << 11) | bz
++    # Combine brick coordinates into a 64-bit key
++    key = (bx << 42) | (by << 21) | bz
++    # Splitmix64-like mix
+     key ^= key >> 33
+     key *= 0xff51afd7ed558ccd
+@@ -130,7 +111,7 @@
+     while True:
+         if hash_keys[slot] == brick_key:
+-            return hash_vals[slot] # Returns base index
+-        elif hash_keys[slot] == 0xFFFFFFFFFFFFFFFF: # UINT64_MAX
+-            return -1 # Not found
++            return hash_vals[slot]
++        elif hash_keys[slot] == 0xFFFFFFFFFFFFFFFF:
++            return -1
+         slot = (slot + 1) & (hash_capacity - 1)
+ 
+@@ -160,5 +141,4 @@
+     return base + rank
+ ```
+-[G] The hash function for brick keys is simplified from the source's splitmix64-like mix applied to a combined key; the exact mixing steps are applied to the combined brick coordinate key. The source uses `slot_key` which implies a pre-computed key from brick coordinates. The bitwise mask `(hash_capacity - 1)` requires `hash_capacity` to be a power of two [S1, unofficial].
+ 
+ ## Subtopics
+@@ -168,11 +148,9 @@
+ 
+ ## Operating characteristics
+--   **Time Complexity**: Lookup is $O(1)$ average case for hash table access, plus $O(1)$ for bitset rank calculation [S1, unofficial].
+--   **Memory Complexity**: Hash table size depends on capacity (power of two). Brick bitsets are 16 words (64 bytes) per brick [S1, unofficial].
+--   **Performance**: Efficient for GPU ray casting due to low contention in concurrent inserts via hashing [S1, unofficial].
+--   **Strengths**: Reduces hash table size by hashing bricks instead of voxels; improves memory locality [S1, unofficial].
+--   **Limitations**: Requires power-of-two hash capacity; returns -1 for inactive voxels, requiring caller checks [S1, unofficial].
+--   **When to use**: When ray tracing sparse voxel grids on GPU and communication of missing brick IDs is needed [S1, unofficial].
+--   **When not**: When voxel density is very low and hash table overhead dominates, or when non-power-of-two capacities are required without rehashing.
++- **Time Complexity**: Lookup is $O(1)$ average case for hash table access, plus $O(1)$ for bitset rank calculation [S1, unofficial].
++- **Memory Complexity**: Hash table size depends on capacity (power of two). Brick bitsets are 16 words (64 bytes) per brick [S1, unofficial].
++- **Performance**: Efficient for GPU ray casting due to low contention in concurrent inserts via hashing [S1, unofficial].
++- **Strengths**: Reduces hash table size by hashing bricks instead of voxels; improves memory locality [S1, unofficial].
++- **Limitations**: Requires power-of-two hash capacity; returns `-1` for inactive voxels, requiring caller checks [S1, unofficial].
+ 
+ ## Background

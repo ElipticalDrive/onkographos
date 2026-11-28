@@ -1,0 +1,147 @@
+--- v025.md
++++ v026.md
+@@ -1,85 +1,88 @@
+ # Hybrid Coarse-to-Fine Strategy
+ 
+-Also called: Multi-stage point cloud refinement
++Also called: multi-stage point cloud training
+ 
+ ## Overview
+-The Hybrid Coarse-to-Fine Strategy is a training methodology for 3D Gaussian Splatting that decomposes the optimization process into multiple sequential stages rather than performing a single monolithic training run [S1]. It addresses the difficulty of initializing and densifying a point cloud representation uniformly without manual hyperparameter tuning by decoupling the initial coarse topology establishment from the subsequent high-fidelity refinement [S1]. Unlike single-stage training, which often struggles to balance global structure and local detail simultaneously, this strategy ensures that the primitive distribution adapts to scene complexity progressively [S1].
++The Hybrid Coarse-to-Fine Strategy is a training methodology for differentiable point-based radiance fields that decomposes the optimization process into multiple distinct stages rather than training the point cloud in a single monolithic phase [S1]. It solves the convergence instability and suboptimal local minima associated with initializing and densifying a sparse point representation simultaneously [S1]. Unlike single-stage training, it decouples the initialization of the point cloud from its geometric refinement, allowing the representation to adapt to scene complexity progressively [S1].
+ 
+ ## How it works
+-The method operates on a set of 3D Gaussian primitives $\mathcal{G} = \{g_1, \dots, g_N\}$, where each primitive $g_k$ is defined by mean position $\mu_k$, covariance $\Sigma_k$ (derived from scale $s_k$ and rotation $q_k$), opacity $\alpha_k$, and spherical harmonic coefficients $\mathbf{c}_k$ [Parent]. The strategy involves distinct phases of optimization, typically starting with a sparse initialization and progressing to denser, more detailed representations.
++The method operates on the standard 3D Gaussian primitive set $\mathcal{G} = \{g_1, \dots, g_N\}$ defined in [Densification Strategy](6234-densification-strategy.md). The training loop is segmented into a coarse stage and a fine stage, with specific hyperparameters and optimization objectives applied at each step.
+ 
+ **Inputs and Outputs:**
+-*   **Input:** A set of input images with known camera poses, an initial sparse set of 3D points (often derived from Structure-from-Motion), and a set of hyperparameters controlling the transition between stages (e.g., iteration counts, densification thresholds).
+-*   **Output:** A final optimized set of 3D Gaussians $\mathcal{G}_{final}$ that minimizes the rendering error against the input views.
++*   **Input:** A set of input images with known camera poses, an initial sparse point cloud (often derived from Structure-from-Motion), and hyperparameters defining the stage transition.
++*   **Output:** An optimized set of 3D Gaussians with refined positions, covariances, opacities, and spherical harmonic coefficients.
+ 
+ **Data Structures:**
+-The core data structure is the list of Gaussians. Each Gaussian $g_k$ stores:
+-*   $\mu_k \in \mathbb{R}^3$: Position.
+-*   $s_k \in \mathbb{R}^3$: Scale (log-space for optimization stability).
+-*   $q_k \in \mathbb{R}^4$: Rotation (quaternion).
+-*   $\alpha_k \in \mathbb{R}$: Opacity.
+-*   $\mathbf{c}_k$: Spherical Harmonic coefficients (if used).
++The core data structure is the point cloud $\mathcal{G}$. Each Gaussian $g_i$ contains:
++*   Position $\mathbf{p}_i \in \mathbb{R}^3$
++*   Covariance matrix $\mathbf{\Sigma}_i$ (or rotation $\mathbf{R}_i$ and scale $\mathbf{s}_i$)
++*   Opacity $\alpha_i \in [0, 1]$
++*   Spherical Harmonic coefficients $\mathbf{c}_{i, l}$ for view-dependent color
+ 
+-**Steps:**
+-1.  **Initialization:** Generate an initial sparse point cloud $\mathcal{G}_{init}$ from the input data (e.g., SfM points). Assign initial covariances and opacities. [S1]
+-2.  **Coarse Stage:** Train the initial set of Gaussians for a specified number of iterations. This stage focuses on establishing the global geometry and rough appearance. The optimization uses standard differentiable rendering losses. [S1]
+-3.  **Densification/Refinement:** Apply densification operations (as detailed in [Densification Strategy](6234-densification-strategy.md)) to increase the density of Gaussians in regions with high rendering error or low opacity. This may involve splitting or cloning existing Gaussians. [S1]
+-4.  **Fine Stage:** Continue training the densified set of Gaussians. This stage refines high-frequency details and color accuracy. Spherical Harmonics are typically enabled or refined during this phase to capture view-dependent effects. [S1]
+-5.  **Filtering:** Apply a consistency filter function during training to remove artifacts or inconsistent Gaussians. This filter is applied every epoch to maintain the quality of the point cloud. [S1]
++**Numbered Steps:**
++1.  **Coarse Stage Initialization:** Initialize the point cloud $\mathcal{G}$ with a sparse set of points. Train the Gaussians using a simplified representation, such as directionally invariant RGB values (omitting high-degree Spherical Harmonics) to stabilize early convergence [S1].
++2.  **Stage Transition:** After the coarse stage converges, transition to the fine stage. This may involve enabling full Spherical Harmonics for view-dependent effects [S1].
++3.  **Fine Stage Refinement:** Continue training the point cloud with the full set of parameters. Apply a consistency filter function during this stage to ensure temporal or spatial consistency of the point cloud properties [S1].
++4.  **Densification:** Integrate densification operations (splitting and cloning) as defined in [Densification Strategy](6234-densification-strategy.md), typically triggered between or within stages to manage representation capacity [S1].
++
++**Formulas:**
++The rendering process uses standard differentiable rasterization. The color $C$ for a pixel is computed by sorting Gaussians by depth and compositing:
++$$ C = \sum_{i \in \mathcal{N}} c_i \alpha_i \prod_{j=1}^{i-1} (1 - \alpha_j) $$
++where $\mathcal{N}$ is the set of Gaussians projected to the pixel, $c_i$ is the color (from SH coefficients or invariant RGB), and $\alpha_i$ is the opacity [S1].
++
++**Parameters:**
++*   **Stage Duration:** Not explicitly defined in sources, but determined by convergence metrics.
++*   **Spherical Harmonics Degree:** Low (or 0) in coarse stage, higher in fine stage [S1].
++
++**Edge Cases and Pitfalls:**
++*   **Premature Transition:** Switching stages before the coarse representation stabilizes can lead to poor convergence.
++*   **Inconsistent Filtering:** Removing the consistency filter function leads to degraded rendering quality, as evidenced by increased LPIPS [S1].
+ 
+ **Pseudocode:**
+ ```python
+-def hybrid_coarse_fine_training(input_images, initial_points, hyperparams):
+-    # Initialize Gaussians from SfM points
+-    gaussians = initialize_gaussians(initial_points)
++def train_hybrid_coarse_fine(points, images, poses):
++    # Initialize sparse point cloud
++    gaussians = initialize_sparse_points(points)
+     
+-    # Coarse Stage
+-    for step in range(hyperparams.coarse_iterations):
+-        # Sample a random view
+-        view = sample_view(input_images)
+-        # Render image from current Gaussians
+-        rendered_image = render(gaussians, view)
+-        # Compute loss (e.g., L1 + SSIM)
+-        loss = compute_loss(rendered_image, view.gt_image)
+-        # Backpropagate and update Gaussians
+-        update_gaussians(gaussians, loss)
+-        
+-    # Densification Step (between stages)
+-    # Identify regions needing more detail based on gradient or error
+-    gaussians = densify(gaussians, view.gt_image, rendered_image)
+-    
+-    # Fine Stage
+-    for step in range(hyperparams.fine_iterations):
+-        view = sample_view(input_images)
+-        rendered_image = render(gaussians, view)
+-        loss = compute_loss(rendered_image, view.gt_image)
+-        update_gaussians(gaussians, loss)
+-        # Apply consistency filter every epoch
+-        if step % hyperparams.filter_epoch == 0:
++    # Stage 1: Coarse Training
++    # Use directionally invariant RGB (no SH)
++    for epoch in range(coarse_epochs):
++        for image, pose in zip(images, poses):
++            # Render with invariant color
++            rendered_color = render(gaussians, pose, use_sh=False)
++            loss = compute_loss(rendered_color, image)
++            # Backpropagate and update gaussians
++            update(gaussians, loss)
++            
++    # Stage 2: Fine Training
++    # Enable Spherical Harmonics
++    for epoch in range(fine_epochs):
++        for image, pose in zip(images, poses):
++            # Render with full SH
++            rendered_color = render(gaussians, pose, use_sh=True)
++            loss = compute_loss(rendered_color, image)
++            
++            # Apply consistency filter
+             gaussians = apply_consistency_filter(gaussians)
++            
++            # Backpropagate and update
++            update(gaussians, loss)
++            
++            # Densification as per [Densification Strategy]
++            gaussians = densify(gaussians)
+             
+     return gaussians
+ ```
+ 
+-**Parameters:**
+-*   `coarse_iterations`: Number of training steps in the initial phase. Not given in the sources.
+-*   `fine_iterations`: Number of training steps in the refinement phase. Not given in the sources.
+-*   `filter_epoch`: Frequency of applying the consistency filter. Not given in the sources.
+-
+-**Edge Cases and Pitfalls:**
+-*   **Precision:** Optimization in log-space for scale and quaternion normalization are standard practices to ensure numerical stability [G].
+-*   **Boundaries:** The transition between coarse and fine stages must be timed correctly; densifying too early can lead to noise, while too late may miss structural details [S1].
+-*   **Degenerate Input:** If the initial SfM points are sparse or noisy, the coarse stage may fail to establish a valid topology, leading to poor final results [S1].
+-
+ ## Subtopics
+ 
+ ### [Coarse-to-Fine Densification](9135-coarse-to-fine-densification.md)
+-A variant that progressively refines a sparse mesh by inserting new vertices at high-error locations. It decouples initialization from refinement, allowing mesh topology to adapt to scene complexity. Choose this when working with mesh-based representations rather than point clouds.
++A variant that progressively refines a sparse mesh by inserting new vertices at high-error locations, decoupling initialization from refinement to ensure uniform vertex distribution.
+ 
+ ## Operating characteristics
+-The Hybrid Coarse-to-Fine Strategy yields significantly better rendering quality than single-stage training. On the Blender dataset, removing the hybrid strategy ('w/o hybrid') reduces PSNR from 30.3 dB to 26.6 dB, SSIM from 0.945 to 0.925, and increases LPIPS from 0.078 to 0.163 [S1]. The strategy allows for better view synthesis performance by jointly optimizing spherical harmonics, the coarse-to-fine progression, and the consistency filter [S1].
++The hybrid strategy yields significantly better rendering quality than single-stage training [S1]. On the Blender dataset, removing the hybrid strategy ('w/o hybrid') reduces PSNR from 30.3 dB to 26.6 dB, SSIM from 0.945 to 0.925, and increases LPIPS from 0.078 to 0.163 [S1]. The method is computationally more expensive due to the multi-stage nature but provides superior view synthesis performance [S1]. It is best used when high-fidelity view synthesis is required and the scene complexity benefits from progressive refinement.
+ 
+ ## Background
+-The Hybrid Coarse-to-Fine Strategy was introduced in the context of differentiable point-based radiance fields for efficient view synthesis [S1]. It departs from volumetric representations and coordinate-network-based methods that require ray-marching with hundreds of network evaluations per ray. Instead, it leverages a point-based representation that allows for efficient, end-to-end differentiable rendering. The method was validated through ablation experiments showing the necessity of each component, including the hybrid training strategy, for achieving high-quality results [S1].
++The strategy was introduced in the context of differentiable point-based radiance fields, which offer an alternative to volumetric neural rendering by using points without sacrificing end-to-end differentiability [S1]. It addresses the limitations of coordinate-network representations that require ray-marching with hundreds of network evaluations per ray [S1].
+ 
+ ## Sources

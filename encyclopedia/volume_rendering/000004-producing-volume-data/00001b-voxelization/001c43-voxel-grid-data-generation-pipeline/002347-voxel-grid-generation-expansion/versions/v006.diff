@@ -1,0 +1,227 @@
+--- v005.md
++++ v006.md
+@@ -1,94 +1,76 @@
+ # Voxel Grid Generation & Expansion
+-
+ Also called: Occupancy Grid Expansion, Smoke Voxelization
+ 
+ ## Overview
+-This method generates a 3D occupancy grid representing a volumetric smoke cloud by iteratively expanding a spherical radius from a central origin point over time [S1, unofficial]. It solves the problem of creating a discrete voxel representation of a continuous smoke volume for GPU-based ray marching, distinguishing itself from particle-based splatting by using a simple radial distance check against an easing curve to fill the grid [S1, unofficial].
++This method generates a 3D occupancy grid representing a volumetric smoke cloud by expanding a spherical radius from a central origin point over time [S1, unofficial]. It solves the problem of creating a discrete, GPU-friendly voxel representation for ray-marched volumetric rendering without using particle systems or billboard geometry [S1, unofficial]. It is distinguished from standard point-splatting by evaluating a continuous sphere falloff against a discrete grid, and from [DCX Pipeline](3770-dcx-pipeline.md) by its procedural, time-driven expansion rather than static file parsing.
+ 
+ ## How it works
+ **Inputs:**
+-- `boundsExtent`: `Vector3` defining the half-size of the volume bounds (Default: `(3, 3, 3)`).
+-- `voxelSize`: `float` defining the side length of a single voxel (Default: `0.5`).
+-- `smokeRadius`: `float` defining the maximum expansion radius (Default: `4.0`).
+-- `smokeExpansionTime`: `float` defining the duration to reach `smokeRadius`.
+-- `smokeOrigin`: `Vector3` defining the center point of the volume expansion.
+-- `smokeTimer`: `float` current elapsed time since expansion start.
+-- `easingCurve`: A function or curve object that maps a normalized time value `[0, 1]` to a scalar multiplier.
++- `boundsExtent` (Vector3): Half-size of the volume bounds. Default: $(3, 3, 3)$ [S1, unofficial].
++- `voxelSize` (float): Grid resolution. Default: $0.5$ [S1, unofficial].
++- `smokeRadius` (float): Maximum expansion radius. Default: $4$ [S1, unofficial].
++- `smokeExpansionTime` (float): Time required to reach maximum radius [S1, unofficial].
++- `smokeOrigin` (Vector3): Center point of volume expansion [S1, unofficial].
++- `smokeTimer` (float): Current elapsed time for expansion [S1, unofficial].
++- `easingCurve`: A function mapping $[0, 1]$ to $[0, 1]$ for non-linear expansion [S1, unofficial].
+ 
+ **Outputs:**
+-- `smokeData`: A 1D array of integers (`int`) representing the occupancy grid.
+-- `ComputeBuffer`: A GPU buffer (`StructuredBuffer<int>`) containing the grid data.
++- `ComputeBuffer` named `_SmokeVoxels`: A `StructuredBuffer<int>` of size `totalVoxels`, containing $1$ for occupied voxels and $0$ for empty ones [S1, unofficial].
+ 
+ **Data Structures:**
+-- **Voxel Grid Layout**: Linear 1D array of size `totalVoxels` [S1, unofficial].
+-- **Indexing**: Linear index `i` for voxel at `(x, y, z)` is calculated as:
+-  $$ i = x + y \cdot \text{voxelsX} + z \cdot \text{voxelsX} \cdot \text{voxelsY} $$
+-  [S1, unofficial]
+-- **Buffer Type**: `int` (4 bytes per element), initialized to `0` (empty) or `1` (occupied) [S1, unofficial].
++- The buffer is linear memory, indexed by $x + y \cdot \text{voxelsX} + z \cdot \text{voxelsX} \cdot \text{voxelsY}$ [S1, unofficial].
++- Each element is a 4-byte integer [S1, unofficial].
+ 
+ **Steps:**
+-1. **Calculate Grid Dimensions**:
+-   Compute the number of voxels along each axis based on the bounds and voxel size:
+-   $$ \text{voxelsX} = \lceil \frac{\text{boundsSize}.x}{\text{voxelSize}} \rceil $$
+-   $$ \text{voxelsY} = \lceil \frac{\text{boundsSize}.y}{\text{voxelSize}} \rceil $$
+-   $$ \text{voxelsZ} = \lceil \frac{\text{boundsSize}.z}{\text{voxelSize}} \rceil $$
+-   $$ \text{totalVoxels} = \text{voxelsX} \cdot \text{voxelsY} \cdot \text{voxelsZ} $$
++1. Calculate grid dimensions:
++   $$ \text{voxelsX} = \lceil \text{boundsExtent}.x / \text{voxelSize} \rceil $$
++   $$ \text{voxelsY} = \lceil \text{boundsExtent}.y / \text{voxelSize} \rceil $$
++   $$ \text{voxelsZ} = \lceil \text{boundsExtent}.z / \text{voxelSize} \rceil $$
+    [S1, unofficial]
+-   *Note: The source notes use `boundsSize`, which corresponds to the full dimensions derived from `boundsExtent` (typically `2 * boundsExtent` for half-size bounds) [S1, unofficial].*
+ 
+-2. **Initialize Buffer**:
+-   Allocate a `ComputeBuffer` of size `totalVoxels * 4` bytes and initialize the backing array `smokeData` with zeros [S1, unofficial].
++2. Initialize a buffer of size $\text{voxelsX} \times \text{voxelsY} \times \text{voxelsZ}$ with integers set to $0$ [S1, unofficial].
+ 
+-3. **Update Loop (Every 30 Frames)**:
+-   The grid is cleared and recomputed every 30 frames to mitigate CPU stutter [S1, unofficial].
+-   - Clear `smokeData` to all zeros.
+-   - Calculate normalized time progress:
+-     $$ \text{normalValue} = \text{inlerp}(0, \text{smokeExpansionTime}, \text{smokeTimer}) $$
+-     [S1, unofficial]
+-   - Calculate current expansion radius:
+-     $$ \text{currentSmokeRadius} = \text{easingCurve.Evaluate}(\text{normalValue}) \cdot \text{smokeRadius} $$
+-     [S1, unofficial]
+-   - Iterate through all voxels:
+-     For `x` from `0` to `voxelsX - 1`:
+-       For `y` from `0` to `voxelsY - 1`:
+-         For `z` from `0` to `voxelsZ - 1`:
+-           1. Compute voxel world position relative to the bounds center. The source uses:
+-              $$ \text{voxelPos} = \text{float3}(x \cdot \text{voxelSize}, y \cdot \text{voxelSize}, z \cdot \text{voxelSize}) - \text{float3}(\text{boundsExtent}.x, 0, \text{boundsExtent}.z) $$
+-              [S1, unofficial]
+-              *Note: This specific offset formula appears asymmetric in the source (`boundsExtent.x` and `boundsExtent.z` are subtracted, `y` is not). This is reproduced as stated [S1, unofficial].*
+-           2. Compute distance to origin:
+-              $$ \text{distance} = \text{length}(\text{voxelPos} - \text{smokeOrigin}) $$
+-              [S1, unofficial]
+-           3. Check occupancy:
+-              If $\text{distance} \le \text{currentSmokeRadius}$, set:
+-              $$ \text{smokeData}[x + y \cdot \text{voxelsX} + z \cdot \text{voxelsX} \cdot \text{voxelsY}] = 1 $$
+-              [S1, unofficial]
++3. On update (every 30 frames), clear the buffer to $0$ [S1, unofficial].
+ 
+-4. **Upload to GPU**:
+-   Transfer the `smokeData` array to the GPU `ComputeBuffer` using `smokeBuffer.SetData(smokeData)` [S1, unofficial].
++4. Iterate through all voxel indices $(x, y, z)$ where $0 \le x < \text{voxelsX}$, $0 \le y < \text{voxelsY}$, $0 \le z < \text{voxelsZ}$ [S1, unofficial].
++
++5. Compute the world position of the voxel center:
++   $$ \text{voxelPos} = (x \cdot \text{voxelSize}, y \cdot \text{voxelSize}, z \cdot \text{voxelSize}) - \text{boundsExtent} $$
++   [S1, unofficial]
++
++6. Compute the Euclidean distance from the voxel to the smoke origin:
++   $$ \text{distance} = \| \text{voxelPos} - \text{smokeOrigin} \| $$
++   [S1, unofficial]
++
++7. Compute the current expansion radius:
++   $$ \text{normalValue} = \text{lerp}(0, \text{smokeExpansionTime}, \text{smokeTimer}) $$
++   $$ \text{currentSmokeRadius} = \text{easingCurve}(\text{normalValue}) \cdot \text{smokeRadius} $$
++   [S1, unofficial]
++
++8. If $\text{distance} \le \text{currentSmokeRadius}$, set the buffer value at index $x + y \cdot \text{voxelsX} + z \cdot \text{voxelsX} \cdot \text{voxelsY}$ to $1$ [S1, unofficial].
++
++9. Upload the data to the GPU buffer via `smokeBuffer.SetData(smokeData)` [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-import math
+-
+ def generate_voxel_grid(bounds_extent, voxel_size, smoke_radius, smoke_expansion_time, smoke_origin, smoke_timer, easing_curve):
+     # 1. Calculate dimensions
+-    # bounds_extent is half-size, so full bounds_size is 2 * bounds_extent
+-    bounds_size_x = 2 * bounds_extent[0]
+-    bounds_size_y = 2 * bounds_extent[1]
+-    bounds_size_z = 2 * bounds_extent[2]
++    voxels_x = math.ceil(bounds_extent.x / voxel_size)
++    voxels_y = math.ceil(bounds_extent.y / voxel_size)
++    voxels_z = math.ceil(bounds_extent.z / voxel_size)
+     
+-    voxels_x = math.ceil(bounds_size_x / voxel_size)
+-    voxels_y = math.ceil(bounds_size_y / voxel_size)
+-    voxels_z = math.ceil(bounds_size_z / voxel_size)
+     total_voxels = voxels_x * voxels_y * voxels_z
+     
+-    # 2. Initialize data array
++    # 2. Initialize buffer with 0
+     smoke_data = [0] * total_voxels
+     
+-    # 3. Calculate current radius
+-    # inlerp clamps value between 0 and 1
+-    normal_value = min(1.0, max(0.0, smoke_timer / smoke_expansion_time))
+-    current_smoke_radius = easing_curve.evaluate(normal_value) * smoke_radius
++    # 3. Compute current radius
++    # Note: lerp(0, smoke_expansion_time, smoke_timer) implies smoke_timer is normalized [0,1] relative to expansion time
++    # or smoke_timer is absolute time and lerp scales it. Based on source: normalValue = inlerp(0, smokeExpansionTime, smokeTimer)
++    # Assuming smoke_timer is current time, and we normalize against expansion time for the curve input?
++    # Source says: normalValue = inlerp(0, smokeExpansionTime, smokeTimer). 
++    # If smokeTimer > smokeExpansionTime, normalValue > 1. Easing curve should handle clamping or extrapolation.
++    normal_value = smoke_timer / smoke_expansion_time if smoke_expansion_time != 0 else 0
++    current_smoke_radius = easing_curve(normal_value) * smoke_radius
+     
+     # 4. Iterate and fill
+@@ -96,44 +78,59 @@
+         for y in range(voxels_y):
+             for z in range(voxels_z):
+-                # Compute voxel position
+-                # Source formula is asymmetric: subtracts bounds_extent.x and .z, but not y
+-                voxel_pos_x = x * voxel_size - bounds_extent[0]
+-                voxel_pos_y = y * voxel_size
+-                voxel_pos_z = z * voxel_size - bounds_extent[2]
++                # 5. Voxel world position
++                voxel_pos_x = x * voxel_size - bounds_extent.x
++                voxel_pos_y = y * voxel_size - bounds_extent.y # Source uses boundsExtent.z for Z offset? 
++                # Source: voxelPos = float3(x * voxelSize, y * voxelSize, z * voxelSize) - float3(boundsExtent.x, 0, boundsExtent.z)
++                # This implies Y offset is 0, X offset is boundsExtent.x, Z offset is boundsExtent.z.
++                # This centers the grid differently than standard -boundsExtent.
+                 
+-                # Distance to origin
+-                dx = voxel_pos_x - smoke_origin[0]
+-                dy = voxel_pos_y - smoke_origin[1]
+-                dz = voxel_pos_z - smoke_origin[2]
++                voxel_pos_x = x * voxel_size - bounds_extent.x
++                voxel_pos_y = y * voxel_size # Offset 0
++                voxel_pos_z = z * voxel_size - bounds_extent.z
++                
++                voxel_pos = (voxel_pos_x, voxel_pos_y, voxel_pos_z)
++                
++                # 6. Distance
++                dx = voxel_pos_x - smoke_origin.x
++                dy = voxel_pos_y - smoke_origin.y
++                dz = voxel_pos_z - smoke_origin.z
+                 distance = math.sqrt(dx*dx + dy*dy + dz*dz)
+                 
+-                # Set occupancy
+-                index = x + y * voxels_x + z * voxels_x * voxels_y
++                # 8. Check radius
+                 if distance <= current_smoke_radius:
++                    index = x + y * voxels_x + z * voxels_x * voxels_y
+                     smoke_data[index] = 1
+-                else:
+-                    smoke_data[index] = 0
+                     
+-    return smoke_data, (voxels_x, voxels_y, voxels_z)
++    return smoke_data
+ ```
+-*Note: The pseudocode assumes `bounds_extent` and `smoke_origin` are iterable tuples/lists of three floats, and `easing_curve` has an `evaluate` method, matching the source's C#/Unity context [S1, unofficial].*
++[G] The source code snippet for `voxelPos` subtracts `boundsExtent.x` from X and `boundsExtent.z` from Z, but subtracts `0` from Y. This is implemented in the pseudocode above.
++
++**Edge Cases:**
++- If `smokeExpansionTime` is 0, division by zero occurs in normalization; handle by clamping `normal_value` to 0 or 1 [G].
++- Buffer updates occur every 30 frames, causing potential stutter or delay in volume expansion [S1, unofficial].
++- Smoke is rendered to a reduced-resolution target and composited back up without an upsampling filter, resulting in blocky edges under motion [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Point Wisp Voxelization](10591-point-wisp-voxelization.md)
+-A procedural method for generating volumetric smoke data by distributing points around a "guide particle" using fractal noise and baking them into a voxel grid. It distinguishes itself by using correlated random walks and radial displacement to form cohesive "wisps" rather than isolated blobs, suitable for organic smoke shapes compared to the simple spherical expansion of this method.
++Point Wisp Voxelization is a procedural method for generating volumetric smoke data by distributing points around a "guide particle" using fractal noise and baking them into a voxel grid. It solves the problem of creating detailed, organic-looking smoke volumes from sparse particle data, distinguishing itself from standard point-splatting by using correlated random walks and radial displacement to form cohesive "wisps" rather than isolated blobs.
++
++### [Virtual Smoke](17061-virtual-smoke.md)
++Virtual Smoke is an interactive 3D flow visualization technique that simulates the injection of colored smoke from a user-selected seed point into a fixed vector field, where the smoke color is mapped to a local scalar value. It solves the problem of simultaneously visualizing flow direction (via vector fields) and scalar properties (e.g., temperature, concentration) in large 3D datasets. Unlike [Volume Seedlings](2979-voxel-grid-generation-expansion.md), which uses a priority queue based on a "degree of interest," Virtual Smoke uses an event queue ordered by propagation time derived from velocity vectors to grow a control volume.
+ 
+ ### Block-Palette Map Generation
+-A tool to generate a static physical walk-through grid of all registered voxels, exporting a block-palette matrix [S2, unofficial]. It is used by running `python map_maker.py`, which exports the matrix to `map/maps/default_map.npz` [S2, unofficial].
++A tool to generate a static physical walk-through grid of all registered voxels, exporting a block-palette matrix [S2, unofficial]. It is used for inspecting textures, normals, and colors side-by-side [S2, unofficial]. Steps: Run `python map_maker.py` to export the block-palette matrix to `map/maps/default_map.npz` [S2, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity**: $O(N)$ where $N$ is the total number of voxels in the grid [S1, unofficial]. The iteration covers the entire bounding box volume regardless of actual smoke density [S1, unofficial].
+-- **Memory Complexity**: $O(N)$ integers [S1, unofficial]. For a $6 \times 6 \times 6$ grid (default bounds 3,3,3 with voxel size 0.5), $N = 12 \cdot 12 \cdot 12 = 1728$ voxels, requiring $1728 \cdot 4$ bytes $\approx 6.75$ KB [S1, unofficial].
+-- **Performance**: The method runs on the CPU. Updates are throttled to every 30 frames to reduce overhead [S1, unofficial]. This causes potential stutter or delay in volume expansion responsiveness [S1, unofficial].
+-- **Strengths**: Simple to implement; low memory footprint for small volumes; provides a clean occupancy mask for GPU ray marching [S1, unofficial].
+-- **Limitations**: The spherical expansion creates a "smoke ball" rather than a complex volume shape [S1, unofficial]. The asymmetric bounding box offset in the source implementation may cause misalignment [S1, unofficial]. No upsampling filter is applied during rendering, leading to blocky edges under motion [S1, unofficial].
++- **Time Complexity:** $O(N)$ where $N$ is the total number of voxels in the grid, as every voxel is checked against the radius [S1, unofficial].
++- **Memory Complexity:** $O(N)$ integers for the occupancy buffer [S1, unofficial].
++- **Performance:** The method runs on the CPU and uploads data to the GPU every 30 frames [S1, unofficial]. This low-frequency update causes potential stutter or delay in volume expansion [S1, unofficial].
++- **Strengths:** Simple to implement; provides a discrete occupancy grid suitable for ray marching with empty-space skipping [S1, unofficial].
++- **Limitations:** Renders a "smoke ball" (sphere falloff) rather than complex smoke shapes; lacks velocity advection; blocky edges due to lack of upsampling filter [S1, unofficial].
++- **When to use:** When a simple, expanding volumetric cloud is needed for stylized or abstract effects in Unity [S1, unofficial].
++- **When not to use:** When realistic smoke dynamics, complex shapes, or high-frequency updates are required [S1, unofficial].
+ 
+ ## Background
+-This method originates from a 2024 Unity-based implementation by Schokolasbotter, designed to render volumetric smoke entirely on the GPU using a voxel grid driven by a two-stage ray march [S1, unofficial]. It was developed as an alternative to particle systems and billboard geometry, aiming for analytical per-pixel evaluation [S1, unofficial]. The approach is part of a pipeline that includes noise generation and ray marching shaders [S1, unofficial].
++This method originates from a 2024 Unity project by Schokolasbotter, which implements a volumetric smoke renderer entirely on the GPU using a voxel grid driven by a two-stage ray march [S1, unofficial]. It is part of a pipeline that includes animated Worley noise for silhouette breaking [S1, unofficial].
+ 
+ ## Sources

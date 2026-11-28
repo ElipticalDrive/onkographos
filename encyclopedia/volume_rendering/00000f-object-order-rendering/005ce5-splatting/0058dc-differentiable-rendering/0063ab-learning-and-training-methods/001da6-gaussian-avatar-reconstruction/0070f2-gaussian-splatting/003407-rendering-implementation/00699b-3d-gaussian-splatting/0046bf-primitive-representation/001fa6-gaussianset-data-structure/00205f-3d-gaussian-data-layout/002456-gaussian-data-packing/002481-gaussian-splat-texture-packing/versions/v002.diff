@@ -1,0 +1,178 @@
+--- v001.md
++++ v002.md
+@@ -4,105 +4,112 @@
+ 
+ ## Overview
+-Gaussian Splat Texture Packing is a method for storing 3D Gaussian Splat attributes in a 2D OpenGL texture to facilitate efficient GPU-side access during rasterization. It solves the problem of transferring large sets of Gaussian parameters from CPU memory to the GPU by packing 8-byte chunks of Gaussian data into a `GL_RGBA32UI` texture. It differs from sibling methods like [SPZ Packed Format](3926-spz-packed-format.md) by using a specific row-major texture layout with a fixed width of 1024 Gaussians per row, whereas [PNG-based Gaussian Compression](4834-png-based-gaussian-compression.md) uses lossy image compression.
++Gaussian Splat Texture Packing is a method for storing 3D Gaussian Splat attributes in a 2D OpenGL texture to facilitate efficient GPU-side access during rasterization. It solves the problem of transferring large volumes of Gaussian data from CPU memory to the GPU by packing 8 bytes of Gaussian data into pairs of RGBA32UI texels. It is distinguished from [SPZ Packed Format](3926-spz-packed-format.md) by its use of a standard 2D texture array with specific integer packing, and from [PNG-based Gaussian Compression](4834-png-based-gaussian-compression.md) by its uncompressed, direct-memory-mapping approach.
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-- Input: A contiguous array of packed Gaussian data (`packedData`), where each Gaussian consists of 8 `uint32_t` values (32 bytes total, though only 8 `uint32_t` indices are used for packing logic in the source, implying the data is pre-packed into 32-bit chunks or the source describes a specific 8-uint32 representation). The source code implies `packedData` is a `std::vector<uint32_t>` or similar.
+-- Output: An OpenGL texture (`splatTexture`) of type `GL_RGBA32UI`.
++**Inputs:** A flat array of Gaussian data (`packedData`) containing 8 bytes per Gaussian, and the total number of Gaussians (`splatCount`).
++**Outputs:** An OpenGL 2D texture (`splatTexture`) containing the packed data.
+ 
+ **Data Structures:**
+-- **Texture Format:** `GL_RGBA32UI` (internal format), `GL_RGBA_INTEGER` (type), `GL_UNSIGNED_INT` (data type).
+-- **Texture Dimensions:**
+-  - Width: 2048 pixels.
+-  - Height: $\lceil \text{splatCount} / 1024 \rceil$ pixels.
+-- **Layout Mapping:**
+-  - Each Gaussian $i$ occupies 2 horizontal columns in the texture (2 `uvec4` elements).
+-  - The x-coordinate (column index in pixels) for Gaussian $i$ is $(i \pmod{1024}) \times 2$.
+-  - The y-coordinate (row index in pixels) for Gaussian $i$ is $\lfloor i / 1024 \rfloor$.
+-  - Each Gaussian's 8 `uint32_t` values are stored as two `uvec4` components.
++*   `packedData`: `std::vector<uint8_t>` or equivalent buffer. Size is `splatCount * 8` bytes.
++*   `splatTexture`: OpenGL texture object.
++    *   Format: `GL_RGBA32UI`
++    *   Internal Format: `GL_RGBA_INTEGER`
++    *   Data Type: `GL_UNSIGNED_INT`
++    *   Dimensions: `width = 2048`, `height = ceil(splatCount / 1024)`
++    *   Filters: `GL_NEAREST` for minification and magnification.
++    *   Wrap Mode: `GL_CLAMP_TO_EDGE` for both S and T axes.
+ 
+-**Numbered Steps:**
+-1. Initialize the texture with dimensions `width = 2048` and `height = ceil(splatCount / 1024)`.
+-2. Set texture filtering to `GL_NEAREST` for both minification and magnification.
+-3. Set texture wrap mode to `GL_CLAMP_TO_EDGE` for both S and T axes.
+-4. For each Gaussian index $i$ from $0$ to $\text{splatCount} - 1$:
+-   a. Calculate the row index: $r = \lfloor i / 1024 \rfloor$.
+-   b. Calculate the base column index: $c = (i \pmod{1024}) \times 2$.
+-   c. Calculate the texture data indices for the two `uvec4` components:
+-      - $idx_1 = (r \times \text{textureWidth} + c) \times 4$
+-      - $idx_2 = (r \times \text{textureWidth} + c + 1) \times 4$
+-   d. Copy the first 4 `uint32_t` values from `packedData` starting at offset $i \times 8$ to `textureData` at $idx_1$:
+-      - `textureData[idx1..idx1+3] = packedData[i*8..i*8+3]`
+-   e. Copy the next 4 `uint32_t` values from `packedData` starting at offset $i \times 8 + 4$ to `textureData` at $idx_2$:
+-      - `textureData[idx2..idx2+3] = packedData[i*8+4..i*8+7]`
++**Layout:**
++Each Gaussian occupies 2 horizontal columns in the texture (2 `uvec4` texels).
++*   The x-coordinate (column) for Gaussian index `i` is `(i & 0x3FF) << 1`. This places 1024 Gaussians per row.
++*   The y-coordinate (row) for Gaussian index `i` is `i >> 10`.
++
++**Steps:**
++1.  Calculate texture dimensions:
++    $$ \text{textureWidth} = 2048 $$
++    $$ \text{textureHeight} = \lceil \frac{\text{splatCount}}{1024} \rceil $$
++2.  Create the OpenGL texture with the specified format and dimensions.
++3.  For each Gaussian $i$ from $0$ to $\text{splatCount} - 1$:
++    a. Compute row and column indices:
++       $$ \text{row} = \lfloor i / 1024 \rfloor $$
++       $$ \text{col} = (i \pmod{1024}) \times 2 $$
++    b. Calculate texture data indices for the two texels:
++       $$ \text{idx1} = (\text{row} \times \text{textureWidth} + \text{col}) \times 4 $$
++       $$ \text{idx2} = (\text{row} \times \text{textureWidth} + \text{col} + 1) \times 4 $$
++    c. Copy the first 4 bytes of the Gaussian data to the first texel:
++       $$ \text{textureData}[\text{idx1} \dots \text{idx1}+3] = \text{packedData}[i \times 8 \dots i \times 8 + 3] $$
++    d. Copy the next 4 bytes of the Gaussian data to the second texel:
++       $$ \text{textureData}[\text{idx2} \dots \text{idx2}+3] = \text{packedData}[i \times 8 + 4 \dots i \times 8 + 7] $$
+ 
+ **Pseudocode:**
+ ```python
+-def pack_gaussians_to_texture(packed_data: list, splat_count: int) -> list:
++def pack_gaussians_to_texture(packed_data: list[int], splat_count: int) -> list[int]:
+     """
+-    Packs Gaussian data into a 2D texture array represented as a flat list.
++    Packs Gaussian data into a 2D texture layout.
+     
+     Args:
+-        packed_data: List of uint32_t values representing Gaussian attributes.
+-                     Each Gaussian is 8 uint32_t values.
++        packed_data: Flat list of uint8 values, 8 bytes per Gaussian.
+         splat_count: Number of Gaussians.
+         
+     Returns:
+-        texture_data: List of uint32_t values representing the RGBA32UI texture.
++        List of uint32 values representing the texture data (RGBA32UI).
+     """
+     texture_width = 2048
+     texture_height = (splat_count + 1023) // 1024  # ceil(splat_count / 1024)
+-    texture_size = texture_width * texture_height * 4  # 4 components per pixel
+     
+-    texture_data = [0] * texture_size
++    # Total texels = width * height
++    # Each texel is 4 uint32s (RGBA)
++    total_texels = texture_width * texture_height
++    texture_data = [0] * (total_texels * 4)
+     
+     for i in range(splat_count):
++        # Calculate row and column
+         row = i // 1024
+         col = (i % 1024) * 2
+         
++        # Calculate indices in the flat texture_data array
++        # Each texel has 4 components (R, G, B, A)
+         idx1 = (row * texture_width + col) * 4
+         idx2 = (row * texture_width + col + 1) * 4
+         
+-        # Copy first 4 uint32_t values
+-        for k in range(4):
+-            texture_data[idx1 + k] = packed_data[i * 8 + k]
+-            
+-        # Copy next 4 uint32_t values
+-        for k in range(4):
+-            texture_data[idx2 + k] = packed_data[i * 8 + 4 + k]
+-            
++        # Source indices in packed_data (8 bytes per Gaussian)
++        src_idx = i * 8
++        
++        # Copy first 4 bytes to first texel
++        texture_data[idx1] = packed_data[src_idx]
++        texture_data[idx1 + 1] = packed_data[src_idx + 1]
++        texture_data[idx1 + 2] = packed_data[src_idx + 2]
++        texture_data[idx1 + 3] = packed_data[src_idx + 3]
++        
++        # Copy next 4 bytes to second texel
++        texture_data[idx2] = packed_data[src_idx + 4]
++        texture_data[idx2 + 1] = packed_data[src_idx + 5]
++        texture_data[idx2 + 2] = packed_data[src_idx + 6]
++        texture_data[idx2 + 3] = packed_data[src_idx + 7]
++        
+     return texture_data
+ ```
+ 
+-**Parameters:**
+-- `textureWidth`: 2048 (fixed).
+-- `textureHeight`: $\lceil \text{splatCount} / 1024 \rceil$.
+-- `minFilter`: `GL_NEAREST`.
+-- `magFilter`: `GL_NEAREST`.
+-- `wrapS`: `GL_CLAMP_TO_EDGE`.
+-- `wrapT`: `GL_CLAMP_TO_EDGE`.
+-
+ **Edge Cases and Pitfalls:**
+-- **Precision:** The use of `GL_RGBA32UI` ensures no precision loss for integer attributes. If floating-point attributes are packed, they must be converted to integers or a different texture format used.
+-- **Boundaries:** The texture height is calculated to fit all Gaussians. Accessing Gaussians beyond `splatCount` should be handled by the reader, as the texture may contain padding.
+-- **Degenerate Input:** If `splatCount` is 0, the texture height is 0, and no data is copied.
++*   **Boundary Conditions:** If `splatCount` is not a multiple of 1024, the last row of the texture will contain unused texels. These should be initialized to zero or ignored during unpacking [S1, unofficial].
++*   **Precision:** The use of `GL_RGBA32UI` ensures no precision loss for integer-packed data. If floating-point data is packed, it must be converted to integers or a different texture format used [S1, unofficial].
++*   **Alignment:** The layout assumes 4-byte alignment for `packedData` entries. Ensure the source data is properly aligned [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Packed Splat Reading](6819-packed-splat-reading.md)
+-A method to read a single 3D Gaussian Splat from a packed texture representation, decoding its geometric and color properties into a Gsplat struct.
++Decodes a single Gaussian from the packed texture. It is the primary accessor for this layout, distinguishing itself by using a single texture array and specific unpacking for standard spherical harmonics or color data.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N)$ for packing, where $N$ is the number of Gaussians.
+-- **Memory Complexity:** $O(N)$ for the texture storage.
+-- **Measured Performance:** Not given in the sources.
+-- **Scaling:** The fixed width of 1024 Gaussians per row limits the texture height. For very large scenes, the texture height increases linearly.
+-- **Strengths:** Efficient GPU access via texture sampling; simple mapping logic.
+-- **Limitations:** Fixed width may lead to inefficient memory usage for small numbers of Gaussians; requires OpenGL support for `GL_RGBA32UI`.
+-- **When to use:** When rendering on OpenGL-based systems and efficient GPU-side access is required.
+-- **When not:** When using Vulkan or DirectX, or when memory efficiency is critical and a more compact format is needed.
++*   **Time Complexity:** Packing is $O(N)$ where $N$ is the number of Gaussians, as each Gaussian requires a constant number of memory copies.
++*   **Memory Complexity:** The texture size is $O(N)$, specifically $2048 \times \lceil N/1024 \rceil$ texels. Each texel is 16 bytes (4 uint32s), so total memory is $16 \times 2048 \times \lceil N/1024 \rceil$ bytes.
++*   **Performance:** This method allows for efficient GPU-side access during rasterization, as the texture can be sampled directly in shaders. It avoids the overhead of complex decompression algorithms used in compressed formats [S1, unofficial].
++*   **Strengths:** Simple implementation, fast packing/unpacking, compatible with standard OpenGL texture sampling.
++*   **Limitations:** Uncompressed, so it does not reduce memory footprint compared to raw data. The fixed texture width of 2048 may lead to wasted space for small scenes [S1, unofficial].
++*   **When to Use:** When GPU-side access to Gaussian data is required and memory bandwidth is not the primary bottleneck.
++*   **When Not to Use:** When memory footprint is critical, consider [PNG-based Gaussian Compression](4834-png-based-gaussian-compression.md) or [SPZ Packed Format](3926-spz-packed-format.md) if they offer better compression or compatibility.
+ 
+ ## Background
+-Originated in the `gsplat-opengl` project by liaozhangsheng [S1, unofficial]. It is an unofficial implementation detail for optimizing Gaussian Splatting rendering in OpenGL.
++This method is derived from the `gsplat-opengl` project, an unofficial implementation of 3D Gaussian Splatting in OpenGL [S1, unofficial]. It provides a straightforward way to transfer Gaussian data to the GPU for rendering.
+ 
+ ## Sources

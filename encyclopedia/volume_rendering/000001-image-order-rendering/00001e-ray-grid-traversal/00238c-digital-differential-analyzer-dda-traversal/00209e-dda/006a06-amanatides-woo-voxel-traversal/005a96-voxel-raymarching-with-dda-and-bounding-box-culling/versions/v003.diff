@@ -1,0 +1,155 @@
+--- v002.md
++++ v003.md
+@@ -8,64 +8,20 @@
+ ## How it works
+ ### Inputs and Outputs
+-**Inputs:**
+-*   **Voxel Data:** A sparse voxel model split into 128×128×128 voxel segments (bricks). Each segment is stored as an R8 3D texture (one byte per voxel, holding a palette index) [S1, unofficial].
+-*   **Segment Directory:** A 2D texture listing active segments. Each entry contains the segment's 3D grid coordinates (X, Y, Z) and its index in the bound texture array [S1, unofficial].
+-*   **Palette:** A 256×1 RGBA8 texture mapping palette indices to colors [S1, unofficial].
+-*   **Camera State:** Eye offset, screen UV, projection matrix, view matrix, and inverse model matrix [S1, unofficial].
+-*   **Bounding Box:** `box_center` (Vector3) and `box_size` (Vector3) defining the volume in voxel space [S1, unofficial].
+-*   **Lighting:** `light_position` in voxel space [S1, unofficial].
+-
+-**Outputs:**
+-*   **Albedo:** The color of the first hit voxel, lit by the point light [S1, unofficial].
+-*   **Depth:** The depth of the hit voxel surface in clip space [S1, unofficial].
++Inputs include a sparse voxel model split into 128×128×128 voxel segments stored as R8 3D textures, a 2D segment directory listing active segments, a 256×1 RGBA8 palette, camera state matrices, bounding box uniforms, and a light position [S1, unofficial]. Outputs are the lit albedo color of the first hit voxel and its depth in clip space [S1, unofficial].
+ 
+ ### Data Structures
+-*   **Segment Brick Textures:** An array of `Texture3D` objects. Each texture is 128³ voxels, R8 format. The array order matches the directory entries [S1, unofficial].
+-*   **Segment Directory:** A 2D texture where each texel `i` stores `(segX, segY, segZ, textureSlot)` as floats. The `textureSlot` is the index into the `segment_voxels` array [S1, unofficial].
+-*   **Palette Texture:** 256×1 RGBA8. Colors are stored as `uint` 0xRRGGBBAA, reversed to 0xAABBGGRR so little-endian memory bytes are R, G, B, A. Read as sRGB in the shader [S1, unofficial].
+-*   **Bounding Box Uniforms:** `box_center` and `box_size` passed to the shader [S1, unofficial].
++The segment brick textures are an array of 128³ R8 `Texture3D` objects ordered to match directory entries [S1, unofficial]. The segment directory is a 2D texture where each texel stores segment grid coordinates and a texture slot index as floats [S1, unofficial]. The palette texture stores colors as 0xRRGGBBAA integers reversed to 0xAABBGGRR for little-endian RGBA8 byte order, read as sRGB [S1, unofficial]. The bounding box uniforms `box_center` and `box_size` define the volume in voxel space [S1, unofficial].
+ 
+ ### Steps
+-1.  **Compute Per-Eye Ray Origin and Direction:**
+-    *   Transform `EYE_OFFSET` (per-eye offset in midpoint view space) to world space:
+-        $$ \text{camera\_world} = (\text{INV\_VIEW\_MATRIX} \times \text{vec4}(\text{EYE\_OFFSET}, 1.0)).\text{xyz} $$
+-    *   Unproject `SCREEN_UV` through the inverse projection matrix into view space, normalize the vector from `EYE_OFFSET` to the unprojected point, then transform direction to world space:
+-        $$ \text{view\_frag} = \text{INV\_PROJECTION\_MATRIX} \times \text{vec4}(\text{SCREEN\_UV} \times 2.0 - 1.0, 0.0, 1.0) $$
+-        $$ \text{view\_frag} /= \text{view\_frag}.w $$
+-        $$ \text{ray\_dir\_view} = \text{normalize}(\text{view\_frag}.xyz - \text{EYE\_OFFSET}) $$
+-        $$ \text{ray\_world\_dir} = \text{normalize}((\text{INV\_VIEW\_MATRIX} \times \text{vec4}(\text{ray\_dir\_view}, 0.0)).xyz) $$
+-    *   Transform ray origin and direction to voxel space using the inverse model matrix:
+-        $$ \text{camera\_voxel} = (\text{inv\_model\_matrix} \times \text{vec4}(\text{camera\_world}, 1.0)).xyz + \text{box\_center} $$
+-        $$ \text{ray\_dir} = \text{normalize}((\text{inv\_model\_matrix} \times \text{vec4}(\text{ray\_world\_dir}, 0.0)).xyz) $$
+-    *   Compute box bounds in voxel space:
+-        $$ \text{box\_min} = \text{box\_center} - \text{box\_size} \times 0.5 $$
+-        $$ \text{box\_max} = \text{box\_center} + \text{box\_size} \times 0.5 $$
+-
+-2.  **March Through the Box:**
+-    *   Perform a ray-AABB slab test to find the entry point `t_entry` and exit point `t_exit` of the ray with the bounding box [S1, unofficial].
+-    *   If the ray misses the box, discard the pixel.
+-    *   Start DDA traversal from the entry point. The traversal steps through voxels along the ray path [S1, unofficial].
+-    *   For each voxel visited, sample the corresponding 3D texture from the `segment_voxels` array using the segment directory to find the correct texture index [S1, unofficial].
+-    *   If a non-empty voxel (palette index > 0) is found, record the hit position, normal, and material ID. If the ray exits the box without finding a non-empty voxel, discard the pixel [S1, unofficial].
+-
+-3.  **Compute Lighting:**
+-    *   Calculate point light lighting with 30% ambient and 70% diffuse:
+-        $$ \text{to\_light} = \text{normalize}(\text{light\_position} - \text{hit\_pos}) $$
+-        $$ \text{lighting} = \max(\text{dot}(\text{normal}, \text{to\_light}), 0.0) \times 0.7 + 0.3 $$
+-    *   Clamp back-facing normals to 0 [S1, unofficial].
+-
+-4.  **Output Albedo:**
+-    *   Retrieve the palette color by material index:
+-        $$ \text{ALBEDO} = \text{get\_material\_color}(\text{material}) \times \text{lighting} $$
+-
+-5.  **Write Depth:**
+-    *   Transform `hit_pos` from voxel space to mesh-local (subtract `box_center`), then to world (`MODEL_MATRIX`), then to clip space (`PROJECTION_MATRIX * VIEW_MATRIX`), and write normalized depth:
+-        $$ \text{hit\_clip} = \text{PROJECTION\_MATRIX} \times \text{VIEW\_MATRIX} \times \text{MODEL\_MATRIX} \times \text{vec4}(\text{hit\_pos} - \text{box\_center}, 1.0) $$
+-        $$ \text{DEPTH} = \text{hit\_clip}.z / \text{hit\_clip}.w $$
++1. **Compute Per-Eye Ray Origin and Direction:** Transform `EYE_OFFSET` to world space, unproject `SCREEN_UV` to view space, normalize the direction, transform it to world space, then transform both origin and direction to voxel space using the inverse model matrix and add `box_center` [S1, unofficial].
++2. **March Through the Box:** Perform a ray-AABB slab test to find the entry point, then start DDA traversal from that point [S1, unofficial]. For each voxel visited, sample the corresponding 3D texture from the `segment_voxels` array using the segment directory to find the correct texture index [S1, unofficial]. If a non-empty voxel (palette index > 0) is found, record the hit position, normal, and material ID; if the ray exits the box without finding one, discard the pixel [S1, unofficial].
++3. **Compute Lighting:** Calculate point light lighting with 30% ambient and 70% diffuse, clamping back-facing normals to 0 [S1, unofficial].
++4. **Output Albedo:** Multiply the palette color retrieved by the material index by the lighting factor [S1, unofficial].
++5. **Write Depth:** Transform `hit_pos` from voxel space to mesh-local, then to world, then to clip space, and write normalized depth [S1, unofficial].
+ 
+ ### Pseudocode
+ ```python
+ def fragment_shader(SCREEN_UV, EYE_OFFSET, INV_PROJECTION_MATRIX, INV_VIEW_MATRIX,
+-                    MODEL_MATRIX, INV_MODEL_MATRIX, PROJECTION_MATRIX,
++                    MODEL_MATRIX, INV_MODEL_MATRIX, PROJECTION_MATRIX, VIEW_MATRIX,
+                     box_center, box_size, segment_directory, segment_voxels, palette,
+                     light_position, active_segment_count):
+@@ -95,5 +51,5 @@
+ 
+     # 4. Output Albedo
+-    albedo = get_material_color(material_id, palette) * lighting
++    albedo = palette[material_id] * lighting
+ 
+     # 5. Write Depth
+@@ -142,18 +98,18 @@
+             if t_max_x < t_max_z:
+                 current_voxel.x += step_x
+-                t_near += t_delta_x
++                t_near = t_max_x
+                 t_max_x += t_delta_x
+             else:
+                 current_voxel.z += step_z
+-                t_near += t_delta_z
++                t_near = t_max_z
+                 t_max_z += t_delta_z
+         else:
+             if t_max_y < t_max_z:
+                 current_voxel.y += step_y
+-                t_near += t_delta_y
++                t_near = t_max_y
+                 t_max_y += t_delta_y
+             else:
+                 current_voxel.z += step_z
+-                t_near += t_delta_z
++                t_near = t_max_z
+                 t_max_z += t_delta_z
+ 
+@@ -164,5 +120,4 @@
+ 
+ def get_segment_id(voxel):
+-    # Voxel coordinates are Z-up (MagicaVoxel)
+     X = voxel.x >> 7
+     Y = voxel.y >> 7
+@@ -171,5 +126,4 @@
+ 
+ def get_texture_index(segment_id, segment_directory, active_segment_count):
+-    # Search directory for matching segment grid coordinates
+     for i in range(active_segment_count):
+         entry = texelFetch(segment_directory, vec2(i, 0))
+@@ -180,5 +134,5 @@
+ 
+ def compute_normal(voxel, hit_pos, ray_dir):
+-    # Approximate normal based on which face was entered [G]
++    # Normal approximation based on entry face [G]
+     if ray_dir.x > 0: return vec3(-1, 0, 0)
+     if ray_dir.x < 0: return vec3(1, 0, 0)
+@@ -194,26 +148,14 @@
+ 
+ ### Parameters
+-*   **Segment Size:** 128×128×128 voxels per segment [S1, unofficial].
+-*   **View Distance:** Camera positioned at 2.5 times the model's largest dimension from the model center [S1, unofficial].
+-*   **Light Position:** Default `vec3(50.0, 50.0, 25.0)` in voxel space [S1, unofficial].
+-*   **Inv Model Matrix:** Inverse of the MeshInstance's GlobalTransform, precomputed on the CPU every frame [S1, unofficial].
++Segment size is 128×128×128 voxels per segment [S1, unofficial]. The camera is positioned at a distance of 2.5 times the model's largest dimension from the model center [S1, unofficial]. The default light position is `vec3(50.0, 50.0, 25.0)` in voxel space [S1, unofficial]. The inverse model matrix is precomputed on the CPU every frame [S1, unofficial].
+ 
+ ### Edge Cases and Pitfalls
+-*   **Bounds Update:** When model bounds change, the bounding box mesh size and position must be updated, and shader uniforms `box_center` and `box_size` must be refreshed. Otherwise, rays will start in the wrong place [S1, unofficial].
+-*   **Ray Origin Precision:** Starting the ray at the interpolated box-surface position causes fuzzy faces, wrong first-hit lighting, and vanishing faces for faces at coordinate 0 due to `floor()` boundary float errors. This is solved by intersecting the ray with the box analytically and clamping the origin just inside it [S1, unofficial].
+-*   **Depth Buffer:** Without writing depth at the hit voxel surface, the depth buffer holds the depth of the box's back face. This causes other geometry to intersect the model as if it were a solid box, and in VR the OpenXR compositor uses depth for reprojection, warping a flat box as a plane and canceling per-eye parallax [S1, unofficial].
+-*   **Coordinate Systems:** Voxel data uses Z-up (MagicaVoxel). Godot uses Y-up. C# code converts voxel coordinates `(x, y, z)_zup` to world coordinates `(x, z, y)_yup`. The shader converts back when reading voxels [S1, unofficial].
++When model bounds change, the bounding box mesh size and position must be updated, and shader uniforms `box_center` and `box_size` must be refreshed to prevent rays from starting in the wrong place [S1, unofficial]. Starting the ray at the interpolated box-surface position causes fuzzy faces, wrong first-hit lighting, and vanishing faces for faces at coordinate 0 due to `floor()` boundary float errors; this is solved by intersecting the ray with the box analytically and clamping the origin just inside it [S1, unofficial]. Without writing depth at the hit voxel surface, the depth buffer holds the depth of the box's back face, causing other geometry to intersect the model as if it were a solid box and warping a flat box as a plane in VR reprojection [S1, unofficial]. Voxel data uses Z-up (MagicaVoxel) while Godot uses Y-up, requiring coordinate conversion `(x, y, z)_zup` to `(x, z, y)_yup` in C# and back in the shader [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear with respect to the number of voxels traversed along the ray. The DDA traversal is efficient for sparse volumes as it skips empty space [S1, unofficial].
+-*   **Memory Complexity:** Proportional to the number of active segments. Each segment is a 128³ R8 texture (2 MB). The directory texture is small [S1, unofficial].
+-*   **Measured Performance:** Not given in the sources.
+-*   **Strengths:** Efficient for sparse voxel models. Avoids floating-point boundary errors by using analytical ray-box intersection. Works well in VR due to correct depth writing [S1, unofficial].
+-*   **Limitations:** Requires precomputed inverse model matrix. Performance depends on the density of the voxel model [S1, unofficial].
+-*   **When to Use:** Sparse voxel models with large empty spaces. VR applications requiring correct depth for reprojection [S1, unofficial].
+-*   **When Not to Use:** Dense voxel models where ray traversal becomes expensive. Models with frequent dynamic changes requiring frequent bound updates [S1, unofficial].
++Time complexity is linear with respect to the number of voxels traversed along the ray, as DDA skips empty space efficiently [S1, unofficial]. Memory complexity is proportional to the number of active segments, with each segment being a 128³ R8 texture (2 MB) and a small directory texture [S1, unofficial]. Measured performance is not given in the sources. Strengths include efficiency for sparse voxel models, avoidance of floating-point boundary errors via analytical ray-box intersection, and correct depth writing for VR [S1, unofficial]. Limitations include the requirement for a precomputed inverse model matrix and performance dependence on voxel model density [S1, unofficial]. It is recommended for sparse voxel models with large empty spaces and VR applications requiring correct depth for reprojection [S1, unofficial]. It is not recommended for dense voxel models where ray traversal becomes expensive or models with frequent dynamic changes requiring frequent bound updates [S1, unofficial].
+ 
+ ## Background
+-This method is implemented in the `Voxel2Pixel` graphics library by Ben McLean [S1, unofficial]. It is designed for use in Godot Engine for rendering voxel models in VR and desktop environments. The method builds on the Amanatides-Woo Voxel Traversal algorithm for efficient ray traversal through voxel grids [S1, unofficial].
++This method is implemented in the `Voxel2Pixel` graphics library by Ben McLean [S1, unofficial]. It is designed for use in Godot Engine for rendering voxel models in VR and desktop environments [S1, unofficial]. The method builds on the Amanatides-Woo Voxel Traversal algorithm for efficient ray traversal through voxel grids [S1, unofficial].
+ 
+ ## Sources

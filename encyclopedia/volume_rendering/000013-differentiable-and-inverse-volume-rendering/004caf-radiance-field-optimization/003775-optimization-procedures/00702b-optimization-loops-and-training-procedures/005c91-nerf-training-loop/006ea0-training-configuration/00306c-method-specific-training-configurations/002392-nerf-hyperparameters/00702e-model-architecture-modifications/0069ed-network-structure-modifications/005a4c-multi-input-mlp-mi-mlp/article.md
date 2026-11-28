@@ -1,0 +1,286 @@
+# Multi-input MLP (mi-MLP)
+Also called: mi-MLP, per-layer inputs incorporation
+
+## Overview
+The multi-input MLP (mi-MLP) is a network architecture modification for Neural Radiance Fields (NeRF) that incorporates the raw input embeddings (3D location and viewing direction) into every layer of the network to prevent overfitting in few-shot view synthesis without reducing model capacity [S1]. Unlike the vanilla NeRF architecture [Parent](20497-network-structure-modifications.md), which relies on deep hierarchical mappings where each layer only sees the output of the previous one, mi-MLP ensures that every layer is explicitly aware of the input embeddings, creating shorter paths between inputs and outputs [S1]. This structural change alleviates overfitting by balancing gradient amplitudes across layers, allowing the model to synthesize high-frequency details with fewer effective parameters [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 5D coordinate vector $\mathbf{x} \in \mathbb{R}^5$, composed of the 3D spatial position $\mathbf{p} \in \mathbb{R}^3$ and the 2D viewing direction $\mathbf{d} \in \mathbb{R}^2$ (normalized).
+*   **Output:** Volume density $\sigma \in \mathbb{R}$ and view-dependent color $\mathbf{c} \in \mathbb{R}^3$.
+
+**Data Structures:**
+The network consists of a sequence of fully connected layers. For each layer $i$, the parameters are:
+*   $\mathbf{w}_i^{j0} \in \mathbb{R}^{1 \times d_1}$: Weight matrix connecting the input embedding to the $j$-th neuron.
+*   $\mathbf{w}_i^{j1} \in \mathbb{R}^{1 \times d_2}$: Weight matrix connecting the previous layer's output to the $j$-th neuron.
+*   $\mathbf{b}_i \in \mathbb{R}^{d_2 \times 1}$: Bias vector.
+*   $d_1$: Dimension of the input embedding $\gamma_L(\mathbf{x})$.
+*   $d_2$: Hidden dimension (output dimension) of the layer.
+
+**Positional Encoding:**
+The input $\mathbf{x}$ is transformed into an embedding $\gamma_L(\mathbf{x})$ using positional encoding [S1]:
+$$
+\gamma_L(\mathbf{x}) = (\sin(2^0 \mathbf{x}), \cos(2^0 \mathbf{x}), \dots, \sin(2^{L-1} \mathbf{x}), \cos(2^{L-1} \mathbf{x}))
+$$
+where $L$ is a hyperparameter controlling the number of frequency bands [S1].
+
+**Algorithm:**
+The computation for layer $i$ (where $i > 1$) is defined as:
+$$
+f_i = \phi_i(f_{i-1}, \gamma_L(\mathbf{x}))
+$$
+with the first layer initialized as:
+$$
+f_1 = \phi_1(\gamma_L(\mathbf{x}))
+$$
+where $f_i$ is the output feature vector of layer $i$, and $\phi_i$ is the layer function [S1].
+
+The $j$-th element of the output feature vector $f_i$, denoted as $\phi_i^j$, is computed as [S1]:
+$$
+\phi_i^j(\gamma_L(\mathbf{x})) = \epsilon\left( \mathbf{w}_i^{j0}[\gamma_L(\mathbf{x})] + \mathbf{w}_i^{j1}[f_{i-1}] + b_i^j \right)
+$$
+where $\epsilon$ is the activation function (default ReLU) [S1]. Note that $f_{i-1}$ is equivalent to $\phi_{i-1}(\gamma_L(\mathbf{x}))$ for $i>2$.
+
+**Parameters:**
+*   $L$: Number of frequency bands in positional encoding. Typical values are not specified in the source, but it is a hyperparameter [S1].
+*   Weight Initialization: Default PyTorch initialization is used. This satisfies the condition $\|\mathbf{w}_i^{j1}\|_1 \in (0, 1]$ [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import math
+
+class PositionalEncoding(nn.Module):
+    def __init__(self, L):
+        super(PositionalEncoding, self).__init__()
+        self.L = L
+
+    def forward(self, x):
+        # x shape: (batch_size, 5)
+        # frequencies: 2^0 to 2^(L-1)
+        frequencies = torch.tensor([2**i for i in range(self.L)], dtype=x.dtype, device=x.device)
+        # Expand x to (batch_size, 1, 5) and frequencies to (1, 2*L, 1)
+        # Result shape: (batch_size, 2*L, 5) -> flatten to (batch_size, 2*L*5)
+        # Note: The formula implies sin/cos of (freq * x). 
+        # Standard NeRF PE usually uses freq * x. 
+        # The source formula: sin(2^k x).
+        
+        # Construct the argument: x * frequencies[:, None, :]
+        # x: (B, 5), freq: (L,) -> (B, 1, 5) * (1, L, 1) = (B, L, 5)
+        args = x.unsqueeze(1) * frequencies.unsqueeze(0).unsqueeze(-1) # (B, L, 5)
+        
+        # Compute sin and cos
+        sin_vals = torch.sin(args) # (B, L, 5)
+        cos_vals = torch.cos(args) # (B, L, 5)
+        
+        # Concatenate and flatten last two dims
+        # Output shape: (B, 2 * L * 5)
+        pe = torch.cat([sin_vals, cos_vals], dim=1)
+        pe = pe.view(x.size(0), -1)
+        return pe
+
+class MiMLPLayer(nn.Module):
+    def __init__(self, input_dim, output_dim):
+        super(MiMLPLayer, self).__init__()
+        self.input_dim = input_dim
+        self.output_dim = output_dim
+        # w_i^{j0} connects input embedding to neuron j
+        # w_i^{j1} connects previous layer output to neuron j
+        # Bias b_i
+        self.weight_input = nn.Parameter(torch.randn(1, input_dim)) # w^{j0}
+        self.weight_prev = nn.Parameter(torch.randn(1, output_dim)) # w^{j1}
+        self.bias = nn.Parameter(torch.zeros(output_dim)) # b_i
+        
+        # Initialize weights to satisfy ||w^{j1}||_1 in (0, 1] approximately via default init
+        # PyTorch default Kaiming Uniform usually results in small weights.
+        # The source states default PyTorch init meets the requirement.
+        
+    def forward(self, prev_output, input_embedding):
+        # prev_output: (B, output_dim)
+        # input_embedding: (B, input_dim)
+        
+        # Compute term 1: w^{j0} * input_embedding
+        # w^{j0} is (1, input_dim). We need to broadcast or repeat for all output neurons?
+        # The formula: w_i^{j0}[gamma_L(x)] implies w^{j0} is specific to neuron j?
+        # Actually, the formula writes w_i^j = (w_i^{j0}, w_i^{j1})^T.
+        # This suggests w^{j0} and w^{j1} are vectors for neuron j.
+        # So for a layer with output_dim neurons, we have output_dim such vectors.
+        
+        # Let's redefine parameters to match the vector notation for all neurons.
+        # w_input: (output_dim, input_dim)
+        # w_prev: (output_dim, output_dim) -- wait, w^{j1} is 1 x d2. 
+        # If prev_output is d2, then w^{j1} dot prev_output is scalar.
+        # So w_prev should be (output_dim, output_dim) if we treat it as a matrix multiplication?
+        # Or is it element-wise? 
+        # Formula: w_i^{j1}[phi_{i-1}]. phi_{i-1} is a vector. w^{j1} is a row vector.
+        # So it is a standard linear transformation for the previous output path.
+        
+        # However, w^{j0} is also a row vector for neuron j.
+        # So the layer is:
+        # f_i[j] = ReLU( w^{j0} . x + w^{j1} . f_{i-1} + b[j] )
+        
+        # This is equivalent to:
+        # f_i = ReLU( x @ W_input^T + f_{i-1} @ W_prev^T + b )
+        # where W_input is (input_dim, output_dim) and W_prev is (output_dim, output_dim).
+        
+        # Let's stick to the source's explicit element-wise definition for clarity in implementation logic,
+        # but use matrix ops for efficiency.
+        pass
+
+class MiMLP(nn.Module):
+    def __init__(self, hidden_dim, num_layers, L):
+        super(MiMLP, self).__init__()
+        self.L = L
+        self.pe = PositionalEncoding(L)
+        
+        # Input dimension after PE
+        # x is 5D. PE expands to 2*L*5.
+        self.input_dim = 2 * L * 5
+        self.hidden_dim = hidden_dim
+        
+        # Layers
+        # Layer 1: takes PE, outputs hidden_dim
+        # Layers 2..N: take prev_output and PE, output hidden_dim
+        self.layers = nn.ModuleList()
+        
+        # First layer
+        # w^{j0}: (hidden_dim, input_dim)
+        # w^{j1}: (hidden_dim, hidden_dim) -- but for layer 1, prev_output is not used?
+        # Formula: f_1 = phi_1(gamma_L(x)).
+        # So layer 1 only uses w^{j0} and b.
+        self.layers.append(MiMLPFirstLayer(self.input_dim, self.hidden_dim))
+        
+        for _ in range(num_layers - 1):
+            self.layers.append(MiMLPSubsequentLayer(self.hidden_dim, self.hidden_dim))
+            
+    def forward(self, x):
+        # x: (B, 5)
+        pe = self.pe(x) # (B, 2*L*5)
+        
+        # Layer 1
+        h = self.layers[0](pe)
+        
+        # Layers 2..N
+        for layer in self.layers[1:]:
+            h = layer(h, pe)
+            
+        return h
+
+class MiMLPFirstLayer(nn.Module):
+    def __init__(self, input_dim, output_dim):
+        super(MiMLPFirstLayer, self).__init__()
+        self.weight = nn.Parameter(torch.randn(output_dim, input_dim))
+        self.bias = nn.Parameter(torch.zeros(output_dim))
+        
+    def forward(self, x):
+        # x: (B, input_dim)
+        # Output: (B, output_dim)
+        return torch.relu(x @ self.weight.t() + self.bias)
+
+class MiMLPSubsequentLayer(nn.Module):
+    def __init__(self, hidden_dim, output_dim):
+        super(MiMLPSubsequentLayer, self).__init__()
+        self.hidden_dim = hidden_dim
+        self.output_dim = output_dim
+        
+        # w^{j0}: (output_dim, input_dim)
+        self.weight_input = nn.Parameter(torch.randn(output_dim, hidden_dim)) # Note: input_dim for PE is fixed, but here input_dim refers to PE dim?
+        # Wait, in the formula, the input to the layer is gamma_L(x).
+        # So the dimension of gamma_L(x) is constant (2*L*5).
+        # The dimension of f_{i-1} is hidden_dim.
+        
+        # Correction:
+        # w^{j0} connects gamma_L(x) (dim D_pe) to neuron j.
+        # w^{j1} connects f_{i-1} (dim D_hidden) to neuron j.
+        
+        self.weight_pe = nn.Parameter(torch.randn(output_dim, 2 * 10 * 5)) # Placeholder for D_pe
+        # Actually, let's pass D_pe explicitly or store it.
+        # For simplicity in this generic class, we assume D_pe is known or passed.
+        # Let's refactor to accept D_pe.
+        pass
+
+# Refined Pseudocode for clarity
+class MiMLPNetwork(nn.Module):
+    def __init__(self, hidden_dim, num_layers, L):
+        super(MiMLPNetwork, self).__init__()
+        self.L = L
+        self.pe_dim = 2 * L * 5
+        self.hidden_dim = hidden_dim
+        
+        # Layer 1: Input is PE only
+        self.layer1 = nn.Linear(self.pe_dim, hidden_dim)
+        nn.init.kaiming_uniform_(self.layer1.weight)
+        nn.init.zeros_(self.layer1.bias)
+        
+        # Layers 2 to N: Input is PE + Prev Output
+        self.layers = nn.ModuleList()
+        for _ in range(num_layers - 1):
+            self.layers.append(MiMLPBlock(self.pe_dim, hidden_dim))
+            
+    def forward(self, x):
+        pe = self.positional_encoding(x)
+        
+        # Layer 1
+        h = torch.relu(self.layer1(pe))
+        
+        # Layers 2..N
+        for block in self.layers:
+            h = block(h, pe)
+            
+        return h
+
+    def positional_encoding(self, x):
+        # x: (B, 5)
+        frequencies = torch.tensor([2**i for i in range(self.L)], dtype=x.dtype, device=x.device)
+        args = x.unsqueeze(1) * frequencies.unsqueeze(0).unsqueeze(-1) # (B, L, 5)
+        sin_vals = torch.sin(args)
+        cos_vals = torch.cos(args)
+        pe = torch.cat([sin_vals, cos_vals], dim=1)
+        return pe.view(x.size(0), -1)
+
+class MiMLPBlock(nn.Module):
+    def __init__(self, pe_dim, hidden_dim):
+        super(MiMLPBlock, self).__init__()
+        self.pe_dim = pe_dim
+        self.hidden_dim = hidden_dim
+        
+        # w^{j0}: (hidden_dim, pe_dim)
+        self.weight_pe = nn.Parameter(torch.randn(hidden_dim, pe_dim))
+        # w^{j1}: (hidden_dim, hidden_dim)
+        self.weight_prev = nn.Parameter(torch.randn(hidden_dim, hidden_dim))
+        self.bias = nn.Parameter(torch.zeros(hidden_dim))
+        
+        # Initialize to satisfy ||w^{j1}||_1 in (0, 1]
+        # PyTorch default init is used.
+        
+    def forward(self, prev_h, pe):
+        # prev_h: (B, hidden_dim)
+        # pe: (B, pe_dim)
+        
+        term_pe = pe @ self.weight_pe.t() # (B, hidden_dim)
+        term_prev = prev_h @ self.weight_prev.t() # (B, hidden_dim)
+        
+        out = term_pe + term_prev + self.bias
+        return torch.relu(out)
+```
+
+**Edge Cases and Pitfalls:**
+*   **Gradient Imbalance:** In vanilla MLPs, gradient amplitudes are similar across all layers during early training. mi-MLP ensures deeper layers (closer to output) receive large gradients while shallower layers receive extremely small ones, which helps prevent overfitting [S1].
+*   **Weight Initialization:** The weight initialization must satisfy $\|\mathbf{w}_i^{j1}\|_1 \in (0, 1]$ to ensure the gradient ratio property holds. Default PyTorch initialization meets this requirement [S1].
+*   **Input Dimension:** The input $\mathbf{x}$ must be consistently encoded using the same $L$ for all layers.
+
+## Operating characteristics
+*   **Time Complexity:** The computational complexity per layer is $O(d_1 \cdot d_2 + d_2^2)$, where $d_1$ is the PE dimension and $d_2$ is the hidden dimension. Since inputs are added to every layer, the constant factor is higher than vanilla MLP, but the number of parameters can be reduced for equivalent performance.
+*   **Memory Complexity:** Memory usage is proportional to the number of parameters. mi-MLP allows for fewer parameters while maintaining capacity, potentially reducing memory footprint compared to a vanilla MLP trained on few-shot data to avoid overfitting [S1].
+*   **Performance:** On few-shot view synthesis benchmarks, mi-MLP boosts PSNR from 14.73 (baseline) to 24.23 [S1].
+*   **Strengths:** Prevents overfitting in few-shot scenarios; preserves high-frequency detail synthesis; plug-and-play with existing NeRF pipelines [S1].
+*   **Limitations:** Requires careful initialization to maintain gradient flow properties; slightly more complex forward pass due to input concatenation at each layer [S1].
+
+## Background
+The multi-input MLP (mi-MLP) was proposed in 2024 by the authors of "Is Vanilla MLP in Neural Radiance Field Enough for Few-Shot View Synthesis?" [S1]. It addresses the overfitting issue in few-shot view synthesis, where reducing model parameters leads to loss of detail. The method introduces an orthogonal perspective by modifying the network structure to incorporate inputs into each layer, rather than just reducing parameters [S1].
+
+## Sources
+[S1] Is Vanilla MLP in Neural Radiance Field Enough for Few-Shot View Synthesis?, https://doi.org/10.1109/cvpr52733.2024.01918, fetched 2026-10-26

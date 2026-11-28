@@ -1,0 +1,186 @@
+--- v001.md
++++ v002.md
+@@ -8,74 +8,27 @@
+ ## How it works
+ **Inputs:**
+-- Mesh defined by vertices $V \in \mathbb{R}^{N \times 3}$ and faces $F \in \mathbb{R}^{M \times 3}$ (indices into $V$).
+-- Voxel grid dimensions $W, H, D$ (width, height, depth).
+-- Bounding box depth $D$ (used for gradient scaling).
++- Mesh defined by vertices $V \in \mathbb{R}^{N \times 3}$ and faces $F \in \mathbb{R}^{M \times 3}$ (indices into $V$) [S1, unofficial].
++- Voxel grid dimensions $W, H, D$ (width, height, depth) [S1, unofficial].
++- Bounding box depth $D$ (used for gradient scaling) [S1, unofficial].
+ 
+ **Outputs:**
+-- Voxel occupancy volume $Vol \in \{0, 1\}^{D \times H \times W}$.
+-- Gradients $\frac{\partial Loss}{\partial V}$ with respect to vertex positions.
++- Voxel occupancy volume $Vol \in \{0, 1\}^{D \times H \times W}$ [S1, unofficial].
++- Gradients $\frac{\partial Loss}{\partial V}$ with respect to vertex positions [S1, unofficial].
+ 
+ **Data Structures:**
+-- `Vol[z][y][x]`: Boolean or integer (0/1) indicating occupancy.
+-- `grad_V`: Tensor of shape $(N, 3)$ storing gradients for each vertex.
++- `Vol[z][y][x]`: Integer (0 or 1) indicating voxel occupancy [S1, unofficial].
++- `grad_V`: Tensor of shape $(N, 3)$ storing gradients for each vertex [S1, unofficial].
+ 
+ **Parameters:**
+ - `diag`: Scaling factor $1.732 \cdot D$, approximating the diagonal of the voxel grid [S1, unofficial].
+-- `border_intersection`: Counter for ambiguous ray intersections.
++- `border_intersection`: Counter for ambiguous ray intersections [S1, unofficial].
+ 
+ **Steps:**
++1. **Forward Pass (Occupancy):** For each voxel at coordinates $(x, y, z)$, initialize a random number generator state with seed $S = H \cdot W \cdot z + W \cdot y + x$ [S1, unofficial]. Generate a random point $P_1$ on the top plane ($z=D$) with $P_1.x = W \cdot \text{rand\_uniform}(S)$ and $P_1.y = H \cdot \text{rand\_uniform}(S)$ [S1, unofficial]. Set ray origin $P_0 = (x, y, z)$ [S1, unofficial]. Initialize counters `face_intersection = 0` and `border_intersection = 0` [S1, unofficial]. Iterate over all faces: compute edge vectors $u = V_1 - V_0$, $v = V_2 - V_0$, and normal $n = \text{cross}(u, v)$ [S1, unofficial]. Compute ray direction $dir = P_1 - P_0$ and vector $w_0 = P_0 - V_0$ [S1, unofficial]. Calculate $a = -\text{dot}(n, w_0)$ and $b = \text{dot}(n, dir)$ [S1, unofficial]. If $|b| < 10^{-8}$, skip (ray parallel to face) [S1, unofficial]. Calculate intersection distance $r = a / b$ [S1, unofficial]. If $r < 0$, skip (intersection behind ray origin) [S1, unofficial]. Compute intersection point $I = P_0 + r \cdot dir$ [S1, unofficial]. Check if $I$ is inside triangle $V_0 V_1 V_2$ using barycentric coordinates: $uu = \text{dot}(u, u)$, $vv = \text{dot}(v, v)$, $uv = \text{dot}(u, v)$ [S1, unofficial]. Compute $w = I - V_0$, $wu = \text{dot}(w, u)$, $wv = \text{dot}(w, v)$ [S1, unofficial]. Calculate $d = uv^2 - uu \cdot vv$ [S1, unofficial]. Compute $s = \frac{uv \cdot wv - vv \cdot wu}{d}$ and $t = \frac{uv \cdot wu - uu \cdot wv}{d}$ [S1, unofficial]. If $s < 0$ or $s > 1$ or $t < 0$ or $s + t > 1$, skip [S1, unofficial]. If $s == 0$ or $t == 0$ or $s + t == 1$, increment `border_intersection` [S1, unofficial]. Otherwise, increment `face_intersection` [S1, unofficial]. After checking all faces, if `border_intersection > 0`, restart the ray for this voxel [S1, unofficial]. If `face_intersection` is odd, set $Vol[z][y][x] = 1$ (inside); else set $0$ (outside) [S1, unofficial].
++2. **Backward Pass (Gradients):** For each voxel $(x, y, z)$, retrieve $voxel = Vol[z][y][x]$ and $grad\_voxel = \frac{\partial Loss}{\partial Vol[z][y][x]}$ [S1, unofficial]. For each face with vertices $V_0, V_1, V_2$, compute gradients for each vertex using `compute_grad` [S1, unofficial]. In `compute_grad` for vertex $V_2$ (relative to ray origin $P$ and other vertices $V_0, V_1$), define plane through $P, V_0, V_1$ and compute normal $n = \text{cross}(V_0 - P, V_1 - P)$ [S1, unofficial]. For each axis $axis \in \{x, y, z\}$, calculate potential shifted position $V_2^{shifted}$ by intersecting the plane with a line parallel to the axis passing through $V_2$ [S1, unofficial]. Example for $x$-axis shift: $V_2^{shifted}_x = -\frac{n_y V_2.y + n_z V_2.z}{n_x}$, $V_2^{shifted}_y = V_2.y$, $V_2^{shifted}_z = V_2.z$ (similar formulas apply for $y$ and $z$ shifts) [S1, unofficial]. Check if $V_2^{shifted}$ lies on the face triangle $V_0, V_1, V_2^{shifted}$ using `P_is_on_face` [S1, unofficial]. The check solves $a(V_0 - V_2^{shifted}) + b(V_1 - V_2^{shifted}) = P - V_2^{shifted}$ for coefficients $a, b$ [S1, unofficial]. If $n_{axis} \neq 0$ and the shift is non-zero and `P_is_on_face` returns true, update gradient: $\text{grad}_{V2}[axis] = -\text{grad}_{\text{voxel}} \cdot \frac{|V_2^{shifted} - V_2|}{\text{diag}}$ if the sign of the shift relative to the voxel boundary matches the gradient direction (i.e., $d \cdot \text{grad}_{\text{voxel}} < 0$ for outside voxels, $> 0$ for inside), where $d = V_2^{shifted} - V_2$ [S1, unofficial]. Else gradient contribution for this axis is 0 [S1, unofficial].
+ 
+-1. **Forward Pass (Occupancy):**
+-   For each voxel at coordinates $(x, y, z)$:
+-   1. Initialize a random number generator state with seed $S = W \cdot H \cdot z + W \cdot y + x$ [S1, unofficial].
+-   2. Generate a random point $P_1$ on the top plane ($z=D$) with coordinates:
+-      $$ P_1.x = W \cdot \text{curand\_uniform\_double}(S) $$
+-      $$ P_1.y = H \cdot \text{curand\_uniform\_double}(S) $$
+-      $$ P_1.z = D $$
+-   3. Set ray origin $P_0 = (x, y, z)$ [S1, unofficial].
+-   4. Initialize counters: `face_intersection = 0`, `border_intersection = 0` [S1, unofficial].
+-   5. For each face with vertices $V_0, V_1, V_2$:
+-      a. Compute edge vectors $u = V_1 - V_0$, $v = V_2 - V_0$ [S1, unofficial].
+-      b. Compute face normal $n = \text{cross}(u, v)$ [S1, unofficial].
+-      c. Compute ray direction $dir = P_1 - P_0$ and vector $w_0 = P_0 - V_0$ [S1, unofficial].
+-      d. Calculate $a = -\text{dot}(n, w_0)$ and $b = \text{dot}(n, dir)$ [S1, unofficial].
+-      e. If $|b| < 10^{-8}$, skip (ray parallel to face) [S1, unofficial].
+-      f. Calculate intersection distance $r = a / b$ [S1, unofficial].
+-      g. If $r < 0$, skip (intersection behind ray origin) [S1, unofficial].
+-      h. Compute intersection point $I = P_0 + r \cdot dir$ [S1, unofficial].
+-      i. Check if $I$ is inside triangle $V_0 V_1 V_2$ using barycentric coordinates:
+-         - $uu = \text{dot}(u, u)$, $vv = \text{dot}(v, v)$, $uv = \text{dot}(u, v)$ [S1, unofficial].
+-         - $w = I - V_0$ [S1, unofficial].
+-         - $wu = \text{dot}(w, u)$, $wv = \text{dot}(w, v)$ [S1, unofficial].
+-         - $d = uv^2 - uu \cdot vv$ [S1, unofficial].
+-         - $s = \frac{uv \cdot wv - vv \cdot wu}{d}$ [S1, unofficial].
+-         - $t = \frac{uv \cdot wu - uu \cdot wv}{d}$ [S1, unofficial].
+-      j. If $s < 0$ or $s > 1$ or $t < 0$ or $s + t > 1$, skip [S1, unofficial].
+-      k. If $s == 0$ or $t == 0$ or $s + t == 1$, increment `border_intersection` [S1, unofficial].
+-      l. Otherwise, increment `face_intersection` [S1, unofficial].
+-   6. If `border_intersection > 0`, restart the ray for this voxel (go to step 1.2) [S1, unofficial].
+-   7. If `face_intersection` is odd, set $Vol[z][y][x] = 1$ (inside); else set $0$ (outside) [S1, unofficial].
+-
+-2. **Backward Pass (Gradients):**
+-   For each voxel $(x, y, z)$:
+-   1. Retrieve $voxel = Vol[z][y][x]$ and $grad\_voxel = \frac{\partial Loss}{\partial Vol[z][y][x]}$ [S1, unofficial].
+-   2. For each face with vertices $V_0, V_1, V_2$:
+-      a. For each vertex $V_k$ in $\{V_0, V_1, V_2\}$, compute gradient contribution using `compute_grad` [S1, unofficial].
+-      b. In `compute_grad` for vertex $V_2$ (relative to ray origin $P$ and other vertices $V_0, V_1$):
+-         i. Define plane through $P, V_0, V_1$. Compute normal $n = \text{cross}(V_0 - P, V_1 - P)$ [S1, unofficial].
+-         ii. For each axis $axis \in \{x, y, z\}$:
+-             - Calculate potential shifted position $V_2^{shifted}$ by intersecting the plane with a line parallel to the axis passing through $V_2$.
+-             - Example for $x$-axis shift:
+-               $$ V_2^{shifted}_x = -\frac{n_y V_2.y + n_z V_2.z}{n_x} $$
+-               $$ V_2^{shifted}_y = V_2.y $$
+-               $$ V_2^{shifted}_z = V_2.z $$
+-               (Similar formulas apply for $y$ and $z$ shifts, swapping indices appropriately) [S1, unofficial].
+-             - Check if $V_2^{shifted}$ lies on the face triangle $V_0, V_1, V_2^{shifted}$ using `P_is_on_face` [S1, unofficial].
+-               - Solve $a(V_0 - V_2^{shifted}) + b(V_1 - V_2^{shifted}) = P - V_2^{shifted}$ for coefficients $a, b$ [S1, unofficial].
+-               - If $n_{axis} \neq 0$ and the shift is non-zero and `P_is_on_face` returns true:
+-                 - Update gradient:
+-                   $$ \text{grad}_{V2}[axis] = -\text{grad}_{\text{voxel}} \cdot \frac{|V_2^{shifted} - V_2|}{\text{diag}} $$
+-                   if the sign of the shift relative to the voxel boundary matches the gradient direction (i.e., $d \cdot \text{grad}_{\text{voxel}} < 0$ for outside voxels, $> 0$ for inside), where $d = V_2^{shifted} - V_2$ [S1, unofficial].
+-             - Else, gradient contribution for this axis is 0 [S1, unofficial].
++**Formulas:**
++- Barycentric coordinate check for point $I$ inside triangle defined by $V_0, V_1, V_2$: $s = \frac{uv \cdot wv - vv \cdot wu}{uv^2 - uu \cdot vv}$, $t = \frac{uv \cdot wu - uu \cdot wv}{uv^2 - uu \cdot vv}$, where $u=V_1-V_0$, $v=V_2-V_0$, $w=I-V_0$, $uu=u\cdot u$, $vv=v\cdot v$, $uv=u\cdot v$, $wu=w\cdot u$, $wv=w\cdot v$ [S1, unofficial]. Point is inside if $s \ge 0, t \ge 0, s+t \le 1$ [S1, unofficial].
++- Gradient update rule for a vertex component: $\text{grad}_{V2} = -\text{grad}_{\text{voxel}} \cdot \frac{|V2_{\text{shifted}} - V2|}{\text{diag}}$ if the sign of the shift relative to the voxel boundary matches the gradient direction (i.e., $d \cdot \text{grad}_{\text{voxel}} < 0$ for outside voxels, $> 0$ for inside), where $d = V2_{\text{shifted}} - V2$ and $\text{diag} = 1.732 \cdot D$ [S1, unofficial].
+ 
+ **Pitfalls:**
+@@ -84,7 +37,94 @@
+ - **Gradient Scaling:** The `diag` factor $1.732 \cdot D$ approximates the grid diagonal; incorrect scaling may lead to unstable gradients [S1, unofficial].
+ 
++```python
++def forward_pass(mesh_vertices, mesh_faces, W, H, D):
++    Vol = np.zeros((D, H, W), dtype=np.int32)
++    for z in range(D):
++        for y in range(H):
++            for x in range(W):
++                seed = H * W * z + W * y + x
++                border = True
++                while border:
++                    border = False
++                    u1 = rand_uniform(seed)
++                    u2 = rand_uniform(seed)
++                    P1 = np.array([W * u1, H * u2, D])
++                    P0 = np.array([x, y, z])
++                    dir_vec = P1 - P0
++                    face_count = 0
++                    for face in mesh_faces:
++                        V0, V1, V2 = mesh_vertices[face[0]], mesh_vertices[face[1]], mesh_vertices[face[2]]
++                        u = V1 - V0
++                        v = V2 - V0
++                        n = np.cross(u, v)
++                        w0 = P0 - V0
++                        a = -np.dot(n, w0)
++                        b = np.dot(n, dir_vec)
++                        if abs(b) < 1e-8: continue
++                        r = a / b
++                        if r < 0: continue
++                        I = P0 + r * dir_vec
++                        w = I - V0
++                        uu = np.dot(u, u)
++                        vv = np.dot(v, v)
++                        uv = np.dot(u, v)
++                        wu = np.dot(w, u)
++                        wv = np.dot(w, v)
++                        d = uv * uv - uu * vv
++                        s = (uv * wv - vv * wu) / d
++                        t = (uv * wu - uu * wv) / d
++                        if s < 0 or s > 1 or t < 0 or s + t > 1: continue
++                        if s == 0 or t == 0 or s + t == 1:
++                            border = True
++                            break
++                        face_count += 1
++                    if border: continue
++                Vol[z, y, x] = 1 if (face_count % 2 == 1) else 0
++    return Vol
++
++def backward_pass(Vol, grad_Vol, mesh_vertices, mesh_faces, W, H, D):
++    grad_V = np.zeros_like(mesh_vertices)
++    diag = 1.732 * D
++    for z in range(D):
++        for y in range(H):
++            for x in range(W):
++                voxel_val = Vol[z, y, x]
++                g_vox = grad_Vol[z, y, x]
++                P0 = np.array([x, y, z])
++                for face in mesh_faces:
++                    V0, V1, V2 = mesh_vertices[face[0]], mesh_vertices[face[1]], mesh_vertices[face[2]]
++                    for Vi_idx, Vi in enumerate([V0, V1, V2]):
++                        # Compute gradient for Vi using the other two vertices and P0
++                        # Determine the other two vertices for the plane definition
++                        others = [mesh_vertices[face[j]] for j in range(3) if j != face[Vi_idx]]
++                        Vp, Vq = others[0], others[1]
++                        n = np.cross(Vp - P0, Vq - P0)
++                        for axis in range(3):
++                            if n[axis] == 0: continue
++                            shifted = Vi.copy()
++                            shifted[axis] = -(n[(axis+1)%3]*Vi[(axis+1)%3] + n[(axis+2)%3]*Vi[(axis+2)%3]) / n[axis]
++                            # Check if P0 lies on triangle Vp, Vq, shifted
++                            # Solve a*(Vp-shifted) + b*(Vq-shifted) = P0-shifted
++                            e1 = Vp - shifted
++                            e2 = Vq - shifted
++                            w = P0 - shifted
++                            uu = np.dot(e1, e1)
++                            vv = np.dot(e2, e2)
++                            uv = np.dot(e1, e2)
++                            wu = np.dot(w, e1)
++                            wv = np.dot(w, e2)
++                            d = uv*uv - uu*vv
++                            if abs(d) < 1e-12: continue
++                            sa = (uv*wv - vv*wu) / d
++                            sb = (uv*wu - uu*wv) / d
++                            if sa >= 0 and sb >= 0 and sa + sb <= 1:
++                                d_shift = shifted[axis] - Vi[axis]
++                                if (voxel_val == 0 and d_shift * g_vox < 0) or (voxel_val == 1 and d_shift * g_vox > 0):
++                                    grad_V[face[Vi_idx], axis] -= g_vox * abs(d_shift) / diag
++    return grad_V
++```
++
+ ## Operating characteristics
+ - **Time Complexity:** $O(W \cdot H \cdot D \cdot M)$ per forward pass, where $M$ is the number of faces. The backward pass is also $O(W \cdot H \cdot D \cdot M)$ due to per-voxel gradient computation [S1, unofficial].
+-- **Memory Complexity:** $O(W \cdot H \cdot D)$ for the voxel volume and $O(N)$ for vertex gradients [S1, unofficial].
+ - **Performance:** Performance depends heavily on the number of faces and voxel resolution. The random ray casting allows for parallelization on GPUs [S1, unofficial].
+ - **Strengths:** Provides differentiable mesh optimization from voxel supervision; handles complex geometries via ray casting [S1, unofficial].

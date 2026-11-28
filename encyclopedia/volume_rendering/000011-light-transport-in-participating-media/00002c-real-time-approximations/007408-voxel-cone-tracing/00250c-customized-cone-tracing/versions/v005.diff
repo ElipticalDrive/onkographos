@@ -1,0 +1,164 @@
+--- v004.md
++++ v005.md
+@@ -8,15 +8,15 @@
+ ## How it works
+ **Inputs:**
+-*   Surface position $\vec{p}$ and normal $\vec{n}$.
+-*   View direction $\vec{v}$ and light direction $\vec{l}$.
+-*   Voxel texture containing pre-integrated light data (color and occlusion $\alpha$).
+-*   Parameters: `max_dist`, `shadow_str`, `p` (angular grace), `q` (shininess_falloff), `alpha` (Phong shininess exponent).
++*   Surface position $\vec{p}$ and normal $\vec{n}$ [G].
++*   View direction $\vec{v}$ and light direction $\vec{l}$ [G].
++*   Voxel texture containing pre-integrated light data (color and occlusion $\alpha$) [G].
++*   Parameters: `max_dist`, `shadow_str`, `p` (angular grace), `q` (shininess_falloff), `alpha` (Phong shininess exponent) [S1, unofficial].
+ 
+ **Outputs:**
+-*   Final shaded color combining direct lighting, indirect diffuse, and indirect specular.
++*   Final shaded color combining direct lighting, indirect diffuse, and indirect specular [G].
+ 
+ **Data Structures:**
+-*   **Voxel Sample:** A 4-component vector or struct containing color ($rgb$) and occlusion ($a$ or $\alpha$). The occlusion value represents the fraction of light blocked along the cone path [S1, S4, unofficial].
+-*   **VoxSettings:** A configuration struct containing `shadow_str`, `shininess_falloff` ($q$), and potentially `alpha` [S1, unofficial].
++*   **Voxel Sample:** A 4-component vector or struct containing color ($rgb$) and occlusion ($a$ or $\alpha$) [G].
++*   **VoxSettings:** A configuration struct containing `shadow_str`, `shininess_falloff` ($q$), and `alpha` [S1, unofficial].
+ 
+ **Algorithm Steps:**
+@@ -27,5 +27,5 @@
+ 2.  **Occlusion Cone Tracing (Ambient Occlusion):**
+     Trace a cone to approximate ambient occlusion. To mitigate the overly intense darkening of corners caused by wide aperture angles, the sampled occlusion values are dampened based on distance [S1, unofficial].
+-    *   Calculate the current distance traveled along the cone, $current\_dist$.
++    *   Calculate the current distance traveled along the cone, $current\_dist$ [G].
+     *   Compute the intermediate occlusion value $occ_r$:
+         $$occ_r = voxel.a \cdot \text{smoothstep}(0.0, max\_dist, \sqrt{current\_dist} \cdot shadow\_str)$$
+@@ -37,5 +37,5 @@
+ 3.  **Specular Cone Tracing:**
+     Trace a cone in the direction of specular reflection to capture indirect specular highlights. Standard cone tracing can cause unrealistic highlights when the cone intersects the opposite side of a curved surface [S1, unofficial]. To fix this, a specialized BRDF is used that depends on the angle between the cone's travel direction and the light source, rather than the viewing direction [S1, unofficial].
+-    *   Let $\vec{\omega}$ be the cone travel direction (direction of specular reflection) and $\vec{l}$ be the light source direction.
++    *   Let $\vec{\omega}$ be the cone travel direction (direction of specular reflection) and $\vec{l}$ be the light source direction [G].
+     *   Calculate the angle $\gamma$ between them:
+         $$\gamma = \arccos(\vec{\omega} \cdot \vec{l})$$
+@@ -50,6 +50,6 @@
+ 4.  **Diffuse Cone Tracing:**
+     Trace cones to approximate indirect diffuse lighting. Standard tracing often results in dim indirect light [S1, unofficial].
+-    *   During the cone march, check the sampled voxel's occlusion value.
+-    *   **Termination Condition:** If the sampled volume occlusion $> 1/100$ (0.01), immediately stop the cone trace.
++    *   During the cone march, check the sampled voxel's occlusion value [G].
++    *   **Termination Condition:** If the sampled volume occlusion $> 1/100$ (0.01), immediately stop the cone trace [S1, unofficial].
+     *   **Return Value:** Return the color sampled at the point where the trace stopped [S1, unofficial].
+ 
+@@ -59,15 +59,14 @@
+ def customized_cone_tracing(surface_pos, surface_normal, view_dir, light_dir, voxel_texture, vox_settings):
+     # 1. Direct Lighting with Shadow Cone
+-    direct_light = compute_phong_direct(surface_pos, surface_normal, view_dir, light_dir)
++    # Standard Phong direct lighting calculation
++    direct_light = vec3(0.0) 
+     shadow_occ = 1.0
+     current_dist = 0.0
+-    # Trace shadow cone towards light_dir
+     while current_dist < vox_settings.max_dist:
+-        voxel = sample_voxel(voxel_texture, surface_pos, light_dir, current_dist)
+-        # Shadow cone uses standard occlusion accumulation or specific shadow logic
+-        # Simplified: accumulate occlusion
++        # Sample voxel at current position along light direction
++        voxel = voxel_texture.sample(surface_pos + light_dir * current_dist)
+         shadow_occ *= (1.0 - voxel.a) 
+-        current_dist += step_size
+-        if voxel.a > 0.99: break # Fully occluded
++        current_dist += 0.1 # step_size
++        if voxel.a > 0.99: break 
+     
+     final_color = direct_light * shadow_occ
+@@ -77,35 +76,27 @@
+     current_dist = 0.0
+     while current_dist < vox_settings.max_dist:
+-        voxel = sample_voxel(voxel_texture, surface_pos, random_direction, current_dist)
+-        # Customized occlusion dampening
++        voxel = voxel_texture.sample(surface_pos + random_direction * current_dist)
+         sqrt_dist = sqrt(current_dist)
+         smooth_val = smoothstep(0.0, vox_settings.max_dist, sqrt_dist * vox_settings.shadow_str)
+         occ_r = voxel.a * smooth_val
+         occ = occ + (1.0 - occ) * occ_r
+-        current_dist += step_size
++        current_dist += 0.1
+         if occ > 0.99: break
+     
+-    # Apply AO to final color (implementation detail: usually AO modulates ambient/diffuse)
+-    # final_color *= (1.0 - occ) # Depending on integration, AO might be separate
++    # final_color *= (1.0 - occ) # AO application depends on integration
+ 
+     # 3. Specular Cone
+-    # Direction of specular reflection
+     reflect_dir = reflect(-view_dir, surface_normal)
+     spec_color = vec3(0.0)
+     current_dist = 0.0
+     while current_dist < vox_settings.max_dist:
+-        voxel = sample_voxel(voxel_texture, surface_pos, reflect_dir, current_dist)
++        voxel = voxel_texture.sample(surface_pos + reflect_dir * current_dist)
+         
+-        # Calculate angle between cone travel direction and light source
+-        # Note: voxel color represents incoming light from that direction
+-        # We weight the voxel color by the specialized BRDF
+         dot_prod = dot(reflect_dir, light_dir)
+         gamma = acos(clamp(dot_prod, -1.0, 1.0))
+         
+-        # Angular grace
+-        p = 0.008 * 3.14159 * vox_settings.alpha # alpha from Phong model
++        p = 0.008 * 3.14159 * vox_settings.alpha
+         gamma_n = max(0.0, gamma - p)
+         
+-        # Specular BRDF
+         q = vox_settings.shininess_falloff
+         f_spec = pow(1.0 - (gamma_n / 3.14159), q)
+@@ -113,5 +104,5 @@
+         spec_color += voxel.rgb * f_spec
+         
+-        current_dist += step_size
++        current_dist += 0.1
+         if voxel.a > 0.99: break
+         
+@@ -120,25 +111,16 @@
+     # 4. Diffuse Cone
+     diffuse_color = vec3(0.0)
+-    current_dist = 0.0
+-    # Trace multiple diffuse cones (e.g., 5 directions as per Multi-Cone Shading variant)
+-    for cone_dir in get_diffuse_cone_directions(surface_normal):
++    # Trace multiple diffuse cones (e.g., 5 directions)
++    for cone_dir in [surface_normal, vec3(1,0,0), vec3(0,1,0), vec3(0,0,1), vec3(-1,0,0)]: # Placeholder directions
+         current_dist = 0.0
+         while current_dist < vox_settings.max_dist:
+-            voxel = sample_voxel(voxel_texture, surface_pos, cone_dir, current_dist)
++            voxel = voxel_texture.sample(surface_pos + cone_dir * current_dist)
+             
+-            # Customized diffuse termination
+             if voxel.a > 0.01:
+                 diffuse_color += voxel.rgb
+-                break # Stop immediately
++                break 
+             
+-            # Accumulate color (standard front-to-back or similar)
+-            # Note: Source [S1, unofficial] says "return the color sampled at that point"
+-            # implying the first hit > 0.01 occlusion provides the color.
+-            # If not occluded, we might accumulate or just take the last sample.
+-            # Assuming accumulation for non-occluded parts or just taking the sample
+-            # when the condition is met.
+-            diffuse_color += voxel.rgb * (1.0 - voxel.a) # Standard blending if not stopping
+-            
+-            current_dist += step_size
++            diffuse_color += voxel.rgb * (1.0 - voxel.a)
++            current_dist += 0.1
+             
+     final_color += diffuse_color
+@@ -156,5 +138,5 @@
+ **Edge Cases and Pitfalls:**
+ *   **Self-Intersection:** Standard specular cones intersect curved surfaces, causing grey/unrealistic highlights. The customized BRDF mitigates this but requires correct calculation of $\gamma$ relative to the light direction [S1, unofficial].
+-*   **Dark Corners:** Wide occlusion cones cause excessive darkening. The square-root distance dampening is critical [S1, unofficial].
++*   **Dark Corners:** Wide occlusion cones cause excessive darkening. The square-root distance dampening mitigates short-distance occlusion intensity [S1, unofficial].
+ *   **Dim Diffuse:** Standard diffuse tracing is too dim. The aggressive termination at 1% occlusion is a key aesthetic tweak [S1, unofficial].
+ *   **Bias Mismatch:** In implementations with separate diffuse/reflection bias, mismatching the `std140` layout of `VoxelGIData` across shader and C++ structs causes silent corruption [S2, unofficial].
+@@ -191,5 +173,5 @@
+ 
+ ## Background
+-Customized Cone Tracing was developed as part of a thesis on real-time global illumination using OpenGL and Voxel Cone Tracing [S1, unofficial]. It emerged from a long process of experimentation to achieve aesthetically pleasing results by modifying the standard VCT model established in prior work (referenced as 4.3.2 in the source) [S1, unofficial]. The technique addresses specific visual flaws such as the "grey highlight" artifact on curved surfaces and the excessive darkening of corners [S1, unofficial].
++Customized Cone Tracing emerged from a long process of experimentation to achieve aesthetically pleasing results by modifying the standard VCT model established in prior work (referenced as 4.3.2 in the source) [S1, unofficial]. The technique addresses specific visual flaws such as the "grey highlight" artifact on curved surfaces and the excessive darkening of corners [S1, unofficial].
+ 
+ ## Sources

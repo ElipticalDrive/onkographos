@@ -1,0 +1,4881 @@
+# NerfingMVS
+### [Project Page](https://weiyithu.github.io/NerfingMVS) | [Paper](https://arxiv.org/abs/2109.01129) | [Video](https://youtu.be/i-b5lPnYipA) | [Data](https://drive.google.com/drive/folders/1X_w57Q_MIFlI3lzhRt7Z8C5X9tNS8cg-?usp=sharing)
+<br/>
+
+> NerfingMVS: Guided Optimization of Neural Radiance Fields for Indoor Multi-view Stereo  
+> [Yi Wei](https://weiyithu.github.io/), [Shaohui Liu](http://b1ueber2y.me/), [Yongming Rao](https://raoyongming.github.io/), [Wang Zhao](https://github.com/thuzhaowang), [Jiwen Lu](http://ivg.au.tsinghua.edu.cn/Jiwen_Lu/), [Jie Zhou](https://scholar.google.com/citations?user=6a79aPwAAAAJ&hl=en&authuser=1)  
+> ICCV 2021 (Oral Presentation)  
+
+<p align='center'>
+<img src="imgs/demo.gif" width='80%'/>
+</p>
+
+## Installation
+- Pull NerfingMVS repo.
+  ```
+  git clone --recursive git@github.com:weiyithu/NerfingMVS.git
+  ```
+- Install python packages with anaconda.
+  ```
+  conda create -n NerfingMVS python=3.7
+  conda activate NerfingMVS
+  conda install pytorch==1.7.1 torchvision==0.8.2 torchaudio==0.7.2 -c pytorch
+  pip install -r requirements.txt
+  ```
+- We use COLMAP to calculate poses and sparse depths. However, original COLMAP does not have fusion mask for each view. Thus, we add masks to COLMAP and denote it as a submodule. Please follow https://colmap.github.io/install.html to install COLMAP in `./colmap` folder (Note that do not cover colmap folder with the original version). 
+
+## Usage
+- Download 8 ScanNet scene data used in the paper [here](https://drive.google.com/file/d/1eY85_adVY-Z8y4XUG8mi31TJzAfdx59M/view?usp=sharing) and put them under `./data` folder. We also upload final results and checkpoints of each scene [here](https://drive.google.com/file/d/137zj7McxulcoDINZ3i1woQcvu2HxrM0X/view?usp=sharing). 
+- Run NerfingMVS
+  ```
+  sh run.sh $scene_name
+  ```
+  The whole procedure takes about 3.5 hours on one NVIDIA GeForce RTX 2080 GPU, including COLMAP, depth priors training, NeRF training, filtering and evaluation. COLMAP can be accelerated with multiple GPUs.You will get per-view depth maps in `./logs/$scene_name/filter`. Note that these depth maps have been aligned with COLMAP poses. COLMAP results will be saved in `./data/$scene_name` while others will be preserved in `./logs/$scene_name`
+
+## Run on Your Own Data!
+- Place your data with the following structure:
+  ```
+  NerfingMVS
+  |───data
+  |    |──────$scene_name
+  |    |   |   train.txt
+  |    |   |──────images
+  |    |   |    |    001.jpg
+  |    |   |    |    002.jpg
+  |    |   |    |    ...
+  |───configs
+  |    $scene_name.txt
+  |     ...
+  ```
+  `train.txt` contains names of all the images. Images can be renamed arbitrarily and '001.jpg' is just an example. You also need to imitate ScanNet scenes to create a config file in `./configs`. Note that `factor` parameter controls the resolution of output depth maps. You also should adjust `depth_N_iters, depth_H, depth_W` in `options.py` accordingly. 
+- Run NerfingMVS without evaluation
+  ```
+  sh demo.sh $scene_name
+  ```
+  Since our work currently relies on COLMAP, the results are dependent on the quality of the acquired poses and sparse reconstruction from COLMAP.
+
+## Acknowledgement
+Our code is based on the pytorch implementation of NeRF: [NeRF-pytorch](https://github.com/yenchenlin/nerf-pytorch). We also refer to [mannequin challenge](https://github.com/google/mannequinchallenge). 
+  
+## Citation 
+If you find our work useful in your research, please consider citing:
+```
+@inproceedings{wei2021nerfingmvs,
+  author    = {Wei, Yi and Liu, Shaohui and Rao, Yongming and Zhao, Wang and Lu, Jiwen and Zhou, Jie},
+  title     = {NerfingMVS: Guided Optimization of Neural Radiance Fields for Indoor Multi-view Stereo},
+  booktitle = {ICCV},
+  year = {2021}
+}
+```
+
+### options.py
+```
+import configargparse
+def config_parser():
+    
+    parser = configargparse.ArgumentParser()
+    parser.add_argument('--config', is_config_file=True,
+                        help='config file path')
+    parser.add_argument("--expname", type=str,
+                        help='experiment name')
+    parser.add_argument("--basedir", type=str, default='./logs/',
+                        help='where to store ckpts and logs')
+    parser.add_argument("--datadir", type=str, default='./data/llff/fern',
+                        help='input data directory')
+    parser.add_argument("--demo", action='store_true',
+                        help='if demo, no evaluation')
+
+    # depth priors options
+    parser.add_argument("--depth_N_rand", type=int, default=4, 
+                        help='batch size for depth')
+    parser.add_argument("--depth_N_iters", type=int, default=151,
+                        help='number of iterations for depth')
+    parser.add_argument("--depth_H", type=int, default=288, 
+                        help='the height of depth image (must be 16x)')
+    parser.add_argument("--depth_W", type=int, default=384,
+                        help='the width of depth image (must be 16x)')
+    parser.add_argument("--depth_lrate", type=float, default=4e-4,
+                        help='learning rate for depth')
+    parser.add_argument("--depth_i_weights", type=int, default=50,
+                        help='frequency of weight ckpt saving for depth')
+    parser.add_argument("--depth_i_print",   type=int, default=20,
+                        help='frequency of console printout and metric loggin')
+    
+    # nerf options
+    parser.add_argument("--netdepth", type=int, default=8,
+                        help='layers in network')
+    parser.add_argument("--netwidth", type=int, default=256,
+                        help='channels per layer')
+    parser.add_argument("--N_rand", type=int, default=32*32*4,
+                        help='batch size (number of random rays per gradient step)')
+    parser.add_argument("--N_iters", type=int, default=200001,
+                        help='number of iterations')
+    parser.add_argument("--lrate", type=float, default=5e-4,
+                        help='learning rate')
+    parser.add_argument("--lrate_decay", type=int, default=250,
+                        help='exponential learning rate decay (in 1000 steps)')
+    parser.add_argument("--chunk", type=int, default=1024*32,
+                        help='number of rays processed in parallel, decrease if running out of memory')
+    parser.add_argument("--netchunk", type=int, default=1024*64,
+                        help='number of pts sent through network in parallel, decrease if running out of memory')
+    parser.add_argument("--no_reload", action='store_true',
+                        help='do not reload weights from saved ckpt')
+    parser.add_argument("--ft_path", type=str, default=None,
+                        help='specific weights npy file to reload for coarse network')
+    parser.add_argument("--N_samples", type=int, default=64,
+                        help='number of coarse samples per ray')
+    parser.add_argument("--perturb", type=float, default=1.,
+                        help='set to 0. for no jitter, 1. for jitter')
+    parser.add_argument("--use_viewdirs", action='store_true',
+                        help='use full 5D input instead of 3D')
+    parser.add_argument("--i_embed", type=int, default=0,
+                        help='set 0 for default positional encoding, -1 for none')
+    parser.add_argument("--multires", type=int, default=10,
+                        help='log2 of max freq for positional encoding (3D location)')
+    parser.add_argument("--multires_views", type=int, default=4,
+                        help='log2 of max freq for positional encoding (2D direction)')
+    parser.add_argument("--raw_noise_std", type=float, default=0.,
+                        help='std dev of noise added to regularize sigma_a output, 1e0 recommended')
+    parser.add_argument("--render_only", action='store_true',
+                        help='do not optimize, reload weights and render out render_poses path')
+    parser.add_argument("--render_test", action='store_true',
+                        help='render the test set instead of render_poses path')
+    parser.add_argument("--render_factor", type=int, default=0,
+                        help='downsampling factor to speed up rendering, set 4 or 8 for fast preview')
+    parser.add_argument("--white_bkgd", action='store_true',
+                        help='set to render synthetic data on a white bkgd (always use for dvoxels)')
+    parser.add_argument("--factor", type=int, default=8,
+                        help='downsample factor for LLFF images')
+    parser.add_argument("--N_views", type=int, default=120,
+                        help='the number of render views')
+    parser.add_argument("--no_ndc", action='store_true',
+                        help='do not use normalized device coordinates (set for non-forward facing scenes)')
+    parser.add_argument("--lindisp", action='store_true',
+                        help='sampling linearly in disparity rather than depth')
+    parser.add_argument("--spherify", action='store_true',
+                        help='set for spherical 360 scenes')
+    parser.add_argument("--near", type=float, default=0.05,
+                        help='abs near bound')
+    parser.add_argument("--far", type=float, default=0.15,
+                        help='abs far bound')
+    parser.add_argument("--topk", type=int, default=4,
+                        help='topk for consis error')
+    parser.add_argument("--i_print",   type=int, default=100,
+                        help='frequency of console printout and metric loggin')
+    parser.add_argument("--i_weights", type=int, default=20000,
+                        help='frequency of weight ckpt saving')
+
+    # filter options
+    parser.add_argument("--worker_num", type=int, default=8,
+                        help='the number of worker for multiprocessing')
+    
+    return parser
+```
+
+### run.py
+```
+import sys
+import torch
+from torch.multiprocessing import set_start_method
+set_start_method('spawn', force=True)
+import time
+
+from src import initialize, depth_priors, run_nerf, filter, evaluation
+from utils.pose_utils import gen_poses
+from options import config_parser
+            
+if __name__=='__main__':
+    time = time.time()
+    torch.set_default_tensor_type('torch.cuda.FloatTensor')
+    parser = config_parser()
+    args = parser.parse_args()
+    print(args.expname)
+    initialize.main(args)
+    gen_poses(args.datadir)
+    depth_priors.train(args)
+    run_nerf.train(args)
+    filter.main(args)
+    
+    if not args.demo:
+        print('Evaluation begins !')
+        evaluation.main(args)
+```
+
+### src/depth_priors.py
+```
+import os, sys
+sys.path.append('..')
+import numpy as np
+import torch
+import cv2
+
+from torch.utils.tensorboard import SummaryWriter
+from tqdm import tqdm, trange
+import pdb
+
+from models.depth_priors.mannequin_challenge_model import MannequinChallengeModel
+from options import config_parser
+from utils.io_utils import *
+from utils.depth_priors_utils import *
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+def create_depth_model(args):
+    """Instantiate depth model.
+    """
+    depth_model = MannequinChallengeModel()
+    grad_vars = depth_model.parameters()
+    # Create optimizer
+    optimizer = torch.optim.Adam(params=grad_vars, lr=args.depth_lrate, betas=(0.9, 0.999))
+
+    start = 0
+    basedir = args.basedir
+    expname = args.expname
+    ckpt_path = os.path.join(basedir, expname, 'depth_priors', 'checkpoints')
+
+    # Load checkpoints
+    ckpts = [os.path.join(ckpt_path, f) for f in sorted(os.listdir(ckpt_path)) if 'tar' in f]
+
+    if len(ckpts) > 0 and not args.no_reload:
+        print('Found ckpts', ckpts)
+        ckpt_path = ckpts[-1]
+        print('Reloading from', ckpt_path)
+        ckpt = torch.load(ckpt_path)
+
+        start = ckpt['global_step']
+        optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+
+        decay_rate = 0.1
+        decay_steps = args.depth_N_iters
+        
+        new_lrate = args.depth_lrate * (decay_rate ** (start / decay_steps))
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = new_lrate
+
+        depth_model.model.netG.load_state_dict(ckpt['netG_state_dict'])
+
+    return depth_model, start, optimizer
+
+
+
+def train(args):
+    print('Depths prior training begins !')
+    image_list = load_img_list(args.datadir)
+    depth_model, global_step_depth, optimizer_depth = create_depth_model(args)
+
+    # Summary writers
+    save_dir = os.path.join(args.basedir, args.expname, 'depth_priors')
+    writer = SummaryWriter(os.path.join(save_dir, 'summary'))
+
+    
+    images = load_rgbs(image_list, os.path.join(args.datadir, 'images'), 
+                       args.depth_H, args.depth_W)
+    images_train = images.clone()
+    depths, masks = load_colmap(image_list, args.datadir, 
+                                args.depth_H, args.depth_W)
+
+    depths_train = torch.from_numpy(depths).to(device)
+    depths_mask_train = torch.from_numpy(masks).to(device)
+
+    N_rand_depth = args.depth_N_rand
+    N_iters_depth = args.depth_N_iters
+    
+    i_batch = 0
+    depth_model.train()
+    start = global_step_depth + 1
+    
+    for i in trange(start, N_iters_depth):
+        batch = images_train[i_batch:i_batch + N_rand_depth]
+        depth_gt, mask_gt = depths_train[i_batch:i_batch + N_rand_depth], depths_mask_train[i_batch:i_batch + N_rand_depth]
+        depth_pred = depth_model(batch)
+        loss = compute_depth_loss(depth_pred, depth_gt, mask_gt)
+
+        optimizer_depth.zero_grad()
+        loss.backward()
+        optimizer_depth.step()
+        decay_rate = 0.1
+        decay_steps = args.depth_N_iters
+        new_lrate = args.depth_lrate * (decay_rate ** (i / decay_steps))
+        for param_group in optimizer_depth.param_groups:
+            param_group['lr'] = new_lrate
+        i_batch += N_rand_depth
+        
+        if i_batch >= images_train.shape[0]:
+            
+            print("Shuffle depth data after an epoch!")
+            rand_idx = torch.randperm(images_train.shape[0])
+            images_train = images_train[rand_idx]
+            depths_train = depths_train[rand_idx]
+            depths_mask_train = depths_mask_train[rand_idx]
+            i_batch = 0
+
+        if i % args.depth_i_weights==0:
+            path = os.path.join(save_dir, 'checkpoints', '{:06d}.tar'.format(i))
+            torch.save({
+                'global_step': i,
+                'netG_state_dict': depth_model.model.netG.state_dict(),
+                'optimizer_state_dict': optimizer_depth.state_dict(),
+            }, path)
+            print('Saved checkpoints at', path)
+            
+        if i%args.depth_i_print==0:
+            tqdm.write(f"[TRAIN] Iter: {i} Loss: {loss.item()}")
+        
+        global_step_depth += 1
+    print('depths prior training done!')
+    
+    with torch.no_grad():
+        depth_model.eval()
+        for i, image_name in enumerate(image_list):
+            frame_id = image_name.split('.')[0]
+            batch = images[i:i + 1]
+            depth_pred = depth_model.forward(batch).cpu().numpy()
+            depth_color = visualize_depth(depth_pred)
+            cv2.imwrite(os.path.join(save_dir, 'results', '{}_depth.png'.format(frame_id)), depth_color)
+            np.save(os.path.join(save_dir, 'results', '{}_depth.npy'.format(frame_id)), depth_pred)
+    print('results have been saved in {}'.format(os.path.join(save_dir, 'results')))
+
+if __name__=='__main__':
+    torch.set_default_tensor_type('torch.cuda.FloatTensor')
+    parser = config_parser()
+    args = parser.parse_args()
+    train(args)
+```
+
+### src/evaluation.py
+```
+import os, sys
+sys.path.append('..')
+import torch
+
+from utils.io_utils import *
+from utils.evaluation_utils import *
+from options import config_parser
+
+def main(args):
+    image_list = load_img_list(args.datadir, load_test=False)
+    prior_path = os.path.join(args.basedir, args.expname, 'depth_priors', 'results')
+    nerf_path = os.path.join(args.basedir, args.expname, 'nerf', 'results')
+    filter_path = os.path.join(args.basedir, args.expname, 'filter')
+    
+    prior_depths = load_depths(image_list, prior_path)
+    nerf_depths = load_depths(image_list, nerf_path)
+    filter_depths = load_depths(image_list, filter_path)
+    gt_depths, _ = load_gt_depths(image_list, args.datadir)
+    
+    print("prior depth evaluation:")
+    depth_evaluation(gt_depths, prior_depths, savedir=prior_path)
+    print("nerf depth evaluation:")
+    depth_evaluation(gt_depths, nerf_depths, savedir=nerf_path)
+    print("filter depth evaluation:")
+    depth_evaluation(gt_depths, filter_depths, savedir=filter_path)
+    
+    image_list_all = load_img_list(args.datadir, load_test=True)
+    image_list_test = list(set(image_list_all) - set(image_list))
+    nerf_rgbs = load_rgbs_np(image_list_test, nerf_path, 
+                             use_cv2=False, is_png=True)
+    gt_rgbs = load_rgbs_np(image_list_test, 
+                    os.path.join(args.datadir, 'images_{}'.format(args.factor)), 
+                    use_cv2=False, is_png=True)
+    print("nerf novel view synthesis evaluation:")
+    with torch.no_grad():
+        rgb_evaluation(gt_rgbs, nerf_rgbs, savedir=nerf_path)
+
+if __name__ == '__main__':
+    parser = config_parser()
+    args = parser.parse_args()
+    main(args)
+```
+
+### src/filter.py
+```
+import os, sys
+sys.path.append('..')
+import numpy as np
+import cv2
+import multiprocessing
+from scipy.sparse import diags
+from scipy.sparse.linalg import cg
+from scipy.sparse import csr_matrix
+
+from options import config_parser
+from utils.filter_utils import *
+from utils.io_utils import *
+
+#From https://github.com/jonbarron/planar_filter/blob/main/planar_filter.ipynb
+def planar_filter(Z, filt, eps):
+  # Solve for the plane at each pixel in `Z`, where the plane fit is computed
+  # by using `filt` (a function that blurs something of the same size and shape
+  # as `Z` by taking a linear non-negative combination of inputs) to weight
+  # pixels in Z, and `eps` regularizes the output to be fronto-parallel.
+  # Returns (Zx, Zy, Zz), which is a plane parameterization for each pixel:
+  # the derivative wrt x and y, and the offset (which can itself be used as
+  # "the" filtered output).
+
+  # Note: This isn't the same code as in the paper. I flipped x and y to match
+  # a more pythonic (x, y) convention, and I had to flip a sign on the output
+  # slopes to make the unit tests pass(this may be a bug in the paper's math).
+  # Also, I decided to not regularize the "offset" component of the plane fit,
+  # which means that setting eps -> infinity gives the output (0, 0, filt(Z)).
+  xy_shape = np.array(Z.shape[-2:])
+  xy_scale = 2 / np.mean(xy_shape-1)  # Scaling the x, y coords to be in ~[0, 1]
+  x, y = np.meshgrid(*[(np.arange(s) - (s-1)/2) * xy_scale for s in xy_shape], indexing='ij')
+  [F1, Fx, Fy, Fz, Fxx, Fxy, Fxz, Fyy, Fyz] = [
+    filt(t) for t in [
+    np.ones_like(x), x, y, Z, x**2, x*y, x*Z, y**2, y*Z]]
+  A11 = F1*x**2 - 2*x*Fx + Fxx + eps**2
+  A22 = F1*y**2 - 2*y*Fy + Fyy + eps**2
+  A12 = F1*y*x - x*Fy - y*Fx + Fxy
+  A13 = F1*x - Fx
+  A23 = F1*y - Fy
+  A33 = F1# + eps**2
+  b1 = Fz*x - Fxz
+  b2 = Fz*y - Fyz
+  b3 = Fz
+  Zx, Zy, Zz = solve_image_ldl3(A11, A12, A13, A22, A23, A33, b1, b2, b3)
+  return -Zx*xy_scale, -Zy*xy_scale, Zz
+
+
+def get_valid_idx(valid, candidates):
+    """Find which values are present in a list and where they are located"""
+    locs = np.searchsorted(valid, candidates)
+    # Handle edge case where the candidate is larger than all valid values
+    locs = np.clip(locs, 0, len(valid) - 1)
+    # Identify which values are actually present
+    valid_idx = np.flatnonzero(valid[locs] == candidates)
+    locs = locs[valid_idx]
+    return valid_idx, locs
+
+class BilateralGrid(object):
+    def __init__(self, im, sigma_spatial=32, sigma_luma=8, sigma_chroma=8):
+        im_yuv = rgb2yuv(im)
+        # Compute 5-dimensional XYLUV bilateral-space coordinates
+        Iy, Ix = np.mgrid[:im.shape[0], :im.shape[1]]
+        x_coords = (Ix / sigma_spatial).astype(int)
+        y_coords = (Iy / sigma_spatial).astype(int)
+        luma_coords = (im_yuv[..., 0] /sigma_luma).astype(int)
+        chroma_coords = (im_yuv[..., 1:] / sigma_chroma).astype(int)
+        coords = np.dstack((x_coords, y_coords, luma_coords, chroma_coords))
+        coords_flat = coords.reshape(-1, coords.shape[-1])
+        self.npixels, self.dim = coords_flat.shape
+        # Hacky "hash vector" for coordinates,
+        # Requires all scaled coordinates be < MAX_VAL
+        self.hash_vec = (MAX_VAL**np.arange(self.dim))
+        # Construct S and B matrix
+        self._compute_factorization(coords_flat)
+
+    def _compute_factorization(self, coords_flat):
+        # Hash each coordinate in grid to a unique value
+        hashed_coords = self._hash_coords(coords_flat)
+        unique_hashes, unique_idx, idx = \
+            np.unique(hashed_coords, return_index=True, return_inverse=True)
+        # Identify unique set of vertices
+        unique_coords = coords_flat[unique_idx]
+        self.nvertices = len(unique_coords)
+        # Construct sparse splat matrix that maps from pixels to vertices
+        self.S = csr_matrix((np.ones(self.npixels), (idx, np.arange(self.npixels))))
+        # Construct sparse blur matrices.
+        # Note that these represent [1 0 1] blurs, excluding the central element
+        self.blurs = []
+        for d in range(self.dim):
+            blur = 0.0
+            for offset in (-1, 1):
+                offset_vec = np.zeros((1, self.dim))
+                offset_vec[:, d] = offset
+                neighbor_hash = self._hash_coords(unique_coords + offset_vec)
+                valid_coord, idx = get_valid_idx(unique_hashes, neighbor_hash)
+                blur = blur + csr_matrix((np.ones((len(valid_coord),)),
+                                          (valid_coord, idx)),
+                                         shape=(self.nvertices, self.nvertices))
+            self.blurs.append(blur)
+
+    def _hash_coords(self, coord):
+        """Hacky function to turn a coordinate into a unique value"""
+        return np.dot(coord.reshape(-1, self.dim), self.hash_vec)
+
+    def splat(self, x):
+        return self.S.dot(x)
+
+    def slice(self, y):
+        return self.S.T.dot(y)
+
+    def blur(self, x):
+        """Blur a bilateral-space vector with a 1 2 1 kernel in each dimension"""
+        assert x.shape[0] == self.nvertices
+        out = 2 * self.dim * x
+        for blur in self.blurs:
+            out += blur.dot(x)
+        return out
+
+    def filter(self, x):
+        """Apply bilateral filter to an input x"""
+        return self.slice(self.blur(self.splat(x))) /  \
+               self.slice(self.blur(self.splat(np.ones_like(x))))
+
+
+#From https://github.com/poolio/bilateral_solver
+class BilateralSolver(object):
+    def __init__(self, grid, params):
+        self.grid = grid
+        self.params = params
+        self.Dn, self.Dm = bistochastize(grid)
+
+    def solve(self, x, w):
+        # Check that w is a vector or a nx1 matrix
+        if w.ndim == 2:
+            assert(w.shape[1] == 1)
+        elif w.dim == 1:
+            w = w.reshape(w.shape[0], 1)
+        A_smooth = (self.Dm - self.Dn.dot(self.grid.blur(self.Dn)))
+        w_splat = self.grid.splat(w)
+        A_data = diags(w_splat[:,0], 0)
+        A = self.params["lam"] * A_smooth + A_data
+        xw = x * w
+        b = self.grid.splat(xw)
+        # Use simple Jacobi preconditioner
+        A_diag = np.maximum(A.diagonal(), self.params["A_diag_min"])
+        M = diags(1 / A_diag, 0)
+        # Flat initialization
+        y0 = self.grid.splat(xw) / (w_splat + 1e-10)
+        yhat = np.empty_like(y0)
+        for d in range(x.shape[-1]):
+            yhat[..., d], info = cg(A, b[..., d], x0=y0[..., d], M=M, maxiter=self.params["cg_maxiter"], tol=self.params["cg_tol"])
+        xhat = self.grid.slice(yhat)
+        return xhat
+
+
+def process(info):
+    img, Z, W, save_path = info
+    print('processing ' + save_path)
+    grid_params = {
+        'sigma_luma' : 8,
+        'sigma_chroma': 8,
+        'sigma_spatial': 8
+    }
+
+    bs_params = {
+        'lam': 128, #The strength of the smoothness parameter
+        'A_diag_min': 1e-5, # Clamp the diagonal of the A diagonal in the Jacobi preconditioner.
+        'cg_tol': 1e-5, # The tolerance on the convergence in PCG
+        'cg_maxiter': 25 # The number of PCG iterations
+    }
+
+    grid = BilateralGrid(img, **grid_params)
+
+    def bf_solver(Z):
+        t = Z.reshape(-1, 1).astype(np.double)
+        c = W.reshape(-1, 1).astype(np.double)
+        return BilateralSolver(grid, bs_params).solve(t, c).reshape(Z.shape)
+
+    Zx, Zy, filter_depth = planar_filter(Z, bf_solver, 1)
+
+    color_depth = visualize_depth(filter_depth)
+    cv2.imwrite(save_path + '.png', color_depth)
+    np.save(save_path + '.npy', filter_depth)
+    
+
+def main(args):
+    print('Filtering begins !')
+    image_list = load_img_list(args.datadir, load_test=False)
+    pred_rgbs = load_rgbs_np(image_list, 
+                    os.path.join(args.basedir, args.expname, 'nerf', 'results'),
+                    is_png=True)
+    pred_depths = load_depths(image_list, 
+                    os.path.join(args.basedir, args.expname, 'nerf', 'results'))
+    N, H, W, _ = pred_rgbs.shape
+    gt_rgbs = load_rgbs_np(image_list, os.path.join(args.datadir, 'images'),
+                           H=H, W=W)
+    confidences = 1 - np.abs(pred_rgbs / 255.0 - gt_rgbs / 255.0).mean(-1)
+    save_path = [os.path.join(args.basedir, args.expname, 'filter', img_name.split('.')[0]) 
+                 for img_name in image_list]
+    info_list = [(gt_rgbs[i], pred_depths[i], confidences[i], save_path[i]) 
+                 for i in range(N)]
+    p = multiprocessing.Pool(args.worker_num)
+    p.map_async(process, info_list)
+    p.close()
+    p.join()
+
+    
+if __name__ == '__main__':
+    parser = config_parser()
+    args = parser.parse_args()
+    main(args)
+```
+
+### src/initialize.py
+```
+import os
+from options import config_parser
+
+def main(args):
+    basedir = args.basedir
+    expname = args.expname
+    os.makedirs(os.path.join(basedir, expname), exist_ok=True)
+    
+    os.makedirs(os.path.join(basedir, expname, 'depth_priors', 'checkpoints'), exist_ok=True)
+    os.makedirs(os.path.join(basedir, expname, 'depth_priors', 'results'), exist_ok=True)
+    os.makedirs(os.path.join(basedir, expname, 'depth_priors', 'summary'), exist_ok=True)
+    
+    os.makedirs(os.path.join(basedir, expname, 'nerf', 'checkpoints'), exist_ok=True)
+    os.makedirs(os.path.join(basedir, expname, 'nerf', 'results'), exist_ok=True)
+    os.makedirs(os.path.join(basedir, expname, 'nerf', 'summary'), exist_ok=True)
+    
+    os.makedirs(os.path.join(basedir, expname, 'filter'), exist_ok=True)
+    
+    f = os.path.join(basedir, expname, 'args.txt')
+    with open(f, 'w') as file:
+        for arg in sorted(vars(args)):
+            attr = getattr(args, arg)
+            file.write('{} = {}\n'.format(arg, attr))
+    if args.config is not None:
+        f = os.path.join(basedir, expname, 'config.txt')
+        with open(f, 'w') as file:
+            file.write(open(args.config, 'r').read())
+            
+if __name__ == '__main__':
+    parser = config_parser()
+    args = parser.parse_args()
+    main(args)
+```
+
+### src/load_llff.py
+```
+import numpy as np
+import os, imageio
+import pdb
+
+########## Slightly modified version of LLFF data loading code
+##########  see https://github.com/Fyusion/LLFF for original
+
+def _minify(basedir, factors=[], resolutions=[]):
+    needtoload = False
+    for r in factors:
+        imgdir = os.path.join(basedir, 'images_{}'.format(r))
+        if not os.path.exists(imgdir):
+            needtoload = True
+    for r in resolutions:
+        imgdir = os.path.join(basedir, 'images_{}x{}'.format(r[1], r[0]))
+        if not os.path.exists(imgdir):
+            needtoload = True
+    if not needtoload:
+        return
+
+    from shutil import copy
+    from subprocess import check_output
+
+    imgdir = os.path.join(basedir, 'images')
+    with open(os.path.join(basedir, 'train.txt'), 'r') as f_list:
+        lines = f_list.readlines()
+    if os.path.exists(os.path.join(basedir, 'test.txt')):
+        with open(os.path.join(basedir, 'test.txt'), 'r') as f_list:
+            lines += f_list.readlines()
+    imgs = [os.path.join(imgdir, f.strip()) for f in lines]
+    imgs = [f for f in imgs if any([f.endswith(ex) for ex in ['JPG', 'jpg', 'png', 'jpeg', 'PNG']])]
+    imgdir_orig = imgdir
+
+    wd = os.getcwd()
+
+    for r in factors + resolutions:
+        if isinstance(r, int):
+            name = 'images_{}'.format(r)
+            resizearg = '{}%'.format(100./r)
+        else:
+            name = 'images_{}x{}'.format(r[1], r[0])
+            resizearg = '{}x{}'.format(r[1], r[0])
+        imgdir = os.path.join(basedir, name)
+        if os.path.exists(imgdir):
+            continue
+
+        print('Minifying', r, basedir)
+
+        os.makedirs(imgdir)
+        check_output('cp {}/* {}'.format(imgdir_orig, imgdir), shell=True)
+
+        ext = imgs[0].split('.')[-1]
+        args = ' '.join(['mogrify', '-resize', resizearg, '-format', 'png', '*.{}'.format(ext)])
+        print(args)
+        os.chdir(imgdir)
+        check_output(args, shell=True)
+        os.chdir(wd)
+
+        if ext != 'png':
+            check_output('rm {}/*.{}'.format(imgdir, ext), shell=True)
+            print('Removed duplicates')
+        print('Done')
+
+
+
+
+def _load_data(basedir, factor=None, width=None, height=None, load_imgs=True):
+
+    poses_arr = np.load(os.path.join(basedir, 'poses_bounds.npy'))
+    poses = poses_arr[:, :-2].reshape([-1, 3, 5]).transpose([1,2,0])
+    bds = poses_arr[:, -2:].transpose([1,0])
+
+    img0 = [os.path.join(basedir, 'images', f) for f in sorted(os.listdir(os.path.join(basedir, 'images'))) \
+            if f.endswith('JPG') or f.endswith('jpg') or f.endswith('png')][0]
+    sh = imageio.imread(img0).shape
+
+    sfx = ''
+
+    if factor is not None:
+        sfx = '_{}'.format(factor)
+        _minify(basedir, factors=[factor])
+        factor = factor
+    elif height is not None:
+        factor = sh[0] / float(height)
+        width = int(sh[1] / factor)
+        _minify(basedir, resolutions=[[height, width]])
+        sfx = '_{}x{}'.format(width, height)
+    elif width is not None:
+        factor = sh[1] / float(width)
+        height = int(sh[0] / factor)
+        _minify(basedir, resolutions=[[height, width]])
+        sfx = '_{}x{}'.format(width, height)
+    else:
+        factor = 1
+
+    imgdir = os.path.join(basedir, 'images' + sfx)
+    if not os.path.exists(imgdir):
+        print( imgdir, 'does not exist, returning' )
+        return
+
+    with open(os.path.join(basedir, 'train.txt'), 'r') as f_list:
+        lines = f_list.readlines()
+    if os.path.exists(os.path.join(basedir, 'test.txt')):
+        with open(os.path.join(basedir, 'test.txt'), 'r') as f_list:
+            lines += f_list.readlines()
+            
+    imgfiles = [os.path.join(imgdir, f.strip().replace('.jpg', '.png')) for f in lines]
+    if poses.shape[-1] != len(imgfiles):
+        print( 'Mismatch between imgs {} and poses {} !!!!'.format(len(imgfiles), poses.shape[-1]) )
+        return
+
+    sh = imageio.imread(imgfiles[0]).shape
+    poses[:2, 4, :] = np.array(sh[:2]).reshape([2, 1])
+    poses[2, 4, :] = poses[2, 4, :] * 1./factor
+
+    if not load_imgs:
+        return poses, bds
+
+    def imread(f):
+        if f.endswith('png'):
+            try:
+                return imageio.imread(f, ignoregamma=True)
+            except:
+                return imageio.imread(f)
+        else:
+            return imageio.imread(f)
+
+    imgs = imgs = [imread(f)[...,:3]/255. for f in imgfiles]
+    imgs = np.stack(imgs, -1)
+
+    print('Loaded image data', imgs.shape, poses[:,-1,0])
+    return poses, bds, imgs
+
+
+
+
+
+
+def normalize(x):
+    return x / np.linalg.norm(x)
+
+def viewmatrix(z, up, pos):
+    vec2 = normalize(z)
+    vec1_avg = up
+    vec0 = normalize(np.cross(vec1_avg, vec2))
+    vec1 = normalize(np.cross(vec2, vec0))
+    m = np.stack([vec0, vec1, vec2, pos], 1)
+    return m
+
+def ptstocam(pts, c2w):
+    tt = np.matmul(c2w[:3,:3].T, (pts-c2w[:3,3])[...,np.newaxis])[...,0]
+    return tt
+
+def poses_avg(poses):
+
+    hwf = poses[0, :3, -1:]
+
+    center = poses[:, :3, 3].mean(0)
+    vec2 = normalize(poses[:, :3, 2].sum(0))
+    up = poses[:, :3, 1].sum(0)
+    c2w = np.concatenate([viewmatrix(vec2, up, center), hwf], 1)
+
+    return c2w
+
+
+
+def render_path_spiral(c2w, up, rads, focal, zdelta, zrate, rots, N):
+    render_poses = []
+    rads = np.array(list(rads) + [1.])
+    hwf = c2w[:,4:5]
+
+    for theta in np.linspace(0., 2. * np.pi * rots, N+1)[:-1]:
+        c = np.dot(c2w[:3,:4], np.array([np.cos(theta), -np.sin(theta), -np.sin(theta*zrate), 1.]) * rads)
+        z = normalize(c - np.dot(c2w[:3,:4], np.array([0,0,-focal, 1.])))
+        render_poses.append(np.concatenate([viewmatrix(z, up, c), hwf], 1))
+    return render_poses
+
+
+
+def recenter_poses(poses):
+
+    poses_ = poses+0
+    bottom = np.reshape([0,0,0,1.], [1,4])
+    c2w = poses_avg(poses)
+    c2w = np.concatenate([c2w[:3,:4], bottom], -2)
+    bottom = np.tile(np.reshape(bottom, [1,1,4]), [poses.shape[0],1,1])
+    poses = np.concatenate([poses[:,:3,:4], bottom], -2)
+
+    poses = np.linalg.inv(c2w) @ poses
+    poses_[:,:3,:4] = poses[:,:3,:4]
+    poses = poses_
+    return poses
+
+
+#####################
+
+
+def spherify_poses(poses, bds, N):
+
+    p34_to_44 = lambda p : np.concatenate([p, np.tile(np.reshape(np.eye(4)[-1,:], [1,1,4]), [p.shape[0], 1,1])], 1)
+
+    rays_d = poses[:,:3,2:3]
+    rays_o = poses[:,:3,3:4]
+
+    def min_line_dist(rays_o, rays_d):
+        A_i = np.eye(3) - rays_d * np.transpose(rays_d, [0,2,1])
+        b_i = -A_i @ rays_o
+        pt_mindist = np.squeeze(-np.linalg.inv((np.transpose(A_i, [0,2,1]) @ A_i).mean(0)) @ (b_i).mean(0))
+        return pt_mindist
+
+    pt_mindist = min_line_dist(rays_o, rays_d)
+
+    center = pt_mindist
+    up = (poses[:,:3,3] - center).mean(0)
+
+    vec0 = normalize(up)
+    vec1 = normalize(np.cross([.1,.2,.3], vec0))
+    vec2 = normalize(np.cross(vec0, vec1))
+    pos = center
+    c2w = np.stack([vec1, vec2, vec0, pos], 1)
+
+    poses_reset = np.linalg.inv(p34_to_44(c2w[None])) @ p34_to_44(poses[:,:3,:4])
+
+    rad = np.sqrt(np.mean(np.sum(np.square(poses_reset[:,:3,3]), -1)))
+
+    sc = 1./rad
+    poses_reset[:,:3,3] *= sc
+    bds *= sc
+    rad *= sc
+
+    centroid = np.mean(poses_reset[:,:3,3], 0)
+    zh = centroid[2]
+    radcircle = np.sqrt(rad**2-zh**2)
+    new_poses = []
+
+    for th in np.linspace(0.,2.*np.pi, N):
+
+        camorigin = np.array([radcircle * np.cos(th), radcircle * np.sin(th), zh])
+        up = np.array([0,0,-1.])
+
+        vec2 = normalize(camorigin)
+        vec0 = normalize(np.cross(vec2, up))
+        vec1 = normalize(np.cross(vec2, vec0))
+        pos = camorigin
+        p = np.stack([vec0, vec1, vec2, pos], 1)
+
+        new_poses.append(p)
+
+    new_poses = np.stack(new_poses, 0)
+
+    new_poses = np.concatenate([new_poses, np.broadcast_to(poses[0,:3,-1:], new_poses[:,:3,-1:].shape)], -1)
+    poses_reset = np.concatenate([poses_reset[:,:3,:4], np.broadcast_to(poses[0,:3,-1:], poses_reset[:,:3,-1:].shape)], -1)
+
+    return poses_reset, new_poses, bds, sc
+
+
+def load_llff_data(basedir, factor=8, recenter=True, bd_factor=.75, spherify=False, path_zflat=False, N_views=120):
+
+    poses, bds, imgs = _load_data(basedir, factor=factor) # factor=8 downsamples original imgs by 8x
+    print('Loaded', basedir, bds.min(), bds.max())
+
+    # Correct rotation matrix ordering and move variable dim to axis 0
+    poses = np.concatenate([poses[:, 1:2, :], -poses[:, 0:1, :], poses[:, 2:, :]], 1)
+    poses = np.moveaxis(poses, -1, 0).astype(np.float32)
+    imgs = np.moveaxis(imgs, -1, 0).astype(np.float32)
+    images = imgs
+    bds = np.moveaxis(bds, -1, 0).astype(np.float32)
+
+    # Rescale if bd_factor is provided
+    sc = 1. if bd_factor is None else 1./(bds.min() * bd_factor)
+    poses[:,:3,3] *= sc
+    bds *= sc
+
+    if recenter:
+        poses = recenter_poses(poses)
+
+    if spherify:
+        poses, render_poses, bds, sc_spherify = spherify_poses(poses, bds, N_views)
+        sc *= sc_spherify
+
+    else:
+
+        c2w = poses_avg(poses)
+        print('recentered', c2w.shape)
+        print(c2w[:3,:4])
+
+        ## Get spiral
+        # Get average pose
+        up = normalize(poses[:, :3, 1].sum(0))
+
+        # Find a reasonable "focus depth" for this dataset
+        close_depth, inf_depth = bds.min()*.9, bds.max()*5.
+        dt = .75
+        mean_dz = 1./(((1.-dt)/close_depth + dt/inf_depth))
+        focal = mean_dz
+
+        # Get radii for spiral path
+        shrink_factor = .8
+        zdelta = close_depth * .2
+        tt = poses[:,:3,3] # ptstocam(poses[:3,3,:].T, c2w).T
+        rads = np.percentile(np.abs(tt), 90, 0)
+        c2w_path = c2w
+        N_rots = 2
+        if path_zflat:
+#             zloc = np.percentile(tt, 10, 0)[2]
+            zloc = -close_depth * .1
+            c2w_path[:3,3] = c2w_path[:3,3] + zloc * c2w_path[:3,2]
+            rads[2] = 0.
+            N_rots = 1
+            N_views/=2
+
+        # Generate poses for spiral path
+        render_poses = render_path_spiral(c2w_path, up, rads, focal, zdelta, zrate=.5, rots=N_rots, N=N_views)
+
+
+    render_poses = np.array(render_poses).astype(np.float32)
+
+    c2w = poses_avg(poses)
+    print('Data:')
+    print(poses.shape, images.shape, bds.shape)
+
+    dists = np.sum(np.square(c2w[:3,3] - poses[:,:3,3]), -1)
+
+    images = images.astype(np.float32)
+    poses = poses.astype(np.float32)
+
+    with open(os.path.join(basedir, 'train.txt'), 'r') as f_list:
+        lines = f_list.readlines()
+        i_train = list(np.arange(len(lines)))
+        
+    if os.path.exists(os.path.join(basedir, 'test.txt')):
+        with open(os.path.join(basedir, 'test.txt'), 'r') as f_list:
+            lines = f_list.readlines()
+            i_test = list(np.arange(len(lines)) + len(i_train))
+    else:
+        i_test = []
+        
+    return images, poses, bds, render_poses, i_train, i_test, sc
+```
+
+### src/run_nerf.py
+```
+import os, sys
+sys.path.append('..')
+import numpy as np
+import imageio
+import random
+import time
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.tensorboard import SummaryWriter
+from tqdm import tqdm, trange
+import cv2
+import pdb
+
+
+from models.nerf.run_nerf_helpers import *
+from options import config_parser
+from .load_llff import load_llff_data
+from utils.io_utils import *
+from utils.nerf_utils import *
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+np.random.seed(0)
+DEBUG = False
+
+
+def batchify(fn, chunk):
+    """Constructs a version of 'fn' that applies to smaller batches.
+    """
+    if chunk is None:
+        return fn
+    def ret(inputs):
+        return torch.cat([fn(inputs[i:i+chunk]) for i in range(0, inputs.shape[0], chunk)], 0)
+    return ret
+
+
+def run_network(inputs, viewdirs, fn, embed_fn, embeddirs_fn, netchunk=1024*64):
+    """Prepares inputs and applies network 'fn'.
+    """
+    inputs_flat = torch.reshape(inputs, [-1, inputs.shape[-1]])
+    embedded = embed_fn(inputs_flat)
+
+    if viewdirs is not None:
+        input_dirs = viewdirs[:,None].expand(inputs.shape)
+        input_dirs_flat = torch.reshape(input_dirs, [-1, input_dirs.shape[-1]])
+        embedded_dirs = embeddirs_fn(input_dirs_flat)
+        embedded = torch.cat([embedded, embedded_dirs], -1)
+
+    outputs_flat = batchify(fn, netchunk)(embedded)
+    outputs = torch.reshape(outputs_flat, list(inputs.shape[:-1]) + [outputs_flat.shape[-1]])
+    return outputs
+
+
+def batchify_rays(rays_flat, chunk=1024*32, depth_priors=None, depth_confidences=None,  **kwargs):
+    """Render rays in smaller minibatches to avoid OOM.
+    """
+    all_ret = {}
+    for i in range(0, rays_flat.shape[0], chunk):
+        ret = render_rays(rays_flat[i:i+chunk], depth_priors=depth_priors[i:i+chunk], depth_confidences=depth_confidences[i:i+chunk], **kwargs)
+        for k in ret:
+            if k not in all_ret:
+                all_ret[k] = []
+            all_ret[k].append(ret[k])
+
+    all_ret = {k : torch.cat(all_ret[k], 0) for k in all_ret}
+    return all_ret
+
+
+def render(H, W, focal, chunk=1024*32, rays=None, c2w=None, ndc=True,
+                  near=0., far=1.,
+                  use_viewdirs=False, c2w_staticcam=None, depth_priors=None, depth_confidences=None,
+                  **kwargs):
+    """Render rays
+    Args:
+      H: int. Height of image in pixels.
+      W: int. Width of image in pixels.
+      focal: float. Focal length of pinhole camera.
+      chunk: int. Maximum number of rays to process simultaneously. Used to
+        control maximum memory usage. Does not affect final results.
+      rays: array of shape [2, batch_size, 3]. Ray origin and direction for
+        each example in batch.
+      c2w: array of shape [3, 4]. Camera-to-world transformation matrix.
+      ndc: bool. If True, represent ray origin, direction in NDC coordinates.
+      near: float or array of shape [batch_size]. Nearest distance for a ray.
+      far: float or array of shape [batch_size]. Farthest distance for a ray.
+      use_viewdirs: bool. If True, use viewing direction of a point in space in model.
+      c2w_staticcam: array of shape [3, 4]. If not None, use this transformation matrix for
+       camera while using other c2w argument for viewing directions.
+    Returns:
+      rgb_map: [batch_size, 3]. Predicted RGB values for rays.
+      disp_map: [batch_size]. Disparity map. Inverse of depth.
+      acc_map: [batch_size]. Accumulated opacity (alpha) along a ray.
+      extras: dict with everything returned by render_rays().
+    """
+    if c2w is not None:
+        # special case to render full image
+        rays_o, rays_d = get_rays(H, W, focal, c2w)
+    else:
+        # use provided ray batch
+        rays_o, rays_d = rays
+
+    if use_viewdirs:
+        # provide ray directions as input
+        viewdirs = rays_d
+        if c2w_staticcam is not None:
+            # special case to visualize effect of viewdirs
+            rays_o, rays_d = get_rays(H, W, focal, c2w_staticcam)
+        viewdirs = viewdirs / torch.norm(viewdirs, dim=-1, keepdim=True)
+        viewdirs = torch.reshape(viewdirs, [-1,3]).float()
+
+    sh = rays_d.shape # [..., 3]
+    if ndc:
+        # for forward facing scenes
+        rays_o_ori = rays_o.clone()
+        rays_d_ori = rays_d.clone()
+        rays_o, rays_d = ndc_rays(H, W, focal, 1., rays_o, rays_d)
+
+    # Create ray batch
+    rays_o = torch.reshape(rays_o, [-1,3]).float()
+    rays_d = torch.reshape(rays_d, [-1,3]).float()
+    depth_priors = torch.reshape(depth_priors, [-1]).float()
+    depth_confidences = torch.reshape(depth_confidences, [-1]).float()
+
+    near, far = near * torch.ones_like(rays_d[...,:1]), far * torch.ones_like(rays_d[...,:1])
+    rays = torch.cat([rays_o, rays_d, near, far], -1)
+    if use_viewdirs:
+        rays = torch.cat([rays, viewdirs], -1)
+
+    # Render and reshape
+    all_ret = batchify_rays(rays, chunk, depth_priors, depth_confidences, **kwargs)
+    for k in all_ret:
+        k_sh = list(sh[:-1]) + list(all_ret[k].shape[1:])
+        all_ret[k] = torch.reshape(all_ret[k], k_sh)
+
+    if ndc:
+        all_ret['depth_map'] = -1/rays_d_ori[:, 2]*(1 / (1 - all_ret['depth_map']) + rays_o_ori[:, 2])
+
+    k_extract = ['rgb_map', 'disp_map', 'acc_map', 'depth_map']
+    ret_list = [all_ret[k] for k in k_extract]
+    ret_dict = {k : all_ret[k] for k in all_ret if k not in k_extract}
+
+    return ret_list + [ret_dict]
+
+
+def render_path(render_poses, hwf, chunk, render_kwargs, image_list, sc,
+                depth_priors=None, depth_confidences=None, savedir=None, render_factor=0):
+
+    H, W, focal = hwf
+
+    if render_factor!=0:
+        # Render downsampled for speed
+        H = H//render_factor
+        W = W//render_factor
+        focal = focal/render_factor
+
+    rgbs = []
+    disps = []
+    depths = []
+
+    for i, c2w in enumerate(tqdm(render_poses)):
+        rgb, disp, acc, depth, _ = render(H, W, focal, depth_priors=depth_priors[i], depth_confidences=depth_confidences[i], chunk=chunk, c2w=c2w[:3,:4], **render_kwargs)
+        rgbs.append(rgb.cpu().numpy())
+        disps.append(disp.cpu().numpy())
+        depths.append(depth)
+        if i==0:
+            print(rgb.shape, disp.shape)
+
+
+        if savedir is not None:
+            rgb8 = to8b(rgbs[-1])
+            frame_id = image_list[i].split('.')[0]
+            filename = os.path.join(savedir, '{}.png'.format(frame_id))
+            imageio.imwrite(filename, rgb8)
+            filename = os.path.join(savedir, '{}_depth.npy'.format(frame_id))
+            np.save(filename, depth.cpu().numpy() / sc)
+            disp_visual = visualize_depth(depth.cpu().numpy())
+            filename = os.path.join(savedir, '{}_depth.png'.format(frame_id))
+            cv2.imwrite(filename, disp_visual)
+
+
+
+    rgbs = np.stack(rgbs, 0)
+    disps = np.stack(disps, 0)
+    depths = torch.stack(depths, 0)
+
+    return rgbs, disps, depths.cpu().numpy()
+
+
+
+def create_nerf(args):
+    """Instantiate NeRF's MLP model.
+    """
+    embed_fn, input_ch = get_embedder(args.multires, args.i_embed)
+
+    input_ch_views = 0
+    embeddirs_fn = None
+    if args.use_viewdirs:
+        embeddirs_fn, input_ch_views = get_embedder(args.multires_views, args.i_embed)
+    output_ch = 4
+    skips = [4]
+    model = NeRF(D=args.netdepth, W=args.netwidth,
+                 input_ch=input_ch, output_ch=output_ch, skips=skips,
+                 input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs).to(device)
+    grad_vars = list(model.parameters())
+
+    network_query_fn = lambda inputs, viewdirs, network_fn : run_network(inputs, viewdirs, network_fn,
+                                                                embed_fn=embed_fn,
+                                                                embeddirs_fn=embeddirs_fn,
+                                                                netchunk=args.netchunk)
+
+    # Create optimizer
+    optimizer = torch.optim.Adam(params=grad_vars, lr=args.lrate, betas=(0.9, 0.999))
+
+    start = 0
+    basedir = args.basedir
+    expname = args.expname
+
+    ##########################
+
+    # Load checkpoints
+    if args.ft_path is not None and args.ft_path!='None':
+        ckpts = [args.ft_path]
+        ckpt_path = ckpts[-1]
+        print('Reloading from', ckpt_path)
+        ckpt = torch.load(ckpt_path)
+
+        #start = 0
+        start = ckpt['global_step']
+        optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+
+        decay_rate = 0.1
+        decay_steps = args.lrate_decay * 1000
+        new_lrate = args.lrate * (decay_rate ** (start / decay_steps))
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = new_lrate
+
+        # Load model
+        model.load_state_dict(ckpt['network_fn_state_dict'])
+
+    else:
+        ckpt_path = os.path.join(basedir, expname, 'nerf', 'checkpoints')
+        ckpts = [os.path.join(ckpt_path, f) for f in sorted(os.listdir(ckpt_path)) if 'tar' in f]
+
+        print('Found ckpts', ckpts)
+        if len(ckpts) > 0 and not args.no_reload:
+            ckpt_path = ckpts[-1]
+            print('Reloading from', ckpt_path)
+            ckpt = torch.load(ckpt_path)
+
+            start = ckpt['global_step']
+            optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+
+            # Load model
+            model.load_state_dict(ckpt['network_fn_state_dict'])
+
+    ##########################
+
+    render_kwargs_train = {
+        'network_query_fn' : network_query_fn,
+        'perturb' : args.perturb,
+        'N_samples' : args.N_samples,
+        'network_fn' : model,
+        'use_viewdirs' : args.use_viewdirs,
+        'white_bkgd' : args.white_bkgd,
+        'raw_noise_std' : args.raw_noise_std,
+        'near_bound': args.near,
+        'far_bound': args.far,
+    }
+
+    # NDC only good for LLFF-style forward facing data
+    if args.no_ndc:
+        print('Not ndc!')
+        render_kwargs_train['ndc'] = False
+        render_kwargs_train['lindisp'] = args.lindisp
+
+    render_kwargs_test = {k : render_kwargs_train[k] for k in render_kwargs_train}
+    render_kwargs_test['perturb'] = False
+    render_kwargs_test['raw_noise_std'] = 0.
+
+    return render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer
+
+
+def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=False):
+    """Transforms model's predictions to semantically meaningful values.
+    Args:
+        raw: [num_rays, num_samples along ray, 4]. Prediction from model.
+        z_vals: [num_rays, num_samples along ray]. Integration time.
+        rays_d: [num_rays, 3]. Direction of each ray.
+    Returns:
+        rgb_map: [num_rays, 3]. Estimated RGB color of a ray.
+        disp_map: [num_rays]. Disparity map. Inverse of depth map.
+        acc_map: [num_rays]. Sum of weights along each ray.
+        weights: [num_rays, num_samples]. Weights assigned to each sampled color.
+        depth_map: [num_rays]. Estimated distance to object.
+    """
+    raw2alpha = lambda raw, dists, act_fn=F.relu: 1.-torch.exp(-act_fn(raw)*dists)
+
+    dists = z_vals[...,1:] - z_vals[...,:-1]
+    dists = torch.cat([dists, torch.Tensor([1e10]).expand(dists[...,:1].shape)], -1)  # [N_rays, N_samples]
+
+    dists = dists * torch.norm(rays_d[...,None,:], dim=-1)
+
+    rgb = torch.sigmoid(raw[...,:3])  # [N_rays, N_samples, 3]
+    noise = 0.
+    if raw_noise_std > 0.:
+        noise = torch.randn(raw[...,3].shape) * raw_noise_std
+
+        # Overwrite randomly sampled data if pytest
+        if pytest:
+            np.random.seed(0)
+            noise = np.random.rand(*list(raw[...,3].shape)) * raw_noise_std
+            noise = torch.Tensor(noise)
+
+    alpha = raw2alpha(raw[...,3] + noise, dists)  # [N_rays, N_samples]
+    weights = alpha * torch.cumprod(torch.cat([torch.ones((alpha.shape[0], 1)), 1.-alpha + 1e-10], -1), -1)[:, :-1]
+    rgb_map = torch.sum(weights[...,None] * rgb, -2)  # [N_rays, 3]
+
+    depth_map = torch.sum(weights * z_vals, -1)
+    disp_map = 1./torch.max(1e-10 * torch.ones_like(depth_map), depth_map / torch.sum(weights, -1))
+    acc_map = torch.sum(weights, -1)
+    if white_bkgd:
+        rgb_map = rgb_map + (1.-acc_map[...,None])
+
+    return rgb_map, disp_map, acc_map, weights, depth_map, rgb
+
+
+def render_rays(ray_batch,
+                network_fn,
+                network_query_fn,
+                N_samples,
+                depth_priors,
+                depth_confidences,
+                retraw=False,
+                lindisp=False,
+                perturb=0.,
+                white_bkgd=False,
+                raw_noise_std=0.,
+                pytest=False,
+                near_bound=None,
+                far_bound=None):
+    """Volumetric rendering.
+    Args:
+      ray_batch: array of shape [batch_size, ...]. All information necessary
+        for sampling along a ray, including: ray origin, ray direction, min
+        dist, max dist, and unit-magnitude viewing direction.
+      network_fn: function. Model for predicting RGB and density at each point
+        in space.
+      network_query_fn: function used for passing queries to network_fn.
+      N_samples: int. Number of different times to sample along each ray.
+      retraw: bool. If True, include model's raw, unprocessed predictions.
+      lindisp: bool. If True, sample linearly in inverse depth rather than in depth.
+      perturb: float, 0 or 1. If non-zero, each ray is sampled at stratified
+        random points in time.
+      white_bkgd: bool. If True, assume a white background.
+      raw_noise_std: ...
+    Returns:
+      rgb_map: [num_rays, 3]. Estimated RGB color of a ray. Comes from fine model.
+      disp_map: [num_rays]. Disparity map. 1 / depth.
+      acc_map: [num_rays]. Accumulated opacity along each ray. Comes from fine model.
+      raw: [num_rays, num_samples, 4]. Raw predictions from model.
+      rgb0: See rgb_map. Output for coarse model.
+      disp0: See disp_map. Output for coarse model.
+      acc0: See acc_map. Output for coarse model.
+      z_std: [num_rays]. Standard deviation of distances along ray for each
+        sample.
+    """
+    N_rays = ray_batch.shape[0]
+    rays_o, rays_d = ray_batch[:,0:3], ray_batch[:,3:6] # [N_rays, 3] each
+    viewdirs = ray_batch[:,-3:] if ray_batch.shape[-1] > 8 else None
+    bounds = torch.reshape(ray_batch[...,6:8], [-1,1,2])
+
+
+    near = (depth_priors * (1 - torch.clamp(depth_confidences, min=near_bound, max=far_bound))).unsqueeze(1)
+    far = (depth_priors * (1 + torch.clamp(depth_confidences, min=near_bound, max=far_bound))).unsqueeze(1)
+
+    t_vals = torch.linspace(0., 1., steps=N_samples)
+    if not lindisp:
+        z_vals = near * (1.-t_vals) + far * (t_vals)
+    else:
+        z_vals = 1./(1./near * (1.-t_vals) + 1./far * (t_vals))
+
+    z_vals = z_vals.expand([N_rays, N_samples])
+
+    if perturb > 0.:
+        # get intervals between samples
+        mids = .5 * (z_vals[...,1:] + z_vals[...,:-1])
+        upper = torch.cat([mids, z_vals[...,-1:]], -1)
+        lower = torch.cat([z_vals[...,:1], mids], -1)
+        # stratified samples in those intervals
+        t_rand = torch.rand(z_vals.shape)
+
+        # Pytest, overwrite u with numpy's fixed random numbers
+        if pytest:
+            np.random.seed(0)
+            t_rand = np.random.rand(*list(z_vals.shape))
+            t_rand = torch.Tensor(t_rand)
+
+        z_vals = lower + (upper - lower) * t_rand
+
+    pts = rays_o[...,None,:] + rays_d[...,None,:] * z_vals[...,:,None] # [N_rays, N_samples, 3]
+
+
+#     raw = run_network(pts)
+    raw = network_query_fn(pts, viewdirs, network_fn)
+    rgb_map, disp_map, acc_map, weights, depth_map, rgb = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
+    
+    ret = {'rgb_map' : rgb_map, 'disp_map' : disp_map, 'acc_map' : acc_map, 'depth_map' : depth_map, "weights" : weights}
+    if retraw:
+        ret['raw'] = raw
+    
+    for k in ret:
+        if (torch.isnan(ret[k]).any() or torch.isinf(ret[k]).any()) and DEBUG:
+            print(f"! [Numerical Error] {k} contains nan or inf.")
+
+    return ret
+
+
+
+
+
+def train(args):
+    print('Nerf begins !')
+    # Load data  
+    images, poses, bds, render_poses, i_train, i_test, sc = load_llff_data(args.datadir, args.factor,
+                                                              recenter=True, bd_factor=.75,
+                                                              spherify=args.spherify, N_views=args.N_views)
+    if len(i_test) > 0:
+        load_test = True
+    else:
+        load_test = False
+        
+    hwf = poses[0,:3,-1]
+    poses = poses[:,:3,:4]
+    print('Loaded llff', images.shape, render_poses.shape, hwf, args.datadir)
+
+    H, W, focal = hwf
+    H, W = int(H), int(W)
+    hwf = [H, W, focal]
+    
+    image_list = load_img_list(args.datadir, load_test=load_test)
+    colmap_depths, colmap_masks = load_colmap(image_list, args.datadir, H, W)
+   
+    image_list_train = load_img_list(args.datadir, load_test=False)
+    depth_priors = load_depths(image_list_train,
+                        os.path.join(args.basedir, args.expname, 'depth_priors', 'results'), 
+                        H, W)
+    
+    depth_priors = align_scales(depth_priors, colmap_depths, colmap_masks, 
+                                poses, sc, i_train, i_test)
+
+    poses_tensor = torch.from_numpy(poses).to(device)
+    K = torch.FloatTensor([[focal, 0, -W / 2.0, 0],
+                           [0, -focal, -H / 2.0, 0],
+                           [0,  0,  -1, 0],
+                           [0,  0,  0, 1]]).to(device)
+    if poses_tensor.shape[1] == 3:
+        bottom = torch.FloatTensor([0, 0, 0, 1]).unsqueeze(0)
+        bottom = bottom.repeat(poses_tensor.shape[0], 1, 1).to(poses_tensor.device)
+        T = torch.cat([poses_tensor, bottom], 1)
+    else:
+        T = poses_tensor.clone()
+
+    depth_confidences = cal_depth_confidences(torch.from_numpy(depth_priors).to(device), 
+                                              T, K, i_train, args.topk)
+
+    print('DEFINING BOUNDS')
+    if args.no_ndc:
+        near = np.ndarray.min(bds) * .9
+        far = np.ndarray.max(bds) * 1.
+    else:
+        near = 0.
+        far = 1.
+    print('NEAR FAR', near, far)
+
+
+    # Create nerf model
+    render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer = create_nerf(args)
+    global_step = start
+
+    bds_dict = {
+        'near' : near,
+        'far' : far,
+    }
+    render_kwargs_train.update(bds_dict)
+    render_kwargs_test.update(bds_dict)
+
+    save_path = os.path.join(args.basedir, args.expname, 'nerf')
+
+    # Short circuit if only rendering out from trained model
+    if args.render_only:
+        print('RENDER ONLY')
+        with torch.no_grad():
+            if args.render_test:
+                testsavedir = os.path.join(save_path, 'results', 
+                                           'renderonly_{}_{:06d}'.format('test', start))
+                render_poses = poses_tensor[i_test]
+                depth_priors = depth_priors[i_test]
+                depth_confidences = depth_confidences[i_test]
+                image_list = image_list[i_test]
+            else:
+                testsavedir = os.path.join(save_path, 'results', 
+                                           'renderonly_{}_{:06d}'.format('train', start))
+                render_poses = poses_tensor[i_train]
+                depth_priors = depth_priors[i_train]
+                depth_confidences = depth_confidences[i_train]
+                image_list = image_list[i_train]
+
+            os.makedirs(testsavedir, exist_ok=True)
+            rgbs, disps, depths = render_path(render_poses, hwf, args.chunk, render_kwargs_test, sc=sc,
+                                          depth_priors=torch.from_numpy(depth_priors).to(device),
+                                          depth_confidences=torch.from_numpy(depth_confidences).to(device), 
+                                          savedir=testsavedir, render_factor=args.render_factor, 
+                                          image_list=image_list)
+            print('Done rendering', testsavedir)
+    
+            return
+
+    # Prepare raybatch tensor if batching random rays
+    N_rand = args.N_rand
+
+    # For random ray batching
+    print('get rays')
+    rays = np.stack([get_rays_np(H, W, focal, p) for p in poses[:,:3,:4]], 0) # [N, ro+rd, H, W, 3]
+    print('done, concats')
+    rays_rgb = np.concatenate([rays, images[:,None]], 1) # [N, ro+rd+rgb, H, W, 3]
+    depths_pri = np.stack([depth_priors,  depth_confidences.astype(np.float32),
+                               np.ones(colmap_depths.shape).astype(np.float32)], -1) #[N, H, W, 3]
+    rays_rgb = np.concatenate([rays_rgb, depths_pri[:, None]], 1)
+    rays_rgb = np.transpose(rays_rgb, [0,2,3,1,4]) # [N, H, W, ro+rd+rgb(d)+prior, 3]
+    rays_rgb = np.stack([rays_rgb[i] for i in i_train], 0) # train images only
+    rays_rgb = np.reshape(rays_rgb, [-1,4,3]) 
+
+    rays_rgb = rays_rgb.astype(np.float32)
+    print('shuffle rays')
+    np.random.shuffle(rays_rgb)
+    print('done')
+    i_batch = 0
+
+    # Move training data to GPU
+    images = torch.Tensor(images).to(device)
+    poses = torch.Tensor(poses).to(device)
+    rays_rgb = torch.Tensor(rays_rgb).to(device)
+
+
+    N_iters = args.N_iters
+    
+    print(args.chunk)
+    print('TRAIN views are', i_train)
+    print('TEST views are', i_test)
+
+    # Summary writers
+    writer = SummaryWriter(os.path.join(args.basedir, args.expname, 'nerf', 'summary'))
+
+    start = start + 1
+    for i in trange(start, N_iters):
+        time0 = time.time()
+
+        # Random over all images
+        batch = rays_rgb[i_batch:i_batch+N_rand] # [B, 2+1, 3*?]
+        batch = torch.transpose(batch, 0, 1)
+        batch_rays, target_s = batch[:2], batch[2]
+        target_prior = batch[3]
+        i_batch += N_rand
+        if i_batch >= rays_rgb.shape[0]:
+            print("Shuffle data after an epoch!")
+            rand_idx = torch.randperm(rays_rgb.shape[0])
+            rays_rgb = rays_rgb[rand_idx]
+            i_batch = 0
+
+        #####  Core optimization loop  #####
+        rgb, disp, acc, depth, extras = render(H, W, focal, chunk=args.chunk, rays=batch_rays, 
+                                               depth_priors=target_prior[:,0], 
+                                               depth_confidences=target_prior[:,1],
+                                               retraw=True, **render_kwargs_train)
+        #pdb.set_trace()
+        optimizer.zero_grad()
+        img_loss = img2mse(rgb, target_s)
+        trans = extras['raw'][...,-1]
+        loss = img_loss
+        psnr = mse2psnr(img_loss)
+
+        loss.backward()
+        optimizer.step()
+
+        # NOTE: IMPORTANT!
+        ###   update learning rate   ###
+        decay_rate = 0.1
+        decay_steps = args.lrate_decay * 1000
+        new_lrate = args.lrate * (decay_rate ** (global_step / decay_steps))
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = new_lrate
+        ################################
+
+        dt = time.time()-time0
+
+        # Rest is logging
+        if i%args.i_weights==0:
+            path = os.path.join(save_path, 'checkpoints', '{:06d}.tar'.format(i))
+            torch.save({
+                'global_step': global_step,
+                'network_fn_state_dict': render_kwargs_train['network_fn'].state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+            }, path)
+            print('Saved checkpoints at', path)
+
+
+        if i%args.i_print==0:
+            tqdm.write(f"[TRAIN] Iter: {i} Loss: {loss.item()}  PSNR: {psnr.item()}")
+            writer.add_scalar("Loss", loss.item(), i)
+            writer.add_scalar("PSNR", psnr.item(), i)
+        
+        global_step += 1
+    
+    with torch.no_grad():
+        testsavedir = os.path.join(save_path, 'results')
+        render_poses = poses_tensor
+
+        os.makedirs(testsavedir, exist_ok=True)
+        rgbs, disps, depths = render_path(render_poses, hwf, args.chunk, render_kwargs_test, sc=sc,
+                                          depth_priors=torch.from_numpy(depth_priors).to(device),
+                                          depth_confidences=torch.from_numpy(depth_confidences).to(device), 
+                                          savedir=testsavedir, render_factor=args.render_factor, 
+                                          image_list=image_list)
+        print('Done rendering', testsavedir)
+    
+
+if __name__=='__main__':
+    torch.set_default_tensor_type('torch.cuda.FloatTensor')
+    parser = config_parser()
+    args = parser.parse_args()
+    train(args)
+```
+
+### utils/colmap_read_model.py
+```
+# Copyright (c) 2018, ETH Zurich and UNC Chapel Hill.
+# All rights reserved.
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions are met:
+#
+#     * Redistributions of source code must retain the above copyright
+#       notice, this list of conditions and the following disclaimer.
+#
+#     * Redistributions in binary form must reproduce the above copyright
+#       notice, this list of conditions and the following disclaimer in the
+#       documentation and/or other materials provided with the distribution.
+#
+#     * Neither the name of ETH Zurich and UNC Chapel Hill nor the names of
+#       its contributors may be used to endorse or promote products derived
+#       from this software without specific prior written permission.
+#
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+# AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+# ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR CONTRIBUTORS BE
+# LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+# CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+# SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+# INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+# CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+# ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+# POSSIBILITY OF SUCH DAMAGE.
+#
+# Author: Johannes L. Schoenberger (jsch at inf.ethz.ch)
+
+import os
+import sys
+import collections
+import numpy as np
+import struct
+
+
+CameraModel = collections.namedtuple(
+    "CameraModel", ["model_id", "model_name", "num_params"])
+Camera = collections.namedtuple(
+    "Camera", ["id", "model", "width", "height", "params"])
+BaseImage = collections.namedtuple(
+    "Image", ["id", "qvec", "tvec", "camera_id", "name", "xys", "point3D_ids"])
+Point3D = collections.namedtuple(
+    "Point3D", ["id", "xyz", "rgb", "error", "image_ids", "point2D_idxs"])
+
+class Image(BaseImage):
+    def qvec2rotmat(self):
+        return qvec2rotmat(self.qvec)
+
+
+CAMERA_MODELS = {
+    CameraModel(model_id=0, model_name="SIMPLE_PINHOLE", num_params=3),
+    CameraModel(model_id=1, model_name="PINHOLE", num_params=4),
+    CameraModel(model_id=2, model_name="SIMPLE_RADIAL", num_params=4),
+    CameraModel(model_id=3, model_name="RADIAL", num_params=5),
+    CameraModel(model_id=4, model_name="OPENCV", num_params=8),
+    CameraModel(model_id=5, model_name="OPENCV_FISHEYE", num_params=8),
+    CameraModel(model_id=6, model_name="FULL_OPENCV", num_params=12),
+    CameraModel(model_id=7, model_name="FOV", num_params=5),
+    CameraModel(model_id=8, model_name="SIMPLE_RADIAL_FISHEYE", num_params=4),
+    CameraModel(model_id=9, model_name="RADIAL_FISHEYE", num_params=5),
+    CameraModel(model_id=10, model_name="THIN_PRISM_FISHEYE", num_params=12)
+}
+CAMERA_MODEL_IDS = dict([(camera_model.model_id, camera_model) \
+                         for camera_model in CAMERA_MODELS])
+
+
+def read_next_bytes(fid, num_bytes, format_char_sequence, endian_character="<"):
+    """Read and unpack the next bytes from a binary file.
+    :param fid:
+    :param num_bytes: Sum of combination of {2, 4, 8}, e.g. 2, 6, 16, 30, etc.
+    :param format_char_sequence: List of {c, e, f, d, h, H, i, I, l, L, q, Q}.
+    :param endian_character: Any of {@, =, <, >, !}
+    :return: Tuple of read and unpacked values.
+    """
+    data = fid.read(num_bytes)
+    return struct.unpack(endian_character + format_char_sequence, data)
+
+
+def read_cameras_text(path):
+    """
+    see: src/base/reconstruction.cc
+        void Reconstruction::WriteCamerasText(const std::string& path)
+        void Reconstruction::ReadCamerasText(const std::string& path)
+    """
+    cameras = {}
+    with open(path, "r") as fid:
+        while True:
+            line = fid.readline()
+            if not line:
+                break
+            line = line.strip()
+            if len(line) > 0 and line[0] != "#":
+                elems = line.split()
+                camera_id = int(elems[0])
+                model = elems[1]
+                width = int(elems[2])
+                height = int(elems[3])
+                params = np.array(tuple(map(float, elems[4:])))
+                cameras[camera_id] = Camera(id=camera_id, model=model,
+                                            width=width, height=height,
+                                            params=params)
+    return cameras
+
+
+def read_cameras_binary(path_to_model_file):
+    """
+    see: src/base/reconstruction.cc
+        void Reconstruction::WriteCamerasBinary(const std::string& path)
+        void Reconstruction::ReadCamerasBinary(const std::string& path)
+    """
+    cameras = {}
+    with open(path_to_model_file, "rb") as fid:
+        num_cameras = read_next_bytes(fid, 8, "Q")[0]
+        for camera_line_index in range(num_cameras):
+            camera_properties = read_next_bytes(
+                fid, num_bytes=24, format_char_sequence="iiQQ")
+            camera_id = camera_properties[0]
+            model_id = camera_properties[1]
+            model_name = CAMERA_MODEL_IDS[camera_properties[1]].model_name
+            width = camera_properties[2]
+            height = camera_properties[3]
+            num_params = CAMERA_MODEL_IDS[model_id].num_params
+            params = read_next_bytes(fid, num_bytes=8*num_params,
+                                     format_char_sequence="d"*num_params)
+            cameras[camera_id] = Camera(id=camera_id,
+                                        model=model_name,
+                                        width=width,
+                                        height=height,
+                                        params=np.array(params))
+        assert len(cameras) == num_cameras
+    return cameras
+
+
+def read_images_text(path):
+    """
+    see: src/base/reconstruction.cc
+        void Reconstruction::ReadImagesText(const std::string& path)
+        void Reconstruction::WriteImagesText(const std::string& path)
+    """
+    images = {}
+    with open(path, "r") as fid:
+        while True:
+            line = fid.readline()
+            if not line:
+                break
+            line = line.strip()
+            if len(line) > 0 and line[0] != "#":
+                elems = line.split()
+                image_id = int(elems[0])
+                qvec = np.array(tuple(map(float, elems[1:5])))
+                tvec = np.array(tuple(map(float, elems[5:8])))
+                camera_id = int(elems[8])
+                image_name = elems[9]
+                elems = fid.readline().split()
+                xys = np.column_stack([tuple(map(float, elems[0::3])),
+                                       tuple(map(float, elems[1::3]))])
+                point3D_ids = np.array(tuple(map(int, elems[2::3])))
+                images[image_id] = Image(
+                    id=image_id, qvec=qvec, tvec=tvec,
+                    camera_id=camera_id, name=image_name,
+                    xys=xys, point3D_ids=point3D_ids)
+    return images
+
+
+def read_images_binary(path_to_model_file):
+    """
+    see: src/base/reconstruction.cc
+        void Reconstruction::ReadImagesBinary(const std::string& path)
+        void Reconstruction::WriteImagesBinary(const std::string& path)
+    """
+    images = {}
+    with open(path_to_model_file, "rb") as fid:
+        num_reg_images = read_next_bytes(fid, 8, "Q")[0]
+        for image_index in range(num_reg_images):
+            binary_image_properties = read_next_bytes(
+                fid, num_bytes=64, format_char_sequence="idddddddi")
+            image_id = binary_image_properties[0]
+            qvec = np.array(binary_image_properties[1:5])
+            tvec = np.array(binary_image_properties[5:8])
+            camera_id = binary_image_properties[8]
+            image_name = ""
+            current_char = read_next_bytes(fid, 1, "c")[0]
+            while current_char != b"\x00":   # look for the ASCII 0 entry
+                image_name += current_char.decode("utf-8")
+                current_char = read_next_bytes(fid, 1, "c")[0]
+            num_points2D = read_next_bytes(fid, num_bytes=8,
+                                           format_char_sequence="Q")[0]
+            x_y_id_s = read_next_bytes(fid, num_bytes=24*num_points2D,
+                                       format_char_sequence="ddq"*num_points2D)
+            xys = np.column_stack([tuple(map(float, x_y_id_s[0::3])),
+                                   tuple(map(float, x_y_id_s[1::3]))])
+            point3D_ids = np.array(tuple(map(int, x_y_id_s[2::3])))
+            images[image_id] = Image(
+                id=image_id, qvec=qvec, tvec=tvec,
+                camera_id=camera_id, name=image_name,
+                xys=xys, point3D_ids=point3D_ids)
+    return images
+
+
+def read_points3D_text(path):
+    """
+    see: src/base/reconstruction.cc
+        void Reconstruction::ReadPoints3DText(const std::string& path)
+        void Reconstruction::WritePoints3DText(const std::string& path)
+    """
+    points3D = {}
+    with open(path, "r") as fid:
+        while True:
+            line = fid.readline()
+            if not line:
+                break
+            line = line.strip()
+            if len(line) > 0 and line[0] != "#":
+                elems = line.split()
+                point3D_id = int(elems[0])
+                xyz = np.array(tuple(map(float, elems[1:4])))
+                rgb = np.array(tuple(map(int, elems[4:7])))
+                error = float(elems[7])
+                image_ids = np.array(tuple(map(int, elems[8::2])))
+                point2D_idxs = np.array(tuple(map(int, elems[9::2])))
+                points3D[point3D_id] = Point3D(id=point3D_id, xyz=xyz, rgb=rgb,
+                                               error=error, image_ids=image_ids,
+                                               point2D_idxs=point2D_idxs)
+    return points3D
+
+
+def read_points3d_binary(path_to_model_file):
+    """
+    see: src/base/reconstruction.cc
+        void Reconstruction::ReadPoints3DBinary(const std::string& path)
+        void Reconstruction::WritePoints3DBinary(const std::string& path)
+    """
+    points3D = {}
+    with open(path_to_model_file, "rb") as fid:
+        num_points = read_next_bytes(fid, 8, "Q")[0]
+        for point_line_index in range(num_points):
+            binary_point_line_properties = read_next_bytes(
+                fid, num_bytes=43, format_char_sequence="QdddBBBd")
+            point3D_id = binary_point_line_properties[0]
+            xyz = np.array(binary_point_line_properties[1:4])
+            rgb = np.array(binary_point_line_properties[4:7])
+            error = np.array(binary_point_line_properties[7])
+            track_length = read_next_bytes(
+                fid, num_bytes=8, format_char_sequence="Q")[0]
+            track_elems = read_next_bytes(
+                fid, num_bytes=8*track_length,
+                format_char_sequence="ii"*track_length)
+            image_ids = np.array(tuple(map(int, track_elems[0::2])))
+            point2D_idxs = np.array(tuple(map(int, track_elems[1::2])))
+            points3D[point3D_id] = Point3D(
+                id=point3D_id, xyz=xyz, rgb=rgb,
+                error=error, image_ids=image_ids,
+                point2D_idxs=point2D_idxs)
+    return points3D
+
+
+def read_model(path, ext):
+    if ext == ".txt":
+        cameras = read_cameras_text(os.path.join(path, "cameras" + ext))
+        images = read_images_text(os.path.join(path, "images" + ext))
+        points3D = read_points3D_text(os.path.join(path, "points3D") + ext)
+    else:
+        cameras = read_cameras_binary(os.path.join(path, "cameras" + ext))
+        images = read_images_binary(os.path.join(path, "images" + ext))
+        points3D = read_points3d_binary(os.path.join(path, "points3D") + ext)
+    return cameras, images, points3D
+
+
+def qvec2rotmat(qvec):
+    return np.array([
+        [1 - 2 * qvec[2]**2 - 2 * qvec[3]**2,
+         2 * qvec[1] * qvec[2] - 2 * qvec[0] * qvec[3],
+         2 * qvec[3] * qvec[1] + 2 * qvec[0] * qvec[2]],
+        [2 * qvec[1] * qvec[2] + 2 * qvec[0] * qvec[3],
+         1 - 2 * qvec[1]**2 - 2 * qvec[3]**2,
+         2 * qvec[2] * qvec[3] - 2 * qvec[0] * qvec[1]],
+        [2 * qvec[3] * qvec[1] - 2 * qvec[0] * qvec[2],
+         2 * qvec[2] * qvec[3] + 2 * qvec[0] * qvec[1],
+         1 - 2 * qvec[1]**2 - 2 * qvec[2]**2]])
+
+
+def rotmat2qvec(R):
+    Rxx, Ryx, Rzx, Rxy, Ryy, Rzy, Rxz, Ryz, Rzz = R.flat
+    K = np.array([
+        [Rxx - Ryy - Rzz, 0, 0, 0],
+        [Ryx + Rxy, Ryy - Rxx - Rzz, 0, 0],
+        [Rzx + Rxz, Rzy + Ryz, Rzz - Rxx - Ryy, 0],
+        [Ryz - Rzy, Rzx - Rxz, Rxy - Ryx, Rxx + Ryy + Rzz]]) / 3.0
+    eigvals, eigvecs = np.linalg.eigh(K)
+    qvec = eigvecs[[3, 0, 1, 2], np.argmax(eigvals)]
+    if qvec[0] < 0:
+        qvec *= -1
+    return qvec
+
+
+def main():
+    if len(sys.argv) != 3:
+        print("Usage: python read_model.py path/to/model/folder [.txt,.bin]")
+        return
+
+    cameras, images, points3D = read_model(path=sys.argv[1], ext=sys.argv[2])
+
+    print("num_cameras:", len(cameras))
+    print("num_images:", len(images))
+    print("num_points3D:", len(points3D))
+
+
+if __name__ == "__main__":
+    main()
+```
+
+### utils/colmap_utils.py
+```
+import argparse
+import numpy as np
+import os
+import os.path as osp
+import cv2
+import struct
+
+from .colmap_read_model import *
+
+def read_array(path):
+    with open(path, "rb") as fid:
+        width, height, channels = np.genfromtxt(fid, delimiter="&", max_rows=1,
+                                                usecols=(0, 1, 2), dtype=int)
+        fid.seek(0)
+        num_delimiter = 0
+        byte = fid.read(1)
+        while True:
+            if byte == b"&":
+                num_delimiter += 1
+                if num_delimiter >= 3:
+                    break
+            byte = fid.read(1)
+        array = np.fromfile(fid, np.float32)
+    array = array.reshape((width, height, channels), order="F")
+    return np.transpose(array, (1, 0, 2)).squeeze()
+
+def load_point_vis(path, masks):
+    with open(path, 'rb') as f:
+        n = struct.unpack('<Q', f.read(8))[0]
+        print('point number: {}'.format(n))
+        for i in range(n):
+            m = struct.unpack('<I', f.read(4))[0]
+            for j in range(m):
+                idx, u, v = struct.unpack('<III', f.read(4 * 3))
+                masks[idx][v, u] = 1
+
+def read_ply_mask(path):
+    images_bin_path = os.path.join(os.path.dirname(path), 'sparse', 'images.bin')
+    images = read_images_binary(images_bin_path)
+    names = [dd[1].name for dd in images.items()]
+    shapes = {}
+    for name in names:
+        depth_fname = os.path.join(os.path.dirname(path), 'stereo', 'depth_maps', name + '.geometric.bin')
+        shapes[name] = read_array(depth_fname).shape
+
+    ply_vis_path = path + '.vis'
+    assert osp.exists(ply_vis_path)
+    masks = [np.zeros(shapes[name], dtype=np.uint8) for name in names]
+    load_point_vis(ply_vis_path, masks)
+    return {name: mask for name, mask in zip(names, masks)}
+```
+
+### utils/depth_priors_utils.py
+```
+import torch
+
+def compute_depth_loss(depth_pred, depth_gt, mask_gt):
+    loss_list = []
+    for pred, gt, mask in zip(depth_pred, depth_gt, mask_gt):
+        log_pred = torch.log(pred[mask])
+        log_target = torch.log(gt[mask])
+        alpha = (log_target - log_pred).sum()/mask.sum()
+        log_diff = torch.abs((log_pred - log_target + alpha))
+        d = 0.05*0.2*(log_diff.sum()/mask.sum())
+        loss_list.append(d)
+
+    return torch.stack(loss_list, 0).mean()
+```
+
+### utils/evaluation_utils.py
+```
+import os
+import cv2
+import numpy as np
+import torch
+import lpips
+import skimage
+
+def compute_errors(gt, pred):
+    """Computation of error metrics between predicted and ground truth depths
+    """
+    thresh = np.maximum((gt / pred), (pred / gt))
+    a1 = (thresh < 1.25     ).mean()
+    a2 = (thresh < 1.25 ** 2).mean()
+    a3 = (thresh < 1.25 ** 3).mean()
+
+    rmse = (gt - pred) ** 2
+    rmse = np.sqrt(rmse.mean())
+
+    rmse_log = (np.log(gt) - np.log(pred)) ** 2
+    rmse_log = np.sqrt(rmse_log.mean())
+
+    abs_rel = np.mean(np.abs(gt - pred) / gt)
+
+    sq_rel = np.mean(((gt - pred) ** 2) / gt)
+
+    return abs_rel, sq_rel, rmse, rmse_log, a1, a2, a3
+
+
+def depth_evaluation(gt_depths, pred_depths, savedir=None, pred_masks=None, min_depth=0.1, max_depth=20):
+    assert gt_depths.shape[0] == pred_depths.shape[0]
+
+    gt_depths_valid = []
+    pred_depths_valid = []
+    errors = []
+    num = gt_depths.shape[0]
+    for i in range(num):
+        gt_depth = gt_depths[i]
+        mask = (gt_depth > min_depth) * (gt_depth < max_depth)
+        gt_height, gt_width = gt_depth.shape[:2]
+
+        pred_depth = cv2.resize(pred_depths[i], (gt_width, gt_height))
+
+        if pred_masks is not None:
+            pred_mask = pred_masks[i]
+            pred_mask = cv2.resize(pred_mask.astype(np.uint8), (gt_width, gt_height)) > 0.5
+            mask = mask * pred_mask
+
+        if mask.sum() == 0:
+            continue
+
+        pred_depth = pred_depth[mask]
+        gt_depth = gt_depth[mask]
+        
+        pred_depths_valid.append(pred_depth)
+        gt_depths_valid.append(gt_depth)
+
+    ratio = np.median(np.concatenate(gt_depths_valid)) / \
+                np.median(np.concatenate(pred_depths_valid))
+
+    for i in range(len(pred_depths_valid)):
+        gt_depth = gt_depths_valid[i]
+        pred_depth = pred_depths_valid[i]
+
+        pred_depth *= ratio
+        pred_depth[pred_depth < min_depth] = min_depth
+        pred_depth[pred_depth > max_depth] = max_depth
+
+        errors.append(compute_errors(gt_depth, pred_depth))
+
+    mean_errors = np.array(errors).mean(0)
+
+    print("\n  " + ("{:>8} | " * 7).format("abs_rel", "sq_rel", "rmse", "rmse_log", "a1", "a2", "a3"))
+    print(("&{: 8.3f}  " * 7).format(*mean_errors.tolist()) + "\\\\")
+    print("\n-> Done!")
+
+    if savedir is not None:
+        with open(os.path.join(savedir, 'depth_evaluation.txt'), 'a') as f:
+            f.writelines(("{:>8} | " * 7).format("abs_rel", "sq_rel", "rmse", "rmse_log", "a1", "a2", "a3") + '\n')
+            f.writelines(("&{: 8.3f}  " * 7).format(*mean_errors.tolist()) + "\\\\")
+
+def rgb_evaluation(gts, predicts, savedir):
+    assert gts.max() <= 1
+    gts = gts.astype(np.float32)
+    predicts = predicts.astype(np.float32)
+    ssim_list = []
+    lpips_list = []
+    mse = ((gts - predicts)**2).mean(-1).mean(-1).mean(-1)
+    print(mse.shape)
+    psnr = (-10*np.log10(mse)).mean()
+    lpips_metric = lpips.LPIPS(net='alex', version='0.1')
+    gts_torch = torch.from_numpy((2*gts - 1).transpose(0, 3, 1, 2)).type(torch.FloatTensor).cuda()
+    predicts_torch = torch.from_numpy((2*predicts - 1).transpose(0, 3, 1, 2)).type(torch.FloatTensor).cuda()
+
+    for i in range(int(np.ceil(gts_torch.shape[0] / 10.0))):
+        temp = lpips_metric(gts_torch[i*10:(i + 1)*10], predicts_torch[i*10:(i + 1)*10])
+        lpips_list.append(temp.cpu().numpy())
+    lpips_ = np.concatenate(lpips_list, 0).mean()
+
+    for i in range(gts.shape[0]):
+        gt = gts[i]
+        predict = predicts[i]
+        ssim_list.append(skimage.measure.compare_ssim(gt, predict, multichannel=True))
+    ssim = np.array(ssim_list).mean()
+
+    with open(os.path.join(savedir, 'rgb_evaluation.txt'), 'w') as f:
+        result = 'psnr: {0}, ssim: {1}, lpips: {2}'.format(psnr, ssim, lpips_)
+        f.writelines(result)
+        print(result)
+```
+
+### utils/filter_utils.py
+```
+import numpy as np
+from scipy.sparse import diags
+
+
+# From: https://en.wikipedia.org/wiki/YCbCr#JPEG_conversion
+RGB_TO_YUV = np.array([
+    [ 0.299,     0.587,     0.114],
+    [-0.168736, -0.331264,  0.5],
+    [ 0.5,      -0.418688, -0.081312]])
+YUV_TO_RGB = np.array([
+    [1.0,  0.0,      1.402],
+    [1.0, -0.34414, -0.71414],
+    [1.0,  1.772,    0.0]])
+YUV_OFFSET = np.array([0, 128.0, 128.0]).reshape(1, 1, -1)
+
+MAX_VAL = 255.0
+
+def rgb2yuv(im):
+    return (np.tensordot(im, RGB_TO_YUV, ([2], [1])) + YUV_OFFSET)
+
+def yuv2rgb(im):
+    return np.tensordot(im.astype(float) - YUV_OFFSET, YUV_TO_RGB, ([2], [1]))
+
+
+
+def solve_image_ldl3(A11, A12, A13, A22, A23, A33, b1, b2, b3):
+      # An unrolled LDL solver for a 3x3 symmetric linear system.
+  d1 = A11
+  L12 = A12/d1
+  d2 = A22 - L12*A12
+  L13 = A13/d1
+  L23 = (A23 - L13*A12)/d2
+  d3 = A33 - L13*A13 - L23*L23*d2 + 1e-10
+  y1 = b1
+  y2 = b2 - L12*y1
+  y3 = b3 - L13*y1 - L23*y2
+  x3 = y3/d3
+  x2 = y2/d2 - L23*x3
+  x1 = y1/d1 - L12*x2 - L13*x3
+  return x1, x2, x3
+
+# A simple linear blur filter. This can be whatever, provided it averages the
+# input images by averaging its inputs with non-negative weights.
+def blur(X, alpha):
+  # Do an exponential decay filter on the outermost two dimensions of X.
+  # Equivalent to convolving an image with a Laplacian blur.
+  Y = X.copy()
+  for i in range(Y.shape[-1]-1):
+    Y[...,i+1] += alpha * Y[...,i]
+
+  for i in range(Y.shape[-1]-1)[::-1]:
+    Y[...,i] += alpha * Y[...,i+1]
+
+  for i in range(Y.shape[-2]-1):
+    Y[...,i+1,:] += alpha * Y[...,i,:]
+
+  for i in range(Y.shape[-2]-1)[::-1]:
+    Y[...,i,:] += alpha * Y[...,i+1,:]
+  return Y
+
+def bistochastize(grid, maxiter=10):
+    """Compute diagonal matrices to bistochastize a bilateral grid"""
+    m = grid.splat(np.ones(grid.npixels))
+    n = np.ones(grid.nvertices)
+    for i in range(maxiter):
+        n = np.sqrt(n * m / (grid.blur(n) + 1e-10))
+    # Correct m to satisfy the assumption of bistochastization regardless
+    # of how many iterations have been run.
+    m = n * grid.blur(n)
+    Dm = diags(m, 0)
+    Dn = diags(n, 0)
+    return Dn, Dm
+```
+
+### utils/io_utils.py
+```
+import os
+import cv2
+import numpy as np
+import torch
+import imageio
+from torchvision import transforms
+
+from .colmap_utils import *
+import pdb
+
+def load_img_list(datadir, load_test=False):
+    with open(os.path.join(datadir, 'train.txt'), 'r') as f:
+        lines = f.readlines()
+        image_list = [line.strip() for line in lines]
+        
+    if load_test:
+        with open(os.path.join(datadir, 'test.txt'), 'r') as f:
+            lines = f.readlines()
+            image_list += [line.strip() for line in lines]
+    return image_list
+
+def load_colmap(image_list, datadir, H=None, W=None):
+    depths = []
+    masks = []
+
+    ply_path = os.path.join(datadir, 'dense', 'fused.ply')
+    ply_masks = read_ply_mask(ply_path)
+
+    for image_name in image_list:
+        depth_path = os.path.join(datadir, 'dense/stereo/depth_maps', image_name + '.geometric.bin')
+        depth = read_array(depth_path)
+        mask = ply_masks[image_name]
+        if H is not None:
+            depth_resize = cv2.resize(depth, (W, H))
+            mask_resize = cv2.resize(mask, (W, H))
+        depths.append(depth_resize)
+        masks.append(mask_resize > 0.5)
+
+    return np.stack(depths), np.stack(masks)
+
+def load_gt_depths(image_list, datadir, H=None, W=None):
+    depths = []
+    masks = []
+
+    for image_name in image_list:
+        frame_id = image_name.split('.')[0]
+        depth_path = os.path.join(datadir, 'depth', '{}.png'.format(frame_id))
+        depth = cv2.imread(depth_path, cv2.IMREAD_UNCHANGED)
+        depth = depth.astype(np.float32) / 1000
+        
+        if H is not None:
+            mask = (depth > 0).astype(np.uint8)
+            depth_resize = cv2.resize(depth, (W, H), interpolation=cv2.INTER_NEAREST)
+            mask_resize = cv2.resize(mask, (W, H), interpolation=cv2.INTER_NEAREST)
+            depths.append(depth_resize)
+            masks.append(mask_resize > 0.5)
+        else:
+            depths.append(depth)
+            masks.append(depth > 0)
+
+    return np.stack(depths), np.stack(masks)
+
+def load_depths(image_list, datadir, H=None, W=None):
+    depths = []
+
+    for image_name in image_list:
+        frame_id = image_name.split('.')[0]
+        depth_path = os.path.join(datadir, '{}_depth.npy'.format(frame_id))
+        if not os.path.exists(depth_path):
+            depth_path = os.path.join(datadir, '{}.npy'.format(frame_id))
+        depth = np.load(depth_path)
+        
+        if H is not None:
+            depth_resize = cv2.resize(depth, (W, H))
+            depths.append(depth_resize)
+        else:
+            depths.append(depth)
+
+    return np.stack(depths)
+
+def pil_loader(path):
+    from PIL import Image
+    # open path as file to avoid ResourceWarning
+    # (https://github.com/python-pillow/Pillow/issues/835)
+    with open(path, 'rb') as f:
+        with Image.open(f) as img:
+            return img.convert('RGB')
+
+def load_rgbs(image_list, datadir, H=None, W=None, is_png=False):
+    from PIL import Image
+    to_tensor = transforms.ToTensor()
+    resize = transforms.Resize((H, W), interpolation=Image.ANTIALIAS)
+    rgbs = []
+
+    for image_name in image_list:
+        if is_png:
+            image_name = image_name.replace('.jpg', '.png')
+        rgb_path = os.path.join(datadir, image_name)
+        rgb = pil_loader(rgb_path)
+        if H is not None:
+            rgb = resize(rgb)
+
+        rgbs.append(to_tensor(rgb))
+
+    return torch.stack(rgbs)
+
+def load_rgbs_np(image_list, datadir, H=None, W=None, is_png=False, use_cv2=True):
+    rgbs = []
+
+    for image_name in image_list:
+        if is_png:
+            image_name = image_name.replace('.jpg', '.png')
+        rgb_path = os.path.join(datadir, image_name)
+        if use_cv2:
+            rgb = cv2.imread(rgb_path)
+        else:
+            rgb = imageio.imread(rgb_path)[..., :3] / 255.0
+        
+        if H is not None:
+            if use_cv2:    
+                rgb = cv2.resize(rgb, (W, H))
+            else:
+                rgb = resize(rgb, (W, H))
+
+        rgbs.append(rgb)
+
+    return np.stack(rgbs)
+
+def visualize_depth(depth, mask=None, depth_min=None, depth_max=None, direct=False):
+    """Visualize the depth map with colormap.
+       Rescales the values so that depth_min and depth_max map to 0 and 1,
+       respectively.
+    """
+    if not direct:
+        depth = 1.0 / (depth + 1e-6)
+    invalid_mask = np.logical_or(np.isnan(depth), np.logical_not(np.isfinite(depth)))
+    if mask is not None:
+        invalid_mask += np.logical_not(mask)
+    if depth_min is None:
+        depth_min = np.percentile(depth[np.logical_not(invalid_mask)], 5)
+    if depth_max is None:
+        depth_max = np.percentile(depth[np.logical_not(invalid_mask)], 95)
+    depth[depth < depth_min] = depth_min
+    depth[depth > depth_max] = depth_max
+    depth[invalid_mask] = depth_max
+
+    depth_scaled = (depth - depth_min) / (depth_max - depth_min)
+    depth_scaled_uint8 = np.uint8(depth_scaled * 255)
+    depth_color = cv2.applyColorMap(depth_scaled_uint8, cv2.COLORMAP_MAGMA)
+    depth_color[invalid_mask, :] = 0
+
+    return depth_color
+```
+
+### utils/nerf_utils.py
+```
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+def align_scales(depth_priors, colmap_depths, colmap_masks, poses, sc, i_train, i_test):
+    ratio_priors = []
+    for i in range(depth_priors.shape[0]):
+        ratio_priors.append(np.median(colmap_depths[i][colmap_masks[i]]) / np.median(depth_priors[i][colmap_masks[i]]))
+    ratio_priors = np.stack(ratio_priors)
+    ratio_priors = ratio_priors[:, np.newaxis, np.newaxis]
+    
+    if len(i_test) > 0:
+        neighbor_idx = cal_neighbor_idx(poses, i_train, i_test)
+        depth_priors_test = depth_priors[i_train][neighbor_idx]
+        ratio_priors_test = ratio_priors[i_train][neighbor_idx]
+        depth_priors = np.concatenate([depth_priors, depth_priors_test], axis=0)
+        ratio_priors = np.concatenate([ratio_priors, ratio_priors_test], axis=0)
+
+    depth_priors = depth_priors * sc * ratio_priors #align scales
+    return depth_priors
+
+def cal_depth_confidences(depths, T, K, i_train, topk=4):
+    _, H, W = depths.shape
+    view_num = len(i_train)
+    invK = torch.inverse(K)
+    batch_K = torch.unsqueeze(K, 0).repeat(view_num, 1, 1)
+    batch_invK = torch.unsqueeze(invK, 0).repeat(depths.shape[0], 1, 1)
+    T_train = T[i_train]
+    invT = torch.inverse(T_train)
+    pix_coords = calculate_coords(W, H)
+    cam_points = BackprojectDepth(depths, batch_invK, pix_coords)
+    depth_confidences = []
+
+    for i in range(depths.shape[0]):
+        cam_points_i = cam_points[i:i+1].repeat(view_num, 1, 1)
+        T_i = torch.matmul(invT, T[i:i+1].repeat(view_num, 1, 1))
+        pix_coords_ref = Project3D(cam_points_i, batch_K, T_i, H, W)
+        depths_ = Project3D_depth(cam_points_i, batch_K, T_i, H, W)
+        depths_proj = F.grid_sample(depths[i_train].unsqueeze(1), pix_coords_ref,
+                        padding_mode="zeros").squeeze()
+        error = torch.abs(depths_proj - depths_) / (depths_ + 1e-7)
+        depth_confidence, _ = error.topk(k=topk, dim=0, largest=False)
+        depth_confidence =  depth_confidence.mean(0).cpu().numpy()
+        depth_confidences.append(depth_confidence)
+    return np.stack(depth_confidences, 0)
+    return np.stack(depth_confidences, 0)
+
+def calculate_coords(W, H):
+    meshgrid = np.meshgrid(range(W), range(H), indexing='xy')
+    id_coords = np.stack(meshgrid, axis=0).astype(np.float32)
+    id_coords = torch.from_numpy(id_coords)
+    pix_coords = torch.stack(
+            [id_coords[0].view(-1), id_coords[1].view(-1)], 0)
+    ones = torch.ones(1, H * W)
+    pix_coords = pix_coords.to(ones.device)
+    pix_coords = torch.cat([pix_coords, ones], 0)
+    return pix_coords
+
+def BackprojectDepth(depth, invK, pix_coords):
+    batch_size, H, W = depth.shape
+    ones = torch.ones(batch_size, 1, H * W)
+    cam_points = torch.matmul(invK[:, :3, :3], pix_coords)
+    cam_points = depth.view(batch_size, 1, -1) * cam_points
+    cam_points = torch.cat([cam_points, ones], 1)
+    return cam_points
+
+def Project3D(points, K, T, H, W, eps=1e-7):
+    batch_size = points.shape[0]
+    P = torch.matmul(K, T)[:, :3, :]
+
+    cam_points = torch.matmul(P, points)
+
+    pix_coords = cam_points[:, :2, :] / (cam_points[:, 2, :].unsqueeze(1) + eps)
+    pix_coords = pix_coords.view(batch_size, 2, H, W)
+    pix_coords = pix_coords.permute(0, 2, 3, 1)
+    pix_coords[..., 0] /= W - 1
+    pix_coords[..., 1] /= H - 1
+    pix_coords = (pix_coords - 0.5) * 2
+    return pix_coords
+
+def Project3D_depth(points, K, T, H, W, eps=1e-7):
+    batch_size = points.shape[0]
+    P = torch.matmul(K, T)[:, :3, :]
+
+    cam_points = torch.matmul(P, points)
+    return cam_points[:, 2, :].view(batch_size, H, W)
+
+def cal_neighbor_idx(poses, i_train, i_test):
+    angles = []
+    trans = []
+    for i in range(poses.shape[0]):
+        angles.append(vec_from_R(poses[i].copy()))
+        trans.append(poses[i][:3,3].copy())
+    angles, trans = np.stack(angles), np.stack(trans)
+    angle_dis = angles[i_test][:, None] - angles[i_train][None, :]
+    tran_dis = trans[i_test][:, None] - trans[i_train][None, :]
+    angle_dis = (angle_dis ** 2).sum(-1)
+    angle_sort = np.argsort(angle_dis, axis=1)
+    tran_dis = (tran_dis ** 2).sum(-1)
+    tran_sort = np.argsort(tran_dis, axis=1)
+    x_range = np.arange(len(i_test))[:,None].repeat(len(i_train), axis=1)
+    y_range = np.arange(len(i_train))[None].repeat(len(i_test), axis=0)
+    angle_dis[x_range, angle_sort] = y_range
+    tran_dis[x_range, tran_sort] = y_range
+    final_score = 100*(angle_dis + tran_dis) + angle_dis
+    neighbor_idx = np.argmin(final_score, axis=1)
+    return neighbor_idx
+
+def vec_from_R(rot):
+    temp = (rot[:3,:3] - rot[:3,:3].transpose(1,0))/2
+    angle_vec = np.stack([temp[2][1],-temp[2][0],temp[1][0]])
+    angle = np.linalg.norm(angle_vec)
+    axis = angle_vec/angle
+    return np.arcsin(angle)*axis
+```
+
+### utils/pose_utils.py
+```
+import numpy as np
+import os
+import sys
+import imageio
+import skimage.transform
+import pdb
+
+import utils.colmap_read_model as read_model
+
+
+def load_colmap_data(realdir):
+
+    camerasfile = os.path.join(realdir, 'sparse/0/cameras.bin')
+    camdata = read_model.read_cameras_binary(camerasfile)
+
+    # cam = camdata[camdata.keys()[0]]
+    list_of_keys = list(camdata.keys())
+    cam = camdata[list_of_keys[0]]
+    print( 'Cameras', len(cam))
+
+    h, w, f = cam.height, cam.width, cam.params[0]
+    # w, h, f = factor * w, factor * h, factor * f
+    hwf = np.array([h,w,f]).reshape([3,1])
+
+    imagesfile = os.path.join(realdir, 'sparse/0/images.bin')
+    imdata = read_model.read_images_binary(imagesfile)
+
+    w2c_mats = []
+    bottom = np.array([0,0,0,1.]).reshape([1,4])
+
+    names = [imdata[k].name for k in imdata]
+    print( 'Images #', len(names))
+    perm = []
+    with open(os.path.join(realdir, 'train.txt'), 'r') as f:
+        lines = f.readlines()
+        for line in lines:
+            for i in range(len(names)):
+                if names[i] == line.strip():
+                    perm.append(i)
+    if os.path.exists(os.path.join(realdir, 'test.txt')):
+        with open(os.path.join(realdir, 'test.txt'), 'r') as f:
+            lines = f.readlines()
+            for line in lines:
+                for i in range(len(names)):
+                    if names[i] == line.strip():
+                        perm.append(i)
+    if len(names) != len(perm):
+        print('COLMAP fails for some images!')
+        exit()
+    for k in imdata:
+        im = imdata[k]
+        R = im.qvec2rotmat()
+        t = im.tvec.reshape([3,1])
+        m = np.concatenate([np.concatenate([R, t], 1), bottom], 0)
+        w2c_mats.append(m)
+
+    w2c_mats = np.stack(w2c_mats, 0)
+    c2w_mats = np.linalg.inv(w2c_mats)
+
+    poses = c2w_mats[:, :3, :4].transpose([1,2,0])
+    poses = np.concatenate([poses, np.tile(hwf[..., np.newaxis], [1,1,poses.shape[-1]])], 1)
+
+    points3dfile = os.path.join(realdir, 'sparse/0/points3D.bin')
+    pts3d = read_model.read_points3d_binary(points3dfile)
+
+    # must switch to [-u, r, -t] from [r, -u, t], NOT [r, u, -t]
+    poses = np.concatenate([poses[:, 1:2, :], poses[:, 0:1, :], -poses[:, 2:3, :], poses[:, 3:4, :], poses[:, 4:5, :]], 1)
+
+    return poses, pts3d, perm
+
+
+def save_poses(basedir, poses, pts3d, perm):
+    pts_arr = []
+    vis_arr = []
+    for k in pts3d:
+        pts_arr.append(pts3d[k].xyz)
+        cams = [0] * poses.shape[-1]
+        for ind in pts3d[k].image_ids:
+            if len(cams) < ind - 1:
+                print('ERROR: the correct camera poses for current points cannot be accessed')
+                return
+            cams[ind-1] = 1
+        vis_arr.append(cams)
+
+    pts_arr = np.array(pts_arr)
+    vis_arr = np.array(vis_arr)
+    print( 'Points', pts_arr.shape, 'Visibility', vis_arr.shape )
+
+    zvals = np.sum(-(pts_arr[:, np.newaxis, :].transpose([2,0,1]) - poses[:3, 3:4, :]) * poses[:3, 2:3, :], 0)
+    valid_z = zvals[vis_arr==1]
+    print( 'Depth stats', valid_z.min(), valid_z.max(), valid_z.mean() )
+
+    save_arr = []
+    for i in perm:
+        vis = vis_arr[:, i]
+        zs = zvals[:, i]
+        zs = zs[vis==1]
+        close_depth, inf_depth = np.percentile(zs, .1), np.percentile(zs, 99.9)
+        # print( i, close_depth, inf_depth )
+
+        save_arr.append(np.concatenate([poses[..., i].ravel(), np.array([close_depth, inf_depth])], 0))
+    save_arr = np.array(save_arr)
+
+    np.save(os.path.join(basedir, 'poses_bounds.npy'), save_arr)
+
+
+
+
+def minify_v0(basedir, factors=[], resolutions=[]):
+    needtoload = False
+    for r in factors:
+        imgdir = os.path.join(basedir, 'images_{}'.format(r))
+        if not os.path.exists(imgdir):
+            needtoload = True
+    for r in resolutions:
+        imgdir = os.path.join(basedir, 'images_{}x{}'.format(r[1], r[0]))
+        if not os.path.exists(imgdir):
+            needtoload = True
+    if not needtoload:
+        return
+
+    def downsample(imgs, f):
+        sh = list(imgs.shape)
+        sh = sh[:-3] + [sh[-3]//f, f, sh[-2]//f, f, sh[-1]]
+        imgs = np.reshape(imgs, sh)
+        imgs = np.mean(imgs, (-2, -4))
+        return imgs
+
+    imgdir = os.path.join(basedir, 'images')
+    imgs = [os.path.join(imgdir, f) for f in sorted(os.listdir(imgdir))]
+    imgs = [f for f in imgs if any([f.endswith(ex) for ex in ['JPG', 'jpg', 'png', 'jpeg', 'PNG']])]
+    imgs = np.stack([imageio.imread(img)/255. for img in imgs], 0)
+
+    for r in factors + resolutions:
+        if isinstance(r, int):
+            name = 'images_{}'.format(r)
+        else:
+            name = 'images_{}x{}'.format(r[1], r[0])
+        imgdir = os.path.join(basedir, name)
+        if os.path.exists(imgdir):
+            continue
+        print('Minifying', r, basedir)
+
+        if isinstance(r, int):
+            imgs_down = downsample(imgs, r)
+        else:
+            imgs_down = skimage.transform.resize(imgs, [imgs.shape[0], r[0], r[1], imgs.shape[-1]],
+                                                order=1, mode='constant', cval=0, clip=True, preserve_range=False,
+                                                 anti_aliasing=True, anti_aliasing_sigma=None)
+
+        os.makedirs(imgdir)
+        for i in range(imgs_down.shape[0]):
+            imageio.imwrite(os.path.join(imgdir, 'image{:03d}.png'.format(i)), (255*imgs_down[i]).astype(np.uint8))
+
+
+
+
+def minify(basedir, factors=[], resolutions=[]):
+    needtoload = False
+    for r in factors:
+        imgdir = os.path.join(basedir, 'images_{}'.format(r))
+        if not os.path.exists(imgdir):
+            needtoload = True
+    for r in resolutions:
+        imgdir = os.path.join(basedir, 'images_{}x{}'.format(r[1], r[0]))
+        if not os.path.exists(imgdir):
+            needtoload = True
+    if not needtoload:
+        return
+
+    from shutil import copy
+    from subprocess import check_output
+
+    imgdir = os.path.join(basedir, 'images')
+    imgs = [os.path.join(imgdir, f) for f in sorted(os.listdir(imgdir))]
+    imgs = [f for f in imgs if any([f.endswith(ex) for ex in ['JPG', 'jpg', 'png', 'jpeg', 'PNG']])]
+    imgdir_orig = imgdir
+
+    wd = os.getcwd()
+
+    for r in factors + resolutions:
+        if isinstance(r, int):
+            name = 'images_{}'.format(r)
+            resizearg = '{}%'.format(int(100./r))
+        else:
+            name = 'images_{}x{}'.format(r[1], r[0])
+            resizearg = '{}x{}'.format(r[1], r[0])
+        imgdir = os.path.join(basedir, name)
+        if os.path.exists(imgdir):
+            continue
+
+        print('Minifying', r, basedir)
+
+        os.makedirs(imgdir)
+        check_output('cp {}/* {}'.format(imgdir_orig, imgdir), shell=True)
+
+        ext = imgs[0].split('.')[-1]
+        args = ' '.join(['mogrify', '-resize', resizearg, '-format', 'png', '*.{}'.format(ext)])
+        print(args)
+        os.chdir(imgdir)
+        check_output(args, shell=True)
+        os.chdir(wd)
+
+        if ext != 'png':
+            check_output('rm {}/*.{}'.format(imgdir, ext), shell=True)
+            print('Removed duplicates')
+        print('Done')
+
+
+
+
+def load_data(basedir, factor=None, width=None, height=None, load_imgs=True):
+
+    poses_arr = np.load(os.path.join(basedir, 'poses_bounds.npy'))
+    poses = poses_arr[:, :-2].reshape([-1, 3, 5]).transpose([1,2,0])
+    bds = poses_arr[:, -2:].transpose([1,0])
+
+    img0 = [os.path.join(basedir, 'images', f) for f in sorted(os.listdir(os.path.join(basedir, 'images'))) \
+            if f.endswith('JPG') or f.endswith('jpg') or f.endswith('png')][0]
+    sh = imageio.imread(img0).shape
+
+    sfx = ''
+
+    if factor is not None:
+        sfx = '_{}'.format(factor)
+        minify(basedir, factors=[factor])
+        factor = factor
+    elif height is not None:
+        factor = sh[0] / float(height)
+        width = int(sh[1] / factor)
+        minify(basedir, resolutions=[[height, width]])
+        sfx = '_{}x{}'.format(width, height)
+    elif width is not None:
+        factor = sh[1] / float(width)
+        height = int(sh[0] / factor)
+        minify(basedir, resolutions=[[height, width]])
+        sfx = '_{}x{}'.format(width, height)
+    else:
+        factor = 1
+
+    imgdir = os.path.join(basedir, 'images' + sfx)
+    if not os.path.exists(imgdir):
+        print( imgdir, 'does not exist, returning' )
+        return
+
+    imgfiles = [os.path.join(imgdir, f) for f in sorted(os.listdir(imgdir)) if f.endswith('JPG') or f.endswith('jpg') or f.endswith('png')]
+    if poses.shape[-1] != len(imgfiles):
+        print( 'Mismatch between imgs {} and poses {} !!!!'.format(len(imgfiles), poses.shape[-1]) )
+        return
+
+    sh = imageio.imread(imgfiles[0]).shape
+    poses[:2, 4, :] = np.array(sh[:2]).reshape([2, 1])
+    poses[2, 4, :] = poses[2, 4, :] * 1./factor
+
+    if not load_imgs:
+        return poses, bds
+
+    # imgs = [imageio.imread(f, ignoregamma=True)[...,:3]/255. for f in imgfiles]
+    def imread(f):
+        if f.endswith('png'):
+            return imageio.imread(f, ignoregamma=True)
+        else:
+            return imageio.imread(f)
+
+    imgs = imgs = [imread(f)[...,:3]/255. for f in imgfiles]
+    imgs = np.stack(imgs, -1)
+
+    print('Loaded image data', imgs.shape, poses[:,-1,0])
+    return poses, bds, imgs
+
+
+
+
+
+def gen_poses(basedir, factors=None):
+
+    print( 'Post-colmap')
+
+    poses, pts3d, perm = load_colmap_data(basedir)
+
+    save_poses(basedir, poses, pts3d, perm)
+
+    if factors is not None:
+        print( 'Factors:', factors)
+        minify(basedir, factors)
+
+    print( 'Done with imgs2poses' )
+
+    return True
+```
+
+### models/depth_priors/__init__.py
+```
+
+```
+
+### models/depth_priors/depth_model.py
+```
+#!/usr/bin/env python3
+# Copyright (c) Facebook, Inc. and its affiliates.
+
+from abc import abstractmethod
+import torch
+
+
+class DepthModel(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, images, metadata=None):
+        """
+        Images should be feed in the format (N, C, H, W). Channels are in BGR
+        order and values in [0, 1].
+
+        Metadata is not used by the depth models itself, only here, for value
+        transformations.
+
+        metadata["scales"]: (optional, can be None) specifies a post-scale
+            transformation of the depth values. Format (1, N, 1).
+        """
+        depth = self.estimate_depth(images)
+
+        if metadata is not None:
+            if "scales" in metadata:
+                factor = metadata["scales"].unsqueeze(3).cuda()
+                depth = depth * factor
+
+        return depth
+
+    @abstractmethod
+    def estimate_depth(self, images, metadata) -> torch.Tensor:
+        pass
+
+    @abstractmethod
+    def save(self, label):
+        pass
+```
+
+### models/depth_priors/mannequin_challenge_model.py
+```
+#!/usr/bin/env python3
+# Copyright (c) Facebook, Inc. and its affiliates.
+import sys
+import os
+import wget
+from zipfile import ZipFile
+import torch
+import torch.autograd as autograd
+
+from .mannequin_challenge.models import pix2pix_model
+from .mannequin_challenge.options.train_options import TrainOptions
+from .depth_model import DepthModel
+
+def get_model_from_url(url: str, local_path: str, is_zip: bool = False, path_root: str = "checkpoints") -> str:
+    local_path = os.path.join(path_root, local_path)
+    if os.path.exists(local_path):
+        print(f"Found cache {local_path}")
+        return local_path
+
+    # download
+    local_path = local_path.rstrip(os.sep)
+    download_path = local_path if not is_zip else f"{local_path}.zip"
+    os.makedirs(os.path.dirname(download_path), exist_ok=True)
+    if os.path.isfile(download_path):
+        print(f"Found cache {download_path}")
+    else:
+        print(f"Dowloading {url} to {download_path} ...")
+        wget.download(url, download_path)
+
+    if is_zip:
+        print(f"Unziping {download_path} to {local_path}")
+        with ZipFile(download_path, 'r') as f:
+            f.extractall(local_path)
+        os.remove(download_path)
+
+    return local_path
+
+class SuppressedStdout:
+    def __enter__(self):
+        self._original_stdout = sys.stdout
+        sys.stdout = open(os.devnull, "w")
+
+    def __exit__(self, exception_type, exception_value, traceback):
+        sys.stdout.close()
+        sys.stdout = self._original_stdout
+        
+class MannequinChallengeModel(DepthModel):
+    # Requirements and default settings
+    align = 16
+    learning_rate = 0.0004
+    lambda_view_baseline = 0.1
+
+    def __init__(self):
+        super().__init__()
+
+        parser = TrainOptions()
+        parser.initialize()
+        params = parser.parser.parse_args(["--input", "single_view"])
+        params.isTrain = False
+
+        model_file = get_model_from_url(
+            "https://storage.googleapis.com/mannequinchallenge-data/checkpoints/best_depth_Ours_Bilinear_inc_3_net_G.pth",
+            "mc.pth", path_root=os.path.dirname(__file__)
+        )
+
+        class FixedMcModel(pix2pix_model.Pix2PixModel):
+            # Override the load function, so we can load the snapshot stored
+            # in our specific location.
+            def load_network(self, network, network_label, epoch_label):
+                return torch.load(model_file)
+
+        with SuppressedStdout():
+            self.model = FixedMcModel(params)
+
+    def train(self):
+        self.model.switch_to_train()
+
+    def eval(self):
+        self.model.switch_to_eval()
+
+    def parameters(self):
+        return self.model.netG.parameters()
+
+    def estimate_depth(self, images):
+        images = autograd.Variable(images.cuda(), requires_grad=False)
+
+        # Reshape ...CHW -> XCHW
+        shape = images.shape
+        C, H, W = shape[-3:]
+        images = images.reshape(-1, C, H, W)
+
+        self.model.prediction_d, _ = self.model.netG.forward(images)
+
+        # Reshape X1HW -> BNHW
+        out_shape = shape[:-3] + self.model.prediction_d.shape[-2:]
+        self.model.prediction_d = self.model.prediction_d.reshape(out_shape)
+
+        self.model.prediction_d = torch.exp(self.model.prediction_d)
+        self.model.prediction_d = self.model.prediction_d.squeeze(-3)
+
+        return self.model.prediction_d
+
+    def save(self, file_name):
+        state_dict = self.model.netG.state_dict()
+        torch.save(state_dict, file_name)
+```
+
+### models/nerf/run_nerf_helpers.py
+```
+import torch
+torch.autograd.set_detect_anomaly(True)
+import torch.nn as nn
+import torch.nn.functional as F
+import numpy as np
+import lpips
+import time
+import skimage
+import os
+import pdb
+
+# Misc
+img2mse = lambda x, y : torch.mean((x - y) ** 2)
+depth2mse = lambda x, y, mask : torch.mean((x[mask] - y[mask]) ** 2)
+mse2psnr = lambda x : -10. * torch.log(x) / torch.log(torch.Tensor([10.]))
+to8b = lambda x : (255*np.clip(x,0,1)).astype(np.uint8)
+
+# Positional encoding (section 5.1)
+class Embedder:
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+        self.create_embedding_fn()
+
+    def create_embedding_fn(self):
+        embed_fns = []
+        d = self.kwargs['input_dims']
+        out_dim = 0
+        if self.kwargs['include_input']:
+            embed_fns.append(lambda x : x)
+            out_dim += d
+
+        max_freq = self.kwargs['max_freq_log2']
+        N_freqs = self.kwargs['num_freqs']
+
+        if self.kwargs['log_sampling']:
+            freq_bands = 2.**torch.linspace(0., max_freq, steps=N_freqs)
+        else:
+            freq_bands = torch.linspace(2.**0., 2.**max_freq, steps=N_freqs)
+
+        for freq in freq_bands:
+            for p_fn in self.kwargs['periodic_fns']:
+                embed_fns.append(lambda x, p_fn=p_fn, freq=freq : p_fn(x * freq))
+                out_dim += d
+
+        self.embed_fns = embed_fns
+        self.out_dim = out_dim
+
+    def embed(self, inputs):
+        return torch.cat([fn(inputs) for fn in self.embed_fns], -1)
+
+
+def get_embedder(multires, i=0):
+    if i == -1:
+        return nn.Identity(), 3
+
+    embed_kwargs = {
+                'include_input' : True,
+                'input_dims' : 3,
+                'max_freq_log2' : multires-1,
+                'num_freqs' : multires,
+                'log_sampling' : True,
+                'periodic_fns' : [torch.sin, torch.cos],
+    }
+
+    embedder_obj = Embedder(**embed_kwargs)
+    embed = lambda x, eo=embedder_obj : eo.embed(x)
+    return embed, embedder_obj.out_dim
+
+
+# Model
+class NeRF(nn.Module):
+    def __init__(self, D=8, W=256, input_ch=3, input_ch_views=3, output_ch=4, skips=[4], use_viewdirs=False):
+        """
+        """
+        super(NeRF, self).__init__()
+        self.D = D
+        self.W = W
+        self.input_ch = input_ch
+        self.input_ch_views = input_ch_views
+        self.skips = skips
+        self.use_viewdirs = use_viewdirs
+
+        self.pts_linears = nn.ModuleList(
+            [nn.Linear(input_ch, W)] + [nn.Linear(W, W) if i not in self.skips else nn.Linear(W + input_ch, W) for i in range(D-1)])
+
+        ### Implementation according to the official code release (https://github.com/bmild/nerf/blob/master/run_nerf_helpers.py#L104-L105)
+        self.views_linears = nn.ModuleList([nn.Linear(input_ch_views + W, W//2)])
+
+        ### Implementation according to the paper
+        # self.views_linears = nn.ModuleList(
+        #     [nn.Linear(input_ch_views + W, W//2)] + [nn.Linear(W//2, W//2) for i in range(D//2)])
+
+        if use_viewdirs:
+            self.feature_linear = nn.Linear(W, W)
+            self.alpha_linear = nn.Linear(W, 1)
+            self.rgb_linear = nn.Linear(W//2, 3)
+        else:
+            self.output_linear = nn.Linear(W, output_ch)
+
+    def forward(self, x):
+        input_pts, input_views = torch.split(x, [self.input_ch, self.input_ch_views], dim=-1)
+        h = input_pts
+        for i, l in enumerate(self.pts_linears):
+            h = self.pts_linears[i](h)
+            h = F.relu(h)
+            if i in self.skips:
+                h = torch.cat([input_pts, h], -1)
+
+        if self.use_viewdirs:
+            alpha = self.alpha_linear(h)
+            feature = self.feature_linear(h)
+            h = torch.cat([feature, input_views], -1)
+
+            for i, l in enumerate(self.views_linears):
+                h = self.views_linears[i](h)
+                h = F.relu(h)
+
+            rgb = self.rgb_linear(h)
+            outputs = torch.cat([rgb, alpha], -1)
+        else:
+            outputs = self.output_linear(h)
+
+        return outputs
+
+    def load_weights_from_keras(self, weights):
+        assert self.use_viewdirs, "Not implemented if use_viewdirs=False"
+
+        # Load pts_linears
+        for i in range(self.D):
+            idx_pts_linears = 2 * i
+            self.pts_linears[i].weight.data = torch.from_numpy(np.transpose(weights[idx_pts_linears]))
+            self.pts_linears[i].bias.data = torch.from_numpy(np.transpose(weights[idx_pts_linears+1]))
+
+        # Load feature_linear
+        idx_feature_linear = 2 * self.D
+        self.feature_linear.weight.data = torch.from_numpy(np.transpose(weights[idx_feature_linear]))
+        self.feature_linear.bias.data = torch.from_numpy(np.transpose(weights[idx_feature_linear+1]))
+
+        # Load views_linears
+        idx_views_linears = 2 * self.D + 2
+        self.views_linears[0].weight.data = torch.from_numpy(np.transpose(weights[idx_views_linears]))
+        self.views_linears[0].bias.data = torch.from_numpy(np.transpose(weights[idx_views_linears+1]))
+
+        # Load rgb_linear
+        idx_rbg_linear = 2 * self.D + 4
+        self.rgb_linear.weight.data = torch.from_numpy(np.transpose(weights[idx_rbg_linear]))
+        self.rgb_linear.bias.data = torch.from_numpy(np.transpose(weights[idx_rbg_linear+1]))
+
+        # Load alpha_linear
+        idx_alpha_linear = 2 * self.D + 6
+        self.alpha_linear.weight.data = torch.from_numpy(np.transpose(weights[idx_alpha_linear]))
+        self.alpha_linear.bias.data = torch.from_numpy(np.transpose(weights[idx_alpha_linear+1]))
+
+
+
+# Ray helpers
+def get_rays(H, W, focal, c2w):
+    i, j = torch.meshgrid(torch.linspace(0, W-1, W), torch.linspace(0, H-1, H))  # pytorch's meshgrid has indexing='ij'
+    i = i.t()
+    j = j.t()
+    dirs = torch.stack([(i-W*.5)/focal, -(j-H*.5)/focal, -torch.ones_like(i)], -1)
+    # Rotate ray directions from camera frame to the world frame
+    rays_d = torch.sum(dirs[..., np.newaxis, :] * c2w[:3,:3], -1)  # dot product, equals to: [c2w.dot(dir) for dir in dirs]
+    # Translate camera frame's origin to the world frame. It is the origin of all rays.
+    rays_o = c2w[:3,-1].expand(rays_d.shape)
+    return rays_o, rays_d
+
+
+def get_rays_np(H, W, focal, c2w):
+    i, j = np.meshgrid(np.arange(W, dtype=np.float32), np.arange(H, dtype=np.float32), indexing='xy')
+    dirs = np.stack([(i-W*.5)/focal, -(j-H*.5)/focal, -np.ones_like(i)], -1)
+    # Rotate ray directions from camera frame to the world frame
+    rays_d = np.sum(dirs[..., np.newaxis, :] * c2w[:3,:3], -1)  # dot product, equals to: [c2w.dot(dir) for dir in dirs]
+    # Translate camera frame's origin to the world frame. It is the origin of all rays.
+    rays_o = np.broadcast_to(c2w[:3,-1], np.shape(rays_d))
+    return rays_o, rays_d
+
+
+def ndc_rays(H, W, focal, near, rays_o, rays_d):
+    # Shift ray origins to near plane
+    t = -(near + rays_o[...,2]) / rays_d[...,2]
+    rays_o = rays_o + t[...,None] * rays_d
+    # Projection
+    o0 = -1./(W/(2.*focal)) * rays_o[...,0] / rays_o[...,2]
+    o1 = -1./(H/(2.*focal)) * rays_o[...,1] / rays_o[...,2]
+    o2 = 1. + 2. * near / rays_o[...,2]
+
+    d0 = -1./(W/(2.*focal)) * (rays_d[...,0]/rays_d[...,2] - rays_o[...,0]/rays_o[...,2])
+    d1 = -1./(H/(2.*focal)) * (rays_d[...,1]/rays_d[...,2] - rays_o[...,1]/rays_o[...,2])
+    d2 = -2. * near / rays_o[...,2]
+
+    rays_o = torch.stack([o0,o1,o2], -1)
+    rays_d = torch.stack([d0,d1,d2], -1)
+
+    return rays_o, rays_d
+```
+
+### models/depth_priors/mannequin_challenge/models/base_model.py
+```
+# Copyright 2019 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import os
+import torch
+
+
+class BaseModel():
+    def name(self):
+        return 'BaseModel'
+
+    def initialize(self, opt):
+        self.opt = opt
+        self.gpu_ids = opt.gpu_ids
+        self.isTrain = opt.isTrain
+        self.Tensor = torch.cuda.FloatTensor if self.gpu_ids else torch.Tensor
+        self.save_dir = os.path.join(opt.checkpoints_dir, opt.name)
+
+    def set_input(self, input):
+        self.input = input
+
+    def forward(self):
+        pass
+
+    # used in test time, no backprop
+    def test(self):
+        pass
+
+    def get_image_paths(self):
+        pass
+
+    def optimize_parameters(self):
+        pass
+
+    def get_current_visuals(self):
+        return self.input
+
+    def get_current_errors(self):
+        return {}
+
+    def save(self, label):
+        pass
+
+    # helper saving function that can be used by subclasses
+    def save_network(self, network, network_label, epoch_label, gpu_ids):
+        save_filename = '_%s_net_%s.pth' % (epoch_label, network_label)
+        save_path = os.path.join(self.save_dir, save_filename)
+        torch.save(network.cpu().state_dict(), save_path)
+        if len(gpu_ids) and torch.cuda.is_available():
+            network.cuda(gpu_ids[0])
+
+    # helper loading function that can be used by subclasses
+    def load_network(self, network, network_label, epoch_label):
+        save_filename = '%s_net_%s.pth' % (epoch_label, network_label)
+        save_path = os.path.join(self.save_dir, save_filename)
+        print(save_path)
+        model = torch.load(save_path)
+        return model
+        # network.load_state_dict(torch.load(save_path))
+
+    def update_learning_rate():
+        pass
+```
+
+### models/depth_priors/mannequin_challenge/models/hourglass.py
+```
+# Copyright 2019 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import torch
+import torch.nn as nn
+
+
+class inception(nn.Module):
+    def __init__(self, input_size, config):
+        self.config = config
+        super(inception, self).__init__()
+        self.convs = nn.ModuleList()
+
+        # Base 1*1 conv layer
+        self.convs.append(nn.Sequential(
+            nn.Conv2d(input_size, config[0][0], 1),
+            nn.BatchNorm2d(config[0][0], affine=False),
+            nn.ReLU(True),
+        ))
+
+        # Additional layers
+        for i in range(1, len(config)):
+            filt = config[i][0]
+            pad = int((filt-1)/2)
+            out_a = config[i][1]
+            out_b = config[i][2]
+            conv = nn.Sequential(
+                nn.Conv2d(input_size, out_a, 1),
+                nn.BatchNorm2d(out_a, affine=False),
+                nn.ReLU(True),
+                nn.Conv2d(out_a, out_b, filt, padding=pad),
+                nn.BatchNorm2d(out_b, affine=False),
+                nn.ReLU(True)
+            )
+            self.convs.append(conv)
+
+    def __repr__(self):
+        return "inception"+str(self.config)
+
+    def forward(self, x):
+        ret = []
+        for conv in (self.convs):
+            ret.append(conv(x))
+        return torch.cat(ret, dim=1)
+
+
+class Channels1(nn.Module):
+    def __init__(self):
+        super(Channels1, self).__init__()
+        self.list = nn.ModuleList()
+        self.list.append(
+            nn.Sequential(
+                inception(256, [[64], [3, 32, 64], [5, 32, 64], [7, 32, 64]]),
+                inception(256, [[64], [3, 32, 64], [5, 32, 64], [7, 32, 64]])
+            )
+        )  # EE
+        self.list.append(
+            nn.Sequential(
+                nn.AvgPool2d(2),
+                inception(256, [[64], [3, 32, 64], [5, 32, 64], [7, 32, 64]]),
+                inception(256, [[64], [3, 32, 64], [5, 32, 64], [7, 32, 64]]),
+                inception(256, [[64], [3, 32, 64], [5, 32, 64], [7, 32, 64]]),
+                nn.UpsamplingBilinear2d(scale_factor=2)
+            )
+        )  # EEE
+
+    def forward(self, x):
+        return self.list[0](x)+self.list[1](x)
+
+
+class Channels2(nn.Module):
+    def __init__(self):
+        super(Channels2, self).__init__()
+        self.list = nn.ModuleList()
+        self.list.append(
+            nn.Sequential(
+                inception(256, [[64], [3, 32, 64], [5, 32, 64], [7, 32, 64]]),
+                inception(256, [[64], [3, 64, 64], [7, 64, 64], [11, 64, 64]])
+            )
+        )  # EF
+        self.list.append(
+            nn.Sequential(
+                nn.AvgPool2d(2),
+                inception(256, [[64], [3, 32, 64], [5, 32, 64], [7, 32, 64]]),
+                inception(256, [[64], [3, 32, 64], [5, 32, 64], [7, 32, 64]]),
+                Channels1(),
+                inception(256, [[64], [3, 32, 64], [5, 32, 64], [7, 32, 64]]),
+                inception(256, [[64], [3, 64, 64], [7, 64, 64], [11, 64, 64]]),
+                nn.UpsamplingBilinear2d(scale_factor=2)
+            )
+        )  # EE1EF
+
+    def forward(self, x):
+        return self.list[0](x)+self.list[1](x)
+
+
+class Channels3(nn.Module):
+    def __init__(self):
+        super(Channels3, self).__init__()
+        self.list = nn.ModuleList()
+        self.list.append(
+            nn.Sequential(
+                nn.AvgPool2d(2),
+                inception(128, [[32], [3, 32, 32], [5, 32, 32], [7, 32, 32]]),
+                inception(128, [[64], [3, 32, 64], [5, 32, 64], [7, 32, 64]]),
+                Channels2(),
+                inception(256, [[64], [3, 32, 64], [5, 32, 64], [7, 32, 64]]),
+                inception(256, [[32], [3, 32, 32], [5, 32, 32], [7, 32, 32]]),
+                nn.UpsamplingBilinear2d(scale_factor=2)
+            )
+        )  # BD2EG
+        self.list.append(
+            nn.Sequential(
+                inception(128, [[32], [3, 32, 32], [5, 32, 32], [7, 32, 32]]),
+                inception(128, [[32], [3, 64, 32], [7, 64, 32], [11, 64, 32]])
+            )
+        )  # BC
+
+    def forward(self, x):
+        return self.list[0](x)+self.list[1](x)
+
+
+class Channels4(nn.Module):
+    def __init__(self):
+        super(Channels4, self).__init__()
+        self.list = nn.ModuleList()
+        self.list.append(
+            nn.Sequential(
+                nn.AvgPool2d(2),
+                inception(128, [[32], [3, 32, 32], [5, 32, 32], [7, 32, 32]]),
+                inception(128, [[32], [3, 32, 32], [5, 32, 32], [7, 32, 32]]),
+                Channels3(),
+                inception(128, [[32], [3, 64, 32], [5, 64, 32], [7, 64, 32]]),
+                inception(128, [[16], [3, 32, 16], [7, 32, 16], [11, 32, 16]]),
+                nn.UpsamplingBilinear2d(scale_factor=2)
+            )
+        )  # BB3BA
+        self.list.append(
+            nn.Sequential(
+                inception(128, [[16], [3, 64, 16], [7, 64, 16], [11, 64, 16]])
+            )
+        )  # A
+
+    def forward(self, x):
+        return self.list[0](x)+self.list[1](x)
+
+
+class HourglassModel(nn.Module):
+    def __init__(self, num_input):
+        super(HourglassModel, self).__init__()
+
+        self.seq = nn.Sequential(
+            nn.Conv2d(num_input, 128, 7, padding=3),
+            nn.BatchNorm2d(128),
+            nn.ReLU(True),
+            Channels4(),
+        )
+
+        uncertainty_layer = [
+            nn.Conv2d(64, 1, 3, padding=1), torch.nn.Sigmoid()]
+        self.uncertainty_layer = torch.nn.Sequential(*uncertainty_layer)
+        self.pred_layer = nn.Conv2d(64, 1, 3, padding=1)
+
+    def forward(self, input_):
+        pred_feature = self.seq(input_)
+
+        pred_d = self.pred_layer(pred_feature)
+        pred_confidence = self.uncertainty_layer(pred_feature)
+
+        return pred_d, pred_confidence
+```
+
+### models/depth_priors/mannequin_challenge/models/networks.py
+```
+# Copyright 2019 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.autograd as autograd
+import numpy as np
+import functools
+
+###############################################################################
+# Functions
+###############################################################################
+EPSILON = 1e-6
+
+
+def gradient(input, do_normalize=False):
+    if input.dim() == 2:
+        D_ry = input[1:, :]
+        D_ly = input[:-1, :]
+        D_rx = input[:, 1:]
+        D_lx = input[:, :-1]
+    elif input.dim() == 3:
+        D_ry = input[:, 1:, :]
+        D_ly = input[:, :-1, :]
+        D_rx = input[:, :, 1:]
+        D_lx = input[:, :, :-1]
+    elif input.dim() == 4:
+        D_ry = input[:, :, 1:, :]
+        D_ly = input[:, :, :-1, :]
+        D_rx = input[:, :, :, 1:]
+        D_lx = input[:, :, :, :-1]
+
+    Dx = D_rx - D_lx
+    Dy = D_ry - D_ly
+    if do_normalize:
+        Dx = Dx / (D_rx + D_lx + EPSILON)
+        Dy = Dy / (D_ry + D_ly + EPSILON)
+    return Dx, Dy
+
+
+def init_weights(net, init_type='normal', gain=0.02):
+
+    def init_func(m):
+        classname = m.__class__.__name__
+        if hasattr(m, 'weight') and (classname.find('Conv') != -1 or
+                                     classname.find('Linear') != -1):
+            if init_type == 'normal':
+                nn.init.normal_(m.weight.data, 0.0, gain)
+            elif init_type == 'xavier':
+                nn.init.xavier_normal_(m.weight.data, gain=gain)
+            elif init_type == 'kaiming':
+                nn.init.kaiming_normal_(m.weight.data, a=0, mode='fan_in')
+            elif init_type == 'orthogonal':
+                nn.init.orthogonal_(m.weight.data, gain=gain)
+            else:
+                raise NotImplementedError(
+                    'initialization method [%s] is not implemented' % init_type)
+            if hasattr(m, 'bias') and m.bias is not None:
+                nn.init.constant_(m.bias.data, 0.0)
+        elif classname.find('BatchNorm2d') != -1:
+            nn.init.normal_(m.weight.data, 1.0, gain)
+            nn.init.constant_(m.bias.data, 0.0)
+
+    print('initialize network with %s' % init_type)
+    net.apply(init_func)
+
+
+def get_scheduler(optimizer, opt):
+    if opt.lr_policy == 'lambda':
+
+        def lambda_rule(epoch):
+            lr_l = 1.0 - max(0, epoch + 1 + opt.epoch_count -
+                             opt.niter) / float(opt.niter_decay + 1)
+            return lr_l
+
+        scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda_rule)
+    elif opt.lr_policy == 'step':
+        scheduler = optim.lr_scheduler.StepLR(
+            optimizer, step_size=opt.lr_decay_epoch, gamma=0.5)
+    elif opt.lr_policy == 'plateau':
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode='min', factor=0.2, threshold=0.01, patience=5)
+    else:
+        return NotImplementedError('learning rate policy [%s] is not implemented',
+                                   opt.lr_policy)
+    return scheduler
+
+
+def get_norm_layer(norm_type='instance'):
+    if norm_type == 'batch':
+        norm_layer = functools.partial(nn.BatchNorm2d, affine=True)
+    elif norm_type == 'instance':
+        norm_layer = functools.partial(
+            nn.InstanceNorm2d, affine=False, track_running_stats=True)
+    elif norm_type == 'none':
+        norm_layer = None
+    else:
+        raise NotImplementedError('normalization layer [%s] is not found' %
+                                  norm_type)
+    return norm_layer
+
+
+def init_net(net, init_type='normal', init_gain=0.02, gpu_ids=[]):
+    if len(gpu_ids) > 0:
+        assert (torch.cuda.is_available())
+        net.to(gpu_ids[0])
+        net = torch.nn.DataParallel(net, gpu_ids)
+    init_weights(net, init_type, gain=init_gain)
+    return net
+
+
+def print_network(net_):
+    num_params = 0
+    for param in net_.parameters():
+        num_params += param.numel()
+    print(net_)
+    print('Total number of parameters: %d' % num_params)
+
+
+##############################################################################
+# Classes
+##############################################################################
+
+
+class LaplacianLayer(nn.Module):
+
+    def __init__(self):
+        super(LaplacianLayer, self).__init__()
+        w_nom = torch.FloatTensor([[0, -1, 0], [-1, 4, -1],
+                                   [0, -1, 0]]).view(1, 1, 3, 3).cuda()
+        w_den = torch.FloatTensor([[0, 1, 0], [1, 4, 1],
+                                   [0, 1, 0]]).view(1, 1, 3, 3).cuda()
+        self.register_buffer('w_nom', w_nom)
+        self.register_buffer('w_den', w_den)
+
+    def forward(self, input, do_normalize=True):
+        assert (input.dim() == 2 or input.dim() == 3 or input.dim() == 4)
+        input_size = input.size()
+        if input.dim() == 4:
+            x = input.view(input_size[0] * input_size[1], 1, input_size[2],
+                           input_size[3])
+        elif input.dim() == 3:
+            x = input.unsqueeze(1)
+        else:
+            x = input.unsqueeze(0).unsqueeze(0)
+        x_nom = torch.nn.functional.conv2d(
+            input=x, weight=autograd.Variable(self.w_nom), stride=1, padding=0)
+        if do_normalize:
+            x_den = torch.nn.functional.conv2d(
+                input=x, weight=autograd.Variable(self.w_den), stride=1, padding=0)
+            # x_den = x.std() + 1e-5
+            x = (x_nom.abs() / x_den)
+        else:
+            x = x_nom.abs()
+        if input.dim() == 4:
+            return x.view(input_size[0], input_size[1], input_size[2] - 2,
+                          input_size[3] - 2)
+        elif input.dim() == 3:
+            return x.squeeze(1)
+        elif input.dim() == 2:
+            return x.squeeze(0).squeeze(0)
+
+
+class JointLoss(nn.Module):
+
+    def __init__(self, opt):
+        super(JointLoss, self).__init__()
+        self.opt = opt
+        self.w_si_mse = 1.0
+        self.w_l1_rel = 1.0
+        self.w_confidence = 1.0
+        self.w_grad = 0.75
+        self.w_sm = 0.1
+        self.w_sm1 = 0.075
+        self.w_sm2 = 0.1
+        self.w_normal = 0.5
+        self.num_scales = 5
+        self.total_loss = None
+        self.laplacian_func = LaplacianLayer()
+
+    def LaplacianSmoothnessLoss(self, depth, img):
+        img_lap = self.laplacian_func(img, do_normalize=False)
+        depth_lap = self.laplacian_func(depth, do_normalize=False)
+
+        x = (-img_lap.mean(1)).exp() * (depth_lap)
+        return x.mean()
+
+    def compute_image_aware_2nd_smoothness_cost(self, depth, img):
+        depth_grad_x, depth_grad_y = gradient(depth, do_normalize=False)
+        depth_grad_x2, depth_grad_xy = gradient(
+            depth_grad_x, do_normalize=False)
+        depth_grad_yx, depth_grad_y2 = gradient(
+            depth_grad_y, do_normalize=False)
+        return depth_grad_x2.abs().mean() \
+            + depth_grad_xy.abs().mean() + depth_grad_yx.abs().mean() + \
+            depth_grad_y2.abs().mean()
+
+    def compute_image_aware_1st_smoothness_cost(self, depth, img):
+        depth_grad_x, depth_grad_y = gradient(depth, do_normalize=False)
+        img_grad_x, img_grad_y = gradient(img, do_normalize=False)
+        if img.dim() == 3:
+            weight_x = torch.exp(-img_grad_x.abs().mean(0))
+            weight_y = torch.exp(-img_grad_y.abs().mean(0))
+            cost = ((depth_grad_x.abs() * weight_x)[:-1, :] +
+                    (depth_grad_y.abs() * weight_y)[:, :-1]).mean()
+        else:
+            weight_x = torch.exp(-img_grad_x.abs().mean(1))
+            weight_y = torch.exp(-img_grad_y.abs().mean(1))
+            cost = ((depth_grad_x.abs() * weight_x)[:, :-1, :] +
+                    (depth_grad_y.abs() * weight_y)[:, :, :-1]).mean()
+        return cost
+
+    def SecondOrderLoss(self, log_pred_d, mask, log_gt):
+        N = torch.sum(mask) + 1e-6
+
+        v_pred_lap = log_pred_d[:-2, :] - 2 * \
+            log_pred_d[1:-1, :] + log_pred_d[2:, :]
+        v_gt_lap = log_gt[:-2, :] - 2 * log_gt[1:-1, :] + log_gt[2:, :]
+
+        v_diff = torch.abs(v_pred_lap - v_gt_lap)
+        v_mask = torch.mul(torch.mul(mask[:-2, :], mask[2:, :]), mask[1:-1, :])
+        v_lap_term = torch.mul(v_diff, v_mask)
+
+        h_pred_lap = log_pred_d[:, :-2] - 2 * \
+            log_pred_d[:, 1:-1] + log_pred_d[:, 2:]
+        h_gt_lap = log_gt[:, :-2] - 2 * log_gt[:, 1:-1] + log_gt[:, 2:]
+
+        h_diff = torch.abs(h_pred_lap - h_gt_lap)
+        h_mask = torch.mul(torch.mul(mask[:, :-2], mask[:, 2:]), mask[:, 1:-1])
+        h_lap_term = torch.mul(h_diff, h_mask)
+
+        second_order_term = torch.sum(v_lap_term) + torch.sum(h_lap_term)
+        second_order_term = second_order_term / N
+
+        return second_order_term
+
+    def GradientLoss(self, log_prediction_d, mask, log_gt):
+        log_d_diff = log_prediction_d - log_gt
+
+        v_gradient = torch.abs(log_d_diff[:, :-2, :] - log_d_diff[:, 2:, :])
+        v_mask = torch.mul(mask[:, :-2, :], mask[:, 2:, :])
+        v_gradient = torch.mul(v_gradient, v_mask)
+
+        h_gradient = torch.abs(log_d_diff[:, :, :-2] - log_d_diff[:, :, 2:])
+        h_mask = torch.mul(mask[:, :, :-2], mask[:, :, 2:])
+        h_gradient = torch.mul(h_gradient, h_mask)
+
+        N = torch.sum(h_mask) + torch.sum(v_mask) + EPSILON
+
+        gradient_loss = torch.sum(h_gradient) + torch.sum(v_gradient)
+        gradient_loss = gradient_loss / N
+
+        return gradient_loss
+
+    def DeMonGradientLoss(self, prediction_d, mask, gt_d):
+
+        v_mask = torch.mul(mask[:, :-2, :], mask[:, 2:, :])
+        v_grad_pred = (prediction_d[:, :-2, :] - prediction_d[:, 2:, :]) / (
+            prediction_d[:, :-2, :] + prediction_d[:, 2:, :] + EPSILON)
+        v_grad_gt = (gt_d[:, :-2, :] - gt_d[:, 2:, :]) / (
+            gt_d[:, :-2, :] + gt_d[:, 2:, :] + EPSILON)
+        v_grad_term = v_mask * torch.abs(v_grad_pred - v_grad_gt)
+
+        h_mask = torch.mul(mask[:, :, :-2], mask[:, :, 2:])
+        h_grad_pred = (prediction_d[:, :, :-2] - prediction_d[:, :, 2:]) / (
+            prediction_d[:, :, :-2] + prediction_d[:, :, 2:] + EPSILON)
+        h_grad_gt = (gt_d[:, :, :-2] - gt_d[:, :, 2:]) / (
+            gt_d[:, :, :-2] + gt_d[:, :, 2:] + EPSILON)
+
+        h_grad_term = h_mask * torch.abs(h_grad_pred - h_grad_gt)
+
+        N = torch.sum(h_mask) + torch.sum(v_mask) + EPSILON
+
+        gradient_loss = torch.sum(v_grad_term) + torch.sum(h_grad_term)
+        gradient_loss = gradient_loss / N
+
+        return gradient_loss
+
+    def Data_Loss(self, log_prediction_d, mask, log_gt):
+        N = torch.sum(mask) + EPSILON
+        log_d_diff = log_prediction_d - log_gt
+        log_d_diff = torch.mul(log_d_diff, mask)
+        s1 = torch.sum(torch.pow(log_d_diff, 2)) / N
+        s2 = (torch.sum(log_d_diff) * torch.sum(log_d_diff)) / (N * N)
+
+        data_loss = s1 - s2
+
+        return data_loss
+
+    def Confidence_Loss(self, pred_confidence, mask, pred_d, gt_d):
+        # using least square to find scaling factor
+        N = torch.sum(mask) + EPSILON
+        N = N.item()
+
+        if N > 0.5:
+            scale_factor = torch.median(
+                gt_d.data[mask.data > 0.1] /
+                (pred_d.data[mask.data > 0.1] + EPSILON)).item()
+            pred_d_aligned = pred_d * scale_factor
+
+            error = torch.abs(pred_d_aligned.data -
+                              gt_d.data) / (gt_d.data + EPSILON)
+            error = torch.exp(-error * 2.0)
+
+            error_var = autograd.Variable(error, requires_grad=False)
+            u_loss = mask * torch.abs(pred_confidence - error_var)
+            confidence_term = torch.sum(u_loss) / N
+        else:
+            confidence_term = 0.0
+
+        return confidence_term
+
+    def Normal_Loss(self, pred_d, gt_d, mask, normalized_p_3d, p_3d_gt):
+
+        p_3d_pred = normalized_p_3d * pred_d.unsqueeze(1).repeat(1, 2, 1, 1)
+
+        x_mask = mask[:, 1:-1, :-2] * mask[:, 1:-1, 2:]
+        y_mask = mask[:, :-2, 1:-1] * mask[:, 2:, 1:-1]
+
+        final_mask = y_mask * x_mask
+
+        grad_x_pred = (pred_d[:, 1:-1, :-2] - pred_d[:, 1:-1, 2:]) / (
+            p_3d_pred[:, 0, 1:-1, :-2] - p_3d_pred[:, 0, 1:-1, 2:] + EPSILON)
+        grad_x_gt = (gt_d[:, 1:-1, :-2] - gt_d[:, 1:-1, 2:]) / (
+            p_3d_gt[:, 0, 1:-1, :-2] - p_3d_gt[:, 0, 1:-1, 2:] + EPSILON)
+
+        grad_y_pred = (pred_d[:, :-2, 1:-1] - pred_d[:, 2:, 1:-1]) / (
+            p_3d_pred[:, 1, :-2, 1:-1] - p_3d_pred[:, 1, 2:, 1:-1] + EPSILON)
+        grad_y_gt = (gt_d[:, :-2, 1:-1] - gt_d[:, 2:, 1:-1]) / (
+            p_3d_gt[:, 1, :-2, 1:-1] - p_3d_gt[:, 1, 2:, 1:-1] + EPSILON)
+
+        norm_pred = torch.sqrt(grad_x_pred * grad_x_pred +
+                               grad_y_pred * grad_y_pred + 1.0) + EPSILON
+        norm_gt = torch.sqrt(grad_x_gt * grad_x_gt + grad_y_gt * grad_y_gt +
+                             1.0) + EPSILON
+
+        dot_product = grad_x_gt * grad_x_pred + grad_y_gt * grad_y_pred + 1.0
+        dot_product = dot_product * final_mask
+
+        N = torch.sum(final_mask) + EPSILON
+
+        normal_term = dot_product / (norm_pred * norm_gt)
+
+        normal_term = 1.0 - torch.sum(normal_term) / N
+
+        return normal_term
+
+    def Weighted_Data_Loss(self, log_prediction_d, w_mask, log_gt):
+        log_d_diff = log_prediction_d - log_gt
+
+        wx_2 = torch.sum(w_mask * torch.pow(log_d_diff, 2))
+        wx = torch.sum(w_mask * log_d_diff)
+        w_sum = torch.sum(w_mask)
+        total_term = w_sum * wx_2 - torch.pow(wx, 2)
+        N = w_sum * w_sum + EPSILON
+
+        return total_term / N
+
+    def L1_inv_loss(self, pred_d_aligned, mask, depth_gt):
+
+        l1_inv_error = torch.abs(1. / (depth_gt + EPSILON) - 1. /
+                                 (EPSILON + pred_d_aligned))
+        l1_inv_error = l1_inv_error * mask
+        num_valid_pixels = torch.sum(mask) + EPSILON
+
+        return torch.sum(l1_inv_error) / num_valid_pixels
+
+    def L1RelLoss(self, pred_d_aligned, mask, depth_gt):
+        l1_rel_error = torch.abs(depth_gt - pred_d_aligned)
+        l1_rel_error = l1_rel_error * mask
+        l1_rel_error = l1_rel_error / \
+            torch.abs(depth_gt + pred_d_aligned + 1e-8)
+
+        num_valid_pixels = torch.sum(mask) + EPSILON
+        return torch.sum(l1_rel_error) / num_valid_pixels
+
+    def L1_rel_loss(self, pred_d_aligned, mask, depth_gt):
+
+        l1_rel_error = torch.abs(depth_gt - pred_d_aligned)
+        l1_rel_error = l1_rel_error * mask
+        l1_rel_error = l1_rel_error / torch.abs(depth_gt + 1e-8)
+
+        num_valid_pixels = torch.sum(mask) + EPSILON
+
+        return torch.sum(l1_rel_error) / num_valid_pixels
+
+    def compute_si_rmse(self, pred_log_d, targets):
+        gt_mask = targets['gt_mask'].cuda()
+        log_d_gt = torch.log(targets['depth_gt'].cuda())
+        env_mask = targets['env_mask'].cuda()
+
+        human_gt_mask = (1.0 - env_mask) * gt_mask
+        env_gt_mask = env_mask * gt_mask
+
+        si_rmse_full = 0.0
+        si_rmse_human = 0.0
+        si_rmse_env = 0.0
+
+        si_rmse_inter = 0.0
+        si_rmse_intra = 0.0
+
+        # compute full error
+        for i in range(0, gt_mask.size(0)):
+
+            mse_full = self.Data_Loss(pred_log_d[i, :, :], gt_mask[i, :, :],
+                                      log_d_gt[i, :, :])
+            mse_env = self.Data_Loss(pred_log_d[i, :, :], env_gt_mask[i, :, :],
+                                     log_d_gt[i, :, :])
+            mse_intra = self.Data_Loss(pred_log_d[i, :, :], human_gt_mask[i, :, :],
+                                       log_d_gt[i, :, :])
+
+            # compute human error
+            n_full = torch.sum(gt_mask[i, :, :])
+            n_human = torch.sum(human_gt_mask[i, :, :])
+            n_env = torch.sum(env_gt_mask[i, :, :])
+
+            log_diff = pred_log_d[i, :, :] - log_d_gt[i, :, :]
+            log_diff_mask = log_diff * gt_mask[i, :, :]
+
+            # full human error
+            sum_sq_log_diff = torch.sum(torch.pow(log_diff_mask, 2))
+            sum_log_diff = torch.sum(log_diff_mask)
+
+            per_pixel_error = n_full * torch.pow(
+                log_diff, 2) + sum_sq_log_diff - 2 * sum_log_diff * log_diff
+            per_pixel_error = per_pixel_error * human_gt_mask[i, :, :]
+
+            mse_human = torch.sum(per_pixel_error) / \
+                (n_human * n_full + EPSILON)
+
+            # inter class mse error
+            log_diff_env_mask = log_diff * env_gt_mask[i, :, :]
+            sum_sq_log_env_diff = torch.sum(torch.pow(log_diff_env_mask, 2))
+            sum_log_env_diff = torch.sum(log_diff_env_mask)
+
+            inter_error = n_env * torch.pow(
+                log_diff, 2) + sum_sq_log_env_diff - 2 * sum_log_env_diff * log_diff
+            inter_error = inter_error * human_gt_mask[i, :, :]
+
+            mse_inter = torch.sum(inter_error) / (n_human * n_env + EPSILON)
+
+            si_rmse_full += torch.sqrt(2.0 * mse_full)
+            si_rmse_human += torch.sqrt(mse_human)
+            si_rmse_env += torch.sqrt(2.0 * mse_env)
+            si_rmse_intra += torch.sqrt(2.0 * mse_intra)
+            si_rmse_inter += torch.sqrt(mse_inter)
+
+        return si_rmse_full, si_rmse_human, si_rmse_env, si_rmse_intra, si_rmse_inter
+
+    def compute_l1_rel_error(self, pred_d, targets):
+        gt_mask = targets['gt_mask']
+        d_gt = targets['depth_gt']
+
+        rel_full = 0.
+
+        for i in range(0, gt_mask.size(0)):
+            gt_d_np = d_gt[i, :, :].cpu().numpy()
+            pred_d_np = pred_d[i, :, :].cpu().numpy()
+            gt_mask_np = gt_mask[i, :, :].cpu().numpy()
+
+            scale_factor = np.linalg.lstsq(
+                np.expand_dims(pred_d_np[gt_mask_np > 1e-8], axis=-1),
+                gt_d_np[gt_mask_np > 1e-8])
+            scale_factor = scale_factor[0][0]
+
+            pred_d_aligned_np = pred_d_np * scale_factor
+
+            total_full_rel = np.sum(gt_mask_np * np.abs(gt_d_np - pred_d_aligned_np) /
+                                    (gt_d_np + EPSILON))
+            rel_full += total_full_rel / (np.sum(gt_mask_np) + EPSILON)
+
+        return rel_full
+
+    def compute_rmse_error(self, pred_d, targets):
+        gt_mask = targets['gt_mask']
+        d_gt = targets['depth_gt']
+
+        rmse_full = 0.
+
+        for i in range(0, gt_mask.size(0)):
+            gt_d_np = d_gt[i, :, :].cpu().numpy()
+            pred_d_np = pred_d[i, :, :].cpu().numpy()
+            gt_mask_np = gt_mask[i, :, :].cpu().numpy()
+
+            scale_factor = np.linalg.lstsq(
+                np.expand_dims(pred_d_np[gt_mask_np > 1e-8], axis=-1),
+                gt_d_np[gt_mask_np > 1e-8])
+            scale_factor = scale_factor[0][0]
+
+            pred_d_aligned_np = pred_d_np * scale_factor
+
+            total_full_rmse = np.sum(gt_mask_np *
+                                     np.square(gt_d_np - pred_d_aligned_np))
+            rmse_full += np.sqrt(total_full_rmse /
+                                 (np.sum(gt_mask_np) + EPSILON))
+
+        return rmse_full
+
+    def Data_Human_Loss(self, pred_log_d, gt_mask, human_gt_mask, log_d_gt):
+        n_full = torch.sum(gt_mask)
+        n_human = torch.sum(human_gt_mask)
+
+        log_diff = pred_log_d - log_d_gt
+        log_diff_mask = log_diff * gt_mask
+
+        sum_sq_log_diff = torch.sum(torch.pow(log_diff_mask, 2))
+        sum_log_diff = torch.sum(log_diff_mask)
+
+        inter_error = n_full * torch.pow(
+            log_diff, 2) + sum_sq_log_diff - 2 * sum_log_diff * log_diff
+        inter_error = inter_error * human_gt_mask
+
+        mse_human = torch.sum(inter_error) / (n_human * n_full + EPSILON)
+        mse_human = mse_human / 2.0
+        return mse_human
+
+    def __call__(self, input_images, log_pred_d_0, pred_confidence, targets):
+
+        log_pred_d_1 = log_pred_d_0[:, ::2, ::2]
+        log_pred_d_2 = log_pred_d_1[:, ::2, ::2]
+        log_pred_d_3 = log_pred_d_2[:, ::2, ::2]
+        log_pred_d_4 = log_pred_d_3[:, ::2, ::2]
+
+        input_0 = input_images
+        input_1 = input_0[:, :, ::2, ::2]
+        input_2 = input_1[:, :, ::2, ::2]
+        input_3 = input_2[:, :, ::2, ::2]
+        input_4 = input_3[:, :, ::2, ::2]
+
+        d_gt_0 = autograd.Variable(targets['depth_gt'].cuda(), requires_grad=False)
+        log_d_gt_0 = torch.log(d_gt_0)
+        log_d_gt_1 = log_d_gt_0[:, ::2, ::2]
+        log_d_gt_2 = log_d_gt_1[:, ::2, ::2]
+        log_d_gt_3 = log_d_gt_2[:, ::2, ::2]
+        log_d_gt_4 = log_d_gt_3[:, ::2, ::2]
+
+        gt_mask = autograd.Variable(targets['gt_mask'].cuda(), requires_grad=False)
+        human_mask = 1.0 - \
+            autograd.Variable(targets['env_mask'].cuda(), requires_grad=False)
+        human_gt_mask = human_mask * gt_mask
+
+        mask_0 = gt_mask
+        mask_1 = mask_0[:, ::2, ::2]
+        mask_2 = mask_1[:, ::2, ::2]
+        mask_3 = mask_2[:, ::2, ::2]
+        mask_4 = mask_3[:, ::2, ::2]
+
+        data_term = 0.0
+        grad_term = 0.0
+        sm_term = 0.0
+        confidence_term = 0.0
+
+        num_samples = mask_0.size(0)
+
+        for i in range(0, num_samples):
+            if self.opt.human_data_term > 0.1:
+                data_term += (self.w_si_mse / num_samples * self.Data_Loss(
+                    log_pred_d_0[i, :, :], mask_0[i, :, :], log_d_gt_0[i, :, :]))
+                data_term += (self.w_si_mse / num_samples * 0.5 * self.Data_Human_Loss(
+                    log_pred_d_0[i, :, :], mask_0[i,
+                                                  :, :], human_gt_mask[i, :, :],
+                    log_d_gt_0[i, :, :]))
+            else:
+                data_term += (self.w_si_mse / num_samples * 1.5 * self.Data_Loss(
+                    log_pred_d_0[i, :, :], mask_0[i, :, :], log_d_gt_0[i, :, :]))
+
+        grad_term += self.w_grad * self.GradientLoss(log_pred_d_0, mask_0,
+                                                     log_d_gt_0)
+        grad_term += self.w_grad * self.GradientLoss(log_pred_d_1, mask_1,
+                                                     log_d_gt_1)
+        grad_term += self.w_grad * self.GradientLoss(log_pred_d_2, mask_2,
+                                                     log_d_gt_2)
+        grad_term += self.w_grad * self.GradientLoss(log_pred_d_3, mask_3,
+                                                     log_d_gt_3)
+        grad_term += self.w_grad * self.GradientLoss(log_pred_d_4, mask_4,
+                                                     log_d_gt_4)
+
+        sm_term += self.w_sm1 * self.compute_image_aware_1st_smoothness_cost(
+            log_pred_d_0, input_0)
+        sm_term += (self.w_sm1 * 0.5 * self.compute_image_aware_1st_smoothness_cost(
+            log_pred_d_1, input_1))
+        sm_term += (self.w_sm1 * 0.25 * self.compute_image_aware_1st_smoothness_cost(
+            log_pred_d_2, input_2))
+        sm_term += (self.w_sm1 * 0.125 * self.compute_image_aware_1st_smoothness_cost(
+            log_pred_d_3, input_3))
+        sm_term += (self.w_sm1 * 0.0625 * self.compute_image_aware_1st_smoothness_cost(
+            log_pred_d_4, input_4))
+
+        sm_term += self.w_sm2 * \
+            self.LaplacianSmoothnessLoss(log_pred_d_0, input_0)
+        sm_term += self.w_sm2 * 0.5 * self.LaplacianSmoothnessLoss(
+            log_pred_d_1, input_1)
+        sm_term += self.w_sm2 * 0.25 * self.LaplacianSmoothnessLoss(
+            log_pred_d_2, input_2)
+        sm_term += self.w_sm2 * 0.125 * self.LaplacianSmoothnessLoss(
+            log_pred_d_3, input_3)
+        sm_term += self.w_sm2 * 0.0625 * self.LaplacianSmoothnessLoss(
+            log_pred_d_4, input_4)
+
+        print('data_term %f' % data_term.item())
+        print('grad_term %f' % grad_term.item())
+        print('sm_term %f' % sm_term.item())
+
+        total_loss = data_term + grad_term + sm_term + confidence_term
+
+        self.total_loss = total_loss
+
+        return total_loss.item()
+
+    def get_loss_var(self):
+        return self.total_loss
+```
+
+### models/depth_priors/mannequin_challenge/models/pix2pix_model.py
+```
+# Copyright 2019 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.autograd as autograd
+import os
+from . import base_model
+from . import networks
+import sys
+import h5py
+import os.path
+from skimage.io import imsave
+from . import hourglass
+
+import torchvision.utils as vutils
+
+
+# torch.manual_seed(1)
+class HourglassVariant(torch.nn.Module):
+
+    def __init__(self, num_input, model):
+        super(HourglassVariant, self).__init__()
+        layer_list = list(model.children())
+        removed = layer_list[1:-1]
+        self.pred_layer = layer_list[-1]
+        model = torch.nn.Sequential(*removed)
+
+        uncertainty_layer = [
+            torch.nn.Conv2d(64, 1, (3, 3), (1, 1), (1, 1)),
+            torch.nn.Sigmoid()
+        ]
+        self.uncertainty_layer = torch.nn.Sequential(*uncertainty_layer)
+        new_input_layer = torch.nn.Conv2d(
+            num_input, 128, (7, 7), (1, 1), (3, 3))
+
+        nn.init.normal_(new_input_layer.weight.data, 0.0, 0.02)
+        nn.init.constant_(new_input_layer.bias.data, 0.0)
+
+        self.new_model = torch.nn.Sequential(new_input_layer, model)
+
+    def forward(self, input_):
+        pred_feature = self.new_model(input_)
+
+        pred_d = self.pred_layer(pred_feature)
+        pred_confidence = self.uncertainty_layer(pred_feature)
+
+        return pred_d, pred_confidence
+
+
+class Pix2PixModel(base_model.BaseModel):
+
+    def name(self):
+        return 'Pix2PixModel'
+
+    def __init__(self, opt, _isTrain=False):
+        self.initialize(opt)
+
+        self.mode = opt.mode
+        if opt.input == 'single_view':
+            self.num_input = 3
+        elif opt.input == 'two_view':
+            self.num_input = 6
+        elif opt.input == 'two_view_k':
+            self.num_input = 7
+        else:
+            raise ValueError("Unknown input type %s" % opt.input)
+
+        if self.mode == 'Ours_Bilinear':
+            print(
+                '======================================  DIW NETWORK TRAIN FROM %s======================='
+                % self.mode)
+
+            new_model = hourglass.HourglassModel(self.num_input)
+
+            print(
+                '===================Loading Pretrained Model OURS ==================================='
+            )
+
+            if not _isTrain:
+                if self.num_input == 7:
+                    model_parameters = self.load_network(
+                        new_model, 'G', 'best_depth_Ours_Bilinear_inc_7')
+                elif self.num_input == 3:
+                    model_parameters = self.load_network(
+                        new_model, 'G', 'best_depth_Ours_Bilinear_inc_3')
+                elif self.num_input == 6:
+                    model_parameters = self.load_network(
+                        new_model, 'G', 'best_depth_Ours_Bilinear_inc_6')
+                else:
+                    print('Something Wrong')
+                    sys.exit()
+
+                new_model.load_state_dict(model_parameters)
+
+            new_model = torch.nn.DataParallel(new_model)
+            new_model.to("cuda")
+
+            self.netG = new_model
+
+        else:
+            print('ONLY SUPPORT Ours_Bilinear')
+            sys.exit()
+
+        self.old_lr = opt.lr
+        self.netG.train()
+
+        if True:
+            self.criterion_joint = networks.JointLoss(opt)
+            # initialize optimizers
+            self.optimizer_G = torch.optim.Adam(
+                self.netG.parameters(), lr=opt.lr, betas=(0.9, 0.999))
+            self.scheduler = networks.get_scheduler(self.optimizer_G, opt)
+            print('---------- Networks initialized -------------')
+            networks.print_network(self.netG)
+            print('-----------------------------------------------')
+
+    def set_writer(self, writer):
+        self.writer = writer
+
+    def set_input(self, stack_imgs, targets):
+        self.input = stack_imgs
+        self.targets = targets
+
+    def forward(self):
+
+        # run first network
+        self.input_images = autograd.Variable(self.input.cuda(), requires_grad=False)
+        human_mask = 1.0 - autograd.Variable(
+            self.targets['env_mask'].cuda(), requires_grad=False).unsqueeze(1)
+        keypoints_img = autograd.Variable(
+            self.targets['keypoints_img'].cuda(), requires_grad=False).unsqueeze(1)
+
+        # stack inputs
+        stack_inputs = None
+
+        if self.num_input == 7:
+            input_log_depth = autograd.Variable(
+                self.targets['input_log_depth'].cuda(),
+                requires_grad=False).unsqueeze(1)
+            input_confidence = autograd.Variable(
+                self.targets['input_confidence'].cuda(),
+                requires_grad=False).unsqueeze(1)
+            stack_inputs = torch.cat((self.input_images, human_mask, keypoints_img,
+                                      input_log_depth, input_confidence), 1)
+        elif self.num_input == 6:
+            input_log_depth = autograd.Variable(
+                self.targets['input_log_depth'].cuda(),
+                requires_grad=False).unsqueeze(1)
+            input_confidence = autograd.Variable(
+                self.targets['input_confidence'].cuda(),
+                requires_grad=False).unsqueeze(1)
+            stack_inputs = torch.cat(
+                (self.input_images, human_mask, input_log_depth, input_confidence), 1)
+        elif self.num_input == 3:
+            stack_inputs = self.input_images
+        else:
+            print('SOMETHING WRONG with num_input !!!!!!!!!!!!!!!!!!!!!!!')
+            sys.exit()
+
+        self.prediction_d, self.pred_confidence = self.netG.forward(
+            stack_inputs)
+        self.prediction_d = self.prediction_d.squeeze(1)
+        self.pred_confidence = self.pred_confidence.squeeze(1)
+
+    def get_image_paths(self):
+        return self.image_paths
+
+    def write_summary(self,
+                      mode_name,
+                      input_images,
+                      prediction_d,
+                      pred_confidence,
+                      targets,
+                      n_iter,
+                      loss=None):
+
+        invere_depth_pred = torch.exp(-prediction_d.data.cpu()).unsqueeze(1).repeat(
+            1, 3, 1, 1)
+
+        invere_depth_gt = 1.0 / \
+            targets['depth_gt'].unsqueeze(1).repeat(1, 3, 1, 1)
+        gt_mask = targets['gt_mask'].unsqueeze(1).repeat(1, 3, 1, 1)
+
+        invere_depth_gt = invere_depth_gt * gt_mask
+        min_depth, max_depth = np.percentile(
+            invere_depth_pred.numpy(), [1, 99])
+        invere_depth_pred[invere_depth_pred > max_depth] = 0.0
+        invere_depth_pred[invere_depth_pred < min_depth] = 0.0
+
+        inv_depth_mask = invere_depth_pred * gt_mask
+
+        human_mask = 1.0 - targets['env_mask'].unsqueeze(1).repeat(1, 3, 1, 1)
+        input_confidence = targets['input_confidence'].unsqueeze(1).repeat(
+            1, 3, 1, 1)
+        pred_confidence_saved = pred_confidence.data.unsqueeze(
+            1).repeat(1, 3, 1, 1)
+
+        if loss:
+            self.writer.add_scalar(mode_name + '/loss', loss, n_iter)
+
+        self.writer.add_image(
+            mode_name + '/image',
+            vutils.make_grid(
+                input_images[:8, :, :, :].data.cpu(), normalize=True),
+            n_iter)
+        self.writer.add_image(
+            mode_name + '/pred_full',
+            vutils.make_grid(invere_depth_pred[:8, :, :, :], normalize=True),
+            n_iter)
+        self.writer.add_image(
+            mode_name + '/pred_mask',
+            vutils.make_grid(inv_depth_mask[:8, :, :, :], normalize=True), n_iter)
+        self.writer.add_image(
+            mode_name + '/pred_confidence',
+            vutils.make_grid(
+                pred_confidence_saved[:8, :, :, :], normalize=True),
+            n_iter)
+
+        self.writer.add_image(
+            mode_name + '/gt_depth',
+            vutils.make_grid(invere_depth_gt[:8, :, :, :], normalize=True), n_iter)
+        self.writer.add_image(
+            mode_name + '/gt_mask',
+            vutils.make_grid(gt_mask[:8, :, :, :], normalize=True), n_iter)
+
+        self.writer.add_image(
+            mode_name + '/human_mask',
+            vutils.make_grid(human_mask[:8, :, :, :], normalize=True), n_iter)
+        self.writer.add_image(
+            mode_name + '/input_confidence',
+            vutils.make_grid(input_confidence[:8, :, :, :], normalize=True), n_iter)
+
+    def backward_G(self, n_iter):
+        # Combined loss
+        self.loss_joint = self.criterion_joint(self.input_images, self.prediction_d,
+                                               self.pred_confidence, self.targets)
+        print('Train loss is %f ' % self.loss_joint)
+
+        # add to tensorboard
+        if n_iter % 100 == 0:
+            self.write_summary('Train', self.input_images, self.prediction_d,
+                               self.pred_confidence, self.targets, n_iter,
+                               self.loss_joint)
+
+        self.loss_joint_var = self.criterion_joint.get_loss_var()
+        self.loss_joint_var.backward()
+
+    def optimize_parameters(self, n_iter):
+        self.forward()
+        self.optimizer_G.zero_grad()
+        self.backward_G(n_iter)
+        self.optimizer_G.step()
+
+    def evlaute_M_error(self, input_, targets, n_iter, write_to_summary):
+        # switch to evaluation mode
+        input_imgs = autograd.Variable(input_.cuda(), requires_grad=False)
+        # stack inputs
+        human_mask = 1.0 - autograd.Variable(
+            targets['env_mask'].cuda(), requires_grad=False).unsqueeze(1)
+        keypoints_img = autograd.Variable(
+            targets['keypoints_img'].cuda(), requires_grad=False).unsqueeze(1)
+
+        if self.num_input == 7:
+            input_log_depth = autograd.Variable(
+                targets['input_log_depth'].cuda(), requires_grad=False).unsqueeze(1)
+            input_confidence = autograd.Variable(
+                targets['input_confidence'].cuda(), requires_grad=False).unsqueeze(1)
+            stack_inputs = torch.cat((input_imgs, human_mask, keypoints_img,
+                                      input_log_depth, input_confidence), 1)
+        elif self.num_input == 6:
+            input_log_depth = autograd.Variable(
+                targets['input_log_depth'].cuda(), requires_grad=False).unsqueeze(1)
+            input_confidence = autograd.Variable(
+                targets['input_confidence'].cuda(), requires_grad=False).unsqueeze(1)
+            stack_inputs = torch.cat(
+                (input_imgs, human_mask, input_log_depth, input_confidence), 1)
+        elif self.num_input == 3:
+            stack_inputs = input_imgs
+        else:
+            print('SOMETHING WRONG!!!!!!!!!!!!!!!!!!!!!!!')
+            sys.exit()
+
+        prediction_d, _ = self.netG.forward(stack_inputs)
+
+        pred_log_d = prediction_d.squeeze(1)
+
+        sc_inv_full, sc_inv_human, sc_inv_env, sc_inv_intra, sc_inv_inter = self.criterion_joint.compute_si_rmse(
+            pred_log_d.data, targets)
+        sc_inv_errors = [
+            sc_inv_full.item(),
+            sc_inv_human.item(),
+            sc_inv_env.item(),
+            sc_inv_intra.item(),
+            sc_inv_inter.item()
+        ]
+
+        return sc_inv_errors
+
+    def eval_save_tum_img(self, input_, targets, save_path):
+        input_imgs = autograd.Variable(input_.cuda())
+        human_mask = 1.0 - autograd.Variable(
+            targets['env_mask'].cuda(), requires_grad=False).unsqueeze(1)
+        keypoints_img = autograd.Variable(
+            targets['keypoints_img'].cuda(), requires_grad=False).unsqueeze(1)
+
+        if self.num_input == 7:
+            input_log_depth = autograd.Variable(
+                targets['input_log_depth'].cuda(), requires_grad=False).unsqueeze(1)
+            input_confidence = autograd.Variable(
+                targets['input_confidence'].cuda(), requires_grad=False).unsqueeze(1)
+            stack_inputs = torch.cat((input_imgs, human_mask, keypoints_img,
+                                      input_log_depth, input_confidence), 1)
+        elif self.num_input == 6:
+            input_log_depth = autograd.Variable(
+                targets['input_log_depth'].cuda(), requires_grad=False).unsqueeze(1)
+            input_confidence = autograd.Variable(
+                targets['input_confidence'].cuda(), requires_grad=False).unsqueeze(1)
+            stack_inputs = torch.cat(
+                (input_imgs, human_mask, input_log_depth, input_confidence), 1)
+        elif self.num_input == 3:
+            stack_inputs = input_imgs
+        else:
+            print('SOMETHING WRONG!!!!!!!!!!!!!!!!!!!!!!!')
+            sys.exit()
+
+        prediction_d, pred_confidence = self.netG.forward(stack_inputs)
+        prediction_d = torch.exp(prediction_d.squeeze(1))
+        pred_confidence = pred_confidence.squeeze(1)
+
+        if not os.path.exists(save_path):
+            os.makedirs(save_path)
+
+        for i in range(0, len(targets['img_1_path'])):
+
+            youtube_dir = save_path + targets['img_1_path'][i].split('/')[-2]
+
+            if not os.path.exists(youtube_dir):
+                os.makedirs(youtube_dir)
+
+            pred_d_ref = prediction_d.data[i, :, :].cpu().numpy()
+            saved_img = np.transpose(
+                input_imgs[i, :, :, :].cpu().numpy(), (1, 2, 0))
+
+            output_path = youtube_dir + '/' + \
+                targets['img_1_path'][i].split('/')[-1]
+
+            print('output_path', output_path)
+            input_confidence = targets['input_confidence'][i]
+            gt_depth = targets['depth_gt'][i]
+            gt_mask = targets['gt_mask'][i]
+            human_mask = 1.0 - targets['env_mask'][i]
+
+            # K = targets['K'][i]
+            # T_1_G = targets['T_1_G'][i]
+
+            hdf5_file_write = h5py.File(output_path, 'w')
+            hdf5_file_write.create_dataset(
+                '/prediction/img', data=saved_img, dtype='float32')
+            hdf5_file_write.create_dataset(
+                '/prediction/pred_depth', data=pred_d_ref, dtype='float32')
+            hdf5_file_write.create_dataset(
+                '/prediction/gt_depth', data=gt_depth, dtype='float32')
+            hdf5_file_write.create_dataset(
+                '/prediction/gt_mask', data=gt_mask, dtype='float32')
+            hdf5_file_write.create_dataset(
+                '/prediction/input_confidence',
+                data=input_confidence,
+                dtype='float32')
+            hdf5_file_write.create_dataset(
+                '/prediction/human_mask', data=human_mask, dtype='float32')
+
+    def evaluate_tum_error(self, input_, targets, n_iter, write_to_summary):
+        input_imgs = autograd.Variable(input_.cuda(), requires_grad=False)
+        human_mask = 1.0 - autograd.Variable(
+            targets['env_mask'].cuda(), requires_grad=False).unsqueeze(1)
+        keypoints_img = autograd.Variable(
+            targets['keypoints_img'].cuda(), requires_grad=False).unsqueeze(1)
+
+        if self.num_input == 7:
+            input_log_depth = autograd.Variable(
+                targets['input_log_depth'].cuda(), requires_grad=False).unsqueeze(1)
+            input_confidence = autograd.Variable(
+                targets['input_confidence'].cuda(), requires_grad=False).unsqueeze(1)
+            stack_inputs = torch.cat((input_imgs, human_mask, keypoints_img,
+                                      input_log_depth, input_confidence), 1)
+        elif self.num_input == 6:
+            input_log_depth = autograd.Variable(
+                targets['input_log_depth'].cuda(), requires_grad=False).unsqueeze(1)
+            input_confidence = autograd.Variable(
+                targets['input_confidence'].cuda(), requires_grad=False).unsqueeze(1)
+            stack_inputs = torch.cat(
+                (input_imgs, human_mask, input_log_depth, input_confidence), 1)
+        elif self.num_input == 3:
+            stack_inputs = input_imgs
+        else:
+            print('SOMETHING WRONG!!!!!!!!!!!!!!!!!!!!!!!')
+            sys.exit()
+
+        prediction_d, _ = self.netG.forward(stack_inputs)
+
+        pred_log_d = prediction_d.squeeze(1)
+        pred_d = torch.exp(pred_log_d)
+
+        sc_inv_full, sc_inv_human, sc_inv_env, sc_inv_intra, sc_inv_inter = self.criterion_joint.compute_si_rmse(
+            pred_log_d.data, targets)
+        l1_rel_full = self.criterion_joint.compute_l1_rel_error(
+            pred_d.data, targets)
+        RMSE_full = self.criterion_joint.compute_rmse_error(
+            pred_d.data, targets)
+
+        sc_inv_errors = [
+            sc_inv_full.item(),
+            sc_inv_human.item(),
+            sc_inv_env.item(),
+            sc_inv_intra.item(),
+            sc_inv_inter.item()
+        ]
+
+        return sc_inv_errors, l1_rel_full, RMSE_full
+
+    def eval_save_img(self, input_, targets, save_path):
+        input_imgs = autograd.Variable(input_.cuda(), requires_grad=False)
+        human_mask = 1.0 - autograd.Variable(
+            targets['env_mask'].cuda(), requires_grad=False).unsqueeze(1)
+        keypoints_img = autograd.Variable(
+            targets['keypoints_img'].cuda(), requires_grad=False).unsqueeze(1)
+
+        if self.num_input == 7:
+            input_log_depth = autograd.Variable(
+                targets['input_log_depth'].cuda(), requires_grad=False).unsqueeze(1)
+            input_confidence = autograd.Variable(
+                targets['input_confidence'].cuda(), requires_grad=False).unsqueeze(1)
+            stack_inputs = torch.cat((input_imgs, human_mask, keypoints_img,
+                                      input_log_depth, input_confidence), 1)
+        elif self.num_input == 6:
+            human_mask = 1.0 - autograd.Variable(
+                targets['env_mask'].cuda(), requires_grad=False).unsqueeze(1)
+            input_log_depth = autograd.Variable(
+                targets['input_log_depth'].cuda(), requires_grad=False).unsqueeze(1)
+            input_confidence = autograd.Variable(
+                targets['input_confidence'].cuda(), requires_grad=False).unsqueeze(1)
+            stack_inputs = torch.cat(
+                (input_imgs, human_mask, input_log_depth, input_confidence), 1)
+        elif self.num_input == 3:
+            stack_inputs = input_imgs
+        else:
+            print('SOMETHING WRONG!!!!!!!!!!!!!!!!!!!!!!!')
+            sys.exit()
+
+        prediction_log_d, _ = self.netG.forward(stack_inputs)
+        prediction_d = torch.exp(prediction_log_d.squeeze(1))
+
+        if not os.path.exists(save_path):
+            os.makedirs(save_path)
+
+        for i in range(0, len(targets['img_1_path'])):
+
+            youtube_dir = save_path + targets['img_1_path'][i].split('/')[-2]
+
+            print('youtube_dir ', youtube_dir)
+
+            if not os.path.exists(youtube_dir):
+                os.makedirs(youtube_dir)
+
+            pred_d_ref = prediction_d.data[i, :, :].cpu().numpy()
+            saved_img = np.transpose(
+                input_imgs[i, :, :, :].cpu().numpy(), (1, 2, 0))
+            human_mask_ref = human_mask.data[i, 0, :, :].cpu().numpy()
+
+            output_path = youtube_dir + '/' + \
+                targets['img_1_path'][i].split('/')[-1]
+            gt_depth_ref = targets['depth_gt'][i]
+            gt_mask_ref = targets['gt_mask'][i]
+            input_confidence_ref = targets['input_confidence'][i]
+            keypoints_img = targets['keypoints_img'][i]
+
+            input_depth_final_ref = targets['input_depth_final'][i]
+            full_flow = targets['full_flow'][i]
+            img_2 = targets['img_2'][i]
+
+            K = targets['K'][i]
+            T_1_G = targets['T_1_G'][i]
+
+            hdf5_file_write = h5py.File(output_path, 'w')
+            hdf5_file_write.create_dataset('/prediction/img', data=saved_img)
+            hdf5_file_write.create_dataset(
+                '/prediction/pred_depth', data=pred_d_ref)
+
+            hdf5_file_write.create_dataset(
+                '/prediction/gt_depth', data=gt_depth_ref)
+            hdf5_file_write.create_dataset(
+                '/prediction/gt_mask', data=gt_mask_ref)
+            hdf5_file_write.create_dataset(
+                '/prediction/human_mask', data=human_mask_ref)
+            hdf5_file_write.create_dataset(
+                '/prediction/input_confidence', data=input_confidence_ref)
+            hdf5_file_write.create_dataset(
+                '/prediction/input_pp_depth', data=input_depth_final_ref)
+            hdf5_file_write.create_dataset(
+                '/prediction/keypoints_img', data=keypoints_img)
+            hdf5_file_write.create_dataset(
+                '/prediction/full_flow', data=full_flow)
+            hdf5_file_write.create_dataset('/prediction/img_2', data=img_2)
+
+            hdf5_file_write.create_dataset('/prediction/K', data=K)
+            hdf5_file_write.create_dataset('/prediction/T_1_G', data=T_1_G)
+            hdf5_file_write.close()
+
+    def run_and_save_videos_prediction(self, input_, targets, save_path):
+        input_imgs = autograd.Variable(input_.cuda(), requires_grad=False)
+
+        human_mask = 1.0 - autograd.Variable(
+            targets['env_mask'].cuda(), requires_grad=False).unsqueeze(1)
+        input_log_depth = autograd.Variable(
+            targets['input_log_depth'].cuda(), requires_grad=False).unsqueeze(1)
+        input_confidence = autograd.Variable(
+            targets['input_confidence'].cuda(), requires_grad=False).unsqueeze(1)
+        keypoints_img = autograd.Variable(
+            targets['keypoints_img'].cuda(), requires_grad=False).unsqueeze(1)
+
+        mvs_depth = autograd.Variable(targets['mvs_depth'].cuda(), requires_grad=False)
+        input_depth = autograd.Variable(
+            targets['input_depth'].cuda(), requires_grad=False)
+
+        full_flow = targets['full_flow']
+
+        if self.num_input == 7:
+            stack_inputs = torch.cat((input_imgs, human_mask, keypoints_img,
+                                      input_log_depth, input_confidence), 1)
+        elif self.num_input == 6:
+            stack_inputs = torch.cat(
+                (input_imgs, human_mask, input_log_depth, input_confidence), 1)
+        elif self.num_input == 3:
+            stack_inputs = input_imgs
+        else:
+            print('SOMETHING WRONG!!!!!!!!!!!!!!!!!!!!!!!')
+            sys.exit()
+
+        prediction_d, pred_confidence = self.netG.forward(stack_inputs)
+
+        pred_log_d = prediction_d.squeeze(1)
+        pred_d = torch.exp(pred_log_d)
+        pred_confidence = pred_confidence.squeeze(1)
+
+        if not os.path.exists(save_path):
+            os.makedirs(save_path)
+
+        for i in range(0, len(targets['img_1_path'])):
+
+            youtube_dir = save_path + targets['img_1_path'][i].split('/')[-2]
+
+            if not os.path.exists(youtube_dir):
+                os.makedirs(youtube_dir)
+
+            saved_img = np.transpose(
+                input_imgs[i, :, :, :].cpu().numpy(), (1, 2, 0))
+
+            pred_d_ref = pred_d.data[i, :, :].cpu().numpy()
+            pred_confidence_ref = pred_confidence.data[i, :, :].cpu().numpy()
+            human_mask_ref = human_mask.data[i, 0, :, :].cpu().numpy()
+
+            mvs_depth_ref = mvs_depth.data[i, :, :].cpu().numpy()
+
+            input_depth_ref = input_depth[i, :, :].data.cpu().numpy()
+            input_confidence_ref = input_confidence[i, 0, :, :].data.cpu(
+            ).numpy()
+            full_flow_ref = full_flow[i, :, :, :].data.cpu().numpy()
+
+            output_path = youtube_dir + '/' + \
+                targets['img_1_path'][i].split('/')[-1]
+
+            K = targets['K'][i]
+            T_1_G = targets['T_1_G'][i]
+            original_mvs_depth = targets['original_mvs_depth'][i]
+
+            print('output_path', output_path)
+            hdf5_file_write = h5py.File(output_path, 'w')
+            hdf5_file_write.create_dataset('/prediction/img', data=saved_img)
+            hdf5_file_write.create_dataset(
+                '/prediction/pred_depth', data=pred_d_ref)
+            hdf5_file_write.create_dataset('/prediction/K', data=K)
+            hdf5_file_write.create_dataset('/prediction/T_1_G', data=T_1_G)
+            hdf5_file_write.create_dataset(
+                '/prediction/confidence', data=pred_confidence_ref)
+            hdf5_file_write.create_dataset(
+                '/prediction/human_mask', data=human_mask_ref)
+            hdf5_file_write.create_dataset(
+                '/prediction/input_depth', data=input_depth_ref)
+            hdf5_file_write.create_dataset(
+                '/prediction/input_confidence', data=input_confidence_ref)
+            hdf5_file_write.create_dataset(
+                '/prediction/mvs_depth', data=mvs_depth_ref)
+            hdf5_file_write.create_dataset(
+                '/prediction/full_flow', data=full_flow_ref)
+            hdf5_file_write.create_dataset(
+                '/prediction/original_mvs_depth', data=original_mvs_depth)
+
+            hdf5_file_write.close()
+
+    def run_and_save_DAVIS(self, input_, targets, save_path):
+        assert (self.num_input == 3)
+        input_imgs = autograd.Variable(input_.cuda(), requires_grad=False)
+
+        stack_inputs = input_imgs
+
+        prediction_d, pred_confidence = self.netG.forward(stack_inputs)
+        pred_log_d = prediction_d.squeeze(1)
+        pred_d = torch.exp(pred_log_d)
+
+        if not os.path.exists(save_path):
+            os.makedirs(save_path)
+
+        for i in range(0, len(targets['img_1_path'])):
+
+            youtube_dir = save_path + targets['img_1_path'][i].split('/')[-2]
+
+            if not os.path.exists(youtube_dir):
+                os.makedirs(youtube_dir)
+
+            saved_img = np.transpose(
+                input_imgs[i, :, :, :].cpu().numpy(), (1, 2, 0))
+
+            pred_d_ref = pred_d.data[i, :, :].cpu().numpy()
+
+            output_path = youtube_dir + '/' + \
+                targets['img_1_path'][i].split('/')[-1]
+            print(output_path)
+            disparity = 1. / pred_d_ref
+            disparity = disparity / np.max(disparity)
+            disparity = np.tile(np.expand_dims(disparity, axis=-1), (1, 1, 3))
+            saved_imgs = np.concatenate((saved_img, disparity), axis=1)
+            saved_imgs = (saved_imgs*255).astype(np.uint8)
+
+            imsave(output_path, saved_imgs)
+
+    def switch_to_train(self):
+        self.netG.train()
+
+    def switch_to_eval(self):
+        self.netG.eval()
+
+    def save(self, label):
+        self.save_network(self.netG, 'G', label, self.gpu_ids)
+
+    def update_learning_rate(self):
+        self.scheduler.step()
+        lr = self.optimizer_G.param_groups[0]['lr']
+        print('Current learning rate = %.7f' % lr)
+```
+
+### models/depth_priors/mannequin_challenge/options/base_options.py
+```
+# Copyright 2019 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import argparse
+import os
+from ..util import util
+
+
+class BaseOptions():
+    def __init__(self):
+        self.parser = argparse.ArgumentParser()
+        self.initialized = False
+
+    def initialize(self):
+        self.parser.add_argument(
+            '--input', type=str, required=True,
+            choices=['single_view', 'two_view', 'two_view_k'],
+            help='type of input. One of "single_view", "two_view" (no human keypoints),'
+            '"two_view_k" (with human keypoints)')
+        self.parser.add_argument('--simple_keypoints', type=int, default=0,
+                                 help='which epoch to load? set to latest to use latest cached model')
+        self.parser.add_argument('--mode', type=str, default='Ours_Bilinear',
+                                 help='which epoch to load? set to latest to use latest cached model')
+        self.parser.add_argument('--human_data_term', type=int, default=0,
+                                 help='which epoch to load? set to latest to use latest cached model')
+
+        self.parser.add_argument(
+            '--batchSize', type=int, default=8, help='input batch size')
+        self.parser.add_argument(
+            '--loadSize', type=int, default=286, help='scale images to this size')
+        self.parser.add_argument(
+            '--fineSize', type=int, default=256, help='then crop to this size')
+        self.parser.add_argument(
+            '--output_nc', type=int, default=3, help='# of output image channels')
+        self.parser.add_argument(
+            '--ngf', type=int, default=64, help='# of gen filters in first conv layer')
+        self.parser.add_argument(
+            '--ndf', type=int, default=64, help='# of discrim filters in first conv layer')
+        self.parser.add_argument('--which_model_netG', type=str,
+                                 default='unet_256', help='selects model to use for netG')
+        self.parser.add_argument(
+            '--gpu_ids', type=str, default='0,1,2,3', help='gpu ids: e.g. 0  0,1,2, 0,2')
+        self.parser.add_argument('--name', type=str, default='test_local',
+                                 help='name of the experiment. It decides where to store samples and models')
+        self.parser.add_argument('--model', type=str, default='pix2pix',
+                                 help='chooses which model to use. cycle_gan, one_direction_test, pix2pix, ...')
+        self.parser.add_argument(
+            '--nThreads', default=2, type=int, help='# threads for loading data')
+        self.parser.add_argument('--checkpoints_dir', type=str,
+                                 default='./checkpoints/', help='models are saved here')
+        self.parser.add_argument('--norm', type=str, default='instance',
+                                 help='instance normalization or batch normalization')
+        self.parser.add_argument('--serial_batches', action='store_true',
+                                 help='if true, takes images in order to make batches, otherwise takes them randomly')
+        self.parser.add_argument(
+            '--display_winsize', type=int, default=256,  help='display window size')
+        self.parser.add_argument(
+            '--display_id', type=int, default=1, help='window id of the web display')
+        self.parser.add_argument('--identity', type=float, default=0.0,
+                                 help='use identity mapping. Setting identity other than 1 has an effect of scaling the weight of the identity mapping loss. For example, if the weight of the identity loss should be 10 times smaller than the weight of the reconstruction loss, please set optidentity = 0.1')
+        self.parser.add_argument(
+            '--use_dropout', action='store_true', help='use dropout for the generator')
+        self.parser.add_argument('--max_dataset_size', type=int, default=float(
+            "inf"), help='Maximum number of samples allowed per dataset. If the dataset directory contains more than max_dataset_size, only a subset is loaded.')
+
+        self.initialized = True
+
+    def parse(self):
+        if not self.initialized:
+            self.initialize()
+        self.opt = self.parser.parse_args()
+        self.opt.isTrain = self.isTrain   # train or test
+
+        str_ids = self.opt.gpu_ids.split(',')
+        self.opt.gpu_ids = []
+        for str_id in str_ids:
+            id = int(str_id)
+            if id >= 0:
+                self.opt.gpu_ids.append(id)
+
+        args = vars(self.opt)
+
+        print('------------ Options -------------')
+        for k, v in sorted(args.items()):
+            print('%s: %s' % (str(k), str(v)))
+        print('-------------- End ----------------')
+
+        # save to the disk
+        expr_dir = os.path.join(self.opt.checkpoints_dir, self.opt.name)
+        util.mkdirs(expr_dir)
+        file_name = os.path.join(expr_dir, 'opt.txt')
+        with open(file_name, 'wt') as opt_file:
+            opt_file.write('------------ Options -------------\n')
+            for k, v in sorted(args.items()):
+                opt_file.write('%s: %s\n' % (str(k), str(v)))
+            opt_file.write('-------------- End ----------------\n')
+        return self.opt
+```
+
+### models/depth_priors/mannequin_challenge/options/train_options.py
+```
+# Copyright 2019 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+from .base_options import BaseOptions
+
+
+class TrainOptions(BaseOptions):
+    def initialize(self):
+        BaseOptions.initialize(self)
+        self.parser.add_argument('--display_freq', type=int, default=100,
+                                 help='frequency of showing training results on screen')
+        self.parser.add_argument('--print_freq', type=int, default=100,
+                                 help='frequency of showing training results on console')
+        self.parser.add_argument('--save_latest_freq', type=int,
+                                 default=5000, help='frequency of saving the latest results')
+        self.parser.add_argument('--save_epoch_freq', type=int, default=5,
+                                 help='frequency of saving checkpoints at the end of epochs')
+        self.parser.add_argument('--continue_train', action='store_true',
+                                 help='continue training: load the latest model')
+        self.parser.add_argument(
+            '--phase', type=str, default='train', help='train, val, test, etc')
+        self.parser.add_argument('--which_epoch', type=str, default='latest',
+                                 help='which epoch to load? set to latest to use latest cached model')
+        self.parser.add_argument(
+            '--niter', type=int, default=100, help='# of iter at starting learning rate')
+        self.parser.add_argument('--niter_decay', type=int, default=100,
+                                 help='# of iter to linearly decay learning rate to zero')
+        self.parser.add_argument('--lr_decay_epoch', type=int, default=8,
+                                 help='# of epoch to linearly decay learning rate to zero')
+        self.parser.add_argument('--lr_policy', type=str, default='step',
+                                 help='learning rate policy: lambda|step|plateau')
+
+        self.parser.add_argument(
+            '--beta1', type=float, default=0.5, help='momentum term of adam')
+        self.parser.add_argument(
+            '--lr', type=float, default=0.0004, help='initial learning rate for adam')
+        self.parser.add_argument('--no_lsgan', action='store_true',
+                                 help='do *not* use least square GAN, if false, use vanilla GAN')
+        self.parser.add_argument(
+            '--lambda_A', type=float, default=10.0, help='weight for cycle loss (A -> B -> A)')
+        self.parser.add_argument(
+            '--lambda_B', type=float, default=10.0, help='weight for cycle loss (B -> A -> B)')
+        self.parser.add_argument('--pool_size', type=int, default=50,
+                                 help='the size of image buffer that stores previously generated images')
+        self.parser.add_argument('--no_html', action='store_true',
+                                 help='do not save intermediate training results to [opt.checkpoints_dir]/[opt.name]/web/')
+        self.parser.add_argument('--no_flip', action='store_true',
+                                 help='if specified, do not flip the images for data argumentation')
+
+        self.isTrain = True
+```
+
+### models/depth_priors/mannequin_challenge/util/util.py
+```
+'''
+Copyright 2019 Google LLC
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+https://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+'''
+
+from __future__ import absolute_import, division, print_function, unicode_literals
+
+import os
+
+
+def mkdirs(paths):
+    if isinstance(paths, list) and not isinstance(paths, str):
+        for path in paths:
+            mkdir(path)
+    else:
+        mkdir(paths)
+
+
+def mkdir(path):
+    if not os.path.exists(path):
+        os.makedirs(path)
+```

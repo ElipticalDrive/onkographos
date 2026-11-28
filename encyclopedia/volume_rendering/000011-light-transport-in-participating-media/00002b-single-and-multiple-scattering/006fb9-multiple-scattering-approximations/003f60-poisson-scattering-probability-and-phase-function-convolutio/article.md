@@ -1,0 +1,97 @@
+# Poisson Scattering Probability and Phase Function Convolution
+
+Also called: Multiple scattering phase function, Scattering order probability
+
+## Overview
+This method approximates multiple scattering contributions in participating media by decoupling the probability of scattering events from the angular redistribution of light. It calculates the radiance contribution of a ray segment by weighting convolution samples of the phase function by the Poisson distribution probability of experiencing a specific number of scattering events [S1, unofficial]. It sets itself apart from [Walter's Method](2262-walter-s-method.md) and [Multiple Scattering Approximations](21920-multiple-scattering-approximations.md) by explicitly modeling the statistical distribution of scattering orders using a Poisson process, rather than relying on diffusion approximations or iterative solvers for the radiative transfer equation.
+
+## How it works
+**Inputs:**
+*   Segment optical depth $D_j$ for segment $S_j$ along a viewing ray.
+*   Base phase function $p(\boldsymbol{\omega}, \boldsymbol{\omega}')$.
+*   Radiance images on the faces of a viewing cube aligned with the viewing ray direction.
+
+**Outputs:**
+*   Contribution $E_j$ of segment $S_j$ to the pixel radiance.
+
+**Data Structures:**
+*   Precomputed multiple scattering phase function images $K_{ij}$ stored for each pixel on the viewing cube faces. $K_{ij}$ represents the convolution of the base phase function with itself $i-1$ times, applied to the radiance images.
+*   Probability values $q_{ij}$ computed per segment and scattering order.
+
+**Steps:**
+1.  **Compute Optical Depth:** Determine the optical depth $D_j$ for the segment $S_j$.
+2.  **Compute Scattering Probabilities:** Calculate the probability $q_{ij}$ of exactly $i$ scattering events occurring along segment $S_j$ using the Poisson distribution [S1, unofficial]:
+    $$ q_{ij} = \frac{\exp(-D_j) D_j^i}{i!} $$
+3.  **Compute Convolution Samples:** For each scattering order $i$, compute the convolution sample $K_{ij}$. This involves convolving the base phase function $p(\boldsymbol{\omega}, \boldsymbol{\omega}')$ with itself $i-1$ times via integration over the unit sphere [S1, unofficial].
+    *   *Optimization for Henyey-Greenstein:* If the base phase function is Henyey-Greenstein with anisotropy parameter $g$, the $i$-fold convolution is equivalent to the same formula with $g$ replaced by $g^i$. These multiple scattering phase functions $p_i(\boldsymbol{\omega}, \boldsymbol{\omega}')$ are precomputed and saved for each pixel on the viewing cube faces [S1, unofficial].
+    *   The precomputed phase function images are multiplied pixelwise by the radiance images on the cube faces to yield $K_{ij}$ [S1, unofficial].
+4.  **Sum Contributions:** Calculate the total contribution $E_j$ of segment $S_j$ by summing the weighted convolution samples over all scattering orders $i$ [S1, unofficial]:
+    $$ E_j = \sum_i q_{ij} K_{ij} $$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_segment_contribution(D_j, phase_function, radiance_cube, max_orders):
+    """
+    Computes the multiple scattering contribution for a segment with optical depth D_j.
+    
+    Args:
+        D_j: Optical depth of the segment.
+        phase_function: Function or parameter (e.g., g for Henyey-Greenstein) defining p(omega, omega').
+        radiance_cube: 3D array of radiance values on the viewing cube faces.
+        max_orders: Maximum number of scattering orders to consider.
+        
+    Returns:
+        E_j: Total contribution of the segment.
+    """
+    E_j = 0.0
+    
+    # Precompute or retrieve convolution samples K_ij
+    # K_ij is the result of convolving the phase function i-1 times and 
+    # multiplying by the radiance cube images.
+    # For Henyey-Greenstein, this is equivalent to using g^i.
+    
+    for i in range(max_orders + 1):
+        # 1. Calculate Poisson probability q_ij
+        # q_ij = exp(-D_j) * D_j^i / i!
+        if i == 0:
+            q_ij = math.exp(-D_j)
+        else:
+            # Efficient recurrence or direct calculation
+            # q_ij = q_i-1 * D_j / i
+            pass # Implementation detail for stability
+        
+        # 2. Retrieve or compute convolution sample K_ij
+        # K_ij = Convolve(phase_function, i-1 times) * Radiance_Cube
+        # For Henyey-Greenstein with anisotropy g:
+        # effective_g = g ** i
+        # K_ij = Apply_Phase_Function(effective_g, radiance_cube)
+        
+        # 3. Accumulate contribution
+        E_j += q_ij * K_ij
+        
+    return E_j
+```
+
+**Edge Cases and Pitfalls:**
+*   **Directional Change Approximation:** The Poisson distribution assumes scattering events are independent and do not affect the probability of subsequent events along the *same* ray path. This is an approximation because scattering changes the ray direction [S1, unofficial].
+*   **Validity:** The approximation is valid primarily for media with highly forward-peaked scattering, such as small water droplets in clouds, where the first few orders of scattering remain close to the original viewing direction [S1, unofficial].
+*   **High-Order Blurring:** For large $i$, the higher-order scattering convolutions $K_{ij}$ become blurred and change slowly with pixel index. This allows for interpolation from sparser sampling to speed up computation, while $q_{ij}$ must still be computed per pixel [S1, unofficial].
+
+## Subtopics
+
+### [Analytical Integration of Scattering Phase Function for Random Polygons](20187-analytical-integration-of-scattering-phase-function-for-rand.md)
+Computes scattering contributions for random polygon collections by analytically integrating geometric terms over angular bins. It neglects mutual occlusion and provides closed-form solutions for vegetation-like media, differing from this method's numerical convolution approach.
+
+## Operating characteristics
+*   **Complexity:** Time complexity depends on the number of scattering orders $i$ considered and the cost of convolution. Memory complexity is dominated by storing the precomputed convolution samples $K_{ij}$ for the viewing cube faces.
+*   **Performance:** Efficient for media with forward-peaked scattering where low-order approximations suffice. High-order terms can be optimized via interpolation due to spatial blurring [S1, unofficial].
+*   **Limitations:** Accuracy degrades for media with isotropic or backward-peaked scattering, or when multiple scattering events significantly alter the ray direction away from the viewing axis [S1, unofficial].
+*   **Use Cases:** Cloud rendering, fog, and other participating media with small particles and forward scattering.
+
+## Background
+This method was introduced in the context of global illumination in clouds, leveraging the Poisson distribution to model scattering probabilities [S1, unofficial]. It builds on the principle that for small water droplets, scattering is highly peaked forward, making the Poisson approximation valid for the first few orders of scattering.
+
+## Sources
+[S1] Diffusion and multiple anisotropic scattering for global illumination in clouds, https://digital.library.unt.edu/ark:/67531/metadc1410406/?q=multiple scattering rendering, fetched 2026-10-29 (unofficial)

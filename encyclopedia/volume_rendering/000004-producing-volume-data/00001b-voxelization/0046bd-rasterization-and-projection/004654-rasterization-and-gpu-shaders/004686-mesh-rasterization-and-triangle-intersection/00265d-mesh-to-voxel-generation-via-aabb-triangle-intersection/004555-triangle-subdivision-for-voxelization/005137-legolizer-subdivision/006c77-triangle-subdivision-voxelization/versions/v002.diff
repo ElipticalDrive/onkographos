@@ -1,0 +1,157 @@
+--- v001.md
++++ v002.md
+@@ -3,97 +3,72 @@
+ 
+ ## Overview
+-A rasterization technique that subdivides triangle edges based on grid resolution and accuracy, sampling points and interpolated normals across the triangle surface to populate a 3D voxel grid [S1, unofficial]. It differs from GPU-based iterative subdivision strategies like Legolizer Subdivision by using a fixed, resolution-dependent subdivision factor rather than refining until edge lengths meet a specific threshold, making it suitable for direct CPU-side or simple shader-based voxel generation where uniform sampling density is prioritized over adaptive mesh refinement.
++A rasterization technique that subdivides triangle edges based on grid resolution and accuracy, sampling points and interpolated normals across the triangle surface to populate a 3D voxel grid [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:**
+-- Triangle vertices $p_1, p_2, p_3$ (3D vectors).
+-- Triangle vertex normals $n_1, n_2, n_3$ (3D vectors).
+-- Voxel grid dimensions $v_x, v_y, v_z$ (integers).
+-- Boolean flag `octree_render` (controls whether normals are stored).
++**Inputs:** Triangle vertices $p_1, p_2, p_3$, vertex normals $n_1, n_2, n_3$, grid dimensions $v_x, v_y, v_z$, and boolean flag `octree_render` [S1, unofficial].
+ 
+-**Outputs:**
+-- A set of voxel coordinates $(voxel\_x, voxel\_y, voxel\_z)$ and optionally quantized normal colors $(color\_x, color\_y, color\_z)$.
++**Outputs:** Voxel coordinates $(voxel\_x, voxel\_y, voxel\_z)$ and optionally quantized normal colors $(color\_x, color\_y, color\_z)$ [S1, unofficial].
+ 
+-**Data Structures:**
+-- The voxel grid is implicitly addressed by integer coordinates derived from continuous positions.
+-- Normal storage uses 8-bit signed integers mapped to a specific range if `octree_render` is true.
++**Data Structures:** The voxel grid is addressed by integer coordinates derived from continuous positions; normal storage uses 8-bit signed integers mapped to a specific range when `octree_render` is true [S1, unofficial].
+ 
+-**Steps:**
++**Pseudocode:**
++```python
++def triangle_subdivision_voxelization(p1, p2, p3, n1, n2, n3, vx, vy, vz, octree_render):
++    d1 = p2 - p1
++    d2 = p3 - p1
++    temp = cross(d1 * 10.0, d2 * 10.0)
++    length_temp = length(temp)
++    if length_temp > 0:
++        normal = temp * (1.0 / length_temp)
++    else:
++        return  # Skip degenerate triangle [G]
++    
++    vm = max(vx, vy, vz)
++    if vx < 512:
++        accuracy = 4
++    elif vx < 1024:
++        accuracy = 3
++    else:
++        accuracy = 2
++        
++    c = max(length(d1), length(d2)) * vm * accuracy
++    
++    for i in range(c + 1):
++        a = i / c
++        x1 = p1 + d1 * a
++        x2 = p1 + d2 * a
++        dx = x2 - x1
++        xn1 = n1 + (n2 - n1) * a
++        xn2 = n1 + (n3 - n1) * a
++        dnx = xn2 - xn1
++        
++        d = length(dx) * vm * accuracy
++        for j in range(d + 1):
++            b = j / d
++            p = x1 + dx * b
++            n = xn1 + dnx * b
++            
++            voxel_x = p.x * vx
++            voxel_y = (1.0 - p.y) * vy
++            voxel_z = p.z * vz
++            
++            if octree_render:
++                color_x = int(n.x * 127 + 128) & 0xfc
++                color_y = int(n.y * 127 + 128)
++                color_z = int(n.z * 127 + 128)
++                # Populate voxel grid at (voxel_x, voxel_y, voxel_z) with position p and optional color [G]
++            else:
++                # Populate voxel grid at (voxel_x, voxel_y, voxel_z) with position p only [G]
++```
+ 
+-1.  **Compute Edge Vectors:**
+-    Calculate the edge vectors from $p_1$:
+-    $$d_1 = p_2 - p_1$$
+-    $$d_2 = p_3 - p_1$$
++**Parameters:** $v_x, v_y, v_z$ are integer grid dimensions; $accuracy$ is a subdivision multiplier (4 if $v_x < 512$, 3 if $512 \le v_x < 1024$, 2 otherwise); `octree_render` controls whether quantized normals are passed to the voxel setter [S1, unofficial].
+ 
+-2.  **Compute Normal:**
+-    Calculate the triangle normal using the cross product of scaled edge vectors, then normalize:
+-    $$temp = \text{cross}(d_1 \times 10.0, d_2 \times 10.0)$$
+-    $$len = \text{length}(temp)$$
+-    If $len > 0$:
+-    $$normal = temp \times \frac{1.0}{len}$$
+-    [G] If $len \le 0$, the triangle is degenerate; skip processing.
+-
+-3.  **Determine Subdivision Resolution:**
+-    Calculate the maximum grid dimension:
+-    $$vm = \max(v_x, v_y, v_z)$$
+-    Determine the accuracy multiplier based on $v_x$:
+-    $$accuracy = \begin{cases} 4 & \text{if } v_x < 512 \\ 3 & \text{if } v_x < 1024 \\ 2 & \text{otherwise} \end{cases}$$
+-    Calculate the outer loop bound $c$:
+-    $$c = \max(\text{length}(d_1), \text{length}(d_2)) \times vm \times accuracy$$
+-
+-4.  **Outer Loop (Edge Subdivision):**
+-    Loop $i$ from $0$ to $c$:
+-    a. Compute interpolation factor:
+-    $$a = \frac{i}{c}$$
+-    b. Interpolate positions on the two edges connected to $p_1$:
+-    $$x_1 = p_1 + d_1 \times a$$
+-    $$x_2 = p_1 + d_2 \times a$$
+-    c. Compute the vector between these points:
+-    $$dx = x_2 - x_1$$
+-    d. Interpolate normals at the endpoints of the current slice:
+-    $$xn_1 = n_1 + (n_2 - n_1) \times a$$
+-    $$xn_2 = n_1 + (n_3 - n_1) \times a$$
+-    e. Compute the normal difference vector:
+-    $$dnx = xn_2 - xn_1$$
+-
+-5.  **Inner Loop (Line Rasterization):**
+-    Calculate the inner loop bound $d$:
+-    $$d = \text{length}(dx) \times vm \times accuracy$$
+-    Loop $j$ from $0$ to $d$:
+-    a. Compute interpolation factor:
+-    $$b = \frac{j}{d}$$
+-    b. Interpolate position and normal along the line segment $x_1 \to x_2$:
+-    $$p = x_1 + dx \times b$$
+-    $$n = xn_1 + dnx \times b$$
+-    c. Map continuous position $p$ to voxel grid coordinates:
+-    $$voxel\_x = p.x \times v_x$$
+-    $$voxel\_y = (1.0 - p.y) \times v_y$$
+-    $$voxel\_z = p.z \times v_z$$
+-    d. Quantize normal for storage (if `octree_render` is true):
+-    $$color\_x = \text{int}(n.x \times 127 + 128) \ \& \ 0xfc$$
+-    $$color\_y = \text{int}(n.y \times 127 + 128)$$
+-    $$color\_z = \text{int}(n.z \times 127 + 128)$$
+-    e. Populate the voxel at $(voxel\_x, voxel\_y, voxel\_z)$ with position and optionally color.
+-
+-**Parameters:**
+-- $v_x, v_y, v_z$: Integer dimensions of the voxel grid.
+-- $accuracy$: Subdivision multiplier. Default is 2. Set to 3 if $v_x < 1024$, and 4 if $v_x < 512$ [S1, unofficial].
+-- `octree_render`: Boolean flag. If true, quantized normals are passed to the voxel setter; otherwise, only positions are stored [S1, unofficial].
+-
+-**Edge Cases and Pitfalls:**
+-- **Degenerate Triangles:** If the triangle area is zero ($len \le 0$), the normal calculation fails. The implementation must check for this and skip the triangle [S1, unofficial].
+-- **Precision:** The use of floating-point arithmetic for interpolation and grid mapping requires careful handling of boundary conditions to avoid off-by-one errors in voxel indexing.
+-- **Grid Coordinate System:** The Y-axis mapping uses $(1.0 - p.y)$, implying a coordinate system where Y increases downwards or is inverted relative to the input mesh space [S1, unofficial].
++**Edge Cases and Pitfalls:** Degenerate triangles ($len \le 0$) must be skipped to prevent division by zero during normalization [G]. Floating-point interpolation and grid mapping require boundary checks to avoid off-by-one voxel indexing errors [G]. The Y-axis mapping uses $(1.0 - p.y)$, inverting the input Y coordinate relative to the grid space [S1, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N \cdot L \cdot vm \cdot accuracy)$, where $N$ is the number of triangles, $L$ is the average edge length, $vm$ is the max grid dimension, and $accuracy$ is the subdivision factor. The complexity is driven by the nested loops proportional to the triangle size and grid resolution.
+-- **Memory Complexity:** $O(V_x \cdot V_y \cdot V_z)$ for the voxel grid storage.
+-- **Strengths:** Simple to implement on CPU or simple shaders; provides uniform sampling density controlled by the accuracy parameter; does not require complex tree structures during the voxelization phase.
+-- **Limitations:** Performance degrades significantly with high-resolution grids or large triangles due to the fixed subdivision factor; not adaptive to mesh complexity; potential for over-sampling or under-sampling if accuracy parameters are not tuned correctly.
+-- **When to use:** Suitable for generating voxel data from static meshes where a uniform sampling rate is acceptable and adaptive methods are too complex or expensive.
+-- **When not to use:** For large-scale scenes with varying detail levels where adaptive voxelization (like Legolizer Subdivision) is preferred.
++Not given in the sources.
+ 
+ ## Background
+-This method is described in the context of sparse voxel octree raycasting implementations, specifically within the `sp4cerat/Sparse-Voxel-Octree-Raycasting` repository [S1, unofficial]. It represents a straightforward approach to converting triangle meshes into voxel data by leveraging linear interpolation and fixed-step subdivision, contrasting with more modern GPU-based iterative refinement techniques.
++Not given in the sources.
+ 
+ ## Sources

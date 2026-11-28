@@ -1,0 +1,1982 @@
+Attempting to make a game-ready signed distance field (SDF) and raymarching (RM) based graphics engine, built on top of a traditional rasterization pipeline.
+
+SDF+RM has the potential to trivialize many of the hardships of creating convincing visuals in rasterization based graphics (shadows, reflections, global illumination, raytracing, diffraction, LOD). It is also perfectly suited for implementing real-time physics, as the information that SDFs provide is exactly what's needed to calculate collisions between objects in a physics simulation (https://www.youtube.com/watch?v=icU6Bm-HZ-E).
+
+Inigo Quilez (iquilezles.org) has already demonstrated that performant and detailed SDF+RM based graphics is possible on standard GPUs (demos: https://iquilezles.org/prods/index.htm) with cleverly written shaders. This is all (at least to my knowledge) without the benefit of having a full supporting pipeline behind the shaders e.g. using trees to reduce nearest neighbor search complexity, offloading predictable calculations to the CPU, optimizing scenes for rendering, LOD, etc.
+
+This project seeks to transition SDF+RM technology from the many impressive demos Quilez has created into a comprehensive engine that can be used to create visuals and video games effectively. Currently I am developing the core tree structure of the engine, along with an algorithm to perform a nearest neighbor search on it based of off the existing branch-and-prune R-tree kNN algorithm.
+
+### sdf/proc_test.py
+```
+import subprocess
+import json
+import shutil
+import sys
+
+assert len(sys.argv) == 2 and sys.argv[1].endswith(".exe")
+build_json_raw = subprocess.run(
+        ["cargo", "test", "--no-run", "--message-format=json"],
+        stdout=subprocess.PIPE,
+        text=True)
+for token in build_json_raw.stdout.split("\n")[:-1]:
+    token_obj = json.loads(token)
+    if "profile" in token_obj.keys() and token_obj["profile"]["test"]:
+        for fname in token_obj["filenames"]:
+            if fname.endswith(".exe"):
+                shutil.copyfile(fname, sys.argv[1])
+            else:
+                shutil.copyfile(fname, sys.argv[1][:-4] + ".pdb")
+```
+
+### src/main.rs
+```
+mod raymarch;
+
+use nalgebra::{
+    Vector4, matrix
+};
+use raymarch::sdf::fields::*;
+use raymarch::sdf::component::*;
+use std::time::{Duration, Instant};
+use bevy::prelude::*;
+use rand::prelude::*;
+use std::f32::consts::PI;
+
+fn get_rand_transform() -> Transform {
+    let mut rng = thread_rng();
+    let mut trans = Transform::from_translation(Vec3::new(
+        rng.gen_range(-50.0..50.0),
+        rng.gen_range(-50.0..50.0),
+        rng.gen_range(-50.0..50.0),
+    ));
+    trans.rotate(Quat::from_rotation_ypr(
+        rng.gen_range(0.0..(2.0 * PI)),
+        rng.gen_range(0.0..(2.0 * PI)),
+        rng.gen_range(0.0..(2.0 * PI)),
+    ));
+    // trans.apply_non_uniform_scale(Vec3::new(
+    //     rng.gen_range(0.5..10.0),
+    //     rng.gen_range(0.5..10.0),
+    //     rng.gen_range(0.5..10.0),
+    // ));
+    trans
+}
+
+fn main() {
+    let mut sdf = SdfBuilder::primitive(
+        SdfSphere {
+            radius: 5.0,
+        }
+    )
+    .transform(get_rand_transform())
+    .operation(
+        SdfUnion {
+            smooth_radius: 0.0,
+        }
+    );
+    for _ in 0..2 {
+        sdf = sdf.with(
+            SdfBuilder::primitive(
+                SdfSphere {
+                    radius: 5.0,
+                }
+            )
+            .transform(get_rand_transform())
+        );
+    }
+    let sdf_comp = sdf.finalize();
+    let create_start = Instant::now();
+    let sdf_comp_expand = sdf_comp.get_tree_expansion();
+    println!("create: {:?}", create_start.elapsed());
+    // sdf_comp.bf_display();
+    let first_start = Instant::now();
+    println!("{}", sdf_comp.nearest_neighbor(Vec3::new(0.0, 0.0, 0.0)).distance);
+    println!("first: {:?}", first_start.elapsed());
+    let second_start = Instant::now();
+    println!("{}", sdf_comp_expand.nearest_neighbor(Vec3::new(0.0, 0.0, 0.0)).distance);
+    println!("second: {:?}", second_start.elapsed());
+    let buf: SdfTreeBuffer = (&sdf_comp_expand).into();
+    for x in buf.op_buffer.iter() {
+        print!("{:#?}", x);
+    }
+}
+```
+
+### src/main__.rs
+```
+use rand::Rng;
+use bevy::{
+    input::mouse::{MouseWheel, MouseScrollUnit},
+    core::Byteable,
+    prelude::*,
+    reflect::TypeUuid,
+    render::{
+        camera::Camera,
+        mesh::shape,
+        pipeline::{PipelineDescriptor, RenderPipeline},
+        render_graph::{base, AssetRenderResourcesNode, RenderResourcesNode, RenderGraph},
+        renderer::RenderResources,
+        shader::{ShaderStage, ShaderStages},
+    },
+};
+
+mod raymarch;
+
+/// This example illustrates how to create a custom material asset and a shader that uses that
+/// material
+fn main() {
+    App::build()
+        .add_plugins(DefaultPlugins)
+        .insert_resource(CameraDist(20.0))
+        .add_asset::<SdfBuffer>()
+        .add_asset::<SdfIndex>()
+        .add_startup_system(setup.system())
+        .add_system(cam_rotator.system())
+        .add_system(cam_mover.system())
+        .run();
+}
+
+struct CameraDist(f32);
+
+#[derive(Default, Clone, Copy, Debug)]
+#[repr(C)]
+struct SdfSphere {
+    pub color: Vec4,
+    pub center: Vec3,
+    pub radius: f32,
+}
+
+// unsafe impl Byteable for SdfSphere {}
+
+#[derive(RenderResources, TypeUuid)]
+#[uuid = "6aec7d3e-63ac-4abe-9d52-b66347d5a577"]
+struct SdfBuffer {
+    pub num_spheres: u32,
+    #[render_resources(buffer)]
+    pub sdfs: Vec<SdfSphere>,
+}
+
+impl SdfBuffer {
+    pub fn insert_sphere(&mut self, sphere: SdfSphere) -> SdfIndex {
+        self.sdfs.push(sphere);
+        self.num_spheres += 1;
+        SdfIndex {
+            index: self.num_spheres - 1
+        }
+    }
+}
+
+impl Default for SdfBuffer {
+    fn default() -> Self {
+        SdfBuffer {
+            num_spheres: 0,
+            sdfs: Vec::new()
+        }
+    }
+}
+
+#[derive(RenderResources, Default, TypeUuid)]
+#[uuid = "1e08866c-0b8a-437e-8bce-37733b25127e"]
+struct SdfIndex {
+    pub index: u32,
+}
+
+const VERTEX_SHADER: &str = r#"
+#version 450
+layout(location = 0) in vec3 Vertex_Position;
+layout(set = 0, binding = 0) uniform CameraViewProj {
+    mat4 ViewProj;
+};
+layout(set = 0, binding = 2) uniform CameraPosition {
+    vec4 Position;
+};
+layout(set = 1, binding = 1) uniform Transform {
+    mat4 Model;
+};
+
+layout(location = 0) out vec3 Initial_Ray_Position;
+layout(location = 1) out vec3 Initial_Ray_Direction;
+
+void main() {
+    vec4 world_position = Model * vec4(Vertex_Position, 1.0);
+    Initial_Ray_Position = world_position.xyz;
+    Initial_Ray_Direction = normalize(world_position.xyz - Position.xyz);
+    gl_Position = ViewProj * world_position;
+}
+"#;
+
+const FRAGMENT_SHADER: &str = r#"
+#version 450
+
+struct SdfSphere {
+    vec4 color;
+    vec3 center;
+    float radius;
+};
+
+layout(location = 0) in vec3 Initial_Ray_Position;
+layout(location = 1) in vec3 Initial_Ray_Direction;
+
+layout(location = 0) out vec4 o_Target;
+layout(set = 2, binding = 0) uniform SdfIndex_index {
+    uint index;
+};
+layout(set = 3, binding = 0) uniform SdfBuffer_num_spheres {
+    uint num_sdf_spheres;
+};
+layout(set = 3, binding = 1) buffer SdfBuffer_sdfs {
+    SdfSphere[] sdfs;
+};
+
+float sdSphere(vec3 point, float radius) {
+    return length(point) - radius;
+}
+
+float map(vec3 point, out uint closest) {
+    float min_dist = 10000.0;
+    for (uint i = 0; i < num_sdf_spheres; i++) {
+        SdfSphere cur_sphere = sdfs[i];
+        float cur_dist = sdSphere(point - cur_sphere.center, cur_sphere.radius);
+        if (cur_dist < min_dist) {
+            min_dist = cur_dist;
+            closest = i;
+        }
+    }
+    return min_dist;
+}
+
+float map(vec3 point) {
+    float min_dist = 10000.0;
+    for (uint i = 0; i < num_sdf_spheres; i++) {
+        SdfSphere cur_sphere = sdfs[i];
+        min_dist = max(min_dist, sdSphere(point - cur_sphere.center, cur_sphere.radius));
+    }
+    return min_dist;
+}
+
+vec3 calcSphereNormal(vec3 point, uint sdf_index) {
+    const float h = 0.0001;
+    const vec2 k = vec2(1, -1);
+    SdfSphere cur_sphere = sdfs[sdf_index];
+    return normalize(
+        k.xyy * sdSphere((point + k.xyy * h) - cur_sphere.center, cur_sphere.radius) +
+        k.yyx * sdSphere((point + k.yyx * h) - cur_sphere.center, cur_sphere.radius) +
+        k.yxy * sdSphere((point + k.yxy * h) - cur_sphere.center, cur_sphere.radius) +
+        k.xxx * sdSphere((point + k.xxx * h) - cur_sphere.center, cur_sphere.radius)
+    );
+}
+
+void main() {
+    uint thing;
+    map(Initial_Ray_Position, thing);
+    vec3 norm = calcSphereNormal(Initial_Ray_Position, thing);
+    float intensity = max(0, dot(normalize(-Initial_Ray_Position), norm));
+    o_Target = vec4(sdfs[thing].color.xyz * intensity, 1.0);
+}
+"#;
+
+fn cam_mover(
+    mut cam_dist: ResMut<CameraDist>,
+    mut scroll_evt: EventReader<MouseWheel>,
+) {
+    for evt in scroll_evt.iter() {
+        if let MouseScrollUnit::Line = evt.unit {
+            cam_dist.0 -= evt.y;
+        }
+    }
+}
+
+fn cam_rotator(
+    time: Res<Time>,
+    cam_dist: Res<CameraDist>,
+    mut query: Query<&mut Transform, With<Camera>>,
+) {
+    let mut cam_transform = query.single_mut().unwrap();
+    let z = (time.seconds_since_startup() / 2.0).cos() * (cam_dist.0 as f64);
+    let x = (time.seconds_since_startup() / 2.0).sin() * (cam_dist.0 as f64);
+    *cam_transform = Transform::from_xyz(x as f32, 0.0, z as f32).looking_at(Vec3::ZERO, Vec3::Y);
+}
+
+fn setup(
+    mut commands: Commands,
+    mut pipelines: ResMut<Assets<PipelineDescriptor>>,
+    mut shaders: ResMut<Assets<Shader>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut indexes: ResMut<Assets<SdfIndex>>,
+    mut buffers: ResMut<Assets<SdfBuffer>>,
+    mut render_graph: ResMut<RenderGraph>,
+) {
+    // Create a new shader pipeline
+    let pipeline_handle = pipelines.add(PipelineDescriptor::default_config(ShaderStages {
+        vertex: shaders.add(Shader::from_glsl(ShaderStage::Vertex, VERTEX_SHADER)),
+        fragment: Some(shaders.add(Shader::from_glsl(ShaderStage::Fragment, FRAGMENT_SHADER))),
+    }));
+
+    // Add an AssetRenderResourcesNode to our Render Graph. This will bind MyMaterial resources to
+    // our shader
+    render_graph.add_system_node(
+        "indexes",
+        AssetRenderResourcesNode::<SdfIndex>::new(true),
+    );
+
+    render_graph.add_system_node(
+        "sdf_buffer",
+        AssetRenderResourcesNode::<SdfBuffer>::new(false),
+    );
+
+    // Add a Render Graph edge connecting our new "my_material" node to the main pass node. This
+    // ensures "my_material" runs before the main pass
+    render_graph
+        .add_node_edge("indexes", base::node::MAIN_PASS)
+        .unwrap();
+
+    render_graph.add_node_edge("sdf_buffer", base::node::MAIN_PASS).unwrap();
+
+    let new_sdf_handle = buffers.add(SdfBuffer::default());
+    let sdf_mut = buffers.get_mut(new_sdf_handle.clone()).unwrap();
+
+    // println!("{:?}", sdf_mut.get_render_resource_hints(0));
+
+    // spheres
+    for _ in 0..16 {
+        let x = rand::thread_rng().gen_range(-20.0..20.0);
+        let y = rand::thread_rng().gen_range(-20.0..20.0);
+        let z = rand::thread_rng().gen_range(-20.0..20.0);
+        let radius = rand::thread_rng().gen_range(1.0..4.0);
+        let r = rand::thread_rng().gen_range(0.0..1.0);
+        let g = rand::thread_rng().gen_range(0.0..1.0);
+        let b = rand::thread_rng().gen_range(0.0..1.0);
+        let new_sdf = SdfSphere {
+            color: Color::rgb(r, g, b).into(),
+            center: Vec3::new(x, y, z),
+            radius: radius,
+        };
+        commands
+        .spawn_bundle(MeshBundle {
+            mesh: meshes.add(Mesh::from(shape::Icosphere { radius: radius, subdivisions: 5})),
+            render_pipelines: RenderPipelines::from_pipelines(vec![RenderPipeline::new(
+                pipeline_handle.clone(),
+            )]),
+            transform: Transform::from_xyz(x, y, z),
+            ..Default::default()
+        })
+        .insert(indexes.add(sdf_mut.insert_sphere(new_sdf)))
+        .insert(new_sdf_handle.clone());
+    }
+    // camera
+    commands.spawn_bundle(PerspectiveCameraBundle {
+        transform: Transform::from_xyz(0.0, 0.0, -25.0).looking_at(Vec3::ZERO, Vec3::Y),
+        ..Default::default()
+    });
+}
+```
+
+### sdf/src/component.rs
+```
+use super::{
+    obb::*,
+    node::*,
+    faux_shader::*,
+};
+use bevy::{
+    prelude::*,
+    reflect::TypeUuid,
+};
+
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct SdfOpSpecificBlock {
+    pub mat4s: [Mat4; 2],
+    pub vec4s: [Vec4; 3],
+    pub floats: [f32; 2],
+}
+
+impl SdfOpSpecificBlock {
+    pub const ZERO: SdfOpSpecificBlock = SdfOpSpecificBlock {
+        mat4s: [Mat4::ZERO; 2],
+        vec4s: [Vec4::ZERO; 3],
+        floats: [0.0; 2],
+    };
+}
+
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct SdfOperationBlock {
+    pub op_code: u32,
+    pub is_primitive: bool,
+    pub parent_is_union: bool,
+    pub len: u32,
+    pub level: u32,
+    pub op_specific: SdfOpSpecificBlock,
+    pub bounding_box: SdfBoundingBoxBlock,
+    pub other_box: SdfBoundingBoxBlock,
+}
+
+impl SdfOperationBlock {
+    pub const ZERO: SdfOperationBlock = SdfOperationBlock {
+        op_code: 0,
+        is_primitive: false,
+        parent_is_union: false,
+        len: 0,
+        level: 0,
+        op_specific: SdfOpSpecificBlock::ZERO,
+        bounding_box: SdfBoundingBoxBlock::ZERO,
+        other_box: SdfBoundingBoxBlock::ZERO,
+    };
+}
+
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct SdfOperationUptreeBlock {
+    pub op_code: u32,
+    pub parent_is_union: bool,
+    pub op_specific: SdfOpSpecificBlock,
+    pub level: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct SdfBoundingBoxBlock {
+    pub matrix: Mat4,
+    pub scale: Vec4,
+    pub full_inverse: Mat4,
+    pub trans_inverse: Mat4,
+}
+
+impl SdfBoundingBoxBlock {
+    pub const ZERO: SdfBoundingBoxBlock = SdfBoundingBoxBlock {
+        matrix: Mat4::ZERO,
+        scale: Vec4::ZERO,
+        full_inverse: Mat4::ZERO,
+        trans_inverse: Mat4::ZERO,
+    };
+}
+
+#[derive(TypeUuid)]
+#[uuid = "b2ad9d5c-eb4e-517b-98d7-1162e78ddadb"]
+pub struct SdfTreeBuffer {
+    pub downtree_buffer: Vec<SdfOperationBlock>,
+    pub uptree_buffer: Vec<SdfOperationUptreeBlock>,
+    pub buffer_len: u32,
+}
+
+impl SdfTreeBuffer {
+    pub fn make_empty() -> SdfTreeBuffer {
+        SdfTreeBuffer {
+            downtree_buffer: Vec::new(),
+            uptree_buffer: Vec::new(),
+            buffer_len: 0,
+        }
+    }
+}
+```
+
+### sdf/src/elements.rs
+```
+use std::fmt;
+use bevy::prelude::*;
+use super::{
+    node::*, 
+    obb::*,
+    component::*,
+};
+
+pub struct SdfElementInfo {
+    pub num_acc_slots: usize,
+    pub num_drawn_slots: usize,
+    pub is_primitive: bool,
+    pub op_id: u32,
+    pub is_union: bool,
+}
+
+impl SdfElementInfo {
+    pub fn primitive_info(op_id: u32) -> Self {
+        SdfElementInfo {
+            num_acc_slots: 0,
+            num_drawn_slots: 0,
+            is_primitive: true,
+            op_id,
+            is_union: false,
+        }
+    }
+
+    pub fn strict_info(op_id: u32, num_acc_slots: usize, num_drawn_slots: usize) -> Self {
+        SdfElementInfo {
+            num_acc_slots,
+            num_drawn_slots,
+            is_primitive: false,
+            op_id,
+            is_union: false,
+        }
+    }
+
+    pub fn union_info(op_id: u32) -> Self {
+        SdfElementInfo {
+            num_acc_slots: 0,
+            num_drawn_slots: usize::MAX,
+            is_primitive: false,
+            op_id,
+            is_union: true,
+        }
+    }
+
+    pub fn num_slots(&self) -> usize {
+        self.num_acc_slots + self.num_drawn_slots
+    }
+}
+
+impl PartialEq for SdfElementInfo {
+    fn eq(&self, other: &Self) -> bool {
+        self.num_acc_slots == other.num_acc_slots
+            && self.num_drawn_slots == other.num_drawn_slots
+            && self.is_primitive == other.is_primitive
+            && self.op_id == other.op_id
+            && self.is_union == other.is_union
+    }
+}
+
+pub trait SdfElement: fmt::Debug {
+    fn get_info(&self) -> SdfElementInfo;
+    fn get_bbox(&self, slots_bboxes: &[SdfBoundingBox]) -> SdfBoundingBox;
+    fn downtree_transform(&self, point: Vec3) -> Vec3 {
+        point
+    }
+    fn uptree_transform(&self, point: Vec3) -> Vec3 {
+        point
+    }
+    fn distance_to(&self, point: Vec3) -> f32 {
+        point.length()
+    }
+    fn clone(&self) -> Box<dyn SdfElement>;
+    fn get_dt_specific_block(&self) -> SdfOpSpecificBlock {
+        SdfOpSpecificBlock::ZERO
+    }
+    fn get_ut_specific_block(&self) -> SdfOpSpecificBlock {
+        SdfOpSpecificBlock::ZERO
+    }
+    fn expand(&self, this_node: &SdfNode) -> ExpandedSdfNode;
+}
+
+#[derive(Debug)]
+pub struct SdfSphere {
+    pub radius: f32,
+}
+
+impl SdfElement for SdfSphere {
+    fn get_info(&self) -> SdfElementInfo {
+        SdfElementInfo::primitive_info(0)
+    }
+
+    fn get_bbox(&self, _slots_bboxes: &[SdfBoundingBox]) -> SdfBoundingBox {
+        SdfBoundingBox::from_transform(Transform::from_scale(Vec3::splat(self.radius)))
+    }
+
+    fn clone(&self) -> Box<dyn SdfElement> {
+        Box::new(SdfSphere {
+            radius: self.radius
+        })
+    }
+
+    fn distance_to(&self, point: Vec3) -> f32 {
+        point.length() - self.radius
+    }
+
+    fn get_dt_specific_block(&self) -> SdfOpSpecificBlock {
+        let mut ret = SdfOpSpecificBlock::ZERO;
+        ret.floats[0] = self.radius;
+        ret
+    }
+
+    fn expand(&self, this_node: &SdfNode) -> ExpandedSdfNode {
+        ExpandedSdfNode::primitive(this_node.bbox.unwrap(), self.clone())
+    }
+}
+
+#[derive(Debug)]
+struct SdfBoxFrame {
+    pub dimension: Vec3,
+    pub thickness: f32,
+}
+
+impl SdfElement for SdfBoxFrame {
+    fn get_info(&self) -> SdfElementInfo {
+        SdfElementInfo::primitive_info(5)
+    }
+
+    fn get_bbox(&self, _slots_bboxes: &[SdfBoundingBox]) -> SdfBoundingBox {
+        SdfBoundingBox::from_transform(Transform::from_scale(self.dimension))
+    }
+
+    fn clone(&self) -> Box<dyn SdfElement> {
+        Box::new(SdfBoxFrame {
+            dimension: self.dimension,
+            thickness: self.thickness,
+        })
+    }
+    
+    fn get_dt_specific_block(&self) -> SdfOpSpecificBlock {
+        let mut ret = SdfOpSpecificBlock::ZERO;
+        ret.vec4s[0] = self.dimension.extend(0.0);
+        ret.floats[0] = self.thickness;
+        ret
+    }
+    
+    fn expand(&self, this_node: &SdfNode) -> ExpandedSdfNode {
+        ExpandedSdfNode::primitive(this_node.bbox.unwrap(), self.clone())
+    }
+}
+
+// Operations
+
+// Basic smooth union
+#[derive(Debug)]
+pub struct SdfUnion {
+    pub smooth_radius: f32,
+}
+
+impl SdfElement for SdfUnion {
+    fn get_info(&self) -> SdfElementInfo {
+        SdfElementInfo::union_info(0)
+    }
+
+    fn get_bbox(&self, slots_bboxes: &[SdfBoundingBox]) -> SdfBoundingBox {
+        SdfBoundingBox::merge(slots_bboxes)
+    }
+
+    fn expand(&self, this_node: &SdfNode) -> ExpandedSdfNode {
+        match this_node.slots.len() {
+            1 => this_node.slots.get(0).unwrap().expanded(),
+            0 => ExpandedSdfNode::null(),
+            _ => {
+                fn recurse(this_intern: &SdfUnion, this_node: &SdfNode, index_vec: Vec<usize>) -> ExpandedSdfNode {
+                    if index_vec.len() == 1 {
+                        return this_node.slots[index_vec[0]].expanded();
+                    }
+
+                    let bboxes = index_vec.iter()
+                        .map(|i| this_node.slots[*i].bbox.unwrap())
+                        .collect::<Vec<SdfBoundingBox>>();
+                    let merged_box = SdfBoundingBox::merge(bboxes.as_slice());
+                    let (left_child_inds, right_child_inds) = merged_box.split(bboxes.as_slice());
+                    
+                    ExpandedSdfNode::operation(
+                        [
+                            Box::new(recurse(this_intern, this_node, left_child_inds)),
+                            Box::new(recurse(this_intern, this_node, right_child_inds)),
+                        ],
+                        merged_box,
+                        this_intern.clone(),
+                    )
+                }
+                recurse(self, this_node, (0..this_node.slots.len()).collect())
+            },
+        }
+    }
+
+    fn clone(&self) -> Box<dyn SdfElement> {
+        Box::new(SdfUnion {
+            smooth_radius: self.smooth_radius,
+        })
+    }
+
+    fn get_ut_specific_block(&self) -> SdfOpSpecificBlock {
+        let mut ret = SdfOpSpecificBlock::ZERO;
+        ret.floats[0] = self.smooth_radius;
+        ret
+    }
+}
+
+// Continuous, Axis Aligned clone operation
+#[derive(Debug)]
+pub struct SdfCaaClone {
+    pub displacement: Vec3,
+    pub neg_limit: Vec3,
+    pub pos_limit: Vec3,
+}
+
+impl SdfElement for SdfCaaClone {
+    fn get_info(&self) -> SdfElementInfo {
+        SdfElementInfo::strict_info(1, 0, 1)
+    }
+
+    fn get_bbox(&self, _slots_bboxes: &[SdfBoundingBox]) -> SdfBoundingBox {
+        SdfBoundingBox::from_transform(
+            Transform::from_translation((self.neg_limit + self.pos_limit) / 2_f32 * self.displacement)
+                .with_scale((self.pos_limit - self.neg_limit) * self.displacement)
+        )
+    }
+
+    fn downtree_transform(&self, point: Vec3) -> Vec3 {
+        let lattice_transform = point - (self.displacement / 2.0);
+        Vec3::new(
+            lattice_transform.x % self.displacement.x,
+            lattice_transform.y % self.displacement.y,
+            lattice_transform.z % self.displacement.z,
+        )
+    }
+
+    fn clone(&self) -> Box<dyn SdfElement> {
+        Box::new(SdfCaaClone {
+            displacement: self.displacement,
+            neg_limit: self.neg_limit,
+            pos_limit: self.pos_limit,
+        })
+    }
+
+    fn get_dt_specific_block(&self) -> SdfOpSpecificBlock {
+        let mut ret = SdfOpSpecificBlock::ZERO;
+        ret.vec4s[0] = self.displacement.extend(0.0);
+        ret.vec4s[1] = self.neg_limit.extend(0.0);
+        ret.vec4s[2] = self.pos_limit.extend(0.0);
+        ret
+    }
+
+    fn expand(&self, this_node: &SdfNode) -> ExpandedSdfNode {
+        ExpandedSdfNode::simple_operation(this_node.slots.get(0).unwrap().expanded(), self.clone())
+    }
+}
+
+// Surface Sin Wave
+// #[derive(Debug)]
+// pub struct SdfSurfaceSin {
+//     pub period: f32,
+//     pub amplitude: f32,
+// }
+
+// impl SdfElement for SdfSurfaceSin {
+//     fn get_info(&self) -> SdfElementInfo {
+//         SdfElementInfo::strict_info(4, 0, 1)
+//     }
+
+//     fn get_bbox(&self, slots_bboxes: &[SdfBoundingBox]) -> SdfBoundingBox {
+//         slots_bboxes[0].apply_transform(Transform::from_scale(Vec3::splat(self.amplitude)))
+//     }
+
+//     fn downtree_transform(&self, point: Vec3) -> Vec3 {
+//         let azimuth = f32::atan2(-point.z, -point.x) + std::f32::consts::PI;
+//         let zenith = f32::atan(-point.y / f32::sqrt(point.x * point.x + point.z * point.z)) + std::f32::consts::FRAC_PI_2;
+//         let proj_zenith = (1.0 - zenith.cos()) * std::f32::consts::PI;
+//         let scale = self.amplitude * (self.period * azimuth).sin() * (self.period * proj_zenith).sin();
+//         point * scale
+//     }
+
+//     fn clone(&self) -> Box<dyn SdfElement> {
+//         Box::new(SdfSurfaceSin {
+//             period: self.period,
+//             amplitude: self.amplitude,
+//         })
+//     }
+// }
+```
+
+### sdf/src/faux_shader.rs
+```
+use super::{
+    component::*,
+    obb::CmpFloat,
+};
+use bevy::prelude::*;
+
+#[derive(Clone, Copy)]
+struct DowntreeResult {
+    point: Vec4,
+}
+
+#[derive(Clone)]
+struct LevelStackEntry {
+    branch_points: [Vec4; 2],
+    branch_dists: [f32; 2],
+    fill_idx: u32,
+}
+
+impl LevelStackEntry {
+    pub const ZERO: Self = LevelStackEntry {
+        branch_points: [Vec4::ZERO; 2],
+        branch_dists: [0_f32; 2],
+        fill_idx: 0,
+    };
+}
+
+fn min(a: f32, b: f32) -> f32 {
+    if a < b { a } else { b }
+}
+
+fn max(a: f32, b: f32) -> f32 {
+    if a > b { a } else { b }
+}
+
+fn clamp(a: f32, lmin: f32, lmax: f32) -> f32 {
+    max(lmin, min(a, lmax))
+}
+
+fn maxdist(bbox: SdfBoundingBoxBlock, point: Vec4) -> f32 {
+    [
+        Vec4::new(1.0, 1.0, 1.0, 1.0),
+        Vec4::new(-1.0, 1.0, 1.0, 1.0),
+        Vec4::new(1.0, -1.0, 1.0, 1.0),
+        Vec4::new(-1.0, -1.0, 1.0, 1.0),
+        Vec4::new(1.0, 1.0, -1.0, 1.0),
+        Vec4::new(-1.0, 1.0, -1.0, 1.0),
+        Vec4::new(1.0, -1.0, -1.0, 1.0),
+        Vec4::new(-1.0, -1.0, -1.0, 1.0),
+    ].iter()
+        .map(|x| CmpFloat(((bbox.matrix * *x) - point).length()))
+        .max().unwrap().0
+}
+
+fn mindist(bbox: SdfBoundingBoxBlock, point: Vec4) -> f32 {
+    let trans = bbox.full_inverse * point;
+    let q_local = (trans.abs() - Vec4::splat(1.0)) * bbox.scale;
+    q_local.max(Vec4::ZERO).length() + q_local.x.max(q_local.y.max(q_local.z)).min(0.0)
+}
+
+fn prim_dispatch(code: u32, op_specific: SdfOpSpecificBlock, point: Vec4) -> f32 {
+    match code {
+        // Sphere
+        0 => point.truncate().length() - op_specific.floats[0],
+
+        other => panic!("Unsupported primitive op code: {}", other),
+    }
+}
+
+fn downtree_dispatch(code: u32, op_specific: SdfOpSpecificBlock, point: Vec4) -> [Vec4; 2] {
+    match code {
+        // Union
+        0 => [point, point],
+
+        // CAA Clone
+        1 => [
+            point - op_specific.vec4s[0] * (point / op_specific.vec4s[0]).round().clamp(op_specific.vec4s[1], op_specific.vec4s[2]),
+            Vec4::ZERO,
+        ],
+
+        other => panic!("Unsupported downtree op code: {}", other),
+    }
+}
+
+fn uptree_dispatch(code: u32, op_specific: SdfOpSpecificBlock, left_dist: f32, right_dist: f32) -> f32 {
+    match code {
+        // Union
+        0 => min(left_dist, right_dist),
+
+        // CAA Clone
+        1 => right_dist,
+        
+        other => panic!("Unsupported downtree op code: {}", other),
+    }
+}
+
+pub fn nearest_neighbor(sdf_tree: &SdfTreeBuffer, point: Vec4) -> f32 {
+    let mut dt_index = 0;
+    let mut ut_index = 0;
+    let mut last_dt_level = 0;
+    let mut point_stack: Vec<LevelStackEntry> = vec![LevelStackEntry::ZERO; 256];
+
+    point_stack[1] = LevelStackEntry {
+        branch_points: [point, Vec4::ZERO],
+        branch_dists: [f32::INFINITY, f32::INFINITY],
+        fill_idx: 0,
+    };
+
+    while dt_index < sdf_tree.buffer_len as usize {
+        let dt_block = &sdf_tree.downtree_buffer[dt_index];
+        let (dt_point, dt_ut_prune_cmp) = {
+            let this_frame = &point_stack[dt_block.level as usize];
+            (this_frame.branch_points[this_frame.fill_idx as usize],
+                this_frame.branch_dists[0])
+        };
+
+        // Apply union pruning
+        if dt_block.parent_is_union {
+            let this_mindist = mindist(dt_block.bounding_box, dt_point);
+            if this_mindist > 0_f32
+                && (this_mindist > dt_ut_prune_cmp
+                    || this_mindist > maxdist(dt_block.other_box, dt_point)) {
+                dt_index += 1 + dt_block.len as usize;
+                ut_index += 1 + dt_block.len as usize;
+                continue;
+            }
+        }   
+
+        // Apply uptree algorithm
+        if dt_block.level < last_dt_level {
+            let mut last_ut_level = u32::MAX;
+            loop {
+                // Read current block
+                let ut_block = &sdf_tree.uptree_buffer[ut_index];
+
+                // Evaluate break condition
+                if ut_block.level >= last_ut_level {
+                    break;
+                }
+
+                // Perform uptree operation
+                let (lbranch_dist, rbranch_dist) = {
+                    let child_frame = &point_stack[ut_block.level as usize + 1];
+                    (child_frame.branch_dists[0], child_frame.branch_dists[1])
+                };
+                let ut_frame = &mut point_stack[ut_block.level as usize];
+                ut_frame.branch_dists[ut_frame.fill_idx as usize] = uptree_dispatch(
+                    ut_block.op_code,
+                    ut_block.op_specific,
+                    lbranch_dist,
+                    rbranch_dist);
+                ut_frame.fill_idx += 1;
+
+                // Increment
+                last_ut_level = ut_block.level;
+                ut_index += 1;
+            }
+        }
+
+        // Primitive case
+        if dt_block.is_primitive {
+            let this_frame = &mut point_stack[dt_block.level as usize];
+            this_frame.branch_dists[this_frame.fill_idx as usize] = prim_dispatch(
+                dt_block.op_code,
+                dt_block.op_specific,
+                dt_block.bounding_box.trans_inverse * dt_point);
+            this_frame.fill_idx += 1;
+            ut_index += 1;
+        } 
+        // Non-primitive case
+        else {
+            let child_frame = &mut point_stack[dt_block.level as usize + 1];
+            child_frame.branch_points = downtree_dispatch(
+                dt_block.op_code,
+                dt_block.op_specific,
+                dt_block.bounding_box.trans_inverse * dt_point);
+            child_frame.fill_idx = 0;
+            child_frame.branch_dists = [f32::INFINITY; 2];
+        }
+
+        // Increment
+        last_dt_level = dt_block.level;
+        dt_index += 1;
+    }
+
+    // Finish propagating distance values to root
+    while ut_index < sdf_tree.buffer_len as usize {
+        // Read current block
+        let ut_block = &sdf_tree.uptree_buffer[ut_index];
+
+        // Perform uptree operation
+        let (lbranch_dist, rbranch_dist) = {
+            let child_frame = &point_stack[ut_block.level as usize + 1];
+            (child_frame.branch_dists[0], child_frame.branch_dists[1])
+        };
+        let ut_frame = &mut point_stack[ut_block.level as usize];
+        ut_frame.branch_dists[ut_frame.fill_idx as usize] = uptree_dispatch(
+            ut_block.op_code,
+            ut_block.op_specific,
+            lbranch_dist,
+            rbranch_dist);
+        ut_frame.fill_idx += 1;
+
+        // Increment
+        ut_index += 1;
+    }
+
+    point_stack[1].branch_dists[0]
+}
+```
+
+### sdf/src/lib.rs
+```
+pub mod obb;
+pub mod node;
+pub mod component;
+pub mod elements;
+pub mod faux_shader;
+```
+
+### sdf/src/node.rs
+```
+use std::ops::Range;
+use std::collections::VecDeque;
+use bevy::prelude::*;
+use super::{
+    obb::*,
+    component::*,
+    elements::{SdfElement, SdfUnion},
+};
+
+pub struct NnResult<'a> {
+    pub node: &'a SdfNode,
+    pub distance: f32,
+}
+
+pub struct NodeDistInfo {
+    pub min_bound: f32,
+    pub max_bound: f32,
+}
+
+pub struct ExpandedSdfNode {
+    expanded_slots: Option<[Box<ExpandedSdfNode>; 2]>,
+    pub bbox: SdfBoundingBox,
+    intern: Option<Box<dyn SdfElement>>,
+}
+
+impl ExpandedSdfNode {
+    pub fn null() -> Self {
+        ExpandedSdfNode {
+            expanded_slots: None,
+            bbox: SdfBoundingBox::zero(),
+            intern: None,
+        }
+    }
+
+    pub fn primitive(bbox: SdfBoundingBox, intern: Box<dyn SdfElement>) -> Self {
+        ExpandedSdfNode {
+            expanded_slots: None,
+            bbox,
+            intern: Some(intern),
+        }
+    }
+
+    pub fn simple_operation(downtree_union: ExpandedSdfNode, intern: Box<dyn SdfElement>) -> Self {
+        ExpandedSdfNode {
+            bbox: downtree_union.bbox,
+            expanded_slots: Some([Box::new(downtree_union), Box::new(Self::null())]),
+            intern: Some(intern),
+        }
+    }
+
+    pub fn operation(expanded_slots: [Box<ExpandedSdfNode>; 2], bbox: SdfBoundingBox, intern: Box<dyn SdfElement>) -> Self {
+        ExpandedSdfNode {
+            expanded_slots: Some(expanded_slots),
+            bbox,
+            intern: Some(intern),
+        }
+    }
+
+    pub fn is_null(&self) -> bool {
+        self.intern.is_none()
+    }
+
+    pub fn is_primitive(&self) -> bool {
+        self.expanded_slots.is_none() && self.intern.is_some()
+    }
+
+    pub fn is_operation(&self) -> bool {
+        self.expanded_slots.is_some() && self.intern.is_some()
+    }
+
+    pub fn is_union(&self) -> bool {
+        self.is_operation() && self.intern.as_ref().unwrap().get_info().is_union
+    }
+
+    pub fn make_buffer(&self) -> SdfTreeBuffer {
+        let mut buffer = SdfTreeBuffer::make_empty();
+
+        fn recurse(
+            buffer: &mut SdfTreeBuffer,
+            root: &ExpandedSdfNode,
+            other_box: &SdfBoundingBox,
+            level: u32,
+            parent_is_union: bool,
+        ) {
+            if root.is_null() {
+                return;
+            }
+
+            let intern = root.intern.as_ref().unwrap();
+            
+            let intern_info = intern.get_info();
+            let dt_block_spec = intern.get_dt_specific_block();
+            let ut_block_spec = intern.get_ut_specific_block();
+            let this_ind = buffer.downtree_buffer.len() as usize;
+
+
+            buffer.downtree_buffer.push(SdfOperationBlock {
+                op_code: intern_info.op_id,
+                is_primitive: intern_info.is_primitive,
+                parent_is_union,
+                len: 0,
+                level,
+                op_specific: dt_block_spec,
+                bounding_box: root.bbox.get_bbox_block(),
+                other_box: other_box.get_bbox_block(),
+            });
+
+            if !root.is_primitive() {
+                let exp_slots = root.expanded_slots.as_ref().unwrap();
+                recurse(
+                    buffer,
+                    &exp_slots[0],
+                    &exp_slots[0].bbox,
+                    level + 1,
+                    root.is_union());
+                recurse(
+                    buffer,
+                    &exp_slots[1],
+                    &exp_slots[1].bbox,
+                    level + 1,
+                    root.is_union());
+            }
+
+            buffer.uptree_buffer.push(SdfOperationUptreeBlock {
+                op_code: intern_info.op_id,
+                parent_is_union,
+                op_specific: ut_block_spec,
+                level,
+            });
+
+            buffer.downtree_buffer[this_ind].len = (buffer.downtree_buffer.len() - this_ind - 1) as u32;
+        }
+
+        let throwaway_box = SdfBoundingBox::zero();
+        recurse(&mut buffer, self, &throwaway_box, 1, false);
+        buffer.buffer_len = buffer.downtree_buffer.len() as u32;
+        buffer
+    }
+}
+
+pub struct SdfNode {
+    pub slots: Vec<SdfNode>,
+    pub bbox: Option<SdfBoundingBox>,
+    intern: Box<dyn SdfElement>,
+}
+
+impl SdfNode {
+    pub fn new(intern: Box<dyn SdfElement>) -> Self {
+        SdfNode {
+            slots: Vec::with_capacity(usize::min(
+                intern.get_info().num_slots(),
+                128
+            )),
+            intern: intern,
+            bbox: None,
+        }
+    }
+
+    pub fn empty() -> Self {
+        SdfNode {
+            slots: Vec::with_capacity(0),
+            intern: Box::new(SdfUnion {
+                smooth_radius: 0.0,
+            }),
+            bbox: Some(SdfBoundingBox::zero()),
+        }
+    }
+
+    pub fn set_slot(&mut self, child_node: SdfNode) -> Result<(), &'static str> {
+        let intern_info = self.intern.get_info();
+        if intern_info.is_primitive {
+            Err("Can't set slots on primitive!")
+        } else if self.slots.len() >= intern_info.num_slots() {
+            Err("Slots already full!")
+        } else {
+            self.slots.push(child_node);
+            Ok(())
+        }
+    }
+
+    pub fn calc_bbox_assign(&mut self) -> SdfBoundingBox {
+        assert!(
+            self.intern.get_info().is_union
+                || self.slots.len() >= self.intern.get_info().num_slots(),
+            "Tried calculating bounding box of SDF node without all required slots filled!"    
+        );
+        if let Some(bbox) = self.bbox {
+            bbox
+        } else {
+            let bbox = self.intern.get_bbox(
+                self.slots.iter_mut()
+                    .map(|node| node.calc_bbox_assign())
+                    .filter(|bbox| !bbox.is_zero()) // Filter after bbox calculation so entire tree is initialized
+                    .collect::<Vec<SdfBoundingBox>>()
+                    .as_slice()
+            );
+            self.bbox = Some(bbox);
+            bbox
+        }
+    }
+
+    pub fn get_sub_boxes(&self) -> Vec<SdfBoundingBox> {
+        self.slots.iter()
+            .map(|node| node.bbox.unwrap())
+            .filter(|bbox| !bbox.is_zero()) // Filter after bbox calculation so entire tree is initialized
+            .collect::<Vec<SdfBoundingBox>>()
+    }
+
+    pub fn expanded(&self) -> ExpandedSdfNode {
+        self.intern.expand(self)
+    }
+
+    pub fn is_finished(&self) -> bool {
+        self.bbox.is_some()
+    }
+
+    pub fn is_primitive(&self) -> bool {
+        self.intern.get_info().is_primitive
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.slots.len() == 0
+    }
+
+    pub fn downtree(&self, point: Vec3) -> Vec3 {
+        self.intern.downtree_transform(point)
+    }
+
+    pub fn full_clone(&self) -> Self {
+        SdfNode {
+            slots: self.slots.iter().map(|child| child.full_clone()).collect(),
+            intern: self.intern.clone(),
+            bbox: self.bbox,
+        }
+    }
+
+    pub fn bf_display(&self) {
+        let mut disp_queue: VecDeque<(usize, &SdfNode)> = VecDeque::new();
+        disp_queue.push_back((0, self));
+        while !disp_queue.is_empty() {
+            let (level, front) = disp_queue.pop_front().unwrap();
+            for child in front.slots.iter() {
+                disp_queue.push_back((level + 1, child));
+            }
+            println!("{}: {:?}, slots: {}, matrix: {}", level, front.intern, front.slots.len(), front.bbox.unwrap().scale);
+            // front.bbox.unwrap_or(SdfBoundingBox::zero()).get_info()
+        }
+    }
+
+    pub fn could_contain(&self, point: Vec3) -> bool {
+        assert!(
+            self.is_finished(),
+            "Tried testing point-in-bbox on an unfinished SDF node!"
+        );
+        self.bbox.unwrap().contains(point)
+    }
+
+    pub fn bbox_dist_info(&self, point: Vec3) -> NodeDistInfo {
+        assert!(
+            self.is_finished(),
+            "Tried getting bounding-box distance info on an unfinished SDF node!"
+        );
+        NodeDistInfo {
+            min_bound: self.bbox.unwrap().distance_to(point),
+            max_bound: self.bbox.unwrap().max_distance(point)
+        }
+    }
+
+    /*
+    GLSL version:
+
+    struct SdfBoundingBoxBlock {
+        mat4 matrix;
+        vec3 scale;
+        mat4 full_inverse;
+        mat4 trans_inverse;
+    };
+
+    struct SdfChildIndicesBlock {
+        uint left_child_index;
+        uint right_child_index;
+    };
+
+    struct SdfOperationBlock {
+        uint                 op_code;
+        SdfChildIndicesBlock op_specific;
+        SdfBoundingBoxBlock  bbox;
+    };
+
+    layout(std430, binding = 2) buffer SdfTree {
+        SdfOperationBlock SdfTree[];
+    };
+
+    float bbox_minbound(in mat4 full_inverse, in vec4 scale, in vec4 point) {
+        vec4 trans = full_inverse * point;
+        vec4 q_local = (abs(trans) - vec4(1.0)) * scale;
+        return length(max(q_local, 0.0)) + min(max(q_local.x, max(q_local.y, q_local.z)), 0.0);
+    }
+
+    float bbox_maxbound(in mat4 matrix, in vec4 point) {
+        return max(
+            length((matrix * vec4(1.0, 1.0, 1.0, 1.0)) - point),
+            length((matrix * vec4(-1.0, 1.0, 1.0, 1.0)) - point),
+            length((matrix * vec4(1.0, -1.0, 1.0, 1.0)) - point),
+            length((matrix * vec4(-1.0, -1.0, 1.0, 1.0)) - point),
+            length((matrix * vec4(1.0, 1.0, -1.0, 1.0)) - point),
+            length((matrix * vec4(-1.0, 1.0, -1.0, 1.0)) - point),
+            length((matrix * vec4(1.0, -1.0, -1.0, 1.0)) - point),
+            length((matrix * vec4(-1.0, -1.0, -1.0, 1.0)) - point)
+        );
+    }
+
+    float nearest_neighbor(in vec4 point) {
+        uint stack[100];
+        uint stack_pointer = 0;
+        stack[stack_pointer] = 0;
+        float current_nearest = 1.0 / 0.0;
+        while (stack_pointer >= 0) {
+            SdfOperationBlock left_child = 
+            SdfOperationBlock operation = SdfTree[stack[stack_pointer]];
+            float left_minbound =
+            float left_maxbound = bbox_maxbound(operation.matrix, point);
+            float right_minbound = bbox_minbound(operation.full_inverse, operation.scale, point);
+            if (left_maxbound < right_minbound) {
+                
+            }
+        }
+    }
+    */
+
+    pub fn nearest_neighbor(&self, point: Vec3) -> NnResult {
+        if self.is_primitive() {
+            return NnResult {
+                node: self,
+                distance: self.intern.distance_to(self.bbox.unwrap().in_box_trans_basis(point.extend(1.0)).truncate()),
+            };
+        }
+        let mut bounds = self.slots.iter()
+            .enumerate()
+            .map(|(i, node)| (i, node.bbox_dist_info(point)))
+            .collect::<Vec<(usize, NodeDistInfo)>>();
+        let min_maxdist = bounds.iter()
+            .map(|(_, bound)| CmpFloat(bound.max_bound))
+            .min().unwrap().0;
+        bounds.sort_unstable_by_key(|(_, bound)| CmpFloat(bound.min_bound));
+        bounds.iter()
+            .take_while(|(_, bound)| bound.min_bound < min_maxdist)
+            .map(|(i, bound)| (self.slots.get(*i).unwrap(), bound))
+            .fold(
+                NnResult {
+                    node: self,
+                    distance: f32::INFINITY,
+                },
+                |accum, (node, bound)| {
+                    if bound.min_bound > accum.distance {
+                        accum
+                    } else {
+                        let child_nn = node.nearest_neighbor(node.downtree(
+                            self.bbox.unwrap().in_box_trans_basis(point.extend(1.0)).truncate()
+                        ));
+                        match child_nn.distance < accum.distance {
+                            true => child_nn,
+                            false => accum,
+                        }
+                    }
+                }
+            )
+    }
+}
+
+pub struct SdfBuilder {
+    root: SdfNode,
+}
+
+impl SdfBuilder {
+    pub fn dyn_primitive(prim: Box<dyn SdfElement>) -> Self {
+        assert!(prim.get_info().is_primitive);
+        SdfBuilder {
+            root: SdfNode::new(prim)
+        }
+    }
+
+    pub fn primitive<T: SdfElement + 'static>(prim: T) -> Self {
+        Self::dyn_primitive(Box::new(prim))
+    }
+
+    pub fn dyn_operation(self, op: Box<dyn SdfElement>) -> Self {
+        assert!(!op.get_info().is_primitive);
+        let mut new_node = SdfNode::new(op);
+        new_node.set_slot(self.root).expect("Couldn't set operation child");
+        SdfBuilder {
+            root: new_node
+        }
+    }
+
+    pub fn operation<T: SdfElement + 'static>(self, op: T) -> Self {
+        self.dyn_operation(Box::new(op))
+    }
+
+    pub fn with(mut self, node: SdfBuilder) -> Self {
+        self.root.set_slot(node.root).expect("Couldn't set operation slot");
+        self
+    }
+
+    pub fn transform(mut self, trans: Transform) -> Self {
+        self.root.bbox = Some(self.root.calc_bbox_assign().apply_transform(trans));
+        self
+    }
+
+    pub fn finalize(mut self) -> SdfNode {
+        self.root.calc_bbox_assign();
+        self.root
+    }
+}
+
+#[cfg(test)]
+pub mod tests {
+    use rand::prelude::*;
+    use std::f32::consts::{PI, FRAC_PI_2, SQRT_2};
+    use bevy::prelude::*;
+    use crate::{
+        node::*,
+        elements::*,
+    };
+    use float_cmp::approx_eq;
+
+    #[derive(Debug)]
+    struct TestPrimitive {
+        pub scale: f32,
+        pub max_dev: f32,
+    }
+
+    impl SdfElement for TestPrimitive {
+        fn get_info(&self) -> SdfElementInfo {
+            SdfElementInfo::primitive_info(1)
+        }
+
+        fn get_bbox(&self, _slots_bboxes: &[SdfBoundingBox]) -> SdfBoundingBox {
+            SdfBoundingBox::from_transform(Transform::from_scale(Vec3::splat(self.scale)))
+        }
+        
+        fn clone(&self) -> Box<dyn SdfElement> {
+            Box::new(TestPrimitive {
+                scale: self.scale,
+                max_dev: self.max_dev,
+            })
+        }
+
+        fn distance_to(&self, point: Vec3) -> f32 {
+            let sectors = 360.0 / (self.max_dev / SQRT_2);
+            let azimuth = f32::atan2(point.z, point.x) + PI;
+            let zenith = f32::atan(point.y / f32::sqrt(point.x * point.x + point.y * point.y)) + FRAC_PI_2;
+            let azimuth_quant = (azimuth * sectors).trunc();
+            let zenith_quant = (zenith * sectors / 2.0).trunc();
+            let paired = zenith_quant * sectors + azimuth_quant;
+            point.length() - paired / (sectors * sectors / 2.0) * self.scale
+        }
+
+        fn get_dt_specific_block(&self) -> SdfOpSpecificBlock {
+            let mut ret = SdfOpSpecificBlock::ZERO;
+            ret.floats[0] = self.scale;
+            ret.floats[1] = self.max_dev;
+            ret
+        }
+
+        fn expand(&self, this_node: &SdfNode) -> ExpandedSdfNode {
+            ExpandedSdfNode::primitive(this_node.bbox.unwrap(), self.clone())
+        }
+    }
+
+    fn get_random_transforms(count: u32) -> Vec<Transform> {
+        let mut rng = thread_rng();
+        (0..count)
+            .map(|_| {
+                if rng.gen::<bool>() {
+                    Transform::from_translation(Vec3::new(
+                        rng.gen_range(-50.0..50.0),
+                        rng.gen_range(-50.0..50.0),
+                        rng.gen_range(-50.0..50.0),
+                    ))
+                } else {
+                    Transform::from_rotation(Quat::from_euler(
+                        EulerRot::XYZ,
+                        rng.gen_range(0.0..(2.0 * PI)),
+                        rng.gen_range(0.0..(2.0 * PI)),
+                        rng.gen_range(0.0..(2.0 * PI)),
+                    ))
+                }
+            })
+            .collect()
+    }
+
+    /**
+     * Re-used test for checking whether a dense, single-element sdf-tree performs nearest neighbor
+     * seach correctly on a given primitive after transformations.
+     * 
+     * Transformations tested are translation, rotation, translation after rotation, and rotation after
+     * translation. For any given primitive, the sdf-tree nearest neighbor results should match the
+     * computed ground truth values.
+     * 
+     * See [`test_dense_nn_single_uni()`] and [`test_dense_nn_single_dir()`] for usage.
+     * 
+     * Generally, this test is meant to check whether [`SdfBuilder::transform()`] and
+     * [`SdfBoundingBox::apply_transform()`] are working as intended.
+     */
+    fn do_dense_nn_single(prim: Box<dyn SdfElement>) {
+        let mut rng = thread_rng();
+        let tlate_trans = Transform::from_translation(Vec3::new(
+            rng.gen_range(-50.0..50.0),
+            rng.gen_range(-50.0..50.0),
+            rng.gen_range(-50.0..50.0),
+        ));
+        let tlate_trans_mat = tlate_trans.compute_matrix();
+        let tlate_trans_inv = tlate_trans_mat.inverse();
+        let rot_trans = Transform::from_rotation(Quat::from_euler(
+            EulerRot::XYZ,
+            rng.gen_range(0.0..(2.0 * PI)),
+            rng.gen_range(0.0..(2.0 * PI)),
+            rng.gen_range(0.0..(2.0 * PI)),
+        ));
+        let rot_trans_mat = rot_trans.compute_matrix();
+        let rot_trans_inv = rot_trans_mat.inverse();
+        let point = Vec3::new(
+            rng.gen_range(-50.0..50.0),
+            rng.gen_range(-50.0..50.0),
+            rng.gen_range(-50.0..50.0),
+        );
+
+        println!("Simple Transform Test Debug:");
+        println!("Sample Point: {}", point);
+        println!("Translation Matrix: {}", tlate_trans_mat);
+        println!("Rotation Matrix: {}", rot_trans_mat);
+
+        let gt_tlate = prim.distance_to((tlate_trans_inv * point.extend(1.0)).truncate());
+        let gt_rot = prim.distance_to((rot_trans_inv * point.extend(1.0)).truncate());
+        let gt_tlate_rot = prim.distance_to((tlate_trans_inv * rot_trans_inv * point.extend(1.0)).truncate());
+        let gt_rot_tlate = prim.distance_to((rot_trans_inv * tlate_trans_inv * point.extend(1.0)).truncate());
+
+        println!("Translation Ground Truth: {}", gt_tlate);
+        println!("Rotation Ground Truth: {}", gt_rot);
+        println!("Translation->Rotation Ground Truth: {}", gt_tlate_rot);
+        println!("Rotation->Translation Ground Truth: {}", gt_rot_tlate);
+
+        let tree_tlate = SdfBuilder::dyn_primitive(prim.clone())
+            .transform(tlate_trans)
+            .finalize()
+            .nearest_neighbor(point)
+            .distance;
+        let tree_rot = SdfBuilder::dyn_primitive(prim.clone())
+            .transform(rot_trans)
+            .finalize()
+            .nearest_neighbor(point)
+            .distance;
+        let tree_tlate_rot = SdfBuilder::dyn_primitive(prim.clone())
+            .transform(tlate_trans)
+            .transform(rot_trans)
+            .finalize()
+            .nearest_neighbor(point)
+            .distance;
+        let tree_rot_tlate = SdfBuilder::dyn_primitive(prim)
+            .transform(rot_trans)
+            .transform(tlate_trans)
+            .finalize()
+            .nearest_neighbor(point)
+            .distance;
+
+        println!("Translation Tree Result: {}", tree_tlate);
+        println!("Rotation Tree Result: {}", tree_rot);
+        println!("Translation->Rotation Tree Result: {}", tree_tlate_rot);
+        println!("Rotation->Translation Tree Result: {}", tree_rot_tlate);
+
+        assert!(approx_eq!(f32, gt_tlate, tree_tlate),
+            "Simple Translation Failed!");
+        assert!(approx_eq!(f32, gt_rot, tree_rot),
+            "Simple Rotation Failed!");
+        assert!(approx_eq!(f32, gt_tlate_rot, tree_tlate_rot),
+            "Simple Translation->Rotation Failed!"); 
+        assert!(approx_eq!(f32, gt_rot_tlate, tree_rot_tlate),
+            "Simple Rotation->Translation Failed!"); 
+    }
+
+    fn do_dense_nn_chain(prim: Box<dyn SdfElement>) {
+        let mut rng = thread_rng();
+        let point = Vec3::new(
+            rng.gen_range(-50.0..50.0),
+            rng.gen_range(-50.0..50.0),
+            rng.gen_range(-50.0..50.0),
+        );
+        let trans_vec = get_random_transforms(1);
+        let final_inv = trans_vec.iter()
+            .map(|trans| trans.compute_matrix().inverse())
+            .fold(Mat4::IDENTITY, |acc, mat| acc * mat);
+        let ground_truth = prim.distance_to((final_inv * point.extend(1.0)).truncate());
+        let sdf_tree = trans_vec.iter()
+            .fold(
+                SdfBuilder::dyn_primitive(prim),
+                |acc, trans| acc.transform(*trans).operation(SdfUnion {
+                    smooth_radius: 0.0,
+                })
+            )
+            .finalize();
+        let nn_result = sdf_tree.nearest_neighbor(point).distance;
+        assert!(approx_eq!(f32, ground_truth, nn_result),
+            "Transform Chain Failed! Ground Truth: {}, NN Result: {}", ground_truth, nn_result);
+    }
+
+    /**
+     * Run a sanity test for whether TestPrimitive actually works as intended.
+     * 
+     * This test is never expected to break or fail; it has no reliance on the rest of the library.
+     */
+    #[test]
+    fn sanity_dir_depend_prim() {
+        let prim = TestPrimitive {
+            scale: 10.0,
+            max_dev: 0.1,
+        };
+        assert!(!float_cmp::approx_eq!(
+            f32,
+            prim.distance_to(Vec3::new(50.0, 0.0, 0.0)),
+            prim.distance_to(Vec3::new(49.8097349, 4.35778713, 0.0))
+        ));
+    }
+
+    #[test]
+    fn test_dense_nn_single_uni() {
+        let prim = SdfSphere {
+            radius: 1.0,
+        };
+        do_dense_nn_single(Box::new(prim));
+    }
+
+    #[test]
+    fn test_dense_nn_single_dir() {
+        let prim = TestPrimitive {
+            scale: 1.0,
+            max_dev: 0.1,
+        };
+        do_dense_nn_single(Box::new(prim));
+    }
+
+    #[test]
+    fn test_dense_nn_chain_uni() {
+        let prim = SdfSphere {
+            radius: 1.0,
+        };
+        do_dense_nn_chain(Box::new(prim));
+    }
+
+    #[test]
+    fn test_dense_nn_chain_dir() {
+        let prim = TestPrimitive {
+            scale: 1.0,
+            max_dev: 0.1,
+        };
+        do_dense_nn_chain(Box::new(prim));
+    }
+}
+```
+
+### sdf/src/obb.rs
+```
+use nalgebra::{
+    Matrix4, Vector4, matrix, Matrix, Matrix4xX, Point, U1, U4, Scalar, Const,
+    storage::{Storage}
+};
+use std::{
+    convert::TryInto,
+    cmp::Ordering,
+};
+use float_cmp::approx_eq;
+use bevy::prelude::*;
+use super::component::*;
+
+const VERT_LIST: [Vector4<f32>; 8] = [
+    Vector4::new(1.0, 1.0, 1.0, 1.0),
+    Vector4::new(-1.0, 1.0, 1.0, 1.0),
+    Vector4::new(1.0, -1.0, 1.0, 1.0),
+    Vector4::new(-1.0, -1.0, 1.0, 1.0),
+    Vector4::new(1.0, 1.0, -1.0, 1.0),
+    Vector4::new(-1.0, 1.0, -1.0, 1.0),
+    Vector4::new(1.0, -1.0, -1.0, 1.0),
+    Vector4::new(-1.0, -1.0, -1.0, 1.0),
+];
+
+// I'm so done with this floats-can't-be-compared bullshit; I don't care 
+// if it isn't right. 
+#[derive(PartialEq)]
+pub struct CmpFloat(pub f32);
+
+impl Eq for CmpFloat {}
+
+impl PartialOrd for CmpFloat {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        self.0.partial_cmp(&other.0)
+    }
+}
+
+impl Ord for CmpFloat {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.0.partial_cmp(&other.0).unwrap_or(Ordering::Equal)
+    }
+}
+
+fn vec_bevy_to_nalgebra(bevy_vec: Vec4) -> Vector4<f32> {
+    Vector4::from_row_slice(bevy_vec.as_ref())
+}
+
+fn mat_bevy_to_nalgebra(bevy_mat: Mat4) -> Matrix4<f32> {
+    Matrix4::from_row_slice(bevy_mat.as_ref())
+}
+
+fn vec_nalgebra_to_bevy(nalgebra_vec: Vector4<f32>) -> Vec4 {
+    // Fully qualified syntax because I am fully qualified to write
+    // this kind of code B)
+    <Vec4 as From<[f32; 4]>>::from(
+        nalgebra_vec.iter()
+            .copied()
+            .collect::<Vec<f32>>()
+            .try_into().unwrap()
+    )
+}
+
+fn mat_nalgebra_to_bevy(nalgebra_mat: Matrix4<f32>) -> Mat4 {
+    Mat4::from_cols_array(
+        &nalgebra_mat.iter()
+            .copied()
+            .collect::<Vec<f32>>()
+            .try_into().unwrap()
+    )
+}
+
+pub fn vec_nalgebra_minmax<T>(nalgebra_vec: Matrix<f32, U4, U1, T>) -> Vector4<f32> where 
+    T: Storage<f32, Const<4_usize>>
+{
+    let mut onehot = [0.0, 0.0, 0.0, 0.0];
+    onehot[nalgebra_vec.iamax()] = 1.0;
+    Vector4::from_row_slice(&onehot)
+}
+
+#[derive(Copy, Clone)]
+pub struct SdfBoundingBox {
+    pub matrix: Matrix4<f32>,
+    pub scale: Vector4<f32>,
+    pub full_inverse: Matrix4<f32>,
+    pub trans_inverse: Matrix4<f32>,
+}
+
+impl SdfBoundingBox {
+    pub fn unit() -> Self {
+        SdfBoundingBox {
+            matrix: Matrix4::identity(),
+            scale: matrix![
+                1.0;
+                1.0;
+                1.0;
+                0.0;
+            ],
+            full_inverse: Matrix4::identity(),
+            trans_inverse: Matrix4::identity(),
+        }
+    }
+
+    pub fn zero() -> Self {
+        SdfBoundingBox {
+            matrix: Matrix4::zeros(),
+            scale: Vector4::zeros(),
+            full_inverse: matrix![
+                f32::INFINITY, 0.0, 0.0, 0.0;
+                0.0, f32::INFINITY, 0.0, 0.0;
+                0.0, 0.0, f32::INFINITY, 0.0;
+                0.0, 0.0, 0.0,           1.0;
+            ],
+            trans_inverse: Matrix4::identity(),
+        }
+    }
+
+    #[allow(clippy::map_clone)]
+    pub fn merge(sub_boxes: &[Self]) -> Self {
+        if sub_boxes.len() == 0 {
+            return SdfBoundingBox::zero();
+        }
+        // Build a matrix from all box vertices
+        let mut vert_mat = Matrix4xX::from_iterator(
+            sub_boxes.len() * 8,
+            sub_boxes.iter()
+                .map(|sub_box| VERT_LIST.iter()
+                    .map(|vert| (sub_box.matrix * vert).iter()
+                        .copied().collect::<Vec<f32>>())
+                    .flatten())
+                .flatten()
+        );
+        // Get mean of vertices
+        let vert_mean = vert_mat.column_mean();
+        // Subtract mean from vert columns
+        for mut col in vert_mat.column_iter_mut() {
+            col -= vert_mean;
+        }
+        // Get transpose
+        let vert_mat_mean_trans = vert_mat.transpose();
+        // Get covariance matrix by right-multiply with transpose
+        let covar_mat = (vert_mat * &vert_mat_mean_trans) / ((sub_boxes.len() * 8 - 1) as f32);
+        // Get eigenstuff of covariance matrix. Covariance is symmetric so we gucci.
+        let eigen_info = covar_mat.symmetric_eigen();
+        // For some reason, symmetric eigen loves to make the W-vector negative sometimes, so we have to set it 
+        // let sort_transform = Matrix4::from_columns(
+        //     eigen_info.eigenvectors.column_iter()
+        //         .map(vec_nalgebra_minmax)
+        //         // .inspect(|x| println!("{}", x))
+        //         .collect::<Vec<Vector4<f32>>>()
+        //         .as_slice()
+        // );
+        let mut eigen_basis = eigen_info.eigenvectors;
+        // println!("eigen: {}", eigen_info.eigenvectors);
+        eigen_basis.set_column(3, &matrix![0.0; 0.0; 0.0; 1.0;]);
+        eigen_basis.set_row(3, &matrix![0.0, 0.0, 0.0, 1.0;]);
+        // Get projections of box verts on normalized eigenvector basis
+        let vert_proj_mat = vert_mat_mean_trans * eigen_basis;
+        // Get minimums and maximums of verts along eigenvector basis
+        let mut box_min = Vector4::zeros();
+        let mut box_max = Vector4::zeros();
+        for proj_vert in vert_proj_mat.row_iter() {
+            // proj_vert is a row vector, so transpose it to compare with box_min, box_max
+            let proj_vert_trans = proj_vert.transpose();
+            box_min = box_min.inf(&proj_vert_trans);
+            box_max = box_max.sup(&proj_vert_trans);
+        }
+        // Get centroid of new bounding box
+        let centroid = (box_max + box_min) / 2.0;
+        // Get scale of new bounding box using centroid
+        let scale = box_max - centroid;
+        let scale_recip = scale.map(|x| 1.0 / x);
+        // Create new bounding box matrix in eigenbasis of vertices, then change to standard basis
+        let new_bbox_mat = Matrix4::new_translation(&vert_mean.xyz())
+            * eigen_basis
+            * Matrix4::new_nonuniform_scaling(&scale.xyz()).append_translation(&centroid.xyz());
+        let mut scale_iter = scale.iter();
+        // println!("eigen full_inverse: {}", (eigen_basis * Matrix4::new_nonuniform_scaling(&scale_recip.xyz())).transpose());
+        SdfBoundingBox {
+            matrix: new_bbox_mat,
+            scale,
+            full_inverse: new_bbox_mat
+                .try_inverse()
+                .unwrap(),
+            trans_inverse: (Matrix4::new_translation(&vert_mean.xyz()) * eigen_basis)
+                .try_inverse()
+                .unwrap(),
+        }
+    }
+
+    pub fn split(&self, sub_boxes: &[Self]) -> (Vec<usize>, Vec<usize>) {
+        let mut inds = (0..sub_boxes.len()).collect::<Vec<usize>>();
+        // Get axes of sides of box
+        let x_axis = self.matrix.column(0);
+        let y_axis = self.matrix.column(1);
+        let z_axis = self.matrix.column(2);
+        // Get bounding box scale in local coordinates
+        let x_scale: f32 = x_axis.iter().map(|x| *x * *x).sum();
+        let y_scale: f32 = y_axis.iter().map(|x| *x * *x).sum();
+        let z_scale: f32 = z_axis.iter().map(|x| *x * *x).sum();
+        // Get normalized axis of bound boxes longest side
+        let split_axis = {
+            if x_scale >= y_scale && x_scale >= z_scale {
+                x_axis.normalize()
+            } else if y_scale >= z_scale {
+                y_axis.normalize()
+            } else {
+                z_axis.normalize()
+            }
+        };
+        // Sort by value of projection along splitting axis
+        inds.sort_unstable_by_key(|sub_box_ind| CmpFloat(sub_boxes[*sub_box_ind].matrix.column(3).dot(&split_axis)));
+        // Split at median
+        let left_side = inds.split_off(inds.len() / 2);
+        (left_side, inds)
+    }
+
+    pub fn verts(&self) -> Vec<Vec4> {
+        VERT_LIST.iter()
+            .map(|vert| vec_nalgebra_to_bevy(self.matrix * vert))
+            .collect()
+    }
+
+    pub fn from_transform(trans: Transform) -> Self {
+        Self::unit().apply_transform(trans)
+    }
+
+    pub fn apply_transform(self, trans: Transform) -> Self {
+        let mut no_scale = trans.clone();
+        no_scale.scale = Vec3::new(1.0, 1.0, 1.0);
+        let mat = Matrix4::from_column_slice(
+            &trans.compute_matrix().to_cols_array()
+        ) * self.matrix;
+        let full_inv = self.full_inverse * Matrix4::from_column_slice(
+            &trans.compute_matrix().inverse().to_cols_array()
+        );
+        let trans_inv = self.trans_inverse * Matrix4::from_column_slice(
+            &no_scale.compute_matrix().inverse().to_cols_array()
+        );
+        SdfBoundingBox {
+            matrix: mat,
+            scale: self.scale.component_mul(&vec_bevy_to_nalgebra(trans.scale.extend(0.0))),
+            full_inverse: full_inv,
+            trans_inverse: trans_inv,
+        }
+    }
+
+    pub fn get_transform(&self) -> Transform {
+        Transform::from_matrix(mat_nalgebra_to_bevy(self.matrix))
+    }
+
+    pub fn in_box_basis(&self, point: Vec4) -> Vec4 {
+        vec_nalgebra_to_bevy(
+            self.full_inverse * vec_bevy_to_nalgebra(point)
+        )
+    }
+
+    pub fn in_box_trans_basis(&self, point: Vec4) -> Vec4 {
+        vec_nalgebra_to_bevy(
+            self.trans_inverse * vec_bevy_to_nalgebra(point)
+        )
+    }
+
+    pub fn in_parent_basis(&self, point: Vec4) -> Vec4 {
+        vec_nalgebra_to_bevy(
+            self.matrix * vec_bevy_to_nalgebra(point)
+        )
+    }
+
+    pub fn mat_in_box_basis(&self, mat: Mat4) -> Mat4 {
+        mat_nalgebra_to_bevy(
+            self.full_inverse * mat_bevy_to_nalgebra(mat)
+        )
+    }
+
+    pub fn mat_in_box_trans_basis(&self, mat: Mat4) -> Mat4 {
+        mat_nalgebra_to_bevy(
+            self.trans_inverse * mat_bevy_to_nalgebra(mat)
+        )
+    }
+
+    pub fn box_in_box_trans_basis(&self, other: &SdfBoundingBox) -> SdfBoundingBox {
+        SdfBoundingBox {
+            matrix: self.trans_inverse * other.matrix,
+            scale: other.scale,
+            full_inverse: other.full_inverse * self.trans_inverse,
+            trans_inverse: other.trans_inverse * self.trans_inverse,
+        }
+    }
+
+    pub fn is_zero(&self) -> bool {
+        self.get_transform().scale.as_ref().iter()
+            .all(|comp| approx_eq!(f32, *comp, 0.0, ulps = 2))
+    }
+
+    pub fn distance_to(&self, point: Vec3) -> f32 {
+        let trans = self.in_box_basis(point.extend(1.0));
+        // println!("scale: {}", self.scale);
+        let q_local = (trans.abs() - Vec4::splat(1.0)) * vec_nalgebra_to_bevy(self.scale);
+        // println!("q_local: {}", q_local);
+        q_local.max(Vec4::ZERO).length() + q_local.y.max(q_local.z).max(q_local.x).min(0.0)
+    }
+
+    pub fn max_distance(&self, point: Vec3) -> f32 {
+        let nalgebra_point = Point::from_slice(point.extend(1.0).as_ref()).coords;
+        VERT_LIST.iter()
+            .map(|vert| CmpFloat(((self.matrix * vert) - nalgebra_point).magnitude()))
+            .max().unwrap().0
+    }
+
+    pub fn centroid(&self) -> Vec3 {
+        self.get_transform().translation
+    }
+
+    pub fn contains(&self, point: Vec3) -> bool {
+        self.full_inverse.transform_point(&Point::from_slice(point.as_ref())).coords.amax() <= 1.0
+    }
+
+    pub fn get_bbox_block(&self) -> SdfBoundingBoxBlock {
+        SdfBoundingBoxBlock {
+            matrix: mat_nalgebra_to_bevy(self.matrix),
+            scale: vec_nalgebra_to_bevy(self.scale),
+            full_inverse: mat_nalgebra_to_bevy(self.full_inverse),
+            trans_inverse: mat_nalgebra_to_bevy(self.trans_inverse),
+        }
+    }
+}
+```

@@ -1,0 +1,138 @@
+--- v006.md
++++ v007.md
+@@ -8,15 +8,15 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A 3D volume dataset $V$ with scalar values $f(\mathbf{x})$ and derived features (gradient magnitude $\|\nabla f\|$, second derivative). A query point $\mathbf{q}$ in spatial domain, obtained via a Data Probe or Clipping Plane widget [S1].
++*   **Input:** A 3D volume dataset $V$ with scalar values $f(\mathbf{x})$ and derived features (gradient magnitude $\|\nabla f\|$, second derivative) [S1]. A query point $\mathbf{q}$ in spatial domain, obtained via a Data Probe or Clipping Plane widget [S1].
+ *   **Output:** A 2D graphical widget displaying a slice of the 3D Lookup Table (LUT) and visual feedback elements (balls and edges) representing the queried voxel's properties in the TF domain [S1].
+ 
+ **Data Structures and Layout:**
+ The widget is implemented as a basic frame widget with the following layout [S1]:
+-*   **Horizontal Axis:** Data value $v = f(\mathbf{x})$.
+-*   **Vertical Axis:** Gradient magnitude $g = \|\nabla f(\mathbf{x})\|$.
+-*   **Implicit Third Axis:** Second derivative $d = \nabla^2 f(\mathbf{x})$, represented via color mapping of visual elements rather than spatial position.
++*   **Horizontal Axis:** Data value $v = f(\mathbf{x})$ [S1].
++*   **Vertical Axis:** Gradient magnitude $g = \|\nabla f(\mathbf{x})\|$ [S1].
++*   **Implicit Third Axis:** Second derivative $d = \nabla^2 f(\mathbf{x})$, represented via color mapping of visual elements rather than spatial position [S1].
+ *   **Inner Plane:** A polygon texture-mapped with a 2D slice of the 3D LUT containing the full transfer function definition [S1].
+ *   **Controls:**
+-    *   Balls at the four corners of the frame for resizing the widget.
++    *   Balls at the four corners of the frame for resizing the widget [S1].
+     *   Bars on the edges for translating the widget's position [S1].
+ 
+@@ -53,7 +53,7 @@
+     """
+     # 1. Identify voxel containing query point
+-    voxel_coords = get_voxel_containing(query_point)
++    voxel_coords = (int(query_point[0]), int(query_point[1]), int(query_point[2]))
+     x, y, z = voxel_coords
+-    
++
+     # 2. Define the 8 corners of the voxel
+     corners = [
+@@ -61,16 +61,48 @@
+         (x+1, y+1, z), (x+1, y, z+1), (x, y+1, z+1), (x+1, y+1, z+1)
+     ]
+-    
++
+     # 3. Calculate features for query point and corners
+-    query_features = compute_features(volume, query_point)
+-    corner_features = [compute_features(volume, c) for c in corners]
+-    
++    # Helper: sample_volume (trilinear interpolation for arbitrary points, direct access for corners)
++    def sample_volume(p):
++        if p in corners:
++            return volume[p[0], p[1], p[2]]
++        # Trilinear interpolation for query_point
++        x0, y0, z0 = int(p[0]), int(p[1]), int(p[2])
++        fx, fy, fz = p[0] - x0, p[1] - y0, p[2] - z0
++        c000 = volume[x0, y0, z0]; c100 = volume[x0+1, y0, z0]
++        c010 = volume[x0, y0+1, z0]; c110 = volume[x0+1, y0+1, z0]
++        c001 = volume[x0, y0, z0+1]; c101 = volume[x0+1, y0, z0+1]
++        c011 = volume[x0, y0+1, z0+1]; c111 = volume[x0+1, y0+1, z0+1]
++        v0 = c000*(1-fx) + c100*fx; v1 = c010*(1-fx) + c110*fx
++        v2 = c001*(1-fx) + c101*fx; v3 = c011*(1-fx) + c111*fx
++        v00 = v0*(1-fy) + v1*fy; v01 = v2*(1-fy) + v3*fy
++        return v00*(1-fz) + v01*fz
++
++    # Helper: compute_gradient (central differences)
++    def compute_gradient(p):
++        dx = sample_volume((p[0]+1, p[1], p[2])) - sample_volume((p[0]-1, p[1], p[2]))
++        dy = sample_volume((p[0], p[1]+1, p[2])) - sample_volume((p[0], p[1]-1, p[2]))
++        dz = sample_volume((p[0], p[1], p[2]+1)) - sample_volume((p[0], p[1], p[2]-1))
++        return (dx, dy, dz)
++
++    # Helper: compute_laplacian (second derivative)
++    def compute_laplacian(p):
++        return (sample_volume((p[0]+1, p[1], p[2])) + sample_volume((p[0]-1, p[1], p[2])) +
++                sample_volume((p[0], p[1]+1, p[2])) + sample_volume((p[0], p[1]-1, p[2])) +
++                sample_volume((p[0], p[1], p[2]+1)) + sample_volume((p[0], p[1], p[2]-1)) -
++                6.0 * sample_volume(p))
++
++    query_features = {"value": sample_volume(query_point), "gradient": compute_gradient(query_point), "second_deriv": compute_laplacian(query_point)}
++    corner_features = [{"value": sample_volume(c), "gradient": compute_gradient(c), "second_deriv": compute_laplacian(c)} for c in corners]
++
+     # 4. Project to TF domain (v, g)
+-    # v = data value, g = gradient magnitude
+-    query_tf_pos = (query_features.value, query_features.gradient_mag)
+-    corner_tf_positions = [(f.value, f.gradient_mag) for f in corner_features]
+-    
++    query_grad_mag = (query_features["gradient"][0]**2 + query_features["gradient"][1]**2 + query_features["gradient"][2]**2)**0.5
++    query_tf_pos = (query_features["value"], query_grad_mag)
++    corner_tf_positions = []
++    for f in corner_features:
++        g_mag = (f["gradient"][0]**2 + f["gradient"][1]**2 + f["gradient"][2]**2)**0.5
++        corner_tf_positions.append((f["value"], g_mag))
++
+     # 5. Determine colors based on second derivative
+-    # Blue: negative, White: zero, Yellow: positive
+     def get_color(second_deriv):
+         if second_deriv < 0:
+@@ -81,14 +113,13 @@
+             return (1, 1, 1)  # White
+ 
+-    query_color = get_color(query_features.second_deriv)
+-    corner_colors = [get_color(f.second_deriv) for f in corner_features]
+-    
++    query_color = get_color(query_features["second_deriv"])
++    corner_colors = [get_color(f["second_deriv"]) for f in corner_features]
++
+     # 6. Define edges for voxel connectivity
+-    # Edges connect corners that are adjacent in the voxel grid
+     edges = [
+         (0, 1), (0, 2), (0, 3), (1, 5), (1, 4), (2, 6), (2, 4),
+         (3, 7), (3, 6), (4, 7), (5, 7), (6, 7)
+     ]
+-    
++
+     return {
+         "query_ball": {"pos": query_tf_pos, "color": query_color},
+@@ -97,27 +128,8 @@
+         "lut_texture": tf_slice_lut
+     }
+-
+-def compute_features(volume, point):
+-    """
+-    Computes data value, gradient magnitude, and second derivative at a point.
+-    Note: For voxel corners, this is direct sampling. For query point, interpolation may be needed.
+-    """
+-    # Implementation details for gradient and second derivative calculation
+-    # are assumed to be handled by standard numerical differentiation routines.
+-    value = sample_volume(volume, point)
+-    gradient = compute_gradient(volume, point)
+-    gradient_mag = length(gradient)
+-    second_deriv = compute_laplacian(volume, point)
+-    
+-    return {
+-        "value": value,
+-        "gradient_mag": gradient_mag,
+-        "second_deriv": second_deriv
+-    }
+ ```
+ 
+ **Parameters and Edge Cases:**
+ *   **Second Derivative Threshold:** The boundary between blue and white, and white and yellow, is exactly zero [S1].
+-*   **Precision:** The widget relies on accurate calculation of derivatives. Degenerate cases (e.g., flat regions with zero gradient) result in points clustering on the horizontal axis [S1].
+ *   **Not Given in the sources:** Specific interpolation methods for the query point (if not on a grid corner) are not detailed, though the source implies calculation of derivatives at the query location [S1].
+ 

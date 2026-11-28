@@ -1,0 +1,108 @@
+--- v004.md
++++ v005.md
+@@ -3,19 +3,19 @@
+ 
+ ## Overview
+-This method computes the analytic gradients of the NeRF piecewise constant volume rendering equation with respect to density ($\boldsymbol{\sigma}$) and color ($\mathbf{c}$) parameters, enabling direct optimization of PlenOctrees [S1, unofficial]. It differs from numerical differentiation by providing exact, efficient gradients required for stochastic gradient descent (SGD) during the fine-tuning phase of PlenOctree optimization [S1, unofficial].
++This method computes the analytic gradients of the NeRF piecewise constant volume rendering equation with respect to density ($\boldsymbol{\sigma}$) and color ($\mathbf{c}$) parameters, enabling direct optimization of PlenOctrees [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- **Input:** A fixed ray with origin and direction, divided into $N$ consecutive segments with endpoints $\{t_i\}_{i=0}^N$. Segment lengths are $\delta_i = t_{i+1} - t_i$. Constant densities $\boldsymbol{\sigma} = (\sigma_0, \dots, \sigma_{N-1})$ and colors $\mathbf{c} = (c_0, \dots, c_N)$, where $c_N$ is the background color.
+-- **Output:** Gradients $\frac{\partial \hat{C}}{\partial \sigma_i}$ and $\frac{\partial \hat{c}_i}$ for each segment $i$.
++- **Input:** A fixed ray with origin and direction, divided into $N$ consecutive segments with endpoints $\{t_i\}_{i=0}^N$ [S1, unofficial]. Segment lengths are $\delta_i = t_{i+1} - t_i$ [S1, unofficial]. Constant densities $\boldsymbol{\sigma} = (\sigma_0, \dots, \sigma_{N-1})$ and colors $\mathbf{c} = (c_0, \dots, c_N)$, where $c_N$ is the background color [S1, unofficial].
++- **Output:** Gradients $\frac{\partial \hat{C}}{\partial \sigma_i}$ and $\frac{\partial \hat{c}_i}$ for each segment $i$ [S1, unofficial].
+ 
+ **Data Structures:**
+-- **Accumulated Transmittance ($T_i$):** Precomputed for $i=0 \dots N$.
+-- **Segment Weights ($w_i$):** Precomputed for $i=0 \dots N$.
++- **Accumulated Transmittance ($T_i$):** Precomputed for $i=0 \dots N$ [S1, unofficial].
++- **Segment Weights ($w_i$):** Precomputed for $i=0 \dots N$ [S1, unofficial].
+ 
+ **Formulas:**
+ 1.  **Accumulated Transmittance:**
+     $$T_i(\boldsymbol{\sigma}) := \prod_{j=0}^{i-1} \exp(-\delta_j \sigma_j)$$
+-    where $T_0 = 1$. $T_i$ represents the transmittance from $t_0$ to $t_i$ [S1, unofficial].
++    where $T_0 = 1$ [S1, unofficial]. $T_i$ represents the transmittance from $t_0$ to $t_i$ [S1, unofficial].
+ 
+ 2.  **Rendered Color:**
+@@ -36,9 +36,18 @@
+     *Derivation Note:* This simplifies from the general form $\frac{\partial \hat{C}}{\partial \sigma_i} = c_N \frac{\partial T_N}{\partial \sigma_i} + \sum_{k=0}^{N-1} c_k \left( \frac{\partial T_k}{\partial \sigma_i} - \frac{\partial T_{k+1}}{\partial \sigma_i} \right)$ using $\frac{\partial T_k}{\partial \sigma_i} = -\delta_i T_k(\boldsymbol{\sigma}) \mathbf{1}_{k>i}$ [S1, unofficial].
+ 
++**Parameters:**
++- Background color $c_N$ is typically a scalar intensity of 1.0 [S1, unofficial].
++
++**Edge Cases and Pitfalls:**
++- Numerical stability must be handled for extreme $\sigma_i \delta_i$ values (e.g., using `expm1` for small arguments) [G].
++- Degenerate segments with $\delta_i = 0$ should be skipped or merged to avoid division by zero or zero-length transmittance products [G].
++
+ **Spherical Harmonics (SH) Handling:**
+-When colors $\mathbf{c}$ are represented by Spherical Harmonics coefficients, the chain rule is applied. Since SH basis function values are constant across the ray, the derivative with respect to SH coefficients is computed by multiplying the gradient with respect to color $\mathbf{c}$ by the SH basis values [S1, unofficial].
++When colors $\mathbf{c}$ are represented by Spherical Harmonics coefficients, the chain rule is applied [S1, unofficial]. Since SH basis function values are constant across the ray, the derivative with respect to SH coefficients is computed by multiplying the gradient with respect to color $\mathbf{c}$ by the SH basis values [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
++import math
++
+ def compute_gradients(N, deltas, sigmas, colors, background_color):
+     """
+@@ -52,6 +61,4 @@
+     """
+     # 1. Compute Transmittance T_i
+-    # T_i is product from j=0 to i-1 of exp(-delta_j * sigma_j)
+-    # T_0 = 1
+     T = [0.0] * (N + 1)
+     T[0] = 1.0
+@@ -60,6 +67,4 @@
+ 
+     # 2. Compute Weights w_i
+-    # w_i = T_i - T_{i+1} for i < N
+-    # w_N = T_N
+     w = [0.0] * (N + 1)
+     for i in range(N):
+@@ -68,20 +73,12 @@
+ 
+     # 3. Compute Color Gradients
+-    # dC/dc_i = w_i
+     grad_colors = list(w)
+ 
+-    # 4. Compute Density Gradients
+-    # dC/dsigma_i = delta_i * [ c_i * T_{i+1} - sum_{k=i+1}^N c_k * w_k ]
++    # 4. Compute Density Gradients in O(N) using a suffix sum
+     grad_sigmas = [0.0] * N
+-    for i in range(N):
+-        # Term 1: c_i * T_{i+1}
+-        term1 = colors[i] * T[i+1]
+-        
+-        # Term 2: sum_{k=i+1}^N c_k * w_k
+-        sum_term = 0.0
+-        for k in range(i+1, N+1):
+-            sum_term += colors[k] * w[k]
+-            
+-        grad_sigmas[i] = deltas[i] * (term1 - sum_term)
++    suffix_sum = 0.0
++    for i in range(N - 1, -1, -1):
++        suffix_sum += colors[i+1] * w[i+1]
++        grad_sigmas[i] = deltas[i] * (colors[i] * T[i+1] - suffix_sum)
+ 
+     return grad_sigmas, grad_colors
+@@ -91,13 +88,12 @@
+ 
+ ### Differentiating Pixel Intensities
+-This variant extends the derivative computation to the pixel level, modeling pixel intensity $I$ as the inner product between radiance $L$ and a reconstruction kernel $K$ over the pixel footprint $P$. The differentiated intensity $\hat{I}$ includes a boundary integral term accounting for discontinuities in $L$ along the boundary of the pixel domain $\partial[0,1)^2$, which is necessary when camera parameters depend on scene parameters [S2, unofficial].
++This variant extends the derivative computation to the pixel level, modeling pixel intensity $I$ as the inner product between radiance $L$ and a reconstruction kernel $K$ over the pixel footprint $P$ [S2, unofficial]. The differentiated intensity $\hat{I}$ includes a boundary integral term accounting for discontinuities in $L$ along the boundary of the pixel domain $\partial[0,1)^2$, which is necessary when camera parameters depend on scene parameters [S2, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N)$ per ray for precomputing transmittance and weights, and $O(N)$ for computing gradients. The density derivative summation is $O(N^2)$ if implemented naively, but can be optimized to $O(N)$ by maintaining a running sum of $c_k w_k$ from $N$ down to $0$.
+-- **Memory Complexity:** $O(N)$ to store $T_i$, $w_i$, and intermediate sums.
+-- **Strengths:** Provides exact gradients, enabling stable and efficient convergence during PlenOctree fine-tuning. Handles SH colors naturally via the chain rule.
+-- **Limitations:** Assumes piecewise constant density and color within segments. Requires careful handling of numerical stability for very small or large $\sigma_i \delta_i$ values (e.g., using `expm1` for small arguments) [G].
+-- **When to use:** When optimizing PlenOctree parameters directly using gradient-based methods like SGD.
+-- **When not to use:** When using differentiable rendering techniques that require pixel-space derivatives with complex camera models or non-constant kernels [S2, unofficial].
++- **Time and Memory Complexity:** Not given in the sources.
++- **Strengths:** Provides exact gradients for direct PlenOctree optimization [S1, unofficial]. Handles SH colors naturally via the chain rule [S1, unofficial].
++- **Limitations:** Assumes piecewise constant density and color within segments [S1, unofficial]. Requires careful handling of numerical stability for very small or large $\sigma_i \delta_i$ values (e.g., using `expm1` for small arguments) [G].
++- **When to use:** When optimizing PlenOctree parameters directly using gradient-based methods like SGD [S1, unofficial].
++- **When not to use:** Not specified in the sources.
+ 
+ ## Background

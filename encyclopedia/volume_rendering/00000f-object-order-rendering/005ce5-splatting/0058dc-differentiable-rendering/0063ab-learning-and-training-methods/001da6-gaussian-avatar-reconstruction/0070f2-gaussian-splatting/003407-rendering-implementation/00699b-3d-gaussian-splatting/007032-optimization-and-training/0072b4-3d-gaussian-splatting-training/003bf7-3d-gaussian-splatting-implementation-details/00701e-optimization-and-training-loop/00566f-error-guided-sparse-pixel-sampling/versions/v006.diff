@@ -1,0 +1,260 @@
+--- v005.md
++++ v006.md
+@@ -4,137 +4,152 @@
+ 
+ ## Overview
+-Error-Guided Sparse Pixel Sampling (Err-SPS) is a training acceleration strategy for 3D Gaussian Splatting that restricts loss evaluation and gradient computation to a sparse subset of pixels per tile, guided by persistent error and age maps [S1, unofficial]. It solves the problem of redundant gradient computation in well-reconstructed regions by reallocating optimization effort to perceptually informative, challenging pixels [S1, unofficial]. Unlike random sampling methods, Err-SPS prioritizes high-error regions to preserve high-frequency details, avoiding the quality degradation associated with uniform sparse sampling [S1, unofficial].
++Error-Guided Sparse Pixel Sampling (Err-SPS) is a training acceleration strategy for 3D Gaussian Splatting that restricts loss evaluation and gradient computation to a sparse subset of pixels per tile, guided by persistent error and age maps [S1, unofficial]. It solves the problem of redundant gradient computation in well-reconstructed regions by reallocating computation to perceptually informative pixels [S1, unofficial]. It is distinguished from sibling methods like [TurboGS](15697-turbogs.md) by its specific focus on the sampling mechanism itself, whereas TurboGS integrates Err-SPS with additional components like structure-aware loss and density control [S1, unofficial]. Unlike [Frequency Guided Resolution Scheduler](15751-frequency-guided-resolution-scheduler.md) which targets resolution, Err-SPS targets pixel-level supervision density [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:**
+-*   Set of training views $V_t$ for the current tile $t$.
+-*   Current Gaussian set $\mathcal{G}$.
+-*   Persistent per-pixel error map $E$ and age map $\Theta$ (initialized to zero or small values).
+-*   Ground-truth images $I$.
+-*   Sampling rate parameters $K_t$ (number of pixels) and $r_t$ (rate).
+-
+-**Outputs:**
+-*   Sparse set of sampled pixels $P_{t,v}$ for each view $v \in V_t$.
+-*   Gradients $\nabla \mathcal{G}$ computed only over $P_{t,v}$.
++**Inputs and Outputs:**
++*   **Inputs:** Current Gaussian set $\mathcal{G}$, ground-truth images $I_{gt}$, camera poses $C_v$, tile configuration (tile size, grid dimensions), error map $E$, age map $A$, training progress $\rho_t$, and sampling rate parameters.
++*   **Outputs:** Updated Gaussian parameters $\mathcal{G}'$, updated error map $E'$, updated age map $A'$, and sparse gradients for the optimizer.
+ 
+ **Data Structures:**
+-*   **Error Map ($E$):** A 2D array (or tile-aligned buffer) storing the running average reconstruction error for each pixel.
+-*   **Age Map ($\Theta$):** A 2D array storing the number of iterations since a pixel was last sampled or updated, used to prevent starvation of low-error pixels.
+-*   **Sampled Pixel Set ($P_{t,v}$):** A list of $(u, v)$ coordinates for view $v$ in tile $t$.
++*   **Error Map ($E$):** A 2D array matching the image resolution (or tile grid), storing the accumulated reconstruction error per pixel. Initialized to zero or a small constant.
++*   **Age Map ($A$):** A 2D array matching the image resolution, storing the number of consecutive iterations a pixel has *not* been sampled. Initialized to zero.
++*   **Sampled Pixel Set ($P_{t,v}$):** A list of pixel coordinates $(u, v)$ for view $v$ in tile $t$ selected for the current iteration.
+ 
+-**Algorithm Steps:**
+-1.  **Initialize Statistics:** At the start of training, initialize error map $E$ and age map $\Theta$ to zero.
+-2.  **Query Sampling Schedule:** Determine the target number of pixels $K_t$ and sampling rate $r_t$ based on training progress $\rho_t$ [S1, unofficial].
+-3.  **Tile-Wise Pixel Sampling:** For each tile $t$ and view $v \in V_t$:
+-    *   Identify candidate pixels within the tile.
+-    *   Compute a sampling probability or priority score for each pixel based on $E$ and $\Theta$. High error increases priority; high age increases priority (to ensure coverage).
+-    *   Select the top $K_t$ pixels (or a fraction $r_t$ of total pixels) to form $P_{t,v}$ [S1, unofficial].
+-4.  **Sparse Forward Rendering:** Render the scene using the standard 3DGS rasterizer, but restrict the accumulation and output to the sampled pixels $P_{t,v}$ [S1, unofficial]. This preserves tile-parallel execution.
+-5.  **Compute Sparse Loss:** Calculate the loss $\mathcal{L}$ only over the sampled pixels $P_{t,v}$ [S1, unofficial]:
+-    $$ \mathcal{L} = \mathbb{E}_{v \in V_t, p \in P_{t,v}} [\ell_1(p)] + \mathbb{E}_{v \in V_t, \tau} \lambda_\tau^{ncc} L_\tau^{S-NCC} $$
+-    where $\ell_1(p)$ is the L1 loss at pixel $p$, $\lambda_\tau^{ncc}$ is a weighting coefficient, and $L_\tau^{S-NCC}$ is a sparse Normalized Cross-Correlation term [S1, unofficial].
+-6.  **Update Error and Age Maps:** Update $E$ and $\Theta$ using an Exponential Moving Average (EMA) of the computed losses and sampling events [S1, unofficial].
+-7.  **Sparse Backward Pass:** Compute gradients $\nabla \mathcal{G}$ using a per-Gaussian backward mechanism. This restricts gradient computation to Gaussians that contribute to the sampled pixels $P_{t,v}$, enabling efficient splat-parallel computation [S1, unofficial].
+-8.  **Optimize:** Update Gaussian parameters using the optimizer (e.g., Adam or a hybrid solver) [S1, unofficial].
++**Numbered Steps:**
++1.  **Initialize:** Set $E = 0$, $A = 0$. Define tile size $T \times T$ and target sampling ratio $r_t$ (e.g., 10-20% of pixels).
++2.  **Iterate:** For each training iteration $t$:
++    3.  **View Selection:** Select a set of views $V_t$ for the current tile batch. [S1, unofficial] Note: Err-SPS alone does not define view selection; it assumes views are provided. In TurboGS, this is geometry-aware [S1, unofficial].
++    4.  **Tile-wise Sampling:** For each tile $t$ and view $v \in V_t$:
++        5.  **Query Error:** Retrieve error values $E(p)$ for all pixels $p$ in the tile.
++        6.  **Sort:** Sort pixels in the tile by error $E(p)$ in descending order.
++        7.  **Select:** Select the top $k = \lfloor r_t \times T^2 \rfloor$ pixels as the sampled set $P_{t,v}$.
++        8.  **Increment Age:** For all pixels $p$ in the tile *not* in $P_{t,v}$, increment $A(p) \leftarrow A(p) + 1$.
++        9.  **Reset Age:** For all pixels $p \in P_{t,v}$, reset $A(p) \leftarrow 0$.
++    10. **Forward Pass:** Render the scene using the selected pixels $P_{t,v}$ for views $V_t$. This produces rendered colors $\hat{I}$ and depths $\hat{D}$ only for sampled pixels.
++    11. **Loss Computation:** Compute the loss $L$ only over sampled pixels:
++        $$ L = \sum_{v \in V_t} \sum_{p \in P_{t,v}} \ell_1(\hat{I}_p, I_{gt,p}) + \lambda_\tau^{ncc} L_\tau^{S-NCC} $$
++        where $\ell_1$ is the L1 loss, and $L_\tau^{S-NCC}$ is a sparse Normalized Cross-Correlation term [S1, unofficial].
++    12. **Backward Pass:** Compute gradients $\nabla \mathcal{G}$ with respect to the Gaussian parameters using the sparse loss. The backward pass is optimized via a per-Gaussian mechanism to handle sparse pixel updates efficiently [S1, unofficial].
++    13. **Update Parameters:** Update $\mathcal{G}$ using the Adam optimizer with the computed gradients [S1, unofficial].
++    14. **Update Error Map:** Update $E$ using an Exponential Moving Average (EMA) of the current pixel-wise losses:
++        $$ E(p) \leftarrow \alpha E(p) + (1 - \alpha) \ell_1(\hat{I}_p, I_{gt,p}) \quad \forall p \in P_{t,v} $$
++        For unsampled pixels, $E(p)$ remains unchanged [S1, unofficial].
++    15. **Update Age Map:** (Already handled in step 9).
+ 
+ **Pseudocode:**
+ ```python
+-# Initialization
+-E = zeros(H, W)  # Error map
+-Theta = zeros(H, W)  # Age map
+-G = initialize_gaussians()
++def error_guided_sparse_pixel_sampling(Gaussians, GT_Images, Cameras, Error_Map, Age_Map, Iteration, Sampling_Rate, Alpha_EMA):
++    # 1. View Selection (Assumed external or random for pure Err-SPS)
++    Views = select_views(Cameras) 
++    
++    # 2. Tile-wise Sampling
++    Sampled_Pixels = {} # Dict: (view_idx, tile_idx) -> list of (u, v)
++    
++    for view_idx, camera in enumerate(Views):
++        # Get tile grid for this view
++        Tiles = get_tile_grid(camera.image_width, camera.image_height)
++        
++        for tile_idx, tile in enumerate(Tiles):
++            tile_pixels = get_pixels_in_tile(tile)
++            
++            # Get errors for current tile pixels
++            errors = [Error_Map[p.y][p.x] for p in tile_pixels]
++            
++            # Sort pixels by error descending
++            sorted_indices = argsort_desc(errors)
++            
++            # Select top k pixels
++            k = int(Sampling_Rate * len(tile_pixels))
++            selected_indices = sorted_indices[:k]
++            sampled_set = [tile_pixels[i] for i in selected_indices]
++            
++            Sampled_Pixels[(view_idx, tile_idx)] = sampled_set
++            
++            # Update Age Map
++            for p in tile_pixels:
++                if p not in sampled_set:
++                    Age_Map[p.y][p.x] += 1
++                else:
++                    Age_Map[p.y][p.x] = 0
+ 
+-for iteration in range(max_iterations):
+-    # 1. Query sampling parameters based on progress rho
+-    K_t, r_t = query_sampling_schedule(K_max, K_min, E_init, Theta, iteration)
++    # 3. Forward Pass (Sparse Rasterization)
++    Rendered_Images = {}
++    Rendered_Depths = {}
+     
+-    # 2. View Selection (Optional Geometry-Aware, but core is pixel sampling)
+-    V_t = select_views() 
++    for (view_idx, tile_idx), pixels in Sampled_Pixels.items():
++        camera = Views[view_idx]
++        # Rasterize only for these pixels
++        rendered_color, rendered_depth = sparse_rasterize(Gaussians, camera, pixels)
++        Rendered_Images[(view_idx, tile_idx)] = rendered_color
++        Rendered_Depths[(view_idx, tile_idx)] = rendered_depth
++
++    # 4. Loss Computation
++    Total_Loss = 0
++    Pixel_Losses = {} # Store losses for EMA update
+     
+-    # 3. Tile-Wise Sparse Pixel Sampling
+-    P_t = {} # Dictionary: view -> list of pixels
+-    for v in V_t:
+-        # Get candidates in tile t for view v
+-        candidates = get_tile_pixels(v, t)
++    for (view_idx, tile_idx), pixels in Sampled_Pixels.items():
++        gt_color = GT_Images[view_idx]
++        rendered_color = Rendered_Images[(view_idx, tile_idx)]
+         
+-        # Compute sampling weights based on Error and Age
+-        # Higher error -> higher weight. Higher age -> higher weight.
+-        weights = compute_sampling_weights(E[candidates], Theta[candidates])
++        # Compute L1 loss for sampled pixels
++        loss = 0
++        for p in pixels:
++            l1 = abs(rendered_color[p.y][p.x] - gt_color[p.y][p.x])
++            loss += l1
++            Pixel_Losses[(view_idx, tile_idx, p)] = l1
++            
++        Total_Loss += loss
+         
+-        # Sample K_t pixels (or r_t fraction)
+-        # Implementation note: Use weighted random sampling or top-k selection
+-        P_t[v] = sample_pixels(candidates, weights, K_t)
+-        
+-    # 4. Sparse Forward Rendering
+-    # Render only for pixels in P_t
+-    rendered_colors = {}
+-    rendered_depths = {}
+-    for v in V_t:
+-        rendered_colors[v], rendered_depths[v] = rasterize_forward(G, v, P_t[v])
+-        
+-    # 5. Compute Sparse Loss
+-    loss = 0.0
+-    pixel_losses = {} # Store per-pixel losses for EMA update
+-    for v in V_t:
+-        gt_colors = get_gt_colors(v, P_t[v])
+-        # L1 Loss
+-        l1_loss = mean(abs(rendered_colors[v] - gt_colors))
+-        loss += l1_loss
+-        
+-        # Sparse NCC Loss (optional but recommended)
+-        ncc_loss = compute_sparse_ncc(rendered_depths[v], gt_depths, P_t[v])
+-        loss += lambda_ncc * ncc_loss
+-        
+-        pixel_losses[v] = l1_loss # Store for error map update
+-        
+-    # 6. Update Error and Age Maps (EMA)
+-    for v in V_t:
+-        for p in P_t[v]:
+-            # Update error with EMA
+-            E[p] = alpha * pixel_losses[v][p] + (1 - alpha) * E[p]
+-            # Reset age for sampled pixels
+-            Theta[p] = 0
+-        # Increment age for unsampled pixels in the tile/view
+-        for p in all_pixels_in_tile(v, t):
+-            if p not in P_t[v]:
+-                Theta[p] += 1
+-                
+-    # 7. Sparse Backward Pass
+-    # Compute gradients only for Gaussians affecting P_t
+-    grads = compute_gradients_backward(G, rendered_colors, gt_colors, P_t)
++        # Add Sparse NCC if required (TurboGS component)
++        # loss += lambda_ncc * sparse_ncc_loss(...)
++
++    # 5. Backward Pass
++    Gradients = compute_gradients(Total_Loss, Gaussians)
+     
+-    # 8. Update Gaussians
+-    G = optimizer_step(G, grads)
++    # 6. Update Gaussians
++    Gaussians = adam_update(Gaussians, Gradients)
++    
++    # 7. Update Error Map (EMA)
++    for (view_idx, tile_idx), pixels in Sampled_Pixels.items():
++        for p in pixels:
++            current_loss = Pixel_Losses[(view_idx, tile_idx, p)]
++            Error_Map[p.y][p.x] = Alpha_EMA * Error_Map[p.y][p.x] + (1 - Alpha_EMA) * current_loss
++            
++    return Gaussians, Error_Map, Age_Map, Total_Loss
+ ```
+ 
+ **Parameters:**
+-*   $\lambda_\tau^{ncc}$: Weight for sparse NCC loss. Not given in the sources.
+-*   $\alpha$: EMA decay factor for error map. Not given in the sources.
+-*   $K_t$: Number of pixels to sample per tile. Scales with training progress.
+-*   $r_t$: Sampling rate.
++*   **Sampling Rate ($r_t$):** The fraction of pixels to sample per tile. Typical values are 10-20% [S1, unofficial].
++*   **EMA Alpha ($\alpha$):** The smoothing factor for the error map. Not explicitly given in sources, but standard EMA values (e.g., 0.9) are implied [S1, unofficial].
++*   **$\lambda_\tau^{ncc}$:** Weight for sparse NCC loss. Not given in sources [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Relying solely on sparse-pixel L1 supervision degrades reconstruction quality**, particularly high-frequency details [S1, unofficial]. It requires complementary geometry-aware view sampling and sparse NCC regularization [S1, unofficial].
+-*   **Random Pixel Sampling (RPS)** as a substitute for Err-SPS causes failure to preserve high-frequency details and drops in PSNR [S1, unofficial].
+-*   **Starvation:** If age is not considered, pixels with consistently low error may never be sampled, leading to stagnation in those regions.
++*   **Degenerate Error Maps:** If the error map is not initialized properly, early training may sample randomly or bias towards specific regions [S1, unofficial].
++*   **Stale Errors:** If the error map is not updated frequently enough, it may guide sampling to regions that are no longer challenging [S1, unofficial].
++*   **Loss of High-Frequency Details:** Relying solely on sparse L1 supervision can degrade reconstruction quality, particularly in high-frequency regions [S1, unofficial]. This requires complementary techniques like sparse NCC regularization or geometry-aware view sampling [S1, unofficial].
++*   **Rippling Artifacts:** Sparse supervision may introduce subtle rippling artifacts in low-frequency regions with weak texture variations (e.g., walls) [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### TurboGS
+-The primary framework that introduces Err-SPS. It combines Err-SPS with geometry-aware view sampling, sparse NCC regularization, error-driven density control, and a hybrid optimizer. Choose TurboGS when maximum training speed is required without significant quality loss. [TurboGS](15697-turbogs.md)
++A full training framework that incorporates Err-SPS along with structure-aware loss, density control, and a hybrid optimizer. Choose when you need end-to-end acceleration with quality preservation. [TurboGS](15697-turbogs.md)
+ 
+-### 3D Gaussian Splatting Training Loop
+-The baseline method that renders and optimizes over all pixels. Choose this for maximum quality when training time is not a constraint. [3D Gaussian Splatting Training Loop](15139-3d-gaussian-splatting-training-loop.md)
++### Frequency Guided Resolution Scheduler
++Adjusts resolution based on frequency content. Choose when you want to manage computational load via resolution rather than pixel density. [Frequency Guided Resolution Scheduler](15751-frequency-guided-resolution-scheduler.md)
++
++### Sparse SH Order Increment
++Adjusts SH order sparsely. Choose when optimizing appearance details rather than geometry/speed. [Sparse SH Order Increment](18689-sparse-sh-order-increment.md)
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Significantly reduced compared to full pixel rendering. On Mip-NeRF 360, Err-SPS reduces training time from 891s to 85s [S1, unofficial].
+-*   **Memory Complexity:** Reduced memory usage for gradient computation and rasterization buffers, as only sampled pixels are processed. Number of Gaussians (NGS) processed drops from 2.73M to 0.76M [S1, unofficial].
+-*   **Strengths:** Accelerates training by 10x or more; reallocates computation to informative pixels; preserves high-frequency details when combined with NCC.
+-*   **Limitations:** May introduce subtle rippling artifacts in low-frequency regions with weak texture variations (e.g., walls or ceilings) if sparse supervision is not balanced [S1, unofficial]. Requires careful tuning of error and age map updates.
+-*   **When to use:** When training time is a bottleneck and the scene has varying levels of reconstructability.
+-*   **When not to use:** When maximum photometric accuracy is required regardless of training time, or in scenes with uniformly low texture where error maps may not be informative.
++*   **Time Complexity:** Reduces training time significantly. On Mip-NeRF 360, Err-SPS reduces training time from 891s to 85s [S1, unofficial].
++*   **Memory Complexity:** Reduces the number of Gaussian splats (NGS) from 2.73M to 0.76M during training, indicating lower memory pressure for gradient accumulation and parameter updates [S1, unofficial].
++*   **Performance:** Provides substantial acceleration with minimal quality loss when combined with complementary techniques (NCC, density control) [S1, unofficial].
++*   **Strengths:** Efficiently reallocates computation to informative pixels; avoids redundant gradient computation in well-reconstructed regions.
++*   **Limitations:** Can degrade reconstruction quality if used alone; may introduce artifacts in low-texture regions; requires careful tuning of sampling rate and error map update frequency [S1, unofficial].
++*   **When to Use:** When training time is a bottleneck and you can afford to integrate complementary loss terms (like NCC) to maintain quality.
++*   **When Not to Use:** When high-fidelity reconstruction of fine details is critical and you cannot use additional regularization; or when hardware memory is not the primary constraint.
+ 
+ ## Background
+-Err-SPS was introduced in the TurboGS paper by Hanson et al. in 2026 (preprint) [S1, unofficial]. It addresses the observation that as 3DGS training progresses, only a small subset of pixels remains difficult to reconstruct, while most become well-explained and yield marginal gradients [S1, unofficial]. The method builds on the tile-wise rasterization structure of 3DGS and adapts it for sparse supervision.
++Err-SPS was introduced in the TurboGS paper by Hanson et al. in 2026 (preprint) [S1, unofficial]. It is part of the broader effort to accelerate 3D Gaussian Splatting training, building on the observation that most pixels become well-reconstructed early in training, yielding marginal gradients [S1, unofficial].
+ 
+ ## Sources

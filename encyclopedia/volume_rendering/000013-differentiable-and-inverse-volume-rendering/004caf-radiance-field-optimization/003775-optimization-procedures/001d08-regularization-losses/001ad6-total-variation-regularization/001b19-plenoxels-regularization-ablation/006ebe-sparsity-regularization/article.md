@@ -1,0 +1,49 @@
+# Sparsity Regularization
+## Overview
+Sparsity regularization is a technique used in radiance-field optimization to encourage model emptiness, thereby reducing unstructured artifacts and preventing the prediction of background color in empty space [S1, S2]. It sets itself apart from homogeneity-based methods like Total Variation by specifically penalizing non-zero density values to favor a sparse voxel grid [S2]. It builds on [Plenoxels regularization ablation](901-plenoxels-regularization-ablation.md) and complements siblings such as [Sparsity and Beta Loss Regularization](1392-sparsity-and-beta-loss-regularization.md) and [Plenoxel Optimization with TV Regularization](1132-plenoxel-optimization-with-tv-regularization.md) [G].
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of accumulated density values $\sigma_i$ and a scalar regularization weight $\lambda_s$ [S2].
+*   **Output:** A scalar loss value $\mathcal{L}_{sparsity}$ [S2].
+**Data Structures:**
+*   $\sigma_i$: The accumulated density of the $i$-th voxel or sample point [S2].
+*   $\lambda_s$: The sparsity regularization weight [S2].
+**Formula:**
+The sparsity loss is defined as [S2]:
+$$ \mathcal{L}_{sparsity} = \lambda_s \sum_i \frac{\sigma_i^2}{\log\left(1 + \frac{\sigma_i^2}{0.5}\right)} $$
+Where $\sigma_i$ is the accumulated density, $\lambda_s$ is the weight, and $0.5$ is a fixed constant [S2].
+**Parameters:**
+*   $\lambda_s$: Regularization weight [S2].
+*   $0.5$: Fixed denominator constant [S2].
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def sparsity_loss(densities, lambda_s):
+    loss = 0.0
+    for sigma in densities:
+        sigma_sq = sigma * sigma
+        denom = math.log(1.0 + sigma_sq / 0.5)
+        if denom == 0.0:
+            term = 0.0
+        else:
+            term = sigma_sq / denom
+        loss += term
+    return lambda_s * loss
+```
+**Edge Cases and Pitfalls:**
+*   **Zero Density:** When $\sigma_i = 0$, the expression yields $0/0$ [G]. The mathematical limit is 0, so implementations should explicitly return 0 for this case to maintain numerical stability [G].
+*   **Gradient Behavior:** For $\sigma_i \to 0$, the gradient approaches 0, naturally encouraging sparsity without penalizing near-zero values [G].
+## Operating characteristics
+*   **Time Complexity:** $O(N)$, where $N$ is the number of voxels or samples in the batch [G]. The operation involves element-wise squaring, logarithm, division, and summation [G].
+*   **Memory Complexity:** $O(N)$ to store the density values and intermediate computations [G].
+*   **Strengths:** Effectively reduces unstructured artifacts by encouraging emptiness in the model [S1]. It favors sparsity of the voxel grid, which allows for efficient storage (e.g., storing only occupied voxels) and real-time rendering via octree-based culling [S2].
+*   **Limitations:** It does not enforce smoothness (homogeneity) within occupied regions; thus, it is often combined with Total Variation regularization [S1].
+*   **When to use:** When memory efficiency and rendering speed are critical, and the scene has significant empty space [S2].
+## Background
+Sparsity regularization has been demonstrated as an efficient loss function for encouraging model emptiness in radiance fields [S1]. It is used in conjunction with other regularization techniques such as Beta-loss, Cauchy-loss, and entropy loss [S1]. In the context of Plenoxels and related methods, it is used to prevent the model from predicting background color in empty space and to enable model sparsification for real-time rendering [S2]. The specific formula cited is from the NeRFLight paper [S2].
+## Sources
+[S1] ADVANCEMENTS IN RADIANCE FIELD TECHNIQUES FOR VOLUMETRIC VIDEO GENERATION: A TECHNICAL OVERVIEW, https://hal.science/hal-05049100v1, fetched 2026-10-26
+[S2] NeRFLight: Fast and Light Neural Radiance Fields using a ..., https://www.iri.upc.edu/files/scidoc/2861-NeRFLight%3A-Fast-and-Light-Neural-Radiance-Fields-using-a-Shared-Feature-Grid.pdf, fetched 2026-10-27

@@ -1,0 +1,220 @@
+--- v005.md
++++ v006.md
+@@ -1,45 +1,38 @@
+ # Depth Estimation from Point Cloud
+ Also called: Closest Point Depth Estimation
++
+ ## Overview
+-This method generates a depth map for a novel camera viewpoint by projecting an existing 3D point cloud onto the 2D image plane. It solves the problem of converting discrete geometric samples into a continuous depth representation, specifically addressing the ambiguity of multiple points projecting to the same pixel by selecting the closest point to the camera. It differs from [Perspective Projection of Points](4037-perspective-projection-of-points.md) by explicitly handling the depth value assignment and occlusion resolution (closest-point selection) rather than just computing 2D coordinates.
++This method generates a depth map for a novel camera viewpoint by projecting an existing 3D point cloud onto the 2D image plane and resolving occlusions [S1]. It solves the problem of converting sparse or implicit 3D geometry into an explicit per-pixel depth buffer, distinguishing itself from volumetric rendering by relying on discrete point proximity rather than ray-marching through a density field.
++
+ ## How it works
+ **Inputs:**
+-- A 3D point cloud $P = \{p_1, p_2, \dots, p_N\}$, where each $p_i \in \mathbb{R}^3$ is a point in world or camera coordinates.
+-- A camera model for the novel viewpoint, defined by intrinsic matrix $K$ and extrinsic transformation (rotation $R$, translation $t$).
+-- Image dimensions $W \times H$.
++- A 3D point cloud $P = \{p_1, p_2, \dots, p_N\}$, where each $p_i \in \mathbb{R}^3$ is a point in world coordinates.
++- A target camera defined by its intrinsic matrix $K$ and extrinsic matrix $[R|t]$ (rotation and translation from world to camera coordinates).
+ 
+ **Outputs:**
+-- A depth image $D$ of size $W \times H$, where $D(u, v)$ is the distance from the camera center to the closest surface point at pixel $(u, v)$.
++- A depth image $D$ of resolution $W \times H$, where $D(u,v)$ is the distance from the camera center to the closest surface point at pixel $(u,v)$.
+ 
+ **Data Structures:**
+-- Depth image $D$: A 2D array of floats, initialized to 0 or infinity.
+-- Point cloud $P$: List or array of 3D coordinates.
++- A 2D array `depth_map` of size $H \times W$, initialized to zero or infinity.
++- A list of projected points for each pixel to resolve conflicts.
+ 
+ **Steps:**
+-1. **Coordinate Transformation:** Transform each point $p_i$ from the world coordinate system to the novel camera's coordinate system. If $p_i$ is already in camera coordinates, skip this.
++1. **Coordinate Transformation**: Transform each 3D point $p_i$ from world coordinates to camera coordinates $p'_i$:
+    $$ p'_i = R p_i + t $$
+-   where $p'_i = [X_i, Y_i, Z_i]^T$.
++   Let $p'_i = (X_i, Y_i, Z_i)$.
+ 
+-2. **Projection:** Project each transformed point $p'_i$ onto the image plane using the pinhole camera model.
++2. **Projection**: Project each transformed point $p'_i$ onto the image plane using the intrinsic matrix $K$. For a pinhole camera model:
+    $$ u_i = \frac{f_x X_i}{Z_i} + c_x $$
+    $$ v_i = \frac{f_y Y_i}{Z_i} + c_y $$
+-   where $f_x, f_y$ are focal lengths and $c_x, c_y$ are principal point coordinates from $K$.
++   where $f_x, f_y$ are focal lengths and $c_x, c_y$ are principal point coordinates.
+ 
+-3. **Validity Check:** Discard points where $Z_i \le 0$ (behind the camera) or where $(u_i, v_i)$ falls outside the image bounds $[0, W-1] \times [0, H-1]$.
++3. **Validation**: Check if the projected pixel $(u_i, v_i)$ lies within the image boundaries $[0, W-1] \times [0, H-1]$ and if the depth $Z_i > 0$ (point is in front of the camera). Discard points failing these checks.
+ 
+-4. **Closest Point Selection:** For each valid point $(u_i, v_i)$, update the depth image $D$. If $D(u_i, v_i)$ is empty (or infinity) or if the new point is closer to the camera ($Z_i < D(u_i, v_i)$), update:
+-   $$ D(u_i, v_i) = Z_i $$
+-   This ensures that if multiple points project to the same pixel, the one with the smallest depth (closest to the camera) is retained.
++4. **Occlusion Resolution**: For each valid pixel $(u, v)$, collect all points $p_i$ that project to this pixel. Select the point $p_{closest}$ with the minimum depth value $Z_{min} = \min \{Z_i\}$.
+ 
+-5. **Post-processing (Optional):** Handle holes (pixels with 0 or invalid depth) if required by the application, though the core method leaves them as undefined.
++5. **Depth Assignment**: Set the depth value for pixel $(u, v)$ to the depth of the closest point:
++   $$ D(u, v) = Z_{min} $$
+ 
+-**Parameters:**
+-- $Z_i > 0$: Minimum depth threshold to avoid numerical instability.
+-- Image bounds: Strictly enforced to prevent out-of-bounds memory access.
+-
+-**Edge Cases:**
+-- **Multiple Points per Pixel:** Resolved by the "closest point" rule.
+-- **Holes:** Pixels with no corresponding points remain 0 or undefined. The source notes that these holes cannot be distinguished from background areas without additional context [S1].
+-- **Precision:** Floating-point precision in $Z_i$ affects depth accuracy.
++6. **Hole Handling**: Pixels with no projected points remain at their initial value (typically 0 or undefined), representing background or missing surface information [S1].
+ 
+ **Pseudocode:**
+@@ -47,80 +40,94 @@
+ def estimate_depth_from_point_cloud(point_cloud, camera_intrinsics, camera_extrinsics, image_width, image_height):
+     """
+-    point_cloud: List of tuples (x, y, z) in world coordinates.
+-    camera_intrinsics: Dict with keys 'fx', 'fy', 'cx', 'cy'.
+-    camera_extrinsics: Tuple (R, t) where R is 3x3 rotation matrix, t is 3x1 translation vector.
++    point_cloud: List of 3D points (N, 3) in world coordinates.
++    camera_intrinsics: Matrix K (3, 3).
++    camera_extrinsics: Matrix [R|t] (3, 4).
+     image_width, image_height: Dimensions of the output depth map.
+     """
+-    # Initialize depth map with infinity
+-    depth_map = [[float('inf')] * image_width for _ in range(image_height)]
++    # Initialize depth map with zeros (indicating no data)
++    depth_map = np.zeros((image_height, image_width))
+     
+-    fx = camera_intrinsics['fx']
+-    fy = camera_intrinsics['fy']
+-    cx = camera_intrinsics['cx']
+-    cy = camera_intrinsics['cy']
++    # Extract camera parameters
++    R = camera_extrinsics[:, :3]
++    t = camera_extrinsics[:, 3]
++    K = camera_intrinsics
+     
+-    R, t = camera_extrinsics
++    # Transform points to camera coordinates
++    # p_world is (N, 3), p_cam is (N, 3)
++    p_cam = (R @ point_cloud.T).T + t
+     
+-    for point in point_cloud:
+-        # Step 1: Transform to camera coordinates
+-        # p_world = [x, y, z, 1]
+-        # p_cam = R * [x, y, z] + t
+-        x, y, z = point
+-        # Manual matrix-vector multiplication for R * [x, y, z]
+-        rx = R[0][0]*x + R[0][1]*y + R[0][2]*z
+-        ry = R[1][0]*x + R[1][1]*y + R[1][2]*z
+-        rz = R[2][0]*x + R[2][1]*y + R[2][2]*z
++    # Project to 2D
++    # X, Y, Z are (N,) arrays
++    X = p_cam[:, 0]
++    Y = p_cam[:, 1]
++    Z = p_cam[:, 2]
++    
++    # Avoid division by zero
++    valid_depth = Z > 1e-5
++    
++    # Calculate pixel coordinates
++    u = (K[0, 0] * X / Z) + K[0, 2]
++    v = (K[1, 1] * Y / Z) + K[1, 2]
++    
++    # Filter valid points: in front of camera and within image bounds
++    valid_u = (u >= 0) & (u < image_width)
++    valid_v = (v >= 0) & (v < image_height)
++    valid_indices = np.where(valid_depth & valid_u & valid_v)[0]
++    
++    # Get valid coordinates
++    u_valid = u[valid_indices]
++    v_valid = v[valid_indices]
++    z_valid = Z[valid_indices]
++    
++    # Round to integer pixel coordinates
++    u_int = u_valid.astype(int)
++    v_int = v_valid.astype(int)
++    
++    # Find closest point for each pixel
++    # We need to keep only the minimum Z for each (u, v)
++    # Create a mask or use a dictionary/array to store min depth
++    min_depths = np.full((image_height, image_width), np.inf)
++    
++    # Iterate through valid points and update minimum depth
++    for idx in range(len(valid_indices)):
++        u_p = u_int[idx]
++        v_p = v_int[idx]
++        z_p = z_valid[idx]
+         
+-        # Add translation
+-        X = rx + t[0]
+-        Y = ry + t[1]
+-        Z = rz + t[2]
+-        
+-        # Step 2 & 3: Check validity
+-        if Z <= 0:
+-            continue
++        if z_p < min_depths[v_p, u_p]:
++            min_depths[v_p, u_p] = z_p
+             
+-        u = (fx * X / Z) + cx
+-        v = (fy * Y / Z) + cy
+-        
+-        # Check bounds
+-        if u < 0 or u >= image_width or v < 0 or v >= image_height:
+-            continue
+-            
+-        # Step 4: Closest point selection
+-        # Use integer indices
+-        u_int = int(round(u))
+-        v_int = int(round(v))
+-        
+-        # Ensure indices are within bounds (redundant check but safe)
+-        if 0 <= u_int < image_width and 0 <= v_int < image_height:
+-            if Z < depth_map[v_int][u_int]:
+-                depth_map[v_int][u_int] = Z
+-                
+-    # Replace infinity with 0 or a specific background value if needed
+-    for i in range(image_height):
+-        for j in range(image_width):
+-            if depth_map[i][j] == float('inf'):
+-                depth_map[i][j] = 0
+-                
+-    return depth_map
++    # Replace inf with 0 for background/holes
++    min_depths[np.isinf(min_depths)] = 0
++    
++    return min_depths
+ ```
++
++**Parameters:**
++- $N$: Number of points in the cloud. Typical values depend on the generation method (e.g., $N=8$ views used in source [S1] for generation, but $N$ points in cloud vary).
++- $\alpha$: Weighting factor in related generation steps, not directly used in projection [S1].
++
++**Edge Cases:**
++- **Holes**: Pixels with no projected points result in zero depth. The source notes that these holes cannot be automatically distinguished from background areas without additional context [S1].
++- **Precision**: Floating-point errors in projection may cause slight misalignments. Integer rounding of $(u,v)$ is required for array indexing.
++
+ ## Subtopics
+ 
+ ### [Triangulation for Closest Point](9933-triangulation-for-closest-point.md)
+-Computes 3D position by finding the closest intersection to $N$ camera rays, using least-squares optimization and visibility masks. Choose when robustness to occlusion in dynamic scenes is required.
++Computes 3D position by finding the closest intersection to multiple camera rays, using least-squares optimization and visibility masks. Choose when multi-view consistency is required.
+ 
+ ### [Dense Depth Estimation via Plane Sweep](10850-dense-depth-estimation-via-plane-sweep.md)
+-Reconstructs dense depth maps by projecting depth planes and evaluating photo-consistency. Choose when textureless regions need handling and explicit volume generation is not desired.
++Reconstructs dense depth by evaluating photo-consistency across depth planes. Choose for textureless regions or when explicit point clouds are unavailable.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N)$ where $N$ is the number of points in the cloud, as each point is processed once.
+-- **Memory Complexity:** $O(W \times H)$ for the depth map.
+-- **Strengths:** Simple, fast, and memory-efficient for sparse point clouds.
+-- **Limitations:** Produces sparse depth maps with holes if the point cloud is not dense. Cannot recover surface geometry between points.
+-- **When to use:** When a point cloud is already available and a quick depth approximation is needed.
+-- **When not to use:** When dense, continuous depth is required or when the point cloud is too sparse.
++- **Time Complexity**: $O(N)$ for projection and $O(W \cdot H)$ for depth map initialization and hole filling. The bottleneck is typically the projection of $N$ points.
++- **Memory Complexity**: $O(N)$ to store the point cloud and $O(W \cdot H)$ for the depth map.
++- **Performance**: The source reports a PSNR of 31.44 dB on the Pavillon dataset using this method, compared to 30.27 dB for standard MVS [S1].
++- **Strengths**: Simple, fast, and directly utilizes existing 3D points.
++- **Limitations**: Produces sparse depth maps with holes if the point cloud is incomplete. Cannot infer depth in regions without 3D points.
++
+ ## Background
+-Originated in the context of Neural Radiance Fields (NeRF) and Multi-View Stereo (MVS). Specifically, it is used in methods like "Improving Neural Radiance Fields Using Near-Surface Sampling with Point Cloud Generation" [S1] to generate depth images from near-surface point clouds for novel view synthesis.
++This method is used in the test stage of neural radiance field improvements that incorporate point cloud generation [S1]. It serves as a bridge between implicit/explicit 3D representations and explicit 2D depth buffers for novel view synthesis.
++
+ ## Sources
+ [S1] Improving Neural Radiance Fields Using Near-Surface Sampling with Point Cloud Generation, https://link.springer.com/article/10.1007/s11063-024-11654-5, fetched 2026-10-30

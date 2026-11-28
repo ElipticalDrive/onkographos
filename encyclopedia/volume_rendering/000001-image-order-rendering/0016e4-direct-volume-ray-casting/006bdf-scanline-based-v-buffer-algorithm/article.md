@@ -1,0 +1,203 @@
+# Scanline-Based V-Buffer Algorithm
+
+Also called: Polygon-based Raycasting, Sequential Scanline V-Buffer
+
+## Overview
+The Scanline-Based V-Buffer Algorithm is a sequential volume rendering method that converts volumetric data into a set of polygons (triangles) and uses a scanline-based approach with a V-Buffer (a linked list of polygons per pixel) to determine ray intersections and perform compositing [S1, unofficial]. It differs from standard Z-Buffer techniques by maintaining a linked list of all intersecting polygons for compositing rather than discarding them via depth testing, and it avoids the intensive pixel merging and strict back/front ordering constraints of projection algorithms [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Input**: A volumetric dataset converted into a set of distinct triangles (e.g., by converting tetrahedrals or hexahedrals) [S1, unofficial]. A camera position and viewing direction. A transfer function mapping scalar values to color and opacity [S1, unofficial].
+*   **Output**: A 2D image where each pixel contains the composited color and accumulated opacity [S1, unofficial].
+
+**Data Structures**
+*   **Triangle List**: A collection of triangles, where each triangle is defined by three vertices. Each vertex holds 3D coordinates and an associated scalar data value [S1, unofficial].
+*   **V-Buffer**: For each pixel $(x, y)$, a linked list storing the intersection points of active polygons with the ray passing through that pixel. The list is ordered front-to-back [S1, unofficial].
+*   **Active Polygon List**: A global or scanline-local structure tracking polygons that intersect the current scanline, allowing incremental updates as the scanline moves [S1, unofficial].
+
+**Steps**
+1.  **Polygon Conversion**: Convert the volumetric data set into a set of polygons (specifically triangles). This is done by connecting data points (e.g., converting tetrahedrals or hexahedrals to triangles) [S1, unofficial]. This step is performed once and the polygonal representation is reused [S1, unofficial].
+2.  **Scanline Rasterization**: Iterate through the image scanline by scanline. For each scanline, maintain a linked list of active polygons. Update this list incrementally as the scanline moves from one line to the next, performing insertions and deletions of polygons that enter or leave the scanline [S1, unofficial].
+3.  **Intersection Calculation**: For each pixel in the current scanline, shoot a ray and determine the list of polygon intersections in front-to-back order. The location of each intersection is determined by intersecting the ray with the planes of the active polygons [S1, unofficial].
+4.  **Sampling**: For a single pixel, iterate through the sorted list of intersections. Take samples between each pair of consecutive triangles. The sampling point is typically the midpoint of the ray segment between two consecutive intersection points [S1, unofficial].
+5.  **Interpolation**: Compute the scalar value at the sampling point by interpolating the scalar values at the end points (vertices) of the intersected triangles. The source specifies using Inverse Distance Interpolation, though Trilinear interpolation is also mentioned as an alternative [S1, unofficial].
+    *   Let the scalar values at the vertices of the relevant geometry be $v_1, v_2, \dots, v_k$.
+    *   Let the distances from the sampling point to these vertices be $d_1, d_2, \dots, d_k$.
+    *   The interpolated value $V_{sample}$ is calculated as:
+        $$ V_{sample} = \frac{\sum_{i=1}^{k} \frac{v_i}{d_i}}{\sum_{i=1}^{k} \frac{1}{d_i}} $$
+    *   Note: If $d_i = 0$, the vertex value is used directly or handled via a limit case [G].
+6.  **Classification**: Map the interpolated scalar value $V_{sample}$ to color $\mathbf{c}$ and opacity $\alpha$ using a transfer function [S1, unofficial].
+7.  **Compositing**: Composite the sampled color and opacity into the pixel color using the front-to-back volume rendering equation, as defined in the parent article [Direct volume ray casting](19-direct-volume-ray-casting.md) [S1, unofficial].
+
+**Pitfalls and Edge Cases**
+*   **Invalid Sampling Geometry**: Sampling is prohibited or invalid if two consecutive triangles in the intersection list share only an external face (6 points) or only a single point (5 points) [S1, unofficial]. Valid sampling requires the triangles to share an edge (4 points) or be internal faces [S1, unofficial]. If the number of unique vertices defining the space between two consecutive triangles is 6 (external faces) or 5 (single point shared), the sampling step must be skipped or handled specially [S1, unofficial].
+*   **Ordering**: The intersection list must be strictly ordered front-to-back to ensure correct compositing [S1, unofficial].
+
+**Pseudocode**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def scanline_vbuffer_render(triangles, image_width, image_height, camera, transfer_function):
+    """
+    Renders a volume using the Scanline-Based V-Buffer Algorithm.
+    
+    Args:
+        triangles: List of Triangle objects. Each Triangle has vertices [v1, v2, v3].
+                   Each Vertex has position (x, y, z) and scalar value 'val'.
+        image_width, image_height: Dimensions of the output image.
+        camera: Object with method get_ray(x, y) returning ray origin and direction.
+        transfer_function: Function mapping scalar value to (color, opacity).
+        
+    Returns:
+        image: 2D array of composited colors.
+        alpha_image: 2D array of accumulated opacities.
+    """
+    # Initialize output buffers
+    image = zeros((image_height, image_width, 3))
+    alpha_image = zeros((image_height, image_width))
+    
+    # Pre-process triangles if necessary (e.g., ensure planar, store scalar values at vertices)
+    # This step is assumed to be done once before rendering
+    for tri in triangles:
+        for vertex in tri.vertices:
+            assert hasattr(vertex, 'val'), "Vertices must have scalar values"
+
+    # Iterate over scanlines
+    for y in range(image_height):
+        # Update active polygon list for the current scanline
+        # This involves adding triangles that intersect the current y-range
+        # and removing those that do not.
+        active_triangles = get_active_triangles_for_scanline(y, triangles)
+        
+        # Iterate over pixels in the scanline
+        for x in range(image_width):
+            # Get ray for this pixel
+            ray_origin, ray_direction = camera.get_ray(x, y)
+            
+            # Find intersections with active triangles
+            # Returns a list of (intersection_point, triangle, distance_t)
+            intersections = []
+            for tri in active_triangles:
+                hit = intersect_ray_triangle(ray_origin, ray_direction, tri)
+                if hit is not None:
+                    intersections.append(hit)
+            
+            # Sort intersections by distance t (front-to-back)
+            intersections.sort(key=lambda item: item[2])
+            
+            # Initialize compositing state for this pixel
+            acc_color = [0.0, 0.0, 0.0]
+            acc_alpha = 0.0
+            
+            # Iterate through intersections to sample between consecutive triangles
+            for i in range(len(intersections) - 1):
+                p1, tri1, t1 = intersections[i]
+                p2, tri2, t2 = intersections[i+1]
+                
+                # Check validity of sampling between these two triangles
+                # Valid if they share an edge (4 unique vertices) or are internal
+                # Invalid if they share only a point (5 unique vertices) or external face (6 unique vertices)
+                if not is_valid_sampling_pair(tri1, tri2):
+                    continue
+                
+                # Calculate sampling point (midpoint)
+                t_sample = (t1 + t2) / 2.0
+                sample_point = ray_origin + ray_direction * t_sample
+                
+                # Interpolate scalar value at sample_point
+                # Using Inverse Distance Interpolation from vertices of the involved triangles
+                # For simplicity, assume we interpolate from the 4 vertices of the quad formed by the shared edge
+                # or all vertices of the two triangles if they don't share an edge but are valid.
+                # The source mentions "end points of the triangles".
+                vertices = get_relevant_vertices(tri1, tri2)
+                scalar_val = inverse_distance_interpolation(sample_point, vertices)
+                
+                # Map to color and opacity
+                color, opacity = transfer_function(scalar_val)
+                
+                # Composite
+                # C_out = C_acc + (1 - alpha_acc) * c * alpha
+                # alpha_out = alpha_acc + (1 - alpha_acc) * alpha
+                weight = (1.0 - acc_alpha) * opacity
+                acc_color[0] += weight * color[0]
+                acc_color[1] += weight * color[1]
+                acc_color[2] += weight * color[2]
+                acc_alpha += weight
+                
+                # Early termination if fully opaque
+                if acc_alpha >= 1.0:
+                    break
+            
+            image[y, x] = acc_color
+            alpha_image[y, x] = acc_alpha
+
+    return image, alpha_image
+
+def is_valid_sampling_pair(tri1, tri2):
+    """
+    Checks if two consecutive triangles allow valid sampling.
+    Valid: Share an edge (4 unique vertices) or are internal.
+    Invalid: Share only a point (5 unique vertices) or external face (6 unique vertices).
+    """
+    unique_vertices = set()
+    for v in tri1.vertices:
+        unique_vertices.add(id(v)) # Assuming vertex identity or position check
+    for v in tri2.vertices:
+        unique_vertices.add(id(v))
+    
+    num_unique = len(unique_vertices)
+    
+    # If 6 unique vertices, it's an external face pair -> Invalid
+    if num_unique == 6:
+        return False
+    # If 5 unique vertices, they share only a point -> Invalid
+    if num_unique == 5:
+        return False
+    # If 4 unique vertices, they share an edge -> Valid
+    if num_unique == 4:
+        return True
+    # Other cases (e.g., identical triangles, though unlikely in sorted list)
+    # Should be handled or considered invalid depending on context.
+    # Source implies "except external faces", so internal configurations are valid.
+    return True
+
+def inverse_distance_interpolation(point, vertices):
+    """
+    Computes scalar value at 'point' using Inverse Distance Interpolation
+    from the scalar values of 'vertices'.
+    """
+    numerator = 0.0
+    denominator = 0.0
+    
+    for v in vertices:
+        dist_sq = sum((point[i] - v.pos[i])**2 for i in range(3))
+        dist = sqrt(dist_sq)
+        
+        # Guard against division by zero if point coincides with vertex
+        if dist < 1e-9:
+            return v.val
+        
+        inv_dist = 1.0 / dist
+        numerator += v.val * inv_dist
+        denominator += inv_dist
+        
+    if denominator == 0:
+        return 0.0 # Or average of values? Source doesn't specify.
+        
+    return numerator / denominator
+```
+
+## Operating characteristics
+*   **Time Complexity**: The algorithm is sequential and processes pixels scanline by scanline. The complexity depends on the number of triangles $T$ and the image resolution $W \times H$. For each pixel, ray-triangle intersection tests are performed against active triangles. In the worst case, this is $O(W \cdot H \cdot T)$, but coherence and the V-Buffer structure reduce the number of active triangles per pixel [S1, unofficial].
+*   **Memory Complexity**: Requires storage for the polygonal representation of the volume and the V-Buffer linked lists. The V-Buffer stores intersections per pixel, so memory usage scales with $W \cdot H$ and the average number of intersections per pixel [S1, unofficial].
+*   **Strengths**: High image quality due to raycasting nature. Leverages scanline coherence for efficient intersection updates. Avoids post-processing merging required by projection methods. Allows easy application of parallel polygon rendering techniques [S1, unofficial].
+*   **Limitations**: Sequential nature limits parallelization compared to pure GPU raycasting. Requires preprocessing to convert volume to polygons. Performance degrades with high triangle counts. The validity check for sampling between triangles adds complexity [S1, unofficial].
+*   **When to use**: When high-quality volume rendering is needed and the data can be efficiently converted to polygons. Useful when multiple transfer functions need to be tested on the same view, as the polygonal structure and intersections are reused [S1, unofficial].
+*   **When not to use**: For very large datasets where polygon conversion is prohibitive. When real-time performance is critical and parallel GPU raycasting is available.
+
+## Background
+The Scanline-Based V-Buffer Algorithm was proposed as a sequential volume rendering approach that combines ideas from raycasting and projection methods [S1, unofficial]. It was introduced to address difficulties in parallelizing projection algorithms and to leverage the high quality of raycasting. The algorithm uses a V-Buffer to maintain a linked list of polygons for compositing, similar to the Z-Buffer but without depth testing discarding [S1, unofficial].
+
+## Sources
+[S1] ;Г, ,1:. 'i f ,3 Ψ |'̂*i, ̂ t ѴУ t ̂ -.̂ 'j f'\ ' ‘'̂ '· îM. Vl ■I ·' !■' Í; 1 ! é .1 li ifi; .· ̂'■ '’(■H ' ■'“' ’"ΐ ΐ'-ΐ ...., https://repository.bilkent.edu.tr/server/api/core/bitstreams/a7dc03c6-3640-4028-b1b3-d6296aa2d23c/content, fetched 2026-10-30 (unofficial)

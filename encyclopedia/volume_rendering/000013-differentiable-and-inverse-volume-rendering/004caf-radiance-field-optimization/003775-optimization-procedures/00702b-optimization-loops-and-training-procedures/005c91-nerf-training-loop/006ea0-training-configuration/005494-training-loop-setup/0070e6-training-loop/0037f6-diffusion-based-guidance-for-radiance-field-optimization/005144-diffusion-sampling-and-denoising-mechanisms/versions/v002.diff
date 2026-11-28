@@ -1,0 +1,56 @@
+--- v001.md
++++ v002.md
+@@ -1,18 +1,28 @@
+ # Diffusion Sampling and Denoising Mechanisms
+ ## Overview
+-This family defines the iterative algorithms and neural architectures used to reverse the diffusion process, transforming random noise into structured radiance field representations or refining existing NeRF renderings. It sets itself apart from direct optimization methods by leveraging pre-trained 2D diffusion priors (like Stable Diffusion) to guide the 3D generation or reconstruction, using noise prediction and classifier-free guidance to enforce photorealistic textures and geometry [8117-diffusion-based-guidance-for-radiance-field-optimization].
++This family defines the iterative reverse-diffusion algorithms and denoiser architectures used to refine latent representations of radiance fields. It solves the problem of generating or reconstructing 3D scenes from 2D observations by iteratively denoising a latent variable $x_t$ to estimate the clean latent $x_0$. It differs from its siblings by focusing on the mathematical mechanics of the sampling loop (e.g., DDIM) and the specific neural network architecture (e.g., 3D U-Net) that performs the noise prediction, rather than the higher-level optimization loops or scene generation tasks.
++## Shared principles
++The core mechanism involves a forward diffusion process that adds Gaussian noise to a clean latent $x_0$ over $T$ timesteps, and a reverse process that removes this noise. The reverse process is parameterized by a neural network $f_\theta$ (the denoiser) that predicts the noise component $\epsilon_\theta(x_t, t)$ or the clean signal $\hat{x}_0$.
+ 
+-## Shared principles
+-All methods in this family operate within the reverse diffusion process, where a noisy latent representation $x_t$ at timestep $t$ is iteratively denoised to estimate the clean latent $x_0$. The core mechanism involves a denoiser network (or a frozen pre-trained model) predicting the noise component $\epsilon_\theta(x_t, t)$ or the score $\nabla_{x_t} \log p(x_t)$. This prediction is combined with conditional information (e.g., text embeddings or image features) via Classifier-Free Guidance (CFG) to steer the generation towards the desired semantic content. The update rule generally follows the form:
+-$$ x_{t-1} = \mu_\theta(x_t, t) + \sigma_t \epsilon $$
+-where $\mu_\theta$ is the mean estimate derived from the noise prediction and the diffusion schedule parameters ($\alpha_t, \bar{\alpha}_t$), and $\sigma_t \epsilon$ represents stochastic noise (which may be zero for deterministic samplers like DDIM). In the context of radiance fields, the "latent" may be a 2D image latent (for 2D-to-3D consistency) or a 3D voxel/triplane latent (for direct 3D generation).
++The reverse step from $x_t$ to $x_{t-1}$ is generally defined by:
++$$ x_{t-1} = \sqrt{\alpha_{t-1}} \cdot \hat{x}_0 + \text{dir\_xt} + \text{noise} $$
++where $\alpha_t$ are cumulative noise schedule coefficients. The term $\text{dir\_xt}$ represents the deterministic direction towards the predicted clean sample, and $\text{noise}$ is a stochastic term scaled by $\sigma_t$.
++
++For DDIM sampling, the transition is deterministic when $\eta=0$:
++$$ \text{dir\_xt} = \sqrt{1 - \alpha_{t-1} - \sigma_t^2} \cdot \epsilon_t $$
++$$ \text{noise} = 0 $$
++where $\epsilon_t$ is the predicted noise.
++
++Classifier-Free Guidance (CFG) modifies the prediction by combining conditional and unconditional model outputs:
++$$ \epsilon_t = \epsilon_t^{uncond} + s \cdot (\epsilon_t^{cond} - \epsilon_t^{uncond}) $$
++where $s$ is the guidance scale.
+ 
+ ## Subtopics
+ 
+ ### [DDIM Sampling with Classifier-Free Guidance](8118-ddim-sampling-with-classifier-free-guidance.md)
+-DDIM Sampling with Classifier-Free Guidance (CFG) is a deterministic (or stochastic with $\eta > 0$) reverse diffusion algorithm that generates samples or refines existing ones by iteratively denoising latent variables [8118-ddim-sampling-with-classifier-free-guidance.md]. It sets itself apart from standard DDPM sampling by skipping intermediate noise steps to allow for fewer sampling iterations, and by combining unconditional and conditional model predictions via a guidance scale to enhance fidelity [8118-ddim-sampling-with-classifier-free-guidance.md]. In the context of radiance field optimization, it serves as a denoising mechanism to refine NeRF renderings or guide 3D generation by leveraging 2D diffusion priors [8118-ddim-sampling-with-classifier-free-guidance.md].
++DDIM Sampling with Classifier-Free Guidance is a deterministic (or stochastic) reverse diffusion algorithm that generates samples or refines existing representations by iteratively denoising a latent variable $x_t$ to estimate the clean latent $x_0$. It builds on [DDIM Sampling and Denoising Mechanisms](14430-diffusion-sampling-and-denoising-mechanisms.md) by skipping intermediate noise steps to allow for fewer sampling iterations than standard DDPM while maintaining sample quality. It differs from its sibling [DDPM Denoise Function Network](11102-ddpm-denoise-function-network.md) by using a fixed noise schedule and deterministic transition equations, and it incorporates CFG to steer generation towards conditional inputs (e.g., text or image features) by combining unconditional and conditional model predictions.
+ 
+ ### [DDPM Denoise Function Network](11102-ddpm-denoise-function-network.md)
+-The DDPM Denoise Function Network is a 3D convolutional neural network that predicts the noise to be removed from a latent radiance field representation during the reverse diffusion process. It serves as the core denoiser in diffusion-based radiance field optimization, enabling the generation of 3D structures from noisy latent codes. It differs from sibling methods like [DDIM Sampling with Classifier-Free Guidance](8118-ddim-sampling-with-classifier-free-guidance.md) by relying on a fixed architectural prior for noise prediction rather than explicit classifier gradients or deterministic sampling trajectories [11102-ddpm-denoise-function-network.md].
++The DDPM Denoise Function Network is a 3D convolutional neural network used as the core denoiser in diffusion-based radiance field optimization. It predicts the noise component $\epsilon_\theta$ for a noisy 3D latent field, enabling the reverse diffusion process to iteratively refine the radiance field representation. It differs from sibling methods like [DDIM Sampling with Classifier-Free Guidance](8118-ddim-sampling-with-classifier-free-guidance.md) by its specific architectural choice of an 8-layer 3D U-Net-like structure designed for voxel grid inputs, rather than relying on 2D image latents or transformer-based attention mechanisms.
+ 
+ ### Image-Guided Sampling
+@@ -20,12 +30,12 @@
+ - [S1] A sampling method that guides the denoising process of a diffusion model using gradients of the rendering loss against known observations to reconstruct 3D scenes from images.
+ #### step
+-- [S1] Combine guidance gradients $g$ with unconditional score prediction as a correction to the denoising output $\hat{x}$: $\hat{x} \leftarrow \hat{x} - \lambda_{gd}(t) g$.
+-- [S1] Use a predictor-corrector sampler to solve for $x(0)$ by alternating between a DDIM step and multiple Langevin correction steps.
++- [S1] Combine guidance gradients g with unconditional score prediction as a correction to the denoising output x̂: x̂ ← x̂ − λgd(t) g.
++- [S1] Use a predictor-corrector sampler to solve for x(0) by alternating between a DDIM step and multiple Langevin correction steps.
+ #### parameter
+-- [S1] $\omega$: Hyperparameter for SNR-based weighting, chosen as 0.5 or 0.25.
+-- [S1] $\lambda_{gd}$: Guidance scale used to combine guidance gradients with unconditional score prediction.
++- [S1] ω: Hyperparameter for SNR-based weighting, chosen as 0.5 or 0.25.
++- [S1] λgd: Guidance scale used to combine guidance gradients with unconditional score prediction.
+ 
+ ## Background
+-The integration of diffusion models into volume rendering originated from the need to enforce photorealistic priors in 3D generation and reconstruction tasks where data is sparse or ambiguous. Early works like Single-Stage Diffusion NeRF [S1] demonstrated that joint optimization of scene codes and diffusion priors could improve reconstruction quality. The use of DDIM for efficient sampling [S1] and the application of Classifier-Free Guidance [8118-ddim-sampling-with-classifier-free-guidance.md] became standard techniques to balance fidelity and diversity. The development of 3D-specific denoising networks [11102-ddpm-denoise-function-network.md] allowed for direct manipulation of volumetric latents, bridging the gap between 2D diffusion priors and 3D geometric representations.
++The concept of using diffusion models for 3D generation and reconstruction emerged prominently with Single-Stage Diffusion NeRF [S1]. This approach unifies 3D generation and reconstruction by jointly optimizing scene codes, a diffusion prior, and a NeRF decoder. The method leverages DDIM solvers [S1] to sample from the diffusion prior and guides the process using rendering loss gradients.
+ 
+ ## Sources

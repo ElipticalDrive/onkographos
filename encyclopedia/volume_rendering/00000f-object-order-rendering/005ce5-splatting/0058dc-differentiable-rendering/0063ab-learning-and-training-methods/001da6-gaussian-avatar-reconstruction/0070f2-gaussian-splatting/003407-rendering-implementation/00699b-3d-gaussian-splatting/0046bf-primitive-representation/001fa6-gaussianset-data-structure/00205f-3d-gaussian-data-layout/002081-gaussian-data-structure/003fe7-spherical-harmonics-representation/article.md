@@ -1,0 +1,202 @@
+# Spherical Harmonics Representation
+
+Also called: SH in 3DGS, Spherical Harmonics (SH) in 3DGS SLAM, Spherical Harmonics Algorithm, View-dependent color via SH
+
+## Overview
+Spherical Harmonics (SH) is a mathematical basis used in 3D Gaussian Splatting to represent the view-dependent color of each Gaussian primitive [S1, unofficial]. It adds view-dependent color representation to Gaussians, capturing appearance variations that a single static RGB value cannot represent [S2, unofficial]. An analytical Jacobian propagates gradients from SH to camera poses during optimization, though this may marginally worsen trajectory estimates if SH incorrectly models non-view-dependent effects caused by camera motion [S2, unofficial].
+
+## How it works
+### Inputs and Outputs
+**Inputs:**
+- The viewing direction vector $\mathbf{v}$ (normalized) in the local coordinate system of the Gaussian [G].
+- The SH degree parameter $L$ (denoted as `sh_degree` in implementation), which determines the maximum degree $l$ used [S1, unofficial].
+- The SH coefficients $c_{l,m}^k$ for each color channel $k \in \{R, G, B\}$ [S1, unofficial].
+
+**Outputs:**
+- The view-dependent color $\mathbf{C}(\mathbf{v}) = [C_R, C_G, C_B]^T$ [G].
+
+### Data Structures
+Each 3D Gaussian stores SH coefficients. For a maximum degree $L$, the number of coefficients per color channel is $(L+1)^2$ [G]. The total number of coefficients per Gaussian is $3(L+1)^2$ [G].
+- **Layout:** The coefficients are typically stored as a flat array or a tensor of shape $[3, (L+1)^2]$ or $[(L+1)^2, 3]$ [G].
+- **Bit Packing:** Not specified in the sources [S2, unofficial].
+
+### Mathematical Foundation
+Spherical Harmonics are derived from the solution of Laplace's equation in a 3D spherical coordinate system [S1, unofficial].
+
+1.  **Laplace's Equation:**
+    In Cartesian coordinates:
+    $$ \frac{\partial^2 f}{\partial x^2} + \frac{\partial^2 f}{\partial y^2} + \frac{\partial^2 f}{\partial z^2} = 0 $$
+    Converted to spherical coordinates $(r, \theta, \varphi)$ where $x = r\sin\theta\cos\varphi$, $y = r\sin\theta\sin\varphi$, $z = r\cos\theta$:
+    $$ \frac{1}{r^{2}}\frac{\partial }{\partial r}\left(r^{2}\frac{\partial f}{\partial r}\right) + \frac{1}{r^{2}\sin\theta } \frac{\partial }{\partial \theta }\left(\sin\theta \frac{\partial f}{\partial \theta }\right) + \frac{1}{r^{2}\sin^{2}\theta } \frac{\partial ^{2} f}{\partial \varphi ^{2}} = 0 $$
+
+2.  **Separation of Variables:**
+    Assume $f(r, \theta, \varphi) = R(r)\Theta(\theta)\Phi(\varphi)$ [S1, unofficial]. This yields:
+    - Radial part: $\frac{1}{R}\frac{\partial}{\partial r}\left(r^{2}\frac{\partial R}{\partial r}\right) = \lambda$ [S1, unofficial]
+    - Azimuthal part: $\frac{\partial^{2}\Phi}{\partial \varphi^{2}} = -m^{2}\Phi$, where $m \in \mathbb{N}$ [S1, unofficial]
+    - Polar part: $\sin\theta \frac{\partial}{\partial \theta}\left(\sin\theta \frac{\partial \Theta}{\partial \theta}\right) = (m^{2}-\lambda \sin^{2}\theta)\Theta$ [S1, unofficial]
+
+3.  **Associated Legendre Equation:**
+    Let $x = \cos\theta$, $\Theta \rightarrow P(x)$, and $\lambda = l(l+1)$ where $l \in \mathbb{Z}^+$ [S1, unofficial]. The equation becomes:
+    $$ \frac{\partial}{\partial x}\left[(1-x^{2})\frac{\partial P(x)}{\partial x}\right] + \left[l(l+1)-\frac{m^{2}}{1-x^{2}}\right]P(x) = 0 $$
+    The solution is the Associated Legendre Function $P_l^m(x)$ [S1, unofficial]. Rodrigues' formula is given as:
+    $$ P_{l}(x)=\frac{1}{2^{l}l!}\frac{\partial ^{l}}{\partial x^{l}}(x^2-1)^{l} $$
+    Orthonormality condition:
+    $$ \int_{-1}^{1}\sqrt{\frac{2m+1}{2}}P_{m}(x) \sqrt{\frac{2n+1}{2}}P_{n}(x)dx=\delta_{mn} $$
+    Recursion relation:
+    $$ (l+1)P_{l+1}(x)=(2l+1)xP_{l}(x)-lP_{l-1}(x) $$
+
+4.  **Spherical Harmonics Function:**
+    The SH basis functions $Y_l^m(\theta, \varphi)$ are defined as:
+    $$ Y_l^m(\theta, \varphi) = \begin{cases} \sqrt{2} K_{l}^{m}\cos(m\varphi)P_{l}^{m}(\cos\theta) & m > 0 \\ \sqrt{2} K_{l}^{m}\sin(-m\varphi)P_{l}^{-m}(\cos\theta) & m < 0 \\ K_{l}^{0}P_{l}^{0}(\cos\theta) & m = 0 \end{cases} $$
+    The normalization scaling factor $K_{l}^{m}$ is:
+    $$ K_{l}^{m}=\sqrt{\frac{2l+1}{4\pi}\cdot \frac{(l-|m|)!}{(l+|m|)!}} $$
+    where $l \in \mathbb{Z}^{+}, m \in \mathbb{Z}, |m| \le l$ [S1, unofficial].
+
+### Rendering Formula
+The color $\mathbf{C}(\mathbf{v})$ for a viewing direction $\mathbf{v}$ (represented by spherical angles $\theta, \varphi$) is computed by projecting the SH coefficients onto the basis functions:
+$$ \mathbf{C}(\theta, \varphi) = \sum_{l=0}^{L} \sum_{m=-l}^{l} c_{l,m} Y_l^m(\theta, \varphi) $$
+The number of basis functions is $(L+1)^2$ [G]. For $L=3$, this is 16 coefficients per channel [G].
+
+### Parameters
+- **`sh_degree` ($L$):** The maximum degree of SH coefficients. Default value is 3 [S1, unofficial].
+    - $L=0$: View-independent color (constant).
+    - $L=1$: Captures linear variations (e.g., simple lighting).
+    - $L=2, 3$: Captures more complex view-dependent effects.
+- **Omission:** SH can be omitted (set $L=0$ or disabled) for synthetic datasets like Replica that lack view-directional effects [S1, S2, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def compute_sh_basis(theta, phi, max_degree):
+    """
+    Computes the Spherical Harmonics basis functions for a given direction.
+    Returns a list of basis values for degrees 0 to max_degree.
+    """
+    cos_theta = math.cos(theta)
+    basis = []
+    for l in range(max_degree + 1):
+        for m in range(-l, l + 1):
+            abs_m = abs(m)
+            # Compute Associated Legendre Function P_l^{|m|}(cos_theta)
+            p_lm = associated_legendre(l, abs_m, cos_theta)
+            # Normalization factor
+            k_lm = math.sqrt((2 * l + 1) / (4 * math.pi) * 
+                             math.factorial(l - abs_m) / math.factorial(l + abs_m))
+            # Angular part based on m
+            if m > 0:
+                angular = math.sqrt(2) * math.cos(m * phi)
+            elif m < 0:
+                angular = math.sqrt(2) * math.sin(-m * phi)
+            else:
+                angular = 1.0
+            basis.append(k_lm * p_lm * angular)
+    return basis
+
+def associated_legendre(l, m, x):
+    """
+    Computes the Associated Legendre Function P_l^m(x).
+    Uses recurrence relations for efficiency.
+    """
+    if m < 0:
+        raise ValueError("m must be non-negative for this implementation")
+    if l < m:
+        return 0.0
+    if l == 0:
+        return 1.0
+    if l == 1:
+        return x if m == 0 else 0.0
+        
+    # Compute P_l^m using recurrence
+    if m == 0:
+        p_l_minus_1 = associated_legendre(l - 1, 0, x)
+        p_l_minus_2 = associated_legendre(l - 2, 0, x)
+        return ((2 * l - 1) * x * p_l_minus_1 - (l - 1) * p_l_minus_2) / l
+    else:
+        # P_m^m
+        if l == m:
+            if m == 0: return 1.0
+            double_fact = 1
+            for i in range(1, 2 * m, 2):
+                double_fact *= i
+            return double_fact * ((1 - x * x) ** (m / 2))
+        # Recurrence for l > m
+        p_l_minus_1 = associated_legendre(l - 1, m, x)
+        p_l_minus_2 = associated_legendre(l - 2, m, x)
+        return ((2 * l - 1) * x * p_l_minus_1 - (l + m - 1) * p_l_minus_2) / (l - m)
+
+def render_sh(color_coeffs, theta, phi, max_degree):
+    """
+    Renders the view-dependent color using SH coefficients.
+    color_coeffs: list of coefficients for R, G, B channels.
+                  Shape: [3, (max_degree+1)^2]
+    """
+    basis = compute_sh_basis(theta, phi, max_degree)
+    color = [0.0, 0.0, 0.0]
+    idx = 0
+    for l in range(max_degree + 1):
+        for m in range(-l, l + 1):
+            val = basis[idx]
+            for c in range(3):
+                color[c] += color_coeffs[c][idx] * val
+            idx += 1
+    return color
+```
+
+### Edge Cases and Pitfalls
+- **Precision:** Higher degrees ($L > 3$) increase computational cost and memory usage without guaranteed quality improvement [S1, unofficial].
+- **Boundary Conditions:** The SH basis is defined on the unit sphere. Directions must be normalized [G].
+- **Overfitting:** Using high SH degrees on datasets without view-dependent effects (like Replica) may lead to overfitting or unnecessary memory usage [S1, S2, unofficial].
+
+## Subtopics
+
+### [GSPull](2773-gspull.md)
+Optimizes Gaussian parameters via pull-based gradients; chosen when gradient propagation efficiency is prioritized over push-based methods.
+
+### [Composite Error Map and Densification/Pruning Scoring](3396-composite-error-map-and-densification-pruning-scoring.md)
+Scores Gaussians using accumulated rendering error; chosen for adaptive densification and pruning during training.
+
+### [Dynamic Buffer Management](3753-dynamic-buffer-management.md)
+Manages GPU memory allocation for variable Gaussian counts; chosen when scene complexity fluctuates or memory is constrained.
+
+### [GS-W Network Architecture](5927-gs-w-network-architecture.md)
+Uses a neural network to predict Gaussian attributes; chosen when parametric generation is preferred over explicit storage.
+
+### [VastGaussian](6000-vastgaussian.md)
+Optimizes large-scale scene rendering via hierarchical structures; chosen for city-scale or massive point cloud datasets.
+
+### [Data Layout and Storage](6235-data-layout-and-storage.md)
+Defines memory layout and compression for Gaussian attributes; chosen to minimize bandwidth and improve cache locality.
+
+### [SLAM and Tracking](6236-slam-and-tracking.md)
+Integrates 3DGS with visual-inertial odometry; chosen for real-time mapping and pose estimation.
+
+### [7D Gaussian Splatting](11462-7d-gaussian-splatting.md)
+Extends Gaussians with additional dimensions (e.g., time, velocity); chosen for dynamic scene reconstruction.
+
+### [Deformation and Dynamic Modeling](11474-deformation-and-dynamic-modeling.md)
+Applies deformation fields to static Gaussians; chosen when explicit dynamic primitives are too expensive.
+
+### [Deformable Radial Kernel (DRK) Parametrization](13703-deformable-radial-kernel-drk-parametrization.md)
+Replaces fixed Gaussian kernels with deformable ones; chosen to better model complex shapes and occlusions.
+
+### [Gaussian Grouping](14893-gaussian-grouping.md)
+Clusters Gaussians for efficient rendering; chosen to reduce draw calls and improve rasterization throughput.
+
+## Operating characteristics
+- **Time Complexity:** Rendering time scales linearly with the number of basis functions, $O((L+1)^2)$ per Gaussian per pixel [G].
+- **Memory Complexity:** Memory per Gaussian increases by $3(L+1)^2$ floats [G].
+- **Measured Performance:** On TUM RGB-D, enabling SH increases memory from 3.97 MB to 11.47 MB [S2, unofficial]. Rendering PSNR improves from 21.89 to 24.37 with SH enabled [S2, unofficial]. ATE RMSE marginally worsens from 1.47 cm to 1.56 cm with SH enabled [S2, unofficial].
+- **Strengths:** Accurately models view-dependent color; enables joint optimization of camera poses via analytical gradients [S2, unofficial].
+- **Limitations:** Increases memory usage significantly; may degrade trajectory estimation if SH incorrectly models non-view-dependent effects caused by camera motion [S2, unofficial]. Higher degrees do not always yield better results and increase computational cost [S1, unofficial].
+- **When to Use:** When view-dependent effects (specularities, complex lighting) are present.
+- **When Not to Use:** For synthetic datasets without view-dependent effects (e.g., Replica) or when memory is severely constrained [S1, S2, unofficial].
+
+## Background
+Spherical Harmonics were introduced as a solution to Laplace's equation in spherical coordinates [S1, unofficial]. In the context of 3D Gaussian Splatting, SH was adopted to represent view-dependent color, building on the original 3DGS method [S1, S2, unofficial]. The method has been widely used in subsequent works, including 3DGS SLAM, dynamic 3DGS, and human 3DGS generation [S1, unofficial].
+
+## Sources
+[S1] I3DGS: Improve 3D Gaussian Splatting from Multiple Dimensions, https://arxiv.org/abs/2405.06408v1, fetched 2026-10-26 (unofficial)
+[S2] Gaussian Splatting SLAM, https://arxiv.org/abs/2312.06741, fetched 2026-10-27 (unofficial)

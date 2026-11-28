@@ -1,0 +1,413 @@
+--- v005.md
++++ v006.md
+@@ -4,194 +4,237 @@
+ 
+ ## Overview
+-Chunk Mesh Assembly aggregates mesh data from multiple rendering layers (e.g., opaque, water, transparent solid, fluids) into contiguous typed arrays for efficient GPU submission [S2, 4100-chunk-mesh-assembly.md, unofficial]. It solves the problem of fragmented geometry by mapping block types to materials and handling per-vertex attributes such as ambient occlusion and light levels within a unified buffer structure [S1, S3, 4100-chunk-mesh-assembly.md, unofficial]. Unlike [Block Render Data Structure & Instance Generation](6209-block-render-data-structure-instance-generation.md), which may use instancing or separate draw calls per block type, this method packs all quads for a chunk into a single mesh object with submesh descriptors [S2, unofficial].
++Chunk Mesh Assembly aggregates mesh data from multiple render layers (e.g., opaque, water, transparent) into contiguous typed arrays for efficient GPU submission [S2, 4100-chunk-mesh-assembly.md, unofficial]. It solves the problem of fragmented geometry by consolidating vertices and indices from disparate voxel blocks into a single draw-call-friendly structure. Unlike [Block Render Data Structure & Instance Generation](6209-block-render-data-structure-instance-generation.md), which may rely on instancing or scattered buffers, this method packs all geometry into dense, contiguous memory regions, optimizing bandwidth and reducing draw call overhead [S2, 4100-chunk-mesh-assembly.md, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** Voxel data store (block types), color/light store, chunk coordinate, and a map of block types to materials.
+-*   **Output:** A configured `Mesh` object (e.g., Unity `Mesh`) attached to a `MeshFilter` and `MeshCollider`, containing vertex positions, normals, indices, and material assignments.
+-
+-**Data Structures:**
+-The core data structure for assembly is `PackedMeshBuffers`, which holds contiguous typed arrays [S2, unofficial]:
+-*   `positions`: `Float32Array` (3 floats per vertex: x, y, z).
+-*   `normals`: `Int8Array` (3 signed bytes per vertex: nx, ny, nz).
+-*   `blockIds`: `Uint16Array` (1 uint16 per vertex).
+-*   `ambientOcclusion`: `Uint8Array` (1 uint8 per vertex).
+-*   `blockLight`: `Uint8Array` (1 uint8 per vertex).
+-*   `skyLight`: `Uint8Array` (1 uint8 per vertex).
+-*   `indices`: `Uint32Array` (6 indices per quad, representing 2 triangles).
+-*   `groups`: `MeshBufferGroup[]` array tracking offsets per layer.
+-
+-The `MeshBufferGroup` structure tracks the layout for each layer [S2, unofficial]:
+-*   `layer`: Enum identifying the render layer (e.g., Opaque, Water).
+-*   `vertexOffset`: Start index in the vertex arrays.
+-*   `vertexCount`: Number of vertices in this layer.
+-*   `indexOffset`: Start index in the indices array.
+-*   `indexCount`: Number of indices in this layer.
+-
+-**Numbered Steps:**
+-1.  **Change Detection:** Check if the chunk has modified voxel data (`chunkProperties.HasChanges`). If false, skip assembly [S1, unofficial].
+-2.  **Mesh Generation:** Call the voxel mesher (e.g., `VoxelWorld.VoxelMesher.CreateMesh`) with the voxel data, color data, and chunk coordinate. If the result is null, return [S1, unofficial].
+-3.  **Quad Count Calculation:** Calculate the total number of quads across all defined `MESH_BUFFER_LAYERS` [S2, unofficial].
+-4.  **Buffer Allocation:** Allocate output arrays based on the total quad count [S2, unofficial]:
+-    *   Positions/Normals size: `quadCount * 4 * 3` (assuming 4 vertices per quad).
+-    *   Indices size: `quadCount * 6` (2 triangles per quad).
+-    *   Other attributes (blockIds, AO, lights): `quadCount * 4` per attribute.
+-5.  **Initialization:** Initialize a writer with offsets (`indexOffset: 0`, `vertexOffset: 0`) and the allocated output arrays [S2, unofficial].
+-6.  **Layer Iteration:** Iterate over each layer in `MESH_BUFFER_LAYERS` [S2, unofficial]:
+-    a.  Record current offsets.
+-    b.  Append quads for the current layer. For each quad, compute vertex positions from bounds, write vertex attributes (position, normal, blockId, AO, lights), and write 6 indices [S2, unofficial].
+-    c.  Look up the material for the block type. If not found, use a pre-scanned `FallbackMat` (the first non-null material in `BlockMaterials`) [S3, unofficial].
+-    d.  Record new offsets in `MeshBufferGroup`.
+-7.  **Mesh Configuration:** Configure the target mesh object [S1, unofficial]:
+-    a.  Set vertex buffer parameters with the total `vertexCount` and `MeshingVertexData.VertexBufferMemoryLayout`.
+-    b.  Set index buffer parameters with `vertexCount` and `IndexFormat.UInt16` (or UInt32 if vertex count exceeds 65535, though sources specify UInt16) [S1, unofficial].
+-    c.  Set submesh count to 1. Create a `SubMeshDescriptor` with the total index count and assign it to submesh 0.
+-    d.  Recalculate mesh bounds.
+-8.  **Assignment:** Assign the mesh to the chunk's `MeshFilter` and `MeshCollider`. Enable the collider and renderer. Reset `HasChanges` to false and set `IsMeshGenerated` to true [S1, unofficial].
+-
+-**Pseudocode:**
++**Inputs and Outputs**
++*   **Input:** Voxel data store (block types, colors), chunk coordinate, and change status (`HasChanges`).
++*   **Output:** A finalized mesh object (e.g., Unity `Mesh`, Godot `ArrayMesh`) with assigned buffers, bounds, and materials.
++
++**Data Structures**
++The assembly relies on specific layouts for intermediate buffers and final mesh components:
++
++1.  **PackedMeshBuffers**: A container for contiguous typed arrays [S2, 4100-chunk-mesh-assembly.md, unofficial]:
++    *   `positions`: `Float32Array` (3 floats per vertex).
++    *   `normals`: `Int8Array` (3 signed bytes per vertex, quantized).
++    *   `blockIds`: `Uint16Array` (1 uint16 per vertex).
++    *   `ambientOcclusion`: `Uint8Array` (1 uint8 per vertex).
++    *   `blockLight`: `Uint8Array` (1 uint8 per vertex).
++    *   `skyLight`: `Uint8Array` (1 uint8 per vertex).
++    *   `indices`: `Uint32Array` (6 indices per quad).
++    *   `groups`: Array of `MeshBufferGroup` structures tracking offsets per layer.
++
++2.  **MeshBufferGroup**: Tracks the range of data for a specific render layer [S2, 4100-chunk-mesh-assembly.md, unofficial]:
++    *   `layer`: Enum identifying the render layer (e.g., Opaque, Water).
++    *   `vertexOffset`: Start index in the vertex buffer.
++    *   `vertexCount`: Number of vertices in this layer.
++    *   `indexOffset`: Start index in the index buffer.
++    *   `indexCount`: Number of indices in this layer.
++
++3.  **FPreparedChunkMesh** (C++/Unreal variant): Holds pre-built data safe for async preparation [S3, 4100-chunk-mesh-assembly.md, unofficial]:
++    *   `ChunkIndex`: `FIntPoint`.
++    *   `SizeX`, `SizeY`, `SizeZ`: Dimensions.
++    *   `Sections`: `TMap<EBlockType, FChunkMeshSection>`.
++    *   `CollisionSection`: `FChunkMeshSection`.
++
++4.  **FChunkMeshSection**: Stores mesh data per block type [S3, 4100-chunk-mesh-assembly.md, unofficial]:
++    *   `Vertices`: `TArray<FVector>`.
++    *   `Triangles`: `TArray<int32>`.
++    *   `Normals`: `TArray<FVector>`.
++    *   `UVs`: `TArray<FVector2D>`.
++
++5.  **FActiveChunk**: Tracks runtime state [S3, 4100-chunk-mesh-assembly.md, unofficial]:
++    *   `MeshComp`: Pointer to the mesh component.
++    *   `PendingCollision`: `FChunkMeshSection`.
++    *   `CollisionSectionIndex`: Integer index.
++    *   `bHasCollision`, `bCastsShadow`: Booleans.
++
++**Numbered Steps**
++
++1.  **Change Detection**: Check if the chunk has changed (`chunkProperties.HasChanges`) [S1, 4100-chunk-mesh-assembly.md, unofficial]. If no changes are detected, reuse the existing mesh and return. If changed, proceed to `GenerateMeshImmediate` [S1, 4100-chunk-mesh-assembly.md, unofficial].
++
++2.  **Mesh Generation**: Call the core mesher (e.g., `VoxelMesher.CreateMesh`) with the voxel data store, color store, and chunk coordinate [S1, 4100-chunk-mesh-assembly.md, unofficial]. If the result is null, return. The mesher produces a collection of prepared sections or a job output containing vertex and triangle counts [S1, 4100-chunk-mesh-assembly.md, unofficial].
++
++3.  **Buffer Allocation**: Calculate the total number of quads ($N_{quads}$) across all layers in `MESH_BUFFER_LAYERS` [S2, 4100-chunk-mesh-assembly.md, unofficial]. Allocate contiguous arrays:
++    *   Positions: $N_{quads} \times 4 \times 3$ floats.
++    *   Normals: $N_{quads} \times 4 \times 3$ signed bytes.
++    *   Indices: $N_{quads} \times 6$ unsigned integers.
++    *   Attributes (`blockIds`, `ao`, `lights`): $N_{quads} \times 4$ per attribute [S2, 4100-chunk-mesh-assembly.md, unofficial].
++
++4.  **Layer Iteration and Writing**: Iterate over the prepared sections or layers [S2, 4100-chunk-mesh-assembly.md, unofficial].
++    *   For each layer (Opaque, Water, TransparentSolid, etc.), record the current `vertexOffset` and `indexOffset` [S2, 4100-chunk-mesh-assembly.md, unofficial].
++    *   Write vertex data: Compute positions from quad bounds, write normal, `blockId`, `ambientOcclusion`, `blockLight`, and `skyLight` [S2, 4100-chunk-mesh-assembly.md, unofficial].
++    *   Write indices: For each quad, write 6 indices forming two triangles (e.g., triangle fan: 0-1-2, 0-2-3) [S2, 4100-chunk-mesh-assembly.md, unofficial].
++    *   Update offsets by the number of written vertices and indices.
++    *   Store the final offsets and counts in a `MeshBufferGroup` for the layer [S2, 4100-chunk-mesh-assembly.md, unofficial].
++
++5.  **Material Mapping**: For each block type encountered, look up the corresponding material in the `BlockMaterials` map [S3, 4100-chunk-mesh-assembly.md, unofficial]. If a material is not found, use a pre-scanned `FallbackMat` (the first non-null material in the map) [S3, 4100-chunk-mesh-assembly.md, unofficial].
++
++6.  **Finalization**:
++    *   Assign the raw data to the mesh object (e.g., `MeshFilter`, `ArrayMesh`) [S1, 4100-chunk-mesh-assembly.md, unofficial].
++    *   Set vertex buffer parameters (count, layout) and index buffer parameters (count, format, e.g., `UInt16` or `UInt32`) [S1, 4100-chunk-mesh-assembly.md, unofficial].
++    *   Set submesh count and create `SubMeshDescriptor` entries linking indices to layers [S1, 4100-chunk-mesh-assembly.md, unofficial].
++    *   Recalculate mesh bounds [S1, 4100-chunk-mesh-assembly.md, unofficial].
++    *   Assign the mesh to the chunk's `MeshFilter` and `MeshCollider` [S1, 4100-chunk-mesh-assembly.md, unofficial].
++    *   Enable the collider and renderer.
++    *   Reset `HasChanges` to false and set `IsMeshGenerated` to true [S1, 4100-chunk-mesh-assembly.md, unofficial].
++
++**Pseudocode**
++
+ ```python
+-def assemble_chunk_mesh(chunk, voxel_data, color_data, block_materials):
+-    # Step 1: Check for changes
+-    if not chunk.properties.has_changes:
+-        return
+-
+-    # Step 2: Generate mesh data
+-    mesh_job = voxel_data.mesher.create_mesh(voxel_data, color_data, chunk.coordinate)
+-    if mesh_job is None:
+-        return
+-
+-    # Step 3: Calculate total quads
+-    total_quads = 0
++def assemble_chunk_mesh(chunk_properties, voxel_data, color_data, chunk_coord):
++    # Step 1: Change Detection
++    if not chunk_properties.HasChanges:
++        return chunk_properties.MeshFilter.mesh  # Reuse existing mesh
++
++    # Step 2: Mesh Generation
++    # Call core mesher to get prepared sections or job output
++    job = VoxelMesher.CreateMesh(voxel_data, color_data, chunk_coord)
++    if job is None:
++        return None
++
++    # Step 3: Buffer Allocation
++    # Calculate total quads across all layers
++    total_quad_count = 0
+     for layer in MESH_BUFFER_LAYERS:
+-        total_quads += mesh_job.layer_quad_count[layer]
+-
+-    # Step 4: Allocate buffers
+-    # 4 vertices per quad, 3 components per vertex
+-    vertex_count = total_quads * 4
+-    positions = allocate_float_array(vertex_count * 3)
+-    normals = allocate_int8_array(vertex_count * 3)
+-    block_ids = allocate_uint16_array(vertex_count)
+-    ao = allocate_uint8_array(vertex_count)
+-    block_light = allocate_uint8_array(vertex_count)
+-    sky_light = allocate_uint8_array(vertex_count)
+-    indices = allocate_uint32_array(total_quads * 6)
+-    
+-    # Pre-scan for fallback material
+-    fallback_mat = None
+-    for mat in block_materials.values():
+-        if mat is not None:
+-            fallback_mat = mat
+-            break
+-
+-    # Step 5 & 6: Iterate layers and write data
+-    groups = []
+-    current_vertex_offset = 0
+-    current_index_offset = 0
+-
++        total_quad_count += job.GetQuadCount(layer)
++
++    # Allocate contiguous arrays
++    # Positions: 4 vertices per quad * 3 floats
++    positions = Float32Array(total_quad_count * 4 * 3)
++    # Normals: 4 vertices per quad * 3 signed bytes
++    normals = Int8Array(total_quad_count * 4 * 3)
++    # Indices: 6 indices per quad
++    indices = Uint32Array(total_quad_count * 6)
++    # Attributes: 4 vertices per quad * 1 uint16/uint8
++    block_ids = Uint16Array(total_quad_count * 4)
++    ambient_ocs = Uint8Array(total_quad_count * 4)
++    block_lights = Uint8Array(total_quad_count * 4)
++    sky_lights = Uint8Array(total_quad_count * 4)
++
++    # Initialize writers with offsets
++    index_offset = 0
++    vertex_offset = 0
++    mesh_buffer_groups = []
++
++    # Step 4: Layer Iteration and Writing
+     for layer in MESH_BUFFER_LAYERS:
+-        start_v_offset = current_vertex_offset
+-        start_i_offset = current_index_offset
+-        
+-        quads = mesh_job.layer_quads[layer]
+-        layer_vertex_count = len(quads) * 4
+-        layer_index_count = len(quads) * 6
+-
+-        for i, quad in enumerate(quads):
+-            # Compute vertex positions from quad bounds
+-            verts = compute_quad_vertices(quad, chunk.coordinate)
+-            
+-            # Write positions (3 floats per vertex)
+-            for v in range(4):
+-                positions[(current_vertex_offset + v) * 3 + 0] = verts[v].x
+-                positions[(current_vertex_offset + v) * 3 + 1] = verts[v].y
+-                positions[(current_vertex_offset + v) * 3 + 2] = verts[v].z
+-            
+-            # Write normals (3 signed bytes per vertex)
+-            for v in range(4):
+-                normals[(current_vertex_offset + v) * 3 + 0] = int8(quad.normal.x)
+-                normals[(current_vertex_offset + v) * 3 + 1] = int8(quad.normal.y)
+-                normals[(current_vertex_offset + v) * 3 + 2] = int8(quad.normal.z)
+-            
+-            # Write attributes (1 per vertex)
+-            for v in range(4):
+-                block_ids[current_vertex_offset + v] = quad.block_id
+-                ao[current_vertex_offset + v] = quad.ao if quad.ao is not None else 0 # NO_AMBIENT_OCCLUSION
+-                block_light[current_vertex_offset + v] = quad.block_light if quad.block_light is not None else 0 # NO_LIGHT
+-                sky_light[current_vertex_offset + v] = quad.sky_light if quad.sky_light is not None else 0
+-
+-            # Write indices (6 indices per quad: triangle fan 0-1-2, 0-2-3)
+-            base_idx = current_index_offset
+-            indices[base_idx + 0] = current_vertex_offset + 0
+-            indices[base_idx + 1] = current_vertex_offset + 1
+-            indices[base_idx + 2] = current_vertex_offset + 2
+-            indices[base_idx + 3] = current_vertex_offset + 0
+-            indices[base_idx + 4] = current_vertex_offset + 2
+-            indices[base_idx + 5] = current_vertex_offset + 3
+-            
+-            current_vertex_offset += 4
+-            current_index_offset += 6
+-
+-        # Material assignment logic (conceptual, as mesh assembly usually handles materials via submeshes or vertex colors)
+-        # In this specific implementation, materials are looked up per block type, 
+-        # but the final mesh object uses a single material or submesh mapping.
+-        # The source implies material lookup happens during quad processing for validation/fallback.
+-        
+-        groups.append({
+-            'layer': layer,
+-            'vertexOffset': start_v_offset,
+-            'vertexCount': layer_vertex_count,
+-            'indexOffset': start_i_offset,
+-            'indexCount': layer_index_count
+-        })
+-
+-    # Step 7: Configure Mesh Object
+-    mesh = create_mesh()
+-    mesh.set_vertex_buffer(positions, normals, block_ids, ao, block_light, sky_light)
+-    mesh.set_index_buffer(indices)
+-    mesh.set_submesh_count(1)
+-    mesh.set_submesh(0, SubMeshDescriptor(index_count=current_index_offset, topology=TriangleList))
+-    mesh.recalculate_bounds()
+-
+-    # Step 8: Assign to Chunk
+-    chunk.mesh_filter.mesh = mesh
+-    chunk.mesh_renderer.enabled = True
+-    chunk.mesh_collider.enabled = True
+-    chunk.mesh_collider.shared_mesh = mesh
+-    chunk.properties.has_changes = False
+-    chunk.properties.is_mesh_generated = True
++        layer_start_vertex = vertex_offset
++        layer_start_index = index_offset
++
++        quads = job.GetQuads(layer)
++        for quad in quads:
++            # Write 4 vertices
++            for i in range(4):
++                # Position: 3 floats
++                pos_idx = vertex_offset * 3 + i * 3
++                positions[pos_idx] = quad.vertices[i].x
++                positions[pos_idx + 1] = quad.vertices[i].y
++                positions[pos_idx + 2] = quad.vertices[i].z
++
++                # Normal: 3 signed bytes (quantized)
++                norm_idx = vertex_offset * 3 + i * 3
++                normals[norm_idx] = quantize_signed_byte(quad.normals[i].x)
++                normals[norm_idx + 1] = quantize_signed_byte(quad.normals[i].y)
++                normals[norm_idx + 2] = quantize_signed_byte(quad.normals[i].z)
++
++                # Attributes
++                block_ids[vertex_offset * 4 + i] = quad.block_id
++                ambient_ocs[vertex_offset * 4 + i] = quad.ao if quad.ao is not None else NO_AMBIENT_OCCLUSION
++                block_lights[vertex_offset * 4 + i] = quad.block_light if quad.block_light is not None else NO_LIGHT
++                sky_lights[vertex_offset * 4 + i] = quad.sky_light if quad.sky_light is not None else NO_LIGHT
++
++            # Write 6 indices (2 triangles: 0-1-2, 0-2-3)
++            base_idx = index_offset
++            indices[index_offset] = base_idx
++            indices[index_offset + 1] = base_idx + 1
++            indices[index_offset + 2] = base_idx + 2
++            indices[index_offset + 3] = base_idx
++            indices[index_offset + 4] = base_idx + 2
++            indices[index_offset + 5] = base_idx + 3
++            index_offset += 6
++
++            vertex_offset += 4
++
++        # Record layer group
++        mesh_buffer_groups.append(MeshBufferGroup(
++            layer=layer,
++            vertexOffset=layer_start_vertex,
++            vertexCount=vertex_offset - layer_start_vertex,
++            indexOffset=layer_start_index,
++            indexCount=index_offset - layer_start_index
++        ))
++
++    # Step 5: Material Mapping (Handled in shader or mesh setup)
++    # FallbackMat is used if block type not found in BlockMaterials
++
++    # Step 6: Finalization
++    # Create mesh object
++    mesh = CreateMesh()
++    
++    # Set vertex buffer
++    mesh.SetVertexBuffer(positions, normals, block_ids, ambient_ocs, block_lights, sky_lights)
++    
++    # Set index buffer
++    mesh.SetIndexBuffer(indices, IndexFormat.UInt32)
++    
++    # Set submeshes
++    mesh.SetSubMeshCount(len(mesh_buffer_groups))
++    for i, group in enumerate(mesh_buffer_groups):
++        mesh.SetSubMesh(i, SubMeshDescriptor(
++            indexCount=group.indexCount,
++            indexStart=group.indexOffset,
++            topology=Topology.TriangleList
++        ))
++    
++    # Recalculate bounds
++    mesh.RecalculateBounds()
++    
++    # Assign to component
++    chunk_properties.MeshFilter.mesh = mesh
++    chunk_properties.MeshCollider.sharedMesh = mesh
++    chunk_properties.MeshCollider.enabled = True
++    chunk_properties.MeshRenderer.enabled = True
++    
++    # Reset state
++    chunk_properties.HasChanges = False
++    chunk_properties.IsMeshGenerated = True
++    
++    return mesh
+ ```
+ 
+-**Parameters:**
+-*   `NO_AMBIENT_OCCLUSION`: Constant value `0` used when AO is not provided [S2, unofficial].
+-*   `NO_LIGHT`: Constant value `0` used when light data is not provided [S2, unofficial].
+-*   `BlockSize`: Static constexpr float defining world units per voxel edge. Default value is `100.f` [S3, unofficial].
+-*   `FallbackMat`: `UMaterialInterface*` assigned to the first non-null material found in `BlockMaterials` map during initialization [S3, unofficial].
+-
+-**Edge Cases and Pitfalls:**
+-*   **Empty Sections:** If a layer has no quads, the vertex array for that layer is empty. The implementation must skip creating mesh sections or submeshes with zero vertices to avoid invalid mesh state [S3, unofficial].
+-*   **Missing Materials:** If a block type is not found in the `BlockMaterials` map, the system must not dereference a null pointer. It falls back to `FallbackMat` [S3, unofficial].
+-*   **Index Format:** The sources specify `UInt16` for indices [S1, unofficial]. If the vertex count exceeds 65,535, this will overflow. The implementer must check `vertexCount` and switch to `UInt32` if necessary, or ensure chunk sizes limit vertex counts.
++**Parameters**
++*   `NO_AMBIENT_OCCLUSION`: Constant value 0, used when AO is not provided [S2, 4100-chunk-mesh-assembly.md, unofficial].
++*   `NO_LIGHT`: Constant value 0, used when light data is not provided [S2, 4100-chunk-mesh-assembly.md, unofficial].
++*   `BlockSize`: Static constexpr float defining world units per voxel edge. Default value is 100.f [S3, 4100-chunk-mesh-assembly.md, unofficial].
++*   `FallbackMat`: `UMaterialInterface*` assigned to the first non-null material found in `BlockMaterials` map during `BuildMeshSections` initialization [S3, 4100-chunk-mesh-assembly.md, unofficial].
++
++**Edge Cases and Pitfalls**
++*   **Empty Sections**: If a prepared section has zero vertices (`Section.Vertices.Num() == 0`), it must be skipped to avoid creating invalid mesh sections [S3, 4100-chunk-mesh-assembly.md, unofficial].
++*   **Missing Materials**: If a block type is not found in the `BlockMaterials` map, a null pointer dereference may occur. The system must fall back to `FallbackMat` [S3, 4100-chunk-mesh-assembly.md, unofficial].
++*   **Precision**: Normals are stored as signed bytes (`Int8Array`). Ensure quantization logic correctly maps [-1, 1] to [-128, 127] to avoid artifacts [S2, 4100-chunk-mesh-assembly.md, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Section-based Mesh Generation](4220-section-based-mesh-generation.md)
+-Renders a large voxel chunk as a vertical stack of smaller, independent sections to enable efficient partial rebuilds when voxels change. It differs from full-chunk rebuilds by limiting computation to the minimal set of sections intersecting the modified voxel, and from adjacency-based chunk rebuilding by operating at the sub-chunk section level within a single chunk.
++Renders a large voxel chunk as a vertical stack of smaller, independent sections to enable efficient partial rebuilds when voxels change. It operates at the sub-chunk section level within a single chunk, limiting computation to the affected sections rather than rebuilding the entire chunk.
+ 
+ ### [Chunk Region Meshing with Dirty Regions](4402-chunk-region-meshing-with-dirty-regions.md)
+-An incremental surface extraction method that generates geometry for a voxel chunk by processing only a specified subset of "dirty" cells, while consulting the complete chunk and its neighbors for visibility, ambient occlusion (AO), and fluid data. It solves the problem of expensive full-chunk remeshing by allowing partial updates, ensuring that only changed geometry is regenerated. Unlike Section-based Mesh Generation, which processes the entire chunk layer by layer, this method restricts computation to a local `dirtyRegion`, significantly reducing work for sparse updates.
++Generates geometry for a voxel chunk by processing only a specified subset of "dirty" cells, while consulting the complete chunk and its neighbors for visibility, ambient occlusion (AO), and fluid data. It solves the problem of expensive full-chunk remeshing by allowing partial updates, ensuring that only changed geometry is regenerated. Unlike [Section-based Mesh Generation](4220-section-based-mesh-generation.md), which processes the entire chunk layer by layer, this method restricts computation to a local `dirtyRegion`, significantly reducing work for sparse updates.
++
++### [VoxelMesher::build_mesh](12771-voxelmesher-build-mesh.md)
++Constructs a Godot ArrayMesh from voxel buffer data, handling material assignment, surface assembly, and optional Transvoxel detail normal map generation.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$ where $N$ is the number of voxels in the chunk, as every voxel face is potentially checked and written. The assembly step itself is linear with respect to the number of generated quads.
+-*   **Memory Complexity:** $O(Q)$ where $Q$ is the number of quads. The buffers scale directly with the surface area of the chunk.
+-*   **Measured Performance:** Not given in the sources.
+-*   **Scaling:** Performance scales with the number of exposed faces. Greedy meshing (often a precursor to assembly) can reduce $Q$ significantly by merging coplanar quads, reducing memory bandwidth and draw call overhead [S2, unofficial].
+-*   **Strengths:** Contiguous memory layout enables efficient GPU submission. Layer separation allows for different rendering passes (e.g., water transparency) without complex shader logic.
+-*   **Limitations:** Full chunk rebuilds are expensive. Memory usage can be high for highly detailed terrain. Index buffer size is limited by the chosen index format (UInt16 vs UInt32).
+-*   **When to use:** Suitable for voxel games where chunks are relatively small and static or change infrequently.
+-*   **When not to use:** Unsuitable for highly dynamic scenes with frequent voxel changes per frame, where incremental methods like Dirty Regions are preferred.
++*   **Time Complexity**: $O(N)$ where $N$ is the number of exposed block faces. The assembly step itself is linear with respect to the number of quads generated by the mesher.
++*   **Memory Complexity**: $O(N)$ for contiguous buffers. Positions: $12 \times N_{quads}$ bytes. Normals: $12 \times N_{quads}$ bytes. Indices: $24 \times N_{quads}$ bytes (if Uint32) or $12 \times N_{quads}$ bytes (if Uint16). Attributes: $16 \times N_{quads}$ bytes.
++*   **Measured Performance**: Not given in the sources.
++*   **Scaling**: Scales linearly with chunk size and surface complexity. Contiguous memory layout improves GPU bandwidth efficiency compared to scattered buffers.
++*   **Strengths**: Reduces draw calls by batching geometry per layer. Efficient memory usage due to contiguous arrays. Simple change detection logic.
++*   **Limitations**: Full chunk rebuild required if `HasChanges` is true, which can be expensive for large chunks. Not incremental by default (unlike Dirty Regions).
++*   **When to Use**: Suitable for static or slowly changing voxel worlds where full chunk updates are acceptable. Ideal for Unity/Unreal engines where mesh components expect contiguous data.
++*   **When Not to Use**: High-frequency dynamic worlds with sparse changes; use [Chunk Region Meshing with Dirty Regions](4402-chunk-region-meshing-with-dirty-regions.md) instead.
+ 
+ ## Background
+-Chunk Mesh Assembly is a standard technique in procedural voxel rendering, particularly in engines like Unity. It is used in projects such as Eldemarkki's Marching-Cubes-Terrain [S1, unofficial], nerima-games' mc-meshing [S2, unofficial], and HawkDev15's VoxelWorld [S3, unofficial]. The method evolved from the need to efficiently submit large amounts of geometry generated by surface extraction algorithms (like Marching Cubes or Greedy Meshing) to the GPU.
++Chunk Mesh Assembly is a standard technique in procedural voxel rendering, particularly within game engines like Unity and Unreal. It is implemented in projects such as Eldemarkki's Marching-Cubes-Terrain [S1, unofficial], nerima-games' mc-meshing [S2, unofficial], and HawkDev15's VoxelWorld [S3, unofficial]. The method evolved from the need to efficiently transfer voxel-derived geometry to the GPU, leveraging contiguous memory layouts to minimize overhead.
+ 
+ ## Sources

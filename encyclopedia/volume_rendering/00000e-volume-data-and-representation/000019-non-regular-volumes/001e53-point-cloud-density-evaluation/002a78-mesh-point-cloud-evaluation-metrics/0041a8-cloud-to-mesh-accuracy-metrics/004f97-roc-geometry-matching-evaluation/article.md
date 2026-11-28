@@ -1,0 +1,98 @@
+# ROC Geometry Matching Evaluation
+
+Also called: Point cloud matching for ROC curves
+
+## Overview
+ROC Geometry Matching Evaluation quantifies the geometric accuracy of a reconstructed point cloud $B$ against a reference point cloud $A$ by computing the True Positive Rate (TPR) and False Positive Rate (FPR) at a specific distance threshold [S1]. Unlike symmetric metrics such as D1/D2 that average errors in both directions and assume similar point counts, this asymmetric method handles cases where the predicted cloud $B$ contains significantly more points than the reference $A$, preventing artificially inflated accuracy scores in the $A \rightarrow B$ direction [S1].
+
+## How it works
+**Inputs:**
+- Reference point cloud $A = \{a_1, \dots, a_P\}$ in World Coordinate System (WCS) [S1].
+- Predicted point cloud $B = \{b_1, \dots, b_M\}$ in World Coordinate System (WCS) [S1].
+- Voxel grid resolution $R$ (e.g., $512^3$) used to calculate the total number of grid points $N$ [S1].
+- Voxel size in world coordinates $s$ [G].
+
+**Outputs:**
+- True Positive Rate (TPR) [S1].
+- False Positive Rate (FPR) [S1].
+
+**Data Structures:**
+- Point clouds $A$ and $B$ are stored as lists or arrays of 3D coordinates $(x, y, z)$ [G].
+- A voxel grid of size $R \times R \times R$ is implicitly used to determine the total number of negative samples $N$ [S1].
+
+**Parameters:**
+- $\delta$: Distance threshold for a match, set to the diagonal of a voxel in $B$ scaled to world coordinates, calculated as $\delta = s\sqrt{3}$ [S1].
+- $P$: Total number of points in reference cloud $A$ [S1].
+- $N$: Total number of negative samples, calculated as the total number of points in the voxelized grid minus $P$ [S1].
+
+**Steps:**
+1. **Calculate Threshold $\delta$**: Determine the voxel size in world coordinates $s$ based on the scene bounds and grid resolution $R$. Compute $\delta = s\sqrt{3}$ [S1].
+2. **Compute Distances**: For each point $b_i \in B$, calculate the minimum Euclidean distance to any point $a_j \in A$: $d(b_i, A) = \min_{a_j \in A} \| b_i - a_j \|_2$ [S1].
+3. **Classify Points**: A point $b_i$ is a True Positive (TP) if $d(b_i, A) \le \delta$, and a False Positive (FP) if $d(b_i, A) > \delta$ [S1].
+4. **Count Positives and Negatives**: Calculate $TP = \sum_{b_i \in B} \mathbb{1}(d(b_i, A) \le \delta)$, $FP = \sum_{b_i \in B} \mathbb{1}(d(b_i, A) > \delta)$, $P = |A|$, and $N = R^3 - P$ [S1].
+5. **Compute Rates**: Calculate $TPR = \frac{TP}{P}$ and $FPR = \frac{FP}{N}$ [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def roc_geometry_matching_evaluation(A, B, grid_resolution, voxel_size_world):
+    """
+    Computes TPR and FPR for point cloud matching.
+    
+    Args:
+        A: list of tuples, reference point cloud in WCS.
+        B: list of tuples, predicted point cloud in WCS.
+        grid_resolution: int, resolution of the voxel grid (e.g., 512).
+        voxel_size_world: float, size of one voxel in world coordinates.
+        
+    Returns:
+        tpr: float, True Positive Rate.
+        fpr: float, False Positive Rate.
+    """
+    P = len(A)
+    total_grid_points = grid_resolution ** 3
+    N = total_grid_points - P
+    
+    # Calculate threshold δ as the voxel diagonal scaled to world coordinates
+    delta = voxel_size_world * math.sqrt(3)
+    
+    # Calculate minimum distance from each point in B to any point in A
+    min_distances = []
+    for b in B:
+        min_dist = float('inf')
+        for a in A:
+            dist = math.sqrt((b[0]-a[0])**2 + (b[1]-a[1])**2 + (b[2]-a[2])**2)
+            if dist < min_dist:
+                min_dist = dist
+        min_distances.append(min_dist)
+    
+    # Classify points and count
+    TP = sum(1 for d in min_distances if d <= delta)
+    FP = sum(1 for d in min_distances if d > delta)
+    
+    # Compute rates with division-by-zero guards
+    tpr = TP / P if P > 0 else 0.0
+    fpr = FP / N if N > 0 else 0.0
+        
+    return tpr, fpr
+```
+
+**Edge Cases and Pitfalls:**
+- **Grid Resolution Dependency**: The value of $N$ depends heavily on the chosen voxel grid resolution, with the source citing $512^3$ for a resolution 9 grid [S1].
+- **Asymmetry**: The metric is asymmetric, evaluating how well $B$ covers $A$ via TPR and how much $B$ deviates from $A$ via FPR [S1].
+- **Threshold Sensitivity**: The choice of $\delta$ is critical, as it directly determines the matching tolerance [S1].
+
+## Operating characteristics
+- **Time Complexity**: The naive calculation of minimum distances is $O(M \cdot P)$, where $M$ is the number of points in $B$ and $P$ is the number of points in $A$ [G].
+- **Memory Complexity**: $O(M + P)$ to store the point clouds and distance arrays [G].
+- **Strengths**: Effective for evaluating pruning methods where the predicted cloud $B$ has a significantly different number of points than the reference $A$, avoiding the bias of symmetric metrics like D1/D2 which assume similar point counts [S1].
+- **Limitations**: The metric is sensitive to the voxel grid resolution used to calculate $N$, and it does not provide a single scalar score but rather a curve (ROC) when evaluated at multiple thresholds [S1].
+
+## Background
+This method is used in the performance analysis of pruning methods for neural plenoptic scene representations, specifically PlenOctrees [S1]. It was developed to address the limitations of symmetric Chamfer Distance variants (D1/D2) when comparing point clouds of vastly different densities, which is common in neural rendering compression and pruning tasks [S1].
+
+## Sources
+[S1] Visibility-Based Geometry Pruning of Neural Plenoptic Scene Representations, https://doi.org/10.1109/tmm.2025.3618548, fetched 2026-10-26

@@ -1,0 +1,187 @@
+--- v011.md
++++ v012.md
+@@ -27,4 +27,5 @@
+ - `render_alphas`: Shape $[C, H, W, 1]$ [S3, unofficial].
+ - `render_normals`: Shape $[C, H, W, 3]$ [S3, unofficial].
++- `render_depths`: Shape $[C, H, W, 1]$ [S6].
+ 
+ **Data Structures:**
+@@ -91,4 +92,5 @@
+     normals: np.ndarray,
+     opacities_cn: np.ndarray,
++    depths: np.ndarray,
+     width: int,
+     height: int,
+@@ -100,5 +102,5 @@
+     """
+     Rasterize 2D Gaussian surfels to pixels.
+-    Returns: (render_colors, render_alphas, render_normals)
++    Returns: (render_colors, render_alphas, render_normals, render_depths)
+     """
+     C = means2d.shape[0]
+@@ -110,72 +112,74 @@
+     render_alphas = np.zeros((C, H, W, 1), dtype=np.float32)
+     render_normals = np.zeros((C, H, W, 3), dtype=np.float32)
++    render_depths = np.zeros((C, H, W, 1), dtype=np.float32)
+     
+     acc_alpha = np.zeros((C, H, W, 1), dtype=np.float32)
+     acc_color = np.zeros((C, H, W, 3), dtype=np.float32)
+     acc_normal = np.zeros((C, H, W, 3), dtype=np.float32)
++    acc_depth = np.zeros((C, H, W, 1), dtype=np.float32)
+     
+     for c in range(C):
+-        surfel_indices = flatten_ids[c]
+-        num_surfels = len(surfel_indices)
+-        
+-        for i in range(num_surfels):
+-            gid = surfel_indices[i]
+-            
+-            m2d = means2d[c, gid]
+-            rt = ray_transforms[c, gid]
+-            color = colors_for_raster[c, gid]
+-            normal = normals[c, gid]
+-            opacity = opacities_cn[c, gid]
+-            
+-            # Determine tile bounds for this surfel
+-            # In the reference, isect_offsets points to the start of each tile's surfel list.
+-            # Here we iterate over pixels covered by the surfel's bounding box for simplicity,
+-            # matching the reference's per-pixel intersection logic.
+-            radius = 2.0 # Simplified radius for bounding box; reference uses exact tile intersection
+-            min_x = max(0, int(m2d[0] - radius))
+-            max_x = min(W, int(m2d[0] + radius))
+-            min_y = max(0, int(m2d[1] - radius))
+-            max_y = min(H, int(m2d[1] + radius))
+-            
+-            for y in range(min_y, max_y):
+-                for x in range(min_x, max_x):
+-                    px = float(x)
+-                    py = float(y)
++        for ty in range(tile_h):
++            for tx in range(tile_w):
++                start = isect_offsets[c, ty, tx]
++                # End index is typically the next offset in the encoded array or a separate bounds array.
++                # If not explicitly provided, it is derived from the encoding scheme.
++                end = isect_offsets[c, ty, tx + 1] if tx + 1 < tile_w else len(flatten_ids[c])
++                
++                for idx in range(start, end):
++                    gid = flatten_ids[c, idx]
+                     
+-                    h_u = -rt[0, :3] + rt[2, :3] * px
+-                    h_v = -rt[1, :3] + rt[2, :3] * py
++                    M_g = ray_transforms[c, gid]
++                    color = colors_for_raster[c, gid]
++                    normal = normals[c, gid]
++                    opacity = opacities_cn[c, gid]
++                    depth = depths[c, gid]
+                     
+-                    tmp = np.cross(h_u, h_v)
++                    y_start = ty * tile_size
++                    y_end = min((ty + 1) * tile_size, H)
++                    x_start = tx * tile_size
++                    x_end = min((tx + 1) * tile_size, W)
+                     
+-                    if abs(tmp[2]) < 1e-10:
+-                        continue
+-                    
+-                    us = tmp[0] / tmp[2]
+-                    vs = tmp[1] / tmp[2]
+-                    
+-                    sigma_3d = us * us + vs * vs
+-                    dx = x - m2d[0]
+-                    dy = y - m2d[1]
+-                    sigma_2d = 2.0 * (dx * dx + dy * dy)
+-                    
+-                    sigma = 0.5 * min(sigma_3d, sigma_2d)
+-                    
+-                    if sigma < 0:
+-                        continue
+-                        
+-                    alpha = min(opacity * np.exp(-sigma), 1.0)
+-                    
+-                    alpha_in = acc_alpha[c, y, x, 0]
+-                    if alpha_in >= 1.0:
+-                        continue
+-                        
+-                    weight = alpha * (1.0 - alpha_in)
+-                    
+-                    acc_color[c, y, x] += color * weight
+-                    acc_normal[c, y, x] += normal * weight
+-                    acc_alpha[c, y, x, 0] += weight
+-                    
+-                    if acc_alpha[c, y, x, 0] >= 1.0:
+-                        break
++                    for y in range(y_start, y_end):
++                        for x in range(x_start, x_end):
++                            px = float(x)
++                            py = float(y)
++                            
++                            h_u = -M_g[0, :3] + M_g[2, :3] * px
++                            h_v = -M_g[1, :3] + M_g[2, :3] * py
++                            
++                            tmp = np.cross(h_u, h_v)
++                            
++                            if abs(tmp[2]) < 1e-10:
++                                continue
++                            
++                            us = tmp[0] / tmp[2]
++                            vs = tmp[1] / tmp[2]
++                            
++                            sigma_3d = us * us + vs * vs
++                            dx = x - means2d[c, gid, 0]
++                            dy = y - means2d[c, gid, 1]
++                            sigma_2d = 2.0 * (dx * dx + dy * dy)
++                            
++                            sigma = 0.5 * min(sigma_3d, sigma_2d)
++                            
++                            if sigma < 0:
++                                continue
++                                
++                            alpha = min(opacity * np.exp(-sigma), 1.0)
++                            
++                            alpha_in = acc_alpha[c, y, x, 0]
++                            if alpha_in >= 1.0:
++                                continue
++                                
++                            weight = alpha * (1.0 - alpha_in)
++                            
++                            acc_color[c, y, x] += color * weight
++                            acc_normal[c, y, x] += normal * weight
++                            acc_alpha[c, y, x, 0] += weight
++                            acc_depth[c, y, x, 0] += depth * weight
++                            
++                            if acc_alpha[c, y, x, 0] >= 1.0:
++                                break
+         
+         for y in range(H):
+@@ -190,6 +194,7 @@
+                 render_alphas[c, y, x, 0] = alpha_final
+                 render_normals[c, y, x] = acc_normal[c, y, x] / (alpha_final + 1e-8)
+-
+-    return render_colors, render_alphas, render_normals
++                render_depths[c, y, x, 0] = acc_depth[c, y, x, 0] / (alpha_final + 1e-8)
++
++    return render_colors, render_alphas, render_normals, render_depths
+ ```
+ 
+@@ -209,14 +214,14 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N \cdot H \cdot W)$ in the naive reference implementation, where $N$ is the number of surfels and $H, W$ are image dimensions. Tile-based optimization reduces this to $O(K \cdot H \cdot W)$ where $K$ is the average number of surfels per tile.
+-- **Memory Complexity:** $O(N + H \cdot W)$ for storing surfel properties and output buffers.
++- **Time Complexity:** Not given in the sources.
++- **Memory Complexity:** Not given in the sources.
+ - **Measured Performance:** Not given in the sources.
+-- **Strengths:** Provides a clear, differentiable (via MLX autodiff in the reference) reference implementation for 2D Gaussian Splatting. Handles multiple camera models (pinhole, fisheye, orthographic) [S3, unofficial].
+-- **Limitations:** The NumPy reference implementation is not differentiable and is slow for large scenes.
+-- **When to use:** For debugging, testing, and educational purposes.
+-- **When not to use:** When real-time performance is required and the optimized implementation is not available.
++- **Strengths:** Provides a clear reference implementation for 2D Gaussian Splatting using NumPy [S3, unofficial]. Handles multiple camera models (pinhole, fisheye, orthographic) [S3, unofficial].
++- **Limitations:** The NumPy reference implementation is not differentiable [S3, unofficial].
++- **When to use:** For debugging, testing, and educational purposes [S3, unofficial].
++- **When not to use:** When real-time performance is required and the optimized implementation is not available [S3, unofficial].
+ 
+ ## Background
+-The method is part of the 2D Gaussian Splatting framework, which extends 3D Gaussian Splatting by using surfels (2D Gaussians) instead of 3D ellipsoids. The reference implementation is provided by the `gsplat-mlx` library [S3, unofficial].
++The method is part of the 2D Gaussian Splatting framework, which extends 3D Gaussian Splatting by using surfels (2D Gaussians) instead of 3D ellipsoids [S5, S6]. The reference implementation is provided by the `gsplat-mlx` library [S3, unofficial].
+ 
+ ## Sources

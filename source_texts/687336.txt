@@ -1,0 +1,231 @@
+A modular C++20 game engine with independent runtime libraries. - Fade objects out by distance and simplify meshes into levels of detail by aoinoikaz · Pull Request #184 · Gondola-Bros-Entertainment/anima
+
+Fade objects out by distance and simplify meshes into levels of detail by aoinoikaz · Pull Request #184 · Gondola-Bros-Entertainment/anima · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+aoinoikaz
+commented
+Oct 1, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Two mechanisms for drawing large outdoor scenes: objects that stop drawing at a distance, fading rather than popping, and meshes that simplify themselves by distance. The design follows Godot's visibility ranges and mesh LOD, Unreal's per-instance dithered fade and per-cluster LOD for instanced copies, and meshoptimizer's own guidance for LOD chains.
+Visibility ranges
+VisibilityRange, set through Scene::set_visibility_range or MeshRenderer::set_visibility_range, gives the distances from the eye at which an object draws, measured to the center of its mesh's rest bounds (Mesh::rest_bounds()) as the object, or each placed copy, places it. Godot measures to the center of an instance's bounds (vd.position = p_instance->transformed_aabb.get_center(); in renderer_scene_cull.cpp). The center of a transformed box is the transformed center, so separate objects and placed copies measure to the same point.
+Objects without placements outside their range are culled on the CPU in every pass; placement clusters entirely outside it are culled with them. Each cluster's bounds hold every copy's center, so culling by bounds never hides a copy that its range still draws.
+In the margins an object dissolves with a 4x4 ordered dither instead of popping. The vertex shaders compute each copy's visible share, as Unreal's PerInstanceFadeAmount does per instance, and the fragment shader discards that share of its pixels. Godot's documentation notes that its alpha fade "forces transparent rendering" and that "dithering transparency is faster to render compared to alpha blending"; dithering keeps depth writes and needs no sorting.
+A copy casts shadows while more than half of it draws, so shadow maps do not speckle; a hidden copy leaves the view volume and costs no pixels. As in Godot, shadow passes measure from the camera.
+An endless range reaches the GPU as ending at the largest float: the Vulkan spec lets implementations "assume that arguments and results are not NaNs or infinities" unless a shader declares SignedZeroInfNanPreserve.
+Custom materials read the range through a new push constant member, ranged, and fade through animaVisibility() and animaDissolved().
+Scene, prefab and prefab variant documents store an optional visibility_range, so their versions stay.
+The margins fade inside the range, whole from begin + begin_margin to end - end_margin, as Unreal's cull distance fades from start to end; Godot centers its fade on each boundary instead.
+Levels of detail
+MeshLodOptions on Mesh::compile and MeshCompileOptions generates up to 8 simplified levels per draw with meshoptimizer's attribute-aware quadric simplifier, as Godot does on import.
+Each level simplifies the one before it. meshoptimizer's README says chaining "is more efficient and produces smoother visual transitions between LOD levels while preserving mesh attributes better", and Godot's importer chains.
+The draw's open border stays locked (meshopt_SimplifyLockBorder), as Godot locks it ("Lock geometric boundary in case the mesh is composed of multiple material subsets"), so the material subsets of one mesh and compile_static pieces meet without cracks whichever levels each draws.
+Each level records the largest error of the steps that made it, in the mesh's units, as meshoptimizer's clusterlod.h merges errors by default. The error combines position and attribute error; meshopt_SimplifyErrorClamped holds the attribute part to the positional scale, as the README recommends "if error values are used for LOD selection" and clusterlod.h does by default (the v1.3 header marks the flag experimental). Normals and colors weigh 1, the README's suggestion for normalized attributes and Godot's weight.
+A step may move the surface by up to the draw's extent, Godot's cap ("We only need LODs that can be selected by error threshold"), and must drop at least 15% of its indices, clusterlod.h's simplify_threshold.
+The renderer draws, per object and per placement cluster, the coarsest level whose error projects to at most RendererOptions::lod_threshold pixels (1 by default, which Godot's documentation calls "tuned to look perceptually lossless"), measured to the nearest point of the world bounds and scaled by the largest axis scale, as Godot's _fill_render_list and mesh_surface_get_lod do. Shadow passes use the view's choice, as Godot's do.
+Godot picks one LOD for a whole MultiMesh; here each placement cluster chooses its own, as Unreal's hierarchical instanced meshes do.
+Masked draws get no levels: their cutout edges follow texture coordinates, which the simplifier does not weigh. Godot generates them anyway.
+Scene::snapshot budgets only each draw's own indices; the levels follow them in Mesh::indices().
+meshoptimizer 1.3 is vendored unmodified (simplifier and allocator only, MIT) and private to anima::assets; the four files are byte-identical to upstream 9e1f07b, the v1.3 tag.
+Option not taken: Nanite-style cluster LOD. It is a GPU-driven pipeline, a cluster hierarchy built offline and culled in compute, and Epic's hardware specification for Nanite requires "DirectX 12 (with Shader Model 6.6 atomics), or Vulkan (VK_KHR_shader_atomic_int64)"; on an Apple M2 neither MoltenVK 1.4.1 nor KosmicKrisp reports shaderBufferInt64Atomics.
+Part of #140, which also asks to skip poses nobody sees.
+Changed after the first push
+CI's --lod check failed on lavapipe with 3 isolated dark pixels. They were cracks: each draw was simplified on its own without a border lock, so an open border collapsed differently on its two sides, and the double-sided sphere showed its dark inside through the gaps. The check's sphere had such a border by accident (in float, sin(2π) is not 0, so its seam never welded), and the material subsets of one mesh and compile_static pieces would crack the same way. Reviewing the rest against Godot, meshoptimizer and the Vulkan spec found:
+Levels now lock their borders, chain from the level before and clamp attribute error, as above.
+Scene::snapshot counted level indices against its budget, so it could refuse a scene that fits.
+Ranges measured to each copy's origin while clusters were culled by geometry bounds, so a copy whose origin lay outside its mesh's bounds could be culled while still in range. Ranges now measure to the bounds center, as Godot's do.
+An endless range reached the shaders as +inf.
+No check ran animaVisibility() or animaDissolved().
+The --lod spheres are now closed, as an exported mesh is; with the accidental seam locked, their far levels stopped at 1,728 indices. Cracks are covered on the CPU instead: mesh_lods requires draws that meet, and compile_static pieces, to stay closed at every combination of their levels, and fails with the border lock removed.
+Checks
+ctest -LE gpu: 91 of 91 pass on macOS (AppleClang, Debug, full configuration), including visibility_ranges and mesh_lods. With the border lock, the snapshot count and the cluster centers reverted, exactly the four tests written for them fail.
+The first commit alone builds with warnings as errors and passes its 62 tests and its 5 range GPU checks.
+ctest -L gpu on an Apple M2: 38 of 38 pass with zero validation messages on MoltenVK 1.4.1 (the renderer, which requests Vulkan 1.1, reports 1.1.334) and on KosmicKrisp (Vulkan 1.3.340), with identical counts.
+--placements draws 256 copies under one visibility range shared by every separate object and the placed copies and requires identical frames; 24 separate objects are culled whole on the CPU.
+--lod: at 1 pixel, every pixel that changes by more than 16 levels lies within a pixel of an edge of the full frame and the mean channel difference stays below 0.5. From 30 m the levels submit 249,270 indices instead of 10,644,486; from 100 m, 173,238 instead of 11,086,854; shadow passes drop by the same factors. The sphere 2 m away draws 6,912 of its 27,648 indices.
+--custom-materials: quads that fade through the helpers dissolve the same 13,650 pixels as the standard material, as separate objects and as placed copies, and leave the same 937 shadowed ground pixels.
+Homebrew clang 22.1.7 with the project's flags and -Wshadow, for MSVC's C4458, reports nothing on every changed translation unit and both consumer builds; clang-format 22.1.8 and the Doxygen build pass.
+Known limits: without temporal anti-aliasing, a dithered fade shows its pattern while an object is mid-fade. LOD selection and range culling run on the CPU per object and per cluster; GPU-driven culling is the path for much larger counts.
+Not run here: the GPU checks on Linux and Windows hardware (CI runs them on lavapipe), and Windows MSVC locally.
+aoinoikaz
+force-pushed
+the
+visibility-ranges-and-lod
+branch
+from
+b4bb37f to
+c095535
+Compare
+October 1, 2026 17:25
+aoinoikaz
+mentioned this pull request
+Oct 1, 2026
+Draw distant foliage as octahedral impostors
+#186
+Closed
+3 tasks
+aoinoikaz
+added 2 commits
+October 1, 2026 14:20
+Draw objects only within their visibility ranges, dissolving at the e…
+…
+a515aa8
+```
+…dges
+
+An application had no way to stop drawing an object far away or up
+close: small scenery drew at every distance it was loaded at, and the
+only alternative was to stream it out by hand.
+
+VisibilityRange, set through Scene::set_visibility_range and
+MeshRenderer::set_visibility_range, gives an object the distances from
+the eye at which it draws, measured to the center of its mesh's rest
+bounds as the object, or each placed copy, places it, as Godot's
+visibility ranges measure to the center of an instance's bounds.
+Mesh::rest_bounds() exposes those bounds. Objects without placements
+outside their range are culled whole on the CPU in every pass, and
+placement clusters entirely outside it are culled with them; each
+cluster's bounds hold every copy's center, so culling a cluster never
+hides a copy that its range still draws. Within its margins an object
+dissolves rather than popping: the vertex shaders compute each copy's
+visible share, as Unreal computes PerInstanceFadeAmount per instance,
+and the standard fragment shader discards that share of its pixels with
+a 4x4 ordered dither, which needs no blending or sorting. A copy casts
+shadows while more than half of it draws, and a hidden copy leaves the
+view volume, so it costs no pixels. Orthographic views draw everything
+whole.
+
+The pose buffer holds a ranged object's world matrix, then its range
+and the center it measures to, ahead of its palette, as it already did
+for placements. Shaders may assume that no value is infinite, so an
+endless range is stored as ending at the largest float. Custom
+materials read the range through a new push constant member, ranged,
+and fade through animaVisibility() and animaDissolved() in
+anima/custom_material.glsl. validate_visibility_range() states the
+rules; scene, prefab and prefab variant documents store the range as
+an optional visibility_range field, so their versions stay.
+ResourceStats::range_culled counts what ranges hid.
+
+--placements now also draws the field under one range shared by every
+separate object and the placed copies, with the far rows hidden and the
+rows in its margin dissolving, and requires identical frames.
+--custom-materials draws quads whose own shaders fade through the
+helpers, as separate objects and as placed copies, and requires the
+pixels they dissolve and the shadows they cast to match the standard
+material's exactly.
+```
+Simplify mesh draws into levels of detail and draw them by screen error
+…
+81607cf
+```
+Every draw rendered its full triangles at every distance, so a far
+forest or field of rocks cost as many vertices as one in front of the
+camera.
+
+Mesh::compile and Mesh::compile_static now take MeshLodOptions, which
+generate up to 8 simplified levels per draw, as Godot generates LODs on
+import. Each level simplifies the one before it toward half its
+triangles with meshoptimizer's attribute-aware quadric simplifier, as
+meshoptimizer recommends for a chain, keeping the seams where normals
+and vertex colors split. The draw's open border stays locked, as Godot
+locks it, so the material subsets of one mesh and the pieces of
+compile_static, which simplify apart, meet without cracks whichever
+levels each draws. Each level records the largest error of the steps
+that made it, in the mesh's units, as meshoptimizer's cluster LOD
+reference merges them; a step's error combines position and attribute
+error, with the attribute part clamped to the positional scale, as
+meshoptimizer recommends when the error chooses levels. Generation
+stops when a level would keep more than 85% of the indices of the one
+before it or a step's error would exceed the draw's extent. Masked
+draws get none, since their cutout edges follow texture coordinates,
+which the simplifier does not weigh. The levels' indices follow every
+draw's own in the mesh's index buffer, and Scene::snapshot budgets only
+the draws' own.
+
+The renderer draws, for each object and each placement cluster, the
+coarsest level whose error, scaled by the largest axis scale that
+places the draw and projected from the eye to the nearest point of the
+draw's or cluster's bounds, covers at most
+RendererOptions::lod_threshold pixels, 1 by default as Godot's mesh LOD
+threshold is; set_lod_threshold() changes it, and 0 always draws the
+full draws. Shadow passes draw the levels the view chose, as Godot's
+do, adjacent clusters at the same level still merge into one call, and
+MeshPlacements::Cluster::scale records the largest placement scale that
+the choice needs. ResourceStats::lod_draws counts the calls that drew a
+level.
+
+meshoptimizer 1.3 is vendored unmodified, its simplifier and allocator
+only, and compiled privately into anima::assets.
+
+--lod draws 400 dense closed spheres through placements and one as an
+object over a shadowed ground. At 1 pixel every pixel that changes by
+more than 16 levels lies within a pixel of an edge of the full frame
+and the mean channel difference stays below 0.5, from 30 m, where the
+levels draw 43 times fewer indices, and from 100 m, 64 times fewer; the
+sphere 2 m away draws a finer level than the far ones. mesh_lods
+requires draws that meet, and compile_static pieces, to stay closed at
+every combination of their levels.
+```
+aoinoikaz
+force-pushed
+the
+visibility-ranges-and-lod
+branch
+from
+c095535 to
+81607cf
+Compare
+October 1, 2026 18:22
+aoinoikaz
+added this pull request to the merge queue
+Oct 1, 2026
+Hide details
+View details
+Merged
+via the queue into
+main
+with commit ba89c35
+Oct 1, 2026
+20 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+aoinoikaz
+deleted the
+visibility-ranges-and-lod
+branch
+October 1, 2026 19:08
+aoinoikaz
+mentioned this pull request
+Oct 1, 2026
+Close the gaps found auditing levels of detail, visibility ranges, placements and depth
+#187
+Merged
+aoinoikaz
+mentioned this pull request
+Oct 26, 2026
+Bias mesh detail per object and skip poses nobody sees
+#140
+Open
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

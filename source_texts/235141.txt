@@ -1,0 +1,208 @@
+# Room Demo：室内 3D 重建与开放语义识别
+
+> 协作边界：本仓库只负责 3DGS 建模、语义到 Gaussian 投影和 contracts v1.0 场景包导出；对象关系、物理支撑验证和场景类型推理由独立 `semantic-3d-reasoning` 仓库负责。详见 `docs/PROJECTION_CONTRACT_BOUNDARY_V1.md`。
+
+Room Demo 是一套面向室内场景的本地工作流：用户上传照片或视频，系统完成质量筛选、快速预览、高质量 Gaussian 重建、人工清理、跨视角对象识别，并在 SuperSplat 中按类别或实例显示红色点云覆盖。
+
+当前目标不是只识别预先手工定义的 `chair001`、`chair002`，而是先发现稳定的物理对象，再解析其开放类别语义；证据不足或冲突时保留为 `unknown`。
+
+## 当前正式工作流
+
+```text
+8000 上传照片/视频
+  -> 18770 图片质量、重复度和视觉连接性门禁
+  -> 自动 COLMAP 相机注册和位姿门禁
+  -> 用户选择建模分支
+       |-> ZipSplat 快速预览 -> SuperSplat 查看或决定补拍
+       `-> 高清训练按钮 -> LichtFeld Studio 正式训练
+  -> SuperSplat 人工清理并保存最终 PLY
+  -> 8000 五视角自动重投影门禁
+  -> 冻结 PLY 哈希、Gaussian 顺序、坐标变换和全部注册照片相机契约
+  -> 2D 对象候选与 SAM3 边界
+  -> Gaussian 贡献映射
+  -> 多视角保守融合
+  -> 物理 instance_id
+  -> 开放类别语义或 unknown
+  -> SuperSplat 类别搜索和红色 Gaussian 覆盖
+```
+
+五视角只在后台验证照片位姿与当前 PLY 的坐标对齐；页面不要求人工确认，自动门控通过后直接进入识别。
+
+质量门通过后提供两个独立分支：
+
+1. ZipSplat 只在用户点击“快速预览”后运行，用于检查覆盖、模糊、碎片化和补拍需求。
+2. COLMAP 位姿通过后，用户点击“高清训练”直接启动 LichtFeld Studio；无需先运行 ZipSplat。只有人工清理并冻结后的最终 PLY 才能生成正式语义包。
+
+## 当前正式模型基线
+
+- 模型：`office_full_supplement2_165img_mcmc30k_v3clean.ply`
+- 路径：`project/artifacts/reconstruction/20260812_office_supplement2_incremental_colmap_lichtfeld_v2/output_v3/`
+- Gaussian 数量：`1,924,953`
+- SHA-256：`7df1453c508bb2427df50745626589b2a0301b5510651ca5ff986298e4dd41a5`
+- COLMAP：165/165 张图注册成功，两组 `SIMPLE_RADIAL` 相机内参
+- 相机/PLY：已恢复 SuperSplat 保存变换并通过五视角重渲染对齐审核
+
+旧 Brush 测试 PLY、旧 ZipSplat PLY 和未清理的 200 万 Gaussian PLY 的索引都不能复制到该模型。
+
+## 目录结构
+
+```text
+D:\room_demo
+├─ apps\capture_portal              # 8000 用户上传门户
+├─ 1\photo_reconstruction_gate      # 18770 图片质量与补拍服务
+├─ 1\semantic_object_registry       # 当前语义识别代码、配置和审核工具
+├─ algorithms
+│  ├─ sam3                          # SAM3/SAM3.1 源码和权重
+│  ├─ sam3d-objects                 # 隔离的 3D 对象研究代码
+│  ├─ semantic                     # Mask2Former、DINOv2、gsplat 环境和权重
+│  └─ zipsplat                     # ZipSplat 预览环境
+├─ tools
+│  ├─ colmap-4.1.1                 # 固定版本 COLMAP
+│  ├─ lichtfeld-studio-v0.5.3      # 正式 Gaussian 重建工具
+│  └─ supersplat                   # 本地改造的 SuperSplat
+├─ scripts                          # 安装、视频抽帧、COLMAP 和 ZipSplat 脚本
+├─ project
+│  ├─ data                         # 原始或用户项目数据
+│  ├─ artifacts                    # 版本化算法证据和输出
+│  ├─ contracts                    # JSON Schema 和接口契约
+│  └─ reports                      # 正式项目报告
+├─ tests                            # 视频/COLMAP 等保留工具测试
+├─ runtime                          # 当前日志、token 和临时构建
+└─ backups                          # 修改前备份、退休脚本和拒绝实验
+```
+
+## 启动上传与质量服务
+
+环境要求：Windows、PowerShell、Python 3.11。项目依赖和缓存应保存在 `D:\room_demo` 内。
+
+先启动质量服务，再启动上传门户：
+
+```powershell
+& 'D:\room_demo\1\photo_reconstruction_gate\start_photo_gate.ps1'
+& 'D:\room_demo\apps\capture_portal\run_capture_portal.ps1'
+```
+
+访问地址：
+
+- 本机上传：`http://127.0.0.1:8000`
+- 手机上传：`http://<电脑局域网IP>:8000`
+- 图片质量/补拍服务：`http://127.0.0.1:18770`
+
+访问令牌保存在：
+
+```text
+D:\room_demo\runtime\capture_portal_access_token.txt
+```
+
+也可以直接双击根目录 [启动正式上传系统.bat](D:/room_demo/启动正式上传系统.bat)。该脚本使用以上两个 D 盘正式入口，在服务就绪后打开 8000 页面；用户点击“识别”后，后台自动执行五视角对齐门禁、冻结全相机契约并进入统一 SAM3 语义主线，无需人工确认五视角。
+
+## 启动本地 SuperSplat
+
+```powershell
+Set-Location -LiteralPath 'D:\room_demo\tools\supersplat'
+npm run develop
+```
+
+标准开发命令默认由前端工具选择服务端口；项目现有工作流通常把正式查看地址配置为 `http://127.0.0.1:60712`。打开具体 PLY 时，还会通过 URL 参数传入文件服务和语义索引地址。
+
+本地 SuperSplat 已增加：
+
+- 独立语义覆盖 PLY；
+- 按类别或别名搜索；
+- Clear 隐藏覆盖；
+- 多场景框选和删除；
+- 用户编辑后分块保存 PLY；
+- 保存后强制标记旧语义包失效。
+
+## 语义识别主入口
+
+统一入口：
+
+```text
+D:\room_demo\1\semantic_object_registry\run_photo_semantic_gaussian_pipeline.py
+```
+
+正式阶段：
+
+```text
+01_selection -> 02_lift -> 03_fusion -> 04_identity -> 05_semantics
+```
+
+- `01_selection`：Mask2Former 高召回候选、object-first/objectness 补充和 SAM3 边界选择。
+- `02_lift`：使用冻结相机契约，把 2D mask 映射为前向 `T*alpha` Gaussian 贡献。
+- `03_fusion`：按不同视角的几何支持保守融合观察。
+- `04_identity`：使用共享视角、前表面深度、空间关系和 contradiction veto 形成物理实例。
+- `05_semantics`：聚合对象级类别证据，输出具体类别或 `unknown`。
+
+运行形式：
+
+```powershell
+& 'D:\room_demo\algorithms\sam3\.venv\Scripts\python.exe' `
+  'D:\room_demo\1\semantic_object_registry\run_photo_semantic_gaussian_pipeline.py' `
+  --config '<绑定当前 Clean PLY 的版本化配置.json>' `
+  --output-dir '<新的版本化输出目录>' `
+  --until semantics
+```
+
+不要直接运行 `photo_semantic_gaussian_pipeline_v1.example.json`：它用于说明字段结构，其中仍有历史测试路径。正式运行必须使用绑定当前 Clean PLY 哈希和正式相机契约的新配置，并且输出目录必须不存在。
+
+## 语义识别原则
+
+- 对象发现先于最终类别决定。
+- SAM3、Mask2Former 和文本提示都只是证据，不单独构成语义真值。
+- 物理实例身份和语义类别是两个独立门禁。
+- 同一 Gaussian 最多属于一个已发布 `instance_id`。
+- `unknown` 是合法结果；不能把证据不足自动改成 `other_object`。
+- Gaussian overlap 只作为局部确认，不能要求同一对象的所有正反表面直接共享 Gaussian。
+- 后墙、地面和物体背后的穿模污染应通过深度、前表面和连通性过滤，不通过放宽分类阈值解决。
+- 人工复核用于校准类别和解决真实歧义，不用于逐个手工定义全部物体。
+- 任何 PLY 删除、重排、再导出或坐标变换都会使已有 Gaussian ID 失效，必须重建语义包。
+
+## 图片和重建数据原则
+
+- 原始照片和视频按原字节保存，不覆盖、不原地转换。
+- 模糊、严重曝光、重复图和断开的相机路径必须被门禁记录。
+- 视频抽帧保持时间连接性；排序不能伪造缺失的桥接视角。
+- 补拍特写必须包含从原场景接近目标、环绕目标和返回场景的连接视角。
+- ZipSplat 预览质量不能替代 COLMAP/LichtFeld 正式模型的相机对齐验证。
+- 每次训练、清理、语义运行和人工决定都写入新的版本化目录。
+
+## 测试
+
+视频到 COLMAP 准备工具测试：
+
+```powershell
+Set-Location -LiteralPath 'D:\room_demo'
+& 'D:\room_demo\algorithms\semantic\.venv\Scripts\python.exe' -m pytest -q `
+  'tests\test_prepare_video_colmap_dataset.py'
+```
+
+上传门户测试：
+
+```powershell
+Set-Location -LiteralPath 'D:\room_demo\apps\capture_portal'
+& 'D:\room_demo\.venv\Scripts\python.exe' -m pytest -q
+```
+
+语义模块测试位于 `1\semantic_object_registry\test_*.py`。部分测试需要语义专用 Python 环境；GPU 推理测试应与纯单元测试分开执行。
+
+## 主要文档
+
+- `PROJECT_ROADMAP_AND_DECISIONS.md`：当前路线图、实验结论和下一门禁。
+- `TECHNICAL_ROUTE_V1.md`：整体技术路线基线。
+- `1/semantic_object_registry/SEMANTIC_RECOGNITION_TECHNICAL_BASELINE_V1.md`：语义技术基线。
+- `1/semantic_object_registry/PHOTO_SEMANTIC_GAUSSIAN_PIPELINE_V1.md`：语义流水线操作说明。
+- `1/semantic_object_registry/OPEN_WORLD_SEMANTIC_ALGORITHM_V1.md`：开放类别和 unknown 策略。
+
+## 当前边界
+
+- 当前 165 图办公室模型已经完成 Clean PLY、相机契约和初步多类/对象性验证。
+- 8000 已接通“新 PLY 门控 -> 五视角自动对齐门禁 -> 全视角相机契约冻结 -> 统一 SAM3 主线”；自动终点仍是待复核的 `05_semantics` 候选清单。
+- 自动化可以生成 provisional `instance_id`，但未经边界和歧义门禁的结果不能冒充人工接受的语义包。
+- class-agnostic objectness 已进入三视角试验，但尚未证明全场景开放召回能力。
+- DINOv2 目前只保留为多视角外观诊断证据，不能自动合并实例碎片。
+- floor 暂不作为当前 object-first 主线的优先目标。
+
+## 已移除组件
+
+旧的 LangGraph Multi-Agent 研发编排模块已于 2026-08-24 从活动项目中移除，包括 Master、Vision、Semantic、Engineering 和 Reviewer Agent。该模块没有参与实际 3DGS、SAM3、COLMAP、LichtFeld、Gaussian 映射或语义推理；它的历史源码保存在 `backups/multi_agent_removed_20260824`，不再作为运行依赖。

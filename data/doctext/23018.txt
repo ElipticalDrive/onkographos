@@ -1,0 +1,815 @@
+# Voxelizer
+
+A simple .NET console application that converts a set of pixel coordinates into a triangle mesh representing a voxelized image. Each pixel corresponds to a 1 mm cube; interior faces between adjacent same‑group pixels are culled for efficiency.
+
+## Features
+- **Mesh Generation**: `MeshGenerator.Generate(List<(int X, int Y)>, int imageHeight)` builds a `Mesh` object from a list of pixel coordinates.
+- **Exterior Faces Only**: Only external faces are emitted to minimize triangle count.
+- **Automatic Rotation**: The generated mesh is rotated 180 degrees around the X‑axis so that it appears "face up."
+- **Test Image Generator**: `TestImageGenerator.Generate(string outputPath)` creates a small PNG (`4×4`) with three colors and one transparent pixel for quick testing.
+
+## Usage
+### Running the Application
+```bash
+dotnet run -- --generate-test   # produces a test image in ./test.png
+```
+### Programmatic Use
+Add `using Voxelizer;` to your project and call:
+```csharp
+var pixels = new List<(int X, int Y)> { (0, 0), (1, 0), (2, 0) }; 
+var height = 10; 
+var mesh = MeshGenerator.Generate(pixels, height); 
+```
+The `mesh` object contains:
+- **Vertices**: A list of `Vertex` structs representing each unique corner.
+- **Triangles**: A list of `Triangle` structs (each with three vertex indices) defining the surface.
+
+## Directory Structure
+```
+Voxelizer/
+├─ MeshGenerator.cs      ⇪ Core mesh-generation logic
+├─ TestImageGenerator.cs⇪ Utility to generate a test PNG
+├─ Program.cs           ⇪ Entry point demonstrating command-line usage
+├─ ConnectedComponents.cs→ Helper for grouping contiguous pixels (currently stubbed)
+└─ Color.cs              → Simple color support (if expanded)
+```
+## Development
+- **Prerequisites**: .NET 8 SDK (`dotnet`).
+- **Testing**: No explicit test framework included; verify mesh output visually with the generated PNG.
+- **Extending**:
+  - Implement `ConnectedComponents.cs` to automatically detect groups of connected pixels.
+  - Add support for diagonal adjacency or custom voxel sizes.
+## License
+MIT License – see the [LICENSE](LICENSE) file for details.
+
+### Color.cs
+```
+namespace Voxelizer;
+
+public readonly struct Color : System.IEquatable<Color>
+{
+    public byte R { get; }
+    public byte G { get; }
+    public byte B { get; }
+    public byte A { get; }
+
+    public Color(byte r, byte g, byte b, byte a = 255)
+    {
+        R = r;
+        G = g;
+        B = b;
+        A = a;
+    }
+
+    public bool Equals(Color other) => R == other.R && G == other.G && B == other.B && A == other.A;
+    public override bool Equals(object? obj) => obj is Color other && Equals(other);
+    public override int GetHashCode() => System.HashCode.Combine(R, G, B, A);
+    public static bool operator ==(Color left, Color right) => left.Equals(right);
+    public static bool operator !=(Color left, Color right) => !left.Equals(right);
+}
+```
+
+### ConnectedComponents.cs
+```
+namespace Voxelizer;
+
+/// <summary>
+/// Represents a connected component of same-color pixels.
+/// </summary>
+public sealed class Component
+{
+    public Color Color { get; }
+    public List<(int X, int Y)> Pixels { get; } = new();
+
+    public Component(Color color)
+    {
+        Color = color;
+    }
+}
+
+/// <summary>
+/// Finds connected components of same-color pixels using Union-Find.
+/// Pixels of the same color within the given search radius are grouped together.
+/// </summary>
+public static class ConnectedComponents
+{
+    /// <summary>
+    /// Default search radius in pixels. Pixels of the same color within this
+    /// distance are considered connected and grouped into the same component.
+    /// </summary>
+    public const int DefaultSearchRadius = 4;
+
+    /// <summary>
+    /// Finds all connected components in the given pixel grid.
+    /// Only fully opaque pixels (alpha == 255) are included.
+    /// </summary>
+    /// <param name="pixels">2D array of pixel colors.</param>
+    /// <param name="searchRadius">
+    /// Maximum distance (in pixels, Chebyshev/chessboard distance) to search
+    /// for same-color neighbors. A radius of 1 is equivalent to 8-connectivity.
+    /// Default is <see cref="DefaultSearchRadius"/>.
+    /// </param>
+    public static List<Component> Find(Color[,] pixels, int searchRadius = DefaultSearchRadius)
+    {
+        int width = pixels.GetLength(0);
+        int height = pixels.GetLength(1);
+        int totalPixels = width * height;
+
+        // Union-Find arrays
+        int[] parent = new int[totalPixels];
+        int[] rank = new int[totalPixels];
+        for (int i = 0; i < totalPixels; i++)
+        {
+            parent[i] = i;
+        }
+
+        // Precompute neighbor offsets within the search radius that have
+        // already been visited in raster scan order (y ascending, x ascending).
+        // This means: all pixels in rows (y - radius) to (y - 1) within
+        // x range [-radius, +radius], plus pixels in the same row with x < 0.
+        var neighborOffsets = new List<(int dx, int dy)>();
+        for (int dy = -searchRadius; dy <= 0; dy++)
+        {
+            int xStart = (dy < 0) ? -searchRadius : -searchRadius;
+            int xEnd = (dy < 0) ? searchRadius : -1;
+            for (int dx = xStart; dx <= xEnd; dx++)
+            {
+                // Check Chebyshev distance (already guaranteed by loop bounds)
+                neighborOffsets.Add((dx, dy));
+            }
+        }
+        var neighbors = neighborOffsets.ToArray();
+
+        for (int y = 0; y < height; y++)
+        {
+            for (int x = 0; x < width; x++)
+            {
+                Color current = pixels[x, y];
+                if (current.A < 255) continue; // Skip non-opaque pixels
+
+                int currentIndex = y * width + x;
+
+                foreach (var (dx, dy) in neighbors)
+                {
+                    int nx = x + dx;
+                    int ny = y + dy;
+
+                    if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+
+                    Color neighbor = pixels[nx, ny];
+                    if (neighbor.A < 255) continue;
+
+                    // Union if same color (comparing RGB, alpha already confirmed == 255)
+                    if (current.R == neighbor.R && current.G == neighbor.G && current.B == neighbor.B)
+                    {
+                        Union(parent, rank, currentIndex, ny * width + nx);
+                    }
+                }
+            }
+        }
+
+        // Collect components by root
+        var componentMap = new Dictionary<int, Component>();
+
+        for (int y = 0; y < height; y++)
+        {
+            for (int x = 0; x < width; x++)
+            {
+                Color pixel = pixels[x, y];
+                if (pixel.A < 255) continue;
+
+                int index = y * width + x;
+                int root = FindRoot(parent, index);
+
+                if (!componentMap.TryGetValue(root, out var component))
+                {
+                    component = new Component(pixel);
+                    componentMap[root] = component;
+                }
+
+                component.Pixels.Add((x, y));
+            }
+        }
+
+        return componentMap.Values.ToList();
+    }
+
+    private static int FindRoot(int[] parent, int i)
+    {
+        while (parent[i] != i)
+        {
+            parent[i] = parent[parent[i]]; // Path halving
+            i = parent[i];
+        }
+        return i;
+    }
+
+    private static void Union(int[] parent, int[] rank, int a, int b)
+    {
+        int rootA = FindRoot(parent, a);
+        int rootB = FindRoot(parent, b);
+        if (rootA == rootB) return;
+
+        // Union by rank
+        if (rank[rootA] < rank[rootB])
+            parent[rootA] = rootB;
+        else if (rank[rootA] > rank[rootB])
+            parent[rootB] = rootA;
+        else
+        {
+            parent[rootB] = rootA;
+            rank[rootA]++;
+        }
+    }
+}
+```
+
+### MeshGenerator.cs
+```
+namespace Voxelizer;
+
+/// <summary>
+/// A 3D vertex.
+/// </summary>
+public readonly record struct Vertex(float X, float Y, float Z);
+
+/// <summary>
+/// A triangle defined by three vertex indices.
+/// </summary>
+public readonly record struct Triangle(int V1, int V2, int V3);
+
+/// <summary>
+/// A mesh consisting of vertices and triangles.
+/// </summary>
+public sealed class Mesh
+{
+    public List<Vertex> Vertices { get; } = new();
+    public List<Triangle> Triangles { get; } = new();
+}
+
+/// <summary>
+/// Generates triangle meshes from connected components of pixels.
+/// Each pixel becomes a 1mm cube, with interior faces between adjacent
+/// same-group pixels culled for efficiency.
+/// </summary>
+public static class MeshGenerator
+{
+    private const float CubeSize = 1.0f; // 1mm per pixel
+
+    /// <summary>
+    /// Generates a mesh for the given set of pixel coordinates.
+    /// Only exterior faces are emitted.
+    /// The mesh is rotated 180 degrees on the X-axis to appear face-up.
+    /// </summary>
+    public static Mesh Generate(List<(int X, int Y)> pixels, int imageHeight)
+    {
+        var mesh = new Mesh();
+        var vertexMap = new Dictionary<Vertex, int>();
+
+        // Build a HashSet for O(1) neighbor lookup
+        var pixelSet = new HashSet<(int X, int Y)>(pixels);
+
+        // For each pixel, check 4 cardinal neighbors (not diagonal — faces only
+        // exist on cardinal-adjacent sides of cubes).
+        // If a neighbor in a given direction is NOT in this component, emit that face.
+        foreach (var (px, py) in pixels)
+        {
+            float x0 = px * CubeSize;
+            float y0 = py * CubeSize;
+            float x1 = x0 + CubeSize;
+            float y1 = y0 + CubeSize;
+            float z0 = 0f;
+            float z1 = CubeSize;
+
+            // Bottom face (Z = 0) — always emit (single layer, nothing below)
+            EmitFace(mesh, vertexMap,
+                new Vertex(x0, y1, z0),
+                new Vertex(x1, y1, z0),
+                new Vertex(x1, y0, z0),
+                new Vertex(x0, y0, z0));
+
+            // Top face (Z = CubeSize) — always emit (single layer, nothing above)
+            EmitFace(mesh, vertexMap,
+                new Vertex(x0, y0, z1),
+                new Vertex(x1, y0, z1),
+                new Vertex(x1, y1, z1),
+                new Vertex(x0, y1, z1));
+
+            // Left face (X = x0, normal → -X) — emit if no neighbor at (px-1, py)
+            if (!pixelSet.Contains((px - 1, py)))
+            {
+                EmitFace(mesh, vertexMap,
+                    new Vertex(x0, y0, z1),
+                    new Vertex(x0, y1, z1),
+                    new Vertex(x0, y1, z0),
+                    new Vertex(x0, y0, z0));
+            }
+
+            // Right face (X = x1, normal → +X) — emit if no neighbor at (px+1, py)
+            if (!pixelSet.Contains((px + 1, py)))
+            {
+                EmitFace(mesh, vertexMap,
+                    new Vertex(x1, y1, z1),
+                    new Vertex(x1, y0, z1),
+                    new Vertex(x1, y0, z0),
+                    new Vertex(x1, y1, z0));
+            }
+
+            // Front face (Y = y0, normal → -Y) — emit if no neighbor at (px, py-1)
+            if (!pixelSet.Contains((px, py - 1)))
+            {
+                EmitFace(mesh, vertexMap,
+                    new Vertex(x1, y0, z1),
+                    new Vertex(x0, y0, z1),
+                    new Vertex(x0, y0, z0),
+                    new Vertex(x1, y0, z0));
+            }
+
+            // Back face (Y = y1, normal → +Y) — emit if no neighbor at (px, py+1)
+            if (!pixelSet.Contains((px, py + 1)))
+            {
+                EmitFace(mesh, vertexMap,
+                    new Vertex(x0, y1, z1),
+                    new Vertex(x1, y1, z1),
+                    new Vertex(x1, y1, z0),
+                    new Vertex(x0, y1, z0));
+            }
+        }
+
+        // Apply 180-degree rotation around the X-axis so the object is "face up".
+        // This consists of mirroring Y and Z.
+        // Winding order is naturally preserved because two reflections equal a rotation.
+        float yMax = imageHeight * CubeSize;
+        for (int i = 0; i < mesh.Vertices.Count; i++)
+        {
+            var v = mesh.Vertices[i];
+            mesh.Vertices[i] = new Vertex(v.X, yMax - v.Y, CubeSize - v.Z);
+        }
+
+        return mesh;
+    }
+
+    /// <summary>
+    /// Emits a quad face as two triangles with correct winding order (CCW for outward normal).
+    /// Vertices should be provided in counter-clockwise order when viewed from outside.
+    /// </summary>
+    private static void EmitFace(Mesh mesh, Dictionary<Vertex, int> vertexMap,
+        Vertex v0, Vertex v1, Vertex v2, Vertex v3)
+    {
+        int i0 = GetOrAddVertex(mesh, vertexMap, v0);
+        int i1 = GetOrAddVertex(mesh, vertexMap, v1);
+        int i2 = GetOrAddVertex(mesh, vertexMap, v2);
+        int i3 = GetOrAddVertex(mesh, vertexMap, v3);
+
+        // Two triangles for the quad: (v0, v1, v2) and (v0, v2, v3)
+        mesh.Triangles.Add(new Triangle(i0, i1, i2));
+        mesh.Triangles.Add(new Triangle(i0, i2, i3));
+    }
+
+    private static int GetOrAddVertex(Mesh mesh, Dictionary<Vertex, int> vertexMap, Vertex v)
+    {
+        if (vertexMap.TryGetValue(v, out int index))
+            return index;
+
+        index = mesh.Vertices.Count;
+        mesh.Vertices.Add(v);
+        vertexMap[v] = index;
+        return index;
+    }
+}
+```
+
+### Program.cs
+```
+using StbImageSharp;
+using System.IO;
+
+namespace Voxelizer;
+
+class Program
+{
+    static int Main(string[] args)
+    {
+        // Hidden utility: generate a test image
+        if (args.Length >= 1 && args[0] == "--generate-test")
+        {
+            string testPath = args.Length >= 2 ? args[1] : "test_image.png";
+            TestImageGenerator.Generate(testPath);
+            return 0;
+        }
+
+        if (args.Length < 1)
+        {
+            Console.Error.WriteLine("Usage: Voxelizer <input.png> [--radius <N>]");
+            Console.Error.WriteLine();
+            Console.Error.WriteLine("Converts a palettized PNG into a 3MF file where each pixel");
+            Console.Error.WriteLine("becomes a 1mm cube. Connected same-color pixels are grouped");
+            Console.Error.WriteLine("into single mesh objects. Output is Bambu Studio / Orca");
+            Console.Error.WriteLine("Slicer compatible.");
+            Console.Error.WriteLine();
+            Console.Error.WriteLine("Options:");
+            Console.Error.WriteLine($"  --radius <N>  Search radius for grouping same-color pixels (default: {ConnectedComponents.DefaultSearchRadius})");
+            return 1;
+        }
+
+        string inputPath = Path.GetFullPath(args[0]);
+
+        // Parse optional --radius flag
+        int searchRadius = ConnectedComponents.DefaultSearchRadius;
+        for (int i = 1; i < args.Length - 1; i++)
+        {
+            if (args[i] == "--radius" && int.TryParse(args[i + 1], out int r) && r >= 1)
+            {
+                searchRadius = r;
+                break;
+            }
+        }
+
+        if (!File.Exists(inputPath))
+        {
+            Console.Error.WriteLine($"Error: File not found: {inputPath}");
+            return 1;
+        }
+
+        // Output file: same name, same directory, .3mf extension
+        string outputPath = Path.Combine(
+            Path.GetDirectoryName(inputPath)!,
+            Path.GetFileNameWithoutExtension(inputPath) + ".3mf");
+
+        Console.WriteLine($"Input:  {inputPath}");
+        Console.WriteLine($"Output: {outputPath}");
+
+        // Step 1: Load the PNG and extract pixel colors
+        Console.Write("Loading image... ");
+        Color[,] pixels;
+        int width, height;
+
+        using (var stream = File.OpenRead(inputPath))
+        {
+            var image = ImageResult.FromStream(stream, ColorComponents.RedGreenBlueAlpha);
+            width = image.Width;
+            height = image.Height;
+            pixels = new Color[width, height];
+
+            for (int y = 0; y < height; y++)
+            {
+                for (int x = 0; x < width; x++)
+                {
+                    int i = (y * width + x) * 4;
+                    pixels[x, y] = new Color(image.Data[i], image.Data[i + 1], image.Data[i + 2], image.Data[i + 3]);
+                }
+            }
+        }
+        Console.WriteLine($"OK ({width}x{height} pixels)");
+
+        // Step 2: Find connected components within search radius
+        Console.Write($"Finding connected components (radius={searchRadius})... ");
+        var components = ConnectedComponents.Find(pixels, searchRadius);
+        Console.WriteLine($"OK ({components.Count} components found)");
+
+        if (components.Count == 0)
+        {
+            Console.Error.WriteLine("Error: No opaque pixels found in the image. Nothing to convert.");
+            return 1;
+        }
+
+        // Build color palette in first-seen order (matches extruder assignment in 3MF)
+        int totalOpaquePixels = components.Sum(c => c.Pixels.Count);
+        var colorPalette = new List<(byte R, byte G, byte B)>();
+        var colorIndexMap = new Dictionary<(byte, byte, byte), int>();
+        foreach (var component in components)
+        {
+            var key = (component.Color.R, component.Color.G, component.Color.B);
+            if (!colorIndexMap.ContainsKey(key))
+            {
+                colorIndexMap[key] = colorPalette.Count;
+                colorPalette.Add(key);
+            }
+        }
+
+        Console.WriteLine($"  - {totalOpaquePixels} opaque pixels");
+        Console.WriteLine($"  - {colorPalette.Count} unique colors:");
+        foreach (var (r, g, b) in colorPalette)
+        {
+            int toolIndex = colorIndexMap[(r, g, b)] + 1; // 1-based
+            var matching = components.Where(c => c.Color.R == r && c.Color.G == g && c.Color.B == b).ToList();
+            int pixelCount = matching.Sum(c => c.Pixels.Count);
+            int componentCount = matching.Count;
+            Console.WriteLine($"    T{toolIndex:000}  #{r:X2}{g:X2}{b:X2} ({r,3}, {g,3}, {b,3}) {pixelCount,5} pixels  ({componentCount} component{(componentCount != 1 ? "s" : "")})");
+        }
+
+        // Step 3: Generate meshes for each component
+        Console.Write("Generating meshes... ");
+        var parts = new List<(Component Component, Mesh Mesh)>();
+        long totalTriangles = 0;
+        long totalVertices = 0;
+
+        foreach (var component in components)
+        {
+            var mesh = MeshGenerator.Generate(component.Pixels, height);
+            parts.Add((component, mesh));
+            totalTriangles += mesh.Triangles.Count;
+            totalVertices += mesh.Vertices.Count;
+        }
+        Console.WriteLine($"OK ({totalVertices:N0} vertices, {totalTriangles:N0} triangles)");
+
+        // Step 4: Write the 3MF file
+        string objectName = Path.GetFileNameWithoutExtension(inputPath);
+        Console.Write("Writing 3MF file... ");
+        ThreeMfWriter.Write(outputPath, objectName, parts);
+        var fileInfo = new FileInfo(outputPath);
+        Console.WriteLine($"OK ({fileInfo.Length:N0} bytes)");
+
+        Console.WriteLine();
+        Console.WriteLine("Done!");
+        return 0;
+    }
+}
+```
+
+### TestImageGenerator.cs
+```
+using StbImageWriteSharp;
+using System.IO;
+
+namespace Voxelizer;
+
+/// <summary>
+/// Utility to generate test images for verifying the voxelizer.
+/// Run with: dotnet run -- --generate-test
+/// </summary>
+public static class TestImageGenerator
+{
+    public static void Generate(string outputPath)
+    {
+        // Create a small 4x4 test image with 3 colors and a transparent pixel
+        int width = 4;
+        int height = 4;
+        byte[] pixels = new byte[width * height * 4];
+
+        void SetPixel(int x, int y, byte r, byte g, byte b, byte a)
+        {
+            int i = (y * width + x) * 4;
+            pixels[i] = r;
+            pixels[i + 1] = g;
+            pixels[i + 2] = b;
+            pixels[i + 3] = a;
+        }
+
+        // Row 0
+        SetPixel(0, 0, 255, 0, 0, 255); SetPixel(1, 0, 255, 0, 0, 255); SetPixel(2, 0, 0, 255, 0, 255); SetPixel(3, 0, 0, 255, 0, 255);
+        // Row 1
+        SetPixel(0, 1, 255, 0, 0, 255); SetPixel(1, 1, 255, 0, 0, 255); SetPixel(2, 1, 0, 255, 0, 255); SetPixel(3, 1, 0, 255, 0, 255);
+        // Row 2
+        SetPixel(0, 2, 0, 0, 255, 255); SetPixel(1, 2, 0, 0, 255, 255); SetPixel(2, 2, 0, 0, 0, 0);       SetPixel(3, 2, 0, 0, 255, 255);
+        // Row 3
+        SetPixel(0, 3, 0, 0, 255, 255); SetPixel(1, 3, 0, 0, 255, 255); SetPixel(2, 3, 0, 0, 255, 255); SetPixel(3, 3, 0, 0, 255, 255);
+
+        using var stream = File.OpenWrite(outputPath);
+        var writer = new ImageWriter();
+        writer.WritePng(pixels, width, height, ColorComponents.RedGreenBlueAlpha, stream);
+        
+        Console.WriteLine($"Generated test image: {outputPath}");
+    }
+}
+```
+
+### ThreeMfWriter.cs
+```
+using System.Globalization;
+using System.IO.Compression;
+using System.Text;
+
+
+namespace Voxelizer;
+
+/// <summary>
+/// Writes a collection of colored mesh components to a 3MF file.
+/// The 3MF format is a ZIP archive containing XML files following the
+/// 3D Manufacturing Format specification.
+/// Includes Bambu Studio compatible metadata (model_settings.config with
+/// extruder assignments and plate configuration).
+/// </summary>
+public static class ThreeMfWriter
+{
+    // UTF-8 without BOM — BOM bytes inside ZIP entries can confuse XML parsers
+    private static readonly Encoding Utf8NoBom = new UTF8Encoding(false);
+    /// <summary>
+    /// Writes the given components as a 3MF file to the specified path.
+    /// Each component becomes a separate object with its assigned color.
+    /// </summary>
+    public static void Write(string outputPath, string objectName, List<(Component Component, Mesh Mesh)> parts)
+    {
+        if (File.Exists(outputPath))
+            File.Delete(outputPath);
+
+        // Build a unique color palette (shared across the writer)
+        var colorPalette = new List<Color>();
+        var colorIndexMap = new Dictionary<uint, int>(); // packed RGBA → palette index (0-based)
+
+        foreach (var (component, _) in parts)
+        {
+            uint key = PackColor(component.Color);
+            if (!colorIndexMap.ContainsKey(key))
+            {
+                colorIndexMap[key] = colorPalette.Count;
+                colorPalette.Add(component.Color);
+            }
+        }
+
+        using var zipStream = new FileStream(outputPath, FileMode.Create);
+        using var archive = new ZipArchive(zipStream, ZipArchiveMode.Create);
+
+        WriteContentTypes(archive);
+        WriteRelationships(archive);
+        WriteModel(archive, objectName, parts, colorPalette, colorIndexMap);
+        WriteModelSettings(archive, objectName, parts, colorPalette, colorIndexMap);
+        WritePlateConfig(archive, parts);
+    }
+
+    private static void WriteContentTypes(ZipArchive archive)
+    {
+        var entry = archive.CreateEntry("[Content_Types].xml", CompressionLevel.Optimal);
+        using var stream = entry.Open();
+        using var writer = new StreamWriter(stream, Utf8NoBom);
+        writer.Write("""
+            <?xml version="1.0" encoding="UTF-8"?>
+            <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+              <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+              <Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/>
+              <Default Extension="config" ContentType="text/xml"/>
+            </Types>
+            """);
+    }
+
+    private static void WriteRelationships(ZipArchive archive)
+    {
+        var entry = archive.CreateEntry("_rels/.rels", CompressionLevel.Optimal);
+        using var stream = entry.Open();
+        using var writer = new StreamWriter(stream, Utf8NoBom);
+        writer.Write("""
+            <?xml version="1.0" encoding="UTF-8"?>
+            <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+              <Relationship Id="rel0" Target="/3D/3dmodel.model" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/>
+            </Relationships>
+            """);
+    }
+
+    private static void WriteModel(ZipArchive archive,
+        string objectName,
+        List<(Component Component, Mesh Mesh)> parts,
+        List<Color> colorPalette,
+        Dictionary<uint, int> colorIndexMap)
+    {
+        var entry = archive.CreateEntry("3D/3dmodel.model", CompressionLevel.Optimal);
+        using var stream = entry.Open();
+        using var writer = new StreamWriter(stream, Utf8NoBom);
+
+        writer.WriteLine("<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
+        writer.WriteLine("<model unit=\"millimeter\" xmlns=\"http://schemas.microsoft.com/3dmanufacturing/core/2015/02\" xml:lang=\"en-US\">");
+
+        // Metadata block — Bambu Studio looks for these
+        writer.WriteLine("  <metadata name=\"Application\">Voxelizer</metadata>");
+
+        writer.WriteLine("  <resources>");
+
+        // Write base materials (color palette) — standard 3MF, id="1"
+        writer.WriteLine("    <basematerials id=\"1\">");
+        for (int i = 0; i < colorPalette.Count; i++)
+        {
+            var c = colorPalette[i];
+            string hex = $"#{c.R:X2}{c.G:X2}{c.B:X2}";
+            string name = $"Color_{i}_{hex}";
+            writer.WriteLine($"      <base name=\"{name}\" displaycolor=\"{hex}\" />");
+        }
+        writer.WriteLine("    </basematerials>");
+
+        // Write child objects (one per component, each with its own mesh and color)
+        // Object IDs: 2..N+1 for child objects, N+2 for the parent assembly
+        for (int partIndex = 0; partIndex < parts.Count; partIndex++)
+        {
+            var (component, mesh) = parts[partIndex];
+            int objectId = partIndex + 2;
+            uint colorKey = PackColor(component.Color);
+            int materialIndex = colorIndexMap[colorKey];
+
+            string colorHex = $"#{component.Color.R:X2}{component.Color.G:X2}{component.Color.B:X2}";
+            string partName = $"{colorHex}_{partIndex}";
+
+            writer.WriteLine($"    <object id=\"{objectId}\" name=\"{partName}\" type=\"model\" pid=\"1\" pindex=\"{materialIndex}\">");
+
+            writer.WriteLine("      <mesh>");
+
+            // Vertices
+            writer.WriteLine("        <vertices>");
+            foreach (var v in mesh.Vertices)
+            {
+                writer.WriteLine(string.Format(CultureInfo.InvariantCulture,
+                    "          <vertex x=\"{0}\" y=\"{1}\" z=\"{2}\" />",
+                    v.X, v.Y, v.Z));
+            }
+            writer.WriteLine("        </vertices>");
+
+            // Triangles
+            writer.WriteLine("        <triangles>");
+            foreach (var t in mesh.Triangles)
+            {
+                writer.WriteLine($"          <triangle v1=\"{t.V1}\" v2=\"{t.V2}\" v3=\"{t.V3}\" />");
+            }
+            writer.WriteLine("        </triangles>");
+
+            writer.WriteLine("      </mesh>");
+            writer.WriteLine("    </object>");
+        }
+
+        // Parent assembly object — groups all child objects as components
+        int parentId = parts.Count + 2;
+        writer.WriteLine($"    <object id=\"{parentId}\" name=\"{objectName}\" type=\"model\">");
+        writer.WriteLine("      <components>");
+        for (int partIndex = 0; partIndex < parts.Count; partIndex++)
+        {
+            int childId = partIndex + 2;
+            writer.WriteLine($"        <component objectid=\"{childId}\" />");
+        }
+        writer.WriteLine("      </components>");
+        writer.WriteLine("    </object>");
+
+        writer.WriteLine("  </resources>");
+
+        // Build section — only the parent assembly
+        writer.WriteLine("  <build>");
+        writer.WriteLine($"    <item objectid=\"{parentId}\" />");
+        writer.WriteLine("  </build>");
+
+        writer.WriteLine("</model>");
+    }
+
+    /// <summary>
+    /// Writes the Bambu Studio model_settings.config file.
+    /// This maps each object to an extruder (filament slot) so Bambu Studio
+    /// knows which filament to use for each part.
+    /// </summary>
+    private static void WriteModelSettings(ZipArchive archive,
+        string objectName,
+        List<(Component Component, Mesh Mesh)> parts,
+        List<Color> colorPalette,
+        Dictionary<uint, int> colorIndexMap)
+    {
+        var entry = archive.CreateEntry("Metadata/model_settings.config", CompressionLevel.Optimal);
+        using var stream = entry.Open();
+        using var writer = new StreamWriter(stream, Utf8NoBom);
+
+        writer.WriteLine("<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
+        writer.WriteLine("<config>");
+
+        // Parent assembly object
+        int parentId = parts.Count + 2;
+        writer.WriteLine($"  <object id=\"{parentId}\">");
+        writer.WriteLine($"    <metadata key=\"name\" value=\"{objectName}\"/>");
+
+        // Child parts with extruder assignments
+        for (int partIndex = 0; partIndex < parts.Count; partIndex++)
+        {
+            var (component, _) = parts[partIndex];
+            int objectId = partIndex + 2;
+            uint colorKey = PackColor(component.Color);
+            int materialIndex = colorIndexMap[colorKey];
+            int extruderIndex = materialIndex + 1; // Bambu uses 1-based
+
+            string colorHex = $"#{component.Color.R:X2}{component.Color.G:X2}{component.Color.B:X2}";
+            string partName = $"{colorHex}_{partIndex}";
+
+            writer.WriteLine($"    <part id=\"{objectId}\">");
+            writer.WriteLine($"      <metadata key=\"name\" value=\"{partName}\"/>");
+            writer.WriteLine($"      <metadata key=\"extruder\" value=\"{extruderIndex}\"/>");
+            writer.WriteLine("    </part>");
+        }
+
+        writer.WriteLine("  </object>");
+        writer.WriteLine("</config>");
+    }
+
+    /// <summary>
+    /// Writes a minimal plate configuration for Bambu Studio.
+    /// Places all objects on plate 1.
+    /// </summary>
+    private static void WritePlateConfig(ZipArchive archive,
+        List<(Component Component, Mesh Mesh)> parts)
+    {
+        var entry = archive.CreateEntry("Metadata/plate_1.config", CompressionLevel.Optimal);
+        using var stream = entry.Open();
+        using var writer = new StreamWriter(stream, Utf8NoBom);
+
+        writer.WriteLine("<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
+        writer.WriteLine("<config>");
+
+        int parentId = parts.Count + 2;
+        writer.WriteLine($"  <object id=\"{parentId}\" />");
+
+        writer.WriteLine("</config>");
+    }
+
+    private static uint PackColor(Color c) =>
+        ((uint)c.R << 24) | ((uint)c.G << 16) | ((uint)c.B << 8) | c.A;
+}
+```

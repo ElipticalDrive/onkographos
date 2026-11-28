@@ -1,0 +1,111 @@
+# Double-sided Depth Rendering
+
+Also called: Back-face depth rendering, Two-pass depth rendering
+
+## Overview
+Double-sided depth rendering generates a complete depth map for a mesh by rendering front-facing and back-facing geometry separately and combining the results. It solves the problem of missing depth information for occluded or back-facing surfaces that standard single-pass rendering culls. Unlike [4DGS Rendering Pipeline](16175-4dgs-rendering-pipeline.md) or [Open3D Image Rendering Pipeline](19719-open3d-image-rendering-pipeline.md) which may rely on specific primitive types or culling flags, this method explicitly handles non-convex geometry by ensuring every ray intersection is captured.
+
+## How it works
+**Inputs and Outputs:**
+- Input: A triangle mesh defined by vertex positions and face indices.
+- Output: A single depth map image where each pixel contains the minimum positive depth value from any surface intersection.
+
+**Data Structures:**
+- `vertices`: Array of 3D coordinates $(x, y, z)$.
+- `faces`: Array of integer indices $[i, j, k]$ defining triangles.
+- `depth_map`: 2D array of floating-point values, initialized to infinity or zero.
+
+**Steps:**
+1. **Render Front Faces:** Render the mesh with standard face culling (or explicit front-face selection) to produce `depth_map_front`.
+2. **Flip Normals:** Swap the first two indices of every face in `faces` (e.g., $[i, j, k] \rightarrow [j, i, k]$) to invert the winding order and effectively flip normals.
+3. **Render Back Faces:** Render the modified mesh. This captures surfaces that were previously back-facing. Produce `depth_map_back`.
+4. **Restore Mesh:** Swap the indices back to their original order to restore the mesh state.
+5. **Combine Depths:** For each pixel, select the minimum positive depth from the two maps.
+
+**Formula:**
+For a pixel at coordinate $(u, v)$:
+$$ D(u, v) = \min(D_{front}(u, v), D_{back}(u, v)) $$
+where $D_{front}$ and $D_{back}$ are treated as infinity if no intersection occurred.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def double_sided_depth_rendering(mesh, camera):
+    """
+    Renders a complete depth map for a mesh by combining front and back face renders.
+    
+    Args:
+        mesh: Object with .vertices and .faces attributes.
+        camera: Object with .render() method that returns a depth map.
+        
+    Returns:
+        depth_map: 2D numpy array of depth values.
+    """
+    # Step 1: Render original mesh (front faces)
+    # Note: Depending on the renderer, this might require disabling back-face culling
+    # or explicitly selecting front faces.
+    depth_front = camera.render(mesh.vertices, mesh.faces)
+    
+    # Step 2: Flip face indices to render back faces
+    # Swap first two indices of each face
+    flipped_faces = mesh.faces.copy()
+    flipped_faces[:, 0], flipped_faces[:, 1] = flipped_faces[:, 1], flipped_faces[:, 0]
+    
+    # Step 3: Render flipped mesh (back faces)
+    depth_back = camera.render(mesh.vertices, flipped_faces)
+    
+    # Step 4: Restore original face order (if mesh object is reused)
+    mesh.faces = mesh.faces  # Or re-assign original faces
+    
+    # Step 5: Combine depths
+    # Initialize combined depth with front depth
+    depth_map = depth_front.copy()
+    
+    # Update with back depth where it is valid and smaller
+    # Assuming 0 or negative values indicate no intersection, or use a mask
+    valid_back = depth_back > 0
+    valid_front = depth_front > 0
+    
+    # If front is invalid, take back
+    depth_map[~valid_front & valid_back] = depth_back[~valid_front & valid_back]
+    
+    # If both valid, take minimum
+    depth_map[valid_front & valid_back] = np.minimum(
+        depth_front[valid_front & valid_back],
+        depth_back[valid_front & valid_back]
+    )
+    
+    return depth_map
+```
+
+**Edge Cases and Pitfalls:**
+- **Culling Flags:** Some rendering APIs (e.g., `pyrender`) may ignore `no_culling` flags for depth buffers, requiring explicit double-sided rendering as described [S1, unofficial].
+- **Precision:** Depth buffer precision must be sufficient to distinguish between front and back intersections in thin geometry.
+- **Degenerate Input:** Zero-area triangles may cause undefined behavior in rasterization; pre-processing to remove them is recommended.
+
+## Subtopics
+
+### Thickness Computation via Additive Depth Blending
+Computes the thickness of a non-convex object by summing the depths of all front-facing and back-facing intersections per pixel and subtracting them. This solves the limitation of simple back-minus-front depth difference, which fails for non-convex geometry with multiple ray intersections [S2, unofficial]. It avoids depth peeling by using additive blending to accumulate depths, which is simpler and faster for thickness estimation [S2, unofficial]. Originally found in the NVIDIA Fog Volume SDK sample [S2, unofficial].
+
+**Steps:**
+1. Enable additive blending for the depth buffer writes.
+2. Render the scene's front-facing polygons first.
+3. Render the scene's back-facing polygons second.
+4. Read the accumulated depth buffer values per pixel and compute thickness as $(\sum \text{front-face depths}) - (\sum \text{back-face depths})$ [S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$ where $N$ is the number of pixels, plus two full rasterization passes over the mesh. Effectively doubles the rendering cost compared to a single pass.
+- **Memory Complexity:** Requires storage for two depth maps (or one if reused) plus the mesh data.
+- **Strengths:** Handles non-convex geometry correctly where single-pass culling fails. Simple to implement.
+- **Limitations:** Does not handle self-occlusion within a single ray path beyond the first/last intersection unless additive blending is used for thickness. Performance is halved due to two passes.
+- **When to use:** When complete depth coverage is required for non-convex meshes, or when computing thickness for participating media [S2, unofficial].
+- **When not to use:** When performance is critical and the object is convex, or when only front-facing visibility is needed.
+
+## Background
+The technique of rendering front and back faces separately to capture complete geometry is a standard workaround in computer graphics when hardware culling is too aggressive or when specific depth information for occluded surfaces is needed. The specific application of this method for thickness computation via additive blending was shared by Thorsten Scheuerman and originally found in the NVIDIA Fog Volume SDK sample [S2, unofficial]. The use of double-sided rendering for depth maps in the context of neural rendering pipelines (e.g., DN-Splatter) addresses the failure of standard culling flags in certain libraries like `pyrender` [S1, unofficial].
+
+## Sources
+[S1] maturk/dn-splatter, https://github.com/maturk/dn-splatter, fetched 2026-10-27 (unofficial)
+[S2] May | 2007 | Level of Detail, https://levelofdetail.wordpress.com/2007/05/, fetched 2026-10-30 (unofficial)

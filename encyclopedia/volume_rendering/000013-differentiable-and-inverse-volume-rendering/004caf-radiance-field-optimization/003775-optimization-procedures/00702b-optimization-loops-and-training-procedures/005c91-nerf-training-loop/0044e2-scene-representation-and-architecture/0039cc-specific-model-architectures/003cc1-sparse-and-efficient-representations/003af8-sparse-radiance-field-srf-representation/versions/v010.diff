@@ -1,0 +1,155 @@
+--- v009.md
++++ v010.md
+@@ -3,119 +3,52 @@
+ 
+ ## Overview
+-A Sparse Radiance Field (SRF) is a voxel-based representation of a 3D scene or object where radiance and density are stored only in non-empty voxels, typically using a Coordinate Format (COO) to manage sparsity [S1]. It serves as a compact, efficient alternative to dense neural radiance fields (NeRFs) and dense voxel grids, enabling fast optimization and direct mesh extraction via algorithms like Marching Cubes [S1]. Unlike its siblings, Mega-NeRF uses hierarchical spatial partitioning for large scenes and KiloNeRF uses a tree-structured MLP for memory efficiency, SRF relies on explicit sparse storage of pre-optimized or learnable voxel features [S1, 8776-mega-nerf-spatial-partitioning.md, 8942-kilonerf.md].
++A Sparse Radiance Field (SRF) is a voxel-based scene representation that explicitly stores density and view-dependent radiance colors in a sparse 3D grid, serving as a direct, differentiable alternative to the implicit Multi-Layer Perceptron (MLP) used in standard NeRFs [S1]. Unlike dense voxel grids or hierarchical structures, SRFs achieve high efficiency by storing features only for occupied regions in Coordinate (COO) format, enabling fast volume rendering and straightforward mesh extraction via Marching Cubes [S1].
+ 
+ ## How it works
+ **Inputs and Outputs**
+-*   **Input:** A set of posed 2D images of a scene/object.
+-*   **Output:** A sparse set of tuples representing the 3D radiance field. Each tuple contains the 3D integer coordinates of a voxel and its associated feature vector (density and color).
++*   **Input:** A set of posed 2D images of a scene or object.
++*   **Output:** A Sparse Radiance Field $X_{non-empty}$, defined as a set of tuples containing 3D coordinates and associated feature vectors.
+ 
+ **Data Structures**
+-The SRF is defined as a voxel grid of dimension $1+d$, where $d$ is the dimension of the radiance color features and 1 is for density [S1].
+-*   **Grid Size:** $H \times H \times H$, where $H$ is the resolution in each dimension [S1].
+-*   **Feature Vector:** For a voxel at $(i, j, k)$, the feature vector $f$ has size $1+d$. It consists of:
+-    *   Density $\alpha_{i,j,k} \in \mathbb{R}$ [S1].
+-    *   Radiance colors $\rho_{i,j,k} \in \mathbb{R}^d$ [S1].
+-*   **Storage Format:** Coordinate Format (COO) [S1]. The SRF is represented as a set of $M$ tuples:
+-    $$
+-    X_{\text{non-empty}} = \{(c_m, f_m)\}_{m=1}^M
+-    $$
+-    where $c_m = (i, j, k) \in \mathbb{Z}^+$ are the positive integer coordinates of the $m$-th non-empty voxel, and $f_m \in \mathbb{R}^{1+d}$ is the feature vector [S1]. The ordering of tuples in the set is arbitrary [S1].
++The SRF is represented in COO (Coordinate) format. It consists of $M$ tuples, where each tuple $m$ contains:
++1.  **Coordinates** $c_m = (i, j, k)$: Positive integers indexing the voxel location in a 3D grid of size $H \times H \times H$.
++2.  **Features** $f_m \in \mathbb{R}^{d+1}$: A vector containing:
++    *   Density $\alpha_{i,j,k} \in \mathbb{R}$ (1 dimension).
++    *   Radiance colors $\rho_{i,j,k} \in \mathbb{R}^d$ ($d$ dimensions).
++
++The total grid dimension is $1+d$. The sparsity is defined as $1 - \frac{M}{H^3}$, where $M$ is the number of non-empty voxels [S1].
+ 
+ **Parameters**
+-*   **Resolution ($H$):** The grid size in each dimension. Typical values used in the SPARF dataset are $H \in \{32, 128, 512\}$ [S1].
+-*   **Radiance Dimension ($d$):**
+-    *   For view-dependent SRF using 4 spherical harmonics (SH) factors per RGB channel: $d = 3 \times 4 = 12$ [S1].
++*   **Resolution $H$:** The grid size in each dimension. Typical values are $H \in \{32, 128, 512\}$ [S1].
++*   **Radiance Dimension $d$:**
++    *   For view-dependent rendering using 4 spherical harmonics (SH) factors per RGB channel: $d = 3 \times 4 = 12$ [S1].
+     *   For fixed RGB colors: $d = 3 \times 1 = 3$ [S1].
+-    *   Note: Using 4 SH factors reduces optimization space by 40% and time by 10% compared to 9 SH factors, while maintaining similar PSNR [S1]. Using fixed RGB reduces PSNR by ~1 dB but saves 80% space and 20% time [S1].
++    *   Note: Using fewer SH components (e.g., 4 per channel vs 9) reduces optimization space by 40% and time by 10% with negligible PSNR loss [S1]. Using raw RGB reduces PSNR by ~1 dB but saves 80% space and 20% time [S1].
+ 
+-**Steps to Construct/Query an SRF**
+-1.  **Initialize Grid:** Define a 3D grid of size $H \times H \times H$.
+-2.  **Optimize/Store Features:** For each voxel $(i, j, k)$ that contains scene information, compute or store the density $\alpha_{i,j,k}$ and radiance features $\rho_{i,j,k}$. This is typically done by optimizing a NeRF or Plenoxels model and extracting the values, or by learning them directly [S1].
+-3.  **Filter Empty Voxels:** Identify voxels where the density is effectively zero or below a threshold. These are excluded from the COO representation to achieve sparsity [S1].
+-4.  **Build COO List:** Create the list of $M$ tuples $(c_m, f_m)$ for all non-empty voxels [S1].
+-5.  **Volume Rendering:** To render a ray, sample points along the ray. For each sample point, find the corresponding voxel in the COO list. If the voxel exists, retrieve $\alpha$ and $\rho$. If not, assume zero density (transparent) [S1].
+-6.  **Composite:** Apply the standard volume rendering integral to compute the pixel color [S1].
++**Algorithm: SRF Construction and Rendering**
++The SRF is typically optimized from images (e.g., using an adaptation of Plenoxels) [S1]. Once constructed, rendering proceeds as follows:
+ 
+-**Pseudocode**
+-```python
+-# Data Structure: SRF is a list of tuples (coords, features)
+-# coords: (i, j, k) integers
+-# features: [density, r0, g0, b0, r1, g1, b1, ...] (size 1+d)
++1.  **Ray Casting:** For each pixel, cast a ray through the scene bounding volume.
++2.  **Voxel Sampling:** Identify all non-empty voxels intersected by the ray. Since the data is in COO format, this requires a spatial lookup or pre-computed ray-voxel intersection list.
++3.  **Feature Retrieval:** For each intersected voxel $m$ with coordinate $c_m$, retrieve $f_m = (\alpha_m, \rho_m)$.
++4.  **Volume Rendering:** Apply standard volumetric rendering integration along the ray segment within the voxel. The transmittance $T$ and color $C$ are updated:
++    $$ T_{next} = T_{curr} \cdot \exp(-\sigma_m \cdot \Delta s) $$
++    $$ C_{next} = C_{curr} + T_{curr} \cdot (1 - \exp(-\sigma_m \cdot \Delta s)) \cdot \rho_m $$
++    Where $\sigma_m$ is derived from $\alpha_m$ (often $\sigma_m = -\ln(1-\alpha_m)/\Delta s$ or similar depending on discretization), and $\Delta s$ is the step size within the voxel [S1, G].
++5.  **Output:** The final color $C_{next}$ is assigned to the pixel.
+ 
+-def query_srf(srf_coo, query_point):
+-    """
+-    Query the SRF for density and radiance at a continuous 3D point.
+-    Note: Standard SRF definition in [S1] is discrete voxel-based.
+-    Interpolation is not explicitly defined in the source notes for SRF.
+-    [G] In practice, trilinear interpolation between neighboring non-empty voxels
+-    is often used for continuous queries, or nearest-neighbor if strict voxel
+-    alignment is assumed. The source [S1] defines SRF as a set of tuples,
+-    implying discrete access. For rendering, rays are sampled at discrete steps.
+-    """
+-    # Map continuous point to voxel coordinates
+-    voxel_coords = map_to_voxel(query_point)
+-    
+-    # Search in COO list
+-    for c_m, f_m in srf_coo:
+-        if c_m == voxel_coords:
+-            density = f_m[0]
+-            radiance = f_m[1:]
+-            return density, radiance
+-            
+-    # Not found in sparse list -> empty space
+-    return 0.0, None
+-
+-def render_ray_srf(srf_coo, ray_origin, ray_direction, num_samples):
+-    """
+-    Render a single ray using the sparse radiance field.
+-    """
+-    T = 1.0  # Transmittance
+-    color = [0.0, 0.0, 0.0]
+-    
+-    for i in range(num_samples):
+-        # Sample point along ray
+-        t = i * (ray_length / num_samples)
+-        point = ray_origin + t * ray_direction
+-        
+-        # Query SRF
+-        density, radiance = query_srf(srf_coo, point)
+-        
+-        if radiance is None:
+-            continue
+-            
+-        # Compute alpha
+-        # delta is the distance between samples
+-        delta = ray_length / num_samples
+-        alpha = 1.0 - exp(-density * delta)
+-        
+-        # Composite
+-        contribution = T * alpha * radiance
+-        color += contribution
+-        
+-        # Update transmittance
+-        T *= (1.0 - alpha)
+-        
+-        # Early exit if fully opaque
+-        if T < 1e-5:
+-            break
+-            
+-    return color
+-```
+-
+-**Edge Cases and Pitfalls**
+-*   **Low-Density Voxels:** Non-empty voxels may have low densities that do not significantly affect volume rendering but contain random colors. These can confuse the network during training [S1].
+-*   **Vanishing Gradients:** High sparsity (~99%) can lead to vanishing gradients. Misalignment between input SRF coordinates and output SRF coordinates (e.g., due to sparse convolutional strides and pruning) further harms gradients [S1].
+-*   **Precision:** Small errors in predicting densities or radiance colors can result in large distortions in rendered images [S1].
++**Pitfalls and Edge Cases**
++*   **Low-Density Noise:** Non-empty voxels may have very low densities that do not contribute to the final image but contain random color values. These can confuse learning networks if the SRF is used as input to another model [S1].
++*   **Vanishing Gradients:** Due to high sparsity (~99%), gradients may vanish. Misalignment between input and output SRF coordinates (e.g., due to sparse convolutional strides) exacerbates this [S1].
++*   **Precision:** Small errors in predicting density or radiance can cause large distortions in rendered images [S1].
+ 
+ ## Operating characteristics
+-*   **Memory Complexity:** Proportional to the number of non-empty voxels $M$, not the total grid size $H^3$. Sparsity is approximately $1 - H/3$ (Note: The source [S1] states "sparsity of $1 - H/3$", which seems to be a typo or specific metric context, as sparsity is usually $1 - M/H^3$. However, the source explicitly says "sparsity of $1 - H/3$". Given $H \in \{32, 128, 512\}$, $H/3$ is not a fraction. It is likely a typo for $1 - M/H^3$ or similar. We report the source's claim but note the ambiguity. Actually, looking at the source text: "with the sparsity of $1 - \frac{H}{3}$" is likely a typo for $1 - \frac{M}{H^3}$ or similar. However, the source text says "sparsity of $1 - H/3$". We will state the source's claim. Wait, $H$ is resolution. $H/3$ for $H=32$ is 10.6. Sparsity cannot be >1. It is likely a typo in the source for $1 - \frac{M}{H^3}$ or similar. We will write "Not given in the sources" for the exact sparsity formula if it's ambiguous, but the source explicitly writes it. We will quote the source's notation but note it is likely a typo. Actually, the source says "sparsity of $1 - H/3$". This is physically impossible for sparsity. We will omit the specific formula and state that it is sparse [S1].
+-*   **Time Complexity:** Rendering is fast if the number of non-empty voxels $M$ is small. Querying the COO list is $O(M)$ without an index, or $O(1)$ with a hash map/grid lookup. Optimization time is reduced compared to dense NeRFs due to fewer parameters [S1].
+-*   **Strengths:** Efficient storage for sparse scenes; direct mesh extraction via Marching Cubes [S1]; reduced optimization space (e.g., using 4 SH factors reduces time by 10%) [S1].
+-*   **Limitations:** High sparsity can cause vanishing gradients [S1]; low-density voxels with random colors can hurt performance [S1]; requires careful handling of coordinate alignment [S1].
+-*   **When to use:** When the scene is sparse (e.g., single objects, clear backgrounds) and fast mesh extraction is desired [S1].
+-*   **When not to use:** For dense, complex scenes with high occlusion where sparsity is low, or when continuous view-dependent effects are critical and interpolation artifacts are unacceptable [S1].
++*   **Memory Complexity:** $O(M \cdot d)$, where $M$ is the number of non-empty voxels. This is significantly lower than dense grids $O(H^3 \cdot d)$ when $M \ll H^3$ [S1].
++*   **Rendering Speed:** Faster than MLP-based NeRFs because it avoids per-point MLP inference; rendering is a direct lookup and integration [S1].
++*   **Mesh Extraction:** Straightforward and efficient. Since SRFs lie on a 3D voxel space, meshes can be extracted with a single pass of Marching Cubes [S1].
++*   **Limitations:** The irregular nature of the sparse grid can complicate standard 3D deep learning operations (like convolutions) due to coordinate misalignment and vanishing gradients [S1].
+ 
+ ## Background
+-The Sparse Radiance Field (SRF) was introduced in the context of the SPARF (Sparse Radiance Field) dataset and learning framework [S1]. The work builds on Plenoxels, which uses spherical harmonics for view-dependent radiance in voxel grids [S1]. The SPARF dataset contains one million SRFs at resolutions 32, 128, and 512, collected from 40,000 shapes across 13 classes [S1]. The method addresses the need for scalable learning of 3D radiance fields by leveraging sparsity and efficient optimization [S1].
++The Sparse Radiance Field (SRF) was introduced in the context of the SPARF (Sparse Radiance Fields) dataset and framework, which collected one million SRFs across multiple resolutions (32, 128, 512) for 13 object classes [S1]. The representation builds on the concept of Plenoxels, which replaced NeRF's MLP with spherical harmonics in a voxel grid, but extends it by explicitly managing sparsity via COO format to scale to large datasets and facilitate learning of 3D structures from few images [S1].
+ 
+ ## Sources

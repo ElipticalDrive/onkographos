@@ -1,0 +1,111 @@
+--- v006.md
++++ v007.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-This method reduces the rendering load of large point clouds by traversing an octree on the CPU to cull nodes outside the camera frustum and select point subsets based on distance and screen-space thresholds before uploading data to the GPU [S1, S2, unofficial]. It solves the problem of rendering billion-point clouds in real time by serving coarse-to-fine samples, ensuring the renderer draws only the points the current view can use without exceeding memory or GPU draw limits [S2, unofficial]. Unlike simple spatial indexes used only for search, this octree stores usable coarse samples at every node, turning it into a rendering tree where the union of stopping points forms a faithful picture at a fraction of the cost [S2, unofficial].
++This method reduces rendering load for billion-point clouds by traversing an octree on the CPU to cull frustum-out nodes and select view-dependent point subsets before GPU upload [S1, S2, unofficial]. It differs from simple spatial indexes by storing usable coarse samples at every node, turning the structure into a rendering tree where stopping points form a faithful picture at a fraction of the cost [S2, unofficial].
+ 
+ ## How it works
+@@ -28,6 +28,6 @@
+     $$ \text{world\_size} = \|\text{pc.aabb.max} - \text{pc.aabb.min}\| $$
+     [S1, unofficial]
+-2.  **Traverse Octree:** Start recursion from the root node [S1, S2, unofficial].
+-3.  **Frustum Culling:** For each node, test its AABB against the six view frustum planes. If the most-positive corner of the box is outside any plane, cull the entire subtree [S1, S2, unofficial].
++2.  **Traverse Octree:** Start recursion from the root node at `maxDepth` [S1, S2, unofficial].
++3.  **Frustum Culling:** For each node, test its AABB against the six view frustum planes. If the most-positive corner of the box is outside any plane, cull the entire subtree [S2, unofficial].
+ 4.  **LOD Decision:** Calculate the projected screen size of the current node's bounding box. If the size is below `pixel_threshold`, draw the node's coarse sample and stop descent. If above, descend to children [S2, unofficial].
+     *   Formula for projected size:
+@@ -50,5 +50,5 @@
+         root_node: The root of the octree.
+         camera: Dict containing 'eye', 'near', 'focal_px', and 'mvp'.
+-        params: Dict containing 'pixel_threshold', 'point_budget', 'world_size'.
++        params: Dict containing 'pixel_threshold', 'point_budget', 'world_size', 'max_depth'.
+         
+     Returns:
+@@ -57,5 +57,15 @@
+     drawn_points = []
+     points_drawn_so_far = 0
+-    frustum_planes = extract_frustum_planes(camera['mvp'])
++    # Extract 6 frustum planes from MVP matrix [G]
++    frustum_planes = [
++        [camera['mvp'][3]+camera['mvp'][0], camera['mvp'][7]+camera['mvp'][4], camera['mvp'][11]+camera['mvp'][8], camera['mvp'][15]+camera['mvp'][12]],
++        [camera['mvp'][3]-camera['mvp'][0], camera['mvp'][7]-camera['mvp'][4], camera['mvp'][11]-camera['mvp'][8], camera['mvp'][15]-camera['mvp'][12]],
++        [camera['mvp'][3]+camera['mvp'][1], camera['mvp'][7]+camera['mvp'][5], camera['mvp'][11]+camera['mvp'][9], camera['mvp'][15]+camera['mvp'][13]],
++        [camera['mvp'][3]-camera['mvp'][1], camera['mvp'][7]-camera['mvp'][5], camera['mvp'][11]-camera['mvp'][9], camera['mvp'][15]-camera['mvp'][13]],
++        [camera['mvp'][3]+camera['mvp'][2], camera['mvp'][7]+camera['mvp'][6], camera['mvp'][11]+camera['mvp'][10], camera['mvp'][15]+camera['mvp'][14]],
++        [camera['mvp'][3]-camera['mvp'][2], camera['mvp'][7]-camera['mvp'][6], camera['mvp'][11]-camera['mvp'][10], camera['mvp'][15]-camera['mvp'][14]]
++    ]
++    # Normalize planes
++    frustum_planes = [[c / math.sqrt(sum(c*c for c in p)) for c in p] for p in frustum_planes]
+ 
+     def traverse(node, current_depth):
+@@ -81,5 +91,14 @@
+             return
+ 
+-        # 5. Recurse to children
++        # 5. Distance-based depth adjustment (S1)
++        dist = math.sqrt(sum((node.center[j] - camera.eye[j])**2 for j in range(3)))
++        if dist > params['world_size'] / 2:
++            target_depth = 9
++        elif params['world_size'] / 4 < dist < params['world_size'] / 2:
++            target_depth = 10
++        else:
++            target_depth = 15
++
++        # 6. Recurse to children
+         for i in range(8):
+             # Check if child exists via bitmask
+@@ -88,22 +107,13 @@
+             child = node.children[i]
+ 
+-            # Optional: Distance-based depth adjustment (S1)
+-            # dist = math.sqrt(sum((child.center[j] - camera.eye[j])**2 for j in range(3)))
+-            # if dist > params['world_size'] / 2:
+-            #     effective_depth = 9
+-            # elif params['world_size'] / 4 < dist < params['world_size'] / 2:
+-            #     effective_depth = 10
+-            # else:
+-            #     effective_depth = 15
+-            # if effective_depth <= current_depth:
+-            #     points_to_add = child.subsample
+-            #     if points_drawn_so_far + len(points_to_add) <= params['point_budget']:
+-            #         drawn_points.extend(points_to_add)
+-            #         points_drawn_so_far += len(points_to_add)
+-            #     continue
++            if current_depth <= target_depth:
++                traverse(child, current_depth - 1)
++            else:
++                points_to_add = child.subsample
++                if points_drawn_so_far + len(points_to_add) <= params['point_budget']:
++                    drawn_points.extend(points_to_add)
++                    points_drawn_so_far += len(points_to_add)
+ 
+-            traverse(child, current_depth + 1)
+-
+-    traverse(root_node, 0)
++    traverse(root_node, params['max_depth'])
+     return drawn_points
+ 
+@@ -127,21 +137,4 @@
+             return False
+     return True
+-
+-def extract_frustum_planes(mvp):
+-    """Extracts 6 frustum planes from MVP matrix [G].
+-    Returns list of [a, b, c, d] for plane equation ax + by + cz + d = 0.
+-    """
+-    planes = []
+-    for i in range(6):
+-        plane = [0.0, 0.0, 0.0, 0.0]
+-        if i == 0: plane = [mvp[3]+mvp[0], mvp[7]+mvp[4], mvp[11]+mvp[8], mvp[15]+mvp[12]]
+-        elif i == 1: plane = [mvp[3]-mvp[0], mvp[7]-mvp[4], mvp[11]-mvp[8], mvp[15]-mvp[12]]
+-        elif i == 2: plane = [mvp[3]+mvp[1], mvp[7]+mvp[5], mvp[11]+mvp[9], mvp[15]+mvp[13]]
+-        elif i == 3: plane = [mvp[3]-mvp[1], mvp[7]-mvp[5], mvp[11]-mvp[9], mvp[15]-mvp[13]]
+-        elif i == 4: plane = [mvp[3]+mvp[2], mvp[7]+mvp[6], mvp[11]+mvp[10], mvp[15]+mvp[14]]
+-        elif i == 5: plane = [mvp[3]-mvp[2], mvp[7]-mvp[6], mvp[11]-mvp[10], mvp[15]-mvp[14]]
+-        length = math.sqrt(sum(c*c for c in plane))
+-        planes.append([c/length for c in plane])
+-    return planes
+ ```
+ 

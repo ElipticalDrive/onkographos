@@ -1,0 +1,80 @@
+# Hard Selection for Editing
+
+Also called: Hard Selection
+
+## Overview
+Hard Selection for Editing is a method for isolating specific semantic regions within a 3D Gaussian Splatting scene by assigning each Gaussian to a single category based on its highest confidence score and filtering for a target label [S1]. It differs from Soft Selection by enforcing a strict, deterministic assignment without tunable thresholds, ensuring that only Gaussians with the dominant class matching the query are included in the edit operation [S1]. This approach prevents "incorrect selection" that may occur when dominant scores in other categories mask the target label, making it suitable for precise, label-scoped updates to color and opacity [S1].
+
+## How it works
+**Inputs:**
+- A set of $N$ 3D Gaussians.
+- A score matrix $S \in \mathbb{R}^{N \times C}$, where $S_{ij}$ is the score of Gaussian $i$ for category $j$, and $C$ is the total number of categories [S1].
+- A query label $l$, which is either a single integer ID or a list of IDs [S1].
+
+**Outputs:**
+- A binary selection mask $M \in \{0, 1\}^N$, where $M_i = 1$ if Gaussian $i$ is selected, and $0$ otherwise [S1].
+- The selected Gaussians are used to update the color set $\{c_i\}_{i=1}^N$ and opacity $\{\alpha_i\}_{i=1}^N$ for the target region [S1].
+
+**Data Structures:**
+- **Score Matrix:** $N$ rows (Gaussians), $C$ columns (categories). Values are typically normalized probabilities or logits [S1].
+- **Selection Mask:** 1D array of length $N$, boolean or integer type [S1].
+
+**Steps:**
+1. **Category Assignment:** Compute the argmax of the score matrix along the category axis to determine the dominant category for each Gaussian [S1].
+   $$ c_i = \text{argmax}_{j} \{ S_{i1}, S_{i2}, \dots, S_{iC} \} $$
+   where $c_i$ is the assigned category index for Gaussian $i$ [S1].
+   Resulting vector: $\mathbf{categories} = [c_1, c_2, \dots, c_N]$ [S1].
+
+2. **Label Filtering:** Compare the assigned category $c_i$ against the query label $l$ [S1].
+   - If $l$ is a single label: Set $M_i = 1$ if $c_i = l$, else $M_i = 0$ [S1].
+   - If $l$ is a list of labels: Set $M_i = 1$ if $c_i \in l$, else $M_i = 0$ [S1].
+
+**Pitfalls:**
+- **Tie Breaking:** The argmax operation is deterministic but may arbitrarily break ties if multiple categories have identical maximum scores [G].
+- **Unseen Labels:** If the score matrix does not cover all possible semantic labels, the argmax will still assign a category, potentially leading to incorrect selection if the query label is not present in the matrix columns [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def hard_selection_for_editing(score_matrix: np.ndarray, query_label) -> np.ndarray:
+    """
+    score_matrix: np.ndarray of shape (N, C)
+    query_label: int or list of ints
+    returns: np.ndarray of shape (N,) with values 0 or 1
+    """
+    # Step 1: Assign category with highest score
+    # argmax returns indices of max values along axis 1 (categories)
+    categories = np.argmax(score_matrix, axis=1)
+    
+    # Step 2: Filter based on query label
+    if isinstance(query_label, list):
+        # Check if assigned category is in the list of target labels
+        selection_mask = np.isin(categories, query_label)
+    else:
+        # Check if assigned category matches the single target label
+        selection_mask = (categories == query_label)
+        
+    # Convert boolean mask to integer 0/1 if required by downstream logic
+    return selection_mask.astype(np.int32)
+```
+
+## Subtopics
+
+### Label-Grid Weight Threshold Selection
+Selects Gaussians for a patch based on a label grid and a weight threshold [S2, unofficial]. It computes a selection grid by checking if the label is non-zero and the weight meets a minimum threshold, then flattens the grid to find indices of selected pixels [S2, unofficial]. A key pitfall is that if no indices are selected, an error must be raised [S2, unofficial]. This variant is distinct from standard Hard Selection as it incorporates a weight threshold and operates on a grid structure rather than a global score matrix [S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(N \cdot C)$ for computing the argmax over the score matrix, where $N$ is the number of Gaussians and $C$ is the number of categories [S1]. The filtering step is $O(N)$ [S1].
+- **Memory Complexity:** $O(N \cdot C)$ to store the score matrix and $O(N)$ for the selection mask [S1].
+- **Strengths:** Deterministic and fast; no tunable threshold parameters required [S1]. Ensures that only the dominant class is selected, avoiding contamination from secondary high scores [S1].
+- **Limitations:** Rigid; cannot handle ambiguity or partial membership in a class [S1]. May exclude valid Gaussians if the score matrix is noisy or if the dominant category is incorrect for a specific Gaussian [S1].
+- **When to Use:** When precise, label-scoped editing is required and the score matrix is reliable [S1].
+- **When Not to Use:** When soft boundaries or partial selections are needed, or when the score matrix is uncertain [S1].
+
+## Background
+Hard Selection for Editing was introduced in the context of Feature 3D Gaussian Splatting to enable distilled feature fields and precise editing of 3D scenes [S1]. It was proposed as an alternative to Soft Selection to address issues where thresholding based on a single column of the score matrix could lead to incorrect selections if dominant scores existed in other columns [S1]. The method relies on the assumption that each Gaussian belongs to exactly one semantic category, determined by the highest score [S1].
+
+## Sources
+[S1] Feature 3DGS: Supercharging 3D Gaussian Splatting to Enable Distilled Feature Fields, https://doi.org/10.1109/cvpr52733.2024.02048, fetched 2026-10-26
+[S2] zjllllllllll/SplatMend, https://github.com/zjllllllllll/SplatMend, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,231 @@
+# Shading and Occlusion Models
+## Overview
+This family extends Direct Volume Ray Casting [19-direct-volume-ray-casting.md] by modifying the compositing step to incorporate lighting, shadows, and occlusion cues, thereby enhancing depth perception and visual clarity in volumetric data [G]. Unlike standard DVR which relies solely on opacity-weighted accumulation, these methods integrate ambient occlusion, directional filtering, or image-space shadowing to simulate light transport effects [G]. They are distinguished from [TVAM Integrator](6814-tvam-integrator.md) by their focus on local shading approximations rather than global illumination path tracing, and from [Cinematic Rendering](9473-cinematic-rendering.md) by their use of simplified or image-space techniques rather than full physically-based surface/volume interaction models [G].
+## Shared principles
+The methods in this family share the foundational mechanism of Direct Volume Ray Casting [19-direct-volume-ray-casting.md], including ray definition, sampling, interpolation, and transfer function mapping [S1]. However, they diverge in the **Compositing (Integration)** step (Step 4 of the parent's Shared principles) [S1]. While standard DVR uses the front-to-back accumulation equation, specific applications modify this accumulation:
+*   **Summation:** Some modes simply sum interpolated scalar values without opacity weighting [G].
+*   **Path Tracing:** Others trace randomized photon paths to solve the multi-dimensional rendering equation, accounting for scattering and global illumination [G].
+*   **Layered Compositing:** Some render distinct material styles into separate layers and composite them post-hoc [G].
+*   **Occlusion-Aware Shading:** Others integrate in-scattered radiance approximations using cone-shaped phase functions during slice traversal [G].
+## Subtopics
+
+### [Directional Occlusion Shading](10970-directional-occlusion-shading.md)
+A slice-based technique that simulates ambient occlusion by integrating soft shadowing using a backward-peaked cone phase function. It differs from siblings by deriving occlusion factors from the radiative transport equation using a viewer-oriented cone, allowing semi-transparent materials to influence occlusion and enabling interactive clipping without precomputation.
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def directional_occlusion_shading(volume, tf, camera, theta, d, resolution):
+    """
+    Computes directional occlusion shading via front-to-back slice traversal.
+    """
+    import math
+    # 1. Compute proxy geometry: view-aligned slices intersecting volume bounding box
+    slices = compute_proxy_slices(volume.bounding_box, camera.view_direction)
+    
+    # 2. Initialize buffers
+    eye_buffer = np.zeros((resolution, resolution, 4), dtype=np.float32)
+    occlusion_curr = np.zeros((resolution, resolution), dtype=np.float32)
+    occlusion_next = np.zeros((resolution, resolution), dtype=np.float32)
+    
+    ambient_radiance = 1.0
+    
+    # 3. Render loop (front to back)
+    for slice_plane in slices:
+        # 3a. Update Eye Buffer
+        slice_color, slice_opacity = render_slice_to_buffer(slice_plane, volume, tf)
+        for y in range(resolution):
+            for x in range(resolution):
+                V = occlusion_curr[y, x]
+                C_slice = slice_color[y, x] * V * ambient_radiance
+                alpha_c = slice_opacity[y, x] * V
+                # Front-to-back alpha blending
+                eye_buffer[y, x, :3] = eye_buffer[y, x, :3] * (1 - alpha_c) + C_slice * alpha_c
+                eye_buffer[y, x, 3] += alpha_c * (1 - eye_buffer[y, x, 3])
+                
+        # 3b. Update Occlusion Buffer
+        r = d * math.tan(theta)
+        # Compute perspective correction factor c (simplified for 2D grid)
+        c = compute_perspective_correction(camera.projection_matrix, slice_plane.z)
+        
+        # Generate uniform grid disk samples
+        grid_size = resolution
+        p_samples = generate_disk_samples(grid_size, r)
+        
+        for y in range(resolution):
+            for x in range(resolution):
+                # Project fragment to NDC
+                x_yd = project_to_ndc(camera, slice_plane, x, y)
+                new_V = 0.0
+                count = 0
+                for p in p_samples:
+                    p_d = x_yd + c * p
+                    p_t = 0.5 * p_d + np.array([0.5, 0.5])
+                    # Clamp to [0,1]
+                    p_t = np.clip(p_t, 0.0, 1.0)
+                    # Read from current occlusion buffer
+                    val = occlusion_curr[clamp(p_t.y, resolution), clamp(p_t.x, resolution)]
+                    # Attenuate by transmittance T approx exp(-sigma_t * d)
+                    T = math.exp(-volume.extinction_coefficient * d)
+                    new_V += val * T
+                    count += 1
+                occlusion_next[y, x] = new_V / count if count > 0 else 0.0
+                
+        # 3c. Swap buffers
+        occlusion_curr, occlusion_next = occlusion_next, occlusion_curr
+        
+    # 4. Final Output
+    return np.clip(eye_buffer[:, :, :3], 0.0, 1.0)
+```
+
+### [Directional Filtering for Occlusion Reduction](14417-directional-filtering-for-occlusion-reduction.md)
+A technique that modulates alpha values based on the alignment between local fiber directions (major eigenvectors) and a user-defined vector. It sets itself apart by leveraging full tensor directional information to selectively fade irrelevant fiber bundles, unlike methods relying on scalar invariants or surface-based approximations.
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def directional_filtering_eigenvector(eigenvector: np.ndarray, user_direction: np.ndarray, base_alpha: float, filter_type: str) -> float:
+    """
+    Computes the modulated alpha for a voxel based on directional filtering.
+    """
+    # 1. Ensure vectors are in the same hemisphere
+    dot_product = np.dot(eigenvector, user_direction)
+    if dot_product < 0:
+        eigenvector = -eigenvector
+        dot_product = -dot_product
+    k = max(0.0, min(1.0, dot_product))
+    
+    # 2. Apply filtering function
+    if filter_type == 'smoothstep':
+        f_k = smoothstep(k)
+    elif filter_type == 'polynomial':
+        f_k = polynomial_filter(k)
+    else:
+        f_k = k
+        
+    # 3. Modulate alpha
+    return base_alpha * f_k
+
+def smoothstep(x: float) -> float:
+    if x < 0: return 0.0
+    if x > 1: return 1.0
+    return 3.0 * x**2 - 2.0 * x**3
+
+def polynomial_filter(x: float) -> float:
+    if x < 0: return 0.0
+    if x > 1: return 1.0
+    t1 = 70.0 * x
+    t2 = -315.0 + t1
+    t3 = 540.0 + t2 * x
+    t4 = -420.0 + t3 * x
+    t5 = 126.0 + t4 * x
+    return t5 * (x ** 5)
+```
+
+### [ISMOS](15205-ismos.md)
+A unified image-space shading model that simulates hard shadows and ambient occlusion for both opaque and transparent media. It distinguishes itself by computing occlusion entirely in image space using multidirectional sampling, achieving results visually identical to ray-casting-based shadows but with decoupled post-processing overhead.
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def ismos_shading(color_buffer, depth_texture, light_sources, beta_param):
+    """
+    Applies ISMOS shading to a volume rendered image.
+    """
+    height, width = color_buffer.shape[:2]
+    shaded_image = np.zeros((height, width, 3))
+    
+    # Precompute rotation matrices for light sampling
+    num_samples = 6
+    thetas = np.linspace(0, 2 * np.pi, num_samples, endpoint=False)
+    phis = np.linspace(0, np.pi, num_samples, endpoint=False)
+    
+    for y in range(height):
+        for x in range(width):
+            base_color = color_buffer[y, x, :3]
+            beta = color_buffer[y, x, 3]
+            
+            # [G] Source does not specify the exact functional form for opacity approximation from beta.
+            # Standard practice interpolates depth to estimate local transmittance.
+            opacity = estimate_opacity_from_beta(beta, depth_texture[y, x])
+            
+            final_color = base_color.copy()
+            
+            for light in light_sources:
+                light_contribution = np.zeros(3)
+                for theta in thetas:
+                    for phi in phis:
+                        cos_t, sin_t = np.cos(theta), np.sin(theta)
+                        cos_p, sin_p = np.cos(phi), np.sin(phi)
+                        rot_matrix = np.array([
+                            [cos_t * cos_p, -sin_t, cos_t * sin_p],
+                            [sin_t * cos_p, cos_t, sin_t * sin_p],
+                            [-sin_p, 0, cos_p]
+                        ])
+                        
+                        # [G] R and r values are not specified in sources. Using standard disk sampling.
+                        R_offset = 0.0
+                        disk_radius = 0.5
+                        sample_local = np.array([disk_radius, 0.0, 0.0])
+                        sample_rotated = rot_matrix @ sample_local
+                        
+                        light_dir = normalize(light.direction + sample_rotated)
+                        
+                        # [G] Source does not detail the exact ray-marching or depth comparison logic.
+                        # Standard image-space occlusion checks depth along light_dir.
+                        is_occluded = check_image_space_occlusion(x, y, light_dir, depth_texture, opacity)
+                        
+                        if not is_occluded:
+                            light_contribution += light.intensity * light.color
+                
+                final_color += light_contribution
+            shaded_image[y, x] = final_color
+    return shaded_image
+```
+
+### [Extinction-based Ambient Occlusion](16209-extinction-based-ambient-occlusion.md)
+Approximates the attenuation of diffusely reflected ambient light through local volume occlusion by summing extinction coefficients rather than tracing shadow rays. It differs from standard DVR by replacing the constant ambient term with a spatially varying occlusion factor derived from a local neighborhood integral, and from full global illumination by ignoring multi-bounce scattering and relying on a precomputed aggregate structure for speed.
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_extinction_ao(volume, sat, s, r, I_A, k):
+    """
+    Compute extinction-based ambient occlusion for sample point s.
+    """
+    x_min, x_max = max(0, s.x - r), min(volume.width - 1, s.x + r)
+    y_min, y_max = max(0, s.y - r), min(volume.height - 1, s.y + r)
+    z_min, z_max = max(0, s.z - r), min(volume.depth - 1, s.z + r)
+    
+    sum_tau = query_sat_3d(sat, x_min, y_min, z_min, x_max, y_max, z_max)
+    
+    w_A_L = 1.0 / (r * r) if r != 0 else 0.0
+    exponent = w_A_L * sum_tau * k
+    
+    C_RGB = volume[s.x, s.y, s.z]
+    E_i = I_A * math.exp(-exponent) * C_RGB
+    return E_i
+
+def query_sat_3d(sat, x_min, y_min, z_min, x_max, y_max, z_max):
+    def get_val(x, y, z):
+        x = max(0, min(x, sat.width - 1))
+        y = max(0, min(y, sat.height - 1))
+        z = max(0, min(z, sat.depth - 1))
+        return sat[x, y, z]
+    return (get_val(x_max, y_max, z_max) 
+            - get_val(x_min - 1, y_max, z_max) 
+            - get_val(x_max, y_min - 1, z_max) 
+            - get_val(x_max, y_max, z_min - 1) 
+            + get_val(x_min - 1, y_min - 1, z_max) 
+            + get_val(x_min - 1, y_max, z_min - 1) 
+            + get_val(x_max, y_min - 1, z_min - 1) 
+            - get_val(x_min - 1, y_min - 1, z_min - 1))
+```
+
+### Direct Volume Rendering with Soft Shadows and Ambient Occlusion
+A visualization technique for rendered tomograms that adapts standard ray marching to include soft shadows and local ambient occlusion [S1]. The pipeline applies a 3×3 Gaussian blur to the image, thresholds intensity values below 1/81st of the maximum value, and adjusts the gamma value to 2.0 to shift mid-tones to brighter values [S1]. This approach pronounces regions with the highest error values and structural features [S1].
+
+## Background
+The specific origins of the family as a whole are not detailed in the provided sources [G]. The constituent methods originate from various research efforts in medical visualization and interactive rendering: Directional Occlusion Shading and ISMOS are associated with research on efficient shading for volume rendering, while Directional Filtering for Occlusion Reduction is linked to diffusion tensor imaging (DTI) visualization [G]. The soft shadow and ambient occlusion variant is applied in GPU-accelerated 3D tomographic reconstruction pipelines to enhance error projection visualization [S1].
+## Sources
+[S1] GPU Accelerated 3D Tomographic Reconstruction and Visualization From Noisy Electron Microscopy Tilt-Series., https://doi.org/10.1109/tvcg.2022.3230445, fetched 2026-10-28

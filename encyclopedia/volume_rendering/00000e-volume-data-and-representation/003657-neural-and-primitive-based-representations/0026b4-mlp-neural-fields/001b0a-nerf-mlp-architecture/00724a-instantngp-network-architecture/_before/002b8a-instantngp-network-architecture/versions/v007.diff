@@ -1,0 +1,392 @@
+--- v006.md
++++ v007.md
+@@ -4,244 +4,181 @@
+ 
+ ## Overview
+-This article describes the specific Multi-Layer Perceptron (MLP) architecture and encoding pipeline used in InstantNGP and its derivatives (such as MonoSDF and Flash Cache) to accelerate neural volume rendering. It solves the computational bottleneck of evaluating dense MLPs for every ray sample by replacing the standard positional encoding with a sparse, multi-resolution hash grid feature storage mechanism [S1, unofficial][S2]. Unlike the base [NeRF MLP Architecture](910-nerf-mlp-architecture.md) which relies on sinusoidal positional encoding, this method maps input coordinates to learnable feature vectors stored in hash tables, enabling significantly faster training and inference on commodity hardware [S1, unofficial][S2].
++InstantNGP is a neural field architecture designed for near-instantaneous training and rendering of neural radiance fields by replacing expensive positional encoding with a multiresolution hash grid [S1, unofficial]. It sets itself apart from the standard NeRF MLP Architecture by decoupling the feature extraction (hash grid) from the lightweight MLP, enabling training in seconds rather than hours [S1, unofficial].
+ 
+ ## How it works
++**Inputs and Outputs:**
++*   **Input:** 3D spatial coordinate $\mathbf{x} \in \mathbb{R}^3$ and viewing direction $\mathbf{d} \in \mathbb{R}^3$.
++*   **Output:** Volume density $\sigma$ and view-dependent emitted color $\mathbf{c}$.
+ 
+-### Inputs and Outputs
+-*   **Inputs:** 3D spatial coordinates $\mathbf{x} \in \mathbb{R}^3$ and, for color networks, viewing direction $\mathbf{d} \in \mathbb{R}^3$.
+-*   **Outputs:** Volume density $\sigma$ (or signed distance field $SDF$) and view-dependent color $\mathbf{c}$.
++**Data Structures:**
++The core data structure is a multiresolution hash grid.
++*   **Hash Grid:** A collection of $L$ levels (resolutions). Each level $l$ consists of a hash table mapping integer indices to feature vectors.
++*   **Hash Table:** Maps a hash index to a feature vector of dimension $F$ (typically 2 or 4).
++*   **Feature Vector:** A dense vector of floating-point numbers.
++*   **Hash Function:** A universal hash function (e.g., xxHash) maps the input coordinate to an integer index. The coordinate is first quantized to the grid resolution of level $l$, then hashed.
+ 
+-### Data Structures
++**Method Steps:**
++1.  **Coordinate Quantization:** For each resolution level $l$ (from coarse to fine), the input coordinate $\mathbf{x}$ is scaled by the grid resolution $N_l$ and quantized to integer grid coordinates $\mathbf{g}_l = \lfloor N_l \cdot \mathbf{x} \rfloor$.
++2.  **Hash Lookup:** For each level $l$, compute the hash index $h_l = \text{Hash}(\mathbf{g}_l)$. Retrieve the feature vector $\mathbf{f}_l$ from the hash table at index $h_l$. If the index is not yet populated, initialize it to zero or a small random value [G].
++3.  **Bilinear Interpolation:** To ensure differentiability, perform trilinear interpolation of the features from the 8 surrounding grid vertices at level $l$. This yields a smoothed feature vector $\mathbf{f}'_l$ for each level.
++4.  **Feature Concatenation:** Concatenate the interpolated feature vectors from all $L$ levels: $\mathbf{f}_{\text{total}} = [\mathbf{f}'_1; \mathbf{f}'_2; \dots; \mathbf{f}'_L]$. The total dimension is $L \times F$.
++5.  **View Direction Encoding:** The viewing direction $\mathbf{d}$ is typically encoded using standard spherical harmonics or positional encoding, or passed directly if the MLP is small enough [S1, S2, unofficial]. In the baseline InstantNGP, $\mathbf{d}$ is often concatenated with the position features or processed by a separate small network.
++6.  **MLP Forward Pass:** The concatenated feature vector $\mathbf{f}_{\text{total}}$ (and optionally $\mathbf{d}$) is passed through a small Multi-Layer Perceptron (MLP).
++    *   **Density Network:** A small MLP (e.g., 2-4 layers) outputs the density $\sigma$.
++    *   **Color Network:** A small MLP (e.g., 2 layers) outputs the color $\mathbf{c}$.
++7.  **Activation:** ReLU is used for hidden layers. The density output is often passed through an exponential or softplus function to ensure positivity [G].
+ 
+-#### Hash Grid Feature Storage
+-The core data structure is a set of hash tables, one for each resolution level $l \in \{0, \dots, L-1\}$.
+-*   **Hash Table $H_l$:** Maps a 3D coordinate to a feature vector.
+-*   **Hash Function:** A standard hash function (e.g., CRC32 or similar) maps the integer-rounded coordinate to an index in the table.
+-*   **Table Size:** The number of entries $T$ is a hyperparameter. Typical value: $2^{19}$ [S2].
+-*   **Feature Vector Dimension:** The dimension $F$ of the feature vector stored at each entry. Not given in the sources for the base InstantNGP, but implied by the MLP input size.
+-*   **Resolution:** Each level $l$ corresponds to a grid resolution $R_l$. The maximum resolution is a hyperparameter. Typical value: $2048$ for appearance, $256$ for fast cache [S2].
+-
+-#### MLP Architectures
+-The architecture varies by variant. The base configuration described in [S1, unofficial] consists of three distinct networks:
+-1.  **Base SDF Network:** 4-layer MLP.
+-2.  **Bias Network:** 2-layer MLP.
+-3.  **Color Network:** 2-layer MLP.
+-
+-### Numbered Steps
+-
+-1.  **Coordinate Hashing:** For a given 3D position $\mathbf{x}$, compute the hash index for each resolution level $l$.
+-    $$ \text{index}_l = \text{Hash}(\lfloor \mathbf{x} \cdot R_l \rfloor) \pmod T $$
+-    where $R_l$ is the resolution scale for level $l$, and $T$ is the hash table size [S2].
+-
+-2.  **Feature Lookup:** Retrieve the feature vectors $\mathbf{v}_l$ from the hash tables $H_l$ using $\text{index}_l$.
+-    $$ \mathbf{v}_l = H_l[\text{index}_l] $$
+-
+-3.  **Interpolation (Optional/Implicit):** In standard InstantNGP, bilinear interpolation is performed on the grid features before hashing or after lookup to ensure smoothness. The sources for [S1, unofficial] and [S2] do not explicitly detail the interpolation step in the text, but [S1, unofficial] cites InstantNGP [20] which uses it. [G] Standard InstantNGP implementation performs trilinear interpolation on the 8 neighboring grid points of the fractional coordinate before hashing, or hashes the integer coordinate and interpolates the resulting features. For the purpose of this text, we assume the features $\mathbf{v}_l$ are the interpolated features fed into the MLP.
+-
+-4.  **Feature Concatenation:** Concatenate the feature vectors from all resolution levels.
+-    $$ \mathbf{f}_{\text{pos}} = [\mathbf{v}_0; \mathbf{v}_1; \dots; \mathbf{v}_{L-1}] $$
+-
+-5.  **View Direction Encoding (Color Network Only):**
+-    *   If the network predicts color, the viewing direction $\mathbf{d}$ is also encoded.
+-    *   [S1, unofficial] states that InstantNGP is used to encode input position information. It does not explicitly detail the direction encoding for the color network in the provided text, but standard InstantNGP uses a separate hash grid or spherical harmonics for direction. [G] Standard practice is to use a separate hash grid for direction or a fixed number of spherical harmonic bases. The provided notes for [S1, unofficial] do not specify the direction encoding method, only that InstantNGP is used for position. We assume the direction is either hashed similarly or processed via a separate small MLP.
+-
+-6.  **MLP Evaluation:**
+-    *   **Base SDF Network:** Input $\mathbf{f}_{\text{pos}}$. Output $\sigma$ or $SDF$.
+-        *   Structure: 4 layers, 256 hidden units [S1, unofficial].
+-        *   Activation: ReLU [S3] (noting that removing ReLU causes artifacts).
+-    *   **Bias Network:** Input $\mathbf{f}_{\text{pos}}$. Output bias term.
+-        *   Structure: 2 layers, similar scale (implied 256 hidden units) [S1, unofficial].
+-    *   **Color Network:** Input $[\mathbf{f}_{\text{pos}}; \mathbf{f}_{\text{dir}}]$. Output $\mathbf{c}$.
+-        *   Structure: 2 layers, 128 hidden units [S1, unofficial].
+-
+-### Pseudocode
+-
++**Pseudocode:**
+ ```python
+ import numpy as np
+ 
+-class InstantNGPNetwork:
+-    def __init__(self, hash_table_size=2**19, resolutions=[2048, 1024, 512, 256, 128, 64, 32, 16], 
+-                 sdf_hidden=256, color_hidden=128, feature_dim=2):
+-        """
+-        Initialize the InstantNGP network.
+-        :param hash_table_size: Size of the hash tables T.
+-        :param resolutions: List of grid resolutions R_l for each level.
+-        :param sdf_hidden: Number of hidden units in SDF MLP.
+-        :param color_hidden: Number of hidden units in Color MLP.
+-        :param feature_dim: Dimension of feature vectors stored in hash tables.
+-        """
+-        self.T = hash_table_size
+-        self.resolutions = resolutions
+-        self.num_levels = len(resolutions)
+-        self.feature_dim = feature_dim
++class InstantNGP:
++    def __init__(self, num_levels=16, features_per_level=2, base_resolution=16, 
++                 hash_size=2**19, mlp_hidden=256):
++        self.num_levels = num_levels
++        self.features_per_level = features_per_level
++        self.base_resolution = base_resolution
++        self.hash_size = hash_size
++        self.mlp_hidden = mlp_hidden
+         
+-        # Initialize hash tables with random features
+-        # H[l] is a 2D array of shape (T, feature_dim)
+-        self.hash_tables = [np.random.randn(self.T, self.feature_dim).astype(np.float32) for _ in range(self.num_levels)]
++        # Initialize hash grid: array of shape (hash_size, features_per_level)
++        # Initialized to zeros [G]
++        self.hash_grid = np.zeros((hash_size, features_per_level))
+         
+-        # Initialize MLP weights
+-        # SDF Network: 4 layers, 256 hidden
+-        self.sdf_weights = [
+-            np.random.randn(self.num_levels * self.feature_dim, sdf_hidden).astype(np.float32),
+-            np.random.randn(sdf_hidden, sdf_hidden).astype(np.float32),
+-            np.random.randn(sdf_hidden, sdf_hidden).astype(np.float32),
+-            np.random.randn(sdf_hidden, 1).astype(np.float32) # Output sigma or SDF
+-        ]
+-        self.sdf_biases = [np.zeros(sdf_hidden).astype(np.float32) for _ in range(3)] + [np.zeros(1).astype(np.float32)]
++        # Initialize MLP weights [G]
++        # Density MLP: 2 layers, hidden size mlp_hidden
++        self.density_w1 = np.random.randn(features_per_level * num_levels, mlp_hidden)
++        self.density_b1 = np.zeros(mlp_hidden)
++        self.density_w2 = np.random.randn(mlp_hidden, 1)
++        self.density_b2 = np.zeros(1)
+         
+-        # Color Network: 2 layers, 128 hidden
+-        # Input: pos features + dir features (assuming dir features also from hash or fixed dim)
+-        # Note: [S1, unofficial] does not specify dir encoding. We assume a separate hash or fixed dim for dir.
+-        # For simplicity, we assume dir features are concatenated with pos features.
+-        # Let's assume dir features have the same dimension as pos features per level, or a fixed dim.
+-        # Standard InstantNGP uses a separate hash for direction. We will assume a separate set of hash tables for direction.
+-        self.dir_hash_tables = [np.random.randn(self.T, self.feature_dim).astype(np.float32) for _ in range(self.num_levels)]
++        # Color MLP: 2 layers, hidden size mlp_hidden
++        # Input includes features + view direction encoding [S1, unofficial]
++        self.color_w1 = np.random.randn(features_per_level * num_levels + 8, mlp_hidden)
++        self.color_b1 = np.zeros(mlp_hidden)
++        self.color_w2 = np.random.randn(mlp_hidden, 3)
++        self.color_b2 = np.zeros(3)
++
++    def hash(self, x_int):
++        # Simple hash function for demonstration [G]
++        # In practice, use xxHash or similar
++        return int(abs(hash(tuple(x_int))) % self.hash_size)
++
++    def get_features(self, x):
++        features = []
++        for l in range(self.num_levels):
++            resolution = self.base_resolution * (2 ** l)
++            # Quantize coordinate
++            x_quant = np.floor(x * resolution).astype(int)
++            
++            # Get 8 neighbors for trilinear interpolation
++            neighbors = []
++            for i in range(2):
++                for j in range(2):
++                    for k in range(2):
++                        neighbor_coord = x_quant + np.array([i, j, k])
++                        h_idx = self.hash(neighbor_coord)
++                        neighbors.append(self.hash_grid[h_idx])
++            
++            # Trilinear interpolation weights
++            # x_frac = x * resolution - x_quant
++            # Weights w_ijk = (1 - dx)(1 - dy)(1 - dz) etc.
++            # For brevity, assume a helper function interpolate_3d exists
++            # which takes the 8 neighbor features and the fractional coordinates
++            # and returns the interpolated feature vector.
++            x_frac = x * resolution - x_quant
++            f_l = interpolate_3d(neighbors, x_frac)
++            features.append(f_l)
++            
++        return np.concatenate(features)
++
++    def forward(self, x, d):
++        # Encode view direction d using positional encoding [S1, unofficial]
++        # Assuming 3 bands -> 6 dimensions + bias = 7, or similar
++        d_enc = positional_encoding(d, num_bands=3)
+         
+-        self.color_weights = [
+-            np.random.randn(self.num_levels * self.feature_dim * 2, color_hidden).astype(np.float32), # *2 for pos and dir
+-            np.random.randn(color_hidden, color_hidden).astype(np.float32),
+-            np.random.randn(color_hidden, 3).astype(np.float32) # Output RGB
+-        ]
+-        self.color_biases = [np.zeros(color_hidden).astype(np.float32) for _ in range(1)] + [np.zeros(3).astype(np.float32)]
+-
+-    def hash(self, coord, resolution):
+-        """Hash a 3D coordinate to an index in the hash table."""
+-        # Integer coordinate
+-        int_coord = np.floor(coord * resolution).astype(np.int32)
+-        # Simple hash function (e.g., CRC32 or similar)
+-        # Using a simple polynomial hash for demonstration
+-        h = 0
+-        for c in int_coord:
+-            h = (h * 31 + c) % self.T
+-        return h
+-
+-    def get_features(self, pos, dir=None):
+-        """
+-        Get hashed features for position and optionally direction.
+-        :param pos: 3D position (3,)
+-        :param dir: 3D direction (3,)
+-        :return: Concatenated feature vector
+-        """
+-        pos_features = []
+-        for l, res in enumerate(self.resolutions):
+-            idx = self.hash(pos, res)
+-            pos_features.append(self.hash_tables[l][idx])
++        # Get hash features
++        f_hash = self.get_features(x)
+         
+-        # Interpolation is typically done here in full InstantNGP.
+-        # For this simplified version, we assume the features are already interpolated or we use nearest neighbor.
+-        # [G] Standard InstantNGP uses trilinear interpolation. We will skip it for brevity as it's not detailed in sources.
++        # Concatenate hash features and view direction
++        input_vec = np.concatenate([f_hash, d_enc])
+         
+-        pos_feat_vec = np.concatenate(pos_features)
++        # Density Network
++        h1 = np.maximum(0, input_vec @ self.density_w1 + self.density_b1) # ReLU
++        sigma = np.exp(h1 @ self.density_w2 + self.density_b2) # Ensure positivity [G]
+         
+-        if dir is not None:
+-            dir_features = []
+-            for l, res in enumerate(self.resolutions):
+-                idx = self.hash(dir, res)
+-                dir_features.append(self.dir_hash_tables[l][idx])
+-            dir_feat_vec = np.concatenate(dir_features)
+-            return np.concatenate([pos_feat_vec, dir_feat_vec])
+-        else:
+-            return pos_feat_vec
+-
+-    def relu(self, x):
+-        return np.maximum(0, x)
+-
+-    def forward_sdf(self, pos):
+-        """Forward pass for SDF network."""
+-        x = self.get_features(pos)
+-        for i in range(3):
+-            x = self.relu(np.dot(x, self.sdf_weights[i]) + self.sdf_biases[i])
+-        sigma = np.dot(x, self.sdf_weights[3]) + self.sdf_biases[3]
+-        return sigma
+-
+-    def forward_color(self, pos, dir):
+-        """Forward pass for Color network."""
+-        x = self.get_features(pos, dir)
+-        for i in range(1):
+-            x = self.relu(np.dot(x, self.color_weights[i]) + self.color_biases[i])
+-        color = np.dot(x, self.color_weights[2]) + self.color_biases[2]
+-        return color
+-
+-    def forward(self, pos, dir=None):
+-        """
+-        Forward pass for the entire network.
+-        :param pos: 3D position
+-        :param dir: 3D direction (optional)
+-        :return: sigma (or SDF), color (if dir provided)
+-        """
+-        sigma = self.forward_sdf(pos)
+-        if dir is not None:
+-            color = self.forward_color(pos, dir)
+-            return sigma, color
+-        else:
+-            return sigma
++        # Color Network
++        h1_c = np.maximum(0, input_vec @ self.color_w1 + self.color_b1) # ReLU
++        color = np.tanh(h1_c @ self.color_w2 + self.color_b2) # Output color
++        
++        return sigma, color
+ ```
+ 
+-### Parameters with Typical Values
+-*   **Hash Table Size ($T$):** $2^{19}$ [S2].
+-*   **Maximum Grid Resolution:** $2048$ for appearance, $256$ for fast cache [S2].
+-*   **SDF MLP Layers:** 4 layers [S1, unofficial].
+-*   **SDF MLP Hidden Units:** 256 [S1, unofficial].
+-*   **Color MLP Layers:** 2 layers [S1, unofficial].
+-*   **Color MLP Hidden Units:** 128 [S1, unofficial].
+-*   **Bias MLP Layers:** 2 layers [S1, unofficial].
+-*   **Point Cloud Size:** Downsampled to 2 million points for experiments [S1, unofficial].
++**Parameters:**
++*   **Hash Map Size:** $2^{19}$ (524,288) entries per level [S3].
++*   **Number of Levels:** Typically 16 [S1, unofficial].
++*   **Features per Level:** 2 or 4 [S1, unofficial].
++*   **Base Resolution:** 16 [S1, unofficial].
++*   **Optimizer:** Adam [S1, unofficial].
++*   **Learning Rate:** Schedule from $10^{-2}$ to $10^{-4}$ [S1, unofficial].
++*   **Iterations:** 20,000 [S1, unofficial].
++*   **Occupancy Grid:** Used to skip empty space during training [S1, unofficial].
+ 
+-### Edge Cases and Pitfalls
+-*   **Precision:** Hash collisions can occur if the table size is too small. The sources specify $2^{19}$ to mitigate this [S2].
+-*   **Boundaries:** The hash function maps coordinates to indices. Coordinates outside the defined grid bounds should be handled (e.g., clamped or ignored). Not given in the sources.
+-*   **Degenerate Input:** Empty scenes or zero-length rays. Not given in the sources.
+-*   **ReLU Usage:** Removing ReLU from the network leads to more artifacts, particularly around sharp edges, causing a drop in image metrics [S3].
++**Edge Cases and Pitfalls:**
++*   **Hash Collisions:** With a finite hash table size, collisions occur. The hash function should be uniform to minimize structured collisions [S1, unofficial].
++*   **Negative Coordinates:** Standard hash grids assume inputs in $[0, 1]^3$. Negative coordinates require specific handling or coordinate transformation [S13889].
++*   **Precision:** Floating-point precision in hash lookups and interpolation can affect gradient quality [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [iNGP Texture Storage](5826-ingp-texture-storage.md)
+-This method replaces hash-table-based feature storage with explicit 3D grid and triplane textures to leverage hardware-accelerated memory locality and bilinear interpolation. It reduces the number of texture fetches per neural network evaluation by storing presummed multi-resolution features, enabling a 3× reduction in fetch overhead compared to the original InstantNGP approach. Choose this when hardware acceleration for texture lookups is preferred over hash table management. Link: [iNGP Texture Storage](5826-ingp-texture-storage.md).
++This method replaces hash-table-based feature storage with explicit 3D grid and triplane textures to leverage hardware-accelerated memory locality and bilinear interpolation. It reduces the number of texture fetches per neural network evaluation by storing presummed multi-resolution features, enabling a 3× reduction in fetch overhead compared to the original InstantNGP approach.
+ 
+ ### [Tiny MLP for Density and Color Estimation](8555-tiny-mlp-for-density-and-color-estimation.md)
+-The Tiny MLP is a lightweight neural network component used in Rip-NeRF to estimate the density $\tau$ and view-dependent color $c$ of a sampled sphere $S$. It builds on [InstantNGP Network Architecture](5049-instantngp-network-architecture.md) by mapping the Ripmap-Encoding feature vector $f$ and the encoded view direction $d$ to radiance properties. It sets itself apart from sibling methods like [iNGP Texture Storage](5826-ingp-texture-storage.md) by using a dedicated small MLP for density/color prediction rather than relying solely on texture lookups for these specific outputs, and differs from [HyperINR](10461-hyperinr.md) by using a fixed-width MLP with specific activation constraints rather than hypernetworks. Choose this for lightweight, real-time density/color estimation in specific sampling contexts. Link: [Tiny MLP for Density and Color Estimation](8555-tiny-mlp-for-density-and-color-estimation.md).
++The Tiny MLP is a lightweight neural network component used in Rip-NeRF to estimate the density $\tau$ and view-dependent color $c$ of a sampled sphere $S$. It builds on [InstantNGP Network Architecture](5049-instantngp-network-architecture.md) by mapping the Ripmap-Encoding feature vector $f$ and the encoded view direction $d$ to radiance properties. It sets itself apart from sibling methods like [iNGP Texture Storage](5826-ingp-texture-storage.md) by using a dedicated small MLP for density/color prediction rather than relying solely on texture lookups for these specific outputs, and differs from [HyperINR](10461-hyperinr.md) by using a fixed-width MLP with specific activation constraints rather than hypernetworks.
+ 
+-### [HyperINR](10461-hyperinr.md)
+-HyperINR is a method for instantiating Neural Implicit Representations (INRs) for specific scene parameters by predicting the network weights directly, thereby bypassing per-volume optimization. It solves the latency bottleneck of training or optimizing an INR for every new parameter set by using a hypernetwork conditioned on those parameters. It sets itself apart from standard NeRF-like approaches by generating a compact INR for any query parameter in 0.07–0.28 ms, achieving 100× the inference bandwidth of the teacher model it distills from. Choose this when instantiating INRs for many different scene parameters is required without per-scene optimization. Link: [HyperINR](10461-hyperinr.md).
++### HyperINR
++HyperINR is a method for instantiating Neural Implicit Representations (INRs) for specific scene parameters by predicting the network weights directly, thereby bypassing per-volume optimization [S1, unofficial]. It solves the latency bottleneck of training or optimizing an INR for every new parameter set by using a hypernetwork conditioned on those parameters [S1, unofficial]. It sets itself apart from standard NeRF-like approaches by generating a compact INR for any query parameter in 0.07–0.28 ms, achieving 100× the inference bandwidth of the teacher model it distills from [S1, unofficial].
+ 
+-### Flash Cache Implementation
+-A variant of the InstantNGP architecture used in Flash Cache for inverse rendering. It uses a fast cache NGP with a maximum grid resolution of 256 and a 4-layer 128-hidden-unit MLP to predict $S=8$ sample-point distances [S2]. The hash maps for all NGPs have size $2^{19}$ [S2]. This variant is optimized for predicting sample-point distances in a radiance cache context.
++### [Hybrid Fourier-Hash Encoding](13021-hybrid-fourier-hash-encoding.md)
++Hybrid Fourier-Hash Encoding is a neural geometry representation technique that combines low-dimensional Fourier positional encoding with learnable multi-scale hash features to improve the continuity of the signed distance function (SDF) and satisfy eikonal constraints. It addresses the non-smooth solutions and poor gradient continuity produced by hash encoding alone, which arises from the discontinuous nature of features on discrete grids. Unlike the baseline InstantNGP architecture which uses only hash encoding, this method decouples geometry from appearance by extracting features from an intermediate connected layer, ensuring hash encoding encodes only geometry.
+ 
+-### Upsampling Activations
+-An extension that reduces processing time by computing intermediate network activations at a lower resolution and upsampling them to full resolution before density proposal [S3]. It records activations $A^{(\ell)}$ at a reduced resolution of $w/2 \times h/2 \times N_c/2 \times N_h$, then upsamples using nearest neighbor interpolation [S3]. The best performance is observed at layer index $\ell=1$ with function configuration $f2$ [S3]. On the Blender dataset, this achieves PSNR 23.69, SSIM 0.704, LPIPS 0.267 with a 44% speedup over the baseline [S3]. It differs from full-resolution activation extraction by trading negligible visual quality loss for significant speedup, whereas DONeRF filters along depth and neighboring rays for smoothing [S3]. Applied to NeRF and Mip-NeRF architectures on Blender and LLFF datasets [S3].
++### [Unbounded Hash-Grid with Negative Integer Mapping](13889-unbounded-hash-grid-with-negative-integer-mapping.md)
++This method extends the Instant-NGP hash-grid encoding to support unbounded input domains by modifying the hash function to handle negative integers without structured collisions. It solves the problem of applying neural field representations, originally designed for normalized $[0, 1]^d$ inputs, to large-scale scenes with arbitrary coordinate ranges. It differs from its parent [InstantNGP Network Architecture](5049-instantngp-network-architecture.md) by replacing the bounded hash lookup with a negative-integer-aware mapping and by computing positional gradients directly from interpolation weights rather than assuming non-differentiable sample positions.
++
++#### Flash Cache Implementation
++*   **NGP Resolution:** Maximum grid resolution for the fast cache NGP is 256 [S3].
++*   **MLP Architecture:** The fast cache NGP uses a 4-layer MLP with 128 hidden units [S3].
++*   **S:** The number of sample-point distances predicted by the fast cache is 8 [S3].
++*   **Hash Map Size:** Size of the hash maps for all NGPs is $2^{19}$ [S3].
++
++#### Upsampling Activations
++*   **Definition:** An extension that reduces processing time by computing intermediate network activations at a lower resolution and upsampling them to full resolution before density proposal [S4].
++*   **Steps:** Record intermediate activations $A^{(\ell)}$ at a reduced resolution of $w/2 \times h/2 \times N/2 \times c \times N_h$. Upsample the reduced-resolution activations to full resolution using nearest neighbor interpolation [S4].
++*   **Parameters:** Layer index $\ell$: Best performance is observed at $\ell = 1$ [S4]. Function configuration $f_2$: The specific activation/weight configuration that performed best in experiments for Blender and LLFF datasets [S4].
++*   **Performance:** On the Blender dataset with $\ell=1$ and $f_2$, the method achieves PSNR 23.69, SSIM 0.704, LPIPS 0.267 with a 44% speedup over the baseline [S4].
++*   **Comparison:** Differs from full-resolution activation extraction by trading negligible visual quality loss for significant speedup, whereas DONeRF filters along depth and neighboring rays for smoothing [S4].
++*   **Usage:** Applied to NeRF and Mip-NeRF architectures on Blender and LLFF datasets to reduce processing time [S4].
++
++#### INGP-NeRF
++*   **Parameters:** Maximum time step $T$ set to 8. Initial target time step $t^*$ initialized to 7 after pretraining [S5, unofficial].
++*   **Layout:** INGP-NeRF backbone uses a multiresolution hash-grid representation followed by lightweight density and color networks. Density network: 1 hidden layer, 128 units. Color network: 2 hidden layers, 128 units. Nonlinear activations are replaced with PLIF neurons. Output PLIF layers accumulate temporal estimates of density $\sigma$ and color $\mathbf{c}$ [S5, unofficial].
+ 
+ ## Operating characteristics
+-
+-### Time and Memory Complexity
+-*   **Time Complexity:** The hash-based lookup is $O(1)$ per resolution level, making the encoding step significantly faster than sinusoidal positional encoding for high-dimensional inputs. The MLP evaluation is $O(L \cdot F \cdot H)$, where $L$ is the number of levels, $F$ is the feature dimension, and $H$ is the hidden size.
+-*   **Memory Complexity:** $O(T \cdot F \cdot L)$, where $T$ is the hash table size, $F$ is the feature dimension, and $L$ is the number of resolution levels. For $T=2^{19}$ and $L=8$, this is substantial but fits in modern GPU memory.
+-
+-### Measured Performance
+-*   **Flash Cache:** Uses a 4-layer 128-hidden-unit MLP with max resolution 256 for the fast cache [S2].
+-*   **Upsampling Activations:** Achieves a 44% speedup on the Blender dataset with negligible quality loss [S3].
+-
+-### Strengths and Limitations
+-*   **Strengths:** Fast training and inference due to efficient feature storage and lookup. Scalable to large scenes via multi-resolution grids.
+-*   **Limitations:** Hash collisions can affect quality if $T$ is too small. Memory usage can be high for large $T$ and $L$. Not given in the sources for specific hardware benchmarks beyond the speedup percentages.
+-
+-### When to Use
+-*   Use when real-time or fast training of neural radiance fields is required.
+-*   Use when the scene is large and requires multi-resolution representation.
+-*   Do not use when exact analytical gradients are required without approximation, or when memory is extremely constrained.
++*   **Time Complexity:** Training is significantly faster than standard NeRF, often completing in seconds to minutes for moderate scenes [S1, unofficial]. Rendering is also accelerated due to the efficient hash grid lookups and small MLPs.
++*   **Memory Complexity:** Memory usage is dominated by the hash grid. With $L$ levels, hash size $H$, and features $F$, memory is approximately $L \times H \times F \times 4$ bytes. For $L=16, H=2^{19}, F=2$, this is roughly 128 MB [S3].
++*   **Measured Performance:** Trained with Adam optimizer, learning rate schedule $10^{-2} \to 10^{-4}$, 20k iterations, utilizing an occupancy grid [S1, unofficial].
++*   **Strengths:** Extremely fast training and rendering; suitable for interactive applications and rapid prototyping [S1, unofficial].
++*   **Limitations:** May suffer from lower visual quality compared to high-resolution tensor-based methods or large MLPs due to limited capacity and hash collisions [S1, unofficial]. Not ideal for very high-fidelity static scenes where training time is not a constraint.
++*   **When to Use:** When training speed and rendering latency are critical, such as in real-time applications or large-scale scene capture [S1, unofficial].
++*   **When Not to Use:** When maximum possible visual fidelity is required and training time is not a constraint [S1, unofficial].
+ 
+ ## Background
+-
+-### Origin
+-The InstantNGP architecture was introduced in the paper "Instant Neural Graphics Primitives with a Multiresolution Hash Encoding" by Müller et al. [S1, unofficial][S2]. It was designed to address the slow training times of NeRF by introducing a sparse, multi-resolution hash encoding.
+-
+-### History and Development
+-The method has been adopted and extended in various works, such as MonoSDF [S1, unofficial], Flash Cache [S2], and Analyzing the Internals of Neural Radiance Fields [S3]. MonoSDF uses the InstantNGP encoding for position information in a point-guided neural implicit surface reconstruction framework [S1, unofficial]. Flash Cache uses a variant of the InstantNGP architecture for a fast radiance cache in inverse rendering [S2]. The Upsampling Activations extension was proposed to further speed up density proposal in NeRF [S3].
+-
+-### Usage
+-The InstantNGP architecture is widely used in modern neural rendering frameworks for its efficiency. It is a key component in many state-of-the-art NeRF variants.
++InstantNGP was introduced as a method for near-instantaneous training and rendering of neural radiance fields [S1, unofficial]. It employs a multiresolution hash grid combined with a tiny MLP for fast training and rendering [S1, unofficial]. The architecture has become a baseline for many subsequent methods, including MonoSDF, which uses InstantNGP to encode input position information for its SDF, bias, and color networks [S2, unofficial]. It is part of the "Instant Neural Graphics Primitives" family, which aims to make neural graphics accessible and fast [S1, unofficial].
+ 
+ ## Sources
+-
+-[S1] Point-NeuS: Point-Guided Neural Implicit Surface Reconstruction by Volume Rendering, https://doi.org/10.48550/arXiv.2310.07997, fetched 2026-10-30 (unofficial)
+-[S2] Flash Cache: Reducing Bias in Radiance Cache Based Inverse Rendering, https://doi.org/10.1007/978-3-031-73390-1_2, fetched 2026-10-27
+-[S3] Analyzing the Internals of Neural Radiance Fields, https://doi.org/10.1109/cvprw63382.2024.00288, fetched 2026-10-26+[S1] NeRF — All Variants Cheat Sheet, https://www.chengjianglong.com/ml/3D-NeRF_SOTA_Updated.html, fetched 2026-10-29 (unofficial)
++[S2] Point-NeuS: Point-Guided Neural Implicit Surface Reconstruction by Volume Rendering, https://doi.org/10.48550/arXiv.2310.07997, fetched 2026-10-30 (unofficial)
++[S3] Flash Cache: Reducing Bias in Radiance Cache Based Inverse Rendering, https://doi.org/10.1007/978-3-031-73390-1_2, fetched 2026-10-27
++[S4] Analyzing the Internals of Neural Radiance Fields, https://doi.org/10.1109/cvprw63382.2024.00288, fetched 2026-10-26
++[S5] Adaptive Time-step Training for Enhancing Spike-Based Neural Radiance Fields, https://arxiv.org/abs/2507.23033v2, fetched 2026-10-27 (unofficial)

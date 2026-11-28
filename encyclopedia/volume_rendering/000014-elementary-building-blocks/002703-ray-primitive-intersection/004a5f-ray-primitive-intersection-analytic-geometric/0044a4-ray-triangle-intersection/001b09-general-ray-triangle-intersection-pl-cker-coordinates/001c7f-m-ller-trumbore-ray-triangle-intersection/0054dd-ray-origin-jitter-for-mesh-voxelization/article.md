@@ -1,0 +1,65 @@
+# Ray Origin Jitter for Mesh Voxelization
+
+Also called: Jittered Ray Origins, STL Voxelization Artifacts Fix
+
+## Overview
+This method eliminates vertical slice artifacts in mesh voxelization by adding a small offset to ray origins before performing ray-triangle intersection tests [S1, unofficial]. It specifically addresses numerical instability in the Möller-Trumbore algorithm when rays align exactly with mesh vertices or edges, which is common in meshes with regular grid topology such as terrain height maps [S1, unofficial]. An alternative approach to avoid this coplanarity issue is to use Signed Distance Field (SDF) files, which bypass ray-tracing entirely [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** Voxel grid position (`xyz`), an initial offset (`offset`), and the ray direction (`direction`) [S1, unofficial].
+*   **Output:** A jittered ray origin vector (`r_origin`) used for the subsequent Möller-Trumbore intersection test [S1, unofficial].
+
+**Data Structures**
+*   `xyz`: Coordinates of the voxel position [S1, unofficial].
+*   `offset`: A vector representing the displacement from the voxel center to the ray start point [S1, unofficial].
+*   `direction`: An integer indicating the primary axis of the ray (0 for X, 1 for Y, 2 for Z) [S1, unofficial].
+
+**Parameters**
+*   `jitter`: The magnitude of the offset added to ray origins [S1, unofficial]. The standard value is `0.001f`, which represents 0.1% of the voxel size [S1, unofficial].
+
+**Steps**
+1.  Calculate the base ray origin by adding the voxel position and the predefined offset:
+    $$ r_{origin} = position(xyz) + offset $$
+2.  Define the jitter magnitude constant:
+    $$ jitter = 0.001f $$
+3.  Add jitter to the components of `r_origin` that are perpendicular to the ray direction [S1, unofficial]. The jitter is applied to component $N$ only if the ray direction is not aligned with axis $N$ (`direction != N`) [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def jitter_ray_origin(position_xyz, offset, direction, voxel_size):
+    r_origin = position_xyz + offset
+    jitter = 0.001 * voxel_size
+    if direction != 0:
+        r_origin.x += jitter
+    if direction != 1:
+        r_origin.y += jitter
+    if direction != 2:
+        r_origin.z += jitter
+    return r_origin
+```
+
+**Edge Cases and Pitfalls**
+*   **Regular Grid Topology:** The primary failure case occurs with meshes generated from height maps or regular grids (e.g., `hill.stl` with 421 Y-aligned planes) where vertices lie on exact coordinates [S1, unofficial]. Without jitter, rays often start exactly on vertex planes, leading to undefined intersection results or missed voxels [S1, unofficial].
+*   **Precision:** The 0.1% offset is empirically shown to be imperceptible in the final simulation while effectively solving the coplanarity issue [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:** Not given in the sources.
+*   **Strengths:**
+    *   Effectively eliminates vertical slice artifacts in voxelized terrain and regular meshes [S1, unofficial].
+    *   Simple to integrate into existing ray-triangle intersection kernels [S1, unofficial].
+*   **Limitations:**
+    *   Only addresses coplanarity issues related to ray origins [S1, unofficial].
+    *   Requires knowledge of the ray direction and voxel size [S1, unofficial].
+*   **When to use:** Use this method when voxelizing STL meshes (especially terrain/heightmap data) using ray-triangle intersection and observing vertical gaps or missing voxels [S1, unofficial].
+*   **When not to use:** Not given in the sources.
+
+## Background
+This technique was proposed in a GitHub pull request to the FluidX3D project, a lattice Boltzmann CFD software, to fix vertical slice artifacts in STL mesh voxelization [S1, unofficial]. The issue was identified when voxelizing terrain meshes with regular grid structures, where the Möller-Trumbore algorithm failed due to rays aligning exactly with mesh vertices [S1, unofficial]. The solution, introduced by user `meet-brad-ch` in December 2025, adds a small jitter to ray origins perpendicular to the ray direction [S1, unofficial]. It was tested on a `hill.stl` terrain mesh with 421 Y-aligned planes, showing a transition from visible artifacts to clean voxelization [S1, unofficial].
+
+## Sources
+[S1] Fix vertical slice artifacts in mesh voxelization, https://github.com/ProjectPhysX/FluidX3D/pull/323, fetched 2026-10-26 (unofficial)

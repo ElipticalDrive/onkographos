@@ -1,0 +1,99 @@
+--- v002.md
++++ v003.md
+@@ -7,5 +7,5 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   `color_cache`: A 3-element array/tensor holding pre-computed color contributions from the forward pass, accessed via indices 0, 1, and 2 [S1, unofficial].
++*   `color_cache`: A 3-element array holding pre-computed color contributions from the forward pass, accessed via indices 0, 1, and 2 [S1, unofficial].
+ *   `grad_output`: Upstream gradient tensor with respect to the rendered pixel color [S1, unofficial].
+ *   `log_transmit_in`: Logarithmic transmission value at the start of the ray from the forward pass [S2, unofficial].
+@@ -28,17 +28,17 @@
+ 
+ **Steps:**
+-1.  **Lane Grouping Initialization**: Compute `lane_colorgrp_id = lane_id % grid.basis_dim` and `lane_colorgrp = lane_id / grid.basis_dim`. Compute `leader_mask = 1U | (1U << grid.basis_dim) | (1U << (2 * grid.basis_dim))` [S1, unofficial].
++1.  **Lane Grouping Initialization**: Compute `lane_colorgrp_id = lane_id % grid.basis_dim` and `lane_colorgrp = lane_id / grid.basis_dim` [S1, unofficial]. Compute `leader_mask = 1U | (1U << grid.basis_dim) | (1U << (2 * grid.basis_dim))` [S1, unofficial].
+ 2.  **Gradient Accumulation Initialization**: Compute the initial `accum` via a fused multiply-add chain: `accum = fmaf(color_cache[0], grad_output[0], fmaf(color_cache[1], grad_output[1], color_cache[2] * grad_output[2]))` [S1, unofficial].
+-3.  **Beta Loss Gradient**: If `beta_loss > 0`, compute `transmit_in = exp(log_transmit_in)`. Update `beta_loss *= (1 - transmit_in / (1 - transmit_in + 1e-3))`. Add the updated `beta_loss` to `accum` [S1, unofficial].
++3.  **Beta Loss Gradient**: If `beta_loss > 0`, compute `transmit_in = exp(log_transmit_in)` [S2, unofficial]. Update `beta_loss *= (1 - transmit_in / (1 - transmit_in + 1e-3))` [S1, unofficial]. Add the updated `beta_loss` to `accum` [S1, unofficial].
+ 4.  **Ray Bounds Check**: If `ray.tmin > ray.tmax`, write `accum` to `accum_out` if not null, write `0` to `log_transmit_out` if not null, and return [S1, unofficial].
+ 5.  **Ray Marching Loop**: While `t <= ray.tmax`: compute ray position, clamp, compute lattice `l` and fractional position [S1, unofficial].
+-6.  **Density Interpolation**: Trilinearly interpolate density `sigma`. If `opt.last_sample_opaque` and `t + opt.step_size > ray.tmax`, set `ray.world_step = 1e9` [S1, unofficial].
++6.  **Density Interpolation**: Trilinearly interpolate density `sigma` [S1, unofficial]. If `opt.last_sample_opaque` and `t + opt.step_size > ray.tmax`, set `ray.world_step = 1e9` [S1, unofficial].
+ 7.  **Color Interpolation**: If `sigma > opt.sigma_thresh`, interpolate color from `grid.sh_data` using `lane_id`, multiply by `sphfunc_val[lane_colorgrp_id]` to get `weighted_lane_color` [S1, unofficial].
+-8.  **Warp Reduction**: Reduce `weighted_lane_color` across the basis dimension using a segmented sum with `lane_colorgrp_id == 0` as the leader flag. Add `0.5f` [S1, unofficial].
+-9.  **Color Clamping & Scaling**: Compute `total_color = fmaxf(lane_color_total, 0.f)`. Compute `color_in_01 = (total_color == lane_color_total)`. Multiply `total_color` by `gout` [S1, unofficial].
++8.  **Warp Reduction**: Reduce `weighted_lane_color` across the basis dimension using a segmented sum with `lane_colorgrp_id == 0` as the leader flag [S1, unofficial]. Add `0.5f` [S1, unofficial].
++9.  **Color Clamping & Scaling**: Compute `total_color = fmaxf(lane_color_total, 0.f)` [S1, unofficial]. Compute `color_in_01 = (total_color == lane_color_total)` [S1, unofficial]. Multiply `total_color` by `gout` [S1, unofficial].
+ 10. **Shuffle & Accumulate**: Shuffle `total_color` to lanes 0 and `2*grid.basis_dim` using `leader_mask`, and accumulate [S1, unofficial].
+-11. **Gradient Common Computation**: Shuffle `color_in_01` to lane `lane_colorgrp * grid.basis_dim` using mask `(1U << grid.sh_data_dim) - 1`. Compute `grad_common = weight * color_in_01 * gout` [S1, unofficial].
++11. **Gradient Common Computation**: Shuffle `color_in_01` to lane `lane_colorgrp * grid.basis_dim` using mask `(1U << grid.sh_data_dim) - 1` [S1, unofficial]. Compute `grad_common = weight * color_in_01 * gout` [S1, unofficial].
+ 12. **Color Gradient**: Compute `curr_grad_color = sphfunc_val[lane_colorgrp_id] * grad_common` [S1, unofficial].
+-13. **SH Basis Gradient**: If `grid.basis_type != BASIS_TYPE_SH`, compute `curr_grad_sphfunc = lane_color * grad_common`. Shuffle down by `2*grid.basis_dim` and `grid.basis_dim`, accumulate. If `lane_id < grid.basis_dim`, add to `grad_sphfunc_val[lane_id]` [S1, unofficial].
++13. **SH Basis Gradient**: If `grid.basis_type != BASIS_TYPE_SH`, compute `curr_grad_sphfunc = lane_color * grad_common` [S1, unofficial]. Shuffle down by `2*grid.basis_dim` and `grid.basis_dim`, accumulate [S1, unofficial]. If `lane_id < grid.basis_dim`, add to `grad_sphfunc_val[lane_id]` [S1, unofficial].
+ 14. **Accumulator Update**: Update `accum -= weight * total_color` [S1, unofficial].
+ 15. **Sparsity Loss**: If `sparsity_loss > 0.f`, apply the Cauchy version gradient [S1, unofficial].
+@@ -47,5 +47,5 @@
+ **Formulas:**
+ *   `pcnt = ray.world_step * sigma`
+-*   `weight = exp(log_transmit) * (1 - exp(-pcnt))`
++*   `weight = exp(log_transmit) * (1 - exp(-pcnt))` [S1, unofficial]
+ *   `log_transmit -= pcnt`
+ *   `curr_grad_sigma = ray.world_step * (total_color * exp(log_transmit) - accum)` [S1, unofficial]
+@@ -88,7 +88,8 @@
+         return accum, log_transmit_out
+ 
+-    # Step 5-16: Ray marching loop (simplified for Python readability; 
+-    # in CUDA this runs per-lane with warp shuffles/reductions)
++    # Step 5-16: Ray marching loop
+     log_transmit = log_transmit_in
++    grad_sphfunc_val = [0.0] * grid_basis_dim
++
+     while ray_t <= ray_tmax:
+         # Compute ray position, clamp, lattice l, fractional pos [S1, unofficial]
+@@ -105,5 +106,5 @@
+ 
+             # Step 8: Warp reduction (simulated with list accumulation)
+-            lane_color_total = weighted_lane_color + 0.5f # 0.5f added per spec
++            lane_color_total = weighted_lane_color + 0.5
+             total_color = max(lane_color_total, 0.0)
+             color_in_01 = 1.0 if (total_color == lane_color_total) else 0.0
+@@ -115,5 +116,8 @@
+ 
+             # Step 11: Gradient common
+-            grad_common = 1.0 * color_in_01 * gout # weight assumed 1.0 for this step
++            pcnt = ray_world_step * sigma
++            weight = math.exp(log_transmit) * (1.0 - math.exp(-pcnt))
++            log_transmit -= pcnt
++            grad_common = weight * color_in_01 * gout
+ 
+             # Step 12: Color gradient
+@@ -125,17 +129,19 @@
+                 # Shuffle down by 2*grid_basis_dim and grid_basis_dim, accumulate
+                 if lane_id < grid_basis_dim:
+-                    grad_sphfunc_val = [0.0] * grid_basis_dim
+                     grad_sphfunc_val[lane_id] += curr_grad_sphfunc
+ 
+             # Step 14: Accumulator update
+-            accum -= 1.0 * total_color # weight assumed 1.0
++            accum -= weight * total_color
+ 
+             # Step 15: Sparsity loss
+             if sparsity_loss > 0.0:
+-                # Apply Cauchy version gradient [S1, unofficial]
++                # Apply Cauchy version gradient from SNeRG [G]
+                 pass
+ 
+         # Step 16: Advance ray
+         ray_t += ray_step_size
++
++    # Compute density gradient
++    curr_grad_sigma = ray_world_step * (total_color * math.exp(log_transmit) - accum)
+ 
+     # Final outputs
+@@ -144,5 +150,5 @@
+     if log_transmit_out is not None:
+         log_transmit_out = log_transmit_in
+-    return accum, log_transmit_out
++    return accum, log_transmit_out, grad_sphfunc_val, curr_grad_sigma
+ ```
+ 

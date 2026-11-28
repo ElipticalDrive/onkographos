@@ -1,0 +1,117 @@
+--- v002.md
++++ v003.md
+@@ -18,8 +18,8 @@
+ **Numbered Steps**
+ 1.  **Local Map Generation:** Transform the target image $I_{trg}$ into a local map $m_{trg}$ using the registration encoder $F_{reg}(I_{trg}, p_0; \theta_{enc})$, where $p_0$ is the fixed origin pose $(0,0,0)$ [S1].
+-2.  **Feature Extraction:** Process the global RNR-Map $m$ through convolutional network $F_k$ to obtain $m'_k$. Simultaneously, process the local map $m_{trg}$ through convolutional network $F_q$ to obtain $m'_q$ [S1].
+-3.  **Orientation Rotation:** Generate $R$ rotated versions of the query feature map $m'_q$. For each rotation index $r \in \{1, \dots, R\}$, apply rotation $Rot_r$ corresponding to angle $\theta_r = 360^\circ \times \frac{r-1}{R}$ to produce $(m'_q)_r$ [S1].
++2.  **Feature Extraction:** Process the global RNR-Map $m$ through convolutional network $F_k$ to obtain $m'_k$ [S1]. Simultaneously, process the local map $m_{trg}$ through convolutional network $F_q$ to obtain $m'_q$ [S1].
++3.  **Orientation Rotation:** Generate $R$ rotated versions of the query feature map $m'_q$ [S1]. For each rotation index $r \in \{1, \dots, R\}$, apply rotation $Rot_r$ corresponding to angle $\theta_r = 360^\circ \times \frac{r-1}{R}$ to produce $(m'_q)_r$ [S1].
+ 4.  **Cross-Correlation:** Perform cross-correlation (denoted as $\mathrm{Conv}$) between the global feature map $m'_k$ and each rotated query feature map $(m'_q)_r$ [S1].
+-5.  **Heatmap and Orientation Prediction:** Forward the outputs of the cross-correlation operations into a final CNN $F_E$. $F_E$ produces the heatmap $E$ and the orientation prediction $\hat{a}_{trg}$ [S1].
++5.  **Heatmap and Orientation Prediction:** Forward the outputs of the cross-correlation operations into a final CNN $F_E$ [S1]. $F_E$ produces the heatmap $E$ and the orientation prediction $\hat{a}_{trg}$ [S1].
+ 
+ **Formulas**
+@@ -44,9 +44,9 @@
+ def floc_localization(global_map_m, target_image, R=18):
+     # Step 1: Transform target image to local map using origin pose p0=(0,0,0)
+-    local_map_m_trg = encode_image_to_grid(target_image, p0=(0,0,0))
++    local_map_m_trg = conv2d(target_image, W_reg)
+ 
+     # Step 2: Process global and local maps through CNNs F_k and F_q
+-    m_prime_k = apply_cnn(global_map_m, weights_F_k)
+-    m_prime_q = apply_cnn(local_map_m_trg, weights_F_q)
++    m_prime_k = relu(conv2d(global_map_m, W_k))
++    m_prime_q = relu(conv2d(local_map_m_trg, W_q))
+ 
+     # Step 3: Rotate query map into R different angles
+@@ -54,5 +54,5 @@
+     for r in range(1, R + 1):
+         angle = 360.0 * (r - 1) / R
+-        rotated_m_prime_q = rotate_tensor(m_prime_q, angle)
++        rotated_m_prime_q = rotate_2d(m_prime_q, angle)
+         rotated_queries.append(rotated_m_prime_q)
+ 
+@@ -60,34 +60,49 @@
+     conv_outputs = []
+     for q_rot in rotated_queries:
+-        output = cross_correlate(m_prime_k, q_rot)
++        output = correlate_2d(m_prime_k, q_rot)
+         conv_outputs.append(output)
+ 
+     # Step 5: Forward to CNN F_E to produce heatmap and orientation
+-    combined_features = concatenate(conv_outputs, dim=-1)
+-    heatmap_E = apply_cnn(combined_features, weights_F_E_heatmap)
+-    orientation_pred = apply_linear(combined_features, weights_F_E_orient)
++    combined_features = concat(conv_outputs, axis=-1)
++    heatmap_E = relu(conv2d(combined_features, W_E_heatmap))
++    orientation_pred = matmul(flatten(combined_features), W_E_orient)
+ 
+     return heatmap_E, orientation_pred
+ 
+ # Standard operation definitions
+-def encode_image_to_grid(image, p0):
+-    # Registration encoder F_reg: CNN mapping image to latent grid
+-    return conv2d(image, weights_F_reg)
++def conv2d(tensor, weights):
++    # 2D convolution with zero-padding to preserve spatial dimensions
++    return torch.nn.functional.conv2d(tensor, weights, padding='same')
+ 
+-def apply_cnn(tensor, weights):
+-    # Standard convolutional block
+-    return relu(conv2d(tensor, weights))
++def relu(tensor):
++    return torch.nn.functional.relu(tensor)
+ 
+-def rotate_tensor(tensor, angle_degrees):
+-    # Standard 2D tensor rotation
+-    return rotate(tensor, angle_degrees)
++def rotate_2d(tensor, angle_degrees):
++    # Bilinear interpolation rotation of 2D tensor
++    angle_rad = math.radians(angle_degrees)
++    cos_a, sin_a = math.cos(angle_rad), math.sin(angle_rad)
++    return bilinear_sample(tensor, rotation_grid(cos_a, sin_a))
+ 
+-def cross_correlate(kernel, query):
++def correlate_2d(kernel, query):
+     # Sliding window cross-correlation
+-    return correlate(kernel, query)
++    return torch.nn.functional.conv2d(query, kernel.flip(0, 1), padding='same')
+ 
+-def apply_linear(tensor, weights):
+-    # Standard fully connected layer
+-    return matmul(tensor, weights)
++def concat(tensors, axis):
++    return torch.cat(tensors, dim=axis)
++
++def flatten(tensor):
++    return tensor.view(tensor.size(0), -1)
++
++def matmul(tensor, weights):
++    return tensor @ weights
++
++def rotation_grid(cos_a, sin_a):
++    # Generate 2x3 affine transformation matrix for rotation
++    return torch.tensor([[cos_a, -sin_a, 0],
++                         [sin_a, cos_a, 0]])
++
++def bilinear_sample(tensor, grid):
++    # Standard bilinear interpolation sampling using grid
++    return torch.nn.functional.grid_sample(tensor, grid)
+ ```
+ 
+@@ -95,11 +110,11 @@
+ 
+ ### SplatLoc Localization Pipeline
+-A feature-matching alternative that extracts 2D keypoints with descriptors via a pre-trained SuperPoint CNN, retrieves reference images from a reconstruction database, computes 3D descriptors from Gaussian primitives, matches them via cosine similarity, and estimates a 6-DoF pose using RANSAC+PnP [S2]. Choose this variant when explicit 2D-3D geometric correspondence is preferred over latent-code cross-correlation, particularly in AR reconstruction pipelines.
++A feature-matching alternative that extracts 2D keypoints with descriptors via a pre-trained SuperPoint CNN, retrieves reference images from a reconstruction database, computes 3D descriptors from Gaussian primitives, matches them via cosine similarity, and estimates a 6-DoF pose using RANSAC+PnP [S2].
+ 
+ ## Operating characteristics
+ *   **Speed:** The localization framework operates at 56.8 Hz [S1]. This is significantly faster than rendering-based optimization methods (e.g., camera tracking at 5 Hz) because it eliminates the rendering step [S1].
+ *   **Accuracy:** In curved scenarios of the NRNS dataset, the navigation framework utilizing this localization achieves a 65.7% success rate, an improvement of 18.6% over the state-of-the-art (55.4%) [S1].
+-*   **Strengths:** Direct utilization of latent codes allows for fast, real-time localization without rendering. It is robust under odometry and actuation noises [S1].
+-*   **Limitations:** It relies on the quality of the latent codes embedded in the RNR-Map. If the RNR-Map is poorly constructed or lacks visual information, localization accuracy degrades. It is less precise than rendering-based camera tracking for fine-level localization [S1].
++*   **Strengths:** Direct utilization of latent codes allows for fast, real-time localization without rendering [S1]. It is robust under odometry and actuation noises [S1].
++*   **Limitations:** It relies on the quality of the latent codes embedded in the RNR-Map [S1]. It is less precise than rendering-based camera tracking for fine-level localization [S1].
+ 
+ ## Background

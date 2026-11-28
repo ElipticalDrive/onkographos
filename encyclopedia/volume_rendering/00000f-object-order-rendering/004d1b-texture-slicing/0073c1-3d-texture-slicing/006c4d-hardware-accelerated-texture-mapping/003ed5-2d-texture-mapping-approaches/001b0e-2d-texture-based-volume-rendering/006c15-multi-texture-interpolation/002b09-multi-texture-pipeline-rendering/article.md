@@ -1,0 +1,78 @@
+# Multi-Texture Pipeline Rendering
+
+Also called: 2D Multi-Texture, 2D Multi-texturing Volume Rendering, 2D-Multi-Texture Based Methods, Multi-Texture Volume Rendering
+
+## Overview
+Multi-Texture Pipeline Rendering is an object-order volume rendering technique that enhances the accuracy and image quality of 2D-texture based rendering by utilizing multiple 2D texture units in a strict sequential pipeline [S1, unofficial]. It solves the limitation of fixed slice counts and the lack of trilinear interpolation on consumer hardware by computing intermediate slices on the fly using bilinear interpolation [S2, unofficial]. Unlike single-texture approaches, it allows separate updates for different components (e.g., color, lighting, fog) at different resolutions, while preserving the memory efficiency of 2D textures over 3D textures [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D volume dataset, camera/viewing parameters, and a set of 2D texture objects containing volume slices [G].
+*   **Output:** A 2D image (framebuffer) with accumulated volume color and opacity [G].
+
+**Data Structures:**
+*   **Texture Units:** A sequence of texture units indexed $0$ to $n$ arranged in a strict pipeline [S1, unofficial]. Each unit holds a 2D texture map representing a slice or a resampled slice of the volume [S2, unofficial].
+*   **Fragment State:** Holds the incoming color $C_{in}$ and texture coordinates [G].
+
+**Method Steps:**
+1.  **Slice Selection/Resampling:** Determine the required 2D slices for the current view [S3]. If the view direction or camera position changes, dynamically resample the volume data into 2D textures [S3].
+2.  **Pipeline Initialization:** Load the first 2D texture into texture unit $T^{(0)}$ [S1, unofficial]. Initialize the fragment color $C_{in}$ to the polygon's primary color or white [G].
+3.  **Sequential Texture Application:** For each texture unit $i$ from $0$ to $n$:
+    *   Sample the texture $T^{(i)}$ at the current fragment's texture coordinates using bilinear interpolation to obtain $T^{(i)}_{in}$ [S2, unofficial].
+    *   Update the fragment color using the pipeline formula: $C_{out} = T^{(i)}_{in} \times C_{in}$ [S1, unofficial]. In a strict pipeline, the output of unit $i$ becomes the input $C_{in}$ for unit $i+1$ [S1, unofficial].
+4.  **Compositing:** The final $C_{out}$ after the last texture unit represents the accumulated color [G]. The exact compositing strategy (e.g., alpha blending or maximum intensity projection) is handled by the fixed-function pipeline state or fragment shaders, while the multi-texture mechanism itself performs component-wise modulation [S1, unofficial][S2, unofficial].
+
+**Formulas:**
+*   **Single Texture Application:**
+    $$ C_{out} = C_{in} \times T_{in} $$
+    Where $C_{in}$ is the incoming fragment color, $C_{out}$ is the output color, and $T_{in}$ is the interpolated texture sample color [S1, unofficial]. Calculated component-wise [S1, unofficial].
+*   **Multi-Texture Pipeline Application:**
+    $$ C_{out} = T^{(n)}_{in} \times (T^{(n-1)}_{in} \times (\dots \times (T^{(0)}_{in} \times C_{in}))) $$
+    Where $T^{(i)}_{in}$ is the texture sample from unit $i$ [S1, unofficial].
+
+**Parameters:**
+*   **Number of Texture Units ($n$):** Determined by hardware capabilities and the desired number of intermediate slices [S1, unofficial][G].
+*   **Interpolation:** Bilinear interpolation is used to substitute trilinear interpolation [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Hardware Limitations:** The strict pipeline provided by early OpenGL specifications is limiting for complex effects like per-pixel illumination, requiring programmable pixel shaders for more flexibility [S1, unofficial].
+*   **Non-uniform Sampling:** If slicing steps are not managed correctly, striping artifacts can occur due to nonuniform sampling steps [S3].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_pipeline(slices, coords, n):
+    # Initialize fragment color with polygon primary color or white [G]
+    c_in = [1.0, 1.0, 1.0]
+    # Iterate through texture units in strict pipeline order [S1, unofficial]
+    for i in range(n + 1):
+        # Sample texture at current coordinates using bilinear interpolation [S2, unofficial]
+        t_in = bilinear_interpolate(slices[i], coords)
+        # Update fragment color: component-wise multiplication [S1, unofficial]
+        c_out = [t_in[j] * c_in[j] for j in range(3)]
+        # Output of unit i becomes input for unit i+1 [S1, unofficial]
+        c_in = c_out
+    return c_out
+```
+
+## Subtopics
+
+### Multitexturing DVR
+A hardware-accelerated DVR algorithm based on register combiners and multitexturing [S3]. It sets itself apart from siblings by using a viewing-direction-based dynamic texture slice resampling scheme that maintains a constant step size to avoid striping artifacts [S3]. Choose it when interactive performance on commodity hardware is required and viewing direction changes frequently [S3]. See [Multi-Texture Interpolation](2200-multi-texture-interpolation.md) [G].
+
+## Operating characteristics
+*   **Time Complexity:** Real-time performance is achievable on consumer graphics hardware [S2, unofficial]. Dynamic resampling adds overhead but is optimized for interactive frame rates [S3].
+*   **Memory Complexity:** Lower memory requirements compared to 3D texture approaches because it removes the necessity to duplicate volume data in memory for 3D texture formats [S1, unofficial].
+*   **Strengths:** Enhances accuracy and image quality of 2D-texture based rendering; allows separate updates for different components (color, light map, fog map) at different resolutions; preserves efficient memory management [S1, unofficial].
+*   **Limitations:** Limited by the number of available texture units; strict pipeline architecture may be too limiting for complex per-pixel effects without programmable shaders [S1, unofficial].
+*   **When to use:** Interactive volume rendering on consumer graphics hardware where 3D textures are not available or supported [S1, unofficial][S2, unofficial].
+*   **When not to use:** When complex per-pixel illumination or normal mapping is required without programmable shaders, as the fixed-function pipeline is limiting [S1, unofficial].
+
+## Background
+The approach emerged as a solution to the limited availability of 3D-texture support on consumer graphics boards in the early 2000s [S1, unofficial]. It leverages the flexible rasterization and texturing units available on consumer hardware to supplement the original 2D-texture based approach [S1, unofficial]. Research by Zhang and colleagues developed a hardware-accelerated DVR algorithm using register combiners and multitexturing, introducing dynamic resampling based on viewing direction [S3]. It became one of the main tools for interactive display and visual analysis of volumetric scalar fields on commodity hardware [S2, unofficial].
+
+## Sources
+[S1] Volume rendering techniques for general purpose graphics hardware, https://opus4.kobv.de/opus4-fau/files/9/Dissertation.pdf, fetched 2026-10-26 (unofficial)
+[S2] Volume Visualization and Compositing on Large-Scale Displays Using Handheld Touchscreen Interaction, https://doi.org/10.25781/kaust-d5m7l, fetched 2026-10-26 (unofficial)
+[S3] Volume Visualization: A Technical Overview with a Focus on ..., https://pmc.ncbi.nlm.nih.gov/articles/PMC3138940/, fetched 2026-10-27

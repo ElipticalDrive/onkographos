@@ -1,0 +1,94 @@
+--- v010.md
++++ v011.md
+@@ -4,57 +4,59 @@
+ 
+ ## Overview
+-Score-based Densification is a constructive training strategy for 3D Gaussian Splatting that controls model size by adding new primitives only where they improve reconstruction quality, adhering to a strict user-defined budget without requiring pruning or culling [S1]. It differs from standard 3D Gaussian Splatting by replacing fixed-step densification with a guided, score-driven schedule that ensures predictable storage demands and training times [S1].
++Score-based Densification is a constructive training strategy for 3D Gaussian Splatting that controls model size by adding new primitives only to those Gaussians that maximize a specific quality score, ensuring the final model adheres to a user-defined budget without requiring pruning [S1]. Unlike standard 3D Gaussian Splatting which relies on heuristic thresholds and subsequent culling, this method uses a purely constructive schedule that steers densification toward Gaussians contributing most to reconstruction quality, avoiding optimization instability caused by aggressive removal [S1].
+ 
+ ## How it works
+-**Inputs:** A set of training views, initial Gaussian primitives, a target model size budget $B$, and a growth curve function $G(t)$.
+-**Outputs:** A set of Gaussian primitives with size $|G| \le B$.
++**Inputs:** A set of 3D Gaussians $\mathcal{G}$, a set of training views, a target model size budget $B$, and a growth curve function $N(t)$.
++**Outputs:** A refined set of Gaussians $\mathcal{G}'$ with size $|\mathcal{G}'| \approx B$.
+ 
+ **Data Structures:**
+-*   **Gaussian Primitive:** Stores position $\mathbf{p}$, covariance $\mathbf{\Sigma}$ (or rotation $\mathbf{R}$ and scale $\mathbf{s}$), opacity $\alpha$, and spherical harmonic coefficients for color.
+-*   **Score Buffer:** A scalar value $S_g$ for each Gaussian $g$, initialized to zero.
++*   **Gaussian:** Inherits standard 3DGS fields: mean $\mu_k$, covariance $\Sigma_k$, opacity $\alpha_k$, spherical harmonics $\mathbf{c}_k$ [S8, unofficial].
++*   **Score Buffer:** A scalar value $S_g$ stored per Gaussian, initialized to zero.
++*   **Saliency Map:** A 2D tensor per view representing pixel-wise importance.
+ 
+ **Steps:**
+-1.  **Sample Views:** Select a batch of training images for the current iteration.
+-2.  **Compute Saliency:** Render the current Gaussians and compute per-pixel saliency maps. Saliency identifies regions where the rendered image differs significantly from the ground truth or where gradients are high [S1].
+-3.  **Compute Per-Gaussian Score ($S_g$):** For each Gaussian $g$, aggregate metrics across all sampled views where it contributes to the image. The score $S_g$ is computed using a scoring function $F$:
+-    $$ S_g = F(\nabla L, \text{Saliency}, \text{Properties}) $$
+-    Where:
+-    *   $\nabla L$ is the gradient of the loss with respect to the Gaussian's parameters.
+-    *   $\text{Saliency}$ is the accumulated saliency value projected onto the Gaussian.
+-    *   $\text{Properties}$ are intrinsic Gaussian attributes (e.g., scale, opacity) [S1].
+-    *   *Note: The exact mathematical form of $F$ is not specified in the sources, but it combines these three components [S1].*
+-4.  **Determine Budget:** Calculate the allowed number of Gaussians for the current training step $t$ using the growth curve $G(t)$, which mimics the original 3D Gaussian Splatting behavior but is fitted to reach the exact budget $B$ at the end of training [S1].
+-5.  **Select Top-Scoring Gaussians:** Identify the Gaussians with the highest $S_g$ values. The number of Gaussians to densify is determined by the difference between the current count and the budget $G(t)$ [S1].
+-6.  **Densify:** For each selected Gaussian, spawn new Gaussians in its vicinity. The sources do not specify the exact perturbation method (e.g., random noise, cloning with jitter) [G].
+-7.  **Update:** Continue training with the new set of Gaussians. Repeat until the budget is reached or training completes [S1].
++1.  **Sample Views:** Select a batch of training views for the current iteration.
++2.  **Compute Saliency:** Render the current Gaussians and compute per-pixel saliency. Saliency identifies regions where the reconstruction error is high or where detail is needed [S1].
++3.  **Compute Per-Gaussian Score ($S_g$):** For each Gaussian $g_k$, aggregate metrics into a scoring function $F$. The score combines:
++    *   Gradient magnitude: Accumulated 2D positional gradients $\tau_k$ [S4, S8, unofficial].
++    *   Saliency: The sum of saliency values projected onto the Gaussian's footprint.
++    *   Primitive properties: Current scale and opacity [S1].
++    $$ S_g(g_k) = F(\tau_k, \text{saliency}_k, \text{properties}_k) $$
++    [G] The exact weighting of $F$ is implementation-dependent but must prioritize gradients in high-saliency regions.
++4.  **Select Top Gaussians:** Rank all Gaussians by $S_g$ in descending order. Select the top $N_{split}$ Gaussians such that the total number of Gaussians after splitting matches the target count $N(t)$ defined by the growth curve [S1].
++5.  **Densify:** For each selected Gaussian $g_k$:
++    *   **Clone:** Create a copy of $g_k$ with identical parameters $\mu, \Sigma, \alpha, \mathbf{c}$ [S8, unofficial].
++    *   **Split:** Replace $g_k$ with children sampled from $\mathcal{N}(\mu_k, \Sigma_k)$ [S8, unofficial].
++    *   [G] The number of children per split is determined by the remaining budget and the current count. Typically, one clone and one split (or similar) are performed to double the local density.
++6.  **Update Growth Curve:** Increment the iteration counter. The target size $N(t)$ follows a curve mimicking standard 3DGS behavior but fitted to reach exactly $B$ at the end of training [S1].
+ 
+ **Parameters:**
+-*   **Budget ($B$):** The target final number of Gaussians. Typical values depend on the scene resolution and desired quality, but the method allows any user-defined value [S1].
+-*   **Growth Curve:** A function $G(t)$ that dictates the number of Gaussians at iteration $t$. It is fitted to match the original 3D Gaussian Splatting densification schedule but capped at $B$ [S1].
++*   **Budget $B$:** The final number of Gaussians. Typical values depend on scene complexity, e.g., 100k–500k for standard datasets [S1].
++*   **Growth Curve:** A function $N(t)$ mapping iteration $t$ to target count. It should be smooth to avoid optimization spikes [S1].
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Precision:** The scoring function must be numerically stable to avoid oscillations in densification decisions [S1].
+-*   **Degenerate Input:** If saliency is zero everywhere (e.g., uniform background), densification may stall. The method assumes non-trivial training data [S1].
++**Edge Cases:**
++*   **Budget Exhaustion:** If the current count exceeds $B$ before the end of training, no further densification occurs.
++*   **Degenerate Gaussians:** Gaussians with near-zero opacity or extremely small scales should be excluded from scoring to prevent noise amplification [G].
+ 
+ ## Subtopics
+ 
+ ### [Pixel-GS](9189-pixel-gs.md)
+-Pixel-GS is a variant that scales the densification gradient by the number of pixels a Gaussian influences, prioritizing primitives that cause errors across many pixels. It accounts for projected area and depth, yielding higher quality than standard score-based methods at the cost of a larger primitive count.
++Pixel-GS is a variant that scales the densification gradient by the number of pixels a Gaussian influences, prioritizing primitives that cause errors across many pixels. Unlike standard score-based methods that use average positional gradients, Pixel-GS accounts for projected area and depth, yielding higher rendering quality at the cost of a larger total primitive count. It is chosen when visual fidelity is prioritized over strict budget constraints.
+ 
+ ### Perceptual-GS
+-Perceptual-GS replaces the gradient-based score with a scene-adaptive perceptual signal to improve detail in visually salient areas [S2, unofficial]. It computes a local perceptual error map using a lightweight vision-transformer head and densifies only where the Structural Similarity Index Measure (SSIM) falls below a dynamic threshold [S2, unofficial].
++Perceptual-GS replaces the gradient-based score with a scene-adaptive perceptual signal to improve detail in visually salient areas [S2, unofficial]. It computes a local perceptual error map using a lightweight vision-transformer head and densifies only where the Structural Similarity Index Measure (SSIM) falls below a dynamic threshold [S2, unofficial]. It is chosen when perceptual quality metrics are more critical than geometric gradient accuracy.
+ 
+ ### Late Densification
+-Late Densification is a timing strategy that enables densification in a narrow window between iterations 20,000 and 20,500, occurring every 100 iterations, to help the model recover loss from the pruning of false-positive Gaussians [S3].
++Late Densification is a temporal strategy that re-enables densification in later training stages (e.g., iterations 20K to 20.5K) to recover loss from earlier pruning or culling of false-positive Gaussians [S3]. It is applied as a supplement to any densification strategy to refine details after the main structure has converged.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Training time is reduced compared to standard 3D Gaussian Splatting due to fewer redundant primitives and optimized gradient computation [S1].
+-*   **Memory Complexity:** Memory usage is strictly bounded by the user-defined budget $B$, preventing unpredictable storage demands [S1].
+-*   **Performance:** The method achieves high-quality novel-view synthesis with significantly lower storage requirements than unconstrained 3D Gaussian Splatting [S1].
+-*   **Strengths:** Predictable model size, no need for pruning, controlled optimization trajectory [S1].
+-*   **Limitations:** Requires careful tuning of the growth curve and scoring function; may not capture fine details as effectively as unconstrained methods if the budget is too low [S1].
++*   **Time Complexity:** $O(N \cdot V)$ per iteration, where $N$ is the number of Gaussians and $V$ is the number of sampled views. Scoring requires an additional pass over the Gaussians to aggregate saliency and gradients [S1].
++*   **Memory Complexity:** $O(N)$ for storing the score buffer and saliency maps. No significant overhead compared to standard 3DGS [S1].
++*   **Performance:** Eliminates the need for pruning/culling passes, reducing training time variability and avoiding optimization peaks [S1]. Ensures predictable memory usage bounded by $B$ [S1].
++*   **Strengths:** Controlled model size, no post-training culling required, stable optimization [S1].
++*   **Limitations:** Requires careful tuning of the growth curve and scoring weights to avoid under-densification in complex regions [S1].
+ 
+ ## Background
+-Score-based Densification was introduced to address the challenges of training 3D Gaussian Splatting models on a budget, specifically the unpredictable size and training duration [S1]. It builds on the original 3D Gaussian Splatting densification pipeline but introduces a guided, constructive approach to primitive addition [S1]. The method acknowledges concurrent work on revising densification strategies [S1].
++Score-based Densification was introduced to address the unpredictable storage demands and fluctuating training times of standard 3D Gaussian Splatting [S1]. It was proposed in "Taming 3DGS: High-Quality Radiance Fields with Limited Resources" (2024) as a guided, purely constructive alternative to heuristic-based densification [S1]. The method builds on the observation that redundancy in 3DGS can be managed by steering additions toward high-quality-contributing primitives rather than removing low-quality ones [S1].
+ 
+ ## Sources

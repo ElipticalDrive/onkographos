@@ -1,0 +1,306 @@
+--- v017.md
++++ v018.md
+@@ -4,129 +4,116 @@
+ 
+ ## Overview
+-Hierarchical traversal accelerates volume rendering by navigating a multi-resolution spatial data structure (such as an Octree or Sparse Voxel Octree) instead of a uniform grid [S1, unofficial]. It solves the problem of excessive memory bandwidth and computation spent traversing empty space by allowing the ray to take larger steps at coarser levels of the hierarchy [S1, unofficial]. Unlike non-hierarchical grid walks that step voxel-by-voxel, hierarchical traversal reduces the total number of intersection tests and memory accesses by skipping large empty regions [S1, unofficial]. It builds on [Stack-based traversal](23146-stack-based-traversal.md) by using a stack to manage the tree descent, but differs from [Sparse Voxel Octree Ray Traversal](2451-sparse-voxel-octree-ray-traversal.md) in that it specifically refers to the general algorithmic approach of hierarchical stepping, often implemented via SVOs [S1, unofficial].
++Hierarchical traversal accelerates volume rendering by navigating a multi-resolution spatial hierarchy (such as an Octree or Sparse Voxel Octree) where higher-level cells cover larger areas (e.g., $2^k \times 2^k \times 2^k$) of the level below [S1, unofficial]. This allows the renderer to take larger steps through empty space, significantly reducing the total number of traversal steps compared to non-hierarchical grid walks [S1, unofficial]. It sets itself apart from flat grid traversal by adapting step size to local data density, and from [BVH Traversal](18487-bounding-volume-hierarchy-bvh-traversal.md) by maintaining a strict resolution hierarchy coupled to the data structure rather than arbitrary bounding volumes [S6, unofficial].
+ 
+ ## How it works
+-**Inputs:** Ray origin $O$, ray direction $D$, and a hierarchical data structure (e.g., SVO or Octree) where each node has a bounding volume and a flag indicating if it contains active data.
+-**Outputs:** A sequence of leaf nodes (or active voxels) intersected by the ray, ready for sampling.
++Hierarchical traversal builds on the stack-based principles of [Stack-based traversal](23146-stack-based-traversal.md), applying them to nodes with variable spatial extents.
+ 
+-**Data Structures:**
+-The structure is typically a Sparse Voxel Octree (SVO) [S1, unofficial].
+-*   **Node Layout:** Nodes are stored in a flat array (node pool). A node contains:
+-    *   `is_leaf`: Boolean flag.
+-    *   `is_empty`: Boolean flag (if true, no children exist and no data is present).
+-    *   `children_offset`: Index of the first child in the node pool (if not a leaf and not empty).
+-    *   `data`: Pointer or index to volumetric data (if leaf) [S3, unofficial].
+-*   **Bounding Volumes:** Each node implicitly or explicitly defines an Axis-Aligned Bounding Box (AABB). For an SVO, the AABB of a node at level $L$ covers a spatial extent of $2^L \times 2^L \times 2^L$ voxels relative to the root [S1, unofficial].
+-*   **Stack:** Stores traversal states. Each state contains the node index and the ray's entry/exit distances ($t_{min}, t_{max}$) relative to the current node's bounding box [S1, 23146-stack-based-traversal.md, unofficial].
++### Inputs and Outputs
++*   **Input**: A ray defined by origin $O$ and direction $D$; a hierarchical data structure (Octree/SVO) where each node has a bounding box and a child pointer (or index).
++*   **Output**: A sequence of leaf nodes (or active voxels) intersected by the ray, processed for shading/compositing.
+ 
+-**Algorithm Steps:**
+-1.  **Initialization:**
+-    *   Compute the intersection of the ray with the root node's bounding box.
++### Data Structures
++The hierarchy is typically stored as a linear array of nodes. A common layout for a Sparse Voxel Octree (SVO) node is [S3, unofficial]:
++
++```python
++struct SVO_Node:
++    # Internal node
++    children_start: u32  # Index of first child in the node pool
++    children_count: u32  # Number of children (up to 8)
++    # Leaf node
++    data_offset: u32     # Offset into the leaf data buffer
++    data_size: u32       # Size of leaf data
++    # Flags
++    is_leaf: bool
++    is_empty: bool
++    is_full: bool
++```
++*Note: Some implementations pack these into 16-byte aligned structures or use bit-masking for child indices to distinguish leaves [S3, unofficial].*
++
++Cell naming conventions often refer to the area covered at Level 0: Level 0 cells are $1\times1$, Level 1 are $2\times2$, Level 2 are $4\times4$ [S1, unofficial].
++
++### Algorithm Steps
++1.  **Initialization**:
++    *   Compute the ray's intersection with the root node's bounding box.
+     *   If no intersection, terminate.
+-    *   Push the root node index and the computed $t_{min}, t_{max}$ onto the stack.
++    *   Push the root node index and intersection interval $[t_{min}, t_{max}]$ onto the traversal stack.
+ 
+-2.  **Traversal Loop:**
++2.  **Traversal Loop**:
+     *   While the stack is not empty:
+-        *   Pop the top state $(node\_idx, t_{min}, t_{max})$.
+-        *   Retrieve the node from the node pool.
+-        *   **Empty Check:** If the node is marked empty, continue to the next iteration (skip subtree) [S1, unofficial].
+-        *   **Leaf Check:** If the node is a leaf:
+-            *   Perform ray marching or sampling within the leaf's voxel data using $t_{min}$ and $t_{max}$ [S1, unofficial].
+-            *   (Optional) If early termination criteria are met (e.g., opacity threshold), stop traversal.
+-            *   Continue to next iteration.
+-        *   **Internal Node:** If the node is internal and not empty:
+-            *   Compute the intersection distances to the 8 children.
+-            *   The children's bounding boxes are sub-regions of the parent. The ray's $t_{min}$ and $t_{max}$ for each child are derived from the parent's $t$ values and the child's position within the parent [S1, unofficial].
+-            *   Filter children: Only consider children that intersect the ray (i.e., $t_{child\_min} < t_{child\_max}$ and $t_{child\_max} > 0$).
+-            *   Sort the valid children by their entry distance $t_{child\_min}$ (ascending).
+-            *   Push the children onto the stack in **reverse order** (farthest first) so that the closest child is popped next [23146-stack-based-traversal.md].
++        1.  Pop the top state $(node\_idx, t_{min}, t_{max})$.
++        2.  Retrieve the node from the data structure.
++        3.  **Leaf Check**: If the node is a leaf:
++            *   Perform volume sampling/shading for the ray segment within this leaf.
++            *   Update $t_{min}$ to the exit point of this leaf.
++            *   If $t_{min} \ge t_{max}$, terminate the ray.
++            *   Continue to next stack item.
++        4.  **Internal Node Check**:
++            *   Identify which children intersect the ray.
++            *   Compute intersection intervals $[t_{child\_min}, t_{child\_max}]$ for each child.
++            *   Filter children where $t_{child\_max} < t_{min}$ or $t_{child\_min} > t_{max}$.
++            *   Sort remaining children by $t_{child\_min}$ (ascending).
++            *   Push children onto the stack in **reverse order** (farthest first) so the closest child is popped next.
+ 
+-3.  **Termination:**
+-    *   The loop ends when the stack is empty or an early termination condition is met.
++3.  **Optimization - Surface Descendant Check**:
++    *   For isosurface extraction, before traversing children, check if the current node has a "surface descendant" (a sign change in the scalar field) [S4, unofficial].
++    *   If the node is a leaf, return whether it has a sign change.
++    *   If the node is a branch, recursively check if any child has a surface descendant.
++    *   If empty or full (no sign change), prune the subtree [S4, unofficial].
+ 
+-**Pseudocode:**
++### Pseudocode
+ ```python
+-def hierarchical_traversal(ray_origin, ray_direction, root_node_idx, node_pool):
++def hierarchical_traverse(ray_origin, ray_dir, root_node, max_depth):
+     # Stack stores tuples: (node_index, t_min, t_max)
+-    stack = [(root_node_idx, ray_origin, ray_direction)]
++    stack = [(root_node.index, ray_origin.t_min, ray_origin.t_max)]
+     
+-    # Helper: Get bounding box of a node
+-    # For SVO, bbox is implicit based on level and position, 
+-    # or stored explicitly. Here we assume a function that returns bbox.
+-    def get_bbox(node_idx):
+-        return node_pool[node_idx].bbox
+-
+-    # Helper: Ray-AABB intersection
+-    # Returns (t_min, t_max) or None if no intersection
+-    def ray_aabb_intersect(origin, direction, bbox):
+-        t_min = -float('inf')
+-        t_max = float('inf')
+-        
+-        for i in range(3):
+-            if direction[i] == 0:
+-                if origin[i] < bbox.min[i] or origin[i] > bbox.max[i]:
+-                    return None
+-            else:
+-                t1 = (bbox.min[i] - origin[i]) / direction[i]
+-                t2 = (bbox.max[i] - origin[i]) / direction[i]
+-                t_min = max(t_min, min(t1, t2))
+-                t_max = min(t_max, max(t1, t2))
+-        
+-        if t_min > t_max or t_max < 0:
+-            return None
+-        return (t_min, t_max)
+-
+     while stack:
+         node_idx, t_min, t_max = stack.pop()
+-        node = node_pool[node_idx]
+-
+-        # 1. Check if node is empty
++        node = get_node(node_idx)
++        
++        # 1. Leaf Processing
++        if node.is_leaf:
++            # Sample volume or extract surface
++            process_leaf(node, ray_origin, ray_dir, t_min, t_max)
++            
++            # Update t_min for next potential intersections in this ray
++            # Assuming leaf covers a segment, we might need to re-intersect
++            # or simply advance t_min past this leaf's exit.
++            # For simplicity, if leaf is fully processed, we continue.
++            # In many SVO implementations, leaves are small enough that
++            # we just march or sample.
++            continue
++            
++        # 2. Internal Node Traversal
+         if node.is_empty:
+             continue
+-
+-        # 2. Check if node is leaf
+-        if node.is_leaf:
+-            # Process leaf: sample volume data
+-            # The actual ray segment is from t_min to t_max
+-            sample_volume(node.data, t_min, t_max)
+-            continue
+-
+-        # 3. Internal node: traverse children
+-        children = node.get_children_indices()
+-        children_to_push = []
+-
+-        for child_idx in children:
+-            child_bbox = get_bbox(child_idx)
+-            # Compute intersection of ray with child bbox
+-            # Note: t_min/t_max passed here are relative to parent, 
+-            # but ray_aabb_intersect expects global ray params.
+-            # We use the original ray origin/direction and the child's global bbox.
+-            # However, to optimize, we can clip t_min/t_max.
+-            # For simplicity, we use global ray params and filter by t_max.
+             
+-            inter = ray_aabb_intersect(ray_origin, ray_direction, child_bbox)
++        children = node.get_children()
++        child_intersections = []
++        
++        for child in children:
++            if child is None:
++                continue
++                
++            # Compute intersection of ray with child's AABB
++            t_child_min, t_child_max = intersect_aabb(ray_origin, ray_dir, child.bbox)
+             
+-            if inter is not None:
+-                c_t_min, c_t_max = inter
+-                # Only push if it intersects within the current ray segment
+-                if c_t_max > t_min:
+-                    children_to_push.append((child_idx, c_t_min, c_t_max))
+-
+-        # Sort children by entry distance (ascending)
+-        children_to_push.sort(key=lambda x: x[1])
+-
++            # Check overlap with current ray segment
++            if t_child_max > t_min and t_child_min < t_max:
++                child_intersections.append((child, t_child_min, t_child_max))
++        
++        # Sort by entry distance (ascending)
++        child_intersections.sort(key=lambda x: x[1])
++        
+         # Push in reverse order (farthest first)
+-        for child in reversed(children_to_push):
+-            stack.append(child)
++        for child, t_min_c, t_max_c in reversed(child_intersections):
++            stack.append((child.index, t_min_c, t_max_c))
++            
++    return
+ ```
+ 
+-**Parameters:**
+-*   **Stack Size:** Depends on tree depth. For an SVO, depth is logarithmic with resolution [S1, unofficial].
+-*   **Termination Threshold:** User-defined opacity or distance limit to stop traversal early [S2, unofficial].
+-
+-**Edge Cases and Pitfalls:**
+-*   **Precision:** Ray-box intersection tests must handle zero direction components carefully to avoid division by zero [23146-stack-based-traversal.md].
+-*   **Boundary Conditions:** Rays passing exactly through node boundaries may cause double-counting or missed nodes if not handled consistently [S3, unofficial].
+-*   **Empty Nodes:** Efficiently skipping empty nodes is the primary performance gain. Failure to mark empty nodes correctly leads to unnecessary traversal [S1, unofficial].
++### Parameters and Edge Cases
++*   **Termination**: A termination object (e.g., max depth, opacity threshold) stops traversal early [S2, unofficial]. The termination object must be convex [S2, unofficial].
++*   **Precision**: Handling zero direction components in ray-box intersection requires clamping $d_i$ to $\epsilon$ or using infinity for $t$ calculations [S1, unofficial].
++*   **Boundary Voxels**: Special care is needed for rays entering/exiting the volume bounds to avoid infinite loops or missed nodes [S3, unofficial].
+ 
+ ## Subtopics
+@@ -139,8 +126,8 @@
+ 
+ ### [Multi-Resolution Rendering with K-D Tree](1942-multi-resolution-rendering-with-k-d-tree.md)
+-Stores complete models in K-D tree nodes for fast preview and adaptive detail, unlike wavelet methods.
++Stores complete models in K-D tree nodes for fast preview and adaptive detail, building on hierarchical traversal.
+ 
+ ### [Coarse Mesh Traversal](3062-coarse-mesh-traversal.md)
+-Decouples global search (BVH) from local sampling, skipping empty regions before fine-level traversal.
++Decouples global search (coarse BVH) from local sampling, skipping empty regions entirely.
+ 
+ ### [Node Omission in Ray-Tree Traversal](3305-node-omission-in-ray-tree-traversal.md)
+@@ -148,53 +135,44 @@
+ 
+ ### [Adaptive Out-of-Core Single-Pass GPU Raycasting](3440-adaptive-out-of-core-single-pass-gpu-raycasting.md)
+-Combines out-of-core octrees with single-pass GPU raycasting to handle multi-gigabyte volumes.
++Combines out-of-core octrees with stackless GPU raycasting for multi-gigabyte volumes.
+ 
+ ### [From-Point Algorithm](18431-from-point-algorithm.md)
+-Uses octree traversal to generate screen-space occluders for visibility culling before isosurface extraction.
++Uses octree traversal to generate screen-space occluders for visibility culling.
+ 
+ ### [Bounding Volume Hierarchy (BVH) Traversal](18487-bounding-volume-hierarchy-bvh-traversal.md)
+-Organizes scene geometry into a BVH for efficient ray-primitive intersection, adapting to spatial distribution.
++Uses a tree of bounding volumes for ray-primitive intersection, adapting to geometry distribution.
+ 
+ ### [Hierarchical Longest Common Traversal Sequence](21519-hierarchical-longest-common-traversal-sequence.md)
+-Matches traversal histories to create common sequences for multiple rays, reusing traversal state.
++Matches traversal histories to create common sequences for multiple rays, reusing state.
+ 
+ ### [Traversal Order and Control Flow](21568-traversal-order-and-control-flow.md)
+-Defines algorithmic strategies for navigating hierarchical structures, focusing on navigation logic rather than spatial partitioning.
++Defines algorithmic strategies for navigating hierarchies, optimizing descent/ascent paths.
+ 
+ ### Surface Descendant Check
+-A method to determine if a node or its descendants contain a surface (sign change) without traversing all leaves [S4, unofficial].
+-*   **Step:** If the cell is a Leaf, return whether it has a sign change. If it is a Branch, recursively check if any of its children have a surface descendant. If it is Empty or Full, return false [S4, unofficial].
++An optimization for isosurface extraction where the traversal checks if a node or its descendants contain a sign change in the scalar field. If a node is a leaf, it returns whether it has a sign change. If it is a branch, it recursively checks its children. If empty or full, it returns false, allowing the traversal to skip the entire subtree [S4, unofficial].
+ 
+ ### Warp-Level Intersection Caching
+-An optimization for GPU traversal to delay intersection tests until warp coherence is achieved [S8, unofficial].
+-*   **Definition:** Delays intersection tests until enough threads in a warp have stored an intersection child node [S8, unofficial].
+-*   **Step:** When an intersection is found, store the current voxel intersection data. At the start of every traversal step, check if enough threads have a stored intersection. If so, proceed by doing an intersection test. Otherwise, continue traversal with the complete warp. If threads find the next intersection test while already having an intersection stored, stop traversing until the next intersection test is performed [S8, unofficial].
++A GPU optimization that delays intersection tests until enough threads in a warp have stored an intersection child node. When an intersection is found, the voxel data is stored. At the start of each step, the warp checks if enough threads have stored intersections; if so, they proceed with the test. Otherwise, the warp continues traversing together. Threads that find a new intersection while already holding one stop until the next test phase [S8, unofficial].
+ 
+ ### Packet Ray Traversal / Ray Coherence Optimization
+-Optimizes GPU traversal by grouping spatially coherent rays [S9, unofficial].
+-*   **Step:** Configure the CUDA grid and block dimensions as 2D. Map threads such that neighboring threads (rays) are spatially coherent (similar direction), causing them to traverse the octree in similar ways, improving cache hit rates [S9, unofficial].
+-*   **Pitfall:** Thread Divergence: In volumetric ray tracing or deep octree subdivisions, neighboring rays may diverge significantly in their traversal paths, causing SIMD stalls [S9, unofficial].
++Configures CUDA grids/blocks as 2D to map spatially coherent threads (rays) to neighboring threads. This causes rays with similar directions to traverse the octree similarly, improving cache hit rates. A pitfall is thread divergence in deep subdivisions, causing SIMD stalls [S9, unofficial].
+ 
+ ### Octree Traversal with Texture Memory Access
+-Uses texture memory for random access patterns in octree traversal [S9, unofficial].
+-*   **Step:** Bind the octree node data to a CUDA texture object. Access node data using the `tex1Dfetch()` function, which utilizes the texture cache for random access patterns typical in tree traversal [S9, unofficial].
+-*   **Comparison:** Texture memory is preferred over constant memory for octree nodes because constant memory is limited in size and optimized for broadcast reads, whereas octree traversal involves random access patterns across different nodes [S9, unofficial].
++Binds octree node data to CUDA texture objects and accesses them via `tex1Dfetch()`. This utilizes the texture cache for the random access patterns typical in tree traversal, preferred over constant memory due to size limits and broadcast optimization mismatches [S9, unofficial].
+ 
+ ### Bookkeeping Method
+-An octree traversal method inspired by Frisken & Perry (2002) to avoid restarting from the root [S10].
+-*   **Definition:** An octree traversal method designed to avoid starting the search from the root node for every wall passage [S10].
+-*   **Comparison:** Unlike the top-down method, it does not require starting the search from the root node for every passage through a wall [S10].
++Inspired by Frisken & Perry (2002), this method avoids starting the search from the root node for every wall passage in simulations. It maintains bookkeeping state to continue traversal from the last known position, reducing overhead compared to top-down searches [S10].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(\log N)$ for traversal in a balanced tree, where $N$ is the number of voxels. In practice, it is significantly faster than $O(N)$ grid walks for sparse data [S1, unofficial].
+-*   **Memory Complexity:** $O(N)$ for storing the tree structure, but with a smaller constant factor for sparse data due to the SVO representation [S1, unofficial].
+-*   **Measured Performance:** In a comparative example, non-hierarchical traversal took 11 steps to intersect an occupied voxel, while hierarchical SVO traversal took 5 steps [S1, unofficial]. Techniques using this traversal are several times faster than non-hierarchical algorithms [S5, unofficial].
+-*   **Strengths:** Efficiently skips empty space; adapts to data density; reduces memory bandwidth usage.
+-*   **Limitations:** Requires building and maintaining the tree structure; potential for thread divergence on GPUs if rays diverge significantly [S9, unofficial].
+-*   **When to Use:** Sparse volumetric data; large datasets where empty space dominates; interactive rendering requirements.
+-*   **When Not to Use:** Dense, fully occupied volumes where the overhead of tree traversal outweighs the benefits; simple uniform grids may be faster due to lower overhead.
++*   **Time Complexity**: $O(\log N)$ for sparse data, where $N$ is the number of voxels, compared to $O(N)$ for dense grids. The number of steps is significantly reduced; e.g., 5 steps for SVO vs. 11 for non-hierarchical in comparable examples [S1, unofficial].
++*   **Memory Complexity**: Depends on the structure. SVOs store only occupied nodes, offering significant space savings for sparse data. However, pointer overhead exists.
++*   **Performance**: Several times faster than non-hierarchical algorithms [S5, unofficial].
++*   **Strengths**: Efficient for sparse volumes; adaptive resolution; reduces overdraw.
++*   **Limitations**: Stack depth can be large for deep trees; pointer chasing can cause cache misses on CPU; thread divergence on GPU [S9, unofficial].
++*   **When to use**: Sparse volumetric data, multi-resolution datasets, isosurface extraction.
++*   **When not to use**: Dense, fully occupied volumes where grid traversal is simpler and faster; hardware with limited stack size (requires stackless variants).
+ 
+ ## Background
+-Hierarchical traversal originated with the development of ray tracing acceleration structures. The concept of using a hierarchy to speed up ray-object intersection was introduced by Kay and Kajiya in 1986 [S5, unofficial]. In volume rendering, it was adapted to traverse octrees and sparse voxel octrees (SVOs) to handle large, sparse datasets efficiently [S1, unofficial]. The SVO specifically stores only the highest level initially and subdivides on demand, enabling sparse storage and traversal [S1, unofficial]. The method is widely used in modern volume rendering engines and scientific visualization tools [S6, unofficial].
++Hierarchical traversal originated with the development of ray tracing acceleration structures. Kay and Kajiya (1986) introduced a hierarchy traversal algorithm for ray-object intersection, demonstrating significant speedups [S5, unofficial]. In volume rendering, the concept was adapted to Octrees and Sparse Voxel Octrees (SVOs) to handle large, sparse datasets efficiently [S1, unofficial]. The technique is widely used in modern volume renderers, particularly those dealing with scientific visualization and medical imaging, where data sparsity is common [S1, S6, unofficial].
+ 
+ ## Sources

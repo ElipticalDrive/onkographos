@@ -1,0 +1,511 @@
+N-body and hydro analysis tools for Python. Contribute to pynbody/pynbody development by creating an account on GitHub.
+
+Opt-in exact AMR rendering, new pynbody.imaging package, and SPH perspective fixes by apontzen · Pull Request #1048 · pynbody/pynbody · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+apontzen
+commented
+Oct 12, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Member
+AMR gas (currently Ramses) can now be rendered as what it is: piecewise-constant cubic cells, rather than SPH particles. This covers slices, projections, perspective images and healpix maps. It is opt-in, through a config option or a per-call argument; the default is still SPH rendering. Rendering moves from pynbody.sph to a new pynbody.imaging package, with the old names kept working. Two bugs in SPH perspective rendering are also fixed.
+Before / after
+Synthetic 6-level AMR grid, rotated, zoom on the disc centre. Slices now show the actual cells; SPH smears them. The projection is noise-free.
+&lt;img width="680" alt="Synthetic AMR grid, rotated: SPH vs exact cells, slice and projection" src="https://gist.github.com/user-attachments/assets/68f08df3-2aae-4546-810e-a3e574d7313b"&gt;
+Slice values along one row of the synthetic grid, compared with the true cell values. The exact renderer reproduces the cell values; SPH (denoised) is biased and smooth.
+&lt;img width="595" alt="Slice values along a row vs true cell values" src="https://gist.github.com/user-attachments/assets/f6e1cba9-daed-4549-a0fb-bd738d0a20e9"&gt;
+Ramses test output output_00080, face-on. Seen face-on, the cells are at an arbitrary rotation to the image.
+&lt;img width="680" alt="Ramses face-on: SPH vs exact cells, slice and projection" src="https://gist.github.com/user-attachments/assets/551eae37-e92e-4e42-a0c6-d71db26ae7e5"&gt;
+Perspective projection of the same output, camera at $z=25$ kpc. The SPH panel already includes the $\sec\theta$ fix below. The remaining differences are the faces of large cells near the camera, which SPH smooths over.
+&lt;img width="1105" alt="Ramses perspective projection: SPH vs exact cells, and their ratio" src="https://gist.github.com/user-attachments/assets/f07e25c6-a3bb-4af2-bad8-c1fce5b165e1"&gt;
+Healpix projection (nside 64) from the densest cell, out to 200 kpc. The disc appears as a ring. Mass is conserved to $2\times10^{-8}$, against $5\times10^{-3}$ for SPH.
+&lt;img width="1105" alt="Ramses healpix projection: SPH vs exact cells, and their ratio" src="https://gist.github.com/user-attachments/assets/3fcbad16-b525-4548-80d9-831aeedc9210"&gt;
+AMR rendering
+Each cell is a cube of side smooth, volume mass/rho, with edges along the original simulation axes. A snapshot declares its AMR families through SimSnap._amr_cell_families, which RamsesSnap sets to gas.
+Opting in. AMR rendering is off by default, and can be switched on at two levels:
+Config file: use-true-amr in [sph], False by default. If it is set to True, make_render_pipeline (and so plot.image etc.) uses an AMR renderer whenever the snapshot consists only of AMR cells, unless a kernel is given or the target is 'volume'.
+Per call: use_true_amr on make_render_pipeline, plot.image, velocity_image and render_spherical_image.
+None (the default) follows the config file.
+False always uses SPH.
+True forces AMR rendering. It raises ValueError if the snapshot's format does not declare AMR cells, if the snapshot mixes families, or if a kernel or target='volume' is given.
+Images (AMRImageRenderer):
+Slices give the exact pixel-averaged cross-section. Aligned cells use separable overlaps; rotated cells use polygon clipping. A slice lying exactly along cell faces consistently takes the +z cells.
+Aligned projections (including after 90° rotations) are exact separable overlaps.
+Rotated projections, by default (approximate_fast=True): cells up to 16 px across interpolate a tabulated corner function $F(X,Y)$, the volume of the cell with $x\le X$, $y\le Y$. This is mass-exact, with pixel errors of typically 1e-5 and at most 1e-3.
+Rotated projections, exact: larger cells, cells cut by the depth limits, or all cells with approximate_fast=False use an exact row-difference method, whose cost scales with the cell's perimeter. The exact corner volumes come from the divergence theorem.
+Perspective projections give $\int q,dl$ along each ray from the camera.
+Under the perspective map each face stays planar, so the depth where a ray crosses it is $K/L(X,Y)$ with $L$ affine. A pixel's integral is a sum of $\int 1/L$ over convex polygons. These use series from polygon moments where they converge, otherwise exact Hermite–Genocchi formulas on triangles.
+The $\sec\theta$ path-length factor is integrated to second order per pixel.
+Shared faces cancel, so cells tile exactly.
+With approximate_fast=True, cells whose perspective image differs from their scaled orthographic image by less than perspective_tolerance (0.1 px) at every corner use the orthographic tables, with exact totals. In images of small cells this is several times faster, with r.m.s. errors around 1e-4 of the peak.
+Perspective slices are orthographic slices of the plane, rescaled.
+Orientation follows rotations applied to the snapshot, via the new Transformable.net_rotation_matrix. Copy-on-access snapshots inherit their base's rotation and AMR families. There is an explicit orientation= / set_orientation override for positions rotated outside pynbody's transformations.
+No kernel or SPH approximation is used: set_kernel accepts only None, and denoising is off unless smooth_floor makes cells overlap.
+Healpix maps (AMRHealpixRenderer):
+Projections: each pixel gets $qV(\text{cell}\cap\text{cone}_p)/\Omega_p$, from exact clipping of each cube to the pixel's cone. The curved sides of healpix pixels are corrected separately. Mass is conserved to round-off: $2\times10^{-8}$ on the Ramses test data, against $5\times10^{-3}$ for SPH.
+Thin shells (shell_distance) sample sub-pixels, with exact tangent-plane fractions for sub-pixels at cell edges.
+Pipeline:
+approximate_fast now means "approximations are allowed for speed", interpreted per renderer: multi-resolution rendering for SPH, tables for AMR, and none for healpix.
+with_approximate() raises for renderers that can't approximate.
+velocity_image renders its vectors the same way as its image.
+Timings
+Wall-clock seconds for make_render_pipeline(...).render() with the default settings (4 threads, and approximate_fast from the default config, i.e. True). Each is the better of two runs on a shared cloud machine, so expect variations of about ±30%.
+The Ramses rows use the test output output_00080 (1.75M cells), centred on its densest cell and rotated 30° about $x$ and 20° about $y$.
+The uniform-grid rows use $96^3$ cells, rotated in the same way, in a 1.6 kpc field.
+The AMR columns use use_true_amr=True; the last also forces approximate_fast=False.
+case
+SPH
+AMR
+AMR, approximate_fast=False
+Ramses, slice, 60 kpc, 500²
+0.58
+0.13
+—
+Ramses, projection, 60 kpc, 500²
+0.30
+0.45
+0.63
+Ramses, projection, 1 Mpc, 1000²
+0.62
+2.50
+3.18
+Ramses, perspective projection, 60 kpc, 500², camera at 120 kpc
+5.90
+4.31
+3.72
+Ramses, healpix projection, nside 64, within 200 kpc
+3.59
+4.55
+—
+uniform 96³ grid, projection, 150² (cells ≈ 1 px)
+0.07
+0.06
+0.71
+uniform 96³ grid, perspective projection, 150² (cells ≈ 1 px)
+0.09
+0.30
+1.53
+uniform 96³ grid, projection, 500² (cells ≈ 3.3 px)
+0.64
+0.19
+3.96
+uniform 96³ grid, perspective projection, 500² (cells ≈ 3.3 px)
+0.68
+4.44
+4.94
+Orthographic images: comparable to SPH, and faster for slices. The exception is views dominated by cells hundreds of pixels across, such as the 1 Mpc view above, where the exact large-cell path costs a few times more.
+Perspective projections: usually slower than SPH, because every face/pixel overlap of a cell is a separate exact integral. The approximate mode helps mainly when cells are about a pixel or smaller; for larger cells it falls back to the exact path.
+Healpix: subagent measurements found AMR as fast as SPH or faster at nside ≥ 64, up to 4× faster at nside 256, and 4–7× slower at nside 4–8.
+pynbody.imaging package
+Moves: renderers, render_image, render_3d_grid and render_spherical_image move from pynbody.sph to pynbody.imaging, along with the Cython cores.
+Deprecated forwarding: the old names still work through module __getattr__ forwarding, with a DeprecationWarning.
+Plotting alias: pynbody.plot.sph becomes pynbody.plot.imaging; the old name is kept as a silent alias.
+What stays in pynbody.sph: kernels and the smooth/rho derived arrays.
+Bug fixes (SPH perspective, z_camera)
+Projections: the kernel was integrated along $z$ rather than along the oblique ray, so off-axis particles were too faint by $\cos\theta$ and not elongated radially. It is now evaluated at the impact parameter perpendicular to the ray.
+Slices: pixels were placed at each particle's depth rather than the depth of the slice plane.
+Docs and tests
+Docs: versionadded/versionchanged 2.9.0 notes on the affected functions, an overhaul note in the pynbody.imaging docstring, and an AMR note in the images tutorial explaining how to opt in. The release notes should repeat the SPH perspective fixes and the new opt-in AMR rendering.
+New tests: tests/amr_image_test.py, tests/amr_healpix_test.py, tests/sph_perspective_test.py and tests/imaging_compatibility_test.py. They cover brute-force ray-sampling references, mass conservation, tiling of subdivided cells, orthographic limits, renderer selection (including SPH remaining the default) and the Ramses test data. The AMR test modules switch use-true-amr on with an autouse fixture.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_01NpDSCZg7LTrfc2UXLDPuTU
+claude
+added 16 commits
+October 12, 2026 06:44
+Render AMR cells as exact cubes rather than SPH kernels
+…
+7e85c80
+```
+For AMR gas (currently Ramses), 2D images now default to a new CellKernel,
+which treats each cell as a cube of side 'smooth' aligned with the original
+simulation axes. Slices give the exact cross-section of each cell and
+projections the exact chord length through it, averaged over each pixel, so
+the image is an exact rendering of the piecewise-constant field and no
+denoising is needed.
+
+- Axis-aligned cells (including after 90-degree rotations) use exact,
+  separable pixel overlaps.
+- Slices through rotated cells use exact polygon clipping against pixels.
+- Projections of rotated cells are exact wherever the chord length is linear
+  over the pixel (identified by the entry/exit faces at the pixel corners);
+  pixels straddling projected edges are supersampled on a ray grid common to
+  all cells, so the cells still tile exactly.
+- Cell orientation follows rotations applied to the snapshot, via the new
+  Transformable.net_rotation_matrix / Transformation.rotation_matrix.
+- Perspective (z_camera) images, volume and healpix targets keep the SPH
+  kernel; pass kernel='CubicSpline' to recover the old behaviour.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01NpDSCZg7LTrfc2UXLDPuTU
+```
+Speed up projections of rotated AMR cells
+…
+a149599
+```
+Projections of rotated cells were 5-10x slower than the SPH renderer, mainly
+because cells at or below pixel scale paid for a convex hull, corner labels
+and up to 16 sub-rays per pixel. Sub-sampling is now replaced entirely:
+
+- The integral of a cell's column over a pixel is a difference of
+  F(X, Y) = vol(cell with x <= X, y <= Y) across the pixel corners. Since all
+  cells share one orientation, F is a rescaled copy of a single function,
+  which is tabulated exactly once per orientation (cached) and bilinearly
+  interpolated for cells up to 16 pixels. Being monotonic, the table conserves
+  each cell's mass exactly and never produces negative pixels; errors are
+  typically 1e-5 and at most 1e-3 per pixel.
+- Cells covering at most 2x2 pixels need only three table lookups.
+- Larger cells are accumulated as second differences along each pixel row,
+  which vanish except near the cell's 12 projected edges, so the cost scales
+  with perimeter rather than area; the image is recovered by cumulative sums.
+  Pixels crossed by a single edge are integrated exactly as two convex pieces
+  with linear column; the remainder use F evaluated exactly.
+- Exact F uses the divergence theorem about a point on both clipping planes,
+  so only the six clipped cube faces contribute, with closed-form areas where
+  a face is cut by one plane.
+- Very large cells handled exactly (e.g. truncated by the depth range) fill
+  blocks of pixels where the column is linear, rather than pixel by pixel.
+
+Rotated projections now cost 0.1-1x the SPH renderer (without its
+approximate mode) for cells larger than half a pixel, and 1.5-1.9x for much
+smaller cells. Tests compare each fast path with the exact one.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01NpDSCZg7LTrfc2UXLDPuTU
+```
+Make AMR rendering a separate renderer rather than a kernel
+…
+bda2166
+```
+Treating AMR cells as a 'kernel' was misleading: the cell renderer shares no
+algorithm with SPH interpolation, and needed special cases throughout the
+kernel machinery. Instead:
+
+- CellKernel is removed; AMRImageRenderer (a subclass of ImageRenderer, for
+  its array handling, units and periodic wrapping) renders cells without any
+  kernel, and rejects attempts to set one.
+- The Cython code moves from _render.pyx (now back to its original state) to
+  a separate extension, _render_amr.pyx.
+- Renderers declare whether they benefit from denoising by default and
+  whether they support approximation, through hooks which multipass wrappers
+  delegate to their sub-renderers, replacing checks on the kernel type.
+- make_render_pipeline and plot.sph.image gain an 'amr' parameter. By default
+  AMR gas (e.g. Ramses) uses AMRImageRenderer, unless a kernel or z_camera is
+  given or the target is not an image, so most users see no interface change.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01NpDSCZg7LTrfc2UXLDPuTU
+```
+Recover AMR row-difference images in place
+…
+099d11f
+```
+The final cumulative sums over the second-difference buffer created three
+image-sized temporaries, so a render containing large rotated cells peaked
+at 28 bytes per pixel (per thread). Doing the sums, clamping and addition
+in place reduces this to 12 bytes per pixel: the float32 result plus the
+float64 buffer, which must stay double precision.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01NpDSCZg7LTrfc2UXLDPuTU
+```
+Project all exactly-rendered rotated AMR cells along pixel rows
+…
+54499d1
+```
+Cells truncated by the depth range of a projection, and the unit cube used
+to build interpolation tables, were projected by a separate per-pixel exact
+path. They now use the row-difference projection like other large cells,
+which removes that path and its supporting code (block fill, convex hulls,
+entry/exit face labels):
+
+- The row projection accepts a z range. The cross-sections of the cube at
+  its limits add up to 12 further lines along which the column's gradient
+  changes; chords are limited to the range.
+- The volume of a cube within a quadrant and a z range now applies the
+  divergence theorem about a point on three of the four clipping planes,
+  so only the clipped cube faces and one cross-section contribute. This is
+  over twice as fast as the general clipped-polytope calculation it
+  replaces, which is removed.
+- Quadrant limits are clamped to the cube's extent before use, avoiding
+  cancellation when called with effectively infinite limits.
+- The row_threshold parameter is removed: rotated cells use a table where
+  one covers their size and they lie within the z range, and are otherwise
+  projected exactly.
+
+Depth-limited projections are 2-20x faster; others are unchanged, within
+timing noise, on both synthetic lattices and the Ramses test data. A new
+test compares single rotated cells, with and without depth limits, against
+a brute-force evaluation of the exact volume at every pixel corner.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01NpDSCZg7LTrfc2UXLDPuTU
+```
+Move rendering from pynbody.sph to a new pynbody.imaging package
+…
+26914ca
+```
+The renderers now handle AMR as well as SPH simulations, so living in
+pynbody.sph was misleading. pynbody.sph keeps the genuinely SPH parts (the
+kernels, kernels.hpp used by the kdtree, and the smooth and rho derived
+arrays); the imaging pipeline moves to pynbody.imaging:
+
+- pynbody.imaging.renderers (from pynbody.sph.renderers), the
+  render_image, render_3d_grid and render_spherical_image functions, and
+  the Cython cores _render, _render_amr and healpix.c.
+- pynbody.plot.imaging (from pynbody.plot.sph); pynbody.plot.image and
+  friends are unchanged.
+
+This commit is the move itself, so that history follows the files; the
+following commit adds compatibility aliases at the old locations.
+
+Also fixes plot.imaging.volume, which called the deprecated to_3d_grid with
+the deprecated qty argument. Docs, examples and tests use the new names.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01NpDSCZg7LTrfc2UXLDPuTU
+```
+Keep the old pynbody.sph and pynbody.plot.sph imaging names working
+…
+dcce4d0
+```
+Old locations keep working and return the same objects:
+
+- pynbody.sph.render_image etc., and anything accessed through the
+  pynbody.sph.renderers module, give a DeprecationWarning (only when used,
+  so that importing pynbody stays silent).
+- pynbody.plot.sph is, for now, a silent alias of pynbody.plot.imaging,
+  since it is very widely used.
+
+A new test checks the compatibility of the old names.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01NpDSCZg7LTrfc2UXLDPuTU
+```
+Guard the AMR renderer against cells outside the image and malformed …
+…
+a016612
+```
+…cells
+
+- Round-off could give a cell lying just beyond the right or top edge of
+  the image a pixel index of nx (or ny), even though the bounding-box tests
+  had passed. Its contribution was then written into the first pixel of
+  the next row, or beyond the end of the image buffer. Such cells are now
+  skipped. This occurred for simple uniform grids at some resolutions.
+- Cells with non-finite position or size, or non-positive size, are skipped
+  rather than producing infinite or NaN pixels or out-of-bounds reads.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01NpDSCZg7LTrfc2UXLDPuTU
+```
+Make the choice of AMR rendering more robust and configurable
+…
+e0aad6e
+```
+- Snapshots declare which families are AMR cells through SimSnap._amr_cell_families
+  (set by RamsesSnap), which copy-on-access snapshots now inherit, together with the
+  orientation of the underlying snapshot's cells; the same information decides
+  whether SPH slices are denoised by default
+- AMR rendering can be switched off by default with "amr-images: False" in the
+  [sph] section of the configuration file
+- Falling back to SPH rendering because z_camera was given now warns; amr=True on a
+  snapshot with several families raises a helpful error; the renderer choice is logged
+- New exact= option to project all rotated cells exactly, and orientation= /
+  set_orientation on AMRImageRenderer for positions rotated outside pynbody's
+  transformations, with the assumptions documented
+- AMR slices are denoised by default when a smooth_floor makes cells overlap
+- velocity_image renders its vectors in the same way as its image
+- A short note on AMR rendering in the images tutorial
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01NpDSCZg7LTrfc2UXLDPuTU
+```
+Tidy up after the move to pynbody.imaging
+…
+a61fdfa
+```
+- Explain the likely cause (a stale build) if the compiled renderers cannot be imported
+- Remove imports left unused in pynbody.sph
+- dir() on the pynbody.plot.sph alias lists the forwarded names
+- Multipass renderers take their kernel from their subrenderers, so that a threaded
+  AMR renderer does not report an SPH kernel
+- render_image docstring no longer describes only SPH
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01NpDSCZg7LTrfc2UXLDPuTU
+```
+Raise when approximation is explicitly requested from the AMR renderer
+…
+e50f165
+```
+Following #1047, with_approximate() raises NotImplementedError for renderers that do not support
+approximation; document that this includes AMRImageRenderer, for which the approximate_fast option
+of make_render_pipeline has no effect, and test it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01NpDSCZg7LTrfc2UXLDPuTU
+```
+Render perspective images of AMR cells exactly
+…
+b3a9289
+```
+AMR cells were previously rendered as SPH particles whenever z_camera was set. Perspective
+images are now rendered by AMRImageRenderer:
+
+- A slice is the orthographic slice of the plane, rescaled to the view from the camera.
+- A projection gives the pixel average of the integral of the quantity along each ray from
+  the camera, computed in a new extension, pynbody.imaging._render_amr_perspective. Under the
+  perspective map each face of a cell stays planar, so the depth at which a ray crosses it is
+  K / L(X, Y) with L affine in the image coordinates; the integral over a pixel is a sum over
+  faces of integrals of 1/L over convex polygons. These are evaluated from polygon moments with
+  a series expansion of 1/L where it converges rapidly, and otherwise exactly (by the
+  Hermite-Genocchi formula on triangles). Pixels entirely within a face use a closed form,
+  cells within a single pixel a series for their whole volume, and the secant converting depth
+  to path length is integrated to second order within each pixel. Since neighbouring cells
+  share faces, they tile without gaps or overlaps.
+
+Tests compare against brute-force ray sampling (agreement at the 1e-5 level of the reference),
+check tiling of subdivided cells, the orthographic limit, depth limits and the pipeline.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01NpDSCZg7LTrfc2UXLDPuTU
+```
+Render AMR cells exactly onto healpix maps
+…
+4d7d516
+```
+Add AMRHealpixRenderer, the healpix counterpart of AMRImageRenderer, with
+its core in the new Cython module pynbody.imaging._render_amr_healpix.
+make_render_pipeline now uses it by default for AMR gas (e.g. Ramses) when
+target='healpix', and accepts amr=True with target='healpix'.
+
+Projections are exact: each pixel receives the volume of each cube lying
+within the pixel's cone, found by clipping the cube's faces to the planes
+through the pixel's corners, plus corrections for the slivers between
+healpix pixel sides and great circles (pixel areas correct to 3e-5). The
+volume of every cell is shared exactly between pixels, so mass is conserved
+to round-off and cells that tile a region give the same map as one cell.
+Cells lying within a single pixel deposit their volume directly.
+
+Thin shells sample cells on equal-area healpix sub-pixels, accepting
+sub-pixels wholly inside or outside a cell and computing the fraction
+inside at the edges using the tangent plane of the shell.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01NpDSCZg7LTrfc2UXLDPuTU
+```
+Control AMR approximation through approximate_fast rather than a sepa…
+…
+a5089e7
+```
+…rate exact flag
+
+approximate_fast now means "approximations may be used for speed", interpreted by each
+renderer: for SPH, multi-resolution rendering as before; for AMR cells, interpolating the
+projections of small rotated cells from tables. With approximate_fast=False (from the call or
+the configuration file), AMR cells are projected exactly. The exact= argument added earlier on
+this branch to make_render_pipeline and plot.image is removed; AMRImageRenderer.set_exact remains
+as the renderer-level setting. velocity_image passes approximate_fast on to its vector render.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01NpDSCZg7LTrfc2UXLDPuTU
+```
+Fix perspective rendering of SPH particles
+…
+7229269
+```
+Projections integrated each kernel along z rather than along the oblique ray from the camera:
+the projected kernel was evaluated at the offset from the ray in the plane of the particle,
+rather than at the impact parameter perpendicular to the ray. Away from the centre of the image,
+particles were therefore too faint by cos(theta) and insufficiently elongated radially. The
+kernel is now evaluated at the impact parameter, with the pixel range widened accordingly.
+
+Slices placed the pixels at the depth of each particle rather than of the plane being sliced;
+they now show the plane z = z0 as seen from the camera (and are empty if it is behind the camera).
+
+The perspective geometry is also now computed in double precision. Adds tests of perspective
+rendering of SPH, and notes on the fixes and on the AMR overhaul in the docs.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01NpDSCZg7LTrfc2UXLDPuTU
+```
+Approximate perspective projections of AMR cells when approximate_fas…
+…
+337ea2c
+```
+…t is set
+
+With approximate_fast (the default), a cell whose perspective image differs from its
+orthographic image, scaled to its distance from the camera and centred on the projection of its
+centre, by less than AMRImageRenderer.perspective_tolerance pixels (0.1 by default) at every
+corner is rendered with the tabulated orthographic projection, with its total scaled to the exact
+perspective value. The displacement of the corners, from the obliquity of the rays and the
+variation of the perspective scale across the cell, is calculated in closed form. Other cells are
+projected exactly. In images of cells up to a pixel or two across this is several times faster,
+with r.m.s. errors of order 1e-4 of the peak and at most a few times 1e-3; it makes little
+difference to images dominated by larger cells.
+
+Also fixes NaNs in exact perspective projections from faces whose planes pass exactly through
+the camera, which were not recognised as edge-on when the plane's offset was itself near zero.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01NpDSCZg7LTrfc2UXLDPuTU
+```
+apontzen
+changed the title
+Render AMR cells as exact cubes rather than SPH kernels
+Exact AMR rendering, new pynbody.imaging package, and SPH perspective fixes
+Oct 12, 2026
+claude
+added 2 commits
+October 12, 2026 21:55
+Sort imports as required by pre-commit
+…
+b143f95
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01NpDSCZg7LTrfc2UXLDPuTU
+```
+Make exact rendering of AMR cells opt-in
+…
+d76e3db
+```
+AMR cells (e.g. Ramses gas) are again rendered as SPH particles by default.
+Exact rendering as cubes is switched on for individual images with the new
+use_true_amr argument of make_render_pipeline, pynbody.plot.image and
+render_spherical_image (replacing the amr argument), or by default with
+use-true-amr: True in the [sph] section of the configuration file
+(replacing amr-images, and False by default). use_true_amr=True now raises
+an error if the snapshot does not consist of AMR cells.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01NpDSCZg7LTrfc2UXLDPuTU
+```
+apontzen
+changed the title
+Exact AMR rendering, new pynbody.imaging package, and SPH perspective fixes
+Opt-in exact AMR rendering, new pynbody.imaging package, and SPH perspective fixes
+Oct 14, 2026
+This branch has not been deployed
+No deployments
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

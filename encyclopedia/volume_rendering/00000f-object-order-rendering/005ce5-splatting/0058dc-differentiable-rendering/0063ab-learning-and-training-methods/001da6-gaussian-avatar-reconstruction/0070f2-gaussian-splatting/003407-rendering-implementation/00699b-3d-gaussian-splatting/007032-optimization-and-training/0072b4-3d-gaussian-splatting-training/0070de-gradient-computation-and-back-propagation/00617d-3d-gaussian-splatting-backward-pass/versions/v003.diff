@@ -1,0 +1,80 @@
+--- v002.md
++++ v003.md
+@@ -7,5 +7,5 @@
+ 
+ ## How it works
+-The backward pass is implemented as a CUDA kernel (often encapsulated in a `DiffRasterizer` class) that takes the forward pass buffers and the upstream loss gradient to compute per-primitive gradients [S1, unofficial].
++The backward pass is implemented as a CUDA kernel (encapsulated in a `DiffRasterizer` class) that takes the forward pass buffers and the upstream loss gradient to compute per-primitive gradients [S1, unofficial].
+ 
+ ### Inputs and Outputs
+@@ -26,7 +26,8 @@
+ *   `d_mean2D`: Gradient w.r.t. 2D mean positions, shape $(N, 3)$ [S1, unofficial].
+ *   `d_conic`: Gradient w.r.t. the 2D conic matrix (inverse covariance), shape $(N, 2, 2)$ [S1, unofficial].
+-*   `d_color`: Gradient w.r.t. SH features, shape $(N, N_{SH}, 3)$ [S1, unofficial].
++*   `d_color`: Gradient w.r.t. SH features, shape $(N, 3)$ [S1, unofficial].
+ *   `d_opacity`: Gradient w.r.t. opacity, shape $(N, 1)$ [S1, unofficial].
+ *   `d_cov3D`: Gradient w.r.t. 3D covariance parameters, shape $(N, 6)$ [S1, unofficial].
++*   `d_sh`: Gradient w.r.t. SH coefficients, shape $(N, N_{SH}, 3)$ [S1, unofficial].
+ *   `d_scale`: Gradient w.r.t. scaling factors, shape $(N, 3)$ [S1, unofficial].
+ *   `d_rotation`: Gradient w.r.t. rotation quaternions, shape $(N, 4)$ [S1, unofficial].
+@@ -44,5 +45,5 @@
+ 
+ ### Formulas and Gradients
+-The core gradient computation relies on the differentiable alpha-compositing equation provided in the parent article [Gradient Computation and Back-Propagation](10202-gradient-computation-and-back-propagation.md). The gradient of the loss $L$ with respect to the parameters $\theta_k$ of the $k$-th Gaussian is computed via the chain rule [G]:
++The core gradient computation relies on the differentiable alpha-compositing equation provided in the parent article [Gradient Computation and Back-Propagation](10202-gradient-computation-and-back-propagation.md) [S1, unofficial]. The gradient of the loss $L$ with respect to the parameters $\theta_k$ of the $k$-th Gaussian is computed via the chain rule [G]:
+ $$
+ \frac{\partial L}{\partial \theta_k} = \frac{\partial L}{\partial \mathbf{C}(\mathbf{x})} \frac{\partial \mathbf{C}(\mathbf{x})}{\partial \alpha_k(\mathbf{x})} \frac{\partial \alpha_k(\mathbf{x})}{\partial \theta_k}
+@@ -54,7 +55,7 @@
+ The term $\frac{\partial \alpha_k(\mathbf{x})}{\partial \theta_k}$ depends on the parameterization [S1, unofficial]:
+ *   **Opacity**: $\alpha_k$ is typically the sigmoid of a learnable scalar. The gradient is $\frac{\partial \alpha_k}{\partial \text{opacity}_{raw}} = \alpha_k (1 - \alpha_k)$ [S1, unofficial].
+-*   **2D Projection**: The 2D covariance $\Sigma_{2D}$ is derived from the 3D covariance $\Sigma_{3D}$ and the view matrix. The conic matrix $C = \Sigma_{2D}^{-1}$ is used for efficient evaluation. Gradients $\frac{\partial \alpha_k}{\partial C}$ are computed based on the Gaussian PDF derivative [S1, unofficial].
+-*   **3D Covariance**: $\Sigma_{3D}$ is parameterized by scale and rotation ($\Sigma_{3D} = R S S^T R^T$). Gradients flow to scale and rotation via the chain rule through $\Sigma_{3D}$ and then to $\Sigma_{2D}$ [S1, unofficial].
+-*   **Color/SH**: $\mathbf{c}_k$ is computed from spherical harmonic (SH) coefficients. Gradients flow directly to SH coefficients based on the basis function evaluation at the viewing direction [S1, unofficial].
++*   **2D Projection**: The 2D covariance $\Sigma_{2D}$ is derived from the 3D covariance $\Sigma_{3D}$ and the view matrix [S1, unofficial]. The conic matrix $C = \Sigma_{2D}^{-1}$ is used for efficient evaluation [S1, unofficial]. Gradients $\frac{\partial \alpha_k}{\partial C}$ are computed based on the Gaussian PDF derivative [S1, unofficial].
++*   **3D Covariance**: $\Sigma_{3D}$ is parameterized by scale and rotation ($\Sigma_{3D} = R S S^T R^T$) [S1, unofficial]. Gradients flow to scale and rotation via the chain rule through $\Sigma_{3D}$ and then to $\Sigma_{2D}$ [S1, unofficial].
++*   **Color/SH**: $\mathbf{c}_k$ is computed from spherical harmonic (SH) coefficients [S1, unofficial]. Gradients flow directly to SH coefficients based on the basis function evaluation at the viewing direction [S1, unofficial].
+ 
+ ### Pseudocode
+@@ -62,18 +63,16 @@
+ 
+ ```python
+-class Tensor:
+-    def __init__(self, shape, device='cuda'):
+-        self.shape = shape
+-        self.device = device
+-        self.data = [0.0] * (shape[0] * shape[1] if len(shape) == 2 else 1)
++import math
+ 
+ def allocate_zeros(shape):
+-    return Tensor(shape)
++    """Allocates a zero-initialized tensor-like structure."""
++    return [0.0] * (shape[0] * shape[1] if len(shape) == 2 else 1)
+ 
+ def copy_tensor(src):
+-    return Tensor(src.shape)
++    """Copies tensor data from forward to backward result."""
++    return src.copy()
+ 
+ def compute_fov_tangents(fov_x, fov_y):
+-    import math
++    """Computes tangent of half-FOV, matching forward pass exactly."""
+     return (math.tan(fov_x / 2), math.tan(fov_y / 2))
+ 
+@@ -99,5 +98,5 @@
+     d_mean2D = allocate_zeros((n_points, 3))
+     d_conic = allocate_zeros((n_points, 2, 2))
+-    d_color = allocate_zeros((n_points, n_sh_features, 3))
++    d_color = allocate_zeros((n_points, 3))
+     d_opacity = allocate_zeros((n_points, 1))
+     d_cov3D = allocate_zeros((n_points, 6))
+@@ -130,8 +129,8 @@
+ *   **Normalization**: Rotation quaternions are normalized during the forward pass. The backward pass must account for this normalization when computing gradients w.r.t. raw quaternion parameters [S1, unofficial].
+ *   **Scaling**: Scaling factors are exponentiated during the forward pass. The gradient w.r.t. raw scale is scaled by the exponential of the raw scale [S1, unofficial].
+-*   **Boundary Conditions**: Gaussians outside the frustum are culled in the forward pass. The backward pass only computes gradients for rendered primitives (`n_rendered`), so gradients for culled primitives remain zero [S1, unofficial].
++*   **Boundary Conditions**: Gaussians outside the frustum are culled in the forward pass [S1, unofficial]. The backward pass only computes gradients for rendered primitives (`n_rendered`), so gradients for culled primitives remain zero [S1, unofficial].
+ 
+ ## Operating characteristics
+-Time and memory complexity, measured performance, scaling, strengths, limitations, and usage conditions are Not given in the sources.
++Time and memory complexity, measured performance, scaling, strengths, limitations, and usage conditions are Not given in the sources. [S1, unofficial]
+ 
+ ## Background

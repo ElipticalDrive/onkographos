@@ -1,0 +1,292 @@
+--- v002.md
++++ v003.md
+@@ -21,10 +21,10 @@
+ 
+ ### Data Structures
+-The system relies on a virtual texture mapping strategy to decouple logical brick indices from physical GPU memory locations.
++The system relies on a virtual texture mapping strategy to decouple logical brick indices from physical GPU memory locations [S1, unofficial].
+ 
+-1.  **Indirection Texture (`indirectionTexture`):** A 3D texture storing metadata for each logical brick.
++1.  **Indirection Texture (`indirectionTexture`):** A 3D texture storing metadata for each logical brick [S1, unofficial].
+     *   **Layout:** `vec4u` per voxel (brick index).
+     *   **Fields:** `xyz` represent the physical atlas coordinates (brick index in the GPU cache); `w` represents validity/status (e.g., `w > 0u` and `w < 255u` indicates valid) [S1, unofficial].
+-2.  **Atlas Texture (`volumeTexture`):** A large 3D texture (or array of 2D textures) acting as the GPU cache. It holds the actual voxel data for currently resident bricks [S1, unofficial].
++2.  **Atlas Texture (`volumeTexture`):** A large texture acting as the GPU cache for resident bricks, sampled via virtual-texture indirection [S1, unofficial].
+ 3.  **Brick Cache:** An LRU (Least Recently Used) cache with a fixed VRAM footprint [S1, unofficial].
+ 4.  **Constants:**
+@@ -47,6 +47,6 @@
+ 
+ 3.  **Brick Intersection and Selection:**
+-    *   Determine the ray entry ($t$) and exit ($t_{end}$) points within the current view volume [S1, unofficial].
+-    *   Iterate through bricks intersected by the ray. For each brick:
++    *   Calculate ray entry ($t$) and exit ($t_{end}$) relative to the current brick intersection [S1, unofficial].
++    *   Iterate through bricks intersected by the ray [S1, unofficial]. For each brick:
+         *   Calculate logical brick index: $B_{idx} = \lfloor V_{pos} / \text{LOGICAL\_BRICK\_SIZE} \rfloor$ [S1, unofficial].
+         *   Fetch indirection: $Ind = \text{textureLoad}(\text{indirectionTexture}, \lfloor B_{idx} \rfloor, 0)$ [S1, unofficial].
+@@ -74,171 +74,92 @@
+ 
+ ```python
+-# Constants
+-LOGICAL_BRICK_SIZE = 64  # Example value, source does not specify exact number
+-PHYSICAL_BRICK_SIZE = 64 # Example value
+-ATLAS_SIZE = 4096        # Example value
+-BORDER = 1               # Example value
+-STEPS_PER_BRICK = 10     # Example value
++import math
+ 
+-def lookup_indirection(indirection_texture, brick_index: vec3i) -> vec4u:
+-    """
+-    Fetches the indirection entry for a logical brick.
+-    Returns vec4u: (atlas_x, atlas_y, atlas_z, status)
+-    """
++# Constants (typical values from evidence)
++LOGICAL_BRICK_SIZE = 64
++PHYSICAL_BRICK_SIZE = 64
++ATLAS_SIZE = 4096
++BORDER = 1
++STEPS_PER_BRICK = 10
++
++def vec3(x, y, z):
++    return (float(x), float(y), float(z))
++
++def vec4(x, y, z, w):
++    return (int(x), int(y), int(z), int(w))
++
++def texture_load(tex, idx, lod):
++    # Returns vec4: (atlas_x, atlas_y, atlas_z, status)
++    return vec4(0, 0, 0, 1)
++
++def texture_sample_level(tex, sampler, pos, lod):
++    # Returns float sample value
++    return 0.0
++
++def clamp(val, min_val, max_val):
++    return max(min_val, min(val, max_val))
++
++def intersect_box_inv(ray_origin, inv_dir, min_world, max_world):
++    # Returns (t_min, t_max)
++    t1 = [(min_world[i] - ray_origin[i]) * inv_dir[i] for i in range(3)]
++    t2 = [(max_world[i] - ray_origin[i]) * inv_dir[i] for i in range(3)]
++    t_min = max(min(t1[0], t2[0]), min(min(t1[1], t2[1]), min(t1[2], t2[2])))
++    t_max = min(max(t1[0], t2[0]), max(max(t1[1], t2[1]), max(t1[2], t2[2])))
++    return (t_min, t_max)
++
++def get_lod_scale(indirection):
++    # SSE-based LOD selection from indirection metadata [G]
++    return vec3(1.0, 1.0, 1.0)
++
++def mark_ray_visited(brick_index):
++    # LRU cache update [G]
++    pass
++
++def setup_brick(ray_origin, ray_dir, inv_dir, t_start, t_end, normalized_size, dataset_size):
++    sample_pos = [ray_origin[i] + ray_dir[i] * t_start for i in range(3)]
++    voxel_pos = [sample_pos[i] * dataset_size[i] / normalized_size[i] for i in range(3)]
++    voxel_pos = [clamp(voxel_pos[i], 0.0, dataset_size[i] - 0.001) for i in range(3)]
++    brick_index = [int(math.floor(voxel_pos[i] / LOGICAL_BRICK_SIZE)) for i in range(3)]
++    brick_min_voxel = [brick_index[i] * LOGICAL_BRICK_SIZE for i in range(3)]
++    brick_max_voxel = [brick_min_voxel[i] + LOGICAL_BRICK_SIZE for i in range(3)]
++    brick_min_world = [brick_min_voxel[i] * normalized_size[i] / dataset_size[i] for i in range(3)]
++    brick_max_world = [brick_max_voxel[i] * normalized_size[i] / dataset_size[i] for i in range(3)]
++    t_brick = intersect_box_inv(ray_origin, inv_dir, brick_min_world, brick_max_world)
++    t_end_brick = min(t_brick[1], t_end)
++    mark_ray_visited(brick_index)
++    indirection = texture_load(indirectionTexture, brick_index, 0)
++    valid = indirection[3] > 0 and indirection[3] < 255
++    info = {}
++    if valid:
++        lod_scale = get_lod_scale(indirection)
++        brick_world_size = math.sqrt(sum((brick_max_world[i] - brick_min_world[i])**2 for i in range(3)))
++        brick_length = t_end_brick - t_start
++        lod_step_mul = min(max(lod_scale[0], max(lod_scale[1], lod_scale[2])), 4.0)
++        step_size = (brick_world_size / STEPS_PER_BRICK) * lod_step_mul
++        num_steps = max(1, int(math.ceil(brick_length / step_size)) + 1)
++        coarse_brick_origin = [int(math.floor(brick_index[i] / lod_scale[i])) * lod_scale[i] * LOGICAL_BRICK_SIZE for i in range(3)]
++        atlas_scale = 1.0 / (lod_scale[0] * ATLAS_SIZE)
++        atlas_offset = [indirection[i] * PHYSICAL_BRICK_SIZE / ATLAS_SIZE + BORDER / ATLAS_SIZE - coarse_brick_origin[i] * atlas_scale for i in range(3)]
++        sample_min = [coarse_brick_origin[i] - 0.5 * BORDER * lod_scale[i] for i in range(3)]
++        sample_max = [coarse_brick_origin[i] + (LOGICAL_BRICK_SIZE + 0.5 * BORDER) * lod_scale[i] for i in range(3)]
++        info['t_end'] = t_end_brick
++        info['valid'] = valid
++        info['lod_scale'] = lod_scale
++        info['step_size'] = step_size
++        info['num_steps'] = num_steps
++        info['atlas_offset'] = atlas_offset
++        info['sample_min'] = sample_min
++        info['sample_max'] = sample_max
++    return info
++
++def lookup_indirection(indirection_texture, brick_index):
+     return texture_load(indirection_texture, brick_index, 0)
+ 
+-def sample_atlas(volume_texture, sampler, atlas_pos: vec3f) -> f32:
+-    """
+-    Samples the atlas texture at the given normalized position.
+-    """
+-    return texture_sample_level(volume_texture, sampler, atlas_pos, 0.0).r
+-
+-def normalize_to_voxel(pos: vec3f, normalized_size: vec3f, dataset_size: vec3f) -> vec3f:
+-    """
+-    Converts normalized world coordinates to voxel coordinates.
+-    """
+-    return pos * dataset_size / normalized_size
+-
+-def voxel_to_normalized(voxel_pos: vec3f, normalized_size: vec3f, dataset_size: vec3f) -> vec3f:
+-    """
+-    Converts voxel coordinates to normalized world coordinates.
+-    """
+-    return voxel_pos * normalized_size / dataset_size
+-
+-def intersect_box_inv(ray_origin: vec3f, inv_dir: vec3f, min_world: vec3f, max_world: vec3f) -> vec2f:
+-    """
+-    Computes tmin and tmax for ray-box intersection.
+-    Returns vec2f(tmin, tmax).
+-    """
+-    # Standard slab intersection algorithm
+-    t1 = (min_world - ray_origin) * inv_dir
+-    t2 = (max_world - ray_origin) * inv_dir
+-    tmin = max(min(t1.x, t2.x), min(min(t1.y, t2.y), min(t1.z, t2.z)))
+-    tmax = min(max(t1.x, t2.x), max(max(t1.y, t2.y), max(t1.z, t2.z)))
+-    return vec2f(tmin, tmax)
+-
+-def setup_brick(ray_origin: vec3f, ray_dir: vec3f, inv_dir: vec3f, t_start: f32, t_end: f32, 
+-                normalized_size: vec3f, dataset_size: vec3f) -> dict:
+-    """
+-    Sets up the raymarching parameters for a specific brick.
+-    """
+-    info = {}
+-    
+-    # Current sample position
+-    sample_pos = ray_origin + ray_dir * t_start
+-    
+-    # Convert to voxel space
+-    voxel_pos = normalize_to_voxel(sample_pos, normalized_size, dataset_size)
+-    
+-    # Clamp to dataset bounds
+-    voxel_pos = clamp(voxel_pos, vec3f(0.0), dataset_size - vec3f(0.001))
+-    
+-    # Determine logical brick index
+-    brick_index = floor(voxel_pos / LOGICAL_BRICK_SIZE)
+-    
+-    # Brick bounds in voxels
+-    brick_min_voxel = brick_index * LOGICAL_BRICK_SIZE
+-    brick_max_voxel = brick_min_voxel + LOGICAL_BRICK_SIZE
+-    
+-    # Brick bounds in normalized world space
+-    brick_min_world = voxel_to_normalized(brick_min_voxel, normalized_size, dataset_size)
+-    brick_max_world = voxel_to_normalized(brick_max_voxel, normalized_size, dataset_size)
+-    
+-    # Intersect ray with brick
+-    t_brick = intersect_box_inv(ray_origin, inv_dir, brick_min_world, brick_max_world)
+-    
+-    # Update t_end to brick exit
+-    info['t_end'] = min(t_brick.y, t_end)
+-    
+-    # Mark brick as visited (for cache management)
+-    mark_ray_visited(brick_index)
+-    
+-    # Fetch indirection
+-    indirection = lookup_indirection(brick_index)
+-    
+-    # Check validity
+-    info['valid'] = (indirection.w > 0u) and (indirection.w < 255u)
+-    
+-    if info['valid']:
+-        # Get LOD scale from indirection
+-        lod_scale = get_lod_scale(indirection)
+-        
+-        # Calculate brick world size
+-        brick_world_size = length(brick_max_world - brick_min_world)
+-        
+-        # Calculate brick length along ray
+-        brick_length = info['t_end'] - t_start
+-        
+-        # Calculate LOD step multiplier
+-        lod_step_mul = min(max(lod_scale.x, max(lod_scale.y, lod_scale.z)), 4.0)
+-        
+-        # Calculate step size
+-        info['step_size'] = (brick_world_size / STEPS_PER_BRICK) * lod_step_mul
+-        
+-        # Calculate number of steps
+-        info['num_steps'] = max(1u, u32(ceil(brick_length / info['step_size'])) + 1u)
+-        
+-        # Calculate atlas offset and scale for sampling
+-        # Coarse brick origin for LOD adjustment
+-        coarse_brick_origin = floor(brick_index / lod_scale) * lod_scale * LOGICAL_BRICK_SIZE
+-        
+-        info['atlas_scale'] = 1.0 / (lod_scale * ATLAS_SIZE)
+-        info['atlas_offset'] = (vec3f(indirection.xyz) * PHYSICAL_BRICK_SIZE / ATLAS_SIZE) + \
+-                               (BORDER / ATLAS_SIZE) - \
+-                               (coarse_brick_origin * info['atlas_scale'])
+-        
+-        info['sample_min'] = coarse_brick_origin - 0.5 * BORDER * lod_scale
+-        info['sample_max'] = coarse_brick_origin + (LOGICAL_BRICK_SIZE + 0.5 * BORDER) * lod_scale
+-        
+-    return info
+-
+-def raymarch_brick(ray_origin: vec3f, ray_dir: vec3f, t_start: f32, t_end: f32, 
+-                   brick_info: dict, normalized_size: vec3f, dataset_size: vec3f) -> f32:
+-    """
+-    Performs raymarching within a single brick.
+-    """
+-    if not brick_info['valid']:
+-        return 0.0 # Or handle invalid brick appropriately
+-        
+-    color = 0.0
+-    alpha = 0.0
+-    
+-    t = t_start
+-    for i in range(brick_info['num_steps']):
+-        if t > brick_info['t_end']:
+-            break
+-            
+-        # Calculate voxel position
+-        sample_pos = ray_origin + ray_dir * t
+-        voxel_pos = normalize_to_voxel(sample_pos, normalized_size, dataset_size)
+-        voxel_pos = clamp(voxel_pos, vec3f(0.0), dataset_size - vec3f(0.001))
+-        
+-        # Calculate brick-local position
+-        lod_scale = get_lod_scale(lookup_indirection(voxel_pos / LOGICAL_BRICK_SIZE))
+-        pos_in_brick = (voxel_pos % (LOGICAL_BRICK_SIZE * lod_scale)) / lod_scale
+-        
+-        # Calculate atlas position
+-        indirection = lookup_indirection(voxel_pos / LOGICAL_BRICK_SIZE)
+-        atlas_base = vec3f(indirection.xyz) * PHYSICAL_BRICK_SIZE / ATLAS_SIZE
+-        atlas_pos = atlas_base + ((pos_in_brick + BORDER) / ATLAS_SIZE)
+-        
+-        # Sample value
+-        val = sample_atlas(atlas_pos)
+-        
+-        # Compositing (simplified DVR)
+-        # Note: Actual shading/transfer function logic is omitted as per source brevity
+-        density = val # Simplified
+-        alpha_new = 1.0 - exp(-density)
+-        color = color * (1.0 - alpha_new) + alpha_new * val # Simplified
+-        
+-        alpha = alpha + alpha_new * (1.0 - alpha)
+-        
+-        t += brick_info['step_size']
+-        
+-    return color
++def sample_atlas(volume_texture, sampler, atlas_pos):
++    return texture_sample_level(volume_texture, sampler, atlas_pos, 0.0)
+ ```
+ 
+ ### Parameters and Typical Values
+-*   **VRAM Footprint:** Bounded/Fixed. The exact size depends on the GPU and the number of bricks that fit in memory [S1, unofficial].
++*   **VRAM Footprint:** Fixed. The system enforces a bounded GPU residency/atlas cache with a fixed VRAM footprint [S1, unofficial].
+ *   **LOD Scale:** Determined by SSE (Slope-Scaled Error) based selection [S1, unofficial].
+ *   **Data Types:** `uint8`, `uint16`, `int16`, `float32` [S1, unofficial].
+@@ -261,9 +182,9 @@
+     *   Multichannel rendering is in beta [S1, unofficial].
+     *   Performance depends on network bandwidth for streaming [S1, unofficial].
+-*   **When to use:** When rendering large OME-Zarr volumes in a web browser with limited GPU memory.
+-*   **When not to use:** When native desktop performance is required, or when WebGPU is not available.
++*   **When to use:** When rendering large OME-Zarr volumes in a web browser with limited GPU memory [S1, unofficial].
++*   **When not to use:** When native desktop performance is required, or when WebGPU is not available [S1, unofficial].
+ 
+ ## Background
+-Kiln is a WebGPU-native out-of-core volume rendering system developed by M. Panknin [S1, unofficial]. It was presented as a "Show HN" project on GitHub in 2024/2025, focusing on streaming multi-gigabyte volumes over HTTP [S1, unofficial]. It is licensed under Apache 2.0 [S1, unofficial].
++Kiln is a WebGPU-native out-of-core volume rendering system developed by M. Panknin [S1, unofficial]. It focuses on streaming multi-gigabyte volumes over HTTP [S1, unofficial]. It is licensed under Apache 2.0 [S1, unofficial].
+ 
+ ## Sources

@@ -1,0 +1,192 @@
+--- v007.md
++++ v008.md
+@@ -1,46 +1,45 @@
+ # Depth Rendering
+ 
+-Also called: Depth Visualization, Z-Buffer Visualization
+ 
+ ## Overview
+-Depth Rendering is a visualization technique that maps the z-coordinate (depth) of the first surface hit by a ray to grayscale intensity, providing a direct representation of distance from the camera [S1, unofficial]. Unlike [Iteration-Based Coloring](1244-iteration-based-coloring.md), which visualizes computational intensity via step counts, Depth Rendering visualizes geometric proximity, where closer features appear brighter or darker depending on the specific mapping function [S1, unofficial].
++Depth Rendering is a visualization technique that maps ray traversal metrics to grayscale intensity, providing a direct representation of distance or computational depth [S1, unofficial]. The source implementation computes intensity from the number of traversal steps, while the accompanying documentation describes an alternative mapping using the hit position's z-coordinate [S1, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- `tree`: The voxel data structure (e.g., Octree) containing spatial bounds `tree->min[2]` and `tree->max[2]` along the depth axis [S1, unofficial].
+-- `rc`: Render context providing pixel dimensions `rc.n_y` (assumed square) and ray generation `rc.getRayForPixel(x, y)` [S1, unofficial].
+-- `texture_array`: Output buffer of size `n_y * n_y * 4` (RGBA), where each pixel is 4 unsigned chars [S1, unofficial].
++- `tree`: Voxel data structure containing spatial bounds `tree->min[2]` and `tree->max[2]` along the depth axis, and side length `tree->gridlength` [S1, unofficial].
++- `rc`: Render context providing pixel dimension `rc.n_y` (assumed square) and ray generation `rc.getRayForPixel(x, y)` returning origin `o` and direction `d` [S1, unofficial].
++- `texture_array`: Output buffer of size `n_y * n_y * 4` (RGBA), where each pixel occupies 4 unsigned chars [S1, unofficial].
+ 
+ **Data Structures:**
+-- `TreeTraverser`: Manages ray traversal through the tree. Methods include `isTerminated()`, `getCurrentNode()`, `hasData()`, `step()`, and `getCurrentPosition()` [S1, unofficial].
+-- `vec3`: 3D vector type with components `[0]` (x), `[1]` (y), `[2]` (z) [S1, unofficial].
++- Ray: Defined by origin `o` (vec3) and direction `d` (vec3, typically normalized) [S1, unofficial].
++- Voxel Grid: Uniform grid spanning `[0, gridlength)` in each axis [S1, unofficial].
+ 
+ **Parameters:**
+-- `factor`: Normalized depth value in range [0, 1] [S1, unofficial].
+-- `size`: `tree->gridlength` used in alternative implementations [S1, unofficial].
++- `gridlength`: Side length of the voxel grid, used for normalization [S1, unofficial].
++- `factor`: Normalized intensity value in range [0, 1] [S1, unofficial].
+ 
+ **Algorithm:**
+ 1. Initialize OpenMP threads equal to the number of CPU processors [S1, unofficial].
+-2. Parallelize the pixel loop over `y` and `x` [S1, unofficial].
++2. Parallelize the outer pixel loop over `y` [S1, unofficial].
+ 3. For each pixel `(x, y)`:
+-   a. Initialize `TreeTraverser` with the tree and the ray for `(x, y)` [S1, unofficial].
+-   b. Traverse the tree:
+-      i. While `!t.isTerminated()`:
+-         - If `t.getCurrentNode()->isLeaf()` and `t.getCurrentNode()->hasData()`, break loop [S1, unofficial].
++   a. Compute `index = y * (n_y * 4) + x * 4`.
++   b. Initialize ray traverser with `tree`, `o`, and `d` [S1, unofficial].
++   c. Traverse the tree:
++      i. While not terminated:
++         - If leaf node has data, break loop [S1, unofficial].
+          - Else, call `t.step()` [S1, unofficial].
+-   c. Get hit position `pos = t.getCurrentPosition()` [S1, unofficial].
+-   d. Compute depth factor:
+-      $$ factor = \frac{|pos[2]|}{|tree->max[2]| - |tree->min[2]|} $$
++   d. Get hit position `pos = t.getCurrentPosition()` [S1, unofficial].
++   e. Compute intensity from step count:
++      $$ factor = \frac{stepcount}{\log_2(gridlength)} $$
+       [S1, unofficial]
+-   e. Compute grayscale color:
+-      $$ r = 255 - (255 \times factor) $$
+-      $$ g = 255 - (255 \times factor) $$
+-      $$ b = 255 - (255 \times factor) $$
++      (Note: The source notes describe an alternative position-based factor $factor = \frac{|pos[2]|}{|tree->max[2]| - |tree->min[2]|}$, but the executable code uses step count [S1, unofficial].)
++   f. Compute grayscale color:
++      $$ val = 255 \times (1 - factor) $$
+       [S1, unofficial]
+-   f. Write to `texture_array` at index `index = y * (rc.n_y * 4) + x * 4`:
+-      - `texture_array[index] = (unsigned char) r`
+-      - `texture_array[index+1] = (unsigned char) g`
+-      - `texture_array[index+2] = (unsigned char) b`
+-      - `texture_array[index+3] = (unsigned char) 1` (Alpha) [S1, unofficial]
++   g. Write to `texture_array`:
++      - `texture_array[index] = val`
++      - `texture_array[index+1] = val`
++      - `texture_array[index+2] = val`
++      - `texture_array[index+3] = 1` (Alpha) [S1, unofficial]
+ 
+ **Pseudocode:**
+@@ -49,55 +48,74 @@
+ 
+ def render_depth(tree, rc, texture_array):
+-    # Initialize OpenMP threads [S1, unofficial]
+-    num_threads = get_num_procs()
+-    set_num_threads(num_threads)
++    n_y = rc.n_y
++    gridlength = tree.gridlength
++    log2_size = math.log2(gridlength) if gridlength > 0 else 1.0
+     
+-    n_y = rc.n_y
+-    size = tree.gridlength
+-    
+-    # Parallel pixel loop [S1, unofficial]
+     for y in range(n_y):
+         partindex = y * (n_y * 4)
+         for x in range(n_y):
+             index = partindex + x * 4
++            ray = rc.getRayForPixel(x, y)
++            o, d = ray.origin, ray.direction
+             
+-            # Initialize ray traverser [S1, unofficial]
+-            t = TreeTraverser(tree, rc.getRayForPixel(x, y))
++            stepcount = 0
++            hit = False
+             
+-            # Traverse tree [S1, unofficial]
+-            while not t.isTerminated():
+-                current_node = t.getCurrentNode()
+-                if current_node.isLeaf():
+-                    if current_node.hasData():
+-                        break
+-                t.step()
++            # DDA initialization for uniform grid [G]
++            if d[0] == 0: t_max_x = float('inf')
++            else: t_max_x = ((0 if d[0] > 0 else gridlength) - o[0]) / d[0]
++            if d[1] == 0: t_max_y = float('inf')
++            else: t_max_y = ((0 if d[1] > 0 else gridlength) - o[1]) / d[1]
++            if d[2] == 0: t_max_z = float('inf')
++            else: t_max_z = ((0 if d[2] > 0 else gridlength) - o[2]) / d[2]
+             
+-            # Get hit position [S1, unofficial]
+-            pos = t.getCurrentPosition()
++            step_x = 1 if d[0] > 0 else -1
++            step_y = 1 if d[1] > 0 else -1
++            step_z = 1 if d[2] > 0 else -1
+             
+-            # Compute depth factor [S1, unofficial]
+-            # Note: Source uses abs() on bounds and position [2]
+-            depth_range = abs(tree.max[2]) - abs(tree.min[2])
+-            if depth_range == 0:
+-                factor = 0.0
+-            else:
+-                factor = abs(pos[2]) / depth_range
++            t_delta_x = abs(1.0 / d[0]) if d[0] != 0 else float('inf')
++            t_delta_y = abs(1.0 / d[1]) if d[1] != 0 else float('inf')
++            t_delta_z = abs(1.0 / d[2]) if d[2] != 0 else float('inf')
+             
+-            # Compute grayscale color [S1, unofficial]
+-            r = 255 - (255 * factor)
+-            g = 255 - (255 * factor)
+-            b = 255 - (255 * factor)
++            cur_x = int(o[0]) if 0 <= o[0] < gridlength else -1
++            cur_y = int(o[1]) if 0 <= o[1] < gridlength else -1
++            cur_z = int(o[2]) if 0 <= o[2] < gridlength else -1
+             
+-            # Write color [S1, unofficial]
+-            texture_array[index] = int(r)
+-            texture_array[index+1] = int(g)
+-            texture_array[index+2] = int(b)
++            # Traverse until bounds exceeded or hit found
++            while stepcount < gridlength * 3 + 100:
++                if 0 <= cur_x < gridlength and 0 <= cur_y < gridlength and 0 <= cur_z < gridlength:
++                    hit = True
++                    break
++                if t_max_x < t_max_y:
++                    if t_max_x < t_max_z:
++                        cur_x += step_x
++                        t_max_x += t_delta_x
++                    else:
++                        cur_z += step_z
++                        t_max_z += t_delta_z
++                else:
++                    if t_max_y < t_max_z:
++                        cur_y += step_y
++                        t_max_y += t_delta_y
++                    else:
++                        cur_z += step_z
++                        t_max_z += t_delta_z
++                stepcount += 1
++            
++            # Compute intensity from step count [S1, unofficial]
++            factor = stepcount / log2_size
++            factor = max(0.0, min(1.0, factor))
++            val = int(255 * (1.0 - factor))
++            
++            texture_array[index] = val
++            texture_array[index+1] = val
++            texture_array[index+2] = val
+             texture_array[index+3] = 1
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-- **Division by Zero:** If `tree->max[2] == tree->min[2]`, the depth range is zero. The implementation must handle this to avoid NaN/Inf [G].
+-- **Termination:** If the ray never hits a leaf with data, `t.isTerminated()` must eventually return true. If the ray escapes the tree without hitting a surface, the behavior is undefined in the source [S1, unofficial].
+-- **Coordinate System:** The formula uses `abs(pos[2])`, implying a specific coordinate system where depth is the Z-axis. This may not match standard OpenGL/DirectX conventions where Y or -Z is depth [G].
++- **Division by Zero:** If `gridlength == 0`, `log2_size` is clamped to 1.0 to prevent NaN/Inf [G].
++- **Termination:** If the ray escapes the tree without hitting a surface, the loop terminates when bounds are exceeded. The code sets alpha to 1 regardless of hit status [S1, unofficial].
++- **Coordinate System:** The notes' formula uses `abs(pos[2])`, implying depth is the Z-axis. Standard graphics APIs often use Y or -Z for depth [G].
+ 
+ ## Subtopics
+@@ -113,5 +131,5 @@
+ 
+ ## Background
+-Originated in early voxel rendering implementations for CPU-based raycasting, specifically in the `cpu_voxel_raycaster` project by Forceflow [S1, unofficial]. It serves as a debugging and visualization tool for voxel data structures.
++Originated in early voxel rendering implementations for CPU-based raycasting, specifically in the `cpu_voxel_raycaster` project by Forceflow [S1, unofficial].
+ 
+ ## Sources

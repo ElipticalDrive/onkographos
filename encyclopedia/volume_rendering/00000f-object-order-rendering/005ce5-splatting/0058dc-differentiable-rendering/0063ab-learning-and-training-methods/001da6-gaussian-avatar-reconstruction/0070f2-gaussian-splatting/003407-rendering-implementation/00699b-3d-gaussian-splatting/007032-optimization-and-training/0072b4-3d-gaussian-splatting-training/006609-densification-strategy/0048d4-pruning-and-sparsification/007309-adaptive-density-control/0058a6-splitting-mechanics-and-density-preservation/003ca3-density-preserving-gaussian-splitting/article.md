@@ -1,0 +1,107 @@
+# Density-preserving Gaussian splitting
+
+Also called: Density-preserving splitting, BOGausS splitting
+
+## Overview
+Density-preserving Gaussian splitting is a densification strategy for 3D Gaussian Splatting that modifies the parameters of split child Gaussians to match the density of the parent Gaussian, thereby preventing loss function perturbations and Gaussian clustering [S1]. Unlike standard 3D Gaussian Splatting which uses opacity reset and cloning, this method discards cloning entirely and relies exclusively on splitting with learned parameter adaptation to maintain stable training dynamics [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A parent Gaussian $G_p$ defined by mean $\mu_p$, scale $\sigma_p$ (vector), rotation $R_p$, opacity $o_p$, and spherical harmonic coefficients $C_p$.
+*   **Output:** Two child Gaussians $G_{c1}, G_{c2}$ with updated parameters.
+
+**Data Structures:**
+The Gaussian is represented by its covariance matrix $\Sigma_p$. The scale vector $\sigma_p = [\sigma_x, \sigma_y, \sigma_z]$ defines the extent along the principal axes. The rotation $R_p$ is a $3 \times 3$ matrix.
+
+**Steps:**
+1.  **Axis Selection:** Identify the principal axis with the largest scale value $\sigma_{max} = \max(\sigma_p)$ [Parent]. Let the corresponding unit vector be $v_{axis}$ [Parent].
+2.  **Mean Shift:** Calculate the shift distance $\Delta = \alpha \cdot \sigma_{max}$, where $\alpha$ is a constant [Parent]. Create two new means:
+    $$ \mu_{c1} = \mu_p + \Delta \cdot v_{axis} $$
+    $$ \mu_{c2} = \mu_p - \Delta \cdot v_{axis} $$
+    [Parent]
+3.  **Parameter Adaptation:** Compute the child scale $\sigma_c$ and opacity $o_c$ using a learned offline function:
+    $$ (\sigma_c, o_c) = \text{SplitAdaptation}(\sigma_p, o_p) $$
+    [Parent]
+    This function ensures the resulting density of the sum of the two children is close to the density of the mother Gaussian [Parent].
+4.  **Inheritance:** Copy the parent's rotation $R_p$ and spherical harmonic coefficients $C_p$ to both children [Parent].
+5.  **Cloning Discard:** Do not perform cloning operations; rely exclusively on splitting for densification [Parent].
+
+**Parameters:**
+*   $\alpha$: A constant controlling the mean shift magnitude. Typical value: $0.3$ [S1].
+
+**Pitfalls:**
+*   Original splitting operations cause perturbations in the loss function [S1].
+*   Cloning operations are discarded to limit these perturbations and prevent Gaussian clusters [S1].
+*   If the scaling factor $k$ for split sizes is too large (e.g., $1.0$), split Gaussians become oversized, causing spikes on intricate bending deformations [S2, unofficial].
+*   If $k$ is too small (e.g., $0.1$), split Gaussians are too small, causing fragmented surfaces [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def density_preserving_split(parent_gaussian, alpha=0.3):
+    # 1. Axis Selection
+    # parent_gaussian.scale is a vector [sx, sy, sz]
+    max_scale_idx = argmax(parent_gaussian.scale)
+    sigma_max = parent_gaussian.scale[max_scale_idx]
+    
+    # Get the principal axis vector from the rotation matrix
+    # The rotation matrix columns are the principal axes
+    principal_axis = parent_gaussian.rotation[:, max_scale_idx]
+    
+    # 2. Mean Shift
+    delta = alpha * sigma_max
+    mu_c1 = parent_gaussian.mean + delta * principal_axis
+    mu_c2 = parent_gaussian.mean - delta * principal_axis
+    
+    # 3. Parameter Adaptation
+    # SplitAdaptation is a learned offline function
+    # It takes the parent's scale and opacity and returns child scale and opacity
+    # Note: The exact implementation of SplitAdaptation is not provided in the source.
+    # It is assumed to be a pre-computed lookup or a simple neural network trained offline.
+    child_scale, child_opacity = SplitAdaptation(parent_gaussian.scale, parent_gaussian.opacity)
+    
+    # 4. Inheritance
+    # Copy rotation and spherical harmonics
+    rotation = parent_gaussian.rotation
+    sh_coeffs = parent_gaussian.sh_coeffs
+    
+    # 5. Construct Children
+    child1 = Gaussian(
+        mean=mu_c1,
+        scale=child_scale,
+        rotation=rotation,
+        opacity=child_opacity,
+        sh_coeffs=sh_coeffs
+    )
+    
+    child2 = Gaussian(
+        mean=mu_c2,
+        scale=child_scale,
+        rotation=rotation,
+        opacity=child_opacity,
+        sh_coeffs=sh_coeffs
+    )
+    
+    return child1, child2
+```
+
+## Subtopics
+
+### Split Scaling Factor
+A scaling factor $k$ used during the Gaussian splitting step to control the size of split Gaussians [S2, unofficial]. Theoretical analysis suggests $k = \sqrt[3]{0.5} \approx 0.79$, but empirically $k = 0.5$ produces superior results [S2, unofficial]. If $k$ is too large (e.g., $1.0$), split Gaussians are oversized, causing spikes on intricate bending deformations [S2, unofficial]. If $k$ is too small (e.g., $0.1$), split Gaussians are too small, causing fragmented surfaces [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Strengths:** Prevents perturbations in the loss function [S1]. Prevents clusters of Gaussians [S1]. Replaces opacity reset with pruning based on opacity threshold [S1].
+*   **Limitations:** Relies on an offline learned function for parameter adaptation [S1]. Discards cloning, which may limit densification speed in some scenarios (though not explicitly stated as a limitation, it is a structural difference) [S1].
+*   **When to use:** When training stability is a concern due to loss perturbations from splitting [S1]. When modeling intricate bending deformations where standard splitting causes spikes [S2, unofficial].
+*   **When not to use:** When cloning is required for specific densification behaviors not covered by splitting [S1].
+
+## Background
+Originated in BOGausS (Better Optimized Gaussian Splatting) [S1]. Inspired by previous work on correction mechanisms for opacity and size parameters [S1]. The method addresses issues identified in original 3D Gaussian Splatting where splitting causes loss perturbations [S1]. It replaces the opacity reset mechanism used in 3DGS with a pruning strategy based on opacity threshold [S1].
+
+## Sources
+[S1] BOGausS: Better Optimized Gaussian Splatting, https://doi.org/10.23919/eusipco63237.2025.11226626, fetched 2026-10-26
+[S2] GSDeformer: Direct Cage-based Deformation for 3D Gaussian Splatting, https://doi.org/10.48550/arXiv.2405.15491, fetched 2026-10-30 (unofficial)

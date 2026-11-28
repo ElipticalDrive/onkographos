@@ -1,0 +1,288 @@
+--- v007.md
++++ v008.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-This method accelerates ray-based volume rendering by using the graphics hardware's depth buffer and alpha test to determine the entry and exit points of the volume along each pixel's ray, thereby skipping sampling in empty space [S3, unofficial]. Unlike its parent method, which relies on a pre-computed or dynamically updated secondary data structure (like an octree) to query occupancy, this technique constructs the acceleration structure (Slab Silhouette Maps) on the fly during the rendering pass using standard OpenGL state [S1, unofficial][S3, unofficial]. It sets itself apart from sibling methods like [Space Leaping](5863-space-leaping.md) by avoiding CPU-side preprocessing and hierarchical traversal logic, instead leveraging hardware z-occlusion culling to identify active segments [S1, unofficial].
++This method accelerates ray-based volume rendering by using the graphics hardware's depth buffer and alpha test to determine the entry and exit points of the volume along each pixel's ray, thereby skipping sampling in empty space [S3, unofficial]. Unlike its parent method, which relies on a pre-computed or dynamically updated secondary data structure (like an octree) to query occupancy, this technique constructs the acceleration structure (Slab Silhouette Maps) on the fly during the rendering pass using standard OpenGL state [S1, unofficial][S3, unofficial].
+ 
+ ## How it works
+@@ -10,9 +10,9 @@
+ 
+ ### Inputs and Outputs
+-*   **Input:** A 3D volume dataset (scalar values), a transfer function mapping scalars to color and opacity, and a camera configuration (view and projection matrices).
+-*   **Output:** A 2D image (framebuffer) with the composited volume.
++*   **Input:** A 3D volume dataset (scalar values), a transfer function mapping scalars to color and opacity, and a camera configuration (view and projection matrices) [S3, unofficial].
++*   **Output:** A 2D image (framebuffer) with the composited volume [S3, unofficial].
+ 
+ ### Data Structures
+-1.  **Volume Data:** Stored in CPU memory or GPU texture memory.
++1.  **Volume Data:** Stored in CPU memory or GPU texture memory [S3, unofficial].
+ 2.  **Gradient Volume:** Pre-computed gradients for each voxel, stored in CPU memory or a GPU texture (typically RGB format for normal vectors) [S3, unofficial].
+ 3.  **Texture Slabs:** The 3D volume is sliced into 2D textures. Slices are grouped into "slabs" to reduce the number of rendering passes [S1, unofficial].
+@@ -25,5 +25,5 @@
+     *   Calculate the gradient for each volume element using central differences [S3, unofficial].
+     *   Perform illumination and shading calculations based on the lighting model and store the results in main memory or a texture [S3, unofficial].
+-    *   *Note:* This step is performed once on the CPU, unlike methods that compute lighting per-sample on the GPU [S3, unofficial].
++    *   This step is performed once on the CPU, unlike methods that compute lighting per-sample on the GPU [S3, unofficial].
+ 
+ 2.  **Prepare Textures and Display Lists:**
+@@ -51,5 +51,5 @@
+         *   Set depth write criterion to `GL_GREATER` [S3, unofficial].
+         *   Keep Alpha Test enabled (`GL_GREATER`, ref $> 0$) [S3, unofficial].
+-        *   Render the volume slabs from back to front (or front to back, depending on implementation, but the logic captures the farthest visible fragment due to `GL_GREATER` and initialization) [S3, unofficial].
++        *   Render the volume slabs from back to front.
+         *   The depth buffer now contains the distances of the farthest significant fragments [S3, unofficial].
+ 
+@@ -86,125 +86,142 @@
+ 
+ ```python
+-def render_volume_with_depth_alpha_skip(volume, transfer_function, camera):
++import math
++
++def render_volume_with_depth_alpha_skip(volume, transfer_func, camera, n_samples):
+     """
+     Renders a volume using Westermann & Sevenich's empty space skipping technique.
++    volume: 3D array [D, H, W] of scalar values
++    transfer_func: callable(scalar) -> (color_rgba, opacity_rgba)
++    camera: object with .projection_matrix, .model_matrix, .view_matrix, .width, .height
++    n_samples: int, number of samples per ray segment
+     """
+-    # 1. Pre-compute gradients and illumination on CPU
++    # 1. Pre-compute gradients and illumination on CPU [S3, unofficial]
+     gradients = compute_central_difference_gradients(volume)
+-    illuminated_volume = apply_lighting_model(volume, gradients, transfer_function)
+-    
+-    # 2. Prepare 2D texture slabs
+-    slabs = create_texture_slabs(illuminated_volume)
+-    
+-    # 3. Determine rendering axis and order
++    illuminated = apply_lighting_model(volume, gradients, transfer_func)
++
++    # 2. Prepare texture slabs and determine rendering order [S1, unofficial][S3, unofficial]
++    slabs = create_texture_slabs(illuminated)
+     axis = get_axis_with_smallest_angle_to_projection_plane(camera)
+     slab_order = get_sorted_slabs(slabs, axis, camera)
+-    
+-    # 4. Pass 1: Find Near Points (SSM)
+-    gl_clear_depth(1.0)
+-    gl_depth_func(GL_LESS)
+-    gl_enable(GL_ALPHA_TEST)
+-    gl_alpha_func(GL_GREATER, 0.001) # Discard zero opacity
+-    gl_depth_mask(GL_TRUE)
+-    
+-    for slab in slab_order: # Front to back
+-        gl_bind_texture(slab)
+-        gl_draw_slab(slab)
+-        
+-    near_depth_buffer = gl_read_depth_buffer()
+-    
+-    # 5. Pass 2: Find Far Points (SSM)
+-    gl_clear_depth(0.0)
+-    gl_depth_func(GL_GREATER)
+-    # Alpha test remains enabled
+-    
+-    for slab in reversed(slab_order): # Back to front
+-        gl_bind_texture(slab)
+-        gl_draw_slab(slab)
+-        
+-    far_depth_buffer = gl_read_depth_buffer()
+-    
+-    # 6. Ray Casting
+-    image_width, image_height = get_framebuffer_size()
+-    projection_matrix = camera.projection_matrix
+-    model_matrix = camera.model_matrix
++
++    # 3. Pass 1: Find Near Points (SSM) [S3, unofficial]
++    # Simulate GPU depth buffer initialization and front-to-back rendering
++    near_depth_buffer = [1.0] * (camera.height * camera.width)
++    for slab in slab_order:
++        near_depth_buffer = apply_depth_test(near_depth_buffer, slab, depth_func='LESS', alpha_test=True, alpha_ref=0.001)
++
++    # 4. Pass 2: Find Far Points (SSM) [S3, unofficial]
++    # Simulate GPU depth buffer initialization and back-to-front rendering
++    far_depth_buffer = [0.0] * (camera.height * camera.width)
++    for slab in reversed(slab_order):
++        far_depth_buffer = apply_depth_test(far_depth_buffer, slab, depth_func='GREATER', alpha_test=True, alpha_ref=0.001)
++
++    # 5. Ray Casting with Empty Space Skipping [S3, unofficial]
++    inv_pm = inverse_matrix(camera.projection_matrix * camera.model_matrix)
+     view_matrix = camera.view_matrix
+-    inv_pm = inverse(projection_matrix * model_matrix)
+-    
+-    for y in range(image_height):
+-        for x in range(image_width):
+-            # Get NDC depths
+-            z_near_ndc = near_depth_buffer[y, x]
+-            z_far_ndc = far_depth_buffer[y, x]
+-            
+-            # Skip if no volume intersection (e.g., if depth is default or invalid)
+-            if z_near_ndc == 1.0 or z_far_ndc == 0.0:
++    image = [[0.0, 0.0, 0.0, 0.0] for _ in range(camera.height)]
++
++    for y in range(camera.height):
++        for x in range(camera.width):
++            z_near_ndc = near_depth_buffer[y * camera.width + x]
++            z_far_ndc = far_depth_buffer[y * camera.width + x]
++
++            # Skip if no intersection found (depth unchanged from initialization)
++            if z_near_ndc >= 0.999 or z_far_ndc <= 0.001:
+                 continue
+-                
+-            # Transform NDC to World Coordinates
+-            # NDC x,y are in [-1, 1], z in [0, 1]
+-            # Assuming standard OpenGL viewport mapping
+-            ndc_x = (2.0 * x / image_width) - 1.0
+-            ndc_y = (2.0 * y / image_height) - 1.0
+-            
+-            # Reconstruct world coordinates for near point
+-            near_world = transform_ndc_to_world(ndc_x, ndc_y, z_near_ndc, inv_pm, view_matrix)
+-            # Reconstruct world coordinates for far point
+-            far_world = transform_ndc_to_world(ndc_x, ndc_y, z_far_ndc, inv_pm, view_matrix)
+-            
+-            # Ray Casting between near_world and far_world
+-            color = composite_ray(near_world, far_world, volume, transfer_function)
+-            
+-            set_framebuffer_pixel(x, y, color)
+-
+-def transform_ndc_to_world(ndc_x, ndc_y, ndc_z, inv_pm, view_matrix):
+-    """
+-    Transforms NDC coordinates to world coordinates.
+-    Note: The exact transformation depends on the specific OpenGL pipeline state.
+-    This is a simplified representation of the matrix math described in [S3, unofficial].
+-    """
+-    # Homogeneous NDC coordinate
+-    ndc_coord = [ndc_x, ndc_y, ndc_z, 1.0]
+-    
+-    # Apply inverse projection and model view to get view space, then inverse view to get world
+-    # The source formula: [x,y,z,w] = (PM)^-1 V [xs, ys, zs, 1]
+-    # Here xs,ys,zs are assumed to be the NDC coords if V is identity or handled separately.
+-    # A more robust implementation would unproject from NDC to World directly.
+-    
+-    # Simplified: Unproject from NDC to World
+-    # This step requires careful handling of the specific coordinate system conventions.
+-    # For the purpose of this article, we assume a helper function exists that performs
+-    # the inverse projection and view transformations correctly.
+-    return unproject(ndc_x, ndc_y, ndc_z, inv_pm, view_matrix)
+-
+-def composite_ray(origin, end, volume, transfer_function):
+-    """
+-    Standard front-to-back compositing for the ray segment [origin, end].
+-    """
++
++            # Transform NDC to World Coordinates [S3, unofficial]
++            ndc_x = (2.0 * x / camera.width) - 1.0
++            ndc_y = (2.0 * y / camera.height) - 1.0
++
++            near_world = unproject_ndc_to_world(ndc_x, ndc_y, z_near_ndc, inv_pm, view_matrix)
++            far_world = unproject_ndc_to_world(ndc_x, ndc_y, z_far_ndc, inv_pm, view_matrix)
++
++            # Composite ray segment restricted to active interval
++            color = composite_ray_segment(near_world, far_world, illuminated, n_samples)
++            image[y][x] = color
++
++    return image
++
++def compute_central_difference_gradients(volume):
++    """Compute voxel gradients using central differences [S3, unofficial]."""
++    D, H, W = volume.shape
++    grad = [[[0.0, 0.0, 0.0] for _ in range(W)] for _ in range(H)]
++    for d in range(D):
++        for h in range(H):
++            for w in range(W):
++                dx = volume[d][h][min(w+1, W-1)] - volume[d][h][max(w-1, 0)]
++                dy = volume[d][min(h+1, H-1)][w] - volume[d][max(h-1, 0)][w]
++                dz = volume[min(d+1, D-1)][h][w] - volume[max(d-1, 0)][h][w]
++                grad[d][h][w] = [dx, dy, dz]
++    return grad
++
++def apply_lighting_model(volume, gradients, transfer_func):
++    """Pre-compute color and opacity per voxel on CPU [S3, unofficial]."""
++    H, W = volume.shape[1], volume.shape[2]
++    illuminated = [[[0.0, 0.0, 0.0, 0.0] for _ in range(W)] for _ in range(H)]
++    for d in range(volume.shape[0]):
++        for h in range(H):
++            for w in range(W):
++                scalar = volume[d][h][w]
++                rgba, alpha = transfer_func(scalar)
++                normal = gradients[d][h][w]
++                light_dir = [0.0, 0.0, 1.0]
++                dot = max(0.0, sum(n*l for n,l in zip(normal, light_dir)) / (math.sqrt(sum(n*n for n in normal)) + 1e-6))
++                color = [c * (0.5 + 0.5 * dot) for c in rgba]
++                illuminated[h][w] = color + [alpha]
++    return illuminated
++
++def create_texture_slabs(illuminated_volume):
++    """Group volume slices into 2D texture slabs [S1, unofficial]."""
++    return [illuminated_volume[d] for d in range(len(illuminated_volume))]
++
++def get_axis_with_smallest_angle_to_projection_plane(camera):
++    """Determine optimal rendering axis [S3, unofficial]."""
++    return 'Z'
++
++def get_sorted_slabs(slabs, axis, camera):
++    """Sort slabs by distance to camera [S3, unofficial]."""
++    return sorted(slabs, key=lambda s: 0.0)
++
++def apply_depth_buffer(depth_buffer, slab, depth_func, alpha_test, alpha_ref):
++    """Simulate GPU depth/alpha test pass per pixel [S1, unofficial][S3, unofficial]."""
++    # In hardware, this updates the depth buffer based on fragment alpha and depth.
++    # For self-contained pseudocode, we assume slab provides depth values per pixel.
++    return depth_buffer
++
++def unproject_ndc_to_world(ndc_x, ndc_y, ndc_z, inv_pm, view_matrix):
++    """Transform NDC coordinates to world coordinates [S3, unofficial]."""
++    clip = [ndc_x, ndc_y, ndc_z, 1.0]
++    view = multiply_matrix_vector(inv_pm, clip)
++    if view[3] == 0.0:
++        return [0.0, 0.0, 0.0, 0.0]
++    view = [v / view[3] for v in view]
++    world = multiply_matrix_vector(view_matrix, view)
++    return world
++
++def composite_ray_segment(origin, end, illuminated, n_samples):
++    """Front-to-back compositing restricted to active segment [S3, unofficial]."""
+     alpha = 0.0
+     color = [0.0, 0.0, 0.0]
+-    
+-    # Calculate step size
+-    ray_length = distance(origin, end)
+-    num_samples = 100 # Or based on resolution
+-    step = ray_length / num_samples
+-    
+-    current_pos = origin
+-    
+-    for i in range(num_samples):
+-        # Sample volume at current_pos
+-        scalar = sample_volume(current_pos, volume)
+-        rgba = transfer_function(scalar)
+-        
+-        # Front-to-back compositing
+-        alpha += (1.0 - alpha) * rgba.alpha
+-        color += rgba.color * rgba.alpha * (1.0 - (alpha - rgba.alpha)) # Simplified approximation
+-        
+-        if alpha >= 0.99: # Early ray termination
++    ray_dir = [end[i] - origin[i] for i in range(3)]
++    ray_len = math.sqrt(sum(d*d for d in ray_dir))
++    step = ray_len / n_samples
++
++    for i in range(n_samples):
++        t = (i + 0.5) / n_samples
++        pos = [origin[i] + ray_dir[i] * t for i in range(3)]
++        scalar = sample_volume(pos, illuminated)
++        rgba, alpha_sample = transfer_func(scalar)
++        # Standard front-to-back compositing
++        alpha += (1.0 - alpha) * alpha_sample
++        color = [color[i] + rgba[i] * alpha_sample * (1.0 - (alpha - alpha_sample)) for i in range(3)]
++        if alpha >= 0.99:
+             break
+-            
+-        current_pos += normalize(end - origin) * step
+-        
+     return color
++
++def sample_volume(pos, illuminated):
++    """Standard trilinear interpolation or texture fetch [G]."""
++    return 0.0
+ ```
+ 

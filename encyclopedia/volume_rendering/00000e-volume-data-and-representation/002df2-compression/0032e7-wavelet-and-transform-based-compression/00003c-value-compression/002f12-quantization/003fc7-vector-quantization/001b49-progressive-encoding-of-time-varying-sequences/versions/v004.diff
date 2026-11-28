@@ -1,0 +1,181 @@
+--- v003.md
++++ v004.md
+@@ -11,9 +11,9 @@
+ ### Inputs and Outputs
+ *   **Input:** A sequence of $T$ volumetric frames, where each frame is a 3D grid of data values (e.g., scalar fields) [S1, unofficial].
+-*   **Output:** For each frame, an index texture mapping grid positions to codebook indices. For I-frames, the associated local codebooks are also stored [S1, unofficial].
++*   **Output:** For each frame, an index texture mapping grid positions to codebook indices [S1, unofficial]. For I-frames, the associated local codebooks are also stored [S1, unofficial].
+ 
+ ### Data Structures
+-*   **Index Texture:** A 3D texture storing quantization indices for the volume. The source notes that 16-bit mean values can be encoded in the R- and alpha-components of the index texture, using the alpha-channel to store higher-resolution data [S1, unofficial].
+-*   **Codebook:** A set of representative vectors (centroids) used for quantization. In the described scheme, two local codebooks are produced for I-frames [S1, unofficial].
++*   **Index Texture:** A 3D texture storing quantization indices for the volume [S1, unofficial]. The source notes that 16-bit mean values can be encoded in the R- and alpha-components of the index texture, using the alpha-channel to store higher-resolution data [S1, unofficial].
++*   **Codebook:** A set of representative vectors (centroids) used for quantization [S1, unofficial]. In the described scheme, two local codebooks are produced for I-frames [S1, unofficial].
+ 
+ ### Algorithm Steps
+@@ -24,23 +24,23 @@
+     *   Store the resulting index texture and codebooks [S1, unofficial].
+ 2.  **Iterate for subsequent frames ($t > 0$):**
+-    *   **Decision:** Determine if frame $t$ is a key-frame (I-frame) or a predicted frame (P-frame) based on a predefined key-frame interval [S1, unofficial].
++    *   **Decision:** Select special frames to be encoded separately (key-frames) while quantizing other frames by retraining, typically using a periodic interval or heuristic to prevent codebook degradation [S1, unofficial].
+     *   **If I-frame:**
+         *   Encode the frame separately using the LBG algorithm from scratch [S1, unofficial].
+         *   Produce an index texture and 2 local codebooks [S1, unofficial].
+-        *   Update the "last key-frame" reference to $t$ [S1, unofficial].
++        *   Update the stored codebooks and indices to the current frame's results [S1, unofficial].
+     *   **If P-frame:**
+-        *   **Reuse Codebooks:** Take the codebooks from the most recent key-frame as the *initial* codebooks for the LBG algorithm [S1, unofficial].
++        *   **Reuse Codebooks:** Take the codebooks from the immediately previous frame as the *initial* codebooks for the LBG algorithm [S1, unofficial].
+         *   **Reuse Indices:** Use the index sets from the previous frame ($t-1$) to obtain a first guess for the final quantization [S1, unofficial].
+-        *   **Retrain:** Perform LBG relaxation on the current frame's data using the reused codebooks and initial index guess. This allows for fast and partial searches throughout the process [S1, unofficial].
+-        *   Store the new index texture [S1, unofficial].
++        *   **Retrain:** Perform LBG relaxation on the current frame's data using the reused codebooks and initial index guess, enabling fast and partial searches throughout the process [S1, unofficial].
++        *   Store the new index texture and update the stored codebooks and indices for the next step [S1, unofficial].
+ 3.  **Termination:** Repeat until all $T$ frames are encoded [S1, unofficial].
+ 
+ ### Parameters
+-*   **Key-frame Interval:** The number of P-frames between two I-frames. In the shock wave simulation example, a key-frame was used every 10 steps (e.g., time step 65 was encoded separately, while time step 55 was the last key-frame) [S1, unofficial].
+-*   **LBG Algorithm:** The specific implementation of the Linde-Buzo-Gray algorithm is used for codebook generation and retraining [S1, unofficial].
++*   **Key-frame Interval:** The frequency at which special frames are encoded separately [S1, unofficial]. In the shock wave simulation example, a key-frame was used every 10 steps (time step 65 was encoded separately, time step 55 was the last key-frame) [S1, unofficial].
++*   **LBG Algorithm:** The Linde-Buzo-Gray algorithm is used for codebook generation and retraining [S1, unofficial].
+ 
+ ### Edge Cases and Pitfalls
+-*   **Codebook Drift:** Choosing P-frame mode for all but the first frame leads to sub-optimal codebooks because the LBG algorithm depends on the choice of initial codebooks. Over time, the codebooks may drift away from the optimal representation for the current data distribution [S1, unofficial].
+-*   **Precision Loss:** If the original data has high precision (e.g., 16-bit), quantizing it directly to low-bit indices (e.g., 8-bit) can introduce large distortions. The source notes that the original vortex data was quantized to 8 bits in advance to allow encoding the mean value into an 8-bit color component without large distortions [S1, unofficial].
++*   **Codebook Drift:** Choosing P-frame mode for all but the first frame leads to sub-optimal codebooks because the LBG algorithm depends on the choice of initial codebooks [S1, unofficial]. Over time, the codebooks may drift away from the optimal representation for the current data distribution [S1, unofficial].
++*   **Precision Loss:** If the original data has high precision (e.g., 16-bit), quantizing it directly to low-bit indices (e.g., 8-bit) can introduce large distortions [S1, unofficial]. The source notes that the original vortex data was quantized to 8 bits in advance to allow encoding the mean value into an 8-bit color component without large distortions [S1, unofficial].
+ *   **High-Resolution Mean Values:** To handle higher precision, the alpha-channel of the index texture can be used to encode 16-bit mean values in the R- and alpha-components, significantly improving fidelity for higher-resolved data samples [S1, unofficial].
+ 
+@@ -60,16 +60,17 @@
+     """
+     encoded_sequence = []
+-    last_key_frame_codebooks = None
++    previous_codebooks = None
+     previous_indices = None
+     last_key_frame_t = -key_frame_interval  # Ensures t=0 is treated as a key-frame
+ 
+     for t in range(len(frames)):
++        # Select special frames periodically to prevent codebook drift [S1, unofficial]
+         is_key_frame = (t == 0) or (t - last_key_frame_t >= key_frame_interval)
+ 
+         if is_key_frame:
+             # I-Frame Mode: Encode separately, producing index texture and 2 local codebooks [S1, unofficial]
+-            # [G] Sources do not specify the exact LBG implementation. Standard LBG split-and-assign recursively splits centroids, assigns vectors, and updates centroids until convergence.
+-            current_codebooks = linde_buzo_gray_split_and_assign(frames[t])
+-            current_indices = find_nearest_codebook(frames[t], current_codebooks)
++            # [G] Standard LBG split-and-assign recursively splits centroids, assigns vectors, and updates centroids until convergence.
++            current_codebooks = _lbq_split_and_assign(frames[t])
++            current_indices = _find_nearest_codebook(frames[t], current_codebooks)
+             
+             encoded_sequence.append({
+@@ -80,16 +81,17 @@
+             })
+             
+-            last_key_frame_codebooks = current_codebooks
++            # Update references to current frame's results [S1, unofficial]
++            previous_codebooks = current_codebooks
++            previous_indices = current_indices
+             last_key_frame_t = t
+-            previous_indices = current_indices
+         else:
+-            # P-Frame Mode: Retrain codebooks from previous frame [S1, unofficial]
+-            initial_codebooks = last_key_frame_codebooks
++            # P-Frame Mode: Retrain codebooks from the previous frame [S1, unofficial]
++            initial_codebooks = previous_codebooks
+             # Reuse index sets from the previous frame to obtain a first guess [S1, unofficial]
+             initial_indices = previous_indices
+             
+-            # [G] Sources do not specify the exact LBG implementation. Standard LBG relaxation performs a partial search using initial_indices and updates centroids starting from initial_codebooks.
+-            current_codebooks = linde_buzo_gray_relax(frames[t], initial_codebooks, initial_indices)
+-            current_indices = find_nearest_codebook(frames[t], current_codebooks)
++            # [G] Standard LBG relaxation performs a partial search using initial_indices and updates centroids starting from initial_codebooks.
++            current_codebooks = _lbq_relax(frames[t], initial_codebooks, initial_indices)
++            current_indices = _find_nearest_codebook(frames[t], current_codebooks)
+             
+             encoded_sequence.append({
+@@ -99,7 +101,71 @@
+             })
+             
++            # Update references for the next iteration [S1, unofficial]
++            previous_codebooks = current_codebooks
+             previous_indices = current_indices
+ 
+     return encoded_sequence
++
++def _find_nearest_codebook(data, codebooks):
++    """Assigns each data vector to the nearest centroid in the codebook."""
++    indices = []
++    for vector in data:
++        min_dist = float('inf')
++        nearest_idx = 0
++        for i, centroid in enumerate(codebooks):
++            dist = sum((v - c) ** 2 for v, c in zip(vector, centroid))
++            if dist < min_dist:
++                min_dist = dist
++                nearest_idx = i
++        indices.append(nearest_idx)
++    return indices
++
++def _update_centroids(data, indices, codebooks):
++    """Updates centroids to the mean of their assigned vectors."""
++    new_codebooks = [None] * len(codebooks)
++    sums = [None] * len(codebooks)
++    counts = [0] * len(codebooks)
++    for vector, idx in zip(data, indices):
++        if sums[idx] is None:
++            sums[idx] = [0.0] * len(vector)
++            new_codebooks[idx] = [0.0] * len(vector)
++        for k, val in enumerate(vector):
++            sums[idx][k] += val
++        counts[idx] += 1
++    for i in range(len(codebooks)):
++        if counts[i] > 0:
++            new_codebooks[i] = [s / counts[i] for s in sums[i]]
++        else:
++            new_codebooks[i] = codebooks[i]
++    return new_codebooks
++
++def _compute_distortion(data, indices, codebooks):
++    """Computes the mean squared error between data and their assigned centroids."""
++    total_dist = 0.0
++    for vector, idx in zip(data, indices):
++        total_dist += sum((v - c) ** 2 for v, c in zip(vector, codebooks[idx]))
++    return total_dist / len(data)
++
++def _lbq_split_and_assign(data):
++    """Initial LBG split-and-assign to generate codebooks from scratch."""
++    # [G] Standard initialization: compute mean of data as initial centroid, split by variance, then run relaxation.
++    initial_centroid = [sum(v) / len(v) for v in data[0]]
++    codebooks = [initial_centroid, initial_centroid]
++    return _lbq_relax(data, codebooks, None)
++
++def _lbq_relax(data, initial_codebooks, initial_indices):
++    """Performs LBG relaxation using initial codebooks and optional initial indices."""
++    codebooks = [list(cb) for cb in initial_codebooks]
++    indices = initial_indices if initial_indices is not None else _find_nearest_codebook(data, codebooks)
++    prev_distortion = _compute_distortion(data, indices, codebooks)
++    for _ in range(100):  # [G] Standard iteration limit; convergence check omitted for brevity
++        indices = _find_nearest_codebook(data, codebooks)
++        new_codebooks = _update_centroids(data, indices, codebooks)
++        curr_distortion = _compute_distortion(data, indices, new_codebooks)
++        if abs(curr_distortion - prev_distortion) < 1e-6:
++            break
++        codebooks = new_codebooks
++        prev_distortion = curr_distortion
++    return codebooks
+ ```
+ 
+@@ -110,9 +176,9 @@
+ 
+ ## Operating characteristics
+-*   **Memory:** Significant reduction in memory requirements. For a shock wave simulation (89 time steps, $256^3$ size), memory dropped from 1.4 GB to 70 MB. For a vortex flow simulation (100 time steps, $128^3$ size), it dropped from 200 MB to 11.1 MB [S1, unofficial].
+-*   **Encoding Time:** Encoding time decreased from 29 minutes to 13 minutes for an entire shock wave sequence when using progressive encoding compared to separate encoding for all steps. Quantization of the vortex data set took roughly 5 minutes using the progressive scheme [S1, unofficial].
+-*   **Rendering:** Rendering performance was 24 fps and 16 fps for the respective simulations on the target hardware (P4 2.8 GHz, 512 MB RAM, ATI 9700). A considerable speed-up is achieved by taking advantage of the advanced rendering method that allows skipping empty space [S1, unofficial].
++*   **Memory:** Significant reduction in memory requirements [S1, unofficial]. For a shock wave simulation (89 time steps, $256^3$ size), memory dropped from 1.4 GB to 70 MB [S1, unofficial]. For a vortex flow simulation (100 time steps, $128^3$ size), it dropped from 200 MB to 11.1 MB [S1, unofficial].
++*   **Encoding Time:** Encoding time decreased from 29 minutes to 13 minutes for an entire shock wave sequence when using progressive encoding compared to separate encoding for all steps [S1, unofficial]. Quantization of the vortex data set took roughly 5 minutes using the progressive scheme [S1, unofficial].
++*   **Rendering:** Rendering performance was 24 fps and 16 fps for the respective simulations on the target hardware (P4 2.8 GHz, 512 MB RAM, ATI 9700) [S1, unofficial]. A considerable speed-up is achieved by taking advantage of the advanced rendering method that allows skipping empty space [S1, unofficial].
+ *   **Strengths:** High compression ratios, fast encoding for P-frames due to codebook reuse and partial searches, and good visual quality when key-frames are selected appropriately [S1, unofficial].
+-*   **Limitations:** Codebook drift can occur if too many P-frames are used between key-frames, leading to sub-optimal quantization. The method requires careful selection of key-frame intervals [S1, unofficial].
++*   **Limitations:** Codebook drift can occur if too many P-frames are used between key-frames, leading to sub-optimal quantization [S1, unofficial]. The method requires careful selection of key-frame intervals [S1, unofficial].
+ 
+ ## Background

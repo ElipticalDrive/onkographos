@@ -1,0 +1,67 @@
+# Quantization
+
+Also called: Quantization with Matrix
+
+## Overview
+Quantization reduces the precision of volumetric data coefficients or parameters by mapping continuous values to a discrete set of representatives, thereby reducing memory footprint and bandwidth requirements [S1][S6, book]. It solves the problem of high storage and transmission costs for large-scale volumetric datasets by exploiting redundancy in spatial, color, or parameter domains [S6, book]. Unlike [Scalar Quantization](5726-scalar-quantization.md) which processes values independently, this family includes methods that group data (e.g., [Vector Quantization](907-vector-quantization.md)) or exploit specific structural symmetries (e.g., [Interpolation Symmetry Quantization](#interpolation-symmetry-quantization)) to achieve higher compression ratios or better perceptual quality [S4][S6, book].
+
+## Shared principles
+The family shares the fundamental mechanism of mapping a continuous input space to a discrete output space [G]. While specific implementations vary, the core operation involves a quantization function $Q(x)$ that maps a real-valued input $x$ to a discrete index or representative value, and an inverse function for reconstruction [G].
+
+1.  **Discretization:** Continuous values (voxel intensities, transform coefficients, neural network weights, or color components) are mapped to a finite set of levels [G].
+2.  **Indexing/Representation:** The quantized data is represented by compact indices, bit-packed integers, or reduced-precision floating-point formats [G].
+3.  **Error Trade-off:** Quantization is inherently lossy [G]. The error introduced is typically measured by distortion metrics such as Mean Squared Error (MSE) or Peak Signal-to-Noise Ratio (PSNR) [G]. The goal is to minimize this error for a given bit budget [G].
+4.  **Integration with Compression:** Quantization is usually followed by entropy coding (e.g., Huffman, Arithmetic) or used in conjunction with predictive coding to further compress the resulting discrete data [S1][S6, book].
+
+## Subtopics
+
+### [Vector Quantization](907-vector-quantization.md)
+Maps $n$-dimensional input vectors (e.g., voxel blocks) to a single fixed-length index referencing an entry in a pre-defined codebook. It differs from [Scalar Quantization](5726-scalar-quantization.md) by grouping data to capture spatial correlations, and from [Hierarchical Vector Quantization](827-hierarchical-vector-quantization.md) by typically using a single dictionary.
+
+### [Scalar Quantization](5726-scalar-quantization.md)
+Maps continuous volume data to a discrete, lower-precision set of values. In compressed volume rendering, it is often implemented as per-block random-access decompression using local min/max values and compact indices. It differs from VQ by processing values independently (or within small blocks without a shared codebook) and from [Chroma Subsampling](6512-chroma-subsampling.md) by operating on scalar intensity rather than color components.
+
+### [Chroma Subsampling](6512-chroma-subsampling.md)
+Reduces the bitrate of volumetric color data by lowering the resolution of chrominance components (U, V) while maintaining full resolution for luminance (Y). It differs from direct subsampling by using a median filter on groups of eight adjacent voxel corners to preserve sharpness and reduce outlier influence.
+
+### [Unquantization Functions](13872-unquantization-functions.md)
+Reconstructs continuous floating-point values from discrete integer indices, specifically tightly coupled to block-based texture compression formats like BC6H. It differs from general [Scalar Quantization](5726-scalar-quantization.md) by handling non-linear or scaled linear mappings defined by block endpoints.
+
+### [Neural Network Parameter Quantization](16222-neural-network-parameter-quantization.md)
+Reduces the memory footprint of neural field representations (e.g., NeRFs) by mapping continuous network weights or grid parameters to discrete, low-bit indices. It differs from standard post-training quantization by integrating quantization into the optimization process or sharing parameters to prevent quality drops.
+
+### Lossy Quantization for Coarsened Patches
+A method for compressing coarsened patches in a bintree hierarchy where quantization error $q$ is proportional to coarsening error $c$ ($q = qc$) [S2]. Quantization levels are restricted to power-of-two multiples of vertical resolution $\Delta z$ for efficient bit-shift implementation [S2]. The shift $k$ is calculated as $k = \lceil \log_2(\epsilon_q / \Delta z) \rceil + 1$ if $\epsilon_q \ge \Delta z$, else 0 [S2]. Corners are stored at full precision, and quantization of original height values (not residuals) ensures adjacent patches agree on shared boundaries [S2].
+
+### HSV Colour Sorting
+A technique to preserve color quality during DXT1 compression by reordering colors based on HSV values before compression [S3, unofficial]. Its effectiveness depends on which HSV component (H, S, or V) is most frequent in the voxel data's color set [S3, unofficial].
+
+### Interpolation Symmetry Quantization
+A method to improve the accuracy of quantized weights by exploiting the symmetry of linear interpolation between segments [S4]. It quantizes both $w$ and $1 - w$ using the scalar quantizer's codebook, keeping the representation with lower error, and stores either $(i, j, w)$ or $(j, i, 1 - w)$ [S4].
+
+### Position Lattice Quantization
+An attempted method to compress Gaussian positions by quantizing them to a lattice structure and embedding positional constraints into training [S5]. It fails to compress positions without introducing significant rendering error [S5]. Currently identified as a future research direction for end-to-end positional compression [S5].
+
+### [Post-finetune Refinement](12641-post-finetune-refinement.md)
+A refinement step using a small number of bits to enhance the reconstruction quality of important voxels, compensating for coarse quantization losses. Ablation studies show disabling it causes a -1.72 dB $\Delta$PSNR, -0.07 $\Delta$SSIM, and -0.079 MB $\Delta$Size reduction on the Synthetic-NeRF dataset.
+
+### Vector Quantization Rendering
+Applies vector quantization in the spatial domain to compress the volume and directly renders the quantized blocks using regular spatial domain volume rendering algorithms [S6, book]. This avoids full decompression to reduce computational overhead [S6, book].
+
+## Background
+Quantization is a foundational technique in data compression, originating in signal processing and image coding [G]. In the context of volume rendering, it has been applied to various data types including voxel grids, transform coefficients, and neural network parameters [G].
+
+*   **Transform Coefficients:** Early applications involved quantizing 3D DCT coefficients for volumetric video compression, using quantization matrices derived from psycho-visual experiments [S1]. This allowed for variable bitrates via scaling factors [S1].
+*   **Spatial Domain:** Vector Quantization was applied directly to spatial voxel blocks for compression-domain rendering, allowing direct rendering of quantized data without full decompression [S6, book].
+*   **Hierarchical Data:** For terrain and multiresolution data, quantization was integrated with hierarchical coarsening, where error bounds were tied to the resolution level [S2].
+*   **Color Compression:** Techniques like HSV sorting were developed to improve the quality of block-based color compression (e.g., DXT1) for volumetric data [S3, unofficial].
+*   **Neural Fields:** Recent work extends quantization to neural network parameters in NeRFs and Gaussian Splatting, using techniques like post-finetuning and symmetry exploitation to maintain quality at high compression ratios [S4, S5].
+
+## Sources
+
+[S1] Neural Residual Radiance Fields for Streamably Free-Viewpoint Videos, https://doi.org/10.1109/cvpr52729.2023.00016, fetched 2026-10-26
+[S2] On-the-fly decompression and rendering of multiresolution terrain, https://doi.org/10.1145/1730804.1730815, fetched 2026-11-01
+[S3] Compression of Sequential Voxel Data for Sequence-based Animation, https://core.ac.uk/download/620674356.pdf, fetched 2026-10-26 (unofficial)
+[S4] The Mixture Graph-A Data Structure for Compressing, Rendering, and Querying Segmentation Histograms, https://doi.org/10.1109/tvcg.2020.3030451, fetched 2026-10-26
+[S5] Compressed 3D Gaussian Splatting for Accelerated Novel View Synthesis, https://doi.org/10.1109/cvpr52733.2024.00985, fetched 2026-10-26
+[S6] PDF Volume Visualization and Volume Graphics, https://www3.cs.stonybrook.edu/~mueller/teaching/cse332/volvisChapter.pdf, fetched 2026-10-28 (book)

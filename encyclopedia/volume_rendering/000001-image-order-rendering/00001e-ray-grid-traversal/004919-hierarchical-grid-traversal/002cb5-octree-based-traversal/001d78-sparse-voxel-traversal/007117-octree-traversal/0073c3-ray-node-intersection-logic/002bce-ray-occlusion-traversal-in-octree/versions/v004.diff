@@ -1,0 +1,474 @@
+--- v003.md
++++ v004.md
+@@ -1,236 +1,269 @@
+ # Ray-Occlusion Traversal in Octree
+ 
+-Also called: Octree Ray Traversal, Octree Shadow Ray Traversal, Ray-Octree Traversal, enterOctree, genShadowRay, traverseOctree, traverseOctreeShadowRay
++Also called: Octree Ray Traversal, Ray-Octree Traversal
+ 
+ ## Overview
+-Ray-Occlusion Traversal in Octree is a method for determining shadow ray intersections within a hierarchical voxel (octree) structure by traversing the tree to find the first non-empty leaf or surface [S1, unofficial][S3, unofficial]. It handles rays starting inside or outside the root voxel by computing entry points via bounding box intersection and stepping through empty space or descending into child nodes [S1, unofficial]. It explicitly manages shadow ray occlusion logic, including specific attenuation factors and boundary precision handling [S1, unofficial].
++Ray-Occlusion Traversal in Octree is a method for intersecting rays with an octree-represented scene to determine visibility, primarily used for shadow ray calculations and early termination in volume rendering. It solves the problem of efficiently determining if a ray intersects any solid voxel or leaf node within a hierarchical structure by recursively descending the tree and culling empty subtrees. It differs from its parent [Octree and Tree Traversal](4134-octree-and-tree-traversal.md) by explicitly handling the logic for rays starting inside or outside the root bounding box and managing the transition from hierarchical descent to voxel stepping when empty leaves are encountered. It differs from [Sparse Voxel Octree Ray Traversal](2451-sparse-voxel-octree-ray-traversal.md) by focusing on a specific recursive implementation pattern often found in compute shader contexts, and from [Bottom-up Neighbor-Finding Ray Traversal](5610-bottom-up-neighbor-finding-ray-traversal.md) by relying on top-down hierarchical descent rather than lateral neighbor lookups.
+ 
+ ## How it works
+-**Inputs:** Ray origin ($O$), ray direction ($D$), octree structure (nodes, depths, bounds), maximum traversal depth ($MAX\_DEPTH$), maximum traversal steps ($MAX\_TRAVERSALS$) [S1, unofficial].
+-**Outputs:** Intersection point, shadow factor, or miss status [S1, unofficial].
++**Inputs and Outputs:**
++- **Input:** A ray defined by origin $\mathbf{o}$ and direction $\mathbf{d}$ (normalized); an octree data structure stored in a flat array; the root node index; maximum traversal depth $D_{max}$; maximum traversal steps $N_{max}$.
++- **Output:** A boolean indicating intersection, or the hit point/material index if a leaf is reached.
+ 
+ **Data Structures:**
+-*   `OctreeNode`: Struct containing 8 integer child pointers (`p0` to `p7`). Indices $\ge 0$ point to child nodes in `octreeArray`; indices $< 0$ (specifically $-1$) indicate no child or leaf status [S1, unofficial].
+-*   `octreeArray`: Flat vector of `OctreeNode` structs, stored in reverse depth order (deepest layers first) [S1, unofficial].
+-*   `OctreeSSBO`: Read-only storage buffer containing `octreeArray` [S1, unofficial].
+-*   `parentVoxels`: Array tracking the voxel coordinates of the parent node at each depth [S1, unofficial].
+-*   `nodeIndices`: Array tracking the index in `octreeArray` for the current node at each depth [S1, unofficial].
+-
+-**Parameters:**
+-*   $MAX\_TRAVERSALS = 300$ [S1, unofficial].
+-*   $MAX\_DEPTH = 100$ [S1, unofficial].
+-*   $INF$: Large constant for invalid intersections [S1, unofficial].
+-*   $\epsilon_{entry} = 0.001$: Offset for collision point validation [S1, unofficial].
+-*   $\epsilon_{step} = 0.01$: Offset for position update after voxel transition [S1, unofficial].
+-*   Shadow attenuation multiplier: $0.3$ [S1, unofficial].
++The octree is stored in a flat array `octreeArray` of `OctreeNode` structs [S1, unofficial].
++- `OctreeNode`: Contains 8 integer child pointers `p0` through `p7` [S1, unofficial].
++  - If `p_i >= 0`, it points to the index of the child node in `octreeArray`.
++  - If `p_i == -1`, the child is empty or the node is a leaf [S1, unofficial].
++  - Indices are adjusted by a `pointerOffset` to be relative to the start of the flat array [S1, unofficial].
++- The nodes are stored in reverse depth order (deepest layers first) [S1, unofficial].
++- Auxiliary arrays may track `child_bit_depth` and `child_mins/maxs` for isovalue checks in some variants [S2].
+ 
+ **Algorithm Steps:**
+ 
+-1.  **Ray-Root Intersection (Entry Point Calculation):**
+-    If the ray origin is outside the root voxel bounding box, calculate intersection distances ($xDist, yDist, zDist$) from $O$ to the six planes of the root voxel defined by `rootNodePos` and `voxelSize` [S1, unofficial].
+-    *   For each axis, use `intersectRayPlane` to find near/far plane intersections based on ray direction signs [S1, unofficial].
+-    *   Clamp negative distances to $INF$ [S1, unofficial].
+-    *   Compute candidate collision points: $xCollision = O + xDist \cdot D$, etc. [S1, unofficial].
+-    *   Validate points using `voxelInParent` [S1, unofficial].
+-    *   Add $\epsilon_{entry} \cdot D$ to the collision point along the intersecting axis to avoid self-intersection [S1, unofficial].
+-    *   Select minimum valid distance ($minDist$) [S1, unofficial].
+-    *   If $minDist = INF$, return miss [S1, unofficial].
+-    *   Determine entry voxel index ($0-5$) based on axis and direction sign [S1, unofficial].
+-    *   Call `traverseOctree` with the collision point, $D$, initial voxel size, rounded voxel coordinates, root position, depth $0$, and collision type [S1, unofficial].
+-
+-2.  **Initialization:**
+-    Set $curDepth = 0$, $nodeIndices[0] = initialIndex$, $parentVoxels[0] = parentVoxel$, $voxelSize = parentVoxelSize / 2$ [S1, unofficial].
+-
+-3.  **Outer Loop (Traversal Limit):**
+-    Iterate $i$ from $0$ to $MAX\_TRAVERSALS - 1$ [S1, unofficial].
+-
+-4.  **Descent (Node Selection):**
+-    While $subNodeValue \ge 0$ and $curDepth < MAX\_DEPTH$:
+-    *   Calculate `parentVoxels[curDepth]` by scaling `curVoxel` with `parentVoxelSize` [S1, unofficial].
+-    *   Calculate `curVoxelScaled` by scaling `curVoxel` with `voxelSize` [S1, unofficial].
+-    *   Determine child index ($p0-p7$) by comparing `curVoxelScaled` components to `parentVoxels[curDepth]` components (equality checks) [S1, unofficial].
+-    *   Update $subNodeValue = octree.octreeArray[nodeIndices[curDepth]].pN$ [S1, unofficial].
+-    *   **Leaf Handling:**
+-        *   If $curDepth + 1 == MAX\_DEPTH$:
+-            *   If $subNodeValue < -1$: Compute shadow factor ($shadowFactor *= 0.3$ if hit, else use normals) [S1, unofficial]. Return color [S1, unofficial].
+-            *   If $subNodeValue \ge -1$: Increment $curDepth$, halve sizes, break descent [S1, unofficial].
+-        *   If $subNodeValue == -1$: Break descent (empty leaf) [S1, unofficial].
+-        *   If $subNodeValue < -1$ (and not max depth): Compute shadow factor [S1, unofficial]. Return color [S1, unofficial].
+-    *   **Advance:**
+-        *   If $subNodeValue > -1$: Set $nodeIndices[curDepth + 1] = subNodeValue$, increment $curDepth$, halve `parentVoxelSize` and `voxelSize` [S1, unofficial].
+-
+-5.  **Voxel Advancement (Stepping):**
+-    If the descent loop breaks due to an empty leaf or max depth edge case:
+-    *   Update current position: $curPosi = curPos$ [S1, unofficial].
+-    *   Add $\epsilon_{step} \cdot D$ to the axis of $minDelta$ in $curPosi$ [S1, unofficial].
+-    *   Compute new $curVoxel = roundVoxel(curPosi, 1)$ [S1, unofficial].
+-    *   Determine `collType` ($0-5$) based on direction sign [S1, unofficial].
+-    *   **Parent Boundary Check:** While `!voxelInParent(curPosi, parentVoxels[curDepth], curParentEnds)` and $curDepth \ge 0$:
+-        *   Decrement $curDepth$, double `parentVoxelSize` and `voxelSize`, update `curParentEnds` [S1, unofficial].
+-        *   If $curDepth < 0$, return miss [S1, unofficial].
+-    *   Advance ray position: $O += minDelta \cdot D$ [S1, unofficial].
+-    *   Update $curVoxel$ by rounding new position with $\epsilon_{step}$ [S1, unofficial].
+-
+-6.  **Recursion/Iteration:**
+-    The process repeats from Step 3 with the updated state [S1, unofficial].
++1. **Initialization:**
++   - Set `curDepth = 0`.
++   - Set `nodeIndices[0]` to the root node index.
++   - Set `parentVoxels[0]` to the root voxel coordinates.
++   - Set `voxelSize` to half the root voxel size (or initial voxel size depending on root definition) [S1, unofficial].
++   - Handle ray origin position:
++     - If the ray origin is outside the root bounding box, compute intersection distances ($t_x, t_y, t_z$) with the six planes of the root voxel [S1, unofficial].
++     - Calculate candidate collision points: $\mathbf{p}_x = \mathbf{o} + t_x \mathbf{d}$, etc. [S1, unofficial].
++     - Validate collision points by checking if they lie within the root voxel bounds [S1, unofficial].
++     - Add a small epsilon offset ($\epsilon_{entry} = 0.001 \cdot \mathbf{d}$) to the collision point along the intersecting axis to avoid self-intersection [S1, unofficial].
++     - Select the minimum valid distance $t_{min}$. If no valid intersection, return miss [S1, unofficial].
++     - Update ray origin to $\mathbf{o} + t_{min} \mathbf{d}$ and determine the entry voxel index (0-5) based on the axis and direction sign [S1, unofficial].
++     - If the ray origin is inside, use the rounded voxel coordinates of the origin [S1, unofficial].
++
++2. **Descent Loop:**
++   - Iterate `i` from 0 to $N_{max} - 1$ [S1, unofficial].
++   - Get the current node `node = octreeArray[nodeIndices[curDepth]]` [S1, unofficial].
++   - Calculate the center of the current voxel: $\mathbf{c} = \mathbf{curVoxel} + \frac{1}{2} \mathbf{voxelSize}$ [S1, unofficial][S2].
++   - Determine the child index `child` based on the ray's position relative to the center:
++     - For each axis $k \in \{x, y, z\}$, if $\mathbf{p}_{enter}.k \ge c.k$, set bit $k$ [S1, unofficial][S2].
++     - `child = (bit_x << 2) | (bit_y << 1) | bit_z` [S1, unofficial][S2].
++   - Retrieve the child pointer `subNodeValue = node.p_child` [S1, unofficial].
++   - **Leaf/Empty Handling:**
++     - If `subNodeValue < -1`: The node is a material leaf. Compute shadow factor or return hit [S1, unofficial].
++     - If `subNodeValue == -1`: The node is an empty leaf. Break descent loop to proceed to stepping [S1, unofficial].
++     - If `curDepth + 1 == D_{max}`: Max depth reached. Check `subNodeValue`. If material, return hit; else, break [S1, unofficial].
++   - **Internal Node Handling:**
++     - If `subNodeValue >= 0`:
++       - Update `nodeIndices[curDepth + 1] = subNodeValue` [S1, unofficial].
++       - Increment `curDepth` [S1, unofficial].
++       - Halve `parentVoxelSize` and `voxelSize` [S1, unofficial].
++       - Continue loop.
++     - If `subNodeValue == -1` (empty): Break descent [S1, unofficial].
++
++3. **Voxel Stepping (Post-Descent):**
++   - If the descent loop breaks due to an empty leaf or max depth without hit:
++   - Calculate deltas to the next voxel boundaries for x, y, z axes using `getDelta` with current `voxelSize` [S1, unofficial].
++     - Note: `getDelta` returns $\infty$ if the direction component is 0 [S1, unofficial].
++   - Determine the minimum distance to the next boundary `minDelta` [S1, unofficial].
++   - Advance the ray position: $\mathbf{p}_{new} = \mathbf{p}_{cur} + minDelta \cdot \mathbf{d}$ [S1, unofficial].
++   - Update current voxel index by rounding the new position, adding a small epsilon ($\epsilon_{step} = 0.01 \cdot \mathbf{d}$) to the axis of `minDelta` to prevent re-entering the same voxel [S1, unofficial].
++   - Determine the collision type (0-5) based on the axis crossed and direction sign [S1, unofficial].
++   - **Parent Boundary Check:**
++     - While the new voxel is outside the current parent voxel bounds:
++       - Decrement `curDepth` [S1, unofficial].
++       - Double `parentVoxelSize` and `voxelSize` [S1, unofficial].
++       - If `curDepth < 0`, return miss [S1, unofficial].
++   - Re-evaluate the node at the new `curDepth` and continue traversal or stepping.
++
++4. **Termination:**
++   - If a material leaf is hit, return the hit point and material data [S1, unofficial].
++   - If $N_{max}$ iterations are exceeded, return miss/black color [S1, unofficial].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def traverse_octree_shadow_ray(ray_origin, ray_dir, octree, max_traversals=300, max_depth=100):
+-    # Helper: intersect ray with 6 planes of a bounding box
+-    def intersect_ray_planes(origin, direction, bounds):
+-        t_vals = []
+-        for i in range(3):
+-            if direction[i] == 0:
+-                if origin[i] < bounds[i] or origin[i] > bounds[i+3]:
+-                    return [float('inf')] * 6
++def ray_occlusion_traversal(ray_origin, ray_dir, octree_array, root_index, max_depth, max_traversals):
++    # Constants
++    INF = float('inf')
++    EPS_ENTRY = 0.001
++    EPS_STEP = 0.01
++    
++    # State
++    cur_depth = 0
++    node_indices = [0] * max_depth
++    node_indices[0] = root_index
++    parent_voxels = [vec3(0,0,0)] * max_depth
++    voxel_size = 1.0 # Assuming normalized root size, adjust based on actual root size
++    parent_voxel_size = 2.0 # Assuming root covers [-1, 1] or similar, adjust
++    
++    # Helper to scale voxel coordinates
++    def scale_voxel(v, size):
++        return v * size
++
++    # Helper to check if voxel is in parent
++    def voxel_in_parent(voxel, parent_voxel, parent_size):
++        # Check if voxel coordinates are within parent bounds
++        # Implementation depends on specific coordinate system
++        return True # Placeholder for specific boundary check logic
++
++    # Helper to get delta to next boundary
++    def get_delta(pos, dir, size):
++        deltas = vec3(INF, INF, INF)
++        if abs(dir.x) > 1e-6:
++            deltas.x = size / abs(dir.x)
++        if abs(dir.y) > 1e-6:
++            deltas.y = size / abs(dir.y)
++        if abs(dir.z) > 1e-6:
++            deltas.z = size / abs(dir.z)
++        return deltas
++
++    # Handle ray origin outside root
++    # Simplified: Assume ray is normalized into root space or root AABB is known
++    # If outside, compute t_min with root AABB planes
++    # For this implementation, we assume ray_origin is already inside or adjusted
++    
++    cur_voxel = round_voxel(ray_origin, 1)
++    
++    for i in range(max_traversals):
++        # Get current node
++        node = octree_array[node_indices[cur_depth]]
++        
++        # Calculate voxel center
++        center = cur_voxel + vec3(0.5, 0.5, 0.5) * voxel_size
++        
++        # Determine child index
++        # Check ray position relative to center
++        # Note: In a pure traversal step, we use current pos. 
++        # In descent, we use entry point.
++        # Here we assume we are at a node and need to find child
++        
++        # For descent: use ray position
++        # For stepping: use current voxel position
++        
++        # Determine octant
++        tc = vec3(
++            1 if ray_origin.x >= center.x else 0,
++            1 if ray_origin.y >= center.y else 0,
++            1 if ray_origin.z >= center.z else 0
++        )
++        child_idx = (tc.x << 2) | (tc.y << 1) | tc.z
++        
++        sub_node_value = node.p[child_idx]
++        
++        if sub_node_value < -1:
++            # Material leaf hit
++            return hit(ray_origin, sub_node_value)
++        elif sub_node_value == -1:
++            # Empty leaf
++            # Step to next voxel
++            deltas = get_delta(cur_voxel, ray_dir, voxel_size)
++            min_delta = min(deltas.x, deltas.y, deltas.z)
++            
++            # Advance ray
++            ray_origin += min_delta * ray_dir
++            
++            # Update voxel
++            update_pos = ray_origin + vec3(
++                EPS_STEP if abs(ray_dir.x) == min_delta else 0,
++                EPS_STEP if abs(ray_dir.y) == min_delta else 0,
++                EPS_STEP if abs(ray_dir.z) == min_delta else 0
++            )
++            cur_voxel = round_voxel(update_pos, 1)
++            
++            # Check parent boundary
++            while not voxel_in_parent(cur_voxel, parent_voxels[cur_depth], parent_voxel_size) and cur_depth >= 0:
++                cur_depth -= 1
++                parent_voxel_size *= 2
++                voxel_size *= 2
++                # Update parent_voxels[cur_depth] logic here
++            
++            if cur_depth < 0:
++                return miss()
++                
++            # Re-evaluate node at new depth
++            # Continue loop to process this new node
++            continue
++        elif cur_depth + 1 == max_depth:
++            # Max depth reached, check if leaf
++            if sub_node_value >= -1:
++                # Treat as leaf or step?
++                # Usually max depth implies leaf
++                if sub_node_value < -1:
++                    return hit(ray_origin, sub_node_value)
++                else:
++                    # Empty at max depth, step
++                    # Same stepping logic as empty leaf
++                    deltas = get_delta(cur_voxel, ray_dir, voxel_size)
++                    min_delta = min(deltas.x, deltas.y, deltas.z)
++                    ray_origin += min_delta * ray_dir
++                    update_pos = ray_origin + vec3(
++                        EPS_STEP if abs(ray_dir.x) == min_delta else 0,
++                        EPS_STEP if abs(ray_dir.y) == min_delta else 0,
++                        EPS_STEP if abs(ray_dir.z) == min_delta else 0
++                    )
++                    cur_voxel = round_voxel(update_pos, 1)
++                    while not voxel_in_parent(cur_voxel, parent_voxels[cur_depth], parent_voxel_size) and cur_depth >= 0:
++                        cur_depth -= 1
++                        parent_voxel_size *= 2
++                        voxel_size *= 2
++                    if cur_depth < 0:
++                        return miss()
++                    continue
+             else:
+-                t1 = (bounds[i] - origin[i]) / direction[i]
+-                t2 = (bounds[i+3] - origin[i]) / direction[i]
+-                t_vals.append(min(t1, t2))
+-                t_vals.append(max(t1, t2))
+-        return t_vals
+-
+-    # Helper: check if point is within parent voxel bounds
+-    def voxel_in_parent(point, parent_bounds):
+-        return all(parent_bounds[i] <= point[i] <= parent_bounds[i+3] for i in range(3))
+-
+-    # Helper: scale voxel index to world coordinates
+-    def scale_voxel(voxel_idx, size):
+-        return [voxel_idx[i] * size for i in range(3)]
+-
+-    # Helper: round position to voxel grid
+-    def round_voxel(pos, factor):
+-        return [int(pos[i] / factor) for i in range(3)]
+-
+-    # Helper: compute distance to next voxel boundary along ray
+-    def get_deltas(pos, direction, voxel_size):
+-        deltas = []
+-        for i in range(3):
+-            if direction[i] == 0:
+-                deltas.append(float('inf'))
+-            else:
+-                next_boundary = (int(pos[i] / voxel_size) + (1 if direction[i] > 0 else 0)) * voxel_size
+-                deltas.append((next_boundary - pos[i]) / direction[i])
+-        return deltas
+-
+-    # 1. Entry Point Calculation
+-    if not voxel_in_parent(ray_origin, octree.root_bounds):
+-        dists = intersect_ray_planes(ray_origin, ray_dir, octree.root_bounds)
+-        t_candidates = []
+-        for i in range(3):
+-            if ray_dir[i] > 0:
+-                t_candidates.append(dists[i*2])
+-            else:
+-                t_candidates.append(dists[i*2+1])
+-        min_dist = min(t_candidates)
+-        if min_dist == float('inf'):
+-            return [0.0, 0.0, 0.0] # MISS
+-        cur_pos = [ray_origin[i] + min_dist * ray_dir[i] for i in range(3)]
+-        axis = min(range(3), key=lambda i: abs(dists[i*2] if ray_dir[i] > 0 else dists[i*2+1]))
+-        cur_pos[axis] += 0.001 * ray_dir[axis]
+-        if not voxel_in_parent(cur_pos, octree.root_bounds):
+-            return [0.0, 0.0, 0.0] # MISS
+-        coll_type = 0 # Determined by axis/direction sign
+-    else:
+-        cur_pos = ray_origin
+-        coll_type = 0
+-
+-    cur_voxel = round_voxel(cur_pos, 1.0)
+-    cur_depth = 0
+-    node_indices = [octree.root_index]
+-    parent_voxels = [cur_voxel]
+-    voxel_size = octree.root_size / 2.0
+-    parent_voxel_size = octree.root_size
+-    shadow_factor = 1.0
+-
+-    for i in range(max_traversals):
+-        sub_node_value = -1
+-        j = 0
+-        # 2. Descent
+-        while sub_node_value >= 0 and cur_depth < max_depth:
+-            j += 1
+-            if j > max_depth:
+-                return [0.0, 0.0, 0.0] # Infinite loop prevention [S1, unofficial]
+-            
+-            parent_voxels[cur_depth] = scale_voxel(cur_voxel, parent_voxel_size)
+-            cur_voxel_scaled = scale_voxel(cur_voxel, voxel_size)
+-
+-            child_idx = 0
+-            if cur_voxel_scaled[0] >= parent_voxels[cur_depth][0]: child_idx |= 4
+-            if cur_voxel_scaled[1] >= parent_voxels[cur_depth][1]: child_idx |= 2
+-            if cur_voxel_scaled[2] >= parent_voxels[cur_depth][2]: child_idx |= 1
+-
+-            node = octree.octree_array[node_indices[cur_depth]]
+-            sub_node_value = node.p[child_idx]
+-
+-            # Leaf Handling
+-            if cur_depth + 1 == max_depth:
+-                if sub_node_value < -1:
+-                    shadow_factor *= 0.3
+-                    return shadow_factor * octree.determine_color(sub_node_value, coll_type)
+-                else:
+-                    cur_depth += 1
+-                    parent_voxel_size /= 2.0
+-                    voxel_size /= 2.0
+-                    break
+-
+-            if sub_node_value == -1:
+-                break # Empty leaf
+-
+-            if sub_node_value < -1:
+-                shadow_factor *= 0.3
+-                return shadow_factor * octree.determine_color(sub_node_value, coll_type)
+-
+-            # Advance
+-            if sub_node_value > -1:
++                return miss()
++        else:
++            # Internal node, descend
++            if sub_node_value >= 0:
+                 node_indices[cur_depth + 1] = sub_node_value
+                 cur_depth += 1
+-                parent_voxel_size /= 2.0
+-                voxel_size /= 2.0
+-
+-        # 3. Voxel Advancement
+-        if sub_node_value == -1 or cur_depth + 1 == max_depth:
+-            deltas = get_deltas(cur_pos, ray_dir, voxel_size)
+-            min_delta = min(deltas)
+-            cur_pos = [cur_pos[k] + min_delta * ray_dir[k] for k in range(3)]
+-            axis = min(range(3), key=lambda k: deltas[k])
+-            cur_pos[axis] += 0.01 * ray_dir[axis]
+-            cur_voxel = round_voxel(cur_pos, 1.0)
+-            coll_type = 0 # Determined by direction sign
+-
+-            # Parent Boundary Check
+-            while not voxel_in_parent(cur_pos, parent_voxels[cur_depth]) and cur_depth >= 0:
+-                cur_depth -= 1
+-                parent_voxel_size *= 2.0
+-                voxel_size *= 2.0
+-                if cur_depth < 0:
+-                    return [0.0, 0.0, 0.0] # MISS
+-
+-    return [0.0, 0.0, 0.0] # MISS
++                parent_voxel_size /= 2
++                voxel_size /= 2
++            else:
++                # Should not happen if sub_node_value >= 0 check is correct
++                # If sub_node_value is -1, it's empty, handled above
++                pass
++                
++    return miss()
+ ```
+ 
++**Parameters:**
++- `MAX_TRAVERSALS`: Maximum number of outer loop iterations, typically 300 [S1, unofficial].
++- `MAX_DEPTH`: Maximum octree depth, typically 100 [S1, unofficial].
++- `INF`: Large constant for infinity [S1, unofficial].
++- `EPS_ENTRY`: Epsilon for entry point, 0.001 [S1, unofficial].
++- `EPS_STEP`: Epsilon for stepping, 0.01 [S1, unofficial].
++- `shadow_attenuation`: Multiplier for shadow rays, 0.3 [S1, unofficial].
++
++**Edge Cases and Pitfalls:**
++- **Zero Direction:** If a ray direction component is 0, `getDelta` returns $\infty$, preventing infinite loops in that axis [S1, unofficial].
++- **Infinite Loops:** A counter `j` inside the descent loop checks `if (j++ > MAX_DEPTH)` to prevent infinite loops in malformed octrees [S1, unofficial].
++- **Precision Errors:** Epsilon offsets are critical at voxel boundaries to avoid self-intersection or re-entering the same voxel [S1, unofficial].
++- **Ray Origin Outside Root:** Requires explicit AABB intersection calculation before traversal begins [S1, unofficial].
++
+ ## Subtopics
+ 
++### [Bottom-up Neighbor-Finding Ray Traversal](5610-bottom-up-neighbor-finding-ray-traversal.md)
++Bottom-up neighbor-finding ray traversal is a method for intersecting rays with an octree-represented scene by determining the sequence of cells the ray passes through via neighbor lookups rather than hierarchical descent. It solves the problem of efficiently stepping from one occupied or relevant cell to the next along a ray path, avoiding the overhead of traversing empty space from the root. Unlike top-down traversal methods that descend from the root for every step, this approach starts at the first intersected cell and moves laterally or vertically through the tree structure to find the subsequent cell, offering a trade-off between implementation complexity and traversal speed depending on the density of the scene.
++
++### [Octree-based Raycasting](5707-octree-based-raycasting.md)
++Octree-based Raycasting is a volume rendering technique that accelerates ray traversal by skipping empty space regions using an octree data structure. It solves the performance bottleneck of naive voxel raycasting, which has $O(n)$ complexity relative to the number of voxels, by reducing traversal cost to depend only on occupied space. It differs from its parent [Ray-Occlusion Traversal in Octree](5121-ray-occlusion-traversal-in-octree.md) by explicitly managing dynamic voxel updates and concurrency, and from [Bottom-up Neighbor-Finding Ray Traversal](5610-bottom-up-neighbor-finding-ray-traversal.md) by relying on hierarchical empty-space skipping rather than neighbor-based stepping.
++
+ ### Octree Traversal via Voxel Grid
+-A method to traverse an octree by mapping ray origin/direction to chunk coordinates and checking if the ray stays within the current chunk bounds, using a loop condition based on distance from center [S1, unofficial]. It defines `voxelCenter = vec3(octreeSize / 2, octreeSize / 2, octreeSize / 2)` and computes `curVoxel = octreeSize * floor(rayOrigin / octreeSize)` [S1, unofficial]. It loops while `dot(rayOrigin - voxelCenter, rayOrigin - voxelCenter) > dot(rayOrigin + rayDir - voxelCenter, voxelCenter)` [S1, unofficial]. If `curVoxel` is within bounds `[0, octreeSize)`, it returns success; otherwise, it advances `rayOrigin += rayDir` [S1, unofficial].
++A method to traverse an octree by mapping ray origin/direction to chunk coordinates and checking if the ray stays within the current chunk bounds, using a loop condition based on distance from center [S1, unofficial]. It defines the voxel center as `voxelCenter = vec3(octreeSize / 2, octreeSize / 2, octreeSize / 2)` and computes the current voxel position as `curVoxel = octreeSize * floor(rayOrigin / octreeSize)` [S1, unofficial]. It loops while the squared distance from the center to the ray origin is greater than the squared distance from the center to the ray end: `dot(rayOrigin - voxelCenter, rayOrigin - voxelCenter) > dot(rayOrigin + rayDir - voxelCenter, rayOrigin + rayDir - voxelCenter)` [S1, unofficial]. If the current voxel is within valid bounds `[0, octreeSize)`, it returns success; otherwise, it advances the ray origin [S1, unofficial].
+ 
+ ### Hero-like Octree Traversal
+-A depth-first search approach for ray-tracing octrees that uses a 2x2x2 voxel test to determine the order of cell hits and descend into occupied nodes [S4, unofficial]. It starts from the root, performs a 2x2 test to find which cells the ray hits and their order, and uses intersection values for middle planes ($t_{mx}, t_{my}$) and exit planes ($t_{ex}, t_{ey}$) to determine the ray's position and path [S4, unofficial]. If any top cells are occupied, it descends by calculating new plane positions based on cell position [S4, unofficial].
++A depth-first search approach for ray-tracing octrees that uses a 2x2x2 voxel test to determine the order of cell hits and descend into occupied nodes [S5, unofficial]. It starts from the root of the octree and performs a 2x2 test to find which cells the ray hits and their order [S5, unofficial]. It uses intersection values for middle planes ($t_{mx}, t_{my}$) and exit planes ($t_{ex}, t_{ey}$) to determine the ray's position and path within the 2x2 area [S5, unofficial]. If any top cells in the 2x2 area are occupied, it descends into the tree by calculating new plane positions based on the cell position [S5, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the depth of the octree and the number of empty nodes skipped [S1, unofficial]. Hierarchical traversal reduces steps compared to non-hierarchical methods (e.g., 5 steps vs 11 in SVO examples) [S4, unofficial].
+-*   **Memory Complexity:** Linear with respect to the number of octree nodes, stored in a flat array [S1, unofficial].
+-*   **Strengths:** Efficiently skips empty space; handles rays starting inside or outside the root [S1, unofficial].
+-*   **Limitations:** Requires careful epsilon handling to avoid precision errors at boundaries [S1, unofficial]. Infinite loop prevention is necessary (e.g., counter check) [S1, unofficial].
+-*   **When to use:** Shadow ray computation in voxel-based scenes [S1, unofficial].
+-*   **When not to use:** When the scene is fully dense, as the overhead of tree traversal may outweigh benefits [G].
++- **Time Complexity:** $O(k)$ where $k$ is the number of nodes visited, which depends on the tree depth and the number of occupied leaves intersected. In the worst case (dense scene), it approaches $O(N)$ where $N$ is the number of voxels, but typically much faster for sparse data [S1, unofficial][S2].
++- **Memory Complexity:** $O(N)$ for storing the octree structure, where $N$ is the number of nodes. The flat array storage is efficient for cache coherence [S1, unofficial].
++- **Measured Performance:** Performance improvements are observed when using a low-resolution depth pass to initialize rays closer to collision points, reducing the number of octree node traversals [S1, unofficial].
++- **Strengths:** Efficiently skips empty space; recursive structure is simple to implement; handles rays starting inside or outside the root [S1, unofficial].
++- **Limitations:** Recursion depth can be limited by stack size; precision issues at boundaries require careful epsilon handling; performance degrades in very dense scenes [S1, unofficial].
++- **When to Use:** Shadow ray calculations, early termination in volume rendering, sparse voxel scenes [S1, unofficial].
++- **When Not to Use:** Dense uniform volumes where simple ray marching is faster; scenes with high frequency detail requiring very deep trees [S1, unofficial].
+ 
+ ## Background
+-Originating from implementations in Vulkan-based raymarchers, this method is detailed in unofficial sources [S1, unofficial][S3, unofficial]. It builds on general octree traversal techniques [S4, unofficial] and is used in real-time rendering applications like the VkEngine project [S1, unofficial]. The approach is also related to techniques used in games like Teardown [S4, unofficial].
++The method originates from implementations in Vulkan-based raymarching applications, specifically the `vkEngine` project by sebbooth [S1, unofficial]. It is also referenced in academic works on interactive isosurface ray tracing of large octree volumes [S2]. The technique is widely used in real-time rendering engines for shadow mapping and volume visualization [S1, S3, S4, unofficial].
+ 
+ ## Sources
+ [S1] sebbooth/vkEngine, https://github.com/sebbooth/vkEngine, fetched 2026-10-24 (unofficial)
++[S2] Interactive Isosurface Ray Tracing of Large Octree Volumes, https://www.sci.utah.edu/~wald/Publications/2006/OctIso/octiso.pdf, fetched 2026-10-27
+ [S3] itsyouyi/Voxelizer, https://github.com/itsyouyi/Voxelizer, fetched 2026-10-27 (unofficial)
+-[S4] versal algorithm for ray tracing Hur man gör en hierarkisk ..., https://kth.diva-portal.org/smash/get/diva2:2069409/FULLTEXT01.pdf, fetched 2026-10-25 (unofficial)+[S4] Mike-Leo-Smith/SolidVoxelization, https://github.com/Mike-Leo-Smith/SolidVoxelization, fetched 2026-10-27 (unofficial)
++[S5] versal algorithm for ray tracing Hur man gör en hierarkisk ..., https://kth.diva-portal.org/smash/get/diva2:2069409/FULLTEXT01.pdf, fetched 2026-10-25 (unofficial)

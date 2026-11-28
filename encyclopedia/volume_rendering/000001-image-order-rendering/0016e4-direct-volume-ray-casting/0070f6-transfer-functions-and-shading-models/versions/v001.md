@@ -1,0 +1,125 @@
+# Transfer Functions and Shading Models
+
+Also called: Classification and Illumination, Optical Property Mapping, Phong Volume Rendering
+
+## Overview
+Transfer Functions and Shading Models define the optical properties (color and opacity) and surface interaction (illumination) of volumetric data during direct volume ray casting. This family solves the problem of translating raw scalar field values into a perceptually meaningful image by determining which voxels are visible and how they contribute to the final pixel color, while shading models provide depth cues to reveal internal structures in semi-transparent data [S2, unofficial][G]. Unlike [Direct volume ray casting](19-direct-volume-ray-casting.md), which handles the geometric traversal and integration, this family focuses strictly on the parameterization of the mapping function $T: V \rightarrow (\mathbf{c}, \alpha)$ and the computation of the lighting term $L(\mathbf{p})$ [G]. It differs from [Neural volume rendering](1576-neural-volume-rendering.md) by relying on explicit mathematical mappings and local gradient approximations rather than learned neural representations [G].
+
+## Shared principles
+All methods in this family operate on the scalar field $V(\mathbf{p})$ sampled at positions $\mathbf{p}$ along the ray. The core mechanism involves two distinct stages applied to each sample point before compositing:
+
+1.  **Classification (Transfer Function):** A transfer function $T$ maps the scalar value $V(\mathbf{p}_i)$ (and optionally gradient information) to a color vector $\mathbf{c}_i \in [0,1]^3$ and an opacity scalar $\alpha_i \in [0,1]$ [S2, unofficial][G].
+    $$ T: V \rightarrow (\mathbf{c}, \alpha) $$
+    These values are subsequently used in the front-to-back compositing equation defined in [Direct volume ray casting](19-direct-volume-ray-casting.md) [G]. Transfer functions are typically parameterized by control points $(V_k, \mathbf{c}_k, \alpha_k)$ with interpolation between points [S2, unofficial]. The opacity $\alpha$ is derived solely from the opacity transfer function and is generally not modified by the shading model, preserving the physical interpretation of density [G].
+
+2.  **Shading (Illumination):** A shading model modulates the base color $\mathbf{c}_i$ derived from the transfer function using a lighting term $L(\mathbf{p}_i)$ computed from local gradients or pre-computed illumination caches [G]. The shading model affects only the color channel; the opacity $\alpha_i$ remains unchanged [G].
+    
+    The lighting term is typically computed using a Phong illumination model or a simplified intensity model [G]. This requires estimating the surface normal $\mathbf{n}_i$ at the sample point, usually by normalizing the gradient of the scalar field $\nabla V(\mathbf{p}_i)$ [G]:
+    $$ \mathbf{n}_i = \frac{\nabla V(\mathbf{p}_i)}{\|\nabla V(\mathbf{p}_i)\|} $$
+    
+    The gradient $\nabla V(\mathbf{p}_i)$ is estimated using finite differences [G]:
+    $$ \nabla V(\mathbf{p}_i) \approx \left( \frac{V(\mathbf{p}_i + \Delta x) - V(\mathbf{p}_i - \Delta x)}{2\Delta x}, \frac{V(\mathbf{p}_i + \Delta y) - V(\mathbf{p}_i - \Delta y)}{2\Delta y}, \frac{V(\mathbf{p}_i + \Delta z) - V(\mathbf{p}_i - \Delta z)}{2\Delta z} \right) $$
+    
+    The Phong lighting term combines ambient, diffuse, and specular components [G]:
+    $$ L(\mathbf{p}_i) = k_a + k_d (\mathbf{n}_i \cdot \mathbf{l}) + k_s (\mathbf{r}_i \cdot \mathbf{v})^n $$
+    
+    Where:
+    *   $k_a, k_d, k_s$: Ambient, diffuse, and specular coefficients [G].
+    *   $\mathbf{l}$: Unit vector from $\mathbf{p}_i$ to the light source [G].
+    *   $\mathbf{v}$: Unit view vector from $\mathbf{p}_i$ to the camera [G].
+    *   $\mathbf{r}_i$: Reflection vector of $\mathbf{l}$ about $\mathbf{n}_i$, calculated as $\mathbf{r}_i = 2(\mathbf{n}_i \cdot \mathbf{l})\mathbf{n}_i - \mathbf{l}$ [G].
+    *   $n$: Shininess exponent [G].
+    
+    The shaded sample color $\mathbf{c}_{shaded, i}$ is computed as:
+    $$ \mathbf{c}_{shaded, i} = \mathbf{c}_i \cdot L(\mathbf{p}_i) $$
+    
+    This shaded color is then accumulated using the front-to-back alpha compositing equation defined in the parent [19-direct-volume-ray-casting.md] [G].
+
+## Subtopics
+
+### [Transfer Function and Opacity Mapping](2789-transfer-function-and-opacity-mapping.md)
+**What it is:** A technique that renders the volume using opacity mapped to a transfer function texture. It solves the problem of translating raw scalar field values into a perceptually meaningful image by defining how data ranges correspond to RGBA outputs.
+**Distinction:** Unlike [Direct Volume Rendering with Phong Illumination](8307-direct-volume-rendering-with-phong-illumination.md), which focuses on lighting models, or [Pre-integrated Volume Rendering](5327-pre-integrated-volume-rendering.md), which focuses on integration accuracy, this family focuses strictly on the parameterization and application of the mapping function $T: V \rightarrow (\mathbf{c}, \alpha)$ [G].
+**When to choose:** When the primary goal is accurate data-to-color mapping without complex lighting effects, or when using texture-based lookups for performance.
+
+### [Programmable Transfer Function DVR](8220-programmable-transfer-function-dvr.md)
+**What it is:** A direct volume rendering technique that replaces traditional texture-based transfer function lookups with a function call at every sample location to compute color and opacity. This approach trades memory fetches for computation, enabling real-time parameter modification and swift interaction without CPU-GPU data transfer bottlenecks.
+**Distinction:** It differs from [Pre-integrated Volume Rendering](5327-pre-integrated-volume-rendering.md) by focusing on computational parameterization rather than pre-computed integration, and from [Direct Volume Rendering with Phong Illumination](8307-direct-volume-rendering-with-phong-illumination.md) by explicitly defining the transfer function as a programmable shader routine rather than a fixed lookup, though it often incorporates shading to enhance depth perception.
+**When to choose:** When interactive parameter tuning is required, or when memory bandwidth is a bottleneck compared to computational capacity. Supports both 1D and 2D transfer function parameterizations.
+
+### [Lighting and Shading Techniques](8281-lighting-and-shading-techniques.md)
+**What it is:** A family of methods that modulate the base color derived from transfer functions with a lighting term computed from local gradients or pre-computed illumination caches to provide realistic depth perception and highlight occluded regions in semi-transparent volumetric data [G].
+**Distinction:** Unlike standard direct volume rendering which often produces "cloud-like" or fuzzy images, these methods introduce specular and diffuse cues to reveal internal structures and surface-like features [G]. They differ from siblings like [Pre-integrated Volume Rendering](5327-pre-integrated-volume-rendering.md) by focusing on the illumination model rather than the compositing integration, and from [Next Event Estimation for Emissive Volumes](3557-next-event-estimation-for-emissive-volumes.md) by typically relying on local gradient-based approximations rather than explicit path-traced light sampling, though some variants integrate global effects via caching [G].
+**When to choose:** When realistic depth perception and surface-like highlights are needed to interpret internal structures.
+
+### [Direct Volume Rendering with Phong Illumination](8307-direct-volume-rendering-with-phong-illumination.md)
+**What it is:** A method that combines Direct Volume Rendering (DVR) with the Phong reflection model to produce photo-realistic images with strong depth cues and a plastic appearance. It distinguishes itself from non-photorealistic methods like Tone or Contour Rendering by calculating ambient, diffuse, and specular light intensities at each sample point, thereby revealing internal structures through surface-like highlights.
+**Distinction:** Unlike siblings such as [Pre-integrated Volume Rendering](5327-pre-integrated-volume-rendering.md), which focuses on integration accuracy, or [Next Event Estimation for Emissive Volumes](3557-next-event-estimation-for-emissive-volumes.md), which uses explicit light sampling, this method relies on local gradient-based approximations of surface normals to modulate the base color derived from transfer functions [G].
+**When to choose:** When a standard, computationally efficient shading model is sufficient to provide depth cues without the complexity of global illumination or non-photorealistic stylization.
+
+### [Cel Shading for Volumes](13210-cel-shading-for-volumes.md)
+**What it is:** Cel Shading for Volumes (XToon) is a direct volume ray casting technique that applies stylized shading effects—including tone detail, specular highlights, and backlighting—to volumetric data. It replaces continuous Phong illumination with discrete, transfer-function-driven shading components to produce sharp contours and highlights, while retaining semi-transparent accumulation.
+**Distinction:** It differs from [Direct Volume Rendering with Phong Illumination](8307-direct-volume-rendering-with-phong-illumination.md) by using discrete lookup tables for shading components rather than continuous mathematical functions, creating a non-photorealistic "cartoon" or "sketch" appearance.
+**When to choose:** When a stylized, non-photorealistic visualization is desired, particularly for emphasizing contours and boundaries.
+
+### [Transfer Functions and Color Encoding](17709-transfer-functions-and-color-encoding.md)
+**What it is:** Defines the mapping from scalar (or multi-scalar) volume data to optical properties (color and opacity) for direct volume ray casting. It solves the problem of visualizing internal structures by determining which voxels are visible and how they contribute to the final image.
+**Distinction:** This family is distinct from [Lighting and Shading Techniques](8281-lighting-and-shading-techniques.md) because it operates on the material properties (color/opacity) rather than the surface interaction (illumination), and from [Transfer Functions and Opacity Mapping](2789-transfer-function-and-opacity-mapping.md) by explicitly handling multi-dimensional color output and multi-variable data integration.
+**When to choose:** When visualizing multi-component data (e.g., vector fields, multi-modal medical data) where color encoding carries significant semantic information beyond simple opacity.
+
+### Direct Diffuse Illumination
+**Definition:** A method to enable direct diffuse illumination for semi-transparent volume rendering [S1, book].
+**Pitfall:** Multiple passes through rasterization hardware lead to significant loss in rendering performance [S1, book].
+
+### Levoy Shading
+**Definition:** A shading model combining Phong shading with depth cueing to enhance visual perception of volume structure [S2, unofficial].
+**Steps:**
+1.  Estimate normals: Compute surface normal $N(x_i)$ at voxel $x_i$ using central difference [S2, unofficial].
+2.  Calculate lighting: Apply Phong model with ambient ($k_a$), diffuse ($k_d$), and specular ($k_s$) coefficients, and fall-off constants $k_1, k_2$ [S2, unofficial].
+**Parameters:**
+*   $N(x_i)$: The surface normal at voxel $x_i$ [S2, unofficial].
+*   $L$: The normalized vector to the light source [S2, unofficial].
+*   $H$: The normalized vector for maximum highlight [S2, unofficial].
+*   $d(x)$: The distance to the picture plane, used for depth cueing [S2, unofficial].
+
+### Gradient-based Volume Rendering
+**Definition:** A volume rendering method that visualizes pre-computed gradient data directly, treating gradient magnitude as opacity and gradient direction/vector as color, without applying lighting models [S3, unofficial].
+**Steps:**
+1.  Calculate ray direction: `vec3 ray_dir = normalize(vray_dir);` [S3, unofficial].
+2.  Compute ray-box intersection: `vec2 t_hit = intersect_box(transformed_eye, ray_dir);` [S3, unofficial].
+3.  Discard if miss: `if (t_hit.x > t_hit.y) discard;` [S3, unofficial].
+4.  Clamp entry: `t_hit.x = max(t_hit.x, 0.0);` [S3, unofficial].
+5.  Calculate step size `dt` using `dt_scale` and volume dimensions [S3, unofficial].
+6.  Generate jitter offset using `wang_hash` [S3, unofficial].
+7.  Initialize position `p` with jitter [S3, unofficial].
+8.  Loop along ray: `for (float t = t_hit.x; t < t_hit.y; t += dt)` [S3, unofficial].
+9.  Sample gradients: `vec4 gradSample = texture(gradients, p);` [S3, unofficial].
+10. Set sample color to gradient sample: `vec4 val_color = gradSample;` [S3, unofficial].
+11. Apply opacity correction: `val_color.a = 1.0-pow((1.0 - val_color.a), dt_scale);` [S3, unofficial].
+12. Composite color: `color.rgb += (1.0 - color.a) * val_color.a * val_color.rgb;` [S3, unofficial].
+13. Composite alpha: `color.a += (1.0 - color.a) * val_color.a;` [S3, unofficial].
+14. Early ray termination: `if (color.a >= 0.95) break;` [S3, unofficial].
+15. Advance position: `p += ray_dir * dt;` [S3, unofficial].
+**Layout:**
+*   Uniforms: `highp sampler3D gradients`, `highp sampler2D colormap`, `ivec3 volume_dims`, `float dt_scale` [S3, unofficial].
+
+### Toneshading
+**Definition:** A depth perception improvement technique that manipulates color based on illumination, simulating warm light on surfaces facing the light source and cool light on the opposite side [S4, unofficial].
+**Steps:**
+1.  Modulate each voxel's color with a lighting texture that manipulates color temperature [S4, unofficial].
+2.  Apply yellow color values to the warm side (facing the light) and blue color values to simulate cold colors on the opposite side [S4, unofficial].
+3.  Interpolate color values in the middle regions between the warm and cold sides [S4, unofficial].
+
+### Oriented Fading
+**Definition:** A technique that emphasizes the orientation of volume objects by desaturating structures oriented towards the viewer and darkening/saturating those oriented away [S4, unofficial].
+**Steps:**
+1.  Modify the color, saturation, value, and transparency of a given volume sample based on the volumetric gradient orientation relative to the viewer [S4, unofficial].
+
+## Background
+The concept of direct volume rendering was introduced by Levoy, who established the foundational pipeline of interpolation, classification (transfer functions), and front-to-back compositing [S2, unofficial]. Early approaches did not provide shading, leading to "cloud-like" images. VanGelder and Kim introduced pre-shading techniques, while Meißner et al. enabled direct diffuse illumination, though often at the cost of performance due to multiple rasterization passes [S1, book]. Levoy also formalized the use of Phong shading combined with depth cueing to enhance depth perception in volumes [S2, unofficial]. The emergence of advanced PC graphics hardware allowed for texture-mapped volume rendering, enabling real-time interaction with programmable transfer functions and shading models [S1, book]. Non-photorealistic techniques, such as cel shading and toneshading, were later developed to improve spatial orientation and aesthetic appeal [S4, unofficial].
+
+## Sources
+[S1] PDF Volume Visualization and Volume Graphics, https://www3.cs.stonybrook.edu/~mueller/teaching/cse332/volvisChapter.pdf, fetched 2026-10-28 (book)
+[S2] Direct volume rendering ray casting, https://slidetodoc.com/direct-volume-rendering-dvr-raycasting-jian-huang-this/, fetched 2026-10-29 (unofficial)
+[S3] rordenlab/MRIcroWeb, https://github.com/rordenlab/MRIcroWeb, fetched 2026-10-26 (unofficial)
+[S4] [PDF] Non-Photorealistic Volume Visualization, https://www.cg.tuwien.ac.at/courses/Seminar/SS2003/Ergebnisse/LangerCarolineArtnerMartin_NPVR.pdf, fetched 2026-10-26 (unofficial)

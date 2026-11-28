@@ -1,0 +1,126 @@
+--- v001.md
++++ v002.md
+@@ -4,24 +4,23 @@
+ 
+ ## Overview
+-Point-Based Chunk Rendering is a technique that renders volumetric data by representing occupied voxels as point primitives (`GL_POINTS`) whose sizes are dynamically scaled based on their distance to the image plane, approximating surface continuity [S1, S2, unofficial]. It distinguishes itself from sibling methods like [Naive Voxel Rendering](1103-naive-voxel-rendering.md) by avoiding fixed-size cubes or manual `glPointSize` calls; instead, it enables the use of vertex arrays and display lists for high-performance rendering by precomputing geometry while handling distance attenuation in the shader [S1, unofficial].
++Point-Based Chunk Rendering is a technique that renders volumetric data by representing occupied voxels as point primitives (`GL_POINTS`) whose sizes are dynamically scaled based on their distance to the image plane, approximating surface continuity [S1, unofficial]. It distinguishes itself from sibling methods by avoiding fixed-size cubes and manual `glPointSize` calls; instead, it enables the use of vertex arrays and display lists for high-performance rendering by precomputing geometry while handling distance attenuation in the shader [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- **Input:** A chunk of voxel data (typically $32^3$ or similar block size) containing occupied and empty cells.
+-- **Output:** A stream of point primitives submitted to the GPU for rasterization.
++- **Input:** A chunk of voxel data (typically $32^3$ or similar block size) containing occupied and empty cells [S2, unofficial].
++- **Output:** A stream of point primitives submitted to the GPU for rasterization [S2, unofficial].
+ 
+ **Data Structures:**
+ The method relies on a Vertex Array Object (VAO) storing attributes for each occupied voxel in the chunk [S2, unofficial]. The layout is defined as follows:
+-- **Attribute 0 (Position):** 3 floats (`vec3`), stride `3*sizeof(float)`, offset `0`. Represents the world-space center of the voxel.
+-- **Attribute 1 (Normal/Extents):** 3 floats (`vec3`), stride `3*sizeof(float)`, offset `0`. Used for lighting or determining point scale factors [S2, unofficial].
+-- **Attribute 2 (Texcoords):** 2 floats (`vec2`), stride `2*sizeof(float)`, offset `0`. Used for texture mapping if the points represent textured surfaces [S2, unofficial].
+-
++- **Attribute 0 (Position):** 3 floats (`vec3`), stride `12` bytes, offset `0` [S2, unofficial].
++- **Attribute 1 (Normal/Extents):** 3 floats (`vec3`), stride `12` bytes, offset `0` [S2, unofficial].
++- **Attribute 2 (Texcoords):** 2 floats (`vec2`), stride `8` bytes, offset `0` [S2, unofficial].
+ Buffers are uploaded with `GL_STATIC_DRAW` [S2, unofficial].
+ 
+ **Steps:**
+-1. **Voxel to Point Conversion:** Iterate through the chunk's voxel grid. For each occupied voxel, calculate its world-space position $P_{world}$ using the transformation defined in [Voxels rasterized as geometry](27-voxels-rasterized-as-geometry.md).
+-2. **Attribute Population:** Populate the VAO buffers with the position, normal, and texture coordinates for each occupied voxel. Empty voxels are skipped.
+-3. **Shader Setup:** Bind the chunk VAO. Set the Model, View, and Projection matrices via shader uniforms [S2, unofficial].
+-4. **Distance Attenuation:** In the vertex shader, calculate the distance $d$ between the vertex position and the camera. Scale the point size $S$ based on this distance to approximate the voxel's physical size in screen space. This replaces the need for `glPointSize`, which is viewpoint-dependent and prevents the use of vertex arrays [S1, unofficial].
++1. **Voxel to Point Conversion:** Iterate through the chunk's voxel grid [S2, unofficial]. For each occupied voxel, calculate its world-space position $P_{world}$ using the transformation $P_{world} = I_{voxel} \times V_{size}$ for unit voxels, as defined in [Voxels rasterized as geometry](27-voxels-rasterized-as-geometry.md) [G].
++2. **Attribute Population:** Populate the VAO buffers with the position, normal, and texture coordinates for each occupied voxel [S2, unofficial]. Empty voxels are skipped [S2, unofficial].
++3. **Shader Setup:** Bind the chunk VAO [S2, unofficial]. Set the Model, View, and Projection matrices via shader uniforms [S2, unofficial].
++4. **Distance Attenuation:** In the vertex shader, calculate the distance $d$ between the vertex position and the camera [G]. Scale the point size $S$ based on this distance to approximate the voxel's physical size in screen space [S1, unofficial]. This replaces the need for `glPointSize`, which is viewpoint-dependent and prevents the use of vertex arrays [S1, unofficial].
+ 5. **Rendering:** Call `glDrawArrays(GL_POINTS, 0, num_occupied_voxels)` [S2, unofficial].
+ 6. **Cleanup:** Unbind the VAO [S2, unofficial].
+@@ -30,47 +29,25 @@
+ ```python
+ def render_chunk(chunk_vao, num_occupied, model_matrix, view_matrix, projection_matrix):
+-    # 1. Bind geometry
+-    bind_vao(chunk_vao)
+-    
+-    # 2. Set uniforms
+-    set_uniform("u_model", model_matrix)
+-    set_uniform("u_view", view_matrix)
+-    set_uniform("u_projection", projection_matrix)
+-    
+-    # 3. Draw points
+-    # The vertex shader handles distance-based scaling internally
+-    draw_arrays(GL_POINTS, 0, num_occupied)
+-    
+-    # 4. Unbind
+-    unbind_vao()
++    # Bind the vertex array object to the graphics pipeline
++    active_vao = chunk_vao
++    # Set model, view, and projection matrices as shader uniforms
++    shader_uniforms["u_model"] = model_matrix
++    shader_uniforms["u_view"] = view_matrix
++    shader_uniforms["u_projection"] = projection_matrix
++    # Issue draw call for point primitives
++    draw_primitives(primitive_type="GL_POINTS", start_index=0, count=num_occupied)
++    # Unbind the vertex array object
++    active_vao = None
+ ```
+ 
+-**Vertex Shader Logic (Conceptual):**
+-```glsl
+-// Input attributes
+-in vec3 a_position;
+-in vec3 a_normal;
+-in vec2 a_texcoord;
+-
+-uniform mat4 u_model;
+-uniform mat4 u_view;
+-uniform mat4 u_projection;
+-
+-// Uniform for base point size (derived from voxel size)
+-uniform float u_base_point_size;
+-
+-void main() {
+-    vec4 world_pos = u_model * vec4(a_position, 1.0);
+-    vec4 view_pos = u_view * world_pos;
+-    
+-    // Calculate distance to camera
+-    float dist = length(view_pos.xyz);
+-    
+-    // Scale point size inversely with distance to maintain apparent size
+-    // This approximates the voxel's physical extent on the screen
+-    gl_PointSize = u_base_point_size * (1.0 / dist); 
+-    
+-    gl_Position = u_projection * view_pos;
+-}
++**Vertex Shader Logic (Python-like):**
++```python
++def vertex_shader(a_position, a_normal, a_texcoord, model_matrix, view_matrix, projection_matrix, base_point_size):
++    world_pos = model_matrix * vec4(a_position, 1.0)
++    view_pos = view_matrix * world_pos
++    dist = length(view_pos.xyz)
++    gl_PointSize = base_point_size * (1.0 / dist)
++    gl_Position = projection_matrix * view_pos
++    return gl_PointSize, gl_Position
+ ```
+ 
+@@ -78,16 +55,16 @@
+ - **Empty Meshes:** Meshes must be updated on the GPU even if they are empty to prevent floating quads or artifacts when destroying blocks near chunk borders [S2, unofficial].
+ - **Quality vs. Speed:** While point generation is significantly faster than triangle generation (e.g., Marching Cubes), the image quality is generally not superior to Marching Cubes [S1, unofficial].
+-- **Precision:** Floating-point precision in position calculations may affect alignment at chunk boundaries [S2, unofficial].
++- **Precision:** Not given in the sources.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Primitive generation is $O(N)$ where $N$ is the number of occupied voxels. Rendering is faster than triangle-based methods (like [Naive Voxel Rendering](1103-naive-voxel-rendering.md)) because point primitives are simpler to process by the GPU [S1, unofficial].
++- **Time Complexity:** Primitive generation is $O(N)$ where $N$ is the number of occupied voxels [G]. Rendering is faster than triangle-based methods because point primitives are simpler to process by the GPU [S1, unofficial].
+ - **Memory Complexity:** $O(N)$ for storing vertex attributes (position, normal, texcoord) for each occupied voxel [S2, unofficial].
+ - **Strengths:** High performance for large volumes; enables use of vertex arrays/display lists; simple implementation [S1, unofficial].
+ - **Limitations:** Lower visual quality compared to surface-based methods like Marching Cubes; potential for gaps or artifacts if point size attenuation is not tuned correctly [S1, unofficial].
+-- **When to use:** When rendering speed is critical and approximate surface visualization is acceptable.
+-- **When not to use:** When high-fidelity surface details are required.
++- **When to use:** When rendering speed is critical and approximate surface visualization is acceptable [G].
++- **When not to use:** When high-fidelity surface details are required [G].
+ 
+ ## Background
+-This technique was proposed in "Hardware Accelerated Point Rendering of Isosurfaces" (2003) as an alternative to triangle-based surface visualization [S1, unofficial]. It addresses the limitation of OpenGL's `glPointSize` being viewpoint-dependent, which prevents precomputation of point sizes in vertex arrays. The method leverages hardware acceleration to scale points based on distance, enabling fast rendering of volumetric data [S1, unofficial]. It is often used in voxel engines and real-time visualization applications where performance outweighs the need for perfect surface continuity [S2, unofficial].
++This technique was proposed in "Hardware Accelerated Point Rendering of Isosurfaces" (2003) as an alternative to triangle-based surface visualization [S1, unofficial]. It addresses the limitation of OpenGL's `glPointSize` being viewpoint-dependent, which prevents precomputation of point sizes in vertex arrays [S1, unofficial]. The method leverages hardware acceleration to scale points based on distance, enabling fast rendering of volumetric data [S1, unofficial].
+ 
+ ## Sources

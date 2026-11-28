@@ -1,0 +1,103 @@
+# Explicit Surface Representation
+
+Also called: Parametric surface, Explicit function surface
+
+## Overview
+Explicit surface representation defines a 3D surface as the graph of a function mapping a 2D domain directly to 3D Euclidean space [S1, unofficial]. It solves the problem of defining geometry where the surface position is uniquely determined by input parameters, avoiding the ambiguity of implicit zero-level sets [S1, unofficial]. Unlike implicit representations that define volume occupancy or density, explicit representations directly output coordinates, making them suitable for surfaces that can be parameterized without self-intersection in the chosen domain [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A set of 2D domain coordinates $\mathbf{u} = (u, v)$ or $\mathbf{x} = (x, y)$ within a defined domain $\tilde{\mathbf{D}}$.
+- Output: A 3D coordinate vector $\mathbf{p} \in \mathbb{R}^3$ representing the point on the surface.
+
+**Data Structures:**
+- The surface $S_{explicit}$ is defined mathematically as a set of points. In implementation, this is typically realized as a function $f_{explicit}$ or a parametric function $f_{parametric}$ that computes $\mathbf{p}$ from $\mathbf{u}$.
+- For discrete approximations (e.g., heightmaps), the domain is discretized into a grid, and the output is a 2D array of height values or 3D vertex positions.
+
+**Formulas:**
+The explicit surface using an explicit function $f_{explicit}(\cdot) \in \mathbb{R}$ in Euclidean space is defined as [S1, unofficial]:
+$$
+S_{explicit} = \left\{ \begin{pmatrix} x \\ y \\ f_{explicit}(x, y) \end{pmatrix} \in \mathbb{R}^3 \right\}
+$$
+This can be generalized as a parametric function $f_{parametric}(\cdot) \in \mathbb{R}^3$ [S1, unofficial]:
+$$
+S_{explicit}^* = \left\{ \begin{pmatrix} u \\ v \\ f_{parametric}(u, v) \end{pmatrix} \in \mathbb{R}^2 \right\}
+$$
+Note: The second formula in the source [S1, unofficial] appears to denote the parametric generalization where the output is a 3D vector derived from 2D parameters, though the notation $\in \mathbb{R}^2$ in the source likely refers to the domain dimensionality or is a typo for $\mathbb{R}^3$ in the set definition context. Standard parametric surfaces map $\mathbb{R}^2 \to \mathbb{R}^3$.
+
+**Steps:**
+1. Define the 2D domain $\tilde{\mathbf{D}}$ (e.g., a square $[0,1]^2$ or a rectangular grid).
+2. For each point $\mathbf{u} = (u, v)$ in the domain:
+   a. Evaluate the explicit function $f_{explicit}(u, v)$ or parametric function $f_{parametric}(u, v)$.
+   b. Construct the 3D point $\mathbf{p} = (u, v, f(u, v))$ or $\mathbf{p} = f_{parametric}(u, v)$.
+3. Store or render the resulting set of points $\mathbf{p}$.
+
+**Parameters:**
+- Domain resolution: The granularity of the input grid $(u, v)$.
+- Function type: Linear, polynomial, or neural network-based $f$.
+
+**Edge Cases and Pitfalls:**
+- **Self-intersection:** Explicit functions $z = f(x,y)$ cannot represent overhangs or closed surfaces (like spheres) without multi-valued functions or multiple patches [S1, unofficial].
+- **Domain Restriction:** The domain $\tilde{\mathbf{D}}$ must be carefully chosen to avoid singularities or undefined regions [S1, unofficial].
+- **Precision:** Floating-point errors in $f_{explicit}$ can cause gaps in dense point clouds if not interpolated or meshed properly.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_explicit_surface(f_explicit, domain_grid):
+    """
+    Computes 3D points for an explicit surface given a function and domain grid.
+    
+    Args:
+        f_explicit: A callable function f(x, y) -> z.
+        domain_grid: A 2D array of shape (H, W) containing x and y coordinates.
+                     Or a tuple of (x_coords, y_coords) from meshgrid.
+                     
+    Returns:
+        points: A 3D array of shape (H, W, 3) containing [x, y, z] coordinates.
+    """
+    # Assuming domain_grid provides x and y coordinates
+    # If domain_grid is a meshgrid of x and y:
+    x, y = domain_grid
+    
+    # Evaluate the explicit function to get z
+    z = f_explicit(x, y)
+    
+    # Stack x, y, z into 3D points
+    # x, y, z are all 2D arrays of shape (H, W)
+    # We need to reshape or stack to get (H, W, 3)
+    points = np.stack((x, y, z), axis=-1)
+    
+    return points
+```
+
+## Subtopics
+
+### [Ray Representation](19057-ray-representation.md)
+Ray Representation (Ray-Rep) encodes 3D solid objects as a set of "rods" (rays) penetrating the object along each of the three principal coordinate directions, storing intersection points (surfels) and unit normals at these points. It solves the problem of performing fast constructive solid geometry (CSG) and boolean operations on complex meshes by reducing them to simple segment operations on rays, while preserving sharp corners and edges that standard voxel grids often smooth out. Unlike voxel grids, which require checking all cells, Ray-Rep allows skipping empty space and identifying only cells intersecting the surface, making it superior for adaptive triangulation and real-time editing of high-resolution details.
+
+### Noise Jittering for Training Stability
+Adds Gaussian noise to input points during training to jitter albedo and BRDF property predictions, improving robustness and preventing overfitting to exact surface locations [S2, unofficial]. If `noise_std > 0`, generate Gaussian noise tensor scaled by `noise_std` and add it to original points. Query the implicit surface for noise-augmented points. Compute albedo and BRDF properties for both original and noisy points. Return all four tensors [S2, unofficial]. Parameters include `noise_std` (standard deviation of Gaussian noise), `albedo_scale` (multiplicative scaling factor for albedo), and `albedo_bias` (additive bias for albedo) [S2, unofficial].
+
+### Point Cloud Representation
+A representation using collections of points to model shapes in the 3D space [S3]. Their major downside is that they do not contain any topological information [S3]. They can be integrated into neural networks and are a common choice for data representation [S3]. Point cloud-based approaches have lower computation cost than volumetric methods but fail to properly render surface information such as the color of a rendered pixel in case of occlusion [S3].
+
+### Parametric Surface Terrain
+Using parametric surfaces such as NURBS to create smooth terrains with little permanent storage requirements [S4, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** Evaluation of $f_{explicit}$ is $O(1)$ per point. Generating a dense surface requires $O(N)$ evaluations for $N$ domain points.
+- **Memory Complexity:** $O(N)$ to store the resulting points or mesh vertices.
+- **Strengths:** Direct coordinate output; efficient for surfaces that are functions of 2D parameters (e.g., heightmaps); no need for marching cubes or root-finding algorithms [S1, unofficial].
+- **Limitations:** Cannot represent closed surfaces or overhangs with a single-valued function; requires multiple patches or parameterizations for complex topology [S1, unofficial].
+- **When to use:** Terrain generation, height-based modeling, or any surface that can be unambiguously projected onto a 2D plane without self-intersection.
+
+## Background
+Explicit surface representations are a fundamental concept in computer graphics and geometric modeling, dating back to early CAD systems. They are contrasted with implicit representations (zero-level sets) and parametric surfaces in general literature [S1, unofficial]. The distinction between explicit $z=f(x,y)$ and general parametric $\mathbf{p}(u,v)$ is highlighted in modern neural rendering contexts to clarify the domain and range of the defining functions [S1, unofficial].
+
+## Sources
+[S1] Advances in Neural Rendering, https://doi.org/10.48550/arxiv.2111.05849, fetched 2026-10-26 (unofficial)
+[S2] ziyc/L-Tracing, https://github.com/ziyc/L-Tracing, fetched 2026-10-26 (unofficial)
+[S3] Vision-based Neural Scene Representations for Spacecraft, https://doi.org/10.1109/cvprw53098.2021.00228, fetched 2026-10-26
+[S4] Heightmap, Voxel, Polygon (geometry) terrains, https://gamedev.stackexchange.com/questions/15573/heightmap-voxel-polygon-geometry-terrains, fetched 2026-10-26 (unofficial)

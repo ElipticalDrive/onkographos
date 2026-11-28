@@ -1,0 +1,85 @@
+# Step Size and Termination Rules
+
+Also called: Ray Marching Parameters and Compositing
+
+## Overview
+Step Size and Termination Rules define the control flow logic for ray-marching loops, determining how far a ray advances per iteration ($\Delta t$) and when the loop halts [G]. This family solves the trade-off between computational efficiency (skipping empty space) and visual fidelity (avoiding missed geometry or aliasing) [G]. It sets itself apart from specific implementations like [Sphere Tracing](1674-sphere-tracing.md) or [Standard Constant Step Ray Marching](1080-standard-constant-step-ray-marching.md) by providing the general framework for adaptive stepping, early termination, and safety constraints applicable to both Signed Distance Fields (SDFs) and volumetric density fields [G].
+
+## Shared principles
+All methods in this family operate on a ray defined by origin $\mathbf{o}$ and normalized direction $\mathbf{d}$, parameterized by accumulated distance $t$ [G]. The core loop evaluates a scene function (SDF, density field, or volume texture) at the current position $\mathbf{p} = \mathbf{o} + t\mathbf{d}$ to determine the next step size $\Delta t$ and check for termination [G].
+
+**Termination Conditions:**
+1. **Surface Hit:** The ray has intersected the target geometry [G]. For SDFs, this is typically $|f(\mathbf{p})| < \epsilon$ or $f(\mathbf{p}) \le 0$ [G]. For volumes, early termination often relies on an accumulated opacity threshold (e.g., $\alpha_{acc} \ge 0.995$) [S1, unofficial].
+2. **Escape/Miss:** The ray has traveled beyond a maximum distance $t_{max}$ or exceeded a maximum iteration count $N_{max}$ [G].
+3. **Early Termination (Volumes):** Accumulated opacity $\alpha_{acc}$ exceeds a threshold, or accumulated transmission falls below a minimum threshold, allowing the ray to stop early as further contributions are negligible [G].
+
+**Step Size Determination:**
+The step size $\Delta t$ is computed based on the local scene properties [G].
+* **SDF-based:** $\Delta t$ is often derived from the SDF value $f(\mathbf{p})$, potentially scaled by a relaxation factor or Lipschitz constant $\lambda$ [G].
+* **Volume-based:** $\Delta t$ may be fixed, adaptive based on density gradients, or constrained by minimum/maximum bounds to prevent aliasing or excessive computation [G].
+* **Safety:** Steps must be chosen to ensure the ray does not penetrate the surface or skip over significant volumetric features, often requiring conservative clamping [G].
+
+**Pseudocode Structure:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def ray_march_loop(ray_origin, ray_direction, scene_func, max_dist, max_steps, epsilon, min_step=1e-6, max_step=1.0):
+    """
+    Generic ray marching loop with adaptive step size and termination.
+    """
+    t = 0.0
+    for i in range(max_steps):
+        if t > max_dist:
+            return False, t
+        
+        p = ray_origin + ray_direction * t
+        val = scene_func(p)
+        
+        # Termination: Surface Hit (SDF)
+        if abs(val) < epsilon:
+            return True, t
+            
+        # Termination: Early Exit (Volume specific) - Not given in the sources.
+        # if is_early_exit(val, t):
+        #     return False, t
+            
+        # Step Size Calculation
+        step = val
+        # Safety Clamp
+        step = max(min_step, min(max_step, step))
+        
+        t += step
+        
+    return False, t
+```
+
+## Subtopics
+
+### [Standard Constant Step Ray Marching](1080-standard-constant-step-ray-marching.md)
+Standard Constant Step Ray Marching uses a predefined constant step size $\Delta t$, simplifying implementation but requiring careful tuning to avoid aliasing or missed details. It differs from [Sphere Tracing](1674-sphere-tracing.md) by ignoring local geometry constraints for performance, and from [SDF Ray Marching with Grid Lookup](5017-sdf-ray-marching-with-grid-lookup.md) by not using interpolation for precise intersection detection. Choose when scene scale is uniform and computational overhead of adaptive stepping is undesirable.
+
+### [Sphere Tracing](1674-sphere-tracing.md)
+Sphere Tracing uses the SDF value at the current position as a safe lower bound for the distance to the nearest surface, allowing the ray to "jump" forward by that exact distance. This guarantees that the ray never overshoots or penetrates the surface, provided the function satisfies the Lipschitz condition. It is distinguished from its siblings by its adaptive step sizing which significantly reduces the number of function evaluations required to converge on a surface. Choose for implicit surfaces where guaranteed no-overshoot is required.
+
+### [Step Size Optimization](2054-step-size-optimization.md)
+Step Size Optimization encompasses techniques that dynamically determine the distance $\Delta t$ to advance a ray, replacing fixed-step methods to balance computational cost and visual fidelity [G]. It differs from [Sphere Tracing](1674-sphere-tracing.md) in that while sphere tracing strictly uses the SDF value as a lower bound for the step (often with a relaxation factor), step size optimization includes broader strategies like error estimation, gap limiting, and integration-based adaptive stepping that may not rely solely on the geometric distance bound [G]. Choose when scene complexity varies significantly along the ray.
+
+### [Adaptive Minimum Step Size](4553-adaptive-minimum-step-size.md)
+Adaptive Minimum Step Size dynamically increases the minimum sampling interval ($\Delta t_{min}$) based on the ray's distance from the camera and the accumulated density along the path. It solves the problem of excessive sampling in regions where visual detail is less critical (far from the camera) or where light contribution is negligible (behind dense volumes), thereby reducing computational cost without significantly degrading image quality. Unlike fixed step sizes, it allows for coarser sampling in the background and deep within volumetric structures. Choose for large, sparse volumetric scenes.
+
+### [Termination Criteria](17794-termination-criteria.md)
+Termination Criteria define the conditions under which a ray-marching loop halts, ensuring the algorithm returns a valid intersection point or correctly identifies a miss without infinite iteration [G]. It sets itself apart from sibling methods like [Sphere Tracing](1674-sphere-tracing.md) by focusing on the general control flow logic applicable to both Signed Distance Fields (SDFs) and volumetric density fields, rather than the specific geometric step-size constraints of sphere tracing or the fixed-step simplicity of constant marching [G]. Choose when robust loop exit conditions are needed across different rendering backends.
+
+### Cone Step Mapping
+Cone step mapping and relaxed cone step mapping are space leaping acceleration techniques used in ray marching [S2, unofficial]. They provide a safety distance that allows the ray to move along the path without intersecting geometry, or without intersecting and then leaving geometry so that it misses it [S2, unofficial].
+
+### Conservative Sphere Tracing Step Sizing
+Conservative Sphere Tracing Step Sizing is a fix for volumetric cloud rendering where sphere tracing takes overly aggressive step sizes, skipping cloud boundaries and leaving circular/scalloped density artifacts [S3, unofficial]. It resolves issues by clamping the pre-computed 2D organic cell SDF to a conservative maximum of `30000.0 * uWorldScale`, reducing the sphere tracing step size multiplier from `0.8` to `0.4`, and clamping the empty space skipping step size to a maximum of `2000.0 * worldScale` [S3, unofficial]. In empty regions of the weather map, uncapped SDF values (up to 1e14) caused bilinear filtering to interpolate extremely large values near cloud edges, while an aggressive step multiplier of 0.8 with no upper bound resulted in rays jumping past the actual cloud surface [S3, unofficial].
+
+## Background
+The concept of step size and termination is fundamental to all ray-marching techniques [G]. Early implementations often used fixed steps due to simplicity, but this led to aliasing and missed geometry in complex scenes [G]. The introduction of Sphere Tracing by John Hart provided a mathematically safe adaptive step size based on SDFs [S2, unofficial]. Subsequent developments, such as those in volumetric cloud rendering, introduced adaptive minimum step sizes to optimize performance in large, sparse volumes [S1, unofficial]. Specific implementations, like the conservative step sizing fixes for volumetric clouds, highlight the ongoing need to balance aggressive space-leaping with visual fidelity [S3, unofficial].
+
+## Sources
+[S1] steubengineer/imaginaryVolumes, https://github.com/steubengineer/imaginaryVolumes, fetched 2026-10-26 (unofficial)
+[S2] What is Ray Marching? Is Sphere Tracing the same thing?, https://computergraphics.stackexchange.com/questions/161, fetched 2026-10-29 (unofficial)
+[S3] Fix volumetric cloud SDF sphere march step sizing, https://github.com/ricecake/boidsish/pull/659, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,282 @@
+# CPDDF-based SI3DR
+
+Also called: CPDDF reconstruction, Conditional PDDF Reconstruction, SI3DR with DDFs, Single-Image 3D Reconstruction (SI3DR), Single-Image 3D Reconstruction with CPDDF
+
+## Overview
+CPDDF-based SI3DR is a method for reconstructing 3D shapes from a single RGB image by predicting a latent shape vector and camera parameters, then rendering geometry via a Conditional Probabilistic Directed Distance Field (CPDDF) [S1, S2]. It differs from direct point cloud or mesh prediction methods by using a differentiable DDF decoder that allows for viewshed-based rendering and explicit sampling, enabling the extraction of watertight surfaces from a single view [S2].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A single RGB image $I$ of size $128 \times 128$ with an alpha channel $I_\alpha$ [S1, S2].
+*   **Outputs:** A predicted latent shape vector $z_s$, a predicted camera parameter vector $\Pi_b$, and a CPDDF model capable of rendering depth $d(p, v|z_s)$ and visibility $\xi(p, v|z_s)$ for any viewpoint [S2].
+
+**Data Structures:**
+1.  **Encoder Output:** A tuple $(z_s, \Pi_b)$ where:
+    *   $z_s \in \mathbb{R}^{512}$: Latent shape vector [S1].
+    *   $\Pi_b \in \mathbb{R}^3$: Predicted camera parameters, representing extrinsic position as (azimuth, elevation, radius) [S1].
+2.  **CPDDF Decoder:** A modulated SIREN network [S1].
+    *   **Architecture:** Layer sizes $[512, 512, 512, 256, 256, 256, 256]$ [S1].
+    *   **Activation:** Uses softplus activation when multiplying the modulator (latent vector) to intermediate features [S1].
+    *   **Input:** 3D point $x \in \mathbb{R}^3$ and latent vector $z_s$.
+    *   **Output:** Depth $d$ and visibility $\xi$ [S2].
+3.  **Sampling Points:**
+    *   **Training:** Oriented points sampled from the shape surface. For types A and U: 1.2K points per shape. For types S, B, T, O: 300 points per shape [S1].
+    *   **Explicit Sampling (Inference):** Oversampled points sorted by visibility to extract the final point cloud [S1].
+
+**Numbered Steps:**
+
+1.  **Encoding:** Pass the input image $I$ through two ResNet-18 networks (one for camera, one for shape) to obtain $(z_s, \Pi_b) = E(I)$ [S2].
+2.  **Camera Constraint:** Z-score normalize the elements of $\Pi_b$ based on training set statistics. Restrict $\Pi_b$ to the range of parameters observed in the dataset [S1].
+3.  **CPDDF Decoding:** For a given ray defined by camera center $p$ (derived from $\Pi_b$) and direction $v$, query the CPDDF conditioned on $z_s$ to get depth $d_b(p, v|z_s)$ and visibility $\xi_b(p, v|z_s)$ [S2].
+4.  **Explicit Sampling (for Point Cloud Extraction):**
+    *   Sample points uniformly in the bounding box.
+    *   Oversample by factor $(1 + \epsilon_p)$ where $\epsilon_p = 0.1$ [S1].
+    *   For each point, compute visibility $\xi(p, v_b^*(p))$ using the CPDDF.
+    *   Sort points by visibility and return the top $n_p$ points to ensure only visible surface points are included [S1].
+5.  **Rendering for Loss:** Render a visibility mask $R_\xi(z_s|\Pi_b)$ at resolution $64 \times 64$ [S1].
+
+**Formulas:**
+
+*   **Camera Loss:**
+    $$ L_\Pi = \|\Pi_g - \Pi_b\|_2^2 $$
+    where $\Pi_g$ is the ground truth camera and $\Pi_b$ is the predicted camera [S2].
+
+*   **Mask Matching Loss:**
+    $$ L_M = \text{BCE}(I_\alpha, R_\xi(z_s|\Pi_b)) $$
+    where $I_\alpha$ is the input alpha channel and $R_\xi$ is the rendered visibility mask [S2].
+
+*   **Visibility Variance Loss:**
+    $$ \mathcal{L}_{V,\xi} = \gamma_{V,\xi} \xi(p, v) [1 - \xi(p, v)] $$
+    with $\gamma_{V,\xi} = 0.25$ [S1].
+
+*   **Shape Fitting Loss ($L_S$):**
+    Combines multiple terms with weights $\gamma_d = 5, \gamma_\xi = 10, \gamma_n = 10, \gamma_V = 1, \gamma_{E,d} = 0.1, \gamma_{E,\xi} = 0.25, \gamma_T = 0.1$ [S1]. (Specific terms defined in [S1] eq. 2, involving depth fitting, normal consistency, and Eikonal regularization).
+
+*   **Total Objective:**
+    $$ L_{SI3DR} = \gamma_{R,S} L_S + \gamma_{R,\Pi} L_\Pi + \gamma_{R,M} L_M $$
+    with $\gamma_{R,S} = 1, \gamma_{R,\Pi} = 5, \gamma_{R,M} = 10$ [S1, S2].
+
+*   **Camera Correction (Optional):**
+    $$ \Pi_b^\nabla = \arg\min_\Pi L_M $$
+    Performed via gradient descent on the input image alpha channel starting from $\Pi_b$ [S2].
+
+**Parameters:**
+*   **Optimizer:** AdamW [S1].
+*   **Iterations:** 100K [S1].
+*   **Batch Size:** 32 shapes [S1].
+*   **Latent Dimension:** 512 [S1].
+*   **SIREN Initializer:** $\omega_0 = 1$ [S1].
+*   **Weight Decay:** $10^{-6}$ for camera predictor, $10^{-3}$ for shape predictor [S1].
+*   **Sampling Points (Evaluation):** 5000 (L) or 2466 (S) points [S2].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torchvision import models
+
+class CPDDFDecoder(nn.Module):
+    """Modulated SIREN for CPDDF."""
+    def __init__(self, latent_dim=512):
+        super().__init__()
+        # Layer sizes: [512, 512, 512, 256, 256, 256, 256]
+        # Input: 3D point (3) + Latent (512) -> 515
+        # Note: SIREN layers typically take concatenated input.
+        # Architecture details from [S1]: Modulated SIREN.
+        self.layers = nn.ModuleList([
+            nn.Linear(3 + latent_dim, 512),
+            nn.Linear(512, 512),
+            nn.Linear(512, 512),
+            nn.Linear(512, 256),
+            nn.Linear(256, 256),
+            nn.Linear(256, 256),
+            nn.Linear(256, 256), # Final layer outputs depth and visibility
+        ])
+        self.init_weights()
+
+    def init_weights(self):
+        # SIREN initialization omega_0 = 1
+        for layer in self.layers:
+            nn.init.uniform_(layer.weight, -1/3, 1/3)
+            nn.init.zeros_(layer.bias)
+
+    def forward(self, x, z_s):
+        """
+        x: (N, 3) 3D points
+        z_s: (N, 512) latent vector
+        Returns: depth (N,), visibility (N,)
+        """
+        # Concatenate point and latent vector
+        # Note: In modulated SIREN, latent vector modulates intermediate features.
+        # Simplified implementation based on [S1] description.
+        h = torch.cat([x, z_s], dim=-1)
+        
+        for i, layer in enumerate(self.layers):
+            h = layer(h)
+            if i < len(self.layers) - 1:
+                # Apply softplus activation when multiplying modulator
+                # Assuming z_s is broadcasted or projected appropriately.
+                # Standard modulation: h = softplus(W * z_s) * h or similar.
+                # [S1] says "softplus activation instead of ReLU, when multiplying 
+                # the modulator to the intermediate features".
+                # We assume a modulation term m derived from z_s.
+                # For simplicity, we apply softplus to the pre-activation or 
+                # modulate the feature. 
+                # Precise modulation formula not fully detailed in notes, 
+                # but standard SIREN modulation is often: h = softplus(W * z) * h
+                # Here we approximate the structure.
+                # G: Assuming standard modulation pattern for SIREN.
+                modulation = torch.sigmoid(h) # Placeholder for specific modulation logic
+                h = torch.nn.functional.softplus(h) * (1 + modulation) 
+                # Note: The exact modulation mechanism (how z_s interacts with h) 
+                # is not explicitly defined in the provided text beyond "modulated SIREN".
+                # This step is a best-effort implementation of the described architecture.
+            else:
+                # Final layer outputs depth and visibility
+                # Split into two outputs
+                pass
+        
+        # Final layer output split
+        out = self.layers[-1](h)
+        depth = out[..., :1]
+        visibility = out[..., 1:]
+        return depth.squeeze(-1), visibility.squeeze(-1)
+
+class Encoder(nn.Module):
+    """Two ResNet-18 networks for camera and shape."""
+    def __init__(self, latent_dim=512):
+        super().__init__()
+        self.camera_net = models.resnet18()
+        self.camera_net.fc = nn.Linear(512, 3) # Azimuth, Elevation, Radius
+        
+        self.shape_net = models.resnet18()
+        self.shape_net.fc = nn.Linear(512, latent_dim)
+
+    def forward(self, x):
+        # x: (B, 4, 128, 128) RGBA image
+        # Process through both networks
+        # G: Assuming standard ResNet forward pass on RGB/RGBA
+        # Note: ResNet expects 3 channels. We might need to handle 4 channels.
+        # [S1] says "128x128 RGBA images".
+        # We assume the encoder handles the 4 channels appropriately (e.g., 
+        # first conv layer adapted or alpha ignored).
+        
+        # Simplified: assume input is converted to 3 channels or encoder handles 4
+        cam_feat = self.camera_net(x)
+        shape_feat = self.shape_net(x)
+        
+        pi_b = self.camera_net.fc(cam_feat)
+        z_s = self.shape_net.fc(shape_feat)
+        
+        return z_s, pi_b
+
+def compute_camera_loss(pi_g, pi_b):
+    """L2 loss between ground truth and predicted camera."""
+    return torch.mean((pi_g - pi_b) ** 2)
+
+def compute_mask_loss(I_alpha, R_xi):
+    """BCE loss between input alpha and rendered visibility."""
+    return nn.BCELoss()(I_alpha, R_xi)
+
+def explicit_sampling(points, cpddf, z_s, epsilon_p=0.1, n_p=2466):
+    """
+    Oversample points, compute visibility, and return top n_p visible points.
+    """
+    # Oversample
+    n_oversample = int((1 + epsilon_p) * n_p)
+    # G: Assuming points are sampled uniformly in [-1, 1]^3
+    # points shape: (n_oversample, 3)
+    
+    # Compute visibility for all oversampled points
+    # cpddf returns (depth, visibility)
+    # We need ray direction v for each point relative to camera center p
+    # This requires camera parameters. Assuming they are available in context.
+    # For this function, we assume visibility is computed via the CPDDF query.
+    
+    # G: The visibility xi(p, v) is computed by the CPDDF.
+    # We need to construct rays. 
+    # Let's assume we have a function get_visibility(points, camera_params, z_s)
+    
+    visibilities = get_visibility(points, camera_params, z_s) # Placeholder for CPDDF query
+    
+    # Sort by visibility (descending, assuming higher visibility = more likely surface)
+    # [S1] says "sorted by visibility ... and only the top np points are returned"
+    # to prevent non-visible points.
+    _, indices = torch.sort(visibilities, descending=True)
+    selected_points = points[indices[:n_p]]
+    
+    return selected_points
+
+def train_step(image, pi_g, cpddf, encoder, optimizer):
+    """
+    One training step.
+    """
+    optimizer.zero_grad()
+    
+    # 1. Encode
+    z_s, pi_b = encoder(image)
+    
+    # 2. Camera Loss
+    L_pi = compute_camera_loss(pi_g, pi_b)
+    
+    # 3. Render Visibility Mask
+    # G: Need to render visibility mask R_xi using pi_b and z_s
+    # This involves sampling points on rays from pi_b and querying CPDDF
+    R_xi = render_visibility_mask(pi_b, z_s, resolution=64)
+    
+    # 4. Mask Loss
+    L_m = compute_mask_loss(image[:, 3, :, :], R_xi) # Assuming alpha is channel 3
+    
+    # 5. Shape Loss (L_S)
+    # G: Requires sampling points on the shape and computing DDF fitting losses
+    # This is complex and depends on the specific L_S formulation from [S1] eq. 2
+    L_s = compute_shape_loss(cpddf, z_s, pi_g) # Placeholder
+    
+    # 6. Total Loss
+    gamma_R_S = 1.0
+    gamma_R_Pi = 5.0
+    gamma_R_M = 10.0
+    
+    L_total = gamma_R_S * L_s + gamma_R_Pi * L_pi + gamma_R_M * L_m
+    
+    L_total.backward()
+    optimizer.step()
+    
+    return L_total.item()
+```
+
+**Edge Cases and Pitfalls:**
+*   **Scale Ambiguity:** ShapeNet shapes are normalized by bounding box diagonal, and CPDDF outputs shapes in $[-1, 1]^3$. A scale factor is needed for rendering. At test time, estimate the scale by sampling a point cloud and measuring the diagonal [S1].
+*   **Pose Uncertainty:** Pose estimation errors can cause "blurry" shape parts when the model is uncertain (e.g., for rare shapes) [S2].
+*   **Non-visible Points:** Explicit sampling must oversample and sort by visibility to prevent outputting non-visible points [S1].
+
+## Subtopics
+
+### Neural Depth Renderer as DDF
+Treats a neural depth renderer as a conditional DDF, mapping camera parameters and shapes to depth/visibility images. [Neural Depth Renderer as DDF](9287-neural-depth-renderer-as-ddf.md)
+
+### Probabilistic Directed Distance Fields (PDDF)
+The underlying representation that models depth and visibility probabilistically. [Probabilistic Directed Distance Fields](9286-probabilistic-directed-distance-fields.md)
+
+### Conditional PDDF (CPDDF)
+A PDDF conditioned on a latent shape vector, allowing for shape variation. [Conditional PDDF](9285-conditional-pddf.md)
+
+## Operating characteristics
+*   **Time Complexity:** Rendering with DDF is significantly faster than sphere tracing. DDF takes <0.01 seconds per render, while sphere tracing (DIST) takes ~5.3 seconds, a ~100x speedup [S2].
+*   **Memory Complexity:** The CPDDF decoder has ~25.6 million parameters, similar to the PC-SIREN baseline [S1].
+*   **Performance:** DDF-derived point clouds perform similarly to directly learning point clouds but underperform Pixel2Mesh (P2M) overall. However, they outperform P2M in shape quality when camera prediction error is excluded [S2].
+*   **Strengths:** Fast rendering, differentiable, allows viewshed-based rendering and explicit sampling [S2].
+*   **Limitations:** Sensitive to pose estimation errors, can produce blurry results for rare shapes [S2]. Scale ambiguity requires post-processing [S1].
+
+## Background
+*   **Origin:** Proposed in "Representing 3D Shapes with Probabilistic Directed Distance Fields" (CVPR 2022) [S1] and further detailed in "Probabilistic Directed Distance Fields for Ray-Based Shape Representations" (TPAMI 2025) [S2].
+*   **Development:** Builds on the concept of Directed Distance Fields (DDFs) and Probabilistic DDFs (PDDFs) to enable single-image 3D reconstruction. It uses a modulated SIREN for the CPDDF decoder and ResNet-18 for the encoder [S1, S2].
+*   **Usage:** Used for single-image 3D reconstruction on ShapeNet-v1 data [S1, S2].
+
+## Sources
+[S1] Representing 3D Shapes with Probabilistic Directed Distance Fields, https://doi.org/10.1109/cvpr52688.2022.01874, fetched 2026-10-26
+[S2] Probabilistic Directed Distance Fields for Ray-Based Shape Representations, https://doi.org/10.1109/tpami.2025.3594225, fetched 2026-10-29

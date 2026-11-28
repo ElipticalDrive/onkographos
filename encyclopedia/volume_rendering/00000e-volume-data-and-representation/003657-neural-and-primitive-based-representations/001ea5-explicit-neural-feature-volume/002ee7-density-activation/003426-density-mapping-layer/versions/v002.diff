@@ -1,0 +1,105 @@
+--- v001.md
++++ v002.md
+@@ -4,28 +4,20 @@
+ 
+ ## Overview
+-The Density Mapping Layer derives the volume density $\sigma$ of a spatial sample from its queried feature vector [S1]. It serves as the final activation step in explicit neural feature volume pipelines, converting high-dimensional latent features into scalar density values suitable for volume rendering [S1]. Unlike the parent [Density Activation](2421-density-activation.md) which describes generic softplus or ReLU operations, this layer specifically implements the transformation from the feature grid to the density field, often employing a learned linear or small network projection rather than a fixed element-wise function [S1].
++The Density Mapping Layer derives the volume density $\sigma$ of a spatial sample from its queried feature vector [S1]. It serves as the final activation step in explicit neural feature volume pipelines, converting high-dimensional latent features into scalar density values suitable for volume rendering [S1]. Unlike the parent [Density Activation](2421-density-activation.md) which describes generic softplus or ReLU operations, this layer specifically implements the transformation from the feature grid to the density field using learned projections rather than fixed element-wise functions [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A feature vector $\Phi(\mathbf{x})$ queried from the neural feature volume at position $\mathbf{x}$. The dimension of this vector is determined by the bottleneck size of the preceding network (typically 256 [S1]).
+-*   **Output:** A scalar density value $\sigma(\mathbf{x})$.
++*   **Input:** A feature vector $\Phi(\mathbf{x})$ queried from the neural feature volume at position $\mathbf{x}$ [S1]. The dimension of this vector is determined by the bottleneck size of the preceding network, typically 256 [S1].
++*   **Output:** A scalar density value $\sigma(\mathbf{x})$ [S1].
+ 
+ **Data Structures:**
+-*   **Feature Vector:** A dense vector of floats. In the referenced implementation, the bottleneck feature size is 256 [S1].
+-*   **Parameters:**
+-    *   $\mathbf{W}_\sigma$: Weight matrix or vector.
+-    *   $\mathbf{b}_\sigma$: Bias scalar or vector.
+-    *   If a hidden layer is used: weights and biases for the hidden layer (64 neurons) and the output layer [S1].
++*   **Parameters:** $\mathbf{W}_\sigma$ and $\mathbf{b}_\sigma$ are weight and bias parameters for the linear transform [S2]. For the tiny network variant, additional weights and biases define a hidden layer with 64 neurons and an output layer [S1].
+ 
+ **Steps:**
+-The method varies based on the dataset type, as specified in [S1]:
+-
+-1.  **Linear Transform (Real-world 360 datasets):**
+-    Apply a linear projection from the feature vector to the density value.
++The method varies based on the dataset type [S1]:
++1.  **Linear Transform (Real-world 360 datasets):** Apply a linear transform from the feature vector to the density value [S1].
+     $$ \sigma(\mathbf{x}) = \mathbf{W}_\sigma \Phi(\mathbf{x}) + \mathbf{b}_\sigma $$
+     Where $\mathbf{W}_\sigma$ and $\mathbf{b}_\sigma$ are learned parameters [S2].
+-
+-2.  **Tiny Network (NeRF synthetic datasets):**
+-    Apply a small multi-layer perceptron (MLP) with one hidden layer containing 64 neurons [S1]. The specific activation function for this hidden layer is not explicitly detailed in the provided notes, but GELU is noted as the preferred activation for the main network layers in the same context [S1].
++2.  **Tiny Network (NeRF synthetic datasets):** Apply a small multi-layer perceptron with one hidden layer containing 64 neurons [S1].
+ 
+ **Pseudocode:**
+@@ -34,31 +26,16 @@
+     """
+     Computes density from feature vector.
+-    
+-    Args:
+-        feature_vector: numpy array of shape (D,), where D is feature dimension (e.g., 256).
+-        dataset_type: str, either 'real_world_360' or 'nerf_synthetic'.
+-        params: dict containing 'W_sigma', 'b_sigma', and optionally 'W_hidden', 'b_hidden', 'W_out', 'b_out'.
+-        
+-    Returns:
+-        scalar density value.
++    params dict keys: 'W_sigma' (list of floats), 'b_sigma' (float),
++                      'W_hidden' (list of 64 lists of floats), 'b_hidden' (list of 64 floats),
++                      'W_out' (list of 64 floats), 'b_out' (float).
+     """
+     if dataset_type == 'real_world_360':
+-        # Linear transform: sigma = W * phi + b
+-        # W_sigma shape: (1, D), b_sigma shape: (1,) or scalar
+-        density = np.dot(params['W_sigma'], feature_vector) + params['b_sigma']
++        density = sum(w * f for w, f in zip(params['W_sigma'], feature_vector)) + params['b_sigma']
+     elif dataset_type == 'nerf_synthetic':
+-        # Tiny network with one hidden layer (64 neurons)
+-        # Hidden layer: h = ReLU(W_hidden * phi + b_hidden) [Activation not specified in notes, assuming standard ReLU or GELU based on context]
+-        # Note: [S1] mentions GELU is used for main layers, but does not specify for this tiny layer.
+-        # We assume a standard activation for the hidden layer as it is not defined.
+-        hidden = np.dot(params['W_hidden'], feature_vector) + params['b_hidden']
+-        # Assuming ReLU for hidden layer as it is standard for "tiny network" unless specified otherwise [G]
+-        hidden = np.maximum(0, hidden) 
+-        
+-        # Output layer: sigma = W_out * h + b_out
+-        density = np.dot(params['W_out'], hidden) + params['b_out']
++        hidden = [sum(w * f for w, f in zip(params['W_hidden'][i], feature_vector)) + params['b_hidden'][i] for i in range(64)]
++        hidden = [max(0.0, h) for h in hidden] # ReLU assumed as activation is not specified in sources [G]
++        density = sum(w * h for w, h in zip(params['W_out'], hidden)) + params['b_out']
+     else:
+         raise ValueError("Unknown dataset type")
+-        
+     return density
+ ```
+@@ -70,6 +47,6 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Dataset Specificity:** The choice between linear and network-based mapping is critical and dataset-dependent. Using the synthetic configuration on real-world data (or vice versa) may degrade quality, though the impact on training time is negligible [S1].
+-*   **Precision:** Standard floating-point precision is assumed. No specific bit-packing is mentioned for this layer.
++*   **Dataset Configuration:** The mapping type must match the dataset type, as the linear transform is used for real-world 360 datasets and the tiny network for NeRF synthetic datasets [S1].
++*   **Performance:** The density mapping layers have a negligible impact on the overall training time for both datasets [S1].
+ 
+ ## Subtopics
+@@ -83,12 +60,12 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Negligible impact on overall training time for both linear and tiny network variants [S1]. The linear transform is $O(D)$ where $D$ is feature dimension. The tiny network is $O(D \cdot 64 + 64 \cdot 1)$, which is also very small.
+-*   **Memory Complexity:** Depends on the parameters. Linear: $O(D)$. Tiny network: $O(D \cdot 64 + 64)$. For $D=256$, this is minimal compared to the feature volume storage.
+-*   **Strengths:** Simple to implement; negligible computational overhead; allows flexibility in modeling density (linear vs. non-linear) based on data characteristics [S1].
+-*   **Limitations:** The "tiny network" variant requires hyperparameter tuning (hidden size, activation) [S1].
+-*   **When to use:** Standard component in Explicit Neural Feature Volume rendering. Use linear for real-world 360 datasets; use tiny network for synthetic NeRF datasets [S1].
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
++*   **Strengths:** The layer has a negligible impact on overall training time for both linear and tiny network variants [S1].
++*   **Limitations:** Not given in the sources.
++*   **When to use:** Use the linear transform for real-world 360 datasets and the tiny network for NeRF synthetic datasets [S1].
+ 
+ ## Background
+-The Density Mapping Layer originates from the work on Volume Feature Rendering for Fast Neural Radiance Field Reconstruction [S1]. It was introduced to efficiently decode density from compressed feature volumes, replacing direct MLP decoding to accelerate training and inference. The distinction between real-world and synthetic dataset handling was observed to improve rendering quality with minimal cost [S1]. The formulation using explicit weight matrices for density and color is also found in Periodic Implicit Generative Adversarial Networks (pi-GAN) [S2].
++The Density Mapping Layer originates from the work on Volume Feature Rendering for Fast Neural Radiance Field Reconstruction [S1]. The distinction between real-world and synthetic dataset handling was introduced to improve rendering quality with minimal cost [S1]. The formulation using explicit weight matrices for density and color is also found in Periodic Implicit Generative Adversarial Networks (pi-GAN) [S2].
+ 
+ ## Sources

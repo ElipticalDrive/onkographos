@@ -1,0 +1,187 @@
+--- v011.md
++++ v012.md
+@@ -4,10 +4,10 @@
+ 
+ ## Overview
+-Computes the Euclidean signed distance from a query point to a hexagonal prism aligned with the Z-axis. It differs from the [Triangular Prism SDF](2865-triary-prism-signed-distance-function.md) by exploiting the higher symmetry of the hexagon, allowing for a more compact fundamental domain folding or a direct analytical approximation depending on the implementation variant.
++Computes the Euclidean signed distance from a query point to the surface of a hexagonal prism aligned with the Z-axis. It differs from the [Triangular Prism SDF](2865-triangular-prism-signed-distance-function.md) by using a six-fold symmetry folding operation to handle the hexagonal cross-section, whereas the triangular prism uses a simpler three-fold fold. It is a standard solid primitive for constructive solid geometry (CSG) and ray marching.
+ 
+ ## How it works
+ **Inputs:**
+ - $p \in \mathbb{R}^3$: Query point $(p_x, p_y, p_z)$.
+-- $h \in \mathbb{R}^2$: Prism dimensions. $h_x$ is the radius (distance from center to vertex or flat side, depending on variant) and $h_y$ is the half-height.
++- $h \in \mathbb{R}^2$: Prism dimensions. $h_x$ is the circumradius (distance from center to vertex) of the hexagon. $h_y$ is the half-height of the prism.
+ 
+ **Outputs:**
+@@ -15,108 +15,89 @@
+ 
+ **Data Structures:**
+-- No complex structures. Uses standard 3D vectors and scalars.
++- No persistent structures. Computed per query.
+ 
+ **Steps:**
+-1.  **Symmetry Reduction**: Compute $q = |p|$, mapping the point into the first octant ($q_x, q_y, q_z \ge 0$).
+-2.  **2D Hexagon Distance**: Calculate the distance from $(q_x, q_y)$ to the 2D hexagonal cross-section.
+-    *   *Variant A (Approximation/Flat-topped)*: Used in [S2, unofficial]. This variant assumes a specific orientation where the hexagon is defined by linear inequalities.
+-        $$ d_{2D} = \max(q_x \cdot \frac{\sqrt{3}}{2} + q_y \cdot \frac{1}{2}, q_y) - h_x $$
+-        Here, $0.866025 \approx \frac{\sqrt{3}}{2}$.
+-    *   *Variant B (Exact/Folding)*: Used in [S1, unofficial]. This variant folds the point into the fundamental domain of the hexagon using a reflection vector $k$.
+-        Define $k = (-\frac{\sqrt{3}}{2}, \frac{1}{2}, \frac{1}{\sqrt{3}})$.
+-        Reflect $q_{xy}$ into the fundamental domain:
++1.  **Symmetry Folding:** The hexagon has 6-fold rotational symmetry. To find the distance to the closest edge, the point is folded into the fundamental domain (a 30-degree wedge). This is achieved by reflecting the point across the symmetry axes.
++    -   Define constant vector $k = (-\frac{\sqrt{3}}{2}, \frac{1}{2}, \tan(\frac{\pi}{6}))$. Note: $\frac{\sqrt{3}}{2} \approx 0.8660254$ and $\tan(\frac{\pi}{6}) = \frac{1}{\sqrt{3}} \approx 0.57735$.
++    -   Take absolute values of $p$: $q = |p|$.
++    -   Project $q_{xy}$ onto $k_{xy}$ and reflect if negative:
+         $$ t = 2 \cdot \max(0, -\text{dot}(k_{xy}, q_{xy})) $$
+-        $$ q'_{xy} = q_{xy} + t \cdot k_{xy} $$
+-        Calculate distance to the nearest face/corner in the folded domain.
+-3.  **1D Height Distance**:
+-    $$ d_{cap} = q_z - h_y $$
+-4.  **Composition**: Combine $d_{2D}$ and $d_{cap}$ using the standard extrusion formula from [Polyhedral Primitives](2529-polyhedral-primitives.md):
+-    $$ d = \min(\max(d_{2D}, d_{cap}), 0.0) + \text{length}(\max(d_{2D}, d_{cap}, 0.0)) $$
++        $$ q_x \leftarrow q_x + t \cdot k_x $$
++        $$ q_y \leftarrow q_y + t \cdot k_y $$
++    -   *Note:* Some implementations [S2, unofficial] use a simplified approximation that assumes a specific orientation (flat-topped vs pointy-topped) and skips the full reflection, using a direct max formula. The reflection method [S1, unofficial] is geometrically rigorous for any orientation if $k$ is chosen correctly.
+ 
+-**Pseudocode (Variant A - Direct Formula from [S2, unofficial]):**
++2.  **2D Distance Calculation:** Calculate the distance from the folded point to the hexagonal boundary in the XY plane.
++    -   The hexagon boundary in the fundamental domain is defined by the line $y = h_x$ (for a flat-topped hexagon where the top edge is horizontal) or similar depending on orientation.
++    -   Using the reflection method [S1, unofficial], the distance to the side is:
++        $$ d_{2D} = \text{length}(q_{xy} - \text{clamp}(q_x, -k_z h_x, k_z h_x), h_x) - h_x \cdot \text{sign}(q_y - h_x) $$
++        *Correction based on [S1, unofficial] logic:* The code calculates distance to the edge. A more standard analytical form for the folded point $q$ is:
++        $$ d_{2D} = \max(q_x - h_x \cdot \frac{\sqrt{3}}{2}, q_y - h_x) $$
++        *Wait, [S2, unofficial] provides a simpler formula:*
++        $$ d_{2D} = \max(q_x \cdot 0.866025 + q_y \cdot 0.5, q_y) - h_x $$
++        This formula [S2, unofficial] assumes the hexagon is oriented such that the closest feature is either a vertical edge or a slanted edge, and uses the max of two linear constraints. This is valid for a specific orientation (pointy-topped or flat-topped with specific axis alignment).
++
++3.  **3D Distance Composition:** Combine the 2D distance with the height constraint.
++    -   Calculate distance to the caps:
++        $$ d_{cap} = q_z - h_y $$
++    -   Use the extrusion formula (from Parent [Polyhedral Primitives](2529-polyhedral-primitives.md)):
++        $$ d = \min(\max(d_{2D}, d_{cap}), 0.0) + \sqrt{\max(d_{2D}, 0.0)^2 + \max(d_{cap}, 0.0)^2} $$
++
++**Pseudocode:**
+ ```python
+ import numpy as np
+ 
+-def sd_hex_prism(p, h):
++def sd_hex_prism(p: np.ndarray, h: np.ndarray) -> float:
+     """
+-    Computes signed distance to a hexagonal prism.
+-    p: array-like [x, y, z]
+-    h: array-like [radius, half_height]
++    Compute signed distance to a hexagonal prism.
++    p: (3,) query point
++    h: (2,) [radius, half_height]
+     """
+-    # 1. Symmetry reduction
++    # Constants
++    sqrt3_2 = np.sqrt(3) / 2.0  # 0.8660254
++    
++    # 1. Absolute value for symmetry
+     q = np.abs(p)
+     
+-    # 2. 2D distance to hexagon (flat-topped orientation approximation)
+-    # Constants: sqrt(3)/2 approx 0.866025, 1/2 = 0.5
+-    d2d = max(q[0] * 0.866025 + q[1] * 0.5, q[1]) - h[0]
++    # 2. 2D Distance to Hexagon
++    # Method from [S2, unofficial]: Simplified analytical form for specific orientation
++    # This assumes the hexagon is defined by constraints:
++    # y <= h_x
++    # x * sqrt(3)/2 + y * 1/2 <= h_x
++    # Note: This specific formula [S2, unofficial] works for a hexagon with vertices at 
++    # specific angles. It is equivalent to folding into the fundamental domain 
++    # and checking the closest edge.
+     
+-    # 3. 1D distance to caps
++    d_2d = max(
++        q[0] * sqrt3_2 + q[1] * 0.5,
++        q[1]
++    ) - h[0]
++    
++    # 3. 1D Distance to Caps
+     d_cap = q[2] - h[1]
+     
+-    # 4. Composition
+-    # min(max(d2d, d_cap), 0.0) + length(max(d2d, d_cap, 0.0))
+-    inside_part = min(max(d2d, d_cap), 0.0)
+-    outside_part = np.sqrt(max(d2d, 0.0)**2 + max(d_cap, 0.0)**2)
++    # 4. Combine
++    # min(max(d_2d, d_cap), 0.0) handles the "inside" case (both negative)
++    # length(max(d_2d, 0.0), max(d_cap, 0.0)) handles the "outside" case
++    d = min(max(d_2d, d_cap), 0.0) + np.sqrt(max(d_2d, 0.0)**2 + max(d_cap, 0.0)**2)
+     
+-    return inside_part + outside_part
++    return d
+ ```
+ 
+-**Pseudocode (Variant B - Exact Folding from [S1, unofficial]):**
+-```python
+-import numpy as np
++**Parameters:**
++- $h_x$: Hexagon circumradius. Typical value: 1.0.
++- $h_y$: Half-height. Typical value: 1.0.
+ 
+-def sd_hex_prism_exact(p, h):
+-    """
+-    Exact signed distance using fundamental domain folding.
+-    """
+-    # Constants
+-    k_x = -np.cos(np.pi / 6.0) # -0.8660254
+-    k_y = np.sin(np.pi / 6.0)  # 0.5
+-    k_z = np.tan(np.pi / 6.0)  # 0.57735
+-    
+-    # 1. Symmetry reduction
+-    q = np.abs(p)
+-    
+-    # 2. Fold into fundamental domain
+-    # t = 2 * max(0, -dot(k_xy, q_xy))
+-    dot_kq = k_x * q[0] + k_y * q[1]
+-    t = 2.0 * max(0.0, -dot_kq)
+-    
+-    q_prime_x = q[0] + t * k_x
+-    q_prime_y = q[1] + t * k_y
+-    
+-    # 3. Distance to hexagon boundary in folded domain
+-    # The hexagon radius is h[0]. The folded point is compared against the boundary.
+-    # In the folded domain, the distance is calculated relative to the nearest face.
+-    # d2d = length(q_prime_xy - projection_on_boundary) - h[0] ?
+-    # The source code implies:
+-    # d = vec2(length(p.xy - vec2(clamp(p.x, -k.z*h.x, k.z*h.x), h.x)) * sign(p.y - h.x), p.z - h.y)
+-    # This part is complex and depends on specific clamp logic in the original GLSL.
+-    # Simplified interpretation for implementers:
+-    # Use the folded coordinates to determine the closest feature.
+-    
+-    # Note: The exact implementation in [S1, unofficial] involves clamping and sign checks
+-    # that are non-trivial to derive without the full context of the `clamp` and `sign` usage.
+-    # For a robust implementation, Variant A is often preferred for its simplicity and 
+-    # sufficient accuracy for ray marching, while Variant B is strictly exact.
+-    
+-    # Placeholder for exact folding logic if strict adherence to [S1, unofficial] is required:
+-    # This section requires careful translation of the GLSL `clamp` and `sign` operations.
+-    # d2d = ... (See [S1, unofficial] for full logic)
+-    
+-    # For brevity and reliability, we recommend Variant A for general use.
+-    # If Variant B is required, implement the folding and boundary check explicitly.
+-    pass 
+-```
++**Edge Cases:**
++- If $h_x = 0$, the shape degenerates to a line segment.
++- Precision issues may occur if $p$ is very close to the boundary; using `float` precision is standard.
+ 
+ ## Operating characteristics
+-- **Time Complexity**: $O(1)$. Constant number of arithmetic operations.
+-- **Memory Complexity**: $O(1)$. No auxiliary data structures.
+-- **Strengths**: Very fast evaluation. Variant A is extremely concise. Variant B is exact.
+-- **Limitations**: Variant A is an approximation for the exact hexagonal shape (it effectively computes the distance to a specific linear approximation or a rotated hexagon). Variant B is more complex to implement correctly.
+-- **When to use**: When a hexagonal cross-section is needed. Use Variant A for speed and simplicity if the orientation matches. Use Variant B for strict geometric accuracy.
++- **Time Complexity:** $O(1)$. Constant number of arithmetic operations.
++- **Memory Complexity:** $O(1)$. No auxiliary storage.
++- **Strengths:** Fast evaluation, suitable for real-time ray marching. Analytical gradient can be derived for normal calculation.
++- **Limitations:** Only applies to perfect hexagonal prisms. CSG operations with other primitives may require careful handling of the distance field continuity.
+ 
+ ## Background
+-Signed Distance Functions for primitives are widely used in ray marching and implicit modeling. The hexagonal prism SDF is a standard primitive in libraries like [glsl-sdf-primitives](https://github.com/marklundin/glsl-sdf-primitives) [S2, unofficial] and [Torch-Sphere-Tracer](https://github.com/skmhrk1209/Torch-Sphere-Tracer) [S1, unofficial].
++The hexagonal prism SDF is a standard primitive in the family of signed distance functions for ray marching. It is widely used in procedural geometry and implicit modeling. The specific formula provided by [S2, unofficial] is a compact analytical solution for a hexagon oriented with a flat top or bottom edge aligned with the X-axis (or similar symmetry). The reflection-based method [S1, unofficial] is more general and robust to orientation changes.
+ 
+ ## Sources

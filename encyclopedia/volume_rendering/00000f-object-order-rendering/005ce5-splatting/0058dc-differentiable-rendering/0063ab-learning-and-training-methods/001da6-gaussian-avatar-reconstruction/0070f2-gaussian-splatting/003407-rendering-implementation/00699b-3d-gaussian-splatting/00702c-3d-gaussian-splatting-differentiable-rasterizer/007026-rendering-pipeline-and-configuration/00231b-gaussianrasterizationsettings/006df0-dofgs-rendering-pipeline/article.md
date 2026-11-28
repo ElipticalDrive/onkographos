@@ -1,0 +1,250 @@
+# DOFGS Rendering Pipeline
+
+Also called: DOFGS render function, Depth of Field Gaussian Splatting Render
+
+## Overview
+The DOFGS (Depth of Field Gaussian Splatting) rendering pipeline extends standard 3D Gaussian Splatting by introducing differentiable depth-of-field (DoF) effects, allowing for the simulation of camera defocus blur during rasterization [S1, unofficial]. It solves the problem of realistic optical blur in neural radiance fields by treating focal distance and aperture size as learnable parameters, enabling joint optimization of scene geometry and camera optics [S1, unofficial]. It differs from standard Gaussian Splatting [3D Gaussian Splatting](3d-gaussian-splatting.md) by computing a Circle of Confusion (CoC) alpha channel and applying a spatially varying blur kernel based on depth, rather than a uniform opacity mask.
+
+## How it works
+The pipeline prepares Gaussian attributes, computes depth-dependent defocus parameters, and invokes a differentiable rasterizer that blends Gaussians with a DoF-aware kernel.
+
+### Inputs and Outputs
+**Inputs:**
+- `pc`: Point cloud object containing parameters (`_xyz`, `_rotation`, `_scaling`, `_opacity`, `_features_dc`, `_features_rest`, `Fs`, `Ks`).
+- `viewpoint_camera`: Camera object with fields `FoVx`, `FoVy`, `image_height`, `image_width`, `camera_center`, `focal_x`.
+- `pipe`: Configuration object with flags `band_limit`, `convert_SHs_python`, `tone_map`.
+- `tone_map`: Optional function or string ('gamma', 'learn') for post-processing.
+
+**Outputs:**
+- `rendered_image`: Tensor of shape `(3, H, W)`.
+- `rendered_depth`: Tensor of shape `(1, H, W)`.
+- `coc_alpha`: Tensor of shape `(1, H, W)` representing the Circle of Confusion alpha.
+- `xy`: Screenspace points tensor.
+- `radii`, `radii_diff`: Visibility and gradient radii tensors.
+
+### Data Structures
+The point cloud `pc` maintains the following learnable parameters (all on CUDA):
+- `_xyz`: `(N, 3)` float32, 3D positions.
+- `_rotation`: `(N, 4)` float32, unit quaternions.
+- `_scaling`: `(N, 3)` float32, log-scale factors.
+- `_opacity`: `(N, 1)` float32, inverse-sigmoided opacity.
+- `_features_dc`: `(N, 1, 3)` float32, DC spherical harmonic coefficients.
+- `_features_rest`: `(N, 15, 3)` float32, higher-order SH coefficients (assuming max degree 3).
+- `Fs`: `(N_view, 1)` float32, learnable focal distance scaling factors.
+- `Ks`: `(N_view, 1)` float32, learnable aperture kernel scaling factors.
+
+The `GaussianRasterizationSettings` (inherited from parent) includes:
+- `tanfovx`, `tanfovy`: Tangent half-angles of view.
+- `kernel_size`: Float, size of the splatting kernel.
+- `subpixel_offset`: `(H, W, 2)` float32, subpixel shifts.
+- `bg`: GPU tensor, background color.
+- `coc2z_coeff`: Float, coefficient for CoC to depth conversion (default 0.0).
+
+### Steps
+
+1. **Initialize Screenspace Points**: Create a tensor for screenspace points with gradient tracking enabled.
+   ```python
+   screenspace_points = torch.zeros_like(pc._xyz, dtype=pc._xyz.dtype, requires_grad=True, device="cuda") + 0
+   screenspace_points.retain_grad()
+   ```
+
+2. **Compute Tangent FOV**:
+   ```python
+   tanfovx = math.tan(viewpoint_camera.FoVx * 0.5)
+   tanfovy = math.tan(viewpoint_camera.FoVy * 0.5)
+   ```
+
+3. **Initialize Subpixel Offset**: If not provided, initialize to zero.
+   ```python
+   subpixel_offset = torch.zeros((int(viewpoint_camera.image_height), int(viewpoint_camera.image_width), 2), dtype=torch.float32, device="cuda")
+   ```
+
+4. **Select Opacity Source**:
+   - If `pipe.band_limit` is true, use `pc.get_opacity_with_3D_filter`.
+   - Else, use `pc.get_opacity`.
+
+5. **Compute Defocus Parameters**: If `focal_distance` and `K_apert` are not explicitly provided as inputs, compute them from the learnable parameters `Fs` and `Ks`.
+   ```python
+   focal_distance = torch.clamp(pc.Fs, 0.01, 1000) * 10.0
+   K_apert = torch.clamp(pc.Ks, 0.01, 200) * 100.0 + 100.0
+   ```
+   *Note: `Fs` and `Ks` are typically initialized based on scene depth statistics (median depth for focal distance, depth range for aperture) [S1, unofficial].*
+
+6. **Select Scales and Covariance**:
+   - If `pipe.compute_cov3D_python` is true, compute `cov3D_precomp = pc.get_covariance(scaling_modifier)`.
+   - Else if `pipe.band_limit` is true, use `pc.get_scaling_with_3D_filter`.
+   - Else, use `pc.get_scaling`.
+   - Rotations are always `pc.get_rotation`.
+
+7. **Compute Precomputed Colors**:
+   - If `override_color` is None and `pipe.convert_SHs_python` is true:
+     ```python
+     shs_view = pc._features_dc.transpose(1, 2).view(-1, 3, (pc.max_sh_degree+1)**2)
+     # Note: _features_rest is typically concatenated or handled in eval_sh
+     dir_pp = (pc._xyz - viewpoint_camera.camera_center.repeat(pc._xyz.shape[0], 1))
+     dir_pp_normalized = dir_pp / dir_pp.norm(dim=1, keepdim=True)
+     sh2rgb = eval_sh(pc.active_sh_degree, shs_view, dir_pp_normalized)
+     colors_precomp = torch.clamp_min(sh2rgb + 0.5, 0.0)
+     ```
+   - Otherwise, pass raw SH features `shs = pc._features` (shape `[N, 16, 3]`) to the rasterizer, setting `colors_precomp` to None.
+
+8. **Call Rasterizer**:
+   Invoke the differentiable rasterizer with the following arguments:
+   - `means3D`: `pc._xyz`
+   - `means2D`: `screenspace_points`
+   - `shs`: `shs` (if `colors_precomp` is None) or `None`
+   - `colors_precomp`: `colors_precomp` (if `shs` is None) or `None`
+   - `opacity`: Selected opacity tensor
+   - `scales`: Selected scales tensor (or None if `cov3D_precomp` is used)
+   - `rotations`: `pc._rotation`
+   - `cov3D_precomp`: Selected covariance tensor (or None)
+   - `F`: `focal_distance`
+   - `K`: `K_apert`
+   
+   The rasterizer returns: `rendered_image`, `rendered_depth`, `xy`, `coc_alpha`, `radii`, `radii_diff`.
+
+9. **Apply Tone Mapping**:
+   If `pipe.tone_map` is not None:
+   - If mode is 'gamma':
+     ```python
+     rendered_image = (rendered_image + 1e-10) ** (1. / 2.2)
+     ```
+   - If mode is 'learn':
+     Use a small MLP:
+     ```python
+     # MLP definition:
+     # nn.Sequential(
+     #     nn.Linear(1, 16), nn.ReLU(),
+     #     nn.Linear(16, 16), nn.ReLU(),
+     #     nn.Linear(16, 16), nn.ReLU(),
+     #     nn.Linear(16, 1)
+     # )
+     x_in = rendered_image.reshape(-1, 1)
+     res_x = mlp(x_in) * 0.1
+     x_out = torch.sigmoid(res_x + x_in)
+     rendered_image = x_out.reshape(rendered_image.shape)
+     ```
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def dofgs_render_pipeline(pc, viewpoint_camera, pipe, tone_map=None):
+    # 1. Initialize screenspace points
+    screenspace_points = torch.zeros_like(pc._xyz, dtype=pc._xyz.dtype, requires_grad=True, device="cuda") + 0
+    screenspace_points.retain_grad()
+
+    # 2. Compute tangent FOV
+    tanfovx = math.tan(viewpoint_camera.FoVx * 0.5)
+    tanfovy = math.tan(viewpoint_camera.FoVy * 0.5)
+
+    # 3. Initialize subpixel offset
+    subpixel_offset = torch.zeros((int(viewpoint_camera.image_height), int(viewpoint_camera.image_width), 2), dtype=torch.float32, device="cuda")
+
+    # 4. Select opacity
+    if pipe.band_limit:
+        opacity = pc.get_opacity_with_3D_filter()
+    else:
+        opacity = pc.get_opacity()
+
+    # 5. Compute defocus parameters
+    focal_distance = torch.clamp(pc.Fs, 0.01, 1000) * 10.0
+    K_apert = torch.clamp(pc.Ks, 0.01, 200) * 100.0 + 100.0
+
+    # 6. Select scales/covariance
+    if pipe.compute_cov3D_python:
+        cov3D_precomp = pc.get_covariance(scaling_modifier=1.0)
+        scales = None
+    elif pipe.band_limit:
+        scales = pc.get_scaling_with_3D_filter()
+        cov3D_precomp = None
+    else:
+        scales = pc.get_scaling()
+        cov3D_precomp = None
+    
+    rotations = pc.get_rotation()
+
+    # 7. Compute colors
+    if pipe.convert_SHs_python:
+        shs_view = pc._features_dc.transpose(1, 2).view(-1, 3, (pc.max_sh_degree+1)**2)
+        # Concatenate rest features if necessary for eval_sh
+        dir_pp = (pc._xyz - viewpoint_camera.camera_center.repeat(pc._xyz.shape[0], 1))
+        dir_pp_normalized = dir_pp / dir_pp.norm(dim=1, keepdim=True)
+        sh2rgb = eval_sh(pc.active_sh_degree, shs_view, dir_pp_normalized)
+        colors_precomp = torch.clamp_min(sh2rgb + 0.5, 0.0)
+        shs = None
+    else:
+        colors_precomp = None
+        shs = pc._features # Shape [N, 16, 3]
+
+    # 8. Rasterize
+    rendered_image, rendered_depth, xy, coc_alpha, radii, radii_diff = GaussianRasterizer(
+        means3D=pc._xyz,
+        means2D=screenspace_points,
+        shs=shs,
+        colors_precomp=colors_precomp,
+        opacity=opacity,
+        scales=scales,
+        rotations=rotations,
+        cov3D_precomp=cov3D_precomp,
+        F=focal_distance,
+        K=K_apert,
+        tanfovx=tanfovx,
+        tanfovy=tanfovy,
+        subpixel_offset=subpixel_offset,
+        bg=pc.bg,
+        kernel_size=pipe.kernel_size,
+        scale_modifier=pipe.scale_modifier,
+        viewmatrix=pipe.viewmatrix,
+        projmatrix=pipe.projmatrix,
+        sh_degree=pc.active_sh_degree,
+        campos=pc.campos,
+        prefiltered=pipe.prefiltered,
+        vIdx=pipe.vIdx,
+        coc2z_coeff=pipe.coc2z_coeff,
+        debug=pipe.debug
+    )
+
+    # 9. Tone mapping
+    if tone_map == 'gamma':
+        rendered_image = (rendered_image + 1e-10) ** (1. / 2.2)
+    elif tone_map == 'learn':
+        x_in = rendered_image.reshape(-1, 1)
+        res_x = tone_map_mlp(x_in) * 0.1
+        x_out = torch.sigmoid(res_x + x_in)
+        rendered_image = x_out.reshape(rendered_image.shape)
+
+    return {
+        'render': rendered_image,
+        'depth': rendered_depth,
+        'viewspace_points': screenspace_points,
+        'visibility_filter': radii > 0,
+        'radii': radii,
+        'radii_diff': radii_diff,
+        'coc_alpha': coc_alpha
+    }
+```
+
+### Parameters and Typical Values
+- `Fs` (Focal Distance Scale): Initialized to `z_median / 10.0`, where `z_median` is the median depth of the point cloud [S1, unofficial].
+- `Ks` (Aperture Scale): Initialized based on depth range: `K_value = COC_MAX / (|1/z_min - 1/z_max| + 1e-6)`, then `Ks = (K_value - 100.0) / 1000.0 * 10.0` [S1, unofficial].
+- `COC_MAX`: Default 15 pixels [S1, unofficial].
+- `band_limit`: Boolean flag, typically false for standard rendering, true for 3D-filtered opacity.
+
+### Edge Cases and Pitfalls
+- **Precision**: `Fs` and `Ks` are clamped to prevent numerical instability (e.g., `Fs` clamped to `[0.01, 1000]`) [S1, unofficial].
+- **Boundaries**: `valid_points` mask ensures only points within the screen and valid depth range contribute to focal distance calculation [S1, unofficial].
+- **Degenerate Input**: If `dir_pp` norm is zero (camera at point location), normalization fails. Guard against division by zero in `dir_pp_normalized` [G].
+
+## Operating characteristics
+- **Time Complexity**: Dominated by the rasterization step, which is $O(N)$ for $N$ Gaussians, but with a larger constant due to DoF kernel computation.
+- **Memory Complexity**: $O(N)$ for Gaussian attributes plus $O(H \times W)$ for buffers.
+- **Performance**: Slower than standard Gaussian Splatting due to the additional computation of CoC and depth-dependent blurring.
+- **Strengths**: Enables realistic depth-of-field effects and joint optimization of camera parameters.
+- **Limitations**: Requires careful initialization of `Fs` and `Ks` to avoid blurry or unrealistic results.
+
+## Background
+DOFGS (Depth of Field Gaussian Splatting) is an extension of 3D Gaussian Splatting that incorporates optical defocus models. It was introduced by Rongduo et al. in an unofficial implementation [S1, unofficial]. The method allows for the learning of focal distance and aperture size, enabling the reconstruction of scenes with realistic camera blur.
+
+## Sources
+[S1] rongduo/DOFGS_implementation, https://github.com/rongduo/DOFGS_implementation, fetched 2026-10-27 (unofficial)

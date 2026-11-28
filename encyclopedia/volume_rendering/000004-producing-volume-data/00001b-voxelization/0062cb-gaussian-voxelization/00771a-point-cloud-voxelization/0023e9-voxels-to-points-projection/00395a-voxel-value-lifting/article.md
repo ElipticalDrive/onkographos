@@ -1,0 +1,106 @@
+# Voxel Value Lifting
+
+
+## Overview
+Voxel Value Lifting maps per-voxel values (such as encoded predictions or features) back to the original point rows using a pre-computed point-to-voxel mapping [S1, unofficial]. It solves the problem of aggregating dense voxel grid data onto sparse, unstructured point clouds, enabling downstream tasks like volume rendering or segmentation where point-wise features are required [S1, unofficial]. It differs from its parent, [Voxels to Points Projection](3172-voxels-to-points-projection.md), by relying on a direct integer index mapping rather than geometric projection or segment IDs, making it suitable for cases where voxelization has already established a deterministic correspondence between points and voxels.
+
+## How it works
+**Inputs:**
+1. `voxel_values`: A 1D or 2D array of shape $[V, D]$ or $[V]$, containing values for each voxel in the grid. $V$ is the number of voxels.
+2. `point_to_voxel`: A 1D integer array of shape $[N]$, where $N$ is the number of points. Each element is the index of the voxel containing the corresponding point.
+3. `fill_value`: A scalar or array value used for points that do not map to a valid voxel.
+
+**Outputs:**
+1. `lifted_values`: An array of shape $[N, D]$ (or $[N]$) containing the voxel value for each point.
+
+**Data Structures:**
+- `point_to_voxel`: Int64 array. Valid indices are in $[0, V-1]$. Invalid mappings are marked as $-1$ [S1, unofficial].
+
+**Steps:**
+1. Initialize `lifted_values` with shape $[N, D]$ (or $[N]$) filled with `fill_value`.
+2. Identify valid point indices: `valid_mask = (point_to_voxel >= 0)`.
+3. For each point $i$ where `valid_mask[i]` is true:
+   - Let $v = \text{point\_to\_voxel}[i]$.
+   - Assign `lifted_values[i] = voxel_values[v]`.
+4. Points with `point_to_voxel[i] == -1` retain the `fill_value` [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def lift_voxel_values(voxel_values: np.ndarray, point_to_voxel: np.ndarray, fill_value: float = 255.0) -> np.ndarray:
+    """
+    Map voxel values back to points using point_to_voxel indices.
+    
+    Args:
+        voxel_values: Array of shape (V, D) or (V,) containing voxel data.
+        point_to_voxel: Array of shape (N,) with integer indices into voxel_values.
+                        -1 indicates no valid voxel.
+        fill_value: Value to assign for invalid mappings.
+        
+    Returns:
+        Array of shape (N, D) or (N,) with lifted values.
+    """
+    N = point_to_voxel.shape[0]
+    
+    # Determine output shape based on voxel_values
+    if voxel_values.ndim == 1:
+        D = 1
+        # Reshape to column vector for broadcasting if needed, or handle scalar
+        voxel_values = voxel_values[:, np.newaxis]
+    else:
+        D = voxel_values.shape[1]
+        
+    # Initialize output with fill value
+    # Using float64 for numerical stability as per source contract [S1, unofficial]
+    lifted_values = np.full((N, D), fill_value, dtype=np.float64)
+    
+    # Identify valid indices
+    valid_mask = point_to_voxel >= 0
+    
+    # Extract valid voxel indices
+    valid_voxel_indices = point_to_voxel[valid_mask]
+    
+    # Check for out-of-bounds access (should not happen if voxelization is correct)
+    if np.any(valid_voxel_indices >= voxel_values.shape[0]):
+        raise IndexError("point_to_voxel contains indices out of bounds for voxel_values")
+        
+    # Lift values
+    # voxel_values[valid_voxel_indices] selects rows from voxel_values
+    lifted_values[valid_mask] = voxel_values[valid_voxel_indices]
+    
+    # If original voxel_values was 1D, squeeze the last dimension
+    if D == 1:
+        lifted_values = lifted_values.squeeze(axis=1)
+        
+    return lifted_values
+```
+
+**Parameters:**
+- `fill_value`: Typically 255 for ignore labels or 0.0 for features. Default is 255.0 [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Invalid Indices:** Points with invalid coordinates or features have a mapping of $-1$ [S1, unofficial]. The method must check for this to avoid out-of-bounds access or incorrect data retrieval [S1, unofficial].
+- **Precision:** Coordinates and features normalize to float64; mappings and IDs use int64 [S1, unofficial].
+- **NaNs/Infinities:** Nonfinite coordinate/feature rows are retained in the point cloud but excluded during voxelization. If a point maps to a voxel, the voxel value is lifted regardless of the point's original validity, as the mapping is established during voxelization [S1, unofficial].
+
+## Subtopics
+
+### [3D Feature Construction via Lifting and Voxelization](13053-3d-feature-construction-via-lifting-and-voxelization.md)
+Constructs a dense 3D feature volume from multi-view 2D features by lifting unstructured point clouds into a global coordinate system and aggregating them into a regular voxel grid. It differs by using statistical pooling to resolve multi-view conflicts and providing global contextual information.
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$, where $N$ is the number of points, as each point requires a single array lookup.
+- **Memory Complexity:** $O(N \cdot D)$ for the output array, where $D$ is the feature dimension.
+- **Strengths:** Fast, deterministic mapping; no geometric projection overhead.
+- **Limitations:** Requires a pre-computed `point_to_voxel` mapping. Does not handle points outside the voxel grid bounds (mapped to -1).
+- **When to Use:** When voxelization has already been performed and a direct mapping exists.
+- **When Not to Use:** When points need to be projected from a different coordinate system or when voxelization has not been performed.
+
+## Background
+Originating from the `pointcloud-core` library by ajavanma, this method is part of a pipeline for processing point clouds and voxel grids [S1, unofficial]. It is used in applications such as 3D object detection and segmentation where features are computed on a voxel grid and then lifted back to points for further processing or rendering [S1, unofficial].
+
+## Sources
+[S1] ajavanma/pointcloud-core, https://github.com/ajavanma/pointcloud-core, fetched 2026-10-27 (unofficial)

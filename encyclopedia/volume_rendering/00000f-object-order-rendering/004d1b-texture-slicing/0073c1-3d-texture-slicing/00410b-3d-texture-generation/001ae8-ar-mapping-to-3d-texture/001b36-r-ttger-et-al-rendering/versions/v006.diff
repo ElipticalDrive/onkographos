@@ -1,0 +1,131 @@
+--- v005.md
++++ v006.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Röttger et al. Rendering is an object-order volume rendering technique that utilizes 3D textures and view-port aligned slices to achieve high-quality visualization through pre-integration [S1]. It solves the problem of high computational cost and artifacts associated with integrating arbitrary (non-linear) transfer functions during rendering by approximating the volume rendering integral in a pre-computed 3D lookup table [S2, S3, book]. Unlike its siblings, it specifically enables hardware-accelerated interpolation along the ray within a tetrahedral cell to support arbitrary transfer functions, including isosurface effects, which linear transfer functions cannot handle without artifacts [S3, book][S4, unofficial].
++Röttger et al. Rendering is an object-order volume rendering technique that utilizes 3D textures and view-port aligned slices to achieve high-quality visualization through pre-integration [S1]. It solves the problem of high computational cost and artifacts associated with integrating arbitrary (non-linear) transfer functions during rendering by approximating the volume rendering integral in a pre-computed 3D lookup table [S2, book][S3, book]. Unlike its siblings, it specifically enables hardware-accelerated interpolation along the ray within a tetrahedral cell to support arbitrary transfer functions, including isosurface effects, which linear transfer functions cannot handle without artifacts [S3, book][S4, unofficial].
+ 
+ ## How it works
+@@ -11,5 +11,5 @@
+ **Inputs:**
+ *   A scalar volume dataset.
+-*   A transfer function mapping scalar values to color and opacity [S2, S3, book].
++*   A transfer function mapping scalar values to color and opacity [S2, book][S3, book].
+ *   Camera parameters (position, orientation) [S6, unofficial].
+ *   Lighting parameters (ambient, diffuse, specular coefficients, light position, eye position) [S6, unofficial].
+@@ -22,7 +22,7 @@
+ **1. Pre-Integration Lookup Table (LUT)**
+ A 3D texture map parameterized by three axes [S2, book][S4, unofficial]:
+-*   **X-axis:** Front scalar value ($s_f$) at the cell entry point.
+-*   **Y-axis:** Back scalar value ($s_b$) at the cell exit point.
+-*   **Z-axis:** Distance through the cell ($l$) or thickness [S2, S3, book][S4, unofficial].
++*   **X-axis:** Front scalar value ($s_f$) at the cell entry point [S2, book][S4, unofficial].
++*   **Y-axis:** Back scalar value ($s_b$) at the cell exit point [S2, book][S4, unofficial].
++*   **Z-axis:** Distance through the cell ($l$) or thickness [S2, book][S3, book][S4, unofficial].
+ *   **Content:** The texture stores the pre-integrated color and opacity resulting from the volume rendering integral for the given parameters [S2, book][S5, unofficial].
+ *   **Note on 2D Transfer Functions:** For transfer functions dependent on both scalar and gradient magnitude, a 4D table is infeasible. Instead, a 3D table is used where each slice corresponds to a constant gradient magnitude, assuming the gradient is constant per ray segment [S1].
+@@ -33,5 +33,5 @@
+ *   **RGB Channels:** Normalized gradient values in range $[0, 1]$ [S6, unofficial].
+ *   **Alpha Channel:** Opacity values in range $[0, 1]$ [S6, unofficial].
+-*   **Gradient Storage:** Raw gradients can be negative. They are normalized to $[-1, 1]$ via scaling, then shifted to $[0, 1]$ for storage using the equation:
++*   **Gradient Storage:** Raw gradients can be negative [S6, unofficial]. They are normalized to $[-1, 1]$ via scaling, then shifted to $[0, 1]$ for storage using the equation:
+     $$ \text{stored\_value} = \frac{\nabla f(x) + 1.0}{2.0} $$
+     [S6, unofficial].
+@@ -69,60 +69,21 @@
+ 
+ ```python
+-# Fragment Shader Implementation for Röttger et al. Rendering
+-# Based on [S6, unofficial]
++def expand(v):
++    """Reverses the normalization of gradient values stored in [0,1]. Returns values in [-1, 1]."""
++    return (v[0] - 0.5) * 2.0, (v[1] - 0.5) * 2.0, (v[2] - 0.5) * 2.0
+ 
+-function expand(v: float3) -> float3:
+-    """
+-    Reverses the normalization of gradient values stored in [0,1].
+-    Returns values in [-1, 1].
+-    """
+-    return (v - 0.5) * 2.0
+-
+-function main(
+-    texPos0: float3,          # Texture coordinates
+-    globalAmbient: float3,    # Ambient light color
+-    lightColor: float3,       # Light source color
+-    lightPosition: float3,    # Light position
+-    eyePosition: float3,      # Camera/Eye position
+-    Ka: float3,               # Ambient reflection coefficient
+-    Kd: float3,               # Diffuse reflection coefficient
+-    Ks: float3,               # Specular reflection coefficient
+-    shininess: float,         # Shininess exponent
+-    samplerTex0: sampler3D    # 3D texture containing gradient (RGB) and opacity (A)
+-) -> float4:
+-    
+-    # Initialize output
+-    OUT = float4(1.0, 1.0, 1.0, 1.0)
+-    
+-    # Sample the volume data texture
+-    # RGB: Normalized gradient [0,1]
+-    # A: Opacity [0,1]
++def main(texPos0, lightColor, lightPosition, eyePosition, Ka, Kd, Ks, shininess, samplerTex0):
++    """Fragment shader implementation for Röttger et al. Rendering [S6, unofficial].
++    Assumes standard vector/math operations: tex3D, normalize, dot, pow, max."""
++    OUT = [1.0, 1.0, 1.0, 1.0]
+     texvalue = tex3D(samplerTex0, texPos0)
+-    
+-    # Recover normal vector from stored gradient
+-    normal = expand(texvalue.rgb)
+-    
+-    # Set output alpha to sampled opacity
+-    OUT.a = texvalue.a
+-    
+-    # Only compute lighting if opacity is non-zero
+-    if OUT.a > 0.0:
+-        # Ambient component
+-        ambient = lightColor * Ka
+-        
+-        # Diffuse component
+-        # Note: Source [S6, unofficial] uses dot(lightPosition, normal). 
+-        # Standard Phong usually uses dot(normal, light_direction).
+-        # We follow the source code exactly.
+-        diffuse = max(dot(lightPosition, normal), 0.0) * Kd * lightColor
+-        
+-        # Specular component
+-        # Calculate halfway vector between light and eye
+-        halfway = normalize(lightPosition - eyePosition)
+-        specular = pow(dot(halfway, normal), shininess) * Ks
+-        
+-        # Combine lighting components
+-        OUT.rgb = ambient + diffuse + specular
+-        
++    normal = expand(texvalue[:3])
++    OUT[3] = texvalue[3]
++    if OUT[3] > 0.0:
++        ambient = [lightColor[i] * Ka[i] for i in range(3)]
++        halfway = normalize([lightPosition[i] - eyePosition[i] for i in range(3)])
++        diffuse = [max(dot(lightPosition, normal), 0.0) * Kd[i] * lightColor[i] for i in range(3)]
++        specular = [pow(dot(halfway, normal), shininess) * Ks[i] for i in range(3)]
++        OUT[:3] = [ambient[i] + diffuse[i] + specular[i] for i in range(3)]
+     return OUT
+ ```
+@@ -135,7 +96,7 @@
+ 
+ ### Edge Cases and Pitfalls
+-*   **Gradient Sign Preservation:** Gradients can be negative. They must be normalized to $[-1, 1]$ and shifted to $[0, 1]$ for storage in the texture [S6, unofficial]. Failure to do so results in incorrect normals.
++*   **Gradient Sign Preservation:** Gradients can be negative [S6, unofficial]. They must be normalized to $[-1, 1]$ and shifted to $[0, 1]$ for storage in the texture [S6, unofficial]. Failure to do so results in incorrect normals [S6, unofficial].
+ *   **Performance Limitation:** 3D texture access is slower than 2D due to irregular memory access patterns and higher computational cost (trilinear interpolation requires 8 texture accesses vs. 4 for bilinear) [S6, unofficial].
+-*   **Fill Rate Limit:** Performance is primarily limited by fill rate. High zoom levels decrease FPS significantly because larger primitives generate more fragments [S6, unofficial].
++*   **Fill Rate Limit:** Performance is primarily limited by fill rate [S6, unofficial]. High zoom levels decrease FPS significantly because larger primitives generate more fragments [S6, unofficial].
+ *   **Alpha Test Effectiveness:** The benefit of alpha testing (skipping transparent fragments) is inversely proportional to data density. Higher density reduces the benefit because more fragments are opaque and require blending [S6, unofficial].
+ *   **4D Table Infeasibility:** Standard pre-integration for 2D transfer functions (scalar + gradient) requires a 4D table, which is infeasible. The method uses a 3D table assuming constant gradient per segment [S1].
+@@ -165,7 +126,7 @@
+ 
+ ### When to Use
+-*   When high-quality visualization with arbitrary, non-linear transfer functions is required.
+-*   When hardware acceleration for volume integration is needed.
+-*   When the volume size fits within the 3D texture limits of the target hardware.
++*   When high-quality visualization with arbitrary, non-linear transfer functions is required [S3, book].
++*   When hardware acceleration for volume integration is needed [S6, unofficial].
++*   When the volume size fits within the 3D texture limits of the target hardware [S6, unofficial].
+ 
+ ### When Not to Use

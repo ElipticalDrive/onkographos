@@ -1,0 +1,94 @@
+# Rasterization-based Isosurface Extraction (Alpha-Test/Stencil)
+
+Also called: Alpha-Test Isosurface Extraction, Rasterization-based Isosurface with Alpha-Test and Stencil, Stencil Buffer Isosurface Extraction
+
+## Overview
+This method extracts isosurfaces from unstructured grids by leveraging fixed-function rasterization hardware, specifically the alpha-test and stencil buffer, without relying on programmable fragment shaders [S1, unofficial][S2, unofficial]. It computes plane-tetrahedron intersections by encoding scalar values in the alpha channel and combining back-face and front-face rasterization results using a bitwise XOR operation on the stencil buffer [S1, unofficial][S2, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A tetrahedral mesh where each vertex has an associated scalar value.
+*   **Output:** A stencil buffer indicating the presence of isosurface fragments.
+
+**Data Structures**
+*   **Stencil Buffer:** A per-pixel integer buffer that accumulates the XOR combination of front and back face rasterization results [S1, unofficial][S2, unofficial].
+*   **Alpha Component:** The interpolated scalar value of the vertex is stored in the alpha channel of the fragment color [S1, unofficial][S2, unofficial].
+
+**Steps**
+1.  **Configure Alpha-Test:** Set the alpha test function to reject fragments with an alpha value less than the desired isovalue [S1, unofficial][S2, unofficial].
+2.  **First Pass (Stencil Setup):**
+    *   Draw the back faces of a given cell with the interpolated scalar value in the alpha component.
+    *   Draw the front faces of the same cell in the same manner.
+    *   The rasterization hardware applies the alpha test and performs a bitwise XOR operation on the stencil buffer for each passing fragment [S1, unofficial][S2, unofficial].
+3.  **Result Extraction:** The final isosurface is identified by pixels where the stencil buffer value is non-zero, indicating an intersection between the plane and the tetrahedron [S1, unofficial][S2, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def extract_isosurface(tetrahedra, isovalue, width, height):
+    # Initialize stencil buffer to zero
+    stencil = [[0] * width for _ in range(height)]
+    # Pass 1: Set stencil buffer
+    for tet in tetrahedra:
+        # Draw back faces
+        for face in tet.back_faces:
+            rasterize_and_apply_stencil(face, isovalue, stencil)
+        # Draw front faces
+        for face in tet.front_faces:
+            rasterize_and_apply_stencil(face, isovalue, stencil)
+    # Pass 2: Read stencil buffer results
+    isosurface_mask = [[1 if stencil[y][x] != 0 else 0 for x in range(width)] for y in range(height)]
+    return isosurface_mask
+
+def rasterize_and_apply_stencil(face, isovalue, stencil):
+    # Interpolate scalar values at vertices to fragment alpha
+    alpha_values = interpolate_scalars(face.vertices)
+    # Rasterize triangle to screen coordinates
+    for x, y in triangle_rasterization(face.screen_coords):
+        # Barycentric interpolation for alpha
+        alpha = barycentric_interpolate(alpha_values, face.screen_coords, x, y)
+        # Alpha test: reject fragments where alpha < isovalue
+        if alpha < isovalue:
+            continue
+        # Stencil XOR operation
+        stencil[y][x] ^= 1
+
+def interpolate_scalars(vertices):
+    return [v.scalar for v in vertices]
+
+def triangle_rasterization(screen_coords):
+    # Returns list of (x, y) pixel coordinates covered by the triangle
+    pass
+
+def barycentric_interpolate(values, coords, x, y):
+    # Returns interpolated scalar value at (x, y)
+    pass
+```
+
+**Parameters**
+*   **Isovalue:** The scalar threshold for isosurface extraction [S1, unofficial][S2, unofficial].
+
+**Edge Cases and Pitfalls**
+Not given in the sources.
+
+## Subtopics
+
+### Revised Version with Checkerboard Texture
+An alternate solution that decomposes tetrahedra into smaller tetrahedra and uses 2D texturing hardware with a checkerboard texture to reduce the number of faces rendered per tetrahedron [S1, unofficial][S2, unofficial]. This method projects back and front faces to either degenerate triangles or identical triangles, allowing intersection computation via texture sampling [S1, unofficial][S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Runs in two passes, with the first pass setting the stencil buffer [S1, unofficial][S2, unofficial].
+*   **Memory Complexity:** Requires a stencil buffer and an alpha channel for scalar storage [S1, unofficial][S2, unofficial].
+*   **Performance:** On average renders 5 to 7 triangles per tetrahedron [S1, unofficial][S2, unofficial].
+*   **Strengths:** Efficient use of fixed-function rasterization hardware without programmable shaders [S1, unofficial][S2, unofficial].
+*   **Limitations:** Limited to hardware supporting alpha-test and stencil buffer operations [S1, unofficial][S2, unofficial].
+*   **When to Use:** Suitable for early GPU architectures that lack programmable shading capabilities [S1, unofficial][S2, unofficial].
+*   **When Not to Use:** Not given in the sources.
+
+## Background
+This technique was introduced in early work on GPU-based volume rendering, exploring the use of graphics hardware functionality without the power of programmable shaders [S1, unofficial][S2, unofficial]. It was proposed in [69] and later revised in [58] [S1, unofficial][S2, unofficial].
+
+## Sources
+[S1] A Survey of GPU-Based Volume Rendering of Unstructured Grids, https://www.sci.utah.edu/~stevec/papers/gputet_survey.pdf, fetched 2026-10-27 (unofficial)
+[S2] A Survey of GPU-Based Volume Rendering of ..., https://www.sci.utah.edu/~csilva/papers/rita2005.pdf, fetched 2026-10-29 (unofficial)

@@ -1,0 +1,196 @@
+--- v001.md
++++ v002.md
+@@ -1,120 +1,110 @@
+ # Renoised Score Distillation (RSD)
+ 
++
+ ## Overview
+-Renoised Score Distillation (RSD) is a score-distillation objective designed for 2D image super-resolution that combines the structural consistency of Score Distillation Sampling (SDS) with the detail generation of ancestral sampling [S1]. It solves the problem of generating high-resolution images that are both sharp and consistent with low-resolution conditioning by optimizing intermediate denoised latents along a linearly decreasing time schedule [S1]. Unlike standard SDS which operates in $z_0$ space, RSD formulates a loss function to backpropagate gradients through the intermediate latent $z'_{t-1}$, allowing it to produce sharper details than SDS while maintaining better low-resolution consistency than pure ancestral sampling [S1].
++Renoised Score Distillation (RSD) is a score-distillation objective designed for 2D image super-resolution that combines features from ancestral sampling and Score Distillation Sampling (SDS) to generate sharp images that are consistent with low-resolution (LR) conditioning [S1]. Unlike standard SDS which optimizes in the latent space $z_0$ and often produces limited details, or ancestral sampling which can generate details structurally inconsistent with the LR input, RSD guides the optimization towards intermediate denoised latents $z_{t-1}$ over a linearly decreasing time schedule [S1]. This approach allows for the incremental building of coarse-to-fine details, resulting in sharper textures while maintaining multi-view consistency in NeRF super-resolution contexts [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- **Input:** A low-resolution (LR) image patch $x_0$, a text prompt $y_{text}$, and the LR image itself as conditioning $y_{img}$ [S1].
+-- **Output:** A high-resolution (HR) image $x'_0$ decoded from refined latents $z'_0$ [S1].
++*   **Inputs:** Low-resolution latent $z_0$ (encoded from a 4× interpolated NeRF render), text prompt embeddings $y_{text}$, noise level embedding $y_{noise\_level}$, LR image embeddings $I_{lr}$, minimum timestep $t_{min}$, maximum timestep $t_{max}$, and the number of super-resolution iterations $max\_sr\_iter$ [S1].
++*   **Outputs:** Refined latent residuals $h_\theta$ [S1].
+ 
+ **Data Structures:**
+-- **Learnable Residuals:** A tensor $h_\theta$ of the same shape as the latent $z_0$, initialized to zero [S1].
+-- **Conditioning $y$:** A composite conditioning vector containing the text prompt, the LR image, and the noise level [S1].
+-- **Model Parameters:** $\phi$ represents the parameters of the UNet backbone of the SD×4 model [S1].
++*   $h_\theta$: Learnable latent residuals, initialized to zero with the same shape as $z_0$ [S1].
++*   $z'_0$: Refined latent, defined as $z'_0 = z_0 + h_\theta$ [S1].
++*   $z'_t, z'_{t-1}$: Noised latents at timesteps $t$ and $t-1$ respectively [S1].
++*   $\hat{z}_{t-1}$: Predicted denoised latent at timestep $t-1$ [S1].
+ 
+-**Algorithm Steps:**
+-1. **Initialization:** Interpolate the input image patch $x_0$ by 4× and encode it into a latent $z_0$ using the pretrained VAE encoder of SD×4 [S1].
+-2. **Residual Creation:** Create a zero-initialized learnable latent residual tensor $h_\theta$ [S1]. Define the refined latent $z'_0$ as:
+-   $$ z'_0 = z_0 + h_\theta $$
+-   where $z'_0$ represents the refined latents for the upscaled image $x'_0$ [S1].
+-3. **Forward Noise Application:** Apply the forward diffusion process (Eq. 1 in [S1]) twice to $z'_0$ at two specific timesteps, $t$ and $t-1$, to obtain two noised latents: $z'_t$ and $z'_{t-1}$ [S1]. The timestep schedule follows a linearly decreasing trajectory [S1].
+-4. **Noise Prediction:** Pass the noised latent $z'_t$ and the conditioning $y$ (comprising text prompt, LR image, and noise level) to the UNet backbone of SD×4 (parameterized by $\phi$) to predict the noise residual $\epsilon_\phi(z'_t, y, t)$ [S1].
+-5. **Predicted Denoised Latent Construction:** Pass the predicted noise residual $\epsilon_\phi(z'_t, y, t)$ to the DDPM reverse process equation (Eq. 3 in [S1]) to construct the predicted denoised latent $\hat{z}_{t-1}$ from $z'_t$ [S1].
+-6. **Loss Computation:** Compute the L1 error between the current noised latent $z'_{t-1}$ and the predicted denoised latent $\hat{z}_{t-1}$ [S1]. The optimization objective $L_{RSD}$ is defined as:
+-   $$ L_{RSD} = \| z'_{t-1} - \hat{z}_{t-1} \| $$
+-   where $z'_{t-1}$ is the current noised latent at $t-1$ and $\hat{z}_{t-1}$ is the predicted denoised latent from $z'_t$ [S1].
+-7. **Optimization:** Backpropagate the gradients of $L_{RSD}$ through $z'_{t-1}$ towards the learnable residuals $h_\theta$ [S1].
+-8. **Decoding:** After optimization, the residuals $h_\theta$ contain the high-resolution details. Add $h_\theta$ to the original $z_0$ to obtain the final upscaled latents $z'_0$ [S1]. Decode $z'_0$ using the VAE decoder of SD×4 to obtain the super-resolved image $x'_0$ [S1].
++**Parameters:**
++*   **Scheduler:** DDPM scheduler [S1].
++*   **Time Schedule:** Linearly decreasing from $t_{max}$ to $t_{min}$, following the ancestral sampling trajectory rather than random sampling [S1].
++*   **Patch Sampling:** Uniform random crops of $128 \times 128$ resolution in latent space (corresponding to $512 \times 512$ image patches) are sampled for optimization [S1].
++*   **Learning Rate:** Constant $10^{-2}$ [S1].
++*   **Text Prompt:** Fixed format "<subject>, high resolution, 4K, photo" where <subject> is the scene name [S1].
++
++**Formulas:**
++The forward noising process (Eq. 1 in [S1]) is:
++$$ z'_t = \sqrt{\bar{\alpha}_t} z'_0 + \sqrt{1-\bar{\alpha}_t} \epsilon $$
++where $\epsilon \sim \mathcal{N}(0, I)$ [S1].
++
++The predicted denoised latent $\hat{z}_{t-1}$ is constructed using the DDPM reverse process (Eq. 3 in [S1]):
++$$ \hat{z}_{t-1} = \sqrt{\frac{1}{\bar{\alpha}_t}} z'_t - \sqrt{\frac{1}{1-\bar{\alpha}_t}} \epsilon_\phi(z'_t, y, t) + \sigma_t \epsilon $$
++where $\epsilon_\phi$ is the noise residual predicted by the UNet backbone of the diffusion model (SD$\times$4) parameterized by $\phi$, and $y$ is the conditioning vector comprising text, noise level, and LR image [S1].
++
++The RSD loss is the L1 error between the current noised latent at $t-1$ and the predicted denoised latent:
++$$ L_{RSD} = \| z'_{t-1} - \hat{z}_{t-1} \| $$
++Gradients are backpropagated through $z'_{t-1}$ towards $h_\theta$ [S1].
+ 
+ **Pseudocode:**
+ ```python
+-def rsd_optimization(x0, text_prompt, lr_image, t, num_iterations, lr):
++def RSD(z0, y_text, y_noise_level, I_lr, t_min, t_max, max_sr_iter):
+     """
+-    Performs Renoised Score Distillation optimization.
++    Implements Renoised Score Distillation (RSD) for super-resolution.
+     
+     Args:
+-        x0: Low-resolution input image patch.
+-        text_prompt: String text prompt for conditioning.
+-        lr_image: Low-resolution image tensor for conditioning.
+-        t: Current timestep in the diffusion schedule.
+-        num_iterations: Number of optimization steps.
+-        lr: Learning rate for h_theta.
++        z0: Initial latent from VAE encoder of 4x interpolated NeRF render.
++        y_text: Text prompt embeddings.
++        y_noise_level: Noise level embeddings.
++        I_lr: LR image embeddings.
++        t_min: Minimum timestep.
++        t_max: Maximum timestep.
++        max_sr_iter: Total number of super-resolution iterations.
+         
+     Returns:
+-        x_prime_0: Super-resolved image.
++        h_theta: Refined latent residuals.
+     """
+-    # 1. Encode LR image to latent z0 using SDx4 VAE encoder
+-    z0 = vae_encoder(x0)
++    # Initialize learnable latent residuals to zero
++    h_theta = zeros_like(z0)
+     
+-    # 2. Initialize learnable residual h_theta to zeros
+-    h_theta = torch.zeros_like(z0, requires_grad=True)
+-    
+-    # Optimizer for h_theta
+-    optimizer = torch.optim.Adam([h_theta], lr=lr)
+-    
+-    for i in range(num_iterations):
+-        optimizer.zero_grad()
++    for sr_iter in range(max_sr_iter):
++        # Sample noise
++        epsilon = sample_normal(z0.shape)
+         
+-        # 3. Compute refined latent z'_0 = z0 + h_theta
+-        z_prime_0 = z0 + h_theta
++        # Create conditioning vector
++        y = concatenate([y_text, y_noise_level, I_lr])
+         
+-        # 4. Apply forward process to get z'_t and z'_{t-1}
+-        # Note: Forward process adds noise based on schedule sigma_t
+-        # z'_t = q(z'_t | z'_0)
+-        # z'_{t-1} = q(z'_{t-1} | z'_0)
+-        # Implementation depends on specific forward diffusion function
+-        z_prime_t = forward_diffusion(z_prime_0, t)
+-        z_prime_t_minus_1 = forward_diffusion(z_prime_0, t - 1)
++        # Calculate timestep t using linearly decreasing schedule
++        t = t_max - (t_max - t_min) * (sr_iter / max_sr_iter)
+         
+-        # 5. Construct conditioning y
+-        y = {
+-            'text': text_prompt,
+-            'image': lr_image,
+-            'noise_level': t # or sigma_t
+-        }
++        # Calculate refined latent z'_0
++        z0_prime = sqrt(z0 + h_theta)
+         
+-        # 6. Predict noise residual epsilon_phi(z'_t, y, t)
+-        epsilon_pred = unet_forward(z_prime_t, y, t, phi)
++        # Apply forward process at timestep t to get z'_t
++        zt_prime = sqrt(alpha_bar[t]) * z0_prime + sqrt(1 - alpha_bar[t]) * epsilon
+         
+-        # 7. Construct predicted denoised latent z_hat_{t-1} from z'_t
+-        # Using DDPM reverse process equation (Eq. 3 in source)
+-        # z_hat_{t-1} = f(z'_t, epsilon_pred, t)
+-        z_hat_t_minus_1 = ddpm_reverse_step(z_prime_t, epsilon_pred, t)
++        # Apply forward process at timestep t-1 to get z'_{t-1}
++        zt_minus_1_prime = sqrt(alpha_bar[t-1]) * z0_prime + sqrt(1 - alpha_bar[t-1]) * epsilon
+         
+-        # 8. Compute L1 loss between z'_{t-1} and z_hat_{t-1}
+-        loss = torch.norm(z_prime_t_minus_1 - z_hat_t_minus_1, p=1)
++        # Predict noise residual using UNet of SDx4
++        epsilon_phi = UNet(zt_prime, y, t)
+         
+-        # 9. Backpropagate gradients through z'_{t-1} towards h_theta
+-        loss.backward()
++        # Construct predicted denoised latent z_hat_{t-1} using DDPM reverse process
++        # Note: sigma_t is the standard deviation of Gaussian noise samples from the DDPM scheduler
++        z_hat_t_minus_1 = (1 / sqrt(alpha_bar[t])) * zt_prime - (1 / sqrt(1 - alpha_bar[t])) * epsilon_phi + sigma_t * epsilon
+         
+-        # 10. Update h_theta
+-        optimizer.step()
++        # Compute L1 loss between current noised latent and predicted denoised latent
++        loss = L1Loss(zt_minus_1_prime, z_hat_t_minus_1)
+         
+-    # 11. Decode final refined latent z'_0
+-    z_prime_0_final = z0 + h_theta.detach()
+-    x_prime_0 = vae_decoder(z_prime_0_final)
+-    
+-    return x_prime_0
++        # Backpropagate gradients through z'_{t-1} towards h_theta
++        # Take gradient descent step on h_theta
++        h_theta = h_theta - learning_rate * gradient(loss, h_theta)
++        
++    return h_theta
+ ```
+ 
+-**Parameters:**
+-- **Scheduler:** Uses a DDPM scheduler where $\sigma_t$ is the standard deviation of Gaussian noise samples [S1].
+-- **Time Schedule:** Uses a linearly decreasing time schedule following ancestral sampling, rather than randomly sampled timesteps $t$ as used in SDS [S1].
+-
+ **Edge Cases and Pitfalls:**
+-- **Structural Inconsistency:** Default ancestral sampling can generate details that are structurally inconsistent with the conditioned LR image, which may aggravate inconsistency across different views in 3D reconstruction [S1].
+-- **Limited Details:** SDS produces LR-consistent features but with limited details, leading to over-smoothed results [S1]. RSD mitigates this by incorporating ancestral sampling elements.
+-- **Gradient Path:** Unlike SDS which applies loss gradients in $z_0$ space, RSD formulates the loss to backpropagate through $z'_{t-1}$, requiring careful handling of the computational graph through the diffusion steps [S1].
++*   **Inconsistency:** Default ancestral sampling can generate details structurally inconsistent with the conditioned LR image, aggravating multi-view inconsistency [S1]. RSD mitigates this by optimizing towards $z_{t-1}$ [S1].
++*   **Detail Limitation:** Standard SDS produces LR-consistent features but with limited details [S1]. RSD addresses this by incorporating ancestral sampling elements [S1].
++*   **Implementation Note:** In practice, $\hat{z}_{t-1}$ can be obtained directly from $\epsilon_\phi(z'_t, y, t)$ using the DDPM denoising equation instead of renoising $\hat{z}_0$ [S1].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** The method requires multiple forward passes through the UNet per optimization step (one for noise prediction) and two forward diffusion applications per step. It is iterative, requiring `num_iterations` steps per image patch.
+-- **Memory Complexity:** Requires storing the latent $z_0$, the residual $h_\theta$, and intermediate noised latents $z'_t$ and $z'_{t-1}$. Memory usage is proportional to the latent size, which is smaller than pixel space but significant for high resolutions.
+-- **Performance:** RSD produces sharper details compared to SDS while maintaining better low-resolution consistency compared to ancestral sampling [S1]. It allows for super-resolution NeRF generation using only low-resolution training images, avoiding the need for high-resolution reference images [S1].
+-- **Strengths:** Combines the best of both worlds: LR consistency from SDS and sharp details from ancestral sampling [S1].
+-- **Limitations:** Requires iterative optimization per image, which is computationally expensive compared to single-pass upscaling. The quality depends on the pretrained SD×4 model and the conditioning quality.
++*   **Time Complexity:** RSD optimization is computationally more expensive than standard NeRF training due to the iterative diffusion model evaluations. DiSR-NeRF (using RSD) takes approximately 6.0 hours for optimization, compared to 0.25 hours for NGP and 8.0 hours for DreamFusion-SDS [S1].
++*   **Memory Complexity:** Patch sampling ($128 \times 128$ latent crops) is used to manage GPU memory usage and improve optimization speed [S1].
++*   **Performance:** RSD achieves higher PSNR and SSIM scores compared to baselines like NGP, SDx4, NeRF-SR, DreamFusion, and IN2N on both synthetic (NeRF-Synthetic) and real-world (LLFF) datasets [S1]. For example, on LLFF, DiSR-NeRF achieves a PSNR of 17.01 and SSIM of 0.633, outperforming DreamFusion (PSNR 14.11, SSIM 0.502) [S1].
++*   **Strengths:** Produces sharper details than SDS and better LR consistency than ancestral sampling [S1].
++*   **Limitations:** Longer optimization time compared to non-diffusion methods [S1].
+ 
+ ## Background
+-Renoised Score Distillation (RSD) was introduced in the paper "DiSR-NeRF: Diffusion-Guided View-Consistent Super-Resolution NeRF" [S1]. The method was developed to address the limitations of existing NeRF super-resolution techniques, which often struggled with multi-view consistency or detail generation. RSD is a core component of the DiSR-NeRF framework, specifically within the Iterative 3D Synchronization (I3DS) process, which alternates between upscaling LR rendered images with diffusion models and updating the underlying 3D representation [S1]. The work builds upon Score Distillation Sampling (SDS) [S1] and ancestral sampling techniques in diffusion models [S1].
++RSD was introduced in the paper "DiSR-NeRF: Diffusion-Guided View-Consistent Super-Resolution NeRF" [S1]. It was developed to address the limitations of existing NeRF super-resolution methods, specifically the view inconsistency of ancestral sampling and the lack of detail in SDS. The method is part of the Iterative 3D Synchronization (I3DS) framework, which alternates between upscaling LR rendered images with diffusion models and updating the underlying 3D representation with standard NeRF training [S1].
+ 
+ ## Sources

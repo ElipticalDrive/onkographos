@@ -1,0 +1,64 @@
+# Final Loss Function
+
+Also called: EBAD-NeRF Loss, MSE Loss, NeRF Loss Function
+
+## Overview
+The Final Loss Function computes the mean squared error between rendered pixel colors and ground-truth observations to optimize the implicit radiance field parameters [S1]. It operates within the differentiable volume rendering framework [G], as detailed in [Specific Loss Formulations](10636-specific-loss-formulations.md).
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A batch of rays $\mathscr{R}$, ground-truth color vectors $C(\mathbf{r})$, and rendered color vectors $\hat{C}(\mathbf{r})$ [S1].
+*   **Outputs:** A scalar loss value $\mathscr{L}$ used for backpropagation [S1].
+
+**Data Structures:**
+*   $\mathscr{R}$: Set of rays in the current training batch [S1].
+*   $C(\mathbf{r})$: Ground-truth color vector for ray $\mathbf{r}$, sampled from the input image at the corresponding pixel coordinates [G].
+*   $\hat{C}(\mathbf{r})$: Rendered color vector for ray $\mathbf{r}$, computed via the differentiable volume rendering process [G].
+
+**Loss Formula:**
+The loss is the sum of squared Euclidean distances between the rendered color and the ground truth color for all rays in the batch [S1]:
+$$ \mathscr{L} = \sum_{\mathbf{r} \in \mathscr{R}} \| C(\mathbf{r}) - \hat{C}(\mathbf{r}) \|^2 $$
+where $\| \cdot \|^2$ denotes the squared $L_2$ norm [S1].
+
+**Parameters:**
+*   No explicit weighting hyperparameters are defined for the standard MSE loss in the primary source [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_final_loss(ground_truth_colors, rendered_colors):
+    scalar_loss = 0.0
+    for i in range(len(ground_truth_colors)):
+        ray_loss = 0.0
+        for j in range(3):
+            diff = rendered_colors[i][j] - ground_truth_colors[i][j]
+            ray_loss += diff * diff
+        scalar_loss += ray_loss
+    return scalar_loss
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The squared error amplifies large outliers; ensure ground truth colors are normalized consistently with the rendering output [G].
+*   **Boundaries:** Rays intersecting the background (if not explicitly modeled) may produce undefined colors if the background color is not handled in the rendering function [G].
+
+## Subtopics
+
+### A-NeRF Optimization Objective
+A-NeRF replaces the standard per-pixel MSE loss with a composite objective balancing data fidelity, pose regularization, and smoothness priors [S3, unofficial]. It is chosen when optimizing for articulated human models where pose consistency and temporal smoothness are critical, unlike standard NeRF which assumes static scenes [S3, unofficial]. The objective function is:
+$$ L_{SV}(\theta, \phi) = \sum_k \|C_\phi(\theta_k) - I_k\|_1 + \lambda_\theta \sum_k d(\theta_k - \hat{\theta}_k) + \lambda_t \sum_k \left\| \frac{\partial^2 \theta_k}{\partial t^2} \right\|_2^2 $$
+where the first term is the $L_1$ data term, the second is a pose regularizer encouraging poses $\theta_k$ to stay close to an initial estimate $\hat{\theta}_k$ (with tolerance $\epsilon = 0.01$ via $d(x) = \min(\|x\|_2 - \epsilon, 0)$), and the third is a smoothness prior on pose acceleration [S3, unofficial]. Hyperparameters $\lambda_\theta$ and $\lambda_t$ balance the regularizer and smoothness terms [S3, unofficial].
+
+### EBAD-NeRF Loss
+EBAD-NeRF extends the standard loss with an event-driven blur loss to handle motion blur in dynamic scenes [S2]. The loss is defined as:
+$$ \mathcal{L}_{blur} = \lambda \mathcal{L}_{event} + \mathcal{L}_{blur}^f + \mathcal{L}_{blur}^c $$
+where $\lambda = 0.005$ is the weight for the event loss [S2]. The event loss $\mathcal{L}_{event}$ is calculated only for the fine network, as the coarse network lacks sufficient texture detail for precise event estimation [S2].
+
+## Operating characteristics
+
+## Background
+
+## Sources
+[S1] BirdNeRF: fast neural reconstruction of large-scale scenes from aerial imagery., https://doi.org/10.1038/s41598-025-21206-z, fetched 2026-10-26
+[S2] Deblurring Neural Radiance Fields with Event-driven Bundle Adjustment, https://doi.org/10.1145/3664647.3680569, fetched 2026-10-27
+[S3] A-NeRF: Articulated Neural Radiance Fields for Learning Human Shape, Appearance, and Pose, https://doi.org/10.48550/arxiv.2102.06199, fetched 2026-10-30 (unofficial)

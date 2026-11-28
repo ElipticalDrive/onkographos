@@ -1,0 +1,123 @@
+# LiveScene
+
+Also called: Language Embedding Interactive Radiance Fields for Physical Scene Rendering and Control
+
+## Overview
+LiveScene is a scene-level language-embedded interactive radiance field that reconstructs and controls multiple articulated objects in complex physical scenes from monocular video [S1, unofficial]. It solves the challenge of high-dimensional interaction space modeling by decomposing the scene into local deformable fields, allowing independent control of individual objects and handling topology changes induced by interactions [S1, unofficial]. Unlike joint modeling approaches like CoNeRF or static language fields like LERF, LiveScene projects high-dimensional $(3+\alpha)$-dimensional interaction features into compact 4D local fields using multi-scale ray sampling [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Inputs:** Monocular video frames, camera poses, and control variables $\kappa = [\kappa_1, \dots, \kappa_\alpha]$ indicating the motion states of $\alpha$ interactive objects [S1, unofficial].
+*   **Outputs:** Rendered RGB images, interaction probabilities, and language embeddings for spatial points [S1, unofficial].
+
+**Data Structures**
+*   **Local Deformable Fields:** A set of disjoint regions, each containing a local 4D deformable field representing an individual object or interaction region [S1, unofficial].
+*   **Multi-scale Feature Planes:** The 4D fields are compressed into multi-scale feature planes for storage [S1, unofficial].
+*   **Model Parameters:** The total model size is constant at 39M parameters [S1, unofficial].
+
+**Method Steps**
+1.  **Define Interactive Space:** Model the scene as a function $y = \rho(x, \kappa, H; \theta)$, where $y$ is the scene property (color, probability, or language embedding), $x \in \mathbb{R}^3$ is the spatial coordinate, $\kappa \in \mathbb{R}^\alpha$ are the control variables, $H$ are optional parameters (e.g., view direction), and $\theta$ stores scene information [S1, unofficial].
+2.  **Ray Definition:** Define a ray in the $(3+\alpha)$-dimensional interactive space:
+    $$ r(t) = [o_x | o_\kappa] + t [d_x | d_\kappa] $$
+    where $o_x \in \mathbb{R}^3$ and $d_x \in \mathbb{R}^3$ are the spatial origin and direction, and $o_\kappa \in \mathbb{R}^\alpha$ and $d_\kappa \in \mathbb{R}^\alpha$ are the control variable origin and direction [S1, unofficial].
+3.  **Intersection:** Determine the intersection point $p = [x | \kappa] \in \mathbb{R}^{3+\alpha}$ where the ray intersects the interaction region [S1, unofficial].
+4.  **Multi-scale Interaction Probability Sampling:** For a given intersection point, retrieve deformable features from the corresponding local 4D deformable field by maximizing the sampling probability $P_i$:
+    $$ u = \arg \max_i \{P_i\} $$
+    where $P = \Theta(\kappa, \theta)$ is the probability feature function [S1, unofficial]. The projected sample is $p_u = [x | \kappa(u)]$ [S1, unofficial].
+5.  **Feature Retrieval:** Retrieve the features from the selected local 4D deformable field for the projected sample $p_u$ [S1, unofficial].
+6.  **Interaction-Aware Language Embedding:** Generate varying language embeddings to localize and control objects under arbitrary states using natural language [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_live_scene(ray_origin_spatial, ray_direction_spatial, 
+                      ray_origin_control, ray_direction_control, 
+                      control_variables_kappa, model_theta):
+    """
+    Renders a point along a ray in the interactive space using LiveScene.
+    
+    Args:
+        ray_origin_spatial: 3D vector (ox)
+        ray_direction_spatial: 3D vector (dx)
+        ray_origin_control: Alpha-dimensional vector (o_kappa)
+        ray_direction_control: Alpha-dimensional vector (d_kappa)
+        control_variables_kappa: Alpha-dimensional vector (kappa) representing current object states
+        model_theta: Model parameters containing local deformable fields and probability function
+        
+    Returns:
+        scene_property: Color, probability, or language embedding
+    """
+    # Step 1: Define the ray in (3+alpha)-dimensional space
+    # r(t) = [ox | o_kappa] + t * [dx | d_kappa]
+    # Note: The intersection point p is determined by the specific ray sampling strategy
+    # and the geometry of the interaction regions.
+    
+    # Step 2: Determine intersection point p = [x | kappa]
+    # x is the 3D spatial position, kappa is the interaction variable
+    # This step involves finding the t where the ray intersects the object's interaction region.
+    # For implementation, this requires the geometric definition of the interaction regions.
+    intersection_point_spatial = get_spatial_intersection(ray_origin_spatial, ray_direction_spatial)
+    intersection_point_control = control_variables_kappa # Or derived from ray control params
+    
+    # Step 3: Multi-scale Interaction Probability Sampling
+    # Calculate probability P_i for each local deformable field i
+    probabilities = []
+    for i in range(num_local_fields):
+        # P = Theta(kappa, theta)
+        p_i = compute_probability(intersection_point_control, model_theta, field_index=i)
+        probabilities.append(p_i)
+        
+    # Select the field with maximum probability
+    best_field_index = argmax(probabilities)
+    
+    # Step 4: Project to compact 4D space and retrieve features
+    # The features are retrieved from the corresponding local 4D deformable field
+    # The specific projection to 4D is handled by the local field's internal structure
+    features = retrieve_features_from_local_field(
+        spatial_pos=intersection_point_spatial,
+        control_var=intersection_point_control,
+        field_index=best_field_index,
+        model_theta=model_theta
+    )
+    
+    # Step 5: Decode scene property (color, probability, or language embedding)
+    # The decoding depends on the target output type
+    scene_property = decode_features(features)
+    
+    return scene_property
+```
+
+**Parameters**
+*   $\alpha$: The number of interactive articulated objects.
+*   $\kappa$: Control variable vector $[\kappa_1, \dots, \kappa_\alpha]$ indicating object motion states [S1, unofficial].
+*   Model size: 39M parameters [S1, unofficial].
+
+**Edge Cases and Pitfalls**
+*   **Topology Changes:** Static language embeddings (e.g., LERF, OpenNeRF) fail when scene topology changes (e.g., a cabinet opening). LiveScene handles this via interaction-aware language embedding [S1, unofficial].
+*   **Memory Consumption:** Joint modeling of all interaction variables leads to high memory usage. LiveScene's decomposition mitigates this [S1, unofficial].
+
+## Subtopics
+
+### Local Deformable Fields
+Decomposes the scene into disjoint regions, each modeled by a 4D deformable field, enabling independent object control [S1, unofficial].
+
+### Multi-scale Interaction Probability Sampling
+A strategy to project high-dimensional features into compact 4D space by selecting the most relevant local field based on interaction probability [S1, unofficial].
+
+### Interaction-Aware Language Embedding
+Generates dynamic language embeddings that adapt to object states, enabling natural language control of interactive objects [S1, unofficial].
+
+## Operating characteristics
+*   **Time and Memory Complexity:** Maintains a constant model parameter size of 39M, scaling well with increasing scene complexity [S1, unofficial].
+*   **Measured Performance:** Achieves SOTA novel view synthesis quality, outperforming existing methods by +9.89, +1.30, and +1.99 PSNR on CoNeRF Synthetic, OmniSim #challenging, and InterReal #challenging subsets, respectively [S1, unofficial]. Improves language grounding accuracy by +65.12 mIOU on OmniSim compared to LeRF [S1, unofficial].
+*   **Strengths:** Handles complex physical scenes with multiple interactive objects; supports natural language control; robust to topology changes; memory efficient.
+*   **Limitations:** Requires monocular video input; evaluation limited to specific datasets (OmniSim, InterReal) [S1, unofficial].
+*   **When to Use:** When reconstructing and controlling multiple interactive objects in complex scenes with natural language interface is required.
+*   **When Not to Use:** For static scenes or scenes with single-object interactions where simpler methods (CoNeRF, K-Planes) suffice.
+
+## Background
+LiveScene was introduced as a preprint in 2024 [S1, unofficial]. It addresses the limitations of prior interactive scene modeling methods like CoNeRF and K-Planes, which use joint modeling and struggle with memory and topology changes. It also improves upon language-embedded NeRFs like LERF and OpenNeRF, which fail with dynamic topology. The authors constructed two new datasets, OmniSim and InterReal, featuring 28 scenes with 70 interactive objects for evaluation [S1, unofficial].
+
+## Sources
+[S1] LiveScene: Language Embedding Interactive Radiance Fields for Physical Scene Rendering and Control, https://doi.org/10.48550/arXiv.2406.16038, fetched 2026-10-29 (unofficial)

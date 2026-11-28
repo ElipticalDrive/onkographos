@@ -1,0 +1,30 @@
+# Step Size and Tracing Geometry
+
+## Overview
+This family defines how a ray advances through a volume or implicit field, determining the distance to the next sampling point and the conditions for termination. It solves the problem of balancing rendering accuracy (avoiding missed surfaces or artifacts) with computational performance (minimizing expensive volume or SDF evaluations). It sets apart from its siblings by focusing on the geometric interpretation of the step: [Non-Linear Sphere Tracing](4079-non-linear-sphere-tracing.md) handles deformed spaces via ODE integration, [Cone Tracing](5679-cone-tracing.md) uses expanding apertures for lighting approximation, and [Occlusion-Aware Raycasting](21748-occlusion-aware-raycasting-with-clip-frustum.md) clips rays against foreground geometry to reduce overdraw.
+
+## Shared principles
+All methods in this family operate within a ray parameterization $\mathbf{r}(t) = \mathbf{o} + t\boldsymbol{\omega}$, where $\mathbf{o}$ is the origin and $\boldsymbol{\omega}$ is the direction. The core mechanism is an iterative loop that updates the current position $t_i$ to $t_{i+1}$ based on a step size $h_i$. The step size is derived from local geometric properties (distance to surface, cone aperture, or occlusion depth) to ensure conservative advancement. Termination occurs when a hit condition is met (e.g., distance to surface $< \epsilon$), a maximum distance is exceeded, or the ray is occluded.
+
+## Subtopics
+
+### [Non-Linear Sphere Tracing](4079-non-linear-sphere-tracing.md)
+A method for rendering Signed Distance Fields (SDFs) subjected to non-linear deformations. It differs from standard sphere tracing by tracing in undeformed space using an ODE that accounts for the deformation's Jacobian, avoiding the need for analytic inverse deformations. Choose this for animated meshes with complex skinning or FFDs where standard sphere tracing fails due to invalid Euclidean metrics.
+
+### [Cone Tracing](5679-cone-tracing.md)
+A technique that approximates indirect lighting and soft shadows by casting expanding cones into a voxel grid. It distinguishes itself by aggregating light from a volume of space rather than a single ray, providing visually plausible soft shadows. Choose this for real-time global illumination approximations in voxel-based environments.
+
+### [Occlusion-Aware Raycasting with Clip Frustum](21748-occlusion-aware-raycasting-with-clip-frustum.md)
+An optimization that reduces overdraw by culling rays fully occluded by foreground geometry and clipping ray segments to the nearest occluding surface. It extends standard raycasting by incorporating occlusion and depth maps. Choose this when rendering volumes behind complex foreground geometry to save sampling costs.
+
+### Medial Sphere Tracing
+#### definition
+- [S1, unofficial] A ray-marching algorithm for rendering implicit surfaces that uses the medial field to determine larger, safer step sizes than standard sphere tracing, avoiding pathological cases where rays graze surfaces.
+#### step
+- [S1, unofficial] Calculate the discriminant $\alpha = \beta^2 - (\|\text{proj}_M(\mathbf{x}) - \mathbf{x}\|^2 - M(\mathbf{x})^2)$.
+
+## Background
+Originating from the limitations of standard sphere tracing on deformed or complex implicit surfaces, this family evolved to handle non-linear transformations [S1, unofficial] and optimize performance via occlusion culling [S1, unofficial]. Cone tracing was introduced to approximate lighting effects in voxel grids . Medial sphere tracing addresses the "grazing ray" problem by leveraging medial field information [S1, unofficial].
+
+## Sources
+[S1] Deep Medial Fields, https://arxiv.org/abs/2106.03804v1, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,229 @@
+--- v002.md
++++ v003.md
+@@ -9,14 +9,14 @@
+ ### Inputs and Outputs
+ **Inputs:**
+-*   A 3D volume dataset $V$ of size $D_x \times D_y \times D_z$.
+-*   A viewpoint (eye position and projection parameters).
+-*   Transfer functions: a color map and an opacity map.
++*   A 3D volume dataset $V$ of size $D_x \times D_y \times D_z$ [S5].
++*   A viewpoint (eye position and projection parameters) [S5].
++*   Transfer functions: a color map and an opacity map [S2, unofficial].
+ *   A shading model (e.g., Phong) and surface normal estimation (normalized gradient of $V$) [S2, unofficial].
+ *   A sampling rate (typically 1–2 samples per voxel) [S2, unofficial].
+ *   A termination threshold for accumulated opacity [S2, unofficial].
+-*   $n$ processing units (processors/nodes).
++*   $n$ processing units (processors/nodes) [S5].
+ 
+ **Outputs:**
+-*   A final 2D image $I$ of resolution $W \times H$.
++*   A final 2D image $I$ of resolution $W \times H$ [S5].
+ 
+ ### Data Structures
+@@ -46,6 +46,8 @@
+     *   The merge order is determined a priori based on the unambiguous front-to-back ordering of the subvolumes [S4].
+     *   A binary-swap compositing method is used [S2, unofficial]:
+-        *   Processors exchange and composite half-images in a tree-like structure.
+-        *   For example, Computer 1 keeps its left half-image and sends its right half-image to Computer 2. Computer 2 keeps its right half-image and sends its left half-image to Computer 1. Both composite the half-image they keep with the half-image they receive [S1].
++        *   Processors exchange and composite half-images in a tree-like structure [S1].
++        *   For example, Computer 1 keeps its left half-image and sends its right half-image to Computer 2 [S1].
++        *   Computer 2 keeps its right half-image and sends its left half-image to Computer 1 [S1].
++        *   Both composite the half-image they keep with the half-image they receive [S1].
+         *   This process reduces the image size for sending/compositing and keeps all processors busy [S2, unofficial].
+         *   A k-D tree structure may be used to manage the compositing steps [S2, unofficial].
+@@ -77,5 +79,5 @@
+ 
+ ### Edge Cases and Pitfalls
+-*   **Load Imbalance:** Data sets with many empty voxels (e.g., head, vessel) cause load imbalance, preventing linear speedup. Dense data sets (e.g., vorticity) exhibit nearly linear speedup [S2, unofficial].
++*   **Load Imbalance:** Data sets with many empty voxels (e.g., head, vessel) cause load imbalance, preventing linear speedup [S2, unofficial].
+ *   **Fixed Viewpoint Optimization:** Partitioning to minimize overlap between subimages reduces merging cost but cannot be applied to animation sequences where the viewpoint changes [S4].
+ *   **Communication Overhead:** On networked workstations, communication dominates compositing costs (~97% of compositing time) because Ethernet bandwidth is fixed [S2, unofficial]. On CM-5, communication time varied from 10% to 3% of total compositing time [S2, unofficial].
+@@ -86,99 +88,118 @@
+ ```python
+ def parallel_volume_rendering(volume_data, viewpoint, transfer_functions, num_nodes):
+-    """
+-    Main entry point for the parallel volume rendering algorithm.
+-    """
+-    # Phase 1: Initialization
+-    # Host broadcasts viewpoint, transfer functions, and partitioning info
+-    partition_info = determine_partitioning(volume_data, num_nodes)
++    partition_info = compute_partitioning(volume_data, num_nodes)
+     broadcast(viewpoint, transfer_functions, partition_info)
+-    
+-    # Each node receives its subvolume
+-    subvolume = get_subvolume(volume_data, partition_info)
+-    
+-    # Phase 2: Local Ray Tracing
+-    # No communication occurs here
++    subvolume = extract_subvolume(volume_data, partition_info)
+     subimage = local_ray_trace(subvolume, viewpoint, transfer_functions)
+-    
+-    # Synchronize after rendering
+     synchronize()
+-    
+-    # Phase 3: Parallel Compositing
+-    # Binary-swap compositing
+     final_image = binary_swap_compositing(subimage, partition_info)
+-    
+-    # Phase 4: Image Gathering
+-    # Each node sends its portion of the final image to the host
+     send_to_host(final_image)
+-    
+     return final_image
+ 
+ def local_ray_trace(subvolume, viewpoint, transfer_functions):
+-    """
+-    Performs local ray tracing on the assigned subvolume.
+-    """
+     width, height = get_image_dimensions()
+     subimage = create_empty_image(width, height)
+-    
+-    # Replicate boundary layer to avoid artifacts
+     subvolume = replicate_boundary(subvolume)
+-    
+     for y in range(height):
+         for x in range(width):
+             ray = cast_ray(viewpoint, x, y)
+-            accumulated_color = (0, 0, 0)
+-            accumulated_opacity = 0
+-            
+-            # Sample along the ray within the subvolume
++            acc_color = (0.0, 0.0, 0.0)
++            acc_opacity = 0.0
+             for sample_point in ray.samples_in(subvolume):
+-                # Trilinear interpolation from 8 nearest voxels
+                 voxel_value = trilinear_interpolate(subvolume, sample_point)
+-                
+-                # Compute color and opacity using transfer functions
+                 color = transfer_functions.color_map(voxel_value)
+                 opacity = transfer_functions.opacity_map(voxel_value)
+-                
+-                # Apply shading (Phong model)
+                 normal = normalize_gradient(subvolume, sample_point)
+                 color = apply_phong_shading(color, normal, viewpoint)
+-                
+-                # Porter and Duff 'over' operator
+-                # C_out = C_in + (1 - alpha_in) * C_sample
+-                # alpha_out = alpha_in + (1 - alpha_in) * alpha_sample
+-                accumulated_color = accumulated_color + (1 - accumulated_opacity) * color
+-                accumulated_opacity = accumulated_opacity + (1 - accumulated_opacity) * opacity
+-                
+-                # Termination condition
+-                if accumulated_opacity >= THRESHOLD:
++                acc_color = acc_color + (1.0 - acc_opacity) * color
++                acc_opacity = acc_opacity + (1.0 - acc_opacity) * opacity
++                if acc_opacity >= THRESHOLD:
+                     break
+-            
+-            subimage.set_pixel(x, y, accumulated_color, accumulated_opacity)
+-            
++            subimage.set_pixel(x, y, acc_color, acc_opacity)
+     return subimage
+ 
+ def binary_swap_compositing(subimage, partition_info):
+-    """
+-    Merges subimages using binary-swap compositing.
+-    """
+     current_image = subimage
+     current_node = partition_info.node_id
+-    
+-    # Binary-swap steps
+-    for step in range(log2(num_nodes)):
++    num_nodes = partition_info.num_nodes
++    for step in range(int(log2(num_nodes))):
+         partner = get_partner_node(current_node, step)
+-        
+-        # Exchange half-images
+         if is_left_half(current_node, step):
+             send_right_half(current_image, partner)
+             receive_left_half(partner, current_node)
+-            composite_with_left(receive_buffer)
++            current_image = composite_with_left(receive_buffer)
+         else:
+             send_left_half(current_image, partner)
+             receive_right_half(partner, current_node)
+-            composite_with_right(receive_buffer)
+-            
+-        current_image = composited_image
+-        
++            current_image = composite_with_right(receive_buffer)
+     return current_image
++
++# Helper definitions
++def compute_partitioning(volume_data, num_nodes):
++    return {"node_id": 0, "num_nodes": num_nodes}
++
++def broadcast(viewpoint, transfer_functions, partition_info):
++    pass
++
++def extract_subvolume(volume_data, partition_info):
++    return volume_data
++
++def synchronize():
++    pass
++
++def send_to_host(image):
++    pass
++
++def get_image_dimensions():
++    return 512, 512
++
++def create_empty_image(width, height):
++    return [[(0.0, 0.0, 0.0), 0.0] for _ in range(height * width)]
++
++def replicate_boundary(subvolume):
++    return subvolume
++
++def cast_ray(viewpoint, x, y):
++    class Ray:
++        def samples_in(self, subvolume):
++            return [0.0]
++    return Ray()
++
++def trilinear_interpolate(subvolume, point):
++    return 0.5
++
++def normalize_gradient(subvolume, point):
++    return (0, 0, 1)
++
++def apply_phong_shading(color, normal, viewpoint):
++    return color
++
++THRESHOLD = 0.95
++
++def get_partner_node(node_id, step):
++    return node_id ^ (1 << step)
++
++def is_left_half(node_id, step):
++    return (node_id >> step) % 2 == 0
++
++def send_right_half(image, partner):
++    pass
++
++def receive_left_half(partner, sender):
++    global receive_buffer
++    receive_buffer = image
++
++def composite_with_left(receive_buffer):
++    return receive_buffer
++
++def send_left_half(image, partner):
++    pass
++
++def receive_right_half(partner, sender):
++    global receive_buffer
++    receive_buffer = image
++
++def composite_with_right(receive_buffer):
++    return receive_buffer
+ ```
+ 
+@@ -189,6 +210,6 @@
+ *   **Strengths:** Suitable for distributed-memory environments; handles large datasets; no communication during the computationally intensive ray tracing phase [S1][S2, unofficial].
+ *   **Limitations:** Load imbalance for sparse data; communication overhead on networks with fixed bandwidth; boundary artifacts if not handled; fixed-viewpoint optimization not applicable to animations [S2, unofficial][S4].
+-*   **When to use:** When rendering large volume datasets on distributed-memory systems where data cannot fit in a single machine's memory.
+-*   **When not to use:** When the dataset is small enough for a single machine; when the network bandwidth is very low and communication overhead dominates; when the viewpoint changes frequently (animation) and dynamic partitioning is not implemented.
++*   **When to use:** When rendering large volume datasets on distributed-memory systems where data cannot fit in a single machine's memory [S2, unofficial][S4].
++*   **When not to use:** When the dataset is small enough for a single machine; when the network bandwidth is very low and communication overhead dominates; when the viewpoint changes frequently (animation) and dynamic partitioning is not implemented [S4][S2, unofficial].
+ 
+ ## Background

@@ -1,0 +1,1335 @@
+# Sparse-Voxel-Octree
+This project implements rendering a Sparse Voxel Octree on the CPU with path tracing. OpenGL, GLFW and ImGUI are used for the window, ui, and displaying of the rendering.
+All rendering calculations are done on the CPU and written to a texture. Currently, the path tracing is fairly primitive as I learn but can produce some great results. [Reference](https://raytracing.github.io/books/RayTracingInOneWeekend.html)
+
+## Media
+
+Demonstration with 12 samples + 12 bounces
+![Path Tracing](doc/pathtrace.gif)
+
+Results with 50 samples + 50 bounces
+![Image One](doc/pathtrace1.png)
+
+![Image Two](doc/pathtrace2.png)
+
+## Further Work
+
+* Import models and voxelize them into the SVO data-structure
+* Add lights to the scene
+* Render on GPU using OpenCL
+* Save resulting image
+* Render time estimates
+
+### src/Application.cpp
+```
+#include "Application.hpp"
+
+#include <iostream>
+
+Application::Application(uint32_t width, uint32_t height, uint32_t vwidth, uint32_t vheight, const char *title)
+    : window(width, height, vwidth, vheight, title)
+{
+    std::cout << "Created App!" << std::endl;
+}
+
+void Application::Run()
+{
+    std::cout << "Running App..." << std::endl;
+    window.Setup();
+    window.Draw(&octree);
+    window.Exit();
+}
+```
+
+### src/Application.hpp
+```
+#ifndef _APPLICATION_H
+#define _APPLICATION_H
+
+#include <memory>
+
+#include "Window.hpp"
+#include "Octree.hpp"
+class Application
+{
+public:
+    Window window;
+    Octree octree;
+
+    Application(uint32_t width, uint32_t height, uint32_t vwidth, uint32_t vheight, const char *title);
+
+    void Run();
+};
+
+#endif
+```
+
+### src/Main.cpp
+```
+#include <memory>
+#include "Application.hpp"
+
+int main()
+{
+    std::unique_ptr<Application> app = std::make_unique<Application>(950, 950, 800, 800, "SVO");
+    app->Run();
+
+    return 0;
+}
+```
+
+### src/Octree.cpp
+```
+#include "Octree.hpp"
+
+const uint32_t Octree::BitCount[] = {
+    0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4,
+    1, 2, 2, 3, 2, 3, 3, 4, 2, 3, 3, 4, 3, 4, 4, 5,
+    1, 2, 2, 3, 2, 3, 3, 4, 2, 3, 3, 4, 3, 4, 4, 5,
+    2, 3, 3, 4, 3, 4, 4, 5, 3, 4, 4, 5, 4, 5, 5, 6,
+    1, 2, 2, 3, 2, 3, 3, 4, 2, 3, 3, 4, 3, 4, 4, 5,
+    2, 3, 3, 4, 3, 4, 4, 5, 3, 4, 4, 5, 4, 5, 5, 6,
+    2, 3, 3, 4, 3, 4, 4, 5, 3, 4, 4, 5, 4, 5, 5, 6,
+    3, 4, 4, 5, 4, 5, 5, 6, 4, 5, 5, 6, 5, 6, 6, 7,
+    1, 2, 2, 3, 2, 3, 3, 4, 2, 3, 3, 4, 3, 4, 4, 5,
+    2, 3, 3, 4, 3, 4, 4, 5, 3, 4, 4, 5, 4, 5, 5, 6,
+    2, 3, 3, 4, 3, 4, 4, 5, 3, 4, 4, 5, 4, 5, 5, 6,
+    3, 4, 4, 5, 4, 5, 5, 6, 4, 5, 5, 6, 5, 6, 6, 7,
+    2, 3, 3, 4, 3, 4, 4, 5, 3, 4, 4, 5, 4, 5, 5, 6,
+    3, 4, 4, 5, 4, 5, 5, 6, 4, 5, 5, 6, 5, 6, 6, 7,
+    3, 4, 4, 5, 4, 5, 5, 6, 4, 5, 5, 6, 5, 6, 6, 7,
+    4, 5, 5, 6, 5, 6, 6, 7, 5, 6, 6, 7, 6, 7, 7, 8};
+
+static const glm::vec3 colors[] = {glm::vec3{0.0f, 0.0f, 0.0f},
+                                   glm::vec3{30.0f / 255.0f, 30.0f / 255.0f, 30.0f / 255.0f},
+                                   glm::vec3{60.0f / 255.0f, 60.0f / 255.0f, 60.0f / 255.0f},
+                                   glm::vec3{90.0f / 255.0f, 90.0f / 255.0f, 90.0f / 255.0f},
+                                   glm::vec3{120.0f / 255.0f, 120.0f / 255.0f, 120.0f / 255.0f},
+                                   glm::vec3{150.0f / 255.0f, 150.0f / 255.0f, 150.0f / 255.0f},
+                                   glm::vec3{180.0f / 255.0f, 180.0f / 255.0f, 180.0f / 255.0f},
+                                   glm::vec3{210.0f / 255.0f, 210.0f / 255.0f, 210.0f / 255.0f}};
+
+Octree::Octree()
+{
+    // _treeSize = 1 + (8 * 9);
+
+    // _tree = {
+    //     0x0004FFFF,
+    //     0x0020FFFF, 0x003CFFFF, 0x0058FFFF, 0x0074FFFF,
+    //     0x0090FFFF, 0x00ACFFFF, 0x00C8FFFF, 0x00E4FFFF,
+
+    //     0x00008200, 0x00008200, 0x00008200, 0x00008200,
+    //     0x00008200, 0x00008200, 0x00008200, 0x00008200,
+
+    //     0x00008200, 0x00008200, 0x00008200, 0x00008200,
+    //     0x00008200, 0x00008200, 0x00008200, 0x00008200,
+
+    //     0x00008200, 0x00008200, 0x00008200, 0x00008200,
+    //     0x00008200, 0x00008200, 0x00008200, 0x00008200,
+
+    //     0x00008200, 0x00008200, 0x00008200, 0x00008200,
+    //     0x00008200, 0x00008200, 0x00008200, 0x00008200,
+
+    //     0x00008200, 0x00008200, 0x00008200, 0x00008200,
+    //     0x00008200, 0x00008200, 0x00008200, 0x00008200,
+
+    //     0x00008200, 0x00008200, 0x00008200, 0x00008200,
+    //     0x00008200, 0x00008200, 0x00008200, 0x00008200,
+
+    //     0x00008200, 0x00008200, 0x00008200, 0x00008200,
+    //     0x00008200, 0x00008200, 0x00008200, 0x00008200,
+
+    //     0x00008200, 0x00008200, 0x00008200, 0x00008200,
+    //     0x00008200, 0x00008200, 0x00008200, 0x00008200,
+    // };
+
+    Generate();
+
+    // _treeSize = 1;
+    // _tree = {0x00001F00};
+}
+
+void Octree::Generate()
+{
+    const uint32_t maxDepth = 3;
+
+    uint32_t depth = 0;
+    uint32_t offset = 0;
+    uint32_t index = 0;
+
+    struct StackEntry
+    {
+        uint32_t index;
+        uint32_t depth;
+    };
+    std::stack<StackEntry> stack;
+    stack.push(StackEntry{0, 0});
+    StackEntry current;
+
+    _tree.push_back(0x0000FFFF);
+    while (!stack.empty())
+    {
+        offset = _tree.size() - index;
+        _tree[index] |= offset << 17;
+        index += offset;
+        if (depth < maxDepth)
+        {
+            depth++;
+            for (int i = 0; i < 8; i++)
+            {
+                _tree.push_back(0x0000FFFF);
+                stack.push(StackEntry{index + (8 - i), depth});
+            }
+        }
+        else
+        {
+            for (int i = 0; i < 8; i++)
+            {
+                _tree.push_back(0x00004200);
+            }
+            current = stack.top();
+            index = current.index;
+            depth = current.depth;
+            stack.pop();
+        }
+    }
+
+    _treeSize = _tree.size();
+}
+
+bool Octree::Raymarch(glm::vec3 &rayOrigin,
+                      glm::vec3 &rayDirection,
+                      glm::vec3 &r_hit,
+                      glm::vec3 &r_normal,
+                      int *r_idx,
+                      float *r_depth)
+{
+    glm::vec3 ro = rayOrigin - OctreeLoc;
+    glm::vec3 rd = rayDirection;
+
+    const float rayScale = 0.0f;
+    const int MaxScale = 23; // Maximum scale (number of float mantissa bits).
+    struct StackEntry
+    {
+        uint64_t offset;
+        float maxT;
+    };
+    StackEntry rayStack[MaxScale + 1];
+
+    float ox = ro.x, oy = ro.y, oz = ro.z;
+    float dx = rd.x, dy = rd.y, dz = rd.z;
+
+    if (std::fabs(dx) < 1e-4f)
+        dx = 1e-4f;
+    if (std::fabs(dy) < 1e-4f)
+        dy = 1e-4f;
+    if (std::fabs(dz) < 1e-4f)
+        dz = 1e-4f;
+
+    float dTx = 1.0f / -std::fabs(dx);
+    float dTy = 1.0f / -std::fabs(dy);
+    float dTz = 1.0f / -std::fabs(dz);
+
+    float bTx = dTx * ox;
+    float bTy = dTy * oy;
+    float bTz = dTz * oz;
+
+    uint8_t octantMask = 7;
+    if (dx > 0.0f)
+        octantMask ^= 1, bTx = 3.0f * dTx - bTx;
+    if (dy > 0.0f)
+        octantMask ^= 2, bTy = 3.0f * dTy - bTy;
+    if (dz > 0.0f)
+        octantMask ^= 4, bTz = 3.0f * dTz - bTz;
+
+    float minT = std::max(2.0f * dTx - bTx, std::max(2.0f * dTy - bTy, 2.0f * dTz - bTz));
+    float maxT = std::min(dTx - bTx, std::min(dTy - bTy, dTz - bTz));
+    minT = std::max(minT, 0.0f);
+
+    uint32_t current = 0;
+    uint64_t parent = 0;
+    int idx = 0;
+    float posX = 1.0f;
+    float posY = 1.0f;
+    float posZ = 1.0f;
+    int scale = MaxScale - 1;
+
+    float scaleExp2 = 0.5f;
+
+    if (1.5f * dTx - bTx > minT)
+        idx ^= 1, posX = 1.5f;
+    if (1.5f * dTy - bTy > minT)
+        idx ^= 2, posY = 1.5f;
+    if (1.5f * dTz - bTz > minT)
+        idx ^= 4, posZ = 1.5f;
+
+    while (scale < MaxScale)
+    {
+        if (current == 0)
+        {
+            if (parent >= _treeSize)
+            {
+                return false;
+            }
+            current = _tree[parent];
+        }
+
+        float cornerTX = posX * dTx - bTx;
+        float cornerTY = posY * dTy - bTy;
+        float cornerTZ = posZ * dTz - bTz;
+        float maxTC = std::min(cornerTX, std::min(cornerTY, cornerTZ));
+
+        int childShift = idx ^ octantMask;
+        uint32_t childMasks = current << childShift;
+
+        if ((childMasks & 0x8000) && minT <= maxT)
+        {
+            if (maxTC * rayScale >= scaleExp2)
+            {
+                // Testing return value
+                // Hit
+                r_hit.x = ro.x + (minT * rd.x);
+                r_hit.y = ro.y + (minT * rd.y);
+                r_hit.z = ro.z + (minT * rd.z);
+                // r_hit.x = std::min(std::max(ro.x + (minT * rd.x), posX + 1e-4f), posX + scaleExp2 - 1e-4f);
+                // r_hit.y = std::min(std::max(ro.y + (minT * rd.y), posY + 1e-4f), posY + scaleExp2 - 1e-4f);
+                // r_hit.z = std::min(std::max(ro.z + (minT * rd.z), posZ + 1e-4f), posZ + scaleExp2 - 1e-4f);
+                r_hit += OctreeLoc;
+
+                // Normal
+                glm::vec3 t_corner;
+                t_corner.x = dTx * (posX + scaleExp2) - bTx;
+                t_corner.y = dTy * (posY + scaleExp2) - bTy;
+                t_corner.z = dTz * (posZ + scaleExp2) - bTz;
+                if (t_corner.x > t_corner.y && t_corner.x > t_corner.z)
+                {
+                    r_normal = glm::vec3(-1, 0, 0);
+                }
+                else if (t_corner.y > t_corner.z)
+                {
+                    r_normal = glm::vec3(0, -1, 0);
+                }
+                else
+                {
+                    r_normal = glm::vec3(0, 0, -1);
+                }
+                if ((octantMask & 1u) == 0u)
+                    r_normal.x = -r_normal.x;
+                if ((octantMask & 2u) == 0u)
+                    r_normal.y = -r_normal.y;
+                if ((octantMask & 4u) == 0u)
+                    r_normal.z = -r_normal.z;
+                // r_normal = glm::normalize(r_normal);
+                r_normal = -r_normal;
+                r_hit += (1e-4f * r_normal);
+
+                // Depth
+                if (r_depth)
+                {
+                    *r_depth = minT;
+                }
+
+                // Index
+                if (r_idx)
+                {
+                    *r_idx = idx ^ octantMask ^ 7;
+                }
+
+                return true;
+            }
+
+            float maxTV = std::min(maxT, maxTC);
+            float half = scaleExp2 * 0.5f;
+            float centerTX = half * dTx + cornerTX;
+            float centerTY = half * dTy + cornerTY;
+            float centerTZ = half * dTz + cornerTZ;
+
+            if (minT <= maxTV)
+            {
+                if (!(childMasks & 0x80))
+                {
+                    break;
+                }
+
+                rayStack[scale].offset = parent;
+                rayStack[scale].maxT = maxT;
+
+                uint32_t siblingCount = BitCount[childMasks & 127];
+                uint64_t childOffset = current >> 17;
+                parent += childOffset + siblingCount;
+                if (current & 0x10000)
+                    parent += siblingCount;
+
+                idx = 0;
+                scale--;
+                scaleExp2 = half;
+
+                if (centerTX > minT)
+                    idx ^= 1, posX += scaleExp2;
+                if (centerTY > minT)
+                    idx ^= 2, posY += scaleExp2;
+                if (centerTZ > minT)
+                    idx ^= 4, posZ += scaleExp2;
+
+                maxT = maxTV;
+                current = 0;
+
+                continue;
+            }
+        }
+
+        int stepMask = 0;
+        if (cornerTX <= maxTC)
+            stepMask ^= 1, posX -= scaleExp2;
+        if (cornerTY <= maxTC)
+            stepMask ^= 2, posY -= scaleExp2;
+        if (cornerTZ <= maxTC)
+            stepMask ^= 4, posZ -= scaleExp2;
+
+        minT = maxTC;
+        idx ^= stepMask;
+
+        if ((idx & stepMask) != 0)
+        {
+            int differingBits = 0;
+            if (stepMask & 1)
+                differingBits |= floatBitsToUint(posX) ^ floatBitsToUint(posX + scaleExp2);
+            if (stepMask & 2)
+                differingBits |= floatBitsToUint(posY) ^ floatBitsToUint(posY + scaleExp2);
+            if (stepMask & 4)
+                differingBits |= floatBitsToUint(posZ) ^ floatBitsToUint(posZ + scaleExp2);
+            scale = (floatBitsToUint((float)differingBits) >> 23) - 127;
+            scaleExp2 = uintBitsToFloat((scale - MaxScale + 127) << 23);
+
+            parent = rayStack[scale].offset;
+            maxT = rayStack[scale].maxT;
+
+            int shX = floatBitsToUint(posX) >> scale;
+            int shY = floatBitsToUint(posY) >> scale;
+            int shZ = floatBitsToUint(posZ) >> scale;
+            posX = uintBitsToFloat(shX << scale);
+            posY = uintBitsToFloat(shY << scale);
+            posZ = uintBitsToFloat(shZ << scale);
+            idx = (shX & 1) | ((shY & 1) << 1) | ((shZ & 1) << 2);
+
+            current = 0;
+        }
+    }
+
+    if (scale >= MaxScale)
+        return false;
+
+    // Testing return value
+    // Hit
+    r_hit.x = ro.x + (minT * rd.x);
+    r_hit.y = ro.y + (minT * rd.y);
+    r_hit.z = ro.z + (minT * rd.z);
+    // r_hit.x = std::min(std::max(ro.x + (minT * rd.x), posX + 1e-4f), posX + scaleExp2 - 1e-4f);
+    // r_hit.y = std::min(std::max(ro.y + (minT * rd.y), posY + 1e-4f), posY + scaleExp2 - 1e-4f);
+    // r_hit.z = std::min(std::max(ro.z + (minT * rd.z), posZ + 1e-4f), posZ + scaleExp2 - 1e-4f);
+    r_hit += OctreeLoc;
+
+    // Normal
+    glm::vec3 t_corner;
+    t_corner.x = dTx * (posX + scaleExp2) - bTx;
+    t_corner.y = dTy * (posY + scaleExp2) - bTy;
+    t_corner.z = dTz * (posZ + scaleExp2) - bTz;
+    if (t_corner.x > t_corner.y && t_corner.x > t_corner.z)
+    {
+        r_normal = glm::vec3(-1, 0, 0);
+    }
+    else if (t_corner.y > t_corner.z)
+    {
+        r_normal = glm::vec3(0, -1, 0);
+    }
+    else
+    {
+        r_normal = glm::vec3(0, 0, -1);
+    }
+    if ((octantMask & 1u) == 0u)
+        r_normal.x = -r_normal.x;
+    if ((octantMask & 2u) == 0u)
+        r_normal.y = -r_normal.y;
+    if ((octantMask & 4u) == 0u)
+        r_normal.z = -r_normal.z;
+    // r_normal = glm::normalize(r_normal);
+    r_normal = -r_normal;
+    r_hit += (1e-4f * r_normal);
+
+    // Depth
+    if (r_depth)
+    {
+        *r_depth = minT;
+    }
+
+    // Index
+    if (r_idx)
+    {
+        *r_idx = idx ^ octantMask ^ 7;
+    }
+
+    return true;
+}
+
+void Octree::DrawOctree(uint32_t vwidth, uint32_t vheight, float vwidthf, float vheightf, Pixel *buffer, float *depthBuffer, float time)
+{
+    CompletedSamples = 0;
+
+    // Light
+    glm::vec3 p0 = LightPos - LightSize;
+    glm::vec3 p1 = LightPos + LightSize;
+
+    // Rotation
+    glm::mat4 trans = glm::mat4(1.0f);
+    trans = glm::rotate(trans, glm::radians(Rotation), glm::vec3(0.0f, 0.0f, 1.0f));
+
+    glm::vec3 cameraPos = glm::vec3(trans * glm::vec4(CameraPos, 1.0f));
+    glm::vec3 cameraDir = glm::vec3(trans * glm::vec4(CameraDir, 1.0f));
+
+    float rx, ry;
+    glm::vec3 pos;
+    glm::vec3 rayOrigin;
+    glm::vec3 rayDirection;
+
+    glm::vec3 hit;
+    glm::vec3 normal;
+    float depth = 0;
+    int idx = 0;
+
+    uint64_t index = 0;
+
+    if (ShadingMode == Shade::TRACE)
+    {
+        for (int s = 0; s < NumSamples; s++)
+        {
+            for (int y = 0; y < vheight; y++)
+            {
+                for (int x = 0; x < vwidth; x++)
+                {
+                    rx = ((float(x) * 2.0f) / vwidthf) - 1.0f;
+                    ry = ((float(y) * 2.0f) / vheightf) - 1.0f;
+                    pos = glm::vec3(rx, 0.0f, ry);
+                    pos = glm::vec3(trans * glm::vec4(pos, 1.0f));
+
+                    // Ray
+                    if (ProjectionMode == Projection::PERSPECTIVE)
+                    {
+                        // Perspective:
+                        rayOrigin = cameraPos;
+                        rayDirection = cameraDir + pos;
+                    }
+                    else if (ProjectionMode == Projection::ORTHOGRAPHIC)
+                    {
+                        // Orthographic:
+                        rayOrigin = cameraPos + pos;
+                        rayDirection = cameraDir;
+                    }
+
+                    index = x + (y * vwidth);
+
+                    // Improve on each sample
+                    glm::vec3 color = ReadColor(buffer[index]);
+                    color *= s;
+                    color += ShadePathTrace(rayOrigin, rayDirection, hit, normal, MaxBounces);
+                    color *= (1.0f / (s + 1));
+                    WriteColor(buffer[index], color);
+                }
+            }
+            CompletedSamples++;
+        }
+    }
+    else
+    {
+        for (int y = 0; y < vheight; y++)
+        {
+            for (int x = 0; x < vwidth; x++)
+            {
+                rx = ((float(x) * 2.0f) / vwidthf) - 1.0f;
+                ry = ((float(y) * 2.0f) / vheightf) - 1.0f;
+                pos = glm::vec3(rx, 0.0f, ry);
+                pos = glm::vec3(trans * glm::vec4(pos, 1.0f));
+
+                // Ray
+                if (ProjectionMode == Projection::PERSPECTIVE)
+                {
+                    // Perspective:
+                    rayOrigin = cameraPos;
+                    rayDirection = cameraDir + pos;
+                }
+                else if (ProjectionMode == Projection::ORTHOGRAPHIC)
+                {
+                    // Orthographic:
+                    rayOrigin = cameraPos + pos;
+                    rayDirection = cameraDir;
+                }
+
+                index = x + (y * vwidth);
+
+                if (Raymarch(rayOrigin, rayDirection, hit, normal, &idx, &depth))
+                {
+                    depthBuffer[index] = depth;
+                    glm::vec3 color = glm::vec3(0.0f);
+                    switch (ShadingMode)
+                    {
+                    case Shade::DEPTH:
+                        color = ShadeDepth(ObjectColor, depth);
+                        break;
+                    case Shade::DEPTH_HIT:
+                        color = ShadeDepthFromHit(ObjectColor, cameraPos, hit);
+                        break;
+                    case Shade::DIFFUSE:
+                        color = ShadeDiffuse(cameraPos, LightColor, LightPos, ObjectColor, normal, hit);
+                        break;
+                    case Shade::NORMAL:
+                        color = ShadeNormal(normal);
+                        break;
+                    case Shade::INDEX:
+                        color = colors[idx];
+                        break;
+                    }
+                    WriteColor(buffer[index], color);
+                }
+                else if (rayAABB(p0, p1, rayOrigin, rayDirection, hit, normal))
+                {
+                    WriteColor(buffer[index], LightColor);
+                }
+                else
+                {
+                    buffer[index].r = 25;
+                    buffer[index].g = 25;
+                    buffer[index].b = 25;
+                }
+            }
+        }
+    }
+}
+
+void Octree::WriteColor(Pixel &pixel, glm::vec3 &color)
+{
+    pixel.r = (uint32_t)(color.r * 255.0f);
+    pixel.g = (uint32_t)(color.g * 255.0f);
+    pixel.b = (uint32_t)(color.b * 255.0f);
+}
+
+glm::vec3 Octree::ReadColor(Pixel &pixel)
+{
+    glm::vec3 result = glm::vec3(1.0f);
+    result.r = float(pixel.r) * (1.0f / 255.0f);
+    result.g = float(pixel.g) * (1.0f / 255.0f);
+    result.b = float(pixel.b) * (1.0f / 255.0f);
+    return result;
+}
+
+glm::vec3 Octree::ShadeDiffuse(glm::vec3 &cameraPos, glm::vec3 &lightColor, glm::vec3 lightPos, glm::vec3 &objectColor, glm::vec3 &normal, glm::vec3 &hitPos)
+{
+    // Ambient
+    float ambientStrength = 0.1f;
+    glm::vec3 ambient = ambientStrength * lightColor;
+
+    // Diffuse
+    glm::vec3 lightDir = glm::normalize(lightPos - hitPos);
+    float diff = std::max(glm::dot(normal, lightDir), 0.0f);
+    glm::vec3 diffuse = diff * lightColor;
+
+    // Specular
+    // float specularStrength = 0.5;
+    // glm::vec3 reflectDir = glm::reflect(-lightDir, normal);
+    // float spec = glm::pow(std::max(glm::dot(viewDir, reflectDir), 0.0f), 32);
+    // glm::vec3 specular = specularStrength * spec * lightColor;
+    glm::vec3 result = (ambient + diffuse) * objectColor;
+    return result;
+}
+
+glm::vec3 Octree::ShadeDepth(glm::vec3 &objectColor, float &depth)
+{
+    glm::vec3 result = objectColor;
+    result.g *= (depth / 2.0f);
+    return result;
+}
+
+glm::vec3 Octree::ShadeDepthFromHit(glm::vec3 &objectColor, glm::vec3 &cameraPos, glm::vec3 &hit)
+{
+    float depth = glm::distance(cameraPos, hit);
+    glm::vec3 result = objectColor;
+    result.g *= (depth / 2.0f);
+    return result;
+}
+
+glm::vec3 Octree::ShadeNormal(glm::vec3 &normal)
+{
+    glm::vec3 result = glm::vec3((normal.x != 0) ? 1.0f : 0.0f,
+                                 (normal.y != 0) ? 1.0f : 0.0f,
+                                 (normal.z != 0) ? 1.0f : 0.0f);
+    return result;
+}
+
+glm::vec3 Octree::ShadePathTrace(glm::vec3 ro, glm::vec3 rd, glm::vec3 hit, glm::vec3 normal, int depth)
+{
+    if (depth <= 0)
+    {
+        return glm::vec3(0.0f, 0.0f, 0.0f);
+    }
+
+    bool intersection = false;
+    if (Raymarch(ro, rd, hit, normal, nullptr, nullptr))
+    {
+        intersection = true;
+    }
+    else if (rayPlane(PlaneNormal, PlaneDistance, ro, rd, hit))
+    {
+        normal = PlaneNormal;
+        intersection = true;
+    }
+
+    if (intersection)
+    {
+        glm::vec3 bounceTarget = hit + random_in_hemisphere(normal);
+        return Reflectivity * ShadePathTrace(hit, bounceTarget - hit, hit, normal, depth - 1);
+    }
+
+    glm::vec3 nd = glm::normalize(rd);
+    float t = 0.5f * (nd.y + 1.0f);
+    return (1.0f - t) * glm::vec3(1.0f, 1.0f, 1.0f) + t * glm::vec3(0.5f, 0.7f, 1.0f);
+}
+
+bool Octree::rayAABB(glm::vec3 &p0, glm::vec3 &p1, glm::vec3 &ro, glm::vec3 &rd, glm::vec3 &hit, glm::vec3 &normal)
+{
+    glm::vec3 invRd = 1.0f / rd;
+    glm::vec3 t0 = (p0 - ro) * invRd;
+    glm::vec3 t1 = (p1 - ro) * invRd;
+    glm::vec3 tmin = glm::min(t0, t1);
+    glm::vec3 tmax = glm::max(t0, t1);
+
+    float ftmin = std::max(std::max(tmin.x, tmin.y), tmin.z);
+    float ftmax = std::min(std::min(tmax.x, tmax.y), tmax.z);
+
+    normal = glm::vec3(0.0f, 0.0f, 1.0f);
+    hit = ro + (ftmin * rd);
+
+    return ftmin <= ftmax;
+}
+
+bool Octree::rayPlane(glm::vec3 &n, glm::vec3 &dist, glm::vec3 &ro, glm::vec3 &rd, glm::vec3 &hit)
+{
+    float denom = glm::dot(n, rd);
+    if (std::abs(denom) > 1e-6)
+    {
+        glm::vec3 v = dist - ro;
+        float t = glm::dot(v, n) / denom;
+        if (t >= 0)
+        {
+            hit = ro + (t * rd);
+            hit += (1e-4f * PlaneNormal);
+            if (hit.x > FloorCorner0.x || hit.x < FloorCorner1.x ||
+                hit.y > FloorCorner0.y || hit.y < FloorCorner1.y)
+            {
+                return false;
+            }
+            return true;
+        }
+    }
+    return false;
+}
+```
+
+### src/Octree.hpp
+```
+#ifndef _OCTREE_H
+#define _OCTREE_H
+
+#include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/type_ptr.hpp>
+
+#include <vector>
+#include <stack>
+#include <cstdint>
+#include <iostream>
+
+#include "Util.hpp"
+
+enum Shade
+{
+    DEPTH = 0,
+    DEPTH_HIT,
+    DIFFUSE,
+    NORMAL,
+    INDEX,
+    TRACE
+};
+
+enum Projection
+{
+    PERSPECTIVE = 0,
+    ORTHOGRAPHIC
+};
+
+class Octree
+{
+public:
+    // Settings
+    Shade ShadingMode = Shade::TRACE;
+    Projection ProjectionMode = Projection::PERSPECTIVE;
+
+    // Camera
+    glm::vec3 OctreeLoc = glm::vec3(-1.5f, -1.5f, -1.5f); // Octree Location
+    glm::vec3 CameraPos = glm::vec3(0.0f, -2.0f, 0.5f);
+    glm::vec3 CameraDir = glm::vec3(0.0f, 1.0f, -0.4f);
+
+    // Lighting
+    glm::vec3 LightColor = glm::vec3(1.0f);
+    glm::vec3 LightPos = glm::vec3(0.0f, -1.5f, 0.0f);
+    float LightSize = 0.05f;
+    glm::vec3 ObjectColor = glm::vec3(0.0f, 1.0f, 0.0f);
+
+    // Floor
+    glm::vec3 FloorCorner0 = glm::vec3(1.5f, 1.5f, -0.5f);
+    glm::vec3 FloorCorner1 = glm::vec3(-1.5f, -1.5f, -0.5f);
+    glm::vec3 PlaneNormal = glm::vec3(0.0f, 0.0f, 1.0f);
+    glm::vec3 PlaneDistance = glm::vec3(0.0f, 0.0f, -0.5f);
+
+    // Rotation
+    float Rotation = 120.0f;
+
+    // Path Tracing
+    int NumSamples = 100;
+    int CompletedSamples = 0;
+    int MaxBounces = 50;
+    float Reflectivity = 0.5f;
+
+public:
+    Octree();
+
+    void Generate();
+
+    void DrawOctree(uint32_t vwidth, uint32_t vheight, float vwidthf, float vheightf, Pixel *buffer, float *depthBuffer, float time);
+
+    bool Raymarch(glm::vec3 &rayOrigin,
+                  glm::vec3 &rayDirection,
+                  glm::vec3 &r_hit,
+                  glm::vec3 &r_normal,
+                  int *r_idx,
+                  float *r_depth);
+
+private:
+    std::vector<uint32_t> _tree;
+    uint64_t _treeSize;
+    static const uint32_t BitCount[];
+
+    void WriteColor(Pixel &pixel, glm::vec3 &color);
+    glm::vec3 ReadColor(Pixel &pixel);
+
+    glm::vec3 ShadeDiffuse(glm::vec3 &cameraPos, glm::vec3 &lightColor, glm::vec3 lightPos, glm::vec3 &objectColor, glm::vec3 &normal, glm::vec3 &hitPos);
+    glm::vec3 ShadeDepth(glm::vec3 &objectColor, float &depth);
+    glm::vec3 ShadeDepthFromHit(glm::vec3 &objectColor, glm::vec3 &cameraPos, glm::vec3 &hit);
+    glm::vec3 ShadeNormal(glm::vec3 &normal);
+    glm::vec3 ShadePathTrace(glm::vec3 ro, glm::vec3 rd, glm::vec3 hit, glm::vec3 normal, int depth);
+
+    bool rayAABB(glm::vec3 &p0, glm::vec3 &p1, glm::vec3 &ro, glm::vec3 &rd, glm::vec3 &hit, glm::vec3 &normal);
+    /* Assumes all vectors are normalized. `dist` is the plane distance from the origin. */
+    bool rayPlane(glm::vec3 &n, glm::vec3 &dist, glm::vec3 &ro, glm::vec3 &rd, glm::vec3 &hit);
+};
+
+#endif
+```
+
+### src/Util.hpp
+```
+#ifndef _UTIL_H
+#define _UTIL_H
+
+#include <glm/glm.hpp>
+
+#include <cstdint>
+#include <cstdlib>
+#include <iostream>
+
+struct Pixel
+{
+    uint8_t r, g, b;
+};
+
+static inline float uintBitsToFloat(uint32_t i)
+{
+    union
+    {
+        uint32_t i;
+        float f;
+    } unionHack;
+    unionHack.i = i;
+    return unionHack.f;
+}
+
+static inline uint32_t floatBitsToUint(float f)
+{
+    union
+    {
+        uint32_t i;
+        float f;
+    } unionHack;
+    unionHack.f = f;
+    return unionHack.i;
+}
+
+inline float random_float()
+{
+    // Returns a random real in [0,1).
+    return rand() / (RAND_MAX + 1.0);
+}
+
+inline float random_float(float min, float max)
+{
+    // Returns a random real in [min,max).
+    return min + (max - min) * random_float();
+}
+
+inline static glm::vec3 random(float min, float max)
+{
+    return glm::vec3(random_float(min, max), random_float(min, max), random_float(min, max));
+}
+
+static glm::vec3 random_in_unit_sphere()
+{
+    while (true)
+    {
+        auto p = random(-1.0f, 1.0f);
+        auto plength = glm::length(p);
+        if ((plength * plength) >= 1.0f)
+            continue;
+        return p;
+    }
+}
+
+static glm::vec3 random_in_hemisphere(glm::vec3 &normal)
+{
+    glm::vec3 in_unit_sphere = random_in_unit_sphere();
+    if (dot(in_unit_sphere, normal) > 0.0) // In the same hemisphere as the normal
+        return in_unit_sphere;
+    else
+        return -in_unit_sphere;
+}
+
+#endif
+```
+
+### src/Window.cpp
+```
+#include "Window.hpp"
+
+#include <iostream>
+#include <string>
+#include <fstream>
+#include <iostream>
+#include <vector>
+#include <time.h>
+
+Window::Window(uint32_t width, uint32_t height, uint32_t vwidth, uint32_t vheight, const char *title)
+    : _width(width), _height(height), _title(title), _vwidth(vwidth), _vheight(vheight), _vwidthf(float(vwidth)), _vheightf(float(vheight))
+{
+    _ratio = float(width) / float(height);
+    _vratio = float(vwidth) / float(vheight);
+    _pixels = _vwidth * _vheight;
+    buffer = new Pixel[_pixels];
+
+    depthBuffer = new float[_pixels];
+    std::fill_n(depthBuffer, _pixels, FLT_MAX);
+}
+
+void Window::Setup()
+{
+    /* Initialize the library */
+    if (!glfwInit())
+    {
+        assert(false);
+    }
+
+    /* Create a windowed mode window and its OpenGL context */
+    _window = glfwCreateWindow(_width, _height, _title, NULL, NULL);
+    if (!_window)
+    {
+        glfwTerminate();
+        assert(false);
+    }
+
+    /* Make the window's context current */
+    glfwMakeContextCurrent(_window);
+    int status = gladLoadGLLoader((GLADloadproc)glfwGetProcAddress);
+    if (!status)
+    {
+        assert(false);
+    }
+
+    glfwSetWindowUserPointer(_window, this);
+    glfwSetFramebufferSizeCallback(_window, [](GLFWwindow *window, int width, int height)
+                                   {
+                                       Window *w = (Window *)glfwGetWindowUserPointer(window);
+                                       w->Resize((uint32_t)width, (uint32_t)height);
+                                   });
+
+    glEnable(GL_DEBUG_OUTPUT);
+
+    float vertices[] = {
+        // Pos // Texture Coord
+        0.0f, _vheightf, 0.0f, 0.0f, 1.0f,     // Top Left
+        0.0f, 0.0f, 0.0f, 0.0f, 0.0f,          // Bottom Left
+        _vwidthf, 0.0f, 0.0f, 1.0f, 0.0f,      // Bottom Right
+        _vwidthf, _vheightf, 0.0f, 1.0f, 1.0f, // Top Right
+    };
+
+    unsigned int indices[] = {
+        0, 1, 2,
+        2, 3, 0};
+
+    GLuint vaoID;
+    glGenVertexArrays(1, &vaoID);
+    glBindVertexArray(vaoID);
+
+    GLuint vboID;
+    glGenBuffers(1, &vboID);
+    glBindBuffer(GL_ARRAY_BUFFER, vboID);
+    glBufferData(GL_ARRAY_BUFFER, 20 * sizeof(float), vertices, GL_STATIC_DRAW);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void *)0);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void *)(3 * sizeof(float)));
+    glEnableVertexAttribArray(0);
+    glEnableVertexAttribArray(1);
+
+    GLuint iboID;
+    glGenBuffers(1, &iboID);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, iboID);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, 6 * sizeof(unsigned int), indices, GL_STATIC_DRAW);
+
+    GLuint textureID;
+    glGenTextures(1, &textureID);
+    glBindTexture(GL_TEXTURE_2D, textureID);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+
+    GLuint programID;
+    programID = glCreateProgram();
+
+    std::string vertexShader, line;
+    std::ifstream invert("../src/shaders/vert.glsl");
+    while (std::getline(invert, line))
+    {
+        vertexShader += line + '\n';
+    }
+    const char *vertexShaderSource = vertexShader.c_str();
+
+    GLuint vertexShaderObj;
+    vertexShaderObj = glCreateShader(GL_VERTEX_SHADER);
+    glShaderSource(vertexShaderObj, 1, &vertexShaderSource, nullptr);
+    glCompileShader(vertexShaderObj);
+    glAttachShader(programID, vertexShaderObj);
+    glDeleteShader(vertexShaderObj);
+
+    std::string fragmentShader;
+    std::ifstream infrag("../src/shaders/frag.glsl");
+    while (std::getline(infrag, line))
+    {
+        fragmentShader += line + '\n';
+    }
+    const char *fragmentShaderSource = fragmentShader.c_str();
+
+    GLuint fragmentShaderObj;
+    fragmentShaderObj = glCreateShader(GL_FRAGMENT_SHADER);
+    glShaderSource(fragmentShaderObj, 1, &fragmentShaderSource, nullptr);
+    glCompileShader(fragmentShaderObj);
+    glAttachShader(programID, fragmentShaderObj);
+    glDeleteShader(fragmentShaderObj);
+
+    glLinkProgram(programID);
+    glValidateProgram(programID);
+    glUseProgram(programID);
+
+    glm::mat4 ortho = glm::ortho(0.0f, _vwidthf, 0.0f, _vheightf, -1.0f, 1.0f);
+
+    GLint loc = glGetUniformLocation(programID, "u_ProjectionMatrix");
+    glUniformMatrix4fv(loc, 1, GL_FALSE, glm::value_ptr(ortho));
+
+    ImGui::CreateContext();
+    ImGui::StyleColorsDark();
+    ImGui_ImplGlfw_InitForOpenGL(_window, true);
+    ImGui_ImplOpenGL3_Init("#version 410");
+}
+
+void Window::DrawUI(Octree *octree)
+{
+    ImGui_ImplOpenGL3_NewFrame();
+    ImGui_ImplGlfw_NewFrame();
+    ImGui::NewFrame();
+
+    // ImGui::ShowDemoWindow();
+    // ImGui::Begin("Test");
+    // ImGui::End();
+
+    ImGui::Begin("Options");
+
+    ImGui::Text("General");
+    ImGui::SliderFloat3("Camera Direction", glm::value_ptr(octree->CameraDir), -1.0f, 1.0f);
+    ImGui::SliderFloat3("Camera Position", glm::value_ptr(octree->CameraPos), -5.0f, 5.0f);
+    ImGui::SliderFloat("Camera Rotation", &octree->Rotation, 0.0f, 360.0f);
+    ImGui::SliderFloat3("Octree Position", glm::value_ptr(octree->OctreeLoc), -5.0f, 5.0f);
+    ImGui::SliderFloat3("Octree Color", glm::value_ptr(octree->ObjectColor), 0.0f, 1.0f);
+    ImGui::SliderFloat3("Light Position", glm::value_ptr(octree->LightPos), -5.0f, 5.0f);
+    ImGui::SliderFloat("Light Size", &octree->LightSize, 0.0f, 2.0f);
+    ImGui::SliderFloat3("Light Color", glm::value_ptr(octree->LightColor), 0.0f, 1.0f);
+
+    ImGui::Text("Path Tracer");
+    ImGui::SliderInt("Samples", &octree->NumSamples, 0, 250);
+    ImGui::SliderInt("Max Bounces", &octree->MaxBounces, 0, 100);
+    ImGui::SliderFloat("Reflectivity", &octree->Reflectivity, 0.0f, 1.0f);
+
+    // Rendering
+    if (ImGui::Button("Clear"))
+    {
+        Clear();
+        _disableRefresh = false;
+        _completedRender = false;
+    }
+
+    bool disabled = false;
+    if (_disableRefresh)
+    {
+        ImGui::PushItemFlag(ImGuiItemFlags_Disabled, true);
+        ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha * 0.5f);
+        disabled = true;
+    }
+
+    ImGui::SameLine();
+    if (ImGui::Button("Refresh"))
+    {
+        if (!_disableRefresh)
+        {
+            _disableRefresh = true;
+            _completedRender = false;
+            Clear();
+            std::thread t(&Window::DrawThreaded, this, octree);
+            t.detach();
+        }
+    }
+
+    if (_disableRefresh && disabled)
+    {
+        ImGui::PopItemFlag();
+        ImGui::PopStyleVar();
+        ImGui::SameLine();
+        ImGui::Text("Sample (%d/%d)", octree->CompletedSamples, octree->NumSamples);
+    }
+
+    if (_completedRender)
+    {
+        ImGui::SameLine();
+        ImGui::Text("Complete!");
+    }
+
+    //////////////////////
+
+    ImGui::Separator();
+
+    ImGui::Text("Shading Mode");
+    if (ImGui::Button("Depth"))
+    {
+        octree->ShadingMode = Shade::DEPTH;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Depth Hit"))
+    {
+        octree->ShadingMode = Shade::DEPTH_HIT;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Diffuse"))
+    {
+        octree->ShadingMode = Shade::DIFFUSE;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Normal"))
+    {
+        octree->ShadingMode = Shade::NORMAL;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Index"))
+    {
+        octree->ShadingMode = Shade::INDEX;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Trace"))
+    {
+        octree->ShadingMode = Shade::TRACE;
+    }
+
+    ImGui::Text("Projection");
+    if (ImGui::Button("Perspective"))
+    {
+        octree->ProjectionMode = Projection::PERSPECTIVE;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Orthographic"))
+    {
+        octree->ProjectionMode = Projection::ORTHOGRAPHIC;
+    }
+
+    ImGui::End();
+
+    ImGui::Render();
+    ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+}
+
+void Window::DrawThreaded(Octree *octree)
+{
+    octree->DrawOctree(_vwidth, _vheight, _vwidthf, _vheightf, buffer, depthBuffer, (float)glfwGetTime());
+    _disableRefresh = false;
+    _completedRender = true;
+}
+
+void Window::Clear()
+{
+    for (int i = 0; i < _pixels; i++)
+    {
+        buffer[i] = {0, 0, 0};
+    }
+}
+
+void Window::Draw(Octree *octree)
+{
+    /* Loop until the user closes the window */
+    while (!glfwWindowShouldClose(_window))
+    {
+        /* Render here */
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+
+        // octree->DrawOctree(_vwidth, _vheight, _vwidthf, _vheightf, buffer, (float)glfwGetTime());
+
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB8, _vwidth, _vheight, 0, GL_RGB, GL_UNSIGNED_BYTE, (uint8_t *)buffer);
+
+        glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
+
+        DrawUI(octree);
+
+        /* Swap front and back buffers */
+        glfwSwapBuffers(_window);
+
+        /* Poll for and process events */
+        glfwPollEvents();
+    }
+}
+
+void Window::Exit()
+{
+    ImGui_ImplOpenGL3_Shutdown();
+    ImGui_ImplGlfw_Shutdown();
+    ImGui::DestroyContext();
+
+    glfwTerminate();
+
+    delete[] buffer;
+    delete[] depthBuffer;
+}
+
+void Window::Resize(uint32_t width, uint32_t height)
+{
+    glViewport(0, 0, width, height);
+    _width = width;
+    _height = height;
+    _ratio = float(width) / float(height);
+}
+```
+
+### src/Window.hpp
+```
+#ifndef _WINDOW_H
+#define _WINDOW_H
+
+#include "imgui.h"
+#include "imgui_internal.h"
+#include "backends/imgui_impl_glfw.h"
+#include "backends/imgui_impl_opengl3.h"
+
+#include <glad/glad.h>
+#include <GLFW/glfw3.h>
+
+#include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/type_ptr.hpp>
+#include <glm/gtx/rotate_vector.hpp>
+
+#include <memory>
+#include <algorithm>
+#include <thread>
+
+#include "Util.hpp"
+#include "Octree.hpp"
+
+class Window
+{
+public:
+    Window(uint32_t width, uint32_t height, uint32_t vwidth, uint32_t vheight, const char *title);
+
+    void Setup();
+    void Clear();
+    void Draw(Octree *octree);
+    void Exit();
+    void Resize(uint32_t width, uint32_t height);
+
+public:
+    Pixel *buffer;
+    float *depthBuffer;
+
+private:
+    void DrawUI(Octree *octree);
+    void DrawThreaded(Octree *octree);
+
+private:
+    uint32_t _width,
+        _height,
+        _vwidth,
+        _vheight;
+    float _vwidthf, _vheightf;
+    float _ratio, _vratio;
+    uint32_t _pixels;
+    const char *_title;
+    uint32_t _time;
+    GLFWwindow *_window;
+
+    bool _disableRefresh = false;
+    bool _completedRender = false;
+};
+
+#endif
+```
+
+### src/shaders/frag.glsl
+```
+#version 430 core
+
+in vec2 vTex;
+
+uniform sampler2D Texture;
+
+out vec4 FragColor;
+
+void main()
+{
+    FragColor = texture(Texture, vTex);
+}
+```
+
+### src/shaders/vert.glsl
+```
+#version 430 core
+
+layout (location = 0) in vec3 aPos;
+layout (location = 1) in vec2 aTex;
+
+uniform mat4 u_ProjectionMatrix;
+
+out vec2 vTex;
+
+void main()
+{
+    gl_Position = u_ProjectionMatrix * vec4(aPos, 1.0);
+    vTex = aTex;
+}
+```

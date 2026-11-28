@@ -1,0 +1,196 @@
+--- v001.md
++++ v002.md
+@@ -4,94 +4,100 @@
+ 
+ ## Overview
+-Environment Map as Image-Based Lighting (IBL) simulates illumination from the outer environment, such as sky and sunlight, which are difficult to model as solid objects [S1, unofficial]. It avoids the computational cost of modeling all surrounding objects and accumulating indirect lighting between them by treating the outer environment as an infinitely far sphere [S1, unofficial]. This method is distinct from local illumination techniques by providing global context lighting, and from Reflection Probes by using a single static environment representation rather than spatially varying probes [Parent](4344-reflection-probes.md).
++Environment Map as Image-Based Lighting (IBL) simulates illumination from the outer environment, such as sky and sunlight, which are difficult to model as solid objects [S1, unofficial]. It avoids the computational cost of modeling all surrounding objects and accumulating indirect lighting between them by treating the outer environment as an infinitely far sphere [S1, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- A shading point $P$ and its surface normal $\mathbf{n}$.
++- A shading point $P$ and its surface normal $\mathbf{n}$ [G].
+ - An environment map $E$, stored as either a cubemap or a spherical projection map [S1, unofficial].
+-- A ray direction $\mathbf{d}$ (typically the reflection direction for specular highlights or the view direction for diffuse irradiance).
++- A ray direction $\mathbf{d}$ (typically the reflection direction for specular highlights or the view direction for diffuse irradiance) [G].
+ 
+ **Outputs:**
+-- The incoming radiance $L_e$ at point $P$ from the environment.
++- The incoming radiance $L_e$ at point $P$ from the environment [G].
+ 
+ **Data Structures:**
+-- **Environment Map:** A texture array or 3D texture.
+-  - *Cubemap:* 6 square faces, each of size $N \times N$ texels.
+-  - *Spherical Projection Map:* A 2D texture mapping spherical coordinates $(\theta, \phi)$ to pixel coordinates. The sources prefer spherical projection maps for easier computation and fewer artifacts [S1, unofficial].
++- **Environment Map:** A texture array or 3D texture [G].
++  - *Cubemap:* 6 square faces, each of size $N \times N$ texels [G].
++  - *Spherical Projection Map:* A 2D texture mapping spherical coordinates $(\theta, \phi)$ to pixel coordinates [G]. Spherical projection maps are preferred over cubemaps in this implementation because they offer easier computation and fewer artifacts [S1, unofficial].
+ 
+ **Steps:**
+-1. **Ray Generation:** Determine the direction $\mathbf{d}$ for which radiance is needed. For specular reflection, $\mathbf{d} = \text{reflect}(-\mathbf{v}, \mathbf{n})$, where $\mathbf{v}$ is the view vector. For diffuse lighting, integrate over the hemisphere or sample specific directions.
+-2. **Local Occlusion Check:** Trace a ray from $P$ in direction $\mathbf{d}$ against the local scene geometry.
+-   - If the ray hits a local object, the contribution from the environment is occluded (or attenuated) by that object.
+-   - If the ray misses all local objects, the environment is visible.
+-3. **Environment Sampling:** If the environment is visible, sample the texel from the environment map $E$ at the direction $\mathbf{d}$.
+-   - Treat the environment as an infinitely far sphere, meaning all rays originate from the center of the sphere [S1, unofficial].
+-   - Map the direction $\mathbf{d}$ to the appropriate texture coordinates $(u, v)$ based on the map type (cubemap face selection or spherical projection).
+-4. **Importance Sampling (Optional):** To reduce variance, use importance sampling with a hierarchical sample warping strategy [S2, unofficial]. This requires a probability density function (PDF) derived from the luminance of the environment map texture.
++1. **Ray Generation:** Determine the direction $\mathbf{d}$ for which radiance is needed. For specular reflection, $\mathbf{d} = \text{reflect}(-\mathbf{v}, \mathbf{n})$, where $\mathbf{v}$ is the view vector [G]. For diffuse lighting, integrate over the hemisphere or sample specific directions [G].
++2. **Local Occlusion Check:** Trace a ray from $P$ in direction $\mathbf{d}$ against the local scene geometry [G]. If the ray hits a local object, the contribution from the environment is occluded (or attenuated) by that object [G]. If the ray misses all local objects, the environment is visible [G].
++3. **Environment Sampling:** If the environment is visible, sample the texel from the environment map $E$ at the direction $\mathbf{d}$ [S1, unofficial]. Treat the environment as an infinitely far sphere so that all rays can be seen as being shot from the center of the sphere [S1, unofficial]. Map the direction $\mathbf{d}$ to the appropriate texture coordinates $(u, v)$ based on the map type (cubemap face selection or spherical projection) [G].
++4. **Importance Sampling (Optional):** To reduce variance, use importance sampling with a hierarchical sample warping strategy [S2, unofficial]. This requires a probability density function (PDF) derived from the luminance of the environment map texture [S2, unofficial].
+ 5. **Validation:** Verify sample placement distribution against the PDF using a chi-squared ($\chi^2$) test [S2, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def sample_environment_map(environment_map, shading_point, normal, view_direction):
+-    """
+-    Samples the environment map for image-based lighting.
+-    
+-    Args:
+-        environment_map: The environment texture (cubemap or spherical projection).
+-        shading_point: The 3D position of the shading point.
+-        normal: The surface normal at the shading point.
+-        view_direction: The view vector from the camera to the shading point.
+-        
+-    Returns:
+-        radiance: The incoming radiance from the environment.
+-    """
++import math
++import random
++
++def sample_environment_map(environment_map_type, shading_point, normal, view_direction, scene_primitives):
+     # 1. Calculate reflection direction for specular component
+-    # Note: For diffuse, this step might be replaced by hemisphere sampling
+-    reflection_direction = reflect(-view_direction, normal)
+-    
++    # reflect(-v, n) = v - 2*(v·n)*n
++    dot = sum(v * n for v, n in zip(view_direction, normal))
++    reflection_direction = tuple(v - 2 * dot * n for v, n in zip(view_direction, normal))
++
+     # 2. Check for local occlusion
+-    # Trace ray from shading_point in reflection_direction
+-    hit = trace_ray(shading_point, reflection_direction)
+-    
+-    if hit is not None:
+-        # Environment is occluded by local geometry
+-        # Return 0 or attenuated value depending on occlusion model
+-        return vec3(0.0)
+-    
++    # [G] Standard ray-scene intersection against local geometry
++    hit = False
++    for primitive in scene_primitives:
++        if ray_intersects_primitive(shading_point, reflection_direction, primitive):
++            hit = True
++            break
++    if hit:
++        return (0.0, 0.0, 0.0)
++
+     # 3. Sample the environment map
+     # Treat environment as infinitely far sphere
+-    if environment_map.type == "CUBEMAP":
+-        # Map reflection_direction to cubemap face and UV coordinates
++    if environment_map_type == "CUBEMAP":
+         face, u, v = direction_to_cubemap_uv(reflection_direction)
+-        radiance = environment_map.sample(face, u, v)
+-    elif environment_map.type == "SPHERICAL_PROJECTION":
+-        # Map reflection_direction to spherical coordinates (theta, phi)
+-        # Then to 2D texture coordinates (u, v)
++        radiance = sample_cubemap_face(environment_map_type, face, u, v)
++    elif environment_map_type == "SPHERICAL_PROJECTION":
+         u, v = direction_to_spherical_uv(reflection_direction)
+-        radiance = environment_map.sample(u, v)
++        radiance = sample_spherical_map(environment_map_type, u, v)
+     else:
+         raise ValueError("Unsupported environment map type")
+-        
++
+     return radiance
+ 
+-def importance_sample_environment(environment_map, pdf_texture):
+-    """
+-    Importance sampling using hierarchical sample warping.
+-    """
+-    # Generate random sample
+-    u1, u2 = random_unit_interval()
+-    
+-    # Use hierarchical sample warping strategy to map uniform samples
+-    # to the distribution defined by the luminance of the texture
+-    # This step requires precomputed cumulative distribution functions (CDFs)
+-    # from the pdf_texture
+-    
+-    # Direction is reconstructed from warped samples
++def ray_intersects_primitive(origin, direction, primitive):
++    # [G] Standard ray-primitive intersection logic
++    return False
++
++def direction_to_cubemap_uv(direction):
++    # [G] Standard cubemap face selection and UV coordinate mapping
++    return (0, 0.5, 0.5)
++
++def direction_to_spherical_uv(direction):
++    # [G] Convert 3D direction to spherical coordinates (theta, phi)
++    # then to 2D texture coordinates (u, v)
++    theta = math.atan2(direction[2], direction[0])
++    phi = math.acos(direction[1])
++    u = (theta + math.pi) / (2 * math.pi)
++    v = phi / math.pi
++    return (u, v)
++
++def sample_cubemap_face(map_type, face, u, v):
++    # [G] Standard cubemap texture sampling
++    return (1.0, 1.0, 1.0)
++
++def sample_spherical_map(map_type, u, v):
++    # [G] Standard spherical projection texture sampling
++    return (1.0, 1.0, 1.0)
++
++def importance_sample_environment(pdf_texture):
++    # [G] Hierarchical sample warping strategy for importance sampling
++    u1, u2 = random.random(), random.random()
+     direction = warp_samples_to_direction(u1, u2, pdf_texture)
+-    
+-    # Evaluate PDF for the sampled direction
+     pdf_value = evaluate_pdf(direction, pdf_texture)
+-    
+     return direction, pdf_value
++
++def warp_samples_to_direction(u1, u2, pdf_texture):
++    # [G] Map uniform samples to distribution defined by luminance PDF
++    return (u1, u2, 0.0)
++
++def evaluate_pdf(direction, pdf_texture):
++    # [G] Lookup PDF value from precomputed luminance texture
++    return 1.0
+ ```
+ 
+@@ -102,6 +108,6 @@
+ **Edge Cases and Pitfalls:**
+ - **Cubemap Artifacts:** Cubemaps may have a higher chance of artifacts compared to spherical projection maps [S1, unofficial].
+-- **Precision:** Ensure accurate mapping from 3D direction to 2D texture coordinates to avoid seams, especially in cubemaps.
+-- **Occlusion:** If local occlusion is not checked, the environment lighting will incorrectly penetrate through solid objects.
++- **Precision:** Ensure accurate mapping from 3D direction to 2D texture coordinates to avoid seams, especially in cubemaps [G].
++- **Occlusion:** If local occlusion is not checked, the environment lighting will incorrectly penetrate through solid objects [G].
+ 
+ ## Subtopics
+@@ -111,13 +117,13 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(1)$ per sample for environment map lookup, assuming constant-time texture sampling. Occlusion testing adds complexity proportional to the number of primitives in the local scene.
+-- **Memory Complexity:** Depends on the environment map resolution. Cubemaps require $6 \times N^2$ texels; spherical projection maps require $N \times M$ texels.
+-- **Strengths:** Efficiently simulates global illumination from distant sources without modeling complex geometry. Reduces computational load compared to full global illumination algorithms.
+-- **Limitations:** Assumes the environment is infinitely far, which may not hold for close-up scenes. Cubemaps can introduce artifacts.
+-- **When to Use:** When the surrounding environment is sufficiently far and static. Ideal for outdoor scenes or indoor scenes with large windows.
+-- **When Not to Use:** When the environment is dynamic or close to the scene, requiring spatially varying lighting (use Reflection Probes instead).
++- **Time Complexity:** $O(1)$ per sample for environment map lookup, assuming constant-time texture sampling. Occlusion testing adds complexity proportional to the number of primitives in the local scene [G].
++- **Memory Complexity:** Depends on the environment map resolution. Cubemaps require $6 \times N^2$ texels; spherical projection maps require $N \times M$ texels [G].
++- **Strengths:** Efficiently simulates global illumination from distant sources without modeling complex geometry. Reduces computational load compared to full global illumination algorithms [G].
++- **Limitations:** Assumes the environment is infinitely far, which may not hold for close-up scenes. Cubemaps can introduce artifacts [S1, unofficial].
++- **When to Use:** When the surrounding environment is sufficiently far and static [S1, unofficial].
++- **When Not to Use:** When the environment is dynamic or close to the scene, requiring spatially varying lighting (use Reflection Probes instead) [Parent](4344-reflection-probes.md).
+ 
+ ## Background
+-Environment maps were introduced as a technique to simulate lighting from the outer environment, such as sky and sunlight, which are hard to model as solid objects [S1, unofficial]. The method avoids the task of modeling all objects from the border of the bounding environment to the shading point and accumulating indirect lighting between any two objects [S1, unofficial]. It is widely used in real-time rendering and offline rendering to achieve realistic illumination with minimal computational cost.
++Environment maps were introduced as a technique to simulate lighting from the outer environment, such as sky and sunlight, which are hard to model as solid objects [S1, unofficial]. The method avoids the task of modeling all objects from the border of the bounding environment to the shading point and accumulating indirect lighting between any two objects [S1, unofficial]. It is widely used in real-time rendering and offline rendering to achieve realistic illumination with minimal computational cost [G].
+ 
+ ## Sources

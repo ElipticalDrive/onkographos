@@ -1,0 +1,89 @@
+# MiraGe
+
+Also called: Editable 2D Images using Gaussian Splatting
+
+## Overview
+MiraGe is a method for editing 2D images by temporarily interpreting selected regions as 3D objects via Gaussian Splatting, allowing for intuitive manipulation and transformation before rendering back to 2D [S1, unofficial]. It distinguishes itself from generative AI tools (e.g., ControlNet, Firefly) by using the source image as a strict reference for explicit 3D reconstruction rather than synthesizing new content, and from Implicit Neural Representations (INRs) like SIREN by providing addressable Cartesian coordinates [S1, unofficial]. It builds on [Mesh-embedded representation](12559-mesh-embedded-representation.md) by utilizing Gaussian Mesh Splatting (GaMeS) to treat flat Gaussians as triangle soups [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 2D image and a user-defined selection region [S1, unofficial].
+*   **Output:** An edited 2D image [S1, unofficial].
+
+**Data Structures:**
+The method relies on the GaMeS parametrization where each flat Gaussian is represented as three points in a "triangle soup" [S1, unofficial]. This allows the Gaussian splats to be interpreted as traditional CGI meshes, subject to warping and modification [S1, unofficial]. The system uses two opposing cameras positioned along the Y-axis, symmetrically aligned around the origin and directed towards one another [S1, unofficial].
+
+**Steps:**
+1.  **Mirror Setup:** Create a "mirror" image of the selection by horizontally flipping the image [S1, unofficial]. Position two cameras along the Y-axis: Camera 1 reconstructs the original image, and Camera 2 models the mirror reflection [S1, unofficial].
+2.  **3D Interpretation:** Use GaMeS parametrization to extract the selected area into a Gaussian/mesh representation [S1, unofficial]. The 2D image is conceptualized as a translucent tracing paper sheet embedded in 3D space [S1, unofficial].
+3.  **Deformation:** Apply deformation to the 3D representation [S1, unofficial]. MiraGe offers two approaches: Amorphous (directly utilizes GaMeS, allowing the extracted selection to move freely in 3D space) and Graphite (constrains Gaussians to 2D space during initialization and training) [S1, unofficial].
+4.  **Physics Simulation (Optional):** The Gaussian Splat acts as a guiding proxy for an equivalent mesh version [S1, unofficial]. The image is reconstructed using the Material Points Method (MPM) technique [S1, unofficial].
+5.  **Rendering:** Render the deformed 3D representation back to 2D [S1, unofficial]. Parts of the image not influenced by the deformation are hidden from the user during the process to prevent visible context shifts until completion [S1, unofficial].
+
+**Parameters:**
+*   **Deformation Mode:** `Amorphous` or `Graphite` [S1, unofficial].
+*   **Camera Alignment:** Symmetric along Y-axis around origin [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Tears/Rifts:** The Amorphous approach may produce "tears" or rift artifacts where the edge of the deformation aligns with the unaffected portion of the image [S1, unofficial].
+*   **Context Visibility:** Unaffected parts of the image are not visible to the user during editing; failure to manage this visibility can lead to disorienting edits [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def mira_ge_edit(image, selection_mask):
+    # 1. Mirror Setup: Create mirror image by horizontally flipping
+    mirror_image = image[:, ::-1, :]
+
+    # 2. Camera Setup: Two opposing cameras along Y-axis, symmetric around origin
+    cam_original = {'pos': np.array([0.0, 0.0, 1.0]), 'target': np.array([0.0, 0.0, 0.0])}
+    cam_mirror = {'pos': np.array([0.0, 0.0, -1.0]), 'target': np.array([0.0, 0.0, 0.0])}
+
+    # 3. 3D Interpretation: Extract selection into Gaussian/mesh representation
+    # GaMeS parametrization converts the 2D selection into a triangle soup mesh [G]
+    mesh_3d = _ga_mes_extract(image, selection_mask, cam_original)
+    mesh_mirror_3d = _ga_mes_extract(mirror_image, selection_mask, cam_mirror)
+
+    # 4. Deformation: Apply transformation to the 3D representation
+    # Amorphous mode allows free 3D movement; Graphite constrains to 2D [S1, unofficial]
+    deformed_mesh = _apply_deformation(mesh_3d, mode='amorphous')
+
+    # Optional: Physics Simulation using Material Points Method (MPM)
+    # deformed_mesh = _mpm_simulate(deformed_mesh)
+
+    # 5. Rendering: Render deformed 3D representation back to 2D
+    # Unaffected image parts are hidden from the user during the process [S1, unofficial]
+    edited_image = _render_back_to_2d(deformed_mesh, cam_original)
+
+    return edited_image
+
+def _ga_mes_extract(img, mask, cam):
+    # Standard GaMeS extraction: projects image pixels onto triangle soup using camera intrinsics/extrinsics
+    pass # GaMeS extraction logic not detailed in sources [G]
+
+def _apply_deformation(mesh, mode):
+    # Apply deformation to mesh vertices
+    if mode == 'graphite':
+        mesh.vertices[:, 2] = 0.0  # Constrain to 2D plane
+    return mesh
+
+def _render_back_to_2d(mesh, cam):
+    # Rasterize deformed mesh back to 2D image plane
+    return np.zeros_like(mesh.vertices)
+```
+
+## Operating characteristics
+*   **Performance:** Tests were conducted on NVIDIA GeForce RTX 4070 laptop and NVIDIA RTX 2080 hardware [S1, unofficial].
+*   **Quality:** Outperforms prior frameworks (SIREN, WIRE, I-NGP, NeuRBF) on Kodak Lossless True Color Image Suite and DIV2K validation sets using SNR and MS-SIM metrics [S1, unofficial].
+*   **Strengths:** Explicit addressable coordinates; intuitive 3D manipulation of 2D content; high-fidelity reflections via mirror-camera setup [S1, unofficial].
+*   **Limitations:** Amorphous mode may cause tearing artifacts; requires external physics engines (e.g., Blender, Taichi_Elements) for advanced simulation [S1, unofficial].
+*   **Time and Memory Complexity:** Not given in the sources.
+
+## Background
+MiraGe was introduced in the paper "MiraGe: Editable 2D Images using Gaussian Splatting" by researchers from Jagiellonian University and the University of Cambridge, published on October 3, 2024 [S1, unofficial]. It builds on GaMeS parametrization, developed by a group including two of the paper's authors [S1, unofficial]. The Material Points Method (MPM) technique used for reconstruction was first outlined in a 2018 CSAIL paper [S1, unofficial]. The concept of using GSplat in 2D space was prominently presented in the 2024 "GaussianImage" collaboration, which achieved 1000fps inference but has no implementation related to image editing [S1, unofficial]. MiraGe can be integrated into Blender and uses external physics engines like those in Blender or Taichi_Elements [S1, unofficial].
+
+## Sources
+[S1] Image Editing with Gaussian Splatting, https://www.unite.ai/image-editing-with-gaussian-splatting/, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,408 @@
+--- v001.md
++++ v002.md
+@@ -4,72 +4,70 @@
+ 
+ ## Overview
+-D-TensoRF is a dynamic radiance field model that maps 3D location $\mathbf{x}$, viewing direction $\mathbf{d}$, and time instant $t$ to emitted color $\mathbf{c}$ and volume density $\sigma$ using factorized 4D/5D tensor grids [S1, unofficial]. It extends the static TensoRF representation [S1, unofficial] by introducing a time axis to the feature grids and applying Matrix-Matrix (MM) decomposition to reduce memory complexity from $O(n^4)$ to $O(n^2)$ compared to naive 4D grid representations [S1, unofficial]. Unlike standard NeRF which uses MLPs for the entire function, D-TensoRF replaces the MLPs with low-rank tensor factors, allowing for efficient modeling of dynamic scenes with continuous motion [S1, unofficial].
++D-TensoRF is a dynamic radiance field model that maps 3D location $\mathbf{x}$, viewing direction $\mathbf{d}$, and time instant $t$ to emitted color $\mathbf{c}$ and volume density $\sigma$ using factorized 4D/5D tensor grids [S1, unofficial]. It extends TensoRF by incorporating a time dimension and applying Matrix-Matrix (MM) decomposition to reduce memory complexity from $O(n^4)$ to $O(n^2)$ compared to naive 4D grid representations [S1, unofficial]. Unlike Deformable Neural Radiance Fields (Nerfies), which rely on explicit deformation fields to warp static coordinates, D-TensoRF models temporal dynamics directly within the tensor structure, augmented by smoothing regularization to enforce temporal dependency [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** 3D position $\mathbf{x} = (x, y, z)$, viewing direction $\mathbf{d} = (\theta, \phi)$, and time instant $t$.
++*   **Inputs:** 3D spatial coordinates $\mathbf{x} = (x, y, z)$, viewing direction $\mathbf{d} = (\theta, \phi)$, and time instant $t$.
+ *   **Outputs:** Volume density $\sigma$ and view-dependent color $\mathbf{c}$.
+ 
+ **Data Structures:**
+-The model uses two primary grids, factorized via MM decomposition:
++The model utilizes two primary grids, factorized via MM decomposition:
+ 1.  **Geometry Grid ($G_\sigma$):** A 4D tensor with dimensions $I \times J \times K \times N$, where $I, J, K$ are spatial resolutions (X, Y, Z) and $N$ is the time axis resolution [S1, unofficial].
+ 2.  **Appearance Grid ($G_c$):** A 5D tensor with dimensions $I \times J \times K \times N \times P$, where $P$ is the number of feature channels [S1, unofficial].
+ 
+ **MM Decomposition Layout:**
+-For a 4D tensor $T \in \mathbb{R}^{I \times J \times K \times N}$, MM decomposition expresses $T$ as a summation of outer products of matrix factors corresponding to pairs of modes [S1, unofficial]. The components are matrices $M_{r,1,2} \in \mathbb{R}^{I \times J}$, $M_{r,1,3} \in \mathbb{R}^{I \times K}$, $M_{r,1,4} \in \mathbb{R}^{I \times N}$, $M_{r,2,3} \in \mathbb{R}^{J \times K}$, $M_{r,2,4} \in \mathbb{R}^{J \times N}$, and $M_{r,3,4} \in \mathbb{R}^{K \times N}$ [S1, unofficial].
++For a 4D tensor $T \in \mathbb{R}^{I \times J \times K \times N}$, MM decomposition expresses $T$ as a summation of outer products of matrix factors corresponding to pairs of modes [S1, unofficial]:
++$$
++T = \sum_{r=1}^{R_1} M_{r,1,2} \circ M_{r,3,4} + \sum_{r=1}^{R_2} M_{r,1,3} \circ M_{r,2,4} + \sum_{r=1}^{R_3} M_{r,2,3} \circ M_{r,1,4}
++$$
++where $M_{r,i,j} \in \mathbb{R}^{d_i \times d_j}$ is a matrix factor for modes $i$ and $j$, and $\circ$ denotes the outer product of the scalar values resulting from the interaction of the two matrices at specific indices [S1, unofficial].
+ 
+ **Parameters:**
+-*   **$R_\sigma$:** Number of components for the geometry grid.
+-*   **$R_c$:** Number of components for the appearance grid. Set to $3 \times R_\sigma$ [S1, unofficial].
+-*   **$N_t$:** Time axis resolution. Set to $0.25 \times (\text{number of training images})$ [S1, unofficial].
++*   **Components:** $R_\sigma$ for geometry, $R_c$ for appearance. $R_c$ is typically set to $3 \times R_\sigma$ [S1, unofficial].
++*   **Time Resolution ($N_t$):** Set to $0.25 \times (\text{number of training images})$ [S1, unofficial].
+ *   **Initial Grid Resolution:** $64^3 \times N_t$ [S1, unofficial].
+-*   **Smoothing Window Size ($S$):** 3 [S1, unofficial].
+-*   **Smoothing Degree ($\sigma_{smooth}$):** 0.5 [S1, unofficial].
+ *   **Converting Function $S$:** A small MLP with two fully-connected layers and 128-channel hidden layers [S1, unofficial].
++*   **Smoothing Regularization:** Window size $S=3$, smoothing degree $\sigma=0.5$ [S1, unofficial].
+ 
+ **Algorithm Steps:**
+ 
+-1.  **Initialize Grids:** Initialize geometry grid $G_\sigma$ and appearance grid $G_c$ with the specified resolutions and component counts $R_\sigma$ and $R_c$. Initialize matrix factors $M$ and vector factors $b$ [S1, unofficial].
++1.  **Initialize Grids:** Initialize geometry grid $G_\sigma$ and appearance grid $G_c$ with random values for their matrix and vector factors. Set initial spatial resolution to $64^3$ and time resolution $N_t = 0.25 \times N_{images}$ [S1, unofficial].
+ 2.  **Compute Density ($\sigma$):**
+-    Quadrilinearly interpolate features from the geometry grid $G_\sigma$ at location $\mathbf{x}$ and time $t$. The density is the scalar output of this interpolation [S1, unofficial].
+-    $$
+-    \sigma = G_\sigma(\mathbf{x}, t) = \sum_{r=1}^{R_\sigma} \left( M_{\sigma,r,X,Y} \circ M_{\sigma,r,Z,T} + M_{\sigma,r,X,Z} \circ M_{\sigma,r,Y,T} + M_{\sigma,r,Y,Z} \circ M_{\sigma,r,X,T} \right)
+-    $$
+-    Where $\circ$ denotes the outer product of the matrix entries evaluated at the respective coordinates [S1, unofficial].
+-3.  **Compute Appearance Features:**
+-    Quadrilinearly interpolate features from the appearance grid $G_c$ at location $\mathbf{x}$ and time $t$. This involves combining matrix factors from $G_c$ and vector factors $b$ [S1, unofficial].
+-    $$
+-    \mathbf{f}_{app} = G_c(\mathbf{x}, t) = \bigoplus_{r=1}^{R_c} \left[ \left( M_{c,r,X,Y} \circ M_{c,r,Z,T} \right) \circ b_{3r-2} + \left( M_{c,r,X,Z} \circ M_{c,r,Y,T} \right) \circ b_{3r-1} + \left( M_{\sigma,r,Y,Z} \circ M_{c,r,X,T} \right) \circ b_{3r} \right]
+-    $$
+-    Here, $\oplus$ is the concatenation operator, and $b$ is a vector of dimension $3R_c$ constructed by stacking all $b_r$ vectors [S1, unofficial].
++    Evaluate $G_\sigma(\mathbf{x}, t)$ using MM decomposition. For each component $r$, compute the scalar value by multiplying the corresponding entries from the matrix factors (e.g., $M_{\sigma,r,X,Y}(x,y) \times M_{\sigma,r,Z,T}(z,t)$). Sum these products across all components [S1, unofficial].
++    $$
++    \sigma = \sum_{r=1}^{R_\sigma} \left( M_{\sigma,r,X,Y} \circ M_{\sigma,r,Z,T} + M_{\sigma,r,X,Z} \circ M_{\sigma,r,Y,T} + M_{\sigma,r,Y,Z} \circ M_{\sigma,r,X,T} \right)
++    $$
++    The result is the volume density $\sigma$ at $(\mathbf{x}, t)$ [S1, unofficial].
++3.  **Compute Appearance Features ($G_c$):**
++    Evaluate $G_c(\mathbf{x}, t)$ using MM decomposition. This involves matrix factors for appearance ($M_{c}$) and geometry ($M_{\sigma}$). The decomposition for $G_c$ is defined as [S1, unofficial]:
++    $$
++    G_c = \sum_{r=1}^{R_c} \left( M_{c,r,X,Y} \circ M_{c,r,Z,T} \circ \mathbf{b}_{3r-2} + M_{c,r,X,Z} \circ M_{c,r,Y,T} \circ \mathbf{b}_{3r-1} + M_{\sigma,r,Y,Z} \circ M_{c,r,X,T} \circ \mathbf{b}_{3r} \right)
++    $$
++    Here, $\mathbf{b}$ represents vector factors. The term $M_{c,r,X,Y} \circ M_{c,r,Z,T}$ produces a scalar value for the spatial-temporal interaction, which is then multiplied by the vector $\mathbf{b}$ [S1, unofficial].
+ 4.  **Compute Color ($\mathbf{c}$):**
+-    Pass the appearance features $\mathbf{f}_{app}$ and viewing direction $\mathbf{d}$ through the converting function $S$ (the MLP) [S1, unofficial].
+-    $$
+-    \mathbf{c} = S(\mathbf{f}_{app}, \mathbf{d})
+-    $$
+-5.  **Rendering:**
+-    Use differentiable volume rendering (as defined in the parent NeRF Training Loop) with $\sigma$ and $\mathbf{c}$ to render images [S1, unofficial].
+-6.  **Loss Calculation:**
+-    Calculate the L2 rendering loss between the rendered image and the ground truth 2D image [S1, unofficial].
+-7.  **Regularization:**
+-    *   **Smoothing Regularization ($L_{smooth}$):** Apply temporal smoothing to factors along the time axis to reflect temporal dependency. For vector factors $v$ and matrix factors $m$ along the time axis:
+-        $$
+-        L_{smooth} = \sum_{r=1}^{R} \sum_{it=0}^{N} \left\| v_{it} - \sum_{iw \in \text{window}(it, S)} w(it, iw) v_{iw} \right\|^2
+-        $$
+-        $$
+-        L_{smooth} = \sum_{r=1}^{R} \sum_{m \in [M_{X,T}, M_{Y,T}, M_{Z,T}]} \sum_{l=0}^{L} \sum_{it=0}^{N} \left\| m_{l,it} - \sum_{iw \in \text{window}(it, S)} w(it, iw) m_{l,iw} \right\|^2
+-        $$
+-        Where the weight function $w(it, iw)$ uses a Gaussian kernel:
+-        $$
+-        w(it, iw) = \frac{K(it, iw)}{\sum_{i'w \in \text{window}(it, S)} K(it, i'w)}, \quad K(it, iw) = \exp\left(-\frac{(it - iw)^2}{2\sigma_{smooth}^2}\right)
+-        $$
+-        [S1, unofficial]
+-    *   **L1 Regularization:** Apply L1 regularization on all vector and matrix factors to prevent overfitting [S1, unofficial].
+-8.  **Optimization:**
+-    Minimize the total loss (Rendering Loss + Regularization) via gradient descent [S1, unofficial].
+-9.  **Upsampling:**
+-    Upsample the vector and matrix factors linearly and bilinearly at training steps 2000, 3000, 4000, 5500, and 7000 [S1, unofficial].
+-10. **Bounding Box Refinement:**
+-    Calculate a binary occupancy mask grid at training step 2000 to create a more accurate bounding box, preventing unnecessary computation [S1, unofficial].
++    Pass the appearance features $G_c(\mathbf{x}, t)$ and viewing direction $\mathbf{d}$ through the converting function $S$:
++    $$
++    \mathbf{c} = S(G_c(\mathbf{x}, t), \mathbf{d})
++    $$
++    $S$ is implemented as a 2-layer MLP with 128 hidden units [S1, unofficial].
++5.  **Render:**
++    Use differentiable volume rendering (standard emission-absorption model) to compute the pixel color $\hat{C}(\mathbf{r})$ from $\sigma$ and $\mathbf{c}$ along ray $\mathbf{r}$ [S1, unofficial].
++6.  **Regularization:**
++    Apply smoothing regularization $L_{smooth}$ to enforce temporal dependency on time-related factors (vectors $\mathbf{b}$ and matrices involving the time axis $T$). For a feature value $ev_{it}$ (or $em_{l,it}$ for matrices) at time index $it$:
++    $$
++    L_{smooth} = \sum_{r=1}^{R} \sum_{it=0}^{N} \left\| ev_{it} - \sum_{iw \in \text{window}(it,S)} w(it, iw) ev_{iw} \right\|^2
++    $$
++    The weight $w(it, iw)$ is a Gaussian kernel:
++    $$
++    w(it, iw) = \frac{K(it, iw)}{\sum_{i'w \in \text{window}(it,S)} K(it, i'w)}, \quad K(it, iw) = \exp\left(-\frac{(it - iw)^2}{2\sigma^2}\right)
++    $$
++    where $\sigma=0.5$ and window size $S=3$ [S1, unofficial].
++    Apply L1 regularization on all vector and matrix factors to prevent overfitting [S1, unofficial].
++7.  **Optimization:**
++    Minimize L2 rendering loss against 2D image supervision using gradient descent [S1, unofficial].
++8.  **Upsampling:**
++    Upsample vector and matrix factors linearly and bilinearly at training steps 2000, 3000, 4000, 5500, and 7000. Do **not** upsample the feature grid along the time axis [S1, unofficial].
++9.  **Bounding Box Refinement:**
++    At training step 2000, calculate a binary occupancy mask grid to create a more accurate bounding box, preventing unnecessary computation [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -80,154 +78,149 @@
+ import torch.nn.functional as F
+ 
+-class DTensorRF(nn.Module):
+-    def __init__(self, I, J, K, N, P, R_sigma, R_c):
+-        super().__init__()
+-        # Geometry Grid: 4D tensor factorized into 6 matrices per component
+-        # M_sigma_r_XY, M_sigma_r_XZ, M_sigma_r_XT, M_sigma_r_YZ, M_sigma_r_YT, M_sigma_r_ZT
++class D_TensoRF:
++    def __init__(self, I, J, K, N, R_sigma, R_c, P=128):
++        """
++        Initialize D-TensoRF model.
++        I, J, K: Spatial resolutions
++        N: Time resolution
++        R_sigma: Number of components for geometry
++        R_c: Number of components for appearance
++        P: Feature channels (hidden size for MLP)
++        """
++        self.I, self.J, self.K, self.N = I, J, K, N
+         self.R_sigma = R_sigma
+-        self.M_sigma = nn.ParameterList([
+-            nn.Parameter(torch.randn(I, J)), # XY
+-            nn.Parameter(torch.randn(I, K)), # XZ
+-            nn.Parameter(torch.randn(I, N)), # XT
+-            nn.Parameter(torch.randn(J, K)), # YZ
+-            nn.Parameter(torch.randn(J, N)), # YT
+-            nn.Parameter(torch.randn(K, N)), # ZT
+-        ] for _ in range(R_sigma))
+-        
+-        # Appearance Grid: 5D tensor factorized into matrices and vectors
+-        # M_c_r_XY, M_c_r_XZ, M_c_r_XT, M_c_r_YZ, M_c_r_YT, M_c_r_ZT
+-        # b_r vectors (3 vectors per component, dim P)
+         self.R_c = R_c
+-        self.M_c = nn.ParameterList([
+-            nn.Parameter(torch.randn(I, J)),
+-            nn.Parameter(torch.randn(I, K)),
+-            nn.Parameter(torch.randn(I, N)),
+-            nn.Parameter(torch.randn(J, K)),
+-            nn.Parameter(torch.randn(J, N)),
+-            nn.Parameter(torch.randn(K, N)),
+-        ] for _ in range(R_c))
+-        
+-        self.b = nn.ParameterList([
+-            nn.Parameter(torch.randn(P)), # b_3r-2
+-            nn.Parameter(torch.randn(P)), # b_3r-1
+-            nn.Parameter(torch.randn(P)), # b_3r
+-        ] for _ in range(R_c))
+-        
+-        # Converting Function S: MLP
++        
++        # Initialize Geometry Grid Factors (MM Decomposition)
++        # M_sigma_r_XY, M_sigma_r_ZT, etc.
++        self.M_sigma_XY = nn.Parameter(torch.randn(R_sigma, I, J))
++        self.M_sigma_ZT = nn.Parameter(torch.randn(R_sigma, K, N))
++        self.M_sigma_XZ = nn.Parameter(torch.randn(R_sigma, I, K))
++        self.M_sigma_YT = nnParameter(torch.randn(R_sigma, J, N))
++        self.M_sigma_YZ = nn.Parameter(torch.randn(R_sigma, J, K))
++        self.M_sigma_XT = nn.Parameter(torch.randn(R_sigma, I, N))
++        
++        # Initialize Appearance Grid Factors
++        # M_c_r_XY, M_c_r_ZT, etc.
++        self.M_c_XY = nn.Parameter(torch.randn(R_c, I, J))
++        self.M_c_ZT = nn.Parameter(torch.randn(R_c, K, N))
++        self.M_c_XZ = nn.Parameter(torch.randn(R_c, I, K))
++        self.M_c_YT = nn.Parameter(torch.randn(R_c, J, N))
++        
++        # Vector factors b for appearance
++        # b_3r-2, b_3r-1, b_3r
++        self.b = nn.Parameter(torch.randn(3 * R_c, P))
++        
++        # Converting Function S (MLP)
+         self.S = nn.Sequential(
+-            nn.Linear(P + 2, 128), # +2 for view direction (theta, phi)
++            nn.Linear(P, 128),
+             nn.ReLU(),
+-            nn.Linear(128, 3)      # Output color RGB
++            nn.Linear(128, 3) # Output RGB
+         )
+         
+-        # Smoothing parameters
+-        self.S_smooth = 3
+-        self.sigma_smooth = 0.5
+-
+-    def quadrilinear_interp(self, M_XY, M_ZT, x, y, z, t):
+-        # Interpolate M_XY at (x, y) and M_ZT at (z, t)
+-        # x, y, z, t are normalized coordinates in [0, 1]
+-        # Scale to grid indices
+-        x_idx = x * (M_XY.shape[0] - 1)
+-        y_idx = y * (M_XY.shape[1] - 1)
+-        z_idx = z * (M_ZT.shape[0] - 1)
+-        t_idx = t * (M_ZT.shape[1] - 1)
+-        
+-        val_XY = F.grid_sample(M_XY.unsqueeze(0).unsqueeze(0), 
+-                               torch.tensor([[[[x_idx, y_idx]]]]).float(), 
+-                               mode='bilinear', align_corners=True).squeeze()
+-        val_ZT = F.grid_sample(M_ZT.unsqueeze(0).unsqueeze(0), 
+-                               torch.tensor([[[[z_idx, t_idx]]]]).float(), 
+-                               mode='bilinear', align_corners=True).squeeze()
+-        return val_XY * val_ZT
+-
+-    def forward(self, x, y, z, theta, phi, t):
+-        # x, y, z, t are normalized coordinates
+-        # theta, phi are view directions
+-        
+-        # 1. Compute Density Sigma
+-        sigma = 0.0
+-        for r in range(self.R_sigma):
+-            m_xy = self.M_sigma[r][0]
+-            m_zt = self.M_sigma[r][5]
+-            m_xz = self.M_sigma[r][1]
+-            m_yt = self.M_sigma[r][4]
+-            m_yz = self.M_sigma[r][3]
+-            m_xt = self.M_sigma[r][2]
+-            
+-            term1 = self.quadrilinear_interp(m_xy, m_zt, x, y, z, t)
+-            term2 = self.quadrilinear_interp(m_xz, m_yt, x, y, z, t)
+-            term3 = self.quadrilinear_interp(m_yz, m_xt, x, y, z, t)
+-            
+-            sigma += term1 + term2 + term3
+-            
+-        # 2. Compute Appearance Features
+-        app_features = []
+-        for r in range(self.R_c):
+-            m_xy = self.M_c[r][0]
+-            m_zt = self.M_c[r][5]
+-            m_xz = self.M_c[r][1]
+-            m_yt = self.M_c[r][4]
+-            m_yz = self.M_sigma[r][3] # Note: Source uses M_sigma for Y,Z in appearance term 3
+-            m_xt = self.M_c[r][2]
+-            
+-            # Term 1: M_c_XY o M_c_ZT o b_3r-2
+-            val1 = self.quadrilinear_interp(m_xy, m_zt, x, y, z, t)
+-            feat1 = val1 * self.b[r][0]
+-            
+-            # Term 2: M_c_XZ o M_c_YT o b_3r-1
+-            val2 = self.quadrilinear_interp(m_xz, m_yt, x, y, z, t)
+-            feat2 = val2 * self.b[r][1]
+-            
+-            # Term 3: M_sigma_YZ o M_c_XT o b_3r
+-            val3 = self.quadrilinear_interp(m_yz, m_xt, x, y, z, t)
+-            feat3 = val3 * self.b[r][2]
+-            
+-            # Concatenate
+-            app_features.append(feat1 + feat2 + feat3)
+-            
+-        # Concatenate all r components
+-        if app_features:
+-            app_features = torch.stack(app_features, dim=0).sum(dim=0)
+-        else:
+-            app_features = torch.zeros_like(self.b[0])
+-            
+-        # 3. Compute Color
+-        # View direction needs to be passed to S. Assuming S takes [features, theta, phi]
+-        view_dir = torch.stack([theta, phi], dim=-1)
+-        color = self.S(torch.cat([app_features, view_dir], dim=-1))
++    def get_sigma(self, x, y, z, t):
++        """Compute density sigma using MM decomposition."""
++        # Normalize coordinates to [0, I-1], etc. for indexing
++        # In practice, use grid_sample or manual interpolation
++        # Here we assume discrete indices for clarity, 
++        # but implementation should use quadrilinear interpolation
++        
++        # Term 1: M_XY(x,y) * M_ZT(z,t)
++        term1 = torch.einsum('rxy, rzT -> r', 
++                             self.M_sigma_XY[x, y], 
++                             self.M_sigma_ZT[z, t])
++        
++        # Term 2: M_XZ(x,z) * M_YT(y,t)
++        term2 = torch.einsum('rxz, ryT -> r', 
++                             self.M_sigma_XZ[x, z], 
++                             self.M_sigma_YT[y, t])
++                             
++        # Term 3: M_YZ(y,z) * M_XT(x,t)
++        term3 = torch.einsum('ryz, rxt -> r', 
++                             self.M_sigma_YZ[y, z], 
++                             self.M_sigma_XT[x, t])
++                             
++        sigma = torch.sum(term1 + term2 + term3, dim=0)
++        return sigma
++
++    def get_color(self, x, y, z, t, d):
++        """Compute color c using MM decomposition and MLP S."""
++        # Compute appearance features G_c(x,t)
++        # Term 1: M_c_XY(x,y) * M_c_ZT(z,t) * b_3r-2
++        feat1 = torch.einsum('rxy, rzT -> r', 
++                             self.M_c_XY[x, y], 
++                             self.M_c_ZT[z, t]) * self.b[0::3]
++        
++        # Term 2: M_c_XZ(x,z) * M_c_YT(y,t) * b_3r-1
++        feat2 = torch.einsum('rxz, ryT -> r', 
++                             self.M_c_XZ[x, z], 
++                             self.M_c_YT[y, t]) * self.b[1::3]
++                             
++        # Term 3: M_sigma_YZ(y,z) * M_c_XT(x,t) * b_3r
++        # Note: Uses geometry matrix M_sigma_YZ and appearance matrix M_c_XT
++        feat3 = torch.einsum('ryz, rxt -> r', 
++                             self.M_sigma_YZ[y, z], 
++                             self.M_c_XT[x, t]) * self.b[2::3]
++                             
++        features = torch.sum(feat1 + feat2 + feat3, dim=0) # Shape: [P]
++        
++        # Pass through MLP S with viewing direction d
++        # d is typically encoded or concatenated
++        color = self.S(features)
++        return color
++
++    def smoothness_loss(self, factors, time_axis_idx):
++        """
++        Compute smoothing regularization loss.
++        factors: tensor of shape [R, ..., N, ...]
++        time_axis_idx: index of the time dimension in the tensor
++        """
++        loss = 0
++        S_window = 3
++        sigma_smooth = 0.5
++        
++        # Iterate over components and other dimensions
++        # This is a simplified representation; actual implementation 
++        # requires iterating over all relevant factors (vectors and matrices)
++        # involving the time axis.
++        
++        # Example for a matrix factor M[..., N]
++        # M shape: [R, D1, N]
++        # We need to smooth along N
++        
++        # Construct Gaussian weights
++        # Window size S=3 means indices it-1, it, it+1
++        # w(it, iw) = exp(-(it-iw)^2 / 2*sigma^2) / sum(...)
++        
++        # For implementation, one would gather neighbors and apply weights
++        # This function returns the scalar loss value
++        return loss # Placeholder for complex tensor operations
++
++    def forward(self, rays):
++        """
++        rays: tensor of shape [N_rays, 6] containing (x, y, z, theta, phi, t)
++        """
++        x, y, z, theta, phi, t = rays.split(1, dim=1)
++        d = torch.cat([torch.sin(theta)*torch.cos(phi), 
++                       torch.sin(theta)*torch.sin(phi), 
++                       torch.cos(theta)], dim=1)
++        
++        sigma = self.get_sigma(x, y, z, t)
++        color = self.get_color(x, y, z, t, d)
+         
+         return sigma, color
+-
+-    def get_regularization_loss(self):
+-        # L1 regularization on all factors
+-        l1_loss = 0.0
+-        for r in range(self.R_sigma):
+-            for m in self.M_sigma[r]:
+-                l1_loss += m.abs().sum()
+-        for r in range(self.R_c):
+-            for m in self.M_c[r]:
+-                l1_loss += m.abs().sum()
+-            for b_vec in self.b[r]:
+-                l1_loss += b_vec.abs().sum()
+-                
+-        # Smoothing regularization (simplified implementation)
+-        # In practice, this requires iterating over time indices and applying Gaussian weights
+-        # This is a placeholder for the complex temporal smoothing logic described in the source
+-        smooth_loss = 0.0
+-        # ... (Implementation of Eqn 13 and 14 from source) ...
+-        
+-        return l1_loss + smooth_loss
+ ```
+ 
+ ## Operating characteristics
+-*   **Memory Complexity:** Reduces memory complexity from $O(n^4)$ to $O(n^2)$ compared to a naive 4D grid representation [S1, unofficial].
+-*   **Performance:** The MLP-based converting function $S$ consistently shows better results than Spherical Harmonics (SH) [S1, unofficial].
++*   **Memory Complexity:** MM decomposition reduces memory complexity from $O(n^4)$ to $O(n^2)$ compared to a naive 4D grid representation [S1, unofficial].
++*   **Performance:** The MLP converting function $S$ consistently shows better results than Spherical Harmonics (SH) [S1, unofficial].
+ *   **Hardware:** Evaluated on a single GeForce RTX 3090 GPU [S1, unofficial].
+-*   **Strengths:** Efficiently models dynamic scenes with continuous motion using low-rank tensor factors. The MM decomposition allows expressing complex scenes with fewer components than CP decomposition [S1, unofficial].
+-*   **Limitations:** Requires careful tuning of upsampling steps and smoothing parameters. Do not upsample the feature grid along the time axis [S1, unofficial].
++*   **Strengths:** Compact representation for dynamic scenes; effective handling of temporal dependencies via smoothing regularization; efficient memory usage compared to dense 4D grids.
++*   **Limitations:** Requires careful tuning of upsampling schedule; smoothing regularization parameters ($S, \sigma$) are fixed and not learned; does not model explicit deformations, which may limit accuracy for highly non-rigid or large-displacement motions compared to deformation-based methods [S1, unofficial].
++*   **When to use:** Suitable for dynamic scenes with continuous motion where memory efficiency is critical and explicit deformation fields are not preferred or available.
++*   **When not to use:** Scenes with large, discontinuous motions or where explicit geometric deformation is more appropriate.
+ 
+ ## Background
+-D-TensoRF was introduced in the paper "D-TensoRF: Tensorial Radiance Fields for Dynamic Scenes" [S1, unofficial]. It extends the TensoRF method [S1, unofficial] to handle dynamic scenes by adding a time dimension to the tensor grids. The method was evaluated on the extended Synthetic NeRF dataset provided by D-NeRF [S1, unofficial], which includes eight scenes with object motions.
++D-TensoRF was introduced in the paper "D-TensoRF: Tensorial Radiance Fields for Dynamic Scenes" [S1, unofficial]. It extends the TensoRF method, which uses tensor decomposition for static scenes, to handle dynamic content by adding a time dimension. The method was developed to address the limitations of existing dynamic radiance field models in terms of memory efficiency and representation capacity. It builds on the principles of differentiable volume rendering and tensor factorization [S1, unofficial].
+ 
+ ## Sources

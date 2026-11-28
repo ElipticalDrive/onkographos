@@ -1,0 +1,121 @@
+--- v001.md
++++ v002.md
+@@ -8,11 +8,11 @@
+ ## How it works
+ **Inputs and Outputs**
+-- **Input**: `ray_samples` (initial uniform samples along rays), `sdf_fn` (neural SDF network), `num_upsample_steps` (integer), `num_samples_importance` (integer), `base_variance` (float).
+-- **Output**: Refined `ray_samples` containing merged uniform and importance samples, sorted by distance.
++- **Input**: `ray_samples` (initial uniform samples along rays), `sdf_fn` (neural SDF network), `num_upsample_steps` (integer), `num_samples_importance` (integer), `base_variance` (float) [S1, unofficial].
++- **Output**: Refined `ray_samples` containing merged uniform and importance samples, sorted by distance [S1, unofficial].
+ 
+ **Data Structures**
+ - `ray_samples`: A structure containing sample positions and distances. Specifically, `ray_samples.deltas` is a tensor of shape `(num_rays, num_samples-1, 1)` representing the distance between adjacent sample points [S1, unofficial].
+-- `sdf`: Tensor of SDF values evaluated at sample points.
+-- `weights`: Tensor of rendering weights derived from alphas.
++- `sdf`: Tensor of SDF values evaluated at sample points [S1, unofficial].
++- `weights`: Tensor of rendering weights derived from alphas [S1, unofficial].
+ - `sorted_index`: Indices used to maintain spatial order when merging old and new samples [S1, unofficial].
+ 
+@@ -27,13 +27,7 @@
+ 2. **Iteration Loop**: While `total_iters < num_upsample_steps`:
+     a. **SDF Evaluation**: Evaluate the SDF network on `new_samples` using `sdf_fn` in a no-gradient context (`torch.no_grad()`) [S1, unofficial].
+-    b. **Merge SDF Values**:
+-        - If `sorted_index` is not `None`, concatenate the existing `sdf` and the newly computed `new_sdf`. Gather the concatenated values using `sorted_index` to maintain the correct spatial order along the ray.
+-        - If `sorted_index` is `None`, set `sdf = new_sdf` [S1, unofficial].
+-    c. **Compute Alphas**: Calculate rendering alphas using the fixed variance method. The inverse softness parameter is computed as:
+-       $$ inv\_s = base\_variance \times 2^{total\_iters} $$
+-       Pass `ray_samples`, the reshaped `sdf` tensor, and `inv_s` to the alpha computation function [S1, unofficial].
+-    d. **Compute Weights**:
+-        - Calculate weights from the alphas.
+-        - Concatenate a zero tensor of shape `(..., 1)` to the end of the weights tensor along dimension 1 (the sample dimension) [S1, unofficial].
++    b. **Merge SDF Values**: If `sorted_index` is not `None`, concatenate the existing `sdf` and the newly computed `new_sdf`, then gather using `sorted_index` to maintain order. Otherwise, set `sdf = new_sdf` [S1, unofficial].
++    c. **Compute Alphas**: Calculate rendering alphas using the fixed variance method. The inverse softness parameter is computed as `inv_s = base_variance * 2^{total_iters}`. Pass `ray_samples`, the reshaped `sdf` tensor, and `inv_s` to the alpha computation function [S1, unofficial].
++    d. **Compute Weights**: Calculate weights from the alphas. Concatenate a zero tensor of shape `(..., 1)` to the end of the weights tensor along dimension 1 [S1, unofficial].
+     e. **Draw Importance Samples**: Use a PDF sampler to draw `num_samples_importance // num_upsample_steps` new importance samples based on the current weights [S1, unofficial].
+     f. **Merge Ray Samples**: Merge the current `ray_samples` with the newly drawn `new_samples` using a merge function. This function returns the updated `ray_samples` and the `sorted_index` required for the next SDF merging step [S1, unofficial].
+@@ -42,5 +36,5 @@
+ 
+ **Alpha Computation Details**
+-The core of the sampling lies in converting SDF values to alpha values robustly. Given SDF values at sample points, the algorithm estimates the derivative (cosine) of the SDF to determine the probability of intersection:
++The core of the sampling lies in converting SDF values to alpha values robustly. Given SDF values at sample points, the algorithm estimates the derivative (cosine) of the SDF to determine the probability of intersection [S1, unofficial]:
+ 1. Compute the cosine of the angle between adjacent SDF values:
+    $$ cos\_val = \frac{next\_sdf - prev\_sdf}{deltas + 10^{-5}} $$
+@@ -48,5 +42,5 @@
+ 2. Estimate the previous cosine value by shifting the current cosine array:
+    $$ prev\_cos\_val = [0, cos\_val[:, :-1]] $$
+-   (Concatenated along the last dimension) [S1, unofficial].
++   concatenated along the last dimension [S1, unofficial].
+ 3. Compute the robust cosine by taking the element-wise minimum of the forward and backward estimates, then clipping to `[-1e3, 0.0]`:
+    $$ cos\_val = \min(prev\_cos\_val, cos\_val) $$
+@@ -68,5 +62,4 @@
+ ```python
+ import torch
+-import torch.nn.functional as F
+ 
+ def neu_s_sampler(ray_samples, sdf_fn, num_upsample_steps=4, num_samples_importance=64, base_variance=64.0):
+@@ -149,15 +142,11 @@
+         # Alpha is probability of intersection in the interval.
+         # Weight is typically product of (1-alpha) up to that interval.
+-        # Assuming standard volume rendering weights calculation
+         trans = torch.cumprod(1.0 - alpha + 1e-5, dim=-1)
+         weights = alpha * torch.cat([torch.ones_like(alpha[..., :1]), trans[..., :-1]], dim=-1)
+         
+-        # Concatenate zero tensor to weights
++        # Concatenate zero tensor to weights along dim=1
+         weights = torch.cat([weights, torch.zeros_like(weights[..., :1])], dim=-1)
+         
+         # 5. Draw new importance samples
+-        # This step requires a PDF sampler implementation.
+-        # For the purpose of this article, we assume a helper function exists
+-        # that draws samples based on weights.
+         new_samples = draw_importance_samples(ray_samples, weights, num_samples_per_step)
+         
+@@ -185,11 +174,16 @@
+     
+     # Inverse CDF sampling
+-    # Find indices where cdf >= u
+     indices = torch.searchsorted(cdf, u, side='right')
+     
+-    # Interpolate positions
+-    # This is a simplified placeholder for the actual interpolation logic
+-    # which depends on the specific ray_samples structure
+-    return ray_samples.interpolate(indices)
++    # Interpolate positions based on indices
++    # Standard linear interpolation between sample positions
++    pos = ray_samples.positions
++    idx = indices.clamp(0, pos.shape[-1] - 2)
++    idx_next = idx + 1
++    t = (u - cdf[..., idx]) / (cdf[..., idx_next] - cdf[..., idx] + 1e-5)
++    t = t.clamp(0.0, 1.0)
++    new_pos = pos[..., idx] + t * (pos[..., idx_next] - pos[..., idx])
++    
++    return ray_samples.copy_with_positions(new_pos)
+ 
+ def merge_ray_samples(old_samples, new_samples):
+@@ -198,11 +192,10 @@
+     Implementation detail: [G]
+     """
+-    # Concatenate samples
+-    all_samples = torch.cat([old_samples.positions, new_samples.positions], dim=-1)
+-    # Sort positions
+-    sorted_positions, sorted_indices = torch.sort(all_samples, dim=-1)
++    # Concatenate positions
++    all_positions = torch.cat([old_samples.positions, new_samples.positions], dim=-1)
++    # Sort positions and get indices
++    sorted_positions, sorted_indices = torch.sort(all_positions, dim=-1)
+     
+     # Reconstruct ray_samples structure from sorted_positions
+-    # This is a simplified placeholder
+     merged_samples = old_samples.copy()
+     merged_samples.positions = sorted_positions
+@@ -212,9 +205,5 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity**: $O(N \cdot K \cdot \log M)$, where $N$ is the number of rays, $K$ is the number of upsample steps, and $M$ is the number of samples per step. The sorting step dominates the complexity [S1, unofficial].
+-- **Memory Complexity**: $O(N \cdot M)$, as it stores SDF values and weights for all samples [S1, unofficial].
+-- **Strengths**: Robust to noise and non-monotonic SDFs due to the minimum cosine estimation. The exponential scaling of `inv_s` ensures that early iterations explore broadly while later iterations focus tightly on the surface [S1, unofficial].
+-- **Limitations**: Requires multiple forward passes through the SDF network per ray. The fixed variance parameter may need tuning for different scene scales [S1, unofficial].
+-- **When to use**: Ideal for neural surface reconstruction where the SDF is learned and may exhibit noise or non-ideal properties near the surface [S1, unofficial].
++Time and memory complexity are not given in the sources. The method requires multiple forward passes through the SDF network per ray. The fixed variance parameter may need tuning for different scene scales. It is ideal for neural surface reconstruction where the SDF is learned and may exhibit noise or non-ideal properties near the surface [S1, unofficial].
+ 
+ ## Background

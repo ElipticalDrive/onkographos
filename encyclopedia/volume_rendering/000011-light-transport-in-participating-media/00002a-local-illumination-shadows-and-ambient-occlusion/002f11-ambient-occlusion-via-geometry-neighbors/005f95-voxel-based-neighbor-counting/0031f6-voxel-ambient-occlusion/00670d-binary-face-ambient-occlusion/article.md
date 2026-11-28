@@ -1,0 +1,146 @@
+# Binary Face Ambient Occlusion
+
+Also called: Neighbor Void Check AO, Voxel AO
+
+## Overview
+Binary Face Ambient Occlusion calculates the ambient occlusion factor for a specific voxel face by evaluating the occupancy status of its immediate neighbors in the parallel plane. It solves the problem of approximating local light blockage in voxel-based scenes with minimal computational overhead. Unlike methods that integrate over hemispheres or use complex sampling, this approach relies on a binary check of 8 surrounding voxels, making it distinct from [Histogram-based Voxel Ambient Occlusion](10973-histogram-based-voxel-ambient-occlusion.md) which aggregates density, and [Vicinity Occlusion Mapping (VOM)](10977-vicinity-occlusion-mapping-vom.md) which uses precomputed maps.
+
+## How it works
+**Inputs:**
+- `local_pos`: A tuple `(x, y, z)` representing the integer coordinates of the center of the voxel face being evaluated.
+- `world_pos`: A tuple `(wx, wy, wz)` representing the world-space coordinates corresponding to the voxel center.
+- `world_voxels`: A data structure (e.g., hash map, 3D array, or sparse grid) storing the occupancy state of voxels in world space.
+- `plane`: A string identifier indicating the orientation of the face: `'X'`, `'Y'`, or `'Z'`.
+
+**Outputs:**
+- `ao_factor`: A float value representing the ambient occlusion factor. The source code implies a binary check; typically, the factor is derived from the count of void neighbors, though the exact weighting formula is not explicitly detailed in the provided source beyond the boolean checks [S1, unofficial].
+
+**Data Structures:**
+- `world_voxels`: The source assumes a lookup function `is_void(world_x, world_y, world_z, world_voxels)` that returns a boolean. The internal layout of `world_voxels` is not specified, but it must support coordinate-based retrieval [S1, unofficial].
+
+**Steps:**
+1. Determine the set of 8 neighboring voxel centers to check based on the `plane` orientation. These neighbors lie in the plane parallel to the face being shaded.
+2. For each neighbor, calculate its world coordinates.
+3. Query the `is_void` function for each neighbor's world coordinates.
+4. Aggregate the results. The source code lists the checks but does not explicitly show the final arithmetic (e.g., summing voids). [G] Standard implementation sums the boolean results (True=1, False=0) and divides by 8 to get a density factor, or uses the count to index a precomputed table.
+
+**Formulas:**
+Let $N$ be the set of 8 neighbor offsets.
+For plane $Y$ (top/bottom):
+$$ N_Y = \{ (0,0,-1), (-1,0,-1), (-1,0,0), (-1,0,1), (0,0,1), (1,0,1), (1,0,0), (1,0,-1) \} $$
+For plane $X$ (left/right):
+$$ N_X = \{ (0,-1,-1), (0,-1,0), (0,-1,1), (0,0,1), (0,1,1), (0,1,0), (0,1,-1), (0,0,-1) \} $$
+*Note: The source lists offsets relative to the local voxel center. The exact mapping to world coordinates depends on the voxel size and origin, which are abstracted by `world_pos` in the code.*
+
+For plane $Z$ (front/back):
+$$ N_Z = \{ (-1,0,0), (-1,-1,0), (0,-1,0), (1,-1,0), (1,0,0), (1,1,0), (0,1,0), (-1,1,0) \} $$
+
+**Parameters:**
+- Voxel resolution: Not specified in the method definition, but the example uses a screen resolution of 1280x720, implying a projection context [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Boundary Checks:** The algorithm does not handle out-of-bounds world coordinates. The `is_void` function or the caller must implement boundary checks to prevent errors when neighbors fall outside the defined voxel volume [S1, unofficial].
+- **Void Definition:** The algorithm assumes `is_void` returns a strict boolean. It does not handle partial occupancy or density values directly in the check logic [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def get_ao(local_pos, world_pos, world_voxels, plane):
+    """
+    Calculate binary face ambient occlusion.
+    
+    Args:
+        local_pos (tuple): (x, y, z) local voxel coordinates.
+        world_pos (tuple): (wx, wy, wz) world coordinates of the voxel center.
+        world_voxels: Data structure for voxel lookup.
+        plane (str): 'X', 'Y', or 'Z'.
+        
+    Returns:
+        float: Ambient occlusion factor (implementation dependent aggregation).
+    """
+    x, y, z = local_pos
+    wx, wy, wz = world_pos
+    
+    # Define neighbor offsets based on plane
+    if plane == 'Y':
+        offsets = [
+            (0, 0, -1), (-1, 0, -1), (-1, 0, 0), (-1, 0, 1),
+            (0, 0, 1), (1, 0, 1), (1, 0, 0), (1, 0, -1)
+        ]
+    elif plane == 'X':
+        offsets = [
+            (0, -1, -1), (0, -1, 0), (0, -1, 1), (0, 0, 1),
+            (0, 1, 1), (0, 1, 0), (0, 1, -1), (0, 0, -1)
+        ]
+    elif plane == 'Z':
+        offsets = [
+            (-1, 0, 0), (-1, -1, 0), (0, -1, 0), (1, -1, 0),
+            (1, 0, 0), (1, 1, 0), (0, 1, 0), (-1, 1, 0)
+        ]
+    else:
+        raise ValueError("Plane must be 'X', 'Y', or 'Z'")
+
+    void_count = 0
+    
+    for dx, dy, dz in offsets:
+        # Calculate world coordinates of the neighbor
+        # Note: The source code adds offsets to local_pos and world_pos separately.
+        # This implies the offsets are in voxel units for local_pos and world units for world_pos?
+        # Or more likely, the offsets are voxel indices, and world_pos is used for lookup.
+        # The source code: is_void((x + dx, y + dy, z + dz), (wx + dx, wy + dy, wz + dz), ...)
+        # This suggests the offsets are applied to both local and world coordinates directly.
+        # This is a simplification assuming unit voxel size in world space or specific scaling.
+        
+        neighbor_local = (x + dx, y + dy, z + dz)
+        neighbor_world = (wx + dx, wy + dy, wz + dz)
+        
+        if is_void(neighbor_local, neighbor_world, world_voxels):
+            void_count += 1
+            
+    # The source code does not specify the final calculation.
+    # [G] Common practice: AO factor = void_count / 8.0
+    return void_count / 8.0
+
+def is_void(local_coords, world_coords, world_voxels):
+    """
+    Check if a voxel is void.
+    Must handle boundary checks internally.
+    """
+    # Boundary check [S1, unofficial]
+    if not is_within_bounds(world_coords):
+        return True # Assume void or solid? Usually void if out of bounds for AO to avoid artifacts.
+    
+    # Lookup logic depends on world_voxels implementation
+    # [G] Assuming a hash map or sparse grid lookup
+    if world_voxels.contains(world_coords):
+        return not world_voxels.is_solid(world_coords)
+    else:
+        return True # Out of bounds treated as void
+```
+
+## Subtopics
+
+### Histogram-based Voxel Ambient Occlusion
+Uses density histograms for smoother results. Choose when smooth gradients are needed. [Link](10973-histogram-based-voxel-ambient-occlusion.md)
+
+### Vicinity Occlusion Mapping (VOM)
+Uses precomputed maps for speed. Choose when performance is critical and memory allows. [Link](10977-vicinity-occlusion-mapping-vom.md)
+
+### Voxel Culling and Ambient Occlusion
+Combines occlusion with culling. Choose for large scenes with significant empty space. [Link](17393-voxel-culling-and-ambient-occlusion.md)
+
+## Operating characteristics
+- **Time Complexity**: $O(1)$ per face, as it always checks exactly 8 neighbors.
+- **Memory Complexity**: $O(1)$ additional memory per query, dependent on the storage of `world_voxels`.
+- **Performance**: Extremely fast due to simple boolean checks. Suitable for real-time applications on low-end hardware.
+- **Strengths**: Simplicity, low memory footprint, no complex sampling required.
+- **Limitations**: Discrete, blocky appearance; sensitive to voxel resolution; no smooth gradients; boundary artifacts if not handled.
+- **When to use**: Voxel-based games, procedural generation, or when computational resources are severely limited.
+- **When not to use**: High-fidelity rendering requiring smooth shadows or large-scale light transport.
+
+## Background
+The method is described in the context of a Python-based procedural world generator called PYVOXEL. It is an unofficial implementation, likely designed for educational or hobbyist purposes rather than industrial-grade rendering [S1, unofficial].
+
+## Sources
+[S1] GitHub - Shubhayu15/PYVOXEL-Procedural-World: A Python-based procedural ..., https://github.com/Shubhayu15/PYVOXEL-Procedural-World, fetched 2026-10-29 (unofficial)

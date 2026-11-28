@@ -1,0 +1,286 @@
+--- v006.md
++++ v007.md
+@@ -4,90 +4,120 @@
+ 
+ ## Overview
+-This method renders 3D Gaussian splats by computing the alpha attenuation using a hybrid sigma metric that combines a 3D ray-surfel distance estimate with a 2D screen-space fallback bound [S1, unofficial]. It solves the problem of inaccurate alpha estimation in standard rasterization by ensuring the Gaussian's influence is tightly bounded even when the 3D covariance projection is ill-conditioned or when the Gaussian is far from the camera [S1, unofficial]. It differs from standard Gaussian Splatting rasterization by replacing the single 2D covariance-based sigma with a minimum of a 3D-derived sigma and a 2D fallback sigma, and differs from [Masked-Rasterization](4366-masked-rasterization.md) by using this continuous hybrid bound rather than hard masks to determine Gaussian visibility [S1, unofficial].
++This method renders 3D Gaussians by combining a 3D geometric sigma calculation with a 2D screen-space fallback sigma to determine the effective spread of each Gaussian splat. It solves the problem of inaccurate alpha culling and rendering artifacts when Gaussians are far from the camera or when the 3D covariance projection is numerically unstable. It sets itself apart from standard rasterization by introducing a hybrid sigma bound that ensures tighter alpha thresholds, and from [Masked-Rasterization](4366-masked-rasterization.md) by using a continuous sigma value rather than a binary mask.
+ 
+ ## How it works
+ **Inputs:**
+-- `means`: 3D Gaussian means, shape `[N, 3]` [S1, unofficial].
+-- `opacities`: Per-Gaussian opacities, shape `[N]` [S1, unofficial].
+-- `colors`: Per-Gaussian colors (SH degree 0), shape `[N, 3]` [S1, unofficial].
+-- `normals`: Per-Gaussian normals, shape `[N, 3]` [S1, unofficial].
+-- `means2d`: Pre-computed 2D screen-space means for each camera, shape `[C, N, 2]` [S1, unofficial].
+-- `cameras`: Camera parameters including intrinsic matrices and view matrices for `C` cameras [S1, unofficial].
+-- `backgrounds`: Optional background colors per camera, shape `[C, 3]` [S1, unofficial].
++*   `means`: 3D Gaussian means, shape $[N, 3]$.
++*   `opacities`: Per-Gaussian opacity, shape $[N]$.
++*   `colors`: Per-Gaussian color, shape $[N, 3]$.
++*   `normals`: Per-Gaussian normal, shape $[N, 3]$.
++*   `means2d`: Pre-computed 2D screen-space means, shape $[C, N, 2]$, where $C$ is the number of cameras.
++*   `cameras`: Camera parameters (intrinsic $K$, extrinsic $V$).
++*   `background`: Optional background color, shape $[C, 3]$.
+ 
+ **Outputs:**
+-- `render_colors`: Rendered RGB images, shape `[C, H, W, 3]` [S1, unofficial].
+-- `render_normals`: Rendered normal images, shape `[C, H, W, 3]` [S1, unofficial].
+-- `render_alphas`: Rendered alpha images, shape `[C, H, W, 1]` [S1, unofficial].
++*   `render_colors`: Rendered RGB images, shape $[C, H, W, 3]$.
++*   `render_normals`: Rendered normal images, shape $[C, H, W, 3]$.
++*   `render_alphas`: Rendered alpha images, shape $[C, H, W, 1]$.
+ 
+ **Parameters:**
+-- `MAX_ALPHA`: Maximum alpha value per splat (implementation specific, typically < 1.0) [S1, unofficial].
+-- `ALPHA_THRESHOLD`: Minimum alpha to process a Gaussian (e.g., 1e-4) [S1, unofficial].
+-- `TRANSMITTANCE_THRESHOLD`: Minimum transmittance to continue blending (e.g., 1e-4) [S1, unofficial].
+-- `EPSILON`: Small constant for depth check (1e-10) [S1, unofficial].
++*   `MAX_ALPHA`: Maximum alpha value per splat (e.g., 1.0).
++*   `ALPHA_THRESHOLD`: Minimum alpha to process (e.g., 0.01).
++*   `TRANSMITTANCE_THRESHOLD`: Minimum transmittance to continue loop (e.g., 0.0001).
++*   `EPSILON`: Small constant for depth check (e.g., $10^{-10}$).
+ 
+ **Data Structures:**
+-- The algorithm iterates over cameras `c`, pixels `(py, px)`, and Gaussians `gid`.
+-- Temporary storage `tmp` holds projected coordinates [S1, unofficial].
++*   `render_colors`: Accumulator for color.
++*   `render_normals`: Accumulator for normal.
++*   `T`: Current transmittance, initialized to 1.0 per pixel.
+ 
+ **Steps:**
+-1. For each camera `c` and pixel `(py, px)`:
+-    a. Initialize `render_colors[c, py, px] = 0`, `render_normals[c, py, px] = 0`, `T = 1.0`.
+-    b. Iterate through all Gaussians `gid` (sorted by depth or pre-sorted):
+-        i. **Projection**: Calculate temporary coordinates `tmp[0], tmp[1], tmp[2]` by projecting the 3D mean of Gaussian `gid` using camera `c`'s extrinsic and intrinsic matrices [S1, unofficial].
+-        ii. **Depth Check**: If `abs(tmp[2]) < 1e-10`, skip this Gaussian [S1, unofficial].
+-        iii. **Screen Coordinates**: Calculate screen-space coordinates `us = tmp[0] / tmp[2]` and `vs = tmp[1] / tmp[2]` [S1, unofficial].
+-        iv. **3D Sigma**: Calculate 3D sigma from ray-surfel intersection:
+-            $$ \sigma_{3d} = us^2 + vs^2 $$
+-            [S1, unofficial]
+-        v. **2D Fallback Sigma**: Retrieve pre-computed 2D mean `mu = means2d_np[c, gid]` [S1, unofficial]. Calculate pixel center `pxf, pyf` (normalized or pixel coordinates consistent with `mu`) [S1, unofficial].
+-            $$ dx = pxf - mu[0] $$
+-            $$ dy = pyf - mu[1] $$
+-            $$ \sigma_{2d} = 2.0 \times (dx^2 + dy^2) $$
+-            [S1, unofficial]
+-        vi. **Hybrid Sigma**: Take the tighter bound:
+-            $$ \sigma = 0.5 \times \min(\sigma_{3d}, \sigma_{2d}) $$
+-            [S1, unofficial]
+-        vii. **Sigma Check**: If `sigma < 0.0`, skip the Gaussian [S1, unofficial].
+-        viii. **Alpha Calculation**:
+-            $$ \alpha = \min(\text{opacities}[gid] \times \exp(-\sigma), \text{MAX\_ALPHA}) $$
+-            [S1, unofficial]
+-        ix. **Alpha Check**: If `alpha < ALPHA_THRESHOLD`, skip the Gaussian [S1, unofficial].
+-        x. **Transmittance Check**: If `T < TRANSMITTANCE_THRESHOLD`, break the Gaussian loop for this pixel [S1, unofficial].
+-        xi. **Blending**:
+-            $$ \text{weight} = T \times \alpha $$
+-            $$ \text{render\_colors}[c, py, px] += \text{weight} \times \text{colors}[gid] $$
+-            $$ \text{render\_normals}[c, py, px] += \text{weight} \times \text{normals}[gid] $$
+-            $$ T \leftarrow T \times (1.0 - \alpha) $$
+-            [S1, unofficial]
+-    c. Set `render_alphas[c, py, px, 0] = 1.0 - T` [S1, unofficial].
+-2. **Background Compositing**: If `backgrounds` is not None:
+-    a. Convert `backgrounds` to numpy array `bg_np` [S1, unofficial].
+-    b. For each camera `c`:
+-        $$ \text{render\_colors}[c] += (1.0 - \text{render\_alphas}[c]) \times \text{bg\_np}[c] $$
+-        [S1, unofficial]
++1.  **Initialization:** Initialize `render_colors`, `render_normals` to 0. Initialize `render_alphas` to 0. Initialize `T` (transmittance) to 1.0 for all pixels.
++2.  **Pixel Loop:** Iterate over each pixel $(p_y, p_x)$ and each camera $c$.
++3.  **Gaussian Loop:** Iterate through all Gaussians $i$ (index $gid$).
++    a.  **Projection Check:** Calculate temporary coordinates `tmp` by projecting the 3D mean. If `abs(tmp[2]) < EPSILON`, skip this Gaussian [S1, unofficial].
++    b.  **Screen Coordinates:** Calculate screen-space coordinates:
++        $$ u_s = \frac{tmp[0]}{tmp[2]} $$
++        $$ v_s = \frac{tmp[1]}{tmp[2]} $$
++    c.  **3D Sigma Calculation:** Calculate the 3D sigma based on the distance from the projected center:
++        $$ \sigma_{3d} = u_s^2 + v_s^2 $$
++    d.  **2D Fallback Sigma Calculation:** Use the pre-computed 2D mean $\boldsymbol{\mu}_{2d}$ for camera $c$ and Gaussian $gid$. Calculate differences:
++        $$ dx = p_x - \mu_{2d}[0] $$
++        $$ dy = p_y - \mu_{2d}[1] $$
++        $$ \sigma_{2d} = 2.0 \times (dx^2 + dy^2) $$
++    e.  **Hybrid Sigma:** Take the tighter bound:
++        $$ \sigma = 0.5 \times \min(\sigma_{3d}, \sigma_{2d}) $$
++    f.  **Alpha Calculation:** Calculate alpha:
++        $$ \alpha = \min(\text{opacities}[gid] \times \exp(-\sigma), \text{MAX\_ALPHA}) $$
++    g.  **Culling:** If $\alpha < \text{ALPHA\_THRESHOLD}$, skip this Gaussian [S1, unofficial].
++    h.  **Transmittance Check:** If current transmittance $T < \text{TRANSMITTANCE\_THRESHOLD}$, break the Gaussian loop for this pixel [S1, unofficial].
++    i.  **Compositing:** Calculate weight $w = T \times \alpha$.
++        $$ \text{render\_colors}[c, p_y, p_x] \leftarrow \text{render\_colors}[c, p_y, p_x] + w \times \text{colors}[gid] $$
++        $$ \text{render\_normals}[c, p_y, p_x] \leftarrow \text{render\_normals}[c, p_y, p_x] + w \times \text{normals}[gid] $$
++        $$ T \leftarrow T \times (1.0 - \alpha) $$
++4.  **Alpha Finalization:** After the Gaussian loop, set:
++    $$ \text{render\_alphas}[c, p_y, p_x, 0] = 1.0 - T $$
++5.  **Background Addition:** If `background` is provided, for each camera $c$:
++    $$ \text{render\_colors}[c] \leftarrow \text{render\_colors}[c] + (1.0 - \text{render\_alphas}[c]) \times \text{background}[c] $$
+ 
+ **Pseudocode:**
+ ```python
+-def hybrid_gaussian_rasterization(means, opacities, colors, normals, means2d, cameras, backgrounds, MAX_ALPHA=0.99, ALPHA_THRESHOLD=1e-4, TRANSMITTANCE_THRESHOLD=1e-4):
+-    C, H, W = cameras.num_cameras, cameras.height, cameras.width
+-    N = means.shape[0]
+-    render_colors = zeros((C, H, W, 3))
+-    render_normals = zeros((C, H, W, 3))
+-    render_alphas = zeros((C, H, W, 1))
++def hybrid_rasterization_with_fallback_sigma(
++    means: Array,
++    opacities: Array,
++    colors: Array,
++    normals: Array,
++    means2d: Array,  # Shape [C, N, 2]
++    cameras: List[Camera],
++    background: Optional[Array] = None,
++    max_alpha: float = 1.0,
++    alpha_threshold: float = 0.01,
++    transmittance_threshold: float = 0.0001,
++    epsilon: float = 1e-10
++) -> Tuple[Array, Array, Array]:
++    """
++    Renders 3D Gaussians using hybrid 3D/2D sigma fallback.
++    
++    Args:
++        means: [N, 3] 3D means.
++        opacities: [N] opacities.
++        colors: [N, 3] colors.
++        normals: [N, 3] normals.
++        means2d: [C, N, 2] pre-computed 2D means per camera.
++        cameras: List of camera objects with intrinsic/extrinsic matrices.
++        background: [C, 3] optional background colors.
++        max_alpha: Max alpha per splat.
++        alpha_threshold: Min alpha to process.
++        transmittance_threshold: Min transmittance to continue.
++        epsilon: Depth check epsilon.
++        
++    Returns:
++        render_colors: [C, H, W, 3]
++        render_normals: [C, H, W, 3]
++        render_alphas: [C, H, W, 1]
++    """
++    C = len(cameras)
++    H, W = cameras[0].height, cameras[0].width
++    
++    # Initialize outputs
++    render_colors = mx.zeros((C, H, W, 3))
++    render_normals = mx.zeros((C, H, W, 3))
++    render_alphas = mx.zeros((C, H, W, 1))
+     
+     for c in range(C):
++        cam = cameras[c]
++        # Project all means to screen space for this camera
++        # This step is assumed to be done externally or via a helper
++        # to get tmp coordinates and depth
++        projected_means = project_gaussians(means, cam) # Returns [N, 3] in clip space
++        
+         for py in range(H):
+             for px in range(W):
+                 T = 1.0
+-                current_color = zeros(3)
+-                current_normal = zeros(3)
+-                
+-                for gid in range(N):
+-                    # Project 3D mean to screen space
+-                    tmp = project_3d_to_screen(means[gid], cameras[c])
++                for gid in range(len(means)):
++                    tmp = projected_means[gid]
+                     
+-                    # Depth check
+-                    if abs(tmp[2]) < 1e-10:
++                    # Check depth
++                    if abs(tmp[2]) < epsilon:
+                         continue
+                     
+@@ -100,10 +130,7 @@
+                     
+                     # 2D Fallback Sigma
+-                    mu = means2d[c, gid]
+-                    # Assuming pxf, pyf are the pixel coordinates in the same space as mu
+-                    pxf = px
+-                    pyf = py
+-                    dx = pxf - mu[0]
+-                    dy = pyf - mu[1]
++                    mu_2d = means2d[c, gid]
++                    dx = px - mu_2d[0]
++                    dy = py - mu_2d[1]
+                     sigma_2d = 2.0 * (dx * dx + dy * dy)
+                     
+@@ -111,55 +138,56 @@
+                     sigma = 0.5 * min(sigma_3d, sigma_2d)
+                     
+-                    if sigma < 0.0:
++                    # Alpha
++                    alpha = min(opacities[gid] * mx.exp(-sigma), max_alpha)
++                    
++                    # Culling
++                    if alpha < alpha_threshold:
+                         continue
+                     
+-                    # Alpha
+-                    alpha = min(opacities[gid] * exp(-sigma), MAX_ALPHA)
+-                    
+-                    if alpha < ALPHA_THRESHOLD:
+-                        continue
+-                    
+-                    if T < TRANSMITTANCE_THRESHOLD:
++                    # Transmittance check
++                    if T < transmittance_threshold:
+                         break
+                     
++                    # Compositing
+                     weight = T * alpha
+-                    current_color += weight * colors[gid]
+-                    current_normal += weight * normals[gid]
++                    render_colors[c, py, px] += weight * colors[gid]
++                    render_normals[c, py, px] += weight * normals[gid]
+                     T *= (1.0 - alpha)
+                 
+-                render_colors[c, py, px] = current_color
+-                render_normals[c, py, px] = current_normal
+                 render_alphas[c, py, px, 0] = 1.0 - T
+     
+-    # Background
+-    if backgrounds is not None:
+-        bg_np = array(backgrounds)
++    # Background addition
++    if background is not None:
+         for c in range(C):
+-            render_colors[c] += (1.0 - render_alphas[c]) * bg_np[c]
++            render_colors[c] += (1.0 - render_alphas[c, :, :, 0]) * background[c]
+             
+     return render_colors, render_normals, render_alphas
+ ```
+ 
++**Edge Cases and Pitfalls:**
++*   **Depth Zero:** If `tmp[2]` is near zero, division by zero occurs. The check `abs(tmp[2]) < EPSILON` handles this [S1, unofficial].
++*   **Negative Sigma:** Although unlikely with squared terms, a check `if sigma < 0.0` is included as a safeguard [S1, unofficial].
++*   **Numerical Stability:** The hybrid sigma ensures that even if the 3D projection is inaccurate, the 2D fallback provides a reasonable bound.
++
+ ## Subtopics
+ 
+ ### [3D Gaussian Splatting Differentiable Rasterizer > Backward Pass](8352-3d-gaussian-splatting-differentiable-rasterizer-backward-pas.md)
+-Computes gradients for end-to-end training, propagating $\frac{\partial L}{\partial \theta}$ for all Gaussian attributes. It builds on this hybrid rasterization variant by providing the necessary gradient flow for the hybrid sigma computation.
++Computes gradients for training.
+ 
+ ### [Image-Based Gaussian Splatting (IBGS)](8764-image-based-gaussian-splatting-ibgs.md)
+-Augments 3DGS by predicting color residuals from neighboring images to capture high-frequency details. It uses this rasterization as the base rendering engine while adding a neural network for residual prediction.
++Adds color residuals.
+ 
+ ### [3D Gaussian Splatting Rendering with Language Features](12439-3d-gaussian-splatting-rendering-with-language-features.md)
+-Extends the rasterizer to output language feature images alongside RGB. It passes precomputed per-Gaussian language features to this rasterization backend, normalizing them to prevent magnitude bias.
++Adds language feature channels.
+ 
+ ## Operating characteristics
+-- **Time Complexity**: $O(C \cdot H \cdot W \cdot N)$ in the worst case if all Gaussians are tested per pixel, but optimized by early termination via `TRANSMITTANCE_THRESHOLD` and `ALPHA_THRESHOLD` [S1, unofficial].
+-- **Memory Complexity**: $O(C \cdot H \cdot W)$ for output buffers plus $O(C \cdot N)$ for `means2d` storage [S1, unofficial].
+-- **Strengths**: Provides tighter alpha bounds than standard 2D-only sigma, reducing artifacts from distant or ill-conditioned Gaussians [S1, unofficial].
+-- **Limitations**: Requires pre-computation of `means2d` for all cameras and Gaussians, increasing memory overhead [S1, unofficial]. The hybrid calculation adds per-pixel per-Gaussian arithmetic cost [S1, unofficial].
+-- **When to use**: When high-fidelity alpha blending is critical and standard 2D sigma leads to over-blending or artifacts [S1, unofficial].
+-- **When not to use**: When memory is constrained due to `means2d` storage or when real-time performance is prioritized over alpha accuracy [S1, unofficial].
++*   **Time Complexity:** $O(C \times H \times W \times N)$ in the worst case, where $C$ is cameras, $H,W$ resolution, $N$ Gaussians. Culling reduces this significantly.
++*   **Memory Complexity:** $O(C \times H \times W)$ for output buffers. $O(C \times N)$ for `means2d`.
++*   **Strengths:** Robust to projection errors; tighter alpha culling improves performance.
++*   **Limitations:** Requires pre-computation of `means2d`; hybrid sigma calculation adds overhead per pixel.
++*   **When to Use:** When standard rasterization suffers from artifacts due to inaccurate sigma estimation or when culling efficiency is critical.
+ 
+ ## Background
+-This method is implemented in the `gsplat-mlx` library by RobotFlow-Labs [S1, unofficial]. It represents a variant of the 3D Gaussian Splatting rasterizer designed for differentiable rendering in machine learning contexts, specifically addressing alpha estimation robustness [S1, unofficial].
++This method is part of the `gsplat-mlx` library, an unofficial implementation of 3D Gaussian Splatting for the MLX framework [S1, unofficial]. It introduces the hybrid sigma approach to improve robustness and culling.
+ 
+ ## Sources

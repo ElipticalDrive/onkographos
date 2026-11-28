@@ -1,0 +1,283 @@
+--- v001.md
++++ v002.md
+@@ -8,6 +8,6 @@
+ ## How it works
+ **Inputs and Outputs**
+-- **Inputs**: Screen color texture, depth texture, camera position, sun position, planet parameters (radius, atmosphere radius), and scattering coefficients.
+-- **Outputs**: Final rendered color buffer.
++- **Inputs**: Screen color texture, depth texture, camera position, sun position, planet parameters (radius, atmosphere radius), and scattering coefficients [S1, unofficial].
++- **Outputs**: Final rendered color buffer [S1, unofficial].
+ 
+ **Data Structures**
+@@ -27,80 +27,158 @@
+ **Numbered Steps**
+ 
+-1.  **Sample Input Data**: Read the screen color and depth value for the current pixel UV coordinates [S1, unofficial].
+-    ```python
+-    screen_color = texture2D(texture_sampler, uv).rgb
+-    depth = texture2D(depth_sampler, uv).r
+-    ```
+-
+-2.  **Compute Ray Origin and Direction**: Transform the depth value to world space to find the deepest visible point, then compute the ray direction from the camera position [S1, unofficial].
+-    ```python
+-    deepest_point = world_from_uv(uv, depth) - camera_position
+-    maximum_distance = length(deepest_point)
+-    ray_dir = deepest_point / maximum_distance
+-    ```
+-
+-3.  **Clamp Ray Length for Sphere Intersection**: Intersect the ray with the planet sphere to get entry distance $t_0$. If the ray intersects and the computed maximum distance is greater than $t_0 - 1.0$ (to avoid precision artifacts from imperfect sphere discretization), clamp the maximum distance to $t_0$. Note: This clamping logic should not be used if the planet has landmasses or non-spherical geometry [S1, unofficial].
+-    ```python
++1. **Sample Input Data**: Read the screen color and depth value for the current pixel UV coordinates [S1, unofficial].
++2. **Compute Ray Origin and Direction**: Transform the depth value to world space to find the deepest visible point, then compute the ray direction from the camera position [S1, unofficial].
++3. **Clamp Ray Length for Planet Sphere Intersection**: Intersect the ray with the planet sphere to get entry distance $t_0$. If the ray intersects and the computed maximum distance is greater than $t_0 - 1.0$ (to avoid precision artifacts from imperfect sphere discretization), clamp the maximum distance to $t_0$. This clamping logic should not be used if the planet has landmasses or non-spherical geometry [S1, unofficial].
++4. **Atmosphere Intersection**: Call the `scatter` function with the screen color, camera position, ray direction, and maximum distance [S1, unofficial]. Inside `scatter`:
++   a. Intersect the ray with the atmosphere sphere to get impact point `impactPoint` and escape point `escapePoint` [S1, unofficial].
++   b. If no intersection occurs, return the original screen color [S1, unofficial].
++   c. Clamp `impactPoint` to $\max(0.0, \text{impactPoint})$ [S1, unofficial].
++   d. Clamp `escapePoint` to $\min(\text{maximumDistance}, \text{escapePoint})$ [S1, unofficial].
++   e. Calculate the distance through the atmosphere: $\text{distanceThroughAtmosphere} = \max(0.0, \text{escapePoint} - \text{impactPoint})$ [S1, unofficial].
++   f. Compute the first point in the atmosphere: $\text{firstPointInAtmosphere} = \text{rayOrigin} + \text{rayDir} \times \text{impactPoint}$ [S1, unofficial].
++   g. Call `calculateLight` with `firstPointInAtmosphere`, ray direction, `distanceThroughAtmosphere`, and original color [S1, unofficial].
++5. **Calculate Scattering (`calculateLight`)**:
++   a. Define the number of sample points `POINTS_FROM_CAMERA` [S1, unofficial].
++   b. Compute step size: $s = \text{rayLength} / (\text{POINTS\_FROM\_CAMERA} - 1)$ [S1, unofficial].
++   c. Initialize accumulators: `inScatteredRayleigh` = 0, `inScatteredMie` = 0, `totalOpticalDepth` = 0 [S1, unofficial].
++   d. Iterate $i$ from 0 to `POINTS_FROM_CAMERA` - 1:
++      i. Current sample point: $P_{sample} = P_{start} + \text{rayDir} \times (i \times s)$ [S1, unofficial].
++      ii. Compute Sun Ray Optical Depth:
++          - Calculate initial distance from light source through atmosphere: $L_{sun} = \text{atmosphereRadius} - \text{length}(P_{sample} - \text{planetPosition})$ [S1, unofficial].
++          - If ray from $P_{sample}$ in sun direction intersects atmosphere sphere, update $L_{sun}$ to the intersection distance $t_1$ [S1, unofficial].
++          - Compute optical depth from sun to sample point: $OD_{sun} = \text{opticalDepth}(P_{sample}, \text{sunDir}, L_{sun})$ [S1, unofficial].
++      iii. Compute View Ray Optical Depth:
++          - Distance from sample point to camera along view ray: $L_{view} = s \times i$ [S1, unofficial].
++          - Compute optical depth from sample point to camera: $OD_{view} = \text{opticalDepth}(P_{sample}, -\text{rayDir}, L_{view})$ [S1, unofficial].
++      iv. Compute Transmittance:
++          - $T = \exp(-\text{rayleighCoeffs} \times (OD_{sun}.x + OD_{view}.x) - \text{mieCoeffs} \times (OD_{sun}.y + OD_{view}.y) - \text{ozoneCoeffs} \times (OD_{sun}.z + OD_{view}.z))$ [S1, unofficial].
++      v. Update Total Optical Depth:
++          - Get local density at sample point: $\rho = \text{densityAtPoint}(P_{sample})$ [S1, unofficial].
++          - $OD_{total} += \rho \times s$ [S1, unofficial].
++      vi. Accumulate Scattered Light:
++          - `inScatteredRayleigh` += $\rho.x \times T \times s$ [S1, unofficial].
++          - `inScatteredMie` += $\rho.y \times T \times s$ [S1, unofficial].
++   e. Compute Phase Functions:
++      - Cosine of angle between view and sun directions: $c = \text{dot}(\text{rayDir}, \text{sunDir})$ [S1, unofficial].
++      - Rayleigh Phase Function: $P_R = \frac{3}{16\pi} (1 + c^2)$ [S1, unofficial].
++      - Mie Phase Function: Let $g = \text{mieAsymmetry}$ [S1, unofficial].
++        $$P_M = \frac{3(1-g^2)}{2(2+g^2)} \frac{1+c^2}{(1+g^2-2gc)^{1.5}}$$
++        [S1, unofficial].
++   f. Apply Phase Functions and Coefficients:
++      - `inScatteredRayleigh` *= $P_R \times \text{rayleighCoeffs}$ [S1, unofficial].
++      - `inScatteredMie` *= $P_M \times \text{mieCoeffs}$ [S1, unofficial].
++   g. Compute Opacity (Transmittance to Camera):
++      - $O = \exp(-(\text{mieCoeffs} \times OD_{total}.y + \text{rayleighCoeffs} \times OD_{total}.x + \text{ozoneCoeffs} \times OD_{total}.z))$ [S1, unofficial].
++   h. Return Final Color:
++      - $\text{final} = (\text{inScatteredRayleigh} + \text{inScatteredMie}) \times \text{lightIntensity} + \text{originalColor} \times O$ [S1, unofficial].
++6. **Post-Processing**:
++   a. Apply exposure: $\text{finalColor} \times 1.2$ [S1, unofficial].
++   b. Apply ACES tonemapping [S1, unofficial].
++   c. Apply saturation (factor 1.2) using grayscale luminance weights $(0.299, 0.587, 0.114)$:
++      $$\text{grayscale} = \text{vec3}(0.299, 0.587, 0.114) \times \text{finalColor}$$
++      $$\text{finalColor} = \text{mix}(\text{grayscale}, \text{finalColor}, 1.2)$$
++      [S1, unofficial].
++   d. Clamp to $[0.0, 1.0]$ and output [S1, unofficial].
++
++**Pseudocode**
++```python
++import math
++
++def ray_intersect_sphere(origin, direction, sphere_center, radius):
++    oc = [origin[j] - sphere_center[j] for j in range(3)]
++    a = sum(d*d for d in direction)
++    b = 2.0 * sum(oc[j]*direction[j] for j in range(3))
++    c = sum(oc[j]*oc[j] for j in range(3)) - radius*radius
++    disc = b*b - 4*a*c
++    if disc < 0: return None, None
++    sqrt_disc = math.sqrt(disc)
++    t0 = (-b - sqrt_disc) / (2*a)
++    t1 = (-b + sqrt_disc) / (2*a)
++    return t0, t1
++
++def optical_depth(point, direction, length, rayleigh_height, mie_height, ozone_height, ozone_falloff):
++    # Note: exact implementation of optical_depth is not provided in the sources.
++    # It integrates exponential density falloff along the ray path.
++    return [0.0, 0.0, 0.0]
++
++def density_at_point(point, rayleigh_height, mie_height, ozone_height, ozone_falloff):
++    # Note: exact implementation of density_at_point is not provided in the sources.
++    # It computes local density based on height falloff parameters.
++    return [0.0, 0.0, 0.0]
++
++def world_from_uv(uv, depth, inverse_projection, inverse_view):
++    # Standard inverse projection to world space
++    clip = [uv[0]*2-1, uv[1]*2-1, 0.0, 1.0]
++    # Apply inverse view and projection matrices, then divide by w
++    # Simplified for pseudocode: returns world position at given depth
++    return [0.0, 0.0, 0.0] # Placeholder for matrix math; implement using inverse_projection * inverse_view
++
++def atmospheric_scattering_post_process(screen_color, depth, uv, camera_position, sun_position, planet_position, planet_radius, atmosphere_radius, rayleigh_coeffs, mie_coeffs, ozone_coeffs, rayleigh_height, mie_height, ozone_height, ozone_falloff, light_intensity, points_from_camera):
++    screen_color = texture2D(screen_color, uv)
++    depth_val = texture2D(depth, uv).r
++    deepest_point = [world_from_uv(uv, depth_val, inverse_projection, inverse_view)[j] - camera_position[j] for j in range(3)]
++    maximum_distance = math.sqrt(sum(d*d for d in deepest_point))
++    ray_dir = [d / maximum_distance for d in deepest_point]
++    
+     t0, t1 = ray_intersect_sphere(camera_position, ray_dir, planet_position, planet_radius)
+-    if maximum_distance > t0 - 1.0:
++    if t0 is not None and maximum_distance > t0 - 1.0:
+         maximum_distance = t0
+-    ```
+-
+-4.  **Atmosphere Intersection**: Call the `scatter` function with the screen color, camera position, ray direction, and maximum distance [S1, unofficial]. Inside `scatter`:
+-    a. Intersect the ray with the atmosphere sphere to get impact point $t_{in}$ and escape point $t_{out}$ [S1, unofficial].
+-    b. If no intersection occurs, return the original screen color [S1, unofficial].
+-    c. Clamp $t_{in}$ to $\max(0.0, t_{in})$ [S1, unofficial].
+-    d. Clamp $t_{out}$ to $\min(\text{maximum\_distance}, t_{out})$ [S1, unofficial].
+-    e. Calculate the distance through the atmosphere: $d_{atm} = \max(0.0, t_{out} - t_{in})$ [S1, unofficial].
+-    f. Compute the first point in the atmosphere: $P_{start} = \text{ray\_origin} + \text{ray\_dir} \times t_{in}$ [S1, unofficial].
+-    g. Call `calculate_light` with $P_{start}$, ray direction, $d_{atm}$, and original color [S1, unofficial].
+-
+-5.  **Calculate Scattering (`calculate_light`)**:
+-    a. Define the number of sample points `POINTS_FROM_CAMERA` (implementation detail, not explicitly defined in sources, but used in loop) [S1, unofficial].
+-    b. Compute step size: $s = d_{atm} / (\text{POINTS\_FROM\_CAMERA} - 1)$ [S1, unofficial].
+-    c. Initialize accumulators: `in_scattered_rayleigh` = 0, `in_scattered_mie` = 0, `total_optical_depth` = 0 [S1, unofficial].
+-    d. Iterate $i$ from 0 to `POINTS_FROM_CAMERA` - 1:
+-        i. Current sample point: $P_{sample} = P_{start} + \text{ray\_dir} \times (i \times s)$ [S1, unofficial].
+-        ii. Compute Sun Ray Optical Depth:
+-            - Calculate distance from light source through atmosphere: $L_{sun} = \text{atmosphere\_radius} - \text{length}(P_{sample} - \text{planet\_position})$ [S1, unofficial].
+-            - If ray from $P_{sample}$ in sun direction intersects atmosphere sphere, update $L_{sun}$ to the intersection distance $t_1$ [S1, unofficial].
+-            - Compute optical depth from sun to sample point: $OD_{sun} = \text{optical\_depth}(P_{sample}, \text{sun\_dir}, L_{sun})$ [S1, unofficial].
+-        iii. Compute View Ray Optical Depth:
+-            - Distance from sample point to camera along view ray: $L_{view} = i \times s$ [S1, unofficial].
+-            - Compute optical depth from sample point to camera: $OD_{view} = \text{optical\_depth}(P_{sample}, -\text{ray\_dir}, L_{view})$ [S1, unofficial].
+-        iv. Compute Transmittance:
+-            - $T = \exp(-\text{rayleigh\_coeffs} \times (OD_{sun}.x + OD_{view}.x) - \text{mie\_coeffs} \times (OD_{sun}.y + OD_{view}.y) - \text{ozone\_coeffs} \times (OD_{sun}.z + OD_{view}.z))$ [S1, unofficial].
+-        v. Update Total Optical Depth:
+-            - Get local density at sample point: $\rho = \text{density\_at\_point}(P_{sample})$ [S1, unofficial].
+-            - $OD_{total} += \rho \times s$ [S1, unofficial].
+-        vi. Accumulate Scattered Light:
+-            - `in_scattered_rayleigh` += $\rho.x \times T \times s$ [S1, unofficial].
+-            - `in_scattered_mie` += $\rho.y \times T \times s$ [S1, unofficial].
+-
+-    e. Compute Phase Functions:
+-        - Cosine of angle between view and sun directions: $c = \text{dot}(\text{ray\_dir}, \text{sun\_dir})$ [S1, unofficial].
+-        - Rayleigh Phase Function: $P_R = \frac{3}{16\pi} (1 + c^2)$ [S1, unofficial].
+-        - Mie Phase Function: Let $g = \text{mie\_asymmetry}$.
+-          $$P_M = \frac{3(1-g^2)}{2(2+g^2)} \frac{1+c^2}{(1+g^2-2gc)^{1.5}}$$
+-          [S1, unofficial].
+-
+-    f. Apply Phase Functions and Coefficients:
+-        - `in_scattered_rayleigh` *= $P_R \times \text{rayleigh\_coeffs}$ [S1, unofficial].
+-        - `in_scattered_mie` *= $P_M \times \text{mie\_coeffs}$ [S1, unofficial].
+-
+-    g. Compute Opacity (Transmittance to Camera):
+-        - $O = \exp(-(\text{mie\_coeffs} \times OD_{total}.y + \text{rayleigh\_coeffs} \times OD_{total}.x + \text{ozone\_coeffs} \times OD_{total}.z))$ [S1, unofficial].
+-
+-    h. Return Final Color:
+-        - $\text{final} = (\text{in\_scattered\_rayleigh} + \text{in\_scattered\_mie}) \times \text{light\_intensity} + \text{original\_color} \times O$ [S1, unofficial].
+-
+-6.  **Post-Processing**:
+-    a. Apply exposure: $\text{final\_color} \times 1.2$ [S1, unofficial].
+-    b. Apply ACES tonemapping [S1, unofficial].
+-    c. Apply saturation (factor 1.2) using grayscale luminance weights $(0.299, 0.587, 0.114)$:
+-       $$\text{grayscale} = \text{dot}(\text{final\_color}, [0.299, 0.587, 0.114])$$
+-       $$\text{final\_color} = \text{mix}(\text{grayscale}, \text{final\_color}, 1.2)$$
+-       [S1, unofficial].
+-    d. Clamp to $[0.0, 1.0]$ and output [S1, unofficial].
++        
++    final_color = scatter(screen_color, camera_position, ray_dir, maximum_distance, sun_position, planet_position, atmosphere_radius, rayleigh_coeffs, mie_coeffs, ozone_coeffs, rayleigh_height, mie_height, ozone_height, ozone_falloff, light_intensity)
++    
++    final_color = [c * 1.2 for c in final_color]
++    final_color = aces_tonemap(final_color)
++    saturation = 1.2
++    grayscale = [0.299*final_color[0], 0.587*final_color[1], 0.114*final_color[2]]
++    final_color = [grayscale[j] + saturation * (final_color[j] - grayscale[j]) for j in range(3)]
++    final_color = [max(0.0, min(1.0, c)) for c in final_color]
++    return final_color
++
++def scatter(original_color, ray_origin, ray_dir, maximum_distance, sun_position, planet_position, atmosphere_radius, rayleigh_coeffs, mie_coeffs, ozone_coeffs, rayleigh_height, mie_height, ozone_height, ozone_falloff, light_intensity):
++    impact_point, escape_point = ray_intersect_sphere(ray_origin, ray_dir, planet_position, atmosphere_radius)
++    if impact_point is None:
++        return original_color
++    impact_point = max(0.0, impact_point)
++    escape_point = min(maximum_distance, escape_point)
++    distance_through_atmosphere = max(0.0, escape_point - impact_point)
++    first_point_in_atmosphere = [ray_origin[j] + ray_dir[j] * impact_point for j in range(3)]
++    return calculate_light(first_point_in_atmosphere, ray_dir, distance_through_atmosphere, original_color, sun_position, planet_position, atmosphere_radius, rayleigh_coeffs, mie_coeffs, ozone_coeffs, rayleigh_height, mie_height, ozone_height, ozone_falloff, light_intensity)
++
++def calculate_light(ray_origin, ray_dir, ray_length, original_color, sun_position, planet_position, atmosphere_radius, rayleigh_coeffs, mie_coeffs, ozone_coeffs, rayleigh_height, mie_height, ozone_height, ozone_falloff, light_intensity):
++    sun_dir = normalize(sun_position, planet_position)
++    step_size = ray_length / (points_from_camera - 1)
++    in_scattered_rayleigh = [0.0, 0.0, 0.0]
++    in_scattered_mie = [0.0, 0.0, 0.0]
++    total_optical_depth = [0.0, 0.0, 0.0]
++    
++    for i in range(points_from_camera):
++        sample_point = [ray_origin[j] + ray_dir[j] * (i * step_size) for j in range(3)]
++        sun_ray_length_in_atm = atmosphere_radius - math.sqrt(sum((sample_point[j] - planet_position[j])**2 for j in range(3)))
++        t0, t1 = ray_intersect_sphere(sample_point, sun_dir, planet_position, atmosphere_radius)
++        if t0 is not None:
++            sun_ray_length_in_atm = t1
++        sun_ray_optical_depth = optical_depth(sample_point, sun_dir, sun_ray_length_in_atm, rayleigh_height, mie_height, ozone_height, ozone_falloff)
++        view_ray_length_in_atm = step_size * i
++        view_ray_optical_depth = optical_depth(sample_point, [-d for d in ray_dir], view_ray_length_in_atm, rayleigh_height, mie_height, ozone_height, ozone_falloff)
++        
++        transmittance = [math.exp(-(rayleigh_coeffs[j] * (sun_ray_optical_depth[j] + view_ray_optical_depth[j]) + mie_coeffs[j] * (sun_ray_optical_depth[j+1] if j<2 else 0) + ozone_coeffs[j] * (sun_ray_optical_depth[j+2] if j<1 else 0))) for j in range(3)] # Simplified vector math for pseudocode
++        local_density = density_at_point(sample_point, rayleigh_height, mie_height, ozone_height, ozone_falloff)
++        total_optical_depth = [total_optical_depth[j] + local_density[j] * step_size for j in range(3)]
++        in_scattered_rayleigh = [in_scattered_rayleigh[j] + local_density[0] * transmittance[j] * step_size for j in range(3)]
++        in_scattered_mie = [in_scattered_mie[j] + local_density[1] * transmittance[j] * step_size for j in range(3)]
++        
++    costheta = sum(ray_dir[j] * sun_dir[j] for j in range(3))
++    costheta2 = costheta * costheta
++    phase_rayleigh = 3.0 / (16.0 * math.pi) * (1.0 + costheta2)
++    g = mie_asymmetry
++    g2 = g * g
++    phase_mie = ((3.0 * (1.0 - g2)) / (2.0 * (2.0 + g2))) * ((1.0 + costheta2) / pow(1.0 + g2 - 2.0 * g * costheta, 1.5))
++    
++    in_scattered_rayleigh = [c * phase_rayleigh * rayleigh_coeffs[j] for j, c in enumerate(in_scattered_rayleigh)]
++    in_scattered_mie = [c * phase_mie * mie_coeffs[j] for j, c in enumerate(in_scattered_mie)]
++    
++    opacity = math.exp(-(mie_coeffs[1] * total_optical_depth[1] + rayleigh_coeffs[0] * total_optical_depth[0] + ozone_coeffs[2] * total_optical_depth[2]))
++    return [(in_scattered_rayleigh[j] + in_scattered_mie[j]) * light_intensity + original_color[j] * opacity for j in range(3)]
++```
+ 
+ **Formulas**
+@@ -108,12 +186,9 @@
+   $$P_R(\theta) = \frac{3}{16\pi} (1 + \cos^2 \theta)$$
+   where $\theta$ is the scattering angle [S1, unofficial].
+-
+ - **Mie Phase Function (Henyey-Greenstein variant)**:
+   $$P_M(\theta) = \frac{3(1-g^2)}{2(2+g^2)} \frac{1+\cos^2 \theta}{(1+g^2-2g\cos \theta)^{3/2}}$$
+   where $g$ is the asymmetry factor [S1, unofficial].
+-
+ - **Optical Depth**:
+-  The optical depth is computed based on the density falloff of Rayleigh, Mie, and Ozone layers. The specific `optical_depth` function implementation is not fully detailed in the provided notes, but it integrates density along the ray path [S1, unofficial].
+-
++  The optical depth is computed based on the density falloff of Rayleigh, Mie, and Ozone layers [S1, unofficial]. The specific `optical_depth` function implementation is not fully detailed in the provided notes, but it integrates density along the ray path [S1, unofficial].
+ - **Transmittance**:
+   $$T = \exp\left(-\sum_{k \in \{R, M, O\}} \sigma_k \cdot OD_k\right)$$
+@@ -134,15 +209,15 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity**: Linear with respect to the number of sample points `POINTS_FROM_CAMERA` per pixel. The complexity is $O(N \cdot P)$ where $N$ is the number of pixels and $P$ is the number of samples per ray.
+-- **Memory Complexity**: $O(1)$ additional memory per pixel, excluding the input and output textures.
+-- **Measured Performance**: Not given in the sources.
+-- **Scaling**: Performance scales linearly with resolution and sample count.
+-- **Strengths**: Post-process approach allows for easy integration into existing rendering pipelines without modifying scene geometry. Accounts for occlusion by scene geometry via depth buffer.
+-- **Limitations**: Limited to screen-space; rays are only traced for visible pixels. Approximates atmospheric scattering with a fixed number of samples. Relies on a spherical atmosphere model.
+-- **When to Use**: When rendering a spherical planet with an atmosphere and occlusion by terrain is required, and performance constraints allow for per-pixel ray marching.
+-- **When Not to Use**: For non-spherical planets, or when high-fidelity multi-scattering is required (this method uses single scattering approximation).
++- **Time Complexity**: Linear with respect to the number of sample points `POINTS_FROM_CAMERA` per pixel. The complexity is $O(N \cdot P)$ where $N$ is the number of pixels and $P$ is the number of samples per ray [S1, unofficial].
++- **Memory Complexity**: $O(1)$ additional memory per pixel, excluding the input and output textures [S1, unofficial].
++- **Measured Performance**: Not given in the sources [S1, unofficial].
++- **Scaling**: Performance scales linearly with resolution and sample count [S1, unofficial].
++- **Strengths**: Post-process approach allows for easy integration into existing rendering pipelines without modifying scene geometry. Accounts for occlusion by scene geometry via depth buffer [S1, unofficial].
++- **Limitations**: Limited to screen-space; rays are only traced for visible pixels. Approximates atmospheric scattering with a fixed number of samples. Relies on a spherical atmosphere model [S1, unofficial].
++- **When to Use**: When rendering a spherical planet with an atmosphere and occlusion by terrain is required, and performance constraints allow for per-pixel ray marching [S1, unofficial].
++- **When Not to Use**: For non-spherical planets, or when high-fidelity multi-scattering is required (this method uses single scattering approximation) [S1, unofficial].
+ 
+ ## Background
+-Originated from the GitHub repository `BarthPaleologue/volumetric-atmospheric-scattering` [S1, unofficial]. It is an implementation of atmospheric scattering using post-processing techniques, likely inspired by standard volumetric rendering principles and Rayleigh/Mie scattering theory.
++Originated from the GitHub repository `BarthPaleologue/volumetric-atmospheric-scattering` [S1, unofficial]. It is an implementation of atmospheric scattering using post-processing techniques, likely inspired by standard volumetric rendering principles and Rayleigh/Mie scattering theory [S1, unofficial].
+ 
+ ## Sources

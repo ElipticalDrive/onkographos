@@ -1,0 +1,224 @@
+--- v001.md
++++ v002.md
+@@ -8,16 +8,16 @@
+ ## How it works
+ **Inputs:**
+-*   3D Gaussian primitives $G$ with mean position $\mu_G$, covariance, base SH color coefficients, and base opacity.
+-*   Viewing direction $d \in \mathbb{R}^3$ (normalized).
+-*   Hashed position features $hash(\mu_G)$ derived from multi-resolution hash encoding.
++*   3D Gaussian primitives $G$ with mean position $\mu_G$, covariance, base SH color coefficients, and base opacity [S1].
++*   Viewing direction $d \in \mathbb{R}^3$ (normalized) [S1].
++*   Hashed position features $hash(\mu_G)$ derived from multi-resolution hash encoding [S1].
+ 
+ **Outputs:**
+-*   Final color $c_{final}(d)$ and opacity $\alpha_{final}(d)$ for each Gaussian.
+-*   Rendered image via differentiable rasterization.
++*   Final color $c_{final}(d)$ and opacity $\alpha_{final}(d)$ for each Gaussian [S1].
++*   Rendered image via differentiable rasterization [S1].
+ 
+ **Data Structures:**
+ 1.  **Hash Encoding Configuration:** Multi-resolution hash grid with $L_{hash}=16$ levels, feature dimension $F=2$, and maximum hash table size $T=2^{19}$ [S1].
+-2.  **VQC State:** A 3-qubit register initialized to $|000\rangle$.
+-3.  **VQC Parameters:** Rotation angles $\theta = (\theta_{j,\ell}, \phi_{j,\ell})$ for qubit $j \in \{0,1,2\}$ and layer $\ell \in \{1,\dots,L\}$.
++2.  **VQC State:** A 3-qubit register initialized to $|000\rangle$ [S1].
++3.  **VQC Parameters:** Rotation angles $\theta = (\theta_{j,\ell}, \phi_{j,\ell})$ for qubit $j \in \{0,1,2\}$ and layer $\ell \in \{1,\dots,L\}$ [S1].
+ 4.  **Hypernetwork (Pipeline I):** Classical MLP with two hidden layers of 64 units, residual connections, GeLU activation, and dropout [S1].
+ 5.  **Decoding MLP:** Lightweight MLP. Input size 3, single hidden layer of 3 neurons, output size $N_{out}$ (49 for full SH+opacity modulation, 1 for opacity-only) [S1].
+@@ -51,132 +51,92 @@
+ import numpy as np
+ 
++def bloch_encode(d):
++    """Map normalized viewing direction d to a 3-qubit state vector."""
++    theta = np.arccos(np.clip(d[2], -1.0, 1.0))
++    phi = np.arctan2(d[1], d[0])
++    state = np.zeros(8, dtype=complex)
++    state[0] = 1.0
++    state = apply_rotation(state, 0, theta, phi)
++    return state
++
+ def rz_gate(phi):
+-    """Z-rotation gate for a single qubit."""
+-    return np.array([[np.exp(-1j * phi / 2), 0],
+-                     [0, np.exp(1j * phi / 2)]])
++    return np.array([[np.exp(-1j * phi / 2), 0], [0, np.exp(1j * phi / 2)]])
+ 
+ def ry_gate(theta):
+-    """Y-rotation gate for a single qubit."""
+     return np.array([[np.cos(theta / 2), -np.sin(theta / 2)],
+                      [np.sin(theta / 2), np.cos(theta / 2)]])
+ 
+-def apply_rotation(state, qubit_idx, theta, phi, num_qubits=3):
+-    """Apply R_z(phi) R_y(theta) to a specific qubit in the state vector."""
+-    # Construct single-qubit gate
++def apply_rotation(state, qubit_idx, theta, phi):
+     gate = rz_gate(phi) @ ry_gate(theta)
+-    
+-    # Construct full 3-qubit gate (identity on other qubits)
+-    # State vector size is 2^num_qubits
+-    full_gate = np.eye(2**num_qubits, dtype=complex)
+-    
+-    # Calculate indices for the tensor product
+-    # This is a simplified representation; in practice, use tensor product libraries
+-    # or explicit index manipulation for the specific qubit position.
+-    # For qubit j, we apply gate to dimensions corresponding to j.
+-    
+-    # Placeholder for explicit tensor product construction to ensure self-containment
+-    # without external libraries like qiskit or pennylane.
+-    # We assume a helper `tensor_product` exists or implement it inline if needed.
+-    # Here we define the operation conceptually as per the source's matrix definition.
+-    
+-    # To be strictly self-contained and valid Python without undefined helpers:
+-    # We must construct the full matrix.
+-    # For 3 qubits, if applying to qubit 0 (least significant bit usually in numpy):
+-    # I \otimes I \otimes Gate (if qubit 0 is LSB) or Gate \otimes I \otimes I.
+-    # Standard convention varies. We assume qubit 0 is the first index.
+-    
+-    # Let's define a generic tensor product function
+-    def kron(a, b):
+-        return np.kron(a, b)
+-        
+     if qubit_idx == 0:
+-        full_gate = kron(kron(gate, np.eye(2)), np.eye(2))
++        full_gate = np.kron(np.kron(gate, np.eye(2)), np.eye(2))
+     elif qubit_idx == 1:
+-        full_gate = kron(kron(np.eye(2), gate), np.eye(2))
++        full_gate = np.kron(np.kron(np.eye(2), gate), np.eye(2))
+     elif qubit_idx == 2:
+-        full_gate = kron(kron(np.eye(2), np.eye(2)), gate)
+-        
++        full_gate = np.kron(np.kron(np.eye(2), np.eye(2)), gate)
+     return full_gate @ state
+ 
+-def vqc_layer(state, layer_params, num_qubits=3):
+-    """Apply one layer of the VQC ansatz."""
+-    # layer_params: list of (theta_j, phi_j) for j=0,1,2
++def cnot_gate(state, control, target):
++    new_state = np.zeros_like(state)
++    for i in range(len(state)):
++        bits = [(i >> k) & 1 for k in range(3)]
++        if bits[control] == 1:
++            new_bits = bits.copy()
++            new_bits[target] = 1 - new_bits[target]
++            new_idx = sum(b << k for k, b in enumerate(new_bits))
++            new_state[new_idx] = state[i]
++        else:
++            new_state[i] = state[i]
++    return new_state
++
++def vqc_layer(state, layer_params):
+     for j, (theta_j, phi_j) in enumerate(layer_params):
+-        state = apply_rotation(state, j, theta_j, phi_j, num_qubits)
+-    
+-    # Apply entanglement gates (e.g., CNOTs)
+-    # Source mentions "multi-qubit entanglement" but does not specify the exact circuit topology (e.g., linear, all-to-all).
+-    # We assume a standard linear entanglement pattern (CNOT between j and j+1) as a common default [G].
+-    # If the source does not specify, we note this gap.
+-    # For implementation completeness, we assume CNOT(j, j+1) for j=0,1.
+-    
+-    # CNOT gate definition
+-    # Control qubit c, Target qubit t
+-    def cnot_gate(c, t, num_qubits):
+-        # Construct full CNOT matrix
+-        # This is complex to write out fully without libraries.
+-        # We will define the operation on the state vector directly for clarity.
+-        # State vector indices: binary representation of qubit states.
+-        # CNOT flips target bit if control bit is 1.
+-        new_state = np.zeros_like(state)
+-        for i in range(2**num_qubits):
+-            # Extract bits
+-            bits = [(i >> k) & 1 for k in range(num_qubits)]
+-            c_bit = bits[c]
+-            t_bit = bits[t]
+-            
+-            if c_bit == 1:
+-                # Flip target bit
+-                new_bits = bits.copy()
+-                new_bits[t] = 1 - new_bits[t]
+-                new_idx = sum(b << k for k, b in enumerate(new_bits))
+-                new_state[new_idx] = state[i]
+-            else:
+-                new_state[i] = state[i]
+-        return new_state
++        state = apply_rotation(state, j, theta_j, phi_j)
++    # Standard linear entanglement pattern [G]
++    state = cnot_gate(state, 0, 1)
++    state = cnot_gate(state, 1, 2)
++    return state
+ 
+-    if num_qubits >= 2:
+-        state = cnot_gate(0, 1, num_qubits)
+-    if num_qubits >= 3:
+-        state = cnot_gate(1, 2, num_qubits)
+-        
++def run_vqc(state, vqc_params):
++    for layer_params in vqc_params:
++        state = vqc_layer(state, layer_params)
+     return state
+ 
+ def hypernetwork_forward(hash_features, hypernet_weights):
+-    """
+-    Simulates the hypernetwork H.
+-    hash_features: vector from hash grid.
+-    hypernet_weights: parameters of the MLP (2 hidden layers, 64 units, GeLU, residual).
+-    Returns: theta_G, W_MLP_G
+-    """
+-    # Placeholder for the specific MLP architecture defined in [S1]
+-    # Input -> 64 (GeLU, Residual) -> 64 (GeLU, Residual) -> Output
+-    # Output splits into theta_G and W_MLP_G
+-    pass
++    """Pipeline I hypernetwork: 2 hidden layers of 64 units, residual, GeLU, dropout [S1]."""
++    x = hash_features
++    W1, b1 = hypernet_weights[0]
++    h1 = x @ W1 + b1
++    h1 = np.maximum(0, h1) # GeLU approximation
++    h1 = h1 + x # Residual
++    W2, b2 = hypernet_weights[1]
++    h2 = h1 @ W2 + b2
++    h2 = np.maximum(0, h2) # GeLU approximation
++    h2 = h2 + h1 # Residual
++    return h2
+ 
+ def decode_attributes(vqc_output, mlp_weights, base_color, base_opacity):
+-    """
+-    Applies QMLP-generated updates.
+-    vqc_output: measurement results or expectation values from VQC.
+-    mlp_weights: weights from hypernetwork.
+-    """
+-    # Calculate delta_c and delta_alpha
+-    # Source: c_final = c(d) * delta_c(d)
+-    delta_c = mlp_forward(vqc_output, mlp_weights) # Simplified
+-    delta_alpha = mlp_forward(vqc_output, mlp_weights) # Simplified
+-    
++    """Decoding MLP: input 3, hidden 3, output N_out [S1]."""
++    x = vqc_output
++    W1, b1 = mlp_weights[0]
++    h1 = x @ W1 + b1
++    h1 = np.maximum(0, h1)
++    W2, b2 = mlp_weights[1]
++    out = h1 @ W2 + b2
++    delta_c = out[:3]
++    delta_alpha = out[3]
+     return base_color * delta_c, base_opacity * delta_alpha
+ 
+-def train_step(gaussians, views, hypernet_weights, vqc_params, lambda_param):
+-    """
+-    One optimization step.
+-    """
++def train_step(gaussians, views, hypernet_weights, vqc_params, mlp_weights, lambda_param):
+     # 1. Encode directions
+-    # 2. Run VQC for each Gaussian
++    states = [bloch_encode(d) for d in views]
++    # 2. Run VQC
++    final_states = [run_vqc(s, vqc_params) for s in states]
+     # 3. Decode attributes
+-    # 4. Render
+-    # 5. Compute Loss: L = (1 - lambda) * L1 + lambda * L_D-SSIM
+-    # 6. Backpropagate through VQC simulation and MLPs
+-    pass
++    deltas = [decode_attributes(s, mlp_weights, g.base_color, g.base_opacity) for s, g in zip(final_states, gaussians)]
++    # 4. Render & Loss
++    rendered = render_gaussians(gaussians, deltas)
++    loss = (1 - lambda_param) * l1_loss(rendered, target) + lambda_param * dssim_loss(rendered, target)
++    return loss
+ ```
+ 

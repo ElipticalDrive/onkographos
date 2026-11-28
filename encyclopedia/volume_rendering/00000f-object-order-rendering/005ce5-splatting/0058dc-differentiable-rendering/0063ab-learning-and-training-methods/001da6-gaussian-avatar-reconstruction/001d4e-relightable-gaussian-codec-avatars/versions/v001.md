@@ -1,0 +1,59 @@
+# Relightable Gaussian Codec Avatars
+
+Also called: GHG, GoHA, GoHA / GHG, Relightable Gaussian head methods using FLAME rig
+
+## Overview
+Relightable Gaussian Codec Avatars is a method for creating photorealistic, relightable 3D head avatars from monocular video by combining Gaussian Splatting with the FLAME parametric head model [S1, unofficial]. It extends standard Gaussian Avatar Reconstruction by decoupling geometry deformation from appearance, allowing the rendering of the avatar under arbitrary lighting conditions [S2, unofficial]. Unlike sibling methods that primarily focus on animatable geometry (e.g., [Gaussian Avatars](1477-gaussian-avatars.md)) or static appearance, this approach explicitly models a relightable BRDF, enabling diverse lighting synthesis while maintaining high-fidelity facial expressions driven by the FLAME rig [S1, unofficial].
+
+## How it works
+**Inputs:**
+*   Monocular video of a talking head (typically ~30 seconds).
+*   FLAME mesh parameters (pose, expression, shape) fitted to the video frames.
+
+**Outputs:**
+*   A set of 3D Gaussians representing the head.
+*   Per-Gaussian attributes: position, covariance, opacity, spherical harmonics (or base color), and BRDF parameters.
+*   A relightable appearance model allowing arbitrary light source insertion.
+
+**Data Structures:**
+*   **Gaussian Set:** Each Gaussian $i$ is defined by:
+    *   $\mu_i \in \mathbb{R}^3$: Mean position.
+    *   $\Sigma_i \in \mathbb{R}^{3 \times 3}$: Covariance matrix (parameterized as rotation $R_i$ and scale $S_i$).
+    *   $\alpha_i \in [0, 1]$: Opacity.
+    *   $c_i$: Color/Appearance. In relightable variants, this is decomposed into base albedo and BRDF coefficients (e.g., diffuse/specular weights) rather than fixed spherical harmonics, or SHs are used for view-dependent effects while a separate lighting model handles illumination [S1, unofficial].
+    *   $p_i \in \mathbb{R}^k$: Pose/expression condition vector mapping to deformation offsets.
+
+**Steps:**
+1.  **Initialization:** Fit a FLAME mesh to the input video using a regression network (e.g., MICA or DECA) to obtain per-frame pose and expression parameters [S1, unofficial]. Initialize one Gaussian per triangle of the FLAME mesh in tangent space [S1, unofficial].
+2.  **Deformation Model:** Train a per-Gaussian deformation MLP or use explicit pose-conditioned offsets to map the canonical Gaussian positions to the deformed space based on FLAME pose/expression parameters [S1, unofficial]. This ensures the avatar is head-driven and riggable [S1, unofficial].
+3.  **Appearance Training:** Optimize Gaussian attributes (opacity, scale, rotation, color/BRDF) using differentiable rasterization of Gaussians [S1, unofficial]. The loss function includes photometric reconstruction loss against input frames.
+4.  **Relighting:** If explicit relighting is required, freeze geometry and train a relightable BRDF component (e.g., separating albedo from lighting) or optimize spherical harmonics under varying synthetic lighting conditions [S1, unofficial]. This allows the avatar to be rendered under novel light sources [S2, unofficial].
+5.  **Compression:** Compress the resulting model to $\le 30$ MB for efficient deployment [S1, unofficial].
+
+**Formulas:**
+*   **Deformation:** $\mu_i^{deformed} = \mu_i^{canonical} + \Delta \mu_i(P, E)$, where $P$ is pose and $E$ is expression [S1, unofficial].
+*   **Rendering:** Standard alpha-blending of Gaussians projected to 2D [S1, unofficial].
+*   **Lighting:** $C_{rendered} = f_{BRDF}(N, V, L, \text{albedo}, \text{roughness}, \dots)$ [S1, S2, unofficial].
+
+**Parameters:**
+*   Number of Gaussians: Typically one per FLAME triangle (thousands to tens of thousands).
+*   Compression target: $\le 30$ MB [S1, unofficial].
+
+**Edge Cases:**
+*   Sparse views: 3DGS can struggle with novel view synthesis from sparse sets, potentially trapping optimization in local minima [S2, unofficial].
+*   Occlusions: Monocular input limits visibility of the back of the head; relighting may reveal inconsistencies if the back is not captured [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Training time is comparable to 3DGS but requires additional optimization for deformation and BRDF parameters. Inference is fast, similar to Gaussian Splatting [S1, unofficial].
+*   **Memory Complexity:** High due to per-Gaussian attributes and deformation networks. Compression is critical to reach $\le 30$ MB [S1, unofficial].
+*   **Strengths:** High-fidelity facial animation; explicit relighting capability; efficient rendering [S1, S2, unofficial].
+*   **Limitations:** Requires accurate FLAME fitting; monocular input limits geometric completeness; potential artifacts under extreme lighting if BRDF is not well-regularized [S1, S2, unofficial].
+*   **When to use:** Applications requiring interactive, relightable head avatars from limited video input (e.g., telepresence, virtual try-on) [S1, S2, unofficial].
+*   **When not to use:** Full-body avatars (use [Gaussian Avatar](1479-gaussian-avatar.md) or [3DGS-Avatar](1480-3dgs-avatar.md)); scenes with complex dynamic lighting interactions beyond head-level BRDFs [S1, unofficial].
+
+## Background
+Relightable Gaussian Codec Avatars (also referred to as GHG or GoHA) builds on the Gaussian Avatar Reconstruction framework [S1, unofficial]. It was introduced to address the limitations of previous methods that lacked explicit relighting capabilities or relied on more complex rigs like SMPL-X [S1, unofficial]. The method leverages the FLAME head model for rigging and uses techniques from photorealistic head reconstruction (e.g., PSAvatar) to enable relighting [S1, unofficial]. It is part of a broader trend in Gaussian Splatting variants for avatar creation, following works like Gaussian Avatars and 3DGS-Avatar [S2, unofficial].
+
+## Sources
+[S1] Gaussian Splatting — All Variants Cheat Sheet, https://www.chengjianglong.com/ml/3D-Gaussian_Splatting_SOTA_Updated.html, fetched 2026-10-27 (unofficial)
+[S2] From Volume Rendering to 3D Gaussian Splatting, https://www.visgraf.impa.br/Data/RefBib/PS_PDF/tutorial-sib2025/tutorial-sib2025.pdf, fetched 2026-10-28 (unofficial)

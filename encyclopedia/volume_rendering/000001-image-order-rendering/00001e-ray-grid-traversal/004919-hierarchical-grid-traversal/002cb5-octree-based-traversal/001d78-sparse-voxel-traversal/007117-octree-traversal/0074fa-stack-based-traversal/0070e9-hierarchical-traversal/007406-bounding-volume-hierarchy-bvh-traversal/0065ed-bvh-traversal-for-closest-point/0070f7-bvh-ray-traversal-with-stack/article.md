@@ -1,0 +1,273 @@
+# BVH Ray Traversal with Stack
+
+Also called: BVH Ray Traversal for Occlusion, IntersectBVHStack, IntersectBVHStackOcclusion, Iterative BVH traversal, Stack-based iterative BVH traversal
+
+## Overview
+BVH Ray Traversal with Stack is an iterative algorithm for traversing a Bounding Volume Hierarchy (BVH) to find the closest ray-triangle intersection [S1, unofficial]. It solves the problem of efficiently determining the first surface a ray hits within a scene composed of multiple entities, each with its own local BVH [S1, unofficial]. It sets itself apart from [BVH Traversal for Closest Point](19482-bvh-traversal-for-closest-point.md) by using an explicit stack to manage traversal order for multiple entities and by returning the closest hit distance rather than just a boolean or closest point to a query [S1, unofficial]. It differs from [Stackless BVH Traversal](22227-stackless-bvh-traversal.md) by relying on a fixed-size explicit stack buffer rather than encoding traversal order in the node structure [S1, unofficial].
+
+## How it works
+**Inputs:**
+*   `RayOrigin`: `vec3` ray origin in world space.
+*   `RayDirection`: `vec3` ray direction in world space.
+*   `NodeStartIndex`: `int` starting index in `BVHNodes` for the current entity.
+*   `NodeCount`: `int` number of nodes in the current entity's BVH.
+*   `InverseMatrix`: `mat4` inverse model matrix of the entity.
+*   `TMax`: `float` maximum traversal distance.
+*   `BVHNodes`: Array of `Node` structures.
+*   `BVHTris`: Array of `Triangle` structures.
+*   `BVHVertices`: Array of `Vertex` structures.
+*   `u_TotalNodes`: `int` total number of nodes in the global BVH array.
+
+**Outputs:**
+*   `ClosestTraversal`: `float` distance to the closest intersection, or `-1.0f` if none.
+*   `oMesh`: `int` index of the intersected mesh.
+*   `oTriangleIndex`: `int` index of the intersected triangle.
+*   `iters`: `int` number of iterations performed.
+
+**Data Structures:**
+*   `Bounds`: Struct with `vec4 Min` and `vec4 Max`. For leaf nodes, `Min.w` contains packed data: `StartIdx` in the upper 4 bits and `Length` in the lower 4 bits.
+*   `Node`: Struct with `Bounds LeftChildData` and `Bounds RightChildData`.
+*   `Triangle`: Struct with `int PackedData[4]`.
+*   `Vertex`: Struct with `vec4 Position` and `uvec4 PackedData`.
+*   `Stack`: Fixed-size array of `int` with size 64.
+
+**Steps:**
+1.  Transform `RayOrigin` and `RayDirection` into the entity's local space using `InverseMatrix`. `RayOrigin` is treated as a point ($w=1.0$), `RayDirection` as a vector ($w=0.0$) [S1, unofficial].
+2.  Compute `InverseDirection` as $1.0 / \text{RayDirection}$ [S1, unofficial].
+3.  Initialize `StackPointer = 0`, `ClosestTraversal = -1.0f`, `Iterations = 0`, and `CurrentNodeIndex = NodeStartIndex` [S1, unofficial].
+4.  Loop while `Iterations < 1024`:
+    a.  Check bounds: If `StackPointer >= 64` or `StackPointer < 0` or `CurrentNodeIndex < NodeStartIndex` or `CurrentNodeIndex > NodeStartIndex + NodeCount` or `CurrentNodeIndex < 0` or `CurrentNodeIndex > u_TotalNodes`, break [S1, unofficial].
+    b.  Fetch `CurrentNode = BVHNodes[CurrentNodeIndex]` [S1, unofficial].
+    c.  Determine if children are leaves: `LeftLeaf = IsLeaf(CurrentNode.LeftChildData)`, `RightLeaf = IsLeaf(CurrentNode.RightChildData)` [S1, unofficial].
+    d.  Calculate traversal distances:
+        i.  If `LeftLeaf`, `LeftTraversal = -1.0f`. Else, `LeftTraversal = RayBounds(RayOrigin, InverseDirection, CurrentNode.LeftChildData.Min, CurrentNode.LeftChildData.Max, TMax)` [S1, unofficial].
+        ii. If `RightLeaf`, `RightTraversal = -1.0f`. Else, `RightTraversal = RayBounds(RayOrigin, InverseDirection, CurrentNode.RightChildData.Min, CurrentNode.RightChildData.Max, TMax)` [S1, unofficial].
+    e.  If `LeftLeaf` and `IntersectTriangles` is true:
+        i.  Extract `Packed = CurrentNode.LeftChildData.Min.w` [S1, unofficial].
+        ii. `StartIdx = Packed >> 4`, `Length = Packed & 0xF` [S1, unofficial].
+        iii. For `Idx` from 0 to `Length - 1`:
+            1.  Fetch `Tri = BVHTris[Idx + StartIdx]` [S1, unofficial].
+            2.  Get vertices `A, B, C` from `BVHVertices` using `Tri.PackedData` [S1, unofficial].
+            3.  Compute `Intersect = RayTriangle(RayOrigin, RayDirection, A, B, C)` [S1, unofficial].
+            4.  If `Intersect.x > 0.0f` and `Intersect.x < TMax`:
+                *   `TMax = Intersect.x`
+                *   `ClosestTraversal = Intersect.x`
+                *   `oMesh = MeshIndex` (from caller context)
+                *   `oTriangleIndex = Idx + StartIdx`
+                *   Return `ClosestTraversal` [S1, unofficial].
+    f.  If `RightLeaf` and `IntersectTriangles` is true, perform the same triangle intersection loop for the right child using `CurrentNode.RightChildData` [S1, unofficial].
+    g.  If `LeftTraversal > 0.0f` and `RightTraversal > 0.0f`:
+        i.  Determine closer child. Get child indices from `Max.w` of the child bounds [S1, unofficial].
+        ii. If `RightTraversal < LeftTraversal`, swap `CurrentNodeIndex` and `Postponed` indices [S1, unofficial].
+        iii. If `StackPointer >= 63`, break [S1, unofficial].
+        iv. Push `Postponed` to `Stack[StackPointer++]` [S1, unofficial].
+        v. Set `CurrentNodeIndex` to the closer node index [S1, unofficial].
+    h.  Else if `LeftTraversal > 0.0f`, set `CurrentNodeIndex` to the left child's index [S1, unofficial].
+    i.  Else if `RightTraversal > 0.0f`, set `CurrentNodeIndex` to the right child's index [S1, unofficial].
+    j.  Else (neither child traversed):
+        i.  If `StackPointer <= 0`, break [S1, unofficial].
+        ii. `CurrentNodeIndex = Stack[--StackPointer]` [S1, unofficial].
+    k.  `Iterations += 1` [S1, unofficial].
+5.  Set `iters = Iterations` and return `ClosestTraversal` [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def IsLeaf(bounds):
+    # Implementation detail: check if bounds indicate a leaf node
+    # Based on source, leaf nodes have specific packed data in Min.w
+    return (bounds.Min.w & 0xF0) != 0  # Placeholder logic based on packing description
+
+def RayTriangle(origin, direction, v0, v1, v2):
+    # Möller–Trumbore intersection algorithm
+    edge1 = v1 - v0
+    edge2 = v2 - v0
+    h = cross(direction, edge2)
+    a = dot(edge1, h)
+    if a > -0.0000001 and a < 0.0000001:
+        return vec4(-1.0, 0.0, 0.0, 0.0)
+    f = 1.0 / a
+    s = origin - v0
+    u = f * dot(s, h)
+    if u < 0.0 or u > 1.0:
+        return vec4(-1.0, 0.0, 0.0, 0.0)
+    q = cross(s, edge1)
+    v = f * dot(direction, q)
+    if v < 0.0 or u + v > 1.0:
+        return vec4(-1.0, 0.0, 0.0, 0.0)
+    t = f * dot(edge2, q)
+    if t > 0.0000001:
+        return vec4(t, u, v, 1.0)
+    return vec4(-1.0, 0.0, 0.0, 0.0)
+
+def RayBounds(origin, inv_dir, min_b, max_b, t_max):
+    # Slab intersection test
+    t1 = (min_b.x - origin.x) * inv_dir.x
+    t2 = (max_b.x - origin.x) * inv_dir.x
+    tmin = min(t1, t2)
+    tmax = max(t1, t2)
+    
+    t1 = (min_b.y - origin.y) * inv_dir.y
+    t2 = (max_b.y - origin.y) * inv_dir.y
+    tmin = max(tmin, min(t1, t2))
+    tmax = min(tmax, max(t1, t2))
+    
+    t1 = (min_b.z - origin.z) * inv_dir.z
+    t2 = (max_b.z - origin.z) * inv_dir.z
+    tmin = max(tmin, min(t1, t2))
+    tmax = min(tmax, max(t1, t2))
+    
+    if tmax < tmin or tmax < 0.0 or tmin > t_max:
+        return -1.0
+    return tmin
+
+def IntersectBVHStack(RayOrigin, RayDirection, NodeStartIndex, NodeCount, InverseMatrix, TMax, BVHNodes, BVHTris, BVHVertices, u_TotalNodes, MeshIndex):
+    # 1. Transform ray to local space
+    ray_origin_local = vec3(InverseMatrix * vec4(RayOrigin, 1.0))
+    ray_dir_local = vec3(InverseMatrix * vec4(RayDirection, 0.0))
+    
+    # 2. Compute inverse direction
+    inv_dir = 1.0 / ray_dir_local
+    
+    # 3. Initialize state
+    stack = [0] * 64
+    stack_pointer = 0
+    closest_traversal = -1.0
+    iterations = 0
+    current_node_index = NodeStartIndex
+    
+    # 4. Traverse
+    while iterations < 1024:
+        # Check bounds
+        if stack_pointer >= 64 or stack_pointer < 0:
+            break
+        if current_node_index < NodeStartIndex or current_node_index > NodeStartIndex + NodeCount:
+            break
+        if current_node_index < 0 or current_node_index > u_TotalNodes:
+            break
+            
+        current_node = BVHNodes[current_node_index]
+        
+        # Determine leaves
+        left_leaf = IsLeaf(current_node.left_child_data)
+        right_leaf = IsLeaf(current_node.right_child_data)
+        
+        # Calculate traversal distances
+        if left_leaf:
+            left_traversal = -1.0
+        else:
+            left_traversal = RayBounds(ray_origin_local, inv_dir, current_node.left_child_data.min, current_node.left_child_data.max, TMax)
+            
+        if right_leaf:
+            right_traversal = -1.0
+        else:
+            right_traversal = RayBounds(ray_origin_local, inv_dir, current_node.right_child_data.min, current_node.right_child_data.max, TMax)
+            
+        # Intersect triangles if leaf
+        if left_leaf:
+            packed = current_node.left_child_data.min.w
+            start_idx = packed >> 4
+            length = packed & 0xF
+            for idx in range(length):
+                tri = BVHTris[idx + start_idx]
+                # Get vertices from BVHVertices using tri.packed_data
+                # This is a placeholder for the actual vertex fetching logic
+                v0 = BVHVertices[tri.packed_data[0]]
+                v1 = BVHVertices[tri.packed_data[1]]
+                v2 = BVHVertices[tri.packed_data[2]]
+                
+                intersect = RayTriangle(ray_origin_local, ray_dir_local, v0.position, v1.position, v2.position)
+                if intersect.x > 0.0 and intersect.x < TMax:
+                    TMax = intersect.x
+                    closest_traversal = intersect.x
+                    # Update output parameters
+                    return closest_traversal
+                    
+        if right_leaf:
+            packed = current_node.right_child_data.min.w
+            start_idx = packed >> 4
+            length = packed & 0xF
+            for idx in range(length):
+                tri = BVHTris[idx + start_idx]
+                # Get vertices from BVHVertices using tri.packed_data
+                v0 = BVHVertices[tri.packed_data[0]]
+                v1 = BVHVertices[tri.packed_data[1]]
+                v2 = BVHVertices[tri.packed_data[2]]
+                
+                intersect = RayTriangle(ray_origin_local, ray_dir_local, v0.position, v1.position, v2.position)
+                if intersect.x > 0.0 and intersect.x < TMax:
+                    TMax = intersect.x
+                    closest_traversal = intersect.x
+                    # Update output parameters
+                    return closest_traversal
+                    
+        # Push to stack if both children are valid
+        if left_traversal > 0.0 and right_traversal > 0.0:
+            # Get child indices from Max.w
+            left_idx = current_node.left_child_data.max.w + NodeStartIndex
+            right_idx = current_node.right_child_data.max.w + NodeStartIndex
+            
+            if right_traversal < left_traversal:
+                current_node_index = right_idx
+                postponed = left_idx
+            else:
+                current_node_index = left_idx
+                postponed = right_idx
+                
+            if stack_pointer >= 63:
+                break
+            stack[stack_pointer] = postponed
+            stack_pointer += 1
+        elif left_traversal > 0.0:
+            current_node_index = current_node.left_child_data.max.w + NodeStartIndex
+        elif right_traversal > 0.0:
+            current_node_index = current_node.right_child_data.max.w + NodeStartIndex
+        else:
+            if stack_pointer <= 0:
+                break
+            stack_pointer -= 1
+            current_node_index = stack[stack_pointer]
+            
+        iterations += 1
+        
+    return closest_traversal
+```
+
+**Parameters:**
+*   `RayOrigin`: World space ray origin [S1, unofficial].
+*   `RayDirection`: World space ray direction [S1, unofficial].
+*   `NodeStartIndex`: Start index in `BVHNodes` for the entity [S1, unofficial].
+*   `NodeCount`: Number of nodes in the entity's BVH [S1, unofficial].
+*   `InverseMatrix`: Inverse model matrix of the entity [S1, unofficial].
+*   `TMax`: Maximum traversal distance [S1, unofficial].
+*   `oMesh`: Output mesh index [S1, unofficial].
+*   `oTriangleIndex`: Output triangle index [S1, unofficial].
+*   `iters`: Output iteration count [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   Stack overflow: The stack size is fixed at 64. If `StackPointer` reaches 63 during a push, the traversal breaks [S1, unofficial].
+*   Infinite loops: The traversal is limited to 1024 iterations [S1, unofficial].
+*   Invalid node index: Checks ensure `CurrentNodeIndex` is within `NodeStartIndex` to `NodeStartIndex + NodeCount` and `0` to `u_TotalNodes` [S1, unofficial].
+*   Leaf node handling: Leaf nodes have a traversal distance of `-1.0f` and are intersected directly [S1, unofficial].
+*   Packed data extraction: `StartIdx` and `Length` are extracted from `Min.w` using bit shifting and masking [S1, unofficial].
+
+## Subtopics
+
+### BVH Ray Traversal for Closest Hit
+A high-level wrapper that combines BVH traversal and data retrieval into a single call, returning `TUVW`, `Mesh`, `TriangleIdx`, `Albedo`, and `Normal` [S1, unofficial]. It calls `IntersectScene` (or `IntersectSceneIgnoreTransparent`) to get `TUVW`, `Mesh`, `TriangleIdx`, and `IntersectedEntity`, then calls `GetData` (or `GetDataFast`) with these values to populate `Normal`, `Albedo`, and `Alpha` [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ in the worst case for a linear BVH, but typically $O(\log N)$ for a balanced BVH, where $N$ is the number of nodes. The fixed iteration limit of 1024 caps the worst-case performance [S1, unofficial].
+*   **Memory Complexity:** $O(1)$ auxiliary space for the stack, with a fixed size of 64 integers [S1, unofficial].
+*   **Performance:** The fixed stack size and iteration limit make it suitable for environments with limited memory or stack depth, such as GPUs [S1, unofficial]. However, the fixed stack size may lead to early termination on complex scenes with deep BVHs [S1, unofficial].
+*   **Strengths:** Simple implementation, no dynamic memory allocation, predictable memory usage [S1, unofficial].
+*   **Limitations:** Fixed stack size may cause incomplete traversal on very deep BVHs. Fixed iteration limit may cause incomplete traversal on degenerate cases [S1, unofficial].
+*   **When to use:** When memory is constrained, or when a fixed maximum traversal depth is acceptable [S1, unofficial].
+*   **When not to use:** When the BVH depth is unknown and potentially very large, or when complete traversal is required for correctness [S1, unofficial].
+
+## Background
+The algorithm is described in the source code of the `VolumetricDisplay` project by `swr06` [S1, unofficial]. It is an iterative implementation of BVH traversal, optimized for binary occlusion queries and closest hit queries [S1, unofficial]. The specific implementation details, such as the fixed stack size and iteration limit, are derived from the source code [S1, unofficial].
+
+## Sources
+[S1] swr06/VolumetricDisplay, https://github.com/swr06/VolumetricDisplay, fetched 2026-10-26 (unofficial)

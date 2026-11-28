@@ -1,0 +1,142 @@
+# Appearance-Aware 3D Gaussian Splatting (AAGS)
+Also called: AAGS-A, AAGS-T
+
+## Overview
+Appearance-Aware 3D Gaussian Splatting (AAGS) reconstructs static scenes from unconstrained photo collections by explicitly modeling per-image appearance variations and excluding transient objects from the geometry [S1]. It differs from standard 3D Gaussian Splatting by integrating a transient visibility mask and appearance interpolation, and outperforms NeRF-based methods in perceptual metrics (LPIPS) without requiring test-set images for appearance embedding training [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of unconstrained images of a scene [S1].
+*   **Output:** 3D Gaussians with static geometry, appearance features, a transient visibility map, and the capability to render novel appearances [S1].
+
+**Data Structures:**
+The method uses the standard 3D Gaussian representation [G: position $\mathbf{p}$, covariance $\Sigma$, opacity $\alpha$, spherical harmonics coefficients $\mathbf{c}$]. AAGS augments this with an appearance feature vector $\mathbf{f}_{app}$ per Gaussian or view, and a 2D transient visibility map $V \in [0, 1]$ predicted per image [S1].
+
+**Network Architectures:**
+1.  **Appearance Feature Extractor ($E_\Phi$):** Consists of 5 convolutional layers, 1 average pooling layer, and 1 fully connected layer, consistent with Ha-NeRF [S1].
+2.  **Transient UNet ($U_\Psi$):** Consists of 1 downsampling layer and 1 upsampling layer [S1].
+3.  **Color Decoder ($F_\theta$):** Consists of 4 fully connected layers, each with a width of 64 [S1].
+
+**Parameters:**
+*   $\lambda_1 = 0.8$: Loss weight hyperparameter [S1].
+*   $n_a = 48$: Image feature length [S1].
+*   $n_g = 24$: Image feature length [S1].
+*   Spherical Harmonics Degree: 4 for directional vectors [S1].
+*   Exponential Annealing Weights: Start at 0.5, decrease to 0.15 [S1].
+
+**Training Procedure:**
+1.  **Initialization:** Initialize Gaussians from a point cloud [G]. Initialize $E_\Phi$, $U_\Psi$, and $F_\theta$ [S1].
+2.  **Iteration Loop (30,000 total iterations):**
+    *   **Densification Phase (Iterations 1–15,000):** Perform Gaussian duplication, splitting, and deletion as per standard 3DGS [S1].
+    *   **Static Phase (Iterations 15,001–30,000):** Disable duplication, splitting, and deletion to maintain a constant Gaussian count [S1].
+    *   **Forward Pass:** Render the scene using differentiable splatting to obtain $\hat{I}$. Pass the input image through $E_\Phi$ to extract appearance features. Pass the input image through $U_\Psi$ to predict the transient visibility map $V$ [S1].
+    *   **Transient Handling:** Exclude transient objects during rendering using $V$ [S1].
+    *   **Loss Calculation:** Compute the total loss $\mathcal{L}$ (defined in Eq. 10 of [S1]) and backpropagate to update all parameters ($E_\Phi, U_\Psi, F_\theta$, and Gaussian properties) [S1].
+
+**Appearance Interpolation:**
+To generate novel appearances, AAGS linearly interpolates between the appearance features of two reference images while keeping the 3D structure (Gaussian positions and covariances) fixed [S1].
+
+**Pitfalls:**
+Without transient objects handling, the model tends to model transient objects as static, causing artifacts, though metrics may appear better on test sets lacking transients [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def initialize_gaussians_from_point_cloud(images):
+    # Standard 3DGS initialization from point cloud [G]
+    return Gaussians(positions, covariances, opacities, sh_coeffs)
+
+class AppearanceExtractor:
+    def __init__(self):
+        # 5 conv layers, 1 average pooling, 1 fully connected layer [S1]
+        pass
+    def forward(self, image):
+        return image_features
+
+class TransientUNet:
+    def __init__(self):
+        # 1 downsampling layer, 1 upsampling layer [S1]
+        pass
+    def forward(self, image):
+        return visibility_map
+
+class ColorDecoder:
+    def __init__(self):
+        # 4 fully connected layers, width 64 [S1]
+        pass
+    def forward(self, gaussian_props, app_features):
+        return decoded_color
+
+def render_gaussians(gaussians, camera_params, app_features, visibility_map):
+    # Differentiable splatting forward pass
+    # Apply visibility_map to exclude transient objects during rendering [S1]
+    return rendered_image
+
+def calculate_loss(rendered_image, gt_image, visibility_map, lambda_1, sh_degree):
+    # Total loss defined in Eq. (10) of [S1]
+    return loss
+
+def train_aags(images, gt_images, num_iterations=30000, densify_until=15000):
+    gaussians = initialize_gaussians_from_point_cloud(images)
+    E_phi = AppearanceExtractor()
+    U_psi = TransientUNet()
+    F_theta = ColorDecoder()
+    lambda_1 = 0.8
+    n_a = 48
+    n_g = 24
+    sh_degree = 4
+    anneal_start = 0.5
+    anneal_end = 0.15
+    optimizer = GradientOptimizer(params=[gaussians, E_phi, U_psi, F_theta])
+
+    for iteration in range(1, num_iterations + 1):
+        if iteration <= densify_until:
+            gaussians.densify_and_split(iteration)
+            gaussians.prune()
+
+        image = sample_random_image(images)
+        gt = get_gt_image(image)
+
+        app_features = E_phi.forward(image)
+        visibility_map = U_psi.forward(image)
+
+        rendered_image = render_gaussians(gaussians, camera_params, app_features, visibility_map)
+
+        loss = calculate_loss(rendered_image, gt, visibility_map, lambda_1, sh_degree)
+        loss.backward()
+        optimizer.step()
+        optimizer.zero_grad()
+
+        current_anneal = anneal_start - (anneal_start - anneal_end) * (iteration / num_iterations)
+
+def render_with_appearance(gaussians, camera_params, ref_image_a, ref_image_b, alpha=0.5):
+    feat_a = AppearanceExtractor().forward(ref_image_a)
+    feat_b = AppearanceExtractor().forward(ref_image_b)
+    interpolated_feat = feat_a * alpha + feat_b * (1 - alpha)
+    return render_gaussians(gaussians, camera_params, interpolated_feat, None)
+```
+
+## Subtopics
+
+### AAGS-A (Ablation without transient objects handling)
+Removes the transient UNet module. Tends to model transient objects as static, causing artifacts, though metrics may appear better on test sets lacking transients [S1].
+
+### AAGS-T (Ablation without appearance modeling)
+Removes the appearance feature extracting module. Struggles to capture appearance differences between images, leading to low perceptual metrics [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Training runs for 30,000 iterations. On a single RTX 3090, training and rendering are nearly 1000x faster than NeRF-based methods [S1].
+*   **Memory Complexity:** Implemented with PyTorch and CUDA extensions on a single RTX 3090 (24GB memory) [S1].
+*   **Performance:**
+    *   **Phototourism Dataset:** Brandenburg Gate PSNR 27.20, SSIM 0.9293, LPIPS 0.1341; Sacré-Cœur PSNR 23.23, SSIM 0.8703, LPIPS 0.1729; Trevi Fountain PSNR 23.04, SSIM 0.8037, LPIPS 0.1795 [S1].
+    *   **NeRF-OSR Dataset:** europa PSNR 21.82, SSIM 0.8069, LPIPS 0.2228; lwt PSNR 23.14, SSIM 0.7972, LPIPS 0.2401; st PSNR 22.31, SSIM 0.6928, LPIPS 0.3421; stjohann PSNR 24.93, SSIM 0.8867, LPIPS 0.1428 [S1].
+*   **Gaussian Count Reduction:** Reduces the number of Gaussians compared to baseline 3DGS: Brandenburg Gate (379K vs 521K), Sacré-Cœur (382K vs 461K), Trevi Fountain (896K vs 1070K) [S1].
+*   **Strengths:** Handles unconstrained photos, removes transient objects, reduces Gaussian count, faster than NeRFs, better perceptual quality (LPIPS) than SWAG [S1].
+*   **Limitations:** Struggles with highlights and certain objects [S1]. Rendering is softer than SWAG (which may be sharper but less perceptually aligned) [S1].
+
+## Background
+AAGS was introduced in the paper "AAGS: Appearance-Aware 3D Gaussian Splatting with Unconstrained Photo Collections" [S1]. It addresses the limitations of standard 3DGS in handling dynamic scenes and appearance variations in unconstrained photo collections [S1].
+
+## Sources
+[S1] AAGS: Appearance-Aware 3D Gaussian Splatting with Unconstrained Photo Collections, https://doi.org/10.1007/s00530-025-01742-4, fetched 2026-10-29

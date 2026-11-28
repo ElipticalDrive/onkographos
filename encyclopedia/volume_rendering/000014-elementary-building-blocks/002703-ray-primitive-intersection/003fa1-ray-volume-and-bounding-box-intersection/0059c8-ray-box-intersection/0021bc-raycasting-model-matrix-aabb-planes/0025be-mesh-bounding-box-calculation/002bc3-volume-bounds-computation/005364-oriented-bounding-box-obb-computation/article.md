@@ -1,0 +1,147 @@
+# Oriented Bounding Box (OBB) Computation
+Also called: 3D Cuboid Detection, PCA-based Bounding Box, SdfBoundingBox::merge
+
+## Overview
+Computes an oriented bounding box (OBB) that encloses a set of 3D points or sub-boxes by fitting an ellipsoid via Principal Component Analysis (PCA) on the covariance matrix of the vertices [S1][S2, unofficial]. Unlike its sibling [Volume Bounds Computation](5114-volume-bounds-computation.md), which produces axis-aligned boxes, this method determines optimal orientation and extent [S1][S2, unofficial]. It is primarily used in 3D cuboid detection for instance segmentation [S1] and for merging sub-boxes in signed distance field trees [S2, unofficial].
+
+## How it works
+**Inputs:**
+1. A set of 3D points assigned to an instance (for PCA-based detection) [S1].
+2. A list of `sub_boxes`, where each sub-box provides a transformation matrix and 8 local vertices (for SDF-based merge) [S2, unofficial].
+
+**Outputs:**
+1. An OBB defined by a center, orientation (rotation basis), and scale (extent) [S1][S2, unofficial].
+2. For SDF implementation: `new_bbox_mat` (transformation matrix), `full_inverse`, and `trans_inverse` [S2, unofficial].
+
+**Data Structures:**
+- `vert_mat`: A matrix of shape $(V \times 4)$ where $V$ is the total number of vertices (e.g., `sub_boxes.len() * 8`), stored in homogeneous coordinates [S2, unofficial].
+- `covar_mat`: A $3 \times 3$ covariance matrix derived from the spatial coordinates of the centered vertices [S2, unofficial].
+- `eigen_basis`: A $4 \times 4$ matrix representing the rotation/translation basis in homogeneous coordinates [S2, unofficial].
+
+**Steps:**
+
+1. **Handle Empty Input:** If `sub_boxes` is empty, return a zero bounding box [S2, unofficial].
+2. **Construct Vertex Matrix:** Extract the 8 vertices of each `sub_box` and transform them by `sub_box.matrix` to populate `vert_mat` [S2, unofficial]. [G] If using raw points directly, pad them to 4D with $w=1$.
+3. **Compute Mean:** Calculate the mean of all vertices: $\text{vert\_mean} = \text{column\_mean}(\text{vert\_mat})$ [S2, unofficial].
+4. **Center Vertices:** Subtract $\text{vert\_mean}$ from each column in `vert_mat`: $\text{vert\_mat}_{\text{centered}} = \text{vert\_mat} - \text{vert\_mean}$ [S2, unofficial].
+5. **Compute Covariance Matrix:** Compute the covariance using the centered spatial coordinates: $\text{covar\_mat} = \frac{1}{V-1} \text{vert\_mat}_{\text{centered}}[:, :3]^T \text{vert\_mat}_{\text{centered}}[:, :3]$ [S2, unofficial]. [G] Only the top-left $3 \times 3$ block is used for PCA orientation.
+6. **Principal Component Analysis (PCA):** Compute the eigenvalues and eigenvectors of $\text{covar\_mat}$ [S2, unofficial]. Construct `eigen_basis` from the top 3 eigenvectors as the rotation basis [S2, unofficial]. Force the 4th row and 4th column of `eigen_basis` to $[0, 0, 0, 1]$ to ensure valid homogeneous coordinates: $\text{eigen\_basis}[3, :] = [0, 0, 0, 1]$ and $\text{eigen\_basis}[:, 3] = [0, 0, 0, 1]^T$ [S2, unofficial].
+7. **Project Vertices:** Project the centered vertices onto the eigenbasis: $\text{vert\_proj\_mat} = \text{eigen\_basis} \times \text{vert\_mat}_{\text{centered}}^T$ [S2, unofficial]. [G] This aligns the data with the principal axes.
+8. **Calculate Extents:** Find the minimum and maximum coordinates of the projected vertices along each axis: $\text{box\_min} = \min(\text{vert\_proj\_mat}[:3, :])$, $\text{box\_max} = \max(\text{vert\_proj\_mat}[:3, :])$ [S2, unofficial].
+9. **Calculate Centroid and Scale:** Calculate centroid in the local projected space: $\text{centroid} = (\text{box\_max} + \text{box\_min}) / 2.0$ [S2, unofficial]. Calculate scale: $\text{scale} = \text{box\_max} - \text{centroid}$ [S2, unofficial]. Calculate reciprocal scale: $\text{scale\_recip} = 1.0 / \text{scale}$ [S2, unofficial].
+10. **Construct Bounding Box Matrix:** Combine translation, rotation, and scaling: $\text{new\_bbox\_mat} = T(\text{vert\_mean}) \times \text{eigen\_basis} \times S(\text{scale}) \times T(\text{centroid})$ [S2, unofficial]. Where $T$ is translation and $S$ is non-uniform scaling [S2, unofficial].
+11. **Compute Inverses:** Compute `full_inverse` as the inverse of `new_bbox_mat` [S2, unofficial]. Compute `trans_inverse` as the inverse of the translation-rotation part: $\text{trans\_inverse} = (T(\text{vert\_mean}) \times \text{eigen\_basis})^{-1}$ [S2, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+class SdfBoundingBox:
+    def __init__(self, new_bbox_mat, full_inverse, trans_inverse, centroid, scale):
+        self.new_bbox_mat = new_bbox_mat
+        self.full_inverse = full_inverse
+        self.trans_inverse = trans_inverse
+        self.centroid = centroid
+        self.scale = scale
+    @staticmethod
+    def zero():
+        return SdfBoundingBox(np.eye(4), np.eye(4), np.eye(4), np.zeros(3), np.zeros(3))
+
+def compute_obb(sub_boxes):
+    """
+    Compute OBB from a list of sub_boxes.
+    Each sub_box has a 'matrix' (4x4) and 8 vertices in local space.
+    """
+    if not sub_boxes:
+        return SdfBoundingBox.zero()
+
+    # Step 2: Construct vertex matrix
+    vertices = []
+    for sub_box in sub_boxes:
+        for local_v in sub_box.local_vertices:
+            world_v = sub_box.matrix @ local_v
+            vertices.append(world_v)
+    
+    vert_mat = np.array(vertices)  # Shape: (N, 4)
+    num_vertices = vert_mat.shape[0]
+
+    # Step 3: Compute mean
+    vert_mean = np.mean(vert_mat, axis=0)
+
+    # Step 4: Center vertices
+    vert_mat_centered = vert_mat - vert_mean
+
+    # Step 5: Compute covariance matrix (3x3)
+    xyz_centered = vert_mat_centered[:, :3]
+    covar_mat = (xyz_centered.T @ xyz_centered) / (num_vertices - 1)
+
+    # Step 6: PCA
+    eigenvalues, eigenvectors = np.linalg.eigh(covar_mat)
+    idx = np.argsort(eigenvalues)[::-1]
+    eigenvalues = eigenvalues[idx]
+    eigenvectors = eigenvectors[:, idx]
+
+    # Construct eigen_basis (4x4)
+    eigen_basis = np.eye(4)
+    eigen_basis[:3, :3] = eigenvectors.T
+    
+    # Force 4th row and column to identity basis
+    eigen_basis[3, :] = [0.0, 0.0, 0.0, 1.0]
+    eigen_basis[:, 3] = [0.0, 0.0, 0.0, 1.0]
+
+    # Step 7: Project vertices
+    # Corrected dimension order from source notes to match standard point transformation
+    vert_proj_mat = eigen_basis @ vert_mat_centered.T  # Shape: (4, N)
+    
+    # Extract xyz projections
+    xyz_proj = vert_proj_mat[:3, :]
+
+    # Step 8: Calculate extents
+    box_min = np.min(xyz_proj, axis=1)
+    box_max = np.max(xyz_proj, axis=1)
+
+    # Step 9: Calculate centroid and scale
+    centroid = (box_max + box_min) / 2.0
+    scale = box_max - centroid
+    scale_recip = 1.0 / scale
+
+    # Step 10: Construct new bounding box matrix
+    T1 = np.eye(4)
+    T1[:3, 3] = vert_mean[:3]
+    
+    S = np.eye(4)
+    S[0, 0] = scale[0]
+    S[1, 1] = scale[1]
+    S[2, 2] = scale[2]
+    
+    T2 = np.eye(4)
+    T2[:3, 3] = centroid
+    
+    new_bbox_mat = T1 @ eigen_basis @ S @ T2
+
+    # Step 11: Compute inverses
+    full_inverse = np.linalg.inv(new_bbox_mat)
+    trans_part = T1 @ eigen_basis
+    trans_inverse = np.linalg.inv(trans_part)
+
+    return SdfBoundingBox(new_bbox_mat, full_inverse, trans_inverse, centroid, scale)
+```
+
+## Operating characteristics
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Not given in the sources.
+- **Measured Performance:** Not given in the sources.
+- **Strengths:** Provides tighter bounds than AABBs for rotated objects [S1][S2, unofficial].
+- **Limitations:** More expensive to compute than AABBs due to PCA [S1][S2, unofficial].
+- **When to use:** Not given in the sources.
+- **When not to use:** Not given in the sources.
+
+## Background
+Originated in 3D computer vision for instance segmentation and cuboid detection [S1]. The SUDS paper (2023) applies PCA to the convex hull of points belonging to each instance to derive oriented bounding boxes [S1]. The SDF implementation adapts this for merging sub-boxes in a signed distance field tree [S2, unofficial].
+
+## Sources
+[S1] SUDS: Scalable Urban Dynamic Scenes, https://doi.org/10.1109/cvpr52729.2023.01191, fetched 2026-10-26
+[S2] holger-kibur/sdf, https://github.com/holger-kibur/sdf, fetched 2026-10-27 (unofficial)

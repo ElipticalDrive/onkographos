@@ -1,0 +1,609 @@
+# Mesh-Constructor-From-Point-Cloud
+
+### include/Chunk.h
+```
+#ifndef CHUNK_H
+#define CHUNK_H
+
+#include <ros/ros.h>
+#include<map>
+#include<unordered_map>
+#include<string>
+#include<array>
+
+using namespace std;
+
+class Chunk {
+  public:
+    int size;
+    bool* chunkData;
+    Chunk(int chunkSize) {
+        size = chunkSize;
+        chunkData = new bool[size * size * size];
+    }
+
+    int get_index(int x, int y, int z)
+    {
+        return x + y * size + z * size * size;
+    }
+
+    void set_data(int x, int y, int z, bool value)
+    {
+        int index = get_index(x,y,z);
+        chunkData[index] = value;
+    }
+
+    bool get_data(int x, int y, int z)
+    {
+        int index = get_index(x,y,z);
+        return chunkData[index];
+    }
+};
+
+
+class World {
+public:
+    int chunkSize;
+    unordered_map<string, Chunk> chunkDict;
+
+    World(int cSize)
+    {
+        chunkSize = cSize;
+
+        ROS_INFO("WORLD: %d", chunkSize);
+    }
+
+    string GetChunkKey(int x, int y, int z)
+    {
+        return to_string(x) + "_" + to_string(y) + "_" + to_string(z);
+
+    }
+
+    bool CheckBlock(int chunk_x, int chunk_y, int chunk_z, int x, int y, int z)
+    {
+
+        string chunk_key = GetChunkKey(chunk_x, chunk_y, chunk_z);
+
+
+        if (chunkDict.find(chunk_key) != chunkDict.end())  // La chiave c'è
+        {
+
+            Chunk c = chunkDict.at(chunk_key.c_str());
+            if (c.get_data(x, y, z)) return false;
+            else c.set_data(x, y, z, true);
+
+        } else
+        {
+            //ROS_INFO("Chunk Creato %s", chunk_key.c_str());
+            Chunk c(chunkSize);
+            c.set_data(x, y, z, true);
+            chunkDict.insert(make_pair(chunk_key, c));
+            //chunkDict[chunk_key] = c;
+        }
+
+        return true;
+    }
+
+
+
+};
+
+
+#endif
+```
+
+### include/mesh_to_msg.h
+```
+#ifndef MESHTOMSG_H
+#define MESHTOMSG_H
+
+#include <shape_msgs/Mesh.h>
+#include <visualization_msgs/Marker.h>
+
+#include <pcl_msgs/PolygonMesh.h>
+
+#include <pcl/PolygonMesh.h>
+#include <sensor_msgs/point_cloud2_iterator.h>
+#include <pcl_conversions/pcl_conversions.h>
+
+
+static bool meshToShapeMsg(const pcl::PolygonMesh& input_mesh, shape_msgs::Mesh& shape_msg)
+{
+
+  pcl_msgs::PolygonMesh pcl_msg_mesh;
+  pcl_conversions::fromPCL(input_mesh, pcl_msg_mesh);
+
+
+  sensor_msgs::PointCloud2Modifier pcd_modifier(pcl_msg_mesh.cloud);
+
+  size_t size = pcd_modifier.size();
+
+  shape_msg.vertices.resize(size);
+
+  std::cout << "polys: " << pcl_msg_mesh.polygons.size() << " vertices: " << pcd_modifier.size() << "\n";
+
+  sensor_msgs::PointCloud2ConstIterator<float> pt_iter(pcl_msg_mesh.cloud, "x");
+
+  for(size_t i = 0; i < size ; i++, ++pt_iter){
+    shape_msg.vertices[i].x = pt_iter[0];
+    shape_msg.vertices[i].y = pt_iter[1];
+    shape_msg.vertices[i].z = pt_iter[2];
+  }
+
+  //ROS_INFO("Found %ld polygons", triangles.size());
+
+  std::cout << "Updated vertices" << "\n";
+
+  //BOOST_FOREACH(const Vertices polygon, triangles)
+
+  shape_msg.triangles.resize(input_mesh.polygons.size());
+
+  for (size_t i = 0; i < input_mesh.polygons.size(); ++i)
+  {
+    if(input_mesh.polygons[i].vertices.size() < 3)
+    {
+      ROS_WARN("Not enough points in polygon. Ignoring it.");
+      continue;
+    }
+
+    //shape_msgs::MeshTriangle triangle = shape_msgs::MeshTriangle();
+    //boost::array<uint32_t, 3> xyz = {{in.polygons[i].vertices[0], in.polygons[i].vertices[1], in.polygons[i].vertices[2]}};
+    //triangle.vertex_indices = xyz;
+
+    //mesh.triangles.push_back(shape_msgs::MeshTriangle());
+    //mesh.triangles[i].vertex_indices.resize(3);
+
+    for (int j = 0; j < 3; ++j)
+      shape_msg.triangles[i].vertex_indices[j] = input_mesh.polygons[i].vertices[j];
+  }
+  return true;
+
+}
+
+static bool meshToMarkerMsg(const pcl::PolygonMesh& in, visualization_msgs::Marker& marker)
+{
+  marker.type = visualization_msgs::Marker::TRIANGLE_LIST;
+  marker.header.frame_id = in.cloud.header.frame_id;
+  marker.header.stamp = ros::Time::now();
+  marker.color.r = 1.0;
+  marker.color.a = 1.0;
+  marker.scale.x = 1.0;
+  marker.scale.y = 1.0;
+  marker.scale.z = 1.0;
+  marker.id = 1;
+  marker.action = visualization_msgs::Marker::ADD;
+
+
+  shape_msgs::Mesh shape_msg_mesh;
+
+  meshToShapeMsg(in, shape_msg_mesh);
+
+  size_t size_triangles = shape_msg_mesh.triangles.size();
+
+  marker.points.resize(size_triangles*3);
+
+  std::cout << "polys: " << size_triangles << " vertices: " << shape_msg_mesh.vertices.size() << "\n";
+
+  size_t i = 0;
+
+  for (size_t tri_index = 0; tri_index < size_triangles; ++tri_index){
+
+    /*
+    std::cout << shape_msg_mesh.triangles[tri_index].vertex_indices[0] <<  " " <<
+                 shape_msg_mesh.triangles[tri_index].vertex_indices[1] <<  " " <<
+                 shape_msg_mesh.triangles[tri_index].vertex_indices[2] << "\n";
+    */
+
+    marker.points[i]   = shape_msg_mesh.vertices[shape_msg_mesh.triangles[tri_index].vertex_indices[0]];
+    marker.points[i+1] = shape_msg_mesh.vertices[shape_msg_mesh.triangles[tri_index].vertex_indices[1]];
+    marker.points[i+2] = shape_msg_mesh.vertices[shape_msg_mesh.triangles[tri_index].vertex_indices[2]];
+    i = i + 3;
+
+  }
+    return true;
+}
+#endif
+```
+
+### include/point_cloud_to_mesh.h
+```
+#ifndef POINTCLOUDTOMESH_H
+#define POINTCLOUDTOMESH_H
+
+#include <string>
+
+#include <pcl/point_cloud.h>
+#include <pcl/PCLPointCloud2.h>
+#include <pcl/filters/filter.h>
+#include <pcl/filters/extract_indices.h>
+#include <pcl/search/kdtree.h>
+#include <pcl/features/normal_3d_omp.h>
+#include <pcl/surface/marching_cubes_hoppe.h>
+#include <pcl/filters/voxel_grid.h>
+#include <pcl/visualization/pcl_visualizer.h>
+#include <pcl/surface/mls.h>
+#include <pcl/filters/radius_outlier_removal.h>
+#include <pcl/surface/gp3.h>
+#include <pcl/io/pcd_io.h>
+
+#include<Chunk.h>
+
+//template <typename PointT, typename PointTNormal>
+class PointCloudToMesh
+{
+	public:
+
+	PointCloudToMesh() { }
+
+	void filter_point_cloud(pcl::PointCloud<pcl::PointXYZ>::Ptr point_cloud_in, pcl::PointCloud<pcl::PointXYZ>::Ptr point_cloud_out)
+	{
+        if (point_cloud_in->size() <= 0) return;
+
+        //Remove Nan
+        pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_no_nan  (new pcl::PointCloud<pcl::PointXYZ>);
+		std::vector<int> indices;
+		pcl::removeNaNFromPointCloud(*point_cloud_in, *cloud_no_nan, indices);
+
+		//Filter Point Cloud
+		pcl::VoxelGrid<pcl::PointXYZ> gridFilter;
+		gridFilter.setInputCloud (cloud_no_nan);
+		gridFilter.setLeafSize (0.025f, 0.025f, 0.025f);
+		gridFilter.filter (*point_cloud_out);
+
+	}
+
+    bool register_point_cloud(pcl::PointCloud<pcl::PointXYZ>::Ptr point_cloud_in)
+    {
+        if (!point_cloud_in.get()) return false;
+
+        if (point_cloud_in->size() <= 0) return false;
+
+        //Rimuovo valori NaN
+		pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_no_nan  (new pcl::PointCloud<pcl::PointXYZ>);
+		std::vector<int> indices;
+		pcl::removeNaNFromPointCloud(*point_cloud_in, *cloud_no_nan, indices);
+
+        //Filter Point Cloud
+        pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_voxelized (new pcl::PointCloud<pcl::PointXYZ>);
+		pcl::VoxelGrid<pcl::PointXYZ> gridFilter;
+		gridFilter.setInputCloud (cloud_no_nan);
+		gridFilter.setLeafSize (0.025f, 0.025f, 0.025f);
+		gridFilter.filter (*cloud_voxelized);
+
+        if (global_point_cloud.size() == 0)
+            global_point_cloud = *cloud_voxelized;
+        else
+            global_point_cloud += *cloud_voxelized;
+
+        return true;
+    }
+
+	bool compute_mesh()
+	{
+
+		if (global_point_cloud.size() <= 0) return false;
+
+        pcl::PointCloud<pcl::PointXYZ>::Ptr gpc = global_point_cloud.makeShared();
+
+		//STIMO LA NORMALE PER OGNI PUNTO
+		pcl::PointCloud<pcl::Normal>::Ptr normals (new pcl::PointCloud<pcl::Normal>);
+
+		pcl::search::KdTree<pcl::PointXYZ>::Ptr tree_ne (new pcl::search::KdTree<pcl::PointXYZ>);
+		tree_ne->setInputCloud (gpc);
+
+		pcl::NormalEstimationOMP<pcl::PointXYZ, pcl::Normal> ne;
+		ne.setInputCloud (gpc);
+		ne.setSearchMethod (tree_ne);
+		ne.setKSearch (20);
+		ne.compute (*normals);
+
+		//UNISCO LA POINT CLOUD CON LE NORMALI CALCOLATE
+        pcl::PointCloud<pcl::PointNormal>::Ptr cloud_with_normals (new pcl::PointCloud<pcl::PointNormal>);
+        pcl::concatenateFields(*gpc, *normals, *cloud_with_normals);
+
+        pcl::search::KdTree<pcl::PointNormal>::Ptr tree (new pcl::search::KdTree<pcl::PointNormal>);
+        tree->setInputCloud (cloud_with_normals);
+
+		//COSTRUISCO LA MESH GREEDPROYECTION
+		pcl::GreedyProjectionTriangulation<pcl::PointNormal> gp3;
+
+		gp3.setSearchRadius(0.1);
+		gp3.setMu (2.5);
+		gp3.setMaximumNearestNeighbors(50);
+		gp3.setMinimumAngle(M_PI/18); // 10 degrees
+		gp3.setMaximumAngle(2*M_PI/3); // 120 degrees
+		gp3.setNormalConsistency(true);
+		gp3.setConsistentVertexOrdering(true);
+
+		gp3.setInputCloud (cloud_with_normals);
+        gp3.setSearchMethod (tree);
+        gp3.reconstruct (mesh);
+
+		return true;
+	}
+
+	void save_to_file()
+	{
+        pcl::io::savePCDFileASCII ("/home/global_point_cloud_unreal.pcd", global_point_cloud);
+	}
+
+    void save_to_file(int n_cloud)
+    {
+        pcl::io::savePCDFileASCII ("/home/clouds_from_node/single_clouds/" + std::to_string(n_cloud) + ".pcd", global_point_cloud);
+    }
+
+	pcl::PolygonMesh getMesh()
+	{
+		return mesh;
+	}
+
+	pcl::PointCloud<pcl::PointXYZ> getGlobalPointCloud()
+	{
+		return global_point_cloud;
+	}
+
+	private:
+
+	pcl::PointCloud<pcl::PointXYZ> global_point_cloud;
+
+	pcl::PolygonMesh mesh;
+
+};
+
+#endif
+```
+
+### include/point_cloud_to_mesh_ros.h
+```
+#ifndef POINTCLOUDTOMESHROS_H
+#define POINTCLOUDTOMESHROS_H
+
+#include <point_cloud_to_mesh.h>
+#include <mesh_to_msg.h>
+//ROS
+#include <ros/ros.h>
+#include <sensor_msgs/PointCloud2.h>
+#include <shape_msgs/Mesh.h>
+#include <geometry_msgs/PoseArray.h>
+#include <visualization_msgs/Marker.h>
+#include <tf/transform_listener.h>
+//PCL
+#include <pcl/point_cloud.h>
+#include <pcl/PCLPointCloud2.h>
+#include <pcl_conversions/pcl_conversions.h>
+#include <pcl_ros/transforms.h>
+
+//#include <Chunk.h>
+#include <cmath>
+
+class PointCloudToMeshRos
+{
+public:
+
+	PointCloudToMeshRos()
+	{
+		ros::NodeHandle nh;
+
+        nh.param("/point_cloud_recorder/waiting_time", waiting_time, 0.5);
+        nh.param("/point_cloud_recorder/queue_size", queue_size, 1);
+        nh.param("/point_cloud_recorder/save_to_file", save_to_file, true);
+        nh.param("/point_cloud_recorder/chunkSize", chunkSize, 16);
+
+		cloud_sub = nh.subscribe("cloud_in", queue_size, &PointCloudToMeshRos::updatePointCloud, this);
+
+		//shape_pub = nh.advertise<shape_msgs::Mesh>("mesh_shape", 1, true);
+		//marker_pub = nh.advertise<visualization_msgs::Marker>("mesh_marker", 1, true);
+
+		cloud_pub = nh.advertise<sensor_msgs::PointCloud2>("global_point_cloud",1, true);
+		points_pub = nh.advertise<geometry_msgs::PoseArray>("points_array",1 , true);
+
+		voxelWorld = new World(chunkSize);
+
+	}
+
+	void updatePointCloud(const sensor_msgs::PointCloud2::ConstPtr& cloud_in)
+	{
+	    total_point_cloud_received += 1;
+	    //Transform Point Cloud with TF Info
+        sensor_msgs::PointCloud2 cloud_out;
+		tf::StampedTransform transform;
+
+		bool transform_done = pcl_ros::transformPointCloud("map", *cloud_in, cloud_out, listener);
+		if (!transform_done)
+		{
+			listener.waitForTransform("map", cloud_in->header.frame_id, ros::Time::now(), ros::Duration(waiting_time)); //ros::Time::now() ros::Time(0)
+			ROS_INFO("Waiting for Transform (%.2fs)", waiting_time);
+			if (!pcl_ros::transformPointCloud("map", *cloud_in, cloud_out, listener))
+			{
+				ROS_INFO("Message Discarded. Can't transform from %s --> /map ", cloud_in->header.frame_id.c_str());
+				return;
+			}
+		}
+
+        point_cloud_registered += 1;
+
+		pcl::PointCloud<pcl::PointXYZ>::Ptr new_point_cloud (new pcl::PointCloud<pcl::PointXYZ>());
+		pcl::fromROSMsg(cloud_out, *new_point_cloud);
+
+        geometry_msgs::PoseArray  posearray;
+        posearray.header.stamp = ros::Time::now(); // timestamp of creation of the msg
+        posearray.header.frame_id = "map";
+        int i = 0;
+
+        pcl::PointCloud<pcl::PointXYZ>::Ptr filtered_point_cloud (new pcl::PointCloud<pcl::PointXYZ>());
+        cloud_to_mesh.filter_point_cloud(new_point_cloud, filtered_point_cloud);
+
+        ROS_INFO("Original size: %lu, filtered size: %lu", new_point_cloud->size(),filtered_point_cloud->size());
+
+	    for (auto elem : filtered_point_cloud->points)
+        {
+                //ROS_INFO("Punti ricevuti: %f %f %f", elem.x, elem.y, elem.z);
+                i += 1;
+                bool x_positive = elem.x >= 0;
+                bool y_positive = elem.y >= 0;
+                bool z_positive = elem.z >= 0;
+
+                int chunk_pos_x = (int) elem.x;
+                int chunk_pos_y = (int) elem.y;
+                int chunk_pos_z = (int) elem.z;
+
+                int pos_x = int(abs(elem.x)*100 - (floor(abs(elem.x)))*100);
+                int pos_y = int(abs(elem.y)*100 - (floor(abs(elem.y)))*100);
+                int pos_z = int(abs(elem.z)*100 - (floor(abs(elem.z)))*100);
+
+                int chunkMultiplier = 100 / chunkSize;
+
+                chunk_pos_x = x_positive ? chunk_pos_x * chunkMultiplier + pos_x / chunkSize : chunk_pos_x * chunkMultiplier - (pos_x / chunkSize) - 1;
+                chunk_pos_y = y_positive ? chunk_pos_y * chunkMultiplier + pos_y / chunkSize : chunk_pos_y * chunkMultiplier - (pos_y / chunkSize) - 1;
+                chunk_pos_z = z_positive ? chunk_pos_z * chunkMultiplier + pos_z / chunkSize : chunk_pos_z * chunkMultiplier - (pos_z / chunkSize) - 1;
+
+
+                pos_x = pos_x < chunkSize ? pos_x : pos_x - (pos_x / chunkSize) * chunkSize;
+                pos_y = pos_y < chunkSize ? pos_y : pos_y - (pos_y / chunkSize) * chunkSize;
+                pos_z = pos_z < chunkSize ? pos_z : pos_z - (pos_z / chunkSize) * chunkSize;
+
+                pos_x = x_positive ? pos_x : chunkSize - 1 - pos_x;
+                pos_y = y_positive ? pos_y : chunkSize - 1 - pos_y;
+                pos_z = z_positive ? pos_z : chunkSize - 1 - pos_z;
+
+                //ROS_INFO("Punti Elaborati %d %d %d %d %d %d", chunk_pos_x, chunk_pos_y, chunk_pos_z, pos_x, pos_y, pos_z);
+
+                if (voxelWorld->CheckBlock(chunk_pos_x, chunk_pos_y, chunk_pos_z, pos_x, pos_y, pos_z))
+                {
+
+                    geometry_msgs::Pose p;
+                    p.position.x = x_positive ? (float) chunk_pos_x + (float) pos_x / (float) 100 : (float) chunk_pos_x - (float) pos_x / (float) 100;
+                    p.position.y = y_positive ? (float) chunk_pos_y + (float) pos_y / (float) 100 : (float) chunk_pos_y - (float) pos_y / (float) 100;
+                    p.position.z = z_positive ? (float) chunk_pos_z + (float) pos_z / (float) 100 : (float) chunk_pos_z - (float) pos_z / (float) 100;
+
+                    //ROS_INFO("chunks %d_%d_%d indexs %d %d %d point: %f %f %f", chunk_pos_x, chunk_pos_y, chunk_pos_z, pos_x, pos_y, pos_z, p.position.x, p.position.y, p.position.z);
+
+                    p.orientation.x = 0;
+                    p.orientation.y = 0;
+                    p.orientation.z = 0;
+                    p.orientation.w = 0;
+
+                    posearray.poses.push_back(p);
+                }
+
+        }
+        ROS_INFO("Point Cloud Traslated %d/%d, Pose array size: %lu/%d", point_cloud_registered, total_point_cloud_received, posearray.poses.size(), i);
+
+        if (posearray.poses.size() > 0)
+        {
+            points_pub.publish(posearray);
+        }
+
+	}
+
+	void registerPointCloudCallBack (const sensor_msgs::PointCloud2::ConstPtr& cloud_in)
+	{
+	    total_point_cloud_received += 1;
+        ROS_INFO("New Point Cloud Received %d", total_point_cloud_received);
+
+        //Transform Point Cloud with TF Info
+        sensor_msgs::PointCloud2 cloud_out;
+		tf::StampedTransform transform;
+
+		bool transform_done = pcl_ros::transformPointCloud("world", *cloud_in, cloud_out, listener);
+		if (!transform_done)
+		{
+			listener.waitForTransform("world", cloud_in->header.frame_id, ros::Time::now(), ros::Duration(waiting_time)); //ros::Time::now() ros::Time(0)
+			ROS_INFO("Waiting for Transform (%.2fs)", waiting_time);
+			if (!pcl_ros::transformPointCloud("world", *cloud_in, cloud_out, listener))
+			{
+				ROS_INFO("Message Discarded. Can't transform from %s --> /world ", cloud_in->header.frame_id.c_str());
+				return;
+			}
+		}
+
+		pcl::PointCloud<pcl::PointXYZ>::Ptr new_point_cloud (new pcl::PointCloud<pcl::PointXYZ>());
+		pcl::fromROSMsg(cloud_out, *new_point_cloud);
+
+		if (cloud_to_mesh.register_point_cloud(new_point_cloud))
+        {
+            point_cloud_registered += 1;
+            if (cloud_pub.getNumSubscribers() > 0 )
+            {
+                sensor_msgs::PointCloud2 point_cloud_msg;
+				pcl::toROSMsg(cloud_to_mesh.getGlobalPointCloud(), point_cloud_msg);
+				cloud_pub.publish(point_cloud_msg);
+
+				if (true) cloud_to_mesh.save_to_file();
+
+				ROS_INFO("Global Point Cloud published, merged point cloud: %d/%d", point_cloud_registered, total_point_cloud_received);
+            }
+        }
+        else
+        {
+            ROS_ERROR ("Error while registering the point cloud");
+            return;
+        }
+
+        if (false) //cloud_to_mesh.compute_mesh()
+        {
+            if (shape_pub.getNumSubscribers() > 0)
+            {
+                shape_msgs::Mesh mesh_msg;
+				meshToShapeMsg(cloud_to_mesh.getMesh(), mesh_msg);
+				shape_pub.publish(mesh_msg);
+				ROS_INFO("Shape_msg::Mesh Published!");
+            }
+
+            if (marker_pub.getNumSubscribers() > 0)
+            {
+                visualization_msgs::Marker marker_msg;
+                meshToMarkerMsg(cloud_to_mesh.getMesh(), marker_msg);
+                marker_pub.publish(marker_msg);
+                ROS_INFO("Visualization_msg::Marker Published!");
+
+            }
+
+        }
+	}
+
+private:
+	ros::Subscriber cloud_sub;
+
+	ros::Publisher cloud_pub;
+	ros::Publisher shape_pub;
+	ros::Publisher marker_pub;
+	ros::Publisher points_pub;
+
+	tf::TransformListener listener;
+
+	PointCloudToMesh cloud_to_mesh;
+    //std::unordered_set<std::string> uniquePoints;
+
+    World* voxelWorld;
+    int chunkSize;
+
+	int point_cloud_registered = 0;
+	int total_point_cloud_received = 0;
+
+	double waiting_time;
+	int queue_size;
+	bool save_to_file;
+
+};
+
+#endif
+```
+
+### src/mesh_constructor.cpp
+```
+#include <ros/ros.h>
+#include <pcl/point_types.h>
+#include <point_cloud_to_mesh_ros.h>
+#include <point_cloud_to_mesh.h>
+
+int main(int argc, char **argv)
+{
+  ros::init(argc, argv, "cloud_to_mesh_node");
+
+  PointCloudToMeshRos conv;
+
+  ros::spin();
+  return 0;
+}
+```

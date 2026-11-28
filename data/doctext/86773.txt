@@ -1,0 +1,2030 @@
+# HoloINR
+Reproducibility repository of this [conference paper](https://ieeexplore.ieee.org/abstract/document/11463026) using Implicit Neural Representations (INRs) to solve the coupled inverse problem of holotomography (Holography and Tomography). The code is developed for the near-field holography case, i.e. Fresnel propagation is used to describe the physics between object and detector.
+
+
+## Getting started
+The code was developed under Python 3.11, the required packages are in [requirements.txt](https://github.com/DESY-FS-PETRA/HoloINR/blob/main/requirements.txt)
+
+## Data
+Our code expects an h5 file containing the following keys:
+- ``angles`` list of floating numbers in $\left[ 0, \dots,  \pi \right)$
+- ``data`` the holographic measurement data. First axis corresponds to angles, last two axis are the image dimensions
+- ``flat`` flatfield measurements. First axis corresponds to realizations, last two axis are the image dimensions
+
+Make sure the following entries in the [config](https://github.com/DESY-FS-PETRA/HoloINR/blob/main/config/config.yaml) agree to your data/set up:
+```
+  BeamSetup:
+      z01: 61.12e7   # nm
+      z02: 19.145e9  # nm
+      px_size: 6500  # nm
+      energy: 17     # keV
+[...]
+  Wandb:
+      project: "my-project"
+      entity: "my-entity"
+      mode: "online"        # disabled
+[...]
+  Dataset:
+      data_path: './path/to/data.h5'
+      preprocessed_path: "./path/to/preproc/data.h5" # preprocessed data will be saved here
+      use_every_nth_angle: 1
+      padding_factor: 1
+      crop_idcs: [200, 2048, 104, 1952] # x_min, x_max, y_min, y_max
+
+```
+
+This project logs training metrics to Weights & Biases ([wandb](https://wandb.ai/)). To use logging, you’ll need a W&B account. If you prefer not to use W&B, disable it in the settings/config by setting the mode to "disabled".
+
+
+## Run the Code
+After modifying the [config](https://github.com/DESY-FS-PETRA/HoloINR/blob/main/config/config.yaml), please run [trainer.py](https://github.com/DESY-FS-PETRA/HoloINR/blob/main/trainer.py). We ran the code on Nvidia H100 or H200 and expect it to be much slower on older GPUs. 
+
+For initial tests we recommend 
+- use a Optimization.downsampling of 4 or 8
+- use data sets with only a few angles or set Dataset.use_every_nth_angle > 1 to reduce the amount of data
+If you run into memory issues
+- decrease RayPropagator.netchunk and RayPropagator.num_grad_samples
+
+In case you encounter any problems please open an issue.
+
+## Citation
+Please cite
+```
+@inproceedings{gruenXRayNearFieldHolotomography2026,
+  title = {X-{{Ray Near-Field Holotomography Reconstruction Using Implicit Neural Representations}}},
+  booktitle = {{{ICASSP}} 2026 - 2026 {{IEEE International Conference}} on {{Acoustics}}, {{Speech}} and {{Signal Processing}} ({{ICASSP}})},
+  author = {Gruen, Johannes and Eberle, Sebastian and Greving, Imke and Flenner, Silja and Burger, Martin and Schroer, Christian G. and Hagemann, Johannes},
+  year = 2026,
+  month = may,
+  pages = {21927--21931},
+  publisher = {IEEE},
+  address = {Barcelona, Spain},
+  doi = {10.1109/ICASSP55912.2026.11463026},
+  urldate = {2026-04-27},
+  copyright = {https://doi.org/10.15223/policy-029},
+  isbn = {979-8-3315-6701-9},
+}
+```
+
+### cone_beam.py
+```
+import logging
+
+
+class ConeBeam:
+    def __init__(self, energy, px_size, z02, z01):
+        self.energy = energy
+        self._px_size = px_size
+        self.active_px_size = px_size
+        self.z02 = z02
+        self.z01 = z01
+
+    @property
+    def px_size(self):
+        return self._px_size
+
+    @px_size.setter
+    def px_size(self, downsample_factor):
+        self.active_px_size = self.px_size * downsample_factor
+
+    def z12(self):
+        return self.z02 - self.z01
+
+    def get_fr(self):
+        z12 = self.z12()
+
+        lam = 1.2398 / self.energy
+        M = (z12 + self.z01) / self.z01
+        dx_eff = self.active_px_size / M
+        z_eff = z12 / M
+        fr_eff = dx_eff**2 / lam / z_eff
+
+        logging.info(f"{'Energy':<17}{self.energy}")
+        logging.info(f"{'Lambda':<17}{round(lam, 6)}")
+        logging.info(f"{'Magnification':<17}{round(M, 2)}")
+        logging.info(f"{'Effective dx':<17}{int(dx_eff)}")
+        logging.info(f"{'Effective z12':<17}{int(z_eff)}")
+        logging.info(f"{'Fresnel Number':<17}{fr_eff}")
+
+        return fr_eff
+```
+
+### fresnel_propagator_torch.py
+```
+import torch
+import numpy as np
+
+
+class FresnelPropagator:
+    def __init__(self, fresnel_numbers: float, data_shape: int, downsampling, device):
+        self.fresnel_number = fresnel_numbers
+        self.device = device
+        self.downsampling = downsampling
+
+        data_shape = max(int(1/fresnel_numbers) + 100, data_shape//downsampling + 150)        # data_shape = tuple(np.array(data_shape) + 2*(np.min(data_shape)  - 1))
+        self.data_shape = data_shape
+        sample_grid = torch.meshgrid(
+            torch.fft.fftfreq(self.data_shape, device=device),
+            torch.fft.fftfreq(self.data_shape, device=device),
+            indexing="ij",
+        )
+        xi, eta = sample_grid
+
+        self.kernel_func = torch.exp(
+            (-1j * np.pi) / self.fresnel_number * (xi * xi + eta * eta)
+        )
+
+    def update_fresnel_number(self, fresnel_number):
+        self.fresnel_number = fresnel_number
+        sample_grid = torch.meshgrid(
+            torch.fft.fftfreq(self.data_shape, device=self.device),
+            torch.fft.fftfreq(self.data_shape, device=self.device),
+            indexing="ij",
+        )
+        xi, eta = sample_grid
+
+        self.kernel_func = torch.exp(
+            (-1j * np.pi) / self.fresnel_number * (xi * xi + eta * eta)
+        )
+
+    def propagate(self, x):
+        propagated = torch.fft.ifft2(
+            torch.fft.fft2(x.reshape(-1, self.data_shape, self.data_shape))
+            * self.kernel_func.to(self.device)
+        )
+        return propagated
+
+    def get_measurements(self, x):
+        return torch.abs(self.propagate(x))
+```
+
+### network.py
+```
+import torch
+import torch.nn as nn
+
+
+class DensityNetwork(nn.Module):
+    def __init__(self, encoder, bound, num_layers=8, hidden_dim=256, skips=[4], input_cat_dims = 0, out_dim=2, last_activation=lambda x: x.abs()):
+        super().__init__()
+        self.num_layers = num_layers
+        self.hidden_dim = hidden_dim
+        self.skips = skips
+        self.encoder = encoder.to("cuda:0")
+        self.input_cat_dims = input_cat_dims
+        self.in_dim = encoder.output_dim + input_cat_dims
+        print("input dims of the net:", self.in_dim)
+        self.bound = bound
+
+        # Linear layers
+        self.layers = nn.ModuleList(
+            [nn.Linear(self.in_dim, hidden_dim)]
+            + [
+                nn.Linear(hidden_dim, hidden_dim)
+                if i not in skips
+                else nn.Linear(hidden_dim + self.in_dim, hidden_dim)
+                for i in range(1, num_layers - 1, 1)
+            ]
+        )
+        self.layers.append(nn.Linear(hidden_dim, out_dim))
+
+        self.layers.to("cuda:0")
+
+        # Activations
+        self.activations = nn.ModuleList(
+            [nn.LeakyReLU() for i in range(0, num_layers - 1, 1)]
+        )
+        self.activations.to("cuda:0")
+        self.last_activation = last_activation
+
+    def forward(self, x, cat_args=None):
+        
+        x /= self.bound
+        x = self.encoder(x, 1)
+        if cat_args is not None:
+            x = torch.cat((x, cat_args), dim=-1)
+    
+        input_pts = x[..., :self.in_dim]
+
+        for i in range(len(self.layers)):
+            linear = self.layers[i]
+            if i in self.skips:
+                x = torch.cat([input_pts, x], -1)
+            x = linear(x)
+            if i == len(self.layers) - 1:
+                x = self.last_activation(x)
+                x[...,0] = -1 * x[...,0]  # make sure real part is negative
+              #  x[...,1] = -1 * x[...,1]  # make sure imag part is negative
+            else:
+                activation = self.activations[i]
+                x = activation(x)
+
+        return x
+```
+
+### propagator.py
+```
+from typing import Any
+import torch
+import torchvision
+from fresnel_propagator_torch import FresnelPropagator
+from utils import pad, softmin_loss
+from holowizard.core.utils.transform import crop_center
+import torch.nn.functional as F
+
+
+class Propagator:
+    def __init__(
+        self,
+        fresnelPropagator: FresnelPropagator,
+        logger,
+        probes,
+        n_angles,
+        rayPropagator=None,
+        step={"blurred_real": 1.0, "blurred_imag": 1.0},
+        downsampling_factor=1,
+    ):
+        self.gaussianBlurReal = torchvision.transforms.GaussianBlur(
+            15, sigma=step["blurred_imag"]
+        )
+        self.gaussianBlurImag = torchvision.transforms.GaussianBlur(
+            15, sigma=step["blurred_real"]
+        )
+        self.rayPropagator = rayPropagator
+        self.fresnelPropagator = fresnelPropagator
+        self.loss = dict()
+        self.logger = (
+            logger  # Placeholder for a writer, e.g., TensorBoard SummaryWriter
+        )
+        self.probe = probes
+        self.n_angles = n_angles
+        self._downsampling_factor = downsampling_factor
+
+    @property
+    def downsampling_factor(self):
+        return self._downsampling_factor
+
+    @downsampling_factor.setter
+    def downsampling_factor(self, value):
+        self._downsampling_factor = value
+        
+
+    def __call__(self, rays, idx, mask=None, log=False, offset=1.0) -> Any:
+        """
+        Given a set of rays, compute the output image.
+        Therefore, we sample the rays and evaluate the network and sum up the result.
+        """
+        self.loss = dict()
+        out = torch.view_as_complex(self.rayPropagator.render(rays, idx, mask=mask))
+        out *= offset
+          #  out.imag = out.imag - 0.3
+        self.l1_loss(out)
+        self.TV_loss(out)
+        out = pad(out)
+        if log:
+            self.plot(out)
+        out = out 
+        out = self.forward(out)
+        ###
+        if log:
+            self.logger.image_from_tensor(out, name="Predicted Hol")
+
+        return out
+
+    def forward(self, out):
+        out = torch.exp(1j * out)
+        out = self.fresnelPropagator.get_measurements(out).squeeze()
+        out = crop_center(out, torch.tensor(self.probe.shape[-2:]) // self.downsampling_factor)
+        return out.unsqueeze(0)
+    
+    def l1_loss(self, y):
+        self.loss = dict(**self.loss, L1_real=torch.abs(y.real).mean(), L1_imag=torch.abs(y.imag).mean())
+
+    def smoothness_loss(self, y):
+        blurred_real_loss = F.mse_loss(self.gaussianBlurReal(y.real), y.real)
+        blurred_imag_loss = F.mse_loss(self.gaussianBlurImag(y.imag), y.imag)
+        self.loss = dict(
+            **self.loss,
+            Smoothness_real=blurred_real_loss,
+            Smoothness_imag=blurred_imag_loss,
+        )
+    def TV_loss(self, y):
+        tv_real = torch.mean(torch.abs(y.real[..., :, 1:] - y.real[..., :, :-1])) + torch.mean(torch.abs(y.real[..., 1:, :] - y.real[..., :-1, :]))
+        tv_imag = torch.mean(torch.abs(y.imag[..., :, 1:] - y.imag[..., :, :-1])) + torch.mean(torch.abs(y.imag[..., 1:, :] - y.imag[..., :-1, :]))
+        self.loss = dict(
+            **self.loss,
+            TV_real=tv_real,
+            TV_imag=tv_imag,
+        )
+
+    def plot(self, y):
+        self.logger.center_line(y[0].clone().real, "Center Line phase")
+        self.logger.center_line(y[0].clone().imag, "Center Line absorption")
+        self.logger.image_from_tensor(y[0].clone().imag, name="Absorption")
+        self.logger.image_from_tensor(y[0].clone().real, name="Phase")
+```
+
+### rays.py
+```
+import torch
+
+
+def tv3d(x):
+    """Compute isotropic Total Variation for 3D volume"""
+    dx = x[1:, :, :] - x[:-1, :, :]
+    dy = x[:, 1:, :] - x[:, :-1, :]
+    dz = x[:, :, 1:] - x[:, :, :-1]
+
+    tv = torch.sqrt(
+        dx[:, :-1, :-1] ** 2 + dy[:-1, :, :-1] ** 2 + dz[:-1, :-1] ** 2 + 1e-6
+    )
+    return tv.mean()
+
+
+class RayPropagator:
+    def __init__(
+        self,
+        model,
+        n_samples,
+        bound,
+        netchunk=1024,
+        num_grad_samples=1000,
+    ):
+        self.model = model
+        self.n_samples = n_samples
+        self.bound = bound
+        self.mask = None
+        self.downsample = 1
+        self.num_grad_samples = num_grad_samples
+
+        self.netchunk = netchunk
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    def sample_down(self, downsampling):
+        self.active_n_samples = int(self.n_samples / downsampling)
+        #   self.netchunk = self.active_n_samples * 10
+        # increase netchunk to keep the same number of rays per chunk
+        self.downsample = downsampling
+
+    def pts_from_rays(self, rays, idx):
+        """
+        Get the 3D points from the rays.
+        """
+        rays_o, rays_d, near, far = (
+            rays[..., :3],
+            rays[..., 3:6],
+            rays[..., 6:7],
+            rays[..., 7:],
+        )
+
+        # apply learnable offset
+        rays_o = rays_o 
+        rays_d = rays_d 
+
+        t_vals = torch.linspace(
+            0.0, 1.0, steps=self.s, device=self.device
+        )
+        # as near and far have dims [batch] x [n_rays] x [1] the mul extends the last dim to active_n_samples
+        z_vals = near * (1.0 - t_vals) + far * (t_vals)
+
+#        rays_o += (
+ #           (torch.rand(rays_o.shape, device=self.device) - 0.5) * self.downsample / 4
+  #      )
+        pts = rays_o[..., None, :] + rays_d[..., None, :] * z_vals[..., :, None]
+        bound = self.bound - 1e-6
+        pts = pts.clamp(-bound, bound)
+
+        return pts  # , z_vals, rays_d, rays_o
+
+    def run_network(self, rays, idx):
+        """
+        Prepares inputs and applies network "fn".
+        """
+        if rays.shape[0] == 0:
+            return torch.empty((0, 2), dtype=torch.float32, device=self.device)
+
+        out_list = []
+        for i in range(0, rays.shape[-2], self.netchunk):
+            # pts, z_vals, rays_d, rays_o = self.pts_from_rays(rays[i:i + self.netchunk])
+            pts = self.pts_from_rays(rays[:, i : i + self.netchunk], idx)
+            raw = self.model(
+                pts.to(self.device)
+            )  # dims: batch x rays/netchunk x active_n_samples (z-direction) x 2
+
+            out = torch.sum(raw, dim=-2)
+            out_list.append(out)
+        return torch.cat(out_list, dim=1)
+
+    def render(self, rays, idx, mask=None):
+        """
+        Given a set of rays, compute the output image.
+        Therefore, we sample the rays and evaluate the network and sum up the result.
+        """
+        self.s = int(rays.shape[1] ** 0.5)
+        if mask is not None:
+            # select rays according to mask
+            rays_through_mask = (
+                torch.tensor(range(rays.shape[1])).reshape(self.s, self.s).to(self.device)
+                * mask.logical_not()
+            )
+            relevant_idcs = rays_through_mask[rays_through_mask != 0].flatten()
+        else:
+            relevant_idcs = torch.arange(rays.shape[1])
+        num_samples = min(self.num_grad_samples, len(relevant_idcs))
+        shuffled_idcs = relevant_idcs[torch.randperm(len(relevant_idcs))]
+        gradients = shuffled_idcs[:num_samples]
+        rays_gradients = rays[:, gradients]
+        acc = self.run_network(rays_gradients, idx)
+
+        acc_out = torch.zeros(
+            (*rays.shape[:2], 2), dtype=torch.float32, device=self.device
+        )
+        acc_out[:, gradients] = acc
+
+        # Process no-gradient rays if there are any
+        if num_samples < len(relevant_idcs):
+            with torch.no_grad():
+                # include rays that were not propagated because of num_samples
+                no_grad = shuffled_idcs[num_samples:]
+
+                rays_no_gradients = rays[:, no_grad]
+                acc_no_grad = self.run_network(rays_no_gradients, idx)
+                acc_out[:, no_grad] = acc_no_grad
+
+        acc = acc_out.reshape(rays.shape[0], self.s, self.s, 2)
+
+        if torch.isnan(acc).any() or torch.isinf(acc).any():
+            print("! [Numerical Error] contains nan or inf.")
+
+        return acc
+
+    def raw2outputs(self, raw, z_vals, rays_d, raw_noise_std=0.0):
+        """Transforms model"s predictions to semantically meaningful values."""
+        dists = z_vals[..., 1:] - z_vals[..., :-1]
+        dists = torch.cat(
+            [dists, torch.Tensor([1e-10]).expand(dists[:, :1].shape).to(dists.device)],
+            -1,
+        )
+        dists = dists * torch.norm(rays_d[..., :], dim=-1)[:, None]
+
+        acc = torch.sum(raw * dists, dim=-2)
+        return acc
+```
+
+### tigre.py
+```
+import torch
+import os
+import numpy as np
+from holowizard.core.utils.remove_outliers import remove_outliers
+from holowizard.core.preprocessing.correct_flatfield import correct_flatfield
+from holowizard.core.preprocessing.calculate_flatfield_components import calculate_flatfield_components
+from torch.utils.data import Dataset
+import h5py
+from utils import crop
+import logging
+
+#  Geometry definition
+#
+#                  Detector plane, behind
+#              |-----------------------------|
+#              |                             |
+#              |                             |
+#              |                             |
+#  Centered    |                             |
+#    at O      A V    +--------+             |
+#              |     /        /|             |
+#     A Z      |    /        / |*D           |
+#     |        |   +--------+  |             |
+#     |        |   |        |  |             |
+#     |        |   |     *O |  +             |
+#     *--->y   |   |        | /              |
+#    /         |   |        |/               |
+#   V X        |   +--------+        U       |
+#              .--------------------->-------|
+#
+#            *S
+#
+#
+# An image of the geometry can be found at DOI: 10.1088/2057-1976/2/5/055010
+# or simply at: https://i.imgur.com/mRweux3.png
+# Geometry class:
+#           -nVoxel:        3x1 array of number of voxels in the image
+#           -sVoxel:        3x1 array with the total size in mm of the image
+#           -dVoxel:        3x1 array with the size of each of the voxels in mm
+#           -nDetector:     2x1 array of number of voxels in the detector plane
+#           -sDetector:     2x1 array with the total size in mm of the detector
+#           -dDetector:     2x1 array with the size of each of the pixels in the detector in mm
+#           -DSD:           1x1 or 1xN array. Distance Source Detector, in mm
+#           -DSO:           1x1 or 1xN array. Distance Source Origin.
+#           -offOrigin:     3x1 or 3xN array with the offset in mm of the centre of the image from the origin.
+#           -offDetector:   2x1 or 2xN array with the offset in mm of the centre of the detector from the x axis
+#           -rotDetector:   3x1 or 3xN array with the rotation in roll-pitch-yaw of the detector
+class ParallelGeometry(object):
+    """
+    Cone beam CT geometry. Note that we convert to meter from millimeter.
+    """
+
+    def __init__(self, data):
+        ## The following geometry assumes that the image is centered at the origin and that we have parallel beam geometry.
+        self.DSO = data["diameter"] / 2
+        self.DSD = self.DSO / 2
+
+        # Detector parameters
+        self.nDetector = np.array(
+            [data["diameter"]] * 2
+        )  # number of pixels              (px)
+        self.dDetector = [1, 1]  # size of each pixel
+        self.sDetector = self.nDetector  # total size of the detector
+        # Image parameters
+        self.nVoxel = np.array(
+            object=data["nVoxels"]
+        )  # number of voxels              (vx)
+        self.dVoxel = [1, 1, 1]  # size of each voxel. Just assume unit...
+        self.sVoxel = self.nVoxel * self.dVoxel  # total size of the image
+
+        # Offsets ## We assume that the image is centered at the origin and that the plane is at the origin.
+        self.offOrigin = np.zeros(3)
+        self.offDetector = np.zeros(2)  # Auxiliary
+
+        self.accuracy = data[
+            "accuracy"
+        ]  # Accuracy of FWD proj          (vx/sample)  # noqa: E501
+        # Mode
+        self.mode = "parallel"  # parallel, cone                ...
+        self.filter = data["filter"]
+
+# TODO dumm!
+
+class Preprocessor:
+    def __init__(self, data_path, crop_idcs, rank):
+        self.data_path = data_path
+        self.crop_idcs = crop_idcs
+        self.rank = rank
+        self.data = self.read_h5_file("data", crop_flag=True)
+        self.flatfield = self.read_h5_file("flat", crop_flag=True)
+        self.angles = self.read_h5_file("angles", crop_flag=False)
+        try:
+            self.shifts = self.read_h5_file("shifts", crop_flag=False)
+        except KeyError:
+            self.shifts = np.zeros((self.data.shape[0], 2))
+        self.mask = torch.zeros_like(self.data, dtype=torch.bool)
+
+    def read_h5_file(self, key, crop_flag=False, dtype=np.float32):
+        with h5py.File(self.data_path, "r") as f:
+            ret = np.squeeze(np.array(f[key][:], dtype=dtype))
+            if crop_flag:
+                ret = crop(ret, self.crop_idcs)  # - data_dark
+            if dtype is bool:
+                ret = torch.from_numpy(ret).to(dtype=torch.bool).cpu()
+            else:
+             #   ret[ret < np.finfo(ret.dtype).eps] = np.finfo(ret.dtype).eps
+               # ret = [
+               #     remove_outliers(torch.from_numpy(x).to(), threshold=1) for x in ret
+               # ]
+                ret = torch.from_numpy(ret).cpu()
+        return ret
+
+
+class FlatField(Preprocessor):
+    def __init__(self, data_path, n_components, crop_idcs, rank):
+        self.data_path = data_path
+        self.rank = rank
+        self.crop_idcs = crop_idcs
+        logging.info("Loading data, flatfields, and mask")
+        self.data = self.read_h5_file("data", crop_flag=True)
+        self.flatfield = self.read_h5_file("flat", crop_flag=True)
+        self.mask = torch.zeros_like(self.data, dtype=torch.bool)
+        logging.info("Correcting flatfields")
+        components = calculate_flatfield_components(self.flatfield.numpy(), n_components)
+        ## TODO probably we have to do this for each angle?
+        self.data = torch.stack([correct_flatfield(x, components) for x in self.data.to(self.rank)])
+        flatfield_offset_corr = self.data.cpu().mean(axis=(1,2)).numpy()
+        self.data = self.data.cpu() / flatfield_offset_corr[:, None, None]
+        self.angles = torch.tensor(np.linspace(0, np.pi, self.data.shape[0], endpoint=False))
+        try:
+            self.shifts = self.read_h5_file("shifts", crop_flag=False)
+        except KeyError:
+            self.shifts = torch.zeros((self.data.shape[0], 2))
+        logging.info("Preprocessing done")
+
+
+class TIGREDataset(Dataset):
+    """
+    TIGRE dataset.
+    """
+
+    def __init__(
+        self,
+        data_path,
+        preprocessed_path,
+        use_every_nth_angle=1,
+        crop_idcs=[200, 800, 200, 800],
+        rank=0,
+        padding_factor=2,
+    ):
+        super().__init__()
+        self.use_every_nth_angle = use_every_nth_angle
+        if not os.path.exists(preprocessed_path):
+            preprocess = FlatField(data_path, 28, crop_idcs, rank)
+            self.projs = preprocess.data
+            self.masks = preprocess.mask
+            self.probe = preprocess.flatfield
+            self.angles = preprocess.angles
+            self.shifts = preprocess.shifts
+            with h5py.File(preprocessed_path, "w") as f:
+                f.create_dataset("data", data=self.projs)
+                f.create_dataset("mask", data=self.masks, dtype=bool)
+                f.create_dataset("probe", data=self.probe.cpu().numpy())
+                f.create_dataset("angles", data=self.angles)
+                f.create_dataset("shifts", data=self.shifts)
+
+        else:
+            self.projs = torch.from_numpy(h5py.File(preprocessed_path, "r")["data"][:])
+            self.masks = torch.from_numpy(h5py.File(preprocessed_path, "r")["mask"][:])
+            self.probe = torch.from_numpy(h5py.File(preprocessed_path, "r")["probe"][:])
+            self.angles = torch.from_numpy(h5py.File(preprocessed_path, "r")["angles"][:])
+            try:
+                self.shifts = torch.from_numpy(h5py.File(preprocessed_path, "r")["shifts"][:])
+            except KeyError:
+                self.shifts = torch.zeros((self.projs.shape[0], 2))
+
+
+        self.projs = self.projs[:: use_every_nth_angle]
+        self.shifts =  np.array(self.shifts[:: use_every_nth_angle])
+        self.masks = self.masks[:: use_every_nth_angle]
+        self.angles = self.angles[:: use_every_nth_angle] - torch.min(self.angles) 
+        self.n_samples = self.projs.shape[0]
+        self.padding_factor = padding_factor
+
+    def sample_down(self, factor, fresnelNumber):
+        ## TODO this does only work is the image is devided by the factor.
+        self.projs_active = self.projs.reshape(
+            -1,
+            self.projs.shape[1] // factor,
+            factor,
+            self.projs.shape[2] // factor,
+            factor,
+        ).mean((2, 4))
+
+        # downsample the masks as 1 is background and 0 is object, we take the min to make the object only bigger in border pixels
+        self.masks_active = self.masks.reshape(
+            -1,
+            self.masks.shape[1] // factor,
+            factor,
+            self.masks.shape[2] // factor,
+            factor,
+        ).amin(dim=(2, 4))
+
+        data = dict(
+            nVoxels=max(int(1/fresnelNumber), self.projs_active.shape[1] + 50) ** 3,
+            diameter=max(int(1/fresnelNumber), self.projs_active.shape[1] + 50),
+            accuracy=0.5,
+            filter="ram-lak",
+        )
+        self.downsample = factor
+        self.data = data
+
+        self.geo = ParallelGeometry(data)
+        self.near, self.far = self.get_near_far(self.geo)
+        rays = self.get_rays( factor, self.geo, self.shifts)
+        self.rays = torch.cat(
+            [
+                rays,
+                torch.ones_like(rays[..., :1]) * self.near,
+                torch.ones_like(rays[..., :1]) * self.far,
+            ],
+            dim=-1,
+        )
+
+    def __len__(self):
+        return self.n_samples
+
+    def __getitem__(self, index):
+        rays = self.rays[index].reshape(-1, 8)
+        projs = self.projs_active[index]
+        mask = self.masks_active[index]
+        out = {
+            "projs": projs.to(dtype=torch.float32),
+            "rays": rays.to(dtype=torch.float32),
+            "idx": index,
+            "projs_mask": mask,
+        }
+        return out
+
+    def get_rays(self, downsampling, geo: ParallelGeometry, shifts):
+        """
+        Get rays given angles and x-ray machine geometry.
+        """
+
+        W, H = geo.nDetector
+        rays = []
+
+        for i, angle in enumerate(self.angles):
+            pose: torch.Tensor = torch.Tensor(
+                self.angle2pose(geo.DSO, angle, shifts[i])
+            )
+            rays_o, rays_d = None, None
+            i, j = torch.meshgrid(
+                torch.linspace(0, W - 1, W),
+                torch.linspace(0, H - 1, H),
+                indexing="ij",
+            )  # pytorch"s meshgrid has indexing="ij"
+            uu = (i.t() + 0.5 - W / 2) * geo.dDetector[0] + geo.offDetector[0]
+            vv = (j.t() + 0.5 - H / 2) * geo.dDetector[1] + geo.offDetector[1]
+            dirs = torch.stack(
+                [torch.zeros_like(uu), torch.zeros_like(uu), torch.ones_like(uu)],
+                -1,
+            )
+            rays_d = torch.sum(
+                torch.matmul(pose[:3, :3], dirs[..., None]), -1
+            )  # pose[:3, :3] *
+            rays_o = torch.sum(
+                torch.matmul(
+                    pose[:3, :3],
+                    torch.stack([uu, vv, torch.zeros_like(uu)], -1)[..., None],
+                ),
+                -1,
+            ) + pose[:3, -1].expand(rays_d.shape)
+            rays.append(torch.concat([rays_o, rays_d], dim=-1))
+
+        return torch.stack(rays, dim=0)
+
+    def angle2pose(self, DSO, angle, shifts):
+        R1 = np.array(
+            [
+                [1.0, 0.0, 0.0],
+                [0.0, 0, 1],
+                [0.0, -1, 0],
+            ]
+        )
+        R2 = np.array(
+            [
+                [0, -1, 0.0],
+                [1, 0, 0.0],
+                [0.0, 0.0, 1.0],
+            ]
+        )
+        R3 = np.array(
+            [
+                [np.cos(angle), -np.sin(angle), 0.0],
+                [np.sin(angle), np.cos(angle), 0.0],
+                [0.0, 0.0, 1.0],
+            ]
+        )
+        rot = np.dot(np.dot(R3, R2), R1)
+        trans = np.array([DSO * np.cos(angle), DSO * np.sin(angle), 0])
+        shift = rot @ np.array([shifts[0]/self.downsample, shifts[1]/self.downsample, 0])
+       # shift = np.array([shifts[0] * np.cos(angle), shifts[1] * np.sin(angle), 0])
+        T = np.eye(4)
+        T[:-1, :-1] = rot
+        T[:-1, -1] = trans - shift
+        return T
+
+    def get_near_far(self, geo: ParallelGeometry, tolerance=0.005):
+        """
+        Compute the near and far threshold.
+        """
+        dist1 = np.linalg.norm(
+            [geo.offOrigin[0] - geo.sVoxel[0] / 2, geo.offOrigin[1] - geo.sVoxel[1] / 2]
+        )
+        dist2 = np.linalg.norm(
+            [geo.offOrigin[0] - geo.sVoxel[0] / 2, geo.offOrigin[1] + geo.sVoxel[1] / 2]
+        )
+        dist3 = np.linalg.norm(
+            [geo.offOrigin[0] + geo.sVoxel[0] / 2, geo.offOrigin[1] - geo.sVoxel[1] / 2]
+        )
+        dist4 = np.linalg.norm(
+            [geo.offOrigin[0] + geo.sVoxel[0] / 2, geo.offOrigin[1] + geo.sVoxel[1] / 2]
+        )
+        dist_max = np.max([dist1, dist2, dist3, dist4])
+        near = np.max([0, geo.DSO - dist_max - tolerance])
+        far = np.min([geo.DSO * 2, geo.DSO + dist_max + tolerance])
+        return near, far
+```
+
+### trainer.py
+```
+import torch
+from tqdm import tqdm
+from omegaconf import DictConfig
+import hydra
+import sys
+import os
+from pytorch_msssim import ssim
+from propagator import Propagator
+
+sys.path.append(".")
+from encoder import get_encoder
+from network import DensityNetwork
+from cone_beam import ConeBeam
+from rays import RayPropagator
+from fresnel_propagator_torch import FresnelPropagator
+from tigre import TIGREDataset
+from torch.utils.data import DataLoader
+import wandb
+import torch.nn.functional as F
+from visualize import Logger
+
+device = "cuda:0" if torch.cuda.is_available() else "cpu"
+
+torch.manual_seed(42)
+image_saver_interval = 50
+
+
+def train(cfg: DictConfig):
+    # Start a new wandb run to track this script.
+    run = wandb.init(
+        project=cfg["Wandb"]["project"],
+        entity=cfg["Wandb"]["entity"],
+        mode=cfg["Wandb"]["mode"],
+        save_code=True,
+        notes=cfg.get("Key", "no_key"),
+    )
+    torch.autograd.set_detect_anomaly(True)
+    basepath = "../../.."
+    code_artifact = wandb.Artifact(type="code", name="code")
+    files = [x for x in os.listdir(basepath) if x.endswith(".py")]
+    [code_artifact.add_file(f"{basepath}/{x}") for x in files]
+    code_artifact.add_file(f"{basepath}/config/config.yaml")  # log config as well
+    wandb.log_artifact(code_artifact)
+
+    # get data
+    dataset = TIGREDataset(**cfg["Dataset"])
+    dataloader = DataLoader(
+        dataset, num_workers=16, batch_size=1, pin_memory=True, shuffle=True
+    )
+    measurement_dims = dataset.projs.shape[-2:]
+
+    cone_beam = ConeBeam(**cfg["BeamSetup"])
+    ## Init INR for 3D object
+    encoder = get_encoder(**cfg["Encoder"])
+    net = DensityNetwork(
+        encoder=encoder,
+        last_activation=lambda x: x**2,
+        bound=measurement_dims[0],
+        **cfg["Network"],
+    )
+    offset_vectors = torch.nn.Parameter(
+        torch.ones((dataset.n_samples), device=device)
+    )
+
+    rayPropagator = RayPropagator(
+        net, bound=measurement_dims[0], **cfg["RayPropagator"]
+    )
+    # Initialize model
+    # Initialize optimizer outside the loop
+    optimizer = torch.optim.AdamW(net.parameters(), lr=cfg["Optimization"][0]["lr"])
+    o_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, cooldown=300, patience=300, factor=0.2
+    )
+
+    offsetOptimizer = torch.optim.SGD(
+        [offset_vectors], lr=cfg["OffsetOptimization"]["lr"]
+    )
+    offsetScheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        offsetOptimizer, cooldown=2, patience=2
+    )
+    logger = Logger(run)
+    stop = False
+    net.train()
+    l = 0
+    for step in cfg["Optimization"]:
+        downsampling = step["downsampling"]
+        cone_beam.px_size = downsampling
+        dataset.sample_down(downsampling, cone_beam.get_fr())
+        net.bound = dataset.data["diameter"]
+        rayPropagator.bound = dataset.data["diameter"]
+        rayPropagator.sample_down(downsampling)
+        
+        fresnelPropagator = FresnelPropagator(
+            cone_beam.get_fr(), dataset.projs.shape[-2], downsampling, device
+        )
+        propagator = Propagator(
+            fresnelPropagator,
+            logger,
+            dataset.probe,
+            n_angles=dataset.n_samples,
+            rayPropagator=rayPropagator,
+            downsampling_factor=downsampling,
+        )
+        propagator.downsampling_factor = downsampling
+        for epoch in range(step["epochs"]):
+
+            for batch_idx, data in tqdm(
+                enumerate(iterable=dataloader), total=len(dataloader)
+            ):
+                l+=1
+                if l == 4000:
+                    stop = True
+                    break
+                optimizer.zero_grad()
+                projs = data["projs"].to(device)
+                rays = data["rays"]
+                idx = data["idx"]
+                projs = torch.sqrt(projs)
+                y_processed = propagator(
+                    rays.to(device),
+                    idx,
+                    mask=None,
+                    log=(batch_idx % image_saver_interval == 0),
+                    offset=offset_vectors[idx].item(),
+                )
+                ssim_value = ssim(
+                    y_processed.unsqueeze(0).unsqueeze(0),
+                    projs.unsqueeze(0).unsqueeze(0),
+                    data_range=max(y_processed.max(), projs.max())
+                    - min(y_processed.min(), projs.min()),
+                    size_average=True,
+                ).item()
+
+                loss = (
+                    F.mse_loss(y_processed, projs)
+                    + step["weight_l1_imag"] * propagator.loss.get("L1_imag", 0)
+                    + step["weight_l1_real"] * propagator.loss.get("L1_real", 0)
+                    + step["weight_tv_imag"] * propagator.loss["TV_imag"]
+                    + step["weight_tv_real"] * propagator.loss["TV_real"]
+                )
+               
+                loss.backward()
+                optimizer.step()
+                o_scheduler.step(F.mse_loss(y_processed, projs).detach())
+                logger.log_epoch["loss"] = logger.log_epoch.get("loss", 0) + loss.item()
+                if "angular_loss" not in logger.log_epoch:
+                    logger.log_epoch["angular_loss"] = dict()
+                if "angular_data_fidelity" not in logger.log_epoch:
+                    logger.log_epoch["angular_data_fidelity"] = dict()
+                if "angular_offset" not in logger.log_epoch:
+                    logger.log_epoch["angular_offset"] = dict()
+                if "angular_offset_direction" not in logger.log_epoch:
+                    logger.log_epoch["angular_offset_direction"] = dict()
+
+                logger.log_epoch["angular_data_fidelity"][idx] = F.mse_loss(
+                    y_processed, projs
+                ).item()
+                logger.log_epoch["angular_loss"][idx] = loss.item()
+                logger.log_epoch["angular_offset"][idx] = offset_vectors[idx].item()
+                logger.log["loss"] = loss.item()
+                logger.log["SSIM"] = ssim_value
+                logger.log["optimizer_lr"] = optimizer.param_groups[0]["lr"]
+                if logger.log["optimizer_lr"] < 1e-7:
+                    stop = True
+                    break
+                logger.log["data_fidelity"] = F.mse_loss(y_processed, projs).item()
+                logger.log["data_fidelity l1"] = F.l1_loss(y_processed, projs).item()
+                if batch_idx % image_saver_interval == 0:
+                    # Log the images to wandb (only first of the batch)
+                    logger.image_from_tensor(projs[0], name="Measurement")
+                    logger.image_from_tensor(
+                        y_processed[0] - projs[0], name="Error in Hologram Space"
+                    )
+                    logger.image_from_tensor(
+                        (y_processed[0] - projs[0]).abs().log(),
+                        name="Abs-Error in Hologram Space - Log Scale",
+                    )
+                    logger.flush()
+
+            offsetOptimizer.step()
+            offsetScheduler.step(torch.tensor(logger.log_epoch["loss"]))
+            logger.log["offset_lr"] = offsetOptimizer.param_groups[0]["lr"]
+
+            logger.slice_from_object(net)
+
+            if stop:
+                break
+
+    logger.save_h5(net, propagator, step["downsampling"], no_angles=dataset.n_samples)
+
+
+@hydra.main(config_path="config", config_name="config")
+def main(cfg: DictConfig):
+    train(cfg)
+
+
+if __name__ == "__main__":
+    main()
+```
+
+### utils.py
+```
+import torch
+import torch.nn.functional as F
+from holowizard.core.reconstruction.constraints.window_2d import get_2d_window
+
+
+def pad(image):
+    size = [50 for x in image.shape for y in range(2)][-4:]
+
+    mirrored_image = F.pad(
+        image, size[::-1], mode="constant", value=0.0
+    )
+    mask = get_2d_window(
+        mirrored_image.shape[-2:],
+        [(50, mirrored_image.shape[-2] - 50), (50, mirrored_image.shape[-1] - 50)],
+        [(120, 120), (120, 120)],
+        "blackman",
+        "cuda",
+    )
+    mirrored_image *= mask[None]
+    return mirrored_image
+
+
+def crop(input_array, crop_idcs):
+    # Crop the array using the given slices
+    cropped_array = input_array[
+        ..., crop_idcs[0] : crop_idcs[1], crop_idcs[2] : crop_idcs[3]
+    ]
+
+    return cropped_array
+
+
+def total_variation_loss(img, weight=1):
+    bs_img, c_img, h_img, w_img = img.size()
+    tv_h = torch.pow(img[..., 1:, :] - img[..., :-1, :], 2).sum()
+    tv_w = torch.pow(img[..., 1:] - img[..., :-1], 2).sum()
+    return weight * (tv_h + tv_w) / (bs_img * c_img * h_img * w_img)
+
+
+def softmin_loss(d, tau=0.1, reduction="mean"):
+    """
+    Soft-min loss over distances.
+
+    Args:
+        d (Tensor): pairwise distances of shape [B, N]
+                    (B = batch size, N = number of reference points).
+        tau (float): temperature parameter (smaller tau -> sharper min).
+        reduction (str): "mean", "sum", or "none" for output reduction.
+
+    Returns:
+        Tensor: scalar loss (if reduction != "none") or [B] loss values.
+    """
+    # -tau * logsumexp(-d/tau) along the reference dimension
+    loss = -tau * torch.logsumexp(-d / tau, dim=0)
+
+    if reduction == "mean":
+        return loss.mean()
+    elif reduction == "sum":
+        return loss.sum()
+    return loss  # shape [B]
+```
+
+### visualize.py
+```
+import h5py
+import wandb
+import numpy as np
+import matplotlib.pyplot as plt
+import torch
+from skimage import io
+import astra
+
+from utils import pad
+from cone_beam import ConeBeam
+import random
+import string
+
+class Logger:
+    def __init__(self, writer, downsampling_factor=1):
+        self.writer = writer
+        self.log = dict()  # Placeholder for a writer, e.g., TensorBoard SummaryWriter
+        self.cuda = "cuda:0"
+        self.log_epoch = dict()
+        self.downsampling_factor = downsampling_factor
+
+    def center_line(self, tensor, name):
+        """
+        Extract the center line of a 2D tensor and convert it to a NumPy array.
+        """
+
+        img = tensor.clone().cpu().detach().numpy()
+        center_line = img[img.shape[0] // 2, :]
+        fig, ax = plt.subplots()
+        g = ax.plot(center_line)
+        wandbfig = wandb.Image(fig)
+        plt.close(fig)
+        self.log[name] = wandbfig
+
+    def line_ploter(self, line, name):
+        fig, ax = plt.subplots()
+        for i in range(line.shape[0]):
+            ax.plot(line[i])
+        wandbfig = wandb.Image(fig)
+        plt.close(fig)
+        self.log[name] = wandbfig
+
+    def image_from_tensor(self, tensor, vmax=None, vmin=None, name="image"):
+        """
+        Convert a PyTorch tensor to a NumPy array and normalize it to the range [0, 255].
+        """
+        img = tensor.clone().cpu().detach().numpy().squeeze()
+        fig, ax = plt.subplots()
+        # Make sure vmax and vmin are defined, otherwise use defaults
+        if vmax is None:
+            vmax = np.max(img)
+        if vmin is None:
+            vmin = np.min(img)
+
+        g = ax.imshow(img, cmap="gray", vmax=vmax, vmin=vmin)
+        plt.colorbar(g, ax=ax)
+        ax.axis("off")
+        fig.tight_layout()
+        wandbfig = wandb.Image(fig)
+        plt.close(fig)
+        self.log[name] = wandbfig
+
+    def slice_from_object(self, net):
+        with torch.no_grad():
+            bound = net.bound // self.downsampling_factor
+            XYZ = torch.meshgrid(
+                torch.arange(bound, dtype=torch.float32),
+                torch.arange(bound, dtype=torch.float32),
+                indexing="ij",
+            )
+            XYZ = torch.stack(XYZ, dim=-1).to(self.cuda)
+            XYZ = XYZ.reshape(-1, 2)
+            XYZ = XYZ - bound/2
+            XYZ = torch.hstack(
+                [XYZ, torch.zeros((XYZ.shape[0], 1), dtype=torch.float32).to(self.cuda)]
+            )
+            net.eval()
+            out = net(XYZ)
+            out = out.reshape(bound, bound, 2)
+            io.imsave("output.tiff", out.cpu().numpy().T)
+            self.image_from_tensor(out[..., 0], name="Center Slice phase")
+            self.image_from_tensor(out[..., 1], name="Center Slice absorption")
+            angular_data_fidelity_values = [
+                v for k, v in sorted(self.log_epoch["angular_data_fidelity"].items())
+            ]
+            angular_data_fidelity_tensor = torch.tensor(angular_data_fidelity_values).unsqueeze(0)
+            angular_loss_figure = self.line_ploter(
+                angular_data_fidelity_tensor, "Angular Data Fidelity"
+            )
+            angular_offset_o_values = [
+                v for k, v in sorted(self.log_epoch["angular_offset"].items())
+            ]
+            angular_offset_o_figure = self.line_ploter(
+                torch.tensor(angular_offset_o_values).unsqueeze(0),
+                "Angular Offset Origin",
+            )
+            angular_offset_d_values = [
+                v for k, v in sorted(self.log_epoch["angular_offset_direction"].items())
+            ]
+            angular_offset_d_figure = self.line_ploter(
+                torch.tensor(angular_offset_d_values).unsqueeze(0),
+                "Angular Offset Direction",
+            )
+            net.train()
+
+        self.log_epoch = {
+            "Epoch loss": self.log_epoch["loss"] / 1500,
+            "Angular Loss": angular_loss_figure,
+            "Angular Offset Origin": angular_offset_o_figure,
+            "Angular Offset Direction": angular_offset_d_figure,
+            **self.log,
+        }
+        self.flush_epoch()
+
+    def save_h5(self, net, propagator, downsampling, no_angles):
+        length=10
+        random_string = ''.join(random.choices(string.ascii_letters + string.digits, k=length))
+
+        print("Saving final output to f{}".format(random_string))
+        torch.save(net.state_dict(), "f{}.pth".format(random_string))
+        with torch.no_grad():
+            shape = net.bound // self.downsampling_factor
+            shape += 50
+            XYZ = torch.meshgrid(torch.arange(shape, dtype=torch.float32), 
+                                torch.arange(shape, dtype=torch.float32), 
+                                torch.arange(shape, dtype=torch.float32), indexing='ij')
+            XYZ = torch.stack(XYZ, dim=-1)
+            XYZ = XYZ - shape / 2
+            net.eval()
+            with torch.no_grad():
+                ret = []
+                for j in range(shape):
+                    slice_data = XYZ[j].to(self.cuda)
+                    slice_data = slice_data.reshape(-1, 3)
+                    out = net(slice_data).cpu().numpy()
+                    out = out.reshape(shape, shape, 2)
+                    ret.append(out)
+                out = np.stack(ret, axis=0)
+                out = out.reshape(shape, shape, shape, 2)
+                # get the projections for different angles
+                projections = np.zeros((no_angles, shape, shape, 2))
+                # Prepare the volume for Radon transform (real and imaginary parts separately)
+                volume_real = out[..., 0]
+                volume_imag = out[..., 1]
+
+                # ASTRA expects volumes in (z, y, x) order
+                volume_real = np.transpose(volume_real, (2, 0, 1))
+                volume_imag = np.transpose(volume_imag, (2, 0, 1))
+
+                # Set up ASTRA projection geometry
+                angles = np.linspace(0, np.pi, no_angles, endpoint=False)
+                proj_geom = proj_geom = astra.create_proj_geom('parallel3d',
+                                   1.0,  # detector_spacing_x
+                                   1.0,  # detector_spacing_y
+                                   shape,  # det_row_count
+                                   shape,  # det_col_count
+                                   angles)
+
+                # Create ASTRA volume geometries
+                vol_geom = astra.create_vol_geom(shape, shape, shape)
+
+                # Compute projections for real part
+                proj_id_real, projections_real = astra.create_sino3d_gpu(volume_real, proj_geom, vol_geom)
+                astra.data2d.delete(proj_id_real)
+
+                # Compute projections for imaginary part
+                proj_id_imag, projections_imag = astra.create_sino3d_gpu(volume_imag, proj_geom, vol_geom)
+                astra.data2d.delete(proj_id_imag)
+
+                # projections shape: (no_angles, shape, shape)
+                projections[..., 0] = np.transpose(projections_real, (1, 0, 2))
+                projections[..., 1] = np.transpose(projections_imag, (1, 0, 2))
+
+                with h5py.File("output_final.h5", "w") as f:
+                    f.create_dataset("slices_real", data=np.rollaxis(out[..., 0], 2))
+                    f.create_dataset("slices_imag", data=np.rollaxis(out[..., 1], 2))
+                    f.create_dataset("projections_real", data=projections[..., 0])
+                    f.create_dataset("projections_imag", data=projections[..., 1])
+
+    def flush(self):
+        wandb.log(self.log)
+        self.log = dict()
+
+    def flush_epoch(self):
+        wandb.log(self.log_epoch)
+        self.log_epoch = dict()
+        self.log = dict()
+```
+
+### encoder/__init__.py
+```
+from .hashencoder import HashEncoder
+from .freqencoder import FreqEncoder
+
+
+def get_encoder(
+    encoding,
+    input_dim=3,
+    multires=6,
+    degree=4,
+    num_levels=16,
+    level_dim=2,
+    base_resolution=16,
+    log2_hashmap_size=19,
+    **kwargs,
+):
+    if encoding == "None":
+        return lambda x, **kwargs: x, input_dim
+
+    elif encoding == "frequency":
+        encoder = FreqEncoder(
+            input_dim=input_dim,
+            max_freq_log2=multires - 1,
+            N_freqs=multires,
+            log_sampling=True,
+        )
+
+    elif encoding == "hashgrid":
+        encoder = HashEncoder(
+            input_dim=input_dim,
+            num_levels=num_levels,
+            level_dim=level_dim,
+            base_resolution=base_resolution,
+            log2_hashmap_size=log2_hashmap_size,
+        )
+
+    else:
+        raise NotImplementedError()
+
+    return encoder
+```
+
+### encoder/freqencoder.py
+```
+import torch
+import torch.nn as nn
+
+
+class FreqEncoder(nn.Module):
+    def __init__(
+        self,
+        input_dim,
+        max_freq_log2,
+        N_freqs,
+        log_sampling=True,
+        include_input=True,
+        periodic_fns=(torch.sin, torch.cos),
+    ):
+        super().__init__()
+
+        self.input_dim = input_dim
+        self.include_input = include_input
+        self.periodic_fns = periodic_fns
+
+        self.output_dim = 0
+        if self.include_input:
+            self.output_dim += self.input_dim
+
+        self.output_dim += self.input_dim * N_freqs * len(self.periodic_fns)
+
+        if log_sampling:
+            self.freq_bands = 2.0 ** torch.linspace(0.0, max_freq_log2, N_freqs)
+        else:
+            self.freq_bands = torch.linspace(2.0**0.0, 2.0**max_freq_log2, N_freqs)
+
+        self.freq_bands = self.freq_bands.numpy().tolist()
+
+    def forward(self, input, bound):
+        out = []
+        if self.include_input:
+            out.append(input)
+
+        for i in range(len(self.freq_bands)):
+            freq = self.freq_bands[i]
+            for p_fn in self.periodic_fns:
+                out.append(p_fn(input * freq))
+
+        out = torch.cat(out, dim=-1)
+
+        return out
+```
+
+### encoder/hashencoder/__init__.py
+```
+from .hashgrid import HashEncoder
+```
+
+### encoder/hashencoder/backend.py
+```
+import os
+from torch.utils.cpp_extension import load
+
+_src_path = os.path.dirname(os.path.abspath(__file__))
+
+_backend = load(
+    name="_hash_encoder",
+    extra_cflags=["-O3"],  # '-std=c++17'
+    extra_cuda_cflags=[
+        "-O3",
+        "-U__CUDA_NO_HALF_OPERATORS__",
+        "-U__CUDA_NO_HALF_CONVERSIONS__",
+        "-U__CUDA_NO_HALF2_OPERATORS__",  # undefine flags, necessary!
+    ],  # '-arch=sm_70'
+    sources=[
+        os.path.join(_src_path, "src", f)
+        for f in [
+            "hashencoder.cu",
+            "bindings.cpp",
+        ]
+    ],
+)
+
+__all__ = ["_backend"]
+```
+
+### encoder/hashencoder/hashgrid.py
+```
+import numpy as np
+
+import torch
+from torch import Tensor
+import torch.nn as nn
+from torch.autograd import Function
+from torch.amp import custom_bwd, custom_fwd
+
+from .backend import _backend
+
+
+class _hash_encode(Function):
+    @staticmethod
+    @custom_fwd(cast_inputs=torch.half, device_type="cuda")
+    # @custom_fwd
+    def forward(
+        ctx, inputs, embeddings, offsets, base_resolution, calc_grad_inputs=False
+    ) -> Tensor:
+        # inputs: [B, D], float in [0, 1]
+        # embeddings: [sO, C], float
+        # offsets: [L + 1], int
+        # RETURN: [B, F], float
+
+        inputs = inputs.contiguous()
+        embeddings = embeddings.contiguous()
+        offsets = offsets.contiguous().to(inputs.device)
+
+        B, D = inputs.shape  # batch size, coord dim
+        L = offsets.shape[0] - 1  # level
+        C = embeddings.shape[1]  # embedding dim for each level
+        H = base_resolution  # base resolution
+
+        # L first, optimize cache for cuda kernel, but needs an extra permute later
+        outputs = torch.zeros(L, B, C, device=inputs.device, dtype=inputs.dtype)
+
+        if calc_grad_inputs:
+            dy_dx = torch.zeros(B, L * D * C, device=inputs.device, dtype=inputs.dtype)
+        else:
+            dy_dx = torch.zeros(1, device=inputs.device, dtype=inputs.dtype)
+
+        _backend.hash_encode_forward(
+            inputs, embeddings, offsets, outputs, B, D, C, L, H, calc_grad_inputs, dy_dx
+        )
+
+        # permute back to [B, L * C]
+        outputs = outputs.permute(1, 0, 2).reshape(B, L * C)
+
+        ctx.save_for_backward(inputs, embeddings, offsets, dy_dx)
+        ctx.dims = [B, D, C, L, H]
+        ctx.calc_grad_inputs = calc_grad_inputs
+
+        return outputs
+
+    @staticmethod
+    @custom_bwd(device_type="cuda")
+    def backward(ctx, grad):
+        # grad: [B, L * C]
+
+        grad = grad.contiguous()
+
+        inputs, embeddings, offsets, dy_dx = ctx.saved_tensors
+        B, D, C, L, H = ctx.dims
+        calc_grad_inputs = ctx.calc_grad_inputs
+
+        grad_embeddings = torch.zeros_like(embeddings)
+
+        if calc_grad_inputs:
+            grad_inputs = torch.zeros_like(inputs)
+        else:
+            grad_inputs = torch.zeros(1, device=inputs.device, dtype=inputs.dtype)
+
+        _backend.hash_encode_backward(
+            grad,
+            inputs,
+            embeddings,
+            offsets,
+            grad_embeddings,
+            B,
+            D,
+            C,
+            L,
+            H,
+            calc_grad_inputs,
+            dy_dx,
+            grad_inputs,
+        )
+
+        if calc_grad_inputs:
+            return grad_inputs, grad_embeddings, None, None, None
+        else:
+            return None, grad_embeddings, None, None, None
+
+
+hash_encode = _hash_encode.apply
+
+
+class HashEncoder(nn.Module):
+    def __init__(
+        self,
+        input_dim=3,
+        num_levels=16,
+        level_dim=2,
+        base_resolution=16,
+        log2_hashmap_size=19,
+    ):
+        super().__init__()
+
+        self.input_dim = input_dim  # coord dims, 2 or 3
+        self.num_levels = num_levels  # num levels, each level multiply resolution by 2
+        self.level_dim = level_dim  # encode channels per level
+        self.log2_hashmap_size = log2_hashmap_size
+        self.base_resolution = base_resolution
+        self.output_dim = num_levels * level_dim
+
+        if level_dim % 2 != 0:
+            print(
+                "[WARN] detected HashGrid level_dim % 2 != 0, which will cause very slow backward is also enabled fp16! (maybe fix later)"
+            )
+
+        # allocate parameters
+        self.offsets = []
+        offset = 0
+        self.max_params = 2**log2_hashmap_size
+        for i in range(num_levels):
+            resolution = base_resolution * 2**i
+            params_in_level = min(
+                self.max_params, (resolution + 1) ** input_dim
+            )  # limit max number
+            # params_in_level = int(params_in_level / 8) * 8 # make divisible
+            self.offsets.append(offset)
+            offset += params_in_level
+        self.offsets.append(offset)
+        self.offsets = torch.from_numpy(np.array(self.offsets, dtype=np.int32))
+
+        self.n_params = self.offsets[-1] * level_dim
+
+        # parameters
+        self.embeddings = nn.Parameter(torch.zeros(offset, level_dim))
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        std = 1e-4
+        self.embeddings.data.uniform_(-std, std)
+
+    def __repr__(self):
+        return f"HashEncoder: input_dim={self.input_dim} num_levels={self.num_levels} level_dim={self.level_dim} H={self.base_resolution} params={self.embeddings.shape}"
+
+    def forward(self, inputs, size=1):
+        # inputs: [..., input_dim], normalized real world positions in [-size, size]
+        # return: [..., num_levels * level_dim]
+
+        if inputs.min().item() < -size or inputs.max().item() > size:
+            raise ValueError(
+                f"HashGrid encoder: inputs range [{inputs.min().item()}, {inputs.max().item()}] not in [{-size}, {size}]!"
+            )
+
+        inputs = (inputs + size) / (2 * size)  # map to [0, 1]
+
+        # print('inputs', inputs.shape, inputs.dtype, inputs.min().item(), inputs.max().item())
+
+        prefix_shape = list(inputs.shape[:-1])
+        inputs = inputs.view(-1, self.input_dim)
+
+        outputs = hash_encode(
+            inputs,
+            self.embeddings,
+            self.offsets,
+            self.base_resolution,
+            inputs.requires_grad,
+        )
+        outputs = outputs.view(prefix_shape + [self.output_dim])
+
+        # print('outputs', outputs.shape, outputs.dtype, outputs.min().item(), outputs.max().item())
+
+        return outputs
+```
+
+### encoder/hashencoder/src/bindings.cpp
+```
+#include <torch/extension.h>
+
+#include "hashencoder.h"
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("hash_encode_forward", &hash_encode_forward, "hash encode forward (CUDA)");
+    m.def("hash_encode_backward", &hash_encode_backward, "hash encode backward (CUDA)");
+}
+```
+
+### encoder/hashencoder/src/hashencoder.cu
+```
+#include <stdint.h>
+
+#include <cuda.h>
+#include <cuda_fp16.h>
+#include <cuda_runtime.h>
+
+#include <ATen/cuda/CUDAContext.h>
+#include <torch/torch.h>
+#include <torch/extension.h>
+
+#include <algorithm>
+#include <stdexcept>
+
+#include <cstdio>
+
+
+#define CHECK_CUDA(x) TORCH_CHECK(x.device().is_cuda(), #x " must be a CUDA tensor")
+#define CHECK_CONTIGUOUS(x) TORCH_CHECK(x.is_contiguous(), #x " must be a contiguous tensor")
+#define CHECK_IS_INT(x) TORCH_CHECK(x.scalar_type() == at::ScalarType::Int, #x " must be an int tensor")
+#define CHECK_IS_FLOATING(x) TORCH_CHECK(x.scalar_type() == at::ScalarType::Float || x.scalar_type() == at::ScalarType::Half || x.scalar_type() == at::ScalarType::Double, #x " must be a floating tensor")
+
+
+// requires CUDA >= 10 and ARCH >= 70
+// this is very slow compared to float or __half2, do not use!
+static inline  __device__ at::Half atomicAdd(at::Half *address, at::Half val) {
+  return atomicAdd(reinterpret_cast<__half*>(address), val);
+}
+
+
+template <typename T>
+static inline __host__ __device__ T div_round_up(T val, T divisor) {
+	return (val + divisor - 1) / divisor;
+}
+
+
+template <uint32_t D>
+__device__ uint32_t fast_hash(const uint32_t pos_grid[D]) {
+	static_assert(D <= 7, "fast_hash can only hash up to 7 dimensions.");
+
+	// While 1 is technically not a good prime for hashing (or a prime at all), it helps memory coherence
+	// and is sufficient for our use case of obtaining a uniformly colliding index from high-dimensional
+	// coordinates.
+	constexpr uint32_t primes[7] = { 1, 19349663, 83492791, 25165843, 6291469, 12582917, 3145739 };
+
+	uint32_t result = 0;
+	#pragma unroll
+	for (uint32_t i = 0; i < D; ++i) {
+		result ^= pos_grid[i] * primes[i];
+	}
+
+	return result;
+}
+
+
+template <uint32_t D, uint32_t C>
+__device__ uint32_t get_grid_index(const uint32_t ch, const uint32_t hashmap_size, const uint32_t resolution, const uint32_t pos_grid[D]) {
+	uint32_t stride = 1;
+	uint32_t index = 0;
+
+	#pragma unroll
+    for (uint32_t d = 0; d < D && stride <= hashmap_size; d++) {
+        //printf("get_grid_index d=%d, pos_grid[d]=%d, stride=%d, reso=%d\n", d, pos_grid[d], stride, resolution);
+        index += pos_grid[d] * stride;
+        stride *= (resolution + 1);
+    }
+
+    if (stride > hashmap_size) {
+        //printf("hash because %d > %d\n", stride, hashmap_size);
+        index = fast_hash<D>(pos_grid);
+        //printf("hashed (%d, %d) = %d to %d in %d\n", pos_grid[0], pos_grid[1], pos_grid[0] + resolution * pos_grid[1], index % hashmap_size, hashmap_size);
+    }
+
+	return (index % hashmap_size) * C + ch;
+}
+
+
+template <typename scalar_t, uint32_t D, uint32_t C>
+__global__ void kernel_grid(
+    const scalar_t * __restrict__ inputs, 
+    const scalar_t * __restrict__ grid, 
+    const int * __restrict__ offsets, 
+    scalar_t * __restrict__ outputs, 
+    uint32_t B, uint32_t L, uint32_t H,
+    const bool calc_grad_inputs, 
+    scalar_t * __restrict__ dy_dx
+) {
+    const uint32_t b = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    if (b >= B) return;
+
+    const uint32_t level = blockIdx.y;
+    
+    // locate
+    grid += (uint32_t)offsets[level] * C;
+    inputs += b * D;
+    outputs += level * B * C + b * C;
+
+    const uint32_t hashmap_size = offsets[level + 1] - offsets[level];
+    const float scale = exp2f(level) * H - 1.0f;
+    const uint32_t resolution = (uint32_t)ceil(scale) + 1;
+    
+    // calculate coordinate
+    float pos[D];
+    uint32_t pos_grid[D];
+
+    #pragma unroll
+    for (uint32_t d = 0; d < D; d++) {
+        pos[d] = (float)inputs[d] * scale + 0.5f;
+        pos_grid[d] = floorf(pos[d]);
+        pos[d] -= (float)pos_grid[d];
+    }
+
+    //printf("[b=%d, l=%d] pos=(%f, %f)+(%d, %d)\n", b, level, pos[0], pos[1], pos_grid[0], pos_grid[1]);
+
+    // interpolate
+    float results[C] = {0}; // temp results in register
+
+    #pragma unroll
+    for (uint32_t idx = 0; idx < (1 << D); idx++) {
+        float w = 1;
+        uint32_t pos_grid_local[D];
+
+        #pragma unroll
+        for (uint32_t d = 0; d < D; d++) {
+            if ((idx & (1 << d)) == 0) {
+                w *= 1 - pos[d];
+                pos_grid_local[d] = pos_grid[d];
+            } else {
+                w *= pos[d];
+                pos_grid_local[d] = pos_grid[d] + 1;
+            }
+        }
+
+        uint32_t index = get_grid_index<D, C>(0, hashmap_size, resolution, pos_grid_local);
+
+        // writing to register (fast)
+        #pragma unroll
+        for (uint32_t ch = 0; ch < C; ch++) {
+            results[ch] += w * grid[index + ch];
+        }
+
+        //printf("[b=%d, l=%d] int %d, idx %d, w %f, val %f\n", b, level, idx, index, w, grid[index]);
+    }    
+
+    // writing to global memory (slow)
+    #pragma unroll
+    for (uint32_t ch = 0; ch < C; ch++) {
+        outputs[ch] = results[ch]; 
+    }
+
+    // prepare dy_dx for calc_grad_inputs
+    // differentiable (soft) indexing: https://discuss.pytorch.org/t/differentiable-indexing/17647/9
+    if (calc_grad_inputs) {
+
+        dy_dx += b * D * L * C + level * D * C; // B L D C
+
+        #pragma unroll
+        for (uint32_t gd = 0; gd < D; gd++) {
+
+            float results_grad[C] = {0}; // temp
+
+            #pragma unroll
+            for (uint32_t idx = 0; idx < (1 << (D - 1)); idx++) {
+                //float w = scale;
+                float w = 1;
+                uint32_t pos_grid_local[D];
+
+                #pragma unroll
+                for (uint32_t nd = 0; nd < D - 1; nd++) {
+                    const uint32_t d = nd > gd ? nd + 1 : nd;
+
+                    if ((idx & (1 << nd)) == 0) {
+                        w *= 1 - pos[d];
+                        pos_grid_local[d] = pos_grid[d];
+                    } else {
+                        w *= pos[d];
+                        pos_grid_local[d] = pos_grid[d] + 1;
+                    }
+                }
+
+                pos_grid_local[gd] = pos_grid[gd];
+                uint32_t index_left = get_grid_index<D, C>(0, hashmap_size, resolution, pos_grid_local);
+                pos_grid_local[gd] = pos_grid[gd] + 1;
+                uint32_t index_right = get_grid_index<D, C>(0, hashmap_size, resolution, pos_grid_local);
+
+                #pragma unroll
+                for (uint32_t ch = 0; ch < C; ch++) {
+                    results_grad[ch] += w * (grid[index_right + ch] - grid[index_left + ch]);
+                }
+            }
+
+            #pragma unroll
+            for (uint32_t ch = 0; ch < C; ch++) {
+                dy_dx[gd * C + ch] = results_grad[ch];
+            }
+        }
+    }
+}
+
+
+template <typename scalar_t, uint32_t D, uint32_t C, uint32_t N_C>
+__global__ void kernel_grid_backward(
+    const scalar_t * __restrict__ grad,
+    const scalar_t * __restrict__ inputs, 
+    const scalar_t * __restrict__ grid, 
+    const int * __restrict__ offsets, 
+    scalar_t * __restrict__ grad_grid, 
+    uint32_t B, uint32_t L, uint32_t H
+) {
+    const uint32_t b = (blockIdx.x * blockDim.x + threadIdx.x) * N_C / C;
+	if (b >= B) return;
+
+    const uint32_t level = blockIdx.y;
+    const uint32_t ch = (blockIdx.x * blockDim.x + threadIdx.x) * N_C - b * C;
+
+    // locate
+    grad_grid += offsets[level] * C;
+    inputs += b * D;
+    grad += b * L * C + level * C + ch;
+
+    const uint32_t hashmap_size = offsets[level + 1] - offsets[level];
+    const float scale = exp2f(level) * H - 1.0f;
+    const uint32_t resolution = (uint32_t)ceil(scale) + 1;
+
+    // calculate coordinate
+    float pos[D];
+    uint32_t pos_grid[D];
+
+    #pragma unroll
+    for (uint32_t d = 0; d < D; d++) {
+        pos[d] = (float)inputs[d] * scale + 0.5f;
+        pos_grid[d] = floorf(pos[d]);
+        pos[d] -= (float)pos_grid[d];
+    }
+
+    // interpolate
+    #pragma unroll
+    for (uint32_t idx = 0; idx < (1 << D); idx++) {
+        float w = 1;
+        uint32_t pos_grid_local[D];
+
+        #pragma unroll
+        for (uint32_t d = 0; d < D; d++) {
+            if ((idx & (1 << d)) == 0) {
+                w *= 1 - pos[d];
+                pos_grid_local[d] = pos_grid[d];
+            } else {
+                w *= pos[d];
+                pos_grid_local[d] = pos_grid[d] + 1;
+            }
+        }
+
+        uint32_t index = get_grid_index<D, C>(ch, hashmap_size, resolution, pos_grid_local);
+
+        // atomicAdd for __half is slow (especially for large values), so we use __half2 if N_C % 2 == 0
+        // TODO: use float which is better than __half, if N_C % 2 != 0
+        if (std::is_same<scalar_t, at::Half>::value && N_C % 2 == 0) {
+            #pragma unroll
+            for (uint32_t c = 0; c < N_C; c += 2) {
+                // process two __half at once (by interpreting as a __half2)
+                __half2 v = {(__half)(grad[c] * w), (__half)(grad[c + 1] * w)};
+                atomicAdd((__half2*)&grad_grid[index + c], v);
+            }
+        // float, or __half when N_C % 2 != 0
+        } else {
+            #pragma unroll
+            for (uint32_t c = 0; c < N_C; c++) {
+                atomicAdd(&grad_grid[index + c], w * grad[c]);
+            }
+        }
+    }    
+}
+
+
+template <typename scalar_t, uint32_t D, uint32_t C>
+__global__ void kernel_input_backward(
+    const scalar_t * __restrict__ grad,
+    const scalar_t * __restrict__ dy_dx,  
+    scalar_t * __restrict__ grad_inputs, 
+    uint32_t B, uint32_t L
+) {
+    const uint32_t t = threadIdx.x + blockIdx.x * blockDim.x;
+    if (t >= B * D) return;
+
+    const uint32_t b = t / D;
+    const uint32_t d = t - b * D;
+
+    grad += b * L * C;
+    dy_dx += b * L * D * C;
+    
+    # pragma unroll
+    for (int l = 0; l < L; l++) {
+        # pragma unroll
+        for (int ch = 0; ch < C; ch++) {
+            grad_inputs[t] += grad[l * C + ch] * dy_dx[l * D * C + d * C + ch];
+        }
+    }
+}
+
+
+template <typename scalar_t, uint32_t D>
+void kernel_grid_wrapper(const scalar_t *inputs, const scalar_t *embeddings, const int *offsets, scalar_t *outputs, const uint32_t B, const uint32_t C, const uint32_t L, const uint32_t H, const bool calc_grad_inputs, scalar_t *dy_dx) {
+    static constexpr uint32_t N_THREAD = 512;
+	const dim3 blocks_hashgrid = { div_round_up(B, N_THREAD), L, 1 };
+    switch (C) {
+        case 1: kernel_grid<scalar_t, D, 1><<<blocks_hashgrid, N_THREAD>>>(inputs, embeddings, offsets, outputs, B, L, H, calc_grad_inputs, dy_dx); break;
+        case 2: kernel_grid<scalar_t, D, 2><<<blocks_hashgrid, N_THREAD>>>(inputs, embeddings, offsets, outputs, B, L, H, calc_grad_inputs, dy_dx); break;
+        case 4: kernel_grid<scalar_t, D, 4><<<blocks_hashgrid, N_THREAD>>>(inputs, embeddings, offsets, outputs, B, L, H, calc_grad_inputs, dy_dx); break;
+        case 8: kernel_grid<scalar_t, D, 8><<<blocks_hashgrid, N_THREAD>>>(inputs, embeddings, offsets, outputs, B, L, H, calc_grad_inputs, dy_dx); break;
+        default: throw std::runtime_error{"GridEncoding: C must be 1, 2, 4, or 8."};
+    }
+}
+
+// inputs: [B, D], float, in [0, 1]
+// embeddings: [sO, C], float
+// offsets: [L + 1], uint32_t
+// outputs: [L, B, C], float (L first, so only one level of hashmap needs to fit into cache at a time.)
+// H: base resolution
+template <typename scalar_t>
+void hash_encode_forward_cuda(const scalar_t *inputs, const scalar_t *embeddings, const int *offsets, scalar_t *outputs, const uint32_t B, const uint32_t D, const uint32_t C, const uint32_t L, const uint32_t H, const bool calc_grad_inputs, scalar_t *dy_dx) {
+    switch (D) {
+        case 2: kernel_grid_wrapper<scalar_t, 2>(inputs, embeddings, offsets, outputs, B, C, L, H, calc_grad_inputs, dy_dx); break;
+        case 3: kernel_grid_wrapper<scalar_t, 3>(inputs, embeddings, offsets, outputs, B, C, L, H, calc_grad_inputs, dy_dx); break;
+        default: throw std::runtime_error{"GridEncoding: C must be 1, 2, 4, or 8."};
+    }
+    
+}
+
+template <typename scalar_t, uint32_t D>
+void kernel_grid_backward_wrapper(const scalar_t *grad, const scalar_t *inputs, const scalar_t *embeddings, const int *offsets, scalar_t *grad_embeddings, const uint32_t B, const uint32_t C, const uint32_t L, const uint32_t H, const bool calc_grad_inputs, scalar_t *dy_dx, scalar_t *grad_inputs) {
+    static constexpr uint32_t N_THREAD = 256;
+	const uint32_t N_C = std::min(2u, C); // n_features_per_thread
+	const dim3 blocks_hashgrid = { div_round_up(B * C / N_C, N_THREAD), L, 1 };
+    switch (C) {
+        case 1: 
+            kernel_grid_backward<scalar_t, D, 1, 1><<<blocks_hashgrid, N_THREAD>>>(grad, inputs, embeddings, offsets, grad_embeddings, B, L, H); 
+            if (calc_grad_inputs) kernel_input_backward<scalar_t, D, 1><<<div_round_up(B * D, N_THREAD), N_THREAD>>>(grad, dy_dx, grad_inputs, B, L);
+            break;
+        case 2: 
+            kernel_grid_backward<scalar_t, D, 2, 2><<<blocks_hashgrid, N_THREAD>>>(grad, inputs, embeddings, offsets, grad_embeddings, B, L, H);
+            if (calc_grad_inputs) kernel_input_backward<scalar_t, D, 2><<<div_round_up(B * D, N_THREAD), N_THREAD>>>(grad, dy_dx, grad_inputs, B, L);
+            break;
+        case 4: 
+            kernel_grid_backward<scalar_t, D, 4, 2><<<blocks_hashgrid, N_THREAD>>>(grad, inputs, embeddings, offsets, grad_embeddings, B, L, H);
+            if (calc_grad_inputs) kernel_input_backward<scalar_t, D, 4><<<div_round_up(B * D, N_THREAD), N_THREAD>>>(grad, dy_dx, grad_inputs, B, L);
+            break;
+        case 8: 
+            kernel_grid_backward<scalar_t, D, 8, 2><<<blocks_hashgrid, N_THREAD>>>(grad, inputs, embeddings, offsets, grad_embeddings, B, L, H);
+            if (calc_grad_inputs) kernel_input_backward<scalar_t, D, 8><<<div_round_up(B * D, N_THREAD), N_THREAD>>>(grad, dy_dx, grad_inputs, B, L);
+            break;
+        default: throw std::runtime_error{"GridEncoding: C must be 1, 2, 4, or 8."};
+    }
+}
+
+
+// grad: [B, L * C], float
+// inputs: [B, D], float, in [0, 1]
+// embeddings: [sO, C], float
+// offsets: [L + 1], uint32_t
+// grad_embeddings: [sO, C]
+// H: base resolution
+template <typename scalar_t>
+void hash_encode_backward_cuda(const scalar_t *grad, const scalar_t *inputs, const scalar_t *embeddings, const int *offsets, scalar_t *grad_embeddings, const uint32_t B, const uint32_t D, const uint32_t C, const uint32_t L, const uint32_t H, const bool calc_grad_inputs, scalar_t *dy_dx, scalar_t *grad_inputs) {
+    switch (D) {
+        case 2: kernel_grid_backward_wrapper<scalar_t, 2>(grad, inputs, embeddings, offsets, grad_embeddings, B, C, L, H, calc_grad_inputs, dy_dx, grad_inputs); break;
+        case 3: kernel_grid_backward_wrapper<scalar_t, 3>(grad, inputs, embeddings, offsets, grad_embeddings, B, C, L, H, calc_grad_inputs, dy_dx, grad_inputs); break;
+        default: throw std::runtime_error{"GridEncoding: C must be 1, 2, 4, or 8."};
+    }
+}
+
+
+
+void hash_encode_forward(const at::Tensor inputs, const at::Tensor embeddings, const at::Tensor offsets, at::Tensor outputs, const uint32_t B, const uint32_t D, const uint32_t C, const uint32_t L, const uint32_t H, const bool calc_grad_inputs, at::Tensor dy_dx) {
+    CHECK_CUDA(inputs);
+    CHECK_CUDA(embeddings);
+    CHECK_CUDA(offsets);
+    CHECK_CUDA(outputs);
+    CHECK_CUDA(dy_dx);
+    
+    CHECK_CONTIGUOUS(inputs);
+    CHECK_CONTIGUOUS(embeddings);
+    CHECK_CONTIGUOUS(offsets);
+    CHECK_CONTIGUOUS(outputs);
+    CHECK_CONTIGUOUS(dy_dx);
+
+    CHECK_IS_FLOATING(inputs);
+    CHECK_IS_FLOATING(embeddings);
+    CHECK_IS_INT(offsets);
+    CHECK_IS_FLOATING(outputs);
+    CHECK_IS_FLOATING(dy_dx);
+
+    AT_DISPATCH_FLOATING_TYPES_AND_HALF(
+    inputs.scalar_type(), "hash_encode_forward", ([&] {
+        hash_encode_forward_cuda<scalar_t>(inputs.data_ptr<scalar_t>(), embeddings.data_ptr<scalar_t>(), offsets.data_ptr<int>(), outputs.data_ptr<scalar_t>(), B, D, C, L, H, calc_grad_inputs, dy_dx.data_ptr<scalar_t>());
+    }));
+}
+
+void hash_encode_backward(const at::Tensor grad, const at::Tensor inputs, const at::Tensor embeddings, const at::Tensor offsets, at::Tensor grad_embeddings, const uint32_t B, const uint32_t D, const uint32_t C, const uint32_t L, const uint32_t H, const bool calc_grad_inputs, const at::Tensor dy_dx, at::Tensor grad_inputs) {
+    CHECK_CUDA(grad);
+    CHECK_CUDA(inputs);
+    CHECK_CUDA(embeddings);
+    CHECK_CUDA(offsets);
+    CHECK_CUDA(grad_embeddings);
+    CHECK_CUDA(dy_dx);
+    CHECK_CUDA(grad_inputs);
+    
+    CHECK_CONTIGUOUS(grad);
+    CHECK_CONTIGUOUS(inputs);
+    CHECK_CONTIGUOUS(embeddings);
+    CHECK_CONTIGUOUS(offsets);
+    CHECK_CONTIGUOUS(grad_embeddings);
+    CHECK_CONTIGUOUS(dy_dx);
+    CHECK_CONTIGUOUS(grad_inputs);
+
+    CHECK_IS_FLOATING(grad);
+    CHECK_IS_FLOATING(inputs);
+    CHECK_IS_FLOATING(embeddings);
+    CHECK_IS_INT(offsets);
+    CHECK_IS_FLOATING(grad_embeddings);
+    CHECK_IS_FLOATING(dy_dx);
+    CHECK_IS_FLOATING(grad_inputs);
+
+    AT_DISPATCH_FLOATING_TYPES_AND_HALF(
+    grad.scalar_type(), "hash_encode_backward", ([&] {
+        hash_encode_backward_cuda<scalar_t>(grad.data_ptr<scalar_t>(), inputs.data_ptr<scalar_t>(), embeddings.data_ptr<scalar_t>(), offsets.data_ptr<int>(), grad_embeddings.data_ptr<scalar_t>(), B, D, C, L, H, calc_grad_inputs, dy_dx.data_ptr<scalar_t>(), grad_inputs.data_ptr<scalar_t>());
+    }));
+    
+}
+```
+
+### encoder/hashencoder/src/hashencoder.h
+```
+#ifndef _HASH_ENCODE_H
+#define _HASH_ENCODE_H
+
+#include <stdint.h>
+#include <torch/torch.h>
+#include <torch/extension.h>
+
+// inputs: [B, D], float, in [0, 1]
+// embeddings: [sO, C], float
+// offsets: [L + 1], uint32_t
+// outputs: [B, L * C], float
+// H: base resolution
+void hash_encode_forward(const at::Tensor inputs, const at::Tensor embeddings, const at::Tensor offsets, at::Tensor outputs, const uint32_t B, const uint32_t D, const uint32_t C, const uint32_t L, const uint32_t H, const bool calc_grad_inputs, at::Tensor dy_dx);
+void hash_encode_backward(const at::Tensor grad, const at::Tensor inputs, const at::Tensor embeddings, const at::Tensor offsets, at::Tensor grad_embeddings, const uint32_t B, const uint32_t D, const uint32_t C, const uint32_t L, const uint32_t H, const bool calc_grad_inputs, const at::Tensor dy_dx, at::Tensor grad_inputs);
+
+#endif
+```

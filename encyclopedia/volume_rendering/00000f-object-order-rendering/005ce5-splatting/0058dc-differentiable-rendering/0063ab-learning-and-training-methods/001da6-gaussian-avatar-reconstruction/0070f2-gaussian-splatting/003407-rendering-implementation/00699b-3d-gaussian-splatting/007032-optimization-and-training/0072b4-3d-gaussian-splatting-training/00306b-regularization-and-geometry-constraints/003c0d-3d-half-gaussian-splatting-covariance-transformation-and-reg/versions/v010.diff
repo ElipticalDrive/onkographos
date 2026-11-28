@@ -1,0 +1,235 @@
+--- v009.md
++++ v010.md
+@@ -4,140 +4,145 @@
+ 
+ ## Overview
+-This method regularizes the covariance matrices of 3D Gaussians to enforce a "half-Gaussian" geometry, effectively modeling sharp transitions between object surfaces and empty space by cutting ellipsoids along their local surface normals. It differs from sibling methods like [Hard and Soft Depth Regularization](9178-hard-and-soft-depth-regularization.md) by directly modifying the kernel's shape anisotropy rather than adding external loss terms, and from [Geometry Regularization](14222-geometry-regularization.md) by using a deterministic basis transformation instead of gradient-based surface alignment. The technique improves reconstruction quality and rendering speed by eliminating redundant volumetric density in empty space.
++This method modifies the covariance matrix of 3D Gaussians to enforce a "half-Gaussian" shape, effectively cutting the ellipsoid along a plane defined by the local surface normal. This constrains the Gaussian to model only one side of the surface, reducing "ghosting" artifacts and improving geometric fidelity in regions with sharp transitions between object surfaces and empty space. It differs from sibling methods like [Geometry Regularization](14222-geometry-geometry-regularization.md) by explicitly altering the kernel's support geometry rather than just penalizing deviations from estimated normals, and from [Frequency Regularization](6130-frequency-regularization.md) by operating in the spatial domain via covariance shaping.
+ 
+ ## How it works
+-The method modifies the covariance matrix $\Sigma$ of each Gaussian to constrain its spread primarily along the tangent plane of the estimated surface, effectively creating a half-ellipsoid. This transformation is applied periodically during training.
++The method transforms the Gaussian covariance matrix into a local basis aligned with the surface normal, modifies the diagonal elements to zero out the component along the normal direction (effectively flattening the Gaussian into a half-ellipsoid), and transforms it back. This transformation is applied periodically during training.
+ 
+ ### Inputs and Outputs
+-- **Input**: The original 3D Gaussian covariance matrix $\Sigma \in \mathbb{R}^{3 \times 3}$ (symmetric positive definite), and the surface normal vector $n \in \mathbb{R}^3$ associated with the Gaussian.
+-- **Output**: The regularized covariance matrix $\sigma \in \mathbb{R}^{3 \times 3}$ in world space.
++*   **Input:** The original covariance matrix $\Sigma$ (3x3 symmetric positive definite), the surface normal vector $n$ (3x1).
++*   **Output:** The regularized covariance matrix $\sigma$ (3x3 symmetric positive semi-definite).
+ 
+ ### Data Structures
+-The covariance matrix is stored as a $3 \times 3$ symmetric matrix. In implementation, this is often represented by 6 unique values or a full $3 \times 3$ array. The basis matrix is a $3 \times 3$ orthogonal matrix formed by column vectors $v_1, v_2, n$.
++The covariance matrix $\Sigma$ is stored as a 3x3 matrix. The basis matrix is a 3x3 matrix formed by column vectors.
+ 
+ ### Algorithm Steps
+ 
+-1.  **Normalize the normal vector**:
+-    $$ n \leftarrow \frac{n}{\|n\|} $$
++1.  **Normalize the normal vector:**
++    $$n \leftarrow \frac{n}{\|n\|}$$
+ 
+-2.  **Construct the local basis**:
+-    Define two tangent vectors $v_1$ and $v_2$ orthogonal to $n$ and each other.
+-    - If $n_x = 0$ and $n_y = 0$ (i.e., $n$ is aligned with the Z-axis):
+-      $$ v_1 = (1, 0, 0) $$
+-      $$ v_2 = (0, 1, 0) $$
+-    - Otherwise:
+-      $$ v_1 \leftarrow \frac{(n_y, -n_x, 0)}{\|(n_y, -n_x, 0)\|} $$
+-      $$ v_2 \leftarrow \frac{n \times v_1}{\|n \times v_1\|} $$
+-    - Construct the basis matrix $B$ by concatenating these vectors as columns:
+-      $$ B = \begin{bmatrix} | & | & | \\ v_1 & v_2 & n \\ | & | & | \end{bmatrix} $$
++2.  **Construct the local basis:**
++    Define two orthogonal vectors $v_1$ and $v_2$ that span the plane perpendicular to $n$.
++    *   If $n_x = 0$ and $n_y = 0$ (i.e., $n$ is parallel to the z-axis):
++        $$v_1 = (1, 0, 0)$$
++        $$v_2 = (0, 1, 0)$$
++    *   Otherwise:
++        $$v_1 \leftarrow \frac{(n_y, -n_x, 0)}{\|(n_y, -n_x, 0)\|}$$
++        $$v_2 \leftarrow \frac{n \times v_1}{\|n \times v_1\|}$$
++    
++    Construct the basis matrix $B$ by concatenating these vectors as columns:
++    $$B = \begin{bmatrix} | & | & | \\ v_1 & v_2 & n \\ | & | & | \end{bmatrix}$$
+ 
+-3.  **Transform covariance to basis space**:
+-    Compute the covariance in the local basis coordinate system:
+-    $$ \text{cov} = B^T \Sigma B $$
++3.  **Transform covariance to basis space:**
++    Compute the covariance matrix in the local basis coordinate system:
++    $$\text{cov} = B^T \Sigma B$$
+ 
+-4.  **Compute modified diagonal and off-diagonal elements**:
+-    Let $\text{cov}_{i,j}$ denote the element at row $i$, column $j$ of the matrix $\text{cov}$. Calculate the intermediate values $a', b', c'$:
+-    $$ a' \leftarrow \text{cov}_{0,0} - \frac{\text{cov}_{0,2}^2}{\text{cov}_{2,2}} $$
+-    $$ b' \leftarrow \text{cov}_{0,1} - \frac{\text{cov}_{0,2} \cdot \text{cov}_{1,2}}{\text{cov}_{2,2}} $$
+-    $$ c' \leftarrow \text{cov}_{1,1} - \frac{\text{cov}_{1,2}^2}{\text{cov}_{2,2}} $$
+-    *Note: These formulas effectively perform a Schur complement-like reduction, removing the variance component along the normal direction $n$ from the tangent plane components.*
++4.  **Compute modified diagonal/off-diagonal elements:**
++    Calculate the Schur complement-like terms for the top-left 2x2 block, accounting for the coupling with the normal direction (index 2):
++    $$a' \leftarrow \text{cov}[0, 0] - \frac{\text{cov}[0, 2]^2}{\text{cov}[2, 2]}$$
++    $$b' \leftarrow \text{cov}[0, 1] - \frac{\text{cov}[0, 2] \cdot \text{cov}[1, 2]}{\text{cov}[2, 2]}$$
++    $$c' \leftarrow \text{cov}[1, 1] - \frac{\text{cov}[1, 2]^2}{\text{cov}[2, 2]}$$
+ 
+-5.  **Construct the regularized covariance in basis space**:
+-    Create the matrix $\sigma_{\text{local}}$ in the basis coordinates:
+-    $$ \sigma_{\text{local}} = \begin{bmatrix} a' & b' & 0 \\ b' & c' & 0 \\ 0 & 0 & \frac{\min(a', c')}{100} \end{bmatrix} $$
+-    The off-diagonal terms connecting the tangent plane to the normal direction are zeroed out. The variance along the normal direction ($\sigma_{2,2}$) is set to a small fraction ($1/100$) of the smaller tangent variance to maintain numerical stability and enforce the "half" geometry.
++5.  **Construct the regularized covariance in basis space:**
++    Create the matrix $\sigma_{\text{local}}$ in the basis space. The top-left 2x2 block uses the modified values. The elements coupling the tangent plane to the normal direction are zeroed out. The normal direction component is scaled down significantly to enforce the "half" nature (effectively making the Gaussian very thin along the normal):
++    $$\sigma_{\text{local}} = \begin{bmatrix} a' & b' & 0 \\ b' & c' & 0 \\ 0 & 0 & \min(a', c') / 100 \end{bmatrix}$$
++    *Note: The source specifies the element at [2,2] is $\min(a', c') / 100$. The rest of the third row and column are 0.*
+ 
+-6.  **Transform back to world space**:
+-    $$ \sigma = B \sigma_{\text{local}} B^T $$
++6.  **Transform back to world space:**
++    $$\sigma = B \sigma_{\text{local}} B^T$$
+ 
+-7.  **Application Frequency**:
+-    This transformation is performed every 5,000 training iterations [S1].
++7.  **Application Frequency:**
++    This transformation is performed every 5000 training iterations [S1].
+ 
+ ### Pseudocode
+ 
+ ```python
+-def transform_covariance_to_half_gaussian(cov_world: Matrix3x3, normal: Vector3) -> Matrix3x3:
++import numpy as np
++
++def transform_covariance_to_half_gaussian(cov_matrix: np.ndarray, normal: np.ndarray) -> np.ndarray:
+     """
+-    Transforms a 3D Gaussian covariance matrix into a half-Gaussian representation
++    Transforms a 3D Gaussian covariance matrix into a half-Gaussian form
+     aligned with the given surface normal.
+     
+     Args:
+-        cov_world: 3x3 symmetric covariance matrix in world space.
+-        normal: 3D normal vector.
++        cov_matrix: 3x3 symmetric covariance matrix Sigma.
++        normal: 3x1 surface normal vector n.
++        
+     Returns:
+-        Regularized 3x3 covariance matrix in world space.
++        sigma: 3x3 regularized covariance matrix.
+     """
+     # 1. Normalize normal
+-    n = normal / norm(normal)
++    n = normal / np.linalg.norm(normal)
+     
+     # 2. Construct basis
+-    # Check if normal is parallel to Z-axis to avoid division by zero or degenerate cross product
+-    if abs(n.x) < 1e-6 and abs(n.y) < 1e-6:
+-        v1 = Vector3(1.0, 0.0, 0.0)
+-        v2 = Vector3(0.0, 1.0, 0.0)
++    # Check if n is parallel to z-axis
++    if n[0] == 0 and n[1] == 0:
++        v1 = np.array([1.0, 0.0, 0.0])
++        v2 = np.array([0.0, 1.0, 0.0])
+     else:
+-        # v1 is orthogonal to n and lies in XY plane projection
+-        v1_raw = Vector3(n.y, -n.x, 0.0)
+-        v1 = v1_raw / norm(v1_raw)
++        # v1 is orthogonal to n and lies in the xy-plane projection
++        v1_raw = np.array([n[1], -n[0], 0.0])
++        v1 = v1_raw / np.linalg.norm(v1_raw)
+         
+         # v2 is orthogonal to both n and v1
+-        v2_raw = cross(n, v1)
+-        v2 = v2_raw / norm(v2_raw)
++        v2_raw = np.cross(n, v1)
++        v2 = v2_raw / np.linalg.norm(v2_raw)
+         
+-    # Basis matrix B = [v1, v2, n]
+-    B = Matrix3x3(v1, v2, n)
++    # Basis matrix B: columns are v1, v2, n
++    B = np.column_stack((v1, v2, n))
+     
+     # 3. Transform to basis space
+-    cov_local = transpose(B) @ cov_world @ B
++    cov_local = B.T @ cov_matrix @ B
+     
+     # 4. Compute modified elements
+-    # cov_local is 3x3. Indices are 0-based.
+-    cov_00 = cov_local[0, 0]
+-    cov_11 = cov_local[1, 1]
++    # Ensure cov_local[2,2] is not zero to avoid division by zero
++    # [G] In practice, cov_local[2,2] represents variance along normal. 
++    # If it is near zero, the Gaussian is already flat. We add a small epsilon for stability.
++    epsilon = 1e-6
+     cov_22 = cov_local[2, 2]
+-    cov_01 = cov_local[0, 1]
+-    cov_02 = cov_local[0, 2]
+-    cov_12 = cov_local[1, 2]
+-    
+-    # Avoid division by zero if cov_22 is extremely small
+-    if cov_22 < 1e-8:
+-        cov_22 = 1e-8
++    if cov_22 < epsilon:
++        cov_22 = epsilon
+         
+-    a_prime = cov_00 - (cov_02 * cov_02) / cov_22
+-    b_prime = cov_01 - (cov_02 * cov_12) / cov_22
+-    c_prime = cov_11 - (cov_12 * cov_12) / cov_22
++    a_prime = cov_local[0, 0] - (cov_local[0, 2]**2) / cov_22
++    b_prime = cov_local[0, 1] - (cov_local[0, 2] * cov_local[1, 2]) / cov_22
++    c_prime = cov_local[1, 1] - (cov_local[1, 2]**2) / cov_22
+     
+     # 5. Construct regularized local covariance
+-    # The normal component variance is reduced significantly
+-    min_tangent_var = min(a_prime, c_prime)
+-    sigma_local = Matrix3x3(
+-        [a_prime, b_prime, 0.0],
+-        [b_prime, c_prime, 0.0],
+-        [0.0, 0.0, min_tangent_var / 100.0]
+-    )
++    # The coupling terms (0,2), (1,2), (2,0), (2,1) are set to 0
++    # The (2,2) term is scaled down
++    sigma_local = np.zeros((3, 3))
++    sigma_local[0, 0] = a_prime
++    sigma_local[0, 1] = b_prime
++    sigma_local[1, 0] = b_prime
++    sigma_local[1, 1] = c_prime
++    sigma_local[2, 2] = min(a_prime, c_prime) / 100.0
+     
+     # 6. Transform back to world space
+-    sigma_world = B @ sigma_local @ transpose(B)
++    sigma = B @ sigma_local @ B.T
+     
+-    return sigma_world
++    return sigma
+ ```
+ 
+-### Parameters and Edge Cases
+-- **Opacity Thresholds**: To support the half-Gaussian representation, the opacity threshold for densification and pruning is increased to $0.01$, and the initial opacity for new half-Gaussians is reset to $0.02$ [S1]. This helps eliminate dust and noise.
+-- **Division by Zero**: The term $\text{cov}_{2,2}$ appears in the denominator. If the Gaussian is already extremely thin along the normal, this value may approach zero. A small epsilon guard is recommended in implementation [G].
+-- **Frequency**: The transformation is not applied every iteration but every 5,000 iterations to stabilize training [S1].
++### Parameters
++*   **Opacity Threshold for Densification/Pruning:** Increased to 0.01 [S1].
++*   **Opacity Reset for Half-Gaussians:** Set to 0.02 [S1].
++*   **Transformation Interval:** Every 5000 iterations [S1].
++
++### Edge Cases and Pitfalls
++*   **Division by Zero:** The calculation of $a', b', c'$ involves division by $\text{cov}[2, 2]$. If the Gaussian is already perfectly aligned with the tangent plane (variance along normal is zero), this causes a singularity. A small epsilon should be added to the denominator [G].
++*   **Degenerate Normals:** If the normal vector is zero or near-zero, the basis construction fails. The normal must be normalized before use [S1].
++*   **Precision:** The scaling of the normal component by 1/100 makes the Gaussian extremely thin. This may lead to numerical instability during rasterization if the resulting covariance matrix becomes ill-conditioned.
+ 
+ ## Operating characteristics
+-- **Time Complexity**: The transformation involves matrix multiplications ($3 \times 3$) and vector operations, which is $O(1)$ per Gaussian. However, it is only applied every 5,000 iterations, making its impact on total training time negligible.
+-- **Memory Complexity**: No additional memory is required beyond the existing Gaussian parameters.
+-- **Performance**:
+-    - On the Mip-NeRF 360 dataset, 3D-HGS with an Efficient Rasterizer achieves 125 FPS and 29.66 PSNR using 3.8M kernels, compared to 3DGS which uses 3.2M kernels (3DGS FPS/PSNR not explicitly listed in the specific row but implied to be lower or comparable with fewer kernels) [S1].
+-    - On the Tank & Dengin dataset, 3D-HGS achieves 160 FPS and 24.45 PSNR using 1.8M kernels [S1].
+-    - On the Tank & Blending dataset, 3D-HGS achieves 126 FPS and 29.76 PSNR using 2.6M kernels [S1].
+-- **Strengths**: Consistently outperforms original 3D Gaussian Splatting across all metrics (PSNR, etc.) on evaluated datasets [S1]. The splitting planes align well with scene surface normals, effectively modeling sharp transitions [S1].
+-- **Limitations**: Requires accurate surface normals for the transformation. If normals are noisy or incorrect, the half-Gaussian shape may be misaligned.
++*   **Time Complexity:** The transformation involves matrix multiplications ($O(1)$ for fixed 3x3 matrices) and is applied every 5000 iterations, so the per-frame overhead is negligible.
++*   **Memory Complexity:** No additional memory structures are required beyond the existing Gaussian parameters.
++*   **Performance:**
++    *   **Mip-NeRF 360:** 125 FPS, 29.66 PSNR with 3.8M kernels (using Efficient Rasterizer) [S1].
++    *   **Tank & Dengin:** 160 FPS, 24.45 PSNR with 1.8M kernels (using Efficient Rasterizer) [S1].
++    *   **Tank & Blending:** 126 FPS, 29.76 PSNR with 2.6M kernels (using Efficient Rasterizer) [S1].
++*   **Strengths:** Consistently outperforms original 3D Gaussian Splatting in PSNR and other metrics on evaluated datasets [S1]. Effectively models sharp transitions between surfaces and empty space [S1].
++*   **Limitations:** Requires accurate surface normals for the transformation. If normals are noisy or incorrect, the half-Gaussian shape may be misaligned, leading to artifacts.
+ 
+ ## Background
+-The method was introduced in the paper "3D-HGS: 3D Half-Gaussian Splatting" [S1]. It builds upon the 3D Gaussian Splatting framework by modifying the kernel geometry to better represent surfaces. The approach is evaluated against Scaffold, mip-splatting, and MCMC architectures [S1].
++3D Half-Gaussian Splatting (3D-HGS) was introduced to address the issue of "ghosting" and blurring in 3D Gaussian Splatting, particularly around object boundaries. By cutting the Gaussian ellipsoid along the surface normal, the method ensures that the Gaussian only contributes to the rendering on one side of the surface, improving geometric accuracy. The method was evaluated against Scaffold, mip-splatting, and MCMC architectures [S1].
+ 
+ ## Sources

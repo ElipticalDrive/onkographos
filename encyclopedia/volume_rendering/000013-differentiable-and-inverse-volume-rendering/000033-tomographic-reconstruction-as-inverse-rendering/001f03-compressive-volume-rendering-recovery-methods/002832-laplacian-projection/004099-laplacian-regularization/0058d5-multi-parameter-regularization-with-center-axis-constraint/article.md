@@ -1,0 +1,126 @@
+# Multi-parameter Regularization with Center-Axis Constraint
+
+Also called: Center-axis constrained regularization, Multi-Parameter Regularized Inversion for Axisymmetric Tomography, Multi-parameter regularization, Multi-regularized Inversion, Tikhonov with axis constraint
+
+## Overview
+This method stabilizes the ill-posed inverse reconstruction of local extinction coefficients and radiative source terms from infrared radiance data in axisymmetric sprays [S1, unofficial]. It combines a global second-order Tikhonov smoothness penalty with a specific center-axis constraint (zero-gradient condition) to suppress numerical artifacts near the symmetry axis that plague single-penalty Abel-type inversions [S1, unofficial]. Unlike single regularization terms which cause artifacts near the axis, this multi-penalty model preserves physical features by utilizing regularization matrices with different null spaces [S1, unofficial].
+
+## How it works
+**Inputs:**
+*   Line-of-sight IR radiance measurements $y$ [S1, unofficial].
+*   Differential Infrared Thermography (DIT) emissivity $\epsilon_{DIT}$ [S1, unofficial].
+*   Radial grid spacing $\Delta r$ [S1, unofficial].
+*   Regularization weights $\mu_2$ and $\mu_0$ [S1, unofficial].
+*   Threshold for weakly radiating regions $\epsilon_{thresh}$ [S1, unofficial].
+
+**Outputs:**
+*   Local radiative source term vector $x$ [S1, unofficial].
+*   Local extinction coefficient (reconstructed in Step 1) [S1, unofficial].
+
+**Data Structures:**
+*   Radial grid points $r_i$ for $i = 1 \dots N$, where $r_1 = 0$ is the symmetry axis [S1, unofficial].
+*   Unknown vector $x$ of size $N$ representing the local radiative source term [S1, unofficial].
+*   System matrix $F$ encoding the attenuated line-of-sight integral operator [S1, unofficial].
+*   Regularization matrices $L_2$ (global smoothness) and $L_0$ (center-axis constraint) [S1, unofficial].
+
+**Step 1: Reconstruct Local Extinction Coefficient**
+Use the DIT emissivity $\epsilon_{DIT}$ to reconstruct the local extinction coefficient [S1, unofficial]. The DIT technique provides integrated emissivity, which is inverted to obtain attenuation information [S1, unofficial].
+
+**Step 2: Formulate the Inverse Problem for Source Term**
+The local radiative source term is recovered by solving the attenuated line-of-sight integral of the Radiative Transfer Equation (RTE) [S1, unofficial]. The problem is ill-posed and sensitive to measurement noise, particularly near the symmetry axis [S1, unofficial].
+
+**Step 3: Apply Multi-Parameter Regularization**
+Stabilize the inversion by minimizing an objective function that combines two penalty terms [S1, unofficial]:
+1.  **Global Smoothness Penalty:** Second-order Tikhonov regularization to suppress high-frequency oscillations caused by measurement noise [S1, unofficial].
+2.  **Center-Axis Constraint:** A constraint imposing the zero-gradient condition $\frac{\partial x}{\partial r} = 0$ at $r=0$, required by axisymmetry [S1, unofficial].
+
+The objective function $\Phi(x)$ to minimize is:
+$$ \Phi(x) = \|Fx - y\|_2^2 + \mu_2^2 \|L_2 x\|_2^2 + \mu_0 \|L_0 x\|_2^2 $$
+Where:
+*   $F$ is the system matrix representing the line-of-sight integration operator [S1, unofficial].
+*   $y$ is the vector of measured radiance data [S1, unofficial].
+*   $L_2$ is the second-order difference matrix for global smoothness [S1, unofficial].
+*   $L_0$ is the matrix enforcing the zero-gradient condition at the axis [S1, unofficial].
+*   $\mu_2$ and $\mu_0$ are regularization parameters [S1, unofficial].
+
+**Step 4: Boundary Masking**
+Apply a mask based on $\epsilon_{DIT}$ to exclude weakly radiating regions below a prescribed threshold $\epsilon_{thresh}$ [S1, unofficial]. This reduces boundary fluctuations that appear near the outer boundary where the extinction coefficient becomes small [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def multi_param_regularization(y, F, dr, mu2, mu0, epsilon_DIT, epsilon_thresh):
+    """
+    Reconstructs local source term x using multi-parameter regularization 
+    with center-axis constraint.
+    """
+    N = len(y)
+    
+    # L2: Second-order difference matrix for global smoothness (size (N-2) x N)
+    L2 = zeros((N - 2, N))
+    for i in range(N - 2):
+        L2[i, i] = 1.0
+        L2[i, i + 1] = -2.0
+        L2[i, i + 2] = 1.0
+    L2 = L2 / (dr ** 2)
+
+    # L0: Center-axis constraint matrix (size 1 x N)
+    # Enforces x[1] - x[0] = 0 (zero first derivative approximation at axis)
+    L0 = zeros((1, N))
+    L0[0, 0] = -1.0
+    L0[0, 1] = 1.0
+    L0 = L0 / dr
+
+    # Construct combined system matrix B^M = F^T F + mu2^2 L2^T L2 + mu0 L0^T L0
+    BM = F.T @ F + (mu2 ** 2) * (L2.T @ L2) + mu0 * (L0.T @ L0)
+
+    # Construct right-hand side B^M x = F^T y
+    rhs = F.T @ y
+
+    # Solve the linear system using Cholesky factorization
+    # [G] Standard Cholesky decomposition and triangular solves
+    L = cholesky(BM)
+    z = solve_triangular(L, rhs, lower=True)
+    x = solve_triangular(L.T, z, lower=False)
+
+    # Apply boundary masking based on DIT emissivity
+    mask = epsilon_DIT >= epsilon_thresh
+    x = x * mask
+
+    return x
+
+def zeros(shape):
+    """Standard matrix initialization."""
+    return [[0.0 for _ in range(shape[1])] for _ in range(shape[0])]
+
+def cholesky(A):
+    """Standard Cholesky decomposition A = L L^T."""
+    import numpy as np
+    return np.linalg.cholesky(np.array(A))
+
+def solve_triangular(L, b, lower=True):
+    """Standard triangular linear system solve."""
+    import numpy as np
+    return np.linalg.solve(L, b)
+```
+
+**Edge Cases and Pitfalls:**
+*   **Semi-convergence:** Iterative techniques like ART suffer from slow convergence and semi-convergence, where the solution diverges as measurement noise is amplified [S1, unofficial].
+*   **Boundary Fluctuations:** Fluctuations appear near the outer boundary where the extinction coefficient becomes small, because the local radiance is obtained from the ratio of the radiative source term to the extinction coefficient [S1, unofficial].
+*   **Axis Artifacts:** Single global regularization terms cause numerical artifacts near the symmetry axis due to Abel-type inversion sensitivity [S1, unofficial].
+*   **Grid Refinement:** The $L_0$ operator is only effective if the radial grid at the center is sufficiently refined; otherwise, it may not properly damp oscillations [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Strengths:** Improves reconstruction near the axis without significantly influencing the overall radial distribution compared to single Tikhonov regularization [S1, unofficial]. Suppresses high-frequency oscillations and non-physical artifacts near the symmetry axis [S1, unofficial].
+*   **Limitations:** Remaining fluctuations can still appear near the outer boundary where extinction is small [S1, unofficial].
+*   **When to use:** For tomographic reconstruction of IR radiance from axisymmetric sprays in hot environments, particularly when high accuracy near the symmetry axis is required and measurement noise is present [S1, unofficial].
+*   **When not to use:** For non-axisymmetric flows where the center-axis constraint is invalid [G].
+
+## Background
+The method was introduced to address the limitations of single-penalty regularization in axisymmetric spray tomography [S1, unofficial]. It builds on the concept that multi-penalty models with different null spaces can preserve various physical features of the target [S1, unofficial]. The framework combines Differential Infrared Thermography (DIT) with multi-parameter regularized inversion to directly solve the Radiative Transfer Equation (RTE) [S1, unofficial]. Numerical phantom studies, including configurations relevant to evaporating cold sprays and flashing jets, demonstrated the method's accuracy under well-defined conditions and noisy measurement scenarios [S1, unofficial].
+
+## Sources
+[S1] Tomographic Reconstruction of Infrared Radiance from Axisymmetric Sprays in a Hot Environment Using Multi-Parameter Regularization, https://doi.org/10.21203/rs.3.rs-10907544/v1, fetched 2026-10-26 (unofficial)

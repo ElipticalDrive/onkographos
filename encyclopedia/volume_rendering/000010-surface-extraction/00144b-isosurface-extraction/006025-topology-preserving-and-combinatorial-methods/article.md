@@ -1,0 +1,32 @@
+# Topology-Preserving and Combinatorial Methods
+
+Also called: Combinatorial Isosurface Extraction, Topological Disambiguation
+
+## Overview
+This family extracts isosurfaces by enforcing global or local topological constraints (manifoldness, convexity, minimal area) rather than relying solely on local geometric interpolation. It solves the ambiguity and topological errors (non-manifold edges, disconnected components) inherent in standard local methods like [Marching Cubes](30-isosurface-extraction.md). Unlike [Marching Cubes](30-isosurface-extraction.md) which uses fixed lookup tables, these methods use optimization, decision trees, or combinatorial topology to ensure the output mesh is a valid 2-manifold with specific topological properties.
+
+## Shared principles
+All methods in this family operate on a discretized domain, typically a regular grid (Cartesian, octree, or tetrahedral) where each cell contains scalar values or occupancy states at its vertices or centers [G]. They share the goal of producing a two-manifold mesh. They differ from [Dual Contouring and Surface Nets](6319-dual-contouring-and-surface-nets.md) by not necessarily optimizing vertex positions for geometric error, but rather for topological consistency or combinatorial optimality.
+
+## Subtopics
+
+### [Minimal Area Triangulation for Polygons](859-minimal-area-triangulation-for-polygons.md)
+Converts complex 3D isopolygons (e.g., from octree nodes) into minimal-area triangle meshes using dynamic programming. It finds the global optimum for triangulation, distinct from [Advancing Front Framework for Implicit Surfaces](819-advancing-front-framework-for-implicit-surfaces.md) which is incremental. Choose when visual artifact reduction via area minimization is critical for non-convex polygons.
+
+### [Convex Contouring with Decision Trees](1201-convex-contouring-with-decision-trees.md)
+Generates topologically consistent surfaces with local convexity by using pre-computed decision trees to select triangulations based on corner values. It ensures negative space inside each cell is convex, enabling fast collision detection. It differs from [Marching Cubes](30-isosurface-extraction.md) by avoiding disconnected non-convex negative space. Choose when collision detection or convexity guarantees are required.
+
+### [Isosurface Extraction with Topological Optimization](2132-isosurface-extraction-with-topological-optimization.md)
+Optimizes global topological properties (genus, component count) by resolving ambiguities in X-faces and X-cubes. It solves the ambiguity of [Marching Cubes](30-isosurface-extraction.md) configurations by making global decisions to minimize topological complexity. Choose when topological correctness (e.g., genus minimization) is more important than local geometric fidelity.
+
+### [Digital Surface Extraction via Khalimsky Space](3937-digital-surface-extraction-via-khalimsky-space.md)
+Extracts boundary surfaces from digital images using Khalimsky space topology and surfel adjacency rules. It guarantees a combinatorial manifold structure without disambiguation cases. Choose when working with binary or thresholded digital images requiring strict topological validity.
+
+#### Topology-Preserving Isosurface Extraction
+Builds a multiresolution ICM (Implicit Cell Model) representation using hierarchical or selective clustering algorithms [S1, unofficial]. Extracts topology-preserved isosurfaces under various error thresholds [S1, unofficial]. Uses a dynamic, topology-preserving vertex refinement/collapse framework for level-of-detail rendering [S1, unofficial].
+
+## Background
+The concept of preserving topological features during simplification and extraction has been explored in multiresolution modeling [S1, unofficial]. The ICM representation allows for topology-preserved isosurface extraction and solid modeling using CSG operations [S1, unofficial].
+
+## Sources
+[S1] Multiresolution isosurface modeling and rendering, https://openalex.org/W2534430728, fetched 2026-10-26 (unofficial)

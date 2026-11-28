@@ -1,0 +1,196 @@
+# Cone-Beam Projection/Backprojection via B-Spline Homographies
+
+Also called: 2D Resampling with B-spline Correlation, 2D representation of resampling, Convolved B-spline projection, Separable 2D B-spline resampling
+
+## Overview
+This method performs cone-beam projection and backprojection by decomposing the 3D geometric transform into a sum of 2D homographies (planar projections) and solving for the projection coefficients using B-spline expansions [S1]. It addresses the problem of variable magnification in cone-beam tomography, preserving density and handling non-uniform sampling where standard Toeplitz-based constant-magnification methods fail [S1]. It differs from [Fourier-space Projection Operations](6356-fourier-space-projection-operations.md) by operating in the spatial domain with explicit B-spline correlations, and from [Cone-beam Backprojection](17464-cone-beam-backprojection.md) by providing a closed-form linear system solution for the resampling coefficients rather than direct interpolation [S1].
+
+## How it works
+**Inputs:**
+*   Volume coefficients $\mathbf{c} \in \mathbb{R}^{N_{J_1} N_{J_2}}$ representing the volume $f(x,z)$ as a tensor product of B-splines of order $m$.
+*   Projection matrix $\mathbf{P} = \mathbf{P}_i \mathbf{P}_e \in \mathbb{R}^{3 \times 4}$ defining the camera geometry.
+*   B-spline orders $m$ (input volume) and $n$ (output projection).
+
+**Outputs:**
+*   Projection vector $\mathbf{p} \in \mathbb{R}^{N_{I_1} N_{I_2}}$ for forward projection.
+*   Volume coefficients $\mathbf{c}$ for backprojection (adjoint operation).
+
+**Data Structures:**
+*   **Projection Matrix $\mathbf{P}$:** $3 \times 4$ matrix with elements $p_{r,c}$.
+*   **Homography Matrix $\mathbf{H}_{y_0}$:** $3 \times 3$ matrix for a specific plane $y=y_0$.
+*   **Footprint Function $\xi$:** Precomputed or on-the-fly values of $\xi_{\Delta}^{m,n}(\theta) = (\beta^m * \beta_{\Delta}^n)(\theta)$.
+*   **Gram Matrix $\mathbf{G}$:** Symmetric matrix $\mathbb{R}^{N_I \times N_I}$ (or approximated as Kronecker product).
+*   **Correlation Matrix $\mathbf{F}$:** Matrix $\mathbb{R}^{N_I \times N_J}$ (or approximated as Kronecker product).
+
+**Steps:**
+
+1.  **Select Summation Axis:**
+    Determine the axis of summation for decomposing the 3D volume into 2D planes.
+    *   If $|\cos \theta| > |\sin \theta|$, sum along axis $y$ (coronal planes).
+    *   Otherwise, sum along axis $x$ (sagittal planes).
+    *   This ensures the resulting 2D homographies are invertible [S1].
+
+2.  **Construct Projection Matrices:**
+    Compute the intrinsic matrix $\mathbf{P}_i$ and extrinsic matrix $\mathbf{P}_e$:
+    $$
+    \mathbf{P}_i = \begin{pmatrix} \alpha & 0 & u_0 \\ 0 & -\alpha & v_0 \\ 0 & 0 & 1 \end{pmatrix}, \quad
+    \mathbf{P}_e = \begin{pmatrix} \cos \theta & \sin \theta & 0 & t_x \\ 0 & 0 & -1 & t_y \\ -\sin \theta & \cos \theta & 0 & t_z \end{pmatrix}
+    $$
+    where $\alpha$ is the source-to-detector distance in pixel units, $(u_0, v_0)$ is the piercing point, $\theta$ is the rotation angle, $(t_x, t_y)$ are detector centering shifts, and $t_z$ is the source-to-origin distance [S1].
+    Compute $\mathbf{P} = \mathbf{P}_i \mathbf{P}_e$. Note that $p_{2,3} = \alpha$, $p_{3,1} = -\sin \theta$, $p_{3,2} = \cos \theta$, $p_{3,4} = t_z$ [S1].
+
+3.  **Define 2D Homography for Plane $y=y_0$:**
+    Extract the $3 \times 3$ homography matrix $\mathbf{H}_{y_0}$ mapping volume plane coordinates $(x, z)$ to detector coordinates $(u, v)$:
+    $$
+    \mathbf{H}_{y_0} = \begin{pmatrix} p_{1,1} & 0 & p_{1,2}y_0 + p_{1,4} \\ p_{2,1} & p_{2,3} & p_{2,2}y_0 + p_{2,4} \\ p_{3,1} & 0 & p_{3,2}y_0 + p_{3,4} \end{pmatrix} = \begin{pmatrix} h_{1,1} & 0 & h_{1,3} \\ h_{2,1} & h_{2,2} & h_{2,3} \\ h_{3,1} & 0 & h_{3,3} \end{pmatrix}
+    $$
+    The mapping is defined by:
+    $$
+    s(x) = h_{3,1}x + h_{3,3}
+    $$
+    $$
+    u = h_1(x) = \frac{h_{1,1}x + h_{1,3}}{s(x)}, \quad v = h_2(x, z) = \frac{h_{2,1}x + h_{2,2}z + h_{2,3}}{s(x)}
+    $$
+    [S1].
+
+4.  **Compute Local Magnification Factors:**
+    Calculate the local sampling steps (magnification factors) for the projection axis $u$ and $v$:
+    $$
+    \Delta_{1,i_1} = |h_1^{-1}(u_{i_1})'|, \quad \Delta_{2,i_1} = \frac{\partial h_2^{-1}(u_{i_1}, v_{i_2})}{\partial v}
+    $$
+    For backprojection, use $\Delta_{1,j_1}^0 = |h_1'(x_{j_1})|$ and $\Delta_{2,j_1}^0 = \frac{\partial h_2(x_{j_1}, z_{j_2})}{\partial z}$ [S1].
+
+5.  **Construct Footprint Function $\xi$:**
+    The footprint is the convolution of the input B-spline $\beta^m$ and the output B-spline $\beta_{\Delta}^n$:
+    $$
+    \xi_{\Delta}^{m,n}(\theta) = (\beta^m * \beta_{\Delta}^n)(\theta)
+    $$
+    Using the scaling property: $\xi_{\Delta}^{m,n}(\theta) = \Delta \xi_{1/\Delta}^{m,n}(\theta/\Delta)$ [S1].
+
+6.  **Build Matrix $\mathbf{F}$ (Cross-Correlation):**
+    $\mathbf{F}$ maps volume coefficients to projection samples. It is constructed using the footprint function:
+    $$
+    F_{i,j} = \xi_{\Delta_{1,i_1}}^{m,n}(x_{j_1} - h_1^{-1}(u_{i_1})) \cdot \xi_{\Delta_{2,i_1}}^{m,n}(z_{j_2} - h_2^{-1}(u_{i_1}, v_{i_2}))
+    $$
+    where $i = (i_1-1)N_{I_2} + i_2$ and $j = (j_1-1)N_{J_2} + j_2$ [S1].
+    $\mathbf{F}$ can be represented via Kronecker products: $\mathbf{F} = [ (\mathbf{F}_1)_{1,\cdot} \otimes \mathbf{F}_2^1 \quad \dots \quad (\mathbf{F}_1)_{N_{I_1},\cdot} \otimes \mathbf{F}_2^{N_{I_1}} ]$, where:
+    $$
+    (F_1)_{i_1,j_1} = \xi_{\Delta_{1,i_1}}^{m,n}(x_{j_1} - h_1^{-1}(u_{i_1}))
+    $$
+    $$
+    (F_2^{i_1})_{i_2,j_2} = \xi_{\Delta_{2,i_1}}^{m,n}(z_{j_2} - h_2^{-1}(u_{i_1}, v_{i_2}))
+    $$
+    [S1].
+
+7.  **Build Matrix $\mathbf{G}$ (Gram Matrix):**
+    $\mathbf{G}$ is the Gram matrix of the output B-splines. Its elements are:
+    $$
+    G_{i,l} = \Delta_{2,i_1} \Delta_{1,i_1} \xi_{\Delta_{2,l_1}/\Delta_{2,i_1}}^{n,n} \left( \frac{h_2^{-1}(u_{i_1}, v_{i_2}) - h_2^{-1}(u_{l_1}, v_{l_2})}{\Delta_{2,i_1}} \right) \xi_{\Delta_{1,l_1}/\Delta_{1,i_1}}^{n,n} \left( \frac{h_1^{-1}(u_{i_1}) - h_1^{-1}(u_{l_1})}{\Delta_{1,i_1}} \right)
+    $$
+    where $l = (l_1-1)N_{I_2} + l_2$ [S1].
+    The diagonal elements are $G_{ii} = \Delta_i b^{2n+1}(0)$ [S1].
+    $\mathbf{G}$ is approximated as a Kronecker product $\mathbf{G} \simeq \mathbf{G}_1 \otimes \tilde{\mathbf{G}}_2$ under the condition that $|h_1^{-1}(u_{i_1}) - h_1^{-1}(u_{l_1})| \leq (n+1) \frac{\Delta_{1,i_1} + \Delta_{1,l_1}}{2}$ [S1]:
+    $$
+    (G_1)_{i_1, l_1} = \Delta_{1, i_1} \sqrt{\Delta_{2, i_1} \Delta_{2, l_1}} \xi_{\Delta_{1, l_1} / \Delta_{1, i_1}}^{n, n} \left( \frac{h_1^{-1}(u_{i_1}) - h_1^{-1}(u_{l_1})}{\Delta_{1, i_1}} \right)
+    $$
+    $$
+    (\tilde{G}_2)_{i_2,l_2} = \beta^{2n+1} (v_{i_2} - v_{l_2})
+    $$
+    [S1].
+
+8.  **Solve Normal Equations:**
+    Solve for the resampling coefficients $\mathbf{s}_{\Delta}$:
+    $$
+    \mathbf{G} \mathbf{s}_{\Delta} = \mathbf{F} \mathbf{c}
+    $$
+    Using the separable approximation:
+    $$
+    \mathbf{s}_{\Delta} \simeq (\mathbf{G}_1^{-1} \otimes \tilde{\mathbf{G}}_2^{-1}) \mathbf{F} \mathbf{c}
+    $$
+    [S1].
+
+9.  **Compute Projection Vector $\mathbf{p}$:**
+    Apply the magnification and overlap correction:
+    $$
+    \mathbf{p} \simeq ((\text{Diag}(\boldsymbol{\Delta})\tilde{\boldsymbol{\Lambda}}_1\mathbf{G}_1^{-1}) \otimes (\boldsymbol{\Lambda}_2\tilde{\mathbf{G}}_2^{-1}))\mathbf{F}\mathbf{c}
+    $$
+    where $\tilde{\boldsymbol{\Lambda}}_1$ and $\boldsymbol{\Lambda}_2$ are diagonal matrices with elements:
+    $$
+    (\tilde{\Lambda}_1)_{i_1, i_1} = \beta_{\Delta_{i_1, i_1}}^n (h_1^{-1}(u_{i_1}) - h_1^{-1}(u_{i_1}))
+    $$
+    $$
+    (\Lambda_2)_{i_2, i_2} = \beta_1^n(v_{i_2} - v_{i_2})
+    $$
+    [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_footprint(m, n, delta, theta):
+    """
+    Computes the footprint function xi_delta^{m,n}(theta).
+    Uses the scaling property: xi_delta(theta) = delta * xi_1/delta(theta/delta).
+    For implementation, this requires a helper function for B-spline convolution.
+    """
+    # Placeholder for actual B-spline convolution implementation
+    # In practice, precompute or use analytical formulas for beta^m * beta_delta^n
+    return delta * compute_footprint_scaled(m, n, 1.0/delta, theta/delta)
+
+def solve_cone_beam_projection(volume_coeffs, P, u_coords, v_coords, m, n):
+    """
+    volume_coeffs: c[j1, j2] coefficients of volume B-splines order m
+    P: 3x4 projection matrix
+    u_coords: array of u detector coordinates
+    v_coords: array of v detector coordinates
+    m, n: B-spline orders
+    """
+    # 1. Select axis (assume y-axis summation for this example)
+    # 2. Extract Homography H_y0 for each y-plane (loop over y)
+    
+    # Precompute inverse homography components for all u, v
+    # h1_inv(u), h2_inv(u, v)
+    
+    # 3. Compute Magnification Factors
+    Delta1 = abs(dh1_inv_du(u_coords))
+    Delta2 = dh2_inv_dv(u_coords, v_coords)
+    
+    # 4. Construct F and G matrices (using separability)
+    # F1[i1, j1] = xi_Delta1[i1]^{m,n}(x[j1] - h1_inv(u[i1]))
+    # F2[i1, i2, j2] = xi_Delta2[i1]^{m,n}(z[j2] - h2_inv(u[i1], v[i2]))
+    
+    # Construct G1 and G2
+    # G1[i1, l1] = Delta1[i1] * sqrt(Delta2[i1]*Delta2[l1]) * xi...
+    # G2[i2, l2] = beta^{2n+1}(v[i2] - v[l2])
+    
+    # 5. Solve for s_delta
+    # s_delta = kron(G1_inv, G2_inv) @ F @ c
+    
+    # 6. Compute p
+    # Lambda1, Lambda2 diagonal matrices
+    # p = kron(Diag(Delta1) @ Lambda1 @ G1_inv, Lambda2 @ G2_inv) @ F @ c
+    
+    return p
+```
+
+## Subtopics
+
+### Destination-driven interpolation
+A projection/backprojection approach where interpolation is performed in the source space (detector for backprojection, volume for forward projection) by mapping destination coordinates to source coordinates [S1].
+*   **Backprojection:** Start from destination voxel $(x_{j_1}, z_{j_2})$, compute detector coordinates $(u, v)$ using homography $H$, and interpolate projection values at $(u, v)$ [S1].
+*   **Forward Projection:** Step through detector bins $(u_{i_1}, v_{i_2})$, find corresponding voxels mapping into the bin, and numerically integrate volume $f$ over the ray using volume interpolation [S1].
+*   **Footprint:** For 1D projection with $n=m=0$ and constant sampling step 1, the footprint matrix element is $F_{i,j} = \beta^1(x_j - h^{-1}(u_i))$ [S1].
+
+## Operating characteristics
+*   **Complexity:** The method reduces 2D computation to two independent 1D pipelines via separability, resulting in complexity proportional to $O(N_{I_1} N_{J_1} + N_{I_2} N_{J_2})$ per homography plane, rather than $O(N_{I_1} N_{I_2} N_{J_1} N_{J_2})$ [S1].
+*   **Memory:** Requires storage of matrices $\mathbf{F}$ and $\mathbf{G}$ (or their factors). $\mathbf{G}$ is not Toeplitz in the homography case, requiring general linear system solvers instead of digital filters used in constant magnification [S1].
+*   **Strengths:** Handles variable magnification accurately; preserves density; provides a closed-form solution for B-spline coefficients [S1].
+*   **Limitations:** Requires solving a linear system for each homography plane; approximation validity depends on $h_{3,1}$ being small enough so magnification variation is negligible over B-spline support [S1].
+*   **When to use:** Cone-beam tomography with flat-panel detectors where magnification varies significantly across the field of view [S1].
+
+## Background
+The method was introduced in the context of magnification-driven B-spline interpolation for cone-beam projection and backprojection [S1]. It extends the 1D resampling pipeline with constant magnification (solvable by digital filters) to general homographies by allowing the input signal to be approximated with B-splines of order $m$ and the output with order $n$, solving the resulting normal equations [S1].
+
+## Sources
+[S1] Magnification-driven B-spline Interpolation for Cone Beam Projection and Backprojection, https://doi.org/10.1002/mp.15179, fetched 2026-10-26

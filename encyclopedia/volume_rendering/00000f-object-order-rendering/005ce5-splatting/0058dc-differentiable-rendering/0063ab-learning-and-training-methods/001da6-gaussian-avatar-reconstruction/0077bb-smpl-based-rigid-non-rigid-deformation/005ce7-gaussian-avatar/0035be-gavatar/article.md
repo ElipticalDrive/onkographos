@@ -1,0 +1,109 @@
+# GAvatar
+
+Also called: A text-based generation method using primitive-based representation attached to SMPL-X and 3D Gaussians
+
+## Overview
+GAvatar is a text-based generation method that creates animatable human avatars by binding 3D Gaussians to a primitive-based representation attached to the SMPL-X model [S1][S2, unofficial]. It distinguishes itself by using an implicit network to predict Gaussian attribute values and converting Gaussian opacity to a signed distance field (SDF) via a NeuS-like method to provide geometry constraints for detailed textured mesh extraction [S1][S2, unofficial].
+
+## How it works
+**Inputs:** Text prompt and SMPL-X template mesh [S1][S2, unofficial].
+**Outputs:** Animatable 3D human avatar represented by 3D Gaussians and a detailed textured mesh [S1][S2, unofficial].
+
+**Data Structures:**
+1.  **SMPL-X Template:** A parametric human body model [S1][S2, unofficial].
+2.  **Primitive-based Representation:** A set of shells or primitives derived from the SMPL template [S1][S2, unofficial].
+3.  **3D Gaussians:** Attached to the local coordinate system of each primitive [S1][S2, unofficial].
+4.  **Implicit Network:** Predicts the attribute values of the 3D Gaussians [S1][S2, unofficial].
+5.  **Signed Distance Field (SDF):** Derived from Gaussian opacity [S1][S2, unofficial].
+
+**Steps:**
+1.  **Primitive Binding:** Create a primitive-based representation from the SMPL-X template and bind 3D Gaussians to the local coordinate system of each primitive [S1][S2, unofficial].
+2.  **Attribute Prediction:** Use an implicit network to predict the attribute values of the 3D Gaussians based on the primitive parameters [S1][S2, unofficial].
+3.  **Geometry Constraint (SDF Conversion):** Convert the opacity of the 3D Gaussians into a signed distance field using a NeuS-like method to provide geometry constraints [S1][S2, unofficial].
+4.  **Text-to-3D Generation:** Generate the avatar from a text prompt, guided primarily by the SDS loss [S1][S2, unofficial].
+5.  **Mesh Extraction:** Extract a detailed textured mesh using the geometry constraints provided by the SDF [S1][S2, unofficial].
+6.  **Animation:** Utilize differentiable rendering of 3DGS and a generative adversarial network (StyleGAN2) to produce animatable 3D humans [S1][S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def GAvatar(text_prompt, smpl_x_template):
+    # Step 1: Create primitive-based representation from SMPL-X template
+    # Sources do not specify the exact primitive generation algorithm [G].
+    primitives = []
+    for vertex in smpl_x_template.vertices:
+        primitives.append({'center': vertex, 'basis': identity_matrix()})
+
+    # Step 2: Bind 3D Gaussians to primitives
+    # Gaussians are attached to the local coordinate system of each primitive
+    gaussians = []
+    for prim in primitives:
+        gaussians.append({'pos': prim['center'], 'rot': prim['basis'], 
+                          'scale': [1.0, 1.0, 1.0], 'opacity': 0.0, 'color': [0.0, 0.0, 0.0]})
+
+    # Step 3: Predict Gaussian attributes using implicit network
+    implicit_network = ImplicitNetwork()
+    for g in gaussians:
+        g['pos'], g['rot'], g['scale'], g['opacity'], g['color'] = implicit_network.predict(g)
+
+    # Step 4: Convert opacity to SDF for geometry constraints
+    # NeuS-like method details are not provided in the sources [G].
+    def opacity_to_sdf(opacity):
+        # [G] Standard negative log-odds conversion for SDF from opacity
+        return -1.0 * (opacity / (1.0 - opacity + 1e-6)).log()
+
+    sdf_grid = compute_sdf_grid(gaussians, opacity_to_sdf)
+
+    # Step 5: Text-based generation guided by SDS loss
+    learning_rate = 0.01
+    for step in range(1000):
+        rendered_image = differentiable_render(gaussians)
+        sds_loss = compute_sds_loss(rendered_image, text_prompt)
+        for g in gaussians:
+            g['pos'] -= learning_rate * gradient(g['pos'], sds_loss)
+            g['opacity'] -= learning_rate * gradient(g['opacity'], sds_loss)
+        implicit_network.update(gaussians)
+        sdf_grid = compute_sdf_grid(gaussians, opacity_to_sdf)
+
+    # Step 6: Extract detailed textured mesh from SDF
+    # [G] Standard marching cubes algorithm on the SDF grid
+    mesh = marching_cubes(sdf_grid, threshold=0.0)
+
+    # Step 7: Ensure animatability using GAN (StyleGAN2)
+    # [G] Standard GAN refinement step
+    animatable_avatar = refine_with_gan(mesh, gaussians)
+
+    return animatable_avatar
+```
+
+**Parameters:**
+-   **SDS Loss Weight:** Not given in the sources.
+-   **Implicit Network Architecture:** Not given in the sources.
+-   **NeuS-like Method Details:** Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+-   **Geometry Consistency:** The NeuS-like SDF conversion is critical for providing geometry constraints, and inaccuracies here may lead to poor mesh extraction [S1][S2, unofficial].
+-   **Precision and Boundaries:** Standard SDF-to-mesh conversion requires careful handling of grid bounds and sign conventions to avoid degenerate isosurfaces [G].
+
+## Operating characteristics
+**Time and Memory Complexity:** Not given in the sources.
+**Measured Performance:** Not given in the sources.
+**Strengths:**
+-   Enables text-based generation of 3D human avatars [S1][S2, unofficial].
+-   Provides detailed textured meshes through SDF-based geometry constraints [S1][S2, unofficial].
+-   Produces animatable avatars using differentiable rendering and GANs [S1][S2, unofficial].
+**Limitations:**
+-   Relies on the quality of the SMPL-X template and the implicit network [S1][S2, unofficial].
+-   The SDS loss may require careful tuning to avoid artifacts [S1][S2, unofficial].
+**When to Use:**
+-   When text-to-3D generation of animatable human avatars is required [S1][S2, unofficial].
+**When Not to Use:**
+-   When high-fidelity geometry without text guidance is needed [S1][S2, unofficial].
+
+## Background
+GAvatar was introduced as a method for text-based generation of 3D human avatars using primitive-based representation attached to SMPL-X and 3D Gaussians [S1][S2, unofficial]. It builds on the principles of Gaussian Splatting and integrates them with parametric human models (SMPL-X) and generative AI techniques (SDS loss, StyleGAN2) [S1][S2, unofficial]. The method addresses the challenge of generating detailed, animatable 3D humans from text prompts by leveraging geometry constraints from a NeuS-like SDF [S1][S2, unofficial].
+
+## Sources
+[S1] Recent advances in 3D Gaussian splatting, https://doi.org/10.1007/s41095-024-0436-y, fetched 2026-10-26
+[S2] PDF Recent advances in 3D Gaussian splatting - Springer, https://link.springer.com/content/pdf/10.1007/s41095-024-0436-y.pdf, fetched 2026-10-29 (unofficial)

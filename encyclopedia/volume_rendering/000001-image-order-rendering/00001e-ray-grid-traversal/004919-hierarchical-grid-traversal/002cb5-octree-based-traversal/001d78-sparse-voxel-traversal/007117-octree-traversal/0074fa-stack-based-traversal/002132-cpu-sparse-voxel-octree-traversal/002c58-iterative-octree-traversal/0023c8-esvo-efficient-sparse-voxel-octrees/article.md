@@ -1,0 +1,129 @@
+# ESVO (Efficient Sparse Voxel Octrees)
+
+Also called: Efficient Sparse Voxel Octree
+
+## Overview
+ESVO is a GPU-based ray casting algorithm that uses a Sparse Voxel Octree (SVO) to reduce voxel storage costs and enable real-time rendering of large scenes [S2]. It sets itself apart from sibling methods by using a compact 4-byte node encoding with a depth-first (z-curve) memory layout, which optimizes for localized memory access patterns on the GPU [S1, unofficial]. Unlike [Hierarchical Ray Marching](5238-hierarchical-ray-marching.md) which may use larger leaf nodes or different traversal strategies, ESVO relies on a near 1:1 port of the original implementation with specific pointer encoding changes to facilitate buffer-less tree construction [S1, unofficial]. It builds on [Iterative Octree Traversal](2618-iterative-octree-traversal.md) by adapting the traversal loop to the specific memory layout and pointer resolution rules of the SVO.
+
+## How it works
+**Inputs and Outputs:**
+- Input: A Sparse Voxel Octree structure representing the voxel scene and camera parameters (origin, direction, near/far planes) [S1, unofficial]. This port specifically excludes contour generation and beam optimization features [S1, unofficial].
+- Output: A rendered image (color and/or depth) for the given camera view [S2].
+
+**Data Structures:**
+The SVO consists of nodes stored in a linear array [S1, unofficial].
+- **Node Layout**: Each node is 4 bytes (32 bits) [S1, unofficial].
+- **Content**: The node contains pointers to child nodes and potentially voxel data (density/color) if it is a leaf. The exact bit-field layout for children vs. data is not fully specified in the provided notes, but the total size is fixed at 4 bytes [S1, unofficial].
+- **Pointer Encoding**: Pointers are relative [S1, unofficial]. "Backwards" relative pointers are used, meaning parent nodes appear after their children in the memory layout, allowing the tree to be built without intermediate buffers [S1, unofficial]. Far pointers are signaled by a reserved upper range of pointer values rather than a dedicated bit flag [S1, unofficial].
+- **Memory Layout**: Nodes are stored in depth-first order, resulting in a Z-curve (Morton code) layout [S1, unofficial]. This locality helps mitigate memory bandwidth issues despite the small node size [S1, unofficial].
+
+**Algorithm Steps:**
+1. Initialize ray parameters from camera origin, direction, and near/far planes [S2].
+2. Start traversal at the root node [S1, unofficial].
+3. At each node, determine which child (if internal) or voxel (if leaf) the ray intersects [S1, unofficial].
+4. Update the ray position and continue traversal until a leaf is reached or the ray exits the scene [S1, unofficial].
+5. At leaf nodes, sample the voxel data and accumulate the result along the ray [S2].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_esvo(scene, origin, direction, near, far):
+    """
+    Render a scene using ESVO.
+    scene: list of node dicts. Each node: {'type': 0|1, 'children': [None]*8, 'data': None}
+    origin: (ox, oy, oz)
+    direction: (dx, dy, dz)
+    near, far: float
+    """
+    # Handle zero direction components for DDA
+    inv_dir = [1.0 / d if d != 0.0 else float('inf') for d in direction]
+    step = [1 if d > 0 else -1 for d in direction]
+    
+    t_min = near
+    t_max = far
+    
+    # DDA initialization
+    t_max_edge = [(far - origin[i]) * inv_dir[i] for i in range(3)]
+    t_delta = [abs(inv_dir[i]) for i in range(3)]
+    t_tmax = [min(t_max_edge[i], t_max) for i in range(3)]
+    
+    current_node = 0  # Root index
+    acc_color = [0.0, 0.0, 0.0]
+    acc_alpha = 0.0
+    
+    while t_min < t_max and current_node is not None:
+        node = scene[current_node]
+        
+        # Determine octant based on ray direction
+        octant = 0
+        for i in range(3):
+            if step[i] > 0:
+                octant |= (1 << i)
+        
+        if node['type'] == 0:  # Internal node
+            child_idx = node['children'][octant]
+            if child_idx is None:
+                current_node = None
+                break
+            current_node = child_idx
+            # Advance to next grid boundary
+            t_min = t_tmax[0] if t_tmax[0] < t_tmax[1] else t_tmax[1]
+            t_min = t_min if t_min < t_tmax[2] else t_tmax[2]
+            for i in range(3):
+                if t_tmax[i] == t_min:
+                    t_tmax[i] += t_delta[i]
+        else:  # Leaf node
+            color = node['data']['color']
+            alpha = node['data']['alpha']
+            # Front-to-back compositing
+            new_alpha = acc_alpha + (1.0 - acc_alpha) * alpha
+            acc_color = [acc_color[i] + color[i] * (1.0 - acc_alpha) * alpha for i in range(3)]
+            acc_alpha = new_alpha
+            if acc_alpha >= 1.0:
+                break
+            # Advance to next leaf
+            t_min = t_tmax[0] if t_tmax[0] < t_tmax[1] else t_tmax[1]
+            t_min = t_min if t_min < t_tmax[2] else t_tmax[2]
+            for i in range(3):
+                if t_tmax[i] == t_min:
+                    t_tmax[i] += t_delta[i]
+            current_node = None
+            
+    return acc_color
+```
+
+**Parameters:**
+- **Node Size**: Fixed at 4 bytes [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Performance**: The traversal can be slow because it takes many extra iterations to ascend and descend the tree and advance positions by DDA [S1, unofficial].
+- **Memory Bandwidth**: Although nodes are small (4 bytes), performance can be underwhelming on integrated GPUs due to memory bandwidth limitations [S1, unofficial].
+- **Pointer Encoding**: The use of "backwards" relative pointers and reserved upper ranges for far pointers requires careful implementation to resolve addresses correctly [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity**: Traversal time depends on the scene density and tree depth. Editing cost is approximately $O(\log m)$, leveraging path copying for persistent data structures [S1, unofficial].
+- **Memory Complexity**: Memory cost is approximately 4 bytes per node [S1, unofficial].
+- **Measured Performance**:
+    - On Sponza 2k (499k * $8^3$ voxels) on an integrated GPU:
+        - Primary rays: 95.0 Mrays/s [S1, unofficial].
+        - Primary + 1 diffuse bounce: 66.2 Mrays/s [S1, unofficial].
+        - Iterations per ray: 46.9 [S1, unofficial].
+        - Clocks per iteration: 148.3 [S1, unofficial].
+    - On Eco House 2k (448k * $8^3$ voxels) on an integrated GPU:
+        - Primary rays: 67.1 Mrays/s [S1, unofficial].
+        - Primary + 1 diffuse bounce: 52.7 Mrays/s [S1, unofficial].
+        - Iterations per ray: 147.1 [S1, unofficial].
+        - Clocks per iteration: 147.1 [S1, unofficial].
+- **Scaling**: Performance is expected to improve 5-10x on real hardware compared to integrated GPUs [S1, unofficial].
+- **Strengths**: Low memory footprint (4 bytes/node), localized memory access (Z-curve layout), supports real-time rendering [S2].
+- **Limitations**: High iteration count due to tree traversal overhead, performance sensitive to memory bandwidth [S1, unofficial].
+- **When to use**: Suitable for real-time rendering of large voxel scenes where memory bandwidth is not the primary bottleneck and a compact representation is needed [S2].
+- **When not to use**: When higher throughput is required and memory bandwidth is limited, or when the scene is primarily smooth surfaces where other octree traversal methods might perform better [S1, unofficial].
+
+## Background
+ESVO was proposed by Samuli Laine and Tero Karras in 2010 [S2]. It was designed to address the high storage costs of dense voxel representations and to enable real-time ray casting on the GPU [S2]. The method has been implemented and analyzed in various contexts, including the VoxelRT repository [S1, unofficial].
+
+## Sources
+[S1] dubiousconst282/VoxelRT, https://github.com/dubiousconst282/VoxelRT, fetched 2026-10-24 (unofficial)
+[S2] Aokana: A GPU-Driven Voxel Rendering Framework for Open World Games, https://doi.org/10.1145/3728299, fetched 2026-10-26

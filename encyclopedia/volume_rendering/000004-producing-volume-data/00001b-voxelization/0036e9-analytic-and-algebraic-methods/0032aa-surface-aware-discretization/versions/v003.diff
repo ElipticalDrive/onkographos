@@ -1,0 +1,331 @@
+--- v002.md
++++ v003.md
+@@ -4,185 +4,178 @@
+ 
+ ## Overview
+-Surface-Aware Discretization is a voxelization method that computes the effective volume of each voxel based on the intersection of the voxel with a target mesh, rather than assuming the voxel is fully filled or empty [S1, unofficial]. This approach mitigates resolution-related artifacts in volumetric additive manufacturing prints by accurately modeling the partial occupancy of voxels near the surface [S1, unofficial]. It differs from [Signed Distance Field Voxelization](3849-signed-distance-field-voxelization.md) and [Analytic Voxelization](10493-analytic-voxelization.md) by using Monte Carlo ray tracing against the mesh geometry to estimate occupancy, rather than relying on distance fields or closed-form geometric integrals [S1, unofficial].
++Surface-Aware Discretization is a voxelization method that computes the effective volume of each voxel by estimating the intersection between the voxel grid and a target mesh, rather than assuming binary occupancy. It solves the problem of resolution-related artifacts in additive manufacturing by providing a more accurate representation of the object's geometry within the discrete volume. It differs from [Signed Distance Field Voxelization](3849-signed-distance-field-voxelization.md) and [Analytic Voxelization](10493-analytic-voxelization.md) by using Monte Carlo ray tracing to estimate the fractional volume occupied by the mesh, making it suitable for differentiable rendering pipelines where gradient-based optimization of printing patterns is required.
+ 
+ ## How it works
++This method uses a Monte Carlo integration approach to estimate the volume of a voxel occupied by a 3D mesh. It treats the voxel as a sampling domain and shoots rays to determine the probability of intersection with the target surface.
++
+ **Inputs:**
+-- A target mesh (scene object) representing the surface to be voxelized.
+-- A voxel grid defined by resolution `res` (x, y, z dimensions) and voxel size `voxel_size`.
+-- The bounding box of the voxel grid.
+-- A sample count `sample_count` for Monte Carlo estimation.
++- A target triangular mesh (implicitly defined by a scene graph).
++- A 3D grid resolution $(R_x, R_y, R_z)$.
++- The voxel size (derived from the grid and the bounding box of the mesh).
++- A sample count $N$ (default $2^{14}$).
+ 
+ **Outputs:**
+-- A tensor `self.volumes` of shape `res`, containing the effective volume of each voxel.
++- A scalar field (tensor) of shape $(R_x, R_y, R_z)$ where each element represents the estimated volume of the voxel occupied by the mesh.
+ 
+ **Data Structures:**
+-- `voxel`: A tensor of `Point3f` coordinates representing the integer indices of each voxel in the grid, generated via `meshgrid`.
+-- `count_in`, `count_out`: Integer tensors of size `prod(res)`, tracking the number of rays hitting the inside and outside of the mesh for each voxel.
+-- `active`: A boolean mask indicating which voxels still require sampling.
++- `voxel`: A 3D tensor of `Point3f` coordinates representing the center of each voxel.
++- `count_in`, `count_out`: Integer tensors of size $R_x R_y R_z$ storing the number of rays hitting the mesh and missing it, respectively.
++- `self.volumes`: A tensor of shape $(R_x, R_y, R_z)$ storing the final computed volumes.
+ 
+-**Parameters:**
+-- `sample_count`: Number of Monte Carlo samples per voxel. Default value is $2^{14}$ [S1, unofficial].
++**Steps:**
++1.  **Initialization**:
++    -   Check if the discretization is surface-aware. If not, return the full voxel volume for all cells.
++    -   If volumes are already computed, return them.
++    -   Identify the target shape in the scene by ID (e.g., 'target'). Raise an error if not found.
++    -   Create a `target_scene` containing only the target shape to optimize intersection queries.
++    -   Initialize `self.volumes` as a tensor of ones with shape `self.m_film.data.shape`.
++    -   Generate voxel coordinates using a meshgrid:
++        $$ \text{voxel}_i = (x_i, y_i, z_i) $$
++        where $x_i, y_i, z_i$ are indices along each axis.
++    -   Initialize counters `count_in` and `count_out` to zeros with size $R_x R_y R_z$.
++    -   Initialize a random sampler with a fixed seed (e.g., 0) and total samples $N \times R_x R_y R_z$.
+ 
+-**Algorithm:**
+-1. **Initialization:**
+-   - If the film is not surface-aware, return the full voxel volume: $V = \text{prod}(\text{voxel\_size})$ for all voxels [S1, unofficial].
+-   - If volumes are already computed, return them [S1, unofficial].
+-   - Identify the target mesh shape in the scene. If not found, raise `ValueError` [S1, unofficial].
+-   - Create a `target_scene` containing only the target shape [S1, unofficial].
+-   - Initialize `self.volumes` as a tensor of ones with shape `self.m_film.data.shape` [S1, unofficial].
+-   - Generate voxel coordinates:
+-     $$
+-     \begin{aligned}
+-     x &= \text{arange}(0, \text{res}.x) \\
+-     y &= \text{arange}(0, \text{res}.y) \\
+-     z &= \text{arange}(0, \text{res}.z) \\
+-     z_{idx}, y_{idx}, x_{idx} &= \text{meshgrid}(z, y, x, \text{indexing}='ij') \\
+-     \text{voxel} &= \text{Point3f}(x_{idx}, y_{idx}, z_{idx})
+-     \end{aligned}
+-     $$
+-   - Initialize `count_in` and `count_out` to zero tensors of size $\text{prod}(\text{res})$ [S1, unofficial].
+-   - Initialize `d = 0` and `active` mask to all `True` [S1, unofficial].
+-   - Create an independent sampler and seed it with `0` and total samples $\text{prod}(\text{res}) \times \text{sample\_count}$ [S1, unofficial].
++2.  **Monte Carlo Sampling Loop**:
++    -   For each sample $k$ from $0$ to $N-1$:
++        -   Generate a random offset $(u, v, w)$ uniformly in $[0, 1]^3$.
++        -   Compute the ray origin $P$ inside the voxel:
++            $$ P = B_{min} + \text{voxel\_size} \cdot (\text{voxel} + (u, v, w)) $$
++            where $B_{min}$ is the minimum corner of the mesh bounding box.
++        -   Generate a random direction $D$ uniformly distributed over the sphere:
++            $$ D = \text{warp\_square\_to\_uniform\_sphere}(s_1, s_2) $$
++        -   Construct a ray $R = (P, D)$.
++        -   Check if $P$ is inside the mesh bounding box. If not, skip intersection test.
++        -   Perform ray-mesh intersection using the `target_scene`.
++        -   Determine if the ray hits the target mesh:
++            $$ \text{hit} = (\text{si.is\_valid}()) \land (\text{si.shape} == \text{target\_shape}) \land (\text{dot}(D, \text{si.normal}) > 0) $$
++            The normal check ensures the ray enters the mesh (or hits the front face, depending on convention; here it checks for positive dot product with normal, implying specific orientation handling).
++        -   If `hit` is true, increment `count_in` for the corresponding voxel index.
++        -   If `hit` is false (and ray was within bbox), increment `count_out`.
+ 
+-2. **Monte Carlo Sampling Loop:**
+-   - While `active` is true:
+-     - Generate random offset:
+-       $$
+-       \text{offset} = \text{Point3f}(\text{sampler.next\_1d}(), \text{sampler.next\_1d}(), \text{sampler.next\_1d}())
+-       $$
+-     - Compute ray origin:
+-       $$
+-       \text{pos} = \text{bbox.min} + \text{voxel\_size} \times (\text{voxel} + \text{offset})
+-       $$
+-     - Generate random direction uniformly over the sphere:
+-       $$
+-       \text{dir} = \text{warp.square\_to\_uniform\_sphere}(\text{sampler.next\_2d}())
+-       $$
+-     - Construct ray: $\text{ray} = \text{Ray3f}(\text{pos}, \text{dir})$ [S1, unofficial].
+-     - Check if ray origin is inside the mesh bounding box:
+-       $$
+-       \text{in\_mesh\_bbox} = \text{all}((\text{ray.o} > \text{bbox.min}) \land (\text{ray.o} < \text{bbox.max}))
+-       $$
+-     - Perform ray intersection with `target_scene`:
+-       $$
+-       \text{si} = \text{target\_scene.ray\_intersect}(\text{ray}, \text{active} = \text{active} \land \text{in\_mesh\_bbox})
+-       $$
+-     - Determine if the ray hits the inside of the mesh:
+-       $$
+-       \text{is\_inside} = \text{si.is\_valid}() \land (\text{si.shape} == \text{target\_shape}) \land (\text{dot}(\text{ray.d}, \text{si.n}) > 0)
+-       $$
+-     - Update counters:
+-       - If `is_inside` is true, increment `count_in` at the corresponding voxel index.
+-       - If `is_inside` is false (and ray is valid/active), increment `count_out` [S1, unofficial].
+-     - Increment `d` and update `active`:
+-       $$
+-       \text{active} \&= (d < \text{sample\_count})
+-       $$
+-
+-3. **Result Aggregation:**
+-   - After the loop, scatter results into `self.volumes`.
+-   - For each voxel index `idx`:
+-     - The total number of samples is `sample_count`.
+-     - The effective volume is calculated as:
+-       $$
+-       V_{idx} = \frac{\text{count\_in}[idx] \times V_{voxel}}{\text{sample\_count}}
+-       $$
+-       where $V_{voxel} = \text{prod}(\text{voxel\_size})$ [S1, unofficial].
+-     - Note: The source code mentions scattering into `2*idx` and `2*idx+1` for inside/outside, but the final volume calculation uses `count_in` [S1, unofficial]. The effective volume is proportional to the fraction of samples that hit the inside of the mesh.
++3.  **Volume Calculation**:
++    -   After all samples are processed, compute the volume for each voxel $i$:
++        $$ V_i = \frac{\text{count\_in}_i}{N} \cdot V_{voxel} $$
++        where $V_{voxel} = \text{voxel\_size}_x \cdot \text{voxel\_size}_y \cdot \text{voxel\_size}_z$.
++    -   Store $V_i$ in `self.volumes`.
+ 
+ **Pseudocode:**
+ ```python
+-def surface_aware_discretization(target_scene, target_shape, res, voxel_size, sample_count=2**14):
+-    # Check if surface-aware is enabled
+-    if not surface_aware_enabled:
+-        return dr.full(dr.Float, dr.prod(voxel_size), shape=res)
++import drjit as dr
++import mitsuba as mi
+ 
+-    # If volumes already computed, return them
++def surface_aware_discretization(target_scene, target_shape_id, resolution, sample_count=2**14):
++    # 1. Initialization
++    if not is_surface_aware():
++        return dr.prod(voxel_size) * dr.ones(resolution)
++    
+     if volumes_computed:
+         return self.volumes
+ 
+-    # Identify target shape
+-    if target_shape not in scene.shapes:
+-        raise ValueError("Target shape not found in scene")
+-
+-    # Create target scene with only the target shape
+-    target_scene = Scene(shapes=[target_shape])
++    target_shape = target_scene.shape(target_shape_id)
++    if target_shape is None:
++        raise ValueError("Target shape not found")
+ 
+     # Initialize volumes tensor
+-    self.volumes = dr.ones(dr.Float, res)
+-
+-    # Generate voxel coordinates
+-    xx = dr.arange(mi.Float, res.x)
+-    yy = dr.arange(mi.Float, res.y)
+-    zz = dr.arange(mi.Float, res.z)
++    self.volumes = dr.ones(mi.Float, resolution)
++    
++    # Generate voxel centers
++    xx = dr.arange(mi.Float, resolution.x)
++    yy = dr.arange(mi.Float, resolution.y)
++    zz = dr.arange(mi.Float, resolution.z)
+     z_idx, y_idx, x_idx = dr.meshgrid(zz, yy, xx, indexing='ij')
+-    voxel = mi.Point3f(x_idx, y_idx, z_idx)
+-
++    voxel_centers = mi.Point3f(x_idx, y_idx, z_idx)
++    
+     # Initialize counters
+-    count_in = dr.zeros(dr.Int, dr.prod(res))
+-    count_out = dr.zeros(dr.Int, dr.prod(res))
+-    d = 0
+-    active = dr.full(dr.Bool, True, shape=res)
+-
+-    # Initialize sampler
+-    sampler = mi.Sampler()
+-    sampler.seed(0, dr.prod(res) * sample_count)
+-
+-    # Bounding box of the voxel grid
+-    bbox = compute_bbox(res, voxel_size)
+-
+-    # Monte Carlo loop
+-    while dr.any(active):
+-        # Generate random offset
+-        offset = mi.Point3f(sampler.next_1d(), sampler.next_1d(), sampler.next_1d())
+-
++    count_in = dr.zeros(mi.UInt32, dr.prod(resolution))
++    count_out = dr.zeros(mi.UInt32, dr.prod(resolution))
++    
++    # Setup sampler
++    sampler = mi.load_array_sampler() # Assuming a sampler creation utility
++    sampler.seed(0, dr.prod(resolution) * sample_count)
++    
++    bbox = target_scene.bounding_box()
++    voxel_vol = dr.prod(voxel_size)
++    
++    active = dr.ones(mi.Bool, dr.prod(resolution))
++    
++    # 2. Sampling Loop
++    for d in range(sample_count):
++        # Generate random offset within voxel
++        u = sampler.next_1d()
++        v = sampler.next_1d()
++        w = sampler.next_1d()
++        offset = mi.Point3f(u, v, w)
++        
+         # Compute ray origin
+-        pos = bbox.min + voxel_size * (voxel + offset)
+-
++        pos = bbox.min + voxel_size * (voxel_centers + offset)
++        
+         # Generate random direction
+-        dir = mi.warp.square_to_uniform_sphere(sampler.next_2d())
+-
+-        # Construct ray
+-        ray = mi.Ray3f(pos, dir)
+-
+-        # Check if ray origin is inside mesh bounding box
+-        in_mesh_bbox = dr.all((ray.o > bbox.min) & (ray.o < bbox.max))
+-
+-        # Perform ray intersection
+-        si = target_scene.ray_intersect(ray, active=active & in_mesh_bbox)
+-
+-        # Determine if inside mesh
+-        is_inside = si.is_valid() & (si.shape == mi.ShapePtr(target_shape)) & (dr.dot(ray.d, si.n) > 0)
+-
++        s1 = sampler.next_2d()
++        ray_dir = mi.warp.square_to_uniform_sphere(s1)
++        
++        ray = mi.Ray3f(pos, ray_dir)
++        
++        # Check if inside bounding box
++        in_bbox = dr.all((ray.o > bbox.min) & (ray.o < bbox.max))
++        
++        # Perform intersection
++        si = target_scene.ray_intersect(ray, active=active & in_bbox)
++        
++        # Determine hit
++        is_valid = si.is_valid()
++        is_target = si.shape == target_shape
++        front_face = dr.dot(ray.d, si.n) > 0
++        
++        hit = is_valid & is_target & front_face
++        
+         # Update counters
+-        # Note: dr.scatter_add is used to update counts at voxel indices
+-        # The index is derived from the voxel coordinates
+-        idx = dr.ravel_index(voxel)
+-        count_in = dr.scatter_add(count_in, idx, dr.cast(dr.Int, is_inside))
+-        count_out = dr.scatter_add(count_out, idx, dr.cast(dr.Int, ~is_inside & active))
+-
+-        # Increment d and update active mask
+-        d += 1
++        # Note: In a real implementation, scatter_add is used for parallel updates
++        # Here we simulate the logic for clarity
++        idx = dr.flatten_index(...) # Get linear index of voxel
++        count_in = dr.scatter_add(count_in, idx, hit.astype(mi.UInt32))
++        count_out = dr.scatter_add(count_out, idx, (~hit).astype(mi.UInt32))
++        
+         active &= (d < sample_count)
+-
+-    # Scatter results into self.volumes
+-    voxel_vol = dr.prod(voxel_size)
+-    for idx in range(dr.prod(res)):
+-        self.volumes[idx] = count_in[idx] * voxel_vol / sample_count
+-
++        
++    # 3. Final Volume Calculation
++    # V_i = (count_in / sample_count) * voxel_vol
++    # Using drjit scatter/gather for final assignment
++    for i in range(dr.prod(resolution)):
++        if count_in[i] > 0:
++            self.volumes.flat()[i] = (count_in[i] / sample_count) * voxel_vol
++        else:
++            self.volumes.flat()[i] = 0.0
++            
+     return self.volumes
+ ```
+ 
++**Parameters:**
++- `sample_count`: Number of Monte Carlo samples per voxel. Default is $2^{14}$ (16384) [S1, unofficial].
++
++**Edge Cases and Pitfalls:**
++-   **Precision**: Monte Carlo estimation introduces noise. Higher sample counts reduce variance but increase computation time.
++-   **Boundaries**: Rays originating outside the mesh bounding box are skipped to save computation.
++-   **Orientation**: The hit condition checks `dot(ray.d, si.n) > 0`. This assumes a specific mesh orientation convention. If the mesh normals are inconsistent, the volume estimation may be incorrect [S1, unofficial].
++-   **Degenerate Input**: If the target shape is not found, the method raises a `ValueError` [S1, unofficial].
++
++## Subtopics
++
++### Signed Distance Field Voxelization
++Computes the exact signed distance from each voxel center to the mesh surface. Choose when smooth gradients and exact distance metrics are needed, rather than volume fractions. [Link](3849-signed-distance-field-voxelization.md)
++
++### Analytic Voxelization
++Uses exact geometric formulas to compute the intersection volume for simple primitives (e.g., spheres, boxes). Choose when the geometry is composed of simple primitives and exact analytical results are preferred over Monte Carlo estimates. [Link](10493-analytic-voxelization.md)
++
+ ## Operating characteristics
+-- **Time Complexity:** $O(N \cdot S)$, where $N$ is the number of voxels and $S$ is the sample count per voxel. Each voxel requires $S$ ray intersections.
+-- **Memory Complexity:** $O(N)$ for storing the voxel grid and counters.
+-- **Performance:** The method is computationally expensive due to the Monte Carlo ray tracing per voxel. In the Dr. TVAM implementation, this step is part of the inverse rendering pipeline and can take significant time (e.g., 25 minutes for certain configurations) [S1, unofficial].
+-- **Strengths:** Accurately models partial voxel occupancy, reducing resolution artifacts in 3D prints [S1, unofficial].
+-- **Limitations:** High computational cost. Requires a differentiable renderer (Mitsuba) for integration into the inverse rendering framework [S1, unofficial].
+-- **When to use:** When high-fidelity voxelization is required for volumetric additive manufacturing, and computational resources are available.
+-- **When not to use:** When real-time performance is critical, or when the mesh is simple enough for analytic or SDF-based methods.
++-   **Time Complexity**: $O(N \cdot R_x R_y R_z)$, where $N$ is the sample count and $R_x R_y R_z$ is the number of voxels. Each voxel requires $N$ ray-mesh intersection tests.
++-   **Memory Complexity**: $O(R_x R_y R_z)$ to store the volume tensor and counters.
++-   **Performance**: The method is computationally expensive due to the large number of ray intersections. However, it is parallelizable across voxels and samples. In the Dr. TVAM implementation, it is optimized using differentiable rendering backends (Mitsuba) [S1, unofficial].
++-   **Strengths**: Accurately models the fractional volume of complex meshes, reducing artifacts in additive manufacturing. Integrates seamlessly with differentiable rendering pipelines.
++-   **Limitations**: Noisy output due to Monte Carlo sampling. Slow convergence for high-precision requirements. Dependent on the efficiency of the underlying ray-tracer.
++-   **When to use**: When using differentiable rendering for inverse problems in volumetric additive manufacturing, where accurate volume representation is critical for print fidelity.
++-   **When not to use**: When real-time performance is required, or when the geometry is simple enough for analytic solutions.
+ 
+ ## Background
+-Surface-Aware Discretization was introduced in the context of Tomographic Volumetric Additive Manufacturing (TVAM) by Nicolet et al. in 2024 [S1, unofficial]. It is part of the Dr. TVAM framework, which uses physically-based differentiable rendering to optimize patterns for TVAM [S1, unofficial]. The method addresses limitations of prior discretization schemes by exploiting ray tracing to mitigate resolution-related artifacts [S1, unofficial].
++Surface-Aware Discretization was introduced in the context of Tomographic Volumetric Additive Manufacturing (TVAM) by Nicolet et al. in 2024. It is part of the Dr. TVAM framework, which uses physically-based differentiable rendering to optimize printing patterns. The method addresses limitations of prior discretization schemes by accurately modeling the intersection of voxels with complex mesh geometries, thereby mitigating resolution-related artifacts in printed parts [S1, unofficial].
+ 
+ ## Sources

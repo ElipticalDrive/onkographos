@@ -1,0 +1,614 @@
+opencv - OpenGL + CUDA interop - image not displaying in window - Stack Overflow
+x Dismiss
+Join the Stack Overflow Community
+Stack Overflow is a community of 7.5 million programmers, just like you, helping each other.
+Join them; it only takes a minute:
+Sign up
+OpenGL + CUDA interop - image not displaying in window
+Ask Question
+up vote
+0
+down vote
+favorite
+Background: I read an image from disk using OpenCV, passed it to the GPU using CUDA, and now, I am trying to get OpenGL to render the image.
+I am not using GLUT here because I compile my code and get 32-bit Windows to create a new window, inside which I will render the image. Now, I flipped the OpenCV image and got OpenGL to render the image nicely when I simply passed flipped.data to the glTexImage2D() function. However, the same image is not being rendered when I use CUDA + OpenGL.
+My actual images are bigger than the current one. I am using the OpenGL pixel buffer object, and the OpenGL texture to render the image. Utilizing the texture allows me to specify the part of the image I want to display. My grayscale image has dimensions w1024xh256, and it has an 8-bit depth (unsigned char/GL_UNSIGNED_BYTE).
+Question: I can't quite figure out what is going wrong in my code. I tried to carefully follow the CUDA C programming guide, and register/map the CUDA resource with the PBO and the texture as well as with the actual input data. Since my input image data comes from OpenCV, I simply copied flipped's data into the device pointer dev_inp. I (correctly?) mapped the dev_inp to the CUDA resource using cudaGraphicsResourceGetMappedPointer() as well. Yet, the window does not display anything, and remains black. There are no viewport changes, and the coordinates that I specify at glBegin().. glEnd() are correct as they properly map flipped's data to the texture.
+Am I missing something else here? Am I mapping the CUDA resource incorrectly to the PBO or the device pointer?
+OpenGL + CUDA interop portion: This portion is specifically only the CUDA + OpenGL interoperation in my code. The function DrawOpenGLScene() is called from the WindProc() method.
+```
+void DrawOpenGLScene()
+{
+
+    initCUDADevice(); 
+
+    Mat image, flipped;
+    image = imread("K:/Ultrasound experiment images/PA_160.png", CV_LOAD_IMAGE_GRAYSCALE);   // Read the file from disk
+
+    if(!image.data)                              // Check for invalid input
+    {
+        cout <<  "Could not open or find the image" << std::endl ;
+
+
+    }
+
+    cv::flip(image, flipped, 0);
+
+    imshow("flip", image);  // displays output
+
+    //cout << "depth: " << flipped.depth() << endl;
+
+    // ===================================================================================
+    // opengl setup
+
+    // first, the context was created 
+    // now, clear the window with the rendering context
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glLoadIdentity();
+
+    // ====================================================================================
+    // generate the pixel buffer object (PBO)
+
+    // Generate a buffer ID called a PBO (Pixel Buffer Object)
+    glGenBuffers(1, &pbo);
+    // Make this the current UNPACK buffer (OpenGL is state-based)
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, pbo);
+    // Allocate data for the buffer. 4-channel 8-bit image
+    glBufferData(GL_PIXEL_UNPACK_BUFFER, sizeof(unsigned char) * flipped.rows * flipped.cols, NULL, GL_DYNAMIC_COPY);
+    //gpuErrchk(cudaGLRegisterBufferObject( pbo ));
+    gpuErrchk(cudaGraphicsGLRegisterBuffer(&cuda_resource, pbo, cudaGraphicsMapFlagsNone)); 
+
+    // ====================================================================================
+    // create the texture object 
+
+    // enable 2D texturing
+    glEnable(GL_TEXTURE_2D);
+
+    // bind the texture     
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+
+    //glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    // put flipped.data at the end, and it'll work for normal texturing
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE,  image.cols, image.rows,  0, GL_LUMINANCE, GL_UNSIGNED_BYTE, NULL);
+
+    // put tex at the end, and it'll work for normal texturing
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    // ====================================================================================
+    // copy data from openCV 
+
+    unsigned char *dev_inp; 
+
+    gpuErrchk( cudaMalloc((void**)&dev_inp, sizeof(unsigned char)*flipped.rows*flipped.cols) );
+    //cudaGLMapBufferObject((void**)dev_inp, pbo);
+
+    gpuErrchk( cudaGraphicsMapResources(1, &cuda_resource, 0) );
+
+    size_t size; // = sizeof(unsigned char)*flipped.rows*flipped.cols; 
+    gpuErrchk( cudaGraphicsResourceGetMappedPointer((void **)&dev_inp, &size, cuda_resource) );
+
+    gpuErrchk( cudaMemcpy(dev_inp, flipped.data, sizeof(unsigned char)*flipped.rows*flipped.cols, cudaMemcpyHostToDevice) );
+
+    //cudaGLUnmapBufferObject(pbo);
+    gpuErrchk( cudaGraphicsUnmapResources(1, &cuda_resource, 0) ); 
+
+    // ====================================================================================
+    // bind pbo and texture to render data now 
+
+    glBindBuffer( GL_PIXEL_UNPACK_BUFFER, pbo);
+
+    glBindTexture(GL_TEXTURE_2D, tex);
+
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, flipped.cols, flipped.rows, GL_LUMINANCE, GL_UNSIGNED_BYTE, NULL);
+
+    glBegin(GL_QUADS);
+        glTexCoord2f(0.0f, 0.0f); glVertex3f(-1.0f, -1.0f,  1.0f);  // Bottom Left Of The Texture and Quad
+        glTexCoord2f(1.0f, 0.0f); glVertex3f( 1.0f, -1.0f,  1.0f);  // Bottom Right Of The Texture and Quad
+        glTexCoord2f(1.0f, 1.0f); glVertex3f( 1.0f,  1.0f,  1.0f);  // Top Right Of The Texture and Quad
+        glTexCoord2f(0.0f, 1.0f); glVertex3f(-1.0f,  1.0f,  1.0f);  // Top Left Of The Texture and Quad
+    glEnd();
+
+
+    glFlush();  // force rendering to happen 
+
+    //glBindTexture(GL_TEXTURE_2D, 0);
+
+}
+```
+Entire code:
+```
+LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
+void DrawOpenGLScene(void);
+HGLRC SetUpOpenGLContext(HWND hWnd);
+
+GLuint tex; 
+GLuint pbo;
+struct cudaGraphicsResource *cuda_resource;
+
+
+int WINAPI WinMain (HINSTANCE hInstance, HINSTANCE hPrevInstance,
+                    LPSTR lpszCmdLine, int nCmdShow)
+
+{    
+
+    static char szClassName[] = "Myclass";
+    static char szTitle[]="A Simple Win32 API OpenGL Program";
+    WNDCLASS wc; 
+    MSG      msg;  
+    HWND     hWnd;
+
+    wc.style = CS_HREDRAW | CS_VREDRAW;
+    wc.lpfnWndProc = (WNDPROC)WndProc;
+    wc.cbClsExtra = 0;
+    wc.cbWndExtra = 0;
+    wc.hInstance = hInstance;
+    wc.hIcon = NULL; 
+    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+    wc.hbrBackground = (HBRUSH)GetStockObject (BLACK_BRUSH);
+    wc.lpszMenuName = NULL;
+    wc.lpszClassName = szClassName;
+    if (!RegisterClass (&wc))
+        return 0;
+
+    hWnd = CreateWindow(szClassName, szTitle, 
+                    WS_OVERLAPPEDWINDOW |
+                        // NEED THESE for OpenGL calls to work!
+            WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
+                            0, 0, 1024, 256,
+            NULL, NULL, hInstance, NULL);
+
+    ShowWindow(hWnd, nCmdShow);
+    UpdateWindow( hWnd );
+    while (GetMessage(&msg, NULL, 0, 0)) 
+    {
+        TranslateMessage( &msg );
+        DispatchMessage( &msg );
+    }
+
+    return(msg.wParam); 
+
+}
+
+
+
+LRESULT CALLBACK WndProc( HWND hWnd, UINT msg,
+                     WPARAM wParam, LPARAM lParam )
+{
+    HDC hDC;
+    static HGLRC hRC; // Note this is STATIC!
+    PAINTSTRUCT ps;
+
+    switch (msg)
+    {
+    case WM_CREATE:
+        // Select a pixel format and create a rendering context
+        hRC = SetUpOpenGLContext(hWnd);
+        break;
+
+    case WM_PAINT:
+        // Draw the scene
+        // Get a DC, make RC current & associate it with this DC
+        hDC = BeginPaint(hWnd, &ps);
+        wglMakeCurrent(hDC, hRC);
+        DrawOpenGLScene();  // Draw 
+        // We're done with the RC, so deselect it
+        wglMakeCurrent(NULL, NULL);
+        EndPaint(hWnd, &ps);
+        break;       
+
+    case WM_DESTROY:
+        //cudaGLUnregisterBufferObject(pbo);     
+        cudaGraphicsUnregisterResource(cuda_resource); 
+
+        // Clean up and terminate
+        wglDeleteContext(hRC);
+
+        PostQuitMessage(0);
+        break;
+
+            default:
+                    return DefWindowProc(hWnd, msg, wParam, lParam);
+    }
+
+    return (0);
+}
+
+//*******************************************************
+//  SetUpOpenGL sets the pixel format and a rendering
+//  context then returns the RC
+//*******************************************************
+
+HGLRC SetUpOpenGLContext(HWND hWnd)
+{
+    static PIXELFORMATDESCRIPTOR pfd = {
+        sizeof (PIXELFORMATDESCRIPTOR), // strcut size 
+        1,                              // Version number
+        PFD_DRAW_TO_WINDOW |    // Flags, draw to a window,
+            PFD_SUPPORT_OPENGL, // use OpenGL
+        PFD_TYPE_RGBA,          // RGBA pixel values
+        24,                     // 24-bit color
+        0, 0, 0,                // RGB bits & shift sizes.
+        0, 0, 0,                // Don't care about them
+        0, 0,                   // No alpha buffer info
+        0, 0, 0, 0, 0,          // No accumulation buffer
+        32,                     // 32-bit depth buffer
+        0,                      // No stencil buffer
+        0,                      // No auxiliary buffers
+        PFD_MAIN_PLANE,         // Layer type
+        0,                      // Reserved (must be 0)
+        0,                      // No layer mask
+        0,                      // No visible mask
+        0                       // No damage mask
+    };
+
+    int nMyPixelFormatID;
+    HDC hDC;
+    HGLRC hRC;
+
+    hDC = GetDC(hWnd);
+    nMyPixelFormatID = ChoosePixelFormat(hDC, &pfd);
+    SetPixelFormat(hDC, nMyPixelFormatID, &pfd);
+    hRC = wglCreateContext(hDC);
+    ReleaseDC(hWnd, hDC);
+    return hRC;
+}
+
+//***********************************************************
+//  initCUDADevice uses CUDA commands to initiate the CUDA
+//  enabled graphics card. This is prior to resource mapping,
+//  and rendering.
+//***********************************************************
+
+void initCUDADevice() { 
+
+    gpuErrchk(cudaGLSetGLDevice( cutGetMaxGflopsDeviceId() ));    
+
+}
+
+//******************************************************** 
+//  DrawOpenGLScene uses OpenGL commands to draw the scene
+//  This is where we put the OpenGL drawing commands
+//********************************************************
+
+void DrawOpenGLScene()
+{
+
+    initCUDADevice(); 
+
+    Mat image, flipped;
+    image = imread("K:/Ultrasound experiment images/PA_160.png", CV_LOAD_IMAGE_GRAYSCALE);   // Read the file from disk
+
+    if(!image.data)                              // Check for invalid input
+    {
+        cout <<  "Could not open or find the image" << std::endl ;
+
+
+    }
+
+    cv::flip(image, flipped, 0);
+
+    imshow("flip", image);  // displays output
+
+    //cout << "depth: " << flipped.depth() << endl;
+
+    // ===================================================================================
+    // opengl setup
+
+    // first, the context was created 
+    // now, clear the window with the rendering context
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glLoadIdentity();
+
+    // ====================================================================================
+    // generate the pixel buffer object (PBO)
+
+    // Generate a buffer ID called a PBO (Pixel Buffer Object)
+    glGenBuffers(1, &pbo);
+    // Make this the current UNPACK buffer (OpenGL is state-based)
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, pbo);
+    // Allocate data for the buffer. 4-channel 8-bit image
+    glBufferData(GL_PIXEL_UNPACK_BUFFER, sizeof(unsigned char) * flipped.rows * flipped.cols, NULL, GL_DYNAMIC_COPY);
+    //gpuErrchk(cudaGLRegisterBufferObject( pbo ));
+    gpuErrchk(cudaGraphicsGLRegisterBuffer(&cuda_resource, pbo, cudaGraphicsMapFlagsNone)); 
+
+    // ====================================================================================
+    // create the texture object 
+
+    // enable 2D texturing
+    glEnable(GL_TEXTURE_2D);
+
+    // bind the texture     
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+
+    //glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    // put flipped.data at the end, and it'll work for normal texturing
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE,  image.cols, image.rows,  0, GL_LUMINANCE, GL_UNSIGNED_BYTE, NULL);
+
+    // put tex at the end, and it'll work for normal texturing
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    // ====================================================================================
+    // copy data from openCV 
+
+    unsigned char *dev_inp; 
+
+    gpuErrchk( cudaMalloc((void**)&dev_inp, sizeof(unsigned char)*flipped.rows*flipped.cols) );
+    //cudaGLMapBufferObject((void**)dev_inp, pbo);
+
+    gpuErrchk( cudaGraphicsMapResources(1, &cuda_resource, 0) );
+
+    size_t size; // = sizeof(unsigned char)*flipped.rows*flipped.cols; 
+    gpuErrchk( cudaGraphicsResourceGetMappedPointer((void **)&dev_inp, &size, cuda_resource) );
+
+    gpuErrchk( cudaMemcpy(dev_inp, flipped.data, sizeof(unsigned char)*flipped.rows*flipped.cols, cudaMemcpyHostToDevice) );
+
+    //cudaGLUnmapBufferObject(pbo);
+    gpuErrchk( cudaGraphicsUnmapResources(1, &cuda_resource, 0) ); 
+
+    // ====================================================================================
+    // bind pbo and texture to render data now 
+
+    glBindBuffer( GL_PIXEL_UNPACK_BUFFER, pbo);
+
+    glBindTexture(GL_TEXTURE_2D, tex);
+
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, flipped.cols, flipped.rows, GL_LUMINANCE, GL_UNSIGNED_BYTE, NULL);
+
+    glBegin(GL_QUADS);
+        glTexCoord2f(0.0f, 0.0f); glVertex3f(-1.0f, -1.0f,  1.0f);  // Bottom Left Of The Texture and Quad
+        glTexCoord2f(1.0f, 0.0f); glVertex3f( 1.0f, -1.0f,  1.0f);  // Bottom Right Of The Texture and Quad
+        glTexCoord2f(1.0f, 1.0f); glVertex3f( 1.0f,  1.0f,  1.0f);  // Top Right Of The Texture and Quad
+        glTexCoord2f(0.0f, 1.0f); glVertex3f(-1.0f,  1.0f,  1.0f);  // Top Left Of The Texture and Quad
+    glEnd();
+
+
+    glFlush();  // force rendering to happen 
+
+    //glBindTexture(GL_TEXTURE_2D, 0);
+
+}
+```
+opencv opengl cuda interop
+share|improve this question
+edited Aug 26 '14 at 22:43
+asked Aug 26 '14 at 18:05
+Eagle
+4643726
+add a comment |
+1 Answer
+1
+active
+oldest
+votes
+up vote
+0
+down vote
+accepted
+In case someone else runs into the same problem, this thread can serve to help them.
+I solved my problem by changing only a couple of calls in DrawOpenGLScene().
+It turns out that cudaGraphicsResourceGetMappedPointer() returns a pointer to and derived from the OpenGL PBO, and places that pointer in dev_inp. It internally allocates size = sizeof(unsigned char) * flipped.rows * flipped.cols memory for the dev_inp based on the previously established calls to glBufferData() and cudaGraphicsGLRegisterBuffer().
+Once this is done, the memory that I had previously allocated using cudaMalloc() now ceases to exist because it is overwritten by the call to cudaGraphicsResourceGetMappedPointer() that places the pointer in dev_inp. Removing the cudaMalloc() and cudaFree() allowed the program to run as originally intended.
+In order to deallocate the memory, one should deallocate the PBO as OpenGL is the "owner" of the memory, and CUDA just shares access to the memory owned by OpenGL.
+The modified DrawOpenGLScene() routine is pasted below:
+```
+#define GET_PROC_ADDRESS( str ) wglGetProcAddress( str )
+
+PFNGLBINDBUFFERARBPROC    glBindBuffer     = NULL;
+PFNGLDELETEBUFFERSARBPROC glDeleteBuffers  = NULL;
+PFNGLGENBUFFERSARBPROC    glGenBuffers     = NULL;
+PFNGLBUFFERDATAARBPROC    glBufferData     = NULL;
+
+void initCUDADevice() { 
+
+    gpuErrchk(cudaGLSetGLDevice( cutGetMaxGflopsDeviceId() ));    
+
+}    
+
+//******************************************************** 
+//  DrawOpenGLScene uses OpenGL commands to draw the scene
+//  This is where we put the OpenGL drawing commands
+//********************************************************
+
+void DrawOpenGLScene()
+{
+
+    // Clear Color and Depth Buffers
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    // Reset transformations
+    glLoadIdentity();
+
+    // ====================================================================================
+    // initiate GPU by setting it correctly 
+    initCUDADevice(); 
+
+    // ====================================================================================
+    // read the image that needs to be textured 
+
+    Mat image, flipped;
+    image = imread("K:/OCT experiment images/PA_175.png", CV_LOAD_IMAGE_GRAYSCALE);   // Read the file from disk
+
+    if(!image.data)                              // Check for invalid input
+    {
+        cout <<  "Could not open or find the image" << std::endl ;
+
+
+    }
+
+    cv::flip(image, flipped, 0);
+
+    imshow("OpenCV - image", image);    // displays output
+
+    // ====================================================================================
+    // allocate the PBO, texture, and CUDA resource
+
+    glBindBuffer    = (PFNGLBINDBUFFERARBPROC)GET_PROC_ADDRESS("glBindBuffer");
+    glDeleteBuffers = (PFNGLDELETEBUFFERSARBPROC)GET_PROC_ADDRESS("glDeleteBuffers");
+    glGenBuffers    = (PFNGLGENBUFFERSARBPROC)GET_PROC_ADDRESS("glGenBuffers");
+    glBufferData    = (PFNGLBUFFERDATAARBPROC)GET_PROC_ADDRESS("glBufferData");
+
+    // ====================================================================================
+    // generate the pixel buffer object (PBO)
+
+    // Generate a buffer ID called a PBO (Pixel Buffer Object)
+    glGenBuffers(1, &pbo);
+
+    // Make this the current UNPACK buffer (OpenGL is state-based)
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, pbo);
+
+    // Allocate data for the buffer. 4-channel 8-bit image
+    glBufferData(GL_PIXEL_UNPACK_BUFFER, sizeof(unsigned char) * flipped.rows * flipped.cols, NULL, GL_STREAM_DRAW);
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+
+    gpuErrchk(cudaGraphicsGLRegisterBuffer(&cuda_resource, pbo, cudaGraphicsMapFlagsNone)); 
+
+    // ====================================================================================
+    // create the texture object 
+
+    // enable 2D texturing
+    glEnable(GL_TEXTURE_2D);
+
+    // generate and bind the texture    
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+
+    // put flipped.data at the end for cpu rendering 
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE,  image.cols, image.rows,  0, GL_LUMINANCE, GL_UNSIGNED_BYTE, 0 );
+
+    // put tex at the end for cpu rendering 
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    // ====================================================================================
+    // copy OpenCV flipped image data into the device pointer
+
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    unsigned char *dev_inp; 
+
+    //gpuErrchk( cudaMalloc((void**)&dev_inp, sizeof(unsigned char)*flipped.rows*flipped.cols) );
+
+    gpuErrchk( cudaGraphicsMapResources(1, &cuda_resource, 0) );
+
+    size_t size; 
+    gpuErrchk( cudaGraphicsResourceGetMappedPointer((void **)&dev_inp, &size, cuda_resource) );
+
+    gpuErrchk( cudaMemcpy(dev_inp, flipped.data, sizeof(unsigned char)*flipped.rows*flipped.cols, cudaMemcpyHostToDevice) );
+
+    gpuErrchk( cudaGraphicsUnmapResources(1, &cuda_resource, 0) ); 
+
+    // ====================================================================================
+    // bind pbo and texture to render data now 
+
+    glBindBuffer( GL_PIXEL_UNPACK_BUFFER, pbo);
+    //
+    glBindTexture(GL_TEXTURE_2D, tex);
+
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, flipped.cols, flipped.rows, GL_LUMINANCE, GL_UNSIGNED_BYTE, NULL);
+
+    gpuErrchk( cudaGraphicsUnregisterResource(cuda_resource));
+    gpuErrchk( cudaThreadSynchronize());
+
+    //gpuErrchk(cudaFree(dev_inp));
+
+    // ====================================================================================
+    // map the texture coords to the vertex coords 
+
+    glBegin(GL_QUADS);
+    // Front Face
+    glTexCoord2f(0.0f, 0.0f); glVertex3f(-1.0f, -1.0f,  1.0f);  // Bottom Left Of The Texture and Quad
+    glTexCoord2f(1.0f, 0.0f); glVertex3f( 1.0f, -1.0f,  1.0f);  // Bottom Right Of The Texture and Quad
+    glTexCoord2f(1.0f, 1.0f); glVertex3f( 1.0f,  1.0f,  1.0f);  // Top Right Of The Texture and Quad
+    glTexCoord2f(0.0f, 1.0f); glVertex3f(-1.0f,  1.0f,  1.0f);  // Top Left Of The Texture and Quad
+
+    glEnd();
+
+    glFlush();  // force rendering
+
+    glDisable(GL_TEXTURE_2D);
+
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+    glDeleteBuffers(1, &pbo);
+```
+share|improve this answer
+answered Sep 1 '14 at 19:19
+Eagle
+4643726
+Please keep in mind that you do not need to map/unmap CUDA resources every time you draw in OpenGL to successfully do interop. Please refer to this example: github.com/nvpro-samples/gl_cuda_interop_pingpong_st
+– bigD
+May 8 '15 at 22:10
+add a comment |
+Not the answer you're looking for? Browse other questions tagged opencv opengl cuda interop or ask your own question.
+asked
+2 years, 11 months ago
+viewed
+945 times
+active
+2 years, 11 months ago
+Linked
+1
+OpenCV - copy CUDA device data into GPU Mat
+Related
+15
+Cuda and OpenGL Interop
+0
+CUDA OPENGL Interoperability: cudaGLSetGLDevice
+2
+Peer to Peer Cuda Kernels - OpenGL Interop
+8
+CUDA/OpenGL interop, draw to OpenGL texture with CUDA
+2
+Crash with CUDA/OGL interop
+3
+CUDA + OpenGL Interop without deprecated functionality
+-1
+Animate with OpenGL, compute with CUDA
+0
+glReadPixels equivalent in CUDA - OpenGL interop, using VBO
+0
+Can only see a single white point CUDA/OpenGL interop
+1
+CUDA/OpenGL InterOp: Using Grayscale Image as Texture with
+Hot Network Questions
+Are my parents ripping me off with this deal that doesn't allow me to build my equity in my home?
+What is "Bird Strike Speed"?
+Would a frictionless fluid make a good lubricant for physical machinery?
+Does the Enterprise-D bridge have a top window?
+What is a reasonable player cost for Manor rebuilding?
+To prove the addition of the square of two ideals of a ring is the ring itself.
+Does pure yellow exist in variations we can't discern?
+How did people know how to build the first space ship?
+Is there any equivalent for this Persian idiom: "Like a cow with a white forehead"?
+Quoting a typo: Do I really have to do "sic", or can I just fix the sentence?
+How to align numbers in a table with different character width?
+Can you report a crash landing on an emergency frequency even if you are not at the airport?
+Control-C triggers logout from root in bash
+Can a DM tell a player if/when they act or roleplay in a manner that isn't their alignment?
+What emergencies could justify a highly liquid emergency fund?
+Taking Out 'Access denied " Lines
+In Germany, what are you supposed to do if your train station doesn't have any working ticket machines?
+Math font with special K
+Mathematically interesting screensavers
+Is the Waif wearing Arya's face?
+How do you revise material that you already half-know, without getting bored and demotivated?
+Parallelogram a Number
+How much time will it take me to watch the .hack series?
+How can I ask politely about someone's preferred gender pronouns?
+more hot questions
+question feed
+default

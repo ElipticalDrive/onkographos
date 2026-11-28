@@ -1,0 +1,152 @@
+# Adjacent Neighbors in Dimension 1
+
+Also called: AdjacentNeighbors, Adjacent Neighbors in Dimension 1 of an Interval
+
+## Overview
+This method determines the empty integer intervals immediately adjacent to a query interval $I$ within a sorted collection of existing intervals $I_1$. It returns a pair $(C_l, C_r)$ representing the gap between $I$ and its nearest left neighbor, and the gap between $I$ and its nearest right neighbor, respectively. It is a subroutine for sweep-line algorithms in voxel data compression, distinguishing itself by explicitly handling the discrete integer boundaries and "sign" states of interval endpoints to define strict adjacency gaps.
+
+## How it works
+**Inputs:**
+*   $I$: The query interval, defined as $[a, b]$ where $a, b \in \mathbb{R}$ (typically integers in this context).
+*   $I_1$: A sorted array of $N$ intervals $\{I_1[1], \dots, I_1[N]\}$. Each interval $I_k$ has a minimum endpoint $\min(I_k)$ and maximum endpoint $\max(I_k)$.
+
+**Outputs:**
+*   $C_l$: The interval strictly between the left endpoint of $I$ and the right endpoint of the nearest left neighbor, or the left endpoint of $I$ itself if no such gap exists.
+*   $C_r$: The interval strictly between the right endpoint of $I$ and the left endpoint of the nearest right neighbor, or the right endpoint of $I$ itself if no such gap exists.
+
+**Data Structures:**
+*   $I_1$ is stored as a sorted array. Access to $\min(I_k)$ and $\max(I_k)$ is $O(1)$.
+*   The binary search operates on indices $1$ to $N$.
+
+**Algorithm Steps:**
+
+1.  **Initialize Boundaries:**
+    Set $imin = \min(I) - 1$ and $imax = \max(I) + 1$. These values define the search targets for the immediate left and right neighbors in the integer domain.
+
+2.  **Find Left Neighbor ($C_l$):**
+    Perform a binary search for the interval in $I_1$ with an endpoint closest to $imin$, searching in the $-1$ direction (left). This returns an interval $I_l$ and a sign $sign_l$.
+    *   If $sign_l = +1$ (indicating the closest endpoint found was a *right* endpoint of some interval $I_l$), then a gap exists between $I_l$ and $I$. Set:
+        $$C_l = [\max(I_l) + 1, imin]$$
+    *   Else (if $sign_l \neq +1$, meaning the closest endpoint was a *left* endpoint or no valid right endpoint was found to the left), set:
+        $$C_l = [imin + 1, imin + 1]$$
+        This represents the single integer point at the left boundary of $I$.
+
+3.  **Find Right Neighbor ($C_r$):**
+    Perform a binary search for the interval in $I_1$ with an endpoint closest to $imax$, searching in the $+1$ direction (right). This returns an interval $I_r$ and a sign $sign_r$.
+    *   If $sign_r = -1$ (indicating the closest endpoint found was a *left* endpoint of some interval $I_r$), then a gap exists between $I$ and $I_r$. Set:
+        $$C_r = [imax, \min(I_r) - 1]$$
+    *   Else (if $sign_r \neq -1$, meaning the closest endpoint was a *right* endpoint or no valid left endpoint was found to the right), set:
+        $$C_r = [imax - 1, imax - 1]$$
+        This represents the single integer point at the right boundary of $I$.
+
+4.  **Return:**
+    Return the pair $(C_l, C_r)$.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def adjacent_neighbors(I, I1):
+    """
+    Finds adjacent empty intervals around I in sorted I1.
+    I: tuple (min_val, max_val)
+    I1: list of tuples [(min1, max1), (min2, max2), ...], sorted by min_val
+    Returns: (Cl, Cr) where Cl and Cr are tuples (start, end)
+    """
+    # Step 1: Initialize boundaries
+    imin = I[0] - 1
+    imax = I[1] + 1
+    
+    # Step 2: Find Left Neighbor
+    # Binary search for closest integer key to imin in I1, searching -1 direction
+    Il, signl = binary_search_dim1(0, len(I1) - 1, imin, I1, -1)
+    
+    if signl == 1:
+        # Gap exists between right endpoint of Il and left of I
+        Cl = (Il[1] + 1, imin)
+    else:
+        # No gap, return left endpoint of I
+        Cl = (imin + 1, imin + 1)
+        
+    # Step 3: Find Right Neighbor
+    # Binary search for closest integer key to imax in I1, searching +1 direction
+    Ir, signr = binary_search_dim1(0, len(I1) - 1, imax, I1, 1)
+    
+    if signr == -1:
+        # Gap exists between right of I and left endpoint of Ir
+        Cr = (imax, Ir[0] - 1)
+    else:
+        # No gap, return right endpoint of I
+        Cr = (imax - 1, imax - 1)
+        
+    return (Cl, Cr)
+
+def binary_search_dim1(a1, b1, T1, I1, sign):
+    """
+    Binary search within dimension 1.
+    a1, b1: search range indices [a1, b1]
+    T1: target integer
+    I1: sorted array of intervals
+    sign: -1 (search left) or +1 (search right)
+    Returns: (interval, signo)
+    """
+    m1 = (a1 + b1) // 2
+    
+    if sign == -1:
+        signo = -1  # Default to Left Endpoint
+        while a1 < m1:
+            # Check if max of mid interval is strictly less than target
+            if I1[m1][1] < T1:
+                a1 = m1
+                signo = 1  # Found a right endpoint < T1
+            # Check if min of mid interval is strictly less than target
+            elif I1[m1][0] < T1:
+                a1 = m1
+                signo = -1 # Found a left endpoint < T1
+            else:
+                b1 = m1
+            m1 = (a1 + b1) // 1
+    else: # sign == 1
+        # Implementation for +1 direction mirrors -1 logic
+        # Default to Right Endpoint for right search
+        signo = 1
+        while a1 < m1:
+            if I1[m1][0] > T1:
+                b1 = m1
+                signo = -1 # Found a left endpoint > T1
+            elif I1[m1][1] > T1:
+                b1 = m1
+                signo = 1  # Found a right endpoint > T1
+            else:
+                a1 = m1
+            m1 = (a1 + b1) // 1
+            
+    # Return the interval I1[m1] (or I1[a1] depending on convergence)
+    # Note: The source pseudocode returns (Il, signl) where Il is the interval found
+    # The exact interval index returned by the loop needs to be resolved.
+    # Based on standard binary search convergence, a1 == b1 == m1 at end.
+    return (I1[a1], signo)
+```
+
+**Parameters:**
+*   $I$: Query interval.
+*   $I_1$: Sorted collection of intervals.
+*   Typical values: Not specified.
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The algorithm relies on integer arithmetic. If $I$ contains non-integer coordinates, $\min(I)$ and $\max(I)$ must be cast or floored/ceiled appropriately before subtracting/adding 1, as the method assumes integer keys [S1, unofficial].
+*   **Empty $I_1$:** If $I_1$ is empty, the binary search must handle the empty range. The source does not explicitly define the behavior for $N=0$, but logically $C_l$ and $C_r$ would default to the boundary points of $I$ (the `else` branches).
+*   **Sign Logic:** The sign $sign_l = +1$ specifically indicates that the closest interval to the left ends *before* $imin$. If the closest interval starts after $imin$ (a left endpoint), $sign_l$ is $-1$, and no gap $C_l$ exists in the traditional sense, so $C_l$ collapses to a point.
+
+## Operating characteristics
+*   **Time Complexity:** $O(\log N)$ for the two binary searches, where $N$ is the number of intervals in $I_1$.
+*   **Memory Complexity:** $O(1)$ auxiliary space, assuming $I_1$ is provided.
+*   **Strengths:** Efficiently identifies empty gaps for sweep-line processing without iterating through all intervals.
+*   **Limitations:** Requires $I_1$ to be sorted. Relies on discrete integer coordinates.
+
+## Background
+This method is described in the context of compressing voxelized vector field data. It serves as a subroutine for the "Sweep-Line Algorithm 5.2" implementation, specifically for determining adjacent neighboring intervals to facilitate data compression by boxes [S1, unofficial].
+
+## Sources
+[S1] Compression of Voxelized Vector Field Data by Boxes is Hard, https://doi.org/10.48550/arxiv.2510.20801, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,110 @@
+# Hierarchical Feature Initialization
+
+Also called: Hierarchical local mapping initialization
+
+## Overview
+Hierarchical Feature Initialization is a method for initializing latent feature grids $F_l$ at level $l$ by leveraging optimization results from previous coarser levels ($F_{1:l-1}$), reducing computational cost compared to optimizing high-dimensional features from scratch [S1, unofficial]. It addresses the challenge that the bulk of computational cost in hierarchical grid optimization is incurred by optimizing high-dimensional features [S1, unofficial]. It sets itself apart from naive initialization by using a learned encoder to map residuals from prior levels to the current level's feature space, rather than using zeros or random values [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Residuals from prior levels $r_{1:l-1}(x)$, encoder parameters $\theta_l$, observed points and labels $x, y$.
+*   **Outputs:** Initialized features $F_l$ for the current level.
+
+**Data Structures:**
+*   **Feature Grid $F_l$:** A grid of latent features.
+    *   **SDF features:** Dimension 4 at each level [S1, unofficial].
+    *   **Vision-Language (VL) features:** Dimension 64 at each level [S1, unofficial].
+*   **Grid Sizes:** 0.5 cm at coarse level, 0.1 cm at fine level [S1, unofficial].
+*   **Residuals:** Vectors representing the difference between predicted and observed values.
+
+**Numbered Steps:**
+1.  **Compute Residuals:** Calculate the residual vector for prior levels:
+    $$r_{1:l-1}(x) = h(x; F_{1:l-1}, 0_{l:L}) - y$$
+    where $x$ and $y$ collect all observed points and labels, $h$ is the decoder, $F_{1:l-1}$ are features from previous levels, and $0_{l:L}$ are zero-initialized features for current and future levels [S1, unofficial].
+2.  **Initialize Features:** Apply the level-$l$ encoder $E_{\theta_l}$ to the residuals:
+    $$F_l \leftarrow E_{\theta_l}(r_{1:l-1}(x))$$
+    The encoder $E_{\theta_l}$ is a neural network (e.g., 3D CNN or Fast Point Transformer) that processes voxelized residuals [S1, unofficial].
+3.  **Optimize:** Update features $F$ by minimizing the cost function for the current level [S1, unofficial].
+
+**Formulas:**
+*   **Optimal Initialization (Linear Case):** For a linear decoder $D_\theta$ and quadratic cost $c_j(h(x_j)) = (h(x_j) - y_j)^2$, the optimal initialization is:
+    $$F_l^\star = E(r_{1:l-1}(x)) := -(J^\top J)^\dagger J^\top r_{1:l-1}(x)$$
+    where $J = \frac{\partial h(x; F)}{\partial F_l}$ is the Jacobian matrix evaluated at $x$, and $(\cdot)^\dagger$ denotes the pseudo-inverse [S1, unofficial].
+*   **SDF Residuals:**
+    $$r_{j,1}^{\text{sdf}} = \begin{cases} \max(h(x_j) - \bar{b}_j, 0), & \text{if } x_j \text{ in free space} \\ 0, & \text{otherwise} \end{cases}$$
+    $$r_{j,2}^{\text{sdf}} = \begin{cases} \max(b_j - h(x_j), 0), & \text{if } x_j \text{ in free space} \\ 0, & \text{otherwise} \end{cases}$$
+    $$r_{j,3}^{\text{sdf}} = 0, \text{ otherwise}$$
+    where $b_j$ and $\bar{b}_j$ are upper and lower bounds [S1, unofficial].
+*   **Vision-Language Residuals:**
+    $$r_j^{\text{vl}} = h^{\text{vl}}(x_j) - y_j^{\text{vl}}$$
+    where $h^{\text{vl}}$ is the vision-language decoder and $y_j^{\text{vl}}$ is the label [S1, unofficial].
+*   **Encoder Training Loss:**
+    $$\min_{\theta_l} \sum_{s \in S} \sum_{j \in J_s} c_j(h(x_j^s; F_{1:l-1}^s, E_{\theta_l}(r_{1:l-1}^s), 0_{l+1:L}))$$
+    where $S$ is the set of training submaps, $J_s$ is the set of points in submap $s$, and $x_j^s$ are computed using noisy poses to account for pose estimation errors [S1, unofficial].
+
+**Parameters:**
+*   **Grid Size:** 0.5 cm (coarse), 0.1 cm (fine) [S1, unofficial].
+*   **SDF Feature Dimension:** 4 [S1, unofficial].
+*   **VL Feature Dimension:** 64 [S1, unofficial].
+*   **Levels:** Typically 2 levels [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Pose Errors:** Noisy poses within submaps must be used during encoder training to account for pose estimation errors at test time [S1, unofficial].
+*   **Free Space:** SDF residuals depend on whether points are in free space [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def hierarchical_feature_initialization(levels, encoder, decoder, observations, labels):
+    """
+    Initialize hierarchical feature grids using residuals from prior levels.
+    
+    Args:
+        levels: List of levels from 1 to L.
+        encoder: Dictionary of encoders E_theta_l for each level.
+        decoder: Function h(x; F) that decodes features to predictions.
+        observations: List of observed points x.
+        labels: List of labels y.
+        
+    Returns:
+        F: Dictionary of initialized features F_l for each level.
+    """
+    F = {}  # Dictionary to store features for each level
+    F_prev = {}  # Features from previous levels
+    
+    for l in levels:
+        # Step 1: Compute residuals from prior levels
+        # h(x; F_{1:l-1}, 0_{l:L}) - y
+        # Note: 0_{l:L} implies zero initialization for current and future levels
+        predictions = decoder(observations, F_prev, zeros_for_current_and_future)
+        residuals = predictions - labels
+        
+        # Step 2: Initialize features using encoder
+        # F_l <- E_theta_l(r_{1:l-1}(x))
+        F_l = encoder[l](residuals)
+        F[l] = F_l
+        
+        # Step 3: Update features by minimizing cost function
+        # This step is performed by the optimizer, not the initialization method itself
+        # F[l] = optimize(F[l], observations, labels, decoder)
+        
+        # Update F_prev for next level
+        F_prev[l] = F[l]
+        
+    return F
+```
+
+## Operating characteristics
+*   **Time Complexity:** Reduces computational cost compared to optimizing from scratch by providing a better initialization [S1, unofficial].
+*   **Memory Complexity:** Depends on the grid size and feature dimensions (4 for SDF, 64 for VL) [S1, unofficial].
+*   **Strengths:** Leverages hierarchical structure to improve initialization quality [S1, unofficial].
+*   **Limitations:** Requires offline training of encoders using submaps from multiple environments [S1, unofficial].
+
+## Background
+*   **Origin:** Proposed in "HIGS: Hierarchical Implicit Grids for Joint Geometric and Semantic Scene Understanding" [S1, unofficial].
+*   **History:** Developed to address the computational cost of optimizing high-dimensional grid features in hierarchical implicit grids [S1, unofficial].
+*   **Usage:** Used in joint geometric and semantic scene understanding tasks, including SDF estimation and open-vocabulary object grounding [S1, unofficial].
+
+## Sources
+[S1] HIGS: Hierarchical Implicit Grids for Joint Geometric and Semantic Scene Understanding, https://doi.org/10.48550/arxiv.2609.38620, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,142 @@
+# Feature Plane Compression (CodecGS)
+Also called: Compression of 3D Gaussian Splatting with Optimized Feature Planes and Standard Video Codecs, Tri-plane Architecture
+
+## Overview
+Feature Plane Compression (CodecGS) is a method for compressing 3D Gaussian Splatting representations by replacing direct storage of unstructured Gaussian primitives with a structured, learnable feature plane representation [S1]. It solves the problem of high storage costs and inefficient entropy coding of irregular 3D point clouds by mapping 3D positions to Gaussian attributes via a tri-plane architecture, which is then compressed using standard video codecs [S1].
+
+## How it works
+**Inputs:** A trained 3D Gaussian Splatting scene or a feed-forward prediction of Gaussian attributes [G].
+**Outputs:** A compressed bitstream representing the feature planes, decodable into Gaussian attributes for rendering [G].
+
+**Data Structures:**
+1. **Tri-Plane Feature Map:** Three 2D feature planes ($F_x, F_y, F_z$) corresponding to the $xy$, $yz$, and $xz$ projections [G]. Each plane stores a feature vector for each grid cell [G].
+2. **Attribute Prediction:** For a 3D point $\mathbf{x} = (x, y, z)$, the feature vector $\mathbf{f}$ is obtained by interpolating values from the three planes at the projected coordinates of $\mathbf{x}$ [G].
+3. **Encoded Format:** Feature planes are normalized and converted to 16-bit integers, conforming to the YUV 16-bit format standard for video codecs [S1].
+
+**Steps:**
+1. **Two-Phase Training:** Perform standard 3D Gaussian Splatting training first, followed by feature plane training to ensure densification consistency [S1].
+2. **Progressive Training Strategy:** To address instability caused by sparse 3DGS signals, employ a progressive training strategy that captures coarse geometric information initially and gradually adds finer details [S1].
+3. **DCT Entropy Modeling:** Apply block-wise Discrete Cosine Transform (DCT) to the feature planes during optimization to leverage spatial correlations within the planes as conventional image signals [S1].
+4. **Smoothing Regularization:** Add a smoothing regularization term during training to promote locally smooth configurations of Gaussians on the grid [S1].
+5. **Quantization and Encoding:** Normalize the trained feature planes, convert the floating-point values to 16-bit integers, and encode the resulting planes using a standard video codec [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def codecgs_train_and_compress(gaussians, tri_plane_res, num_epochs, lr, lambda_smooth):
+    # Initialize tri-planes F_x, F_y, F_z of shape (H, W, C) with learnable parameters [G]
+    F_x = np.random.randn(tri_plane_res, tri_plane_res, C)
+    F_y = np.random.randn(tri_plane_res, tri_plane_res, C)
+    F_z = np.random.randn(tri_plane_res, tri_plane_res, C)
+
+    # Phase 1: Standard 3DGS Training
+    # Optimize initial Gaussian primitives using standard 3DGS loss [G]
+    for epoch in range(num_epochs // 2):
+        # ... standard 3DGS optimization loop ...
+        pass
+
+    # Phase 2: Feature Plane Training
+    for epoch in range(num_epochs // 2, num_epochs):
+        # Sample 3D points x from the scene distribution [G]
+        points = sample_3d_points(gaussians)
+
+        # Predict attributes from tri-planes
+        features = predict_features_from_triplanes(points, F_x, F_y, F_z)
+
+        # Decode attributes from features (pos, scale, rot, color, opacity) [G]
+        predicted_gaussians = decode_attributes(features)
+
+        # Calculate rendering loss [G]
+        loss = calculate_rendering_loss(predicted_gaussians)
+
+        # Add smoothing regularization to promote spatial smoothness [G]
+        smoothing_loss = calculate_smoothing_loss(F_x, F_y, F_z)
+
+        # Total loss
+        total_loss = loss + lambda_smooth * smoothing_loss
+
+        # Update tri-planes using gradient descent [G]
+        optimizer.step()
+
+        # Progressive resolution increase if applicable [G]
+        if epoch in progressive_schedule:
+            increase_triplane_resolution(F_x, F_y, F_z)
+
+    # Post-training: Prepare for video codec
+    F_x_norm = normalize(F_x)
+    F_y_norm = normalize(F_y)
+    F_z_norm = normalize(F_z)
+
+    # Apply block-wise DCT to leverage spatial correlations [S1]
+    F_x_dct = apply_dct(F_x_norm)
+    F_y_dct = apply_dct(F_y_norm)
+    F_z_dct = apply_dct(F_z_norm)
+
+    # Convert to 16-bit integers (YUV 16-bit format) [S1]
+    F_x_int = float_to_16bit_int(F_x_dct)
+    F_y_int = float_to_16bit_int(F_y_dct)
+    F_z_int = float_to_16bit_int(F_z_dct)
+
+    # Encode using standard video codec [S1]
+    # A step the sources do not give is a comment saying so.
+    bitstream = encode_video_codec(F_x_int, F_y_int, F_z_int)
+
+    return bitstream
+
+def predict_features_from_triplanes(points, F_x, F_y, F_z):
+    coords_xy = (points.x, points.y)
+    coords_yz = (points.y, points.z)
+    coords_xz = (points.x, points.z)
+    f_xy = bilinear_sample(F_x, coords_xy)
+    f_yz = bilinear_sample(F_y, coords_yz)
+    f_xz = bilinear_sample(F_z, coords_xz)
+    return np.concatenate([f_xy, f_yz, f_xz], axis=-1)
+
+def bilinear_sample(grid, coords):
+    x, y = coords
+    x0, x1 = int(x), int(x) + 1
+    y0, y1 = int(y), int(y) + 1
+    w_x = x - x0
+    w_y = y - y0
+    return (1 - w_x) * (1 - w_y) * grid[x0, y0] + \
+           w_x * (1 - w_y) * grid[x1, y0] + \
+           (1 - w_x) * w_y * grid[x0, y1] + \
+           w_x * w_y * grid[x1, y1]
+
+def float_to_16bit_int(tensor):
+    t_min, t_max = tensor.min(), tensor.max()
+    normalized = (tensor - t_min) / (t_max - t_min + 1e-8)
+    return (normalized * 65535).astype(np.int16)
+
+def apply_dct(grid):
+    # Apply block-wise 2D DCT-II to the grid [G]
+    # Standard DCT implementation omitted for brevity
+    return grid
+```
+
+**Parameters:**
+*   **Tri-plane Resolution:** Not given in the sources.
+*   **Feature Channel Dimension ($C$):** Not given in the sources.
+*   **Smoothing Regularization Weight ($\lambda_{smooth}$):** Not given in the sources.
+*   **Quantization:** 16-bit integers [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Sparse Signals:** Feature plane training can be unstable due to sparse 3DGS signals. Mitigated by progressive training [S1].
+*   **Boundary Conditions:** Interpolation at the boundaries of the tri-planes requires careful handling (e.g., clamping or padding) [G].
+*   **Precision:** Conversion to 16-bit integers may introduce quantization artifacts. The choice of normalization range is critical [S1].
+
+## Operating characteristics
+*   **Compression Ratio:** Not given in the sources.
+*   **Rendering Quality:** Not given in the sources.
+*   **Complexity:** Encoding complexity depends on the standard video codec used. Decoding involves video decoding followed by tri-plane interpolation [G].
+*   **Strengths:** Leverages mature video compression standards; exploits spatial redundancy in natural scenes; avoids complex entropy coding of irregular 3D structures [S1].
+*   **Limitations:** Requires training of feature planes; interpolation overhead during rendering; potential loss of high-frequency details due to quantization and video codec compression [S1].
+*   **When to Use:** When high compression ratios are needed and standard video codecs are available [G].
+*   **When Not to Use:** When real-time training of feature planes is prohibitive; when exact preservation of unstructured Gaussian data is required without interpolation artifacts [G].
+
+## Background
+CodecGS was introduced as a method to compress 3D Gaussian Splatting by employing optimized feature planes and standard video codecs [S1]. It builds on a progressive training strategy that captures coarse geometric information initially and gradually adds finer details [S1]. The method is implemented in the `gsplat` library, an open-source library for CUDA-accelerated differentiable rasterization of 3D Gaussians [S1].
+
+## Sources
+[S1] 3DGS.zip: A survey on 3D Gaussian Splatting Compression Methods, https://arxiv.org/abs/2407.09510v5, fetched 2026-10-26

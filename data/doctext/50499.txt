@@ -1,0 +1,1801 @@
+# [UNITY] procedural planet octree renderer
+dual contour octree realtime renderer for point cloud data or procedural planet generation  
+there's still work to do in order to fix the cracks between contiguous chunks with different level-of-detail (these gaps in the screenshots, in the code there should be an attempt to bruteforce the stitching, totally ugly and broken code)
+the algorithm used is basically dual contouring, but at the moment instead of calculating the quadratic error function 
+I just average all the intersection points for each cell and then perform the geometry tesselation along these points, as at this stage there are no noticeable artifacts because of this oversimplification.  
+
+![random point clound](https://raw.githubusercontent.com/paolorussian/proceduralplanet/master/ss/ss_pointcloud.png)
+![rounded](https://raw.githubusercontent.com/paolorussian/proceduralplanet/master/ss/ss_rounded.png)
+
+### Assets/Scripts/CameraTarget.cs
+```
+﻿using UnityEngine;
+using System.Collections;
+
+public class CameraTarget : MonoBehaviour {
+
+    public GameObject target = null;
+    public bool orbitY = true;
+
+	// Use this for initialization
+	void Start () {
+	
+	}
+	
+	// Update is called once per frame
+	void Update () {
+
+        if (transform != null) {
+
+            transform.LookAt(target.transform.position);
+
+            // Vector3 worldPt = target.transform.localToWorldMatrix.MultiplyPoint3x4(target.transform.position);
+            //  transform.RotateAround(new Vector3(0f,0f,-100f), Vector3.up, 50*Time.deltaTime);
+            /*
+            if (orbitY) {
+               
+            }
+            */
+            
+
+            if (Input.GetMouseButton(1)) {
+                //transform.LookAt(target.transform);
+                transform.RotateAround(target.transform.position, Vector3.up, Input.GetAxis("Mouse X") * 3f);
+                transform.RotateAround(target.transform.position, Vector3.left, Input.GetAxis("Mouse Y") * 3f);
+            }
+
+        }
+
+	
+	}
+}
+```
+
+### Assets/Scripts/CellEdge.cs
+```
+﻿using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+
+public class CellEdge {
+
+    public Vector3 inV, outV;
+    public DCManager manager;
+    float h;
+    public bool hasIntersection=false;
+    public Vector3 intersectionPoint;
+    public Vector3[] cells = new Vector3[4];
+    public Vector3[] centerPoints = new Vector3[4];
+    public string name = "";
+    public bool isFlipped = false;
+    public Chunk parentChunk;
+    public float noiseIn;
+    public float noiseOut;
+    public Vector3 position;
+    public float treshold;
+
+    public bool X_MAX = false;
+    public bool X_MIN = false;
+    public bool Y_MAX = false;
+    public bool Y_MIN = false;
+    public bool Z_MAX = false;
+    public bool Z_MIN = false;
+
+    public int px, py, pz;
+
+    public CellEdge() {
+        //internal use
+    }
+
+
+
+    public CellEdge(Vector3 inV, Vector3 outV, float noiseIn, float noiseOut, Vector3 position, float treshold) {
+        
+
+         if (noiseIn < treshold && noiseOut > treshold) {  // regular
+            this.hasIntersection = true;
+            this.name = outV + "|" + inV;
+            this.noiseIn = noiseIn;
+            this.noiseOut = noiseOut;
+            this.position = position;
+            this.treshold = treshold;
+
+            intersectionPoint = Vector3.Lerp(inV, outV, (treshold - noiseIn) / (noiseOut - noiseIn));
+
+        
+        } else if (noiseOut < treshold && noiseIn > treshold) {
+            this.hasIntersection = true;
+            isFlipped = true;
+            this.outV = inV;
+            this.inV = outV;
+             this.name = inV + "|" + outV;
+            //this.name = outV + "|" + inV;
+            intersectionPoint = Vector3.Lerp(inV, outV, (treshold - noiseIn) / (noiseOut - noiseIn));
+
+        }
+        
+
+
+
+        }
+
+
+}
+```
+
+### Assets/Scripts/Chunk.cs
+```
+﻿using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+using System;
+using System.Threading;
+using System.Linq;
+
+public class Chunk : MonoBehaviour {
+
+
+    [HideInInspector] public DCManager manager;
+    public float edgeSize;
+    public int lodLevel = -1;
+    public Chunk parent;
+    public List<Chunk> children = new List<Chunk>();
+    public Boolean deleteMe = false;
+    public Shader shader;
+    public Material material;
+    public int childrenReady = 0;
+    public Boolean isSplitting = false;
+    public Boolean isRestoringParent = false;
+    public Mesh mesh;
+    public Dictionary<string, CellEdge> edgeDictionary = new Dictionary<string, CellEdge>();
+    public Dictionary<string, CellEdge> edgeDictionaryOrphans = new Dictionary<string, CellEdge>();
+    
+
+    public float distanceToPlayer = 100000000f;
+
+    private MeshData meshData;
+    private MapData mapData;
+    public Boolean needsMeshUpdate = false;
+
+    void Start () {
+
+        Debug.Log("new chunk!");
+		
+	}
+	
+
+
+	void Update () {
+
+
+        
+
+        Vector3 worldPt = gameObject.transform.TransformPoint(transform.position);
+        distanceToPlayer = Vector3.Distance(gameObject.transform.TransformPoint(Camera.main.transform.parent.position), worldPt);
+        //float dist2 = Vector3.Distance(gameObject.transform.TransformPoint(Camera.main.transform.parent.position), worldPt);
+        
+        float diagonal = Mathf.Sqrt(2*(edgeSize * edgeSize));
+
+        if (isSplitting  || isRestoringParent) return;
+        if (parent != null && parent.isRestoringParent) return;
+        if (parent != null && parent.isSplitting) return;
+
+        if (distanceToPlayer < diagonal
+                && lodLevel < manager.maxLodLevel
+                && childrenReady < 8
+                && !isSplitting
+                && !isRestoringParent
+                && mesh != null) {
+            if (!DCManager.greenLight) return;
+            DCManager.greenLight = false;
+            isSplitting = true;
+           // Debug.Log("splitting");
+            splitCube();
+
+        } else if (lodLevel>0 && distanceToPlayer > diagonal * 3 && mesh != null  && !parent.isRestoringParent) {
+            
+            if (name.EndsWith("|DBR")) {
+              
+                parent.isRestoringParent = true;
+              //  Debug.Log("restoring");
+                restoreParentCube();
+            }
+        
+        }
+
+        //// patches
+        /*
+        if (meshData != null && DCManager.chunkList.Contains(this)) {
+            if (DCManager.chunkDictionary.ContainsKey(transform.position + new Vector3(edgeSize, 0f, 0f))) {
+                Chunk chunkXplus = DCManager.chunkDictionary[transform.position + new Vector3(edgeSize, 0f, 0f)];
+                if(DCManager.chunkList.Contains(chunkXplus)){
+                    GetComponent<MeshFilter>().mesh = meshData.CreateMesh(MeshData.TYPE_X_NORMAL_PLUS);
+                } else {
+                    GetComponent<MeshFilter>().mesh = meshData.CreateMesh(MeshData.TYPE_NORMAL);
+                    //GetComponent<MeshFilter>().mesh = mesh;
+                }
+            }
+        }*/
+        
+
+
+    }
+
+    public void splitCube() {
+
+     
+
+        float delta = (float)edgeSize / 4;
+
+
+        GameObject go1 = new GameObject();
+        Chunk newChunk1 = go1.gameObject.AddComponent<Chunk>();
+        newChunk1.createCube(this, manager, edgeSize / 2, lodLevel + 1, transform.position.x - delta, transform.position.y - delta, transform.position.z - delta, name + "|DBR");
+
+        GameObject go2 = new GameObject();
+        Chunk newChunk2 = go2.gameObject.AddComponent<Chunk>();
+        newChunk2.createCube(this, manager, edgeSize / 2, lodLevel + 1, transform.position.x - delta, transform.position.y - delta, transform.position.z + delta, name + "|DBL");
+
+        GameObject go3 = new GameObject();
+        Chunk newChunk3 = go3.gameObject.AddComponent<Chunk>();
+        newChunk3.createCube(this, manager, edgeSize / 2, lodLevel + 1, transform.position.x + delta, transform.position.y - delta, transform.position.z - delta, name + "|DTR");
+
+        GameObject go4 = new GameObject();
+        Chunk newChunk4 = go4.gameObject.AddComponent<Chunk>();
+        newChunk4.createCube(this, manager, edgeSize / 2, lodLevel + 1, transform.position.x + delta, transform.position.y - delta, transform.position.z + delta, name + "|DTL");
+
+        GameObject go5 = new GameObject();
+        Chunk newChunk5 = go5.gameObject.AddComponent<Chunk>();
+        newChunk5.createCube(this, manager, edgeSize / 2, lodLevel + 1, transform.position.x - delta, transform.position.y + delta, transform.position.z - delta, name + "|UBR");
+
+        GameObject go6 = new GameObject();
+        Chunk newChunk6 = go6.gameObject.AddComponent<Chunk>();
+        newChunk6.createCube(this, manager, edgeSize / 2, lodLevel + 1, transform.position.x - delta, transform.position.y + delta, transform.position.z + delta, name + "|UBL");
+
+        GameObject go7 = new GameObject();
+        Chunk newChunk7 = go7.gameObject.AddComponent<Chunk>();
+        newChunk7.createCube(this, manager, edgeSize / 2, lodLevel + 1, transform.position.x + delta, transform.position.y + delta, transform.position.z - delta, name + "|UTR");
+
+        GameObject go8 = new GameObject();
+        Chunk newChunk8 = go8.gameObject.AddComponent<Chunk>();
+        newChunk8.createCube(this, manager, edgeSize / 2, lodLevel + 1, transform.position.x + delta, transform.position.y + delta, transform.position.z + delta, name + "|UTL");
+
+    }
+
+    public void restoreParentCube() {
+
+        float delta = edgeSize / 2;
+
+       
+        parent.isRestoringParent = true;
+       
+        parent.createCube(parent.parent, manager, edgeSize * 2, lodLevel - 1, transform.position.x + delta, transform.position.y + delta, transform.position.z + delta, name.Substring(0, name.Length - 4));
+        
+        // do these two lines do something?
+        edgeDictionary.Clear();
+        edgeDictionaryOrphans.Clear();
+       
+        
+    }
+
+
+    public Chunk createCube(Chunk parentTarget, DCManager manager, float size, int lodLevel,float delta1, float delta2, float delta3, string name) {
+
+        if (this == null) return null;
+        parent = parentTarget;
+        if (parentTarget != null) {
+            parentTarget.children.Add(this);
+        } else {
+            manager.children.Add(this);
+        }
+
+        this.edgeSize = size;
+        this.manager = manager;
+        this.lodLevel = lodLevel;
+        this.name = name;
+
+        /////////////
+        
+        GameObject o = gameObject; 
+        
+        o.name = name;
+        if(o.GetComponent<MeshFilter>()==null) o.AddComponent<MeshFilter>();
+        if (o.GetComponent<MeshRenderer>() == null) o.AddComponent<MeshRenderer>();
+        //o.AddComponent<MeshCollider>();
+        
+        o.transform.parent = manager.transform;
+
+        
+        transform.position = new Vector3(delta1, delta2, delta3);
+
+
+       
+        //MeshFilter mf = o.GetComponent<MeshFilter>();
+        MeshRenderer mr = o.GetComponent<MeshRenderer>();
+        //MeshCollider mc = o.GetComponent<MeshCollider>();
+
+        shader = Shader.Find("paolo/NormalColor");
+        material = new Material(shader);
+        mr.sharedMaterial = material;
+
+        
+        //mf.sharedMesh = m;
+        //m = md.CreateMesh();
+        manager.meshGenerator.RequestMapData(edgeSize, manager.subdivisions, transform.position, manager.cnoise, 
+            OnMapDataReceived, edgeDictionary, edgeDictionaryOrphans
+            );
+
+        return this;
+
+    }
+
+    public void OnMapDataReceived(MapData mapData) {
+        
+        //if(mapData.edgeDictionary.Count>0 || parent.isRestoringParent || isRestoringParent)
+
+
+        Debug.Log("mapData orphans count: "+mapData.edgeDictionaryOrphans.Count());
+
+        //store these orphans edges in a common big list, so that RequestMeshData can access all orphans across every chunk
+        // warning possibly thread safety issues :/
+        //manager.edgeDictionaryOrphansGlobal = manager.edgeDictionaryOrphansGlobal.Concat(mapData.edgeDictionaryOrphans).ToDictionary(x => x.Key, x => x.Value);
+
+        manager.meshGenerator.RequestMeshData(mapData, OnMeshDataReceived);
+
+       
+        
+    }
+
+
+    public void OnMeshDataReceived(MeshData meshData) {
+
+        //DCManager.chunkDictionary.Add(transform.position, this);
+        this.meshData = meshData;
+        DCManager.addChunkToList(this);
+        //DCManager.chunkList.Add(this);
+    }
+
+    public void CreateFinalMesh() { 
+
+        if (meshData == null) return;
+        mesh = meshData.CreateMesh(MeshData.TYPE_NORMAL);
+        Mesh XplusPatchMesh = meshData.CreateMesh(MeshData.TYPE_X_NORMAL_PLUS);
+
+        GetComponent<MeshFilter>().mesh = mesh;
+
+       
+        if (parent != null) {
+            if (parent.isSplitting) {
+                parent.childrenReady++;
+                if (parent.childrenReady == 8) {
+                    Destroy(parent.GetComponent<MeshFilter>().mesh);
+                    parent.mesh = null;
+                    parent.childrenReady = 0;
+                    parent.isSplitting = false;
+                    //DCManager.chunkDictionary.Remove(parent.transform.position);
+                    DCManager.removeChunkFromList(this);
+                    DCManager.greenLight = true;
+                }
+            }
+        } else {
+
+            if (manager.isSplitting) {
+                manager.childrenReady++;
+                if (manager.childrenReady == 8) {
+                    Destroy(parent.GetComponent<MeshFilter>().mesh);
+                    manager.GetComponent<MeshFilter>().mesh = null;
+                    manager.childrenReady = 0;
+                    manager.isSplitting = false;
+                    DCManager.greenLight = true;
+
+                }
+            }
+        }
+
+        if (isRestoringParent) {
+
+
+            int k = children.Count;
+            for (int i = 0; i < k; i++) {
+                Destroy(children[i].gameObject);
+                //DCManager.chunkDictionary.Remove(children[i].transform.position);
+                //DCManager.chunkList.Remove(children[i]);
+                DCManager.removeChunkFromList(children[i]);
+
+            }
+
+            children.Clear();
+            isRestoringParent = false;
+        }
+
+        
+
+
+        
+  
+    }
+
+    
+
+
+    void OnDrawGizmos() {
+
+                if ( manager==null || !manager.showGizmos) return;
+
+
+
+                    switch (lodLevel) {
+          
+           /* case 0:
+                Gizmos.color = Color.red;
+                break;
+                
+            case 1:
+                Gizmos.color = Color.yellow;
+                break;*/
+            case 2:
+                Gizmos.color = Color.white;
+                break;
+            case 3:
+                Gizmos.color = Color.red;
+                break;
+                
+            default:
+                Gizmos.color = Color.white;
+                Gizmos.color = new Color(1F, 1F, 1F, 0.25F);
+                break;
+                
+        }
+            
+
+            Vector3 s = new Vector3(edgeSize, edgeSize, edgeSize);
+
+            Gizmos.DrawWireCube(transform.position, s);
+             
+    }
+  
+
+}
+```
+
+### Assets/Scripts/CustomImprovedNoise.cs
+```
+﻿using UnityEngine;
+using System.Collections;
+
+public class CustomImprovedNoise {
+
+    int[] p = new int[512];
+
+    public CustomImprovedNoise(int seed) {
+        shuffle(seed);
+    }
+
+    public double noise(Vector3 v) {
+        return noise(v.x, v.y, v.z);
+    }
+
+    public double noise(float x, float y, float z) {
+
+        int X = (int)Mathf.Floor(x) & 255, // FIND UNIT CUBE THAT
+        Y = (int)Mathf.Floor(y) & 255, // CONTAINS POINT.
+        Z = (int)Mathf.Floor(z) & 255;
+        x -= Mathf.Floor(x); // FIND RELATIVE X,Y,Z
+        y -= Mathf.Floor(y); // OF POINT IN CUBE.
+        z -= Mathf.Floor(z);
+        double u = fade(x), // COMPUTE FADE CURVES
+        v = fade(y), // FOR EACH OF X,Y,Z.
+        w = fade(z);
+        int A = p[X] + Y, AA = p[A] + Z, AB = p[A + 1] + Z, // HASH COORDINATES OF
+        B = p[X + 1] + Y, BA = p[B] + Z, BB = p[B + 1] + Z; // THE 8 CUBE CORNERS,
+
+        return lerp(w, lerp(v, lerp(u, grad(p[AA], x, y, z), // AND ADD
+                grad(p[BA], x - 1, y, z)), // BLENDED
+                lerp(u, grad(p[AB], x, y - 1, z), // RESULTS
+                        grad(p[BB], x - 1, y - 1, z))),// FROM  8
+                lerp(v, lerp(u, grad(p[AA + 1], x, y, z - 1), // CORNERS
+                        grad(p[BA + 1], x - 1, y, z - 1)), // OF CUBE
+                        lerp(u, grad(p[AB + 1], x, y - 1, z - 1), grad(p[BB + 1], x - 1, y - 1, z - 1))));
+    }
+
+    double fade(double t) {
+        return t * t * t * (t * (t * 6 - 15) + 10);
+    }
+
+    double lerp(double t, double a, double b) {
+        return a + t * (b - a);
+    }
+
+    double grad(int hash, double x, double y, double z) {
+        int h = hash & 15; // CONVERT LO 4 BITS OF HASH CODE
+        double u = h < 8 ? x : y, // INTO 12 GRADIENT DIRECTIONS.
+        v = h < 4 ? y : h == 12 || h == 14 ? x : z;
+        return ((h & 1) == 0 ? u : -u) + ((h & 2) == 0 ? v : -v);
+    }
+
+   
+
+    public double perlinNoise(float x, float y) {
+        float n = 0;
+
+        for (int i = 0; i < 8; i++) {
+            float stepSize = 64.0f / ((1 << i));
+            n += ((float)noise(x / stepSize, y / stepSize, 128f) * 1.0f / (1 << i)); 
+        }
+
+        return n;
+    }
+
+    public void shuffle(int seed) {
+
+        //Random.seed = seed;
+        Random.InitState(seed);
+        //Random random = new Random();
+        int[] permutation = new int[256];
+        for (int i = 0; i < 256; i++) {
+            permutation[i] = i;
+        }
+
+        for (int i = 0; i < 256; i++) {
+            //int j = random.nextInt(256 - i) + i;
+            int j = Random.Range(0, 256-i) + i;
+            int tmp = permutation[i];
+            permutation[i] = permutation[j];
+            permutation[j] = tmp;
+            p[i + 256] = p[i] = permutation[i];
+        }
+    }
+
+   
+}
+```
+
+### Assets/Scripts/DCManager.cs
+```
+﻿using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+using LibNoise.Unity;
+using LibNoise.Unity.Generator;
+using LibNoise.Unity.Operator;
+using System;
+using System.Threading;
+
+
+public class DCManager : MonoBehaviour {
+
+
+    public bool showGizmos=false;
+    public static int radius = 1000;
+    //public int chunksPerSide = 4;
+    [Range(0, 8)]
+    public int maxLodLevel = 3;
+
+    [Range(0, 32)]
+    public int subdivisions = 16;
+
+    [HideInInspector]
+    public Perlin noise = new Perlin();
+    [HideInInspector]
+    public CustomImprovedNoise cnoise;
+
+    [HideInInspector] public List<Chunk> chunks;
+    [HideInInspector] public static Perlin perlinNoise1;
+    [HideInInspector] public float frequency = 3f;
+    [HideInInspector] public double lacunarity = 1f;
+    [HideInInspector] public double persistence = 1;
+    [HideInInspector] public float smoothness = 1;
+    [HideInInspector] public int octaves = 3;
+    [HideInInspector] private QualityMode quality = QualityMode.High;
+
+
+    
+    [HideInInspector]
+    public List<Chunk> children = new List<Chunk>();
+    [HideInInspector]
+    public int childrenReady = 0;
+    [HideInInspector]
+    GameObject root_cube;
+    [HideInInspector]
+    public Boolean isSplitting = false;
+    [HideInInspector]
+    public Boolean isRestoringParent = false;
+    [HideInInspector]
+    public static Perlin perlinNoise;
+
+    [HideInInspector]
+    public static Boolean greenLight = true;
+
+    [HideInInspector]
+    Chunk rootChunk;
+
+    [HideInInspector]
+    public static Dictionary<Vector3, Chunk> chunkDictionary = new Dictionary<Vector3, Chunk>();
+    public Dictionary<string, CellEdge> edgeDictionaryOrphansGlobal = new Dictionary<string, CellEdge>();
+    public static List<Chunk> chunkList = new List<Chunk>();
+
+    public  MeshGenerator meshGenerator;
+    //private bool needsGlobalMeshUpdate = true;
+
+    void Start () {
+
+        meshGenerator = gameObject.AddComponent<MeshGenerator>();
+
+        int seed = 151178;
+        //int seed = (int)UnityEngine.Random.value;
+        perlinNoise1 = new Perlin(frequency , lacunarity, persistence, octaves, seed, quality);
+        perlinNoise = new Perlin(frequency, lacunarity, persistence, octaves, seed, quality);
+        cnoise = new CustomImprovedNoise(151178);
+
+        root_cube =  new GameObject();
+        rootChunk = root_cube.AddComponent<Chunk>();
+        rootChunk.transform.parent = gameObject.transform;
+        rootChunk.createCube(null, this, radius, 0, 0, 0, 0, "root");
+
+    }
+
+    void Update() {
+        bool global = false;
+
+        for (int k = maxLodLevel; k >= 0; k--) {
+            for (int i = 0; i < chunkList.Count; i++) {
+                Chunk c = chunkList[i];
+                if ((c.needsMeshUpdate || global) && c.lodLevel == k) {
+                    //global = true;
+                    c.CreateFinalMesh();
+                    c.needsMeshUpdate = false;
+                }
+            }
+        }
+        global = false;
+
+
+            
+
+
+        }
+
+    public static void addChunkToList(Chunk c) {
+
+        if (!chunkList.Contains(c)) {
+            chunkList.Add(c);
+            if(!chunkDictionary.ContainsKey(c.transform.position)) chunkDictionary.Add(c.transform.position, c);
+        }
+        c.needsMeshUpdate = true;
+
+
+    }
+
+    public static void removeChunkFromList(Chunk c) {
+        if (chunkList.Contains(c)) {
+            chunkList.Remove(c);
+            if (chunkDictionary.ContainsKey(c.transform.position)) chunkDictionary.Remove(c.transform.position);
+            c.needsMeshUpdate = true;
+        }
+        
+    }
+
+
+    public static void destroyChildrenOf(string name) {
+
+        Destroy(GameObject.Find(name + "|DBR").gameObject);
+        Destroy(GameObject.Find(name + "|DBL").gameObject);
+        Destroy(GameObject.Find(name + "|DTR").gameObject);
+        Destroy(GameObject.Find(name + "|DTL").gameObject);
+
+
+        Destroy(GameObject.Find(name + "|UBR").gameObject);
+        Destroy(GameObject.Find(name + "|UBL").gameObject);
+        Destroy(GameObject.Find(name + "|UTR").gameObject);
+        Destroy(GameObject.Find(name + "|UTL").gameObject);
+
+
+    }
+
+    
+
+    
+    // OBSOLETO
+    /*
+    public static float[] GenerateEmptySurface(float[] field, Vector3 pos, int size, int increment) {
+
+
+
+        int rS = size + 1;
+
+        
+        for (int x = 0; x < rS; x++) {
+            for (int y = 0; y < rS; y++) {
+                for (int z = 0; z < rS; z++) {
+
+                    // if (max == 0) break;
+
+                    // Vector3 p = pos + new Vector3(x * increment, y * increment, z * increment) + new Vector3(-rS / 2, -rS / 2, -rS / 2);
+                    Vector3 p = pos + new Vector3(x, y, z );
+
+
+                    // distance center - cube chunk position
+                    float d = Mathf.Abs((Vector3.zero - p).magnitude);
+                    //convert to 0-1 range
+                    //float t = 1f - 1f / (1f + d);
+
+                    //---
+                   // Vector3 pt = (Vector3.zero - p);
+                    //Vector3 ptn = p.normalized;
+                    //float u = (float) (Mathf.Atan2(pt.x, pt.z) / (2 * Mathf.PI) + 0.5);
+                    //float v = (float) (Mathf.Asin(pt.y) / Mathf.PI + .5);
+
+
+                    //----
+
+                    //float d = Mathf.Abs((Vector3.zero - p).magnitude); // distance from center - position
+                    //float t = 1f - 1f / (1f + d); //convert to a range from 0 to 1
+
+
+                    // NORMAL PERTURBATION
+                    float n = (float)perlinNoise.GetValue((Vector3.zero - p));
+
+
+
+                   
+                //    float val = -t * radius + radius;
+                    //field[x + y * rS + z * rS * rS] = val +(n/(rS));
+                  //  float n0 = val + (n / (rS));
+                   
+
+
+
+
+                    //field 3d but symmetrical
+                  //  pt = (Vector3.zero - p);
+                   // float w = d / 100;
+                   // float sm = 0.05f;
+                    //float n2 = -(float)perlinNoise.GetValue(pt.x, pt.y,w*2);
+                    //float n2 = -(float)perlinNoise.GetValue(pt.x , pt.y , pt.z );
+                    //float n1 = 1 - (float)perlinNoise.GetValue(pt.x * sm, pt.y * sm, pt.z * sm);
+                    //if (x == 10 && y ==10) Debug.Log(n1);
+
+                    // 3d mode usage test, field is filled when the noise is above some value (and distance less than planet radius just to make it rounded)
+                    
+                    if ((p.x > 0 && p.x < size * num)
+                        && (p.y > 0 && p.y < size * num)
+                        && (p.z > 0 && p.z < size * num)
+                       // && d<radius*2
+                       ) {
+
+                        //  if (n0 > n1) {
+                        //      field[x + y * rS + z * rS * rS] = n1;// 1-n1;
+                        //  } else {
+                        //      field[x + y * rS + z * rS * rS] = n0;
+                        //  }
+
+
+                    }
+                   
+
+                    // field[x + y * rS + z * rS * rS] = n1;
+                    if (n < 0f && d < 50) {
+                        field[x + y * rS + z * rS * rS] = 1;
+                    } else {
+                        field[x + y * rS + z * rS * rS] = 0;
+                    }
+
+
+
+
+                }
+            }
+        }
+        return field;
+    }
+    */
+
+    }
+```
+
+### Assets/Scripts/KeyboardScript.cs
+```
+﻿using UnityEngine;
+using System.Collections;
+
+public class KeyboardScript : MonoBehaviour {
+
+
+
+    public float speed = 5f;
+    //float rollSpeed = 0.03f;
+    float rotSpeed = 0.5f;
+
+    // Use this for initialization
+    void Start () {
+	
+	}
+	
+	// Update is called once per frame
+	void FixedUpdate () {
+
+
+
+        /*
+        if (Input.GetKey(KeyCode.A))
+            transform.Translate(Vector3.left * speed, Space.World);
+
+        if (Input.GetKey(KeyCode.W))
+            transform.Translate(Vector3.forward * speed, Space.World);
+
+        if (Input.GetKey(KeyCode.S))
+            transform.Translate(Vector3.back * speed, Space.World);
+
+        if (Input.GetKey(KeyCode.D))
+            transform.Translate(Vector3.right * speed, Space.World);
+
+        if (Input.GetKey(KeyCode.R))
+            transform.Translate(Vector3.up * speed, Space.World);
+
+        if (Input.GetKey(KeyCode.F))
+            transform.Translate(Vector3.down * speed, Space.World);
+          */
+
+        Vector3 targetDirection = new Vector3(Input.GetAxis("Vertical"), Input.GetAxis("Horizontal"), 0.0f);
+        transform.Rotate(targetDirection);
+
+        if (Input.GetKey(KeyCode.Space)) {
+            targetDirection = transform.TransformDirection(targetDirection);
+            //targetDirection.y = 0.0f;
+            transform.Translate(transform.forward * speed, Space.World);
+        }
+        if (Input.GetKey(KeyCode.LeftShift)) {
+            targetDirection = transform.TransformDirection(targetDirection);
+            //targetDirection.y = 0.0f;
+            transform.Translate(-transform.forward * speed, Space.World);
+        }
+
+
+        if (Input.GetKey(KeyCode.E))
+            transform.Rotate(Vector3.back * rotSpeed);
+
+        if (Input.GetKey(KeyCode.Q))
+            transform.Rotate(Vector3.forward * rotSpeed);
+
+        //transform.Translate(Vector3.forward * speed, Space.World);
+        //transform.Translate(Vector3.forward * speed, Space.World);
+        //transform.m .Move(moveDirection * Time.deltaTime);
+
+        //  transform.Translate(Vector3.forward * Time.deltaTime);
+        //  transform.Translate(Vector3.up * Time.deltaTime, Space.World);
+
+    }
+}
+```
+
+### Assets/Scripts/MapData.cs
+```
+﻿using System.Collections;
+using System.Collections.Generic;
+
+public class MapData  {
+
+
+    public Dictionary<string, CellEdge> edgeDictionary = new Dictionary<string, CellEdge>();
+    public Dictionary<string, CellEdge> edgeDictionaryOrphans = new Dictionary<string, CellEdge>();
+    
+}
+```
+
+### Assets/Scripts/MeshData.cs
+```
+﻿using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+
+public class MeshData  {
+
+    public const string TYPE_NORMAL = "TYPE_NORMAL";
+    public const string TYPE_X_NORMAL_PLUS = "TYPE_X_NORMAL_PLUS";
+
+    public Vector3[] vertices;
+    public int[] triangles;
+    public Vector2[] uvs;
+    public Mesh mesh;
+    public Mesh meshXplusNormal;
+
+    public List<Vector3> vertexList = new List<Vector3>();
+    public List<int[]> triangleList = new List<int[]>();
+
+    public List<Vector3> vertexListXplusNormal = new List<Vector3>();
+    public List<int[]> triangleListXplusNormal = new List<int[]>();
+
+    //int triangleIndex = 0; 
+    int vertexIndex = 0;
+
+
+    public void AddTriangle(Vector3 a, Vector3 b, Vector3 c, string type) {
+
+        switch (type) {
+
+            case TYPE_NORMAL:
+                vertexList.Add(a);
+                vertexList.Add(b);
+                vertexList.Add(c);
+                break;
+
+            case TYPE_X_NORMAL_PLUS:
+                vertexListXplusNormal.Add(a);
+                vertexListXplusNormal.Add(b);
+                vertexListXplusNormal.Add(c);
+                break;
+
+        }
+
+
+
+    }
+
+
+
+
+    public Mesh CreateMesh(string type) {
+
+        switch (type) {
+
+            case TYPE_NORMAL:
+                vertices = new Vector3[vertexList.Count + vertexListXplusNormal.Count];
+                vertexIndex = 0;
+
+                foreach (Vector3 v in vertexList) {
+                    vertices[vertexIndex] = v;
+                    vertexIndex++;
+                }
+
+                triangles = new int[vertexList.Count+ vertexListXplusNormal.Count];
+
+                if (triangles.Length > 0) {
+                    for (int i = 0; i < vertexList.Count; i += 3) {
+                        triangles[i] = i;
+                        triangles[i + 1] = i + 1;
+                        triangles[i + 2] = i + 2;
+                    }
+                }
+                /*
+                mesh = new Mesh();
+                mesh.vertices = vertices;
+                mesh.triangles = triangles;
+                mesh.uv = uvs;
+                break;
+
+            case TYPE_X_NORMAL_PLUS:
+                vertices = new Vector3[vertexListXplusNormal.Count];
+                vertexIndex = 0;
+                */
+                foreach (Vector3 v in vertexListXplusNormal) {
+                    vertices[vertexIndex] = v;
+                    vertexIndex++;
+                }
+
+               // triangles = new int[vertexListXplusNormal.Count];
+
+                if (triangles.Length > 0) {
+                    for (int i = vertexList.Count; i < vertexList.Count+vertexListXplusNormal.Count; i += 3) {
+                        triangles[i] = i;
+                        triangles[i + 1] = i + 1;
+                        triangles[i + 2] = i + 2;
+                    }
+                }
+
+                mesh = new Mesh();
+                mesh.vertices = vertices;
+                mesh.triangles = triangles;
+                mesh.uv = uvs;
+ 
+                break;
+
+
+
+
+        }
+        mesh.RecalculateNormals();
+        return mesh;
+    }
+}
+```
+
+### Assets/Scripts/MeshGenerator.cs
+```
+﻿using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+using LibNoise;
+using LibNoise.Unity.Generator;
+using LibNoise.Unity.Operator;
+using System.Threading;
+using System;
+using System.Linq;
+
+
+
+public class MeshGenerator : MonoBehaviour {
+
+    //MapData mapData = new MapData();
+    Queue<MapThreadInfo<MapData>> mapDataThreadInfoQueue = new Queue<MapThreadInfo<MapData>>();
+    Queue<MeshThreadInfo<MeshData>> meshDataThreadInfoQueue = new Queue<MeshThreadInfo<MeshData>>();
+
+    //Dictionary<string, CellEdge> edgeDictionaryXNormalPatch = new Dictionary<string, CellEdge>();
+
+    Vector3 position;
+    int subdivisions;
+
+    public MapData GenerateTerrainData(float size, int subdivisions, Vector3 position, CustomImprovedNoise noise,
+        Dictionary<string, CellEdge> edgeDictionary,
+        Dictionary<string, CellEdge> edgeDictionaryOrphans
+
+        ) {
+
+        this.position = position;
+        this.subdivisions = subdivisions;
+        float increment = size / subdivisions;
+
+        int flagIndex = 0;
+        //float treshold = 0.4f;
+        float treshold = DCManager.radius * 0.55f;
+        Vector3 centerPoint;
+        int i, x, y, z;
+        Vector3[] edgeVertex;
+        List<CellEdge> edgeList = new List<CellEdge>();
+        int numEdgesWithIntersections = 0;
+
+        MapData mapData = new MapData();
+        Vector3[] cube;
+        float[] noiseCube;
+
+
+        // trova gli spigoli che hanno intersezioni e dove: quando li trovi salvali in edgeDictionary
+        // con nome [punto fuori + "|"+ punto dentro], valore la cellEdge(che contiene i 4 centerPoints)
+        for (x = 0; x < subdivisions; x++) {
+            for (y = 0; y < subdivisions; y++) {
+                for (z = 0; z < subdivisions; z++) {
+                    edgeList.Clear();
+                    cube = new Vector3[8];
+                    noiseCube = new float[8];
+                    edgeVertex = new Vector3[12];
+
+
+                    numEdgesWithIntersections = 0;
+                    flagIndex = 0;
+
+                    Vector3 v0 = new Vector3(-size / 2 + x * increment, -size / 2 + y * increment, -size / 2 + z * increment);
+                    Vector3 v1 = new Vector3(-size / 2 + x * increment, -size / 2 + y * increment, -size / 2 + z * increment + increment);
+                    Vector3 v2 = new Vector3(-size / 2 + x * increment + increment, -size / 2 + y * increment, -size / 2 + z * increment + increment);
+                    Vector3 v3 = new Vector3(-size / 2 + x * increment + increment, -size / 2 + y * increment, -size / 2 + z * increment);
+
+                    Vector3 v4 = new Vector3(-size / 2 + x * increment, -size / 2 + y * increment + increment, -size / 2 + z * increment);
+                    Vector3 v5 = new Vector3(-size / 2 + x * increment, -size / 2 + y * increment + increment, -size / 2 + z * increment + increment);
+                    Vector3 v6 = new Vector3(-size / 2 + x * increment + increment, -size / 2 + y * increment + increment, -size / 2 + z * increment + increment);
+                    Vector3 v7 = new Vector3(-size / 2 + x * increment + increment, -size / 2 + y * increment + increment, -size / 2 + z * increment);
+
+                    cube[0] = v0;
+                    cube[1] = v1;
+                    cube[2] = v2;
+                    cube[3] = v3;
+                    cube[4] = v4;
+                    cube[5] = v5;
+                    cube[6] = v6;
+                    cube[7] = v7;
+
+
+
+                    for (i = 0; i < 8; i++) {
+                        noiseCube[i] = DCManager.radius - (cube[i] + position).magnitude;
+
+                        if (noiseCube[i] <= treshold) flagIndex |= 1 << i;
+                    }
+
+                    if (flagIndex == 0 || flagIndex == 255) { continue; }
+
+
+                    // prepara gli spigoli e ordinali in un dizionario
+                    edgeList.Add(new CellEdge(v0, v1, noiseCube[0], noiseCube[1], position, treshold) { px = x, py = y, pz = z });
+                    edgeList.Add(new CellEdge(v2, v3, noiseCube[2], noiseCube[3], position, treshold) { px = x, py = y, pz = z });
+                    edgeList.Add(new CellEdge(v4, v5, noiseCube[4], noiseCube[5], position, treshold) { px = x, py = y, pz = z });
+                    edgeList.Add(new CellEdge(v6, v7, noiseCube[6], noiseCube[7], position, treshold) { px = x, py = y, pz = z });
+
+                    edgeList.Add(new CellEdge(v1, v5, noiseCube[1], noiseCube[5], position, treshold) { px = x, py = y, pz = z });
+                    edgeList.Add(new CellEdge(v0, v4, noiseCube[0], noiseCube[4], position, treshold) { px = x, py = y, pz = z });
+                    edgeList.Add(new CellEdge(v2, v6, noiseCube[2], noiseCube[6], position, treshold) { px = x, py = y, pz = z });
+                    edgeList.Add(new CellEdge(v3, v7, noiseCube[3], noiseCube[7], position, treshold) { px = x, py = y, pz = z });
+
+                    edgeList.Add(new CellEdge(v0, v3, noiseCube[0], noiseCube[3], position, treshold) { px = x, py = y, pz = z });
+                    edgeList.Add(new CellEdge(v1, v2, noiseCube[1], noiseCube[2], position, treshold) { px = x, py = y, pz = z });
+                    edgeList.Add(new CellEdge(v4, v7, noiseCube[4], noiseCube[7], position, treshold) { px = x, py = y, pz = z });
+                    edgeList.Add(new CellEdge(v5, v6, noiseCube[5], noiseCube[6], position, treshold) { px = x, py = y, pz = z });
+
+
+                    // per ogni cubo trova quanti spigoli hanno intersezioni
+                    numEdgesWithIntersections = 0;
+                    centerPoint = new Vector3();
+                    foreach (CellEdge ce in edgeList) {
+                        if (ce.hasIntersection) {
+                            CellEdge c = getOrAdd(ce, edgeDictionaryOrphans);
+                            numEdgesWithIntersections++;
+                            centerPoint += ce.intersectionPoint;
+                        }
+                    }
+
+                    //salta le celle tutte piene e quelle tutte vuote
+                    if (numEdgesWithIntersections == 0 || numEdgesWithIntersections == 8) continue;
+
+                    // ora che sappiamo quanti spigoli hanno intersezioni calcola il punto medio tra loro e settalo come punto centrale della cella
+                    // dual contour - per infighettarlo qua dovresti applicare la QEF, invece del punto medio tra gli spigoli che hanno intersezioni
+                    centerPoint = centerPoint / numEdgesWithIntersections;
+
+
+                    int k = 0;
+                    foreach (CellEdge ce in edgeList) {
+                        if (ce.hasIntersection) {
+                            CellEdge c = getOrAdd(ce, edgeDictionaryOrphans);
+
+                            //if (numEdgesWithIntersections == 4) {
+                            // c = getOrAdd(ce, edgeDictionary);
+                            //if (c.cells[k] != Vector3.zero) Debug.Log("ERROR"); //TODO: check why I would possibly overwrite a preesisting(?) [k] value
+                            c.cells[k] = centerPoint; //questa cosa della k, vista dopo anni, sembra funzionare per caso...
+
+                        }
+                        k++;
+                        if (k > 3) k = 0;
+                    }
+
+                    //Debug.Log("edgeDictionaryOrphans:" + edgeDictionaryOrphans.Count());
+
+
+
+
+
+
+                }
+            }
+        } // fine del mega ciclo
+
+
+
+        List<String> edgesKeysToMove = new List<String>();//edgeDictionaryOrphans.Keys.Except(keysToInclude).ToList();
+      
+        foreach (CellEdge ce in edgeDictionaryOrphans.Values) {
+
+            if (ce.cells.Count(v => v != Vector3.zero) == 4) {
+                edgesKeysToMove.Add(ce.name);
+            }
+        }
+
+        foreach (String key in edgesKeysToMove) { 
+            CellEdge ce = edgeDictionaryOrphans[key];
+            getOrAdd(ce, edgeDictionary);
+            edgeDictionaryOrphans.Remove(ce.name);
+            
+        }
+
+        mapData.edgeDictionary = edgeDictionary;
+        mapData.edgeDictionaryOrphans = edgeDictionaryOrphans;
+        
+
+
+        return mapData;
+    }
+
+    public MeshData GenerateTerrainMesh(MapData mapData) {
+
+        MeshData meshData = new MeshData();
+       
+
+        //Debug.Log("restarting "+ mapData.edgeDictionary.Count());
+
+        // per ogni spigolo del dizionario tira fuori i 4 punti centrali delle celle che lo condividono e collegali con 2 triangolis
+        foreach (CellEdge edg in mapData.edgeDictionary.Values) {
+
+
+            /*
+            if ((edg.px >= 0 && edg.px < subdivisions
+                && edg.py >= 0 && edg.py < subdivisions
+                && edg.pz >= 0 && edg.pz < subdivisions)) {
+                */
+
+                List<Vector3> points = edg.cells.Cast<Vector3>().ToList();
+                //crea i 2 triangoli su tutti gli spigoli che sono condivisi da almeno 4 celle di questo stesso chunk
+                if (points.Count(v => v != Vector3.zero) == 4) {
+
+                    //Gizmos.color = Color.blue;
+                    // Gizmos.DrawLine(edg.inV,edg.outV);
+
+                    if (edg.isFlipped) {
+
+                        meshData.AddTriangle(
+                            edg.cells[0],
+                            edg.cells[2],
+                            edg.cells[1],
+                            MeshData.TYPE_NORMAL
+                            );
+                        meshData.AddTriangle(
+                           edg.cells[2],
+                           edg.cells[3],
+                           edg.cells[1],
+                            MeshData.TYPE_NORMAL
+                           );
+
+                    } else {
+
+                        meshData.AddTriangle(
+                        edg.cells[0],
+                        edg.cells[1],
+                        edg.cells[2],
+                            MeshData.TYPE_NORMAL
+                        );
+                        meshData.AddTriangle(
+                           edg.cells[2],
+                           edg.cells[1],
+                           edg.cells[3],
+                            MeshData.TYPE_NORMAL
+                           );
+
+                    }
+
+
+                } else {
+                    //orphans: these intersections has 1 to 3 cells only to triangulate
+
+
+
+                    Debug.Log("there are orphan points in edgeDictionary");
+                    //Debug.Log(edg.cells[0]+","+ edg.cells[1] + "," + edg.cells[2] + "," + edg.cells[3]);
+
+                }
+
+
+
+            
+           
+
+
+
+
+        }
+        
+        
+        return meshData;
+
+     }
+   
+
+    void Update() {
+        if (mapDataThreadInfoQueue.Count > 0) {
+            for (int i = 0; i < mapDataThreadInfoQueue.Count; i++) {
+                MapThreadInfo<MapData> threadInfo = mapDataThreadInfoQueue.Dequeue();
+                threadInfo.callback(threadInfo.parameter);
+            }
+        }
+
+        if (meshDataThreadInfoQueue.Count > 0) {
+            for (int i = 0; i < meshDataThreadInfoQueue.Count; i++) {
+                MeshThreadInfo<MeshData> threadInfo = meshDataThreadInfoQueue.Dequeue();
+                if (!default(MeshThreadInfo<MeshData>).Equals(threadInfo)) {
+                    threadInfo.callback(threadInfo.parameter);
+                }
+            }
+        }
+
+    }
+  
+    public void RequestMapData(float edgeSize, 
+                                    int subdivisions, 
+                                    Vector3 position, 
+                                    CustomImprovedNoise noise, 
+                                    Action<MapData> callback, 
+                                    Dictionary<string, CellEdge> edgeDictionary, 
+                                    Dictionary<string, CellEdge> edgeDictionaryOrphans
+
+        ) {
+
+
+        ThreadStart threadStart = delegate {
+            MapDataThread(edgeSize, subdivisions, position, noise, callback, edgeDictionary, edgeDictionaryOrphans);
+        };
+
+        new Thread(threadStart).Start();
+    }
+    
+  void MapDataThread(float edgeSize, int subdivisions, Vector3 position, CustomImprovedNoise noise, Action<MapData> callback, 
+      Dictionary<string, CellEdge> edgeDictionary, 
+      Dictionary<string, CellEdge> edgeDictionaryOrphans
+      ) {
+
+        MapData mapData = GenerateTerrainData(edgeSize, subdivisions, position, noise, edgeDictionary, edgeDictionaryOrphans);
+
+      lock (mapDataThreadInfoQueue) {
+          mapDataThreadInfoQueue.Enqueue(new MapThreadInfo<MapData>(callback, mapData, edgeDictionary, edgeDictionaryOrphans));
+      }
+  }
+  
+
+    struct MapThreadInfo<T> {
+
+        public readonly Action<T> callback;
+        public readonly T parameter;
+        public readonly Dictionary<string, CellEdge> edgeDictionary;
+        public readonly Dictionary<string, CellEdge> edgeDictionaryOrphans;
+
+        public MapThreadInfo(Action<T> callback, T parameter, Dictionary<string, CellEdge> edgeDictionary, Dictionary<string, CellEdge> edgeDictionaryOrphans) {
+            this.callback = callback;
+            this.parameter = parameter;
+            this.edgeDictionary = edgeDictionary;
+            this.edgeDictionaryOrphans = edgeDictionaryOrphans;
+        }
+
+    }
+    
+    
+    public void RequestMeshData(MapData mapData, Action<MeshData> callback) {
+        ThreadStart threadStart = delegate {
+            MeshDataThread(mapData, callback);
+        };
+
+        new Thread(threadStart).Start();
+    }
+    
+    void MeshDataThread(MapData mapData, Action<MeshData> callback) {
+        MeshData meshData = GenerateTerrainMesh(mapData);
+        lock (meshDataThreadInfoQueue) {
+            meshDataThreadInfoQueue.Enqueue(new MeshThreadInfo<MeshData>(callback, meshData));
+        }
+    }
+
+    struct MeshThreadInfo<T> {
+        public readonly Action<T> callback;
+        public readonly T parameter;
+      
+
+        public MeshThreadInfo(Action<T> callback, T parameter) {
+            this.callback = callback;
+            this.parameter = parameter;
+
+        }
+
+    }
+
+    private CellEdge getOrAdd(CellEdge c, Dictionary<String,CellEdge> dic) {
+
+        if (dic.ContainsKey(c.name)) {
+            return dic[c.name];
+        } else {
+            dic.Add(c.name, c);
+            return dic[c.name];
+        }
+
+    }
+}
+```
+
+### Assets/Shaders/HeightColorShader.shader
+```
+﻿// Upgrade NOTE: replaced '_Object2World' with 'unity_ObjectToWorld'
+
+Shader "paolo/HeightColorShader" {
+
+	Properties{
+		
+		
+		_CentrePoint("Centre", Vector) = (0, 0, 0, 0)
+		_planetRadius("planetRadius", Float) = 0
+		_SunPosition("_SunPosition", Vector) = (1000, 0, 0, 0)
+		
+		_Blue("blue", Color) = (0,0.5,1,1)
+		_Cyan("cyan", Color) = (0.5,0.8,1,1)
+		_Yellow("yellow", Color) = (0.9,0.9,0,1)
+		_Green("green", Color) = (0,1,0,1)
+		_White("white", Color) = (1,1,1,1)
+		_Black("black", Color) = (0,0,0,1)
+
+		
+	}
+
+
+		SubShader{
+
+			Tags{ "RenderType" = "Opaque" }
+			LOD 200
+
+			CGPROGRAM
+			#pragma surface surf Lambert vertex:vert 
+			#include "UnityCG.cginc" 
+
+			
+			fixed4 _Blue;
+			fixed4 _Cyan;
+			fixed4 _Green;
+			fixed4 _Yellow;
+			fixed4 _White;
+			fixed4 _Black;
+
+	
+			float _planetRadius;
+			float4 _CentrePoint;
+			float4 _SunPosition;
+			float3 worldPos;
+
+			struct Input
+			{
+				float2 uv_MainTex;
+				float4 screenPos;
+				float3 worldPos;
+				float3 objPos;
+
+				
+				
+			};
+
+
+			
+
+			void vert(inout appdata_full v, out Input o) {
+				UNITY_INITIALIZE_OUTPUT(Input, o);
+				o.objPos = v.vertex;
+
+				float3 worldPos = mul(unity_ObjectToWorld, v.vertex).xyz;
+				
+			}
+
+			void surf(Input IN, inout SurfaceOutput o) {
+
+				
+				
+				float originDistance = distance(_CentrePoint, IN.objPos.xyz);
+
+				float pointDistance = distance(_SunPosition, worldPos);
+
+				
+				fixed4 c;
+
+				originDistance = originDistance - _planetRadius; // somewhat from -1 to +1
+
+
+
+				if (originDistance <-0.1) {
+					c = _Yellow;
+				}
+				else if (-0.1 <= originDistance && originDistance < 0.1) {
+					c = lerp(_Yellow, _Green, (originDistance+0.1)*5);
+				}
+				else if (0.8 <= originDistance && originDistance < 0.9) {
+					c = lerp(_Green, _White, (originDistance - 0.8) * 10 );
+				}
+				else if (originDistance <0.9) {
+					c = _Green;
+				}
+				else {
+					c = _White;
+				}
+
+
+				c = lerp(_Black, c, (originDistance+1)/2);
+			
+
+
+
+				float4 objectOrigin = mul(unity_ObjectToWorld, float4(0.0, 0.0, 0.0, 1.0));
+				float4 lightPositionWorld = (1000.0, 0.0, 0.0, 1.0);
+
+				float fragDistance = distance(IN.worldPos.xyz, float4(1000.0, 0.0, -1000.0, 1.0));
+
+				float centreDistance = distance(objectOrigin, float4(1000.0, 0.0, -1000.0, 1.0));
+
+
+				float diff = centreDistance - fragDistance;
+
+				if(diff<-10)
+					o.Emission = c.rgb;
+				else if (diff>10)
+					o.Emission = c.rgb / 6;
+
+				else
+					o.Emission = lerp(c.rgb, c.rgb / 6, (diff +10)/20);
+
+
+				o.Alpha = 1;
+			
+
+			}
+
+
+			ENDCG
+		}
+
+			Fallback "Diffuse"
+			
+
+	
+}
+```
+
+### Assets/Shaders/NormalColor.shader
+```
+﻿Shader "paolo/NormalColor" {
+	Properties{
+		_MainTex("Texture", 2D) = "white" {}
+	}
+		SubShader{
+		Tags{ "RenderType" = "Opaque" }
+		CGPROGRAM
+#pragma surface surf Lambert vertex:vert
+	struct Input {
+		float2 uv_MainTex;
+		float3 customColor;
+	};
+	void vert(inout appdata_full v, out Input o) {
+		UNITY_INITIALIZE_OUTPUT(Input,o);
+		o.customColor = abs(v.normal);
+	}
+	sampler2D _MainTex;
+	void surf(Input IN, inout SurfaceOutput o) {
+		o.Albedo = tex2D(_MainTex, IN.uv_MainTex).rgb;
+		o.Albedo *= IN.customColor;
+	}
+	ENDCG
+	}
+		Fallback "Diffuse"
+}
+```
+
+### Assets/Shaders/PlanetShader.shader
+```
+﻿// Upgrade NOTE: replaced 'mul(UNITY_MATRIX_MVP,*)' with 'UnityObjectToClipPos(*)'
+
+// Upgrade NOTE: replaced '_Object2World' with 'unity_ObjectToWorld'
+
+Shader "paolo/PlanetShader"
+{
+	
+	Properties
+	{
+		// we have removed support for texture tiling/offset,
+		// so make them not be displayed in material inspector
+		[NoScaleOffset] _MainTex("Texture", 2D) = "white" {}
+	}
+		SubShader
+	{
+		Pass
+	{
+		CGPROGRAM
+		// use "vert" function as the vertex shader
+		#pragma vertex vert
+		// use "frag" function as the pixel (fragment) shader
+		#pragma fragment frag
+
+		float4 _Fade;
+	float _Shift;
+
+		// vertex shader inputs
+	struct appdata
+	{
+		float4 vertex : POSITION; // vertex position
+		float2 uv : TEXCOORD0; // texture coordinate
+	};
+
+	// vertex shader outputs ("vertex to fragment")
+	struct v2f
+	{
+		float2 uv : TEXCOORD0; // texture coordinate
+		float4 vertex : SV_POSITION; // clip space position
+
+		float4 fragPos : TEXCOORD2;
+		float4 fade : TEXCOORD3;
+	};
+
+	// vertex shader
+	v2f vert(appdata v)
+	{
+		v2f o;
+		// transform position to clip space
+		// (multiply with model*view*projection matrix)
+		o.vertex = UnityObjectToClipPos(v.vertex);
+		// just pass the texture coordinate
+		o.uv = v.uv;
+		return o;
+	}
+
+	// texture we will sample
+	sampler2D _MainTex;
+
+	// pixel shader; returns low precision ("fixed4" type)
+	// color ("SV_Target" semantic)
+	fixed4 frag(v2f i) : SV_Target
+	{
+		// sample texture and return it
+		fixed4 col = tex2D(_MainTex, i.uv);
+
+		float dist = distance(i.fade, i.fragPos);
+		float4 objectOrigin = mul(unity_ObjectToWorld, float4(0.0, 0.0, 0.0, 1.0));
+		float dist2 = distance(objectOrigin, _WorldSpaceCameraPos);
+
+		if (dist2<1000)
+		{
+			col = col/2;
+		}
+
+		return col;
+	}
+		ENDCG
+	}
+	}
+}
+```
+
+### Assets/Shaders/PlanetVertexColorShader.shader
+```
+﻿Shader "paolo/PlanetVertexColorShader" {
+
+	Properties{
+		//_MainTex("Base (RGB)", 2D) = "white" {}
+		_CentrePoint("Centre", Vector) = (0, 0, 0, 0)
+
+		_Color("Top Color", Color) = (1,0.8,0.3,1)
+		_Color2("Bottom Color", Color) = (0,1,0,1)
+		//_Color("Top Color", Color) = (255,255,255,1)
+		//_Color2("Bottom Color", Color) = (0,0,0,1)
+
+		_Blue("blue", Color) = (0,0,1,1)
+		_Cyan("cyan", Color) = (0.3,0.3,1,1)
+		_Yellow("yellow", Color) = (1,0.8,0.3,1)
+		_Green("green", Color) = (0,1,0,1)
+		_White("white", Color) = (1,1,1,1)
+	}
+
+
+		SubShader{
+		Lighting Off
+		Tags{ "RenderType" = "Opaque" }
+		LOD 200
+
+		CGPROGRAM
+#pragma surface surf Lambert vertex:vert 
+#include "UnityCG.cginc" 
+		//sampler2D _MainTex;
+		fixed4 _Color;
+	fixed4 _Color2;
+	fixed4 _Blue;
+	fixed4 _Cyan;
+	fixed4 _Green;
+	fixed4 _Yellow;
+	fixed4 _White;
+	float4 _CentrePoint;
+
+
+	struct Input
+	{
+		//float2 uv_MainTex;
+		float4 screenPos;
+		float3 worldPos;
+		float3 objPos;
+	};
+
+	void vert(inout appdata_full v, out Input o) {
+		UNITY_INITIALIZE_OUTPUT(Input, o);
+		o.objPos = v.vertex;
+	}
+
+	void surf(Input IN, inout SurfaceOutput o) {
+
+		//if(IN.screenPos.w!=0)
+		//float2 screenUV = IN.screenPos.xy / IN.screenPos.w;
+
+
+		//float curDistance = distance(_CentrePoint.xyz, IN.screenPos.w);
+		//float lenght = length(ObjSpaceViewDir(v.vertex));
+
+		//fixed4 c = tex2D(_MainTex, IN.uv_MainTex) * lerp(_Color2, _Color, screenUV.y);
+
+		//fixed4 c = tex2D(_MainTex, IN.uv_MainTex) * lerp(_Color2, _Color, screenUV.y);
+		//fixed4 c = lerp(_Color, _Color2, IN.worldPos.x);
+
+		//float4 objectOrigin = mul(_Object2World, float4(0.0, 0.0, 0.0, 1.0));
+
+		//float distToOrigin = distance(objectOrigin, screenUV);
+
+		//float curDistance = distance(objectOrigin, IN.screenPos.xy);
+
+		//float pixDistance = distance(IN.objPos, screenUV);
+
+		float originDistance = distance(float4(0.0, 0.0, 0.0, 1.0), IN.objPos.xyz);
+
+		//fixed4 c = lerp(_Color, _Color2, IN.objPos.x+0.5);
+		//fixed4 c = lerp(_Color, _Color2, abs(IN.objPos.x/0.5));
+		//fixed4 c = lerp(_Color, _Color2,  -0.8+(distance2)  );
+
+		fixed4 c;
+
+		if (originDistance < 1.25) {
+
+			c = _Blue;
+		}
+		else if (originDistance < 1.3005) {
+			c = _Cyan;
+		}
+		else if (originDistance < 1.32) {
+			c = _Yellow;
+		}
+		else if (originDistance < 1.38) {
+			c = _Green;
+		}
+		else if (originDistance < 1.5) {
+			c = _White;
+		}
+
+		//fixed4 c = lerp(_Color, _Color2,  1.3/(originDistance)  -0.5  );
+
+
+		//o.Emission = c.rgb;
+		o.Albedo = c.rgb;
+		//o.Alpha = c.a;
+
+		//o.Albedo = IN.objPos;
+		o.Alpha = 1;
+
+	}
+
+
+
+	fixed4 LightingNoLighting(SurfaceOutput s, fixed3 lightDir, fixed atten)
+	{
+		fixed4 c;
+		c.rgb = s.Albedo;
+		c.a = s.Alpha;
+		return c;
+	}
+
+	ENDCG
+	}
+
+		//Fallback "Diffuse"
+		Fallback "VertexLit"
+
+
+}
+```
+
+### Assets/Shaders/ScreenSpaceShader.shader
+```
+﻿Shader "paolo/ScreenSpaceShader" {
+
+
+
+	Properties
+	{
+		_Color("Top Color", Color) = (0,1,0,1)
+		_Color2("Bottom Color", Color) = (0,0,0,1)
+		_MainTex("Base (RGB)", 2D) = "white" {}
+	}
+		SubShader
+	{
+		Tags{ "RenderType" = "Opaque" }
+		LOD 200
+
+		CGPROGRAM
+#pragma surface surf Lambert
+
+		sampler2D _MainTex;
+	fixed4 _Color;
+	fixed4 _Color2;
+
+	struct Input
+	{
+		float2 uv_MainTex;
+		float4 screenPos;
+	};
+
+	void surf(Input IN, inout SurfaceOutput o) {
+		float2 screenUV = IN.screenPos.xy / IN.screenPos.w;
+		fixed4 c = tex2D(_MainTex, IN.uv_MainTex) * lerp(_Color2,_Color,screenUV.y);
+		o.Albedo = c.rgb;
+		o.Alpha = c.a;
+	}
+	ENDCG
+	}
+
+		Fallback "VertexLit"
+}
+```

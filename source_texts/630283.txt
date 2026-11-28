@@ -1,0 +1,118 @@
+Part of #345. What Render one transition as a short clip from a recipe, through a job queue that any number of workers pull from. There are two kinds of worker: the app server itself (it runs on .227 anyway); a standalone worker (the bpm...
+
+Transition Lab: render queue — clip renders of one A→B from a recipe, load-balanced across the app server and standalone workers · Issue #346 · lolimmlost/aidj · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Transition Lab: render queue — clip renders of one A→B from a recipe, load-balanced across the app server and standalone workers #346
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Transition Lab: render queue — clip renders of one A→B from a recipe, load-balanced across the app server and standalone workers#346
+Copy link
+Labels
+audioPlayback, crossfade, stall recovery, iOS audioPlayback, crossfade, stall recovery, iOS audioenhancementNew feature or improvementNew feature or improvementinfraCI, deploy, dependencies, databaseCI, deploy, dependencies, database
+Description
+lolimmlost
+opened on Oct 23, 2026
+Issue body actions
+Part of #345.
+What
+Render one transition as a short clip from a recipe, through a job queue that any number of workers pull from. There are two kinds of worker:
+the app server itself (it runs on .227 anyway);
+a standalone worker (the bpmtest image on .227 today, and any other machine later).
+Load balancing comes from pull-based claiming: each worker claims a job only when it has a free slot and enough memory. There's no separate balancer to run.
+Output
+Clip window: 8 bars of A before the blend, then the blend, then 8 bars of B after B's drop. That's about 30–60 s.
+clip.mp3: mastered like a set render (drop-matched loudness, limiter at −1 dBTP).
+clip.json, per deck:
+Song id, original BPM and set BPM, Camelot key, energy.
+Beat and bar times in clip time, after the stretch.
+Phrase marks, drop bars, intro and outro.
+3-band waveform peaks (low / mid / high, ~100 per s) for the clip, plus a coarse set for the whole track (the overview strip).
+clip.json, for the transition:
+kind (swap / chain), entry drop, blend start and end, kill start, B's drop time.
+Lock stats (p90 ms, points, shift ms), loudness per side.
+Warnings: big stretch, unverified lock, hold applied.
+Recipe: what mix_set.py already decides per transition (kind, N, S, kill bars, bass swap / sweep, hold), plus a sauce list (Transition Lab: sauce controls — edit the transition on the decks (drop, blend, kill, EQ lanes, FX) and re-render a variant #348).
+With no overrides, the recipe is the planner's own choice, so rendering the default equals what a set render does.
+Cache: keyed by sha1(a, b, recipe, renderer version). A cache hit skips the queue entirely.
+Queue and load balancing
+Table transition_render_jobs:
+id, cache key, a/b song ids, recipe (jsonb);
+priority: interactive (someone is waiting in the Lab) > variants (auto-generated alternatives, Transition Lab: rank variants — blind A/B and drag-to-rank, votes and recipes in the DB #349) > batch;
+status: queued / running / done / failed;
+worker id, lease expiry, attempts, error, timestamps.
+Claim: UPDATE … WHERE id = (SELECT id … WHERE status = 'queued' ORDER BY priority, created_at FOR UPDATE SKIP LOCKED LIMIT 1) RETURNING …. Two workers can never take the same job.
+Leases:
+A worker heartbeats every ~10 s while rendering.
+A job whose lease expires goes back to queued, at most 2 attempts. That covers a killed or OOM'd worker.
+Capacity per worker:
+A worker claims only while it has a free slot and host MemAvailable ≥ ~2.5 GB.
+Every worker on the same host reads the same /proc/meminfo, so the app-server worker and the bpmtest worker on .227 back off together without coordinating.
+.227 has 8 cores and 15 GB, about 8 GB free, so expect 2–3 clip renders at once. A whole-set render (9 GB today) is one batch job that needs a mostly free host.
+Remote workers:
+They talk to the app API, not to Postgres, so no DB credentials leave the app.
+Endpoints: POST /api/dj-lab/worker/claim, POST …/jobs/$id/heartbeat, PUT …/jobs/$id/result (clip + JSON upload), POST …/jobs/$id/fail.
+Auth is a DJ_LAB_WORKER_TOKEN bearer.
+The in-server worker runs the same claim and complete logic as a function call, not over HTTP.
+It starts from bootstrapBackgroundJobs() in server.ts, the boot hook reconciliation already uses on prod.
+It's opt-in: DJ_LAB_LOCAL_WORKER=1, with DJ_LAB_LOCAL_SLOTS defaulting to 1.
+Running renders inside the app server safely
+Runtime: the app image (Debian trixie) has no render tools today. Add python3, numpy / scipy / librosa / soundfile, rubberband-cli and ffmpeg in a separate Dockerfile stage, only when DJ_LAB_LOCAL_WORKER builds are wanted. Measure the image growth and note it in the PR.
+Isolation: the renderer runs as a child process (the Python entry point from the factoring below), never inside Node.
+Set the child's oom_score_adj to 1000, so under memory pressure the kernel kills the render, not the app.
+Add a wall-clock timeout per job.
+The app container has no memory limit, so this matters.
+Priority: run the child at nice 10, so playback, streaming and API requests win on CPU.
+Storage:
+Clips and JSON go to a persistent volume (/data/dj-lab/), served by the app through admin-only routes.
+The Coolify volume needs adding.
+Shared analysis: beat grids and drop profiles are cached per song in the DB (song_beat_analysis: song_id, method hop512 / hop128, bpm, beats, profile). Any worker, on any machine, reuses another's analysis instead of re-tracking.
+Work
+One code path: factor the per-transition plan and render out of mix_set.py into a function that both the set renderer and the workers call. A forked recipe would drift. Retire mix_r2.py.
+Admin API: POST /api/dj-lab/render enqueues (or returns the cache hit); GET /api/dj-lab/jobs/$id returns status and queue position. Both check the session, then role = 'admin'.
+Worker CLI: dj_lab_worker.py --app <url> --token … --slots 2 for standalone workers.
+Tempo-family analysis: above 150 BPM, use hop 128 with a 172 prior (analyze_j.py, EVOLUTION g2f). The default 23 ms frame is a 7 % beat-length step at jungle tempo.
+Later (not this issue)
+Set renders through the same queue. A set is a tempo plan, then N independent transition jobs (spread across workers), then an assembly job. That would turn ~25 min into a few minutes.
+Done when
+Rendering the default recipe for a pair taken from a published set reproduces that set's transition: same S / N / kill, lock within 1 ms.
+With the app-server worker and the bpmtest worker both running, 6 queued clips finish with no job claimed twice.
+Killing one worker mid-render requeues its job, and the other worker finishes it.
+A render that blows past memory gets OOM-killed as the child process; the app keeps serving.
+A second request with the same recipe returns the cached clip at once.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_01LAQj7kfXYU9jy1L9ByWw8r
+Activity
+lolimmlost
+added
+enhancementNew feature or improvementNew feature or improvement
+audioPlayback, crossfade, stall recovery, iOS audioPlayback, crossfade, stall recovery, iOS audio
+infraCI, deploy, dependencies, databaseCI, deploy, dependencies, database
+on Oct 23, 2026
+lolimmlost
+changed the title [-]Transition Lab: render service — clip renders of one A→B from a recipe JSON, called from the app[/-] [+]Transition Lab: render queue — clip renders of one A→B from a recipe, load-balanced across the app server and standalone workers[/+] on Oct 23, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+audioPlayback, crossfade, stall recovery, iOS audioPlayback, crossfade, stall recovery, iOS audioenhancementNew feature or improvementNew feature or improvementinfraCI, deploy, dependencies, databaseCI, deploy, dependencies, database
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

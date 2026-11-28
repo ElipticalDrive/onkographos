@@ -1,0 +1,201 @@
+--- v001.md
++++ v002.md
+@@ -4,52 +4,59 @@
+ 
+ ## Overview
+-Procedural Volume Rendering with Noise Perturbation enhances coarse, low-resolution volumetric data by adding high-frequency microstructure details (such as wispy cloud filaments, fur, or smoke turbulence) at render time, avoiding the memory and computational cost of increasing the underlying voxel resolution [S2, S3]. It sets itself apart from sibling methods like [Implicit Field Composition](2652-implicit-field-composition.md) by perturbing the sampling domain or optical properties of an existing discrete volume rather than defining the geometry via a continuous mathematical field, and from [Procedural Noise Functions](1799-procedural-noise-functions.md) by applying noise as a displacement or modulation vector to texture lookups rather than generating the scalar field directly [S2].
++Procedural Volume Rendering with Noise Perturbation enhances coarse, low-resolution volumetric data by superimposing high-frequency details using a small, tiling procedural noise volume [S1, unofficial][S2, S3]. It solves the problem of "blobby" or overly smooth appearances in real-time rendering by creating wispy, cloud-like filaments or fur-like textures without increasing the underlying voxel resolution [S1, unofficial][S2]. Unlike methods that animate the noise function itself, this technique perturbs either the sampling coordinates or the optical properties at render time, effectively moving the view through a "solid space" texture [S1, unofficial][S2, S3]. It sets itself apart from sibling methods like [Weather & Cloud Parameterization](3617-weather-cloud-parameterization.md) by relying on a pre-generated small noise volume rather than analytic noise functions evaluated per-pixel, and from [Chunk Generation with Base Terrain](1110-chunk-generation-with-base-terrain.md) by focusing on volumetric opacity/density rather than surface geometry [S2].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** A coarse 3D volume dataset (macrostructure), a small 3D perturbation noise volume, and rendering parameters (time, scales, weights).
+-*   **Output:** A rendered image with high-frequency detail superimposed on the coarse volume.
++**Inputs:**
++1.  **Macrostructure Volume:** A coarse 3D volume dataset (e.g., $64^3$ voxels) representing the large-scale shape [S2].
++2.  **Perturbation Volume:** A small 3D noise volume (typically $32^3$) initialized with random values [S2, S3].
++3.  **Transfer Function:** Maps scalar density values to optical properties (color, opacity) [S2, S3].
++4.  **Parameters:** Time, noise scale, coordinate perturbation strength, optical property perturbation strength, and flow speed [S1, unofficial].
++
++**Outputs:**
++1.  **Final Image:** A rendered frame with high-frequency detail superimposed on the macrostructure [S2].
+ 
+ **Data Structures:**
+-1.  **Macrostructure Volume:** The base volume data (e.g., density field). Resolution is typically coarse (e.g., $64^3$ voxels) [S2].
+-2.  **Perturbation Noise Volume:** A small 3D texture.
+-    *   **Dimensions:** Typically $32 \times 32 \times 32$ [S2, S3].
+-    *   **Format:** 8-bit RGBA (e.g., `vk::Format::eR8G8B8A8Unorm` or OpenGL equivalent) [S1, unofficial][S2].
+-    *   **Initialization:** Each texel is initialized with four random 8-bit numbers [S2, S3].
+-    *   **Filtering:** Slightly blurred to hide artifacts caused by trilinear interpolation [S2, S3].
+-    *   **Addressing:** Set to repeat (wrap) to allow tiling [S1, unofficial][S2].
+-3.  **Parameters:**
+-    *   `time`: Animation time offset [S1, unofficial][S2].
+-    *   `noiseScale`: Scaling factor for the noise volume coordinates [S1, unofficial].
+-    *   `coordPerturb`: Amplitude for coordinate perturbation [S1, unofficial].
+-    *   `propPerturb`: Amplitude for property perturbation [S1, unofficial].
+-    *   `opacityCorrection`: Correction factor for opacity when slice count changes [S1, unofficial].
+-    *   `flowSpeed`: Speed of animation [S1, unofficial].
++*   **Perturbation Volume:**
++    *   Dimensions: $kNoiseDim \times kNoiseDim \times kNoiseDim$ (typically 32) [S1, unofficial][S2].
++    *   Format: 8-bit RGBA (e.g., `vk::Format::eR8G8B8A8Unorm`) [S1, unofficial][S2].
++    *   Initialization: Each texel contains four random 8-bit numbers [S2, S3].
++    *   Filtering: Slightly blurred to hide artifacts from trilinear interpolation [S2, S3].
++    *   Addressing: Tiling/repeat mode (`vk::SamplerAddressMode::eRepeat`) [S1, unofficial][S2].
++*   **Push Constants (Vulkan Example):**
++    *   `mvp`: Model-View-Projection matrix [S1, unofficial].
++    *   `params`: `[time, noiseScale, coordPerturb, propPerturb]` [S1, unofficial].
++    *   `params2`: `[opacityCorrection, flowSpeed]` [S1, unofficial].
++    *   `opacityCorrection`: Calculated as $kReferenceSlices / m\_numSlices$ [S1, unofficial].
+ 
+-**Algorithm Steps:**
+-The method requires an additional rendering pass (or fragment shader logic) before the main volume shading/compositing pass due to hardware limitations on simultaneous texture bindings and dependent texture reads [S2].
++**Steps:**
+ 
+-1.  **Generate Perturbation Field:**
+-    *   Create multiple copies of the perturbation noise texture, each scaled by a different factor (e.g., low frequency/large amplitude and high frequency/small amplitude) [S2].
+-    *   For each copy, sample the noise texture using coordinates perturbed by time and scale.
+-    *   Compute the per-pixel perturbation vector $\mathbf{P}$ as the weighted sum of the individual noise components from all scales [S3].
+-    *   *Note:* For coordinate perturbation, use 3 components of the noise (RGB) as the vector $\mathbf{P}$. For optical perturbation, use 4 components (RGBA) [S2, S3].
++1.  **Generate Perturbation Volume:**
++    *   Create a $32^3$ volume.
++    *   Fill each voxel with four random 8-bit values (RGBA) [S2, S3].
++    *   Apply a slight blur to the volume to mitigate trilinear interpolation artifacts [S2, S3].
+ 
+-2.  **Apply Perturbation (Two Approaches):**
+-    *   **Approach A: Coordinate Perturbation (Geometry/Density Warping)**
+-        1.  Calculate the original texture coordinates $\mathbf{C}_{orig}$ for the volume data lookup [S2].
+-        2.  Compute perturbed coordinates: $\mathbf{C}_{pert} = \mathbf{C}_{orig} + \mathbf{P} \cdot \text{scale}$ [S2, S3].
+-        3.  Perform a dependent texture read on the macrostructure volume using $\mathbf{C}_{pert}$ [S2].
+-        4.  Render the resulting perturbed data to a pixel buffer (render target) [S2].
+-        5.  Use this pixel buffer as the input for the subsequent volume shading/compositing pass [S2].
+-    *   **Approach B: Optical Property Perturbation**
+-        1.  Sample the macrostructure volume at $\mathbf{C}_{orig}$ to get base density/value [S2].
+-        2.  Evaluate the transfer function to get base optical properties (color, opacity) [S2].
+-        3.  Use the 4 noise components from $\mathbf{P}$ to modulate the optical properties (e.g., color or opacity) [S2, S3].
+-        4.  The user selects which specific optical properties are modified [S2].
++2.  **Compute Perturbation Field (Pre-pass or Shader):**
++    *   Due to hardware limits on simultaneous textures and dependent reads, an additional pass is often required [S2].
++    *   Sample the perturbation volume multiple times at different scales [S2, S3].
++    *   For each scale $i$, apply an offset based on time and flow speed to animate the noise [S2, S3].
++    *   Weight and sum the sampled noise components per pixel to create a displacement vector field or noise vector [S2, S3].
++    *   *Note:* Low-frequency perturbation is achieved with large amplitude; high-frequency with small amplitude and texture repetition [S2].
+ 
+-3.  **Animation:**
+-    *   Update the noise texture coordinates by adding a time-based offset vector $\mathbf{T}(t)$ each frame [S2, S3].
+-    *   $\mathbf{C}_{noise}(t) = \mathbf{C}_{base} + \mathbf{T}(t)$ [S3].
++3.  **Apply Perturbation (Two Approaches):**
++
++    *   **Approach 1: Optical Property Perturbation** [S2, S3]:
++        1.  Evaluate the transfer function on the original volume data to get base optical properties (color, opacity) [S2, S3].
++        2.  Use the four per-pixel noise components from the perturbation field to modify these optical properties [S2, S3].
++        3.  The user selects which properties (e.g., color, opacity) are modified [S2].
++        4.  This creates inhomogeneities and subtle iridescence [S2].
++
++    *   **Approach 2: Coordinate Perturbation (Texture Coordinate Perturbation)** [S2, S3]:
++        1.  Use three components of the noise texture (e.g., RGB) as a 3D displacement vector $\mathbf{d}$ [S2, S3].
++        2.  Add $\mathbf{d}$ to the original texture coordinates $\mathbf{u}$ of the macrostructure volume: $\mathbf{u}' = \mathbf{u} + \mathbf{d}$ [S2, S3].
++        3.  Perform a dependent texture read on the macrostructure volume using $\mathbf{u}'$ [S2, S3].
++        4.  Render the perturbed data to a pixel buffer, which is then used for compositing [S2].
++
++4.  **Animate:**
++    *   Update the offset vector added to the noise texture coordinates each frame based on `flowSpeed` and `time` [S1, unofficial][S2, S3].
+ 
+ **Pseudocode (Coordinate Perturbation Approach):**
+@@ -57,63 +64,59 @@
+ ```python
+ # Vertex Shader / Geometry Setup
+-# Passes original texture coordinates C_orig to fragment shader
++# Renders a slice or ray-cast quad. Passes original texture coordinates 'uv' and depth 'z' to fragment shader.
+ 
+ # Fragment Shader
+-uniform sampler3D macroVolume;
+-uniform sampler3D noiseVolume;
+-uniform vec3 timeOffset;
+-uniform float coordPerturbScale;
+-uniform vec3 noiseScales[4]; # Scales for multiple noise copies
+-uniform float noiseWeights[4];
++uniform sampler3D macroVolume;       // Coarse volume data
++uniform sampler3D noiseVolume;       // 32^3 perturbation volume
++uniform vec3 params;                 // [time, noiseScale, coordPerturb]
++uniform vec3 params2;                // [opacityCorrection, flowSpeed, unused]
+ 
+ void main() {
+-    vec3 C_orig = gl_TexCoord[0].xyz; // Original volume coordinates
++    // 1. Sample noise volume at multiple scales to build perturbation vector
++    vec3 perturbation = vec3(0.0);
+     
+-    // Step 1: Compute perturbation vector P
+-    vec3 P = vec3(0.0);
+-    for (int i = 0; i < 4; i++) {
+-        // Sample noise at scaled and time-offset coordinates
+-        vec3 noiseCoord = C_orig * noiseScales[i] + timeOffset;
+-        vec4 noiseVal = texture3D(noiseVolume, noiseCoord);
+-        
+-        // Use RGB components for displacement vector
+-        P += noiseVal.rgb * noiseWeights[i];
+-    }
++    // Low frequency component (large amplitude)
++    vec3 lowFreqUV = uv * params.y + vec3(0.0, 0.0, params2.y * params.x);
++    perturbation += texture(noiseVolume, lowFreqUV).rgb * params.z;
+     
+-    // Step 2: Apply perturbation
+-    vec3 C_pert = C_orig + P * coordPerturbScale;
++    // High frequency component (small amplitude, repeated)
++    vec3 highFreqUV = uv * (params.y * 2.0) + vec3(0.0, 0.0, params2.y * params.x * 1.5);
++    perturbation += texture(noiseVolume, highFreqUV).rgb * (params.z * 0.5);
+     
+-    // Step 3: Dependent texture read
+-    // Note: In OpenGL, this might require a separate render-to-texture pass
+-    // if dependent reads are limited. Here we assume direct access for clarity.
+-    float density = texture3D(macroVolume, C_pert).r;
++    // 2. Apply perturbation to macrostructure coordinates
++    vec3 perturbedUV = uv + perturbation;
+     
+-    // Step 4: Standard volume shading/compositing using 'density'
+-    // ... (Transfer function, lighting, etc.)
+-    gl_FragColor = vec4(density, density, density, 1.0);
++    // 3. Sample macrostructure with perturbed coordinates
++    float density = texture(macroVolume, perturbedUV).r;
++    
++    // 4. Apply transfer function (simplified)
++    vec4 color = vec4(density, density, density, density);
++    
++    // 5. Composite
++    gl_FragColor = color;
+ }
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Trilinear Interpolation Artifacts:** The blurring of the noise volume is critical to prevent visible grid artifacts when sampling the perturbation volume [S2, S3].
+-*   **Hardware Limits:** Limited number of simultaneous texture units and dependent texture reads may necessitate an intermediate render-to-texture pass to store the perturbed volume data before the final shading pass [S2].
+-*   **Gradient Recomputation:** Unlike surface shading on perturbed volumes, this method avoids the need to recompute gradients based on the perturbed grid, simplifying lighting calculations [S2].
++*   **Trilinear Interpolation Artifacts:** The perturbation volume must be blurred slightly to prevent visible grid artifacts when sampled [S2, S3].
++*   **Hardware Limits:** Limited number of simultaneous textures and dependent texture reads may require an intermediate render pass to store the perturbation field [S2].
++*   **Gradient Recomputation:** If surface shading is used on perturbed volumes, gradients must be recomputed based on the perturbed grid, which is computationally expensive [S2]. This method avoids that by shading the volume directly [S2].
+ 
+ ## Subtopics
+ 
+ ### [Fog Animation](4611-fog-animation.md)
+-Fog Animation generates the appearance of moving gaseous volumes by perturbing the spatial coordinates of the evaluation point before sampling a static turbulence function, effectively moving the point through a "solid space" texture. Unlike methods that animate the noise function itself, this approach creates motion by shifting the sampling domain, producing upward-swirling gas movement suitable for real-time fog and smoke. It is a specific application of Procedural Volume Rendering with Noise Perturbation [1370-procedural-volume-rendering-with-noise-perturbation.md] tailored for transparency-based fog effects.
++Fog Animation generates the appearance of moving gaseous volumes by perturbing the spatial coordinates of the evaluation point before sampling a static turbulence function, effectively moving the point through a "solid space" texture. Unlike methods that animate the noise function itself, this approach creates motion by shifting the sampling domain, producing upward-swirling gas movement suitable for real-time fog and smoke. It is a specific application of Procedural Volume Rendering with Noise Perturbation tailored for transparency-based fog effects.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Adds a constant overhead per fragment for sampling the noise volume(s) and computing the perturbation vector. The number of noise samples depends on the number of scales used (typically 2-4) [S2].
+-*   **Memory Complexity:** Requires storage for the coarse volume and the small perturbation noise volume ($32^3$ texels is negligible compared to high-res volumes) [S2].
+-*   **Performance:** On hardware like NVIDIA GeForce 3 and ATI Radeon 8500, frame rates were only 50-60% slower than volume rendering with no shading, demonstrating high efficiency [S2].
+-*   **Strengths:** Produces detail equivalent to an unperturbed voxel dataset of at least 100 times the resolution [S2]. Efficiently adds high-frequency details (clouds, fur, smoke) without increasing voxel count [S2, S3]. Avoids gradient recomputation issues associated with surface shading on perturbed grids [S2].
+-*   **Limitations:** Requires additional rendering passes or fragment shader complexity due to texture read limits [S2]. The visual quality is heavily dependent on the underlying shading model; without realistic shading, results may look like deformed blobs [S2].
+-*   **When to Use:** Real-time rendering of clouds, smoke, fire, fur, or any volumetric effect where high-frequency detail is desired but memory/bandwidth for high-resolution voxels is limited [S1, unofficial][S2].
+-*   **When Not to Use:** When exact physical simulation of density fields is required, or when the perturbation artifacts (if blurring is insufficient) become distracting.
++*   **Time Complexity:** $O(1)$ per sample, but requires multiple noise texture samples per pixel (multiple scales) [S2, S3]. The need for an additional pass for dependent reads adds overhead [S2].
++*   **Memory Complexity:** Requires storage for the macrostructure volume and a small perturbation volume ($32^3$ texels) [S1, unofficial][S2].
++*   **Measured Performance:** Frame rates are only 50-60% slower than volume rendering with no shading on NVIDIA GeForce 3 and ATI Radeon 8500 hardware [S2].
++*   **Strengths:** Produces detail equivalent to an unperturbed voxel dataset of at least 100 times the resolution [S2]. Efficient on modern graphics hardware by leveraging texture lookups [S2]. Suitable for real-time clouds, smoke, and fire [S1, unofficial].
++*   **Limitations:** Limited by the number of simultaneous textures and dependent reads [S2]. Surface shading on perturbed volumes requires expensive gradient recomputation [S2].
++*   **When to Use:** When rendering coarse volumetric data (e.g., $64^3$) and needing high-frequency detail (clouds, fur, smoke) in real-time [S2].
++*   **When Not to Use:** When exact physical accuracy of density gradients is required for surface shading, or when hardware limits on texture sampling are strict [S2].
+ 
+ ## Background
+-The technique was introduced by Kniss et al. in 2002 as part of "Interactive Translucent Volume Rendering and Procedural Modeling" [S2]. It builds on earlier work by Ebert (lattice-based noise for clouds) and Peachey (vector-based noise simulation) [S2]. It was further detailed in GPU Gems Chapter 39 (Kniss et al., 2003) [S3]. The method was implemented on early GPUs (GeForce 3, Radeon 8500) leveraging OpenGL extensions for render-to-texture [S2].
++Originating from work by Kniss et al. (2002) and Ebert et al. (2002), this technique adapts procedural noise modeling for interactive volume rendering [S2, S3]. It builds on the principle of using coarse models for macrostructure and procedural noise for microstructure [S2, S3]. The method was implemented on early GPUs (NVIDIA GeForce 3, ATI Radeon 8500) leveraging OpenGL render-to-texture extensions to manage dependent reads [S2]. It is widely used in real-time graphics for clouds, smoke, and fur-like surfaces [S2].
+ 
+ ## Sources

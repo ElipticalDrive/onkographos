@@ -1,0 +1,564 @@
+--- v004.md
++++ v005.md
+@@ -4,61 +4,76 @@
+ 
+ ## Overview
+-TriDF is a hybrid explicit–implicit 3D representation designed for few-shot novel view synthesis (NVS) in remote sensing, specifically addressing the computational burden and overfitting issues of implicit radiance fields when trained on as few as three input views [S1]. It decouples scene representation by modeling high-frequency color information using an explicit triplane structure and low-frequency geometry using implicit continuous density fields, thereby reducing optimization competition and accelerating convergence [S1]. Unlike sibling methods that jointly model color and density or rely on dense pretraining priors, TriDF leverages sparse depth supervision from Structure-from-Motion (SfM) point clouds to guide geometry reconstruction without requiring extensive external datasets [S1].
++TriDF is a hybrid explicit–implicit 3D representation designed for few-shot novel view synthesis, particularly in remote sensing scenes where input views are sparse (e.g., 3 images) and have low overlap [S1]. It decouples color and volume density to reduce the computational burden on implicit radiance fields and accelerate reconstruction [S1]. Unlike standard triplane methods that struggle with fine-grained geometry under insufficient supervision, or joint models where color and density compete for network capacity, TriDF uses explicit triplanes for high-frequency color prediction and implicit density fields for geometry, guided by sparse depth from point clouds [S1].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Inputs:** $V$ input images (typically $V=3$) with known camera poses, and their corresponding depth maps or point clouds generated via SfM/PatchMatch Stereo.
+-*   **Outputs:** A rendered color image $\hat{C}(r)$ for a novel view ray $r$.
++**Inputs:** $V$ input images (typically $V=3$) with known camera poses, and their associated depth maps or point clouds generated via Structure-from-Motion (SfM) and PatchMatch Stereo (PMS) [S1].
++**Outputs:** A rendered image $\hat{C}(r)$ for a novel view ray $r$ [S1].
+ 
+ **Data Structures:**
+-1.  **Triplane ($P$):** A set of three mutually orthogonal feature planes $P = \{P_{XY}, P_{YZ}, P_{ZX}\}$. Each plane $P_{ij}$ is a tensor of size $H \times W \times C$ [S1].
++1.  **Triplane ($P$):** A set of three mutually orthogonal feature planes $P = \{P_{XY}, P_{YZ}, P_{ZX}\}$ [S1]. Each plane $P_{ij}$ is a tensor of size $H \times W \times C$ [S1].
+     *   $H, W$: Height and width of the feature maps.
+     *   $C$: Channel dimension (feature vector dimension is 64) [S1].
+     *   Initialized randomly and optimized directly [S1].
+-2.  **Density MLP:** A Multi-Layer Perceptron (MLP) with CUTLASS architecture, width 512, and depth 8 [S1].
+-3.  **Color MLP:** A compact MLP used to predict color [S1].
+-4.  **Reference Features:** Extracted from input images using a pretrained CNN encoder [S1].
+-
+-**Numbered Steps:**
+-
+-1.  **Preprocessing (Point Cloud Generation):**
+-    Generate coarse 3D point clouds from the training views and poses using Structure-from-Motion (SfM) and PatchMatch Stereo (PMS) techniques (e.g., COLMAP) [S1]. Re-project key points and their associated depth information from these point clouds to serve as spatial anchors for depth-guided optimization [S1].
+-
+-2.  **Triplane Feature Retrieval (Color Branch):**
+-    For a 3D spatial point $\mathbf{x}$:
+-    a. Project $\mathbf{x}$ orthogonally onto the three planes $P_{XY}, P_{YZ}, P_{ZX}$ [S1].
+-    b. Identify the four nearest grid points on each plane.
+-    c. Apply bilinear interpolation to compute feature vectors $\mathbf{f}_{XY}, \mathbf{f}_{YZ}, \mathbf{f}_{ZX}$ [S1].
+-    d. Concatenate these vectors to form the triplane feature vector:
+-       $$ \mathbf{f}_{tri} = \text{concat}(\mathbf{f}_{XY}, \mathbf{f}_{YZ}, \mathbf{f}_{ZX}) $$
+-       [S1]
+-
+-3.  **Density Field Prediction (Geometry Branch):**
+-    a. Extract reference features $\mathbf{f}_{ref}$ from input images using a pretrained CNN encoder [S1].
+-    b. Project $\mathbf{f}_{ref}$ to obtain corresponding feature vectors for the sampling point [S1].
+-    c. Concatenate the projected reference features with the spatial coordinates $\mathbf{x}$ encoded via positional encoding (frequency = 6) [S1].
+-    d. Process the concatenated vector through the Density MLP to predict volume density $\sigma$ and intermediate features $\mathbf{f}_m$ [S1].
+-
+-4.  **Color Prediction:**
+-    a. Combine the triplane features $\mathbf{f}_{tri}$ and density features $\mathbf{f}_m$ using a compact MLP ($\Phi_{base}$) to generate intermediate features $\mathbf{f}_{base}$:
+-       $$ \mathbf{f}_{base} = \Phi_{base}(\mathbf{f}_{tri}, \mathbf{f}_m) $$
+-       [S1]
+-    b. Encode the viewing direction $\mathbf{d} \in \mathbb{R}^3$ on the spherical harmonics basis $\text{SH}(\cdot)$ [S1].
+-    c. Process $\mathbf{f}_{base}$ and $\text{SH}(\mathbf{d})$ through the Color MLP ($\Phi_{color}$) to predict the point's color $\mathbf{c} \in \mathbb{R}^3$:
+-       $$ \mathbf{c} = \Phi_{color}(\mathbf{f}_{base}, \text{SH}(\mathbf{d})) $$
+-       [S1]
+-
+-5.  **Volume Rendering:**
+-    Render the pixel color $\hat{C}(r)$ along ray $r$ using differentiable volume rendering [S1]:
+-    $$ \hat{C}(r) = \sum_{i=1}^{N} T_i (1 - \exp(-\sigma_i \delta_i)) \mathbf{c}_i $$
+-    $$ T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right) $$
+-    where $\mathbf{c}_i$ and $\sigma_i$ are the color and volume density at sample $i$, $\delta_i$ is the distance between adjacent samples, $N$ is the number of sampling points, and $T_i$ is the accumulated transmittance [S1].
+-
+-6.  **Optimization:**
+-    Optimize the model parameters (Triplane $P$, MLP weights) using backpropagation [S1].
+-    *   **Loss Functions:** Photometric loss (predicted vs. ground truth colors), depth loss (from point cloud anchors), and edge-aware smoothness loss [S1].
+-    *   **Edge-Aware Smoothness:** Process 64 key points and randomly render a $16 \times 16$ patch with stride 4 to compute this loss [S1].
+-    *   **Training Schedule:** 30,000 total iterations. First 10,000 iterations use depth-guided optimization. The subsequent 20,000 iterations use edge-aware smoothness loss [S1].
+-    *   **Optimizer:** AdamW with initial learning rate 0.0001 [S1].
++2.  **Density MLP:** A Multi-Layer Perceptron (MLP) implementing the CUTLASS architecture [S1].
++    *   Width: 512.
++    *   Depth: 8 layers [S1].
++3.  **Color MLP:** A compact MLP for color prediction [S1].
++4.  **Base MLP ($\Phi_{base}$):** A compact MLP combining triplane and density features [S1].
++
++**Parameters:**
++*   Positional encoding frequency for coordinates: 6 [S1].
++*   Batch size: 1024 pixel rays [S1].
++*   Samples per ray: 128 coarse samples [S1].
++*   Total iterations: 30,000 (10k with depth guidance, 20k with edge-aware smoothness loss) [S1].
++*   Optimizer: AdamW, initial learning rate 0.0001 [S1].
++
++**Algorithm:**
++
++1.  **Initialization:**
++    *   Estimate initial 3D point clouds from training views and poses using COLMAP [S1].
++    *   Re-project key points and their associated depth information from the generated point clouds to use as spatial anchors [S1].
++    *   Initialize triplane tensors $P_{XY}, P_{YZ}, P_{ZX}$ randomly [S1].
++
++2.  **Feature Extraction (IBR):**
++    *   Extract pixel-aligned features $f_{ref}$ from input images using a pretrained CNN encoder [S1].
++    *   Project these reference features to obtain corresponding feature vectors for each sampling point along the ray [S1].
++
++3.  **Density Field Prediction:**
++    *   For a 3D spatial point $\mathbf{x}$, apply positional encoding (frequency 6) to $\mathbf{x}$ [S1].
++    *   Concatenate the positionally encoded coordinates with the projected reference features $f_{ref}$ [S1].
++    *   Process the concatenated vector through the Density MLP to predict volume density $\sigma$ and intermediate features $f_m$ [S1].
++    *   Note: The Density MLP outputs both $\sigma$ and $f_m$ [S1].
++
++4.  **Triplane Feature Retrieval:**
++    *   Decompose the scene space into three orthogonal parameterized planes $P = \{P_{XY}, P_{YZ}, P_{ZX}\}$ [S1].
++    *   For a 3D spatial point $\mathbf{x}$, project it orthogonally onto the three planes [S1].
++    *   Identify the four nearest grid points on each plane and apply bilinear interpolation to compute feature vectors $f_{XY}, f_{YZ}, f_{ZX}$ [S1].
++    *   Concatenate the feature vectors from the three planes to form the final triplane feature vector:
++        $$ f_{tri} = \text{concat}(f_{XY}, f_{YZ}, f_{ZX}) $$
++        [S1]
++
++5.  **Color Prediction:**
++    *   Combine triplane features $f_{tri}$ and density features $f_m$ using the Base MLP ($\Phi_{base}$) to generate intermediate features $f_{base}$:
++        $$ f_{base} = \Phi_{base}(f_{tri}, f_m) $$
++        [S1]
++    *   Encode the viewing direction $\mathbf{d} \in \mathbb{R}^3$ on the spherical harmonics basis $\text{SH}(\cdot)$ [S1].
++    *   Map $f_{base}$ and the encoded viewing direction to determine the point's color $\mathbf{c} \in \mathbb{R}^3$ using the Color MLP ($\Phi_{color}$):
++        $$ \mathbf{c} = \Phi_{color}(f_{base}, \text{SH}(\mathbf{d})) $$
++        [S1]
++
++6.  **Volume Rendering:**
++    *   Aggregate attributes along the ray using differentiable volume rendering [S1].
++    *   The pixel color $\hat{C}(r)$ is computed as:
++        $$ \hat{C}(r) = \sum_{i=1}^{N} T_i (1 - \exp(-\sigma_i \delta_i)) \mathbf{c}_i $$
++        where $T_i = \exp(-\sum_{j=1}^{i-1} \sigma_j \delta_j)$, $\mathbf{c}_i$ and $\sigma_i$ are color and volume density, $\delta_i$ is the distance between adjacent samples, and $N$ is the number of sampling points [S1].
++
++7.  **Optimization:**
++    *   Optimize the model through backpropagation [S1].
++    *   **Loss Functions:**
++        *   Photometric loss between predicted and ground truth colors [S1].
++        *   Depth supervision from the generated point clouds (first 10k iterations) [S1].
++        *   Edge-aware smoothness loss (last 20k iterations) [S1].
++            *   For edge-aware smoothness loss: process 64 key points and randomly render a $16 \times 16$ patch with stride 4 [S1].
++    *   Use Nerfacc for efficient empty space skipping [S1].
+ 
+ **Pseudocode:**
+@@ -70,255 +85,199 @@
+ 
+ class TriDF:
+-    def __init__(self, H, W, C, density_mlp_width=512, density_mlp_depth=8):
+-        """
+-        Initialize TriDF representation.
++    def __init__(self, H, W, C, num_samples=128):
++        """
++        Initialize TriDF model.
+         :param H: Height of triplane feature maps
+         :param W: Width of triplane feature maps
+-        :param C: Channel dimension of triplane feature maps (typically 64)
+-        :param density_mlp_width: Width of density MLP
+-        :param density_mlp_depth: Depth of density MLP
+-        """
+-        # Triplane: 3 planes (XY, YZ, ZX), each H x W x C
+-        self.P = nn.Parameter(torch.randn(3, H, W, C))
+-        
+-        # Density MLP (CUTLASS architecture)
+-        self.density_mlp = self._build_mlp(density_mlp_width, density_mlp_depth)
+-        
+-        # Color MLP (Compact)
+-        self.color_mlp = self._build_mlp(64, 2) # Simplified structure for color prediction
+-        
+-        # Base MLP to combine triplane and density features
+-        self.base_mlp = self._build_mlp(64, 2)
++        :param C: Channel dimension of triplane feature maps
++        :param num_samples: Number of coarse samples per ray
++        """
++        self.H = H
++        self.W = W
++        self.C = C
++        self.num_samples = num_samples
++        
++        # Triplane parameters: 3 planes (XY, YZ, ZX), each H x W x C
++        self.triplane = nn.Parameter(torch.randn(3, C, H, W))
++        
++        # Density MLP (CUTLASS architecture: width 512, depth 8)
++        # Input: pos_encoded_coord (dim=7) + ref_features (dim=64) -> 71
++        # Output: sigma (1) + f_m (dim=64) -> 65
++        self.density_mlp = nn.Sequential(
++            nn.Linear(71, 512), nn.ReLU(),
++            nn.Linear(512, 512), nn.ReLU(),
++            nn.Linear(512, 512), nn.ReLU(),
++            nn.Linear(512, 512), nn.ReLU(),
++            nn.Linear(512, 512), nn.ReLU(),
++            nn.Linear(512, 512), nn.ReLU(),
++            nn.Linear(512, 512), nn.ReLU(),
++            nn.Linear(512, 65) # 1 for sigma, 64 for f_m
++        )
++        
++        # Base MLP: combines f_tri (192) and f_m (64) -> f_base (64)
++        self.base_mlp = nn.Sequential(
++            nn.Linear(192 + 64, 512), nn.ReLU(),
++            nn.Linear(512, 64)
++        )
++        
++        # Color MLP: combines f_base (64) and SH(d) (dim=27 for SH order 2) -> color (3)
++        # Note: SH dimension depends on order. Standard NeRF uses order 4 (81 dims) or order 2 (27 dims).
++        # The source mentions "SH(·)" but doesn't specify order. We assume a standard SH encoding function.
++        self.color_mlp = nn.Sequential(
++            nn.Linear(64 + 27, 512), nn.ReLU(),
++            nn.Linear(512, 512), nn.ReLU(),
++            nn.Linear(512, 3)
++        )
+         
+         # Pretrained CNN encoder for reference features (frozen)
+-        self.encoder = self._load_pretrained_encoder()
+-        
+-        # Positional encoding frequency
+-        self.pe_freq = 6
+-
+-    def _build_mlp(self, width, depth):
+-        """Build a simple MLP with ReLU activations."""
+-        layers = []
+-        for _ in range(depth):
+-            layers.append(nn.Linear(width, width))
+-            layers.append(nn.ReLU())
+-        return nn.Sequential(*layers)
+-
+-    def _load_pretrained_encoder(self):
+-        """Load a pretrained CNN encoder. Returns a frozen module."""
+-        # Placeholder for actual pretrained model loading
+-        # In implementation, this would be a specific CNN architecture
+-        return nn.Sequential(nn.Conv2d(3, 64, 3, padding=1)) # [G] Placeholder structure
+-
+-    def positional_encoding(self, x, freq):
+-        """Apply positional encoding to coordinates."""
++        self.encoder = get_pretrained_cnn_encoder() 
++        self.encoder.eval()
++        for param in self.encoder.parameters():
++            param.requires_grad = False
++
++    def positional_encoding(self, x, freq=6):
++        """
++        Apply positional encoding to coordinates.
++        :param x: Coordinates (N, 3)
++        :param freq: Frequency of sine/cosine waves
++        :return: Encoded coordinates (N, 3 * 2 * freq + 3)
++        """
+         # Standard NeRF positional encoding
+-        # x shape: (..., 3)
++        x = x.unsqueeze(-1)
+         scales = torch.tensor([2**i for i in range(freq)])
+-        shaped_x = x.unsqueeze(-1) * scales.view(1, 1, 1, -1)
+-        shaped_x = shaped_x.view(*x.shape[:-1], -1)
+-        return torch.sin(shaped_x)
+-
+-    def get_triplane_features(self, x):
+-        """
+-        Retrieve triplane features for 3D points x.
+-        :param x: Tensor of shape (N, 3) containing 3D coordinates
+-        :return: Tensor of shape (N, 3*C) concatenated features
+-        """
+-        N = x.shape[0]
++        shaped_x = x * (2 * torch.pi * scales).reshape(1, 1, -1, 1)
++        pe = torch.cat((torch.sin(shaped_x), torch.cos(shaped_x)), -1)
++        pe = pe.reshape(x.shape[0], -1)
++        return torch.cat([x.reshape(x.shape[0], -1), pe], dim=-1)
++
++    def get_triplane_features(self, x, triplane):
++        """
++        Retrieve features from triplane for points x.
++        :param x: Points (N, 3)
++        :param triplane: Triplane parameters (3, C, H, W)
++        :return: Concatenated features (N, 3*C)
++        """
+         features = []
+-        
+-        # Project x onto XY, YZ, ZX planes
+-        # x[:, 0] is X, x[:, 1] is Y, x[:, 2] is Z
+-        # XY plane: use (X, Y)
+-        # YZ plane: use (Y, Z)
+-        # ZX plane: use (Z, X)
+-        
+-        coords_xy = x[:, :2] # (N, 2)
+-        coords_yz = x[:, 1:] # (N, 2)
+-        coords_zx = torch.cat([x[:, 2:], x[:, :1]], dim=1) # (N, 2)
+-        
+-        # Normalize coordinates to [-1, 1] for grid sampling
+-        # Assuming scene bounds are normalized. [G] Implementation detail: 
+-        # coordinates must be scaled to [-1, 1] range corresponding to grid indices.
+-        coords_xy = coords_xy * 2.0 - 1.0
+-        coords_yz = coords_yz * 2.0 - 1.0
+-        coords_zx = coords_zx * 2.0 - 1.0
+-        
+-        # Reshape for grid_sample: (N, 1, 1, 2)
+-        coords_xy = coords_xy.unsqueeze(1).unsqueeze(1)
+-        coords_yz = coords_yz.unsqueeze(1).unsqueeze(1)
+-        coords_zx = coords_zx.unsqueeze(1).unsqueeze(1)
+-        
+-        # Extract features from each plane using bilinear interpolation
+-        # P shape: (3, C, H, W). grid_sample expects (N, C, H, W)
+-        # We need to permute P to (3, C, H, W) for grid_sample
+-        P_perm = self.P.permute(0, 3, 1, 2)
+-        
+-        f_xy = F.grid_sample(P_perm[0].unsqueeze(0), coords_xy, align_corners=True).squeeze() # (N, C)
+-        f_yz = F.grid_sample(P_perm[1].unsqueeze(0), coords_yz, align_corners=True).squeeze() # (N, C)
+-        f_zx = F.grid_sample(P_perm[2].unsqueeze(0), coords_zx, align_corners=True).squeeze() # (N, C)
+-        
+-        # Concatenate features
++        # Project onto XY, YZ, ZX planes
++        # XY plane: use x, y coordinates
++        xy_coords = x[:, :2] # (N, 2)
++        # Normalize to [-1, 1] for grid_sample if necessary, assuming triplane is in this range
++        # grid_sample expects normalized coordinates in [-1, 1]
++        xy_norm = xy_coords * 2 - 1 
++        xy_norm = xy_norm.unsqueeze(1).unsqueeze(1) # (N, 1, 1, 2)
++        
++        # Sample from P_XY
++        f_xy = F.grid_sample(triplane[0].unsqueeze(0), xy_norm, align_corners=True).squeeze() # (C, N)
++        f_xy = f_xy.permute(1, 0) # (N, C)
++        
++        # YZ plane: use y, z coordinates
++        yz_coords = x[:, 1:] # (N, 2)
++        yz_norm = yz_coords * 2 - 1
++        yz_norm = yz_norm.unsqueeze(1).unsqueeze(1)
++        f_yz = F.grid_sample(triplane[1].unsqueeze(0), yz_norm, align_corners=True).squeeze()
++        f_yz = f_yz.permute(1, 0)
++        
++        # ZX plane: use z, x coordinates
++        zx_coords = torch.cat([x[:, 2:], x[:, :1]], dim=1) # (N, 2)
++        zx_norm = zx_coords * 2 - 1
++        zx_norm = zx_norm.unsqueeze(1).unsqueeze(1)
++        f_zx = F.grid_sample(triplane[2].unsqueeze(0), zx_norm, align_corners=True).squeeze()
++        f_zx = f_zx.permute(1, 0)
++        
+         f_tri = torch.cat([f_xy, f_yz, f_zx], dim=1) # (N, 3*C)
+         return f_tri
+ 
+-    def get_density_and_ref_features(self, x, reference_images):
+-        """
+-        Predict density and intermediate features using density fields and IBR.
+-        :param x: Tensor of shape (N, 3)
+-        :param reference_images: List of input images (tensors)
+-        :return: sigma (N,), f_m (N, 64)
+-        """
+-        # Extract reference features from input images
+-        # reference_images shape: (V, 3, H_img, W_img)
+-        ref_features = self.encoder(reference_images) # (V, 64, H_f, W_f)
+-        
++    def forward(self, rays_o, rays_d, ref_images, ref_poses, point_cloud_depths):
++        """
++        Forward pass for a batch of rays.
++        :param rays_o: Ray origins (B, 3)
++        :param rays_d: Ray directions (B, 3)
++        :param ref_images: Reference images (V, 3, H_img, W_img)
++        :param ref_poses: Reference camera poses (V, 4, 4)
++        :param point_cloud_depths: Depth maps from point clouds for supervision
++        :return: Rendered colors, densities, and auxiliary losses
++        """
++        # 1. Extract reference features
++        with torch.no_grad():
++            ref_features = self.encoder(ref_images) # (V, C_enc, H_ref, W_ref)
++        
++        # 2. Sample points along rays
++        # Assume t_near, t_far are determined by Nerfacc or bounding box
++        t_vals = torch.linspace(0, 1, self.num_samples) # Placeholder for actual sampling strategy
++        # In practice, Nerfacc handles empty space skipping. Here we assume uniform sampling for simplicity.
++        # t_vals = nerfacc.sample_stratified(t_near, t_far, self.num_samples)
++        t_vals = t_vals.to(rays_o.device)
++        t_vals = torch.stack([t_vals] * rays_o.shape[0], dim=0)
++        z_vals = t_vals # Placeholder
++        
++        # 3. Compute 3D points
++        pts = rays_o.unsqueeze(1) + rays_d.unsqueeze(1) * z_vals.unsqueeze(2) # (B, N, 3)
++        pts_flat = pts.reshape(-1, 3) # (B*N, 3)
++        
++        # 4. Get Triplane Features
++        f_tri = self.get_triplane_features(pts_flat, self.triplane) # (B*N, 3*C)
++        
++        # 5. Get Reference Features for Density
+         # Project reference features to sampling points
+-        # This step involves projecting camera rays to image planes and sampling features
+-        # [G] Detailed projection logic depends on camera intrinsics/extrinsics.
+-        # Assuming a function `project_features` exists that maps 3D points to 2D image coordinates
+-        # and samples the feature maps.
+-        f_ref = self.project_features(ref_features, x) # (N, 64)
+-        
+-        # Positional encoding of coordinates
+-        pe_x = self.positional_encoding(x, self.pe_freq) # (N, 12)
+-        
+-        # Concatenate projected features and positional encoding
+-        input_density = torch.cat([f_ref, pe_x], dim=1) # (N, 64 + 12)
+-        
+-        # Process through Density MLP
+-        # Density MLP width is 512. We need to project input to 512 first if dimensions don't match.
+-        # [G] Assuming a linear projection layer exists to map (64+12) -> 512
+-        input_density_proj = F.linear(input_density, self.density_mlp[0].weight) # Simplified
+-        # Actually, the first layer of the MLP handles the input dimension.
+-        # Let's assume the MLP is defined to take the concatenated input.
+-        
+-        # Re-defining MLP to accept correct input size for clarity in pseudocode
+-        # In actual implementation, the first Linear layer of density_mlp would have in_features=76
+-        out = self.density_mlp(input_density)
+-        
+-        sigma = out[:, 0] # Volume density
+-        f_m = out[:, 1:]  # Intermediate features (assuming last dim is 64)
+-        
+-        return sigma, f_m
+-
+-    def project_features(self, ref_features, x):
+-        """
+-        Project 3D points to reference image feature maps and sample.
+-        :param ref_features: (V, C, H_f, W_f)
+-        :param x: (N, 3)
+-        :return: (N, C)
+-        """
+-        # [G] This is a complex geometric operation involving camera matrices.
+-        # For each point x, for each view v:
+-        # 1. Transform x to camera coordinates.
+-        # 2. Project to 2D image coordinates (u, v).
+-        # 3. Check if (u, v) is within image bounds.
+-        # 4. Sample ref_features[v] at (u, v) using bilinear interpolation.
+-        # 5. Aggregate features from multiple views (e.g., mean or max).
+-        # Since this is a placeholder for a complex geometric kernel, we return a dummy.
+-        # In a real implementation, this would use PyTorch3D or similar libraries.
+-        return torch.zeros(x.shape[0], 64, device=x.device)
+-
+-    def forward(self, x, d, reference_images):
+-        """
+-        Forward pass for a batch of 3D points and view directions.
+-        :param x: (N, 3) 3D coordinates
+-        :param d: (N, 3) View directions
+-        :param reference_images: List of input images
+-        :return: sigma (N,), c (N, 3)
+-        """
+-        # 1. Get Triplane Features
+-        f_tri = self.get_triplane_features(x) # (N, 3*C)
+-        
+-        # 2. Get Density and IBR Features
+-        sigma, f_m = self.get_density_and_ref_features(x, reference_images) # (N,), (N, 64)
+-        
+-        # 3. Combine for Color Prediction
+-        # f_base = Phi_base(f_tri, f_m)
+-        # [G] f_tri is 3*C, f_m is 64. Need to align dimensions.
+-        # Assuming f_tri is projected or f_m is expanded.
+-        # The paper says "compact MLP combines f_tri and f_m".
+-        # Let's assume f_tri is already processed or dimensions are handled by MLP input.
+-        # For pseudocode, we concatenate and project.
+-        f_base_input = torch.cat([f_tri, f_m], dim=1)
+-        f_base = self.base_mlp(f_base_input) # (N, 64)
+-        
+-        # 4. Spherical Harmonics Encoding of Direction
+-        # SH(d)
+-        sh_d = self.spherical_harmonics(d, degree=3) # (N, 12) for degree 3 (4 coeffs * 3 channels? No, SH is scalar basis)
+-        # SH basis for degree L has (L+1)^2 coefficients. For L=3, 16 coeffs.
+-        # Usually SH is applied per channel or concatenated.
+-        # Paper says "encode viewing direction d on the spherical harmonics basis SH(.)"
+-        # Then "Map f_tri and viewing direction d to determine color".
+-        # Let's assume SH(d) produces a vector of size K.
+-        
+-        # 5. Predict Color
+-        # c = Phi_color(f_base, SH(d))
+-        color_input = torch.cat([f_base, sh_d], dim=1)
+-        c = self.color_mlp(color_input) # (N, 3)
+-        
+-        return sigma, c
+-
+-    def spherical_harmonics(self, d, degree=3):
+-        """Compute spherical harmonics basis for directions d."""
+-        # [G] Standard SH implementation
+-        # d shape: (N, 3)
+-        # Returns shape: (N, (degree+1)^2)
+-        # This is a standard mathematical function.
+-        pass
+-
+-    def render_ray(self, ray_o, ray_d, t_near, t_far, num_samples, reference_images):
+-        """
+-        Render a single ray using volume rendering.
+-        :param ray_o: Origin (3,)
+-        :param ray_d: Direction (3,)
+-        :param t_near, t_far: Near and far clipping planes
+-        :param num_samples: Number of samples along the ray
+-        :param reference_images: Input images
+-        :return: Color (3,)
+-        """
+-        # Sample points along the ray
+-        t_vals = torch.linspace(t_near, t_far, num_samples)
+-        x = ray_o.unsqueeze(0) + t_vals.unsqueeze(1) * ray_d.unsqueeze(0) # (N, 3)
+-        d = ray_d.unsqueeze(0).repeat(num_samples, 1) # (N, 3)
+-        
+-        # Get sigma and c
+-        sigma, c = self.forward(x, d, reference_images)
+-        
+-        # Volume Rendering Equation
+-        # delta = t_vals[i+1] - t_vals[i]
+-        deltas = t_vals[1:] - t_vals[:-1]
+-        deltas = torch.cat([deltas, torch.tensor([1e10], device=deltas.device)]) # Last delta large
+-        
+-        # Alpha: alpha = 1 - exp(-sigma * delta)
+-        alpha = 1.0 - torch.exp(-sigma * deltas)
+-        
+-        # Transmittance: T_i = exp(-sum_{j=1}^{i-1} sigma_j * delta_j)
+-        # Cumulative product of (1 - alpha)
+-        weights = alpha * torch.cumprod(torch.cat([torch.ones(1, device=alpha.device), 1.0 - alpha + 1e-10]), dim=0)[:-1]
+-        
+-        # Color: C = sum(w_i * c_i)
+-        color = torch.sum(weights.unsqueeze(1) * c, dim=0)
+-        
+-        return color
++        # This requires projecting ref_images to the 3D points and aggregating
++        # Simplified: Assume we have pre-computed f_ref for each point
++        # f_ref = project_ref_features(pts_flat, ref_features, ref_poses)
++        # For the sake of the pseudocode, we assume f_ref is available
++        f_ref = torch.randn(pts_flat.shape[0], 64).to(pts_flat.device) # Placeholder for IBR feature aggregation
++        
++        # 6. Density Field Prediction
++        pos_enc = self.positional_encoding(pts_flat, freq=6) # (B*N, 7)
++        density_input = torch.cat([pos_enc, f_ref], dim=1) # (B*N, 71)
++        density_output = self.density_mlp(density_input) # (B*N, 65)
++        sigma = density_output[:, 0] # (B*N,)
++        f_m = density_output[:, 1:] # (B*N, 64)
++        
++        # 7. Color Prediction
++        f_base = self.base_mlp(torch.cat([f_tri, f_m], dim=1)) # (B*N, 64)
++        
++        # Spherical Harmonics encoding of viewing direction
++        # d_flat = rays_d.unsqueeze(1).expand(-1, self.num_samples, -1).reshape(-1, 3)
++        # d_flat = d_flat / d_flat.norm(dim=1, keepdim=True)
++        # sh_d = spherical_harmonics_encoding(d_flat, order=2) # (B*N, 27)
++        sh_d = torch.randn(pts_flat.shape[0], 27).to(pts_flat.device) # Placeholder
++        
++        color = self.color_mlp(torch.cat([f_base, sh_d], dim=1)) # (B*N, 3)
++        color = color.reshape(rays_o.shape[0], self.num_samples, 3)
++        sigma = sigma.reshape(rays_o.shape[0], self.num_samples)
++        
++        # 8. Volume Rendering
++        # Compute deltas
++        deltas = z_vals[:, 1:] - z_vals[:, :-1] # (B, N-1)
++        # Add epsilon for numerical stability
++        deltas = torch.cat([deltas, torch.ones_like(deltas[:, :1]) * 1e-10], dim=-1)
++        
++        # Alpha
++        alpha = 1 - torch.exp(-sigma * deltas) # (B, N)
++        
++        # Transmittance
++        T = torch.cumprod(1 - alpha + 1e-10, dim=1) # (B, N)
++        T = torch.cat([torch.ones_like(T[:, :1]), T[:, :-1]], dim=-1) # (B, N)
++        
++        # Weights
++        weights = alpha * T # (B, N)
++        
++        # Color
++        C = torch.sum(weights.unsqueeze(-1) * color, dim=1) # (B, 3)
++        
++        return C, sigma, alpha, weights
+ ```
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Training is significantly faster than standard NeRF-based methods. TriDF achieves a 30× speed increase compared to NeRF-based methods [S1]. A fully trained model takes 14 minutes, while an early version (TriDF-10k, 10k iterations) takes 5 minutes on a single consumer GPU (Nvidia GeForce RTX 4090) [S1].
+-*   **Memory Complexity:** The triplane representation is compact. The triplane memory usage is $3 \times H \times W \times C$ bytes. The density MLP is small (width 512, depth 8) [S1]. Total parameters are low compared to dense voxel grids or large MLPs [S1].
+-*   **Performance:** On the LEVIRNVS dataset, TriDF improves PSNR by 7.4% and SSIM by 3.4% compared to advanced few-shot methods (including 3DGS-based methods like FSGS and CoR-GS) [S1].
+-*   **Strengths:**
+-    *   Fast convergence due to explicit optimization of triplane features [S1].
+-    *   Effective few-shot synthesis (3 views) without extensive pretraining [S1].
+-    *   Better extrapolation to empty regions compared to explicit 3DGS methods, avoiding boundary distortions [S1].
+-*   **Limitations:**
+-    *   Rendering speed lags behind 3DGS-based methods designed for real-time rendering [S1].
+-    *   Standard triplane representations suffer from redundancy or inaccurate geometry with sparse inputs if not decoupled from density [S1].
+-    *   Integrating IBR features directly into the triplane branch causes overfitting because frozen encoder features are constant and triplane features maintain a one-to-one correspondence with reference features [S1].
++*   **Time Complexity:** Training is significantly faster than standard NeRF-based methods. TriDF achieves a 30× speed increase compared to NeRF-based methods [S1].
++*   **Memory Complexity:** The triplane representation is compact. The triplane itself consumes 25.6 MB (for $H, W, C$ values implied by the source, though exact $H,W$ are not given, the memory is stated) [S1]. The density MLP consumes 6.4 MB [S1]. Total parameters are manageable on a single consumer GPU [S1].
++*   **Measured Performance:** On the LEVIRNVS dataset, TriDF achieves a 7.4% increase in PSNR and a 3.4% increase in SSIM compared to advanced few-shot methods [S1].
++*   **Training Time:** ~5 minutes for 10k iterations (TriDF-10k) and 14 minutes for 30k iterations on a single Nvidia GeForce RTX 4090 GPU [S1]. Initialization (stereo-matching + point cloud fusion) takes 18 seconds [S1].
++*   **Strengths:** Fast convergence due to direct optimization of explicit triplane features; effective few-shot rendering from as few as 3 views; avoids overfitting common in standard NeRF with sparse views; no need for extensive pretraining on large multi-view datasets [S1].
++*   **Limitations:** Rendering speed lags behind 3DGS-based methods designed for real-time rendering [S1]; relies on the quality of initial point clouds from SfM/PMS; standard triplane representations suffer from redundancy or inaccurate geometry modeling with sparse inputs if not decoupled [S1].
++*   **When to use:** Remote sensing novel view synthesis with sparse input views (e.g., 3 images) where fast reconstruction is required [S1].
++*   **When not to use:** When real-time rendering speed is the primary constraint (use 3DGS); when dense input views are available and pretraining is feasible (use PixelNeRF/IBRNet); when high-frequency geometry is critical and point cloud initialization is unreliable [S1].
+ 
+ ## Background
+-TriDF was proposed to address the challenges of few-shot novel view synthesis in remote sensing, where input views are sparse and have low overlap [S1]. Traditional NeRF methods require hundreds of views and are computationally intensive, while existing few-shot methods often rely on large-scale pretraining or complex regularization [S1]. The method was validated on the LEVIRNVS dataset, a remote sensing dataset [S1]. The code is publicly available at https://github.com/kanehub/TriDF [S1].
++TriDF was proposed in a paper published in 2025 [S1]. It addresses the challenges of few-shot novel view synthesis in remote sensing, where data acquisition constraints limit the number of input views to as few as 3 [S1]. Traditional NeRF methods require hundreds of images and are computationally intensive, taking dozens of hours to reconstruct a single scene [S1]. Existing few-shot methods often rely on pretraining on large datasets (e.g., PixelNeRF, IBRNet) or complex regularization (e.g., 3DGS methods), which are impractical for remote sensing due to the lack of comprehensive 3D datasets and the specific characteristics of aerial imagery [S1]. TriDF introduces a hybrid explicit–implicit representation that decouples color and volume density, using triplanes for color and implicit fields for density, guided by sparse depth from point clouds [S1].
+ 
+ ## Sources

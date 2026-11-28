@@ -1,0 +1,263 @@
+--- v006.md
++++ v007.md
+@@ -4,77 +4,86 @@
+ 
+ ## Overview
+-Voxel Ambient Occlusion (Voxel AO) estimates ambient occlusion for a surface point by sampling the solidity of surrounding voxels in a 2D grid relative to the surface normal, simulating light blockage from adjacent geometry [S1, unofficial]. Unlike ray-based approaches such as Local AO, it uses discrete neighborhood queries to approximate occlusion factors efficiently [S1, unofficial]. It sets itself apart from its siblings, such as Histogram-based Voxel Ambient Occlusion, by relying on direct voxel solidity checks rather than precomputed intensity distributions [S1, unofficial].
++Voxel Ambient Occlusion (Voxel AO) estimates ambient occlusion for a surface point by sampling the solidity of surrounding voxels in a 2D grid relative to the surface normal, simulating light blockage from adjacent geometry [S1, unofficial]. It sets itself apart from its siblings, such as [JAOCC Shading](3634-jaocc-shading.md) which uses precomputed histograms, and [Vertex Ambient Occlusion Approximation](6623-vertex-ambient-occlusion-approximation.md) which operates on vertex data, by performing real-time, position-based shading directly on the voxel grid using a fixed set of neighbor samples [S1, unofficial]. Unlike ray-based approaches such as Local AO, it avoids expensive ray marching by relying on direct grid lookups [S1, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-- Input: Hit position ($hitPos$), surface normal ($normal$), voxel grid data structure supporting `isSolid` queries, and a 2D offset array defining corner positions.
+-- Output: A scalar ambient occlusion factor ($AO$) in the range $[0.0, 1.0]$.
++**Inputs:**
++- `hitPos`: The 3D world-space position of the surface hit point.
++- `normal`: The 3D surface normal at the hit point.
++- `voxelGrid`: A data structure providing `isSolid(pos)` which returns 1 if a voxel at integer coordinate `pos` is occupied, 0 otherwise.
++- `axes`: A 2D array of 4 offset vectors representing the corners of a unit square: `(1,1), (-1,1), (-1,-1), (1,-1)`.
++
++**Outputs:**
++- `ao`: A float value in `[0.0, 1.0]` representing the ambient occlusion factor, where 1.0 is fully lit and 0.0 is fully occluded.
+ 
+ **Data Structures:**
+-- `axes`: A 2D array of 4 elements representing the four corners of a unit square relative to the base voxel. The elements are: $(1, 1)$, $(-1, 1)$, $(-1, -1)$, $(1, -1)$ [S1, unofficial].
+-- `isSolid(pos)`: A function returning $1u$ (solid) or $0u$ (empty) for a given voxel position [S1, unofficial].
++- `axes`: `vec2[4]` containing `{(1,1), (-1,1), (-1,-1), (1,-1)}`.
++
++**Steps:**
++1.  **Base Position Calculation:** Calculate the integer voxel coordinate of the hit surface by rounding the hit position offset by the normal to prevent self-intersection.
++    $$ \text{basePos} = \lfloor \text{hitPos} + \text{normal} \times 0.01 \rfloor $$
++    [S1, unofficial]
++
++2.  **Neighbor Sampling:** Sample the solidity of the 4 side neighbors and 4 corner neighbors relative to `basePos`.
++    -   Side neighbors (using offsets `d1` and `d2` corresponding to the axes):
++        ```python
++        side.x = isSolid(basePos + d1)
++        side.y = isSolid(basePos + d2)
++        side.z = isSolid(basePos - d1)
++        side.w = isSolid(basePos - d2)
++        ```
++    -   Corner neighbors:
++        ```python
++        corner.x = isSolid(basePos + d1 + d2)
++        corner.y = isSolid(basePos - d1 + d2)
++        corner.z = isSolid(basePos - d1 - d2)
++        corner.w = isSolid(basePos + d1 - d2)
++        ```
++    [S2, unofficial]
++
++3.  **Face AO Calculation:** Compute the AO contribution for each of the 4 faces using a helper function `vertex_ao`.
++    ```python
++    ao.x = vertex_ao(side.xy, corner.x)
++    ao.y = vertex_ao(side.yz, corner.y)
++    ao.z = vertex_ao(side.zw, corner.z)
++    ao.w = vertex_ao(side.wx, corner.w)
++    ```
++    [S2, unofficial]
++
++    The `vertex_ao` function is defined as follows [S1, unofficial]:
++    1.  Determine dominant axis of `normal`.
++    2.  Set `sideA` and `sideB` vectors based on the dominant axis:
++        -   If `|normal.x| > 0`: `sideA = (0, offset.x, 0)`, `sideB = (0, 0, offset.y)`
++        -   Else if `|normal.y| > 0`: `sideA = (offset.x, 0, 0)`, `sideB = (0, 0, offset.y)`
++        -   Else: `sideA = (offset.x, 0, 0)`, `sideB = (0, offset.y, 0)`
++    3.  Calculate `cornerOffset = sideA + sideB`.
++    4.  Sample solidity for `side1`, `side2`, and `corner` using `isSolid(basePos + sideVector)`.
++    5.  Calculate AO contribution:
++        -   If `side1 == 1` and `side2 == 1`: `ao = 0.9`
++        -   Else: `ao = side1 * 0.4 + side2 * 0.4 + corner * 0.2`
++    6.  Return `ao`.
++
++4.  **Accumulation:** Sum the AO contributions from the 4 faces.
++    ```python
++    aoSum = 0.0
++    for i in 0 to 3:
++        offset = axes[i]
++        # Note: The specific mapping of axes[i] to sideA/sideB in the loop is implicit in the face calculation above.
++        # The accumulation simply sums the pre-calculated face AO values.
++        aoSum += ao[i]
++    ```
++    [S1, unofficial]
++
++5.  **Final Result:** Return the inverted and clamped average AO.
++    $$ \text{ao} = \text{clamp}(1.0 - (\text{aoSum} / 4.0), 0.0, 1.0) $$
++    [S1, unofficial]
+ 
+ **Parameters:**
+-- `epsilon`: A small offset value (e.g., $0.01$) used to prevent self-intersection when casting rays or querying neighbors [S1, unofficial].
+-
+-**Steps:**
+-1. Calculate the base voxel position by rounding the hit position offset by the normal:
+-   $$basePos = \lfloor hitPos + normal \cdot 0.01 \rfloor$$
+-   [S1, unofficial][S2, unofficial]
+-
+-2. Initialize `aoSum` to $0.0$ [S1, unofficial].
+-
+-3. Loop $i$ from $0$ to $3$ (4 iterations). For each iteration:
+-   a. Get the offset vector from the `axes` array: $offset = axes[i]$ [S1, unofficial].
+-   b. Determine side vectors `sideA` and `sideB` based on the dominant axis of the normal:
+-      - If $|normal.x| > 0$: $sideA = (0, offset.x, 0)$, $sideB = (0, 0, offset.y)$
+-      - Else if $|normal.y| > 0$: $sideA = (offset.x, 0, 0)$, $sideB = (0, 0, offset.y)$
+-      - Else: $sideA = (offset.x, 0, 0)$, $sideB = (0, offset.y, 0)$
+-      [S1, unofficial]
+-   c. Calculate the corner offset:
+-      $$cornerOffset = sideA + sideB$$
+-      [S1, unofficial]
+-   d. Sample solidity for the two side neighbors and the corner neighbor:
+-      - $side1 = isSolid(basePos + sideA)$
+-      - $side2 = isSolid(basePos + sideB)$
+-      - $corner = isSolid(basePos + cornerOffset)$
+-      [S1, unofficial]
+-   e. Calculate the AO contribution `ao`:
+-      - If $side1 == 1u$ and $side2 == 1u$: $ao = 0.9$
+-      - Otherwise: $ao = side1 \cdot 0.4 + side2 \cdot 0.4 + corner \cdot 0.2$
+-      [S1, unofficial]
+-   f. Accumulate the AO:
+-      $$aoSum += ao$$
+-      [S1, unofficial]
+-
+-4. Return the final AO value:
+-   $$AO = \text{clamp}(1.0 - (aoSum / 4.0), 0.0, 1.0)$$
+-   [S1, unofficial]
+-
+-**Alternative Implementation (Side/Corner Sampling):**
+-Some implementations sample 4 side neighbors and 4 corner neighbors explicitly using distance vectors $d1$ and $d2$ [S2, unofficial]:
+-1. Sample 4 side neighbors:
+-   - $side.x = get\_voxel(pos + d1)$
+-   - $side.y = get\_voxel(pos + d2)$
+-   - $side.z = get\_voxel(pos - d1)$
+-   - $side.w = get\_voxel(pos - d2)$
+-   [S2, unofficial]
+-2. Sample 4 corner neighbors:
+-   - $corner.x = get\_voxel(pos + d1 + d2)$
+-   - $corner.y = get\_voxel(pos - d1 + d2)$
+-   - $corner.z = get\_voxel(pos - d1 - d2)$
+-   - $corner.w = get\_voxel(pos + d1 - d2)$
+-   [S2, unofficial]
+-3. Compute AO for each of the 4 faces using a helper `vertex_ao`:
+-   - $ao.x = vertex\_ao(side.xy, corner.x)$
+-   - $ao.y = vertex\_ao(side.yz, corner.y)$
+-   - $ao.z = vertex\_ao(side.zw, corner.z)$
+-   - $ao.w = vertex\_ao(side.wx, corner.w)$
+-   [S2, unofficial]
+-4. Return inverted AO: $1.0 - ao$ [S2, unofficial].
++-   `epsilon`: 0.01 (used in basePos calculation to prevent self-intersection) [S1, unofficial].
++-   Weights: 0.9 for full side occlusion, 0.4 for single side, 0.2 for corner [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-- An epsilon offset (e.g., $0.01$) is required to prevent self-intersection when querying neighbors or casting rays from the surface [S1, unofficial].
+-- Precision issues may arise if the hit position is very close to a voxel boundary; rounding logic must be consistent [S1, unofficial].
++-   **Self-Intersection:** The offset `normal * 0.01` is critical to prevent the ray/sample from hitting the surface it is shading [S1, unofficial].
++-   **Boundary Conditions:** If `basePos` is outside the voxel grid, `isSolid` must return 0 (empty space) or handle bounds checking appropriately [G].
++-   **Normal Dominance:** The logic for determining `sideA` and `sideB` relies on the dominant axis of the normal. If the normal is exactly aligned with an axis (e.g., `(1,0,0)`), the `|normal.x| > 0` check handles it, but precision issues near zero should be considered [S1, unofficial].
+ 
+ ## Subtopics
+@@ -91,55 +100,79 @@
+ ### Stochastic Hemisphere Sampling for Voxel AO
+ A stochastic method to estimate ambient occlusion by casting rays into a hemisphere oriented around the surface normal, using cosine-weighted sampling [S1, unofficial].
+-- **Steps**: Loop $i$ from $0$ to $maxSamples$. Calculate seed $= seedBase + f32(i) \cdot (13.37 \cdot 10.2)$. Get two random numbers $u1, u2$ from seed. Sample local direction using cosine-weighted hemisphere. Transform local direction to world space using tangent (T), bitangent (B), and normal (N) basis. For each sample direction, perform a voxel mesh query (ray march) from a slightly offset position ($hitPosition + normal \cdot \epsilon$). If a hit is found, increment hit counter. Calculate $occlusionFactor = 1.0 - (hit / f32(maxSamples))$. Multiply AO color by $occlusionFactor$ [S1, unofficial].
+-- **Parameters**: $maxSamples: u32 = 8$; $seedBase: f32 = fragCoord.x \cdot fragCoord.y + 0.1234 + time$ [S1, unofficial].
+-- **Pitfall**: Epsilon offset ($0.01$) is used to prevent self-intersection when casting rays from the surface [S1, unofficial].
++-   **Steps:**
++    1.  Loop `i` from 0 to `maxSamples`.
++    2.  Calculate `seed = seedBase + f32(i) * (13.37 * 10.2)`.
++    3.  Get two random numbers `u1`, `u2` from `seed`.
++    4.  Sample local direction using cosine-weighted hemisphere.
++    5.  Transform local direction to world space using tangent (T), bitangent (B), and normal (N) basis.
++    6.  For each sample direction, perform a voxel mesh query (ray march) from a slightly offset position (`hitPosition + normal * epsilon`).
++    7.  If a hit is found, increment hit counter.
++    8.  Calculate `occlusionFactor = 1.0 - (hit / f32(maxSamples))`.
++    9.  Multiply AO color by `occlusionFactor`.
++-   **Parameters:**
++    -   `maxSamples`: `u32 = 8` [S1, unofficial].
++    -   `seedBase`: `f32 = fragCoord.x * fragCoord.y + 0.1234 + time` [S1, unofficial].
++-   **Pitfall:** Epsilon offset (0.01) is used to prevent self-intersection when casting rays from the surface [S1, unofficial].
+ 
+ ### Voxel Ambient Occlusion via Axis-Aligned Corner Sampling
+ An ambient occlusion technique for voxel scenes that samples the 4 corners of the voxel face adjacent to the hit point, weighted by the surface normal's dominant axis [S1, unofficial].
+-- **Steps**: Calculate $basePos = \lfloor hitPos + normal \cdot 0.01 \rfloor$ to get the integer voxel coordinate of the hit surface. Define 4 corner offsets: $(1,1)$, $(-1,1)$, $(-1,-1)$, $(1,-1)$. If $|normal.x| > 0.0$, set $sideA = (0, offset.x, 0)$ and $sideB = (0, 0, offset.y)$. Else if $|normal.y| > 0.0$, set $sideA$ and $sideB$ for Y-dominant normal. Sum the solidity of the 4 corners. Divide by $4.0$ to get AO factor ($0.0$ to $1.0$) [S1, unofficial].
++-   **Steps:**
++    1.  Calculate `basePos = floor(hitPos + normal * 0.01)` to get the integer voxel coordinate of the hit surface [S1, unofficial].
++    2.  Define 4 corner offsets: `(1,1), (-1,1), (-1,-1), (1,-1)` [S1, unofficial].
++    3.  If `abs(normal.x) > 0.0`, set `sideA = (0, offset.x, 0)` and `sideB = (0, 0, offset.y)`. Else if `abs(normal.y) > 0.0`, set `sideA` and `sideB` for Y-dominant normal [S1, unofficial].
++    4.  Sum the solidity of the 4 corners.
++    5.  Divide by 4.0 to get AO factor (0.0 to 1.0) [S1, unofficial].
+ 
+ ### Voxel-Neighborhood Ambient Occlusion
+-- **Steps**: Convert each vertex's world-space position to voxel grid coordinates by subtracting the grid offset and dividing by the voxel scale, casting to $i32$. Compute the AO factor by querying the voxel neighborhood at the grid coordinates $(vx, vy, vz)$ and the vertex normal. Modulate the vertex RGB color channels by multiplying each channel by the computed AO factor [S3, unofficial].
+-- **Parameters**: $offset$: world-space origin of the voxel grid [S3, unofficial].
++-   **Steps:**
++    1.  Convert each vertex's world-space position to voxel grid coordinates by subtracting the grid offset and dividing by the voxel scale, casting to `i32` [S3, unofficial].
++    2.  Compute the AO factor by querying the voxel neighborhood at the grid coordinates `(vx, vy, vz)` and the vertex normal [S3, unofficial].
++    3.  Modulate the vertex RGB color channels by multiplying each channel by the computed AO factor [S3, unofficial].
++-   **Parameters:**
++    -   `offset`: world-space origin of the voxel grid [S3, unofficial].
+ 
+ ### Color Bleeding via Extinction
+ An approximation of color bleeding where the color appearance of a surface is affected by colored nearby objects, modeled by including the voxel color $C_{RGB}$ in the attenuation integral [S4, unofficial].
+-- **Steps**: Reformulate the AO integral (Eq. 4) by multiplying the extinction coefficient $\tau(t)$ by the color $C_{RGB}(t)$ before integration, allowing the estimation of color bleeding using the same aggregate summation structure [S4, unofficial].
+-- **Formula**:
+-  $$I_{AORGB}(s) \approx I_A \cdot e^{-\int_{t \in \mathbb{N}(s)} \frac{\tau(t) C_{RGB}(t)}{|s-t|^2} dt}$$
+-  where $I_{AORGB}$ is a vector describing intensity per color, $C_{RGB}(t)$ is the color at position $t$ depending on the Transfer Function (TF), and other terms are as in Eq. 4 [S4, unofficial].
++-   **Steps:**
++    1.  Reformulate the AO integral (Eq. 4) by multiplying the extinction coefficient $\tau(t)$ by the color $C_{RGB}(t)$ before integration, allowing the estimation of color bleeding using the same aggregate summation structure [S4, unofficial].
++-   **Formula:**
++    $$ I_{AORGB}(s) \approx I_A \cdot e^{-\int_{t \in \mathbb{N}(s)} \frac{\tau(t) C_{RGB}(t)}{|s-t|^2} dt} $$
++    where $I_{AORGB}$ is a vector describing intensity per color, $C_{RGB}(t)$ is the color at position t depending on the Transfer Function (TF), and other terms are as in Eq. 4 [S4, unofficial].
+ 
+ ### CUDA-based VOM Construction
+ A CUDA-based implementation to compute Vicinity Occlusion Maps on the GPU, using a column-then-row summation strategy for Summed Area Tables [S5, unofficial].
+-- **Steps**: Analyze the source depth map by columns on the GPU. Sum the resulting values by rows on the GPU [S5, unofficial].
+-- **Parameters**: Hardware: Intel Core 2 Duo CPU at 3.0 GHz, 4GB RAM, NVidia GeForce GTX 280 GPU with 1GB RAM [S5, unofficial].
+-- **Pitfall**: The connection between the regular graphics pipeline and the CUDA pipeline requires downloading the depth map to the CPU before uploading it to CUDA memory, limiting performance gains [S5, unofficial].
+-- **Performance**: VOM construction time (ms) on CPU vs GPU (CUDA) for 512x512 viewport: CPU 2.427ms, GPU 1.450ms. Frame rate for Body dataset (512x512x512) at 512x512 viewport: CPU VOM 5.67 fps, CUDA VOM 7.21 fps [S5, unofficial].
+-- **Comparison**: CUDA construction times are faster than CPU SAT construction, but overall frame rates are similar to CPU VOM due to data transfer overhead [S5, unofficial].
++-   **Steps:**
++    1.  Analyze the source depth map by columns on the GPU [S5, unofficial].
++    2.  Sum the resulting values by rows on the GPU [S5, unofficial].
++-   **Parameters:**
++    -   Hardware: Intel Core 2 Duo CPU at 3.0 GHz, 4GB RAM, NVidia GeForce GTX 280 GPU with 1GB RAM [S5, unofficial].
++-   **Pitfall:** The connection between the regular graphics pipeline and the CUDA pipeline requires downloading the depth map to the CPU before uploading it to CUDA memory, limiting performance gains [S5, unofficial].
++-   **Performance:**
++    -   VOM construction time (ms) on CPU vs GPU (CUDA) for 512x512 viewport: CPU 2.427ms, GPU 1.450ms [S5, unofficial].
++    -   Frame rate for Body dataset (512x512x512) at 512x512 viewport: CPU VOM 5.67 fps, CUDA VOM 7.21 fps [S5, unofficial].
++-   **Comparison:** CUDA construction times are faster than CPU SAT construction, but overall frame rates are similar to CPU VOM due to data transfer overhead [S5, unofficial].
+ 
+ ## Operating characteristics
+ **Time and Memory Complexity:**
+-- The basic Voxel AO method performs a constant number of voxel queries (4-8) per surface point, resulting in $O(1)$ time complexity per sample [S1, unofficial].
+-- Histogram-based variants require precomputing and storing histograms, increasing memory usage but allowing real-time updates via texture blending [S1, unofficial].
+-- VOM requires constructing Summed Area Tables (SATs) from depth maps, which is $O(N)$ with respect to the number of pixels, but allows constant-time queries [S2, unofficial].
++-   Time complexity is $O(1)$ per surface point as it involves a fixed number of voxel lookups (4 sides, 4 corners) and arithmetic operations [S1, unofficial].
++-   Memory complexity is $O(1)$ additional memory per sample, relying on the existing voxel grid storage [S1, unofficial].
+ 
+ **Measured Performance:**
+-- On an Intel Core 2 Duo CPU (3.0 GHz) and NVidia GeForce GTX 280 GPU, VOM construction on GPU (CUDA) took 1.450ms for a 512x512 viewport, compared to 2.427ms on CPU [S5, unofficial].
+-- Frame rates for a 512x512x512 volume dataset at 512x512 viewport were 5.67 fps (CPU VOM) and 7.21 fps (CUDA VOM) [S5, unofficial].
++-   Specific performance metrics for the core Voxel AO method are not given in the sources [S1, unofficial].
++-   Related methods like VOM show that GPU acceleration can reduce construction time (e.g., 2.427ms to 1.450ms for 512x512) but may not improve frame rate significantly due to data transfer overhead [S5, unofficial].
++
++**Scaling:**
++-   The method scales well with resolution as the number of samples is constant, but accuracy depends on the voxel grid resolution relative to the scene detail [S1, unofficial].
+ 
+ **Strengths and Limitations:**
+-- **Strengths**: Efficient for voxel-based scenes; avoids expensive ray marching for occlusion; can be integrated into real-time pipelines [S1, unofficial][S5, unofficial].
+-- **Limitations**: Discrete nature may introduce aliasing; stochastic variants require multiple samples for noise reduction; CUDA implementations may suffer from data transfer overhead between CPU and GPU [S1, unofficial][S5, unofficial].
++-   **Strengths:** Fast, real-time capable, simple implementation, no preprocessing required [S1, unofficial].
++-   **Limitations:** Approximate, depends on voxel grid resolution, may suffer from aliasing if grid is coarse [S1, unofficial].
+ 
+ **When to Use:**
+-- Use when rendering voxel-based volumes where performance is critical and approximate occlusion is sufficient [S1, unofficial].
+-- Use VOM when view-dependent effects are needed without the cost of 3D volume processing [S2, unofficial].
+-
+-**When Not to Use:**
+-- Avoid when high-fidelity, physically accurate occlusion is required, as voxel-based methods are approximations [S1, unofficial].
+-- Avoid in scenarios with significant data transfer bottlenecks between CPU and GPU if using CUDA-based VOM [S5, unofficial].
++-   Use for real-time voxel-based rendering where performance is critical and approximate AO is acceptable [S1, unofficial].
++-   Avoid when high-quality, view-dependent AO is required, in which case screen-space methods like VOM or ray-based methods might be better [S1, unofficial][S2, unofficial].
+ 
+ ## Background
+-Voxel Ambient Occlusion originated as a method to efficiently approximate lighting effects in voxel-based rendering engines [S1, unofficial]. It builds on the principles of local illumination and shadowing in participating media [34-local-illumination-shadows-and-ambient-occlusion.md]. The technique has been implemented in various open-source voxel engines, such as DivineVoxelEngine and bevy-voxel-engine, to enhance visual quality in real-time applications [S1, unofficial][S2, unofficial]. Extensions include color bleeding via extinction [S4, unofficial] and screen-space variants like Vicinity Occlusion Mapping [S5, unofficial].
++Voxel Ambient Occlusion is a technique used in voxel-based rendering to approximate the shading effects of ambient occlusion by querying the local neighborhood of voxels [S1, unofficial]. It is part of the broader family of local illumination techniques for volume rendering [S1, unofficial]. The specific implementation details described here are derived from unofficial sources documenting voxel engine implementations [S1, unofficial].
+ 
+ ## Sources

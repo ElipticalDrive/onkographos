@@ -1,0 +1,119 @@
+--- v001.md
++++ v002.md
+@@ -4,63 +4,43 @@
+ 
+ ## Overview
+-Test-time Pose Optimization is a procedure to obtain accurate camera poses for testing views by freezing a pre-trained 3D Gaussian Splatting (3DGS) model and optimizing only the test view poses via photometric error minimization [S2]. It sets itself apart from sibling methods by decoupling the scene representation (frozen) from the camera parameters (optimized), specifically addressing pose errors that degrade novel view synthesis quality [S2]. It builds on [Test-time Optimization with Sim(3) Initialization](8565-test-time-optimization-with-sim-3-initialization.md) by applying optimization to the final test poses.
++Test-time Pose Optimization is a procedure to obtain accurate camera poses for testing views by freezing a pre-trained 3D Gaussian Splatting (3DGS) model and optimizing only the test view poses via photometric error minimization [S2]. It sets itself apart from sibling methods by decoupling the scene representation (frozen) from the camera parameters (optimized), specifically addressing pose errors that degrade novel view synthesis quality [S2].
+ 
+ ## How it works
+ **Inputs:**
+-- Pre-trained 3DGS model (Gaussian attributes and covariance fixed).
+-- Test view images.
+-- Initial test view poses (initialized via Procrustes alignment and nearest neighbor training poses).
++- Pre-trained 3DGS model with fixed Gaussian attributes and covariance [S2].
++- Test view images [S2].
++- Initial test view poses, initialized via Procrustes alignment on training cameras and nearest-neighbor lookup among learned training poses [S1, S2].
+ 
+ **Outputs:**
+-- Optimized camera poses for the test views.
++- Optimized camera poses for the test views [S1, S2].
+ 
+ **Data Structures:**
+-- Camera Pose: A $4 \times 4$ transformation matrix $P \in \mathbb{R}^{4 \times 4}$ representing the world-to-camera transformation.
+-- Photometric Loss: Mean Squared Error (MSE) or L1 loss between rendered pixels and ground truth pixels.
++- Camera Pose: A $4 \times 4$ transformation matrix $P \in \mathbb{R}^{4 \times 4}$ representing the world-to-camera transformation [G].
++- Photometric Loss: Mean Squared Error (MSE) or L1 loss between rendered pixels and ground truth pixels [G].
+ 
+ **Steps:**
+-1. **Procrustes Alignment:** Register the cameras of the test images using the transformation matrix obtained via Procrustes analysis on the predicted and ground truth cameras of the training images [S1]. This provides a global alignment baseline.
++1. **Procrustes Alignment:** Register the cameras of the test images using the transformation matrix obtained via Procrustes analysis on the predicted and ground truth cameras of the training images [S1]. This provides a global alignment baseline [S1].
+ 2. **Initialization:** Initialize the camera pose of each test view using the closest camera position from the learned poses of all training frames [S2].
+ 3. **Optimization:** Optimize the camera poses of the test images by minimizing the photometric loss between the synthesized images and the test view images [S1, S2]. This factors out the effect of pose error on view synthesis quality [S1].
+-4. **Interleaving (Optional):** In some pipelines (e.g., GNeRF), the test-time optimization is interleaved with the training process, where the total number of iterations depends on the number of training steps seen for the best checkpoint [S1].
++4. **Interleaving:** In some pipelines (e.g., GNeRF), the test-time optimization is interleaved with the training process, so the total number of iterations depends on the number of training steps seen for the best checkpoint [S1].
+ 
+ **Pseudocode:**
+ ```python
+-def test_time_pose_optimization(frozen_3dgs_model, test_images, initial_poses, num_iterations):
+-    """
+-    Optimizes test camera poses by minimizing photometric error.
++def test_time_pose_optimization(frozen_model, test_images, initial_poses, num_iterations, lr):
++    # Initialize trainable parameters: list of 4x4 pose matrices
++    poses = [pose.clone().detach().requires_grad_(True) for pose in initial_poses]
++    # Standard optimizer state (e.g., Adam moments) initialized to zero [G]
++    optimizer_state = {p: {'m': 0.0, 'v': 0.0} for p in poses}
+     
+-    Args:
+-        frozen_3dgs_model: Pre-trained 3DGS model with fixed Gaussian attributes.
+-        test_images: List of ground truth test view images.
+-        initial_poses: List of initial camera poses (after Procrustes and NN initialization).
+-        num_iterations: Number of optimization steps.
++    for step in range(num_iterations):
++        total_loss = 0.0
++        for pose, gt_image in zip(poses, test_images):
++            rendered_image = frozen_model.render(pose)
++            loss = sum((rendered_image - gt_image) ** 2) / rendered_image.numel() # MSE [G]
++            total_loss += loss
+         
+-    Returns:
+-        optimized_poses: List of optimized camera poses.
+-    """
+-    # Initialize trainable parameters with initial poses
+-    # Each pose is a 4x4 matrix, but typically only rotation (3x3) and translation (3x1) are optimized
+-    # or the full 4x4 matrix is treated as a flat vector of 16 elements for gradient descent.
+-    # For 3DGS, we assume the model renders given a pose.
+-    
+-    poses = [pose.clone().detach().requires_grad_(True) for pose in initial_poses]
+-    optimizer = torch.optim.Adam(poses, lr=0.001) # Learning rate not specified in sources [G]
+-    
+-    for i in range(num_iterations):
+-        optimizer.zero_grad()
+-        total_loss = 0.0
+-        
+-        for pose, gt_image in zip(poses, test_images):
+-            # Render image using frozen 3DGS model and current pose
+-            rendered_image = frozen_3dgs_model.render(pose)
+-            
+-            # Compute photometric loss (e.g., MSE or L1)
+-            # Note: Exact loss function (L1 vs L2) is not specified in sources [G]
+-            loss = torch.nn.functional.mse_loss(rendered_image, gt_image)
+-            total_loss += loss
+-            
+-        total_loss.backward()
+-        optimizer.step()
++        # Backpropagation and parameter update [G]
++        gradients = compute_gradients(total_loss, poses)
++        update_parameters(poses, gradients, optimizer_state, lr)
+         
+     return [pose.detach() for pose in poses]
+@@ -68,5 +48,5 @@
+ 
+ **Parameters:**
+-- Number of test-time optimization iterations: Typically ~4230 [S1]. Can be increased (e.g., to 1000) for scenes with pose outliers to ensure convergence [S1]. Note: The source mentions increasing from 100 to 1000 improves metrics, but also states typical is 4230. This suggests 4230 is the standard for the GNeRF pipeline, while 1000 is a minimum for difficult cases [S1].
++- Number of test-time optimization iterations: Typically ~4230 for the GNeRF pipeline [S1]. For scenes with pose outliers, increasing iterations (e.g., from 100 to 1000) dramatically improves convergence and rendering metrics [S1].
+ 
+ **Edge Cases and Pitfalls:**
+@@ -75,14 +55,14 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** The optimization is iterative. The total time depends on the number of iterations and the cost of rendering each test view. For the GNeRF pipeline, it runs approximately 4230 iterations [S1].
+-- **Memory Complexity:** Low, as the 3DGS model is frozen and only camera poses are stored as trainable parameters.
+-- **Performance:** On a single RTX 3090 GPU, the method is significantly faster than methods like Nope-NeRF (~30 h) taking ~2 h [S2].
+-- **Strengths:** Factors out pose error effects on view synthesis quality [S1]. Simple to implement as it only optimizes camera poses.
+-- **Limitations:** Sensitive to initial alignment quality (Procrustes). May not converge accurately if initial poses are severely misaligned due to outliers [S1].
+-- **When to use:** When test view poses are unknown or inaccurate, and high-quality novel view synthesis is required.
+-- **When not to use:** When computational resources are extremely limited and approximate poses are acceptable, or when the scene has severe outliers that break Procrustes alignment.
++- **Time Complexity:** The optimization is iterative, and the total time depends on the number of iterations and the cost of rendering each test view [S1]. For the GNeRF pipeline, it runs approximately 4230 iterations [S1].
++- **Memory Complexity:** Low, as the 3DGS model is frozen and only camera poses are stored as trainable parameters [G].
++- **Performance:** On a single RTX 3090 GPU, the method takes approximately 2 hours, significantly faster than methods like Nope-NeRF which take ~30 hours [S2].
++- **Strengths:** Factors out pose error effects on view synthesis quality [S1].
++- **Limitations:** Sensitive to initial alignment quality; may not converge accurately if initial poses are severely misaligned due to outliers [S1].
++- **When to use:** When test view poses are unknown or inaccurate, and high-quality novel view synthesis is required [S1, S2].
++- **When not to use:** When the scene has severe outliers that break Procrustes alignment and increasing iterations is computationally prohibitive [S1].
+ 
+ ## Background
+-The method is inspired by NeRFmm [49] and is used in the context of COLMAP-free 3D Gaussian Splatting [S2]. It is also employed in the GNeRF pipeline for evaluating novel view synthesis [S1]. The procedure follows established practices for evaluating novel view synthesis where test poses are not given [S1].
++The method is inspired by NeRFmm [S2] and is used in the context of COLMAP-free 3D Gaussian Splatting [S2]. It is also employed in the GNeRF pipeline for evaluating novel view synthesis [S1]. The procedure follows established practices for evaluating novel view synthesis where test poses are not given [S1].
+ 
+ ## Sources

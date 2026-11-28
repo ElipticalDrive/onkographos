@@ -1,0 +1,231 @@
+--- v001.md
++++ v002.md
+@@ -1,45 +1,42 @@
+ # OpenVDB Volume Grid Storage
+ 
+-Also called: OpenVDB Grid, VDB Grid
++Also called: OpenVDB Grid, OpenVDB Data Structure
+ 
+ ## Overview
+-OpenVDB Volume Grid Storage is a data structure for efficiently storing dense and sparse volume grids as groups of voxels, where each voxel is indexed by a 3D integer coordinate [S1, unofficial]. It solves the memory inefficiency of storing individual values for every voxel in large grids by using tiling and active status flags to compress uniform regions and empty space [S1, unofficial]. It sets itself apart from sibling methods by combining a hierarchical tiling system with a binary active/inactive status per tile and voxel, allowing for efficient storage of both dense data with uniform areas and sparse data with large empty regions [S1, unofficial].
++OpenVDB Volume Grid Storage is a sparse data structure for efficiently storing dense and sparse volume grids as groups of voxels indexed by 3D integer coordinates [S1, unofficial]. It solves the memory inefficiency of storing individual values for every voxel in large grids by using tiling and active status flags to compress uniform or empty regions [S1, unofficial]. It is distinguished from sibling methods by its specific implementation of hierarchical tiling (e.g., 8x8x8 tiles) and the explicit separation of topology (active status) from data values, allowing for efficient boolean operations and smooth transitions in signed distance fields (SDFs) [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A set of voxel values at 3D integer coordinates, a grid transform, and a background value.
+-*   **Output:** A compressed grid structure containing tiles, active status flags, and data pointers.
++*   **Input:** A set of voxel coordinates $(x, y, z)$ and associated scalar or vector values.
++*   **Output:** A grid structure containing compressed data blocks, a background value, and a transform matrix.
+ 
+ **Data Structures:**
+ The grid consists of the following components:
+-1.  **Grid Transform:** A 4x4 matrix (or equivalent) mapping index-space to object-space. It includes location, rotation, and scale [S1, unofficial].
+-2.  **Background Value:** A single scalar value (e.g., float) representing the value of all inactive voxels [S1, unofficial].
++1.  **Background Value:** A single value (scalar or vector) representing inactive regions.
++2.  **Transform Matrix:** A $4 \times 4$ matrix mapping index-space to object-space.
+ 3.  **Tiles:** Hierarchical blocks of voxels.
+-    *   **Small Tile:** A block of $8 \times 8 \times 8 = 512$ voxels [S1, unofficial].
+-    *   **Large Tile:** A block of $16 \times 16 \times 16$ small tiles (less common) [S1, unofficial].
+-    *   Each tile stores a pointer to data if active, or a flag if inactive.
+-4.  **Active Status:** A binary flag associated with each tile and voxel.
+-    *   **Active:** The tile/voxel stores a specific value.
+-    *   **Inactive:** The tile/voxel uses the grid’s background value [S1, unofficial].
++    *   **Small Tile:** A block of $8 \times 8 \times 8 = 512$ voxels.
++    *   **Large Tile:** A block of $16 \times 16 \times 16$ small tiles (less common).
++4.  **Active Status:** A boolean flag associated with each voxel and tile.
++    *   **Active:** The voxel/tile stores a specific value.
++    *   **Inactive:** The voxel/tile uses the grid’s background value.
+ 
+-**Coordinate System:**
+-*   Voxels are indexed by 3D integer coordinates $(x, y, z)$ [S1, unofficial].
+-*   The coordinate $(0, 0, 0)$ is the center voxel [S1, unofficial].
+-*   The coordinate $(1, 0, 0)$ is the voxel to the right of the center [S1, unofficial].
++**Coordinate System and Transform:**
++Voxels are indexed by 3D integer coordinates $(x, y, z)$.
++*   The coordinate $(0, 0, 0)$ is the center voxel.
++*   The coordinate $(1, 0, 0)$ is the voxel to the right of the center.
++*   The transform maps index-space to object-space. If the grid has a scale factor $s$, the object-space position $\mathbf{p}_{obj}$ for a voxel at index $\mathbf{i}$ is:
++    $$ \mathbf{p}_{obj} = \mathbf{T} \cdot (\mathbf{i} \cdot s) $$
++    where $\mathbf{T}$ includes location and rotation, and $s$ is the voxel size [S1, unofficial].
+ 
+-**Transform Mapping:**
+-The grid transform maps index-space to object-space. For a grid with scale $s$, the object-space position $\mathbf{p}_{obj}$ for index $\mathbf{i} = (x, y, z)$ is calculated as:
+-$$ \mathbf{p}_{obj} = \mathbf{T} \cdot (\mathbf{i} \cdot s) $$
+-Where $\mathbf{T}$ is the transformation matrix (rotation and translation) and $s$ is the uniform scale factor [S1, unofficial]. For example, if scale is $0.1$, voxel $(5, 0, 0)$ corresponds to object space position $(0.5, 0, 0)$ [S1, unofficial].
+-
+-**Numbered Steps for Storage:**
+-1.  **Initialize Grid:** Create an empty grid with a specified background value and transform [S1, unofficial].
+-2.  **Assign Voxels:** For each input voxel at index $\mathbf{i}$ with value $v$:
+-    a. Determine the small tile containing $\mathbf{i}$.
+-    b. Check if all voxels in the small tile have the same value $v$.
+-    c. If yes, mark the small tile as active and store $v$ once for the entire tile [S1, unofficial].
+-    d. If no, mark the small tile as active and store individual values for each voxel in the tile [S1, unofficial].
+-    e. Check if all small tiles in a large tile are identical and active. If so, store the large tile as a single unit [S1, unofficial].
+-3.  **Handle Inactive Voxels:** Any voxel not explicitly set to active remains inactive and returns the background value [S1, unofficial].
++**Algorithm Steps:**
++1.  **Initialization:** Set the grid background value and transform matrix.
++2.  **Tiling:** Divide the 3D space into $8 \times 8 \times 8$ small tiles. Higher-level tiles (e.g., $16 \times 16 \times 16$ small tiles) may be used for larger uniform regions.
++3.  **Active Status Assignment:**
++    *   For each voxel, determine if it is active.
++    *   If a tile contains only active voxels with identical values, store the value once for the entire tile.
++    *   If a tile contains inactive voxels, mark the tile as inactive and use the background value.
++4.  **Storage:** Store only the values for active voxels/tiles. Inactive voxels return the background value on access.
++5.  **Topology Management:** Operations preserve the topology of input grids. When merging grids (e.g., addition), topologies are generally merged. A separate topology input can determine which voxels/tiles to operate on [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -48,84 +45,98 @@
+     def __init__(self, background_value, transform_matrix, scale):
+         self.background_value = background_value
+-        self.transform = transform_matrix
++        self.transform_matrix = transform_matrix
+         self.scale = scale
+         self.tiles = {}  # Map from tile_key to Tile object
+ 
+-    def set_voxel(self, index, value):
+-        """Set a single voxel's value."""
+-        tile_key = self._get_tile_key(index)
++    def set_value(self, x, y, z, value):
++        # Determine tile key (e.g., integer division by 8)
++        tile_key = (x // 8, y // 8, z // 8)
++        
++        # Get or create tile
+         if tile_key not in self.tiles:
+             self.tiles[tile_key] = Tile()
+-        self.tiles[tile_key].set_voxel(index, value)
++        
++        tile = self.tiles[tile_key]
++        
++        # Set active status and value
++        tile.set_active(x % 8, y % 8, z % 8, True)
++        tile.set_value(x % 8, y % 8, z % 8, value)
++        
++        # Check if tile can be compressed (all values same)
++        if tile.is_uniform():
++            tile.compress()
+ 
+-    def get_voxel(self, index):
+-        """Get a single voxel's value."""
+-        tile_key = self._get_tile_key(index)
++    def get_value(self, x, y, z):
++        tile_key = (x // 8, y // 8, z // 8)
++        
+         if tile_key in self.tiles:
+             tile = self.tiles[tile_key]
+-            if tile.is_active:
+-                return tile.get_voxel(index)
+-            else:
+-                return self.background_value
+-        else:
+-            return self.background_value
++            local_x, local_y, local_z = x % 8, y % 8, z % 8
++            
++            if tile.is_active(local_x, local_y, local_z):
++                return tile.get_value(local_x, local_y, local_z)
++        
++        # Return background value for inactive voxels
++        return self.background_value
+ 
+-    def _get_tile_key(self, index):
+-        """Calculate the key for the small tile containing the index."""
+-        # Assuming 8x8x8 small tiles
+-        tile_size = 8
+-        return (index[0] // tile_size, index[1] // tile_size, index[2] // tile_size)
++    def get_object_space_position(self, x, y, z):
++        index_vector = Vector(x, y, z) * self.scale
++        return self.transform_matrix * index_vector
+ 
+ class Tile:
+     def __init__(self):
+-        self.is_active = False
+-        self.uniform_value = None
+-        self.voxel_data = {}  # Map from local_index to value
++        self.values = {}  # Map from (local_x, local_y, local_z) to value
++        self.active_flags = {}  # Map from (local_x, local_y, local_z) to bool
++        self.compressed_value = None  # Value if tile is uniform
++        self.is_compressed = False
+ 
+-    def set_voxel(self, index, value):
+-        self.is_active = True
+-        # Check if this is the first voxel or if it matches the uniform value
+-        if not self.voxel_data:
+-            self.uniform_value = value
+-            self.voxel_data = {}
+-        elif self.uniform_value is not None and self.uniform_value != value:
+-            # Transition from uniform to individual storage
+-            self.uniform_value = None
+-            # Copy existing uniform value to all voxels in tile
+-            for i in range(8):
+-                for j in range(8):
+-                    for k in range(8):
+-                        self.voxel_data[(i, j, k)] = self.uniform_value
+-        if self.uniform_value is None:
+-            local_index = (index[0] % 8, index[1] % 8, index[2] % 8)
+-            self.voxel_data[local_index] = value
++    def set_active(self, x, y, z, active):
++        self.active_flags[(x, y, z)] = active
+ 
+-    def get_voxel(self, index):
+-        if self.uniform_value is not None:
+-            return self.uniform_value
+-        local_index = (index[0] % 8, index[1] % 8, index[2] % 8)
+-        return self.voxel_data.get(local_index, self.uniform_value) # Fallback to uniform if not found (should not happen if active)
++    def is_active(self, x, y, z):
++        return self.active_flags.get((x, y, z), False)
++
++    def set_value(self, x, y, z, value):
++        self.values[(x, y, z)] = value
++
++    def get_value(self, x, y, z):
++        return self.values.get((x, y, z))
++
++    def is_uniform(self):
++        # Check if all active voxels have the same value
++        if not self.active_flags:
++            return False
++        active_values = [self.values[k] for k in self.active_flags if self.active_flags[k]]
++        if not active_values:
++            return False
++        return all(v == active_values[0] for v in active_values)
++
++    def compress(self):
++        if self.is_uniform():
++            active_values = [self.values[k] for k in self.active_flags if self.active_flags[k]]
++            self.compressed_value = active_values[0]
++            self.is_compressed = True
+ ```
+ 
+ **Parameters:**
+-*   **Small Tile Size:** $8 \times 8 \times 8$ voxels [S1, unofficial].
+-*   **Large Tile Size:** $16 \times 16 \times 16$ small tiles (less common) [S1, unofficial].
+-*   **Background Value:** User-defined, typically 0.0 for SDFs [S1, unofficial].
++*   **Tile Size:** $8 \times 8 \times 8$ voxels (small tile). Larger tiles ($16 \times 16 \times 16$ small tiles) are less common [S1, unofficial].
++*   **Background Value:** Set via `Set Grid Background` node. Default is not specified [S1, unofficial].
++*   **Scale:** Voxel size in object-space units. Example: 0.1 units per voxel [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Memory Efficiency:** Storing every voxel individually is impractical for large grids (e.g., $100^3$ voxels = 1,000,000 values) [S1, unofficial]. Tiling and active status are required for efficiency [S1, unofficial].
+-*   **Topology Merging:** When combining grids (e.g., addition), topologies are generally merged, which may increase memory usage if the resulting grid has less uniformity [S1, unofficial].
+-*   **Inactive Voxels:** Most operations ignore inactive voxels, which use the background value [S1, unofficial].
++*   **Memory Efficiency:** Storing every voxel individually is impractical for large grids (e.g., $100 \times 100 \times 100$ has 1,000,000 voxels) [S1, unofficial].
++*   **Inactive Voxels:** Most operations ignore inactive voxels. Inactive voxels return the background value [S1, unofficial].
++*   **Topology Merging:** When combining grids, topologies are merged. This can lead to unexpected active regions if not managed [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Lookup is $O(1)$ for tile access plus $O(1)$ for voxel access within a tile, assuming hash-based tile lookup. Pruning and voxelization operations depend on the number of tiles and voxels [S1, unofficial].
+-*   **Memory Complexity:** Proportional to the number of active tiles and active voxels within those tiles, not the total volume of the grid [S1, unofficial].
+-*   **Strengths:** Efficient storage of sparse data and dense data with large uniform regions. Supports efficient boolean operations with smooth transitions for SDFs [S1, unofficial].
+-*   **Limitations:** SDF grids are generally less efficient for storing detailed shapes compared to meshes [S1, unofficial].
+-*   **When to Use:** When dealing with volume grids that have significant empty space or uniform regions, or when performing boolean operations on SDFs [S1, unofficial].
+-*   **When Not to Use:** When the grid is fully dense with no uniform regions, the overhead of tiling may not be justified [S1, unofficial].
++*   **Time Complexity:** Access is $O(1)$ for active voxels if tile location is known. Compression and decompression depend on tile size.
++*   **Memory Complexity:** Proportional to the number of active voxels and tiles, not the total grid volume. Uniform regions are stored once per tile.
++*   **Strengths:** Efficient storage for sparse data; supports smooth boolean operations for SDFs; standard industry format.
++*   **Limitations:** Inefficient for storing detailed shapes compared to meshes; topology management can be complex [S1, unofficial].
++*   **When to Use:** Sparse volume data, SDFs requiring boolean operations, large grids with uniform regions.
++*   **When Not to Use:** Dense, fully active grids with no uniform regions; when mesh representation is sufficient.
+ 
+ ## Background
+-OpenVDB is an industry-standard library for storing and processing volumetric data [S1, unofficial]. It was developed to address the memory challenges of storing large volume grids, such as those used in visual effects and scientific visualization [S1, unofficial]. The structure is widely used in software like Blender (via Geometry Nodes), Houdini, and other VFX tools [S1, unofficial].
++OpenVDB is an industry-standard library for storing and processing volumetric data. It was developed to address the memory challenges of large-scale volume grids. The data structure is widely used in visual effects and animation for storing SDFs and other volumetric data. The specific implementation described here is based on the Blender Geometry Nodes integration of OpenVDB [S1, unofficial].
+ 
+ ## Sources

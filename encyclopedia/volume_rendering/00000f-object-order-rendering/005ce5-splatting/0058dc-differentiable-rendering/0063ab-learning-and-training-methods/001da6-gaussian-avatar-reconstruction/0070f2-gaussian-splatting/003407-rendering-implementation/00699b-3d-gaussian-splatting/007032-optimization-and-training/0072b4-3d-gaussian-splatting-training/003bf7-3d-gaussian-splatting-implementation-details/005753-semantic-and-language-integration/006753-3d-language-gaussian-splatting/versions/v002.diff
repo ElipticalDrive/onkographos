@@ -1,0 +1,474 @@
+--- v001.md
++++ v002.md
+@@ -2,70 +2,66 @@
+ 
+ Also called: LangSplat
++
+ ## Overview
+-3D Language Gaussian Splatting (LangSplat) constructs a 3D language field using 3D Gaussians to enable precise, efficient open-vocabulary querying in 3D spaces [S1]. It addresses the imprecise boundaries and slow rendering speeds of NeRF-based methods like LERF by leveraging tile-based splatting and a scene-specific autoencoder to compress high-dimensional CLIP embeddings into a low-dimensional latent space [S1].
++3D Language Gaussian Splatting (LangSplat) constructs a 3D language field using 3D Gaussians to enable precise, efficient open-vocabulary querying in 3D spaces [S1]. It addresses the imprecise object boundaries and slow rendering speeds of NeRF-based methods like LERF by leveraging tile-based splatting and hierarchical semantic supervision from SAM [S1]. Unlike its siblings that may use direct high-dimensional embedding storage or auxiliary DINO features, LangSplat employs a scene-specific autoencoder to compress CLIP embeddings into a low-dimensional latent space, significantly reducing memory overhead while maintaining multi-view consistency [S1].
++
+ ## How it works
+-### Inputs and Outputs
+-**Inputs:**
+-*   A set of $T$ multi-view 2D images $\{I_t\}_{t=1}^T$ of a 3D scene.
+-*   Camera poses for each input image.
+-*   A text query (optional, for inference).
+-
+-**Outputs:**
+-*   A set of 3D language Gaussians, each defined by mean $\mu$, covariance $\Sigma$, opacity $\alpha$, and three latent language embeddings $\{f^s, f^p, f^w\} \in \mathbb{R}^d$.
+-*   Rendered 2D language feature maps $\mathbf{F}^l$ for semantic levels $l \in \{s, p, w\}$.
+-*   Recovered CLIP embeddings $\Psi(\mathbf{F}^l)$ for open-vocabulary querying.
+-
+-### Data Structures
+-**3D Language Gaussian $G_i$:**
+-*   $\mu_i \in \mathbb{R}^3$: Mean position.
+-*   $\Sigma_i \in \mathbb{R}^{3 \times 3}$: Covariance matrix (often parameterized by rotation $R$ and scale $S$).
+-*   $\alpha_i \in [0, 1]$: Opacity.
+-*   $f^s_i, f^p_i, f^w_i \in \mathbb{R}^d$: Latent language embeddings for subpart, part, and whole semantic levels.
+-*   Note: The dimension $d$ is significantly smaller than the original CLIP dimension $D$ (typically $d=3$).
+-
+-**Scene-Specific Autoencoder:**
+-*   Encoder $E: \mathbb{R}^D \to \mathbb{R}^d$.
+-*   Decoder $\Psi: \mathbb{R}^d \to \mathbb{R}^D$.
+-
+-### Steps
++**Inputs:** A set of $T$ multi-view images $\{I_t\}_{t=1}^T$ of a 3D scene.
++**Outputs:** A set of 3D language Gaussians $\mathcal{G}$, each parameterized by position $\mu$, covariance $\Sigma$, opacity $\alpha$, color $c$, and three latent language embeddings $\{f^s, f^p, f^w\}$ corresponding to subpart, part, and whole semantic levels. A trained scene-specific autoencoder (Encoder $E$, Decoder $\Psi$).
++
++**Data Structures:**
++1.  **3D Language Gaussian $G_i$:**
++    *   $\mu_i \in \mathbb{R}^3$: Mean position.
++    *   $\Sigma_i \in \mathbb{R}^{3 \times 3}$: Covariance matrix (often parameterized via rotation $q$ and scale $s$).
++    *   $\alpha_i \in [0, 1]$: Opacity.
++    *   $c_i$: Color (RGB).
++    *   $f^s_i, f^p_i, f^w_i \in \mathbb{R}^d$: Latent language embeddings for subpart, part, and whole levels. $d$ is the latent dimension.
++2.  **Autoencoder:**
++    *   Encoder $E: \mathbb{R}^D \to \mathbb{R}^d$.
++    *   Decoder $\Psi: \mathbb{R}^d \to \mathbb{R}^D$.
++    *   $D=512$ (CLIP embedding dimension), $d=3$ (latent dimension) [S1].
++
++**Steps:**
+ 
+ 1.  **Hierarchical Semantic Extraction:**
+     For each input image $I_t$:
+-    a.  Feed a regular grid of $32 \times 32$ point prompts into the Segment Anything Model (SAM) to obtain initial masks at three semantic levels: subpart ($M^0_s$), part ($M^0_p$), and whole ($M^0_w$) [S1].
+-    b.  Remove redundant masks from each set based on predicted IoU score, stability score, and overlap rate [S1].
++    a.  Feed a regular grid of $32 \times 32$ point prompts into the Segment Anything Model (SAM) to obtain initial mask sets $\{M^0_s, M^0_p, M^0_w\}$ for subpart, part, and whole levels [S1].
++    b.  Filter redundant masks in each set based on predicted IoU score, stability score, and overlap rate [S1].
+     c.  Perform comprehensive full-image segmentation for each filtered mask set to generate three segmentation maps: $M^s_t, M^p_t, M^w_t$ [S1].
+-    d.  Extract CLIP features for each segmented region using the CLIP image encoder $V$ to obtain pixel-aligned language embeddings $\mathbf{L}^l_t(v)$:
+-        $$ \mathbf{L}^l_t(v) = V(I_t \odot M^l_t(v)), \quad l \in \{s, p, w\} $$
+-        where $M^l_t(v)$ is the mask region pixel $v$ belongs to at semantic level $l$ [S1].
+-
+-2.  **Autoencoder Training:**
+-    Train a lightweight scene-wise autoencoder to map high-dimensional CLIP features to a low-dimensional latent space:
+-    a.  The encoder $E$ maps $\mathbf{L}^l_t(v) \in \mathbb{R}^D$ to $\mathbf{H}^l_t(v) = E(\mathbf{L}^l_t(v)) \in \mathbb{R}^d$.
+-    b.  The decoder $\Psi$ reconstructs the original embeddings.
+-    c.  Minimize the reconstruction loss $\mathcal{L}_{ae}$ using both L1 and cosine distance:
+-        $$ \mathcal{L}_{ae} = \sum_{l \in \{s,p,w\}} \sum_{t=1}^T d_{ae}(\Psi(E(\mathbf{L}^l_t(v))), \mathbf{L}^l_t(v)) $$
+-        where $d_{ae}()$ combines L1 and cosine distance [S1].
+-    d.  Transform all CLIP embeddings $\{\mathbf{L}^l_t\}$ into scene-specific latent features $\{\mathbf{H}^l_t\}$ using the trained encoder $E$ [S1].
+-
+-3.  **Gaussian Initialization and Optimization:**
+-    a.  Initialize 3D Gaussians using standard 3D Gaussian Splatting initialization (e.g., from SfM points) [S1].
+-    b.  Augment each Gaussian $G_i$ with three language embeddings $\{f^s_i, f^p_i, f^w_i\}$ in the latent space $\mathbb{R}^d$ [S1].
+-    c.  Render the language embeddings to 2D using tile-based splatting. For a pixel $v$ and semantic level $l$:
+-        $$ \mathbf{F}^l(v) = \sum_{i \in \mathcal{N}} \mathbf{f}^l_i \alpha_i \prod_{j=1}^{i-1} (1 - \alpha_j) $$
+-        where $\mathcal{N}$ is the set of Gaussians in the tile, $\mathbf{f}^l_i$ is the language embedding of the $i$-th Gaussian, and $\alpha_i = o_i G^{2D}_i(v)$ is the projected opacity [S1].
+-    d.  Optimize Gaussian parameters by minimizing the language loss $\mathcal{L}_{lang}$:
+-        $$ \mathcal{L}_{lang} = \sum_{l \in \{s,p,w\}} \sum_{t=1}^T d_{lang}(\mathbf{F}^l_t(v), \mathbf{H}^l_t(v)) $$
+-        where $d_{lang}()$ is the distance function for 3D Language Gaussians (typically cosine or L1) [S1].
++    d.  Extract CLIP image embeddings for each segmented region using the CLIP image encoder $V$:
++        $$ L^l_t(v) = V(I_t \odot M^l(v)), \quad l \in \{s, p, w\} $$
++        where $M^l(v)$ is the mask region pixel $v$ belongs to at semantic level $l$, and $\odot$ denotes element-wise multiplication (masking) [S1].
++
++2.  **Scene-Specific Autoencoder Training:**
++    a.  Train a lightweight autoencoder to map high-dimensional CLIP features to a low-dimensional latent space.
++    b.  The encoder $E$ maps $L^l_t(v) \in \mathbb{R}^D$ to $H^l_t(v) = E(L^l_t(v)) \in \mathbb{R}^d$ [S1].
++    c.  The decoder $\Psi$ reconstructs the original embeddings from the latent representation.
++    d.  Optimize the autoencoder using the loss:
++        $$ \mathcal{L}_{ae} = \sum_{l \in \{s,p,w\}} \sum_{t=1}^T d_{ae}(\Psi(E(L^l_t(v))), L^l_t(v)) $$
++        where $d_{ae}$ combines L1 distance and cosine distance loss [S1].
++    e.  Transform all training CLIP embeddings $\{L^l_t\}$ into scene-specific latent features $\{H^l_t\}$ using the trained encoder $E$ [S1].
++
++3.  **3D Language Gaussian Initialization and Optimization:**
++    a.  Initialize 3D Gaussians (e.g., from SfM points). Augment each Gaussian $G_i$ with three latent language embeddings $\{f^s_i, f^p_i, f^w_i\}$ initialized from the projected latent features $H^l_t$ [S1].
++    b.  Render the 3D language scene to 2D using tile-based rasterization. For a pixel $v$ and semantic level $l$, the rendered language embedding $F^l(v)$ is:
++        $$ F^l(v) = \sum_{i \in \mathcal{N}} f^l_i \alpha_i \prod_{j=1}^{i-1} (1 - \alpha_j) $$
++        where $\mathcal{N}$ is the set of Gaussians in the tile, $\alpha_i$ is the opacity, and the product term represents transmittance [S1].
++    c.  Optimize the Gaussian parameters (including $f^l_i$) by minimizing the language loss:
++        $$ \mathcal{L}_{lang} = \sum_{l \in \{s,p,w\}} \sum_{t=1}^T d_{lang}(F^l_t(v), H^l_t(v)) $$
++        where $d_{lang}$ is a distance function (typically cosine or L1) between the rendered latent feature and the target latent feature $H^l_t(v)$ [S1].
++    d.  Jointly optimize with photometric reconstruction losses (L1/SSIM on color $c$) to ensure visual fidelity [S1, 15930-semantic-and-language-integration.md].
+ 
+ 4.  **Inference and Querying:**
+-    a.  Render language embeddings $\mathbf{F}^l$ from 3D to 2D.
+-    b.  Use the trained decoder $\Psi$ to recover CLIP embeddings $\Psi(\mathbf{F}^l_t) \in \mathbb{R}^D$ [S1].
+-    c.  Compute relevancy scores for a text query $\phi_{qry}$ against rendered embeddings $\phi_{img}$:
+-        $$ \text{score} = \min_i \frac{\exp(\phi_{img} \cdot \phi_{qry})}{\exp(\phi_{img} \cdot \phi_{qry}) + \exp(\phi_{img} \cdot \phi^{\text{canon}}_i)} $$
+-        where $\phi^{\text{canon}}_i$ are CLIP embeddings of predefined canonical phrases ("object", "things", "stuff", "texture") [S1].
+-    d.  Select the semantic level ($s, p, w$) yielding the highest relevancy score [S1].
+-    e.  For localization, choose the point with the highest relevance score. For segmentation, filter points below a threshold [S1].
+-
+-### Pseudocode
++    a.  Render the language embeddings $F^l$ from the optimized 3D Gaussians to 2D.
++    b.  Decode the rendered latent features back to CLIP space using the trained decoder: $\hat{L}^l = \Psi(F^l) \in \mathbb{R}^D$ [S1].
++    c.  For a text query, compute the CLIP text embedding $\phi_{qry}$.
++    d.  Compute the relevancy score for each pixel/point. Let $\phi_{img}$ be the decoded CLIP embedding and $\phi_{canon}$ be the CLIP embedding of a predefined canonical phrase (e.g., "object", "things", "stuff", "texture") [S1]. The relevancy score is:
++        $$ \text{score} = \min_i \frac{\exp(\phi_{img} \cdot \phi_{qry})}{\exp(\phi_{img} \cdot \phi_{qry}) + \exp(\phi_{img} \cdot \phi_{canon})} $$
++        (Note: The source formula uses a min operator over indices $i$, likely referring to a normalization or specific scoring mechanism described in the appendix, but the core cosine similarity structure is explicit) [S1].
++    e.  Select the semantic level ($s, p, w$) that yields the highest relevancy score for the query [S1].
++    f.  **3D Object Localization:** Choose the 3D point with the highest relevance score [S1].
++    g.  **3D Semantic Segmentation:** Filter out points with relevancy scores lower than a chosen threshold and predict object masks with the remaining regions [S1].
++
++**Pseudocode:**
+ 
+ ```python
+@@ -75,195 +71,178 @@
+ 
+ class LangSplat:
+-    def __init__(self, clip_dim=512, latent_dim=3, num_views=100):
+-        self.clip_dim = clip_dim
+-        self.latent_dim = latent_dim
+-        self.num_views = num_views
+-        
++    def __init__(self, d_latent=3, d_clip=512):
++        self.d_latent = d_latent
++        self.d_clip = d_clip
+         # Scene-specific autoencoder
+         self.encoder = nn.Sequential(
+-            nn.Linear(clip_dim, 256),
++            nn.Linear(d_clip, 256),
+             nn.ReLU(),
+-            nn.Linear(256, latent_dim)
++            nn.Linear(256, d_latent)
+         )
+         self.decoder = nn.Sequential(
+-            nn.Linear(latent_dim, 256),
++            nn.Linear(d_latent, 256),
+             nn.ReLU(),
+-            nn.Linear(256, clip_dim)
++            nn.Linear(256, d_clip)
+         )
+-        
+-        # 3D Gaussians (simplified representation)
+-        # Each Gaussian has: mean (3), cov (6 for symmetric), opacity (1), 
+-        # and 3 latent features (3 * latent_dim)
++        # 3D Gaussians: stored as tensors
++        # mu: (N, 3), cov: (N, 3, 3) or q,s,
++        # alpha: (N,), color: (N, 3)
++        # lang_features: (N, 3, d_latent) -> [f_s, f_p, f_w]
+         self.gaussians = None 
+-        
+-        # SAM and CLIP models would be loaded externally
+-        self.sam_model = None 
+-        self.clip_encoder = None 
+-
+-    def extract_hierarchical_semantics(self, images):
+-        """
+-        Extracts hierarchical semantic masks and CLIP features for a batch of images.
+-        Returns: dict of {level: tensor of shape (T, H, W, D)}
+-        """
+-        features = {'s': [], 'p': [], 'w': []}
+-        
+-        for img in images:
+-            # 1. SAM Segmentation
+-            # Feed 32x32 grid prompts to SAM
+-            masks_s, masks_p, masks_w = self.sam_model.segment_grid_prompts(img)
+-            
+-            # 2. Filter redundant masks
+-            masks_s = self.filter_masks(masks_s)
+-            masks_p = self.filter_masks(masks_p)
+-            masks_w = self.filter_masks(masks_w)
+-            
+-            # 3. Full-image segmentation maps
+-            seg_map_s = self.full_segmentation(masks_s)
+-            seg_map_p = self.full_segmentation(masks_p)
+-            seg_map_w = self.full_segmentation(masks_w)
+-            
+-            # 4. Extract CLIP features
+-            # V is CLIP image encoder, I is image, M is mask
+-            feat_s = self.clip_encoder(img * seg_map_s)
+-            feat_p = self.clip_encoder(img * seg_map_p)
+-            feat_w = self.clip_encoder(img * seg_map_w)
+-            
+-            features['s'].append(feat_s)
+-            features['p'].append(feat_p)
+-            features['w'].append(feat_w)
+-            
+-        return {k: torch.stack(v) for k, v in features.items()}
+-
+-    def train_autoencoder(self, clip_features):
+-        """
+-        Trains the scene-specific autoencoder on CLIP features.
+-        clip_features: dict of {level: tensor (T, H, W, D)}
+-        """
+-        self.encoder.train()
+-        self.decoder.train()
+-        
+-        total_loss = 0
+-        for level in ['s', 'p', 'w']:
+-            feats = clip_features[level] # (T, H, W, D)
+-            # Flatten for training
+-            feats_flat = feats.view(-1, self.clip_dim)
+-            
+-            # Encode
+-            latent = self.encoder(feats_flat)
+-            # Decode
++        self.is_trained = False
++
++    def train_autoencoder(self, clip_embeddings):
++        """
++        clip_embeddings: (T, H, W, 3, D) or flattened (N_masks, D)
++        """
++        optimizer = torch.optim.Adam(list(self.encoder.parameters()) + 
++                                     list(self.decoder.parameters()), lr=1e-3)
++        
++        # Flatten for training
++        flat_embs = clip_embeddings.view(-1, self.d_clip)
++        
++        for epoch in range(100): # Placeholder for convergence
++            latent = self.encoder(flat_embs)
+             recon = self.decoder(latent)
+             
+-            # Loss: L1 + Cosine
+-            l1_loss = F.l1_loss(recon, feats_flat)
+-            cosine_loss = 1 - F.cosine_similarity(recon, feats_flat, dim=1).mean()
+-            
+-            total_loss += l1_loss + cosine_loss
+-            
+-        total_loss.backward()
+-        # Optimizer step would be called here
+-        return total_loss.item()
+-
+-    def render_language_features(self, gaussians, camera):
+-        """
+-        Renders language features using tile-based splatting.
+-        gaussians: list of Gaussian objects
+-        camera: camera parameters
+-        Returns: dict of {level: tensor (H, W, D)}
+-        """
+-        rendered = {'s': None, 'p': None, 'w': None}
+-        
+-        for level in ['s', 'p', 'w']:
+-            # Get latent features for this level from all Gaussians
+-            f_level = torch.stack([g.f[level] for g in gaussians]) # (N, d)
+-            alphas = torch.stack([g.alpha * g.projected_opacity(camera) for g in gaussians]) # (N)
+-            
+-            # Tile-based rasterization
+-            # This is a simplified representation of the standard 3DGS rasterizer
+-            # In practice, this involves sorting Gaussians per tile and alpha blending
+-            rendered[level] = self.tile_rasterizer(f_level, alphas, gaussians, camera)
+-            
+-        return rendered
+-
+-    def optimize_gaussians(self, gaussians, target_latents, camera):
+-        """
+-        Optimizes 3D Gaussians to match target latent features.
+-        target_latents: dict of {level: tensor (T, H, W, d)}
+-        """
+-        rendered = self.render_language_features(gaussians, camera)
+-        
+-        total_loss = 0
+-        for level in ['s', 'p', 'w']:
+-            # Target is the encoded CLIP feature from training step
+-            target = target_latents[level]
+-            pred = rendered[level]
+-            
+-            # Language loss (cosine or L1)
+-            loss = F.cosine_similarity(pred, target, dim=-1).mean() # Simplified
+-            total_loss += loss
+-            
+-        total_loss.backward()
+-        # Optimizer step would be called here
+-        return total_loss.item()
+-
+-    def query(self, rendered_features, text_query):
+-        """
+-        Performs open-vocabulary query on rendered features.
+-        rendered_features: dict of {level: tensor (H, W, D)} (decoded)
++            l1_loss = F.l1_loss(recon, flat_embs)
++            # Cosine distance
++            cos_sim = F.cosine_similarity(recon, flat_embs, dim=1)
++            cosine_loss = 1 - cos_sim.mean()
++            
++            loss = l1_loss + cosine_loss
++            optimizer.zero_grad()
++            loss.backward()
++            optimizer.step()
++            
++        self.is_autoencoder_trained = True
++
++    def get_target_latents(self, clip_embeddings):
++        """Transform CLIP embeddings to latent space using trained encoder."""
++        if not self.is_autoencoder_trained:
++            raise Exception("Autoencoder not trained")
++        flat_embs = clip_embeddings.view(-1, self.d_clip)
++        return self.encoder(flat_embs).view_as(clip_embeddings)
++
++    def render_language(self, gaussians, camera_params):
++        """
++        Render language features using tile-based splatting.
++        Returns rendered latent features F^l for each level l.
++        """
++        # Pseudocode for standard 3DGS rasterization adapted for language features
++        # 1. Project 3D Gaussians to 2D tiles
++        # 2. Sort Gaussians by depth within each tile
++        # 3. Alpha blend language features
++        
++        # F^l(v) = sum_i f_i^l * alpha_i * prod_{j<i} (1 - alpha_j)
++        # This is handled by the rasterizer. 
++        # Here we assume a function `rasterize` that returns (H, W, d_latent) for each level
++        pass 
++
++    def optimize_gaussians(self, images, masks, camera_params, target_latents):
++        """
++        images: (T, 3, H, W)
++        masks: (T, 3, H, W, 3) -> [M_s, M_p, M_w] boolean masks
++        target_latents: (T, 3, H, W, d_latent) -> [H_s, H_p, H_w]
++        """
++        optimizer = torch.optim.Adam(self.gaussians.parameters(), lr=1e-4)
++        
++        for step in range(10000):
++            # Forward pass
++            rendered_latents = self.render_language(self.gaussians, camera_params)
++            
++            # Loss calculation
++            # L_lang = sum_l sum_t d_lang(F^l_t, H^l_t)
++            lang_loss = 0
++            for l in range(3): # s, p, w
++                # Masked loss or full image loss as per source
++                # Source implies supervision using SAM-based masks
++                mask = masks[:, l] 
++                rendered = rendered_latents[:, l]
++                target = target_latents[:, l]
++                
++                # Apply mask
++                if mask.any():
++                    lang_loss += F.mse_loss(rendered[mask], target[mask])
++            
++            # Photometric loss (L1/SSIM on color)
++            rendered_colors = self.render_color(self.gaussians, camera_params)
++            photo_loss = F.l1_loss(rendered_colors, images)
++            
++            total_loss = lang_loss + photo_loss
++            
++            optimizer.zero_grad()
++            total_loss.backward()
++            optimizer.step()
++            
++            # Densification/Pruning steps would go here (standard 3DGS)
++
++    def query(self, text_query, rendered_latents_3d):
++        """
+         text_query: string
+-        Returns: dict of {level: tensor (H, W)} relevancy scores
++        rendered_latents_3d: (N, 3, d_latent) -> latent features for each 3D point
++        Returns: relevancy scores and best semantic level
+         """
+         # Encode text query
+-        phi_qry = self.clip_text_encoder(text_query)
++        text_emb = clip_text_encoder(text_query) # (D,)
+         
+         # Canonical phrases
+         canonical_phrases = ["object", "things", "stuff", "texture"]
+-        phi_canon = torch.stack([self.clip_text_encoder(p) for p in canonical_phrases])
+-        
+-        scores = {}
+-        for level, feat_2d in rendered_features.items():
+-            # feat_2d: (H, W, D)
+-            # Compute cosine similarity with query
+-            sim_q = F.cosine_similarity(feat_2d, phi_qry, dim=-1) # (H, W)
+-            
+-            # Compute min similarity with canonical phrases
+-            sims_canon = [F.cosine_similarity(feat_2d, phi_c, dim=-1) for phi_c in phi_canon]
+-            sim_min_canon = torch.stack(sims_canon).min(dim=0)[0] # (H, W)
+-            
+-            # Relevancy score
+-            # score = min(exp(sim_q) / (exp(sim_q) + exp(sim_min_canon)))
+-            # Note: The formula in source uses min over i of the softmax-like term
+-            # Here we approximate the min over canonical phrases
+-            exp_q = torch.exp(sim_q)
+-            exp_c = torch.exp(sim_min_canon)
+-            score = exp_q / (exp_q + exp_c)
+-            
+-            scores[level] = score
+-            
+-        return scores
++        canon_embs = [clip_text_encoder(p) for p in canonical_phrases]
++        
++        # Decode 3D latents to CLIP space
++        decoded_latents = self.decoder(rendered_latents_3d) # (N, 3, D)
++        
++        scores = []
++        for l in range(3):
++            point_embs = decoded_latents[:, l] # (N, D)
++            # Cosine similarity with query
++            sim_query = F.cosine_similarity(point_embs, text_emb, dim=1) # (N,)
++            
++            # Relevancy score calculation
++            # score = min_i (exp(sim) / (exp(sim) + exp(sim_canon)))
++            # Note: Source formula is slightly ambiguous on 'min_i'. 
++            # Assuming it refers to normalization against canonical phrases.
++            # We compute similarity against each canonical phrase
++            canon_sims = torch.stack([F.cosine_similarity(point_embs, c, dim=1) for c in canon_embs]) # (4, N)
++            
++            # Numerator
++            num = torch.exp(sim_query)
++            # Denominator: sum over canonical phrases? Or min? 
++            # Source: "min_i exp(...) / (exp(...) + exp(...))"
++            # Let's implement the explicit formula structure:
++            # For each point, we compare query vs canonical.
++            # The source says "min_i" where i likely indexes the canonical phrases or a specific normalization.
++            # Given "chosen from 'object', 'things'...", we take the max canonical similarity as the denominator baseline?
++            # Or strictly follow the text: min over i of the ratio.
++            
++            ratios = []
++            for c_sim in canon_sims:
++                ratio = torch.exp(sim_query) / (torch.exp(sim_query) + torch.exp(c_sim))
++                ratios.append(ratio)
++            
++            # Min over canonical phrases
++            level_score = torch.min(torch.stack(ratios), dim=0)[0]
++            scores.append(level_score)
++            
++        # Select best level
++        scores_tensor = torch.stack(scores) # (3, N)
++        best_level_idx = torch.argmax(scores_tensor, dim=0) # (N,)
++        best_scores = torch.gather(scores_tensor, 0, best_level_idx.unsqueeze(0)).squeeze(0) # (N,)
++        
++        return best_scores, best_level_idx
+ ```
+ 
+-### Parameters
+-*   **$d$**: Dimension of the scene-specific latent space. Typical value: $d=3$ [S1].
+-*   **$D$**: Dimension of the CLIP embedding space (typically 512) [S1].
+-*   **$\phi^{\text{canon}}$**: CLIP embeddings of predefined canonical phrases chosen from 'object', 'things', 'stuff', and 'texture' [S1].
+-*   **Grid Size**: $32 \times 32$ point prompts for SAM [S1].
+-
+-### Pitfalls
+-*   **Memory Exhaustion**: Directly learning 512-dimensional CLIP features increases memory requirements for storing 3D Gaussians by over 35 times compared to RGB colors without spherical harmonics, easily leading to L1 cache memory exhaustion [S1].
+-*   **Point Ambiguity**: Without hierarchical segmentation, points may lack precise semantic context, leading to vague language fields [S1].
+-
+ ## Operating characteristics
+-*   **Speed**: LangSplat is 199x faster than LERF at 1440x1080 resolution [S1].
+-*   **Memory**: Significantly reduced memory cost compared to directly modeling D-dimensional CLIP embeddings by using a scene-specific autoencoder to compress features to latent space $d$ [S1].
+-*   **Accuracy**:
++*   **Memory:** Significantly reduced compared to direct CLIP storage. Storing 512-dimensional CLIP features increases memory requirements by over 35 times compared to RGB colors (without spherical harmonics), leading to L1 cache exhaustion [S1]. LangSplat uses a latent dimension $d=3$, drastically lowering this cost [S1].
++*   **Speed:** 199x faster than LERF at 1440x1080 resolution [S1]. This efficiency comes from tile-based splatting instead of volume rendering [S1].
++*   **Accuracy:** 
+     *   Localization accuracy on LERF dataset: LangSplat 84.3% overall vs LERF 73.6% vs LSeg 21.1% [S1].
+     *   3D semantic segmentation IoU on LERF dataset: LangSplat 51.4% overall vs LERF 37.4% vs LSeg 16.6% [S1].
+-*   **Strengths**: Precise object boundaries, efficient real-time rendering, open-vocabulary querying without extensive scale search [S1].
+-*   **Limitations**: Requires SAM and CLIP models for preprocessing; dependent on the quality of SAM segmentation [S1].
++*   **Strengths:** Precise object boundaries, efficient rendering, open-vocabulary querying, no need for DINO regularization [S1].
++*   **Limitations:** Requires SAM for initial mask generation; performance depends on the quality of the autoencoder reconstruction; limited to predefined semantic levels (subpart, part, whole) during training [S1].
+ 
+ ## Background
+-*   **Origin**: Proposed by Wang et al. in "LangSplat: 3D Language Gaussian Splatting" (CVPR 2024) [S1].
+-*   **History**: Builds on 3D Gaussian Splatting [Parent] and addresses limitations of NeRF-based language fields like LERF, which suffer from slow rendering and imprecise features [S1].
+-*   **Usage**: Used for 3D open-vocabulary querying, 3D object localization, and 3D semantic segmentation [S1].
++LangSplat was introduced in 2024 by Wang et al. [S1]. It builds on the principles of 3D Gaussian Splatting and addresses limitations in NeRF-based language fields like LERF, which suffer from imprecise features and slow rendering [S1]. It incorporates hierarchical semantics from SAM and uses a scene-specific autoencoder to compress CLIP embeddings [S1].
+ 
+ ## Sources

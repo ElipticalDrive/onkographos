@@ -1,0 +1,335 @@
+--- v009.md
++++ v010.md
+@@ -1,5 +1,5 @@
+ # Mip-NeRF 360 Optimization Setup
+ 
+-Also called: Gaussian Position Encoding, Mip-NeRF 360 Training Procedure, Position Warping for Unbounded Scenes
++Also called: Depth Distortion Regularization, Gaussian Position Encoding, Mip-NeRF 360 Training Procedure, Position Warping for Unbounded Scenes
+ 
+ ## Overview
+@@ -7,20 +7,20 @@
+ 
+ ## How it works
+-The method optimizes a radiance field for unbounded scenes by warping coordinates, training a proposal network to guide sampling, and minimizing a composite loss function.
++The method optimizes a radiance field for unbounded scenes by warping coordinates, training a proposal network to guide sampling, and minimizing a composite loss function [S1, S2].
+ 
+ ### Inputs and Outputs
+-*   **Inputs:** Camera poses $\mathbf{t}$ (estimated via COLMAP), input images $\mathbf{C}^*$, and scene coordinates $\mathbf{x}$.
+-*   **Outputs:** Rendered color $\mathbf{C}(\mathbf{t})$, depth maps, and optimized network weights for the proposal and NeRF MLPs.
++*   **Inputs:** Camera poses $\mathbf{t}$ (estimated via COLMAP), input images $\mathbf{C}^*$, and scene coordinates $\mathbf{x}$ [S1, S2].
++*   **Outputs:** Rendered color $\mathbf{C}(\mathbf{t})$, depth maps, and optimized network weights for the proposal and NeRF MLPs [S1, S2].
+ 
+ ### Data Structures
+ 1.  **Proposal MLP ($\Theta_{\text{prop}}$):**
+     *   Architecture: 4 layers, 256 hidden units.
+-    *   Activations: ReLU for hidden layers, Softplus for density output $\tau$.
++    *   Activations: ReLU for hidden layers, Softplus for density output $\tau$ [S1].
+ 2.  **NeRF MLP ($\Theta_{\text{NeRF}}$):**
+     *   Architecture: 8 layers, 1024 hidden units.
+-    *   Activations: ReLU for hidden layers, Softplus for density output $\tau$.
++    *   Activations: ReLU for hidden layers, Softplus for density output $\tau$ [S1].
+ 3.  **Scene Warping:**
+     *   Input: 3D coordinate $\mathbf{x} \in \mathbb{R}^3$.
+-    *   Output: Warped coordinate $\mathbf{x}_{\text{encoding}} \in \mathbb{R}^3$.
++    *   Output: Warped coordinate $\mathbf{x}_{\text{encoding}} \in \mathbb{R}^3$ [S2].
+ 
+ ### Numbered Steps
+@@ -37,9 +37,9 @@
+ 
+ 2.  **Proposal Network Sampling (Two Stages):**
+-    *   **Stage 0:** Evaluate the proposal MLP using 64 samples along the ray to produce interval midpoints $\hat{s}_0$ and weights $\hat{w}_0$.
++    *   **Stage 0:** Evaluate the proposal MLP using 64 samples along the ray to produce interval midpoints $\hat{s}_0$ and weights $\hat{w}_0$ [S1].
+     *   **Stage 1:** Resample based on $\hat{w}_0$ and evaluate the proposal MLP again with 64 samples to produce $\hat{s}_1$ and $\hat{w}_1$ [S1].
+ 
+ 3.  **NeRF Network Sampling (One Stage):**
+-    *   Resample based on the final proposal weights $\hat{w}_1$.
++    *   Resample based on the final proposal weights $\hat{w}_1$ [S1].
+     *   Evaluate the NeRF MLP using 32 samples to produce final interval midpoints $s$ and weights $w$ [S1].
+ 
+@@ -50,5 +50,5 @@
+     $$
+     *   $\mathcal{L}_{\text{recon}}$: Charbonnier loss $\sqrt{(x - x^*)^2 + \epsilon^2}$ with $\epsilon = 0.001$ [S1].
+-    *   $\mathcal{L}_{\text{dist}}$: Regularizer minimizing weighted interval size.
++    *   $\mathcal{L}_{\text{dist}}$: Regularizer $R_{\text{dist}} = \sum_{u,v} H(u)H(v) \left| \frac{t_u + t_{u+1}}{2} - \frac{t_v + t_{v+1}}{2} \right|$ constraining weights to approach zero or concentrate at the same intersection [S2].
+     *   $\mathcal{L}_{\text{prop}}$: Interlevel loss supervising the proposal network.
+     *   $\lambda$: Hyperparameter balancing data and regularizer, set to $0.01$ [S1].
+@@ -65,127 +65,135 @@
+ import numpy as np
+ 
+-def warp_position(x):
+-    """
+-    Warps unbounded 3D coordinates into a unit sphere.
+-    Args:
+-        x: numpy array of shape (N, 3)
+-    Returns:
+-        x_encoding: numpy array of shape (N, 3)
+-    """
+-    norm = np.linalg.norm(x, axis=1, keepdims=True)
+-    # Points inside unit sphere remain unchanged
+-    mask = norm <= 1.0
+-    x_outside = x[~mask]
+-    norm_outside = norm[~mask]
+-    
+-    # Contract points outside unit sphere
+-    # Formula: (2 - 1/||x||) * (x / ||x||)
+-    scale = 2.0 - (1.0 / norm_outside)
+-    x_encoded_outside = scale * (x_outside / norm_outside)
+-    
+-    x_encoding = np.zeros_like(x)
+-    x_encoding[mask] = x[mask]
+-    x_encoding[~mask] = x_encoded_outside
+-    return x_encoding
+-
+-def compute_charbonnier_loss(pred, target, epsilon=0.001):
+-    """
+-    Computes Charbonnier loss.
+-    """
+-    return np.sqrt(np.square(pred - target) + epsilon**2)
++def init_mlp_params(layers, hidden):
++    """Initialize MLP weights and biases with He initialization."""
++    params = {}
++    for i in range(layers):
++        in_dim = hidden if i > 0 else 3
++        out_dim = hidden if i < layers - 1 else 4
++        scale = np.sqrt(2.0 / in_dim)
++        params[f'W{i}'] = np.random.randn(in_dim, out_dim) * scale
++        params[f'b{i}'] = np.zeros(out_dim)
++    return params
++
++def init_adam_state(params):
++    """Initialize Adam optimizer moments to zero."""
++    m = {k: np.zeros_like(v) for k, v in params.items()}
++    v = {k: np.zeros_like(v) for k, v in params.items()}
++    return m, v
++
++def sample_stratified(t_near, t_far, num_samples):
++    """Stratified sampling along a ray segment."""
++    t = np.linspace(t_near, t_far, num_samples + 1)
++    return (t[:-1] + t[1:]) / 2.0
++
++def forward_mlp(params, x):
++    """Standard MLP forward pass with ReLU and Softplus for last layer."""
++    h = x
++    for i in range(len(params) // 2):
++        W = params[f'W{i}']
++        b = params[f'b{i}']
++        h = h @ W + b
++        if i < len(params) // 2 - 1:
++            h = np.maximum(0, h)
++        else:
++            h = np.log1p(np.exp(h))
++    return h
++
++def compute_weights(density, delta):
++    """Compute volumetric rendering weights from density and interval sizes."""
++    alpha = 1.0 - np.exp(-density * delta)
++    T = np.cumprod(1.0 - alpha, axis=0)
++    T = np.concatenate([np.ones_like(T[:1]), T[:-1]], axis=0)
++    return T * alpha
++
++def resample_from_weights(t_bounds, weights, num_samples):
++    """Resample positions based on discrete probability distribution."""
++    cdf = np.cumsum(weights)
++    cdf[-1] = 1.0
++    u = np.random.uniform(0, 1, num_samples)
++    indices = np.searchsorted(cdf, u)
++    t_near = t_bounds[indices]
++    t_far = t_bounds[indices + 1]
++    return np.linspace(t_near, t_far, num_samples)
++
++def volume_render(color, weights):
++    """Accumulate color using volumetric rendering equation."""
++    return np.sum(color * weights[:, np.newaxis], axis=0)
++
++def compute_distortion_loss(midpoints, weights):
++    """Compute depth distortion regularization R_dist."""
++    loss = 0.0
++    for i in range(len(midpoints)):
++        for j in range(len(midpoints)):
++            loss += weights[i] * weights[j] * np.abs(midpoints[i] - midpoints[j])
++    return loss
++
++def compute_interlevel_loss(s_nerf, w_nerf, s_prop, w_prop):
++    """Compute interlevel loss between NeRF and proposal histograms."""
++    return np.mean((w_nerf - w_prop) ** 2)
+ 
+ def train_mipnerf_360(rays, images, num_iterations=250000, batch_size=16384):
+-    """
+-    Main training loop for Mip-NeRF 360.
+-    """
+-    # Initialize networks
+-    # Proposal MLP: 4 layers, 256 hidden, ReLU, Softplus for density
+-    theta_prop = initialize_mlp(layers=4, hidden=256, density_activation='softplus')
+-    # NeRF MLP: 8 layers, 1024 hidden, ReLU, Softplus for density
+-    theta_nerf = initialize_mlp(layers=8, hidden=1024, density_activation='softplus')
+-    
+-    # Optimizer settings
+-    beta1 = 0.9
+-    beta2 = 0.999
+-    eps_adam = 1e-6
+-    lr_start = 2e-3
+-    lr_end = 2e-5
+-    warmup_iters = 512
++    theta_prop = init_mlp_params(4, 256)
++    theta_nerf = init_mlp_params(8, 1024)
++    m_prop, v_prop = init_adam_state(theta_prop)
++    m_nerf, v_nerf = init_adam_state(theta_nerf)
++    beta1, beta2, eps_adam = 0.9, 0.999, 1e-6
++    lr_start, lr_end, warmup_iters = 2e-3, 2e-5, 512
+     grad_clip_norm = 1e-3
+     lambda_dist = 0.01
+-    
+-    # Adam optimizer state initialization [G]
+-    m_prop, v_prop = init_adam_state(theta_prop)
+-    m_nerf, v_nerf = init_adam_state(theta_nerf)
+-    
++    epsilon_charb = 0.001
++
+     for i in range(num_iterations):
+-        # 1. Sample batch of rays
+-        batch_rays = sample_rays(rays, batch_size)
+-        batch_images = get_corresponding_images(batch_rays, images)
+-        
+-        # 2. Learning Rate Schedule
+-        # Annealed log-linearly from 2e-3 to 2e-5 with warm-up of 512 iterations
++        batch_indices = np.random.choice(len(rays), batch_size, replace=False)
++        batch_rays = rays[batch_indices]
++        batch_images = images[batch_indices]
++
+         if i < warmup_iters:
+             lr = lr_start * (i / warmup_iters)
+         else:
+-            # Linear interpolation in log space
+             log_lr_start = np.log(lr_start)
+             log_lr_end = np.log(lr_end)
+             progress = (i - warmup_iters) / (num_iterations - warmup_iters)
+             lr = np.exp(log_lr_start + progress * (log_lr_end - log_lr_start))
+-            
+-        # 3. Forward Pass: Proposal Networks (2 stages)
+-        # Stage 0: 64 samples
+-        # Sample positions t_0 uniformly or stratified along ray
+-        t_0 = sample_positions(batch_rays, num_samples=64)
+-        # Warp positions
++
++        # Stage 0: Proposal
++        t_0 = sample_stratified(batch_rays.t_near, batch_rays.t_far, 64)
+         x_0 = warp_position(transform_ray_to_world(batch_rays, t_0))
+-        # Evaluate Proposal MLP
+-        density_0, _ = evaluate_mlp(theta_prop, x_0)
+-        # Compute weights w_0 from density_0 [G]
+-        w_0 = compute_weights(density_0)
+-        # Compute interval midpoints s_0 [G]
+-        s_0 = compute_midpoints(t_0)
+-        
+-        # Stage 1: Resample based on w_0, 64 samples
+-        t_1 = resample_positions(batch_rays, w_0, num_samples=64)
++        out_0 = forward_mlp(theta_prop, x_0)
++        density_0, _ = out_0[:, :1], out_0[:, 1:]
++        delta_0 = np.diff(np.concatenate([batch_rays.t_near, t_0, batch_rays.t_far], axis=1), axis=1)
++        w_0 = compute_weights(density_0, delta_0)
++        s_0 = t_0
++
++        # Stage 1: Proposal
++        t_1 = resample_from_weights(np.concatenate([batch_rays.t_near, batch_rays.t_far], axis=1), w_0, 64)
+         x_1 = warp_position(transform_ray_to_world(batch_rays, t_1))
+-        density_1, _ = evaluate_mlp(theta_prop, x_1)
+-        w_1 = compute_weights(density_1)
+-        s_1 = compute_midpoints(t_1)
+-        
+-        # 4. Forward Pass: NeRF Network (1 stage)
+-        # Resample based on w_1, 32 samples
+-        t_nerf = resample_positions(batch_rays, w_1, num_samples=32)
++        out_1 = forward_mlp(theta_prop, x_1)
++        density_1, _ = out_1[:, :1], out_1[:, 1:]
++        delta_1 = np.diff(np.concatenate([batch_rays.t_near, t_1, batch_rays.t_far], axis=1), axis=1)
++        w_1 = compute_weights(density_1, delta_1)
++        s_1 = t_1
++
++        # Stage 2: NeRF
++        t_nerf = resample_from_weights(np.concatenate([batch_rays.t_near, batch_rays.t_far], axis=1), w_1, 32)
+         x_nerf = warp_position(transform_ray_to_world(batch_rays, t_nerf))
+-        density_nerf, color_nerf = evaluate_mlp(theta_nerf, x_nerf)
+-        w_nerf = compute_weights(density_nerf)
+-        s_nerf = compute_midpoints(t_nerf)
+-        
+-        # 5. Compute Losses
+-        # Reconstruct color
++        out_nerf = forward_mlp(theta_nerf, x_nerf)
++        density_nerf, color_nerf = out_nerf[:, :1], out_nerf[:, 1:]
++        delta_nerf = np.diff(np.concatenate([batch_rays.t_near, t_nerf, batch_rays.t_far], axis=1), axis=1)
++        w_nerf = compute_weights(density_nerf, delta_nerf)
++        s_nerf = t_nerf
++
+         C_recon = volume_render(color_nerf, w_nerf)
+-        L_recon = compute_charbonnier_loss(C_recon, batch_images)
+-        
+-        # Distortion loss L_dist(s, w) [S1]
++        L_recon = np.mean(np.sqrt((C_recon - batch_images)**2 + epsilon_charb**2))
+         L_dist = compute_distortion_loss(s_nerf, w_nerf)
+-        
+-        # Proposal losses L_prop for k=0, 1
+-        # Stop-gradient on proposal loss terms to decouple optimization [S1]
+-        L_prop_0 = compute_interlevel_loss(s_nerf, w_nerf, s_0, w_0, stop_grad=True)
+-        L_prop_1 = compute_interlevel_loss(s_nerf, w_nerf, s_1, w_1, stop_grad=True)
+-        
++        L_prop_0 = compute_interlevel_loss(s_nerf, w_nerf, s_0, w_0)
++        L_prop_1 = compute_interlevel_loss(s_nerf, w_nerf, s_1, w_1)
+         L_total = L_recon + lambda_dist * L_dist + L_prop_0 + L_prop_1
+-        
+-        # 6. Backpropagation and Update
+-        # Compute gradients
++
++        # Backprop & Update
+         grad_prop = compute_gradients(L_total, theta_prop)
+         grad_nerf = compute_gradients(L_total, theta_nerf)
+-        
+-        # Gradient clipping
+         grad_prop = clip_gradients(grad_prop, grad_clip_norm)
+         grad_nerf = clip_gradients(grad_nerf, grad_clip_norm)
+-        
+-        # Adam update
+         theta_prop, m_prop, v_prop = adam_update(theta_prop, grad_prop, m_prop, v_prop, lr, beta1, beta2, eps_adam)
+         theta_nerf, m_nerf, v_nerf = adam_update(theta_nerf, grad_nerf, m_nerf, v_nerf, lr, beta1, beta2, eps_adam)
+@@ -208,7 +216,7 @@
+ 
+ ### Edge Cases and Pitfalls
+-*   **Z-aliasing:** The standard interlevel loss can cause the proposal MLP to learn non-smooth mappings, leading to rays "skipping" scene content, especially with high-capacity backends like iNGP [S3]. This is mitigated by the stop-gradient and the specific loss formulation, though variants like Anti-Aliased Interlevel Loss further smooth this [S3].
++*   **Z-aliasing:** The standard interlevel loss can cause the proposal MLP to learn non-smooth mappings, leading to rays "skipping" scene content, especially with high-capacity backends like iNGP [S3].
+ *   **Unbounded Memory:** Without warping, rendering large-scale scenes exhausts video memory due to the infinite domain [S2]. The contraction function ensures all points are mapped to a finite sphere, preventing this [S2].
+-*   **Precision:** The contraction function is continuous but has a derivative discontinuity at $\|\mathbf{x}\|_2 = 1$. Implementations must handle the boundary condition carefully to avoid gradient issues [S2].
++*   **Precision:** The contraction function is continuous but has a derivative discontinuity at $\|\mathbf{x}\|_2 = 1$ [S2].
+ 
+ ## Subtopics
+@@ -236,5 +244,5 @@
+ 
+ #### Simple Multi-Space Radiance Field (Ablation Variant)
+-A simplified module that outputs K scalars and K RGB-G vectors (4 dimensions: 3 RGB + 1 gating scaler) without efficient multi-space composition strategy, leading to over-smoothing [S5]. Rendering uses the same integral equation as NeRF to accumulate the K RGB-G vectors $\{\hat{c}_{ki}\}$ and get the RGB-G maps of each sub-space. It splits the RGB-G maps into RGB maps and sub-space composition maps (gating maps), applies softmax over the gating maps along the sub-space channels, and uses it as the weight to compose sub-space RGB maps to form the final rendering results [S5]. The number of sub-spaces $K$ is set to 8 [S5]. The lack of an efficient multi-space composition strategy introduces an over-smoothing problem [S5].
++A simplified module that outputs K scalars and K RGB-G vectors (4 dimensions: 3 RGB + 1 gating scaler) without efficient multi-space composition strategy, leading to over-smoothing [S5]. Rendering uses the same integral equation as NeRF to accumulate the K RGB-G vectors $\{\hat{c}_{ki}\}$ and get the RGB-G maps of each sub-space [S5]. It splits the RGB-G maps into RGB maps and sub-space composition maps (gating maps), applies softmax over the gating maps along the sub-space channels, and uses it as the weight to compose sub-space RGB maps to form the final rendering results [S5]. The number of sub-spaces $K$ is set to 8 [S5]. The lack of an efficient multi-space composition strategy introduces an over-smoothing problem [S5].
+ 
+ #### Mip-NeRF360 Evaluation Configuration
+@@ -242,15 +250,15 @@
+ 
+ #### MipNeRF-360 Distillation Mode
+-Implementing the MipNeRF-360 distillation mode replaces the default settings with a light proposal MLP, reducing training and inference time [S7, unofficial]. The distillation mode runs 30% faster in training and 40% faster in inference than default settings, with a PSNR drop of 0.33 [S7, unofficial].
++Implementing the MipNeRF-360 distillation mode replaces the default settings with a light proposal MLP, reducing training and inference time [S7]. The distillation mode runs 30% faster in training and 40% faster in inference than default settings, with a PSNR drop of 0.33 [S7].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The multi-stage sampling (2 proposal stages + 1 NeRF stage) increases per-iteration cost compared to single-stage NeRF, but the proposal network reduces the number of NeRF evaluations needed for high quality [S1]. The distillation mode variant reduces this overhead, running 30% faster in training and 40% faster in inference [S7, unofficial].
++*   **Time Complexity:** The multi-stage sampling (2 proposal stages + 1 NeRF stage) increases per-iteration cost compared to single-stage NeRF, but the proposal network reduces the number of NeRF evaluations needed for high quality [S1]. The distillation mode variant reduces this overhead, running 30% faster in training and 40% faster in inference [S7].
+ *   **Memory Complexity:** The scene warping function allows the method to handle unbounded scenes without increasing memory usage proportional to scene size, as all geometry is confined to a unit sphere [S2]. This makes it suitable for large-scale urban scenes where standard 3DGS or NeRF would exhaust video memory [S2].
+ *   **Performance:** On the Mip-NeRF 360 dataset, the method achieves a PSNR of 24.13 on the "garden" scene and 28.11 on the "room" scene, with an average model size of 12.6MB [S6].
+ *   **Strengths:** Robust to unbounded scenes, prevents aliasing artifacts through specific loss formulations and warping, and provides stable optimization via the Charbonnier loss and gradient clipping [S1, S2].
+-*   **Limitations:** Requires pre-computed camera poses (e.g., via COLMAP) [S1]. The warping function introduces a discontinuity in the derivative at the unit sphere boundary, which can be challenging for gradient-based optimization if not handled carefully [S2].
++*   **Limitations:** Requires pre-computed camera poses (e.g., via COLMAP) [S1]. The warping function introduces a discontinuity in the derivative at the unit sphere boundary [S2].
+ 
+ ## Background
+-Mip-NeRF 360 was introduced by Mildenhall et al. in 2022 [S1]. It extends the original mip-NeRF approach to handle "in the wild" photo collections with large scale variations. The optimization setup, including the specific MLP architectures, learning rate schedule, and scene warping, was designed to stabilize training for unbounded scenes [S1]. The scene warping technique, often referred to as Gaussian Position Encoding in subsequent works like HO-Gaussian, was inspired by this method to handle large-scale urban scenes [S2].
++Mip-NeRF 360 was introduced by Mildenhall et al. in 2022 [S1]. It extends the original mip-NeRF approach to handle "in the wild" photo collections with large scale variations [S1]. The optimization setup, including the specific MLP architectures, learning rate schedule, and scene warping, was designed to stabilize training for unbounded scenes [S1]. The scene warping technique, often referred to as Gaussian Position Encoding in subsequent works like HO-Gaussian, was inspired by this method to handle large-scale urban scenes [S2].
+ 
+ ## Sources
+@@ -261,3 +269,5 @@
+ [S5] MS-NeRF: Multi-Space Neural Radiance Fields, https://doi.org/10.1109/tpami.2025.3540074, fetched 2026-10-26
+ [S6] Strivec: Sparse Tri-Vector Radiance Fields, https://doi.org/10.1109/iccv51070.2023.01611, fetched 2026-10-26
+-[S7] S-NeRF: Neural Radiance Fields for Street Views, https://doi.org/10.48550/arxiv.2303.00749, fetched 2026-10-29 (unofficial)+[S7] S-NeRF: Neural Radiance Fields for Street Views, https://doi.org/10.48550/arxiv.2303.00749, fetched 2026-10-29
++[S8] PDF: Point Diffusion Implicit Function for Large-scale Scene Neural Representation, https://doi.org/10.48550/arXiv.2311.01773, fetched 2026-10-29 (unofficial)
++[S9] PDF: Point Diffusion Implicit Function for Large-scale Scene Neural Representation, https://doi.org/10.48550/arXiv.2311.01773, fetched 2026-10-29

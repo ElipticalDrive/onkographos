@@ -1,0 +1,224 @@
+--- v005.md
++++ v006.md
+@@ -1,39 +1,56 @@
+ # LPIPS Computation
+-Also called: Learned Perceptual Image Patch Similarity, LPIPS, LPIPS Loss
++
++Also called: Learned Perceptual Image Patch Similarity, LPIPS Loss
+ 
+ ## Overview
+-LPIPS is a full-reference perceptual quality metric that measures the similarity between two images by comparing deep feature representations extracted from a pretrained convolutional neural network [S1, S3]. Unlike pixel-wise metrics such as PSNR or MSE, which are computed at the level of individual pixels without considering neighboring information, LPIPS aligns closely with human judgments of image similarity by leveraging semantic features [S2, unofficial][S6, unofficial]. It is primarily used in volume rendering and NeRF optimization to evaluate reconstruction fidelity or as a perceptual loss function to guide training, capturing nuances like texture and structure that standard metrics miss [S3][S5, unofficial].
++LPIPS is a full-reference perceptual quality assessment metric that estimates the similarity between two images by comparing deep features extracted from pretrained convolutional neural networks [S1][S2, unofficial][S3, S4]. It solves the limitation of pixel-wise metrics (such as MSE or PSNR) by capturing high-level semantic and structural nuances that align better with human perception [S3, S4][S6, unofficial]. Unlike its siblings, it operates on feature activations rather than raw pixel values, making it sensitive to texture and edge preservation [S6, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- **Input:** Two images, $x$ (reference) and $y$ (assessed/reconstructed), typically of shape $(H, W, C)$ or $(C, H, W)$.
+-- **Output:** A scalar distance value $LPIPS(x, y) \in [0, \infty)$. Lower values indicate higher perceptual similarity [S5, unofficial].
++- **Inputs:** Two images (or image patches), $x$ (reference) and $y$ (assessed/reconstructed). Typically normalized to $[0, 1]$ or $[-1, 1]$.
++- **Outputs:** A scalar distance value $LPIPS(x, y) \ge 0$. Lower values indicate higher perceptual similarity.
+ 
+ **Data Structures:**
+-- **Feature Maps:** For each layer $l$ in the backbone network, the output is a tensor of activations [S1]. Let $x^l$ and $y^l$ be the feature maps for images $x$ and $y$ at layer $l$ [S1].
+-- **Weights:** A learnable vector $w_l$ of size equal to the number of channels in layer $l$, used to weight the importance of each channel [S1]. They are fixed during the LPIPS computation itself [G].
++- **Feature Maps:** For each layer $l$ in the backbone network, the output is a tensor of shape $(C_l, H_l, W_l)$, where $C_l$ is the number of channels, and $H_l, W_l$ are the spatial dimensions.
++- **Learned Weights:** A set of scalar weights $w_l$ for each layer $l$, learned via a perceptual loss optimization on human judgments [S1][S2, unofficial].
++
++**Steps:**
++1. **Preprocessing:** Scale input images from $[0, 1]$ to $[-1, 1]$ using the transformation $x' = 2x - 1$ and $y' = 2y - 1$ [S5, unofficial]. Add a batch dimension if necessary (e.g., shape $(1, C, H, W)$) [S5, unofficial].
++2. **Feature Extraction:** Pass both images through a pretrained backbone network (e.g., VGG, AlexNet, or SqueezeNet) [S1, S3][S5, unofficial]. Extract intermediate feature maps $f_l(x)$ and $f_l(y)$ for a set of layers $l \in \{0, \dots, L\}$ [S2, unofficial].
++3. **Normalization:** Normalize the feature maps per channel. The original LPIPS paper normalizes features by dividing by the square root of the number of elements in the feature map, effectively computing a normalized Euclidean distance [S1][S2, unofficial]. *Note: The specific normalization step is implicit in the "learned weights" formulation in [S2, unofficial] but explicit in the weighted MSE formulation in [S1]. The standard implementation [S5, unofficial] uses the `lpips` library which handles this internally.*
++4. **Distance Calculation:** Compute the weighted squared Euclidean distance between the feature maps of $x$ and $y$ across all layers [S1][S2, unofficial].
++
++**Formula:**
++The LPIPS distance is defined as [S1][S2, unofficial]:
++
++$$
++LPIPS(x, y) = \sum_{l} w_l \| f_l(x) - f_l(y) \|_2^2
++$$
++
++Where:
++- $l$ indexes the layers of the backbone network.
++- $w_l$ are the learned weights for layer $l$ [S2, unofficial].
++- $f_l(x)$ and $f_l(y)$ are the feature activations of images $x$ and $y$ at layer $l$ [S2, unofficial].
++- $\| \cdot \|_2^2$ denotes the squared $L_2$ norm (sum of squared differences) over the spatial dimensions and channels of the feature map [S1][S2, unofficial].
++
++An equivalent formulation provided in [S1] expands the norm:
++
++$$
++LPIPS(x, y) = \sum_{l} \frac{1}{H_l W_l} \sum_{h,w} ||w_l \odot (x^l_{hw} - y^l_{hw})||_2^2
++$$
++
++Where:
++- $x^l_{hw}, y^l_{hw}$ are the feature vectors at pixel $(h, w)$ and layer $l$ [S1].
++- $H_l, W_l$ are the height and width of the feature map at layer $l$ [S1].
++- $\odot$ denotes element-wise multiplication with the learned weights $w_l$ [S1].
+ 
+ **Parameters:**
+-- **Backbone Network:** The original implementation uses a pretrained VGG16 [S1][S4], though AlexNet [S1][S2, unofficial] and SqueezeNet [S1] are also supported. VGG16 is the standard for high-fidelity evaluation [S1][S4].
+-- **Normalization:** Input images must be normalized to the range $[-1, 1]$ before feature extraction [S5, unofficial].
+-- **Weights ($w_l$):** Learnable weights are applied per channel to weight the importance of each feature map [S1].
++- **Backbone Architecture:** The original paper used SqueezeNet, VGG, and AlexNet [S1]. VGG is commonly used in modern implementations [S5, unofficial]. AlexNet is also cited for specific applications [S3].
++- **Weights ($w_l$):** Learned per layer to minimize correlation with human perceptual judgments [S2, unofficial]. Not given in the sources for specific values, but they are part of the pretrained model weights.
+ 
+-**Steps:**
+-1. **Preprocessing:** Scale the input images $x$ and $y$ from their native range (typically $[0, 1]$) to $[-1, 1]$ using the transformation $x' = 2.0 \cdot x - 1.0$ and $y' = 2.0 \cdot y - 1.0$ [S5, unofficial].
+-2. **Feature Extraction:** Pass $x'$ and $y'$ through the chosen backbone network (e.g., VGG16) [S5, unofficial]. Extract feature maps from multiple intermediate layers of the backbone network [S1]. Let $x^l_{hw}$ and $y^l_{hw}$ denote the feature values at pixel $(h, w)$ for layer $l$ [S1].
+-3. **Distance Calculation:** Compute the weighted squared Euclidean distance for each layer, normalized by the spatial dimensions and channel weights [S1].
+-4. **Aggregation:** Sum the normalized distances across all selected layers to produce the final score [S1].
+-
+-**Formula:**
+-The LPIPS distance is defined as [S1]:
+-$$
+-LPIPS(x, y) = \sum_{l} \frac{1}{H_l W_l} \sum_{h=1}^{H_l} \sum_{w=1}^{W_l} || w_l \odot (x^l_{hw} - y^l_{hw}) ||_2^2
+-$$
+-Where:
+-- $l$ indexes the selected layers of the backbone network [S1].
+-- $H_l$ and $W_l$ are the height and width of the feature map at layer $l$ [S1].
+-- $x^l_{hw}$ and $y^l_{hw}$ are the feature vectors at pixel $(h, w)$ for the reference and assessed images, respectively [S1].
+-- $w_l$ is the vector of learned weights for layer $l$, with one weight per channel. $\odot$ denotes element-wise multiplication [S1].
+-- $|| \cdot ||_2^2$ is the squared $L_2$ norm (sum of squared elements) of the vector [G].
++**Pitfalls:**
++- **Weight Download:** The first run requires downloading pretrained weights to the `TORCH_HOME` cache, requiring internet access or pre-cached weights [S5, unofficial].
++- **Normalization:** Incorrect input scaling (e.g., not converting to $[-1, 1]$ if the model expects it) can lead to incorrect feature activations [S5, unofficial].
++- **Perceptual vs. Pixel:** LPIPS does not measure pixel-perfect accuracy. It may assign high similarity to images that are perceptually similar but pixel-different [S6, unofficial].
+ 
+ **Pseudocode:**
+@@ -41,92 +58,61 @@
+ import torch
+ import torch.nn as nn
++import lpips # External library for pretrained weights and model definition
+ 
+-def compute_lpips(reference: torch.Tensor, assessed: torch.Tensor, 
+-                  backbone: nn.Module, weights: dict) -> float:
++def compute_lpips(image_x: torch.Tensor, image_y: torch.Tensor, net_type: str = 'vgg') -> float:
+     """
+-    Compute LPIPS distance between two images.
++    Compute LPIPS between two images.
+     
+     Args:
+-        reference: Tensor of shape (C, H, W) or (B, C, H, W) with values in [0, 1].
+-        assessed: Tensor of shape (C, H, W) or (B, C, H, W) with values in [0, 1].
+-        backbone: Pretrained VGG16 model in eval mode.
+-        weights: Dictionary mapping layer names to weight tensors (C_l,).
++        image_x: Reference image tensor of shape (C, H, W) or (B, C, H, W), values in [0, 1].
++        image_y: Assessed image tensor of same shape, values in [0, 1].
++        net_type: Backbone architecture ('vgg', 'alex', 'squeeze').
++        
++    Returns:
++        LPIPS distance scalar.
++    """
++    # 1. Load model
++    loss_fn = lpips.LPIPS(net=net_type)
+     
+-    Returns:
+-        Scalar LPIPS distance.
+-    """
+-    # 1. Preprocessing: Scale from [0, 1] to [-1, 1] and add batch dimension
+-    if reference.dim() == 3:
+-        reference = reference.unsqueeze(0)
+-        assessed = assessed.unsqueeze(0)
++    # 2. Set to evaluation mode
++    loss_fn.eval()
+     
+-    ref_scaled = 2.0 * reference - 1.0
+-    ass_scaled = 2.0 * assessed - 1.0
++    # 3. Ensure batch dimension
++    if image_x.dim() == 3:
++        image_x = image_x.unsqueeze(0)
++        image_y = image_y.unsqueeze(0)
++        
++    # 4. Scale from [0, 1] to [-1, 1]
++    # Note: Some implementations handle this internally, but explicit scaling is safer
++    # based on [S5, unofficial] which shows `* 2.0 - 1.0`.
++    # However, the standard lpips library often expects [-1, 1] input directly.
++    # We follow [S5, unofficial] explicitly.
++    image_x_scaled = image_x * 2.0 - 1.0
++    image_y_scaled = image_y * 2.0 - 1.0
+     
+-    # 2. Feature Extraction: Collect outputs from specific intermediate layers
+-    ref_features = _extract_features(ref_scaled, backbone, list(weights.keys()))
+-    ass_features = _extract_features(ass_scaled, backbone, list(weights.keys()))
++    # 5. Compute distance
++    # The lpips library returns a tensor of shape (B,)
++    distance = loss_fn(image_x_scaled, image_y_scaled)
+     
+-    lpips_score = 0.0
+-    
+-    # 3. Compute weighted distance for each layer
+-    for layer_name in weights.keys():
+-        x_l = ref_features[layer_name] # Shape: (B, C_l, H_l, W_l)
+-        y_l = ass_features[layer_name]
+-        
+-        w_l = weights[layer_name] # Shape: (C_l,)
+-        
+-        # Compute difference
+-        diff = x_l - y_l
+-        
+-        # Apply weights: element-wise multiply each channel by its weight
+-        weighted_diff = diff * w_l.view(1, -1, 1, 1)
+-        
+-        # Compute squared L2 norm per pixel (sum over channels)
+-        sq_norm = torch.sum(weighted_diff ** 2, dim=1) # Shape: (B, H_l, W_l)
+-        
+-        # Normalize by spatial dimensions H_l * W_l
+-        normalized_dist = torch.mean(sq_norm, dim=[1, 2]) # Shape: (B,)
+-        
+-        # Sum over batch dimension
+-        lpips_score += torch.mean(normalized_dist)
+-        
+-    return lpips_score.item()
+-
+-def _extract_features(input_tensor: torch.Tensor, backbone: nn.Module, layer_names: list) -> dict:
+-    """Helper to collect feature maps from specified layers using forward hooks."""
+-    features = {}
+-    def hook_fn(name):
+-        def hook(module, input, output):
+-            features[name] = output
+-        return hook
+-    hooks = [backbone._modules[name].register_forward_hook(hook_fn(name)) for name in layer_names]
+-    with torch.no_grad():
+-        _ = backbone(input_tensor)
+-    for h in hooks:
+-        h.remove()
+-    return features
++    # 6. Return mean as float
++    return distance.mean().item()
+ ```
+-
+-**Edge Cases and Pitfalls:**
+-- The first run downloads pretrained weights to the `TORCH_HOME` cache, requiring internet access or pre-cached weights [S5, unofficial].
+-- Precision issues may arise if input tensors are not properly scaled to $[-1, 1]$ before feature extraction [S5, unofficial].
+ 
+ ## Subtopics
+ 
+-### Wasserstein Distortion
+-Wasserstein Distortion (WD) is an image-to-image perceptual metric that focuses on local statistics matching rather than global divergence [S7, unofficial]. It extracts multi-scale feature representations from a pre-trained VGG network for two images, then at each spatial location applies a pooling kernel of size $\sigma(x, y)$ to model surrounding features as a Gaussian distribution [S7, unofficial]. It computes the 2-Wasserstein divergence $W_2^2(\cdot)$ between the corresponding localized Gaussian distributions from the two features, and spatially averages and sums the local WD values across all feature maps [S7, unofficial]. The hyperparameter $\sigma$ defines the kernel size as $2\sigma$, controlling the trade-off between point-wise fidelity ($\sigma \to 0$) and texture re-sampling/peripheral vision mimicry (larger $\sigma$) [S7, unofficial]. A spatially varying $\sigma$ can be adopted to allocate more weight to salient regions [S7, unofficial]. WD provides a closer match to human perceptual judgments than commonly used alternatives such as LPIPS or DISTS [S7, unofficial].
++### [Wasserstein Distortion](15233-wasserstein-distortion.md)
++An image-to-image metric that focuses on local statistics matching rather than global divergence, used as the primary training objective for perceptual quality.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Not given in the sources.
+-- **Memory Complexity:** Not given in the sources.
+-- **Performance:** LPIPS matches human perception [S3] and captures nuances not reflected in pixel-wise metrics like PSNR or SSIM [S4].
+-- **Strengths:** Captures perceptual quality better than pixel-wise metrics like MSE because it accounts for neighboring information [S6, unofficial].
+-- **Limitations:** Computationally expensive; requires a pretrained network and internet access for initial weight download [S5, unofficial].
+-- **When to use:** When human perceptual quality is the primary goal, such as in final evaluation of NeRF renderings or as a perceptual loss in training [S3][S5, unofficial].
+-- **When not to use:** Not given in the sources.
++- **Time Complexity:** Dominated by the forward pass of the backbone network (e.g., VGG-16). For a single image pair, it is comparable to a single forward pass of the backbone.
++- **Memory Complexity:** Requires storing intermediate feature maps for all layers during the forward pass. For VGG-16, this is significant but manageable on modern GPUs.
++- **Performance:** LPIPS correlates better with human perception than PSNR or SSIM [S3, S4]. It is preferred over MSE for optimization objectives because it accounts for neighboring information and structural context [S6, unofficial].
++- **Strengths:** Captures perceptual nuances missed by pixel-wise metrics; robust to small geometric shifts and texture variations [S4][S6, unofficial].
++- **Limitations:** Computationally more expensive than PSNR/SSIM; requires a pretrained network; not differentiable with respect to the input images in a way that provides pixel-level gradients for direct optimization (though it can be used as a loss if the backbone is differentiable, which is rare in standard evaluation) [S6, unofficial].
++- **When to use:** Evaluating perceptual quality of rendered images, especially in NeRF and Gaussian Splatting where visual fidelity is key [S4][S5, unofficial].
++- **When not to use:** When pixel-perfect accuracy is required, or when computational resources are extremely limited [S6, unofficial].
+ 
+ ## Background
+-LPIPS is a full-reference perceptual quality metric that uses learned convolutional features [S1]. The original implementation used SqueezeNet, VGG, and AlexNet as feature extraction backbones [S1]. In the context of NeRF and volume rendering, LPIPS has become a standard metric for evaluating the perceptual quality of novel view synthesis, often used alongside PSNR and SSIM to provide a more comprehensive assessment [S1, S3]. It is also used as a loss function in differentiable rendering to encourage perceptually pleasing results [S5, unofficial].
++LPIPS was introduced by Zhang et al. in 2018 [S1, S3][S6, unofficial]. It was designed to address the poor correlation of traditional metrics (MSE, SSIM) with human perceptual judgments. The metric uses features from pretrained networks (AlexNet, VGG, SqueezeNet) and learns weights to minimize the distance between the metric's output and human similarity judgments [S1][S2, unofficial]. It has become a standard metric in NeRF evaluation [S1, S4].
+ 
+ ## Sources
+@@ -136,4 +122,3 @@
+ [S4] The Adaption of Recent New Concepts in Neural Radiance Fields and Their Role for High-Fidelity Volume Reconstruction in Medical Images., https://doi.org/10.3390/s24185923, fetched 2026-10-26
+ [S5] 3DAgentWorld/Advanced3DGS, https://github.com/3DAgentWorld/Advanced3DGS, fetched 2026-10-27 (unofficial)
+-[S6] Feature-Guided Diffusion for Non-Differentiable Inverse Rendering, https://doi.org/10.48550/arXiv.2607.17411, fetched 2026-10-29 (unofficial)
+-[S7] Seeing What Matters: Perceptual Wrapper with Common Randomness for 3D Gaussian Splatting, https://doi.org/10.48550/arXiv.2606.11782, fetched 2026-10-29 (unofficial)+[S6] Feature-Guided Diffusion for Non-Differentiable Inverse Rendering, https://doi.org/10.48550/arXiv.2607.17411, fetched 2026-10-29 (unofficial)

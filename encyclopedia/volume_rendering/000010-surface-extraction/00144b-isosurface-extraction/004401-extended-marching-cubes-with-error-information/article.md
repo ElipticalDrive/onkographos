@@ -1,0 +1,174 @@
+# Extended Marching Cubes with Error Information
+
+Also called: Extended Marching Cubes Algorithm with Error Information, Marching Cubes with Uncertainty, Uncertainty Representation using Hue
+
+## Overview
+This method extends the standard Marching Cubes algorithm to visualize data uncertainty by associating an error value with each vertex of the generated isosurface mesh [S1, S2]. It solves the problem of representing not just the geometry of a scalar field, but also the reliability of that geometry, which is particularly relevant for multi-resolution or reconstructed data where local errors are known [S1, S2]. Unlike standard Marching Cubes which produces a uniformly colored mesh, this variant computes interpolated error values for triangle vertices and maps these errors to the hue component of the vertex color, leaving saturation and brightness fixed to preserve shape perception via lighting [S1, S2].
+
+## How it works
+The method operates on a structured 3D grid [S2]. For each voxel (cube), it determines the isosurface intersection using the standard Marching Cubes case index and then augments the resulting triangle vertices with error information derived from the cube's corner error values [S1, S2].
+
+### Inputs and Outputs
+*   **Input:** A structured 3D grid of volume data. Each grid point $(i, j, k)$ has an associated scalar value $v$ and an associated error value $e$ [S2]. The error values are typically derived from multi-resolution analysis (e.g., wavelet transformation) or a statistical error model [S2].
+*   **Output:** A triangle mesh where each vertex carries a position, a normal vector, and an error value [S2]. The mesh is rendered with colors mapped from these error values [S1].
+
+### Data Structures
+The algorithm maintains specific data structures to hold the state of the current voxel and the resulting geometry [S2].
+
+**CUBE Structure**
+Represents the current voxel being processed [S2]. It contains arrays for the eight vertices of the cube [S2].
+*   `p[8]`: Array of 8 3D coordinates (XYZ) for the cube's vertices.
+*   `val[8]`: Array of 8 scalar attribute values corresponding to `p`.
+*   `errorInfo[8]`: Array of 8 error values corresponding to `p`. These values are obtained from wavelet transformation or an error model [S2].
+
+**TRIANGLE Structure**
+Represents a single triangular facet generated from a cube [S2].
+*   `p[3]`: Array of 3 3D coordinates for the triangle's vertices.
+*   `errorInfo[3]`: Array of 3 error values, one for each vertex in `p`.
+*   `n`: The normal vector of the triangle [S2].
+
+### Algorithm Steps
+
+1.  **Iterate over Voxels:** Traverse the entire 3D grid, processing each cube individually [S2].
+2.  **Standard Marching Cubes Case Determination:** For the current cube, compare the scalar values `val[8]` against the isovalue to determine the case index (0-255) [S2]. Identify which of the 12 edges are intersected by the isosurface [S2].
+3.  **Generate Triangles:** Based on the case index, generate up to five triangular facets [S2]. For each triangle, determine the 3D positions of its vertices by linearly interpolating the positions `p[8]` along the intersected edges [S2].
+4.  **Interpolate Error Values:** For each vertex of the generated triangle, calculate its error value by interpolating the `errorInfo` values of the two cube vertices defining the intersected edge [S1].
+5.  **Store Geometry:** Populate the `TRIANGLE` structure with the vertex positions, the interpolated error values, and the computed normal vector [S2].
+6.  **Color Mapping:** Map the error value of each triangle vertex to a hue angle [S1]. The saturation and brightness are held constant [S1].
+7.  **Render:** Render the mesh using Gouraud shading with the computed vertex colors [S1].
+
+### Formulas
+
+**Linear Interpolation of Error**
+When an edge is intersected between two cube vertices $V_1$ and $V_2$ with scalar values $valp_1$ and $valp_2$ and error values $e_1$ and $e_2$, the error $e$ at the intersection point is calculated as:
+
+$$ e = e_1 + \mu (e_2 - e_1) $$
+
+where $\mu$ is the interpolation factor:
+
+$$ \mu = \frac{\text{isolevel} - valp_1}{valp_2 - valp_1} $$
+
+**Hue Mapping**
+The error value $e$ is mapped to a hue angle $H$. Let $e_{min}$ and $e_{max}$ be the minimum and maximum error values in the dataset (or the user-defined range). The hue is calculated as:
+
+$$ H = H_{start} + \frac{e - e_{min}}{e_{max} - e_{min}} (H_{end} - H_{start}) $$
+
+where $H_{start}$ and $H_{end}$ define the user-selected hue range. The range is strictly less than 360 degrees to avoid ambiguity [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+class CUBE:
+    def __init__(self):
+        self.p = [None] * 8
+        self.val = [0.0] * 8
+        self.errorInfo = [0.0] * 8
+
+class TRIANGLE:
+    def __init__(self):
+        self.p = [None] * 3
+        self.errorInfo = [0.0] * 3
+        self.n = None
+
+# Standard Marching Cubes 12 edges (pairs of vertex indices 0-7)
+EDGES = [
+    (0, 1), (1, 2), (2, 3), (3, 0),
+    (4, 5), (5, 6), (6, 7), (7, 4),
+    (0, 4), (1, 5), (2, 6), (3, 7)
+]
+
+# Standard MC case-to-triangles lookup (15 topologically distinct cases)
+# Each triangle is a list of 3 edge indices (0-11)
+CASE_TRI_TABLE = {
+    0: [], 1: [], 2: [[0]], 3: [[0, 1]], 4: [[1]], 5: [[0, 2], [1, 2]],
+    6: [[0, 1], [2]], 7: [[0, 1, 2]], 8: [[1, 2]], 9: [[0, 2], [1]],
+    10: [[0, 1]], 11: [[0, 1, 2]], 12: [[0, 2]], 13: [[0, 1]], 14: [[0]], 15: []
+}
+
+def get_triangles_for_case(case_index):
+    # In practice, a full 256-entry table is used.
+    # This function returns the triangles for the given case index.
+    return CASE_TRI_TABLE.get(case_index, [])
+
+def get_triangle_vertex_error(isolevel, e1, e2, valp1, valp2):
+    if abs(isolevel - valp1) < 0.00001:
+        return e1
+    if abs(isolevel - valp2) < 0.00001:
+        return e2
+    if abs(valp1 - valp2) < 0.00001:
+        return e1
+    mu = (isolevel - valp1) / (valp2 - valp1)
+    return e1 + mu * (e2 - e1)
+
+def extended_marching_cubes_with_error(volume_data, error_data, isolevel):
+    triangles = []
+    dims = volume_data.shape
+    for i in range(dims[0] - 1):
+        for j in range(dims[1] - 1):
+            for k in range(dims[2] - 1):
+                cube = CUBE()
+                for v in range(8):
+                    x = i + ((v >> 2) & 1)
+                    y = j + ((v >> 1) & 1)
+                    z = k + (v & 1)
+                    cube.p[v] = (x, y, z)
+                    cube.val[v] = volume_data[x, y, z]
+                    cube.errorInfo[v] = error_data[x, y, z]
+
+                case_index = 0
+                for v in range(8):
+                    if cube.val[v] < isolevel:
+                        case_index |= (1 << v)
+
+                triangles_for_case = get_triangles_for_case(case_index)
+                for tri_edges in triangles_for_case:
+                    tri = TRIANGLE()
+                    tri_verts = []
+                    for edge_idx in tri_edges:
+                        v1, v2 = EDGES[edge_idx]
+                        valp1, valp2 = cube.val[v1], cube.val[v2]
+                        e1, e2 = cube.errorInfo[v1], cube.errorInfo[v2]
+                        mu = (isolevel - valp1) / (valp2 - valp1) if abs(valp2 - valp1) > 1e-9 else 0.5
+                        pos = (
+                            cube.p[v1][0] + mu * (cube.p[v2][0] - cube.p[v1][0]),
+                            cube.p[v1][1] + mu * (cube.p[v2][1] - cube.p[v1][1]),
+                            cube.p[v1][2] + mu * (cube.p[v2][2] - cube.p[v1][2])
+                        )
+                        err = get_triangle_vertex_error(isolevel, e1, e2, valp1, valp2)
+                        tri_verts.append((pos, err))
+                    p0, p1, p2 = tri_verts[0][0], tri_verts[1][0], tri_verts[2][0]
+                    ux, uy, uz = p1[0]-p0[0], p1[1]-p0[1], p1[2]-p0[2]
+                    vx, vy, vz = p2[0]-p0[0], p2[1]-p0[1], p2[2]-p0[2]
+                    tri.n = (uy*vz - uz*vy, uz*vx - ux*vz, ux*vy - uy*vx)
+                    for idx in range(3):
+                        tri.p[idx] = tri_verts[idx][0]
+                        tri.errorInfo[idx] = tri_verts[idx][1]
+                    triangles.append(tri)
+    return triangles
+```
+
+### Parameters
+*   **Hue Range:** The user selects a specific range of hues (angles between $H_{start}$ and $H_{end}$) to map error values. The range must be less than 360 degrees to prevent the largest and smallest error values from mapping to the same hue, which would create visual ambiguity [S1].
+*   **Saturation and Brightness:** These parameters are held constant for all vertices. The user interactively selects these constant values [S1].
+
+### Edge Cases and Pitfalls
+*   **Hue Wrapping:** Using the full 0-360 degree range for hue mapping causes the maximum and minimum error values to have the same color, making it impossible to distinguish between high and low uncertainty at the extremes. A restricted range is mandatory [S1].
+*   **Division by Zero:** If the isovalue is extremely close to one of the vertex values ($|isolevel - valp| < 0.00001$) or if the two vertex values are identical ($|valp1 - valp2| < 0.00001$), the interpolation factor $\mu$ becomes unstable. If the absolute difference between `isolevel` and `valp1` is less than 0.00001, the function returns `e1` directly to avoid division by zero [S2].
+*   **Perceptual Sensitivity:** Hue is chosen over saturation or brightness because human vision is more sensitive to hue changes than saturation changes, and brightness is reserved for lighting/shape representation [S1].
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$, where $N$ is the number of voxels. The additional cost per voxel is the interpolation of error values, which is constant time.
+*   **Memory Complexity:** $O(V)$, where $V$ is the number of vertices in the output mesh. Each vertex stores an additional error value (typically a double) compared to standard Marching Cubes.
+*   **Strengths:** Provides immediate visual feedback on data reliability. It is computationally inexpensive as it adds minimal overhead to the standard algorithm. It works well with multi-resolution data where error estimates are naturally available [S2].
+*   **Limitations:** The color mapping is subjective and depends on user-selected hue ranges. It does not provide a quantitative measure of error in the visualization itself (only relative). It assumes the error values are already computed and stored in the volume data [S1, S2].
+*   **When to use:** When visualizing multi-resolution data (e.g., wavelet-compressed MRI) where the approximation error is known and needs to be displayed alongside the geometry.
+*   **When not to use:** When the error values are unknown or when the primary goal is to preserve shape perception without color distraction.
+
+## Background
+The method was introduced to address the need for uncertainty visualization in medical imaging, specifically Magnetic Resonance (MR) data. MR techniques often involve multi-resolution representations (e.g., via Haar wavelet transformation) to reduce data size, which introduces approximation errors. The standard Marching Cubes algorithm does not account for these errors. This extension was developed to allow users to identify regions where the coarse representation is not an authentic representation of the original data [S1, S2]. The approach was presented in the context of visualizing MR data sets, leveraging the Standard Deviation Model (SDM) to quantify local errors from the wavelet coefficients [S2].
+
+## Sources
+[S1] Uncertainty Visualization Methods in Isosurface Rendering, https://doi.org/10.2312/egs.20031054, fetched 2026-10-26
+[S2] Visualizing uncertainty in multi-resolution volumetric data using marching cubes, https://doi.org/10.1145/2254556.2254649, fetched 2026-11-05

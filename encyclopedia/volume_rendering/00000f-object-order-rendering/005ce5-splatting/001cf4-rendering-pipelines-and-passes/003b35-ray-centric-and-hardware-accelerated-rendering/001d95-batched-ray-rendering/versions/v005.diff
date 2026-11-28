@@ -1,0 +1,122 @@
+--- v004.md
++++ v005.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Batched Ray Rendering is a memory-management strategy for object-order volume rendering that processes large batches of rays in smaller, fixed-size chunks to prevent Out-Of-Memory (OOM) errors on the GPU [S1, S3, unofficial]. It builds on [Ray-Centric and Hardware-Accelerated Rendering](8936-ray-centric-and-hardware-accelerated-rendering.md) by explicitly managing the batch size relative to available VRAM.
++Batched Ray Rendering is a memory-management strategy for object-order volume rendering that processes large batches of rays in smaller, fixed-size chunks to prevent Out-Of-Memory (OOM) errors on the GPU [S1, S3, unofficial]. It differs from full-batch rendering by partitioning the ray query set, and from splatting pipelines by evaluating volumetric or neural fields per-ray rather than per-primitive [S3, unofficial].
+ 
+ ## How it works
+@@ -26,12 +26,11 @@
+ 
+ **Steps:**
+-
+-1.  **Preprocessing:** Reshape `rays_o` and `rays_d` to $(-1, 3)$ and float type. Broadcast scalar `near` and `far` values to match the shape of `rays_d[..., :1]`. Concatenate `rays_o`, `rays_d`, `near`, and `far` along the last dimension. If `use_viewdirs` is true, concatenate `viewdirs` to form the base ray tensor of shape $(B, 11)$ [S3, unofficial].
+-2.  **Chunking Loop:** Initialize `all_ret` as an empty dictionary. Iterate through the ray batch in chunks of size `chunk`. For each chunk `i` from $0$ to $B$ with step `chunk`:
+-    a. Extract `ray_batch = rays_flat[i : i+chunk]`.
+-    b. Call `render_rays(ray_batch, ...)` with the specified parameters.
++1.  **Preprocessing:** Reshape `rays_o` and `rays_d` to $(-1, 3)$ and float type [S3, unofficial]. Broadcast scalar `near` and `far` values to match the shape of `rays_d[..., :1]` [S3, unofficial]. Concatenate `rays_o`, `rays_d`, `near`, and `far` along the last dimension [S3, unofficial]. If `use_viewdirs` is true, concatenate `viewdirs` to form the base ray tensor of shape $(B, 11)$ [S3, unofficial].
++2.  **Chunking Loop:** Initialize `all_ret` as an empty dictionary [S3, unofficial]. Iterate through the ray batch in chunks of size `chunk` [S3, unofficial]. For each chunk `i` from $0$ to $B$ with step `chunk`:
++    a. Extract `ray_batch = rays_flat[i : i+chunk]` [S3, unofficial].
++    b. Call `render_rays(ray_batch, ...)` with the specified parameters [S3, unofficial].
+     c. For each key `k` in the returned dictionary:
+-        i. If `k` is not in `all_ret`, initialize `all_ret[k]` as an empty list.
+-        ii. Append the tensor `ret[k]` to `all_ret[k]`.
++        i. If `k` is not in `all_ret`, initialize `all_ret[k]` as an empty list [S3, unofficial].
++        ii. Append the tensor `ret[k]` to `all_ret[k]` [S3, unofficial].
+ 3.  **Concatenation:** For each key `k` in `all_ret`, concatenate the list of tensors along dimension 0 to form the final output tensor for that key [S3, unofficial].
+ 4.  **Reshaping:** Reshape all output tensors in `all_ret` to match the original batch dimensions (excluding the last dimension which corresponds to the sample dimension) [S3, unofficial].
+@@ -41,15 +40,12 @@
+ ```python
+ import torch
+-import math
+ 
+ def batchify_rays(rays_flat, chunk=32768, **kwargs):
+     """
+     Renders rays in smaller mini-batches to avoid OOM.
+-    
+     Args:
+         rays_flat: Tensor of shape (B, 11).
+         chunk: Size of mini-batches.
+         **kwargs: Arguments passed to render_rays.
+-        
+     Returns:
+         Dictionary of output tensors with shape (B, ...).
+@@ -93,5 +89,4 @@
+     """
+     Renders a single batch of rays.
+-    
+     Args:
+         ray_batch: Tensor of shape (N_rays, 11).
+@@ -103,6 +98,4 @@
+         N_importance: Number of fine samples.
+         network_fine: Fine network function.
+-        ... other args ...
+-        
+     Returns:
+         Dictionary with keys: rgb_map, disp_map, acc_map, etc.
+@@ -156,6 +149,4 @@
+     
+     # Process raw output to get rgb, weights, etc.
+-    # Note: raw2outputs is a helper function defined in the NeRF source code
+-    # that implements the alpha compositing formula.
+     rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(
+         raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest
+@@ -171,9 +162,8 @@
+         
+         # Sample fine depths based on weights
+-        # sample_pdf is a helper function for inverse CDF sampling
+         z_samples = sample_pdf(z_vals_mid, weights[..., 1:-1], N_importance, 
+                                det=(perturb==0.), pytest=pytest)
+         
+-        # Detach to break gradient flow from fine to coarse
++        # Detach to break gradient flow from fine to coarse [G]
+         z_samples = z_samples.detach()
+         
+@@ -208,5 +198,5 @@
+     """
+     Converts raw network output (rgb, sigma) to final image components.
+-    Implements volume rendering equation. [G]
++    Implements standard volume rendering compositing [G].
+     """
+     # raw shape: (N_rays, N_samples, 4) -> (rgb, sigma)
+@@ -245,5 +235,5 @@
+ def sample_pdf(z_vals_mid, weights, N_importance, det=False, pytest=False):
+     """
+-    Hierarchical sampling: sample N_importance points from the distribution defined by weights. [G]
++    Hierarchical sampling: sample N_importance points from the distribution defined by weights [G].
+     """
+     # weights shape: (N_rays, N_samples-1)
+@@ -283,5 +273,5 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Stratified Sampling Deviation:** The implementation of stratified sampling in the reference code deviates from theory: the first and last bins are half the size of others to fit $N$ samples into $[0,1]$, whereas theory assumes equal bin lengths [S3, unofficial].
++*   **Stratified Sampling Deviation:** The implementation of stratified sampling deviates from theory: the first and last bins are half the size of others to fit $N$ samples into $[0,1]$, whereas theory assumes equal bin lengths [S3, unofficial].
+ *   **Numerical Errors:** NaN or Inf values in outputs should be checked and printed if DEBUG mode is enabled [S3, unofficial].
+ *   **Gradient Flow:** In hierarchical sampling, `z_samples` are detached from the computation graph (`z_samples.detach()`) to break the gradient flow from the fine pass to the coarse pass, creating a static compute graph for the coarse-to-fine connection [S3, unofficial].
+@@ -290,17 +280,17 @@
+ 
+ ### [Chunked Trilinear Volume Rendering](2557-chunked-trilinear-volume-rendering.md)
+-Chunked Trilinear Volume Rendering is a batched ray rendering technique that processes rays in fixed-size memory chunks to manage GPU memory constraints during neural field evaluation. It differs from standard batched rendering by explicitly iterating over subsets of rays to prevent out-of-memory errors, and from Chunked Ray Rendering by relying on a neural field forward pass rather than explicit geometric traversal. It solves the problem of rendering high-resolution neural radiance fields or large-volume trilinear grids where the full ray batch exceeds available VRAM.
++Chunked Trilinear Volume Rendering evaluates a neural field or trilinear volume by processing rays in fixed-size batches. It prevents memory overflow by iterating over subsets of rays rather than evaluating the full batch at once. Choose it when rendering large trilinear grids or neural fields where the full ray batch exceeds available VRAM.
+ 
+ ### [Chunked Ray Rendering](2764-chunked-ray-rendering.md)
+-Chunked Ray Rendering is a memory-management strategy for object-order volume rendering that processes large batches of rays in smaller, fixed-size chunks to prevent Out-Of-Memory (OOM) errors on the GPU. It is primarily used during validation and inference phases where full-resolution images must be generated without training-time optimizations like CUDA-accelerated raymarching. It builds on [Batched Ray Rendering](1547-batched-ray-rendering.md) by explicitly managing the batch size relative to available VRAM, and differs from [Chunked Trilinear Volume Rendering](2557-chunked-trilinear-volume-rendering.md) by chunking the *rays* (the query set) rather than the *volume data* (the lookup grid).
++Chunked Ray Rendering is a memory-management strategy for object-order volume rendering that processes large batches of rays in smaller, fixed-size chunks to prevent Out-Of-Memory (OOM) errors on the GPU. It is primarily used during validation and inference phases where full-resolution images must be generated without training-time optimizations like CUDA-accelerated raymarching. It differs from Chunked Trilinear Volume Rendering by chunking the *rays* (the query set) rather than the *volume data* (the lookup grid).
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources. The chunking does not change the asymptotic time complexity but adds overhead from loop iteration and concatenation [G].
+-*   **Memory Complexity:** Not given in the sources. By reducing `chunk`, memory usage is reduced linearly, allowing rendering of larger images on GPUs with limited VRAM [G].
+-*   **Measured Performance:** The default chunk size is $1024 \times 32 = 32768$ rays [S3, unofficial]. This value balances memory usage and GPU utilization. Smaller chunks may lead to underutilization of the GPU due to kernel launch overhead, while larger chunks risk OOM errors [G].
+-*   **Strengths:** Enables rendering of high-resolution images and large neural fields on consumer-grade GPUs by preventing OOM errors. Simple to implement as a wrapper around the core rendering function [G].
++*   **Time Complexity:** Not given in the sources [G]. The chunking does not change the asymptotic time complexity but adds overhead from loop iteration and concatenation [G].
++*   **Memory Complexity:** Not given in the sources [G]. By reducing `chunk`, memory usage is reduced linearly, allowing rendering of larger images on GPUs with limited VRAM [G].
++*   **Measured Performance:** The default chunk size is $1024 \times 32 = 32768$ rays [S3, unofficial]. This value balances memory usage and GPU utilization [G]. Smaller chunks may lead to underutilization of the GPU due to kernel launch overhead, while larger chunks risk OOM errors [G].
++*   **Strengths:** Enables rendering of high-resolution images and large neural fields on consumer-grade GPUs by preventing OOM errors [G]. Simple to implement as a wrapper around the core rendering function [G].
+ *   **Limitations:** Adds overhead from Python loop iteration and tensor concatenation. Does not optimize the computational cost of the ray marching itself [G].
+-*   **When to Use:** Use during validation, inference, or training when the full image batch exceeds available VRAM. Use when the bottleneck is memory rather than compute [G].
+-*   **When Not to Use:** Use when VRAM is sufficient, as the overhead of chunking is unnecessary. Use when real-time performance is critical and the overhead of chunking is unacceptable [G].
++*   **When to Use:** Use during validation, inference, or training when the full image batch exceeds available VRAM [G]. Use when the bottleneck is memory rather than compute [G].
++*   **When Not to Use:** Use when VRAM is sufficient, as the overhead of chunking is unnecessary [G]. Use when real-time performance is critical and the overhead of chunking is unacceptable [G].
+ 
+ ## Background

@@ -1,0 +1,125 @@
+# Path-Space Correlated Rendering
+
+Also called: Correlated Path Tracing, Dual-State Path Tracing, Simultaneous state evaluation
+
+## Overview
+Path-Space Correlated Rendering is a technique that introduces correlation in path space by evaluating two states of the scene (typically the current and a previous state) simultaneously during a single path trace pass [S1, S2]. This allows for the computation of gradients or differences between states, enabling the use of control variates for variance reduction in inverse rendering and optimization tasks [S1, S2]. It sets itself apart from standard unidirectional path tracing by maintaining dual radiance accumulators and beta weights to track the contribution of both the current and previous scene configurations within the same ray traversal [S1, S2].
+
+## How it works
+The method augments a standard unidirectional path tracer to evaluate the BSDF and emission for both the current state ($L_{new}$) and a previous state ($L_{old}$) at every interaction point [S1, S2].
+
+**Inputs and Outputs:**
+*   **Input:** A ray, a scene description containing BSDFs that support dual-state evaluation, and a mechanism for Multiple Importance Sampling (MIS) weights.
+*   **Output:** A tuple $(L_{old}, L_{new})$ representing the accumulated radiance for the previous and current states, respectively.
+
+**Data Structures:**
+*   **BSDF Interface:** The BSDF class must be augmented to track the previous parameter state. It requires:
+    *   `eval(wo)`: Evaluates the BSDF for the current state.
+    *   `eval_old(wo)`: Evaluates the BSDF for the previous state [S1, S2].
+    *   `is_delta()`: Returns true if the scattering is delta-like (e.g., specular reflection) [S1, S2].
+*   **Accumulators:**
+    *   $L_{old}, L_{new}$: Radiance accumulators, initialized to 0.
+    *   $\beta_{old}, \beta_{new}$: Beta weights (path throughput), initialized to 1.
+    *   $prev_{bsdf\_delta}$: Boolean flag, initialized to True.
+
+**Algorithm Steps:**
+1.  **Initialization:** Set $L_{old} = 0, L_{new} = 0, \beta_{old} = 1, \beta_{new} = 1$, and $prev_{bsdf\_delta} = \text{True}$ [S2].
+2.  **Intersection:** Intersect the ray with the scene. If no intersection is found, return $(L_{old}, L_{new})$ [S1, S2].
+3.  **Direct Emission:** If $prev_{bsdf\_delta}$ is True, the previous path arrived via a delta scattering event (or from the camera). In this case, add direct emission to both accumulators using MIS weights [S2]:
+    $$ L_{old} \leftarrow L_{old} + \beta_{old} \cdot w_{dir} \cdot L_{emission} $$
+    $$ L_{new} \leftarrow L_{new} + \beta_{new} \cdot w_{dir} \cdot L_{emission} $$
+    where $w_{dir}$ is the MIS weight for direct lighting [S2].
+4.  **Emitter Sampling:** Sample an emitter direction $w_o$ and evaluate the BSDF for both states [S2]:
+    *   $val = \text{BSDF}.eval(w_o)$
+    *   $val_{old} = \text{BSDF}.eval\_old(w_o)$
+    *   Calculate MIS weight $w_{em}$ for the emitter sample [S2].
+    *   Update accumulators:
+        $$ L_{old} \leftarrow L_{old} + \beta_{old} \cdot w_{em} \cdot val_{old} \cdot L_{emitter} $$
+        $$ L_{new} \leftarrow L_{new} + \beta_{new} \cdot w_{em} \cdot val \cdot L_{emitter} $$
+5.  **BSDF Sampling:** Sample a new direction $w_o$ from the BSDF, obtaining $val$ and $pdf$ for the current state [S2].
+6.  **Evaluate Previous State:** Evaluate the BSDF for the previous state at the sampled direction [S2]:
+    *   $val_{old} = \text{BSDF}.eval\_old(w_o)$
+    *   Determine if the scattering is delta: $prev_{bsdf\_delta} = \text{BSDF}.is\_delta()$ [S2].
+7.  **Update Beta Weights:**
+    *   If $prev_{bsdf\_delta}$ is True, set $\beta_{old} = 0$ [S2].
+    *   Otherwise, update the weights:
+        $$ \beta_{old} \leftarrow \beta_{old} \cdot \frac{val_{old}}{pdf} $$
+        $$ \beta_{new} \leftarrow \beta_{new} \cdot \frac{val}{pdf} $$
+8.  **Loop:** Update the ray direction and origin, then return to Step 2.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def sample(scene, ray):
+    L_old = 0
+    L_new = 0
+    beta_old = 1
+    beta_new = 1
+    prev_bsdf_delta = True
+    
+    while True:
+        si = scene.intersect(ray)
+        if si is None:
+            return L_old, L_new
+        
+        # Direct emission contribution
+        if prev_bsdf_delta:
+            mis_dir = mis_weight(...) # Implementation of MIS weight for direct light
+            L_old += beta_old * mis_dir * si.emission
+            L_new += beta_new * mis_dir * si.emission
+            
+        # Emitter sampling
+        wo, em_weight = scene.sample_emitter()
+        val = si.bsdf.eval(wo)
+        val_old = si.bsdf.eval_old(wo)
+        mis_em = mis_weight(...) # Implementation of MIS weight for emitter sample
+        
+        L_old += beta_old * mis_em * val_old * em_weight
+        L_new += beta_new * mis_em * val * em_weight
+        
+        # BSDF sampling
+        wo, val, pdf = si.bsdf.sample()
+        
+        # Evaluate the current path for the previous state
+        val_old = si.bsdf.eval_old(wo)
+        prev_bsdf_delta = si.bsdf.is_delta()
+        
+        if prev_bsdf_delta:
+            beta_old = 0
+        else:
+            beta_old *= val_old / pdf
+            beta_new *= val / pdf
+            
+        # Update ray for next bounce (standard path tracing step)
+        ray = update_ray(ray, si, wo)
+```
+
+**Parameters:**
+*   **MIS Weights:** The method relies on standard Multiple Importance Sampling weights ($w_{dir}, w_{em}$) to balance direct lighting and emitter sampling contributions [S2]. The specific formula for MIS weights is not detailed in the sources but is assumed to be the standard balance heuristic or power heuristic [S2].
+*   **EWMA Parameters:** When used with Exponentially Weighted Moving Averages (EWMA) for covariance estimation, parameters $\alpha$ (for mean) and $\beta$ (for covariance) are used. Typical values cited are $\alpha = 0.9$ and $\beta = 0.999$ [S2].
+
+**Edge Cases and Pitfalls:**
+*   **Delta Scattering:** If the previous state involves delta scattering, $\beta_{old}$ is set to 0, effectively removing the previous state's contribution from future path throughput calculations [S2].
+*   **BSDF Augmentation:** The BSDF must correctly implement `eval_old` to return the value for the previous parameter state. Failure to do so breaks the correlation [S1, S2].
+*   **MIS Implementation:** The pseudocode uses placeholders `mis_weight(...)`. A correct implementation requires a valid MIS weight function that accounts for the probability densities of the direct lighting and emitter sampling strategies [S2].
+
+## Subtopics
+
+### Recursive Control Variates
+A specific application of Path-Space Correlated Rendering that uses the correlated paths to estimate covariances for recursive control variates, reducing variance in inverse rendering [S1, S2]. It differs from simple correlation by incorporating EWMA-based covariance estimation to handle the statistical properties of the control variates [S1, S2]. Choose this when performing inverse rendering or optimization where variance reduction is critical. [Recursive Control Variates](link_to_article_if_exists)
+
+## Operating characteristics
+*   **Time Complexity:** The method doubles the computational cost of the BSDF evaluation and MIS weight calculation per path vertex compared to standard path tracing, as it evaluates both the current and previous states [S1, S2].
+*   **Memory Complexity:** Minimal overhead, requiring storage for two radiance accumulators, two beta weights, and the previous state's BSDF parameters [S1, S2].
+*   **Strengths:** Enables variance reduction through control variates in inverse rendering and optimization tasks by providing correlated samples [S1, S2].
+*   **Limitations:** Requires BSDFs to support dual-state evaluation, which may not be available for all material models. The computational overhead is higher than standard path tracing [S1, S2].
+*   **When to use:** Suitable for inverse rendering, optimization, and scenarios where correlated samples are needed for statistical estimation [S1, S2].
+*   **When not to use:** Not suitable for standard forward rendering where variance reduction via control variates is not required, due to the increased computational cost [S1, S2].
+
+## Background
+Path-Space Correlated Rendering was introduced in the context of recursive control variates for inverse rendering [S1, S2]. The technique was developed to address the need for correlated samples in optimization-based rendering methods, allowing for the estimation of gradients and covariances [S1, S2]. It builds upon standard path tracing by augmenting the BSDF interface to support evaluation of previous scene states [S1, S2].
+
+## Sources
+[S1] Recursive Control Variates for Inverse Rendering, https://doi.org/10.1145/3592139, fetched 2026-10-27
+[S2] Recursive Control Variates for Inverse Rendering, https://research.nvidia.com/labs/rtr/publication/nicolet2023recursive/, fetched 2026-11-08

@@ -1,0 +1,633 @@
+--- v001.md
++++ v002.md
+@@ -4,67 +4,40 @@
+ 
+ ## Overview
+-This method is a lossless compression algorithm for 3D volume data that exploits spatial coherence by predicting voxel values from previously encoded neighbors and encoding the difference (residual) using a truncated Huffman code [S1, unofficial]. It achieves approximately 50% compression ratios on biomedical volume datasets, outperforming generic compressors like gzip and zip by removing spatial redundancy rather than just statistical redundancy [S1, unofficial]. Unlike simple delta encoding, it uses an optimal linear predictor derived from the data's covariance to minimize residual variance [S1, unofficial].
++This method is a lossless compression algorithm for 3D volume data that exploits spatial coherence by predicting voxel values from previously encoded neighbors and encoding the difference (residual) using a truncated Huffman code [S1, unofficial]. It achieves approximately 50% compression ratios on biomedical volume datasets, outperforming generic compressors like gzip and zip by explicitly removing spatial redundancy rather than just statistical redundancy [S1, unofficial]. It sets itself apart from siblings like [Delta Encoding](1096-delta-encoding.md) by using a multi-tap linear predictor optimized via the Yule-Walker equations to handle non-isotropic sampling, and from [Residual Coding for Volumetric Compression](6518-residual-coding-for-volumetric-compression.md) by relying on a fixed causal 6-neighborhood model rather than transform-domain residuals.
+ 
+ ## How it works
+-The algorithm operates in two main phases: coefficient estimation and encoding/decoding. It assumes the volume data is wide-sense stationary and uses a causal 6-neighborhood predictor (face-sharing neighbors only) [S1, unofficial].
++The algorithm operates in two phases: an analysis phase to determine optimal predictor coefficients and a Huffman codebook, and an encoding/decoding phase that scans the volume to generate and encode residuals.
+ 
+ ### Inputs and Outputs
+-*   **Input:** A 3D volume array $v(x, y, z)$ of size $X \times Y \times Z$. The source data is typically 16-bit integers [S1, unofficial].
++*   **Input:** A 3D volume array $v(x, y, z)$ of size $X \times Y \times Z$. The source assumes 16-bit integer voxels [S1, unofficial].
+ *   **Output:** A compressed bitstream containing the Huffman-encoded residuals, preceded by a header storing the mean, predictor coefficients, and the Huffman code table [S1, unofficial].
+ 
+ ### Data Structures
+-*   **Compressed File Header:**
+-    *   Estimated mean $\bar{v}$ (float or fixed-point).
+-    *   Predictor coefficients $a_1, a_2, a_3$ (float or fixed-point).
+-    *   Huffman Code Table: A mapping from source symbols (difference values $s_i$) to their assigned Huffman codes.
+-*   **Huffman Table Structure:**
+-    *   The table handles $L$ possible source symbols. For 16-bit input, difference values range from $-66535$ to $65536$, so $L = 131,071$ [S1, unofficial].
+-    *   The $L_1$ most frequent symbols are assigned variable-length Huffman codes.
+-    *   The remaining $L - L_1$ symbols are assigned fixed-length codes [S1, unofficial].
+-    *   Default parameter: $L_1 = 256$ [S1, unofficial].
++1.  **Volume Data:** $v(x, y, z)$, accessed in raster-scan order (increasing $x$, then $y$, then $z$).
++2.  **Covariance Matrix ($A$):** A $3 \times 3$ symmetric matrix used to solve for predictor coefficients.
++3.  **Covariance Vector ($b$):** A $3 \times 1$ vector of lagged covariances.
++4.  **Huffman Table:** A mapping from difference values $s_i$ to variable-length bit codes. The table must store the symbol $s_i$ and its corresponding code for the $L_1$ most frequent symbols.
+ 
+ ### Parameters
+-*   **Predictor Order:** 3 coefficients ($a_1, a_2, a_3$) corresponding to the X, Y, and Z predecessors [S1, unofficial].
+-*   **Scan Order:** Raster-scan order (lexicographic order of indices) to ensure causality [S1, unofficial].
+-*   **Truncation Parameter:** $L_1 = 256$ (number of symbols Huffman-coded) [S1, unofficial].
+-
+-### Formulas
+-**Entropy:**
+-$$ H = - \sum_{i=1}^{k} p_i \log_2(p_i) $$
+-where $k = |\Sigma|$ is the size of the alphabet and $p_i$ is the probability of the $i$-th symbol [S1, unofficial].
+-
+-**Prediction:**
+-$$ \hat{v}(x, y, z) = a_1 v_1(x, y, z) + a_2 v_2(x, y, z) + a_3 v_3(x, y, z) $$
+-where $v_1, v_2, v_3$ are mean-subtracted neighbors [S1, unofficial]:
+-$$
+-v_1(x, y, z) = \begin{cases} 
+-0 & \text{if } x = 0 \\
+-v(x-1, y, z) - \bar{v} & \text{otherwise}
+-\end{cases}
+-$$
+-$$
+-v_2(x, y, z) = \begin{cases} 
+-0 & \text{if } y = 0 \\
+-v(x, y-1, z) - \bar{v} & \text{otherwise}
+-\end{cases}
+-$$
+-$$
+-v_3(x, y, z) = \begin{cases} 
+-0 & \text{if } z = 0 \\
+-v(x, y, z-1) - \bar{v} & \text{otherwise}
+-\end{cases}
+-$$
+-[S1, unofficial]
+-
+-**Residual:**
+-$$ d(x, y, z) = v(x, y, z) - \hat{v}(x, y, z) $$
+-[S1, unofficial]
+-
+-**Covariance Estimation:**
++*   **Predictor Order:** 3 coefficients ($a_1, a_2, a_3$) corresponding to the 6-neighborhood (face-sharing neighbors only) [S1, unofficial].
++*   **Truncated Huffman Limit ($L_1$):** The number of most frequent symbols to be Huffman coded. The remaining symbols are assigned fixed-length codes. Default value: $L_1 = 256$ [S1, unofficial].
++*   **Total Symbol Space ($L$):** For 16-bit voxels, difference values range from $-66535$ to $65536$, resulting in $L = 131,071$ possible source symbols [S1, unofficial].
++
++### Step-by-Step Method
++
++#### 1. Estimate Global Statistics
++The algorithm assumes wide-sense stationarity to derive optimal coefficients [S1, unofficial].
++
++**Step 1.1: Estimate Mean**
++Scan the entire volume to calculate the mean $\bar{v}$:
++$$ \bar{v} = \frac{1}{XYZ} \sum_{x=0}^{X-1} \sum_{y=0}^{Y-1} \sum_{z=0}^{Z-1} v(x, y, z) $$
++
++**Step 1.2: Estimate Covariance**
++Scan the volume to estimate the covariance $r(x, y, z)$ for lags $x, y, z \in \{-1, 0, 1\}$:
+ $$ r(x, y, z) = \frac{1}{(X-2)(Y-2)(Z-2)} \sum_{x'=1}^{X-2} \sum_{y'=1}^{Y-2} \sum_{z'=1}^{Z-2} [v(x', y', z') - \bar{v}] [v(x'+x, y'+y, z'+z) - \bar{v}] $$
+-for lags $x, y, z \in \{-1, 0, 1\}$ [S1, unofficial].
+-
+-**Predictor Coefficients (Yule-Walker):**
+-The coefficients $\mathbf{a} = [a_1, a_2, a_3]^T$ are found by solving:
++Note: The sources provide this specific summation range for covariance estimation [S1, unofficial].
++
++**Step 1.3: Calculate Predictor Coefficients**
++Solve the linear system $A \mathbf{a} = \mathbf{b}$ for coefficients $\mathbf{a} = [a_1, a_2, a_3]^T$. The matrix $A$ and vector $\mathbf{b}$ are defined by the estimated covariance values:
+ $$
+ \begin{bmatrix}
+@@ -74,34 +47,72 @@
+ \end{bmatrix}
+ \begin{bmatrix}
+-a_1 \\ a_2 \\ a_3
++a_1 \\
++a_2 \\
++a_3
+ \end{bmatrix}
+ =
+ \begin{bmatrix}
+-r(1,0,0) \\ r(0,1,0) \\ r(0,0,1)
++r(1,0,0) \\
++r(0,1,0) \\
++r(0,0,1)
+ \end{bmatrix}
+ $$
+-Note: The source provides this specific matrix layout in Eq (8), which contains index patterns distinct from the standard symmetric Yule-Walker form, but the implementation instruction is to solve this specific linear system using the estimated covariance values [S1, unofficial].
+-
+-### Steps
+-
+-#### Encoding
+-1.  **Estimate Mean:** Scan the volume to calculate the mean $\bar{v}$:
+-    $$ \bar{v} = \frac{1}{XYZ} \sum_{x=0}^{X-1} \sum_{y=0}^{Y-1} \sum_{z=0}^{Z-1} v(x, y, z) $$
+-    [S1, unofficial]
+-2.  **Estimate Covariance:** Scan the volume to estimate the covariance $r(x, y, z)$ for lags in $\{-1, 0, 1\}$ using the formula above. [S1, unofficial]
+-3.  **Calculate Coefficients:** Solve the linear system $A\mathbf{a} = \mathbf{b}$ defined by the covariance estimates to obtain $a_1, a_2, a_3$. [S1, unofficial]
+-4.  **Calculate Residuals (First Pass):** Scan the volume. For each voxel, compute the predicted value $\hat{v}(x, y, z)$ using the mean-subtracted neighbors and coefficients. Compute the difference $d(x, y, z) = v(x, y, z) - \hat{v}(x, y, z)$. Do **not** store these differences to save memory. [S1, unofficial]
+-5.  **Count Frequencies:** Count the occurrences of each difference value $s_i$ across the volume to estimate symbol probabilities $p_i$. [S1, unofficial]
+-6.  **Build Huffman Table:** Construct a truncated Huffman code table. Assign Huffman codes to the $L_1$ most frequent symbols and fixed-length codes to the rest. [S1, unofficial]
+-7.  **Encode (Second Pass):** Scan the volume again. Recompute $d(x, y, z)$ for each voxel and encode it using the Huffman table. Write the bits to the output stream. [S1, unofficial]
+-8.  **Write Header:** Prepend the compressed stream with $\bar{v}$, $a_1, a_2, a_3$, and the Huffman code table. [S1, unofficial]
+-
+-#### Decoding
+-1.  **Read Header:** Read $\bar{v}$, $a_1, a_2, a_3$, and the Huffman code table from the compressed file. [S1, unofficial]
+-2.  **Decode Residuals:** Read the next Huffman code from the stream. Look up the corresponding difference value $d(x, y, z)$ in the Huffman table. [S1, unofficial]
+-3.  **Reconstruct Voxel:** Calculate the predicted value $\hat{v}(x, y, z)$ using the same causal predictor logic (using previously reconstructed neighbors). Reconstruct the voxel:
++The sources note that Equation (8) in the original paper contains specific index layouts which may appear to have typos compared to standard Yule-Walker forms, but the implementation instruction is to solve this specific linear system using the estimated covariance values [S1, unofficial].
++
++#### 2. Build Huffman Codebook
++**Step 2.1: Calculate Residuals (First Pass)**
++Scan the volume to calculate difference values $d(x, y, z)$. The predictor uses mean-subtracted neighbors to ensure orthogonality:
++$$ \hat{v}(x, y, z) = a_1 v_1(x, y, z) + a_2 v_2(x, y, z) + a_3 v_3(x, y, z) $$
++$$ d(x, y, z) = v(x, y, z) - \hat{v}(x, y, z) $$
++Where the neighbor values $v_i$ are adjusted by the mean $\bar{v}$:
++$$
++v_1(x, y, z) = \begin{cases} 
++0 & \text{if } x = 0 \\
++v(x-1, y, z) - \bar{v} & \text{otherwise}
++\end{cases}
++$$
++$$
++v_2(x, y, z) = \begin{cases} 
++0 & \text{if } y = 0 \\
++v(x, y-1, z) - \bar{v} & \text{otherwise}
++\end{cases}
++$$
++$$
++v_3(x, y, z) = \begin{cases} 
++0 & \text{if } z = 0 \\
++v(x, y, z-1) - \bar{v} & \text{otherwise}
++\end{cases}
++$$
++The difference values are **not** stored to prevent excessive memory costs [S1, unofficial].
++
++**Step 2.2: Count Frequencies**
++Count the occurrences of each difference value $s_i$ across the volume. These counts estimate the symbol probabilities $p_i$.
++
++**Step 2.3: Construct Truncated Huffman Table**
++Sort symbols by frequency. Assign Huffman codes to the first $L_1$ most frequent symbols. Assign fixed-length codes to the remaining $L - L_1$ symbols. The maximum code length is restricted to a manageable size [S1, unofficial].
++
++#### 3. Encoding
++**Step 3.1: Encode Residuals**
++Scan the volume a fourth time. For each voxel, calculate $d(x, y, z)$ using the same predictor logic as Step 2.1. Encode $d(x, y, z)$ using the Huffman table from Step 2.3. Write the bits to the output stream. Do not store the difference values themselves [S1, unofficial].
++
++**Step 3.2: Write Header**
++Prepend the compressed stream with:
++1.  The estimated mean $\bar{v}$.
++2.  The three predictor coefficients $a_1, a_2, a_3$.
++3.  The Huffman code table (mapping source symbols $s_i$ to their assigned Huffman codes) [S1, unofficial].
++
++#### 4. Decompression
++**Step 4.1: Read Header**
++Read $\bar{v}$, $a_1, a_2, a_3$, and the Huffman table from the compressed file [S1, unofficial].
++
++**Step 4.2: Decode and Reconstruct**
++For each voxel in raster-scan order:
++1.  Read the next Huffman code from the stream.
++2.  Look up the difference value $d(x, y, z)$ in the Huffman table.
++3.  Calculate the predicted value $\hat{v}(x, y, z)$ using the stored coefficients and the **already reconstructed** previous voxels (using the same boundary logic as the encoder):
++    $$ \hat{v}(x, y, z) = a_1 v_1(x, y, z) + a_2 v_2(x, y, z) + a_3 v_3(x, y, z) $$
++    Where $v_1, v_2, v_3$ are derived from the reconstructed $v(x', y', z')$ for $(x', y', z') < (x, y, z)$.
++4.  Reconstruct the current voxel:
+     $$ v(x, y, z) = \hat{v}(x, y, z) + d(x, y, z) $$
+-    [S1, unofficial]
+-4.  **Repeat:** Continue until the volume is fully reconstructed. [S1, unofficial]
+ 
+ ### Pseudocode
+@@ -110,236 +121,229 @@
+ import numpy as np
+ 
+-def compute_mean(volume):
+-    """Step 1: Estimate mean."""
+-    return np.mean(volume)
+-
+-def compute_covariance(volume, mean, X, Y, Z):
+-    """Step 2: Estimate covariance for lags in {-1, 0, 1}."""
+-    # Center the volume
+-    centered = volume.astype(np.float64) - mean
+-    
+-    # Initialize covariance matrix for lags -1, 0, 1
+-    # We map lag index -1 -> 0, 0 -> 1, 1 -> 2 for array indexing
+-    cov = np.zeros((3, 3, 3))
+-    
+-    # Normalization factor
+-    norm = (X - 2) * (Y - 2) * (Z - 2)
+-    
+-    # Sum over valid range x'=1..X-2, y'=1..Y-2, z'=1..Z-2
+-    # Note: Source uses 1-based indexing for summation limits, 
+-    # which corresponds to 0-based indices 1 to X-3 inclusive? 
+-    # Source: sum_{x'=1}^{X-2}. In 0-based, this is indices 1 to X-3.
+-    # However, standard covariance estimation usually sums over all valid pairs.
+-    # We follow the source formula strictly.
+-    
+-    for x in range(-1, 2):
+-        for y in range(-1, 2):
+-            for z in range(-1, 2):
+-                # Indices for the shifted volume
+-                # v(x'+x, ...)
+-                # If x=1, we need x'+1. Max x' is X-3 (from X-2 in 1-based).
+-                # So max index is X-2. This fits in 0..X-1.
+-                
+-                # Slice the centered volume
+-                # Source: v(x', y', z') and v(x'+x, y'+y, z'+z)
+-                # x' ranges 1 to X-2 (1-based) => 0 to X-3 (0-based)
+-                # x'+x ranges 1+x to X-2+x
+-                
+-                # Determine slices
+-                # x' part: 1 to X-2 (1-based) -> indices 1 to X-3
+-                # x'+x part: 1+x to X-2+x (1-based) -> indices x to X-3+x
+-                
+-                # To avoid boundary checks in loop, we slice carefully
+-                # Source formula implies summing over the intersection of valid domains
+-                
+-                # Let's implement the sum directly as per source indices
+-                # x' from 1 to X-2 (1-based)
+-                # In 0-based: x' from 1 to X-3
+-                
+-                sum_val = 0.0
+-                for xp in range(1, X - 2): # 0-based index 1 to X-3
+-                    for yp in range(1, Y - 2):
+-                        for zp in range(1, Z - 2):
+-                            val1 = centered[xp, yp, zp]
+-                            val2 = centered[xp + x, yp + y, zp + z]
+-                            sum_val += val1 * val2
+-                cov[x + 1, y + 1, z + 1] = sum_val / norm
+-                
+-    return cov
+-
+-def solve_predictor(cov):
+-    """Step 3: Solve for a1, a2, a3."""
+-    # Matrix A and vector b from source Eq (8)
+-    # A = [[r(0,0,0), r(1,-1,0), r(1,0,-1)],
+-    #      [r(-1,1,0), r(0,0,0), r(0,1,-1)],
+-    #      [r(-1,0,1), r(0,-1,1), r(0,0,0)]]
+-    # b = [r(1,0,0), r(0,1,0), r(0,0,1)]
+-    
+-    # Helper to get r(x,y,z) from cov array (index = lag + 1)
+-    def get_r(x, y, z):
+-        return cov[x+1, y+1, z+1]
+-        
++def compress_volume(volume: np.ndarray) -> bytes:
++    """
++    Compress a 3D volume using Optimal Linear Predictor + Truncated Huffman.
++    volume: np.ndarray of shape (X, Y, Z), dtype int16.
++    """
++    X, Y, Z = volume.shape
++    
++    # 1. Estimate Mean
++    mean_v = np.mean(volume)
++    
++    # 2. Estimate Covariance for lags in {-1, 0, 1}
++    # Note: Source uses specific summation bounds for covariance estimation
++    # r(x,y,z) = E[(v - mean)(v_shifted - mean)]
++    # We compute the required covariances: r(0,0,0), r(1,-1,0), r(1,0,-1), etc.
++    # To avoid storing all covariances, we compute the specific entries needed for the 3x3 matrix.
++    
++    # Helper to compute covariance for specific lag (dx, dy, dz)
++    # The source formula sums x' from 1 to X-2, y' from 1 to Y-2, z' from 1 to Z-2
++    # This implies we are correlating v(x',y',z') with v(x'+dx, y'+dy, z'+dz)
++    # within the valid interior range.
++    
++    def get_cov(dx, dy, dz):
++        sum_val = 0.0
++        count = 0
++        # Iterate over the valid range defined in source Eq (11)
++        for x in range(1, X - 1):
++            for y in range(1, Y - 1):
++                for z in range(1, Z - 1):
++                    val1 = volume[x, y, z] - mean_v
++                    val2 = volume[x + dx, y + dy, z + dz] - mean_v
++                    sum_val += val1 * val2
++                    count += 1
++        return sum_val / count if count > 0 else 0.0
++
++    # Calculate required covariance entries
++    # Matrix A indices correspond to lags between predictor taps (0,0,0) and (1,0,0), (0,1,0), (0,0,1)
++    # The source matrix A is:
++    # [r(0,0,0) r(1,-1,0) r(1,0,-1)]
++    # [r(-1,1,0) r(0,0,0) r(0,1,-1)]
++    # [r(-1,0,1) r(0,-1,1) r(0,0,0)]
++    
++    r_000 = get_cov(0, 0, 0)
++    r_1m10 = get_cov(1, -1, 0)
++    r_10m1 = get_cov(1, 0, -1)
++    r_m110 = get_cov(-1, 1, 0)
++    r_01m1 = get_cov(0, 1, -1)
++    r_m101 = get_cov(-1, 0, 1)
++    r_0m11 = get_cov(0, -1, 1)
++    
++    # Vector b
++    b = np.array([get_cov(1, 0, 0), get_cov(0, 1, 0), get_cov(0, 0, 1)])
++    
++    # Matrix A
+     A = np.array([
+-        [get_r(0, 0, 0), get_r(1, -1, 0), get_r(1, 0, -1)],
+-        [get_r(-1, 1, 0), get_r(0, 0, 0), get_r(0, 1, -1)],
+-        [get_r(-1, 0, 1), get_r(0, -1, 1), get_r(0, 0, 0)]
++        [r_000, r_1m10, r_10m1],
++        [r_m110, r_000, r_01m1],
++        [r_m101, r_0m11, r_000]
+     ])
+     
+-    b = np.array([
+-        get_r(1, 0, 0),
+-        get_r(0, 1, 0),
+-        get_r(0, 0, 1)
+-    ])
+-    
+-    # Solve linear system
+-    a = np.linalg.solve(A, b)
+-    return a
+-
+-def predict_and_residual(volume, mean, a):
+-    """Step 4 & 7: Predict and compute residuals."""
+-    X, Y, Z = volume.shape
+-    residuals = np.zeros_like(volume, dtype=np.float64)
+-    
+-    a1, a2, a3 = a
++    # Solve for coefficients a1, a2, a3
++    coeffs = np.linalg.solve(A, b)
++    a1, a2, a3 = coeffs
++    
++    # 3. Calculate Residuals and Count Frequencies
++    # We do not store residuals to save memory. We just count frequencies.
++    freq = {}
+     
+     for x in range(X):
+         for y in range(Y):
+             for z in range(Z):
+-                # Calculate v1, v2, v3
+-                if x == 0:
+-                    v1 = 0.0
+-                else:
+-                    v1 = volume[x-1, y, z] - mean
+-                    
+-                if y == 0:
+-                    v2 = 0.0
+-                else:
+-                    v2 = volume[x, y-1, z] - mean
+-                    
+-                if z == 0:
+-                    v3 = 0.0
+-                else:
+-                    v3 = volume[x, y, z-1] - mean
+-                    
++                # Calculate predicted value
++                # Neighbor values are mean-subtracted if they exist, else 0
++                v1 = (volume[x-1, y, z] - mean_v) if x > 0 else 0
++                v2 = (volume[x, y-1, z] - mean_v) if y > 0 else 0
++                v3 = (volume[x, y, z-1] - mean_v) if z > 0 else 0
++                
+                 pred = a1 * v1 + a2 * v2 + a3 * v3
+-                residuals[x, y, z] = volume[x, y, z] - pred
+-                
+-    return residuals
+-
+-def build_huffman_table(residuals, L1=256):
+-    """Step 5 & 6: Build truncated Huffman table."""
+-    # Count frequencies
+-    # Residuals are floats, but source implies integer difference values 
+-    # for 16-bit input. We assume residuals are rounded or input is integer.
+-    # Source: "difference values d(x,y,z) range from -66535 to 65536"
+-    # We treat them as integers for symbol counting.
+-    
+-    int_residuals = np.round(residuals).astype(np.int32)
+-    
+-    # Flatten and count
+-    unique, counts = np.unique(int_residuals, return_counts=True)
+-    
+-    # Create symbol list and probabilities
+-    symbols = unique
+-    probs = counts / np.sum(counts)
+-    
+-    # Sort by probability descending
+-    sorted_indices = np.argsort(-probs)
+-    sorted_symbols = symbols[sorted_indices]
+-    sorted_probs = probs[sorted_indices]
+-    
+-    # Truncated Huffman
+-    # First L1 symbols get Huffman codes
+-    # Remaining get fixed length codes
+-    
+-    # Note: Standard Huffman implementation is required here.
+-    # This pseudocode outlines the logic, not the bit-packing engine.
+-    
+-    huffman_codes = {}
+-    
+-    # 1. Huffman code for top L1 symbols
++                residual = volume[x, y, z] - pred
++                
++                # Count frequency
++                freq[residual] = freq.get(residual, 0) + 1
++                
++    # 4. Build Truncated Huffman Table
++    # Sort symbols by frequency descending
++    sorted_symbols = sorted(freq.items(), key=lambda item: item[1], reverse=True)
++    
++    L1 = 256
++    huffman_table = {}
++    
++    # Assign Huffman codes to top L1 symbols
++    # Note: Standard Huffman construction (e.g., using a priority queue) is required here.
++    # For brevity, we assume a function `build_huffman_codes` exists.
+     top_symbols = sorted_symbols[:L1]
+-    # ... Implement Huffman tree construction for top_symbols ...
+-    # ... Assign codes ...
+-    
+-    # 2. Fixed length code for remaining
+-    remaining_symbols = sorted_symbols[L1:]
+-    if len(remaining_symbols) > 0:
+-        # Calculate bits needed for fixed length
+-        # Source doesn't specify exact bit width for fixed part, 
+-        # just "fixed-length code". 
+-        # Typically ceil(log2(remaining_count)) or max possible bits.
+-        # Given L=131071, and L1=256, remaining is large.
+-        # We assume a standard fixed length sufficient to encode the symbol index.
+-        pass 
+-        
+-    return huffman_codes
+-
+-def compress(volume):
+-    mean = compute_mean(volume)
+-    cov = compute_covariance(volume, mean, *volume.shape)
+-    a = solve_predictor(cov)
+-    
+-    # First pass for stats (residuals not stored)
+-    residuals = predict_and_residual(volume, mean, a)
+-    
+-    # Build table
+-    huffman_table = build_huffman_table(residuals)
+-    
+-    # Second pass for encoding
+-    # ... Encode residuals using huffman_table ...
+-    
+-    return header, compressed_bits
+-
+-def decompress(compressed_bits, header):
+-    mean = header['mean']
+-    a = header['coeffs']
+-    huffman_table = header['huffman_table']
+-    
+-    X, Y, Z = header['shape']
+-    volume = np.zeros((X, Y, Z))
+-    
+-    # Decode bitstream
+-    # ... Read codes, lookup d(x,y,z) ...
++    huffman_codes = build_huffman_codes(top_symbols) # Returns dict {symbol: bitstring}
++    
++    for symbol, code in huffman_codes.items():
++        huffman_table[symbol] = code
++        
++    # Assign fixed-length codes to remaining symbols
++    # Total symbols L = 131071 for 16-bit data
++    # Fixed length code length needed to represent remaining symbols
++    remaining_count = len(sorted_symbols) - L1
++    if remaining_count > 0:
++        fixed_len = int(np.ceil(np.log2(remaining_count)))
++        # Assign fixed length codes sequentially to the remaining symbols
++        for i, (symbol, _) in enumerate(sorted_symbols[L1:]):
++            huffman_table[symbol] = format(i, f'0{fixed_len}b')
++            
++    # 5. Encode Volume
++    output_bits = []
+     
+     for x in range(X):
+         for y in range(Y):
+             for z in range(Z):
+-                # Decode d(x,y,z)
+-                d = decode_next_code(compressed_bits, huffman_table)
+-                
+-                # Predict
+-                if x == 0: v1 = 0.0
+-                else: v1 = volume[x-1, y, z] - mean
+-                
+-                if y == 0: v2 = 0.0
+-                else: v2 = volume[x, y-1, z] - mean
+-                
+-                if z == 0: v3 = 0.0
+-                else: v3 = volume[x, y, z-1] - mean
+-                
+-                pred = a[0]*v1 + a[1]*v2 + a[2]*v3
+-                volume[x, y, z] = pred + d
++                v1 = (volume[x-1, y, z] - mean_v) if x > 0 else 0
++                v2 = (volume[x, y-1, z] - mean_v) if y > 0 else 0
++                v3 = (volume[x, y, z-1] - mean_v) if z > 0 else 0
++                
++                pred = a1 * v1 + a2 * v2 + a3 * v3
++                residual = volume[x, y, z] - pred
++                
++                code = huffman_table[residual]
++                output_bits.append(code)
++                
++    # Convert bits to bytes
++    bitstream = "".join(output_bits)
++    # Pad to byte boundary if necessary
++    if len(bitstream) % 8 != 0:
++        bitstream += "0" * (8 - len(bitstream) % 8)
++        
++    compressed_bytes = bytes(int(bitstream[i:i+8], 2) for i in range(0, len(bitstream), 8))
++    
++    # 6. Package Header
++    # Header: mean, coeffs, huffman_table
++    # Implementation detail: Serialize mean, coeffs, and the huffman_table dict
++    header = serialize_header(mean_v, coeffs, huffman_table)
++    
++    return header + compressed_bytes
++
++def decompress_volume(compressed_data: bytes, X: int, Y: int, Z: int) -> np.ndarray:
++    """
++    Decompress volume data.
++    """
++    # 1. Parse Header
++    mean_v, coeffs, huffman_table = parse_header(compressed_data)
++    a1, a2, a3 = coeffs
++    bitstream = compressed_data[len(header):]
++    
++    # 2. Decode and Reconstruct
++    volume = np.zeros((X, Y, Z), dtype=np.int16)
++    
++    # Convert bytes back to bit string
++    bits = "".join(format(byte, '08b') for byte in bitstream)
++    
++    # We need to track the current bit position
++    bit_pos = 0
++    
++    for x in range(X):
++        for y in range(Y):
++            for z in range(Z):
++                # Decode residual
++                # In a real implementation, we would traverse the Huffman tree or use a lookup
++                # based on the variable length codes. Here we assume we can extract the code
++                # for the current residual.
++                # Since Huffman codes are variable length, we must read bits until a valid code is found.
++                # For pseudocode simplicity, we assume `decode_next_residual` handles bitstream reading.
++                residual = decode_next_residual(bits, bit_pos, huffman_table)
++                bit_pos += len(huffman_table[residual]) # Update bit position
++                
++                # Calculate prediction using RECONSTRUCTED neighbors
++                v1 = (volume[x-1, y, z] - mean_v) if x > 0 else 0
++                v2 = (volume[x, y-1, z] - mean_v) if y > 0 else 0
++                v3 = (volume[x, y, z-1] - mean_v) if z > 0 else 0
++                
++                pred = a1 * v1 + a2 * v2 + a3 * v3
++                volume[x, y, z] = pred + residual
+                 
+     return volume
++
++def build_huffman_codes(symbol_freqs):
++    """
++    Standard Huffman coding construction.
++    symbol_freqs: list of (symbol, frequency) tuples.
++    """
++    import heapq
++    
++    # Create a priority queue of leaf nodes
++    heap = [[freq, [symbol, ""]] for symbol, freq in symbol_freqs]
++    heapq.heapify(heap)
++    
++    while len(heap) > 1:
++        lo = heapq.heappop(heap)
++        hi = heapq.heappop(heap)
++        
++        for pair in lo[1:]:
++            pair[1] = '0' + pair[1]
++        for pair in hi[1:]:
++            pair[1] = '1' + pair[1]
++            
++        heapq.heappush(heap, [lo[0] + hi[0]] + lo[1:] + hi[1:])
++        
++    # Extract codes
++    codes = {}
++    for symbol, code in heapq.heappop(heap)[1:]:
++        codes[symbol] = code
++        
++    return codes
+ ```
+ 
+ ### Edge Cases and Pitfalls
+-*   **Causality:** The predictor must strictly use only previously processed voxels ($x-1, y, z$), ($x, y-1, z$), and ($x, y, z-1$) to ensure the decoder can generate identical predictions [S1, unofficial].
+-*   **Non-stationarity:** The optimal predictor assumes wide-sense stationarity. Real volume data is not stationary, making global statistics suboptimal. The algorithm does not handle this locally; future improvements involve octree-based local predictors [S1, unofficial].
+-*   **Memory vs. Speed:** The algorithm scans the volume four times (2 for stats, 1 for residuals, 1 for encoding). Residuals are not stored to prevent excessive memory costs, necessitating the fourth scan [S1, unofficial].
+-*   **Precision:** The covariance calculation involves sums over the volume. Using single precision for covariance estimation may reduce mathematical precision compared to double precision, though the source notes greater precision is obtained by separating the mean and variance scans [S1, unofficial].
++*   **Causality:** The predictor must strictly use only previously processed voxels ($x-1, y, z$), ($x, y-1, z$), and ($x, y, z-1$) to ensure the decoder generates identical predictions [S1, unofficial].
++*   **Non-Stationarity:** The optimal predictor assumes wide-sense stationarity. Real volume data is not stationary, making global statistics suboptimal. The algorithm does not handle this locally; future improvements involve octree-based local predictors [S1, unofficial].
++*   **Memory vs. Speed:** The algorithm scans the volume four times (two for statistics, one for residual calculation/frequency counting, one for encoding). Residuals are not stored to save memory, necessitating the fourth scan [S1, unofficial].
++*   **Boundary Handling:** The predictor uses mean-subtracted neighbors. For boundary voxels ($x=0, y=0, z=0$), the corresponding neighbor term is set to 0. This ensures the prediction error is orthogonal to the input variables [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Compression Ratio:** Achieves approximately 50% compression (reducing size by half) on a set of volume data files [S1, unofficial]. Specifically, on `3dhead.vox`, it achieves 48.5% compression compared to 36.1% for gzip and 33.8% for zip [S1, unofficial].
+-*   **Performance:** On an HP 9000 Series 735, compression of `3dhead.vox` took 4.7 minutes, and decompression took 1.4 minutes [S1, unofficial].
+-*   **Complexity:** The calculation of the optimal predictor takes only about 6% of the total compression time [S1, unofficial]. The majority of time is spent in the scanning and Huffman encoding steps.
+-*   **Strengths:** Removes spatial redundancy effectively, outperforming generic statistical compressors (gzip, zip, compress, pack) on volume data [S1, unofficial]. The optimal predictor automatically compensates for non-isotropic sampling [S1, unofficial].
+-*   **Limitations:** Assumes wide-sense stationarity, which may not hold for all datasets. The 4-pass nature is I/O intensive. The fixed $L_1=256$ truncation parameter is arbitrary [S1, unofficial].
++*   **Time Complexity:** The algorithm requires four full scans of the volume. Two scans are for estimating mean and covariance ($O(XYZ)$). The third scan calculates residuals and counts frequencies ($O(XYZ)$). The fourth scan encodes the data ($O(XYZ)$). The covariance calculation involves nested loops over the volume, making it computationally intensive relative to simple delta encoding. The source notes that calculating the optimal predictor takes only about 6% of the total compression time, implying the scanning and encoding dominate [S1, unofficial].
++*   **Memory Complexity:** Low. The algorithm does not store the residual array, requiring only storage for the volume data itself (during scanning) and the Huffman table (which is small, $L_1=256$ entries) [S1, unofficial].
++*   **Measured Performance:** On a HP 9000 Series 735, the `compvox` algorithm achieved 48.5% compression on `3dhead.vox` (256x256x109, 13.6 MB) in 4.7 minutes, with decompression in 1.4 minutes [S1, unofficial]. This outperformed gzip (36.1%) and zip (33.8%) [S1, unofficial].
++*   **Compression Ratio:** Approximately 50% on average for a set of biomedical volume data files [S1, unofficial]. Entropy values ranged from 3.28 to 10.29 bits/voxel across test datasets [S1, unofficial].
++*   **Strengths:** High compression ratio for volumetric data by removing spatial redundancy; handles non-isotropic sampling automatically via optimal coefficients; lossless.
++*   **Limitations:** High computational cost due to multiple volume scans and covariance estimation; assumes stationarity which may not hold; slower than generic compressors like gzip for small or non-spatially coherent data [S1, unofficial].
+ 
+ ## Background
+-*   **Origin:** Introduced by James Edwin Fowler and Roni Yagel in January 1995 at the Proceedings of the 1994 Symposium on Volume Visualization [S1, unofficial].
+-*   **Context:** Developed to address the large storage requirements of volume data in biomedical and scientific applications where lossless compression is mandatory [S1, unofficial].
+-*   **Comparison:** It combines Differential Pulse-Code Modulation (DPCM) and Huffman coding. It is distinct from simple delta encoding by using an optimal linear predictor derived from the data's covariance structure [S1, unofficial].
++The method was introduced by James Edwin Fowler and Roni Yagel in January 1995 at the Proceedings of the 1994 Symposium on Volume Visualization [S1, unofficial]. It was designed specifically for lossless compression of biomedical volume data (MRI, CT, electron density maps) where lossy compression is unacceptable for diagnosis and treatment planning [S1, unofficial]. The algorithm combines Differential Pulse-Code Modulation (DPCM) with Huffman coding, leveraging the spatial coherence of volume data to achieve better compression than generic algorithms like `compress`, `zip`, `gzip`, and `pack` [S1, unofficial].
+ 
+ ## Sources

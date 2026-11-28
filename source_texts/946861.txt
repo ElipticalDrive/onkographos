@@ -1,0 +1,661 @@
+# Faster and Better 3D Splatting via Group Training
+
+Chengbo Wang1,3,4,5 Guozheng Ma2 Yifei Xue1,3,4,5 Yizhen Lao1,4,5,†
+
+1Hunan University 2Nanyang Technological University
+
+3DaHe.AI 4Lushan Innovation Lab
+
+5 Key Laboratory of Digital Culture Smart Design Technology, Minstry of Culture and Tourism
+
+{wangchb, yizhenlao}@hnu.edu.cn, GUOZHENG001@e.ntu.edu.sg, iflyhsueh@gmail.com
+
+## Abstract
+
+3D Gaussian Splatting (3DGS) has emerged as a powerful technique for novel view synthesis, demonstrating remarkable capability in high-fidelity scene reconstruction through its Gaussian primitive representations. However, the computational overhead induced by the massive number of primitives poses a significant bottleneck to training efficiency. To overcome this challenge, we propose Group Training, a simple yet effective strategy that organizes Gaussian primitives into manageable groups, optimizing training efficiency and improving rendering quality. This approach shows universal compatibility with existing 3DGS frameworks, including vanilla 3DGS and Mip-Splatting, consistently achieving accelerated training while maintaining superior synthesis quality. Extensive experiments reveal that our straightforward Group Training strategy achieves up to 30% faster convergence and improved rendering quality across diverse scenarios. Project Website: .
+
+## 1. Introduction
+
+Novel view synthesis (NVS) is a pivotal technology in various domains, such as virtual reality [11], augmented reality [34], and autonomous driving [36]. Recently, 3D Gaussian Splatting (3DGS) [12] achieved significant success in NVS due to its real-time [15, 29, 37], high-quality rendering [2, 20]. This high-quality rendering is made possible by using millions of Gaussians [3], each includes a complex set of attributes, namely, position, size, orientation, opacity, and color. These attributes are optimized via multi-view photometric losses.
+
+• Motivation. However, 3DGS also introduces a potential risk during training, as the exponentially growing Gaussians
+
+
+
+(a) Reconstruction of the “Stump” [1] scene by 3DGS [12].
+
+
+
+(b) Reconstruction of the “Dr. Johnson” [9] scene by Mip-Splatting [33].
+
+Figure 1. Improvements and Illustrations of Applying Group Training in 3DGS [12] and Mip-Splatting [33]. Grouping Training (solid line) achieves a significant increase in reconstruction speed and superior scene quality compared to baseline methods (dashed line). In the “Stump” [1] scene, Grouping Training delivers a 28% faster reconstruction while rendering leaf details with greater clarity. In the “Dr. Johnson” [9] scene, Mip-Splatting with Group Training achieves a 33% reduction in reconstruction time and effectively suppresses the generation of floating artifacts.
+
+significantly increase the training burden. Consequently, a primary research focus is the development of methods that enable rapid and cost-effective 3D scene reconstruction without compromising the rendering performance.
+
+During the densification stage, the cyclic pruning of Gaussians with low opacity emerges as a straightforward yet potentially effective strategy [12, 28] for enhancing the training efficiency of 3DGS. Specifically, in each round, 3DGS prunes Gaussians whose opacity falls below a designated threshold  $\epsilon_\alpha$ , which is a vital parameter that facilitates control over the number of generated Gaussians. However, this method has inherent limitations. If  $\epsilon_\alpha$  is set too conservatively, the resultant acceleration will be minimal while an excessively lenient threshold defeats the quality of the NVS. Thus, achieving a balance between accelerating the training and preserving the rendering quality poses a considerable challenge.
+
+- • Intuition and contributions. Inspired by the limitations of the cyclic pruning strategy, we propose to cache a portion of the Gaussians instead of directly pruning Gaussians. This “cache” concept can retain the “important” Gaussians while reducing the total number of them. Therefore, we propose a novel Group Training strategy to accelerate the training of 3DGS. Specifically, (1) a portion of Gaussians is cyclically cached during training. These cached Gaussians are temporarily excluded from scene rendering and model training, which greatly reduces the number of Under-training Gaussians and cuts down on training time. (2) Additionally, through cyclic resampling, the cached Gaussians are reintegrated into the 3DGS model, reducing the impact of direct pruning. (3) A crucial element of Group Training is determining how to sample Gaussians to distinguish between under-training and cached Gaussians. A naive sampling approach would be random sampling. Interestingly, we discovered that the distribution of Gaussian opacity values influences both the quantity of Gaussians generated during densification and the rendering speed of the scene. Therefore, we introduce an Opacity-based Prioritized Sampling method, which effectively reduces the generation of redundant Gaussians and improves the training speed of 3DGS. Specifically, the main technical contributions of our work are as follows:
+
+1. 1. We propose a simple yet highly efficient training framework called Group Training for 3D Gaussian Splatting, which is seamlessly integrated into existing 3DGS frameworks, including both 3DGS and Mip-Splatting.
+2. 2. Our framework significantly improves the efficiency of scene reconstruction and the quality of NVS.
+
+## 2. Related Work
+
+In this section, we review relevant work in novel view synthesis and 3D Gaussian Splatting, followed by the distinc-
+
+
+
+Figure 2. PSNR and Time Performance of Pruning [12, 28] and Group Training under Varying Hyperparameters. The reconstructions are performed on the “Train” scene [14] using 3DGS [12] as the baseline. Left: The pruning method exhibits substantial instability in optimizing the trade-off between reconstruction efficiency and quality. The hyperparameter sensitivity (Opacity Threshold) presents significant challenges for optimal parameter tuning. Right: Group Training demonstrates consistent improvements in both reconstruction speed and quality, with robust performance across a wide range of hyperparameter values (Caching Ratio), enabling straightforward parameter optimization.
+
+tion of our approach.
+
+- • NVS. NVS involves generating new views of a scene from different viewpoints than those in the original dataset. Neural Radiance Fields (NeRF) [21] have been pivotal in NVS for producing photo-realistic images through volume rendering. Neural Radiance Fields (NeRF) have significantly advanced NVS by producing photo-realistic images via volume rendering, but they require substantial computational resources and lengthy training due to costly MLP evaluations. To overcome these limitations, methods such as voxel grids [7], hash grids [23] and points [30] have been introduced to facilitate real-time NeRF rendering.
+
+Recently, 3D Gaussian Splatting (3DGS) [12] has emerged as a promising alternative in the NVS field. Unlike the implicit structure of NeRF, 3DGS uses rasterization rather than ray tracing, enabling efficient rendering suitable for applications requiring both speed and image quality.
+
+- • 3DGS. 3D Gaussian Splatting (3DGS) is a recent approach to high-quality, real-time novel view synthesis that represents scenes explicitly as 3D Gaussian primitives. By rasterizing these Gaussians into 2D splats and blending them using  $\alpha$ -blending [21], 3DGS produces detailed, high-resolution outputs, making it well-suited for applications that demand both speed and visual fidelity.
+
+The 3DGS training process involves two main stages: “Densification” and “Optimization”. During the densification phase (0~15K iterations), Adaptive Density
+
+
+
+Figure 3. The overall framework of Group Training. Group Training involves periodically dividing all Gaussian primitives. Specifically, at regular iteration intervals, Gaussians from all groups are merged before rendering the training view. Subsequently, all Gaussian primitives are categorized into the Under-training Group and the Caching Group according to a specified sampling strategy. Before the next grouping, the Under-training Group is utilized for Gaussian densification (Iteration 0~15K) or optimization (Iteration 15~30K), while the Caching Group remains inactive and does not participate in any calculations.
+
+Control [12] is applied to increase the density of Gaussian primitives, thereby enhancing the model’s capacity for detailed scene representation. In the optimization phase (15K~30K iterations), densification stops, and the existing Gaussians undergo global refinement, yielding a more precise scene depiction. Recent studies have driven significant advancements in 3DGS across several areas, notably improving rendering quality [2, 13, 33], memory efficiency [5, 25, 27], and scalability for large scenes [16]. Beyond these enhancements, additional research has focused on increasing the efficiency of 3DGS optimizers [10] and refining Gaussian Densification [18, 19, 31] and Pruning strategies [5, 6, 26]. These improvements yield more compact 3DGS models that support faster reconstruction but sacrificing detail.
+
+- • Distinction. Unlike previous optimization-focused approaches, we propose Group Training, a principled strategy that dynamically manages Gaussian primitives during training through controlled group sampling. This approach not only accelerates training but also improves reconstruction quality by maintaining effective primitive optimization, achieving a better balance between computational efficiency and visual fidelity.
+
+### 3. Methodology
+
+In Sec. 3.1, we will provide a comprehensive introduction to the Group Training method and its multifunctional advantages in 3D Gaussian Splatting (3DGS). Section 3.2 introduces two sampling paradigms: Random Sampling and Prioritized Sampling (incorporating importance score, opacity-based, and volume-based criteria), with comparative analysis of their computational efficiency and performance trade-offs. We mathematically demonstrate that Opacity-based Prioritized Sampling achieves effective 3DGS densification and efficient rendering. Finally, in Sec. 3.3, we summarize training characteristics of 3DGS with Group Training, and the Sampling Strategies are identified.
+
+
+
+Figure 4. Schedule for activating Group Training during reconstruction. Group Training is enabled at regular intervals. Groups Merging (Grouping without resampling) occurring at iteration  $I_D$  and  $I_O$  before the completion of the densification and optimization processes for global densification and optimization.
+
+#### 3.1. Group Training
+
+The number of Gaussian primitives in the Gaussian set increases rapidly during the densification phase to achieve rich representation capabilities. This implies that the computational time to render a scene from a specific viewpoint will also increase, and this effect will extend to the global optimisation phase. To this end, we employ the Group Training method during training.
+
+For any given set of Gaussian  $G$ , the Under-training Group  $G_{\text{Under-training}}$  is obtained through sampling, while the remaining primitives constitute the Cached Group  $G_{\text{Cached}}$ .
+
+$$G_{\text{Under-training}} = \{g_i | g_i \in G, i \in I, I \subseteq \{1, 2, 3, \dots, |G|\}\} \quad (1)$$
+
+$$G_{\text{Cached}} = G \setminus G_{\text{Under-training}} \quad (2)$$
+
+Before the next grouping, the Cached Group is merged with the Under-training Group, after which the new  $G_{\text{Under-training}}$  and  $G_{\text{Cached}}$  groups are resampled. A visual representation of the Group Training process is provided in Fig. 3. This procedure ensures that each Gaussian primitive has an opportunity to contribute to the training process, and effectively reducing the number of Under-training Gaussians while retaining those deemed “important.”
+
+As outlined in Sec. 2, the 3DGS training process consists of two distinct phases: “Densification” and “Optimization”. Group Training is facilitated in both phases and concludes with Groups Merging at each phases, as illustrated in Fig. 4.
+
+### 3.2. Effective and Efficient Sampling Strategies
+
+Within each grouping, a subset of Gaussians is sampled from the merged Gaussians. The simplest sampling strategy is Random Sampling (RS). We propose attribute-driven Prioritized Sampling to optimize 3DGS further.
+
+We evaluated various attributes, including opacity and volume-based approaches [5] and importance scores [6, 8, 26, 35] (see appendix for detailed comparisons). Among these, Opacity-based Prioritized Sampling demonstrated superior performance in both training speed and rendering quality. As mathematically proven in Sec. 3.2.1 and 3.2.2, opacity intrinsically governs two critical 3DGS properties, both experimentally validated.
+
+#### 3.2.1. Sampling Strategy for Better Densification
+
+For any Gaussian primitive  $G_m$  projected onto the imaging plane with 2D center coordinates  $[x_m, y_m]$ , the partial derivatives of loss  $L$  w.r.t the projected coordinates are  $[\frac{\partial L}{\partial x_m}, \frac{\partial L}{\partial y_m}]$ , which govern the densification criterion by:
+
+$$\sqrt{\left(\frac{\partial L}{\partial x_m}\right)^2 + \left(\frac{\partial L}{\partial y_m}\right)^2} > \tau_{\text{grad}}, \quad (3)$$
+
+where  $\tau_{\text{grad}}$  denotes the predefined gradient threshold.
+
+We formulate the first fundamental property of 3DGS:
+
+• Proposition 1. Opacity-based Effective Gaussians Densification: Gaussian primitives with higher opacity serve as the primary contributors to densification of 3DGS.
+
+Proof. Under our assumptions of mutual independence between Gaussian attributes and within-primitive parameter independence, the partial derivatives are computed as:
+
+$$\frac{\partial L}{\partial x_m} = o_m \sum_{\text{pixel}} \frac{\partial L}{\partial \hat{C}} \frac{\partial \hat{C}}{\partial \alpha_m} \frac{\partial G_m^{2D}}{\partial \Delta x} \frac{\partial \Delta x}{\partial x_m}, \quad (4)$$
+
+$$\frac{\partial L}{\partial y_m} = o_m \sum_{\text{pixel}} \frac{\partial L}{\partial \hat{C}} \frac{\partial \hat{C}}{\partial \alpha_m} \frac{\partial G_m^{2D}}{\partial \Delta y} \frac{\partial \Delta y}{\partial y_m}, \quad (5)$$
+
+where  $o_m$  denotes the opacity of  $G_m$ ,  $\hat{C}$  represents the rendered pixel value, and  $\Delta x, \Delta y$  indicate coordinate offsets between pixels and  $[x_m, y_m]$ . Under the parameter mutual independence assumptions, the  $[\frac{\partial \Delta x}{\partial x_m}, \frac{\partial \Delta y}{\partial y_m}]$ ,  $[\frac{\partial G_m^{2D}}{\partial \Delta x}, \frac{\partial G_m^{2D}}{\partial \Delta y}]$  and  $\frac{\partial L}{\partial \hat{C}}$  remain independent of  $o_m$ . We prove that  $\frac{\partial \hat{C}}{\partial \alpha_m}$  increases with higher expected value of  $o_m$  in appendix:
+
+$$\mathbb{E} \left[ \frac{\partial \hat{C}}{\partial \alpha_m} \right] = \frac{(c_0 - c_{\text{bg}}) T_{\text{saturation}}}{1 - \mathbb{E}[o_m] \cdot \mathbb{E}[G_m^{2D}]}, \quad (6)$$
+
+where  $c_0$  and  $\alpha_0$  denote the expected color and opacity respectively, and  $T_{\text{saturation}}$  controls  $\alpha$  saturation [12].
+
+With fixed  $L$ , Eqs. (4) to (6) demonstrate that elevated opacity distributions yield greater gradient magnitudes in  $[\frac{\partial L}{\partial x_m}, \frac{\partial L}{\partial y_m}]$ , thereby making such Gaussians statistically prioritized for densification.  $\square$ 
+
+
+
+Figure 5. The distribution of Gaussian attributes. The distribution of all Gaussian attributes (left) and those contributing specifically to densification (right) in the ‘‘Bicycle’’ [1] with 3DGS [12]. Top row: While the opacities are primarily concentrated around 0 and 1, the Gaussians that contribute to densification are predominantly situated around 1. Bottom row: The distribution of Volume. As densification progresses, Gaussians with lower volume become increasingly involved in the densification process.
+
+• Experimental Validation: Our experiments track Gaussian primitives contributing to densification, focusing on opacity and volumes values. Statistical analysis of attribute distributions during densification steps (Fig. 5) reveals that Gaussians with high opacity and small volume are the primary sources implementing Gaussian densification.
+
+Notably, insufficient high-opacity Gaussians increase the photometric loss, exacerbating both under-reconstruction and over-reconstruction [12], thereby forces redundant densification. While small volumes can be employed as a compression metric [5] in the model compression of 3D Gaussian Splatting, they simultaneously drive reasonable densification. Take into account all factors, it is advisable to cache Gaussians with low-opacity for better gaussian densification.
+
+#### 3.2.2. Sampling Strategy for Faster Rendering
+
+During viewpoint-specific image synthesis in 3DGS, the framework implements  $\alpha$ -blending [21] through recursive application of the compositing equation on a per-pixel.
+
+$$C_p = \sum_{i=1}^N c_i \alpha_i T_i, \quad T_i = \prod_{j=1}^{i-1} (1 - \alpha_j), \quad (7)$$
+
+$$N = \min \left\{ i \in \mathbb{N}^+, \left| \prod_{j=1}^{i-1} (1 - \alpha_j) \leq T_{\text{saturation}} \right. \right\} \quad (8)$$
+
+As established in 3DGS [12], the determination of  $N$  hinges on achieving opacity saturation within a pixel's accumulated  $\alpha$  value (Transmittance  $T_i < T_{\text{saturation}}$ ). This critical threshold implementation introduces a fundamental constraint on rendering efficiency: during forward rendering operations, the sequential traversal of Gaussian primitives inherently prevents parallel computation of  $T_i$  values. Consequently,  $N$  emerges as the principal determinant of rendering speed, where any reduction on  $N$  directly translates to accelerated renderings.
+
+Based on the preceding analysis, we formulate the second fundamental property of the 3DGS framework:
+
+• Proposition 2. Opacity-based Efficient Rendering Acceleration: Gaussian primitives with higher opacity enable faster rendering through faster achieving  $\alpha$  saturation.
+
+Proof. Building upon the premise of mutually independent  $\alpha_i$  values between Gaussians, we posit that the mathematical expectation  $\mathbb{E}[T_N] \approx T_{\text{saturation}}$ ,
+
+$$\mathbb{E}[T_N] = (1 - \mathbb{E}[\alpha_i])^N = (1 - \mathbb{E}[o_i] \cdot \mathbb{E}[G_i^{2D}])^N, \quad (9)$$
+
+where  $\alpha_i$  combines its intrinsic opacity  $o_i$  and  $G_i^{2D}$  (dependent on view projection and covariance, independent of  $o_i$ ). We decouple the expected value of  $\alpha_i$ .  $\square$ 
+
+• Experimental Validation: We generated a 3DGS model with Gaussian  $o_i$  values sampled from  $\mathcal{N}(\mu_o, 0.1)$ , fixing the other parameters. The rendering time as a function of  $\mu_o$  is shown in Fig. 6. The results reveals that Gaussian primitives with higher-opacity induce faster transmittance saturation, thereby reducing the blending steps  $N$  and rendering computational load.
+
+### 3.3. Analysis and Design Insights
+
+Through a comprehensive testing program and a detailed examination of the densification and rendering formulas in 3DGS, we have identified the acceleration effect of the opacity attribute in the 3DGS training process. Based on these insights, we propose an Opacity-based Prioritised Sampling (OPS) strategy.
+
+The Opacity-based sampling probability  $p_i$  for selecting an Under-training Gaussian  $G_i$  is defined as:
+
+$$p_i = \frac{\alpha_i}{\sum_{i=1}^N \alpha_i}, \quad (10)$$
+
+where  $\alpha_i$  represents the opacity of Gaussian primitive  $G_i$ , and  $N$  is the total number of Gaussian primitives.
+
+## 4. Experiments
+
+We undertake an experimental investigation of Group Training within the context of 3D Gaussian Splatting [12] and Mip-Splatting [33]. The experimental settings are detailed in Sec. 4.1. Subsequently, we present the experimental results in Sec. 4.2. Cross-baselines applicability validation
+
+
+
+Figure 6. High-opacity Gaussians accelerate 3DGS rendering. Left: The rendering time decreases by 40% as  $\mu_o$  increases. Right: The mechanisms that higher-opacity Gaussians achieve faster  $\alpha$  saturation with less number of Gaussians.
+
+across diverse scenarios is further presented in Sec. 4.3. The ablation experiments and their results are comprehensively discussed in Sec. 4.4. Finally, we analyse the results of different sampling strategies in Sec. 4.5.
+
+### 4.1. Experimental Settings
+
+Implementation Details. The Group Training method was integrated as a plug-in to facilitate its utilisation in conjunction with 3DGS. We implemented our method within both 3D Gaussian Splatting [12] and Mip-Splatting [33].
+
+Group Training was implemented with a default grouping interval of 500 iterations throughout the training process. We employed both Random Sampling (RS) and Opacity-Based Prioritized Sampling (OPS) strategies with an Under-Training Ratio (UTR) of 0.6. To ensure computational stability, considering the importance of initial Gaussians [4], Group Training was activated at the 500th iteration after densification begins. The global densification ( $I_D$ ) and optimization ( $I_O$ ) were scheduled at 14.5K and 29K iterations, respectively. To manage the increased GPU memory consumption during group merging, we fixed the SH coefficients [25, 28] at iterations  $I_D$  and  $I_O$ . We also conducted experiments applying Group Training solely during the densification phase.
+
+Dataset and Metrics. The efficacy of our method is evaluated on the Mip-NeRF360 [1], Tanks & Temples [14], Deep Blending [9], and NeRF-Synthetic [21] using a single RTX 3090. Subsequently, the model's reconstruction performance is evaluated using PSNR, SSIM, and LPIPS. Furthermore, the training time, peak memory usage, and model size for each scene are recorded.
+
+### 4.2. Experiments Results
+
+This section presents the experimental results of integrating the Group-Training method into the 3D Gaussian Splat-
+
+
+
+
+
+
+
+
+
+
+
+
+
+|                        | Grouping Iterations | Mip-NeRF360 [1] |            |              | Tanks & Temples [14] |            |              | Deep Blending [9] |            |              | Blender [21] |           |             |
+|------------------------|---------------------|-----------------|------------|--------------|----------------------|------------|--------------|-------------------|------------|--------------|--------------|-----------|-------------|
+|                        |                     | PM ↓            | Size ↓     | Time ↓       | PM ↓                 | Size ↓     | Time ↓       | PM ↓              | Size ↓     | Time ↓       | PM ↓         | Size ↓    | Time ↓      |
+| 3D Gaussian Splatting* | —                   | 8.69            | 792        | 26.72        | 4.59                 | 434        | 15.00        | 7.72              | 666        | 23.90        | 2.78         | 69        | 6.06        |
+| Group Training w/ RS   | 0~15K               | 9.51            | 907        | 26.62        | 5.08                 | 496        | 14.60        | 7.64              | 644        | 21.85        | 2.76         | 63        | 5.66        |
+|                        | 0~30K               | 9.48            | 902        | 22.58        | 5.04                 | 495        | 12.25        | 7.63              | 643        | 18.45        | 2.76         | 63        | 5.26        |
+| Group Training w/ OPS  | 0~15K               | 8.57     | 678 | 22.53        | 4.54          | 384 | 12.80        | 6.81       | 487 | 19.25        | 2.65  | 43 | 5.01        |
+|                        | 0~30K               | 8.57     | 679 | 19.56 | 4.55          | 384 | 10.95 | 6.80       | 487 | 16.85 | 2.64  | 43 | 4.79 |
+
+Table 1. Comparison of reconstruction efficiency for 3DGS [12]. Group Training significantly enhances reconstruction speed across all four datasets, with the OPS strategy achieving the highest acceleration. This effect is particularly notable in complex scenes. While Group Training with RS produces a more redundant model, the OPS strategy yields more compact models and reduced GPU peak memory usage. \* indicates that the model was retrained. PM stands for GPU peak memory allocation, with Size in MB and Time in minutes.
+
+|                       | Grouping Iterations | Mip-NeRF360 [1] |              |               | Tanks&Temples [14] |               |              | Deep Blending [9] |             |               | Blender [21]  |         |             |               |              |               |            |
+|-----------------------|---------------------|-----------------|--------------|---------------|--------------------|---------------|--------------|-------------------|-------------|---------------|---------------|---------|-------------|---------------|--------------|---------------|------------|
+|                       |                     | PSNR ↑          | SSIM ↑       | LPIPS ↓       | Time ↓             | PSNR ↑        | SSIM ↑       | LPIPS ↓           | Time ↓      | PSNR ↑        | SSIM ↑        | LPIPS ↓ | Time ↓      |               |              |               |            |
+| 3D GS [12]            | —                   | 27.205          | 0.815        | 0.2143        | —                  | 23.142        | 0.841        | 0.183             | —           | 29.405        | 0.2425 | —       | 33.33       | 0.969         | 0.030        | —             |            |
+| 3D GS*                | —                   | 27.445          | 0.816        | 0.2155        | 26.7               | 23.697        | 0.849        | 0.1764            | 15.0        | 29.586        | 0.904         | 0.2437  | 23.9        | 33.772        | 0.970        | 0.0306        | 6.1        |
+| Group Training w/ RS  | 0~15K               | 27.621   | 0.822 | 0.2074 | 26.6               | 23.773        | 0.851 | 0.1703     | 14.6        | 29.185        | 0.901         | 0.2473  | 21.9        | 33.959 | 0.971 | 0.0284 | 5.7        |
+|                       | 0~30K               | 27.537          | 0.821        | 0.2157        | 22.6               | 23.703        | 0.848        | 0.1823            | 12.3        | 29.417        | 0.907  | 0.2481  | 18.5        | 33.877        | 0.971 | 0.0295        | 5.3        |
+| Group Training w/ OPS | 0~15K               | 27.582          | 0.820        | 0.2103        | 22.5               | 23.842        | 0.851 | 0.1726            | 12.8        | 29.713        | 0.906         | 0.2435  | 19.3        | 33.889        | 0.971 | 0.0292        | 5.0        |
+|                       | 0~30K               | 27.564          | 0.820        | 0.2133        | 19.6        | 23.853 | 0.850        | 0.1764            | 11.0 | 29.746 | 0.907  | 0.2450  | 16.9 | 33.808        | 0.970        | 0.0299        | 4.8 |
+
+Table 2. Comparison of reconstruction quality for 3DGS [12]. Group Training simultaneously accelerates the 3DGS scene reconstruction process and improves the accuracy of 3D reconstructions. Notably, Group Training with OPS achieves a notable improvement in reconstruction quality while maintaining the highest reconstruction speed.
+
+ting [12] and Mip-Splatting [33]. The test outcomes demonstrate that the Group Training with OPS offers a significant reduction in training time compared to the baseline in all scenes, while concurrently enhancing the rendering quality of the novel view, as presented in Fig. 7.
+
+3D Gaussian Splatting. We first tested the effectiveness of Group Training based on 3DGS. The reconstruction efficiency for all scenes is summarized in Tab. 1, and Tab. 2 presents the NVS rendering quality across all scenes.
+
+Across these scenes, Group Training consistently resulted in faster reconstruction, and this speedup was more pronounced in complex scenes. However, Group Training with RS could lead to an overabundance of redundant Gaussian primitives in some reconstruction tasks, which complicates subsequent operations, such as model compression [24, 25, 28]. Additionally, GPU memory usage significantly increased due to this redundancy [17], as shown in Tab. 1. In comparison to Group Training with RS, Group Training with OPS demonstrated a more pronounced improvement in reconstruction speed. For the reconstruction of all three complex scenes, the average speed increase was about 30%. Moreover, OPS greatly reduced the generation of redundant Gaussian primitives, leading to a smaller reconstruction model size than the original 3DGS reconstruction model in all tasks. Across all reconstruction tasks, the model size was reduced by between 10% and 40%, resulting in a more compact model overall.
+
+Mip-Splatting. We tested Mip-Splatting with Group Training, another significant variant of the Gaussian Splat-
+
+ting model. The experimental results are presented in Tab. 3 and Tab. 4. Overall, the performance of Group Training with Mip-Splatting was similar to 3DGS. Group Training with RS consistently improved both reconstruction quality and speed for Mip-Splatting but produced the highest number of Gaussian primitives during the densification phase. Group Training with OPS achieved the fastest reconstruction speed, and its reconstruction quality was nearly optimal. The OPS reduced the proportion of densification and resulted in a smaller model size that was either the smallest among the tested methods or comparable to the baseline.
+
+Counterintuitive Findings. Our experiments reveal two notable findings that challenge conventional understanding:
+
+1. 1. Despite producing larger model sizes, Group Training with RS consistently improves reconstruction speed, indicating that training dynamics rather than model size dominates reconstruction efficiency.
+2. 2. Group Training with OPS simultaneously achieves better reconstruction quality with reduced model size. This demonstrates that superior performance stem from its fundamental impact on the optimization process rather than from model size.
+
+### 4.3. Methodological Applicability
+
+Group-Training framework fundamentally addresses accelerated training and rendering in 3DGS through its dataset-agnostic improvement. Designed as a pluggable training component, the method demonstrates dual efficacy in both
+
+|                       | Grouping Iterations | Tanks & Temples [14] |              |               |             | Deep Blending [9] |              |               |        | Blender [21]  |              |               |            |
+|-----------------------|---------------------|----------------------|--------------|---------------|-------------|-------------------|--------------|---------------|--------|---------------|--------------|---------------|------------|
+|                       |                     | PSNR ↑               | SSIM ↑       | LPIPS ↓       | Time ↓      | PSNR ↑            | SSIM ↑       | LPIPS ↓       | Time ↓ | PSNR ↑        | SSIM ↑       | LPIPS ↓       | Time ↓     |
+| Mip-Splatting*        | –                   | 23.749               | 0.860        | 0.1562        | 23.0        | 29.358            | 0.903        | 0.2390        | 35.1   | 33.995        | 0.970        | 0.0296        | 8.5        |
+| Group Training w/ RS  | 0~15K               | 23.953               | 0.863 | 0.1504 | 24.6        | 28.929            | 0.900        | 0.2431        | 31.7   | 34.203 | 0.971        | 0.0278 | 9.3        |
+|                       | 0~30K               | 24.146               | 0.862 | 0.1598        | 20.4        | 29.392            | 0.908 | 0.2420        | 26.5   | 34.123        | 0.972 | 0.0285        | 8.3        |
+| Group Training w/ OPS | 0~15K               | 23.958               | 0.863 | 0.1519        | 21.7        | 29.665            | 0.907        | 0.2364 | 28.1   | 34.132        | 0.971        | 0.0285        | 8.2        |
+|                       | 0~30K               | 24.156        | 0.863 | 0.1559        | 18.2 | 29.788     | 0.908 | 0.2384        | 24.0   | 34.110        | 0.971        | 0.0286        | 7.5 |
+
+Table 3. Comparison of reconstruction quality for Mip-Splatting [33]. Group Training achieves simultaneous improvements in both speed and reconstruction quality for Mip-Splatting across all tasks. Specifically, Group Training with OPS attains the fastest reconstruction speed across all three datasets and delivers the highest reconstruction quality in the Tanks & Temples and Deep Blending dataset.
+
+|                       | Grouping Iterations | Outdoor       |              |               |             | Indoor      |               |              |               | Average    |             |               |              |               |            |             |
+|-----------------------|---------------------|---------------|--------------|---------------|-------------|-------------|---------------|--------------|---------------|------------|-------------|---------------|--------------|---------------|------------|-------------|
+|                       |                     | PSNR ↑        | SSIM ↑       | LPIPS ↓       | Size ↓      | PSNR ↑      | SSIM ↑        | LPIPS ↓      | Size ↓        | PSNR ↑     | SSIM ↑      | LPIPS ↓       | Size ↓       | Time ↓        |            |             |
+| Mip-Splatting*        | –                   | 24.814        | 0.748        | 0.1995        | 1430 | 43.3        | 31.265        | 0.929        | 0.1738        | 448        | 33.3        | 27.681        | 0.828        | 0.1881        | 994 | 38.8        |
+| Group Training w/ RS  | 0~15K               | 24.969        | 0.757        | 0.1897 | 2017        | 45.9        | 31.266        | 0.931 | 0.1697 | 556        | 34.9        | 27.768        | 0.834        | 0.1808 | 1377       | 41.0        |
+|                       | 0~30K               | 25.216 | 0.763 | 0.1969        | 2017        | 36.8        | 31.164        | 0.929        | 0.1757        | 556        | 30.5        | 27.860 | 0.837 | 0.1875        | 1377       | 34.0        |
+| Group Training w/ OPS | 0~15K               | 24.981        | 0.754        | 0.1940        | 1571        | 40.7        | 31.417 | 0.931 | 0.1725        | 375 | 29.1        | 27.841        | 0.832        | 0.1844        | 1039       | 35.5        |
+|                       | 0~30K               | 24.984        | 0.754        | 0.1967        | 1571        | 32.9 | 31.407        | 0.930        | 0.1739        | 375 | 26.4 | 27.839        | 0.832        | 0.1865        | 1039       | 30.0 |
+
+Table 4. Quantitative evaluation on the Mip-NeRF360 [1] reconstructed by Mip-Splatting [33]. For the reconstruction of outdoor scenes, Grouping Training with RS yields a larger model size, resulting in the best reconstruction quality. Grouping Training with OPS achieves the fastest reconstruction speed but provides sub-optimal reconstruction quality. For indoor scenes, Grouping Training with OPS continues to offer both the fastest reconstruction speed and the highest reconstruction quality.
+
+|                | Cyclic Resample | Global Densify | Global Optimize | Tanks & Temples |        |         |        |        |
+|----------------|-----------------|----------------|-----------------|-----------------|--------|---------|--------|--------|
+|                |                 |                |                 | PSNR ↑          | SSIM ↑ | LPIPS ↓ | Size ↓ | Time ↓ |
+| 3D GS*         | –               | –              | –               | 23.697          | 0.849  | 0.1764  | 434    | 15.0   |
+|                | ✓               | ✓              |                 | 23.866          | 0.850  | 0.1749  | 292    | 11.8   |
+|                | ✓               | ✓              |                 | 23.769          | 0.849  | 0.1765  | 231    | 11.0   |
+| Group Training | ✓               |                | ✓               | 23.835          | 0.850  | 0.1754  | 485    | 11.8   |
+|                | ✓               | ✓              | ✓               | 23.853          | 0.850  | 0.1764  | 384    | 11.0   |
+
+Table 5. Ablation Study of Group Training with OPS on Tanks & Temples [14]. Cyclic Resampling provides the most substantial acceleration for scene reconstruction, while Global Densification further improves efficiency by reducing model size. With Global Densification enabled, Global Optimization enhances the reconstruction quality of the model.
+
+3DGS acceleration model [6] and compression model [5], which is detailed in appendix.
+
+#### 4.4. Ablation Studies
+
+We conducted an ablation study on the Tanks & Temples dataset [14] to evaluate the impact of three key components of the Group Training method. The detailed comparison results are provided in Tab. 5.
+
+The results indicate that cyclic resampling contributes the most to improving training speed. Specifically, during iterations  $I_D \sim 15K$ , the Global Densification process adaptively performs cyclic pruning of low-opacity Gaussians within 3DGS, reducing redundant Gaussians, decreasing the model size, and thereby enhancing training efficiency. When Global Densification is enabled, the 3DGS model removes most redundant Gaussians during global densification, resulting in fewer redundant Gaussians in the Caching
+
+Group during the Optimization phase. In this scenario, Global Optimization can make full use of all Gaussians, further improving reconstruction performance.
+
+#### 4.5. Discussion
+
+Our experimental results demonstrate that enabling Group Training and utilizing OPS improved both reconstruction speed and quality. To better clarify these improvements, two key questions arise from these findings:
+
+- • Why faster? Group Training significantly accelerates reconstruction primarily by reducing the number of Under-training Gaussian primitives, thereby decreasing the rendering burden on the model. This speedup is observed even when the final model size is larger than the baseline. In alignment with our earlier analysis in Sec. 3.2, the OPS also contributes notably to this speedup effect. During the densification phase, Group Training with OPS preserves high-opacity Gaussians within the Under-Training Group, without which could lead to instances of both under-reconstruction and over-reconstruction [12, 32]. These issues can lead to redundant densification. As a result, models reconstructed with Group Training and OPS contain fewer redundant Gaussians, leading to smaller model sizes and faster reconstruction overall. Additionally, OPS prioritizes sampling high-opacity Gaussians, which rapidly drives  $\alpha$  saturation, which also discussed in Sec. 3.2. Focusing on these most impactful Gaussians reduces the number of Gaussians needed for splatting, further enhancing training and rendering efficiency.
+
+- • Why better? Group Training with the OPS prioritizes the
+
+
+
+Figure 7. Visual Comparison of Grouping Training and Baseline on 3DGS [12] and Mip-Splatting [33]. The Grouping Training method accelerates reconstruction by approximately 30% while achieving more detailed and accurate scene rendering. Notable improvements can be observed in the picture frame in the “Dr. Johnson” scene and the bucket handle in the “Garden” scene, where finer details are captured. Furthermore, Grouping Training significantly reduces floaters in Mip-Splatting, enhancing overall reconstruction fidelity.
+
+retention and optimization of high-opacity Gaussian primitives. This achieves comparable or superior fidelity to RS, while significantly reducing the model size. The Gaussian primitives with higher opacity inherently have a greater influence on the final rendered image [5, 19, 22, 28], so emphasizing their optimization leads to significant improvements in overall rendering quality. Besides, cyclic resampling temporarily excluding a randomly selected subset of Gaussian primitives, each remaining primitive is compelled to learn how to independently represent essential scene features leading to a more robust representation.
+
+In summary, by integrating these strategies, Group Training with OPS simultaneously enhances both reconstruction speed and rendering quality. By focusing on the most impactful primitives and encouraging independent feature representation, Group Training achieves efficient, high-quality scene reconstruction.
+
+## 5. Conclusion
+
+This paper presents Group Training, an effective strategy that addresses the computational challenges in 3D Gaussian Splatting by dynamically managing Gaussian primitives in organized groups. Through theoretical analysis and extensive experiments, we demonstrate that our method not only accelerates training by up to 30% but also improves rendering quality across diverse scenarios. Our opacity-based sampling strategy shows universal compatibility with existing 3DGS frameworks, achieving consistent improvements without compromising model complexity. The success of Group Training reveals the importance of dynamic primitive management in 3DGS optimization, suggesting promising directions for future research, such as adaptive grouping strategies and dynamic sampling mechanisms for more complex scenes. Our work provides valuable insights for future developments in efficient novel view synthesis.
+
+## Acknowledgements
+
+This work is supported by the National Key R&D Program of China (No.2022ZD0119000), Hunan Provincial Key R&D Program of China (No.2024JK2020 and 2024JK2021), Hunan Provincial Natural Science Foundation of China (No.2024JJ10027), Young Talents of Huxiang (No.Z202433000575), and Changsha Science Fund for Distinguished Young Scholars (kq2306002).
+
+## References
+
+- [1] Jonathan T. Barron. Mip-NeRF 360: Unbounded Anti-Aliased Neural Radiance Fields. In CVPR, 2022. 1, 4, 5, 6, 7, 8, 12, 13, 15, 17
+- [2] Samuel Rota Bulò, Lorenzo Porzi, and Peter Kontschieder. Revising densification in gaussian splatting. arXiv preprint arXiv:2404.06109, 2024. 1, 3
+- [3] Guikun Chen and Wenguan Wang. A survey on 3d gaussian splatting. arXiv preprint arXiv:2401.03890, 2024. 1
+- [4] Jaeyoung Chung, Jeongtaek Oh, and Kyoung Mu Lee. Depth-regularized optimization for 3d gaussian splatting in few-shot images. arXiv preprint arXiv:2311.13398, 2023. 5
+- [5] Zhiwen Fan, Kevin Wang, Kairun Wen, Zehao Zhu, Dejia Xu, and Zhangyang Wang. Lightgaussian: Unbounded 3d gaussian compression with 15x reduction and 200+ fps, 2023. 3, 4, 7, 8, 12, 13
+- [6] Guangchi Fang and Bing Wang. Mini-splatting: Representing scenes with a constrained number of gaussians, 2024. 3, 4, 7, 12, 13
+- [7] Sara Fridovich-Keil, Alex Yu, Matthew Tancik, Qinhong Chen, Benjamin Recht, and Angjoo Kanazawa. Plenoxels: Radiance fields without neural networks. In CVPR, 2022. 2
+- [8] Sharath Girish, Kamal Gupta, and Abhinav Shrivastava. Eagles: Efficient accelerated 3d gaussians with lightweight encodings. arXiv preprint arXiv:2312.04564, 2023. 4
+- [9] Peter Hedman, Julien Philip, True Price, Jan-Michael Frahm, George Drettakis, and Gabriel Brostow. Deep Blending for Free-Viewpoint Image-Based Rendering. In SIGGRAPH, 2018. 1, 5, 6, 7, 8, 11, 12, 15, 17
+- [10] Lukas Höllein, Aljaž Božič, Michael Zollhöfer, and Matthias Nießner. 3dgs-lm: Faster gaussian-splatting optimization with levenberg-marquardt. arXiv:2409.12892, 2024. 3
+- [11] Ying Jiang, Chang Yu, Tianyi Xie, Xuan Li, Yutao Feng, Huamin Wang, Minchen Li, Henry Lau, Feng Gao, Yin Yang, et al. Vr-gs: A physical dynamics-aware interactive gaussian splatting system in virtual reality. In ACM SIGGRAPH 2024 Conference Papers, pages 1–1, 2024. 1
+- [12] Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler, and George Drettakis. 3d gaussian splatting for real-time radiance field rendering. ACM Transactions on Graphics, 42 (4), 2023. 1, 2, 3, 4, 5, 6, 7, 8, 11, 12, 13, 15, 16
+- [13] Shakiba Kheradmand, Daniel Rebain, Gopal Sharma, Weiwei Sun, Yang-Che Tseng, Hossam Isack, Abhishek Kar, Andrea Tagliasacchi, and Kwang Moo Yi. 3d gaussian splatting as markov chain monte carlo. Advances in Neural Information Processing Systems, 37:80965–80986, 2024. 3
+- [14] Arno Knapitsch, Jaesik Park, Qian-Yi Zhou, and Vladlen Koltun. Tanks and Temples: Benchmarking Large-Scale Scene Reconstruction. In SIGGRAPH, 2017. 2, 5, 6, 7, 8, 11, 12, 16, 18
+- [15] Zhan Li, Zhang Chen, Zhong Li, and Yi Xu. Spacetime gaussian feature splatting for real-time dynamic view synthesis. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pages 8508–8520, 2024. 1
+- [16] Yang Liu, Chuanchen Luo, Lue Fan, Naiyan Wang, Junran Peng, and Zhaoxiang Zhang. Citygaussian: Real-time high-quality large-scale scene rendering with gaussians. In European Conference on Computer Vision, pages 265–282. Springer, 2025. 3, 12
+- [17] Jiahao Lu, Yifan Zhang, Qiuhong Shen, Xinchao Wang, and Shuicheng Yan. Poison-splat: Computation cost attack on 3d gaussian splatting. arXiv preprint arXiv:2410.08190, 2024. 6
+- [18] Tao Lu, Mulin Yu, Linning Xu, Yuanbo Xiangli, Limin Wang, Dahua Lin, and Bo Dai. Scaffold-gs: Structured 3d gaussians for view-adaptive rendering. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 20654–20664, 2024. 3
+- [19] Saswat Subhajyoti Mallick, Rahul Goel, Bernhard Kerbl, Markus Steinberger, Francisco Vicente Carrasco, and Fernando De La Torre. Taming 3dgs: High-quality radiance fields with limited resources. In SIGGRAPH Asia 2024 Conference Papers, New York, NY, USA, 2024. Association for Computing Machinery. 3, 8
+- [20] Jiarui Meng, Haijie Li, Yanmin Wu, Qiankun Gao, Shuzhou Yang, Jian Zhang, and Siwei Ma. Mirror-3dgs: Incorporating mirror reflections into 3d gaussian splatting. arXiv preprint arXiv:2404.01168, 2024. 1
+- [21] Ben Mildenhall, Pratul P. Srinivasan, Matthew Tancik, Jonathan T. Barron, Ravi Ramamoorthi, and Ren Ng. Nerf: Representing scenes as neural radiance fields for view synthesis. In ECCV, 2020. 2, 4, 5, 6, 7, 12, 13, 16, 18
+- [22] Wieland Morgenstern, Florian Barthel, Anna Hilsmann, and Peter Eisert. Compact 3d scene representation via self-organizing gaussian grids. arXiv preprint arXiv:2312.13299, 2023. 8
+- [23] Thomas Müller, Alex Evans, Christoph Schied, and Alexander Keller. Instant neural graphics primitives with a multiresolution hash encoding. ACM Trans. Graph., 41(4):102:1–102:15, 2022. 2
+- [24] KL Navaneet, Kossar Pourahmadi Meibodi, Soroush Abbasi Koohpayegani, and Hamed Pirsiavash. Compgs: Smaller and faster gaussian splatting with vector quantization. ECCV, 2024. 6
+- [25] Simon Niedermayr, Josef Stumpfegger, and Rüdiger Westermann. Compressed 3d gaussian splatting for accelerated novel view synthesis, 2023. 3, 5, 6
+- [26] Michael Niemeyer, Fabian Manhardt, Marie-Julie Rakotosaona, Michael Oechsle, Daniel Duckworth, Rama Gosula, Keisuke Tateno, John Bates, Dominik Kaeser, and Federico Tombari. Radsplat: Radiance field-informed gaussian splatting for robust real-time rendering with 900+ fps. arXiv.org, 2024. 3, 4, 12
+
+- [27] Panagiotis Papantonakis, Georgios Kopanas, Bernhard Kerbl, Alexandre Lanvin, and George Drettakis. Reducing the memory footprint of 3d gaussian splatting. Proceedings of the ACM on Computer Graphics and Interactive Techniques, 7(1):1–17, 2024. 3
+- [28] Panagiotis Papantonakis, Georgios Kopanas, Bernhard Kerbl, Alexandre Lanvin, and George Drettakis. Reducing the memory footprint of 3d gaussian splatting. Proceedings of the ACM on Computer Graphics and Interactive Techniques, 2024. 2, 5, 6, 8
+- [29] Zhexi Peng, Tianjia Shao, Yong Liu, Jingke Zhou, Yin Yang, Jingdong Wang, and Kun Zhou. Rtg-slam: Real-time 3d reconstruction at scale using gaussian splatting. In ACM SIG-GRAPH 2024 Conference Papers, pages 1–11, 2024. 1
+- [30] Qiangeng Xu, Zexiang Xu, Julien Philip, Sai Bi, Zhixin Shu, Kalyan Sunkavalli, and Ulrich Neumann. Point-nerf: Point-based neural radiance fields. In CVPR, 2022. 2
+- [31] Haosen Yang, Chenhao Zhang, Wenqing Wang, Marco Volino, Adrian Hilton, Li Zhang, and Xiatian Zhu. Localized gaussian point management. arXiv e-prints, pages arXiv–2406, 2024. 3
+- [32] Zongxin Ye, Wenyu Li, Sidun Liu, Peng Qiao, and Yong Dou. Absgs: Recovering fine details for 3d gaussian splatting, 2024. 7
+- [33] Zehao Yu, Anpei Chen, Binbin Huang, Torsten Sattler, and Andreas Geiger. Mip-splatting: Alias-free 3d gaussian splatting. In CVPR, 2024. 1, 3, 5, 6, 7, 8, 13, 17, 18
+- [34] Hongjia Zhai, Xiyu Zhang, Boming Zhao, Hai Li, Yijia He, Zhaopeng Cui, Hujun Bao, and Guofeng Zhang. Splatloc: 3d gaussian splatting-based visual localization for augmented reality. arXiv preprint arXiv:2409.14067, 2024. 1
+- [35] Zhaoliang Zhang, Tianchen Song, Yongjae Lee, Li Yang, Cheng Peng, Rama Chellappa, and Deliang Fan. Lp-3dgs: Learning to prune 3d gaussian splatting. arXiv preprint arXiv:2405.18784, 2024. 4, 12
+- [36] Xiaoyu Zhou, Zhiwei Lin, Xiaojun Shan, Yongtao Wang, Deqing Sun, and Ming-Hsuan Yang. Drivinggaussian: Composite gaussian splatting for surrounding dynamic autonomous driving scenes. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 21634–21643, 2024. 1
+- [37] Zehao Zhu, Zhiwen Fan, Yifan Jiang, and Zhangyang Wang. Fsgs: Real-time few-shot view synthesis using gaussian splatting. In European Conference on Computer Vision, pages 145–163. Springer, 2025. 1
+
+# Faster and Better 3D Splatting via Group Training
+
+## Supplementary Material
+
+### A. Proof of Property 1: Opacity-based Effective Gaussians Densification
+
+Under the assumptions of mutual independence between Gaussian attributes and intra-primitive parameter independence, the partial derivatives  $[\frac{\partial \Delta x}{\partial x_m}, \frac{\partial \Delta y}{\partial y_m}]$  for any arbitrary Gaussian admit the following derivation:
+
+$$\frac{\partial \alpha}{\partial G} = O + \frac{\partial O}{\partial G} G = O + 0 \cdot G = O, \quad (11)$$
+
+$$\begin{aligned} \frac{\partial L}{\partial x_m} &= \sum_{\text{pixel}} \frac{\partial L}{\partial G_m^{2D}} \frac{\partial G_m^{2D}}{\partial \Delta x} \frac{\partial \Delta x}{\partial x_m} \\ &= \sum_{\text{pixel}} o_m \frac{\partial L}{\partial \alpha_m} \frac{\partial G_m^{2D}}{\partial \Delta x} \frac{\partial \Delta x}{\partial x_m} \end{aligned} \quad (12)$$
+
+$$\begin{aligned} &= o_m \sum_{\text{pixel}} \frac{\partial L}{\partial \hat{C}} \frac{\partial \hat{C}}{\partial \alpha_m} \frac{\partial G_m^{2D}}{\partial \Delta x} \frac{\partial \Delta x}{\partial x_m}, \\ \frac{\partial L}{\partial y_m} &= o_m \sum_{\text{pixel}} \frac{\partial L}{\partial \hat{C}} \frac{\partial \hat{C}}{\partial \alpha_m} \frac{\partial G_m^{2D}}{\partial \Delta y} \frac{\partial \Delta y}{\partial y_m}, \end{aligned} \quad (13)$$
+
+where  $[\frac{\partial \Delta x}{\partial x_m}, \frac{\partial \Delta y}{\partial y_m}]$  remain constant parameters determined by the resolution  $[W, H]$ ;  $[\frac{\partial G_m^{2D}}{\partial \Delta x}, \frac{\partial G_m^{2D}}{\partial \Delta y}]$  derive from the scale, the rotation and the world coordinates of Gaussian primitives (independent of their opacity); and  $\frac{\partial L}{\partial \hat{C}}$  represents the loss gradient with respect to the current pixel value.
+
+Given that  $\hat{C}$  is formulated as the composite rendering of  $N$  Gaussians in Eq. (14), the derivative  $\frac{\partial \hat{C}}{\partial \alpha_m}$  admits computation via Eq. (15).
+
+$$\begin{aligned} \hat{C} &= \underbrace{\sum_{i=1}^{m-1} \alpha_i c_i \prod_{j=1}^{i-1} (1 - \alpha_j)}_{\text{Before Gaussian } m} + \underbrace{\alpha_m c_m \prod_{j=1}^{m-1} (1 - \alpha_j)}_{\text{Gaussian } m} \\ &\quad + \underbrace{\sum_{i=m+1}^N \prod_{j=1}^{m-1} (1 - \alpha_j) \alpha_i c_i (1 - \alpha_m)}_{\text{Before G } m} \underbrace{\prod_{j=m+1}^{i-1} (1 - \alpha_j)}_{\text{After G } m} \\ &\quad + \underbrace{\sum_{i=1}^N \prod_{j=1}^{i-1} (1 - \alpha_i) c_{bg}}_{\text{After Gaussian } m} \end{aligned} \quad (14)$$
+
+$$\frac{\partial \hat{C}}{\partial \alpha_m} = \underbrace{\prod_{j=1}^{m-1} (1 - \alpha_j)}_{\text{Before G } m} \left[ c_m - \underbrace{\sum_{i=m+1}^N \alpha_i c_i \prod_{j=m+1}^{i-1} (1 - \alpha_j)}_{\text{After G } m} \right] - \frac{c_{bg} T_N}{1 - \alpha_m} \quad (15)$$
+
+| Sampling Strategy | Tanks&Temples [14] |                 |                    |                 |                   |                   |             |
+|-------------------|--------------------|-----------------|--------------------|-----------------|-------------------|-------------------|-------------|
+|                   | PSNR $\uparrow$    | SSIM $\uparrow$ | LPIPS $\downarrow$ | PM $\downarrow$ | Size $\downarrow$ | Time $\downarrow$ |             |
+| 3DGS*             | -                  | 23.730          | 0.8491             | 0.176           | 4.6               | 430               | 15.3        |
+| Group Training    | Imp. score         | 23.672          | 0.8486             | 0.174    | 5.8               | 593               | 15.7        |
+|                   | Vol.               | 23.718          | 0.8462             | 0.182           | 5.1               | 493               | 12.4        |
+|                   | Opac.              | 23.850   | 0.8500      | 0.176           | 4.5        | 383        | 11.0 |
+| Vol.+Opac.        |                    | 23.684          | 0.8475             | 0.179           | 4.8               | 438               | 11.9        |
+
+Table 6. Quantitative evaluation of training efficiency on the Tanks&Temples [14] reconstructed by 3DGS [12]. \* indicates that we retrain the model. PM stands for GPU peak memory allocation, with Size in MB and Time in minutes. Imp. score = Importance score based, Vol. = Volume-based, Opac. = Opacity-based, Vol.+Opac. = Volume & Opacity-based.
+
+| Sampling Strategy | Deep Blending [9] |                 |                    |                 |                   |                   |             |
+|-------------------|-------------------|-----------------|--------------------|-----------------|-------------------|-------------------|-------------|
+|                   | PSNR $\uparrow$   | SSIM $\uparrow$ | LPIPS $\downarrow$ | PM $\downarrow$ | Size $\downarrow$ | Time $\downarrow$ |             |
+| 3DGS*             | -                 | 29.503          | 0.9038             | 0.244    | 7.8               | 677               | 25.2        |
+| Group Training    | Imp. score        | 29.589          | 0.9051             | 0.246           | 8.5               | 765               | 23.2        |
+|                   | Vol.              | 29.448          | 0.9036             | 0.251           | 7.5               | 623               | 19.8        |
+|                   | Opac.             | 29.768   | 0.9067      | 0.245           | 6.8        | 489        | 17.2 |
+| Vol.+Opac.        |                   | 29.619          | 0.9048             | 0.247           | 7.0               | 533               | 19.0        |
+
+Table 7. Quantitative evaluation of training efficiency on the Deep Blending [9] reconstructed by 3DGS [12]. Group Training with Opacity-based Prioritised Sampling demonstrates the fastest reconstruction speed and superior performance compared to other sampling strategies.
+
+Subsequently, the mathematical expectation of this derivative is formally established through Eq. (16)
+
+$$\begin{aligned} \mathbb{E} \left[ \frac{\partial \hat{C}}{\partial \alpha_m} \right] &= \underbrace{\left( 1 - \alpha_0 \right)^{m-1}}_{\text{Before G } m} \left\{ c_0 - c_0 \alpha_0 \sum_{i=m+1}^N \mathbb{E} \left[ \underbrace{\prod_{j=m+1}^{i-1} (1 - \alpha_j)}_{\text{After G } m} \right] \right\} - \frac{c_{bg} T_{\text{sta.}}}{1 - \alpha_0} \\ &= (1 - \alpha_0)^{m-1} \left[ c_0 - c_0 \alpha_0 \sum_{i=m+1}^N (1 - \alpha_0)^{i-m-1} \right] - \frac{c_{bg} T_{\text{saturation}}}{1 - \alpha_0} \\ &= \frac{(c_0 - c_{bg}) T_{\text{saturation}}}{1 - \alpha_0} \\ &= \frac{(c_0 - c_{bg}) T_{\text{saturation}}}{1 - \mathbb{E} [\alpha_i] \mathbb{E} [G_i]}, \end{aligned} \quad (16)$$
+
+### B. Efficiency And Effectiveness For Various Sampling Strategies
+
+We propose various sampling strategies for Group Training, incorporating Prioritised Sampling based on distinct sampling metrics. The sampling probability for each Gaussian primitive  $G_i$  is defined as follows:
+
+$$p_i = \frac{\theta_i}{\sum_{i=1}^N \theta_i}, \quad (17)$$
+
+|                    | Mip-NeRF360 [1] |        |          | Tanks&Temples [14] |        |          | Deep Blending [9] |        |          | Blender [21] |            |          |
+|--------------------|-----------------|--------|----------|--------------------|--------|----------|-------------------|--------|----------|--------------|------------|----------|
+|                    | PSNR ↑          | Time ↓ | Accel. ↑ | PSNR ↑             | Time ↓ | Accel. ↑ | PSNR ↑            | Time ↓ | Accel. ↑ | PSNR ↑       | Time ↓     | Accel. ↑ |
+| 3D-GS [12]         | 27.45           | 26.7   | –        | 23.70              | 15.0   | –        | 29.59             | 23.9   | –        | 33.77        | 6.1        | –        |
+| +Group Training    | 27.56           | 19.6   | 27%      | 23.85              | 11.0   | 27%      | 29.75             | 16.9   | 29%      | 33.81        | 4.8 | 21%      |
+| Mini-Splatting [6] | 27.27           | 20.7   | –        | 23.26              | 12.6   | –        | 29.95             | 17.8   | –        | 31.60        | 10.0       | –        |
+| +Group Training    | 27.25           | 17.9   | 13%      | 23.10              | 9.9    | 21%      | 29.85             | 14.7   | 17%      | 31.98        | 8.4 | 16%      |
+| LightGaussian [5]  | 27.06           | 27.5   | –        | 23.09              | 16.1   | –        | 27.28             | 25.9   | –        | 32.95        | 6.1        | –        |
+| +Group Training    | 27.34           | 20.5   | 25%      | 23.55              | 11.9   | 26%      | 28.50             | 19.0   | 27%      | 33.18        | 4.6 | 24%      |
+
+Table 8. Quantitative comparisons on different baselines and datasets. Group Training with 3DGS achieves faster reconstruction speed than Mini-Splatting across all datasets. Furthermore, Group Training demonstrates consistent acceleration effects on both 3DGS acceleration model (13%~21% speedup on Mini-Splatting [6]) and compression model (24%~27% speedup on LightGaussian [5]). Accel. = Acceleration Ratio in training time compared to the baseline.
+
+
+
+Figure 8. Comparison of Under-Training Gaussian Primitives. Our Group-Training methodology selectively trains a subset of Gaussian primitives, demonstrating enhanced computational efficiency while mitigating loss of potentially critical points during opacity reset operations.
+
+where  $\theta_i$  represents the sampling metrics (opacity [5], volume [16] or importance score [6, 26, 35]) of Gaussian primitive  $G_i$ , and  $N$  is the total number of Gaussian primitives. We also evaluated the metric which both Opacity and Volume are considered simultaneously, referred to as the Volume & Opacity-based method, as applied in [5]. The sampling metric  $\theta_i$  for Volume & Opacity-based Prioritized Sampling is computed as follows:
+
+$$\theta_i = \alpha_i \cdot V_i, \quad (18)$$
+
+where  $\alpha_i$  represents the opacity and  $V_i$  represents the volume of Gaussian primitive  $G_i$ .
+
+We conducted experiments using 3D Gaussian Splatting (3DGS) on two datasets: Tanks&Temples [14] and Deep Blending [9], both captured with camera-based systems. The comprehensive comparative results are presented in Tab. 6 and Tab. 7. Our results demonstrate that Group
+
+Based on code: 
+
+
+
+Figure 9. Comparison of Forward Rendering Efficiency. We measured the number of hit Gaussians and forward rendering FPS throughout the training process. 3DGS with Group Training consistently demonstrated higher FPS and fewer hit Gaussians compared to the baseline method during training.
+
+Training with Opacity-based Prioritized Sampling (OPS) consistently achieves significant improvements in both reconstruction speed and the quality of 3DGS models. Additionally, the reconstructed models exhibit greater compactness, as evidenced by a marked reduction in redundant Gaussian primitives.
+
+However, volume and importance scores are not the most effective sampling metrics, as they fail to differentiate Gaussians that contribute to densification. This deficiency leads to abrupt vacancies in the Gaussian space under high sampling rates, causing the over-reconstruction and under-reconstruction [12]. Consequently, this exacerbates Gaussian densification, introducing redundancy between newly densified Gaussians and those already cached. The detailed analysis is provided in Sec. 3.2.
+
+### C. Temporal Evolution of Under-Training Gaussian Primitives
+
+We visually compare the quantitative differences in under-training Gaussian primitives between Group-Training and 3DGS during scene reconstruction in Fig. 8. 3DGS with Group-Training reduces the training overhead by avoiding full optimization of all Gaussian primitives. Furthermore, during each opacity reset operation, the proposed
+
+
+
+(a) 3DGS (PSNR: 25.21dB Time: 34.1min)
+
+
+
+(b) 3DGS + Group Training (PSNR: 25.22dB Time: 21.8min)
+
+Figure 10. The visual comparison of Gaussian primitive distributions in the imaging plane. We visualize the Gaussian projection information on the imaging plane during images rendering. Left: Gaussian distribution on the imaging plane for the “Bicycle” scene [1]. Right: 3DGS with Group Training achieves comparable rendering quality using fewer Gaussian primitives.
+
+method retains a higher proportion of geometrically significant primitives compared to baseline. These retained elements, despite their low-opacity values, preserve critical structural information that contributes to scene geometry fidelity.
+
+## D. Comparison of Scene Representation Efficiency
+
+Fig. 9 presents a comparative analysis for the “train” scene reconstruction using 3D Gaussian Splatting (3DGS) under baseline conditions versus Group Training. It compares the per-iteration FPS and the number of hitten Gaussians. And the baseline method required 12.5 minutes to reach a PSNR of 21.985 dB, whereas Group Training with OPS acceleration attained a PSNR of 22.156 dB in just 9.3 minutes. These measurements confirm that Group Training consistently accelerates rendering with a substantial reduction in hitten Gaussians count during training. Consequently, it demonstrates higher scene representation efficiency by utilizing fewer Gaussian primitives without compromising reconstruction quality.
+
+## E. Distribution of Gaussian Primitives in Imaging Plane Space
+
+Fig. 10 illustrates the projection of rendering Gaussian primitives onto the imaging plane. Our Group Training approach significantly reduces the number of primitives required per image compared to the baseline, without compromising rendering quality, and further improves reconstruction speed.
+
+## F. Methodological Applicability
+
+We perform comparative validation across two distinct 3DGS architectures: an acceleration-optimized model [6] and a compression-focused LightGaussian [5].
+
+Empirical results demonstrate Group-Training’s consistent efficacy across dataset scales, particularly evidenced by reduced temporal overhead in the Blender [21], as shown in Tab. 8. Crucially, our method synergistically integrates with existing acceleration techniques like Mini-Splatting [6], achieving compounded acceleration gains while providing sustained acceleration for compressed models with concurrent fidelity enhancement.
+
+## G. Detailed Experimental Results for All Scenes
+
+We present the reconstruction results for all scenes using Group Training with Random Sampling (RS) and Opacity-based Prioritized Sampling (OPS), evaluated on 3D Gaussian Splatting (3DGS) [12] and Mip-Splatting [33]. The detailed results are provided in Tabs. 9 to 16.
+
+The experimental results demonstrate that Group Training consistently delivers significant improvements in both reconstruction speed and quality across all tests, with the acceleration effect being particularly pronounced on complex datasets. Notably, Group Training with OPS achieves the fastest reconstruction times while maintaining optimal or near-optimal reconstruction quality.
+
+We compare the effects of enabling RS and OPS during the Gaussian densification phase. The results indicate that Group Training with RS generates a significantly larger number of Gaussian primitives across all scenarios. For example, when reconstructing the “Bicycle” scene using Mip-Splatting, the high density of Gaussian primitives required
+
+the use of an NVIDIA A100 GPU for Group Training with RS. In contrast, Group Training with OPS produces sparser Gaussian primitives while delivering comparable or even superior reconstruction quality. Additionally, the reduced number of Gaussian primitives significantly alleviates the burden on peak memory usage.
+
+|                            | Grouping Iterations | Dr. Johnson |        |         |      |        |        | Playroom |        |         |      |        |        |
+|----------------------------|---------------------|-------------|--------|---------|------|--------|--------|----------|--------|---------|------|--------|--------|
+|                            |                     | PSNR ↑      | SSIM ↑ | LPIPS ↓ | PM ↓ | Size ↓ | Time ↓ | PSNR ↑   | SSIM ↑ | LPIPS ↓ | PM ↓ | Size ↓ | Time ↓ |
+| 3D Gaussian Splatting [12] | –                   | 28.766      | 0.899  | 0.244   | –    | –      | –      | 30.044   | 0.906  | 0.241   | –    | –      | –      |
+| 3D Gaussian Splatting*     | –                   | 29.190      | 0.901  | 0.2442  | 9.0  | 782    | 26.8   | 29.981   | 0.907  | 0.2431  | 6.4  | 549    | 21.0   |
+| Group Training w/ RS       | 0~15K               | 28.383      | 0.894  | 0.2517  | 8.8  | 733    | 24.2   | 29.987   | 0.908  | 0.2429  | 6.5  | 554    | 19.5   |
+|                            | 0~30K               | 28.701      | 0.902  | 0.2513  | 8.8  | 734    | 20.3   | 30.133   | 0.912  | 0.2448  | 6.5  | 552    | 16.6   |
+| Group Training w/ OPS      | 0~15K               | 29.287      | 0.903  | 0.2430  | 8.1  | 592    | 21.7   | 30.138   | 0.909  | 0.2439  | 5.6  | 382    | 16.8   |
+|                            | 0~30K               | 29.309      | 0.904  | 0.2451  | 8.1  | 594    | 18.6   | 30.183   | 0.910  | 0.2448  | 5.6  | 380    | 15.1   |
+
+Table 9. Comprehensive quantitative evaluation results on the DeepBlending [9] reconstructed by 3DGS [12]. RS denotes Random Sampling, and OPS denotes Opacity-based Prioritized Sampling.
+
+|           | Grouping Iterations   | Mip-NeRF360 [1] |         |        |        |          |        |         |         |        |        |
+|-----------|-----------------------|-----------------|---------|--------|--------|----------|--------|---------|---------|--------|--------|
+|           |                       | bicycle         | flowers | garden | stump  | treehill | bonsai | counter | kitchen | room   |        |
+| 3DGS [12] | –                     | 25.246          | 21.520  | 27.410 | 26.550 | 22.490   | 31.980 | 28.700  | 31.317  | 30.632 |        |
+|           | 3DGS*                 | –               | 25.205  | 21.484 | 27.397 | 26.620   | 22.514 | 32.202  | 28.980  | 31.222 | 31.377 |
+|           | Group Training w/ RS  | 0~15K           | 25.228  | 21.748 | 27.552 | 26.854   | 22.441 | 32.430  | 29.121  | 31.579 | 31.634 |
+| PSNR      | 0~30K                 | 25.217          | 21.806  | 27.463 | 27.095 | 22.671   | 31.975 | 28.850  | 31.319  | 31.438 |        |
+|           | 0~15K                 | 25.260          | 21.751  | 27.434 | 26.809 | 22.402   | 32.312 | 29.031  | 31.539  | 31.699 |        |
+|           | 0~30K                 | 25.219          | 21.741  | 27.418 | 26.830 | 22.522   | 32.205 | 28.973  | 31.425  | 31.744 |        |
+| SSIM      | 3DGS [12]             | –               | 0.771   | 0.605  | 0.868  | 0.775    | 0.638  | 0.938   | 0.905   | 0.922  | 0.914  |
+|           | 3DGS*                 | –               | 0.765   | 0.605  | 0.866  | 0.773    | 0.634  | 0.942   | 0.908   | 0.927  | 0.919  |
+|           | Group Training w/ RS  | 0~15K           | 0.769   | 0.619  | 0.872  | 0.787    | 0.638  | 0.946   | 0.913   | 0.930  | 0.923  |
+| PSNR      | 0~30K                 | 0.769           | 0.616   | 0.871  | 0.795  | 0.642    | 0.942  | 0.909   | 0.927   | 0.920  |        |
+|           | 0~15K                 | 0.770           | 0.617   | 0.869  | 0.785  | 0.635    | 0.945  | 0.911   | 0.929   | 0.922  |        |
+|           | 0~30K                 | 0.768           | 0.616   | 0.868  | 0.786  | 0.637    | 0.944  | 0.909   | 0.927   | 0.921  |        |
+| LPIPS     | 3DGS [12]             | –               | 0.205   | 0.336  | 0.103  | 0.210    | 0.317  | 0.205   | 0.204   | 0.129  | 0.220  |
+|           | 3DGS*                 | –               | 0.2103  | 0.3355 | 0.1069 | 0.2149   | 0.3240 | 0.2036  | 0.2001  | 0.1261 | 0.2184 |
+|           | Group Training w/ RS  | 0~15K           | 0.2094  | 0.3246 | 0.0985 | 0.1989   | 0.3182 | 0.1936  | 0.1909  | 0.1216 | 0.2110 |
+| LPIPS     | 0~30K                 | 0.2225          | 0.3324  | 0.1061 | 0.2032 | 0.3281   | 0.2008 | 0.2008  | 0.1280  | 0.2198 |        |
+|           | 0~15K                 | 0.2074          | 0.3262  | 0.1033 | 0.2044 | 0.3203   | 0.1968 | 0.1954  | 0.1245  | 0.2148 |        |
+|           | 0~30K                 | 0.2125          | 0.3307  | 0.1051 | 0.2075 | 0.3226   | 0.1992 | 0.1987  | 0.1272  | 0.2161 |        |
+| PM        | 3DGS*                 | –               | 11.6    | 7.7    | 11.3   | 9.0      | 7.5    | 7.7     | 6.7     | 8.4    | 8.5    |
+|           | Group Training w/ RS  | 0~15K           | 12.1    | 8.8    | 12.0   | 10.9     | 9.0    | 8.4     | 7.1     | 8.5    | 8.8    |
+|           | 0~30K                 | 12.0            | 8.8     | 12.0   | 10.9   | 9.0      | 8.4    | 7.2     | 8.5     | 8.7    |        |
+| PM        | Group Training w/ OPS | 0~15K           | 11.1    | 8.1    | 10.6   | 9.4      | 8.2    | 7.6     | 6.4     | 7.6    | 8.1    |
+|           | 0~30K                 | 11.1            | 8.0     | 10.6   | 9.3    | 8.4      | 7.6    | 6.4     | 7.6     | 8.1    |        |
+|           | 3DGS*                 | –               | 1450    | 858    | 1391   | 1163     | 896    | 296     | 284     | 428    | 366    |
+| Size      | Group Training w/ RS  | 0~15K           | 1516    | 1019   | 1474   | 1457     | 1106   | 408     | 348     | 439    | 397    |
+|           | 0~30K                 | 1491            | 1016    | 1472   | 1452   | 1105     | 407    | 349     | 439     | 390    |        |
+|           | Group Training w/ OPS | 0~15K           | 1192    | 795    | 1083   | 1078     | 899    | 267     | 225     | 277    | 287    |
+| Time      | Group Training w/ OPS | 0~30K           | 1195    | 790    | 1084   | 1060     | 921    | 267     | 225     | 275    | 291    |
+|           | 0~15K                 | 31.2            | 24.2    | 33.2   | 28.7   | 25.0     | 22.1   | 24.3    | 27.6    | 23.3   |        |
+|           | 0~30K                 | 24.8            | 20.1    | 27.3   | 23.6   | 20.3     | 20.6   | 21.7    | 24.2    | 20.6   |        |
+| Time      | Group Training w/ OPS | 0~15K           | 26.9    | 21.1   | 27.4   | 23.5     | 22.0   | 18.5    | 20.4    | 22.4   | 20.6   |
+|           | 0~30K                 | 21.8            | 17.9    | 23.2   | 19.4   | 18.4     | 17.4   | 18.7    | 20.4    | 18.8   |        |
+
+Table 10. Comprehensive quantitative evaluation results on the Mip-NeRF360 [1] reconstructed by 3DGS [12].
+
+|                            | Grouping Iterations | Train           |                 |                    |                 |                   |                   | Truck           |                 |                    |                 |                   |                   |
+|----------------------------|---------------------|-----------------|-----------------|--------------------|-----------------|-------------------|-------------------|-----------------|-----------------|--------------------|-----------------|-------------------|-------------------|
+|                            |                     | PSNR $\uparrow$ | SSIM $\uparrow$ | LPIPS $\downarrow$ | PM $\downarrow$ | Size $\downarrow$ | Time $\downarrow$ | PSNR $\uparrow$ | SSIM $\uparrow$ | LPIPS $\downarrow$ | PM $\downarrow$ | Size $\downarrow$ | Time $\downarrow$ |
+| 3D Gaussian Splatting [12] | –                   | 21.097          | 0.802           | 0.218              | –               | –                 | –                 | 25.187          | 0.879           | 0.148              | –               | –                 | –                 |
+| 3D Gaussian Splatting*     | –                   | 21.985          | 0.815           | 0.2063             | 3.6             | 257               | 12.5              | 25.409          | 0.882           | 0.1464             | 5.5             | 610               | 17.5              |
+| Group Training w/ RS       | 0~15K               | 22.064          | 0.818           | 0.2031             | 3.9             | 278               | 11.7              | 25.482          | 0.885           | 0.1375             | 6.3             | 714               | 17.5              |
+|                            | 0~30K               | 21.910          | 0.812           | 0.2185             | 3.8             | 273               | 10.1              | 25.495          | 0.884           | 0.1460             | 6.3             | 716               | 14.4              |
+| Group Training w/ OPS      | 0~15K               | 22.159          | 0.818           | 0.2040             | 3.6             | 228               | 10.7              | 25.524          | 0.884           | 0.1411             | 5.5             | 539               | 14.9              |
+|                            | 0~30K               | 22.156          | 0.816           | 0.2104             | 3.6             | 227               | 9.3               | 25.549          | 0.884           | 0.1424             | 5.5             | 540               | 12.6              |
+
+Table 11. Comprehensive quantitative evaluation results on the Tanks&Temples [14] reconstructed by 3DGS [12].
+
+|       | Grouping Iterations   | Blender [21] |        |        |        |        |           |        |        |        |
+|-------|-----------------------|--------------|--------|--------|--------|--------|-----------|--------|--------|--------|
+|       |                       | chair        | drumps | ficus  | hotdog | lego   | materials | mic    | ship   |        |
+| PSNR  | 3DGS [12]             | –            | 33.83  | 26.15  | 34.87  | 37.72  | 35.78     | 30.00  | 35.36  | 30.80  |
+|       | 3DGS*                 | –            | 35.581 | 26.258 | 35.481 | 38.004 | 36.062    | 30.461 | 36.649 | 31.677 |
+|       | Group Training w/ RS  | 0~15K        | 35.736 | 26.273 | 35.494 | 38.242 | 36.580    | 30.675 | 36.842 | 31.829 |
+| PSNR  | 0~30K                 | 35.637       | 26.224 | 35.436 | 38.142 | 36.441 | 30.588    | 36.786 | 31.765 |        |
+|       | Group Training w/ OPS | 0~15K        | 35.688 | 26.270 | 35.487 | 38.145 | 36.435    | 30.569 | 36.719 | 31.800 |
+|       | 0~30K                 | 35.623       | 26.227 | 35.467 | 38.017 | 36.335 | 30.452    | 36.654 | 31.692 |        |
+| SSIM  | 3DGS*                 | –            | 0.988  | 0.955  | 0.987  | 0.985  | 0.983     | 0.960  | 0.993  | 0.906  |
+|       | Group Training w/ RS  | 0~15K        | 0.988  | 0.955  | 0.987  | 0.986  | 0.985     | 0.962  | 0.993  | 0.909  |
+|       | 0~30K                 | 0.988        | 0.956  | 0.987  | 0.987  | 0.985  | 0.963     | 0.993  | 0.910  |        |
+| LPIPS | Group Training w/ OPS | 0~15K        | 0.988  | 0.955  | 0.987  | 0.986  | 0.984     | 0.962  | 0.993  | 0.909  |
+|       | 0~30K                 | 0.988        | 0.955  | 0.987  | 0.986  | 0.984  | 0.961     | 0.992  | 0.909  |        |
+|       | 3DGS*                 | –            | 0.0104 | 0.0367 | 0.0118 | 0.0201 | 0.0161    | 0.0370 | 0.0064 | 0.1060 |
+| LPIPS | Group Training w/ RS  | 0~15K        | 0.0097 | 0.0355 | 0.0117 | 0.0170 | 0.0131    | 0.0340 | 0.0061 | 0.0998 |
+|       | 0~30K                 | 0.0107       | 0.0357 | 0.0118 | 0.0184 | 0.0140 | 0.0351    | 0.0063 | 0.1037 |        |
+|       | Group Training w/ OPS | 0~15K        | 0.0099 | 0.0359 | 0.0118 | 0.0181 | 0.0139    | 0.0356 | 0.0064 | 0.1016 |
+| PM    | Group Training w/ OPS | 0~30K        | 0.0102 | 0.0364 | 0.0119 | 0.0189 | 0.0143    | 0.0367 | 0.0065 | 0.1042 |
+|       | 3DGS*                 | –            | 3.1    | 2.9    | 2.7    | 2.6    | 2.9       | 2.6    | 2.6    | 2.8    |
+|       | Group Training w/ RS  | 0~15K        | 2.9    | 2.8    | 2.6    | 2.7    | 3.0       | 2.6    | 2.6    | 2.8    |
+| PM    | Group Training w/ OPS | 0~30K        | 2.9    | 2.8    | 2.6    | 2.7    | 3.0       | 2.6    | 2.6    | 2.8    |
+|       | Group Training w/ OPS | 0~15K        | 2.8    | 2.7    | 2.5    | 2.6    | 2.8       | 2.6    | 2.6    | 2.7    |
+|       | 0~30K                 | 2.8          | 2.7    | 2.5    | 2.6    | 2.8    | 2.5       | 2.6    | 2.7    |        |
+| Size  | 3DGS*                 | –            | 116    | 92     | 63     | 44     | 82        | 39     | 46     | 66     |
+|       | Group Training w/ RS  | 0~15K        | 88     | 78     | 39     | 46     | 97        | 47     | 42     | 69     |
+|       | 0~30K                 | 87           | 78     | 39     | 47     | 97     | 47        | 43     | 69     |        |
+| Time  | Group Training w/ OPS | 0~15K        | 59     | 57     | 27     | 31     | 58        | 32     | 30     | 49     |
+|       | 0~30K                 | 61           | 58     | 27     | 31     | 58     | 30        | 30     | 49     |        |
+|       | 3DGS*                 | –            | 7.4    | 6.6    | 5.3    | 5.9    | 6.5       | 4.9    | 5.3    | 6.6    |
+| Time  | Group Training w/ RS  | 0~15K        | 6.0    | 5.7    | 4.5    | 6.0    | 6.4       | 5.2    | 4.8    | 6.7    |
+|       | 0~30K                 | 5.5          | 5.3    | 4.3    | 5.5    | 5.8    | 4.9       | 4.6    | 6.2    |        |
+|       | Group Training w/ OPS | 0~15K        | 5.3    | 5.3    | 4.1    | 5.2    | 5.3       | 4.6    | 4.5    | 5.8    |
+| Time  | Group Training w/ OPS | 0~30K        | 5.1    | 5.0    | 4.0    | 5.0    | 5.0       | 4.5    | 4.2    | 5.5    |
+
+Table 12. Comprehensive quantitative evaluation results on the Blender [21] reconstructed by 3DGS [12].
+
+|                       | Grouping Iterations | Dr. Johnson |        |         |      |        |        | Playroom |        |         |      |        |        |
+|-----------------------|---------------------|-------------|--------|---------|------|--------|--------|----------|--------|---------|------|--------|--------|
+|                       |                     | PSNR ↑      | SSIM ↑ | LPIPS ↓ | PM ↓ | Size ↓ | Time ↓ | PSNR ↑   | SSIM ↑ | LPIPS ↓ | PM ↓ | Size ↓ | Time ↓ |
+| Mip-Splatting*        | –                   | 28.711      | 0.898  | 0.2431  | 10.5 | 981    | 39.3   | 30.005   | 0.907  | 0.2348  | 7.4  | 673    | 30.8   |
+| Group Training w/ RS  | 0~15K               | 27.957      | 0.892  | 0.2526  | 10.1 | 898    | 34.3   | 29.901   | 0.908  | 0.2335  | 8.0  | 749    | 29.1   |
+|                       | 0~30K               | 28.500      | 0.902  | 0.2486  | 10.1 | 902    | 28.2   | 30.283   | 0.914  | 0.2354  | 8.0  | 748    | 24.7   |
+| Group Training w/ OPS | 0~15K               | 29.145      | 0.903  | 0.2393  | 9.4  | 732    | 31.0   | 30.185   | 0.910  | 0.2334  | 6.6  | 520    | 25.2   |
+|                       | 0~30K               | 29.271      | 0.904  | 0.2407  | 9.4  | 734    | 26.0   | 30.305   | 0.911  | 0.2360  | 6.6  | 518    | 22.0   |
+
+Table 13. Comprehensive quantitative evaluation results on the DeepBlending [9] reconstructed by Mip-Splatting [33].
+
+|                | Grouping Iterations   | Mip-NeRF360 [1] |         |        |        |          |        |         |         |        |        |
+|----------------|-----------------------|-----------------|---------|--------|--------|----------|--------|---------|---------|--------|--------|
+|                |                       | bicycle         | flowers | garden | stump  | treehill | bonsai | counter | kitchen | room   |        |
+| Mip-Splatting* | –                     | 25.535          | 21.753  | 27.603 | 26.874 | 22.304   | 32.301 | 29.214  | 31.803  | 31.740 |        |
+| PSNR           | Group Training w/ RS  | 0~15K           | 25.664  | 21.960 | 27.726 | 27.124   | 22.371 | 32.299  | 29.291  | 31.719 | 31.756 |
+|                | 0~30K                 | 25.784          | 22.257  | 27.881 | 27.446 | 22.711   | 32.381 | 29.084  | 31.510  | 31.682 |        |
+|                | Group Training w/ OPS | 0~15K           | 25.651  | 21.852 | 27.825 | 27.166   | 22.411 | 32.745  | 29.330  | 31.870 | 31.721 |
+| SSIM           | Group Training w/ RS  | 0~15K           | 0.800   | 0.653  | 0.881  | 0.805    | 0.647  | 0.949   | 0.917   | 0.932  | 0.926  |
+|                | 0~30K                 | 0.803           | 0.656   | 0.882  | 0.816  | 0.658    | 0.947  | 0.914   | 0.931   | 0.925  |        |
+|                | Group Training w/ OPS | 0~15K           | 0.796   | 0.648  | 0.879  | 0.803    | 0.645  | 0.948   | 0.915   | 0.932  | 0.926  |
+| LPIPS          | Group Training w/ OPS | 0~15K           | 0.796   | 0.646  | 0.879  | 0.804    | 0.646  | 0.948   | 0.915   | 0.931  | 0.926  |
+|                | Mip-Splatting*        | –               | 0.1670  | 0.2727 | 0.0950 | 0.1889   | 0.2740 | 0.1881  | 0.1864  | 0.1194 | 0.2011 |
+|                | Group Training w/ RS  | 0~15K           | 0.1607  | 0.2628 | 0.0895 | 0.1736   | 0.2619 | 0.1823  | 0.1807  | 0.1163 | 0.1995 |
+| PM             | Group Training w/ RS  | 0~15K           | 0.1708  | 0.2748 | 0.0933 | 0.1751   | 0.2704 | 0.1874  | 0.1891  | 0.1213 | 0.2050 |
+|                | Group Training w/ OPS | 0~15K           | 0.1655  | 0.2657 | 0.0922 | 0.1782   | 0.2683 | 0.1843  | 0.1847  | 0.1185 | 0.2026 |
+|                | Mip-Splatting*        | –               | 0.1673  | 0.2710 | 0.0929 | 0.1799   | 0.2723 | 0.1861  | 0.1864  | 0.1200 | 0.2029 |
+| Size           | Mip-Splatting*        | –               | 15.6    | 9.5    | 12.3   | 10.9     | 10.1   | 8.4     | 7.4     | 9.2    | 9.7    |
+|                | Group Training w/ RS  | 0~15K           | 19.2    | 12.6   | 17.2   | 15.5     | 13.7   | 9.6     | 8.3     | 9.9    | 10.0   |
+|                | Mip-Splatting*        | 0~30K           | 19.2    | 12.7   | 17.1   | 15.6     | 13.7   | 9.6     | 8.3     | 9.9    | 10.0   |
+| Time           | Group Training w/ OPS | 0~15K           | 15.8    | 10.6   | 13.9   | 12.4     | 11.4   | 8.4     | 7.2     | 8.4    | 9.0    |
+|                | Mip-Splatting*        | –               | 15.7    | 10.6   | 13.9   | 12.4     | 11.5   | 8.4     | 7.2     | 8.4    | 9.0    |
+|                | Group Training w/ OPS | 0~15K           | 1949    | 1550   | 2194   | 2083     | 1763   | 560     | 491     | 615    | 558    |
+| Size           | Group Training w/ OPS | 0~15K           | 2489    | 1570   | 2187   | 2094     | 1764   | 560     | 490     | 610    | 560    |
+|                | Mip-Splatting*        | –               | 1968    | 1230   | 1684   | 1564     | 1410   | 379     | 329     | 388    | 403    |
+|                | Mip-Splatting*        | –               | 1961    | 1230   | 1684   | 1562     | 1429   | 378     | 329     | 394    | 412    |
+| Time           | Group Training w/ RS  | 0~15K           | 43.7    | 39.9   | 57.7   | 46.3     | 42.1   | 32.2    | 34.1    | 40.3   | 32.8   |
+|                | Mip-Splatting*        | 0~30K           | 35.1    | 32.5   | 45.3   | 37.0     | 34.2   | 28.8    | 30.0    | 34.2   | 28.9   |
+|                | Group Training w/ OPS | 0~15K           | 47.9    | 34.3   | 47.7   | 37.4     | 36.2   | 27.2    | 28.7    | 32.0   | 28.5   |
+| Time           | Group Training w/ OPS | 0~30K           | 37.7    | 28.3   | 38.8   | 30.0     | 29.5   | 24.9    | 26.1    | 28.5   | 25.9   |
+
+Table 14. Comprehensive quantitative evaluation results on the Mip-NeRF360 [1] reconstructed by Mip-Splatting [33].
+
+|                       | Grouping Iterations | Train  |        |         |      |        | Truck  |        |        |         |      |        |        |
+|-----------------------|---------------------|--------|--------|---------|------|--------|--------|--------|--------|---------|------|--------|--------|
+|                       |                     | PSNR ↑ | SSIM ↑ | LPIPS ↓ | PM ↓ | Size ↓ | Time ↓ | PSNR ↑ | SSIM ↑ | LPIPS ↓ | PM ↓ | Size ↓ | Time ↓ |
+| Mip-Splatting*        | –                   | 21.783 | 0.826  | 0.1892  | 4.4  | 351    | 19.5   | 25.714 | 0.893  | 0.1232  | 6.8  | 767    | 26.5   |
+| Group Training w/ RS  | 0~15K               | 22.004 | 0.829  | 0.1861  | 4.8  | 405    | 18.9   | 25.901 | 0.896  | 0.1146  | 9.2  | 1123   | 30.3   |
+|                       | 0~30K               | 22.358 | 0.829  | 0.1975  | 4.7  | 403    | 16.3   | 25.934 | 0.896  | 0.1221  | 9.2  | 1119   | 24.4   |
+| Group Training w/ OPS | 0~15K               | 21.994 | 0.830  | 0.1859  | 4.4  | 346    | 17.4   | 25.921 | 0.896  | 0.1178  | 7.5  | 874    | 25.9   |
+|                       | 0~30K               | 22.167 | 0.829  | 0.1915  | 4.4  | 348    | 14.7   | 25.991 | 0.895  | 0.1205  | 7.6  | 876    | 21.1   |
+
+Table 15. Comprehensive quantitative evaluation results on the Tanks&Temples [14] reconstructed by Mip-Splatting [33].
+
+|                | Grouping Iterations   | Blender [21] |        |        |        |        |           |        |        |        |
+|----------------|-----------------------|--------------|--------|--------|--------|--------|-----------|--------|--------|--------|
+|                |                       | chair        | drumps | ficus  | hotdog | lego   | materials | mic    | ship   |        |
+| Mip-Splatting* | –                     | 35.773       | 26.357 | 35.890 | 38.267 | 36.354 | 30.645    | 36.934 | 31.738 |        |
+| PSNR           | Group Training w/ RS  | 0~15K        | 36.078 | 26.367 | 35.930 | 38.474 | 36.883    | 30.839 | 37.152 | 31.902 |
+|                |                       | 0~30K        | 35.910 | 26.293 | 35.865 | 38.376 | 36.860    | 30.780 | 36.968 | 31.931 |
+|                | Group Training w/ OPS | 0~15K        | 35.981 | 26.369 | 35.912 | 38.396 | 36.748    | 30.756 | 37.067 | 31.823 |
+| 0~30K          |                       | 35.958       | 26.363 | 35.914 | 38.326 | 36.739 | 30.704    | 37.049 | 31.824 |        |
+| Mip-Splatting* | –                     | 0.988        | 0.956  | 0.988  | 0.986  | 0.984  | 0.961     | 0.993  | 0.907  |        |
+| SSIM           | Group Training w/ RS  | 0~15K        | 0.989  | 0.956  | 0.988  | 0.987  | 0.986     | 0.963  | 0.993  | 0.909  |
+|                |                       | 0~30K        | 0.989  | 0.957  | 0.988  | 0.987  | 0.986     | 0.964  | 0.993  | 0.911  |
+|                | Group Training w/ OPS | 0~15K        | 0.989  | 0.956  | 0.988  | 0.987  | 0.985     | 0.963  | 0.993  | 0.909  |
+| 0~30K          |                       | 0.989        | 0.956  | 0.988  | 0.987  | 0.985  | 0.963     | 0.993  | 0.909  |        |
+| Mip-Splatting* | –                     | 0.0109       | 0.0366 | 0.0111 | 0.0186 | 0.0150 | 0.0359    | 0.0062 | 0.1022 |        |
+| LPIPS          | Group Training w/ RS  | 0~15K        | 0.0101 | 0.0355 | 0.0110 | 0.0163 | 0.0126    | 0.0330 | 0.0059 | 0.0980 |
+|                |                       | 0~30K        | 0.0110 | 0.0358 | 0.0111 | 0.0173 | 0.0132    | 0.0341 | 0.0060 | 0.0998 |
+|                | Group Training w/ OPS | 0~15K        | 0.0105 | 0.0360 | 0.0111 | 0.0169 | 0.0133    | 0.0343 | 0.0060 | 0.0997 |
+| 0~30K          |                       | 0.0105       | 0.0359 | 0.0111 | 0.0171 | 0.0134 | 0.0349    | 0.0061 | 0.1001 |        |
+| Mip-Splatting* | –                     | 3.0          | 3.0    | 2.7    | 2.7    | 2.9    | 2.6       | 2.8    | 2.9    |        |
+| PM             | Group Training w/ RS  | 0~15K        | 3.3    | 3.3    | 2.9    | 2.9    | 3.3       | 2.8    | 3.0    | 3.4    |
+|                |                       | 0~30K        | 3.3    | 3.4    | 2.9    | 2.9    | 3.3       | 2.8    | 3.0    | 3.4    |
+|                | Group Training w/ OPS | 0~15K        | 3.1    | 3.1    | 2.7    | 2.7    | 3.1       | 2.7    | 2.9    | 3.1    |
+| 0~30K          |                       | 3.1          | 3.1    | 2.7    | 2.7    | 3.1    | 2.7       | 2.9    | 3.1    |        |
+| Mip-Splatting* | –                     | 90           | 98     | 51     | 51     | 76     | 40        | 64     | 83     |        |
+| Size           | Group Training w/ RS  | 0~15K        | 141    | 146    | 79     | 70     | 136       | 71     | 94     | 146    |
+|                |                       | 0~30K        | 141    | 147    | 80     | 71     | 136       | 71     | 94     | 146    |
+|                | Group Training w/ OPS | 0~15K        | 109    | 115    | 57     | 55     | 98        | 51     | 72     | 109    |
+| 0~30K          |                       | 109          | 115    | 57     | 55     | 99     | 51        | 72     | 109    |        |
+| Mip-Splatting* | –                     | 9.2          | 8.8    | 6.2    | 8.4    | 8.8    | 6.2       | 9.3    | 10.7   |        |
+| Time           | Group Training w/ RS  | 0~15K        | 9.6    | 9.7    | 6.9    | 8.8    | 9.8       | 7.3    | 9.8    | 12.1   |
+|                |                       | 0~30K        | 8.5    | 8.7    | 6.4    | 8.1    | 8.8       | 6.9    | 8.5    | 10.8   |
+|                | Group Training w/ OPS | 0~15K        | 8.6    | 8.8    | 6.2    | 7.8    | 8.6       | 6.6    | 8.4    | 10.4   |
+| 0~30K          |                       | 7.8          | 8.0    | 6.0    | 7.3    | 7.7    | 6.3       | 7.6    | 9.6    |        |
+
+Table 16. Comprehensive quantitative evaluation results on the Blender [21] reconstructed by Mip-Splatting [33].

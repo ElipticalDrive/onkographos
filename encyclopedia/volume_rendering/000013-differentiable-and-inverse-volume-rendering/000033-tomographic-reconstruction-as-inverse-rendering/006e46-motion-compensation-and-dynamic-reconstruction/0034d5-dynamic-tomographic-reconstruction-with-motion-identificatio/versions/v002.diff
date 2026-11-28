@@ -1,0 +1,199 @@
+--- v001.md
++++ v002.md
+@@ -4,18 +4,18 @@
+ 
+ ## Overview
+-DynTomo is a staggered iterative method for reconstructing deforming 3D volumes from 2D projection data acquired over time, simultaneously identifying the full 2D space-time displacement field [S1]. It solves the problem of motion artifacts in tomography by alternating between algebraic volume reconstruction (DynART) and projection-based digital volume correlation (PDVC) for motion identification [S1]. Unlike standard Algebraic Reconstruction Techniques (ART) which produce blurry or split reconstructions under large displacements, DynTomo corrects for motion to yield sharp edges and accurate gray levels [S1]. It builds on [Tomographic reconstruction as inverse rendering](45-tomographic-reconstruction-as-inverse-rendering.md) by incorporating a parametric displacement model into the optimization loop.
++DynTomo is a staggered iterative method for reconstructing deforming 3D volumes from 2D projection data acquired over time, simultaneously identifying the full 2D space-time displacement field [S1]. It solves the problem of motion artifacts in tomography by alternating between algebraic volume reconstruction (DynART) and projection-based digital volume correlation (PDVC) for motion identification [S1]. Unlike standard Algebraic Reconstruction Techniques (ART) which produce blurry or split reconstructions under large displacements, DynTomo corrects for motion to yield sharp edges and accurate gray levels [S1]. It builds on [Tomographic reconstruction as inverse rendering](45-tomographic-reconstruction-as-inverse-rendering.md) by incorporating a parametric displacement model into the optimization loop [S1].
+ 
+ ## How it works
+ **Inputs:**
+-*   $p(r, \theta, t)$: Acquired sinogram (projections) at detector coordinates $r$, angles $\theta$, and time steps $t \in \{1, \dots, N_t\}$.
+-*   $N_t$: Number of time steps (projections).
+-*   $N_\theta$: Number of angles.
+-*   $N_{scale}$: Number of multiscale levels.
+-*   $\epsilon$: Convergence threshold for inner loops.
+-*   Basis functions: $N_\tau$ time functions $\phi_i(t)$ and $N_s$ spatial shape functions $\Phi_j(x)$.
++*   $p(r, \theta, t)$: Acquired sinogram (projections) at detector coordinates $r$, angles $\theta$, and time steps $t \in \{1, \dots, N_t\}$ [S1].
++*   $N_t$: Number of time steps (projections) [S1].
++*   $N_\theta$: Number of angles [S1].
++*   $N_{scale}$: Number of multiscale levels [S1].
++*   $\epsilon$: Convergence threshold for inner loops [S1].
++*   Basis functions: $N_\tau$ time functions $\phi_i(t)$ and $N_s$ spatial shape functions $\Phi_j(x)$ [S1].
+ 
+ **Outputs:**
+-*   $f(x)$: Reconstructed reference volume.
+-*   $u(x, t)$: Space-time displacement field.
++*   $f(x)$: Reconstructed reference volume [S1].
++*   $u(x, t)$: Space-time displacement field [S1].
+ 
+ **Data Structures:**
+@@ -23,5 +23,5 @@
+     The displacement field is represented as a linear combination of basis functions:
+     $$ u(x, t) = \sum_{i=1}^{N_\tau} \sum_{j=1}^{N_s} \alpha_{ij} \phi_i(t) \Phi_j(x) $$
+-    where $\alpha_{ij}$ are the amplitude coefficients. The reference state is defined at $t=0$ such that $u(x, 0) = 0$, implying $\phi_i(0) = 0$ [S1].
++    where $\alpha_{ij}$ are the amplitude coefficients [S1]. The reference state is defined at $t=0$ such that $u(x, 0) = 0$, implying $\phi_i(0) = 0$ [S1].
+ *   **Spatial Basis:**
+     $\Phi_j(x)$ are composed of $C^4$ mesh elements (4-node square elements with bilinear interpolation) [S1]. In the source tests, $N_s = 18$ degrees of freedom [S1].
+@@ -31,63 +31,105 @@
+     Defined as $G_\lambda(r) = \frac{1}{2\pi\lambda^2} \exp\left(-\frac{|r|^2}{2\lambda^2}\right)$ [S1].
+ 
+-**Algorithm Steps:**
++**Pseudocode:**
++```python
++def DynTomo(p, N_t, N_theta, N_scale, eps, N_tau, N_s, phi, Phi):
++    # p: sinogram array [N_theta, N_t, H, W]
++    # phi: time basis functions [N_tau]
++    # Phi: spatial basis functions [N_s]
++    u = zeros(volume_shape + (N_t,))  # Displacement field u(x, t)
++    
++    for i in range(N_scale, -1, -1):
++        lam = 2**i
++        # Convolve recorded projections with Gaussian kernel
++        G_lam = (1/(2*pi*lam**2)) * exp(-r_norm**2 / (2*lam**2))
++        p_check = convolve(p, G_lam)
++        
++        rho = p_check.copy()
++        Residual = 1 + eps  # Force first loop
++        
++        while Residual > eps:
++            # 1. Volume Reconstruction (DynART)
++            f = DynART(p_check, u, N_t, N_theta, eps)
++            
++            # 2. Motion Identification (PDVC)
++            u = PDVC(f, p_check, u, N_t, N_theta, eps, N_tau, N_s, phi, Phi)
++            
++            # 3. Scale Residual Update
++            rho_old = rho.copy()
++            f_warped = warp(f, u)
++            rho = p_check - forward_projection(f_warped)
++            Residual = norm(rho - rho_old)
++            
++    return f, u
+ 
+-1.  **Initialization:**
+-    *   Set displacement field $u(x, t) \leftarrow 0$ [S1].
+-    *   Iterate scales from $i = N_{scale}$ down to $0$.
+-    *   Set scale parameter $\lambda = 2^i$ [S1].
+-    *   Convolve recorded projections $p(r, \theta)$ with Gaussian kernel $G_\lambda$ to create filtered projections $\check{p}_\lambda(r, \theta)$:
+-        $$ \check{p}_\lambda(r, \theta) = \sum_{r'} G_\lambda(r') p(r - r', \theta) $$
+-        [S1].
+-    *   Initialize residual tracking: $\rho \leftarrow \check{p}_\lambda$, $\text{Residual} \leftarrow 1 + \epsilon$ (to force first loop) [S1].
++def DynART(p_check, u, N_t, N_theta, eps):
++    f = zeros(volume_shape)
++    n = 1
++    perm = permutation(N_t)  # Permutation over acquisition times
++    
++    for _ in range(60):  # N_DynART iterations
++        for t_idx in range(N_t):
++            tau = perm[t_idx]
++            # Warp volume to current time
++            f_tilde = warp(f, u[:, tau])
++            # Forward projection
++            proj = forward_projection(f_tilde, theta=tau)
++            # Residual
++            rho = p_check[:, tau] - proj
++            # Backprojection
++            df_tilde = back_projection(rho, theta=tau)
++            # Unwarp update to reference space
++            df = warp(df_tilde, -u[:, tau])
++            # Update volume with normalization factor Δf̃ from source
++            f = f + df / max(df_tilde)
++            # Apply constraints (e.g., positivity)
++            f = clip(f, 0, None)
++            n += 1
++    return f
+ 
+-2.  **Multiscale Iteration Loop:**
+-    While $\text{Residual} > \epsilon$:
++def PDVC(f, p_check, u, N_t, N_theta, eps, N_tau, N_s, phi, Phi):
++    u0 = u.copy()
++    # Initialize residual
++    f_warped = warp(f, u)
++    rho_old = p_check - forward_projection(f_warped)
++    Progress = 1 + eps
+     
+-    2.1. **Volume Reconstruction (DynART):**
+-    Reconstruct volume $f(x)$ using DynART with filtered projections $\check{p}_\lambda$ and current displacement $u$.
+-    
+-    *DynART Procedure:*
+-    *   Initialize $f^{(0)}(x) \leftarrow 0$, iteration counter $n \leftarrow 1$ [S1].
+-    *   Choose a permutation $\pi$ over $N_t$ acquisition times [S1].
+-    *   For $i \leftarrow 1$ to $N_{\text{DynART}}$ (number of inner iterations):
+-        *   For $t \leftarrow 1$ to $N_t$:
+-            *   $\tau \leftarrow \pi(t)$ [S1].
+-            *   **Warp:** Compute warped volume estimate $\tilde{f}^{(n)}(x, \tau) = f^{(n)}(x + u(x, \tau))$ [S1].
+-            *   **Residual:** Compute projected residual $\rho(r, \tau) = p(r, \tau) - R_\theta(\tau)[\tilde{f}^{(n)}(x, \tau)]$, where $R_\theta$ is the forward projection operator [S1].
+-            *   **Backproject:** Compute update in warped space $\Delta \tilde{f}^{(n+1)}(x) = B_\theta(\tau)[\rho(r, \tau)]$, where $B_\theta$ is the backprojection operator [S1].
+-            *   **Unwarp:** Compute unwarped update $\Delta f^{(n+1)}(x) = \Delta \tilde{f}^{(n+1)}(x - u(x, \tau))$ [S1].
+-            *   **Update:** Update volume $f^{(n+1)}(x) = f^{(n)}(x) + \frac{\Delta f^{(n+1)}(x)}{\Delta \tilde{f}}$. Apply constraints (e.g., positivity) [S1].
+-            *   Increment $n \leftarrow n + 1$ [S1].
+-    *   Return $f(x) = f^{(n)}(x)$ [S1].
+-
+-    2.2. **Motion Identification (PDVC):**
+-    Update displacement $u$ using PDVC with volume $f$, filtered projections $\check{p}_\lambda$, and previous displacement $u$.
+-    
+-    *PDVC Procedure:*
+-    *   Initialize $u(x, t) \leftarrow u_0(x, t)$ (current estimate) [S1].
+-    *   Initialize $\rho_{\text{old}}(r, t) \leftarrow p(r, t) - R_\theta(t)[f^\lambda(x, t)]$ [S1]. Note: $f^\lambda$ is the volume reconstructed at the current scale.
+-    *   Initialize $\text{Progress} \leftarrow 1 + \epsilon$ [S1].
+-    *   While $\text{Progress} > \epsilon$:
+-        *   **Advection:** Compute warped volume $\tilde{f}(x, t) = f^\lambda(x + u(x, t))$ [S1].
+-        *   **Residual:** Compute current residual $\rho(r, t) = p(r, t) - R_\theta(t)[\tilde{f}(x, t)]$ [S1].
+-        *   **Convergence Check:** $\text{Progress} \leftarrow \|\rho(r, t) - \rho_{\text{old}}(r, t)\|$ [S1].
+-        *   **Sensitivity Computation:**
+-            For $i \leftarrow 1$ to $N_\tau$ and $j \leftarrow 1$ to $N_s$:
+-            *   Compute spatial gradient of warped volume $\nabla \tilde{f}(x, t)$ [S1].
+-            *   Compute $\chi_j(x, t) = R_\theta(t)[\Phi_j(x) \nabla \tilde{f}(x, t)]$ [S1].
+-            *   Compute sensitivity $S_{ij}(r, t) = \phi_i(t) \chi_j(x, t)$ [S1].
+-        *   **Linear System Assembly:**
+-            *   Hessian $H_{ijkl} = \sum_{r,t} S_{ij}(r, t) S_{kl}(r, t)$ [S1].
+-            *   Second member $b_{ij} = \sum_{r,t} \rho(r, t) S_{ij}(r, t)$ [S1].
+-        *   **Solve:** Solve linear system $[H] \delta\alpha = b$ for displacement amplitude correction $\delta\alpha$ [S1].
+-        *   **Update:** Update displacement $u(x, t) \leftarrow u(x, t) + \delta\alpha \phi(t) \Phi(x)$ [S1].
+-        *   **Store:** $\rho_{\text{old}}(r, t) \leftarrow \rho(r, t)$ [S1].
+-    *   Return updated $u(x, t)$ [S1].
+-
+-    2.3. **Scale Residual Update:**
+-    *   $\rho_{\text{old}} \leftarrow \rho$ [S1].
+-    *   Compute $\rho(r, t)$ (using current $f$ and $u$) [S1].
+-    *   $\text{Residual} \leftarrow \|\rho - \rho_{\text{old}}\|$ [S1].
++    while Progress > eps:
++        f_warped = warp(f, u)
++        rho = p_check - forward_projection(f_warped)
++        Progress = norm(rho - rho_old)
++        
++        # Sensitivity computation
++        H = zeros((N_tau * N_s, N_tau * N_s))
++        b = zeros(N_tau * N_s)
++        
++        for i in range(N_tau):
++            for j in range(N_s):
++                # Compute projected sensitivities over all r, t
++                chi_j = zeros_like(p_check)
++                for t_idx in range(N_t):
++                    grad_f = gradient(f_warped[:, t_idx])
++                    chi_j[:, t_idx] = forward_projection(Phi[j] * grad_f, theta=t_idx)
++                S_ij = phi[i] * chi_j  # S_ij(r, t) = phi_i(t) * chi_j
++                
++                # Assemble Hessian and second member
++                for k in range(N_tau):
++                    for l in range(N_s):
++                        chi_k = zeros_like(p_check)
++                        for t_idx in range(N_t):
++                            grad_f = gradient(f_warped[:, t_idx])
++                            chi_k[:, t_idx] = forward_projection(Phi[l] * grad_f, theta=t_idx)
++                        S_kl = phi[k] * chi_k
++                        H[i*N_s + j, k*N_s + l] = sum(S_ij * S_kl)
++                b[i*N_s + j] = sum(rho * S_ij)
++                
++        # Solve linear system [H]δα = b
++        delta_alpha = solve(H, b)
++        # Update displacement field
++        u = u + reshape(delta_alpha, (N_tau, N_s)) * outer(phi, Phi)
++        rho_old = rho.copy()
++        
++    return u
++```
+ 
+ **Parameters:**

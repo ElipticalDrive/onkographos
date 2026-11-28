@@ -1,0 +1,194 @@
+--- v001.md
++++ v002.md
+@@ -67,5 +67,5 @@
+      $$ d = \text{voxelPos} - \text{rayPos} $$
+      Adjust $d$ based on direction signs:
+-     If $\text{dirSign}.x == 1$, $d.x = 1 - d.x$ (same for $y, z$).
++     If $\text{dirSign}.x == 1$, $d.x = 1 - d.x$ (same for $y, z$) [S1, S2, unofficial].
+      $$ d = d \times \text{projLength} $$
+      [S1, S2, unofficial]
+@@ -74,5 +74,5 @@
+    If `materialIndex != 0` and `texSize > 1`:
+    - Fetch initial voxel code:
+-     $$ \text{codes} = \text{texelFetch}(\text{u\_componentTex}, \text{ivec3}(\text{rayPos}.x + \text{rayPos}.y \times \text{texSize}, \text{rayPos}.z, \text{materialIndex}), \text{gs\_voxel\_material\_mipmap}.z).\text{xy} $$
++     $$ \text{codes} = \text{texelFetch}(\text{u\_componentTex}, \text{ivec3}(\text{rayPos}.x + \text{rayPos}.y \times \text{texSize}, \text{rayPos}.z, \text{materialIndex}), \text{gs\_neighbor\_material\_mipmap}.z).\text{xy} $$
+      [S1, S2, unofficial]
+    - While `(codes.y & voxelMask) == 0`:
+@@ -94,5 +94,5 @@
+        If $\text{rayPos} \ge \text{ivec3}(\text{texSize}, \text{texSize}, \text{texSize})$ or $\text{rayPos} < \text{ivec3}(0, 0, 0)$, discard fragment [S1, S2, unofficial].
+      - Fetch next voxel code:
+-       $$ \text{codes} = \text{texelFetch}(\text{u\_componentTex}, \text{ivec3}(\text{rayPos}.x + \text{rayPos}.y \times \text{texSize}, \text{rayPos}.z, \text{materialIndex}), \text{gs\_voxel\_material\_mipmap}.z).\text{xy} $$
++       $$ \text{codes} = \text{texelFetch}(\text{u\_componentTex}, \text{ivec3}(\text{rayPos}.x + \text{rayPos}.y \times \text{texSize}, \text{rayPos}.z, \text{materialIndex}), \text{gs\_neighbor\_material\_mipmap}.z).\text{xy} $$
+        [S1, S2, unofficial]
+ 
+@@ -115,20 +115,50 @@
+ ### Pseudocode
+ ```python
+-# Inputs: gs_objectPosition, gs_neighbor_material_mipmap, gs_texCoord, u_componentTex, c_mWorldView, c_mInverseWorldView, c_maxTexRes
+-# Outputs: fragColor
+-
+-def main():
++# Self-contained Python implementation of the GLSL fragment shader logic
++class Vec3:
++    def __init__(self, x, y, z): self.x, self.y, self.z = x, y, z
++    def __add__(self, o): return Vec3(self.x+o.x, self.y+o.y, self.z+o.z)
++    def __sub__(self, o): return Vec3(self.x-o.x, self.y-o.y, self.z-o.z)
++    def __mul__(self, s): return Vec3(self.x*s, self.y*s, self.z*s)
++    def __truediv__(self, s): return Vec3(self.x/s, self.y/s, self.z/s)
++    def __neg__(self): return Vec3(-self.x, -self.y, -self.z)
++    def abs(self): return Vec3(abs(self.x), abs(self.y), abs(self.z))
++    def normalize(self):
++        l = (self.x**2 + self.y**2 + self.z**2)**0.5
++        return Vec3(self.x/l, self.y/l, self.z/l) if l > 0 else Vec3(0,0,0)
++
++class IVec3:
++    def __init__(self, x, y, z): self.x, self.y, self.z = int(x), int(y), int(z)
++    def __add__(self, o): return IVec3(self.x+o.x, self.y+o.y, self.z+o.z)
++    def __sub__(self, o): return IVec3(self.x-o.x, self.y-o.y, self.z-o.z)
++
++def vec4(x, y, z, w): return (x, y, z, w)
++def mat3x3(m): return [[m[0][0], m[0][1], m[0][2]], [m[1][0], m[1][1], m[1][2]], [m[2][0], m[2][1], m[2][2]]]
++def texelFetch(tex, coord, lod): return tex[lod][coord[0], coord[1], coord[2]]
++def discard(): raise StopIteration("Fragment discarded")
++
++def main(gs_objectPosition, gs_neighbor_material_mipmap, gs_texCoord, u_componentTex, c_mWorldView, c_mInverseWorldView, c_maxTexRes):
+     # 1. Compute Component-Space Position
+-    chunkSpacePos = gs_objectPosition + gs_texCoord - 0.5
++    chunkSpacePos = gs_objectPosition + gs_texCoord - Vec3(0.5, 0.5, 0.5)
+     
+     # 2. Transform View Direction
+-    viewDir = normalize((vec4(chunkSpacePos, 1) * c_mWorldView).xyz)
+-    chunkSpaceDir = viewDir * mat3x3(c_mInverseWorldView)
++    w_view = c_mWorldView
++    viewDir_raw = (chunkSpacePos.x * w_view[0][0] + chunkSpacePos.y * w_view[1][0] + chunkSpacePos.z * w_view[2][0] + w_view[3][0],
++                   chunkSpacePos.x * w_view[0][1] + chunkSpacePos.y * w_view[1][1] + chunkSpacePos.z * w_view[2][1] + w_view[3][1],
++                   chunkSpacePos.x * w_view[0][2] + chunkSpacePos.y * w_view[1][2] + chunkSpacePos.z * w_view[2][2] + w_view[3][2])
++    viewDir = Vec3(*viewDir_raw).normalize()
++    
++    inv_view = mat3x3(c_mInverseWorldView)
++    chunkSpaceDir = Vec3(
++        viewDir.x * inv_view[0][0] + viewDir.y * inv_view[1][0] + viewDir.z * inv_view[2][0],
++        viewDir.x * inv_view[0][1] + viewDir.y * inv_view[1][1] + viewDir.z * inv_view[2][1],
++        viewDir.x * inv_view[0][2] + viewDir.y * inv_view[1][2] + viewDir.z * inv_view[2][2]
++    )
+     
+     # 3. Calculate Texture Resolution
+-    texSize = c_maxTexRes / (1 << gs_neighbor_material_mipmap.z)
++    texSize = c_maxTexRes // (1 << gs_neighbor_material_mipmap[2])
+     
+     # 4. Initialize Ray Marching
+-    dirSign = ivec3(1, 1, 1)
++    dirSign = IVec3(1, 1, 1)
+     if chunkSpaceDir.x < 0.0: dirSign.x = -1
+     if chunkSpaceDir.y < 0.0: dirSign.y = -1
+@@ -136,10 +166,10 @@
+     
+     voxelPos = gs_texCoord * (texSize - 0.00001)
+-    rayPos = ivec3(voxelPos)
+-    
+-    absDir = abs(chunkSpaceDir)
+-    projLength = 1.0 / (absDir + 0.0001)
+-    
+-    d = voxelPos - rayPos
++    rayPos = IVec3(int(voxelPos.x), int(voxelPos.y), int(voxelPos.z))
++    
++    absDir = chunkSpaceDir.abs()
++    projLength = Vec3(1.0 / (absDir.x + 0.0001), 1.0 / (absDir.y + 0.0001), 1.0 / (absDir.z + 0.0001))
++    
++    d = voxelPos - Vec3(float(rayPos.x), float(rayPos.y), float(rayPos.z))
+     if dirSign.x == 1: d.x = 1.0 - d.x
+     if dirSign.y == 1: d.y = 1.0 - d.y
+@@ -148,51 +178,43 @@
+     
+     # 5. Ray March Loop
+-    materialIndex = gs_neighbor_material_mipmap.x >> 24
++    materialIndex = gs_neighbor_material_mipmap[0] >> 24
+     if materialIndex != 0 and texSize > 1:
+-        # Compute voxel mask
+-        voxelMask = 0x40 | ((~gs_neighbor_material_mipmap.x) & 0x3f)
++        voxelMask = 0x40 | ((~gs_neighbor_material_mipmap[0]) & 0x3f)
+         
+-        # Fetch initial code
+-        texCoord = ivec3(rayPos.x + rayPos.y * texSize, rayPos.z, materialIndex)
+-        codes = texelFetch(u_componentTex, texCoord, gs_neighbor_material_mipmap.z).xy
++        texCoord = IVec3(rayPos.x + rayPos.y * texSize, rayPos.z, materialIndex)
++        codes = texelFetch(u_componentTex, texCoord, gs_neighbor_material_mipmap[2])
++        codes_x, codes_y = codes[0], codes[1]
+         
+-        while (codes.y & voxelMask) == 0:
+-            # Determine step direction
++        while (codes_y & voxelMask) == 0:
+             if d.x < d.y or d.z < d.y:
+                 if d.x < d.z:
+                     rayPos.x += dirSign.x
+-                    d.yz -= d.x
+-                    d.x = projLength.x
++                    d.y -= d.x; d.z -= d.x; d.x = projLength.x
+                 else:
+                     rayPos.z += dirSign.z
+-                    d.xy -= d.z
+-                    d.z = projLength.z
++                    d.x -= d.z; d.y -= d.z; d.z = projLength.z
+             else:
+                 rayPos.y += dirSign.y
+-                d.xz -= d.y
+-                d.y = projLength.y
++                d.x -= d.y; d.z -= d.y; d.y = projLength.y
+             
+-            # Boundary Check
+-            if any(rayPos >= ivec3(texSize, texSize, texSize)) or any(rayPos < ivec3(0, 0, 0)):
++            if rayPos.x >= texSize or rayPos.y >= texSize or rayPos.z >= texSize or rayPos.x < 0 or rayPos.y < 0 or rayPos.z < 0:
+                 discard()
+             
+-            # Fetch next code
+-            texCoord = ivec3(rayPos.x + rayPos.y * texSize, rayPos.z, materialIndex)
+-            codes = texelFetch(u_componentTex, texCoord, gs_neighbor_material_mipmap.z).xy
++            texCoord = IVec3(rayPos.x + rayPos.y * texSize, rayPos.z, materialIndex)
++            codes = texelFetch(u_componentTex, texCoord, gs_neighbor_material_mipmap[2])
++            codes_x, codes_y = codes[0], codes[1]
+     
+     # 6. Estimate Normal
+-    d = abs(d - projLength)
+-    normal = vec3(0.0)
++    d = Vec3(abs(d.x - projLength.x), abs(d.y - projLength.y), abs(d.z - projLength.z))
++    normal = Vec3(0.0, 0.0, 0.0)
+     if d.x < 0.0001:
+-        normal = -dirSign.x * vec3(c_mWorldView[0][0], c_mWorldView[1][0], c_mWorldView[2][0])
++        normal = Vec3(-dirSign.x * c_mWorldView[0][0], -dirSign.x * c_mWorldView[1][0], -dirSign.x * c_mWorldView[2][0])
+     elif d.y < 0.0001:
+-        normal = -dirSign.y * vec3(c_mWorldView[0][1], c_mWorldView[1][1], c_mWorldView[2][1])
++        normal = Vec3(-dirSign.y * c_mWorldView[0][1], -dirSign.y * c_mWorldView[1][1], -dirSign.y * c_mWorldView[2][1])
+     elif d.z < 0.0001:
+-        normal = -dirSign.z * vec3(c_mWorldView[0][2], c_mWorldView[1][2], c_mWorldView[2][2])
+-    
+-    normal = normalize(normal)
+-    
+-    # Output color (implementation specific)
+-    fragColor = vec4(1.0, 1.0, 1.0, 1.0) # Placeholder for shading
++        normal = Vec3(-dirSign.z * c_mWorldView[0][2], -dirSign.z * c_mWorldView[1][2], -dirSign.z * c_mWorldView[2][2])
++    
++    normal = normal.normalize()
++    return normal # Placeholder for fragColor
+ ```
+ 
+@@ -207,8 +229,8 @@
+ 
+ ### Ray Marching with Octant Masking
+-The parent method using octant-based traversal. This method replaces it with uniform grid ray marching through volume textures for better performance on dense data [S1, S2, unofficial].
++[Ray Marching with Octant Masking](2488-ray-marching-with-octant-masking.md)
+ 
+ ### Gigavoxels
+-A related technique using octrees for efficient ray-casting of 3D textures. This method differs by using uniform grids and volume textures, avoiding the complexity of octree traversal for dynamic transformations [S2, unofficial].
++[Gigavoxels](https://en.wikipedia.org/wiki/Gigavoxels)
+ 
+ ## Operating characteristics
+@@ -219,8 +241,7 @@
+ - **Limitations**: More sensitive to screen resolution; LOD artifacts if computed in fragment shader [S1, S2, unofficial].
+ - **When to Use**: When rendering dense voxel data with dynamic updates and a blocky aesthetic is desired [S1, S2, unofficial].
+-- **When Not to Use**: When continuous surfaces are required (e.g., marching cubes) or when memory bandwidth is severely constrained [S2, unofficial].
+ 
+ ## Background
+-This method was developed by Johannes Jendersie for the project Monolith, addressing the unbearable 20ms frame time of previous approaches [S1, S2, unofficial]. It was introduced in May 2015 [S1, S2, unofficial]. The technique leverages the observation that components consist of the same voxel patterns repeatedly, allowing for a hybrid approach of geometry shader instancing and ray marching [S1, S2, unofficial]. It was used to render stone and water components with 16x16x16 voxels each [S1, S2, unofficial].
++This method was developed by Johannes Jendersie for the project Monolith, addressing the unbearable 20ms frame time of previous approaches [S1, S2, unofficial]. The technique leverages the observation that components consist of the same voxel patterns repeatedly, allowing for a hybrid approach of geometry shader instancing and ray marching [S1, S2, unofficial]. It was used to render stone and water components with 16x16x16 voxels each [S1, S2, unofficial].
+ 
+ ## Sources

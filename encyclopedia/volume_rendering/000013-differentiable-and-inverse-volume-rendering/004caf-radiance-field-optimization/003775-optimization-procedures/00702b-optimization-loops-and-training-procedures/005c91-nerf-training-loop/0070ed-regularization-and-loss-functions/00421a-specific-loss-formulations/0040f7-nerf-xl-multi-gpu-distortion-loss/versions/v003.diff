@@ -1,0 +1,236 @@
+--- v002.md
++++ v003.md
+@@ -1,80 +1,72 @@
+ # NeRF-XL Multi-GPU Distortion Loss
+-
+-Also called: Distributed Distortion Loss, Multi-GPU Distortion Aggregation
++Also called: Multi-GPU Distortion Loss, Distributed Distortion Loss
+ 
+ ## Overview
+-The NeRF-XL Multi-GPU Distortion Loss is a distributed algorithm for computing the distortion regularization term in Neural Radiance Fields (NeRFs) across multiple GPUs. It solves the problem of calculating the global distortion loss $L_{1 \to N+1}$ when the volume rendering segments are partitioned across $N$ distinct compute devices, ensuring that the gradient signal for distortion is consistent with a single-GPU implementation. It sets itself apart from standard single-GPU distortion loss by introducing a global aggregation step that combines local auxiliary variables ($A$ and $D$) and transmittance ($T$) from all participating GPUs, rather than relying on local segment data alone.
++The NeRF-XL Multi-GPU Distortion Loss is a distributed regularization term designed to penalize the "spread" of sampling weights along the ray in large-scale NeRF training [S1]. It solves the problem of computing the distortion metric $\mathcal{L}_{dist}$ when the volume rendering process is partitioned across multiple GPUs, ensuring that the global loss is mathematically identical to the single-GPU formulation [S1]. It sets itself apart from standard distortion losses by introducing a distributed aggregation protocol that combines local transmittance, auxiliary, and distortion values from all participating GPUs without requiring global synchronization of the entire ray at every step [S1].
+ 
+ ## How it works
+-The method computes the distortion loss by aggregating local contributions from each GPU into a global state. The algorithm runs identically on each GPU $k$, using local segment data and gathered data from other GPUs.
++The method computes the distortion loss $\mathcal{L}_{dist}$ by aggregating local contributions from each GPU $k$ into a global loss value. The distortion loss is defined as the expected distance between two independent samples drawn from the same ray distribution [S1]. In the multi-GPU setting, the ray is segmented across GPUs, and each GPU holds local integration data.
+ 
+ **Inputs and Outputs:**
+ *   **Inputs:**
+-    *   $T_{k \to k+1}$: Local transmittance for the segment on GPU $k$.
+-    *   $C_{k \to k+1}$: Local color contribution (used for rendering, passed for context but not directly in the distortion loss formula).
+-    *   $A_{k \to k+1}$: Local auxiliary variable $A$ for the segment on GPU $k$.
+-    *   $D_{k \to k+1}$: Local auxiliary variable $D$ for the segment on GPU $k$.
+-    *   $L_{k \to k+1}$: Local distortion loss contribution for the segment on GPU $k$.
+-    *   $I = \{i_1, i_2, \dots, i_N\}$: A permutation of GPU indices $\{1, \dots, N\}$, defining the global order of segments.
++    *   $k$: The index of the current GPU.
++    *   $T_{k \to k+1}$: Local transmittance from the start of the segment on GPU $k$ to its end.
++    *   $C_{k \to k+1}$: Local accumulated color (not used in distortion calculation directly, but part of the rendering context).
++    *   $I = \{i_1, i_2, \dots, i_N\}$: A sorted list of GPU indices representing the order in which segments are traversed along the ray. $N$ is the total number of GPUs involved.
++    *   $A_{k \to k+1}$: Local auxiliary value $\int_{t_k}^{t_{k+1}} \sigma(t) t \, dt$.
++    *   $D_{k \to k+1}$: Local distortion value $\int_{t_k}^{t_{k+1}} \sigma(t) (t - \bar{t})^2 \, dt$ or equivalent integral form used in the paper.
++    *   $L_{k \to k+1}$: Local distortion contribution.
+ *   **Outputs:**
+-    *   $L_{1 \to N+1}$: The global distortion loss value.
++    *   $L_{1 \to N+1}$: The global distortion loss for the ray.
+ 
+ **Data Structures:**
+-The algorithm maintains global accumulators on each GPU:
+-*   $T_{1 \to i}$: Global transmittance up to segment $i$.
+-*   $A_{1 \to i}$: Global auxiliary $A$ accumulator up to segment $i$.
+-*   $D_{1 \to i}$: Global auxiliary $D$ accumulator up to segment $i$.
+-*   $L_{1 \to N+1}$: Global distortion loss.
++The algorithm maintains global accumulators for each GPU $k$:
++*   $T_{1 \to i}$: Global transmittance from the ray origin to the start of segment $i$.
++*   $A_{1 \to i}$: Global auxiliary integral from the ray origin to the start of segment $i$.
++*   $D_{1 \to i}$: Global distortion integral from the ray origin to the start of segment $i$.
++*   $L_{1 \to N+1}$: The final computed loss.
+ 
+ **Numbered Steps:**
+-1.  **Initialization:** Initialize global accumulators for the current GPU $k$:
+-    $$T_{1 \to i} \leftarrow 1, \quad A_{1 \to i} \leftarrow 0, \quad D_{1 \to i} \leftarrow 0, \quad L_{1 \to N+1} \leftarrow 0$$
+-    [S1]
+-
+-2.  **Iteration:** Iterate through the global segment order $s$ from $1$ to $N$. Let $i$ be the GPU index $I[s]$.
+-    [S1]
+-
+-3.  **Data Gathering:** If the current segment $i$ is not the local GPU $k$ ($i \neq k$):
+-    *   Gather local transmittance $T_{i \to i+1}$ and color $C_{i \to i+1}$ from GPU $i$. This gathering must disable automatic differentiation (auto-grad) to prevent gradient propagation through the communication channel.
+-    *   Gather the local auxiliary variables $A_{i \to k+1}$, $D_{i \to i+1}$, and local loss $L_{i \to i+1}$ from GPU $i$ using a function `gather_loss(i)`.
+-    [S1]
+-    [G] *Note: If $i=k$, the local values $T_{k \to k+1}, A_{k \to k+1}, D_{k \to k+1}, L_{k \to k+1}$ are used directly without gathering.*
+-
+-4.  **Intermediate Term Calculation:** Compute the cross-term $S_{1 \to i}$ using the local GPU's auxiliary variables and the global accumulators:
+-    $$S_{1 \to i} = D_{k \to k+1} \times A_{1 \to i} - A_{k \to k+1} \times D_{1 \to i}$$
+-    [S1]
+-
+-5.  **Global Loss Update:** Update the global distortion loss:
+-    $$L_{1 \to N+1} \leftarrow L_{1 \to N+1} + T_{1 \to i} \times L_{i \to i+1} + T_{1 \to i} \times S_{1 \to i}$$
+-    [S1]
+-
+-6.  **Global Auxiliary Updates:** Update the global accumulators $A$ and $D$:
+-    $$A_{1 \to i} \leftarrow A_{1 \to i} + T_{1 \to i} \times A_{i \to i+1}$$
+-    $$D_{1 \to i} \leftarrow D_{1 \to i} + T_{1 \to i} \times D_{i \to i+1}$$
+-    [S1]
+-
+-7.  **Transmittance Update:** Update the global transmittance for the next iteration:
+-    $$T_{1 \to i+1} \leftarrow T_{1 \to i} \times T_{i \to i+1}$$
+-    [S1] *Note: The source pseudocode updates $T_{1 \to i}$ in place at the end of the loop, effectively becoming $T_{1 \to i+1}$ for the next step.*
++1.  Initialize global accumulators: $T_{1 \to i} \leftarrow 1$, $A_{1 \to i} \leftarrow 0$, $D_{1 \to i} \leftarrow 0$, and $L_{1 \to N+1} \leftarrow 0$ [S1].
++2.  Iterate through the segments $s$ from $1$ to $N$:
++    a. Let $i$ be the GPU index $I[s]$ [S1].
++    b. If $i \neq k$ (the segment is not on the current GPU):
++        i. Gather $T_{i \to i+1}$ and $C_{i \to i+1}$ from GPU $i$ with auto-grad disabled [S1].
++        ii. Gather $A_{i \to k+1}$, $D_{i \to i+1}$, and $L_{i \to i+1}$ using a `gather_loss` operation [S1]. Note: The source notation $A_{i \to k+1}$ in the gather step appears to be a typo for $A_{i \to i+1}$ based on the algorithm logic, but the text explicitly says "gather $A_{i \to k+1}$". However, Algorithm 2 data section lists $A_{k \to k+1}$ as input. The update step uses $A_{i \to i+1}$. We assume standard local segment data is gathered [S1].
++    c. Compute the intermediate cross-term $S_{1 \to i}$:
++       $$ S_{1 \to i} = D_{k \to k+1} \times A_{1 \to i} - A_{k \to k+1} \times D_{1 \to i} $$
++       This term accounts for the interaction between the current GPU's local segment and the global history accumulated up to segment $i$ [S1].
++    d. Update the global loss:
++       $$ L_{1 \to N+1} \leftarrow L_{1 \to N+1} + T_{1 \to i} \times L_{i \to i+1} + T_{1 \to i} \times S_{1 \to i} $$
++       Here, $L_{i \to i+1}$ is the local distortion contribution from segment $i$ [S1].
++    e. Update the global auxiliary accumulator:
++       $$ A_{1 \to i} \leftarrow A_{1 \to i} + T_{1 \to i} \times A_{i \to i+1} $$
++    f. Update the global distortion accumulator:
++       $$ D_{1 \to i} \leftarrow D_{1 \to i} + T_{1 \to i} \times D_{i \to i+1} $$
++    g. Update the global transmittance:
++       $$ T_{1 \to i} \leftarrow T_{1 \to i} \times T_{i \to i+1} $$
++       (Note: The source pseudocode updates $T_{1 \to i}$ at the end of the loop iteration, effectively preparing it for the next segment $i+1$ [S1]).
+ 
+ **Pseudocode:**
+ ```python
+-def compute_distortion_loss_local(k, N, I, T_local, A_local, D_local, L_local):
++def compute_distortion_loss_multi_gpu(k, T_k, C_k, I, A_k, D_k, L_k):
+     """
+-    Computes the global distortion loss on GPU k.
++    Compute global distortion loss for the k-th GPU.
+     
+     Args:
+         k: Current GPU index.
+-        N: Total number of GPUs.
+-        I: List of GPU indices representing the global segment order.
+-        T_local: Transmittance of the segment on GPU k.
+-        A_local: Auxiliary A of the segment on GPU k.
+-        D_local: Auxiliary D of the segment on GPU k.
+-        L_local: Local distortion loss of the segment on GPU k.
++        T_k: Local transmittance T_{k->k+1}.
++        C_k: Local color C_{k->k+1}.
++        I: List of GPU indices [i_1, ..., i_N] in ray order.
++        A_k: Local auxiliary integral A_{k->k+1}.
++        D_k: Local distortion integral D_{k->k+1}.
++        L_k: Local distortion loss contribution L_{k->k+1}.
+         
+     Returns:
+         L_global: The aggregated global distortion loss.
+     """
+-    # 1. Initialize global accumulators
++    N = len(I)
++    
++    # Global accumulators
+     T_global = 1.0
+     A_global = 0.0
+@@ -82,41 +74,48 @@
+     L_global = 0.0
+     
+-    # 2. Iterate through all segments in global order
++    # Local values for the current GPU k
++    # Note: In the loop, when i == k, we use local variables.
++    # When i != k, we gather from other GPUs.
++    
+     for s in range(N):
+         i = I[s]
+         
+-        # 3. Gather data from other GPUs
++        # Gather data from GPU i
+         if i != k:
+-            # Gather T and C (C is not used in distortion loss but part of the protocol)
+-            T_other, C_other = gather(i) # Disables auto-grad
++            # Gather transmittance and color (color not used in distortion)
++            T_i = gather_from_gpu(i, "T")
++            C_i = gather_from_gpu(i, "C")
+             
+-            # Gather auxiliary variables and local loss
+-            A_other, D_other, L_other = gather_loss(i)
++            # Gather auxiliary, distortion, and loss
++            # Note: Source says gather A_{i->k+1}, but logic implies A_{i->i+1}
++            A_i = gather_loss(i, "A")
++            D_i = gather_loss(i, "D")
++            L_i = gather_loss(i, "L")
+         else:
+-            # Use local data
+-            T_other = T_local
+-            A_other = A_local
+-            D_other = D_local
+-            L_other = L_local
++            # Use local values
++            T_i = T_k
++            C_i = C_k
++            A_i = A_k
++            D_i = D_k
++            L_i = L_k
+             
+-        # 4. Compute intermediate term S
++        # Compute intermediate term S
+         # S_{1->i} = D_{k->k+1} * A_{1->i} - A_{k->k+1} * D_{1->i}
+-        S = D_local * A_global - A_local * D_global
++        # Note: The source uses D_{k->k+1} and A_{k->k+1} which are the LOCAL values of the CURRENT GPU k.
++        # This implies the cross-term is always calculated using the current GPU's local segment data
++        # against the global history accumulated so far.
++        S = D_k * A_global - A_k * D_global
+         
+-        # 5. Update global loss
+-        # L_{1->N+1} += T_{1->i} * L_{i->i+1} + T_{1->i} * S_{1->i}
+-        L_global += T_global * L_other + T_global * S
++        # Update global loss
++        L_global += T_global * L_i + T_global * S
+         
+-        # 6. Update global auxiliary A
+-        # A_{1->i} += T_{1->i} * A_{i->i+1}
+-        A_global += T_global * A_other
++        # Update global auxiliary
++        A_global += T_global * A_i
+         
+-        # 7. Update global auxiliary D
+-        # D_{1->i} += T_{1->i} * D_{i->i+1}
+-        D_global += T_global * D_other
++        # Update global distortion
++        D_global += T_global * D_i
+         
+-        # 8. Update global transmittance for next iteration
+-        # T_{1->i+1} = T_{1->i} * T_{i->i+1}
+-        T_global *= T_other
++        # Update global transmittance
++        T_global *= T_i
+         
+     return L_global
+@@ -124,21 +123,21 @@
+ 
+ **Parameters:**
+-*   $N$: Number of GPUs. Typical values depend on the scene scale (e.g., 8 for Laguna Seca, 64 for Matrix-City) [S1].
+-*   $I$: The permutation of GPU indices. This must be consistent across all GPUs to ensure the global composition order is identical.
++*   $N$: Number of GPUs. Typical values range from 8 to 64 for large-scale captures like Laguna Seca or Matrix-City [S1].
++*   $\lambda_{dist}$: Weight for the distortion loss in the total loss function. Not specified in the distortion loss article itself, but follows the parent principle [S1, 10636-specific-loss-formulations.md].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Gradient Discontinuity:** The gathering of $T$ and $C$ must disable auto-grad. The gradients for the distortion loss are computed via the backpropagation of the aggregated $L_{1 \to N+1}$ through the local variables $A, D, T$ on each GPU, not through the communication channel itself.
+-*   **Order Consistency:** The permutation $I$ must be identical on all GPUs. If GPUs process segments in different orders, the global accumulators $A_{1 \to i}$ and $D_{1 \to i}$ will diverge, leading to incorrect loss values.
+-*   **Precision:** The accumulation of $T_{1 \to i}$ can lead to underflow for very long rays or many segments. Standard floating-point precision (FP32) is used in the source, but FP16 or BF16 may require careful handling of underflow.
++*   **Precision:** The accumulation of $T_{1 \to i}$ can lead to underflow for very long rays or high density, potentially causing numerical instability in the cross-term $S$ [G].
++*   **Synchronization:** The `gather` operations require all GPUs to be synchronized at the start of the loss computation step. If one GPU finishes rendering significantly faster, it must wait for the others [S1].
++*   **Ordering:** The list $I$ must be strictly sorted by the ray traversal order. Incorrect ordering leads to incorrect transmittance propagation [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$ communication steps per ray, where $N$ is the number of GPUs. The computation per step is $O(1)$.
+-*   **Memory Complexity:** $O(1)$ additional memory per GPU for the global accumulators.
+-*   **Scaling:** The method scales linearly with the number of GPUs, as each GPU performs the same amount of computation and communication per ray. The source demonstrates scalability up to 64 GPUs on the Matrix-City dataset [S1].
+-*   **Strengths:** Enables distortion regularization for large-scale NeRFs that cannot fit on a single GPU. Maintains the mathematical equivalence of the single-GPU distortion loss.
+-*   **Limitations:** Requires synchronized communication between all GPUs for every ray. The communication overhead can become a bottleneck if the network bandwidth is insufficient or if the number of GPUs is very large.
++*   **Time Complexity:** $O(N)$ per ray, where $N$ is the number of GPUs. The communication overhead is proportional to $N$ gather operations per ray [S1].
++*   **Memory Complexity:** $O(1)$ extra memory per GPU for the accumulators, as the global state is distributed and updated incrementally [S1].
++*   **Scalability:** The method is designed to scale to large numbers of GPUs. The paper demonstrates successful training on 64 GPUs for the 25km$^2$ Matrix-City scene [S1].
++*   **Strengths:** Enables exact computation of distortion loss in a distributed setting, which is crucial for high-quality large-scale NeRFs. It avoids the need for global ray reconstruction [S1].
++*   **Limitations:** Communication overhead increases with $N$. The method assumes a fixed number of GPUs per ray, which may not be optimal for all scene geometries [S1].
+ 
+ ## Background
+-The NeRF-XL Multi-GPU Distortion Loss was introduced in the paper "NeRF-XL: Scaling NeRFs with Multiple GPUs" [S1]. The paper addresses the challenge of training NeRFs on large-scale captures (e.g., 1km² to 25km²) which involve billions of pixels and exceed the memory capacity of a single GPU. The distortion loss, originally proposed by [S2] (Mildenhall et al., 2020, as referenced in the context of NeRF), is a regularization term that encourages the network to distribute weight along the ray rather than concentrating it at a single depth. The NeRF-XL paper extends this to a multi-GPU setting by deriving a distributed aggregation algorithm that preserves the global nature of the distortion loss.
++The NeRF-XL Multi-GPU Distortion Loss was introduced in the NeRF-XL paper by [S1] to address the scalability challenges of training NeRFs on large-scale scenes. The paper highlights the need for robust and scalable optimization procedures when dealing with billions of pixels and vast amounts of information [S1]. The distortion loss itself is a known regularization technique in NeRFs, but its distributed implementation is a specific contribution of the NeRF-XL framework [S1].
+ 
+ ## Sources

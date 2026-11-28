@@ -1,0 +1,298 @@
+# Anisotropic Reflective Spherical 3D Gaussian Splatting
+
+Also called: ARS-GS, Anisotropic Spherical Gaussians for 3DGS
+
+## Overview
+Anisotropic Reflective Spherical 3D Gaussian Splatting (ARS-GS) is a differentiable rendering method that embeds Anisotropic Spherical Gaussians (ASG) within a Physically Based Rendering (PBR) pipeline to model view-dependent specular reflections and enable accurate mesh reconstruction from multi-view images [S1]. Unlike sibling methods that use ASG primarily for appearance fitting, ARS-GS strictly aligns ASG with GGX microfacet models to simulate light transport, providing physical constraints that improve geometric fidelity in highly reflective regions [S1]. It solves the problem of vanishing gradients in specular areas by introducing a direct skip connection from specular color to Gaussian position, allowing for the reconstruction of shiny surfaces that traditional spherical harmonics cannot capture [S1].
+
+## How it works
+
+### Inputs and Outputs
+**Inputs:**
+*   A set of $N$ images $X_i$ with known camera poses [S1].
+*   Initial Gaussian primitives defined by geometric attributes: opacity $\alpha_k$, center position $p_k$, and covariance matrix $\Sigma_k$ [S1].
+*   Appearance parameters: Spherical Harmonics (SH) coefficients $F_{SH}$ for diffuse lighting and Anisotropic Spherical Gaussian parameters $F_{ASG}$ (roughness $\rho$, metallic $m$, albedo $a$, and frame vectors) [S1].
+
+**Outputs:**
+*   Optimized Gaussian primitives (geometry and appearance) [S1].
+*   Rendered images and reconstructed meshes via zero-value surface identification [S1].
+
+### Data Structures
+Each Gaussian primitive $G_k$ stores:
+*   **Geometry:** Center $p_k \in \mathbb{R}^3$, Covariance $\Sigma_k \in \mathbb{R}^{3 \times 3}$, Opacity $\alpha_k \in [0,1]$ [S1].
+*   **Appearance:**
+    *   Diffuse SH coefficients $F_{SH}$ [S1].
+    *   Material attributes: Roughness $\rho \in [0,1]$, Metallic $m \in [0,1]$, Albedo $a \in [0,1]^3$ [S1].
+    *   Anisotropic Frame: Orthonormal basis $[x, y, z]$ where $z$ is the normal, $x, y$ are tangent/bitangent vectors [S1].
+    *   ASG Bandwidths: $\lambda, \mu > 0$ derived from roughness [S1].
+
+### Formulas and Parameters
+
+**1. Spatial Gaussian Distribution**
+The spatial probability density function for primitive $k$ is:
+$$ G_k(x) = \alpha_k e^{-\frac{1}{2}(x-p_k)^T \Sigma_k^{-1} (x-p_k)} $$
+where $\alpha_k$ is opacity, $p_k$ is center, and $\Sigma_k$ is covariance [S1].
+
+**2. Ray-Gaussian Intersection**
+For a ray $r(t) = o + tv$, the intersection evaluation $E(G_j, o, r)$ is the maximum 1D Gaussian value along the ray:
+$$ E(G_j, o, r) = G_{j1D}(t^*) $$
+where $t^*$ is the parameter at which the 1D Gaussian reaches its maximum [S1]. The final color $C(o,r)$ is accumulated via alpha compositing:
+$$ C(o,r) = \sum_{j=1}^{J} c_j \alpha_j E(G_j, o, r) \prod_{q=1}^{j-1} (1 - \alpha_q E(G_q, o, r)) $$
+where $J$ is the number of contributing primitives and $c_j$ is the shaded color [S1].
+
+**3. PBR Color Model**
+The color $c_j$ of a primitive is the sum of diffuse and specular components:
+$$ c_j = c_{diffuse,j} + c_{specular,j} $$
+The BRDF $f(\omega_i, \omega_o)$ is defined as:
+$$ f(\omega_i, \omega_o) = \frac{(1-m)a}{\pi} + \frac{D F G}{4(\omega_i \cdot n)(\omega_o \cdot n)} $$
+where $\omega_o = -v$ is the view direction, $n$ is the normal, $\omega_i$ is the light direction, $m$ is metallic, $a$ is albedo, $D$ is the microfacet distribution, $F$ is the Fresnel term, and $G$ is the geometry term [S1].
+
+**4. Anisotropic Spherical Gaussian (ASG) Definition**
+The ASG lobe is defined as:
+$$ \Phi(v; [x,y,z], [\lambda,\mu], A) = A \cdot S(v;z) \cdot e^{-\lambda(v \cdot x)^2 - \mu(v \cdot y)^2} $$
+where $[x,y,z]$ is an orthonormal frame, $\lambda, \mu$ are bandwidths, $A$ is amplitude, and $S(v;z) = \max(v \cdot z, 0)$ is attenuation [S1].
+
+**5. Distribution Term Approximation ($D_{ASG}$)**
+The GGX distribution $D(h) = \frac{\rho^2}{\pi (n \cdot h)^2 (\rho^2 - 1) + 1}$ is approximated using a second-order Taylor expansion for smooth surfaces where $h \cdot z \approx 1 - \frac{1}{2}[(h \cdot x)^2 + (h \cdot y)^2]$. This yields:
+$$ D_{ASG}(h) \approx \frac{\lambda \mu \pi}{\lambda (h \cdot x)^2 + \mu (h \cdot y)^2 + 2} \approx \Phi(h; [x,y,z], [\lambda,\mu]) $$
+The bandwidths are calculated from roughness $\rho$ as:
+$$ \lambda = \mu = \frac{1 - \rho^2}{\rho^2} $$
+[ S1 ]
+
+**6. Geometry Term Approximation ($G_{ASG}$)**
+The geometry term $G(\omega_i, \omega_o) = G_1(\omega_i) G_1(\omega_o)$ is reparameterized to share anisotropy with the distribution:
+$$ G_1(\omega) = \frac{2(n \cdot \omega)}{(n \cdot \omega) + \lambda (h \cdot x)^2 + \mu (h \cdot y)^2 + (n \cdot \omega)^2} $$
+[ S1 ]
+
+**7. Specular Color Calculation (Split-Sum Approximation)**
+The specular integral is decomposed into a Lighting Integral and a BRDF Integral:
+$$ c_{specular,j} \approx \underbrace{\int_{\Omega} L(\omega_i) D_{ASG}(\rho, t) d\omega_i}_{\text{Lighting Integral}} \cdot \underbrace{\int_{\Omega} \frac{D_{ASG} F G_{ASG}}{4(\omega_o \cdot n)} d\omega_i}_{\text{BRDF Integral}} $$
+*   **Lighting Integral:** Computed using SH coefficients $c_{\ell m}$ and basis $Y_{\ell m}(t)$ at the reflection direction $t$:
+    $$ \int_{\Omega} L_{SH}(\omega_i) D_{ASG}(\rho, t) d\omega_i = \sum_{\ell, m} A_\ell(1/\rho) c_{\ell m} Y_{\ell m}(t) $$
+    where $A_\ell(1/\rho) \approx \exp(-2\rho \sqrt{\ell(\ell+1)})$ [S1].
+*   **BRDF Integral:** Computed using precomputed lookup tables $F_1, F_2$ parameterized by roughness:
+    $$ \text{BRDF Integral} = ((1-m) \cdot 0.04 + m \cdot a) \cdot F_1 + F_2 $$
+    [ S1 ]
+
+**8. Diffuse Color Calculation**
+The diffuse component uses a clamped-cosine kernel:
+$$ c_{diffuse,j} = a_j (1 - m_j) \int_{\Omega} L_{SH}(\omega_i) \frac{\omega_i \cdot n}{\pi} d\omega_i $$
+[ S1 ]
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def compute_asg_bandwidths(roughness):
+    """
+    Computes ASG bandwidths lambda and mu from roughness rho.
+    Formula: lambda = mu = (1 - rho^2) / rho^2
+    """
+    rho = max(roughness, 1e-6)
+    val = (1 - rho**2) / rho**2
+    return val, val
+
+def evaluate_gaussian_1d(gaussian, ray_origin, ray_dir):
+    """
+    Computes the 1D Gaussian value at the point of closest approach along the ray.
+    Returns (max_value, t_star).
+    """
+    # Inverse covariance
+    inv_cov = np.linalg.inv(gaussian['covariance'])
+    
+    # Project center onto ray to find closest point
+    t_star = np.dot(gaussian['center'] - ray_origin, ray_dir)
+    p_closest = ray_origin + t_star * ray_dir
+    
+    # Compute exponent
+    diff_closest = p_closest - gaussian['center']
+    exponent = -0.5 * np.dot(diff_closest, np.dot(inv_cov, diff_closest))
+    
+    max_value = np.exp(exponent)
+    return max_value, t_star
+
+def compute_d_asg(h, x, y, z, lam, mu):
+    """
+    Computes the ASG approximation of the GGX distribution D_ASG.
+    Formula: (lambda * mu * pi) / (lambda * (h.x)^2 + mu * (h.y)^2 + 2)
+    """
+    hx = np.dot(h, x)
+    hy = np.dot(h, y)
+    denom = lam * hx**2 + mu * hy**2 + 2
+    return (lam * mu * np.pi) / denom
+
+def compute_g_asg(n, omega, h, x, y, lam, mu):
+    """
+    Computes the ASG geometry term G1 for a single direction.
+    Formula: 2 * (n.omega) / ((n.omega) + lambda*(h.x)^2 + mu*(h.y)^2 + (n.omega)^2)
+    """
+    n_omega = np.dot(n, omega)
+    hx = np.dot(h, x)
+    hy = np.dot(h, y)
+    denom = n_omega + lam * hx**2 + mu * hy**2 + n_omega**2
+    return (2 * n_omega) / denom
+
+def sh_evaluate(sh_coeffs, direction):
+    """
+    Evaluates Spherical Harmonics at a given direction.
+    Assumes 3rd order (9 coefficients) standard basis [G].
+    """
+    # Standard SH basis functions for order 2 (9 coeffs)
+    # Y0, Y1, Y2, Y3, Y4, Y5, Y6, Y7, Y8
+    # Note: Exact basis definition depends on convention. 
+    # Using common OpenGL-like convention for demonstration [G].
+    x, y, z = direction
+    norm = np.sqrt(x**2 + y**2 + z**2)
+    if norm == 0:
+        return np.zeros(9)
+    x, y, z = x/norm, y/norm, z/norm
+    
+    # Basis functions
+    b0 = 0.282095
+    b1 = 0.488603 * y
+    b2 = 0.488603 * z
+    b3 = 0.488603 * x
+    b4 = 1.092548 * x * y
+    b5 = 1.092548 * y * z
+    b6 = 0.315392 * (3 * z**2 - 1)
+    b7 = 1.092548 * x * z
+    b8 = 0.546274 * (x**2 - y**2)
+    
+    basis = np.array([b0, b1, b2, b3, b4, b5, b6, b7, b8])
+    return np.sum(sh_coeffs * basis)
+
+def compute_specular_color(light_sh_coeffs, roughness, metallic, albedo, normal, view_dir, reflection_dir):
+    """
+    Computes specular color using split-sum approximation.
+    """
+    lam, mu = compute_asg_bandwidths(roughness)
+    
+    # Lighting Integral: SH convolution with ASG lobe
+    # Attenuation factor A_l(1/rho) approx exp(-2 * rho * sqrt(l(l+1)))
+    # For simplicity, assuming light_sh_coeffs are already processed or 
+    # applying attenuation to basis evaluation [S1].
+    # Here we evaluate SH at reflection direction and apply attenuation.
+    # Note: The source [S1] describes summing A_l * c_lm * Y_lm(t).
+    # We approximate this by scaling the SH evaluation or pre-computed tables.
+    # For implementation, we use the lookup table result for BRDF and SH eval for Light.
+    
+    # Lighting Integral Result (simplified as SH eval at reflection dir with attenuation)
+    # In practice, this requires pre-computed SH coefficients for the ASG lobe.
+    # We assume light_sh_coeffs are the incident light SH.
+    # The integral is approximated by evaluating SH at reflection direction t.
+    # The attenuation A_l is applied to the coefficients or basis.
+    # For this pseudocode, we assume a helper that computes the convolved SH value.
+    lighting_integral = sh_evaluate(light_sh_coeffs, reflection_dir) 
+    # Note: Strictly, this should be the result of the integral in [S1], 
+    # which involves attenuation. We assume light_sh_coeffs are adjusted or 
+    # this is a placeholder for the specific SH-ASG convolution [G].
+
+    # BRDF Integral
+    # ((1-m)*0.04 + m*a) * F1 + F2
+    # F1 and F2 are lookup tables. We approximate with simple constants for pseudocode [G].
+    # In real implementation, these are 2D textures indexed by roughness and NdotV.
+    F1 = 1.0 # Placeholder for lookup table value
+    F2 = 0.0 # Placeholder for lookup table value
+    
+    base_color = (1 - metallic) * 0.04 + metallic * albedo
+    brdf_integral = base_color * F1 + F2
+    
+    return lighting_integral * brdf_integral
+
+def compute_diffuse_color(light_sh_coeffs, albedo, metallic, normal):
+    """
+    Computes diffuse color using cosine lobe kernel.
+    """
+    # Integral of L_SH * (omega.n)/pi
+    # This is equivalent to evaluating the SH irradiance at the normal.
+    diffuse_irradiance = sh_evaluate(light_sh_coeffs, normal) * np.pi
+    return albedo * (1 - metallic) * diffuse_irradiance
+
+def render_gaussian(gaussian, ray_origin, ray_dir, light_sh_coeffs, roughness, metallic, albedo, normal, view_dir):
+    """
+    Renders a single Gaussian primitive for a ray.
+    """
+    # 1. Evaluate spatial Gaussian
+    val, t_star = evaluate_gaussian_1d(gaussian, ray_origin, ray_dir)
+    
+    if val < 1e-6:
+        return 0.0, 0.0
+        
+    # 2. Compute reflection direction
+    omega_o = -ray_dir
+    # Reflect view direction around normal
+    t = 2 * np.dot(normal, omega_o) * normal - omega_o
+    
+    # 3. Compute ASG parameters
+    lam, mu = compute_asg_bandwidths(roughness)
+    
+    # 4. Compute Specular
+    # Note: D_ASG and G_ASG are used in the split-sum derivation.
+    # The split-sum approximation uses the reflection direction t for the lighting integral.
+    specular = compute_specular_color(light_sh_coeffs, roughness, metallic, albedo, normal, omega_o, t)
+    
+    # 5. Compute Diffuse
+    diffuse = compute_diffuse_color(light_sh_coeffs, albedo, metallic, normal)
+    
+    # 6. Combine
+    c_j = diffuse + specular
+    
+    return c_j * val, val
+
+def optimize_gaussian_position(gaussian, loss, light_sh_coeffs, roughness, metallic, albedo, normal, view_dir, camera_pos):
+    """
+    Computes gradient for Gaussian position using the skip connection.
+    """
+    # Direct gradient path for specular component
+    # dL/dpw = dL/dcspecular * dcspecular/dpw
+    
+    # Compute specular color
+    ray_dir = (gaussian['center'] - camera_pos)
+    ray_dir = ray_dir / np.linalg.norm(ray_dir)
+    specular_color, _ = render_gaussian(gaussian, camera_pos, ray_dir, light_sh_coeffs, roughness, metallic, albedo, normal, ray_dir)
+    
+    # Gradient of loss w.r.t specular color [G]
+    dL_dcspecular = ... # Provided by upstream loss function
+    
+    # Gradient of specular color w.r.t position
+    # This requires differentiating the render_gaussian function w.r.t gaussian['center']
+    # Specifically, the reflection direction t depends on normal, which may depend on position,
+    # and the spatial evaluation val depends on position.
+    # The skip connection bypasses the complex diffuse/gradient path.
+    
+    # Simplified: dcspecular/dpw involves d(t)/dpw and d(val)/dpw
+    # t = 2(n.v)v - v. If n is fixed, t doesn't depend on p directly, 
+    # but v depends on p.
+    # val depends on p via the Gaussian exponent.
+    
+    # For the purpose of the article, we state the existence of this direct path [S1].
+    # Implementation details of dcspecular/dpw are complex and depend on the specific 
+    # differentiable renderer used.
+    pass
+```
+
+### Edge Cases and Pitfalls
+*   **Vanishing Gradients:** In scenes with dense specular reflections, traditional gradient paths from reflectance color loss to Gaussian positions can lead to vanishing gradients [S1]. ARS-GS mitigates this with a skip connection linking spatial coordinates directly to ASG color attributes [S1].
+*   **Roughness Boundaries:** When roughness $\rho$ approaches 0, the bandwidths $\lambda, \mu$ approach infinity, potentially causing numerical instability. A minimum roughness (e.g., $10^{-6}$) should be enforced [S1].
+*   **Smooth Surface Approximation:** The ASG approximation of GGX relies on a second-order Taylor expansion valid for smooth surfaces where the half-vector aligns with the normal. This may be less accurate for very rough surfaces [S1].
+
+## Operating characteristics
+
+*   **Time Complexity:** The rendering complexity is linear with respect to the number of Gaussian primitives $J$ per pixel, similar to standard 3DGS, but with higher constant factors due to the PBR calculations (SH evaluation, ASG bandwidth computation) [S1]. The split-sum approximation allows efficient lighting integration [S1].
+*   **Memory Complexity:** Each primitive stores additional appearance parameters (roughness, metallic, albedo, ASG frame) compared to standard 3DGS, increasing memory usage per primitive [S1].
+*   **Performance:** Evaluated on Ref-NeRF, NeRF-Synthetic, Shiny Blender, and Mip-NeRF-360 datasets [S1]. It provides superior performance in accuracy and efficiency for highly specular scenes compared to methods using only SH [S1].
+*   **Strengths:** Accurate modeling of view-dependent specular reflections; improved geometric fidelity in reflective regions; real-time performance via split-sum approximation [S1].
+*   **Limitations:** Relies on the ASG approximation of GGX, which is an approximation rather than an exact equivalence; requires careful handling of roughness parameters to avoid numerical issues [S1].
+
+## Background
+
+*   **Origin:** ARS-GS was introduced in the paper "ARS-GS: Anisotropic Reflective Spherical 3D Gaussian Splatting" (2024) [S1].
+*   **Development:** It builds upon 3D Gaussian Splatting and incorporates Anisotropic Spherical Gaussians (ASG) into a PBR pipeline, aligning with GGX microfacet models. It addresses limitations in previous methods like Spec-Gaussian by providing physical constraints for mesh reconstruction [S1].
+*   **Usage:** Used for reconstructing scenes with complex specular reflections and directional lighting, such as real-world environments and synthetic metallic surfaces [S1].
+
+## Sources
+
+[S1] ARS-GS: Anisotropic Reflective Spherical 3D Gaussian Splatting., https://doi.org/10.3390/jimaging12040170, fetched 2026-10-26

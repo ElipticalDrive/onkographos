@@ -1,0 +1,63 @@
+# WKB-based Multiple Scattering Approximation
+
+Also called: Multiple Path Point (MPP) method, WKB expansion of the path integral
+
+## Overview
+The WKB-based Multiple Scattering Approximation is a method for computing multiply-scattered light in participating media by replacing the integration over the complete initial path space $(x_0, \tilde{\omega}_0)$ with an integration over a reduced subset defined by Multiple Path Points (MPPs) [S1]. It is distinguished from the diffusion approximation by its validity in sparse and inhomogeneous media, though it assumes strongly forward-peaked phase functions and ignores backscattering [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** The viewing position $s$ along the ray, the current position $\mathbf{x}$, the current direction $\vec{\omega}$, the medium properties (extinction coefficient $c$, scattering coefficient, phase function), and the incident radiance field $L_0$.
+*   **Output:** The radiance $L(s, \mathbf{x}, \vec{\omega})$ at the current point.
+
+**Data Structures:**
+*   **MPP (Multiple Path Point):** Represents a specific path configuration characterized by a total length $s$, a position $\mathbf{x}$, and a direction $\vec{\omega}$. The MPPs are constructed for a given total length $s$.
+*   **Gaussian Width $w(s)$:** A scalar value representing the spread of the scattering distribution, derived from the WKB approximation.
+
+**Steps:**
+1.  **Construct MPPs:** For a given total path length $s$, identify the set of Multiple Path Points (MPPs) that represent the dominant contributions to the multiply-scattered light. This relies on the WKB assumption that the single-scattered light distribution is strongly forward-peaked [S1].
+2.  **Compute Extinction:** Calculate the total extinction along the path from the start to the current point $s$. This is given by the exponential term:
+    $$ \exp \left( - \int_0^s c(MPP_s(s')) ds' \right) $$
+    where $c(MPP_s(s'))$ is the extinction coefficient along the path defined by the MPP for length $s$ [S1].
+3.  **Compute Curvature Action:** Calculate the curvature part of the action function, denoted as $A_c(MPP_s)$, which accounts for the geometric deviation of the path [S1].
+4.  **Evaluate Phase Function:** Evaluate the multiply-scattered phase function $P_{MS}(\vec{\omega} - \vec{\omega}')$, which gives the probability of light being scattered by a given angle after a given number of scattering events. The path fraction is directly given by this function [S1].
+5.  **Integrate Over Reduced Support:** Perform the integration over the reduced subset of the initial path space. Instead of integrating over the complete $(x_0, \tilde{\omega}_0)$-space, integrate over the support of the Gaussian distribution centered at the MPP:
+    $$ \int_{plane\perp MPP} gauss(\mathbf{x}', w(s)) b(\mathbf{x}') L_0(\mathbf{x}', \vec{\omega}') d\mathbf{x}' $$
+    where:
+    *   $plane\perp MPP$ is the plane perpendicular to the MPP direction.
+    *   $gauss(\mathbf{x}', w(s))$ is a Gaussian distribution of width $w(s)$ applied at position $\mathbf{x}'$.
+    *   $b(\mathbf{x}')$ is the source term or scattering coefficient at $\mathbf{x}'$.
+    *   $L_0(\mathbf{x}', \vec{\omega}')$ is the incident radiance.
+
+**Formula:**
+The final radiance is computed as:
+$$ L(s, \mathbf{x}, \vec{\omega}) = \exp \left( - \int_0^s c(MPP_s(s')) ds' \right) \exp(-A_c(MPP_s)) \times P_{MS}(\vec{\omega} - \vec{\omega}') \int_{plane\perp MPP} gauss(\mathbf{x}', w(s)) b(\mathbf{x}') L_0(\mathbf{x}', \vec{\omega}') d\mathbf{x}' $$
+[S1]
+
+**Parameters:**
+*   $w(s)$: Gaussian width, determined by the WKB approximation at position $\mathbf{x}_0$ and length $s$. [S1]
+*   $A_c(MPP_s)$: Curvature part of the action function. [S1]
+
+**Edge Cases and Pitfalls:**
+*   **Backscattering:** The method ignores backscattering, so it is not suitable for media where backscattering is significant [S1].
+*   **Phase Function Assumption:** Assumes strongly forward-peaked phase functions. If the phase function is isotropic or backward-peaked, the approximation will fail [S1].
+*   **Precision:** The integration over the Gaussian support requires careful handling of the width $w(s)$ to avoid numerical instability, especially for large $s$.
+
+## Subtopics
+
+### [Premoze et al. Path Integration](12248-premoze-et-al-path-integration.md)
+Premoze et al. path integration is an approximation for simulating light transport in participating media that utilizes the WKB (Wentzel-Kramers-Brillouin) approximation to compute multiply-scattered light. It is distinguished from the diffusion approximation by its validity in sparse and inhomogeneous media, though it assumes strongly forward-peaked phase functions and ignores backscattering.
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Strengths:** Valid in sparse and inhomogeneous media, unlike the diffusion approximation [S1].
+*   **Limitations:** Assumes strongly forward-peaked phase functions and ignores backscattering [S1].
+*   **When to Use:** When simulating multiple scattering in sparse or inhomogeneous media with forward-peaked scattering.
+*   **When Not to Use:** When backscattering is significant or the phase function is not forward-peaked.
+
+## Background
+The WKB-based Multiple Scattering Approximation is based on the WKB (Wentzel-Kramers-Brillouin) approximation, which is used to compute multiply-scattered light in participating media [S1]. The method was introduced by Premoze et al. in their work on practical rendering of multiple scattering effects [S1].
+
+## Sources
+[S1] PDF Practical Rendering of Multiple Scattering Effects in Participating Media, https://cseweb.ucsd.edu/~ravir/HRPIEG.pdf, fetched 2026-10-28

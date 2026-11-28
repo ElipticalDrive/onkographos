@@ -1,0 +1,143 @@
+# Point Cloud Generation and Refinement
+
+Also called: Depth-guided Point Cloud Refinement
+
+## Overview
+An offline process that generates and refines a 3D point cloud from a subset of training images to improve depth estimation accuracy for novel views in neural rendering [S1]. It differs from standard Multi-View Stereo (MVS) by iteratively validating points against ground-truth depth from adjacent views, allowing it to generate a denser, more accurate point cloud for similar computational time, which leads to higher rendering quality (PSNR) [S1].
+
+## How it works
+**Inputs:**
+- A subset of training images with known camera poses and ground-truth depth maps [S1].
+- A threshold parameter $\tau$ controlling the tolerance for depth consistency [S1].
+
+**Outputs:**
+- A refined 3D point cloud [S1].
+
+**Data Structures:**
+- **Point Cloud:** A list of 3D points $P = \{p_1, p_2, \dots, p_N\}$ in absolute coordinates [S1].
+- **Depth Map:** A 2D array of ground-truth depth values $d_{GT}$ for each pixel in the training views [S1].
+
+**Steps:**
+1. **Initialization:** Select a subset of training views with sufficient and uniform distance between adjacent viewpoints to ensure efficiency [S1].
+2. **Iterative Generation:** For each viewpoint $V_i$ in the subset, sequentially follow the trajectory:
+   a. **Generate:** Create an initial point cloud using the depth image from viewpoint $V_i$ [S1].
+   b. **Project:** Project the 3D points of the generated point cloud onto the image plane of the next viewpoint $V_{i+1}$ [S1].
+   c. **Calculate Distance:** For each projected point, calculate the distance $\tilde{d}$ between the 3D point and the camera location of $V_{i+1}$ using multiple view geometry [S1].
+   d. **Validate:** Compare $\tilde{d}$ with the ground-truth depth value $d_{GT}$ of the corresponding pixel in $V_{i+1}$'s depth map. Check if the condition is satisfied:
+      $$ |\tilde{d} - d_{GT}| \le \tau $$
+      where $\tilde{d}$ is the calculated distance, $d_{GT}$ is the ground-truth depth, and $\tau$ is the specified threshold [S1].
+   e. **Refine:** If the condition is **not** satisfied, discard the current point and generate a new 3D point by back-projecting the pixel with value $d_{GT}$ from $V_{i+1}$ [S1].
+3. **Finalization:** Repeat the iteration for all viewpoints in the subset to produce the final refined point cloud [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def generate_and_refine_point_cloud(training_views, tau):
+    """
+    Generate and refine a 3D point cloud from a subset of training views.
+    
+    Args:
+        training_views: List of view objects containing camera intrinsics (K), 
+                        inverse intrinsics (K_inv), rotation (R), translation (t), 
+                        position, width, height, and depth_map.
+        tau: Threshold for depth consistency check.
+        
+    Returns:
+        point_cloud: List of 3D points.
+    """
+    point_cloud = []
+    
+    # Iterate through the subset of training views sequentially
+    for i in range(len(training_views) - 1):
+        current_view = training_views[i]
+        next_view = training_views[i + 1]
+        
+        # Step 1: Generate initial point cloud from current view's depth
+        current_points = []
+        for y in range(current_view.height):
+            for x in range(current_view.width):
+                d = current_view.depth_map[y][x]
+                if d > 0:
+                    p = back_project_pixel(x, y, d, current_view)
+                    current_points.append(p)
+                    
+        # Step 2 & 3: Project to next view, calculate distance, validate
+        for p in current_points:
+            u, v = project_to_pixel(p, next_view)
+            
+            # Check bounds
+            if 0 <= u < next_view.width and 0 <= v < next_view.height:
+                d_gt = next_view.depth_map[int(v)][int(u)]
+                
+                # Calculate Euclidean distance to next camera center
+                d_tilde = distance_to_camera(p, next_view.position)
+                
+                # Step 4: Validate against threshold
+                if abs(d_tilde - d_gt) <= tau:
+                    point_cloud.append(p)
+                else:
+                    # Generate new point from ground truth depth
+                    new_p = back_project_pixel(int(u), int(v), d_gt, next_view)
+                    point_cloud.append(new_p)
+                    
+    return point_cloud
+
+def back_project_pixel(u, v, depth, camera):
+    # Standard pinhole back-projection: P = K_inv * [u, v, 1] * depth
+    ray = [u, v, 1.0]
+    local_p = multiply_matrix_vector(camera.K_inv, ray)
+    local_p = [x * depth for x in local_p]
+    # Apply extrinsics (R, t)
+    cam_p = multiply_matrix_vector(camera.R, local_p)
+    return [cam_p[i] + camera.t[i] for i in range(3)]
+
+def project_to_pixel(point, camera):
+    # Transform to camera space: P_cam = R^T * (P - t)
+    cam_p = [point[i] - camera.t[i] for i in range(3)]
+    cam_p = multiply_matrix_vector(camera.R.T, cam_p)
+    # Project: [u, v, w] = K * P_cam
+    proj = multiply_matrix_vector(camera.K, cam_p)
+    return proj[0] / proj[2], proj[1] / proj[2]
+
+def distance_to_camera(point, camera_pos):
+    return ((point[0]-camera_pos[0])**2 + (point[1]-camera_pos[1])**2 + (point[2]-camera_pos[2])**2)**0.5
+
+def multiply_matrix_vector(M, v):
+    return [sum(M[i][j]*v[j] for j in range(3)) for i in range(3)]
+```
+
+**Parameters:**
+- $\tau$: Threshold for comparing calculated distance and ground-truth depth. Controls point cloud density and hole filling. Too large: fewer points, faster rendering, more holes. Too small: overlapping points, slower rendering, fewer holes [S1].
+
+**Edge Cases and Pitfalls:**
+- **Threshold Selection:** An inappropriate $\tau$ leads to either excessive holes (if too large) or overlapping points causing slow rendering (if too small) [S1].
+- **Background Filling:** If the hole-filling kernel size $\kappa$ (used in subsequent refinement) is too small, holes in background areas may be filled, blurring the depth image [S1].
+- **Subset Selection:** Using the entire training view set is less efficient; a subset with uniform spacing is recommended [S1].
+
+## Subtopics
+
+### [Depth-Guided Optimization](14749-depth-guided-optimization.md)
+A strategy that uses sparse Structure-from-Motion (SfM) and dense PatchMatch Stereo point clouds to guide depth prediction in few-shot novel view synthesis, preventing overfitting to training views. It differs from standard depth-supervised methods by computing adaptive weights based on multiview color consistency to mitigate inaccuracies in estimated 3D points, and by restricting its application to early training stages.
+
+### [Projected Depth Refining](8044-projected-depth-refining.md)
+A post-processing technique that enhances the geometric fidelity of depth maps projected from a 3D point cloud, addressing the loss of fine details and scale ambiguity inherent in initial projections. It sets itself apart from sibling methods like Depth-Guided Optimization by explicitly integrating high-resolution RGB priors via diffusion models to recover high-frequency geometric details, rather than relying solely on geometric consistency or optimization constraints. It obtains accurate depth images for novel views by refining a rough depth image projected from a 3D point cloud, specifically by removing unnecessary points and filling holes.
+
+### Point Cloud Initialization & Optimization
+Generates 3D point locations and confidence using multi-view stereo, then optimizes features and geometry for radiance field training [S2, unofficial]. It generates 3D point locations and confidence using deep MVS methods with deep 3D CNNs, uses a 2D CNN to extract feature maps from images, aligns them with the generated points, and describes per-point features, then performs point growing and pruning procedures to eliminate outliers and holes, ensuring rendering quality [S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** Similar to standard MVS. On a GPU with 20 views, processing time is approximately 87.12 s, compared to 86.78 s for standard MVS [S1].
+- **Memory Complexity:** Not given in the sources.
+- **Performance:** Generates more points than standard MVS for similar computational time, leading to higher PSNR (31.44 dB vs 30.27 dB on the Pavillon dataset) [S1].
+- **Strengths:** Improves rendering quality by providing a denser, more accurate point cloud [S1].
+- **Limitations:** Requires ground-truth depth maps for training views; performance is sensitive to the threshold $\tau$ [S1].
+- **When to use:** When high-quality novel view synthesis is required and ground-truth depth data is available for training views [S1].
+- **When not to use:** When computational resources are extremely limited and slight quality degradation is acceptable, or when ground-truth depth is unavailable [S1].
+
+## Background
+Originated in the work by H. B. Yoo et al., titled "Improving Neural Radiance Fields Using Near-Surface Sampling with Point Cloud Generation" [S1]. The method was developed to improve depth estimation accuracy for novel views by iteratively correcting point positions based on depth consistency across training views [S1]. It leverages multiple view geometry to iteratively correct point positions based on depth consistency across training views [S1].
+
+## Sources
+[S1] Improving Neural Radiance Fields Using Near-Surface Sampling with Point Cloud Generation, https://link.springer.com/article/10.1007/s11063-024-11654-5, fetched 2026-10-30
+[S2] Point-Based Radiance Fields for Controllable Human Motion Synthesis, https://doi.org/10.48550/arXiv.2310.03375, fetched 2026-10-29 (unofficial)

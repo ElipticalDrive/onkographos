@@ -1,0 +1,142 @@
+--- v003.md
++++ v004.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-A hardware-accelerated rendering method for voxel landscapes that replaces software span rendering with triangle strips [S1, unofficial]. It projects voxels onto the screen in columns and constructs geometry based on the visibility of adjacent columns to minimize polygon count and utilize hardware interpolation [S1, unofficial]. Unlike software span rendering which draws spans immediately, this method buffers column projections to construct triangle strips, reducing draw calls and leveraging hardware interpolation for texture coordinates, lightmap colors, and heights [S1, unofficial]. It builds on [Voxel Polygon Rendering](6747-voxel-polygon-rendering.md) by replacing immediate span drawing with batched strip construction.
++A hardware-accelerated rendering method for voxel landscapes that replaces software span rendering with triangle strips [S1, unofficial]. It projects voxels onto the screen in columns and constructs geometry based on the visibility of adjacent columns to minimize polygon count and utilize hardware interpolation [S1, unofficial]. Unlike software span rendering which draws spans immediately, this method buffers column projections to construct triangle strips, reducing draw calls and leveraging hardware interpolation for texture coordinates, lightmap colors, and heights [S1, unofficial]. It builds on [Voxel Polygon Rendering](6747-voxel-polygon-rendering.md) by replacing immediate span drawing with batched strip construction [S1, unofficial].
+ 
+ ## How it works
+@@ -14,23 +14,23 @@
+ 
+ **Steps:**
+-1.  **Scan Columns:** Iterate through the landscape depth lines. Sample columns at intervals defined by the step size (default 32 pixels). Smaller steps generate more polygons [S1, unofficial].
++1.  **Scan Columns:** Iterate through the landscape depth lines [S1, unofficial]. Sample columns at intervals defined by the step size (default 32 pixels) [S1, unofficial]. Smaller steps generate more polygons [S1, unofficial].
+ 2.  **Project Voxels:** For each sampled column, project the voxels onto the screen [S1, unofficial].
+ 3.  **Evaluate Visibility:** Determine the visibility status of column $A$ (previous column) and column $B$ (current column) [S1, unofficial].
+ 4.  **Construct Geometry:** Based on the visibility of $A$ and $B$, execute one of four cases [S1, unofficial]:
+-    -   **Case 1 ($A$ not visible, $B$ visible):** Start a new triangle strip. Send vertices of columns $A$ then $B$ to the GL [S1, unofficial].
+-    -   **Case 2 ($A$ visible, $B$ visible):** Continue the currently active triangle strip. Send only vertices of column $B$ to the GL [S1, unofficial].
++    -   **Case 1 ($A$ not visible, $B$ visible):** Start a new triangle strip [S1, unofficial]. Send vertices of columns $A$ then $B$ to the GL [S1, unofficial].
++    -   **Case 2 ($A$ visible, $B$ visible):** Continue the currently active triangle strip [S1, unofficial]. Send only vertices of column $B$ to the GL [S1, unofficial].
+     -   **Case 3 ($A$ visible, $B$ not visible):** Send coordinates of column $B$ to the GL and stop the current triangle strip [S1, unofficial].
+-    -   **Case 4 ($A$ not visible, $B$ not visible):** Usually do nothing. Handle a special sub-case for holes [S1, unofficial].
++    -   **Case 4 ($A$ not visible, $B$ not visible):** Usually do nothing [S1, unofficial]. Handle a special sub-case for holes [S1, unofficial].
+ 5.  **Handle Holes (Case 4 Sub-case):** If a triangle strip was started or finished at column $A$ during the previous pass, draw a single triangle to close the gap [S1, unofficial]. Check the condition:
+     $$ (Y_1 > pY_1) \text{ and } (Y_2 > pY_2) $$
+-    Where $Y_1, Y_2$ and $pY_1, pY_2$ are Y-coordinates from the projected spans [S1, unofficial]. If true, draw the triangle. This approximation may draw triangles that are not quite visible but is more efficient than performing line intersections [S1, unofficial].
++    Where $Y_1, Y_2$ and $pY_1, pY_2$ are Y-coordinates from the projected spans [S1, unofficial]. If true, draw the triangle [S1, unofficial]. This approximation may draw triangles that are not quite visible but is more efficient than performing line intersections [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def project_voxels(column_index):
++def project_voxels(col_idx):
+     # Projects voxels for a given column index.
+-    # Returns (is_visible: bool, y_coords: list[float])
++    # Returns (is_visible: bool, y_top: float, y_bot: float, vertices: list)
+     # Exact projection math depends on the voxel map layout [G]
+-    return is_visible, y_coords
++    return is_visible, y_top, y_bot, vertices
+ 
+ def send_vertices_to_gl(vertices):
+@@ -38,9 +38,9 @@
+     pass
+ 
+-def start_triangle_strip():
++def begin_primitive(primitive_type):
+     # Begins a new GL_TRIANGLE_STRIP primitive [G]
+     pass
+ 
+-def end_triangle_strip():
++def end_primitive():
+     # Terminates the current GL_TRIANGLE_STRIP primitive [G]
+     pass
+@@ -50,38 +50,37 @@
+     pass
+ 
+-# Initialize state
+-strip_active = False
+-strip_started_at_prev = False
+-strip_ended_at_prev = False
+-prev_col_A = None
+-prev_col_A_visible = False
+-
+ # Configuration
+ step_size = 32  # pixels
+ num_columns = landscape_width_in_columns  # Derived from landscape bounds [G]
+ 
++# State tracking
++prev_vertices = None
++prev_visible = False
++Y1 = 0.0
++pY1 = 0.0
++strip_started_at_prev = False
++strip_ended_at_prev = False
++
+ # Iterate through depth lines (columns)
+ for col_idx in range(0, num_columns, step_size):
+-    curr_col_B, curr_col_B_visible = project_voxels(col_idx)
++    curr_vertices, curr_visible, Y2, pY2 = project_voxels(col_idx)
+ 
+-    if prev_col_A is not None:
+-        if not prev_col_A_visible and curr_col_B_visible:
+-            # Case 1: Start new strip
+-            start_triangle_strip()
+-            send_vertices_to_gl(prev_col_A)
+-            send_vertices_to_gl(curr_col_B)
+-            strip_active = True
++    if prev_vertices is not None:
++        if not prev_visible and curr_visible:
++            # Case 1: Start new triangle strip
++            begin_primitive(GL_TRIANGLE_STRIP)
++            send_vertices_to_gl(prev_vertices)
++            send_vertices_to_gl(curr_vertices)
+             strip_started_at_prev = True
+             strip_ended_at_prev = False
+-        elif prev_col_A_visible and curr_col_B_visible:
+-            # Case 2: Continue active strip
+-            send_vertices_to_gl(curr_col_B)
++        elif prev_visible and curr_visible:
++            # Case 2: Continue active triangle strip
++            send_vertices_to_gl(curr_vertices)
+             strip_started_at_prev = False
+             strip_ended_at_prev = False
+-        elif prev_col_A_visible and not curr_col_B_visible:
+-            # Case 3: End active strip
+-            send_vertices_to_gl(curr_col_B)
+-            end_triangle_strip()
+-            strip_active = False
++        elif prev_visible and not curr_visible:
++            # Case 3: End active triangle strip
++            send_vertices_to_gl(curr_vertices)
++            end_primitive()
+             strip_started_at_prev = False
+             strip_ended_at_prev = True
+@@ -89,5 +88,5 @@
+             # Case 4: Both not visible
+             if strip_started_at_prev or strip_ended_at_prev:
+-                # Hole closure check using Y-coordinates from projected spans [S1, unofficial]
++                # Hole closure check: (Y1 > pY1) and (Y2 > pY2) [S1, unofficial]
+                 if (Y1 > pY1) and (Y2 > pY2):
+                     draw_hole_closing_triangle(Y1, pY1, Y2, pY2)
+@@ -95,14 +94,16 @@
+             strip_ended_at_prev = False
+ 
+-    prev_col_A = curr_col_B
+-    prev_col_A_visible = curr_col_B_visible
++    prev_vertices = curr_vertices
++    prev_visible = curr_visible
++    Y1 = Y2
++    pY1 = pY2
+ ```
+ 
+ **Parameters:**
+--   **Step Size:** The distance between scanned columns. Default is 32 pixels. Smaller steps generate more polygons [S1, unofficial].
++-   **Step Size:** The distance between scanned columns [S1, unofficial]. Default is 32 pixels [S1, unofficial]. Smaller steps generate more polygons [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+ -   **Holes:** In Case 4, if a triangle strip was started or finished at the previous column during the previous pass, a single triangle must be drawn to close the gap [S1, unofficial].
+--   **Mesh Density:** The triangle mesh can become too dense at the bottom of valleys. A span reduction technique is ideally needed to mitigate this [S1, unofficial].
++-   **Mesh Density:** The triangle mesh can become too dense at the bottom of valleys [S1, unofficial]. A span reduction technique is ideally needed to mitigate this [S1, unofficial].
+ -   **Approximation:** The hole-closing condition may draw triangles that are not quite visible, but this is accepted for efficiency over line intersections [S1, unofficial].
+ 

@@ -1,0 +1,128 @@
+--- v008.md
++++ v009.md
+@@ -11,14 +11,14 @@
+ ### Inputs and Outputs
+ *   **Input**: The current sample point $\mathbf{p}$ (hit point or volume sample), the view direction $\vec{\omega}_o$, the scene geometry including emissive volumes, and the light sources [G].
+-*   **Output**: The direct lighting term $L_{direct}(\mathbf{p})$ to be combined with the base color and other lighting terms [G].
++*   **Output**: The direct lighting term $L_{\text{direct}}(\mathbf{p})$ to be combined with the base color and other lighting terms [G].
+ 
+ ### Data Structures
+-*   **Ray Segment**: Defined by entry point $\mathbf{p}_{entry}$ and exit point $\mathbf{p}_{exit}$ within the bounding volume of the emissive source [S1, unofficial].
++*   **Ray Segment**: Defined by entry point $\mathbf{p}_{\text{entry}}$ and exit point $\mathbf{p}_{\text{exit}}$ within the bounding volume of the emissive source [S1, unofficial].
+ *   **PDF Storage**: Requires tracking the solid angle PDF $p(\vec{\omega})$ and the derived volume PDF $p(\mathbf{x})$ [S1, unofficial].
+ 
+ ### Steps
+ 1.  **Light Sampling**: For each light source (specifically emissive volumes), sample a point $\mathbf{x}_L$ on the light [S2, unofficial]. Calculate the vector $\vec{L} = \mathbf{x}_L - \mathbf{p}$ and distance $r = \|\vec{L}\|$ [S2, unofficial].
+-2.  **Shadow Ray**: Cast a shadow ray from $\mathbf{p}$ to $\mathbf{x}_L$ with near clip $0.001$ and far clip $r - 0.001$ [S2, unofficial]. Check for occlusion by intersecting with scene objects. If occluded, the direct lighting contribution from this light is zero [S2, unofficial].
+-3.  **PDF Conversion**: If not occluded, compute the MIS weight. The standard volume PDF $p(\mathbf{x})$ must be compared against the solid angle PDF $p(\vec{\omega})$ converted to volume space [S1, unofficial]. The conversion factor involves $r^{-2}$ [S1, unofficial].
++2.  **Shadow Ray**: Cast a shadow ray from $\mathbf{p}$ to $\mathbf{x}_L$ with near clip $0.001$ and far clip $r - 0.001$ [S2, unofficial]. Check for occlusion by intersecting with scene objects [S2, unofficial]. If occluded, the direct lighting contribution from this light is zero [S2, unofficial].
++3.  **PDF Conversion**: If not occluded, compute the MIS weight [S1, unofficial]. The standard volume PDF $p(\mathbf{x})$ must be compared against the solid angle PDF $p(\vec{\omega})$ converted to volume space [S1, unofficial]. The conversion factor involves $r^{-2}$ [S1, unofficial].
+     *   The MIS weight is computed as $\mathrm{MIS}(r^{-2}p(\vec{\omega}), p(\mathbf{x}))$ [S1, unofficial].
+     *   Note: $r^{-2}p(\vec{\omega})$ is a non-normalisable PDF because $\int_V r^{-2} p(\vec{\omega}) \mathrm{dV}$ does not converge to 1 in the standard manner [S1, unofficial].
+@@ -26,8 +26,8 @@
+ 5.  **Lighting Term Calculation**: Compute the direct lighting term using the evaluated emission, the geometric cosine factor, and the PDF weights [S2, unofficial].
+     $$
+-    L_{direct} = \frac{f_r(\mathbf{p}, \vec{\omega}_o, \vec{\omega}_i) L_e(\mathbf{x}_L) \cos \theta}{p(\mathbf{x})} \cdot \text{MIS weight}
++    L_{\text{direct}} = \frac{f_r(\mathbf{p}, \vec{\omega}_o, \vec{\omega}_i) L_e(\mathbf{x}_L) \cos \theta}{p(\mathbf{x})} \cdot \text{MIS weight}
+     $$
+     Where $L_e$ is the emitted radiance, $\theta$ is the angle between the surface normal and light direction, and $f_r$ is the BSDF [S2, unofficial].
+-6.  **Accumulation**: Add $L_{direct}$ to the total lighting term $L(\mathbf{p})$ for the sample point [G].
++6.  **Accumulation**: Add $L_{\text{direct}}$ to the total lighting term $L(\mathbf{p})$ for the sample point [G].
+ 
+ ### Pseudocode
+@@ -57,5 +57,4 @@
+ def compute_normal(p):
+     # Standard gradient normalization for volume shading [G]
+-    # Returns normalized gradient of scalar field at p
+     return [0.0, 1.0, 0.0]
+ 
+@@ -65,5 +64,5 @@
+     return p1_sq / (p1_sq + p2_sq)
+ 
+-def intersects_ray_scene(origin, direction, t_min, t_max):
++def intersects_scene(origin, direction, t_min, t_max):
+     # Standard ray-scene intersection test [G]
+     # Returns True if ray intersects any geometry within [t_min, t_max]
+@@ -85,33 +84,48 @@
+ 
+ def next_event_estimation(p, wo, scene, depth):
++    # Base case for path tracing recursion [S2, unofficial]
++    if depth <= 0:
++        return [0.0, 0.0, 0.0]
++
+     direct_light = [0.0, 0.0, 0.0]
+-    if depth <= 0:
+-        return direct_light
+     if not scene.lights:
+         return direct_light
+ 
+     for light in scene.lights:
++        # Sample point on light source [S2, unofficial]
+         to_light = light.random_sample(p)
+         distance_to_light = vector_norm(to_light)
+         if distance_to_light < 0.001:
+             continue
++
+         light_dir = vector_normalize(to_light)
++        point_on_light = vector_add(p, to_light)
++
++        # Shadow ray with tight intervals to avoid self-intersection [S2, unofficial]
+         shadow_near = 0.001
+         shadow_far = distance_to_light - 0.001
+-        if intersects_ray_scene(p, light_dir, shadow_near, shadow_far):
++        # Check occlusion by intersecting with scene objects [S2, unofficial]
++        if intersects_scene(p, light_dir, shadow_near, shadow_far):
+             continue
+ 
++        # PDF values for MIS [S1, unofficial]
+         p_omega = light.pdf(p)
+         r = distance_to_light
++        # Volume PDF derived from solid angle PDF [S1, unofficial]
+         p_vol = (1.0 / (r * r)) * p_omega
+-        p_x = 1.0
++        p_x = scene.get_volume_pdf(p) # Standard volume PDF [S1, unofficial]
++
++        # MIS weight [S1, unofficial]
+         mis_weight = balance_heuristic_mis(p_vol, p_x)
+ 
+-        emission_integral = evaluate_emission_segment(p, vector_add(p, to_light), scene)
++        # Evaluate emission along the entire ray segment for MIS consistency [S1, unofficial]
++        emission_integral = evaluate_emission_segment(p, point_on_light, scene)
+ 
++        # Compute direct lighting term [S2, unofficial]
+         normal = compute_normal(p)
+         cosine = max(0.0, dot(normal, light_dir))
+-        light_color = light.emitted(vector_add(p, to_light))
++        light_color = light.emitted(point_on_light)
+         attenuation = 1.0
++        # Formula from [S2, unofficial], adjusted for emission integral [S1, unofficial]
+         term = (attenuation / 255.0) * light_color * cosine * emission_integral / (math.pi * p_x)
+         direct_light = vector_add(direct_light, vector_mul(term, mis_weight))
+@@ -122,7 +136,7 @@
+ ### Parameters and Edge Cases
+ *   **Ray Intervals**: Shadow rays must use tight intervals (e.g., $0.001$ to $r-0.001$) to avoid self-intersection artifacts [S2, unofficial].
+-*   **PDF Normalization**: The term $r^{-2}p(\vec{\omega})$ is non-normalisable. Naive conversion using $r^{-2}\frac{\mathrm{dV}}{\mathrm{d\Omega}}$ yields incorrect results and is inconsistent with previous results without NEE [S1, unofficial].
++*   **PDF Normalization**: The term $r^{-2}p(\vec{\omega})$ is non-normalisable [S1, unofficial]. Naive conversion using $r^{-2}\frac{\mathrm{dV}}{\mathrm{d\Omega}}$ yields incorrect results and is inconsistent with previous results without NEE [S1, unofficial].
+ *   **Performance**: Integrating the volume PDF over the ray length is significantly slower (20x-40x) due to required ray casts and raises OptiX warnings in CUDA modes [S1, unofficial].
+-*   **Mode Discrepancies**: In `llvm_*` modes, the implementation using NEE is approximately 5x slower than not using NEE. In `cuda_*` modes, it is approximately 1.5x slower [S1, unofficial].
++*   **Mode Discrepancies**: In `llvm_*` modes, the implementation using NEE is approximately 5x slower than not using NEE [S1, unofficial]. In `cuda_*` modes, it is approximately 1.5x slower [S1, unofficial].
+ *   **Intersection Backend**: Differences in ray intersection handling between Embree (llvm) and OptiX (cuda) can lead to different results for ray entry/exit points, potentially causing incorrect results in `llvm_*` modes if not carefully handled [S1, unofficial].
+ 
+@@ -132,7 +146,10 @@
+ A general path tracing algorithm that includes direct lighting estimation via NEE [S2, unofficial]. It recursively traces rays to compute pixel color [S2, unofficial]. The base case returns black if depth is 0 [S2, unofficial]. It handles transmission materials by returning emitted light plus the recursive ray color scaled by transmittance [S2, unofficial]. For opaque materials, it computes direct lighting by sampling a point on the light, checking for shadow, and calculating the contribution using the cosine term, light color, and PDF [S2, unofficial]. Indirect lighting is computed recursively [S2, unofficial]. This variant is a standard implementation of NEE in path tracers [S2, unofficial].
+ 
++### Volume Light Emission
++A technique using the Volume Light shelf tool to set up a geometry light based on a selected volume [S3]. Using an actual light is more straightforward, less noisy, and faster than simply assigning an emissive material, and provides convenient controls like rolloff [S3]. The emissive (Ce) value only contributes to the diffuse component and does not affect the reflective component of the volume [S3].
++
+ ## Operating characteristics
+-*   **Time Complexity**: The method adds overhead due to shadow ray casting and emission integration along the segment. In `llvm_*` modes, it is ~5x slower than without NEE. In `cuda_*` modes, it is ~1.5x slower [S1, unofficial].
+-*   **Memory Complexity**: Requires storing ray intersection data and PDF values. No significant additional memory compared to standard path tracing [G].
++*   **Time Complexity**: The method adds overhead due to shadow ray casting and emission integration along the segment [S1, unofficial][S2, unofficial]. In `llvm_*` modes, it is ~5x slower than without NEE [S1, unofficial]. In `cuda_*` modes, it is ~1.5x slower [S1, unofficial].
++*   **Memory Complexity**: Requires storing ray intersection data and PDF values [S1, unofficial][G]. No significant additional memory compared to standard path tracing [G].
+ *   **Performance**: Reduces noise for the same sample count by providing accurate direct lighting estimates [S1, unofficial].
+ *   **Strengths**: Ensures energy consistency and reduces noise in scenes with emissive volumes [S1, unofficial].
+@@ -146,3 +163,4 @@
+ ## Sources
+ [S1] [✨ feature] Emissive Volume Rendering, https://github.com/mitsuba-renderer/mitsuba3/pull/678, fetched 2026-10-26 (unofficial)
+-[S2] TakTikFR/Volumetric-Path-Tracing, https://github.com/TakTikFR/Volumetric-Path-Tracing, fetched 2026-10-26 (unofficial)+[S2] TakTikFR/Volumetric-Path-Tracing, https://github.com/TakTikFR/Volumetric-Path-Tracing, fetched 2026-10-26 (unofficial)
++[S3] Rendering volumes - SideFX, https://www.sidefx.com/docs/houdini/render/volumes.html, fetched 2026-10-29

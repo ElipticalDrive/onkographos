@@ -1,0 +1,121 @@
+--- v001.md
++++ v002.md
+@@ -8,5 +8,5 @@
+ ## How it works
+ **Inputs and Outputs**
+-*   **Input:** A batch of 32 splats (bounding box data), a sub-tile of 32 pixels (8x4 grid).
++*   **Input:** A batch of 32 splats containing bounding box data, and a sub-tile of 32 pixels arranged in an 8x4 grid [S1].
+ *   **Output:** A 32-bit bitmask indicating which splats intersect the sub-tile, allowing threads to skip non-contributing splats during the rendering phase [S1].
+ 
+@@ -21,68 +21,72 @@
+ 
+ **Steps**
+-1.  **Subdivision:** Subdivide the image tile into sub-tiles of 32 pixels (8x4 grid). Map each pixel in the sub-tile to a unique thread in a warp [S1].
+-2.  **Batching:** Iterate through the splat batches in chunks of 32 splats. Map the 32 threads in the warp to the 32 splats in the current batch [S1].
+-3.  **Geometric Intersection Test:** Each thread $i$ (corresponding to splat $i$) pulls the bounding box of its assigned splat. It performs a boolean geometric intersection test between the splat's bounding box and the sub-tile's boundaries [S1].
+-4.  **Bitmask Creation:** Threads share their intersection results using the ballot primitive. This creates a 32-bit bitmask where bit $i$ is 1 if splat $i$ intersects the sub-tile, and 0 otherwise [S1].
+-5.  **Culling:** Each thread iterates through the 32 splats in the batch. Using the bitmask, it checks if the bit corresponding to the current splat index is set. If the bit is 0, the thread skips loading the full splat data and skipping the expensive alpha evaluation for that splat [S1].
++1.  **Subdivision:** Subdivide the image tile into sub-tiles of 32 pixels (8x4 grid) and map each pixel in the sub-tile to a unique thread in a warp [S1].
++2.  **Batching:** Iterate through the splat batches in chunks of 32 splats, and map the 32 threads in the warp to the 32 splats in the current batch [S1].
++3.  **Geometric Intersection Test:** Each thread $i$ (corresponding to splat $i$) pulls the bounding box of its assigned splat and performs a boolean geometric intersection test between the splat's bounding box and the sub-tile's boundaries [S1].
++4.  **Bitmask Creation:** Threads share their intersection results using the ballot primitive to create a 32-bit bitmask where bit $i$ is 1 if splat $i$ intersects the sub-tile, and 0 otherwise [S1].
++5.  **Culling:** Each thread iterates through the 32 splats in the batch, and uses the bitmask to check if the bit corresponding to the current splat index is set [S1]. If the bit is 0, the thread skips loading the full splat data and skips the expensive alpha evaluation for that splat [S1].
+ 
+ **Pseudocode**
+ ```python
+-# Assumptions:
+-# - warp_size = 32
+-# - sub_tile_width = 8
+-# - sub_tile_height = 4
+-# - sub_tile_pixel_count = 32
+-# - thread_id: unique ID of the thread within the warp (0-31)
+-# - splat_batch: array of 32 splats, each with bounding box (x_min, y_min, x_max, y_max)
+-# - sub_tile_bounds: (st_x_min, st_y_min, st_x_max, st_y_max) defining the sub-tile area
++WARP_SIZE = 32
++
++def warp_ballot(predicates):
++    # Simulates hardware warp ballot: returns a 32-bit integer where bit i is set if predicates[i] is true
++    mask = 0
++    for i in range(WARP_SIZE):
++        if predicates[i]:
++            mask |= (1 << i)
++    return mask
++
++def load_splat_data(splat):
++    # Fetches full splat attributes (position, covariance, opacity, etc.) from memory
++    return splat.attributes
++
++def evaluate_gaussian_alpha(attributes, pixel_coords):
++    # Computes the standard 3D Gaussian alpha value for the pixel
++    return compute_gaussian(attributes, pixel_coords)
+ 
+ def warp_level_culling(thread_id, splat_batch, sub_tile_bounds):
+-    # Step 1 & 2: Map thread to splat index
++    # Step 1 & 2: Map thread to splat index (0-31)
+     splat_index = thread_id
+-    
++
+     # Step 3: Geometric Intersection Test
+-    # Pull bounding box for the assigned splat
+     splat = splat_batch[splat_index]
+     sx_min, sy_min, sx_max, sy_max = splat.bounding_box
+-    
+-    # Check overlap with sub-tile
+-    # Two rectangles overlap if their projections on both axes overlap
+-    x_overlap = (sx_min < sub_tile_bounds.st_x_max) and (sx_max > sub_tile_bounds.st_x_min)
+-    y_overlap = (sy_min < sub_tile_bounds.st_y_max) and (sy_max > sub_tile_bounds.st_y_min)
+-    
++    st_x_min, st_y_min, st_x_max, st_y_max = sub_tile_bounds
++
++    # Boolean overlap check for axis-aligned rectangles
++    x_overlap = (sx_min < st_x_max) and (sx_max > st_x_min)
++    y_overlap = (sy_min < st_y_max) and (sy_max > st_y_min)
+     intersects = x_overlap and y_overlap
+-    
+-    # Step 4: Create Bitmask using ballot primitive
+-    # ballot(predicate) returns a 32-bit integer where bit i is set if thread i's predicate is true
+-    bitmask = ballot(intersects)
+-    
++
++    # Step 4: Bitmask Creation
++    # In hardware, ballot(intersects) aggregates results across all 32 threads in lock-step
++    thread_intersects = [False] * WARP_SIZE
++    thread_intersects[thread_id] = intersects
++    bitmask = warp_ballot(thread_intersects)
++
+     # Step 5: Culling during rendering loop
+-    # Each thread iterates through all 32 splats in the batch
+-    for i in range(warp_size):
+-        # Check if splat i intersects the sub-tile
+-        # Extract bit i from bitmask
++    for i in range(WARP_SIZE):
+         is_contributing = (bitmask >> i) & 1
+-        
+         if is_contributing:
+-            # Load full splat data and perform expensive alpha evaluation
+             splat_data = load_splat_data(splat_batch[i])
+             alpha = evaluate_gaussian_alpha(splat_data, thread_id)
+-            # ... perform blending ...
++            # Perform blending with alpha
+         else:
+-            # Skip loading data and alpha evaluation
++            # Skip full data load and alpha evaluation
+             pass
+ ```
+ 
+ **Edge Cases and Pitfalls**
+-*   **Synchronization Stalls:** The method avoids block-wide synchronization fences of the original blend stage by using warp-level lock-step execution. The ballot "fence" does not create stalls because threads in a warp progress in lock-step [S1].
+-*   **Workload Imbalance:** Not all splats in a tile will overlap and contribute to a pixel. This creates an uneven distribution of work among threads. The method ingests splat batches 32-at-a-time to mitigate stalls at synchronization fences [S1].
++*   **Synchronization Stalls:** The method avoids block-wide synchronization fences of the original blend stage by using warp-level lock-step execution [S1]. The ballot "fence" does not create stalls because threads in a warp progress in lock-step [S1].
++*   **Workload Imbalance:** Not all splats in a tile will overlap and contribute to a pixel [S1]. This creates an uneven distribution of work among threads [S1]. The method ingests splat batches 32-at-a-time to mitigate stalls at synchronization fences caused by this unevenness [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Reduces the number of expensive Gaussian alpha evaluations and memory fetches for non-contributing splats. The overhead is a cheap boolean bounding box check [S1].
++*   **Time Complexity:** Reduces the number of expensive Gaussian alpha evaluations and memory fetches for non-contributing splats [S1]. The overhead is a cheap boolean bounding box check [S1].
+ *   **Memory Complexity:** Reduces memory traffic by avoiding loading full splat data for culled splats [S1].
+ *   **Performance:** Maintains bit-identical output to the baseline (Faster-GS) because it only optimizes the culling of non-contributing splats, not the rendering of contributing ones [S1].
+ *   **Strengths:** Significant reduction in instruction count and memory traffic for sparse scenes or large tiles [S1].
+-*   **Limitations:** Effectiveness depends on the sparsity of splats within the sub-tile. If most splats overlap, the overhead of the culling logic may not yield significant gains [S1].
++*   **Limitations:** Effectiveness depends on the sparsity of splats within the sub-tile [S1]. If most splats overlap, the overhead of the culling logic may not yield significant gains [S1].
+ 
+ ## Background

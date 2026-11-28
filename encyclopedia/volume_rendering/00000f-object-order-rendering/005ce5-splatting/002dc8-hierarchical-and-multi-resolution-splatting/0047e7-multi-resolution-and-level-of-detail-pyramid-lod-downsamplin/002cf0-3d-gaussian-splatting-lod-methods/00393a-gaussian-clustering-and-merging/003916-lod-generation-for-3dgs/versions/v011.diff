@@ -1,0 +1,89 @@
+--- v010.md
++++ v011.md
+@@ -13,5 +13,5 @@
+ **Data Structures:**
+ *   **Page Table:** An array of entries. Each entry contains:
+-    *   `page_id`: Identifier for the virtual page.
++    *   `page_id`: Identifier for the virtual page [S1].
+     *   `lod_level`: Integer index indicating the current detail level (0 = highest detail/raw Gaussians, 1+ = merged) [S1].
+     *   `last_use`: Timestamp or frame counter for LRU eviction [S1].
+@@ -28,9 +28,9 @@
+ 2.  **Merging:** Replace each cluster $C_j$ with a single representative Gaussian $G'_j$ [S1].
+     *   **Translation:** Arithmetic mean: $\mathbf{t}'_j = \frac{1}{|C_j|} \sum_{i \in C_j} \mathbf{t}_i$ [S1].
+-    *   **Rotation:** Arithmetic mean of quaternions (normalized) [S1].
++    *   **Rotation:** Arithmetic mean of quaternions, followed by normalization [S1].
+     *   **Opacity:** Arithmetic mean: $\alpha'_j = \frac{1}{|C_j|} \sum_{i \in C_j} \alpha_i$ [S1].
+     *   **Color:** Arithmetic mean of spherical harmonic coefficients [S1].
+-    *   **Scale:** Arithmetic mean is **not** used directly. Merging scales directly causes the resulting Gaussian to be too small, creating visual gaps [S1]. Instead, the merged Gaussian is scaled up by a fixed factor $k_{scale}$ to fill gaps [S1]. The factor $k_{scale}$ is determined during training using average pixel coverage [S1].
+-        *   $\mathbf{s}'_j = k_{scale} \cdot \frac{1}{|C_j|} \sum_{i \in C_j} \mathbf{s}_i$ [S1].
++    *   **Scale:** Arithmetic mean is **not** used directly. Merging scales directly causes the resulting Gaussian to be too small, creating visual gaps [S1]. Instead, the merged Gaussian is scaled up by a fixed factor $k_{\text{scale}}$ to fill gaps [S1]. The factor $k_{\text{scale}}$ is determined during training using average pixel coverage [S1].
++        *   $\mathbf{s}'_j = k_{\text{scale}} \cdot \frac{1}{|C_j|} \sum_{i \in C_j} \mathbf{s}_i$ [S1].
+ 
+ 3.  **LOD Threshold Management:**
+@@ -78,7 +78,9 @@
+     return Gaussian(mean_t, mean_q, raw_mean_s, mean_alpha, mean_sh, (0.0, 0.0, 0.0))
+ 
+-def standard_kmeans(points: list, k: int, max_iters: int = 10) -> list[list[int]]:
++def standard_kmeans(points: list, k: int, max_iters: int = 10, position_weight: float = 10.0) -> list[list[int]]:
+     """Standard Lloyd's k-means algorithm [G]. Returns list of cluster indices."""
+     n = len(points)
++    if k > n:
++        k = n
+     centroids = points[:k]
+     assignments = [0] * n
+@@ -89,5 +91,6 @@
+             best_c = 0
+             for i, c in enumerate(centroids):
+-                dist = sum((p[j] - c[j])**2 for j in range(len(p)))
++                # Weight position higher to prevent dispersed clusters [S1]
++                dist = position_weight * sum((p[j] - c[j])**2 for j in range(3)) + sum((p[j] - c[j])**2 for j in range(3, len(p)))
+                 if dist < min_dist:
+                     min_dist = dist
+@@ -112,22 +115,23 @@
+     for cluster_indices in clusters:
+         cluster_gs = [page_gaussians[i] for i in cluster_indices]
+-        t, q, alpha, sh, raw_s = compute_cluster_mean(cluster_gs).t, compute_cluster_mean(cluster_gs).q, compute_cluster_mean(cluster_gs).alpha, compute_cluster_mean(cluster_gs).sh, compute_cluster_mean(cluster_gs).s
+-        s = tuple(v * scale_factor for v in raw_s)
+-        merged_gaussians.append(Gaussian(t, q, s, alpha, sh, (0.0, 0.0, 0.0)))
++        mean = compute_cluster_mean(cluster_gs)
++        s = tuple(v * scale_factor for v in mean.s)
++        merged_gaussians.append(Gaussian(mean.t, mean.q, s, mean.alpha, mean.sh, (0.0, 0.0, 0.0)))
+     return merged_gaussians
+ 
+-def update_lod_thresholds(current_memory_usage: float, memory_limit: float, current_thresholds: list[float], prev_step_direction: int) -> tuple[list[float], int]:
++def update_lod_thresholds(current_memory_usage: float, memory_limit: float, current_thresholds: list[float], prev_step_direction: int, base_step: float) -> tuple[list[float], int, float]:
+     new_thresholds = current_thresholds.copy()
+-    step = 1.0
++    step = base_step
++    # Dynamically adjust step size based on previous moves to prevent popping/flickering [S1]
+     if prev_step_direction != 0:
+-        step = 0.8 if prev_step_direction == 1 else 1.2
++        step = base_step * 0.8 if prev_step_direction == 1 else base_step * 1.2
+     if current_memory_usage > memory_limit:
+         for i in range(len(new_thresholds)):
+             new_thresholds[i] += step
+-        return new_thresholds, 1
++        return new_thresholds, 1, step
+     else:
+         for i in range(len(new_thresholds)):
+             new_thresholds[i] = max(0.0, new_thresholds[i] - step)
+-        return new_thresholds, -1
++        return new_thresholds, -1, step
+ ```
+ 
+@@ -138,11 +142,11 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** Not given in the sources.
++*   **Time Complexity:** Not given in the sources. [G]
++*   **Memory Complexity:** Not given in the sources. [G]
+ *   **Performance:** Enables real-time rendering (60+ FPS) by reducing sorting and rendering overhead for distant geometry [S1].
+ *   **Strengths:** Arithmetic averaging is computationally cheap [S1]. Dynamic thresholding adapts to varying memory constraints [S1].
+ *   **Limitations:** Arithmetic averaging can introduce geometric artifacts if clusters are large or heterogeneous [S1]. Fixed scale factor may not be optimal for all scenes [S1]. Rapid flipping (popping) can occur if threshold adaptation is poorly tuned [S1].
+-*   **When to use:** Not given in the sources.
+-*   **When not to use:** Not given in the sources.
++*   **When to use:** Not given in the sources. [G]
++*   **When not to use:** Not given in the sources. [G]
+ 
+ ## Background

@@ -1,0 +1,188 @@
+# Cache-based Lazy Memory Management
+
+Also called: CLM
+
+## Overview
+Cache-based Lazy Memory Management (CLM) is a memory offloading strategy that enables the training of large-scale 3D Gaussian Splatting (3DGS) scenes on a single consumer-grade GPU by exploiting the inherent sparsity of Gaussian memory access patterns [S1]. Unlike naive offloading approaches that load all Gaussians to the GPU or multi-GPU solutions that require complex synchronization, CLM keeps the majority of Gaussians in CPU memory and loads only the subset accessed by the current view, overlapping communication with computation to hide latency [S1].
+
+## How it works
+CLM operates on the standard 3D Gaussian primitive definition provided by [Rendering Implementation and Acceleration](21069-rendering-implementation-and-acceleration.md). The method manages the lifecycle of Gaussian parameters between CPU RAM and GPU VRAM to fit scenes exceeding GPU capacity.
+
+### Inputs and Outputs
+- **Input:** A set of posed training images (views), the full list of $N$ 3D Gaussians stored in CPU memory, and the current optimizer state.
+- **Output:** Updated Gaussian parameters in CPU memory (and optionally GPU memory for the active subset) after a training iteration.
+
+### Data Structures and Layout
+Each 3D Gaussian consists of 59 learnable parameters [S1]. These are divided into four attribute types:
+1.  **3D Position:** 3 parameters.
+2.  **Covariance (Scale + Rotation):** 3 + 4 = 7 parameters.
+3.  **Spherical Harmonics (Color):** 48 parameters.
+4.  **Opacity:** 1 parameter.
+
+Total parameters per Gaussian: $59$ [S1].
+
+During training, each parameter requires storage for:
+1.  The parameter value itself.
+2.  Its gradient.
+3.  Two additional versions for the Adam optimizer state [S1].
+
+Each value is a 4-byte floating-point number. Thus, the memory required per parameter is $4 \times 4 = 16$ bytes [S1]. The total memory required for $N$ Gaussians is:
+$$ \text{Memory} = N \times 59 \times 16 \text{ bytes} $$
+Or equivalently:
+$$ \text{Memory} = N \times 59 \times 4 \times 4 \text{ bytes} $$
+[S1]
+
+### Algorithm Steps
+The core strategy involves four key observations to minimize CPU-GPU communication overhead [S1]:
+
+1.  **Ahead-of-Time Access Computation:** Compute the set of Gaussians accessed by each view (training image) before the iteration begins. This allows the loading of Gaussians for the current iteration to overlap with the computation of the previous iteration [S1].
+2.  **Caching Overlapping Gaussians:** Identify and cache Gaussians that are accessed by multiple different views. This reduces the volume of data transferred during each training iteration [S1].
+3.  **Spatial Locality Scheduling:** Schedule training iterations such that views in the same spatial region are processed consecutively. Since views in the same region access similar Gaussians, this maximizes cache hits across successive iterations and minimizes overall communication volume [S1].
+4.  **Overlapping Gradient and Update:** Exploit spatial locality to overlap the gradient computation phase with a substantial portion of the Gaussian parameter update phase [S1].
+
+### Pseudocode
+The following pseudocode implements the CLM offloading strategy. It assumes a standard 3DGS training loop where `views` is a list of training images, `gaussians` is the full dataset in CPU memory, and `active_gaussians` is the subset accessed by a specific view.
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def train_clm(views, gaussians, optimizer_state):
+    """
+    Train 3DGS using Cache-based Lazy Memory Management.
+    
+    Args:
+        views: List of training view objects, each containing camera pose and image.
+        gaussians: Full list of N Gaussians stored in CPU memory.
+        optimizer_state: Current state of the Adam optimizer (stored in CPU memory).
+        
+    Returns:
+        Updated gaussians and optimizer_state in CPU memory.
+    """
+    
+    # Pre-compute access patterns for all views to enable ahead-of-time loading
+    # This step determines which Gaussians are visible/active for each view.
+    access_patterns = compute_access_patterns(views, gaussians)
+    
+    # Initialize a cache for Gaussians currently resident in GPU memory
+    # The cache size is limited by available GPU memory (e.g., 24GB on RTX 4090)
+    gpu_cache = Cache()
+    
+    # Initialize overlap pipeline: previous iteration's computation might still be running
+    prev_iter_compute_task = None
+    
+    for i, view in enumerate(views):
+        # Step 1: Determine Gaussians needed for the current view
+        current_gaussian_indices = access_patterns[i]
+        
+        # Step 2: Load necessary Gaussians from CPU to GPU
+        # This operation is asynchronous and can overlap with previous computation
+        load_task = load_gaussians_to_gpu(gaussians, current_gaussian_indices, gpu_cache)
+        
+        # Wait for load to complete if it hasn't started or if dependencies require it
+        # In practice, this is managed by a pipeline to hide latency
+        load_task.wait()
+        
+        # Step 3: Perform GPU computation (Rasterization and Forward Pass)
+        # This uses the Gaussians currently in the GPU cache
+        rendered_image = rasterize(view, gpu_cache.get_active_gaussians())
+        
+        # Step 4: Compute Loss and Gradients on GPU
+        loss = compute_loss(rendered_image, view.gt_image)
+        gradients = compute_gradients(loss, gpu_cache.get_active_gaussians())
+        
+        # Step 5: Transfer Gradients to CPU and Update Parameters
+        # This overlaps with the next iteration's loading phase
+        transfer_task = transfer_gradients_to_cpu(gradients, optimizer_state, current_gaussian_indices)
+        
+        # The actual parameter update (Adam step) happens on CPU
+        # This can overlap with the loading of the NEXT iteration's Gaussians
+        update_task = update_optimizer(optimizer_state, current_gaussian_indices)
+        
+        # Manage pipeline overlap:
+        # If the previous iteration's update is not done, wait for it to free up resources
+        # or simply let the CPU handle it while GPU loads the next batch.
+        if prev_iter_compute_task:
+            prev_iter_compute_task.wait()
+            
+        # Schedule next iteration's load to start as soon as possible
+        # The key insight is that loading for iteration i+1 can start while
+        # iteration i's gradient update is happening on CPU.
+        prev_iter_compute_task = transfer_task
+        
+    return gaussians, optimizer_state
+
+def compute_access_patterns(views, gaussians):
+    """
+    Compute which Gaussians are visible for each view.
+    This is done ahead-of-time to enable overlap.
+    """
+    patterns = []
+    for view in views:
+        # Project Gaussians to screen space and check overlap with view frustum/tiles
+        # Return indices of Gaussians that contribute to the render
+        active_indices = get_visible_gaussians(view, gaussians)
+        patterns.append(active_indices)
+    return patterns
+
+def load_gaussians_to_gpu(cpu_gaussians, indices, gpu_cache):
+    """
+    Load specific Gaussians from CPU to GPU, respecting cache limits.
+    Evicts old Gaussians if cache is full.
+    """
+    # Check which indices are already in GPU cache
+    cached_indices = gpu_cache.get_indices()
+    needed_indices = [idx for idx in indices if idx not in cached_indices]
+    
+    if needed_indices:
+        # Evict if necessary to make space
+        gpu_cache.evict_if_needed(len(needed_indices))
+        
+        # Transfer data
+        gpu_data = transfer_cpu_to_gpu(cpu_gaussians, needed_indices)
+        gpu_cache.add(gpu_data, needed_indices)
+        
+    return AsyncTask() # Placeholder for async transfer task
+
+def update_optimizer(optimizer_state, indices):
+    """
+    Run Adam optimizer step on CPU for the specified Gaussian indices.
+    """
+    # Extract gradients and parameters for indices
+    grads = get_gradients(indices)
+    params = get_parameters(indices)
+    
+    # Update optimizer state (m, v) and parameters
+    new_params, new_state = adam_step(params, grads, optimizer_state[indices])
+    
+    # Write back to CPU memory
+    update_cpu_memory(indices, new_params, new_state)
+    
+    return AsyncTask()
+```
+
+### Parameters and Typical Values
+- **Gaussian Parameter Count:** 59 per Gaussian [S1].
+- **Memory per Parameter:** 16 bytes (4 bytes for param, 4 for gradient, 8 for optimizer state) [S1].
+- **GPU Memory Capacity:** The method is demonstrated on an NVIDIA RTX 4090 with 24GB VRAM [S1].
+- **Scene Scale:** Successfully trained scenes with 100 million to 102 million Gaussians on a single RTX 4090 [S1].
+- **Tile Size:** Inherits the $16 \times 16$ pixel tile size from the parent [Rendering Implementation and Acceleration](21069-rendering-implementation-and-acceleration.md) .
+
+### Edge Cases and Pitfalls
+- **Naive Offloading Overhead:** Naively offloading all Gaussians to the CPU and loading them per iteration incurs significant performance overhead due to CPU-GPU communication latency and the time required to run the Adam optimizer on the CPU [S1].
+- **Memory Proportionality:** Naive offloading fails to scale because it still requires GPU memory proportional to the total number of Gaussians if all are loaded simultaneously [S1].
+- **Cache Thrashing:** If the spatial locality is poor or the cache size is too small, frequent evictions and reloads can negate the benefits of offloading [S1].
+- **Precision:** The method relies on standard 32-bit floating-point arithmetic for parameters and gradients [S1].
+
+## Operating characteristics
+- **Time Complexity:** The training time per iteration is dominated by the rasterization and gradient computation on the GPU, plus the CPU-GPU communication overhead. CLM minimizes this overhead by overlapping communication with computation and leveraging spatial locality [S1].
+- **Memory Complexity:** GPU memory usage is proportional to the number of *active* Gaussians in the current view and the cache size, not the total number of Gaussians $N$. CPU memory usage is proportional to $N \times 59 \times 16$ bytes [S1].
+- **Measured Performance:** CLM trains a scene with 102 million Gaussians on a single RTX 4090 (24GB) [S1]. It achieves state-of-the-art reconstruction quality comparable to multi-GPU systems [S1].
+- **Scaling:** Scales to large scenes that exceed single-GPU memory limits without requiring multi-GPU setups or reducing scene fidelity [S1].
+- **Strengths:** Enables training of very large scenes on consumer hardware; maintains high rendering quality; reduces communication overhead through caching and scheduling [S1].
+- **Limitations:** Requires pre-computation of access patterns; performance depends on the effectiveness of spatial locality in the training schedule; CPU-GPU communication remains a bottleneck if not properly overlapped [S1].
+
+## Background
+CLM was introduced in the paper "CLM: Removing the GPU Memory Barrier for 3D Gaussian Splatting" [S1]. The work addresses the memory barrier that prevents scaling 3DGS to large, intricate scenes on single consumer-grade GPUs. Prior approaches either used multiple GPUs (adding cost and complexity) or pruned Gaussians (compromising quality) [S1]. CLM leverages the observation that 3DGS computation is inherently sparse, allowing for efficient memory offloading [S1].
+
+## Sources
+[S1] CLM: Removing the GPU Memory Barrier for 3D Gaussian Splatting, https://doi.org/10.1145/3779212.3790140, fetched 2026-10-31

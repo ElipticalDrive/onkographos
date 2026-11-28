@@ -1,0 +1,74 @@
+# FlexGS
+
+Also called: Flexible 3D Gaussian Splatting, Elastic 3D Gaussian Splatting
+
+## Overview
+FlexGS is an elastic inference method for 3D Gaussian Splatting (3DGS) that enables a single trained model to adapt to varying computational constraints at inference time by selecting and transforming a subset of Gaussians based on a desired model size ratio, without requiring additional fine-tuning [S1]. It solves the problem that standard 3DGS models are too memory-intensive for devices with restricted resources (e.g., smartphones, VR headsets) and that previous compression methods required costly separate fine-tuning or re-training for each target compression ratio [S1]. Unlike post-hoc pruning methods that use fixed heuristics to retain Top-K Gaussians based on static importance scores, FlexGS jointly trains a learnable selector and transformation field to dynamically adjust the Gaussian set based on attributes and the input ratio during training [S1].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A pre-trained 3DGS model consisting of $N$ Gaussians, each characterized by position $X$, scaling $s$, rotation $q$, opacity $\alpha$, and color $c$ (defined by spherical harmonics coefficients $SH$) [S1]. A target ratio $e \in (0, 1]$ specifying the fraction of Gaussians to retain [S1].
+*   **Output:** A subset of $K = eN$ Gaussians, where the selected Gaussians are transformed (displaced/scaled) to compensate for the missing details of the pruned ones, allowing for rendering with reduced computational cost [S1].
+
+**Data Structures**
+The core data structure remains the list of $N$ Gaussians. Each Gaussian $i$ stores:
+*   Position: $X_i \in \mathbb{R}^3$
+*   Scaling vector: $s_i \in \mathbb{R}^3$
+*   Rotation quaternion: $q_i \in \mathbb{R}^4$ (optimized as a 3-vector in the source notation, but standard quaternions are 4D; the source specifies $q \in \mathbb{R}^3$ likely referring to the axis-angle or specific parameterization, but standard 3DGS uses quaternions. The source text says "rotation vector $q \in \mathbb{R}^3$", which is non-standard for quaternions. However, Eq 1 uses $R$. We follow the source's explicit definition: $q \in \mathbb{R}^3$) [S1].
+*   Opacity: $\alpha_i \in \mathbb{R}$
+*   Color: $c_i$ derived from $SH_i \in \mathbb{R}^{(d+1)}$ where $d$ is the SH degree [S1].
+
+The FlexGS framework adds two learnable modules:
+1.  **Gaussian Selector:** A neural network that takes Gaussian attributes and the target ratio $e$ as input and outputs a selection probability or score for each Gaussian.
+2.  **Transformation Field:** A neural network that takes the attributes of selected Gaussians and the ratio $e$ as input and outputs transformation parameters (displacement, scaling adjustment) to compensate for pruning.
+
+**Numbered Steps**
+1.  **Training Phase (Joint Optimization):**
+    1.  Initialize a standard 3DGS model with $N$ Gaussians.
+    2.  For each training step, sample a target ratio $e$ from a distribution (e.g., uniform over a range of desired deployment ratios) [S1].
+    3.  **Selection:** The Gaussian Selector module processes the attributes of all $N$ Gaussians and the current ratio $e$ to predict a binary scaler $\lambda_i$ for each Gaussian $i$. The selection is constrained such that $\sum_{i=1}^{N} \lambda_i = eN$ [S1].
+        *   *Note:* The source mentions using Gumbel-Softmax to handle the discrete nature of $\lambda_i$ for gradient propagation, as direct optimization over discrete choices is ineffective [S1].
+    4.  **Transformation:** For each Gaussian $i$ where $\lambda_i = 1$, the Transformation Field module computes a transformation $\Delta_i$ (e.g., displacement of mean $X$, adjustment of scaling $s$) based on the Gaussian's attributes and $e$ [S1].
+    5.  **Rendering:** Render the image using the transformed subset of Gaussians. The rendering equation for a pixel blending $N'$ ordered overlapping points is:
+        $$ C = \sum_{i \in N'} c_i \alpha_i \prod_{j=1}^{i-1} (1 - \alpha_j) $$
+        where $N'$ is the set of selected Gaussians ($\lambda_i=1$) [S1].
+    6.  **Loss Calculation:** Compute the rendering loss (e.g., L1 loss, D-SSIM) between the rendered image and the ground truth.
+    7.  **Backpropagation:** Update the 3DGS attributes, the Gaussian Selector parameters, and the Transformation Field parameters using gradient descent [S1].
+
+2.  **Inference Phase:**
+    1.  Load the jointly trained model.
+    2.  Specify the desired inference ratio $e$.
+    3.  Run the Gaussian Selector to identify the subset of Gaussians ($\lambda_i=1$).
+    4.  Run the Transformation Field to adjust the attributes of the selected Gaussians.
+    5.  Render using the standard 3DGS rasterization pipeline with the adjusted subset [S1].
+
+**Formulas**
+*   **Gaussian Definition:**
+    $$ G(X) = e^{-\frac{1}{2} X \Sigma^{-1} X}, \quad \Sigma = R S S^\top R^\top $$
+    where $X$ is the mean, $\Sigma$ is the covariance matrix, $R$ is the rotation matrix derived from quaternion $q$, and $S$ is the scaling matrix derived from vector $s$ [S1].
+*   **Selection Constraint:**
+    $$ \sum_{i=1}^{N} \lambda_i = eN $$
+    where $\lambda_i \in \{0, 1\}$ is the selection indicator for Gaussian $i$, and $e$ is the target ratio [S1].
+
+**Parameters**
+*   $N$: Total number of Gaussians in the initial model.
+*   $e$: Target ratio of Gaussians to retain. Typical values depend on the deployment target (e.g., 0.1 for 10% retention on mobile, 0.5 for moderate compression) [S1].
+*   $d$: Degree of spherical harmonics for color representation [S1].
+
+**Edge Cases and Pitfalls**
+*   **Extreme Compression:** Fixed heuristic selection rules may fail to generalize in extreme cases, such as when selecting only 1% of Gaussians, because importance scores must be frequently re-computed as Gaussian attributes evolve during training [S1]. FlexGS addresses this by learning the selection dynamically.
+*   **Discrete Optimization:** The binary nature of selection ($\lambda_i$) requires techniques like Gumbel-Softmax to allow gradient-based training [S1].
+*   **Ratio Dependency:** The transformation field is ratio-dependent. If the inference ratio differs significantly from the ratios seen during training, performance may degrade. The method assumes the training distribution covers the desired inference ratios [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Training time is comparable to standard 3DGS but requires multiple forward passes per step for different ratios $e$. Inference time is proportional to the number of selected Gaussians $K = eN$, offering linear speedup with respect to the ratio $e$ compared to the full model [S1].
+*   **Memory Complexity:** Memory usage during inference is proportional to $K = eN$ Gaussians, significantly reducing GPU memory requirements compared to the full $N$ Gaussians [S1].
+*   **Performance:** FlexGS achieves substantial rendering performance with reduced computational cost without additional fine-tuning. Experiments on ZipNeRF, MipNeRF, and Tanks&Temples scenes demonstrate its effectiveness [S1].
+*   **Strengths:** Single model supports multiple compression ratios; no re-training required for different devices; adaptive selection based on learned importance rather than static heuristics.
+*   **Limitations:** Requires joint training of selector and transformation modules; performance may vary with extreme compression ratios if not adequately covered in training; introduces slight overhead during training due to multi-ratio sampling [S1].
+
+## Background
+FlexGS was introduced by Hengyu Liu, Yuehao Wang, Chenxin Li, Ruisi Cai, Kevin Wang, Wuyang Li, Pavlo Molchanov, Peihao Wang, and Zhangyang Wang from The Chinese University of Hong Kong, University of Texas at Austin, and Nvidia [S1]. The paper "FlexGS: Train Once, Deploy Everywhere with Many-in-One Flexible 3D Gaussian Splatting" was published in CVPR 2025 (arXiv:2506.04174v1, June 4, 2025) [S1]. It addresses the limitations of standard 3DGS in resource-constrained environments and the inefficiencies of previous compression methods that required separate fine-tuning for each target ratio [S1].
+
+## Sources
+[S1] FlexGS: Train Once, Deploy Everywhere with Many-in-One Flexible 3D Gaussian Splatting, https://doi.org/10.1109/cvpr52734.2025.01523, fetched 2026-10-29

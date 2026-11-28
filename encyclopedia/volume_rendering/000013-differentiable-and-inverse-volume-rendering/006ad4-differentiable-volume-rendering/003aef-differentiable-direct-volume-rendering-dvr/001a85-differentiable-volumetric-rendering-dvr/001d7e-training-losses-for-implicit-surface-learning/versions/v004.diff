@@ -1,0 +1,275 @@
+--- v003.md
++++ v004.md
+@@ -4,17 +4,17 @@
+ 
+ ## Overview
+-This method defines a set of loss functions to train an occupancy network $f_\theta$ and a texture network $t_\theta$ using 2D image supervision, categorizing pixels into three distinct sets: $P_0$ (inside the object mask with finite predicted depth), $P_1$ (outside the object mask), and $P_2$ (inside the object mask but with infinite predicted depth) [S1]. It distinguishes itself from sibling methods by explicitly handling the ambiguity of empty space and missing geometry through specialized freespace and occupancy penalties, rather than relying solely on photometric consistency [S1].
++This method defines a set of loss functions to train an occupancy network $f_\theta$ and a texture network $t_\theta$ using 2D image supervision, categorizing pixels into three distinct sets: $\mathcal{P}_0$ (inside the object mask with finite predicted depth), $\mathcal{P}_1$ (outside the object mask), and $\mathcal{P}_2$ (inside the object mask but with infinite predicted depth) [S1]. It distinguishes itself from sibling methods by explicitly handling the ambiguity of empty space and missing geometry through specialized freespace and occupancy penalties, rather than relying solely on photometric consistency [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** A single image $I_k$ with corresponding camera intrinsics/extrinsics, an object mask $M_k$, and optionally ground truth depth $D_k$.
++*   **Inputs:** A single image $I_k$ with corresponding camera intrinsics and extrinsics, an object mask $M_k$, and optionally ground truth depth $D_k$ [S1].
+ *   **Outputs:** Gradients for $\theta$ (occupancy network parameters) and texture parameters.
+ 
+ **Data Structures:**
+-*   **Point Set $\mathcal{P}_0$:** Pixels $\mathbf{u}$ inside $M_k$ where the predicted depth $\hat{d}$ is finite.
+-*   **Point Set $\mathcal{P}_1$:** Pixels $\mathbf{u}$ outside $M_k$.
+-*   **Point Set $\mathcal{P}_2$:** Pixels $\mathbf{u}$ inside $M_k$ where the predicted depth $\hat{d}$ is infinite.
+-*   **Ray $\mathbf{r}(d)$:** The ray originating from the camera center through pixel $\mathbf{u}$ at depth $d$.
+-*   **Surface Point $\hat{\mathbf{p}}$:** The point $\mathbf{r}(\hat{d})$ on the predicted surface.
++*   **Point Set $\mathcal{P}_0$:** Pixels $\mathbf{u}$ inside $M_k$ where the predicted depth $\hat{d}$ is finite [S1].
++*   **Point Set $\mathcal{P}_1$:** Pixels $\mathbf{u}$ outside $M_k$ [S1].
++*   **Point Set $\mathcal{P}_2$:** Pixels $\mathbf{u}$ inside $M_k$ where the predicted depth $\hat{d}$ is infinite [S1].
++*   **Ray $\mathbf{r}(d)$:** The ray originating from the camera center through pixel $\mathbf{u}$ at depth $d$ [G].
++*   **Surface Point $\hat{\mathbf{p}}$:** The point $\mathbf{r}(\hat{d})$ on the predicted surface [G].
+ 
+ **Parameters:**
+@@ -68,108 +68,142 @@
+ **Pseudocode:**
+ ```python
+-def compute_training_loss(image, mask, depth_gt, camera_intrinsics, camera_extrinsics, 
+-                          occupancy_net, texture_net, Np):
+-    """
+-    Computes the total training loss for implicit surface learning.
+-    
+-    Args:
+-        image: Input image I_k.
+-        mask: Object mask M_k.
+-        depth_gt: Ground truth depth D_k (optional).
+-        camera_intrinsics, camera_extrinsics: Camera parameters.
+-        occupancy_net: Network f_theta predicting occupancy.
+-        texture_net: Network t_theta predicting texture.
+-        Np: Number of pixels to sample.
+-        
+-    Returns:
+-        total_loss: Scalar loss value.
+-    """
+-    # 1. Sample Np points on the image plane
+-    u_samples = sample_random_pixels(Np)
+-    
+-    # 2. Classify points into P0, P1, P2
+-    P0 = []
+-    P1 = []
+-    P2 = []
+-    
+-    for u in u_samples:
+-        # Project u to 3D ray r
+-        ray = get_ray_from_pixel(u, camera_intrinsics, camera_extrinsics)
+-        
+-        # Predict surface depth d_hat along the ray
+-        # Note: Implementation detail [G] - typically involves marching or root finding
+-        d_hat = predict_surface_depth(ray, occupancy_net)
+-        
+-        if is_inside_mask(u, mask):
+-            if is_finite(d_hat):
+-                P0.append(u)
++def compute_training_loss(image, mask, depth_gt, K, pose, occupancy_net, texture_net, Np, d_min, d_max, tau=0.5):
++    # K: 3x3 intrinsics, pose: 4x4 extrinsics (camera-to-world)
++    # Returns scalar total loss
++    cam_center = pose[:3, 3]
++    K_inv = np.linalg.inv(K)
++    H, W = image.shape[:2]
++
++    # 1. Sample Np pixels
++    u_idx = np.random.randint(0, W, size=Np)
++    v_idx = np.random.randint(0, H, size=Np)
++    points = np.stack([u_idx, v_idx], axis=1)
++
++    P0, P1, P2 = [], [], []
++    d_hats = {}
++
++    # 2. Classify points and predict depths
++    for i, u in enumerate(points):
++        uv1 = np.array([u[0], u[1], 1.0])
++        ray_dir = K_inv @ uv1
++        ray_dir = ray_dir / np.linalg.norm(ray_dir)
++        ray_origin = cam_center
++
++        # Predict depth by finding root of occupancy along ray
++        d_hat = find_surface_depth(ray_origin, ray_dir, occupancy_net, d_min, d_max, tau)
++        d_hats[i] = d_hat
++
++        inside = mask[u[1], u[0]] > 0.5
++        if inside:
++            if np.isfinite(d_hat):
++                P0.append(i)
+             else:
+-                P2.append(u)
++                P2.append(i)
+         else:
+-            P1.append(u)
+-            
++            P1.append(i)
++
+     total_loss = 0.0
+-    
++
+     # 3. Compute RGB Loss for P0
+     if P0:
+-        # Predict image I_hat for points in P0
+-        I_hat = predict_image_for_points(P0, occupancy_net, texture_net, camera_intrinsics, camera_extrinsics)
+-        
+-        # Feature extraction: RGB + optional gradients
+-        features_gt = extract_features(image, P0)
+-        features_pred = extract_features(I_hat, P0)
+-        
+-        # L1 loss
+-        l_rgb = sum(l1_norm(f_gt - f_pred) for f_gt, f_pred in zip(features_gt, features_pred))
+-        total_loss += l_rgb
+-        
+-        # 4. Compute Depth Loss for P0 (if depth_gt available)
+-        if depth_gt is not None:
+-            d_gt = get_depth_at_pixels(depth_gt, P0)
+-            d_hat_list = [d_hat for u in P0] # d_hat was computed in step 2
+-            l_depth = sum(abs(d - d_h) for d, d_h in zip(d_gt, d_hat_list))
+-            total_loss += l_depth
+-            
+-        # 5. Compute Normal Loss for P0 (optional)
+-        # [G] Implementation detail: Compute normals from occupancy gradient or geometry
+-        # l_normal = sum(norm_dist(p_normal, q_normal) for p, q in neighbors)
+-        # total_loss += l_normal
+-        
++        features_gt = []
++        features_pred = []
++        for i in P0:
++            u = points[i]
++            d = d_hats[i]
++            uv1 = np.array([u[0], u[1], 1.0])
++            ray_dir = K_inv @ uv1
++            ray_dir = ray_dir / np.linalg.norm(ray_dir)
++            p = cam_center + d * ray_dir
++
++            # Extract GT features (RGB + optional gradients)
++            gt_feat = np.concatenate([image[u[1], u[0]], compute_image_gradients(image, u)])
++            features_gt.append(gt_feat)
++
++            # Predict texture at surface point
++            pred_feat = texture_net(p)
++            features_pred.append(pred_feat)
++
++        features_gt = np.array(features_gt)
++        features_pred = np.array(features_pred)
++        total_loss += np.sum(np.abs(features_gt - features_pred))
++
++    # 4. Compute Depth Loss for P0 (if available)
++    if depth_gt is not None and P0:
++        d_gt_vals = np.array([depth_gt[u[1], u[0]] for i in P0 for u in [points[i]]])
++        d_hat_vals = np.array([d_hats[i] for i in P0])
++        total_loss += np.sum(np.abs(d_gt_vals - d_hat_vals))
++
++    # 5. Compute Normal Loss for P0 (optional)
++    # [G] Implementation detail: Compute normals via finite differences or analytical gradient
++    # l_normal = sum(norm(n(p_u) - n(q_u)) for u in P0)
++    # total_loss += l_normal
++
+     # 6. Compute Freespace Loss for P1
+     if P1:
+         l_freespace = 0.0
+-        for u in P1:
+-            ray = get_ray_from_pixel(u, camera_intrinsics, camera_extrinsics)
+-            # Check if finite depth was predicted (false positive)
+-            d_hat = predict_surface_depth(ray, occupancy_net)
+-            if is_finite(d_hat):
+-                p_hat = ray.point_at(d_hat)
+-                occ_val = occupancy_net(p_hat)
+-                l_freespace += bce(occ_val, 0)
++        for i in P1:
++            u = points[i]
++            uv1 = np.array([u[0], u[1], 1.0])
++            ray_dir = K_inv @ uv1
++            ray_dir = ray_dir / np.linalg.norm(ray_dir)
++            ray_origin = cam_center
++            d_hat = d_hats[i]
++
++            if np.isfinite(d_hat):
++                p_hat = ray_origin + d_hat * ray_dir
++                occ = occupancy_net(p_hat)
++                l_freespace += bce_loss(occ, 0.0)
+             else:
+-                # No surface predicted, sample random point on ray
+-                d_rand = random_depth()
+-                p_rand = ray.point_at(d_rand)
+-                occ_val = occupancy_net(p_rand)
+-                l_freespace += bce(occ_val, 0)
++                d_rand = np.random.uniform(d_min, d_max)
++                p_rand = ray_origin + d_rand * ray_dir
++                occ = occupancy_net(p_rand)
++                l_freespace += bce_loss(occ, 0.0)
+         total_loss += l_freespace
+-        
++
+     # 7. Compute Occupancy Loss for P2
+     if P2:
+         l_occupancy = 0.0
+-        for u in P2:
+-            ray = get_ray_from_pixel(u, camera_intrinsics, camera_extrinsics)
+-            # Sample random depth or use visual hull/ground truth
+-            if single_view_experiment:
+-                d_sample = get_visual_hull_depth(ray, mask) # or ground truth if available
+-            else:
+-                d_sample = random_depth()
+-                
+-            p_sample = ray.point_at(d_sample)
+-            occ_val = occupancy_net(p_sample)
+-            l_occupancy += bce(occ_val, 1)
++        for i in P2:
++            u = points[i]
++            uv1 = np.array([u[0], u[1], 1.0])
++            ray_dir = K_inv @ uv1
++            ray_dir = ray_dir / np.linalg.norm(ray_dir)
++            ray_origin = cam_center
++
++            # Single-view or random depth sampling
++            d_sample = np.random.uniform(d_min, d_max)
++            # [G] In single-view experiments, d_sample is replaced by visual hull or GT depth
++            p_sample = ray_origin + d_sample * ray_dir
++            occ = occupancy_net(p_sample)
++            l_occupancy += bce_loss(occ, 1.0)
+         total_loss += l_occupancy
+-        
++
+     return total_loss
++
++def find_surface_depth(origin, direction, net, d_min, d_max, tau):
++    # Simple bisection to find depth where occupancy crosses tau
++    low, high = d_min, d_max
++    for _ in range(20):
++        mid = (low + high) / 2.0
++        p = origin + mid * direction
++        occ = net(p)
++        if occ < tau:
++            low = mid
++        else:
++            high = mid
++    return (low + high) / 2.0 if high < d_max else np.inf
++
++def compute_image_gradients(img, u):
++    # [G] Simple finite difference gradient approximation
++    h, w = img.shape[:2]
++    dy = img[min(u[1]+1, h-1), u[0]] - img[max(u[1]-1, 0), u[0]]
++    dx = img[u[1], min(u[0]+1, w-1)] - img[u[1], max(u[0]-1, w-1)]
++    return np.array([dy, dx])
++
++def bce_loss(pred, target):
++    eps = 1e-7
++    pred = np.clip(pred, eps, 1 - eps)
++    return -(target * np.log(pred) + (1 - target) * np.log(1 - pred))
+ ```
+ 
+@@ -181,12 +215,12 @@
+ ## Operating characteristics
+ *   **Time Complexity:** Linear with respect to the number of sampled pixels $N_p$ and the number of points in each set $|\mathcal{P}_0|, |\mathcal{P}_1|, |\mathcal{P}_2|$ [S1].
+-*   **Memory Complexity:** Depends on the storage of the occupancy and texture networks and the intermediate gradients for the sampled points [S1].
++*   **Memory Complexity:** Depends on the storage of the occupancy and texture networks and the sampled point coordinates [G].
+ *   **Strengths:** Works with as little as one image per object [S1]. Can incorporate depth information if available [S1]. The normal loss is useful for real-world data to enforce natural shapes in unconstrained areas [S1].
+ *   **Limitations:** Relies on accurate object masks [S1]. The freespace and occupancy losses depend on the correct classification of pixels, which can be sensitive to depth prediction errors [S1].
+ *   **When to use:** When training implicit neural representations with 2D image supervision, especially in single-view or sparse-view settings [S1].
+-*   **When not to use:** When 3D ground truth geometry is available and can be used directly for supervision, as 2D-only supervision may lead to ambiguities [S1].
++*   **When not to use:** Not given in the sources.
+ 
+ ## Background
+-This method originates from the work on learning implicit 3D representations without 3D supervision [S1]. It was developed to address the challenge of training occupancy networks and texture networks using only 2D image data, masks, and optionally depth [S1]. The approach builds on the differentiable volumetric rendering framework [Parent](775-differentiable-volumetric-rendering-dvr.md).
++This method originates from the work on learning implicit 3D representations without 3D supervision [S1]. It was developed to address the challenge of training occupancy networks and texture networks using only 2D image data, masks, and optionally depth [S1]. The approach builds on the differentiable volumetric rendering framework [Parent](775-differentiable-volumetric-rendering-dvr.md) [G].
+ 
+ ## Sources

@@ -1,0 +1,179 @@
+--- v001.md
++++ v002.md
+@@ -18,17 +18,7 @@
+ **Method Steps:**
+ 
+-1.  **Encoding:** For each depth map $D_t$ at frame $t$:
+-    *   Unproject the depth map into a point cloud.
+-    *   Pass the point cloud through the encoder $E$ to extract deep features for each point by aggregating information within a local region [S1].
+-    *   Map these features to a set of latent codes to form the single-view neural volume $V_c^t$ [S1].
+-
+-2.  **Local-Level Fusion:** Integrate $V_c^t$ into the global volume $V_w$:
+-    *   Perform weighted averaging of the new latent codes into the global volume $V_w$ using weights $W_c^t$ [S1].
+-    *   This step efficiently integrates new information but is susceptible to depth outliers as it lacks global context [S1].
+-
+-3.  **Global-Level Fusion:** Optimize the global volume $V_w$:
+-    *   Iteratively optimize the latent codes in $V_w$ by minimizing the discrepancy between Signed Distance Function (SDF) values extracted from the volume and actual depth measurements along camera rays [S1].
+-    *   The decoder $\mathcal{D}$ parameters are frozen during this optimization; only the latent codes are updated [S1].
+-    *   This step encourages coherent global reconstruction and corrects errors from the local-level fusion [S1].
++1.  **Encoding:** For each depth map $D_t$ at frame $t$: unproject the depth map into a point cloud; pass the point cloud through the encoder $E$ to extract deep features for each point by aggregating information within a local region; map these features to a set of latent codes to form the single-view neural volume $V_c^t$ [S1].
++2.  **Local-Level Fusion:** Integrate $V_c^t$ into the global volume $V_w$ by performing weighted averaging of the new latent codes into the global volume using weights $W_c^t$ [S1]. This step efficiently integrates new information but is susceptible to depth outliers as it lacks global context [S1].
++3.  **Global-Level Fusion:** Optimize the global volume $V_w$ by iteratively minimizing the discrepancy between Signed Distance Function (SDF) values extracted from the volume $s_i$ and actual depth measurements $\bar{s}_i$ along camera rays [S1]. The decoder $\mathcal{D}$ parameters are frozen during this optimization; only the latent codes are updated [S1]. This step encourages coherent global reconstruction and corrects errors from the local-level fusion [S1].
+ 
+ **Implicit Neural Volume Definition:**
+@@ -52,68 +42,70 @@
+ *   $\bm{p}$: A local point cloud with normals of a local surface patch [S1].
+ *   $\bm{x}$: A sampled point around the surface [S1].
+-*   $s^{gt}_{\bm{x}}$: The ground-truth SDF value for point $\bm{x}$ [S1].
++*   $s^{gt}_{\bm{x}}$: The ground-truth SDF value for the sampled point $\bm{x}$ around the surface [S1].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-# Global state
+-global_volume = InitializeImplicitNeuralVolume() # Grid of latent codes l_i at positions p_i
+-decoder_D = LoadTrainedDecoder() # 4-layer MLP, parameters frozen during fusion
+-encoder_E = LoadTrainedEncoder() # Modified PointNet
++# Standard mathematical operations
++def trilinear_weight_and_decode(grid, query_pt, decoder_D):
++    # Compute 8 surrounding grid cells and trilinear weights
++    base_ix = int((query_pt[0] - grid.bounds[0]) / grid.res)
++    base_iy = int((query_pt[1] - grid.bounds[1]) / grid.res)
++    base_iz = int((query_pt[2] - grid.bounds[2]) / grid.res)
++    sdf_val = 0.0
++    for dx in range(2):
++        for dy in range(2):
++            for dz in range(2):
++                key = (base_ix + dx, base_iy + dy, base_iz + dz)
++                if key in grid.cells:
++                    l_i = grid.cells[key]
++                    p_i = np.array([
++                        grid.bounds[0] + (base_ix + dx) * grid.res,
++                        grid.bounds[1] + (base_iy + dy) * grid.res,
++                        grid.bounds[2] + (base_iz + dz) * grid.res
++                    ])
++                    # Trilinear interpolation weights
++                    fx = (query_pt[0] - p_i[0]) / grid.res
++                    fy = (query_pt[1] - p_i[1]) / grid.res
++                    fz = (query_pt[2] - p_i[2]) / grid.res
++                    w = (1.0 - fx if dx == 0 else fx) * \
++                        (1.0 - fy if dy == 0 else fy) * \
++                        (1.0 - fz if dz == 0 else fz)
++                    rel_coord = query_pt - p_i
++                    sdf_val += w * decoder_D(l_i, rel_coord)
++    return sdf_val
+ 
+-def encode_depth_map(depth_map, pose_Tcw):
+-    """
+-    Converts a depth map into a single-view neural volume (set of latent codes).
+-    """
+-    # Unproject depth map to 3D point cloud
+-    point_cloud = unproject_depth(depth_map, pose_Tcw)
+-    
+-    # Extract deep features and map to latent codes
+-    # E is modified PointNet aggregating local region info
+-    latent_codes = encoder_E(point_cloud)
+-    return latent_codes
++def unproject_depth(depth_map, K, T_cw):
++    points = []
++    for u in range(depth_map.shape[1]):
++        for v in range(depth_map.shape[0]):
++            z = depth_map[v, u]
++            if z > 0:
++                x_cam = (u - K[0, 2]) * z / K[0, 0]
++                y_cam = (v - K[1, 2]) * z / K[1, 1]
++                pt_cam = np.array([x_cam, y_cam, z, 1.0])
++                pt_world = T_cw @ pt_cam
++                points.append(pt_world[:3])
++    return points
+ 
+-def local_level_fusion(global_volume, new_latent_codes, weights):
+-    """
+-    Integrates new latent codes into the global volume via weighted averaging.
+-    """
+-    for new_code in new_latent_codes:
+-        # Find corresponding location in global volume
+-        # Update global volume latent code using running average weighted by W_cst
+-        global_volume.update_weighted_average(new_code, weights)
+-    return global_volume
++# Main Algorithm
++class NeuralVolumeGrid:
++    def __init__(self, bounds, resolution):
++        self.cells = {}
++        self.bounds = bounds
++        self.res = resolution
++    def get_or_create(self, pos):
++        ix = int((pos[0] - self.bounds[0]) / self.res)
++        iy = int((pos[1] - self.bounds[1]) / self.res)
++        iz = int((pos[2] - self.bounds[2]) / self.res)
++        key = (ix, iy, iz)
++        if key not in self.cells:
++            self.cells[key] = np.zeros(LATENT_DIM)
++        return self.cells[key], key
+ 
+-def global_level_fusion(global_volume, depth_map, pose_Tcw, num_iterations):
+-    """
+-    Optimizes latent codes in the global volume using neural rendering.
+-    """
+-    # Unproject depth map to get measurement points and values
+-    measurement_points, measurement_sdfs = unproject_depth_with_sdf(depth_map, pose_Tcw)
+-    
+-    for iteration in range(num_iterations):
+-        # Sample points along camera rays or use measurement points
+-        # Compute SDF from global volume using trilinear interpolation
+-        predicted_sdfs = []
+-        for pt in measurement_points:
+-            # Get 8 neighbors for trilinear interpolation
+-            neighbors = get_trilinear_neighbors(global_volume, pt)
+-            sdf_val = 0.0
+-            for i, neighbor in enumerate(neighbors):
+-                # w is trilinear weight, D is frozen decoder
+-                w = compute_trilinear_weight(pt, neighbor.pos)
+-                # Input to D: latent code l_i and relative coord x_bar_i
+-                rel_coord = pt - neighbor.pos
+-                sdf_val += w * decoder_D(neighbor.code, rel_coord)
+-            predicted_sdfs.append(sdf_val)
+-        
+-        # Compute loss: discrepancy between predicted SDFs and actual measurements
+-        loss = sum((pred - meas)**2 for pred, meas in zip(predicted_sdfs, measurement_sdfs))
+-        
+-        # Backpropagate to update latent codes only (decoder D is frozen)
+-        update_latent_codes(global_volume, loss)
+-        
+-    return global_volume
++global_volume = NeuralVolumeGrid(bounds=[-10, -10, -10, 10, 10, 10], resolution=0.05)
++decoder_D = load_pretrained_mlp()
++encoder_E = load_pretrained_pointnet()
+ 
+-# Main Loop
+ for t in range(num_frames):
+     D_t = get_depth_map(t)
+@@ -121,13 +113,23 @@
+     
+     # Step 1: Encoding
+-    V_c_t = encode_depth_map(D_t, T_cw_t)
++    point_cloud = unproject_depth(D_t, K, T_cw_t)
++    latent_codes = encoder_E(point_cloud)
+     
+     # Step 2: Local-Level Fusion
+-    global_volume = local_level_fusion(global_volume, V_c_t, weights=W_c_t)
++    for code, pos in zip(latent_codes, point_cloud):
++        cell, key = global_volume.get_or_create(pos)
++        cell[:] = (cell * W_c_t + code * (1.0 - W_c_t))
++        
++    # Step 3: Global-Level Fusion
++    measurement_points = unproject_depth(D_t, K, T_cw_t)
++    measurement_sdfs = depth_to_sdf(D_t, measurement_points)
+     
+-    # Step 3: Global-Level Fusion
+-    global_volume = global_level_fusion(global_volume, D_t, T_cw_t, num_iterations=K)
++    for iteration in range(K):
++        loss = 0.0
++        for pt in measurement_points:
++            pred_sdf = trilinear_weight_and_decode(global_volume, pt, decoder_D)
++            loss += (pred_sdf - measurement_sdfs[pt]) ** 2
++        update_latent_codes(global_volume, loss)
+ 
+-# Output
+ mesh = marching_cubes(global_volume)
+ ```

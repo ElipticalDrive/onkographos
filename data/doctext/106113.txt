@@ -1,0 +1,1229 @@
+# Voxelizer-rs
+
+A high-performance, parallelized CLI tool written in Rust that converts 3D meshes (STL/OBJ) into particle clouds. 
+
+## Features
+
+### Fast: 
+Uses rayon for multi-threaded ray-casting and grid search.
+
+### Robust: Handles both .stl (binary/ascii) and .obj formats.
+
+### Multi-format Export: Outputs to PLY, CSV, VTK, OBJ, MagicaVoxel (.vox), or a compact binary (.bin) format depending on the file extension.
+
+### Surface and Solid Modes: Generate either a solid voxelized volume, or just a thin surface shell.
+
+## Installation
+
+```
+cargo install voxelizer-rs
+```
+
+## Usage
+
+```
+voxelizer-rs --input heart_model.stl --output heart.bin --resolution 0.5
+```
+
+Arguments:
+
+``` -i, --input ```: Path to source mesh. 
+
+``` -o, --output ```: Path to destination file. The format is inferred from the extension (`.csv`, `.ply`, `.vtk`, `.obj`, `.vox`, or `.bin`).
+
+``` -r, --resolution ```: Voxel size in mesh units (default: 0.5).
+
+``` --surface-only ```: Optional flag. If provided, the output will only contain surface voxels instead of solid filling.
+
+``` --narrow-band ```: Optional value. Evaluate and store only the voxels where the absolute distance is within the desired threshold (e.g., `--narrow-band 1.0`).
+
+``` --scale ```: Scale multiplier for the mesh dimensions (default: 1.0).
+
+``` --center ```: Optional flag. If provided, the mesh will be centered at the origin (0, 0, 0) before processing.
+
+``` --translate ```: Translates the mesh by 'x,y,z' offsets (e.g., `--translate 10,-5,0`).
+
+``` --rotate ```: Rotates the mesh by 'x,y,z' degrees (e.g., `--rotate 90,0,0`).
+
+``` --crop ```: Crops the mesh to the given bounding box 'min_x,min_y,min_z,max_x,max_y,max_z' (e.g., `--crop -10,-10,-10,10,10,10`).
+
+``` --vertex-noise ```: Adds random displacement noise with the specified amplitude.
+
+``` --phase-sphere ```: Specify a sphere for assigning a phase 'x,y,z,radius' (e.g., `--phase-sphere 0,0,0,5`).
+
+``` --threads ```: Number of parallel threads to use. Defaults to the system's logical core count.
+
+## Binary Format Specification
+
+The output file uses a compact custom binary format serialized via ```bincode```.
+
+### 1. Header (Little Endian)
+
+| Offset | Type | Description |
+|---|---|---|
+| 0x00 | u32 | Version (Current: 2) |
+| 0x04 | u64 | Particle Count (N) |
+| 0x0C | f64 | Resolution (Grid spacing) |
+
+### 2. Payload (Little Endian)
+
+The header is immediately followed by a 64-bit length indicator (part of the bincode vector serialization), and then N particle structs.
+
+Layout per Particle (32 bytes):
+
+```
+struct ParticleData {
+    x: f32,
+    y: f32,
+    z: f32,
+    sdf: f32,
+    phase: u32, // 0 = Fluid, 1 = Wall/Solid
+    label_id: u32,
+    fiber_x: f32,
+    fiber_y: f32,
+}
+```
+
+### benches/voxelize_bench.rs
+```
+use criterion::{Criterion, criterion_group, criterion_main};
+use std::hint::black_box;
+use voxelizer_rs::{MeshProcessor, TransformConfig};
+
+fn bench_voxelize(c: &mut Criterion) {
+    let mesh_processor =
+        MeshProcessor::from_file("tests/data/cube.obj", &TransformConfig::default()).unwrap();
+
+    c.bench_function("voxelize", |b| {
+        b.iter(|| mesh_processor.voxelize(black_box(0.1), false, None, None));
+    });
+}
+
+criterion_group!(benches, bench_voxelize);
+criterion_main!(benches);
+```
+
+### src/lib.rs
+```
+use anyhow::Result;
+use nalgebra::Point3;
+use parry3d::math::{Isometry, Point, Vector};
+use parry3d::query::{PointQuery, Ray, RayCast, intersection_test};
+use parry3d::shape::{Cuboid, TriMesh};
+use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
+use std::fs::File;
+use std::path::Path;
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ParticleHeader {
+    pub version: u32,
+    pub particle_count: u64,
+    pub resolution: f64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy)]
+pub struct ParticleData {
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+    pub sdf: f32,
+    pub phase: u32,
+    pub label_id: u32,
+    pub fiber_x: f32,
+    pub fiber_y: f32,
+}
+
+type MeshData = (Vec<Point<f64>>, Vec<[u32; 3]>);
+
+#[derive(Debug, Clone, Copy)]
+pub struct TransformConfig {
+    pub scale: f64,
+    pub center: bool,
+    pub translate: Option<[f64; 3]>,
+    pub rotate: Option<[f64; 3]>,  // x, y, z in degrees
+    pub crop: Option<[f64; 6]>,    // min_x, min_y, min_z, max_x, max_y, max_z
+    pub vertex_noise: Option<f64>, // random displacement amplitude
+}
+
+impl Default for TransformConfig {
+    fn default() -> Self {
+        Self {
+            scale: 1.0,
+            center: false,
+            translate: None,
+            rotate: None,
+            crop: None,
+            vertex_noise: None,
+        }
+    }
+}
+
+pub struct MeshProcessor {
+    mesh: TriMesh,
+    bounds_min: Point3<f64>,
+    bounds_max: Point3<f64>,
+}
+
+impl MeshProcessor {
+    pub fn from_file(path: &str, transform: &TransformConfig) -> Result<Self> {
+        let path_obj = Path::new(path);
+        let extension = path_obj.extension().and_then(|s| s.to_str());
+        let ext_lower = extension.map(|e| e.to_lowercase());
+
+        let (mut points, indices) = match ext_lower.as_deref() {
+            Some("obj") => Self::load_obj(path)?,
+            Some("stl") => Self::load_stl(path)?,
+            Some(ext) => anyhow::bail!("Unsupported file format: {}", ext),
+            None => anyhow::bail!("Missing file extension"),
+        };
+
+        if let Some(r) = transform.rotate {
+            let rx = r[0].to_radians();
+            let ry = r[1].to_radians();
+            let rz = r[2].to_radians();
+
+            let rot_x = nalgebra::Rotation3::from_axis_angle(&nalgebra::Vector3::x_axis(), rx);
+            let rot_y = nalgebra::Rotation3::from_axis_angle(&nalgebra::Vector3::y_axis(), ry);
+            let rot_z = nalgebra::Rotation3::from_axis_angle(&nalgebra::Vector3::z_axis(), rz);
+
+            let rotation = rot_z * rot_y * rot_x;
+
+            for p in &mut points {
+                *p = rotation * *p;
+            }
+        }
+
+        if transform.center {
+            let mut min = Point3::new(f64::MAX, f64::MAX, f64::MAX);
+            let mut max = Point3::new(f64::MIN, f64::MIN, f64::MIN);
+            for p in &points {
+                min.x = min.x.min(p.x);
+                min.y = min.y.min(p.y);
+                min.z = min.z.min(p.z);
+                max.x = max.x.max(p.x);
+                max.y = max.y.max(p.y);
+                max.z = max.z.max(p.z);
+            }
+            let center = Point3::new(
+                (min.x + max.x) * 0.5,
+                (min.y + max.y) * 0.5,
+                (min.z + max.z) * 0.5,
+            );
+            for p in &mut points {
+                p.x -= center.x;
+                p.y -= center.y;
+                p.z -= center.z;
+            }
+        }
+
+        if (transform.scale - 1.0).abs() > f64::EPSILON {
+            for p in &mut points {
+                p.x *= transform.scale;
+                p.y *= transform.scale;
+                p.z *= transform.scale;
+            }
+        }
+
+        if let Some(t) = transform.translate {
+            for p in &mut points {
+                p.x += t[0];
+                p.y += t[1];
+                p.z += t[2];
+            }
+        }
+
+        #[allow(clippy::collapsible_if)]
+        if let Some(amp) = transform.vertex_noise {
+            if amp > 0.0 {
+                // Simple, fast pseudo-random number generator for noise
+                let mut seed = 123456789u32;
+                for p in &mut points {
+                    seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                    let rx = (seed as f64 / u32::MAX as f64) * 2.0 - 1.0;
+                    seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                    let ry = (seed as f64 / u32::MAX as f64) * 2.0 - 1.0;
+                    seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                    let rz = (seed as f64 / u32::MAX as f64) * 2.0 - 1.0;
+
+                    p.x += rx * amp;
+                    p.y += ry * amp;
+                    p.z += rz * amp;
+                }
+            }
+        }
+
+        let mesh = TriMesh::new(points, indices);
+        let aabb = mesh.local_aabb();
+
+        let mut bounds_min = aabb.mins;
+        let mut bounds_max = aabb.maxs;
+
+        if let Some(crop) = transform.crop {
+            bounds_min.x = bounds_min.x.max(crop[0]);
+            bounds_min.y = bounds_min.y.max(crop[1]);
+            bounds_min.z = bounds_min.z.max(crop[2]);
+            bounds_max.x = bounds_max.x.min(crop[3]);
+            bounds_max.y = bounds_max.y.min(crop[4]);
+            bounds_max.z = bounds_max.z.min(crop[5]);
+        }
+
+        Ok(Self {
+            mesh,
+            bounds_min,
+            bounds_max,
+        })
+    }
+
+    fn load_obj(path: &str) -> Result<MeshData> {
+        let (models, _) = tobj::load_obj(
+            path,
+            &tobj::LoadOptions {
+                triangulate: true,
+                ..Default::default()
+            },
+        )?;
+
+        // Pre-calculate capacities for all vertex positions and triangle faces to avoid
+        // multiple reallocations during vector growth, especially for large OBJ files.
+        let (total_points, total_faces) = models.iter().fold((0, 0), |acc, model| {
+            (
+                acc.0 + model.mesh.positions.len() / 3,
+                acc.1 + model.mesh.indices.len() / 3,
+            )
+        });
+
+        let mut all_points = Vec::with_capacity(total_points);
+        let mut all_indices = Vec::with_capacity(total_faces);
+        let mut offset = 0;
+
+        for model in models {
+            let mesh = model.mesh;
+            if mesh.positions.len() % 3 != 0 {
+                anyhow::bail!(
+                    "Model '{}' has a malformed positions array (length {} is not a multiple of 3)",
+                    model.name,
+                    mesh.positions.len()
+                );
+            }
+            if mesh.indices.len() % 3 != 0 {
+                anyhow::bail!(
+                    "Model '{}' has a malformed indices array (length {} is not a multiple of 3)",
+                    model.name,
+                    mesh.indices.len()
+                );
+            }
+            for chunk in mesh.positions.chunks_exact(3) {
+                all_points.push(Point::new(
+                    chunk[0] as f64,
+                    chunk[1] as f64,
+                    chunk[2] as f64,
+                ));
+            }
+            for chunk in mesh.indices.chunks_exact(3) {
+                all_indices.push([chunk[0] + offset, chunk[1] + offset, chunk[2] + offset]);
+            }
+            offset += (mesh.positions.len() / 3) as u32;
+        }
+        Ok((all_points, all_indices))
+    }
+
+    fn load_stl(path: &str) -> Result<MeshData> {
+        let mut file = File::open(path)?;
+        let stl = stl_io::read_stl(&mut file)?;
+
+        let points: Vec<Point<f64>> = stl
+            .vertices
+            .iter()
+            .map(|v| Point::new(v[0] as f64, v[1] as f64, v[2] as f64))
+            .collect();
+
+        let indices: Vec<[u32; 3]> = stl
+            .faces
+            .iter()
+            .map(|f| {
+                [
+                    f.vertices[0] as u32,
+                    f.vertices[1] as u32,
+                    f.vertices[2] as u32,
+                ]
+            })
+            .collect();
+
+        Ok((points, indices))
+    }
+
+    pub fn voxelize(
+        &self,
+        resolution: f64,
+        surface_only: bool,
+        narrow_band: Option<f64>,
+        phase_sphere: Option<[f64; 4]>,
+    ) -> Result<Vec<ParticleData>> {
+        if !resolution.is_finite() || resolution <= 1e-6 {
+            anyhow::bail!(
+                "Resolution must be a finite number greater than 1e-6 to avoid excessive resource usage or division by zero. Provided: {}",
+                resolution
+            );
+        }
+
+        if narrow_band.is_some_and(|band| !band.is_finite() || band < 0.0) {
+            anyhow::bail!(
+                "Narrow band must be a finite non-negative number. Provided: {}",
+                narrow_band.unwrap()
+            );
+        }
+
+        let start_time = std::time::Instant::now();
+
+        let mut bounds_min = self.bounds_min;
+        let mut bounds_max = self.bounds_max;
+
+        if let Some(band) = narrow_band {
+            // Expand the evaluation bounds by the narrow_band to ensure we capture
+            // exterior voxels in the required shell.
+            bounds_min.x -= band;
+            bounds_min.y -= band;
+            bounds_min.z -= band;
+            bounds_max.x += band;
+            bounds_max.y += band;
+            bounds_max.z += band;
+        }
+
+        let size = bounds_max - bounds_min;
+        let nx = (size.x / resolution).ceil() as u64;
+        let ny = (size.y / resolution).ceil() as u64;
+        let nz = (size.z / resolution).ceil() as u64;
+
+        println!(
+            "Grid Dimensions: {} x {} x {} (Potential Voxels: {})",
+            nx,
+            ny,
+            nz,
+            nx * ny * nz
+        );
+
+        // We avoid collecting the entire yz cartesian product to save memory.
+        // Instead we can use rayon's `into_par_iter` on a range or use flat_map across the ranges.
+        let particles: Vec<ParticleData> = (0..ny)
+            .into_par_iter()
+            .flat_map(|iy| {
+                (0..nz).into_par_iter().flat_map(move |iz| {
+                    let mut local_particles = Vec::with_capacity(nx as usize);
+                    let y = bounds_min.y + (iy as f64 * resolution) + (resolution * 0.5);
+                    let z = bounds_min.z + (iz as f64 * resolution) + (resolution * 0.5);
+
+                    // Extract raycasting to be available for both modes so SDF sign is consistent.
+                    let start_x = self.bounds_min.x - 1.0;
+                    let ray_point = Point::new(start_x, y, z);
+                    let ray = Ray::new(ray_point, Vector::x());
+                    let mut current_ray = ray;
+                    let max_dist = (bounds_max.x.max(self.bounds_max.x) - start_x) + 1.0;
+
+                    let mut hit_xs = Vec::new();
+                    while let Some(hit_toi) = self.mesh.cast_local_ray(&current_ray, max_dist, true)
+                    {
+                        let hit_point = current_ray.point_at(hit_toi);
+                        hit_xs.push(hit_point.x);
+
+                        current_ray = Ray::new(current_ray.point_at(hit_toi + 1e-4), Vector::x());
+
+                        if hit_xs.len() > 100_000 {
+                            break;
+                        }
+                    }
+
+                    // Sort intersections just in case precision issues caused out-of-order results
+                    hit_xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+                    // Iterate over X in the inner loop to optimize spatial cache locality.
+                    // Because rays are cast along the +X direction, doing X sequentially
+                    // keeps the raycast traversals in the same BVH region,
+                    // while parallelizing over (Y, Z) ensures finer granularity for Rayon.
+                    if surface_only {
+                        let half_res = resolution * 0.5;
+                        let cuboid = Cuboid::new(Vector::new(half_res, half_res, half_res));
+                        let mesh_iso = Isometry::identity();
+
+                        for ix in 0..nx {
+                            let x = bounds_min.x + (ix as f64 * resolution) + (resolution * 0.5);
+                            let point = Point::new(x, y, z);
+                            let voxel_iso = Isometry::translation(point.x, point.y, point.z);
+
+                            if let Ok(true) =
+                                intersection_test(&mesh_iso, &self.mesh, &voxel_iso, &cuboid)
+                            {
+                                let intersections_to_right =
+                                    hit_xs.len() - hit_xs.partition_point(|&hx| hx <= x);
+                                let is_inside = intersections_to_right % 2 != 0;
+
+                                let distance =
+                                    self.mesh.distance_to_local_point(&point, false) as f32;
+                                let sdf = if is_inside { -distance } else { distance };
+
+                                // Surface voxels inherently intersect the surface, so they should always be kept
+                                // if we're not using narrow_band. If narrow_band is used, we check the distance.
+                                let keep = if let Some(band) = narrow_band {
+                                    sdf.abs() <= band as f32
+                                } else {
+                                    true
+                                };
+
+                                if keep {
+                                    let mut phase = 0;
+                                    if let Some(sphere) = phase_sphere {
+                                        let dx = x - sphere[0];
+                                        let dy = y - sphere[1];
+                                        let dz = z - sphere[2];
+                                        let r2 = sphere[3] * sphere[3];
+                                        if dx * dx + dy * dy + dz * dz <= r2 {
+                                            phase = 1;
+                                        }
+                                    }
+                                    local_particles.push(ParticleData {
+                                        x: x as f32,
+                                        y: y as f32,
+                                        z: z as f32,
+                                        sdf,
+                                        phase,
+                                        label_id: 0,
+                                        fiber_x: 0.0,
+                                        fiber_y: 0.0,
+                                    });
+                                }
+                            }
+                        }
+                    } else {
+                        for ix in 0..nx {
+                            let x = bounds_min.x + (ix as f64 * resolution) + (resolution * 0.5);
+                            let point_3d = Point::new(x, y, z);
+
+                            // A point is inside if it has an odd number of intersections to its right (or left).
+                            // hit_xs is sorted, so we can use partition_point for O(log N) lookup.
+                            let intersections_to_right =
+                                hit_xs.len() - hit_xs.partition_point(|&hx| hx <= x);
+
+                            let is_inside = intersections_to_right % 2 != 0;
+
+                            let distance =
+                                self.mesh.distance_to_local_point(&point_3d, false) as f32;
+                            let sdf = if is_inside { -distance } else { distance };
+
+                            let keep = if let Some(band) = narrow_band {
+                                sdf.abs() <= band as f32
+                            } else {
+                                sdf <= 0.0
+                            };
+
+                            if keep {
+                                let mut phase = 0;
+                                if let Some(sphere) = phase_sphere {
+                                    let dx = x - sphere[0];
+                                    let dy = y - sphere[1];
+                                    let dz = z - sphere[2];
+                                    let r2 = sphere[3] * sphere[3];
+                                    if dx * dx + dy * dy + dz * dz <= r2 {
+                                        phase = 1;
+                                    }
+                                }
+                                local_particles.push(ParticleData {
+                                    x: x as f32,
+                                    y: y as f32,
+                                    z: z as f32,
+                                    sdf,
+                                    phase,
+                                    label_id: 0,
+                                    fiber_x: 0.0,
+                                    fiber_y: 0.0,
+                                });
+                            }
+                        }
+                    }
+                    local_particles
+                })
+            })
+            .collect();
+
+        let duration = start_time.elapsed();
+        println!("Voxelization complete in {:.2?}s", duration);
+
+        Ok(particles)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_voxelize_invalid_resolution() {
+        let points = vec![
+            Point::new(0.0, 0.0, 0.0),
+            Point::new(1.0, 0.0, 0.0),
+            Point::new(0.0, 1.0, 0.0),
+        ];
+        let indices = vec![[0, 1, 2]];
+        let mesh = TriMesh::new(points, indices);
+        let bounds_min = Point3::new(0.0, 0.0, 0.0);
+        let bounds_max = Point3::new(1.0, 1.0, 1.0);
+        let processor = MeshProcessor {
+            mesh,
+            bounds_min,
+            bounds_max,
+        };
+
+        let check_err = |res: f64| {
+            let err = processor.voxelize(res, false, None, None).unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                format!(
+                    "Resolution must be a finite number greater than 1e-6 to avoid excessive resource usage or division by zero. Provided: {}",
+                    res
+                )
+            );
+        };
+
+        check_err(0.0);
+        check_err(-1.0);
+        check_err(1e-7);
+        check_err(f64::NAN);
+        check_err(f64::INFINITY);
+
+        assert!(processor.voxelize(0.5, false, None, None).is_ok());
+    }
+
+    #[test]
+    fn test_voxelize_invalid_narrow_band() {
+        let points = vec![
+            Point::new(0.0, 0.0, 0.0),
+            Point::new(1.0, 0.0, 0.0),
+            Point::new(0.0, 1.0, 0.0),
+        ];
+        let indices = vec![[0, 1, 2]];
+        let mesh = TriMesh::new(points, indices);
+        let bounds_min = Point3::new(0.0, 0.0, 0.0);
+        let bounds_max = Point3::new(1.0, 1.0, 1.0);
+        let processor = MeshProcessor {
+            mesh,
+            bounds_min,
+            bounds_max,
+        };
+
+        let assert_narrow_band_error = |band: f64| {
+            let err = processor
+                .voxelize(0.5, false, Some(band), None)
+                .unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                format!(
+                    "Narrow band must be a finite non-negative number. Provided: {}",
+                    band
+                )
+            );
+        };
+
+        assert_narrow_band_error(-1.0);
+        assert_narrow_band_error(f64::NAN);
+        assert_narrow_band_error(f64::INFINITY);
+        assert_narrow_band_error(f64::NEG_INFINITY);
+
+        assert!(processor.voxelize(0.5, false, Some(0.0), None).is_ok());
+        assert!(processor.voxelize(0.5, false, Some(2.0), None).is_ok());
+    }
+
+    #[test]
+    fn test_voxelize_cube() {
+        let points = vec![
+            Point::new(0.0, 0.0, 0.0),
+            Point::new(1.0, 0.0, 0.0),
+            Point::new(1.0, 1.0, 0.0),
+            Point::new(0.0, 1.0, 0.0),
+            Point::new(0.0, 0.0, 1.0),
+            Point::new(1.0, 0.0, 1.0),
+            Point::new(1.0, 1.0, 1.0),
+            Point::new(0.0, 1.0, 1.0),
+        ];
+
+        let indices = vec![
+            [0, 1, 2],
+            [0, 2, 3], // Front
+            [5, 4, 7],
+            [5, 7, 6], // Back
+            [4, 5, 1],
+            [4, 1, 0], // Bottom
+            [3, 2, 6],
+            [3, 6, 7], // Top
+            [4, 0, 3],
+            [4, 3, 7], // Left
+            [1, 5, 6],
+            [1, 6, 2], // Right
+        ];
+
+        let mesh = TriMesh::new(points, indices);
+        let aabb = mesh.local_aabb();
+        let bounds_min = aabb.mins;
+        let bounds_max = aabb.maxs;
+
+        let processor = MeshProcessor {
+            mesh,
+            bounds_min,
+            bounds_max,
+        };
+
+        let particles = processor.voxelize(0.5, false, None, None).unwrap();
+        assert_eq!(
+            particles.len(),
+            8,
+            "Expected 8 voxels for a 1x1x1 cube at 0.5 resolution"
+        );
+
+        for p in &particles {
+            assert!(p.x == 0.25 || p.x == 0.75);
+            assert!(p.y == 0.25 || p.y == 0.75);
+            assert!(p.z == 0.25 || p.z == 0.75);
+        }
+    }
+
+    #[test]
+    fn test_from_file_unsupported_extension() {
+        let err = MeshProcessor::from_file("test.txt", &TransformConfig::default())
+            .err()
+            .expect("Expected an error for unsupported extension")
+            .to_string();
+        assert!(err.contains("Unsupported file format"));
+        assert!(err.contains("txt"));
+    }
+
+    #[test]
+    fn test_from_file_no_extension() {
+        let err = MeshProcessor::from_file("test", &TransformConfig::default())
+            .err()
+            .expect("Expected an error for missing extension");
+        assert!(err.to_string().contains("Missing file extension"));
+    }
+
+    #[test]
+    fn test_transform_scale() {
+        let temp_dir = std::env::temp_dir();
+        let file_path = temp_dir.join(format!(
+            "test_scale_{}.stl",
+            std::time::UNIX_EPOCH.elapsed().unwrap().as_nanos()
+        ));
+
+        let faces = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+
+        let mut f = std::fs::File::create(&file_path).unwrap();
+        use std::io::Write;
+        f.write_all(&[0; 80]).unwrap();
+        f.write_all(&1u32.to_le_bytes()).unwrap();
+        f.write_all(&[0; 12]).unwrap();
+        for v in &faces {
+            for c in v {
+                f.write_all(&(*c as f32).to_le_bytes()).unwrap();
+            }
+        }
+        f.write_all(&[0; 2]).unwrap();
+
+        let config = TransformConfig {
+            scale: 2.0,
+            ..Default::default()
+        };
+
+        let processor = MeshProcessor::from_file(file_path.to_str().unwrap(), &config).unwrap();
+
+        assert_eq!(processor.bounds_min.x, 0.0);
+        assert_eq!(processor.bounds_max.x, 2.0);
+        assert_eq!(processor.bounds_max.y, 2.0);
+
+        std::fs::remove_file(file_path).unwrap();
+    }
+
+    #[test]
+    fn test_transform_center() {
+        let temp_dir = std::env::temp_dir();
+        let file_path = temp_dir.join(format!(
+            "test_center_{}.stl",
+            std::time::UNIX_EPOCH.elapsed().unwrap().as_nanos()
+        ));
+
+        let faces = vec![[1.0, 1.0, 1.0], [3.0, 1.0, 1.0], [1.0, 3.0, 1.0]];
+
+        let mut f = std::fs::File::create(&file_path).unwrap();
+        use std::io::Write;
+        f.write_all(&[0; 80]).unwrap();
+        f.write_all(&1u32.to_le_bytes()).unwrap();
+        f.write_all(&[0; 12]).unwrap();
+        for v in &faces {
+            for c in v {
+                f.write_all(&(*c as f32).to_le_bytes()).unwrap();
+            }
+        }
+        f.write_all(&[0; 2]).unwrap();
+
+        let config = TransformConfig {
+            center: true,
+            ..Default::default()
+        };
+
+        let processor = MeshProcessor::from_file(file_path.to_str().unwrap(), &config).unwrap();
+
+        assert_eq!(processor.bounds_min.x, -1.0);
+        assert_eq!(processor.bounds_max.x, 1.0);
+        assert_eq!(processor.bounds_min.y, -1.0);
+        assert_eq!(processor.bounds_max.y, 1.0);
+        assert_eq!(processor.bounds_min.z, 0.0);
+        assert_eq!(processor.bounds_max.z, 0.0);
+
+        std::fs::remove_file(file_path).unwrap();
+    }
+
+    #[test]
+    fn test_transform_translate() {
+        let temp_dir = std::env::temp_dir();
+        let file_path = temp_dir.join(format!(
+            "test_translate_{}.stl",
+            std::time::UNIX_EPOCH.elapsed().unwrap().as_nanos()
+        ));
+
+        let faces = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+
+        let mut f = std::fs::File::create(&file_path).unwrap();
+        use std::io::Write;
+        f.write_all(&[0; 80]).unwrap();
+        f.write_all(&1u32.to_le_bytes()).unwrap();
+        f.write_all(&[0; 12]).unwrap();
+        for v in &faces {
+            for c in v {
+                f.write_all(&(*c as f32).to_le_bytes()).unwrap();
+            }
+        }
+        f.write_all(&[0; 2]).unwrap();
+
+        let config = TransformConfig {
+            translate: Some([10.0, 20.0, 30.0]),
+            ..Default::default()
+        };
+
+        let processor = MeshProcessor::from_file(file_path.to_str().unwrap(), &config).unwrap();
+
+        assert_eq!(processor.bounds_min.x, 10.0);
+        assert_eq!(processor.bounds_max.x, 11.0);
+        assert_eq!(processor.bounds_min.y, 20.0);
+        assert_eq!(processor.bounds_max.y, 21.0);
+        assert_eq!(processor.bounds_min.z, 30.0);
+        assert_eq!(processor.bounds_max.z, 30.0);
+
+        std::fs::remove_file(file_path).unwrap();
+    }
+
+    #[test]
+    fn test_transform_crop() {
+        let temp_dir = std::env::temp_dir();
+        let file_path = temp_dir.join(format!(
+            "test_crop_{}.stl",
+            std::time::UNIX_EPOCH.elapsed().unwrap().as_nanos()
+        ));
+
+        let faces = vec![
+            [[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [0.0, 10.0, 0.0]],
+            [[0.0, 0.0, 10.0], [10.0, 0.0, 10.0], [0.0, 10.0, 10.0]],
+        ];
+
+        let mut f = std::fs::File::create(&file_path).unwrap();
+        use std::io::Write;
+        f.write_all(&[0; 80]).unwrap();
+        f.write_all(&2u32.to_le_bytes()).unwrap();
+        for v in &faces {
+            f.write_all(&[0; 12]).unwrap();
+            for pt in v {
+                for c in pt {
+                    f.write_all(&(*c as f32).to_le_bytes()).unwrap();
+                }
+            }
+            f.write_all(&[0; 2]).unwrap();
+        }
+
+        let config = TransformConfig {
+            crop: Some([2.0, 2.0, 2.0, 8.0, 8.0, 8.0]),
+            ..Default::default()
+        };
+
+        let processor = MeshProcessor::from_file(file_path.to_str().unwrap(), &config).unwrap();
+
+        assert_eq!(processor.bounds_min.x, 2.0);
+        assert_eq!(processor.bounds_min.y, 2.0);
+        assert_eq!(processor.bounds_min.z, 2.0);
+        assert_eq!(processor.bounds_max.x, 8.0);
+        assert_eq!(processor.bounds_max.y, 8.0);
+        assert_eq!(processor.bounds_max.z, 8.0);
+
+        std::fs::remove_file(file_path).unwrap();
+    }
+
+    #[test]
+    fn test_transform_rotate() {
+        let temp_dir = std::env::temp_dir();
+        let file_path = temp_dir.join(format!(
+            "test_rotate_{}.stl",
+            std::time::UNIX_EPOCH.elapsed().unwrap().as_nanos()
+        ));
+
+        let faces = vec![[1.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 0.0, 0.0]];
+
+        let mut f = std::fs::File::create(&file_path).unwrap();
+        use std::io::Write;
+        f.write_all(&[0; 80]).unwrap();
+        f.write_all(&1u32.to_le_bytes()).unwrap();
+        f.write_all(&[0; 12]).unwrap();
+        for v in &faces {
+            for c in v {
+                f.write_all(&(*c as f32).to_le_bytes()).unwrap();
+            }
+        }
+        f.write_all(&[0; 2]).unwrap();
+
+        let config = TransformConfig {
+            rotate: Some([0.0, 0.0, 90.0]),
+            ..Default::default()
+        };
+
+        let processor = MeshProcessor::from_file(file_path.to_str().unwrap(), &config).unwrap();
+
+        // The point (1,0,0) rotated 90 degrees around Z should become (0,1,0)
+        assert!((processor.bounds_min.x - 0.0).abs() < 1e-5);
+        assert!((processor.bounds_max.y - 1.0).abs() < 1e-5);
+
+        std::fs::remove_file(file_path).unwrap();
+    }
+}
+```
+
+### src/main.rs
+```
+use clap::Parser;
+use std::fs::File;
+use std::io::{BufWriter, Write};
+use std::path::Path;
+use voxelizer_rs::{MeshProcessor, ParticleHeader, TransformConfig};
+
+#[derive(Parser, Debug)]
+#[command(author, version, about = "Voxelizer")]
+struct Args {
+    #[arg(short, long)]
+    input: String,
+
+    #[arg(short, long)]
+    output: String,
+
+    #[arg(short, long, default_value_t = 0.5, value_parser = validate_resolution)]
+    resolution: f64,
+
+    #[arg(long)]
+    surface_only: bool,
+
+    #[arg(long, value_parser = validate_narrow_band)]
+    narrow_band: Option<f64>,
+
+    #[arg(long, default_value_t = 1.0)]
+    scale: f64,
+
+    #[arg(long)]
+    center: bool,
+
+    #[arg(long, value_parser = parse_vec3)]
+    translate: Option<[f64; 3]>,
+
+    #[arg(long, value_parser = parse_vec3)]
+    rotate: Option<[f64; 3]>,
+
+    #[arg(long, value_parser = parse_vec6)]
+    crop: Option<[f64; 6]>,
+
+    #[arg(long)]
+    vertex_noise: Option<f64>,
+
+    #[arg(long, value_parser = parse_vec4)]
+    phase_sphere: Option<[f64; 4]>,
+
+    #[arg(long)]
+    threads: Option<usize>,
+}
+
+fn parse_vec4(s: &str) -> Result<[f64; 4], String> {
+    let parts: Vec<&str> = s.split(',').collect();
+    if parts.len() != 4 {
+        return Err(format!("Expected 'x,y,z,radius', got '{}'", s));
+    }
+    let x = parts[0]
+        .parse()
+        .map_err(|_| format!("Invalid x: {}", parts[0]))?;
+    let y = parts[1]
+        .parse()
+        .map_err(|_| format!("Invalid y: {}", parts[1]))?;
+    let z = parts[2]
+        .parse()
+        .map_err(|_| format!("Invalid z: {}", parts[2]))?;
+    let w = parts[3]
+        .parse()
+        .map_err(|_| format!("Invalid radius: {}", parts[3]))?;
+    Ok([x, y, z, w])
+}
+
+fn parse_vec6(s: &str) -> Result<[f64; 6], String> {
+    let parts: Vec<&str> = s.split(',').collect();
+    if parts.len() != 6 {
+        return Err(format!(
+            "Expected 'min_x,min_y,min_z,max_x,max_y,max_z', got '{}'",
+            s
+        ));
+    }
+    let v0 = parts[0]
+        .parse()
+        .map_err(|_| format!("Invalid value: {}", parts[0]))?;
+    let v1 = parts[1]
+        .parse()
+        .map_err(|_| format!("Invalid value: {}", parts[1]))?;
+    let v2 = parts[2]
+        .parse()
+        .map_err(|_| format!("Invalid value: {}", parts[2]))?;
+    let v3 = parts[3]
+        .parse()
+        .map_err(|_| format!("Invalid value: {}", parts[3]))?;
+    let v4 = parts[4]
+        .parse()
+        .map_err(|_| format!("Invalid value: {}", parts[4]))?;
+    let v5 = parts[5]
+        .parse()
+        .map_err(|_| format!("Invalid value: {}", parts[5]))?;
+    Ok([v0, v1, v2, v3, v4, v5])
+}
+
+fn parse_vec3(s: &str) -> Result<[f64; 3], String> {
+    let parts: Vec<&str> = s.split(',').collect();
+    if parts.len() != 3 {
+        return Err(format!("Expected 'x,y,z', got '{}'", s));
+    }
+    let x = parts[0]
+        .parse()
+        .map_err(|_| format!("Invalid x: {}", parts[0]))?;
+    let y = parts[1]
+        .parse()
+        .map_err(|_| format!("Invalid y: {}", parts[1]))?;
+    let z = parts[2]
+        .parse()
+        .map_err(|_| format!("Invalid z: {}", parts[2]))?;
+    Ok([x, y, z])
+}
+
+fn validate_resolution(s: &str) -> Result<f64, String> {
+    let val: f64 = s.parse().map_err(|_| format!("`{s}` isn't a number"))?;
+    if val.is_finite() && val > 1e-6 {
+        Ok(val)
+    } else {
+        Err(format!(
+            "Resolution must be a finite number greater than 1e-6. Provided: {s}"
+        ))
+    }
+}
+
+fn validate_narrow_band(s: &str) -> Result<f64, String> {
+    let val: f64 = s.parse().map_err(|_| format!("`{s}` isn't a number"))?;
+    if val.is_finite() && val >= 0.0 {
+        Ok(val)
+    } else {
+        Err(format!(
+            "Narrow band must be a finite non-negative number. Provided: {s}"
+        ))
+    }
+}
+
+fn main() -> anyhow::Result<()> {
+    let args = Args::parse();
+
+    if let Some(threads) = args.threads {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build_global()
+            .map_err(|e| anyhow::anyhow!("Failed to configure thread pool: {}", e))?;
+    }
+
+    println!("Input: {}", args.input);
+    println!("Resolution: {} mm", args.resolution);
+
+    let transform = TransformConfig {
+        scale: args.scale,
+        center: args.center,
+        translate: args.translate,
+        rotate: args.rotate,
+        crop: args.crop,
+        vertex_noise: args.vertex_noise,
+    };
+
+    let processor = MeshProcessor::from_file(&args.input, &transform)?;
+    let particles = processor.voxelize(
+        args.resolution,
+        args.surface_only,
+        args.narrow_band,
+        args.phase_sphere,
+    )?;
+
+    println!("Generated {} particles.", particles.len());
+
+    let path_out = Path::new(&args.output);
+    let extension = path_out
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|e| e.to_lowercase());
+
+    let file = File::create(&args.output)?;
+    let mut writer = BufWriter::new(file);
+
+    match extension.as_deref() {
+        Some("csv") => {
+            writeln!(writer, "x,y,z,phase")?;
+            for p in &particles {
+                writeln!(writer, "{},{},{},{}", p.x, p.y, p.z, p.phase)?;
+            }
+        }
+        Some("ply") => {
+            writeln!(writer, "ply")?;
+            writeln!(writer, "format ascii 1.0")?;
+            writeln!(writer, "element vertex {}", particles.len())?;
+            writeln!(writer, "property float x")?;
+            writeln!(writer, "property float y")?;
+            writeln!(writer, "property float z")?;
+            writeln!(writer, "end_header")?;
+            for p in &particles {
+                writeln!(writer, "{} {} {}", p.x, p.y, p.z)?;
+            }
+        }
+        Some("vtk") => {
+            writeln!(writer, "# vtk DataFile Version 3.0")?;
+            writeln!(writer, "Voxelizer Output")?;
+            writeln!(writer, "ASCII")?;
+            writeln!(writer, "DATASET POLYDATA")?;
+            writeln!(writer, "POINTS {} float", particles.len())?;
+            for p in &particles {
+                writeln!(writer, "{} {} {}", p.x, p.y, p.z)?;
+            }
+            writeln!(writer, "POINT_DATA {}", particles.len())?;
+            writeln!(writer, "SCALARS phase int 1")?;
+            writeln!(writer, "LOOKUP_TABLE default")?;
+            for p in &particles {
+                writeln!(writer, "{}", p.phase)?;
+            }
+        }
+        Some("vox") => {
+            if particles.is_empty() {
+                println!("No particles to export. Cannot generate empty VOX file.");
+                anyhow::bail!("Cannot generate empty VOX file.");
+            }
+
+            let mut min_x = f32::MAX;
+            let mut min_y = f32::MAX;
+            let mut min_z = f32::MAX;
+            let mut max_x = f32::MIN;
+            let mut max_y = f32::MIN;
+            let mut max_z = f32::MIN;
+
+            for p in &particles {
+                if p.x < min_x {
+                    min_x = p.x;
+                }
+                if p.y < min_y {
+                    min_y = p.y;
+                }
+                if p.z < min_z {
+                    min_z = p.z;
+                }
+                if p.x > max_x {
+                    max_x = p.x;
+                }
+                if p.y > max_y {
+                    max_y = p.y;
+                }
+                if p.z > max_z {
+                    max_z = p.z;
+                }
+            }
+
+            let res = args.resolution as f32;
+            let mut size_x = ((max_x - min_x) / res).round() as u32 + 1;
+            let mut size_y = ((max_y - min_y) / res).round() as u32 + 1;
+            let mut size_z = ((max_z - min_z) / res).round() as u32 + 1;
+
+            if size_x > 256 || size_y > 256 || size_z > 256 {
+                println!(
+                    "Warning: The voxel grid ({size_x}x{size_y}x{size_z}) exceeds MagicaVoxel's 256x256x256 per-model limit. Voxels outside this range will be clamped or wrapped."
+                );
+                size_x = size_x.min(256);
+                size_y = size_y.min(256);
+                size_z = size_z.min(256);
+            }
+
+            // MagicaVoxel format requires a 256-color palette. We'll just use color index 1 for solid and 2 for surface.
+            // Since phase isn't always reliable for surface/solid coloring, we can color by phase or just use 1.
+            let num_voxels = particles.len() as u32;
+
+            // Header
+            writer.write_all(b"VOX ")?;
+            writer.write_all(&150u32.to_le_bytes())?;
+
+            // MAIN chunk
+            writer.write_all(b"MAIN")?;
+            writer.write_all(&0u32.to_le_bytes())?;
+            // Size of children: SIZE chunk (24) + XYZI chunk (16 + 4 * num_voxels)
+            let children_size = 24 + 16 + num_voxels * 4;
+            writer.write_all(&children_size.to_le_bytes())?;
+
+            // SIZE chunk
+            writer.write_all(b"SIZE")?;
+            writer.write_all(&12u32.to_le_bytes())?;
+            writer.write_all(&0u32.to_le_bytes())?;
+            writer.write_all(&size_x.to_le_bytes())?;
+            writer.write_all(&size_y.to_le_bytes())?;
+            writer.write_all(&size_z.to_le_bytes())?;
+
+            // XYZI chunk
+            writer.write_all(b"XYZI")?;
+            let xyzi_content_size = 4 + num_voxels * 4;
+            writer.write_all(&xyzi_content_size.to_le_bytes())?;
+            writer.write_all(&0u32.to_le_bytes())?;
+            writer.write_all(&num_voxels.to_le_bytes())?;
+
+            for p in &particles {
+                let mut vx = ((p.x - min_x) / res).round() as i32;
+                let mut vy = ((p.y - min_y) / res).round() as i32;
+                let mut vz = ((p.z - min_z) / res).round() as i32;
+
+                // Clamp to [0, 255]
+                vx = vx.clamp(0, 255);
+                vy = vy.clamp(0, 255);
+                vz = vz.clamp(0, 255);
+
+                let color_idx = if p.phase > 0 { 2u8 } else { 1u8 };
+                writer.write_all(&[vx as u8, vy as u8, vz as u8, color_idx])?;
+            }
+        }
+        Some("obj") => {
+            for p in &particles {
+                writeln!(writer, "v {} {} {}", p.x, p.y, p.z)?;
+            }
+        }
+        _ => {
+            // Default to BIN
+            let header = ParticleHeader {
+                version: 2,
+                particle_count: particles.len() as u64,
+                resolution: args.resolution,
+            };
+
+            bincode::serialize_into(&mut writer, &header)?;
+            bincode::serialize_into(&mut writer, &particles)?;
+        }
+    }
+
+    println!("Saved to {}", args.output);
+    Ok(())
+}
+```

@@ -1,0 +1,45 @@
+# Contrastive Diffusion for Volume Super-Resolution (CD-TVD)
+Also called: CD-TVD, Contrastive Diffusion for Volume SR
+
+## Overview
+CD-TVD is the first diffusion-based approach to scientific volume super-resolution, designed to upscale low-resolution volumetric data to high resolution [S1, unofficial]. It distinguishes itself from prior GAN-based methods by combining contrastive pre-training on historical simulation data with fine-tuning from as few as one high-resolution timestep, enabling adaptation to new simulation scenarios with minimal exemplars [S1, unofficial]. Unlike image SR methods that rely on VGG-based perceptual losses, CD-TVD employs a contrastive encoding module to learn degradation-aware features in latent space, providing domain-specific representations for scientific data [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: Low-resolution volume data (timesteps from scientific simulations).
+- Output: High-resolution volume data (upscaled, typically 4×).
+
+**Data Structures:**
+- The method utilizes a latent space representation for features.
+- The SR module is built upon a Swin Transformer-based 3D denoising network [S1, unofficial].
+- Specific bit-packing or memory layout details for the Swin Transformer blocks are not given in the sources [G].
+
+**Steps:**
+1. **Contrastive Pre-training:** Train a contrastive encoding module on historical simulation data. This module learns degradation-aware features in the latent space, replacing the VGG-based perceptual losses typical of image SR with domain-specific representations [S1, unofficial].
+2. **SR Module Processing:** Pass the low-resolution volume through the Swin Transformer-based 3D denoising network [S1, unofficial].
+3. **Fine-tuning:** Adapt the pre-trained model to new simulation scenarios using entropy-based key-timestep selection, requiring as few as one high-resolution timestep as an exemplar [S1, unofficial].
+
+**Parameters:**
+- Upscaling factor: 4× (typical value used in evaluations) [S1, unofficial].
+- Training data: Historical simulation data for pre-training; single exemplar timestep for fine-tuning [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- The method is limited to volumes up to $1024^3$ [S1, unofficial].
+- Per-dataset training regimes are required, meaning the model may not generalize across entirely different simulation types without re-training or fine-tuning [S1, unofficial].
+
+## Subtopics
+
+### Gradient Vector Flow Diffusion with CNN Denoising
+An alternative formulation that recovers grid-based vector fields from representative streamlines [S1, unofficial]. It employs a two-stage approach: gradient vector flow diffusion followed by CNN-based denoising with recurrent residual blocks [S1, unofficial]. This method achieves 31–36 dB PSNR with compression rates of 12–51× on supercurrent, supernova, and tornado data [S1, unofficial]. It is distinct from CD-TVD in its input representation, as it operates on streamlines rather than direct grid-based upscaling [S1, unofficial].
+
+## Operating characteristics
+- **Performance:** On four fluid dynamics datasets at 4× upscaling, CD-TVD achieved 43–48 dB PSNR [S1, unofficial].
+- **Comparison:** It outperformed GAN-based methods in these evaluations [S1, unofficial].
+- **Limitations:** The approach remains limited to volumes up to $1024^3$ and requires per-dataset training regimes [S1, unofficial].
+- **Strengths:** Ability to adapt to new simulation scenarios from a single high-resolution exemplar via entropy-based key-timestep selection [S1, unofficial].
+
+## Background
+CD-TVD was introduced as the first diffusion-based approach to scientific volume super-resolution [S1, unofficial]. It addresses the limitations of previous methods by integrating contrastive learning with diffusion models, allowing for effective upscaling with limited high-resolution data. The method builds on the progression from single-modality CNNs to diffusion models in spatial scalar SR [S1, unofficial].
+
+## Sources
+[S1] Deep Learning Methods and Neural Representations for Scientific Volume ..., https://www.cs.uoregon.edu/Reports/AREA-202603-Mathai.pdf, fetched 2026-10-27 (unofficial)

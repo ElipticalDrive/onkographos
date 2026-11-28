@@ -1,0 +1,121 @@
+--- v006.md
++++ v007.md
+@@ -4,53 +4,86 @@
+ 
+ ## Overview
+-Screened Poisson Surface Reconstruction (SPSR) is an optimization-based method that fits a surface directly to a single oriented point cloud without prior training [S2]. It solves a Poisson equation to reconstruct a watertight manifold mesh, distinguishing itself from marching cubes variants (e.g., [Dual Contouring](778-dual-contouring.md), [Surface Nets](921-surface-nets.md)) by guaranteeing watertightness and avoiding the need to search for an ideal level-set threshold [S1, unofficial]. It builds on [Dual Contouring and Surface Nets](6319-dual-contouring-and-surface-nets.md) by offering a global smoothness prior rather than local cell-based extraction.
++Screened Poisson Surface Reconstruction (SPSR) is an optimization-based method that fits a manifold surface directly to a single oriented point cloud without prior training [S2]. It solves a screened Poisson equation to interpolate a scalar field from oriented samples, extracting the zero-level set as a watertight mesh [S1, unofficial]. Unlike marching cubes, which evaluates a volumetric grid and often produces non-watertight meshes or requires searching for an ideal level-set threshold, SPSR leverages the surface definition of the underlying differentiable renderer to create an oriented point set, which is then interpolated into a manifold surface [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:** An oriented point cloud $\{(\mathbf{c}_i, \mathbf{n}_i)\}_{i=1}^N$, where $\mathbf{c}_i$ is the position and $\mathbf{n}_i$ is the unit normal. A scalar field parameter $\lambda$ (often called `pointWeight` or interpolation weight).
+-
+-**Outputs:** A watertight triangle mesh representing the implicit surface $\phi(\mathbf{x}) = 0$.
++**Inputs:** An oriented point cloud consisting of positions $\mathbf{c}_i$ and unit normals $\mathbf{n}_i$ for $i=1 \dots N$.
++**Outputs:** A watertight triangle mesh.
+ 
+ **Data Structures:**
+-1.  **Point Cloud:** Array of $N$ structs, each containing $\mathbf{c}_i \in \mathbb{R}^3$ and $\mathbf{n}_i \in \mathbb{R}^3$.
+-2.  **Voxel Grid:** A 3D grid of resolution $R \times R \times R$ (typically $R \in [64, 256]$) covering the bounding box of the point cloud. Each voxel stores a scalar value $\phi$ and potentially a gradient.
+-3.  **Linear System:** A sparse matrix $A$ and vector $b$ representing the discretized screened Poisson equation.
++The input is a list of surfels. Each surfel $i$ contains:
++- $\mathbf{c}_i \in \mathbb{R}^3$: Position.
++- $\mathbf{n}_i \in \mathbb{R}^3$: Oriented unit normal.
++- $w_i \in \mathbb{R}$: Optional weight (default 1.0).
+ 
+-**Steps:**
+-1.  **Define Bounding Box:** Compute the axis-aligned bounding box (AABB) of the input point cloud. Expand it slightly to ensure boundary conditions are handled correctly.
+-2.  **Discretize Domain:** Create a uniform voxel grid over the AABB with resolution $R$. Let $V$ be the number of voxels.
+-3.  **Construct Matrix $A$:** Initialize $A$ as an identity matrix scaled by $\lambda$. Add Laplacian terms for the Poisson operator. For each voxel $j$, the diagonal entry $A_{jj}$ is set to $\lambda + \sum_{k \in \text{neighbors}(j)} w_{jk}$, and off-diagonal entries $A_{jk}$ are set to $-w_{jk}$, where $w_{jk}$ are weights based on voxel adjacency (typically 1 for 6-connected neighbors). [G: Standard 7-point Laplacian stencil].
+-4.  **Construct Vector $b$:** Initialize $b$ to zero. For each point $i$ in the cloud:
+-    a. Find the voxel $j$ containing $\mathbf{c}_i$ (or the closest voxel).
+-    b. Compute the contribution of the normal $\mathbf{n}_i$ to the gradient of $\phi$. The target gradient is $\mathbf{n}_i$.
+-    c. Distribute the normal information to the voxel centers of the neighboring voxels using trilinear interpolation weights $w_{ij}$.
+-    d. Update $b_j \leftarrow b_j + \lambda \cdot (\mathbf{n}_i \cdot \nabla \phi_{target})$. [G: In practice, this often involves integrating the normal field over the voxel support. A common approximation is $b_j = \sum_i \lambda \cdot \mathbf{n}_i \cdot \mathbf{v}_{ij}$, where $\mathbf{v}_{ij}$ is the basis function derivative].
+-5.  **Solve System:** Solve the linear system $A \phi = b$ for the scalar field values $\phi$ at all voxel centers. Use a sparse linear solver (e.g., Conjugate Gradient or Multigrid).
+-6.  **Extract Mesh:** Apply the Marching Cubes algorithm to the voxel grid scalar field $\phi$ to extract the isosurface $\phi(\mathbf{x}) = 0$.
+-7.  **Post-processing:** (Optional) Transfer material attributes (albedo, roughness, metallic) from the original point cloud to the mesh vertices using nearest-neighbor or radial-basis-function interpolation [S1, unofficial].
++**Method:**
++1.  **Field Definition:** Define a scalar field $f(\mathbf{x})$ such that its gradient $\nabla f(\mathbf{x})$ approximates the vector field defined by the point cloud normals. The target vector field $\mathbf{V}(\mathbf{x})$ is constructed by weighting the normals of nearby points.
++2.  **Poisson Equation:** Solve for $f$ by minimizing the energy functional:
++    $$ E(f) = \int_{\Omega} |\nabla f(\mathbf{x}) - \mathbf{V}(\mathbf{x})|^2 d\mathbf{x} + \lambda \int_{\Omega} |f(\mathbf{x})|^2 d\mathbf{x} $$
++    The first term ensures $\nabla f \approx \mathbf{V}$ (interpolation), and the second term (screening) with parameter $\lambda$ prevents the solution from drifting to infinity, ensuring stability [S1, unofficial].
++3.  **Discretization:** Discretize the domain $\Omega$ using a uniform grid or octree. The vector field $\mathbf{V}$ is typically estimated using Shepard interpolation or similar kernel weighting of the input normals.
++4.  **Linear System:** The minimization leads to a sparse linear system $A f = b$, where $A$ is the screened Laplacian matrix and $b$ depends on the vector field samples.
++5.  **Solve:** Solve the linear system for $f$ using a sparse linear solver (e.g., Conjugate Gradient).
++6.  **Extraction:** Extract the isosurface $f(\mathbf{x}) = 0$ using a marching cubes algorithm.
+ 
+ **Parameters:**
+-*   `pointWeight` ($\lambda$): Controls the interpolation constraint. High values force the surface to pass through the points; low values allow smoothing. Typical values: $10-100$ for dense clouds, lower for sparse [S1, unofficial].
+-*   `resolution` ($R$): Grid resolution. Typical values: $128-256$ [G].
++-   $\lambda$ (screening parameter): Controls the trade-off between interpolation accuracy and smoothness. Not given in the sources.
++-   `pointWeight`: Interpolation weight. Reducing this parameter relaxes the interpolation constraint, which is recommended to mitigate under-sampling artifacts [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Under-sampling:** In regions where the partition-of-unity condition is not met (e.g., boundaries, rapid variation), Shepard normalization acts as a kernel regression (Nadaraya-Watson estimator) rather than an interpolant. Surfel centers may deviate from the true surface. SPSR with high `pointWeight` produces artifacts here [S1, unofficial].
+-*   **Sparse/Corrupted Input:** The method struggles with sparse or heavily corrupted inputs [S2].
+-*   **Mitigation:** Reduce `pointWeight` to relax the interpolation constraint, allowing the Poisson solve to regularize the surface [S1, unofficial].
++-   **Under-sampling:** In regions where the partition-of-unity condition is not met (e.g., surface boundaries or rapid geometric variation), Shepard normalization acts as a kernel regression (Nadaraya–Watson estimator) rather than an interpolant [S1, unofficial]. This causes surfel centers to deviate from the true surface.
++-   **Artifacts:** Using SPSR with high interpolation weight in under-sampled regions may produce artifacts because the method attempts to interpolate through smoothed approximations [S1, unofficial].
++-   **Sparse Inputs:** The method struggles with sparse or heavily corrupted inputs [S2].
++
++**Pseudocode:**
++```python
++def screened_poisson_surface_reconstruction(points, normals, lambda_screen=1.0, point_weight=1.0):
++    """
++    Reconstructs a mesh from oriented points using Screened Poisson Surface Reconstruction.
++    
++    Args:
++        points: List of 3D positions (N, 3).
++        normals: List of unit normals (N, 3).
++        lambda_screen: Screening parameter for the Poisson equation.
++        point_weight: Interpolation weight to relax constraints in under-sampled regions.
++        
++    Returns:
++        vertices: (M, 3) array of mesh vertices.
++        faces: (K, 3) array of mesh face indices.
++    """
++    # 1. Construct the vector field V(x) from the point cloud
++    # V(x) is typically a weighted sum of normals using a kernel function K
++    # V(x) = sum_i (w_i * n_i * K(||x - c_i||)) / sum_i (w_i * K(||x - c_i||))
++    # Note: The exact kernel and discretization scheme (grid vs octree) are implementation-specific.
++    
++    # 2. Discretize the domain and build the linear system
++    # The system is A * f = b
++    # A = Laplacian + lambda_screen * Identity
++    # b is derived from the divergence of the vector field V or its projection onto the basis functions
++    
++    # 3. Solve the linear system
++    # f = solve(A, b)
++    
++    # 4. Extract the zero-level set
++    # Use Marching Cubes on the scalar field f to extract the mesh
++    vertices, faces = marching_cubes(f, level=0)
++    
++    return vertices, faces
++```
+ 
+ ## Subtopics
+ 
+ ### [Poisson Surface Reconstruction for Mesh Export](6401-poisson-surface-reconstruction-for-mesh-export.md)
+-A variant used to export watertight, colored triangle meshes from 3D Gaussians. It differs from marching cubes by always producing a watertight manifold surface, avoiding level-set threshold search.
++A variant used to generate watertight, colored triangle meshes from implicit surface representations like 3D Gaussians. It differs by leveraging differentiable renderer outputs to create oriented point sets and transferring material attributes via interpolation.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(V \log V)$ or $O(V)$ depending on the solver, where $V$ is the number of voxels. Solving the linear system is the dominant cost.
+-*   **Memory Complexity:** $O(V)$ for the voxel grid and sparse matrix.
+-*   **Strengths:** Produces watertight, manifold meshes; handles noisy data well with appropriate $\lambda$; global smoothness prior.
+-*   **Limitations:** Struggles with sparse inputs; requires tuning of `pointWeight`; may smooth out fine details if $\lambda$ is too low; artifacts in under-sampled regions if $\lambda$ is too high [S1, unofficial][S2].
+-*   **When to use:** When a watertight mesh is required from a dense, oriented point cloud, and fine detail preservation is less critical than topological correctness.
+-*   **When not to use:** For sparse point clouds or when preserving sharp features without smoothing is paramount.
++-   **Time Complexity:** Depends on the solver and grid resolution. Solving the sparse linear system is typically $O(N)$ to $O(N \log N)$ for well-conditioned systems, where $N$ is the number of grid cells or points.
++-   **Memory Complexity:** Proportional to the number of grid cells and non-zeros in the Laplacian matrix.
++-   **Strengths:** Produces watertight, manifold meshes suitable for physics simulation and fabrication. Robust to noise compared to simple interpolation methods.
++-   **Limitations:** Struggles with sparse or heavily corrupted inputs [S2]. Requires careful tuning of the `pointWeight` parameter to handle under-sampled regions [S1, unofficial].
++-   **When to use:** When a watertight mesh is required from an oriented point cloud, especially in inverse rendering pipelines where material attributes need to be transferred to the mesh.
++-   **When not to use:** For sparse inputs or when the input point cloud is heavily corrupted, as the method may produce artifacts or fail to converge to a meaningful surface.
+ 
+ ## Background
+-SPSR was introduced by Kazhdan and Hoppe in 2013 [S1, unofficial]. It extends the original Poisson Surface Reconstruction by Hoppe et al. (1992) by adding a "screening" term to the Poisson equation, which allows for better handling of noisy data and varying point densities [S1, unofficial]. It is widely used in computer graphics for surface reconstruction from range scans and point clouds.
++Screened Poisson Surface Reconstruction was introduced by Kazhdan and Hoppe in 2013 [S1, unofficial]. It builds on the original Poisson Surface Reconstruction by Hoppe et al. (1992) [S1, unofficial], adding a screening term to stabilize the solution. It is widely used in computer graphics for surface reconstruction from point clouds, particularly in the context of inverse rendering and 3D reconstruction from multi-view images or neural radiance fields.
+ 
+ ## Sources

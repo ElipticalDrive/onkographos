@@ -1,0 +1,63 @@
+--- v002.md
++++ v003.md
+@@ -29,5 +29,5 @@
+         $$ \text{prevtile} = \text{point\_list\_keys}[idx - 1] \gg 32 $$
+         [S1, unofficial]
+-    *   If $\text{currtile} \neq \text{prevtile}$, a tile boundary exists between `idx - 1` and `idx`. Set the end of the previous tile's range to the current index and the start of the current tile's range to the current index:
++    *   If $\text{currtile} \neq \text{prevtile}$, a tile boundary exists between `idx - 1` and `idx` [S1, unofficial]. Set the end of the previous tile's range to the current index and the start of the current tile's range to the current index:
+         $$ \text{ranges}[\text{prevtile}].y = idx $$
+         $$ \text{ranges}[\text{currtile}].x = idx $$
+@@ -39,30 +39,22 @@
+ **Pseudocode:**
+ ```python
+-def identify_tile_ranges_kernel(point_list_keys, ranges, L, block_idx, block_dim, thread_idx):
+-    # Global thread index in the grid
+-    idx = block_idx * block_dim + thread_idx
++def identify_tile_ranges_kernel(point_list_keys, ranges, L, thread_id):
++    idx = thread_id
+     
+-    # Bounds check
+     if idx >= L:
+         return
+ 
+-    # Extract current tile ID from the 64-bit key
+     currtile = point_list_keys[idx] >> 32
+ 
+-    # Handle the first element of the list
+     if idx == 0:
+         ranges[currtile].x = 0
+ 
+-    # Handle boundaries between tiles
+     if idx > 0:
+         prevtile = point_list_keys[idx - 1] >> 32
+         
+         if currtile != prevtile:
+-            # End of previous tile
+             ranges[prevtile].y = idx
+-            # Start of current tile
+             ranges[currtile].x = idx
+ 
+-    # Handle the last element of the list
+     if idx == L - 1:
+         ranges[currtile].y = L
+@@ -70,14 +62,14 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Empty Tiles:** If a tile has no splats, its range will remain at its default initialization value (typically `{0, 0}` or `{L, L}` depending on initialization strategy). The rasterizer must check if `start >= end` to skip empty tiles [G].
+-*   **Concurrent Writes:** Multiple threads may write to the same `ranges` entry (e.g., thread `idx` and `idx+1` both write to `ranges[currtile].x` if they are in the same tile, or thread `idx` writes `ranges[prevtile].y` while thread `idx-1` wrote `ranges[prevtile].x`). Since these writes are idempotent for the start index (always setting to the first occurrence) and the end index (always setting to the last occurrence + 1), atomic operations are not strictly required if the logic is correct, but race conditions on the *same* field from different threads in the same tile are benign only if they write the same value. Specifically, `ranges[currtile].x` is written by the first thread in that tile. `ranges[prevtile].y` is written by the last thread in that tile. There is no conflict for a single field from multiple threads unless the logic is flawed. However, `ranges[currtile].x` is written by thread `idx` where `currtile` is first seen. If multiple threads map to the same tile, only the first one (lowest `idx`) sets the start. The others see `currtile == prevtile` and do not write. Thus, no atomics are needed [G].
++*   **Empty Tiles:** If a tile has no splats, its range will remain at its default initialization value (typically `{0, 0}` or `{L, L}` depending on initialization strategy) [G]. The rasterizer must check if `start >= end` to skip empty tiles [G].
++*   **Concurrent Writes:** Multiple threads may write to the same `ranges` entry (e.g., thread `idx` and `idx+1` both write to `ranges[currtile].x` if they are in the same tile, or thread `idx` writes `ranges[prevtile].y` while thread `idx-1` wrote `ranges[prevtile].x`) [G]. Since these writes are idempotent for the start index (always setting to the first occurrence) and the end index (always setting to the last occurrence + 1), atomic operations are not strictly required if the logic is correct, but race conditions on the *same* field from different threads in the same tile are benign only if they write the same value [G]. Specifically, `ranges[currtile].x` is written by the first thread in that tile, and `ranges[prevtile].y` is written by the last thread in that tile [G]. There is no conflict for a single field from multiple threads unless the logic is flawed [G]. However, `ranges[currtile].x` is written by thread `idx` where `currtile` is first seen [G]. If multiple threads map to the same tile, only the first one (lowest `idx`) sets the start, while the others see `currtile == prevtile` and do not write [G]. Thus, no atomics are needed [G].
+ *   **Initialization:** The `ranges` array must be initialized to a safe default (e.g., `{0, 0}`) before kernel launch to handle tiles with no splats, or the rasterizer must handle uninitialized ranges [G].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(L)$, where $L$ is the number of (splat, tile) pairs after assignment. Each element is processed exactly once by one thread [G].
++*   **Time Complexity:** $O(L)$, where $L$ is the number of (splat, tile) pairs after assignment, as each element is processed exactly once by one thread [G].
+ *   **Memory Complexity:** $O(N_{tiles})$ for the output `ranges` array [G].
+-*   **Performance:** This kernel is extremely lightweight and typically completes in negligible time compared to the sorting and rasterization phases. It is memory-bandwidth bound due to reading `point_list_keys` and writing `ranges`, but the working set is small [G].
+-*   **Strengths:** Simple parallel logic, no synchronization barriers required between threads, minimal overhead [G].
+-*   **Limitations:** Requires the list to be fully sorted by tile ID before execution. Does not handle unsorted input [G].
++*   **Performance:** This kernel is extremely lightweight and typically completes in negligible time compared to the sorting and rasterization phases [G]. It is memory-bandwidth bound due to reading `point_list_keys` and writing `ranges`, but the working set is small [G].
++*   **Strengths:** Simple parallel logic, no synchronization barriers required between threads, and minimal overhead [G].
++*   **Limitations:** Requires the list to be fully sorted by tile ID before execution, and does not handle unsorted input [G].
+ 
+ ## Background

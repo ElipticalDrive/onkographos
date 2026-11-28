@@ -1,0 +1,153 @@
+# Volume Rendering (Taichi Forward Array)
+
+
+## Overview
+This method performs a forward volume rendering pass using the Taichi programming language to accumulate RGB color, depth, and opacity per ray [S1, unofficial]. It differs from standard CPU-based ray casting by leveraging Taichi's parallel execution model and supports transmittance thresholding to terminate ray marching early [S1, unofficial]. It builds on [Training Ray Compositing](3785-training-ray-compositing.md) by providing the specific Taichi-native implementation for compositing ray samples.
+
+## How it works
+**Inputs and Outputs:**
+The method takes volumetric data and ray metadata as inputs and produces compositing results.
+*   `sigmas`: Volume density field, shape $(N_{samples})$, type `ti.types.ndarray()` [S1, unofficial].
+*   `rgbs`: Volume color field, shape $(N_{samples}, 3)$, type `ti.types.ndarray()` [S1, unofficial].
+*   `deltas`: Distances between adjacent sample points, shape $(N_{samples})$, type `ti.types.ndarray()` [S1, unofficial].
+*   `ts`: Cumulative distances (or depths) of sample points, shape $(N_{samples})$, type `ti.types.ndarray()` [S1, unofficial].
+*   `rays_a`: Ray metadata array, shape $(N_{rays}, 3)$, type `ti.types.ndarray()`. Each row $n$ contains:
+    *   `rays_a[n, 0]`: Ray index `ray_idx` (integer) [S1, unofficial].
+    *   `rays_a[n, 1]`: Start index `start_idx` in the sample arrays (integer) [S1, unofficial].
+    *   `rays_a[n, 2]`: Number of samples `N_samples` for this ray (integer) [S1, unofficial].
+*   `T_threshold`: Float threshold for transmittance to stop marching [S1, unofficial].
+
+**Outputs:**
+*   `rgb`: Accumulated RGB color per ray, shape $(N_{rays}, 3)$, type `ti.types.ndarray()` [S1, unofficial].
+*   `depth`: Accumulated depth per ray, shape $(N_{rays})$, type `ti.types.ndarray()` [S1, unofficial].
+*   `opacity`: Accumulated opacity per ray, shape $(N_{rays})$, type `ti.types.ndarray()` [S1, unofficial].
+*   `total_samples`: Count of samples processed per ray, shape $(N_{rays})$, type `ti.types.ndarray()` [S1, unofficial].
+*   `ws`: Weights array, shape $(N_{rays})$, type `ti.types.ndarray()` [S1, unofficial].
+
+**Data Structures:**
+The implementation uses Taichi fields or arrays. The ray metadata `rays_a` is a 2D array where each row defines a ray's segment in the global sample buffer. The transmittance array `T` is typically allocated with size $N_{samples} + 1$ to store transmittance values at sample boundaries [S1, unofficial].
+
+**Parameters:**
+*   `T_threshold`: Float. If transmittance drops below this value, the ray is considered fully occluded and marching stops [S1, unofficial].
+*   `block_dim`: Loop configuration parameter, typically 256 [S1, unofficial].
+
+**Algorithm:**
+The method iterates over each ray defined in `rays_a`. For each ray, it initializes accumulators and marches through the sample points.
+
+1.  Iterate over each ray index $n$ in the range of `rays_a` (number of rays).
+2.  Extract `ray_idx = rays_a[n, 0]`, `start_idx = rays_a[n, 1]`, and `N_samples = rays_a[n, 2]` [S1, unofficial].
+3.  Initialize accumulators for this ray:
+    *   `rgb[ray_idx] = 0.0` (vector of size 3) [S1, unofficial].
+    *   `depth[ray_idx] = 0.0` [S1, unofficial].
+    *   `opacity[ray_idx] = 0.0` [S1, unofficial].
+    *   `total_samples[ray_idx] = 0` [S1, unofficial].
+4.  Initialize transmittance at the start of the ray segment: `T[start_idx] = 1.0` [S1, unofficial].
+5.  Loop over sample index `sample_` from $0$ to $N_{samples} - 1$:
+    a.  Compute global sample index: $s = \text{start\_idx} + \text{sample\_}$ [S1, unofficial].
+    b.  Read current transmittance: $T\_ = T[s]$ [S1, unofficial].
+    c.  **Check Threshold**: If $T\_ \le \text{T\_threshold}$:
+        i.  Set $T[s + 1] = 0.0$ [S1, unofficial].
+        ii. Break the loop (stop marching) [S1, unofficial].
+    d.  Compute absorption coefficient (opacity contribution) for this sample:
+        $$a = 1.0 - \exp(-\text{sigmas}[s] \times \text{deltas}[s])$$
+        [S1, unofficial].
+    e.  Compute weight $w$ for this sample:
+        $$w = T\_ \times a$$
+        [G: Derived from standard volume rendering equation $w_i = T_i (1 - e^{-\sigma_i \delta_i})$].
+    f.  Accumulate RGB:
+        $$\text{rgb}[\text{ray\_idx}, i] \leftarrow \text{rgb}[\text{ray\_idx}, i] + w \times \text{rgbs}[s, i] \quad \text{for } i \in \{0, 1, 2\}$$
+        [S1, unofficial].
+    g.  Accumulate Depth:
+        $$\text{depth}[\text{ray\_idx}] \leftarrow \text{depth}[\text{ray\_idx}] + w \times \text{ts}[s]$$
+        [S1, unofficial].
+    h.  Accumulate Opacity:
+        $$\text{opacity}[\text{ray\_idx}] \leftarrow \text{opacity}[\text{ray\_idx}] + w$$
+        [S1, unofficial].
+    i.  Update transmittance for the next step:
+        $$T[s + 1] = T\_ \times (1.0 - a)$$
+        [S1, unofficial].
+    j.  Increment `total_samples[ray_idx]` [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import taichi as ti
+
+@ti.kernel
+def composite_train_fw_array(
+    sigmas: ti.types.ndarray(),
+    rgbs: ti.types.ndarray(),
+    deltas: ti.types.ndarray(),
+    ts: ti.types.ndarray(),
+    rays_a: ti.types.ndarray(),
+    T_threshold: float,
+    rgb: ti.types.ndarray(),
+    depth: ti.types.ndarray(),
+    opacity: ti.types.ndarray(),
+    total_samples: ti.types.ndarray(),
+    ws: ti.types.ndarray(),
+    T: ti.types.ndarray() # Pre-allocated transmittance array, size N_samples + 1
+):
+    # Iterate over rays
+    for n in range(rays_a.shape[0]):
+        ray_idx = ti.cast(rays_a[n, 0], ti.i32)
+        start_idx = ti.cast(rays_a[n, 1], ti.i32)
+        N_samples = ti.cast(rays_a[n, 2], ti.i32)
+        
+        # Initialize accumulators
+        rgb[ray_idx, 0] = 0.0
+        rgb[ray_idx, 1] = 0.0
+        rgb[ray_idx, 2] = 0.0
+        depth[ray_idx] = 0.0
+        opacity[ray_idx] = 0.0
+        total_samples[ray_idx] = 0
+        
+        # Initialize transmittance at start
+        T[start_idx] = 1.0
+        
+        # March through samples
+        for sample_ in range(N_samples):
+            s = start_idx + sample_
+            T_ = T[s]
+            
+            # Check transmittance threshold
+            if T_ <= T_threshold:
+                T[s + 1] = 0.0
+                break
+            
+            # Compute absorption
+            a = 1.0 - ti.exp(-sigmas[s] * deltas[s])
+            
+            # Compute weight
+            w = T_ * a
+            
+            # Accumulate RGB
+            for i in range(3):
+                rgb[ray_idx, i] += w * rgbs[s, i]
+            
+            # Accumulate Depth
+            depth[ray_idx] += w * ts[s]
+            
+            # Accumulate Opacity
+            opacity[ray_idx] += w
+            
+            # Update transmittance
+            T[s + 1] = T_ * (1.0 - a)
+            
+            # Increment sample count
+            total_samples[ray_idx] += 1
+```
+
+## Operating characteristics
+*   **Time Complexity:** $O(N_{rays} \times N_{samples})$ in the worst case, where $N_{rays}$ is the number of rays and $N_{samples}$ is the maximum samples per ray. With thresholding, it is often faster.
+*   **Memory Complexity:** $O(N_{samples})$ for the transmittance array `T` and input/output buffers.
+*   **Performance:** Implemented in Taichi, it leverages GPU parallelism. The `block_dim=256` configuration suggests optimization for GPU thread blocks [S1, unofficial].
+*   **Strengths:** Efficient parallel execution on GPU; early termination via thresholding reduces computation for occluded rays.
+*   **Limitations:** Requires pre-allocated transmittance array `T` which must be managed carefully to avoid race conditions if rays share samples (though typically rays are disjoint in training setups). Precision issues may arise with very small `deltas` or `sigmas`.
+
+## Background
+This method is part of the Stable Dreamfusion pipeline, specifically the volume rendering component used for training NeRFs from text prompts [S1, unofficial]. It is implemented using Taichi for high-performance GPU computation.
+
+## Sources
+[S1] ashawkey/stable-dreamfusion, https://github.com/ashawkey/stable-dreamfusion, fetched 2026-10-26 (unofficial)

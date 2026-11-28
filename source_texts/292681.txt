@@ -1,0 +1,841 @@
+SplatFill: 3D Scene Inpainting via Depth-Guided Gaussian Splatting
+Mahtab Dahaghin
+Milind G. Padalkar
+Matteo Toso
+Alessio Del Bue
+Pattern Analysis and Computer Vision (PAVIS)
+Istituto Italiano di Tecnologia (IIT)
+arXiv:2509.07809v1 [cs.CV] 9 Sep 2025
+{mahtab.dahaghin, milind.padalkar, matteo.toso, alessio.delbue}@iit.it
+Abstract
+3D Gaussian Splatting (3DGS) has enabled the creation
+of highly realistic 3D scene representations from sets of
+multi-view images. However, inpainting missing regions,
+whether due to occlusion or scene editing, remains a challenging task, often leading to blurry details, artifacts, and
+inconsistent geometry. In this work, we introduce SplatFill,
+a novel depth-guided approach for 3DGS scene inpainting that achieves state-of-the-art perceptual quality and improved efficiency. Our method combines two key ideas:
+(1) joint depth-based and object-based supervision to ensure inpainted Gaussians are accurately placed in 3D space
+and aligned with surrounding geometry, and (2) we propose a consistency-aware refinement scheme that selectively
+identifies and corrects inconsistent regions without disrupting the rest of the scene. Evaluations on the SPIn-NeRF
+dataset demonstrate that SplatFill not only surpasses existing NeRF-based and 3DGS-based inpainting methods in visual fidelity but also reduces training time by 24.5%. Qualitative results show our method delivers sharper details,
+fewer artifacts, and greater coherence across challenging
+viewpoints.
+Figure 1. The 3D scene inpainting problem: Starting from a set of
+images with known poses and masks occluding the area to be inpainted, we train a model to incrementally fill the masked regions
+with high-frequency geometric and texture details that remain consistent with the unmasked scene elements. The resulting method
+is consistent even under strong viewpoint changes.
+which were either occluded by other elements or in contact
+with the edited components, resulting in visible gaps in the
+3D model. The task of completing these missing elements,
+outlined in Fig. 1, is commonly referred to as 3D scene inpainting, and requires high-quality visual synthesis as well
+as geometric consistency across all viewpoints. These requirements are hard to satisfy, making 3D scene inpainting
+a still open challenge.
+Inpainting missing content is a long-standing problem
+in computer vision. Image inpainting methods, from early
+PDE- and patch-based approaches [1, 2, 8, 10] to modern diffusion-based generative models [7, 17, 25, 32], have
+achieved impressive results in 2D. Yet, simply applying
+image inpainting independently to each reference view in
+a multi-view set is insufficient: minor inconsistencies between views quickly accumulate into artifacts and blurry
+results when rendered in 3D. This multi-view coherence re-
+1. Introduction
+In recent years, Novel View Synthesis (NVS) methods such
+as NeRF [18] and 3DGS [13] have made it possible to fully
+capture the appearance of a scene starting from a small set
+of images, training a model to generate photorealistic, accurate renderings from any viewpoint. Such methods have
+the potential to play a significant role in applications such as
+movie editing, game design, virtual/augmented reality, and
+robotics. However, in real-world applications, static reconstruction is not enough. To fully exploit NVS within these
+fields, we would require complete control over the 3D environment, i.e. being able to edit the scene dynamically by
+removing, replacing and modifying objects in the model.
+Such changes would expose previously unseen surfaces,
+1
+quirement is the primary obstacle separating 3D scene inpainting from its 2D counterpart.
+Recent works have explored 3D scene inpainting for both
+NeRF [6, 15, 19, 20, 23, 28, 31, 34] and 3DGS [16, 21, 29].
+While NeRF-based methods generally achieve high-quality
+results, their slow training and rendering speeds limit realtime applications. Conversely, 3DGS-based methods offer significant speed advantages but still struggle to achieve
+high-quality, consistent inpainting across all views. Existing inpainting approaches typically follow one of two main
+paradigms. The first conditions the reconstruction on a single inpainted reference view [29], which can yield accurate
+renderings from viewpoints close to that reference but tends
+to fail under large viewpoint changes. The second aggregates inpainted 2D images from multiple viewpoints [3, 26]
+in an attempt to enforce multi-view consistency. However,
+because the generative inpainting process does not always
+produce perfectly consistent 2D inpainting results across
+different views, enforcing 3D consistency can introduce artifacts and lead to blurring or unrealistic renderings.
+We introduce SplatFill, a new 3DGS-based inpainting
+framework that overcomes these limitations by integrating
+high-detail single-view inpainting with a multi-view refinement process guided by geometric priors. Our method captures fine details from a single reference view, then selectively fills occluded or missing regions using additional references while preserving a coherent 3D structure even under large viewpoint changes (see Fig. 1). The framework
+is built on three key insights: i) Multi-View Consistency inpainting starts from a single reference view and propagates edits to additional views with controlled consistency
+checks; ii) Depth-Aware Optimization - Since monocular
+depth accuracy varies with distance from the image plane,
+we reweight its contribution during training to improve reliability; and iii) Exploiting Instance Priors - instance segmentation in training images enables the embedding of a
+3D segmentation field in the Gaussian representation, ensuring that Gaussians align with object boundaries for more
+accurate reconstructions.
+Following these principles, SplatFill is designed to operate in seven stages: (i) select a reference view and perform
+2D inpainting of its masked region; (ii) estimate monocular depth maps for both the inpainted reference and other
+masked views; (iii) use depth maps only to group pixels
+by depth level, providing reliable depth priors; (iv) incorporate object-based supervision by associating Gaussians with
+instance-level features, enabling the identification and isolation of individual objects for targeted editing; (v) initialize and optimize Gaussians in missing regions using the inpainted image, depth priors, and object-aware constraints;
+(vi) detect depth inconsistencies by comparing normalized
+gradients of monocular depth with rendered depth, then select the most inconsistent view as the new reference and ap-
+ply 2D inpainting to its inconsistent region; (vii) repeat this
+loop until all views meet geometric and visual consistency
+requirements. This iterative strategy ensures consistent,
+high-quality 3D scene inpainting, leveraging both depthaware and object-aware supervision to improve geometric
+coherence and enable controllable scene editing across all
+viewpoints.
+Our contributions can be summarized as follows:
+1. We introduce a novel weighted depth optimization loss
+that reduces errors in monocular depth estimation, ensuring robust geometric continuity in the reconstructed 3D
+scenes. Unlike existing approaches, this loss does not
+require accounting for scale and shift alignment.
+2. We present a structured inpainting framework that systematically identifies inconsistencies among inpainted
+elements and the available training views. It then corrects these inconsistencies view by view while maintaining compatibility with previously processed views.
+3. We incorporate additional reconstruction priors to guide
+inpainting, encouraging Gaussians to align with object
+structures. This inherent grouping of Gaussians by objects benefits tasks such as 3D object selection.
+2. Related Work
+In this section, we review prior work in image inpainting
+and its extensions to 3D scene reconstruction, focusing on
+three main areas: 2D inpainting methods, 3D scene inpainting approaches for NeRF and 3DGS models.
+2.1. 2D inpainting
+Traditional 2D inpainting techniques initially relied on
+patch-based methods that leveraged repetitive patterns in
+images [2, 8]. These methods found applications in interactive image editing [1] and live video stream manipulation [10]. Data-driven methods as convolutional neural networks [12, 22, 36] and generative adversarial networks [35, 38] improved further the visual synthesis quality. More recently, diffusion models [7, 17, 25, 32] and
+Fourier convolutions [27] have achieved state-of-the-art
+performance in filling missing regions. While these methods excel in generating high-quality 2D images, they lack
+mechanisms for ensuring geometric consistency required
+in 3D scene inpainting. In practice, previous methods often apply an of-the-shelf 2D inpainting approach on one or
+more views to synthesize content in the missing regions,
+and then use these inpainted views as the starting point to
+perform 3D scene inpainting. We use the diffusion-based
+method from [9] to inpaint our reference views.
+2.2. NeRF-based 3D scene inpainting methods
+The pionnering NeRF-based inpainting method in SPInNeRF [20] inpaints each view independently and leverages a mean squared error loss on the unmasked regions
+2
+Figure 2. Pipeline. (a) We begin with a set of multi-view training images, each with its corresponding binary mask and camera pose.
+(b) One image is selected as the reference and inpainted using a diffusion-based 2D inpainting model, providing plausible content for the
+masked region. (c) Monocular depth estimation is performed for each image, producing depth maps that guide the 3D spatial placement
+of Gaussians. (d) Instance segmentation is applied to all images to generate object masks, providing semantic priors for the 3D Gaussians.
+(e) The 3DGS model is optimized with supervision from the photometric, depth, and object-aware signals, producing geometrically and
+semantically consistent inpainting across all views. (f) Selective Guided Inpainting (SGI) is iteratively applied by identifying and refining
+the regions with the highest inpainting errors using updated 2D inpainting on challenging views.
+tive framework, to achieve sharp, geometrically consistent
+reconstructions across diverse viewpoints, even in the presence of large occlusions. We compare our results with those
+presented in SPIn-NeRF [20] and OR–NeRF [34].
+and a perceptual loss on masked regions to guide NeRF
+optimization. In contrast, InNeRF360 [28] while also inpainting views independently, learns 3D shapes from 2D
+images using [5] to enforces global geometric consistency
+for full 360◦ scenes. While these methods reduce blurriness, residual inconsistencies across views can still lead to
+geometric artifacts. To address these issues, more recent
+diffusion-guided methods such as MVIP-NeRF [6] and Inpaint3D [23], directly incorporate diffusion priors via Score
+Distillation Sampling (SDS) to jointly optimize appearance
+and geometry. Another diffusion-based method NeRFiller
+[31], employs a tiling-based strategy to maintain geometric alignment across the inpainted regions. However, these
+approaches still often suffer from blurry details. Similarly,
+methods like OR–NeRF [34] and MALDNeRF [15], which
+primarily rely on pixel–wise losses or architectural modifications, also tend to produce blurry outputs. An alternative, reference guided approach [19] anchors the reconstruction to a single inpainted view, but frequently struggles
+to capture view-dependent effects when target views deviate significantly from the reference. In contrast, while ours
+is not a NeRF-based inpainting method, it combines both
+single-reference and multi-reference strategies in an itera-
+2.3. 3DGS-based 3D scene inpainting methods
+3DGS-based inpainting uses a sparse set of 3D Gaussians,
+each defined by explicit parameters like position, covariance, color, and opacity, to enable fast rendering and highdetail reconstruction. As opposed to NeRF’s implicit neural network representation, this clear, editable representation integrates easily into existing 3D pipelines.
+InFusion [16] starts by inpainting depth on a reference
+view, then unprojects the depth map to place 3D Gaussians
+in missing regions, which are fine-tuned to match the inpainted content. For complex scenes, it progressively uses
+multiple references. Our approach also works iteratively
+from a single reference to multi-reference views, but without explicit depth inpainting or training a latent diffusion
+model. Instead, we use depth cues from multiple views
+to guide 3DGS inpainting. GScream [29] conditions scene
+completion on a single reference using depth cues from all
+views, but depth estimation errors and large viewpoint vari3
+ations can introduce artifacts. In contrast, our method introduces a depth optimization loss that aligns estimated depth
+with a robust, structure-aware average along constant-depth
+contours, improving the capture of geometric structure and
+mitigating depth prior errors. RefFusion [21] adapts a 2D
+inpainting diffusion model to a single reference and distills
+generative priors into a 3D scene using multi-view score
+distillation. However, its reliance on a single reference and
+auxiliary depth regularization limits its ability to handle
+complex scene variations, causing artifacts with imperfect
+references or depth estimates. Our method overcomes these
+limitations by using the depth optimization loss and a progressive strategy to incorporate additional views. We compare our results to [16, 21, 29], the closest to our method.
+also incorporate the loss functions described in the following subsections, the soft depth clustering loss and the cropfocused depth loss (section 3.2) as well as the object-aware
+contrastive loss (section 3.3) to guide the learning process.
+This integrated approach ensures that, from the outset, the
+model benefits not only from the inpainted content but also
+from enhanced depth supervision and object-aware feature
+discrimination.
+We empirically found that an initial training of 8,000
+steps is sufficient to establish a robust baseline model,
+where the inpainted regions are plausibly initialized and the
+3DGS representation captures the overall scene structure.
+However, due to limited supervision and viewpoint diversity, inconsistencies and artifacts may still persist, particularly in challenging regions. To address these remaining
+errors and achieve multi-view consistency, we apply our selective guided inpainting strategy (section 3.4), which iteratively identifies and refines the most problematic areas
+based on their depth and appearance discrepancies.
+3. Method
+Given a set of N multi-view images {Ii }N
+i=1 with their
+corresponding camera poses {Pi }N
+and
+binary masks
+i=1
+{Mi }N
+that
+indicate
+observed
+and
+masked
+(to be ini=1
+painted) regions, our goal is to reconstruct a complete and
+consistent 3D scene via Gaussian Splatting, in which the
+inpainted regions exhibit geometric and perceptual fidelity
+from all viewpoints. Each 3D Gaussians are characterized
+by their 3D position µ, a covariance matrix Σ that encapsulates scale and shape, color c, opacity α, and spherical
+harmonics coefficients to capture view-dependent appearance. These parameters are optimized such that rendering
+the model on one of the provided camera poses Pi yields
+the corresponding image Ii . This is achieved by optimizing
+the parameters through a differentiable rendering process,
+in which the color of each pixel p is obtained by projecting
+all 3D Gaussians on the plane and α-blending them according to their distance. This is summarized by the formula:
+C(p) =
+|Gp |
+X
+ci αi′
+i=1
+i−1
+Y
+
+1 − αj′ ,
+3.2. Depth-based Supervision
+The first optimization loss, exemplified in Figure 2 (c), employs monocular depth estimation to enhance the scene geometry in both inpainted and non-inpainted regions. The
+key insight of this loss is to enforce consistency between
+monocular depth maps obtained with an off-the shelf estimator (in our case, Depth Anything [33]) and the rendered
+depth from the Gaussian d(p) for each pixel p. The discrepancy between rendered and estimated depth serves as a
+supervisory signal to guide the correct spatial positioning of
+the 3D Gaussians.
+This loss forces the Gaussians to adhere to the surfaces
+identified by monocular depth estimation and implicitly, by
+applying the loss to multiple views, to be consistent with
+the volumetric occupancy of the scene elements they represent. For the non-masked areas, this loss can make the
+overall model more geometrically consistent, and discourages floating or isolated Gaussians. Conversely, in the area
+to be inpainted this loss provides an additional source of
+supervision, since when considering a new image it allows
+to identify inconsistent, outlier elements. Given these different scopes, we define two separate loss terms - called
+respectively Soft Depth Clustering Loss and Crop-Focused
+Depth Loss - and then combine them.
+(1)
+j=1
+where αi′ denotes the effective opacity of the i-th Gaussian
+at pixel p.
+3.1. Model Initialization
+As shown in Figure 2 (a), we begin with a set of multi-view
+images with their binary masks indicating regions requiring
+inpainting. To fill the missing area, we select one image as a
+reference image r0 and apply a diffusion-based 2D inpainting model [9] to its masked region (Figure 2 (b)). This generates a plausible initial content for the occluded area, providing a concrete starting point for the inpainting process.
+The inpainted reference, together with the original masked
+images from other views, is used to optimize the photometric parameters of a 3DGS model. The unmasked areas are
+supervised by all images, while the inpainted region is optimized using the reference image only. Additionally, we
+Soft Depth Clustering Loss (SDCL) is designed as an
+alternative to traditional metric depth losses, reducing the
+impact of scale-and-shift misalignment. The loss is computed over the full image by first partitioning the ground
+truth depth map into evenly spaced depth bins. For each bin,
+we generate a mask Mk . Within each mask, we calculate
+the mean depth µk based on the rendered depths d(p). Since
+both d(p) and µk come from the rendered depth, they have
+4
+the same numerical scale and, therefore, can be compared
+directly without the need of any scale or shift alignment.
+SDCL consists of two main components:
+Per-Bin Loss: For each depth bin k, we compute the
+mean absolute error between the rendered depth d(p) and
+the bin’s mean depth µk over all pixels p ∈ Mk :
+Lk =
+X
+1
+|d(p) − µk | .
+|Mk |
+To make this possible, we integrate an Object-Aware
+Contrastive Loss (OACL) that learns a segmentation-aware
+feature representation for each Gaussian. To do so, each 3D
+Gaussian is augmented with a 16-dimensional learnable parameter for capturing segmentation features as done in [4].
+First, we generate 2D segmentation masks mp for each
+input image I ∈ RH×W using SAM2 [24]. The number
+of segments identified by SAM2 in the image will be indicated as Nk . For each training image, we render a feature map of size H × W × 16 from a chosen viewpoint by
+splatting the Gaussians and alpha blending associated the
+16-dimensional learnable parameter (similar to what is done
+for the color parameter ci in Eq. (1)). We then group the
+rendered features based on their corresponding segmentation masks, forming clusters {fp } for each segment mp .
+The centroid f¯p of each cluster is computed as the mean feature vector of that group. Our goal is to maximize the similarity of features within each cluster while minimizing the
+similarity between features across different clusters. This is
+achieved by minimizing the following loss function:
+(2)
+p∈Mk
+This term quantifies how well the rendered depths cluster
+around the mean within each bin.
+Weighted Averaging: To aggregate the per-bin losses,
+we compute a weighted average where each bin’s weight
+wk reflects its relative reliability. In our approach, bins corresponding to farther depth intervals—where errors tend to
+be larger—are assigned lower weights. This prioritizes the
+supervision in regions where depth predictions are more accurate.
+The overall soft depth clustering loss is then defined as
+P wk P
+P
+wk · L k
+p∈M |d(p) − µk |
+k |Mk |
+k
+P k
+=
+.
+LSDCL = P
+k wk
+k wk
+(3)
+Nk
+1 X
+|{fp }|
+exp
+ q ¯
+fp ·fp
+ϕp
+1
+ q ¯ ,
+log P
+LOACL = −
+f ·f
+Nk
+Nk p=1 |{fp }| q=1
+exp p s
+X
+s=1
+ϕs
+(5)
+where fpq denotes the q-th feature in cluster {fp } and ϕp
+is the temperature parameter for the p-th cluster. We determine ϕp based on the dispersion of features within the
+cluster:
+Crop-Focused Depth Loss (CFDL) encourages better
+depth estimation in the masked regions, especially in the
+reference inpainted images. Every 9 iterations, we crop a
+region around the inpainted area; this region is randomly
+expanded also to include part of the non-inpainted area and
+provide additional context. The cropped region is then processed using the same binning and mask creation strategy
+as the full-image SDCL. Within this crop, a Gaussian-like
+weighting scheme is applied to assign higher weights to pixels near the center of the inpainted region, providing focused supervision where it matters most.
+The overall depth loss is then computed as a weighted
+sum of the global and localized components:
+Np
+ϕp =
+1 X q
+∥f − f¯p ∥2 · log(Np + ϵ),
+Np q=1 p
+(6)
+where κ, the coefficient balancing the contributions of
+global scene geometry and localized inpainted detail, is empirically set to κ = 25.
+with Np = |{fp }| and a stabilizing constant ϵ = 100. To
+ensure stable similarity measurements, all features are ℓ2 normalized prior to loss computation.
+By incorporating this object-aware contrastive loss, our
+model learns robust and distinct object representations in
+the 3D feature space. This not only enhances the semantic coherence of the inpainted regions but also bridges the
+gap between static reconstruction and fully controllable 3D
+content creation.
+3.3. Object-based Supervision
+3.4. Selective Guided Inpainting
+Beyond producing a visually complete scene, our framework is designed to enable object-level control within the
+reconstructed 3D representation. This is important because
+many real-world editing tasks, such as removing an object
+from a scene, require isolating individual objects in the 3D
+space. Once objects are explicitly identified, they can be removed, and our inpainting pipeline can be applied to seamlessly fill the resulting gaps in the scene.
+Even with depth-based supervision and an initial inpainted
+reference view, achieving perfect multi-view consistency
+remains challenging. In practice, certain viewpoints, particularly those far from the initial reference, tend to exhibit
+incomplete geometry, blurred results, or inconsistencies in
+occluded regions. These errors often arise because the inpainting guidance from a single reference view does not
+fully constrain the geometry in occluded areas.
+Ldepth = LSDCL + κ LCFDL ,
+(4)
+5
+4. Experiments
+To address this, we introduce Selective Guided Inpainting (SGI), an iterative refinement process that progressively
+identifies and corrects the most problematic regions in the
+reconstruction. The central idea is to avoid re-inpainting the
+entire masked regions for each training image, an approach
+that is computationally expensive and risks introducing unnecessary changes to regions that are already consistent, and
+instead focus only on views and sub-regions where inconsistencies are most severe.
+At each refinement step, we render all training views
+from the current 3DGS model and compare their rendered
+depth maps Drend (x, y) with monocular depth predictions
+Dmono (x, y) obtained from an off-the-shelf estimator. This
+comparison is restricted to the masked regions that require
+inpainting. We then compute an absolute depth error map
+E(x, y) = |Drend (x, y) − Dmono (x, y)| ,
+In this section, we evaluate the SplatFill framework and
+compare it against state-of-the-art 3D inpainting methods.
+We first introduce the experimental setup (Sec. 4.1), then
+provide a detailed quantitative and qualitative evaluation of
+our approach (Sec. 4.2) along with the training times. Finally, we provide a set of ablation experiments to assess the
+contribution of each of the three losses; the advantage of using our monocular depth loss over the existing implementation proposed by GScream (Sec. 4.3); and the benefits of
+including our method to the original MCMC [14] approach.
+4.1. Experimental Setup
+Dataset. We evaluated our method using the SPInNeRF [20] dataset, a benchmark specifically prepared for
+object removal evaluation in forward-facing, in-the-wild
+scenes. The dataset comprises 10 scenes, each containing 100 multi-view images with human-annotated object
+masks. For each scene, 60 images include an unwanted object (used as training views), while the remaining 40 images
+capture the scene without the object (used as test views) and
+allow assessing the quality of the inpainted model.
+(7)
+which highlights areas where the current reconstruction deviates significantly from the geometric P
+prior. The view v ∗
+with the largest cumulative depth error x,y E(x, y) is selected for targeted refinement. Within the selected view v ∗ ,
+we further localize problematic areas by analyzing the spatial variation of the error map. Specifically, we compute the
+gradient magnitude
+G(x, y) = ∥∇E(x, y)∥2 ,
+Evaluation Metrics. To evaluate the performance we
+employ four widely recognized metrics: Peak Signal-toNoise Ratio (PSNR), Structural Similarity Index Measure
+(SSIM) [30], Learned Perceptual Image Patch Similarity
+(LPIPS) [37], and Fréchet Inception Distance (FID) [11].
+These metrics are computed both across the full image and
+within the specific object mask region to provide a comprehensive assessment of image quality and fidelity in both
+global and localized contexts. For the evaluations we indicate the best and the 2nd best values using bold and
+underlined, respectively.
+(8)
+to detect sharp transitions indicative of geometric inconsistencies, such as misplaced surfaces or depth discontinuities.
+We then threshold G(x, y) to obtain a binary map, and apply morphological dilation to ensure full coverage of the
+inconsistent regions. The result is a refined binary mask
+B(x, y) ∈ {0, 1} that marks the subset of pixels requiring
+re-inpainting.
+Rather than modifying the entire view, we apply a
+diffusion-based 2D inpainting model only to the regions
+indicated by B(x, y). This targeted update strategy minimizes disruption to well-reconstructed areas while injecting high-quality, view-specific guidance exactly where it is
+needed. The newly inpainted image from iteration k, de(k)
+noted Iinp , together with its updated mask, is then added to
+the set of reference views, providing additional supervision
+for subsequent optimization. Summing up, SGI first selects
+the view with the largest overall depth error, then localizes
+the geometric inconsistencies within it, and re-inpaints only
+those regions. The resulting updated image is added to the
+reference set, providing new guidance for subsequent optimization. By iteratively applying this refinement, the model
+is progressively completed, with each iteration addressing
+smaller and smaller discrepancies while preserving the appearance learned in previous steps.
+Implementation Details The models were trained on a
+system equipped with NVIDIA A100 80G GPU and an
+Intel Xeon Silver 4316 CPU with 80 cores. Our implementation builds upon a modified version of the MCMC
+framework [14], where we extended the CUDA rasterization functions to additionally render depth information.
+Baselines We compare our method against four baseline approaches: GScream [29], SPIn-NeRF [20], and ORNeRF [34]. To ensure a fair comparison with GScream, we
+retrain and evaluate the models using their publicly available open-source code. For the remaining methods, we utilize the results reported by GScream. Additionally, since
+GScream’s evaluations were conducted on a slower GPU
+than ours, we provide appropriately scaled training times
+for a more accurate comparison with SPIn-NeRF and ORNeRF.
+6
+4.2. Experimental results
+surroundings, while GScream exhibits noticeable inconsistencies along the right edge of the bench. In the second
+column, the grass behind the fence is reconstructed with
+significantly finer detail and smoother blending in our result, whereas GScream’s output appears softer and less
+coherent. The third column highlights our ability to recover detailed grass patterns around the manhole, preserving the natural texture that is partially lost in GScream’s inpainting. Finally, in the fourth column, the distant grass
+beyond the fence remains sharp and structurally consistent, while GScream’s result becomes noticeably blurred in
+background areas. The zoomed-in crops in Figure 3 clearly
+illustrate these differences, providing visual evidence that
+our method better preserves structural detail and spatial
+consistency in the inpainted regions.
+We evaluated our method across all scenes in the SPInNeRF dataset, reporting both qualitative and quantitative results.
+Quantitative Comparison We first report the average
+PSNR, LPIPS, and SSIM scores for the entire views in
+Tab. 1. The results in this table show that our method consistently outperforms SPIn-NeRF and OR-NeRF across all
+metrics. Against GScream, it delivers comparable performance in PSNR, SSIM, and LPIPS, but achieves a significantly lower FID score, reflecting a stronger alignment and
+coherence with the surrounding scene content. Moreover,
+our method is also more efficient to train, with ∼ 24.5%
+faster training time than GScream, the fastest baseline.
+In Tab. 2, we present the results when considering only
+the masked regions. Our method performs on par with
+GScream across all metrics. While SPIn-NeRF and ORNeRF show higher reported scores, these values are taken
+directly from GScream’s results and may not fully reflect
+differences in conditions. Given that GScream has already
+been shown to outperform both SPIn-NeRF and OR-NeRF
+on the same dataset and evaluation setup, our comparable
+performance to GScream strongly indicates that our method
+also surpasses these baselines in the masked regions.
+Methods
+SPIn-NeRF
+OR-NeRF
+GScream
+Ours
+PSNR ↑
+20.18*
+20.32*
+20.45
+20.46
+SSIM ↑
+0.46*
+0.54*
+0.58
+0.63
+LPIPS ↓
+0.47*
+0.35*
+0.28
+0.25
+FID ↓
+58.78*
+38.69*
+36.72
+29.76
+4.3. Ablation Study
+While the previous section establishes the overall effectiveness of our method, here we analyze the contributions of its
+main components to better understand their impact on 3D
+inpainting.
+Depth-based supervision. We first examine the role of
+our depth loss by comparing three configurations: (i) no
+depth supervision, (ii) the depth loss formulation used in
+GScream, and (iii) our full depth-based supervision combining the Soft Depth Clustering Loss (SDCL) and CropFocused Depth Loss (CFDL). The results in Table 3 show a
+clear advantage when using our full depth loss: both SDCL
+and CFDL contribute to better spatial placement of Gaussians, which in turn reduces geometric inconsistencies and
+improves the perceptual quality of the inpainted regions.
+Qualitative comparisons and further discussion are provided
+in the supplementary material.
+Training Time ↓
+∼ 112.5 mins*
+∼ 225*
+45 mins
+34 mins
+Table 1. Average results for all scenes in the SPIn-NeRF dataset
+(Full Region). ‘*’ indicates the metrics are based on those reported
+in GScream.
+Methods
+SPIn-NeRF
+OR-NeRF
+GScream
+Ours
+PSNR ↑
+15.80*
+15.74*
+15.67
+15.67
+SSIM ↑
+0.21*
+0.21*
+0.21
+0.21
+LPIPS ↓
+0.58*
+0.56*
+0.54
+0.54
+Inpainting strategy. We next evaluate the impact of our
+Selective Guided Inpainting (SGI) approach. For this, we
+compare (i) training with a single inpainted reference image, and (ii) our full SGI pipeline that iteratively identifies
+the most inconsistent views, refines them locally, and incorporates them back into the reference set. As reported in Table 4, SGI improves performance over the single-reference
+setup. Qualitative examples illustrating this improvement
+are included in the supplementary material.
+Overall, these ablations confirm that both our depthbased supervision and our SGI strategy are essential for
+the robustness and quality of our 3D inpainting results: the
+depth loss anchors geometry in both visible and occluded
+areas, while SGI ensures that remaining inconsistencies are
+removed in a targeted and stable manner.
+Table 2. Average results for all scenes in the SPIn-NeRF dataset
+(Masked Region). ‘*’ indicates the metrics are based on those
+reported in GScream.
+Qualitative Comparison. The improvements observed in
+our quantitative evaluation are further confirmed by the
+qualitative results shown in Figure 3. Overall, our method
+produces inpainted regions with sharper textures and improved geometric coherence compared to GScream. In
+the first column, our method reconstructs the stone bench
+with sharper edges and a more natural integration into the
+7
+Figure 3. Qualitative evaluation across multiple scenes (each column shows a different scene). For each method, the first row shows
+the full inpainted view, and the second row provides zoomed-in crops of selected regions from that view. The top block corresponds to
+GScream, the middle block to our proposed method, and the bottom block to the ground truth, where the target objects were physically
+removed from the real environment.
+Depth-based supervision
+None
+GScream Depth Loss
+Our Full Depth Loss
+PSNR ↑
+15.14
+15.22
+15.67
+SSIM ↑
+0.18
+0.19
+0.21
+LPIPS ↓
+0.56
+0.56
+0.54
+influence on how close the initialized model is to the desired reconstruction; in this work, we select it randomly, but
+more informed heuristics could yield better results. Our use
+of segmentation is also limited: while it clusters Gaussians
+by object, it is not yet fully exploited for inpainting, as we
+do not segment and complete each 3D object independently.
+Finally, the current approach does not explicitly handle illumination changes between views, meaning that variations
+such as shadows or reflections can lead to inconsistencies.
+Table 3. Ablation on depth-based supervision: Comparison among
+our full depth loss (SDCL + CFDL), no depth loss, and the
+GScream depth loss variant. (masked region)
+Inpainting strategy
+Single Reference
+Selective Guided Inpainting (SGI)
+PSNR ↑
+15.35
+15.67
+SSIM ↑
+0.19
+0.21
+LPIPS ↓
+0.54
+0.54
+6. Conclusion
+Table 4. Ablation on the inpainting strategy: Comparison among
+using a single reference view and our proposed Selective Guided
+Inpainting (SGI) approach. (on masked region)
+SplatFill introduces a 3D scene inpainting framework for
+Gaussian Splatting with depth-guided and object-aware supervision, along with a consistency-aware refinement strategy. Our approach enhances coherence across views while
+achieving a 24.5% faster training time compared to existing
+methods. Experiments on SPIn-NeRF show that SplatFill
+achieves state-of-the-art performance, offering a consistent
+improvement across all metrics. Additionally, it reduces
+blurriness and artifacts, particularly in challenging view-
+5. Limitations
+While our method improves both quality and training speed
+compared to existing approaches, several challenges remain. The quality of the initial reference view has a strong
+8
+point changes, resulting in sharper inpainted details and better perceptual quality. This makes SplatFill a computationally efficient and visually robust strategy for 3D scene inpainting. Future work could further refine illumination consistency and reference view selection to further enhance 3D
+scene inpainting quality.
+[11] Martin Heusel, Hubert Ramsauer, Thomas Unterthiner,
+Bernhard Nessler, and Sepp Hochreiter. GANs trained by
+a two time-scale update rule converge to a local nash equilibrium. Advances in neural information processing systems,
+30, 2017. 6
+[12] Satoshi Iizuka, Edgar Simo-Serra, and Hiroshi Ishikawa.
+Globally and locally consistent image completion. ACM
+Transactions on Graphics (ToG), 36(4):1–14, 2017. 2
+[13] Bernhard Kerbl, Georgios Kopanas, Thomas Leimkuehler,
+and George Drettakis. 3d gaussian splatting for real-time
+radiance field rendering. ACM Trans. Graph., 42(4), 2023. 1
+[14] Shakiba Kheradmand, Daniel Rebain, Gopal Sharma, Weiwei Sun, Yang-Che Tseng, Hossam Isack, Abhishek Kar,
+Andrea Tagliasacchi, and Kwang Moo Yi. 3d gaussian splatting as markov chain monte carlo. In Advances in Neural
+Information Processing Systems (NeurIPS), 2024. Spotlight
+Presentation. 6, 2
+[15] Chieh Hubert Lin, Changil Kim, Jia-Bin Huang, Qinbo Li,
+Chih-Yao Ma, Johannes Kopf, Ming-Hsuan Yang, and HungYu Tseng. Taming latent diffusion model for neural radiance
+field inpainting. In European Conference on Computer Vision (ECCV), 2024. 2, 3
+[16] Zhiheng Liu, Hao Ouyang, Qiuyu Wang, Ka Leong Cheng,
+Jie Xiao, Kai Zhu, Nan Xue, Yu Liu, Yujun Shen, and
+Yang Cao. InFusion: Inpainting 3d gaussians via learning depth completion from diffusion prior. arXiv preprint
+arXiv:2404.11613, 2024. 2, 3, 4
+[17] Andreas Lugmayr, Martin Danelljan, Andres Romero, Fisher
+Yu, Radu Timofte, and Luc Van Gool. Repaint: Inpainting using denoising diffusion probabilistic models. In 2022
+IEEE/CVF Conference on Computer Vision and Pattern
+Recognition (CVPR), pages 11451–11461, 2022. 1, 2
+[18] Ben Mildenhall, Pratul P. Srinivasan, Matthew Tancik,
+Jonathan T. Barron, Ravi Ramamoorthi, and Ren Ng. Nerf:
+Representing scenes as neural radiance fields for view synthesis. In Proceedings of the European Conference on Computer Vision (ECCV), 2020. 1
+[19] Ashkan Mirzaei, Tristan Aumentado-Armstrong, Marcus A
+Brubaker, Jonathan Kelly, Alex Levinshtein, Konstantinos G
+Derpanis, and Igor Gilitschenski. Reference-guided controllable inpainting of neural radiance fields. In Proceedings
+of the IEEE/CVF International Conference on Computer Vision, pages 17815–17825, 2023. 2, 3
+[20] Ashkan Mirzaei, Tristan Aumentado-Armstrong, Konstantinos G Derpanis, Jonathan Kelly, Marcus A Brubaker, Igor
+Gilitschenski, and Alex Levinshtein. SPIn-NeRF: Multiview
+segmentation and perceptual inpainting with neural radiance
+fields. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 20669–20679,
+2023. 2, 3, 6
+[21] Ashkan Mirzaei, Riccardo De Lutio, Seung Wook Kim,
+David Acuna, Jonathan Kelly, Sanja Fidler, Igor Gilitschenski, and Zan Gojcic. RefFusion: Reference adapted diffusion
+models for 3d scene inpainting, 2024. 2, 4
+[22] Deepak Pathak, Philipp Krahenbuhl, Jeff Donahue, Trevor
+Darrell, and Alexei A Efros. Context encoders: Feature
+learning by inpainting. In Proceedings of the IEEE con-
+References
+[1] Connelly Barnes, Eli Shechtman, Adam Finkelstein, and
+Dan B Goldman. PatchMatch: A randomized correspondence algorithm for structural image editing. ACM Trans.
+Graph., 28(3):24, 2009. 1, 2
+[2] Marcelo Bertalmio, Guillermo Sapiro, Vincent Caselles, and
+Coloma Ballester. Image inpainting. In Proceedings of the
+27th Annual Conference on Computer Graphics and Interactive Techniques, page 417–424. Addison-Wesley, 2000. 1,
+2
+[3] Chenjie Cao, Chaohui Yu, Fan Wang, Xiangyang Xue, and
+Yanwei Fu. Mvinpainter: Learning multi-view consistent
+inpainting to bridge 2d and 3d editing. arXiv preprint
+arXiv:2408.08000, 2024. 2
+[4] Myrna Castillo, Mahtab Dahaghin, Matteo Toso, and Alessio
+Del Bue. Contrastive gaussian clustering for weakly supervised 3d scene segmentation. In Pattern Recognition: 27th
+International Conference, ICPR 2024, Kolkata, India, December 1–5, 2024, Proceedings, Part XXIII, page 114–130,
+2024. 5
+[5] Angel X. Chang, Thomas Funkhouser, Leonidas Guibas, Pat
+Hanrahan, Qixing Huang, Zimo Li, Silvio Savarese, Manolis Savva, Shuran Song, Hao Su, Jianxiong Xiao, Li Yi,
+and Fisher Yu. ShapeNet: An Information-Rich 3D Model
+Repository. Technical Report arXiv:1512.03012 [cs.GR],
+Stanford University — Princeton University — Toyota Technological Institute at Chicago, 2015. 3
+[6] Honghua Chen, Chen Change Loy, and Xingang Pan. Mvipnerf: Multi-view 3d inpainting on nerf scenes via diffusion
+prior. In CVPR, 2024. 2, 3
+[7] Ciprian Corneanu, Raghudeep Gadde, and Aleix M Martinez. Latentpaint: Image inpainting in latent space with
+diffusion models. In 2024 IEEE/CVF Winter Conference on
+Applications of Computer Vision (WACV), pages 4322–4331,
+2024. 1, 2
+[8] A. Criminisi, P. Perez, and K. Toyama. Region filling and
+object removal by exemplar-based image inpainting. IEEE
+Transactions on Image Processing, 13(9):1200–1212, 2004.
+1, 2
+[9] Patrick Esser, Sumith Kulal, Andreas Blattmann, Rahim
+Entezari, Jonas Müller, Harry Saini, Yam Levi, Dominik
+Lorenz, Axel Sauer, Frederic Boesel, et al. Scaling rectified flow transformers for high-resolution image synthesis.
+In Forty-first international conference on machine learning,
+2024. 2, 4
+[10] Jan Herling and Wolfgang Broll. PixMix: A real-time approach to high-quality diminished reality. In 2012 ieee international symposium on mixed and augmented reality (ismar), pages 141–150. IEEE, 2012. 1, 2
+9
+segmentation with neural radiance fields. arXiv preprint
+arXiv:2305.10503, 2023. 2, 3, 6
+[35] Jiahui Yu, Zhe Lin, Jimei Yang, Xiaohui Shen, Xin Lu, and
+Thomas S. Huang. Generative image inpainting with contextual attention. In 2018 IEEE/CVF Conference on Computer
+Vision and Pattern Recognition, pages 5505–5514, 2018. 2
+[36] Jiahui Yu, Zhe Lin, Jimei Yang, Xiaohui Shen, Xin Lu, and
+Thomas Huang. Free-form image inpainting with gated convolution. In 2019 IEEE/CVF International Conference on
+Computer Vision (ICCV), pages 4470–4479, 2019. 2
+[37] Richard Zhang, Phillip Isola, Alexei A Efros, Eli Shechtman, and Oliver Wang. The unreasonable effectiveness of
+deep features as a perceptual metric. In Proceedings of the
+IEEE conference on computer vision and pattern recognition, pages 586–595, 2018. 6
+[38] Shengyu Zhao, Jonathan Cui, Yilun Sheng, Yue Dong, Xiao
+Liang, Eric I Chang, and Yan Xu. Large scale image completion via co-modulated generative adversarial networks. arXiv
+preprint arXiv:2103.10428, 2021. 2
+ference on computer vision and pattern recognition, pages
+2536–2544, 2016. 2
+[23] Kira Prabhu, Jane Wu, Lynn Tsai, Peter Hedman, Dan B
+Goldman, Ben Poole, and Michael Broxton. Inpaint3D: 3d
+scene content generation using 2d inpainting diffusion. arXiv
+preprint arXiv:2312.03869, 2023. 2, 3
+[24] Nikhila Ravi, Valentin Gabeur, Yuan-Ting Hu, Ronghang
+Hu, Chaitanya Ryali, Tengyu Ma, Haitham Khedr, Roman
+Rädle, Chloe Rolland, Laura Gustafson, Eric Mintun, Junting Pan, Kalyan Vasudev Alwala, Nicolas Carion, ChaoYuan Wu, Ross Girshick, Piotr Dollár, and Christoph Feichtenhofer. SAM 2: Segment anything in images and videos,
+2024. 5
+[25] Robin Rombach, Andreas Blattmann, Dominik Lorenz,
+Patrick Esser, and Bjorn Ommer. High-Resolution Image
+Synthesis with Latent Diffusion Models . In 2022 IEEE/CVF
+Conference on Computer Vision and Pattern Recognition
+(CVPR), pages 10674–10685, 2022. 1, 2
+[26] Ahmad Salimi, Tristan Aumentado-Armstrong, Marcus A
+Brubaker, and Konstantinos G Derpanis. Geometry-aware
+diffusion models for multiview scene inpainting. arXiv
+preprint arXiv:2502.13335, 2025. 2
+[27] Roman Suvorov, Elizaveta Logacheva, Anton Mashikhin,
+Anastasia Remizova, Arsenii Ashukha, Aleksei Silvestrov,
+Naejin Kong, Harshith Goka, Kiwoong Park, and Victor
+Lempitsky. Resolution-robust large mask inpainting with
+fourier convolutions. In 2022 IEEE/CVF Winter Conference
+on Applications of Computer Vision (WACV), pages 3172–
+3182, 2022. 2
+[28] Dongqing Wang, Tong Zhang, Alaa Abboud, and Sabine
+Süsstrunk. InNeRF360: Text-Guided 3D-Consistent Object
+Inpainting on 360-degree Neural Radiance Fields. In Proceedings of the IEEE/CVF Conference on Computer Vision
+and Pattern Recognition (CVPR), 2024. 2, 3
+[29] Yuxin Wang, Qianyi Wu, Guofeng Zhang, and Dan Xu.
+Learning 3D geometry and feature consistent gaussian splatting for object removal. In European Conference on Computer Vision, pages 1–17. Springer, 2025. 2, 3, 4, 6
+[30] Zhou Wang, Alan C Bovik, Hamid R Sheikh, and Eero P Simoncelli. Image quality assessment: from error visibility to
+structural similarity. IEEE transactions on image processing,
+13(4):600–612, 2004. 6
+[31] Ethan Weber, Aleksander Holynski, Varun Jampani, Saurabh
+Saxena, Noah Snavely, Abhishek Kar, and Angjoo
+Kanazawa. Nerfiller: Completing scenes via generative 3d
+inpainting. In CVPR, 2024. 2, 3
+[32] Shaoan Xie, Zhifei Zhang, Zhe Lin, Tobias Hinz, and Kun
+Zhang. Smartbrush: Text and shape guided object inpainting with diffusion model. In 2023 IEEE/CVF Conference
+on Computer Vision and Pattern Recognition (CVPR), pages
+22428–22437, 2023. 1, 2
+[33] Lihe Yang, Bingyi Kang, Zilong Huang, Xiaogang Xu, Jiashi
+Feng, and Hengshuang Zhao. Depth anything: Unleashing
+the power of large-scale unlabeled data. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, pages 10371–10381, 2024. 4
+[34] Youtan Yin, Zhoujie Fu, Fan Yang, and Guosheng Lin. ORNeRF: Object removing from 3d scenes guided by multiview
+10
+SplatFill: 3D Scene Inpainting via Depth-Guided Gaussian Splatting
+Supplementary Material
+7. Object Insertion
+In addition to 3D inpainting, our framework is capable of
+seamlessly inserting new objects into the reconstructed 3D
+scene. For object insertion, we adopt a strategy analogous
+to our inpainting approach. Specifically, the user provides
+a textual prompt to Stable Diffusion (e.g., “flowers on the
+bench”) to generate a reference view with the desired object
+inserted into the scene. This 2D inpainting output serves as
+the reference image for our pipeline. Following the same selective guided inpainting strategy used for missing regions,
+the inpainted reference is then incorporated into our 3D
+Gaussian Splatting model, ensuring that the inserted object
+is rendered with high-frequency details and consistent spatial alignment across different viewpoints. Figure 4 illustrates this process: (a) shows the inpainted reference view
+produced by Stable Diffusion, while (b) and (c) present two
+novel views generated by our model.
+8. Additional Ablation
+Effect of Selective Guided Inpainting To evaluate the
+impact of our Selective Guided Inpainting (SGI) strategy,
+we compare two methods: one that relies solely on the inpainted reference view as guidance and our full SGI approach. Figure 5 is organized into two rows corresponding
+to these methods, with three columns in each row. In the left
+column, the inpainted reference image generated by the 2D
+inpainting model is shown; the middle and right columns
+display two novel views rendered from viewpoints that diverge significantly from the reference. The baseline method
+(top row) suffers from inconsistent details in the novel views
+due to insufficient guidance when far from the reference,
+whereas our SGI approach (bottom row) selectively refines
+regions with high inpainting error, yielding more coherent
+reconstructions across diverse viewpoints.
+Figure 4. Object insertion results. (a) Inpainted reference view
+generated by Stable Diffusion using the prompt “flowers on the
+bench”. (b) and (c) are two novel views produced by our model.
+Effect of Depth Loss Supervision To further evaluate the
+impact of our depth loss formulation, we compare qualitative results from models trained with different depth supervision strategies. In Figure 6, the top row (a) shows
+the reconstruction results obtained using conventional metric depth supervision, where errors in scale-and-shift alignment lead to noticeable blurring of distant objects. In contrast, the bottom row (b) illustrates the results using our soft
+depth loss, which produces more detailed reconstructions
+even for far objects. This comparison demonstrates that our
+soft depth loss effectively mitigates alignment errors and
+captures fine geometric details across varying depths.
+Multi-Inpainting Without Selective Mask To further
+validate the effectiveness of our SGI strategy, we compare
+our approach against a baseline that performs multi-view
+2D inpainting without selective refinement. In the baseline, multiple views are inpainted without isolating the regions exhibiting high error, which leads to oversmoothed
+and blurred outputs. Figure 7 presents a qualitative comparison: the top row shows the results of the baseline multiinpainting approach, whereas the bottom row displays our
+Selective Guided Inpainting (SGI) method. The SGI strat1
+Figure 5. Comparison of inpainting results spanning two columns. Top row (Baseline: Reference-only): The inpainted reference view
+is used as guidance for rendering novel views, resulting in blurred and inconsistent details when the viewpoint diverges significantly from
+the reference. Bottom row (Selective Guided Inpainting - SGI): Our approach selectively refines regions with high inpainting error,
+yielding sharper and more coherent novel views. In both rows, the left column shows the inpainted reference view, while the middle and
+right columns display two novel views rendered from distant viewpoints.
+Figure 6. Qualitative comparison of depth supervision strategies. Top row (a): Reconstruction using conventional metric depth supervision,
+where distant objects appear blurred due to scale-and-shift alignment errors. Bottom row (b): Reconstruction using our soft depth loss,
+which yields sharper and more detailed reconstructions, even for objects at far distances.
+egy selectively refines only the regions with significant errors, yielding sharper and more detailed inpainted outputs.
+This modification allows us to compute the rendered depth
+d(p) for each pixel p and to incorporate our soft depth clustering loss (SDCL) and crop-focused depth loss (CFDL)
+during training. Additionally, we modified MCMC to augment each 3D Gaussian with a 16-dimensional learnable p
+dedicated to capturing segmentation features. Training was
+performed on a system equipped with an NVIDIA A100
+80G GPU and an Intel Xeon Silver 4316 CPU with 80 cores.
+A total of 8000 training steps were used to establish a
+robust baseline before further refinement with our Selective
+9. Additional Implementation Details
+In this section, we provide further details regarding the
+implementation of our SplatFill framework. Our implementation builds upon a modified version of the MCMC
+framework [14], where we extended the CUDA rasterization functions to render depth information alongside color.
+2
+Figure 7. Qualitative comparison of multi-inpainting strategies. Top row (Multi-Inpainting Baseline): Uniform inpainting across all
+views leads to oversmoothed and blurred results. Bottom row (Selective Guided Inpainting - SGI): Our method selectively refines
+regions with high error, resulting in sharper and more detailed inpainted outputs.
+Guided Inpainting (SGI) strategy. The following hyperparameters were employed:
+ther refinement. Once the candidate view is identified, the
+function analyzes its error map by computing the gradient
+magnitude using the Sobel operator, which reveals abrupt
+changes in depth error. To robustly detect these regions, the
+base mask is first eroded to exclude boundary artifacts, and
+the gradient map is thresholded to generate a binary mask
+highlighting regions with significant discrepancies. This binary mask is further refined via morphological dilation to
+ensure that all problematic areas are adequately covered.
+• Soft Depth Clustering Loss (SDCL): Computed at every
+59 training iterations.
+• Crop-Focused Depth Loss (CFDL): Computed every 9
+iterations.
+• Weighting factor: The CFDL contribution is balanced
+by a factor of κ = 25.
+Our Selective Guided Inpainting (SGI) module employs
+an error-driven approach to identify regions that require
+further refinement. Specifically, for each training camera
+view, we compute an error heatmap by measuring the perpixel absolute difference between the rendered depth from
+the 3DGS model and the ground-truth depth estimated via
+a monocular depth estimator, restricted to the masked regions. The module processes all training views by first rendering the scene and saving the corresponding images and
+depth maps. To ensure comparability between the rendered
+and estimated depth maps - despite potential scale differences, both are computed using consistent camera parameters and normalized to a common metric scale during preprocessing. For each view (excluding the reference), it computes a cumulative depth error over the masked area and selects the view with the highest error as the candidate for fur3

@@ -1,0 +1,1098 @@
+GeoGaussian: Geometry-aware Gaussian
+Splatting for Scene Rendering
+Yanyan Li1,2 , Chenyu Lyu3 , Yan Di2 , Guangyao Zhai2 , Gim Hee Lee*1 , and
+Federico Tombari*2,4
+National University of Singapore, Singapore
+Technical University of Munich, Germany
+3
+Tianjin University, China
+4
+Google, Zurich, Switzerland
+https://yanyan-li.github.io/project/gs/geogaussian
+arXiv:2403.11324v2 [cs.CV] 17 Jul 2024
+1
+2
+Abstract. During the Gaussian Splatting optimization process, the scene
+geometry can gradually deteriorate if its structure is not deliberately
+preserved, especially in non-textured regions such as walls, ceilings, and
+furniture surfaces. This degradation significantly affects the rendering
+quality of novel views that deviate significantly from the viewpoints in
+the training data. To mitigate this issue, we propose a novel approach
+called GeoGaussian. Based on the smoothly connected areas observed
+from point clouds, this method introduces a novel pipeline to initialize
+thin Gaussians aligned with the surfaces, where the characteristic can
+be transferred to new generations through a carefully designed densification strategy. Finally, the pipeline ensures that the scene geometry
+and texture are maintained through constrained optimization processes
+with explicit geometry constraints. Benefiting from the proposed architecture, the generative ability of 3D Gaussians is enhanced, especially
+in structured regions. Our proposed pipeline achieves state-of-the-art
+performance in novel view synthesis and geometric reconstruction, as
+evaluated qualitatively and quantitatively on public datasets.
+Keywords: Gaussian Splatting · Geometry-aware Densification · Geometric Consistency
+1
+Introduction
+Due to the impressive rendering quality of Neural Radiance Fields (NeRF) [27],
+the area of photo-realistic novel view synthesis (NVS) has become a popular research topic in the communities of computer vision, graphics, and robotics. While
+NeRFs offer high-quality rendering, 3D Gaussian Splatting ( [9, 19]) shows better performance in terms of training speed and rendering quality. 3D Gaussian
+Splatting is explicitly represented by a set of Gaussian points parameterized by
+its position, orientation, and spherical harmonics parameters. An additional rasterization step re-projects these 3D Gaussians back to training images to capture
+⋆
+Equal senior author
+2
+Y. Li et al.
+3DGS [19]
+Reference
+GeoGaussian (ours)
+Fig. 1: Comparisons of novel view rendering and 3D Gaussian model on the Replica
+Datasets. As highlighted in the second row, the proposed method shows a very clear
+boundary between two low-textured walls, but 3DGS has blurring issues since the
+geometry of its 3D Gaussian model is not accurate in this area.
+scene geometry and appearance by using alpha-blending. However, in the Gaussian Splatting optimization process, the geometry of 3D Gaussian models lacks
+sufficient constraints especially in low-textured regions, leading to significant
+degradation in rendering performance for novel views that deviate substantially
+from the training data.
+NVS methods typically represent 3D scenes implicitly [30, 44] or explicitly [5, 17] based on multiple 2D views and corresponding camera poses. Previous solutions for NVS tasks have primarily relied on 3D surface reconstruction
+using technologies such as Structure-from-Motion [12], multi-view stereo [36],
+TSDF [15], Marching Cubes [24], Poisson [17], and texturing [40]. While these
+methods enable the rendering of new views in texture and depth based on 3D
+surface models, achieving photo-realistic rendering quality remains challenging.
+Since the impressive achievements of convolutional neural networks are made on
+many tasks, such as point detection [7] and scene completion [42], deep learningbased mesh representations [10] have been proposed to enhance view synthesis,
+while the challenges for these mesh-based methods are to capture accurate geometry and appearance in complex scenarios. Compared to learning-based mesh
+methods, NeRF [27] proposes a continuous volumetric function representation
+using a multi-layer perceptron (MLP), which produces high-quality renderings
+with impressive details. To address the heavy computational burden and intensive memory consumption, recent improvements have been made using sparse
+volumes [23], hash tables [29], and hierarchical sampling methods [3, 41]. De-
+GeoGaussian
+3
+spite a significant reduction in training time with these methods, improving rendering efficiency is still a pressing requirement for applications such as SLAM.
+Recently, 3D Gaussian Splatting (3DGS) [19] has gained significant attention
+in the community, which shows that the rendering speed in high-quality NVS
+tasks can be made up to 150 FPS [9]. In the Gaussian Splatting optimization
+process, approaches often prioritize image clarity over geometric fidelity. While
+some viewpoints may render well, issues arising from confusing geometry can impact rendering quality at certain viewpoints. To extract mesh surface from 3D
+Gaussians, SuGaR [13] serves as a refinement module to jointly optimize mesh
+and Gaussians. However, the method requires more GPU resources for training
+compared with 3DGS.
+In this paper, we propose a geometry-aware Gaussian Splatting method emphasizing rendering fidelity and geometry structure simultaneously. Initially, normal vectors are extracted from input point clouds, and then smoothly connected
+areas are detected based on normals. For general regions, we follow the traditional initialization process [19] that represents every point as a sphere. However,
+each point is parameterized as a thin ellipsoid with explicit geometric information for smoothly connected areas. Specifically, the third value of the scale vector
+S is fixed to make the ellipsoid thin. Additionally, the third column of rotation
+matrix R decoupled from the covariance matrix Σ is initialized by the normal
+vector, as shown in Figure 2. Based on the design, we encourage these thin ellipsoids to lie on the surface of smooth regions. Leveraging the thin ellipsoid
+representation, our densification strategy containing split and clone steps operates within a well-constrained process. On the one hand, a large Gaussian point
+can be split into two smaller co-planar Gaussians lying on the plane established
+by the position and normal vectors of the large Gaussian, whereas traditional
+approaches [9, 19, 25] randomly position new Gaussians within the ellipsoid. On
+the other hand, our Gaussian clone approach ensures that new generations have
+to lie on the same plane with the original since the new Gaussian is also required
+to align with the surface of the smooth region. The step is supported by accumulating the gradient descent direction of the origin’s position µ, and then the
+component of the direction that is perpendicular to the normal vector of origin
+is decoupled to guide the position for the cloned Gaussian. Through the learning rate and direction, the Gaussian map undergoes densification for continuous
+training. In the optimization module, we propose a new geometrically consistent constraint for thin ellipsoids lying on the smooth areas by encouraging the
+nearest neighbors to be co-planar, which are jointly optimized with the widely
+used photometric residuals [19] in an iterative process. The contributions of the
+paper are summarized as:
+– A parameterization with explicit geometry meaning for thin 3D Gaussians is
+employed in our carefully designed initialization and densification strategies
+to establish reasonable 3D Gaussian models.
+– A geometrically consistent constraint is proposed to encourage thin Gaussians to align with the smooth surfaces.
+4
+Y. Li et al.
+– Evaluations on the public datasets demonstrate that the proposed method
+improves rendering quality compared to state-of-the-art Gaussian Splatting
+methods.
+2
+Related Work
+2.1
+Map Reconstruction and Texturing
+Traditional approaches to view synthesis typically involve 3D model reconstruction and texture mapping modules. 3D surface reconstruction can be achieved
+using algorithm modules such as structure-from-motion [43], simultaneous localization and mapping [20], and depth map fusion [4, 15]. After obtaining surface
+meshes based on methods like Marching Cubes [24] and Poisson surface reconstruction [17], another crucial step is to refine the texture of triangle faces based
+on input visual images [22] or through a form of blending [1] between these images. Learning-based solutions for 3D reconstruction [11,26] and texturing [8,31]
+tasks have also been proposed, representing high-frequency texture and employing techniques for natural blending.
+2.2
+Neural Rendering and Radiance Fields
+Instead of explicitly representing scenes, NeRF [27] records environments using
+MLP neural networks, opening new possibilities for high-quality view synthesis based on volumetric ray tracing. However, limited by inference speed and
+convergence difficulties, explicit structures such as voxels [23] or deep features
+are incorporated into ray-based representations to accelerate rendering. Relu
+fields [16] investigate grid-based representations to maintain the high-fidelity rendering performances of MLPs while speeding up the reconstruction and reference
+processes through fixed non-linearity on interpolated grid parameters. InstantNGP [29] proposes a multi-resolution hash table of trainable feature vectors to
+improve neural networks for the same speeding-up goal of neural graphics primitives. Despite the significant improvements achieved by these methods [6,23,33],
+current approaches may not fully satisfy the requirements of real-time rendering
+applications.
+2.3
+Gaussian Splatting in Rendering and Reconstruction
+Recently, 3DGS [19], combining point-based splatting and blending techniques
+for rendering, has achieved real-time speed with photo-realistic rendering quality.
+To make the representation more compact, LightGS [9] proposes a strategy to
+remove unimportant Gaussians based on the volume and opacity of each Gaussian. Building on the results of 3DGS, SuGaR [13] extracts mesh faces from
+unorganized 3D Gaussian maps, serving as an optional refinement module to
+jointly optimize surface and Gaussians. However, this method requires significantly more GPU resources compared to 3DGS. In contrast to the architecture of Colmap+GS solutions, 3D Gaussians working as the only representation
+smooth area
+smooth area
+z
+normal
+modified
+direction
+y
+x
+3D Position: µ
+Scales: S = [s1 s2 0.001]T
+Rotation: R = [r1 r2 n]
+Spherical Harmonics: C
+Opacity: α
+Parametrization of Thin Gaussians
+zGeoGaussian
+Y
+nearest
+neighbors
+5
+normal
+Z
+y
+accumulated
+direction
+Clone on Tangent space
+x
+π
+X
+Split on Tangent space
+Densification
+Co-planar Constraint
+Clone on
+Smooth Constraint
+3D Position: µ
+Scales: S = [s s 0.001]
+Rotation: R = [r r n]
+Spherical Harmonics: C
+Opacity: α
+Fig. 2: Geometry-aware strategies of our GeoGaussian. In smoothly connected areas,
+the parameterization of thin Gaussians contains clear geometry meaningsTin the
+mean vector and covariance matrix. Furthermore, the
+densification
+1
+2 operation for these
+thin Gaussians encourages the new generations to lie in the tangent space established
+by the position and normal vectors of the original Gaussian. Finally,
+1 these
+2 thin Gaussians, measured by a training view, are used to establish smooth constraints with
+photometric constraints in the optimization process.
+are used in incremental tracking and mapping systems [18, 25, 47]. GaussianSLAM [47] selects every 5th frame as a keyframe for training 3D Gaussians
+based on RGB-D images. Compared with 3DGS and related refinements, our
+method focuses on modeling geometry and achieving photo-realistic rendering
+performance through redesigned parameterization and densification processes,
+as well as geometry-aware constraints.
+Parametrization of Thin Gaussians
+3
+Our Methodology
+3.1
+3D Gaussian Splatting
+In the widely used 3D Gaussian Splatting representation, the scene is built by a
+set of anisotropic Gaussians. Each Gaussian point is characterized by attributes
+i
+including the mean µiw and covariance Σw
+in the world coordinate frame, where
+the mean vector and covariance matrix also represent the position and shape of
+the ith Gaussian ellipsoid G i . To ensure semi-positive definiteness, the covariance
+matrix is represented by diagonal scaling matrix Siw = Diag[si1 si2 si3 ] ∈ R3×3
+and rotation matrix Riw = [ri1 ri2 ri3 ] ∈ SO(3) as follows:
+\Sigma _w^i = \mathbf {R}_w^i\mathbf {S}_w^i{\mathbf {S}_w^i}^{\intercal }{\mathbf {R}_w^i}^{\intercal },
+(1)
+where SO(3) is the special orthogonal group.
+In addition to the position and shape parameters, spherical harmonics coef2
+ficients Ciw ∈ R(m+1) ×3 , where m is the degrees of the freedom, and opacity
+i
+αw ∈ R also play important roles in rendering the colored image. The color of
+the target pixel can be synthesized by splatting and blending these N organized
+Gaussian points that have overlaps with the pixel. First, the splatting operation
+Split on
+Den
+6
+Y. Li et al.
+is to form 2D Gaussians N (µI , ΣI ) on the image planes from the 3D Gaussians
+N (µw , Σw ) in the world coordinates based on camera poses, i.e.:
+\mu _{I} =\Pi (\mathbf {T}_{cw} \mu _w) ,\; \Sigma _{I} = \mathbf {J}\mathbf {W}_{cw}\Sigma _{w}\mathbf {W}_{cw}^{\intercal }\mathbf {J}^{\intercal },
+(2)
+
+
+Wcw tcw
+where Tcw =
+∈ SE(3) is the camera pose from the world to the
+0
+1
+camera coordinate in the special Euclidean group, and Wcw and tcw are rotational and translational components, respectively. J is the Jacobian matrix of
+the projective transformation. The blending operation is then given as follows:
+\mathcal {C}_{\mathbf {p}}=\sum _{i\in N} c^i\alpha _w^i \prod _{j=1}^{i-1}(1-\alpha _w^i),
+(3)
+i
+represent the color and opacity of the point, and the 3D Gauswhere ci and αw
+sian Splatting and blending operations are differentiable. Based on optimization
+solvers, Gaussian parameters can be trained gradually and supervised via photometric residuals.
+3.2
+Gaussian Initialization and Densification
+Initialization. Surface normals are first extracted from point clouds using a
+method [28], wherein unreliable normals are detected based on two rules: 1)
+points with long distances from others, and 2) points whose neighbors within a
+distance threshold have different normals with large angles with the point. This
+leads to the creation of two groups of points: Sco and Sind , where Sco contains
+points located on smooth surfaces while Sind comprises more individual points.
+These sparse points are then fed to the Gaussian Initialization module. For
+Gaussians initialized by Sind , we adopt an approach similar to that used in 3DGS
+by using the distance between the point and its nearest neighbor to set the scale.
+For Gaussians G related to Sco , we encode more geometric information in the
+parameters as shown in Figure 2. Specifically, the scale vector has only 2 DoFs
+since the value in the z-axis s3 (in the Gaussian coordinate frame) is fixed to
+a small value to create a thin ellipsoid aligned with the surfaces. Additionally,
+we assume that the third column r3 of the rotation matrix from the covariance
+matrix Σ represents the normal while the other two columns are set as a group
+of normalized basis vectors perpendicular to r3 .
+Densification in the tangential space. The general Gaussians initialized by
+points from Sind are densified in the traditional manner, which involves splitting
+a large ellipsoid into two smaller ones located randomly inside the ellipsoid.
+However, the approach differs for thin Gaussians denoted as Gθ . We do the
+following to ensure that the new clones and splits are aligned with the surface: 1)
+Cloning. The gradient of the position is calculated over 10 iterations [19]. The
+position µi+1 of the new Gaussian is obtained when the accumulated gradient
+(δµi ) exceeds the threshold γ. However, instead of being set along the direction
+GeoGaussian
+7
+of the gradient, the new position of the clone Gaussian is determined as follows:
+\bm {\mu }^{i+1} = \bm {\mu }^{i} + \delta \bm {\mu }^{i} - \mathbf {r}_3^\intercal \delta \bm {\mu }^{i},
+i
+(4)
+is the position of the original Gaussian Gθi . Additionally, parameters
+where µ
+such as r3 are also cloned to the new Gaussian. 2) Splitting. The split process
+also follows the rule of being co-planar. Due to our thin Gaussian representation,
+the new position µi+1 lies on the plane established by the normal and position
+⊺
+⊺
+vectors of Gθi , satisfying the equation [µi+1 | µi+1 ri+1
+= µi ri3 , Gθi+1 ∈ Sco ].
+3
+Based on this method, the Gaussian clone occurs in the tangential space near
+the original Gaussian point, and the split operation also ensures that the new
+Gaussians lie in the tangential space.
+3.3
+View-dependent Optimization
+The iterative optimization process is necessary to ensure that these Gaussians
+have the ability to render photo-realistic images at given viewpoints. Following
+the strategy of 3DGS [19], the goal of our designed loss functions is to create
+correct geometry and adjust incorrectly positioned Gaussians. The photometric
+residual between the rendered pixel ci and the ground truth pixel c̄i is represented
+as:
+E_{pho}^i = \| c_i - \bar {c}_i \| = \| f(\mathcal {G}, \mathbf {T}_{cw}) - \bar {c}_i \|,
+(5)
+where f (G, Tcw ) rasterizes and blends the relevant Gaussians (regular and thin
+ellipsoids) to produce the color.
+After selecting view-dependent thin Gaussians Gθ which are encouraged to
+preserve smooth connections with their nearest neighbors, we propose a smoothness loss function to further improve the geometry of the model. Only Gaussians
+detected by the current view are considered in this function. We then utilize
+the K-NN algorithm to detect the eight nearest neighbors around Gθ , which are
+passed through a filter to remove outliers that have large angle differences by
+comparing their normal vectors with that of Gθ . Consequently, the proposed
+smooth constrain for optimizing position and normal vectors can be represented
+as:
+E_{geo} = \beta _1\| \mathbf {r}_3^\intercal \bm {\mu } - \frac {1}{m}\sum _{j\in m} {\mathbf {r}_3^j}^\intercal \bm {\mu }^j \| \\ + \beta _2\| \mathbf {r}_3^j - \mathbf {r}_3 \|_{2},
+(6)
+where β1 and β2 are weights, and r⊺3 µ shows the distance between the origin
+of the world coordinateP
+and the plane established by normal r3 and position µ
+j⊺ j
+1
+vectors of Gθ , while m
+j∈m r3 µ shows the average point-plane distance of
+the neighborhood.
+By jointly optimizing the normal alignment and depth consistency of the
+Gaussian point tangent space in the neighborhood, we can obtain Gaussian
+points with a smooth distribution and alignment on the scene surface.
+Finally, the loss function L combines both photometric Epho and geometric
+Egeo residuals as:
+L = \lambda _1 \sum _{\forall k \in H\times {W}} E_{pho}^k + \lambda _2\sum _{\mathcal {G}_{\theta }^i} E_{geo}^i,
+(7)
+8
+Y. Li et al.
+where λ1 and λ2 are hyper-parameters, and H and W represent the height and
+width of the image, respectively. Gθi is detected by the image.
+4
+Experiments
+4.1
+Implementation Details
+In this section, we detail the experimental settings. The proposed GeoGaussian
+approach is trained and evaluated on a desktop PC equipped with an Intel Core
+i9 12900K 3.50GHz processor and a single GeForce RTX 3090 GPU. Throughout
+all experiments, we maintain a consistent learning rate of 0.0002 for Gaussian
+optimization and γ is set to 0.0002. We also use a photometric loss weighting of
+0.8 and a geometric loss weighting of 0.3, while weights β1 and β2 are 0.05 and
+0.01, respectively.
+In the evaluation phase, we employ a standard procedure. Specifically, we
+follow 3DGS [19] to train our models on public datasets for 30,000 iterations.
+During the first 2,000 iterations, only photometric constraints are used in the
+optimization process. Densification operations cease after 10,000 iterations. Additionally, Gaussians with small opacity values (under 0.05) are removed from
+the map. The list of nearest neighbors is updated every 100 iterations before
+reaching 20,000 iterations. After 20,000 iterations, the update frequency is set
+to 1,000 iterations as no more Gaussians are added to the map at that time.
+4.2
+Datasets and Metrics
+Datasets. Three public datasets, including Replica [38], TUM RGB-D [39],
+and ICL-NUIM [14], are utilized in the evaluation process. The Replica dataset
+comprises 8 sequences featuring living room and office scenarios. Similarly, ICLNUIM is also a synthetic dataset that offers environments comparable to those
+in Replica. We also select 4 sequences from the TUM RGB-D dataset, which
+were captured in real-world settings unlike Replica and ICL-NUIM. These TUM
+RGB-D sequences consist of distortion-free images, making them suitable as
+references for evaluation.
+Metrics. Following the popular evaluation protocol used in methods [19, 38],
+standard photometric rendering quality metrics are employed in the experiment section to evaluate the quality of novel view rendering. These metrics include Peak Signal-to-Noise Ratio (PSNR), Structural Similarity Index Measure
+(SSIM), and Learned Perceptual Image Patch Similarity (LPIPS). Particularly,
+PSNR evaluates on a color-wise basis. SSIM measures the similarity between two
+images, which considers changes in structural information, luminance, and contrast that can occur with various types of distortion. LPIPS compares features
+of two images extracted by a pre-trained neural network such as VGG-Net [37]
+instead of comparing two images directly.
+GeoGaussian
+9
+Replica OFF2
+Replica OFF0
+TUM RGB-D f3/strtex-far
+ICL-NUIM Office 3
+(a) 3DGS [19]
+(b) LightGS [9]
+(c) GeoGaussian
+(d) Reference
+Fig. 3: Comparisons of novel view rendering on public datasets. At some challenging
+viewpoints having bigger differences in translation and orientation motions compared
+with training views, 3DGS and LightGS have issues with photorealistic rendering. (d)
+shows the training view closest to the rendered one.
+10
+Y. Li et al.
+Method
+Metric
+R0 R1 R2 OFF0 OFF1 OFF2 OFF3 OFF4 Avg.
+PSNR↑ 22.39 22.36 23.92 27.79 29.83 20.33 23.47 25.21 24.41
+VoxSSIM↑ 0.683 0.751 0.798 0.857 0.876 0.794 0.803 0.847 0.801
+Fusion [45]
+LPIPS↓ 0.303 0.269 0.234 0.241 0.184 0.243 0.213 0.199 0.236
+PSNR↑ 32.40 34.08 35.50 38.26 39.16 33.99 33.48 33.49 35.17
+PointSSIM↑ 0.974 0.977 0.982 0.983 0.986 0.960 0.960 0.979 0.975
+SLAM [34]
+LPIPS↓ 0.113 0.116 0.111 0.100 0.118 0.156 0.132 0.142 0.124
+PSNR↑ 34.83 36.43 37.49 39.95 42.09 36.24 36.70 36.07 37.50
+GaussianSSIM↑ 0.954 0.959 0.965 0.971 0.977 0.964 0.963 0.957 0.960
+Splatting
+SLAM [25] LPIPS↓ 0.068 0.076 0.07 0.072 0.055 0.078 0.065 0.099 0.070
+PSNR ↑ 35.20 38.24 39.14 42.74 42.20 37.31 36.66 38.74 38.78
+GeoGaussian
+SSIM↑ 0.952 0.979 0.970 0.981 0.970 0.970 0.964 0.967 0.969
+(ours)
+LPIPS↓ 0.029 0.021 0.024 0.016 0.040 0.029 0.029 0.031 0.027
+Table 1: Comparison of different solutions for novel view rendering on the Replica
+dataset, GeoGaussian is fed by point clouds, initial camera poses, and monocular images, while other methods work in real-time with RGB-D streams. Results of GaussianSplatting SLAM, Vox-Fusion, and Point-SLAM are taken from [25].
+4.3
+Scene Rendering Solutions
+Solutions for NVS tasks can be generally classified into end-to-end and hybrid
+methods. Gaussian Splatting SLAM [25] represents end-to-end methods that use
+Gaussians as the map for incremental localization, reconstruction, and rendering
+tasks. In contrast, Vox-Fusion [45] represents hybrid methods that integrate implicit neural representations into traditional volumetric methods, and estimate
+6-DoF camera poses following traditional pose estimation without using neural
+embeddings saved in voxels. Similarly, our GeoGaussian starts from point clouds
+and camera poses which can be generated by SLAM [32] and Structure-fromMotion [35] methods, and uses differentiable 3D Gaussian representations for
+rendering instead of neural implicit ones. Nonetheless, the big difference is that
+methods such as Vox-Fusion operates online, while Gaussian Splatting optimization functions similar to a global refinement module that requires more time and
+unable to perform real-time optimization.
+We put aside the all other differences between these methods to focus on
+comparisons on the rendering task. Specifically, we compare the rendering results of our GeoGaussian against Gaussian-Splatting SLAM, Point-SLAM, and
+Vox-Fusion on the same Replica dataset. As listed in Table 1, our proposed GeoGaussian using offline Gaussian Splatting achieves the best novel view rendering results, especially in PSNR and LPIPS metrics. Point-SLAM is also very robust, especially in SSIM, but the LPIPS metric is worse than Gaussian-Splatting
+SLAM. These results show that the Gaussian Splatting algorithm yield more impressive performance in photo-realistic rendering problems compared with neural
+representation methods used in Vox-Fusion and Point-SLAM.
+GeoGaussian
+4.4
+11
+Gaussian Splatting in NVS
+In this section, our GeoGaussian is benchmarked against Gaussian Splatting
+methods which are fed by the same inputs such as sparse point clouds, initial
+camera poses, and monocular images based on the preprocessing method [32].
+3DGS [19] is the most important baseline in this area, while LightGS [9] is a
+refinement approach based on 3DGS that involves the pruning of insignificant
+Gaussian points and further fine-tuning.
+For the experiments, we feed the three methods with the same inputs to validate their rendering performance as listed in Table 2. Additionally, we evaluate
+these methods in sparse views, which is a significant metric for evaluating the
+generality of the trained Gaussian models. Evaluating on a dataset that is too
+similar to the training dataset can make it difficult to assess the generality of the
+model. To address this issue, we first select the evaluation dataset at a frequency
+of one frame every five frames. The remaining data is considered as the training
+dataset, referred to as R1 (100%) as an example in the second row of Table 2 and
+Figure 4. Similarly, we use only 10% of the training dataset for training, referred
+to as R1 (10%). It is important to note that the removal process is uniformly
+implemented across all sequences.
+Methods
+3DGS [19]
+LightGS [9]
+GeoGaussian
+Data
+10% 16.6% 50% 100% 10% 16.6% 50% 100% 10% 16.6% 50% 100%
+PSNR↑ 30.49 33.98 37.45 37.60 30.54 34.06 37.72 38.44 31.65 35.17 38.00 38.24
+SSIM↑ 0.932 0.951 0.964 0.965 0.932 0.951 0.965 0.967 0.937 0.957 0.968 0.979
+R1
+LPIPS↓ 0.051 0.036 0.029 0.028 0.051 0.035 0.028 0.025 0.041 0.027 0.022 0.021
+PSNR↑ 31.53 35.82 38.53 38.70 31.54 35.93 38.78 39.07 32.13 36.81 38.84 39.14
+SSIM↑ 0.935 0.959 0.968 0.968 0.935 0.959 0.968 0.968 0.943 0.963 0.969 0.970
+R2
+LPIPS↓ 0.050 0.031 0.028 0.029 0.049 0.031 0.027 0.028 0.041 0.025 0.024 0.024
+PSNR↑ 30.90 33.86 36.26 36.56 30.93 33.90 36.38 36.63 31.62 33.91 36.42 36.66
+OFF3 SSIM↑ 0.928 0.946 0.958 0.959 0.928 0.947 0.958 0.958 0.938 0.953 0.963 0.964
+LPIPS↓ 0.052 0.040 0.037 0.036 0.052 0.040 0.036 0.037 0.040 0.032 0.029 0.029
+PSNR↑ 29.55 32.98 37.70 38.48 29.51 32.97 37.95 38.59 31.90 34.61 38.30 38.74
+OFF4 SSIM↑ 0.920 0.941 0.962 0.964 0.920 0.941 0.962 0.964 0.936 0.953 0.966 0.967
+LPIPS↓ 0.070 0.049 0.037 0.035 0.070 0.049 0.036 0.036 0.050 0.036 0.030 0.031
+PSNR↑ 30.62 34.16 37.49 37.84 30.63 34.22 37.71 38.18 31.83 35.13 38.18 38.20
+Avg. SSIM↑ 0.929 0.949 0.964 0.964 0.929 0.950 0.964 0.964 0.939 0.957 0.967 0.970
+LPIPS↓ 0.056 0.039 0.032 0.032 0.056 0.039 0.032 0.032 0.043 0.030 0.026 0.026
+Table 2: Comparison of rendering on the Replica dataset. The position and orientation
+of viewpoints used in training and evaluation are illustrated in Appendix.
+Evaluation on Replica. Our proposed GeoGaussian demonstrates superior
+rendering performance compared to other Gaussian Splatting-based methods in
+the R1, R2, and OFF3 sequences, as shown in Table 2. Particularly in the R1
+and R2 sequences, our method exhibits comprehensive improvements across all
+three metrics. These environments consist mostly of less-textured regions, such
+as single-color walls, where 3DGS [19] and its refinement method LightGS [9]
+lack sufficient photometric constraints for their optimization processes. This is
+Y. Li et al.
+1
+0.8
+0.6
+0.4
+0.2
+R1 (10%)
+R1
+R2 (10%)
+3DGS [19]
+R2
+OFF3 (10%)
+LightGS [9]
+OFF3
+OFF4 (10%)
+OFF4
+0
+Number of Gaussian Points (M)
+12
+GeoGaussian
+Fig. 4: Statistics of the number of Gaussians in sequences of Replica. To make the
+comparison compact, more values are illustrated in Appendix.
+evident in the first two rows of Figure 3, where the ceiling appears blurry in
+these two methods but is well-preserved in our method.
+Furthermore, the distributions of 3D Gaussians illustrate that the geometry
+in our method is more reasonable compared to the results from 3DGS, with
+flatter walls and clearer junction lines highlighted in Figure 3. As shown in the
+OFF3 sequence, our 3D Gaussian model shows more generality and robustness
+in rendering performance when the training data becomes sparser. Specifically,
+the PSNR distance between 3DGS and ours is 0.1 in OFF3 (100%), while the
+distance becomes 0.7 in OFF3 (10%). Similar improvements are witnessed in
+R1, where the distance between these two methods in R1 (100%) is around
+0.6, and this difference continues to increase in R1 (16.6%) to 1.2. Since our
+evaluation dataset includes rich scenarios, these improvements demonstrate that
+the proposed method has advantages in novel view rendering tasks by using
+geometry-aware strategies.
+In Figure 4, we present the number of Gaussians used for each sequence.
+All methods are optimized for 30,000 iterations. LightGS received an additional
+5,000 iterations based on the 25,000 models of 3DGS, following the official settings of LightGS. Generally, 3DGS requires more Gaussians in average compared
+to the other two methods. For example, 3DGS employs about one-fourth more
+Gaussians than the other methods in OFF4, yet the rendering performance remains similar across all three methods.
+Evaluation on TUM RGB-D. In Table 3, sequences from TUM RGB-D are
+used to evaluate Gaussian Splatting approaches. In sequences such as f3/cabinet
+and f3/strtex-far, our method outperforms 3DGS and LightGS significantly. For
+example, our method achieves a PSNR of 28.64 while 3DGS obtains 27.85 in
+f3/strtex-far. As shown in the last row of Figure 3, the 3D Gaussian points in
+our method are well-organized in structure, whereas the geometry is not preserved in 3DGS, appearing as a big blue ellipsoid passing through the wall. In
+the cabinet sequence, characterized by a lack of textured regions, our proposed
+method demonstrates impressive improvements in both sparse (10%) and full
+(100%) training data scenarios. However, in the lag-cabinet sequences where the
+GeoGaussian
+13
+camera moves around a cabinet placed in the middle of the scene, both 3DGS
+and LightGS perform better than our GeoGaussian.
+Method
+3DGS [19]
+LightGS [9]
+GeoGaussian
+Metric
+PSNR↑ SSIM↑ LPIPS↓ PSNR↑ SSIM↑ LPIPS↓ PSNR↑ SSIM↑ LPIPS↓
+f3/cabinet (100%)
+27.24 0.907 0.125 27.35 0.908 0.124 28.17 0.916 0.106
+f3/cabinet (10%)
+22.43 0.850 0.186 22.36 0.849 0.190 25.59 0.887 0.138
+f3/strtex-far (100%) 27.85 0.896 0.073 27.90 0.896 0.073 28.64 0.907 0.064
+f3/strtex-far (10%) 21.41 0.737 0.192 21.39 0.734 0.194 22.84 0.779 0.137
+Avg.
+24.73 0.848 0.144 24.75 0.847 0.145 26.31 0.872 0.111
+Table 3: Rendering performance comparison on the TUM RGB-D datasets.
+4.5
+Ablation Studies
+Sparse Views for Training. In this section, we present additional settings for
+sparse view rendering evaluation as listed in Table 4. As the number of training images decreases from 50% to 10%, the performance of 3DGS deteriorates
+significantly. In contrast, the GeoGaussian approach, leveraging the proposed
+geometry-aware densification operations and constraints, demonstrates more robust rendering performance.
+10%
+12.5%
+16.6%
+25%
+50%
+(train/test) (train/test) (train/test) (train/test) (train/test)
+PSNR↑
+30.49
+33.15
+33.98
+36.58
+37.45
+SSIM↑
+0.932
+0.944
+0.951
+0.961
+0.964
+3DGS [19]
+LPIPS↓
+0.051
+0.039
+0.035
+0.028
+0.028
+PSNR↑
+31.65
+33.95
+35.17
+36.83
+38.00
+GeoGaussian
+0.942
+0.949
+0.957
+0.964
+0.968
+SSIM↑
+(ours)
+LPIPS↓
+0.041
+0.032
+0.027
+0.023
+0.022
+Table 4: Sparse view rendering on the R1 sequence of Replica dataset. The position
+and orientation of viewpoints used in training and evaluation are given in Appendix.
+Method
+Metric
+Training and Evaluation. Figure 5 illustrates the PSNR results collected during training and evaluation iterations. In Figure 5a, our GeoGaussian achieves
+significantly better results in the first 15K iterations than 3DGS. This improvement can be attributed to the accuracy provided by our proposed initialization
+and densification modules, which help to achieve better convergence. Similar
+phenomena can be seen in Figure 5b, the performance of GeoGaussian is more
+robust in both sparse (10%) and full (100%) training data scenarios. In Fig-
+14
+Y. Li et al.
+ure 5c, 3DGS tends to overfit the training views, while our approach limits the
+extent of overfitting and prevents test results from degrading rapidly.
+50
+35
+GeoGaussian-Training
+GeoGaussian-Evaluation
+3DGS-Training
+3DGS-Evaluation
+29
+GeoGaussian-100%
+GeoGaussian-10%
+3DGS-100%
+3DGS-10%
+40
+30
+GeoGaussian-Training
+GeoGaussian-Evaluation
+3DGS-Training
+3DGS-Evaluation
+59
+P SN R
+31
+P SN R
+P SN R
+33
+47
+35
+27
+20
+25
+2
+7
+15
+Iterations(K)
+(a) f3/strtex_far
+30
+23
+1
+2
+3
+4
+5
+Iterations(K)
+(b) OFF4
+6
+7
+18
+2
+7
+15
+Iterations(K)
+30
+(c) Room 2(10%)
+Fig. 5: Rendering performance in training and evaluation using TUM RGB-D (a),
+Replica (b), and ICL-NUIM (c) datasets.
+5
+Conclusion
+In this paper, we introduce a novel approach called GeoGaussian, which emphasizes the importance of preserving accurate geometry in Gaussian models
+to enhance their representation in 3D space. Our method first gives Gaussian
+parameters a clearer geometric meaning. The third parameter of the scale vector
+is used to control thickness, while the third column of the rotation matrix specifies the normal direction of the thin ellipsoid, where the initial normal direction
+is extracted from the initial point clouds. Additionally, we propose a carefully
+designed densification approach to effectively organize the newly generated ellipsoids. In the optimization module, we encourage ellipsoids in the neighborhood
+to lie in a co-planar area, further enhancing the representation quality. Experimental results on public datasets demonstrate that our method achieves superior
+performance in terms of geometry accuracy and photo-realistic novel view rendering compared to state-of-the-art approaches. In the future, we plan to explore
+more comprehensive solutions for improving the geometry of Gaussian models.
+This will involve incorporating depth, normals, and camera poses into the 3D
+Gaussian Splatting optimization process, reducing the reliance on point cloud
+normal vectors.
+Acknowledgement. This research work is supported by the Agency for Science, Technology and Research (A*STAR) under its MTC Programmatic Funds
+(Grant No. M23L7b0021).
+GeoGaussian
+A
+15
+Novel View Rendering
+In the evaluation section, we present a comprehensive set of experiments to evaluate the performance of our method. Here, we provide additional quantitative
+and qualitative results to further demonstrate the effectiveness of our approach.
+A.1
+Replica Sequences
+In Table 2 (see Section 4.1), we compare novel view rendering performance using
+the R1, R2, OFF3, and OFF4 sequences. Additionally, we conduct experiments
+on four additional sequences (R0, OFF0, OFF1, and OFF2) in this section.
+Following the same setup as described in the section of Gaussian Splatting in
+NVS (see Section 4.4), we evaluate the rendering performance of 3DGS, LightGS,
+and GeoGaussian using three metrics, as shown in Table 5.
+methods
+3DGS
+LightGS
+GeoGaussian
+data
+10% 16.6% 50% 100% 10% 16.6% 50% 100% 10% 16.6% 50% 100%
+PSNR↑ 27.24 31.14 34.54 35.10 27.23 31.21 34.68 35.28 28.84 31.77 34.66 35.23
+SSIM↑ 0.875 0.928 0.949 0.952 0.875 0.929 0.950 0.953 0.899 0.931 0.949 0.952
+R0
+LPIPS↓ 0.070 0.040 0.031 0.032 0.070 0.040 0.031 0.031 0.057 0.036 0.028 0.029
+PSNR↑ 31.61 35.99 41.70 42.67 31.63 36.00 41.82 43.08 32.42 36.34 42.11 42.74
+OFF0 SSIM↑ 0.927 0.959 0.979 0.981 0.927 0.959 0.979 0.981 0.924 0.960 0.980 0.981
+LPIPS↓ 0.062 0.034 0.018 0.017 0.062 0.034 0.018 0.016 0.053 0.030 0.016 0.017
+PSNR↑ 34.81 38.39 42.27 42.88 34.83 38.43 42.43 43.01 34.86 38.35 41.89 42.17
+OFF1 SSIM↑ 0.943 0.956 0.972 0.974 0.943 0.956 0.972 0.974 0.939 0.952 0.968 0.970
+LPIPS↓ 0.060 0.046 0.036 0.035 0.060 0.045 0.036 0.035 0.061 0.045 0.039 0.039
+PSNR↑ 28.27 32.91 36.72 37.34 28.25 32.85 36.95 37.49 29.52 33.97 36.90 37.32
+OFF2 SSIM↑ 0.911 0.948 0.964 0.966 0.911 0.948 0.965 0.967 0.925 0.955 0.968 0.970
+LPIPS↓ 0.074 0.043 0.033 0.033 0.073 0.045 0.032 0.033 0.054 0.032 0.028 0.029
+PSNR↑ 30.48 34.61 38.81 39.50 30.49 34.87 38.97 39.72 31.41 35.11 38.89 39.37
+Avg. SSIM↑ 0.914 0.948 0.966 0.968 0.914 0.948 0.967 0.969 0.922 0.950 0.966 0.968
+LPIPS↓ 0.067 0.041 0.030 0.029 0.066 0.041 0.029 0.029 0.056 0.036 0.028 0.029
+Table 5: Comparison of rendering on the Replica dataset.
+The 3D Gaussian models obtained by GeoGaussian and 3DGS are represented in Figure 6. Benefiting from the proposed densification method and geometric constraints, our method, GeoGaussian, preserves the reasonable geometry
+of environments. For example, the walls in Figure 6b and 6c are very thin, but
+the geometry is very noisy in the corresponding models of 3DGS.
+Viewpoints in training and evaluation. In Table 2, we also evaluate the
+relationship between rendering performance and the sparsity of training views.
+Therefore, we visualize the position and orientation of viewpoints used in training
+and evaluation in Figure 7.
+As shown in Figure 7, when the views used in training become sparse from
+OFF3(100%) to OFF3(10%), the scenarios seen from the training frames are
+16
+Y. Li et al.
+GeoGaussian 3DGS
+(a) R0 (100%)
+(b) OFF0(100%)
+(c) OFF1(100%)
+(d) OFF2(100%)
+Fig. 6: Gaussian models generated by GeoGaussian (ours) and 3DGS on the Replica
+sequences.
+(a) OFF3 (10%)
+(b) OFF3 (16.6%)
+(c) OFF3 (50%)
+(d) OFF3 (100%)
+Fig. 7: Viewpoints are used during training and evaluation, where the red camera is
+used for evaluation.
+difficult to cover from evaluation viewpoints. Therefore, the structure of the
+models plays an important role in maintaining the rendering performance as
+illustrated in Table 2 (see Section 4.4).
+A.2
+ICL-NUIM Sequences
+As we mentioned in the Experiment section (see Section 4.2), the four sequences
+are used to evaluate these Gaussian Splatting approaches. As listed in Table 6,
+the proposed method shows robust rendering performance in different training
+settings compared with state-of-the-art Gaussian Splatting methods. When the
+number of training frames is reduced, our method shows more robust performance since our models have better geometry to alleviate overfitting problems
+in rendering tasks. For example, our model trained on ICL-O3 (10%) achieves
+a PSNR of 21.42, while models of 3DGS and LightGS obtain 19.28 and 19.19,
+respectively.
+As we mentioned in the Experiment section (see Section 4.2), the four sequences are used to evaluate these Gaussian Splatting approaches. As listed in
+Table 6, the proposed method shows robust rendering performance in different
+training settings compared with state-of-the-art Gaussian Splatting methods.
+When the number of training frames is reduced, our method shows more robust performance since our models have better geometry to alleviate overfitting
+problems in rendering tasks. For example, our model trained on ICL-O3 (10%)
+GeoGaussian
+GeoGaussian-Training
+GeoGaussian-Evaluation
+3DGS-Training
+3DGS-Evaluation
+47
+GeoGaussian-Training
+GeoGaussian-Evaluation
+3DGS-Training
+3DGS-Evaluation
+71
+59
+P SN R
+P SN R
+59
+17
+47
+35
+35
+23
+18
+2
+7
+15
+Iterations(K)
+(a) ICL-NUIM Room 2(10%)
+30
+23
+18
+2
+7
+15
+Iterations(K)
+30
+(b) ICL-NUIM Office 3(10%)
+Fig. 8: Comparison of Rendering performance in training and evaluation datasets.
+methods
+3DGS
+LightGS
+GeoGaussian
+data
+10% 16.6% 50% 100% 10% 16.6% 50% 100% 10% 16.6% 50% 100%
+PSNR↑ 40.09 40.39 40.59 40.79 40.25 40.53 41.03 41.26 40.58 41.21 41.51 41.43
+Room 1 SSIM↑ 0.971 0.973 0.973 0.973 0.972 0.974 0.974 0.974 0.974 0.976 0.977 0.976
+LPIPS↓ 0.022 0.023 0.024 0.025 0.021 0.022 0.023 0.023 0.019 0.019 0.019 0.019
+PSNR↑ 23.31 30.15 37.33 39.10 23.28 30.18 37.51 39.23 25.23 31.26 37.70 39.46
+Room 2 SSIM↑ 0.777 0.906 0.965 0.974 0.775 0.906 0.965 0.974 0.841 0.925 0.968 0.975
+LPIPS↓ 0.251 0.080 0.023 0.017 0.252 0.080 0.022 0.017 0.142 0.059 0.023 0.018
+PSNR↑ 26.24 29.82 35.54 37.88 26.22 29.77 35.58 37.99 28.35 32.34 36.76 38.54
+Office 2 SSIM↑ 0.844 0.896 0.943 0.962 0.843 0.896 0.943 0.962 0.874 0.917 0.952 0.967
+LPIPS↓ 0.145 0.078 0.036 0.024 0.146 0.078 0.035 0.023 0.100 0.055 0.026 0.017
+PSNR↑ 19.28 22.86 32.20 36.04 19.19 22.82 32.21 36.06 21.42 27.06 33.52 36.19
+Office 3 SSIM↑ 0.718 0.848 0.950 0.975 0.716 0.847 0.949 0.975 0.769 0.907 0.966 0.977
+LPIPS↓ 0.219 0.143 0.044 0.017 0.219 0.143 0.044 0.016 0.145 0.082 0.024 0.015
+PSNR↑ 27.23 30.80 36.41 38.45 27.23 30.82 36.58 38.63 28.89 32.96 37.37 38.90
+SSIM↑ 0.827 0.905 0.967 0.971 0.826 0.905 0.957 0.971 0.864 0.931 0.965 0.973
+Avg.
+LPIPS↓ 0.159 0.081 0.031 0.020 0.159 0.087 0.031 0.019 0.101 0.053 0.024 0.017
+Table 6: Comparison of rendering on the ICL-NUIM dataset.
+(a) 3DGS
+(b) LightGS
+(c) GeoGaussian
+(d) Reference
+Fig. 9: Comparisons of novel view rendering on the ICL-NUIM datasets. In these
+scenarios, 3DGS and LightGS struggle with photorealistic rendering. As depicted in
+(d), the two training views surrounding the novel view.
+18
+Y. Li et al.
+achieves a PSNR of 21.42, while models of 3DGS and LightGS obtain 19.28 and
+19.19, respectively.
+In an extreme case, when we observe the training process of these methods
+on ICL-O3 (10%), as shown in Figure 8, it is evident that Gaussian Splatting
+methods tend to overfit the training views due to the limited number of training
+views. However, our method maintains a certain level of generalization ability
+based on geometry constraints. For example, as the model improves its rendering
+results on the training dataset, the performance on the test dataset does not
+decrease significantly, as shown in Figure 8a.
+A.3
+TUM RGB-D Sequences
+methods
+3DGS
+LightGS
+GeoGaussian
+10% 16.6% 50% 100% 10% 16.6% 50% 100% 10% 16.6% 50% 100%
+data
+PSNR↑ 20.05 23.27 24.63 24.87 20.09 23.32 24.74 24.89 20.85 22.22 24.15 24.79
+f3/lag-cabinet SSIM↑ 0.772 0.831 0.864 0.866 0.773 0.832 0.865 0.867 0.804 0.833 0.863 0.868
+LPIPS↓ 0.226 0.143 0.123 0.127 0.225 0.142 0.123 0.126 0.178 0.158 0.130 0.125
+PSNR↑ 16.67 18.88 23.54 24.33 16.69 18.93 23.66 24.43 18.89 20.55 24.56 25.12
+f3/long-office SSIM↑ 0.598 0.686 0.812 0.832 0.600 0.689 0.813 0.835 0.643 0.736 0.833 0.843
+LPIPS↓ 0.336 0.246 0.148 0.139 0.335 0.245 0.146 0.138 0.279 0.196 0.128 0.125
+PSNR↑ 18.31 21.07 24.08 24.60 18.39 21.12 24.20 24.66 19.87 21.38 24.35 24.95
+SSIM↑ 0.685 0.758 0.838 0.849 0.686 0.760 0.839 0.851 0.723 0.748 0.848 0.850
+Avg.
+LPIPS↓ 0.281 0.194 0.135 0.133 0.280 0.193 0.134 0.132 0.228 0.177 0.129 0.125
+Table 7: Comparison of rendering on the non-structured sequences on the TUM RGBD dataset.
+(a) Real scene
+(b) 3DGS
+(c) GeoGaussian(ours)
+Fig. 10: Scene of the lag-cabinet sequence and render quality.
+Structured environments from the TUM RGB-D dataset are utilized to evaluate rendering performance in Section 4.4. For a comprehensive evaluation of our
+method in general scenarios, we test it on the f3/lag-cabinet and f3/long-office
+sequences, which are non-structured Scenes, as shown in Figure 10 and Table 7.
+As mentioned in Section 4.4, the proposed method is not as effective as
+3DGS and LightGS in the lag-cabinet sequence. This is because the far walls in
+GeoGaussian
+19
+this sequence cannot be accurately captured based on point clouds, making it
+challenging to obtain good normal vectors from the point clouds.
+B
+Model Reconstruction
+In this section, we present more quantitative results in the comparison of 3D
+Gaussian models. Based on the ground truth mesh models provided by the
+Replica dataset, we align these mesh models with point clouds from Gaussian
+models, where we randomly sample three points in each Gaussian ellipsoid.
+methods
+R0 R1 R2 OFF0 OFF1 OFF2 OFF3 OFF4 Avg.
+mean 0.026 0.025 0.042 0.017 0.019 0.039 0.032 0.032 0.029
+3DGS
+std 0.066 0.081 0.146 0.050 0.055 0.201 0.066 0.112 0.097
+GeoGaussian mean 0.018 0.014 0.015 0.020 0.029 0.013 0.018 0.014 0.018
+(ours)
+std 0.032 0.016 0.028 0.042 0.067 0.024 0.020 0.023 0.031
+Table 8: Comparison of reconstruction performance on the Replica dataset.
+As illustrated in Table 8, the proposed method achieves better performance in
+mean and standard errors compared to 3DGS. Specifically, in the R2 sequence,
+the standard error of our method is 0.028, while the corresponding value for
+3DGS is 0.146, which is 5 times worse than ours. Additionally, in OFF2, the
+mean error of 3DGS is 3 times greater than ours.
+As shown in Figure 11, the point clouds from 3D Gaussians are aligned
+with mesh models, where the green and red points represent GeoGaussian and
+3DGS, respectively. It is evident that points from our method align well with
+the model surface, indicating that our Gaussians are distributed according to the
+structure and texture of the training views. In contrast, the points from 3DGS are
+distributed more uniformly around the training perspective. This indicates that
+3DGS is more inclined to perform densification along the angle of the training
+line of sight, while our method is more focused on training a highly versatile
+model rather than overfitting to the training perspectives.
+In Figure 12, the mesh reconstruction results of 3DGS and our method are
+obtained by feeding Gaussian points into the Poisson reconstruction and texturing algorithms [46]. In low-textured regions, such as door and floor areas, the
+proposed method demonstrates robust and accurate performance in reconstructing dense models.
+C
+Performance in Wild Scenes and Limitations
+To evaluate the performance of the proposed approach in wild scenes, additional
+popular datasets [2, 21] are used to test GeoGaussian and 3DGS in this section.
+As shown in Figure 13 and 14, we compare our method with 3DGS in wild
+20
+Y. Li et al.
+(a) R0
+(b) R1
+(c) R2
+(d) OFF0
+(e) OFF1
+(f ) OFF2
+Ground truth mesh
+Red points from 3DGS
+Green points from GeoGaussian
+(g) OFF3
+(h) OFF4
+(i) Description
+Fig. 11: Reconstruction error visualization.
+SuGaR
+3DGS
+Ours
+Fig. 12: Comparison in dense mesh modelling of Replica OFF0.
+GeoGaussian
+Fig. 13: Our depth render result in Mip-NeRF360 Bicycle.
+Fig. 14: 2D and 3D results in Truck [21] and Garden scenes [2].
+21
+22
+Y. Li et al.
+scenarios, demonstrating that GeoGaussian is more robust and converges faster
+since our method requires only local smooth regions instead of large plane features. In 3DGS, 3D Gaussians are optimized via photometric residuals, resulting
+in floaters in texture-less regions. As shown in Figure 14, while the rendering
+result of 3DGS is acceptable, the 3D geometry is clearly not well reconstructed.
+This phenomenon has been witnessed in other indoor sequences (see Figure 6
+and 11).
+To solve the problem, our system introduces geometric constraints in the
+initialization, densification, and optimization modules. This design enhances the
+quality of scene geometry, leading to robust rendering performance (Figure 3).
+However, there are limitations to this approach, summarized as follows:
+– The geometric constraints degenerate if few smooth regions are detected;
+– Incorrect geometric residuals can occur when fake smooth regions are initialized as thin Gaussians, although the effect of outliers is controllable.
+D
+Initialization and Densification
+GeoGaussian-100%
+GeoGaussian-10%
+3DGS-100%
+3DGS-10%
+50
+GeoGaussian-100%
+GeoGaussian-10%
+3DGS-100%
+3DGS-10%
+50
+40
+P SN R
+P SN R
+40
+30
+30
+20
+20
+0
+1
+2
+3
+4 5 6 7
+Iterations(K)
+(a) ICL-NUIM Room 2
+10
+0
+1
+2
+3
+4 5 6 7
+Iterations(K)
+10
+(b) ICL NUIM Office 2
+Fig. 15: Rendering performance in the first 10,000 iterations.
+In Figure 15, the rendering performance of 3DGS and GeoGaussian approaches in the first 10,000 iterations is presented. Our method stops increasing
+Gaussians after 10,000 iterations, while 3DGS continues to increase Gaussians
+until 15,000 iterations. Therefore, the densification progress mainly occurs in the
+first 10,000 iterations, where Gaussians are initialized and dramatically densified
+under the supervision of photometric and geometric constraints.
+As shown in Figure 15, the PSNR performance increases rapidly in the first
+10,000 iterations for both 3DGS and GeoGaussian methods. But, our method
+is easy to train, especially in sparse view rendering tasks like ICL-NUIM Room
+2(10%) and ICL-NUIM Office 2(10%).
+GeoGaussian
+23
+References
+1. Allene, C., Pons, J.P., Keriven, R.: Seamless image-based texture atlases using
+multi-band blending. In: 2008 19th international conference on pattern recognition.
+pp. 1–4. IEEE (2008)
+2. Barron, J.T., Mildenhall, B., Verbin, D., Srinivasan, P.P., Hedman, P.: Mipnerf 360: Unbounded anti-aliased neural radiance fields. In: Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition. pp. 5470–
+5479 (2022)
+3. Barron, J.T., Mildenhall, B., Verbin, D., Srinivasan, P.P., Hedman, P.: Zip-nerf:
+Anti-aliased grid-based neural radiance fields. arXiv preprint arXiv:2304.06706
+(2023)
+4. Dai, A., Nießner, M., Zollhöfer, M., Izadi, S., Theobalt, C.: Bundlefusion: Realtime globally consistent 3d reconstruction using on-the-fly surface reintegration.
+ACM Transactions on Graphics (ToG) 36(4), 1 (2017)
+5. Debevec, P.E., Taylor, C.J., Malik, J.: Modeling and rendering architecture from
+photographs: A hybrid geometry-and image-based approach. In: Seminal Graphics
+Papers: Pushing the Boundaries, Volume 2, pp. 465–474 (2023)
+6. Deng, B., Barron, J.T., Srinivasan, P.P.: Jaxnerf: an efficient jax implementation of nerf. URL http://github. com/googleresearch/googleresearch/tree/master/jaxnerf (2020)
+7. DeTone, D., Malisiewicz, T., Rabinovich, A.: Superpoint: Self-supervised interest
+point detection and description. In: Proceedings of the IEEE conference on computer vision and pattern recognition workshops. pp. 224–236 (2018)
+8. Dong, X., Dong, J., Sun, G., Duan, Y., Qi, L., Yu, H.: Learning-based texture synthesis and automatic inpainting using support vector machines. IEEE Transactions
+on Industrial Electronics 66(6), 4777–4787 (2018)
+9. Fan, Z., Wang, K., Wen, K., Zhu, Z., Xu, D., Wang, Z.: Lightgaussian: Unbounded 3d gaussian compression with 15x reduction and 200+ fps. arXiv preprint
+arXiv:2311.17245 (2023)
+10. Feng, Y., Feng, Y., You, H., Zhao, X., Gao, Y.: Meshnet: Mesh neural network
+for 3d shape representation. In: Proceedings of the AAAI conference on artificial
+intelligence. vol. 33, pp. 8279–8286 (2019)
+11. Gao, J., Chen, W., Xiang, T., Jacobson, A., McGuire, M., Fidler, S.: Learning deformable tetrahedral meshes for 3d reconstruction. Advances In Neural Information
+Processing Systems 33, 9936–9947 (2020)
+12. Goesele, M., Snavely, N., Curless, B., Hoppe, H., Seitz, S.M.: Multi-view stereo
+for community photo collections. In: 2007 IEEE 11th International Conference on
+Computer Vision. pp. 1–8. IEEE (2007)
+13. Guédon, A., Lepetit, V.: Sugar: Surface-aligned gaussian splatting for efficient 3d mesh reconstruction and high-quality mesh rendering. arXiv preprint
+arXiv:2311.12775 (2023)
+14. Handa, A., Whelan, T., McDonald, J., Davison, A.J.: A benchmark for rgb-d visual
+odometry, 3d reconstruction and slam. In: 2014 IEEE international conference on
+Robotics and automation (ICRA). pp. 1524–1531. IEEE (2014)
+15. Izadi, S., Kim, D., Hilliges, O., Molyneaux, D., Newcombe, R., Kohli, P., Shotton,
+J., Hodges, S., Freeman, D., Davison, A., et al.: Kinectfusion: real-time 3d reconstruction and interaction using a moving depth camera. In: Proceedings of the 24th
+annual ACM symposium on User interface software and technology. pp. 559–568
+(2011)
+24
+Y. Li et al.
+16. Karnewar, A., Ritschel, T., Wang, O., Mitra, N.: Relu fields: The little non-linearity
+that could. In: ACM SIGGRAPH 2022 Conference Proceedings. pp. 1–9 (2022)
+17. Kazhdan, M., Bolitho, M., Hoppe, H.: Poisson surface reconstruction. In: Proceedings of the fourth Eurographics symposium on Geometry processing. vol. 7, p. 0
+(2006)
+18. Keetha, N., Karhade, J., Jatavallabhula, K.M., Yang, G., Scherer, S., Ramanan,
+D., Luiten, J.: Splatam: Splat, track & map 3d gaussians for dense rgb-d slam.
+arXiv preprint arXiv:2312.02126 (2023)
+19. Kerbl, B., Kopanas, G., Leimkühler, T., Drettakis, G.: 3d gaussian splatting for
+real-time radiance field rendering. ACM Transactions on Graphics 42(4) (July
+2023), https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/
+20. Kerl, C., Sturm, J., Cremers, D.: Dense visual slam for rgb-d cameras. In: 2013
+IEEE/RSJ International Conference on Intelligent Robots and Systems. pp. 2100–
+2106. IEEE (2013)
+21. Knapitsch, A., Park, J., Zhou, Q.Y., Koltun, V.: Tanks and temples: Benchmarking
+large-scale scene reconstruction. ACM Transactions on Graphics (ToG) 36(4), 1–13
+(2017)
+22. Lempitsky, V., Ivanov, D.: Seamless mosaicing of image-based texture maps. In:
+2007 IEEE conference on computer vision and pattern recognition. pp. 1–6. IEEE
+(2007)
+23. Liu, L., Gu, J., Zaw Lin, K., Chua, T.S., Theobalt, C.: Neural sparse voxel fields.
+Advances in Neural Information Processing Systems 33, 15651–15663 (2020)
+24. Lorensen, W.E., Cline, H.E.: Marching cubes: A high resolution 3d surface construction algorithm. In: Seminal graphics: pioneering efforts that shaped the field,
+pp. 347–353 (1998)
+25. Matsuki, H., Murai, R., Kelly, P.H.J., Davison, A.J.: Gaussian Splatting SLAM
+(2024)
+26. Mescheder, L., Oechsle, M., Niemeyer, M., Nowozin, S., Geiger, A.: Occupancy
+networks: Learning 3d reconstruction in function space. In: Proceedings of the
+IEEE/CVF conference on computer vision and pattern recognition. pp. 4460–4470
+(2019)
+27. Mildenhall, B., Srinivasan, P.P., Tancik, M., Barron, J.T., Ramamoorthi, R., Ng,
+R.: Nerf: Representing scenes as neural radiance fields for view synthesis. Communications of the ACM 65(1), 99–106 (2021)
+28. Muja, M., Lowe, D.G.: Fast approximate nearest neighbors with automatic algorithm configuration. VISAPP (1) 2(331-340), 2 (2009)
+29. Müller, T., Evans, A., Schied, C., Keller, A.: Instant neural graphics primitives with
+a multiresolution hash encoding. ACM Transactions on Graphics (ToG) 41(4), 1–
+15 (2022)
+30. Niemeyer, M., Mescheder, L., Oechsle, M., Geiger, A.: Differentiable volumetric
+rendering: Learning implicit 3d representations without 3d supervision. In: Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition. pp. 3504–3515 (2020)
+31. Oechsle, M., Mescheder, L., Niemeyer, M., Strauss, T., Geiger, A.: Texture
+fields: Learning texture representations in function space. In: Proceedings of the
+IEEE/CVF International Conference on Computer Vision. pp. 4531–4540 (2019)
+32. R. Yunus, Y.L., Tombari, F.: Manhattanslam: Robust planar tracking and mapping
+leveraging mixture of manhattan frames. In: 2021 IEEE international conference
+on Robotics and automation (ICRA) (2021)
+GeoGaussian
+25
+33. Rebain, D., Jiang, W., Yazdani, S., Li, K., Yi, K.M., Tagliasacchi, A.: Derf: Decomposed radiance fields. In: Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition. pp. 14153–14161 (2021)
+34. Sandström, E., Li, Y., Van Gool, L., Oswald, M.R.: Point-slam: Dense neural point
+cloud-based slam. In: Proceedings of the IEEE/CVF International Conference on
+Computer Vision (ICCV). pp. 18433–18444 (October 2023)
+35. Schönberger, J.L., Frahm, J.M.: Structure-from-motion revisited. In: Conference
+on Computer Vision and Pattern Recognition (CVPR) (2016)
+36. Seitz, S.M., Curless, B., Diebel, J., Scharstein, D., Szeliski, R.: A comparison and
+evaluation of multi-view stereo reconstruction algorithms. In: 2006 IEEE computer
+society conference on computer vision and pattern recognition (CVPR’06). vol. 1,
+pp. 519–528. IEEE (2006)
+37. Simonyan, K., Zisserman, A.: Very deep convolutional networks for large-scale
+image recognition. arXiv preprint arXiv:1409.1556 (2014)
+38. Straub, J., Whelan, T., Ma, L., Chen, Y., Wijmans, E., Green, S., Engel, J.J.,
+Mur-Artal, R., Ren, C., Verma, S., et al.: The replica dataset: A digital replica of
+indoor spaces.(2019). arXiv preprint arXiv:1906.05797 2(8), 9 (2019)
+39. Sturm, J., Engelhard, N., Endres, F., Burgard, W., Cremers, D.: A benchmark for
+the evaluation of rgb-d slam systems. In: 2012 IEEE/RSJ international conference
+on intelligent robots and systems. pp. 573–580. IEEE (2012)
+40. Waechter, M., Moehrle, N., Goesele, M.: Let there be color! large-scale texturing of
+3d reconstructions. In: Computer Vision–ECCV 2014: 13th European Conference,
+Zurich, Switzerland, September 6-12, 2014, Proceedings, Part V 13. pp. 836–850.
+Springer (2014)
+41. Wang, P., Liu, Y., Chen, Z., Liu, L., Liu, Z., Komura, T., Theobalt, C., Wang,
+W.: F2-nerf: Fast neural radiance field training with free camera trajectories. In:
+Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition. pp. 4150–4159 (2023)
+42. Wang, Y., Tan, D.J., Navab, N., Tombari, F.: Forknet: Multi-branch volumetric
+semantic completion from a single depth image. In: Proceedings of the IEEE/CVF
+international conference on computer vision. pp. 8608–8617 (2019)
+43. Westoby, M.J., Brasington, J., Glasser, N.F., Hambrey, M.J., Reynolds, J.M.:
+Structure-from-motion photogrammetry: A low-cost, effective tool for geoscience
+applications. Geomorphology 179, 300–314 (2012)
+44. Xu, Q., Wang, W., Ceylan, D., Mech, R., Neumann, U.: Disn: Deep implicit surface network for high-quality single-view 3d reconstruction. Advances in neural
+information processing systems 32 (2019)
+45. Yang, X., Li, H., Zhai, H., Ming, Y., Liu, Y., Zhang, G.: Vox-fusion: Dense tracking
+and mapping with voxel-based neural implicit representation. In: 2022 IEEE International Symposium on Mixed and Augmented Reality (ISMAR). pp. 499–507.
+IEEE Computer Society, Los Alamitos, CA, USA (oct 2022)
+46. Ye, C., Nie, Y., Chang, J., Chen, Y., Zhi, Y., Han, X.: Gaustudio: A modular
+framework for 3d gaussian splatting and beyond. arXiv preprint arXiv:2403.19632
+(2024)
+47. Yugay, V., Li, Y., Gevers, T., Oswald, M.R.: Gaussian-slam: Photo-realistic dense
+slam with gaussian splatting. arXiv preprint arXiv:2312.10070 (2023)

@@ -1,0 +1,374 @@
+--- v002.md
++++ v003.md
+@@ -4,153 +4,239 @@
+ 
+ ## Overview
+-Direct Volume Rendering (DVR) visualizes 3D scalar data by treating the volume as a translucent gel or gas, simulating light transmission through the medium without extracting intermediate geometric surfaces [S1, S2, S9, unofficial]. Unlike [Indirect Volume Rendering](3314-indirect-volume-rendering.md), which converts data into polygonal meshes, DVR processes the entire dataset directly, preserving all information and allowing weak or ill-defined structures to remain visible [S4, S9, unofficial]. It differs from [Back-face rasterized volume rendering](1296-back-face-rasterized-volume-rendering.md) by using ray casting rather than rasterization primitives, and from [Neural volume rendering](1576-neural-volume-rendering-techniques.md) by relying on explicit optical models rather than learned latent representations.
++Direct Volume Rendering (DVR) is a technique that visualizes 3D scalar data by treating the volume as a transparent gel, simulating light transmission through the medium without extracting intermediate geometric surfaces [S1, S2, S9, unofficial]. Unlike indirect methods that require explicit surface extraction (e.g., marching cubes) [S6, S9, unofficial], DVR maps scalar values directly to optical properties (color and opacity) via a transfer function and integrates these properties along viewing rays using the emission-absorption optical model [S2, unofficial][S5, S13]. It is distinguished from [Pre-integrated Volume Rendering](5327-pre-integrated-volume-rendering.md) by performing classification and compositing per-sample rather than pre-computing integrals between grid points, and from [Indirect Volume Rendering](3314-indirect-volume-rendering.md) by avoiding polygonal mesh generation entirely [S9, unofficial].
+ 
+ ## How it works
+-The method implements the emission-absorption optical model, computing the light intensity reaching the eye by integrating absorption and self-emission along a ray through the scalar volume [S5][S7, unofficial].
+-
+-**Inputs and Outputs:**
+-*   **Input:** A 3D scalar volume $V$ defined on a rectilinear grid, a camera configuration (origin $O$, direction $D$), a transfer function $T$ mapping scalar values to color and opacity, and volume bounds.
+-*   **Output:** A 2D image where each pixel contains the accumulated color $C$ and opacity $\alpha$.
+-
+-**Data Structures:**
+-*   **Volume Data:** A 3D array of scalar values $V_{i,j,k}$ representing density at grid vertices [S3, unofficial][S5].
+-*   **Transfer Function:** A mapping $T: [\min, \max] \rightarrow [0,1]^4$ (RGB$\alpha$), typically discretized into regularly spaced bins with linear interpolation [S2, unofficial][S5].
+-*   **Ray:** Parameterized as $r(t) = O + tD$, where $t$ is the distance along the ray [S3, unofficial].
+-
+-**Steps:**
+-
+-1.  **Ray Casting:** For each pixel, cast a ray from the camera origin through the pixel center into the volume [S3, S9, unofficial].
+-2.  **Ray Initialization:** Determine the entry point $t_{start}$ and exit point $t_{end}$ of the ray within the volume bounds [Volume Raycasting Discretization](831-volume-raycasting-discretization.md). Apply a fixed random offset $t_o \sim U(0, \Delta t)$ to the start position to prevent banding artifacts caused by regular sampling [S7, S18, unofficial].
+-3.  **Sampling:** Discretize the ray segment $[t_{start}, t_{end}]$ into $N$ equidistant samples with step size $\Delta t$. The position of sample $i$ is $x_i = O + (t_{start} + i\Delta t + t_o)D$ [S7, unofficial][S13].
+-4.  **Interpolation:** For each sample position $x_i$, retrieve the scalar density value $d_i$ from the volume data using trilinear interpolation [S2, unofficial][S5, S13].
+-    $$ d_i = \text{TrilinearInterpolate}(V, x_i) $$
+-5.  **Classification (Transfer Function):** Map the scalar density $d_i$ to an emitted color $C_i$ and opacity $\alpha_i$ using the transfer function [S2, S9, unofficial].
+-    $$ C_i, \alpha_i = T(d_i) $$
+-    The opacity is often derived from the absorption coefficient $\kappa$ using the Beer-Lambert model: $\alpha_i = 1 - \exp(-\Delta t \cdot \kappa(d_i))$ [S2, unofficial][S5].
+-6.  **Shading (Optional but common):** Estimate the gradient $\nabla f$ at $x_i$ using central differences to compute surface normals for illumination [S9, S18, unofficial].
+-    $$ \nabla f(x_i, y_j, z_k) \approx \frac{1}{2} \begin{bmatrix} f(x_{i+1}, y_j, z_k) - f(x_{i-1}, y_j, z_k) \\ f(x_i, y_{j+1}, z_k) - f(x_i, y_{j-1}, z_k) \\ f(x_i, y_j, z_{k+1}) - f(x_i, y_j, z_{k-1}) \end{bmatrix} $$
+-    To avoid normal discontinuities, a two-voxel offset is sometimes used instead of one [S18, unofficial]. The gradient is used to modulate the color $C_i$ via a shading model (e.g., Phong) [S4, S9, unofficial].
+-7.  **Compositing:** Accumulate the color and opacity from front to back using alpha blending [S2, S3, S9, unofficial]. Let $C'_{i-1}$ and $\alpha'_{i-1}$ be the accumulated color and opacity after sample $i-1$. Initialize $C'_0 = 0, \alpha'_0 = 0$.
+-    $$ C'_i = C'_{i-1} + (1 - \alpha'_{i-1}) \alpha_i C_i $$
+-    $$ \alpha'_i = \alpha'_{i-1} + (1 - \alpha'_{i-1}) \alpha_i $$
+-8.  **Early Ray Termination:** If $\alpha'_i \ge 1$ or a threshold (typically 0.99), terminate the ray early to save computation [S2, S3, S4, S18, unofficial].
+-9.  **Gamma Correction:** Apply gamma correction (typically $\gamma = 2.2$) to the final accumulated color [S9, unofficial].
+-    $$ C_{final} = (C'_N)^{1/2.2} $$
+-
+-**Pseudocode:**
+-
++The method implements the emission-absorption optical model, computing the light intensity reaching the eye by integrating radiative energy along a ray through the scalar volume [S1, unofficial][S5][S9, unofficial]. The process follows a strict pipeline for each pixel: ray generation, sampling, classification (transfer function application), shading, and compositing [S4, S34, unofficial].
++
++### Inputs and Outputs
++*   **Input:** A 3D scalar volume $V$ defined on a rectilinear grid with dimensions $W \times H \times D$, where each voxel stores a density value $d \in \mathbb{R}$. A camera definition (origin $\mathbf{o}$, direction $\mathbf{d}$, field of view) and a Transfer Function (TF) $T$.
++*   **Output:** A 2D image with color $C_{final}$ and accumulated opacity $\alpha_{final}$ for each pixel.
++
++### Data Structures
++1.  **Volume Grid:** A 3D array of scalar values. Access is typically accelerated by storing data in 3D textures on GPU hardware [S11][S12, unofficial].
++2.  **Transfer Function (TF):** A mapping $T: \mathbb{R} \rightarrow \mathbb{R}^4$ (RGBA). In practice, this is discretized into $R$ regularly spaced control points with linear interpolation, often implemented as a 1D texture map on the GPU for hardware-supported interpolation [S2, unofficial][S5].
++3.  **Ray Parameters:** For each pixel, the entry $t_{start}$ and exit $t_{end}$ parameters of the ray intersection with the volume's Axis-Aligned Bounding Box (AABB) [S1, S7, S15, S22, S33, S55, unofficial].
++
++### Numbered Steps
++
++1.  **Ray Generation:** For each pixel, define a ray $r(t) = \mathbf{o} + t\mathbf{d}$, where $\mathbf{o}$ is the camera origin and $\mathbf{d}$ is the normalized direction vector [S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39, S40, S41, S42, S43, S44, S45, S46, S47, S48, S49, S50, S51, S52, S53, S54, S55, S56, S57, S58, S59, S60, S61, S62, S63, S64, S65, S66, S67, S68, S69, S70, S71, S72, S73, S74, S75, S76, S77, S78, S79, S80, S81, S82, S83, S84, S85, S86, S87, S88, S89, S90, S91, S92, S93, S94, S95, S96, S97, S98, S99, S100]. Intersect this ray with the volume domain to find $t_{start}$ and $t_{end}$ [S1, S7, S15, S22, S33, S55, unofficial].
++
++2.  **Discretization:** Discretize the segment $[t_{start}, t_{end}]$ into $N$ samples at equidistant intervals $\Delta t$ [S4, S8, S9, S16, S33, S40, unofficial]. The step size is typically chosen relative to the voxel size $d_v$ as $\Delta t = d_v / s$, where $s$ is the sampling rate [S7, unofficial][S13]. A common heuristic is to ensure at least one sample per voxel along the fastest axis to minimize aliasing [S36, unofficial][S46, abstract only, unofficial].
++
++3.  **Sampling and Interpolation:** For each sample index $i \in [0, N-1]$, compute the position $\mathbf{p}_i = r(t_{start} + i \Delta t)$ [S3, S7, unofficial]. Reconstruct the scalar value $d_i = V(\mathbf{p}_i)$ from the discrete voxel grid using trilinear interpolation, which combines the eight surrounding voxels [S6, S7, S33, S40, unofficial]. Nearest-neighbor interpolation may be used for performance or specific artifact styles [S43, unofficial][S44, book].
++
++4.  **Classification (Transfer Function):** Map the scalar value $d_i$ to optical properties: color $C_i$ and opacity $\alpha_i$ using the transfer function $T(d_i)$ [S2, S5, S11, S12, S25, S29, S31, S34, unofficial].
++    *   **Opacity:** The opacity $\alpha_i$ is often derived from the absorption coefficient $\kappa(d_i)$ using the Beer-Lambert model: $\alpha_i = 1 - \exp(-\Delta t \cdot \kappa(d_i))$ [S2, unofficial][S5][S7, unofficial].
++    *   **Color:** The color $C_i$ represents the emitted light, often scaled by the step size: $C_i = c(d_i) \Delta t$, where $c(d_i)$ is the emission component [S7, unofficial].
++    *   *Note:* Classification can be pre-classification (mapping to RGBA before interpolation) or post-classification (interpolating scalars first, then mapping) [S4, unofficial][S44, book]. Post-classification is standard in GPU-based DVR to leverage texture filtering [S5].
++
++5.  **Shading:** Enhance depth perception by computing surface normals from the volume gradient $\nabla V$ [S14, S15, S30, unofficial][S54]. The gradient is estimated using central differences on the interpolated scalar field or directly from the grid:
++    $$
++    \nabla f(x_i, y_j, z_k) \approx \frac{1}{2} \begin{bmatrix} f(x_{i+1}, y_j, z_k) - f(x_{i-1}, y_j, z_k) \\ f(x_i, y_{j+1}, z_k) - f(x_i, y_{j-1}, z_k) \\ f(x_i, y_j, z_{k+1}) - f(x_i, y_j, z_{k-1}) \end{bmatrix}
++    $$
++    [S9, unofficial]. Lighting models (e.g., Phong or Blinn-Phong) use these normals to calculate diffuse and specular highlights [S14, S15, S30, unofficial][S54]. The shaded color replaces or modulates $C_i$.
++
++6.  **Compositing (Front-to-Back Integration):** Integrate contributions from all samples along the ray from front to back ($t_{start}$ to $t_{end}$) [S1, S12, S16, S23, S24, S43, S50, S51, unofficial]. Initialize accumulated color $C' = 0$ and accumulated opacity $\alpha' = 0$ [S12, S43, S50, unofficial]. For each sample $i$:
++    $$
++    C'_{i} = C'_{i-1} + (1 - \alpha'_{i-1}) \alpha_i C_i
++    $$
++    $$
++    \alpha'_{i} = \alpha'_{i-1} + (1 - \alpha'_{i-1}) \alpha_i
++    $$
++    [S12, S43, S50, unofficial]. The term $(1 - \alpha'_{i-1})$ is the transmittance [S1, S51, unofficial]. If $\alpha'$ reaches 1 (or a threshold close to it), terminate the ray early (Early Ray Termination) [S9, S12, S27, unofficial].
++
++### Pseudocode
+ ```python
+-import random
+-import math
+-
+-def vec3(x, y, z):
+-    return [x, y, z]
+-
+-def pow_vec3(v, exponent):
+-    return [v[0]**exponent, v[1]**exponent, v[2]**exponent]
+-
+-def compute_ray_exit(origin, direction, bounds):
+-    # Slab intersection for axis-aligned box [G]
+-    t0 = max((bounds[0][i] - origin[i]) / direction[i] if direction[i] != 0 else float('inf') for i in range(3))
+-    t1 = min((bounds[1][i] - origin[i]) / direction[i] if direction[i] != 0 else float('inf') for i in range(3))
+-    return max(t0, t1)
+-
+-def trilinear_interpolate(volume, pos, dims):
+-    # Standard trilinear interpolation [G]
+-    vx = pos[0] * (dims[0] - 1)
+-    vy = pos[1] * (dims[1] - 1)
+-    vz = pos[2] * (dims[2] - 1)
+-    x0, y0, z0 = int(math.floor(vx)), int(math.floor(vy)), int(math.floor(vz))
+-    x1, y1, z1 = x0 + 1, y0 + 1, z0 + 1
+-    x0 = max(0, min(x0, dims[0]-1))
+-    x1 = max(0, min(x1, dims[0]-1))
+-    y0 = max(0, min(y0, dims[1]-1))
+-    y1 = max(0, min(y1, dims[1]-1))
+-    z0 = max(0, min(z0, dims[2]-1))
+-    z1 = max(0, min(z1, dims[2]-1))
+-    wx = vx - x0
+-    wy = vy - y0
+-    wz = vz - z0
+-    c00 = volume[x0][y0][z0] * (1-wx) + volume[x1][y0][z0] * wx
+-    c01 = volume[x0][y0][z1] * (1-wx) + volume[x1][y0][z1] * wx
+-    c10 = volume[x0][y1][z0] * (1-wx) + volume[x1][y1][z0] * wx
+-    c11 = volume[x0][y1][z1] * (1-wx) + volume[x1][y1][z1] * wx
+-    r0 = c00 * (1-wy) + c10 * wy
+-    r1 = c01 * (1-wy) + c11 * wy
+-    return r0 * (1-wz) + r1 * wz
+-
+-def direct_volume_raycast(volume_data, camera, transfer_function, volume_bounds, volume_dims, step_size=0.001, threshold=0.99):
+-    """
+-    Renders a volume using fixed-step raycasting with front-to-back compositing.
+-    """
+-    h, w = camera.screen_height, camera.screen_width
+-    image = [[vec3(0.0, 0.0, 0.0) for _ in range(w)] for _ in range(h)]
+-    
+-    for y in range(h):
+-        for x in range(w):
+-            ray_origin, ray_direction = camera.cast_ray(x, y)
+-            accumulated_color = vec3(0.0, 0.0, 0.0)
+-            accumulated_opacity = 0.0
+-            
+-            # Ray initialization: fixed random offset to prevent banding [S18, unofficial]
+-            t = random.uniform(0.0, step_size)
+-            
+-            # Compute ray exit distance from volume bounds [G]
+-            t_end = compute_ray_exit(ray_origin, ray_direction, volume_bounds)
+-            
+-            while accumulated_opacity < threshold and t < t_end:
+-                # Compute current position in texture space [0,1]
+-                pos = [(ray_origin[i] + t * ray_direction[i]) for i in range(3)]
+-                # Sample volume at current position using trilinear interpolation [S1, unofficial][S5]
+-                scalar_value = trilinear_interpolate(volume_data, pos, volume_dims)
+-                
+-                # Apply transfer function to get color and opacity [S2, unofficial][S5]
+-                color, opacity = transfer_function(scalar_value)
+-                
+-                # Front-to-back compositing [S2, unofficial][S5]
+-                accumulated_color[0] += (1.0 - accumulated_opacity) * opacity * color[0]
+-                accumulated_color[1] += (1.0 - accumulated_opacity) * opacity * color[1]
+-                accumulated_color[2] += (1.0 - accumulated_opacity) * opacity * color[2]
+-                accumulated_opacity += (1.0 - accumulated_opacity) * opacity
+-                
+-                t += step_size
+-                
+-            # Gamma correction [S9, unofficial]
+-            image[y][x] = pow_vec3(accumulated_color, 1.0/2.2)
++def direct_volume_rendering(volume, camera, transfer_function, step_size):
++    """
++    Renders a 3D scalar volume using direct volume ray casting.
++    
++    Args:
++        volume: 3D array of scalar values (density).
++        camera: Object containing origin (o) and direction vectors for each pixel.
++        transfer_function: Function mapping scalar density to (color, opacity).
++        step_size: Distance between samples along the ray.
++        
++    Returns:
++        image: 2D array of final colors.
++    """
++    height, width = camera.image_shape
++    image = np.zeros((height, width, 3))
++    
++    # Pre-calculate ray origins and directions for all pixels
++    ray_origins, ray_directions = camera.get_rays()
++    
++    for y in range(height):
++        for x in range(width):
++            o = ray_origins[y, x]
++            d = ray_directions[y, x]
++            
++            # 1. Ray-Volume Intersection
++            t_start, t_end = intersect_aabb(o, d, volume.bounding_box)
++            if t_start > t_end:
++                continue # Ray misses volume
++                
++            # Initialize compositing variables
++            acc_color = np.array([0.0, 0.0, 0.0])
++            acc_opacity = 0.0
++            
++            # 2. Discretization and Marching
++            # Number of samples needed
++            num_samples = int((t_end - t_start) / step_size)
++            
++            for i in range(num_samples):
++                t = t_start + i * step_size
++                p = o + t * d # Current sample position
++                
++                # 3. Sampling and Interpolation
++                # Clamp p to volume bounds to handle boundary conditions
++                p_clamped = clamp_to_volume_bounds(p, volume.dimensions)
++                density = trilinear_interpolate(volume, p_clamped)
++                
++                # 4. Classification
++                color, opacity = transfer_function.evaluate(density)
++                
++                # 5. Shading (Gradient Estimation)
++                # Estimate gradient at p for normal calculation
++                gradient = estimate_gradient(volume, p_clamped)
++                normal = normalize(gradient)
++                # Apply lighting model (simplified Phong)
++                light_color = compute_phong_shading(normal, camera.light_direction, color)
++                
++                # 6. Compositing (Front-to-Back)
++                # Transmittance is the amount of light reaching this sample
++                transmittance = 1.0 - acc_opacity
++                
++                # Contribution of current sample
++                contribution = transmittance * opacity * light_color
++                
++                acc_color += contribution
++                acc_opacity += transmittance * opacity
++                
++                # Early Ray Termination
++                if acc_opacity >= 0.99:
++                    break
++            
++            # Store final color
++            image[y, x] = acc_color
+             
+     return image
++
++def intersect_aabb(origin, direction, bbox):
++    """
++    Computes intersection of a ray with an Axis-Aligned Bounding Box.
++    Returns (t_start, t_end) or None if no intersection.
++    """
++    t_min = -np.inf
++    t_max = np.inf
++    
++    for axis in range(3):
++        if direction[axis] == 0:
++            if origin[axis] < bbox.min[axis] or origin[axis] > bbox.max[axis]:
++                return None # Parallel and outside
++        else:
++            t1 = (bbox.min[axis] - origin[axis]) / direction[axis]
++            t2 = (bbox.max[axis] - origin[axis]) / direction[axis]
++            t_min = max(t_min, min(t1, t2))
++            t_max = min(t_max, max(t1, t2))
++            
++    if t_min > t_max:
++        return None
++        
++    return (t_min, t_max)
++
++def trilinear_interpolate(volume, point):
++    """
++    Performs trilinear interpolation on a 3D volume grid.
++    """
++    # Convert point to grid coordinates
++    x, y, z = point_to_grid_coords(point, volume.dimensions, volume.spacing)
++    
++    # Get integer coordinates
++    ix, iy, iz = int(x), int(y), int(z)
++    
++    # Get fractional parts
++    fx, fy, fz = x - ix, y - iy, z - iz
++    
++    # Clamp indices to valid range
++    ix = clamp(ix, 0, volume.width - 2)
++    iy = clamp(iy, 0, volume.height - 2)
++    iz = clamp(iz, 0, volume.depth - 2)
++    
++    # Fetch 8 surrounding voxels
++    v000 = volume[ix, iy, iz]
++    v100 = volume[ix+1, iy, iz]
++    v010 = volume[ix, iy+1, iz]
++    v110 = volume[ix+1, iy+1, iz]
++    v001 = volume[ix, iy, iz+1]
++    v101 = volume[ix+1, iy, iz+1]
++    v011 = volume[ix, iy+1, iz+1]
++    v111 = volume[ix+1, iy+1, iz+1]
++    
++    # Interpolate along x
++    c00 = lerp(v000, v100, fx)
++    c10 = lerp(v010, v110, fx)
++    c01 = lerp(v001, v101, fx)
++    c11 = lerp(v011, v111, fx)
++    
++    # Interpolate along y
++    c0 = lerp(c00, c10, fy)
++    c1 = lerp(c01, c11, fy)
++    
++    # Interpolate along z
++    return lerp(c0, c1, fz)
++
++def lerp(a, b, t):
++    return a + t * (b - a)
++
++def clamp(val, min_val, max_val):
++    return max(min_val, min(val, max_val))
++
++def estimate_gradient(volume, point):
++    """
++    Estimates gradient using central differences.
++    """
++    # Convert to grid coords
++    x, y, z = point_to_grid_coords(point, volume.dimensions, volume.spacing)
++    
++    # Neighbors
++    # Note: In a real implementation, boundary checks are required
++    dx = (volume.get_value(x+1, y, z) - volume.get_value(x-1, y, z)) / 2
++    dy = (volume.get_value(x, y+1, z) - volume.get_value(x, y-1, z)) / 2
++    dz = (volume.get_value(x, y, z+1) - volume.get_value(x, y, z-1)) / 2
++    
++    return np.array([dx, dy, dz])
+ ```
+ 
+-**Parameters:**
+-*   **Step Size ($\Delta t$):** Typically chosen relative to voxel size $d_v$ as $\Delta t = d_v / s$, where $s$ is the sampling rate [S7, unofficial][S13].
+-*   **Threshold:** Early termination threshold, typically 0.99 [S2, S18, unofficial].
+-*   **Jitter Magnitude:** Usually equal to $\Delta t$ [S7, unofficial].
+-
+-**Edge Cases and Pitfalls:**
+-*   **Aliasing:** Fixed sampling rates cause aliasing artifacts. Mitigated by ray jittering [S7, unofficial].
+-*   **Band Artifacts:** Regular sampling can cause visible bands. Mitigated by random offset [S18, unofficial].
+-*   **Normal Discontinuities:** One-voxel central differences can cause rings on smooth surfaces. Use two-voxel offsets [S18, unofficial].
+-*   **Undersampling:** If the transfer function and data are undersampled, artifacts appear [S12, unofficial].
+-*   **Information Loss:** Traditional grid-based resampling loses information due to approximation of ideal reconstruction filters. Direct methods from projections (D2VR) avoid this [S8].
++### Parameters and Typical Values
++*   **Step Size ($\Delta t$):** Typically $\Delta t = d_v / s$, where $d_v$ is the voxel size and $s$ is the sampling rate. A sampling rate $s \ge 1$ is common [S7, unofficial][S13].
++*   **Transfer Function Control Points ($R$):** The number of bins in the TF discretization. Common values range from 256 to 1024 [S2, unofficial][S5].
++*   **Early Ray Termination Threshold:** Often set to 0.99 or 1.0 [S9, S12, S27, unofficial].
++
++### Edge Cases and Pitfalls
++*   **Aliasing:** Fixed sampling rates can cause aliasing artifacts. Mitigated by ray jittering: applying a random offset $t_o \sim U(0, t_{j,max})$ to the ray direction, where $t_{j,max} = \Delta t$ [S7, unofficial][S8].
++*   **Reconstruction Filter Loss:** Traditional grid-based resampling suffers from information loss because practical reconstruction filters approximate the ideal sinc kernel (infinite support) and real-world signals are not band-limited, resulting in aliasing or smoothing [S8].
++*   **Undersampling:** Artifacts occur when the convolution of the transfer function and underlying data set is undersampled [S12, unofficial].
++*   **Unstructured Data:** GPU DVR algorithms for unstructured data are nontrivial compared to rectilinear grids [S12, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Indirect Volume Rendering](3314-indirect-volume-rendering.md)
+-Converts volume to intermediate geometry (isosurfaces) for rasterization. Choose when hardware rasterization performance is critical and explicit surfaces are desired.
++Converts volume data into an intermediate representation (isosurface/mesh) for rasterization. Choose when standard hardware rasterization pipelines are preferred or when explicit surface geometry is required.
+ 
+ ### [Volumetric Normal Mapping](6594-volumetric-normal-mapping.md)
+-Perturbs gradients with a 3D normal texture to add high-frequency detail without mesh extraction. Choose when visualizing multiple attributes or adding surface detail to smooth volumes.
++Perturbs surface normals using 3D normal glyphs to add high-frequency detail without mesh extraction. Choose when visualizing multiple attributes with differing resolutions or enhancing surface detail in DVR.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Proportional to the number of pixels $W \times H$ and the number of samples $N$ per ray ($O(W \cdot H \cdot N)$) [S5].
+-*   **Memory Complexity:** $O(V)$ for the volume data, plus $O(W \cdot H)$ for the image buffer [S5].
+-*   **Performance:** Software implementations are slow; hardware acceleration using 3D texture mapping on GPUs is standard for rectilinear grids [S11].
+-*   **Strengths:** Preserves all data information; no preprocessing required; handles transparency and internal structures naturally; allows relaxed classification constraints [S4, S9, unofficial].
+-*   **Limitations:** Computationally expensive for high-resolution data; sensitive to transfer function quality; aliasing if not jittered; non-trivial for unstructured data [S12, unofficial].
+-*   **When to Use:** When transparency, internal structures, and data fidelity are important, and sufficient compute resources (GPU) are available.
+-*   **When Not to Use:** When explicit surface meshes are required (use [Indirect Volume Rendering](3314-indirect-volume-rendering.md)) or when real-time performance on low-end hardware is critical without acceleration techniques.
++*   **Time Complexity:** Proportional to the number of pixels $W \times H$ and the number of samples $N$ per ray ($O(W \cdot H \cdot N)$) [S5]. The number of operations $k$ is proportional to the overall number of samples [S5].
++*   **Memory Complexity:** Dominated by the storage of the volume data $O(W \cdot H \cdot D)$ and the transfer function $O(R)$ [S5]. Intermediate results for optimization (e.g., Wengert list) can be large, storing RGB$\alpha$ images of size $W \times H \times 4$ [S5].
++*   **Performance:** Hardware-accelerated DVR using 3D graphics hardware (GPU texture mapping) is significantly faster than software implementations [S11]. Performance scales with resolution and volume size.
++*   **Strengths:** Preserves all information in the original dataset; eliminates extensive preprocessing steps required by surface-based models; allows weak or ill-defined surfaces to appear; relaxed classification constraints [S4, S12, unofficial].
++*   **Limitations:** Computationally expensive for high-resolution volumes; sensitive to transfer function choice; aliasing artifacts if sampling is insufficient [S7, unofficial][S8][S12, unofficial].
++*   **When to Use:** When the internal structure of the volume is important and transparency/translucency is desired.
++*   **When Not to Use:** When explicit surface geometry is needed for further processing (use Indirect VR) or when real-time performance on very large volumes is critical without acceleration techniques (use [Tiled Ray Marching](2586-tiled-ray-marching-with-grid-sampling.md) or [Pre-integrated VR](5327-pre-integrated-volume-rendering.md)).
+ 
+ ## Background
+-Direct Volume Rendering was coined by Mark Levoy [S4, unofficial]. It emerged as an alternative to surface-based rendering (like Marching Cubes) to avoid the loss of information associated with binary classification and surface extraction [S4, S9, unofficial]. The technique is widely used in medical imaging and scientific visualization to visualize complex internal structures [S1, S9, unofficial]. It relies on the volume rendering integral, discretized into a summation over sample points along a ray [S3, unofficial][S5].
++Direct Volume Rendering was coined by Mark Levoy [S4, unofficial]. His algorithm, developed at PIXAR, is based on directly shading each data sample and projecting it onto the image plane, avoiding explicit surface detection [S4, unofficial]. The technique uses an emission-absorption optical model to map data values to optical properties and accumulates these properties along viewing rays [S13]. It is widely used in medical imaging and scientific visualization for its ability to visualize the entire dataset without loss of information [S9, unofficial][S11].
+ 
+ ## Sources

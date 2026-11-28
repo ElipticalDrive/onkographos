@@ -1,0 +1,210 @@
+--- v001.md
++++ v002.md
+@@ -1,4 +1,3 @@
+ # Neural Radiance Field Codebooks (NRC)
+-
+ ## Overview
+ Neural Radiance Field Codebooks (NRC) is a scalable method for learning object-centric representations through novel view reconstruction, enabling the discovery of reoccurring visual and geometric patterns across scenes [S1, unofficial]. It differs from standard NeRF by mapping continuous spatial features to a discrete, finite codebook of object categories, which allows for constant rendering compute regardless of object count and supports an unbounded number of objects per scene [S1, unofficial].
+@@ -6,14 +5,14 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Input image $I_h \in \mathbb{R}^{3 \times H \times W}$, novel view image $I'_h \in \mathbb{R}^{3 \times H \times W}$, relative camera pose between input and novel view.
+-*   **Outputs:** Rendered novel view image, object codes $L$, encoder parameters $\theta$, variation module parameters.
++*   **Inputs:** Input image $I_h \in \mathbb{R}^{3 \times H \times W}$, novel view image $I'_h \in \mathbb{R}^{3 \times H \times W}$, relative camera pose between input and novel view [S1, unofficial].
++*   **Outputs:** Rendered novel view image, object codes $L$, encoder parameters $\theta$, variation module parameters [S1, unofficial].
+ 
+ **Data Structures:**
+-*   **Codebook $L$:** A set of $k$ categorical object codes $l_i \in \mathbb{R}^d$. The size $k$ is dynamic.
+-*   **Spatial Feature Map $f_h$:** Output of encoder $F_\theta$, shape $\mathbb{R}^{d \times H/k \times W/k}$.
+-*   **Variation Module:** A convolutional network (or MLP as per Figure 2 caption context, though text says convolutional) that transforms categorical codes to fine-grained instance codes.
++*   **Codebook $L$:** A set of $k$ categorical object codes $l_i \in \mathbb{R}^d$ [S1, unofficial].
++*   **Spatial Feature Map $f_h$:** Output of encoder $F_\theta$, shape $\mathbb{R}^{d \times H/k \times W/k}$ [S1, unofficial].
++*   **Variation Module:** A convolutional network that transforms categorical codes and feature vectors into fine-grained instance codes [S1, unofficial].
+ 
+ **Parameters:**
+-*   $k$: Codebook size (number of codes). Depends on scene complexity; dynamically added [S1, unofficial].
++*   $k$: Codebook size (number of codes). Depends on scene complexity and is dynamically added [S1, unofficial].
+ *   $\lambda$: Scaling hyperparameter for adding new codes [S1, unofficial].
+ *   $\theta$: Encoder parameters [S1, unofficial].
+@@ -34,13 +33,13 @@
+ *   **Inference Assignment (STE):**
+     $$l^*(x, y) \leftarrow \arg \max_{l_i; i \in [k]} \frac{e^{-\|l_i - f_{h_{x,y}}\|^2}}{\sum_{j=1}^k e^{-\|l_j - f_{h_{x,y}}\|^2}} \quad \text{(STE)} \quad [S1, \text{unofficial}, unofficial]$$
+-    *Note: The text labels this as arg max but provides a softmax-like numerator/denominator structure in Eq 1, applying STE.*
++    The source labels this as arg max but provides a softmax-like numerator/denominator structure in Eq 1, applying STE [S1, unofficial].
+ 
+ *   **Backward Pass Assignment (Softmax Relaxation):**
+     $$l_{back}(x, y) \leftarrow \frac{e^{-\|l_i - f_{h_{x,y}}\|^2}}{\sum_{j=1}^k e^{-\|l_j - f_{h_{x,y}}\|^2}} \quad [S1, \text{unofficial}, unofficial]$$
+-    *Note: The text uses $l_i$ in the numerator but implies the specific assigned code's contribution or the full softmax distribution for gradient flow.*
++    The source uses $l_i$ in the numerator but implies the specific assigned code's contribution or the full softmax distribution for gradient flow [S1, unofficial].
+ 
+ *   **Dynamic Code Addition:**
+     $$l_i \leftarrow T\left(\sigma(s - i / \lambda)\right) \cdot l_i; \quad T(a, t) := \begin{cases} 1, & a > t \\ 0, & a \le t \end{cases} \quad [S1, \text{unofficial}, unofficial]$$
+-    *Where $T$ is a binarization function in the forward pass and lets gradients pass through using STE in the back pass. $\sigma(\cdot)$ is the sigmoid function, $\lambda$ is a scaling hyperparameter.*
++    Where $T$ is a binarization function in the forward pass and lets gradients pass through using STE in the back pass. $\sigma(\cdot)$ is the sigmoid function, $\lambda$ is a scaling hyperparameter [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -50,6 +49,38 @@
+ import torch.nn.functional as F
+ 
++class STEAssign(torch.autograd.Function):
++    @staticmethod
++    def forward(ctx, features, codes):
++        dists = torch.cdist(features, codes)  # (N, k)
++        probs = torch.softmax(-dists, dim=1) # Softmax relaxation for backward
++        indices = torch.argmax(probs, dim=1) # Argmax for forward
++        selected = codes[indices]            # Straight-through: forward uses hard assignment
++        ctx.save_for_backward(probs)
++        return selected, indices
++
++    @staticmethod
++    def backward(ctx, grad_selected, grad_indices):
++        probs, = ctx.saved_tensors
++        # Gradients flow through the softmax relaxation
++        return probs @ grad_selected, None
++
++def project_to_camera(world_pts, cam_pose):
++    """Projects world coordinates (N,3) to camera 2D coordinates (N,2) using relative pose."""
++    ones = torch.ones(world_pts.size(0), 1, device=world_pts.device)
++    homo_pts = torch.cat([world_pts, ones], dim=1)  # (N, 4)
++    cam_pts = (cam_pose @ homo_pts.T).T              # (N, 4)
++    return cam_pts[:, :2] / cam_pts[:, 3:4]          # (N, 2) normalized coordinates
++
++def sample_features(feature_map, cam_coords):
++    """Samples features from spatial map at normalized camera coordinates (N,2)."""
++    # Normalize to [-1, 1] for grid_sample
++    norm_coords = 2.0 * cam_coords - 1.0
++    norm_coords = norm_coords.unsqueeze(1).unsqueeze(1)  # (N, 1, 1, 2)
++    # feature_map: (B, d, H/k, W/k)
++    sampled = F.grid_sample(feature_map, norm_coords, align_corners=True)
++    return sampled.squeeze(-1).squeeze(-1).permute(0, 2, 1)  # (B, N, d)
++
+ class NRC:
+-    def __init__(self, encoder, variation_module, renderer, codebook_size=10, lambda_param=1.0):
++    def __init__(self, encoder, variation_module, renderer, codebook_size=10, lambda_param=1.0, d=64):
+         self.encoder = encoder
+         self.variation_module = variation_module
+@@ -57,88 +88,50 @@
+         self.codebook_size = codebook_size
+         self.lambda_param = lambda_param
+-        
+-        # Initialize codebook
+-        self.codes = nn.Parameter(torch.randn(codebook_size, 64)) # d=64 assumed
+-        
++        self.d = d
++        self.codes = nn.Parameter(torch.randn(codebook_size, d))
++        self.step_counter = 0
++
+     def encode(self, image):
+-        # F_theta: Convolutional network
+         return self.encoder(image)
+-        
+-    def project_and_select(self, feature_map, novel_view_points, camera_pose):
+-        # novel_view_points: (N, 3) world coordinates
+-        # camera_pose: relative pose matrix
+-        # Returns: (N, d) features from input frame
+-        cam_coords = transform_to_camera(novel_view_points, camera_pose)
+-        # Select feature from patch containing (x,y)
+-        # Assuming feature_map is (B, d, H/k, W/k)
+-        features = sample_features(feature_map, cam_coords)
+-        return features
+-        
+-    def assign_codes_inference(self, features, codes):
+-        # Eq 1 with STE
+-        # Compute distances
+-        dists = torch.cdist(features, codes) # (N, k)
+-        # Softmax relaxation for argmax selection via STE
+-        # The formula in source is softmax-like but used for argmax
+-        probs = torch.softmax(-dists, dim=1)
+-        # Argmax to get indices
+-        indices = torch.argmax(probs, dim=1)
+-        # Straight-Through Estimator: use indices in forward, but allow gradients through probs
+-        selected_codes = codes[indices]
+-        return selected_codes, indices
+-        
+-    def assign_codes_backward(self, features, codes):
+-        # Eq 2: Softmax relaxation for backward pass
+-        dists = torch.cdist(features, codes)
+-        probs = torch.softmax(-dists, dim=1)
+-        # Return the soft assignment for gradient flow
+-        return probs
+-        
+-    def add_code(self, step, s):
+-        # Eq 3: Dynamic code addition
+-        # T(a, t) is binarization in forward, STE in backward
+-        # sigma(s - i / lambda)
+-        # This is applied per code index i
+-        # Assuming s is a scalar score for adding a new code
+-        # This logic is complex to implement purely in PyTorch without custom autograd
+-        # Simplified: If step > threshold, add a new code
+-        if step > s / self.lambda_param:
+-            new_code = nn.Parameter(torch.randn(1, 64))
+-            self.codes = torch.cat([self.codes, new_code], dim=0)
++
++    def assign_codes(self, features, codes):
++        return STEAssign.apply(features, codes)
++
++    def add_code(self, s):
++        """Dynamically adds/gates codes using step functions with STE."""
++        indices = torch.arange(self.codes.size(0), device=self.codes.device)
++        gate = torch.sigmoid(s - indices / self.lambda_param)
++        # Forward: binarize, backward: pass gradient through sigmoid
++        gate_hard = (gate > 0.5).float()
++        self.codes = gate_hard.unsqueeze(1) * self.codes
+         return self.codes
+-        
++
+     def render(self, instance_codes, view_dirs, positions):
+-        # Condition renderer on instance code, view direction, positional encodings
+-        # Instance codes are fine-grained codes from variation module
+-        # Positional encodings for positions
+         return self.renderer(instance_codes, view_dirs, positions)
+-        
++
+     def train_step(self, input_image, novel_view_image, camera_pose, novel_view_points):
+         # 1. Encode
+         f_h = self.encode(input_image)
+         
+-        # 2. Project and Select
+-        features = self.project_and_select(f_h, novel_view_points, camera_pose)
++        # 2. Project
++        cam_coords = project_to_camera(novel_view_points, camera_pose)
+         
+-        # 3. Assign Codes (Inference for forward pass)
+-        selected_codes, indices = self.assign_codes_inference(features, self.codes)
++        # 3. Select features
++        features = sample_features(f_h, cam_coords)
+         
+-        # 4. Variation Module
+-        # Pass categorical codes and feature vectors to variation module
++        # 4. Assign codes (Inference forward pass)
++        selected_codes, indices = self.assign_codes(features, self.codes)
++        
++        # 5. Variation Module
+         instance_codes = self.variation_module(selected_codes, features)
+         
+-        # 5. Render
+-        # Assume view_dirs and positions are derived from novel_view_points
++        # 6. Render
++        view_dirs = novel_view_points  # Simplified: using positions as view directions for illustration
+         rendered_image = self.render(instance_codes, view_dirs, novel_view_points)
+         
+-        # 6. Loss
++        # 7. Loss
+         loss = F.mse_loss(rendered_image, novel_view_image)
+         
+-        # 7. Backward pass uses softmax relaxation
+-        # The gradients flow through the softmax relaxation defined in assign_codes_backward
+-        # This is handled by the STE mechanism in PyTorch if implemented correctly
+-        # For simplicity, we assume the forward pass uses STE and backward uses softmax
+-        # In practice, this requires a custom autograd function
+-        
++        # 8. Backward pass uses softmax relaxation via STEAssign
+         loss.backward()
+         
+@@ -152,5 +145,5 @@
+ ## Operating characteristics
+ *   **Time Complexity:** Constant rendering compute, whereas other methods' computational cost grows linearly with the number of objects [S1, unofficial].
+-*   **Memory Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources [S1, unofficial].
+ *   **Strengths:** Enables constant rendering compute; allows an unbounded number of objects per scene; discovers reoccurring visual and geometric patterns across scenes; transfers well to object navigation and unsupervised segmentation [S1, unofficial].
+ *   **Limitations:** Dynamic codebook addition is complex due to discrete nature; requires joint optimization of encoder, codebook, and renderer [S1, unofficial].

@@ -1,0 +1,189 @@
+--- v010.md
++++ v011.md
+@@ -4,104 +4,115 @@
+ 
+ ## Overview
+-Multi-scale Joint Training Loss is a composite objective function used in differentiable volume rendering to balance low-frequency structural consistency with high-frequency detail fidelity during optimization [S2]. It addresses the problem of refining rendered images by preventing global appearance damage while enhancing texture sharpness [S2]. It differs from single-scale losses by explicitly weighting contributions from multiple network stages or resolution levels [S1], and from simple photometric losses by incorporating uncertainty and multi-scale aggregation [S1].
++The Multi-scale Joint Training Loss is a composite objective function used in multi-stage or multi-resolution radiance field optimization to balance structural consistency with high-frequency detail fidelity. It addresses the problem of refining coarse reconstructions by ensuring that the optimization process does not sacrifice global appearance (low-frequency agreement) while enhancing local textures and edges (high-frequency fidelity). It differs from single-scale losses by explicitly weighting contributions from different resolution stages or coarse/fine network branches, often employing a dynamic weighting scheme based on the number of active stages.
+ 
+ ## How it works
+-The method aggregates loss terms from multiple output stages or scales. Two distinct formulations exist in the literature for this concept: one based on a coarse-fine balance for refinement [S2], and another based on multi-stage uncertainty-weighted aggregation [S1].
++The method operates in two primary formulations found in literature: a coarse-fine balance for refinement stages and a multi-stage summation for dynamically growing networks.
+ 
+ ### Inputs and Outputs
+-*   **Inputs:** Model parameters $\theta$, input images (or reference views), and query coordinates.
+-*   **Outputs:** A scalar loss value $L(\theta)$ or $\mathcal{L}$ used for gradient backpropagation.
++*   **Inputs:**
++    *   $\theta$: Network parameters.
++    *   $I_{coarse}$: Low-resolution or smoothed input/reference image.
++    *   $I_{fine}$: High-resolution or current network output.
++    *   $I^i_{out}$: Output image from stage $i$.
++    *   $D$: Current number of active stages or layers.
++*   **Outputs:**
++    *   Scalar loss value $L(\theta)$ or $\mathcal{L}$.
+ 
+ ### Data Structures
+-*   **Stages/Layers:** A set of $D$ output stages or network layers.
+-*   **Loss Components:** Per-stage Mean Squared Error ($\mathcal{L}_{MSE}$) and uncertainty loss ($\mathcal{L}_{unct}$) [S1].
+-*   **Weights:** Scalar coefficients $\alpha, \beta_1, \beta_2$ [S1, S2].
++No specific complex data structures are required beyond standard image tensors and scalar weights. The method relies on the hierarchical output of the network architecture (e.g., intermediate layers in a growing NeRF or coarse/fine branches in a denoising pipeline).
+ 
+-### Formulas and Steps
++### Formulas and Parameters
+ 
+-**Formulation 1: Coarse-Fine Balance [S2]**
+-Used in the second round of training to refine denoised inputs.
++**1. Coarse-Fine Joint Loss (Refinement Stage)**
++Used to balance low-frequency structural consistency and high-frequency detail fidelity [S2].
++
+ $$ L(\theta) = \alpha L_{coarse}(\theta) + (1-\alpha) L_{fine}(\theta) $$
+-Where:
+-*   $\alpha \in [0, 1]$ is the balance weight.
+-*   $L_{coarse}(\theta)$: Low-frequency consistency term. Compares input and output after smoothing to preserve tone and large-scale structure [S2].
+-*   $L_{fine}(\theta)$: Detail consistency term. Composed of pixel-level robust distance, structural similarity, gradient consistency, and chroma consistency [S2].
+ 
+-**Formulation 2: Multi-Stage Uncertainty Weighted [S1]**
+-Used in Recursive-NeRF for dynamic growth.
++*   $\alpha \in [0, 1]$: Weight balancing coarse and fine terms.
++*   $L_{coarse}(\theta)$: Low-frequency consistency term. This compares the input and output after smoothing. It focuses on preserving tone and large-scale structure, preventing damage to global appearance during refinement. It typically includes pixel-level robust distance, structural similarity (SSIM), gradient consistency, and chroma consistency terms [S2].
++*   $L_{fine}(\theta)$: Detail consistency term. Focuses on high-frequency fidelity.
++
++**2. Multi-Stage Summation Loss (Dynamic Growth)**
++Used in dynamically growing networks where queries are processed through multiple outlets [S1].
++
+ $$ \mathcal{L} = \sum_{i=1}^D \left( \beta_1 \mathcal{L}_{MSE}^i + \beta_2 \mathcal{L}_{unct}^i \right) $$
+-Where:
+-*   $D$ is the current number of stages (also equal to $D-1$ times the network growth count) [S1].
+-*   $\mathcal{L}_{MSE}^i$: MSE loss of the output image of layer $i$ [S1].
+-*   $\mathcal{L}_{unct}^i$: Uncertainty loss of the output image of layer $i$ [S1].
+-*   $\beta_1 = 1.0$ and $\beta_2 = 0.1$ are typical weights [S1].
+-*   All query coordinates are output through all outlets during training [S1].
++
++*   $D$: Current number of stages (also equal to $D-1$ times of network growth) [S1].
++*   $\mathcal{L}_{MSE}^i$: Mean Squared Error loss of the output image of layer $i$.
++*   $\mathcal{L}_{unct}^i$: Uncertainty loss of the output image of layer $i$.
++*   $\beta_1$: Weight for MSE loss. Typical value: $1.0$ [S1].
++*   $\beta_2$: Weight for uncertainty loss. Typical value: $0.1$ [S1].
+ 
+ ### Pseudocode
+-The following pseudocode implements the Multi-Stage Uncertainty Weighted loss [S1], as it provides a complete algorithmic structure. The Coarse-Fine formulation [S2] requires specific definitions of $L_{coarse}$ and $L_{fine}$ components not fully detailed in the source notes.
+ 
+ ```python
+-def multi_scale_joint_loss_stages(predictions, targets, uncertainties, num_stages, beta1=1.0, beta2=0.1):
++def compute_multi_scale_joint_loss(outputs, targets, uncertainty_maps, config):
+     """
+-    Computes the multi-scale joint training loss for Recursive-NeRF.
++    Computes the multi-scale joint training loss.
+     
+     Args:
+-        predictions: List of rendered images for each stage i=1..D.
+-        targets: List of target/reference images for each stage i=1..D.
+-        uncertainties: List of uncertainty maps for each stage i=1..D.
+-        num_stages: D, the current number of stages.
+-        beta1: Weight for MSE loss.
+-        beta2: Weight for uncertainty loss.
++        outputs: List of output images [I^1_out, ..., I^D_out] from each stage.
++        targets: List of target images corresponding to each stage.
++        uncertainty_maps: List of uncertainty maps [U^1, ..., U^D] for each stage.
++        config: Dictionary containing hyperparameters.
++            - 'method': 'coarse_fine' or 'dynamic_growth'
++            - 'alpha': Weight for coarse term (if method is coarse_fine)
++            - 'beta1': Weight for MSE term (if method is dynamic_growth)
++            - 'beta2': Weight for uncertainty term (if method is dynamic_growth)
++            
++    Returns:
++        scalar_loss: Total loss value.
++    """
++    if config['method'] == 'coarse_fine':
++        # Coarse-Fine Joint Loss [S2]
++        # L_coarse: Low-frequency consistency (structure, tone, chroma)
++        # L_fine: High-frequency fidelity (edges, textures)
++        # Note: Specific sub-terms for L_coarse (SSIM, gradient, etc.) are implementation details
++        # of the respective loss functions, assumed to be computed externally.
+         
+-    Returns:
+-        Total scalar loss.
+-    """
+-    total_loss = 0.0
+-    
+-    for i in range(1, num_stages + 1):
+-        # Calculate MSE loss for stage i
+-        # L_MSE^i = mean((predictions[i] - targets[i])^2)
+-        mse_loss_i = mean_squared_error(predictions[i-1], targets[i-1])
++        L_coarse = compute_coarse_consistency_loss(outputs[0], targets[0])
++        L_fine = compute_fine_detail_loss(outputs[1], targets[1])
+         
+-        # Calculate uncertainty loss for stage i
+-        # L_unct^i is derived from the uncertainty map of layer i
+-        # [G] Standard uncertainty loss often involves log-variance or similar;
+-        # exact formula for L_unct is not specified in sources, assumed available.
+-        unct_loss_i = compute_uncertainty_loss(uncertainties[i-1])
++        alpha = config['alpha']
++        scalar_loss = alpha * L_coarse + (1 - alpha) * L_fine
+         
+-        # Aggregate weighted losses for this stage
+-        stage_loss = beta1 * mse_loss_i + beta2 * unct_loss_i
+-        total_loss += stage_loss
++    elif config['method'] == 'dynamic_growth':
++        # Multi-Stage Summation Loss [S1]
++        D = len(outputs)
++        beta1 = config['beta1']
++        beta2 = config['beta2']
+         
+-    return total_loss
+-
+-def mean_squared_error(pred, target):
+-    return mean((pred - target) ** 2)
+-
+-def compute_uncertainty_loss(uncertainty_map):
+-    # Placeholder for specific uncertainty loss definition
+-    # [G] Implementation depends on whether uncertainty is variance or standard deviation
+-    return mean(uncertainty_map)
++        total_loss = 0.0
++        for i in range(D):
++            # MSE Loss for stage i
++            l_mse = mean_squared_error(outputs[i], targets[i])
++            
++            # Uncertainty Loss for stage i
++            # Typically involves the uncertainty map U^i and the residual
++            l_unct = compute_uncertainty_loss(outputs[i], targets[i], uncertainty_maps[i])
++            
++            total_loss += beta1 * l_mse + beta2 * l_unct
++            
++        scalar_loss = total_loss
++        
++    else:
++        raise ValueError("Unknown method type")
++        
++    return scalar_loss
+ ```
+ 
+-### Parameters
+-*   $\alpha$: Balance between coarse and fine terms. Range $[0, 1]$ [S2].
+-*   $\beta_1$: MSE weight. Typical value $1.0$ [S1].
+-*   $\beta_2$: Uncertainty weight. Typical value $0.1$ [S1].
+-
+ ### Edge Cases and Pitfalls
+-*   **Precision:** Summing losses across $D$ stages can lead to gradient magnitude issues if $D$ is large; normalization may be required [S1].
+-*   **Boundaries:** Query coordinates must be valid for all outlets/stages [S1].
+-*   **Degenerate Input:** If uncertainty is zero or undefined, the uncertainty loss term may fail [S1].
++*   **Stage Count $D$**: In dynamic growth methods, $D$ changes during training. The loss summation must dynamically adjust to the current number of active stages [S1].
++*   **Weight Sensitivity**: The choice of $\alpha$ in coarse-fine loss and $\beta_1, \beta_2$ in multi-stage loss significantly impacts convergence. Incorrect weights may lead to over-smoothing (if coarse weight is too high) or noise amplification (if fine/uncertainty weight is too high) [S1, S2].
++*   **Uncertainty Definition**: The exact formulation of $\mathcal{L}_{unct}^i$ is not fully detailed in the sources, but it is tied to the uncertainty of the query outputs [S1]. Implementers must ensure the uncertainty map is properly normalized or calibrated relative to the MSE term.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear with respect to the number of stages $D$ [S1].
+-*   **Memory Complexity:** Requires storing predictions and uncertainties for all $D$ stages simultaneously during the forward pass [S1].
+-*   **Strengths:** Balances structural integrity with detail recovery [S2]; adapts to dynamic network growth [S1].
+-*   **Limitations:** Requires careful tuning of $\alpha, \beta_1, \beta_2$ [S1, S2]; increased memory usage with more stages [S1].
+-*   **When to use:** When refining rendered images or training dynamically growing neural radiance fields [S1, S2].
++*   **Time Complexity**: Linear with respect to the number of stages $D$ in the dynamic growth formulation, as it sums losses from all active outlets [S1].
++*   **Memory Complexity**: Requires storing intermediate outputs and uncertainty maps for all active stages during the backward pass, increasing memory usage compared to single-stage losses [S1].
++*   **Strengths**: Effectively balances global structure and local detail, preventing the "blurring" effect common in single-scale optimizations [S2]. Adapts to network growth dynamically [S1].
++*   **Limitations**: Requires careful tuning of multiple hyperparameters ($\alpha, \beta_1, \beta_2$). The uncertainty loss term may be sensitive to the quality of the uncertainty estimation [S1].
+ 
+ ## Background
+-The concept originates from two distinct lines of research. The Coarse-Fine Joint Loss was introduced in Denoise-GS for self-supervised denoising in sparse-view 3D Gaussian Splatting [S2]. The Multi-Stage Uncertainty Weighted loss was introduced in Recursive-NeRF for efficient, dynamically growing neural radiance fields [S1].
++The concept of multi-scale or joint loss functions in radiance field optimization emerged to address the limitations of single-resolution training. The dynamic growth approach with multi-stage loss was introduced in **Recursive-NeRF** [S1], which dynamically grows the network depth based on uncertainty clustering. The coarse-fine joint loss formulation was utilized in **Denoise-GS** [S2] for self-supervised denoising in sparse-view 3D Gaussian Splatting, aiming to refine denoised images while preserving structural consistency.
+ 
+ ## Sources

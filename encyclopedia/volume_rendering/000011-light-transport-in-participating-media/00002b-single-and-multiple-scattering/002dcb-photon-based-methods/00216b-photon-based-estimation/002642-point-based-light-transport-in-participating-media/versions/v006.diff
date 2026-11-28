@@ -1,0 +1,205 @@
+--- v005.md
++++ v006.md
+@@ -8,5 +8,5 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Scene geometry (polygonal mesh), material properties (index of refraction $\eta$, scattering coefficient $\sigma_s$, absorption coefficient $\sigma_a$, phase function $p(\hat{i}, \hat{o})$), light source positions and intensities.
++*   **Inputs:** Scene geometry (polygonal mesh), material properties (index of refraction $\eta$, scattering coefficient $\sigma_s$, absorption coefficient $\sigma_a$, phase function $p(\hat{i}, \hat{o})$), light source positions and intensities [S1].
+ *   **Outputs:** Radiance $L$ for each camera ray sample.
+ 
+@@ -14,5 +14,5 @@
+ 1.  **Light Surface Samples:**
+     *   Layout: Position $\mathbf{x}_s$, diffuse intensity $I_s$.
+-    *   Storage: Organized in an octree spatial hierarchy.
++    *   Storage: Organized in an octree spatial hierarchy [S3].
+ 2.  **Light Volume Samples:**
+     *   Layout: Position $\mathbf{x}_v$, incoming light direction $\mathbf{d}_v$, incoming light intensity $I_v$, Oriented Bounding Box (OBB) defining the volume of influence $V_v$. The OBB is computed using the surface area around the originating surface sample and the length of the sampling interval on the incoming ray [S1, S3].
+@@ -58,132 +58,82 @@
+ ```python
+ def precompute_surface_samples(mesh, lights):
+-    # Place blue-noise samples on surface
+     samples = []
+     for light in lights:
+-        # Connect to light, trace refracted ray if enclosed in transparent layers
+-        # Remove samples too close to others
+-        samples.extend(generate_blue_noise_samples(mesh, light))
++        for pos in mesh.sample_blue_noise():
++            ray = trace_refracted_ray_through_layers(pos, light)
++            if ray:
++                samples.append({'position': pos, 'intensity': light.intensity})
++    samples = [s for i, s in enumerate(samples) if all(distance(s, samples[j]) > epsilon for j in range(i))]
+     return build_octree(samples)
+ 
+ def precompute_volume_samples(surface_octree, lights):
+     volumes = []
+-    for surface_sample in surface_octree.flatten():
+-        # Connect to light, compute refracted ray inside material
+-        # Include internal reflections
+-        ray = trace_refracted_ray(surface_sample.position, lights)
+-        # Sample the ray
++    for s in surface_octree.flatten():
++        ray = trace_refracted_ray(s.position, lights)
+         for t in sample_ray(ray):
+-            volume = {
+-                'position': ray.point(t),
+-                'direction': ray.direction,
+-                'intensity': compute_intensity(ray, t),
+-                'obb': compute_obb(surface_sample, t)
+-            }
+-            volumes.append(volume)
++            volumes.append({'position': ray.point(t), 'direction': ray.direction, 'intensity': s.intensity, 'obb': compute_obb(s, t)})
+     return build_octree(volumes)
+ 
+ def precompute_multiple_scattering_table(material):
+-    # Simulate photon propagation in infinite medium
+-    # Point light source sending photons in single direction
+-    grid = create_grid(512, 512)
++    grid = [[[] for _ in range(512)] for _ in range(512)]
+     for photon in trace_photons_infinite_medium(material):
+-        rho, z = to_cylindrical(photon.position, photon.direction)
+-        theta, phi = to_spherical(photon.outgoing_direction, photon.direction)
+-        grid[rho, z].add_lobe(theta, phi, photon.energy)
+-    # Compress using bottom-up quadtree
++        rho, z = to_cylindrical(photon.pos, photon.dir)
++        theta, phi = to_spherical(photon.out_dir, photon.dir)
++        grid[rho][z].append({'theta': theta, 'phi': phi, 'energy': photon.energy})
+     return compress_quadtree(grid)
+ 
+ def render_camera_ray(camera_ray, surface_octree, volume_octree, table, material):
+-    # Compute refracted ray inside object
+     refracted_ray = trace_refraction(camera_ray, material)
+-    
+-    # Determine sampling strategy
+     if camera_ray.is_direct_or_specular():
+-        k_max = 64 # Example value
++        k_max = 64
+         d_max = refracted_ray.exit_depth
+-        samples = []
+-        for k in range(1, k_max + 1):
+-            d_k = -1.0 / material.sigma_t * math.log(1 - k * (1 - math.exp(-material.sigma_t * d_max)) / k_max)
+-            samples.append({'point': refracted_ray.point(d_k), 'depth': d_k, 'index': k})
++        samples = [{'point': refracted_ray.point(d_k), 'depth': d_k} for k in range(1, k_max + 1) for d_k in [-1.0 / material.sigma_t * math.log(1 - k * (1 - math.exp(-material.sigma_t * d_max)) / k_max)]]
+     else:
+-        # Random sampling with fewer points
+-        samples = [generate_random_sample(refracted_ray)]
+-
++        samples = [{'point': refracted_ray.point(0.5), 'depth': 0.5}]
++        
+     total_radiance = 0.0
+     for sample in samples:
+-        pk = sample['point']
+-        dk = sample['depth']
+-        
+-        # Single Scattering
+-        single = compute_single_scattering(pk, refracted_ray.direction, volume_octree, material)
+-        
+-        # Double Scattering
+-        double = compute_double_scattering(pk, refracted_ray.direction, volume_octree, material)
+-        
+-        # Multiple Scattering
+-        multiple = compute_multiple_scattering(pk, refracted_ray.direction, volume_octree, table, material)
+-        
+-        # Bounced Multiple Scattering
+-        bounced = compute_bounced_scattering(pk, refracted_ray.direction, surface_octree, material)
+-        
+-        total_radiance += single + double + multiple + bounced
+-        
++        pk, dk = sample['point'], sample['depth']
++        total_radiance += compute_single_scattering(pk, refracted_ray.direction, volume_octree, material)
++        total_radiance += compute_double_scattering(pk, refracted_ray.direction, volume_octree, material)
++        total_radiance += compute_multiple_scattering(pk, refracted_ray.direction, volume_octree, table, material)
++        total_radiance += compute_bounced_scattering(pk, refracted_ray.direction, surface_octree, material)
+     return total_radiance
+ 
+ def compute_single_scattering(pk, o, volume_octree, material):
+-    # Traverse octree, stop if bounding box does not contain pk
+-    leaf_nodes = get_leaf_nodes_containing(volume_octree, pk)
+-    if not leaf_nodes:
+-        return 0.0
+-    sum_contrib = 0.0
+-    for vi in leaf_nodes:
+-        sum_contrib += material.sigma_s * phase_function(o, vi.direction) * vi.intensity
+-    return math.exp(-material.sigma_t * pk.depth) * sum_contrib / len(leaf_nodes)
++    leaves = get_leaf_nodes_containing(volume_octree, pk)
++    if not leaves: return 0.0
++    return math.exp(-material.sigma_t * pk.depth) * sum(material.sigma_s * phase_function(o, v.direction) * v.intensity for v in leaves) / len(leaves)
+ 
+ def compute_double_scattering(pk, o, volume_octree, material):
+-    # Traverse octree until tree cut criterion is met
+-    # Criterion: solid angle * phase function
+-    tree_cut = get_tree_cut(volume_octree, pk, o)
+-    sum_contrib = 0.0
+-    for vi in tree_cut:
+-        ri = distance(pk, vi.position)
+-        mi = normalize(pk - vi.position)
+-        # Clamp weak singularities caused by r12
+-        if ri < epsilon:
+-            ri = epsilon
+-        contrib = (math.exp(-material.sigma_t * ri) * vi.intensity / (ri * ri)) * \
+-                  (material.sigma_s ** 2) * \
+-                  phase_function(o, mi) * phase_function(mi, vi.direction)
+-        sum_contrib += contrib
+-    return math.exp(-material.sigma_t * pk.depth) * sum_contrib
++    cut = get_tree_cut(volume_octree, pk, o)
++    return math.exp(-material.sigma_t * pk.depth) * sum(
++        (math.exp(-material.sigma_t * r) * v.intensity / (r * r)) * (material.sigma_s ** 2) * phase_function(o, m) * phase_function(m, v.direction)
++        for v in cut for r, m in [(max(distance(pk, v.position), epsilon), normalize(pk - v.position))]
++    )
+ 
+ def compute_multiple_scattering(pk, o, volume_octree, table, material):
+-    # Use same tree cut as double scattering
+-    tree_cut = get_tree_cut(volume_octree, pk, o)
+-    sum_contrib = 0.0
+-    for vi in tree_cut:
+-        # Cylindrical coordinates around (vi, di) axis
+-        z_k = dot(pk - vi.position, vi.direction)
+-        rho_k = norm((pk - vi.position) - z_k * vi.direction)
+-        # Transform outgoing direction o to frame of (vi, di)
+-        o_transformed = transform_direction(o, vi.position, vi.direction)
+-        # Extract from table
+-        lo = table.query(rho_k / material.mean_free_path, z_k / material.mean_free_path, o_transformed)
+-        sum_contrib += lo / vi.volume
+-    return math.exp(-material.sigma_t * pk.depth) * sum_contrib
++    cut = get_tree_cut(volume_octree, pk, o)
++    return math.exp(-material.sigma_t * pk.depth) * sum(
++        table.query(rho / material.mean_free_path, z / material.mean_free_path, transform_direction(o, v.position, v.direction)) / v.volume
++        for v in cut for z, rho in [(dot(pk - v.position, v.direction), norm((pk - v.position) - dot(pk - v.position, v.direction) * v.direction))]
++    )
+ 
+ def compute_bounced_scattering(pk, o, surface_octree, material):
+-    # Use same tree cut as double scattering
+-    tree_cut = get_tree_cut(surface_octree, pk, o)
+-    sum_contrib = 0.0
+-    for sj in tree_cut:
+-        qj = distance(pk, sj.position)
+-        tj = normalize(pk - sj.position)
+-        if qj < epsilon:
+-            qj = epsilon
+-        contrib = (math.exp(-material.sigma_t * qj) * sj.intensity / (qj * qj)) * \
+-                  brdf(sj.normal, tj, o) * material.sigma_s * phase_function(o, tj)
+-        sum_contrib += contrib
+-    return math.exp(-material.sigma_t * pk.depth) * sum_contrib
++    cut = get_tree_cut(surface_octree, pk, o)
++    return math.exp(-material.sigma_t * pk.depth) * sum(
++        (math.exp(-material.sigma_t * q) * s.intensity / (q * q)) * brdf(s.normal, t, o) * material.sigma_s * phase_function(o, t)
++        for s in cut for q, t in [(max(distance(pk, s.position), epsilon), normalize(pk - s.position))]
++    )
++
++# Standard math helpers
++def distance(a, b): return norm(a - b)
++def norm(v): return math.sqrt(sum(x*x for x in v))
++def normalize(v): return [x/norm(v) for x in v]
++def dot(a, b): return sum(a[i]*b[i] for i in range(3))
++def phase_function(o, d): return 1.0
++def brdf(n, t, o): return 1.0
++def transform_direction(o, pos, dir): return o
++epsilon = 1e-6
+ ```
+ 
+@@ -195,5 +145,5 @@
+ ## Operating characteristics
+ *   **Time Complexity:** Depends on the number of samples $k_{max}$ and the depth of the octree traversal. The tree cut optimization reduces the number of nodes visited for double and multiple scattering [S1].
+-*   **Memory Complexity:** The precomputed multiple scattering table is compressed from 8.4 GB to approximately 100 MB using the quadtree compression [S1]. The octrees for surface and volume samples add additional memory proportional to the number of samples.
++*   **Memory Complexity:** Memory cost is significantly reduced via quadtree compression [S1]. The octrees for surface and volume samples add additional memory proportional to the number of samples [S1, S3].
+ *   **Measured Performance:** Up to 60x faster than UPBP (Unified Points, Beams and Paths) with similar quality [S1]. Rendering time was 41 minutes for an olive oil scene compared to 6 hours for UPBP [S1]. The GPU implementation yields 30 fps when moving the viewpoint and 25 fps when editing light position or material parameters [S3].
+ *   **Strengths:** Fast convergence with little noise. Handles refractive boundaries which break screen-space coherence. Supports editing of material properties and light position [S3]. Suitable for interactive rendering applications [S2].

@@ -1,0 +1,332 @@
+--- v003.md
++++ v004.md
+@@ -4,22 +4,22 @@
+ 
+ ## Overview
+-Cross-scale geometric adaptation is a self-adaptive regularization method that uses reprojection errors across multiple voxel scales to guide geometry learning without requiring explicit depth ground truth [S1]. It selects render depths with minimal reprojection error across different scales as pseudo labels, ensuring geometric integrity by leveraging low-frequency components from low-resolution voxels for coarse geometry early in training, while medium- and high-resolution voxels refine details as training advances [S1]. It sets itself apart from sibling methods like [Hard and Soft Depth Regularization](9178-hard-and-soft-depth-regularization.md) by avoiding scale mismatches inherent in single-scale depth priors, providing a stronger and more robust constraint that significantly reduces floaters and improves convergence quality [S1].
++Cross-scale geometric adaptation is a self-adaptive regularization method that uses reprojection errors across multiple voxel scales to guide geometry learning without requiring explicit depth ground truth or complex scheduling [S1]. It selects render depths with minimal reprojection error across different scales as pseudo labels, ensuring geometric integrity and significantly reducing floaters compared to training without geometric adaptation [S1]. Unlike sibling methods that may rely on pre-trained feature extractors or fixed depth priors, this approach adapts to diverse scenes by leveraging low-frequency components from low-resolution voxels for coarse geometry early in training, while medium- and high-resolution voxels refine details as training advances [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Training views (frames $i$ and $j$), camera intrinsics $K_i, K_j$, camera poses $(R_i, t_i), (R_j, t_j)$, multi-scale voxel grid depths $D_{il}(p_i)$ for scale $l \in \{0, \dots, L\}$, and RGB maps $C_i, C_j$.
+-*   **Outputs:** Geometric adaptation loss $\mathcal{L}_{geo}$ and pseudo-ground truth depth $D'(r_{train})$.
++*   **Inputs:** Training views (frames $i$ and $j$), camera intrinsics $K_i, K_j$, camera poses (rotation $R_i, R_j$ and translation $t_i, t_j$), multi-scale voxel representations (low, mid, high resolution), and RGB maps $C_i, C_j$.
++*   **Outputs:** Geometric adaptation loss $\mathcal{L}_{geo}$ and pseudo-ground truth depth $D'(r_{train})$ for each training ray $r_{train}$.
+ 
+ **Data Structures:**
+-*   **Multi-scale Voxel Grid:** A hierarchical structure where each scale $l$ stores depth values $D_{il}(p_i)$ for every pixel $p_i$ in the training view. The sources do not specify the exact bit-packing or memory layout of the voxel grid, only that it captures varying scene frequencies [S1].
+-*   **RGB Maps:** 2D arrays $C_i, C_j$ storing color values for frames $i$ and $j$.
++*   **Multi-scale Voxels:** A set of voxel grids at different resolutions (low, mid, high). Each scale $l$ provides a depth value $D_{il}(p_i)$ for a pixel $p_i$ via volume rendering [S1].
++*   **Ray Representation:** A training ray $r_{train}$ is defined by its origin $o_i(p_i)$ and direction $v_i(p_i)$ in the camera coordinate system of frame $i$ [S1].
+ 
+ **Numbered Steps:**
+-1.  **Ray Sampling:** For each training ray $r_{train} \in \mathcal{R}_{train}$, identify the 2D pixel coordinate $p_i$ in frame $i$ [S1].
++1.  **Ray Sampling:** For each training ray $r_{train}$ sampled from frame $i$, identify the 2D pixel coordinate $p_i$ [S1].
+ 2.  **Homogeneous Augmentation:** Compute the homogeneous coordinate $\tilde{p}_i$ from $p_i$ [S1].
+-3.  **3D Point in Camera Coordinates (Frame $i$):** Compute the 3D point $x_{li}$ in the camera coordinate system of frame $i$ using the depth at scale $l$ and camera intrinsics:
++3.  **3D Point in Camera Coordinates (Frame $i$):** Calculate the 3D point $x_{li}$ in the camera coordinate system of frame $i$ at scale $l$ using the depth $D_{il}(p_i)$ obtained from volume rendering and camera intrinsics $K_i$:
+     $$ x_{li} = D_{il}(p_i) K_i^{-1} \tilde{p}_i $$
+-    Alternatively, this point can be determined directly from the ray origin $o_i(p_i)$ and direction $v_i(p_i)$:
+-    $$ x_l = o_i(p_i) + D_{il}(p_i) v_i(p_i) $$
++    Alternatively, this point can be determined directly from the ray:
++    $$ x_{li} = o_i(p_i) + D_{il}(p_i) v_i(p_i) $$
+     [S1]
+ 4.  **Transformation to World Coordinates:** Transform $x_{li}$ to world coordinates $x_l$ using frame $i$'s rotation $R_i$ and translation $t_i$:
+@@ -32,13 +32,14 @@
+     $$ \tilde{p}_{li \to j} = \pi(K_j x_{li \to j}) $$
+     where $\pi([x, y, z]^T) = [x/z, y/z]^T$ [S1].
+-7.  **Reprojection Error Calculation:** Compute the reprojection error $e_l(p_i)$ for scale $l$ as the difference between the original RGB pixel and the warped pixel:
++7.  **Reprojection Error Calculation:** Compute the reprojection error $e_l(p_i)$ for scale $l$ as the difference between the original RGB pixel $C_i(p_i)$ and the warped pixel $C_j(\tilde{p}_{li \to j})$:
+     $$ e_l(p_i) = C_i(p_i) - C_j(\tilde{p}_{li \to j}) $$
+     [S1]
+-8.  **Pseudo-Ground Truth Selection:** Select the scale $l$ with the minimum reprojection error as the pseudo-ground truth depth for the ray:
++8.  **Pseudo-Ground Truth Selection:** Select the scale $l$ with the minimum reprojection error as the pseudo-ground truth depth $D'(r_{train})$:
+     $$ D'(r_{train}) = \arg \min_l (e_l(r_{train})) $$
+     [S1]
+-9.  **Loss Computation:** Compute the geometric adaptation loss $\mathcal{L}_{geo}$ as the Mean Squared Error (MSE) between the rendered depth at the selected scale and the pseudo-ground truth depth:
+-    $$ \mathcal{L}_{geo}(r_{train}) = \sum_{l=0}^{L} \left( \hat{D}_l(r_{train}) - D'(r_{train}) \right)^2 $$
+-    Note: The source formula [S1] sums over $l$, but the logic implies selecting the best $l$. The text states "pseudo-GT depth of the scale with the minimum reprojection error is obtained... utilized to compute the geometric adaptation loss". The formula provided in [S1] appears to sum the squared difference for all scales against the selected pseudo-GT, or potentially implies a weighted sum where the best scale has weight 1. Given the ambiguity, the implementation should calculate $D'(r_{train})$ as the depth from the scale with min error, and then compute the loss against the rendered depths. A common interpretation of such adaptive losses is to penalize the deviation of the *selected* scale's depth from the pseudo-GT, or to use the pseudo-GT to supervise the entire multi-scale representation. The source formula explicitly sums over $l$. We follow the source formula [S1].
++9.  **Loss Computation:** Compute the geometric adaptation loss $\mathcal{L}_{geo}$ as the Mean Squared Error (MSE) between the rendered depth $D_l(r_{train})$ at the selected scale and the pseudo-ground truth depth $D'(r_{train})$ over all training rays $R_{train}$:
++    $$ \mathcal{L}_{geo}(r_{train}) = \sum_{l=0}^{L} \| \hat{D}_l(r_{train}) - D'(r_{train}) \|^2 $$
++    Note: The source formula (19) sums over scales $l$ and rays $r_{train}$, but the text implies selecting the best scale per ray. The implementation should sum the squared difference between the depth at the *selected* best scale and the pseudo-GT depth for each ray, or sum over all scales if the pseudo-GT is defined per scale. Based on Eq 19, it appears to be a sum over scales of the difference between the rendered depth at scale $l$ and the *best* pseudo-GT depth. However, standard practice suggests comparing the selected scale's depth to the pseudo-GT. The source states: "the pseudo-GT depth of the scale with the minimum reprojection error is obtained... utilized to compute the geometric adaptation loss (MSE)". Eq 19 shows a sum over $l$. This implies the loss penalizes all scales, but the pseudo-GT is fixed per ray. Let's stick to the explicit formula provided:
++    $$ \mathcal{L}_{geo} = \sum_{r_{train} \in R_{train}} \sum_{l=0}^{L} \| \hat{D}_l(r_{train}) - D'(r_{train}) \|^2 $$
+     [S1]
+ 
+@@ -46,136 +47,163 @@
+ ```python
+ def compute_cross_scale_geometric_adaptation_loss(
+-    frames: List[Frame], 
+-    voxel_grids: List[VoxelGrid], 
+-    intrinsics: List[Matrix3x3], 
+-    poses: List[Pose]
+-) -> float:
++    rays, 
++    frames, 
++    voxel_grids, 
++    intrinsics, 
++    poses
++):
+     """
+-    Computes the Lgeo loss for a batch of training frames.
++    rays: List of Ray objects, each with origin o, direction v, and pixel coordinate p.
++    frames: List of Frame objects, each with RGB map C, intrinsics K, rotation R, translation t.
++    voxel_grids: List of VoxelGrid objects at different scales (low, mid, high).
++    intrinsics: List of camera intrinsic matrices K.
++    poses: List of camera pose tuples (R, t).
+     
+-    Args:
+-        frames: List of training frames, each containing RGB map C and ray data.
+-        voxel_grids: List of voxel grids, one for each scale l.
+-        intrinsics: List of camera intrinsic matrices K.
+-        poses: List of camera poses (R, t).
+-        
+     Returns:
+-        The scalar Lgeo loss value.
++    loss: Scalar geometric adaptation loss.
+     """
+     total_loss = 0.0
+     
+-    # Assume we process pairs of frames (i, j) or use a single frame i and 
+-    # warp to other views in the batch. The source describes using frame i 
+-    # and frame j. We assume frames[i] and frames[j] are available.
+-    # For simplicity, we iterate over rays in frame i and warp to frame j.
+-    
+-    for i in range(len(frames)):
+-        frame_i = frames[i]
+-        K_i = intrinsics[i]
+-        R_i, t_i = poses[i].R, poses[i].t
+-        
+-        for j in range(len(frames)):
+-            if i == j:
+-                continue # Skip self-reprojection
+-            
++    for ray in rays:
++        # Assume ray is associated with frame i
++        frame_i = frames[ray.frame_index]
++        K_i = intrinsics[ray.frame_index]
++        R_i, t_i = poses[ray.frame_index]
++        
++        # Select a reference frame j for reprojection (e.g., next frame or random other frame)
++        # In practice, this might be a specific neighbor or averaged over multiple j
++        # For this implementation, we assume a single reference frame j is provided or selected
++        # Let's assume we iterate over a set of reference frames or pick one
++        # The source implies a pair (i, j). We'll pick a fixed j for simplicity or iterate.
++        # Let's assume we have a list of reference frame indices for each ray
++        ref_frame_indices = get_reference_frames(ray) 
++        
++        best_pseudo_depth = None
++        min_error = float('inf')
++        
++        for j in ref_frame_indices:
+             frame_j = frames[j]
+             K_j = intrinsics[j]
+-            R_j, t_j = poses[j].R, poses[j].t
+-            
+-            # Get ray data for frame i
+-            rays_i = frame_i.rays # List of (origin, direction) for each pixel
+-            
+-            for pixel_idx, (o_i, v_i) in enumerate(rays_i):
+-                p_i = frame_i.pixel_coords[pixel_idx]
+-                
+-                # Step 1-2: Homogeneous augmentation
+-                p_i_homogeneous = np.array([p_i[0], p_i[1], 1.0])
+-                
+-                # Step 3: 3D point in camera coordinates of frame i
+-                # Using depth from each scale l
+-                depths_l = []
+-                for l, voxel_grid in enumerate(voxel_grids):
+-                    # D_il(p_i) is the depth at scale l for pixel p_i
+-                    d_il = voxel_grid.get_depth(p_i)
+-                    depths_l.append(d_il)
+-                
+-                # Compute 3D points in world coordinates for each scale
+-                # x_l = R_i * (D_il * K_i^-1 * p_i_hom) + t_i
+-                # Or x_l = o_i + D_il * v_i
+-                # We use the second form as it is more direct for rays
+-                x_l_world = []
+-                for d_il in depths_l:
+-                    x_l_cam = d_il * np.linalg.inv(K_i) @ p_i_homogeneous
+-                    x_l_w = R_i @ x_l_cam + t_i
+-                    x_l_world.append(x_l_w)
+-                
+-                # Step 5-6: Reproject to frame j
+-                reprojection_errors = []
+-                projected_pixels_j = []
+-                
+-                for l, x_l_w in enumerate(x_l_world):
+-                    # Transform to camera j
+-                    x_l_cam_j = R_j.T @ (x_l_w - t_j)
++            R_j, t_j = poses[j]
++            
++            # Step 3: 3D point in camera coordinates of frame i
++            # Using ray definition: x_li = o_i(p_i) + D_il(p_i) * v_i(p_i)
++            # We need depth D_il(p_i) for each scale l
++            depths_at_scale = []
++            for l, voxel_grid in enumerate(voxel_grids):
++                # Volume render depth at pixel ray.p for scale l
++                # This is a helper function that queries the voxel grid
++                d_il = volume_render_depth(voxel_grid, ray.o, ray.v)
++                depths_at_scale.append(d_il)
++                
++                # Calculate 3D point in camera coords
++                x_li = ray.o + d_il * ray.v
++                
++                # Step 4: Transform to world coordinates
++                x_l = R_i @ x_li + t_i
++                
++                # Step 5: Transform to camera coordinates of frame j
++                x_li_to_j = R_j.T @ (x_l - t_j)
++                
++                # Step 6: Reproject to 2D pixel coordinate of frame j
++                # pi([x, y, z]) = [x/z, y/z]
++                if x_li_to_j[2] == 0:
++                    continue # Avoid division by zero
++                p_li_to_j = (K_j @ x_li_to_j)[:2] / x_li_to_j[2]
++                
++                # Step 7: Compute reprojection error
++                # C_i(p_i) - C_j(p_li_to_j)
++                # Need to handle boundary checks for p_li_to_j
++                if not is_valid_pixel(p_li_to_j, frame_j.C.shape):
++                    continue
+                     
+-                    # Project to 2D
+-                    p_j_homogeneous = K_j @ x_l_cam_j
+-                    p_j_2d = p_j_homogeneous[:2] / p_j_homogeneous[2]
+-                    
+-                    # Get RGB value at projected pixel in frame j
+-                    # C_j(p_j_2d)
+-                    c_j_val = frame_j.get_rgb_at_pixel(p_j_2d)
+-                    
+-                    # Reprojection error: difference in RGB
+-                    c_i_val = frame_i.get_rgb_at_pixel(p_i)
+-                    error = np.linalg.norm(c_i_val - c_j_val)
+-                    
+-                    reprojection_errors.append(error)
+-                    projected_pixels_j.append(p_j_2d)
+-                
+-                # Step 8: Select scale with minimum reprojection error
+-                min_error_idx = np.argmin(reprojection_errors)
+-                pseudo_gt_depth = depths_l[min_error_idx]
+-                
+-                # Step 9: Compute Loss
+-                # L_geo = sum_l (D_hat_l - D')^2
+-                # D_hat_l is the rendered depth at scale l, which is depths_l[l]
+-                # D' is the pseudo_gt_depth
+-                
+-                scale_loss = 0.0
+-                for l, d_il in enumerate(depths_l):
+-                    scale_loss += (d_il - pseudo_gt_depth) ** 2
+-                
+-                total_loss += scale_loss
+-
+-    return total_loss / (num_frames * num_rays)
++                error = frame_i.C[ray.p] - frame_j.C[p_li_to_j]
++                error_norm = np.linalg.norm(error)
++                
++                # Store error for this scale and frame j
++                # We need to find the min error across ALL scales and ALL reference frames?
++                # The source says "across different scales". It doesn't explicitly say across frames j,
++                # but reprojection requires a second view.
++                # Let's assume we track the min error across scales for a given j,
++                # and then potentially across j.
++                # The source formula (19) sums over l, implying the pseudo-GT is fixed per ray.
++                # Let's find the scale l with min error for this j.
++                pass
++
++        # The source indicates selecting the scale with minimal reprojection error.
++        # Let's assume we aggregate errors across scales and reference frames to find the best pseudo-GT.
++        # For simplicity, let's assume we pick one reference frame j and find the best scale l.
++        
++        # Re-evaluating based on source: "selecting render depths with minimal reprojection error across different scales"
++        # This implies for a given ray, we compute errors for all scales, and pick the scale l* with min error.
++        # The reprojection is done against a reference frame j.
++        
++        # Let's assume we have a set of reference frames. We compute the min error across scales for each j,
++        # then pick the best j? Or just one j?
++        # The source doesn't specify how j is chosen. We'll assume a single reference frame j is used for the ray.
++        
++        # Let's implement the logic for a single reference frame j for clarity, as the core mechanism is cross-scale.
++        
++        min_error_overall = float('inf')
++        best_scale_idx = -1
++        best_pseudo_depth_val = None
++        
++        for l, voxel_grid in enumerate(voxel_grids):
++            d_il = volume_render_depth(voxel_grid, ray.o, ray.v)
++            x_li = ray.o + d_il * ray.v
++            x_l = R_i @ x_li + t_i
++            x_li_to_j = R_j.T @ (x_l - t_j)
++            
++            if x_li_to_j[2] == 0:
++                continue
++                
++            p_li_to_j = (K_j @ x_li_to_j)[:2] / x_li_to_j[2]
++            
++            if not is_valid_pixel(p_li_to_j, frame_j.C.shape):
++                continue
++                
++            error = frame_i.C[ray.p] - frame_j.C[p_li_to_j]
++            error_norm = np.linalg.norm(error)
++            
++            if error_norm < min_error_overall:
++                min_error_overall = error_norm
++                best_scale_idx = l
++                best_pseudo_depth_val = d_il
++                
++        if best_scale_idx == -1:
++            continue # No valid reprojection found
++            
++        # Step 9: Compute loss
++        # The source formula (19) sums over l. 
++        # L_geo = sum_l || D_l - D' ||^2
++        # where D' is the pseudo-GT depth (from the best scale).
++        
++        for l, voxel_grid in enumerate(voxel_grids):
++            d_il = volume_render_depth(voxel_grid, ray.o, ray.v)
++            loss_term = (d_il - best_pseudo_depth_val) ** 2
++            total_loss += loss_term
++            
++    return total_loss
+ ```
+ 
+ **Parameters:**
+-*   **Number of Scales ($L$):** Not given in the sources.
+-*   **Voxel Resolution per Scale:** Not given in the sources.
+-*   **Weight $\lambda_{geo}$:** Not given in the sources.
++*   **Voxel Scales:** Typically 3 scales (low, mid, high) [S1].
++*   **Reference Frames:** Not explicitly defined in the notes, but requires at least one other view $j$ for reprojection [S1].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** Reprojection errors are sensitive to camera pose accuracy. Inaccurate poses can lead to incorrect pseudo-ground truth selection [S1].
+-*   **Boundaries:** The method assumes valid depth values from volume rendering. If a ray does not intersect any voxel, the depth may be undefined, requiring handling for missing data [G].
+-*   **Degenerate Input:** In scenarios with significant viewpoint changes or sparse training views, the method may face challenges in generalization, as accurate camera poses are required [S1].
+-
+-## Subtopics
+-
+-### Multi-scale Voxel Grids
+-A hierarchical representation capturing varying scene frequencies, where low-resolution voxels guide coarse geometry and high-resolution voxels refine details. Chosen when few-shot inputs require robust geometry learning without overfitting. [Link](52-multi-scale-voxel-grids.md)
+-
+-### Reprojection Error Metric
+-A measure of geometric consistency between views, used to select pseudo-ground truth depths. Chosen when explicit depth ground truth is unavailable. [Link](52-reprojection-error-metric.md)
++*   **Occlusions:** If frame $j$ does not see the surface point visible in frame $i$, the reprojection error will be large, potentially leading to incorrect pseudo-GT selection. The method relies on multi-view consistency [S1].
++*   **Depth Ambiguity:** In textureless regions, depth estimation may be unstable, affecting the reprojection error [S1].
++*   **Boundary Checks:** Reprojected coordinates $\tilde{p}_{li \to j}$ may fall outside the image bounds of frame $j$, requiring validation [S1].
++*   **Precision:** Floating-point precision in matrix operations and reprojection can introduce small errors [G].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the number of scales $L$, the number of training rays, and the number of frame pairs used for reprojection. Each ray requires reprojection to $N-1$ other views and error calculation across $L$ scales.
+-*   **Memory Complexity:** Requires storing multi-scale voxel grids and RGB maps for all training frames.
+-*   **Measured Performance:** In FrugalNeRF, Lgeo alone achieves lower final depth error than single-scale depth prior (Ld) and significantly reduces floaters [S1]. Combining Lgeo and Ld yields the best results [S1].
+-*   **Strengths:** Self-adaptive, no complex scheduling required, robust to geometric noise compared to feature warping methods like GeCoNeRF [S1].
+-*   **Limitations:** Relies on accurate camera poses; performance may degrade with sparse views or large viewpoint changes [S1].
++*   **Time Complexity:** Adds overhead for multi-scale volume rendering and reprojection calculations for each training step. The source notes that FrugalNeRF achieves state-of-the-art results with shorter training times compared to other few-shot methods, suggesting the regularization is efficient [S1].
++*   **Memory Complexity:** Requires storing multi-scale voxel grids and RGB maps for reference frames [S1].
++*   **Performance:** Significantly reduces floaters and improves convergence quality across scales compared to training without geometric adaptation [S1]. Provides a stronger and more robust constraint than the depth prior ($\mathcal{L}_d$), achieving lower final depth error [S1]. Combining $\mathcal{L}_{geo}$ with $\mathcal{L}_d$ yields the best results [S1].
++*   **Strengths:** Self-adaptive, no complex scheduling, no explicit depth ground truth required, robust to geometric noise compared to feature-warping methods like GeCoNeRF [S1].
++*   **Limitations:** Relies on accurate camera poses. May face challenges in generalization with significant viewpoint changes or sparse training views (e.g., 360° datasets) [S1].
+ 
+ ## Background
+-Cross-scale geometric adaptation was proposed in FrugalNeRF (2025) by [S1]. It addresses the challenge of few-shot novel view synthesis by regularizing training through multi-scale voxel geometry and reprojection errors. It builds on the idea that low-frequency components can guide coarse geometry early in training, while high-frequency components refine details later.
++Cross-scale geometric adaptation was proposed in **FrugalNeRF** by [S1] (CVPR 2025). It is designed for extreme few-shot novel view synthesis, accelerating and regularizing training by using weight-sharing voxels across scales and geometric adaptation via reprojection errors. It addresses the issue of floaters and sub-optimal convergence in few-shot scenarios by providing a self-adaptive supervisory signal for geometry [S1].
+ 
+ ## Sources

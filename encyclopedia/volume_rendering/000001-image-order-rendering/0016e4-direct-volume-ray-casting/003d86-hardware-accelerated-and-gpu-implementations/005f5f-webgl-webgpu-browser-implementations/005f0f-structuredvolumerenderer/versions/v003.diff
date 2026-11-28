@@ -1,0 +1,255 @@
+--- v002.md
++++ v003.md
+@@ -1,169 +1,107 @@
+ # StructuredVolumeRenderer
+ 
+-Also called: luma.gl StructuredVolumeRenderer, Luma.gl Volume Renderer
++Also called: luma.gl StructuredVolumeRenderer
+ 
+ ## Overview
+-StructuredVolumeRenderer is a reusable, graph-native WebGPU renderer for scalar, vector, and hybrid volume data, exposing facades at `@luma.gl/scene/forward`, `/deferred`, `/raytrace`, and `/raymarch` [S1, unofficial]. It solves the problem of rendering structured grid data (buffers or 3D textures) in the browser by providing a fixed-step jittered ray marching implementation with front-to-back compositing [S1, unofficial]. It sets itself apart from sibling WebGL implementations by leveraging the WebGPU compute/render pipeline for direct GPU execution without CPU submission, and by supporting both storage buffer and 3D texture backing with manual trilinear interpolation [S1, unofficial].
++StructuredVolumeRenderer is a reusable, graph-native GPU renderer for scalar, vector, and hybrid volume data in WebGPU environments [S1, unofficial]. It consumes storage buffers or 3D textures and exposes scene renderer facades for forward, deferred, raytrace, and raymarch passes [S1, unofficial]. It distinguishes itself from sibling WebGL implementations by leveraging WebGPU's storage buffer and texture binding models, manual trilinear interpolation, and fixed-step jittered ray marching with early opacity termination [S1, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input Data:** `float32` scalar buffers, `WGSL`-aligned `float32x4` vector buffers, or matching `float` 3D textures [S1, unofficial].
+-*   **Input Transforms:** Model-to-world matrix (`worldToVolumeMatrix`), camera position, and view/projection matrices [S1, unofficial].
+-*   **Input Parameters:** Local bounds, viewport/scissor rectangles, transfer functions (sequential/signed scalar, direction/constant vector), and optional 3D glyph configurations [S1, unofficial].
+-*   **Output:** Rendered image with premultiplied front-to-back transparency [S1, unofficial].
++**Inputs and Outputs**
++*   **Inputs**: Float32 scalar buffers, WGSL-aligned float32x4 vector buffers, or matching float 3D textures [S1, unofficial].
++*   **Outputs**: Rendered image with premultiplied front-to-back transparency [S1, unofficial].
+ 
+-**Data Structures:**
+-*   **Scalar Source:** Defined by `sources.scalar.type` ('buffer' or 'texture') and `sources.scalar.format` [S1, unofficial].
+-    *   If buffer: `read-only-storage` binding with `location: 0` [S1, unofficial].
+-    *   If texture: `texture_3d` binding with `viewDimension: '3d'` [S1, unofficial].
+-*   **Vector Source:** `WGSL`-aligned `float32x4` storage buffer [S1, unofficial].
+-*   **Binding Layout:** Texture bindings for 32-bit formats (`r32float`, `rgba32float`) must specify `sampleType: 'unfilterable-float'` to avoid pipeline creation failure on adapters lacking `float32-filterable` [S1, unofficial].
++**Data Structures**
++*   **Scalar Source**: Defined by `sources.scalar.type` ('buffer' or 'texture') [S1, unofficial].
++    *   If 'buffer': Binding layout is `read-only-storage`, group 0, location 0 [S1, unofficial].
++    *   If 'texture': Binding layout includes `viewDimension: '3d'` [S1, unofficial].
++*   **Vector Source**: WGSL-aligned float32x4 buffers [S1, unofficial].
++*   **Transforms**: `worldToVolumeMatrix` for coordinate transformation [S1, unofficial].
++*   **Camera**: `cameraAndSamples.xyz` for ray origin derivation [S1, unofficial].
+ 
+-**Numbered Steps:**
+-1.  **Initialization:** Construct the renderer with fixed dimensions, backing type, and channel format. These are construction-time invariants [S1, unofficial].
+-2.  **Binding Setup:**
+-    *   For scalar buffers, validate offset alignment. The offset must be an integer, non-negative, and a multiple of `bytesPerElement` [S1, unofficial].
+-    *   Enforce WebGPU `device.limits.minStorageBufferOffsetAlignment` (commonly 256 bytes) for storage buffer offsets. If the source offset is not aligned, bind from an aligned base and apply a shader-side element offset [S1, unofficial].
+-    *   For scalar textures, set `sampleType: 'unfilterable-float'` for 32-bit formats [S1, unofficial].
+-3.  **Ray Generation:**
+-    *   Compute `nearWorld` and `farWorld` by unprojecting the camera UV coordinates at depth 0.0 and 1.0 respectively [S1, unofficial].
++**Numbered Steps**
++1.  **Source Binding Setup**: Determine binding type based on `sources.scalar.type`. If texture, set `viewDimension` to '3d' [S1, unofficial].
++2.  **Offset Validation**: Check if buffer offset is an integer, non-negative, and aligned to `bytesPerElement` [S1, unofficial].
++3.  **Ray Generation**:
++    *   Compute `nearWorld` by unprojecting camera UV at depth 0.0 [S1, unofficial].
++    *   Compute `farWorld` by unprojecting camera UV at depth 1.0 [S1, unofficial].
+     *   Transform `nearWorld` using `worldToVolumeMatrix` to get `rayOrigin` [S1, unofficial].
+     *   Transform `farWorld` using `worldToVolumeMatrix` to get `rayTarget` [S1, unofficial].
+-    *   Compute `rayDirection = normalize(rayTarget - rayOrigin)` [S1, unofficial].
+-    *   *Note:* Do not use a single camera position as the origin for all rays, as this causes convergence in orthographic projections and ignores near-plane clipping in perspective projections [S1, unofficial].
+-4.  **Ray Marching:**
+-    *   Perform fixed-step jittered ray marching [S1, unofficial].
+-    *   Sample the volume data using manual eight-corner trilinear interpolation for both buffer and texture backings [S1, unofficial].
+-    *   Apply transfer functions: sequential/signed scalar values or direction/constant vector colors [S1, unofficial].
+-    *   Composite using premultiplied front-to-back transparency [S1, unofficial].
+-    *   Terminate early if opacity threshold is reached [S1, unofficial].
+-5.  **Rendering:**
+-    *   Call `prepare(commandEncoder, options)` to set up the render pass [S1, unofficial].
+-    *   Call `draw(renderPass)` to execute the draw call [S1, unofficial].
+-    *   *Note:* These functions do not submit the command buffer internally; submission is handled by the caller [S1, unofficial].
++    *   Compute `rayDirection` as `normalize(rayTarget - rayOrigin)` [S1, unofficial].
++4.  **Ray Marching**: Execute fixed-step jittered ray marching [S1, unofficial].
++5.  **Interpolation**: Perform manual eight-corner trilinear interpolation for volume values [S1, unofficial].
++6.  **Compositing**: Apply premultiplied front-to-back transparency [S1, unofficial].
++7.  **Early Termination**: Terminate ray if accumulated opacity exceeds threshold [S1, unofficial].
++8.  **Transfer Function**: Apply sequential/signed scalar transfer functions or direction/constant vector colors [S1, unofficial].
+ 
+-**Pseudocode:**
++**Formulas**
++*   Ray Origin: $O = M_{w2v} \cdot \text{unproject}(UV, 0.0)$
++*   Ray Direction: $D = \text{normalize}(M_{w2v} \cdot \text{unproject}(UV, 1.0) - O)$
++*   Compositing: Standard front-to-back alpha blending [S1, unofficial].
++
++**Parameters**
++*   **Ray Samples**: 72 samples per view in showcase [S1, unofficial].
++*   **Boundary Handling**: Second-order centered differences in interior; selectable second-order one-sided or periodic boundary handling [S1, unofficial].
++*   **Glyphs**: Optional 3D arrows (solid shaft-plus-cone SDFs) [S1, unofficial].
++
++**Edge Cases and Pitfalls**
++*   **Texture Binding**: On adapters without `float32-filterable`, r32float/rgba32float textures must be bound with `unfilterable-float` sample type to avoid pipeline creation failure [S1, unofficial].
++*   **Buffer Offset Alignment**: WebGPU requires storage buffer offsets to be multiples of `device.limits.minStorageBufferOffsetAlignment` (commonly 256) [S1, unofficial].
++*   **Ray Origin**: Using a single camera position for orthographic projections causes rays to converge; using near plane unprojection ensures parallel rays and correct near-plane clipping [S1, unofficial].
++
++**Pseudocode**
+ ```python
+-# Initialization
+-class StructuredVolumeRenderer:
+-    def __init__(self, device, sources, options):
+-        self.device = device
+-        self.sources = sources
+-        # Dimensions, backing type, and channel format are construction-time invariants
+-        self.dimensions = options.dimensions
+-        self.backing_type = options.backing_type
+-        self.channel_format = options.channel_format
+-        
+-        # Setup bindings
+-        self.bindings = self._setup_bindings(sources)
++def setup_binding(sources):
++    if sources.scalar.type == 'buffer':
++        return {
++            'type': 'read-only-storage',
++            'group': 0,
++            'location': 0
++        }
++    else:
++        return {
++            'type': 'texture',
++            'group': 0,
++            'location': 0,
++            'viewDimension': '3d'
++        }
+ 
+-    def _setup_bindings(self, sources):
+-        bindings = {}
+-        # Scalar source binding
+-        if sources.scalar.type == 'buffer':
+-            offset = sources.scalar.offset if hasattr(sources.scalar, 'offset') else 0
+-            bytes_per_element = 4 # float32
+-            if not isinstance(offset, int) or offset < 0 or offset % bytes_per_element != 0:
+-                raise Error('Structured volume buffer offset is not aligned to its element format.')
+-            
+-            # Enforce device alignment
+-            min_alignment = self.device.limits.minStorageBufferOffsetAlignment
+-            if offset % min_alignment != 0:
+-                # Bind from aligned base and add shader-side offset
+-                aligned_offset = (offset // min_alignment) * min_alignment
+-                shader_offset = offset - aligned_offset
+-                bindings['scalar'] = {
+-                    'type': 'read-only-storage',
+-                    'group': 0,
+-                    'location': 0,
+-                    'buffer': sources.scalar.buffer,
+-                    'offset': aligned_offset,
+-                    'shader_offset': shader_offset
+-                }
+-            else:
+-                bindings['scalar'] = {
+-                    'type': 'read-only-storage',
+-                    'group': 0,
+-                    'location': 0,
+-                    'buffer': sources.scalar.buffer,
+-                    'offset': offset
+-                }
+-        elif sources.scalar.type == 'texture':
+-            bindings['scalar'] = {
+-                'type': 'texture',
+-                'group': 0,
+-                'location': 0,
+-                'view_dimension': '3d',
+-                'sample_type': 'unfilterable-float' # Required for 32-bit formats
+-            }
+-        return bindings
++def validate_offset(binding, bytes_per_element):
++    offset = binding.offset if 'offset' in binding else 0
++    if not isinstance(offset, int) or offset < 0 or offset % bytes_per_element != 0:
++        raise Error('Structured volume buffer offset is not aligned to its element format.')
+ 
+-    def prepare(self, command_encoder, options):
+-        # Set up render pass with viewport/scissor control
+-        # Set up bind groups from self.bindings
+-        pass
++def generate_ray(camera_uv, world_to_volume_matrix):
++    near_world = unproject(camera_uv, 0.0)
++    far_world = unproject(camera_uv, 1.0)
++    ray_origin = transform_point(world_to_volume_matrix, near_world)
++    ray_target = transform_point(world_to_volume_matrix, far_world)
++    ray_direction = normalize(ray_target - ray_origin)
++    return ray_origin, ray_direction
+ 
+-    def draw(self, render_pass):
+-        # Execute draw call
+-        pass
+-
+-    def render(self, camera, command_encoder, render_pass):
+-        # Ray Generation
+-        camera_uv = get_pixel_uv() # Per-pixel UV
+-        near_world = unproject(camera_uv, 0.0)
+-        far_world = unproject(camera_uv, 1.0)
+-        
+-        ray_origin = transform_point(camera.world_to_volume_matrix, camera.position)
+-        # Corrected: Use nearWorld for origin to handle orthographic/perspective correctly
+-        ray_origin = transform_point(camera.world_to_volume_matrix, near_world)
+-        ray_target = transform_point(camera.world_to_volume_matrix, far_world)
+-        ray_direction = normalize(ray_target - ray_origin)
+-        
+-        # Ray Marching
+-        color = vec4(0.0)
+-        alpha = 0.0
+-        step_size = calculate_step_size(camera, self.dimensions)
+-        current_pos = ray_origin
+-        
+-        for i in range(max_steps):
+-            if alpha >= 1.0:
+-                break
+-            
+-            # Sample volume
+-            value = sample_volume(current_pos, self.sources, self.bindings)
+-            
+-            # Apply transfer function
+-            color_sample, alpha_sample = apply_transfer_function(value)
+-            
+-            # Front-to-back compositing
+-            color = color + color_sample * (1.0 - alpha)
+-            alpha = alpha + alpha_sample * (1.0 - alpha)
+-            
+-            current_pos += ray_direction * step_size
+-        
+-        return color
++def render(command_encoder, render_pass, structured_volume):
++    # Prepare and draw do not submit internally
++    prepare(command_encoder, structured_volume.options)
++    draw(render_pass, structured_volume)
+ ```
+ 
+-**Parameters:**
+-*   **Ray Samples:** 72 ray samples per selected view in the showcase [S1, unofficial].
+-*   **Update Rate:** 30 Hz field/derivative updates without volume readback [S1, unofficial].
+-*   **Boundary Handling:** Selectable second-order one-sided or periodic boundary handling for finite difference calculations [S1, unofficial].
++## Subtopics
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Float32 Texture Binding:** On adapters without `float32-filterable`, `r32float` and `rgba32float` sources fail if `sampleType` is omitted. Must be set to `unfilterable-float` [S1, unofficial].
+-*   **Storage Buffer Offset Alignment:** WebGPU requires offsets to be multiples of `minStorageBufferOffsetAlignment` (commonly 256). Non-aligned offsets cause bind-group creation failure [S1, unofficial].
+-*   **Ray Origin Calculation:** Using a single camera position as the origin for all rays causes convergence in orthographic projections and ignores near-plane clipping. Rays must start from the unprojected near plane [S1, unofficial].
++### WebGL Multi-pass Ray-casting with 3D Geometry Intersection
++Uses multi-pass approach with 3D geometry intersection for ray-box intersection [6575-webgl-multi-pass-ray-casting-with-3d-geometry-intersection.md]. Choose when WebGL is required or when geometry-based intersection is preferred.
++
++### WebGL Path Tracing Volume Rendering
++Uses path tracing for more accurate lighting and scattering [8592-webgl-path-tracing-volume-rendering.md]. Choose when physically accurate lighting is needed and performance allows.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear with respect to the number of ray samples and volume depth. Fixed-step marching implies constant steps per ray.
+-*   **Memory Complexity:** Linear with respect to the volume data size (buffer or texture).
+-*   **Measured Performance:** 40³ showcase volume with 72 ray samples per view, 6³ glyph lattice, and 30 Hz field/derivative updates without volume readback [S1, unofficial].
+-*   **Strengths:** Reusable, graph-native, supports both buffers and textures, manual trilinear interpolation, early opacity termination.
+-*   **Limitations:** Fixed-step marching may be less efficient than adaptive methods. Requires WebGPU support.
+-*   **When to Use:** Browser-based volume rendering of structured grid data (scalar, vector, hybrid) where GPU performance is critical.
+-*   **When Not to Use:** When adaptive ray marching is required, or when running on hardware without WebGPU support.
++*   **Time Complexity**: Fixed-step ray marching with 72 samples per view in showcase [S1, unofficial].
++*   **Memory Complexity**: Depends on volume resolution; 40³ showcase volume used [S1, unofficial].
++*   **Performance**: 30 Hz field/derivative updates without volume readback in showcase [S1, unofficial].
++*   **Strengths**: Reusable, graph-native, supports scalar/vector/hybrid data, manual interpolation for control [S1, unofficial].
++*   **Limitations**: Requires WebGPU, manual interpolation may be slower than hardware trilinear, alignment constraints [S1, unofficial].
++*   **When to Use**: WebGPU environments, need for reusable renderer, scalar/vector/hybrid data [S1, unofficial].
++*   **When Not to Use**: WebGL-only environments, need for hardware trilinear interpolation [S1, unofficial].
+ 
+ ## Background
+-StructuredVolumeRenderer was introduced as part of the luma.gl library to provide a reusable, graph-native GPU primitive for volume rendering [S1, unofficial]. It was developed to support the Vector Field Lab showcase, which includes animated Taylor–Green fields, divergence views, and curl glyphs [S1, unofficial]. The renderer is designed to be integrated into the luma.gl scene graph, exposing facades for forward, deferred, ray-tracing, and ray-marching rendering modes [S1, unofficial]. It is part of the ongoing development of WebGPU-based visualization tools in the visgl ecosystem.
++StructuredVolumeRenderer was introduced in luma.gl PR #3104 as part of the Vector Field Lab showcase [S1, unofficial]. It supports scalar, vector, and hybrid volume rendering, exposing facades for various rendering passes [S1, unofficial]. The renderer is designed to be reusable and graph-native, integrating with WebGPU's command encoding and rendering pass models [S1, unofficial].
+ 
+ ## Sources

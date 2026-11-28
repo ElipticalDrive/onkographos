@@ -1,0 +1,202 @@
+Describe the feature you would like to be added. Add a resample_to_image filter on pyvista.DataSet (and by extension MultiBlock) that resamples any mesh onto a pyvista.ImageData grid in a single call, with sensible automatic defaults for...
+
+`DataSet.resample_to_image()` for one-line uniform-grid resampling · Issue #9221 · pyvista/pyvista · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+DataSet.resample_to_image() for one-line uniform-grid resampling #9221
+New issue
+Copy link
+New issue
+Copy link
+Closed
+#9226
+Closed
+DataSet.resample_to_image() for one-line uniform-grid resampling#9221
+#9226
+Copy link
+Labels
+feature-requestPlease add this cool feature!Please add this cool feature!
+Description
+banesullivan
+opened on Sep 12, 2026
+Issue body actions
+Describe the feature you would like to be added.
+Add a resample_to_image filter on pyvista.DataSet (and by extension MultiBlock) that resamples any mesh onto a pyvista.ImageData grid in a single call, with sensible automatic defaults for dimensions, origin, and spacing derived from the input.
+Today, getting from an arbitrary mesh (UnstructuredGrid, StructuredGrid, RectilinearGrid, PolyData) to an ImageData requires manually constructing the target grid before calling sample:
+```
+b = mesh.bounds
+grid = pv.ImageData(
+    dimensions=(256, 256, 256),
+    origin=(b.x_min, b.y_min, b.z_min),
+    spacing=(
+        (b.x_max - b.x_min) / 255,
+        (b.y_max - b.y_min) / 255,
+        (b.z_max - b.z_min) / 255,
+    ),
+)
+volume = grid.sample(mesh)
+```
+This is boilerplate that gets repeated in every notebook that wants to volume-render a non-uniform mesh. It also has a few easy-to-miss bugs (off-by-one on spacing, dimensions vs. cells confusion, anisotropic data getting forced into an isotropic grid).
+The proposed API:
+```
+volume = mesh.resample_to_image()                        # automatic everything
+volume = mesh.resample_to_image(dimensions=(512, 512, 512))
+volume = mesh.resample_to_image(spacing=0.5)             # uniform spacing in world units
+volume = mesh.resample_to_image(target_voxels=64_000_000) # cap total voxel count
+```
+This matters for volume rendering specifically. vtkGPUVolumeRayCastMapper is dramatically faster on ImageData than any unstructured volume mapper, because uniform spacing maps directly to a 3D texture lookup. Making the resample step trivial removes the main reason users currently get poor volume-rendering performance on non-ImageData inputs.
+Automatic defaults that should be robust
+The hard part is picking dimensions and spacing without user input. Proposed logic:
+Bounds: take mesh.bounds. Add a small epsilon (e.g. 0.5 * cell-size) so points exactly on the boundary sample cleanly.
+Anisotropy: respect the dataset's aspect ratio. Do not force a cubic (256, 256, 256) grid on a thin slab dataset. Compute extents along each axis and allocate dimensions proportionally.
+Resolution target: default to a total voxel budget (e.g. ~16M voxels, ~64MB at float32). Distribute that budget across axes proportionally to extent. Users can override via dimensions, spacing, or target_voxels.
+Native cell scale: if the input is ImageData/RectilinearGrid/StructuredGrid, use its existing cell sizes as a hint for the spacing floor so we never resample below the native resolution by accident. For UnstructuredGrid/PolyData, estimate from mesh.length / cbrt(n_points) as a starting point.
+Fallback: clamp dimensions to [8, 1024] per axis to avoid pathological inputs producing huge grids or degenerate single-voxel slabs.
+Resolution conflicts
+If the user passes both dimensions and spacing, raise. Pick one. If both are None, the auto-budget kicks in.
+Empty / invalid samples
+vtkResampleWithDataSet (which sample already wraps) marks invalid points with vtkValidPointMask. The new filter should preserve this and document that volume rendering of the result will show transparent regions where the mesh did not cover. No new behavior needed; just call this out clearly.
+Why a new filter rather than just docs
+sample already exists, and so does ImageData.resample. Neither answers "give me an ImageData from this arbitrary mesh." A thin filter that picks reasonable defaults is the missing piece, and it deserves a dedicated entry point so it shows up in autocomplete and docs.
+Links to VTK Documentation, Examples, or Class Definitions.
+vtkResampleToImage: https://vtk.org/doc/nightly/html/classvtkResampleToImage.html
+vtkResampleWithDataSet (already wrapped by DataSet.sample): https://vtk.org/doc/nightly/html/classvtkResampleWithDataSet.html
+vtkGPUVolumeRayCastMapper (the consumer that benefits most): https://vtk.org/doc/nightly/html/classvtkGPUVolumeRayCastMapper.html
+Existing PyVista wrapper: https://github.com/pyvista/pyvista/blob/main/pyvista/core/filters/image_data.py (see ImageData.resample)
+Existing PyVista wrapper: https://github.com/pyvista/pyvista/blob/main/pyvista/core/filters/data_object.py (see DataObjectFilters.sample)
+vtkResampleToImage is the canonical VTK class for this exact operation. The PyVista filter could wrap it directly instead of building on sample, which simplifies the implementation and gets us VTK's own bounds/dimension defaults for free.
+Pseudocode or Screenshots
+Proposed signature and reference implementation sketch:
+```
+def resample_to_image(
+    self,
+    dimensions=None,
+    spacing=None,
+    bounds=None,
+    target_voxels=16_777_216,    # ~16M voxels, ~64MB float32 per scalar
+    max_dim=1024,
+    min_dim=8,
+    tolerance=None,
+    pass_cell_data=True,
+    pass_point_data=True,
+    progress_bar=False,
+):
+    """Resample this mesh onto a uniform ImageData grid.
+
+    If neither ``dimensions`` nor ``spacing`` is given, picks dimensions
+    automatically from the mesh bounds and aspect ratio so the total voxel
+    count is approximately ``target_voxels``. Per-axis dimensions are
+    proportional to the extent along that axis and clamped to
+    ``[min_dim, max_dim]``.
+
+    Returns
+    -------
+    pyvista.ImageData
+        Uniform grid with all point/cell arrays from ``self`` resampled
+        onto its points. Points that fall outside the source mesh are
+        flagged via the ``vtkValidPointMask`` array.
+    """
+    if dimensions is not None and spacing is not None:
+        raise ValueError("Pass dimensions OR spacing, not both.")
+
+    bounds = bounds or self.bounds
+    extents = (
+        bounds.x_max - bounds.x_min,
+        bounds.y_max - bounds.y_min,
+        bounds.z_max - bounds.z_min,
+    )
+
+    if dimensions is None and spacing is None:
+        dimensions = _auto_dimensions(extents, target_voxels, min_dim, max_dim)
+    elif spacing is not None:
+        spacing_vec = (spacing,) * 3 if np.isscalar(spacing) else tuple(spacing)
+        dimensions = tuple(
+            int(np.clip(round(e / s) + 1, min_dim, max_dim))
+            for e, s in zip(extents, spacing_vec)
+        )
+
+    spacing = tuple(
+        e / max(d - 1, 1) for e, d in zip(extents, dimensions)
+    )
+    origin = (bounds.x_min, bounds.y_min, bounds.z_min)
+
+    target = pv.ImageData(
+        dimensions=dimensions, origin=origin, spacing=spacing,
+    )
+    return target.sample(
+        self,
+        tolerance=tolerance,
+        pass_cell_data=pass_cell_data,
+        pass_point_data=pass_point_data,
+        progress_bar=progress_bar,
+    )
+
+
+def _auto_dimensions(extents, target_voxels, min_dim, max_dim):
+    """Distribute target_voxels across axes proportional to extent."""
+    extents = np.asarray(extents, dtype=float)
+    nonzero = extents > 0
+    if not nonzero.any():
+        return (min_dim, min_dim, min_dim)
+
+    # Geometric scale that gives prod(dims) == target_voxels
+    # with dims_i proportional to extents_i along nonzero axes.
+    log_extents = np.zeros(3)
+    log_extents[nonzero] = np.log(extents[nonzero])
+    avg = log_extents[nonzero].mean()
+    n_nonzero = nonzero.sum()
+    scale = (target_voxels ** (1.0 / n_nonzero)) / np.exp(avg)
+
+    dims = np.where(nonzero, np.round(extents * scale), min_dim).astype(int)
+    return tuple(int(np.clip(d, min_dim, max_dim)) for d in dims)
+```
+End-user usage for volume rendering:
+```
+import pyvista as pv
+
+mesh = pv.read("seismic.vtu")          # any DataSet
+volume = mesh.resample_to_image()      # one line, sensible defaults
+pl = pv.Plotter()
+pl.add_volume(volume, cmap="viridis", opacity="sigmoid")
+pl.show()
+```
+Reactions are currently unavailable
+Activity
+banesullivan
+added
+feature-requestPlease add this cool feature!Please add this cool feature!
+on Sep 12, 2026
+user27182 commented on Sep 12, 2026
+user27182
+on Sep 12, 2026
+Last edited by user27182
+Contributor
+More actions
+The hard part is picking dimensions and spacing without user input.
+voxelize_binary_maskalready solves this using vtkLengthDistribution to get an estimate of the dataset's cell sizes and picks the 10th percentile from the distribution of cell sizes.
+Does this method work for you? We could refactor and re-use the logic from voxelize_binary_mask so that the API and implementation is the same between the two filters, i.e. both would have reference_volume, dimensions and spacing as keywords.
+akaszynski
+closed this as completedin #9226on Sep 20, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+feature-requestPlease add this cool feature!Please add this cool feature!
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

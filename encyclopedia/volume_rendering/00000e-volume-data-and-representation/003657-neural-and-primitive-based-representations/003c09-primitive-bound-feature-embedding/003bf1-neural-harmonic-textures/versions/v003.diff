@@ -1,0 +1,163 @@
+--- v002.md
++++ v003.md
+@@ -8,13 +8,13 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A set of primitives $\mathcal{G}$ (e.g., Gaussians, tetrahedra, triangles), each associated with a virtual scaffold. For 3D primitives, this scaffold is a bounding tetrahedron; for 2D primitives, it is a virtual triangle [S1].
++*   **Input:** A set of primitives $\mathcal{G}$ (e.g., Gaussians, tetrahedra, triangles), each associated with a virtual scaffold [S1].
+ *   **Input:** Camera parameters (position, orientation, intrinsics) and ray directions $\mathbf{d}$ [S1].
+ *   **Output:** Pixel color $\mathbf{c}$ and optionally high-dimensional semantic features [S1].
+ 
+ **Data Structures:**
+-*   **Primitive Scaffold:** Each primitive $i$ has a virtual scaffold defined by vertices.
++*   **Primitive Scaffold:** Each primitive $i$ has a virtual scaffold defined by vertices [S1].
+     *   For 3D primitives (e.g., Gaussians encapsulated in tetrahedra): 4 vertices [S1].
+     *   For 2D primitives (e.g., 2DGS, Triangle Splatting): 3 vertices [S1].
+-*   **Feature Vectors:** Learnable feature vectors $\mathbf{f}_{v}$ are attached to each vertex $v$ of the scaffold.
++*   **Feature Vectors:** Learnable feature vectors $\mathbf{f}_{v}$ are attached to each vertex $v$ of the scaffold [S1].
+     *   Total features per primitive: 64 [S1].
+     *   Distribution: 16 features per vertex for tetrahedral primitives (4 vertices $\times$ 16 = 64) [S1]. For 2D primitives, 3 vertices $\times$ 16 = 48 features [S1].
+@@ -23,5 +23,5 @@
+ **Numbered Steps:**
+ 
+-1.  **Ray-Primitive Intersection:** For each pixel, cast a ray and determine the intersection point $p^*_i$ with each primitive $i \in \mathcal{G}$. The point $p^*_i$ is typically defined as the point along the ray where the projected primitive has its maximum response [S1].
++1.  **Ray-Primitive Intersection:** For each pixel, cast a ray and determine the intersection point $p^*_i$ with each primitive $i \in \mathcal{G}$ [S1]. The point $p^*_i$ is typically defined as the point along the ray where the projected primitive has its maximum response [S1].
+ 2.  **Local Interpolation:** Interpolate the vertex feature vectors $\mathbf{f}_{v_i}$ of the primitive's scaffold at the intersection point $p^*_i$ to obtain the primitive's local feature vector $\mathbf{f}_i$ [S1].
+     *   For 3D tetrahedral primitives, use barycentric interpolation [S1].
+@@ -43,30 +43,15 @@
+ 
+ ```python
+-import math
+ import numpy as np
+ 
+-def neural_harmonic_textures(primitives, ray_origin, ray_direction, mlp_weights):
++def accumulate_harmonic_signal(primitives, ray_origin, ray_direction):
+     """
+-    Renders a single ray using Neural Harmonic Textures.
++    Computes the accumulated harmonic signal H for a single ray.
++    Matches the formula: H = sum_{i in G} alpha_i * T_i * [sin(f_i); cos(f_i)]
++    """
++    harmonic_accumulator = np.zeros(128)  # 64 sin + 64 cos channels
++    transmittance = 1.0
+     
+-    Args:
+-        primitives: List of primitive objects. Each primitive has:
+-            - vertices: List of 3D points defining the virtual scaffold (4 for 3D, 3 for 2D).
+-            - vertex_features: List of feature vectors (numpy arrays) for each vertex.
+-            - opacity: Scalar alpha value.
+-            - get_intersection(ray_origin, ray_direction): Returns (point, barycentric_coords) 
+-              or None if no intersection.
+-        ray_origin: 3D numpy array.
+-        ray_direction: 3D numpy array.
+-        mlp_weights: Weights for the 128x3 MLP decoder.
+-        
+-    Returns:
+-        color: 3D numpy array (RGB).
+-    """
+-    
+-    # Step 1 & 2: Intersect and Interpolate Features
+-    harmonic_accumulator = np.zeros(128) # 64 sin + 64 cos channels
+-    
+-    # Sort primitives by distance for correct alpha blending order
++    # Collect intersections and sort by distance for correct alpha blending order
+     intersections = []
+     for prim in primitives:
+@@ -74,15 +59,11 @@
+         if result is not None:
+             point, bary_coords = result
+-            # Calculate distance from origin
+             dist = np.linalg.norm(point - ray_origin)
+-            intersections.append((dist, prim, point, bary_coords))
++            intersections.append((dist, prim, bary_coords))
+             
+     intersections.sort(key=lambda x: x[0])
+     
+-    transmittance = 1.0
+-    
+-    for dist, prim, point, bary_coords in intersections:
+-        # Interpolate vertex features at the intersection point
+-        # bary_coords should sum to 1.0 and correspond to prim.vertices
++    for _, prim, bary_coords in intersections:
++        # Step 2: Local Interpolation
+         f_i = np.zeros(64)
+         for v_idx, weight in enumerate(bary_coords):
+@@ -90,11 +71,8 @@
+             
+         # Step 3: Harmonic Encoding
+-        # Apply sin and cos to the feature vector
+-        sin_features = np.sin(f_i)
+-        cos_features = np.cos(f_i)
+-        h_i = np.concatenate([sin_features, cos_features])
++        h_i = np.concatenate([np.sin(f_i), np.cos(f_i)])
+         
+         # Step 4: Alpha Blending
+-        alpha = prim.opacity
++        alpha = np.clip(prim.opacity, 0.0, 1.0)  # Clamp to prevent negative transmittance
+         contribution = alpha * transmittance * h_i
+         harmonic_accumulator += contribution
+@@ -102,45 +80,35 @@
+         transmittance *= (1.0 - alpha)
+         
++        # Early exit if ray is fully opaque
+         if transmittance < 1e-4:
+             break
+             
+-    # Step 5: Directional Encoding (Standard case)
+-    # Encode ray direction with 2nd degree spherical harmonics (9 coefficients)
++    return harmonic_accumulator
++
++def decode_harmonic_signal(harmonic_accumulator, ray_direction):
++    """
++    Deferred decoding pass. Matches: c = MLP_theta(H, k * SH2(d))
++    """
++    # Step 5: Directional Encoding
+     sh2_d = spherical_harmonics_2(ray_direction)
+     
+-    # Step 6: Deferred Decoding
+-    # Concatenate harmonic signal and directional encoding
+-    input_to_mlp = np.concatenate([harmonic_accumulator, sh2_d])
++    # Step 6: MLP Decoding (128-wide x 3 hidden layers)
++    # Input: 128 (H) + 9 (SH2) = 137 dimensions
++    x = np.concatenate([harmonic_accumulator, sh2_d])
+     
+-    # Simple 3-layer MLP: 128 -> 128 -> 128 -> 3 (RGB)
+-    # Assuming mlp_weights is structured as [W1, b1, W2, b2, W3, b3, W4, b4]
+-    # W1: 137x128, b1: 128, W2: 128x128, b2: 128, W3: 128x128, b3: 128, W4: 128x3, b4: 3
+-    # Note: This is a simplified representation. In practice, weights are loaded from the trained model.
+-    
+-    x = input_to_mlp
+-    x = np.dot(x, mlp_weights[0]) + mlp_weights[1]
+-    x = np.maximum(0, x) # ReLU
+-    
+-    x = np.dot(x, mlp_weights[2]) + mlp_weights[3]
+-    x = np.maximum(0, x) # ReLU
+-    
+-    x = np.dot(x, mlp_weights[4]) + mlp_weights[5]
+-    x = np.maximum(0, x) # ReLU
+-    
+-    color = np.dot(x, mlp_weights[6]) + mlp_weights[7]
++    # Layer 1: 137 -> 128
++    x = np.maximum(0.0, np.dot(x, W1) + b1)
++    # Layer 2: 128 -> 128
++    x = np.maximum(0.0, np.dot(x, W2) + b2)
++    # Layer 3: 128 -> 128
++    x = np.maximum(0.0, np.dot(x, W3) + b3)
++    # Output: 128 -> 3 (RGB)
++    color = np.dot(x, W4) + b4
+     
+     return color
+ 
+ def spherical_harmonics_2(direction):
+-    """
+-    Computes 2nd degree spherical harmonics for a normalized direction vector.
+-    Returns 9 coefficients.
+-    """
++    """Computes 2nd degree spherical harmonics for a normalized direction vector. Returns 9 coefficients."""
+     x, y, z = direction
+-    # Standard SH2 basis functions (unnormalized for simplicity, scaling handled in MLP)
+-    # L0: 1
+-    # L1: x, y, z
+-    # L2: xy, xz, yz, x^2-y^2, 3z^2-1 (or similar variants)
+-    # Using common OpenGL/WebGL SH2 order
+     return np.array([
+         1.0,

@@ -1,0 +1,153 @@
+--- v001.md
++++ v002.md
+@@ -8,5 +8,5 @@
+ ## How it works
+ **Inputs:**
+-*   A 3D volume dataset $V$ consisting of scalar values $v_{ijk}$ at voxel centers or grid points.
++*   A 3D volume dataset $V$ consisting of scalar values $v_{ijk}$ at voxel centers or grid points [G].
+ *   An isovalue threshold $t$ (commonly $t=0$ for signed distance fields or binary segmentation) [S1, unofficial][S2].
+ *   Voxel dimensions $(dx, dy, dz)$. If the dataset consists of 2D slices where the inter-slice distance differs from the in-plane pixel size, the data must be resampled to ensure cubic voxels ($dx=dy=dz$) [S1, unofficial].
+@@ -16,80 +16,68 @@
+ 
+ **Data Structures:**
+-*   The input volume is treated as a regular grid.
++*   The input volume is treated as a regular grid [G].
+ *   The output is a set of polygons (quads) or a mesh structure containing vertices and face indices [S1, unofficial][S2].
+ 
+ **Steps:**
+ 1.  **Preprocessing:** Ensure voxel isotropy. If the distance between slices is larger than the pixel size, resample the data so the gap between slices equals the pixel size [S1, unofficial].
+-2.  **Segmentation:** Determine which voxels belong to the object. For each voxel, compare its value $v$ against the isovalue $t$ [S1, unofficial][S2]:
+-    *   If $v < t$ (inside) or $v > t$ (outside), classify the voxel state [S2].
+-    *   Specifically, identify voxels where the value crosses the threshold, indicating the voxel is part of the surface [S1, unofficial].
+-3.  **Face Selection:** For each voxel identified as part of the surface, determine which of its 6 faces are exposed to the exterior [S1, unofficial][S2]. A face is selected if it separates a voxel that is "inside" ($t < 0$) from a voxel that is "outside" ($t \ge 0$) [S2].
+-    *   *Note:* Some implementations simply generate all 6 faces for every intersected voxel and rely on rendering order or back-face culling, but the optimized approach selects only separating faces [S1, unofficial][S2].
+-4.  **Mesh Stitching:** Stitch the selected faces together to form a quad mesh [S2].
+-    *   **Ambiguity Resolution:** In configurations where four faces meet at an edge (ambiguous configuration), the algorithm must decide which pair of faces to stitch together. This is resolved using the asymptotic decider by Nielson and Hamann, originally invented for Marching Cubes [S2].
++2.  **Segmentation:** Determine which voxels belong to the object. For each voxel, compare its value $v$ against the isovalue $t$ [S1, unofficial][S2]. Voxels with $v < t$ are classified as inside, and voxels with $v \ge t$ are classified as outside [S2]. Identify voxels where the value crosses the threshold, indicating the voxel is part of the surface [S1, unofficial].
++3.  **Face Selection:** For each voxel identified as part of the surface, determine which of its 6 faces are exposed to the exterior [S1, unofficial][S2]. A face is selected if it separates a voxel that is inside ($v < t$) from a voxel that is outside ($v \ge t$) [S2].
++4.  **Mesh Stitching:** Stitch the selected faces together to form a quad mesh [S2]. In configurations where four faces meet at an edge (ambiguous configuration), the algorithm must decide which pair of faces to stitch together. This is resolved using the asymptotic decider by Nielson and Hamann, originally invented for Marching Cubes [S2].
+ 5.  **Rendering:** Render each polygon in an appropriate color [S1, unofficial]. Gradient shading can be applied to reduce the blocky appearance [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def cuberille(volume, isovalue):
++def cuberille(volume, isovalue, voxel_size=(1.0, 1.0, 1.0)):
+     """
+     volume: 3D array of scalar values
+     isovalue: threshold t
+-    Returns: list of quads (each quad is a list of 4 vertices)
++    voxel_size: (dx, dy, dz)
++    Returns: list of quads (each quad is a list of 4 vertices in world coordinates)
+     """
+     quads = []
+-    # Assume volume dimensions are X, Y, Z
+-    # Ensure cubic voxels; if not, resample first (not implemented here)
+-    
+-    for x in range(volume.shape[0]):
+-        for y in range(volume.shape[1]):
+-            for z in range(volume.shape[2]):
++    X, Y, Z = volume.shape
++    dx, dy, dz = voxel_size
++    for x in range(X):
++        for y in range(Y):
++            for z in range(Z):
+                 val = volume[x, y, z]
+-                
+-                # Check if voxel is part of the surface
+-                # Condition: voxel value crosses isovalue relative to neighbors
+-                # Or simply: voxel is "inside" and has an "outside" neighbor
+-                is_inside = val < isovalue
+-                
+-                # Check 6 neighbors
+-                neighbors = [
+-                    (x+1, y, z), (x-1, y, z),
+-                    (x, y+1, z), (x, y-1, z),
+-                    (x, y, z+1), (x, y, z-1)
+-                ]
+-                
+-                for nx, ny, nz in neighbors:
+-                    # Boundary check
+-                    if not (0 <= nx < volume.shape[0] and 
+-                            0 <= ny < volume.shape[1] and 
+-                            0 <= nz < volume.shape[2]):
+-                        # Outside world is considered "outside"
+-                        outside_neighbor = True
+-                    else:
+-                        n_val = volume[nx, ny, nz]
+-                        outside_neighbor = n_val >= isovalue
+-                    
+-                    # If current is inside and neighbor is outside, generate face
+-                    if is_inside and outside_neighbor:
+-                        # Determine face geometry based on neighbor direction
+-                        # This generates the quad for the separating face
+-                        quad = generate_face_quad(x, y, z, nx, ny, nz)
+-                        quads.append(quad)
+-                        
+-    # Stitching and ambiguity resolution (Nielson-Hamann) would occur here
+-    # to merge adjacent quads into a proper mesh topology
+-    return stitch_mesh(quads)
++                if val >= isovalue:
++                    continue  # Outside voxel, skip
++                # Inside voxel, check 6 neighbors to find exposed faces
++                # +X face
++                if x + 1 >= X or volume[x + 1, y, z] >= isovalue:
++                    quads.append(make_quad(x + 1, y, z, dx, dy, dz))
++                # -X face
++                if x - 1 < 0 or volume[x - 1, y, z] >= isovalue:
++                    quads.append(make_quad(x, y, z, dx, dy, dz, axis=0, neg=True))
++                # +Y face
++                if y + 1 >= Y or volume[x, y + 1, z] >= isovalue:
++                    quads.append(make_quad(x, y + 1, z, dx, dy, dz, axis=1))
++                # -Y face
++                if y - 1 < 0 or volume[x, y - 1, z] >= isovalue:
++                    quads.append(make_quad(x, y, z, dx, dy, dz, axis=1, neg=True))
++                # +Z face
++                if z + 1 >= Z or volume[x, y, z + 1] >= isovalue:
++                    quads.append(make_quad(x, y, z + 1, dx, dy, dz, axis=2))
++                # -Z face
++                if z - 1 < 0 or volume[x, y, z - 1] >= isovalue:
++                    quads.append(make_quad(x, y, z, dx, dy, dz, axis=2, neg=True))
++    return quads
+ 
+-def generate_face_quad(x, y, z, nx, ny, nz):
+-    # Placeholder for specific vertex coordinate generation
+-    # based on voxel grid positions
+-    pass
+-
+-def stitch_mesh(quads):
+-    # Implementation of stitching logic
+-    # Resolves ambiguous configurations where 4 faces meet at an edge
+-    # using the asymptotic decider
+-    pass
++def make_quad(ix, iy, iz, dx, dy, dz, axis=0, neg=False):
++    """Generate a quad at the boundary of voxel (ix, iy, iz)."""
++    bx, by, bz = ix * dx, iy * dy, iz * dz
++    if axis == 0:  # X-face
++        vx = bx if neg else bx + dx
++        verts = [(vx, by, bz), (vx, by + dy, bz), (vx, by + dy, bz + dz), (vx, by, bz + dz)]
++    elif axis == 1:  # Y-face
++        vy = by if neg else by + dy
++        verts = [(bx, vy, bz), (bx + dx, vy, bz), (bx + dx, vy, bz + dz), (bx, vy, bz + dz)]
++    else:  # Z-face
++        vz = bz if neg else bz + dz
++        verts = [(bx, by, vz), (bx + dx, by, vz), (bx + dx, by + dy, vz), (bx, by + dy, vz)]
++    return verts
+ ```
++*Note: The pseudocode outputs a list of quads. Standard mesh construction merges adjacent quads sharing edges. Ambiguous configurations where four faces meet at an edge are resolved using the asymptotic decider by Nielson and Hamann [S2].*
+ 
+ **Parameters:**
+@@ -104,11 +92,10 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The first stage (finding and rendering the surface) is parallelizable at the cell level [S1, unofficial]. The complexity is linear with respect to the number of voxels $N$, $O(N)$, as each voxel is processed independently [S1, unofficial].
+-*   **Memory Complexity:** Depends on the number of surface voxels. In the worst case (all voxels are surface), it is $O(N)$ [S1, unofficial].
+-*   **Performance:** The algorithm is easy and straightforward to implement, and finding/rendering the surface is fast [S1, unofficial].
++*   **Time Complexity:** The first stage (finding and rendering the surface) is parallelizable at the cell level [S1, unofficial]. The algorithm is fast and straightforward to implement [S1, unofficial].
++*   **Memory Complexity:** Depends on the number of surface voxels [G].
++*   **Performance:** Finding and rendering the surface is fast [S1, unofficial].
+ *   **Strengths:** Simplicity, speed, parallelizability [S1, unofficial].
+ *   **Limitations:** Blocky appearance, poor representation of small features, jaggy edges [S1, unofficial].
+ *   **When to use:** When speed is critical and geometric smoothness is not required, or for initial visualization of voxel data [S1, unofficial].
+-*   **When not to use:** When high-quality, smooth surfaces are needed [S1, unofficial].
+ 
+ ## Background

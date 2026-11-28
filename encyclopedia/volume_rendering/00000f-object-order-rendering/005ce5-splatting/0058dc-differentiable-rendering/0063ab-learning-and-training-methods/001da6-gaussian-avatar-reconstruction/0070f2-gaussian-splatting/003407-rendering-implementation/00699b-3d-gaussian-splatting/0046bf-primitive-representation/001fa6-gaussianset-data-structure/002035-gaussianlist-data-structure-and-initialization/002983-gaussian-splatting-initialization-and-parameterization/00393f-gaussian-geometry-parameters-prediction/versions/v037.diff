@@ -1,0 +1,144 @@
+--- v036.md
++++ v037.md
+@@ -1,5 +1,5 @@
+ # Gaussian Geometry Parameters Prediction
+ 
+-Also called: EVolSplat, Efficient Volume-based Gaussian Splatting, GRM, Gaussian MLP Heads, Gaussian Representation Model
++Also called: 3D Gaussian Splatting (3DGS), EVolSplat, Efficient Volume-based Gaussian Splatting, GRM, Gaussian MLP Heads, Gaussian Representation Model
+ 
+ ## Overview
+@@ -46,15 +46,16 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Ghosting Artifacts:** Pixel-aligned methods generate redundant primitives in overlapping regions. This method addresses this by using a global volume and filtering duplicates [S3].
+-*   **Depth Noise:** Monocular depth predictions contain noise and floating artifacts. Statistical filtering is required to remove floaters after uniform filtering [S3].
+-*   **Recursive Convergence:** The position update is recursive. During inference, $\Delta \mu^{prev}_i$ is initialized to 0, and the update rules are executed recursively (empirically twice) to obtain a converged $\Delta \mu_i$ before querying $\alpha_i$ and $\Sigma_i$ [S3].
++*   **Ghosting Artifacts:** Pixel-aligned methods generate redundant primitives in overlapping regions [S3].
++*   **Depth Noise:** Monocular depth predictions contain noise and floating artifacts [S3].
++*   **Recursive Convergence:** The position update is recursive [S3].
+ 
+ **Pseudocode:**
+ ```python
+-def predict_gaussian_geometry(input_images, camera_poses, depth_estimator, sparse_3d_cnn, d_pos, d_opa, d_cov, voxel_size):
++def predict_gaussian_geometry(input_images, camera_poses, depth_estimator, sparse_3d_cnn, d_pos, d_opa, d_cov, voxel_size, num_iterations=2):
+     """
+     Predicts 3D Gaussian geometry parameters in a feed-forward manner.
+     """
+     N = len(input_images)
++    H, W = input_images[0].shape[-2:]
+     
+     # Step 1 & 2: Depth Estimation and Global Point Cloud Construction
+@@ -62,18 +63,19 @@
+     global_point_cloud = []
+     for n in range(N):
+-        # Unproject RGB image using depth, intrinsics, and extrinsics
+-        for u in range(height):
+-            for v in range(width):
++        K_n = camera_poses[n].intrinsic
++        T_n = camera_poses[n].extrinsic
++        for u in range(H):
++            for v in range(W):
+                 d = depth_maps[n][u, v]
+                 if d > 0:
+-                    cam_pt = np.linalg.inv(camera_poses[n].intrinsic) @ np.array([u, v, 1])
+-                    world_pt = camera_poses[n].extrinsic @ np.append(cam_pt * d, 1)
++                    cam_pt = np.linalg.inv(K_n) @ np.array([u, v, 1])
++                    world_pt = T_n @ np.append(cam_pt * d, 1)
+                     global_point_cloud.append(world_pt[:3])
+-    
+     P = np.array(global_point_cloud)
+     
+     # Step 3: Filtering
+-    P = uniform_filter(P, threshold=0.05)
+-    P = statistical_filter(P, min_neighbors=5)
++    # Sources do not specify the exact algorithm for uniform and statistical filters.
++    # P = uniform_filter(P)
++    # P = statistical_filter(P)
+     
+     # Step 4: Feature Volume Extraction
+@@ -83,56 +85,32 @@
+     mu_init = P.copy()
+     N_p = len(mu_init)
+-    
+-    # Step 6: Geometry Parameters Prediction
+     delta_mu_prev = np.zeros_like(mu_init)
+     
+-    # Recursive update for convergence (empirically 2 iterations)
+-    for iteration in range(2):
++    # Step 6: Geometry Parameters Prediction (Recursive Convergence)
++    for _ in range(num_iterations):
+         mu_est = mu_init + delta_mu_prev
+-        features = trilinear_interpolate(F, mu_est)
+-        
+-        alpha = d_opa(features)
+-        Sigma = d_cov(features)
+-        
+-        delta_mu = np.tanh(d_pos(features)) * voxel_size
++        # Query feature volume using trilinear interpolation
++        # Sources do not specify the exact interpolation implementation.
++        f_i = trilinear_interpolate(F, mu_est)
++        # Decode parameters
++        alpha = d_opa(f_i)
++        Sigma = d_cov(f_i)
++        delta_mu = np.tanh(d_pos(f_i)) * voxel_size
+         mu = mu_init + delta_mu
+         delta_mu_prev = delta_mu
+         
+     # Final query for alpha and Sigma at converged position
+-    final_features = trilinear_interpolate(F, mu)
+-    alpha = d_opa(final_features)
+-    Sigma = d_cov(final_features)
++    final_mu = mu_init + delta_mu_prev
++    final_f = trilinear_interpolate(F, final_mu)
++    alpha = d_opa(final_f)
++    Sigma = d_cov(final_f)
++    delta_mu = np.tanh(d_pos(final_f)) * voxel_size
++    mu = mu_init + delta_mu
+     
+     # Step 7: Color Prediction
+-    colors = predict_color_from_2d_context(mu, alpha, Sigma, input_images, camera_poses, K=3)
++    # Sources do not specify the exact algorithm for 2D context retrieval and color decoding.
++    # colors = predict_color_from_2d_context(mu, alpha, Sigma, input_images, camera_poses, K=3)
+     
+     return [(mu[i], alpha[i], Sigma[i], colors[i]) for i in range(N_p)]
+-
+-def uniform_filter(points, threshold=0.05):
+-    unique_points = []
+-    for pt in points:
+-        if not any(np.linalg.norm(pt - u) < threshold for u in unique_points):
+-            unique_points.append(pt)
+-    return np.array(unique_points)
+-
+-def statistical_filter(points, min_neighbors=5):
+-    filtered = []
+-    for pt in points:
+-        neighbors = sum(1 for p in points if np.linalg.norm(pt - p) < 0.1)
+-        if neighbors >= min_neighbors:
+-            filtered.append(pt)
+-    return np.array(filtered)
+-
+-def trilinear_interpolate(volume, points):
+-    features = []
+-    for pt in points:
+-        features.append(interpolate_3d(volume, pt))
+-    return np.array(features)
+-
+-def predict_color_from_2d_context(mu, alpha, Sigma, input_images, camera_poses, K=3):
+-    colors = []
+-    for i in range(len(mu)):
+-        colors.append(compute_color(mu[i], alpha[i], Sigma[i], input_images, camera_poses, K))
+-    return colors
+ ```
+ 
+@@ -205,10 +183,7 @@
+ Gamba predicts Gaussian attributes using the recent Mamba network to better capture the relationship between Gaussians [S1].
+ 
+-### Gaussian Parameter Prediction
+-Not given in the sources.
+-
+ ## Operating characteristics
+ *   **Time Complexity:** Feed-forward inference is significantly faster than per-scene optimization methods, which require minutes of gradient descent [S3]. The complexity is dominated by the sparse 3D CNN feature extraction and the MLP decoding per point [S3].
+-*   **Memory Complexity:** Requires storage for the global point cloud $P$ and the feature volume $F$. The sparse 3D CNN reduces memory usage compared to dense volumes [S3].
++*   **Memory Complexity:** Requires storage for the global point cloud $P$ and the feature volume $F$ [S3].
+ *   **Measured Performance:** EVolSplat achieves real-time rendering speeds for urban scenes [S3]. It improves global consistency and reduces ghosting artifacts compared to pixel-aligned methods like MVSplat, Flash3D, and DrivingForward [S3].
+ *   **Strengths:** Handles large-scale urban scenes with sparse inputs; reduces redundancy and ghosting artifacts; enables real-time rendering via feed-forward prediction [S3].

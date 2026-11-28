@@ -1,0 +1,126 @@
+--- v014.md
++++ v015.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Vertex-level pruning is a geometric simplification mechanism applied during the training of Mixed-Primitive Gaussian Splatting (MP-GS) to remove redundant vertices from Gaussian triangles and lines, converting them into lower-order primitives (ellipses or lines) [S1, unofficial]. It addresses the issue of "messy" representations where high-order primitives persist in regions that can be adequately modeled by simpler shapes, thereby refining the surface representation and reducing storage overhead [S1, unofficial]. Unlike standard 3D Gaussian Splatting which only performs primitive-level opacity pruning, this method operates on the vertex level within mixed-primitive frameworks [S1, unofficial]. It builds on [Pruning and Reduction](14909-pruning-and-reduction.md).
++Vertex-level pruning is a geometric simplification mechanism applied during the training of Mixed-Primitive Gaussian Splatting (MP-GS) to remove redundant vertices from Gaussian triangles and lines, converting them into lower-order primitives (ellipses or lines) [S1, unofficial]. It addresses the issue of "messy" representations where high-order primitives persist in regions that can be adequately modeled by simpler shapes, thereby refining the surface representation and reducing storage overhead [S1, unofficial]. Unlike standard 3D Gaussian Splatting which only performs primitive-level opacity pruning, this method operates on the vertex level within mixed-primitive frameworks [S1, unofficial]. It builds on [Pruning and Reduction](14909-pruning-and-reduction.md) [S1, unofficial].
+ 
+ ## How it works
+@@ -15,6 +15,6 @@
+ 
+ **Parameters:**
+-*   $\omega_{dist}$: The threshold for determining if vertices are "close". A set of vertices is considered close if their maximum pairwise L2 distance is below this value. Default value: $0.5$ [S1, unofficial].
+-*   $\omega_{pear}$: The threshold for determining if Gaussian triangle vertices are collinear. Vertices are nearly collinear if the absolute value of the Pearson correlation coefficient computed from them exceeds this value. Default value: $0.9$ [S1, unofficial].
++*   $\omega_{dist}$: The threshold for determining if vertices are "close". A set of vertices is considered close if their maximum pairwise L2 distance is below this value [S1, unofficial]. Default value: $0.5$ [S1, unofficial].
++*   $\omega_{pear}$: The threshold for determining if Gaussian triangle vertices are collinear. Vertices are nearly collinear if the absolute value of the Pearson correlation coefficient computed from them exceeds this value [S1, unofficial]. Default value: $0.9$ [S1, unofficial].
+ 
+ **Algorithm Steps:**
+@@ -25,10 +25,10 @@
+     *   Calculate the maximum pairwise L2 distance among the three vertices:
+         $$ d_{max} = \max(\|\boldsymbol{\mu}_1 - \boldsymbol{\mu}_2\|_2, \|\boldsymbol{\mu}_2 - \boldsymbol{\mu}_3\|_2, \|\boldsymbol{\mu}_3 - \boldsymbol{\mu}_1\|_2) $$
+-    *   If $d_{max} < \omega_{dist}$, the vertices are considered close. Prune vertices $\boldsymbol{\mu}_2$ and $\boldsymbol{\mu}_3$. Convert the primitive into a Gaussian ellipse centered at $\boldsymbol{\mu}_1$ [S1, unofficial].
++    *   If $d_{max} < \omega_{dist}$, the vertices are considered close [S1, unofficial]. Prune vertices $\boldsymbol{\mu}_2$ and $\boldsymbol{\mu}_3$ [S1, unofficial]. Convert the primitive into a Gaussian ellipse centered at $\boldsymbol{\mu}_1$ [S1, unofficial].
+ 
+ 2.  **Check for Gaussian Triangle Degeneration to Line:**
+     For a Gaussian triangle primitive where the condition in Step 1 is not met (vertices are not close):
+     *   Compute the Pearson correlation coefficient from the coordinates of the three vertices [S1, unofficial].
+-    *   If the absolute value of the Pearson correlation coefficient exceeds $\omega_{pear}$, the vertices are considered nearly collinear. Convert the primitive from a Gaussian triangle to a Gaussian line [S1, unofficial].
++    *   If the absolute value of the Pearson correlation coefficient exceeds $\omega_{pear}$, the vertices are considered nearly collinear [S1, unofficial]. Convert the primitive from a Gaussian triangle to a Gaussian line [S1, unofficial].
+ 
+ 3.  **Check for Gaussian Line Collapse to Ellipse:**
+@@ -36,5 +36,5 @@
+     *   Calculate the L2 distance:
+         $$ d = \|\boldsymbol{\mu}_1 - \boldsymbol{\mu}_2\|_2 $$
+-    *   If $d < \omega_{dist}$, the vertices are considered close. Prune vertex $\boldsymbol{\mu}_2$. Reduce the primitive to a Gaussian ellipse centered at $\boldsymbol{\mu}_1$ [S1, unofficial].
++    *   If $d < \omega_{dist}$, the vertices are considered close [S1, unofficial]. Prune vertex $\boldsymbol{\mu}_2$ [S1, unofficial]. Reduce the primitive to a Gaussian ellipse centered at $\boldsymbol{\mu}_1$ [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -66,5 +66,5 @@
+         
+         if max_dist < omega_dist:
+-            # Prune mu2 and mu3, convert to ellipse at mu1
++            # Prune mu2 and mu3, convert to ellipse at mu1 [S1, unofficial]
+             primitive['type'] = 'ellipse'
+             primitive['vertices'] = [mu1]
+@@ -72,22 +72,48 @@
+             
+         # Step 2: Check if vertices are collinear
++        # Project points onto the line connecting mu1 and mu2, then compute Pearson r [G]
++        v = [b - a for a, b in zip(mu1, mu2)]
++        v_len = math.sqrt(sum(x*x for x in v))
++        if v_len < 1e-6:
++            # Degenerate line, treat as close (already handled by step 1, but guard here)
++            primitive['type'] = 'ellipse'
++            primitive['vertices'] = [mu1]
++            return primitive
++        v_norm = [x / v_len for x in v]
++        
++        # Project coordinates onto v_norm
++        proj = [sum(p * vn for p, vn in zip(pt, v_norm)) for pt in [mu1, mu2, mu3]]
++        
++        # Compute Pearson correlation coefficient of the 1D projections
++        n = len(proj)
++        mean_p = sum(proj) / n
++        var_p = sum((x - mean_p)**2 for x in proj) / (n - 1)
++        
++        if var_p < 1e-9:
++            # All projected points are identical, treat as collinear
++            pearson_val = 1.0
++        else:
++            cov_p = sum((x - mean_p)**2 for x in proj) / (n - 1) # Variance is same as var_p here
++            pearson_val = 1.0 # Perfect correlation along the line by construction
++        
++        # Since projection onto the line connecting two points guarantees |r|=1, 
++        # we instead compute correlation of coordinates across dimensions or use 
++        # a standard 3D collinearity metric. The source specifies Pearson correlation 
++        # on the vertices directly. We compute the correlation matrix of the 3 points' 
++        # coordinates and take the maximum off-diagonal absolute value as a proxy [G].
+         coords = [mu1, mu2, mu3]
+-        n = len(coords)
+-        dim = len(coords[0])
++        dim = len(mu1)
++        means = [sum(c[d] for c in coords) / n for d in range(dim)]
++        stds = [math.sqrt(sum((c[d] - means[d])**2 for c in coords) / (n - 1)) for d in range(dim)]
+         
+-        # Compute mean per dimension
+-        means = [sum(c[d] for c in coords) / n for d in range(dim)]
+-        
+-        # Compute covariance matrix
+-        cov = [[sum((coords[i][d1] - means[d1]) * (coords[i][d2] - means[d2]) for i in range(n)) / (n - 1) for d2 in range(dim)] for d1 in range(dim)]
+-        
+-        # Compute standard deviation
+-        std = [math.sqrt(cov[d][d]) for d in range(dim)]
+-        
+-        # Compute correlation matrix
+-        corr = [[cov[d1][d2] / (std[d1] * std[d2]) if std[d1] > 0 and std[d2] > 0 else 0.0 for d2 in range(dim)] for d1 in range(dim)]
+-        
+-        # Take absolute value of off-diagonal element
+-        pearson_val = abs(corr[0][1])
++        max_corr = 0.0
++        for d1 in range(dim):
++            for d2 in range(d1 + 1, dim):
++                if stds[d1] > 1e-9 and stds[d2] > 1e-9:
++                    cov_d = sum((coords[i][d1] - means[d1]) * (coords[i][d2] - means[d2]) for i in range(n)) / (n - 1)
++                    r = abs(cov_d / (stds[d1] * stds[d2]))
++                    if r > max_corr:
++                        max_corr = r
++        pearson_val = max_corr
+         
+         if pearson_val > omega_pear:
+@@ -104,5 +130,5 @@
+         
+         if dist < omega_dist:
+-            # Prune mu2, reduce to ellipse at mu1
++            # Prune mu2, reduce to ellipse at mu1 [S1, unofficial]
+             primitive['type'] = 'ellipse'
+             primitive['vertices'] = [mu1]
+@@ -113,6 +139,6 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Covariance Preservation:** When converting a triangle to a line or ellipse, or a line to an ellipse, the covariance matrix $\boldsymbol{\Sigma}$ must be appropriately transformed or re-initialized to maintain the visual appearance of the primitive [S1, unofficial]. The source does not specify the exact mathematical transformation for $\boldsymbol{\Sigma}$ during these conversions [S1, unofficial].
+-*   **Collinearity Calculation:** The Pearson correlation coefficient calculation assumes the vertices are treated as variables [G]. If vertices are identical or degenerate in a way that causes zero variance, the correlation is undefined (NaN) [G]. The pseudocode handles this by defaulting to $0.0$ when standard deviation is zero [G].
++*   **Covariance Preservation:** When converting a triangle to a line or ellipse, or a line to an ellipse, the covariance matrix $\boldsymbol{\Sigma}$ must be appropriately transformed or re-initialized to maintain the visual appearance of the primitive [G]. The source does not specify the exact mathematical transformation for $\boldsymbol{\Sigma}$ during these conversions [S1, unofficial].
++*   **Collinearity Calculation:** The Pearson correlation coefficient calculation assumes the vertices are treated as variables [G]. If vertices are identical or degenerate in a way that causes zero variance, the correlation is undefined (NaN) [G]. The pseudocode handles this by defaulting to $0.0$ or $1.0$ when standard deviation is near zero [G].
+ *   **Interaction with Densification:** Vertex pruning does not reduce the representation to only point-centered ellipses because the original densification mechanism (cloning and splitting) continues to operate alongside pruning [S1, unofficial].
+ 

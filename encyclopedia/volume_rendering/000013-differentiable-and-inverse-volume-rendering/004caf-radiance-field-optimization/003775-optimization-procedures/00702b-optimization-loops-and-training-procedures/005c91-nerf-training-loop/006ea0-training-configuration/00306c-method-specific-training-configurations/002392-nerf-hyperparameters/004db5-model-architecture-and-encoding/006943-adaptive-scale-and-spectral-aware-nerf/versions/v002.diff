@@ -1,0 +1,189 @@
+--- v001.md
++++ v002.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Adaptive-Scale and Spectral-Aware NeRF is a variant of Neural Radiance Fields that integrates an adaptive scale function to modulate sample point contributions and a spectral decoder to handle multispectral information (including infrared and ultraviolet) for improved color fidelity [S1]. It builds on [Model Architecture and Encoding](13550-model-architecture-and-encoding.md) by replacing the standard color prediction with a wavelength-aware mechanism and adjusting density integration weights via local feature analysis.
++Adaptive-Scale and Spectral-Aware NeRF is a neural radiance field variant that integrates an adaptive scale function to modulate sample point contributions and a spectral decoder to handle multispectral information, including infrared and ultraviolet wavelengths, for improved color fidelity [S1]. It builds on [Model Architecture and Encoding](13550-model-architecture-and-encoding.md) by replacing the standard color prediction with a wavelength-aware mechanism and adjusting density integration weights via local feature analysis [S1].
+ 
+ ## How it works
+@@ -19,18 +19,14 @@
+ **Method Steps**
+ 
+-1.  **Initialize Model:** Load MTL-FeatureNet to extract global features $G$ from input image $I$. Define the volume density network $\sigma(x)$ and the color network $c(x, \varepsilon, S)$ [S1].
+-2.  **Compute Adaptive Scale:**
+-    *   Extract local features $Q$ from 3D position $x(t)$ using $FA(G, x(t))$ [S1].
+-    *   Compute the adaptive scale $S$ using the formula:
+-        $$ S(FA(G, x(t)), G) = \sigma(\beta \cdot D_{complex}(CT(FA(G, x(t)), G))) $$
+-        Where $D_{complex}$ is a depth network, $CT$ is a feature combination function, and $\beta$ is a parameter [S1].
+-3.  **Spectral-Aware Color Estimation:**
+-    *   Estimate color $c(x, \varepsilon)$ at position $x$ and wavelength $\varepsilon$ using the spectral decoder:
+-        $$ c(x, \varepsilon) = \text{softmax}\left(\sum_{n=1}^N G_n \cdot e^{-\frac{(\varepsilon - \mu_n)^2}{2\delta_n^2}}\right) \cdot MLP_{color}(F(x, \varepsilon)) $$
+-        Where $N$ is the number of spectral components, $G_n$ is the weight of the $n$-th component, $\mu_n$ is the center wavelength, $\delta_n^2$ is the variance, $MLP_{color}$ is a multilayer perceptron, and $F(x, \varepsilon)$ are spectral features [S1].
+-4.  **Rendering:**
+-    *   Render the image $C(r)$ by integrating along the ray $r$:
+-        $$ C(r) = \int_{t_n}^{t_f} T(t) \cdot \sigma(p(x(t))) \cdot c(x(t), S(FA(G, x(t)), G)) \, dt $$
+-        Where $T(t)$ is the accumulated transmittance, $\sigma(p(x(t)))$ is the spectral-aware volume density, and $c$ is the color modulated by the adaptive scale $S$ [S1].
++1.  **Initialize Model:** Load MTL-FeatureNet to extract global features $G$ from input image $I$ [S1]. Define the volume density network $\sigma(x)$ and the color network $c(x, \varepsilon, S)$ [S1].
++2.  **Compute Adaptive Scale:** Extract local features $Q$ from 3D position $x(t)$ using $FA(G, x(t))$ [S1]. Compute the adaptive scale $S$ using the formula:
++    $$ S(FA(G, x(t)), G) = \sigma(\beta \cdot D_{complex}(CT(FA(G, x(t)), G))) $$
++    Where $D_{complex}$ is a depth network, $CT$ is a feature combination function, and $\beta$ is a parameter [S1].
++3.  **Spectral-Aware Color Estimation:** Estimate color $c(x, \varepsilon)$ at position $x$ and wavelength $\varepsilon$ using the spectral decoder:
++    $$ c(x, \varepsilon) = \text{softmax}\left(\sum_{n=1}^N G_n \cdot e^{-\frac{(\varepsilon - \mu_n)^2}{2\delta_n^2}}\right) \cdot MLP_{color}(F(x, \varepsilon)) $$
++    Where $N$ is the number of spectral components, $G_n$ is the weight of the $n$-th component, $\mu_n$ is the center wavelength, $\delta_n^2$ is the variance, $MLP_{color}$ is a multilayer perceptron, and $F(x, \varepsilon)$ are spectral features [S1].
++4.  **Rendering Integration:** Render the image $C(r)$ by integrating along the ray $r$:
++    $$ C(r) = \int_{t_n}^{t_f} T(t) \cdot \sigma(p(x(t))) \cdot c(x(t), S(FA(G, x(t)), G)) \, dt $$
++    Where $T(t)$ is the accumulated transmittance, $\sigma(p(x(t)))$ is the spectral-aware volume density, and $c$ is the color modulated by the adaptive scale $S$ [S1].
+ 5.  **Output:** Return the final rendered image $C(r)$ [S1].
+ 
+@@ -38,4 +34,6 @@
+ 
+ ```python
++import math
++
+ def adaptive_scale_spectral_nerf(I, P, G, epsilon):
+     """
+@@ -44,5 +42,5 @@
+     Args:
+         I: Input 2D toy image.
+-        P: Camera parameters.
++        P: Camera parameters containing rays. Each ray has origin, direction, near, far, num_samples.
+         G: Global features from MTL-FeatureNet.
+         epsilon: Spectral components (wavelengths).
+@@ -51,71 +49,86 @@
+         C: Rendered 3D image.
+     """
+-    # Step 1: Initialize
+-    # MTL-FeatureNet is assumed to be loaded and G is provided.
+-    # Define networks: sigma_network, color_network, fa_function, d_complex, ct_function, mlp_color
++    # Precompute spectral weights for all rays
++    spectral_sum = 0.0
++    for n in range(N):
++        spectral_sum += G_n[n] * math.exp(-((epsilon - mu_n[n])**2) / (2 * delta_n[n]**2))
++    softmax_weight = 1.0  # softmax of a scalar sum evaluates to 1.0 per source formula
+     
+-    # Step 2 & 3 & 4: For each ray r in camera parameters P
+-    rendered_image = empty_image()
++    rendered_image = []
+     
+     for ray in P.rays:
+-        # Sample points along the ray
+-        t_values = sample_points(ray.origin, ray.direction, near=ray.near, far=ray.far)
+-        
+         accumulated_transmittance = 1.0
+         ray_color = [0.0, 0.0, 0.0]
++        prev_t = ray.near
+         
+-        for t in t_values:
++        for t in [ray.near + (ray.far - ray.near) * (k + 0.5) / ray.num_samples for k in range(ray.num_samples)]:
+             # 3D position x(t)
+-            x_t = ray.origin + t * ray.direction
++            x_t = [ray.origin[i] + t * ray.direction[i] for i in range(3)]
+             
+             # Step 2: Adaptive-Scale Function
+             # Extract local features Q from 3D position x(t) using FA(G, x(t))
+-            local_features = FA(G, x_t)
++            Q = fa_func(G, x_t)
+             
+             # Compute adaptive scale S
+-            # S = sigma(beta * D_complex(CT(local_features, G)))
+-            combined_features = CT(local_features, G)
+-            depth_output = D_complex(combined_features)
+-            S = sigma(beta * depth_output)
++            combined_features = ct_func(Q, G)
++            depth_output = depth_net(combined_features)
++            S = activation_fn(beta * depth_output)
+             
+             # Step 3: Spectral-Aware Color Estimation
+-            # c(x, epsilon) = softmax(sum(G_n * exp(-((epsilon - mu_n)^2) / (2 * delta_n^2)))) * MLP_color(F(x, epsilon))
++            # Get spectral features F(x, epsilon)
++            F = spectral_features_net(x_t, epsilon)
+             
+-            # Calculate spectral weights
+-            spectral_weights = 0.0
+-            for n in range(N):
+-                # G_n is the weight of the n-th component
+-                # mu_n is the center wavelength
+-                # delta_n^2 is the variance
+-                gaussian_weight = exp(-((epsilon - mu_n)**2) / (2 * delta_n**2))
+-                spectral_weights += G_n * gaussian_weight
+-            
+-            softmax_weight = softmax(spectral_weights)
+-            
+-            # Get spectral features F(x, epsilon)
+-            spectral_features = F(x_t, epsilon)
+-            
+-            # Apply MLP for color
+-            color = mlp_color(spectral_features)
+-            
+-            # Combine with softmax weight
+-            c_x_epsilon = softmax_weight * color
++            # Apply MLP for color (S is passed as per step 1 definition c(x, epsilon, S))
++            color = softmax_weight * mlp_color(F, S)
+             
+             # Step 4: Rendering Integration
+             # sigma(p(x(t))) is the spectral-aware volume density
+-            density = sigma(x_t)
++            density = density_net(x_t)
+             
+-            # Contribution
+-            contribution = accumulated_transmittance * density * c_x_epsilon
+-            ray_color += contribution
++            # Distance between samples
++            delta = t - prev_t
+             
+-            # Update transmittance
+-            # T(t) = exp(-sum(sigma * delta_t))
+-            # Note: Standard NeRF transmittance update
+-            accumulated_transmittance *= exp(-density * (t_values[1] - t_values[0])) # Approximation for discrete steps
++            # Opacity and transmittance update
++            alpha = 1.0 - math.exp(-density * delta)
++            accumulated_transmittance *= (1.0 - alpha)
+             
+-        rendered_image[ray.id] = ray_color
++            # Accumulate color
++            for c in range(3):
++                ray_color[c] += accumulated_transmittance * alpha * color[c]
++            
++            prev_t = t
++            
++        rendered_image.append(ray_color)
+         
+     return rendered_image
++
++# Helper definitions matching source components
++def density_net(x):
++    """Volume density network sigma(x) [S1]."""
++    return 0.0  # Placeholder for trained network forward pass
++
++def fa_func(G, x):
++    """Local feature estimation based on global features and position [S1]."""
++    return []  # Placeholder for trained network forward pass
++
++def ct_func(Q, G):
++    """Feature combination function [S1]."""
++    return []  # Placeholder for trained network forward pass
++
++def depth_net(features):
++    """Depth network D_complex [S1]."""
++    return 0.0  # Placeholder for trained network forward pass
++
++def activation_fn(x):
++    """Activation function sigma used in adaptive scale computation [S1]."""
++    return 1.0 / (1.0 + math.exp(-x))  # Standard sigmoid activation
++
++def spectral_features_net(x, epsilon):
++    """Feature extraction F(x, epsilon) [S1]."""
++    return []  # Placeholder for trained network forward pass
++
++def mlp_color(F, S):
++    """Multilayer perceptron MLP_color applied to spectral features and adaptive scale [S1]."""
++    return [0.0, 0.0, 0.0]  # Placeholder for trained network forward pass
+ ```
+ 
+@@ -131,4 +144,5 @@
+ *   **Feature Extraction:** The quality of $G$ depends on MTL-FeatureNet; poor extraction may degrade adaptive scaling [S1].
+ *   **Depth Network:** $D_{complex}$ requires accurate depth estimation; errors here affect the adaptive scale $S$ [S1].
++*   **Variable Naming:** The source uses $\sigma$ for both the volume density network and the activation function in the adaptive scale computation; implementations must distinguish them to avoid mathematical conflicts [S1].
+ 
+ ## Operating characteristics

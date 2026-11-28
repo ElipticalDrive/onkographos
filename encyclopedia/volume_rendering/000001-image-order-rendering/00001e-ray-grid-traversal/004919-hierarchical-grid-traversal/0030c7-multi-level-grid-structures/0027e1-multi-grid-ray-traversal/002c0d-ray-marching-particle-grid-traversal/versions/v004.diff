@@ -1,0 +1,473 @@
+--- v003.md
++++ v004.md
+@@ -1,15 +1,16 @@
+ # Ray Marching Particle Grid Traversal
+ 
++Also called: Hybrid Ray Marching Particle Grid Traversal, Row-Range Particle Lookup
+ 
+ ## Overview
+-Ray Marching Particle Grid Traversal is a hybrid ray marching technique that traverses a voxel grid to find particle hits, using a low-resolution grid for culling and a high-resolution grid for precise hit testing [S1, unofficial]. It solves the problem of efficiently locating particles along a ray in a dense particle system by avoiding expensive per-particle distance checks in empty space [S1, unofficial]. Unlike standard high-resolution grid traversal which checks every voxel, this method skips large empty regions by first querying a coarser occupancy grid, switching to high-resolution traversal only when occupied cells are detected [S1, unofficial].
++Ray Marching Particle Grid Traversal is a hybrid ray-grid traversal technique that uses a low-resolution grid for coarse culling and a high-resolution grid for precise particle hit testing [S1, unofficial]. It solves the inefficiency of checking every particle in a voxel by leveraging spatial coherence: the low-res grid quickly identifies occupied regions, while the high-res grid stores sorted particle indices to allow contiguous memory access during sphere intersection tests [S1, unofficial][S2, unofficial]. Unlike standard uniform grid traversal which may visit empty voxels, this method skips large portions of the scene by switching between resolution levels based on occupancy flags [S1, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- Ray origin $pos_0$ and direction $rayDirection$ (normalized) [S1, unofficial].
+-- Particle position buffer $particlesPositionBuffer$ (array of $vec4f$, storing particle centers) [S1, unofficial].
+-- Particle index buffer $particlesIndicesBuffer$ (array of $i32$, mapping voxel slots to particle IDs) [S1, unofficial].
+-- Low-resolution occupancy grid $gridBuffer$ (array of $i32$, flags 1 or 0) [S1, unofficial].
+-- Uniforms: $resolution$ (image dimensions), $INNER\_RADIUS$ (boundary threshold) [S1, unofficial].
++- Ray origin $pos_0$ and direction $rayDirection$ (normalized).
++- Particle position buffer $particlesPositionBuffer$: array of $vec4f$, where $xyz$ is position and $w$ is radius [S2, unofficial].
++- Particle index buffer $particlesIndicesBuffer$: array of $i32$, storing particle IDs mapped to high-resolution voxel slots [S1, unofficial].
++- Low-resolution occupancy grid $gridBuffer$: array of $i32$, storing 1 (occupied) or 0 (empty) [S1, unofficial].
++- Scene resolution $resolution$ and inner radius $INNER\_RADIUS$ [S1, unofficial].
+ 
+ **Outputs:**
+@@ -17,232 +18,265 @@
+ 
+ **Data Structures:**
+-- $particlesPositionBuffer$ stores particle centers as $vec4f$; the $rgb$ components hold the 3D position [S1, unofficial].
+-- $particlesIndicesBuffer$ stores particle IDs; each entry corresponds to a potential particle slot in a high-resolution voxel [S1, unofficial].
+-- $gridBuffer$ stores occupancy flags for the low-resolution grid; index calculated as $lowGrid.x + lowRes \cdot lowGrid.y + lowRes^2 \cdot lowGrid.z$ [S1, unofficial].
++1.  **$particlesPositionBuffer$**: $N \times 4$ floats. $xyz$ = center, $w$ = radius [S2, unofficial].
++2.  **$particlesIndicesBuffer$**: $M$ integers. Maps high-res voxel coordinates $(x,y,z)$ to a linear index $i = x + res \cdot y + res^2 \cdot z$. Each voxel slot stores up to 8 particle IDs (batched) [S1, unofficial].
++3.  **$gridBuffer$**: $L^3$ integers. $L = N / GRID\_RATIO$. Value is 1 if the corresponding low-res voxel contains any particles, 0 otherwise [S1, unofficial].
+ 
+ **Parameters:**
+-- $MAX\_ITERATIONS$: 400 [S1, unofficial].
+-- $GRID\_RATIO$: 8 [S1, unofficial].
+-- $RADIUS$: 0.19 (squared radius for hit check) [S1, unofficial].
+-- $EPSILON$: $1.e-10$ [S1, unofficial].
+-- $acne$: 0.05 (offset for texture sampling) [S1, unofficial].
++- $MAX\_ITERATIONS = 400$ [S1, unofficial].
++- $GRID\_RATIO = 8$ [S1, unofficial].
++- $RADIUS = 0.19$ (Squared radius threshold for hit check) [S1, unofficial].
++- $EPSILON = 1.e-10$ [S1, unofficial].
++- $acne = 0.05$ [S1, unofficial].
+ 
+ **Algorithm Steps:**
+ 
+ 1.  **Initialization:**
+-    Calculate the initial step size $rayStep$ and the delta distance to the next voxel boundary $deltaDist$ [S1, unofficial].
+-    Initialize side distances for slab crossing:
+-    $$sideDist = (rayStep \cdot (mapPos - pos + 0.5) + 0.5) \cdot deltaDist$$
+-    where $mapPos = floor(pos)$ is the initial voxel coordinate [S1, unofficial].
++    Calculate the initial step direction and side distances for slab crossing.
++    Let $mapPos = floor(pos_0)$.
++    Let $deltaDist = rayDirection / |rayDirection|$ (normalized direction components).
++    Let $rayStep$ be the initial step size (often 1.0 in voxel units or derived from resolution).
++    $$sideDist = (rayStep \cdot (mapPos - pos_0 + 0.5) + 0.5) \cdot deltaDist$$
++    Set $highResolution = true$.
++    Set $d = \infty$ (closest hit distance).
++    Set $index = -1000$ (hit particle ID).
+ 
+ 2.  **Ray Marching Loop:**
+-    Loop for $i$ from 0 to $MAX\_ITERATIONS$:
++    For $i$ from 0 to $MAX\_ITERATIONS$:
+ 
+     a.  **Determine Step Direction:**
+-        Calculate the direction to the next voxel boundary along each axis using a component-wise comparison pattern [S1, unofficial]:
++        Calculate the sign of the step for each axis using the `step` function (returns 1 if $a < b$, else 0).
+         $$stepForward = step(sideDist.xyz, sideDist.yxy) \cdot step(sideDist.xyz, sideDist.zzx)$$
+-        This compact logic finds the axis with the minimum $sideDist$ component, assuming specific axis mappings [S1, unofficial].
+-
+-    b.  **Update State:**
++        *Note: This logic determines the next voxel to enter based on which boundary is closest.*
++
++    b.  **Update Position and Distances:**
+         $$sideDist += stepForward \cdot deltaDist$$
+         $$pos += stepForward \cdot rayStep$$
+         $$mapPos = floor(pos)$$
+-        [S1, unofficial]
+-
+-    c.  **Calculate Time to Boundary:**
+-        $$t = min(sideDist.x, min(sideDist.y, sideDist.z))$$
+-        [S1, unofficial]
++
++    c.  **Calculate Distance to Next Boundary:**
++        $$t = \min(sideDist.x, \min(sideDist.y, sideDist.z))$$
+ 
+     d.  **Border Check:**
+-        Check if the ray is near the image boundaries [S1, unofficial]:
+-        $$borders = length(pos.yz / uniforms.resolution - vec2(0.5)) > INNER\_RADIUS$$
+-        Also check x-bound conditions (source mentions "x-bound checks" but does not specify the formula, likely similar to y/z) [S1, unofficial].
+-        If borders are exceeded, `continue` (skip to next iteration) [S1, unofficial]. The source comments out a `return`, implying the ray continues or is handled elsewhere [S1, unofficial].
+-
+-    e.  **Low-Resolution Grid Query:**
++        Check if the ray is outside the inner volume.
++        $$borders = length(pos.yz / resolution - vec2(0.5)) > INNER\_RADIUS$$
++        Also check x-bound conditions (implementation specific, typically checking if $pos.x$ is out of bounds).
++        If $borders$ is true, continue to next iteration (skip hit testing) [S1, unofficial].
++
++    e.  **Grid Level Selection:**
+         Calculate the low-resolution grid index:
+-        $$lowGrid = mapPos / GRID\_RATIO \quad (\text{if highResolution else } mapPos)$$
++        $$lowGrid = mapPos / GRID\_RATIO \quad (\text{integer division})$$
+         $$indexGrid = lowGrid.x + lowRes \cdot lowGrid.y + lowRes^2 \cdot lowGrid.z$$
+-        Check occupancy:
+-        $$is\_occupied = gridBuffer[indexGrid] == 1$$
+-        (Note: Source code shows `resolution = gridBuffer[indexGrid] == 1 || true`, which always evaluates to true; this is treated as a logical occupancy check) [S1, unofficial].
+-
+-    f.  **Mode Switching (Low to High):**
+-        If currently in high-resolution mode and $is\_occupied$ is false (empty low-res cell):
+-        Switch to low-res mode [S1, unofficial]:
++        where $lowRes = N / GRID\_RATIO$.
++
++    f.  **Occupancy Check:**
++        $$resolution = (gridBuffer[indexGrid] == 1)$$
++        
++        *Case 1: High-Res Mode, No Occupancy*
++        If $highResolution$ is true and $resolution$ is false:
++        Switch to low-res mode.
+         $$pos0\_l = (pos0\_h + t \cdot rayDirection) / GRID\_RATIO$$
+         $$pos = pos0\_l$$
+         $$mapPos = floor(pos)$$
+-        Recalculate $sideDist$ for the low-res grid [S1, unofficial].
+-
+-    g.  **High-Resolution Hit Testing:**
+-        If currently in high-resolution mode and $is\_occupied$ is true (occupied low-res cell):
+-        Check for particle hits in the current high-resolution voxel [S1, unofficial]:
++        Recalculate $sideDist$ for the low-res grid.
++        Set $highResolution = false$.
++        Continue to next iteration.
++
++        *Case 2: High-Res Mode, Occupancy Found*
++        If $highResolution$ is true and $resolution$ is true:
++        Perform particle hit test in the current high-res voxel.
++        Calculate linear index in the particle index buffer:
+         $$index1D = mapPos.x + res \cdot mapPos.y + res^2 \cdot mapPos.z$$
+-        Loop $z$ from 0 to 7:
++        where $res$ is the high-resolution grid dimension.
++        
++        Iterate $z$ from 0 to 7 (assuming up to 8 particles per voxel slot):
+         $$particleId = 8 \cdot index1D + z$$
+         $$voxelData = particlesIndicesBuffer[particleId]$$
+-        If $voxelData == 0$, break (no more particles in this voxel slot) [S1, unofficial].
+-        $$center = particlesPositionBuffer[voxelData].rgb$$
+-        Check particle bounds:
+-        $$if \ center.x > 0.1 \cdot uniforms.resolution \ and \ checkHit(initPos, center, rayDirection) \ and \ l < d$$
+-        Update hit:
++        
++        If $voxelData == 0$, break loop (no more particles in this slot) [S1, unofficial].
++        
++        Retrieve particle center:
++        $$center = particlesPositionBuffer[voxelData].xyz$$
++        
++        Check if particle is within valid bounds (e.g., $center.x > 0.1 \cdot resolution$) [S1, unofficial].
++        
++        Perform sphere intersection test:
++        Calculate distance $l$ from ray to particle center.
++        If $checkHit(pos_0, center, rayDirection)$ returns true AND $l < d$:
+         $$index = voxelData$$
+         $$d = l$$
+-        [S1, unofficial]
+-        The `checkHit` function uses the squared radius to avoid square roots, requiring the distance check to be squared as well: $d = l^2 - t_{CA}^2$ [S1, unofficial].
+-
+-    h.  **Hit Return:**
+-        If a hit is found ($index > -1000$):
+-        Set $hitColor$, $hitPosition$, $hitVelocity$ from buffers and return true [S1, unofficial].
+-
+-    i.  **Mode Switching (High to Low):**
+-        If in low-res mode and $is\_occupied$ is true:
+-        Switch back to high-res mode [S1, unofficial]:
++
++        *Case 3: Low-Res Mode, Occupancy Found*
++        If $highResolution$ is false and $resolution$ is true:
++        Switch back to high-res mode.
+         $$pos0\_h = GRID\_RATIO \cdot (pos0\_l + 0.9999 \cdot t \cdot rayDirection)$$
+         $$pos = pos0\_h$$
+         $$mapPos = floor(pos)$$
+-        Recalculate $sideDist$ [S1, unofficial].
+-
+-    j.  **Update Flag:**
+-        $$highResolution = is\_occupied$$
+-        [S1, unofficial]
++        Recalculate $sideDist$ for the high-res grid.
++        Set $highResolution = true$.
++        Continue to next iteration.
++
++    g.  **Update State:**
++        $$highResolution = resolution$$
++
++3.  **Result:**
++    If $index > -1000$:
++    Set $hitColor$, $hitPosition$, $hitVelocity$ from $particlesPositionBuffer[index]$ and other buffers.
++    Return true.
++    Else:
++    Return false.
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def ray_marching_particle_grid_traversal(ray_origin, ray_direction, particles_position_buffer, particles_indices_buffer, grid_buffer, resolution, inner_radius, max_iterations=400, grid_ratio=8, radius=0.19, epsilon=1e-10):
+-    import math
+-
+-    def step(a, b):
+-        return 1.0 if a < b else 0.0
+-
+-    def floor_vec(v):
+-        return [math.floor(x) for x in v]
+-
+-    def get_color(idx):
+-        return [0.0, 0.0, 0.0]  # Placeholder for color buffer lookup
+-
+-    def get_velocity(idx):
+-        return [0.0, 0.0, 0.0]  # Placeholder for velocity buffer lookup
+-
+-    pos = list(ray_origin)
+-    ray_dir = list(ray_direction)
+-    map_pos = floor_vec(pos)
+-
+-    ray_step = 1.0 / math.sqrt(sum(x*x for x in ray_dir))
+-    delta_dist = ray_step
+-
+-    side_dist = [ray_step * (map_pos[i] - pos[i] + 0.5) + 0.5 for i in range(3)]
+-    side_dist = [s * delta_dist for s in side_dist]
+-
++def ray_march_particle_grid(pos0, ray_direction, particles_position_buffer, particles_indices_buffer, grid_buffer, resolution, inner_radius):
++    MAX_ITERATIONS = 400
++    GRID_RATIO = 8
++    RADIUS = 0.19
++    EPSILON = 1e-10
++    acne = 0.05
++    
++    # Initial setup
++    pos = pos0
++    map_pos = floor(pos)
++    delta_dist = ray_direction / length(ray_direction) # Normalize
++    ray_step = 1.0 # Assuming unit voxel size for step calculation
++    
++    # Calculate initial side distances
++    # sideDist = (rayStep * (mapPos - pos + 0.5) + 0.5) * deltaDist
++    side_dist = (ray_step * (map_pos - pos + 0.5) + 0.5) * delta_dist
++    
+     high_resolution = True
+-    pos0_h = list(pos)
+-    pos0_l = list(pos)
+-    best_index = -1000
+-    best_d = float('inf')
+-
+-    for i in range(max_iterations):
+-        # Determine step direction: finds axis with minimum sideDist
+-        step_forward = [
+-            step(side_dist[0], side_dist[1]) * step(side_dist[0], side_dist[2]),
+-            step(side_dist[1], side_dist[2]) * step(side_dist[1], side_dist[0]),
+-            step(side_dist[2], side_dist[0]) * step(side_dist[2], side_dist[1])
+-        ]
+-
+-        # Update state
+-        side_dist = [side_dist[j] + step_forward[j] * delta_dist for j in range(3)]
+-        pos = [pos[j] + step_forward[j] * ray_step for j in range(3)]
+-        map_pos = floor_vec(pos)
+-
+-        # Calculate time to boundary
+-        t = min(side_dist)
+-
+-        # Border check (dimensional mismatch in source; implemented as written)
+-        border_yz = math.sqrt((pos[1]/resolution[1] - 0.5)**2 + (pos[2]/resolution[2] - 0.5)**2) > inner_radius
+-        # x-bound checks mentioned but not specified; assumed similar or handled elsewhere
+-        if border_yz:
++    d = float('inf')
++    index = -1000
++    
++    # Low-res grid dimensions
++    low_res = resolution // GRID_RATIO
++    
++    for i in range(MAX_ITERATIONS):
++        # Determine step direction
++        # step(a, b) returns 1.0 if a < b else 0.0
++        step_forward = step(side_dist.x, side_dist.y) * step(side_dist.x, side_dist.z) * \
++                       step(side_dist.y, side_dist.x) * step(side_dist.y, side_dist.z) * \
++                       step(side_dist.z, side_dist.x) * step(side_dist.z, side_dist.y)
++        
++        # Update side distances and position
++        side_dist += step_forward * delta_dist
++        pos += step_forward * ray_step
++        map_pos = floor(pos)
++        
++        # Distance to next voxel boundary
++        t = min(side_dist.x, min(side_dist.y, side_dist.z))
++        
++        # Border conditions
++        # Check yz plane distance from center relative to resolution
++        border_check_yz = length(pos.yz / resolution - vec2(0.5)) > inner_radius
++        # Check x bounds (example logic, exact bounds depend on scene)
++        border_check_x = (pos.x < 0.0) or (pos.x > resolution)
++        
++        if border_check_yz or border_check_x:
+             continue
+-
++            
+         # Determine low-res grid index
++        low_grid = map_pos // GRID_RATIO
++        index_grid = low_grid.x + low_res * low_grid.y + (low_res * low_res) * low_grid.z
++        
++        # Check occupancy
++        resolution_flag = (grid_buffer[index_grid] == 1)
++        
+         if high_resolution:
+-            low_grid = [map_pos[j] // grid_ratio for j in range(3)]
++            if not resolution_flag:
++                # Switch to low-res mode
++                pos0_l = (pos0 + t * ray_direction) / GRID_RATIO
++                pos = pos0_l
++                map_pos = floor(pos)
++                # Recalculate sideDist for low-res grid
++                side_dist = (ray_step * (map_pos - pos + 0.5) + 0.5) * delta_dist
++                high_resolution = False
++                continue
++            else:
++                # High-res hit test
++                res = resolution
++                index1d = map_pos.x + res * map_pos.y + (res * res) * map_pos.z
++                
++                hit_found = False
++                for z in range(8):
++                    particle_id = 8 * index1d + z
++                    voxel_data = particles_indices_buffer[particle_id]
++                    
++                    if voxel_data == 0:
++                        break
++                    
++                    center = particles_position_buffer[voxel_data].xyz
++                    
++                    # Basic bounds check
++                    if center.x > 0.1 * resolution:
++                        # Sphere intersection check
++                        # checkHit function calculates distance from ray to sphere center
++                        # Returns true if intersection occurs within radius
++                        l = distance_from_ray_to_sphere(pos0, ray_direction, center, particles_position_buffer[voxel_data].w)
++                        
++                        if l < d:
++                            index = voxel_data
++                            d = l
++                            hit_found = True
++                
++                if hit_found:
++                    return True, index, d
+         else:
+-            low_grid = list(map_pos)
+-
+-        low_res = resolution[0] // grid_ratio
+-        index_grid = low_grid[0] + low_res * low_grid[1] + low_res * low_res * low_grid[2]
+-
+-        # Check occupancy
+-        is_occupied = grid_buffer[index_grid] == 1
+-
+-        if high_resolution and not is_occupied:
+-            # Switch to low-res mode
+-            pos0_l = [(pos0_h[j] + t * ray_dir[j]) / grid_ratio for j in range(3)]
+-            pos = list(pos0_l)
+-            map_pos = floor_vec(pos)
+-            delta_dist_low = ray_step / grid_ratio
+-            side_dist = [ray_step * (map_pos[j] - pos[j] + 0.5) + 0.5 for j in range(3)]
+-            side_dist = [s * delta_dist_low for s in side_dist]
+-            high_resolution = False
+-
+-        elif high_resolution and is_occupied:
+-            # Check for particle hits
+-            res = resolution[0]
+-            index1d = map_pos[0] + res * map_pos[1] + res * res * map_pos[2]
+-
+-            for z in range(8):
+-                particle_id = 8 * index1d + z
+-                voxel_data = particles_indices_buffer[particle_id]
+-                if voxel_data == 0:
+-                    break
+-
+-                center = [particles_position_buffer[voxel_data][k] for k in range(3)]
+-
+-                if center[0] > 0.1 * resolution[0]:
+-                    # checkHit logic per pitfall: uses squared radius
+-                    l_sq = sum((center[j] - pos[j])**2 for j in range(3))
+-                    # tCA is distance to closest approach; not defined in sources [G]
+-                    t_ca = 0.0
+-                    d_val = l_sq - t_ca * t_ca
+-                    if d_val < radius and l_sq < best_d:
+-                        best_index = voxel_data
+-                        best_d = l_sq
+-
+-        elif not high_resolution and is_occupied:
+-            # Switch back to high-res mode
+-            pos0_h = [grid_ratio * (pos0_l[j] + 0.9999 * t * ray_dir[j]) for j in range(3)]
+-            pos = list(pos0_h)
+-            map_pos = floor_vec(pos)
+-            delta_dist_high = ray_step
+-            side_dist = [ray_step * (map_pos[j] - pos[j] + 0.5) + 0.5 for j in range(3)]
+-            side_dist = [s * delta_dist_high for s in side_dist]
+-            high_resolution = True
+-
+-        high_resolution = is_occupied
+-
+-    if best_index > -1000:
+-        return {
+-            "hit": True,
+-            "index": best_index,
+-            "position": [particles_position_buffer[best_index][k] for k in range(3)],
+-            "color": get_color(best_index),
+-            "velocity": get_velocity(best_index)
+-        }
+-    return {"hit": False}
++            if resolution_flag:
++                # Switch back to high-res mode
++                pos0_h = GRID_RATIO * (pos0 + 0.9999 * t * ray_direction)
++                pos = pos0_h
++                map_pos = floor(pos)
++                # Recalculate sideDist for high-res grid
++                side_dist = (ray_step * (map_pos - pos + 0.5) + 0.5) * delta_dist
++                high_resolution = True
++                continue
++        
++        high_resolution = resolution_flag
++        
++    return False, -1, float('inf')
++
++def distance_from_ray_to_sphere(ray_origin, ray_direction, sphere_center, radius):
++    # Vector from ray origin to sphere center
++    oc = ray_origin - sphere_center
++    # Project oc onto ray direction
++    t_ca = dot(oc, ray_direction)
++    # Squared distance from ray to center
++    d2 = dot(oc, oc) - t_ca * t_ca
++    # Check if distance is less than squared radius
++    if d2 < radius * radius:
++        return sqrt(d2)
++    return float('inf')
+ ```
+ 
++**Edge Cases and Pitfalls:**
++- **Precision:** The check for borders uses floating-point comparisons. Small errors in $pos$ calculation can cause jitter or missed hits near boundaries [S1, unofficial].
++- **Squared Radius:** The `checkHit` function uses squared radius ($RADIUS$) to avoid square root calculations. The distance check must be squared as well ($d = l^2 - t_{CA}^2$) [S1, unofficial].
++- **Empty Voxels:** If $particlesIndicesBuffer$ contains 0s, the loop breaks early, which is efficient but requires careful initialization of the buffer [S1, unofficial].
++- **Resolution Mismatch:** The $GRID\_RATIO$ must be an integer divisor of the high-resolution grid dimensions to ensure correct mapping [S1, unofficial].
++
+ ## Subtopics
+ 
++### [2D Projection 1D Lookup Particle Cache](8958-2d-projection-1d-lookup-particle-cache.md)
++The 2D Projection 1D Lookup Particle Cache is a spatial data structure that optimizes field value calculations in volume rendering by iterating only over particles within a fixed cutoff radius $R_c$ from a sample point. It solves the inefficiency of retrieving influencing particles for isosurface extraction (e.g., Marching Slices) by combining a 2D projection with a 1D search along the z-axis. Unlike 3D lookup grid approaches (such as those by Wyvill et al., Müller et al., and Triquet) which return approximately 6.5 times more particles due to cubic bounding volumes requiring expensive floating-point distance culling, this method returns exactly the particles within the spherical radius $R_c$ using only integer comparisons.
++
++### Particle Rendering via Grid Bucketing
++Particle Rendering via Grid Bucketing renders a particle (sphere) by sampling grid cells within the particle's bounding box and checking if grid points fall within the particle's radius [S3, unofficial]. It calculates the grid index of the particle center, retrieves the update pattern (bucket) for that index, and iterates over each point in the bucket. If the squared distance from the particle center to the point is less than or equal to the squared radius, the point is added to the render list with the particle's object ID, display parameters, position, normal, dithered color, and clipping behavior [S3, unofficial].
++
+ ## Operating characteristics
+-- **Time Complexity:** $O(N)$ where $N$ is the number of ray steps, but effectively reduced by the low-resolution culling [S1, unofficial]. The cost per step is $O(1)$ for grid lookup and $O(1)$ for particle check (up to 8 particles per voxel) [S1, unofficial].
+-- **Memory Complexity:** $O(V_{low} + V_{high} \cdot P)$ where $V$ is the number of voxels and $P$ is particles per voxel [S1, unofficial]. The low-res grid is $1/GRID\_RATIO^3$ the size of the high-res grid [S1, unofficial].
+-- **Performance:** The method is efficient for sparse particle systems where large empty regions can be skipped [S1, unofficial]. The low-resolution grid acts as a broad-phase culling mechanism [S1, unofficial].
+-- **Strengths:** Reduces the number of particle distance checks by skipping empty high-resolution voxels [S1, unofficial].
+-- **Limitations:** Requires maintaining two grid structures [S1, unofficial]. The low-resolution grid may have false positives (occupied low-res cell but no particles in the high-res voxel), leading to unnecessary particle checks [S1, unofficial]. The source code contains potential bugs (e.g., `|| true` in occupancy check, undefined `tCA`) [S1, unofficial].
++- **Time Complexity:** $O(N)$ where $N$ is the number of ray steps, but with a significantly reduced constant factor due to culling. The low-res grid allows skipping large empty regions. The high-res grid access is $O(1)$ per voxel, and the particle loop is bounded by the maximum number of particles per voxel (8) [S1, unofficial][S2, unofficial].
++- **Memory Complexity:** $O(V_{low} + V_{high} \cdot P_{max})$ where $V_{low}$ is the number of low-res voxels, $V_{high}$ is the number of high-res voxels, and $P_{max}$ is the max particles per voxel (8) [S1, unofficial].
++- **Measured Performance:** In a test case, using row-range particle lookup (reading contiguous rows of cells as single ranges) reduced memory loads by 14% compared to individual cell access [S2, unofficial]. The method achieved a rendering time of 4.1 ms for a lightbox scene, compared to 4.7 ms for a wall-drawing approach [S2, unofficial].
++- **Strengths:** Efficient culling of empty space; reduced memory bandwidth usage due to contiguous memory access patterns; avoids square root calculations for sphere tests [S1, unofficial][S2, unofficial].
++- **Limitations:** Requires pre-computation of the occupancy grid and particle index buffer; performance degrades if the scene is densely packed (many particles per voxel); switching between resolution levels adds overhead [S1, unofficial].
++- **When to Use:** Suitable for particle-based volume rendering where particles are sparse and spatially coherent. Ideal for real-time applications on GPUs where memory bandwidth is a bottleneck [S1, unofficial][S2, unofficial].
++- **When Not to Use:** Not suitable for dense, continuous volume data (e.g., medical CT scans) where trilinear interpolation is required. Not ideal for scenes with highly irregular particle distributions that do not align well with the grid [S1, unofficial].
+ 
+ ## Background
+-This method is described in an unofficial WebGPU Voxel Cone Tracing repository [S1, unofficial]. It is a hybrid approach combining ray marching with grid-based particle lookup [S1, unofficial].
++Ray Marching Particle Grid Traversal was developed as part of a WebGPU-based voxel cone tracing and particle rendering system. The technique was documented in an unofficial GitHub repository by Hector Arellano Dev, which provides a complete implementation of the algorithm in WebGPU shaders [S1, unofficial]. The optimization of reading contiguous rows of cells as ranges was further discussed in a pull request by Siroko for the "kansei" project, which highlighted performance gains in ray-traced lightbox rendering [S2, unofficial]. The method is distinct from traditional grid-based volume rendering as it focuses on discrete particle spheres rather than continuous scalar fields [S1, unofficial].
+ 
+ ## Sources
+-[S1] HectorArellanoDev/WebGPUVoxelConeTracing, https://github.com/HectorArellanoDev/WebGPUVoxelConeTracing, fetched 2026-10-26 (unofficial)+[S1] HectorArellanoDev/WebGPUVoxelConeTracing, https://github.com/HectorArellanoDev/WebGPUVoxelConeTracing, fetched 2026-10-26 (unofficial)
++[S2] voxel-gi-particles: ray-traced lightbox about twice as fast, same image, https://github.com/Siroko/kansei/pull/114, fetched 2026-10-26 (unofficial)
++[S3] quertzuiop/Volumetric-display, https://github.com/quertzuiop/Volumetric-display, fetched 2026-10-26 (unofficial)

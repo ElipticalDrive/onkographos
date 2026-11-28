@@ -1,0 +1,191 @@
+A WebGPU engine for creative coding. Contribute to Siroko/kansei development by creating an account on GitHub.
+
+feat(culling): two-phase GPU occlusion culling for instanced renderables by Siroko · Pull Request #37 · Siroko/kansei · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Siroko
+commented
+Sep 28, 2026
+Copy link
+Copy Markdown
+Owner
+GPU occlusion culling for instanced renderables (part 2 of 3)
+The user asked for GPU occlusion culling of instances, "so we only render the amount of geometry that is visible". Part 1 (#30, merged) added the depth pyramid. This PR adds two-phase occlusion culling on top of the existing per-view frustum/LOD culling, plus stats and a debug freeze. It also makes the existing culling much cheaper on the CPU for everyone. Part 3 (a stacked PR, next) adds a standalone example and the measurements.
+Freeze-culling debug view: the camera's culling was frozen in the valley (Renderer::set_freeze_culling) and the camera then moved up. The drawn trees are exactly the ones the valley camera draws: the slope facing it. The trees behind the ridge were occluded, and the rest were frustum- or LOD-culled.
+How it works
+Each frame, for the camera, for renderables that opt in:
+Early phase. The cull draws the instances in view that were visible last frame, together with the rest of the opaque scene. A DepthPyramid (max depth) is built from that depth.
+Late phase. Every instance in view is tested against the pyramid. Its bounds are projected through the jittered projection (as rasterized) and sampled at the mip where they span at most 2 × 2 texels. The visible ones the early phase didn't draw (disoccluded, or new in view) are drawn in a second GBuffer pass, followed by the transparent renderables, which don't occlude. Each instance's visibility is kept for the next frame.
+Nothing visible is missed, even on disocclusion or a camera cut: whatever the early phase leaves out, the late phase tests against this frame's depth. The history only decides which phase draws an instance.
+Camera cuts (Camera::reset_motion, as midsommar already calls) and Renderer::reset_occlusion_history() forget the history. The next early phase then draws none of those instances, and the late phase tests them against the depth of everything else (terrain, meshes). That is cheaper than an "all visible" reset and just as correct.
+Occluders are everything opaque in the early phase: renderables without culling (terrain, large meshes), frustum-only instances, and the instances seen last frame. Nothing needs marking.
+Render scale and TAA: the pyramid is built at the GBuffer's render size, and the test uses the jittered projection.
+Shadow maps and reflections stay frustum-only: an instance hidden from the camera may still cast a shadow into the picture.
+Where it runs: the camera in render_with_postprocessing (single-sampled GBuffer). render() stays frustum-only.
+Composes with fix(renderer): stable per-object matrix slots; dynamic renderables drawn outside the render bundle #31: the first phase draws fix(renderer): stable per-object matrix slots; dynamic renderables drawn outside the render bundle #31's opaque bundle and dynamic opaque renderables. The second draws a bundle of the late phase's draws, the dynamic ones live, then fix(renderer): stable per-object matrix slots; dynamic renderables drawn outside the render bundle #31's transparent bundle and transparent dynamic renderables.
+API (additive; frustum-only stays the default)
+InstanceCulling::with_occlusion(true)
+opt a renderable in (occlusion field)
+InstanceCulling::with_bounds_shift(v), with_bounds_box(half)
+tighter bounds for every view: move the sphere off the instance centre, or use an object-space box (tested against the frustum, and projected for occlusion). A tree's sphere around its base reaches a whole tree height below ground and to each side.
+Renderer::set_occlusion_culling(bool)
+renderer-wide switch (on by default; each renderable still opts in)
+Renderer::reset_occlusion_history()
+forget visibility (automatic on Camera::reset_motion)
+Renderer::set_freeze_culling(bool)
+debug: keep the camera's culling where it was while the camera moves
+Renderer::set_culling_stats(bool), culling_stats()
+per view (CullViewKind): tested, outside the LOD band, outside the frustum, occluded, drawn (CullStats). Workgroup-level counters in the indirect args, read back asynchronously: a few frames late, up to seconds under heavy GPU load.
+Renderer::depth_pyramid()
+the pyramid of the early phase's depth
+Cheaper culling for everyone (no opt-in)
+Measuring the film showed the existing frustum culling cost about 5 ms of CPU per frame. Each culled renderable made two queue.write_buffer calls per view (146 dispatches in shot 7), and a write costs 20–60 µs in Chrome under load. Now:
+The frame's views go up in one write, and each dispatch picks its view by dynamic offset.
+A renderable's parameters are written only when they change.
+Its indirect draws share one buffer, reset by one clear_buffer; the cull writes each draw's index count.
+In the film, run_instance_culling went from 4.5–6 ms to 0.07–0.1 ms of CPU per frame, occlusion on or off. That was timed in-page around the call on this Mac, with occlusion alternating on and off inside one page load.
+Also, the GBuffer's indirect/refractive pass is now skipped when nothing indirect is visible. It used to load and store every GBuffer target for nothing.
+Measurements (headless Chrome, Apple GPU, this Mac)
+Timing is noisy on this shared Mac: other sessions render WebGPU at the same time, and separate runs differ by tens of percent. So every A/B alternates occlusion on and off inside one page (2–3 s phases, 8–20 of them). Full tables are in part 3.
+The example, GPU-bound, 1920 × 1080, mean frame interval with occlusion on vs off:
+View
+On
+Off
+forest
+7.12 ms
+8.86 ms
+ridge
+6.42 ms
+8.11 ms
+valley
+6.40 ms
+6.63 ms
+high
+8.28 ms
+8.89 ms
+sky (nothing to hide, pure overhead)
+4.03 ms
+3.25 ms
+In an earlier run, sky measured 1.48 vs 1.30 ms.
+The Midsommar film (1080p, render scale 0.75):
+Draws: occlusion cuts the camera's instances in every shot that has occluders. The lake shot goes from 27,994 to 8,562, the trunks shot from 9,848 to 4,386, departure from 5,203 to about 3,300. The canopy and branches shots have nothing to occlude.
+GPU time: it doesn't go down. The measured span runs from the start of the GBuffer pass to the end of the velocity pass, plus the cull pass. Paired medians put occlusion at about 0–1.9 ms slower per frame, with ±8 ms noise per pair. The second phase costs about 1–1.5 ms (pyramid, second cull, a second GBuffer pass that loads and stores every target). What it saves is small on this GPU: the hidden instances are mostly cheap far LODs, and the tile-based GPU already discards hidden pixels.
+Frame time: on this Mac the film is CPU-bound in headless Chrome (11–35 ms in the render call, depending on load), so neither effect changes it. The CPU saving above does.
+So: occlusion culling works and is correct: pixel diffs on vs off are at the noise floor of two off/off captures, with no missing geometry. It pays in the example's dense-geometry views. For the midsommar film on Apple GPUs, leave it off for now; the culling CPU saving applies either way. set_occlusion_culling's docs say so.
+Tests
+The per-view GPU culling test runs on the new buffer layout, and now also covers feat(reflections): a LOD distance scale for mirrored views #32's LOD distance scale.
+A new two-phase GPU test runs several frames:
+nothing seen yet;
+the early phase drawing what was seen;
+a hidden instance drawn the frame its occluder goes;
+a reset;
+spheres and boxes;
+the stats counters.
+It fails when the occlusion test is disabled. I checked both ways it can be disabled.
+The naga validation checks both new uniform structs' sizes.
+cargo test -p kansei-core, cargo check --workspace and cargo check -p kansei-core --target wasm32-unknown-unknown pass. cargo clippy -p kansei-core adds no warnings.
+feat(culling): two-phase GPU occlusion culling for instanced renderables
+…
+9f30b71
+```
+The second part of occlusion culling (the depth pyramid was #30): InstanceCulling::with_occlusion
+also culls the camera's instances hidden behind the rest of the scene, on the GPU, in two phases.
+
+- First phase: the instances in view that the camera saw last frame are drawn with the opaque
+  scene; a DepthPyramid (Max) is built from that depth.
+- Second phase: every instance in view is tested against the pyramid (its bounds projected
+  through the jittered projection, at the mip where they span 2 x 2 texels); the visible ones the
+  first phase did not draw are drawn in a second GBuffer pass, followed by the transparent
+  renderables (which do not occlude), and each instance's visibility is kept for the next frame.
+  Nothing visible is missed on disocclusion or a camera cut; the history only decides which phase
+  draws it. Camera cuts (Camera::reset_motion) and Renderer::reset_occlusion_history forget it.
+- Opt-in per renderable (frustum-only stays the default); Renderer::set_occlusion_culling switches
+  it for the whole renderer. It runs for the camera in render_with_postprocessing (single-sampled
+  GBuffer, any render scale); shadow maps and reflections stay frustum-only. Occluders are all
+  opaque geometry of the first phase: terrain and other meshes need nothing.
+- Tighter bounds, for every view: with_bounds_shift (move the sphere or box off the instance
+  centre) and with_bounds_box (an object-space box, tested against the frustum and projected for
+  occlusion).
+- Stats: Renderer::set_culling_stats / culling_stats give, per view, the instances tested, culled
+  by LOD band, frustum and occlusion, and drawn (workgroup-level counters in the indirect args,
+  read back asynchronously). Debugging: Renderer::set_freeze_culling keeps the camera's culling
+  where it was while the camera moves.
+
+Cheaper culling for everyone: queue.write_buffer costs tens of microseconds a call in Chrome, and
+the frustum culling made two per renderable per view (146 dispatches in the Midsommar film, ~5 ms
+of CPU a frame). Now the frame's views go up in one write and each dispatch picks its view by a
+dynamic offset; a renderable's parameters are written only when they change; its indirect draws
+share one buffer, reset by one clear. The film's culling CPU went from 4.5-6 ms to ~0.1 ms a frame.
+Also: the GBuffer's indirect/refractive pass is skipped when there is nothing indirect to draw (it
+loaded and stored every target for nothing).
+
+Tests: the GPU culling test on the new layout, and a two-phase GPU test over several frames
+(nothing seen yet, then the first phase drawing what was seen, a hidden instance uncovered the
+frame the wall goes, a reset, spheres and boxes, and the counters); checked to fail with the
+occlusion test disabled.
+```
+vercel
+Bot
+commented
+Sep 28, 2026
+Copy link
+Copy Markdown
+Deployment failed for project kansei-fluid with the following error:
+```
+Resource is limited - try again in 24 hours (more than 100, code: "api-deployments-free-per-day").
+```
+Learn More: https://vercel.com/sirokos-projects?upgradeToPro=build-rate-limit
+vercel
+Bot
+commented
+Sep 28, 2026
+Copy link
+Copy Markdown
+Deployment failed for project kansei with the following error:
+```
+Resource is limited - try again in 24 hours (more than 100, code: "api-deployments-free-per-day").
+```
+Learn More: https://vercel.com/sirokos-projects?upgradeToPro=build-rate-limit
+Siroko
+mentioned this pull request
+Sep 28, 2026
+feat(examples): occlusion-culling forest, with stats, freeze and an A/B bench
+#38
+Merged
+Hide details
+View details
+Siroko
+merged commit f8c1a1e
+into
+development
+Sep 28, 2026
+0 of 2 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+Siroko
+mentioned this pull request
+Sep 28, 2026
+feat(culling): two-phase occlusion culling in planar-reflection views
+#57
+Merged
+Siroko
+mentioned this pull request
+Oct 8, 2026
+feat(ts): Hi-Z depth pyramid and two-phase occlusion culling, opt-in (V-2)
+#211
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

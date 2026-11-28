@@ -1,0 +1,463 @@
+--- v001.md
++++ v002.md
+@@ -4,43 +4,68 @@
+ 
+ ## Overview
+-In-core volume rendering, specifically as implemented in the **Srend** system, is a method for visualizing Computational Fluid Dynamics (CFD) simulations using Cartesian grids by embedding the rendering code directly within the simulation application [S1]. It solves the problem of high data I/O overhead and latency in large-scale parallel simulations by performing rendering in-core during the simulation run, eliminating the need for external visualization tools or post-processing steps [S1]. Unlike general-purpose in-situ renderers that often employ complex load-balancing or supervisory mechanisms, Srend relies on a simple time-partitioning strategy where every simulation process renders its local data, followed by space-partitioned compositing via a user-defined "rendering tree" [S1]. This approach exploits the embarrassingly parallel nature of ray casting and the associativity of pre-multiplied alpha compositing to achieve scalable, low-overhead visualization [S1].
++In-Core Volume Rendering, specifically implemented as the **Srend** library, is a method for embedding direct volume ray casting directly within computational fluid dynamics (CFD) simulation codes to produce immediate, high-quality imagery without external post-processing [S1]. It solves the problem of visualization overhead and storage requirements in large-scale parallel simulations by performing rendering in-core, utilizing time partitioning where every simulation process renders its own data [S1]. It differs from established volume renderers by lacking a supervisory load-balancing mechanism; instead, it relies on the associativity of pre-multiplied alpha compositing to combine results from distributed processes via a user-defined "rendering tree" [S1].
+ 
+ ## How it works
+-The method integrates ray casting, local rendering, and distributed compositing into the simulation loop. It is designed as a Fortran library to be compiled directly into simulation codes (e.g., PPMstar, CM1, WRF) [S1].
++The method operates on the fundamental loop structure of [Direct volume ray casting](19-direct-volume-ray-casting.md): for each pixel, a ray $r(t) = \mathbf{o} + t\mathbf{d}$ is defined, intersected with the volume domain, and sampled/composited along its path [G]. The traversal order is determined by the pixel's position in the image plane [G].
++
++The core computational engine consists of four sequential stages applied to each ray [S5, S10, S37, unofficial]:
++
++1.  **Ray Generation and Discretization**: The ray segment $[t_{start}, t_{end}]$ intersecting the volume is determined, typically by intersecting the ray with the volume's bounding box [S1][S8, S16, unofficial]. The segment is discretized into $N$ samples at equidistant intervals $\Delta t = (t_{end} - t_{start}) / N$ [S5, S10, S17, unofficial].
++2.  **Sampling and Interpolation**: At each sample point $\mathbf{p}_i = r(t_i)$, the scalar value $V(\mathbf{p}_i)$ is retrieved from the volume data. This is typically performed by trilinear interpolation of the eight surrounding voxels [S9, S11, S47, unofficial].
++3.  **Classification (Transfer Function)**: The scalar value $V(\mathbf{p}_i)$ is mapped to optical properties: color $C_i$ and opacity $\alpha_i$ [S2, S2789]. The opacity is often corrected for the step size $\Delta t$ to ensure physical consistency, using the Beer-Lambert law approximation:
++    $$ \alpha_i = 1 - e^{-\sigma_i \Delta t} $$
++    where $\sigma_i$ is the extinction coefficient derived from the scalar value [S24, S30, unofficial].
++4.  **Compositing**: The samples are accumulated from front to back (closest to the eye to furthest) using the front-to-back alpha compositing equation [S1][S2, S13, unofficial][S61]:
++    $$ C_{out} = C_{in} + (1 - \alpha_{in}) \cdot C_{sample} \cdot \alpha_{sample} $$
++    $$ \alpha_{out} = \alpha_{in} + (1 - \alpha_{in}) \cdot \alpha_{sample} $$
++    where $C_{in}$ and $\alpha_{in}$ are the accumulated color and opacity from previous samples, and $C_{sample}$ and $\alpha_{sample}$ are the color and opacity of the current sample [S52, S60, unofficial]. The process initializes with $C_{in} = 0$ and $\alpha_{in} = 0$ [S15, S46, unofficial].
+ 
+ ### Inputs and Outputs
+ *   **Inputs**:
+-    *   Simulation state data: 3D arrays of variable values (scalar fields) representing the volume [S1].
+-    *   Grid geometry: Cartesian grid coordinates. For non-uniform grids (stretched or terrain-following), spatial coordinates must be interpolated to ensure spatial accuracy [S1].
+-    *   Rendering parameters: View index, camera position, projection type (perspective or orthographic), and color/opacity transfer function definitions [S1].
+-    *   Data format: The scalar values must be pre-scaled to 8-bit unsigned integers (bytes) and mapped to a user-defined color table [S1].
++    *   Volume data: Rectangular "bricks" represented as 3D arrays of variable values [S1].
++    *   Data Format: Arrays of bytes (e.g., Fortran `character*1`) scaled to a color table [S1]. The user must scale real simulation data to bytes and define a color table [S1].
++    *   Rendering Parameters: View index, camera position/direction, number of samples, and color table definition [S1].
++    *   MPI Context: Simulation worker ranks and the user-defined "rendering tree" topology [S1].
+ *   **Outputs**:
+-    *   A final 2D image file (e.g., PNG, TIFF) written to disk by the root finisher [S1].
+-    *   Intermediate 2D pre-multiplied alpha planes sent between processes [S1].
++    *   A 2D rendered image (pre-multiplied alpha plane) for the local brick [S1].
++    *   Composited final image written to disk by the root finisher [S1].
+ 
+ ### Data Structures
+-The data is partitioned into rectangular "bricks" [S1].
+-*   **Brick**: A 3D array of bytes (`character*1` in Fortran) representing a sub-volume of the simulation domain [S1].
+-*   **Color Table**: A user-defined mapping from byte values (0-255) to RGBA colors [S1].
+-*   **Rendering Tree**: A logical hierarchy of MPI ranks defined by the user to specify how 2D renderings are composited. It is not a spatial data structure but a communication topology [S1].
++*   **Volume Brick**: A 3D array of bytes. The dimensions correspond to the partitioned subset of the global Cartesian grid held by the current MPI rank [S1].
++*   **Color Table**: A mapping from byte values (0-255) to RGBA color and opacity values [S1].
++*   **Render State**: Contains the accumulated color $C_{in}$ and opacity $\alpha_{in}$ for the current ray [S1].
+ 
+ ### Numbered Steps
+ 
+-1.  **Data Partitioning**: The global simulation domain is divided among MPI worker ranks. Each rank holds a local "brick" of data (a 3D array of bytes) [S1].
+-2.  **Local Rendering (Ray Casting)**:
+-    *   Each MPI rank performs volume ray casting on its local brick independently [S1].
+-    *   Rays are generated from the eye position through the volume of interest [S1].
+-    *   For each ray, the algorithm samples the local brick. If the ray passes through regions not owned by the current rank, those regions are treated as empty or transparent (the rank renders "as if the brick was alone in space") [S1].
+-    *   The ray casting loop accumulates color and opacity using front-to-back compositing (Beer-Lambert law) to produce a 2D pre-multiplied alpha plane for the brick [S1].
+-    *   *Note*: The sources state that data must be scaled to bytes and a color table defined by the user. The interpolation kernel depends on the grid type; for Cartesian grids, standard trilinear or nearest-neighbor interpolation is implied, but for stretched/terrain-following grids, spatial interpolation is required [S1].
+-3.  **Compositing (Tree Reduction)**:
+-    *   Each rank sends its 2D rendered alpha plane to a designated "composer" rank according to the user-defined rendering tree [S1].
+-    *   Composers receive 2D renderings from their children in the tree.
+-    *   Composers perform pixel-wise pre-multiplied alpha compositing of the received planes [S1].
+-    *   The compositing operation is associative, allowing arbitrary tree structures [S1].
+-    *   The result is sent up the tree toward the root [S1].
++1.  **Data Partitioning**: The global simulation volume is partitioned into rectangular bricks among simulation worker ranks [S1]. Each rank holds a subset of the data [S1].
++2.  **Local Rendering (Per Rank)**:
++    1.  For each pixel in the output image:
++        2.  Generate ray $r(t)$ based on the view parameters [S1].
++        3.  Intersect ray with the local brick's bounding box to determine $[t_{start}, t_{end}]$ [S1].
++        4.  If the ray does not intersect the local brick, skip to the next pixel [S1].
++        5.  Discretize the segment into $N$ samples with step $\Delta t$ [S1].
++        6.  Initialize $C_{in} = 0, \alpha_{in} = 0$ [S1].
++        7.  For each sample $i$ from $0$ to $N-1$:
++            8.  Calculate sample position $\mathbf{p}_i = r(t_{start} + i \cdot \Delta t)$ [S1].
++            9.  Check if $\mathbf{p}_i$ is within the local brick boundaries [S1].
++            10. If outside, continue to next sample [S1].
++            11. Retrieve byte value $B$ from the local 3D array at $\mathbf{p}_i$ using interpolation (e.g., trilinear) [S1].
++            12. Map $B$ to color $C_{sample}$ and opacity $\alpha_{sample}$ using the color table [S1].
++            13. Update compositing state:
++                $$ C_{in} = C_{in} + (1 - \alpha_{in}) \cdot C_{sample} \cdot \alpha_{sample} $$
++                $$ \alpha_{in} = \alpha_{in} + (1 - \alpha_{in}) \cdot \alpha_{sample} $$
++            14. If $\alpha_{in} \ge 1.0$, break loop (ray is fully opaque) [S1].
++        15. Store $(C_{in}, \alpha_{in})$ as the pixel value for the local brick's 2D render buffer [S1].
++3.  **Compositing (Across Ranks)**:
++    1.  Each rank sends its 2D rendered brick buffer to a designated "composer" process according to the rendering tree [S1].
++    2.  The composer receives 2D renderings from its sources [S1].
++    3.  The composer combines the incoming pre-multiplied alpha planes with its own local result (if it is also a renderer) or with previous composited results [S1].
++    4.  The composition follows the associativity of alpha compositing: if $R_A$ and $R_B$ are two pre-multiplied alpha images, the composite $R_C$ is calculated pixel-wise [S1]:
++        $$ C_C = C_A + (1 - \alpha_A) \cdot C_B $$
++        $$ \alpha_C = \alpha_A + (1 - \alpha_A) \cdot \alpha_B $$
++    5.  The result is sent up the rendering tree to the next composer or to the root [S1].
+ 4.  **Finalization**:
+-    *   The root rank (finisher) receives the fully composited 2D image from the final composer [S1].
+-    *   The finisher writes the image to disk [S1].
++    1.  The root "finisher" receives the fully composited image from the final composer [S1].
++    2.  The finisher writes the image to disk [S1].
+ 
+ ### Pseudocode
+@@ -48,181 +73,203 @@
+ ```python
+ # Srend In-Core Volume Rendering Implementation
+-# Note: This is a conceptual Python representation of the Fortran-based Srend logic.
+-# The actual implementation is embedded in Fortran simulation codes.
+-
+-import mpi4py.MPI as MPI
+-import numpy as np
+-
+-# Global configuration
+-comm = MPI.COMM_WORLD
+-rank = comm.Get_rank()
+-size = comm.Get_size()
+-
+-# User-defined parameters (passed in each rendering call)
+-view_index = 0
+-num_sources = 0  # Number of child ranks in the rendering tree for this node
+-target_rank = -1 # MPI rank to send composited result to
+-output_filename = "rendering.png"
+-
+-def scale_data_to_bytes(simulation_data, min_val, max_val):
+-    """
+-    User-defined step: Scale real simulation data to 0-255 bytes.
+-    Requires user knowledge of data distribution.
+-    """
+-    # [G] Standard min-max normalization clamped to 0-255
+-    normalized = (simulation_data - min_val) / (max_val - min_val)
+-    normalized = np.clip(normalized, 0, 1)
+-    return (normalized * 255).astype(np.uint8)
+-
+-def define_color_table():
+-    """
+-    User-defined step: Define mapping from byte value to RGBA.
+-    Returns a 256x4 array.
+-    """
+-    # [G] Placeholder for user-defined transfer function
+-    return np.zeros((256, 4), dtype=np.float32)
+-
+-def ray_cast_brick(brick_data, color_table, view_params):
+-    """
+-    Local ray casting for a single brick.
+-    brick_data: 3D numpy array of uint8 (local sub-volume)
+-    color_table: 256x4 array of RGBA
+-    view_params: Contains eye position, direction, etc.
+-    Returns: 2D pre-multiplied alpha plane (height x width x 4)
+-    """
+-    height, width = view_params['image_dims']
+-    # Initialize output buffer with 0 opacity, 0 color
+-    alpha_plane = np.zeros((height, width, 4), dtype=np.float32)
+-    
+-    # Ray generation and casting loop
+-    for y in range(height):
+-        for x in range(width):
+-            ray_origin, ray_direction = view_params.get_ray(x, y)
++
++# Constants
++MAX_ALPHA = 1.0
++EPSILON = 1e-6
++
++# Data Structures
++class ColorTable:
++    def __init__(self, entries):
++        # entries: list of (r, g, b, a) tuples for byte values 0-255
++        self.entries = entries
++
++    def get_color(self, byte_val):
++        return self.entries[byte_val]
++
++class Brick:
++    def __init__(self, data_3d, bounds):
++        # data_3d: 3D array of bytes (uint8)
++        # bounds: (min_x, min_y, min_z, max_x, max_y, max_z) in grid coordinates
++        self.data = data_3d
++        self.bounds = bounds
++
++class Ray:
++    def __init__(self, origin, direction):
++        self.origin = origin
++        self.direction = direction
++
++    def intersect_brick(self, brick):
++        # Returns (t_start, t_end) or None if no intersection
++        # Simplified AABB intersection
++        min_b, max_b = brick.bounds
++        t_min = -float('inf')
++        t_max = float('inf')
++        
++        for i in range(3):
++            if abs(self.direction[i]) < EPSILON:
++                if self.origin[i] < min_b[i] or self.origin[i] > max_b[i]:
++                    return None
++            else:
++                t1 = (min_b[i] - self.origin[i]) / self.direction[i]
++                t2 = (max_b[i] - self.origin[i]) / self.direction[i]
++                t_min = max(t_min, min(t1, t2))
++                t_max = min(t_max, max(t1, t2))
++        
++        if t_min > t_max:
++            return None
++        return (t_min, t_max)
++
++    def sample(self, t):
++        return (self.origin[i] + t * self.direction[i] for i in range(3))
++
++def trilinear_interpolate(brick, point):
++    # Returns byte value from brick.data at point
++    # Point is in continuous coordinates; needs to be mapped to grid indices
++    # This is a placeholder for the specific interpolation logic
++    # [G] Implementation details for trilinear interpolation on byte arrays
++    pass
++
++def render_brick_local(brick, ray, color_table, num_samples):
++    # Renders the local brick for a single ray
++    intersection = ray.intersect_brick(brick)
++    if intersection is None:
++        return None, None
++    
++    t_start, t_end = intersection
++    delta_t = (t_end - t_start) / num_samples
++    
++    acc_color = (0.0, 0.0, 0.0)
++    acc_alpha = 0.0
++    
++    for i in range(num_samples):
++        t = t_start + i * delta_t
++        point = ray.sample(t)
++        
++        # Check if point is within brick bounds (continuous)
++        # [G] Simplified boundary check; actual implementation needs precise voxel mapping
++        if not is_inside_brick(brick, point):
++            continue
+             
+-            # Front-to-back compositing
+-            accumulated_color = np.array([0.0, 0.0, 0.0, 0.0])
+-            accumulated_alpha = 0.0
++        byte_val = trilinear_interpolate(brick, point)
++        r, g, b, a = color_table.get_color(byte_val)
++        
++        # Pre-multiply color by alpha for compositing
++        r_pm = r * a
++        g_pm = g * a
++        b_pm = b * a
++        
++        # Front-to-back compositing
++        # C_out = C_in + (1 - alpha_in) * C_sample_pm
++        # alpha_out = alpha_in + (1 - alpha_in) * alpha_sample
++        # Note: Srend uses pre-multiplied alpha planes. 
++        # The standard equation for pre-multiplied alpha is:
++        # C_out = C_in + (1 - alpha_in) * C_sample_pm
++        # alpha_out = alpha_in + (1 - alpha_in) * alpha_sample
++        
++        acc_color = (
++            acc_color[0] + (1 - acc_alpha) * r_pm,
++            acc_color[1] + (1 - acc_alpha) * g_pm,
++            acc_color[2] + (1 - acc_alpha) * b_pm
++        )
++        acc_alpha = acc_alpha + (1 - acc_alpha) * a
++        
++        if acc_alpha >= MAX_ALPHA:
++            break
+             
+-            # Sample along ray
+-            # [G] Simplified ray marching; actual Srend uses optimized ray traversal
+-            t = 0.0
+-            while t < view_params['max_dist']:
+-                # Interpolate value from brick_data at current ray position
+-                # [G] Assumes brick_data covers the ray segment or returns 0 if out of bounds
+-                voxel_value = interpolate(brick_data, ray_origin + t * ray_direction)
+-                
+-                # Map voxel value to RGBA using color table
+-                rgba = color_table[voxel_value]
+-                color = rgba[:3]
+-                opacity = rgba[3]
+-                
+-                # Beer-Lambert law compositing
+-                # C_out = C_in + (1 - alpha_in) * C_sample * alpha_sample
+-                # alpha_out = alpha_in + (1 - alpha_in) * alpha_sample
+-                
+-                weight = (1.0 - accumulated_alpha) * opacity
+-                accumulated_color += weight * color
+-                accumulated_alpha += weight
+-                
+-                if accumulated_alpha > 0.999: # Early ray termination
+-                    break
+-                    
+-                t += view_params['step_size']
+-            
+-            alpha_plane[y, x] = accumulated_color
+-
+-    return alpha_plane
+-
+-def composite_alpha_plane(plane1, plane2):
+-    """
+-    Pre-multiplied alpha compositing of two 2D planes.
+-    """
+-    # [G] Standard Porter-Duff over operator
+-    c1, a1 = plane1[:3], plane1[3]
+-    c2, a2 = plane2[:3], plane2[3]
+-    
+-    new_alpha = a1 + a2 * (1 - a1)
+-    new_color = c1 + c2 * (1 - a1)
+-    
+-    return np.concatenate([new_color, [new_alpha]])
+-
+-def srend_render_loop():
+-    """
+-    Main rendering routine called from within the simulation code.
+-    """
+-    # 1. Local Data Preparation
+-    # [G] User must provide simulation_data and scaling parameters
+-    local_brick_bytes = scale_data_to_bytes(simulation_data, min_val, max_val)
+-    color_table = define_color_table()
++    return acc_color, acc_alpha
++
++def is_inside_brick(brick, point):
++    min_b, max_b = brick.bounds
++    return (min_b[0] <= point[0] <= max_b[0] and
++            min_b[1] <= point[1] <= max_b[1] and
++            min_b[2] <= point[2] <= max_b[2])
++
++def composite_pre_multiplied_alpha(color_a, alpha_a, color_b, alpha_b):
++    # Composite image B over image A
++    # C_out = C_A + (1 - alpha_A) * C_B
++    # alpha_out = alpha_A + (1 - alpha_A) * alpha_B
++    # Note: C_B is assumed to be pre-multiplied by alpha_B already?
++    # In Srend, the "2D renderings" are pre-multiplied alpha planes.
++    # So C_B in the formula above is actually the pre-multiplied color.
++    
++    r_out = color_a[0] + (1 - alpha_a) * color_b[0]
++    g_out = color_a[1] + (1 - alpha_a) * color_b[1]
++    b_out = color_a[2] + (1 - alpha_a) * color_b[2]
++    alpha_out = alpha_a + (1 - alpha_a) * alpha_b
++    
++    return (r_out, g_out, b_out), alpha_out
++
++def srend_render_loop(brick, color_table, num_samples, num_pixels, ray_generator):
++    # Local rendering for all pixels
++    local_image = []
++    for pixel_idx in range(num_pixels):
++        ray = ray_generator(pixel_idx)
++        color, alpha = render_brick_local(brick, ray, color_table, num_samples)
++        if color is None:
++            # Ray did not hit brick, transparent
++            local_image.append(((0,0,0), 0.0))
++        else:
++            local_image.append((color, alpha))
++    return local_image
++
++def srend_compose_tree(local_images, rendering_tree):
++    # Compose images according to the rendering tree
++    # Each node in the tree has a list of children (sources)
++    # If a node is also a renderer, it combines its local image with children
++    
++    # This is a high-level description of the MPI communication
++    # [G] Specific MPI send/receive logic is abstracted here
++    pass
++
++# Main Execution Flow
++def main():
++    # 1. Setup
++    brick = load_brick_data() # 3D byte array
++    color_table = load_color_table() # Map byte to RGBA
++    num_samples = 64 # Typical value
+     
+     # 2. Local Rendering
+-    local_rendering = ray_cast_brick(local_brick_bytes, color_table, view_params)
+-    
+-    # 3. Distributed Compositing
+-    # If this rank is a leaf in the rendering tree (no children), it sends its local rendering
+-    # If it is an internal node, it receives from children, composites, and sends to parent
+-    
+-    current_plane = local_rendering
+-    
+-    # Receive from children (if any)
+-    # [G] The rendering tree structure determines who sends to whom.
+-    # For simplicity, assume a binary tree or user-defined list of sources.
+-    for source_rank in range(num_sources):
+-        req = comm.Irecv(source=source_rank, tag=view_index)
+-        child_plane = req.wait()
+-        current_plane = composite_alpha_plane(current_plane, child_plane)
+-    
+-    # Send to parent (if not root)
+-    if target_rank != -1:
+-        # Send the composited plane up the tree
+-        # [G] MPI Send is non-blocking in Srend to minimize overhead
+-        comm.Isend(current_plane, dest=target_rank, tag=view_index)
+-    else:
+-        # This is the root (finisher)
+-        # Write image to disk
+-        write_image_to_disk(current_plane, output_filename)
+-
+-# Simulation Loop Integration
+-# while simulation_not_finished:
+-#     update_simulation_state()
+-#     if render_now():
+-#         srend_render_loop()
++    local_image = srend_render_loop(brick, color_table, num_samples, num_pixels, generate_rays)
++    
++    # 3. Send to Composer
++    send_to_composer(local_image)
++    
++    # 4. Receive Composite (if composer)
++    # 5. Finalize (if root)
++    pass
+ ```
+ 
+ ### Parameters
+-*   **Data Format**: Bytes (`character*1` in Fortran). The user must scale real data to this format [S1].
++*   **Number of Samples ($N$)**: Not specified in sources. Typical values for ray casting range from 32 to 256 depending on required quality and performance [S1].
++*   **Data Scaling**: The user must scale real simulation data to bytes (0-255) [S1].
+ *   **Color Table**: User-defined mapping from byte values to RGBA [S1].
+-*   **Rendering Parameters**: Passed in every call. Includes view index, camera parameters, and projection type [S1].
+-*   **Composer Parameters**: View index, number of sources (children in the tree), and target rank (parent in the tree) [S1].
+-*   **Finisher Parameters**: View index, number of sources, and output file name [S1].
++*   **Rendering Tree**: User-defined topology for MPI compositing [S1].
+ 
+ ### Edge Cases and Pitfalls
+-*   **Grid Interpolation**: If the simulation uses stretched grids or terrain-following vertical coordinates, data arrays must be interpolated to spatial arrays for Srend to maintain spatial accuracy [S1]. Failure to do so results in geometric distortion [S1].
+-*   **Redundant Information**: Every renderer sends identical image finishing parameters (e.g., output file name) up the tree, even though only the finisher uses them. This is a design choice to simplify usage, accepting a small data payload overhead [S1].
+-*   **No Load Balancing**: Srend has no supervisory mechanism. If simulation workloads are uneven, some ranks may render while others are idle, or rendering may become a bottleneck if not carefully timed [S1].
+-*   **Data Scaling**: The user must manually scale data to bytes and define color tables. This requires domain knowledge and is not automated [S1].
++*   **Grid Interpolation**: If the simulation uses stretched grids or terrain-following vertical coordinates, data arrays must be interpolated to spatial arrays for Srend to maintain spatial accuracy [S1].
++*   **Redundant Information**: Every renderer sends identical image finishing parameters (e.g., output file name) up the rendering tree, even though only the finisher uses them. This is a design choice to simplify usage [S1].
++*   **No Load Balancing**: Srend has no load balancing or supervisory mechanism. Performance depends on the uniformity of rendering work across ranks [S1].
++*   **Data Format**: Data must be in arrays of bytes. Floating-point data must be pre-scaled by the user [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: The rendering completion time (simulation halt time) depends primarily on the rendering work itself. There is no synchronization or management overhead beyond MPI messaging [S1].
+-*   **Memory Complexity**: Data is partitioned into bricks. Each rank only stores its local brick in memory. The 2D alpha planes are small compared to the 3D volume data [S1].
+-*   **Measured Performance**: Results show modest rendering overhead and fine quality imagery with high potential for scaling [S1]. The rendering work is insignificant compared to the simulation work of updating volume data according to PDEs [S1].
++*   **Time Complexity**: Rendering completion time depends on the rendering work itself. There is no synchronization or management overhead beyond that imposed by MPI messaging [S1].
++*   **Memory Complexity**: Data is stored in-core. The method eliminates the need for external visualization tools or post-processing steps, reducing data output and storage requirements [S1].
++*   **Measured Performance**: Results show modest rendering overhead, fine quality imagery, and high potential for scaling [S1].
+ *   **Strengths**:
+-    *   Eliminates data I/O overhead by rendering in-core [S1].
+-    *   Simple implementation: no load balancing or supervisory mechanisms [S1].
+-    *   Scalable: exploits embarrassingly parallel ray casting and associative compositing [S1].
+-    *   Easy integration: Fortran code can be embedded via ordinary subroutine calls [S1].
++    *   Immediate, quality imagery during simulation [S1].
++    *   No reliance on special visualization hardware, libraries, or external programs [S1].
++    *   Embarrassingly parallel ray casting [S1].
++    *   Scalable via MPI and associativity of compositing [S1].
+ *   **Limitations**:
+-    *   Requires user to handle data scaling and color table definition [S1].
+-    *   No automatic load balancing [S1].
+-    *   Requires Cartesian grids (or interpolated data for non-Cartesian) [S1].
+-    *   Redundant data transmission up the rendering tree [S1].
+-*   **When to use**: When visualizing CFD simulations on Cartesian grids where reducing data I/O is critical, and the simulation code is written in Fortran. Suitable for development, testing, education, and guiding post-processing [S1].
+-*   **When not to use**: When the simulation uses complex non-Cartesian grids without interpolation support, or when automatic load balancing is required for highly heterogeneous workloads [S1].
++    *   Requires user to define color tables and scale data [S1].
++    *   No load balancing [S1].
++    *   Requires Fortran compatibility for easiest integration (though not strictly required for the algorithm) [S1].
++*   **When to Use**: Embedded visualization in CFD simulations using Cartesian grids, particularly when immediate feedback is needed and storage is a concern [S1].
++*   **When Not to Use**: When load balancing is critical or when the simulation code is not Fortran-based and integration is difficult [S1].
+ 
+ ## Background
+-*   **Origin**: Srend was developed at the University of Minnesota / LCSE (Laboratory for Computational Science and Engineering) [S1].
+-*   **History**: It was modified from its original form used in a terrain flow code studying smoke and pollen advection in the St. Louis River region [S1]. It was redesigned to visualize data from 15,363 star simulations planned for 2014-15 [S1]. The "S" in Srend originally stood for "spherical data rendering" (lon/lat view for stellar data), but it was generalized for Cartesian grid CFD [S1].
+-*   **Development**: It was embedded in three major codes: Piecewise Parabolic Method (PPMstar), Cloud Model 1 (CM1), and Weather Research Forecast model (WRF) [S1].
+-*   **Usage**: Used for immediate, quality imagery generation during simulation runs, reducing data output and storage requirements [S1].
++*   **Origin**: Srend was developed at the University of Minnesota / LCSE [S1].
++*   **History**: It was modified from its original form used in a terrain flow code for the St. Louis River region and redesigned for spherical data rendering (stellar data) [S1]. It was embedded in three codes: PPMstar, CM1, and WRF [S1].
++*   **Usage**: Used for visualization of computational fluid dynamics simulations using Cartesian grids [S1].
+ 
+ ## Sources

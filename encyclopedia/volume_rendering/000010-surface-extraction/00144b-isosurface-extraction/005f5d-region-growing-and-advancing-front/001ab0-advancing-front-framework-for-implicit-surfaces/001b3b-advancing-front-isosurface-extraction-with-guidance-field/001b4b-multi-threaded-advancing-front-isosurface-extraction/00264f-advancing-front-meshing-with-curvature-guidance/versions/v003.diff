@@ -1,0 +1,103 @@
+--- v002.md
++++ v003.md
+@@ -39,31 +39,56 @@
+ **Pseudocode:**
+ ```python
++def sign_change_in_voxel(grid, i, j, k, threshold):
++    vals = [grid[x][y][z] for x in (i, i+1) for y in (j, j+1) for z in (k, k+1)]
++    return any(v < threshold for v in vals) and any(v > threshold for v in vals)
++
++def downsample_3d(vol):
++    h, w, d = len(vol), len(vol[0]), len(vol[0][0])
++    return [[[vol[i][j][k] for k in range(0, d, 2)] for j in range(0, w, 2)] for i in range(0, h, 2)]
++
++def compute_gradient(vol):
++    h, w, d = len(vol), len(vol[0]), len(vol[0][0])
++    gx = [[[vol[i][j][k] - vol[i-1][j][k] if i > 0 else 0 for k in range(d)] for j in range(w)] for i in range(h)]
++    gy = [[[vol[i][j][k] - vol[i][j-1][k] if j > 0 else 0 for k in range(d)] for j in range(w)] for i in range(h)]
++    gz = [[[vol[i][j][k] - vol[i][j][k-1] if k > 0 else 0 for k in range(d)] for j in range(w)] for i in range(h)]
++    return (gx, gy, gz)
++
++def compute_curvature(vol, grad):
++    gx, gy, gz = grad
++    h, w, d = len(vol), len(vol[0]), len(vol[0][0])
++    curv = [[[ (gx[i][j][k]**2 + gy[i][j][k]**2 + gz[i][j][k]**2)**0.5 for k in range(d)] for j in range(w)] for i in range(h)]
++    return curv
++
+ def advancing_front_curvature_guidance(ct_data, threshold, k, n, L):
+-    # 1. Construct voxel pyramid: coarse (L) to fine (0)
++    # 1. Construct voxel pyramid: pyramid[0] is finest, pyramid[L] is coarsest
+     pyramid = [ct_data]
+     for _ in range(L):
+         pyramid.append(downsample_3d(pyramid[-1]))
+-        
++
+     # 2. Initialize at coarsest scale (l = L)
+     l = L
+     response_region = []
+-    for i, j, idx in grid_indices(pyramid[l]):
+-        if sign_change(pyramid[l][i, j, idx], threshold):
+-            response_region.append((i, j, idx))
+-            
++    H, W, D = len(pyramid[l]), len(pyramid[l][0]), len(pyramid[l][0][0])
++    for i in range(H - 1):
++        for j in range(W - 1):
++            for idx in range(D - 1):
++                if sign_change_in_voxel(pyramid[l], i, j, idx, threshold):
++                    response_region.append((i, j, idx))
++
+     while l > 0:
+-        # 3. Compute fields
++        # 3. Compute fields for current scale
+         grad_field = compute_gradient(pyramid[l])
+         curv_field = compute_curvature(pyramid[l], grad_field)
+-        
++
+         # 4a. Statistics
+-        curv_values = [curv_field[u] for u in response_region]
+-        mu = sum(curv_values) / len(curv_values)
+-        sigma = (sum((c - mu)**2 for c in curv_values) / len(curv_values))**0.5
++        curv_values = [curv_field[u[0]][u[1]][u[2]] for u in response_region]
++        N = len(curv_values)
++        mu = sum(curv_values) / N
++        sigma = (sum((c - mu)**2 for c in curv_values) / N)**0.5
+         theta = mu + k * sigma
+-        
++
+         # 4b. High-curvature region
+-        high_curv_region = [u for u in response_region if curv_field[u] > theta]
+-        
++        high_curv_region = [u for u in response_region if curv_field[u[0]][u[1]][u[2]] > theta]
++
+         # 4c. Dilation (width n)
+         candidate_region = set()
+@@ -72,20 +97,23 @@
+                 for dy in range(-n, n + 1):
+                     for dz in range(-n, n + 1):
+-                        candidate_region.add((u[0] + dx, u[1] + dy, u[2] + dz))
+-                        
++                        nx, ny, nz = u[0] + dx, u[1] + dy, u[2] + dz
++                        if 0 <= nx < H and 0 <= ny < W and 0 <= nz < D:
++                            candidate_region.add((nx, ny, nz))
++
+         # 4d. Map to finer scale & screen new response units
+         l -= 1
++        H, W, D = len(pyramid[l]), len(pyramid[l][0]), len(pyramid[l][0][0])
+         response_region = []
+         for u in candidate_region:
+-            if sign_change(pyramid[l][u], threshold):
++            if sign_change_in_voxel(pyramid[l], u[0], u[1], u[2], threshold):
+                 response_region.append(u)
+-                
++
+     return response_region
+ ```
+ 
+ **Parameters:**
+-*   $k$: Adjustable parameter for curvature threshold sensitivity. Not given in the sources.
++*   $k$: Adjustable parameter for curvature threshold sensitivity. Not given in the sources. [S1, unofficial]
+ *   $n$: Dilation width in voxels. Typically 1 or 2 [S1, unofficial].
+-*   $L$: Maximum number of levels in the voxel pyramid. Determined by the downsampling factor of the input data.
++*   $L$: Maximum number of levels in the voxel pyramid. Determined by the downsampling factor of the input data. [S1, unofficial]
+ 
+ **Edge Cases and Pitfalls:**

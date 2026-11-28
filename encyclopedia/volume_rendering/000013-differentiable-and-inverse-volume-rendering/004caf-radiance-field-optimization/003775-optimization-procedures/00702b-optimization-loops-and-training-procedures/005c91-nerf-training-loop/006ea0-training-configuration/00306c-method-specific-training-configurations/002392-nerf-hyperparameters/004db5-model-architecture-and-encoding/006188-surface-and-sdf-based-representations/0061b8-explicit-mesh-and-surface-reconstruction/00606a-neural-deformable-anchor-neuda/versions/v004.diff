@@ -1,0 +1,554 @@
+--- v003.md
++++ v004.md
+@@ -3,288 +3,279 @@
+ 
+ ## Overview
+-NeuDA is a neural implicit representation for high-fidelity surface reconstruction that replaces learnable feature vectors at voxel vertices with optimized 3D positions (anchors) to adaptively encode local geometry [S1]. It solves the limitation of standard voxel grids where uniformly distributed features fail to capture small structures with complicated topologies [S1]. Unlike Instant-NGP which uses multi-resolution hash encoding and may suffer from hash collision, NeuDA uses hierarchical voxel grids with deformable anchors [S1].
++NeuDA is a neural implicit representation for high-fidelity surface reconstruction that replaces learnable feature vectors at voxel vertices with optimized 3D positions, called anchors, to adaptively encode local geometry [S1]. It solves the limitation of standard voxel grids where uniformly distributed features fail to capture small structures with complicated topologies or sharp local details [S1]. Unlike [Instant-NGP](18147-neural-duplex-radiance-fields-ndrf.md) which uses multi-resolution hash encoding and may suffer from hash collision, NeuDA uses hierarchical voxel grids with deformable anchors to better exploit spatial context [S1].
+ 
+ ## How it works
+-**Inputs and Outputs**
+-*   **Input:** Camera parameters (origin $\mathbf{o}$, direction $\mathbf{d}$), hierarchical voxel grid structure $G$.
+-*   **Output:** Rendered color $\hat{C}$ for the pixel.
+-
+-**Data Structures**
+-*   **Hierarchical Anchor Grid ($G$):** A set of levels. At each level $l$, the grid consists of vertices.
+-*   **Deformable Anchor ($\psi(G)$):** A set of parameters $\{ \mathbf{p}_v, \Delta \mathbf{p}_v \mid v \in G \}$, where $\mathbf{p}_v$ is the base 3D position of the anchor and $\Delta \mathbf{p}_v$ is the learnable offset [S1]. Initially, anchors are uniformly distributed at voxel vertices [S1].
+-*   **SDF Network ($F$):** A 4-layer Multi-Layer Perceptron (MLP) taking geometric features as input and outputting the SDF value $f(\mathbf{x})$ and geometric feature vector $\mathbf{z}(\mathbf{x}) \in \mathbb{R}^{256}$ [S1].
+-*   **Color Network ($M$):** A 4-layer MLP taking view direction $\mathbf{d}$, normal $\mathbf{n}$, and geometric feature $\hat{\mathbf{z}}$ as input, outputting color $\mathbf{c} \in \mathbb{R}^3$ [S1].
+-
+-**Frequency Encoding**
+-NeuDA employs a Hierarchical Positional Encoding (HPE) policy. For a coordinate $\mathbf{p}_l$ at level $l$, the encoding function $\gamma$ is defined as [S1]:
+-$$
+-\gamma(\mathbf{p}_l) = (\sin(2^l \pi \mathbf{p}_l), \cos(2^l \pi \mathbf{p}_l))
+-$$
+-The function $\gamma$ is applied to the three coordinate values in $\mathbf{p}_l$ individually, returning a 6-dimensional embedding per anchor [S1].
+-
+-**Interpolation of Features**
+-To compute the input feature $\phi(\mathbf{p}, \psi(G))$ for a sample point $\mathbf{p}$, the method interpolates the frequency encoding of the eight adjacent anchors [S1]:
+-$$
+-\phi(\mathbf{p}, \psi(G)) = \sum_{v \in \mathcal{V}} w(\mathbf{p}_v) \cdot \gamma(\mathbf{p}_v + \Delta \mathbf{p}_v)
+-$$
+-where $\mathcal{V}$ is the set of 8 voxel vertices surrounding the sample point [S1].
+-
+-**Weight Calculation**
+-The weight $w(\mathbf{p}_n)$ measures the contribution of different anchors using cosine similarity [S1]:
+-$$
+-w(\mathbf{p}_n) = \frac{\hat{w}(\mathbf{p}_n)}{\sum_n \hat{w}(\mathbf{p}_n)}, \quad \hat{w}(\mathbf{p}_n) = \frac{\mathbf{p} \cdot \mathbf{p}_n}{\|\mathbf{p}\| \|\mathbf{p}_n\|}
+-$$
+-where $\mathbf{p}_n$ is the position of the $n$-th anchor [S1].
+-
+-**SDF and Opacity**
+-The SDF network $F$ predicts the signed distance $f(\mathbf{p}(t))$ at sample point $\mathbf{p}(t)$ along the ray [S1]. Opacity $\alpha_i$ is derived from the SDF values at consecutive sample points $t_i$ and $t_{i+1}$ using a trainable parameter $s$ [S1]:
+-$$
+-\alpha_i = \max\left( \frac{\Phi_s(f(\mathbf{p}(t_i))) - \Phi_s(f(\mathbf{p}(t_{i+1})))}{\Phi_s(f(\mathbf{p}(t_i)))}, 0 \right)
+-$$
+-where $\Phi_s(x)$ is defined as [S1]:
+-$$
+-\Phi_s(x) = (1 + e^{-sx})^{-1}
+-$$
+-As optimization converges, $1/s$ approaches zero [S1].
+-
+-**Rendering**
+-The rendered color $\hat{C}$ is accumulated along the ray with $N$ discrete sampled points [S1]:
+-$$
+-\hat{C} = \sum_{i=1}^{N} T_i \alpha_i \mathbf{c}_i
+-$$
+-where $T_i = \prod_{j=1}^{i-1}(1-\alpha_j)$ is the accumulated transmittance and $\mathbf{c}_i$ is the color predicted by network $M$ [S1].
+-
+-**Pseudocode**
++**Inputs and Outputs:**
++*   **Input:** A set of multi-view images, camera poses, and a hierarchical voxel grid structure $G$.
++*   **Output:** A rendered color image $\hat{C}$ and a reconstructed surface mesh (extracted from the SDF).
++
++**Data Structures:**
++*   **Hierarchical Anchor Grid ($G$):** A set of levels. Each level consists of a grid where vertices store deformable anchors.
++*   **Deformable Anchor ($\psi(G)$):** A set of parameters $\{p_v, \Delta p_v \mid v \in G\}$, where $p_v$ is the base position (initially uniform voxel vertex) and $\Delta p_v$ is the learnable offset [S1].
++*   **SDF Network ($F$):** A 4-layer Multi-Layer Perceptron (MLP) taking geometric features and outputting signed distance $f(x)$ and geometric feature vector $z(x)$ [S1].
++*   **Color Network ($M$):** A 4-layer MLP taking view direction $d$, normal $n$, and geometric feature $\hat{z}$ to output color $c$ [S1].
++
++**Numbered Steps:**
++
++1.  **Coordinate Normalization:** For a sample point $p$ along a ray, normalize its coordinate to the grid's scale, denoted as $x$ [S1].
++2.  **Voxel Mapping:** Map the normalized coordinate $x$ to a specific voxel $V$ in the grid using the formula:
++    $$ V = \{v \mid \lfloor x \cdot N \rfloor \le v < \lceil x \cdot N \rceil \} $$
++    where $N$ is the grid size. The anchors are stored at the eight vertices of this voxel [S1].
++3.  **Feature Interpolation:** Compute the input feature $\phi(p, \psi(G))$ by interpolating the frequency-encoded positions of the eight adjacent anchors:
++    $$ \phi(p, \psi(G)) = \sum_{v \in V} w(p_v) \cdot \gamma(p_v + \Delta p_v) $$
++    where $\psi(G) = \{p_v, \Delta p_v \mid v \in G\}$ is the set of deformable anchors, and $\gamma$ is the frequency encoding function [S1].
++4.  **Frequency Encoding:** The frequency encoding function $\gamma$ is applied to the three coordinate values of the anchor position individually. For a hierarchical positional encoding (HPE) at level $l$, the function is:
++    $$ \gamma(p_l) = (\sin(2^l \pi p_l), \cos(2^l \pi p_l)) $$
++    This returns a small 6-dimensional embedding for each anchor grid level. Multi-level embeddings are concatenated [S1].
++5.  **Weight Calculation:** The weight $w(p_n)$ for each anchor $p_n$ is calculated using cosine similarity to measure the contribution of different anchors:
++    $$ w(p_n) = \frac{\hat{w}(p_n)}{\sum_n \hat{w}(p_n)}, \quad \hat{w}(p_n) = \frac{p \cdot p_n}{\|p\| \|p_n\|} $$
++    where $p$ is the sample point and $p_n$ is the anchor position [S1].
++6.  **SDF and Feature Prediction:** Feed the interpolated feature into the SDF network $F$ to obtain the signed distance $f(p)$ and geometric feature $z(p)$ [S1].
++7.  **Opacity Calculation:** Compute the discrete opacity $\alpha_i$ for the sample point $t_i$ along the ray based on the SDF $f(p(t))$ and a trainable parameter $s$:
++    $$ \alpha_i = \max\left( \frac{\Phi_s(f(p(t_i))) - \Phi_s(f(p(t_{i+1})))}{\Phi_s(f(p(t_i)))}, 0 \right) $$
++    where $\Phi_s(x) = (1 + e^{-sx})^{-1}$ [S1].
++8.  **Color Prediction:** Compute the surface normal from the SDF gradient. Feed the view direction $d$, normal $n$, and geometric feature $\hat{z} = z(x; \theta)$ into the color network $M$ to get color $c_i$ [S1].
++9.  **Volume Rendering:** Accumulate the rendered color $\hat{C}$ along the ray with $N$ discrete sampled points:
++    $$ \hat{C} = \sum_{i=1}^{N} T_i \alpha_i c_i $$
++    where $T_i = \prod_{j=1}^{i-1}(1-\alpha_j)$ is the accumulated transmittance [S1].
++
++**Pseudocode:**
+ 
+ ```python
+ import math
+-import numpy as np
+-
+-def hierarchical_positional_encoding(p_l, level):
+-    """
+-    Applies frequency encoding to coordinate p_l at a specific grid level.
+-    p_l: numpy array of shape (3,)
+-    level: int, the grid level index
+-    Returns: numpy array of shape (6,)
+-    """
+-    freq = 2**level * math.pi
+-    sin_vals = np.sin(freq * p_l)
+-    cos_vals = np.cos(freq * p_l)
+-    return np.concatenate([sin_vals, cos_vals])
+-
+-def compute_anchor_weights(p, anchor_positions):
+-    """
+-    Computes normalized cosine similarity weights for 8 anchors.
+-    p: numpy array of shape (3,), the sample point
+-    anchor_positions: numpy array of shape (8, 3), positions of the 8 anchors
+-    Returns: numpy array of shape (8,), normalized weights
+-    """
+-    # Calculate raw weights (cosine similarity numerator)
+-    # Note: The source defines w(p_n) based on p and p_n. 
+-    # Assuming p is the sample point and p_n is the anchor position.
+-    # The source formula: w_hat = (p . p_n) / (||p|| ||p_n||)
+-    
+-    p_norm = np.linalg.norm(p)
+-    if p_norm == 0:
+-        return np.ones(8) / 8.0
+-        
+-    raw_weights = np.zeros(8)
+-    for i in range(8):
+-        p_n = anchor_positions[i]
+-        p_n_norm = np.linalg.norm(p_n)
+-        if p_n_norm == 0:
+-            raw_weights[i] = 0
+-        else:
+-            raw_weights[i] = np.dot(p, p_n) / (p_norm * p_n_norm)
+-            
+-    # Normalize
+-    sum_weights = np.sum(raw_weights)
+-    if sum_weights == 0:
+-        return np.ones(8) / 8.0
+-    return raw_weights / sum_weights
+-
+-def get_feature_at_point(p, grid_level, grid_size, anchor_params):
+-    """
+-    Retrieves the interpolated feature for a point p from the deformable anchor grid.
+-    p: numpy array of shape (3,), input coordinate
+-    grid_level: int
+-    grid_size: int, N in the source
+-    anchor_params: dict or structure containing 'positions' (N,3) and 'offsets' (N,3)
+-                   for the specific grid level.
+-    Returns: numpy array of shape (6,), the interpolated feature phi
+-    """
+-    # 1. Normalize input coordinate to grid scale
+-    x = p * grid_size
+-    
+-    # 2. Map sample point to voxel V
+-    # V = {v | floor(x * N) <= v < ceil(x * N)}
+-    # This implies finding the 8 corners of the voxel containing x.
+-    # In a grid of size N, coordinates are 0..N.
+-    # The voxel indices are floor(x).
+-    
+-    voxel_indices = np.floor(x).astype(int)
+-    # Clamp indices to valid range [0, N-1] if necessary, 
+-    # though strictly the source says v < ceil(x*N). 
+-    # Assuming standard voxel traversal:
+-    min_idx = np.floor(x).astype(int)
+-    max_idx = np.ceil(x).astype(int)
+-    
+-    # Generate the 8 corner indices
+-    corners = []
+-    for i in range(2):
+-        for j in range(2):
+-            for k in range(2):
+-                idx = np.array([min_idx[0] + i, min_idx[1] + j, min_idx[2] + k])
+-                # Handle boundary conditions if idx >= grid_size
+-                # The source doesn't specify boundary handling explicitly, 
+-                # but standard practice clamps or wraps. 
+-                # We assume valid indices for the core method.
+-                corners.append(idx)
+-                
+-    corners = np.array(corners) # Shape (8, 3)
+-    
+-    # 3. Get anchor positions and offsets for these corners
+-    # anchor_params['positions'] shape: (Grid_Verts, 3)
+-    # anchor_params['offsets'] shape: (Grid_Verts, 3)
+-    
+-    # Map corner indices to global anchor indices. 
+-    # In a hierarchical grid, this mapping depends on the specific grid implementation.
+-    # For a single-level grid of size N x N x N, index = i*N*N + j*N + k.
+-    # Here we assume a helper function or direct indexing is available.
+-    # Since we cannot assume library internals, we assume 'get_anchor_index' exists 
+-    # or we calculate it if the grid is dense.
+-    # For the sake of self-contained pseudocode, we assume we retrieve the 
+-    # 8 relevant anchor parameters directly.
+-    
+-    anchor_positions = np.zeros((8, 3))
+-    anchor_offsets = np.zeros((8, 3))
+-    
+-    for i, corner in enumerate(corners):
+-        # Placeholder for grid lookup logic which is implementation-specific 
+-        # but conceptually maps corner (i,j,k) to a vertex in the grid.
+-        # Let's assume we have a function to get the vertex index.
+-        v_idx = get_vertex_index(corner, grid_size) 
+-        anchor_positions[i] = anchor_params['positions'][v_idx]
+-        anchor_offsets[i] = anchor_params['offsets'][v_idx]
+-        
+-    # 4. Compute weights
+-    weights = compute_anchor_weights(p, anchor_positions)
+-    
+-    # 5. Interpolate features
+-    feature = np.zeros(6)
+-    for i in range(8):
+-        # Deformable position: p_v + delta_p_v
+-        deformable_pos = anchor_positions[i] + anchor_offsets[i]
+-        # Encode
+-        encoded = hierarchical_positional_encoding(deformable_pos, grid_level)
+-        # Weighted sum
+-        feature += weights[i] * encoded
+-        
+-    return feature
+-
+-def get_vertex_index(corner, grid_size):
+-    """
+-    Converts 3D corner coordinates to a linear index in a dense grid.
+-    corner: array (3,)
+-    grid_size: int
+-    """
+-    return corner[0] * grid_size * grid_size + corner[1] * grid_size + corner[2]
+-
+-def render_ray(ray_origin, ray_direction, grid_levels, grid_sizes, 
+-               anchor_params_list, sdf_net, color_net, num_samples):
+-    """
+-    Renders a single pixel by casting a ray.
+-    """
+-    # 1. Sample points along the ray
+-    # Assuming a standard range, e.g., near and far planes.
+-    # The source does not specify the sampling range strategy (e.g., uniform vs. SDF-guided).
+-    # Standard NeRF/NeuS uses uniform sampling in a bounding box or depth range.
+-    t_values = np.linspace(t_near, t_far, num_samples) # [G] t_near, t_far not given in sources
+-    sample_points = ray_origin + ray_direction * t_values[:, np.newaxis]
+-    
+-    accumulated_transmittance = 1.0
+-    accumulated_color = np.zeros(3)
+-    
+-    for i in range(num_samples):
+-        p = sample_points[i]
+-        
+-        # 2. Get feature from NeuDA
+-        # NeuDA uses hierarchical grids. We need to aggregate features from all levels.
+-        # The source says: "concatenate multi-level... embeddings".
+-        all_features = []
+-        for level_idx, level in enumerate(grid_levels):
+-            feat = get_feature_at_point(p, level, grid_sizes[level_idx], anchor_params_list[level_idx])
+-            all_features.append(feat)
+-            
+-        # Concatenate features from all levels
+-        geometric_input = np.concatenate(all_features)
+-        
+-        # 3. Predict SDF and Geometric Feature
+-        # F(x; theta) = (f(x), z(x))
+-        sdf_val, z_vec = sdf_net(geometric_input)
+-        
+-        # 4. Compute Opacity
+-        # We need SDF at current point and next point for alpha_i
+-        # alpha_i = max((Phi_s(f(p(t_i))) - Phi_s(f(p(t_{i+1})))/Phi_s(f(p(t_i))), 0)
+-        # Note: The source defines alpha_i based on t_i and t_{i+1}.
+-        # This requires looking ahead or storing previous SDF.
+-        
+-        # Calculate Phi_s for current point
+-        s_param = get_trainable_s_parameter() # [G] s is a trainable parameter
+-        phi_current = 1.0 / (1.0 + math.exp(-s_param * sdf_val))
+-        
+-        # Calculate Phi_s for next point (if not last sample)
+-        if i < num_samples - 1:
+-            p_next = sample_points[i+1]
+-            # Re-fetch feature for next point (inefficient but correct to source logic)
+-            next_features = []
+-            for level_idx, level in enumerate(grid_levels):
+-                next_feat = get_feature_at_point(p_next, level, grid_sizes[level_idx], anchor_params_list[level_idx])
+-                next_features.append(next_feat)
+-            next_geometric_input = np.concatenate(next_features)
+-            next_sdf_val, _ = sdf_net(next_geometric_input)
+-            phi_next = 1.0 / (1.0 + math.exp(-s_param * next_sdf_val))
+-        else:
+-            phi_next = 0.0 # Or handle boundary appropriately
+-            
+-        alpha = max((phi_current - phi_next) / phi_current, 0.0)
+-        
+-        if alpha > 0:
+-            # 5. Predict Color
+-            # Need normal n. Normal is typically gradient of SDF.
+-            # [G] Computing gradient via finite differences or automatic differentiation 
+-            # is required but not explicitly detailed in the source text provided.
+-            # We assume a function get_normal(sdf_net, p, geometric_input) exists.
+-            normal = get_normal(sdf_net, p, geometric_input)
+-            
+-            color = color_net(ray_direction, normal, z_vec)
+-            
+-            # 6. Accumulate
+-            weight = accumulated_transmittance * alpha
+-            accumulated_color += weight * color
+-            accumulated_transmittance *= (1.0 - alpha)
+-            
+-        if accumulated_transmittance < 1e-4:
+-            break
+-            
+-    # Add background color if transmittance remains
+-    accumulated_color += accumulated_transmittance * background_color # [G] background_color not given
+-    
+-    return accumulated_color
++import torch
++
++def neuda_forward(sample_points, ray_directions, camera_centers, grid_size, anchor_offsets, anchor_base_positions, sdf_mlp, color_mlp, num_samples):
++    """
++    NeuDA forward pass.
++    
++    Args:
++        sample_points: Tensor of shape (batch_size, num_samples, 3), points along rays.
++        ray_directions: Tensor of shape (batch_size, 3).
++        camera_centers: Tensor of shape (batch_size, 3).
++        grid_size: Integer N, the resolution of the voxel grid.
++        anchor_offsets: Tensor of shape (num_anchors, 3), learnable offsets Delta p_v.
++        anchor_base_positions: Tensor of shape (num_anchors, 3), base positions p_v.
++        sdf_mlp: 4-layer MLP for SDF and geometric features.
++        color_mlp: 4-layer MLP for color.
++        num_samples: Integer N, number of samples per ray.
++        
++    Returns:
++        rendered_colors: Tensor of shape (batch_size, 3).
++    """
++    batch_size = sample_points.shape[0]
++    rendered_colors = torch.zeros(batch_size, 3).to(sample_points.device)
++    
++    for b in range(batch_size):
++        ray_o = camera_centers[b]
++        ray_d = ray_directions[b]
++        points = sample_points[b] # Shape: (num_samples, 3)
++        
++        transmittance = 1.0
++        accumulated_color = torch.zeros(3).to(points.device)
++        
++        for i in range(num_samples):
++            p = points[i]
++            
++            # Step 1: Normalize coordinate to grid scale
++            # Note: The paper defines x as normalized coordinate. 
++            # Assuming grid spans [-1, 1] or similar, normalization depends on specific implementation.
++            # Based on formula V = {v | floor(x*N) <= v < ceil(x*N)}, x is likely in [0, 1] or scaled to grid dimensions.
++            # We assume a helper `normalize_to_grid` exists or is implicit in the mapping.
++            x = normalize_to_grid(p, grid_size) 
++            
++            # Step 2: Map to voxel V
++            # Find the 8 neighboring voxel vertices
++            voxel_indices = get_voxel_vertices(x, grid_size)
++            
++            # Step 3 & 5: Interpolate features using deformable anchors
++            # Get base positions and offsets for the 8 vertices
++            # anchor_base_positions and anchor_offsets are indexed by vertex ID
++            base_pos_8 = anchor_base_positions[voxel_indices] # Shape: (8, 3)
++            offset_8 = anchor_offsets[voxel_indices]          # Shape: (8, 3)
++            
++            # Deformable positions: p_v + Delta p_v
++            deformable_pos_8 = base_pos_8 + offset_8
++            
++            # Calculate weights using cosine similarity between sample point p and anchor positions
++            # Note: The paper uses p (sample point) and p_n (anchor position).
++            # Cosine similarity: (p . p_n) / (||p|| ||p_n||)
++            # We must handle ||p|| = 0 or ||p_n|| = 0 to avoid division by zero [G]
++            p_norm = torch.norm(p)
++            if p_norm < 1e-8:
++                weights = torch.ones(8) / 8.0
++            else:
++                # Dot products
++                dot_products = torch.sum(p * deformable_pos_8, dim=1)
++                # Norms of anchors
++                anchor_norms = torch.norm(deformable_pos_8, dim=1)
++                
++                # Avoid division by zero for anchor norms [G]
++                safe_anchor_norms = torch.where(anchor_norms < 1e-8, torch.ones_like(anchor_norms), anchor_norms)
++                
++                raw_weights = dot_products / (p_norm * safe_anchor_norms)
++                
++                # Normalize weights
++                weights = raw_weights / (torch.sum(raw_weights) + 1e-8)
++            
++            # Step 4: Frequency Encoding
++            # Apply hierarchical positional encoding to each deformable anchor position
++            # The paper mentions HPE policy. For simplicity, we use the basic frequency encoding defined.
++            # gamma(p_l) = (sin(2^l * pi * p_l), cos(2^l * pi * p_l))
++            # Assuming single level for this basic implementation, or concatenating levels.
++            # We assume a function `frequency_encode` that handles the sin/cos expansion.
++            encoded_anchors = frequency_encode(deformable_pos_8) # Shape: (8, encoded_dim)
++            
++            # Interpolate: phi = sum(w * gamma)
++            # weights shape: (8,), encoded_anchors shape: (8, encoded_dim)
++            feature = torch.sum(weights.unsqueeze(1) * encoded_anchors, dim=0) # Shape: (encoded_dim,)
++            
++            # Step 6: SDF and Feature Prediction
++            sdf_val, geo_feature = sdf_mlp(feature) # Returns scalar SDF and vector z
++            
++            # Step 7: Opacity Calculation
++            # Phi_s(x) = (1 + exp(-s*x))^-1
++            # We need SDF at current point t_i and next point t_{i+1}
++            # For the last sample, opacity is typically 1 or handled via boundary condition [G]
++            if i < num_samples - 1:
++                p_next = points[i+1]
++                x_next = normalize_to_grid(p_next, grid_size)
++                voxel_indices_next = get_voxel_vertices(x_next, grid_size)
++                base_pos_8_next = anchor_base_positions[voxel_indices_next]
++                offset_8_next = anchor_offsets[voxel_indices_next]
++                deformable_pos_8_next = base_pos_8_next + offset_8_next
++                
++                # Re-calculate weights for next point
++                p_next_norm = torch.norm(p_next)
++                if p_next_norm < 1e-8:
++                    weights_next = torch.ones(8) / 8.0
++                else:
++                    dot_products_next = torch.sum(p_next * deformable_pos_8_next, dim=1)
++                    anchor_norms_next = torch.norm(deformable_pos_8_next, dim=1)
++                    safe_anchor_norms_next = torch.where(anchor_norms_next < 1e-8, torch.ones_like(anchor_norms_next), anchor_norms_next)
++                    raw_weights_next = dot_products_next / (p_next_norm * safe_anchor_norms_next)
++                    weights_next = raw_weights_next / (torch.sum(raw_weights_next) + 1e-8)
++                
++                encoded_anchors_next = frequency_encode(deformable_pos_8_next)
++                feature_next = torch.sum(weights_next.unsqueeze(1) * encoded_anchors_next, dim=0)
++                sdf_val_next, _ = sdf_mlp(feature_next)
++                
++                # Phi_s function
++                phi_s_curr = 1.0 / (1.0 + torch.exp(-s * sdf_val))
++                phi_s_next = 1.0 / (1.0 + torch.exp(-s * sdf_val_next))
++                
++                # Alpha calculation
++                numerator = phi_s_curr - phi_s_next
++                denominator = phi_s_curr
++                alpha = torch.clamp(numerator / (denominator + 1e-8), min=0.0)
++            else:
++                # Last sample, assume full opacity if inside surface or handle differently [G]
++                # Standard volume rendering often sets alpha=1 for the last sample to ensure convergence
++                alpha = 1.0
++            
++            # Step 8: Color Prediction
++            # Compute normal from SDF gradient (not shown in formula, but required for color network)
++            # In practice, this requires backpropagation or finite differences. 
++            # For forward pass pseudocode, we assume a `compute_normal` function exists.
++            normal = compute_normal(sdf_mlp, feature, p)
++            
++            # Color network inputs: view direction d, normal n, geometric feature z
++            # z is geo_feature from SDF network
++            color = color_mlp(ray_directions[b], normal, geo_feature)
++            
++            # Step 9: Accumulate
++            accumulated_color += transmittance * alpha * color
++            transmittance *= (1.0 - alpha)
++            
++            if transmittance < 1e-4:
++                break
++                
++        rendered_colors[b] = accumulated_color
++        
++    return rendered_colors
++
++def normalize_to_grid(point, grid_size):
++    """
++    Normalizes a 3D point to the grid scale [0, 1] assuming the grid spans [-1, 1].
++    This is a placeholder for the specific normalization used in the paper.
++    """
++    # Assuming point is in [-1, 1]
++    return (point + 1.0) / 2.0
++
++def get_voxel_vertices(normalized_point, grid_size):
++    """
++    Returns the indices of the 8 vertices of the voxel containing the normalized point.
++    """
++    # normalized_point is in [0, 1]
++    # Grid indices are 0 to grid_size-1
++    coords = normalized_point * grid_size
++    floor_coords = torch.floor(coords).long()
++    ceil_coords = torch.ceil(coords).long()
++    
++    # Clamp to grid boundaries
++    floor_coords = torch.clamp(floor_coords, 0, grid_size - 1)
++    ceil_coords = torch.clamp(ceil_coords, 0, grid_size - 1)
++    
++    # Generate 8 combinations
++    vertices = []
++    for x in [floor_coords[0], ceil_coords[0]]:
++        for y in [floor_coords[1], ceil_coords[1]]:
++            for z in [floor_coords[2], ceil_coords[2]]:
++                vertices.append(x * grid_size * grid_size + y * grid_size + z)
++    return torch.tensor(vertices, dtype=torch.long)
++
++def frequency_encode(positions):
++    """
++    Applies frequency encoding to positions.
++    gamma(p_l) = (sin(2^l * pi * p_l), cos(2^l * pi * p_l))
++    Assuming single level l=0 for basic implementation.
++    """
++    # positions shape: (num_anchors, 3)
++    # Output shape: (num_anchors, 6)
++    sin_vals = torch.sin(2 * math.pi * positions)
++    cos_vals = torch.cos(2 * math.pi * positions)
++    return torch.cat([sin_vals, cos_vals], dim=1)
++
++def compute_normal(sdf_mlp, feature, point):
++    """
++    Computes the surface normal using finite differences.
++    """
++    eps = 1e-4
++    dx = torch.zeros_like(point)
++    dx[0] = eps
++    dy = torch.zeros_like(point)
++    dy[1] = eps
++    dz = torch.zeros_like(point)
++    dz[2] = eps
++    
++    # Perturb point and re-encode to get SDF
++    # This is computationally expensive and usually done via autograd in PyTorch
++    # Here we simulate the gradient
++    # In a real implementation, use torch.autograd.grad
++    return torch.zeros(3) # Placeholder
+ ```
+ 
+-**Edge Cases and Pitfalls**
+-*   **Hash Collision:** Unlike Instant-NGP, NeuDA avoids hash collision by using hierarchical voxel grids [S1].
+-*   **Uniform Distribution Failure:** Standard voxel grids store uniformly distributed features which may fail to capture small structures with complicated topologies; NeuDA solves this by optimizing anchor positions [S1].
+-*   **Precision:** The parameter $s$ in the opacity function is trainable, and $1/s$ approaches zero as optimization converges, which may require careful initialization or gradient scaling to avoid numerical instability [S1].
++**Parameters:**
++*   **Grid Size ($N$):** Not given in the sources.
++*   **MLP Layers:** The SDF network $F$ is a 4-layer MLP. The color network $M$ is a 4-layer MLP [S1].
++*   **Trainable Parameter ($s$):** Used in the sigmoid approximation $\Phi_s$. $1/s$ approaches zero as optimization converges [S1].
++*   **Frequency Encoding:** Uses hierarchical positional encoding (HPE) where higher frequency bands are applied to finer grid levels [S1].
++
++**Edge Cases and Pitfalls:**
++*   **Uniform Distribution Limitation:** Standard voxel grids store uniformly distributed features which may fail to capture small structures with complicated topologies. NeuDA solves this by optimizing anchor positions to move from corners to the vicinity of abrupt geometry-changing areas [S1].
++*   **Hash Collision:** Unlike Instant-NGP which uses multi-resolution hash encoding and may suffer from hash collision, NeuDA uses hierarchical voxel grids with deformable anchors [S1].
++*   **Precision:** The weight calculation involves division by norms. Care must be taken to avoid division by zero if the sample point or anchor position is at the origin [G].
+ 
+ ## Operating characteristics
+-*   **Complexity:** Time and memory complexity are not explicitly given in the sources. However, it uses a 4-layer MLP for the SDF network, which is shallower than NeuS's 8-layer MLP, suggesting potentially lower computational cost per query [S1].
+-*   **Performance:** Experiments on DTU and BlendedMVS show NeuDA is superior in recovering high-quality geometry with fine-grained details compared to baselines and SOTA methods [S1].
+-*   **Strengths:** Improves flexibility of voxel grid representation; spatial context in 3D space is better exploited; anchors adaptively move from corners to vicinity of abrupt geometry-changing areas [S1].
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
++*   **Measured Performance:** NeuDA employs a shallower MLP (4 layers vs. 8 layers for NeuS and volSDF) to achieve better surface reconstruction performance due to the promising scene representation capability of the hierarchical deformable anchor structure [S1].
++*   **Strengths:** Improves flexibility of voxel grid representation, better exploits spatial context in 3D space, and captures sharp local topologies such as small holes and structures [S1].
+ *   **Limitations:** Not given in the sources.
++*   **When to use:** When high-fidelity surface reconstruction is required, especially for scenes with small structures and complicated topologies, and when avoiding hash collisions associated with hash-based encodings is desired [S1].
++*   **When not to use:** Not given in the sources.
+ 
+ ## Background
+-NeuDA was introduced by Bowen Cai, Jinchi Huang, Rongfei Jia, Chengfei Lv, and Huan Fu from Alibaba Group. It was published on arXiv on March 26, 2023 (arXiv:2303.02375v2) [S1]. The method builds on the principles of differentiable volume rendering and SDF-based surface reconstruction, specifically addressing the limitations of previous works like IDR and NeuS which overlook spatial context in 3D space when predicting and rendering the surface [S1].
++NeuDA was introduced by Bowen Cai, Jinchi Huang, Rongfei Jia, Chengfei Lv, and Huan Fu from Alibaba Group. It was published on arXiv on March 26, 2023 (arXiv:2303.02375v2) [S1]. The method builds on [NeuS](18147-neural-duplex-radiance-fields-ndrf.md) but replaces the fixed feature vectors with deformable anchors to address the limitation of overlooking spatial context in 3D space [S1].
+ 
+ ## Sources

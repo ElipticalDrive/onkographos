@@ -1,0 +1,168 @@
+--- v010.md
++++ v011.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-The Sparse Voxel Octree (SVO) Builder constructs a hierarchical Sparse Voxel Octree from a flat list of voxelized geometry fragments. It differs from its parent [Sparse Voxel Octree Construction (Basic Version)](1694-sparse-voxel-octree-construction-basic-version.md) by explicitly detailing the GPU compute shader pipeline for level-by-level node allocation, attribute injection, and mipmap generation, whereas the parent focuses on the high-level logical steps of flagging and memory allocation [S1, S5, unofficial]. It addresses the problem of efficiently converting triangle meshes into a compact hierarchical voxel representation for real-time global illumination and pathfinding [S1, S2, unofficial].
++The Sparse Voxel Octree (SVO) Builder constructs a hierarchical Sparse Voxel Octree from a flat list of voxelized geometry fragments [S1, S3, unofficial]. It differs from its parent [Sparse Voxel Octree Construction (Basic Version)](1694-sparse-voxel-octree-construction-basic-version.md) by explicitly detailing the GPU compute shader pipeline for level-by-level node allocation, attribute injection, and mipmap generation, whereas the parent focuses on the high-level logical steps of flagging and memory allocation [S1, S5, unofficial]. It addresses the problem of efficiently converting triangle meshes into a compact hierarchical voxel representation for real-time global illumination and pathfinding [S1, S2, unofficial].
+ 
+ ## How it works
+@@ -13,14 +13,14 @@
+     *   `maxDepth`: Maximum subdivision depth of the octree. Typical values are not specified in the sources, but it determines when leaf nodes are created instead of children [S3, S4, unofficial].
+     *   `bounds`: User-specified world-space bounding box. If input meshes fall outside these bounds, the builder automatically expands `min`/`max` to include them, and the final bounds are extended to a power of two [S2, unofficial].
+-*   **Output:** A Sparse Voxel Octree data structure containing nodes with parent pointers, neighbor pointers, and attribute data [S2, S5, unofficial].
++*   **Output:** A Sparse Voxel Octree data structure containing nodes with parent pointers, neighbor pointers, and attribute data [S2, S1, unofficial].
+ 
+ **Data Structures:**
+ The tree is stored in a flat array `_tree` of `uint32_t` values [S3, unofficial]. Each node entry uses the following bit layout:
+-*   **Bits 0–16 (17 bits):** Index of the first child node in the `_tree` array.
+-*   **Bit 17 (1 bit):** Leaf flag. If set, the node is a leaf; if clear, it is an internal node with children.
++*   **Bits 0–16 (17 bits):** Index of the first child node in the `_tree` array [S3, unofficial].
++*   **Bit 17 (1 bit):** Leaf flag. If set, the node is a leaf; if clear, it is an internal node with children [S3, unofficial].
+ *   **Value 0x0000FFFF:** Represents an empty node (child index 0, not a leaf) [S3, unofficial].
+ *   **Value 0x00004200:** Represents a solid leaf node [S3, unofficial].
+ 
+-*Note: Some implementations (e.g., UE5 pathfinding) use a 1-byte metadata struct where bits 0–6 store Depth and bit 7 stores IsLeaf, alongside separate fields for position, size, parent index, and children indices [S4, unofficial]. The GPU builder described below uses the flat `uint32_t` array layout.*
++*Note: Some implementations (e.g., UE5 pathfinding) use a 1-byte metadata struct where bits 0–6 store Depth and bit 7 stores IsLeaf, alongside separate fields for position, size, parent index, and children indices [S4, unofficial]. The GPU builder described below uses the flat `uint32_t` array layout [S3, unofficial].*
+ 
+ **Algorithm Steps:**
+@@ -31,7 +31,5 @@
+     $$ \text{max} = \lceil \text{world\_max} / \text{voxel\_size} \rceil $$
+     Calculate the origin (min) and size (max dimension rounded up to the next power of two) [S2, unofficial].
+-
+ 2.  **Initialize Root:** Clear memory for the first 8 nodes (start=0, count=8) using a `node_init` shader. Initialize the root node (level 0) [S5, unofficial].
+-
+ 3.  **Iterative Level Construction:** Iterate from level $L=1$ to `resolution - 1` (where `resolution` is $\lceil \log_2(\text{size}) \rceil$) [S5, unofficial]:
+     a.  **Node Flagging:** Execute the `node_flag` shader. It binds the octree buffer and the voxel list to determine which nodes at the current level are internal (have children) or leaves. Nodes that need further division are tagged [S5, unofficial].
+@@ -39,13 +37,10 @@
+     c.  **Initialization:** Clear the memory for the newly allocated nodes using the `node_init` shader [S5, unofficial].
+     d.  **State Update:** Update state variables for the next iteration: `start` becomes `alloc_start`, `count` becomes `alloc_count * 8`, and `alloc_start` becomes `start + count` [S5, unofficial].
+-
+ 4.  **Leaf Storage:** After the loop, execute the `store_leaf` shader. It binds the octree buffer and voxel list, and dispatches compute work based on the voxel list size to store leaf node data [S5, unofficial].
+-
+ 5.  **Attribute Injection:** Inject voxel attributes (albedo, normal, etc.) into the leaf nodes. If multiple voxel fragments fall into the same leaf node, their attribute values are averaged [S1, unofficial].
+-
+ 6.  **Mipmap Generation:** Mipmap node values from bottom to top, level by level, into the interior nodes [S1, unofficial].
+ 
+ **Pseudocode:**
+-The following pseudocode combines the high-level logic from [S1, S5, unofficial] with the structural details from [S2, unofficial]. It assumes a GPU compute shader environment where `atomicAdd`, `node_init`, `node_flag`, `node_alloc`, and `store_leaf` are shader invocations.
++The following pseudocode combines the high-level logic from [S1, S5, unofficial] with the structural details from [S2, unofficial]. It assumes a GPU compute shader environment where `atomicAdd`, `node_init`, `node_flag`, `node_alloc`, and `store_leaf` are shader invocations [S5, unofficial].
+ 
+ ```python
+@@ -55,5 +50,4 @@
+     max_voxel = ceil(bounds_max / voxel_size)
+     
+-    # Handle empty input
+     if min_voxel == max_voxel:
+         origin = min_voxel
+@@ -61,50 +55,66 @@
+     else:
+         origin = min_voxel
+-        # Round up to next power of two
+-        max_dim = max(max_voxel.x - min_voxel.x, 
+-                      max_voxel.y - min_voxel.y, 
+-                      max_voxel.z - min_voxel.z)
+-        size = next_power_of_two(max_dim)
++        max_dim = max(max_voxel.x - min_voxel.x, max_voxel.y - min_voxel.y, max_voxel.z - min_voxel.z)
++        size = 1
++        while size < max_dim:
++            size *= 2
+ 
+-    # 2. Initialize Root
+-    # Allocate space for root's 8 children
+-    alloc_start = 0
+-    alloc_count = 8
+-    node_init(alloc_start, alloc_count, value=0x0000FFFF) # Empty nodes
+-
++    resolution = int(log2(size))
++    tree = []
+     current_start = 0
+     current_count = 8
+-    resolution = log2(size)
++    
++    # 2. Initialize Root
++    # Clear memory for the first 8 nodes (start=0, count=8) using node_init
++    tree.extend([0x0000FFFF] * current_count)
+ 
+-    # 3. Iterative Level Construction
+     for level in range(1, resolution):
+-        # Tag nodes that need further division
+-        # node_flag reads from current_start, writes flags to a temporary buffer
+-        node_flag(current_start, current_count, voxel_list)
++        # 3a. Node Flagging
++        # Determine which nodes at [current_start : current_start+current_count] are internal
++        internal_flags = node_flag(tree, current_start, current_count, voxel_list)
+         
+-        # Allocate memory for children of internal nodes
+-        # Returns new start address and count of allocated nodes
+-        alloc_start, alloc_count = node_alloc(current_start, current_count)
++        # 3b. Memory Allocation
++        # Use atomic counter to track allocated nodes; output start address is alloc_start
++        alloc_count = sum(internal_flags) * 8
++        alloc_start = len(tree)
+         
+-        # Initialize allocated memory
+-        node_init(alloc_start, alloc_count, value=0x0000FFFF)
++        # 3c. Initialization
++        # Clear memory for newly allocated nodes using node_init
++        tree.extend([0x0000FFFF] * alloc_count)
+         
+-        # Update state for next level
++        # 3d. State Update
+         current_start = alloc_start
+-        current_count = alloc_count * 8 # Each internal node has 8 children
++        current_count = alloc_count
+ 
+-    # 4. Store Leaves and Inject Attributes
+-    # Store leaf data from voxel_list into the tree
+-    store_leaf(current_start, current_count, voxel_list)
++    # 4. Leaf Storage
++    # Dispatch compute work based on voxel list size to store leaf node data
++    store_leaf(tree, current_start, current_count, voxel_list)
+     
++    # 5. Attribute Injection
+     # Average attributes if multiple fragments map to same leaf
+-    # This is handled within store_leaf or a post-process step
+-    average_leaf_attributes(current_start, current_count)
++    average_leaf_attributes(tree, current_start, current_count)
+ 
+-    # 5. Mipmap Values
++    # 6. Mipmap Generation
+     # Propagate values from leaves up to root
+-    mipmap_upwards(resolution)
++    mipmap_upwards(tree, resolution)
+ 
+-    return SparseVoxelOctree(origin=origin, size=size)
++    return {"origin": origin, "size": size, "tree": tree}
++
++def node_flag(tree, start, count, voxel_list):
++    # Binds octree buffer and voxel list to determine internal vs leaf nodes
++    # Returns a list of booleans indicating which nodes have children
++    return [True] * count  # [G] Simulation of GPU flagging step
++
++def store_leaf(tree, start, count, voxel_list):
++    # Binds octree buffer and voxel list, dispatches compute work
++    pass  # [G] GPU shader invocation for leaf population
++
++def average_leaf_attributes(tree, start, count):
++    # Averages attribute values for fragments falling into the same leaf
++    pass  # [G] Post-processing step for attribute blending
++
++def mipmap_upwards(tree, resolution):
++    # Iterates from bottom to top, level by level, into interior nodes
++    pass  # [G] GPU shader invocation for value propagation
+ ```
+ 
+@@ -132,10 +142,10 @@
+ ## Operating characteristics
+ *   **Time Complexity:** Linear in the number of input voxels for collection and leaf grouping. Iterative layer construction scales with tree depth ($\log_2(\text{size})$). Parent/neighbor filling scales linearly with total node count [S2, unofficial].
+-*   **Memory Complexity:** The flat array `_tree` stores one `uint32_t` per node. The number of nodes depends on the sparsity of the input and the `maxDepth`.
++*   **Memory Complexity:** The flat array `_tree` stores one `uint32_t` per node. The number of nodes depends on the sparsity of the input and the `maxDepth` [S3, unofficial].
+ *   **Performance:** The method is designed for GPU execution using compute shaders, leveraging parallel processing for voxelization and tree construction [S1, S5, unofficial].
+ *   **Strengths:** Reduces memory consumption compared to dense voxel grids. Efficiently handles large scenes by only storing non-empty regions [S1, unofficial].
+ *   **Limitations:** Requires careful management of atomic operations and memory allocation on the GPU. Sparsity can lead to work imbalance in parallel implementations [S4, unofficial].
+ *   **When to Use:** Real-time global illumination, pathfinding in large 3D environments, and scenarios requiring efficient spatial queries on voxelized data [S1, S2, unofficial].
+-*   **When Not to Use:** When the scene is extremely dense (approaching a full grid), the overhead of the octree structure may outweigh the benefits. When dynamic updates are frequent and the cost of rebuilding the tree is prohibitive.
++*   **When Not to Use:** When the scene is extremely dense (approaching a full grid), the overhead of the octree structure may outweigh the benefits. When dynamic updates are frequent and the cost of rebuilding the tree is prohibitive [G].
+ 
+ ## Background

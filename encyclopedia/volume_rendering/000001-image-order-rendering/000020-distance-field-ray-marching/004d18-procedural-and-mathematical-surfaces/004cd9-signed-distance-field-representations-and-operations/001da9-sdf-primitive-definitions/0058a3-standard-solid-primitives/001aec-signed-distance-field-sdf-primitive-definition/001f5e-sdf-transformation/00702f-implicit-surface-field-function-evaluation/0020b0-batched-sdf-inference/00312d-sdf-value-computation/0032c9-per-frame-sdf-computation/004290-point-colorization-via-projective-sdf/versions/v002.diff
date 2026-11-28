@@ -1,0 +1,351 @@
+--- v001.md
++++ v002.md
+@@ -1,180 +1,218 @@
+ # Point Colorization via Projective SDF
+ 
+-Also called: Projective SDF Colorization
++Also called: Projective SDF Colorization, Projective SDF Filtering & Color Sampling
+ 
+ ## Overview
+-Point Colorization via Projective SDF assigns RGB colors to a set of 3D points by projecting them into training views, filtering candidates based on alpha confidence and projective depth consistency, and sampling the closest valid color. It differs from standard multi-view averaging by using a Signed Distance Field (SDF) metric to resolve occlusions and select the nearest surface color, ensuring geometric consistency.
++Point Colorization via Projective SDF assigns RGB colors to a set of 3D points by projecting them into training views, filtering based on alpha confidence and projective depth consistency, and sampling the closest valid color from the rendered reference frames [S1, unofficial]. It differs from standard nearest-neighbor colorization by enforcing geometric consistency through a projective Signed Distance Field (SDF) metric, ensuring that sampled colors correspond to the visible surface rather than occluded geometry or background [S1, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- `pts`: Tensor of shape $(N, 3)$ containing 3D point coordinates.
+-- `voxel_model`: The trained sparse voxel model containing camera parameters and rendering capabilities.
+-- `cam_lst`: List of training camera objects.
+-- `depth_lst`: List of rendered depth maps corresponding to `cam_lst`.
+-- `alpha_lst`: List of rendered alpha maps corresponding to `cam_lst`.
+-- `args`: Configuration object containing `alpha_thres`, `bbox_scale`, `bandwidth_vox`, and `crop_bbox`.
++- `pts`: Tensor of shape $(N, 3)$ containing 3D point coordinates in world space [S1, unofficial].
++- `voxel_model`: A sparse voxel representation capable of rendering color, depth, and alpha [S1, unofficial].
++- `cam_lst`: List of training camera objects, each providing `position`, `lookat`, `project`, and `render` methods [S1, unofficial].
++- `args.alpha_thres`: Scalar threshold for alpha filtering (e.g., 0.5) [S1, unofficial].
++- `args.use_mean`: Boolean flag to select mean depth (`True`) or median depth (`False`) from the renderer [S1, unofficial].
+ 
+ **Outputs:**
+-- `colors`: Tensor of shape $(N, 3)$ containing the assigned RGB color for each point.
++- `closest_color`: Tensor of shape $(N, 3)$ containing the assigned RGB color for each point [S1, unofficial].
++- `closest_dist`: Tensor of shape $(N)$ containing the minimum projective SDF distance for each point [S1, unofficial].
+ 
+ **Data Structures:**
+-- `frame_color`: Tensor of shape $(H, W, 3)$, the rendered color image for a specific camera.
+-- `frame_depth`: Tensor of shape $(H, W)$, the rendered depth image.
+-- `frame_alpha`: Tensor of shape $(H, W)$, the rendered alpha (transparency) image.
+-- `pts_uv`: Tensor of shape $(N, 2)$, normalized device coordinates (NDC) of projected points.
++- `closest_color`: Initialized to $[0.5, 0.5, 0.5]$ for all points [S1, unofficial].
++- `closest_dist`: Initialized to $+\infty$ for all points [S1, unofficial].
++- `valid_pts_idx`: Indices of points currently considered valid, initially all points projected within the image bounds [S1, unofficial].
+ 
+ **Parameters:**
+-- `alpha_thres`: Minimum alpha threshold for valid pixels. Typical value: $0.5$ [S1, unofficial].
+-- `bbox_scale`: Scaling factor for the bounding box of valid voxels. Typical value: $1.0$ [S1, unofficial].
+-
+-**Steps:**
+-
+-1.  **Initialize Tracking Variables:**
+-    Set `closest_color` to a default value (e.g., $0.5$) and `closest_dist` to infinity for all points.
+-
+-2.  **Iterate Over Training Cameras:**
+-    For each camera $c$ in `cam_lst`:
++- `mode='bilinear'`: Interpolation mode for `grid_sample` [S1, unofficial].
++- `align_corners=False`: Coordinate alignment setting for `grid_sample` to prevent edge bias [S1, unofficial].
++
++**Algorithm Steps:**
++
++1.  **Initialization**:
++    Set `closest_color` to $0.5$ for all $N$ points. Set `closest_dist` to $+\infty$ for all $N$ points.
++
++2.  **Iterate over Training Cameras**:
++    For each camera `cam` in `cam_lst`:
+     
+-    a. **Render View:**
+-    Render the scene using the voxel model to obtain color, depth, and alpha.
+-    $$ \text{render\_pkg} = \text{voxel\_model.render}(c, \text{color\_mode}="sh0", \text{output\_depth}=\text{True}, \text{output\_T}=\text{True}) $$
+-    Extract `frame_color`, `frame_depth`, and `raw_T`.
+-    Compute alpha:
+-    $$ \text{frame\_alpha} = 1 - \text{raw\_T} $$
+-    Let $H, W$ be the height and width of `frame_depth`.
+-
+-    b. **Project Points:**
+-    Project 3D points to 2D NDC coordinates:
+-    $$ \text{pts\_uv} = c.\text{project}(pts) $$
+-    Filter points outside the image bounds $[-1, 1]$:
+-    $$ \text{filter\_idx} = \{ i \mid \|\text{pts\_uv}_i\|_\infty \le 1 \} $$
+-    Let `valid_pts_idx` be the indices of points currently being considered (initially all points).
+-
+-    c. **Sample Alpha:**
+-    Sample `frame_alpha` at `pts_uv` using bilinear interpolation:
+-    $$ \text{pts\_frame\_alpha} = \text{grid\_sample}(\text{frame\_alpha}, \text{pts\_uv}) $$
+-    Filter points with insufficient alpha confidence:
+-    $$ \text{valid\_pts\_idx} = \{ i \in \text{valid\_pts\_idx} \mid \text{pts\_frame\_alpha}_i > \text{alpha\_thres} \} $$
+-
+-    d. **Compute Projective SDF:**
+-    Sample `frame_depth` at `pts_uv`:
+-    $$ \text{pts\_frame\_depth} = \text{grid\_sample}(\text{frame\_depth}, \text{pts\_uv}) $$
+-    Compute the signed distance along the camera look-at vector. Let $P_i$ be the 3D point, $C$ be the camera position, and $L$ be the camera look-at direction.
+-    $$ \text{pts\_depth}_i = (P_i - C) \cdot L $$
+-    $$ \text{pts\_dist}_i = | \text{pts\_frame\_depth}_i - \text{pts\_depth}_i | $$
+-    This `pts_dist` represents the projective SDF error.
+-
+-    e. **Update Closest Color:**
+-    Identify points with smaller projective distance than the current best:
+-    $$ \text{update\_idx} = \{ i \in \text{valid\_pts\_idx} \mid \text{pts\_dist}_i < \text{closest\_dist}_i \} $$
+-    For each $i \in \text{update\_idx}$:
+-    1. Sample color from `frame_color` at `pts_uv`:
+-       $$ \text{pts\_color}_i = \text{grid\_sample}(\text{frame\_color}, \text{pts\_uv})_i $$
+-    2. Update tracking variables:
+-       $$ \text{closest\_color}_i = \text{pts\_color}_i $$
+-       $$ \text{closest\_dist}_i = \text{pts\_dist}_i $$
+-
+-3.  **Return Colors:**
+-    Output `closest_color`.
++    a.  **Render Reference Frame**:
++        Call `render_pkg = voxel_model.render(cam, color_mode="sh0", output_depth=True, output_T=True)` [S1, unofficial].
++        Extract `frame_color` from `render_pkg['color']` [S1, unofficial].
++        Select `frame_depth`: if `args.use_mean` is true, use `render_pkg['raw_depth'][[0]]` (mean); otherwise, use `render_pkg['raw_depth'][[2]]` (median) [S1, unofficial].
++        Compute `frame_alpha = 1 - render_pkg['raw_T']` [S1, unofficial].
++        Get image dimensions $H, W$ from `frame_depth.shape[-2:]` [S1, unofficial].
++
++    b.  **Project Points**:
++        Compute projected UV coordinates: `pts_uv = cam.project(pts)` [S1, unofficial].
++        Filter points outside the image bounds $[-1, 1]$:
++        `filter_idx = torch.where((pts_uv.abs() <= 1).all(-1))[0]` [S1, unofficial].
++        Update valid indices and points:
++        `valid_pts_idx = filter_idx`
++        `valid_pts = pts[filter_idx]`
++        `pts_uv = pts_uv[filter_idx]`
++        If `valid_pts` is empty, skip to the next camera [G].
++
++    c.  **Alpha Filtering**:
++        Sample alpha at projected UVs using bilinear interpolation:
++        $$ \text{pts\_frame\_alpha} = \text{grid\_sample}(\text{frame\_alpha}.view(1,1,H,W), \text{pts\_uv}.view(1,1,-1,2), \text{mode}='bilinear', \text{align\_corners}=False).flatten() $$
++        [S1, unofficial].
++        Filter points with alpha below threshold:
++        `filter_idx = torch.where(pts_frame_alpha > args.alpha_thres)[0]` [S1, unofficial].
++        Update valid arrays:
++        `valid_pts_idx = valid_pts_idx[filter_idx]`
++        `valid_pts = valid_pts[filter_idx]`
++        `pts_uv = pts_uv[filter_idx]`
++        If `valid_pts` is empty, skip to the next camera [G].
++
++    d.  **Compute Projective SDF Distance**:
++        Sample frame depth at projected UVs:
++        $$ \text{pts\_frame\_depth} = \text{grid\_sample}(\text{frame\_depth}.view(1,1,H,W), \text{pts\_uv}.view(1,1,-1,2), \text{mode}='bilinear', \text{align\_corners}=False).flatten() $$
++        [S1, unofficial].
++        Compute camera-space depth for each point:
++        $$ \text{pts\_depth} = (\text{valid\_pts} - \text{cam.position}) \cdot \text{cam.lookat} $$
++        [S1, unofficial].
++        Compute absolute projective distance:
++        $$ \text{pts\_dist} = |\text{pts\_frame\_depth} - \text{pts\_depth}| $$
++        [S1, unofficial].
++
++    e.  **Update Closest Color**:
++        Identify points with smaller distance than current best:
++        `filter_idx = torch.where(pts_dist < closest_dist[valid_pts_idx])[0]` [S1, unofficial].
++        Update valid indices for this iteration:
++        `valid_pts_idx = valid_pts_idx[filter_idx]`
++        `pts_uv = pts_uv[filter_idx]`
++        `pts_dist = pts_dist[filter_idx]`
++        `valid_pts = valid_pts[filter_idx]`
++        If `valid_pts` is empty, continue to next camera [G].
++        
++        Sample color at filtered UVs:
++        $$ \text{pts\_color} = \text{grid\_sample}(\text{frame\_color}[None], \text{pts\_uv}.view(1,1,-1,2), \text{mode}='bilinear', \text{align\_corners}=False).squeeze().T $$
++        [S1, unofficial].
++        
++        Update global closest arrays:
++        `closest_dist[valid_pts_idx] = pts_dist`
++        `closest_color[valid_pts_idx] = pts_color`
++        [S1, unofficial].
++
++3.  **Return**:
++    Return `closest_color` and `closest_dist` [S1, unofficial].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def point_colorization(pts, voxel_model, cam_lst, args):
++import torch
++import torch.nn.functional as F
++
++def point_colorization_via_projective_sdf(pts, voxel_model, cam_lst, args):
++    """
++    Args:
++        pts: (N, 3) tensor of 3D points
++        voxel_model: SparseVoxelModel with render method
++        cam_lst: List of camera objects
++        args: Object with alpha_thres, use_mean, bandwidth_vox
++    Returns:
++        closest_color: (N, 3) tensor
++        closest_dist: (N,) tensor
++    """
+     N = pts.shape[0]
+-    closest_color = torch.full((N, 3), 0.5, device=pts.device)
+-    closest_dist = torch.full((N,), float('inf'), device=pts.device)
+-    valid_pts_idx = torch.arange(N, device=pts.device)
++    closest_color = torch.full((N, 3), 0.5, dtype=torch.float32, device=pts.device)
++    closest_dist = torch.full((N,), float('inf'), dtype=torch.float32, device=pts.device)
+     
+     for cam in cam_lst:
+-        # Render view
++        # 1. Render reference frame
+         render_pkg = voxel_model.render(cam, color_mode="sh0", output_depth=True, output_T=True)
+         frame_color = render_pkg['color']
+-        frame_depth = render_pkg['depth']
+-        raw_T = render_pkg['raw_T']
+-        frame_alpha = 1.0 - raw_T
++        
++        if args.use_mean:
++            frame_depth = render_pkg['raw_depth'][[0]]
++        else:
++            frame_depth = render_pkg['raw_depth'][[2]]
++            
++        frame_alpha = 1 - render_pkg['raw_T']
+         H, W = frame_depth.shape[-2:]
+         
+-        # Project points
++        # 2. Project points
+         pts_uv = cam.project(pts)
+         
+-        # Filter points outside image bounds
+-        in_bounds = (pts_uv.abs() <= 1.0).all(dim=1)
+-        current_valid = valid_pts_idx[in_bounds[valid_pts_idx]]
+-        
+-        if len(current_valid) == 0:
++        # Filter points outside image bounds [-1, 1]
++        valid_mask = (pts_uv.abs() <= 1).all(dim=-1)
++        valid_indices = torch.where(valid_mask)[0]
++        
++        if valid_indices.numel() == 0:
+             continue
+             
+-        pts_uv_valid = pts_uv[current_valid]
+-        
+-        # Sample alpha
+-        # grid_sample expects input of shape (1, 1, H, W) and coordinates (1, 1, N, 2)
+-        pts_frame_alpha = grid_sample(
+-            frame_alpha.view(1, 1, H, W), 
+-            pts_uv_valid.view(1, 1, -1, 2), 
+-            mode='bilinear', 
++        valid_pts = pts[valid_indices]
++        pts_uv_valid = pts_uv[valid_indices]
++        
++        # 3. Alpha filtering
++        # grid_sample expects coordinates in [-1, 1]
++        pts_frame_alpha = F.grid_sample(
++            frame_alpha.view(1, 1, H, W),
++            pts_uv_valid.view(1, 1, -1, 2),
++            mode='bilinear',
+             align_corners=False
+         ).flatten()
+         
+-        # Filter by alpha threshold
+-        alpha_valid_mask = pts_frame_alpha > args.alpha_thres
+-        alpha_valid_indices = current_valid[alpha_valid_mask]
+-        
+-        if len(alpha_valid_indices) == 0:
++        alpha_mask = pts_frame_alpha > args.alpha_thres
++        valid_indices = valid_indices[alpha_mask]
++        valid_pts = valid_pts[alpha_mask]
++        pts_uv_valid = pts_uv_valid[alpha_mask]
++        
++        if valid_indices.numel() == 0:
+             continue
+             
+-        pts_uv_alpha_valid = pts_uv_valid[alpha_valid_mask]
+-        
+-        # Compute projective SDF
+-        pts_frame_depth = grid_sample(
+-            frame_depth.view(1, 1, H, W), 
+-            pts_uv_alpha_valid.view(1, 1, -1, 2), 
+-            mode='bilinear', 
++        # 4. Compute Projective SDF
++        pts_frame_depth = F.grid_sample(
++            frame_depth.view(1, 1, H, W),
++            pts_uv_valid.view(1, 1, -1, 2),
++            mode='bilinear',
+             align_corners=False
+         ).flatten()
+         
+-        # Projective depth: distance along camera look-at vector
+-        # cam.position is camera location, cam.lookat is normalized view direction
+-        pts_3d = pts[alpha_valid_indices]
+-        pts_depth = (pts_3d - cam.position) @ cam.lookat
++        # Camera space depth: dot product of point offset and look-at vector
++        pts_depth = (valid_pts - cam.position) @ cam.lookat
++        
++        # Absolute distance
+         pts_dist = (pts_frame_depth - pts_depth).abs()
+         
+-        # Update closest
+-        # Compare with current closest_dist for these specific points
+-        current_closest = closest_dist[alpha_valid_indices]
++        # 5. Update closest
++        # Compare with current closest_dist for these specific indices
++        current_closest = closest_dist[valid_indices]
+         update_mask = pts_dist < current_closest
+         
+-        if update_mask.any():
+-            update_indices = alpha_valid_indices[update_mask]
+-            pts_uv_update = pts_uv_alpha_valid[update_mask]
+-            pts_dist_update = pts_dist[update_mask]
+-            
+-            # Sample color
+-            pts_color = grid_sample(
+-                frame_color.view(1, H, W, 3).permute(0, 3, 1, 2), # Adjust for grid_sample format if needed
+-                pts_uv_update.view(1, 1, -1, 2), 
+-                mode='bilinear', 
+-                align_corners=False
+-            ).squeeze().T # Shape (3, K) -> (K, 3)
+-            
+-            closest_color[update_indices] = pts_color
+-            closest_dist[update_indices] = pts_dist_update
+-            
+-    return closest_color
++        update_indices = valid_indices[update_mask]
++        update_pts_uv = pts_uv_valid[update_mask]
++        update_pts_dist = pts_dist[update_mask]
++        
++        if update_indices.numel() == 0:
++            continue
++            
++        # Sample color
++        pts_color = F.grid_sample(
++            frame_color[None],
++            update_pts_uv.view(1, 1, -1, 2),
++            mode='bilinear',
++            align_corners=False
++        ).squeeze().T
++        
++        # Update global arrays
++        closest_dist[update_indices] = update_pts_dist
++        closest_color[update_indices] = pts_color
++        
++    return closest_color, closest_dist
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-- **Precision:** Depth sampling requires bilinear interpolation. Discrete depth maps may introduce quantization errors in `pts_dist` [S1, unofficial].
+-- **Boundaries:** Points exactly on the image border ($\pm 1$) may suffer from interpolation artifacts depending on `align_corners` settings [S1, unofficial].
+-- **Degenerate Input:** If no training view provides a valid alpha and depth match for a point, the point retains the default color ($0.5$) [S1, unofficial].
++- **Precision**: Use `float32` for coordinates and depths to match typical rendering pipelines [S1, unofficial].
++- **Boundaries**: Points projected exactly to the image edge may suffer from interpolation bias if `align_corners=True`; the method uses `align_corners=False` to mitigate this [S1, unofficial].
++- **Degenerate Input**: If no training views cover a point (all projections outside bounds or low alpha), the point retains the initial color $[0.5, 0.5, 0.5]$ and distance $\infty$ [S1, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N \cdot C)$, where $N$ is the number of points and $C$ is the number of training cameras. Each point is projected and sampled for every camera.
+-- **Memory Complexity:** $O(N)$ for storing closest distances and colors. Rendering overhead depends on image resolution $H \times W$.
+-- **Strengths:** Robust to occlusions by selecting the nearest surface color based on projective depth. Simple to implement given a differentiable renderer.
+-- **Limitations:** Computationally expensive for large $N$ or many cameras. Sensitive to depth map accuracy and alpha threshold selection.
++- **Time Complexity**: $O(N \cdot C)$, where $N$ is the number of points and $C$ is the number of training cameras. Each camera requires rendering and grid sampling operations proportional to $N$ [S1, unofficial].
++- **Memory Complexity**: $O(N)$ for storing `closest_color` and `closest_dist` [S1, unofficial].
++- **Strengths**: Robust to occlusion by using projective depth consistency; leverages existing sparse voxel rendering infrastructure [S1, unofficial].
++- **Limitations**: Requires access to training views and their depth/alpha outputs; performance scales linearly with the number of cameras [S1, unofficial].
+ 
+ ## Background
+-This method is part of the SV-Raster pipeline for reconstructing 3D scenes from images. It leverages the geometric consistency of SDFs to colorize points extracted from sparse voxel representations. The approach is detailed in the SV-Raster repository [S1, unofficial].
++This method is part of the SVaR (Sparse Voxel Rasterization) pipeline for 3D reconstruction and colorization [S1, unofficial]. It builds on Per-Frame SDF Computation to assign colors to points derived from adaptive sparse voxels [S1, unofficial]. The approach was introduced in the context of efficient mesh extraction and colorization from sparse voxel representations [S1, unofficial].
+ 
+ ## Sources

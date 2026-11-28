@@ -1,0 +1,592 @@
+Graphic | Developerblog – Johannes Jendersie
+One year ago I have written a post with the same header. Now I am back to the project Monolith and the 20ms frame time I got before was just unbearable. The observation that there are components consisting of the same voxel patterns again and again helped a lot to implement a new hybrid approach: Geometry-Shader-spawned cubes with ray marched volume textures.
+Ray Marching Voxel Textures
+As before I use optimized geometry shader instancing for boxes. But now I draw boxes down to the component level only (a component is a functional unit in monolith e.g. a thruster or a laser). Below that the geometry is static and it is affordable to store dense information for that, i.e. volume textures.
+The laser weapons in the front demonstrate the effect of neighbor-sensitve sampling
+Visualizing volume textures with ray marching is common sense and straight forward. Since I wanted to have a blocky look the ray can do steps from plane to plane in the uniform grid. The traversal can stop if any non-zero entry is found in the texture. It is possible to march through the texture without maintaining a floating point ray position. Therefore the initial texel position is determined and then in each iteration one of three dimensions is increased or decreased depending on the sign of the ray direction. The right dimension to modify is that which is closest to the next grid-plane in ray direction. Despite changing the texture coordinate, the plane distances must be updated which is a simple subtraction of the distance of the step. The chosen dimension in which the step was done has 0 distance then, so it is reset to the full projected distance between two planes.
+The following fragment shader performs the ray marching. Additional to the explained ray marching
+voxelMask is introduced. This mask changes the appearance of the component dependent on the neighborhood. It is a code with a bit for each side and an additional one for non side dependent voxels. The texture contains a mask of the same kind too. Hence, a simple logic AND can decide between visible voxel or not. Additionally the geometry shader computes a LOD (mipmap) dependent on the view distance. Doing this in the fragment shader would cause artifacts, because a LOD-seem can run through a single component which would create little holes.
+C++
+flat in vec3 gs_objectPosition;
+flat in ivec3 gs_neighbor_material_mipmap;
+in vec3 gs_texCoord;
+out vec4 fragColor;
+uniform isampler2DArray u_componentTex;
+...
+void main()
+{
+// Determine which voxels can be sampled at all (dependent on neighborhood)
+int voxelMask = 0x40 | ((~gs_neighbor_material_mipmap.x) & 0x3f);
+int materialIndex = gs_neighbor_material_mipmap.x >> 24;
+ivec2 codes;
+codes.x = gs_neighbor_material_mipmap.y;
+// Find view direction in component-space
+vec3 chunkSpacePos = gs_objectPosition + gs_texCoord - 0.5;
+vec3 viewDir = normalize((vec4(chunkSpacePos, 1) * c_mWorldView).xyz);
+vec3 chunkSpaceDir = viewDir * mat3x3(c_mInverseWorldView);
+// Number of pixel must be equal in all directions (can theoretically be changed
+// if required). Used for ray marching the texture.
+int texSize = c_maxTexRes / (1 << gs_neighbor_material_mipmap.z);
+// Initialize ray marching algorithm
+ivec3 dirSign;
+dirSign.x = chunkSpaceDir.x < 0.0f ? -1 : 1;
+dirSign.y = chunkSpaceDir.y < 0.0f ? -1 : 1;
+dirSign.z = chunkSpaceDir.z < 0.0f ? -1 : 1;
+vec3 voxelPos = gs_texCoord * (texSize - 0.00001);
+ivec3 rayPos = ivec3(voxelPos);
+vec3 absDir = abs(chunkSpaceDir);
+vec3 projLength = 1.0 / (absDir + 0.0001);
+vec3 d = voxelPos - rayPos;
+if(dirSign.x == 1) d.x = 1-d.x;
+if(dirSign.y == 1) d.y = 1-d.y;
+if(dirSign.z == 1) d.z = 1-d.z;
+d *= projLength;
+if( materialIndex != 0 && texSize > 1 )
+{
+// Ray march until a voxel is set in the current configuration
+codes = texelFetch(u_componentTex, ivec3(rayPos.x + rayPos.y * texSize, rayPos.z, materialIndex), gs_voxel_material_mipmap.z).xy;
+while((codes.y & voxelMask) == 0)
+{
+if(d.x < d.y || d.z < d.y) {
+if(d.x < d.z) {
+rayPos.x += dirSign.x;
+d.yz -= d.x;
+d.x = projLength.x;
+} else {
+rayPos.z += dirSign.z;
+d.xy -= d.z;
+d.z = projLength.z;
+}
+} else {
+rayPos.y += dirSign.y;
+d.xz -= d.y;
+d.y = projLength.y;
+}
+if(any(greaterThanEqual(rayPos, ivec3(texSize,texSize,texSize))) || any(lessThan(rayPos, ivec3(0,0,0))))
+discard;
+codes = texelFetch(u_componentTex, ivec3(rayPos.x + rayPos.y * texSize, rayPos.z, materialIndex), gs_voxel_material_mipmap.z).xy;
+}
+}
+// Estimate normal from the plane we intersected
+d = abs(d - projLength);
+vec3 normal;
+if(d.x < 0.0001) normal = -dirSign.x * vec3(c_mWorldView[0][0], c_mWorldView[1][0], c_mWorldView[2][0]);
+if(d.y < 0.0001) normal = -dirSign.y * vec3(c_mWorldView[0][1], c_mWorldView[1][1], c_mWorldView[2][1]);
+if(d.z < 0.0001) normal = -dirSign.z * vec3(c_mWorldView[0][2], c_mWorldView[1][2], c_mWorldView[2][2]);
+normal = normalize(normal);
+...
+}
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29
+30
+31
+32
+33
+34
+35
+36
+37
+38
+39
+40
+41
+42
+43
+44
+45
+46
+47
+48
+49
+50
+51
+52
+53
+54
+55
+56
+57
+58
+59
+60
+61
+62
+63
+64
+65
+66
+67
+68
+69
+70
+71
+72
+73
+74
+75
+76
+77
+flat in vec3 gs_objectPosition;
+flat in ivec3 gs_neighbor_material_mipmap;
+in vec3 gs_texCoord;
+out vec4 fragColor;
+uniform isampler2DArray u_componentTex;
+...
+void main()
+{
+// Determine which voxels can be sampled at all (dependent on neighborhood)
+int voxelMask = 0x40 | ((~gs_neighbor_material_mipmap.x) & 0x3f);
+int materialIndex = gs_neighbor_material_mipmap.x >> 24;
+ivec2 codes;
+codes.x = gs_neighbor_material_mipmap.y;
+// Find view direction in component-space
+vec3 chunkSpacePos = gs_objectPosition + gs_texCoord - 0.5;
+vec3 viewDir = normalize((vec4(chunkSpacePos, 1) * c_mWorldView).xyz);
+vec3 chunkSpaceDir = viewDir * mat3x3(c_mInverseWorldView);
+// Number of pixel must be equal in all directions (can theoretically be changed
+// if required). Used for ray marching the texture.
+int texSize = c_maxTexRes / (1 << gs_neighbor_material_mipmap.z);
+// Initialize ray marching algorithm
+ivec3 dirSign;
+dirSign.x = chunkSpaceDir.x < 0.0f ? -1 : 1;
+dirSign.y = chunkSpaceDir.y < 0.0f ? -1 : 1;
+dirSign.z = chunkSpaceDir.z < 0.0f ? -1 : 1;
+vec3 voxelPos = gs_texCoord * (texSize - 0.00001);
+ivec3 rayPos = ivec3(voxelPos);
+vec3 absDir = abs(chunkSpaceDir);
+vec3 projLength = 1.0 / (absDir + 0.0001);
+vec3 d = voxelPos - rayPos;
+if(dirSign.x == 1) d.x = 1-d.x;
+if(dirSign.y == 1) d.y = 1-d.y;
+if(dirSign.z == 1) d.z = 1-d.z;
+d *= projLength;
+if( materialIndex != 0 && texSize > 1 )
+{
+// Ray march until a voxel is set in the current configuration
+codes = texelFetch(u_componentTex, ivec3(rayPos.x + rayPos.y * texSize, rayPos.z, materialIndex), gs_voxel_material_mipmap.z).xy;
+while((codes.y & voxelMask) == 0)
+{
+if(d.x < d.y || d.z < d.y) {
+if(d.x < d.z) {
+rayPos.x += dirSign.x;
+d.yz -= d.x;
+d.x = projLength.x;
+} else {
+rayPos.z += dirSign.z;
+d.xy -= d.z;
+d.z = projLength.z;
+}
+} else {
+rayPos.y += dirSign.y;
+d.xz -= d.y;
+d.y = projLength.y;
+}
+if(any(greaterThanEqual(rayPos, ivec3(texSize,texSize,texSize))) || any(lessThan(rayPos, ivec3(0,0,0))))
+discard;
+codes = texelFetch(u_componentTex, ivec3(rayPos.x + rayPos.y * texSize, rayPos.z, materialIndex), gs_voxel_material_mipmap.z).xy;
+}
+}
+// Estimate normal from the plane we intersected
+d = abs(d - projLength);
+vec3 normal;
+if(d.x < 0.0001) normal = -dirSign.x * vec3(c_mWorldView[0][0], c_mWorldView[1][0], c_mWorldView[2][0]);
+if(d.y < 0.0001) normal = -dirSign.y * vec3(c_mWorldView[0][1], c_mWorldView[1][1], c_mWorldView[2][1]);
+if(d.z < 0.0001) normal = -dirSign.z * vec3(c_mWorldView[0][2], c_mWorldView[1][2], c_mWorldView[2][2]);
+normal = normalize(normal);
+...
+}
+Results - Incredible!
+The gain is much larger than hoped. The new hybrid approach takes only a few milliseconds (3-4) on the notbook GPU GTX850M. Before this took over 20ms. The new bottlenecks seem to be driver overhead (the GUI in main menu also takes 3ms) and bad scheduling. Well, I immediately increased the component resolution from 8 to 16 cubic which ended in a bit more than 4ms for really many voxels. Unfortunately the new approach is more sensitive to screen resolution but even so it is on the good side of 16ms. The image shows 62663 components (stone and water) with 16x16x16 voxels each. So the total theoretical amount of voxels in the image is around 256,667,000 (a quarter gigavoxel) whereby the effective number is much smaller (there are only 1M pixels). However the old render approach would have scheduled approximating 4 million voxels for the same image which is much more than 62 thousand.
+Approximating virtually 250,000,000 voxels (not all visible) in 4.45ms on a notbook GTX850M
+As it happens I try to render many voxels in my latest project Monolith (Project page is still pending, but you can look on github for it).
+What is a Voxel? A voxel is a small volumetric element - it is a pixel in 3D. The nice things with them is that the logical arrangement in a 3D textures allows simple algorithms, e.g. for destructions. That is why I want to use them.
+What is many? Well Monolith is a space strategy game based on voxels. Therefore spaceships and planets and solar systems and ... are made of voxels. To store the earth in 1 m³ large volume elements we would need 10^21 of them. Even if we store only one byte for each this requires 962081 PB RAM or disc space. So, many is as much as possible.
+Which approaches do exist?
+First of all I decided that I want to render voxels directly in the form of boxes. There are people how don't like that and yes there are algorithms as marching cubes to create continuous surfaces but I considered real cubes as the way to go. They allow much more dynamical updates because not every change causes a recomputation of complex meshes. Following Ideas can suffice for this task:
+Ray marching (see Gigavoxels [1])
+It is possible to use octrees - which are the natural representation of voxel hierarchies - to efficiently ray-cast a 3D texture. But its not exactly what I want to do. All models in the game have there own dynamic transformation, hence there would be many relatively small 3D textures and I have to test which objects are hit by a ray before using a sparse octree traversal. This approach would probably not be realtime.
+Static vertex buffers with many cubes
+One could create quads for each surface side of a cube. Drawing static meshes is just the fastest thing a GPU can do. Updating the information is somewhat tricky because we need to know a neighborhood. I assume this to be fastest anyway but it requires plenty of space. It is possible, but not probable, that I benchmark that later.
+Instancing
+The advantage is that only a few data per cube is required on GPU. Since there is no need to store real vertices (only one real cube mesh and many instance information) this would be efficient. To update a local change only the instance information must be overwritten or masked and bus-traffic should be low.
+Indeed I had a reference implementation for many instanced cubes but I wanted to test if this can be outperformed.
+Geometry shader
+This is what I did and I will explain it in detail.
+My Geometry Shader Advanced Instancing
+It is common practice to create billboards in form of quads inside a geometry shader. Why not whole cubes? Depending on the vertex normals (smoothed or per face) this requires either 16 or 24 vertices. Both are possible but effectively to large to be efficient. On the other hand we can decide if a cube is visible before any triangle is created. It happens that backface culling for a cube will always remove one of two opposite faces. Therefore my shader emits at most 12 vertices for 3 quads.
+Spanning the cube
+For a single voxel based model all cubes have the same size and rotation. One could compute some offset vectors to a voxel center in the shader, but since these vectors are equal for all instances they can also be precomputed. To avoid two vector-matrix transformations the vectors must be added in object space (before transformation) or in projection space (after transformation of the center). I did the second one.
+Culling
+In projection space frustum culling is easy. The homogeneous coordinate must be inside the unit volume: . Multiplying this with gives the simple equations:
+. The z coordinate equation depends on which clipping planes are used. These are different: [0,1] in DirectX and [-1,1] in OpenGL. Using this test on the center would cause voxels to disappear to early. So I added an offset and "made the frustum larger".
+C++
+vec4 vPos = vec4( x, y, z, 1 ) * c_mWorldViewProjection;
+// Discard voxel outside the viewing volume
+float w = vPos.w + max(max(length(c_vCorner000), length(c_vCorner001)), max(length(c_vCorner010), length(c_vCorner011)));
+if( abs(vPos.z) > w ||
+abs(vPos.x) > w ||
+abs(vPos.y) > w )
+return;
+1
+2
+3
+4
+5
+6
+7
+8
+vec4 vPos = vec4( x, y, z, 1 ) * c_mWorldViewProjection;
+// Discard voxel outside the viewing volume
+float w = vPos.w + max(max(length(c_vCorner000), length(c_vCorner001)), max(length(c_vCorner010), length(c_vCorner011)));
+if( abs(vPos.z) > w ||
+abs(vPos.x) > w ||
+abs(vPos.y) > w )
+return;
+Then I added backface culling. This got a bit more complicated. I did not find a way to do this in projection space directly. A direction in projection space can be transformed to view space with a single multiplication (assuming you have the same projection matrix as I have) with
+(1/mProjection[0][0], 1/mProjection[1][1], 1/mProjection[2][2]) . As last trick I added a masking for rejecting faces which are "inside". If there are two neighbored voxels the two sides which are shared in between are never visible.
+C++
+// Decide for front or back face
+if( dot((c_vCorner000.xyz+c_vCorner110.xyz)*c_vInverseProjection.xyz, vViewDirection) > 0 ) {
+// Reject invisible faces inside the model
+if( (vs_out_VoxelCode[0] & uint(0x10)) != uint(0) )
+{
+vec3 vNormal = normalize((vec4(0,0,-1,0) * c_mWorldView).xyz);
+gs_color = Lightning(vNormal, vViewDirection, shininess, specular, color, emissive);
+gl_Position = c_vCorner000 + vPos;
+EmitVertex();
+gl_Position = c_vCorner100 + vPos;
+EmitVertex();
+gl_Position = c_vCorner010 + vPos;
+EmitVertex();
+gl_Position = c_vCorner110 + vPos;
+EmitVertex();
+EndPrimitive();
+}
+} else {
+// Reject invisible faces inside the model
+if( (vs_out_VoxelCode[0] & uint(0x20)) != uint(0) )
+{
+vec3 vNormal = normalize((vec4(0,0,1,0) * c_mWorldView).xyz);
+gs_color = Lightning(vNormal, vViewDirection, shininess, specular, color, emissive);
+gl_Position = c_vCorner011 + vPos;
+EmitVertex();
+gl_Position = c_vCorner111 + vPos;
+EmitVertex();
+gl_Position = c_vCorner001 + vPos;
+EmitVertex();
+gl_Position = c_vCorner101 + vPos;
+EmitVertex();
+EndPrimitive();
+}
+}
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29
+30
+31
+32
+33
+34
+// Decide for front or back face
+if( dot((c_vCorner000.xyz+c_vCorner110.xyz)*c_vInverseProjection.xyz, vViewDirection) > 0 ) {
+// Reject invisible faces inside the model
+if( (vs_out_VoxelCode[0] & uint(0x10)) != uint(0) )
+{
+vec3 vNormal = normalize((vec4(0,0,-1,0) * c_mWorldView).xyz);
+gs_color = Lightning(vNormal, vViewDirection, shininess, specular, color, emissive);
+gl_Position = c_vCorner000 + vPos;
+EmitVertex();
+gl_Position = c_vCorner100 + vPos;
+EmitVertex();
+gl_Position = c_vCorner010 + vPos;
+EmitVertex();
+gl_Position = c_vCorner110 + vPos;
+EmitVertex();
+EndPrimitive();
+}
+} else {
+// Reject invisible faces inside the model
+if( (vs_out_VoxelCode[0] & uint(0x20)) != uint(0) )
+{
+vec3 vNormal = normalize((vec4(0,0,1,0) * c_mWorldView).xyz);
+gs_color = Lightning(vNormal, vViewDirection, shininess, specular, color, emissive);
+gl_Position = c_vCorner011 + vPos;
+EmitVertex();
+gl_Position = c_vCorner111 + vPos;
+EmitVertex();
+gl_Position = c_vCorner001 + vPos;
+EmitVertex();
+gl_Position = c_vCorner101 + vPos;
+EmitVertex();
+EndPrimitive();
+}
+}
+Remarks: Of course you need to emit normals, texture coordinates or other stuff you need to colorize your voxel. I do lightning on voxel basis to reduce the export bottle neck. Further the code above is only for two of the six sides. It must be replicated for the other two directions.
+Input
+Geometry shaders aren't that fast, especially if the amount of data increases. I encoded the invisible masking and the position inside a single 32 bit integer value. There are 6 bits for the mask of each side and 3*8 bits for the position, the remaining 2 bits are not used currently. This allows to address 256^3 positions which leads to the need of a chunked approach for larger models.
+Monolith is using a 32^3 chunk size only because, despite the technical necessity, this allows an efficient memory managment as well as easy LOD and large scale culling algorithms. More information might come in a future post.
+Result
+The image was made with an Geforce 640M LE. It draws 32368 voxels per millisecond. Let me know if you achieve higher rates with another approach!
+Each different colored area is its own voxel
+[1] http://maverick.inria.fr/Publications/2009/CNLE09/
+Shortly I discovered that drawing a proper beam is a really complex issue. I tried to draw a grid, but beams are also useful for lighting effects as god-rays or laser weapons. Of course you can draw a single line with just rendering lines (or wireframe). Unfortunately such lines are sharp and thin - good for a laser weapon but not for the rest. I started with single lines and found them not appropriate for my grid on FullHD resolution.
+After expanding lines with a geometry shader I found some Problems:
+Vertex coordinates behind the camera caused entire beams vanishing
+Texture coordinate Interpolation got broken
+I solved both by manually reimplementing pipeline stages which took me a day. So I though you might be interested in my solution.
+Spanning the Beam with a Geometry Shader
+The easy idea where everything begun: Create a billboard in the geometry shader.
+For an input of two vertices from a line compute a vector which is perpendicular to the line and the view direction. Add this new vector as offsets to the ends and emit a thin quad with two corners at on end and two at the other end. I did the offsetting directly in projection space to avoid the requirement for more matrices and transformations. This is not the common approach and might be confusing.
+You can see the implementation in the code in the next section. I added a scaling
+* l1.w to the offset vector to make the beam zoom invariant. This is because I will use it to render selections, ... of objects and don't want the handles to vanish at far distances. Later I discovered that this causes problem two and I removed it.
+The next step was to smooth the quad borders in pixel shader. Therefore I created "texture coordinates" and used them to compute the distance of a fragment to the beam border.
+C++
+void main()
+{
+// Fading along the line direction only close to the ends
+float fadeLong = max(0, abs(gs_TexCoord.x) * c_fFadeScale - c_fFadeOffset);
+fadeLong = max(0, 1 - fadeLong * fadeLong);
+// Maximal smooth fading about beem width
+float fadeShort = max(0, 1 - gs_TexCoord.y * gs_TexCoord.y);
+ps_FragColor = gs_Color * fadeShort * fadeLong;
+}
+1
+2
+3
+4
+5
+6
+7
+8
+9
+void main()
+{
+// Fading along the line direction only close to the ends
+float fadeLong = max(0, abs(gs_TexCoord.x) * c_fFadeScale - c_fFadeOffset);
+fadeLong = max(0, 1 - fadeLong * fadeLong);
+// Maximal smooth fading about beem width
+float fadeShort = max(0, 1 - gs_TexCoord.y * gs_TexCoord.y);
+ps_FragColor = gs_Color * fadeShort * fadeLong;
+}
+Vanishing Triangles through Projective Space
+Everything worked fine and than I enlarged my grid...
+It is a matter of fact that if a vertex of a triangle is behind the camera the full triangle is culled. This is because in perspective space a vertex behind the camera has undefined coordinates - the camera itself is a singularity. It has nothing to do with the clipping algorithm, which would work well if a vertex is between near plane and camera. To avoid the negative coordinates you need to do clipping of the triangle yourself before perspective division.
+The clipping must do two things: Move the vertex and interpolate its data. The lines 24-34 are doing this. Since I would like to clip a ray it becomes easier than with triangles. I project the end points along the ray direction to the nearplane. For a triangle do that on each edge. Important: the direction is the full 4D vector in homogeneous space. To figure that out I required most of the time.
+C++
+#version 330
+#define OUT_VERTS 4
+in vec4 vs_Color[2];
+in vec3 vs_Position[2];
+out vec4 gs_Color;
+// x/w, y/w, 1/w for perspective correction
+noperspective out vec3 gs_TexCoord;
+layout(lines) in;
+layout(triangle_strip, max_vertices = OUT_VERTS) out;
+layout(std140) uniform ... // Shortened this listing here
+void main(void)
+{
+// Transform to projection space - the rest is done directly in screen space
+vec4 l1 = vec4(vs_out_Position[0], 1) * c_mWorldViewProjection;
+vec4 l2 = vec4(vs_out_Position[1], 1) * c_mWorldViewProjection;
+// Do a manual clipping.
+vec4 direction = normalize(l2 - l1);
+// Compute original distance for texture coordinate reprojection.
+float len = length(l2.xyz - l1.xyz) * 0.5;
+// Reproject end points to the near-thresholdplane
+if( l1.z < c_fNearPlane )
+l1 -= direction * (l1.z-c_fNearPlane) / direction.z;
+float tex1 = 1.0 - length(l2.xyz - l1.xyz) / len;
+if( l2.z < c_fNearPlane )
+l2 -= direction * (l2.z-c_fNearPlane) / direction.z;
+float tex2 = length(l2.xyz - l1.xyz) / len - 1.0;
+// Compute a vector perpendicular vector to create a beam
+vec2 dir = normalize(l2.xy / l2.w - l1.xy / l1.w);
+// Cross product with view direction
+vec4 perpendicular = vec4(-dir.y * 0.2, dir.x * 0.2, 0, 0);
+gs_Color = vs_out_Color[0];
+gl_Position = l1 + perpendicular * l1.w;
+gs_TexCoord = vec3(tex1 / l1.w, -1.0, 1.0 / l1.w);
+EmitVertex();
+gl_Position = l1 - perpendicular * l1.w;
+gs_TexCoord = vec3(tex1 / l1.w, 1.0, 1.0 / l1.w);
+EmitVertex();
+gs_Color = vs_out_Color[1];
+gl_Position = l2 + perpendicular * l2.w;
+gs_TexCoord = vec3(tex2 / l2.w, -1.0, 1.0 / l2.w);
+EmitVertex();
+gl_Position = l2 - perpendicular * l2.w;
+gs_TexCoord = vec3(tex2 / l2.w, 1.0, 1.0 / l2.w);
+EmitVertex();
+EndPrimitive();
+}
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29
+30
+31
+32
+33
+34
+35
+36
+37
+38
+39
+40
+41
+42
+43
+44
+45
+46
+47
+48
+49
+50
+51
+52
+53
+54
+55
+56
+57
+58
+#version 330
+#define OUT_VERTS 4
+in vec4 vs_Color[2];
+in vec3 vs_Position[2];
+out vec4 gs_Color;
+// x/w, y/w, 1/w for perspective correction
+noperspective out vec3 gs_TexCoord;
+layout(lines) in;
+layout(triangle_strip, max_vertices = OUT_VERTS) out;
+layout(std140) uniform ... // Shortened this listing here
+void main(void)
+{
+// Transform to projection space - the rest is done directly in screen space
+vec4 l1 = vec4(vs_out_Position[0], 1) * c_mWorldViewProjection;
+vec4 l2 = vec4(vs_out_Position[1], 1) * c_mWorldViewProjection;
+// Do a manual clipping.
+vec4 direction = normalize(l2 - l1);
+// Compute original distance for texture coordinate reprojection.
+float len = length(l2.xyz - l1.xyz) * 0.5;
+// Reproject end points to the near-thresholdplane
+if( l1.z < c_fNearPlane )
+l1 -= direction * (l1.z-c_fNearPlane) / direction.z;
+float tex1 = 1.0 - length(l2.xyz - l1.xyz) / len;
+if( l2.z < c_fNearPlane )
+l2 -= direction * (l2.z-c_fNearPlane) / direction.z;
+float tex2 = length(l2.xyz - l1.xyz) / len - 1.0;
+// Compute a vector perpendicular vector to create a beam
+vec2 dir = normalize(l2.xy / l2.w - l1.xy / l1.w);
+// Cross product with view direction
+vec4 perpendicular = vec4(-dir.y * 0.2, dir.x * 0.2, 0, 0);
+gs_Color = vs_out_Color[0];
+gl_Position = l1 + perpendicular * l1.w;
+gs_TexCoord = vec3(tex1 / l1.w, -1.0, 1.0 / l1.w);
+EmitVertex();
+gl_Position = l1 - perpendicular * l1.w;
+gs_TexCoord = vec3(tex1 / l1.w, 1.0, 1.0 / l1.w);
+EmitVertex();
+gs_Color = vs_out_Color[1];
+gl_Position = l2 + perpendicular * l2.w;
+gs_TexCoord = vec3(tex2 / l2.w, -1.0, 1.0 / l2.w);
+EmitVertex();
+gl_Position = l2 - perpendicular * l2.w;
+gs_TexCoord = vec3(tex2 / l2.w, 1.0, 1.0 / l2.w);
+EmitVertex();
+EndPrimitive();
+}
+Perspective Interpolation
+Without perspective correction
+For any data interpolated over a triangle in screen space artifacts appear. If you search for the heading you will find pictures illustrating the problem. The first picture on the right also shows what happens when doing non-corrected interpolation. To implement that use the qualifier:
+noperspective out vec3 gs_TexCoord; . The standard behavior or the qualifier
+smooth will let the hardware doing the correction. But then I got image two which was worse. Another problem was that in certain angles the lines faded out if not using corrected coordinates. So I tried to combine them.
+To do perspective correct interpolation manually one can interpolate
+(u/w) ,
+(v/w) and
+(1/w) instead and compute
+u = (u/w)/(1/w) in the pixel shader. This is what happens to the coordinates in the listing. I only correct the "long" direction of the ray and let the short uncorrected. The solution created stable lines but with the artifacts from picture one.
+With perspective correction
+During writing this post I discovered that my zoom invariant scaling caused this problem. I do not recommend using it. If you need it rather set
+c_fLineWidth to a value which depends on the object distance. I removed the scaling and the semi-correction after writing this.
+Lesson learned: Write down what you did to see what you can improve.

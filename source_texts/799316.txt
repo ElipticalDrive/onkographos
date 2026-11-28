@@ -1,0 +1,547 @@
+Added a new module misc/TetraMesh to support GPU-based volume rendering of tetrahedral meshes. The current implementation relies on Shader Storage Buffers Objects (OpenGL 4.3).
+The TetraMeshProvider class serves as interface between arbitrary tetra meshes and the GPU implementation/buffers. An example implementation can be found in the VTKToTetraMesh processor and its data provider VTKTetraMeshProvider.
+
+Feature/tetramesh by martinfalk · Pull Request #205 · inviwo/modules · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Feature/tetramesh
+#205
+New issue
+Have a question about this project? Sign up for a free GitHub account to open an issue and contact its maintainers and the community.
+Sign up for GitHub
+By clicking “Sign up for GitHub”, you agree to our terms of service and
+privacy statement. We’ll occasionally send you account related emails.
+Already on GitHub?
+Sign in
+to your account
+Closed
+martinfalk
+wants to merge
+20
+commits into
+master
+from
+feature/tetramesh
+Uh oh!
+There was an error while loading. Please reload this page.
+Closed
+Feature/tetramesh
+#205
+Show file tree
+Hide file tree
+Changes from 7 commits
+Commits
+Show all changes
+20 commits
+Select commit
+Hold shift + click to select a range
+85a1a30
+TTK: refactored VTK to Mesh processor
+martinfalk Oct 9, 2023
+91e1f84
+TTK: tetrahedra support in VTKToMesh processor
+martinfalk Oct 10, 2023
+0f25186
+TTK: tetrahedra face orientation
+martinfalk Oct 10, 2023
+bd882c0
+TTK: added legacy VTK source processor
+martinfalk Oct 9, 2023
+c3b94cd
+TTK: customizable vtk array selection
+martinfalk Oct 16, 2023
+5072928
+TTK: extended ArrayBufferMapper
+martinfalk Oct 25, 2023
+9cb68fa
+Misc: added TetraMesh module
+martinfalk Oct 26, 2023
+a705f42
+TTK: VTK to TetraMesh support
+martinfalk Oct 26, 2023
+9e83ae9
+TetraMesh: refactored TetraMesh datastructures
+martinfalk Nov 6, 2023
+4bc8062
+TetraMesh: added Volume to TetraMesh converter
+martinfalk Nov 6, 2023
+78f10e4
+TetraMesh: requested changes
+martinfalk Nov 6, 2023
+1daa672
+TTK: refactored TetraMesh datastructures
+martinfalk Nov 6, 2023
+8b19cf9
+TTK: requested change
+martinfalk Nov 6, 2023
+710d8ab
+TetraMesh: refactored TetraMesh
+martinfalk Nov 8, 2023
+4918e84
+TTK: refactored TetraMesh
+martinfalk Nov 8, 2023
+a835ea1
+TetraMesh: correct background blending
+martinfalk Nov 8, 2023
+f71cca5
+TetraMesh: make TetraMesh a SpatialEntity
+martinfalk Nov 9, 2023
+48c75ba
+TTK: TetraMesh changes
+martinfalk Nov 9, 2023
+00fe070
+TetraMesh: transform + bbox processors
+martinfalk Nov 9, 2023
+ad79a42
+TetraMesh: example workspace
+martinfalk Nov 9, 2023
+File filter
+Clear filters
+Conversations
+Failed to load comments. Retry
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Jump to
+Jump to file
+Failed to load files. Retry
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Diff view
+Diff view
+There are no files selected for viewing
+4 changes: 4 additions & 0 deletions
+4
+misc/tetramesh/CMakeLists.txt
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+Expand Up
+@@ -6,7 +6,9 @@ set(HEADER_FILES
+include/inviwo/tetramesh/datastructures/volumetetramesh.h
+include/inviwo/tetramesh/ports/tetrameshport.h
+include/inviwo/tetramesh/processors/tetrameshboundaryextractor.h
+include/inviwo/tetramesh/processors/tetrameshboundingbox.h
+include/inviwo/tetramesh/processors/tetrameshvolumeraycaster.h
+include/inviwo/tetramesh/processors/transformtetramesh.h
+include/inviwo/tetramesh/processors/volumetotetramesh.h
+include/inviwo/tetramesh/tetrameshmodule.h
+include/inviwo/tetramesh/tetrameshmoduledefine.h
+Expand All
+@@ -20,7 +22,9 @@ set(SOURCE_FILES
+src/datastructures/volumetetramesh.cpp
+src/ports/tetrameshport.cpp
+src/processors/tetrameshboundaryextractor.cpp
+src/processors/tetrameshboundingbox.cpp
+src/processors/tetrameshvolumeraycaster.cpp
+src/processors/transformtetramesh.cpp
+src/processors/volumetotetramesh.cpp
+src/tetrameshmodule.cpp
+src/util/tetrameshutils.cpp
+Expand Down
+494 changes: 494 additions & 0 deletions
+494
+misc/tetramesh/data/workspaces/tetrameshraycasting.inv
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Load diff
+Large diffs are not rendered by default.
+Oops, something went wrong.
+Retry
+Uh oh!
+There was an error while loading. Please reload this page.
+1 change: 1 addition & 0 deletions
+1
+misc/tetramesh/depends.cmake
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+Expand Up
+@@ -2,6 +2,7 @@
+# List modules on the format "Inviwo<ModuleName>Module"
+set(dependencies
+InviwoOpenGLModule
+InviwoBaseModule
+)
+# Add an alias for this module. Several modules can share an alias.
+Expand Down
+126 changes: 100 additions & 26 deletions
+126
+misc/tetramesh/glsl/tetramesh_traversal.frag
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+Expand Up
+@@ -29,9 +29,6 @@
+#include "utils/structs.glsl"
+#include "utils/shading.glsl"
+#include "utils/pickingutils.glsl"
+#include "utils/compositing.glsl"
+#include "utils/classification.glsl"
+#if !defined(REF_SAMPLING_INTERVAL)
+#define REF_SAMPLING_INTERVAL 150.0
+Expand All
+@@ -54,6 +51,7 @@ uniform LightParameters lighting;
+uniform sampler2D transferFunction;
+uniform int shaderOutput = 0;
+uniform int maxSteps = 20;
+uniform int maxTFSteps = 100;
+// scalar scaling and offset are used to map scalar values from [min,max] to [0,1]
+uniform float tfScalarScaling = 1.0;
+Expand All
+@@ -63,7 +61,9 @@ uniform float opacityScaling = 1.0;
+uniform ImageParameters backgroundParameters;
+uniform sampler2D backgroundColor;
+uniform bool useBackground = false;
+uniform sampler2D backgroundDepth;
+uniform sampler2D tfGradients;
+struct VertexPosition {
+vec3 pos;
+Expand All
+@@ -86,7 +86,7 @@ in Fragment {
+flat vec4 color;
+flat int tetraFaceId;
+flat vec3 camPos;
+flat vec3 camPosData;
+} in_frag;
+Expand Down
+Expand Up
+@@ -189,8 +189,7 @@ vec3 getTetraGradient(in Tetra tetra) {
+return -normalize(tetra.fA * tetra.jacobyDetInv * tetra.s);
+}
+// Compute the absorption along distance \p tIncr according to the volume rendering equation
+float absorption(in float opacity, in float tIncr) {
+return 1.0 - pow(1.0 - opacity, tIncr * REF_SAMPLING_INTERVAL);
+}
+Expand All
+@@ -203,9 +202,45 @@ vec4 sampleTF(float normalizedScalar) {
+return texture(transferFunction, vec2(normalizedScalar, 0.5));
+}
+// Convert normalized screen coordinates [0,1] to data coords of the tetramesh geometry
+float convertScreenPosToDataDepth(vec3 screenPos) {
+vec4 posData = geometry.worldToData * camera.clipToWorld
+* vec4(screenPos * 2.0 - 1.0, 1.0);
+posData /= posData.w;
+return length(posData.xyz - in_frag.camPosData);
+}
+// Compute the non-linear depth of a data-space position in normalized device coordinates
+float normalizedDeviceDepth(in vec3 posData, in mat4 dataToClip) {
+mat4 mvpTranspose = transpose(dataToClip);
+vec4 pos = vec4(posData, 1.0);
+float depth = dot(mvpTranspose[2], pos);
+float depthW = dot(mvpTranspose[3], pos);
+return ((depth / depthW) + 1.0) * 0.5;
+}
+void main() {
+const float invalidDepth = 1.0e8;
+// all computations except illumination (World space) take place in Data space
+const vec3 rayDirection = normalize(in_frag.position - in_frag.camPosData);
+const vec3 rayDirWorld = normalize(in_frag.worldPosition.xyz - camera.position);
+const float tEntry = length(in_frag.position - in_frag.camPosData);
+vec3 rayDirection = normalize(in_frag.position - in_frag.camPos);
+float bgDepthScreen = invalidDepth;
+#if defined(BACKGROUND_AVAILABLE)
+vec2 screenTexCoords = gl_FragCoord.xy * backgroundParameters.reciprocalDimensions;
+vec4 background = texture(backgroundColor, screenTexCoords);
+// prepare background color for pre-multiplied alpha blending
+background.rgb *= background.a;
+bgDepthScreen = texture(backgroundDepth, screenTexCoords).r;
+// background depth in Data space
+const float tBackground = convertScreenPosToDataDepth(vec3(screenTexCoords, bgDepthScreen));
+#endif // BACKGROUND_AVAILABLE
+int tetraFaceId = in_frag.tetraFaceId;
+vec3 pos = in_frag.position;
+Expand All
+@@ -219,6 +254,16 @@ void main() {
+float prevScalar = normalizeScalar(barycentricInterpolation(pos, tetra));
+vec4 dvrColor = vec4(0);
+#if defined(BACKGROUND_AVAILABLE)
+// blend background if it lies in front of the start position of the ray
+dvrColor = tBackground < tEntry ? background : dvrColor;
+// suppress background blending tests if the background alpha is zero
+bool bgBlended = tBackground < tEntry || background.a == 0.0;
+#endif // BACKGROUND_AVAILABLE
+float tTotal = tEntry;
+float tFirstHit = invalidDepth;
+int steps = 0;
+while (tetraFaceId > -1 && steps < maxSteps && dvrColor.a < ERT_THRESHOLD) {
+// find next tetra
+Expand All
+@@ -240,13 +285,12 @@ void main() {
+dot(tetra.v[3] - pos, faceNormal[2]),
+dot(tetra.v[0] - pos, faceNormal[3])) / vdir;
+const float invalidDist = 1.0e6;
+// only consider intersections on the inside of the current triangle faces, that is t > 0.
+// Also ignore intersections being parallel to a face
+vt = mix(vt, vec4(invalidDist), lessThan(vdir, vec4(0.0)));
+vt = mix(vt, vec4(invalidDepth), lessThan(vdir, vec4(0.0)));
+// ignore self-intersection with current face ID, set distance to max
+vt[localFaceId] = invalidDist;
+vt[localFaceId] = invalidDepth;
+// closest intersection
+// face ID of closest intersection
+Expand All
+@@ -257,44 +301,74 @@ void main() {
+vec3 endPos = pos + rayDirection * tmin;
+float scalar = normalizeScalar(barycentricInterpolation(endPos, tetra));
+vec3 gradient = getTetraGradient(tetra);
+const float scalar = normalizeScalar(barycentricInterpolation(endPos, tetra));
+const vec3 gradient = getTetraGradient(tetra);
+const vec3 gradientWorld = geometry.dataToWorldNormalMatrix * gradient;
+const int numSteps = 100;
+float tDelta = tmin / float(numSteps);
+for (int i = 1; i <= numSteps; ++i) {
+float s = mix(prevScalar, scalar, i / float(numSteps));
+float tCurrent = tTotal + tDelta * i;
+#if defined(BACKGROUND_AVAILABLE)
+if (!bgBlended && tBackground > tCurrent - tDelta && tBackground <= tCurrent) {
+dvrColor += (1.0 - dvrColor.a) * background;
+bgBlended = true;
+}
+#endif // BACKGROUND_AVAILABLE
+vec4 color = sampleTF(s);
+if (color.a > 0) {
+tFirstHit = tFirstHit == invalidDepth ? tCurrent : tFirstHit;
+#if defined(SHADING_ENABLED)
+color.rgb = APPLY_LIGHTING(lighting, color.rgb, color.rgb, vec3(1.0),
+pos + rayDirection * tDelta * i,
+gradient, -rayDirection);
+#endif
+// perform illumination in world coordinates
+vec3 worldPos = (geometry.dataToWorld * vec4(pos + rayDirection * tDelta * i, 1.0)).xyz;
+color.rgb = APPLY_LIGHTING(lighting, color.rgb, color.rgb, vec3(1.0),
+worldPos, gradientWorld, -rayDirWorld);
+#endif // SHADING_ENABLED
+// volume integration along current segment
+color.a = absorption(color.a, tDelta * opacityScaling * 0.1);
+// front-to-back blending
+color.rgb *= color.a;
+dvrColor += (1.0 - dvrColor.a) * color;
+}
+}
+// volume integration along current segment
+color.a = absorption(color.a, tDelta * opacityScaling * 0.1);
+// front-to-back blending
+color.rgb *= color.a;
+dvrColor += (1.0 - dvrColor.a) * color;
+#if defined(BACKGROUND_AVAILABLE)
+// need to check the entire interval again due to precision issues
+if (!bgBlended && tBackground > tTotal && tBackground <= tTotal + tmin) {
+dvrColor += (1.0 - dvrColor.a) * background;
+bgBlended = true;
+}
+#endif // BACKGROUND_AVAILABLE
+prevScalar = scalar;
+// update position
+pos = endPos;
+tTotal += tmin;
+// determine the half face opposing the half face with the found intersection
+tetraFaceId = faceIds[tetraId][vface];
+++steps;
+}
+if (useBackground) {
+// blend result with background
+vec4 background = texture(backgroundColor, gl_FragCoord.xy * backgroundParameters.reciprocalDimensions);
+background.rgb *= background.a;
+#if defined(BACKGROUND_AVAILABLE)
+// blend result with background
+if (tBackground > tTotal) {
+// tFirstHit = tFirstHit == invalidDepth ? tBackground : tFirstHit;
+dvrColor += (1.0 - dvrColor.a) * background;
+}
+#endif // BACKGROUND_AVAILABLE
+float depth = tFirstHit == invalidDepth ? 1.0 :
+normalizedDeviceDepth(in_frag.camPosData + rayDirection * tFirstHit,
+camera.worldToClip * geometry.dataToWorld);
+gl_FragDepth = min(depth, bgDepthScreen);
+FragData0 = dvrColor;
+}
+4 changes: 2 additions & 2 deletions
+4
+misc/tetramesh/glsl/tetramesh_traversal.vert
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+Expand Up
+@@ -41,14 +41,14 @@ out Fragment {
+flat vec4 color;
+flat int tetraFaceId;
+flat vec3 camPos;
+flat vec3 camPosData;
+} out_vert;
+void main(void) {
+// gl_VertexID
+out_vert.color = vec4(pickingIndexToColor(in_tetraFaceId + 1), 1.0);
+out_vert.tetraFaceId = in_tetraFaceId;
+out_vert.camPos = vec3(geometry.worldToData * vec4(camera.position, 1.0));
+out_vert.camPosData = vec3(geometry.worldToData * vec4(camera.position, 1.0));
+out_vert.position = in_Vertex.xyz;
+out_vert.worldPosition = geometry.dataToWorld * vec4(in_Vertex.xyz, 1.0);
+Expand Down
+48 changes: 28 additions & 20 deletions
+48
+misc/tetramesh/include/inviwo/tetramesh/datastructures/tetramesh.h
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+Expand Up
+@@ -32,6 +32,7 @@
+#include <inviwo/core/metadata/metadataowner.h>
+#include <inviwo/core/datastructures/datatraits.h>
+#include <inviwo/core/datastructures/spatialdata.h>
+#include <inviwo/core/util/document.h>
+#include <fmt/format.h>
+Expand All
+@@ -53,7 +54,7 @@ namespace inviwo {
+*
+* \see TetraMeshBuffers
+*/
+class IVW_MODULE_TETRAMESH_API TetraMesh {
+class IVW_MODULE_TETRAMESH_API TetraMesh : public SpatialEntity<3> {
+public:
+TetraMesh() = default;
+virtual TetraMesh* clone() const = 0;
+Expand All
+@@ -63,27 +64,21 @@ class IVW_MODULE_TETRAMESH_API TetraMesh {
+virtual int getNumberOfPoints() const = 0;
+/**
+* This list holds the 3D coordinates of each node along with its scalar value (vec4).
+* The scalar is stored in the w component.
+*
+* @return node position and corresponding scalar value
+* Fill the \p nodes vector with the 3D coordinates of each node along with its scalar value
+* (vec4). The scalar is stored in the w component. The \p nodeIds vector is filled with the
+* node/vertex IDs for each tetrahedron (ivec4). The faces opposite of each node are implicitly
+* encoded.
+* The coordinates are given in Data space and can be transformed to Model space using the
+* Model matrix or SpatialCoordinateTransformer::getDataToModelMatrix().
+*/
+virtual std::vector<vec4> getNodes() const = 0;
+virtual void get(std::vector<vec4>& nodes, std::vector<ivec4>& nodeIds) const = 0;
+/**
+* A list of node/vertex IDs for each tetrahedron (ivec4). The faces opposite of each node are
+* implicitly encoded.
+*
+* @return list of four node IDs for each tetrahedron
+* Return the bounding box of all nodes of the tetrahedral mesh in world space. The bounding
+* box is represented using a mat4, where all positions are between `bbox * (x,y,z,1)` where x,
+* y, and z are between 0 and 1.
+*/
+virtual std::vector<ivec4> getNodeIds() const = 0;
+/**
+* Determine the bounding box of all nodes in the tetrahedral mesh
+*
+* @return min and max positions of the tetrahedral mesh
+*/
+virtual std::pair<vec3, vec3> getBounds() const = 0;
+virtual mat4 getBoundingBox() const = 0;
+/**
+* Return the data range of the scalar values
+Expand All
+@@ -110,8 +105,21 @@ struct DataTraits<TetraMesh> {
+tb(H("Points"), data.getNumberOfPoints());
+tb(H("Scalar Value Range"), data.getDataRange());
+auto&& [min, max] = data.getBounds();
+tb(H("Bounding Box"), fmt::format("{} - {}", min, max));
+vec3 worldMin(std::numeric_limits<float>::max());
+vec3 worldMax(std::numeric_limits<float>::lowest());
+const mat4 bbox{data.getBoundingBox()};
+const std::array<vec3, 8> corners = {vec3{0, 0, 0}, vec3{1, 0, 0}, vec3{1, 1, 0},
+vec3{0, 1, 0}, vec3{0, 0, 1}, vec3{1, 0, 1},
+vec3{1, 1, 1}, vec3{0, 1, 1}};
+for (const auto& corner : corners) {
+const auto point = vec3(bbox * vec4(corner, 1.f));
+worldMin = glm::min(worldMin, point);
+worldMax = glm::max(worldMax, point);
+}
+tb(H("Bounding Box"), fmt::format("{} - {}", worldMin, worldMax));
+return doc;
+}
+Expand Down
+13 changes: 4 additions & 9 deletions
+13
+misc/tetramesh/include/inviwo/tetramesh/datastructures/volumetetramesh.h
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+Expand Up
+@@ -65,19 +65,14 @@ class IVW_MODULE_TETRAMESH_API VolumeTetraMesh : public TetraMesh {
+virtual int getNumberOfPoints() const override;
+/**
+* @copydoc TetraMesh::getNodes
+* @copydoc TetraMesh::get
+*/
+virtual std::vector<vec4> getNodes() const override;
+virtual void get(std::vector<vec4>& nodes, std::vector<ivec4>& nodeIds) const override;
+/**
+* @copydoc TetraMesh::getNodeIds
+* @copydoc TetraMesh::getBoundingBox
+*/
+virtual std::vector<ivec4> getNodeIds() const override;
+/**
+* @copydoc TetraMesh::getBounds
+*/
+virtual std::pair<vec3, vec3> getBounds() const override;
+virtual mat4 getBoundingBox() const override;
+/**
+* @copydoc TetraMesh::getDataRange
+Expand Down
+Loading
+Oops, something went wrong.
+Retry
+Uh oh!
+There was an error while loading. Please reload this page.
+Toggle all file notes
+Toggle all file annotations
+Add this suggestion to a batch that can be applied as a single commit.
+This suggestion is invalid because no changes were made to the code.
+Suggestions cannot be applied while the pull request is closed.
+Suggestions cannot be applied while viewing a subset of changes.
+Only one suggestion per line can be applied in a batch.
+Add this suggestion to a batch that can be applied as a single commit.
+Applying suggestions on deleted lines is not supported.
+You must change the existing code in this line in order to create a valid suggestion.
+Outdated suggestions cannot be applied.
+This suggestion has been applied or marked resolved.
+Suggestions cannot be applied from pending reviews.
+Suggestions cannot be applied on multi-line comments.
+Suggestions cannot be applied while the pull request is queued to merge.
+Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

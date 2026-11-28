@@ -1,0 +1,234 @@
+--- v001.md
++++ v002.md
+@@ -1,101 +1,168 @@
+ # Gaussian Preprocessing
+ 
+-Also called: forward preprocessing, preprocessCUDA
++Also called: Voxelized Gaussian Rasterization Preprocessing, computeCov3D2, forward preprocessing, preprocessCUDA
+ 
+ ## Overview
+-Gaussian Preprocessing is a CUDA kernel that transforms 3D Gaussian parameters into voxel-space coordinates, conic matrices, and bounding radii to enable efficient rasterization. It serves as the bridge between the learned Gaussian representation and the tile-based rasterizer, converting world-space attributes into the specific data structures required for the subsequent splatting pass. It is distinct from [Conical Frustum to Gaussian](12183-conical-frustum-to-gaussian.md) by operating on pre-computed covariances and focusing on voxel-space transformation rather than frustum approximation.
++Gaussian Preprocessing is a CUDA kernel that preprocesses 3D Gaussian parameters into voxel-space coordinates, conic matrices, and bounding radii for efficient tile-based rasterization [S1, unofficial]. It transforms world-space attributes into voxel-space data structures required by the splatting pass, differing from sibling methods like [Conical Frustum to Gaussian](12183-conical-frustum-to-gaussian.md) by operating directly on voxel-space transformations and conic matrix inversion rather than frustum approximation [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-The kernel takes as input the 3D means (`means3D`), scales (`scales`), rotations (`rotations`), opacities (`opacities`), and pre-computed 3D covariances (`cov3D_precomp`). It outputs normalized means (`means3D_norm`), depths (`depths`), 2D covariances (`cov3Ds`), a packed `conic_opacity` array (7 floats per Gaussian: 6 for the upper triangle of the inverse 2D covariance matrix + 1 for opacity), and a bitmask of `tiles_touched`.
++Inputs: `means3D` (`float*`, 3D means), `scales` (`glm::vec3*`, scales), `rotations` (`glm::vec4*`, quaternions), `opacities` (`float*`, opacity), `cov3D_precomp` (`float*`, precomputed covariances) [S1, unofficial].
++Outputs: `means3D_norm` (`float3*`, normalized means), `depths` (`float*`, z-depth), `cov3Ds` (`float*`, covariances), `conic_opacity` (`float*`, 7 floats per Gaussian: inverse conic matrix + opacity), `tiles_touched` (`uint32*`, tiles touched) [S1, unofficial].
+ 
+ **Data Structures:**
+ - `means3D`: `float*`, size $P \times 3$.
+ - `scales`: `glm::vec3*`, size $P \times 3$.
+-- `rotations`: `glm::vec4*`, size $P \times 4$ (quaternions).
++- `rotations`: `glm::vec4*`, size $P \times 4$.
+ - `opacities`: `float*`, size $P$.
+-- `cov3D_precomp`: `float*`, size $P \times 9$ (symmetric 3x3 matrix).
++- `cov3D_precomp`: `float*`, precomputed covariances (optional).
+ - `means3D_norm`: `float3*`, size $P \times 3$.
+ - `depths`: `float*`, size $P$.
+-- `cov3Ds`: `float*`, size $P \times 6$ (upper triangle of 2x2 2D covariance).
++- `cov3Ds`: `float*`, size $P \times 6$ (upper triangle of 3D covariance).
+ - `conic_opacity`: `float*`, size $P \times 7$.
+-- `tiles_touched`: `uint32*`, size equal to the number of tiles.
++- `tiles_touched`: `uint32*`, size equal to number of tiles.
+ 
+ **Parameters:**
+ - $P$: Number of Gaussians.
+-- `BLOCK3D_SIZE`: 256 (threads per block).
+-- `NUM_CHANNELS`: Template parameter for output channels.
++- `BLOCK3D_SIZE`: 256 (threads per block) [S1, unofficial].
+ - `nVoxel_x/y/z`: Voxel grid dimensions.
+-- `sVoxel_x/y/z`: Voxel sizes (scaling factors).
++- `sVoxel_x/y/z`: Voxel sizes.
+ - `center_x/y/z`: Center offset.
+ - `radii_x/y/z`: Bounding box radii.
+ 
+ **Steps:**
+-1. Launch the kernel with one thread per Gaussian. The grid dimension is calculated as $\lceil P / 256 \rceil$ blocks, with a block size of 256 threads.
++1. Launch kernel with one thread per Gaussian using grid dimension $\lceil P / 256 \rceil$ and block size 256 [S1, unofficial].
+ 2. Each thread $i$ processes the $i$-th Gaussian:
+-   a. Transform the 3D mean $\mathbf{m}$ to voxel space using the voxel size and center offset:
+-      $$ \mathbf{m}_{voxel} = (\mathbf{m} - \mathbf{c}) \odot \mathbf{s}_{voxel} $$
+-      where $\mathbf{c} = (center_x, center_y, center_z)$ and $\mathbf{s}_{voxel} = (sVoxel_x, sVoxel_y, sVoxel_z)$.
+-   b. Store the normalized mean in `means3D_norm[i]`.
+-   c. Compute the depth $z$ of the transformed mean and store it in `depths[i]`.
+-   d. Retrieve the pre-computed 3D covariance $\Sigma_{3D}$ from `cov3D_precomp`.
+-   e. Compute the 2D covariance $\Sigma_{2D}$ by projecting $\Sigma_{3D}$ onto the image plane. This involves the view matrix $J$ and the Jacobian of the affine approximation of the projection. The resulting 2D covariance is then inverted to form the conic matrix $C = \Sigma_{2D}^{-1}$.
+-   f. Pack the upper triangle of $C$ (6 values) and the opacity $\alpha$ into `conic_opacity[i]`.
+-   g. Compute the bounding box radii for the Gaussian in voxel space.
+-   h. Determine which tiles are intersected by the bounding box and set the corresponding bits in `tiles_touched`.
++   a. Initialize `radii[i] = 0` and `tiles_touched[i] = 0` [S2, unofficial].
++   b. Compute voxel dimensions: $dVoxel_x = sVoxel_x / nVoxel_x$, $dVoxel_y = sVoxel_y / nVoxel_y$, $dVoxel_z = sVoxel_z / nVoxel_z$ [S2, unofficial].
++   c. If `cov3D_precomp` is null, compute 3D covariance using `computeCov3D2(scales[i], scale_modifier, rotations[i], cov3Ds + i * 6)`; otherwise, set `cov3D = cov3D_precomp + i * 6` [S2, unofficial].
++   d. Construct voxel-space covariance `cov` by transforming world-space covariance $Vrk$ (from `cov3D[0..5]`) with voxel scaling matrix $M = \text{diag}(1/dVoxel_x, 1/dVoxel_y, 1/dVoxel_z)$: $cov = M^T Vrk^T M$ [S2, unofficial].
++   e. Extract `cov` elements into `hata, hatb, hatc, hatd, hate, hatf`. Compute determinant $det = hata \cdot hatd \cdot hatf + 2 \cdot hatb \cdot hatc \cdot hate - hata \cdot hate^2 - hatf \cdot hatb^2 - hatd \cdot hatc^2$. If $det = 0.0$, skip Gaussian [S2, unofficial].
++   f. Compute inverse conic matrix upper triangle using cofactors and $det_{inv} = 1/det$: $inv\_a = (hatd \cdot hatf - hate^2) det_{inv}$, $inv\_b = (hatc \cdot hate - hatb \cdot hatf) det_{inv}$, $inv\_c = (hatb \cdot hate - hatc \cdot hatd) det_{inv}$, $inv\_d = (hata \cdot hatf - hatc^2) det_{inv}$, $inv\_e = (hatb \cdot hatc - hata \cdot hate) det_{inv}$, $inv\_f = (hata \cdot hatd - hatb^2) det_{inv}$ [S2, unofficial].
++   g. Compute max scale in voxel units: $max\_scale = \max(\max(scale.x/dVoxel_x, scale.y/dVoxel_y), scale.z/dVoxel_z)$. Compute radius $my\_radius = \lceil 3.0 \cdot max\_scale \rceil$ [S2, unofficial].
++   h. Transform mean to voxel space: $point\_vol.x = (p_{orig}.x - center_x + sVoxel_x/2) / dVoxel_x$ (similarly for y, z) [S2, unofficial].
++   i. Call `getCube(point_vol, my_radius, cube_min, cube_max, grid)` to determine bounding voxel cube. If $(cube\_max.x - cube\_min.x) \times (cube\_max.y - cube\_min.y) \times (cube\_max.z - cube\_min.z) = 0$, skip [S2, unofficial].
++   j. Store normalized mean in `means3D_norm[i]`, depth $z$ in `depths[i]`, and pack `[inv_a, inv_b, inv_c, inv_d, inv_e, inv_f, opacities[i]]` into `conic_opacity[i * 7 : (i + 1) * 7]` [S2, unofficial].
++   k. Mark tiles touched by the bounding box in `tiles_touched` [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-# Pseudocode for a single thread processing Gaussian i
+-def preprocess_gaussian(i, means3D, scales, rotations, opacities, cov3D_precomp, 
++def preprocess_gaussian(i, means3D, scales, rotations, opacities, cov3D_precomp,
+                         nVoxel, sVoxel, center, tiles_touched, num_tiles):
+-    # 1. Transform mean to voxel space
+-    m = means3D[i]
+-    m_voxel = (m - center) * sVoxel
+-    
+-    # 2. Store normalized mean and depth
+-    means3D_norm[i] = m_voxel
+-    depths[i] = m_voxel.z
+-    
+-    # 3. Get pre-computed 3D covariance
+-    cov3D = cov3D_precomp[i] # 9 floats
+-    
+-    # 4. Compute 2D covariance and conic matrix
+-    # Note: The exact projection formula depends on the view matrix and Jacobian,
+-    # which are typically passed as additional parameters or computed from camera intrinsics.
+-    # Here we assume a helper function exists that performs the projection.
+-    cov2D = project_covariance_3d_to_2d(cov3D) # Returns 6 floats (upper triangle)
+-    conic = invert_2x2_matrix(cov2D) # Returns 6 floats (upper triangle of inverse)
+-    
+-    # 5. Pack conic and opacity
+-    conic_opacity[i * 7 : (i + 1) * 7] = conic + [opacities[i]]
+-    
+-    # 6. Compute bounding box radii
+-    # Radii are derived from the eigenvalues of the 2D covariance or pre-computed
+-    # based on the 3D scale and rotation.
+-    radii = compute_gaussian_radii(cov2D)
+-    
+-    # 7. Mark tiles touched
+-    tile_bounds = compute_tile_bounds_from_radii(m_voxel.xy, radii)
+-    for tile in tile_bounds:
+-        if 0 <= tile < num_tiles:
+-            tiles_touched[tile] |= (1 << i) # Or use atomic OR if concurrent
++    # 1. Initialize
++    radii = 0
++    tiles_touched[i] = 0
++
++    # 2. Voxel dimensions
++    dVoxel_x = sVoxel[0] / nVoxel[0]
++    dVoxel_y = sVoxel[1] / nVoxel[1]
++    dVoxel_z = sVoxel[2] / nVoxel[2]
++
++    # 3. Get 3D covariance
++    if cov3D_precomp is not None:
++        cov3D = cov3D_precomp[i * 6 : (i + 1) * 6]
++    else:
++        cov3D = computeCov3D2(scales[i], 1.0, rotations[i])
++
++    # 4. Voxel-space covariance transform
++    Vrk = [[cov3D[0], cov3D[1], cov3D[2]],
++           [cov3D[1], cov3D[3], cov3D[4]],
++           [cov3D[2], cov3D[4], cov3D[5]]]
++    M = [[1.0/dVoxel_x, 0, 0], [0, 1.0/dVoxel_y, 0], [0, 0, 1.0/dVoxel_z]]
++    cov = mat_mul(mat_transpose(M), mat_mul(Vrk, M))
++    hata, hatb, hatc = cov[0][0], cov[0][1], cov[0][2]
++    hatd, hate = cov[1][1], cov[1][2]
++    hatf = cov[2][2]
++
++    # 5. Determinant
++    det = hata*hatd*hatf + 2*hatb*hatc*hate - hata*hate*hate - hatf*hatb*hatb - hatd*hatc*hatc
++    if det == 0.0:
++        return
++
++    det_inv = 1.0 / det
++    inv_a = (hatd*hatf - hate*hate) * det_inv
++    inv_b = (hatc*hate - hatb*hatf) * det_inv
++    inv_c = (hatb*hate - hatc*hatd) * det_inv
++    inv_d = (hata*hatf - hatc*hatc) * det_inv
++    inv_e = (hatb*hatc - hata*hate) * det_inv
++    inv_f = (hata*hatd - hatb*hatb) * det_inv
++
++    # 6. Radius
++    max_scale = max(scales[i][0]/dVoxel_x, scales[i][1]/dVoxel_y, scales[i][2]/dVoxel_z)
++    my_radius = math.ceil(3.0 * max_scale)
++
++    # 7. Mean transform
++    p_orig = means3D[i]
++    point_vol_x = (p_orig[0] - center[0] + sVoxel[0]/2.0) / dVoxel_x
++    point_vol_y = (p_orig[1] - center[1] + sVoxel[1]/2.0) / dVoxel_y
++    point_vol_z = (p_orig[2] - center[2] + sVoxel[2]/2.0) / dVoxel_z
++
++    # 8. Bounding voxel cube & tile marking
++    cube_min_x = int(math.floor(point_vol_x - my_radius))
++    cube_max_x = int(math.ceil(point_vol_x + my_radius))
++    cube_min_y = int(math.floor(point_vol_y - my_radius))
++    cube_max_y = int(math.ceil(point_vol_y + my_radius))
++    cube_min_z = int(math.floor(point_vol_z - my_radius))
++    cube_max_z = int(math.ceil(point_vol_z + my_radius))
++
++    if (cube_max_x - cube_min_x) * (cube_max_y - cube_min_y) * (cube_max_z - cube_min_z) == 0:
++        return
++
++    # Clamp to grid bounds
++    cube_min_x = max(0, min(cube_min_x, nVoxel[0] - 1))
++    cube_max_x = max(0, min(cube_max_x, nVoxel[0] - 1))
++    cube_min_y = max(0, min(cube_min_y, nVoxel[1] - 1))
++    cube_max_y = max(0, min(cube_max_y, nVoxel[1] - 1))
++    cube_min_z = max(0, min(cube_min_z, nVoxel[2] - 1))
++    cube_max_z = max(0, min(cube_max_z, nVoxel[2] - 1))
++
++    # Mark tiles
++    for z in range(cube_min_z, cube_max_z + 1):
++        for y in range(cube_min_y, cube_max_y + 1):
++            for x in range(cube_min_x, cube_max_x + 1):
++                tile_idx = (z * nVoxel[1] + y) * nVoxel[0] + x
++                if 0 <= tile_idx < num_tiles:
++                    tiles_touched[tile_idx] |= (1 << i)
++
++    # 9. Store outputs
++    means3D_norm[i] = (point_vol_x, point_vol_y, point_vol_z)
++    depths[i] = point_vol_z
++    conic_opacity[i * 7 : (i + 1) * 7] = [inv_a, inv_b, inv_c, inv_d, inv_e, inv_f, opacities[i]]
++
++def computeCov3D2(scale, scale_modifier, rotation):
++    S = [[scale_modifier * scale[0], 0, 0],
++         [0, scale_modifier * scale[1], 0],
++         [0, 0, scale_modifier * scale[2]]]
++    r, x, y, z = rotation
++    R = [[1 - 2*(y*y + z*z), 2*(x*y - r*z), 2*(x*z + r*y)],
++         [2*(x*y + r*z), 1 - 2*(x*x + z*z), 2*(y*z - r*x)],
++         [2*(x*z - r*y), 2*(y*z + r*x), 1 - 2*(x*x + y*y)]]
++    M = mat_mul(S, R)
++    Sigma = mat_mul(mat_transpose(M), M)
++    return [Sigma[0][0], Sigma[0][1], Sigma[0][2], Sigma[1][1], Sigma[1][2], Sigma[2][2]]
++
++def mat_mul(A, B):
++    return [[sum(A[i][k] * B[k][j] for k in range(3)) for j in range(3)] for i in range(3)]
++
++def mat_transpose(A):
++    return [[A[j][i] for j in range(3)] for i in range(3)]
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-- Precision: Floating-point precision in the inversion of the 2D covariance matrix can lead to instability if the determinant is near zero. A small epsilon should be added to the diagonal before inversion [G].
+-- Boundaries: Ensure that tile indices are clamped to valid ranges to avoid out-of-bounds memory access.
+-- Degenerate Input: If a Gaussian has zero scale or opacity, the covariance may be singular. Handle this by skipping or setting a default conic matrix [G].
++- Determinant zero: If $det = 0.0$, the covariance is singular and the Gaussian is skipped [S2, unofficial].
++- Out of bounds: If `point_vol` lies outside the voxel grid bounds $[0, nVoxel_x) \times [0, nVoxel_y) \times [0, nVoxel_z)$, the Gaussian is skipped [S2, unofficial].
++- Precision: Floating-point inversion instability near zero determinant is handled by the early return check [S2, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(P)$, where $P$ is the number of Gaussians. Each Gaussian is processed by a single thread.
+-- **Memory Complexity:** $O(P)$ for the output arrays. The `tiles_touched` array size depends on the number of tiles.
+-- **Performance:** The kernel is highly parallel and efficient on GPUs due to the one-thread-per-Gaussian model. Performance scales linearly with the number of Gaussians.
+-- **Strengths:** Fast preprocessing, efficient tile culling, and minimal memory overhead.
+-- **Limitations:** Requires pre-computed 3D covariances. The quality of the rasterization depends on the accuracy of the 2D covariance projection.
++- **Time Complexity:** $O(P)$, where $P$ is the number of Gaussians, as each Gaussian is processed by a single thread [S1, unofficial].
++- **Memory Complexity:** $O(P)$ for the output arrays; `tiles_touched` scales with the number of tiles [S1, unofficial].
++- **Performance:** Highly parallel on GPUs due to the one-thread-per-Gaussian model; scales linearly with $P$ [S1, unofficial].
++- **Strengths:** Efficient voxel-space transformation, conic matrix computation, and tile culling [S1, unofficial].
++- **Limitations:** Requires precomputed covariances or quaternion-to-matrix conversion; sensitive to degenerate covariances [S2, unofficial].
+ 
+ ## Background
+-Gaussian Preprocessing is part of the Gaussian Splatting pipeline, specifically designed for efficient rasterization of 3D Gaussians. It was introduced in the context of differentiable rendering and 3D Gaussian Splatting [S1, unofficial]. The method leverages CUDA for parallel processing to transform 3D Gaussian parameters into a format suitable for tile-based rasterization.
++Gaussian Preprocessing is part of the Gaussian Splatting pipeline, specifically designed for efficient rasterization of 3D Gaussians in voxel space [S1, unofficial]. It leverages CUDA kernels to transform world-space Gaussian parameters into voxel-space coordinates, conic matrices, and bounding radii for tile-based splatting [S1, unofficial].
+ 
+ ## Sources
+-[S1] Ruyi-Zha/r2_gaussian, https://github.com/Ruyi-Zha/r2_gaussian, fetched 2026-10-26 (unofficial)+[S1] Ruyi-Zha/r2_gaussian, https://github.com/Ruyi-Zha/r2_gaussian, fetched 2026-10-26 (unofficial)
++[S2] yuyouxixi/x2-gaussian, https://github.com/yuyouxixi/x2-gaussian, fetched 2026-10-26 (unofficial)

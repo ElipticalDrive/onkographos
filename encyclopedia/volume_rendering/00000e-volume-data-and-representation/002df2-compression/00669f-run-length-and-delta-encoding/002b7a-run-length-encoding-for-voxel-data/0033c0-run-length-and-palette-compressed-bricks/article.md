@@ -1,0 +1,117 @@
+# Run-length and palette-compressed bricks
+
+Also called: Minecraft-style palette compression, Palette-compressed bricks
+
+## Overview
+Run-length and palette-compressed bricks compress voxel material data by storing a local palette and bit-packed indices for fixed-size sections [S1]. This reduces memory footprint compared to storing raw material IDs [G]. It sets itself apart from pure RLE methods because pure RLE does not suit GPU random access or arbitrary 3D edits [S1].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A 3D voxel grid where each voxel holds a material ID.
+- Output: A list of compressed bricks, each containing a palette array and a bit-packed index array (or `None` for single-material bricks) [S1].
+
+**Data Structures:**
+1. **Palette:** An array of unique material IDs present in the brick [S1].
+2. **Index Array:** A bit-packed byte array storing indices into the palette [S1]. Each index uses at least 4 bits, up to 12 bits [S1].
+
+**Steps:**
+1. **Partitioning:** Divide the voxel volume into fixed-size cubic bricks (e.g., $16 \times 16 \times 16$) [S1].
+2. **Palette Extraction:** For each brick, collect all voxel material IDs and build a sorted list of unique values [G].
+3. **Index Mapping:** Replace each voxel's material ID with its position in the local palette [G].
+4. **Bit-Packing:** Pack the indices into a contiguous byte stream using the calculated bit-depth per index [G].
+5. **Optimization:** If a brick contains only one unique material, store the palette and set the index array to `None` [S1].
+
+**Formulas:**
+- Bits per index: $k = \max(4, \lceil \log_2(\text{num\_unique\_materials}) \rceil)$ [S1, G]
+- Total bytes for indices: $B = \lceil (\text{voxel\_count} \times k) / 8 \rceil$ [G]
+
+**Parameters:**
+- Brick size: $16 \times 16 \times 16$ [S1].
+- Minimum bits per index: 4 bits [S1].
+
+**Edge Cases and Pitfalls:**
+- **Single Material:** Omit the index array entirely to save space [S1].
+- **GPU Access:** RLE components do not suit GPU random access or arbitrary 3D edits [S1]. Palette compression mitigates this by allowing direct index lookup, though cache locality depends on index distribution [G].
+- **Precision:** Bit-packing must handle non-byte-aligned boundaries correctly by shifting and masking [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compress_bricks(voxel_grid, brick_size=16):
+    """
+    Compress a 3D voxel grid using palette compression.
+    voxel_grid: 3D list/array of material IDs.
+    brick_size: Size of each cubic brick (default 16).
+    Returns: List of (palette, indices) tuples for each brick.
+    """
+    compressed_bricks = []
+    dim_x, dim_y, dim_z = len(voxel_grid), len(voxel_grid[0]), len(voxel_grid[0][0])
+    
+    for z in range(0, dim_z, brick_size):
+        for y in range(0, dim_y, brick_size):
+            for x in range(0, dim_x, brick_size):
+                # Extract brick data
+                brick_materials = []
+                for dz in range(brick_size):
+                    for dy in range(brick_size):
+                        for dx in range(brick_size):
+                            if z+dz < dim_z and y+dy < dim_y and x+dx < dim_x:
+                                brick_materials.append(voxel_grid[x+dx][y+dy][z+dz])
+                
+                # Build palette
+                unique_materials = sorted(list(set(brick_materials)))
+                palette = unique_materials
+                material_to_index = {m: i for i, m in enumerate(palette)}
+                
+                # Handle single material case
+                if len(palette) == 1:
+                    compressed_bricks.append((palette, None))
+                    continue
+                
+                # Map to indices
+                indices = [material_to_index[m] for m in brick_materials]
+                
+                # Determine bit depth (at least 4 bits per [S1])
+                num_unique = len(palette)
+                bits_per_index = max(4, (num_unique - 1).bit_length())
+                
+                # Pack indices into bytes
+                packed = bytearray()
+                buffer = 0
+                bits_in_buffer = 0
+                for idx in indices:
+                    buffer |= (idx << bits_in_buffer)
+                    bits_in_buffer += bits_per_index
+                    while bits_in_buffer >= 8:
+                        packed.append(buffer & 0xFF)
+                        buffer >>= 8
+                        bits_in_buffer -= 8
+                if bits_in_buffer > 0:
+                    packed.append(buffer & 0xFF)
+                
+                compressed_bricks.append((palette, packed))
+    
+    return compressed_bricks
+```
+
+## Subtopics
+
+### [Palette Encoding](13874-palette-encoding.md)
+A sub-method for decoding texel values within a compressed block using a deterministic pattern lookup to select between two encoded values. Choose this when memory bandwidth is critical and the palette size is very small (e.g., 2 colors) [G].
+
+## Operating characteristics
+- **Time Complexity:** Compression is $O(N)$ where $N$ is the number of voxels, dominated by palette extraction and bit-packing [G]. Decompression is $O(N)$ for bit-unpacking [G].
+- **Memory Complexity:** Storage is proportional to $N \times k$ bits plus palette overhead [G].
+- **Measured Performance:** Not given in the sources [G].
+- **Scaling:** Not given in the sources [G].
+- **Strengths:** High compression ratios for homogeneous regions; supports arbitrary edits better than pure RLE [G].
+- **Limitations:** Not suitable for GPU random access if the index array is not structured for cache coherence; RLE components do not suit GPU random access [S1].
+- **When to use:** Terrain, building blocks, and volumes with discrete, repeating materials [G].
+- **When not to use:** Volumes with high material entropy or requiring fine-grained per-voxel color variation without palette limits [G].
+
+## Background
+This method is exemplified by Minecraft's chunk format, which stores $16 \times 16 \times 16$ sections with a palette and packed indices of at least 4 bits [S1]. It is described as the standard, easy way to compress materials in voxel engines [S1]. Voxlap's VXL format also uses a related concept with column spans, though it is noted as less suitable for GPU random access [S1].
+
+## Sources
+[S1] https://github.com/theHimanshuShekhar/bhayanakvoxel/blob/research/voxel-data-structures/docs/research/voxel-data-structures.md, https://github.com/theHimanshuShekhar/bhayanakvoxel/blob/research/voxel-data-structures/docs/research/voxel-data-structures.md, fetched 2026-10-28

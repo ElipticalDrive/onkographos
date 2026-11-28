@@ -1,0 +1,87 @@
+--- v001.md
++++ v002.md
+@@ -7,15 +7,15 @@
+ 
+ ## How it works
+-The method operates as a post-processing or fragment shader stage applied during volume ray-marching. It uses the gradient magnitude and direction computed from the volume data (typically via Sobel operators as per [Voxel Gradient Calculation](2102-voxel-gradient-calculation.md)) to determine the final alpha value of a sample.
++The method is implemented as a fragment shader stage applied during volume ray-marching [S1]. It uses the gradient magnitude and direction computed from the volume data to determine the final alpha value of a sample [S1].
+ 
+ **Inputs and Outputs:**
+-*   **Input:** Volume data index, current sample position, ray direction vector ($\vec{r}$), and pre-computed gradient vector ($\vec{g}$) and its alpha component ($\alpha_g$) from the previous step.
+-*   **Output:** Final RGBA color and alpha value for the current sample.
++*   **Input:** Volume data index, current sample position, ray direction vector ($\vec{r}$), and a gradient computation routine [S1].
++*   **Output:** Final RGBA color and alpha value for the current sample [S1].
+ 
+ **Data Structures:**
+-The implementation relies on standard floating-point vectors.
+-*   `vec4 sample`: The initial sample from the volume transfer function, containing RGB intensity and alpha.
+-*   `vec4 n`: The result of `ComputeGradient`, where `n.rgb` is the gradient vector $\vec{g}$ and `n.a` is the gradient magnitude or a mask indicating valid gradient data.
+-*   `vec2 step`: A pair of floats defining the smoothstep range.
++The implementation relies on standard floating-point vectors [G].
++*   `vec4 sample`: The initial sample from the volume transfer function, containing RGB intensity and alpha [S1].
++*   `vec4 n`: The result of `ComputeGradient`, where `n.rgb` is the gradient vector $\vec{g}$ and `n.a` is the gradient magnitude or a validity mask [S1].
++*   `vec2 step`: A pair of floats defining the smoothstep range [S1].
+ 
+ **Parameters:**
+@@ -26,14 +26,15 @@
+ 
+ **Algorithm Steps:**
+-1.  **Sample Volume:** Retrieve the initial color and alpha from the volume at the current position using the transfer function.
+-2.  **Check Threshold:** If the sample's alpha is greater than `sampleThreshold`, proceed to gradient analysis; otherwise, retain the original sample.
+-3.  **Compute Gradient:** Calculate the 3D intensity gradient $\vec{g}$ and its associated alpha/magnitude $\alpha_g$ at the current position. This step assumes the existence of a `ComputeGradient` function that returns a `vec4` where the RGB components are the gradient vector and the A component is the magnitude or validity mask [S1].
+-4.  **Check Gradient Validity:** If the gradient alpha $\alpha_g$ is greater than 0.0, proceed to modulation; otherwise, retain the original sample.
++1.  **Sample Volume:** Retrieve the initial color and alpha from the volume at the current position using the transfer function: `vec4 sample = SampleVolumeWithTF(volumeIndex, pos);` [S1].
++2.  **Check Threshold:** If `sample.a > sampleThreshold`, proceed to gradient analysis; otherwise, retain the original sample [S1].
++3.  **Compute Gradient:** Calculate the 3D intensity gradient $\vec{g}$ and its associated alpha/magnitude $\alpha_g$ at the current position: `vec4 n = ComputeGradient(volumeIndex, pos, gradStep);` [S1].
++4.  **Check Gradient Validity:** If `n.a > 0.0`, proceed to modulation; otherwise, retain the original sample [S1].
+ 5.  **Calculate Modulation Factor:** Compute the factor $F$ using the formula:
+     $$ F = \|\vec{g}\| \cdot (1 - |\vec{g} \cdot \vec{r}|) $$
+-    Where $\|\vec{g}\|$ is the magnitude of the gradient (represented by `n.a` in the source code, assuming `n.rgb` is normalized or the magnitude is stored in `n.a`), and $\vec{r}$ is the unit ray direction vector [S1]. Note: The source code uses `n.a` as the magnitude multiplier and `n.rgb` as the vector for the dot product, implying `n.a` represents $\|\vec{g}\|$ or a scalar weight derived from it [S1].
++    Where $\|\vec{g}\|$ is the magnitude of the gradient (represented by `n.a` in the source code), and $\vec{r}$ is the unit ray direction vector [S1]. The source code implements this as `float factor = n.a * (1.0 - abs(dot(rayDir, n.rgb)));` [S1].
+ 6.  **Compute Final Alpha:** Apply the `smoothstep` function to the factor $F$ using `stepMin` and `stepMax`:
+     $$ \alpha_{final} = \text{smoothstep}(\text{stepMin}, \text{stepMax}, F) $$
+-7.  **Set Output Color:** Replace the sample's color with a solid red color (`vec4(1.0, 0.0, 0.0, alpha)`) and set its alpha to $\alpha_{final}$ [S1]. This creates a high-contrast edge highlight.
++    The source code implements this as `float alpha = smoothstep(step.x, step.y, factor);` [S1].
++7.  **Set Output Color:** Replace the sample's color with a solid red color and set its alpha to $\alpha_{final}$: `sampleRGBA = vec4(1.0, 0.0, 0.0, alpha);` [S1].
+ 
+ **Pseudocode:**
+@@ -52,5 +53,5 @@
+         if n.a > 0.0:
+             # 5. Calculate factor: ||g|| * (1 - |g . r|)
+-            # Note: n.rgb is g, n.a is ||g|| (or magnitude proxy)
++            # n.rgb is g, n.a is ||g|| per source implementation
+             gradient_vector = n.rgb
+             gradient_magnitude = n.a
+@@ -69,23 +70,20 @@
+             
+             # 7. Set output to red edge highlight
+-            return vec4(1.0, 0.0, 0.0, alpha_final)
+-    
+-    # If conditions not met, return original sample
+-    return sample
++            result = vec4(1.0, 0.0, 0.0, alpha_final)
++        else:
++            result = sample
++    else:
++        result = sample
++        
++    return result
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+ *   **Zero Gradient:** If the gradient magnitude is zero (homogeneous region), the factor is zero, and the alpha becomes zero (or very low depending on smoothstep), effectively hiding the region [S1].
+-*   **Parallel Gradient/Ray:** If the gradient is parallel to the ray direction ($\vec{g} \cdot \vec{r} \approx \pm 1$), the term $(1 - |\vec{g} \cdot \vec{r}|)$ approaches zero, reducing edge enhancement. This is intentional, as edges perpendicular to the view are the primary depth cue [S1].
++*   **Parallel Gradient/Ray:** If the gradient is parallel to the ray direction ($\vec{g} \cdot \vec{r} \approx \pm 1$), the term $(1 - |\vec{g} \cdot \vec{r}|)$ approaches zero, reducing edge enhancement [S1]. This is intentional, as edges perpendicular to the view are the primary depth cue [S1].
+ *   **Precision:** The use of `smoothstep` requires careful tuning of `stepMin` and `stepMax` to avoid binary alpha results or overly soft edges [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(1)$ per sample, as it involves a constant number of vector operations and a smoothstep evaluation.
+-*   **Memory Complexity:** $O(1)$ additional memory per sample for temporary variables.
+-*   **Performance:** The method adds minimal computational overhead to the volume rendering pipeline, primarily requiring the gradient computation step which is already part of the preprocessing or shader stage [S1].
+-*   **Strengths:** Significantly improves depth perception for complex, overlapping structures like vasculature by providing strong ordinal depth cues [S1].
+-*   **Limitations:** The method produces a specific red edge highlight, which may not be suitable for all visualization contexts without color mapping adjustments. It relies heavily on the accuracy of the gradient computation [S1].
+-*   **When to Use:** Ideal for medical visualization (e.g., CTA scans) where disambiguating overlapping vessels is critical [S1].
+-*   **When Not to Use:** When naturalistic color rendering is required without artificial edge highlighting, or when performance is extremely constrained and gradient computation is too expensive.
++Not given in the sources.
+ 
+ ## Background

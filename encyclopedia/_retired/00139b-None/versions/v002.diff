@@ -1,0 +1,207 @@
+--- v001.md
++++ v002.md
+@@ -3,108 +3,127 @@
+ 
+ ## Overview
+-CSG Model Voxelization is a GPU-accelerated method for converting Constructive Solid Geometry (CSG) models into voxel grids by rendering individual CSG nodes into 2D textures (worksheets or slicemaps) and performing boolean operations in image space using GPU blending [S1, S2, S3, unofficial]. It solves the problem of efficiently computing the volumetric representation of complex boolean combinations of meshes, which is particularly useful for collision detection, haptic feedback, and transparent illustration [S3, unofficial]. It sets itself apart from sibling methods like [Rasterization-based Voxelization](908-rasterization-based-voxelization.md) by explicitly leveraging the GPU's fixed-function blending hardware to execute boolean logic (AND, OR, NOT) directly on the voxel data during the rendering pass, rather than post-processing or using complex CPU-side data structures [S1, S3, unofficial].
++CSG Model Voxelization is a method for converting Constructive Solid Geometry (CSG) models into discrete voxel grids by voxelizing individual geometric nodes into intermediate textures (worksheets) and performing boolean operations in image space using GPU blending [S1, S2, unofficial]. It differs from its siblings, such as [Rasterization-based Voxelization](908-rasterization-based-voxelization.md) or [Interior Voxelize](995-interior-voxelize.md), which typically process a single mesh or point cloud, by explicitly leveraging the hierarchical structure of CSG trees to compute complex boolean unions, intersections, and differences directly on the GPU [S1, S2, S3, unofficial]. This approach decouples the complexity of the input geometry from the voxelization cost, allowing for real-time processing of high-complexity models [S3, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A CSG tree representing the model, where leaf nodes are polygon meshes (or parametric surfaces) and internal nodes are boolean operators (Union, Intersection, Difference) [S1, S3, unofficial].
+-*   **Output:** A 3D voxel grid (or a stack of 2D slicemaps) representing the final boolean result [S1, S3, unofficial].
++*   **Input:** A CSG tree where leaf nodes are parametric surfaces or polygonal meshes, and internal nodes are boolean operators (Union, Intersection, Difference) [S1, S2, unofficial].
++*   **Output:** A 3D voxel grid (or a stack of 2D slices) representing the final boolean result of the CSG model [S1, S2, S3, unofficial].
+ 
+ **Data Structures:**
+-*   **Worksheet / Slicemap:** A 2D texture (or render target) representing a single slice of the voxel grid. It stores binary occupancy or multivalued data (e.g., normals, material IDs) for the voxels in that slice [S1, S2, S3, unofficial].
+-*   **CSG Tree:** A hierarchical structure of nodes. Each node has a type (leaf or boolean) and children [S1, S3, unofficial].
++*   **Worksheet:** A 2D texture (or buffer) representing a single slice or the entire voxel volume for a specific CSG node. It stores occupancy data (binary or multi-valued) [S1, S2, unofficial].
++*   **Slicemap:** A separate worksheet allocated for each object or CSG node when performing inter-object CSG operations [S3, unofficial].
+ 
+ **Steps:**
+-1.  **Voxelize Leaf Nodes:** For each leaf node (mesh) in the CSG tree, render the mesh into its dedicated 2D worksheet/slicemap. This is typically done using a vertex shader that transforms vertices to 3D space and projects them onto the 2D slice, writing occupancy bits to the texture [S1, S2, unofficial].
+-2.  **Evaluate Boolean Operations:** Process the CSG tree from the bottom up (leaves to root). For each internal boolean node:
+-    *   Retrieve the 2D textures (worksheets) corresponding to its children.
+-    *   Perform the boolean operation (Union, Intersection, Difference) on these 2D textures using GPU blending operations. For example, Union might use `glBlendFunc(GL_ONE, GL_ONE)`, Intersection might use `glBlendFunc(GL_DST_COLOR, GL_ZERO)` or similar blending modes depending on the specific implementation of the boolean logic in the fragment shader or fixed-function pipeline [S1, S3, unofficial].
+-    *   Store the result in a new 2D texture (worksheet) for this node.
+-3.  **Handle CSG Trees:** For complex CSG trees with height $n$, intermediate results are stored. The storage requirement is noted as $O(\log^* n)$ where $n$ is the height of the tree, though rearranging the tree can optimize this [S3, unofficial].
+-4.  **Final Output:** The root node's worksheet represents the final voxelized CSG model. If a full 3D volume is needed, this process is repeated for all slices along the desired axis [S1, S3, unofficial].
++1.  **Voxelize Leaf Nodes:** Each leaf node (primitive or mesh) of the CSG tree is voxelized individually into its respective worksheet. This is typically done by projecting the geometry onto the voxel grid, often using a vertex shader to map parametric coordinates to 3D positions and then to the worksheet [S1, S2, unofficial].
++2.  **Bottom-Up Boolean Evaluation:** The boolean operations are performed from the bottom of the CSG tree to the top. For each internal node, the results of its children (stored in their respective worksheets) are combined [S1, S2, unofficial].
++3.  **GPU Blending:** The boolean operation is executed using GPU blending operations on the 2D textures (worksheets). Standard GPU blend modes (e.g., additive, subtractive, or custom blend functions) are mapped to boolean logic (AND, OR, NOT) [S1, S2, unofficial].
++4.  **Final Result:** The top node of the CSG tree contains the final voxelized result [S1, S2, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def voxelize_csg(csg_tree, slice_resolution):
++# Pseudocode for CSG Model Voxelization
++# Assumes a CSG tree structure with nodes having children and an operation type
++
++def voxelize_csg_tree(csg_node, grid_resolution, bounding_box):
+     """
+-    Voxelizes a CSG tree into a 3D volume by processing each slice.
++    Voxelize a CSG tree node and its children.
++    Returns the resulting worksheet (2D texture/buffer) for this node.
+     """
+-    # Assume csg_tree is a node with type 'leaf' or 'boolean'
+-    # and children if boolean.
+-    # slice_resolution is (width, height) for the 2D slicemap.
+-    
+-    # Dictionary to store the 2D texture (slicemap) for each node
+-    node_slicemaps = {}
+-    
+-    # Helper function to evaluate a node's slicemap
+-    def evaluate_node(node):
+-        if node.type == 'leaf':
+-            # Voxelize the leaf mesh into a new 2D texture
+-            slicemap = create_empty_texture(slice_resolution)
+-            render_mesh_to_texture(node.mesh, slicemap)
+-            node_slicemaps[node.id] = slicemap
+-            return slicemap
+-        elif node.type == 'boolean':
+-            # Evaluate children first
+-            left_slicemap = evaluate_node(node.left_child)
+-            right_slicemap = evaluate_node(node.right_child)
+-            
+-            # Create result texture
+-            result_slicemap = create_empty_texture(slice_resolution)
+-            
+-            # Perform boolean operation using GPU blending
+-            # The exact blending function depends on the boolean operator
+-            if node.operator == 'UNION':
+-                blend_func = GL_ONE, GL_ONE # Example blending
+-            elif node.operator == 'INTERSECTION':
+-                blend_func = GL_DST_COLOR, GL_ZERO # Example blending
+-            elif node.operator == 'DIFFERENCE':
+-                blend_func = GL_ONE, GL_ONE_MINUS_SRC_ALPHA # Example blending
+-            
+-            render_two_textures(left_slicemap, right_slicemap, result_slicemap, blend_func)
+-            node_slicemaps[node.id] = result_slicemap
+-            return result_slicemap
++    # Base case: Leaf node
++    if csg_node.is_leaf():
++        # Voxelize the primitive/mesh into a worksheet
++        # This involves mapping parametric coordinates to 3D space
++        # and then to the voxel grid indices
++        worksheet = voxelize_primitive(csg_node.primitive, grid_resolution, bounding_box)
++        return worksheet
++
++    # Recursive case: Internal node
++    else:
++        # Step 1: Voxelize children
++        left_worksheet = voxelize_csg_tree(csg_node.left_child, grid_resolution, bounding_box)
++        right_worksheet = voxelize_csg_tree(csg_node.right_child, grid_resolution, bounding_box)
++
++        # Step 2: Perform boolean operation using GPU blending
++        # The specific blend mode depends on the CSG operation
++        if csg_node.operation == "UNION":
++            result_worksheet = gpu_blend(left_worksheet, right_worksheet, blend_mode="ADD")
++        elif csg_node.operation == "INTERSECTION":
++            result_worksheet = gpu_blend(left_worksheet, right_worksheet, blend_mode="MULTIPLY") # Or specific AND blend
++        elif csg_node.operation == "DIFFERENCE":
++            result_worksheet = gpu_blend(left_worksheet, right_worksheet, blend_mode="SUBTRACT") # Or specific AND NOT blend
+         else:
+-            raise ValueError("Unknown node type")
++            raise ValueError("Unknown CSG operation")
+ 
+-    # Process all slices (e.g., along Z-axis)
+-    volume = []
+-    for z in range(slice_resolution[1]): # Assuming height is Z
+-        # Update camera/viewport for current slice
+-        set_slice_viewport(z)
+-        
+-        # Evaluate the entire CSG tree for this slice
+-        root_slicemap = evaluate_node(csg_tree.root)
+-        
+-        # Add the 2D slice to the 3D volume
+-        volume.append(read_texture_to_array(root_slicemap))
+-        
+-    return volume
++        return result_worksheet
++
++def voxelize_primitive(primitive, grid_resolution, bounding_box):
++    """
++    Voxelize a single primitive into a worksheet.
++    This is implementation-specific but typically involves rasterization
++    or ray-casting per slice.
++    """
++    # Allocate worksheet
++    worksheet = allocate_texture(grid_resolution)
++
++    # For each slice (or the whole volume if 3D texture is supported):
++    for z in range(grid_resolution.z):
++        # Project primitive onto the slice
++        # Use vertex shader to transform vertices
++        # Rasterize to fill the worksheet cells
++        rasterize_slice(primitive, z, worksheet)
++
++    return worksheet
++
++def gpu_blend(tex1, tex2, blend_mode):
++    """
++    Perform a boolean operation on two textures using GPU blending.
++    """
++    # This function encapsulates the GPU blending operation
++    # The exact implementation depends on the graphics API
++    # but maps blend modes to boolean logic
++    if blend_mode == "ADD":
++        # Union: A + B (with clamping to 1 for binary)
++        return tex1 + tex2
++    elif blend_mode == "MULTIPLY":
++        # Intersection: A * B
++        return tex1 * tex2
++    elif blend_mode == "SUBTRACT":
++        # Difference: A - B
++        return tex1 - tex2
++    # Note: Actual GPU blending might require specific blend factors
++    # and color channels to represent boolean states correctly.
++    # [G] In practice, this often involves using specific blend factors
++    # like GL_ONE, GL_ZERO, GL_ONE_MINUS_SRC_ALPHA, etc.,
++    # or custom fragment shaders to implement the boolean logic.
+ ```
+ 
+ **Parameters:**
+-*   **Slice Resolution:** The resolution of each 2D slicemap. High resolutions (e.g., $1024^3$) are supported [S3, unofficial].
+-*   **Blending Function:** The specific GPU blending mode used to implement each boolean operator [S1, S3, unofficial].
++*   **Grid Resolution:** The number of voxels per axis. High resolutions (e.g., $10^9$ voxels) are supported in real-time [S3, unofficial].
++*   **Bounding Box:** Defines the spatial extent of the voxel grid [S1, S2, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** The method works at a precision of several billion ($10^9$) voxels in real-time [S3, unofficial].
+-*   **Artifacts:** Previous solutions for CSG or inter-object intersection were more complex and could contain artifacts; this method aims to reduce such artifacts by using solid voxelization [S3, unofficial].
+-*   **Memory:** Storing intermediate results for deep CSG trees can be memory-intensive, though the storage is noted as $O(\log^* n)$ [S3, unofficial].
++*   **Precision:** The method works at a precision of several billion voxels, but artifacts may arise if the resolution is too low for thin features [S3, unofficial].
++*   **CSG Tree Height:** For deep CSG trees, intermediate results must be stored, requiring $\log^* n$ storage where $n$ is the height of the tree [S3, unofficial]. Rearranging the tree can optimize this [S3, unofficial].
++*   **Blending Artifacts:** Incorrect mapping of boolean operations to GPU blend modes can lead to incorrect results [S1, S2, unofficial].
+ 
+ ## Subtopics
+ 
++### [SDF-based Voxelization](6595-sdf-based-voxelization.md)
++SDF-based Voxelization is a method to visualize any Constructive Solid Geometry (CSG) mesh or analytic primitive as a Minecraft-style voxel chunk pile by determining world-space bounding boxes, sampling a 3D grid, and querying Signed Distance Fields (SDF) to determine occupancy. It differs from GPU-based rasterization voxelization by relying on CPU-side SDF queries and storing results in a packed bitmap for later rendering as analytic box primitives, enabling A/B comparison with the original mesh without shader changes.
++
+ ### CSG and Inter-object Intersection
+-This variant focuses on using CSG voxelization for testing object penetration and collision detection. It voxelizes each object into a separate slicemap and renders them over each other with blending to compute the boolean intersection. The density computation allows for rapid recovery of the intersection's volume, which is useful for collision detection or haptic feedback. It works at a precision of several billion ($10^9$) voxels in real-time with low dependence on input geometry complexity [S3, unofficial].
++This variant performs general Constructive Solid Geometry (CSG) by voxelizing each object in a separate slicemap, rendering one over the other with blending for the desired boolean operation [S3, unofficial]. It extends to CSG trees by storing intermediate results, requiring $\log^* n$ storage where $n$ is the height of the tree [S3, unofficial]. It is useful for collision detection or haptic feedback, as it allows rapid recovery of the intersection's volume using density computation [S3, unofficial]. It works at a precision of several billion ($10^9$) voxels in real-time with low dependence on input geometry complexity [S3, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Real-time performance is claimed, with low dependence on input geometry complexity [S3, unofficial]. The cost is directly linked to the voxelization process itself [S3, unofficial].
+-*   **Memory Complexity:** Storage for intermediate results in CSG trees is noted as $O(\log^* n)$ where $n$ is the height of the tree, though this can be optimized by rearranging the tree [S3, unofficial].
+-*   **Performance:** Works at a precision of several billion ($10^9$) voxels in real-time [S3, unofficial].
+-*   **Strengths:** Simple implementation leveraging GPU hardware; efficient for complex boolean combinations; suitable for real-time applications like collision detection and haptic feedback [S3, unofficial].
+-*   **Limitations:** Requires GPU support for blending operations; memory usage for deep CSG trees can be a concern [S3, unofficial].
+-*   **When to Use:** When real-time voxelization of complex CSG models is needed, especially for collision detection, haptic feedback, or transparent illustration [S1, S3, unofficial].
+-*   **When Not to Use:** When CPU-side processing is preferred, or when the CSG tree is extremely deep and memory is constrained [S3, unofficial].
++*   **Time Complexity:** The cost is directly linked to the voxelization of the leaf nodes. The boolean operations are performed in image space, which is generally efficient on GPUs [S3, unofficial].
++*   **Memory Complexity:** Requires storage for intermediate worksheets. For CSG trees, this is $\log^* n$ where $n$ is the height of the tree [S3, unofficial].
++*   **Performance:** Works in real-time for high resolutions (several billion voxels) [S3, unofficial].
++*   **Strengths:** Low dependence on input geometry complexity; simple implementation for complex boolean operations; enables real-time transparent illustration and collision detection [S1, S2, S3, unofficial].
++*   **Limitations:** Requires GPU support for blending operations; potential artifacts if resolution is insufficient; memory usage for deep CSG trees [S1, S2, S3, unofficial].
++*   **When to use:** When dealing with complex CSG models and needing real-time voxelization for visualization, collision detection, or haptic feedback [S3, unofficial].
++*   **When not to use:** When CPU-side processing is preferred or when GPU blending capabilities are limited [S1, S2, S3, unofficial].
+ 
+ ## Background
+-CSG Model Voxelization was introduced in the context of real-time voxelization for complex models. It leverages the GPU's ability to perform boolean operations on 2D textures via blending operations, making it straightforward to voxelize CSG models [S1, S2, unofficial]. It has been applied to problems such as transparent illustration and inter-object intersection testing [S1, S3, unofficial].
++The method originates from research on real-time voxelization for complex models, specifically leveraging GPU capabilities for boolean operations on textures [S1, S2, unofficial]. It was developed to address the challenge of visualizing complex CSG models and performing inter-object intersection tests efficiently [S1, S2, S3, unofficial]. The approach was extended to handle CSG trees and applied to problems such as transparent illustration and collision detection [S1, S2, S3, unofficial].
+ 
+ ## Sources

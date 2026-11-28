@@ -1,0 +1,104 @@
+# Rasterization-based Splatting Pipeline
+
+Also called: Point Splatting Rasterization, RASTERIZE
+
+## Overview
+The Rasterization-based Splatting Pipeline renders volumetric data by decomposing it into primitives (points or Gaussians), transforming them to screen space, and rasterizing them as 2D footprints (splats) that are accumulated via alpha blending [S1]. It differs from ray-marching methods by leveraging standard GPU rasterization hardware for high-performance, real-time rendering, and from pure screen-space quad methods by explicitly managing primitive-to-pixel sorting and blending to handle transparency and depth complexity correctly [S1].
+
+## How it works
+The pipeline processes a set of volumetric primitives to produce a 2D image. It consists of projection, rasterization of attributes, sorting, and compositing.
+
+### Inputs and Outputs
+- **Inputs**:
+  - $C$: Camera model (intrinsic and extrinsic parameters) [S1].
+  - $P$: Point positions (3D coordinates) [S1].
+  - $A$: Opacities and features (per-primitive attributes) [S1].
+  - $F$: Feature data (e.g., color, normal) associated with splats [S1].
+- **Output**:
+  - $I$: Rendered image (2D pixel buffer) [S1].
+
+### Data Structures
+- **Primitives**: Defined by position $\mathbf{p}_k$, opacity $\alpha_k$, and features $\mathbf{f}_k$.
+- **Splat Attributes**: After rasterization, each pixel may receive multiple splat contributions. These are stored as:
+  - $A'$: Rasterized attributes (position, opacity, features) mapped to screen space [S1].
+  - $K$: Keys (pixel coordinates or tile indices) identifying which pixel each splat contributes to [S1].
+  - $N$: Counts (number of splats per pixel) [S1].
+  - $L$: Exclusive sum of counts, used to compute starting indices for sorting and blending [S1].
+
+### Steps
+1. **Project and Cull**: Transform primitive positions from world space to clip space using the camera model $C$. Cull primitives that are outside the view frustum or behind the camera [S1].
+   $$ P' \leftarrow \text{PROJECTANDCULL}(P, C) $$
+2. **Bilinear Splatting**: Rasterize the projected primitives onto the screen. For each primitive, compute its contribution to nearby pixels using a bilinear or Gaussian footprint. Compute the screen-space attributes $A'$, the pixel keys $K$, and the splat counts $N$ per pixel [S1].
+   $$ A', K, N \leftarrow \text{BILINEARSPLATTING}(P', A) $$
+3. **Exclusive Sum**: Compute the exclusive prefix sum of the counts $N$ to determine the starting index in the sorted output array for each pixel's splats. This allows for efficient parallel sorting and blending [S1].
+   $$ L \leftarrow \text{EXCLUSIVESUM}(N) $$
+4. **Radix Sort**: Sort the splats based on their keys $K$ and their depth (or sort order) using the exclusive sums $L$ as offsets. This groups splats by pixel and orders them for correct alpha blending (typically front-to-back) [S1].
+   $$ \text{RADIXSORTPAIRS}(K, L) $$
+5. **Blend Sorted Splats**: Iterate through the sorted splats. For each pixel, accumulate the color and opacity using alpha blending. The blending order is determined by the sorted depth of the splats [S1].
+   $$ I \leftarrow \text{BLENDSORTEDSPLATS}(A', F, L, N) $$
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def RASTERIZE(C, P, A, F):
+    # Step 1: Project and cull primitives
+    P_prime = PROJECTANDCULL(P, C)
+    
+    # Step 2: Rasterize primitives to screen, computing attributes, keys, and counts
+    A_prime, K, N = BILINEARSPLATTING(P_prime, A)
+    
+    # Step 3: Compute exclusive sum of counts to determine start indices
+    L = EXCLUSIVESUM(N)
+    
+    # Step 4: Sort splats by pixel key and depth using radix sort
+    # K contains pixel indices, L contains start indices for each pixel's splats
+    RADIXSORTPAIRS(K, L)
+    
+    # Step 5: Blend sorted splats per pixel to form the final image
+    I = BLENDSORTEDSPLATS(A_prime, F, L, N)
+    
+    return I
+```
+
+### Parameters and Edge Cases
+- **Sorting Order**: Correct alpha blending requires splats to be sorted front-to-back relative to the camera. The `RADIXSORTPAIRS` step must handle depth comparison correctly, especially for anisotropic splats where the depth varies across the footprint [S1].
+- **Precision**: Floating-point precision in position and depth calculations can affect culling and sorting accuracy, particularly for distant or small primitives [G].
+- **Empty Pixels**: Pixels with no splats should be initialized to a background color or transparent value [G].
+
+## Subtopics
+
+### [Tile-based Gaussian Rasterizer](22316-tile-based-gaussian-rasterizer.md)
+The tile-based Gaussian rasterizer is a GPU-accelerated rendering method for 3D Gaussian splats that pre-sorts primitives across the entire image to enable approximate alpha-blending for anisotropic splats. It distinguishes itself from previous per-pixel sorting approaches by eliminating hard limits on the number of blended primitives receiving gradient updates, thereby supporting arbitrary depth complexity without scene-specific hyperparameter tuning.
+
+### 4D Voxel Cloud Rendering
+Rendering a 4D volume by slicing it into multiple 3D cross-sections, rendering each slice to a texture, and then blending these textures together to form a 3D voxel cloud image [S2, unofficial].
+- **Steps**: Render each 3D cross-section slice to a frame buffer (texture). Use Alpha Blending to overlay the textures of the slices. Render one layer, project it to the 2D canvas, and reuse the frame buffer texture for the next layer to save memory [S2, unofficial].
+- **Formula**: Opacity can be adjusted per pixel based on the angle between the view direction and the slice normal, following exponential decay. Light passing through layers at a steep angle travels a longer distance and should be more attenuated (less transparent) [S2, unofficial].
+- **Parameters**: Opacity can be assigned per object (e.g., ground/sky transparent, objects opaque) to improve visibility. Slicing direction is typically aligned with coordinate axes; arbitrary directions are possible but may incur high computational overhead [S2, unofficial].
+
+### Surface Splatting
+A renderer that takes point clouds, rasterizes them to fragments, computes splat weights based on a quadratic form $Q$ and a scaler, and composites the point colors into an image with an occupancy mask [S3, unofficial].
+- **Steps**:
+  1. Rasterize the input point clouds using the configured rasterizer to obtain fragments and filtered point clouds [S3, unofficial].
+  2. Permute the weights tensor from shape $(N, H, W, C)$ to $(N, C, H, W)$ to align with the compositor's expected input format [S3, unofficial].
+  3. Extract point colors from the filtered point clouds, permute from $(C, N)$ to $(N, C)$, and clamp values to $[0, 1]$ [S3, unofficial].
+  4. Extract the fragment indices (idx), permute from $(N, H, W, C)$ to $(N, C, H, W)$, and convert to long integer type [S3, unofficial].
+  5. Composite the image using either a custom compositor or the default weighted_sum function from pytorch3d, passing fragment indices, weights, and point colors [S3, unofficial].
+  6. Permute the resulting image tensor from $(N, C, H, W)$ to $(N, H, W, C)$ and concatenate the occupancy mask (fragments.occupancy) as an additional channel [S3, unofficial].
+- **Formula**: Weights are computed as $w = \exp(-0.5 \cdot Q) \cdot \text{scaler}$, where $Q$ is the quadratic form from fragments.qvalue and scaler is from fragments.scaler. The weights are then clamped to $[0, 2000]$ [S3, unofficial].
+
+## Operating characteristics
+- **Time Complexity**: Dominated by the sorting step, which is $O(N \log N)$ or $O(N)$ with radix sort, where $N$ is the number of primitives. Rasterization is $O(N)$ if the footprint size is bounded [S1].
+- **Memory Complexity**: Requires storage for primitive attributes, sorted splat lists, and frame buffers. The tile-based variant reduces memory pressure by processing tiles independently [S1].
+- **Performance**: Enables real-time rendering on modern GPUs due to hardware acceleration of rasterization and sorting [S1].
+- **Strengths**: High performance, supports arbitrary depth complexity, and is compatible with standard graphics APIs [S1].
+- **Limitations**: Sorting can be expensive for very high primitive counts. Anisotropic splats require careful handling of depth sorting to avoid artifacts [S1].
+
+## Background
+The rasterization-based splatting pipeline has evolved from early point-based rendering techniques to support complex volumetric and neural representations. The INPC method (Implicit Neural Point Clouds) formalized this pipeline for radiance field rendering, integrating view-specific sampling and efficient GPU-based sorting and blending [S1]. The 4D voxel cloud rendering approach extends these concepts to higher-dimensional data by slicing and blending [S2, unofficial]. Surface splatting techniques have been adapted for point cloud rendering and diffusion models, emphasizing efficient weight computation and compositing [S3, unofficial].
+
+## Sources
+[S1] INPC: Implicit Neural Point Clouds for Radiance Field Rendering, https://doi.org/10.1109/3dv66043.2025.00021, fetched 2026-10-26
+[S2] 四维计算机图形学：渲染篇, https://wxyhly.github.io/archives/cg4d/, fetched 2026-10-30 (unofficial)
+[S3] pbonazzi/guassian-diffusion, https://github.com/pbonazzi/guassian-diffusion, fetched 2026-10-28 (unofficial)

@@ -1,0 +1,802 @@
+Missing Wedge Inpainting and Joint Alignment in
+Electron Tomography through Implicit Neural
+Representations
+Cedric Lim1, *, † , Corneel Casert2, *, ‡ , Arthur R. C. McCray1 , Serin Lee1 , Andrew Barnum3 ,
+Jennifer Dionne1 , and Colin Ophus1, ⋆
+1 Department of Materials Science and Engineering, Stanford University, 496 Lomita Mall, Stanford, 94305, CA, USA
+arXiv:2512.08113v1 [eess.IV] 8 Dec 2025
+2 National Energy Research Scientific Computing Center, Lawrence Berkeley National Laboratory, 1 Cyclotron Road,
+Berkeley, 94720, CA, USA
+3 nano@Stanford Shared Facilities, Stanford University, 348 Via Pueblo, Stanford, 94305, CA, USA
+† cedlim@stanford.edu
+‡ ccasert@lbl.gov
+⋆ cophus@stanford.edu
+* These authors contributed equally to this work
+ABSTRACT
+Electron tomography is a powerful tool for understanding the morphology of materials in three dimensions,
+but conventional reconstruction algorithms typically suffer from missing-wedge artifacts and data misalignment
+imposed by experimental constraints. Recently proposed supervised machine-learning-enabled reconstruction
+methods to address these challenges rely on training data and are therefore difficult to generalize across materials
+systems. We propose a fully self-supervised implicit neural representation (INR) approach using a neural network
+as a regularizer. Our approach enables fast inline alignment through pose optimization, missing wedge inpainting,
+and denoising of low dose datasets via model regularization using only a single dataset. We apply our method to
+simulated and experimental data and show that it produces high-quality tomograms from diverse and informationlimited datasets. Our results show that INR-based self-supervised reconstructions offer high fidelity reconstructions
+with minimal user input and preprocessing, and can be readily applied to a wide variety of materials samples and
+experimental parameters.
+1 Introduction
+Electron tomography (ET) has emerged as a powerful method for resolving the three-dimensional (3D) structure of
+materials and biological specimens at the nanoscale. In materials science, tomographic quantification of nanoparticle
+size distribution, morphology, and composition has been used to explain electrocatalytic properties1–4 , while atomic
+electron tomography (AET) enables determination of 3D atomic positions and species for direct evaluation of
+catalytic activity5–8 . In structural biology, cryo-electron tomography (cryo-ET) has been instrumental in resolving
+the 3D architectures of viruses, ribosomes, and complex biomolecular assemblies9–12 .
+Tomography datasets are collected by taking a series of images while tilting the sample through a range of
+discrete tilt angles13, 14 . Many standard reconstruction algorithms were originally developed for X-ray computed
+tomography15 , where the specimen is rotated between the source and detector and projections are typically acquired
+over a full 180◦ (parallel-beam) or 360◦ (cone-beam) rotation16 . For most materials samples, dense angular sampling
+is often feasible because X-rays cause relatively little radiation damage during acquisition17 . In contrast, for datasets
+collected using (scanning) transmission electron microscopy ((S)TEM), the accessible tilt range (typically ∼ ±70◦ ) is
+restricted by the geometry of the microscope pole piece. The incomplete angular coverage leads to a missing-wedge
+of information in reciprocal space that greatly degrades reconstructions. Moreover, coarse angular sampling is often
+necessary in electron tomography to minimize beam damage, resulting in small missing-wedge artifacts between
+projections18 . Reconstruction fidelity is further reduced by alignment-related errors, including uncertainty in the tilt
+1
+axis and relative shifts between projections19 . By comparison, X-ray tomography typically uses mechanically stable
+rotation stages and is less affected by alignment issues20 , or fiducial markers can be easily incorporated to refine
+alignment21 .
+The most widely used conventional reconstruction algorithms, such as filtered back-projection (FBP)22, 23 and
+the simultaneous iterative/algebraic reconstruction techniques (SIRT/SART)24, 25 , have strict data requirements to
+achieve high-quality reconstructions. FBP requires a large set of high-quality, low-noise projections for accurate
+results, which is generally feasible in X-ray tomography. Iterative methods such as SIRT, while more computationally
+demanding, are more tolerant of limited or noisy data and therefore remain the primary choice for most electron
+tomography experiments. Inline alignment is often used to correct translational shifts, but it is generally limited
+to coarse refinements. More recently, algorithms developed specifically for electron tomography have addressed
+tilt-axis misalignment and missing-wedge artifacts using Fourier-based approaches26–28 . However, these methods
+are often constrained by the computational cost of repeated Fourier and inverse Fourier transforms and by slow
+convergence.
+In recent years, deep learning has become the focal point in improving tomographic reconstructions, particularly
+for interpolating the missing wedge in tomographic datasets. In medical X-ray tomography, numerous methods based
+on implicit neural representations (INR) have been developed for denoising and sparse-view reconstruction29–34 ; for
+instance, representing the volume using a neural-network model effectively reduces streaking artifacts in computed
+tomography (CT)35, 36 . In cryo-electron tomography (cryo-ET), diverse approaches have emerged, including CNNbased subtomogram inpainting37 , iterative angular masking38 , and frame interpolation between tilt images39 . These
+methods typically rely on subtomogram averaging and supervised learning under assumptions of structural uniformity.
+Overall, most deep learning–based reconstruction methods remain dependent on fully supervised or semi-supervised
+training, often requiring tomographic data from similar nanoparticles for network pre-training40 . Consequently, the
+reliance on supervised learning renders most deep learning–based reconstruction techniques unsuitable for materials
+science applications, where samples are heterogeneous and collecting multiple tomograms is impractical. In addition,
+the majority of these machine learning algorithms do not optimize for tilt-axis or translational misalignments,
+imposing an additional time-consuming requirement of high-quality manual alignment.
+In this work, we develop a fully self-supervised and easily parallelizable tomographic reconstruction algorithm
+that jointly performs alignment and missing-wedge inpainting using INRs. We use a neural-network model to
+represent the volume as a continuous physical shape function. This framework enables denoising of heavily doselimited datasets but also recovers missing-wedge information without relying on any explicit sinogram inpainting.
+In addition, the framework robustly reconstructs sparsely sampled data, effectively compensating for small missing
+wedges and producing high-fidelity reconstructions of dose-sensitive samples. By jointly learning the full 3D pose
+of the object corresponding to each tilt image, our method achieves accurate reconstructions without the need for
+prior fine alignment. We apply INR tomography with joint alignment to experimental tilts series from two different
+materials systems, and a simulated phantom to directly compare with conventional algorithms showing marked
+improvements. We have implemented this algorithm in the open-source Python package quantEM. INR tomography
+provides high-quality reconstructions and automated alignment for a wide range of materials tomography datasets.
+2 Results
+2.1 INR Tomography Workflow
+A schematic of our reconstruction workflow is shown in Fig. 1. The sample is rotated about an arbitrary tilt axis with
+a specified tilt step, where an image is collected per angle. During acquisition, the sample is roughly re-centered and
+rotation is nominally along one axis, but in practice the holder deviates from the ideal tilt axis due to inherent runout
+resulting from manufacturing tolerances and imperfections. (Fig. 1a). Unlike conventional algorithms that use only
+a single tilt angle for each image and estimate the image shifts as a pre-processing step, our method solves for the
+complete 3D orientation and in-plane translation, i.e. the full sample pose of each tilt image.
+Because conventional algorithms generally do not optimize orientation parameters, a natural machine-learning
+approach is to represent the object on a voxelized 3D grid, project it for each pose, and define a loss from the
+2/20
+a
+b
+Electron
+Beam
+Implicit Neural Representation
+Coordinates
+Sample
+Intensity
+c
+Pose 1
+Ray (i, j)
+Tilt axis
+Tilt Images
+Ray
+Sampling
+Points
+Predicted Pixel
+Intensity
+Optimization Loop
+d
+Pose 2
+Ray (n, m)
+Pixel
+(n, m)
+Pixel
+(i, j)
+e
+Tilt 1
+Tilt 2
+INR
+Pixel-byPixel Loss
+Tilt n
+Update Model
+Weights
+Update
+Poses
+Backpropagate
+Experimental
+Tilt Images
+Figure 1. Overview of the INR-based tomographic reconstruction algorithm. (a) Schematic of a tomographic
+experiment using STEM. An image is recorded at each tilt step as the sample is rotated around the tilt axis. (b) A
+neural network receives a 3-D position vector,⃗r = {x, y, z} as input, and produces an intensity value, φ , at that
+position. This way of representing the volume is called an implicit neural representation (INR). (c) The
+reconstruction volume is sampled by rays that terminate at individual pixels of the experimental data. Each ray also
+incorporates and optimizes the pose for each tilt image in the dataset. (d) Optimization loop schematic. Coordinates
+sampled along each ray are fed to the INR, whose outputs are integrated to predict the pixel intensity. This
+prediction is compared to the experimental measurement with a pixel-wise loss, which is back-propagated to update
+both the INR weights and the pose. (e) Schematic showing how the experimental tilt images are reshaped into a 1D
+array of pixels that are compared to individual pixel predictions made using the INR.
+difference between predicted and measured image intensities. The gradients of both the imaging parameters and
+object representation can be solved via automatic differentiation (AD). In this method, one would be able to perform
+gradient descent and find the ground truth tilt axis and relative shifts for each projection.
+However, this approach requires a fully differentiable projection operator that rotates the object to arbitrary
+orientations, and each rotation involves interpolating the voxelized volume. Most importantly, parallelization of the
+3/20
+projection operator is difficult as the volume would have to be instantiated across multiple GPUs in order to rotate it
+to a specific pose.
+Rather than using a voxel grid to represent the volume, we instead use an INR as a model regularizer to represent
+the volume. Specifically, we use a fully-connected neural network with periodic activation functions29 , which takes
+as input an arbitrary coordinate vector and returns an intensity value (Fig. 1b). In our testing, this architecture
+had the least amount of hyperparameter tuning needed to converge to high spatial frequencies, in contrast to other
+architectures30 . Additionally, using an INR allows for arbitrarily fine sampling of the volume, upsampling, and easy
+modification of the support constraint41 . Most importantly, we are able to project the volume at any orientation
+without interpolation by using precisely rotated projection vectors corresponding to each pose. We first compute
+rays along the beam direction with discrete sampling points (Fig. 1c) which correspond to each pose. By integrating
+the intensity along a ray, we obtain a predicted pixel intensity that we can compare directly with the experimentally
+collected tilt projection, pixel-by-pixel. This simple “forward model” of integration works for HAADF STEM,
+as to a first approximation images collected in this modality depend linearly on the projected potential of the
+sample14 . With the predicted intensity value, we can compute a pixel-by-pixel smoothL1 loss (see Methods), which
+is back-propagated to simultaneously optimize the model weights and poses until the loss converges (Fig. 1d). To
+speed up convergence, one can perform a rough initial alignment and pre-train the network on a fully converged
+SIRT reconstruction. To show that this method is truly self-supervised, we initialize the network randomly without
+any pre-training for the rest of this work. Each pixel can be evaluated independently, allowing for straightforward
+parallelization over many GPUs. The training procedure is described in detail in Sec. 4.1.
+2.2 Experiments with a simulated phantom
+By representing the volume with an INR, the neural network acts as an implicit prior that constrains the volume,
+leading to a more physical reconstruction even for challenging datasets (e.g noisy, sparse, or misaligned). We
+first demonstrate this for a simulated 3D phantom, shown in Fig. 2a, and compare the INR reconstruction to a
+conventional iterative reconstruction algorithm (SIRT). The phantom contains internal 3D features with varying
+intensities and structures with shapes including triangular and spherical volumes, all wrapped in a thin ellipsoid
+membrane. We perform a series of experiments to demonstrate the effectiveness of our method: varying the missing
+wedge size, changing the tilt step between projections, and reducing the electron fluence. For each test case, we plot
+an image which averages a 5-voxel thick slice through the center of the volume, with the missing wedge direction
+shown vertically. We have inset the Fourier transform magnitude of each slice in the lower right corner. We evaluate
+the reconstruction quality by using the structural similarity index measure (SSIM)42 comparing each reconstructed
+volume to the ground truth volume shown in Fig. 2a.
+We first vary the missing-wedge extent, which is shown in Fig. 2b. We used a 1◦ tilt increment for all panels. The
+leftmost slices shown in Fig. 2b were reconstructed from data using a tilt range of (−80◦ , 80◦ ), i.e. a 20◦ missing
+wedge, and have SSIM values equal to 0.985 and 0.972 for the INR and SIRT reconstructions respectively. For a
+small missing wedge, the INR is able to regularize the reconstruction, while SIRT begins to show streaking artifacts
+between features, and both elongation along with missing segments of the membrane. As we increase the missing
+wedge angle, the SIRT reconstructions degrade significantly, and the internal structure is dramatically different with
+an 80◦ missing wedge. The INR in contrast is able to reconstruct the internal features accurately up to a missing
+wedge of 100◦ , and degrades gracefully at even larger missing wedge angles. The INR reconstructs the membrane
+more accurately than SIRT across all missing wedge angles, although gaps remain along the missing wedge direction
+at larger angles. The benefit of using an INR reconstruction is also clearly shown in the inset Fourier transform
+magnitudes, where the large missing wedge is clearly visible in the SIRT reconstructions. The INR is able to learn
+approximate shape functions which effectively inpaint the missing wedge without any prior training.
+Next we vary the tilt step while maintaining the full tilt range of (−90◦ , 90◦ ), as shown in Fig. 2c. The INR is
+much more robust and can generate accurate volumes of up to 20◦ step size, while SIRT significantly suffers with
+tilt steps of greater than 5◦ . Going to larger tilt steps, the missing information between each tilt become increasingly
+apparent in the Fourier transform magnitudes. In particular, the INR recovers the ground-truth volume using only 9
+projections, provided high-angle tilts are included, with SSIM values of 0.957 for INR and 0.427 for SIRT. The
+4/20
+a Ground Truth
+Volume Phantom
+b
+Slices
+Missing Wedge (tilt range)
+INR
+SIRT
+c
+20° (-80°, 80°)
+40° (-70°, 70°)
+80° (-50°, 50°) 100° (-40°, 40°) 140° (-20°, 20°)
+1° (180)
+5° (36)
+12° (16)
+20° (9)
+45° (5)
+Tilt Step
+104
+103
+102
+101
+1
+Fluence
+Tilt Step (number of projections)
+Missing
+Angles
+INR
+SIRT
+d
+Electron Fluence (counts/px)
+INR
+SIRT
+Figure 2. Comparison between INR and SIRT for a simulated phantom. (a) Reference slice of the ground truth
+phantom, slices along the volume, and a 3D render. (b-d) Comparison between our method (INR) versus SIRT by
+varying the missing wedge size, tilt step, and electron fluence respectively through a slice perpendicular to the
+missing wedge direction. For each case we also compute the SSIM between each reconstructed slice to the ground
+truth.
+5/20
+SSIM scores for SIRT drop sharply once the tilt step exceeds 10◦ , whereas the ML reconstruction maintains an
+average SSIM of 0.981 up to 20°, compared with 0.683 for SIRT. Since this experiment has no missing wedge, these
+results highlight that extending the tilt range to higher angles improves reconstruction quality more than simply
+reducing the tilt step size.
+In TEM imaging, the signal-to-noise ratio is often limited by electron fluence; when operating at low dose,
+Poisson noise dominates the reconstruction. We vary electron fluence by adding Poisson noise to each tilt image,
+keeping a 1° tilt step and no missing wedge, as shown in Fig. 2d. The INR is capable of denoising the projections
+and is able to reconstruct a much smoother volume compared to SIRT. At a fluence of 104 counts/px, SIRT and INR
+are practically indistinguishable, however the reconstruction quality degrades rapidly when the fluence is decreased.
+The SIRT reconstruction is visibly noisy for a fluence of 100 counts/px, while the INR reconstruction is almost
+noise-free. At a fluence of 1 count/px, the INR still resolves the internal structures, while SIRT fails to reconstruct a
+meaningful volume. However, the INR does begin to overfit to noise, and so we perform holdout validation as a
+benchmark for early-stopping; in this case outputting the reconstructed volume when the loss is minimal on the
+holdout set (see Sec. 4.1). This trend is reflected in the SSIM, which drops sharply with dose; at a dose of 10
+count/px, the SSIM is 0.857 for INR and 0.293 for SIRT.
+Tilt Axis Error (degrees)
+10°
+c
+SSIM
+5°
+b
+d
+SSIM
+2°
+Corrected
+0°
+Uncorrected
+a
+Tilt Error
+Iterations
+Figure 3. INR corrected and uncorrected pose comparison. (a) Slice through the phantom volume for varying
+tilt-axis error pose optimization, (b) without pose optimization. The inset shows the zoomed in circular feature in
+the middle of the slice. (c) SSIM for different tilt-axis errors for the corrected and uncorrected case. (d) SSIM and
+the number of training epochs required to converge depending on the degree of the tilt-axis error. The gray dashed
+line indicates where we begin optimization of the poses.
+To benchmark our inline alignment routine, we deliberately misalign the tilt stack by applying a systematic tilt
+axis error in Fig. 3. As discussed in Sec. 2.1, we directly optimize the full 3D orientation of the volume corresponding
+to each tilt image. In Fig. 3a, it is clear that our pose optimization is robust to high degrees of rotational misalignment.
+Without incorporating any inline alignment in Fig. 3b, the reconstruction degrades considerably even at small
+tilt-axis values. Similar to conventional algorithms, the volume begins to exhibit streaking artifacts along with high
+frequency artifacts. This is highlighted in the SSIM in Fig. 3c decreasing significantly with increasing amounts
+of misalignment. In contrast, by optimizing the pose we are able to retrieve the ground truth structure no matter
+the degree of rotational misalignment achieving an average SSIM of .974. However we note that large degrees of
+misalignment correspond to longer convergence times as seen in Fig. 3d. While it is feasible to let the INR perform
+6/20
+the full alignment, it is still recommended to perform a coarse preprocessing routine to speed up convergence time.
+2.3 Experimental tomography of catalytic nanoparticles
+To experimentally validate and test our methods, we have used INR and SIRT to reconstruct tilt series recorded using
+a STEM instrument. We used the high annular dark field (HAADF) imaging mode, as it produces approximately
+linear projected contrast14 . The first sample we reconstructed consists of AuPd nanoparticles on a TiO2 support3 .
+The nanoparticles are the minority phase, dispersed over the surface of the support. We collected projections by
+interleaving two tilt series with 4◦ steps to make one singular tilt series with a range of ±70◦ and a tilt step of 2◦ .
+Prior to reconstruction we applied a polynomial fit to each projection for background subtraction, fitting to the areas
+outside of the sample (see Sec. 4.5)
+a
+b
+INR
+SIRT
+TiO2 (C*)
+support
+AuPd
+particles
+100 nm
+Figure 4. INR and SIRT tomographic reconstructions of catalytic AuPd nanoparticles on a TiO2 support. A
+3D visualization and image slices of the reconstructed volume using (a) INR and (b) SIRT. The right panels show
+X-Y, X-Z, and Y-Z slices from top to bottom respectively. The bimodality seen is suspected to be carbon
+contamination (see Supp. Info).
+As discussed in Sec. 2.2, by jointly optimizing the full 3D orientation of each projection the model learns selfconsistent alignment parameters across the entire series. Applying this approach to the experimental dataset yields a
+substantially higher-fidelity reconstruction than SIRT, as shown in Fig. 4a. The SIRT reconstruction (Fig. 4b) exhibits
+7/20
+visible missing wedge and misalignment artifacts, seen as streaking and elongation of individual nanoparticles,
+whereas the INR isolates each particle and refines the surrounding support with well-defined boundaries. Although
+the SIRT reconstruction appears reasonable, the INR reveals sharper features throughout the volume, including
+a clearly resolved lighter contrast region from the carbon support and possible carbon contamination in some
+sample regions. We have confirmed the presence of carbon using x-ray energy-dispersive spectroscopy (XEDS)
+measurements shown and discussed in Supplemental Figure 1.
+a
+Missing Wedge (tilt range)
+100 nm
+40 (-70°, 70°)
+b
+c
+60° (-60°, 60°)
+100° (-40°, 40°) 140° (-20°, 20°) 160° (-10°, 10°)
+Tilt Step (number of projections)
+2° (71)
+10° (15)
+14° (11)
+28° (6)
+70° (3)
+101
+1
+Electron Fluence (counts/px)
+104
+103
+102
+Figure 5. Supported nanoparticles INR reconstructions for different experimental parameters. (a)–(c)
+Reconstructed slices perpendicular to the missing wedge direction for varying missing wedge sizes, tilt steps, and
+electron fluences, respectively.
+We next test the robustness of our method on experimental data to evaluate how the trends observed in the
+simulated phantom extend to real measurements. We perform the same set of experiments as in Sec. 2.2, varying the
+missing wedge while keeping a 2◦ tilt step and examining slices along the missing wedge direction as shown in
+Figure 5a. Compared to the simulated phantom, this experimental dataset is more challenging since the INR must
+also infer information lost within the small gaps between projections caused by the 2◦ tilt step. Consistent with the
+simulated results, the INR produces accurate reconstructions up to a missing wedge of 100◦ (±40◦ tilt range). At
+more limited tilt ranges, the nanoparticles remain identifiable but exhibit increasing vertical distortion and missing
+wedge artifacts.
+8/20
+To further evaluate our method on sparsely collected datasets, we now vary the tilt step while maintaining the
+original tilt range of the dataset as shown in Fig. 5b. Since we originally start with a limited tilt range, we use values
+that provide symmetric angular coverage in the positive and negative tilt angle ranges. Tilt steps between 2◦ and
+10◦ were not included since there was no considerable changes to the volume. Similar to the phantom, this test
+emphasizes the importance of prioritizing higher angular coverage over tilt steps. Even with 10◦ steps our algorithm
+is still able to resolve the general structure and particles within the volume. However, subsequent increases to the tilt
+step produces the same mini-missing wedge artifact seen with SIRT. Surprisingly, even with only 11 projections we
+can still clearly resolve the nanoparticles and with only 6 projections we could estimate the approximate position of
+the 4 nanoparticles visible in this slice.
+Since we cannot experimentally change the electron fluence post-acquisition, we instead simulate it by adding
+Poisson noise similar to Sec. 2.2. As observed in the phantom, the INR is incredibly resilient to low-dose conditions
+with no appreciable change until a dose of 10 counts/pixel. At lower doses, the INR begins to fit to noise and
+performing holdout validation becomes necessary in these conditions.
+2.4 Experimental tomography of a hyperbranched nanoparticle
+We reconstruct a hyperbranched Co2 P nanoparticle with approximate six-fold symmetry and an included fiducial to
+study the effect of high spatial frequency and low intensity features in the tilt series published by Levin et al.43 (Fig.
+6). As discussed in43 , the tilt range of this sample is from ±75◦ with a 2◦ step, with the 23◦ and 25◦ angles removed
+due to a goniometer backlash. The previous results feature relatively simple structures, allowing the INR to recover
+physical shape functions with ease.
+In Fig. 6a, we show a 3D render of the sample using our algorithm. We also provide a direct comparison between
+the INR and SIRT reconstruction methods in Fig. 6b, where for both methods we used the preprocessed dataset
+provided in the original dataset and performed background subtraction. In Fig. 6b, the additional pose refinements
+and INR regularization reveal finer high-frequency details and suppress the streaking artifacts that are prominent
+in the SIRT reconstruction. Moreover, it is clear that the INR is not heavily affected by missing wedge and small
+missing wedge artifacts. In the FFT inset of the SIRT X-Z slice, the two missing projections from the tilt series are
+visible, whereas they are not apparent in the INR reconstruction.
+For this sample we simulate limited experimental conditions by restricting the tilt series to a maximum angle of
+±55◦ with a tilt step of 10◦ (Fig. 6c). Effectively, this reduces the total dose by a factor of 7 throughout the whole
+tilt series. In practice, this could happen if one were to collect an interleaved tilt series with a step of 5◦ and the
+sample becomes too beam damaged to perform the last tilt series. With SIRT, the reconstruction quality is clearly
+limited by the small number of available projections. Although the X–Y slices still yield a reasonable reconstruction,
+the resolution along the other axes is strongly degraded by missing information and algorithm-induced streaking
+artifacts. In the X-Z summed projection, the structure is heavily deteriorated and not interpretable. However, the
+INR reconstruction is able to reduce the artifacts observed in SIRT and is still is able to retrieve a reasonable
+tomogram. Most importantly, even with 11 projections the INR is still robust to both types of missing wedge artifacts.
+However, comparing to the best case scenario with all projections, from a limited number of projections the INR
+shows significant smearing in the vertical directions of the Y-Z and X-Z slices. Despite this, the INR can produce
+reasonable quality reconstructions even with heavily constrained experimental parameters that would be difficult to
+achieve methods that do not incorporate machine learning.
+For this sample, alignment is a challenge because fine corrections are required for each tilt projection. In
+Fig. 7, we compare INR reconstructions with (corrected) and without (uncorrected) pose optimization, using the
+same reconstruction parameters in both cases. Comparing both Fig. 7a and Fig. 7b, we are able to minimize the
+misalignment induced smearing artifact and better isolate individual branches. Additionally, our algorithm is able to
+correct for the goniometer backlash in the experiment as seen in Fig. 7c. Together, these improvements demonstrate
+that our pose-optimization methodology can reliably recover high-fidelity structural information and is able to
+correct for experimental errors.
+9/20
+a
+b
+X-Y
+Y-Z
+X-Z
+100 nm
+INR
+y
+z
+SIRT
+x
+c
+Missing Wedge: 92° (-50°, 50°) Tilt Step: 10° (11 Projections)
+INR
+SIRT
+X-Y
+Y-Z
+X-Z
+X-Z Summed
+Figure 6. INR and SIRT reconstructions of a hyperbranched Co2 P nanoparticle. (a) 3D rendering of the
+sample using an INR. (b) Slices from the INR and SIRT at X-Y, Y-Z, and X-Z projections. (c) Slices from SIRT and
+INR reconstructions across different projection planes, with a simulated 92◦ missing wedge and 10◦ tilt steps.
+3 Discussion
+We have developed a self-supervised and parallelizable tomography reconstruction algorithm that simultaneously
+aligns, denoises, and fills in some of the lost information due to the missing wedge artifact. In comparison to
+current iterative and machine learning tomography methods, using INRs for tomographic reconstructions provides
+improved robustness to information-limited datasets, while improving reconstruction quality for experimental
+datasets. Additionally, the INR does not require supervised training for missing wedge inpainting, and can allow
+better tomographic experiments of beam-sensitive materials through denoising. Most importantly, our algorithm
+automates projection alignment, which is often the most difficult and time-consuming part of tomography. Allowing
+for learning the full 3D pose of each projection is key to obtaining accurate tomograms. Furthermore, we are able to
+reconstruct large-scale volumes due to the parallelizable nature of INRs.
+Reconstruction speed is highly dependent on the number of GPUs available in this framework. The experiments
+conducted in this work were performed using a total of 16 GPUs per reconstruction. For both experimental cases
+using the full dataset for 150 epochs took 2 hours. Without access to multi-GPU systems, and depending on the
+10/20
+Corrected
+Uncorrected
+c
+Predicted Euler Angles
+Degrees
+b
+Slice
+a
+50 nm
+°
+°
+Tilt Angle
+°
+°
+Figure 7. INR reconstructions of a hyperbranched Co2 P nanoparticle with alignments corrected and not
+corrected. Slice of the INR reconstruction (a) with pose optimization (b) and without optimization. (c) The
+predicted Z1 and Z3 Euler angles. The gray line corresponds to the goniometer backlash observed in43 .
+volume size, reconstructions speed will take considerably longer. Nonetheless, since INR iteration speed scales
+nearly linearly with the number of GPUs this problem can be effectively mitigated. This work also highlights that
+reconstruction quality is highly sensitive to the choice of loss function (See Sec. 4.1 and Supplemental Information
+Sec. 4.6). Nevertheless, we have proposed guidelines and how to use cross-validation to reconstruct a variety of
+samples which may minimize the need for performing a hyperparameter search.
+We anticipate that multimodal and low-dose experiments, such as XEDS tomography, will benefit substantially
+from our INR framework, as radiation damage from repeated chemical mapping often limits achievable resolution
+and reconstruction quality. Furthermore, conventional paralell-beam TEM imaging contains phase and diffraction
+contrast that convey useful structural information. Currently, most existing algorithms do not incorporate this
+into the physics forward model, leading to degraded reconstruction quality. Our framework may enable the direct
+inclusion of this underlying imaging physics, overcoming these limitations. Additionally for atomic-resolution
+electron tomography (AET), where precise alignment and faithful reconstruction of atomic potentials are critical,
+our approach may offer several advantages over existing methods. Together, this reconstruction framework based on
+inline alignment and INRs could significantly enhance electron tomography as a whole, enabling higher-quality
+reconstructions with fewer projections and less stringent experimental requirements.
+4 Methods
+4.1 Reconstruction implementation
+4.1.1 Volume representation
+The volume is represented through an implicit neural network, which maps coordinates r = {x, y, z} ∈ [−1, 1]3
+to a value for the intensity φ . Such a continuous representation has several advantages over grid-based methods,
+including being more memory-efficient for large volumes (the number of neural-network weights can be much
+smaller than the number of voxels in a discrete representation), allowing for analytical calculation of derivatives, and
+not requiring interpolation to evaluate a shifted or rotated volume.
+We use an INR with periodic activation functions, which are less affected by the spectral-bias problem (i.e. that
+low-frequency components are more easily learned) than ReLU-based neural networks29 . Specifically, we use the
+H-Siren network, which is a fully-connected network with as activation function for the input layer
+σi (x) = sin(ω0 sinh(2x)),
+(1)
+and for the hidden layers
+σh (x) = sin(ω0 x),
+(2)
+11/20
+where ω0 is a hyperparameter that controls the frequency and is kept fixed at ω0 = 30. To obtain a nonnegative value
+for the predicted intensity φ , we use a softplus output activation function
+σo (x) = ln(1 + exp(x)).
+(3)
+Throughout this paper, we use an H-Siren network with four hidden layers and a hidden dimension of 512. We
+initialize the weights {w} for the input layer as
+wi ∼ U(−1/n, 1/n),
+where n is the number of input features to the layer (“fan-in”), and for the other layers as
+
+ p
+p
+wh ∼ U − 6/n/ω0 , 6/n/ω0 .
+(4)
+(5)
+4.1.2 Optimization
+To optimize the volume representation and poses (shifts and tilts), we minimize the loss function
+L = Lpixel + αLTV ,
+(6)
+where the first term is the smoothL1 loss29, 44 of the predicted and experimentally measured pixel intensities. The
+second term is a regularization term, and α is a hyperparameter which determines the weight of the regularization
+term which is a tunable parameter that needs to be adjusted depending on the sample.
+The first term is given by
+2
+Lpixel =
+1 M N
+i, j
+i, j
+− Ipred
+)
+∑ ∑ smoothL1 (Iexp
+MN 2 j=1
+i=1
+(7)
+i, j
+where Iexp
+is the intensity of pixel i in the N × N tilt series image j, of which there are M. The smoothL1 is defined
+as,
+( 2
+0.5x
+if |x| < 1
+β
+smoothL1 (x) =
+(8)
+|x| − 0.5β otherwise
+As described in44 , we use a value for the hyperparameter β = 0.07 which defines the crossover point between using
+L1 or L2 loss. This choice of β was the most robust for showing low and high spatial frequencies, and low intensity
+features across all experiments (see Supplemental Information Sec. 4.6). This parameter may also be tuned to
+enhance reconstructions.
+i, j
+To calculate the predicted pixel intensity Ipred
+, we need to integrate the intensity φ along a line (“ray”) which ends
+at pixel i. This ray can be found by rotating and shifting a ray going along the z axis in the original coordinate system
+according to the tilt angle θ j and the pose (tilt axis oscillation and shifted position), see Fig. 1c. We parameterize
+the latter for each tilt image through learnable angles z1j , z3j and scalars δxj , δyj respectively. We sample a discrete
+number of points along the ray, apply the shifts δxj and δyj along the x and y axes, and then perform a rotation
+R(z3j )R(θ j )R(z1j ), where R are rotation matrices. We then evaluate the intensity at those points and integrate along
+i, j
+the ray to find the predicted pixel intensity Ipred
+.
+The second term is a total-variation regularization term, calculated as
+LTV = ⟨|∇r φ (r)|⟩ ,
+(9)
+where the average is calculated over a randomly sampled subset (due to memory constraints) of the coordinates
+evaluated to calculate the Lpixel term. The derivative can be calculated analytically through automatic differentiation.
+12/20
+We minimize the loss Eq. (6) with the Adam optimizer. We use a learning rate of 8 × 10−6 for the neural-network
+weights, and a learning rate of 5 × 10−2 for the pose parameters. We start with a warmup period for ten epochs
+where we gradually scale up the learning rate to the value of 8 × 10−6 , and then use a cosine-annealing learning rate
+scheduler to decrease it during training. To rapidly converge to a correct shape for the volume, we initially use very
+few sampling points along each ray and then ramp this up over the first few epochs. We use a batch size of 1024
+pixels per GPU, resulting in a global batch size of 16384.
+In scenarios where the signal-to-noise ratio in the tilt series images is high, such as at low electron fluence in
+Figs. 2, 5, we divide the data set in a training set, which contains 80% of pixels in the data set (randomly sampled)
+and validation set which contains the other 20%. To prevent overfitting to noise, we evaluate the Lpixel loss term on
+the validation set after every training epoch, and stop training once the loss on the validation set starts to increase.
+Training is straightforward to distribute over many GPUs by having a model replica on each GPU evaluate its
+own batch, and then averaging the calculated gradients (“Distributed Data Parallel”45 ). As this results in a larger
+effective batch size, we can take larger gradients steps; we here scale the learning rate by the square root of the
+number of GPUs46, 47 .
+4.2 Comparison with SIRT
+The SIRT algorithm used throughout this paper uses a vectorized PyTorch re-implementation of the Radon and
+inverse-Radon transform from scikit-image48 . To create the best possible reconstruction, we also implement a
+cross-correlation inline alignment of the tilt stack. In all SIRT reconstructions on this paper we also applied the
+positivity constraint on the volume.
+4.3 Electron fluence simulations
+For simulating electron fluence, we use the formula,
+imnoisy =
+Poisson(im × dose)
+dose
+(10)
+where we retrieve the image from the Poisson distribution.
+4.4 Phantom data set
+The phantom shown in Fig. 2 is a 200 × 200 × 200 volume that contains low- and high- spatial frequencies. In
+contrast to well-known phantoms such as the Shepp-Logan phantom, we find that it does not represent what a true
+materials system would consist of. In our phantom, we have a sea-mine-like structure to simulate a similar structure
+to the TiO2 with AuPd system we reconstructed. Including high-spatial frequency features such as a pyramid-like
+structure, and with atomic-like structures. Included is also a cheese-wedge like structure to make sure we can
+reconstruct low-spatial frequency features.
+We use an α = 1 × 10−4 for the total variational loss, with a β = 0.07 for the smoothL1 loss. Each reconstruction
+was trained to 150 epochs. The volume sshown in Fig. 2 converged within 30 epochs with no noticeable change.
+4.5 Catalytic nanoparticles dataset
+The catalytic TiO2 -AuPd system was collected using the Thermo Fisher Spectra 300 with the Fischione 2040
+dual-axis tomography holder. AuPd/TiO2 were synthesized following a co-deposition-precipitation protocol. Prior
+to the synthesis, the TiO2 powder was dried in air at 100°C to remove moisture. The dried TiO2 was dispersed
+into the aqueous solution containing pre-dissolved HAuCl4 3H2 O and Pd(aca)2 as the precursors, and urea as the
+reducing agent. The synthesized supported catalyst was collected after proceeding the reaction overnight at 85
+°C. The collected catalyst was dried under vacuum and subsequently reduced in the H2 atmosphere at 400 °C for
+1 hour, followed by annealing in Ar. The prepared catalyst was deposited onto a Simpore two-slot SiN window
+(SN100H-A05L), mounted on a Fischione 2040 dual-axis tomography holder.
+Since the dose sensitivity of the sample was unknown, the tilt series was collected by interleaving two tilt series
+each with a 4◦ step which resulted with a tilt range from -70◦ to 70◦ with 2◦ degree increments. Each tilt series
+13/20
+subset in turn has their own respective tilt axis to be optimized over. The original resolution of the projections was at
+2048×2048 resolution with a sampling rate of 0.1 nm per pixel. For the reconstructions performed, each projection
+was scaled down to 500×500 using Fourier downsampling. We also collected 0◦ and 90◦ degree scan pairs for drift
+correction49 .
+To produce the final processed tilt series we performed drift-correction using the 0◦ -90◦ scan pairs, background
+subtraction, rough cross-correlation, invariant line, and tilt axis alignment. For methods used for drift correction
+refer to49 . For background subtraction we use bivariate Bernstein polynomial fitting to estimate the background. We
+then use cross-correlation to align the tilt stack, then used center-of-mass alignment to align the stack to the invariant
+line. Aligning the tilt axis was performed by eye until a reasonable reconstruction was obtained.
+The experimental reconstructions using our method and SIRT in Figures 4 and 5 are 500 × 500 × 500 volumes
+using the preprocessed tilt series. We use an α = 3 × 10−4 for the total variational loss, with a β = 0.07 for the
+smoothL1 loss. Each reconstruction was trained to 150 epochs.
+4.6 Hyperbranched nanoparticle dataset
+The prealigned dataset of the hyperbranched Co2 P nanoparticle was taken from Levin et al.43 . The only additional
+preprocessing step performed was background subtraction using bivariate Bernstein polynomial fitting similar
+to Sec. 4.5. We use an α = 1 × 10−5 for the total variational loss, with a β = 0.07 for the smoothL1 loss. Each
+reconstruction was trained to 150 epochs.
+Acknowledgments
+This research used resources of the National Energy Research Scientific Computing Center, a DOE Office of
+Science User Facility supported by the Office of Science of the U.S. Department of Energy under Contract No.
+DE-AC02-05CH11231 using AI4Sci@NERSC NERSC award NERSC DDR-ERCAP0038157. CL, ARCM and CO
+were supported by Stanford University. The catalytic nanoparticle tilt series dataset was collected at the Stanford
+Shared Nano Facilities (SNSF). We also thank Lin Yuan for developing the sample preparation of the catalytic
+nanoparticles, and Stephanie Ribet for helpful information for acquiring tomographic datasets.
+Data Availability
+Link to be added at submission
+Code Availability
+The Python code is available in the in the open-source Quantitative Electron Microscopy (quantEM) package. The
+current code is in its development phase, and will be fully implemented into quantEM along with tutorial notebooks
+which a link will be added at submission.
+References
+1. Wang, Z., Ke, X. & Sui, M. Recent Progress on Revealing 3D Structure of Electrocatalysts Using Advanced 3D
+Electron Tomography: A Mini Review. Front. Chem. 10 (2022). Publisher: Frontiers.
+2. Xia, W. et al. Bimetallic Nanoparticle Oxidation in Three Dimensions by Chemically Sensitive Electron
+Tomography and in Situ Transmission Electron Microscopy. ACS nano 12, 7866–7874 (2018).
+3. Lee, S. et al. Efficient selectivity regulation of methane coupling reaction towards hydrocarbons on a aupd
+bimetallic catalyst via a light-driven shifting of the hydrophilic center. Manuscript in preparation.
+4. McKeown-Green, A. et al. Ammonia-catalysts evolution under realistic reactor conditions revealed by via
+multimodal and in-situ electron microscopy. Manuscript in preparation.
+5. Jeong, C. et al. Atomic-scale 3D structural dynamics and functional degradation of Pt alloy nanocatalysts during
+the oxygen reduction reaction. Nat. Commun. 16, 8026 (2025). Publisher: Nature Publishing Group.
+14/20
+6. Xiang, W. et al. 3D atomic-scale imaging of mixed Co-Fe spinel oxide nanoparticles during oxygen evolution
+reaction. Nat. Commun. 13, 179 (2022). Publisher: Nature Publishing Group.
+7. Pelz, P. M. et al. Simultaneous Successive Twinning Captured by Atomic Electron Tomography. ACS Nano 16,
+588–596 (2022). Publisher: American Chemical Society.
+8. Lee, J., Jeong, C. & Yang, Y. Single-atom level determination of 3-dimensional surface atomic structure
+via neural network-assisted atomic electron tomography. Nat. Commun. 12, 1962 (2021). Publisher: Nature
+Publishing Group.
+9. Cressey, D. & Callaway, E. Cryo-electron microscopy wins chemistry Nobel. Nature 550, 167–167 (2017).
+Publisher: Nature Publishing Group.
+10. Turk, M. & Baumeister, W. The promise and the challenges of cryo-electron tomography. FEBS Lett. 594,
+3243–3261 (2020). _eprint: https://febs.onlinelibrary.wiley.com/doi/pdf/10.1002/1873-3468.13948.
+11. Nogales, E. The development of cryo-EM into a mainstream structural biology technique. Nat. Methods 13,
+24–27 (2016). Publisher: Nature Publishing Group.
+12. Oikonomou, C. M., Chang, Y.-W. & Jensen, G. J. A new view into prokaryotic cell biology from electron
+cryotomography. Nat. Rev. Microbiol. 14, 205–220 (2016). Publisher: Nature Publishing Group.
+13. Ercius, P., Alaidi, O., Rames, M. J. & Ren, G. Electron Tomography: A Three-Dimensional Analytic Tool for Hard and Soft Materials Research. Adv. Mater. 27, 5638–5663 (2015). _eprint:
+https://advanced.onlinelibrary.wiley.com/doi/pdf/10.1002/adma.201501015.
+14. Ophus, C. et al. 3D Imaging Using HAADF-STEM and HRTEM Atomic Electron Tomography. Microsc.
+Microanal. 25, 394–395 (2019).
+15. Schulz, R. A., Stein, J. A. & Pelc, N. J. How CT happened: the early development of medical computed
+tomography. J. Med. Imaging 8, 052110 (2021).
+16. Kak, A. C. & Slaney, M. Principles of computerized tomographic imaging (SIAM, 2001).
+17. du Plessis, A., le Roux, S. G. & Guelpa, A. Comparison of medical and industrial X-ray computed tomography
+for non-destructive testing. Case Stud. Nondestruct. Test. Eval. 6, 17–25 (2016).
+18. Leijten, Z. J., Keizer, A. D., de With, G. & Friedrich, H. Quantitative analysis of electron beam damage in
+organic thin films. The J. Phys. Chem. C 121, 10552–10561 (2017).
+19. Kübel, C. et al. Recent advances in electron tomography: Tem and haadf-stem tomography for materials science
+and semiconductor applications. Microsc. Microanal. 11, 378–400 (2005).
+20. Sun, W., Brown, S., Flay, N., McCarthy, M. & McBride, J. A reference sample for investigating the stability of
+the imaging system of x-ray computed tomography. Meas. Sci. Technol. 27, 085004 (2016).
+21. Parkinson, D. Y., Knoechel, C., Yang, C., Larabell, C. A. & Le Gros, M. A. Automatic alignment and
+reconstruction of images for soft x-ray tomography. J. structural biology 177, 259–266 (2012).
+22. Frank, J. Three-Dimensional Electron Microscopy of Macromolecular Assemblies: Visualization of Biological
+Molecules in Their Native State (Oxford University Press, 2006).
+23. Momose, A., Takeda, T., Itai, Y. & Hirano, K. Phase-contrast X-ray computed tomography for observing
+biological soft tissues. Nat. Medicine 2, 473–475 (1996).
+24. Gilbert, P. Iterative methods for the three-dimensional reconstruction of an object from projections. J. Theor.
+Biol. 36, 105–117 (1972).
+25. Andersen, A. H. & Kak, A. C. Simultaneous Algebraic Reconstruction Technique (SART): A Superior
+Implementation of the Art Algorithm. Ultrason. Imaging 6, 81–94 (1984). Publisher: SAGE Publications Inc.
+26. Miao, J., Förster, F. & Levi, O. Equally sloped tomography with oversampling reconstruction. Phys. Rev. B 72,
+052103 (2005). Publisher: American Physical Society.
+15/20
+27. Pham, M., Yuan, Y., Rana, A., Osher, S. & Miao, J. Accurate real space iterative reconstruction (RESIRE)
+algorithm for tomography. Sci. Reports 13, 5624 (2023). Publisher: Nature Publishing Group.
+28. GENFIRE: A generalized Fourier iterative reconstruction algorithm for high-resolution 3D imaging | Scientific
+Reports.
+29. Gao, R. & Jaiman, R. K. H-SIREN: Improving implicit neural representations with hyperbolic periodic functions,
+DOI: 10.48550/arXiv.2410.04716 (2024). ArXiv:2410.04716 [cs].
+30. Zhu, H. et al. FINER++: Building a Family of Variable-periodic Functions for Activating Implicit Neural
+Representation, DOI: 10.48550/arXiv.2407.19434 (2024). ArXiv:2407.19434 [cs].
+31. Mildenhall, B. et al. NeRF: Representing Scenes as Neural Radiance Fields for View Synthesis, DOI: 10.48550/
+arXiv.2003.08934 (2020). ArXiv:2003.08934 [cs].
+32. Wang, G., Chen, Z., Loy, C. C. & Liu, Z. SparseNeRF: Distilling Depth Ranking for Few-shot Novel View
+Synthesis, DOI: 10.48550/arXiv.2303.16196 (2023). ArXiv:2303.16196 [cs].
+33. Zha, R. et al. R$^2$-Gaussian: Rectifying Radiative Gaussian Splatting for Tomographic Reconstruction, DOI:
+10.48550/arXiv.2405.20693 (2024). ArXiv:2405.20693 [eess].
+34. Cai, Y. et al. Radiative Gaussian Splatting for Efficient X-ray Novel View Synthesis, DOI: 10.48550/arXiv.
+2403.04116 (2024). ArXiv:2403.04116 [eess].
+35. Wang, X., Hu, S., Fan, H., Zhu, H. & Li, X. Neural Radiance Fields in Medical Imaging: Challenges and Next
+Steps, DOI: 10.48550/arXiv.2402.17797 (2024). ArXiv:2402.17797 [eess] version: 1.
+36. Veen, D. V. et al. Missing Wedge Completion via Unsupervised Learning with Coordinate Networks, DOI:
+10.1101/2024.04.12.589090 (2024). Pages: 2024.04.12.589090 Section: New Results.
+37. Liu, Y.-T. et al. Isotropic Reconstruction of Electron Tomograms with Deep Learning, DOI: 10.1101/2021.07.
+17.452128 (2021). Pages: 2021.07.17.452128 Section: New Results.
+38. Wiedemann, S. & Heckel, R. A deep learning method for simultaneous denoising and missing wedge reconstruction in cryogenic electron tomography. Nat. Commun. 15, 8255 (2024). Publisher: Nature Publishing
+Group.
+39. Majtner, T. et al. cryoTIGER: deep-learning based tilt interpolation generator for enhanced reconstruction in
+cryo electron tomography. Commun. Biol. 8, 1443 (2025). Publisher: Nature Publishing Group.
+40. Yao, L., Lyu, Z., Li, J. & Chen, Q. No ground truth needed: unsupervised sinogram inpainting for nanoparticle
+electron tomography (UsiNet) to correct missing wedges. npj Comput. Mater. 10, 28 (2024). Publisher: Nature
+Publishing Group.
+41. Scott, M. C. et al. Electron tomography at 2.4-ångström resolution. Nature 483, 444–447 (2012). Publisher:
+Nature Publishing Group.
+42. Wang, Z., Bovik, A., Sheikh, H. & Simoncelli, E. Image quality assessment: from error visibility to structural
+similarity. IEEE Transactions on Image Process. 13, 600–612 (2004).
+43. Levin, B. D. A. et al. Nanomaterial datasets to advance tomography in scanning transmission electron
+microscopy. Sci. Data 3, 160041 (2016). Publisher: Nature Publishing Group.
+44. Girshick, R. Fast R-CNN, DOI: 10.48550/arXiv.1504.08083 (2015). ArXiv:1504.08083 [cs].
+45. Li, S. et al. Pytorch distributed: Experiences on accelerating data parallel training.
+arXiv:2006.15704 (2020).
+arXiv preprint
+46. Krizhevsky, A. One weird trick for parallelizing convolutional neural networks, DOI: 10.48550/arXiv.1404.5997
+(2014). ArXiv:1404.5997 [cs].
+47. Hoffer, E., Hubara, I. & Soudry, D. Train longer, generalize better: closing the generalization gap in large batch
+training of neural networks, DOI: 10.48550/arXiv.1705.08741 (2018). ArXiv:1705.08741 [stat].
+16/20
+48. van der Walt, S. et al. scikit-image: image processing in Python. PeerJ 2, e453 (2014).
+49. Ophus, C., Ciston, J. & Nelson, C. T. Correcting nonlinear drift distortion of scanning probe and scanning
+transmission electron microscopies from image pairs with orthogonal scan directions. Ultramicroscopy 162,
+1–9 (2016).
+17/20
+Supplemental Information
+XEDS Measurement of Supported Nanoparticles
+To address the bimodality seen in Fig. 5,we performed EDS measurements on a different sample found on the same
+TEM grid shown in Supp. Fig. 1. Subsequent tomography experiments on the same sample were attempted by
+performing plasma cleaning of the grid prior to depositing the sample. Significant charging was observed, and
+tomography experiments were largely unsuccessful. We suspect that the presence of carbon proved vital for setting
+the nanoparticles and dramatically preventing charging of the sample. In Supp. Fig. 1b, there is non-neglibile signal
+at the base of the particle imaged, and in Supp. Fig 1c the titanium oxide support is clearly shown.
+a
+HAADF
+b
+C
+c
+Ti
+25 nm
+Supplemental Figure 1. HAADF, and Carbon and Titanium EDS maps of supported nanoparticles. (a)
+HAADF image of the sample (b) Carbon (c) and Titanium XEDS signals.
+smoothL1 and L2 Reconstruction Comparisons
+The choice of loss function has a significant effect on the quality of the reconstruction. To see the effect of the two
+loss functions we use the simulated phantom using a TV weight of α = 10−4 , and for smoothL1 (L1) using a value
+of β = 0.07 as described in the main text. In Supp. Fig. 2a, no noticeable change can be seen between the two
+losses. This can be further seen in the SSIM where the two values are similar. Varying the tilt step in Supp. Fig. 2b
+for the 12◦ case, L2 is able to more effectively retain the full structure of the membrane. In contrast, the L1 loss
+starts to lose continuity across the membrane while still retaining the internal features. The SSIM obtained with
+L1 is marginally less robust to larger tilt steps compared to L2, while converging to the same performance at very
+limited projection cases. The most significant change can be seen when varying the dose in Supp. Fig. 2c. At low
+dose cases, in particular the 10 counts/px, L1 significantly dims the membrane while L2 is still able to capture the
+membrane. In the 1 counts/px case, L2 significantly outperforms L1 in retaining the membrane which leads to a
+large difference in the SSIM.
+While the results discussed above would suggest that using an L2 pixel-wise loss would significantly improve
+reconstruction quality, applying this to the hyperbranched nanoparticle shows otherwise. For this case we set the TV
+weight α = 0 and β = 0.07; relying solely on the pixelwise losses. In Supp. Fig. 3, we compare the ground truth
+reference tilt image with the corresponding summed down projection (X-Y plane) of the L2 and L1 reconstructions.
+Comparing Supp. Fig. 3a to Supp. Fig. 3c, real features are not present or significantly reduced. In contrast to the L1
+case in Supp. Fig. 3b, the features in the reference tilt image is effectively being reproduced.
+The results shown here may give some insights on how to direct hyperparameter optimization of β and α. In
+particular, for samples that are dominated by high spatial frequencies requires lower β and α values which effectively
+turns the pixelwise loss function to a pure L1 loss. For samples dominated by low spatial frequencies, using a higher
+β may offer better performance. However, fine tuning of α may still be necessary.
+18/20
+a
+Missing Wedge (tilt range)
+SSIM
+L2
+L1
+b
+20° (-80°, 80°)
+40° (-70°, 70°)
+80° (-50°, 50°) 100° (-40°, 40°) 140° (-20°, 20°)
+Tilt Step (number of projections)
+1° (180)
+5° (36)
+104
+103
+Angles
+SSIM
+L2
+L1
+c
+12° (16)
+20° (9)
+45° (5)
+102
+101
+1
+Electron Fluence (counts/px)
+Tilt Step
+SSIM
+L2
+L1
+Fluence
+Supplemental Figure 2. Comparison between smoothL1 (L1) and MSE (L2) loss for a simulated phantom. a
+(a-c) Comparison between L1 and L2 losses by varying the missing wedge size, tilt step, and electron fluence
+respectively through a slice perpedincular to the missing wedge direction. The SSIMs were computed using the
+ground truth slice.
+19/20
+a
+L2
+b
+L1
+c Reference Tilt Image
+Supplemental Figure 3. Comparison between smoothL1 (L1) and MSE (L2) loss on the hyperbranched
+Co2 P nanoparticle. Reconstructions of the particle using L2 (a), L1 (b), and the reference tilt image (c).
+Zoomed-in regions are shown highlighting missing features.
+20/20

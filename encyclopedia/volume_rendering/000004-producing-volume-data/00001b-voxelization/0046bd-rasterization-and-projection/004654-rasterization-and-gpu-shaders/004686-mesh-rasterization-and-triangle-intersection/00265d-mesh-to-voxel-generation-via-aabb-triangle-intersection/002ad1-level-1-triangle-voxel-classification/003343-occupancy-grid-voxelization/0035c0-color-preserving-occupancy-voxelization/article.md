@@ -1,0 +1,120 @@
+# Color-Preserving Occupancy Voxelization
+
+Also called: Color Preservation in Occupancy Grids
+
+## Overview
+This method extends standard occupancy grid voxelization by storing the index of the first mesh face intersecting a voxel instead of a binary occupancy flag, thereby preserving color information for subsequent rendering or reconstruction. It differs from [Occupancy Grid Voxelization](6958-occupancy-grid-voxelization.md) by mapping face indices to voxel values rather than simple boolean presence, and from [Adaptive Triangle-to-Voxel Overlap Test](14342-adaptive-triangle-to-voxel-overlap-test.md) by using a fixed parallel iteration over all voxels without adaptive refinement.
+
+## How it works
+**Inputs and Outputs:**
+- Input: A watertight triangular mesh in OFF format (vertices and faces). Optional: per-face RGB colors.
+- Output: An HDF5 file containing an $N \times H \times W \times D$ tensor of integer face indices (0 for empty, $f$ for occupied by face $f$). If color mode is enabled, a separate `[int]_color.h5` file stores the original mesh face colors.
+
+**Data Structures:**
+- **Occupancy Grid:** 3D array of integers. Dimensions correspond to voxel grid resolution. Values are face indices.
+- **Color File:** HDF5 file storing RGB values for each face in the mesh.
+
+**Algorithm Steps:**
+1. **Initialization:** Determine grid dimensions ($H, W, D$) based on mesh bounds and voxel size. Initialize parallel loop over all voxel indices $i$ from $0$ to $H \times W \times D - 1$.
+2. **Voxel Coordinate Calculation:** For each index $i$, compute voxel coordinates $(h, w, d)$:
+   $$ d = i \pmod D $$
+   $$ w = \left\lfloor \frac{i}{D} \right\rfloor \pmod W $$
+   $$ h = \left\lfloor \frac{i}{D \times W} \right\rfloor $$
+3. **Voxel Bounds:** Define the axis-aligned bounding box (AABB) for the voxel at $(h, w, d)$:
+   $$ \text{min} = (w, h, d) $$
+   $$ \text{max} = (w + 1, h + 1, d + 1) $$
+   *Note: These are integer grid coordinates. Physical coordinates are derived by scaling with voxel size.*
+4. **Face Intersection Loop:** Iterate over all mesh faces $f$ from $0$ to $N_{faces} - 1$.
+   - Retrieve vertices $v_1, v_2, v_3$ for face $f$.
+   - Perform triangle-box intersection test:
+     $$ \text{overlap} = \text{triangle\_box\_intersection}(\text{min}, \text{max}, v_1, v_2, v_3) $$
+   - If $\text{overlap}$ is true:
+     - Store face index $f$ in the occupancy grid at $(h, w, d)$.
+     - **Pitfall Handling:** If $f == 0$, store $N_{faces}$ instead of $0$ to distinguish from empty space (where $0$ indicates no intersection).
+     - Break the face loop for this voxel (only the first intersecting face is stored).
+5. **Color Storage (if enabled):** If the `--color` flag is set, write the original mesh face colors to a separate HDF5 file `[int]_color.h5`.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def color_preserving_voxelization(mesh, voxel_size, grid_bounds):
+    """
+    mesh: object with vertices (N_v, 3) and faces (N_f, 3)
+    voxel_size: float, size of one voxel in world units
+    grid_bounds: tuple (min_x, min_y, min_z, max_x, max_y, max_z)
+    """
+    # Calculate grid dimensions
+    min_x, min_y, min_z, max_x, max_y, max_z = grid_bounds
+    width = int(round((max_x - min_x) / voxel_size))
+    height = int(round((max_y - min_y) / voxel_size))
+    depth = int(round((max_z - min_z) / voxel_size))
+    
+    # Initialize occupancy grid with 0 (empty)
+    occ_grid = np.zeros((height, width, depth), dtype=np.int32)
+    
+    num_faces = mesh.num_faces()
+    
+    # Parallel loop over all voxels
+    for i in range(height * width * depth):
+        # Calculate voxel coordinates
+        d = i % depth
+        w = (i // depth) % width
+        h = (i // (depth * width))
+        
+        # Define voxel bounds in grid coordinates
+        min_coord = np.array([w, h, d], dtype=np.float32)
+        max_coord = np.array([w + 1, h + 1, d + 1], dtype=np.float32)
+        
+        # Convert to world coordinates if necessary for intersection test
+        # Assuming mesh vertices are in world coordinates
+        min_world = min_coord * voxel_size + np.array([min_x, min_y, min_z])
+        max_world = max_coord * voxel_size + np.array([min_x, min_y, min_z])
+        
+        found = False
+        for f in range(num_faces):
+            v1, v2, v3 = mesh.get_face_vertices(f)
+            
+            # Triangle-box intersection test
+            overlap = triangle_box_intersection(min_world, max_world, v1, v2, v3)
+            
+            if overlap:
+                # Store face index, handling the 0-index pitfall
+                face_id = f if f != 0 else num_faces
+                occ_grid[h, w, d] = face_id
+                found = True
+                break # Only store the first intersecting face
+        
+        # If not found, occ_grid[h, w, d] remains 0 (empty)
+        
+    return occ_grid
+```
+
+**Parameters:**
+- `voxel_size`: Determines resolution. Not given in the sources.
+- `grid_bounds`: Defines the spatial extent. Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+- **Face Index 0:** Face index $0$ is treated as 'not voxelized' space by default. If face $0$ overlaps a voxel, store `num_faces()` in the voxel instead of $0$ to distinguish it from empty space [S1, unofficial].
+- **Watertight Meshes:** The triangular meshes of the input OFF files should be watertight [S2, unofficial].
+- **Color File Ordering:** When providing multiple color files to `occ_to_off.py`, the ordering is important [S2, unofficial].
+
+## Subtopics
+
+### [Surface-based Voxel Color Sampling](16409-surface-based-voxel-color-sampling.md)
+Assigns colors by sampling the nearest point on the mesh surface rather than the voxel center, avoiding color errors when voxel centers fall inside empty space. It differs from center-based sampling by ensuring that surface voxels receive colors derived from the actual geometry intersection. This method builds on [Color-Preserving Occupancy Voxelization](7557-color-preserving-occupancy-voxelization.md) by utilizing the occupancy grid to identify which voxels require surface sampling.
+
+## Operating characteristics
+- **Time Complexity:** $O(V \times F)$, where $V$ is the number of voxels and $F$ is the number of faces, as each voxel may potentially intersect with all faces before finding the first one.
+- **Memory Complexity:** $O(V)$ for the occupancy grid, plus $O(F)$ for the color file if enabled.
+- **Strengths:** Preserves color information directly in the voxel grid, enabling simple color reconstruction.
+- **Limitations:** Only stores the first intersecting face, which may not be the most representative for thick surfaces. Performance degrades with high face counts due to the linear scan per voxel.
+- **When to use:** When color preservation is required and the mesh is watertight.
+- **When not to use:** For non-watertight meshes or when multiple surface interactions per voxel are needed.
+
+## Background
+Originating from the `mesh-voxelization` project by David Stutz, this method was developed to enhance standard occupancy grid voxelization by incorporating color data. It is used in contexts requiring colored voxel representations of 3D meshes, such as 3D reconstruction and visualization.
+
+## Sources
+[S1] Mesh Voxelization - GitHub, https://github.com/davidstutz/mesh-voxelization, fetched 2026-10-26 (unofficial)
+[S2] mesh-voxelization/README.md at master, https://github.com/davidstutz/mesh-voxelization/blob/master/README.md, fetched 2026-10-26 (unofficial)

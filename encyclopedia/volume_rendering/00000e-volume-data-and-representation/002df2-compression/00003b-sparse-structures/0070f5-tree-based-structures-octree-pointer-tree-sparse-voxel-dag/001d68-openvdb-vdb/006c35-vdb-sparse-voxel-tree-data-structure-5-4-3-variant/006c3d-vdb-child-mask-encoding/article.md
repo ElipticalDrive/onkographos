@@ -1,0 +1,118 @@
+# VDB Child Mask Encoding
+
+Also called: Child presence mask, Topology mask
+
+## Overview
+VDB Child Mask Encoding is a bit-vector mechanism used within the OpenVDB sparse voxel tree to indicate the existence of child nodes. It solves the problem of sparse storage by allowing a parent node to omit children that contain no data, storing only a bitmask to define the tree topology and the sorted order of the remaining children [S1, unofficial]. It is distinct from the Value Mask, which encodes data uniformity (tiles) rather than structural presence [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** The spatial coordinates $(x, y, z)$ of a potential child relative to its parent, and the node type (3-node, 4-node, or 5-node) which determines the dimension $dim$.
+*   **Output:** A bit index into a contiguous array of 64-bit integers representing the presence of that child.
+
+**Data Structures:**
+The mask is stored as an array of 64-bit unsigned integers (`u64`). The size of the array depends on the node type:
+*   **5-node:** $32,768$ bits, stored as $512$ `u64`s.
+*   **4-node:** $4,096$ bits, stored as $64$ `u64`s.
+*   **3-node:** $512$ bits, stored as $8$ `u64`s.
+
+**Bit Index Calculation:**
+The position of the bit corresponding to a child at relative coordinates $(x, y, z)$ is calculated using the dimension $dim$ of the child node. The range for $x, y, z$ is $[0, dim)$.
+
+1.  **Standard Formula:**
+    $$bit\_index = z + y \cdot dim + x \cdot dim \cdot dim$$
+    Where $dim = 1 \ll log2dim$.
+
+2.  **Optimized Bitwise Formula:**
+    Since the ranges of $x, y, z$ fit within $log2dim$ bits, and the shifts align perfectly without overlap, addition can be replaced by bitwise OR to avoid overflow logic:
+    $$bit\_index = z \ | \ (y \ll log2dim) \ | \ (x \ll (log2dim \ll 1))$$
+    This packs the coordinates into a single integer: `xxxyyyzzz` in binary.
+
+3.  **Fused Multiply Add (MADD) Formula:**
+    $$bit\_index = madd(madd(x, (1 \ll logdim), y), (1 \ll logdim), z)$$
+    Where $madd(a, b, c) = a \cdot b + c$.
+
+**Storage Order:**
+Children are stored in the file sequentially, sorted by their calculated `bit_index`. The mask defines both the topology (which children exist) and the storage order [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def calculate_bit_index(x: int, y: int, z: int, log2dim: int) -> int:
+    """
+    Calculate the bit index for a child node at relative coordinates (x, y, z).
+    
+    Args:
+        x: Relative x coordinate [0, 2^log2dim)
+        y: Relative y coordinate [0, 2^log2dim)
+        z: Relative z coordinate [0, 2^log2dim)
+        log2dim: Log base 2 of the dimension (e.g., 3 for 8x8x8, 4 for 16x16x16, 5 for 32x32x32)
+        
+    Returns:
+        The integer index of the bit in the mask array.
+    """
+    # Using bitwise OR for efficiency and correctness within bounds
+    return z | (y << log2dim) | (x << (log2dim << 1))
+
+def set_child_present(mask_array: list, x: int, y: int, z: int, log2dim: int):
+    """
+    Set the bit in the mask array indicating a child exists at (x, y, z).
+    
+    Args:
+        mask_array: List of 64-bit integers representing the mask.
+        x, y, z: Relative coordinates.
+        log2dim: Log base 2 of the dimension.
+    """
+    bit_index = calculate_bit_index(x, y, z, log2dim)
+    
+    # Determine which 64-bit integer holds the bit
+    array_index = bit_index // 64
+    # Determine the bit position within that integer (0-63)
+    bit_position = bit_index % 64
+    
+    # Set the bit
+    mask_array[array_index] |= (1 << bit_position)
+
+def is_child_present(mask_array: list, x: int, y: int, z: int, log2dim: int) -> bool:
+    """
+    Check if a child exists at (x, y, z) based on the mask.
+    
+    Args:
+        mask_array: List of 64-bit integers representing the mask.
+        x, y, z: Relative coordinates.
+        log2dim: Log base 2 of the dimension.
+        
+    Returns:
+        True if the child exists, False otherwise.
+    """
+    bit_index = calculate_bit_index(x, y, z, log2dim)
+    
+    array_index = bit_index // 64
+    bit_position = bit_index % 64
+    
+    # Check if the bit is set
+    return (mask_array[array_index] >> bit_position) & 1 == 1
+```
+
+**Edge Cases and Pitfalls:**
+*   **Bounds:** The coordinates $x, y, z$ must be strictly within $[0, dim)$. Exceeding these bounds results in undefined behavior or incorrect bit mapping.
+*   **Integer Size:** The `bit_index` must fit within the integer type used for the array index. For 5-nodes, the max index is $32,767$, which fits in standard integer types.
+*   **Endianness:** The sources do not specify byte endianness for the storage of the `u64` array. Implementers should assume the order of bits within the `u64` follows the logical `bit_index` calculation, but byte order may need to match the file format's endianness [S1, unofficial].
+
+## Subtopics
+
+### VDB Tile Optimization
+An optimization where a child node's subtree is omitted if all voxels within that child's span have the same value. The single uniform value is stored at the parent level. Such a child is called a **tile**. It uses a **Value Mask**, which is identical in structure to the Child Mask (one bit per potential child), but a set bit indicates uniformity rather than existence [S1, unofficial].
+
+## Operating characteristics
+*   **Memory:** The mask adds fixed overhead per node. For a 5-node, this is 512 `u64`s (4 KB). For a 4-node, 64 `u64`s (512 B). For a 3-node, 8 `u64`s (64 B). This overhead is constant regardless of sparsity.
+*   **Time Complexity:** Accessing a child's presence is $O(1)$ given the coordinates, requiring one bitwise operation and one array lookup.
+*   **Strengths:** Enables highly sparse storage by omitting empty subtrees. The sorted storage order allows for efficient sequential reading/writing.
+*   **Limitations:** The fixed-size mask means that even for very sparse nodes, the overhead is paid. For extremely sparse data, the ratio of mask bits to data bits can be high.
+
+## Background
+The VDB format was developed by DreamWorks Animation for visual effects pipelines. The specific bit-mask encoding scheme described here was reverse-engineered from the OpenVDB C++ source code and binary file structures, as no formal public specification existed at the time of the primary source's publication [S1, unofficial].
+
+## Sources
+[S1] JangaFX - Insight: VDB, a deep dive, https://jangafx.com/insights/vdb-a-deep-dive, fetched 2026-10-27 (unofficial)

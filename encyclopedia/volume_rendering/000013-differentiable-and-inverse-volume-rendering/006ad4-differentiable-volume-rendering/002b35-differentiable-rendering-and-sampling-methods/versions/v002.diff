@@ -1,0 +1,323 @@
+--- v001.md
++++ v002.md
+@@ -4,145 +4,199 @@
+ 
+ ## Overview
+-Differentiable Rendering and Sampling Methods constitute the core algorithmic framework for optimizing 3D scene parameters (such as density, color, geometry, or material properties) by propagating gradients from a 2D image loss back through the rendering integral [S5, unofficial]. Unlike traditional rendering which produces images, this method produces a differentiable computational graph where the output is the rendered pixel color $\hat{C}(\mathbf{r})$ and the inputs are the scene representation parameters [S5, unofficial]. It sets itself apart from differentiable rasterization by operating on volumetric fields (density, SDF) via numerical integration rather than explicit geometry [S5, unofficial], and from standard Monte Carlo ray tracing by ensuring the sampling and integration steps are fully differentiable to enable gradient-based optimization [S1, S5, unofficial].
++Differentiable Rendering and Sampling Methods are rendering algorithms that numerically integrate along camera rays through a volumetric scene representation (such as a Neural Radiance Field or Signed Distance Function), where the integration process is made differentiable with respect to scene parameters to enable gradient-based optimization [S1, unofficial]. Unlike differentiable rasterization, which uses explicit geometry and pixel/primitive association, this method relies on volumetric fields and numerical integration, requiring surface extraction for explicit mesh output [S1, unofficial]. It serves as the core mechanism for training Neural Radiance Fields (NeRF) and optimizing implicit 3D scene representations from 2D image observations [S1, unofficial].
+ 
+ ## How it works
+-The method numerically approximates the volume rendering equation by discretizing the integration along camera rays into a sum over sampled points [S5, unofficial].
+-
+-### Inputs and Outputs
+-*   **Inputs:** Camera ray $\mathbf{r}$ (origin $\mathbf{o}$, direction $\mathbf{d}$); Scene representation parameters $\theta$ (e.g., MLP weights, hash grid entries, or voxel values); Sampling configuration (number of samples $N$, step size $\delta$).
+-*   **Outputs:** Rendered pixel color $\hat{C}(\mathbf{r})$; Gradients $\frac{\partial \mathcal{L}}{\partial \theta}$ with respect to a loss $\mathcal{L}$ (e.g., MSE between rendered and ground truth images) [S5, unofficial].
+-
+-### Data Structures
+-The scene is typically represented as an implicit function queried by a neural network (MLP) or a structured grid (e.g., hash grid, voxel grid) [S5, unofficial].
+-*   **Neural Field:** A function $f_\theta(\mathbf{x}, \mathbf{d}) \rightarrow (\sigma, \mathbf{c})$, where $\mathbf{x}$ is the 3D coordinate, $\sigma$ is the density, and $\mathbf{c}$ is the color [S5, unofficial].
+-*   **Sampling Points:** A list of 3D coordinates $\{\mathbf{x}_i\}_{i=1}^N$ along the ray, where $\mathbf{x}_i = \mathbf{o} + t_i \mathbf{d}$ [S5, unofficial].
+-
+-### Formulas
+-The volume rendering equation is discretized as [S5, unofficial]:
+-
+-$$
+-\hat{C}(\mathbf{r}) = \sum_{i=1}^N T_i \cdot \alpha_i \cdot \mathbf{c}_i
+-$$
+-
+-where:
+-*   $\alpha_i = 1 - \exp(-\sigma_i \delta_i)$ is the opacity at sample $i$, derived from density $\sigma_i$ and step size $\delta_i$ [S5, unofficial].
+-*   $\mathbf{c}_i$ is the color at sample $i$ [S5, unofficial].
+-*   $T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right)$ is the transmittance, representing the probability that the ray travels to sample $i$ without being absorbed or scattered [S5, unofficial].
+-
+-### Parameters
+-*   **$N$ (Samples per ray):** The number of discrete points sampled along the ray. Typical values range from 2 to 32 depending on the trade-off between accuracy and runtime [S4].
+-*   **$\delta_i$ (Step size):** The distance between consecutive samples. Can be uniform or adaptive based on hierarchical sampling [S5, unofficial].
+-*   **$\sigma_0$ (Kernel spread):** In perturbation-based optimization, the initial standard deviation for sampling noise. Typical default is 0.5 [S4].
+-*   **$\sigma_m$ (Minimum spread):** The minimum value for $\sigma$ during annealing to avoid numerical instability. Set to 0.01 [S4].
+-
+-### Steps
+-1.  **Ray Generation:** For each pixel, generate a camera ray $\mathbf{r}$ defined by its origin and direction [S5, unofficial].
+-2.  **Sampling:** Sample $N$ points $\{\mathbf{x}_i\}$ along the ray. Stratified sampling is often used to jitter positions within intervals to reduce aliasing [S5, unofficial].
+-    *   *Hierarchical Sampling (Optional):* Perform a coarse pass with evenly spaced samples to estimate density distribution, then allocate more samples to high-density regions for the fine pass [S5, unofficial].
+-3.  **Scene Query:** At each $\mathbf{x}_i$, query the scene representation network $f_\theta(\mathbf{x}_i, \mathbf{d})$ to obtain density $\sigma_i$ and color $\mathbf{c}_i$ [S5, unofficial].
+-4.  **Compositing:** Compute transmittance $T_i$ and opacity $\alpha_i$ for each sample. Accumulate the final color $\hat{C}(\mathbf{r})$ using the front-to-back blending formula [S5, unofficial].
+-5.  **Loss Computation:** Calculate the loss $\mathcal{L}$ (e.g., MSE) between $\hat{C}(\mathbf{r})$ and the ground truth image [S5, unofficial].
+-6.  **Backpropagation:** Compute gradients $\frac{\partial \mathcal{L}}{\partial \theta}$ by backpropagating through the compositing weights and into the network parameters [S5, unofficial].
+-
+-### Pseudocode
++The method approximates the volume rendering integral by discretizing it into a sum over sampled points, making the process differentiable for gradient-based optimization of scene parameters like density and color [S1, unofficial].
++
++**Inputs and Outputs:**
++*   **Inputs:** Camera parameters (origin, direction), scene representation (implicit function, e.g., MLP or hash grid), and ground truth image (for loss computation).
++*   **Outputs:** Rendered pixel color $\hat{C}$ and gradients with respect to scene parameters.
++
++**Data Structures:**
++*   **Scene Representation:** A neural network (e.g., MLP) or data structure (e.g., Instant NGP) that maps 3D coordinates (and viewing direction) to volumetric properties. For NeRF, it outputs density $\sigma$ and color $\mathbf{c}$. For SDF-based models, it outputs a signed distance value and a feature vector for color [S1, unofficial].
++*   **Ray Buffer:** Stores ray origins, directions, and sampled points along the ray.
++
++**Numbered Steps:**
++
++1.  **Ray Generation:** For each pixel, generate a camera ray $\mathbf{r}$ defined by its origin (camera center) and direction [S1, unofficial].
++2.  **Sampling:** Sample points along the ray at discrete intervals. Stratified sampling is often used to randomly jitter sample positions within each interval to reduce aliasing artifacts [S1, unofficial].
++    *   *Hierarchical Sampling (Efficiency Optimization):* Use a two-stage process. Coarse Stage: Predict density at evenly spaced samples to produce a rough density distribution. Fine Stage: Allocate more samples to regions with high density (likely containing surfaces) based on the coarse distribution. This is importance sampling to focus computation [S1, unofficial].
++3.  **Scene Query:** At each sampled 3D point $\mathbf{x}_i$, query the scene representation network. The network outputs density $\sigma_i$ and color $\mathbf{c}_i$ (or features for color) [S1, unofficial].
++4.  **Differentiable Compositing:** Compute the final pixel color $\hat{C}(\mathbf{r})$ using the volume rendering equation. The discrete, differentiable approximation is alpha compositing [S1, unofficial]:
++    $$
++    \hat{C}(\mathbf{r}) = \sum_{i=1}^N T_i \cdot \alpha_i \cdot \mathbf{c}_i
++    $$
++    where:
++    *   $\alpha_i = 1 - \exp(-\sigma_i \delta_i)$ is the opacity at sample $i$, derived from density $\sigma_i$ and step size $\delta_i$ [S1, unofficial].
++    *   $T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right)$ is the transmittance, representing the probability the ray travels to sample $i$ without hitting anything [S1, unofficial].
++    *   $\mathbf{c}_i$ is the color at sample $i$ [S1, unofficial].
++5.  **Loss Computation:** Compute a loss (e.g., Mean Squared Error) between the rendered image $\hat{C}$ and the ground truth image $C_{gt}$ [S1, unofficial].
++    *   *Auxiliary Losses:* Eikonal Loss (enforces unit norm spatial gradients for SDFs) and Total Variation Loss (smooths density fields) may be added [S1, unofficial].
++6.  **Optimization:** Backpropagate the loss through the compositing weights and into the network parameters (MLP weights, encoding parameters) to calculate gradients. Update parameters using an optimizer like Adam to minimize photometric error [S1, unofficial].
++
++**Pseudocode:**
++
+ ```python
+-def differentiable_ray_marching(ray_origin, ray_direction, scene_network, num_samples, step_size):
+-    """
+-    Performs differentiable volume rendering along a single ray.
+-    
+-    Args:
+-        ray_origin: 3D vector, camera origin.
+-        ray_direction: 3D vector, camera direction.
+-        scene_network: Function f_theta(x, d) -> (sigma, color).
+-        num_samples: Integer N, number of samples per ray.
+-        step_size: Float delta, distance between samples.
+-        
+-    Returns:
+-        color: 3D vector, rendered pixel color.
+-        gradients: Dict, gradients of loss w.r.t. scene_network parameters (handled by AD framework).
+-    """
+-    # Step 1: Sampling
+-    # Generate sample positions along the ray
+-    # t_i = i * step_size for i in 0..N-1
+-    # x_i = ray_origin + t_i * ray_direction
+-    sample_positions = []
+-    for i in range(num_samples):
+-        t = i * step_size
+-        pos = ray_origin + t * ray_direction
+-        sample_positions.append(pos)
+-    
+-    # Step 2: Scene Query
+-    # Query density and color at each sample point
+-    densities = []
+-    colors = []
+-    for pos in sample_positions:
+-        sigma, c = scene_network(pos, ray_direction)
+-        densities.append(sigma)
+-        colors.append(c)
+-        
+-    # Step 3: Compositing
+-    # Compute transmittance and accumulated color
+-    accumulated_transmittance = 1.0
+-    final_color = [0.0, 0.0, 0.0]
+-    
+-    for i in range(num_samples):
+-        sigma = densities[i]
+-        c = colors[i]
+-        
+-        # Alpha: probability of absorption at this sample
+-        alpha = 1.0 - exp(-sigma * step_size)
+-        
+-        # Transmittance: probability of reaching this sample
+-        # T_i = exp(-sum_{j<i} sigma_j * delta)
+-        # Note: accumulated_transmittance holds T_i at the start of iteration i
+-        
+-        # Contribution of this sample
+-        contribution = accumulated_transmittance * alpha * c
+-        final_color = final_color + contribution
+-        
+-        # Update transmittance for next sample
+-        # T_{i+1} = T_i * (1 - alpha_i)
+-        accumulated_transmittance = accumulated_transmittance * (1.0 - alpha)
+-        
+-    return final_color
++import torch
++import torch.nn as nn
++
++class DifferentiableRenderer:
++    def __init__(self, scene_network, num_samples_coarse, num_samples_fine):
++        self.scene_network = scene_network
++        self.num_samples_coarse = num_samples_coarse
++        self.num_samples_fine = num_samples_fine
++
++    def generate_rays(self, camera_params):
++        """
++        Generate rays for each pixel based on camera parameters.
++        Returns: ray_origins (H, W, 3), ray_directions (H, W, 3)
++        """
++        # Implementation depends on camera model (e.g., pinhole)
++        # [G] Standard pinhole camera ray generation logic
++        pass
++
++    def sample_points(self, ray_origins, ray_directions, near, far):
++        """
++        Sample points along rays.
++        Returns: points (H, W, N, 3)
++        """
++        # Stratified sampling along the ray
++        t_vals = torch.linspace(near, far, self.num_samples_coarse)
++        # Add jitter for stratified sampling
++        jitter = torch.rand_like(t_vals)
++        t_vals = t_vals + jitter / self.num_samples_coarse
++        # Expand dimensions for batch processing
++        points = ray_origins.unsqueeze(2) + ray_directions.unsqueeze(2) * t_vals.unsqueeze(3)
++        return points
++
++    def query_scene(self, points):
++        """
++        Query the scene network for density and color.
++        Returns: sigma (H, W, N, 1), color (H, W, N, 3)
++        """
++        # Reshape points to (H*W*N, 3) for network input
++        batch_points = points.view(-1, 3)
++        # Query network
++        # [G] Assuming scene_network returns (sigma, color)
++        sigma, color = self.scene_network(batch_points)
++        # Reshape back
++        sigma = sigma.view(points.shape[0], points.shape[1], points.shape[2], 1)
++        color = color.view(points.shape[0], points.shape[1], points.shape[2], 3)
++        return sigma, color
++
++    def composite(self, sigma, points, ray_directions):
++        """
++        Perform differentiable volume rendering.
++        Returns: rendered_color (H, W, 3), transmittance (H, W, N, 1)
++        """
++        # Compute step sizes
++        # [G] Assuming uniform sampling for simplicity; non-uniform requires delta_i calculation
++        delta = torch.norm(points[:, :, 1:, :] - points[:, :, :-1, :], dim=3)
++        # Handle first and last points
++        delta = torch.cat([delta, delta[:, :, -1:, :]], dim=2)
++        
++        # Compute opacity alpha
++        alpha = 1.0 - torch.exp(-sigma * delta)
++        
++        # Compute transmittance T_i
++        # T_i = exp(-sum_{j<i} sigma_j * delta_j)
++        # Accumulate weight
++        weights = alpha * torch.cumprod(torch.cat([torch.ones_like(alpha[:, :, 0:1, :]), 1.0 - alpha[:, :, :-1, :]], dim=2), dim=2)
++        
++        # Compute final color
++        rendered_color = torch.sum(weights * alpha * sigma * 0 + weights * color, dim=2) # Simplified: weights already include alpha
++        # Correct formula: C = sum(T_i * alpha_i * c_i)
++        # T_i is product of (1-alpha) for j < i
++        T = torch.cumprod(torch.cat([torch.ones_like(alpha[:, :, 0:1, :]), 1.0 - alpha[:, :, :-1, :]], dim=2), dim=2)
++        rendered_color = torch.sum(T * alpha * color, dim=2)
++        
++        return rendered_color, T
++
++    def forward(self, camera_params, ground_truth_image):
++        """
++        Forward pass with loss computation.
++        """
++        ray_origins, ray_directions = self.generate_rays(camera_params)
++        
++        # Coarse sampling
++        points_coarse = self.sample_points(ray_origins, ray_directions, near=0.0, far=1.0)
++        sigma_coarse, color_coarse = self.query_scene(points_coarse)
++        
++        # Hierarchical sampling: use coarse density to guide fine sampling
++        # [G] Importance sampling based on sigma_coarse
++        # For simplicity, assume fine samples are generated similarly but focused
++        points_fine = self.sample_points(ray_origins, ray_directions, near=0.0, far=1.0) # Placeholder for importance sampling logic
++        sigma_fine, color_fine = self.query_scene(points_fine)
++        
++        # Composite fine samples
++        rendered_color, _ = self.composite(sigma_fine, points_fine, ray_directions)
++        
++        # Compute loss
++        loss = torch.mean((rendered_color - ground_truth_image) ** 2)
++        
++        return loss
++
++    def backward(self, loss):
++        """
++        Backpropagation is handled by automatic differentiation frameworks (e.g., PyTorch).
++        """
++        loss.backward()
+ ```
+ 
+-### Edge Cases and Pitfalls
+-*   **Numerical Instability:** If density $\sigma$ is very large, $1 - \exp(-\sigma \delta)$ may suffer from precision loss. Using the exponential form directly is preferred [S5, unofficial].
+-*   **Zero Density:** If $\sigma = 0$, $\alpha = 0$ and $T = 1$, contributing nothing to color but passing transmittance [S5, unofficial].
+-*   **Gradient Vanishing:** If the ray passes through empty space (low $\sigma$), gradients may vanish, slowing optimization [S5, unofficial].
+-*   **Discontinuities:** Naive automatic differentiation misses boundary effects when an edge crosses a ray. Edge sampling is required to capture these derivatives [S6, unofficial].
++**Parameters:**
++*   **Num Samples:** Number of points sampled per ray. Hierarchical sampling uses coarse and fine stages [S1, unofficial].
++*   **Optimizer:** Adam is commonly used [S1, unofficial].
++*   **Loss Functions:** Mean Squared Error (MSE) for photometric error, Eikonal Loss for SDFs, Total Variation Loss for density smoothing [S1, unofficial].
++
++**Edge Cases and Pitfalls:**
++*   **Precision:** Floating-point precision issues can arise in transmittance calculation for very dense or transparent volumes.
++*   **Boundaries:** Handling near and far clipping planes correctly is essential to avoid sampling outside the scene.
++*   **Degenerate Input:** Empty space or zero density regions can lead to undefined behavior if not handled (e.g., by clamping or skipping).
+ 
+ ## Subtopics
+ 
+ ### [Monte Carlo Radiance Estimate for Scene Reconstruction](1119-monte-carlo-radiance-estimate-for-scene-reconstruction.md)
+-Replaces deterministic ray marching with stochastic sampling to accelerate training in voxel-based representations like DVGO, trading increased variance for speed.
++Monte Carlo Radiance Estimate (MC + RVS) is an unbiased color estimation method for differentiable volume rendering that accelerates training in voxel-based scene representations like DVGO by evaluating fewer samples per ray. It replaces deterministic ray marching with stochastic sampling, yielding a ×6 speedup over DVGO's sparsity thresholding with $k=8$ at the cost of increased estimate variance. It provides an unbiased radiance estimate for any sample count $k$, making it suitable for architectures where density field evaluation is faster than radiance field evaluation.
+ 
+ ### [Ray Marching with Differential Diffusion](3547-ray-marching-with-differential-diffusion.md)
+-Computes single and multiple scattering radiance and their density derivatives simultaneously using deterministic ray marching and pre-computed diffusion terms, avoiding separate backward passes.
++Ray Marching with Differential Diffusion is a differentiable volume rendering method that computes single and multiple scattering radiance alongside their derivatives with respect to density simultaneously. It solves the problem of efficient gradient accumulation for density optimization by storing intermediate gradient contributions in a dedicated structure, avoiding the need for a separate backward pass or on-the-fly recomputation. Unlike [Monte Carlo Radiance Estimate for Scene Reconstruction](1119-monte-carlo-radiance-estimate-for-scene-reconstruction.md) which relies on stochastic sampling, this method uses deterministic ray marching with pre-computed diffusion terms. It differs from [Image-based Transfer Function Optimization via Automatic Differentiation](4372-image-based-transfer-function-optimization-via-automatic-dif.md) by explicitly modeling the physics of participating media (single/multiple scattering) rather than optimizing transfer functions directly on image space.
+ 
+ ### [Image-based Transfer Function Optimization via Automatic Differentiation](4372-image-based-transfer-function-optimization-via-automatic-dif.md)
+-Optimizes a transfer function to match a reference volume's appearance by minimizing image-space differences rather than per-voxel residuals.
++This method optimizes a transfer function $T_o$ for an optimization volume field $F_o$ such that its rendered images match those of a reference volume field $F_r$ rendered with a reference transfer function $T_r$. It solves the problem of finding a visual mapping for one dataset that reproduces the appearance of another, enabling comparative volume rendering. It differs from voxel-based least-squares approaches by minimizing the difference between final rendered images rather than per-voxel color residuals, thereby prioritizing voxels that have a larger effect on the final image. It builds on [Differentiable Rendering and Sampling Methods](4973-differentiable-rendering-and-sampling-methods.md) by applying automatic differentiation to the direct volume rendering compositing equation.
+ 
+ ### [Soft Rasterizer](6779-soft-rasterizer.md)
+-A differentiable renderer using probabilistic triangle selection instead of z-buffering, applicable to surface-based representations.
++Soft Rasterizer is a differentiable rendering method that replaces the deterministic, z-buffer-based triangle selection of traditional rasterization with a probabilistic aggregation approach. It computes pixel color as a weighted sum of contributions from all mesh triangles, including occluded ones, by modeling each triangle as a probabilistic cloud with a blur radius. This allows gradients to flow to blocked and distant triangle vertices, making it particularly suitable for geometry optimization tasks where other methods fail to propagate gradients through occlusions.
++
++### [RGBXY Derivatives with Optimal Transport (DROT)](8830-rgbxy-derivatives-with-optimal-transport-drot.md)
++RGBXY Derivatives with Optimal Transport (DROT) is a differentiable rendering method that associates each screen-space pixel with a visible 3D geometric point (point proxy) to compute 5D RGBXY derivatives, measuring how 3D RGB color and 2D projected screen-space position change with respect to scene parameters. It combines these dense derivatives with an optimal transport-based loss function to find pixel matching between rendered and target images, solving the problem of converging in inverse rendering when initial and target object locations are not close. Unlike traditional methods that rely on sparse, local per-pixel color derivatives and L2 loss, DROT captures global and long-range object motions, making it superior for optimizing global translations and rotations.
++
++### Differentiable Monte Carlo Ray Tracing
++A rendering technique used to compute global illumination via single-bounce differentiable MC ray tracing within the JOC framework [S2, unofficial]. JOC uses single-bounce differentiable MC rendering, whereas previous methods like NVDIFFRECMC avoided multi-bounce due to noise and cost, limiting them to direct lighting [S2, unofficial].
++
++### Edge Sampling for Visibility Derivatives
++A technique to capture derivative contributions from visibility changes (discontinuities) that normal path samples miss by explicitly sampling discontinuity edges [S3, unofficial]. Unlike naive automatic differentiation which only differentiates the currently traced path and misses boundary effects when an edge crosses a ray, edge sampling captures the missing boundary term [S3, unofficial]. Introduced by Li et al. in 'Differentiable Monte Carlo Ray Tracing through Edge Sampling' at SIGGRAPH Asia 2018 [S3, unofficial].
++
++### VNetL-16-17
++An architecture using an MLP to map 16 semantic channels to 16 color space channels, decoded with a final MLP on the 16-channel output image [S4, unofficial]. It performs compositing in an abstract 16-channel color space, using VNetLight for encoding, direct compositing of semantic channels, and an MLP decoder for the final RGB image [S4, unofficial]. Steps include using VNetLight architecture to implement the volume encoder producing a 16-channel volume, using the same MLP architecture as VNetL16-4 for feature mapping but using 16 semantic channels directly in compositing, decoding the resulting 16-channel image (plus one additional alpha channel) using another MLP with one ReLU-activated 16-channel hidden layer and a sigmoid output layer to yield a 3-channel RGB image, and using the opacity directly as produced from the DVRUnit [S4, unofficial]. Layout: Encoder: VNet16. TF: MLP16. Accumulation: Alpha. Decoder: MLP3. Parameters: ~12.3 M [S4, unofficial].
++
++### Parameter-space ReSTIR
++A differentiable rendering formulation that computes gradients directly in parameter space instead of image space, enabling efficient sample reuse across optimization iterations by storing one reservoir per parameter (texel) rather than per pixel [S5]. It reformulates the derivative estimation as a single integral over the parameter space, allowing the use of one reservoir per parameter (texel) instead of one per pixel, reducing storage from O(pixels × parameters) to O(parameters) [S5].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear with respect to the number of samples $N$ and pixels [S4]. Hierarchical sampling reduces effective $N$ by focusing on high-density regions [S5, unofficial].
+-*   **Memory Complexity:** $O(kn)$ for reverse-mode AD if intermediate states are stored, where $n$ is pixels and $k$ is samples. Adjoint methods or analytic inversion can reduce this to $O(n)$ [S5, unofficial].
+-*   **Performance:** Runtime scales linearly with $N$. At $N \approx 16$, runtime equals that of constant-baseline path tracers using adjoint methods [S4]. Convergence improves with $N$ up to $\sim 10$, then stagnates [S4].
+-*   **Strengths:** Enables end-to-end optimization of 3D scenes from 2D images; handles complex topology via implicit representations [S5, unofficial].
+-*   **Limitations:** High memory usage for large scenes with standard AD; sensitive to sampling noise and discontinuities [S5, unofficial][S6, unofficial].
+-*   **When to use:** Neural Radiance Field (NeRF) training, SDF optimization, inverse rendering [S5, unofficial].
+-*   **When not to use:** Real-time rendering without pre-training; scenes with sharp discontinuities requiring edge sampling [S6, unofficial].
++*   **Time Complexity:** Depends on the number of samples per ray and the complexity of the scene query network. Hierarchical sampling reduces the number of samples needed for high-quality results [S1, unofficial].
++*   **Memory Complexity:** Standard reverse-mode AD requires storing $O(kn)$ intermediate states, leading to high memory usage [S5]. Adjoint methods and analytic inversion can reduce this to $O(n)$ [S5].
++*   **Measured Performance:** Differentiable Monte Carlo Ray Tracing can provide a ×6 speedup over deterministic ray marching with sparsity thresholding at the cost of increased variance [S1, unofficial].
++*   **Strengths:** Enables gradient-based optimization of 3D scene representations from 2D images; handles complex topology and view consistency; suitable for view synthesis and scene reconstruction [S1, unofficial].
++*   **Limitations:** High memory usage for large scenes with standard AD; stochastic methods introduce variance; requires careful tuning of sampling and loss functions [S1, unofficial][S5].
++*   **When to Use:** When optimizing implicit 3D scene representations (NeRF, SDFs) from 2D images; when view synthesis or scene reconstruction is required [S1, unofficial].
++*   **When Not to Use:** When explicit geometry output is needed without surface extraction; when real-time performance is critical without pre-training [S1, unofficial].
+ 
+ ## Background
+-Differentiable Ray Marching was introduced as a core component of Neural Radiance Fields (NeRF) for view synthesis [S5, unofficial]. It builds on the volume rendering equation and automatic differentiation techniques. Edge sampling for differentiable ray tracing was introduced by Li et al. at SIGGRAPH Asia 2018 [S6, unofficial]. The method has been widely adopted in neural rendering, including NeuS, VolSDF, and Occupancy Networks [S5, unofficial].
++Differentiable Ray Marching is a core algorithm in neural rendering that enables the optimization of 3D scene parameters by making the process of synthesizing a 2D image from a volumetric representation fully differentiable [S1, unofficial]. It is primarily used in Neural Radiance Field (NeRF) training for view synthesis and scene reconstruction from 2D images [S1, unofficial]. It is also used in Signed Distance Function (SDF) optimization (NeuS, VolSDF), Occupancy Network training, and inverse rendering applications like intrinsic decomposition and neural reflectance fields [S1, unofficial]. The method builds on the volume rendering equation and the propagation of gradients through the integration steps [G].
+ 
+ ## Sources
+-[S1] Joint Optimization of Triangle Mesh, Material, and Light from Neural Fields with Neural Radiance Cache, https://doi.org/10.48550/arxiv.2305.16800, fetched 2026-10-26 (unofficial)
+-[S2] Deep Direct Volume Rendering: Learning Visual Feature Mappings From Exemplary Images, https://doi.org/10.48550/arxiv.2106.05429, fetched 2026-10-26 (unofficial)
+-[S3] Differentiable Rendering: A Survey, https://doi.org/10.48550/arxiv.2006.12057, fetched 2026-10-26 (unofficial)
+-[S4] Plateau-Reduced Differentiable Path Tracing, https://doi.org/10.1109/cvpr52729.2023.00417, fetched 2026-10-26
+-[S5] Differentiable Ray Marching: Definition & How It Works, https://inferensys.com/glossary/neural-radiance-fields-and-spatial-computing/implicit-surface-representations/differentiable-ray-marching, fetched 2026-10-28 (unofficial)
+-[S6] Differentiable ray tracing — from paths to gradients | Bai Liping, https://bailiping.com/differentiable-ray-tracing/, fetched 2026-10-28 (unofficial)+[S1] Differentiable Ray Marching: Definition & How It Works, https://inferensys.com/glossary/neural-radiance-fields-and-spatial-computing/implicit-surface-representations/differentiable-ray-marching, fetched 2026-10-28 (unofficial)
++[S2] Joint Optimization of Triangle Mesh, Material, and Light from Neural Fields with Neural Radiance Cache, https://doi.org/10.48550/arxiv.2305.16800, fetched 2026-10-26 (unofficial)
++[S3] Differentiable ray tracing — from paths to gradients | Bai Liping, https://bailiping.com/differentiable-ray-tracing/, fetched 2026-10-28 (unofficial)
++[S4] Deep Direct Volume Rendering: Learning Visual Feature Mappings From Exemplary Images, https://doi.org/10.48550/arxiv.2106.05429, fetched 2026-10-26 (unofficial)
++[S5] Parameter-space ReSTIR for Differentiable and Inverse Rendering, https://doi.org/10.1145/3588432.3591512, fetched 2026-10-27

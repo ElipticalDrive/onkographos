@@ -1,0 +1,90 @@
+# Dynamic NeRF
+
+Also called: D-NeRF, DynamicNeRF
+
+## Overview
+Dynamic NeRF is a variation of NeRF designed to operate on dynamic 3D objects by explicitly considering rigid and non-rigid motion of the target [S1, unofficial]. It constructs a 3D model based on a camera moving around the object, extending the static radiance field representation to handle temporal changes [S1, unofficial]. It sets itself apart from static NeRF by introducing time as an explicit input and using deformation or flow fields to map canonical representations to deformed scenes [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** 3D spatial coordinates $(x, y, z)$, viewing direction $(\theta, \phi)$, and time $t$ [S1, unofficial][S2, unofficial].
+*   **Outputs:** Volume density $\sigma$, color $C$, and optionally forward/backward 3D scene flow vectors [S2, unofficial].
+
+**Data Structures:**
+The method consists of two deep neural networks [S1, unofficial]:
+1.  **Canonical Network:** Encodes 2D scenes into a canonical 3D representation [S1, unofficial].
+2.  **Deformation/Mapping Network:** Maps these canonical representations to deformed scenes based on a time input [S1, unofficial].
+
+In some implementations, a static NeRF models background/non-moving elements, while a time-varying dynamic NeRF handles moving objects [S2, unofficial]. The dynamic component predicts volume density, color, forward 3D scene flow, and backward 3D scene flow at a given spatiotemporal location [S2, unofficial].
+
+**Steps:**
+1.  **Canonical Encoding:** The 2D scenes are encoded into a canonical 3D representation using the first network [S1, unofficial].
+2.  **Deformation/Flow Prediction:** The second network takes the canonical features and the time input $t$ to predict the deformation or scene flow [S1, unofficial]. If using scene flow, the network predicts forward and backward 3D scene flow vectors [S2, unofficial].
+3.  **Warping:** The flow vectors are used to warp the radiance fields from adjacent time instances, creating a temporally consistent representation [S2, unofficial].
+4.  **Rendering:** The warped features are decoded to predict volume density and color for volume rendering [S2, unofficial].
+
+**Formulas:**
+Not given in the sources.
+
+**Parameters:**
+*   **Time Input:** An extra input of time is required to deal with motion [S1, unofficial].
+*   **Compute Cost:** The method has a 2.5 times higher compute cost than standard NeRF [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Not given in the sources.
+*   **Boundaries:** Not given in the sources.
+*   **Degenerate Input:** Not given in the sources.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def dynamic_nerf_query(xyz, direction, time, canonical_net, deformation_net):
+    """
+    Query the dynamic NeRF at a specific spatiotemporal location.
+    Implements the two-network architecture and flow warping from [S1, unofficial][S2, unofficial].
+    """
+    # Step 1: Canonical Encoding
+    # The canonical network learns to encode 2D scenes into a canonical 3D representation [S1, unofficial]
+    canonical_features = canonical_net(xyz, direction)
+    
+    # Step 2: Deformation/Flow Prediction
+    # The second network maps canonical representations to deformed scenes based on time [S1, unofficial]
+    # It predicts volume density, color, forward and backward 3D scene flow vectors [S2, unofficial]
+    sigma, color, flow_forward, flow_backward = deformation_net(canonical_features, time)
+    
+    # Step 3: Warping
+    # Flow vectors warp radiance fields from adjacent time instances, creating temporal consistency [S2, unofficial]
+    # During volume rendering, coordinates are adjusted by the flow vectors before density/color evaluation [G]
+    warped_xyz = xyz + flow_forward
+    
+    # Step 4: Rendering
+    # The network directly outputs density and color for the queried spatiotemporal location [S2, unofficial]
+    return sigma, color, flow_forward, flow_backward
+```
+
+## Subtopics
+
+### DMRF
+DMRF establishes a two-way coupling between meshes and NeRF, allowing the updating of radiance and throughput along a cast ray with an arbitrary number of bounces [S2, unofficial]. It addresses the color space discrepancy between path tracing and standard NeRF by training NeRF with high dynamic range (HDR) images, enabling more accurate light transport simulation [S2, unofficial]. It also presents a strategy for estimating light sources and casting shadows on NeRF [S2, unofficial].
+
+### V4D
+V4D employs a dual voxel format for density and texture fields, processed by a small MLP [S2, unofficial]. It incorporates a lookup table refinement module for pixel-level enhancements with minimal computational overhead [S2, unofficial]. It also introduces conditional positional encoding to improve performance with negligible computational costs [S2, unofficial].
+
+### MSTH
+MSTH represents dynamic scenes as a weighted combination of 3D and 4D hash encodings, with weights determined by a learnable mask guided by uncertainty estimation [S2, unofficial]. This method reduces hash collision rates and enables compact representation, allowing rapid optimization and convergence [S2, unofficial].
+
+## Operating characteristics
+*   **Time and Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** The method has a 2.5 times higher compute cost than standard NeRF [S1, unofficial].
+*   **Scaling:** Not given in the sources.
+*   **Strengths and Limitations:** It can learn high-fidelity 3D models with dynamic motion [S1, unofficial]. However, it has higher compute costs [S1, unofficial]. There is no equivalent of Instant NGP-acceleration for D-NeRF, which may impact performance [S1, unofficial].
+*   **When to use it:** Use when modeling dynamic 3D objects with rigid or non-rigid motion [S1, unofficial].
+*   **When not:** Use when computational resources are limited and static scenes are sufficient [S1, unofficial].
+
+## Background
+Dynamic NeRF (D-NeRF) was introduced to address the limitations of algorithms designed for static 3D objects, which did not clearly perform well under changing attitudes and lighting conditions experienced by orbiting objects [S1, unofficial]. It explicitly considers rigid and non-rigid motion of the target in constructing a 3D model based on a camera moving around the object [S1, unofficial]. Experiments were performed at the ORION facility at Florida Tech to capture images of a mock-up of a satellite to represent a Resident Space Object (RSO) [S1, unofficial].
+
+## Sources
+[S1] 3D Reconstruction of Non-cooperative Resident Space Objects using Instant NGP-accelerated NeRF and D-NeRF, https://doi.org/10.48550/arxiv.2301.09060, fetched 2026-10-26 (unofficial)
+[S2] Dynamic Scene Reconstruction: Recent Advance in Real-time Rendering and Streaming, https://doi.org/10.48550/arXiv.2503.08166, fetched 2026-10-29 (unofficial)

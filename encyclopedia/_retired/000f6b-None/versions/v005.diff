@@ -1,0 +1,192 @@
+--- v004.md
++++ v005.md
+@@ -8,6 +8,6 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A 3D point set representing the model, optionally with per-point attributes (color, normal).
+-*   **Output:** A final image rendered in a single pass.
++*   **Input:** A 3D point set representing the model, optionally with per-point attributes (color, normal) [S1, unofficial].
++*   **Output:** A final image rendered in a single pass [S1, unofficial].
+ 
+ **Data Structures:**
+@@ -35,13 +35,13 @@
+ 
+ 3.  **Rendering Loop:**
+-    *   Iterate over all patches.
++    *   Iterate over all patches [S1, unofficial].
+     *   For each patch:
+-        *   Address the respective texture objects.
++        *   Address the respective texture objects [S1, unofficial].
+         *   Trigger the corresponding VBO for rendering using the linear index buffer [S1, unofficial].
+ 
+ 4.  **Vertex Shader:**
+-    *   **Translation:** Translate point positions according to their elevation values from the VBO.
++    *   **Translation:** Translate point positions according to their elevation values from the VBO [S1, unofficial].
+     *   **Rotation:** Rotate the translated points using the patch's 4x4 transformation matrix to place them on the surface of the original model [S1, unofficial].
+-    *   **Radius Calculation:** Set the radius of each point (point sprite) based on the sampling step size $\mu$ and elevation variance to prevent holes [S1, unofficial]. The base radius is $\frac{1}{2}\sqrt{2}\mu$. Radii are increased in areas with high variance between neighboring elevation values to account for spatial gaps [S1, unofficial].
++    *   **Radius Calculation:** Set the radius of each point (point sprite) based on the sampling step size $\mu$ and elevation variance to prevent holes [S1, unofficial]. The base radius is $\frac{1}{2}\sqrt{2}\mu$ [S1, unofficial]. Radii are increased in areas where variance between neighboring elevation values results in spatial gaps [S1, unofficial].
+ 
+ 5.  **Rasterization:**
+@@ -58,23 +58,27 @@
+ 
+ ```python
++import math
++
+ # Pre-processing (CPU)
+ def build_patches(point_set):
+     patches = []
+-    for region in partition(point_set):
+-        # Resample using MLS
+-        grid, heights = resample_mls(region)
+-        # Handle overlap with epsilon
+-        epsilon = 0.01 # Example value
+-        boundary_points = get_boundary_points(region, epsilon)
++    # [G] Standard spatial partitioning of point set into regions
++    regions = partition_point_set(point_set) 
++    for region in regions:
++        # [G] Moving Least Squares surface reconstruction
++        grid, heights = resample_mls_surface(region) 
++        # Handle overlap with epsilon to prevent gaps [S1, unofficial]
++        epsilon = 0.01
++        boundary_points = get_epsilon_boundary_points(region, epsilon) 
+         heights.extend(boundary_points)
+-        
+-        # Compute attributes
+-        normals = compute_normals(grid, heights)
+-        colors = sample_colors(grid, region)
+-        
+-        # Compute plane parameters
+-        plane_origin, plane_normal = fit_plane(grid)
+-        transform_matrix = compute_transform(plane_origin, plane_normal)
+-        
++
++        # Compute attributes on regular grid [S1, unofficial]
++        normals = compute_normals_from_grid(grid, heights) 
++        colors = sample_attributes_from_grid(grid, region) 
++
++        # Compute plane parameters and transform [S1, unofficial]
++        plane_origin, plane_normal = fit_plane_to_grid(grid) 
++        transform_matrix = compute_4x4_transform(plane_origin, plane_normal) 
++
+         patches.append({
+             'grid': grid,
+@@ -87,68 +91,62 @@
+     return patches
+ 
+-# GPU Rendering (Shader Logic)
++# GPU Rendering Loop
+ def render_patches(patches):
+     for patch in patches:
+-        # Set up VBO and Texture Objects
+-        bind_vbo(patch.elevation_data)
+-        bind_texture(patch.color_map)
+-        bind_texture(patch.normal_map)
+-        
+-        # Draw using linear index buffer
+-        draw_indexed_linear(patch.num_points)
++        # Address texture objects and trigger VBO [S1, unofficial]
++        bind_vbo(patch['elevation_data'])
++        bind_texture(patch['color_map'])
++        bind_texture(patch['normal_map'])
++        # Draw using linear index buffer 1..n [S1, unofficial]
++        indices = list(range(1, patch['num_points'] + 1))
++        draw_points(indices)
+ 
+-# Vertex Shader
+-void vertex_shader(in uint index, out vec3 world_pos, out float radius):
+-    # Get grid coordinates from index
+-    row = index / patch.resolution
+-    col = index % patch.resolution
+-    
+-    # Get base position on plane
+-    base_pos = patch.origin + row * patch.u_vec + col * patch.v_vec
+-    
+-    # Get elevation
+-    height = patch.heights[row][col]
+-    
+-    # Translate by elevation
+-    translated_pos = base_pos + height * patch.normal
+-    
+-    # Rotate/Transform to world space
+-    world_pos = patch.transform * translated_pos
+-    
+-    # Calculate radius
+-    # Base radius depends on sampling step size mu
+-    mu = patch.resolution / patch.physical_size
+-    base_radius = 0.5 * sqrt(2.0) * mu
+-    
+-    # Adjust for elevation variance to prevent holes
++# Vertex Shader Logic (Python representation)
++def vertex_shader(index, patch):
++    row = (index - 1) // patch['resolution']
++    col = (index - 1) % patch['resolution']
++
++    # Base position on plane
++    base_pos = patch['origin'] + row * patch['u_vec'] + col * patch['v_vec']
++
++    # Get elevation and translate
++    height = patch['heights'][row][col]
++    translated_pos = base_pos + height * patch['normal']
++
++    # Rotate/Transform to world space [S1, unofficial]
++    world_pos = patch['transform'] @ translated_pos
++
++    # Calculate radius [S1, unofficial]
++    mu = patch['resolution'] / patch['physical_size']
++    base_radius = 0.5 * math.sqrt(2.0) * mu
++
++    # Adjust for elevation variance to prevent holes [S1, unofficial]
+     h_center = height
+-    h_neighbors = get_neighbor_heights(row, col, patch.heights)
+-    variance = compute_variance(h_neighbors)
+-    radius = base_radius * (1.0 + variance * scale_factor)
++    h_neighbors = [patch['heights'][r][c] for r, c in get_neighbor_indices(row, col, patch['resolution'])]
++    variance = sum((h - h_center)**2 for h in h_neighbors) / len(h_neighbors)
++    radius = base_radius * (1.0 + variance * 0.1) # [G] Scaling constant
++    return world_pos, radius
+ 
+-# Fragment Shader
+-void fragment_shader(in vec3 world_pos, in vec2 uv, out vec4 color):
+-    # Transform fragment to simulate splatting
+-    # (Specific transformation depends on point sprite implementation)
+-    
+-    # Interpolate attributes from patch grid
+-    # Project fragment back to patch plane to get grid coordinates
+-    grid_uv = project_to_patch_plane(world_pos, patch)
+-    
+-    # Bilinear interpolation of normals and colors from texture objects
+-    normal = texture(patch.normal_map, grid_uv)
+-    diffuse = texture(patch.color_map, grid_uv)
+-    
+-    # Compute lighting
+-    light_color = compute_phong_shading(world_pos, normal)
+-    
+-    # Compute reflection/refraction
++# Fragment Shader Logic (Python representation)
++def fragment_shader(world_pos, patch):
++    # Transform fragment to simulate splatting [S1, unofficial]
++    # (Point sprites are screen-aligned; transform handles this)
++
++    # Project fragment back to patch plane for UV coordinates [S1, unofficial]
++    grid_uv = project_to_patch_plane(world_pos, patch) # [G] Ray-plane intersection
++
++    # Interpolate attributes from texture objects [S1, unofficial]
++    normal = texture_sample(patch['normal_map'], grid_uv)
++    diffuse = texture_sample(patch['color_map'], grid_uv)
++
++    # Compute lighting and shader effects [S1, unofficial]
++    light_color = compute_phong_shading(world_pos, normal) # [G] Standard lighting
+     view_dir = normalize(camera_pos - world_pos)
+-    reflect_color = texture(cube_map, reflect(view_dir, normal))
+-    refract_color = texture(cube_map, refract(view_dir, normal, ior))
+-    
+-    # Sum contributions
++    reflect_color = texture_sample(cube_map, reflect(view_dir, normal))
++    refract_color = texture_sample(cube_map, refract(view_dir, normal, 1.5))
++
++    # Sum contributions [S1, unofficial]
+     final_color = light_color * diffuse + reflect_color + refract_color
+-    color = final_color
++    return final_color
+ ```
+ 

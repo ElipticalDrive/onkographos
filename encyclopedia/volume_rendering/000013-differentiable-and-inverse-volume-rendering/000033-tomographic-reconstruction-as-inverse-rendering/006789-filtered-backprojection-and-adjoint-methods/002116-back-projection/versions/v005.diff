@@ -1,0 +1,116 @@
+--- v004.md
++++ v005.md
+@@ -18,5 +18,5 @@
+ **Numbered Steps:**
+ 
+-1.  **Coordinate Transformation:** For each projection pixel coordinate $\mathbf{k}_{proj} = (k_r, k_c)$, compute the corresponding 3D coordinate in the volume space.
++1.  **Coordinate Transformation:** For each projection pixel coordinate $\mathbf{k}_{proj} = (k_r, k_c)$, compute the corresponding 3D coordinate in the volume space [S2, unofficial].
+     *   In Fourier-space methods, extend to 3D: $\mathbf{k}_{3D} = (k_c, k_r, 0)$ [S2, unofficial].
+     *   In spatial methods, compute the ray path from source to detector element [S3, unofficial].
+@@ -24,10 +24,10 @@
+ 
+ 2.  **Interpolation Kernel Selection:** Determine the interpolation order $order \in \{0, 1, 2\}$ [S4, unofficial].
+-    *   $order=0$: Voxel-based (nearest neighbor).
+-    *   $order=1$: Trilinear (3D) or bilinear (2D).
++    *   $order=0$: Voxel-based (nearest neighbor) [S4, unofficial].
++    *   $order=1$: Trilinear (3D) or bilinear (2D) [S2, unofficial].
+     *   $order=2$: Higher-order box splines or tricubic (Catmull-Rom) [S2, unofficial][S4, unofficial].
+ 
+-3.  **Scatter Accumulation:** Distribute the projection value $p$ into the volume.
+-    *   **Spatial Domain:** For each ray, iterate through voxels intersected by the ray. For each voxel, compute the interpolation weights based on the fractional distance of the ray within the voxel. Accumulate the weighted projection value into the voxel using atomic addition [S3, unofficial].
++3.  **Scatter Accumulation:** Distribute the projection value $p$ into the volume [S3, unofficial].
++    *   **Spatial Domain:** For each ray, iterate through voxels intersected by the ray [S3, unofficial]. For each voxel, compute the interpolation weights based on the fractional distance of the ray within the voxel [S3, unofficial]. Accumulate the weighted projection value into the voxel using atomic addition [S3, unofficial].
+         *   Formula: $x_{\mathbf{q}} \leftarrow x_{\mathbf{q}} + w \cdot p$ [S3, unofficial].
+     *   **Fourier Domain:** Accumulate the projection value into the 3D Fourier volume at the transformed coordinate $\mathbf{k}_{rec}$ using 3D interpolation kernels in transpose mode [S2, unofficial].
+@@ -77,4 +77,5 @@
+     volume = torch.zeros(batch, 1, *volume_shape, device=projections.device)
+     z, y, x = volume_shape
++    voxel_size = torch.as_tensor(voxel_size, device=projections.device)
+ 
+     for view in range(views):
+@@ -89,34 +90,42 @@
+         valid = t_max > t_min
+ 
+-        # Step along rays
+         t_vals = torch.linspace(0, 1, n_samples, device=projections.device)
+         t_sampled = t_min.unsqueeze(-1) + t_vals.unsqueeze(0) * (t_max - t_min).unsqueeze(-1)
+         points = rays_o.unsqueeze(1) + t_sampled.unsqueeze(-1) * rays_d_norm.unsqueeze(1)
+ 
+-        # Convert to voxel coordinates
+         voxel_coords = points / voxel_size
+         ix, iy, iz = voxel_coords[..., 0], voxel_coords[..., 1], voxel_coords[..., 2]
+ 
+-        # Clamp to volume bounds for interpolation
+-        ix = torch.clamp(ix, 0, x - 1)
+-        iy = torch.clamp(iy, 0, y - 1)
+-        iz = torch.clamp(iz, 0, z - 1)
++        ix_i, ix_f = torch.div(ix, 1.0, rounding_mode='trunc'), ix - ix.floor()
++        iy_i, iy_f = torch.div(iy, 1.0, rounding_mode='trunc'), iy - iy.floor()
++        iz_i, iz_f = torch.div(iz, 1.0, rounding_mode='trunc'), iz - iz.floor()
+ 
+-        # Trilinear weights
+-        dx = ix - ix.floor()
+-        dy = iy - iy.floor()
+-        dz = iz - iz.floor()
+-        w000 = (1-dx)*(1-dy)*(1-dz)
+-        w100 = dx*(1-dy)*(1-dz)
+-        w010 = (1-dx)*dy*(1-dz)
+-        w110 = dx*dy*(1-dz)
+-        w001 = (1-dx)*(1-dy)*dz
+-        w101 = dx*(1-dy)*dz
+-        w011 = (1-dx)*dy*dz
+-        w111 = dx*dy*dz
++        w000 = (1-ix_f)*(1-iy_f)*(1-iz_f)
++        w100 = ix_f*(1-iy_f)*(1-iz_f)
++        w010 = (1-ix_f)*iy_f*(1-iz_f)
++        w110 = ix_f*iy_f*(1-iz_f)
++        w001 = (1-ix_f)*(1-iy_f)*iz_f
++        w101 = ix_f*(1-iy_f)*iz_f
++        w011 = (1-ix_f)*iy_f*iz_f
++        w111 = ix_f*iy_f*iz_f
+ 
+-        # Scatter weighted values to 8 neighboring voxels
+-        # ... (Implementation detail omitted for brevity; see GPU kernels [S3, unofficial])
+-        pass
++        proj_flat = proj_view.flatten()
++        
++        def scatter_corner(w, dx, dy, dz):
++            idx_x = torch.clamp(ix_i + dx, 0, x - 1).flatten()
++            idx_y = torch.clamp(iy_i + dy, 0, y - 1).flatten()
++            idx_z = torch.clamp(iz_i + dz, 0, z - 1).flatten()
++            indices = idx_z * (y * x) + idx_y * x + idx_x
++            weights = w.flatten() * proj_flat
++            volume[0, 0].scatter_add_(0, indices, weights)
++
++        scatter_corner(w000, 0, 0, 0)
++        scatter_corner(w100, 1, 0, 0)
++        scatter_corner(w010, 0, 1, 0)
++        scatter_corner(w110, 1, 1, 0)
++        scatter_corner(w001, 0, 0, 1)
++        scatter_corner(w101, 1, 0, 1)
++        scatter_corner(w011, 0, 1, 1)
++        scatter_corner(w111, 1, 1, 1)
+ 
+     return volume
+@@ -160,11 +169,11 @@
+ ## Operating characteristics
+ *   **Time Complexity:** $O(N_v \cdot N_r \cdot N_s)$, where $N_v$ is the number of views, $N_r$ is the number of rays per view, and $N_s$ is the number of samples per ray [S3, unofficial]. In Fourier space, complexity is dominated by FFTs: $O(N^3 \log N)$ [S2, unofficial].
+-*   **Memory Complexity:** $O(N_v \cdot N_r)$ for storing projection data and $O(N_x \cdot N_y \cdot N_z)$ for the volume buffer [G]. Explicit Radon Matrix Construction requires $O(N_v \cdot N_r \cdot N_x \cdot N_y \cdot N_z)$, which is prohibitive for large volumes [S9109, unofficial].
+-*   **Performance:** TorchRadon is up to 125× faster than Astra Toolbox for parallel/fan-beam projections due to GPU batch operations [S1, unofficial]. Fourier-space methods show 1–2 orders of magnitude improvement over `torch-fourier-slice` [S6356, unofficial].
++*   **Memory Complexity:** $O(N_v \cdot N_r)$ for storing projection data and $O(N_x \cdot N_y \cdot N_z)$ for the volume buffer [G]. Explicit Radon Matrix Construction requires $O(N_v \cdot N_r \cdot N_x \cdot N_y \cdot N_z)$, which is prohibitive for large volumes [S4, unofficial].
++*   **Performance:** TorchRadon is up to 125× faster than Astra Toolbox for parallel/fan-beam projections due to GPU batch operations [S1, unofficial]. Fourier-space methods show 1–2 orders of magnitude improvement over `torch-fourier-slice` [S1, unofficial].
+ *   **Strengths:** Differentiable, stable for iterative optimization, efficient on GPUs [S1, unofficial][S6, unofficial].
+ *   **Limitations:** Unfiltered BP is blurry [S5, unofficial]. FDK yields worse results than iterative methods (e.g., SART) with limited projections [S7, unofficial]. Atomic contention in spatial back-projection can limit throughput [S3, unofficial].
+ 
+ ## Background
+-Back-projection is the inverse of the Radon transform, forming the basis of analytical tomographic reconstruction methods like Filtered Back-Projection (FBP) [S5, unofficial][S7, unofficial]. It was historically implemented on CPUs and later optimized for GPUs using CUDA and OpenCL [S1, unofficial][S5110, unofficial]. Recent developments focus on making back-projection fully differentiable for integration into deep learning pipelines, enabling end-to-end optimization of volume representations and camera parameters [S1, unofficial][S2, unofficial][S4, unofficial].
++Back-projection is the inverse of the Radon transform, forming the basis of analytical tomographic reconstruction methods like Filtered Back-Projection (FBP) [S5, unofficial][S7, unofficial]. It was historically implemented on CPUs and later optimized for GPUs using CUDA and OpenCL [S1, unofficial][S3, unofficial]. Recent developments focus on making back-projection fully differentiable for integration into deep learning pipelines, enabling end-to-end optimization of volume representations and camera parameters [S1, unofficial][S2, unofficial][S4, unofficial].
+ 
+ ## Sources
+@@ -176,6 +185,3 @@
+ [S6] PDF Differentiable Forward Projector for X-ray Computed Tomography, https://differentiable.xyz/papers-2023/paper_48.pdf, fetched 2026-10-29 (unofficial)
+ [S7] Space-Time Tomographic Reconstruction of Deforming Objects, https://vccimaging.org/Publications/Zang2020Thesis/Zang2020Thesis.pdf, fetched 2026-10-30 (unofficial)
+-[S8] Gradient w.r.t Source/Detector Geometry, https://github.com/itu-biai/torchtomo, fetched 2026-10-27 (unofficial)
+-[S9109] Explicit Radon Matrix Construction, https://github.com/itu-biai/torchtomo, fetched 2026-10-27 (unofficial)
+-[S6356] Fourier-space Projection Operations, https://github.com/itu-biai/torchtomo, fetched 2026-10-27 (unofficial)
+-[S5110] GPU Backprojection using OpenCL Buffers, https://github.com/itu-biai/torchtomo, fetched 2026-10-27 (unofficial)+[S8] Gradient w.r.t Source/Detector Geometry, https://github.com/itu-biai/torchtomo, fetched 2026-10-27 (unofficial)

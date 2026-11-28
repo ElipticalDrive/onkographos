@@ -1,0 +1,4550 @@
+# Amethyst-voxel [![](https://github.com/Kurble/amethyst_voxel/workflows/Clippy/badge.svg)](https://github.com/Kurble/amethyst_voxel/actions)
+
+Amethyst-voxel is a toolbox that delivers voxel functionality and rendering to the [Amethyst game engine](https://amethyst.rs/). Voxels in amethyst-voxel are treated as a resource, which can be rendered and collided with.  Amethyst-voxel tries to be agnostic towards the aesthetics the user desires from their voxel based game.
+
+## Features
+The current features of amethyst-voxel are:
+- Voxel representation through chunks of user defined dimensions (as long as they are 2^x on each axis);
+- A recursive structure, each voxel can contain a chunk of subvoxels;
+- PBR rendering pipeline;
+- Raycasting on individual voxel objects;
+- Voxel model components, a single voxel chunk is used a normal 3D mesh;
+- Voxel world components, voxel chunks are dynamically loaded in a "3D viewport";
+- Support for MagicaVoxel `.vox` files;
+- Simple movement of entities through voxel worlds, not physics based.
+
+## Development status
+Amethyst-voxel is still in development, and it's final goals have not quite been defined yet. If you want to discuss the project join us on the [amethyst-voxel discord server](https://discord.gg/ZJcan7E)!
+
+## Documentation
+To get started check out any of the following documentation resources:
+- The examples directory contains examples that show you how to use amethyst-voxel.
+- Follow one of the guides (that are still TODO).
+- The [docs.rs](docs.rs) documentation that serves as a technical reference.
+
+## Setup
+Amethyst-voxel requires the amethyst game engine to run, which is the biggest part of setting it up. Check out the [Amethyst game engine](https://amethyst.rs/) for more information on setting it up. After setting the amethyst game engine up for use, setting up amethyst-voxel is as simple as adding the dependency to your `Cargo.toml` file:
+```toml
+amethyst_voxel = "0.1"
+```
+
+(todo: publish to crates.io...)
+
+
+## Contributing
+
+Contributions are welcome! Feel free to submit pull requests.
+
+Pull requests that fix bugs or improve documentation are likely to be quickly reviewed, while pull
+requests that add features or change the API may be more controversial and take more time.
+
+If your change adds, removes or modifies a trait or a function, please add an entry to the
+`changelog.md` file as part of your pull request.
+
+## License
+
+Amethyst-voxel is free and open source software distributed under the terms of both the MIT License and the Apache License 2.0.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in the work by you, as defined in the Apache-2.0 license, shall be dual licensed as above, without any additional terms or conditions.
+
+### shaders/voxels.vert
+```
+#version 450
+
+layout(std140, set = 0, binding = 0) uniform Projview {
+    mat4 proj;
+    mat4 view;
+};
+
+layout(location = 0) in vec3 position;
+layout(location = 1) in vec3 normal;
+layout(location = 2) in vec3 tangent;
+layout(location = 3) in vec3 surface; 
+layout(location = 4) in mat4 model; // instance rate
+layout(location = 8) in vec4 tint; // instance rate
+
+layout(location = 0) out VertexData {
+    vec3 position;
+    vec3 normal;
+    vec3 tangent;
+    float tang_handedness;
+    vec2 tex_coord;
+    vec4 color;
+} vertex;
+
+void main() {
+    vec4 vertex_position = model * vec4(position, 1.0);
+    vertex.position = vertex_position.xyz;
+    vertex.normal = mat3(model) * normal;
+    vertex.tangent = mat3(model) * tangent;
+    vertex.tang_handedness = 1.0;
+    vertex.tex_coord = surface.xy;
+    vertex.color = tint * surface.z;
+    gl_Position = proj * view * vertex_position;
+}
+```
+
+### shaders/voxels_skinned.vert
+```
+#version 450
+
+layout(std140, set = 0, binding = 0) uniform ViewArgs {
+    uniform mat4 proj;
+    uniform mat4 view;
+};
+
+layout(std430, set = 2, binding = 0) readonly buffer JointTransforms {
+    mat4 joints[];
+};
+
+layout(location = 0) in vec3 position;
+layout(location = 1) in vec3 normal;
+layout(location = 2) in vec3 tangent;
+layout(location = 3) in vec3 surface; 
+layout(location = 4) in uvec4 joint_ids;
+layout(location = 5) in vec4 joint_weights;
+layout(location = 6) in mat4 model; // instance rate
+layout(location = 10) in vec4 tint; // instance rate
+layout(location = 11) in uint joints_offset; // instance rate
+
+layout(location = 0) out VertexData {
+    vec3 position;
+    vec3 normal;
+    vec3 tangent;
+    float tang_handedness;
+    vec2 tex_coord;
+    vec4 color;
+} vertex;
+
+void main() {
+    mat4 joint_transform =
+        joint_weights.x * joints[int(joints_offset + joint_ids.x)] +
+        joint_weights.y * joints[int(joints_offset + joint_ids.y)] +
+        joint_weights.z * joints[int(joints_offset + joint_ids.z)] +
+        joint_weights.w * joints[int(joints_offset + joint_ids.w)];
+
+    vec4 vertex_position = model * joint_transform * vec4(position, 1.0);
+    mat3 mat3_transform = mat3(model) * mat3(joint_transform);
+    vertex.position = vertex_position.xyz;
+    vertex.normal = mat3_transform * normal;
+    vertex.tangent = mat3_transform * tangent;
+    vertex.tang_handedness = 1.0;
+    vertex.tex_coord = surface.xy;
+    vertex.color = tint * surface.z;
+    gl_Position = proj * view * vertex_position;
+}
+```
+
+### src/ambient_occlusion.rs
+```
+use crate::context::Context;
+use crate::side::Side;
+use crate::voxel::Voxel;
+use std::collections::HashMap;
+
+pub enum SharedVertexData<'a> {
+    Big {
+        occlusion: Vec<Vertex>,
+        detail: HashMap<usize, SharedVertexData<'a>>,
+        width: usize,
+    },
+    Borrowed {
+        target: &'a Self,
+    },
+    Small {
+        occlusion: [Vertex; 8],
+    },
+}
+
+#[derive(Clone, Copy)]
+pub struct Vertex {
+    occlusion: u16,
+    skins: [(u8, u8); 4],
+}
+
+pub struct SharedVertex {
+    pub occlusion: f32,
+    pub skins: [(u8, u8); 4],
+}
+
+impl SharedVertexData<'_> {
+    pub fn build<'a, T: Voxel, C: Context<T>>(root: &T, neighbours: &C) -> Self {
+        let w = T::AO_WIDTH as isize;
+        if root.is_detail() {
+            let bound = |x| x < 0 || x > T::LAST as isize;
+            let sample_occlusion = |x, y, z| {
+                if bound(x) || bound(y) || bound(z) {
+                    if neighbours.visible(x, y, z) {
+                        1
+                    } else {
+                        0
+                    }
+                } else if root
+                    .get(T::coord_to_index(x as usize, y as usize, z as usize))
+                    .unwrap()
+                    .visible()
+                {
+                    1
+                } else {
+                    0
+                }
+            };
+            let sample_skin = |x, y, z| {
+                if bound(x) || bound(y) || bound(z) {
+                    neighbours.skin(x, y, z)
+                } else {
+                    root.get(T::coord_to_index(x as usize, y as usize, z as usize))
+                        .unwrap()
+                        .skin()
+                }
+            };
+            let process = |s: [u16; 8]| {
+                let table = |s: [u16; 4]| match s {
+                    [0, 0, 0, 0] => 0,
+                    [1, 0, 0, 0] | [0, 1, 0, 0] | [0, 0, 1, 0] | [0, 0, 0, 1] => 1,
+                    [1, 1, 0, 0] | [0, 0, 1, 1] | [0, 1, 0, 1] | [1, 0, 1, 0] => 2,
+                    _ => 3,
+                };
+                let neg_x = table([s[0], s[1], s[4], s[5]]);
+                let pos_x = table([s[2], s[3], s[6], s[7]]);
+                let neg_y = table([s[0], s[1], s[2], s[3]]);
+                let pos_y = table([s[4], s[5], s[6], s[7]]);
+                let neg_z = table([s[0], s[2], s[4], s[6]]);
+                let pos_z = table([s[1], s[3], s[5], s[7]]);
+
+                (neg_x << 10) | (pos_x << 8) | (neg_y << 6) | (pos_y << 4) | (neg_z << 2) | (pos_z)
+            };
+
+            let occlusion = (0..w)
+                .flat_map(move |z| {
+                    (0..w).flat_map(move |y| {
+                        (0..w).map(move |x| {
+                            let occlusion = process([
+                                sample_occlusion(x - 1, y - 1, z - 1),
+                                sample_occlusion(x - 1, y - 1, z),
+                                sample_occlusion(x, y - 1, z - 1),
+                                sample_occlusion(x, y - 1, z),
+                                sample_occlusion(x - 1, y, z - 1),
+                                sample_occlusion(x - 1, y, z),
+                                sample_occlusion(x, y, z - 1),
+                                sample_occlusion(x, y, z),
+                            ]);
+
+                            let mut skins = [(0u8, 0u8); 4];
+
+                            for skin in [
+                                sample_skin(x - 1, y - 1, z - 1),
+                                sample_skin(x - 1, y - 1, z),
+                                sample_skin(x, y - 1, z - 1),
+                                sample_skin(x, y - 1, z),
+                                sample_skin(x - 1, y, z - 1),
+                                sample_skin(x - 1, y, z),
+                                sample_skin(x, y, z - 1),
+                                sample_skin(x, y, z),
+                            ].iter().filter_map(|&e| e) {
+                                for i in 0..4 {
+                                    if skins[i].0 == skin {
+                                        skins[i].1 += 1;
+                                        break;
+                                    }
+                                    if skins[i].1 == 0 {
+                                        skins[i] = (skin, 1);
+                                        break;
+                                    }
+                                }
+                            }
+
+                            let mut total: u16 = skins.iter().map(|s| s.1 as u16).sum();
+                            let mut left: u16 = 255;
+
+                            skins[0].1 = 255;
+
+                            for i in 0..4 {
+                                if total > 0 {
+                                    let points = skins[1].1 as u16;
+                                    skins[i].1 = ((points * left) / total) as u8;
+                                    total -= points;
+                                    left -= skins[1].1 as u16;
+                                }
+                            }
+
+                            assert_eq!(skins.iter().map(|s| s.1 as u16).sum::<u16>(), 255u16);
+
+                            Vertex { occlusion, skins }
+                        })
+                    })
+                })
+                .collect();
+
+            SharedVertexData::Big {
+                occlusion,
+                detail: (0..T::COUNT)
+                    .filter_map(|index| {
+                        root.get(index).and_then(|voxel| {
+                            if voxel.is_detail() {
+                                let (x, y, z) = T::index_to_coord(index);
+                                Some((
+                                    index,
+                                    Self::build(
+                                        voxel,
+                                        &neighbours.child(x as isize, y as isize, z as isize),
+                                    ),
+                                ))
+                            } else {
+                                None
+                            }
+                        })
+                    })
+                    .collect(),
+                width: T::AO_WIDTH,
+            }
+        } else {
+            SharedVertexData::Small {
+                occlusion: [Vertex {
+                    occlusion: 0xfff,
+                    skins: [(0, 64); 4],
+                }; 8],
+            }
+        }
+    }
+
+    pub fn sub(&self, x: usize, y: usize, z: usize) -> SharedVertexData {
+        match *self {
+            SharedVertexData::Big {
+                ref occlusion,
+                ref detail,
+                width,
+            } => {
+                let index = x + y * width + z * width * width;
+                detail
+                    .get(&index)
+                    .map(|target| SharedVertexData::Borrowed { target })
+                    .unwrap_or_else(|| {
+                        let x = 1;
+                        let y = width;
+                        let z = width * width;
+                        SharedVertexData::Small {
+                            occlusion: [
+                                occlusion[index],
+                                occlusion[index + x],
+                                occlusion[index + y],
+                                occlusion[index + y + x],
+                                occlusion[index + z],
+                                occlusion[index + z + x],
+                                occlusion[index + z + y],
+                                occlusion[index + z + y + x],
+                            ],
+                        }
+                    })
+            }
+
+            SharedVertexData::Borrowed { target } => target.sub(x, y, z),
+
+            SharedVertexData::Small { .. } => unreachable!(),
+        }
+    }
+
+    pub fn quad<S: Side>(&self) -> [SharedVertex; 4] {
+        let f = |d: Vertex, s: u16| SharedVertex {
+            occlusion: 1.0 - f32::from((d.occlusion >> s) & 0x03) / 4.0,
+            skins: d.skins,
+        };
+        match *self {
+            SharedVertexData::Small { occlusion } => {
+                let o = &occlusion;
+                match S::SIDE {
+                    0 => [f(o[6], 10), f(o[2], 10), f(o[0], 10), f(o[4], 10)],
+                    1 => [f(o[3], 8), f(o[7], 8), f(o[5], 8), f(o[1], 8)],
+                    2 => [f(o[5], 6), f(o[4], 6), f(o[0], 6), f(o[1], 6)],
+                    3 => [f(o[3], 4), f(o[2], 4), f(o[6], 4), f(o[7], 4)],
+                    4 => [f(o[2], 2), f(o[3], 2), f(o[1], 2), f(o[0], 2)],
+                    5 => [f(o[7], 0), f(o[6], 0), f(o[4], 0), f(o[5], 0)],
+                    _ => unreachable!(),
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+```
+
+### src/bundle.rs
+```
+use crate::material::AtlasProcessor;
+use crate::{mesh::*, voxel::Data, world::VoxelSource, world::VoxelWorld};
+use amethyst::{
+    core::bundle::SystemBundle,
+    ecs::prelude::{Component, DispatcherBuilder, WorldExt},
+    error::Error,
+    prelude::World,
+    renderer::Backend,
+};
+use rayon::{ThreadPool, ThreadPoolBuilder};
+use std::sync::Arc;
+
+type SystemRegistrator = dyn for<'a, 'b> FnOnce(&mut World, &mut DispatcherBuilder<'a, 'b>);
+
+/// Main bundle for supporting voxels in your amethyst project.
+/// Before any `Voxel<T>` type will work,
+///  you have to specify which `Data` and `Source` implementations you plan to use.
+pub struct VoxelBundle {
+    triangulation_limit: usize,
+    systems: Vec<Box<SystemRegistrator>>,
+    pool: Arc<ThreadPool>,
+}
+
+impl VoxelBundle {
+    pub fn new(triangulation_limit: usize) -> Self {
+        VoxelBundle {
+            triangulation_limit,
+            systems: Vec::new(),
+            pool: Arc::new(
+                ThreadPoolBuilder::new()
+                    .num_threads(2)
+                    .build()
+                    .expect("Unable to create threadpool for voxel loading"),
+            ),
+        }
+    }
+
+    /// Configure systems that load voxels with `Data` `V` from the source `S`.
+    pub fn with_source<V, S>(mut self) -> Self
+    where
+        V: Data,
+        S: for<'s> VoxelSource<'s, V> + Component + Send + Sync,
+    {
+        let pool = self.pool.clone();
+        self.systems.push(Box::new(|_world, builder| {
+            builder.add(
+                crate::world::WorldSystem::<V, S>::new(pool),
+                "world_sourcing",
+                &[],
+            )
+        }));
+        self
+    }
+
+    /// Configure systems that work with `Data` `V`.
+    pub fn with_voxel<B: Backend, V: Data + Default>(mut self) -> Self {
+        self.systems.push(Box::new({
+            let triangulation_limit = self.triangulation_limit;
+            move |world, builder| {
+                world.register::<VoxelWorld<V>>();
+
+                let triangulator = TriangulatorSystem::<B, V>::new(triangulation_limit);
+                builder.add(triangulator, "triangulator", &[]);
+
+                let processor = VoxelMeshProcessor::<B, V>::new();
+                builder.add(processor, "voxel_mesh_processor", &[]);
+            }
+        }));
+        self
+    }
+}
+
+impl<'a, 'b> SystemBundle<'a, 'b> for VoxelBundle {
+    fn build(
+        self,
+        world: &mut World,
+        builder: &mut DispatcherBuilder<'a, 'b>,
+    ) -> Result<(), Error> {
+        builder.add(AtlasProcessor, "atlas_processor", &[]);
+        for sys in self.systems.into_iter() {
+            sys(world, builder);
+        }
+        Ok(())
+    }
+}
+```
+
+### src/context.rs
+```
+use crate::mesh::DynamicVoxelMesh;
+use crate::voxel::{Data, NestedVoxel, Voxel, ChildOf};
+use crate::world::VoxelWorld;
+
+use amethyst::core::ecs::storage::GenericReadStorage;
+
+/// Trait for retrieving neighbour information between separate root voxels.
+pub trait Context<T: Voxel> {
+    /// Same as `Voxel::visible`, but accepts a relative coordinate for selecting a child voxel.
+    fn visible(&self, x: isize, y: isize, z: isize) -> bool;
+
+    /// Same as `Voxel::render`, but accepts a relative coordinate for selecting a child voxel.
+    fn render(&self, x: isize, y: isize, z: isize) -> bool;
+
+    /// Same as `Voxel::skin`, but accepts a relative coordinate for selecting a child voxel.
+    fn skin(&self, x: isize, y: isize, z: isize) -> Option<u8>;
+
+    /// Returns a Context for the child at the relative coordinate
+    fn child<'a>(
+        &'a self,
+        x: isize,
+        y: isize,
+        z: isize,
+    ) -> DetailContext<'a, T>;
+}
+
+/// Context sampling no neighbours at all.
+#[derive(Clone)]
+pub struct VoxelContext<'a, T: Voxel> {
+    voxel: &'a T,
+}
+
+/// Context sampling the inner details of a voxel. Neighbours resolve through the parent Context.
+#[derive(Clone)]
+pub struct DetailContext<'a, P: Voxel> {
+    parent: &'a dyn Context<P>,
+    coord: [isize; 3],
+    voxel: Option<&'a ChildOf<P>>,
+}
+
+/// Context sampling the chunks of a world.
+pub struct WorldContext<'a, V: Data, S: 'a + GenericReadStorage<Component = DynamicVoxelMesh<V>>> {
+    coord: [isize; 3],
+    world: &'a VoxelWorld<V>,
+    chunks: &'a S,
+}
+
+impl<'a, T: Voxel> VoxelContext<'a, T> {
+    pub fn new(voxel: &'a T) -> Self {
+        Self { voxel }
+    }
+}
+
+impl<'a, T: Voxel> Context<T> for VoxelContext<'a, T> {
+    fn visible(&self, _: isize, _: isize, _: isize) -> bool {
+        false
+    }
+
+    fn render(&self, x: isize, y: isize, z: isize) -> bool {
+        if x >= 0
+            && x < T::WIDTH as isize
+            && y >= 0
+            && y < T::WIDTH as isize
+            && z >= 0
+            && z < T::WIDTH as isize
+        {
+            false
+        } else {
+            true
+        }
+    }
+
+    fn skin(&self, x: isize, y: isize, z: isize) -> Option<u8> {
+        if x >= 0
+            && x < T::WIDTH as isize
+            && y >= 0
+            && y < T::WIDTH as isize
+            && z >= 0
+            && z < T::WIDTH as isize
+        {
+            self.voxel.skin()
+        } else {
+            None
+        }
+    }
+
+    fn child<'b>(
+        &'b self,
+        x: isize,
+        y: isize,
+        z: isize,
+    ) -> DetailContext<'b, T> {
+        if x >= 0
+            && x < T::WIDTH as isize
+            && y >= 0
+            && y < T::WIDTH as isize
+            && z >= 0
+            && z < T::WIDTH as isize
+        {
+            let index = T::coord_to_index(x as usize, y as usize, z as usize);
+            DetailContext::new(self, [x, y, z], self.voxel.get(index))
+        } else {
+            DetailContext::new(self, [x, y, z], None)
+        }
+    }
+}
+
+impl<'a, P: Voxel> DetailContext<'a, P> {
+    pub fn new(parent: &'a dyn Context<P>, coord: [isize; 3], voxel: Option<&'a ChildOf<P>>) -> Self {
+        Self {
+            parent,
+            coord,
+            voxel,
+        }
+    }
+
+    fn find(&self, x: isize, y: isize, z: isize) -> Option<&'a ChildOf<ChildOf<P>>> {
+        let size = ChildOf::<P>::WIDTH as isize;
+        let coord = [x, y, z];
+        if (0..3).fold(true, |b, i| b && coord[i] >= 0 && coord[i] < size) {
+            self.voxel.and_then(|v| {
+                v.get(
+                    x as usize * ChildOf::<P>::DX
+                        + y as usize * ChildOf::<P>::DY
+                        + z as usize * ChildOf::<P>::DZ,
+                )
+            })
+        } else {
+            let grid = |x| if x >= 0 { x / size } else { (x + 1) / size - 1 };
+            let grid_mod = |x| {
+                if x % size >= 0 {
+                    x % size
+                } else {
+                    x % size + size
+                }
+            };
+
+            let neighbour: Self = self.parent.child(
+                self.coord[0] + grid(x),
+                self.coord[1] + grid(y),
+                self.coord[2] + grid(z),
+            );
+
+            neighbour.find(grid_mod(x), grid_mod(y), grid_mod(z))
+        }
+    }
+}
+
+impl<'a, P: Voxel> Context<ChildOf<P>> for DetailContext<'a, P> {
+    fn visible(&self, x: isize, y: isize, z: isize) -> bool {
+        self.find(x, y, z).map(|v| v.visible()).unwrap_or(false)
+    }
+
+    fn render(&self, x: isize, y: isize, z: isize) -> bool {
+        self.find(x, y, z).map(|v| v.render()).unwrap_or(false)
+    }
+
+    fn skin(&self, x: isize, y: isize, z: isize) -> Option<u8> {
+        self.find(x, y, z).and_then(|v| v.skin())
+    }
+
+    fn child<'b>(&'b self, x: isize, y: isize, z: isize) -> DetailContext<'b, ChildOf<P>> {
+        DetailContext::new(self, [x, y, z], self.find(x, y, z))
+    }
+}
+
+impl<'a, V, S> WorldContext<'a, V, S>
+where
+    V: Data,
+    S: 'a + GenericReadStorage<Component = DynamicVoxelMesh<V>>,
+{
+    pub fn new(coord: [isize; 3], world: &'a VoxelWorld<V>, chunks: &'a S) -> Self {
+        Self {
+            coord,
+            world,
+            chunks,
+        }
+    }
+
+    fn find(&self, x: isize, y: isize, z: isize) -> Option<&'a V::Child> {
+        let size = NestedVoxel::<V>::WIDTH as isize;
+        let grid = |x| if x >= 0 { x / size } else { (x + 1) / size - 1 };
+        let coord = [
+            self.coord[0] + grid(x),
+            self.coord[1] + grid(y),
+            self.coord[2] + grid(z),
+        ];
+        let within_bounds = |b, i| b && coord[i] >= 0 && coord[i] < self.world.dims[i] as isize;
+
+        if (0..3).fold(true, within_bounds) {
+            let index = coord[0] as usize
+                + coord[1] as usize * self.world.dims[0]
+                + coord[2] as usize * self.world.dims[0] * self.world.dims[1];
+            if let Some(voxel) = self.world.data[index]
+                .get()
+                .and_then(|e| self.chunks.get(e))
+            {
+                let grid_mod = |x: isize| if x%size >= 0 { x%size } else { x%size + size } as usize;
+                voxel.get(
+                    grid_mod(x) * NestedVoxel::<V>::DX
+                        + grid_mod(y) * NestedVoxel::<V>::DY
+                        + grid_mod(z) * NestedVoxel::<V>::DZ,
+                )
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+}
+
+impl<'a, V, S> Context<NestedVoxel<V>> for WorldContext<'a, V, S>
+where
+    V: Data,
+    S: 'a + GenericReadStorage<Component = DynamicVoxelMesh<V>>,
+{
+    fn visible(&self, x: isize, y: isize, z: isize) -> bool {
+        self.find(x, y, z).map(|c| c.visible()).unwrap_or(false)
+    }
+
+    fn render(&self, x: isize, y: isize, z: isize) -> bool {
+        self.find(x, y, z).map(|c| c.render()).unwrap_or(false)
+    }
+
+    fn skin(&self, x: isize, y: isize, z: isize) -> Option<u8> {
+        self.find(x, y, z).and_then(|v| v.skin())
+    }
+
+    fn child<'b>(&'b self, x: isize, y: isize, z: isize) -> DetailContext<'b, NestedVoxel<V>> {
+        DetailContext::new(self, [x, y, z], self.find(x, y, z))
+    }
+}
+
+impl<'a, V, S> Clone for WorldContext<'a, V, S>
+where
+    V: Data,
+    S: 'a + GenericReadStorage<Component = DynamicVoxelMesh<V>>,
+     {
+    fn clone(&self) -> Self {
+        Self {
+            coord: self.coord,
+            world: self.world,
+            chunks: self.chunks,
+        }
+    }
+}
+```
+
+### src/lib.rs
+```
+//! # amethyst_voxel
+//!
+//! A voxel toolbox for the amethyst game engine.
+//!
+//! Todo introduction
+
+#[macro_use]
+extern crate derivative;
+
+pub mod material;
+pub mod model;
+pub mod prefab;
+pub mod raycast;
+pub mod vox;
+pub mod voxel;
+pub mod world;
+
+mod ambient_occlusion;
+mod bundle;
+mod context;
+mod mesh;
+mod pass;
+mod plugin;
+mod side;
+mod triangulate;
+
+pub mod prelude;
+```
+
+### src/material.rs
+```
+use amethyst::{
+    assets::{Asset, AssetStorage, Handle, HotReloadStrategy, Loader, ProcessingState},
+    core::{ArcThreadPool, Time},
+    ecs::prelude::*,
+    renderer::{
+        mtl::{Material, MaterialDefaults},
+        palette::*,
+        rendy::{
+            hal::image::*,
+            texture::{pixel::*, MipLevels, TextureBuilder},
+        },
+        types::Texture,
+    },
+};
+use core::num::NonZeroU8;
+use serde_derive::*;
+use std::borrow::Cow;
+use std::collections::HashMap;
+use std::iter::repeat;
+use std::ops::Deref;
+use std::sync::Arc;
+
+/// A material. For a better explanation of the properties,
+/// take a look at the amethyst PBR model.
+pub trait VoxelMaterial: 'static + Send + Sync {
+    /// The width and height of this material.
+    fn dimension(&self) -> usize;
+    /// Get a pixel value for the albedo/alpha channel. The format is [r, g, b, a].
+    fn albedo_alpha(&self, x: usize, y: usize) -> [u8; 4];
+    /// Get a pixel value for the emission channel. The format is [r, g, b].
+    fn emission(&self, x: usize, y: usize) -> [u8; 3];
+    /// Get a pixel value for the metallic/roughness channel. The format is [m, r].
+    fn metallic_roughness(&self, x: usize, y: usize) -> [u8; 2];
+    /// The submaterials of this material. Should be at least self.
+    fn submaterials(&self) -> Vec<Box<dyn VoxelMaterial>>;
+    /// What submaterial to render for the given properties.
+    fn sub_side(&self, side: u8) -> usize;
+    /// The amount of animation frmaes for this material
+    fn sub_frames(&self) -> usize;
+    /// The kind of tiling to bake into the atlas for this material.
+    fn tiling(&self) -> Tiling;
+}
+
+pub trait AtlasAccess {
+    fn coord(&self, material: u32, side: u8, coord: u8) -> [f32; 2];
+
+    /// Retrieve material handle for the given id.
+    fn get(&self, id: &str) -> Option<AtlasMaterialHandle>;
+}
+
+/// A material handle issued by an `Atlas`.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct AtlasMaterialHandle(pub(crate) u32);
+
+/// A storage resource for `VoxelMaterial`s.
+pub struct Atlas {
+    materials: Vec<Box<dyn VoxelMaterial>>,
+    lookup: HashMap<String, AtlasMaterialHandle>,
+    size: usize,
+    grid: usize,
+    pub(crate) handle: Handle<Material>,
+}
+
+/// Data for creating a material atlas.
+#[derive(Default)]
+pub struct AtlasData {
+    materials: Vec<Box<dyn VoxelMaterial>>,
+    lookup: HashMap<String, AtlasMaterialHandle>,
+    size: usize,
+    grid: usize,
+}
+
+/// System that loads the `Atlas` resources from `AtlasData`.
+pub struct AtlasProcessor;
+
+/// `SystemData` for the `AtlasProcessor` system.
+#[derive(SystemData)]
+pub struct AtlasProcessorData<'a> {
+    atlas_storage: Write<'a, AssetStorage<Atlas>>,
+    texture_storage: Read<'a, AssetStorage<Texture>>,
+    material_storage: Read<'a, AssetStorage<Material>>,
+    material_defaults: ReadExpect<'a, MaterialDefaults>,
+    loader: ReadExpect<'a, Loader>,
+    time: Read<'a, Time>,
+    pool: ReadExpect<'a, ArcThreadPool>,
+    strategy: Option<Read<'a, HotReloadStrategy>>,
+}
+
+/// The tiling of the the textured material. This is only relevant when filtering is enabled.
+#[derive(Deserialize, Clone, Copy)]
+pub enum Tiling {
+    None,
+    Horizontal,
+    Vertical,
+    Both,
+}
+
+#[derive(Clone)]
+pub struct ColoredMaterial {
+    /// The diffuse albedo of the material
+    pub albedo: [u8; 3],
+    /// Emissive color of the material
+    pub emission: [u8; 3],
+    /// Alpha blending factor of the material (unused for now)
+    pub alpha: u8,
+    /// The metallic factor of the material
+    pub metallic: u8,
+    /// The roughness factor of the material
+    pub roughness: u8,
+}
+
+#[derive(Clone)]
+pub struct TexturedMaterial {
+    /// The size of both the width and the height of this texture. Must be a power of 2.
+    pub size: usize,
+    /// The tiling of the the textured material. This is only relevant when filtering is enabled.
+    pub tiling: Tiling,
+    /// The albedo/alpha texture. One entry [r, g, b, a] per pixel.
+    /// If you don't care abou this texture you can leave it empty, [0, 0, 0, 255] will be used i f the vector is empty.
+    pub albedo_alpha: Arc<[[u8; 4]]>,
+    /// The emission texture. One entry [r, g, b] per pixel.
+    /// If you don't care about this texture you can leave it empty, [0, 0, 0] will be used if the vector is empty.
+    pub emission: Arc<[[u8; 3]]>,
+    /// The metallic/roughness texture. One entry [m, r] per pixel.
+    /// If you don't care abou this texture you can leave it empty, [240, 8] will be used i f the vector is empty.
+    pub metallic_roughness: Arc<[[u8; 2]]>,
+}
+
+impl AtlasAccess for Atlas {
+    fn coord(&self, material: u32, side: u8, coord: u8) -> [f32; 2] {
+        let slots = self.size / self.grid;
+        const COORD_MAP_X: [f32; 4] = [0.0, 1.0, 1.0, 0.0];
+        const COORD_MAP_Y: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
+
+        let (material_id, material_size) = self
+            .materials
+            .get(material as usize)
+            .map(|m| (material as usize + m.sub_side(side), m.dimension()))
+            .unwrap_or((material as usize, 1));
+
+        let border = ((self.grid - material_size) / 2) as f32;
+
+        let x = ((material_id as usize % slots) * self.grid) as f32
+            + border
+            + COORD_MAP_X[coord as usize & 0x3] * material_size as f32;
+
+        let y = ((material_id as usize / slots) * self.grid) as f32
+            + border
+            + COORD_MAP_Y[coord as usize & 0x3] * material_size as f32;
+
+        let w = 1.0 / self.size as f32;
+        [x * w, y * w]
+    }
+
+    fn get(&self, id: &str) -> Option<AtlasMaterialHandle> {
+        self.lookup.get(id).cloned()
+    }
+}
+
+impl Asset for Atlas {
+    const NAME: &'static str = "Atlas";
+    type Data = AtlasData;
+    type HandleStorage = DenseVecStorage<Handle<Self>>;
+}
+
+impl AtlasData {
+    /// Create a new material with a id if a material with the given id doesn't exist already.
+    /// Returns the material handle for the given id.
+    pub fn create<T: AsRef<dyn VoxelMaterial>, S: Into<String>>(
+        &mut self,
+        id: S,
+        material: T,
+    ) -> AtlasMaterialHandle {
+        self.lookup
+            .entry(id.into())
+            .or_insert_with({
+                let materials = &mut self.materials;
+                let grid = &mut self.grid;
+                let size = &mut self.size;
+                move || {
+                    let material = material.as_ref();
+                    let id = materials.len();
+                    materials.extend(material.submaterials().into_iter());
+                    *grid = (*grid).max(material.dimension() * 2);
+                    *size = {
+                        let mut size = 32;
+                        while materials.len() * (*grid) * (*grid) > size * size {
+                            size *= 2;
+                        }
+                        size
+                    };
+                    AtlasMaterialHandle(id as u32)
+                }
+            })
+            .clone()
+    }
+
+    /// Create a material without assigning an id to it. This means the material can't be looked up at a later point.
+    /// The returned handle is the only way to refer to the created material.
+    pub fn create_without_id<T: AsRef<dyn VoxelMaterial>>(
+        &mut self,
+        material: T,
+    ) -> AtlasMaterialHandle {
+        let material = material.as_ref();
+        let id = self.materials.len();
+        self.materials.extend(material.submaterials().into_iter());
+        self.grid = self.grid.max(material.dimension() * 2);
+        self.size = {
+            let mut size = 32;
+            while self.materials.len() * self.grid * self.grid > size * size {
+                size *= 2;
+            }
+            size
+        };
+        AtlasMaterialHandle(id as u32)
+    }
+}
+
+impl AtlasAccess for AtlasData {
+    fn coord(&self, material: u32, side: u8, coord: u8) -> [f32; 2] {
+        let slots = self.size / self.grid;
+        const COORD_MAP_X: [f32; 4] = [0.0, 1.0, 1.0, 0.0];
+        const COORD_MAP_Y: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
+
+        let (material_id, material_size) = self
+            .materials
+            .get(material as usize)
+            .map(|m| (material as usize + m.sub_side(side), m.dimension()))
+            .unwrap_or((material as usize, 1));
+
+        let border = ((self.grid - material_size) / 2) as f32;
+
+        let x = ((material_id as usize % slots) * self.grid) as f32
+            + border
+            + COORD_MAP_X[coord as usize & 0x3] * material_size as f32;
+
+        let y = ((material_id as usize / slots) * self.grid) as f32
+            + border
+            + COORD_MAP_Y[coord as usize & 0x3] * material_size as f32;
+
+        let w = 1.0 / self.size as f32;
+        [x * w, y * w]
+    }
+
+    fn get(&self, id: &str) -> Option<AtlasMaterialHandle> {
+        self.lookup.get(id).cloned()
+    }
+}
+
+impl Default for ColoredMaterial {
+    fn default() -> Self {
+        ColoredMaterial {
+            albedo: [255, 255, 255],
+            emission: [0, 0, 0],
+            alpha: 255,
+            metallic: 8,
+            roughness: 250,
+        }
+    }
+}
+
+impl VoxelMaterial for ColoredMaterial {
+    fn dimension(&self) -> usize {
+        8
+    }
+
+    fn sub_side(&self, _: u8) -> usize {
+        0
+    }
+
+    fn sub_frames(&self) -> usize {
+        0
+    }
+
+    fn tiling(&self) -> Tiling {
+        Tiling::Both
+    }
+
+    fn submaterials(&self) -> Vec<Box<dyn VoxelMaterial>> {
+        vec![Box::new(self.clone())]
+    }
+
+    fn albedo_alpha(&self, _: usize, _: usize) -> [u8; 4] {
+        [self.albedo[0], self.albedo[1], self.albedo[2], self.alpha]
+    }
+
+    fn emission(&self, _: usize, _: usize) -> [u8; 3] {
+        [self.emission[0], self.emission[1], self.emission[2]]
+    }
+
+    fn metallic_roughness(&self, _: usize, _: usize) -> [u8; 2] {
+        [self.metallic, self.roughness]
+    }
+}
+
+impl VoxelMaterial for TexturedMaterial {
+    fn dimension(&self) -> usize {
+        self.size
+    }
+
+    fn sub_side(&self, _: u8) -> usize {
+        0
+    }
+
+    fn sub_frames(&self) -> usize {
+        0
+    }
+
+    fn submaterials(&self) -> Vec<Box<dyn VoxelMaterial>> {
+        vec![Box::new(self.clone())]
+    }
+
+    fn tiling(&self) -> Tiling {
+        self.tiling
+    }
+
+    fn albedo_alpha(&self, x: usize, y: usize) -> [u8; 4] {
+        self.albedo_alpha
+            .get(y * self.size + x)
+            .unwrap_or(&[255, 0, 255, 255])
+            .clone()
+    }
+
+    fn emission(&self, x: usize, y: usize) -> [u8; 3] {
+        self.emission
+            .get(y * self.size + x)
+            .unwrap_or(&[0, 0, 0])
+            .clone()
+    }
+
+    fn metallic_roughness(&self, x: usize, y: usize) -> [u8; 2] {
+        self.metallic_roughness
+            .get(y * self.size + x)
+            .unwrap_or(&[240, 8])
+            .clone()
+    }
+}
+
+impl Tiling {
+    fn horizontal(&self) -> bool {
+        match self {
+            Tiling::Horizontal => true,
+            Tiling::Both => true,
+            _ => false,
+        }
+    }
+
+    fn vertical(&self) -> bool {
+        match self {
+            Tiling::Vertical => true,
+            Tiling::Both => true,
+            _ => false,
+        }
+    }
+}
+
+impl Default for Tiling {
+    fn default() -> Self {
+        Tiling::Both
+    }
+}
+
+impl<'a> System<'a> for AtlasProcessor {
+    type SystemData = AtlasProcessorData<'a>;
+
+    fn run(&mut self, mut data: Self::SystemData) {
+        data.atlas_storage.process(
+            {
+                let loader = &data.loader;
+                let texture_storage = &*data.texture_storage;
+                let material_storage = &*data.material_storage;
+                let material_defaults = &*data.material_defaults;
+                move |atlas| {
+                    let grid = {
+                        atlas
+                            .materials
+                            .iter()
+                            .map(|e| e.dimension() * 2)
+                            .max()
+                            .unwrap_or(1)
+                    };
+
+                    let size = {
+                        let mut size = 32;
+                        while atlas.materials.len() * grid * grid > size * size {
+                            size *= 2;
+                        }
+                        size
+                    };
+
+                    let handle = build_material(
+                        size,
+                        grid,
+                        &atlas.materials,
+                        loader,
+                        texture_storage,
+                        material_storage,
+                        material_defaults,
+                    );
+
+                    Ok(ProcessingState::Loaded(Atlas {
+                        materials: atlas.materials,
+                        lookup: atlas.lookup,
+                        size,
+                        grid,
+                        handle,
+                    }))
+                }
+            },
+            data.time.frame_number(),
+            &**data.pool,
+            data.strategy.as_ref().map(Deref::deref),
+        );
+    }
+
+    fn setup(&mut self, world: &mut World) {
+        Self::SystemData::setup(world);
+    }
+}
+
+fn build_material(
+    size: usize,
+    grid: usize,
+    materials: &Vec<Box<dyn VoxelMaterial>>,
+    loader: &Loader,
+    texture_storage: &AssetStorage<Texture>,
+    material_storage: &AssetStorage<Material>,
+    defaults: &MaterialDefaults,
+) -> Handle<Material> {
+    let slots = size / grid;
+
+    let find_material = |x, y| {
+        let texture_x = x as usize - (x as usize / grid) * grid;
+        let texture_y = y as usize - (y as usize / grid) * grid;
+        materials
+            .get((y as usize / grid) * slots + x as usize / grid)
+            .map(|m| {
+                let border = (grid - m.dimension()) / 2;
+                let border = |x, tile| match (x < border, tile) {
+                    (true, true) => ((x + m.dimension()) - border) % m.dimension(),
+                    (true, false) => 0,
+                    (false, true) => (x - border) % m.dimension(),
+                    (false, false) => (m.dimension() - 1).min(x - border),
+                };
+                let t = m.tiling();
+                (
+                    m,
+                    border(texture_x, t.horizontal()),
+                    border(texture_y, t.vertical()),
+                )
+            })
+    };
+
+    let mips = {
+        let mut i = 1;
+        let mut room = grid / 2;
+        while room > 2 {
+            i += 1;
+            room /= 2;
+        }
+        NonZeroU8::new(i as u8).unwrap()
+    };
+
+    let albedo = loader.load_from_data(
+        build_texture(size, mips, |x, y| {
+            find_material(x, y)
+                .map(|(m, x, y)| m.albedo_alpha(x, y))
+                .unwrap_or([255, 0, 255, 255])
+        })
+        .into(),
+        (),
+        texture_storage,
+    );
+
+    let wrap = |x: [u8; 3]| [x[0], x[1], x[2], 255];
+    let emission = loader.load_from_data(
+        build_texture(size, mips, |x, y| {
+            find_material(x, y)
+                .map(|(m, x, y)| wrap(m.emission(x, y)))
+                .unwrap_or([0, 0, 0, 255])
+        })
+        .into(),
+        (),
+        texture_storage,
+    );
+
+    let wrap = |x: [u8; 2]| [0, x[0], x[1], 255];
+    let metallic_roughness = loader.load_from_data(
+        build_texture(size, mips, |x, y| {
+            find_material(x, y)
+                .map(|(m, x, y)| wrap(m.metallic_roughness(x, y)))
+                .unwrap_or([0, 240, 8, 255])
+        })
+        .into(),
+        (),
+        texture_storage,
+    );
+
+    let mat = Material {
+        albedo,
+        emission,
+        metallic_roughness,
+
+        ..defaults.0.clone()
+    };
+
+    loader.load_from_data(mat, (), material_storage)
+}
+
+fn build_texture<'a, F: Fn(usize, usize) -> [u8; 4]>(
+    width: usize,
+    mips: NonZeroU8,
+    pixel: F,
+) -> TextureBuilder<'a> {
+    let mut sampler_info = SamplerInfo::new(Filter::Linear, WrapMode::Clamp);
+    sampler_info.min_filter = Filter::Linear;
+    sampler_info.mag_filter = Filter::Nearest;
+    sampler_info.mip_filter = Filter::Linear;
+    sampler_info.anisotropic = Anisotropic::On(2);
+    TextureBuilder::new()
+        .with_kind(Kind::D2(width as u32, width as u32, 1, 1))
+        .with_view_kind(ViewKind::D2)
+        .with_data_width(width as u32)
+        .with_data_height(width as u32)
+        .with_mip_levels(MipLevels::GenerateLevels(mips))
+        .with_sampler_info(sampler_info)
+        .with_data(Cow::<[Rgba8Unorm]>::from(
+            repeat(())
+                .take(width)
+                .enumerate()
+                .flat_map(|(y, _)| {
+                    repeat(y).take(width).enumerate().map(|(x, y)| {
+                        let px = pixel(x, y);
+                        Rgba8Unorm::from(Srgba::new(px[0], px[1], px[2], px[3]))
+                    })
+                })
+                .collect::<Vec<_>>(),
+        ))
+}
+```
+
+### src/mesh.rs
+```
+use amethyst::{
+    assets::*,
+    core::{ArcThreadPool, Time},
+    ecs::prelude::*,
+    renderer::{
+        rendy::{command::QueueId, factory::Factory},
+        types::Backend,
+    },
+};
+
+use nalgebra_glm::*;
+
+use crate::ambient_occlusion::*;
+use crate::context::*;
+use crate::material::*;
+use crate::model::*;
+use crate::triangulate::Triangulation;
+use crate::voxel::{Data, NestedVoxel, Voxel};
+use crate::world::VoxelWorld;
+
+use std::collections::HashMap;
+use std::marker::PhantomData;
+use std::ops::{Deref, DerefMut};
+use std::sync::Arc;
+
+/// Asset for voxelmesh rendering
+pub struct VoxelMesh {
+    pub(crate) inner: Option<amethyst::renderer::types::Mesh>,
+    pub(crate) atlas: Handle<Atlas>,
+}
+
+/// A component that manages a dynamic voxelmesh
+pub struct DynamicVoxelMesh<T: Data> {
+    pub(crate) data: NestedVoxel<T>,
+    pub(crate) atlas: Handle<Atlas>,
+    pub(crate) transform: Mat4x4,
+    pub(crate) parent: Option<(Entity, [isize; 3])>,
+    pub(crate) dirty: bool,
+}
+
+pub struct DynamicVoxelMeshData<T: Data> {
+    pub data: NestedVoxel<T>,
+    pub atlas: Handle<Atlas>,
+}
+
+pub struct TriangulatorSystem<B: Backend, V: Data + Default> {
+    triangulation_limit: usize,
+    marker: PhantomData<(B, V)>,
+}
+
+pub struct VoxelMeshProcessor<B: Backend, V: Data + Default> {
+    marker: PhantomData<(B, V)>,
+}
+
+#[derive(SystemData)]
+pub struct TriangulatorSystemData<'a, B: Backend, V: Data> {
+    mesh_storage: Write<'a, AssetStorage<VoxelMesh>>,
+    dynamic_mesh_storage: WriteStorage<'a, DynamicVoxelMesh<V>>,
+    handle_storage: WriteStorage<'a, Handle<VoxelMesh>>,
+    world_storage: ReadStorage<'a, VoxelWorld<V>>,
+    entities: Entities<'a>,
+    queue_id: ReadExpect<'a, QueueId>,
+    factory: ReadExpect<'a, Factory<B>>,
+    atlas_storage: Read<'a, AssetStorage<Atlas>>,
+}
+
+#[derive(SystemData)]
+pub struct VoxelMeshProcessorData<'a, B: Backend, V: Data> {
+    mesh_storage: Write<'a, AssetStorage<VoxelMesh>>,
+    voxel_storage: Write<'a, AssetStorage<DynamicVoxelMeshData<V>>>,
+    atlas_storage: Read<'a, AssetStorage<Atlas>>,
+    loader: ReadExpect<'a, Loader>,
+    queue_id: ReadExpect<'a, QueueId>,
+    time: Read<'a, Time>,
+    pool: ReadExpect<'a, ArcThreadPool>,
+    strategy: Option<Read<'a, HotReloadStrategy>>,
+    factory: ReadExpect<'a, Factory<B>>,
+}
+
+impl Asset for VoxelMesh {
+    const NAME: &'static str = "VoxelMesh";
+    type Data = ModelData;
+    type HandleStorage = DenseVecStorage<Handle<Self>>;
+}
+
+impl<T: Data> Asset for DynamicVoxelMeshData<T> {
+    const NAME: &'static str = "DynamicVoxelMesh";
+    type Data = ModelData;
+    type HandleStorage = DenseVecStorage<Handle<Self>>;
+}
+
+impl<T: Data> Component for DynamicVoxelMesh<T> {
+    type Storage = DenseVecStorage<Self>;
+}
+
+impl<T: Data> DynamicVoxelMesh<T> {
+    /// Create a new `DynamicVoxelMesh` component.
+    pub fn new(value: NestedVoxel<T>, atlas: Handle<Atlas>) -> Self {
+        DynamicVoxelMesh {
+            data: value,
+            atlas,
+            transform: scale(
+                &identity(),
+                &(vec3(1.0, 1.0, 1.0) * NestedVoxel::<T>::WIDTH as f32),
+            ),
+            parent: None,
+            dirty: true,
+        }
+    }
+
+    /// Create a new `VoxelRender` component with a new `Voxel<T>` created from an iterator.
+    pub fn from_iter<I>(data: T, atlas: Handle<Atlas>, iter: I) -> Self
+    where
+        I: IntoIterator<Item = T::Child>,
+    {
+        DynamicVoxelMesh {
+            data: NestedVoxel::from_iter(data, iter),
+            atlas,
+            transform: scale(
+                &identity(),
+                &(vec3(1.0, 1.0, 1.0) * NestedVoxel::<T>::WIDTH as f32),
+            ),
+            parent: None,
+            dirty: true,
+        }
+    }
+}
+
+impl<T: Data> Deref for DynamicVoxelMesh<T> {
+    type Target = NestedVoxel<T>;
+
+    fn deref(&self) -> &NestedVoxel<T> {
+        &self.data
+    }
+}
+
+impl<T: Data> DerefMut for DynamicVoxelMesh<T> {
+    fn deref_mut(&mut self) -> &mut NestedVoxel<T> {
+        self.dirty = true;
+        &mut self.data
+    }
+}
+
+impl<B: Backend, V: Data + Default> TriangulatorSystem<B, V> {
+    pub fn new(triangulation_limit: usize) -> Self {
+        TriangulatorSystem {
+            triangulation_limit,
+            marker: PhantomData,
+        }
+    }
+}
+
+impl<'a, B: Backend, V: Data + Default> System<'a> for TriangulatorSystem<B, V> {
+    type SystemData = TriangulatorSystemData<'a, B, V>;
+
+    fn run(&mut self, mut data: Self::SystemData) {
+        let dirty_meshes = (&data.entities, &mut data.dynamic_mesh_storage)
+            .join()
+            .filter_map({
+                let atlas_storage = &data.atlas_storage;
+                move |(e, dynamic_mesh)| {
+                    if dynamic_mesh.dirty && atlas_storage.contains(&dynamic_mesh.atlas) {
+                        dynamic_mesh.dirty = false;
+                        Some(e)
+                    } else {
+                        None
+                    }
+                }
+            })
+            .take(self.triangulation_limit)
+            .collect::<Vec<_>>();
+
+        for dirty in dirty_meshes {
+            let dynamic_mesh = data.dynamic_mesh_storage.get(dirty).unwrap();
+            let atlas = data.atlas_storage.get(&dynamic_mesh.atlas).unwrap();
+            // triangulate the mesh
+            let mesh = dynamic_mesh
+                .parent
+                .map(|(world, coord)| {
+                    let world = data
+                        .world_storage
+                        .get(world)
+                        .expect("DynamicVoxelMesh parent invalid");
+                    build_mesh(
+                        Some((
+                            &dynamic_mesh.data,
+                            &WorldContext::new(coord, world, &data.dynamic_mesh_storage),
+                            &dynamic_mesh.transform,
+                        )),
+                        atlas,
+                        *data.queue_id,
+                        &data.factory,
+                    )
+                })
+                .unwrap_or_else(|| {
+                    build_mesh(
+                        Some((
+                            &dynamic_mesh.data,
+                            &VoxelContext::new(&dynamic_mesh.data),
+                            &dynamic_mesh.transform,
+                        )),
+                        atlas,
+                        *data.queue_id,
+                        &data.factory,
+                    )
+                });
+
+            // create a mesh handle for the voxelmesh we just created.
+            // the handle is picked up by the rendering system.
+            let handle = data.mesh_storage.insert(VoxelMesh {
+                inner: mesh,
+                atlas: dynamic_mesh.atlas.clone(),
+            });
+
+            // add the handle to the entity
+            data.handle_storage.insert(dirty, handle.clone()).ok();
+        }
+    }
+}
+
+impl<B: Backend, V: Data + Default> VoxelMeshProcessor<B, V> {
+    pub fn new() -> Self {
+        VoxelMeshProcessor {
+            marker: PhantomData,
+        }
+    }
+}
+
+impl<'a, B: Backend, V: Data + Default> System<'a> for VoxelMeshProcessor<B, V> {
+    type SystemData = VoxelMeshProcessorData<'a, B, V>;
+
+    fn run(&mut self, mut data: Self::SystemData) {
+        data.voxel_storage.process(
+            {
+                let loader = &data.loader;
+                let atlas_storage = &data.atlas_storage;
+                move |model| {
+                    let mut atlas = AtlasData::default();
+                    let data = build_voxel::<V>(&model, &model.submodels[0], &mut atlas);
+                    let atlas = loader.load_from_data(atlas, (), atlas_storage);
+                    Ok(ProcessingState::Loaded(DynamicVoxelMeshData {
+                        data,
+                        atlas,
+                    }))
+                }
+            },
+            data.time.frame_number(),
+            &**data.pool,
+            data.strategy.as_ref().map(Deref::deref),
+        );
+
+        data.mesh_storage.process(
+            {
+                let queue_id = &data.queue_id;
+                let factory = &data.factory;
+                let loader = &data.loader;
+                let atlas_storage = &data.atlas_storage;
+                move |model| {
+                    let mut atlas = AtlasData::default();
+
+                    let voxels = model
+                        .submodels
+                        .iter()
+                        .map(|sub| (sub, build_voxel::<V>(&model, sub, &mut atlas)))
+                        .collect::<Vec<_>>();
+
+                    let context = voxels
+                        .iter()
+                        .map(|(_, voxel)| VoxelContext::new(voxel))
+                        .collect::<Vec<_>>();
+
+                    let mesh = build_mesh(
+                        voxels
+                            .iter()
+                            .zip(context.iter())
+                            .map(|((sub, voxel), context)| (voxel, context, &sub.offset)),
+                        &atlas,
+                        **queue_id,
+                        factory,
+                    );
+
+                    Ok(ProcessingState::Loaded(VoxelMesh {
+                        inner: mesh,
+                        atlas: loader.load_from_data(atlas, (), atlas_storage),
+                    }))
+                }
+            },
+            data.time.frame_number(),
+            &**data.pool,
+            data.strategy.as_ref().map(Deref::deref),
+        );
+    }
+}
+
+fn build_voxel<V: Data>(
+    model: &ModelData,
+    submodel: &SubModelData,
+    atlas: &mut AtlasData,
+) -> NestedVoxel<V> {
+    let mut materials_map = HashMap::new();
+
+    let voxels = submodel
+        .voxels
+        .iter()
+        .map(|instance| {
+            (
+                instance.index,
+                materials_map
+                    .entry(instance.material)
+                    .or_insert_with(|| {
+                        atlas.create_without_id(model.materials[instance.material].clone())
+                    })
+                    .clone(),
+            )
+        })
+        .collect::<Vec<(usize, AtlasMaterialHandle)>>();
+
+    let mut detail: Vec<V::Child> = std::iter::repeat(Voxel::new_empty(Default::default()))
+        .take(NestedVoxel::<V>::COUNT)
+        .collect();
+
+    for (index, material) in voxels {
+        let x = index % submodel.dimensions[0];
+        let y =
+            (index / (submodel.dimensions[0] * submodel.dimensions[1])) % submodel.dimensions[2];
+        let z = (index / submodel.dimensions[0]) % submodel.dimensions[1];
+
+        if x < NestedVoxel::<V>::WIDTH && y < NestedVoxel::<V>::WIDTH && z < NestedVoxel::<V>::WIDTH
+        {
+            detail[NestedVoxel::<V>::coord_to_index(x, y, z)] =
+                Voxel::new_filled(Default::default(), material);
+        }
+    }
+
+    NestedVoxel::Detail {
+        data: Default::default(),
+        detail: Arc::new(detail),
+    }
+}
+
+fn build_mesh<'a, 'c, B, V, C, A, I>(
+    iter: I,
+    atlas: &A,
+    queue: QueueId,
+    factory: &Factory<B>,
+) -> Option<amethyst::renderer::types::Mesh>
+where
+    B: Backend,
+    V: Voxel,
+    C: Context<V> + 'c,
+    A: AtlasAccess,
+    I: IntoIterator<Item = (&'a V, &'c C, &'a Mat4x4)>,
+{
+    let mut tri = Triangulation::new(false);
+
+    for (voxel, context, transform) in iter {
+        let shared = SharedVertexData::build(voxel, context);
+        tri.append(voxel, &shared, context, vec3(0.0, 0.0, 0.0), 1.0, transform);
+    }
+
+    tri.to_mesh(atlas, queue, factory)
+}
+```
+
+### src/model.rs
+```
+use crate::material::VoxelMaterial;
+use nalgebra_glm::*;
+use std::sync::Arc;
+
+/// Data type for the `Model` asset.
+pub struct ModelData {
+    /// List of materials used in this `ModelData`.
+    pub materials: Arc<[Arc<dyn VoxelMaterial>]>,
+    /// List of submodels.
+    pub submodels: Vec<SubModelData>,
+    /// Optional list of bones, together forming a skeleton for skinning.
+    pub skeleton: Vec<Bone>,
+}
+
+pub struct SubModelData {
+    /// Voxel data for the sub model
+    pub voxels: Vec<Instance>,
+    /// The dimensions of the voxel data
+    pub dimensions: [usize; 3],
+    /// Offset from the origin for this submodel
+    pub offset: Mat4x4,
+}
+
+pub struct Instance {
+    /// the index references the index within the dimensions of the
+    ///  `SubModelData` this `Instance` is contained in.
+    pub index: usize,
+    /// The material references to an index in the materials slice
+    ///  of the `ModelData` this `Instance` is contained in.
+    pub material: usize,
+    /// Reference to a bone in the `ModelData`.
+    /// Ignored if the `ModelData` doesn't have bones.
+    pub bone: usize,
+}
+
+pub struct Bone {
+    pub parent: Option<usize>,
+    pub bind_matrix: Mat4x4,
+}
+
+impl ModelData {
+    /// Create new `ModelData` from raw parts:
+    /// materials: a shared arc slice of materials.
+    /// submodels: a list of submodels
+    pub fn new(
+        materials: Arc<[Arc<dyn VoxelMaterial>]>,
+        submodels: Vec<SubModelData>,
+        skeleton: Vec<Bone>,
+    ) -> Self {
+        Self {
+            materials,
+            submodels,
+            skeleton,
+        }
+    }
+}
+
+impl SubModelData {
+    /// Create a new `SubModelData`.
+    /// voxels: a list of voxels in the format (index, material).
+    ///         the index references the index within the dimensions.
+    ///         the material references to an index in the materials slice.
+    /// dimensions: the three dimensional size of the model.
+    pub fn new(voxels: Vec<Instance>, dimensions: [usize; 3]) -> Self {
+        Self { voxels, dimensions, offset: Mat4x4::identity() }
+    }
+}
+```
+
+### src/pass.rs
+```
+use amethyst::assets::{AssetStorage, Handle};
+use amethyst::renderer::{
+    batch::{GroupIterator, TwoLevelBatch},
+    pass::Base3DPassDef,
+    pipeline::{PipelineDescBuilder, PipelinesBuilder},
+    pod::{SkinnedVertexArgs, VertexArgs},
+    rendy::{
+        command::{QueueId, RenderPassEncoder},
+        factory::Factory,
+        graph::{
+            render::{PrepareResult, RenderGroup, RenderGroupDesc},
+            GraphContext, NodeBuffer, NodeImage,
+        },
+        hal::{self, device::Device, format::Format, pso},
+        mesh::{AsAttribute, AsVertex, VertexFormat},
+        shader::{Shader, SpirvShader},
+        util::types::vertex::{Normal, Position, Tangent},
+    },
+    resources::Tint,
+    skinning::{JointCombined, JointTransforms},
+    submodules::{DynamicVertexBuffer, EnvironmentSub, MaterialId, MaterialSub, SkinningSub},
+    types::Backend,
+    util,
+};
+
+use crate::{material::*, mesh::*};
+use amethyst::core::{
+    ecs::{Join, Read, ReadStorage, SystemData, World},
+    transform::Transform,
+};
+use smallvec::SmallVec;
+use std::marker::PhantomData;
+
+#[derive(Clone, Derivative)]
+#[derivative(Debug(bound = ""), Default(bound = ""))]
+pub struct DrawVoxelDesc<B: Backend, D: Base3DPassDef> {
+    marker: PhantomData<(B, D)>,
+    skinning: bool,
+    transparency: bool,
+}
+
+#[derive(Derivative)]
+#[derivative(Debug(bound = ""))]
+pub struct DrawVoxel<B: Backend, T: Base3DPassDef> {
+    pipeline_basic: B::GraphicsPipeline,
+    pipeline_skinned: Option<B::GraphicsPipeline>,
+    pipeline_layout: B::PipelineLayout,
+    static_batches: TwoLevelBatch<MaterialId, u32, SmallVec<[VertexArgs; 4]>>,
+    skinned_batches: TwoLevelBatch<MaterialId, u32, SmallVec<[SkinnedVertexArgs; 4]>>,
+    vertex_format_base: Vec<VertexFormat>,
+    vertex_format_skinned: Vec<VertexFormat>,
+    env: EnvironmentSub<B>,
+    materials: MaterialSub<B, T::TextureSet>,
+    skinning: SkinningSub<B>,
+    models: DynamicVertexBuffer<B, VertexArgs>,
+    skinned_models: DynamicVertexBuffer<B, SkinnedVertexArgs>,
+    marker: PhantomData<T>,
+    transparency: bool,
+}
+
+#[derive(Debug)]
+pub struct VoxelPassDef<T: Base3DPassDef>(PhantomData<T>);
+
+/// Type for combined texture coord and ambient occlusion attributes of vertex
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
+pub struct Surface {
+    pub tex_ao: [f32; 3],
+}
+
+impl AsAttribute for Surface {
+    const NAME: &'static str = "surface";
+    const FORMAT: Format = Format::Rgb32Sfloat;
+}
+
+impl<B: Backend, T: Base3DPassDef> DrawVoxelDesc<B, T> {
+    pub fn new(skinning: bool, transparency: bool) -> Self {
+        Self {
+            marker: PhantomData,
+            skinning,
+            transparency,
+        }
+    }
+}
+
+impl<'a, B, T> RenderGroupDesc<B, World> for DrawVoxelDesc<B, T>
+where
+    B: Backend,
+    T: Base3DPassDef,
+{
+    fn build(
+        self,
+        _ctx: &GraphContext<B>,
+        factory: &mut Factory<B>,
+        _queue: QueueId,
+        _aux: &World,
+        framebuffer_width: u32,
+        framebuffer_height: u32,
+        subpass: hal::pass::Subpass<'_, B>,
+        _buffers: Vec<NodeBuffer>,
+        _images: Vec<NodeImage>,
+    ) -> Result<Box<dyn RenderGroup<B, World>>, failure::Error> {
+        let env = EnvironmentSub::new(
+            factory,
+            [
+                hal::pso::ShaderStageFlags::VERTEX,
+                hal::pso::ShaderStageFlags::FRAGMENT,
+            ],
+        )?;
+
+        let materials = MaterialSub::new(factory)?;
+        let skinning = SkinningSub::new(factory)?;
+
+        let mut vertex_format_base = T::base_format();
+        let mut vertex_format_skinned = T::skinned_format();
+
+        let (mut pipelines, pipeline_layout) = build_pipelines::<B, T>(
+            factory,
+            subpass,
+            framebuffer_width,
+            framebuffer_height,
+            &vertex_format_base,
+            &vertex_format_skinned,
+            self.skinning,
+            self.transparency,
+            vec![
+                env.raw_layout(),
+                materials.raw_layout(),
+                skinning.raw_layout(),
+            ],
+        )?;
+
+        vertex_format_base.sort();
+        vertex_format_skinned.sort();
+
+        Ok(Box::new(DrawVoxel::<B, T> {
+            pipeline_basic: pipelines.remove(0),
+            pipeline_skinned: pipelines.pop(),
+            pipeline_layout,
+            static_batches: Default::default(),
+            skinned_batches: Default::default(),
+            vertex_format_base,
+            vertex_format_skinned,
+            env,
+            materials,
+            skinning,
+            models: DynamicVertexBuffer::new(),
+            skinned_models: DynamicVertexBuffer::new(),
+            marker: PhantomData,
+            transparency: self.transparency,
+        }))
+    }
+}
+
+impl<T: Base3DPassDef> Base3DPassDef for VoxelPassDef<T> {
+    const NAME: &'static str = "VoxelPass";
+    type TextureSet = T::TextureSet;
+
+    fn vertex_shader() -> &'static SpirvShader {
+        &VOXEL_VERTEX
+    }
+    fn vertex_skinned_shader() -> &'static SpirvShader {
+        &VOXEL_VERTEX_SKINNED
+    }
+    fn fragment_shader() -> &'static SpirvShader {
+        T::fragment_shader()
+    }
+    fn base_format() -> Vec<VertexFormat> {
+        vec![
+            Position::vertex(),
+            Normal::vertex(),
+            Tangent::vertex(),
+            Surface::vertex(),
+        ]
+    }
+    fn skinned_format() -> Vec<VertexFormat> {
+        vec![
+            Position::vertex(),
+            Normal::vertex(),
+            Tangent::vertex(),
+            Surface::vertex(),
+            JointCombined::vertex(),
+        ]
+    }
+}
+
+impl<'a, B, T> RenderGroup<B, World> for DrawVoxel<B, T>
+where
+    B: Backend,
+    T: Base3DPassDef,
+{
+    fn prepare(
+        &mut self,
+        factory: &Factory<B>,
+        _queue: QueueId,
+        index: usize,
+        _subpass: hal::pass::Subpass<'_, B>,
+        world: &World,
+    ) -> PrepareResult {
+        let (
+            //visibility,
+            mesh_storage,
+            atlas_storage,
+            meshes,
+            transforms,
+            joints,
+            tints,
+        ) = <(
+            Read<'_, AssetStorage<VoxelMesh>>,
+            Read<'_, AssetStorage<Atlas>>,
+            ReadStorage<'_, Handle<VoxelMesh>>,
+            ReadStorage<'_, Transform>,
+            ReadStorage<'_, JointTransforms>,
+            ReadStorage<'_, Tint>,
+        )>::fetch(world);
+
+        // Prepare environment
+        self.env.process(factory, index, world);
+        self.materials.maintain();
+
+        self.static_batches.clear_inner();
+
+        let materials_ref = &mut self.materials;
+        let skinning_ref = &mut self.skinning;
+        let statics_ref = &mut self.static_batches;
+        let skinned_ref = &mut self.skinned_batches;
+        let transparency = self.transparency;
+
+        (&meshes, &transforms, tints.maybe(), !&joints)
+            .join()
+            .filter_map(|(mesh, tform, tint, _)| {
+                if tint.map(|tint| tint.0.alpha < 1.0).unwrap_or(false) != transparency {
+                    None
+                } else {
+                    Some((mesh.id(), VertexArgs::from_object_data(tform, tint)))
+                }
+            })
+            .for_each_group(|mesh_id, data| {
+                if let Some(mesh) = mesh_storage.get_by_id(mesh_id) {
+                    if let Some(mat) = atlas_storage.get(&mesh.atlas) {
+                        if let Some((mat, _)) = materials_ref.insert(factory, world, &mat.handle) {
+                            statics_ref.insert(mat, mesh_id, data.drain(..));
+                        }
+                    }
+                }
+            });
+
+        if self.pipeline_skinned.is_some() {
+            (&meshes, &transforms, tints.maybe(), &joints)
+                .join()
+                .filter_map(|(mesh, tform, tint, joints)| {
+                    if tint.map(|tint| tint.0.alpha < 1.0).unwrap_or(false) != transparency {
+                        None
+                    } else {
+                        Some((
+                            mesh.id(),
+                            SkinnedVertexArgs::from_object_data(
+                                tform,
+                                tint,
+                                skinning_ref.insert(joints),
+                            ),
+                        ))
+                    }
+                })
+                .for_each_group(|mesh_id, data| {
+                    if let Some(mesh) = mesh_storage.get_by_id(mesh_id) {
+                        if let Some(mat) = atlas_storage.get(&mesh.atlas) {
+                            if let Some((mat, _)) =
+                                materials_ref.insert(factory, world, &mat.handle)
+                            {
+                                skinned_ref.insert(mat, mesh_id, data.drain(..));
+                            }
+                        }
+                    }
+                });
+        }
+
+        self.static_batches.prune();
+        self.skinned_batches.prune();
+
+        let static_changed = self.models.write(
+            factory,
+            index,
+            self.static_batches.count() as u64,
+            self.static_batches.data(),
+        );
+        let skinned_changed = self.skinned_models.write(
+            factory,
+            index,
+            self.skinned_batches.count() as u64,
+            self.skinned_batches.data(),
+        );
+        self.skinning.commit(factory, index);
+        if static_changed || skinned_changed {
+            PrepareResult::DrawRecord
+        } else {
+            PrepareResult::DrawReuse
+        }
+    }
+
+    fn draw_inline(
+        &mut self,
+        mut encoder: RenderPassEncoder<'_, B>,
+        index: usize,
+        _subpass: hal::pass::Subpass<'_, B>,
+        world: &World,
+    ) {
+        let mesh_storage = <Read<'_, AssetStorage<VoxelMesh>>>::fetch(world);
+        let models_loc = self.vertex_format_base.len() as u32;
+
+        encoder.bind_graphics_pipeline(&self.pipeline_basic);
+        self.env.bind(index, &self.pipeline_layout, 0, &mut encoder);
+
+        if self.models.bind(index, models_loc, 0, &mut encoder) {
+            let mut instances_drawn = 0;
+            for (&mat_id, batches) in self.static_batches.iter() {
+                if self.materials.loaded(mat_id) {
+                    self.materials
+                        .bind(&self.pipeline_layout, 1, mat_id, &mut encoder);
+                    for (mesh_id, batch_data) in batches {
+                        if let Some(mesh) = unsafe {
+                            mesh_storage
+                                .get_by_id_unchecked(*mesh_id)
+                                .inner
+                                .as_ref()
+                                .and_then(B::unwrap_mesh)
+                        } {
+                            mesh.bind_and_draw(
+                                0,
+                                &self.vertex_format_base,
+                                instances_drawn..instances_drawn + batch_data.len() as u32,
+                                &mut encoder,
+                            )
+                            .unwrap();
+                        }
+                        instances_drawn += batch_data.len() as u32;
+                    }
+                }
+            }
+        }
+    }
+
+    fn dispose(self: Box<Self>, factory: &mut Factory<B>, _aux: &World) {
+        unsafe {
+            factory
+                .device()
+                .destroy_graphics_pipeline(self.pipeline_basic);
+            factory
+                .device()
+                .destroy_pipeline_layout(self.pipeline_layout);
+        }
+    }
+}
+
+lazy_static::lazy_static! {
+    static ref VOXEL_VERTEX: SpirvShader = SpirvShader::from_bytes(
+        include_bytes!("../compiled/voxels.vert.spv"),
+        pso::ShaderStageFlags::VERTEX,
+        "main",
+    ).expect("Failed to load /compiled/voxels.vert.spv");
+
+    static ref VOXEL_VERTEX_SKINNED: SpirvShader = SpirvShader::from_bytes(
+        include_bytes!("../compiled/voxels_skinned.vert.spv"),
+        pso::ShaderStageFlags::VERTEX,
+        "main",
+    ).expect("Failed to load /compiled/voxels.vert.spv");
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_pipelines<B: Backend, T: Base3DPassDef>(
+    factory: &Factory<B>,
+    subpass: hal::pass::Subpass<'_, B>,
+    framebuffer_width: u32,
+    framebuffer_height: u32,
+    vertex_format_base: &[VertexFormat],
+    vertex_format_skinned: &[VertexFormat],
+    skinning: bool,
+    transparent: bool,
+    layouts: Vec<&B::DescriptorSetLayout>,
+) -> Result<(Vec<B::GraphicsPipeline>, B::PipelineLayout), failure::Error> {
+    let pipeline_layout = unsafe {
+        factory
+            .device()
+            .create_pipeline_layout(layouts, None as Option<(_, _)>)
+    }?;
+
+    let vertex_desc = vertex_format_base
+        .iter()
+        .map(|f| (f.clone(), pso::VertexInputRate::Vertex))
+        .chain(Some((
+            VertexArgs::vertex(),
+            pso::VertexInputRate::Instance(1),
+        )))
+        .collect::<Vec<_>>();
+
+    let shader_vertex_basic = unsafe { T::vertex_shader().module(factory).unwrap() };
+    let shader_fragment = unsafe { T::fragment_shader().module(factory).unwrap() };
+    let pipe_desc = PipelineDescBuilder::new()
+        .with_vertex_desc(&vertex_desc)
+        .with_shaders(util::simple_shader_set(
+            &shader_vertex_basic,
+            Some(&shader_fragment),
+        ))
+        .with_layout(&pipeline_layout)
+        .with_subpass(subpass)
+        .with_framebuffer_size(framebuffer_width, framebuffer_height)
+        .with_face_culling(pso::Face::BACK)
+        .with_depth_test(pso::DepthTest {
+            fun: pso::Comparison::Less,
+            write: !transparent,
+        })
+        .with_blend_targets(vec![pso::ColorBlendDesc {
+            mask: pso::ColorMask::ALL,
+            blend: if transparent {
+                Some(pso::BlendState::PREMULTIPLIED_ALPHA)
+            } else {
+                None
+            },
+        }]);
+
+    let pipelines = if skinning {
+        let shader_vertex_skinned = unsafe { T::vertex_skinned_shader().module(factory).unwrap() };
+
+        let vertex_desc = vertex_format_skinned
+            .iter()
+            .map(|f| (f.clone(), pso::VertexInputRate::Vertex))
+            .chain(Some((
+                SkinnedVertexArgs::vertex(),
+                pso::VertexInputRate::Instance(1),
+            )))
+            .collect::<Vec<_>>();
+
+        let pipe = PipelinesBuilder::new()
+            .with_pipeline(pipe_desc.clone())
+            .with_child_pipeline(
+                0,
+                pipe_desc
+                    .with_vertex_desc(&vertex_desc)
+                    .with_shaders(util::simple_shader_set(
+                        &shader_vertex_skinned,
+                        Some(&shader_fragment),
+                    )),
+            )
+            .build(factory, None);
+
+        unsafe {
+            factory.destroy_shader_module(shader_vertex_skinned);
+        }
+
+        pipe
+    } else {
+        PipelinesBuilder::new()
+            .with_pipeline(pipe_desc)
+            .build(factory, None)
+    };
+
+    unsafe {
+        factory.destroy_shader_module(shader_vertex_basic);
+        factory.destroy_shader_module(shader_fragment);
+    }
+
+    match pipelines {
+        Err(e) => {
+            unsafe {
+                factory.device().destroy_pipeline_layout(pipeline_layout);
+            }
+            Err(e)
+        }
+        Ok(pipelines) => Ok((pipelines, pipeline_layout)),
+    }
+}
+```
+
+### src/plugin.rs
+```
+use crate::mesh::VoxelMesh;
+use crate::pass::*;
+
+use amethyst::{
+    assets::Handle,
+    core::ecs::{DispatcherBuilder, World, WorldExt},
+    error::Error,
+    renderer::{
+        bundle::{RenderOrder, RenderPlan, RenderPlugin, Target},
+        pass::Base3DPassDef,
+        Backend, Factory,
+        rendy::graph::render::RenderGroupDesc,
+    },
+};
+
+/// A `RenderPlugin` for forward rendering of 3d voxels.
+/// Generic over 3d pass rendering method.
+#[derive(derivative::Derivative)]
+#[derivative(Default(bound = ""), Debug(bound = ""))]
+pub struct RenderVoxel<D: Base3DPassDef> {
+    target: Target,
+    skinning: bool,
+    marker: std::marker::PhantomData<D>,
+}
+
+impl<D: Base3DPassDef> RenderVoxel<D> {
+    /// Set target to which 3d meshes will be rendered.
+    pub fn with_target(mut self, target: Target) -> Self {
+        self.target = target;
+        self
+    }
+
+    /// Enable or disable skinning.
+    pub fn with_skinning(mut self, skinned: bool) -> Self {
+        self.skinning = skinned;
+        self
+    }
+}
+
+impl<B, D> RenderPlugin<B> for RenderVoxel<D>
+where
+    B: Backend,
+    D: Base3DPassDef,
+{
+    fn on_build<'a, 'b>(
+        &mut self,
+        world: &mut World,
+        _builder: &mut DispatcherBuilder<'a, 'b>,
+    ) -> Result<(), Error> {
+        world.register::<Handle<VoxelMesh>>();
+        //builder.add(VisibilitySortingSystem::new(), "visibility_system", &[]);
+        Ok(())
+    }
+
+    fn on_plan(
+        &mut self,
+        plan: &mut RenderPlan<B>,
+        _factory: &mut Factory<B>,
+        _world: &World,
+    ) -> Result<(), Error> {
+        let skinning = self.skinning;
+        plan.extend_target(self.target, move |ctx| {
+            ctx.add(
+                RenderOrder::Opaque,
+                DrawVoxelDesc::<B, D>::new(skinning, false).builder(),
+            )?;
+            Ok(())
+        });
+        plan.extend_target(self.target, move |ctx| {
+            ctx.add(
+                RenderOrder::Transparent,
+                DrawVoxelDesc::<B, D>::new(skinning, true).builder(),
+            )?;
+            Ok(())
+        });
+        Ok(())
+    }
+}
+```
+
+### src/prefab.rs
+```
+use amethyst::assets::{AssetStorage, Handle, Loader, PrefabData, Progress, ProgressCounter};
+use amethyst::ecs::*;
+use amethyst::error::*;
+use serde::Deserialize;
+
+use crate::mesh::{DynamicVoxelMesh, DynamicVoxelMeshData, VoxelMesh};
+use crate::vox::VoxFormat;
+use crate::voxel::Data;
+
+#[derive(Clone, Deserialize)]
+pub enum VoxelMeshPrefab {
+    File(String),
+
+    #[serde(skip)]
+    Handle(Handle<VoxelMesh>),
+
+    #[serde(skip)]
+    Placeholder,
+}
+
+#[derive(Deserialize)]
+pub enum DynamicVoxelMeshPrefab<V: Data> {
+    File(String),
+
+    #[serde(skip)]
+    Handle(Handle<DynamicVoxelMeshData<V>>),
+
+    #[serde(skip)]
+    Placeholder,
+}
+
+impl<'a> PrefabData<'a> for VoxelMeshPrefab {
+    type SystemData = (
+        ReadExpect<'a, Loader>,
+        Read<'a, AssetStorage<VoxelMesh>>,
+        WriteStorage<'a, Handle<VoxelMesh>>,
+    );
+    type Result = ();
+
+    fn add_to_entity(
+        &self,
+        entity: Entity,
+        (_, _, handles): &mut Self::SystemData,
+        _: &[Entity],
+        _: &[Entity],
+    ) -> Result<Self::Result, Error> {
+        match self {
+            VoxelMeshPrefab::Handle(handle) => {
+                handles.insert(entity, handle.clone())?;
+            }
+            _ => unreachable!(),
+        }
+        Ok(())
+    }
+
+    fn load_sub_assets(
+        &mut self,
+        mut progress: &mut ProgressCounter,
+        (loader, storage, _): &mut Self::SystemData,
+    ) -> Result<bool, Error> {
+        match std::mem::replace(self, VoxelMeshPrefab::Placeholder) {
+            VoxelMeshPrefab::File(file) => {
+                progress.add_assets(1);
+                *self = VoxelMeshPrefab::Handle(loader.load(file, VoxFormat, progress, storage));
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+}
+
+impl<'a, V: Data> PrefabData<'a> for DynamicVoxelMeshPrefab<V> {
+    type SystemData = (
+        ReadExpect<'a, Loader>,
+        Read<'a, AssetStorage<DynamicVoxelMeshData<V>>>,
+        WriteStorage<'a, DynamicVoxelMesh<V>>,
+    );
+    type Result = ();
+
+    fn add_to_entity(
+        &self,
+        entity: Entity,
+        (_, storage, mesh): &mut Self::SystemData,
+        _: &[Entity],
+        _: &[Entity],
+    ) -> Result<Self::Result, Error> {
+        match self {
+            DynamicVoxelMeshPrefab::Handle(handle) => {
+                let voxel = storage.get(handle).expect("Voxel not loaded");
+                mesh.insert(
+                    entity,
+                    DynamicVoxelMesh::new(voxel.data.clone(), voxel.atlas.clone()),
+                )?;
+            }
+            _ => unreachable!(),
+        }
+        Ok(())
+    }
+
+    fn load_sub_assets(
+        &mut self,
+        mut progress: &mut ProgressCounter,
+        (loader, storage, _): &mut Self::SystemData,
+    ) -> Result<bool, Error> {
+        match std::mem::replace(self, DynamicVoxelMeshPrefab::Placeholder) {
+            DynamicVoxelMeshPrefab::File(file) => {
+                progress.add_assets(1);
+                *self =
+                    DynamicVoxelMeshPrefab::Handle(loader.load(file, VoxFormat, progress, storage));
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+}
+```
+
+### src/prelude.rs
+```
+pub use crate::{
+    bundle::VoxelBundle,
+    material::{
+        Atlas, AtlasAccess, AtlasData, AtlasMaterialHandle, ColoredMaterial, TexturedMaterial,
+        Tiling, VoxelMaterial,
+    },
+    mesh::{DynamicVoxelMesh, VoxelMesh},
+    prefab::{DynamicVoxelMeshPrefab, VoxelMeshPrefab},
+    raycast::{Raycast, RaycastBase},
+    vox::VoxFormat,
+    voxel::{Data, NestedVoxel, SimpleVoxel, Voxel},
+    world::{Limits, VoxelSource, VoxelSourceResult, VoxelWorld, VoxelWorldAccess},
+};
+
+pub type RenderVoxelPbr =
+    crate::plugin::RenderVoxel<crate::pass::VoxelPassDef<amethyst::renderer::pass::PbrPassDef>>;
+```
+
+### src/raycast.rs
+```
+use nalgebra_glm::*;
+use std::ops::{Deref, DerefMut};
+
+use crate::voxel::{Data, NestedVoxel, Voxel};
+use crate::world::VoxelWorldAccess;
+
+/// A ray that can be used to perform raycasting on a specific type that implements `Raycast`.
+/// The ray is not compatible with other `Raycast` implementations.
+pub struct Ray {
+    origin: Vec3,
+    direction: Vec3,
+    transform: Mat4,
+    length: Option<f32>,
+}
+
+/// The result from performing a raycast
+pub struct Intersection {
+    /// The inner result. If the voxel that this intersection hit has subvoxels, the
+    ///  inner intersection contains the intersection with that subvoxel.
+    pub inner: Option<Box<Intersection>>,
+    /// The index of the subvoxel that this intersection intersects with.
+    pub index: usize,
+    /// The position of this intersection.
+    pub position: Vec3,
+    /// The normal of this intersection.
+    pub normal: Vec3,
+}
+
+/// A "root" type that can create rays as well as being raycasted.
+pub trait RaycastBase: Raycast {
+    /// Create a new ray compatible with `Self`.
+    fn ray(&self, origin: Vec3, direction: Vec3) -> Ray;
+}
+
+/// A type that can be raycasted.
+pub trait Raycast {
+    type Child: Raycast;
+
+    /// Cast a `Ray` on self, returning a ray that can be casted on the child type.
+    fn cast(&self, ray: &Ray) -> Option<Intersection>;
+
+    fn check(
+        &self,
+        ray: &Ray,
+        current: Vec3,
+        coord: [isize; 3],
+        normal: Vec3,
+    ) -> Option<Intersection>;
+
+    /// Immutably retrieve the child for the casted ray.
+    fn get_hit(&self, intersection: &Intersection) -> Option<&Self::Child>;
+
+    /// Mutably retrieve the child for the casted ray.
+    fn get_hit_mut(&mut self, ray: &Intersection) -> Option<&mut Self::Child>;
+
+    /// Get the distance on the ray to the nearest hit.
+    fn hit(&self, ray: &Ray) -> Option<f32> {
+        self.cast(ray)
+            .map(|result| (result.innermost().position - ray.origin).magnitude())
+    }
+}
+
+impl Ray {
+    pub fn length(mut self, length: f32) -> Self {
+        self.length = Some(length);
+        self
+    }
+
+    pub fn debug(self) -> Self {
+        self
+    }
+}
+
+impl Intersection {
+    pub fn level(&self, level: usize) -> Option<&Intersection> {
+        if level == 0 {
+            Some(self)
+        } else {
+            self.inner.as_ref().and_then(|i| i.level(level - 1))
+        }
+    }
+
+    pub fn innermost(&self) -> &Intersection {
+        self.inner.as_ref().map(|i| i.innermost()).unwrap_or(self)
+    }
+}
+
+impl<'a, 'b, V: Data> RaycastBase for VoxelWorldAccess<'a, 'b, V> {
+    fn ray(&self, origin: Vec3, direction: Vec3) -> Ray {
+        Ray {
+            origin,
+            direction,
+            transform: Mat4::identity(),
+            length: None,
+        }
+    }
+}
+
+impl<'a, 'b, V: Data> Raycast for VoxelWorldAccess<'a, 'b, V> {
+    type Child = NestedVoxel<V>;
+
+    fn cast(&self, ray: &Ray) -> Option<Intersection> {
+        let origin = vec3(
+            self.world.origin[0] as f32,
+            self.world.origin[1] as f32,
+            self.world.origin[2] as f32,
+        );
+        // the current location being checked on the ray
+        let current = ray.origin * (1.0 / self.world.scale) - origin;
+        cast(self, ray, current, ray.direction, 30).map(|mut intersection| {
+            intersection.position = intersection.position + origin;
+            intersection.position = intersection.position * self.world.scale;
+            intersection
+        })
+    }
+
+    fn check(
+        &self,
+        ray: &Ray,
+        current: Vec3,
+        coord: [isize; 3],
+        normal: Vec3,
+    ) -> Option<Intersection> {
+        if (0..3).fold(true, |b, i| {
+            b && coord[i] >= 0 && coord[i] < self.world.dims[i] as isize
+        }) {
+            let i = coord[0] as usize
+                + coord[1] as usize * self.world.dims[0]
+                + coord[2] as usize * self.world.dims[0] * self.world.dims[1];
+            if let Some(voxel) = self.world.data[i].get().and_then(|e| self.chunks.get(e)) {
+                if voxel.visible() {
+                    let sc = self.world.scale;
+                    let s = scaling(&vec3(sc, sc, sc));
+                    let t = translation(&vec3(
+                        (self.world.origin[0] + coord[0]) as f32 * sc,
+                        (self.world.origin[1] + coord[1]) as f32 * sc,
+                        (self.world.origin[2] + coord[2]) as f32 * sc,
+                    ));
+                    let r = Ray {
+                        transform: ray.transform * t * s,
+                        origin: ray.origin,
+                        direction: ray.direction,
+                        length: ray.length,
+                    };
+                    if let Some(sub) = voxel.cast(&r) {
+                        return Some(Intersection {
+                            inner: Some(Box::new(sub)),
+                            index: i,
+                            position: current,
+                            normal,
+                        });
+                    }
+                }
+            } else {
+                return Some(Intersection {
+                    inner: None,
+                    index: 0,
+                    position: current,
+                    normal,
+                });
+            }
+        }
+        None
+    }
+
+    fn get_hit(&self, intersection: &Intersection) -> Option<&Self::Child> {
+        self.world.data[intersection.index]
+            .get()
+            .and_then(|e| self.chunks.get(e))
+            .map(|c| c.deref())
+    }
+
+    fn get_hit_mut(&mut self, intersection: &Intersection) -> Option<&mut Self::Child> {
+        self.world.data[intersection.index]
+            .get()
+            .and_then(move |e| self.chunks.get_mut(e))
+            .map(|c| c.deref_mut())
+    }
+}
+
+impl<T: Voxel> Raycast for T {
+    type Child = <T::Data as Data>::Child;
+
+    fn cast(&self, ray: &Ray) -> Option<Intersection> {
+        // the current location being checked on the ray
+        // scales the origin so that we're in subvoxel space.
+        let transform = inverse(&ray.transform);
+        let scale = (1 << <T::Data as Data>::SUBDIV) as f32;
+        let current_direction = transform.transform_vector(&ray.direction);
+        let current = transform * vec4(ray.origin[0], ray.origin[1], ray.origin[2], 1.0);
+        let mut current = vec4_to_vec3(&current) * scale;
+
+        // move the origin of the ray to the start of the box, but only if we're not inside the
+        //  box already.
+        for i in 0..3 {
+            let t = if current_direction[i] > 0.0 {
+                (0.0 - current[i]) / current_direction[i]
+            } else if current_direction[i] < 0.0 {
+                (scale - current[i]) / current_direction[i]
+            } else {
+                0.0
+            };
+            if t > 0.0 {
+                current += current_direction * t;
+            }
+        }
+
+        cast(
+            self,
+            ray,
+            current,
+            current_direction,
+            6 * T::WIDTH,
+        )
+        .map(|mut intersection| {
+            let mut pos = vec3_to_vec4(&intersection.position) / scale;
+            pos.w = 1.0;
+            pos = ray.transform * pos;
+            intersection.position = vec4_to_vec3(&pos);
+            intersection
+        })
+    }
+
+    fn check(
+        &self,
+        ray: &Ray,
+        current: Vec3,
+        coord: [isize; 3],
+        normal: Vec3,
+    ) -> Option<Intersection> {
+        if (0..3).fold(true, |b, i| {
+            b && coord[i] >= 0 && coord[i] < T::WIDTH as isize
+        }) {
+            let i = coord[0] as usize
+                + coord[1] as usize * T::DY
+                + coord[2] as usize * T::DZ;
+            if let Some(voxel) = self.get(i) {
+                if voxel.visible() {
+                    if voxel.is_detail() {
+                        let sc = T::SCALE;
+                        let s = scaling(&vec3(sc, sc, sc));
+                        let t = translation(&vec3(
+                            coord[0] as f32 * sc,
+                            coord[1] as f32 * sc,
+                            coord[2] as f32 * sc,
+                        ));
+                        let r = Ray {
+                            transform: ray.transform * t * s,
+                            origin: ray.origin,
+                            direction: ray.direction,
+                            length: ray.length,
+                        };
+                        if let Some(sub) = voxel.cast(&r) {
+                            return Some(Intersection {
+                                inner: Some(Box::new(sub)),
+                                index: i,
+                                position: current,
+                                normal,
+                            });
+                        }
+                    } else {
+                        return Some(Intersection {
+                            inner: None,
+                            index: i,
+                            position: current,
+                            normal,
+                        });
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
+    fn get_hit(&self, intersection: &Intersection) -> Option<&<T::Data as Data>::Child> {
+        self.get(intersection.index)
+    }
+
+    fn get_hit_mut(&mut self, intersection: &Intersection) -> Option<&mut <T::Data as Data>::Child> {
+        self.get_mut(intersection.index)
+    }
+}
+
+/// raycast: the Raycast implementation that will be cast on
+/// current: the current position on the ray
+/// direction: the direction of the ray
+fn cast<R: Raycast>(
+    raycast: &R,
+    ray: &Ray,
+    mut current: Vec3,
+    direction: Vec3,
+    iterations: usize,
+) -> Option<Intersection> {
+    // keep the current location as integer coordinates, to mitigate rounding errors on
+    //  integrated values
+    let mut current_i = [
+        current[0].floor() as isize,
+        current[1].floor() as isize,
+        current[2].floor() as isize,
+    ];
+    for i in 0..3 {
+        if current[i] - current[i].floor() < std::f32::EPSILON && direction[i] < 0.0 {
+            current_i[i] -= 1;
+        }
+    }
+
+    let normals = [
+        vec3(1.0, 0.0, 0.0),
+        vec3(0.0, 1.0, 0.0),
+        vec3(0.0, 0.0, 1.0),
+    ];
+
+    // don't forget to skip the starting position
+    if let Some(hit) = raycast.check(ray, current, current_i, vec3(0.0, 0.0, 0.0)) {
+        return Some(hit);
+    }
+
+    // try to find the nearest voxel hit
+    for _ in 0..iterations {
+        // try to find the nearest intersection with the grid
+        let i = vec3(
+            intersect(current_i[0], current[0], direction[0]),
+            intersect(current_i[1], current[1], direction[1]),
+            intersect(current_i[2], current[2], direction[2]),
+        );
+
+        // advance by the distance to the nearest grid intersection
+        for d in 0..3 {
+            let e = (d + 1) % 3;
+            let f = (d + 2) % 3;
+            if i[d] <= i[e] && i[d] <= i[f] {
+                current += direction * i[d];
+                if direction[d] < 0.0 {
+                    current_i[d] -= 1;
+                    current[d] = current_i[d] as f32 + 1.0;
+                    if let Some(hit) = raycast.check(ray, current, current_i, normals[d]) {
+                        return Some(hit);
+                    }
+                } else {
+                    current_i[d] += 1;
+                    current[d] = current_i[d] as f32;
+                    if let Some(hit) = raycast.check(ray, current, current_i, -normals[d]) {
+                        return Some(hit);
+                    }
+                }
+                break;
+            }
+        }
+    }
+    None
+}
+
+/// find nearest intersection with a 1d grid, with grid lines at all integer positions
+fn intersect(reference: isize, position: f32, direction: f32) -> f32 {
+    if direction == 0.0 {
+        ::std::f32::INFINITY
+    } else {
+        let target = if direction < 0.0 {
+            reference as f32
+        } else {
+            (reference + 1) as f32
+        };
+        (target - position) / direction
+    }
+}
+```
+
+### src/side.rs
+```
+use crate::voxel::{Voxel};
+use nalgebra_glm::{Mat3, Vec3};
+
+pub trait Side {
+    const SIDE: usize;
+    const DX: isize;
+    const DY: isize;
+    const DZ: isize;
+
+    fn offset<T: Voxel>() -> isize;
+
+    fn accept<T: Voxel>(x: usize, y: usize, z: usize) -> bool;
+
+    fn orientation() -> Mat3;
+}
+
+pub struct Left;
+
+impl Side for Left {
+    const SIDE: usize = 1;
+    const DX: isize = 1;
+    const DY: isize = 0;
+    const DZ: isize = 0;
+
+    fn offset<T: Voxel>() -> isize { 
+        T::DX as isize 
+    }
+
+    fn accept<T: Voxel>(x: usize, _: usize, _: usize) -> bool {
+        x < T::LAST
+    }
+
+    fn orientation() -> Mat3 {
+        Mat3::from_columns(&[
+            Vec3::new(0.0, 0.0, 1.0),
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+        ])
+    }
+}
+
+pub struct Right;
+
+impl Side for Right {
+    const SIDE: usize = 0;
+    const DX: isize = -1;
+    const DY: isize = 0;
+    const DZ: isize = 0;
+
+    fn offset<T: Voxel>() -> isize {
+        -(T::DX as isize)
+    }
+
+    fn accept<T: Voxel>(x: usize, _: usize, _: usize) -> bool {
+        x > 0
+    }
+
+    fn orientation() -> Mat3 {
+        Mat3::from_columns(&[
+            Vec3::new(0.0, 0.0, -1.0),
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(-1.0, 0.0, 0.0),
+        ])
+    }
+}
+
+pub struct Below;
+
+impl Side for Below {
+    const SIDE: usize = 3;
+    const DX: isize = 0;
+    const DY: isize = 1;
+    const DZ: isize = 0;
+
+    fn offset<T: Voxel>() -> isize {
+        T::DY as isize
+    }
+
+    fn accept<T: Voxel>(_: usize, y: usize, _: usize) -> bool {
+        y < T::LAST
+    }
+
+    fn orientation() -> Mat3 {
+        Mat3::from_columns(&[
+            Vec3::new(-1.0, 0.0, 0.0),
+            Vec3::new(0.0, 0.0, -1.0),
+            Vec3::new(0.0, 1.0, 0.0),
+        ])
+    }
+}
+
+pub struct Above;
+
+impl Side for Above {
+    const SIDE: usize = 2;
+    const DX: isize = 0;
+    const DY: isize = -1;
+    const DZ: isize = 0;
+
+    fn offset<T: Voxel>() -> isize {
+        -(T::DY as isize)
+    }
+
+    fn accept<T: Voxel>(_: usize, y: usize, _: usize) -> bool {
+        y > 0
+    }
+
+    fn orientation() -> Mat3 {
+        Mat3::from_columns(&[
+            Vec3::new(-1.0, 0.0, 0.0),
+            Vec3::new(0.0, 0.0, 1.0),
+            Vec3::new(0.0, -1.0, 0.0),
+        ])
+    }
+}
+
+pub struct Back;
+
+impl Side for Back {
+    const SIDE: usize = 5;
+    const DX: isize = 0;
+    const DY: isize = 0;
+    const DZ: isize = 1;
+
+    fn offset<T: Voxel>() -> isize {
+        T::DZ as isize
+    }
+
+    fn accept<T: Voxel>(_: usize, _: usize, z: usize) -> bool {
+        z < T::LAST
+    }
+
+    fn orientation() -> Mat3 {
+        Mat3::from_columns(&[
+            Vec3::new(-1.0, 0.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(0.0, 0.0, 1.0),
+        ])
+    }
+}
+
+pub struct Front;
+
+impl Side for Front {
+    const SIDE: usize = 4;
+    const DX: isize = 0;
+    const DY: isize = 0;
+    const DZ: isize = -1;
+
+    fn offset<T: Voxel>() -> isize {
+        -(T::DZ as isize)
+    }
+
+    fn accept<T: Voxel>(_: usize, _: usize, z: usize) -> bool {
+        z > 0
+    }
+
+    fn orientation() -> Mat3 {
+        Mat3::from_columns(&[
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(0.0, 0.0, -1.0),
+        ])
+    }
+}
+```
+
+### src/triangulate.rs
+```
+use crate::ambient_occlusion::*;
+use crate::context::Context;
+use crate::material::{AtlasAccess, AtlasMaterialHandle};
+use crate::pass::Surface;
+use crate::side::*;
+use crate::voxel::*;
+use amethyst::renderer::{
+    rendy::{
+        command::QueueId,
+        factory::Factory,
+        mesh::MeshBuilder,
+        mesh::{Normal, Position, Tangent},
+    },
+    skinning::{JointCombined, JointIds, JointWeights},
+    types::{Backend, Mesh},
+};
+use nalgebra_glm::*;
+use std::iter::repeat;
+
+/// Triangulated mesh data created from a single voxel definition.
+pub struct Triangulation {
+    skinned: bool,
+    pos: Vec<Position>,
+    nml: Vec<Normal>,
+    tan: Vec<Tangent>,
+    tex: Vec<Texturing>,
+    jnt: Vec<JointCombined>,
+    ind: Vec<u32>,
+}
+
+struct Texturing {
+    material_id: u32,
+    side: u8,
+    coord: u8,
+    ao: f32,
+}
+
+impl Triangulation {
+    pub fn new(skinned: bool) -> Self {
+        Triangulation {
+            skinned,
+            pos: Vec::new(),
+            nml: Vec::new(),
+            tan: Vec::new(),
+            tex: Vec::new(),
+            jnt: Vec::new(),
+            ind: Vec::new(),
+        }
+    }
+
+    /// Create a new mesh
+    pub fn append<'a, T: Voxel, C: Context<T>>(
+        &mut self,
+        root: &T,
+        ao: &SharedVertexData,
+        context: &C,
+        origin: Vec3,
+        scale: f32,
+        transform: &Mat4x4,
+    ) {
+        let start = self.pos.len();
+        root.triangulate::<Left, C>(self, ao, context, origin, scale);
+        root.triangulate::<Right, C>(self, ao, context, origin, scale);
+        root.triangulate::<Below, C>(self, ao, context, origin, scale);
+        root.triangulate::<Above, C>(self, ao, context, origin, scale);
+        root.triangulate::<Back, C>(self, ao, context, origin, scale);
+        root.triangulate::<Front, C>(self, ao, context, origin, scale);
+        for i in start..self.pos.len() {
+            let pos: [f32; 3] = self.pos[i].0.into();
+            let nml: [f32; 3] = self.nml[i].0.into();
+            let tan: [f32; 3] = [self.tan[i].0[0], self.tan[i].0[1], self.tan[i].0[2]];
+            self.pos[i] = transform.transform_point(&pos.into()).coords.into();
+            self.nml[i] = transform.transform_vector(&nml.into()).into();
+            let tan = transform.transform_vector(&tan.into());
+            self.tan[i] = [tan[0], tan[1], tan[2], self.tan[i].0[3]].into();
+        }
+    }
+
+    /// Transform into a rendy Mesh
+    pub fn to_mesh<A, B>(self, atlas: &A, queue: QueueId, factory: &Factory<B>) -> Option<Mesh>
+    where
+        A: AtlasAccess,
+        B: Backend,
+    {
+        if !self.pos.is_empty() {
+            let tex = self
+                .tex
+                .into_iter()
+                .map(|texturing| {
+                    let [u, v] =
+                        atlas.coord(texturing.material_id, texturing.side, texturing.coord);
+                    Surface {
+                        tex_ao: [u, v, texturing.ao],
+                    }
+                })
+                .collect::<Vec<_>>();
+
+            let mut builder = MeshBuilder::new()
+                .with_indices(self.ind)
+                .with_vertices(self.pos)
+                .with_vertices(self.nml)
+                .with_vertices(self.tan)
+                .with_vertices(tex);
+
+            if self.skinned {
+                builder = builder.with_vertices(self.jnt);
+            }
+
+            Some(B::wrap_mesh(builder.build(queue, factory).unwrap()))
+        } else {
+            None
+        }
+    }
+}
+
+pub fn triangulate_detail<S, T, C>(
+    triangulation: &mut Triangulation,
+    shared: &SharedVertexData,
+    context: &C,
+    origin: Vec3,
+    scale: f32,
+    sub: &[ChildOf<T>],
+) where
+    S: Side,
+    T: Voxel,
+    C: Context<T>,
+{
+    // the scale of a single sub-voxel
+    let scale = scale * T::SCALE;
+    // loop over all sub-voxels and check for visible faces
+    for i in 0..T::COUNT {
+        if sub[i].visible() {
+            let x = (i) & T::LAST;
+            let y = (i >> <T::Data as Data>::SUBDIV) & T::LAST;
+            let z = (i >> (<T::Data as Data>::SUBDIV * 2)) & T::LAST;
+            let j = (i as isize + S::offset::<T>()) as usize;
+
+            if sub[i].render()
+                || (S::accept::<T>(x, y, z) && sub[j].render())
+                || context.render(x as isize + S::DX, y as isize + S::DY, z as isize + S::DZ)
+            {
+                let shared = shared.sub(x, y, z);
+                let ctx = context.child(x as isize, y as isize, z as isize);
+                let src = vec3(
+                    origin.x + x as f32 * scale,
+                    origin.y + y as f32 * scale,
+                    origin.z + z as f32 * scale,
+                );
+
+                // add the visible face
+                sub[i].triangulate::<S, _>(triangulation, &shared, &ctx, src, scale);
+            }
+        }
+    }
+}
+
+pub fn triangulate_face<S: Side>(
+    triangulation: &mut Triangulation,
+    shared: &SharedVertexData,
+    origin: Vec3,
+    scale: f32,
+    material: AtlasMaterialHandle,
+) {
+    let sc = scale * 0.5;
+    let quad = [
+        vec3(-sc, sc, sc),
+        vec3(sc, sc, sc),
+        vec3(sc, -sc, sc),
+        vec3(-sc, -sc, sc),
+    ];
+    let begin = triangulation.pos.len() as u32;
+    let transform = S::orientation();
+    let center = vec3(origin.x + sc, origin.y + sc, origin.z + sc);
+    let normal = transform * vec3(0.0, 0.0, 1.0);
+    let tangent = transform * vec3(1.0, 0.0, 0.0);
+    let shared = shared.quad::<S>();
+
+    triangulation.pos.extend(
+        quad.iter()
+            .map(|pos| Position(convert3(transform * pos + center))),
+    );
+    triangulation
+        .nml
+        .extend(repeat(Normal(convert3(normal))).take(4));
+    triangulation
+        .tan
+        .extend(repeat(Tangent(convert4(tangent))).take(4));
+    triangulation
+        .tex
+        .extend(shared.iter().enumerate().map(|(i, shared)| Texturing {
+            material_id: material.0,
+            side: S::SIDE as u8,
+            coord: i as u8,
+            ao: shared.occlusion,
+        }));
+
+    if triangulation.skinned {
+        triangulation
+            .jnt
+            .extend(shared.iter().map(|shared| JointCombined {
+                joint_ids: JointIds([
+                    shared.skins[0].0 as u16,
+                    shared.skins[1].0 as u16,
+                    shared.skins[2].0 as u16,
+                    shared.skins[3].0 as u16,
+                ]),
+                joint_weights: JointWeights([
+                    shared.skins[0].1 as f32 / 255.0,
+                    shared.skins[1].1 as f32 / 255.0,
+                    shared.skins[2].1 as f32 / 255.0,
+                    shared.skins[3].1 as f32 / 255.0,
+                ]),
+            }));
+    }
+
+    if shared[0].occlusion + shared[2].occlusion > shared[1].occlusion + shared[3].occlusion {
+        triangulation.ind.extend_from_slice(&[
+            begin,
+            begin + 1,
+            begin + 2,
+            begin,
+            begin + 2,
+            begin + 3,
+        ]);
+    } else {
+        triangulation.ind.extend_from_slice(&[
+            begin,
+            begin + 1,
+            begin + 3,
+            begin + 1,
+            begin + 2,
+            begin + 3,
+        ]);
+    }
+}
+
+#[inline]
+fn convert3(v: Vec3) -> [f32; 3] {
+    [v[0], v[1], v[2]]
+}
+
+#[inline]
+fn convert4(v: Vec3) -> [f32; 4] {
+    [v[0], v[1], v[2], 1.0]
+}
+```
+
+### src/vox.rs
+```
+use crate::{
+    material::{ColoredMaterial, VoxelMaterial},
+    model::*,
+};
+use amethyst::assets::Format;
+use byteorder::*;
+use std::io::*;
+use std::sync::Arc;
+
+type E = LittleEndian;
+
+/// MagicaVoxel .vox format.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct VoxFormat;
+
+impl Format<ModelData> for VoxFormat {
+    fn name(&self) -> &'static str {
+        "MagicaVoxel"
+    }
+
+    fn import_simple(&self, bytes: Vec<u8>) -> amethyst::Result<ModelData> {
+        let val = load_vox(bytes.as_slice()).unwrap();
+        Ok(val)
+    }
+}
+
+fn load_vox<R>(mut reader: R) -> Result<ModelData>
+where
+    R: ReadBytesExt,
+{
+    // Read the vox file header and check if the version is supported.
+    reader.read_exact(&mut [0; 4])?;
+    let version = reader.read_u32::<E>()?;
+    check(version >= 150)?;
+
+    // Read the main chunk and check if it is indeed the main chunk.
+    let (main, _) = Chunk::load(&mut reader)?;
+    check(main.is("MAIN"))?;
+
+    // Some vectors to store processed chunks in
+    let mut sizes = Vec::new();
+    let mut voxels = Vec::new();
+    let mut materials = DEFAULT_MATERIALS
+        .iter()
+        .cloned()
+        .map(|m| {
+            let r = ((m) & 0xff) as u8;
+            let g = ((m >> 8) & 0xff) as u8;
+            let b = ((m >> 16) & 0xff) as u8;
+            let a = ((m >> 24) & 0xff) as u8;
+            rgba_to_material(r, g, b, a)
+        })
+        .collect::<Vec<_>>();
+
+    // Process all child chunks from the main chunk
+    for mut chunk in main.children {
+        // the size for a model
+        if chunk.is("SIZE") {
+            let w = chunk.content.read_u32::<E>()? as usize;
+            let h = chunk.content.read_u32::<E>()? as usize;
+            let d = chunk.content.read_u32::<E>()? as usize;
+            sizes.push((w, h, d));
+        }
+        // the content for a model
+        else if chunk.is("XYZI") {
+            let num = chunk.content.read_u32::<E>()? as usize;
+            let mut vox = Vec::new();
+            for _ in 0..num {
+                let x = chunk.content.read_u8()?;
+                let y = chunk.content.read_u8()?;
+                let z = chunk.content.read_u8()?;
+                let i = chunk.content.read_u8()?;
+                vox.push((x, y, z, i));
+            }
+            voxels.push(vox);
+        }
+        // the used palette. Colors are diffuse. Overwrites the current palette.
+        else if chunk.is("RGBA") {
+            materials.clear();
+            materials.push(ColoredMaterial::default());
+            for _ in 0..255 {
+                let r = chunk.content.read_u8()?;
+                let g = chunk.content.read_u8()?;
+                let b = chunk.content.read_u8()?;
+                let a = chunk.content.read_u8()?;
+                materials.push(rgba_to_material(r, g, b, a));
+            }
+        }
+        // PBR properties for a single material in the palette
+        else if chunk.is("MATT") {
+            let id = chunk.content.read_u32::<E>()? as usize;
+            let ty = chunk.content.read_u32::<E>()?;
+            let weight = chunk.content.read_f32::<E>()?;
+            let props = chunk.content.read_u32::<E>()?;
+            let old = materials[id].clone();
+            let _plastic = if bit(props, 0) {
+                chunk.content.read_f32::<E>()?
+            } else {
+                0.0
+            };
+            let roughness = if bit(props, 1) {
+                chunk.content.read_f32::<E>()?
+            } else {
+                1.0
+            };
+            let _specular = if bit(props, 2) {
+                chunk.content.read_f32::<E>()?
+            } else {
+                0.0
+            };
+            let _ior = if bit(props, 3) {
+                chunk.content.read_f32::<E>()?
+            } else {
+                0.0
+            };
+            let _attenuation = if bit(props, 4) {
+                chunk.content.read_f32::<E>()?
+            } else {
+                0.0
+            };
+            let _power = if bit(props, 5) {
+                chunk.content.read_f32::<E>()?
+            } else {
+                0.0
+            };
+            let _glow = if bit(props, 6) {
+                chunk.content.read_f32::<E>()?
+            } else {
+                0.0
+            };
+
+            println!(
+                "MATT chunk. id: {}, ty: {}, weight: {}, props: {}",
+                id, ty, weight, props
+            );
+
+            materials[id] = match ty {
+                0 /*diffuse*/ => ColoredMaterial {
+                    albedo: old.albedo,
+                    emission: old.emission,
+                    alpha: old.alpha,
+                    metallic: mul_value(255, 1.0 - weight),
+                    roughness: mul_value(255, roughness),
+                },
+                1 /*metal*/ => ColoredMaterial {
+                    albedo: old.albedo,
+                    emission: old.emission,
+                    alpha: old.alpha,
+                    metallic: mul_value(255, 1.0 - weight),
+                    roughness: mul_value(255, roughness),
+                },
+                2 /*glass*/ => ColoredMaterial {
+                    albedo: old.albedo,
+                    emission: old.emission,
+                    alpha: old.alpha,
+                    metallic: mul_value(255, 1.0 - weight),
+                    roughness: mul_value(255, roughness),
+                },
+                3 /*emissive*/ => ColoredMaterial {
+                    albedo: old.albedo,
+                    emission: [
+                        mul_value(old.albedo[0], weight),
+                        mul_value(old.albedo[1], weight),
+                        mul_value(old.albedo[2], weight),
+                    ],
+                    alpha: old.alpha,
+                    metallic: old.metallic,
+                    roughness: mul_value(255, roughness),
+                },
+                _ => old,
+            }
+        }
+    }
+
+    let materials: Arc<[Arc<dyn VoxelMaterial>]> = materials
+        .into_iter()
+        .map(|color| Arc::new(color) as Arc<dyn VoxelMaterial>)
+        .collect::<Vec<Arc<dyn VoxelMaterial>>>()
+        .into();
+
+    // Convert the stored chunk data to our own voxel format.
+    Ok(ModelData {
+        materials,
+        skeleton: Vec::new(),
+        submodels: sizes
+            .into_iter()
+            .zip(voxels)
+            .enumerate()
+            .map(|(mesh_index, (size, voxels))| {
+                SubModelData::new(
+                    voxels
+                        .into_iter()
+                        .map(|(x, y, z, i)| Instance {
+                            index: x as usize + y as usize * size.0 + z as usize * size.0 * size.1,
+                            material: i as usize,
+                            bone: mesh_index,
+                        })
+                        .collect(),
+                    [size.0, size.1, size.2],
+                )
+            })
+            .collect(),
+    })
+}
+
+// assert without panicking, instead returns an error.
+fn check(b: bool) -> Result<()> {
+    if b {
+        Ok(())
+    } else {
+        Err(ErrorKind::InvalidData.into())
+    }
+}
+
+// multiply a unorm value by a scalar
+fn mul_value(value: u8, scalar: f32) -> u8 {
+    ((f32::from(value) / 255.0) * scalar * 255.0) as u8
+}
+
+// check if bit is present in u32
+fn bit(field: u32, bit: u32) -> bool {
+    (field & (0x01 << bit)) > 0
+}
+
+// convert a simple r,g,b,a material to a VoxelMaterial
+fn rgba_to_material(r: u8, g: u8, b: u8, a: u8) -> ColoredMaterial {
+    //let r = ((r as f32 / 255.0).powf(2.2 / 1.0) * 255.0) as u8;
+    //let g = ((g as f32 / 255.0).powf(2.2 / 1.0) * 255.0) as u8;
+    //let b = ((b as f32 / 255.0).powf(2.2 / 1.0) * 255.0) as u8;
+
+    ColoredMaterial {
+        albedo: [r, g, b],
+        emission: [0, 0, 0],
+        alpha: a,
+        metallic: 8,
+        roughness: 240,
+    }
+}
+
+struct Chunk {
+    id: [u8; 4],
+    content: Cursor<Vec<u8>>,
+    children: Vec<Chunk>,
+}
+
+impl Chunk {
+    fn load<R>(reader: &mut R) -> Result<(Self, usize)>
+    where
+        R: ReadBytesExt,
+    {
+        // load id
+        let mut id = [0u8; 4];
+        reader.read_exact(&mut id)?;
+
+        // load content
+        let content_size = reader.read_u32::<E>()? as usize;
+        let children_size = reader.read_u32::<E>()? as usize;
+        let mut content = Vec::new();
+        content.resize(content_size, 0);
+        reader.read_exact(content.as_mut_slice())?;
+
+        // load children
+        let mut loaded = 0;
+        let mut children = Vec::new();
+        while loaded < children_size {
+            let (chunk, size) = Chunk::load(reader)?;
+            children.push(chunk);
+            loaded += size;
+        }
+        check(loaded == children_size)?;
+
+        // build chunk struct
+        let chunk = Chunk {
+            id,
+            content: Cursor::new(content),
+            children,
+        };
+        let size = 12 + content_size + children_size;
+        Ok((chunk, size))
+    }
+
+    fn is(&self, id: &str) -> bool {
+        id.as_bytes().eq(&self.id)
+    }
+}
+
+/// VOX format default materials
+const DEFAULT_MATERIALS: [u32; 256] = [
+    0x0000_0000,
+    0xffff_ffff,
+    0xffcc_ffff,
+    0xff99_ffff,
+    0xff66_ffff,
+    0xff33_ffff,
+    0xff00_ffff,
+    0xffff_ccff,
+    0xffcc_ccff,
+    0xff99_ccff,
+    0xff66_ccff,
+    0xff33_ccff,
+    0xff00_ccff,
+    0xffff_99ff,
+    0xffcc_99ff,
+    0xff99_99ff,
+    0xff66_99ff,
+    0xff33_99ff,
+    0xff00_99ff,
+    0xffff_66ff,
+    0xffcc_66ff,
+    0xff99_66ff,
+    0xff66_66ff,
+    0xff33_66ff,
+    0xff00_66ff,
+    0xffff_33ff,
+    0xffcc_33ff,
+    0xff99_33ff,
+    0xff66_33ff,
+    0xff33_33ff,
+    0xff00_33ff,
+    0xffff_00ff,
+    0xffcc_00ff,
+    0xff99_00ff,
+    0xff66_00ff,
+    0xff33_00ff,
+    0xff00_00ff,
+    0xffff_ffcc,
+    0xffcc_ffcc,
+    0xff99_ffcc,
+    0xff66_ffcc,
+    0xff33_ffcc,
+    0xff00_ffcc,
+    0xffff_cccc,
+    0xffcc_cccc,
+    0xff99_cccc,
+    0xff66_cccc,
+    0xff33_cccc,
+    0xff00_cccc,
+    0xffff_99cc,
+    0xffcc_99cc,
+    0xff99_99cc,
+    0xff66_99cc,
+    0xff33_99cc,
+    0xff00_99cc,
+    0xffff_66cc,
+    0xffcc_66cc,
+    0xff99_66cc,
+    0xff66_66cc,
+    0xff33_66cc,
+    0xff00_66cc,
+    0xffff_33cc,
+    0xffcc_33cc,
+    0xff99_33cc,
+    0xff66_33cc,
+    0xff33_33cc,
+    0xff00_33cc,
+    0xffff_00cc,
+    0xffcc_00cc,
+    0xff99_00cc,
+    0xff66_00cc,
+    0xff33_00cc,
+    0xff00_00cc,
+    0xffff_ff99,
+    0xffcc_ff99,
+    0xff99_ff99,
+    0xff66_ff99,
+    0xff33_ff99,
+    0xff00_ff99,
+    0xffff_cc99,
+    0xffcc_cc99,
+    0xff99_cc99,
+    0xff66_cc99,
+    0xff33_cc99,
+    0xff00_cc99,
+    0xffff_9999,
+    0xffcc_9999,
+    0xff99_9999,
+    0xff66_9999,
+    0xff33_9999,
+    0xff00_9999,
+    0xffff_6699,
+    0xffcc_6699,
+    0xff99_6699,
+    0xff66_6699,
+    0xff33_6699,
+    0xff00_6699,
+    0xffff_3399,
+    0xffcc_3399,
+    0xff99_3399,
+    0xff66_3399,
+    0xff33_3399,
+    0xff00_3399,
+    0xffff_0099,
+    0xffcc_0099,
+    0xff99_0099,
+    0xff66_0099,
+    0xff33_0099,
+    0xff00_0099,
+    0xffff_ff66,
+    0xffcc_ff66,
+    0xff99_ff66,
+    0xff66_ff66,
+    0xff33_ff66,
+    0xff00_ff66,
+    0xffff_cc66,
+    0xffcc_cc66,
+    0xff99_cc66,
+    0xff66_cc66,
+    0xff33_cc66,
+    0xff00_cc66,
+    0xffff_9966,
+    0xffcc_9966,
+    0xff99_9966,
+    0xff66_9966,
+    0xff33_9966,
+    0xff00_9966,
+    0xffff_6666,
+    0xffcc_6666,
+    0xff99_6666,
+    0xff66_6666,
+    0xff33_6666,
+    0xff00_6666,
+    0xffff_3366,
+    0xffcc_3366,
+    0xff99_3366,
+    0xff66_3366,
+    0xff33_3366,
+    0xff00_3366,
+    0xffff_0066,
+    0xffcc_0066,
+    0xff99_0066,
+    0xff66_0066,
+    0xff33_0066,
+    0xff00_0066,
+    0xffff_ff33,
+    0xffcc_ff33,
+    0xff99_ff33,
+    0xff66_ff33,
+    0xff33_ff33,
+    0xff00_ff33,
+    0xffff_cc33,
+    0xffcc_cc33,
+    0xff99_cc33,
+    0xff66_cc33,
+    0xff33_cc33,
+    0xff00_cc33,
+    0xffff_9933,
+    0xffcc_9933,
+    0xff99_9933,
+    0xff66_9933,
+    0xff33_9933,
+    0xff00_9933,
+    0xffff_6633,
+    0xffcc_6633,
+    0xff99_6633,
+    0xff66_6633,
+    0xff33_6633,
+    0xff00_6633,
+    0xffff_3333,
+    0xffcc_3333,
+    0xff99_3333,
+    0xff66_3333,
+    0xff33_3333,
+    0xff00_3333,
+    0xffff_0033,
+    0xffcc_0033,
+    0xff99_0033,
+    0xff66_0033,
+    0xff33_0033,
+    0xff00_0033,
+    0xffff_ff00,
+    0xffcc_ff00,
+    0xff99_ff00,
+    0xff66_ff00,
+    0xff33_ff00,
+    0xff00_ff00,
+    0xffff_cc00,
+    0xffcc_cc00,
+    0xff99_cc00,
+    0xff66_cc00,
+    0xff33_cc00,
+    0xff00_cc00,
+    0xffff_9900,
+    0xffcc_9900,
+    0xff99_9900,
+    0xff66_9900,
+    0xff33_9900,
+    0xff00_9900,
+    0xffff_6600,
+    0xffcc_6600,
+    0xff99_6600,
+    0xff66_6600,
+    0xff33_6600,
+    0xff00_6600,
+    0xffff_3300,
+    0xffcc_3300,
+    0xff99_3300,
+    0xff66_3300,
+    0xff33_3300,
+    0xff00_3300,
+    0xffff_0000,
+    0xffcc_0000,
+    0xff99_0000,
+    0xff66_0000,
+    0xff33_0000,
+    0xff00_00ee,
+    0xff00_00dd,
+    0xff00_00bb,
+    0xff00_00aa,
+    0xff00_0088,
+    0xff00_0077,
+    0xff00_0055,
+    0xff00_0044,
+    0xff00_0022,
+    0xff00_0011,
+    0xff00_ee00,
+    0xff00_dd00,
+    0xff00_bb00,
+    0xff00_aa00,
+    0xff00_8800,
+    0xff00_7700,
+    0xff00_5500,
+    0xff00_4400,
+    0xff00_2200,
+    0xff00_1100,
+    0xffee_0000,
+    0xffdd_0000,
+    0xffbb_0000,
+    0xffaa_0000,
+    0xff88_0000,
+    0xff77_0000,
+    0xff55_0000,
+    0xff44_0000,
+    0xff22_0000,
+    0xff11_0000,
+    0xffee_eeee,
+    0xffdd_dddd,
+    0xffbb_bbbb,
+    0xffaa_aaaa,
+    0xff88_8888,
+    0xff77_7777,
+    0xff55_5555,
+    0xff44_4444,
+    0xff22_2222,
+    0xff11_1111,
+];
+```
+
+### src/voxel.rs
+```
+use std::iter::FromIterator;
+use std::ops::{Deref, DerefMut};
+use std::sync::Arc;
+
+use nalgebra_glm::Vec3;
+
+use crate::ambient_occlusion::SharedVertexData;
+use crate::context::Context;
+use crate::material::AtlasMaterialHandle;
+use crate::side::Side;
+use crate::triangulate::Triangulation;
+
+pub trait Voxel: 'static + Clone + Send + Sync {
+    type Data: Data;
+
+    const WIDTH: usize = 1 << <Self::Data as Data>::SUBDIV;
+    const AO_WIDTH: usize = Self::WIDTH + 1;
+    const LAST: usize = Self::WIDTH - 1;
+    const COUNT: usize = Self::WIDTH * Self::WIDTH * Self::WIDTH;
+    const DX: usize = 1;
+    const DY: usize = Self::DX * Self::WIDTH;
+    const DZ: usize = Self::DY * Self::WIDTH;
+    const SCALE: f32 = 1.0 / Self::WIDTH as f32;
+
+    /// Convert a coordinate in the format (x, y, z) to an array index
+    fn coord_to_index(x: usize, y: usize, z: usize) -> usize {
+        x * Self::DX + y * Self::DY + z * Self::DZ
+    }
+
+    /// Convert an array index to a coordinate in the format (x, y, z)
+    fn index_to_coord(index: usize) -> (usize, usize, usize) {
+        let x = index & Self::LAST;
+        let y = (index >> <Self::Data as Data>::SUBDIV) & Self::LAST;
+        let z = (index >> (<Self::Data as Data>::SUBDIV * 2)) & Self::LAST;
+        (x, y, z)
+    }
+
+    /// Construct a new, empty voxel.
+    fn new_empty(data: Self::Data) -> Self;
+
+    /// Construct a new, filled voxel. The voxel will be filled with one single material.
+    fn new_filled(data: Self::Data, material: AtlasMaterialHandle) -> Self;
+
+    /// Retrieve a reference to subvoxel at index.
+    fn get(&self, index: usize) -> Option<&<Self::Data as Data>::Child>;
+
+    /// Mutably retrieve subvoxel at index
+    fn get_mut(&mut self, index: usize) -> Option<&mut <Self::Data as Data>::Child>;
+
+    /// Returns whether this voxel is visible, i.e. if it has geometry.
+    fn visible(&self) -> bool;
+
+    /// Returns whether the neighbours of this voxel are visible if the camera was inside this voxel.
+    fn render(&self) -> bool;
+
+    /// Returns the skin binding for this voxel
+    fn skin(&self) -> Option<u8>;
+
+    /// Whether this voxel has subvoxels.
+    fn is_detail(&self) -> bool;
+
+    /// Triangulate the voxel on a specific side
+    fn triangulate<'a, S: Side, C: Context<Self>>(
+        &self,
+        mesh: &mut Triangulation,
+        ao: &SharedVertexData,
+        context: &C,
+        origin: Vec3,
+        scale: f32,
+    );
+}
+
+/// Trait for user data associated with voxels.
+pub trait Data: 'static + Default + Clone + Send + Sync {
+    /// The amount of subdivisions to do in order to create child voxels.
+    /// A value of 4 means that 2^4=16 subvoxels would be created at every axis, for a total of 16^3=4096 subvoxels.
+    const SUBDIV: usize;
+
+    type Child: Voxel;
+
+    /// Returns whether this voxel is visible, i.e. if it has geometry.
+    fn visible(&self) -> bool {
+        true
+    }
+
+    /// Returns whether the neighbours of this voxel are visible if the camera was inside this voxel.
+    fn render(&self) -> bool {
+        false
+    }
+
+    /// Returns the skin binding for this voxel
+    fn skin(&self) -> Option<u8> {
+        None
+    }
+}
+
+#[allow(type_alias_bounds)]
+pub type ChildOf<T: Voxel> = <T::Data as Data>::Child;
+
+/// A single voxel with nesting capability.
+#[derive(Clone)]
+pub enum NestedVoxel<T: Data> {
+    /// An empty voxel, air for example.
+    Empty {
+        /// User data for the voxel
+        data: T,
+    },
+
+    /// A detail voxel. This voxel contains a number of subvoxels determined by `T::subdivisions()`.
+    Detail {
+        /// A shared array of subvoxels. The array is shared so that templated detail voxels can be
+        /// represented cheaply.
+        detail: Arc<Vec<T::Child>>,
+
+        /// User data for the voxel.
+        data: T,
+    },
+
+    /// A completely solid voxel with a single material (color + specular)
+    Material {
+        /// The material id
+        material: AtlasMaterialHandle,
+
+        /// User data for the voxel.
+        data: T,
+    },
+
+    /// An empty voxel without data
+    Placeholder,
+}
+
+#[derive(Clone)]
+pub struct SimpleVoxel {
+    material: Option<AtlasMaterialHandle>,
+}
+
+impl Data for () {
+    type Child = SimpleVoxel;
+    const SUBDIV: usize = 0;
+}
+
+impl Voxel for SimpleVoxel {
+    type Data = ();
+
+    fn new_empty(_: ()) -> Self {
+        Self { material: None }
+    }
+
+    fn new_filled(_: (), material: AtlasMaterialHandle) -> Self {
+        Self { material: Some(material) }
+    }
+
+    fn get(&self, _: usize) -> Option<&ChildOf<Self>> {
+        None
+    }
+
+    fn get_mut(&mut self, _: usize) -> Option<&mut ChildOf<Self>> {
+        None
+    }
+
+    fn visible(&self) -> bool {
+        self.material.is_some()
+    }
+
+    fn render(&self) -> bool {
+        self.material.is_none()
+    }
+
+    fn skin(&self) -> Option<u8> {
+        None
+    }
+
+    fn is_detail(&self) -> bool {
+        false
+    }
+
+    fn triangulate<'a, S: Side, C: Context<Self>>(
+        &self,
+        mesh: &mut Triangulation,
+        ao: &SharedVertexData,
+        _: &C,
+        origin: Vec3,
+        scale: f32,
+    ) {
+        use crate::triangulate::*;
+        if let Some(material) = self.material {
+            triangulate_face::<S>(mesh, ao, origin, scale, material);
+        }
+    }
+}
+
+impl<T: Data> NestedVoxel<T> {
+    /// Construct a Voxel::Detail from an iterator.
+    pub fn from_iter<I>(data: T, iter: I) -> Self
+    where
+        I: IntoIterator<Item = T::Child>,
+    {
+        Self::Detail {
+            data,
+            detail: Arc::new(Vec::from_iter(iter.into_iter().take(Self::COUNT))),
+        }
+    }
+}
+
+impl<T: Data> Voxel for NestedVoxel<T> {
+    type Data = T;
+
+    fn new_empty(data: Self::Data) -> Self {
+        Self::Empty { data }
+    }
+
+    fn new_filled(data: Self::Data, material: AtlasMaterialHandle) -> Self {
+        Self::Material { data, material }
+    }
+
+    fn get(&self, index: usize) -> Option<&<T as Data>::Child> {
+        match *self {
+            Self::Empty { .. } => None,
+            Self::Detail { ref detail, .. } => detail.get(index),
+            Self::Material { .. } => None,
+            Self::Placeholder => None,
+        }
+    }
+
+    fn get_mut(&mut self, index: usize) -> Option<&mut <T as Data>::Child> {
+        match *self {
+            Self::Empty { .. } => None,
+            Self::Detail { ref mut detail, .. } => Arc::make_mut(detail).get_mut(index),
+            Self::Material { .. } => None,
+            Self::Placeholder => None,
+        }
+    }
+
+    fn visible(&self) -> bool {
+        match *self {
+            Self::Empty { .. } => false,
+            Self::Detail { ref data, .. } => data.visible(),
+            Self::Material { .. } => true,
+            Self::Placeholder => false,
+        }
+    }
+
+    fn render(&self) -> bool {
+        match *self {
+            Self::Empty { .. } => true,
+            Self::Detail { ref data, .. } => data.render(),
+            Self::Material { .. } => false,
+            Self::Placeholder => true,
+        }
+    }
+
+    fn skin(&self) -> Option<u8> {
+        match *self {
+            Self::Empty { .. } => None,
+            Self::Detail { ref data, .. } |
+            Self::Material { ref data, .. } => data.skin(),
+            Self::Placeholder => None,
+        }
+    }
+
+    fn is_detail(&self) -> bool {
+        if let Self::Detail { .. } = self {
+            true
+        } else {
+            false
+        }
+    }
+
+    fn triangulate<'a, S: Side, C: Context<Self>>(
+        &self,
+        mesh: &mut Triangulation,
+        shared: &SharedVertexData,
+        context: &C,
+        origin: Vec3,
+        scale: f32,
+    ) {
+        use crate::triangulate::*;
+        match *self {
+            Self::Empty { .. } => (),
+
+            Self::Detail { ref detail, .. } => triangulate_detail::<S, _, _>(
+                mesh,
+                shared,
+                context,
+                origin,
+                scale,
+                detail.as_slice(),
+            ),
+
+            Self::Material { material, .. } => {
+                triangulate_face::<S>(mesh, shared, origin, scale, material)
+            }
+
+            Self::Placeholder => (),
+        }
+    }
+}
+
+impl<T: Data> From<AtlasMaterialHandle> for NestedVoxel<T> {
+    fn from(material: AtlasMaterialHandle) -> Self {
+        Self::Material {
+            data: Default::default(),
+            material,
+        }
+    }
+}
+
+impl<T: Data> Default for NestedVoxel<T> {
+    fn default() -> Self {
+        Self::Empty {
+            data: Default::default(),
+        }
+    }
+}
+
+impl<T: Data> Deref for NestedVoxel<T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        match *self {
+            Self::Empty { ref data, .. }
+            | Self::Detail { ref data, .. }
+            | Self::Material { ref data, .. } => data,
+            Self::Placeholder => panic!("Placeholder dereferenced"),
+        }
+    }
+}
+
+impl<T: Data> DerefMut for NestedVoxel<T> {
+    fn deref_mut(&mut self) -> &mut T {
+        match *self {
+            Self::Empty { ref mut data, .. }
+            | Self::Detail { ref mut data, .. }
+            | Self::Material { ref mut data, .. } => data,
+            Self::Placeholder => panic!("Placeholder dereferenced"),
+        }
+    }
+}
+```
+
+### src/world.rs
+```
+use crate::material::Atlas;
+use crate::mesh::*;
+use crate::voxel::*;
+
+use amethyst::{
+    assets::Handle,
+    core::{
+        ecs::storage::{GenericReadStorage, GenericWriteStorage},
+        math::Vector3,
+        transform::Transform,
+    },
+    ecs::prelude::*,
+    renderer::{ActiveCamera, Camera},
+};
+use crossbeam::atomic::AtomicCell;
+use nalgebra_glm::*;
+use rayon::ThreadPool;
+
+use std::marker::PhantomData;
+use std::mem::replace;
+use std::ops::{Deref, DerefMut};
+use std::sync::Arc;
+
+/// A dynamically loaded infinite world component.
+/// Voxel data is pulled from a VoxelSource component on the same entity.
+/// The voxel world has a rendering range around the viewpoint of the current camera, which is automatically updated.
+pub struct VoxelWorld<T: Data> {
+    loaded: bool,
+    limits: Limits,
+    visibility: [f32; 6],
+    view_range: f32,
+    atlas: Handle<Atlas>,
+    pub(crate) data: Vec<Chunk<T>>,
+    pub(crate) dims: [usize; 3],
+    pub(crate) origin: [isize; 3],
+    pub(crate) scale: f32,
+}
+
+/// Utility struct for accessing `Voxel`s in a `VoxelWorld`.
+pub struct VoxelWorldAccess<'a, 'b, T: Data> {
+    pub world: &'a VoxelWorld<T>,
+    pub chunks: &'a mut WriteStorage<'b, DynamicVoxelMesh<T>>,
+}
+
+pub enum VoxelSourceResult<T: Data> {
+    Ok(NestedVoxel<T>),
+    Loading(Box<dyn FnOnce() -> NestedVoxel<T> + Send>),
+    Retry,
+}
+
+/// Voxel data source for `VoxelWorld`
+pub trait VoxelSource<'s, T: Data>: Send + Sync {
+    type SystemData: SystemData<'s>;
+
+    /// Load chunk at the specified chunk coordinate.
+    /// After this the returned FnOnce will be run on a background thread to get the final result.
+    fn load_voxel(
+        &mut self,
+        system_data: &mut Self::SystemData,
+        coord: [isize; 3],
+    ) -> VoxelSourceResult<T>;
+
+    /// When a chunk is removed from the `VoxelWorld`, some sources might want to persist the changes made
+    /// to the voxel. When a chunk is removed, this function will be called dispose of the chunk properly.
+    fn drop_voxel(
+        &mut self,
+        _system_data: &mut Self::SystemData,
+        _coord: [isize; 3],
+        _voxel: NestedVoxel<T>,
+    ) -> Box<dyn FnOnce() + Send> {
+        Box::new(|| ())
+    }
+
+    /// Retrieve the limits in chunks that this VoxelSource can generate.
+    /// Chunks that have neighbours according to the limits, but have no neighbours in the `VoxelWorld`
+    /// will not be rendered to ensure that rendering glitches don't occur.
+    fn limits(&self) -> Limits;
+}
+
+pub struct WorldSystem<T: Data, S: for<'s> VoxelSource<'s, T>> {
+    pool: Arc<ThreadPool>,
+    marker: PhantomData<(T, S)>,
+}
+
+/// Chunk coordinates to denote the rendering limits of a `VoxelWorld`.
+/// `None` specifies a non-existing limit, the world will be infinite in that direction.
+/// `Some` specifies an existing inclusive limit, chunk past this limit will not be requested.
+#[derive(Clone)]
+pub struct Limits {
+    pub from: [Option<isize>; 3],
+    pub to: [Option<isize>; 3],
+}
+
+pub(crate) enum Chunk<T: Data> {
+    NotNeeded,
+    NotReady(Arc<AtomicCell<Option<NestedVoxel<T>>>>),
+    Ready(Entity),
+}
+
+impl<T: Data> VoxelWorld<T> {
+    /// Create a new `VoxelWorld` component with specified render distance `dims` and a specified chunk `scale`.
+    /// The `VoxelWorld` will still require a `VoxelSource`, that should be added to the entity separately.
+    pub fn new(atlas: Handle<Atlas>, dims: [usize; 3], scale: f32) -> Self {
+        Self {
+            loaded: false,
+            limits: Limits {
+                from: [None; 3],
+                to: [None; 3],
+            },
+            visibility: [0.0; 6],
+            view_range: 0.0,
+            atlas,
+            data: (0..dims[0] * dims[1] * dims[2])
+                .map(|_| Chunk::NotNeeded)
+                .collect(),
+            dims,
+            origin: [0, 0, 0],
+            scale,
+        }
+    }
+
+    pub fn get<'a, R: 'a + GenericReadStorage<Component = DynamicVoxelMesh<T>>>(
+        &self,
+        mut coord: [isize; 3],
+        chunks: &'a R,
+    ) -> Option<&'a NestedVoxel<T>> {
+        for i in 0..3 {
+            coord[i] -= self.origin[i];
+            if coord[i] < 0 || coord[i] >= self.dims[i] as isize {
+                return None;
+            }
+        }
+
+        let index = coord[0] as usize
+            + coord[1] as usize * self.dims[0]
+            + coord[2] as usize * self.dims[0] * self.dims[1];
+
+        self.data[index]
+            .get()
+            .and_then(move |e| chunks.get(e))
+            .map(|m| m.deref())
+    }
+
+    pub fn get_mut<'a, W: 'a + GenericWriteStorage<Component = DynamicVoxelMesh<T>>>(
+        &self,
+        mut coord: [isize; 3],
+        chunks: &'a mut W,
+    ) -> Option<&'a mut NestedVoxel<T>> {
+        for i in 0..3 {
+            coord[i] -= self.origin[i];
+            if coord[i] < 0 || coord[i] >= self.dims[i] as isize {
+                return None;
+            }
+        }
+
+        let index = coord[0] as usize
+            + coord[1] as usize * self.dims[0]
+            + coord[2] as usize * self.dims[0] * self.dims[1];
+
+        self.data[index]
+            .get()
+            .and_then(move |e| chunks.get_mut(e))
+            .map(|r| r.deref_mut())
+    }
+
+    /// Get a `Handle<Atlas>` to the texture atlas used by this `VoxelWorld`
+    pub fn atlas(&self) -> &Handle<Atlas> {
+        &self.atlas
+    }
+}
+
+impl<T: Data> amethyst::ecs::Component for VoxelWorld<T> {
+    type Storage = amethyst::ecs::DenseVecStorage<Self>;
+}
+
+impl<'a, 'b, V: Data> VoxelWorldAccess<'a, 'b, V> {
+    pub fn new(
+        world: &'a VoxelWorld<V>,
+        chunks: &'a mut WriteStorage<'b, DynamicVoxelMesh<V>>,
+    ) -> Self {
+        Self { world, chunks }
+    }
+
+    pub fn get(&self, coord: [isize; 3]) -> Option<&NestedVoxel<V>> {
+        self.world.get(coord, self.chunks)
+    }
+
+    pub fn get_mut(&mut self, coord: [isize; 3]) -> Option<&mut NestedVoxel<V>> {
+        self.world.get_mut(coord, self.chunks)
+    }
+}
+
+impl<T: Data> Chunk<T> {
+    pub fn get(&self) -> Option<Entity> {
+        match *self {
+            Chunk::NotNeeded => None,
+            Chunk::NotReady(_) => None,
+            Chunk::Ready(voxel) => Some(voxel),
+        }
+    }
+}
+
+impl<T: Data, S: for<'s> VoxelSource<'s, T>> WorldSystem<T, S> {
+    pub fn new(pool: Arc<ThreadPool>) -> Self {
+        WorldSystem {
+            marker: PhantomData,
+            pool,
+        }
+    }
+}
+
+impl<'s, T: Data, S: for<'a> VoxelSource<'a, T> + Component> System<'s> for WorldSystem<T, S> {
+    #[allow(clippy::type_complexity)]
+    type SystemData = (
+        WriteStorage<'s, VoxelWorld<T>>,
+        WriteStorage<'s, DynamicVoxelMesh<T>>,
+        WriteStorage<'s, S>,
+        Entities<'s>,
+        Read<'s, ActiveCamera>,
+        ReadStorage<'s, Camera>,
+        WriteStorage<'s, Transform>,
+        <S as VoxelSource<'s, T>>::SystemData,
+    );
+
+    fn run(
+        &mut self,
+        (
+            mut worlds,
+            mut meshes,
+            mut sources,
+            entities,
+            active_camera,
+            cameras,
+            mut transforms,
+            mut source_data,
+        ): Self::SystemData,
+    ) {
+        let identity_transform = Transform::default();
+
+        let transform = active_camera
+            .entity
+            .as_ref()
+            .and_then(|ac| transforms.get(*ac))
+            .or_else(|| (&cameras, &transforms).join().next().map(|(_c, t)| t))
+            .unwrap_or(&identity_transform);
+
+        let center = {
+            let m = transform.global_matrix().column(3).xyz();
+            [m[0], m[1], m[2]]
+        };
+
+        for (world_entity, world, source) in (&entities, &mut worlds, &mut sources).join() {
+            let limits = source.limits();
+            world.limits = source.limits();
+
+            let origin = {
+                let f = |i: usize| {
+                    let origin =
+                        (center[i] / world.scale).floor() as isize - (world.dims[i] / 2) as isize;
+                    origin
+                        .max(limits.from[i].unwrap_or(origin))
+                        .min(limits.to[i].unwrap_or(origin))
+                };
+                [f(0), f(1), f(2)]
+            };
+
+            for (i, &center) in center.iter().enumerate() {
+                world.visibility[i * 2] = center - world.scale * (world.dims[i] / 2) as f32;
+                world.visibility[i * 2 + 1] =
+                    world.visibility[i * 2] + world.scale * world.dims[i] as f32;
+            }
+
+            let offset = {
+                let f = |i| origin[i] - world.origin[i];
+                [f(0), f(1), f(2)]
+            };
+            let dims = [
+                world.dims[0] as isize,
+                world.dims[1] as isize,
+                world.dims[2] as isize,
+            ];
+
+            fn limit_visibility(v: &mut [f32; 6], center: [f32; 3], limit: [f32; 3], scale: f32) {
+                for i in 0..3 {
+                    if limit[i] + scale < center[i] {
+                        v[i * 2] = v[i * 2].max(limit[i] + scale);
+                    } else {
+                        v[i * 2 + 1] = v[i * 2 + 1].min(limit[i]);
+                    }
+                }
+            }
+
+            fn for_loop(to: isize, reverse: bool, mut f: impl FnMut(isize)) {
+                let range = 0..to;
+                if reverse {
+                    for i in range.rev() {
+                        f(i);
+                    }
+                } else {
+                    for i in range {
+                        f(i);
+                    }
+                }
+            }
+
+            for_loop(dims[2], offset[2] < 0, |z| {
+                let exists = z + offset[2] >= 0 && z + offset[2] < dims[2];
+                for_loop(dims[1], offset[1] < 0, |y| {
+                    let exists = exists && y + offset[1] >= 0 && y + offset[1] < dims[1];
+                    for_loop(dims[0], offset[0] < 0, |x| {
+                        let exists = exists && x + offset[0] >= 0 && x + offset[0] < dims[0];
+                        let index = (z * dims[0] * dims[1] + y * dims[0] + x) as usize;
+
+                        // retrieve the existing chunk
+                        let moved_chunk = if exists {
+                            let index = ((z + offset[2]) * dims[0] * dims[1]
+                                + (y + offset[1]) * dims[0]
+                                + (x + offset[0])) as usize;
+                            replace(&mut world.data[index], Chunk::NotNeeded)
+                        } else {
+                            Chunk::NotNeeded
+                        };
+
+                        // process the chunk
+                        let moved_chunk = match moved_chunk {
+                            Chunk::NotNeeded => {
+                                // todo: *check* if the chunk needs to be loaded
+                                let coord = [x + origin[0], y + origin[1], z + origin[2]];
+                                limit_visibility(
+                                    &mut world.visibility,
+                                    center,
+                                    [
+                                        coord[0] as f32 * world.scale,
+                                        coord[1] as f32 * world.scale,
+                                        coord[2] as f32 * world.scale,
+                                    ],
+                                    world.scale,
+                                );
+
+                                match source.load_voxel(&mut source_data, coord) {
+                                    VoxelSourceResult::Ok(chunk) => {
+                                        let entity = entities.create();
+                                        let mut mesh =
+                                            DynamicVoxelMesh::new(chunk, world.atlas.clone());
+                                        let mut transform = Transform::default();
+                                        transform.set_scale(Vector3::new(
+                                            world.scale,
+                                            world.scale,
+                                            world.scale,
+                                        ));
+                                        transform.set_translation(vec3(
+                                            coord[0] as f32 * world.scale,
+                                            coord[1] as f32 * world.scale,
+                                            coord[2] as f32 * world.scale,
+                                        ));
+                                        mesh.transform = identity();
+                                        mesh.parent = Some((world_entity, [x, y, z]));
+                                        meshes.insert(entity, mesh).ok();
+                                        transforms.insert(entity, transform).ok();
+                                        Chunk::Ready(entity)
+                                    }
+                                    VoxelSourceResult::Loading(job) => {
+                                        let request = Arc::new(AtomicCell::default());
+                                        let weak = Arc::downgrade(&request);
+                                        self.pool.spawn(move || {
+                                            if let Some(request) = weak.upgrade() {
+                                                let result = job();
+                                                request.store(Some(result));
+                                            }
+                                        });
+                                        Chunk::NotReady(request)
+                                    }
+                                    VoxelSourceResult::Retry => {
+                                        world.loaded = false;
+                                        Chunk::NotNeeded
+                                    }
+                                }
+                            }
+                            Chunk::NotReady(request) => {
+                                let coord = [x + origin[0], y + origin[1], z + origin[2]];
+                                limit_visibility(
+                                    &mut world.visibility,
+                                    center,
+                                    [
+                                        coord[0] as f32 * world.scale,
+                                        coord[1] as f32 * world.scale,
+                                        coord[2] as f32 * world.scale,
+                                    ],
+                                    world.scale,
+                                );
+
+                                match request.take() {
+                                    Some(chunk) => {
+                                        let entity = entities.create();
+                                        let mut mesh =
+                                            DynamicVoxelMesh::new(chunk, world.atlas.clone());
+                                        let mut transform = Transform::default();
+                                        transform.set_scale(vec3(
+                                            world.scale,
+                                            world.scale,
+                                            world.scale,
+                                        ));
+                                        transform.set_translation(vec3(
+                                            coord[0] as f32 * world.scale,
+                                            coord[1] as f32 * world.scale,
+                                            coord[2] as f32 * world.scale,
+                                        ));
+                                        mesh.transform = identity();
+                                        mesh.parent = Some((world_entity, [x, y, z]));
+                                        meshes.insert(entity, mesh).ok();
+                                        transforms.insert(entity, transform).ok();
+                                        Chunk::Ready(entity)
+                                    }
+                                    None => Chunk::NotReady(request),
+                                }
+                            }
+                            Chunk::Ready(voxel) => Chunk::Ready(voxel),
+                        };
+
+                        // install the chunk
+                        match replace(&mut world.data[index], moved_chunk) {
+                            Chunk::NotReady(_future) => { /* this is a problem */ }
+                            Chunk::Ready(entity) => {
+                                let coord = [x + origin[0], y + origin[1], z + origin[2]];
+                                let voxel = replace(
+                                    meshes.get_mut(entity).unwrap().deref_mut(),
+                                    NestedVoxel::Placeholder,
+                                );
+                                entities.delete(entity).expect("Remove chunk entity failed");
+                                let job = source.drop_voxel(&mut source_data, coord, voxel);
+                                self.pool.spawn(move || job());
+                            }
+                            Chunk::NotNeeded => (),
+                        }
+                    })
+                })
+            });
+
+            world.origin = origin;
+
+            // todo: find out view range
+            world.view_range = world
+                .visibility
+                .iter()
+                .enumerate()
+                .fold(1000.0, |view_range, (i, visibility)| {
+                    view_range.min((visibility - center[i / 2]).abs())
+                });
+        }
+    }
+}
+```

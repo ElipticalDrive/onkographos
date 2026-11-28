@@ -1,0 +1,192 @@
+--- v001.md
++++ v002.md
+@@ -3,76 +3,75 @@
+ 
+ ## Overview
+-Plenoxel is a neural network-free radiance field representation that models a scene as a sparse 3D grid, calculating color and opacity via trilinear interpolation during ray casting [S2]. It distinguishes itself from its parent [Plenoxels Optimization Configuration](929-plenoxels-optimization-configuration.md) and sibling [Plenoxels Training](5979-plenoxels-training.md) by relaxing the assumption of constant opacity and spherical harmonic (SH) coefficients within each voxel, instead using trilinear interpolation to define a continuous function throughout the volume [S1].
++Plenoxel is a volume rendering method that represents a scene as a sparse 3D grid of voxels, calculating color and opacity via trilinear interpolation during ray casting without using neural networks [S2]. It solves the problem of high computational cost in neural radiance fields by relaxing the PlenOctrees assumption of constant opacity and spherical harmonic (SH) coefficients inside each voxel, instead defining a continuous function throughout the volume [S1]. Unlike its sibling [Plenoxels Optimization Configuration](929-plenoxels-optimization-configuration.md) which may assume piecewise constant attributes, Plenoxel explicitly interpolates attributes, allowing for smoother gradients and potentially higher fidelity at the cost of increased memory bandwidth during sampling [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Sparse 3D voxel grid containing learnable features (opacity and SH coefficients).
+-*   **Output:** Per-pixel color and transmittance for a given camera view.
++*   **Input:** A sparse 3D voxel grid containing learnable parameters; camera poses and viewing directions.
++*   **Output:** Rendered HDR color image $\hat{C}(\mathbf{r})$ for given rays $\mathbf{r}$.
+ 
+ **Data Structures:**
+-The scene is represented as a sparse 3D grid [S2]. Unlike standard PlenOctrees which assume piecewise constant values, Plenoxel stores values at voxel corners or centers that are interpolated [S1].
+-*   **Voxel Content:** Each voxel location holds learnable parameters for opacity ($\sigma$) and spherical harmonic coefficients [S1].
+-*   **Interpolation:** Trilinear interpolation is used to compute values at arbitrary points within the volume [S1, S2].
++The scene is represented by a voxel grid. Each vertex of the voxel grid stores a 28-dimensional vector [S3]:
++1.  **SH Coefficients:** 27 values, corresponding to 9 coefficients per color channel (R, G, B) for degree-2 spherical harmonics.
++2.  **Opacity:** 1 scalar value $\sigma$.
+ 
+-**Steps:**
+-1.  **Ray Casting:** For each pixel, cast a ray through the scene [S2].
+-2.  **Sampling:** Sample points along the ray [S2].
+-3.  **Feature Retrieval:** For each sample point, determine its position relative to the voxel grid [S1].
+-4.  **Interpolation:** Use trilinear interpolation to compute the opacity and SH coefficients at the sample point from the surrounding voxel data [S1, S2].
+-5.  **Rendering:** Integrate the interpolated opacity and color (derived from SH coefficients) along the ray to produce the final pixel color [S2].
+-6.  **Optimization:** Directly optimize the voxel opacities and SH coefficients using gradient-based methods without a neural network [S1].
+-
+-**Formulas:**
+-Let $v$ be a sample point in 3D space. The value $f(v)$ (opacity or SH coefficient) is computed via trilinear interpolation of the 8 surrounding voxel values.
+-$$ f(v) = \sum_{i=0}^{7} w_i f_i $$
+-where $f_i$ are the values at the 8 corners of the containing voxel and $w_i$ are the trilinear weights determined by the relative position of $v$ within the voxel [S1, S2].
+-
+-**Parameters:**
+-*   **Grid Sparsity:** Not given in the sources.
+-*   **SH Degree:** Not given in the sources.
+-*   **Learning Rate:** Not given in the sources.
+-
+-**Edge Cases and Pitfalls:**
+-*   **Boundaries:** Trilinear interpolation requires valid voxel neighbors. Handling rays that exit the sparse grid boundary requires specific logic (e.g., assuming zero opacity/color outside) [G].
+-*   **Precision:** Trilinear interpolation is computationally cheaper than MLP queries but may introduce smoothing artifacts compared to higher-order interpolation or neural representations [S1].
++**Algorithm Steps:**
++1.  **Initialization:** Initialize voxel opacities $\sigma$ to 0.1 and color coefficients to grey by adding an offset of 0.5 to the SH coefficients [S3].
++2.  **Ray Definition:** For each pixel, define a ray $\mathbf{r} = \mathbf{o} + t\mathbf{d}$, where $\mathbf{o}$ is the camera center and $\mathbf{d}$ is the normalized viewing direction [S3].
++3.  **Sampling:** Sample $N$ points along the ray at regular intervals $\delta_i = t_{i+1} - t_i$ [S3].
++4.  **Interpolation:** For any 3D point $(x, y, z)$ and normalized viewing angle $(v_x, v_y, v_z)$ within the voxel grid, trilinearly interpolate the color $\mathbf{c}_i$ and opacity $\sigma_i$ from the eight nearby voxel vertices [S1, S3].
++5.  **Rendering:** Compute the accumulated transmittance $T_i$ and the final color using the volume rendering integral [S3]:
++    $$ \hat{C}(\mathbf{r}) = \sum_{i=1}^{N} T_i \left( 1 - \exp(-\sigma_i \delta_i) \right) \mathbf{c}_i $$
++    where the transmittance is defined as:
++    $$ T_i = \exp\left( -\sum_{j=1}^{i-1} \sigma_j \delta_j \right) $$
++6.  **Optimization:** Directly optimize the voxel opacities and SH coefficients using gradient-based optimizers, without neural network backpropagation through a MLP [S1].
+ 
+ **Pseudocode:**
+ ```python
+-def render_plenoxel(ray_origin, ray_direction, voxel_grid):
++def render_plenoxel(ray_origin, ray_direction, voxel_grid, num_samples):
+     """
+     Renders a single ray using Plenoxel representation.
+-    voxel_grid: Sparse structure mapping (x,y,z) -> (opacity, sh_coeffs)
++    
++    Args:
++        ray_origin: 3D vector (o)
++        ray_direction: 3D vector (d), normalized
++        voxel_grid: Sparse 3D grid storing 28D vectors per vertex
++        num_samples: Integer N
++        
++    Returns:
++        color: 3D vector (RGB)
+     """
+-    # 1. Sample points along the ray
+-    # Standard NeRF sampling strategy (e.g., uniform + stratified)
+-    sample_points = sample_along_ray(ray_origin, ray_direction, num_samples=192) # [S2]
++    # 1. Define ray and sample points
++    # Assume bounding box limits for the scene are known
++    t_min, t_max = get_ray_box_intersection(ray_origin, ray_direction)
++    t_values = linspace(t_min, t_max, num_samples + 1)
+     
++    accumulated_transmittance = 1.0
+     final_color = [0.0, 0.0, 0.0]
+-    T = 1.0  # Transmittance
+     
+-    for point in sample_points:
+-        # 2. Check if point is within the sparse grid bounds
+-        if not voxel_grid.contains(point):
+-            break
+-            
+-        # 3. Retrieve and interpolate features
+-        # Trilinear interpolation of opacity and SH coefficients
+-        sigma = voxel_grid.trilinear_interpolate_opacity(point)
+-        sh_coeffs = voxel_grid.trilinear_interpolate_sh(point)
++    for i in range(num_samples):
++        t_i = t_values[i]
++        t_next = t_values[i+1]
++        delta = t_next - t_i
+         
+-        # 4. Compute color from SH coefficients
+-        # Direction vector for SH evaluation
+-        direction = normalize(ray_direction)
+-        color = evaluate_sh(sh_coeffs, direction)
++        # 2. Sample point position
++        point_pos = ray_origin + ray_direction * t_i
+         
+-        # 5. Accumulate color
+-        # Alpha compositing: C = sum(T * (1 - exp(-sigma * delta)) * color)
+-        # Approximation for small delta or standard NeRF integration
+-        alpha = 1.0 - exp(-sigma) # Assuming unit step or pre-computed delta
+-        T_current = T * (1.0 - alpha)
+-        final_color += T * alpha * color
+-        T = T_current
++        # 3. Trilinear Interpolation
++        # Get color c_i and opacity sigma_i from voxel grid at point_pos
++        # and viewing direction ray_direction
++        c_i, sigma_i = trilinear_interpolate(voxel_grid, point_pos, ray_direction)
+         
+-        if T < 1e-4:
++        # 4. Volume Rendering Step
++        # T_i is accumulated transmittance up to point i
++        # Note: T_1 = 1.0 (exp(0))
++        
++        weight = 1.0 - exp(-sigma_i * delta)
++        final_color += accumulated_transmittance * weight * c_i
++        
++        # Update transmittance for next step
++        accumulated_transmittance *= exp(-sigma_i * delta)
++        
++        # Early termination if transmittance is negligible
++        if accumulated_transmittance < 1e-5:
+             break
+             
+@@ -80,41 +79,30 @@
+ ```
+ 
++**Parameters:**
++*   **Initial Opacity:** 0.1 [S3].
++*   **Initial Color Offset:** 0.5 added to initialize color to grey [S3].
++*   **Sampling:** $N$ points sampled at regular intervals [S3].
++
++**Edge Cases and Pitfalls:**
++*   **Training Instability:** SH coefficients can change significantly during training, leading to instability. The grey initialization offset mitigates this [S3].
++*   **Boundary Conditions:** Trilinear interpolation requires valid voxel neighbors. Points outside the sparse grid bounds must be handled (e.g., treated as transparent or background) [G].
++
+ ## Subtopics
+ 
+-### Plenoxels Training with Progressive Growing
+-Builds on Plenoxel by progressively increasing grid resolution during training. [Link](1493-plenoxels-training-with-progressive-growing.md)
+-
+-### Joint Finetuning for Vector-Quantized Radiance Fields
+-Applies vector quantization to Plenoxel features for compression. [Link](1871-joint-finetuning-for-vector-quantized-radiance-fields.md)
+-
+-### Plenoxels Training
+-General training procedures for Plenoxel models. [Link](5979-plenoxels-training.md)
+-
+-### Voxel optimization (F2Plenoxels)
+-Optimizes voxel structures specifically for Plenoxels. [Link](7384-voxel-optimization-f2plenoxels.md)
+-
+-### RGB-D Plenoxel Mapping
+-Extends Plenoxel to incorporate depth information. [Link](7820-rgb-d-plenoxel-mapping.md)
+-
+-### Plenoxels Training Configuration (PeRFception variants)
+-Specific configuration variants for Plenoxel training. [Link](8192-plenoxels-training-configuration-perfception-variants.md)
+-
+-### Clonoxels
+-A variant or related method to Plenoxel. [Link](8364-clonoxels.md)
+-
+-### Plenoxels Transmittance Offset
+-Adjusts transmittance calculations in Plenoxel. [Link](10129-plenoxels-transmittance-offset.md)
++### HDR-Plenoxels Volume Representation
++A radiance representation using Spherical Harmonics (SH) in a voxel grid to model HDR irradiance, exploiting SH's ability to implicitly express non-Lambertian effects and span all colors over every direction of a sphere [S3]. It follows the standard Plenoxel interpolation and rendering pipeline but is specifically configured for High Dynamic Range output, often followed by an explicit tone mapping stage to convert HDR radiance to LDR images [S3].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Significantly faster than MLP-based NeRFs. Standard NeRF requires hundreds of MLP queries per pixel (e.g., 192 samples * 256 MLPs = ~49,152 queries per pixel in some contexts, or 235,929,600 total for an image) [S2]. Plenoxel replaces MLP queries with trilinear interpolation, reducing computational cost by orders of magnitude [S2].
+-*   **Memory Complexity:** Depends on the sparsity of the 3D grid. Sparse grids reduce memory usage compared to dense grids [S2].
+-*   **Performance:** In standard benchmark tasks, Plenoxels optimized with Instant-NGP algorithms are 2 orders of magnitude faster than JNeRF without loss in visual quality [S2].
+-*   **Strengths:** No neural network overhead; fast inference and training; efficient memory usage via sparsity.
+-*   **Limitations:** Trilinear interpolation may lack the representational power of neural networks for complex high-frequency details [S1].
++*   **Time Complexity:** Rendering requires $O(N)$ trilinear interpolations per ray, where $N$ is the number of samples. This is significantly faster than neural network queries (MLPs) used in standard NeRF, which involve multiple matrix multiplications per sample [S2].
++*   **Memory Complexity:** Memory usage is proportional to the number of voxels in the sparse grid. Each voxel vertex stores 28 floats (27 SH + 1 opacity). Sparsity helps reduce this compared to dense grids [S2].
++*   **Performance:** Plenoxels optimized with Instant-NGP algorithms achieve training speeds 2 orders of magnitude faster than JNeRF, with no loss in visual quality on standard benchmarks [S2].
++*   **Strengths:** No neural network overhead; efficient ray marching; continuous representation avoids artifacts from piecewise constant assumptions [S1, S2].
++*   **Limitations:** Trilinear interpolation may introduce blurring compared to higher-order methods; memory usage can be high for high-resolution grids [S1, S3].
+ 
+ ## Background
+-Plenoxel was proposed by Fridovich-Keil et al. in 2022 [S2]. It was introduced as a NeRF model that does not use neural networks, representing the scene as a sparse 3D grid and calculating color and opacity via trilinear interpolation [S2]. It relaxes the PlenOctrees assumption of constant opacity and SH coefficients within each voxel [S1].
++Plenoxel was proposed by Fridovich-Keil et al. in 2022 [S1, S2]. It was introduced as a NeRF model without neural networks, representing the scene as a sparse 3D grid. It relaxes the PlenOctrees assumption [YLT* 21] by using trilinear interpolation to define a continuous function throughout the volume, directly optimizing voxel opacities and SH coefficients [S1].
+ 
+ ## Sources
+ [S1] Recent Advances and Trends in Learning‐Based 3D Representations, https://doi.org/10.1111/cgf.70530, fetched 2026-10-26
+-[S2] Overview of NeRF technology and applications, https://www.jcad.cn/en/article/doi/10.3724/SP.J.1089.2023-00759, fetched 2026-10-31+[S2] Overview of NeRF technology and applications, https://www.jcad.cn/en/article/doi/10.3724/SP.J.1089.2023-00759, fetched 2026-10-31
++[S3] HDR-Plenoxels: Self-Calibrating High Dynamic Range Radiance Fields, https://doi.org/10.1007/978-3-031-19824-3_23, fetched 2026-10-26

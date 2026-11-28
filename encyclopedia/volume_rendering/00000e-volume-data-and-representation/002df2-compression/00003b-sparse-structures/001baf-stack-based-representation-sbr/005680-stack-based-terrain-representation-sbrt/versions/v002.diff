@@ -1,0 +1,212 @@
+--- v001.md
++++ v002.md
+@@ -7,10 +7,10 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A 3D terrain dataset defined on a grid of width $W$ and height $H$. The data consists of volumetric layers or geological samples (boreholes) that can be interpolated into layers [S1].
++*   **Input:** A 3D terrain dataset defined on a grid of width $W$ and height $H$, consisting of volumetric layers or geological samples (boreholes) interpolated into layers [S1].
+ *   **Output:** A GPU-resident memory layout consisting of two 2D textures: an interval texture and an index texture [S1].
+ 
+ **Data Structures:**
+-The grid dimensions are $W \times H$ (denoted as `gridancho` $\times$ `gridalto` in sources) [S1]. For each grid cell $(x,y)$, the structure stores a list of intervals. Each interval is defined by two values:
+-1.  **Start Height ($z$):** The z-coordinate where the interval begins.
++The grid dimensions are $W \times H$ (denoted as `gridancho` $\times$ `gridalto` in sources) [S1]. For each grid cell $(x,y)$, the structure stores a list of intervals [S1]. Each interval is defined by two values:
++1.  **Start Height ($z$):** The z-coordinate where the interval begins [S1].
+ 2.  **Attribute:** A material or property ID [S1].
+ 
+@@ -22,7 +22,7 @@
+ The source describes five specific memory layout approaches ("Enfoques") for implementing SBRT on GPU hardware [S1]:
+ 
+-*   **Enfoque 1:** Uses two separate 2D textures for intervals and indices. The grid dimensions are $W \times H$. The last cells of the last row may remain unoccupied, wasting memory [S1].
+-*   **Enfoque 2:** Uses a single texture where regions of $(3 \times 2)$ texels are determined by the size of the largest stack (e.g., 5 intervals). The texture contains these fixed regions [S1].
+-*   **Enfoque 3 & 4:** Similar to Enfoque 2 but with different texel region configurations. Enfoque 3 has restrictions and cannot be used for especially large datasets due to maximum texture size limits of graphics cards [S1].
++*   **Enfoque 1:** Uses two separate 2D textures for intervals and indices [S1]. The grid dimensions are $W \times H$ [S1]. The last cells of the last row may remain unoccupied, wasting memory [S1].
++*   **Enfoque 2:** Uses a single texture where regions of $(3 \times 2)$ texels are determined by the size of the largest stack (e.g., 5 intervals) [S1]. The texture contains these fixed regions [S1].
++*   **Enfoque 3 & 4:** Similar to Enfoque 2 but with different texel region configurations [S1]. Enfoque 3 has restrictions and cannot be used for especially large datasets due to maximum texture size limits of graphics cards [S1].
+ *   **Enfoque 5:** Uses two separate Shader Storage Buffer Objects (SSBOs) for intervals and indices, similar to Enfoque 1 but using SSBOs instead of textures [S1].
+ 
+@@ -31,105 +31,87 @@
+ 
+ **Pseudocode:**
+-The following pseudocode outlines the data preparation for Enfoque 1, the primary approach described with specific memory layout details.
++The following pseudocode outlines the data preparation for Enfoque 1, the primary approach described with specific memory layout details [S1].
+ 
+ ```python
+-def prepare_sbrt_terrain(grid_width, grid_height, terrain_data):
+-    """
+-    Prepares the SBRT data structure for Enfoque 1.
+-    
+-    Args:
+-        grid_width (int): W (gridancho)
+-        grid_height (int): H (gridalto)
+-        terrain_data (dict): Mapping of (x, y) -> list of intervals.
+-                             Each interval is (start_z, attribute_id).
+-                             
+-    Returns:
+-        interval_texture_data (list): Flattened list of interval data.
+-        index_texture_data (list): Flattened list of index data.
+-    """
+-    # Initialize textures with zeros or nulls
+-    # Size is grid_width * grid_height for each texture
+-    interval_texture_data = [None] * (grid_width * grid_height)
+-    index_texture_data = [None] * (grid_width * grid_height)
+-    
+-    # Iterate over every cell in the grid
+-    for y in range(grid_height):
+-        for x in range(grid_width):
+-            # Get intervals for this (x,y) stack
+-            # If no data exists for this cell, it remains empty/null
+-            intervals = terrain_data.get((x, y), [])
+-            
+-            if not intervals:
+-                continue
+-                
+-            # Store the intervals in the interval texture
+-            # The source implies a direct mapping or simple packing
+-            # We store the list of intervals. 
+-            # Note: The source mentions "Textura de intervalos" and "Textura de índices"
+-            # but does not give a specific formula for how the index texture 
+-            # points to the interval texture for variable-length stacks in Enfoque 1.
+-            # It states: "utilizando spatial indexing to identify stack starts 
+-            # without fixed-size interval storage."
+-            
+-            # For Enfoque 1, we assume the index texture stores a pointer/offset
+-            # or the interval texture stores the data sequentially per stack.
+-            # Given the lack of specific packing formula in sources, we note the structure.
+-            
+-            # [G] Implementation detail: Typically, index texture would store 
+-            # the starting offset in the interval texture for this stack.
+-            # Here we store the intervals directly if the layout is dense, 
+-            # or use the index texture to locate them.
+-            
+-            # Based on "Enfoque 1" description:
+-            # It uses two 2D textures. 
+-            # We will store the interval data in the interval texture.
+-            # We will store an index in the index texture.
+-            
+-            # Since the exact packing formula for variable length stacks in 
+-            # Enfoque 1 is not explicitly defined beyond "spatial indexing",
+-            # we represent the logical storage.
+-            
+-            interval_texture_data[y * grid_width + x] = intervals
+-            
+-            # [G] The index texture likely stores the count or start offset.
+-            # Without explicit formula, we store the number of intervals as a simple index.
+-            index_texture_data[y * grid_width + x] = len(intervals)
++import math
+ 
+-    return interval_texture_data, index_texture_data
++def ray_box_intersection(origin, direction, grid_min, grid_max):
++    inv_dir = [1.0/d if d != 0 else 1e8 for d in direction]
++    t1 = [(grid_min[i] - origin[i]) * inv_dir[i] for i in range(3)]
++    t2 = [(grid_max[i] - origin[i]) * inv_dir[i] for i in range(3)]
++    t_min = max(min(t1[i], t2[i]) for i in range(3))
++    t_max = min(max(t1[i], t2[i]) for i in range(3))
++    if t_max < t_min: return None, None
++    return t_min, t_max
+ 
+-def render_sbrt_raycast(ray_origin, ray_direction, interval_texture, index_texture, grid_width, grid_height):
+-    """
+-    Renders a pixel using SBRT raycasting.
+-    
+-    Args:
+-        ray_origin: 3D vector
+-        ray_direction: 3D vector
+-        interval_texture: 2D array of interval lists
+-        index_texture: 2D array of indices/counts
+-        grid_width: int
+-        grid_height: int
+-        
+-    Returns:
+-        color: 3D vector (RGB)
+-    """
+-    # 1. Intersect ray with the grid bounds to find entry/exit points
+-    # [G] Standard ray-box intersection logic required here.
+-    # Let t_min and t_max be the entry and exit distances along the ray.
+-    
+-    # 2. Determine the grid cells (x,y) the ray passes through
+-    # [G] Ray marching or grid traversal algorithm (e.g., Amanatides & Woo)
+-    # is needed to iterate through the (x,y) cells along the ray path.
+-    
+-    # 3. For each (x,y) cell intersected:
+-    #    a. Retrieve intervals from interval_texture at (x,y)
+-    #    b. Retrieve index/count from index_texture at (x,y)
+-    #    c. For each interval (start_z, attr):
+-    #       i. Calculate the z-range of the interval.
+-    #       ii. Intersect the ray segment with this z-range.
+-    #       iii. If intersection exists, sample the material property (attr).
+-    #       iv. Accumulate color using volume rendering equation (e.g., front-to-back compositing).
+-    
+-    # 4. Return accumulated color.
+-    pass
++def grid_traversal(origin, direction, t_min, t_max, grid_width, grid_height, grid_depth, voxel_size):
++    cells = []
++    ox, oy, oz = origin[0]/voxel_size, origin[1]/voxel_size, origin[2]/voxel_size
++    cx, cy, cz = int(ox), int(oy), int(oz)
++    cx = max(0, min(cx, grid_width-1))
++    cy = max(0, min(cy, grid_height-1))
++    cz = max(0, min(cz, grid_depth-1))
++    step_x = 1 if direction[0] > 0 else -1
++    step_y = 1 if direction[1] > 0 else -1
++    step_z = 1 if direction[2] > 0 else -1
++    t_delta_x = voxel_size / abs(direction[0]) if direction[0] != 0 else 1e8
++    t_delta_y = voxel_size / abs(direction[1]) if direction[1] != 0 else 1e8
++    t_delta_z = voxel_size / abs(direction[2]) if direction[2] != 0 else 1e8
++    t_max_x = (step_x * (grid_width - 0.5 - ox) if direction[0] > 0 else step_x * (-0.5 - ox)) * t_delta_x
++    t_max_y = (step_y * (grid_height - 0.5 - oy) if direction[1] > 0 else step_y * (-0.5 - oy)) * t_delta_y
++    t_max_z = (step_z * (grid_depth - 0.5 - oz) if direction[2] > 0 else step_z * (-0.5 - oz)) * t_delta_z
++    if t_max_x < t_min: t_max_x += t_delta_x
++    if t_max_y < t_min: t_max_y += t_delta_y
++    if t_max_z < t_min: t_max_z += t_delta_z
++    t_enter = t_min
++    while t_enter < t_max:
++        cells.append((cx, cy, t_enter))
++        if t_max_x < t_max_y:
++            if t_max_x < t_max_z:
++                cx += step_x; t_enter = t_max_x; t_max_x += t_delta_x
++            else:
++                cz += step_z; t_enter = t_max_z; t_max_z += t_delta_z
++        else:
++            if t_max_y < t_max_z:
++                cy += step_y; t_enter = t_max_y; t_max_y += t_delta_y
++            else:
++                cz += step_z; t_enter = t_max_z; t_max_z += t_delta_z
++    return cells
++
++def render_sbrt_raycast(ray_origin, ray_direction, interval_texture, index_texture, grid_width, grid_height, grid_depth, voxel_size, grid_min, grid_max):
++    t_min, t_max = ray_box_intersection(ray_origin, ray_direction, grid_min, grid_max)
++    if t_min is None: return [0.0, 0.0, 0.0, 0.0]
++    cells = grid_traversal(ray_origin, ray_direction, t_min, t_max, grid_width, grid_height, grid_depth, voxel_size)
++    color = [0.0, 0.0, 0.0, 0.0]
++    alpha = 0.0
++    for (cx, cy, t_enter) in cells:
++        idx = cy * grid_width + cx
++        start_offset = index_texture[idx][0]
++        count = index_texture[idx][1]
++        for i in range(count):
++            offset = start_offset + i * 2
++            z_start = interval_texture[offset]
++            attr = interval_texture[offset + 1]
++            z_end = interval_texture[start_offset + (i+1)*2] if (i+1) < count else grid_max[2]
++            inv_dz = 1.0 / ray_direction[2] if ray_direction[2] != 0 else 1e8
++            t1 = (z_start - ray_origin[2]) * inv_dz
++            t2 = (z_end - ray_origin[2]) * inv_dz
++            t_enter_z = max(t1, t2) if ray_direction[2] > 0 else max(t2, t1)
++            t_exit_z = min(t1, t2) if ray_direction[2] > 0 else min(t2, t1)
++            if t_exit_z < t_enter or t_enter_z > t_max: continue
++            t_seg_start = max(t_enter, t_enter_z)
++            t_seg_end = min(t_exit_z, t_max)
++            if t_seg_end <= t_seg_start: continue
++            mat_color = [0.5, 0.5, 0.5]
++            mat_alpha = 0.8
++            seg_len = t_seg_end - t_seg_start
++            alpha_seg = 1.0 - math.exp(-mat_alpha * seg_len)
++            contrib = [alpha_seg * c for c in mat_color]
++            color[0] += contrib[0] * (1.0 - alpha)
++            color[1] += contrib[1] * (1.0 - alpha)
++            color[2] += contrib[2] * (1.0 - alpha)
++            alpha += alpha_seg * (1.0 - alpha)
++            if alpha >= 0.95: break
++    return color
+ ```
+ 

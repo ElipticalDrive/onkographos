@@ -1,0 +1,81 @@
+# Sphere Rendering with Thickness
+Also called: Hollow Sphere Rendering with Thickness Clipping, Shell Sphere Voxelization, Shell sphere, Sphere Thickness Rasterization, Thick sphere clipping
+
+## Overview
+Sphere Rendering with Thickness renders a sphere with a specified thickness as a hollow shell by checking grid points against the sphere's inner and outer radii [S1, unofficial]. It filters grid points based on a thickness parameter, excluding points that fall within the inner radius [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+- **Input**: Sphere center position `pos` (3D vector), sphere radius `r`, thickness parameter $\tau$, and a grid of query points (voxel centers) [S1, unofficial].
+- **Output**: A subset of grid points that fall within the spherical shell, added to a render list [S1, unofficial].
+
+**Data Structures**
+- **SphereGeometry**: Contains `pos` (center) and `radius` ($r$) [S1, unofficial].
+- **BucketIndices**: A list of grid indices covering the bounding box of the sphere to optimize query scope [S1, unofficial].
+
+**Steps**
+1. Compute bounding box indices for the sphere: `auto bucketIndices = calculateIndicesFromBB(params, pos, pos, radius);` [S1, unofficial].
+2. Compute squared radius: `float radius2 = radius * radius;` [S1, unofficial].
+3. For each point `ptCoords` in the bucket, calculate squared distance to center: `float d2 = dist2(ptCoords, pos);` [S1, unofficial].
+4. If `thickness > 0` and `d2 < (2 * radius * thickness - radius2)`, skip the point as it lies inside the hollow core [S1, unofficial].
+5. If `d2 < radius2`, add the point to the render list with color, dithering, and clipping behavior [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_sphere_thickness(center, radius, thickness, grid_points):
+    """
+    Renders a sphere with thickness by filtering grid points.
+    
+    Args:
+        center: Vec3, sphere center position.
+        radius: float, outer radius of the sphere.
+        thickness: float, thickness of the shell.
+        grid_points: List[Vec3], voxel centers within the computed bounding box bucket.
+        
+    Returns:
+        List[Vec3], points inside the shell.
+    """
+    r2 = radius * radius
+    inner_threshold = 2 * radius * thickness - r2
+    rendered_points = []
+    
+    for pt in grid_points:
+        dx = pt.x - center.x
+        dy = pt.y - center.y
+        dz = pt.z - center.z
+        d2 = dx*dx + dy*dy + dz*dz
+        
+        if thickness > 0 and d2 < inner_threshold:
+            continue
+            
+        if d2 < r2:
+            rendered_points.append(pt)
+            
+    return rendered_points
+```
+
+**Parameters**
+- `radius`: Sphere outer radius [S1, unofficial].
+- `thickness`: Shell thickness parameter [S1, unofficial].
+
+**Edge Cases and Pitfalls**
+- The inner radius check formula `2 * radius * thickness - radius2` is described as "magic math" in the source code comment, implying it approximates the inner radius squared for a thin shell [S1, unofficial].
+
+## Subtopics
+
+### Triangle Rendering with Thickness
+Renders a triangle with a specified thickness by checking if grid points are within the thickness distance from the triangle plane or edges. Use this for planar surfaces. [Triangle Rendering with Thickness](12908-triangle-rendering-with-thickness.md)
+
+### Mesh Rasterization and Triangle Intersection
+The general framework for converting 3D mesh primitives into voxel data. Sphere rendering is a specialized primitive within this framework. [Mesh Rasterization and Triangle Intersection](12907-mesh-rasterization-and-triangle-intersection.md)
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+This method originates from the `Volumetric-display` project by quartzzuiop, which implements a custom volumetric renderer [S1, unofficial]. The specific implementation for sphere thickness is found in the source code comments and demo applications, where it is used to render moving spheres with a defined thickness [S1, unofficial].
+
+## Sources
+[S1] quertzuiop/Volumetric-display, https://github.com/quertzuiop/Volumetric-display, fetched 2026-10-26 (unofficial)

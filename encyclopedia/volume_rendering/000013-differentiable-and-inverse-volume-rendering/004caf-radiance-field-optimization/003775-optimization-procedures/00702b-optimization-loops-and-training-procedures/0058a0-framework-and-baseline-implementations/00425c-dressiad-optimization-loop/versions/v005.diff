@@ -1,0 +1,373 @@
+--- v004.md
++++ v005.md
+@@ -4,221 +4,174 @@
+ 
+ ## Overview
+-The DressiAD Optimization Loop is a define-and-run differentiable rendering optimization procedure that constructs a computational graph, marks variables for gradient tracking, and executes forward/backward passes with Stochastic Gradient Descent (SGD) [S1]. It is distinct from eager-mode frameworks (like PyTorch) by explicitly managing graph traversal, packing the computation into Vulkan command buffers, and handling dirty-flag-based graph rebuilding [S1]. It builds on [Framework and Baseline Implementations](16220-framework-and-baseline-implementations.md).
++The DressiAD Optimization Loop is a define-and-run differentiable rendering optimization framework that constructs a computational graph, marks variables for gradient tracking, and executes forward/backward passes using Stochastic Gradient Descent (SGD) [S1]. It distinguishes itself from standard AD libraries by packing the computational graph into Vulkan command buffers for execution, allowing for hardware-agnostic differentiable rendering [S1]. Unlike general-purpose AD which may store $O(kn)$ intermediate states, DressiAD manages graph staticity and rebuilds stages/substages based on dirty flags to optimize execution [S1].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Inputs:** Scene data (vertex positions, UVs, faces, matrices, environment map, albedo, metallic, roughness, normal, background) loaded into CPU memory [S1]. Target images for loss calculation [S1].
+-*   **Outputs:** Optimized scene parameters (e.g., vertex positions, normal maps) saved as GLTF files [S1].
++The method operates in two phases: initialization (graph construction) and iteration (execution). It relies on the `DressiBasicRenderer` interface to manage scene data and the `DressiAD` class to handle the AD logic [S1].
+ 
+-**Data Structures:**
+-*   **CpuImage:** A simple buffer of a 2D image used to store scene data [S1]. Non-image data (e.g., vertex positions) are converted into 2D image representation for efficient rendering [S1].
+-*   **Variable:** A data structure representing inputs and outputs of functions in the computational graph. It has a `type` (VEC3, VEC2, IVEC3, MAT4, FLOAT, VEC4) and `size` [S1]. It includes methods `setRequiresGradRecursively()` and `setDirtyRecursively(bool)` [S1].
+-*   **Function:** Wraps forward GLSL code and a backward generator [S1].
+-*   **DressiAD Class:** Contains interfaces for `setLossVar()`, `setOptimizer()`, `sendImg()`, `recvImg()`, and `execStep()` [S1]. It maintains an `InitStatus` enum (`BACKWARD`, `STAGE`, `SUBSTAGE`, `FINISHED`) and counters `m_graph_static_cnt` [S1].
++### Inputs and Outputs
++**Inputs:**
++*   Scene data files (e.g., `.gltf`, `.png`) loaded into CPU memory [S1].
++*   Optimization targets: Variables marked with `requires-gradient` flags (e.g., vertex positions, normal textures) [S1].
++*   Hyperparameters: Learning rate ($lr$), HardSoftRas parameters ($K, r, \sigma, \delta$) [S1].
+ 
+-**Parameters:**
+-*   `lr`: Learning rate for the SGD optimizer. Typical value: 0.01f [S1].
+-*   `K`: Number of peeling for HardSoftRas. Typical value: 2 [S1].
+-*   `r`: Radius parameter for HardSoftRas. Typical value: 0.01f [S1].
+-*   `sigma`: Blending parameter for HardSoftRas. Calculated as `r / 7.f` [S1].
+-*   `delta`: Silhouette edge width for HardSoftRas. Calculated as `r` [S1].
+-*   `FAST_REBUILD_COUNT` and `FULL_REBUILD_COUNT`: Thresholds for `m_graph_static_cnt` to trigger graph rebuilds [S1]. Values not given in the sources.
++**Outputs:**
++*   Optimized scene parameters saved to disk (e.g., `.gltf`) [S1].
++*   Rendered images and loss values during iteration [S1].
+ 
+-**Steps:**
+-1.  **Initialization:** Create a renderer instance (e.g., `DressiBasicRenderer`) and load scene data from files into CPU memory [S1].
+-2.  **Graph Construction:** Build a computational graph by calling `BuildBasicRenderGraph` with scene variables and HardSoftRas parameters (`K, r, sigma, delta`) [S1].
+-3.  **Loss Calculation:** Compute L1 loss between the target image and the rendered image: $L = \text{Mean}(|I_{target} - I_{rendered}|)$ [S1].
+-4.  **Target Marking:** Mark vertex positions and normal textures as optimization targets using `requires-gradient` flags via `setRequiresGrad()` [S1].
+-5.  **Optimizer Setup:** Set the loss variable and an SGD optimizer function to the DressiAD instance [S1]. The SGD update rule is $x_{new} = x_{old} - g \cdot lr$ [S1].
+-6.  **Optimization Loop:** For each iteration:
+-    a.  Check if any input variable has changed dirty flags. If so, reset `m_graph_static_cnt` to 0 [S1].
+-    b.  If `m_graph_static_cnt` equals `FAST_REBUILD_COUNT`, set `m_init_status` to `InitStatus::STAGE` [S1].
+-    c.  If `m_graph_static_cnt` equals `FULL_REBUILD_COUNT`, set `m_init_status` to `InitStatus::SUBSTAGE` [S1].
+-    d.  Execute `execStep()` [S1].
+-7.  **Execution (`execStep`):**
+-    a.  Send CPU images to GPU if needed (marking variables as dirty) [S1].
+-    b.  Construct backward pass: Traverse the forward computational graph starting from the loss variable. Initialize gradient of loss to 1.0. For each function, generate backward graph using `Function::buildBwd()`. Sum gradients for variables with multiple creators [S1].
+-    c.  Pack the graph into Vulkan stages and sub-stages [S1].
+-    d.  Execute Vulkan commands via `VkQueueSubmit(m_vk_cmd_buf)` [S1].
+-    e.  Mark all input variables as clean recursively [S1].
+-    f.  Set `m_init_status` to `FINISHED` [S1].
+-    g.  Collect input and gradient variables, summing pixel-wise gradients for variables with multiple creators [S1].
+-8.  **Iteration:** The optimizer function applies the gradient update to the marked variables [S1].
+-9.  **Finalization:** Save optimized data as a GLTF file [S1].
++### Data Structures
++**CpuImage**
++A simple buffer representing a 2D image used to store scene data on the CPU [S1]. Fields include:
++*   Vertex positions, UVs, faces.
++*   Matrices (model, view, projection).
++*   Textures: Environment map, albedo, metallic, roughness, normal, background [S1].
+ 
+-**Pseudocode:**
++**Variable**
++A data structure representing inputs and outputs of functions in the computational graph [S1]. Fields:
++*   `type`: Enum indicating data shape (`VEC3`, `VEC2`, `IVEC3`, `MAT4`, `FLOAT`, `VEC4`) [S1].
++*   `size`: Dimensions of the variable [S1].
++*   `dirty`: Boolean flag indicating if the variable has changed since the last graph rebuild [S1].
++*   `requires_grad`: Boolean flag indicating if gradients should be computed for this variable [S1].
++
++**DressiAD Class State**
++*   `m_loss_var`: The variable representing the loss [S1].
++*   `m_init_status`: Enum (`BACKWARD`, `STAGE`, `SUBSTAGE`, `FINISHED`) controlling the graph rebuild phase [S1].
++*   `m_graph_static_cnt`: Counter tracking iterations without graph changes [S1].
++*   `m_input_vars`: List of input variables [S1].
++*   `m_vk_cmd_buf`: Vulkan command buffer [S1].
++
++### Parameters
++*   $lr$: Learning rate for SGD. Typical value: $0.01$ [S1].
++*   $K$: Number of peeling steps for HardSoftRas. Typical value: $2$ [S1].
++*   $r$: Radius parameter for HardSoftRas. Typical value: $0.01$ [S1].
++*   $\sigma$: Blending parameter for HardSoftRas. Calculated as $r / 7$ [S1].
++*   $\delta$: Silhouette edge width for HardSoftRas. Equal to $r$ [S1].
++*   `FAST_REBUILD_COUNT`: Threshold for fast graph rebuild. Not given in the sources.
++*   `FULL_REBUILD_COUNT`: Threshold for full graph rebuild. Not given in the sources.
++
++### Steps
++
++1.  **Initialization:**
++    *   Create a `DressiBasicRenderer` instance [S1].
++    *   Load scene data from files into `CpuImage` buffers on CPU memory [S1].
++    *   Convert non-image data (e.g., vertex positions) into 2D image representation for efficient rendering [S1].
++    *   Create `Variable` objects for scene data and target images [S1].
++    *   Call `buildGraph()` to construct the forward computational graph:
++        *   Invoke `BuildBasicRenderGraph` with scene variables and HardSoftRas parameters ($K, r, \sigma, \delta$) [S1].
++        *   Compute L1 loss: $L = \text{Mean}(|I_{\text{target}} - I_{\text{rendered}}|)$ [S1].
++        *   Set the loss variable in `DressiAD` via `setLossVar()` [S1].
++        *   Set the optimizer function in `DressiAD` via `setOptimizer()` [S1].
++        *   Mark optimization targets (e.g., vertex positions, normals) using `setRequiresGrad()` [S1].
++    *   Set `m_init_status` to `InitStatus::BACKWARD` [S1].
++
++2.  **Optimization Loop (per iteration):**
++    *   Check if any input variable has changed dirty flags (`IsAnyVariableDirtyChanged`) [S1].
++        *   If changed, reset `m_graph_static_cnt` to $0$ [S1].
++    *   Check rebuild conditions:
++        *   If `m_graph_static_cnt == FAST_REBUILD_COUNT`, set `m_init_status = InitStatus::STAGE` [S1].
++        *   If `m_graph_static_cnt == FULL_REBUILD_COUNT`, set `m_init_status = InitStatus::SUBSTAGE` [S1].
++    *   Transfer data: Send CPU images to GPU if needed (`sendImg()`), marking variables as dirty if updated [S1].
++    *   Execute `execStep()`:
++        *   **Backward Pass Construction:**
++            *   Initialize `fwd_bwds_map` (mapping forward variables to backward gradient variables) and `func_queue` [S1].
++            *   Set loss variable gradient to $1.0$ (`F::Float(1.f)`) [S1].
++            *   Push loss variable's creator function to `func_queue` [S1].
++            *   While `func_queue` is not empty:
++                *   Pop function $F$ from queue [S1].
++                *   Call `F::buildBwd()` to generate backward graph nodes [S1].
++                *   For each input $x$ of $F$ with gradient $g_x$:
++                    *   Add $g_x$ to `fwd_bwds_map[x]` [S1].
++                    *   Push $x$'s creator function to `func_queue` if not already processed [S1].
++        *   **Graph Traversal & Packing:**
++            *   Traverse the graph based on `m_init_status` to pack into Vulkan stages/substages [S1].
++            *   Create Vulkan objects from stage/substage graphs [S1].
++        *   **Execution:**
++            *   Submit commands via `VkQueueSubmit(m_vk_cmd_buf)` [S1].
++    *   **Post-Iteration:**
++        *   Mark all input variables as clean recursively (`setDirtyRecursively(false)`) [S1].
++        *   Set `m_init_status` to `FINISHED` [S1].
++        *   Increment `m_graph_static_cnt` [G] (implied by usage of counter for rebuilds).
++        *   Collect input variables and their summed gradients from `fwd_bwds_map` [S1].
++        *   Apply optimizer: Update variables $x_i$ using gradients $g_{x_i}$ and learning rate $lr$:
++            $$ x_i \leftarrow x_i - g_{x_i} \cdot lr $$
++            [S1]
++
++### Pseudocode
+ 
+ ```python
+-# Constants
+-LR = 0.01f
++# Initialization
++renderer = DressiBasicRenderer()
++renderer.load_scene("initial_scene.gltf", "target_img.png")
++
++# Build Graph
+ K = 2
+-R = 0.01f
+-SIGMA = R / 7.0f
+-DELTA = R
+-FAST_REBUILD_COUNT = Not given in the sources.
+-FULL_REBUILD_COUNT = Not given in the sources.
++r = 0.01
++sigma = r / 7.0
++delta = r
++lr = 0.01
+ 
+-# Data Structures
+-class Variable:
+-    type: Enum(VEC3, VEC2, IVEC3, MAT4, FLOAT, VEC4)
+-    size: tuple
+-    requires_grad: bool
+-    dirty: bool
+-    creator: Function
+-    gradients: list[Variable]
++# Build rendering graph
++rendered_img = BuildBasicRenderGraph(
++    vtx_pos, vtx_uv, faces, model_mat, view_mat, prj_mat,
++    env_img, albedo, metallic, roughness, normal, background,
++    K, r, sigma, delta
++)
+ 
+-    def set_requires_grad_recursively(self):
+-        # Set requires_grad flag and recursively mark dependencies
+-        pass
++# Compute Loss
++loss = Mean(Abs(target_img - rendered_img))
+ 
+-    def set_dirty_recursively(self, value: bool):
+-        # Set dirty flag and recursively mark dependencies
+-        pass
++# Configure AD
++dressi_ad = DressiAD()
++dressi_ad.set_loss_var(loss)
++dressi_ad.set_optimizer(lambda xs, gxs: [x - g * lr for x, g in zip(xs, gxs)])
+ 
+-class CpuImage:
+-    # Simple buffer of a 2D image
+-    pass
++# Mark Targets
++vtx_pos.set_requires_grad()
++normal.set_requires_grad()
+ 
+-class DressiAD:
+-    def __init__(self):
+-        self.loss_var: Variable = None
+-        self.optimizer_func = None
+-        self.init_status: Enum = InitStatus.BACKWARD
+-        self.graph_static_cnt: int = 0
+-        self.input_vars: list[Variable] = []
+-        self.vk_imgs: dict[Variable, VkImage] = {}
+-        self.vk_cmd_buf: VkCommandBuffer = None
++# Optimization Loop
++for iter in range(1000):
++    # Check dirty flags
++    if is_any_variable_dirty(m_input_vars):
++        m_graph_static_cnt = 0
++    
++    # Check rebuild conditions
++    if m_graph_static_cnt == FAST_REBUILD_COUNT:
++        m_init_status = InitStatus.STAGE
++    elif m_graph_static_cnt == FULL_REBUILD_COUNT:
++        m_init_status = InitStatus.SUBSTAGE
++        
++    # Transfer Data
++    if not m_is_sent:
++        send_img_to_gpu(vtx_pos)
++        send_img_to_gpu(normal)
++        m_is_sent = True
++        
++    # Execute Step
++    dressi_ad.exec_step()
++    
++    # Post-step
++    mark_inputs_clean(m_input_vars)
++    m_init_status = InitStatus.FINISHED
++    m_graph_static_cnt += 1
+ 
+-    def set_loss_var(self, loss_var: Variable):
+-        self.loss_var = loss_var
+-        self.init_status = InitStatus.BACKWARD
+-
+-    def set_optimizer(self, optimizer_func):
+-        self.optimizer_func = optimizer_func
+-
+-    def send_img(self, var: Variable, cpu_img: CpuImage):
+-        if var in self.vk_imgs:
+-            var.set_dirty_recursively(True)
+-            SendHostImageToDevice(self.vk_imgs[var], cpu_img)
+-
+-    def recv_img(self, var: Variable) -> CpuImage:
+-        if var in self.vk_imgs:
+-            return ReceiveHostImageFromDevice(self.vk_imgs[var])
+-        return None
+-
+-    def exec_step(self):
+-        # Check dirty flags
+-        if IsAnyVariableDirtyChanged(self.input_vars):
+-            self.graph_static_cnt = 0
+-
+-        # Check rebuild condition
+-        if self.graph_static_cnt == FAST_REBUILD_COUNT:
+-            self.init_status = InitStatus.STAGE
+-        elif self.graph_static_cnt == FULL_REBUILD_COUNT:
+-            self.init_status = InitStatus.SUBSTAGE
+-
+-        # Build backward pass
+-        input_vars, input_grad_vars = BuildBackward(self.loss_var)
+-
+-        # Apply optimizer
+-        if self.optimizer_func:
+-            updated_vars = self.optimizer_func(input_vars, input_grad_vars)
+-            # Update variables (implementation detail not fully specified in sources)
+-            pass
+-
+-        # Execute Vulkan commands
+-        VkQueueSubmit(self.vk_cmd_buf)
+-
+-        # Mark as clean
+-        for v in self.input_vars:
+-            v.set_dirty_recursively(False)
+-        self.init_status = InitStatus.FINISHED
+-
+-    def build_backward(self, loss_var: Variable):
+-        fwd_bwds_map = {} # Map from Variable to list of gradient Variables
+-        func_queue = [] # Priority queue of Functions
+-
+-        # Initialize loss gradient
+-        fwd_bwds_map[loss_var] = [Float(1.0f)]
+-        if loss_var.creator:
+-            func_queue.push(loss_var.creator)
+-
+-        while func_queue is not empty:
+-            func = func_queue.pop()
+-            # Generate backward graph
+-            input_vars, grad_vars = func.build_bwd()
+-            for x, gx in zip(input_vars, grad_vars):
+-                if x not in fwd_bwds_map:
+-                    fwd_bwds_map[x] = []
+-                fwd_bwds_map[x].append(gx)
+-                if x.creator:
+-                    func_queue.push(x.creator)
+-
+-        # Collect and sum gradients
+-        input_vars = []
+-        input_grad_vars = []
+-        for x, gxs in fwd_bwds_map.items():
+-            input_vars.append(x)
+-            input_grad_vars.append(SumPixelWise(gxs))
+-
+-        return input_vars, input_grad_vars
+-
+-# Main Optimization Loop
+-def optimize_vertex_position_and_normal_texture():
+-    renderer = DressiBasicRenderer()
+-    renderer.load_scene("initial_scene.gltf", "target_img.png")
+-
+-    # Build graph
+-    rendered_img = BuildBasicRenderGraph(
+-        renderer.var_map["vtx_pos"],
+-        renderer.var_map["vtx_uv"],
+-        renderer.var_map["faces"],
+-        renderer.var_map["model_mat"],
+-        renderer.var_map["view_mat"],
+-        renderer.var_map["prj_mat"],
+-        renderer.var_map["env_img"],
+-        renderer.var_map["albedo"],
+-        renderer.var_map["metallic"],
+-        renderer.var_map["roughness"],
+-        renderer.var_map["normal"],
+-        renderer.var_map["background"],
+-        K, R, SIGMA, DELTA
+-    )
+-
+-    # Compute L1 loss
+-    loss = Mean(Abs(renderer.var_map["target"] - rendered_img))
+-
+-    # Set loss and optimizer
+-    dressi_ad = renderer.dressi_ad
+-    dressi_ad.set_loss_var(loss)
+-    dressi_ad.set_optimizer(lambda xs, gxs: [x - g * LR for x, g in zip(xs, gxs)])
+-
+-    # Mark targets
+-    renderer.set_requires_grad("vtx_pos")
+-    renderer.set_requires_grad("normal")
+-
+-    # Optimization iterations
+-    for iter in range(1000):
+-        dressi_ad.exec_step()
+-
+-    # Save results
+-    renderer.save_scene("optimized_scene.gltf")
++# Save Results
++renderer.save_scene("optimized_scene.gltf")
+ ```
+ 
+-**Subtopics:**
+-*   [Training & Optimization Protocol](12939-training-optimization-protocol.md): A general protocol for differentiable rendering optimization, including transformation functions and loss definitions. Choose when needing a broader framework description.
++### Edge Cases and Pitfalls
++*   **Dirty Flags:** If input variables change, the graph must be rebuilt. Failure to reset `m_graph_static_cnt` may lead to stale computations [S1].
++*   **Rebuild Counts:** The specific values for `FAST_REBUILD_COUNT` and `FULL_REBUILD_COUNT` are not provided in the sources [S1].
++*   **Memory Management:** The system relies on Vulkan command buffers. Improper submission or cleanup may lead to GPU hangs or memory leaks [S1].
++*   **Gradient Summation:** Gradients from multiple paths to the same variable must be summed pixel-wise before optimization [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** Not given in the sources.
+-*   **Measured Performance:** Not given in the sources.
+-*   **Scaling:** Not given in the sources.
+-*   **Strengths:** Hardware-agnostic design with reactive shader packing; efficient handling of graph rebuilding via dirty flags; integration with Vulkan for GPU execution [S1].
+-*   **Limitations:** Requires manual graph construction; specific to the Dressi renderer architecture [S1].
+-*   **When to use:** When optimizing vertex positions and normal maps in a differentiable rendering context using the Dressi system [S1].
+-*   **When not:** When using eager-mode frameworks or non-Vulkan backends [S1].
++*   **Time Complexity:** Depends on the number of samples per ray and the depth of the computational graph. The backward pass traverses the graph once [S1].
++*   **Memory Complexity:** DressiAD avoids storing all intermediate states by using a reactive packing strategy. It packs the graph into Vulkan stages/substages, potentially reducing memory overhead compared to standard AD [S1].
++*   **Performance:** Performance is hardware-dependent due to Vulkan integration. The use of HardSoftRas allows for differentiable rasterization with soft edges, which may be slower than hard rasterization but provides smoother gradients [S1].
++*   **Strengths:** Hardware-agnostic, integrates with Vulkan, supports physically based shading, and allows for optimization of vertex positions and textures [S1].
++*   **Limitations:** Requires manual graph construction, limited to defined operators, and may have high overhead for small graphs due to Vulkan command submission [S1].
+ 
+ ## Background
+-The DressiAD Optimization Loop originates from the Dressi renderer, a hardware-agnostic differentiable renderer with reactive shader packing and soft rasterization [S1]. It was proposed in 2022 [S1]. The system is designed to be similar to common AD libraries like PyTorch and TensorFlow but uses a define-and-run approach [S1]. It is used for differentiable rendering optimization of vertex positions and normal maps [S1].
++DressiAD is part of the Dressi renderer, a hardware-agnostic differentiable rendering system [S1]. It was introduced in 2022 by the authors of "Dressi: A Hardware‐Agnostic Differentiable Renderer with Reactive Shader Packing and Soft Rasterization" [S1]. The system is designed to bridge the gap between differentiable rendering and hardware acceleration by packing computational graphs into Vulkan command buffers [S1].
+ 
+ ## Sources

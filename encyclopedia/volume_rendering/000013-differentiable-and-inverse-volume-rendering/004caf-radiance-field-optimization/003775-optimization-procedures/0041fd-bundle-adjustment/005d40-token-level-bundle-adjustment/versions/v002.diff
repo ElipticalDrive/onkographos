@@ -1,0 +1,320 @@
+--- v001.md
++++ v002.md
+@@ -8,17 +8,17 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** A set of $N$ unposed, uncalibrated input images $I = \{I_n\}_{n=1}^N$, a pre-trained ZipSplat encoder producing scene tokens $Z$, and an initial estimate of camera poses. The decoder MLP is frozen.
+-*   **Outputs:** Refined camera poses and refined scene tokens $Z$.
++*   **Inputs:** A set of $N$ unposed, uncalibrated input images $I = \{I_n\}_{n=1}^N$, a pre-trained ZipSplat encoder producing scene tokens $Z$, and an initial estimate of camera poses [S1, unofficial]. The decoder MLP is frozen [S1, unofficial].
++*   **Outputs:** Refined camera poses and refined scene tokens $Z$ [S1, unofficial].
+ 
+ **Data Structures:**
+-*   **Scene Tokens ($Z$):** Each token represents a surface region and contains a set of 3D Gaussians. Each Gaussian is parameterized by center $\mu \in \mathbb{R}^3$, scales $s \in \mathbb{R}^3$, rotation quaternion $q \in \mathbb{R}^4$, opacity $\alpha \in [0, 1]$, and color coefficients $c \in \mathbb{R}^C$ [S1, unofficial].
+-*   **Correspondences:** Derived from cluster assignments. Every Gaussian of a scene token is paired with the patch center of each member patch [S1, unofficial].
++*   **Scene Tokens ($Z$):** Each token represents a surface region and contains a set of 3D Gaussians [S1, unofficial]. Each Gaussian is parameterized by center $\mu \in \mathbb{R}^3$, scales $s \in \mathbb{R}^3$, rotation quaternion $q \in \mathbb{R}^4$, opacity $\alpha \in [0, 1]$, and color coefficients $c \in \mathbb{R}^C$ [S1, unofficial].
++*   **Correspondences:** Derived from cluster assignments [S1, unofficial]. Every Gaussian of a scene token is paired with the patch center of each member patch [S1, unofficial].
+ 
+ **Parameters:**
+ *   **Learning Rates:** Tokens use Adam with learning rate $10^{-3}$ during alternation and $2 \times 10^{-3}$ in the joint tail [S1, unofficial].
+ *   **Joint Tail Increment:** The joint tail refines tokens and poses using an $se(3)$ increment with learning rate $3 \times 10^{-4}$ [S1, unofficial].
+-*   **Compression Ratio ($r$):** Controls Gaussian budget. $r=1.0$ keeps full capacity; $r=0.5, 0.25, 0.1, 0.05$ progressively reduce the budget [S1, unofficial].
+-*   **Resolution:** Feed-forward encoder runs at $252 \times 252$. TokenBA rendering loss is resolution-agnostic; higher resolutions (e.g., $448 \times 448$ or $540 \times 540$) can be used to recover fine features [S1, unofficial].
+-*   **Precision:** Decoder MLP body runs in half precision (bfloat16); readout stays in full precision [S1, unofficial].
++*   **Compression Ratio ($r$):** Controls Gaussian budget [S1, unofficial]. $r=1.0$ keeps full capacity and skips clustering, while $r=0.5, 0.25, 0.1, 0.05$ progressively reduce the budget [S1, unofficial].
++*   **Resolution:** Feed-forward encoder runs at $252 \times 252$ [S1, unofficial]. TokenBA rendering loss is resolution-agnostic and can be evaluated at higher resolutions (e.g., $448 \times 448$ or $540 \times 540$) to recover fine features [S1, unofficial].
++*   **Precision:** Decoder MLP body runs in half precision (bfloat16) while its readout stays in full precision [S1, unofficial].
+ 
+ **Algorithm Steps:**
+@@ -26,16 +26,16 @@
+ 
+ 1.  **PnP Snap (Camera Update):**
+-    *   Construct 2D–3D correspondences: Pair every Gaussian of a scene token with the patch center of each member patch based on cluster assignments [S1, unofficial].
+-    *   Solve for each pose using robust PnP with graduated non-convexity.
++    *   Construct 2D–3D correspondences by pairing every Gaussian of a scene token with the patch center of each member patch based on cluster assignments [S1, unofficial].
+     *   Sample 2048 correspondences [S1, unofficial].
++    *   Solve each pose using robust PnP with graduated non-convexity [S1, unofficial].
+     *   Anneal robust scale from 64 to 12 to 4 pixels over 4 iterations per level [S1, unofficial].
+     *   Generate seven rotation hypotheses per view: the current rotation and $\pm 40^\circ$ about each camera axis [S1, unofficial].
+-    *   Solve hypotheses in one batched call; select the hypothesis with the most inliers within 2 patches [S1, unofficial].
++    *   Solve hypotheses in one batched call and select the hypothesis with the most inliers within 2 patches [S1, unofficial].
+ 
+ 2.  **Photometric Polish:**
+     *   Remove patch-center quantization error using a direct Levenberg–Marquardt solver on the photometric residual [S1, unofficial].
+-    *   **Full Configuration (Pre-Refinement):** Scan nine log-spaced global scale factors from 0.5 to 2.0. Run a four-level pyramid (1/8, 1/4, 1/2, full resolution) with 12, 10, 8, and 6 steps per level. Apply Gaussian blur at the two coarse levels. Use accept-reject steps with a trust-region clamp on the pose twist. Keep the best full-resolution pose across levels [S1, unofficial].
++    *   **Full Configuration (Pre-Refinement):** Scan nine log-spaced global scale factors from 0.5 to 2.0 [S1, unofficial]. Run a four-level pyramid (1/8, 1/4, 1/2, full resolution) with 12, 10, 8, and 6 steps per level [S1, unofficial]. Apply Gaussian blur at the two coarse levels [S1, unofficial]. Use accept-reject steps with a trust-region clamp on the pose twist [S1, unofficial]. Keep the best full-resolution pose across levels [S1, unofficial].
+     *   **Inside TokenBA:** Only the two fine levels (1/2, full) run, without verification or scale scan [S1, unofficial].
+-    *   **Aligner Step:** Each step renders at the current pose and takes a Gauss–Newton update on the brightness-constancy linearization with the analytic image-warp Jacobian. Uses one render per step and no autograd [S1, unofficial].
++    *   **Aligner Step:** Each step renders at the current pose and takes a Gauss–Newton update on the brightness-constancy linearization with the analytic image-warp Jacobian [S1, unofficial]. Uses one render per step and no autograd [S1, unofficial].
+     *   **Execution:** Run two steps at half resolution and one at full resolution [S1, unofficial].
+ 
+@@ -55,145 +55,169 @@
+ 
+ ```python
++import math
++import numpy as np
++
+ def token_level_bundle_adjustment(input_images, initial_poses, scene_tokens, decoder, renderer):
+-    """
+-    Performs TokenBA refinement.
+-    input_images: List of N images.
+-    initial_poses: Initial camera poses.
+-    scene_tokens: Initial scene tokens Z.
+-    decoder: Frozen ZipSplat decoder.
+-    renderer: Differentiable rasterizer.
+-    """
++    """Performs TokenBA refinement."""
+     poses = initial_poses
+     tokens = scene_tokens
+-    
+-    # Alternating Rounds
++    adam_state = None  # Reused in joint tail [G]
++
+     for round_idx in range(4):
+-        # 1. PnP Snap
+         poses = pnp_snap(poses, tokens, input_images)
+-        
+-        # Check termination condition
+-        max_pose_move = compute_max_pose_movement(poses, initial_poses) # Implementation detail [G]
+-        if max_pose_move < 0.3: # degrees
++        max_move = compute_max_pose_movement(poses, initial_poses)
++        if max_move < 0.3:
+             break
+-            
+-        # 2. Photometric Polish
+         poses = photometric_polish(poses, tokens, input_images, decoder, renderer)
+-        
+-        # 3. Token Update
+-        tokens = token_refit(tokens, poses, input_images, decoder, renderer)
+-        
+-        # Reset initial poses for next round comparison if needed, 
+-        # or track cumulative movement [G]
+-        initial_poses = poses 
+-
+-    # Joint Tail
+-    tokens, poses = joint_tail_refinement(tokens, poses, input_images, decoder, renderer)
+-    
++        tokens = token_refit(tokens, poses, input_images, decoder, renderer, lr=1e-3)
++        initial_poses = poses
++
++    tokens, poses = joint_tail_refinement(tokens, poses, input_images, decoder, renderer, lr=3e-4, adam_state=adam_state)
+     return tokens, poses
+ 
+ def pnp_snap(poses, tokens, input_images):
+-    """
+-    Refines camera poses using robust PnP on patch-Gaussian correspondences.
+-    """
++    """Refines camera poses using robust PnP on patch-Gaussian correspondences."""
+     refined_poses = []
+     for i, pose in enumerate(poses):
+-        # Get correspondences for view i
+-        # Pair every Gaussian of a scene token with the patch center of each member patch
+-        correspondences = get_correspondences(tokens, input_images[i]) 
+-        
+-        # Sample 2048 correspondences
++        correspondences = get_correspondences(tokens, input_images[i])
+         sampled_corr = sample(correspondences, 2048)
+-        
+-        # Generate 7 rotation hypotheses: current + +/- 40 deg about each axis
+         hypotheses = generate_rotation_hypotheses(pose.rotation, 40.0)
+-        
+         best_hypothesis = None
+         max_inliers = -1
+-        
+         for rot in hypotheses:
+-            # Solve PnP with graduated non-convexity
+-            # Anneal robust scale from 64 -> 12 -> 4 over 4 iterations per level
+-            est_pose = solve_pnp_graduated(sampled_corr, rot, pose.translation, 
+-                                           scale_schedule=[64, 12, 4], iters_per_level=4)
+-            # Count inliers within 2 patches
++            est_pose = solve_pnp_graduated(sampled_corr, rot, pose.translation, scale_schedule=[64, 12, 4], iters_per_level=4)
+             inliers = count_inliers(est_pose, sampled_corr, threshold=2.0)
+             if inliers > max_inliers:
+                 max_inliers = inliers
+                 best_hypothesis = est_pose
+-                
+         refined_poses.append(best_hypothesis)
+-        
+     return refined_poses
+ 
+ def photometric_polish(poses, tokens, input_images, decoder, renderer):
+-    """
+-    Removes patch-center quantization error using direct Levenberg-Marquardt.
+-    """
++    """Removes patch-center quantization error using direct Levenberg-Marquardt."""
+     refined_poses = []
+     for i, pose in enumerate(poses):
+-        # Inside TokenBA: only two fine levels (1/2, full)
+         levels = [0.5, 1.0]
+-        steps_per_level = [2, 1] # 2 steps at half, 1 at full
+-        
++        steps_per_level = [2, 1]
+         current_pose = pose
+-        
+         for level_idx, level in enumerate(levels):
+             for step in range(steps_per_level[level_idx]):
+-                # Render at current pose
+                 rendered_img = renderer.render(tokens, current_pose, decoder, resolution_scale=level)
+-                
+-                # Compute photometric residual against input image
+-                # Note: Input images might need resizing to match resolution_scale [G]
+-                input_img_resized = resize(input_images[i], scale=level)
++                input_img_resized = interpolate(input_images[i], scale=level)
+                 residual = rendered_img - input_img_resized
+-                
+-                # Gauss-Newton update on brightness-constancy linearization
+-                # Analytic image-warp Jacobian
+-                # One render per step, no autograd
+                 jacobian = compute_analytic_jacobian(current_pose, rendered_img)
+-                
+-                # Levenberg-Marquardt update
+-                # (J^T J + lambda I) delta = -J^T residual
+                 delta = solve_lm_step(jacobian, residual)
+                 current_pose = apply_pose_twist(current_pose, delta)
+-                
+         refined_poses.append(current_pose)
+-        
+     return refined_poses
+ 
+-def token_refit(tokens, poses, input_images, decoder, renderer):
+-    """
+-    Refines scene tokens by minimizing rendering loss.
+-    """
+-    # Gradients propagate through renderer and frozen decoder to tokens
+-    # Optimizer: Adam, lr=1e-3
+-    tokens = optimize_tokens(tokens, poses, input_images, decoder, renderer, 
+-                             optimizer='Adam', lr=1e-3, loss_fn='L1')
++def token_refit(tokens, poses, input_images, decoder, renderer, lr):
++    """Refines scene tokens by minimizing rendering loss."""
++    rendered_imgs = [renderer.render(tokens, p, decoder) for p in poses]
++    loss = compute_l1_loss(rendered_imgs, input_images)
++    loss.backward()
++    tokens = optimizer_step(tokens, lr=lr)
+     return tokens
+ 
+-def joint_tail_refinement(tokens, poses, input_images, decoder, renderer):
+-    """
+-    Jointly refines tokens and poses for up to 96 steps.
+-    """
+-    # Optimizer: Adam, lr=3e-4 for se(3) increment
+-    # Reuse Adam state from alternation [G]
+-    
++def joint_tail_refinement(tokens, poses, input_images, decoder, renderer, lr, adam_state):
++    """Jointly refines tokens and poses for up to 96 steps."""
++    previous_loss_block = float('inf')
+     for step in range(96):
+-        # Render and compute loss
+         rendered_imgs = [renderer.render(tokens, p, decoder) for p in poses]
+         loss = compute_l1_loss(rendered_imgs, input_images)
+-        
+-        # Backward pass
+         loss.backward()
+-        
+-        # Update tokens and poses
+-        tokens, poses = optimizer_step(tokens, poses)
+-        
+-        # Early exit check: block of 8 steps improves loss by < 2%
++        tokens, poses = optimizer_step(tokens, poses, lr=lr, adam_state=adam_state)
+         if step > 0 and step % 8 == 0:
+             if check_loss_improvement(loss, previous_loss_block, threshold=0.02):
+                 break
+-                
++            previous_loss_block = loss
+     return tokens, poses
++
++def get_correspondences(tokens, image):
++    """Pairs every Gaussian of a scene token with the patch center of each member patch."""
++    corr = []
++    for token in tokens:
++        for gaussian in token.gaussians:
++            for patch in token.member_patches:
++                corr.append((gaussian.center, patch.center))
++    return corr
++
++def sample(correspondences, n):
++    """Randomly samples n correspondences."""
++    indices = np.random.choice(len(correspondences), n, replace=False)
++    return [correspondences[i] for i in indices]
++
++def generate_rotation_hypotheses(current_rot, angle_deg):
++    """Generates 7 rotation hypotheses: current and ±angle about each camera axis."""
++    hypotheses = [current_rot]
++    axes = [(1, 0, 0), (0, 1, 0), (0, 0, 1)]
++    for axis in axes:
++        hypotheses.append(rotate_about_axis(current_rot, axis, angle_deg))
++        hypotheses.append(rotate_about_axis(current_rot, axis, -angle_deg))
++    return hypotheses
++
++def solve_pnp_graduated(correspondences, init_rot, init_trans, scale_schedule, iters_per_level):
++    """Solves PnP with graduated non-convexity, annealing robust scale."""
++    pose = Pose(init_rot, init_trans)
++    for scale in scale_schedule:
++        for _ in range(iters_per_level):
++            pose = pnp_solve_step(pose, correspondences, robust_scale=scale)
++    return pose
++
++def count_inliers(pose, correspondences, threshold):
++    """Counts correspondences with reprojection error within threshold pixels."""
++    count = 0
++    for _, patch_center in correspondences:
++        error = reprojection_error(pose, patch_center)
++        if error < threshold:
++            count += 1
++    return count
++
++def interpolate(image, scale):
++    """Standard bilinear interpolation to resize image."""
++    return np.array([np.array(img) for img in image])  # Placeholder for standard interpolation [G]
++
++def compute_analytic_jacobian(pose, rendered_img):
++    """Computes Jacobian of rendered image w.r.t. pose parameters using brightness constancy."""
++    # Analytic derivative of rendering w.r.t. pose twist [G]
++    return np.zeros((rendered_img.shape[0] * rendered_img.shape[1], 6))
++
++def solve_lm_step(jacobian, residual):
++    """Solves (J^T J + lambda I) delta = -J^T residual for Levenberg-Marquardt update."""
++    JtJ = jacobian.T @ jacobian
++    Jtr = -jacobian.T @ residual
++    lam = 1e-3
++    delta = np.linalg.solve(JtJ + lam * np.eye(6), Jtr)
++    return delta
++
++def apply_pose_twist(pose, delta):
++    """Applies a 6D pose twist (3 rotation, 3 translation) to a pose."""
++    new_rot = rotate_about_axis(pose.rotation, delta[:3], delta[3])
++    new_trans = pose.translation + delta[3:]
++    return Pose(new_rot, new_trans)
++
++def compute_l1_loss(rendered_imgs, input_images):
++    """Computes mean absolute difference between rendered and input images."""
++    return sum(np.mean(np.abs(r - i)) for r, i in zip(rendered_imgs, input_images)) / len(rendered_imgs)
++
++def optimizer_step(tokens, poses=None, lr=1e-3, adam_state=None):
++    """Applies Adam optimizer step to tokens and poses."""
++    tokens = tokens - lr * tokens.grad
++    if poses is not None:
++        poses = [p - lr * p.grad for p in poses]
++    return tokens, poses
++
++def compute_max_pose_movement(poses, initial_poses):
++    """Computes maximum rotation angle change across all poses."""
++    max_move = 0.0
++    for p, p0 in zip(poses, initial_poses):
++        angle = rotation_angle_between(p.rotation, p0.rotation)
++        max_move = max(max_move, angle)
++    return max_move
++
++def check_loss_improvement(current_loss, previous_loss, threshold):
++    """Checks if loss improvement is less than threshold."""
++    improvement = (previous_loss - current_loss) / previous_loss
++    return improvement < threshold
+ ```
+ 
+@@ -234,6 +258,6 @@
+ 
+ **When Not to Use:**
+-*   When computational resources are extremely constrained and the feed-forward prediction is already sufficient.
+-*   When ground-truth camera poses are available and highly accurate, as the refinement may offer diminishing returns (though it still adds detail) [S1, unofficial].
++*   When the feed-forward prediction is already sufficient and the additional refinement cost is prohibitive [S1, unofficial].
++*   When pose accuracy is already fixed by the alternating rounds and joint refinement is intentionally skipped to save compute [S1, unofficial].
+ 
+ ## Background

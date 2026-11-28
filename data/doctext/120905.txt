@@ -1,0 +1,155 @@
+Intro   Hi every one ! This is my first post on dev.to so a new experience for me! I'm... Tagged with cpp, gamedev, programming.
+
+How I've optimized chunk generation in my Minecraft clone - DEV Community
+Intro
+Hi every one ! This is my first post on dev.to so a new experience for me!
+I'm actually working on a Minecraft clone for my engine dev portfolio, and I've decided to share with you the steps of my journey 😁
+This post is intended for people who have a basic understanding of 3D rendering. If that's not the case, I highly recommend you take a look at this website, which is an absolute reference!
+For your information, I am working on Fedora Linux 44, with a RTX 3060Ti, 32GB of DDR4 3600MHz and a Ryzen 7 5700X.
+Well, let's dive into !
+1. Storing blocks
+Before we begin, I would first like to explain how my blocks are stored in memory.
+Each block has several properties, such as its name (in a string), its UVs (top, down and side for example), if it is transparent, affected by gravity, etc.
+If we store these informations in each block of the map, you will just destroy your RAM (~256 bytes with the previous informations, multiply by the number of blocks in the map...).
+The solution is simple. Instead of storing definitions, we will store types:
+```
+enum class BlockType : uint8_t {
+    AIR,
+    GRASS,
+    DIRT,
+    STONE,
+};
+```
+Enter fullscreen mode
+Exit fullscreen mode
+And in the Chunk class:
+```
+class Chunk {
+   public:
+    Chunk();
+
+    // Methods
+
+   private:
+    std::array<BlockType, CHUNK_WIDTH * CHUNK_WIDTH * CHUNK_HEIGHT> m_blocks;
+};
+```
+Enter fullscreen mode
+Exit fullscreen mode
+We are therefore going from several bytes per block to just one.
+If we need a block property, we can build a Registry, where we will be able to register a definition for each type:
+```
+struct BlockDef {
+    std::string name;
+    UVRegion top;
+    UVRegion side;
+    UVRegion bottom;
+    bool transparent;
+};
+
+class BlockRegistry {
+   public:
+    void registerBlock(BlockType type, const BlockDef& def);
+    const BlockDef& get(BlockType type) const;
+
+   private:
+    std::unordered_map<BlockType, BlockDef> m_blocks;
+};
+```
+Enter fullscreen mode
+Exit fullscreen mode
+Note: While a std::unordered_map is convenient, we'll see in the next post that it can become a major bottleneck during meshing, and why a simple array is often better.
+Then:
+```
+m_registry.registerBlock(BlockType::GRASS,
+    {
+       .name = "grass",
+       .top = m_atlas.region("grass_block_top"),
+       .side = m_atlas.region("grass_block_side"),
+       .bottom = m_atlas.region("dirt"),
+       .transparent = false,
+    });
+```
+Enter fullscreen mode
+Exit fullscreen mode
+Now that we know how to store our thousands of blocks without destroying our memory, we can start to work on the meshing!
+2. The "stupid" meshing
+At first glance, a voxel-type engine is simple, it's just blocks...
+We could simply loop through the chunk like this:
+```
+void Chunk::render(Renderer& renderer) {
+    for(const auto& block : m_blocks) {
+        renderer.render(block.mesh(), block.position());
+    }
+}
+```
+Enter fullscreen mode
+Exit fullscreen mode
+And then render our blocks one by one.
+That's what I initially believed. Buuuuuuuut in fact it is a bit more complicated 😅
+The previous code is, for every engine programmer, a HERESY! Why? For two reasons:
+You generate 1 draw call per block... For a world that can contain more than a hundred thousand, or even millions of blocks, you will saturate your PCIe bus. The GPU will spend its time just waiting... We need to drastically limit the number of draw calls.
+The mesh is absolutely not optimized. You are sending to the GPU more invisible triangles than visible ones. This is a huge loss of performance, and in engine development, we love performance, so we need to reduce the number of rendered triangles.
+For the first point, there's a famous solution named batching, which consists of "batch" all the polygons into one mesh, and send this huge mesh to the GPU. We can then reduce the number of draw calls to just 1... But this is not the main subject of this post, we can dive into maybe in another one!
+Here is the first rendering of a single batched chunk (16*256*16 blocks) but without any mesh optimization:
+And in wireframe view:
+I am rendering 786432 triangles for only one chunk, which is totally unacceptable! So let's optimize that !
+3. Internal face culling
+This is the first optimization we're going to work on. Actually, I am rendering all faces of all blocks in the chunk, even invisible ones. So the objective of the internal face culling is to remove a face if the adjacent block is opaque:
+To do that, I've separated the meshing of the chunk to build independently each face of the block:
+```
+struct Vertex {
+    glm::vec3 position;
+    glm::vec2 uv;
+    glm::vec3 normal;
+    float luminosity;
+};
+
+enum class Face { Top, Bottom, Front, Back, Right, Left };
+
+void MeshBuilder::addCubeFace(const glm::vec3& pos, const UVRegion& region, Face face) {
+    switch (face) {
+        case Face::Top:
+            addQuad({
+                Vertex{pos + glm::vec3(0, 1, 0), {region.uv_min.x, region.uv_min.y}, {0, 1, 0}, 1.f},
+                Vertex{pos + glm::vec3(0, 1, 1), {region.uv_min.x, region.uv_max.y}, {0, 1, 0}, 1.f},
+                Vertex{pos + glm::vec3(1, 1, 1), {region.uv_max.x, region.uv_max.y}, {0, 1, 0}, 1.f},
+                Vertex{pos + glm::vec3(1, 1, 0), {region.uv_max.x, region.uv_min.y}, {0, 1, 0}, 1.f},
+            });
+            break;
+        // etc.
+}
+```
+Enter fullscreen mode
+Exit fullscreen mode
+Then, when I'm generating the mesh, I can just recover the neighbor cube of the face, check if it is opaque or not, and generate the face accordingly:
+```
+void ChunkMesher::buildFace(const Chunk& chunk, const glm::ivec3& pos, const BlockDef& block_def,
+                            MeshBuilder::Face face) {
+    glm::ivec3 neighbor_pos;
+    UVRegion region;
+    switch (face) {
+        case MeshBuilder::Face::Top:
+            neighbor_pos = {pos.x, pos.y + 1, pos.z};
+            region = block_def.top;
+            break;
+        // etc.
+    }
+
+    if (chunk.contains(neighbor_pos.x, neighbor_pos.y, neighbor_pos.z)) {
+        auto neighbor_type = chunk.getBlock(neighbor_pos.x, neighbor_pos.y, neighbor_pos.z);
+        if (!m_registry.get(neighbor_type).transparent) return;  // If neighbor is opaque, don't generate the face
+    }
+    m_mesh_builder.addCubeFace({pos.x, pos.y, pos.z}, region, face);
+}
+```
+Enter fullscreen mode
+Exit fullscreen mode
+If we restart the engine:
+No visual difference, but as you can see in the "Stats" window, we've gone from 786432 rendered triangles to 33792.
+Perfect! We have a first optimized chunk mesh and an acceptable number of triangles! In the second post I will talk to you about some issues I've encountered on the chunk build time, which was a bit... slow... I will show you how I used the Tracy Profiler and how I manage to reduce this time. Thank you for making it this far and see you!
+PS: If there is some english mistakes, sorry for my frenchy french habits XD
+For further actions, you may consider blocking this person and/or reporting abuse
+We're a place where coders share, stay up-to-date and grow their careers.
+Log in
+Create account

@@ -1,0 +1,190 @@
+## はじめに
+
+3D Gaussian Splatting は高品質な 3D シーン再構成技術として注目されていますが、多くは GPU(CUDA) 環境を前提としています。
+
+この記事では、C++ で実装されたオープンソースの 3D Gaussian Splatting である [pierotofy/OpenSplat](https://github.com/pierotofy/OpenSplat) を、**GPU を使わず CPU のみ**で、**Windows 環境**でビルドし、実行するまでの手順をまとめます。
+
+## 前提となる環境・ツール
+
+この記事の手順を進めるにあたり、以下のツールが利用可能な状態であることを確認してください。
+
+- **Windows OS:** Windows 10 または 11
+- **(必須) Visual Studio 2022:**
+  - C++ のコンパイル環境として必要です (Community 版で OK)。
+  - インストール時に **「C++ によるデスクトップ開発」ワークロード** が選択されている必要があります。
+  - インストール手順: [Visual Studio のインストール | Microsoft Learn](https://learn.microsoft.com/ja-jp/visualstudio/install/install-visual-studio?view=vs-2022)
+- **(必須) Git:**
+  - ソースコードの取得や `vcpkg` のセットアップに必要です。
+  - コマンドプロンプトや PowerShell で `git --version` を実行し、バージョンが表示されるか確認してください。
+  - [Git for Windows](https://gitforwindows.org/) からインストール可能。
+- **インターネット接続:** 各種ダウンロードに必要です。
+- **(推奨) コマンドライン操作の知識:** 基本的な `cd` やコマンド実行。
+- **(推奨) 十分なディスク空き容量とメモリ:** 目安として数十GBの空き容量、16GB以上のメモリを推奨します。
+
+## 実行環境
+
+今回試した環境は以下の通りです。
+
+- **OS：** Windows 11
+- **CPU：** Intel Core Ultra 9 185H
+- **メモリ：** 32GB
+- **コンパイラ：** Visual Studio 2022 (C++関連コンポーネント含む)
+- **CMake：** 4.0.0 (`cmake --version` で確認したバージョンを記載してください)
+- **vcpkg：** 2025.03.22 (取得日: 2025-04-01)
+- **OpenCV4：** 4.10.0 (vcpkg経由でインストール)
+- **LibTorch:** 2.6.0 (CPU版, 2025年4月時点のStable)
+
+## CMake のインストール
+
+1.  **公式サイトからのダウンロード**
+    [CMake の公式サイト](https://cmake.org/download/) から Windows 用のインストーラー (`cmake-*-windows-x86_64.msi`) をダウンロードします。
+2.  **インストール**
+    ダウンロードしたインストーラーを実行します。
+3.  **環境変数の設定 (重要)**
+    インストーラーの途中で、「`Add CMake to the system PATH for all users`」または「`Add CMake to the system PATH for the current user`」を選択します。(管理者権限がない場合は後者を選択)
+4.  **インストールの確認**
+    コマンドプロンプトまたは PowerShell を **新しく** 開き、以下のコマンドを実行してバージョンが表示されることを確認します。
+    ```
+    cmake --version
+    ```
+   
+## 依存ライブラリの準備（LibTorch）
+
+1.  **公式サイトからのダウンロード**
+    [PyTorchの公式サイト](https://pytorch.org/get-started/locally/) から**CPU版のLibTorch**をダウンロードします。
+    以下の選択肢を選んでください（バージョンは最新の安定版を選びます）:
+    *   PyTorch Build：**Stable**
+    *   Your OS：**Windows**
+    *   Package：**LibTorch**
+    *   Language：**C++/Java**
+    *   Compute Platform：**CPU**
+    "Download ZIP" をクリックしてダウンロードします。
+
+2.  **展開**
+    ダウンロードしたZIPファイル (`libtorch-win-shared-with-deps-*.zip`) を任意の場所に展開します。書き込み権限のある場所を推奨します (例: `C:\Dev\libtorch`)。
+    **注意:** この展開先のパス (例: `C:\Dev\libtorch`) は後のCMake実行時に必要になるため、メモしておいてください。
+
+## vcpkg を利用した依存ライブラリの準備 (OpenCV)
+
+`vcpkg` は C++ ライブラリの管理ツールです。これを使って OpenCV をインストールします。
+
+1.  **vcpkg をクローン**
+    コマンドプロンプトを開き、`vcpkg` を配置したいディレクトリ (例: `C:\Dev`) に移動し、リポジトリをクローンします。
+    ```
+    cd C:\Dev
+    git clone https://github.com/microsoft/vcpkg.git
+    ```
+
+2.  **vcpkg のセットアップ**
+    クローンした `vcpkg` ディレクトリに移動し、セットアップ用のバッチファイルを実行します。
+    ```
+    cd vcpkg
+    ./bootstrap-vcpkg.bat
+    ```
+    続けて、Visual Studio との連携を設定します (任意ですが推奨)。
+    ```
+    ./vcpkg integrate install
+    ```
+
+3. **環境変数の設定**
+    システム全体で `vcpkg` を利用できるように、以下のコマンドで環境変数に`VCPKG_ROOT`を設定します。
+   ```
+   setx VCPKG_ROOT "C:\Dev\vcpkg"
+   ```
+
+4.  **必要な OpenCV モジュールのインストール**
+    OpenSplat で必要となる OpenCV のモジュール (`core`, `imgproc`, `highgui`, `calib3d`) をインストールします。少し時間がかかります。
+    ```bash
+    ./vcpkg install opencv4[core,highgui,calib3d] --triplet=x64-windows
+    ```
+    `--triplet=x64-windows` は 64bit Windows 向けのライブラリを指定しています。
+
+5.  **確認 (任意)**
+    インストールされたライブラリ一覧を表示し、`opencv4:x64-windows` が含まれているか確認します。
+    ```bash
+    ./vcpkg list
+    ```
+
+## OpenSplat のソースコード取得
+
+1. **作業ディレクトリの作成**
+    コマンドプロンプトを開き、OpenSplat のソースコードを配置するディレクトリを作成します (例: `C:\Dev\open_splat`)。
+   ```
+   mkdir C:\Dev\open_splat
+   cd C:\Dev\open_splat
+   ```
+
+2. **Git Clone の実行**
+    OpenSplat のリポジトリを Git で取得します。
+   ```
+   git clone https://github.com/pierotofy/OpenSplat.git
+   cd OpenSplat
+   ```
+
+## Build 手順
+
+1. **CMake の実行**
+    ビルドのために `build` ディレクトリ内に`Release` フォルダを作成し、CMakeを実行します。`vcpkg` のツールチェーンファイルを指定し、Release モードでコンパイル設定を行います。
+    ```
+    mkdir build && cd build
+    mkdir Release
+    cmake -DCMAKE_TOOLCHAIN_FILE="C:/Dev/vcpkg/scripts/buildsystems/vcpkg.cmake" -DCMAKE_BUILD_TYPE=Release ..
+    ```
+    ※ エラーが発生した場合は、`CMakeLists.txt` のパスや環境変数の設定を確認してください。
+
+2. **実行**
+    CMake の設定が完了したら、以下のコマンドでビルドを開始します。
+    ```
+    cmake --build . --config Release
+    ```
+    ビルドが成功すると、`build/Release` フォルダ内に `opensplat.exe` が生成されます。
+    ビルドには時間がかかる場合があります。
+3. **確認**
+    ビルドした `opensplat.exe` が正しく動作するかを確認します。
+    ```
+    cd Release
+    .\opensplat -h
+    ```
+    これが実行できたら、OpenSplat のソースコード取得、CMake による設定・ビルド、実行準備が完了です。
+
+## Run 手順
+1.  **データセットの用意**
+    OpenSplat は COLMAP 形式などのデータセットを入力として使用します。
+    例として、公式でリンクされている `banana` データセット (COLMAP形式) を使用します。
+    *   ダウンロード: [banana dataset (Google Drive)](https://drive.google.com/file/d/1mUUZFDo2swd6CE5vwPPkjN63Hyf4XyEv/view)
+    *   ダウンロードしたファイルを展開し、任意の場所 (例: `C:\Dev\datasets\banana`) に配置します。展開後のフォルダ内に `cameras.bin`, `images.bin`, `points3D.bin` などが含まれていることを確認してください。
+
+2.  **再構成の実行**
+    コマンドプロンプトで、先ほどビルドした `opensplat.exe` があるディレクトリ (`C:\Dev\open_splat\OpenSplat\build\Release`) に移動していることを確認し、以下のコマンドを実行します。
+
+    ```bash
+    # 出力先ディレクトリを作成 (推奨)
+    mkdir C:\Dev\open_splat\output
+
+    # 実行コマンド (データセットパス、出力ファイルパスは適宜変更)
+    .\opensplat.exe colmap -s C:\Dev\datasets\banana -n 2000 --output C:\Dev\open_splat\output\banana.ply
+    ```
+    *   `colmap`: データセットの形式を指定します (`banana` データセットは COLMAP 形式です)。
+    *   `-s C:\Dev\datasets\banana`: データセットが格納されているディレクトリのパスを指定します。
+    *   `-n 2000`: 最適化のイテレーション回数を指定します。CPU での実行は非常に時間がかかるため、最初は小さい値 (例: `-n 100`) で試すことをお勧めします。値が大きいほど高品質になる傾向がありますが、計算時間が増加します。
+    *   `-o C:\Dev\open_splat\output\banana.ply`: 出力される `.ply` ファイルのパスを指定します。
+
+    CPU での実行には数時間以上かかる場合があります。`-n` の値を小さくすると、より短時間で結果を確認できます。
+
+## 結果の確認
+
+処理が完了すると、`-o` で指定したパスに `.ply` ファイル (`banana.ply` など) が生成されます。
+
+この `.ply` ファイルは、Gaussian Splatting 対応のビューワーで開くことができます。Web ベースのビューワーとしては以下のようなものがあります。
+
+*   [**SuperSplat editor**](https://superspl.at/editor)
+
+これらのサイトを開き、生成された `.ply` ファイルをドラッグ＆ドロップすると、再構成された 3D シーンを表示できます。
+
+## まとめ
+
+この手順により、Windows 環境において GPU (CUDA) を使わずに、CPU だけで C++ 版 OpenSplat のビルドと再構成の実行が可能になります。
+
+CPU での実行は GPU に比べて大幅に時間がかかりますが、GPU 環境がない場合や、3D Gaussian Splatting のアルゴリズムを CPU ベースで追ってみたい場合、デバッグ目的などで役立ちます。
+
+ビルドや実行中に問題が発生した場合は、エラーメッセージをよく読み、各ステップの設定 (パスの指定、環境変数、インストールされたツールやライブラリのバージョン) を再確認してください。特に CMake 実行時のパス指定は間違いやすいポイントです。

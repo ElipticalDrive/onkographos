@@ -1,0 +1,192 @@
+A WebGPU engine for creative coding. Contribute to Siroko/kansei development by creating an account on GitHub.
+
+feat(fog): port FroxelGrid and VolumetricFogEffect to kansei-core (K1) by Siroko · Pull Request #3 · Siroko/kansei · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Siroko
+commented
+Sep 27, 2026
+Copy link
+Copy Markdown
+Owner
+K1: volumetric fog in kansei-core
+This ports the TS froxel volumetric fog to the Rust core. It is the first engine PR for the Midsommar intro on the web (Siroko/midsommar-web), where the Unreal intro's fog is the signature effect.
+rust/kansei-wasm/examples/volumetric-fog, headless Chrome 154 on an M4 Pro:
+A low sun with a 2048 shadow map, whose light comes through the pillars in shafts.
+A warm lamp with cube shadows, and a cool one without.
+Temporal reprojection is on; there is no other post.
+What's in it
+froxels::FroxelGrid, from src/froxels/FroxelGrid.ts:
+Exponential depth slices with rgba16float 3D textures for injection and accumulation.
+Front-to-back integration.
+Optional temporal reprojection with ping-pong history.
+FROXEL_WGSL_HELPERS for consumers.
+postprocessing::effects::VolumetricFogEffect, from VolumetricFogEffect.ts. It implements PostProcessingEffect, so it chains in a PostProcessingVolume:
+Inject: height-falloff density; directional and point (and area-as-point) lights with the Henyey-Greenstein phase; the directional shadow map and point cube shadows.
+Then temporal blend, accumulation, and a composite by depth with slice jitter.
+The WGSL is the TS shader code, moved to src/shaders/froxel_*.wgsl and volumetric_fog_*.wgsl.
+Renderer::shadow_map() / cubemap_shadow_map() accessors, so effects can bind the renderer's shadow maps.
+Example: rust/kansei-wasm/examples/volumetric-fog, run with wasm-pack build --target web --release, then serve the example dir and open www/.
+```
+let mut fog = VolumetricFogEffect::new(VolumetricFogOptions {
+    grid: FroxelGridOptions { far: 80.0, temporal: true, ..Default::default() },
+    base_density: 0.1, ambient: Vec3::new(0.012, 0.016, 0.03), ..Default::default()
+});
+fog.set_shadow_map(renderer.shadow_map());          // shafts
+fog.set_point_shadows(renderer.cubemap_shadow_map());
+fog.update_lights(scene.lights());                  // when lights change
+let mut volume = PostProcessingVolume::new(&renderer, vec![Box::new(fog)]);
+renderer.render_with_postprocessing(&mut scene, &mut camera, &mut volume);
+```
+Differences from the TS effect
+Depth convention. Linearization and froxel↔world use the Rust camera's [0,1] projection (glam::Mat4::perspective_rh, as dof.rs does), not the TS GL [-1,1] formula.
+Shadows.
+The directional light VP is bound straight from ShadowMap::light_vp_buf, so it always matches the one the renderer computed this frame. The effect can't see it any other way from inside render_with_postprocessing.
+The directional shadow applies only to the scene's first directional light with cast_shadow, which is the light the renderer's shadow map follows.
+Point shadows use CubeMapShadowMap's face layout (as in basic_lit.wgsl) and apply only to the first shadow-casting point light, which is the only one the renderer draws into the atlas.
+TS instead used the directional map for point lights whenever a shadow map was set.
+Additions (defaults keep TS behaviour):
+ambient: the radiance of a uniform sky around the fog, scattering as density * ambient. It keeps fog lit without direct light, e.g. at dusk; distant fog tends to it.
+fog_height: density stays at base_density below it.
+reset_history(): for camera cuts, where reprojection would otherwise smear across the cut.
+time: a public field that drives the wind, since the effect has no clock (std::time isn't on wasm).
+Fixes:
+The temporal lookup sampled the previous frame half a slice too deep ((slice + 0.5) / D on a slice that already includes the +0.5).
+The composite now samples pixel centres.
+Verified
+cargo test -p kansei-core: 41 passed. New tests:
+Every froxel/fog WGSL module parses and validates with naga (a dev-dependency, the same naga 24 as wgpu), and each Rust uniform struct's size equals its WGSL struct's size.
+update_lights assigns shadows and colours correctly.
+cargo check and clippy on kansei-core for wasm32: no new warnings.
+The example renders in Chrome with no WebGPU errors (screenshot above).
+Not in this PR (the plan's K4): spot cones in injection, and local fog volumes.
+feat(fog): port FroxelGrid and VolumetricFogEffect to kansei-core
+…
+fd2c42e
+```
+Port the TS froxel volumetric fog to the Rust core: FroxelGrid (exponential depth slices,
+front-to-back accumulation, optional temporal reprojection) and VolumetricFogEffect
+(height-fog injection lit by directional and point lights with HG phase, directional
+shadow map and point cube shadows, composite by depth), reusing the TS WGSL.
+
+Differences from the TS effect:
+- depth math follows kansei-core's [0,1] projection (glam perspective_rh), not GL [-1,1]
+- the shadow light VP is bound from the ShadowMap's own buffer, so it is never a frame
+  stale; point shadows use CubeMapShadowMap's face layout and only on the light it renders
+- new: ambient (sky radiance) term, fog_height, reset_history() for camera cuts, and a
+  caller-driven time for wind
+- fixes: the temporal lookup no longer samples half a slice deep, and the composite samples
+  pixel centres
+
+Also Renderer::shadow_map()/cubemap_shadow_map() accessors, naga-validated WGSL and
+uniform-layout tests, and a volumetric-fog WASM example.
+```
+vercel
+Bot
+commented
+Sep 27, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+The latest updates on your projects. Learn more about Vercel for GitHub.
+Project
+Deployment
+Actions
+Updated
+kansei
+Ready
+Preview
+Sep 27, 2026 12:06pm UTC
+kansei-fluid
+Ready
+Preview
+Sep 27, 2026 12:06pm UTC
+vercel
+Bot
+deployed
+to
+Preview – kansei
+September 27, 2026 11:58
+View deployment
+vercel
+Bot
+deployed
+to
+Preview – kansei-fluid
+September 27, 2026 11:59
+View deployment
+feat(fog): start_distance, UE's fog start distance
+…
+75e703d
+```
+No fog closer than start_distance (faded in over one slice). Exponential height fog alone
+cannot give the near-clear, far-hazy look of scenes lit this way; UE exposes the same
+control on its height and volumetric fog.
+```
+vercel
+Bot
+deployed
+to
+Preview – kansei
+September 27, 2026 12:05
+View deployment
+vercel
+Bot
+deployed
+to
+Preview – kansei-fluid
+September 27, 2026 12:06
+View deployment
+Hide details
+View details
+Siroko
+merged commit 2ed2bea
+into
+development
+Sep 27, 2026
+3 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+Siroko
+deleted the
+feat/volumetric-fog
+branch
+September 27, 2026 12:52
+Hide environments
+Show environments
+This branch was successfully deployed
+2 active
+deployments
+Preview – kansei-fluid
+—
+75e703d5
+Deployed
+Sep 27, 2026 by
+vercel[bot]
+View deployment
+Preview – kansei
+—
+75e703d5
+Deployed
+Sep 27, 2026 by
+vercel[bot]
+View deployment
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

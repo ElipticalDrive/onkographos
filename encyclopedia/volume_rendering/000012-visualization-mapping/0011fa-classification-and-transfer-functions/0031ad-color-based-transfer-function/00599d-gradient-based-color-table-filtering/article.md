@@ -1,0 +1,75 @@
+# Gradient-Based Color Table Filtering
+
+## Overview
+Gradient-Based Color Table Filtering is a technique for accurately filtering color table-based textures by estimating the noise value range $\delta$ from the local noise gradient [S1]. It addresses the error introduced when noise values and gradients are evaluated on unfiltered noise, which is a common source of inaccuracy in procedural noise rendering [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   Input: A procedural noise function $N(u)$, a 1D color table $C(u)$, spatial position $x$, and filter size.
+*   Output: A filtered color value.
+
+**Data Structures:**
+*   The color table $C$ is stored as a 1D texture or array, allowing for hardware-accelerated interpolation (e.g., MIP-mapping) [S1].
+
+**Steps:**
+1.  Evaluate the noise value $u = N(x)$ at the current spatial position $x$ [S1].
+2.  Compute the local noise gradient $\nabla N(x)$ at $x$ via finite differencing or analytically, as most procedural noises are differentiable [S1].
+3.  Estimate the range of noise values $\delta$ over the filter footprint. The interval size is computed from the filter size and the maximum gradient of $C$ with respect to $u$. Hart et al. refine this approach using the local noise gradient [S1].
+4.  Define the interval $[u - \delta, u + \delta]$ [S1].
+5.  Evaluate the color over this interval using MIP-mapping on the 1D color table, which effectively averages the color values across the estimated range [S1].
+
+**Pitfalls:**
+*   A source of error is that the noise value and gradient are evaluated on the unfiltered noise [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def gradient_based_color_table_filtering(noise_func, color_table, position, filter_size):
+    # 1. Evaluate noise value
+    u = noise_func(position)
+    
+    # 2. Compute local noise gradient via central finite differences
+    epsilon = 1e-6
+    grad = [0.0, 0.0, 0.0]
+    for i in range(3):
+        pos_plus = list(position)
+        pos_minus = list(position)
+        pos_plus[i] += epsilon
+        pos_minus[i] -= epsilon
+        grad[i] = (noise_func(pos_plus) - noise_func(pos_minus)) / (2.0 * epsilon)
+        
+    # 3. Estimate range delta from filter size and gradient magnitude
+    grad_magnitude = (grad[0]**2 + grad[1]**2 + grad[2]**2)**0.5
+    delta = grad_magnitude * filter_size
+    
+    # 4. Evaluate color over interval [u - delta, u + delta]
+    # Using MIP-mapping or linear interpolation on the 1D color table
+    c_low = color_table[u - delta]
+    c_high = color_table[u + delta]
+    filtered_color = (c_low + c_high) / 2.0
+    
+    return filtered_color
+```
+
+## Subtopics
+
+### [Variance-Based Color Table Filtering](16457-variance-based-color-table-filtering.md)
+Estimates $\delta$ from the loss in noise variance due to filtering, using analytical noise variance expressions. Sets itself apart by relying on analytical variance rather than local gradient estimation. Choose when analytical variance is available and gradient estimation is insufficient.
+
+### [Gradient-Aware Color Table Filtering](17190-gradient-aware-color-table-filtering.md)
+A refinement using local noise gradient to improve accuracy. Sets itself apart by relying on local gradient estimation rather than analytical variance. Choose when higher precision is needed and gradient computation is feasible.
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Strengths:** Accurate filtering by leveraging the differentiability of common procedural noise functions [S1].
+*   **Limitations:** Introduces error because the noise value and gradient are evaluated on the unfiltered noise [S1].
+*   **When to use:** Not given in the sources.
+*   **When not to use:** Not given in the sources.
+
+## Background
+Originated from Hart et al. [HCK99], who refined color table filtering by incorporating local noise gradients [S1]. Lagae et al. [LLDD09a] later proposed a related variance-based approach [S1].
+
+## Sources
+[S1] A Survey of Procedural Noise Functions, https://www.cs.umd.edu/~zwicker/publications/SurveyProceduralNoise-CGF10.pdf, fetched 2026-10-27

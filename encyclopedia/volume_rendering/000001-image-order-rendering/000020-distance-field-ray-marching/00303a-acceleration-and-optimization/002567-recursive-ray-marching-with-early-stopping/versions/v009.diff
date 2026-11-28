@@ -1,0 +1,204 @@
+--- v008.md
++++ v009.md
+@@ -7,117 +7,83 @@
+ 
+ ## How it works
+-The method operates on a batch of camera rays, iteratively marching them until they converge to the surface or exit the bounding volume. It uses a boolean mask to track active rays, concatenating only active rays for SDF queries to save memory and compute [S1].
+-
+ **Inputs:**
+-- Camera rays: origin $\mathbf{o}_i$ and direction $\mathbf{d}_i$ for each pixel $i \in [0, H \times W - 1]$.
+-- SDF function $f(\mathbf{p})$: returns signed distance and optionally gradient.
+-- Parameters: `max_steps` (default 100), `ratio` (step multiplier, default 1.5), `threshold` (convergence stop, default $5 \times 10^{-5}$) [S1][S2, unofficial].
++- Camera rays: origin $\mathbf{o}_i$ and direction $\mathbf{d}_i$ for each pixel $i \in [0, H \times W - 1]$ [S1].
++- SDF function $f(\mathbf{p})$: returns signed distance value for a query point [S1].
+ 
+ **Outputs:**
+-- Rendered depth, normal, color, or silhouette for each pixel.
+-- Gradients for optimization (if differentiable).
++- Rendered depth, normal, color, or silhouette for each pixel [S1].
++- Gradients for optimization (if differentiable) [S1].
+ 
+ **Data Structures:**
+-- `marching_zdepth`: Tensor of shape $(N)$, storing the accumulated distance along each ray. Initialized to 0.
+-- `unfinished_mask`: Boolean tensor of shape $(N)$, initially all `True`.
+-- `ray_positions`: Tensor of shape $(N, 3)$, storing current 3D position of each ray.
+-- `query_history`: List of tensors storing query positions for backpropagation.
++- `marching_zdepth`: Array of size $N$, storing accumulated distance along each ray. Initialized to $0$.
++- `unfinished_mask`: Boolean array of size $N$, initially `True` for all rays within the valid viewing frustum or unit sphere bounds [S2, unofficial].
++- `ray_positions`: Array of size $N \times 3$, storing current 3D position of each ray. Initialized to $\mathbf{o}_i$ [S1].
++- `query_history`: List of arrays storing query positions for backpropagation [S1].
+ 
+-**Steps:**
++**Numbered Steps:**
++1. **Initialization:** Set `marching_zdepth` to zeros. Set `ray_positions` to ray origins $\mathbf{o}_i$. Set `unfinished_mask` to `True` for all rays within the valid viewing frustum or unit sphere bounds [S2, unofficial].
++2. **Iteration Loop:** For step $k$ from 1 to `max_steps`:
++   a. **Select Active Rays:** Identify indices where `unfinished_mask` is `True`. Concatenate these rays into a single batch tensor [S1].
++   b. **Query SDF:** Evaluate $d_j = f(\mathbf{p}_j)$ for each active ray $j$ in the batch [S1][S2, unofficial].
++   c. **Update Positions:** Compute step size using the SDF value and a multiplier. Update position and accumulated depth [S2, unofficial].
++   d. **Check Convergence:** If the ray meets convergence criteria, set its mask entry to `False` [S1].
++   e. **Gradient Handling:** Save query locations globally. Perform minimization of absolute SDF over a detached tensor graph to find the minimum $K$ queries per ray. Re-evaluate these specific queries with gradients attached [S1].
++3. **Final Compositing:** Map results back to original image resolution [S1].
+ 
+-1. **Initialization:**
+-   - Set `marching_zdepth` to zeros.
+-   - Set `ray_positions` to ray origins $\mathbf{o}_i$.
+-   - Set `unfinished_mask` to `True` for all rays within the valid viewing frustum (or unit sphere bounds) [S2, unofficial].
++**Formulas:**
++- Step size: $\text{step\_size}_j = \min(d_j, \text{max\_step}) \times \alpha$
++- Position update: $\mathbf{p}_j \leftarrow \mathbf{p}_j + \mathbf{d}_j \times \text{step\_size}_j$
++- Depth update: $\text{marching\_zdepth}_j \leftarrow \text{marching\_zdepth}_j + \text{step\_size}_j$
++- Convergence: $|d_j| < \text{threshold}$ or ray exits bounding volume [S1][S2, unofficial].
++- Symbols: $d_j$ is signed distance at $\mathbf{p}_j$, $\alpha$ is step multiplier, $\text{max\_step}$ is a clamp limit, $\text{threshold}$ is convergence tolerance, $\mathbf{d}_j$ is ray direction, $\mathbf{p}_j$ is current position.
+ 
+-2. **Iteration Loop:**
+-   For step $k$ from 1 to `max_steps`:
+-   
+-   a. **Select Active Rays:**
+-      Identify indices where `unfinished_mask` is `True`. Let this set be $A_k$.
+-      If $A_k$ is empty, break loop [S1][S2, unofficial].
+-
+-   b. **Query SDF:**
+-      Extract positions $\mathbf{p}_j$ for $j \in A_k$.
+-      Compute $\mathbf{d}_j = f(\mathbf{p}_j)$ and $\mathbf{g}_j = \nabla f(\mathbf{p}_j)$ [S1][S2, unofficial].
+-
+-   c. **Update Positions:**
+-      For each active ray $j$:
+-      $$ \text{step\_size}_j = \min(\mathbf{d}_j, \text{max\_step\_limit}) \times \text{ratio} $$
+-      $$ \mathbf{p}_j \leftarrow \mathbf{p}_j + \mathbf{d}_j \cdot \text{step\_size}_j $$
+-      $$ \text{marching\_zdepth}_j \leftarrow \text{marching\_zdepth}_j + \text{step\_size}_j $$
+-      *Note: The step size is clamped to avoid overshooting thin structures. The `ratio` parameter (typically 1.2–1.8) scales the SDF value to ensure stability [S1].*
+-
+-   d. **Check Convergence:**
+-      For each active ray $j$:
+-      - If $|\mathbf{d}_j| < \text{threshold}$, the ray has converged.
+-      - If the ray has exited the bounding volume (e.g., distance from origin > sphere radius), mark as converged.
+-      - Set `unfinished_mask[j] = False` for converged rays [S1][S2, unofficial].
+-
+-   e. **Gradient Handling (Differentiable Rendering):**
+-      To compute gradients without unaffordable memory consumption from storing all query locations:
+-      1. Save query locations globally in `query_history`.
+-      2. Perform minimization of absolute SDF over a detached tensor graph (no gradients) to find the minimum $K$ queries per ray [S1].
+-      3. Retrieve these specific queries and re-evaluate the SDF with gradients attached [S1].
+-      4. Typical $K$ values: 1 for depth rendering, 3 for shape completion, 1 for multi-view reconstruction [S1].
+-
+-3. **Final Compositing:**
+-   - For rays still active after `max_steps`, use the final position or mark as background.
+-   - Map results back to original image resolution [S1].
+-
+-**Pseudocode:**
+-
+-```python
+-def recursive_ray_marching_with_early_stopping(rays, sdf_func, max_steps=100, ratio=1.5, threshold=5e-5, K=1):
+-    """
+-    rays: Tensor of shape (N, 2, 3) [origin, direction]
+-    sdf_func: Function returning (distance, gradient)
+-    """
+-    N = rays.shape[0]
+-    positions = rays[:, 0, :]  # (N, 3)
+-    directions = rays[:, 1, :]  # (N, 3)
+-    z_depth = torch.zeros(N)  # (N,)
+-    unfinished_mask = torch.ones(N, dtype=torch.bool)  # (N,)
+-    query_history = []  # List of (N, 3) tensors
+-    
+-    for step in range(max_steps):
+-        # Select active rays
+-        active_indices = torch.where(unfinished_mask)[0]
+-        if len(active_indices) == 0:
+-            break
+-            
+-        active_positions = positions[active_indices]
+-        
+-        # Query SDF
+-        distances, gradients = sdf_func(active_positions)
+-        
+-        # Store for backprop (detached for minimization step)
+-        query_history.append(active_positions.detach())
+-        
+-        # Update positions
+-        # Clamp step size to prevent overshooting, scaled by ratio
+-        step_sizes = torch.clamp(distances, max=1.0) * ratio
+-        new_positions = active_positions + directions[active_indices] * step_sizes.unsqueeze(1)
+-        
+-        # Update global state
+-        positions[active_indices] = new_positions
+-        z_depth[active_indices] += step_sizes
+-        
+-        # Check convergence
+-        converged = (torch.abs(distances) < threshold)
+-        unfinished_mask[active_indices] = ~converged
+-        
+-    # Gradient computation using K best queries
+-    # This part is simplified; actual implementation requires careful tensor manipulation
+-    # to find min |SDF| per ray from query_history and re-evaluate with gradients.
+-    # See [S1] for detailed implementation of "Dynamic Synchronized Inference" gradient trick.
+-    
+-    return z_depth, positions
+-```
++**Parameters:**
++- `max_steps`: Maximum marching iterations. Default is 100 [S1].
++- `alpha` ($\alpha$): Step multiplier scaling the SDF value. Typical range is 1.2–1.8 [S1].
++- `threshold`: Convergence stop threshold. Default is $5 \times 10^{-5}$ [S2, unofficial].
++- `K`: Number of queries to keep for backpropagation. $K=1$ for depth rendering, $K=3$ for shape completion, $K=1$ for multi-view reconstruction [S1].
+ 
+ **Edge Cases and Pitfalls:**
+ - **Precision:** When close to the surface, SDF values are small, leading to slow convergence. The `threshold` must be chosen relative to the rendering resolution and object scale [S1].
+-- **Thin Structures:** Large `ratio` values can cause rays to overshoot thin surfaces, creating holes. Empirical values range from 1.2 to 1.8 [S1].
++- **Thin Structures:** Large `alpha` values can cause rays to overshoot thin surfaces, creating holes. Empirical values range from 1.2 to 1.8 [S1].
+ - **Memory:** Storing all query positions for backpropagation is memory-intensive. The detached tensor minimization trick is essential for high-resolution rendering (e.g., 2048x2048) [S1].
++
++**Pseudocode:**
++```python
++def recursive_ray_marching_with_early_stopping(rays, sdf_func, max_steps=100, alpha=1.5, threshold=5e-5, K=1):
++    """
++    rays: list of (origin, direction) tuples, each 3D vector
++    sdf_func: callable returning distance (float)
++    """
++    N = len(rays)
++    positions = [ray[0] for ray in rays]
++    directions = [ray[1] for ray in rays]
++    z_depth = [0.0] * N
++    unfinished_mask = [True] * N
++    query_history = []
++
++    for step in range(max_steps):
++        active_indices = [i for i in range(N) if unfinished_mask[i]]
++        if not active_indices:
++            break
++
++        active_positions = [positions[i] for i in active_indices]
++        distances = [sdf_func(p) for p in active_positions]
++
++        query_history.append(active_positions)
++
++        for idx, i in enumerate(active_indices):
++            d = distances[idx]
++            step_size = min(d, 1.0) * alpha
++            positions[i] = [positions[i][j] + directions[i][j] * step_size for j in range(3)]
++            z_depth[i] += step_size
++
++            if abs(d) < threshold:
++                unfinished_mask[i] = False
++
++    # Gradient computation: find min |SDF| per ray from query_history, 
++    # re-evaluate with gradients attached. Requires framework-specific autograd hooks [G].
++    return z_depth, positions
++```
+ 
+ ## Subtopics
+@@ -130,12 +96,12 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N \cdot S_{active})$, where $N$ is the number of rays and $S_{active}$ is the average number of steps per active ray. Early stopping reduces $S_{active}$ for converged rays, improving performance over fixed-step marching.
++- **Time Complexity:** $O(N \cdot S_{active})$, where $N$ is the number of rays and $S_{active}$ is the average number of steps per active ray. Early stopping reduces $S_{active}$ for converged rays, improving performance over fixed-step marching [S1].
+ - **Memory Complexity:** $O(N \cdot K)$ for storing query history for backpropagation, where $K$ is the number of queries kept per ray [S1].
+ - **Performance:** Enables high-resolution rendering (2048x2048) on single GPUs (e.g., GTX-1080Ti) by avoiding wasted computation on converged rays [S1].
+-- **Strengths:** Efficient for scenes with varying depth complexity; reduces compute for background and converged foreground pixels.
+-- **Limitations:** Requires careful tuning of `ratio` and `threshold`; gradient computation is complex due to the dynamic mask and history management [S1].
++- **Strengths:** Efficient for scenes with varying depth complexity; reduces compute for background and converged foreground pixels [S1].
++- **Limitations:** Requires tuning of the step multiplier $\alpha$ (typically 1.2–1.8) to balance convergence speed and hole formation in thin areas [S1].
+ 
+ ## Background
+-The method was introduced as "Dynamic Synchronized Inference" in the DIST (Differentiable Implicit Signed Distance) framework [S1]. It addresses the inefficiency of naive parallel sphere tracing where all rays are updated synchronously, leading to wasted computation when some rays converge earlier than others [S1]. The implementation details were further explored in unofficial repositories such as B1ueber2y/DIST-Renderer [S2, unofficial].
++The method was introduced as "Dynamic Synchronized Inference" in the DIST framework [S1]. It addresses the inefficiency of naive parallel sphere tracing where all rays are updated synchronously, leading to wasted computation when some rays converge earlier than others [S1]. The implementation details were further explored in unofficial repositories such as B1ueber2y/DIST-Renderer [S2, unofficial].
+ 
+ ## Sources

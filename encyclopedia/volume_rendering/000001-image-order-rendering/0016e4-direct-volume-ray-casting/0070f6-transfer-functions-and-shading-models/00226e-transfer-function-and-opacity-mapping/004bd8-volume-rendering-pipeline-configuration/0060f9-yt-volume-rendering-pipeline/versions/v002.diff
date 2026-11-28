@@ -1,0 +1,141 @@
+--- v001.md
++++ v002.md
+@@ -65,6 +65,6 @@
+     $$v^{n+1}_{i} = j_{i}\Delta s + (1 - \alpha_{i}\Delta s )v^{n}_{i}$$
+     Where:
+-    *   $n$ and $n+1$ represent the pixel state before and after passing through a sample.
+-    *   $i$ is the color channel (red, green, blue).
++    *   $n$ and $n+1$ represent the pixel state before and after passing through a sample [S1].
++    *   $i$ is the color channel (red, green, blue) [S1].
+     *   $\Delta s$ is the path length between samples [S1].
+ 10. **Early Termination**: Determine if any further integration will change the sample value significantly. If not, terminate integration for that ray. This reduces integration time when rendering front-to-back [S1].
+@@ -75,91 +75,39 @@
+ ```python
+ def yt_volume_render_pipeline(scene, camera, lens, volume_source, transfer_function):
+-    """
+-    Executes the volume rendering pipeline for a single VolumeSource.
+-    """
+     # 1. Prepare Data
+-    # Partition chunks into non-overlapping bricks containing finest data
+-    bricks = partition_into_bricks(volume_source.data_chunks)
+-    
+-    # Generate vertex-centered data if ghost zones are used
+-    if volume_source.use_ghost_zones:
+-        vertex_data = generate_vertex_centered_data(volume_source.grids)
+-    else:
+-        vertex_data = volume_source.grids # Use cell-centered directly or handle interpolation internally
++    bricks = [chunk.decompose_into_brick() for chunk in volume_source.data_chunks]
++    vertex_data = volume_source.grids.interpolate_to_vertex_centered() if volume_source.use_ghost_zones else volume_source.grids
+ 
+     # 2. Initialize Ray Plane
+-    # Create plane of rays parallel to image plane
+-    # Initial pixel values set to zero
+-    # Rays located at the back of the region
+-    ray_plane = initialize_ray_plane(camera, lens, volume_source.bounds)
+-    
++    width, height = camera.resolution
++    ray_plane = [[0.0, 0.0, 0.0] for _ in range(height)]
++
+     # 3. Order Bricks
+-    # Order bricks from front-to-back relative to camera
+-    ordered_bricks = order_bricks_front_to_back(bricks, camera.position, camera.normal_vector)
+-    
++    ordered_bricks = sorted(bricks, key=lambda b: b.distance_to_camera(camera))
++
+     # 4. Cast Rays
+     for brick in ordered_bricks:
+-        # Identify rays intersecting this brick
+-        intersecting_rays = find_intersecting_rays(ray_plane, brick.bounds)
+-        
+-        for ray in intersecting_rays:
+-            # Initialize ray state within the brick
+-            current_pixel_value = ray_plane.get_pixel_value(ray.id) # Initially 0
+-            
+-            # Sample cells along the ray path through the brick
+-            # Default 5 samples per cell intersection
+-            num_samples = volume_source.samples_per_cell # Default 5
+-            
+-            for sample_idx in range(num_samples):
+-                # Determine sample position within the cell
+-                sample_pos = interpolate_sample_position(ray, sample_idx)
+-                
+-                # Trilinearly interpolate data value from vertex-centered data
+-                field_value = trilinear_interpolate(vertex_data, sample_pos)
+-                
+-                # Evaluate transfer function
+-                # f(v) -> (r, g, b, a)
+-                color_rgba = transfer_function.evaluate(field_value)
+-                r, g, b, alpha = color_rgba
+-                
+-                # Calculate emission and absorption for each channel
+-                # j is emission, alpha is absorption coefficient
+-                # Note: In standard volume rendering, alpha is often derived from opacity
+-                # Here, the formula uses alpha directly as absorption coefficient
+-                j_r = r
+-                j_g = g
+-                j_b = b
+-                alpha_r = alpha
+-                alpha_g = alpha
+-                alpha_b = alpha
+-                
+-                # Path length between samples
+-                delta_s = ray.step_size
+-                
+-                # Rectangular Integration Update
+-                # v^{n+1}_i = j_i * delta_s + (1 - alpha_i * delta_s) * v^n_i
+-                
+-                # Update Red Channel
+-                new_r = j_r * delta_s + (1 - alpha_r * delta_s) * current_pixel_value.r
+-                # Update Green Channel
+-                new_g = j_g * delta_s + (1 - alpha_g * delta_s) * current_pixel_value.g
+-                # Update Blue Channel
+-                new_b = j_b * delta_s + (1 - alpha_b * delta_s) * current_pixel_value.b
+-                
+-                # Check for early termination
+-                # If change is negligible, break
+-                if abs(new_r - current_pixel_value.r) < epsilon and \
+-                   abs(new_g - current_pixel_value.g) < epsilon and \
+-                   abs(new_b - current_pixel_value.b) < epsilon:
+-                    break
+-                
+-                current_pixel_value.r = new_r
+-                current_pixel_value.g = new_g
+-                current_pixel_value.b = new_b
+-            
+-            # Store final pixel value
+-            ray_plane.set_pixel_value(ray.id, current_pixel_value)
+-            
+-    return ray_plane.image
++        for y in range(height):
++            for x in range(width):
++                ray_origin = camera.get_ray_origin(x, y)
++                ray_direction = camera.get_ray_direction(x, y)
++                if not brick.ray_brick_intersection(ray_origin, ray_direction):
++                    continue
++                current_pixel = ray_plane[y][x]
++                cell_step = brick.cell_size / 5
++                for cell in brick.cells_along_ray(ray_origin, ray_direction):
++                    for sample_idx in range(5):
++                        sample_pos = cell.center + (sample_idx + 0.5) * cell_step * ray_direction
++                        field_value = vertex_data.trilinear_interpolate(sample_pos)
++                        r, g, b, alpha = transfer_function.evaluate(field_value)
++                        delta_s = cell_step
++                        new_r = r * delta_s + (1 - alpha * delta_s) * current_pixel[0]
++                        new_g = g * delta_s + (1 - alpha * delta_s) * current_pixel[1]
++                        new_b = b * delta_s + (1 - alpha * delta_s) * current_pixel[2]
++                        if abs(new_r - current_pixel[0]) < 1e-6 and abs(new_g - current_pixel[1]) < 1e-6 and abs(new_b - current_pixel[2]) < 1e-6:
++                            break
++                        current_pixel[0], current_pixel[1], current_pixel[2] = new_r, new_g, new_b
++                ray_plane[y][x] = current_pixel
++    return ray_plane
+ ```
+ 
+@@ -173,6 +121,6 @@
+ ## Operating characteristics
+ 
+-*   **Time Complexity**: The method involves casting rays through a volume, sampling cells, and integrating along the path. Complexity depends on the number of rays, samples per cell, and the depth of the volume traversal. Early termination helps reduce time for opaque regions.
+-*   **Memory Complexity**: Requires storing the dataset, the `AMRKDTree` structure, vertex-centered data (if enabled), and the ray plane image.
++*   **Time Complexity**: The method involves casting rays through a volume, sampling cells, and integrating along the path. Complexity depends on the number of rays, samples per cell, and the depth of the volume traversal. Early termination helps reduce time for opaque regions [S1].
++*   **Memory Complexity**: Requires storing the dataset, the `AMRKDTree` structure, vertex-centered data (if enabled), and the ray plane image [S1].
+ *   **Performance**: Implemented in software, requiring no specialized hardware [S1]. Optimized versions using OpenGL and GPUs are being actively developed [S1]. Parallelism is supported via MPI and OpenMP [S1]. MPI parallelization decomposes the volume by splitting the `AMRKDTree` in a balanced way [S1].
+ *   **Strengths**: Accommodates both opaque and transparent structures; user-defined transfer functions allow flexible visualization; software-based implementation ensures portability [S1, S2].

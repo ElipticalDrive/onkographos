@@ -1,0 +1,2412 @@
+Gaussian Splat Renderer for the Godot Engine. Contribute to klausi3D/godotGS development by creating an account on GitHub.
+
+gaussian_splatting: render splats with the engine's TAA jitter, and key the render cache on the matrix that carries it (#929) by klausi3D · Pull Request #1026 · klausi3D/godotGS · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+klausi3D
+commented
+Sep 17, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Splats swim under FSR2 because the projection uploaded to the splat GPU pipeline never carried the engine's temporal jitter. This lands the fix, the cache-key change that would otherwise have silently neutered it, a QA oracle that is red on the unfixed tree, and the scoped disclosure of the half that remains.
+Base: b915afc51c5 (origin/master at the time of writing; top commits #999 and #1009).
+Why one PR and not a stack. The plan this follows is four ordered steps — rig, cache key, jitter, disclosure — and the rig is deliberately red on the unfixed tree. A blocking QA scene that fails on master cannot land on its own, so splitting the rig out would either red master or require landing it disabled, which is the opposite of the point. The four steps are still separable in review: §4.1 is the rig, §3 change 2 is the cache key, §3 change 1 is the jitter, §5 is the disclosure, and §4.3 shows each production change failing its own test in isolation.
+Risk class: R2 — python scripts/agentic/classify_change.py returns R2 for this path set (renderer/**). Note that interfaces/output_compositor.{h,cpp}, which this PR also touches, classifies R1 under the misclassification filed as #1017; it is treated as R2 here regardless and carries the GPU evidence below.
+1. The defect, re-verified at the base
+gaussian_splat_renderer.cpp:2400-2402 built the GPU projection by copying p_render_data->scene_data->cam_projection (:2373) and flipping one sign:
+```
+// Apply flip_y only; gaussian pipeline uses linear view-space depth.
+Projection render_projection = cam_projection;
+if (... scene_data->flip_y) { render_projection.columns[1][1] = -render_projection.columns[1][1]; }
+```
+grep -c taa_jitter modules/gaussian_splatting/ returned 0 — not one reference in the module.
+Meanwhile every mesh in the same frame is rendered through RenderSceneDataRD::get_cam_projection() (servers/rendering/renderer_rd/storage_rd/render_scene_data_rd.cpp:40-45), which left-multiplies taa_jitter via Projection::add_jitter_offset() (core/math/projection.cpp:932-935), and FSR2 is handed the same vector immediately below the splat pre-upscale hook (render_forward_clustered.cpp:2699, params.jitter at :2713). FSR2 then un-jitters its input — ComputeHrPosFromLrPos() at thirdparty/amd-fsr2/shaders/ffx_fsr2_common.h:431-437 and InitParams() at ffx_fsr2_accumulate.h:219-220. A layer that was never jittered is therefore reconstructed displaced by +jitter, moving every frame along the Halton sequence.
+Godot's TAA never receives the jitter at all — the whole push constant at servers/rendering/renderer_rd/shaders/effects/taa_resolve.glsl:50-55 is {vec2 resolution; float disocclusion_threshold; float disocclusion_scale;} — so under TAA splats do not swim; they are bit-stable and simply never antialiased. The issue title is half wrong and the §11 entry is updated to say so.
+2. Measurement
+2.1 Real scan, before and after
+Binaries (both built by me from this repo in the same worktree, platform=windows target=editor optimize=speed_trace tests=yes module_gaussian_splatting_enabled=yes gs_native_arch=no — not a dev build, so not -O0):
+BASE: b915afc51c5, Z:/wt-929-bin/base/godot.windows.editor.x86_64.exe, 178,642,432 bytes, linked 2026-09-17 23:09:26.
+AFTER: f10ac3c6ecf, Z:/wt-929-bin/fixed/godot.windows.editor.x86_64.exe, 178,658,304 bytes, linked 2026-09-17 23:17:01.
+Which commit produced which measurement, because the head moved twice after the real-scan capture (once to recalibrate the QA gate, once for the self-review fixes in §8) and an evidence chain that does not say so is not one:
+measurement
+commit it was taken at
+production-code delta to this PR's head
+§2.1 real-scan capture, BASE
+b915afc51c5
+the whole PR
+§2.1 real-scan capture, AFTER
+f10ac3c6ecf
+none — git diff f10ac3c6ecf HEAD -- modules/gaussian_splatting/renderer modules/gaussian_splatting/interfaces is comments only
+§4.1 QA rig, BASE and AFTER; §4.2 lane counts; §4.4 full suite
+a7e21559f63
+none — comment-only
+§4.3 mutations
+5dcb353dc4b + one reverted line each
+the §8 review fixes, none of which touch the mutated lines
+The base binary independently reproduces the assessment's published numbers, which were measured on the nightly (5dfeb44b5b4, a different binary built on different hardware): 0.000 / 0.002 / 1.089 / 1.409 mean LSB with peaks 104 and 136, to the digit. Two independently built binaries agreeing to three decimal places is the cross-check that the rig is measuring the renderer and not the build.
+GPU: NVIDIA GeForce RTX 3090, Vulkan driver 1.4.325. Renderer: forward_plus.
+Scene: one real-scan GaussianSplatNode3D (Cabin in the forest.ply, 31,208 visible splats in both runs, quality/preset = 2) plus a high-frequency checker-textured unshaded box, both in one 960×540 SubViewport (own_world_3d, transparent_bg = false), static camera (near 0.05, far 200), static content.
+Project pins in force: this rig's project.godot pins nothing under [gaussian_splatting], so composite/depth_test runs at its shipped default true (core/gaussian_splat_manager.cpp:998) and per_splat_depth_clip at its shipped default true (:1002). It is deliberately not the QA project, which pins composite/depth_test=false, lighting/indirect_sh_scale=0.0 and use_rgba8_framebuffer=true — the masked configuration that hid GPU-001 twice.
+Method: 24 consecutive frames per config after a 64-frame warm-up, plus an 8-frame engage window captured right after each switch; metrics computed offline over a splat-only mask (264,185 px) and a mesh-only mask (45,802 px) derived from reference captures. The mesh is the in-frame control: same frame, same stage, same capture path, drawn with the engine's jitter-corrected projection.
+Run under the shared heavy lock with CI idle.
+BASE — b915afc51c5, binary godot.windows.editor.x86_64.exe 178,642,432 bytes, linked 2026-09-17 23:09
+config
+scale
+raster path
+SPLAT Δ LSB mean / max
+MESH Δ LSB mean / max
+SPLAT displacement px mean / max
+MESH displacement px mean / max
+autocorr @ jitter phase, splat / mesh
+none
+1.00
+other
+0.000 / 0
+0.000 / 0
+0.0000 / 0.0000
+0.0000 / 0.0000
+n/a
+taa
+1.00
+other
+0.002 / 14
+0.310 / 59
+0.0000 / 0.0000
+0.0151 / 0.0314
++0.985 / +0.981
+fsr2
+1.00
+other
+1.089 / 104
+2.365 / 123
+0.2525 / 0.3945
+0.0100 / 0.0198
++1.000 / +1.000
+fsr2
+0.50
+other
+1.409 / 136
+2.180 / 220
+0.3603 / 0.7015
+0.0046 / 0.0119
+n/a (phase 32 > window)
+AFTER — f10ac3c6ecf (C++ identical to the head of this PR; the later amend touched only the two QA .gd files, git diff --stat confirms), binary 178,658,304 bytes, linked 2026-09-17 23:17
+config
+scale
+raster path
+SPLAT Δ LSB mean / max
+MESH Δ LSB mean / max
+SPLAT displacement px mean / max
+MESH displacement px mean / max
+autocorr @ jitter phase, splat / mesh
+none
+1.00
+other
+0.000 / 0
+0.000 / 0
+0.0000 / 0.0000
+0.0000 / 0.0000
+n/a
+taa
+1.00
+other
+0.098 / 14
+0.407 / 59
+0.0156 / 0.0360
+0.0152 / 0.0315
++1.000 / +0.992
+fsr2
+1.00
+other
+0.894 / 103
+2.306 / 121
+0.0900 / 0.1469
+0.0099 / 0.0172
++1.000 / +0.999
+fsr2
+0.50
+other
+0.977 / 133
+1.909 / 220
+0.0927 / 0.1790
+0.0046 / 0.0075
+n/a
+(Δ = per-channel LSB, 0–255, mean over consecutive-frame pairs in the mask. Displacement = Lucas–Kanade sub-pixel shift of each captured frame against that window's own mean frame, in output pixels.)
+What moved, and what did not:
+BASE
+AFTER
+FSR2 @1.0 splat displacement
+0.2525 px
+0.0900 px
+−64%, a 2.8× reduction; peak 0.3945 → 0.1469 px
+FSR2 @0.5 splat displacement
+0.3603 px
+0.0927 px
+−74%, a 3.9× reduction; peak 0.7015 → 0.1790 px
+FSR2 @1.0 mesh control
+0.0100 px
+0.0099 px
+unchanged — the change is confined to the splat layer
+FSR2 @0.5 mesh control
+0.0046 px
+0.0046 px
+unchanged
+no temporal stage
+0.0000 px / 0.000 LSB
+0.0000 px / 0.000 LSB
+bit-identical, both regions, as the zero-jitter short-circuit guarantees
+TAA splat
+0.0000 px / 0.002 LSB
+0.0156 px / 0.098 LSB
+not a regression — the intended effect. Splats were bit-stable under TAA because they were never jittered, i.e. never antialiased while every mesh beside them was. They now move by the same order as the mesh control (0.0156 vs 0.0152 px in this run), which is what a correctly integrated layer looks like. Read as an order of magnitude, not a parity claim: the TAA control has run-to-run spread comparable to its own value (an independent reproduction measured 0.0068 / 0.0182 px), and TAA is not gated.
+TAA mesh control
+0.0151 px
+0.0152 px
+unchanged
+The residual is named, not hidden. After the fix the splat layer still displaces ~0.09 px against a mesh control at ~0.01 px. That remainder is not the jitter. #1025 later identified the mechanism, and it is not the one guessed here: the composite already feeds FSR2's reactive mask through the destination alpha (viewport_blit.glsl:206-208 → params.reactive), clamped to 0.9, so FSR2 is deliberately not accumulating history on splat pixels — they track the raw jittered frame instead of converging the way the mesh does. An earlier revision of this paragraph blamed "no reactive mask", which was false. That is the §8.1 disclosure and the follow-up issue, not a defect this PR leaves half-fixed.
+2.2 Why the colour delta is reported and not gated
+Look at the BASE FSR2 rows: the broken splat region measures 1.089 mean LSB while the correct mesh control beside it measures 2.365. The broken layer scores better. Mean |LSB| between consecutive frames confounds displacement with local contrast, and a 2 px checker has a far larger gradient than a soft scan. Gating it in either direction would be gating content.
+2.3 Why the periodicity is reported and not gated either
+The assessment attributed the defect by periodicity: the splat signal repeats with period 8 at scale 1.0, autocorrelation +1.00 at lag 8, which is the engine's jitter phase (renderer_viewport.cpp:252-260). That attribution is sound and I reproduced it.
+It is not an oracle, and this is the one place my verification contradicts the assessment's plan, which proposed it as the QA rig's oracle ("the splat-region signal's autocorrelation at the engine's jitter-phase lag … is the oracle"). Measured on the same captures, the mesh control autocorrelates +1.000 at lag 8 as well. FSR2's resolve is phase-periodic under a static camera whether or not the layer feeding it is jittered, so the statistic cannot separate a correctly integrated layer from a broken one, and a gate built on it would have been red before and after. The QA rig records both autocorrelations and gates on neither; the reasoning is written into the scene header so the next reader does not rediscover it as a good idea.
+2.4 What does separate: sub-pixel displacement
+The defect is a statement about position, so measure position. A first-order (Lucas–Kanade) estimate divides the temporal difference by the spatial gradient and returns pixels, so contrast cancels:
+```
+[Sxx Sxy; Sxy Syy] d = [bx; by],  Sxx = sum gx^2 ... bx = sum gx * dI
+```
+evaluated for each frame of the converged window against that window's own mean frame. Those are the SPLAT px / MESH px columns above.
+3. The change
+1. GaussianSplatRenderer::build_render_projection() (renderer/gaussian_splat_renderer.cpp, declared beside build_cull_projection()). Static and free of RenderData, so the contract is unit-testable without a GPU. It applies flip_y and, when the jitter is non-zero, the same identity-plus-translation correction the engine uses. It deliberately does not apply the engine's depth correction — the gaussian pipeline carries linear view-space depth.
+Zero jitter short-circuits and returns the flipped matrix, so the non-temporal path is bit-identical to the pre-#929 matrix by construction rather than by a floating-point argument about multiplying by an identity. It is self-gating: scene_data->taa_jitter is exactly (0,0) unless a temporal stage is active (renderer_scene_cull.cpp:2681-2696 only assigns it when the jitter phase count is non-zero; renderer_viewport.cpp:252-260 leaves that at 0 unless temporal upscaling or TAA is on). The shadow pass (gaussian_splat_renderer.cpp:1981-1987) builds its own projections locally and is untouched.
+2. The render cache reuse key now carries the GPU projection (interfaces/output_compositor.{h,cpp}, call sites at renderer/render_pipeline_stages.cpp:1909 and :2603). The key was p_input.projection, the unjittered camera projection, compared exactly at output_compositor.cpp:176. The jitter appears nowhere else, so wherever reuse is live — a static camera, which is exactly the case this fix is about — the raster stage is skipped (render_pipeline_stages.cpp:1835) and one frozen jitter phase would be re-composited every frame. Change 1 would silently do nothing while still looking correct to any test that only inspects the matrix the renderer built. The new parameter is required and has no default, so a caller cannot reintroduce the trap by forgetting an argument.
+3. Three false comments. gaussian_splat_renderer.h:377, interfaces/rasterizer_interfaces.h:34 and interfaces/painterly_renderer_interfaces.h:88 all read // GPU projection with depth/jitter correction applied. The code had never applied either.
+3.1 Blast radius, checked rather than assumed
+consumer
+projection
+verdict
+GPU/CPU cull, frustum planes
+cull_projection, re-derived from the unjittered projection (gaussian_splat_renderer.cpp:588-595)
+unaffected; tests/ci/check_cull_signature_parity.py green
+_compute_cull_config_signature
+zero occurrences of "projection" in the function
+unaffected
+depth sort keys
+view-space z only (compute/depth_compute.glsl:202-203)
+unaffected
+conic / Jacobian / subpixel-cull
+focal_x/y from projection_matrix[0][0]/[1][1] (shaders/tile_binning.glsl:566-568) — the two entries the jitter provably does not touch, asserted in the new unit test
+unaffected
+near/far
+p_params.projection.get_z_near()/get_z_far() (tile_render_stages.cpp:278-279), the unjittered one, and unaffected by a translation anyway
+unaffected
+shadow pass
+builds both projections locally with p_render_data == nullptr
+unaffected
+tile binning grid
+render_projection (tile_binning.glsl:541, :557-558)
+affected, and correctly so — binning and raster share one matrix, which is what makes the layer move as a unit
+painterly raster
+same TileRenderer::RenderParams
+follows automatically
+tile_resolve.glsl:276 lighting reconstruction
+params.inv_projection_matrix
+checked, and the assessment's concern does not apply. tile_render_stages.cpp:251-262 derives both projection_matrix and inv_projection_matrix from the same render_projection, so the forward and inverse stay a consistent pair; inverting the jittered matrix at the pixel centre is the correct recovery for a fragment produced by the jittered forward transform.
+composite depth test
+viewport_blit.glsl:120-135 compares GS depth against the engine's scene depth
+improves. Godot's opaque depth buffer is jittered whenever TAA/FSR2 is on, so before this the two sat in different subpixel frames. This is also why the jitter must be taken from scene_data verbatim: a rescaled or negated value would misregister silhouettes instead of fixing them.
+tests/ci/check_gs_pre_upscale_hook.py watches seven literal anchors in render_forward_clustered.cpp; this PR touches none of them and the guard is green.
+3.2 Performance
+The render cache is already disabled at shipped defaults and was never the cost it looked like: _is_per_splat_clip_expected() (render_pipeline_stages.cpp:234-249) returns true whenever per_splat_depth_clip is on — shipped default true (core/gaussian_splat_manager.cpp:1002) — and :2598-2600 then refuses reuse outright for non-painterly frames. Measured rather than inferred: every config in every capture above reported raster_path = other, never cached. The static-camera render cache never engaged once.
+4. Tests, and the proof each one is not vacuous
+4.1 The QA rig — qa_composite_production_defaults, phase 2
+The scene keeps its presence phase unchanged and gains a temporal-stability phase: a 480×270 SubViewport with its own World3D, carrying a deterministic high-contrast splat cluster on the left and a high-frequency checker-textured unshaded box on the right, in disjoint screen rectangles of one frame, swept over {none, taa, fsr2@1.0, fsr2@0.5}. It sets composite/depth_test to the shipped default true for the sweep and restores the project pin afterwards, and the runner already requires config-mutating scenes to run last. Both phases now call _finish_test() when done, so the suite does not pay for the raised test_duration ceiling — the whole scene runs in 11 s.
+Run standalone, both with this PR's rig — the same two .gd files — differing only in which binary renders them: the §2.1 BASE binary (b915afc51c5) and a build of a7e21559f63, which is this PR's head minus comments (see the provenance table in §2.1).
+none
+taa
+fsr2 @1.0
+fsr2 @0.5
+BASE splat px
+0.0000
+0.0000
+0.3052
+0.2219
+AFTER splat px
+0.0000
+0.0209
+0.0929
+0.0614
+mesh control px, BASE → AFTER
+0.0000 → 0.0000
+0.0092 → 0.0092
+0.0029 → 0.0030
+0.0034 → 0.0042
+mesh engage-window Δ LSB
+0.000
+0.190
+3.146
+5.922
+splat / mesh autocorr @ jitter phase
+n/a
+unavailable¹
++1.000 / +1.000
+unavailable¹
+¹ the 16-frame window yields 15 pairs and autocorrelation_at_lag needs 4 overlapping pairs, so the largest usable lag is 11 — below the TAA phase (16) and the FSR2 @0.5 phase (32). The scene records the reason string for those two rather than a number, so "could not be measured" and "measured and came out flat" cannot be confused. Lengthening the window to cover lag 32 would cost this blocking lane ~2.5× for a statistic that is not gated, and that cost is declined in the code.
+BASE verdict: FAIL: … TEMPORAL STABILITY failed: fsr2_100: the splat layer displaces 0.3052 px against its own window mean, over the 0.150 px ceiling, while the in-frame mesh control … displaces 0.0029 px. The splat projection is not carrying the engine's taa_jitter (#929). | fsr2_050: … 0.2219 px …
+AFTER verdict: PASS: … temporal stability OK: none splat=0.0000px mesh=0.0000px, taa splat=0.0209px mesh=0.0092px, fsr2_100 splat=0.0929px mesh=0.0030px, fsr2_050 splat=0.0614px mesh=0.0042px
+The FSR2 mesh-control values, the engage deltas and the autocorrelations repeat to the third digit across the two runs, so in the two configurations the gate actually reads, only the splat layer moved — the single-variable property the rig exists to establish. The TAA mesh control does not repeat that tightly and the sentence here originally over-claimed it: my two runs both read 0.0092 px, but the independent reviewer's reproduction measured 0.0068 px on base and 0.0182 px on final. TAA is reported and not gated, so nothing depends on it; the honest statement is that the TAA control has run-to-run spread of the same order as its own value, and that FSR2 — the gated pair — does not.
+Threshold calibration, every observation. On one RTX 3090 / Vulkan 1.4.325, optimize=speed_trace:
+```
+jitter ABSENT   fsr2_100: 0.3045 0.3066 0.3047 0.3052 0.3041 0.3066 0.3047
+                fsr2_050: 0.2444 0.2347 0.2252 0.2219 0.2172 0.2403
+jitter APPLIED  fsr2_100: 0.0929 0.0929 0.0929 0.0929 0.09286
+                fsr2_050: 0.0542 0.0569 0.0614 0.0570 0.0545
+```
+The last two fsr2_100 entries per row and the last fsr2_050 entries were taken after the stray GPU process was killed, and are indistinguishable from those taken under it — the measurement, not the argument, that this metric does not respond to contention. 0.09286 / 0.0545 come from a CI run on a dev_build binary rather than optimize=speed_trace.
+0.15 px is within 6% of the geometric midpoint of the two nearest neighbours across that whole set (sqrt(0.0929 × 0.2172) = 0.142): 1.61× above every passing measurement and 1.45× below every failing one. The 0.3041 / 0.2252 pair comes from a mutation build that reverts only the jitter, so the defect population is not merely "an older tree". The same numbers, and the instruction to widen rather than delete if another GPU ever reds a correct tree, are in the constant's docblock.
+Which project pins are active here, because this is the QA project and its pins have hidden real defects twice. tests/examples/godot/test_project/project.godot pins composite/depth_test=false, renderer_rd/forward_plus/use_rgba8_framebuffer=true, lighting/indirect_sh_scale=0.0, lighting/shadow_strength=0.0, plus the gpu_sorting block. Phase 2 overrides composite/depth_test to the shipped true for its sweep and restores the pin in _restore_settings(); every other pin stays active, including use_rgba8_framebuffer=true. That last one was the live risk — an RGBA8 internal buffer could plausibly have made FSR2 refuse to run, and a silently-not-running FSR2 leaves a perfectly stable splat region that looks exactly like a perfectly integrated one. It does not: the engage gate measures the mesh control moving by 3.146 and 5.922 LSB in the two FSR2 windows, so the stage demonstrably ran under that pin. That is the gate earning its place rather than a box ticked.
+Three gates run before any displacement is scored, and each fails the scene rather than degrading:
+Rig determinism — with no temporal stage both regions must be bit-identical frame to frame (0.000 LSB mean and max). Measured exactly 0 in every run.
+Region discrimination — hiding the splat node must move the splat rectangle by ≥ 1.0 LSB and the mesh rectangle by ≤ 0.5, and vice versa. Without it both rectangles could be pointing at background and every number below would be noise compared with noise.
+Stage engaged — the mesh control must move during each temporal config's engage window. A viewport that silently refuses TAA or FSR2 leaves both layers perfectly stable, which is indistinguishable from perfect integration; this is Every in-repo painterly test exercises the baseline fallback, not painterly: the test project contains no PainterlyMaterial #997's shape and it is directly reachable here.
+A region whose gradient energy or structure tensor cannot support the 2×2 solve is reported UNMEASURABLE and fails; it is never recorded as 0.0 px, which would read as flawless stability.
+4.2 Unit tests — both in the STRICT [ViewTransform] lane, both without a GPU
+[GaussianSplatting][ViewTransform] Render projection carries the engine TAA jitter (tests/test_view_transform.h), four subcases — zero jitter is bit-identical to the flip-only matrix in all 16 entries (and to the raw matrix with flip_y = false); a non-zero jitter composes exactly as J · (flip · P); the result is a depth-independent NDC translation of exactly +jitter at three depths spanning 0.5 to 100 m, with w unchanged and columns[0][0] / columns[1][1] untouched; and two different phases produce different matrices. It carries its own discrimination check — that the jittered and unjittered matrices differ at all — so a no-op implementation cannot satisfy the equalities.
+The fourth subcase uses an off-axis frustum (set_frustum(2.0, 16/9, Vector2(0, 0.3), …), which writes a non-zero columns[2][1]) and REQUIREs that entry is really non-zero before asserting, per column, that the jitter contribution is exactly +jitter × w_row and that zero jitter is still bit-identical. It exists because the symmetric perspective is precisely the case where the module's single-entry flip and the engine's whole-row flip agree, so on its own it could not pin down what the jitter does for any other projection type. The jitter term is the engine's for all of them; the flip is not, and that divergence is pre-existing, unchanged here, and now named in the docblock rather than papered over (self-review finding 1).
+[GaussianSplatting][ViewTransform] Render cache reuse is refused when only the GPU projection's jitter differs (tests/test_renderer_pipeline.h) — drives OutputCompositor before initialize(), so with p_require_valid_depth = false the two cache functions are pure functions over the cache state and need no RenderingDevice; RIDs come from a local RID_Owner. It asserts reuse is granted for an identical key in both directions before asserting it is refused when only the jitter moves, so it cannot be satisfied by a cache that never grants reuse. It is tagged [ViewTransform] deliberately: [Renderer] is an advisory lane (run_module_tests.py, strict=False) and a fail-closed proof that cannot fail CI is not a proof.
+Lane counts on the same filter (--test-case=*GaussianSplatting*][ViewTransform]* --test-case-exclude=*][RequiresGPU]*): 5 cases / 5 assertions at base → 7 cases / 78 assertions after, 7 passed, 0 failed. The two new cases contribute 73 assertions, so they are not empty shells.
+4.3 Mutation proofs
+Each mutation reverses exactly one production change and leaves the tests in place, so the failure attributes to that change rather than to "something broke". The edits are exact-string patches that refuse to apply unless the anchor is found exactly once — a mutation that silently did nothing cannot be mistaken for "the test still passed". Each is a full optimize=speed_trace rebuild, ~35 s incremental, and the binary's link time was checked before each run.
+Mutation 1 — drop the GPU-projection compare from the reuse key (removes the five added lines in OutputCompositor::can_reuse_cached_render; the jitter itself is still applied).
+```
+[doctest] test cases:  7 |  6 passed | 1 failed | 2121 skipped
+[doctest] assertions: 60 | 57 passed | 3 failed |
+[doctest] Status: FAILURE!
+```
+The failing case is Render cache reuse is refused when only the GPU projection's jitter differs, at all three CHECK_FALSEs — CHECK_FALSE( true ): the cache hands back a frame rendered with a different jitter phase. The jitter case still passes, which is the isolation that makes this a proof of the cache-key change specifically.
+Mutation 2 — make build_render_projection() ignore the jitter (restores the cache key first, then forces the zero-jitter short-circuit to be taken always).
+```
+[doctest] test cases:  7 |  5 passed |  2 failed | 2121 skipped
+[doctest] assertions: 60 | 45 passed | 15 failed |
+[doctest] Status: FAILURE!
+```
+The jitter case fails on the matrix compare, and the failure output is itself the mechanism, printed by doctest:
+```
+CHECK( built == expected ) is NOT correct!
+  values: CHECK( [... Z: ( 0.000000,  0.000000, -1.0005, -1.0) ...]
+              == [... Z: (-0.000521,  0.000463, -1.0005, -1.0) ...] )
+```
+columns[2][0] = −jitter.x and columns[2][1] = −jitter.y for jitter = (0.5/960, −0.25/540) = (0.000520833, −0.000462963) — exactly the two entries a left-multiplied add_jitter_offset writes against a matrix whose w row is columns[2][3] = −1, and nothing else. The differs discrimination check and all six depth-probe assertions fail too.
+The cache-key case also fails under this mutation, at its REQUIRE( gpu_jitter_a != gpu_unjittered ) discrimination guard, because with no jitter applied all three matrices it builds are identical. That is the guard doing its job — refusing to report a pass on a fixture that cannot separate — and it is why mutation 1 is run separately.
+The QA rig on the mutation-2 binary — the same fix-tree source with only the jitter reverted, so this separates "the rig detects the missing jitter" from "the rig detects an older tree":
+```
+config     scale    taa |   splat px    mesh px | splat LSB  mesh LSB |   engage
+none        1.00  false |     0.0000     0.0000 |     0.000     0.000 |    0.000
+taa         1.00   true |     0.0000     0.0092 |     0.000     0.123 |    0.190
+fsr2_100    1.00  false |     0.3041     0.0030 |     0.523     0.208 |    3.146
+fsr2_050    0.50  false |     0.2252     0.0030 |     0.414     0.111 |    5.825
+FAIL: … fsr2_100: the splat layer displaces 0.3041 px … over the 0.150 px ceiling …
+      … fsr2_050: … 0.2252 px …
+```
+0.3041 / 0.2252 px against the base binary's 0.3045 / 0.2347 px: the rig reproduces the defect from a one-line reversal, and the TAA row returns to exactly 0.0000 px — splats bit-stable and unantialiased again — while the mesh control and every engage value stay put.
+The tree was restored and rebuilt afterwards; the restored build's lane is 7/7 again.
+4.4 Everything else
+python tests/ci/run_module_tests.py --guard-only — zero guard failed / FAILED ( lines, ends Guard-only mode complete. Includes check_gs_pre_upscale_hook.py (this PR touches none of its seven anchors) and check_cull_signature_parity.py.
+python tests/ci/run_module_tests.py --godot-binary <the AFTER build> — all 28 lanes PASS, exit 0, 173 s. Nothing regressed. The relevant rows:
+```
+lane=GaussianSplatting [ViewTransform] strict=1 outcome=PASS passed_tests=7  passed_assertions=78    failed_tests=0
+lane=GaussianSplatting [Renderer]      strict=0 outcome=PASS passed_tests=9  passed_assertions=66    failed_tests=0
+lane=GaussianSplatting [SceneTree]     strict=1 outcome=PASS passed_tests=31 passed_assertions=4922  failed_tests=0
+lane=TileRenderer                      strict=0 outcome=PASS passed_tests=11 passed_assertions=2097742 failed_tests=0
+```
+(lane=GPU Memory Stream … ADVISORY-NO-COVERAGE is pre-existing and unrelated to this diff.) The run also re-checked the review-base-relative guards against b915afc51c57: [require-null-deref] PASS 0 new, [size-then-index] PASS 0 new.
+5. Docs
+docs/governance/release-acceptance-bar.md §8.1 gains a #929 residual row scoped to what actually remains. Re-scoped after Splats ghost under TAA/FSR2 in motion: no depth write-back, no motion vectors, no reactive mask (post-#929 residual) #1025 measured the moving-camera case: the trail is TAA-only and ≈1.5 px; under FSR2 there is measurably no ghosting (0.000 frames of staleness at scale 1.0). The row said "TAA or FSR2" until that measurement refuted it — publishing that would have told users to avoid FSR2 for no reason. Workaround is now use_taa = false, Godot's own default.
+§10.1 records the maintainer decision that TAA and FSR2 are inside the alpha envelope. That list said "Forward+, single view" and was silent on the temporal stages, which is what left this issue's disposition undecidable; the decision is what makes the jitter a fix rather than a disclosure.
+§11 item 5 is re-decided. It read "Blocked on the GPU-001: splats absent under viewport scaling and FSR2 with composite depth_test=true (default) — composite writes an already-consumed buffer #921 disposition"; that disposition was made and landed in gaussian_splatting: composite splats at the pre-upscale seam so scaled/temporal viewports present them (GPU-001, Option B) (refs #921) #924, and the claim itself is narrowed by measurement (TAA does not swim).
+docs/architecture/render-pipeline.md — the residual-risk paragraph named three of the four missing temporal inputs. The fourth was the jitter, and it is now described as supplied, with the remaining three still named.
+5.1 Merge-order note
+Two sibling PRs also edit docs/governance/release-acceptance-bar.md — #1020 (widening the alpha envelope to streaming open worlds, which touches §10.1, the same section this adds a bullet to) and #1022. I have not touched either branch. Whichever lands second will need a textual merge in §10.1 and §8.1; the decisions they record are independent (theirs is about streaming, this one is about the temporal stages), so it should be a text merge and not a conflict of substance.
+6. Not in this PR
+Velocity write-back and depth write-back are filed as #1025, labelled needs-adr. The design sketch in that issue has since been partly refuted by its own investigation and should be read with #1025's measurement comment: velocity does not depend on depth write-back (the ladder inverts), it is module-side rather than an engine-boundary R3 change, and the reactive-mask contribution is not missing at all — the composite already supplies it through the destination alpha. What keeps velocity out of the alpha is risk, not cost: a wrong velocity smears confidently.
+7. What still needs human eyes
+This section is a request, not a formality. Everything above is a number. Nobody has yet looked at the two renders side by side and said which one is better, and that judgement is not mine to make.
+Frame captures are on disk on the build machine, 132 PNGs per run: …/scratchpad/929b/cap_base and …/scratchpad/929b/cap_fixed, plus a contact sheet at …/scratchpad/929b/929_contact_sheet.png — one converged FSR2 @1.0 frame from each run beside |frame − window mean| amplified 12×, which is the swim made visible. In that amplified panel the splat foliage streaks across the base frame and goes dark in the fixed one, while the checker box stays equally bright in both, because the mesh control was always correctly jittered and its own reconstruction noise is unchanged. That is the picture the table describes, but somebody has to agree it reads that way on real content.
+Whether the newly antialiased splats look better. Under TAA, splats went from bit-stable-and-aliased to participating in the accumulation. That should be an improvement; it has not been eyeballed.
+The moving camera has now been measured — by Splats ghost under TAA/FSR2 in motion: no depth write-back, no motion vectors, no reactive mask (post-#929 residual) #1025, not by this PR, and after this PR's evidence was gathered. It refuted the prediction this PR inherited: no FSR2 ghosting, ≈1.5 px TAA-only trail, base and this head agreeing to within 0.01 frames. The §8.1 row and render-pipeline.md are corrected to match. Its own visual disposition is likewise open.
+Not measured: MetalFX (macOS only), multiview, Forward Mobile, and any GPU other than an RTX 3090.
+8. Review status
+Two independent passes have now run, neither found a P1. A full independent review of 65132c9e7e9 (reproduced the rig from its own worktree; see §9) and, once its quota returned, a Codex pass on the current head. At the time this section was first written Codex was out of quota until 2026-09-19 13:17 and only a self-review existed; that is no longer the case. The human visual disposition is still outstanding and is a merge precondition (§7).
+The self-review returned five findings, all low; four are fixed in this head and the fifth is answered:
+The flip_y claim was too broad. GS negates columns[1][1]; the engine's set_depth_correction() negates the whole y row. They coincide for a symmetric perspective and diverge for an off-axis frustum offset (Projection::set_frustum writes a non-zero columns[2][1]). That divergence is pre-existing — build_cull_projection() has always done it — but this PR was newly asserting the matrix is the engine's correction. Fixed: the docblock, render-pipeline.md and the test's subcase title now say precisely that the jitter term is the engine's exactly, for every projection type (it depends only on the w row), while the flip is the module's own and named as divergent. The flip itself is deliberately not changed here: it is not part of GPU-001 follow-up: splat projection is unjittered while feeding temporal consumers (TAA/FSR2/MetalFX) — subpixel mismatch vs meshes #929, it would alter rendering for frustum-offset cameras, and it needs its own evidence.
+That claim's test could not fail — the only projection exercised was the symmetric case where the two formulations agree. Fixed: a new subcase builds set_frustum(2.0, 16/9, Vector2(0, 0.3), …), REQUIREs that the divergent entry really is non-zero, and then asserts the jitter contribution per column against the w row, so the claim is pinned on the projection type that would break a wrong one.
+The periodicity diagnostic was structurally uncomputable for two of three configs — a 16-frame window gives 15 pairs and the largest usable lag is 11, while the TAA and FSR2 @0.5 phases are 16 and 32, so both always recorded the -2.0 sentinel while the comment claimed the artifact preserved the attribution. Fixed, by narrowing the claim rather than paying for it: the value is computed only where the window supports the lag, and the other configs record a reason string instead of a number, so "could not be measured" and "measured and came out flat" no longer read the same. Lengthening the window to 40 frames to cover lag 32 would multiply this blocking lane's capture and Lucas–Kanade cost by ~2.5× for a statistic that is explicitly not gated; that cost is declined and the decision is written into the code.
+A real bug, and the worst kind here: a null capture reached mean_grid() as {} and died with "Invalid access to key 'w'" — a SCRIPT ERROR instead of the UNMEASURABLE refusal the file's own header promises must happen. Fixed in mean_grid() and displacement(), both of which now reject a missing grid into the refusal path, with the reason naming a readback failure.
+Threshold headroom is one GPU's worth. Answered rather than changed: 0.15 px is within 4% of the geometric midpoint of the two nearest neighbours across the whole measured set (sqrt(0.0929 × 0.2252) = 0.145), which is 1.61× above every passing measurement and 1.50× below every failing one. Both populations' repeatability is now recorded in the constant's docblock (jitter-absent 0.3045 / 0.3066 / 0.3047; jitter-applied 0.0929 / 0.0929), together with the instruction to widen toward 0.2252 px and record the new measurement if another GPU ever reds a correct tree — not to delete the gate.
+The review also independently refuted a regression it had gone looking for: the legacy post-resolve hook (forward-mobile, multiview, reflection probes) cannot be affected, because true multiview goes through set_multiview_camera() (renderer_scene_cull.cpp:2775) which never sets taa_jitter, and reflection probes likewise.
+CodeFactor reports one notice: can_reuse_cached_render is now a "Complex Method" because this PR adds a tenth guard clause. Declined rather than unfixable — the function is a flat chain of if (cached_x != p_x) return false;, one per cache-key field, and collapsing or extracting them would cost the property that each refusal is individually locatable while changing nothing about the metric's cause. qlty check reports "Build errored" on this PR and on every recent merged PR (#999, #1009), i.e. it is not a signal from this diff.
+Refs #929
+Refs #921
+Refs #1017
+🤖 Generated with Claude Code
+https://claude.ai/code/session_013MbNkf9hckmDJSE3dogs1k
+9. Independent review round 1 — what changed
+Independent review of 65132c9e7e9 returned no P1, and reproduced the rig from its own worktree with its own runs: base fails at 0.3047 / 0.2242 px, final passes at 0.0931 / 0.0547, none exactly 0.0000 on both. Every number landed inside the populations this PR reports. Two P2s and two P3s are addressed below; head is now 78fb8063605.
+P2(1) — the document contradicted itself. Fixed in the text.
+§10.1 stated the rule "an in-envelope defect must be fixed, an out-of-envelope one may be disclosed", and then §8.1 disclosed an in-envelope residual. Both cannot be true as written.
+Reading implemented: the rule keeps its force and gains one narrow, explicitly-stated exception — rather than moving #1025 into §11. The exception requires all four of: the defect is a residual of something already fixed (shipped behaviour strictly better, not merely documented); closing it needs a higher risk class than the fix itself (R3 at the engine boundary, ADR required); a workaround exists and is stated, reachable from default settings; and a named human has accepted it as an alpha limitation, recorded on the issue or the PR.
+Applied to #929: conditions 1-3 hold. Condition 4 does not yet. So the §8.1 row is marked proposed, and the text says in as many words that until that human line exists, #1025 is a §4 blocker and the row is not valid. The §8.1 preamble now also says that a row for an in-envelope, reproduced defect may stand only under that exception and must say so in its cell — one row does today, and it is named.
+I did not make the product call, and this PR does not contain a human decision dressed up as one. The §10.1 envelope bullet now says on its face that it is an agent's transcription of a decision relayed from the maintainer, and that the maintainer's own line on #929 or #1026 is the authoritative record — the review's objection was that a release-scope decision had no human trace, and the fix for that is to label the transcription as one, not to make it look more official. The envelope call and the residual-acceptance call are also separated in the text: only the first has been made.
+A label gap under one branch, which nothing else tracks. #929 carries only program:prod-ready, so the §9 gate never asks about it either. Under the accepted branch that resolves itself — the issue closes and leaves the population. Under the not accepted branch #929 stays open and stays invisible, and #1025 is not a substitute: separate issues, and the gate sees only the labelled one. §11 item 5 now says that declining the acceptance requires labelling #929 at the same time, or the blocker it becomes is one the machine cannot see. Raised by the #1022 author against my item 5; it is mine, so it is recorded there.
+What happens to #929 on merge — the review asked, and §11 item 5 now answers it explicitly. The PR says Refs #929 and never a closing keyword (a closing keyword has already closed a live issue once in this repo), so nothing closes automatically. The one line a human owes is the condition-4 acceptance, and item 5 spells out both branches: accepted → #929 closed by hand on merge, item 5 struck, the row loses its proposed marker, the limitation goes on the known-limitations page; not accepted → #1025 replaces #929 as item 5 and stays in the §4 blocker query, and the §8.1 row is deleted. Either way #929 itself carries no remaining work. Until the line exists, count #929 open, which is what #1020's status line assumes.
+A §8.1 row is not by itself a machine-visible disclosure, and the text now says so, because I checked the gate rather than assuming it:
+required_issue_query.classification_labels_any is ["priority:P0", "priority:P1", "release blocker"] (docs/reference/renderer_release_gate_manifest.json), and _candidate_issue_is_relevant() returns on that list when non-empty (tests/ci/check_renderer_release_gates.py). Splats ghost under TAA/FSR2 in motion: no depth write-back, no motion vectors, no reactive mask (post-#929 residual) #1025 carried only program:prod-ready, so the gate never asked about it at all. I have added priority:P1 to Splats ghost under TAA/FSR2 in motion: no depth write-back, no motion vectors, no reactive mask (post-#929 residual) #1025 — enough to be presented, not enough to be automatically blocking, which is the right split since blocking-ness comes from the bundle's classification.
+An accepted_alpha_limitation also needs a docs_path string-equal to the manifest's known_limitations_page (docs/development/known-public-alpha-limitations.md), checked in _candidate_issue_accepted_limitation_failures.
+And the issue must be in public_alpha_issue_ledger.tracked_issues, which today holds only Audit P0: make render route, fallback, and stage failure contracts explicit #351/Audit P0: close GPU resource leaks and shutdown lifetime hazards #352/Audit P3: define and enforce public alpha release acceptance gates #360/Audit P0: repair opaque qlty check failures blocking renderer PRs #369. That is an R3 manifest edit and is deliberately not in this PR; it is being recorded with the rest of the envelope-widening mechanism in docs: widen the public-alpha envelope to streaming open worlds rather than narrow its gate (#1016) #1020. So Splats ghost under TAA/FSR2 in motion: no depth write-back, no motion vectors, no reactive mask (post-#929 residual) #1025 cannot yet be classified as an accepted limitation even if a human accepts it — which is the fail-closed direction, and is now written down.
+And a fourth condition the other three depend on, surfaced by Codex on docs: widen the public-alpha envelope to streaming open worlds rather than narrow its gate (#1016) #1020 and verified here before recording it: the gate cannot tell whether it was shown every issue. _validate_candidate_issues iterates only the rows in --issues-json; check_renderer_release_gates.py contains no GitHub API call at all — its whole import list is argparse, datetime, fnmatch, hashlib, importlib.util, json, math, re, subprocess, sys, pathlib, typing, so a live query cannot happen without adding a dependency, which constrains the fix to "generate in-workflow and bind to the run"; and the sole omission check, _validate_omitted_manifest_blockers, iterates manifest_classifications, so it catches a missing manifest-tracked blocking entry and nothing else. A truncated or empty snapshot therefore passes. Requiring --issues-json to be a separate file stops a bundle certifying itself; it does not detect omission. Until Generate the candidate evidence bundle in-workflow: a stable tag currently fails closed on a file nothing produces #961 generates the snapshot from a live in-workflow query, any classification means "the gate was shown this and accepted it", never "the gate saw everything". §10.1 now says so, because it bounds what the §8.1 row is worth.
+Credit for the label gap goes to the #1022 author.
+P2(2) — semantic clash with #1022. Agreed wording, in writing, with its author.
+#1022's new known-public-alpha-limitations.md says #929 "is in the blocker set, not the accepted set, and this page does not list blockers", which this PR's §8.1 row contradicts. Merge order is #1020 → #1026 → #1022 rebased, so this row must survive and #1022 must absorb it.
+I contacted the #1022 author directly rather than leaving it to merge time. Agreed:
+They are deleting the "GPU-001 follow-up: splat projection is unjittered while feeding temporal consumers (TAA/FSR2/MetalFX) — subpixel mismatch vs meshes #929 is in the blocker set" block and replacing it with a Splats ghost under TAA/FSR2 in motion: no depth write-back, no motion vectors, no reactive mask (post-#929 residual) #1025 entry, taking my paragraph verbatim so the two documents cannot drift on substance — they add only their page's Status: convention, and attribute the measurement to this PR rather than re-claiming it.
+The docs_path string is docs/development/known-public-alpha-limitations.md. This PR's §8.1 row now links that page; the machine-readable docs_path belongs in the evidence bundle, not in this markdown table, so I have not invented a column for it.
+They are re-counting docs: widen the public-alpha envelope to streaming open worlds rather than narrow its gate (#1016) #1020's §11 status line anyway (it was already stale for an unrelated reason) and will phrase it so the GPU-001 follow-up: splat projection is unjittered while feeding temporal consumers (TAA/FSR2/MetalFX) — subpixel mismatch vs meshes #929 disposition reads as a human call not yet made, rather than baking in either answer. I have not touched their branch.
+They will rebase docs: state the alpha's API promise, its real limitations, and fix docs the code contradicts (#1010, #1011, #1013) #1022 onto this and carry the row's substance through the §8.1 → pointer replacement.
+Both P2s are therefore resolved as text that no longer contradicts itself, with the product decision left where it belongs.
+P3(1) — reuse cost where the cache is live: measured, not asserted.
+The review was right that §3.2 argued cost ≈ 0 from the shipped-default path and never took the number the plan's step 2 asked for. Taken now — and then retaken, because the first measurement was contaminated (see the note at the top of the table).
+These figures were re-measured on 2026-09-20 and the delta moved. A stray godot.head.exe from 2026-09-16 had been holding the GPU on this machine for three days; it was killed on 2026-09-20. Every timing number taken here before that is suspect, so all of them were retaken on the quiet machine and the table below is the quiet-machine set. The pixel and displacement measurements everywhere else in this PR are deterministic frame comparisons and are unaffected — as is the cached / other structural result below, which is a count, not a time. The superseded figures were +2.11 ms (0.798 → 2.912) against +1.87 ms (0.905 → 2.772) now; the conclusion did not change and its margin got tighter.
+Configuration: the same real scan (31,208 splats, 960×540 SubViewport, static camera), optimize=speed_trace, RTX 3090, vsync off (without that every number is the monitor), 240 timed frames per config after a 40-frame settle, raster_path sampled every 8th frame across the window rather than once. Six samples per binary per config, taken under the shared heavy lock with CI idle and no other GPU process on the box.
+With the relief valve OFF (composite/per_splat_depth_clip = false) — the only shipped way to make static-camera reuse live:
+config
+BASE ms/frame
+BASE raster
+AFTER ms/frame
+AFTER raster
+no temporal stage
+0.680–0.955 (mean 0.804)
+cached 30/30
+0.692–0.954 (mean 0.851)
+cached 30/30
+FSR2 @1.0
+0.759–1.176 (mean 0.905)
+cached 30/30
+2.735–2.881 (mean 2.772)
+cached 0/30
+At SHIPPED DEFAULTS (per_splat_depth_clip = true) — the control:
+config
+BASE ms/frame
+BASE raster
+AFTER ms/frame
+AFTER raster
+no temporal stage
+2.612 / 2.613
+cached 0/30
+2.605 / 2.624
+cached 0/30
+FSR2 @1.0
+2.737 / 2.780 (mean 2.758)
+cached 0/30
+2.745 / 2.774 (mean 2.760)
+cached 0/30
+At shipped defaults the two binaries are indistinguishable — 2.758 vs 2.760 ms under FSR2, 2.613 vs 2.615 with no temporal stage. The cache never engages on either, exactly as §3.2 claimed; that claim is now measured on both sides rather than argued from one code path.
+Three things follow, and the first is the one that matters:
+The base binary's "cheap" FSR2 row is the defect, not a baseline. cached 30/30 under FSR2 means the raster never re-ran while the Halton phase advanced — one frozen jitter phase re-composited every frame, for as long as the camera stays still. That is precisely what the cache-key change exists to stop. The comparison is not "0.9 ms versus 2.8 ms", it is "0.9 ms for a wrong image versus 2.8 ms for a right one".
+The cost is real and bounded: +1.87 ms/frame (0.905 → 2.772 mean) in that configuration, on this scene. Worst pairing across the samples is +2.12 ms, best is +1.56 ms. The spread is almost entirely on the cached side, which is a sub-millisecond path dominated by CPU and present jitter (0.759–1.176, 55%); the re-raster side is steady (2.735–2.881, 5%).
+It is not a new cost, it is the shipped-default cost reappearing. The relief-valve-off AFTER figure (2.772 ms) and the shipped-default figure (2.758 / 2.760 ms) agree to within 0.5%: turning the valve off no longer buys a static-camera saving under a temporal stage, so that configuration now performs as the shipped default already does. Nothing got slower than the product's own baseline; one opt-out stopped paying off, and it was only paying off by serving a stale frame.
+With no temporal stage the key change is inert — cached 30/30 on both binaries, and the spread within each binary is larger than the gap between them. That is what the zero-jitter short-circuit guarantees, now measured rather than argued.
+docs/architecture/render-pipeline.md now states the behaviour and these numbers; neither it nor the setting's docstring said that static-camera reuse is unavailable under a temporal stage.
+P3(2) — "identical to the digit" over-claimed. Softened.
+The reviewer's TAA mesh-control values were 0.0068 / 0.0182 px against my 0.0092 / 0.0092, while the FSR2 mesh values did repeat to the third digit on both. §4.1 and §2.1 now say that the FSR2 control repeats and that the TAA control has run-to-run spread of the same order as its own value. TAA is reported and not gated, so nothing depends on it.
+P3(3) — gate 1 fires on any non-determinism, not only on swimming.
+No change requested and none made; recording the reviewer's point that the exact-zero determinism gate certifies determinism only under the QA project's sort pins, so a future red there should be read as "something in the GS pipeline became frame-variant with no temporal stage", which is what its message says.
+Still open, and not mine to close
+The human visual pass. No human has looked at the frames. R2's real-scan visual validation and the review policy's human disposition make that a merge precondition; §7 names the captures and the contact sheet. The reviewer explicitly declined to wave it through from numbers, and so do I.
+Codex pass — ran, clean, but thinner than its verdict suggests
+Codex quota returned (it was exhausted until 2026-09-19 13:17), so the owed second independent pass has now run: codex exec -s read-only, gpt-5.6-terra, reasoning effort high, on the range b915afc51c5..c340b2512c4 from the head worktree. It was asked five numbered questions — jitter composition vs RenderSceneDataRD::get_cam_projection() and Projection::add_jitter_offset; whether any path now gets a jittered projection that should not (shadow, reflection probes, multiview, forward-mobile, the legacy post-resolve hook); completeness of the cache-key call-site update; whether the two new C++ cases could pass against a no-op; and anything in the GDScript that can crash, hang, or report a pass having measured nothing — and told to say plainly if it found nothing in a category.
+Verdict returned: no correctness findings; git diff --check clean; no build or tests run.
+What that is worth, stated rather than assumed. I checked its own trace before reporting it as a pass, because a clean Codex answer has been wrong here before by not having started:
+It did run on the correct range and read the diff — the log is 9,300 lines and contains the diff hunks.
+It did cover question 3: its searches include rg -n "build_render_projection|render_projection|can_reuse_cached_render\(|update_render_cache_signature\(" across *.{cpp,h}, which is exactly the call-site sweep that question asked for.
+It did not visibly cover questions 1 and 2. Its greps are scoped to the module and the tests; the log shows no read of core/math/projection.cpp, servers/rendering/renderer_rd/storage_rd/render_scene_data_rd.cpp or renderer_scene_render_rd.cpp, and every mention of add_jitter_offset / set_depth_correction in the log comes from the diff text itself rather than from opening the engine sources. It also did not answer the five questions individually as instructed.
+So I am recording it as: a second independent pass that ran on the right head and found nothing, whose coverage of the engine-boundary questions is not evidenced in its own trace. It corroborates; it does not discharge those two questions on its own. The Claude independent review above is the stronger signal for them — it read render_scene_data_rd.cpp:39-46, projection.cpp:931-934, renderer_scene_render_rd.cpp:1547 and renderer_scene_cull.cpp:2776 explicitly, chased the multiview path as a suspected regression and refuted it, and reproduced the rig from its own worktree.
+Two independent passes, no P1 between them.
+chatgpt-codex-connector
+Bot
+commented
+Sep 17, 2026
+Copy link
+Copy Markdown
+You have reached your Codex usage limits for code reviews. You can see your limits in the Codex usage dashboard.
+klausi3D
+mentioned this pull request
+Sep 17, 2026
+GPU-001 follow-up: splat projection is unjittered while feeding temporal consumers (TAA/FSR2/MetalFX) — subpixel mismatch vs meshes
+#929
+Closed
+klausi3D
+force-pushed
+the
+gs/929-jitter-splat-projection
+branch
+from
+c07fb97 to
+65132c9
+Compare
+September 17, 2026 21:46
+This was referenced Sep 18, 2026
+docs: widen the public-alpha envelope to streaming open worlds rather than narrow its gate (#1016)
+#1020
+Merged
+docs: state the alpha's API promise, its real limitations, and fix docs the code contradicts (#1010, #1011, #1013)
+#1022
+Merged
+klausi3D
+commented
+Sep 18, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Independent review of 65132c9e7e9 against base b915afc51c5 (diff-only; no code changed, nothing pushed)
+Verdict: no P1. The fix is sound and the evidence holds up under independent reproduction. Two P2s, both governance/docs, need a human sentence before merge; three P3s are optional.
+Line numbers below are at the PR head unless the file is untouched by the PR.
+What I verified, and how
+Correctness of the jitter (space, sign, scale, scope).
+Projection::add_jitter_offset writes columns[3][0] += x; columns[3][1] += y on the correction matrix (core/math/projection.cpp:932-935). Left-multiplying it (gaussian_splat_renderer.cpp:619-620) gives columns[j][0] += jx * columns[j][3], i.e. an NDC translation of exactly +jitter at every depth, with columns[0][0]/[1][1] untouched. That is the same composition as RenderSceneDataRD::get_cam_projection() (render_scene_data_rd.cpp:40-46, J * D * P); in both the flip precedes J, so the y-term sign agrees. FSR2 is handed taa_jitter * internal_size * 0.5 (render_forward_clustered.cpp:2699, :2713) and un-jitters by it (thirdparty/amd-fsr2/shaders/ffx_fsr2_common.h:433). Every citation in the docblock (gaussian_splat_renderer.h:1759-1804) resolves to the line it names.
+Binning computes screen_pos from the full matrix (shaders/tile_binning.glsl:541-558) and focal lengths from [0][0]/[1][1] only (:567-568); tile_render_stages.cpp:251-262 derives forward and inverse from the same render_projection; near/far come from the unjittered projection (:278-279); tile_resolve.glsl:187, :276, :305 now reconstruct GS and scene positions with a consistently jittered pair. Nothing on the host reads render_projection except the debug-only is_same() log at render_pipeline_stages.cpp:2318-2325.
+Single producer. build_render_projection() is called once, in render_scene_instance() (gaussian_splat_renderer.cpp:2430-2434). The shadow pass builds both projections locally and calls render_sorted_splats(nullptr, ...) (:2007-2013, :2021) — untouched, confirmed. The legacy post-resolve hook (renderer_scene_render_rd.cpp:1547) only runs when the pre-upscale hook did not (render_forward_clustered.cpp:2673: multiview or reflection probe); multiview goes through set_multiview_camera() (renderer_scene_cull.cpp:2776) which carries no jitter, and single-view XR takes the pre-upscale hook. So no route composites jittered splats after a resolve.
+Zero-jitter short-circuit (gaussian_splat_renderer.cpp:606-612): Vector2::operator== is exact; scene_data->taa_jitter is assigned only under p_jitter_phase_count > 0 (renderer_scene_cull.cpp:2681-2697), and the count is 0 unless temporal scaling or TAA is on (renderer_viewport.cpp:252-260). No multiply is performed, so the non-temporal matrix is the pre-PR matrix by construction. My none rows measured 0.000 LSB / 0.0000 px on both binaries (below).
+The cache key. Exactly two production call sites (render_pipeline_stages.cpp:1909-1914, :2604-2608); both pass render_projection from the same RasterStage input, populated at :1797 from RenderFrameContext::render_projection (:1064) — the matrix that was uploaded. The parameter has no default (output_compositor.h:147-159), the compare is exact (output_compositor.cpp:183-185), and the signature is written back at :218. A jittered frame cannot be served from an entry written under a different phase. Strict-lane proof: I ran --test-case=*GaussianSplatting*][ViewTransform]* --test-case-exclude=*][RequiresGPU]* on the author's binaries — base 5 cases / 5 assertions, final 7 / 78, all passing. [ViewTransform] is strict=True at tests/ci/run_module_tests.py:144.
+Evidence integrity — reproduced, not accepted. I created my own worktree of the head (Z:/wt-rev929 at 65132c9), confirmed a7e2155..65132c9 is comment-only in both changed test files (so Z:/wt-929-bin/final, linked 23:42, is code-equivalent to the head), and ran qa_composite_production_defaults.tscn standalone from that worktree with the base and final binaries under the shared heavy lock, CI idle, RTX 3090:
+none
+taa
+fsr2 @1.0
+fsr2 @0.5
+verdict
+BASE splat px
+0.0000
+0.0000
+0.3047
+0.2242
+rc=1 FAIL, both FSR2 rows over 0.15
+FINAL splat px
+0.0000
+0.0209
+0.0931
+0.0547
+rc=0 PASS
+mesh control px, BASE / FINAL
+0.0000 / 0.0000
+0.0068 / 0.0182
+0.0030 / 0.0029
+0.0023 / 0.0041
+mesh engage LSB, BASE / FINAL
+0 / 0
+0.158 / 0.213
+3.354 / 3.447
+6.012 / 5.568
+stage ran under use_rgba8_framebuffer=true
+Every number lands inside the populations the PR reports (defect 0.2219–0.3066, pass 0.0542–0.0929). No SCRIPT ERROR in either log; both runs took 11 s. CI on this head agrees: GPU QA Tests, GPU Harness + Visual Gate, Module Build + Runtime Harness and Guards are all green.
+Does the 0.15 px threshold discriminate, or merely separate two numbers? It discriminates on this hardware, and the two sides are anchored differently: the failing side is driven by the engine's Halton amplitude (up to ±0.5 px at render resolution), the passing side by FSR2's own reconstruction noise for a layer with no depth/velocity/reactive input. It is still one GPU's worth of headroom (1.6×), and a partial jitter (~half magnitude) would sit near the boundary — which is exactly what the strict unit test's exact built == expected compare (test_view_transform.h:381) pins. The two are complementary; neither alone would do. Ways the rig cannot be fooled that I checked: a splat layer that bypasses the temporal stage (e.g. composited post-resolve) reads as a flat region and hits the gradient-energy refusal (qa_subpixel_swim.gd:193-198), so "stable because absent" fails rather than passes; the render-cache regression is invisible to the rig at QA pins (reuse is refused at render_pipeline_stages.cpp:2598-2600 because per_splat_depth_clip defaults true) and is caught by the strict [ViewTransform] cache case instead (test_renderer_pipeline.h:5325-5405).
+Pins the rig relies on (tests/examples/godot/test_project/project.godot): composite/depth_test is overridden to the shipped true at qa_composite_production_defaults.gd:589 and is read per frame (render_pipeline_stages.cpp:215, :731; output_compositor.cpp:1651), so the override is real. Everything else stays pinned: use_rgba8_framebuffer=true, lighting/indirect_sh_scale=0.0, lighting/shadow_strength=0.0, the whole gpu_sorting/* block (incl. enable_tie_breaker=true, key_bits=64), instance_pipeline/enabled=true. The baseline compare iterates baseline keys only (tests/ci/run_baseline_qa.py:1270), so the new swim_* metrics need no baseline change and the existing composite_* pins are untouched.
+Guards on the head worktree: run_module_tests.py --guard-only — 0 guard failed / FAILED ( lines; [cull-signature-parity] PASSED; GS pre-upscale composite hook guard passed; [require-null-deref]/[size-then-index] 0 new relative to b915afc51c57; ends Guard-only mode complete.
+Policy. scripts/agentic/classify_change.py --base-ref b915afc51c5 → R2 via renderer/**; the four interfaces/** files classify R1 (the #1017 misclassification). The PR treats them as R2 and the GPU evidence covers them, so nothing here leans on the misclassification.
+Findings
+P2 — docs/governance/release-acceptance-bar.md:236-244, :166, :320-331: two release-scope decisions are recorded with no human trace, and the PR's own rule contradicts one of them. :236-244 records "Decided: in." for TAA/FSR2 and states the rule "an in-envelope defect must be fixed, an out-of-envelope one may be disclosed" (:238-239). :166 then discloses the in-envelope moving-camera residual (#1025) under §8.1 as "Scoped down, not waived", while :320-331 keeps #929 in the §11 blocker list as item 5. By the rule at :238-239, an in-envelope residual is a §4.1 blocker unless a human accepts it as a limitation — and neither #929's comments nor this PR carries a human-authored line making either decision (the #929 assessment lists it as "decision points for the maintainer", question 1; the follow-up comment asserting the decision is agent-generated like the rest). Confirm by: the maintainer posting one line here stating (a) TAA and FSR2 are in the alpha envelope, and (b) whether #1025 is an accepted alpha limitation (then it belongs in §8.1 and on the known-limitations page, and #929 closes on merge) or an alpha blocker (then #1025 replaces #929 as §11 item 5). The PR says Refs #929; it should also say what happens to #929 when this merges.
+P2 — merge hazard with #1020 and #1022, semantic not textual. A three-way git merge-tree of this head with #1020's head (97fbc6538e1) produces zero conflict markers: #1020's §10.1 edits sit at base lines 222-223 / after 238, this PR's bullet is inserted after base line 234, and they are separated by unchanged lines, so git merges them silently. The real overlap is in meaning: #1020 rewrites the §11 status line to "7 fixed or closed, 4 open" and this PR reclassifies item 5 as half-fixed — the count stays right only if #929 remains open, i.e. only once the P2 above is answered. Worse, #1022 introduces docs/development/known-public-alpha-limitations.md with a block that says #929 "is in the blocker set (acceptance bar §11), not the accepted set, and this page does not list blockers" (#1022 diff, that file, lines 190-195). After this PR the #929 residual is a §8.1 accepted limitation, and §9.1 requires an accepted_alpha_limitation to carry a docs_path equal to that page. The files are disjoint, so no merge tool will flag it: whichever of #1022 / this PR lands second must add the #929-residual section to that page and drop the "not listed here" note. Confirm by reading the merged tree, not the merge result.
+P3 — performance trade-off where reuse is live is asserted, not measured, and not documented. §3.2 argues cost ≈ 0 because reuse is already refused at shipped defaults (render_pipeline_stages.cpp:2598-2600). With per_splat_depth_clip=false — the documented relief valve at :2596-2597 — a static camera under TAA/FSR2 now re-rasters every frame, because the Halton phase changes the key every frame (output_compositor.cpp:183-185). That is the correct behaviour, but #929's plan step 2 asked for the frame-time delta in exactly that configuration and it was not taken, and neither render-pipeline.md nor the setting's docstring says that static-camera reuse is unavailable under any temporal stage. One sentence in docs/architecture/render-pipeline.md (and a number if cheap) closes it.
+P3 — gate 1 is exact-zero determinism (qa_composite_production_defaults.gd:835-841) and will red on unrelated non-determinism. Any future frame-to-frame variation in the GS pipeline with no temporal stage (adaptive budgets, async sort convergence) fails this scene with a determinism message, not a swim message. That is fail-closed and it names its reason, so no change requested — recording that it certifies determinism only under the QA project's sort pins, so a future red is read correctly.
+P3 — "identical to the digit" over-claims for TAA. §4.1 says the mesh control was identical across BASE and AFTER; my TAA mesh values were 0.0068 vs 0.0182 px (the author's 0.0092 / 0.0092), while the FSR2 mesh values did repeat to the third digit. TAA is not gated, so no consequence; soften the sentence to the FSR2 rows.
+What I could not check
+The two mutation proofs were not rebuilt (C: cannot link; a mutation build on Z: was not worth the runner time). The doctest failure text in §4.3 is consistent with the algebra above, and the rig's red on the base binary is the runtime analogue.
+No human has looked at the frames. §7 of the PR says so; R2's "real-scan visual validation" and the review policy's human disposition make that a merge precondition, not something a reviewer can wave through from numbers.
+Moving camera, other GPUs, MetalFX, Forward Mobile: unmeasured by anyone, as the PR states.
+CodeFactor / qlty reds: I did not verify qlty's history on gaussian_splatting: make the painterly viewport composite reachable, colour-correct and depth-correct (#986, #987) #999/gaussian_splatting: resubmit a GaussianSplatWorld3D when the assigned world resource's payload changes (#862) #1009 myself.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_013MbNkf9hckmDJSE3dogs1k
+klausi3D
+mentioned this pull request
+Sep 19, 2026
+Splats ghost under TAA/FSR2 in motion: no depth write-back, no motion vectors, no reactive mask (post-#929 residual)
+#1025
+Open
+klausi3D
+added a commit
+that referenced
+this pull request
+Sep 19, 2026
+docs: correct what the candidate gate actually enforces, and name the…
+…
+1bc4d2e
+```
+… real cost of widening (#1016)
+
+Independent review found two P1s. Both are cases of this document describing a
+stricter gate than the one that runs, which is the failure mode the bar itself
+calls blocking under section 4.2. Every claim below was re-verified against the
+validator before the text changed. The widening decision is unchanged.
+
+P1(a): open_world_proof is integrity-only. The ADR said all three requirements
+"must run and pass". _validate_candidate_artifact_group (:1050-1065) runs the
+required-field, hash, commit and mtime checks and nothing else - no validator
+opens any artifact. The manifest already said so about itself
+(workflow_blocking_behavior_machine_enforced: false at :320-324; "open-world
+proof must be blocking rather than advisory" under documented_non_enforced_rules
+at :260-264).
+
+Reproduced here: a bundle identical to the ADR's passing Run B except that
+open_world_proof points at the repository's README.md, with a correct digest,
+exits 0 with NO failures. README.md is accepted as open-world proof. My own Run B
+passed partly for this reason - its artifacts were synthetic files - and section
+2 now says so instead of letting the run imply more than it showed.
+
+So section 4.3 now distinguishes the two content-validated benchmark lanes from
+the one hashed file, and states plainly that the open-world obligation is
+human-enforced: #961 must point the group at real corridor output and the signer
+must confirm it, because the gate will not catch a substitution. Section 6's
+reason 1 no longer cites disallow_open_world_advisory_only as machinery an option
+would have to defeat; it is a documented-not-enforced rule, and the argument is
+restated on what it actually is - a written intent, plus two lanes that ARE
+content-checked.
+
+P1(b): the cost section named three issues; the real number is 37. A
+bundle-supplied accepted_alpha_limitation or deferred fails unless the issue is
+in the manifest's own ledger (:1918-1926), and blocking always fails
+(:1793-1799). So the bundle cannot classify anything: an open relevant issue must
+be closed or ledgered, and ledgering is an R3 manifest edit. Measured 2026-09-19:
+2 open P0 (#182, #184), 35 open P1, 4 release-blocker-labelled (#1010, #1011,
+#1012, #1016) - 37 distinct. The old claim was wrong twice: #351 and #352 closed
+in June, and the requirement was never about three issues. New section 5.5 states
+it as the largest single cost of the alpha.
+
+The same section records the gap in the other direction: the four defects section
+11 still calls alpha blockers are invisible to that population. #929 carries only
+program:prod-ready; #851/#833/#54 are priority:P2; #1025 and #1030 are
+unlabelled. The bar's blocker set and the machine's are disjoint sets.
+
+P2s, all verified:
+
+- Section 10's table called the alpha's gate "Human sign-off" and made section
+  4.2 v1.0-only, while this ADR's central obligation rests on 4.2. Both rows
+  corrected, with the reasoning that this is a correction to machinery that
+  already ran, not a raised bar.
+- Section 11 recount: #930 closed FIXED by #999, so 8 fixed / 4 open / 0 refuted.
+  The "#930 is refuted only while #986 stands" and "whoever fixes #986 must land
+  the decode" paragraphs are discharged, not deleted. Items 4, 6 and 7 now say
+  "fixed on master" inline like items 1-3, instead of describing closed defects
+  in the present tense. Item 5 is left untouched - #1026 rewrites it.
+- Run A/B bundles are not attached, so section 2 now says so and gives the
+  reproduction recipe rather than asserting an unreproducible result.
+
+P3s: the selector accepts channel OR tag, not both (:900-910); visual acceptance
+is per benchmark-lane row, not per bundle, and also checks
+capture_threshold_pass_count and visual_reference_match (:1598-1630); the boxed
+note now says #351/#352 are already closed and need resolved_manifest_issues
+rows; section 7.1's section list aligned with what the PR touches; section 5.1's
+open question answered (benchmark_latest.json:25 carries a city_flyover row, so
+performance/index.md is right and benchmark-suite.md:300 is the stale line);
+section 11 no longer offers "record as an accepted limitation" as an equal
+alternative to un-quarantining a streaming QA scene - a switched-off scene cannot
+satisfy the limitations page's evidence bullet.
+
+Nothing here lowers a threshold, removes a blocker or relaxes a gate. Two of the
+changes make the documented bar stricter by correcting it upward.
+
+Refs #1016
+Refs #961
+Refs #963
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013MbNkf9hckmDJSE3dogs1k
+```
+klausi3D
+force-pushed
+the
+gs/929-jitter-splat-projection
+branch
+2 times, most recently
+from
+c340b25 to
+e280274
+Compare
+September 19, 2026 15:54
+klausi3D
+commented
+Sep 19, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Review round 1 addressed. Head is now e2802744905; the delta from the binary all the GPU evidence was taken on (a7e21559f63) is comments and docs only — git diff a7e21559f63 HEAD -- modules/ tests/examples/ has no non-comment line, so none of the measurements need retaking.
+Thank you for reproducing the rig rather than reading it. Your numbers (base 0.3047 / 0.2242, final 0.0931 / 0.0547, none exactly 0) landing inside my populations from a separate worktree is worth more than anything I could have added to the PR body.
+P2(1) — self-contradiction. Fixed in the text; reading implemented: the rule keeps its force and gains one explicitly-stated exception. §10.1 now states the rule, then the exception, which requires all four of: residual of something already fixed; remainder is a higher risk class than the fix (R3/ADR); stated workaround from default settings; and a named human accepting it. #929 meets 1-3; condition 4 is not met, so the §8.1 row is marked proposed and the text says #1025 is a §4 blocker until that line exists. The §8.1 preamble now also says an in-envelope reproduced defect may sit there only under that exception and must say so in its cell.
+Your sharper point — that the envelope decision itself had no human trace — is handled by labelling it as what it is rather than dressing it up: the bullet now says on its face that it is an agent's transcription of a decision relayed from the maintainer, and that the maintainer's own line is the authoritative record. The envelope call and the residual-acceptance call are also separated in the text; only the first has been made.
+#929 on merge — §11 item 5 now answers it. Refs, never a closing keyword, so nothing closes automatically; both branches are spelled out (accepted → #929 closed by hand, item 5 struck; not accepted → #1025 replaces #929 as item 5). Until then, count #929 open.
+A §8.1 row turned out not to be a machine-visible disclosure at all, which your finding led me to. Verified in the gate: classification_labels_any is ["priority:P0", "priority:P1", "release blocker"] and _candidate_issue_is_relevant() returns on it, so #1025 — carrying only program:prod-ready — was never presented to the gate. I have added priority:P1. It also needs a docs_path equal to known_limitations_page, and an entry in public_alpha_issue_ledger.tracked_issues (today [351, 352, 360, 369]) — an R3 manifest edit deliberately not in this PR. So the row is necessary but not sufficient, and §10.1 now says so. Credit to the #1022 author for spotting the label gap.
+P2(2) — agreed in writing with the #1022 author, not left to merge time. They are deleting the "#929 is in the blocker set" block and taking my paragraph verbatim for a #1025 entry; docs_path is docs/development/known-public-alpha-limitations.md (my row now links it in prose — the machine-readable key belongs in the evidence bundle, not in a markdown table); they are re-counting #1020's §11 status line themselves and will phrase the #929 disposition as an unmade human call. I touched neither branch.
+P3 — reuse cost: you were right that I argued it instead of measuring it. Measured now, same scene, vsync off, 240 timed frames per config, two runs per binary, plus a control I added because the first result invites a wrong reading:
+BASE
+AFTER
+per_splat_depth_clip=false, no temporal
+0.740–0.910 ms, cached 30/30
+0.772–1.015 ms, cached 30/30
+per_splat_depth_clip=false, FSR2 @1.0
+0.785–0.821 ms, cached 30/30
+2.898–2.922 ms, cached 0/30
+shipped defaults, FSR2 @1.0
+2.896 / 2.936 ms, cached 0/30
+2.910 / 2.935 ms, cached 0/30
++2.11 ms/frame in that configuration — and the control says it is not a new cost: the relief-valve-off AFTER figure (2.912 ms mean) is the shipped-default figure (2.916 / 2.923 ms, indistinguishable between the two binaries). The base row's cheapness was the raster never re-running while the Halton phase advanced, i.e. the defect itself. render-pipeline.md now states both the behaviour and the number; neither it nor the setting's docstring did.
+P3 — "identical to the digit": softened, and your figures are quoted in the PR body. The FSR2 control repeats to the third digit; the TAA control does not, and your 0.0068 / 0.0182 against my 0.0092 / 0.0092 is the evidence for saying so. TAA is reported and not gated.
+P3 — gate 1: no change, recorded as you framed it.
+Codex. Its quota returned today, so the owed second pass has run on this head (gpt-5.6-terra, read-only, high effort): no correctness findings. I checked its trace before reporting that, and it is thinner than its verdict — it covered the call-site sweep explicitly, but its greps never opened core/math/projection.cpp, render_scene_data_rd.cpp or renderer_scene_render_rd.cpp, so it does not discharge the engine-boundary questions; your review remains the stronger signal there. It is recorded that way in §9 rather than as a clean bill.
+Still yours, not mine: the human visual pass. I have not treated your "not something a reviewer can wave through from numbers" as anything other than binding.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_013MbNkf9hckmDJSE3dogs1k
+klausi3D
+added a commit
+that referenced
+this pull request
+Sep 19, 2026
+docs: re-measure the ledger cost after #1025 was labelled, and record…
+…
+cbeb37c
+```
+… the label remedy
+
+The #1026 author added priority:P1 to #1025 today, in response to the
+gate-invisibility finding this ADR records. Two consequences, both re-measured
+rather than estimated:
+
+- The open gate-relevant set is now 38, not 37 (2 P0, 36 P1, 4 release-blocker,
+  after overlap). The count moved because a real in-envelope defect became
+  visible to the gate, which is the change section 5.5 asks for - so the number
+  went up for a good reason. Both places that quote it now say it moves and tell
+  the reader to re-query; the binding statement is the rule, not the integer.
+
+- #1025 is no longer in the list of alpha-relevant defects the gate cannot see.
+  That list is now #929, #851, #833, #54 and #1030. The ADR and section 9.1 both
+  record #1025's relabel as the remedy applied once, so the remaining five are
+  not read as unfixable.
+
+Refs #1016
+Refs #1025
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013MbNkf9hckmDJSE3dogs1k
+```
+klausi3D
+added a commit
+that referenced
+this pull request
+Sep 19, 2026
+docs: record the TAA/FSR2 motion residual and the get_statistics cras…
+…
+0182d92
+```
+…h, and stop claiming machine enforcement the gate does not do (#1011)
+
+Independent review found three omissions and a promise the page cannot keep.
+All verified before writing.
+
+#1025 - moving-camera ghosting under TAA/FSR2 - is real on master today, in the
+alpha envelope, and appeared nowhere: not on this page, not in bar section 11.
+The page instead carried a callout saying #929 "is in the blocker set, not the
+accepted set", which #1026 overturns by splitting #929 into a fixed
+static-camera half and this residual. That callout is replaced by a #1025 entry.
+
+The wording is taken verbatim on the substance from #1026's section 8.1 row, by
+agreement with its author, so the disclosure and the disposition cannot drift.
+The measured static-camera figures (0.2525 -> 0.0900 px at FSR2 scale 1.0,
+0.3603 -> 0.0927 px at scale 0.5) are attributed to #1026 rather than claimed
+here.
+
+The entry is marked PROPOSED, not accepted. #1025 is in-envelope, so under
+section 4.1 it is a blocker until a named human accepts it, and no such line
+exists yet; #1026 marks its own row proposed for the same reason. The entry also
+warns that a ledger entry is required before the classification can pass the
+gate at all - an accepted_alpha_limitation supplied by the bundle fails unless
+the issue is in public_alpha_issue_ledger.
+
+#1030 - GaussianSplatNode3D.get_statistics() intermittently crashing the engine
+when polled per frame - was unrecorded. It is a ClassDB-bound public API
+(nodes/gaussian_splat_node_3d.cpp:233) at the polling rate any per-node HUD would
+use. Recorded with its real workaround (poll at 4 Hz or slower; a 444-frame run
+at that rate did not crash) and with its status stated as reproduced-not-
+diagnosed: 2 crashes in 5 runs, unsymbolized backtrace, no root cause. 2 of 5 is
+a rate, not a mechanism.
+
+The page also promised something the machinery does not do. "Blocking defects are
+not listed here - they are in the blocker set and stop the release" reads as
+machine enforcement, but the candidate gate's population is
+priority:P0|priority:P1|release blocker and the section 11 alpha blockers carry
+none of those - #929 has no priority label, #851/#833/#54 are priority:P2. So
+nothing automated stops a release on them. The sentence now points at the bar's
+section 11 list by name and says plainly that it is human-maintained and mostly
+invisible to the gate, rather than implying a guarantee.
+
+Smaller corrections from the same review:
+
+- #851's symptom is now named (black contour lines, inert shadow_strength), so a
+  user who sees it can find the issue. Previously the entry said only "lighting-
+  mode fields are tracked as #851".
+- features/streaming.md step 2 still said the node creates a streaming system
+  "when streaming is enabled", immediately after the new paragraph explaining
+  there is no such setting. Now: when the route policy selects streaming and the
+  payload is streamable.
+- api-stability.md no longer hand-asserts "193 project settings" as a bare fact -
+  it is a third copy of a number the bar's own section 7 says drifts. The page
+  now names the manifest and register_types.cpp as the authority and dates its
+  counts.
+- Bar section 8.1 no longer says "Two entries were decided here", which would go
+  stale the moment #1026 adds a third row. It names the entries without a count,
+  and says why no count is given.
+
+Refs #1011
+Refs #1025
+Refs #1030
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013MbNkf9hckmDJSE3dogs1k
+```
+klausi3D
+added a commit
+that referenced
+this pull request
+Sep 19, 2026
+docs: record the TAA/FSR2 motion residual and the get_statistics cras…
+…
+f34b190
+```
+…h, and stop claiming machine enforcement the gate does not do (#1011)
+
+Independent review found three omissions and a promise the page cannot keep.
+All verified before writing.
+
+#1025 - moving-camera ghosting under TAA/FSR2 - is real on master today, in the
+alpha envelope, and appeared nowhere: not on this page, not in bar section 11.
+The page instead carried a callout saying #929 "is in the blocker set, not the
+accepted set", which #1026 overturns by splitting #929 into a fixed
+static-camera half and this residual. That callout is replaced by a #1025 entry.
+
+The wording is taken verbatim on the substance from #1026's section 8.1 row, by
+agreement with its author, so the disclosure and the disposition cannot drift.
+The measured static-camera figures (0.2525 -> 0.0900 px at FSR2 scale 1.0,
+0.3603 -> 0.0927 px at scale 0.5) are attributed to #1026 rather than claimed
+here.
+
+The entry is marked PROPOSED, not accepted. #1025 is in-envelope, so under
+section 4.1 it is a blocker until a named human accepts it, and no such line
+exists yet; #1026 marks its own row proposed for the same reason. The entry also
+warns that a ledger entry is required before the classification can pass the
+gate at all - an accepted_alpha_limitation supplied by the bundle fails unless
+the issue is in public_alpha_issue_ledger.
+
+#1030 - GaussianSplatNode3D.get_statistics() intermittently crashing the engine
+when polled per frame - was unrecorded. It is a ClassDB-bound public API
+(nodes/gaussian_splat_node_3d.cpp:233) at the polling rate any per-node HUD would
+use. Recorded with its real workaround (poll at 4 Hz or slower; a 444-frame run
+at that rate did not crash) and with its status stated as reproduced-not-
+diagnosed: 2 crashes in 5 runs, unsymbolized backtrace, no root cause. 2 of 5 is
+a rate, not a mechanism.
+
+The page also promised something the machinery does not do. "Blocking defects are
+not listed here - they are in the blocker set and stop the release" reads as
+machine enforcement, but the candidate gate's population is
+priority:P0|priority:P1|release blocker and the section 11 alpha blockers carry
+none of those - #929 has no priority label, #851/#833/#54 are priority:P2. So
+nothing automated stops a release on them. The sentence now points at the bar's
+section 11 list by name and says plainly that it is human-maintained and mostly
+invisible to the gate, rather than implying a guarantee.
+
+Smaller corrections from the same review:
+
+- #851's symptom is now named (black contour lines, inert shadow_strength), so a
+  user who sees it can find the issue. Previously the entry said only "lighting-
+  mode fields are tracked as #851".
+- features/streaming.md step 2 still said the node creates a streaming system
+  "when streaming is enabled", immediately after the new paragraph explaining
+  there is no such setting. Now: when the route policy selects streaming and the
+  payload is streamable.
+- api-stability.md no longer hand-asserts "193 project settings" as a bare fact -
+  it is a third copy of a number the bar's own section 7 says drifts. The page
+  now names the manifest and register_types.cpp as the authority and dates its
+  counts.
+- Bar section 8.1 no longer says "Two entries were decided here", which would go
+  stale the moment #1026 adds a third row. It names the entries without a count,
+  and says why no count is given.
+
+Refs #1011
+Refs #1025
+Refs #1030
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013MbNkf9hckmDJSE3dogs1k
+```
+klausi3D
+added a commit
+that referenced
+this pull request
+Sep 19, 2026
+docs: fence the unaccepted #1025 entry, and narrow three claims Codex…
+…
+83474cf
+```
+… found overstated
+
+Codex (independent, quota restored) reviewed this PR's diff against the source.
+It confirmed every count and constant - 33 classes, 2 singletons, 193/153/139,
+MAX_ENCODED_COEFFICIENTS=12, quantized slots 6, PackedGaussian 128 B, and the
+3-of-15 / 9-of-15 SH drops - and found no reproduced-vs-code-read label wrong.
+Four substantive findings, all verified before fixing.
+
+1. The page contradicted its own rule. It says blocking defects are not listed
+   here, then listed #1025, which the entry itself describes as still blocking
+   pending maintainer acceptance. Rather than drop the entry - the merge plan
+   requires this PR to absorb #1026's disposition - #1025 moves into a fenced
+   "Proposed, not yet accepted" section at the foot of the page, and the rule at
+   the top now names that section as its single explicit exception. Everything
+   above the fence is what the alpha ships with; nothing below it may be cited as
+   an accepted_alpha_limitation. The rule and the content now agree.
+
+2. features/index.md said imports "land as a GaussianSplatNode3D node in your
+   scene tree". They do not: the importer produces a GaussianSplatAsset resource
+   (io/resource_importer_ply.cpp:494), which you then assign to a node. I had
+   corrected the class name in this PR and left the surrounding claim wrong.
+
+3. features/streaming.md overstated the route policy. I had reworded step 2 to
+   "when the route policy selects streaming and the payload is streamable", which
+   is still wrong for the node route: a direct GaussianSplatNode3D always pins
+   SUBMISSION_RESIDENCY_HINT_RESIDENT and DELIBERATELY IGNORES route_policy
+   (nodes/gaussian_splat_node_3d.cpp:2626-2631). Streaming is opt-in through
+   GaussianSplatWorld3D and only through it. The section now says that first, and
+   step 1 is choosing the right node type rather than setting a policy that the
+   node route does not read.
+
+4. The #1008 entry claimed every payload change costs a full GPU re-upload of
+   every splat buffer. That is the resident branch only: a file-backed world
+   takes set_file_backed_payload_source() instead
+   (renderer/render_data_orchestrator.cpp:799-803), and a world with no
+   registered submission resubmits nothing. Both bounds are now stated. The
+   resident path - which is what the alpha's world route uses - is unchanged and
+   still the cost the entry discloses.
+
+Codex's fifth finding is citation drift in two pre-existing table rows
+(ply_loader.cpp:69,97,112 and the colour-grading upload anchor). Not fixed here:
+it is the same systemic anchor-drift program this PR already declines to take on
+in one change, and both rows' prose is correct.
+
+Refs #1011
+Refs #1013
+Refs #1025
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013MbNkf9hckmDJSE3dogs1k
+```
+klausi3D
+force-pushed
+the
+gs/929-jitter-splat-projection
+branch
+from
+e280274 to
+73b305c
+Compare
+September 19, 2026 16:47
+klausi3D
+mentioned this pull request
+Sep 19, 2026
+Generate the candidate evidence bundle in-workflow: a stable tag currently fails closed on a file nothing produces
+#961
+Open
+gaussian_splatting: render splats with the engine's TAA jitter, and k…
+…
+5254ab8
+```
+…ey the render cache on the matrix that carries it (#929)
+
+The splat pipeline built its GPU projection from the raw camera projection with
+a flip_y and nothing else, while every mesh in the frame is rendered through
+RenderSceneDataRD::get_cam_projection(), which left-multiplies the engine's
+per-frame taa_jitter. FSR2 -- handed that same jitter immediately below the
+splat pre-upscale composite hook -- un-jitters its whole input by it. A layer
+that was never jittered therefore came out displaced by +jitter, changing every
+frame along the Halton sequence.
+
+Measured on a real scan (31,208 splats) with a static camera, FSR2 scale 1.0:
+the splat region displaced 0.2525 px against its own window mean while the
+in-frame, correctly-jittered mesh control displaced 0.0100 px -- 25x. At scale
+0.5, 0.3603 px vs 0.0046 px, 78x. With no temporal stage both are exactly
+0.0000 px. After this change the splat figures are 0.0900 px and 0.0927 px --
+2.8x and 3.9x reductions -- with the mesh control unchanged at 0.0099 and
+0.0046 px. The remaining ~0.09 px is NOT the jitter: splats also publish no
+depth write-back, no motion vectors and no reactive mask, so FSR2 reconstructs
+them with less information than it has about the mesh. That residual is
+disclosed under release-acceptance-bar 8.1 and tracked as #1025.
+
+Three changes, in dependency order:
+
+1. GaussianSplatRenderer::build_render_projection() -- a static, RenderData-free
+   helper beside build_cull_projection(). It applies flip_y and, when
+   scene_data->taa_jitter is non-zero, the same identity-plus-translation
+   correction the engine uses. It deliberately does NOT apply the engine depth
+   correction: the gaussian pipeline carries linear view-space depth. Zero
+   jitter short-circuits and returns the flipped matrix bit-identically, so
+   every non-temporal configuration -- Godot's default -- is untouched by
+   construction rather than by a floating-point argument. Self-gating:
+   taa_jitter is exactly (0,0) unless a temporal stage is active
+   (renderer_scene_cull.cpp:2681-2696, renderer_viewport.cpp:252-260). The
+   shadow pass builds its own projections locally and is not routed through it.
+
+2. OutputCompositor's reuse key now carries the GPU projection. The key was the
+   UNJITTERED camera projection, and the jitter appears nowhere else, so
+   wherever reuse is live the raster stage is skipped and one frozen jitter
+   phase would be re-composited every frame -- change 1 would silently do
+   nothing while still looking correct to any test that only inspects the
+   matrix the renderer built. The new parameter is required and has no default,
+   so a caller cannot reintroduce the trap by omitting an argument.
+
+3. The three header comments that claimed "GPU projection with depth/jitter
+   correction applied" described a correction the code had never applied.
+
+Tests:
+
+* [ViewTransform] "Render projection carries the engine TAA jitter" -- pure
+  math, no GPU, in a STRICT lane: zero jitter is bit-identical to the flip-only
+  matrix; a non-zero jitter equals the engine's own J * (flip * P); the result
+  is a depth-independent NDC translation of exactly +jitter that leaves
+  columns[0][0] / columns[1][1] -- the focal entries tile_binning.glsl derives
+  the conic and Jacobian from -- untouched.
+* [ViewTransform] "Render cache reuse is refused when only the GPU projection's
+  jitter differs" -- also no GPU, by driving the compositor before initialize()
+  so the cache functions are pure. Asserts reuse in both directions and refusal
+  when only the jitter moves, with a discrimination check that the three
+  matrices differ at all.
+* qa_composite_production_defaults gains a temporal-stability phase: a 480x270
+  SubViewport with a splat cluster and a high-frequency unshaded checker box in
+  disjoint screen rectangles, swept over none / TAA / FSR2 1.0 / FSR2 0.5. The
+  oracle is the sub-pixel (Lucas-Kanade) displacement of the splat region
+  against its own window-mean frame, gated at an absolute 0.15 px chosen from
+  measurements of BOTH populations -- 0.3045 / 0.2347 px with the jitter absent,
+  0.0929 / 0.0569 px with it applied -- and NOT as a ratio against the control,
+  which the measurement rejected. Behind three gates that run first: rig
+  determinism (exactly 0 with no
+  temporal stage), region discrimination (hiding each subject must move its own
+  rectangle and only its own), and stage engagement (the control must move in
+  each engage window, so "stable", "never engaged" and "swimming" stay
+  distinguishable).
+
+Two statistics are recorded and deliberately NOT gated, because both were
+measured not to discriminate: the frame-to-frame colour delta (the broken splat
+layer scored 1.089 LSB against the correct mesh control's 2.365 -- contrast, not
+displacement, dominates it) and the autocorrelation at the engine's jitter phase
+(+1.000 for the splat region and +1.000 for the mesh control alike, so it
+attributes the defect but cannot detect it).
+
+Docs: the §8.1 disclosure is scoped down to the moving-camera ghosting that
+remains -- splats still write no motion vectors, no reactive-mask contribution
+and no depth write-back -- with its workaround; §10.1 records the maintainer
+decision that TAA and FSR2 are inside the alpha envelope, which is what makes
+the jitter a fix rather than a disclosure; §11 item 5 is re-decided; and
+render-pipeline.md's residual-risk paragraph gains the fourth missing temporal
+input it never mentioned.
+
+Review round 1 (independent, no P1) also produced, in this head: the §10.1
+in-envelope rule now carries one explicitly-stated four-condition exception
+instead of silently contradicting the §8.1 row it licenses, and the row is
+marked *proposed* because the fourth condition -- a named human accepting the
+residual as an alpha limitation -- is not met; §11 item 5 now states what
+happens to #929 on merge under each branch of that decision; and the
+render-cache reuse cost the plan's step 2 asked for is measured rather than
+asserted: with per_splat_depth_clip=false under FSR2, 0.798 ms/frame cached
+30/30 -> 2.912 ms/frame cached 0/30, which is the same 2.92 ms the same scene
+already costs at shipped defaults on BOTH binaries. The cached figure was the
+raster never re-running while the Halton phase advanced.
+
+Refs #929
+Refs #921
+Refs #1025
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013MbNkf9hckmDJSE3dogs1k
+```
+klausi3D
+force-pushed
+the
+gs/929-jitter-splat-projection
+branch
+from
+73b305c to
+5254ab8
+Compare
+September 19, 2026 16:56
+klausi3D
+commented
+Sep 19, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+The red GPU QA Tests (Windows Self-Hosted) on 5254ab8eee0 is VOID, not a result. My QA scene never ran. Flagging it explicitly because a red GPU lane on a renderer PR is exactly the thing that costs a diagnosis cycle, which is what #875 exists to prevent.
+Job 105932655105, step outcomes:
+```
+4  success  Verify Python
+5  FAILURE  Preflight - GPU contention, wait for a free runner (#875)
+6  skipped  Preflight - runner GPU environment (#875)
+7-12 skipped  (MSVC, SCons, build, resolve binary, baseline mode, sorting check)
+13 skipped  Run QA scene suite (blocking visual/SSIM gate)   <-- my scene
+16 FAILURE  Postflight - GPU contention verdict (#875)
+```
+Step 13 is the one that would exercise qa_composite_production_defaults. It was skipped, so this run carries no information about this PR in either direction — it is not a pass either.
+Cause: runner contention, not this diff. The job ran 17:18–17:33 UTC while fix/833-template-start's Baseline QA Automation was in progress on the same box (still running at the time of writing, 1h8m+), with four more runs queued behind it including this PR's own Gaussian Production Gates. tests/ci/runner_gpu_contention.py polls for the GPU to free, and on timeout exits EXIT_RUNNER_BUSY behind a RUNNER BUSY -- THIS RESULT IS VOID banner and skips the measuring steps, precisely so a busy box cannot be misread as a renderer regression. It behaved correctly.
+Not me. My last GPU work on this machine finished at 15:46 UTC, ninety minutes before this job started, and the shared heavy lock is free now. I am deliberately not running the local full-suite verification I still owe until the runner drains — doing GPU work now would make me the contention for whoever is next, which is the same failure.
+Plan: wait for the self-hosted runner to go idle, then gh run rerun --failed on that run. A rerun is safe here and will not replay a stale merge: the run was created at 16:56 UTC and the only commit to land since my base (611ae3bca2b, #1023 — three lines in scripts/ab_pipeline_features.gd, untouched by this PR) was already on master at 15:23 UTC, so the merge commit is current. GitHub reports this PR MERGEABLE.
+What is still unverified, and I want it on the record rather than buried: the QA scene suite has never run in full-suite context on any head of this PR — not in CI, and not locally either, where I have only ever run the scene standalone. Scene-to-scene state leakage is therefore argued (my phase 2 restores composite/depth_test in _restore_settings() and touches no other process-global state) and not measured. The re-run is what closes it; if the runner stays contended I will close it locally instead and say which.
+The other reds are unchanged and pre-existing: CodeFactor's single notice on can_reuse_cached_render (explained in the body) and qlty check, which errors on every recent PR including #999 and #1009.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_013MbNkf9hckmDJSE3dogs1k
+klausi3D
+and others
+added 2 commits
+September 20, 2026 10:05
+Merge remote-tracking branch 'origin/master' into gs/929-jitter-splat…
+…
+d6bbcd2
+```
+…-projection
+
+# Conflicts:
+#	docs/governance/release-acceptance-bar.md
+```
+docs: correct the render-cache reuse timing after a stray GPU process…
+…
+7188c0a
+```
+… was found (#929)
+
+The +2.11 ms figure was taken while a godot.head.exe from 2026-09-16 had been
+holding the GPU for three days. Retaken on the quiet machine with six samples
+per side: 0.905 ms/frame cached 30/30 -> 2.772 ms/frame cached 0/30, +1.87 ms.
+The shipped-default control moved the same way, 2.758 (before) / 2.760 (after),
+so the conclusion is unchanged and its margin is tighter: the relief-valve-off
+configuration now performs as the shipped default already does, to within 0.5%.
+
+The cached side is a sub-millisecond path and is genuinely noisy (0.759-1.176,
+55% spread); the re-raster side is steady (2.735-2.881, 5%). Both ranges are
+quoted rather than a bare mean.
+
+Pixel and sub-pixel displacement measurements are deterministic frame
+comparisons and are unaffected, as are the cached/other raster_path counts,
+which are counts rather than times.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013MbNkf9hckmDJSE3dogs1k
+```
+klausi3D
+commented
+Sep 20, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Rebased onto merged #1020 and corrected a timing figure that was measured against a contaminated machine. Head 7188c0ac3b7.
+The conflict: one file, text only
+git merge origin/master reported exactly one conflict, docs/governance/release-acceptance-bar.md. Every code file merged clean. I resolved it by taking #1020's merged text wholesale (git show origin/master:… > …, verified git diff origin/master -- <file> returned 0 lines before I touched it) and then re-applying my three insertions on top. Nothing of #1020's was reverted, reworded or "improved".
+Two of my insertions changed shape to fit the merged structure, and one shrank because #1020 made it redundant:
+§8.1 — unchanged by docs: widen the public-alpha envelope to streaming open worlds rather than narrow its gate (#1016) #1020, so the preamble and the #929 residual row went back verbatim, still marked proposed, still saying Splats ghost under TAA/FSR2 in motion: no depth write-back, no motion vectors, no reactive mask (post-#929 residual) #1025 is a §4 blocker until a named human accepts it.
+§10.1 — docs: widen the public-alpha envelope to streaming open worlds rather than narrow its gate (#1016) #1020 restructured this section and established a convention: short bullet in the list, then a **Decided …:** paragraph after it. My single mega-bullet was reshaped to match — a three-line TAA and FSR2 are IN bullet, then a **Decided: TAA and FSR2 are in the alpha envelope** paragraph carrying the rule, the four-condition exception and the applied-to-GPU-001 follow-up: splat projection is unjittered while feeding temporal consumers (TAA/FSR2/MetalFX) — subpixel mismatch vs meshes #929 analysis. Content and hedging are unchanged, including the sentence saying the paragraph is an agent's transcription of a decision relayed from the maintainer and that the maintainer's own line is authoritative.
+§10.1 machinery paragraph — deliberately shrunk. docs: widen the public-alpha envelope to streaming open worlds rather than narrow its gate (#1016) #1020's new §9.1 now documents the label population, the ledger requirement, the docs_path rule and the snapshot-completeness gap in far more depth than my paragraph did. Restating it would have been duplication of exactly the kind asked about, so mine collapsed to a cross-reference plus the one thing §9.1 does not say: Splats ghost under TAA/FSR2 in motion: no depth write-back, no motion vectors, no reactive mask (post-#929 residual) #1025 carries priority:P1 so the gate asks about it, but it is not in the ledger, so it cannot be classified as an accepted limitation even if accepted.
+§11 item 5 — replaced the stale "Blocked on the GPU-001: splats absent under viewport scaling and FSR2 with composite depth_test=true (default) — composite writes an already-consumed buffer #921 disposition" text with both branches, and trimmed where docs: widen the public-alpha envelope to streaming open worlds rather than narrow its gate (#1016) #1020 already covers it. It now cross-references §9.1's label note instead of restating that GPU-001 follow-up: splat projection is unjittered while feeding temporal consumers (TAA/FSR2/MetalFX) — subpixel mismatch vs meshes #929 carries only program:prod-ready, and it names the arithmetic for the accepted branch (9 fixed or closed / 3 open) against docs: widen the public-alpha envelope to streaming open worlds rather than narrow its gate (#1016) #1020's re-counted status line rather than duplicating the line.
+Duplication check, read end to end rather than grepped for markers: exactly one #929 residual row in §8.1, one TAA/FSR2 decision in §10.1, one item 5 in §11. #1020's own §9.1 mentions of #929 and #1025 — including its note that #1025 "was given priority:P1 for exactly this reason — the remedy, demonstrated once" — are complementary and left alone. No stale count: #1020's status line already says the #929 disposition is an unmade human call, which is what my item 5 elaborates.
+The code diff is untouched by the resolution. git diff 5254ab8eee0 -- modules/ tests/ returns 0 lines, and git diff --stat origin/master HEAD is the same 13 files this PR always had. The GPU evidence therefore stays valid — no code has changed since a7e21559f63, the commit every measurement was taken on.
+Guards: 0 guard failed / FAILED ( lines, Renderer release gate contract check passed, ends Guard-only mode complete.
+The timing correction
+A stray godot.head.exe from 2026-09-16 had been holding the GPU for three days and was killed on 2026-09-20. Every timing figure I took on this machine before that is suspect, including the reuse-cost number, so I retook all of them on the quiet box under the heavy lock with six samples per side instead of four.
+superseded (contended)
+corrected (quiet)
+valve-off FSR2, BASE
+0.798 ms, cached 30/30
+0.905 ms (0.759–1.176), cached 30/30
+valve-off FSR2, AFTER
+2.912 ms, cached 0/30
+2.772 ms (2.735–2.881), cached 0/30
+delta
++2.11 ms
++1.87 ms
+shipped default FSR2, BASE / AFTER
+2.916 / 2.923 ms
+2.758 / 2.760 ms
+The conclusion did not change and its margin got tighter. The valve-off AFTER figure (2.772) and the shipped-default figure (2.758 / 2.760) now agree to within 0.5%, so "that configuration performs as the shipped default already does" is better supported than before. The two binaries remain indistinguishable at shipped defaults.
+Worth stating because it affects how the number should be read: the spread is almost all on the cached side — a sub-millisecond path dominated by CPU and present jitter, 0.759–1.176, 55% — while the re-raster side is steady at 5%. The table now quotes ranges, not bare means, and render-pipeline.md carries the corrected figures.
+What is not affected, and why: every pixel and sub-pixel displacement measurement in this PR is a deterministic comparison of captured frames, not a timing, so GPU contention cannot move it; the cached / other raster_path results are counts for the same reason. The 0.3052 / 0.2219 → 0.0929 / 0.0614 px displacement result, the none rows at exactly 0, and the mutation proofs all stand unchanged.
+Still open
+The human visual pass on the captures, unchanged and still a merge precondition. The PR currently reports MERGEABLE / BLOCKED, the latter being the required reviews and that pass, not a failing check. The remaining red is CodeFactor's single style notice, explained in the body.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_013MbNkf9hckmDJSE3dogs1k
+klausi3D
+added a commit
+that referenced
+this pull request
+Sep 20, 2026
+docs: record the TAA/FSR2 motion residual and the get_statistics cras…
+…
+edb62f0
+```
+…h, and stop claiming machine enforcement the gate does not do (#1011)
+
+Independent review found three omissions and a promise the page cannot keep.
+All verified before writing.
+
+#1025 - moving-camera ghosting under TAA/FSR2 - is real on master today, in the
+alpha envelope, and appeared nowhere: not on this page, not in bar section 11.
+The page instead carried a callout saying #929 "is in the blocker set, not the
+accepted set", which #1026 overturns by splitting #929 into a fixed
+static-camera half and this residual. That callout is replaced by a #1025 entry.
+
+The wording is taken verbatim on the substance from #1026's section 8.1 row, by
+agreement with its author, so the disclosure and the disposition cannot drift.
+The measured static-camera figures (0.2525 -> 0.0900 px at FSR2 scale 1.0,
+0.3603 -> 0.0927 px at scale 0.5) are attributed to #1026 rather than claimed
+here.
+
+The entry is marked PROPOSED, not accepted. #1025 is in-envelope, so under
+section 4.1 it is a blocker until a named human accepts it, and no such line
+exists yet; #1026 marks its own row proposed for the same reason. The entry also
+warns that a ledger entry is required before the classification can pass the
+gate at all - an accepted_alpha_limitation supplied by the bundle fails unless
+the issue is in public_alpha_issue_ledger.
+
+#1030 - GaussianSplatNode3D.get_statistics() intermittently crashing the engine
+when polled per frame - was unrecorded. It is a ClassDB-bound public API
+(nodes/gaussian_splat_node_3d.cpp:233) at the polling rate any per-node HUD would
+use. Recorded with its real workaround (poll at 4 Hz or slower; a 444-frame run
+at that rate did not crash) and with its status stated as reproduced-not-
+diagnosed: 2 crashes in 5 runs, unsymbolized backtrace, no root cause. 2 of 5 is
+a rate, not a mechanism.
+
+The page also promised something the machinery does not do. "Blocking defects are
+not listed here - they are in the blocker set and stop the release" reads as
+machine enforcement, but the candidate gate's population is
+priority:P0|priority:P1|release blocker and the section 11 alpha blockers carry
+none of those - #929 has no priority label, #851/#833/#54 are priority:P2. So
+nothing automated stops a release on them. The sentence now points at the bar's
+section 11 list by name and says plainly that it is human-maintained and mostly
+invisible to the gate, rather than implying a guarantee.
+
+Smaller corrections from the same review:
+
+- #851's symptom is now named (black contour lines, inert shadow_strength), so a
+  user who sees it can find the issue. Previously the entry said only "lighting-
+  mode fields are tracked as #851".
+- features/streaming.md step 2 still said the node creates a streaming system
+  "when streaming is enabled", immediately after the new paragraph explaining
+  there is no such setting. Now: when the route policy selects streaming and the
+  payload is streamable.
+- api-stability.md no longer hand-asserts "193 project settings" as a bare fact -
+  it is a third copy of a number the bar's own section 7 says drifts. The page
+  now names the manifest and register_types.cpp as the authority and dates its
+  counts.
+- Bar section 8.1 no longer says "Two entries were decided here", which would go
+  stale the moment #1026 adds a third row. It names the entries without a count,
+  and says why no count is given.
+
+Refs #1011
+Refs #1025
+Refs #1030
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013MbNkf9hckmDJSE3dogs1k
+```
+klausi3D
+added a commit
+that referenced
+this pull request
+Sep 20, 2026
+docs: fence the unaccepted #1025 entry, and narrow three claims Codex…
+…
+b9b96ca
+```
+… found overstated
+
+Codex (independent, quota restored) reviewed this PR's diff against the source.
+It confirmed every count and constant - 33 classes, 2 singletons, 193/153/139,
+MAX_ENCODED_COEFFICIENTS=12, quantized slots 6, PackedGaussian 128 B, and the
+3-of-15 / 9-of-15 SH drops - and found no reproduced-vs-code-read label wrong.
+Four substantive findings, all verified before fixing.
+
+1. The page contradicted its own rule. It says blocking defects are not listed
+   here, then listed #1025, which the entry itself describes as still blocking
+   pending maintainer acceptance. Rather than drop the entry - the merge plan
+   requires this PR to absorb #1026's disposition - #1025 moves into a fenced
+   "Proposed, not yet accepted" section at the foot of the page, and the rule at
+   the top now names that section as its single explicit exception. Everything
+   above the fence is what the alpha ships with; nothing below it may be cited as
+   an accepted_alpha_limitation. The rule and the content now agree.
+
+2. features/index.md said imports "land as a GaussianSplatNode3D node in your
+   scene tree". They do not: the importer produces a GaussianSplatAsset resource
+   (io/resource_importer_ply.cpp:494), which you then assign to a node. I had
+   corrected the class name in this PR and left the surrounding claim wrong.
+
+3. features/streaming.md overstated the route policy. I had reworded step 2 to
+   "when the route policy selects streaming and the payload is streamable", which
+   is still wrong for the node route: a direct GaussianSplatNode3D always pins
+   SUBMISSION_RESIDENCY_HINT_RESIDENT and DELIBERATELY IGNORES route_policy
+   (nodes/gaussian_splat_node_3d.cpp:2626-2631). Streaming is opt-in through
+   GaussianSplatWorld3D and only through it. The section now says that first, and
+   step 1 is choosing the right node type rather than setting a policy that the
+   node route does not read.
+
+4. The #1008 entry claimed every payload change costs a full GPU re-upload of
+   every splat buffer. That is the resident branch only: a file-backed world
+   takes set_file_backed_payload_source() instead
+   (renderer/render_data_orchestrator.cpp:799-803), and a world with no
+   registered submission resubmits nothing. Both bounds are now stated. The
+   resident path - which is what the alpha's world route uses - is unchanged and
+   still the cost the entry discloses.
+
+Codex's fifth finding is citation drift in two pre-existing table rows
+(ply_loader.cpp:69,97,112 and the colour-grading upload anchor). Not fixed here:
+it is the same systemic anchor-drift program this PR already declines to take on
+in one change, and both rows' prose is correct.
+
+Refs #1011
+Refs #1013
+Refs #1025
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013MbNkf9hckmDJSE3dogs1k
+```
+klausi3D
+added a commit
+that referenced
+this pull request
+Sep 20, 2026
+docs: caveat the two figures taken during the GPU-contention window, …
+…
+f6c36cc
+```
+…and point the fence at 9.1
+
+A stray godot.head.exe left over from 2026-09-16 held this machine's GPU
+continuously until it was killed on 2026-09-19. Both measured figures this page
+quotes were taken inside that window, on 2026-09-17, so both are suspect. Found
+by the #1026 author, who had to retake their own timings for the same reason and
+flagged the window rather than only fixing their own numbers.
+
+#1030's crash rate is the one that matters more, and it cuts the opposite way to
+a timing. The issue attributes the crash to main-thread/render-thread contention
+over live metrics structures; a third process competing for the GPU is exactly
+what would make that MORE likely, so 2-of-5 may be an overestimate and the clean
+444-frame run at 4 Hz is correspondingly weaker evidence that the slower rate is
+actually safe. The defect is real - it is a bound public API taking the process
+down - but every number around it needs retaking on a quiet machine, and the
+entry now says so.
+
+#1008's medians (17 / 259 / 2124 ms) are marked an upper bound rather than a
+measurement. Figures another PR took in the same window moved about 10% when
+retaken quiet. The finding does not rest on them: a full rebuild with no
+dirty-field tracking and an unconditional re-upload is a code fact, and ~2 s at
+1M is not plausibly contention alone. But they should not be quoted as a
+baseline until retaken.
+
+Neither caveat softens a defect. Both say the shape stands and the numbers do
+not, which is the honest state.
+
+Also: the fence intro now points at the acceptance bar's 9.1 for the machinery
+behind the two conditions it names, instead of restating it. 9.1 covers the
+ledger requirement, the docs_path equality and the snapshot-completeness gap in
+more depth than this page should carry, and #1026's 10.1 collapsed to a
+cross-reference for the same reason - three documents, no overlap.
+
+Refs #1011
+Refs #1008
+Refs #1030
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013MbNkf9hckmDJSE3dogs1k
+```
+klausi3D
+added a commit
+that referenced
+this pull request
+Sep 20, 2026
+docs: fix the direction of the #1030 contamination caveat
+…
+6088ee4
+```
+The caveat added in the previous commit reasoned in two directions from one
+premise and got the second one backwards. Caught by the #1026 author.
+
+Premise: a stray process holding the GPU raises the hazard rate for a
+main-thread/render-thread race. From that, two consequences, and they move the
+SAME way:
+
+- 2-of-5 at per-frame polling is plausibly an OVERESTIMATE of what a user on a
+  quiet machine hits. (Correct as written.)
+- The clean 444-frame run at 4 Hz is STRONGER evidence that 4 Hz is safe, not
+  weaker - it survived while the hazard was elevated. The previous text said
+  "correspondingly weaker", which is simply the wrong direction.
+
+Both figures still need retaking: an overestimate is not a measurement and one
+clean run is not a safety proof. The practical conclusion is unchanged, but the
+reasoning was wrong on its face and a reader could have followed it into
+distrusting the workaround for no reason.
+
+The error is recorded inline rather than silently swapped, because a document
+that quietly reverses itself teaches nobody anything.
+
+No change to #1008's caveat: its finding rests on a code fact - a full rebuild
+with no dirty-field tracking and an unconditional re-upload - which survives any
+timing, so the caveat costs the defect nothing. #1030 is the case where the
+number IS the claim, which is why the two entries are worded differently.
+
+Refs #1011
+Refs #1030
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013MbNkf9hckmDJSE3dogs1k
+```
+klausi3D
+commented
+Sep 20, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+GPU QA Tests passed on 7188c0ac3b7, and this run closes two gaps I had flagged as open. I checked the step list before believing the green, because the previous run on this PR was a skip dressed as a failure.
+It actually ran this time. Steps 5 and 6 (the #875 contention preflight and the runner GPU environment check) both succeeded, and step 13, "Run QA scene suite (blocking visual/SSIM gate)", succeeded rather than being skipped. Artifact baseline-qa-gpu-results carries my scene's own numbers, so this is not an exit code I am reading as a pass.
+Gap 1 — the scene had never run in full-suite context. Now it has.
+I said plainly that qa_composite_production_defaults had only ever run standalone, so scene-to-scene state leakage was argued and not measured. This run executed it inside the real suite, after the nine scenes that precede it, on the real runner. From tests/ci/qa_results.json:
+```
+passed: True   skipped: False
+All 3 composite configurations present (variance floor 0.0010) …
+temporal stability OK: none splat=0.0000px mesh=0.0000px (dLSB 0.000/0.000),
+                       taa  splat=0.0206px mesh=0.0139px (dLSB 0.036/0.124),
+                       fsr2_100 splat=0.0929px mesh=0.0030px (dLSB 0.220/0.208),
+                       fsr2_050 splat=0.0545px mesh=0.0034px (dLSB 0.188/0.111)
+```
+All three pre-scoring gates fired and passed in that context:
+gate
+CI value
+determinism (none, both regions, mean and max)
+0.0 exactly
+region discrimination — splat rect on splat hide / mesh rect on mesh hide
+8.85 / 18.15 LSB
+region crosstalk — mesh rect on splat hide / splat rect on mesh hide
+0.0 / 0.0
+stage engaged — mesh engage window, taa / fsr2@1.0 / fsr2@0.5
+0.192 / 3.146 / 5.946 LSB
+Gap 2 — the displacement figures were taken in the contaminated window. The fixed side is now confirmed outside it.
+The #1022 author's #1030 finding generalises — a contaminated window can manufacture or mask an effect, not only inflate a timing — and my whole case rests on displacement numbers measured while that stray process was running. I had argued they were safe because they are deterministic frame comparisons driven by frame counts, not wall clock. This run tests that argument instead of restating it, and it is a harder test than the one I was planning:
+my local runs (contaminated, optimize=speed_trace)
+this CI run (clean machine, CI's own dev_build binary)
+fsr2 @1.0 splat displacement
+0.0929 px
+0.09286 px
+fsr2 @0.5 splat displacement
+0.0542 / 0.0569 / 0.0614 px
+0.0545 px
+none splat displacement
+0.0000 px
+4.1e-08 px
+Agreement to four significant figures at scale 1.0 across both a different machine state and a different build configuration. The metric demonstrably does not respond to GPU contention — which is what a deterministic pixel comparison should do, now shown rather than asserted.
+Still pending, and I am not calling it done: the same check on the base binary, to confirm the rig still goes red post-cleanup. Given the fixed side did not move by 0.0001 px it is very unlikely the base side moved from 0.30 to under the 0.15 ceiling, but "very unlikely" is not "measured", and it costs twelve seconds. The runner has been continuously busy, and taking the GPU while CI is mid-run is what voided this lane on Friday, so it waits. I will post the number either way.
+Two side-findings this run reproduced
+The periodicity statistic still does not discriminate, now demonstrated by CI rather than by me: splat autocorrelation at the jitter phase +0.99989, mesh control +0.99959. That is the measurement that made me reject the assessment's proposed oracle, reproduced on independent hardware state.
+swim_fsr2_100_ratio_vs_mesh = 31.4 — the fixed splat layer is still ~31× the mesh control, exactly as §4.1 says. This is why the gate is an absolute ceiling and not a ratio: any ratio tight enough to catch the missing jitter would also fail the correct layer. The number is in the artifact so the claim is checkable.
+The taa mesh control read 0.0139 px here against 0.0092 locally and the reviewer's 0.0068 / 0.0182 — consistent with the softened wording that the TAA control has run-to-run spread of its own order and is reported, not gated.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_013MbNkf9hckmDJSE3dogs1k
+qa: record the post-cleanup displacement observations in the gate's c…
+…
+b9e307f
+```
+…alibration (#929)
+
+The base-side re-check the contamination question actually needed. A stray
+godot.head.exe had been loading this machine since 2026-09-16; after it was
+killed, the rig was re-run on both binaries in one quiet session:
+
+  base  fsr2_100 0.3066 / 0.3047 px, fsr2_050 0.2172 / 0.2403 px -> RED
+  fixed fsr2_100 0.0929 px,          fsr2_050 0.0570 px          -> GREEN
+
+Indistinguishable from the values taken under load, which is the measurement
+rather than the argument that this metric does not respond to GPU contention:
+it is a deterministic comparison of captured frames, and now it has been shown
+to be one. A CI run on a dev_build binary independently measured the same
+pass-side figure to five figures (0.09286).
+
+The calibration docblock is updated with every observation, and the quoted
+lower edge of the defect population moves 0.2219 -> 0.2172, which is the one
+number that changed. Separation is now highest-passing 0.0929 against
+lowest-failing 0.2172: the 0.15 px ceiling sits 1.61x above the former and
+1.45x below the latter.
+
+Documentation only; no code and no threshold changed.
+
+Refs #929
+Refs #1025
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01UA1aX2xX8cajR4uKaMeLN6
+```
+klausi3D
+commented
+Sep 20, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Base-side re-check done on the quiet machine. The rig still goes red, and the contamination question is now closed by measurement on both sides. Head b9e307ff9e2.
+This was the one measurement I still owed: the CI cross-check confirmed the fixed side was unaffected by the stray GPU process, but "the rig still exceeds 0.15 px on the base binary" is a different proposition, and it is the one that establishes the gate discriminates. I declined to let the cross-check stand in for it.
+Run under the heavy lock with the runner verified idle (zero in-progress, zero queued, no godot process), base and fixed alternating in one session so they share machine state:
+fsr2 @1.0
+fsr2 @0.5
+verdict
+BASE, run 1
+0.3066 px
+0.2172 px
+rc=1 FAIL, both over the ceiling
+FIXED, same session
+0.0929 px
+0.0570 px
+rc=0 PASS
+BASE, run 2
+0.3047 px
+0.2403 px
+rc=1 FAIL
+Against the contaminated-window values — base fsr2@1.0 0.3041–0.3066, fsr2@0.5 0.2219–0.2444; fixed 0.0929 and 0.0542–0.0614 — these are indistinguishable. Contention did not move this metric on either side. That was always the expectation for a deterministic comparison of captured frames driven by frame counts rather than wall clock, but it was an argument until now and it is a measurement from here.
+The mesh control behaved identically across the pair (0.0029 / 0.0030 px at scale 1.0), and the none configuration stayed at exactly 0.0000 px in every run, so the two path-proof gates held throughout.
+One number changed, and it is in the docblock
+The lowest observed failing value moved from 0.2219 to 0.2172 px. That is the edge the threshold's justification quotes, so SWIM_MAX_DISPLACEMENT_PX's calibration block is updated with every observation now taken, including the CI run's five-figure 0.09286 on a dev_build binary and a marker for which samples were taken after the cleanup. Separation as it now stands:
+highest passing measurement 0.0929 px
+lowest failing measurement 0.2172 px
+the 0.15 px ceiling sits 1.61× above the former and 1.45× below the latter, within 6% of their geometric midpoint
+The guidance in that block is unchanged and deliberate: if this ever reds on a correct tree, widen toward 0.2172 and record the new measurement there — do not delete the gate. The threshold itself was not moved, and no code changed: git diff a7e21559f63 HEAD -- modules/ tests/ is still empty of non-comment lines, so every GPU measurement in this PR remains valid against the binary it was taken on.
+Contamination audit, complete
+evidence
+affected?
+reuse-cost timing
+yes — corrected, +2.11 → +1.87 ms, committed separately
+shipped-default timing control
+yes — corrected, 2.916/2.923 → 2.758/2.760 ms
+sub-pixel displacement, both sides
+no — re-measured, unchanged
+cached / other raster-path counts
+no — counts, not times
+pixel deltas (LSB), autocorrelations
+no — deterministic frame comparisons
+mutation proofs, guards, doctest lanes
+no — no GPU involved
+Everything timing-derived was corrected; everything else was re-verified rather than assumed safe. Thanks to the #1022 author, whose #1030 finding — that a contaminated window can manufacture an effect, not only inflate one — is what stopped me reasoning past this instead of measuring it.
+Nothing further is outstanding on my side. The human visual pass on the captures remains the merge precondition.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_01UA1aX2xX8cajR4uKaMeLN6
+docs: correct the #929 residual disclosure to what #1025 measured, an…
+…
+78fb806
+```
+…d record the reactive-mask coupling (#929, #1025)
+
+The moving-camera case was measured for the first time in #1025 and the
+disclosure this PR added was wrong about it in the direction that matters:
+it would have told users FSR2 ghosts when it measurably does not.
+
+Under FSR2 there is no ghosting -- 0.000 frames of staleness at scale 1.0 on
+both a 15 deg/s and a 56 deg/s pan, 0.04 px on a dolly, at the floor set by an
+in-frame geometry control; at scale 0.5 the splat trail is at or below the
+control's in two of three motions. Under TAA splats do trail, by about 1.5 px
+(0.27-0.87 frames, 6-26x the control), and the trail does not grow with camera
+speed because the variance clip is computed from the current frame. Base and
+this head agree to within 0.01 frames, so #1026 neither causes nor cures it.
+
+Three cells of the section 8.1 row are rewritten: the symptom is now TAA-only
+with the measured magnitude and a citation; the workaround is "use_taa = false"
+rather than "avoid FSR2"; and the "why it does not block" cell withdraws two
+claims #1025 refuted -- velocity write-back does not require depth write-back
+(the dependency runs the other way), and it is not an engine-boundary R3 change
+(the module already holds the RenderSceneBuffersRD*, already caches the
+previous-frame camera, and the velocity target carries the storage bit). The
+honest part is kept and is now the whole reason: a wrong velocity smears
+confidently, which is worse than a bounded trail on a stage that is off by
+default. Verified each citation at this head rather than relaying them.
+
+The reactive-mask coupling is recorded in render-pipeline.md, because it is
+load-bearing and was undocumented, and because an earlier revision of that file
+asserted the opposite. The composite writes splat coverage into the destination
+alpha (viewport_blit.glsl:206-208, gated on pre_upscale_phase), and that alpha
+IS params.reactive -- get_internal_texture_reactive() is an alpha-swizzled view
+of RB_TEX_COLOR. FSR2 clamps it to 0.9, so splat pixels get roughly a tenth of
+the normal history accumulation. That is why FSR2 is clean, and it likely also
+explains this PR's previously unattributed static residual. Anyone touching
+that alpha -- #989 touches exactly it -- changes FSR2 behaviour with no test
+naming the coupling.
+
+Also corrected: the same false "no reactive mask" claim in two QA script
+docblocks, and two warnings recorded for anyone extending the scene to a moving
+camera -- the exact-zero determinism gate would be flaky there (3-9 LSB over
+<=963 of 16.6M px, intermittent), and the 2 px checker control aliases under
+motion and is not a usable baseline.
+
+Documentation and comments only. No code, no threshold and no test logic
+changed, so no new GPU evidence is required and none of this PR's existing
+measurements are affected.
+
+Refs #929
+Refs #1025
+Refs #989
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01UA1aX2xX8cajR4uKaMeLN6
+```
+klausi3D
+commented
+Sep 20, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+My §8.1 row was wrong in the direction that matters, and is corrected. Head 78fb8063605. It would have told users FSR2 ghosts when #1025's measurement shows it measurably does not — a wrong doc is a user-facing defect under §4.3, and this one would have pushed people off a feature that works.
+I verified every citation at this head rather than relaying them.
+What changed in the row
+cell
+before
+after
+symptom
+"With TAA or FSR2 on, splat regions ghost while the camera or the content moves"
+TAA-only, ≈1.5 px (0.27–0.87 frames, 6–26× an in-frame control), and does not grow with camera speed (1.48 px at 15°/s → 1.65 px at 56°/s). FSR2: no ghosting — 0.000 frames at scale 1.0 on both pans, 0.04 px on a dolly, at the control's floor. Cites #1025.
+why it does not block
+velocity "requires caching the previous view-projection and depth write-back… engine-boundary R3"
+both claims withdrawn as refuted, with the mechanism that actually explains the asymmetry
+workaround
+"use scaling_3d_mode = bilinear at scale 1.0 with use_taa = false" — i.e. avoid FSR2
+use_taa = false only. FSR2 needs no workaround at either scale.
+The row stays proposed and #1025 stays a §4 blocker, as instructed — this edit only makes the description true.
+The two refuted claims, checked at this head
+Velocity does not require depth write-back; the dependency inverts. And it is not an engine-boundary change: gaussian_splat_renderer.cpp:2409 already casts to RenderSceneBuffersRD *; :2420-2421 already hold the previous-frame camera (those lines write the current one, so the state carries the previous until then) — which refutes the "the module caches no previous-frame camera state at all" line I had inherited into Splats ghost under TAA/FSR2 in motion: no depth write-back, no motion vectors, no reactive mask (post-#929 residual) #1025's sketch; and get_velocity_usage_bits() delegates to get_color_usage_bits(…, p_storage) with the buffer created can_be_storage, so an imageStore is legal.
+Depth write-back is separately blocked, but for a different reason than I wrote. get_depth_usage_bits() gives the non-MSAA, non-resolve case only SAMPLING | DEPTH_STENCIL_ATTACHMENT — no STORAGE bit; only the resolve target may be storage. So it needs its own depth-only raster pass, and it buys nothing for ghosting once velocity lands.
+What I kept is the part that was always the real reason: a wrong velocity smears confidently, which is worse than a bounded 1.5 px trail on a stage that is off by default. That is now the whole justification rather than a closing remark.
+The reactive-mask coupling, recorded durably
+This is the load-bearing find, and render-pipeline.md asserted the opposite until now ("no FSR2 reactive-mask contribution"). Verified end to end at this head:
+```
+viewport_blit.glsl:206-208      result_color.a = destination_has_alpha ? coverage-over : 1.0
+output_compositor.cpp:1252      params.destination_has_alpha = p_destination_has_alpha
+                     :1644      pre_upscale_phase = render_data->gaussian_composite_pre_upscale
+render_forward_clustered.cpp:2707   params.reactive = rb->get_internal_texture_reactive(v)
+render_scene_buffers_rd.h:257-264   ...which is RB_TEX_COLOR with all four swizzles = TEXTURE_SWIZZLE_A
+```
+So splat coverage already is FSR2's reactive value, clamped to 0.9 — roughly a tenth of normal history accumulation on splat pixels. That is why FSR2 measures clean, and it is the most plausible explanation for this PR's previously unattributed 0.0900 px static residual: FSR2 is deliberately not accumulating there, so those pixels track the raw jittered frame instead of converging like the mesh. §2.1 of the body attributed that residual to "the other three missing inputs"; that attribution is now corrected too.
+The warning that matters more than the explanation: anyone changing that destination alpha changes FSR2 behaviour silently, and no test names the coupling. #989 touches exactly that channel.
+Also corrected, and two warnings recorded
+The same false "no reactive mask" sentence appeared in two QA script docblocks — both fixed. And for anyone extending the scene to a moving camera, SWIM gate 1 now carries two warnings from #1025's investigation, neither affecting the static-camera gate here:
+exact-zero determinism would be flaky under motion — 3–9 LSB over ≤963 of 16.6M px in 5 of 6 runs, intermittent; static-camera is exactly 0 in every run ever taken, which is what lets this gate demand equality;
+the 2 px checker control aliases under motion — a shift-mixture model explains only 52–68% of its variance there (residual 0.32–0.48) against 0.03–0.11 for band-limited content. Right worst case for a static jitter test, wrong baseline for a moving one.
+Evidence status
+Documentation and comments only — no code, no threshold, no test logic changed, so no new GPU evidence is required and none of this PR's existing measurements are affected. git diff a7e21559f63 HEAD -- modules/ tests/ remains empty of non-comment lines. Guards: 0 failures, Guard-only mode complete. Rebased state is clean against the new master (511acdc0fc9, #1027 landed meanwhile); true delta unchanged at 13 files.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_01UA1aX2xX8cajR4uKaMeLN6
+klausi3D
+added a commit
+that referenced
+this pull request
+Sep 20, 2026
+docs: correct the #1025 entry - FSR2 does not ghost, and the old text…
+…
+ffe2e40
+```
+… told users to avoid it
+
+The moving-camera case has now been measured (#1025 comment 5751997279), on a
+real scan, on both the base and #1026 binaries. The entry I shipped was a
+prediction taken verbatim from #1026's section 8.1 row, and it was wrong in the
+direction that costs a user a working feature.
+
+- FSR2: NO ghosting. 0.000 frames of staleness at scale 1.0 across a slow pan, a
+  normal pan and a dolly, at the floor set by an in-frame geometry control; at
+  scale 0.5 the splat trail is at or below the control's in two of three motions.
+- TAA: a real ~1.5 px trail, 0.27-0.87 frames stale, 6-26x the control, and it
+  does NOT grow with camera speed because the variance clip is computed from the
+  current frame.
+- Base and #1026's head agree within 0.01 frames, so the jitter fix neither
+  causes nor cures it.
+
+The workaround change is the one that matters: it said "keep scaling_3d_mode =
+bilinear at scale 1.0 and use_taa = false". Half of that was pushing users off
+FSR2 for a defect FSR2 does not have. It now says use_taa = false, which is
+Godot's own default, and states plainly that FSR2 needs no workaround.
+
+Also corrected: the entry said fixing this "edits render_forward_clustered.cpp
+and needs its own ADR". The ladder inverted under measurement - velocity
+write-back does not require depth write-back, and it is not an engine-boundary
+change, because the module already holds the buffers and the previous-frame
+camera. What survives is the honest reason it is not alpha work: a wrong velocity
+smears confidently and reads as a renderer bug rather than a missing feature.
+
+The correction is recorded in the entry rather than silently swapped, same as the
+#1030 direction fix.
+
+And a coupling that was undocumented anywhere, now on the #989 entry because that
+is where it will bite: the destination alpha #989 is about IS FSR2's reactive
+mask. Godot has no dedicated reactive texture - params.reactive is an
+alpha-swizzled view of the internal colour buffer, and the composite writes splat
+coverage into that alpha. That is WHY splats do not ghost under FSR2. Whoever
+fixes transparent_bg changes FSR2's temporal behaviour silently, and no test
+would notice.
+
+Refs #1011
+Refs #1025
+Refs #989
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01UA1aX2xX8cajR4uKaMeLN6
+```
+klausi3D
+mentioned this pull request
+Sep 20, 2026
+One mechanism, four documents: consolidate the splats-and-temporal-stages seam (#929/#989/#1025/render-pipeline.md)
+#1036
+Open
+Hide details
+View details
+klausi3D
+merged commit 7c16775
+into
+master
+Sep 20, 2026
+18 of 20 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+klausi3D
+deleted the
+gs/929-jitter-splat-projection
+branch
+September 20, 2026 20:09
+klausi3D
+added a commit
+that referenced
+this pull request
+Sep 20, 2026
+docs: record the TAA/FSR2 motion residual and the get_statistics cras…
+…
+c999d48
+```
+…h, and stop claiming machine enforcement the gate does not do (#1011)
+
+Independent review found three omissions and a promise the page cannot keep.
+All verified before writing.
+
+alpha envelope, and appeared nowhere: not on this page, not in bar section 11.
+The page instead carried a callout saying #929 "is in the blocker set, not the
+accepted set", which #1026 overturns by splitting #929 into a fixed
+static-camera half and this residual. That callout is replaced by a #1025 entry.
+
+The wording is taken verbatim on the substance from #1026's section 8.1 row, by
+agreement with its author, so the disclosure and the disposition cannot drift.
+The measured static-camera figures (0.2525 -> 0.0900 px at FSR2 scale 1.0,
+0.3603 -> 0.0927 px at scale 0.5) are attributed to #1026 rather than claimed
+here.
+
+The entry is marked PROPOSED, not accepted. #1025 is in-envelope, so under
+section 4.1 it is a blocker until a named human accepts it, and no such line
+exists yet; #1026 marks its own row proposed for the same reason. The entry also
+warns that a ledger entry is required before the classification can pass the
+gate at all - an accepted_alpha_limitation supplied by the bundle fails unless
+the issue is in public_alpha_issue_ledger.
+
+when polled per frame - was unrecorded. It is a ClassDB-bound public API
+(nodes/gaussian_splat_node_3d.cpp:233) at the polling rate any per-node HUD would
+use. Recorded with its real workaround (poll at 4 Hz or slower; a 444-frame run
+at that rate did not crash) and with its status stated as reproduced-not-
+diagnosed: 2 crashes in 5 runs, unsymbolized backtrace, no root cause. 2 of 5 is
+a rate, not a mechanism.
+
+The page also promised something the machinery does not do. "Blocking defects are
+not listed here - they are in the blocker set and stop the release" reads as
+machine enforcement, but the candidate gate's population is
+priority:P0|priority:P1|release blocker and the section 11 alpha blockers carry
+none of those - #929 has no priority label, #851/#833/#54 are priority:P2. So
+nothing automated stops a release on them. The sentence now points at the bar's
+section 11 list by name and says plainly that it is human-maintained and mostly
+invisible to the gate, rather than implying a guarantee.
+
+Smaller corrections from the same review:
+
+- #851's symptom is now named (black contour lines, inert shadow_strength), so a
+  user who sees it can find the issue. Previously the entry said only "lighting-
+  mode fields are tracked as #851".
+- features/streaming.md step 2 still said the node creates a streaming system
+  "when streaming is enabled", immediately after the new paragraph explaining
+  there is no such setting. Now: when the route policy selects streaming and the
+  payload is streamable.
+- api-stability.md no longer hand-asserts "193 project settings" as a bare fact -
+  it is a third copy of a number the bar's own section 7 says drifts. The page
+  now names the manifest and register_types.cpp as the authority and dates its
+  counts.
+- Bar section 8.1 no longer says "Two entries were decided here", which would go
+  stale the moment #1026 adds a third row. It names the entries without a count,
+  and says why no count is given.
+
+Refs #1011
+Refs #1025
+Refs #1030
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013MbNkf9hckmDJSE3dogs1k
+```
+klausi3D
+added a commit
+that referenced
+this pull request
+Sep 20, 2026
+docs: fence the unaccepted #1025 entry, and narrow three claims Codex…
+…
+61342d5
+```
+… found overstated
+
+Codex (independent, quota restored) reviewed this PR's diff against the source.
+It confirmed every count and constant - 33 classes, 2 singletons, 193/153/139,
+MAX_ENCODED_COEFFICIENTS=12, quantized slots 6, PackedGaussian 128 B, and the
+3-of-15 / 9-of-15 SH drops - and found no reproduced-vs-code-read label wrong.
+Four substantive findings, all verified before fixing.
+
+1. The page contradicted its own rule. It says blocking defects are not listed
+   here, then listed #1025, which the entry itself describes as still blocking
+   pending maintainer acceptance. Rather than drop the entry - the merge plan
+   requires this PR to absorb #1026's disposition - #1025 moves into a fenced
+   "Proposed, not yet accepted" section at the foot of the page, and the rule at
+   the top now names that section as its single explicit exception. Everything
+   above the fence is what the alpha ships with; nothing below it may be cited as
+   an accepted_alpha_limitation. The rule and the content now agree.
+
+2. features/index.md said imports "land as a GaussianSplatNode3D node in your
+   scene tree". They do not: the importer produces a GaussianSplatAsset resource
+   (io/resource_importer_ply.cpp:494), which you then assign to a node. I had
+   corrected the class name in this PR and left the surrounding claim wrong.
+
+3. features/streaming.md overstated the route policy. I had reworded step 2 to
+   "when the route policy selects streaming and the payload is streamable", which
+   is still wrong for the node route: a direct GaussianSplatNode3D always pins
+   SUBMISSION_RESIDENCY_HINT_RESIDENT and DELIBERATELY IGNORES route_policy
+   (nodes/gaussian_splat_node_3d.cpp:2626-2631). Streaming is opt-in through
+   GaussianSplatWorld3D and only through it. The section now says that first, and
+   step 1 is choosing the right node type rather than setting a policy that the
+   node route does not read.
+
+4. The #1008 entry claimed every payload change costs a full GPU re-upload of
+   every splat buffer. That is the resident branch only: a file-backed world
+   takes set_file_backed_payload_source() instead
+   (renderer/render_data_orchestrator.cpp:799-803), and a world with no
+   registered submission resubmits nothing. Both bounds are now stated. The
+   resident path - which is what the alpha's world route uses - is unchanged and
+   still the cost the entry discloses.
+
+Codex's fifth finding is citation drift in two pre-existing table rows
+(ply_loader.cpp:69,97,112 and the colour-grading upload anchor). Not fixed here:
+it is the same systemic anchor-drift program this PR already declines to take on
+in one change, and both rows' prose is correct.
+
+Refs #1011
+Refs #1013
+Refs #1025
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013MbNkf9hckmDJSE3dogs1k
+```
+klausi3D
+added a commit
+that referenced
+this pull request
+Sep 20, 2026
+docs: caveat the two figures taken during the GPU-contention window, …
+…
+cbff043
+```
+…and point the fence at 9.1
+
+A stray godot.head.exe left over from 2026-09-16 held this machine's GPU
+continuously until it was killed on 2026-09-19. Both measured figures this page
+quotes were taken inside that window, on 2026-09-17, so both are suspect. Found
+by the #1026 author, who had to retake their own timings for the same reason and
+flagged the window rather than only fixing their own numbers.
+
+#1030's crash rate is the one that matters more, and it cuts the opposite way to
+a timing. The issue attributes the crash to main-thread/render-thread contention
+over live metrics structures; a third process competing for the GPU is exactly
+what would make that MORE likely, so 2-of-5 may be an overestimate and the clean
+444-frame run at 4 Hz is correspondingly weaker evidence that the slower rate is
+actually safe. The defect is real - it is a bound public API taking the process
+down - but every number around it needs retaking on a quiet machine, and the
+entry now says so.
+
+#1008's medians (17 / 259 / 2124 ms) are marked an upper bound rather than a
+measurement. Figures another PR took in the same window moved about 10% when
+retaken quiet. The finding does not rest on them: a full rebuild with no
+dirty-field tracking and an unconditional re-upload is a code fact, and ~2 s at
+1M is not plausibly contention alone. But they should not be quoted as a
+baseline until retaken.
+
+Neither caveat softens a defect. Both say the shape stands and the numbers do
+not, which is the honest state.
+
+Also: the fence intro now points at the acceptance bar's 9.1 for the machinery
+behind the two conditions it names, instead of restating it. 9.1 covers the
+ledger requirement, the docs_path equality and the snapshot-completeness gap in
+more depth than this page should carry, and #1026's 10.1 collapsed to a
+cross-reference for the same reason - three documents, no overlap.
+
+Refs #1011
+Refs #1008
+Refs #1030
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013MbNkf9hckmDJSE3dogs1k
+```
+klausi3D
+added a commit
+that referenced
+this pull request
+Sep 20, 2026
+docs: fix the direction of the #1030 contamination caveat
+…
+ff8a5d6
+```
+The caveat added in the previous commit reasoned in two directions from one
+premise and got the second one backwards. Caught by the #1026 author.
+
+Premise: a stray process holding the GPU raises the hazard rate for a
+main-thread/render-thread race. From that, two consequences, and they move the
+SAME way:
+
+- 2-of-5 at per-frame polling is plausibly an OVERESTIMATE of what a user on a
+  quiet machine hits. (Correct as written.)
+- The clean 444-frame run at 4 Hz is STRONGER evidence that 4 Hz is safe, not
+  weaker - it survived while the hazard was elevated. The previous text said
+  "correspondingly weaker", which is simply the wrong direction.
+
+Both figures still need retaking: an overestimate is not a measurement and one
+clean run is not a safety proof. The practical conclusion is unchanged, but the
+reasoning was wrong on its face and a reader could have followed it into
+distrusting the workaround for no reason.
+
+The error is recorded inline rather than silently swapped, because a document
+that quietly reverses itself teaches nobody anything.
+
+No change to #1008's caveat: its finding rests on a code fact - a full rebuild
+with no dirty-field tracking and an unconditional re-upload - which survives any
+timing, so the caveat costs the defect nothing. #1030 is the case where the
+number IS the claim, which is why the two entries are worded differently.
+
+Refs #1011
+Refs #1030
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013MbNkf9hckmDJSE3dogs1k
+```
+klausi3D
+added a commit
+that referenced
+this pull request
+Sep 20, 2026
+docs: correct the #1025 entry - FSR2 does not ghost, and the old text…
+…
+cd77e94
+```
+… told users to avoid it
+
+The moving-camera case has now been measured (#1025 comment 5751997279), on a
+real scan, on both the base and #1026 binaries. The entry I shipped was a
+prediction taken verbatim from #1026's section 8.1 row, and it was wrong in the
+direction that costs a user a working feature.
+
+- FSR2: NO ghosting. 0.000 frames of staleness at scale 1.0 across a slow pan, a
+  normal pan and a dolly, at the floor set by an in-frame geometry control; at
+  scale 0.5 the splat trail is at or below the control's in two of three motions.
+- TAA: a real ~1.5 px trail, 0.27-0.87 frames stale, 6-26x the control, and it
+  does NOT grow with camera speed because the variance clip is computed from the
+  current frame.
+- Base and #1026's head agree within 0.01 frames, so the jitter fix neither
+  causes nor cures it.
+
+The workaround change is the one that matters: it said "keep scaling_3d_mode =
+bilinear at scale 1.0 and use_taa = false". Half of that was pushing users off
+FSR2 for a defect FSR2 does not have. It now says use_taa = false, which is
+Godot's own default, and states plainly that FSR2 needs no workaround.
+
+Also corrected: the entry said fixing this "edits render_forward_clustered.cpp
+and needs its own ADR". The ladder inverted under measurement - velocity
+write-back does not require depth write-back, and it is not an engine-boundary
+change, because the module already holds the buffers and the previous-frame
+camera. What survives is the honest reason it is not alpha work: a wrong velocity
+smears confidently and reads as a renderer bug rather than a missing feature.
+
+The correction is recorded in the entry rather than silently swapped, same as the
+#1030 direction fix.
+
+And a coupling that was undocumented anywhere, now on the #989 entry because that
+is where it will bite: the destination alpha #989 is about IS FSR2's reactive
+mask. Godot has no dedicated reactive texture - params.reactive is an
+alpha-swizzled view of the internal colour buffer, and the composite writes splat
+coverage into that alpha. That is WHY splats do not ghost under FSR2. Whoever
+fixes transparent_bg changes FSR2's temporal behaviour silently, and no test
+would notice.
+
+Refs #1011
+Refs #1025
+Refs #989
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01UA1aX2xX8cajR4uKaMeLN6
+```
+klausi3D
+mentioned this pull request
+Sep 20, 2026
+gaussian_splatting: give the wind field family one shared producer, unfreezing painterly's wind clock (#1018)
+#1033
+Merged
+klausi3D
+added a commit
+that referenced
+this pull request
+Sep 20, 2026
+docs: state the alpha's API promise, its real limitations, and fix do…
+…
+bc77ce3
+```
+…cs the code contradicts (#1010, #1011, #1013) (#1022)
+
+* docs: state the alpha's API promise, its real limitations, and fix docs the code contradicts (#1010, #1011, #1013)
+
+Three user-facing gaps in the alpha's disclosure, all verified against
+b915afc before being written down.
+
+API promise; the only occurrence in the repo was the acceptance bar's own table
+row. Adds docs/development/api-stability.md and two README status rows. Counts
+were re-derived, not copied: 33 registered classes (independently confirmed by
+check_doc_classes_complete.py), 2 engine singletons, 193 settings of which 153
+resolve to public and 139 are inventory_only.
+
+recorded yet" while the bar recorded two, and the page was in no nav entry.
+Replaces it with the real list and gives it a click-path. Every entry was checked
+against code first; entries that are code-reading findings rather than observed
+failures say so by name, and the bar's 8.1 table is replaced by a pointer so the
+two cannot drift again.
+
+Dropped from the draft: the "painterly and standard composites disagree by ~2%"
+item (#998). Nothing in the repo substantiates the figure, and #999 replaced the
+two independent depth implementations with a shared guard, so the premise no
+longer holds either. Not written.
+
+Corrected from the draft rather than copied: #997 does not fail because the test
+project has no PainterlyMaterial - it has four, assigned to `painterly/material`,
+which GaussianSplatNode3D does not bind, so they are discarded in silence. And
+the painterly test suite renders neither pipeline; it is a CPU software
+rasterizer. #1006 is bypassed on every resubmit path, not "only after the first
+apply". #1003's bounds are sticky once non-empty however they got there.
+
+normals are decoded at tile_binning.glsl:752). The SH band-3 item turned out to
+need the opposite of the obvious fix: sh_config.h's "16 coefficients = 48 values"
+is mathematically CORRECT, and the real defect is that the GPU layout stores DC
+plus at most 12 non-DC coefficients, so 3 third-order coefficients are dropped
+even at full quality and 9 of 15 under quantization - undocumented, unmetered,
+untested. Documented user-facing in the quantization page. sh_config.h itself is
+NOT edited: renderer/** is R2 and this change is docs-only.
+
+Also in that page: PackedGaussian has been 128 bytes since #971, not 144, so
+-44% is now -37.5%; the measured tables predate the change and are labelled as
+such rather than silently reattributed.
+
+Further verified contradictions fixed: features/streaming.md told users to
+confirm a `streaming/enabled` setting that does not exist anywhere in the module
+(route_policy is the real key); features/index.md advertised .splat files, COLMAP
+poses and a GaussianSplat3D class, none of which exist; ply-loader.md named the
+sidecar .gsplatworld instead of .gsplatcache; two registration anchors pointed at
+the wrong class.
+
+NOT fixed here, and flagged instead: 27 past-EOF code anchors across five
+user-facing docs. Re-deriving them is its own change.
+
+Refs #1010
+Refs #1011
+Refs #1013
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013MbNkf9hckmDJSE3dogs1k
+
+* docs: address self-review findings on the limitations and internal-classes pages
+
+Two defects found by /code-review high on origin/master..HEAD, both verified
+before fixing.
+
+#929 was classified twice. The page listed "splats swim relative to meshes under
+TAA or FSR2" as a shipping limitation while release-acceptance-bar.md section 11
+item 5 lists #929 as Blocking the Public Alpha, and this page's own rule says
+blockers are not listed here. A candidate bundle built from both documents would
+resolve one issue two ways, and the gate's ledger allows exactly one
+classification per issue. #929 is now named as a blocker in that neighbourhood -
+the same treatment #851 already had - and not listed as accepted.
+
+The page's admission criterion was unmet by its own entries. The preamble
+requires "evidence proving the limitation does not hide renderer correctness
+failures", while several entries state plainly that they were never reproduced
+(#1018, #983, #1005). Rather than soften the criterion, "How to read this page"
+now separates disclosure from admission: everything real is disclosed here for
+users, but an entry with no reproduction must not be pointed at by a candidate's
+docs_path until it has one. The criterion is unchanged.
+
+Also: internal-classes.md pointed the reader at #1013 for re-deriving its drifted
+registration table. #1013 is about the quantized-unlit and SH band-3 claims and
+does not mention that table, so the work was being sent to an issue that does not
+track it. The note now says plainly that it is untracked, and names a concrete
+instance (GaussianSplatAsset is at register_types.cpp:94, while the table says
+:71) so the warning is checkable rather than vague.
+
+Refs #1011
+Refs #1013
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013MbNkf9hckmDJSE3dogs1k
+
+* docs: record the TAA/FSR2 motion residual and the get_statistics crash, and stop claiming machine enforcement the gate does not do (#1011)
+
+Independent review found three omissions and a promise the page cannot keep.
+All verified before writing.
+
+alpha envelope, and appeared nowhere: not on this page, not in bar section 11.
+The page instead carried a callout saying #929 "is in the blocker set, not the
+accepted set", which #1026 overturns by splitting #929 into a fixed
+static-camera half and this residual. That callout is replaced by a #1025 entry.
+
+The wording is taken verbatim on the substance from #1026's section 8.1 row, by
+agreement with its author, so the disclosure and the disposition cannot drift.
+The measured static-camera figures (0.2525 -> 0.0900 px at FSR2 scale 1.0,
+0.3603 -> 0.0927 px at scale 0.5) are attributed to #1026 rather than claimed
+here.
+
+The entry is marked PROPOSED, not accepted. #1025 is in-envelope, so under
+section 4.1 it is a blocker until a named human accepts it, and no such line
+exists yet; #1026 marks its own row proposed for the same reason. The entry also
+warns that a ledger entry is required before the classification can pass the
+gate at all - an accepted_alpha_limitation supplied by the bundle fails unless
+the issue is in public_alpha_issue_ledger.
+
+when polled per frame - was unrecorded. It is a ClassDB-bound public API
+(nodes/gaussian_splat_node_3d.cpp:233) at the polling rate any per-node HUD would
+use. Recorded with its real workaround (poll at 4 Hz or slower; a 444-frame run
+at that rate did not crash) and with its status stated as reproduced-not-
+diagnosed: 2 crashes in 5 runs, unsymbolized backtrace, no root cause. 2 of 5 is
+a rate, not a mechanism.
+
+The page also promised something the machinery does not do. "Blocking defects are
+not listed here - they are in the blocker set and stop the release" reads as
+machine enforcement, but the candidate gate's population is
+priority:P0|priority:P1|release blocker and the section 11 alpha blockers carry
+none of those - #929 has no priority label, #851/#833/#54 are priority:P2. So
+nothing automated stops a release on them. The sentence now points at the bar's
+section 11 list by name and says plainly that it is human-maintained and mostly
+invisible to the gate, rather than implying a guarantee.
+
+Smaller corrections from the same review:
+
+- #851's symptom is now named (black contour lines, inert shadow_strength), so a
+  user who sees it can find the issue. Previously the entry said only "lighting-
+  mode fields are tracked as #851".
+- features/streaming.md step 2 still said the node creates a streaming system
+  "when streaming is enabled", immediately after the new paragraph explaining
+  there is no such setting. Now: when the route policy selects streaming and the
+  payload is streamable.
+- api-stability.md no longer hand-asserts "193 project settings" as a bare fact -
+  it is a third copy of a number the bar's own section 7 says drifts. The page
+  now names the manifest and register_types.cpp as the authority and dates its
+  counts.
+- Bar section 8.1 no longer says "Two entries were decided here", which would go
+  stale the moment #1026 adds a third row. It names the entries without a count,
+  and says why no count is given.
+
+Refs #1011
+Refs #1025
+Refs #1030
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013MbNkf9hckmDJSE3dogs1k
+
+* docs: fence the unaccepted #1025 entry, and narrow three claims Codex found overstated
+
+Codex (independent, quota restored) reviewed this PR's diff against the source.
+It confirmed every count and constant - 33 classes, 2 singletons, 193/153/139,
+MAX_ENCODED_COEFFICIENTS=12, quantized slots 6, PackedGaussian 128 B, and the
+3-of-15 / 9-of-15 SH drops - and found no reproduced-vs-code-read label wrong.
+Four substantive findings, all verified before fixing.
+
+1. The page contradicted its own rule. It says blocking defects are not listed
+   here, then listed #1025, which the entry itself describes as still blocking
+   pending maintainer acceptance. Rather than drop the entry - the merge plan
+   requires this PR to absorb #1026's disposition - #1025 moves into a fenced
+   "Proposed, not yet accepted" section at the foot of the page, and the rule at
+   the top now names that section as its single explicit exception. Everything
+   above the fence is what the alpha ships with; nothing below it may be cited as
+   an accepted_alpha_limitation. The rule and the content now agree.
+
+2. features/index.md said imports "land as a GaussianSplatNode3D node in your
+   scene tree". They do not: the importer produces a GaussianSplatAsset resource
+   (io/resource_importer_ply.cpp:494), which you then assign to a node. I had
+   corrected the class name in this PR and left the surrounding claim wrong.
+
+3. features/streaming.md overstated the route policy. I had reworded step 2 to
+   "when the route policy selects streaming and the payload is streamable", which
+   is still wrong for the node route: a direct GaussianSplatNode3D always pins
+   SUBMISSION_RESIDENCY_HINT_RESIDENT and DELIBERATELY IGNORES route_policy
+   (nodes/gaussian_splat_node_3d.cpp:2626-2631). Streaming is opt-in through
+   GaussianSplatWorld3D and only through it. The section now says that first, and
+   step 1 is choosing the right node type rather than setting a policy that the
+   node route does not read.
+
+4. The #1008 entry claimed every payload change costs a full GPU re-upload of
+   every splat buffer. That is the resident branch only: a file-backed world
+   takes set_file_backed_payload_source() instead
+   (renderer/render_data_orchestrator.cpp:799-803), and a world with no
+   registered submission resubmits nothing. Both bounds are now stated. The
+   resident path - which is what the alpha's world route uses - is unchanged and
+   still the cost the entry discloses.
+
+Codex's fifth finding is citation drift in two pre-existing table rows
+(ply_loader.cpp:69,97,112 and the colour-grading upload anchor). Not fixed here:
+it is the same systemic anchor-drift program this PR already declines to take on
+in one change, and both rows' prose is correct.
+
+Refs #1011
+Refs #1013
+Refs #1025
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013MbNkf9hckmDJSE3dogs1k
+
+* docs: caveat the two figures taken during the GPU-contention window, and point the fence at 9.1
+
+A stray godot.head.exe left over from 2026-09-16 held this machine's GPU
+continuously until it was killed on 2026-09-19. Both measured figures this page
+quotes were taken inside that window, on 2026-09-17, so both are suspect. Found
+by the #1026 author, who had to retake their own timings for the same reason and
+flagged the window rather than only fixing their own numbers.
+
+#1030's crash rate is the one that matters more, and it cuts the opposite way to
+a timing. The issue attributes the crash to main-thread/render-thread contention
+over live metrics structures; a third process competing for the GPU is exactly
+what would make that MORE likely, so 2-of-5 may be an overestimate and the clean
+444-frame run at 4 Hz is correspondingly weaker evidence that the slower rate is
+actually safe. The defect is real - it is a bound public API taking the process
+down - but every number around it needs retaking on a quiet machine, and the
+entry now says so.
+
+#1008's medians (17 / 259 / 2124 ms) are marked an upper bound rather than a
+measurement. Figures another PR took in the same window moved about 10% when
+retaken quiet. The finding does not rest on them: a full rebuild with no
+dirty-field tracking and an unconditional re-upload is a code fact, and ~2 s at
+1M is not plausibly contention alone. But they should not be quoted as a
+baseline until retaken.
+
+Neither caveat softens a defect. Both say the shape stands and the numbers do
+not, which is the honest state.
+
+Also: the fence intro now points at the acceptance bar's 9.1 for the machinery
+behind the two conditions it names, instead of restating it. 9.1 covers the
+ledger requirement, the docs_path equality and the snapshot-completeness gap in
+more depth than this page should carry, and #1026's 10.1 collapsed to a
+cross-reference for the same reason - three documents, no overlap.
+
+Refs #1011
+Refs #1008
+Refs #1030
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013MbNkf9hckmDJSE3dogs1k
+
+* docs: fix the direction of the #1030 contamination caveat
+
+The caveat added in the previous commit reasoned in two directions from one
+premise and got the second one backwards. Caught by the #1026 author.
+
+Premise: a stray process holding the GPU raises the hazard rate for a
+main-thread/render-thread race. From that, two consequences, and they move the
+SAME way:
+
+- 2-of-5 at per-frame polling is plausibly an OVERESTIMATE of what a user on a
+  quiet machine hits. (Correct as written.)
+- The clean 444-frame run at 4 Hz is STRONGER evidence that 4 Hz is safe, not
+  weaker - it survived while the hazard was elevated. The previous text said
+  "correspondingly weaker", which is simply the wrong direction.
+
+Both figures still need retaking: an overestimate is not a measurement and one
+clean run is not a safety proof. The practical conclusion is unchanged, but the
+reasoning was wrong on its face and a reader could have followed it into
+distrusting the workaround for no reason.
+
+The error is recorded inline rather than silently swapped, because a document
+that quietly reverses itself teaches nobody anything.
+
+No change to #1008's caveat: its finding rests on a code fact - a full rebuild
+with no dirty-field tracking and an unconditional re-upload - which survives any
+timing, so the caveat costs the defect nothing. #1030 is the case where the
+number IS the claim, which is why the two entries are worded differently.
+
+Refs #1011
+Refs #1030
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013MbNkf9hckmDJSE3dogs1k
+
+* docs: correct the #1025 entry - FSR2 does not ghost, and the old text told users to avoid it
+
+The moving-camera case has now been measured (#1025 comment 5751997279), on a
+real scan, on both the base and #1026 binaries. The entry I shipped was a
+prediction taken verbatim from #1026's section 8.1 row, and it was wrong in the
+direction that costs a user a working feature.
+
+- FSR2: NO ghosting. 0.000 frames of staleness at scale 1.0 across a slow pan, a
+  normal pan and a dolly, at the floor set by an in-frame geometry control; at
+  scale 0.5 the splat trail is at or below the control's in two of three motions.
+- TAA: a real ~1.5 px trail, 0.27-0.87 frames stale, 6-26x the control, and it
+  does NOT grow with camera speed because the variance clip is computed from the
+  current frame.
+- Base and #1026's head agree within 0.01 frames, so the jitter fix neither
+  causes nor cures it.
+
+The workaround change is the one that matters: it said "keep scaling_3d_mode =
+bilinear at scale 1.0 and use_taa = false". Half of that was pushing users off
+FSR2 for a defect FSR2 does not have. It now says use_taa = false, which is
+Godot's own default, and states plainly that FSR2 needs no workaround.
+
+Also corrected: the entry said fixing this "edits render_forward_clustered.cpp
+and needs its own ADR". The ladder inverted under measurement - velocity
+write-back does not require depth write-back, and it is not an engine-boundary
+change, because the module already holds the buffers and the previous-frame
+camera. What survives is the honest reason it is not alpha work: a wrong velocity
+smears confidently and reads as a renderer bug rather than a missing feature.
+
+The correction is recorded in the entry rather than silently swapped, same as the
+#1030 direction fix.
+
+And a coupling that was undocumented anywhere, now on the #989 entry because that
+is where it will bite: the destination alpha #989 is about IS FSR2's reactive
+mask. Godot has no dedicated reactive texture - params.reactive is an
+alpha-swizzled view of the internal colour buffer, and the composite writes splat
+coverage into that alpha. That is WHY splats do not ghost under FSR2. Whoever
+fixes transparent_bg changes FSR2's temporal behaviour silently, and no test
+would notice.
+
+Refs #1011
+Refs #1025
+Refs #989
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01UA1aX2xX8cajR4uKaMeLN6
+
+---------
+
+Co-authored-by: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+klausi3D
+mentioned this pull request
+Sep 20, 2026
+docs: record the #1025 acceptance and make the 8.1 row a real disclosure (#929, #1025)
+#1039
+Merged
+klausi3D
+added a commit
+that referenced
+this pull request
+Sep 20, 2026
+docs: answer both reviews on the #1025 acceptance recording (#1025, #929
+…
+f65b421
+```
+)
+
+Codex and /code-review high both ran on 9d78be2 and converged on the same
+first finding. All six are answered here; none is waived.
+
+- **Condition 2's basis was refuted two hundred lines away** (both reviewers).
+  §10.1 condition 2 wants work of a higher risk class, "in practice R3 at the
+  engine boundary", while the §8.1 row says the velocity write-back is *not* an
+  engine-boundary R3 change. Both are true of different questions, and the
+  document now says which: the remainder classifies **R2 by path glob** and is
+  *warranted* R3 by behaviour — it writes an engine-owned render target that
+  engine stages consume — which is why #1025 carries `needs-adr` and would need
+  two independent reviews and a CODEOWNER. That is "class follows the design,
+  not the cheaper glob". The failure branch is stated rather than hidden: read
+  literally as requiring an edit outside the module, condition 2 fails and
+  #1025 returns to the §4 blocker query. No condition is re-read to fit the
+  instance.
+- **Condition 4's record is an agent transcription**, and §10.1 already says
+  such a transcription is not the decision itself. The same standard is now
+  applied to this one: it is the standing record, and the §9 human sign-off —
+  which already covers the accuracy of the known-issue disclosure — is where it
+  is confirmed rather than assumed if no maintainer-authored line appears.
+- **The struck §11 heading still read "splats swim under FSR2"** to a skimmer.
+  It now carries what it was and what remains: the static-camera jitter defect,
+  fixed in #1026, with a TAA-only residual and no FSR2 ghosting.
+- **The determinism gate was presented as unconditionally clean.** The source
+  also reports an earlier matrix failing it 5 of 6 runs by 3-9 LSB over 49-963
+  of 16,588,800 pixels, and warns that an exact-zero assertion extended to a
+  moving camera would be flaky. Both are now in the entry.
+- **The page's verification anchor predated the entry above it.** `b915afc51c5`
+  is before #1026, so checking the new entry out there would show the opposite
+  behaviour; the anchor now excepts entries that name their own commit, and the
+  #1025 entry names `bc77ce31e9c`.
+- **§9.1's re-count said "three" and listed four.** #1030 is separated out: §11
+  does not list it as a blocker, the limitations page discloses it, and it is
+  unlabelled, so it is in neither population.
+- **A third stale location was not swept.** The streaming-envelope ADR still
+  called #929 an open gate-invisible blocker and its obligations table still
+  asked for a label on #929 and #1025. Both are amended in place with a dated
+  note rather than rewritten, and the table now points #1025 at #1038.
+
+One accuracy fix of my own, not from either review: "6-26x an in-frame control"
+holds for the two pans. On the dolly the splat trail is 2x the control in frames
+and, at 0.36 px against 0.54 px, smaller than the control's in pixels. Said
+plainly rather than rounded up.
+
+Checks re-run at this head: run_module_tests.py --guard-only (exit 0, zero
+"guard failed"/"FAILED (" lines, "Guard-only mode complete"),
+validate_repo_contract.py, tests/agentic (132 tests, OK), check_links.py,
+check_renderer_release_gates.py contract mode.
+
+Refs #929, #1025, #1038
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01UA1aX2xX8cajR4uKaMeLN6
+```
+klausi3D
+mentioned this pull request
+Sep 22, 2026
+docs: disclose the overlap-record drop artifact, measured (#54)
+#1043
+Merged
+klausi3D
+mentioned this pull request
+Oct 4, 2026
+Raster payload stores the splat screen centre as fp16 in pixels: 1 px snapping for x >= 1024, so the right half of every 1080p frame renders off-centre and TAA jitter is nullified there
+#1153
+Open
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

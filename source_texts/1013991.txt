@@ -1,0 +1,179 @@
+tl;dr: The rectilinear chunks spec is not general enough for VirtualiZarr Summary In the rectilinear chunk grid, each chunk along a dimension is described by a single number. That number simultaneously determines (a) how many elements th...
+
+Rectilinear chunk grids: a chunk's encoded extent can only exceed its logical extent for the final chunk · Issue #74 · zarr-developers/zarr-extensions · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Rectilinear chunk grids: a chunk's encoded extent can only exceed its logical extent for the final chunk #74
+New issue
+Copy link
+New issue
+Copy link
+Open
+#75
+Open
+Rectilinear chunk grids: a chunk's encoded extent can only exceed its logical extent for the final chunk#74
+#75
+Copy link
+Description
+TomNicholas
+opened on Sep 18, 2026
+Issue body actions
+tl;dr: The rectilinear chunks spec is not general enough for VirtualiZarr
+Summary
+In the rectilinear chunk grid, each chunk along a dimension is described by a single number. That number simultaneously determines (a) how many elements the chunk decodes to, and (b) where the next chunk begins. Those two meanings can only diverge for the last chunk along a dimension, via the array shape falling short of the sum of the edges.
+This makes it impossible to describe an array in which a chunk somewhere in the middle decodes to more elements than it contributes.
+Throughout I'll use:
+encoded extent — how many elements the stored chunk decodes to
+logical extent — how many elements it contributes to the array
+Why it matters
+The motivating case is presenting several existing files as a single array without rewriting data (this came up in VirtualiZarr). Combining N files whose lengths aren't multiples of their chunk size is a large part of the motivation for variable-length chunks in the first place.
+Whether it's expressible depends on how the source format stores a boundary chunk:
+Formats that store a short final chunk at its true size are fine — TIFF strips, for example, where a 100-row image at 30 rows/strip yields StripByteCounts = (1500, 1500, 1500, 500). Encoded equals logical, so real per-chunk lengths can be declared honestly and concatenation works, compressed included.
+Formats that pad the boundary chunk to the full chunk size — HDF5/netCDF chunks, TIFF tiles (i.e. the two most important formats) — encode 200 elements where only 150 are real. Such a chunk can only ever be placed last, so a file like that can't be combined with anything following it.
+For uncompressed padded data there's a workaround: reference only the real prefix of the stored bytes, so the encoded extent genuinely becomes 150. For compressed padded data the blob is atomic and inflates to the full 200, so there is none.
+It seems worth deciding deliberately whether this case is in or out of scope.
+Current semantics (as I understand them)
+```
+{"name": "rectilinear",
+ "configuration": {"kind": "inline", "chunk_shapes": [[200, 200, 150]]}}
+```
+Per dimension, chunk_shapes gives one value per chunk (as a bare integer shorthand, an explicit list, or its run-length encoding). For chunk index i, that value is both its encoded extent and, through the cumulative sum of preceding values, its position.
+The extension already permits encoded > logical: the edges may overshoot the array shape, in which case the final chunk is cut short. With shape = [550] and chunk_shapes = [[200, 200, 200]], the third chunk decodes to 200 elements and contributes 150.
+The gap
+That overshoot is only expressible at the tail, because it's inferred from the array shape rather than stated per chunk. Consider two arrays, each shape = [550] with a regular grid of 200, that I want to present as one array of 1100 without re-encoding anything. The required grid is:
+chunk
+0
+1
+2
+3
+4
+5
+encoded extent
+200
+200
+200
+200
+200
+200
+logical extent
+200
+200
+150
+200
+200
+150
+Chunk 2 must decode to 200 while advancing the grid by only 150. There's no way to write that down:
+chunk_shapes = [[200, 200, 150, 200, 200, 150]] — positions are right, but chunk 2 is now declared to decode to 150 and the stored chunk yields 200.
+chunk_shapes = [[200, 200, 200, 200, 200, 200]] — decoding is right, but chunk 3 starts at 600 instead of 550, so 50 elements of chunk 2's padding appear as array data and everything after is displaced.
+Reproducer (zarr-python 3.2.1)
+```
+import numpy as np, zarr
+from zarr.storage import MemoryStore
+from zarr.core.sync import sync
+from zarr.core.buffer import default_buffer_prototype
+
+zarr.config.set({"array.rectilinear_chunks": True})
+
+# a producer wrote 150 values into an array chunked at 200, so the chunk is
+# encoded at its full 200-element size; compressed, it is an atomic blob
+s = MemoryStore()
+a = zarr.create_array(s, shape=(150,), chunks=(200,), dtype="i8",
+                      compressors=zarr.codecs.ZstdCodec())
+a[:] = np.arange(150)
+short_blob = sync(s.get("c/0", default_buffer_prototype()))
+
+s2 = MemoryStore()
+b = zarr.create_array(s2, shape=(200,), chunks=(200,), dtype="i8",
+                      compressors=zarr.codecs.ZstdCodec())
+b[:] = np.arange(150, 350)
+full_blob = sync(s2.get("c/0", default_buffer_prototype()))
+
+def build(edges, blobs, shape=(350,)):
+    st = MemoryStore()
+    arr = zarr.create_array(st, shape=shape, chunks=[list(edges)], dtype="i8",
+                            compressors=zarr.codecs.ZstdCodec(), overwrite=True)
+    for i, blob in enumerate(blobs):
+        sync(st.set(f"c/{i}", blob))
+    return arr
+
+# as the FINAL chunk -- works, via the shape/edge-sum overshoot
+build((200, 200), [full_blob, short_blob])[:]
+
+# as an INTERIOR chunk -- cannot be expressed
+build((150, 200), [short_blob, full_blob])[:]
+# ValueError: cannot reshape array of size 200 into shape (150,)
+
+# declaring the encoded extent instead displaces everything after it
+build((200, 200), [short_blob, full_blob])[:]
+#   elements 145..155 -> [145 146 147 148 149 0 0 0 0 0 0]
+#   expected             [145 146 147 148 149 150 151 152 153 154 155]
+```
+Possible direction
+Allow the encoded extent to be stated per chunk, separately from the logical extent, with chunk positions advancing by the logical extent while decoding uses the encoded one. That would generalise the existing tail overshoot rather than introduce a new concept.
+I haven't thought hard about the serialisation, and it isn't free — it's a second number per chunk, against a format that currently compresses well via RLE, so it'd want to stay optional and absent in the common case.
+Worth noting the reference implementation already carries the two separately downstream: its per-chunk descriptor has distinct slices (valid region) and codec_shape (decode buffer) fields, with the comment "For interior chunks these are equal." The codec path handles them differing — that's what makes the tail case work on a compressed chunk. The constraint is in what the metadata can express, not in the machinery underneath.
+Activity
+LDeakin commented on Sep 18, 2026
+LDeakin
+on Sep 18, 2026
+Member
+More actions
+encoded extent — how many elements the stored chunk decodes to
+logical extent — how many elements it contributes to the array
+Introducing these is a major change to chunk grid functionality. An alternative is if you only need to pad chunks to a fixed size, that could be achieved with a codec.
+jbms commented on Sep 19, 2026
+jbms
+on Sep 19, 2026
+Contributor
+More actions
+You might want to also allow specifying an arbitrary offset within each chunk. But then next you may find you need different codecs for different chunks. Ultimately this lack of flexibility is why a dedicated representation of a concatenation of multiple zarr arrays (e.g. https://google.github.io/tensorstore/driver/stack/index.html#driver-stack) may be better than trying to do it indirectly via a rectilinear chunk grid + redirection implemented at the store level.
+d-v-b commented on Sep 19, 2026
+d-v-b
+on Sep 19, 2026
+Last edited by d-v-b
+Contributor
+More actions
+this change would effectively change the role of the chunk grid -- instead of simply declaring the shape of each decoded chunk, the chunk grid would define a transformation in array space that is applied to each chunk. IMO that kind of thing is better served by codecs, and as jeremy notes there will be chunk transformations that can't be expressed by the codecs field of a single array, and in this case a higher-level representation of concatenated arrays might be the right target. his example from tensorstore shows that encoding this in JSON isn't problematic. so perhaps a zarr convention defining array concatenation is an easier place to start than changing chunk grid semantics.
+d-v-b commented on Sep 19, 2026
+d-v-b
+on Sep 19, 2026
+Contributor
+More actions
+another solution that might be more attractive than expressing this via array concatenation: a zarr extension / convention that declares the domain of the array, as a selection / subset of the full array domain. for trailing hdf5 chunks, this would allow two levels of representation: the raw zarr array representation would faithfully mirror the low-level hdf5 representation, where there is a fully allocated chunk. the extension / convention representation would tell consumers that the array's domain does not include the pad regions, and so consumers accessing through that level would see the hdf5 application level perspective, where the array is truncated.
+to do this efficiently in array attributes we would need a JSON serialization of orthogonal indexing with slices instead of explicit indices. that would be in-scope for the tensorstore-based array selection spec i have been working on: https://github.com/zarr-developers/ndsel.
+TomNicholas commented on Oct 12, 2026
+TomNicholas
+on Oct 12, 2026
+MemberAuthor
+More actions
+An alternative is if you only need to pad chunks to a fixed size, that could be achieved with a codec.
+Only if each file has internal chunks of the same size, which they generally don't.
+you may find you need different codecs for different chunks
+I do think we need that.
+a dedicated representation of a concatenation of multiple zarr arrays
+I see many problems with this idea.
+Please see zarr-developers/zarr-specs#399 for details.
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

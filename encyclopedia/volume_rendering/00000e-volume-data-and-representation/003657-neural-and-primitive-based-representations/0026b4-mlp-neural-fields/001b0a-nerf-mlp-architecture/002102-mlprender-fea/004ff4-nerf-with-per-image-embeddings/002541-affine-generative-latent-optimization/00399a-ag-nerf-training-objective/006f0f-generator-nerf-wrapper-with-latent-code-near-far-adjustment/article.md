@@ -1,0 +1,127 @@
+# Generator (NeRF Wrapper with Latent Code & Near/Far Adjustment)
+
+Also called: Latent Code NeRF Generator, NeRF Wrapper with Latent Code
+
+## Overview
+Wraps a NeRF network to render rays conditioned on a latent code $z$, handling camera pose sampling, ray generation, and dynamic near/far plane adjustment for variable radii [S1, unofficial]. It differs from standard NeRF renderers by injecting the latent code into the feature space and dynamically shifting clipping planes based on the camera's distance from the origin [S1, unofficial].
+
+## How it works
+**Inputs:**
+- $z$: Latent code tensor of shape $(N, z_{dim})$ [S1, unofficial].
+- $y$: Optional class label or condition tensor [S1, unofficial].
+- $H, W$: Image height and width [S1, unofficial].
+- $focal$: Camera focal length [S1, unofficial].
+- $radius$: Float or tuple $(r_{min}, r_{max})$ defining the spherical sampling range for camera poses [S1, unofficial].
+- $render\_kwargs$: Dictionary containing rendering parameters (`near`, `far`, `chunk`, `raw_noise_std`) [S1, unofficial].
+
+**Outputs:**
+- Rendered RGB image tensor (normalized to $[-1, 1]$) [S1, unofficial].
+- Optional depth, accumulation, and auxiliary maps in test mode [S1, unofficial].
+
+**Data Structures:**
+- `render_kwargs`: Dictionary passed to the underlying NeRF renderer. Key fields include `near`, `far`, `features` (stores $z$), `chunk` (batch size for chunked rendering), and `raw_noise_std` (standard deviation for raw noise added to volume rendering) [S1, unofficial].
+
+**Steps:**
+1. **Initialization**: Store image dimensions ($H, W$), focal length, radius configuration, ray sampler, and render kwargs. Store coordinates for validation [S1, unofficial].
+2. **Ray Generation**: If rays are not provided, generate them via `sample_rays()`, which samples camera poses and calls the sampler with $(H, W, focal, pose)$ to return batch rays [S1, unofficial].
+3. **Kwargs Selection**: Select training or testing render kwargs based on `use_test_kwargs`. Create a dictionary copy to avoid mutating shared state [S1, unofficial].
+4. **Near/Far Adjustment**: If `radius` is a tuple $(r_{min}, r_{max})$, adjust clipping planes: compute ray origin norm $r_o = \|o\|$, compute shift $shift = (r_{max} - r_o) \cdot \mathbf{1}$, update $near \leftarrow near - shift$ and $far \leftarrow far - shift$, and assert $near \ge 0$ and $far \ge 0$ [S1, unofficial].
+5. **Latent Injection**: Set `render_kwargs['features'] = z` [S1, unofficial].
+6. **Rendering**: Call the volume rendering routine with $(H, W, focal, chunk, rays, \text{**render\_kwargs})$ [S1, unofficial].
+7. **Post-processing**: Apply $x_{out} = x_{in} \cdot 2 - 1$ to map outputs from $[0, 1]$ to $[-1, 1]$ [S1, unofficial].
+8. **Noise Decay**: During training, linearly decay `raw_noise_std` from `initial_raw_noise_std` to $0$ over `end_it=5000` iterations [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+
+class NeRFGenerator(nn.Module):
+    def __init__(self, nerf_network, H, W, focal, radius, ray_sampler, 
+                 render_kwargs_train, render_kwargs_test, chunk=1024*3, 
+                 initial_raw_noise_std=0.0, end_it=5000):
+        super().__init__()
+        self.nerf = nerf_network
+        self.H = H
+        self.W = W
+        self.focal = focal
+        self.radius = radius
+        self.ray_sampler = ray_sampler
+        self.render_kwargs_train = render_kwargs_train
+        self.render_kwargs_test = render_kwargs_test
+        self.chunk = chunk
+        self.initial_raw_noise_std = initial_raw_noise_std
+        self.end_it = end_it
+        self.current_it = 0
+
+    def decrease_nerf_noise(self):
+        """Linearly decay raw_noise_std from initial to 0 over end_it iterations."""
+        if self.current_it < self.end_it:
+            return self.initial_raw_noise_std * (1.0 - self.current_it / self.end_it)
+        return 0.0
+
+    def sample_rays(self, pose=None):
+        """Generate rays from camera pose."""
+        if pose is None:
+            pose = self.sample_pose() # [G] Standard pose sampling based on radius/ranges
+        return self.ray_sampler(self.H, self.W, self.focal, pose)
+
+    def forward(self, z, y=None, rays=None, use_test_kwargs=False):
+        """Render image conditioned on latent code z."""
+        if rays is None:
+            rays = self.sample_rays()
+        render_kwargs = self.render_kwargs_test.copy() if use_test_kwargs else self.render_kwargs_train.copy()
+        if isinstance(self.radius, tuple):
+            r_min, r_max = self.radius
+            rays_radius = rays[0].norm(dim=-1)
+            shift = (r_max - rays_radius).view(-1, 1).float()
+            render_kwargs['near'] -= shift
+            render_kwargs['far'] -= shift
+            assert torch.all(render_kwargs['near'] >= 0), "Near plane became negative"
+            assert torch.all(render_kwargs['far'] >= 0), "Far plane became negative"
+        render_kwargs['features'] = z
+        if not use_test_kwargs:
+            render_kwargs['raw_noise_std'] = self.decrease_nerf_noise()
+            self.current_it += 1
+        rgb, disp, acc, extras = render(self.H, self.W, self.focal, self.chunk, rays, **render_kwargs)
+        rgb_out = rgb.view(len(rgb), -1) * 2 - 1
+        if use_test_kwargs:
+            return rgb_out, disp, acc, extras
+        return rgb_out
+
+def render(H, W, focal, chunk, rays, **kwargs):
+    """Standard volume rendering routine. Samples points along rays, queries the NeRF MLP with kwargs['features'], and integrates density/RGB."""
+    # [G] Standard volume rendering implementation:
+    # 1. Sample T points along each ray between near and far planes.
+    # 2. Query NeRF MLP with positions and kwargs['features'] to get density and RGB.
+    # 3. Apply raw noise to density if raw_noise_std > 0.
+    # 4. Compute weights via alpha blending.
+    # 5. Return weighted RGB, depth, accumulation, and extras.
+    pass
+```
+
+**Parameters:**
+- `radius`: Float or tuple $(r_{min}, r_{max})$ controlling camera distance from origin [S1, unofficial].
+- `raw_noise_std`: Float, standard deviation for raw noise added to volume rendering, decays during training [S1, unofficial].
+- `chunk`: Integer, batch size for chunked rendering to manage memory [S1, unofficial].
+- `range_u`, `range_v`: Tuples, spherical coordinate ranges for camera sampling [S1, unofficial].
+
+**Edge Cases:**
+- **Negative Planes**: If the camera is too close to the origin relative to `r_max`, the adjusted `near` plane may become negative; the implementation asserts against this [S1, unofficial].
+- **Precision**: Ray origin norms and shift calculations assume consistent scaling between ray origins and the radius definition [G].
+
+## Operating characteristics
+- **Time Complexity**: Linear with respect to the number of pixels ($H \times W$) and the number of sampled points per ray [G].
+- **Memory Complexity**: Dominated by the NeRF network weights and intermediate activation maps for chunked rays; the latent code $z$ adds negligible overhead [G].
+- **Strengths**: Enables conditional generation of 3D-consistent images; dynamic near/far adjustment ensures robust rendering across varying camera distances without manual clipping plane tuning [S1, unofficial].
+- **Limitations**: Performance is bound by the underlying NeRF's MLP evaluation speed; the noise decay schedule is fixed and may not be optimal for all datasets [S1, unofficial].
+- **When to use**: Training a GAN for 3D-aware image synthesis where the generator needs to output consistent 3D structures conditioned on latent codes [S1, unofficial].
+
+## Background
+Originates from code implementing a NeRF wrapper for generative training loops, specifically adapted within the DeepScan3D project for single X-ray to 3D CT reconstruction [S1, unofficial]. It extends standard NeRF architectures by integrating generative latent codes and GAN-specific training techniques such as raw noise injection and dynamic clipping [S1, unofficial].
+
+## Sources
+[S1] sanchit1606/DeepScan3D-Single-X-ray-to-3D-CT-Reconstruction-using-Neural-Radiance-Fields-, https://github.com/sanchit1606/DeepScan3D-Single-X-ray-to-3D-CT-Reconstruction-using-Neural-Radiance-Fields-, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,210 @@
+--- v006.md
++++ v007.md
+@@ -4,23 +4,26 @@
+ 
+ ## Overview
+-Global conditioning encodes the entire information of a data sample into a single latent vector $z \in \mathcal{Z}$ [S2, unofficial]. This vector represents global properties such as scene identity or modality, distinguishing it from local conditioning which distributes information across spatial coordinates [S2, unofficial]. It serves as the primary input to the mapping network, which transforms this global code into an intermediate non-linear latent space suitable for conditioning the radiance field [S1].
++Global conditioning encodes the entire information of a data sample into a single latent vector $z$, allowing the neural field to distinguish between different instances [S2, unofficial]. It serves as the primary mechanism for instance-specific variation in latent code conditioning, contrasting with local conditioning which distributes information across spatial regions [S2, unofficial]. It is distinct from sibling methods by using a dedicated network (Mapping Network) to transform the raw latent code into a suitable intermediate representation, rather than directly concatenating $z$ or using a HyperNetwork to generate weights [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   Input: Global latent code $z$.
+-*   Output: Transformed latent code $z'$ with shape 128.
++*   Input: Global latent code $z \in \mathbb{R}^d$ (typically $d=512$) [S1].
++*   Output: Intermediate latent code $w \in \mathbb{R}^{128}$ [S1].
+ 
+ **Data Structures:**
+-The mapping network is a simple feedforward MLP. No complex data structures are required beyond the latent vector itself.
++The Mapping Network is a Multi-Layer Perceptron (MLP) consisting of:
++1.  A normalization layer.
++2.  Three linear layers.
++3.  Activation functions applied after each linear layer.
+ 
+ **Steps:**
+-1.  **Normalization:** Normalize the input vector $z$. The specific normalization method (e.g., LayerNorm) is not detailed in the sources, but it is a required step before the linear layers [S1].
+-2.  **Linear Transformation 1:** Apply a linear layer to the normalized $z$.
+-3.  **Activation 1:** Apply LeakyReLU with negative slope 0.2.
+-4.  **Linear Transformation 2:** Apply a second linear layer.
+-5.  **Activation 2:** Apply LeakyReLU with negative slope 0.2.
+-6.  **Linear Transformation 3:** Apply a third linear layer.
+-7.  **Activation 3:** Apply LeakyReLU with negative slope 0.2.
+-8.  **Output:** The result is the output vector $z'$ of shape 128 [S1].
++1.  **Normalize:** Apply normalization to input $z$. The specific normalization method (e.g., LayerNorm) is not detailed in the source, but it is a required preprocessing step [S1].
++2.  **Linear Layer 1:** Compute $h_1 = \text{Linear}_1(z)$.
++3.  **Activation 1:** Apply LeakyReLU with negative slope 0.2: $a_1 = \text{LeakyReLU}(h_1, \alpha=0.2)$ [S1].
++4.  **Linear Layer 2:** Compute $h_2 = \text{Linear}_2(a_1)$.
++5.  **Activation 2:** Apply LeakyReLU: $a_2 = \text{LeakyReLU}(h_2, \alpha=0.2)$ [S1].
++6.  **Linear Layer 3:** Compute $h_3 = \text{Linear}_3(a_2)$.
++7.  **Activation 3:** Apply LeakyReLU: $w = \text{LeakyReLU}(h_3, \alpha=0.2)$ [S1].
++8.  **Output:** The result $w$ has shape 128 [S1].
+ 
+ **Pseudocode:**
+@@ -30,113 +33,76 @@
+ 
+ class MappingNetwork(nn.Module):
+-    def __init__(self, latent_dim: int = 512):
++    def __init__(self, input_dim=512, output_dim=128):
+         super().__init__()
+-        # Note: Input dimension is not explicitly stated in sources, 
+-        # but standard StyleGAN uses 512. We assume latent_dim.
+-        self.norm = nn.LayerNorm(latent_dim)
+-        self.linear1 = nn.Linear(latent_dim, 128)
+-        self.linear2 = nn.Linear(128, 128)
+-        self.linear3 = nn.Linear(128, 128)
+-        self.activation = nn.LeakyReLU(negative_slope=0.2)
+-
+-    def forward(self, z: torch.Tensor) -> torch.Tensor:
++        # Normalization layer is required but type not specified in source [S1]
++        # Using LayerNorm as a standard default for latent codes [G]
++        self.norm = nn.LayerNorm(input_dim)
++        self.linear1 = nn.Linear(input_dim, output_dim)
++        self.linear2 = nn.Linear(output_dim, output_dim)
++        self.linear3 = nn.Linear(output_dim, output_dim)
++        
++    def forward(self, z):
+         # Step 1: Normalize
+-        z = self.norm(z)
+-        # Step 2-3: Linear + Activation
+-        z = self.activation(self.linear1(z))
+-        # Step 4-5: Linear + Activation
+-        z = self.activation(self.linear2(z))
+-        # Step 6-7: Linear + Activation
+-        z = self.activation(self.linear3(z))
++        z_norm = self.norm(z)
++        
++        # Step 2-3: Linear 1 + LeakyReLU(0.2)
++        h1 = self.linear1(z_norm)
++        a1 = torch.nn.functional.leaky_relu(h1, negative_slope=0.2)
++        
++        # Step 4-5: Linear 2 + LeakyReLU(0.2)
++        h2 = self.linear2(a1)
++        a2 = torch.nn.functional.leaky_relu(h2, negative_slope=0.2)
++        
++        # Step 6-7: Linear 3 + LeakyReLU(0.2)
++        h3 = self.linear3(a2)
++        w = torch.nn.functional.leaky_relu(h3, negative_slope=0.2)
++        
+         # Step 8: Output shape is 128
+-        return z
++        return w
+ ```
+ 
+ **Parameters:**
++*   Input dimension: 512 (typical for StyleGAN-based architectures) [S1].
+ *   Output dimension: 128 [S1].
+-*   Activation: LeakyReLU(0.2) [S1].
++*   Activation: LeakyReLU with $\alpha=0.2$ [S1].
+ 
+ **Edge Cases:**
+-*   Input dimension: The source does not specify the input dimension of $z$. Implementers must ensure the input $z$ matches the expected dimension of the first linear layer [G].
++*   If $z$ is not normalized, the linear layers may suffer from unstable gradients or saturation [S1].
++*   The source does not specify the weight initialization scheme [S1].
+ 
+ ## Subtopics
+ 
+ ### Global Generator
+-The Global Generator extends global conditioning by mapping a single global latent code $z$ to a 2D grid of local latent codes $W$, representing the spatial layout of the scene [S1]. It is chosen when the scene requires spatially varying global properties rather than a single uniform code [S1].
+-
+-**Definition:** Maps $z$ to a 2D grid $W$ [S1].
+-
+-**Steps:**
+-1.  **Initialization:** Initialize with a learnable constant input tensor [S1].
+-2.  **First Layer:** Apply a 3×3 modulated convolution conditioned on $z$.
+-3.  **Upsampling Pairs:** For subsequent layers, apply pairs of modulated convolutions. Each pair upsamples the resolution by 2× using a transposed convolution (stride 2) followed by bilinear filtering [S1].
+-4.  **Activation:** Apply LeakyReLU(0.2) after each convolution [S1].
+-
+-**Parameters:**
+-*   Output resolution: 32×32 [S1]. This controls the spatial granularity of the local codes [S1].
+-*   Channel depth: Starts at 256, ending at 32 (see Table 8 in [S1]).
+-
+-**Pseudocode:**
+-```python
+-import torch
+-import torch.nn as nn
+-
+-class GlobalGenerator(nn.Module):
+-    def __init__(self, latent_dim: int = 512, out_res: int = 32):
+-        super().__init__()
+-        # Constant input initialization
+-        self.const_input = nn.Parameter(torch.randn(256, 4, 4))
+-        
+-        # First modulated conv (3x3)
+-        self.conv1 = ModulatedConv2d(256, 256, 3, latent_dim)
+-        
+-        # Upsampling pairs
+-        # 4x4 -> 8x8
+-        self.conv2 = ModulatedConv2d(256, 256, 3, latent_dim)
+-        self.conv3 = ModulatedConv2d(256, 256, 3, latent_dim)
+-        
+-        # 8x8 -> 16x16
+-        self.conv4 = ModulatedConv2d(256, 256, 3, latent_dim)
+-        self.conv5 = ModulatedConv2d(256, 256, 3, latent_dim)
+-        
+-        # 16x16 -> 32x32
+-        self.conv6 = ModulatedConv2d(256, 32, 3, latent_dim)
+-        self.conv7 = ModulatedConv2d(32, 32, 3, latent_dim)
+-        
+-        self.activation = nn.LeakyReLU(negative_slope=0.2)
+-        self.out_res = out_res
+-
+-    def forward(self, z: torch.Tensor) -> torch.Tensor:
+-        x = self.const_input
+-        x = self.activation(self.conv1(x, z))
+-        
+-        # Upsample 4->8
+-        x = nn.functional.interpolate(x, scale_factor=2, mode='bilinear', align_corners=False)
+-        x = self.activation(self.conv2(x, z))
+-        x = self.activation(self.conv3(x, z))
+-        
+-        # Upsample 8->16
+-        x = nn.functional.interpolate(x, scale_factor=2, mode='bilinear', align_corners=False)
+-        x = self.activation(self.conv4(x, z))
+-        x = self.activation(self.conv5(x, z))
+-        
+-        # Upsample 16->32
+-        x = nn.functional.interpolate(x, scale_factor=2, mode='bilinear', align_corners=False)
+-        x = self.activation(self.conv6(x, z))
+-        x = self.activation(self.conv7(x, z))
+-        
+-        return x
+-```
+-*Note: `ModulatedConv2d` is a standard StyleGAN component not defined in the source text, so it is referenced by name [G].*
++A variant that maps the global latent code $z$ to a 2D grid of local latent codes $W$, representing the spatial layout of the scene [S1]. It is chosen when spatial variation of the latent code is required, unlike the standard Mapping Network which outputs a single vector [S1].
++*   **Definition:** Maps $z$ to a grid $W$ of size $H \times W \times C$ [S1].
++*   **Steps:**
++    1.  Initialize with a learnable constant input tensor [S1].
++    2.  Apply a $3 \times 3$ modulated convolution conditioned on $z$ [S1].
++    3.  Apply LeakyReLU(0.2) [S1].
++    4.  For subsequent layers, apply pairs of modulated convolutions. Each pair upsamples resolution by $2\times$ using a transposed convolution (stride 2) followed by bilinear filtering [S1].
++    5.  Apply LeakyReLU(0.2) after each convolution [S1].
++*   **Parameters:**
++    *   Output resolution: $32 \times 32$ [S1]. This controls the spatial granularity of the local latent codes [S1].
++    *   Channel depth: Starts at 256, ends at 32 [S1].
++*   **Architecture Details:**
++    *   Input: Constant tensor [S1].
++    *   Layer 1: ModulatedConv ($3 \times 3$) $\rightarrow$ Output: $256 \times 4 \times 4$ [S1].
++    *   Layer 2: ModulatedConv ($3 \times 3$) $\rightarrow$ Output: $256 \times 8 \times 8$ [S1].
++    *   Layer 3: ModulatedConv ($3 \times 3$) $\rightarrow$ Output: $256 \times 8 \times 8$ [S1].
++    *   Layer 4: ModulatedConv ($3 \times 3$) $\rightarrow$ Output: $256 \times 16 \times 16$ [S1].
++    *   Layer 5: ModulatedConv ($3 \times 3$) $\rightarrow$ Output: $256 \times 16 \times 16$ [S1].
++    *   Layer 6: ModulatedConv ($3 \times 3$) $\rightarrow$ Output: $256 \times 32 \times 32$ [S1].
++    *   Layer 7: ModulatedConv ($3 \times 3$) $\rightarrow$ Output: $256 \times 32 \times 32$ [S1].
++    *   Final Layer: Output: $32 \times 32 \times 32$ [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The mapping network is $O(1)$ with respect to spatial resolution, as it processes a single vector. The global generator is $O(N^2)$ where $N$ is the output resolution (32×32) [S1].
+-*   **Memory Complexity:** The mapping network uses minimal memory. The global generator stores the output grid $W$ of size $C \times H \times W$ (e.g., $32 \times 32 \times 32$) [S1].
+-*   **Strengths:** Captures global scene properties efficiently. The global generator allows for spatial variation of global features [S1].
+-*   **Limitations:** The global generator has significantly higher computational cost than the simple mapping network [S1].
+-*   **When to use:** Use the mapping network for uniform global conditioning. Use the global generator when the scene requires spatially varying global attributes [S1].
++*   **Time Complexity:** The Mapping Network is a small MLP (3 linear layers), making it computationally inexpensive compared to the Global Generator [S1]. The Global Generator involves multiple convolutional layers, increasing cost [S1].
++*   **Memory Complexity:** The Mapping Network stores weights for 3 linear layers ($512 \times 128 \times 3$). The Global Generator stores convolutional weights and the constant input tensor [S1].
++*   **Strengths:** Global conditioning is simple and effective for encoding instance-level variations [S2, unofficial]. The Mapping Network ensures the latent code is in a suitable non-linear space for the decoder [S1].
++*   **Limitations:** A single global code may struggle to encode complex spatial variations without the Global Generator [S1]. The Global Generator increases computational cost significantly compared to sampling at low resolution and refining [S1].
++*   **When to use:** Use Global Conditioning (Mapping Network) for instance-specific variation. Use the Global Generator variant when spatial layout of latent codes is needed [S1].
+ 
+ ## Background
+-Global conditioning and the mapping network architecture originate from StyleGAN [S1][S2, unofficial]. The specific application to unconstrained scene generation with locally conditioned radiance fields was presented in [S1]. The concept of encoding a whole data sample in one latent code is discussed in [S2, unofficial].
++Global conditioning was introduced in the context of unconstrained scene generation with locally conditioned radiance fields [S1]. The Mapping Network architecture is inspired by StyleGAN [24, 31] [S1]. The concept of global vs. local conditioning is discussed in broader neural field literature [S2, unofficial].
+ 
+ ## Sources

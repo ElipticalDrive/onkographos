@@ -1,0 +1,146 @@
+--- v008.md
++++ v009.md
+@@ -1,97 +1,40 @@
+ # GeoGaussian
+ 
+-Also called: Tangent Plane Densification, Geometric Smoothness Regularization
+ 
+ ## Overview
+-GeoGaussian is a training optimization and representation modification for 3D Gaussian Splatting that improves geometric consistency by restricting Gaussian densification to the tangent planes of existing primitives and enforcing smoothness of geometric properties between neighbors [S1]. It sets itself apart from standard 3DGS by addressing the tendency of splats to drift off-surface during optimization, thereby reducing floating artifacts and improving surface reconstruction fidelity without altering the core alpha-blending kernel [S1].
++GeoGaussian is a training optimization and initialization strategy for 3D Gaussian Splatting that improves geometric fidelity by modifying the densification process. It addresses the issue of noisy or inconsistent geometry in standard 3DGS by densifying new Gaussians on the tangent plane of existing ones and enforcing smoothness of geometric properties between neighboring Gaussians [S1]. It sets itself apart from sibling methods like Scaffold-GS, which uses a scaffold structure for initialization, by focusing on local tangent-space propagation and normal consistency during the growth phase [S1].
+ 
+ ## How it works
+-GeoGaussian modifies the densification and regularization phases of the 3DGS training pipeline. It does not change the primitive definition (mean $\boldsymbol{\mu}$, covariance $\boldsymbol{\Sigma}$, opacity $\alpha$, color $\mathbf{c}$) or the rendering equation, but constrains the evolution of $\boldsymbol{\mu}$ and $\boldsymbol{\Sigma}$ during gradient descent [S1].
++GeoGaussian modifies the standard 3DGS densification pipeline to ensure that new primitives align with the local surface geometry and maintain smooth geometric transitions.
+ 
+-**Inputs:**
+-- Standard 3DGS training state: set of Gaussians $\mathcal{G} = \{G_i\}$, where each $G_i$ has mean $\boldsymbol{\mu}_i$, covariance $\boldsymbol{\Sigma}_i$, opacity $\alpha_i$, and spherical harmonic coefficients for color.
+-- Camera poses and image observations.
+-- Hyperparameters: tangent plane projection threshold $\tau$, geometric smoothness weight $\lambda_{geo}$.
++**Inputs and Outputs:**
++- Input: Current set of 3D Gaussians $\mathcal{G} = \{G_i\}$, where each $G_i$ has mean $\boldsymbol{\mu}_i$, covariance $\boldsymbol{\Sigma}_i$, opacity $\alpha_i$, and color coefficients.
++- Output: Updated set of Gaussians $\mathcal{G}'$ with densified primitives.
+ 
+ **Data Structures:**
+-- Gaussian attributes: $\boldsymbol{\mu}_i \in \mathbb{R}^3$, $\boldsymbol{\Sigma}_i \in \mathbb{R}^{3 \times 3}$ (symmetric positive definite), $\alpha_i \in [0,1]$, $\mathbf{c}_i$ (color).
+-- Normal estimation: For each Gaussian, an estimated surface normal $\mathbf{n}_i$ is derived from the eigenvector of $\boldsymbol{\Sigma}_i$ corresponding to the smallest eigenvalue, or from local point cloud geometry if initialized from a point cloud [G].
++- Gaussian $G_i$:
++  - $\boldsymbol{\mu}_i \in \mathbb{R}^3$: Mean position.
++  - $\boldsymbol{\Sigma}_i \in \mathbb{R}^{3 \times 3}$: Covariance matrix, decomposed into rotation $\mathbf{R}_i$ and scale $\mathbf{S}_i$ such that $\boldsymbol{\Sigma}_i = \mathbf{R}_i \mathbf{S}_i \mathbf{S}_i^T \mathbf{R}_i^T$.
++  - $\alpha_i \in [0, 1]$: Opacity.
++  - $\mathbf{c}_i$: Color representation (e.g., SH coefficients).
+ 
+-**Numbered Steps:**
+-
+-1. **Tangent Plane Densification:**
+-   When a Gaussian $G_i$ requires splitting (based on standard 3DGS criteria such as high gradient magnitude or small projected area), the new child Gaussians are not placed randomly in 3D space. Instead, they are constrained to lie on the tangent plane of $G_i$.
+-   - Compute the normal $\mathbf{n}_i$ of $G_i$.
+-   - Generate two new means $\boldsymbol{\mu}_{new}$ by sampling from a distribution centered at $\boldsymbol{\mu}_i$ but projected onto the plane defined by $\mathbf{n}_i \cdot (\mathbf{x} - \boldsymbol{\mu}_i) = 0$.
+-   - Specifically, if $\mathbf{u}, \mathbf{v}$ are orthonormal basis vectors spanning the tangent plane, the new mean is:
+-     $$ \boldsymbol{\mu}_{new} = \boldsymbol{\mu}_i + \delta_u \mathbf{u} + \delta_v \mathbf{v} $$
+-     where $\delta_u, \delta_v$ are small random perturbations scaled by the split radius [S1].
+-
+-2. **Geometric Smoothness Regularization:**
+-   To encourage consistency between neighboring Gaussians, a regularization term is added to the loss function. This term penalizes large differences in geometric properties (such as normals or covariances) between adjacent Gaussians.
+-   - For each Gaussian $G_i$, identify its $k$ nearest neighbors $\mathcal{N}_i$ in 3D space.
+-   - Compute the geometric smoothness loss $L_{geo}$:
+-     $$ L_{geo} = \sum_{i} \sum_{j \in \mathcal{N}_i} w_{ij} \| \mathbf{n}_i - \mathbf{n}_j \|^2 $$
+-     where $w_{ij}$ is a weighting factor based on distance or overlap [S1].
+-   - The total loss becomes:
+-     $$ L_{total} = L_{render} + \lambda_{geo} L_{geo} $$
+-     where $L_{render}$ is the standard photometric and perceptual loss [S1].
+-
+-3. **Gradient Update:**
+-   During backpropagation, the gradients for $\boldsymbol{\mu}_i$ are modified to respect the tangent plane constraint if the Gaussian is being densified. For non-densified Gaussians, standard gradients are used, but the smoothness term influences the update direction of $\boldsymbol{\mu}_i$ via the normal $\mathbf{n}_i$ [S1].
+-
+-**Pseudocode:**
+-
+-```python
+-def geogaussian_step(gaussians, cameras, images, step):
+-    # Standard 3DGS forward pass and loss computation
+-    rendered_images = render(gaussians, cameras)
+-    loss_render = compute_loss(rendered_images, images)
+-    
+-    # GeoGaussian: Compute geometric smoothness loss
+-    loss_geo = 0.0
+-    for g in gaussians:
+-        # Estimate normal from covariance eigenvector (smallest eigenvalue)
+-        n_g = get_normal_from_covariance(g.covariance)
+-        neighbors = get_k_nearest_neighbors(g.mean, gaussians, k=5)
+-        for neighbor in neighbors:
+-            n_neighbor = get_normal_from_covariance(neighbor.covariance)
+-            dist = distance(g.mean, neighbor.mean)
+-            weight = exp(-dist / sigma_smooth)
+-            loss_geo += weight * squared_norm(n_g - n_neighbor)
+-    
+-    loss_geo *= lambda_geo
+-    total_loss = loss_render + loss_geo
+-    
+-    # Backpropagation
+-    gradients = compute_gradients(total_loss, gaussians, cameras)
+-    
+-    # Update Gaussians
+-    for g in gaussians:
+-        if should_densify(g):
+-            # Tangent plane densification
+-            n_g = get_normal_from_covariance(g.covariance)
+-            u, v = compute_tangent_basis(n_g)
+-            delta_u = random_normal() * split_scale
+-            delta_v = random_normal() * split_scale
+-            new_mean = g.mean + delta_u * u + delta_v * v
+-            create_child_gaussian(g, new_mean)
+-        else:
+-            # Standard gradient update with geometric regularization influence
+-            g.mean -= learning_rate * gradients[g.id].mean
+-            # Other attributes updated similarly
+-            pass
+-            
+-    return gaussians, total_loss
+-```
++**Steps:**
++1. **Identify Densification Candidates:** Select Gaussians $G_i$ that require densification based on standard criteria (e.g., high gradient magnitude in image space or low opacity) [S1].
++2. **Compute Tangent Plane:** For each candidate Gaussian $G_i$, compute the local surface normal $\mathbf{n}_i$. The normal is derived from the covariance matrix $\boldsymbol{\Sigma}_i$. The eigenvector corresponding to the smallest eigenvalue of $\boldsymbol{\Sigma}_i$ defines the normal direction $\mathbf{n}_i$ [S1]. The tangent plane is defined as the plane passing through $\boldsymbol{\mu}_i$ with normal $\mathbf{n}_i$.
++3. **Densify on Tangent Plane:** Generate new Gaussians $G_{new}$ by sampling positions on the tangent plane of $G_i$. The positions $\boldsymbol{\mu}_{new}$ are perturbed from $\boldsymbol{\mu}_i$ within the tangent plane:
++   $$ \boldsymbol{\mu}_{new} = \boldsymbol{\mu}_i + \mathbf{T} \mathbf{u} $$
++   where $\mathbf{T} \in \mathbb{R}^{3 \times 2}$ is a basis matrix for the tangent plane (columns are orthonormal vectors orthogonal to $\mathbf{n}_i$), and $\mathbf{u} \in \mathbb{R}^2$ is a random vector sampled from a distribution (e.g., Gaussian or uniform) scaled by a densification radius [S1].
++4. **Initialize New Gaussians:** Initialize the covariance $\boldsymbol{\Sigma}_{new}$ of the new Gaussians to match the local geometry. A common approach is to set the scale along the normal direction to be small and the scales in the tangent plane to match the parent or a fixed value, ensuring the new Gaussian lies flat on the surface [S1].
++5. **Enforce Geometric Smoothness:** During optimization, apply a regularization term to encourage smoothness of geometric properties (such as normals or positions) between neighboring Gaussians. This can be implemented as a loss term:
++   $$ \mathcal{L}_{smooth} = \sum_{i,j \in \mathcal{N}(i)} \| \mathbf{n}_i - \mathbf{n}_j \|^2 $$
++   where $\mathcal{N}(i)$ is the set of neighbors of Gaussian $i$ [S1]. This ensures that the geometric properties vary smoothly across the surface.
+ 
+ **Parameters:**
+-- $\lambda_{geo}$: Weight for geometric smoothness loss. Typical value: Not given in the sources.
+-- $\tau$: Threshold for tangent plane projection. Not given in the sources.
+-- $k$: Number of neighbors for smoothness calculation. Not given in the sources.
++- Densification radius: Controls the spread of new Gaussians on the tangent plane. Not given in the sources.
++- Smoothness weight: Weight for the geometric smoothness loss. Not given in the sources.
+ 
+ **Edge Cases and Pitfalls:**
+-- **Degenerate Covariance:** If a Gaussian is highly anisotropic (e.g., a flat sheet), the normal estimation from the smallest eigenvector may be unstable. [G] Use a minimum eigenvalue threshold to clamp the normal estimation.
+-- **Boundary Effects:** Gaussians near the boundary of the scene may have fewer neighbors, leading to inconsistent smoothness regularization. [G] Adjust neighbor selection to include only valid neighbors within the scene bounds.
++- **Degenerate Covariance:** If the covariance matrix is ill-conditioned, the normal estimation may be unstable. [G] Add a small regularization term to the covariance matrix to ensure numerical stability.
++- **Boundary Effects:** Near object boundaries, the tangent plane assumption may break down. [G] Consider using a confidence measure based on the covariance eigenvalues to weight the smoothness term.
+ 
+ ## Subtopics
+@@ -104,14 +47,13 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Adds overhead to the densification step due to normal estimation and neighbor search. The smoothness loss computation is $O(N \cdot k)$ where $N$ is the number of Gaussians and $k$ is the number of neighbors. [S1]
+-- **Memory Complexity:** Requires storing neighbor indices or computing distances on the fly, adding minimal memory overhead. [S1]
+-- **Performance:** Improves geometric consistency and reduces floating artifacts. [S1]
+-- **Strengths:** Better surface reconstruction, reduced noise in geometric properties. [S1]
+-- **Limitations:** May slow down training due to additional loss computation. [S1]
+-- **When to use:** When high-fidelity surface geometry is required. [S1]
+-- **When not to use:** When real-time training speed is critical and geometric accuracy is less important. [S1]
++- **Time Complexity:** Densification adds overhead to the training loop due to tangent plane computation and neighbor search. The smoothness loss requires computing normals for all Gaussians and their neighbors. Not given in the sources.
++- **Memory Complexity:** No significant additional memory overhead compared to standard 3DGS, as it uses the same primitive attributes. Not given in the sources.
++- **Strengths:** Improves geometric fidelity and reduces noise in reconstructed surfaces. Ensures smooth transitions between neighboring Gaussians.
++- **Limitations:** May require careful tuning of the smoothness weight and densification radius. Computationally more expensive than standard 3DGS due to normal computation and regularization.
++- **When to use:** When high-quality geometric reconstruction is required, such as for downstream tasks like mesh extraction or texture mapping.
++- **When not to use:** When real-time rendering speed is the primary concern and geometric fidelity is less critical.
+ 
+ ## Background
+-GeoGaussian was proposed in the context of recent advances in 3D Gaussian Splatting, specifically to address the issue of Gaussian drift and geometric inconsistency during optimization [S1]. It builds on the idea of constraining Gaussian growth to local surface approximations, similar to plane constraints used in GaussianPro [S1].
++GeoGaussian was proposed in the context of recent advances in 3D Gaussian Splatting to address the limitations of standard densification strategies that can lead to noisy or inconsistent geometry [S1]. It builds on the idea of using local surface information to guide the placement of new Gaussians, similar to other methods like GaussianPro which considers normal consistency between neighboring views [S1].
+ 
+ ## Sources

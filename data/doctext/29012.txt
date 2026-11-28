@@ -1,0 +1,2425 @@
+# WebGPU viewer for Gaussian Splatting nerfs
+
+![Image](teaser-image.png)
+
+This repository contains the source for an interactive web viewer of NeRFs crated with the code available from [INRIA](https://github.com/graphdeco-inria/gaussian-splatting). The app with instructions is hosted at [jatentaki.github.io](https://jatentaki.github.io/portfolio/gaussian-splatting/).
+
+## Building
+This project has been created using **webpack-cli**. Before the first build, go to the code directory and execute `npm install` to install dependencies.
+
+Afterwards, you can use
+```
+npm run build
+```
+to bundle the application or 
+```
+npm run serve
+```
+to have a live-updating server.
+
+## Browser compatibility
+The official compatiblity table of WebGPU can be found [here](https://developer.mozilla.org/en-US/docs/Web/API/WebGPU_API#browser_compatibility). In practice, the following are known to work:
+
+**MacOS**: works with recent (version 115+) Chrome/Chromium browsers.
+
+**Windows**: works with Edge 116+, most likely with Chrome/Chromium as well (it's the same thing but I was not able to test).
+
+**Ubuntu**: works with Chrome dev version and custom flags. The steps are as follows:
+1. Download and install [Chrome dev](https://www.google.com/chrome/dev/).
+2. Launch from command line with extra flags: `google-chrome-unstable --enable-features=Vulkan,UseSkiaRenderer`.
+3. Go to `chrome://flags/#enable-unsafe-webgpu` and enable webgpu. Restart the browser for the change to take effect, make sure to use the flags from the previous step as well.
+4. The Gaussian viewer should work.
+
+**Firefox**: the nightly channel is supposed to support webGPU experimentally but in practice it fails on parsing my shaders across MacOS/Ubuntu.
+
+> If you succeed with any other configuration or fail with the ones described above, please [open an issue](https://github.com/cvlab-epfl/gaussian-splatting-web/issues) and tell us.
+
+## Architecture
+Unlike the original paper, this code doesn't use computer shaders to compute each pixel value independently but instead maps the problem to a standard rasterization technique, where each Gaussian is a flat rectangle facing the camera, with the actual content drawn via a fragment shader. I found this approach to yield substantially better framerates than compute shaders, although both are available in WebGPU.
+
+This was my first substantial webdev project, therefore the code is far from idiomatic. I'm happy to receive PRs both to improve performance and to clean up the codebase.
+
+### webpack.config.js
+```
+// Generated using webpack-cli https://github.com/webpack/webpack-cli
+
+const path = require('path');
+const HtmlWebpackPlugin = require('html-webpack-plugin');
+
+const isProduction = process.env.NODE_ENV == 'production';
+
+
+const stylesHandler = 'style-loader';
+
+
+const config = {
+    entry: './src/index.ts',
+    output: {
+        path: path.resolve(__dirname, 'dist'),
+        filename: '[name].js',
+        chunkFilename: '[name].js',
+    },
+    devServer: {
+        open: true,
+        host: 'localhost',
+        static: {
+            directory: path.join(__dirname, 'public'),
+        }
+    },
+    plugins: [
+        new HtmlWebpackPlugin({
+            template: 'index.html',
+        }),
+
+        // Add your plugins here
+        // Learn more about plugins from https://webpack.js.org/configuration/plugins/
+    ],
+    module: {
+        rules: [
+            {
+                test: /\.(ts|tsx)$/i,
+                loader: 'ts-loader',
+                exclude: ['/node_modules/'],
+            },
+            {
+                test: /\.css$/i,
+                use: [stylesHandler,'css-loader'],
+            },
+            {
+                test: /\.(eot|svg|ttf|woff|woff2|png|jpg|gif)$/i,
+                type: 'asset',
+            },
+
+            // Add your rules for custom modules here
+            // Learn more about loaders from https://webpack.js.org/loaders/
+        ],
+    },
+    resolve: {
+        extensions: ['.tsx', '.ts', '.jsx', '.js', '...'],
+    },
+    devtool: 'source-map',
+};
+
+module.exports = () => {
+    if (isProduction) {
+        config.mode = 'production';
+        
+        
+    } else {
+        config.mode = 'development';
+    }
+    return config;
+};
+```
+
+### src/bitonic.ts
+```
+// Implements a bitonic argsort on the GPU.
+// It would be more efficient to use a radix sort, but this is simpler to implement.
+
+import { GpuContext } from "./gpu_context";
+
+const WGSIZE = 128;
+
+function bitonicSortShader(itemsPerThread: number): string {
+    return `
+// Uniform buffer to store j and k
+struct Uniforms {
+    j: u32,
+    k: u32,
+};
+
+@binding(0) @group(0) var<storage, read_write> data: array<vec4f>;
+@binding(1) @group(0) var<storage, read_write> indices: array<vec4<u32>>;
+@binding(2) @group(0) var<uniform> uniforms: Uniforms;
+
+@compute @workgroup_size(${WGSIZE})
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let j = uniforms.j;
+    let k = uniforms.k;
+    
+    let max = (global_id.x + 1) * ${itemsPerThread};
+    for (var n = global_id.x * ${itemsPerThread}; n < max && (max ^ j) > max; n += 4) {
+       var datan = data[n / 4];
+       var indicesn = indices[n / 4];
+       var swap = false;
+       var dataixj = vec4f(0, 0, 0, 0);
+       var indicesixj = vec4<u32>(0, 0, 0, 0);
+       var lastIxjLoadedMajorIdx: u32 = 0;
+       for (var l: u32 = 0; l < 4; l++) {
+           let i = n + l;
+           let datai = datan[l];
+           let indicesi = indicesn[l];
+
+           let ixj = i ^ j;
+           if (ixj <= i) {
+               continue;
+           }
+
+           let ixjMajor = ixj / 4;
+           let ixjMinor = ixj % 4;
+           let writeToWorkgroupBlock = (ixjMajor == n / 4);
+           if (writeToWorkgroupBlock) {
+               dataixj = datan;
+               indicesixj = indicesn;
+               lastIxjLoadedMajorIdx = 0;
+           } else if (lastIxjLoadedMajorIdx != ixjMajor) {
+               if (lastIxjLoadedMajorIdx != 0) {
+                   data[lastIxjLoadedMajorIdx] = dataixj;
+                   indices[lastIxjLoadedMajorIdx] = indicesixj;
+               } 
+               dataixj = data[ixjMajor];
+               indicesixj = indices[ixjMajor];
+               lastIxjLoadedMajorIdx = ixjMajor;
+           }
+
+           let swap_pos = ((i & k) == 0 && datai > dataixj[ixjMinor]);
+           let swap_neg = ((i & k) != 0 && datai < dataixj[ixjMinor]);
+
+           if (swap_pos || swap_neg) {
+               swap = true;
+               datan[l] = dataixj[ixjMinor];
+               dataixj[ixjMinor] = datai;
+               indicesn[l] = indicesixj[ixjMinor];
+               indicesixj[ixjMinor] = indicesi;
+               if (writeToWorkgroupBlock) {
+                   datan[ixjMinor] = datai;
+                   indicesn[ixjMinor] = indicesi;
+               }
+           }
+       }
+       if (swap) {
+           data[n / 4] = datan;
+           indices[n / 4] = indicesn;
+       }
+       if (lastIxjLoadedMajorIdx != 0) {
+          data[lastIxjLoadedMajorIdx] = dataixj;
+          indices[lastIxjLoadedMajorIdx] = indicesixj;
+       }
+    }
+}
+`;
+}
+
+export class BitonicSorter {
+    context: GpuContext;
+
+    nElements: number;
+    numThreads: number;
+
+    pipeline: GPUComputePipeline;
+    bindGroups: GPUBindGroup[];
+
+    valuesBuffer: GPUBuffer; // The buffer to sort
+    indicesBuffer: GPUBuffer; // The indices of the values (to be sorted)
+    initialIndexBuffer: GPUBuffer; // The initial indices of the values, to copy from at each call
+    uniformBuffers: GPUBuffer[]; // The uniform buffers to use for each dispatch
+
+    constructor(context: GpuContext, nElements: number) {
+        if (Math.log2(nElements) % 1 != 0) {
+            throw new Error("nElements must be a power of 2");
+        }
+
+        this.context = context;
+        this.nElements = nElements;
+        this.valuesBuffer = this.context.device.createBuffer({
+            size: this.nElements * 4,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+            mappedAtCreation: false,
+            label: "bitonicSorter.valuesBuffer"
+        });
+
+        this.indicesBuffer = this.context.device.createBuffer({
+            size: this.nElements * 4,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+            mappedAtCreation: false,
+            label: "bitonicSorter.indicesBuffer"
+        });
+
+        this.initialIndexBuffer = this.context.device.createBuffer({
+            size: this.nElements * 4,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+            mappedAtCreation: true,
+            label: "bitonicSorter.initialIndexBuffer"
+        });
+
+        const initialIndices = new Uint32Array(this.initialIndexBuffer.getMappedRange());
+        for (let i = 0; i < this.nElements; i++) {
+            initialIndices[i] = i;
+        }
+        this.initialIndexBuffer.unmap();
+
+        this.numThreads = 8192;
+        const itemsPerThread = Math.ceil(this.nElements / this.numThreads);
+        this.pipeline = this.context.device.createComputePipeline({
+            compute: {
+                module: this.context.device.createShaderModule({
+                    code: bitonicSortShader(itemsPerThread),
+                }),
+                entryPoint: 'main',
+            },
+            layout: 'auto',
+        });
+
+        this.createUniforms();
+    }
+
+    private createUniforms(): void {
+        const gpuBuffers = [];
+        const gpuBindGroups = [];
+
+        for (let k = 2; k <= this.nElements; k <<= 1) {
+            for (let j = k >> 1; j > 0; j = j >> 1) {
+                const bufferContent = new Uint32Array([j, k]);
+                const gpuBuffer = this.context.device.createBuffer({
+                    size: bufferContent.byteLength,
+                    usage: GPUBufferUsage.UNIFORM,
+                    mappedAtCreation: true,
+                    label: `bitonicSorter.uniformsBuffer.k=${k}.j=${j}`
+                });
+                new Uint32Array(gpuBuffer.getMappedRange()).set(bufferContent);
+                gpuBuffer.unmap();
+
+                const gpuBindGroup = this.context.device.createBindGroup({
+                    layout: this.pipeline.getBindGroupLayout(0),
+                    entries: [
+                        {
+                            binding: 0,
+                            resource: {
+                                buffer: this.valuesBuffer
+                            },
+                        },
+                        {
+                            binding: 1,
+                            resource: {
+                                buffer: this.indicesBuffer,
+                            },
+                        },
+                        {
+                            binding: 2,
+                            resource: {
+                                buffer: gpuBuffer
+                            },
+                        },
+                    ],
+                });
+
+                gpuBuffers.push(gpuBuffer);
+                gpuBindGroups.push(gpuBindGroup);
+            }
+        }
+
+        this.uniformBuffers = gpuBuffers;
+        this.bindGroups = gpuBindGroups;
+    }
+
+    public destroy(): void {
+        this.valuesBuffer.destroy();
+        this.indicesBuffer.destroy();
+        this.initialIndexBuffer.destroy();
+        for (const uniformBuffer of this.uniformBuffers) {
+            uniformBuffer.destroy();
+        }
+    }
+
+    argsort(values: GPUBuffer): GPUBuffer {
+        if (values.size != this.valuesBuffer.size) {
+            throw new Error("Input buffer size does not match the size of the sorter");
+        }
+
+        // Copy the data to the GPU
+        const commandEncoder = this.context.device.createCommandEncoder();
+        // clear just in case
+        commandEncoder.clearBuffer(this.valuesBuffer);
+        // copy the values
+        commandEncoder.copyBufferToBuffer(values, 0, this.valuesBuffer, 0, values.size);
+
+        // write the initial indices
+        commandEncoder.copyBufferToBuffer(this.initialIndexBuffer, 0, this.indicesBuffer, 0, this.initialIndexBuffer.size);
+
+        // Sort by dispatching the compute shader for each uniform buffer
+        for (const uniformBindGroup of this.bindGroups) {
+            const passEncoder = commandEncoder.beginComputePass();
+            passEncoder.setPipeline(this.pipeline);
+            passEncoder.setBindGroup(0, uniformBindGroup);
+            passEncoder.dispatchWorkgroups(this.numThreads / WGSIZE);
+            passEncoder.end();
+        }
+
+        this.context.device.queue.submit([commandEncoder.finish()]);
+
+        return this.indicesBuffer;
+    }
+}
+
+export function testBitonic() {
+    // Usage example
+    const values: Float32Array = new Float32Array(1 << 10);
+    for (let i = 0; i < values.length; i++) {
+        values[i] = Math.random();
+    }
+    
+    // reference CPU argsort
+    const valuesWithIndices: [number, number][] = [];
+    for (let i = 0; i < values.length; i++) {
+        valuesWithIndices.push([values[i], i]);
+    }
+    valuesWithIndices.sort((a, b) => a[0] - b[0]);
+    const cpuResult = new Uint32Array(values.length);
+    for (let i = 0; i < values.length; i++) {
+        cpuResult[i] = valuesWithIndices[i][1];
+    }
+    console.log(cpuResult);
+
+    // GPU argsort
+    GpuContext.create().then(context => {
+        const sorter = new BitonicSorter(context, values.length);
+        const valuesBuffer = context.device.createBuffer({
+            size: values.byteLength,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+            mappedAtCreation: true,
+            label: "testBitonic.valuesBuffer"
+        });
+        new Float32Array(valuesBuffer.getMappedRange()).set(values);
+        valuesBuffer.unmap();
+
+        const argSortBuffer = sorter.argsort(valuesBuffer);
+
+        const readBuffer = context.device.createBuffer({
+            size: values.byteLength,
+            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+            mappedAtCreation: false,
+            label: "testBitonic.readBuffer"
+        });
+        const commandEncoder = context.device.createCommandEncoder();
+        commandEncoder.copyBufferToBuffer(argSortBuffer, 0, readBuffer, 0, values.byteLength);
+        context.device.queue.submit([commandEncoder.finish()]);
+
+        readBuffer.mapAsync(GPUMapMode.READ).then(() => {
+            const result = new Uint32Array(readBuffer.getMappedRange());
+            console.log(result);
+            readBuffer.unmap();
+        });
+    });
+}
+```
+
+### src/camera.ts
+```
+import { mat4, vec3, mat3, Mat4, Mat3, Vec3 } from 'wgpu-matrix';
+
+// camera as loaded from JSON
+interface CameraRaw {
+    id: number;
+    img_name: string;
+    width: number;
+    height: number;
+    position: number[];
+    rotation: number[][];
+    fx: number;
+    fy: number;
+}
+
+// for some reason this needs to be a bit different than the one in wgpu-matrix
+function getProjectionMatrix(znear: number, zfar: number, fovX: number, fovY: number): Mat4 {
+    const tanHalfFovY: number = Math.tan(fovY / 2);
+    const tanHalfFovX: number = Math.tan(fovX / 2);
+
+    const top: number = tanHalfFovY * znear;
+    const bottom: number = -top;
+    const right: number = tanHalfFovX * znear;
+    const left: number = -right;
+
+    const P: Mat4 = mat4.create();
+
+    const z_sign: number = 1.0;
+
+    P[0] = (2.0 * znear) / (right - left);
+    P[5] = (2.0 * znear) / (top - bottom);
+    P[8] = (right + left) / (right - left);
+    P[9] = (top + bottom) / (top - bottom);
+    P[10] = z_sign * zfar / (zfar - znear);
+    P[11] = -(zfar * znear) / (zfar - znear);
+    P[14] = z_sign;
+    P[15] = 0.0;
+
+    return mat4.transpose(P);
+}
+
+// useful for coordinate flips
+function diagonal4x4(x: number, y: number, z: number, w: number): Mat4 {
+    const m = mat4.create();
+    m[0] = x;
+    m[5] = y;
+    m[10] = z;
+    m[15] = w;
+    return m;
+}
+
+// A camera as used by the renderer. Interactivity is handled by InteractiveCamera.
+export class Camera {
+    height: number;
+    width: number;
+    viewMatrix: Mat4;
+    perspective: Mat4;
+    focalX: number;
+    focalY: number;
+    scaleModifier: number;
+
+    constructor(
+        height: number,
+        width: number,
+        viewMatrix: Mat4,
+        perspective: Mat4,
+        focalX: number,
+        focalY: number,
+        scaleModifier: number,
+    ) {
+        this.height = height;
+        this.width = width;
+        this.viewMatrix = viewMatrix;
+        this.perspective = perspective;
+        this.focalX = focalX;
+        this.focalY = focalY;
+        this.scaleModifier = scaleModifier;
+    }
+
+    static default(): Camera {
+        return new Camera(
+            500,
+            500,
+            mat4.lookAt([0, 0, 0], [0, 0, -1], [0, 1, 0]),
+            mat4.perspective(Math.PI / 4, 1, 0.2, 100),
+            600,
+            600,
+            1,
+        )
+    }
+
+    // computes the depth of a point in camera space, for sorting
+    dotZ(): (v: Vec3) => number {
+        const depthAxis = this.depthAxis();
+        return (v: Vec3) => {
+            return vec3.dot(depthAxis, v);
+        }
+    }
+
+    // gets the camera position in world space, for evaluating the spherical harmonics
+    getPosition(): Vec3 {
+        const inverseViewMatrix = mat4.inverse(this.viewMatrix);
+        return mat4.getTranslation(inverseViewMatrix);
+    }
+
+    getProjMatrix(): Mat4 {
+        var flippedY = mat4.clone(this.perspective);
+        flippedY = mat4.mul(flippedY, diagonal4x4(1, -1, 1, 1));
+        return mat4.multiply(flippedY, this.viewMatrix);
+    }
+
+    // for camera interactions
+    translate(x: number, y: number, z: number) {
+        const viewInv = mat4.inverse(this.viewMatrix);
+        mat4.translate(viewInv, [x, y, z], viewInv);
+        mat4.inverse(viewInv, this.viewMatrix);
+    }
+
+    // for camera interactions
+    rotate(x: number, y: number, z: number) {
+        const viewInv = mat4.inverse(this.viewMatrix);
+        mat4.rotateX(viewInv, y, viewInv);
+        mat4.rotateY(viewInv, x, viewInv);
+        mat4.rotateZ(viewInv, z, viewInv);
+        mat4.inverse(viewInv, this.viewMatrix);
+    }
+
+    // the depth axis is the third column of the transposed view matrix
+    private depthAxis(): Vec3 {
+        return mat4.getAxis(mat4.transpose(this.viewMatrix), 2);
+    }
+}
+
+// Adds interactivity to a camera. The camera is modified by the user's mouse and keyboard input.
+export class InteractiveCamera {
+    private camera: Camera;
+    private canvas: HTMLCanvasElement;
+
+    private drag: boolean = false;
+    private oldX: number = 0;
+    private oldY: number = 0;
+    private dRX: number = 0;
+    private dRY: number = 0;
+    private dRZ: number = 0;
+    private dTX: number = 0;
+    private dTY: number = 0;
+    private dTZ: number = 0;
+
+    private dirty: boolean = true;
+
+    constructor(camera: Camera, canvas: HTMLCanvasElement) {
+        this.camera = camera;
+        this.canvas = canvas;
+
+        this.createCallbacks();
+    }
+
+    static default(canvas: HTMLCanvasElement): InteractiveCamera {
+        return new InteractiveCamera(Camera.default(), canvas);
+    }
+
+    private createCallbacks() {
+        this.canvas.addEventListener('mousedown', (e) => {
+            this.drag = true;
+            this.oldX = e.pageX;
+            this.oldY = e.pageY;
+            this.setDirty();
+            e.preventDefault();
+        }, false);
+
+        this.canvas.addEventListener('mouseup', (e) => {
+            this.drag = false;
+        }, false);
+
+        this.canvas.addEventListener('mousemove', (e) => {
+            if (!this.drag) return false;
+            this.dRX = (e.pageX - this.oldX) * 2 * Math.PI / this.canvas.width;
+            this.dRY = -(e.pageY - this.oldY) * 2 * Math.PI / this.canvas.height;
+            this.oldX = e.pageX;
+            this.oldY = e.pageY;
+            this.setDirty();
+            e.preventDefault();
+        }, false);
+
+        this.canvas.addEventListener('wheel', (e) => {
+            this.dTZ = e.deltaY * 0.1;
+            this.setDirty();
+            e.preventDefault();
+        }, false);
+
+        window.addEventListener('keydown', (e) => {
+            const keyMap: {[key: string]: () => void} = {
+                // translation
+                'w': () => { this.dTY -= 0.1 },
+                's': () => { this.dTY += 0.1 },
+                'a': () => { this.dTX -= 0.1 },
+                'd': () => { this.dTX += 0.1 },
+                'q': () => { this.dTZ += 0.1 },
+                'e': () => { this.dTZ -= 0.1 },
+
+                // rotation
+                'j': () => { this.dRX += 0.1 },
+                'l': () => { this.dRX -= 0.1 },
+                'i': () => { this.dRY += 0.1 },
+                'k': () => { this.dRY -= 0.1 },
+                'u': () => { this.dRZ += 0.1 },
+                'o': () => { this.dRZ -= 0.1 },
+            }
+
+            if (!keyMap[e.key]) {
+                return;
+            } else {
+                keyMap[e.key]();
+                this.setDirty();
+                e.preventDefault();
+            }
+
+        }, false);
+    }
+
+    public setNewCamera(newCamera: Camera) {
+        this.camera = newCamera;
+        this.setDirty();
+    }
+
+    private setDirty() {
+        this.dirty = true;
+    }
+    
+    private setClean() {
+        this.dirty = false;
+    }
+
+    public isDirty(): boolean {
+        return this.dirty;
+    }
+
+    public getCamera(): Camera {
+        if (this.isDirty()) {
+            this.camera.translate(this.dTX, this.dTY, this.dTZ);
+            this.camera.rotate(this.dRX, this.dRY, this.dRZ);
+            this.dTX = this.dTY = this.dTZ = this.dRX = this.dRY = this.dRZ = 0;
+            this.setClean();
+        }
+
+        return this.camera;
+    }
+}
+
+function focal2fov(focal: number, pixels: number): number {
+    return 2 * Math.atan(pixels / (2 * focal));
+}
+
+function worldToCamFromRT(R: Mat3, t: Vec3): Mat4 {
+    const R_ = R;
+    const camToWorld = mat4.fromMat3(R_);
+    const minusT = vec3.mulScalar(t, -1);
+    mat4.translate(camToWorld, minusT, camToWorld);
+    return camToWorld;
+}
+
+// converting camera coordinate systems is always black magic :(
+function cameraFromJSON(rawCamera: CameraRaw, canvasW: number, canvasH: number): Camera {
+    const fovX = focal2fov(rawCamera.fx, rawCamera.width);
+    const fovY = focal2fov(rawCamera.fy, rawCamera.height);
+    const projectionMatrix = getProjectionMatrix(0.2, 100, fovX, fovY);
+
+    const R = mat3.create(...rawCamera.rotation.flat());
+    const T = rawCamera.position;
+
+    const viewMatrix = worldToCamFromRT(R, T);
+
+    return new Camera(
+        canvasH,
+        canvasW,
+        viewMatrix,
+        projectionMatrix,
+        rawCamera.fx,
+        rawCamera.fy,
+        Math.max(canvasW / rawCamera.width, canvasH / rawCamera.height),
+    );
+}
+
+// A UI component that parses a JSON file containing a list of cameras and displays them as a list,
+// allowing the user to choose from presets.
+export class CameraFileParser {
+    private fileInput: HTMLInputElement;
+    private listElement: HTMLUListElement;
+    private currentLineId: number = 0;
+    private canvas: HTMLCanvasElement;
+    private cameraSetCallback: (camera: Camera) => void;
+
+    constructor(
+        fileInput: HTMLInputElement,
+        listElement: HTMLUListElement,
+        canvas: HTMLCanvasElement,
+        cameraSetCallback: (camera: Camera) => void,
+    ) {
+        this.fileInput = fileInput;
+        this.listElement = listElement;
+        this.canvas = canvas;
+        this.cameraSetCallback = cameraSetCallback;
+
+        this.fileInput.addEventListener('change', this.handleFileInputChange);
+    }
+
+    private handleFileInputChange = (event: Event) => {
+        const file = this.fileInput.files?.[0];
+
+        if (file) {
+            const reader = new FileReader();
+            reader.onload = this.handleFileLoad;
+            reader.readAsText(file);
+        }
+    };
+
+    private handleFileLoad = (event: ProgressEvent<FileReader>) => {
+        if (!event.target) return;
+
+        const contents = event.target.result as string;
+        const jsonData = JSON.parse(contents);
+
+        this.currentLineId = 0;
+        this.listElement.innerHTML = '';
+
+        jsonData.forEach((cameraJSON: any) => {
+            this.currentLineId++;
+            const listItem = document.createElement('li');
+            const camera = cameraFromJSON(cameraJSON, this.canvas.width, this.canvas.height);
+            listItem.textContent = cameraJSON.img_name;
+            listItem.addEventListener('click', this.createCallbackForLine(camera));
+            this.listElement.appendChild(listItem);
+        });
+    };
+
+    private createCallbackForLine = (camera: Camera) => {
+        return () => {
+            this.cameraSetCallback(camera);
+        };
+    };
+}
+```
+
+### src/depth_sorter.ts
+```
+// The bitonic sort algorithm itself is implemented in bitonic.ts
+// but we need to do some extra work to sort the depth buffer:
+// 1. compute the depth of each vertex
+// 2. pad the depth buffer to the next power of 2
+// 3. sort the depth buffer
+// 4. copy the indices to the index buffer, replicating each index 6 times (since each quad has 6 vertices)
+//
+// This file implements steps 1, 2 and 4.
+
+import { GpuContext } from './gpu_context';
+import { BitonicSorter } from './bitonic';
+import { PackedGaussians } from './ply';
+import { f32, mat4x4 } from './packing';
+
+function nextPowerOfTwo(x: number): number {
+    return Math.pow(2, Math.ceil(Math.log2(x)));
+}
+
+// the depth of each vertex is computed, the excess space is padded with +inf
+function computeDepthShader(itemsPerThread: number, numQuadsUnpadded: number): string {
+    return `
+@group(0) @binding(0) var<storage, read> vertices: array<vec3<f32>>;
+@group(0) @binding(1) var<storage, read_write> depths: array<f32>;
+@group(0) @binding(2) var<uniform> projMatrix: mat4x4<f32>;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    for (var i = global_id.x * ${itemsPerThread}; i < (global_id.x + 1) * ${itemsPerThread}; i++) {
+        //if (i >= arrayLength(&vertices)) {
+        if (i >= ${numQuadsUnpadded}) {
+            depths[i] = 1e20f; // pad with +inf
+        } else {
+            let pos = vertices[i];
+            let projPos = projMatrix * vec4<f32>(pos, 1.0);
+            depths[i] = projPos.z;
+        }
+    }
+}
+`
+}
+
+// each quad index is repeated 6 times, once for each vertex
+function copyToIndexBufferShader(itemsPerThread: number, numQuadsUnpadded: number): string {
+    return `
+struct IndexVertex {
+    vec1: u32,
+    vec2: u32,
+    vec3: u32,
+    vec4: u32,
+    vec5: u32,
+    vec6: u32,
+};
+
+@group(0) @binding(0) var<storage, read> indices: array<u32>;
+@group(0) @binding(1) var<storage, read_write> indexBuffer: array<IndexVertex>;
+
+var<private> vertex: IndexVertex;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    for (var i = global_id.x * ${itemsPerThread}; i < (global_id.x + 1) * ${itemsPerThread}; i++) {
+        if (i >= ${numQuadsUnpadded}) {
+            break;
+        }
+        let index = indices[i];
+
+        vertex.vec1 = index * 6 + 0;
+        vertex.vec2 = index * 6 + 1;
+        vertex.vec3 = index * 6 + 2;
+        vertex.vec4 = index * 6 + 3;
+        vertex.vec5 = index * 6 + 4;
+        vertex.vec6 = index * 6 + 5;
+        indexBuffer[i] = vertex;
+    }
+}
+`
+}
+
+const projMatrixLayout = new mat4x4(f32);
+
+export class DepthSorter {
+    context: GpuContext;
+    nUnpadded: number;
+    nPadded: number;
+    numThreads: number;
+
+    positionsBuffer: GPUBuffer; // vertex positions, set once, #nElements
+
+    // TODO: we're using the entire projection matrix and compute (x, y, z, w) of each
+    // vertex, but we only need the z component. We could save some bandwidth by
+    // only sending the z component of the projection matrix and only computing
+    // the z component of each vertex.
+    projMatrixBuffer: GPUBuffer; // projection matrix, set at each frame
+    depthBuffer: GPUBuffer; // depth values, computed each time using uniforms, padded to next power of 2
+    indexBuffer: GPUBuffer; // resulting index buffer, per vertex, 6 * #nElements
+
+    computeDepthPipeline: GPUComputePipeline;
+    computeDepthBindGroup: GPUBindGroup;
+
+    copyToIndexBufferPipeline: GPUComputePipeline;
+    copyToIndexBufferBindGroup: GPUBindGroup;
+
+    sorter: BitonicSorter;
+
+    constructor(context: GpuContext, gaussians: PackedGaussians) {
+        this.context = context;
+        this.nUnpadded = gaussians.numGaussians;
+        this.nPadded = nextPowerOfTwo(this.nUnpadded);
+        this.numThreads = 2048;
+
+        // buffer for the vertex positions, set once
+        this.positionsBuffer = this.context.device.createBuffer({
+            size: gaussians.positionsArrayLayout.size,
+            usage: GPUBufferUsage.STORAGE,
+            mappedAtCreation: true,
+            label: "depthSorter.positionsBuffer"
+        });
+        new Uint8Array(this.positionsBuffer.getMappedRange()).set(new Uint8Array(gaussians.positionsBuffer));
+        this.positionsBuffer.unmap();
+        
+        // buffer for the depth values, computed each time using uniforms, padded to next power of 2
+        this.depthBuffer = this.context.device.createBuffer({
+            size: this.nPadded * 4, // f32
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+            label: "depthSorter.depthBuffer"
+        });
+
+        // buffer for the projection matrix, set at each frame
+        this.projMatrixBuffer = this.context.device.createBuffer({
+            size: projMatrixLayout.size,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+            label: "depthSorter.projMatrixBuffer"
+        });
+
+        // manually create the bind group layout because
+        // this.computeDepthPipeline.getBindGroupLayout(0) doesn't work for some reason
+        const computeDepthBindGroupLayout = this.context.device.createBindGroupLayout({
+            entries: [
+                {
+                    binding: 0,
+                    visibility: GPUShaderStage.COMPUTE,
+                    buffer: {
+                        type: 'read-only-storage' as GPUBufferBindingType,
+                    },
+                },
+                {
+                    binding: 1,
+                    visibility: GPUShaderStage.COMPUTE,
+                    buffer: {
+                        type: 'storage' as GPUBufferBindingType,
+                    },
+                },
+                {
+                    binding: 2,
+                    visibility: GPUShaderStage.COMPUTE,
+                    buffer: {
+                        type: 'uniform' as GPUBufferBindingType,
+                    },
+                },
+            ],
+        }); 
+
+        const computeDepthPipelineLayout = this.context.device.createPipelineLayout({
+            bindGroupLayouts: [computeDepthBindGroupLayout],
+        });
+
+        const paddedPerThread = Math.ceil(this.nPadded / this.numThreads);
+        this.computeDepthPipeline = this.context.device.createComputePipeline({
+            layout: computeDepthPipelineLayout, // would be easier to say layout: 'auto'
+            compute: {
+                module: this.context.device.createShaderModule({
+                    code: computeDepthShader(paddedPerThread, this.nUnpadded),
+                }),
+                entryPoint: 'main',
+            },
+        });
+
+        this.computeDepthBindGroup = this.context.device.createBindGroup({
+            //layout: this.computeDepthPipeline.getBindGroupLayout(0), // this doesn't work for some reason
+            layout: computeDepthBindGroupLayout,
+            entries: [
+                {
+                    binding: 0,
+                    resource: {
+                        buffer: this.positionsBuffer,
+                    },
+                },
+                {
+                    binding: 1,
+                    resource: {
+                        buffer: this.depthBuffer,
+                    },
+                },
+                {
+                    binding: 2,
+                    resource: {
+                        buffer: this.projMatrixBuffer,
+                    },
+                },
+            ],
+        });
+
+        this.sorter = new BitonicSorter(this.context, this.nPadded);
+
+        // buffer for the resulting index buffer, per vertex, 6 * #nElements
+        this.indexBuffer = this.context.device.createBuffer({
+            size: this.nUnpadded * 6 * 4,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+            label: "depthSorter.indexBuffer"
+        });
+
+        const unpaddedPerThread = Math.ceil(this.nUnpadded / this.numThreads);
+        this.copyToIndexBufferPipeline = this.context.device.createComputePipeline({
+            compute: {
+                module: this.context.device.createShaderModule({
+                    code: copyToIndexBufferShader(unpaddedPerThread, this.nUnpadded),
+                }),
+                entryPoint: 'main',
+            },
+            layout: 'auto',
+        });
+
+        this.copyToIndexBufferBindGroup = this.context.device.createBindGroup({
+            layout: this.copyToIndexBufferPipeline.getBindGroupLayout(0),
+            entries: [
+                {
+                    binding: 0,
+                    resource: {
+                        buffer: this.sorter.indicesBuffer,
+                    },
+                },
+                {
+                    binding: 1,
+                    resource: {
+                        buffer: this.indexBuffer,
+                    },
+                },
+            ],
+        });
+    }
+
+    destroy(): void {
+        this.positionsBuffer.destroy();
+        this.depthBuffer.destroy();
+        this.projMatrixBuffer.destroy();
+        this.indexBuffer.destroy();
+
+        this.sorter.destroy();
+    }
+
+    sort(projMatrix: number[][]): GPUBuffer {
+        const projMatrixCpuBuffer = new ArrayBuffer(projMatrixLayout.size);
+        projMatrixLayout.pack(0, projMatrix, new DataView(projMatrixCpuBuffer));
+
+        this.context.device.queue.writeBuffer(
+            this.projMatrixBuffer,
+            0,
+            projMatrixCpuBuffer,
+            0,
+            projMatrixCpuBuffer.byteLength
+        );
+
+        { // compute the depth of each vertex
+            const commandEncoder = this.context.device.createCommandEncoder();
+            const passEncoder = commandEncoder.beginComputePass();
+            passEncoder.setPipeline(this.computeDepthPipeline);
+            passEncoder.setBindGroup(0, this.computeDepthBindGroup);
+            passEncoder.dispatchWorkgroups(this.numThreads / 64);
+            passEncoder.end();
+
+            this.context.device.queue.submit([commandEncoder.finish()]);
+        }
+
+        // discard the result because we have already bound
+        // this.sorter.indicesBuffer to the copyToIndexBufferBindGroup
+        this.sorter.argsort(this.depthBuffer);
+
+
+        { // copy the indices to the index buffer
+            const commandEncoder = this.context.device.createCommandEncoder();
+            const passEncoder = commandEncoder.beginComputePass();
+            passEncoder.setPipeline(this.copyToIndexBufferPipeline);
+            passEncoder.setBindGroup(0, this.copyToIndexBufferBindGroup);
+            passEncoder.dispatchWorkgroups(this.numThreads / 64);
+            passEncoder.end();
+
+            this.context.device.queue.submit([commandEncoder.finish()]);
+        }
+
+        return this.indexBuffer;
+    }
+}
+```
+
+### src/gpu_context.ts
+```
+export class GpuContext {
+    gpu: GPU;
+    adapter: GPUAdapter;
+    device: GPUDevice;
+
+    constructor(gpu: GPU, adapter: GPUAdapter, device: GPUDevice) {
+        this.gpu = gpu;
+        this.adapter = adapter;
+        this.device = device;
+    }
+
+    static async create(): Promise<GpuContext> {
+        const gpu = navigator.gpu;
+        if (!gpu) {
+            return Promise.reject("WebGPU not supported on this browser! (navigator.gpu is null)");
+        }
+
+        const adapter = await gpu.requestAdapter();
+        if (!adapter) {
+            return Promise.reject("WebGPU not supported on this browser! (gpu.adapter is null)");
+        }
+
+        const device = await adapter.requestDevice({label: "GPUDevice"});
+
+        return new GpuContext(gpu, adapter, device);
+    }
+
+    destroy() { 
+        this.device.destroy();
+        this.adapter = null as any;
+        this.device = null as any;
+    }
+}
+```
+
+### src/index.ts
+```
+import { loadFileAsArrayBuffer, PackedGaussians } from './ply';
+import { CameraFileParser, InteractiveCamera } from './camera';
+import { Renderer } from './renderer';
+
+if (!navigator.gpu) {
+    alert("WebGPU not supported on this browser! (navigator.gpu is null)");
+}
+
+// grab the DOM elements
+const canvas = document.getElementById("canvas-webgpu") as HTMLCanvasElement;
+const loadingPopup = document.getElementById('loading-popup')! as HTMLDivElement;
+const fpsCounter = document.getElementById('fps-counter')! as HTMLLabelElement;
+const cameraFileInput = document.getElementById('cameraButton')! as HTMLInputElement;
+const cameraList = document.getElementById('cameraList')! as HTMLUListElement;
+const plyFileInput = document.getElementById('plyButton') as HTMLInputElement;
+
+// create the camera and renderer globals
+let interactiveCamera = InteractiveCamera.default(canvas);
+var currentRenderer: Renderer;
+
+// swap the renderer when the ply file changes
+function handlePlyChange(event: any) {
+    const file = event.target.files[0];
+
+    async function onFileLoad(arrayBuffer: ArrayBuffer) {
+        if (currentRenderer) {
+            await currentRenderer.destroy();
+        }
+        const gaussians = new PackedGaussians(arrayBuffer);
+        try {
+            const context = await Renderer.requestContext(gaussians);
+            const renderer = new Renderer(canvas, interactiveCamera, gaussians, context, fpsCounter);
+            currentRenderer = renderer; // bind to the global scope
+            loadingPopup.style.display = 'none'; // hide loading popup
+        } catch (error) {
+            loadingPopup.style.display = 'none'; // hide loading popup
+            alert(error);
+        }
+    }
+
+    if (file) {
+        loadingPopup.style.display = 'block'; // show loading popup
+        loadFileAsArrayBuffer(file)
+            .then(onFileLoad);
+    }
+}
+
+// loads the default ply file (bundled with the source) at startup, useful for dev
+async function loadDefaultPly() {
+    const url = "pc_short.ply";
+    loadingPopup.style.display = 'block'; // show loading popup
+    const content = await fetch(url);
+    const arrayBuffer = await content.arrayBuffer();
+    const gaussians = new PackedGaussians(arrayBuffer);
+    const context = await Renderer.requestContext(gaussians);
+    const renderer = new Renderer(canvas, interactiveCamera, gaussians, context, fpsCounter);
+    currentRenderer = renderer; // bind to the global scope
+    loadingPopup.style.display = 'none'; // hide loading popup
+}
+
+// DEV: uncomment this line to load the default ply file at startup
+//loadDefaultPly();
+
+// add event listeners
+plyFileInput!.addEventListener('change', handlePlyChange);
+new CameraFileParser(
+    cameraFileInput,
+    cameraList,
+    canvas,
+    (camera) => interactiveCamera.setNewCamera(camera),
+);
+```
+
+### src/packing.ts
+```
+// This file contains the code for packing and unpacking data into webGPU buffers.
+// WebGPU buffers have rules about datatype layouts, padding etc, so it's much easier
+// to define a code which automatically generates the correct packing methods.
+// It is weakly typed and relies on runtime check, a proper solution would be with
+// extensive generics, but that's outside my comfort zone.
+
+// I wished to define it as 
+// export type NestedData = number | NestedData[] | Record<string, NestedData>;
+// but it complains about circular references.
+export type NestedData = any;
+
+function roundUp(n: number, multiple: number): number {
+    return Math.ceil(n / multiple) * multiple;
+}
+
+class PackingError extends Error {
+    constructor(message: string) {
+        super(message);
+        this.name = 'PackingError';
+    }
+}
+
+export abstract class PackingType {
+    public size: number;
+    public alignment: number;
+
+    constructor(size: number, alignment: number) {
+        this.size = size;
+        this.alignment = alignment;
+    }
+
+    abstract pack(offset: number, value: NestedData, view: DataView): number;
+    abstract unpack(offset: number, view: DataView): [number, NestedData];
+}
+
+class i32Type extends PackingType {
+    constructor() { super(4, 4); }
+    pack(offset: number, value: number, view: DataView): number {
+        if (typeof value !== 'number') {
+            throw new PackingError(`Expected number, got ${value}`);
+        }
+        view.setInt32(offset, value, true);
+        return offset + this.size;
+    }
+
+    unpack(offset: number, view: DataView): [number, number] {
+        const content = view.getInt32(offset, true);
+        return [offset + this.size, content];
+    }
+}
+
+class u32Type extends PackingType {
+    constructor() { super(4, 4); }
+    pack(offset: number, value: number, view: DataView): number {
+        if (typeof value !== 'number') {
+            throw new PackingError(`Expected number, got ${value}`);
+        }
+        view.setUint32(offset, value, true);
+        return offset + this.size;
+    }
+
+    unpack(offset: number, view: DataView): [number, number] {
+        const content = view.getUint32(offset, true);
+        return [offset + this.size, content];
+    }
+
+}
+
+class f32Type extends PackingType {
+    constructor() { super(4, 4); }
+    pack(offset: number, value: number, view: DataView): number {
+        if (typeof value !== 'number') {
+            throw new PackingError(`Expected number, got ${value}`);
+        }
+        view.setFloat32(offset, value, true);
+        return offset + this.size;
+    }
+
+    unpack(offset: number, view: DataView): [number, number] {
+        const content = view.getFloat32(offset, true);
+        return [offset + this.size, content];
+    }
+}
+
+export const i32 = new i32Type();
+export const u32 = new u32Type();
+export const f32 = new f32Type();
+
+class VectorType extends PackingType {
+    public baseType: PackingType;
+    public nValues: number;
+
+    constructor(baseType: PackingType, nValues: number, alignment: number) {
+        super(baseType.size * nValues, alignment);
+        this.baseType = baseType;
+        this.nValues = nValues;
+    }
+
+    pack(offset: number, values: number[], view: DataView) {
+        if (!Array.isArray(values)) {
+            throw new PackingError(`Expected array, got ${values}`);
+        }
+
+        if (values.length !== this.nValues) {
+            throw new PackingError(`Expected ${this.nValues} values, got ${values.length}`);
+        }
+
+        while (offset % this.alignment !== 0) {
+            offset++;
+        }
+
+        for (let i = 0; i < values.length; i++) {
+            try {
+                offset = this.baseType.pack(offset, values[i], view);
+            } catch (e) {
+                if (e instanceof PackingError) {
+                    throw new PackingError(`Error packing value ${i}: ${e.message}`);
+                } else {
+                    throw e;
+                }
+            };
+        }
+        return offset;
+    }
+
+    unpack(offset: number, view: DataView): [number, number[]] {
+        const values: number[] = [];
+
+        while (offset % this.alignment !== 0) {
+            offset++;
+        }
+
+        for (let i = 0; i < this.nValues; i++) {
+            let [newOffset, value] = this.baseType.unpack(offset, view);
+            offset = newOffset;
+            values.push(value);
+        }
+        return [offset, values];
+    }
+}
+
+export class vec2 extends VectorType {
+    constructor(baseType: PackingType) { super(baseType, 2, 8); }
+}
+
+export class vec3 extends VectorType {
+    constructor(baseType: PackingType) { super(baseType, 3, 16); }
+}
+
+export class vec4 extends VectorType {
+    constructor(baseType: PackingType) { super(baseType, 4, 16); }
+}
+
+export class Struct extends PackingType {
+    public members: [string, PackingType][];
+
+    constructor(members: [string, PackingType][]) {
+        const alignment = Math.max(...members.map(([_name, type]) => type.alignment));
+
+        let offset = 0;
+        for (const [_, type] of members) {
+            while (offset % type.alignment !== 0) {
+                offset++;
+            }
+
+            offset += type.size;
+        }
+
+        // SizeOf(S) = roundUp(AlignOf(S), justPastLastMember)
+        // where justPastLastMember = OffsetOfMember(S,N) + SizeOfMember(S,N)
+        const size = roundUp(offset, alignment);
+        super(size, alignment);
+        this.members = members;
+    }
+
+    pack(offset: number, values: Record<string, NestedData>, view: DataView) {
+        const expectedKeys = this.members.map(([name, _type]) => name);
+        const actualKeys = Object.keys(values);
+
+        if (expectedKeys.length !== actualKeys.length) {
+            throw new PackingError(`Expected values for ${expectedKeys}, got ${actualKeys}`);
+        }
+        if (!expectedKeys.every((key) => actualKeys.includes(key))) {
+            throw new PackingError(`Expected values for ${expectedKeys}, got ${actualKeys}`);
+        }
+
+        const startingOffset = offset;
+
+        while (offset % this.alignment !== 0) {
+            offset++;
+        }
+
+        for (const [name, type] of this.members) {
+            const value = values[name as keyof typeof values];
+            try {
+                offset = type.pack(offset, value, view);
+            } catch (e) {
+                // error packing the thing inside
+                if (e instanceof PackingError) {
+                    throw new PackingError(`Error packing value ${name}: ${e.message}`);
+                } else {
+                    throw e;
+                }
+            }
+        }
+
+        offset += this.size - (offset - startingOffset);
+
+        return offset;
+    }
+
+    unpack(offset: number, view: DataView): [number, Record<string, NestedData>] {
+        const values: Record<string, NestedData> = {};
+
+        const startingOffset = offset;
+
+        while (offset % this.alignment !== 0) {
+            offset++;
+        }
+
+        for (const [name, type] of this.members) {
+            let [newOffset, value] = type.unpack(offset, view);
+            offset = newOffset;
+            values[name] = value;
+        }
+
+        offset += this.size - (offset - startingOffset);
+
+        return [offset, values];
+    }
+}
+
+export class StaticArray extends PackingType {
+    public type: PackingType;
+    public nElements: number;
+    public stride: number;
+
+    constructor(type: PackingType, nElements: number) {
+        const alignment = type.alignment;
+        const size = nElements * roundUp(type.size, type.alignment);
+        super(size, alignment);
+        this.type = type
+        this.nElements = nElements;
+        this.stride = roundUp(type.size, type.alignment);
+    }
+
+    pack(offset: number, values: NestedData[], view: DataView) {
+        if (!Array.isArray(values)) {
+            throw new PackingError(`Expected array, got ${values}`);
+        }
+
+        if (values.length !== this.nElements) {
+            throw new PackingError(`Expected ${this.nElements} values, got ${values.length}`);
+        }
+
+        while (offset % this.alignment !== 0) {
+            offset++;
+        }
+
+        for (let i = 0; i < values.length; i++) {
+            try {
+                offset = this.type.pack(offset, values[i], view);
+            } catch (e) {
+                if (e instanceof PackingError) {
+                    throw new PackingError(`Error packing value ${i}: ${e.message}`);
+                } else {
+                    throw e;
+                }
+            }
+            offset += this.stride - this.type.size;
+        }
+
+        return offset;
+    }
+
+    unpack(offset: number, view: DataView): [number, NestedData[]] {
+        const values: NestedData[] = [];
+
+        while (offset % this.alignment !== 0) {
+            offset++;
+        }
+
+        for (let i = 0; i < this.nElements; i++) {
+            let [newOffset, value] = this.type.unpack(offset, view);
+            offset = newOffset;
+            values.push(value);
+            offset += this.stride - this.type.size;
+        }
+        return [offset, values];
+    }
+}
+
+class MatrixType extends PackingType {
+    public baseType: PackingType;
+    public nRows: number;
+    public nColumns: number;
+
+    constructor(baseType: PackingType, nRows: number, nColumns: number) {
+        var vecType: VectorType;
+        if (nRows === 2) {
+            vecType = new vec2(baseType);
+        } else if (nRows === 3) {
+            vecType = new vec3(baseType);
+        } else if (nRows === 4) {
+            vecType = new vec4(baseType);
+        } else {
+            throw new Error(`Invalid number of rows: ${nRows}`);
+        }
+        const arrayType = new StaticArray(vecType, nColumns);
+
+        super(arrayType.size, vecType.alignment);
+        this.baseType = baseType;
+        this.nRows = nRows;
+        this.nColumns = nColumns;
+    }
+
+    pack(offset: number, values: number[][], view: DataView): number {
+        if (!Array.isArray(values)) {
+            throw new PackingError(`Expected array, got ${values}`);
+        }
+
+        if (values.length !== this.nColumns) {
+            throw new PackingError(`Expected ${this.nColumns} columns, got ${values.length}`);
+        }
+
+        while (offset % this.alignment !== 0) {
+            offset++;
+        }
+
+        const startOffset = offset;
+
+        for (let i = 0; i < values.length; i++) {
+            if (!Array.isArray(values[i])) {
+                throw new PackingError(`Expected array, got ${values[i]}`);
+            }
+
+            for (let j = 0; j < values[i].length; j++) {
+                try {
+                    offset = this.baseType.pack(offset, values[i][j], view);
+                } catch (e) {
+                    if (e instanceof PackingError) {
+                        throw new PackingError(`Error packing value ${i},${j}: ${e.message}`);
+                    } else {
+                        throw e;
+                    }
+                }
+            }
+        }
+
+        offset = startOffset + this.size;
+
+        return offset;
+    }
+
+    unpack(offset: number, view: DataView): [number, number[][]] {
+        while (offset % this.alignment !== 0) {
+            offset++;
+        }
+
+        const startOffset = offset;
+
+        const outerValues: number[][] = [];
+        for (let i = 0; i < this.nColumns; i++) {
+            const innerValues: number[] = [];
+            for (let j = 0; j < this.nRows; j++) {
+                let [newOffset, value] = this.baseType.unpack(offset, view);
+                offset = newOffset;
+                innerValues.push(value);
+            }
+            outerValues.push(innerValues);
+        }
+
+        offset += this.size - (offset - startOffset);
+
+        return [offset, outerValues];
+    }
+}
+
+export class mat4x4 extends MatrixType {
+    constructor(baseType: PackingType) { super(baseType, 4, 4); }
+}
+```
+
+### src/ply.ts
+```
+import { PackingType, StaticArray, Struct, vec3, vec4, f32 } from "./packing";
+import { Vec3 } from "wgpu-matrix";
+
+export function loadFileAsArrayBuffer(file: File): Promise<ArrayBuffer> {
+    /* loads a file as an ArrayBuffer (i.e. a binary blob) */
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+
+        reader.onload = (event) => {
+            if (!event.target || !event.target.result) {
+                reject('Failed to load file');
+                return;
+            }
+            if (typeof event.target.result === 'string') {
+                reject('Got a text file instead of a binary one');
+                return;
+            }
+            resolve(event.target.result);
+        };
+
+        reader.onerror = (event) => {
+            if (!event.target) {
+                reject('Failed to load file');
+                return;
+            }
+            reject(event.target.error);
+        };
+
+        reader.readAsArrayBuffer(file);
+    });
+}
+
+export class PackedGaussians {
+    /* A class that
+        1) reads the binary blob from a .ply file
+        2) converts internally into a structured representation
+        3) packs the structured representation into a flat array of bytes as expected by the shaders
+    */
+    numGaussians: number;
+    sphericalHarmonicsDegree: number;
+
+    gaussianLayout: PackingType;
+    public gaussianArrayLayout: PackingType;
+    positionsLayout: PackingType;
+    public positionsArrayLayout: PackingType;
+
+    gaussiansBuffer: ArrayBuffer;
+    positionsBuffer: ArrayBuffer;
+
+    private static decodeHeader(plyArrayBuffer: ArrayBuffer): [number, Record<string, string>, DataView] {
+        /* decodes the .ply file header and returns a tuple of:
+            * - vertexCount: number of vertices in the point cloud
+            * - propertyTypes: a map from property names to their types
+            * - vertexData: a DataView of the vertex data
+        */
+
+        const decoder = new TextDecoder();
+        let headerOffset = 0;
+        let headerText = '';
+
+        while (true) {
+            const headerChunk = new Uint8Array(plyArrayBuffer, headerOffset, 50);
+            headerText += decoder.decode(headerChunk);
+            headerOffset += 50;
+
+            if (headerText.includes('end_header')) {
+                break;
+            }
+        }
+
+        const headerLines = headerText.split('\n');
+
+        let vertexCount = 0;
+        let propertyTypes: Record<string, string> = {};
+
+        for (let i = 0; i < headerLines.length; i++) {
+            const line = headerLines[i].trim();
+            if (line.startsWith('element vertex')) {
+                const vertexCountMatch = line.match(/\d+/);
+                if (vertexCountMatch) {
+                    vertexCount = parseInt(vertexCountMatch[0]);
+                }
+            } else if (line.startsWith('property')) {
+                const propertyMatch = line.match(/(\w+)\s+(\w+)\s+(\w+)/);
+                if (propertyMatch) {
+                    const propertyType = propertyMatch[2];
+                    const propertyName = propertyMatch[3];
+                    propertyTypes[propertyName] = propertyType;
+                }
+            } else if (line === 'end_header') {
+                break;
+            }
+        }
+
+        const vertexByteOffset = headerText.indexOf('end_header') + 'end_header'.length + 1;
+        const vertexData = new DataView(plyArrayBuffer, vertexByteOffset);
+
+        return [
+            vertexCount,
+            propertyTypes,
+            vertexData,
+        ];
+    }
+
+    private readRawVertex(offset: number, vertexData: DataView, propertyTypes: Record<string, string>): [number, Record<string, number>] {
+        /* reads a single vertex from the vertexData DataView and returns a tuple of:
+            * - offset: the offset of the next vertex in the vertexData DataView
+            * - rawVertex: a map from property names to their values
+        */
+        let rawVertex: Record<string, number> = {};
+
+        for (const property in propertyTypes) {
+            const propertyType = propertyTypes[property];
+            if (propertyType === 'float') {
+                rawVertex[property] = vertexData.getFloat32(offset, true);
+                offset += Float32Array.BYTES_PER_ELEMENT;
+            } else if (propertyType === 'uchar') {
+                rawVertex[property] = vertexData.getUint8(offset) / 255.0;
+                offset += Uint8Array.BYTES_PER_ELEMENT;
+            }
+        }
+
+        return [offset, rawVertex];
+    }
+
+    public get nShCoeffs(): number {
+        /* returns the expected number of spherical harmonics coefficients */
+        if (this.sphericalHarmonicsDegree === 0) {
+            return 1;
+        } else if (this.sphericalHarmonicsDegree === 1) {
+            return 4;
+        } else if (this.sphericalHarmonicsDegree === 2) {
+            return 9;
+        } else if (this.sphericalHarmonicsDegree === 3) {
+            return 16;
+        } else {
+            throw new Error(`Unsupported SH degree: ${this.sphericalHarmonicsDegree}`);
+        }
+    }
+
+    private arrangeVertex(rawVertex: Record<string, number>, shFeatureOrder: string[]): Record<string, any> {
+        /* arranges a raw vertex into a vertex that can be packed by the gaussianLayout utility */
+        const shCoeffs = [];
+        for (let i = 0; i < this.nShCoeffs; ++i) {
+            const coeff = [];
+            for (let j = 0; j < 3; ++j) {
+                const coeffName = shFeatureOrder[i * 3 + j];
+                coeff.push(rawVertex[coeffName]);
+            }
+            shCoeffs.push(coeff);
+        }
+
+        const arrangedVertex: Record<string, any> = {
+            position: [rawVertex.x, rawVertex.y, rawVertex.z],
+            logScale: [rawVertex.scale_0, rawVertex.scale_1, rawVertex.scale_2],
+            rotQuat: [rawVertex.rot_0, rawVertex.rot_1, rawVertex.rot_2, rawVertex.rot_3],
+            opacityLogit: rawVertex.opacity,
+            shCoeffs: shCoeffs,
+        };
+        return arrangedVertex;
+    }
+
+    constructor(arrayBuffer: ArrayBuffer) {
+        // decode the header
+        const [vertexCount, propertyTypes, vertexData] = PackedGaussians.decodeHeader(arrayBuffer);
+        this.numGaussians = vertexCount;
+
+        // figure out the SH degree from the number of coefficients
+        var nRestCoeffs = 0;
+        for (const propertyName in propertyTypes) {
+            if (propertyName.startsWith('f_rest_')) {
+                nRestCoeffs += 1;
+            }
+        }
+        const nCoeffsPerColor = nRestCoeffs / 3;
+        this.sphericalHarmonicsDegree = Math.sqrt(nCoeffsPerColor + 1) - 1;
+        console.log('Detected degree', this.sphericalHarmonicsDegree, 'with ', nCoeffsPerColor, 'coefficients per color');
+
+        // figure out the order in which spherical harmonics should be read
+        const shFeatureOrder = [];
+        for (let rgb = 0; rgb < 3; ++rgb) {
+            shFeatureOrder.push(`f_dc_${rgb}`);
+        }
+        for (let i = 0; i < nCoeffsPerColor; ++i) {
+            for (let rgb = 0; rgb < 3; ++rgb) {
+                shFeatureOrder.push(`f_rest_${rgb * nCoeffsPerColor + i}`);
+            }
+        }
+
+        // define the layout of a single point
+        this.gaussianLayout = new Struct([
+            ['position', new vec3(f32)],
+            ['logScale', new vec3(f32)],
+            ['rotQuat', new vec4(f32)],
+            ['opacityLogit', f32],
+            ['shCoeffs', new StaticArray(new vec3(f32), this.nShCoeffs)],
+        ]);
+        // define the layout of the entire point cloud
+        this.gaussianArrayLayout = new StaticArray(this.gaussianLayout, vertexCount);
+
+        this.positionsLayout = new vec3(f32);
+        this.positionsArrayLayout = new StaticArray(this.positionsLayout, vertexCount);
+
+        // pack the points
+        this.gaussiansBuffer = new ArrayBuffer(this.gaussianArrayLayout.size);
+        const gaussianWriteView = new DataView(this.gaussiansBuffer);
+
+        this.positionsBuffer = new ArrayBuffer(this.positionsArrayLayout.size);
+        const positionsWriteView = new DataView(this.positionsBuffer);
+
+        var readOffset = 0;
+        var gaussianWriteOffset = 0;
+        var positionWriteOffset = 0;
+        for (let i = 0; i < vertexCount; i++) {
+            const [newReadOffset, rawVertex] = this.readRawVertex(readOffset, vertexData, propertyTypes);
+            readOffset = newReadOffset;
+            gaussianWriteOffset = this.gaussianLayout.pack(
+                gaussianWriteOffset,
+                this.arrangeVertex(rawVertex, shFeatureOrder),
+                gaussianWriteView,
+            );
+
+            positionWriteOffset = this.positionsLayout.pack(
+                positionWriteOffset,
+                [rawVertex.x, rawVertex.y, rawVertex.z],
+                positionsWriteView,
+            );
+        }
+    }
+}
+```
+
+### src/renderer.ts
+```
+// This file contains the main rendering code. Unlike the official implementation,
+// instead of using compute shaders and iterating through (possibly) all gaussians,
+// we instead use a vertex shader to turn each gaussian into a quad facing the camera
+// and then use the fragment shader to paint the gaussian on the quad.
+// If we draw the quads in order of depth, with well chosen blending settings we can
+// get the same color accumulation rule as in the original paper.
+// This approach is faster than the original implementation on webGPU but still substantially
+// slow compared to the CUDA impl. The main bottleneck is the sorting of the quads by depth,
+// which is done on the CPU but could presumably be replaced by a compute shader sort.
+
+import { PackedGaussians } from './ply';
+import { f32, Struct, vec3, mat4x4 } from './packing';
+import { InteractiveCamera } from './camera';
+import { getShaderCode } from './shaders';
+import { Mat4, Vec3 } from 'wgpu-matrix';
+import { GpuContext } from './gpu_context';
+import { DepthSorter } from './depth_sorter';
+
+const uniformLayout = new Struct([
+    ['viewMatrix', new mat4x4(f32)],
+    ['projMatrix', new mat4x4(f32)],
+    ['cameraPosition', new vec3(f32)],
+    ['tanHalfFovX', f32],
+    ['tanHalfFovY', f32],
+    ['focalX', f32],
+    ['focalY', f32],
+    ['scaleModifier', f32],
+]);
+
+function mat4toArrayOfArrays(m: Mat4): number[][] {
+    return [
+        [m[0], m[1], m[2], m[3]],
+        [m[4], m[5], m[6], m[7]],
+        [m[8], m[9], m[10], m[11]],
+        [m[12], m[13], m[14], m[15]],
+    ];
+}
+
+export class Renderer {
+    canvas: HTMLCanvasElement;
+    interactiveCamera: InteractiveCamera;
+    numGaussians: number;
+
+    context: GpuContext;
+    contextGpu: GPUCanvasContext;
+
+    uniformBuffer: GPUBuffer;
+    pointDataBuffer: GPUBuffer;
+    drawIndexBuffer: GPUBuffer;
+
+    depthSorter: DepthSorter;
+
+    uniformsBindGroup: GPUBindGroup;
+    pointDataBindGroup: GPUBindGroup;
+
+    drawPipeline: GPURenderPipeline;
+
+    depthSortMatrix: number[][];
+
+    // fps counter
+    fpsCounter: HTMLLabelElement;
+    lastDraw: number;
+
+    destroyCallback: (() => void) | null = null;
+
+    public static async requestContext(gaussians: PackedGaussians): Promise<GpuContext> {
+        const gpu = navigator.gpu;
+        if (!gpu) {
+            return Promise.reject("WebGPU not supported on this browser! (navigator.gpu is null)");
+        }
+
+        const adapter = await gpu.requestAdapter();
+        if (!adapter) {
+            return Promise.reject("WebGPU not supported on this browser! (gpu.adapter is null)");
+        }
+
+        // for good measure, we request 1.5 times the amount of memory we need
+        const byteLength = gaussians.gaussiansBuffer.byteLength;
+        const device = await adapter.requestDevice({
+            requiredLimits: {
+                maxStorageBufferBindingSize: 1.5 * byteLength,
+                maxBufferSize: 1.5 * byteLength,
+            }
+        });
+
+        return new GpuContext(gpu, adapter, device);
+    }
+
+    // destroy the renderer and return a promise that resolves when it's done (after the next frame)
+    public async destroy(): Promise<void> {
+        return new Promise((resolve, reject) => {
+            this.destroyCallback = resolve;
+        });
+    }
+
+    constructor(
+        canvas: HTMLCanvasElement,
+        interactiveCamera: InteractiveCamera,
+        gaussians: PackedGaussians,
+        context: GpuContext,
+        fpsCounter: HTMLLabelElement,
+    ) {
+        this.canvas = canvas;
+        this.interactiveCamera = interactiveCamera;
+        this.context = context;
+        const contextGpu = canvas.getContext("webgpu");
+        if (!contextGpu) {
+            throw new Error("WebGPU context not found!");
+        }
+        this.contextGpu = contextGpu;
+        this.fpsCounter = fpsCounter;
+        this.lastDraw = performance.now();
+
+        this.numGaussians = gaussians.numGaussians;
+
+        const presentationFormat = "rgba16float" as GPUTextureFormat;
+
+        this.contextGpu.configure({
+            device: this.context.device,
+            format: presentationFormat,
+            alphaMode: 'premultiplied' as GPUCanvasAlphaMode,
+        });
+
+        this.pointDataBuffer = this.context.device.createBuffer({
+            size: gaussians.gaussianArrayLayout.size,
+            usage: GPUBufferUsage.STORAGE,
+            mappedAtCreation: true,
+            label: "renderer.pointDataBuffer",
+        });
+        new Uint8Array(this.pointDataBuffer.getMappedRange()).set(new Uint8Array(gaussians.gaussiansBuffer));
+        this.pointDataBuffer.unmap();
+
+        // Create a GPU buffer for the uniform data.
+        this.uniformBuffer = this.context.device.createBuffer({
+            size: uniformLayout.size,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+            label: "renderer.uniformBuffer",
+        });
+
+        const shaderCode = getShaderCode(canvas, gaussians.sphericalHarmonicsDegree, gaussians.nShCoeffs);
+        const shaderModule = this.context.device.createShaderModule({ code: shaderCode });
+
+        this.drawPipeline = this.context.device.createRenderPipeline({
+            layout: "auto",
+            vertex: {
+                module: shaderModule,
+                entryPoint: "vs_points",
+            },
+            fragment: {
+                module: shaderModule,
+                entryPoint: "fs_main",
+                targets: [
+                    {
+                        format: presentationFormat,
+                        // with one-minus-dst alpha we can set the src to src.alpha * src.color and
+                        // we get that color_new = src.color * src.alpha + dst.color * (1 - src.alpha)
+                        // which is the same as the accumulation rule in the paper
+                        blend: {
+                            color: {
+                                srcFactor: "one-minus-dst-alpha" as GPUBlendFactor,
+                                dstFactor: "one" as GPUBlendFactor,
+                                operation: "add" as GPUBlendOperation,
+                            },
+                            alpha: {
+                                srcFactor: "one-minus-dst-alpha" as GPUBlendFactor,
+                                dstFactor: "one" as GPUBlendFactor,
+                                operation: "add" as GPUBlendOperation,
+                            },
+                        }
+                    },
+                ],
+            },
+            primitive: {
+                topology: "triangle-list",
+                stripIndexFormat: undefined,
+                cullMode: undefined,
+            },
+        });
+
+        this.uniformsBindGroup = this.context.device.createBindGroup({
+            layout: this.drawPipeline.getBindGroupLayout(0),
+            entries: [{
+                binding: 0,
+                resource: {
+                    buffer: this.uniformBuffer,
+                },
+            }],
+        });
+
+        this.pointDataBindGroup = this.context.device.createBindGroup({
+            layout: this.drawPipeline.getBindGroupLayout(1),
+            entries: [{
+                binding: 1,
+                resource: {
+                    buffer: this.pointDataBuffer,
+                },
+            }],
+        });
+
+        this.depthSorter = new DepthSorter(this.context, gaussians);
+
+        this.drawIndexBuffer = this.context.device.createBuffer({
+           size: 6 * 4 * gaussians.numGaussians,
+           usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
+           mappedAtCreation: false,
+           label: "renderer.drawIndexBuffer",
+        });
+
+        // start the animation loop
+        requestAnimationFrame(() => this.animate(true));
+    }
+
+    private destroyImpl(): void {
+        if (this.destroyCallback === null) {
+            throw new Error("destroyImpl called without destroyCallback set!");
+        }
+
+        this.uniformBuffer.destroy();
+        this.pointDataBuffer.destroy();
+        this.drawIndexBuffer.destroy();
+        this.depthSorter.destroy();
+        this.context.destroy();
+        this.destroyCallback();
+    }
+
+    draw(nextFrameCallback: FrameRequestCallback): void {
+        const commandEncoder = this.context.device.createCommandEncoder();
+
+        // sort the draw order
+        const indexBufferSrc = this.depthSorter.sort(this.depthSortMatrix);
+
+        // copy the draw order to the draw index buffer
+        commandEncoder.copyBufferToBuffer(
+            indexBufferSrc,
+            0,
+            this.drawIndexBuffer,
+            0,
+            6 * 4 * this.depthSorter.nUnpadded,
+        );
+
+        const textureView = this.contextGpu.getCurrentTexture().createView();
+        const renderPassDescriptor: GPURenderPassDescriptor = {
+            colorAttachments: [{
+                view: textureView,
+                clearValue: { r: 0, g: 0, b: 0, a: 0 },
+                storeOp: "store" as GPUStoreOp,
+                loadOp: "clear" as GPULoadOp,
+            }],
+        };
+
+        const passEncoder = commandEncoder.beginRenderPass(renderPassDescriptor);
+        passEncoder.setPipeline(this.drawPipeline);
+
+        passEncoder.setBindGroup(0, this.uniformsBindGroup);
+        passEncoder.setBindGroup(1, this.pointDataBindGroup);
+
+        passEncoder.setIndexBuffer(this.drawIndexBuffer, "uint32" as GPUIndexFormat)
+        passEncoder.drawIndexed(this.numGaussians * 6, 1, 0, 0, 0);
+        passEncoder.end();
+
+        this.context.device.queue.submit([commandEncoder.finish()]);
+
+        // fps counter
+        const now = performance.now();
+        const fps = 1000 / (now - this.lastDraw);
+        this.lastDraw = now;
+        this.fpsCounter.innerText = 'FPS: ' + fps.toFixed(2);
+        this.fpsCounter.style.display = 'block';
+
+        requestAnimationFrame(nextFrameCallback);
+    }
+
+    animate(forceDraw?: boolean) {
+        if (this.destroyCallback !== null) {
+            this.destroyImpl();
+            return;
+        }
+        if (!this.interactiveCamera.isDirty() && !forceDraw) {
+            requestAnimationFrame(() => this.animate());
+            return;
+        }
+        const camera = this.interactiveCamera.getCamera();
+
+        const position = camera.getPosition();
+
+        const tanHalfFovX = 0.5 * this.canvas.width / camera.focalX;
+        const tanHalfFovY = 0.5 * this.canvas.height / camera.focalY;
+
+        this.depthSortMatrix = mat4toArrayOfArrays(camera.viewMatrix);
+
+        let uniformsMatrixBuffer = new ArrayBuffer(this.uniformBuffer.size);
+        let uniforms = {
+            viewMatrix: mat4toArrayOfArrays(camera.viewMatrix),
+            projMatrix: mat4toArrayOfArrays(camera.getProjMatrix()),
+            cameraPosition: Array.from(position),
+            tanHalfFovX: tanHalfFovX,
+            tanHalfFovY: tanHalfFovY,
+            focalX: camera.focalX,
+            focalY: camera.focalY,
+            scaleModifier: camera.scaleModifier,
+
+        };
+        uniformLayout.pack(0, uniforms, new DataView(uniformsMatrixBuffer));
+
+        this.context.device.queue.writeBuffer(
+            this.uniformBuffer,
+            0,
+            uniformsMatrixBuffer,
+            0,
+            uniformsMatrixBuffer.byteLength
+        );
+
+        this.draw(() => this.animate());
+    }
+}
+```
+
+### src/shaders.ts
+```
+const shDeg3Code = `
+    // spherical harmonic coefficients
+    const SH_C0 = 0.28209479177387814f;
+    const SH_C1 = 0.4886025119029199f;
+    const SH_C2 = array(
+        1.0925484305920792f,
+        -1.0925484305920792f,
+        0.31539156525252005f,
+        -1.0925484305920792f,
+        0.5462742152960396f
+    );
+    const SH_C3 = array(
+        -0.5900435899266435f,
+        2.890611442640554f,
+        -0.4570457994644658f,
+        0.3731763325901154f,
+        -0.4570457994644658f,
+        1.445305721320277f,
+        -0.5900435899266435f
+    );
+
+    fn compute_color_from_sh(position: vec3<f32>, sh: array<vec3<f32>, 16>) -> vec3<f32> {
+        let dir = normalize(position - uniforms.camera_position);
+        var result = SH_C0 * sh[0];
+
+        // if deg > 0
+        let x = dir.x;
+        let y = dir.y;
+        let z = dir.z;
+
+        result = result + SH_C1 * (-y * sh[1] + z * sh[2] - x * sh[3]);
+
+        let xx = x * x;
+        let yy = y * y;
+        let zz = z * z;
+        let xy = x * y;
+        let xz = x * z;
+        let yz = y * z;
+
+        // if (sh_degree > 1) {
+        result = result +
+            SH_C2[0] * xy * sh[4] +
+            SH_C2[1] * yz * sh[5] +
+            SH_C2[2] * (2. * zz - xx - yy) * sh[6] +
+            SH_C2[3] * xz * sh[7] +
+            SH_C2[4] * (xx - yy) * sh[8];
+        
+        // if (sh_degree > 2) {
+        result = result +
+            SH_C3[0] * y * (3. * xx - yy) * sh[9] +
+            SH_C3[1] * xy * z * sh[10] +
+            SH_C3[2] * y * (4. * zz - xx - yy) * sh[11] +
+            SH_C3[3] * z * (2. * zz - 3. * xx - 3. * yy) * sh[12] +
+            SH_C3[4] * x * (4. * zz - xx - yy) * sh[13] +
+            SH_C3[5] * z * (xx - yy) * sh[14] +
+            SH_C3[6] * x * (xx - 3. * yy) * sh[15];
+
+        // unconditional
+        result = result + 0.5;
+
+        return max(result, vec3<f32>(0.));
+    }
+`;
+
+const shDeg2Code = `
+    // spherical harmonic coefficients
+    const SH_C0 = 0.28209479177387814f;
+    const SH_C1 = 0.4886025119029199f;
+    const SH_C2 = array(
+        1.0925484305920792f,
+        -1.0925484305920792f,
+        0.31539156525252005f,
+        -1.0925484305920792f,
+        0.5462742152960396f
+    );
+
+    fn compute_color_from_sh(position: vec3<f32>, sh: array<vec3<f32>, 9>) -> vec3<f32> {
+        let dir = normalize(position - uniforms.camera_position);
+        var result = SH_C0 * sh[0];
+
+        // if deg > 0
+        let x = dir.x;
+        let y = dir.y;
+        let z = dir.z;
+
+        result = result + SH_C1 * (-y * sh[1] + z * sh[2] - x * sh[3]);
+
+        let xx = x * x;
+        let yy = y * y;
+        let zz = z * z;
+        let xy = x * y;
+        let xz = x * z;
+        let yz = y * z;
+
+        // if (sh_degree > 1) {
+        result = result +
+            SH_C2[0] * xy * sh[4] +
+            SH_C2[1] * yz * sh[5] +
+            SH_C2[2] * (2. * zz - xx - yy) * sh[6] +
+            SH_C2[3] * xz * sh[7] +
+            SH_C2[4] * (xx - yy) * sh[8];
+        
+        // unconditional
+        result = result + 0.5;
+
+        return max(result, vec3<f32>(0.));
+    }
+`;
+
+const shDeg1Code = `
+    // spherical harmonic coefficients
+    const SH_C0 = 0.28209479177387814f;
+    const SH_C1 = 0.4886025119029199f;
+
+    fn compute_color_from_sh(position: vec3<f32>, sh: array<vec3<f32>, 4>) -> vec3<f32> {
+        let dir = normalize(position - uniforms.camera_position);
+        var result = SH_C0 * sh[0];
+
+        // if deg > 0
+        let x = dir.x;
+        let y = dir.y;
+        let z = dir.z;
+
+        result = result + SH_C1 * (-y * sh[1] + z * sh[2] - x * sh[3]);
+
+        // unconditional
+        result = result + 0.5;
+
+        return max(result, vec3<f32>(0.));
+    }
+`;
+
+
+export function getShaderCode(canvas: HTMLCanvasElement, shDegree: number, nShCoeffs: number) {
+    const shComputeCode = {
+        1: shDeg1Code,
+        2: shDeg2Code,
+        3: shDeg3Code,
+    }[shDegree];
+
+    const shaderCode = `
+// for some reason passing these as uniform is broken
+const canvas_height = ${canvas.height};
+const canvas_width = ${canvas.width};
+const sh_degree = ${shDegree};
+const n_sh_coeffs = ${nShCoeffs};
+
+struct PointInput {
+    @location(0) position: vec3<f32>,
+    @location(1) log_scale: vec3<f32>,
+    @location(2) rot: vec4<f32>,
+    @location(3) opacity_logit: f32,
+    sh: array<vec3<f32>, n_sh_coeffs>,
+};
+
+struct PointOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) color: vec3<f32>,
+    @location(1) uv: vec2<f32>,
+    @location(2) conic_and_opacity: vec4<f32>,
+};
+
+struct Uniforms {
+    viewMatrix: mat4x4<f32>,
+    projMatrix: mat4x4<f32>,
+    camera_position: vec3<f32>,
+    tan_fovx: f32,
+    tan_fovy: f32,
+    focal_x: f32,
+    focal_y: f32,
+    scale_modifier: f32,
+};
+
+${shComputeCode}
+
+fn sigmoid(x: f32) -> f32 {
+    if (x >= 0.) {
+        return 1. / (1. + exp(-x));
+    } else {
+        let z = exp(x);
+        return z / (1. + z);
+    }
+}
+
+fn compute_cov3d(log_scale: vec3<f32>, rot: vec4<f32>) -> array<f32, 6> {
+    let modifier = uniforms.scale_modifier;
+    let S = mat3x3<f32>(
+        exp(log_scale.x) * modifier, 0., 0.,
+        0., exp(log_scale.y) * modifier, 0.,
+        0., 0., exp(log_scale.z) * modifier,
+    );
+
+    let r = rot.x;
+    let x = rot.y;
+    let y = rot.z;
+    let z = rot.w;
+
+    let R = mat3x3<f32>(
+        1. - 2. * (y * y + z * z), 2. * (x * y - r * z), 2. * (x * z + r * y),
+        2. * (x * y + r * z), 1. - 2. * (x * x + z * z), 2. * (y * z - r * x),
+        2. * (x * z - r * y), 2. * (y * z + r * x), 1. - 2. * (x * x + y * y),
+    );
+
+    let M = S * R;
+    let Sigma = transpose(M) * M;
+
+    return array<f32, 6>(
+        Sigma[0][0],
+        Sigma[0][1],
+        Sigma[0][2],
+        Sigma[1][1],
+        Sigma[1][2],
+        Sigma[2][2],
+    );
+} 
+
+fn ndc2pix(v: f32, size: u32) -> f32 {
+    return ((v + 1.0) * f32(size) - 1.0) * 0.5;
+}
+
+fn compute_cov2d(position: vec3<f32>, log_scale: vec3<f32>, rot: vec4<f32>) -> vec3<f32> {
+    let cov3d = compute_cov3d(log_scale, rot);
+
+    var t = uniforms.viewMatrix * vec4<f32>(position, 1.0);
+
+    let limx = 1.3 * uniforms.tan_fovx;
+    let limy = 1.3 * uniforms.tan_fovy;
+    let txtz = t.x / t.z;
+    let tytz = t.y / t.z;
+
+    t.x = min(limx, max(-limx, txtz)) * t.z;
+    t.y = min(limy, max(-limy, tytz)) * t.z;
+
+    let J = mat4x4(
+        uniforms.focal_x / t.z, 0., -(uniforms.focal_x * t.x) / (t.z * t.z), 0.,
+        0., uniforms.focal_y / t.z, -(uniforms.focal_y * t.y) / (t.z * t.z), 0.,
+        0., 0., 0., 0.,
+        0., 0., 0., 0.,
+    );
+
+    let W = transpose(uniforms.viewMatrix);
+
+    let T = W * J;
+
+    let Vrk = mat4x4(
+        cov3d[0], cov3d[1], cov3d[2], 0.,
+        cov3d[1], cov3d[3], cov3d[4], 0.,
+        cov3d[2], cov3d[4], cov3d[5], 0.,
+        0., 0., 0., 0.,
+    );
+
+    var cov = transpose(T) * transpose(Vrk) * T;
+
+    // Apply low-pass filter: every Gaussian should be at least
+    // one pixel wide/high. Discard 3rd row and column.
+    cov[0][0] += 0.3;
+    cov[1][1] += 0.3;
+
+    return vec3<f32>(cov[0][0], cov[0][1], cov[1][1]);
+}
+
+
+@binding(0) @group(0) var<uniform> uniforms: Uniforms;
+@binding(1) @group(1) var<storage, read> points: array<PointInput>;
+
+const quadVertices = array<vec2<f32>, 6>(
+    vec2<f32>(-1.0, -1.0),
+    vec2<f32>(-1.0, 1.0),
+    vec2<f32>(1.0, -1.0),
+    vec2<f32>(1.0, 1.0),
+    vec2<f32>(-1.0, 1.0),
+    vec2<f32>(1.0, -1.0),
+);
+
+@vertex
+fn vs_points(@builtin(vertex_index) vertex_index: u32) -> PointOutput {
+    var output: PointOutput;
+    let pointIndex = vertex_index / 6u;
+    let quadIndex = vertex_index % 6u;
+    let quadOffset = quadVertices[quadIndex];
+    let point = points[pointIndex];
+
+    let cov2d = compute_cov2d(point.position, point.log_scale, point.rot);
+    let det = cov2d.x * cov2d.z - cov2d.y * cov2d.y;
+    let det_inv = 1.0 / det;
+    let conic = vec3<f32>(cov2d.z * det_inv, -cov2d.y * det_inv, cov2d.x * det_inv);
+    let mid = 0.5 * (cov2d.x + cov2d.z);
+    let lambda_1 = mid + sqrt(max(0.1, mid * mid - det));
+    let lambda_2 = mid - sqrt(max(0.1, mid * mid - det));
+    let radius_px = ceil(3. * sqrt(max(lambda_1, lambda_2)));
+    let radius_ndc = vec2<f32>(
+    radius_px / (canvas_height),
+    radius_px / (canvas_width),
+    );
+    output.conic_and_opacity = vec4<f32>(conic, sigmoid(point.opacity_logit));
+
+    var projPosition = uniforms.projMatrix * vec4<f32>(point.position, 1.0);
+    projPosition = projPosition / projPosition.w;
+    output.position = vec4<f32>(projPosition.xy + 2 * radius_ndc * quadOffset, projPosition.zw);
+    output.color = compute_color_from_sh(point.position, point.sh);
+    output.uv = radius_px * quadOffset;
+
+    return output;
+}
+
+@fragment
+fn fs_main(input: PointOutput) -> @location(0) vec4<f32> {
+    // we want the distance from the gaussian to the fragment while uv
+    // is the reverse
+    let d = -input.uv;
+    let conic = input.conic_and_opacity.xyz;
+    let power = -0.5 * (conic.x * d.x * d.x + conic.z * d.y * d.y) + conic.y * d.x * d.y;
+    let opacity = input.conic_and_opacity.w;
+
+    if (power > 0.0) {
+    discard;
+    }
+
+    let alpha = min(0.99, opacity * exp(power));
+
+    return vec4<f32>(input.color * alpha, alpha);
+}
+`;
+
+    return shaderCode;
+}
+```

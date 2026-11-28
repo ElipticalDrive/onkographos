@@ -1,0 +1,143 @@
+--- v003.md
++++ v004.md
+@@ -1,86 +1,85 @@
+ # 3D Gaussian Splatting Training Loop
+ 
+-Also called: 3DGS Optimization, Render-Compare-Correct Loop
++Also called: Render-Compare-Correct Loop
+ 
+ ## Overview
+-The 3D Gaussian Splatting (3DGS) training loop is a stochastic gradient descent procedure that minimizes a photometric loss between rendered images and ground-truth photographs to optimize the parameters of a 3D Gaussian point cloud [S2, unofficial]. It distinguishes itself from random search or Monte Carlo methods by computing explicit gradients via a differentiable rasterizer, allowing millions of parameters to be corrected simultaneously and purposefully [S2, unofficial]. The method operates on a fixed iteration budget (typically 30,000 steps) rather than a convergence threshold, periodically densifying and pruning Gaussians to adapt scene density [S2, unofficial][S1].
++The 3D Gaussian Splatting (3DGS) training loop is an iterative optimization process that minimizes the photometric difference between rendered images and ground-truth training views by adjusting the parameters of a set of 3D Gaussians. It distinguishes itself from blind search methods by using stochastic gradient descent to compute precise update directions for millions of parameters simultaneously, leveraging a differentiable rasterizer to propagate errors back to the 3D primitives [S2, unofficial].
+ 
+ ## How it works
+-**Inputs:** A set of training images with known camera poses (from Structure-from-Motion), and an initial set of 3D Gaussians (initialized from SfM points or a template model like SMPL) [S2, unofficial][S1].
+-**Outputs:** Optimized Gaussian parameters (position, covariance, opacity, spherical harmonics coefficients) and potentially updated topology (split/pruned Gaussians) [S2, unofficial][S1].
++**Inputs:** A set of training images with known camera poses (typically recovered via Structure-from-Motion), and an initial set of 3D Gaussians $\mathcal{G} = \{g_i\}_{i=1}^N$.
++**Outputs:** Optimized Gaussian parameters (position, covariance, opacity, spherical harmonics coefficients) and a final scene representation.
+ 
+ **Data Structures:**
+-*   **Gaussian Set:** A list of $N$ Gaussians. Each Gaussian $i$ stores:
+-    *   Position $\mathbf{p}_i \in \mathbb{R}^3$
+-    *   Covariance $\Sigma_i$ (or rotation $\mathbf{q}_i$ and scale $\mathbf{s}_i$)
+-    *   Opacity $\alpha_i \in [0, 1]$
+-    *   Spherical Harmonics (SH) coefficients $\mathbf{c}_{i, l}$ for color representation
+-*   **Optimizer State:** Adam optimizer state (first and second moment estimates) for each parameter group [S1].
++Each Gaussian $i$ is defined by:
++*   Position $\mathbf{p}_i \in \mathbb{R}^3$
++*   Covariance $\Sigma_i$, parameterized by rotation quaternion $\mathbf{q}_i \in \mathbb{R}^4$ and scale vector $\mathbf{s}_i \in \mathbb{R}^3$.
++*   Opacity $\alpha_i \in [0, 1]$.
++*   Spherical Harmonics (SH) coefficients $\mathbf{c}_{i, l}$ for view-dependent color.
+ 
+ **Numbered Steps:**
+-1.  **Sampling:** Randomly select one training image and its corresponding camera pose from the dataset [S2, unofficial].
+-2.  **Transformation:** Transform canonical Gaussian parameters to the observation space defined by the selected camera pose. If using a parametric avatar (e.g., Human Gaussian Splatting), apply skinning weights from a template (like SMPL) to deform the Gaussians [S1].
+-3.  **Rendering:** Project the transformed Gaussians to 2D and alpha-blend them using the differentiable Gaussian rasterizer to produce a rendered image $\hat{I}$ [S1][S2, unofficial].
+-4.  **Loss Computation:** Compute the per-image error $\mathcal{L}_{img}$ by comparing $\hat{I}$ to the ground-truth image $I_{gt}$ [S2, unofficial]. The loss is a weighted sum:
+-    $$ \mathcal{L}_{img} = (1 - \lambda) \mathcal{L}_{L1} + \lambda \mathcal{L}_{D-SSIM} $$
+-    where $\mathcal{L}_{L1}$ is the L1 loss (mean absolute difference) and $\mathcal{L}_{D-SSIM}$ is the differentiable Structural Similarity index loss [S2, unofficial][S1]. The weight $\lambda$ is typically 0.2 [S2, unofficial][S1].
+-5.  **Backpropagation:** Compute gradients $\nabla \mathcal{L}_{img}$ with respect to all Gaussian parameters (position, covariance, opacity, SH coefficients) using automatic differentiation through the rasterizer [S2, unofficial][S1].
+-6.  **Update:** Update the Gaussian parameters using the Adam optimizer with $\beta_1 = 0.9$ and $\beta_2 = 0.99$ [S1][S2, unofficial].
+-7.  **Densification/Pruning:** Periodically (e.g., every $k$ iterations), evaluate gradient magnitudes and opacity thresholds to split high-gradient Gaussians or prune low-opacity ones, adapting the density of the representation [S1][S2, unofficial].
++1.  **Sampling:** Randomly select one training image and its corresponding camera pose from the dataset [S2, unofficial][S1].
++2.  **Rendering:** Transform the 3D Gaussians from canonical space to the observation space (camera space) and render a 2D image $\hat{I}$ using the differentiable Gaussian rasterizer [S1][S2, unofficial].
++3.  **Loss Computation:** Compute the per-image loss $\mathcal{L}$ between the rendered image $\hat{I}$ and the ground-truth image $I_{gt}$ [S2, unofficial][S1].
++4.  **Backpropagation:** Compute gradients $\nabla \mathcal{L}$ with respect to all Gaussian parameters using automatic differentiation through the rasterizer [S2, unofficial][S1].
++5.  **Update:** Update the Gaussian parameters using the Adam optimizer [S1][S2, unofficial].
++6.  **Densification/Pruning:** Periodically (every $k$ iterations), evaluate gradient magnitudes and opacity thresholds to split high-gradient Gaussians or prune low-opacity ones, adapting the density of the representation [S1][S2, unofficial].
++
++**Formulas:**
++The total loss $\mathcal{L}$ is a weighted sum of the L1 loss and the differentiable Structural Similarity (D-SSIM) loss [S2, unofficial][S1]:
++$$ \mathcal{L}_{img} = (1 - \lambda) \mathcal{L}_{L1} + \lambda \mathcal{L}_{D-SSIM} $$
++where $\mathcal{L}_{L1}$ is the average absolute difference between corresponding pixel colors, and $\mathcal{L}_{D-SSIM}$ measures local structure, contrast, and texture [S2, unofficial]. The weight $\lambda$ is typically 0.2 [S2, unofficial][S1].
++
++**Parameters:**
++*   **Optimizer:** Adam with $\beta_1 = 0.9$ and $\beta_2 = 0.99$ [S1][S2, unofficial].
++*   **Iteration Budget:** Training typically runs for a fixed number of iterations, commonly around 30,000 [S2, unofficial].
++*   **Loss Weight:** $\lambda \approx 0.2$ [S2, unofficial][S1].
++
++**Edge Cases and Pitfalls:**
++*   **Stopping Criterion:** The process does not stop at a specific loss threshold because the loss curve continues to creep down with diminishing returns. A fixed iteration budget is used instead [S2, unofficial].
++*   **Initialization:** For specific applications like human avatars, Gaussians may be initialized using SMPL model vertex positions and skinning weights [S1].
++*   **Evaluation:** To judge generalization, hold-out views not seen during training should be rendered and compared against real photos using metrics like PSNR, SSIM, and LPIPS [S2, unofficial][S1].
+ 
+ **Pseudocode:**
+ ```python
+-def train_3dgs(gaussians, training_views, num_iterations=30000, lambda_ss=0.2):
+-    optimizer = Adam(gaussians.parameters(), lr=1e-4, betas=(0.9, 0.99))
++def train_3dgs(Gaussians, TrainingData, Iterations=30000, Lambda=0.2):
++    # Initialize optimizer with Adam (beta1=0.9, beta2=0.99)
++    optimizer = Adam(Gaussians.parameters(), lr=initial_lr)
+     
+-    for iteration in range(num_iterations):
++    for step in range(Iterations):
+         # 1. Sampling
+-        view = random.choice(training_views)
+-        camera_pose = view.pose
+-        gt_image = view.image
++        image, camera_pose = TrainingData.random_sample()
+         
+-        # 2. Transformation (if parametric)
+-        # For standard 3DGS, this step is implicit in the rasterizer's view transform
+-        # For avatar 3DGS, apply skinning:
+-        # gaussians.transform_to_observation_space(camera_pose, skinning_weights)
++        # 2. Rendering
++        # Transform Gaussians to observation space and rasterize
++        rendered_image = DifferentiableRasterizer(Gaussians, camera_pose)
+         
+-        # 3. Rendering
+-        rendered_image = gaussian_rasterizer(gaussians, camera_pose)
++        # 3. Loss Computation
++        # Compute L1 and D-SSIM losses
++        l1_loss = L1Loss(rendered_image, image)
++        ssim_loss = DSSIMLoss(rendered_image, image)
++        loss = (1 - Lambda) * l1_loss + Lambda * ssim_loss
+         
+-        # 4. Loss Computation
+-        l1_loss = l1_loss_function(rendered_image, gt_image)
+-        ssim_loss = d_ssim_loss(rendered_image, gt_image)
+-        loss = (1 - lambda_ss) * l1_loss + lambda_ss * ssim_loss
+-        
+-        # 5. Backpropagation
++        # 4. Backpropagation
+         optimizer.zero_grad()
+         loss.backward()
+         
+-        # 6. Update
++        # 5. Update
+         optimizer.step()
+         
+-        # 7. Densification/Pruning (periodic)
+-        if iteration % densification_interval == 0:
+-            gaussians.densify_and_prune(iteration)
++        # 6. Densification/Pruning (Periodic)
++        if step % densification_interval == 0:
++            Gaussians.densify_and_prune()
+             
+-    return gaussians
++    return Gaussians
+ ```
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Precision:** The differentiable rasterizer must handle depth sorting and alpha blending correctly to ensure valid gradients [S1].
+-*   **Boundaries:** Background pixels should be handled explicitly (e.g., setting background to black in ground truth) to avoid misleading gradients [S1].
+-*   **Degenerate Input:** If the initial SfM point cloud is sparse, the initial render may be poor, requiring careful initialization or densification strategies [S2, unofficial].
+-
+ ## Operating characteristics
+-*   **Time Complexity:** Each iteration involves a forward pass through the rasterizer ($O(N)$ where $N$ is the number of Gaussians) and a backward pass. The total time is proportional to the number of iterations (typically 30,000) [S2, unofficial].
+-*   **Memory Complexity:** Memory usage scales with the number of Gaussians and their parameters (position, covariance, opacity, SH coefficients). Densification increases memory usage over time [S1][S2, unofficial].
+-*   **Measured Performance:** Training is performed on GPUs using PyTorch. Evaluation metrics include PSNR, SSIM, and LPIPS on held-out views [S1].
+-*   **Strengths:** Efficient gradient-based optimization allows for high-quality reconstruction from sparse inputs. The fixed iteration budget provides predictable training time [S2, unofficial].
+-*   **Limitations:** The method is sensitive to the initial SfM reconstruction quality. Densification heuristics can lead to over-parameterization if not tuned correctly [S1][S2, unofficial].
+-*   **When to use:** Suitable for static or dynamic scene reconstruction where high-fidelity novel view synthesis is required [S1][S2, unofficial].
+-*   **When not to use:** Not suitable for real-time training on resource-constrained devices due to the iterative nature and memory requirements [S2, unofficial].
++*   **Time Complexity:** Linear with respect to the number of Gaussians and pixels per iteration. The fixed iteration budget (e.g., 30,000) makes total time predictable but potentially long for high-resolution scenes [S2, unofficial].
++*   **Memory Complexity:** Proportional to the number of Gaussians $N$ and the resolution of the SH coefficients. Densification increases memory usage over time [S1].
++*   **Strengths:** Efficient gradient-based optimization allows for simultaneous correction of millions of parameters, avoiding the inefficiency of random search [S2, unofficial].
++*   **Limitations:** The loss curve has diminishing returns, requiring a fixed iteration budget rather than a convergence threshold [S2, unofficial].
+ 
+ ## Background
+-The 3D Gaussian Splatting training loop was introduced in the original 3DGS paper [S1] and popularized by subsequent tutorials and implementations [S2, unofficial]. It builds on the differentiable rendering framework established by earlier work [S1]. The method has been extended to dynamic scenes, such as Human Gaussian Splatting, which integrates SMPL models for animatable avatars [S1].
++The method originates from the 3D Gaussian Splatting framework, which introduced differentiable rasterization for 3D Gaussians. The training loop conceptually follows a "Render, Compare, Correct" cycle, leveraging stochastic gradient descent to optimize the scene representation from multi-view images [S2, unofficial]. It builds on earlier work in differentiable rendering and Gaussian splatting [S1].
+ 
+ ## Sources

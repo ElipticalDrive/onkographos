@@ -1,0 +1,151 @@
+# Varifocal Mirror Display
+
+Also called: Sher's method, Variable Focal Length Mirror, Variable Focal Length Mirror Display, Variable-mirror-based 3D display, Varifocal Mirror, Varifocal Mirror 3D Display, Vibrating Mirror Display
+
+## Overview
+The Varifocal Mirror Display is a volumetric display system that generates a true 3D image in space by reflecting a sequence of 2D images from a vibrating circular mirror with variable focal length [S1, S3, unofficial]. It solves the problem of mental reconstruction required by stacked 2D displays by using retinal integration to fuse rapidly changing images into a continuous volume [S1, S2, unofficial]. It is distinguished from sibling methods like [Rotational Swept-Screen Projection](8589-rotational-swept-screen-projection.md) by using a deformable mirror driven by audio signals rather than a mechanically rotating physical screen, and from [Galvanometer Scanner Volume Rendering](5277-galvanometer-scanner-volume-rendering.md) by using temporal multiplexing of static frames rather than continuous beam scanning [S2, S3, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A sequence of 2D tomographic images (frames) corresponding to depth slices, synchronized with the mirror's vibration phase.
+*   **Output:** A virtual 3D image floating in space in front of the viewer, viewable by multiple observers within a limited solid angle [S2, S3, unofficial].
+
+**Data Structures**
+*   **Refresher Buffer:** A memory structure storing the display list of 3D points. Each point is defined by its $(x, y)$ screen coordinates and its desired depth $z$. The scheduling of points in this buffer determines their apparent depth [S2, unofficial].
+*   **Frame Sequence:** A list of 2D images, one for each depth slice, displayed in synchrony with the mirror's motion [S1, unofficial].
+
+**System Layout**
+The hardware consists of a high-speed point-plotting CRT (or monitor) pointed at a flexible circular mirror. The mirror is an aluminized membrane stretched over the cone of a loudspeaker (woofer) [S1, S3, unofficial]. The woofer is driven by an audio signal to vibrate the mirror [S2, S3, unofficial].
+
+**Parameters**
+*   **Drive Frequency:** 30 Hz audio signal [S2, unofficial].
+*   **Frame Rate:** 30 frames per second (synchronized with the 30 Hz drive) [S2, unofficial].
+*   **Display Volume:** Maximum $25 \times 25 \times 25$ cm [S2, unofficial].
+*   **Resolution:** 128x128 points per frame [S2, unofficial].
+*   **Position Accuracy:** Points must be displayed within 0.1 inches of their desired position to appear correct [S2, unofficial].
+
+**Algorithm Steps**
+1.  **Initialize System:** Attach the flexible circular mirror to the front of the woofer. Connect the monitor to the woofer's audio input or a synchronized controller [S3, unofficial].
+2.  **Drive Mirror:** Apply a 30 Hz sinusoidal audio signal to the woofer. This causes the mirror to vibrate, continuously changing its curvature and thus its focal length [S2, S3, unofficial].
+3.  **Synchronize Display:** Display the tomographic images from the refresher buffer onto the CRT one at a time. The timing of each frame must be synchronized with the phase of the mirror's vibration [S1, S2, unofficial].
+4.  **Map Depth to Timing:** Schedule each 3D point in the display list such that it is displayed when the mirror's focal length corresponds to the point's desired depth $z$. The position of the mirror (curvature) determines the apparent depth of the reflected point [S2, unofficial].
+5.  **Reflect and Fuse:** The viewer observes the reflection of the CRT screen on the vibrating mirror. Due to the variable focal length, different points appear at different physical locations in space [S3, unofficial]. The human eye fuses the rapidly changing 2D images (30 fps) into a single 3D image via retinal integration [S1, S2, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Constants
+DRIVE_FREQUENCY_HZ = 30
+FRAME_RATE = 30
+MAX_VOLUME_CM = 25
+RESOLUTION = 128
+POSITION_TOLERANCE_INCHES = 0.1
+
+# Data Structure for 3D Points
+class Point3D:
+    def __init__(self, x, y, z):
+        self.x = x  # Screen coordinate
+        self.y = y  # Screen coordinate
+        self.z = z  # Desired depth in volume
+
+# Main Display Loop
+def varifocal_mirror_display(points_3d, monitor, mirror_driver):
+    """
+    Renders a 3D point cloud using a varifocal mirror display.
+    
+    Args:
+        points_3d: List of Point3D objects.
+        monitor: Object with method display_frame(frame_index, image_data).
+        mirror_driver: Object with method set_audio_signal(phase, amplitude).
+    """
+    
+    # 1. Initialize the mirror driver with a 30 Hz signal
+    # The mirror vibrates continuously, changing focal length
+    mirror_driver.start_vibration(frequency=DRIVE_FREQUENCY_HZ)
+    
+    # 2. Prepare the display list
+    # Sort points by depth if necessary, or schedule based on phase
+    # The key is that the timing of the frame determines the apparent depth
+    display_list = points_3d
+    
+    # 3. Render Loop
+    while True:
+        # Get current phase of the mirror vibration (0 to 2*pi)
+        # This phase corresponds to the current focal length
+        current_phase = mirror_driver.get_current_phase()
+        
+        # Map phase to depth slice index
+        # Assuming one full vibration cycle corresponds to the full depth range
+        # or a specific subset of the cycle is used for the volume
+        depth_slice_index = map_phase_to_slice(current_phase, total_slices=FRAME_RATE)
+        
+        # 4. Select and Display Frame
+        # Retrieve the 2D image for the current depth slice
+        # This image contains all points scheduled for this specific depth
+        current_frame = generate_frame_for_slice(display_list, depth_slice_index)
+        
+        # Display the frame on the CRT
+        # The CRT must have fast phosphor decay to prevent smear
+        monitor.display_frame(depth_slice_index, current_frame)
+        
+        # 5. Wait for next frame
+        # Synchronize with the 30 Hz drive
+        wait_for_next_frame(FRAME_RATE)
+
+def map_phase_to_phase(phase, total_slices):
+    """
+    Maps the continuous phase of the mirror vibration to a discrete frame index.
+    In a real implementation, this mapping depends on the specific mechanical
+    response of the mirror and the synchronization logic.
+    """
+    # Normalize phase to 0-1
+    normalized_phase = phase % (2 * 3.14159) / (2 * 3.14159)
+    # Map to frame index
+    return int(normalized_phase * total_slices)
+
+def generate_frame_for_slice(points, slice_index):
+    """
+    Generates a 2D image for a specific depth slice.
+    """
+    frame = create_blank_image(RESOLUTION, RESOLUTION)
+    for point in points:
+        # Check if point belongs to this slice
+        # In a real system, this is determined by the scheduling/timing
+        if is_point_in_slice(point, slice_index):
+            # Plot point on the CRT
+            # Position accuracy must be within 0.1 inches
+            plot_point(frame, point.x, point.y)
+    return frame
+
+def is_point_in_slice(point, slice_index):
+    """
+    Determines if a 3D point should be displayed in the current frame.
+    This is based on the scheduling of the point in the refresher buffer
+    relative to the mirror's phase.
+    """
+    # Placeholder for the specific scheduling logic
+    # The point is displayed when the mirror's focal length matches its depth z
+    return False # Implementation detail depends on synchronization hardware
+```
+
+**Edge Cases and Pitfalls**
+*   **Transparency/Occlusion:** All images are transparent; the depth cue of interposition (occlusion) is missing. Hidden line removal has no meaning, which can cause confusion with high information content [S2, unofficial].
+*   **Color Limitations:** Color images are impossible because a color point-plotting CRT with sufficiently fast phosphor decay to eliminate smear is not available. The display is limited to monochrome [S2, unofficial].
+*   **Resolution Limits:** Limited by the size of the mirror and the updating rate of the images, as the mirror must vibrate [S3, unofficial].
+*   **Position Accuracy:** Points must be displayed within 0.1 inches of their desired position to appear correct [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** The rendering time per frame is proportional to the number of points in the slice, $O(N)$, where $N$ is the number of points displayed in that frame. The system runs at a fixed 30 fps [S2, unofficial].
+*   **Memory Complexity:** Requires storage for the refresher buffer containing all 3D points, $O(P)$, where $P$ is the total number of points in the volume [S2, unofficial].
+*   **Performance:** Maximum display volume is $25 \times 25 \times 25$ cm with 128x128 resolution per frame [S2, unofficial].
+*   **Strengths:** Provides inherent binocular disparity and head motion parallax. Viewable by several observers over a range of distances within a limited solid angle [S2, unofficial].
+*   **Limitations:** Lack of occlusion cues limits usability for complex scenes. Monochrome only. Limited by mirror size and vibration rate [S2, S3, unofficial].
+
+## Background
+The variable focal length mirror was first introduced by J.C. Muirhead in 1960 [S2, unofficial]. It was soon after used to create a 3-D display device [S2, unofficial]. A known implementation is the Mayo Clinic True Three-Dimension Machine [S2, S3, unofficial]. The method is also referred to as Sher's method, after Sher who proposed a similar system using a vibrating circular mirror and a high-speed monitor [S3, unofficial].
+
+## Sources
+[S1] Volumetric rendering of medical data : applications to stereotactic neurosurgery planning, https://doi.org/10.82308/10070, fetched 2026-10-26 (unofficial)
+[S2] DTIC ADA258995: A User Interface to a True 3-D Display Device, https://archive.org/details/DTIC_ADA258995, fetched 2026-10-26 (unofficial)
+[S3] Three-dimensional display technologies, https://pmc.ncbi.nlm.nih.gov/articles/PMC4269274, fetched 2026-10-29 (unofficial)

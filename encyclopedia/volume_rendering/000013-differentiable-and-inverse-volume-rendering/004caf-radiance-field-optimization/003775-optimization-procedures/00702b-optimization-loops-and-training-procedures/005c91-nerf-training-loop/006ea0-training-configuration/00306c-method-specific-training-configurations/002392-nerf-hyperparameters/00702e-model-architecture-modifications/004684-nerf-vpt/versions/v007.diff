@@ -1,0 +1,308 @@
+--- v006.md
++++ v007.md
+@@ -4,195 +4,136 @@
+ 
+ ## Overview
+-NeRF-VPT is a cascading view prompt tuning paradigm for novel view synthesis that progressively enhances image quality by using RGB information from preceding rendering iterations as visual prompts for subsequent stages [S1]. It solves the problem of limited scene understanding in sparse-view or standard NeRF settings by iteratively refining the network's output, leveraging the inherent representation of the NeRF family as prior knowledge [S1]. Unlike methods that rely on external networks or specific data preprocessing, NeRF-VPT uses only the network's internal output as prior knowledge, making it a plug-and-play module that can be integrated into existing NeRF variants like Mip-NeRF and TensoRF [S1].
++NeRF-VPT is a cascading view prompt tuning paradigm for novel view synthesis that iteratively incorporates visual prompts—specifically, the RGB images rendered in preceding training stages—into subsequent network iterations to progressively enhance image quality [S1]. It solves the problem of limited scene understanding in sparse-view or standard NeRF settings by leveraging prior knowledge embedded in the network's own outputs, effectively guiding the optimization direction without requiring external priors or ground-truth images at test time [S1]. Unlike methods that rely on external networks or specific data preprocessing, NeRF-VPT is a plug-and-play modification that re-uses the internal representation of the NeRF family, making it transferable to variants like Mip-NeRF and TensoRF [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Training images for supervision, ray origins $\mathbf{o}$ and directions $\mathbf{d}$, and the rendered RGB image from the previous stage $i-1$ (for $i > 0$) [S1]. Ray origins and directions are standard volumetric rendering inputs [G].
+-*   **Outputs:** Predicted volume density $\sigma$ and view-dependent color $\mathbf{c}$ for each sampling point along the ray [S1].
++*   **Inputs:** Training images $\{I_k\}$, camera poses, and ray origins/directions. The method takes the output of the previous stage (or Stage 0 for the first iteration) as a visual prompt.
++*   **Outputs:** Refined volume density $\sigma$ and view-dependent color $\mathbf{c}$ for each sampled point along the ray, resulting in a higher-fidelity rendered image $\hat{c}(r)$ [S1].
+ 
+-**Data Structures:**
+-The framework consists of $N+1$ stages, indexed from Stage 0 to Stage $N$ [S1]. Each stage $i$ employs a distinct mapping function $F_i$ (typically an MLP) [S1].
+-*   **Stage 0:** A standard NeRF network that learns basic 3D space structure without any prior [S1].
+-*   **Stage $i$ ($i > 0$):** A new network instance [S1]. Its input layer accepts the positional encoding $\text{PE}(\mathbf{x})$, the directional encoding $\text{DE}(\mathbf{d})$, and the concatenated RGB prompt $\mathbf{c}(r)_{i-1}$ [S1].
++**Data Structures and Layout:**
++The framework consists of $N+1$ stages, indexed $0$ to $N$ (typically $N=6$) [S1].
++*   **Stage 0:** A standard NeRF network $F_0$. It takes only position $\mathbf{x}$ and direction $\mathbf{d}$ as input. It does not use any prior [S1].
++*   **Stage $i$ ($i > 0$):** A new network $F_i$. It takes position $\mathbf{x}$, direction $\mathbf{d}$, and the rendered RGB image from Stage $i-1$, denoted $c(r)_{i-1}$, as inputs [S1].
++*   **Feature Integration:** The RGB prompt $c(r)_{i-1}$ is concatenated after the direction encoding $DE(\mathbf{d})$ [S1]. This placement is chosen because color is high-frequency data, and encoding is viewed as signal decomposition; concatenating after direction encoding allows the network to modulate color prediction based on the prompt [S1].
++*   **Parameter Overhead:** The method adds negligible parameters, specifically $0.0008$ M additional parameters compared to the baseline NeRF [S1].
+ 
+ **Numbered Steps:**
+-1.  **Initialize Stage 0:** Train a standard NeRF network $F_0$ using position $\mathbf{x}$ and direction $\mathbf{d}$ inputs without any prior knowledge [S1]. This stage learns the basic 3D space structure and generates the initial prior RGB values [S1].
+-2.  **Iterate for Stages $i = 1$ to $N$:**
+-    a.  **Ray Sampling:** For each pixel in the training images, sample points $\mathbf{x}_j$ along the ray $\mathbf{r} = (\mathbf{o}, \mathbf{d})$ between near $t_n$ and far $t_f$ boundaries [S1].
+-    b.  **Encoding:** Compute directional encoding $\text{DE}(\mathbf{d})$ for the ray direction [S1]. Compute positional encoding $\text{PE}(\mathbf{x}_j)$ for each sample point using standard trigonometric mappings [G].
+-    c.  **Retrieve Prompt:** Obtain the rendered RGB image $\mathbf{c}(r)_{i-1}$ from the previous stage $i-1$ [S1]. This image serves as the visual prompt [S1].
+-    d.  **Concatenate Prompt:** Concatenate the RGB prompt $\mathbf{c}(r)_{i-1}$ to the directional encoding $\text{DE}(\mathbf{d})$ [S1]. The source notes that color is high-frequency data and encoding is viewed as signal decomposition, justifying this placement [S1].
+-    e.  **Network Forward Pass:** Input $\text{PE}(\mathbf{x}_j)$ and the combined vector $(\text{DE}(\mathbf{d}), \mathbf{c}(r)_{i-1})$ into the current stage's network $F_i$ to predict density $\sigma_i$ and color $\mathbf{c}_i$ [S1].
+-    f.  **Volume Rendering:** Render the image using the volumetric rendering equation [S1].
+-    g.  **Loss Calculation:** Compute the training loss $L = \sum_{\mathbf{r} \in R} ||\hat{c}(\mathbf{r}) - c(\mathbf{r})||$ against ground truth colors $c(\mathbf{r})$ [S1].
+-    h.  **Optimization:** Update the weights of network $F_i$ [S1].
+-3.  **Termination:** Training concludes when the maximum number of stages (typically 5 or 6) is reached [S1].
+-
+-**Formulas:**
+-The volumetric rendering equation for color $\hat{c}(\mathbf{r})$ is [S1]:
+-$$ \hat{c}(\mathbf{r}) = \sum_{i=1}^{M} T_i (1 - \exp(-\sigma_i \delta_i)) \mathbf{c}_i $$
+-where $T_i = \exp(-\sum_{j=1}^{i-1} \sigma_j \delta_j)$ handles occlusion, $\delta_j$ is the distance between samples, and $\sigma_j, \mathbf{c}_j$ are the density and color predicted by the current stage [S1].
+-
+-The mapping function for iteration $i$ is defined as [S1]:
+-$$ (\mathbf{c}_i, \sigma_i) = F_i(\text{PE}(\mathbf{x}), (\text{DE}(\mathbf{d}), \mathbf{c}(\mathbf{r})_{i-1})) $$
+-where $F_0$ and $F_i$ denote the mapping functions in iterations, $\text{PE}$ is position encoding, $\text{DE}$ is direction encoding, and $\mathbf{c}(\mathbf{r})_{i-1}$ is the RGB prompt from the previous stage [S1]. For Stage 0:
+-$$ (\mathbf{c}_0, \sigma_0) = F_0(\text{PE}(\mathbf{x}), \text{DE}(\mathbf{d})) $$
+-
+-The training loss is [S1]:
+-$$ L = \sum_{\mathbf{r} \in R} ||\hat{c}(\mathbf{r}) - c(\mathbf{r})|| $$
+-where $R$ represents all image pixels in the training data, and $c(\mathbf{r})$ is the ground truth color [S1].
+-
+-**Parameters:**
+-*   **Number of Stages:** 5 to 6 stages on a standard baseline achieve maximum performance [S1].
+-*   **Prompt Integration Point:** The RGB prompt is concatenated after the direction encoding [S1].
+-*   **Prior Images (Alternative Approach):** The authors explored using 20 uniformly sampled training images to extract features via Swin-Transformer and fuse them via soft-view pooling, but found this yielded limited improvement compared to the cascading output method [S1].
++1.  **Initialization (Stage 0):** Train a standard NeRF network $F_0$ using position encoding $PE(\mathbf{x})$ and direction encoding $DE(\mathbf{d})$ to gain initial knowledge of the 3D space. This stage generates the first set of rendered RGB images, which serve as the initial visual prompt [S1].
++    $$ (\mathbf{c}_0, \sigma_0) = F_0(PE(\mathbf{x}), DE(\mathbf{d})) $$
++2.  **Cascading Iteration (Stage $i$, for $i = 1$ to $N$):**
++    a.  **Ray Sampling:** Sample points $\mathbf{x}$ and directions $\mathbf{d}$ along rays from training viewpoints [S1].
++    b.  **Encoding:** Encode the viewing direction $\mathbf{d}$ using $DE(\mathbf{d})$ [S1].
++    c.  **Prompt Retrieval:** Retrieve the RGB image $\mathbf{c}(r)_{i-1}$ rendered by the network in the previous stage $i-1$ [S1].
++    d.  **Input Combination:** Concatenate the encoded direction $DE(\mathbf{d})$ and the previous stage's RGB output $\mathbf{c}(r)_{i-1}$ [S1].
++    e.  **Network Forward Pass:** Pass the position encoding $PE(\mathbf{x})$ and the combined direction-prompt vector into the current stage's network $F_i$ [S1].
++    f.  **Output:** The network outputs the refined density $\sigma_i$ and color $\mathbf{c}_i$ [S1].
++    $$ (\mathbf{c}_i, \sigma_i) = F_i(PE(\mathbf{x}), (DE(\mathbf{d}), \mathbf{c}(r)_{i-1})) $$
++3.  **Rendering:** Compute the final pixel color $\hat{c}(r)$ using the volumetric rendering equation [S1]:
++    $$ \hat{c}(r) = \sum_{i=n}^{N} T_i (1 - \exp(-\sigma_i \delta_i)) \mathbf{c}_i $$
++    where $T_i = \exp(-\sum_{j=1}^{i-1} \sigma_j \delta_j)$ handles occlusion, $t_n, t_f$ are near/far boundaries, and $\delta_i$ is the distance between samples [S1].
++4.  **Loss Calculation:** Minimize the mean squared error between the rendered color $\hat{c}(r)$ and the ground-truth color $c(r)$ [S1]:
++    $$ L = \sum_{r \in R} ||\hat{c}(r) - c(r)|| $$
++    where $R$ represents all image pixels in the training data [S1].
++5.  **Termination:** Training concludes once the maximum number of stages (typically 5 or 6) is reached [S1].
+ 
+ **Pseudocode:**
+ ```python
+-import torch
+-import torch.nn as nn
+-
+-# Standard positional encoding [G]
+-def positional_encoding(x, num_freq_bands=10):
+-    scales = torch.tensor([2**i for i in range(num_freq_bands)], dtype=x.dtype, device=x.device)
+-    scaled_x = x[..., None, :] * scales[None, None, :]
+-    return torch.cat([torch.sin(scaled_x), torch.cos(scaled_x)], dim=-1)
+-
+-# Standard directional encoding [G]
+-def directional_encoding(d, num_freq_bands=4):
+-    scales = torch.tensor([2**i for i in range(num_freq_bands)], dtype=d.dtype, device=d.device)
+-    scaled_d = d[..., None, :] * scales[None, None, :]
+-    return torch.cat([torch.sin(scaled_d), torch.cos(scaled_d)], dim=-1)
+-
+-# Mapping function F_i (MLP) [G]
+-class NeRFMLP(nn.Module):
+-    def __init__(self, pos_dim, dir_dim, hidden_dim=256):
+-        super().__init__()
+-        self.pos_mlp = nn.Sequential(
+-            nn.Linear(pos_dim, hidden_dim), nn.ReLU(),
+-            nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
+-            nn.Linear(hidden_dim, hidden_dim)
+-        )
+-        self.shade_mlp = nn.Sequential(
+-            nn.Linear(hidden_dim + dir_dim, hidden_dim), nn.ReLU(),
+-            nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
+-            nn.Linear(hidden_dim, 4)  # 3 for color, 1 for density
+-        )
+-    def forward(self, pos_enc, dir_enc):
+-        h = self.pos_mlp(pos_enc)
+-        out = self.shade_mlp(torch.cat([h, dir_enc], dim=-1))
+-        sigma = out[..., :1]
+-        color = out[..., 1:]
+-        return sigma, color
+-
+-class NeRFVPT:
+-    def __init__(self, num_stages=6, near=2.0, far=6.0, pos_freq=10, dir_freq=4):
+-        self.num_stages = num_stages
+-        self.near = near
+-        self.far = far
+-        self.pos_freq = pos_freq
+-        self.dir_freq = dir_freq
+-        # Initialize Stage 0 as a standard NeRF
+-        self.stages = [NeRFMLP(pos_freq * 6, dir_freq * 6)]
+-        # Initialize subsequent stages with prompt dimension +3
+-        for _ in range(1, num_stages):
+-            self.stages.append(NeRFMLP(pos_freq * 6, dir_freq * 6 + 3))
+-        self.previous_rendered_images = {}
+-
+-    def render_stage(self, stage_idx, rays_o, rays_d, gt_images):
+-        """
+-        Render images for a specific stage.
+-        rays_o: (B, H, W, 3) ray origins
+-        rays_d: (B, H, W, 3) ray directions
+-        gt_images: (B, H, W, 3) ground truth images
+-        """
+-        # Sample points along rays
+-        t_vals = torch.linspace(self.near, self.far, steps=128, device=rays_o.device)
+-        pts = rays_o[..., None, :] + rays_d[..., None, :] * t_vals[..., None]
++def train_nerf_vpt(training_images, poses, num_stages=6):
++    """
++    Trains a NeRF-VPT model using cascading view prompt tuning.
++    
++    Args:
++        training_images: List of ground truth RGB images.
++        poses: Camera poses corresponding to training images.
++        num_stages: Number of cascading stages (0 to N).
+         
+-        # Encode positions and directions
+-        pts_enc = positional_encoding(pts, self.pos_freq)
+-        dirs_enc = directional_encoding(rays_d, self.dir_freq)
++    Returns:
++        final_network: The network from the final stage.
++    """
++    # Stage 0: Standard NeRF initialization
++    # F_0 takes only position and direction
++    network_prev = initialize_standard_nerf() 
++    
++    for stage in range(1, num_stages + 1):
++        # Initialize new network for current stage
++        # F_stage takes position, direction, and previous RGB prompt
++        network_curr = initialize_nerf_stage_with_prompt()
+         
+-        # Get previous stage's rendered image as prompt
+-        if stage_idx == 0:
+-            prompt = None
+-        else:
+-            # Retrieve rendered image from previous stage
+-            prompt = self.previous_rendered_images[stage_idx - 1]
+-            # Broadcast prompt to match ray batch and sample points
+-            prompt = prompt[..., None, :].expand(-1, -1, -1, pts.shape[-2], -1)
+-            
+-        # Concatenate prompt to direction encoding
+-        if prompt is not None:
+-            combined_dirs = torch.cat([dirs_enc, prompt], dim=-1)
+-        else:
+-            combined_dirs = dirs_enc
+-            
+-        # Forward pass through the stage's MLP
+-        sigma, color = self.stages[stage_idx](pts_enc, combined_dirs)
++        # Training loop for the current stage
++        for epoch in range(max_epochs):
++            for ray in sample_rays(training_images, poses):
++                # 1. Ray Sampling
++                points_x, directions_d = ray.sample_points()
++                
++                # 2. Encoding
++                pos_enc = positional_encoding(points_x)
++                dir_enc = directional_encoding(directions_d)
++                
++                # 3. Retrieve Visual Prompt
++                # Render image using the previous stage's network
++                # This provides the 'prior knowledge' for the current stage
++                prompt_rgb = render_image(network_prev, ray)
++                
++                # 4. Combine Inputs
++                # Concatenate direction encoding and prompt RGB
++                # Prompt is concatenated after direction encoding
++                combined_input = concatenate(dir_enc, prompt_rgb)
++                
++                # 5. Forward Pass
++                # Input: Position Encoding, Combined Direction-Prompt
++                sigma, color = network_curr(pos_enc, combined_input)
++                
++                # 6. Volumetric Rendering
++                # Calculate occlusion weights
++                T = compute_transmittance(sigma)
++                # Render final color
++                rendered_color = volumetric_render(T, sigma, color)
++                
++                # 7. Loss Calculation
++                gt_color = ray.get_ground_truth_color()
++                loss = mean_squared_error(rendered_color, gt_color)
++                
++                # 8. Backpropagation
++                network_curr.backward(loss)
++                network_curr.step()
+         
+-        # Volume Rendering
+-        # Calculate deltas (distance between samples)
+-        deltas = t_vals[1:] - t_vals[:-1]
+-        deltas = torch.cat([deltas, torch.zeros_like(deltas[..., :1])], dim=-1)
++        # Update previous network for the next stage
++        # Weights can be loaded from the previous round to facilitate convergence [S1]
++        network_prev = network_curr
+         
+-        # Calculate alpha and transmittance
+-        alpha = 1.0 - torch.exp(-torch.relu(sigma) * deltas)
+-        transmittance = torch.cumprod(torch.cat([torch.ones_like(alpha[..., :1]), 1.0 - alpha], dim=-1), dim=-1)[..., :-1]
+-        
+-        # Render color
+-        weights = alpha * transmittance
+-        rendered_color = torch.sum(weights[..., None] * color, dim=-2)
+-        
+-        # Compute Loss
+-        loss = torch.mean((rendered_color - gt_images) ** 2)
+-        
+-        # Store rendered image for next stage prompt
+-        self.previous_rendered_images[stage_idx] = rendered_color.detach()
+-        
+-        return loss, rendered_color
+-
+-    def train(self, training_data):
+-        """
+-        training_data: list of (rays_o, rays_d, gt_images) batches
+-        """
+-        # Stage 0: Standard NeRF training
+-        for batch in training_data:
+-            rays_o, rays_d, gt_images = batch
+-            loss, _ = self.render_stage(0, rays_o, rays_d, gt_images)
+-            # Backpropagate and update Stage 0 weights
+-            self.stages[0].optimizer.step()
+-            
+-        # Cascading Stages 1 to N
+-        for stage_idx in range(1, self.num_stages):
+-            # Load weights from previous stage to facilitate convergence [S1]
+-            # Implementation detail: Copy weights from stage_idx-1 to stage_idx if desired.
+-            
+-            for batch in training_data:
+-                rays_o, rays_d, gt_images = batch
+-                loss, _ = self.render_stage(stage_idx, rays_o, rays_d, gt_images)
+-                # Backpropagate and update Stage stage_idx weights
+-                self.stages[stage_idx].optimizer.step()
++    return network_prev
+ ```
+ 
++**Parameters:**
++*   **Number of Stages:** 5 to 6 stages are sufficient to achieve maximum performance [S1].
++*   **Prior Images for Feature Extraction (Alternative/Exploratory):** 20 uniformly sampled training images were used in ablation studies to extract features via Swin-Transformer, but this was found to be less effective than the cascading RGB prompt [S1].
++*   **Resolution:** Training resolution varies by dataset (e.g., $400 \times 400$ for Realistic Synthetic 360, $504 \times 376$ for Real Forward-Facing) [S1].
++
+ **Edge Cases and Pitfalls:**
+-*   **Ground Truth Unavailability:** Directly providing ground truth images as priors fails during testing for unknown viewpoints because ground truth is unavailable [S1]. NeRF-VPT solves this by using rendered images from a pre-trained model as the prompt, which are available for all viewpoints [S1].
++*   **Ground Truth Unavailability:** Directly providing ground truth images as priors fails during testing for unknown viewpoints because ground truth is unavailable [S1]. NeRF-VPT solves this by using rendered images from the pre-trained model as the prompt, which are available for all viewpoints [S1].
+ *   **Feature Fusion Limitations:** Extracting features from multiple images via Swin-Transformer or CNN and fusing them into an MLP showed limited improvement because it is challenging to encapsulate multi-view information within a single feature [S1].
+-*   **Training Time Scaling:** Training time per iteration decreases significantly as the cascade progresses because increasingly accurate visual prompts reduce the learning difficulty for the network [S1].
++*   **Placement of Prompt:** Incorporating priors into direction encoding yields higher PSNR than position encoding because direction information induces diverse color variations for the same position after volume density is predicted [S1].
++
++## Subtopics
++
++### Sparse-View NeRF-VPT
++A configuration where NeRF-VPT is used to achieve high-quality rendering with significantly fewer input views (e.g., 45 views achieving quality comparable to 180 views in standard NeRF) [S1].
++
++### NeRF-VPT with Mip-NeRF/TensoRF
++The plug-and-play integration of the view prompt tuning mechanism into other NeRF variants like Mip-NeRF and TensoRF to elevate their performance [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Training time increases with the number of stages, but the time per stage decreases as the prompts become more accurate [S1].
+-*   **Memory Complexity:** Parameter overhead is negligible, adding only 0.0008 M additional parameters compared to baseline NeRF [S1].
++*   **Time Complexity:** Training time per iteration decreases significantly as the cascade progresses (from Stage 1 to 6). This is because increasingly accurate visual prompts reduce the learning difficulty for the network [S1]. For example, on the Replica dataset, training time drops from 8.78 hours in Stage 1 to 0.61 hours in Stage 6 [S1].
++*   **Memory Complexity:** The parameter overhead is negligible, adding only $0.0008$ M parameters compared to the baseline NeRF [S1].
+ *   **Measured Performance:**
+-    *   On the Realistic Synthetic 360 Dataset, NeRF-VPT (Stage 6) achieves PSNR 34.95, SSIM 0.977, LPIPS 0.042, outperforming NeRF (31.01, 0.947, 0.081) and Mip-NeRF (33.09, 0.961, 0.043) [S1].
+-    *   On the Real Forward-Facing Dataset, NeRF-VPT (Stage 6) achieves PSNR 28.95, SSIM 0.872, LPIPS 0.158, outperforming NeRF (26.50, 0.811, 0.250) and Mip-NeRF (27.13, 0.839, 0.164) [S1].
+-    *   On the Replica Dataset, training with 45 sparse views using NeRF-VPT achieves comparable image quality to training standard NeRF with 180 views [S1].
+-    *   Rendering speed on the Replica dataset is 0.108 FPS, compared to 0.103 FPS for NeRF [S1].
+-*   **Strengths:** Plug-and-play integration with other NeRF variants (Mip-NeRF, TensoRF); significant improvement in sparse-view synthesis; maintains depth prediction quality (MSE distance 0.02, identical to baseline NeRF) [S1].
+-*   **Limitations:** Requires multiple training stages, increasing total training time compared to a single-stage NeRF; depth estimation does not improve significantly over baseline [S1].
++    *   **Realistic Synthetic 360 Dataset:** NeRF-VPT (Stage 6) achieves PSNR 34.95, SSIM 0.977, LPIPS 0.042, outperforming NeRF (31.01, 0.947, 0.081) and Mip-NeRF (33.09, 0.961, 0.043) [S1].
++    *   **Real Forward-Facing Dataset:** NeRF-VPT (Stage 6) achieves PSNR 28.95, SSIM 0.872, LPIPS 0.158, outperforming NeRF (26.50, 0.811, 0.250) and Mip-NeRF (27.13, 0.839, 0.164) [S1].
++    *   **Replica Dataset:** Rendering speed is 0.108 FPS, compared to 0.103 FPS for NeRF [S1].
++*   **Depth Quality:** Depth prediction quality is maintained with a Mean-Squared Error distance of 0.02, identical to baseline NeRF, despite significant image quality improvements [S1].
++*   **Strengths:** Plug-and-play compatibility, significant improvement in novel view synthesis quality, effective handling of sparse views, and reduced training time in later stages.
++*   **Limitations:** Requires multiple training stages (increasing total training time compared to a single-stage NeRF), and depth estimation does not improve over the baseline [S1].
+ 
+ ## Background
+-NeRF-VPT was introduced in 2024 in the paper "NeRF-VPT: Learning Novel View Representations with Neural Radiance Fields via View Prompt Tuning" [S1]. It builds on the standard NeRF architecture [S1] and addresses limitations in prior methods that relied on external networks or specific data preprocessing for priors [S1]. The method draws inspiration from cascade structures used in other computer vision applications such as object detection, super-resolution, and pose estimation [S1].
++NeRF-VPT was introduced in 2024 in the paper "NeRF-VPT: Learning Novel View Representations with Neural Radiance Fields via View Prompt Tuning" presented at the AAAI Conference on Artificial Intelligence [S1]. The method builds on the success of NeRF and addresses limitations in prior knowledge incorporation methods that relied on external networks or ground truth images. It draws inspiration from cascading learning strategies used in other computer vision applications like object detection and super-resolution [S1].
+ 
+ ## Sources

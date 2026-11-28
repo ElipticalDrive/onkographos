@@ -1,0 +1,142 @@
+--- v003.md
++++ v004.md
+@@ -45,13 +45,27 @@
+ import numpy as np
+ 
+-def accumulate_harmonic_signal(primitives, ray_origin, ray_direction):
+-    """
+-    Computes the accumulated harmonic signal H for a single ray.
+-    Matches the formula: H = sum_{i in G} alpha_i * T_i * [sin(f_i); cos(f_i)]
+-    """
+-    harmonic_accumulator = np.zeros(128)  # 64 sin + 64 cos channels
+-    transmittance = 1.0
+-    
+-    # Collect intersections and sort by distance for correct alpha blending order
++def neural_harmonic_textures(primitives, ray_origin, ray_direction, mlp, k=1.0):
++    """
++    Renders a single ray using Neural Harmonic Textures.
++    
++    Args:
++        primitives: List of primitive objects. Each primitive has:
++            - vertices: List of 3D points defining the virtual scaffold (4 for 3D, 3 for 2D).
++            - vertex_features: List of feature vectors (numpy arrays) for each vertex.
++            - opacity: Scalar alpha value.
++            - get_intersection(ray_origin, ray_direction): Returns (point, barycentric_coords) 
++              or None if no intersection.
++        ray_origin: 3D numpy array.
++        ray_direction: 3D numpy array.
++        mlp: A callable MLP function that takes a 137-dim vector and returns a 3-dim RGB vector.
++        k: Scaling factor for spherical harmonics.
++        
++    Returns:
++        color: 3D numpy array (RGB).
++    """
++    if not primitives:
++        return np.zeros(3)
++
++    # Step 1: Intersect and sort primitives by distance
+     intersections = []
+     for prim in primitives:
+@@ -60,10 +74,14 @@
+             point, bary_coords = result
+             dist = np.linalg.norm(point - ray_origin)
+-            intersections.append((dist, prim, bary_coords))
++            intersections.append((dist, prim, point, bary_coords))
+             
+     intersections.sort(key=lambda x: x[0])
+     
+-    for _, prim, bary_coords in intersections:
+-        # Step 2: Local Interpolation
++    # Step 2 & 4: Initialize accumulation and transmittance
++    harmonic_accumulator = np.zeros(128) # 64 sin + 64 cos channels
++    transmittance = 1.0
++    
++    for dist, prim, point, bary_coords in intersections:
++        # Interpolate vertex features at the intersection point
+         f_i = np.zeros(64)
+         for v_idx, weight in enumerate(bary_coords):
+@@ -71,8 +89,10 @@
+             
+         # Step 3: Harmonic Encoding
+-        h_i = np.concatenate([np.sin(f_i), np.cos(f_i)])
++        sin_features = np.sin(f_i)
++        cos_features = np.cos(f_i)
++        h_i = np.concatenate([sin_features, cos_features])
+         
+         # Step 4: Alpha Blending
+-        alpha = np.clip(prim.opacity, 0.0, 1.0)  # Clamp to prevent negative transmittance
++        alpha = prim.opacity
+         contribution = alpha * transmittance * h_i
+         harmonic_accumulator += contribution
+@@ -80,34 +100,21 @@
+         transmittance *= (1.0 - alpha)
+         
+-        # Early exit if ray is fully opaque
+         if transmittance < 1e-4:
+             break
+             
+-    return harmonic_accumulator
+-
+-def decode_harmonic_signal(harmonic_accumulator, ray_direction):
+-    """
+-    Deferred decoding pass. Matches: c = MLP_theta(H, k * SH2(d))
+-    """
+     # Step 5: Directional Encoding
+     sh2_d = spherical_harmonics_2(ray_direction)
+     
+-    # Step 6: MLP Decoding (128-wide x 3 hidden layers)
+-    # Input: 128 (H) + 9 (SH2) = 137 dimensions
+-    x = np.concatenate([harmonic_accumulator, sh2_d])
+-    
+-    # Layer 1: 137 -> 128
+-    x = np.maximum(0.0, np.dot(x, W1) + b1)
+-    # Layer 2: 128 -> 128
+-    x = np.maximum(0.0, np.dot(x, W2) + b2)
+-    # Layer 3: 128 -> 128
+-    x = np.maximum(0.0, np.dot(x, W3) + b3)
+-    # Output: 128 -> 3 (RGB)
+-    color = np.dot(x, W4) + b4
++    # Step 6: Deferred Decoding
++    input_to_mlp = np.concatenate([harmonic_accumulator, k * sh2_d])
++    color = mlp(input_to_mlp)
+     
+     return color
+ 
+ def spherical_harmonics_2(direction):
+-    """Computes 2nd degree spherical harmonics for a normalized direction vector. Returns 9 coefficients."""
++    """
++    Computes 2nd degree spherical harmonics for a normalized direction vector.
++    Returns 9 coefficients.
++    """
+     x, y, z = direction
+     return np.array([
+@@ -120,4 +127,29 @@
+         3 * z**2 - 1
+     ])
++
++class SimpleMLP:
++    """
++    3-hidden layer MLP (137 -> 128 -> 128 -> 128 -> 3) with ReLU activations.
++    Weights are initialized randomly for demonstration; in practice, load trained weights.
++    """
++    def __init__(self):
++        np.random.seed(42)
++        self.W1 = np.random.randn(137, 128) * 0.1
++        self.b1 = np.zeros(128)
++        self.W2 = np.random.randn(128, 128) * 0.1
++        self.b2 = np.zeros(128)
++        self.W3 = np.random.randn(128, 128) * 0.1
++        self.b3 = np.zeros(128)
++        self.W4 = np.random.randn(128, 3) * 0.1
++        self.b4 = np.zeros(3)
++        
++    def __call__(self, x):
++        x = np.dot(x, self.W1) + self.b1
++        x = np.maximum(0, x) # ReLU
++        x = np.dot(x, self.W2) + self.b2
++        x = np.maximum(0, x) # ReLU
++        x = np.dot(x, self.W3) + self.b3
++        x = np.maximum(0, x) # ReLU
++        return np.dot(x, self.W4) + self.b4
+ ```
+ 

@@ -1,0 +1,116 @@
+Summary estimateSigma calls noiseMRS() with no selection, so the multiscale noise estimate runs over the full 26.1 Mpx frame. On an SHO palette it is called three times per rendered frame — once per distinct filter — on the running mean....
+
+Ticking the SNR overlay adds three full-frame noiseMRS estimations per rendered frame, on 26.1 Mpx, unannounced · Issue #48 · caelo-works/session-cinema · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Ticking the SNR overlay adds three full-frame noiseMRS estimations per rendered frame, on 26.1 Mpx, unannounced #48
+New issue
+Copy link
+New issue
+Copy link
+Closed
+#92
+Closed
+Ticking the SNR overlay adds three full-frame noiseMRS estimations per rendered frame, on 26.1 Mpx, unannounced#48
+#92
+Copy link
+Labels
+area:perfRender time, memory, diskRender time, memory, diskaudit-2026-08Surfaced by the full codebase review of 2026-08-25Surfaced by the full codebase review of 2026-08-25enhancementNew feature or requestNew feature or requestsev:majorReal, visible defect with a workaroundReal, visible defect with a workaround
+Milestone
+Lot E — What it costs
+Description
+caelo-works
+opened on Aug 25, 2026
+Issue body actions
+Summary
+estimateSigma calls noiseMRS() with no selection, so the multiscale noise estimate runs over the full 26.1 Mpx frame. On an SHO palette it is called three times per rendered frame — once per distinct filter — on the running mean. A 66-frame colour render therefore performs 198 full-frame MRS estimations; with interleaved filters (198 rendered frames) it performs 594. noiseMRS is an iterative multiscale estimator whose cost is at least linear in pixel count, so restricting it to a 1024² central window is at least a 25× reduction on that item.
+The user-visible symptom: ticking "SNR" in the overlay can multiply render time, and nothing anywhere says so. The fallback path in the same function already works on a central region, so the principle is accepted in this file.
+How to reproduce
+Render a colour stack with the SNR overlay off. Note the duration.
+Render the same session with ovShowSnr on (the default).
+Expected: a modest, bounded difference.
+Actual: three full-frame multiscale noise estimations per rendered frame are added, with no indication of the cost anywhere in the UI or the console.
+Root cause
+pjsr/SessionCinema.js:3209 (colour, running mean):
+```
+               if ( cfg.ovShowSnr && sigCur[ fName ] === undefined )
+                  sigCur[ fName ] = estimateSigma( mw.mainView.image );
+```
+memoised per filter, not per channel — so SHO makes 3 calls per frame and HOO makes 2. The reference sub is measured the same way at pjsr/SessionCinema.js:3176, and the mono path at pjsr/SessionCinema.js:2984.
+estimateSigma itself (pjsr/SessionCinema.js:2131) never sets a selection:
+```
+function estimateSigma( img )
+{
+   try
+   {
+      var a = img.noiseMRS();
+      if ( a && a.length > 0 && a[ 0 ] > 0 )
+         return a[ 0 ];
+   }
+   ...
+```
+Its own MAD fallback, three lines lower, does the opposite — imageChannelStats( img, true ) at pjsr/SessionCinema.js:2154, which sets a central selectedRect at pjsr/SessionCinema.js:2064:
+```
+         img.selectedRect = new Rect( Math.floor( w/4 ), Math.floor( h/4 ),
+                                      Math.floor( 3*w/4 ), Math.floor( 3*h/4 ) );
+```
+Suggested fix
+Set a fixed central selectedRect before noiseMRS() / noiseKSigma() and reset it in a finally:
+```
+function estimateSigma( img )
+{
+   var w = img.width, h = img.height;
+   var cw = Math.min( 1024, Math.max( 64, Math.floor( w/2 ) ) );
+   var ch = Math.min( 1024, Math.max( 64, Math.floor( h/2 ) ) );
+   var x0 = Math.floor( ( w - cw )/2 ), y0 = Math.floor( ( h - ch )/2 );
+   try { img.selectedRect = new Rect( x0, y0, x0 + cw, y0 + ch ); } catch ( e ) {}
+   try { /* existing MRS / k-sigma / MAD chain */ }
+   finally { try { img.resetSelections(); } catch ( e ) {} }
+}
+```
+Notes
+This changes the sample a displayed measurement is taken on, so it does not ship on reasoning alone. The SNR gain in dB is presented to the user as a measurement, not as decoration. Three conditions before merging:
+The window must be identical for σ_first and σ_n. It is, as written: the reference sub (pjsr/SessionCinema.js:3176) and the running mean (pjsr/SessionCinema.js:3210) share the same geometry, so the same rect applies to both. If that ever stops being true, the ratio becomes meaningless.
+If MRS returns 0 on the reduced window, the existing fallback chain (k-sigma, then central MAD) already takes over, and formatSnrGainDb already knows how to say "unavailable" rather than invent a figure. That behaviour must be preserved.
+Bench comparison on a real dataset before shipping: σ measured full-frame vs σ measured on the central window, on an image with a bright central object, not only on flat sky background. A 1024² window centred on an astro image lands precisely on the object, i.e. where the sky background is least representative. MRS is robust to structure but not invariant to it, and the dB ratio can move.
+Two facts worth carrying into that comparison: registered subs carry zero borders left by StarAlignment, which a central window avoids — the measurement may become more correct, not less. And it must be verified on the bench that noiseMRS() honours selectedRect at all; the file already assumes median() and MAD() do (pjsr/SessionCinema.js:2055-2088), but that cannot be extrapolated to the noise estimators from the source alone. A decisive test: an image whose left half is high noise and right half low noise, noiseMRS() called with the selection on each half — two different values means the selection is honoured.
+Sizing: the factor on this item is at least 25×; its share of total render time is unknown, because the stacking path is not instrumented. See #44 — it should land first so the before/after can be stated in milliseconds.
+Activity
+caelo-works
+added this to the Lot E — What it costs milestone on Aug 25, 2026
+caelo-works
+added
+enhancementNew feature or requestNew feature or request
+sev:majorReal, visible defect with a workaroundReal, visible defect with a workaround
+area:perfRender time, memory, diskRender time, memory, disk
+audit-2026-08Surfaced by the full codebase review of 2026-08-25Surfaced by the full codebase review of 2026-08-25
+on Aug 25, 2026
+caelo-works commented on Aug 26, 2026
+caelo-works
+on Aug 26, 2026
+OwnerAuthor
+More actions
+Three full-frame noise estimations per frame, on 26 Mpx, for one line of caption. Same batch.
+caelo-works
+closed this as completedin 7bbf31don Aug 26, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+area:perfRender time, memory, diskRender time, memory, diskaudit-2026-08Surfaced by the full codebase review of 2026-08-25Surfaced by the full codebase review of 2026-08-25enhancementNew feature or requestNew feature or requestsev:majorReal, visible defect with a workaroundReal, visible defect with a workaround
+Projects
+No projects
+Milestone
+Lot E — What it costsNo due date
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

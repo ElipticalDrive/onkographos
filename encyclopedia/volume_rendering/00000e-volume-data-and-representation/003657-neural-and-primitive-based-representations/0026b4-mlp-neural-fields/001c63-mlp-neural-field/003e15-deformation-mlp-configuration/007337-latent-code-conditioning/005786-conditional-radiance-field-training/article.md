@@ -1,0 +1,170 @@
+# Conditional Radiance Field Training
+
+Also called: Instance-conditioned NeRF
+
+## Overview
+Conditional Radiance Field Training is a method for modeling shape and appearance variations across multiple 3D instances by jointly optimizing a single neural radiance field with instance-specific latent codes [S1]. It differs from standard NeRF by replacing the implicit instance identity with explicit, learnable shape and color codes that condition the network's output, allowing for efficient multi-instance reconstruction and editing [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A dataset of $K$ instances, where each instance $k$ has a set of training rays $R_k$. Each ray $r$ consists of origin, direction, and ground truth color $C(r)$ [S1].
+*   **Output:** A conditional radiance field model consisting of two networks ($F_{coarse}, F_{fine}$) and $K$ pairs of latent codes ($\mathbf{z}_k^{(s)}, \mathbf{z}_k^{(c)}$) [S1].
+
+**Data Structures:**
+*   **Latent Codes:** For each instance $k \in \{1, \dots, K\}$, two learned vectors are maintained:
+    *   Shape code $\mathbf{z}_k^{(s)}$: 32-dimensional [S1].
+    *   Color code $\mathbf{z}_k^{(c)}$: 32-dimensional [S1].
+    *   *Note:* An ablation variant uses a single 64-dimensional code for both [S1].
+*   **Networks:** Two Multi-Layer Perceptrons (MLPs), $F_{coarse}$ and $F_{fine}$, each 4 layers deep with 256 channels [S1]. They use ReLU activations [S1].
+    *   $F_{coarse}$: Estimates density $\sigma$ and color $\mathbf{c}$ for coarse sampling.
+    *   $F_{fine}$: Estimates density $\sigma$ and color $\mathbf{c}$ for fine sampling.
+    *   Architecture details: The networks use skip connections from the input position to the output [S1]. The shape code is embedded and concatenated with the positional encoding [S1].
+
+**Numbered Steps:**
+
+1.  **Initialization:** Initialize $F_{coarse}$, $F_{fine}$, and the latent codes $\mathbf{z}_k^{(s)}, \mathbf{z}_k^{(c)}$ for all $k=1 \dots K$ [S1].
+2.  **Iteration Loop:** Repeat until convergence (average 1M iterations) [S1]:
+    1.  **Sample Instance:** Randomly select an instance index $k \in \{1, \dots, K\}$ [S1].
+    2.  **Retrieve Codes:** Obtain the shape code $\mathbf{z}_k^{(s)}$ and color code $\mathbf{z}_k^{(c)}$ for instance $k$ [S1].
+    3.  **Sample Rays:** Sample a batch of training rays $r$ from the set $R_k$ belonging to instance $k$ [S1].
+    4.  **Coarse Rendering:**
+        *   For each ray $r$, use stratified sampling to generate points [S1].
+        *   Compute positional encodings for the points [G].
+        *   Concatenate the shape code $\mathbf{z}_k^{(s)}$ and color code $\mathbf{z}_k^{(c)}$ with the encoded position and viewing direction $\mathbf{d}$ [S1].
+        *   Pass through $F_{coarse}$ to get density $\sigma$ and color $\mathbf{c}$ [S1].
+        *   Render coarse color $\hat{C}_{coarse}(r, \mathbf{z}_k^{(s)}, \mathbf{z}_k^{(c)})$ using volume rendering [S1].
+    5.  **Hierarchical Sampling:** Use the density outputs from $F_{coarse}$ to sample a hierarchical volume (importance sampling) for the fine network [S1].
+    6.  **Fine Rendering:**
+        *   Pass the fine samples through $F_{fine}$ using the same conditioning codes $\mathbf{z}_k^{(s)}, \mathbf{z}_k^{(c)}$ [S1].
+        *   Render fine color $\hat{C}_{fine}(r, \mathbf{z}_k^{(s)}, \mathbf{z}_k^{(c)})$ [S1].
+    7.  **Loss Calculation:** Compute the photometric loss $L_{train}$ [S1]:
+        $$
+        L_{train} = \sum_{k=1}^{K} \sum_{r \in R_k} \left( \|\hat{C}_{coarse}(r, \mathbf{z}_k^{(s)}, \mathbf{z}_k^{(c)}) - C(r)\|_2^2 + \|\hat{C}_{fine}(r, \mathbf{z}_k^{(s)}, \mathbf{z}_k^{(c)}) - C(r)\|_2^2 \right)
+        $$
+    8.  **Optimization:** Update $F_{coarse}$, $F_{fine}$, and all latent codes $\mathbf{z}_k^{(s)}, \mathbf{z}_k^{(c)}$ using the Adam optimizer [S1].
+
+**Parameters:**
+*   **Optimizer:** Adam [S1].
+*   **Learning Rate:** $10^{-4}$ for training [S1].
+*   **Adam Hyperparameters:** $\beta_1 = 0.9$, $\beta_2 = 0.999$, $\epsilon = 10^{-8}$ [S1].
+*   **Training Duration:** Until convergence, averaging 1M iterations [S1].
+*   **Code Dimensionality:** 32 dimensions for shape and 32 for color [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Disentanglement:** The method relies on separate shape and color codes to prevent appearance from affecting geometry estimation. Using a single combined code (64-dim) yields lower performance than separate codes [S1].
+*   **Parameter Count:** Ablation studies must increase layer widths to keep the total parameter count approximately equal across different architectural choices (e.g., shared vs. separate branches) to ensure fair comparison [S1].
+*   **Editing Stability:** During editing, the coarse network is kept fixed, and only the fine network and codes are optimized with a higher learning rate ($10^{-2}$) for 100 iterations [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def positional_encoding(x, num_freqs=10):
+    """Standard NeRF positional encoding [G]."""
+    scales = np.array([2**i for i in range(num_freqs)])
+    xb = np.reshape((x - 0.5) * np.pi * scales, (x.shape[0], -1, x.shape[1]))
+    return np.concatenate([np.sin(xb), np.cos(xb)], axis=-1).reshape(x.shape[0], -1)
+
+def stratified_sample(origin, direction, num_samples=64, near=2.0, far=6.0):
+    """Uniform stratified sampling along ray [G]."""
+    t = np.linspace(near, far, num_samples + 1)
+    dt = t[1] - t[0]
+    sample_t = t[:-1] + np.random.uniform(0, dt, num_samples)
+    return origin + direction * sample_t[:, np.newaxis]
+
+def volume_render(points, sigma, color):
+    """Alpha compositing volume rendering [G]."""
+    dists = np.linalg.norm(np.diff(points, axis=0), axis=1)
+    alpha = 1.0 - np.exp(-sigma * dists)
+    transmittance = np.cumprod(1.0 - alpha)
+    transmittance = np.concatenate([[1.0], transmittance[:-1]])
+    return np.sum(alpha * transmittance * color, axis=0)
+
+def hierarchical_sample(origin, direction, coarse_sigma, num_fine=48, near=2.0, far=6.0):
+    """Importance sampling based on coarse density [G]."""
+    pdf = coarse_sigma / (np.sum(coarse_sigma) + 1e-8)
+    indices = np.random.choice(len(pdf), size=num_fine, p=pdf)
+    t_fine = np.linspace(near, far, len(pdf) + 1)
+    t_fine = t_fine[indices] + np.random.uniform(0, t_fine[1]-t_fine[0], num_fine)
+    return origin + direction * t_fine[:, np.newaxis]
+
+def train_conditional_nerf(K, rays_per_instance, num_iterations=1000000):
+    # Initialize networks (4 layers, 256 channels, ReLU hidden, skip connections) [S1]
+    F_coarse = MLP(4, 256, skip=True)
+    F_fine = MLP(4, 256, skip=True)
+
+    # Initialize latent codes (32-dim each) [S1]
+    z_shape = np.random.randn(K, 32)
+    z_color = np.random.randn(K, 32)
+
+    # Optimizer state (Adam) [S1]
+    params = list(F_coarse.parameters()) + list(F_fine.parameters()) + [z_shape, z_color]
+    m = [np.zeros_like(p) for p in params]
+    v = [np.zeros_like(p) for p in params]
+    t = 0
+    lr = 1e-4
+    beta1, beta2, eps = 0.9, 0.999, 1e-8
+
+    for iteration in range(num_iterations):
+        k = np.random.randint(K)
+        zk_s = z_shape[k]
+        zk_c = z_color[k]
+        batch_rays = rays_per_instance[k]
+
+        total_loss = 0.0
+        grads = [np.zeros_like(p) for p in params]
+
+        for origin, direction, gt_color in batch_rays:
+            # Coarse rendering
+            coarse_pts = stratified_sample(origin, direction)
+            pos_enc = positional_encoding(coarse_pts)
+            dir_enc = positional_encoding(direction[np.newaxis, :])
+
+            # Inject codes wherever positional or directional embeddings are injected [S1]
+            input_coarse = np.concatenate([pos_enc, zk_s, dir_enc, zk_c], axis=-1)
+            sigma_coarse, c_coarse = F_coarse.forward(input_coarse)
+            C_hat_coarse = volume_render(coarse_pts, sigma_coarse, c_coarse)
+
+            # Hierarchical sampling
+            fine_pts = hierarchical_sample(origin, direction, sigma_coarse)
+
+            # Fine rendering
+            pos_enc_fine = positional_encoding(fine_pts)
+            input_fine = np.concatenate([pos_enc_fine, zk_s, dir_enc, zk_c], axis=-1)
+            sigma_fine, c_fine = F_fine.forward(input_fine)
+            C_hat_fine = volume_render(fine_pts, sigma_fine, c_fine)
+
+            # Loss calculation
+            loss = np.sum((C_hat_coarse - gt_color)**2) + np.sum((C_hat_fine - gt_color)**2)
+            total_loss += loss
+
+        # Optimization step (Adam update) [S1]
+        t += 1
+        for i, p in enumerate(params):
+            grad = compute_gradient(p, total_loss) # Standard autograd
+            m[i] = beta1 * m[i] + (1 - beta1) * grad
+            v[i] = beta2 * v[i] + (1 - beta2) * grad**2
+            m_hat = m[i] / (1 - beta1**t)
+            v_hat = v[i] / (1 - beta2**t)
+            params[i] -= lr * m_hat / (np.sqrt(v_hat) + eps)
+
+    return F_coarse, F_fine, z_shape, z_color
+```
+
+## Operating characteristics
+*   **Performance:** On the PhotoShapes dataset, the method matches the performance of training independent NeRF models for each instance [S1].
+*   **Scalability:** The method scales well to large numbers of instances; training with all 626 instances of the PhotoShapes dataset achieves high reconstruction quality [S1].
+*   **Metrics:** Evaluated using PSNR and LPIPS [S1].
+*   **Strengths:** Jointly models shape and appearance differences; allows for editing by optimizing latent codes [S1].
+*   **Limitations:** Requires joint optimization of codes and network weights, which can be sensitive to hyperparameters [S1].
+
+## Background
+*   **Origin:** Introduced in "Editing Conditional Radiance Fields" (ICCV 2021) [S1].
+*   **Development:** The method builds upon the original NeRF architecture [S1] and ablates various conditioning strategies (single code vs. separate shape/color codes, shared vs. separate branches) [S1].
+*   **Usage:** Used for modeling multi-instance 3D objects (e.g., chairs) and enabling appearance editing [S1].
+
+## Sources
+[S1] Editing Conditional Radiance Fields, https://doi.org/10.1109/iccv48922.2021.00572, fetched 2026-10-26

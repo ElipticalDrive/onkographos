@@ -1,0 +1,196 @@
+# Joint Root-Finding
+
+Also called: Joint Root-Finding for Ray-Surface Intersection, Simultaneous Ray-Surface and Correspondence Search
+
+## Overview
+Joint Root-Finding is a hybrid algorithm for simultaneous ray-surface intersection search and canonical correspondence search in articulated implicit surface representations [S1]. It solves for the precise intersection point $\hat{\mathbf{x}}$ and depth $d$ in a single Newton iteration, avoiding the high memory and runtime costs of alternating sphere tracing and root finding [S1]. Unlike [Secant Method for Surface Depth Refinement](996-secant-method-for-surface-depth-refinement.md) which refines depth for a known surface, or [Parabolic Root-Finding with Gradients](8906-parabolic-root-finding-with-gradients.md) which uses gradient information for faster convergence, this method couples the surface constraint with the geometric correspondence constraint (forward skinning) to handle articulated deformations [S1].
+
+## How it works
+**Inputs:**
+- Camera ray defined by center $\mathbf{c}$ and unit direction vector $\mathbf{v}$ [S1].
+- Canonical Signed Distance Function (SDF) network $\sigma_f$ evaluating $f_{\sigma_f}(\hat{\mathbf{x}})$ [S1].
+- Forward Linear Blend Skinning (LBS) network $\sigma_\omega$ evaluating $LBS_{\sigma_\omega}(\hat{\mathbf{x}})$ [S1].
+- Initial rough estimation of canonical point $\hat{\mathbf{x}}_0$ and depth $d_0$ [S1].
+
+**Outputs:**
+- Converged canonical point $\hat{\mathbf{x}}^*$ and depth $d^*$ [S1].
+
+**Data Structures:**
+- State vector $\mathbf{u}_k = [\hat{\mathbf{x}}_k, d_k]^T \in \mathbb{R}^4$ (assuming 3D space) [S1].
+- Residual vector $\mathbf{g}(\mathbf{u}_k) \in \mathbb{R}^4$ [S1].
+- Jacobian matrix $\mathbf{J}_k \in \mathbb{R}^{4 \times 4}$ [S1].
+
+**Formulas:**
+The system to solve is defined as [S1]:
+$$
+g_{\sigma_f, \sigma_\omega}(\hat{\mathbf{x}}, d) = \begin{bmatrix} f_{\sigma_f}(\hat{\mathbf{x}}) \\ LBS_{\sigma_\omega}(\hat{\mathbf{x}}) - (\mathbf{c} + \mathbf{v} \cdot d) \end{bmatrix} = \mathbf{0}
+$$
+where:
+- $f_{\sigma_f}(\hat{\mathbf{x}})$ is the scalar SDF value at canonical point $\hat{\mathbf{x}}$ [S1].
+- $LBS_{\sigma_\omega}(\hat{\mathbf{x}})$ is the 3D position in observation space predicted by forward skinning from canonical point $\hat{\mathbf{x}}$ [S1].
+- $\mathbf{c} + \mathbf{v} \cdot d$ is the 3D position on the camera ray at depth $d$ [S1].
+
+The Jacobian matrix $\mathbf{J}_k$ at iteration $k$ is [S1]:
+$$
+\mathbf{J}_k = \begin{bmatrix} \frac{\partial f_{\sigma_f}}{\partial \hat{\mathbf{x}}}(\hat{\mathbf{x}}_k) & 0 \\ \frac{\partial LBS_{\sigma_\omega}}{\partial \hat{\mathbf{x}}}(\hat{\mathbf{x}}_k) & -\mathbf{v} \end{bmatrix}
+$$
+where $\frac{\partial f_{\sigma_f}}{\partial \hat{\mathbf{x}}}$ is the gradient of the SDF (scalar), $\frac{\partial LBS_{\sigma_\omega}}{\partial \hat{\mathbf{x}}}$ is the Jacobian of the skinning function (3x3 matrix), and $-\mathbf{v}$ is the negative ray direction vector (3x1 column) [S1].
+
+**Pseudocode:**
+The implementation uses Broyden’s method to approximate the Jacobian inverse, avoiding explicit computation of $\mathbf{J}_k$ at each iteration [S1].
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def joint_root_finding(c, v, sigma_f, sigma_w, x_init, d_init, max_iter=10):
+    """
+    Solves for canonical point x_hat and depth d simultaneously.
+    
+    Args:
+        c: Camera center (3,)
+        v: Ray direction unit vector (3,)
+        sigma_f: SDF network function f(x_hat) -> scalar
+        sigma_w: LBS network function LBS(x_hat) -> 3D point
+        x_init: Initial canonical point estimate (3,)
+        d_init: Initial depth estimate (scalar)
+        max_iter: Maximum number of Newton/Broyden steps
+        
+    Returns:
+        x_hat: Converged canonical point (3,)
+        d: Converged depth (scalar)
+    """
+    # Initialize state
+    x_hat = x_init.copy()
+    d = d_init
+    
+    # Initialize Jacobian approximation J_inv
+    # J = [ grad_f  0      ]
+    #     [ grad_LBS -v    ]
+    # We need J_inv. A simple initialization is the inverse of the diagonal 
+    # or identity scaled, but Broyden updates it. 
+    # For the first step, we compute the exact Jacobian inverse or use a 
+    # pseudo-inverse if singular. [G] Using identity as initial guess for 
+    # Broyden's rank-1 update is standard, but computing the first exact 
+    # inverse is safer for convergence.
+    
+    # Compute initial residual
+    f_val = sigma_f(x_hat)
+    lbs_val = sigma_w(x_hat)
+    ray_pos = c + v * d
+    residual = np.array([f_val, lbs_val[0] - ray_pos[0], lbs_val[1] - ray_pos[1], lbs_val[2] - ray_pos[2]])
+    
+    # Compute initial Jacobian J
+    # grad_f is scalar, treated as 1x3 row vector
+    grad_f = compute_gradient_sigma_f(x_hat) 
+    # grad_LBS is 3x3 matrix
+    grad_LBS = compute_jacobian_sigma_w(x_hat)
+    
+    # Construct J
+    # J shape: 4x4
+    # Row 0: [grad_f, 0, 0, 0]
+    # Rows 1-3: [grad_LBS, -v]
+    J = np.zeros((4, 4))
+    J[0, :3] = grad_f
+    J[0, 3] = 0
+    J[1:4, :3] = grad_LBS
+    J[1:4, 3] = -v
+    
+    # Invert J for the first step
+    J_inv = np.linalg.inv(J)
+    
+    for k in range(max_iter):
+        # Newton/Broyden update: u_{k+1} = u_k - J_inv * g(u_k)
+        # u = [x_hat; d]
+        update = J_inv @ residual
+        
+        x_hat_new = x_hat - update[:3]
+        d_new = d - update[3]
+        
+        # Check convergence
+        if np.linalg.norm(update) < 1e-6:
+            return x_hat_new, d_new
+            
+        # Update state
+        x_hat = x_hat_new
+        d = d_new
+        
+        # Compute new residual
+        f_val = sigma_f(x_hat)
+        lbs_val = sigma_w(x_hat)
+        ray_pos = c + v * d
+        residual = np.array([f_val, lbs_val[0] - ray_pos[0], lbs_val[1] - ray_pos[1], lbs_val[2] - ray_pos[2]])
+        
+        # Broyden's Rank-1 Update for J_inv
+        # y = g(u_{k+1}) - g(u_k)
+        # s = u_{k+1} - u_k = -update
+        # J_inv_{k+1} = J_inv_k + (s - J_inv_k @ y) @ s^T / (s^T @ s)
+        # Note: Standard Broyden updates J, not J_inv. 
+        # The "Good" Broyden method updates J_inv directly:
+        # J_inv_{k+1} = J_inv_k + (s - J_inv_k @ y) @ s^T / (s^T @ s)
+        
+        s = -update # u_{k+1} - u_k
+        # We need y = g(u_{k+1}) - g(u_k). We have residual for u_k.
+        # We need to compute residual for u_{k+1} (which is now x_hat, d)
+        # But we already computed residual for the NEW x_hat, d above? 
+        # No, the residual variable holds g(u_k) from the start of the loop.
+        # Let's re-evaluate residual for the NEW point to get y.
+        
+        f_val_new = sigma_f(x_hat)
+        lbs_val_new = sigma_w(x_hat)
+        ray_pos_new = c + v * d
+        residual_new = np.array([f_val_new, lbs_val_new[0] - ray_pos_new[0], lbs_val_new[1] - ray_pos_new[1], lbs_val_new[2] - ray_pos_new[2]])
+        
+        y = residual_new - residual
+        
+        # Broyden update for J_inv
+        # J_inv = J_inv + (s - J_inv @ y) @ s.T / (s.T @ s)
+        term1 = s - J_inv @ y
+        denom = np.dot(s, s)
+        if abs(denom) < 1e-12:
+            break # Singular update
+        J_inv = J_inv + np.outer(term1, s) / denom
+        
+        residual = residual_new
+
+    return x_hat, d
+
+def compute_gradient_sigma_f(x):
+    # [G] Standard automatic differentiation or finite difference for scalar field
+    pass
+
+def compute_jacobian_sigma_w(x):
+    # [G] Standard automatic differentiation for vector field
+    pass
+```
+
+**Parameters:**
+- `max_iter`: Typically small, as the method converges quadratically [S1].
+- Initialization: A single initialization is sufficient; multiple initializations incur drastic overhead without noticeable improvement [S1]. The rough estimation is obtained by combining approximate backward mapping (inverse of linearly combined forward bone transforms) with sphere tracing [S1].
+
+**Edge Cases and Pitfalls:**
+- **Initialization Quality:** The method relies on a rough estimation from inverse transformations using SMPL skinning weights rather than rigid bone transformations [S1]. Poor initialization may lead to convergence failure.
+- **Singular Jacobian:** If the Jacobian is singular, Broyden's update may fail. Guard against division by zero in the denominator `s^T @ s` [G].
+- **Multiple Initializations:** Adding more initializations incurs drastic memory and runtime overhead without noticeable improvements [S1].
+
+## Subtopics
+
+### Ray Marching with Secant Refinement
+Uses secant method for depth refinement after ray marching. Simpler but slower convergence than joint root-finding. [Link](1042-ray-marching-with-secant-refinement.md)
+
+### Parabolic Root-Finding with Gradients
+Uses second-order (parabolic) approximation for faster convergence. Requires gradient computation. [Link](8906-parabolic-root-finding-with-gradients.md)
+
+## Operating characteristics
+- **Time Complexity**: Amortized complexity is $O(M)$ where $M$ is the number of root-finding steps [S1]. Naive alternation between sphere-tracing and root-finding is $O(MN)$ where $N$ is sphere-tracing steps [S1].
+- **Measured Performance**: Results in approximately 5x speedup compared to naive alternation between sphere-tracing and root-finding [S1].
+- **Convergence**: Quadratic convergence theoretically, compared to superlinear convergence for secant-method-based root-finding [S1].
+- **Strengths**: Efficient simultaneous search for intersection and correspondence; generalizes well to unseen poses; avoids high memory/runtime cost of alternating methods [S1].
+- **Limitations**: Requires differentiable SDF and LBS networks; relies on good initialization from inverse transformations [S1].
+- **When to Use**: When rendering articulated human avatars with detailed geometry and pose-dependent appearance from sparse multi-view RGB videos [S1].
+- **When Not to Use**: When rigid geometry is assumed (simpler methods suffice); when computational resources are extremely limited and initialization quality is poor [S1].
+
+## Background
+Originated in the paper "ARAH: Animatable Volume Rendering of Articulated Human SDFs" [S1]. The method addresses the challenge of rendering clothed human avatars with detailed geometry that generalizes well to out-of-distribution poses. It combines articulated implicit surface representation with volume rendering. The joint root-finding algorithm enables efficient point sampling and accurate point canonicalization [S1]. It is used in the context of 3D Computer Vision, Clothed Human Modeling, and Cloth Motion Capture [S1].
+
+## Sources
+[S1] ARAH: Animatable Volume Rendering of Articulated Human SDFs, https://doi.org/10.1007/978-3-031-19824-3_1, fetched 2026-10-26

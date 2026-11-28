@@ -1,0 +1,170 @@
+--- v017.md
++++ v018.md
+@@ -4,101 +4,85 @@
+ 
+ ## Overview
+-This configuration defines the training protocol for StyleGAN2-based radiance field models (such as StyleNeRF and VoxGRAF), adapting the 2D image synthesis framework to 3D-aware generation. It solves the instability and inconsistency issues inherent in training generative adversarial networks (GANs) for volumetric data by enforcing specific regularization, learning rate scaling, and noise management strategies. It differs from standard NeRF baselines [11349-nerf-gt-baseline-training-setup.md] by replacing standard MSE loss with adversarial objectives and R1 regularization, and from alternative GAN setups by explicitly removing per-pixel 2D noise injection to preserve 3D consistency across camera viewpoints [S3, unofficial].
++This configuration adapts the StyleGAN2 training protocol to 3D-aware radiance field models, explicitly removing per-pixel 2D noise injection to preserve 3D consistency across camera viewpoints [S3, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Ground truth images $\mathbf{I}_{gt}$, camera poses $\mathbf{T}$, and latent codes $\mathbf{z} \sim \mathcal{N}(0, I)$.
+-*   **Outputs:** Rendered images $\hat{\mathbf{I}}$, discriminator scores $D(\mathbf{I})$, and updated network weights.
++*   **Inputs:** Ground truth images $\mathbf{I}_{gt}$, camera poses $\mathbf{T}$, and latent codes $\mathbf{z} \sim \mathcal{N}(0, I)$ [S2].
++*   **Outputs:** Rendered images $\hat{\mathbf{I}}$, discriminator scores $D(\mathbf{I})$, and updated network weights [S2].
+ 
+ **Data Structures:**
+-*   **Generator ($G$):** A neural network mapping latent codes to radiance fields (or voxel grids). Parameters are updated using RMSprop.
+-*   **Discriminator ($D$):** A neural network evaluating image realism. Includes a minibatch standard deviation layer.
+-*   **Exponential Moving Average (EMA):** A shadow copy of generator weights $\theta_{EMA}$ maintained separately from training weights $\theta$.
++*   **Generator ($G$):** A neural network mapping latent codes to radiance fields or voxel grids, updated via RMSprop [S2].
++*   **Discriminator ($D$):** A neural network evaluating image realism, which includes a minibatch standard deviation layer [S1].
++*   **Exponential Moving Average (EMA):** A shadow copy of generator weights $\theta_{EMA}$ maintained separately from training weights $\theta$ [S2].
+ 
+ **Numbered Steps:**
+-
+-1.  **Optimizer Setup:** Initialize RMSprop optimizer for both Generator and Discriminator with learning rate $\eta = 0.002$, momentum $\alpha = 0.99$, and epsilon $\epsilon = 10^{-8}$ [S2].
+-2.  **Learning Rate Scaling:** Apply equalized learning rates to all trainable parameters in the synthesis network [S1][S2]. Set the learning rate of the mapping network to $100\times$ less than the synthesis network (i.e., $\eta_{map} = 0.00002$) [S2].
+-3.  **Data Augmentation:** Apply differentiable data augmentations (random translation, color jitter, Cutout) to all discriminator inputs to combat overfitting [S2].
++1.  **Optimizer Setup:** Initialize RMSprop for $G$ and $D$ with learning rate $\eta = 0.002$, momentum $\alpha = 0.99$, and epsilon $\epsilon = 10^{-8}$ [S2].
++2.  **Learning Rate Scaling:** Apply equalized learning rates to all trainable parameters in the synthesis network [S1][S2]. Set the mapping network learning rate to $100\times$ less than the synthesis network ($\eta_{map} = 0.00002$) [S2].
++3.  **Data Augmentation:** Apply differentiable augmentations (random translation, color jitter, Cutout) to all discriminator inputs to combat overfitting [S2].
+ 4.  **Noise Injection Handling:** Remove per-pixel 2D noise injection from the generator. Standard StyleGAN2 injects noise to model stochastic variations (e.g., hair), but this noise is 2D-only and breaks 3D consistency when the camera moves [S3, unofficial]. [G] If 3D-consistent noise is required, use geometry-aware noise based on estimated surface depth instead.
+-5.  **Regularization Strategy (R1):** Apply R1 gradient penalty to the discriminator. To reduce computational cost, use lazy regularization: compute the gradient penalty once every $k$ minibatches.
+-    *   For StyleNeRF: $k=4$, strength $\gamma = 1$ [S1].
+-    *   For GSN: $k=16$, strength $\lambda_{R1} = 0.01$ [S2].
+-    *   Formula for R1 penalty at iteration $t$:
+-        $$ \mathcal{L}_{R1} = \frac{\gamma}{2} \mathbb{E}_{\mathbf{x} \sim p_{data}} [||\nabla_{\mathbf{x}} D(\mathbf{x})||_2^2] $$
+-        where $\mathbf{x}$ is the discriminator input (real or fake) [S1][S2].
+-6.  **Loss Computation:**
+-    *   Compute adversarial loss for $G$ and $D$.
+-    *   If using a reconstruction-based variant (e.g., GSN), add reconstruction loss: $\mathcal{L}_{Recon} = \lambda_{Recon} ||\mathbf{I}_{gt} - \hat{\mathbf{I}}||_2^2$ with $\lambda_{Recon} = 1000$ [S2].
++5.  **Regularization Strategy (R1):** Apply R1 gradient penalty to the discriminator. To reduce computational cost, use lazy regularization: compute the gradient penalty once every $k$ minibatches. For StyleNeRF: $k=4$, strength $\gamma = 1$ [S1]. For GSN: $k=16$, strength $\lambda_{R1} = 0.01$ [S2]. The R1 penalty formula is $\mathcal{L}_{R1} = \frac{\gamma}{2} \mathbb{E}_{\mathbf{x} \sim p_{data}} [||\nabla_{\mathbf{x}} D(\mathbf{x})||_2^2]$, where $\mathbf{x}$ is the discriminator input [G].
++6.  **Loss Computation:** Compute adversarial loss for $G$ and $D$. If using a reconstruction-based variant (e.g., GSN), add reconstruction loss: $\mathcal{L}_{Recon} = \lambda_{Recon} ||\mathbf{I}_{gt} - \hat{\mathbf{I}}||_2^2$ with $\lambda_{Recon} = 1000$ [S2].
+ 7.  **Backpropagation:** Update weights using the optimizer. Do not use path regularization or style-mixing [S1].
+-8.  **EMA Update:** Update the generator's EMA weights after each step:
+-    $$ \theta_{EMA} \leftarrow \alpha_{EMA} \theta_{EMA} + (1 - \alpha_{EMA}) \theta $$
+-    with decay $\alpha_{EMA} = 0.999$ [S2].
+-9.  **Mixed Precision:** Use mixed-precision training (FP16) for the generator. For the discriminator, mixed precision may be disabled if training stability decreases (as observed in GSN) [S2].
++8.  **EMA Update:** Update the generator's EMA weights after each step: $\theta_{EMA} \leftarrow \alpha_{EMA} \theta_{EMA} + (1 - \alpha_{EMA}) \theta$ with decay $\alpha_{EMA} = 0.999$ [S2].
++9.  **Mixed Precision:** Use mixed-precision training (FP16) for the generator [S1][S2]. For the discriminator, mixed precision may be disabled if training stability decreases (as observed in GSN) [S2].
+ 
+ **Pseudocode:**
++```python
++# Helper definitions
++def RMSprop_update(params, exp_avg, lr, alpha, eps):
++    for p in params:
++        if p.grad is None: continue
++        if p not in exp_avg: exp_avg[p] = zeros_like(p)
++        exp_avg[p].mul_(alpha).add_(p.grad, alpha=1.0 - alpha)
++        p.add_(exp_avg[p].sqrt().add_(eps).reciprocal(), alpha=-lr)
+ 
+-```python
++def deep_copy(model):
++    return ModelCopy(model.state_dict())
++
++def compute_gradients(output, input_tensor):
++    return gradient(output.sum(), input_tensor, create_graph=True)
++
+ # Initialization
+-optimizer_G = RMSprop(params=G.parameters(), lr=0.002, alpha=0.99, eps=1e-8)
+-optimizer_D = RMSprop(params=D.parameters(), lr=0.002, alpha=0.99, eps=1e-8)
+-# Mapping network uses 1/100th learning rate
+-optimizer_Map = RMSprop(params=G.mapping.parameters(), lr=0.00002, alpha=0.99, eps=1e-8)
+-
+-# EMA state
++exp_avg_G = {}
++exp_avg_D = {}
+ ema_decay = 0.999
+-ema_G = copy.deepcopy(G)
+-
+-# R1 regularization settings (Example: StyleNeRF config)
++ema_G = deep_copy(G)
+ r1_reg_every = 4
+ r1_gamma = 1.0
+-# Alternative: GSN config uses r1_reg_every=16, r1_gamma=0.01
+ 
+-def train_step(real_images, camera_poses, latent_codes):
++def train_step(real_images, camera_poses, latent_codes, global_step):
+     # 1. Data Augmentation
+-    real_images_aug = augment(real_images) # Random translation, color jitter, Cutout
+-    
+-    # 2. Generator Forward Pass
+-    # Note: 2D noise injection is REMOVED for 3D consistency
++    real_images_aug = augment(real_images, ops=["random_translation", "color_jitter", "cutout"])
++
++    # 2. Generator Forward Pass (2D noise injection is removed)
+     fake_images = G(latent_codes, camera_poses)
+-    
+-    # 3. Discriminator Forward Pass
+-    # Minibatch standard deviation layer is included in D
++
++    # 3. Discriminator Forward Pass (includes minibatch standard deviation layer)
+     D_real = D(real_images_aug)
+     D_fake = D(fake_images.detach())
+-    
++
+     # 4. Adversarial Loss
+-    loss_D = -torch.mean(D_real) + torch.mean(D_fake)
+-    loss_G = -torch.mean(D_fake)
+-    
++    loss_D = -mean(D_real) + mean(D_fake)
++    loss_G = -mean(D_fake)
++
+     # 5. R1 Regularization (Lazy)
+-    # Compute gradient penalty only every r1_reg_every steps
+     if global_step % r1_reg_every == 0:
+-        real_images_aug.requires_grad_(True)
++        real_images_aug.requires_grad = True
+         D_real_val = D(real_images_aug)
+-        gradients = torch.autograd.grad(
+-            outputs=D_real_val.sum(), 
+-            inputs=real_images_aug, 
+-            create_graph=True, 
+-            retain_graph=True
+-        )[0]
+-        # R1 penalty: gamma/2 * ||grad||^2
+-        r1_penalty = r1_gamma * (gradients.square().sum(dim=(1,2,3)).mean() / 2)
++        gradients = compute_gradients(D_real_val, real_images_aug)
++        r1_penalty = (r1_gamma / 2) * mean(sum(gradients**2, dim=(1, 2, 3)))
+         loss_D += r1_penalty
+-        
++
+     # 6. Backpropagation
+-    optimizer_D.zero_grad()
+     loss_D.backward()
+-    optimizer_D.step()
+-    
+-    optimizer_G.zero_grad()
++    RMSprop_update(D.parameters(), exp_avg_D, lr=0.002, alpha=0.99, eps=1e-8)
++
+     loss_G.backward()
+-    optimizer_G.step()
+-    
++    RMSprop_update(G.parameters(), exp_avg_G, lr=0.002, alpha=0.99, eps=1e-8)
++
+     # 7. EMA Update
+-    with torch.no_grad():
++    with no_grad():
+         for param_q, param_k in zip(ema_G.parameters(), G.parameters()):
+-            param_q.data = (ema_decay * param_q.data + (1.0 - ema_decay) * param_k.data)
+-
++            param_q.data = ema_decay * param_q.data + (1.0 - ema_decay) * param_k.data
+ ```
+ 
+@@ -124,11 +108,11 @@
+ *   **Time Complexity:** Training is computationally intensive. 64x64 models trained for 500k iterations take approximately 4 days on two NVIDIA A100 GPUs (40GB each) [S2].
+ *   **Memory Complexity:** Mixed precision reduces memory cost for the generator. The discriminator may require higher precision (FP32) to maintain stability, increasing its memory footprint [S2].
+-*   **Strengths:** High-quality 3D-aware synthesis; stable training via R1 regularization and EMA; effective handling of small datasets via transfer learning [S1][S2].
++*   **Strengths:** High-quality 3D-aware synthesis; stable training via R1 regularization and EMA; effective handling of small datasets via transfer learning [S1][S2][S3, unofficial].
+ *   **Limitations:** Removal of 2D noise reduces ability to model fine stochastic details (e.g., hair strands) unless geometry-aware noise is implemented [S3, unofficial].
+-*   **When to Use:** When generating high-resolution, 3D-consistent images from a generative prior (StyleGAN2) rather than optimizing a single NeRF for a specific scene.
+-*   **When Not to Use:** When 3D consistency is not required, or when computational resources are insufficient for GAN training (vs. supervised NeRF).
++*   **When to Use:** When generating high-resolution, 3D-consistent images from a generative prior (StyleGAN2) rather than optimizing a single NeRF for a specific scene [S3, unofficial].
++*   **When Not to Use:** When 3D consistency is not required, or when computational resources are insufficient for GAN training (vs. supervised NeRF) [S3, unofficial].
+ 
+ ## Background
+-Originating from the adaptation of StyleGAN2 [22] to 3D radiance fields, this configuration was introduced in works such as StyleNeRF [S3, unofficial] and VoxGRAF [S1]. It addresses the challenge of applying 2D generative priors to 3D view synthesis. Key developments include the removal of 2D noise for consistency [S3, unofficial] and the use of lazy R1 regularization for efficiency [S1][S2]. It is used in state-of-the-art 3D-aware image synthesis and view synthesis tasks.
++Originating from the adaptation of StyleGAN2 [22] to 3D radiance fields, this configuration was introduced in works such as StyleNeRF [S3, unofficial] and VoxGRAF [S1]. Key developments include the removal of 2D noise for consistency [S3, unofficial] and the use of lazy R1 regularization for efficiency [S1][S2]. It is used in state-of-the-art 3D-aware image synthesis and view synthesis tasks [S3, unofficial].
+ 
+ ## Sources

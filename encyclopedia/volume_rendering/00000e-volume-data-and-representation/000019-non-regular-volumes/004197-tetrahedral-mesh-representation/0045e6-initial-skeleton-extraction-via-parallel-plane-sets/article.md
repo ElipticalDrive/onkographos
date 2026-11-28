@@ -1,0 +1,217 @@
+# Initial Skeleton Extraction via Parallel-Plane Sets
+
+Also called: Grid Representation as a Union of Parallel-plane Sets, Vertex and Edge Extraction
+
+## Overview
+This method extracts the initial geometric skeleton (vertices and edges) of a multi-resolution tetrahedral grid by exploiting its inherent regularity [S1]. It represents the grid as a union of parallel-plane sets, where planes sharing the same normal are grouped by their offsets [S1]. This approach efficiently identifies the topological structure of the grid without relying on local neighborhood searches [S1]. It sets itself apart from sibling methods like [Adaptive Subdivision in DiffTetVR](807-adaptive-subdivision-in-difftetvr.md) and [DEFTET](6415-deftet.md) by using global linear algebra operations (Kronecker products and matrix inversions) to generate candidate vertices and edges in parallel via tensor broadcasting [S1].
+
+## How it works
+
+### Inputs and Outputs
+**Inputs:**
+*   $\mathcal{N}$: The set of unique plane normals $\{\mathbf{n}_0, \dots, \mathbf{n}_i, \dots\}$ derived from the tetrahedral subdivision slopes [S1].
+*   $\mathbf{d}^{(i)}$: For each normal $\mathbf{n}_i$, a vector of offsets $[d_0^{(i)}, d_1^{(i)}, \dots]^\top$ across all resolution levels [S1].
+*   $\mathcal{S}$: The bounded domain (bounding box) of the volume [S1].
+
+**Outputs:**
+*   $\mathcal{V}$: The set of extracted vertices [S1].
+*   $\mathcal{E}$: The set of extracted edges [S1].
+
+### Data Structures
+*   **Normals ($\mathcal{N}$):** A list of 3D vectors representing unique plane orientations [S1].
+*   **Offsets ($\mathbf{d}^{(i)}$):** A list of 1D arrays of floating-point numbers, where each vector's length corresponds to the number of planes sharing that normal across resolution levels [S1].
+*   **Candidate Vertices ($\mathbf{X}^{(ijk)}$):** A $3 \times N$ matrix where $N = |\mathbf{d}^{(i)}| \cdot |\mathbf{d}^{(j)}| \cdot |\mathbf{d}^{(k)}|$; each column represents a candidate vertex intersection [S1].
+*   **Vertices ($\mathcal{V}$):** A list of 3D points within the bounded domain [S1].
+*   **Edges ($\mathcal{E}$):** A list of pairs of vertex coordinates [S1].
+
+### Steps
+
+1.  **Identify Unique Normals and Offsets:**
+    Analyze the multi-resolution tetrahedral grid to identify all unique plane normals $\mathcal{N}$ [S1]. For each normal $\mathbf{n}_i$, collect all associated offsets from all resolution levels into the vector $\mathbf{d}^{(i)}$ [S1].
+
+2.  **Generate Normal Triplets:**
+    Generate all triplets of linearly independent normals $\mathcal{T}^{(ijk)}$ from $\mathcal{N}$ [S1]. A triplet $\{\mathbf{n}_i, \mathbf{n}_j, \mathbf{n}_k\}$ is valid if:
+    $$ \det[\mathbf{n}_i \ \mathbf{n}_j \ \mathbf{n}_k] \neq 0 $$ [S1]
+
+3.  **Construct Matrices for Triplets:**
+    For each valid triplet $\{\mathbf{n}_i, \mathbf{n}_j, \mathbf{n}_k\}$:
+    *   Construct the normal matrix $\mathbf{N}^{(ijk)} \in \mathbb{R}^{3 \times 3}$:
+        $$ \mathbf{N}^{(ijk)} = [\mathbf{n}_i \ \mathbf{n}_j \ \mathbf{n}_k] $$ [S1]
+    *   Construct the offset matrix $\mathbf{D}^{(ijk)} \in \mathbb{R}^{3 \times (|\mathbf{d}^{(i)}||\mathbf{d}^{(j)}||\mathbf{d}^{(k)}|)}$ using Kronecker products ($\otimes$) and vectors of ones ($\mathbf{1}$):
+        $$ \mathbf{D}^{(ijk)} = \begin{bmatrix} (\mathbf{d}^{(i)} \otimes \mathbf{1}_{|\mathbf{d}^{(j)}|} \otimes \mathbf{1}_{|\mathbf{d}^{(k)}|})^\top \\ (\mathbf{1}_{|\mathbf{d}^{(i)}|} \otimes \mathbf{d}^{(j)} \otimes \mathbf{1}_{|\mathbf{d}^{(k)}|})^\top \\ (\mathbf{1}_{|\mathbf{d}^{(i)}|} \otimes \mathbf{1}_{|\mathbf{d}^{(j)}|} \otimes \mathbf{d}^{(k)})^\top \end{bmatrix} $$ [S1]
+        Here, $\mathbf{1}_k$ is a column vector of ones of length $k$ [S1]. The Kronecker product collapses into a vector in this context [S1].
+
+4.  **Compute Candidate Vertices:**
+    Solve for the candidate vertices $\mathbf{X}^{(ijk)}$ for the triplet [S1]. The columns of $\mathbf{X}^{(ijk)}$ are the solutions to the linear system defined by the intersection of the three planes:
+    $$ \mathbf{X}^{(ijk)} = \mathbf{N}^{(ijk)-\top} \mathbf{D}^{(ijk)} $$ [S1]
+    Note: $\mathbf{N}^{(ijk)-\top}$ denotes the inverse transpose of $\mathbf{N}^{(ijk)}$ [S1].
+
+5.  **Filter Vertices:**
+    Collect all candidate vertices from all triplets into $\mathcal{X}_{\text{all}}$ [S1]. Filter this set to keep only vertices within the bounded domain $\mathcal{S}$:
+    $$ \mathcal{V} := \mathcal{X}_{\text{all}} \cap \mathcal{S} $$ [S1]
+
+6.  **Generate Normal Pairs:**
+    Generate all pairs of non-parallel normals $\mathcal{P}$ from $\mathcal{N}$:
+    $$ \mathcal{P} = \{\{\mathbf{n}_i, \mathbf{n}_j\} \mid \mathbf{n}_i \times \mathbf{n}_j \neq \mathbf{0}\} $$ [S1]
+
+7.  **Compute Intersection Directions:**
+    For each pair $\{\mathbf{n}_i, \mathbf{n}_j\} \in \mathcal{P}$, compute the unit direction vector $\mathbf{u}_{ij}$ of the line of intersection:
+    $$ \mathbf{u}_{ij} = \frac{\mathbf{n}_i \times \mathbf{n}_j}{\|\mathbf{n}_i \times \mathbf{n}_j\|} $$ [S1]
+
+8.  **Find Intersecting Vertices:**
+    For each pair of normals $\{\mathbf{n}_i, \mathbf{n}_j\}$ and each pair of offsets $(d_n^{(i)}, d_m^{(j)})$, find the subset of vertices $\mathcal{V}_{nm}^{(ij)} \subseteq \mathcal{V}$ that lie on both planes:
+    $$ \mathcal{V}_{nm}^{(ij)} := \{\mathbf{v} \in \mathcal{V} \mid \mathbf{n}_i^\top \mathbf{v} = d_n^{(i)} \text{ and } \mathbf{n}_j^\top \mathbf{v} = d_m^{(j)}\} $$ [S1]
+
+9.  **Sort Vertices:**
+    Sort the vertices in $\mathcal{V}_{nm}^{(ij)}$ by their scalar projection onto the direction vector $\mathbf{u}_{ij}$:
+    $$ t_{mn}^{(ij)}(\mathbf{v}) = \mathbf{u}_{ij}^\top \mathbf{v} $$ [S1]
+    Let the sorted sequence be $\tilde{\mathcal{V}}_{mn}^{(ij)} = [\mathbf{v}_0, \dots, \mathbf{v}_\ell, \dots]$ [S1].
+
+10. **Form Edges:**
+    Connect consecutive vertices in the sorted list to form non-overlapping edges:
+    $$ \mathcal{E}_{mn}^{(ij)} := \{\{\mathbf{v}_\ell, \mathbf{v}_{\ell+1}\} \mid 0 \leq \ell < |\tilde{\mathcal{V}}_{mn}^{(ij)}| - 1\} $$ [S1]
+
+11. **Union Edges:**
+    The final edge set $\mathcal{E}$ is the union of all local edge sets $\mathcal{E}_{mn}^{(ij)}$ over all normal pairs and offset pairs [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def extract_skeleton(normals, offsets, domain_min, domain_max):
+    """
+    Extracts vertices and edges from a multi-resolution tetrahedral grid
+    represented as a union of parallel-plane sets.
+    
+    Args:
+        normals: List of unique normal vectors (3D).
+        offsets: Dict mapping normal index to array of offsets.
+        domain_min: 3D array, minimum corner of bounding box.
+        domain_max: 3D array, maximum corner of bounding box.
+        
+    Returns:
+        vertices: List of 3D points.
+        edges: List of pairs of vertex coordinates.
+    """
+    candidate_vertices = []
+    n_normals = len(normals)
+    
+    # Steps 2-4: Generate Triplets, Construct Matrices, Compute Candidates
+    for i in range(n_normals):
+        for j in range(i + 1, n_normals):
+            for k in range(j + 1, n_normals):
+                ni, nj, nk = normals[i], normals[j], normals[k]
+                
+                # Step 2: Check linear independence
+                if np.isclose(np.linalg.det(np.column_stack((ni, nj, nk))), 0):
+                    continue
+                
+                # Step 3: Construct Normal Matrix
+                N_ijk = np.column_stack((ni, nj, nk))
+                
+                # Step 3: Construct Offset Matrix using Kronecker products
+                di, dj, dk = offsets[i], offsets[j], offsets[k]
+                ones_di, ones_dj, ones_dk = np.ones(len(di)), np.ones(len(dj)), np.ones(len(dk))
+                
+                D_ijk = np.vstack([
+                    np.kron(di, np.kron(ones_dj, ones_dk)),
+                    np.kron(ones_di, np.kron(dj, ones_dk)),
+                    np.kron(ones_di, np.kron(ones_dj, dk))
+                ])
+                
+                # Step 4: Compute Candidate Vertices
+                try:
+                    N_inv_T = np.linalg.inv(N_ijk.T)
+                except np.linalg.LinAlgError:
+                    continue
+                    
+                X_ijk = N_inv_T @ D_ijk
+                candidate_vertices.append(X_ijk.T)
+    
+    # Step 5: Filter Vertices within domain S
+    all_candidates = np.vstack(candidate_vertices) if candidate_vertices else np.empty((0, 3))
+    mask = (np.all(all_candidates >= domain_min, axis=1)) & (np.all(all_candidates <= domain_max, axis=1))
+    vertices = all_candidates[mask]
+    
+    edges = []
+    # Steps 6-11: Generate Pairs, Find Intersections, Sort, Form Edges
+    for i in range(n_normals):
+        for j in range(i + 1, n_normals):
+            ni, nj = normals[i], normals[j]
+            
+            # Step 6: Check non-parallel
+            cross = np.cross(ni, nj)
+            cross_norm = np.linalg.norm(cross)
+            if cross_norm < 1e-9:
+                continue
+                
+            # Step 7: Compute Intersection Directions
+            u_ij = cross / cross_norm
+            
+            di, dj = offsets[i], offsets[j]
+            
+            for d_n in di:
+                for d_m in dj:
+                    # Step 8: Find Intersecting Vertices
+                    # Tolerance for floating-point equality [G]
+                    tol = 1e-6
+                    mask_pair = (np.abs(vertices @ ni - d_n) < tol) & (np.abs(vertices @ nj - d_m) < tol)
+                    subset = vertices[mask_pair]
+                    
+                    if len(subset) < 2:
+                        continue
+                        
+                    # Step 9: Sort Vertices
+                    projections = subset @ u_ij
+                    sorted_subset = subset[np.argsort(projections)]
+                    
+                    # Step 10: Form Edges
+                    for l in range(len(sorted_subset) - 1):
+                        edges.append((tuple(sorted_subset[l]), tuple(sorted_subset[l+1])))
+                        
+    return vertices, edges
+```
+
+### Parameters and Edge Cases
+*   **Tolerance:** Floating-point comparisons for plane intersections (Step 8) require a tolerance (e.g., $10^{-6}$) due to numerical precision [G].
+*   **Degenerate Input:** If the determinant of the normal matrix is zero (Step 2), the triplet is skipped [S1]. If normals are parallel (Step 6), the pair is skipped [S1].
+*   **Domain Boundaries:** Vertices outside the bounded domain $\mathcal{S}$ are discarded [S1].
+
+## Operating characteristics
+
+### Time and Memory Complexity
+*   **Vertex Extraction:** The complexity is dominated by the number of normal triplets and the size of the offset vectors [S1]. For $N_n$ normals and average offset vector length $L$, the number of candidate vertices per triplet is $L^3$ [S1]. With $O(N_n^3)$ triplets, the total candidate count is $O(N_n^3 L^3)$ [S1]. The computation is highly parallelizable via tensor broadcasting [S1].
+*   **Edge Extraction:** The complexity depends on the number of normal pairs $O(N_n^2)$ and the number of offset pairs $O(L^2)$ [S1]. For each pair, vertices are filtered and sorted [S1].
+*   **Memory:** Peak GPU memory scales with the size of the offset vectors and the number of candidates [S1]. For the Stanford dataset, peak GPU memory ranges from 0.99 GB to 4.56 GB [S1].
+
+### Measured Performance
+*   **Stanford Dataset:**
+    *   **Small (4x4x4):** Initial extraction 0.24s, Total 1.83s [S1].
+    *   **Medium (4x4x4):** Initial extraction 0.33s, Total 1.53s [S1].
+    *   **Large (3x5x5):** Initial extraction 1.99s, Total 8.01s [S1].
+*   **Comparison with Analytic Marching (AM):**
+    *   AM-H10/W90 (74K params): CD 5475, Time 4.21s [S1].
+    *   AM-H20/W200 (765K params): CD 5062, Time 5.10s [S1].
+    *   Ours-Medium is faster and more accurate than AM-H20/W200 [S1].
+*   **Comparison with Adaptive Sampling (CGAL):**
+    *   CGAL MC at $512^3$: 0.94s [S1].
+    *   CGAL DC at $512^3$: 5.87s [S1].
+
+### Strengths and Limitations
+*   **Strengths:** Efficient extraction of large vertex and edge sets [S1]. Computation can be parallelized over triplets and pairs [S1]. The initial skeleton can be cached and reused if encoder settings are fixed [S1].
+*   **Limitations:** The method generates a large number of candidate vertices, some of which are filtered out [S1]. The complexity grows cubically with the number of unique normals [S1].
+
+## Background
+
+### Origin and History
+This method is described in the paper "TetraSDF: Analytic Isosurface Extraction with Multi-resolution Tetrahedral Grid" [S1]. It exploits the inherent regularity of multi-resolution tetrahedral grids, where the slopes of tetrahedral subdivision are constant across levels, resulting in a shared set of normals with varying offsets [S1]. This representation allows for compact storage and efficient extraction of the grid's topology [S1].
+
+### Usage
+The method is used to extract the initial skeleton (encoder-induced polyhedral complex) for volume rendering and isosurface extraction in the context of TetraSDF [S1]. It serves as a preprocessing step for rendering, enabling efficient downstream operations [S1].
+
+## Sources
+
+[S1] TetraSDF: Analytic Isosurface Extraction with Multi-resolution Tetrahedral Grid, https://arxiv.org/abs/2511.16273v4, fetched 2026-10-26

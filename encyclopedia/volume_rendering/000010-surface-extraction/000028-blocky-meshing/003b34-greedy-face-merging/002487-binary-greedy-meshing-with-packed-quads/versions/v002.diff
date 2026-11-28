@@ -1,0 +1,344 @@
+--- v001.md
++++ v002.md
+@@ -4,96 +4,103 @@
+ 
+ ## Overview
+-Binary Greedy Meshing (BGM) generates maximal axis-aligned quads from a binary voxel slice by greedily expanding horizontally from the first solid block found in each vertical run, using bitwise operations to minimize clock cycles [S1, S2, S3, unofficial]. It treats the Signed Distance Field (SDF) or voxel grid as solid/empty, culls hidden faces, and merges co-planar visible faces into maximal rectangles drawn via instanced rendering from an 8-byte packed record [S3, unofficial]. Unlike [Marching Cubes](52-marching-cubes.md) which produces smooth isosurfaces, BGM preserves the blocky aesthetic while reducing triangle count by 1.88–2.60× and geometry size by 39.5–54.5× compared to Marching Cubes on typical terrain [S3, unofficial]. It builds on [Greedy Meshing](1776-greedy-meshing.md) by replacing per-voxel iteration with row-wise bitwise logic [S1, S2, unofficial].
++Binary Greedy Meshing (BGM) is a surface extraction algorithm that generates maximal axis-aligned quads from a binary voxel volume (solid/empty) by treating voxel slices as bitmasks and greedily expanding rectangles using bitwise operations [S1, unofficial][S2, unofficial][S3, unofficial]. It solves the problem of excessive triangle counts in blocky voxel terrain by merging adjacent visible faces into the largest possible quads, reducing geometry by 1.88×–2.60× in triangle count and up to 54.5× in memory compared to Marching Cubes, while maintaining a blocky aesthetic [S3, unofficial]. Unlike [Greedy Meshing](1776-greedy-meshing.md), which typically processes individual faces or runs sequentially, BGM operates on packed binary planes (1 bit per voxel), allowing the entire greedy expansion to be performed with CPU-native bitwise instructions (trailing zeros, shifts, masks) rather than branching logic, significantly reducing clock cycles [S2, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-- **Input:** A voxel chunk of size $N \times N \times N$ (typically $N=16$ or $32$), a face direction (Up, Down, Left, Right, Forward, Back), and optionally an Ambient Occlusion (AO) grid and block type map.
+-- **Output:** A list of quads, each defined by position $(x, y, z)$, dimensions $(w, h)$, face direction, and attributes (AO, block type).
+-
+-**Data Structures:**
+-1.  **Axis Columns (`axisCols`):** A buffer storing voxel presence for three axes. For a chunk size $N$ and padding $P = N+2$, the size is $P^2 \times 4 \times 3$ bytes. It contains three $P \times P$ grids of 32-bit integers, where each bit represents a voxel [S2, unofficial].
+-2.  **Face Masks (`colFaceMasks`):** A buffer of size $P^2 \times 4 \times 3 \times 2$ bytes. For each axis, it stores two masks per row: one for outward-facing faces (e.g., UP/RIGHT/BACK) and one for inward-facing (e.g., DOWN/LEFT/FORWARD) [S2, unofficial].
+-3.  **Binary Plane (`data`):** A 1D array of 32-bit integers (or 16-bit for $N=16$) representing a single slice of face locations. Each bit set to 1 indicates a visible face at that position [S1, S2, unofficial].
+-4.  **VoxelQuadEncoding:** An 8-byte (64-bit) packed record for instancing.
+-    -   **Geometry Word (32 bits):** $x$ (5 bits), $y$ (5 bits), $z$ (5 bits), $w-1$ (5 bits), $h-1$ (5 bits), face direction (3 bits), reserved (4 bits). Extents are stored biased-by-one to support $32^3$ chunks [S3, unofficial].
+-    -   **Material Word (32 bits):** 8 bits used for material index, padded to 32 bits [S3, unofficial].
+-
+-**Algorithm Steps:**
+-
+-1.  **Build Voxel Grid:**
+-    Iterate over the chunk volume. For each solid voxel at $(x, y, z)$, set the corresponding bit in `axisCols` for the XZ, ZY, and XY axes. The index calculation depends on the axis [S2, unofficial]:
+-    -   XZ Axis: `index = (x + (z * P)) * 4`
+-    -   ZY Axis: `index = (z + (y * P) + P^2) * 4`
+-    -   XY Axis: `index = (x + (y * P) + P^2 * 2) * 4`
+-    Set bit $y$ (for XZ), $x$ (for ZY), or $z$ (for XY) to true [S2, unofficial].
+-
+-2.  **Cull Faces:**
+-    For each axis (0 to 2) and each row $i$ in the $P \times P$ grid:
+-    -   Read the column `col` from `axisCols`.
+-    -   Compute outward mask: `outward = col & !(col << 1)` (for ascending axis) or `col & !(col >> 1)` (for descending axis).
+-    -   Compute inward mask: `inward = col & !(col >> 1)` (for ascending) or `col & !(col << 1)` (for descending).
+-    -   Write to `colFaceMasks` at indices corresponding to the face direction [S1, S2, unofficial].
+-
+-3.  **Generate Axis Planes:**
+-    For each of the 6 face directions (axes 0-5):
+-    -   Iterate over the plane coordinates (e.g., $z, x$ for Y-axis faces).
+-    -   Read the face mask column from `colFaceMasks`.
+-    -   Shift right by 1 and mask out the top bit (bit $N$) to remove edge cases from neighboring chunks [S2, unofficial].
+-    -   Store the resulting binary plane in a hash table `data[axis][blockType][y]`, where the key combines the block type and AO pattern [S1, S2, unofficial]. The AO pattern is a 9-bit integer derived from the 3x3 neighborhood of the voxel [S1, unofficial].
+-
+-4.  **Greedy Mesh Each Plane:**
+-    For each binary plane buffer `data`:
+-    -   Initialize `row` from 0 to $N-1$.
+-    -   Initialize `y = 0`.
+-    -   **Skip Air:** Calculate `airHeight = trailing_zeros(data[row] >> y)`. Update `y += airHeight`. If `y >= N`, break.
+-    -   **Calculate Height:** Calculate `h = trailing_ones(data[row] >> y)`.
+-    -   **Create Mask:** `h_as_mask = (1 << h) - 1`. If $h=32$, use `!0`. `mask = h_as_mask << y`.
+-    -   **Expand Width:** Initialize `w = 1`. While `row + w < N`:
+-        -   Read `nextRow = data[row + w]`.
+-        -   Check if the bits in `nextRow` at positions $y$ to $y+h-1$ match `h_as_mask`. Specifically: `(nextRow >> y) & h_as_mask == h_as_mask`.
+-        -   If match:
+-            -   Remove used bits from `nextRow` to prevent reuse: `data[row + w] &= ~mask`.
+-            -   Increment `w`.
+-        -   Else: Break.
+-    -   **Emit Quad:** Create a quad with position $(row, y, \text{depth})$, width $w$, height $h$.
+-    -   Update `y += h`.
+-
+-**Pseudocode:**
++The algorithm processes a voxel chunk by first generating face masks for all six directions, then grouping voxels by block type and ambient occlusion (AO) pattern into binary planes, and finally applying a bitwise greedy merge to each plane to emit quads.
++
++### Inputs and Outputs
++- **Input**: A voxel chunk of size $N \times N \times N$ (typically $N=16$ or $N=32$) with block types and a Signed Distance Field (SDF) or height field determining solidity.
++- **Output**: A list of quads, each defined by position $(x, y, z)$, dimensions $(w, h)$, face direction, block type, and AO value. These are typically encoded into a packed 8-byte record for instanced rendering [S3, unofficial].
++
++### Data Structures
++
++**1. Axis Columns Buffer (`axisCols`)**
++Stores the voxel presence for the chunk.
++- **Size**: $N_P^2 \times 4 \times 3$ bytes, where $N_P = N + 2$ (padding for neighbors) [S2, unofficial].
++- **Layout**: Three $N_P \times N_P$ grids (one per axis: X, Y, Z). Each grid stores voxel presence as 1 bit per block position, packed into 32-bit integers [S2, unofficial].
++- **Indexing**: For axis $A \in \{0, 1, 2\}$, row $r$, column $c$:
++  $$ \text{index} = ((r \cdot N_P) + c) \cdot 4 + (A \cdot N_P^2 \cdot 4) $$
++  The bit at position $b$ within the 32-bit word is set using bitwise operations [S2, unofficial].
++
++**2. Face Masks Buffer (`colFaceMasks`)**
++Stores the exposed faces for culling.
++- **Size**: $N_P^2 \times 4 \times 3 \times 2$ bytes [S2, unofficial].
++- **Layout**: For each axis, two masks per row: one for "outward" faces (Up/Right/Back) and one for "inward" faces (Down/Left/Forward) [S2, unofficial].
++- **Computation**: Derived from `axisCols` by detecting transitions from air to solid or solid to air along the axis direction [S1, unofficial].
++
++**3. Binary Plane Hash Map (`x_data`)**
++Groups binary planes by block type and AO pattern.
++- **Key**: A 32-bit integer combining a 9-bit AO index and block type bits [S1, unofficial].
++  $$ \text{key} = \text{ao\_index} \mid (\text{block\_type} \ll 9) $$
++- **Value**: An array of 32 32-bit integers, where each integer represents a column of voxel solid statuses for a specific Y-slice [S1, unofficial].
++
++**4. Packed Quad Record (`VoxelQuadEncoding`)**
++- **Size**: 8 bytes (64 bits) [S3, unofficial].
++- **Layout**:
++  - Geometry Word (32 bits): $x$ (5 bits), $y$ (5 bits), $z$ (5 bits), $w-1$ (5 bits), $h-1$ (5 bits), face direction (3 bits), reserved (4 bits). Extents are stored biased-by-one (i.e., $w-1$) to support full 32³ chunks [S3, unofficial].
++  - Material Word (32 bits): Block type (8 bits used) and other material properties [S3, unofficial].
++
++### Steps
++
++1. **Build Voxel Grid**:
++   Iterate over the chunk volume. For each solid voxel at $(x, y, z)$, set the corresponding bit in `axisCols` for the X, Y, and Z axes [S2, unofficial]. The grid includes padding ($N_P = N+2$) to handle neighbor chunks [S3, unofficial].
++
++2. **Cull Faces**:
++   For each axis and each row in the axis columns, compute the face masks:
++   - **Outward Mask** (e.g., Up): $M_{out} = C \ \& \ \sim(C \ll 1)$
++   - **Inward Mask** (e.g., Down): $M_{in} = C \ \& \ \sim(C \gg 1)$
++   Where $C$ is the 32-bit column value. This identifies the first solid voxel in each vertical run [S1, unofficial][S2, unofficial].
++
++3. **Generate Axis Planes**:
++   For each of the 6 face directions, iterate over the face masks. For each set bit (face), determine its 2D position $(u, v)$ on the plane.
++   - Compute the 3x3 Ambient Occlusion (AO) neighborhood index for the voxel. This involves sampling the 9 surrounding voxels in the plane and packing their solidity into a 9-bit integer [S1, unofficial].
++   - Create a key from the AO index and block type.
++   - Set the corresponding bit in the binary plane for that key and Y-slice [S1, unofficial].
++
++4. **Greedy Mesh Each Plane**:
++   For each binary plane (defined by key and Y-slice), apply the greedy meshing loop:
++   - Iterate over each row $r$ of the plane.
++   - Skip leading air (zero bits) using `trailing_zeros`.
++   - Find the height $h$ of the current solid run using `trailing_ones` on the inverted bits [S2, unofficial].
++   - Create a mask for the height: $M_h = (1 \ll h) - 1$.
++   - Expand horizontally ($w$) by checking if subsequent rows match the current height mask.
++   - Remove the used bits from subsequent rows to prevent reuse [S2, unofficial].
++   - Emit a quad with position, width, height, and attributes [S2, unofficial].
++
++5. **Emit Quads**:
++   Convert the generated quads into the packed 8-byte format and append to the output list [S3, unofficial].
++
++### Pseudocode
+ 
+ ```python
+ def greedy_mesh_binary_plane(data: list[int], lod_size: int) -> list[dict]:
+     """
+-    Greedy mesh a single binary plane represented as a list of 32-bit integers.
+-    data: List of integers where each integer represents a row of bits.
+-    lod_size: The dimension of the chunk (e.g., 16 or 32).
+-    Returns: List of dicts with keys 'x', 'y', 'w', 'h'.
+-    """
+-    greedy_quads = []
++    Greedy mesh a single binary plane represented as a list of 32-bit integers (columns).
++    data: List of 32-bit integers, where each integer represents a column of voxels.
++    lod_size: The width of the plane (number of columns).
++    Returns: List of quads {x, y, w, h}.
++    """
++    quads = []
++    num_rows = len(data)
+     
+-    for row in range(lod_size):
++    for row in range(num_rows):
+         y = 0
+         while y < lod_size:
+-            # Skip leading air (zero bits)
+-            # Note: In Python, (data[row] >> y).bit_count() is not trailing_zeros.
+-            # We simulate trailing_zeros by checking bits.
+-            shift_val = data[row] >> y
+-            air_height = 0
+-            while air_height < (lod_size - y) and (shift_val & 1) == 0:
+-                air_height += 1
+-                shift_val >>= 1
+-            
++            # Skip leading air (zeros)
++            # Note: data[row] is a 32-bit int. We shift right by y to align the current bit to position 0.
++            shifted_row = data[row] >> y
++            air_height = trailing_zeros(shifted_row)
+             y += air_height
++            
+             if y >= lod_size:
+                 break
+             
+-            # Calculate height of solid run
+-            # Count trailing ones in the shifted value
+-            h = 0
+-            temp_val = data[row] >> y
+-            while h < (lod_size - y) and (temp_val & 1) == 1:
+-                h += 1
+-                temp_val >>= 1
+-            
+-            # Create mask for height h
++            # Find height of solid run
++            # Invert bits to find trailing zeros of air, which corresponds to trailing ones of solid
++            inverted_row = ~shifted_row
++            h = trailing_zeros(inverted_row)
++            
++            # Create mask for height h: 0b11...1 (h times)
++            # Handle overflow if h=32
+             if h == 32:
+                 h_as_mask = 0xFFFFFFFF
+@@ -101,22 +108,25 @@
+                 h_as_mask = (1 << h) - 1
+             
+-            # Align mask to current y position
++            # Shift mask to align with current y
+             mask = h_as_mask << y
+             
+             # Expand horizontally
+             w = 1
+-            while row + w < lod_size:
+-                next_row_val = data[row + w]
+-                # Check if the bits in next_row at positions y..y+h-1 are all 1
+-                next_row_slice = (next_row_val >> y) & h_as_mask
+-                if next_row_slice == h_as_mask:
+-                    # Remove used bits to prevent reuse in future quads
+-                    data[row + w] &= ~mask
+-                    w += 1
+-                else:
++            while row + w < num_rows:
++                next_row = data[row + w]
++                # Check if the next row has the same solid bits in the current run
++                # We shift next_row by y and mask with h_as_mask to compare only the relevant bits
++                next_row_check = (next_row >> y) & h_as_mask
++                
++                if next_row_check != h_as_mask:
+                     break
++                
++                # Remove the used bits from the next row to prevent reuse in future iterations
++                # This ensures each voxel is part of only one quad
++                data[row + w] &= ~mask
++                w += 1
+             
+             # Emit quad
+-            greedy_quads.append({
++            quads.append({
+                 'x': row,
+                 'y': y,
+@@ -125,74 +135,68 @@
+             })
+             
++            # Move y past the current run
+             y += h
+             
+-    return greedy_quads
+-
+-def build_face_masks(axis_cols: list[int], chunk_size_p: int) -> list[list[int]]:
++    return quads
++
++def build_face_masks(axis_cols: list[int], size_p: int) -> list[int]:
+     """
+     Build face masks from axis columns.
+-    axis_cols: List of 3 * chunk_size_p^2 integers.
+-    Returns: List of 6 * chunk_size_p^2 integers (2 masks per row per axis).
+-    """
+-    col_face_masks = [0] * (6 * chunk_size_p * chunk_size_p)
+-    
++    axis_cols: List of 32-bit integers representing voxel presence.
++    size_p: Padded size of the grid.
++    Returns: List of face masks (outward and inward for each axis).
++    """
++    face_masks = []
+     for axis in range(3):
+-        for i in range(chunk_size_p * chunk_size_p):
+-            # Index calculation for axis_cols
+-            # axis 0: XZ, axis 1: ZY, axis 2: XY
+-            # Each axis has chunk_size_p^2 rows
+-            col = axis_cols[axis * chunk_size_p * chunk_size_p + i]
+-            
+-            # Compute outward and inward masks
+-            # Outward: bit is 1 if current is 1 and next is 0
+-            # Inward: bit is 1 if current is 1 and prev is 0
+-            # Assuming ascending order for outward/downward logic
+-            
+-            # For simplicity, assuming standard bit ordering
++        for i in range(size_p * size_p):
++            col = axis_cols[i]
++            # Outward mask: solid where air meets solid (ascending)
+             outward = col & ~(col << 1)
++            # Inward mask: solid where solid meets air (descending)
+             inward = col & ~(col >> 1)
+-            
+-            # Store in col_face_masks
+-            # 2 masks per row: index 2*axis + 0 for outward, 2*axis + 1 for inward
+-            col_face_masks[2 * axis * chunk_size_p * chunk_size_p + i] = outward
+-            col_face_masks[(2 * axis + 1) * chunk_size_p * chunk_size_p + i] = inward
+-            
+-    return col_face_masks
++            face_masks.append(outward)
++            face_masks.append(inward)
++    return face_masks
+ ```
+ 
+-**Parameters:**
+--   `CHUNK_SIZE`: 16 or 32 [S2, S3, unofficial].
+--   `CHUNK_SIZE_P`: `CHUNK_SIZE + 2` (18 or 34) for padding [S2, S3, unofficial].
+--   `BLOCK_TYPES`: Number of distinct block types (e.g., 3) [S2, unofficial].
+-
+-**Edge Cases and Pitfalls:**
+--   **Padding:** Uniform padding on all three axes is required to handle chunk boundaries correctly. Special-casing Y-axis padding against neighbor chunks can lead to bugs [S3, unofficial].
+--   **Extents:** Width and height in the packed quad encoding must be stored biased-by-one (i.e., store $w-1$) to support full $32^3$ chunks, as 5 bits can only represent 0-31 [S3, unofficial].
+--   **AO Index Collisions:** The AO index uses 9 bits. If block types or AO patterns exceed bit limits, collisions may occur [S1, unofficial].
+--   **Shader Mismatch:** The C++ `VoxelQuad.h` and GLSL `VoxelQuadUnpack.glsl` must match exactly. A mismatch causes silent transposition or offset errors [S3, unofficial].
+--   **Face Basis:** The `kWidthIsInnerExtent` table varies by face direction. Incorrect mapping transposes quads (e.g., 1x8 becomes 8x1) [S3, unofficial].
++### Parameters
++- **CHUNK_SIZE**: The dimension of the voxel chunk. Common values are 16 [S2, unofficial] or 32 [S3, unofficial].
++- **CHUNK_SIZE_P**: Padded dimension, $CHUNK\_SIZE + 2$ (e.g., 18 for 16x16) [S2, unofficial].
++- **BLOCK_TYPES**: Number of distinct block types. Typically small (e.g., 3) [S2, unofficial].
++
++### Edge Cases and Pitfalls
++- **Padding**: The voxel grid must be padded by 1 on all sides (size+2) to correctly sample the 3x3 AO neighborhood for edge voxels [S1, unofficial]. Uniform padding on all three axes is required for identical code paths for all six directions [S3, unofficial].
++- **Extents**: Width and height in the packed quad record must be stored biased-by-one ($w-1, h-1$) to support full 32³ chunks. Using unbiased extents causes the 2-byte encoding to fail for large quads [S3, unofficial].
++- **AO Collisions**: The AO index uses 9 bits. If block types or AO patterns exceed bit limits, collisions may occur [S1, unofficial].
++- **Contract Mismatch**: The C++ voxel quad header and GLSL unpacking shader must match exactly. A mismatch causes silent transposition or offset errors [S3, unofficial].
++- **Face Basis**: The $kWidthIsInnerExtent$ table varies by face direction due to U/V ordering. Incorrect mapping transposes quads (1x8 becomes 8x1) but does not lose geometry [S3, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Streaming Binary Greedy Meshing](3777-streaming-binary-greedy-meshing.md)
+-Processes chunks x-slice by x-slice with rolling buffers to improve cache locality, emitting quads for all six directions as runs terminate. Choose when memory bandwidth or cache misses are a bottleneck.
+-
+-### [Binary Greedy Meshing with Ambient Occlusion](3778-binary-greedy-meshing-with-ambient-occlusion.md)
+-Extends BGM to include AO data in the quad attributes, requiring a 3x3 neighborhood sample for each voxel. Choose when lighting quality is critical and the performance cost of AO calculation is acceptable.
+-
+-### [Binary Greedy Meshing with Texture Atlases](3779-binary-greedy-meshing-with-texture-atlases.md)
+-Integrates texture atlas UVs into the packed quad record. Choose when texture filtering or atlas-based rendering is required.
++A performance-oriented variant that combines face visibility generation and greedy merging into a single streaming traversal, retaining only two rolling face data slices to improve cache locality.
++
++### [Voxel Mesh Generation (Run-based Greedy Meshing)](3127-voxel-mesh-generation-run-based-greedy-meshing.md)
++A traditional run-based approach that processes faces sequentially without bitwise packing.
++
++### [Chunked Voxel Mesh Generation with Face Culling and Quad Expansion](3133-chunked-voxel-mesh-generation-with-face-culling-and-quad-exp.md)
++A chunked approach with explicit face culling and quad expansion logic.
++
++### [Greedy Meshing for Voxel Faces](3367-greedy-meshing-for-voxel-faces.md)
++A general greedy meshing method for voxel faces.
++
++### [3D Greedy Meshing](3519-3d-greedy-meshing.md)
++A 3D greedy meshing variant that merges cubes instead of quads.
+ 
+ ## Operating characteristics
+--   **Time Complexity:** $O(N^2)$ per face direction, where $N$ is the chunk size. The bitwise operations make the constant factor very small.
+--   **Memory Complexity:** $O(N^2)$ for the face masks and binary planes. The packed quad output is $O(Q)$ where $Q$ is the number of quads.
+--   **Performance:** For a 16x16 chunk, BGM takes 0.116ms, a 2.49ms improvement over traditional greedy meshing (2.606ms) [S2, unofficial]. On rugged terrain, it produces 8,469 quads vs 31,869 tris for Marching Cubes, with 39.5x less geometry [S3, unofficial].
+--   **Strengths:** Extremely fast due to bitwise operations; low memory footprint; minimal draw calls via instancing.
+--   **Limitations:** Only works for binary (solid/empty) voxels; cannot handle smooth surfaces or partial voxels; requires careful handling of chunk boundaries and AO.
+--   **When to Use:** Blocky voxel games, terrain generation, and scenarios where performance and low triangle count are prioritized over smooth geometry.
+--   **When Not to Use:** Organic terrain requiring smooth isosurfaces (use Marching Cubes), or when partial voxel transparency is needed.
++- **Time Complexity**: $O(N^2)$ per face direction, where $N$ is the chunk size. The bitwise operations make the constant factor very small.
++- **Memory Complexity**: $O(N^2)$ for the face masks and binary planes. The packed quad output is $O(Q)$, where $Q$ is the number of quads.
++- **Performance**: For a 16x16 chunk, BGM takes approximately 0.116ms, a 2.49ms improvement over traditional part-based methods [S2, unofficial].
++- **Geometry Reduction**: Reduces triangle count by 1.88×–2.60× compared to Marching Cubes for rugged/terraced terrain, and reduces geometry bytes by 39.5×–54.5× [S3, unofficial].
++- **Strengths**: Extremely fast due to bitwise operations; low memory footprint; minimal draw calls via instancing.
++- **Limitations**: Only suitable for blocky, axis-aligned geometry; requires uniform padding; sensitive to AO and block type grouping.
+ 
+ ## Background
+-Binary Greedy Meshing was developed as an optimization for voxel rendering, leveraging bitwise operations to accelerate the greedy meshing process. It was popularized in the context of voxel engines like Roblox and custom game engines (e.g., OloEngine) to reduce the high triangle counts of naive voxel meshing. The method treats the voxel volume as a binary field, allowing for efficient face culling and quad merging. It is often compared to Marching Cubes, with which it can coexist in the same engine, selected based on the desired aesthetic (blocky vs. smooth) [S3, unofficial]. The technique has been refined to include packed quad encodings for efficient GPU instancing and streaming variants for better cache performance [S4, unofficial].
++Binary Greedy Meshing was developed as an optimization for voxel graphics, leveraging bitwise operations to accelerate the greedy meshing process. It was popularized in the context of Lua-based voxel engines (e.g., Roblox) and C++ voxel engines (e.g., OloEngine) [S1, unofficial][S2, unofficial][S3, unofficial]. The method treats the voxel volume as a binary field and uses bitwise tricks to find maximal rectangles, significantly outperforming traditional run-based greedy meshing in terms of clock cycles [S2, unofficial].
+ 
+ ## Sources

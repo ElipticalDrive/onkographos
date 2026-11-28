@@ -1,0 +1,126 @@
+# NTS Training Objective
+
+Also called: UV Volumes Training Loss
+
+## Overview
+The NTS Training Objective is a composite loss function designed to optimize UV volumes and neural texture stack parameters for real-time rendering of human performances. It solves the problem of training differentiable radiance fields by combining photometric, perceptual, semantic, UV-metric, and silhouette losses. Unlike methods that sample image patches during training, this objective renders entire images, leveraging a memory-saving framework that disentangles appearance and geometry [S1].
+
+## How it works
+The method optimizes the model parameters by minimizing a weighted sum of five distinct loss terms.
+
+**Inputs and Outputs**
+*   **Inputs:** Ground-truth image $\mathcal{I}$, ground-truth binary human mask $\mathcal{S}$, DensePose outputs (semantic probability $\mathcal{P}_k$, UV coordinates $\mathcal{U}_k, \mathcal{V}_k$ for $k=1 \dots N_k$), and rendered image $\hat{\mathcal{I}}$.
+*   **Outputs:** Scalar loss value $\mathcal{L}$ used for gradient descent.
+
+**Data Structures**
+*   **Rendered Image $\hat{\mathcal{I}}$:** Tensor of shape $H \times W \times 3$.
+*   **Ground-truth Image $\mathcal{I}$:** Tensor of shape $H \times W \times 3$.
+*   **Binary Mask $\mathcal{S}$:** Tensor of shape $H \times W$. $\mathcal{S}(\mathbf{r}) = 0$ for foreground (human), $\mathcal{S}(\mathbf{r}) = 1$ for background [S1].
+*   **DensePose Outputs:**
+    *   $\mathcal{P}_k$: Semantic probability for body part $k$.
+    *   $\mathcal{U}_k, \mathcal{V}_k$: UV coordinates for body part $k$.
+    *   $N_k$: Number of body parts.
+*   **Predicted UV Outputs:**
+    *   $\hat{\mathcal{P}}_k, \hat{\mathcal{U}}_k, \hat{\mathcal{V}}_k$: Predicted semantic probability and UV coordinates for body part $k$.
+
+**Parameters**
+*   $\lambda_{\text{vgg}}, \lambda_{\text{p}}, \lambda_{\text{uv}}, \lambda_s$: Weighting coefficients for perceptual, semantic, UV-metric, and silhouette losses respectively. [S1]
+*   $\psi(\cdot)$: Pretrained fixed VGG network used for feature extraction [S1].
+
+**Formulas**
+1.  **Photometric Loss ($\mathcal{L}_{\text{rgb}}$):**
+    $$ \mathcal{L}_{\text{rgb}} = \left\| \hat{\mathcal{I}} - \mathcal{I} \right\|_2^2 $$
+2.  **Perceptual Loss ($\mathcal{L}_{\text{vgg}}$):**
+    $$ \mathcal{L}_{\text{vgg}} = \left\| \psi(\hat{\mathcal{I}}) - \psi(\mathcal{I}) \right\|_1 $$
+3.  **Semantic Loss ($\mathcal{L}_p$):**
+    $$ \mathcal{L}_p = \sum_{k=1}^{N_k} \mathcal{P}_k \log(\hat{\mathcal{P}}_k) $$
+4.  **UV-Metric Loss ($\mathcal{L}_{\text{uv}}$):**
+    $$ \mathcal{L}_{\text{uv}} = \sum_{k=1}^{N_k} \mathcal{P}_k \left( \left\| \hat{\mathcal{U}}_k - \mathcal{U}_k \right\|_2^2 + \left\| \hat{\mathcal{V}}_k - \mathcal{V}_k \right\|_2^2 \right) $$
+5.  **Silhouette Loss ($\mathcal{L}_s$):**
+    First, compute accumulated transmittance $T(\mathbf{r})$ for ray $\mathbf{r}$:
+    $$ T(\mathbf{r}) = \exp \left( - \sum_{j=1}^{N_i-1} \sigma(\mathbf{x}_j) \delta_j \right) $$
+    where $\sigma(\mathbf{x}_j)$ is density and $\delta_j$ is step size [S1].
+    Then:
+    $$ \mathcal{L}_s = \sum_{\mathbf{r} \in \mathcal{R}} \left( \mathcal{S}(\mathbf{r})(1 - T(\mathbf{r})) + (1 - \mathcal{S}(\mathbf{r}))T(\mathbf{r}) \right) $$
+6.  **Total Loss ($\mathcal{L}$):**
+    $$ \mathcal{L} = \mathcal{L}_{\text{rgb}} + \lambda_{\text{vgg}} \mathcal{L}_{\text{vgg}} + \lambda_{\text{p}} \mathcal{L}_p + \lambda_{\text{uv}} \mathcal{L}_{\text{uv}} + \lambda_s \mathcal{L}_s $$
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def nts_training_objective(rendered_image, ground_truth_image, binary_mask, 
+                           densepose_semantics, densepose_uvs, predicted_semantics, 
+                           predicted_uvs, vgg_network, transmittance_map, 
+                           lambda_vgg, lambda_p, lambda_uv, lambda_s):
+    """
+    Compute the NTS Training Objective.
+    
+    Args:
+        rendered_image: Tensor (H, W, 3), predicted image.
+        ground_truth_image: Tensor (H, W, 3), ground truth image.
+        binary_mask: Tensor (H, W), 0 for foreground, 1 for background.
+        densepose_semantics: Tensor (H, W, N_k), semantic probabilities from DensePose.
+        densepose_uvs: Tuple of Tensors (H, W, N_k), (U, V) coordinates from DensePose.
+        predicted_semantics: Tensor (H, W, N_k), predicted semantic probabilities.
+        predicted_uvs: Tuple of Tensors (H, W, N_k), predicted (U, V) coordinates.
+        vgg_network: Pretrained fixed VGG network.
+        transmittance_map: Tensor (H, W), accumulated transmittance T(r).
+        lambda_vgg, lambda_p, lambda_uv, lambda_s: Float weights.
+        
+    Returns:
+        Total loss scalar.
+    """
+    # 1. Photometric Loss L_rgb
+    l_rgb = torch.sum((rendered_image - ground_truth_image) ** 2)
+    
+    # 2. Perceptual Loss L_vgg
+    # Extract features using pretrained VGG
+    features_pred = vgg_network(rendered_image)
+    features_gt = vgg_network(ground_truth_image)
+    # L1 norm between feature maps
+    l_vgg = torch.sum(torch.abs(features_pred - features_gt))
+    
+    # 3. Semantic Loss L_p
+    # Sum over body parts k=1 to N_k
+    # Note: Source uses log(hat_P_k). Implementation assumes standard cross-entropy-like form 
+    # or log-likelihood as defined.
+    # densepose_semantics is P_k, predicted_semantics is hat_P_k
+    l_p = torch.sum(densepose_semantics * torch.log(predicted_semantics + 1e-8))
+    
+    # 4. UV-Metric Loss L_uv
+    densepose_u, densepose_v = densepose_uvs
+    pred_u, pred_v = predicted_uvs
+    
+    # Weighted L2 loss between DensePose UVs and predicted UVs
+    # Sum over k, weighted by P_k
+    uv_diff = ((pred_u - densepose_u) ** 2 + (pred_v - densepose_v) ** 2)
+    l_uv = torch.sum(densepose_semantics * uv_diff)
+    
+    # 5. Silhouette Loss L_s
+    # T(r) is transmittance_map
+    # S(r) is binary_mask
+    # L_s = sum( S(r)*(1-T(r)) + (1-S(r))*T(r) )
+    l_s = torch.sum(binary_mask * (1 - transmittance_map) + (1 - binary_mask) * transmittance_map)
+    
+    # 6. Total Loss
+    total_loss = l_rgb + lambda_vgg * l_vgg + lambda_p * l_p + lambda_uv * l_uv + lambda_s * l_s
+    
+    return total_loss
+```
+
+**Edge Cases and Pitfalls**
+*   **Noisy DensePose Supervision:** DensePose outputs may contain incorrect semantic and UV labels. The method relies on the intrinsic multi-view constraint of the RGB loss to recover proper UV volumes despite this noise [S1].
+*   **Mask Definition:** The binary mask $\mathcal{S}$ must strictly follow the convention: 0 for foreground (human) and 1 for background. Inverting this leads to incorrect silhouette loss gradients [S1].
+
+## Operating characteristics
+*   **Memory Efficiency:** The method renders entire images during training rather than sampling patches, which is enabled by the memory-saving framework that disentangles appearance and geometry [S1].
+*   **Performance:** The method achieves real-time rendering capabilities (FPS reported in experiments) and high-fidelity novel view synthesis [S1].
+*   **Strengths:** Joint optimization of photometric, perceptual, and geometric (UV/mask) constraints allows for robust training even with noisy pseudo-supervision from DensePose [S1].
+*   **Limitations:** Reliance on DensePose introduces potential noise, though mitigated by the RGB loss constraint [S1].
+
+## Background
+The NTS Training Objective was introduced in the paper "UV Volumes for Real-time Rendering of Editable Free-view Human Performance" [S1]. It is part of a framework for real-time rendering of human performances, utilizing UV volumes to store appearance and geometry information. The method was developed to address the limitations of patch-based training and to leverage pseudo-supervision from pre-trained models like DensePose to regularize the solution space of UV volumes [S1].
+
+## Sources
+[S1] UV Volumes for Real-time Rendering of Editable Free-view Human Performance, https://doi.org/10.1109/cvpr52729.2023.01595, fetched 2026-10-26

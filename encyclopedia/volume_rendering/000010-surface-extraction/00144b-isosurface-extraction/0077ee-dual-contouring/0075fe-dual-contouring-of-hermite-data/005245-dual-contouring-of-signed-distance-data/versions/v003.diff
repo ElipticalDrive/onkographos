@@ -1,0 +1,84 @@
+--- v002.md
++++ v003.md
+@@ -30,16 +30,16 @@
+ 
+ **Algorithm Steps:**
+-1. **Initialization:** For each grid cell, identify the edges intersecting the zero-level set of the SDF. Compute initial Hermite data (intersection position and normal) for these edges using linear interpolation and finite differences or gradient approximation from the SDF grid [G].
++1. **Initialization:** For each grid cell, identify the edges intersecting the zero-level set of the SDF [G]. Compute initial Hermite data (intersection position and normal) for these edges using linear interpolation and finite differences or gradient approximation from the SDF grid [G].
+ 2. **Outer Loop:** Iterate `outer_iters` times:
+    a. **Hermite Update (if `hermite_update` is True):** Refine the Hermite positions and normals based on the current mesh state or SDF data, blending new estimates with existing ones using `new_hermite_pos_weight`, `new_hermite_normal_weight`, and `new_face_pos_weight` [S1, unofficial].
+    b. **Inner Loop (Local Energy Minimization):** For each grid cell containing a vertex to be placed:
+-      i. Define the local energy function $E(v)$ for the vertex position $v$. The energy typically includes a term penalizing deviation from the Hermite constraints (position and normal consistency) and a regularization term weighted by `mu` [S1, unofficial].
+-      ii. Solve the quadratic optimization problem for $v$ using `inner_iters` iterations. The optimization minimizes $E(v)$ subject to the constraints derived from the Hermite data [S1, unofficial].
+-      iii. Update the vertex position $v$ in the cell.
++      i. Define the local energy function $E(v)$ for the vertex position $v$ [G].
++      ii. Solve the quadratic optimization problem for $v$ using `inner_iters` iterations [G].
++      iii. Update the vertex position $v$ in the cell [G].
+    c. **Mesh Generation:** After placing vertices in all cells, generate the mesh topology by connecting vertices within each cell according to the dual contouring scheme (typically forming a convex polyhedron or triangle fan) [S1, unofficial].
+ 3. **Output:** Return the generated mesh [S1, unofficial].
+ 
+ **Formulas:**
+-The specific quadratic energy function $E(v)$ is not explicitly detailed in the provided sources, but it is described as a combination of Hermite energy (weighted by `dc_weight`) and regularization (weighted by `mu`) [S1, unofficial]. The optimization solves for $v$ that minimizes this energy [S1, unofficial]. Standard dual contouring formulates this as $E(v) = \sum_{i} \|v - p_i\|^2 + \mu \|v - c\|^2$, where $p_i$ are Hermite positions and $c$ is the cell center [G].
++The specific quadratic energy function $E(v)$ is not explicitly detailed in the provided sources, but it is described as a combination of Hermite energy (weighted by `dc_weight`) and regularization (weighted by `mu`) [S1, unofficial]. The optimization solves for $v$ that minimizes this energy [S1, unofficial]. Standard dual contouring formulates this as $E(v) = \sum_{i} \|v - p_i\|^2 + \mu \|v - c\|^2$, where $p_i$ are Hermite positions and $c$ is the cell center [G]. The gradient is $\nabla E(v) = 2 \sum_{i} (v - p_i) + 2\mu(v - c)$, and the iterative update follows $v \leftarrow v - \alpha \nabla E(v)$ [G].
+ 
+ **Edge Cases and Pitfalls:**
+@@ -69,8 +69,6 @@
+                 cell_id = (x, y, z)
+                 edges = []
+-                # Grid corners for this cell
+                 corners = [(x,y,z), (x+1,y,z), (x,y+1,z), (x,y,z+1),
+                            (x+1,y+1,z), (x+1,y,z+1), (x,y+1,z+1), (x+1,y+1,z+1)]
+-                # Check all 12 edges of the cube
+                 edge_pairs = [(0,1), (0,2), (0,3), (1,4), (1,5), (2,4), (2,6), (3,5), (3,6), (4,7), (5,7), (6,7)]
+                 for i, j in edge_pairs:
+@@ -80,9 +78,10 @@
+                         t = abs(p1) / (abs(p1) + abs(p2))
+                         pos = vec_add(vec_scale(corners[i], 1.0 - t), vec_scale(corners[j], t))
+-                        # Finite difference normal [G]
++                        # Central difference normal with boundary clamping [G]
+                         grad = [0.0, 0.0, 0.0]
+                         for k in range(3):
+-                            if corners[i][k] > 0: grad[k] -= sdf_grid[max(0,corners[i][0]-1)][corners[i][1]][corners[i][2]]
+-                            if corners[i][k] < Nx-1: grad[k] += sdf_grid[min(Nx-1,corners[i][0]+1)][corners[i][1]][corners[i][2]]
++                            idx = list(corners[i])
++                            if idx[k] > 0: grad[k] -= sdf_grid[max(0,idx[k]-1)][idx[1-(k==1)]][idx[2-(k==2)]]
++                            if idx[k] < [Nx,Ny,Nz][k]-1: grad[k] += sdf_grid[min([Nx,Ny,Nz][k]-1,idx[k]+1)][idx[1-(k==1)]][idx[2-(k==2)]]
+                         normal = vec_norm(grad)
+                         edges.append({'pos': pos, 'normal': normal})
+@@ -103,18 +102,9 @@
+         current_vertices = []
+         for cell_id, edges in hermite_data.items():
++            c = [cell_id[0] + 0.5, cell_id[1] + 0.5, cell_id[2] + 0.5] # Cell center [G]
++            v = [0.0, 0.0, 0.0] # Initial guess [G]
++            
+             # 2b. Inner Loop: Solve quadratic optimization for v [S1, unofficial]
+-            c = [cell_id[0] + 0.5, cell_id[1] + 0.5, cell_id[2] + 0.5] # Cell center [G]
+-            sum_p = [0.0, 0.0, 0.0]
+-            for e in edges:
+-                sum_p = vec_add(sum_p, e['pos'])
+-            
+-            # Closed-form least squares solution for E(v) = dc_weight * sum(||v-p_i||^2) + mu * ||v-c||^2 [G]
+-            v = vec_scale(sum_p, options.dc_weight)
+-            v = vec_add(v, vec_scale(c, options.mu))
+-            denom = options.dc_weight * len(edges) + options.mu
+-            v = vec_scale(v, 1.0 / denom)
+-
+-            # Iterative refinement if inner_iters > 1 [G]
+-            for _ in range(options.inner_iters - 1):
++            for _ in range(options.inner_iters):
+                 grad = [0.0, 0.0, 0.0]
+                 for e in edges:
+@@ -172,5 +162,5 @@
+ ## Operating characteristics
+ - **Time Complexity:** Depends on the number of grid cells and the number of iterations (`outer_iters` * `inner_iters`) [S1, unofficial].
+-- **Memory Complexity:** Not given in the sources.
++- **Memory Complexity:** Not given in the sources [G].
+ - **Measured Performance:** Sets a new state of the art for medium and high-resolution SDF reconstruction [S1, unofficial]. Specific performance metrics are not provided [S1, unofficial].
+ - **Scaling:** Scales with grid resolution and number of iterations. Batch processing (`batch_size`) allows handling large grids [S1, unofficial].
+@@ -178,5 +168,5 @@
+ - **Limitations:** Requires careful tuning of parameters (e.g., `mu`, `dc_weight`); implementation tested only on macOS; performance may vary on other platforms [S1, unofficial].
+ - **When to Use:** When reconstructing meshes from SDF data with sharp features, and gradient information is not available or difficult to compute [S1, unofficial].
+-- **When Not to Use:** Not given in the sources.
++- **When Not to Use:** Not given in the sources [G].
+ 
+ ## Background

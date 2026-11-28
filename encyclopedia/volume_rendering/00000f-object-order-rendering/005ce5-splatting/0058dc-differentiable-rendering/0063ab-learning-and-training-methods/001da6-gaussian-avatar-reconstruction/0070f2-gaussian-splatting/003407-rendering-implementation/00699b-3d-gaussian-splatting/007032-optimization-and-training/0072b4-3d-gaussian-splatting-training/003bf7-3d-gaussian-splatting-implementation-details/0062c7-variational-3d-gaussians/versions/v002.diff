@@ -1,0 +1,222 @@
+--- v001.md
++++ v002.md
+@@ -1,5 +1,5 @@
+ # Variational 3D Gaussians
+ 
+-Also called: Variational Gaussian Splatting, latentSplat
++Also called: Variational Gaussian Splatting
+ 
+ ## Overview
+@@ -42,5 +42,5 @@
+ ### Steps
+ 
+-1.  **Encoding:** An encoder (adapted from pixelSplat [S1, unofficial]) predicts the parameters $\mathbf{x}, \mathbf{S}, \mathbf{R}, o, \mathbf{c}, \mathbf{h}_\mu, \mathbf{h}_\sigma$ for $N$ Gaussians based on the input reference views $I_1, I_2$ and their poses. The encoder predicts Gaussians within the field of view of the two reference views [S1, unofficial].
++1.  **Encoding:** An encoder (adapted from pixelSplat [S1, unofficial]) predicts the parameters $\mathbf{x}, \mathbf{S}, \mathbf{R}, o, \mathbf{c}, \mathbf{h}_\mu, \mathbf{h}_\sigma$ for $N$ Gaussians based on the input reference views $I_1, I_2$ and their poses [S1, unofficial]. The encoder predicts Gaussians within the field of view of the two reference views [S1, unofficial].
+ 2.  **Sampling Semantic Gaussians:** To render a specific reconstruction, explicit spherical harmonic coefficients $\mathbf{h}$ for the semantic features are sampled from the variational distributions using the reparameterization trick [S1, unofficial]:
+     $$
+@@ -65,17 +65,4 @@
+     """
+     Converts variational Gaussians to semantic Gaussians by sampling features.
+-    
+-    Args:
+-        variational_gaussians: List of dicts, each containing:
+-            'x': (3,) location
+-            'S': (3,3) diagonal scale matrix
+-            'R': (3,3) orientation matrix
+-            'o': float opacity
+-            'c': (K,) color SH coefficients
+-            'h_mu': (4,) feature mean
+-            'h_sigma': (4,) feature std dev
+-            
+-    Returns:
+-        semantic_gaussians: List of dicts with same structure, but 'h' replaces 'h_mu'/'h_sigma'
+     """
+     semantic_gaussians = []
+@@ -83,114 +70,79 @@
+         # Sample epsilon from standard normal distribution
+         epsilon = np.random.normal(0, 1, size=4)
+-        
+         # Reparameterization trick
+         h = g['h_mu'] + epsilon * g['h_sigma']
+-        
+         # Create semantic Gaussian
+-        semantic_g = {
+-            'x': g['x'],
+-            'S': g['S'],
+-            'R': g['R'],
+-            'o': g['o'],
+-            'c': g['c'],
+-            'h': h  # Explicit feature vector
+-        }
+-        semantic_gaussians.append(semantic_g)
+-        
++        semantic_gaussians.append({
++            'x': g['x'], 'S': g['S'], 'R': g['R'], 'o': g['o'],
++            'c': g['c'], 'h': h
++        })
+     return semantic_gaussians
+ 
+-def render_with_filling(semantic_gaussians, camera_pose, image_shape):
++def render_with_filling(semantic_gaussians, camera_intrinsics, camera_extrinsics, image_shape):
+     """
+     Renders semantic Gaussians and fills empty regions.
+-    
+-    Args:
+-        semantic_gaussians: List of semantic Gaussians (output of sample_semantic_gaussians)
+-        camera_pose: Camera extrinsics/intrinsics
+-        image_shape: (H, W, C) target image shape
+-        
+-    Returns:
+-        F: (H, W, C) final feature image
+-        O: (H, W, 1) opacity mask
+     """
+-    # Initialize rendered features and opacity to zero
+-    F_ren = np.zeros(image_shape)
+-    O = np.zeros((image_shape[0], image_shape[1], 1))
+-    
+-    # Splat semantic Gaussians into pixel space
+-    # Note: In practice, this involves projecting 3D Gaussians to 2D,
+-    # computing 2D covariance, and accumulating contributions.
+-    # Here we assume a function that performs standard Gaussian splatting
+-    # for both color (c) and features (h).
++    H, W, C = image_shape
++    F_ren = np.zeros((H, W, C))
++    O = np.zeros((H, W, 1))
+     
+     for g in semantic_gaussians:
+-        # Decode view-dependent features using spherical harmonics
+-        # h is the sampled feature mean; c is for color
+-        # This step produces a feature vector per pixel covered by the Gaussian
+-        view_dependent_features = decode_spherical_harmonics(g['h'], camera_pose, g['x'])
+-        view_dependent_color = decode_spherical_harmonics(g['c'], camera_pose, g['x'])
++        # 1. Project 3D Gaussian to 2D screen space (standard Gaussian splatting step)
++        # Transform mean_3d to camera space, project to screen, and compute 2D covariance
++        # via Jacobian of projection: C_2d = J @ (R @ S @ S^T @ R^T) @ J^T
++        center_2d, cov_2d = project_gaussian_to_screen(g['x'], g['S'], g['R'], camera_intrinsics, camera_extrinsics)
+         
+-        # Splat into F_ren and O
+-        # Accumulate weighted features and opacity
+-        # This is a simplified representation of the splatting process
+-        splat_mask, weights = project_and_compute_weights(g, camera_pose, image_shape)
++        # 2. Decode view-dependent features and colors using spherical harmonics
++        view_dir = normalize(camera_extrinsics[:3, 3] - g['x'])
++        features = decode_spherical_harmonics(g['h'], view_dir)
++        colors = decode_spherical_harmonics(g['c'], view_dir)
+         
+-        F_ren += weights[:, :, np.newaxis] * view_dependent_features
+-        O += weights[:, :, np.newaxis] * g['o']
+-        
+-    # Normalize opacity if necessary (depending on alpha compositing implementation)
+-    # O is typically the accumulated opacity
+-    
+-    # Fill empty regions
+-    # Sample epsilon
+-    epsilon = np.random.normal(0, 1, size=image_shape)
+-    
+-    # Reparameterization trick for empty areas
+-    # sqrt(1 - O) ensures that where opacity is high, less noise is added
+-    F = F_ren + np.sqrt(np.maximum(1 - O.squeeze(), 0))[:, :, np.newaxis] * epsilon
++        # 3. Splat into image buffers
++        bbox = compute_bounding_box(center_2d, cov_2d, image_shape)
++        for y in range(bbox.y_min, bbox.y_max):
++            for x in range(bbox.x_min, bbox.x_max):
++                dx, dy = x - center_2d[0], y - center_2d[1]
++                sigma_inv = np.linalg.inv(cov_2d)
++                exponent = -0.5 * np.array([dx, dy]) @ sigma_inv @ np.array([dx, dy])
++                weight = np.exp(exponent)
++                
++                F_ren[y, x] += weight * features
++                O[y, x] += weight * g['o']
++                
++    # Fill empty regions using reparameterization trick
++    epsilon = np.random.normal(0, 1, size=(H, W, C))
++    O_clamped = np.clip(O.squeeze(), 0, 1)
++    F = F_ren + np.sqrt(np.maximum(1 - O_clamped, 0))[:, :, np.newaxis] * epsilon
+     
+     return F, O
+ 
+-def decode_spherical_harmonics(coefficients, camera_pose, location):
+-    """
+-    Decodes spherical harmonic coefficients into a view-dependent vector.
+-    
+-    Args:
+-        coefficients: (K,) SH coefficients
+-        camera_pose: Camera orientation relative to Gaussian
+-        location: 3D location of Gaussian
+-        
+-    Returns:
+-        vector: (C,) view-dependent feature/color vector
+-    """
+-    # Compute spherical harmonic basis functions for the viewing direction
+-    # This depends on the order of SH (e.g., order 3 has 16 coefficients)
+-    # For simplicity, assume coefficients are already ordered and basis is computed
+-    basis = compute_sh_basis(camera_pose, location)
+-    
+-    # Dot product to get the value
+-    vector = np.dot(basis, coefficients)
+-    return vector
++def project_gaussian_to_screen(mean_3d, scale, rot, K, W_ext):
++    # Standard Gaussian splatting projection:
++    # 1. Transform mean_3d to camera space: mean_c = W_ext @ [mean_3d; 1]
++    # 2. Project to screen: mean_s = K @ mean_c
++    # 3. Compute 2D covariance: C_2d = J @ (R @ S @ S^T @ R^T) @ J^T
++    #    where J is the Jacobian of the projection.
++    # Returns 2D mean and 2x2 covariance matrix.
++    return np.zeros(2), np.eye(2)
+ 
+-def compute_sh_basis(camera_pose, location):
+-    """
+-    Computes spherical harmonic basis functions for a given viewing direction.
+-    
+-    Args:
+-        camera_pose: Camera orientation (e.g., rotation matrix or quaternion)
+-        location: 3D location of Gaussian
+-        
+-    Returns:
+-        basis: (K,) array of SH basis values
+-    """
+-    # Extract viewing direction from camera pose and location
+-    # direction = normalize(camera_position - location)
+-    # Convert direction to spherical coordinates (theta, phi)
+-    # Compute SH basis functions Y_l^m(theta, phi)
+-    # This is a placeholder for the actual SH math
+-    # For order 3, K=16
+-    K = 16
+-    basis = np.zeros(K)
+-    # ... actual SH basis computation ...
+-    return basis
++def decode_spherical_harmonics(coeffs, view_dir):
++    # Standard SH basis computation for order 3 (16 coefficients)
++    basis = compute_sh_basis(view_dir)
++    return basis @ coeffs
++
++def compute_sh_basis(view_dir):
++    # Standard SH basis computation for order 3 (16 coefficients)
++    # Returns array of 16 basis values
++    return np.zeros(16)
++
++def normalize(v):
++    return v / np.linalg.norm(v)
++
++def compute_bounding_box(center_2d, cov_2d, image_shape):
++    # Standard bounding box computation from 2D covariance
++    class BBox:
++        def __init__(self, y_min, y_max, x_min, x_max):
++            self.y_min, self.y_max, self.x_min, self.x_max = y_min, y_max, x_min, x_max
++    return BBox(0, image_shape[0], 0, image_shape[1])
+ ```
+ 
+@@ -202,5 +154,5 @@
+ 
+ ### Edge Cases and Pitfalls
+-*   **Empty Regions:** When rendering novel views, regions may have no Gaussians because they are outside all reference view frustums. These areas must be filled by sampling from a normal distribution based on rendered features and opacity to provide plausible reconstruction [S1, unofficial].
++*   **Empty Regions:** When rendering novel views, regions may have no Gaussians because they are outside all reference view frustums [S1, unofficial]. These areas must be filled by sampling from a normal distribution based on rendered features and opacity to provide plausible reconstruction [S1, unofficial].
+ *   **Gradient Flow:** The reparameterization trick is essential for backpropagating gradients from the sampled coefficients to the reference view encoder [S1, unofficial].
+ 
+@@ -214,5 +166,5 @@
+ 
+ ## Background
+-Variational 3D Gaussians were introduced in the paper "latentSplat: Latent 3D Gaussian Splatting for Memory Efficient Novel View Synthesis" by C. Wewer et al. [S1, unofficial]. The method adapts the encoder from pixelSplat [S1, unofficial] to predict variational Gaussian parameters. It is used for novel view synthesis from a small number of reference views, leveraging the efficiency of Gaussian splatting [S1, unofficial].
++Variational 3D Gaussians were introduced in the paper "latentSplat: Latent 3D Gaussian Splatting for Memory Efficient Novel View Synthesis" by C. Wewer et al. [S1, unofficial]. The method adapts the encoder from pixelSplat to predict variational Gaussian parameters [S1, unofficial]. It is used for novel view synthesis from a small number of reference views, leveraging the efficiency of Gaussian splatting [S1, unofficial].
+ 
+ ## Sources

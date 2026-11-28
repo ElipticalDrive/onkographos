@@ -1,0 +1,144 @@
+# Point-Cloud Based CGH Calculation
+
+Also called: Point Source Method, Point-Cloud Approach, Point-based CGH, Point-cloud based hologram calculation
+
+## Overview
+Point-Cloud Based CGH Calculation generates computer-generated holograms by discretizing a 3D scene into a finite set of points, treating each as a coherent point light source, and summing their propagated wavefields on the hologram plane [S1, S2]. It is distinguished from [Polygon-based CGH generation](13818-polygon-based-cgh-generation.md) and [Layer-Based Holographic Algorithm](13372-layer-based-holographic-algorithm.md) by avoiding large-scale FFT circuits and complex mesh processing, making it highly suitable for hardware implementation [S1, S5]. While computationally simpler than polygon-based or layer-based approaches, it suffers from high computational cost for large scenes and produces artifacts such as vivid boundaries and weak defocus blur compared to modern alternatives [S1, S6].
+
+## How it works
+**Inputs:**
+*   A set of $N$ object points $P_i = (x_i, y_i, z_i)$ representing the 3D scene [S1, S2].
+*   Hologram plane dimensions $W \times H$ (pixels) [S3].
+*   Wavelength $\lambda$ of the reconstruction light [S3].
+*   Distance $z$ from the object plane to the hologram plane, or individual depths $z_i$ for each point [S4].
+
+**Outputs:**
+*   A complex amplitude distribution $U_h(x,y)$ on the hologram plane, which is subsequently encoded into a phase-only or amplitude-only hologram pattern [S2].
+
+**Data Structures:**
+*   **Point Cloud:** A list of tuples containing coordinates $(x_i, y_i, z_i)$ and optional amplitude $A_i$ and initial phase $\phi_{0,i}$ for each point $i \in [1, N]$ [S2, S4].
+*   **Hologram Buffer:** A 2D complex array initialized to zero to accumulate contributions [G].
+
+**Mathematical Model:**
+The complex amplitude contribution of a single point source $i$ at hologram pixel $(x,y)$ is calculated using the spherical wave propagation formula or the Fresnel approximation [S4, S5]. The distance $r_i$ from point $i$ to pixel $(x,y)$ is:
+$$ r_i = \sqrt{(x-x_i)^2 + (y-y_i)^2 + z_i^2} $$
+[S4]. The phase is $\phi_i(x,y) = k r_i + \phi_{0,i}$, where $k = 2\pi/\lambda$ is the wavenumber [S2, S4]. The total hologram is the superposition:
+$$ U_h(x,y) = \sum_{i=1}^{N} A_i \exp\left(i \phi_i(x,y)\right) $$
+[S2, S3].
+
+**Steps:**
+1.  **Discretization:** Represent the 3D object as a finite set of object points [S2].
+2.  **Propagation:** For each point $P_i$, calculate its complex amplitude distribution on the hologram plane using the spherical wave formula or Fresnel approximation [S2, S4, S5].
+3.  **Superposition:** Sum the complex amplitudes of all $N$ points to obtain the total wave surface distribution $U_h(x,y)$ [S2].
+4.  **Occlusion Handling (Optional):** Ignore backside wavefront contributions when backside and frontside wavefronts overlap [S6].
+5.  **Encoding:** Encode $U_h(x,y)$ into a format suitable for the Spatial Light Modulator (SLM), such as phase-only encoding or amplitude modulation [S2].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def calculate_point_cloud_cgh(points, width, height, wavelength):
+    """
+    Calculate CGH using direct point-wise integration.
+    
+    Args:
+        points: List of tuples (x, y, z, amplitude, phase) for N points.
+        width: Width of hologram in pixels.
+        height: Height of hologram in pixels.
+        wavelength: Wavelength of light in meters.
+        
+    Returns:
+        hologram: 2D list of complex numbers of size (height, width).
+    """
+    k = 2.0 * math.pi / wavelength
+    hologram = [[0.0 + 0.0j for _ in range(width)] for _ in range(height)]
+    
+    for y in range(height):
+        for x in range(width):
+            amp_sum = 0.0 + 0.0j
+            for px, py, pz, amp, phi0 in points:
+                dx = x - px
+                dy = y - py
+                dz = pz
+                r = math.sqrt(dx*dx + dy*dy + dz*dz)
+                phase = k * r + phi0
+                amp_sum += amp * complex(math.cos(phase), math.sin(phase))
+            hologram[y][x] = amp_sum
+            
+    return hologram
+```
+
+**Parameters:**
+*   **Wavelength ($\lambda$):** Typically 400-700 nm for visible light [S3].
+*   **Sub-hologram size:** In optimized implementations using Look-Up Tables (LUTs) or Wavefront Recording Planes (WRP), the hologram is divided into sub-holograms [S1]. The runtime scales quadratically with the sub-hologram size [S3].
+*   **Point Density:** The number of points $N$ directly impacts complexity; 2 million points is a common benchmark for performance measurement [S3].
+
+**Edge Cases and Pitfalls:**
+*   **Occlusion:** Naive summation does not account for occlusion, leading to "see-through" artifacts; explicit occlusion handling increases computational cost [S1, S6].
+*   **Depth Errors:** Incorrect depth values in captured depth maps cause interference-induced black lines at object boundaries [S6].
+*   **Vivid Boundaries:** Abrupt phase variations at interfaces of objects at different depths cause constructive/destructive interference, creating sharp boundaries instead of natural defocus blur [S6].
+*   **Hole Distortion:** Holes in objects are distorted by depth differences between the object and background [S6].
+*   **Defocus Blur:** Coherent propagation forms Fresnel diffraction patterns rather than natural defocus blur, distorting depth perception [S6].
+
+## Subtopics
+
+### Look-Up-Table (LUT) Acceleration
+Pre-calculates point contributions for specific depths and reuses them to reduce computation time, though it increases memory usage [S1].
+
+### Wavefront Recording Plane (WRP)
+Interposes an intermediate plane between the point cloud and hologram plane to reduce propagation distance and complexity [S1].
+
+### Convolution-Based Approximation
+Approximates point-wise integration as a convolution with a spatially invariant kernel when the lens phase is fixed, reducing runtime from seconds to milliseconds but sacrificing spatial variance accuracy [S3].
+
+### [HORN-8 Point-Cloud Hologram Generation](18277-horn-8-point-cloud-hologram-generation.md)
+A hardware-accelerated method for generating computer-generated holograms from point-cloud data using a dedicated FPGA pipeline. It solves the computational bottleneck by employing a normalized Fresnel approximation that enables integer arithmetic and incremental phase calculation, thereby eliminating the need for memory-intensive look-up tables for trigonometric operations. Unlike the layer method, which relies on FFTs and is unsuitable for hardware implementation, HORN-8 is optimized for localized models and achieves high parallelization through a memoryless pipeline architecture.
+
+## Operating characteristics
+**Time Complexity:**
+*   The naive point-wise integration method scales as $O(N_{obj} N_{hol})$ [S5].
+*   Runtime scales quadratically with the sub-hologram size [S3].
+
+**Memory Complexity:**
+*   $O(W \cdot H)$ for the hologram buffer [G].
+*   LUT methods require $O(D \cdot W_{sub} \cdot H_{sub})$ memory for pre-calculated tables, where $D$ is the number of depth levels [S1].
+
+**Measured Performance:**
+*   **Hardware:** NVIDIA GTX 980 Ti [S3], NVIDIA V100 [S6].
+*   **Runtime:** 1 to tens of seconds for 2 million points on GTX 980 Ti, depending on sub-hologram size [S3]. Convolution methods can achieve milliseconds [S3].
+*   **Image Quality (nCGH):** 512x512 dataset PSNR 22.5 dB, SSIM 0.756; FHD dataset PSNR 27.1 dB, SSIM 0.889 [S6].
+
+**Strengths:**
+*   Relatively simple calculations [S1].
+*   Can handle real scenes acquired as point clouds [S1].
+*   No need for complex polygon mesh processing [S1].
+*   Suitable for hardware implementation [S5].
+
+**Limitations:**
+*   High computational cost for large scenes [S1].
+*   Weak defocus blur and vivid boundaries distort depth perception [S6].
+*   Sensitive to depth map errors [S6].
+*   Slower than convolution-based methods [S3].
+
+**When to Use:**
+*   Small to medium-sized scenes where simplicity is prioritized [S1].
+*   Localized models where hardware acceleration is preferred [S5].
+*   Synthetic scenes with known point coordinates [S2].
+
+**When Not to Use:**
+*   Real-time applications requiring high resolution and large point counts [S1].
+*   Scenes requiring accurate depth cues and natural defocus blur [S6].
+*   Applications with noisy or incomplete depth data [S6].
+
+## Background
+The point-cloud approach, also known as the object point scattering method, is a conventional CGH generation technique [S1, S2]. In 2002, T. Shimobab et al. employed this method to construct a 3D diagram using a reflective LCD panel and LED reference light source [S2]. It is based on the superposition of spherical waves from point sources [S2]. It has been widely studied as a baseline for comparison with layer-based, polygon-based, and diffraction-engineered holography [S1, S6]. Despite its simplicity, its computational inefficiency and optical artifacts have led to faster and higher-quality alternatives [S1, S6].
+
+## Sources
+[S1] Recent Advances in the Processing and Rendering Algorithms for Computer-Generated Holography, https://doi.org/10.3390/electronics8050556, fetched 2026-10-26
+[S2] Principle and Outlook of Holography, https://doi.org/10.2991/icmmita-16.2016.54, fetched 2026-10-26
+[S3] Holographic near-eye displays for virtual and augmented reality, https://doi.org/10.1145/3072959.3073624, fetched 2026-10-30
+[S4] Computing optimzation methods for 3D real-time computer generated hologram, https://www.atlantis-press.com/proceedings/iccsee-13/4707, fetched 2026-10-28
+[S5] High-performance parallel computing for next-generation holographic imaging, https://doi.org/10.1038/s41928-018-0057-5, fetched 2026-10-29
+[S6] Diffraction-engineered holography: Beyond the depth representation limit of holographic displays, https://www.nature.com/articles/s41467-022-33728-5, fetched 2026-10-29

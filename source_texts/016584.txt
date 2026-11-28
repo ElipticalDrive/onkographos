@@ -1,0 +1,1779 @@
+LA-UR-25-23616
+Approved for public release; distribution is unlimited.
+Title:
+STZ: A High Quality and High Speed Streaming Lossy Compression Framework for Scientific
+Data
+Author(s):
+Wang, Daoce; Grosset, Andre Vincent Pascal; Pulido, Jesus Jr; Tian, Jiannan; Athawale,
+Tushar; Jia, Jinda; Sun, Baixi; Zhang, Boyuan; Jin, Sian; Zhao, Kai; Ahrens, James Paul;
+Song, Fengguang
+Intended for:
+Supercomputing - The International Conference for High Performance Computing,
+Networking, Storage and Analysis, 2025-11-16/2025-11-21 (St Louis, Missouri, UNITED
+STATES)
+Issued:
+2025-12-10 (rev.1)
+Los Alamos National Laboratory, an affirmative action/equal opportunity employer, is operated by Triad National Security, LLC for the National Nuclear Security
+Administration of U.S. Department of Energy under contract 89233218CNA000001. By approving this article, the publisher recognizes that the U.S. Government
+retains nonexclusive, royalty-free license to publish or reproduce the published form of this contribution, or to allow others to do so, for U.S. Government
+purposes. Los Alamos National Laboratory requests that the publisher identify this article as work performed under the auspices of the U.S. Department of
+Energy. Los Alamos National Laboratory strongly supports academic freedom and a researcher's right to publish; as an institution, however, the Laboratory does
+not endorse the viewpoint of a publication or guarantee its technical correctness.
+STZ: A High Quality and High Speed Streaming Lossy
+Compression Framework for Scientific Data
+Daoce Wang
+Pascal Grosset
+Jesus Pulido
+Jiannan Tian
+Univ of Nebraska Omaha
+Omaha, USA
+daocwang@iu.edu
+Los Alamos National Lab
+Los Alamos, USA
+pascalgrosset@lanl.gov
+Los Alamos National Lab
+Los Alamos, USA
+pulido@lanl.gov
+Oakland University
+Rochester, USA
+jtian@oakland.edu
+Tushar Athawale
+Jinda Jia
+Baixi Sun
+Boyuan Zhang
+Oak Ridge National Lab
+Oak Ridge, USA
+athawaletm@ornl.gov
+Indiana University
+Bloomington, USA
+jindjia@iu.edu
+Indiana University
+Bloomington, USA
+sunbaix@iu.edu
+Indiana University
+Bloomington, USA
+bozhan@iu.edu
+Sian Jin
+Kai Zhao
+James Ahrens
+Fengguang Song∗
+Temple University
+Philadelphia, USA
+sian.jin@temple.edu
+Florida State University
+Tallahassee, USA
+kai.zhao@fsu.edu
+Los Alamos National Lab
+Los Alamos, USA
+ahrens@lanl.gov
+Indiana University
+Bloomington, USA
+fgsong@iu.edu
+Abstract
+Error-bounded lossy compression is one of the most efficient solutions to reduce the volume of scientific data. For lossy compression,
+progressive decompression and random-access decompression are
+critical features that enable on-demand data access and flexible
+analysis workflows. However, these features can severely degrade
+compression quality and speed. To address these limitations, we propose a novel streaming compression framework that supports both
+progressive decompression and random-access decompression while
+maintaining high compression quality and speed. Our contributions are three-fold: (1) we design the first compression framework
+that simultaneously enables both progressive decompression and
+random-access decompression; (2) we introduce a hierarchical partitioning strategy to enable both streaming features, along with
+a hierarchical prediction mechanism that mitigates the impact of
+partitioning and achieves high compression quality—even comparable to state-of-the-art (SOTA) non-streaming compressor SZ3; and
+(3) our framework delivers high compression and decompression
+speed, up to 6.7× faster than SZ3.
+CCS Concepts
+• Theory of computation → Data compression; • Computing
+methodologies → Massively parallel and high-performance
+simulations.
+Keywords
+Lossy compression, progressive decompression, random-access.
+∗ Corresponding author
+This work is licensed under a Creative Commons Attribution 4.0 International License.
+SC ’25, St Louis, MO, USA
+© 2025 Copyright held by the owner/author(s).
+ACM ISBN 979-8-4007-1466-5/25/11
+https://doi.org/10.1145/3712285.3759795
+2038
+ACM Reference Format:
+Daoce Wang, Pascal Grosset, Jesus Pulido, Jiannan Tian, Tushar Athawale,
+Jinda Jia, Baixi Sun, Boyuan Zhang, Sian Jin, Kai Zhao, James Ahrens,
+and Fengguang Song. 2025. STZ: A High Quality and High Speed Streaming
+Lossy Compression Framework for Scientific Data. In The International Conference for High Performance Computing, Networking, Storage and Analysis
+(SC ’25), November 16–21, 2025, St Louis, MO, USA. ACM, New York, NY,
+USA, 18 pages. https://doi.org/10.1145/3712285.3759795
+1
+Introduction
+Supercomputers have quickly approached exascale capabilities with
+increasingly higher computing power, causing the volume of scientific data storage and transmission to grow exponentially. Traditionally, a simulation with a resolution of 40963 can generate approximately 5 TB of data per snapshot. Thus, running a single simulation
+with 200 snapshots would require a total disk storage capacity of
+1 PB. Simulations in exascale scenarios are even larger—often involving thousands of points per axis—highlighting the necessity for
+effective data size reduction. While computing power has advanced
+rapidly, storage bandwidth has not kept pace, widening the gap
+between processing capability and data movement.
+To fill this gap, data reduction techniques have become critical for conserving storage bandwidth, reducing power consumption, and optimizing HPC system performance. Traditional lossless
+compression techniques, such as GZIP [10] and Zstandard [49],
+typically achieve compression ratios of only up to 2 for scientific
+data. In contrast, new generations of lossy compressors—known
+as error-bounded lossy compressors—have been developed, including SZ [11, 23, 33, 47], ZFP [25], MGARD [1, 15], SPERR [22], and
+TTHRESH [3]. These compressors provide significantly higher compression ratios while minimizing quality loss in the reconstructed
+data and preserving its fidelity for post-analysis.
+Although lossy compression can significantly reduce the storage
+and transmission overhead, traditional compression workflows
+require the entire compressed data to be fully decompressed for
+post-analysis or visualization, which restores the dataset to its
+original uncompressed size. However, many scientific use cases,
+SC ’25, November 16–21, 2025, St Louis, MO, USA
+Wang et al.
+Figure 1: Iso-surface of original (top, 256 × 256 × 2048, 1𝐺𝐵) and downsampled (bottom, 128 × 128 × 1024, 128𝑀𝐵) WarpX dataset. Visual
+differences between them are virtually imperceptible (SSIM=0.96),
+highlighting the need for progressive decompression.
+such as inspecting regions of interest (e.g., 2D slices in a 3D dataset)
+or generating coarse-resolution previews [36, 46] (as shown in
+Figure 1), do not require full data reconstruction.
+In these scenarios, decompressing and storing the entire dataset
+introduces significant computational, memory, I/O, and storage
+overhead. This problem is especially severe in two cases: (1) For analyzing terabyte-scale datasets on local devices, limited RAM and disk
+space can severely restrict the user’s ability to decompress and process
+the data. (2) For larger datasets, such as petabyte-scale datasets from
+extreme-scale simulations, the decompressed data can be too large
+to fit even in the memory of one or a few HPC nodes, making full
+decompression impractical on HPC systems. These challenges highlight the urgent need for on-demand decompression frameworks
+that support targeted access to compressed scientific data without
+reconstructing the entire dataset.
+Streaming compression is a method that supports both progressive decompression (i.e., decompressing data to a lower resolution)
+and random-access decompression (i.e., selectively decompressing
+parts of the data), offering an effective solution to these challenges.
+However, many scientific compressors, such as SZ3, do not support
+streaming compression, as it can significantly degrade compression
+quality and speed. Moreover, to the best of our knowledge, no existing scientific compressor supports both progressive decompression
+and random-access decompression simultaneously. For example,
+ZFP supports random-access decompression by partitioning data
+into 43 blocks and processes each block independently during compression. However, this block-wise approach sacrifices compression
+quality/ratio due to the loss of spatial information between blocks
+(as summarized in Table 1). On the other hand, SPERR supports
+progressive decompression through its wavelet transform, which
+enables lower-resolution extraction while preserving global data
+structure. However, the wavelet transform used by SPERR is computationally expensive, resulting in slow performance and making
+it unsuitable for in-situ or online compression scenarios.
+Table 1: Features of different compressors.
+Progressive
+Random Access
+Speed
+Comp. Quality
+SZ3
+SPERR
+MGARD
+ZFP
+Ours
+✗
+✗
+mid
+high
+✓
+✗
+very low
+very high
+✓
+✗
+low
+mid
+✗
+✓
+very high
+low
+✓
+✓
+high
+high
+To address these limitations, we propose a novel streaming compression framework that fills the gap between streaming capabilities
+and high compression quality and speed. Our framework supports
+2039
+both progressive decompression and random-access decompression,
+enabling flexible HPC workflows for handling massive scientific
+data. We evaluate our solution against four state-of-the-art (SOTA)
+compressors and demonstrate that it enables streaming capabilities without compromising compression quality and speed. The
+features of our work and the baseline compressors are summarized
+in Table 1, and detailed evaluation results are presented in §4.
+Our contributions are summarized as follows:
+1. We propose a first-of-its-kind streaming compression framework
+that simultaneously supports progressive decompression and
+random-access decompression.
+2. To enable streaming compression, we first introduce a hierarchical partitioning strategy. To mitigate compression quality
+loss caused by partitioning, we propose a hierarchical prediction
+method to preserve spatial information across different hierarchical levels, enabling our framework to achieve even comparable
+compression quality to the non-streaming compressor SZ3.
+3. Our framework achieves high compression and decompression
+speeds, with high parallel efficiency, and is up to 6.7× faster than
+SOTA compressors with the same compression quality and ratio.
+4. We evaluate our framework against four SOTA scientific lossy
+compressors: SZ3, SPERR, MGARD-X, and ZFP, using four realworld scientific datasets. The results show that our solution
+achieves the best overall trade-off between compression quality
+and speed. Notably, none of the SOTA compressors support both
+progressive decompression and random-access decompression.
+2 RELATED WORK
+2.1 Lossy Compression for Scientific Data
+Most scientific simulations use floating-point data. There are two
+main categories of floating-point data compression: lossless and
+lossy compression. Lossless compression suffers from low compression ratios on scientific data (only up to 2× [6]), because even
+when floating-point values are numerically similar, their binary
+representations can differ significantly, making them difficult to
+be effectively compressed. In contrast, lossy compression offers
+much higher compression ratios by trading off some accuracy and
+better exploiting the redundancy in floating-point data. Unlike traditional image lossy compressors (e.g., JPEG), which focus on image
+compression, a new generation of error-bounded lossy compressors (specifically for scientific data) has been developed in recent
+years. These include SZ, ZFP, MGARD, SPERR, and TTHRESH,
+and their GPU versions [8, 17, 26, 34, 35]. These compressors
+have been widely used in the scientific community [2, 5, 12, 18–
+21, 27, 28, 32, 37–42, 48] as they offer higher compression quality
+for scientific datasets and offer strict error control based on userspecified bounds.
+In general, there are three steps in error-bounded scientific lossy
+compressors: (1) First, the data is de-correlated to leverage spatial
+redundancy, such as by using prediction (SZ3, MGARD) or transformation (ZFP, SPERR); (2) Then, the loss is introduced to improve
+compressibility, for example via quantization (SZ3) or bit truncation (ZFP); (3) Finally, the data goes through lossless encoding,
+such as Huffman encoding (SZ3, MGARD) or run-length encoding (TTHRESH). Our work combines prediction, quantization, and
+Huffman encoding to achieve high speed and compression ratio.
+STZ: A High Quality and High Speed Streaming Lossy Compression Framework for Scientific Data
+2.2
+Progressive Decompression
+There are two main categories of progressive decompression: (1)
+precision-progressive and (2) resolution-progressive.
+Precision-progressive decompression [24, 29, 44, 45] reconstructs
+data at multiple fidelity levels by incrementally increasing precision
+(i.e., reducing compression error). IPComp [45] is currently the best
+precision-progressive compressor in terms of overall compression
+quality and speed; however, its quality and speed are still lower
+than those of SZ3. Moreover, precision-progressive decompression
+does not reduce the size of the decompressed data, as the output
+retains its original resolution and data type (e.g., FP32 remains FP32).
+This still leads to significant I/O and memory overhead during
+decompression and post-processing. For these reasons, in this work,
+we focus on resolution-progressive decompression.
+Resolution-progressive decompression enables reconstructing a
+lower-resolution (coarse) version of the data and then progressively
+increasing the resolution. However, this approach incurs significant
+overhead in compression quality or speed. Resolution-progressive
+decompression can be achieved through wavelet transform, which
+de-correlates and decomposes the data into wavelet coefficients
+that can be progressively reconstructed from coarse to fine resolutions. For example, SPERR uses the CDF 9/7 wavelet transform,
+which provides both high compression quality and progressive
+capability. However, the wavelet transform in SPERR incurs high
+computational costs, resulting in significantly low compression
+throughput—up to 37× slower than our solution.
+Another approach to resolution-progressive decompression is
+to directly partition the data into hierarchical levels. For instance,
+AMM [4] uses tree structures to partition the domain. However,
+such partitioning can break spatial locality and degrade compression quality and ratio (in lossy compression, compression quality
+and ratio are interchangeable—one can be traded off for the other).
+As a result, AMM cannot achieve compression quality comparable
+to SOTA compressors like ZFP and MGARD. MGARD also adopts
+a hierarchical decomposition strategy but cannot eliminate the
+spatial locality loss due to partitioning, resulting in lower compression ratios than SZ3 and our solution. Moreover, MGARD has high
+computational complexity and is up to 18× slower than our work.
+Our solution also partitions the data hierarchically to enable highspeed resolution-progressive decompression. However, to achieve
+high compression quality, we introduce an effective hierarchical
+prediction method to eliminate the negative impact of partitioning
+and achieve higher compression quality or ratio (e.g., up to 4.9×
+higher compression ratio than MGARD with the same data quality).
+2.3
+Random Access Decompression
+Random access decompression enables independent decompression
+of specific regions of interest (ROI) in the dataset at full resolution, thereby reducing memory usage, decompression time, and
+I/O cost. ZFP supports random-access decompression due to its
+block-wise design. Specifically, it partitions the data into 43 blocks
+and performs transformation independently on each block, with
+no dependencies between them. However, this partitioning reduces
+spatial locality across blocks, leading to low compression quality.
+In contrast, non-block-wise compressors such as SZ3, MGARD,
+2040
+SC ’25, November 16–21, 2025, St Louis, MO, USA
+SPERR, and TTHRESH preserve more spatial information but introduce strong data dependencies, making them incompatible with
+random-access decompression.
+Our solution bridges this gap by enabling random-access decompression for non-block-wise compression that has high compression
+quality. That is, we achieve the non-block-wise compressor’s high
+quality and the block-wise compressor’s random-access decompression capability, with high performance, simultaneously. More
+specifically, our proposed hierarchical partitioning and prediction
+method introduces minimal dependency: all data points depend
+only on 1.6% of the dataset. Thus, random-access decompression
+can be achieved by incurring only a 1.6% prediction overhead.
+For the encoding stage, we adopt Huffman encoding due to its
+high speed and high compression ratio. However, Huffman encoding does not support random-access decoding, as it requires
+decoding from the beginning of the encoded bitstream due to its
+variable-length nature. One possible way to address this is to apply
+Huffman encoding to smaller chunks of data to enable independent
+decoding. However, this approach will significantly reduce compression ratios. Thus, we choose to maximize the compression ratio
+by sacrificing little performance in random-access decoding. Note
+that our solution still achieves up to 57% savings in decoding time
+in many random-access decompression scenarios (i.e., accessing
+a 2D slice from a 3D dataset). Detailed analysis of random-access
+decompression savings is provided in §3.3 and §4.5.
+Figure 2: Overview of our proposed STZ
+3
+Design Methodology
+In this section, we introduce our proposed streaming lossy compression framework, STZ, illustrated in Figure 2, which provides
+high compression quality and speed. The outline is detailed below.
+In §3.1, we introduce our hierarchical partition approach, which
+enables streaming compression. We then present a series of hierarchical prediction optimizations to mitigate the spatial locality loss
+from partitioning, allowing our solution to achieve compression
+quality comparable to the SOTA non-streaming compressor SZ3.
+In §3.2, we extend our approach to a 3-level hierarchical partition,
+which further improves progressive decompression and randomaccess decompression capabilities, while also increasing compression and decompression speed compared to the 2-level partition,
+achieving up to 6.7× speed up compared to SZ3.
+In §3.3, we detail our framework’s progressive decompression
+and random-access decompression features, which enable users to
+progressively decompress a coarse (lower-resolution) version of the
+data and selectively decompress only the region of interest (ROI).
+We also propose an ROI selection module to identify the ROI.
+SC ’25, November 16–21, 2025, St Louis, MO, USA
+(a) Original data
+Wang et al.
+(b) Partition, SSIM=0.67, PSNR=107
+(c) SZ3, SSIM=0.95, PSNR=118
+(d) Ours, SSIM=0.95, PSNR=120
+Figure 3: Visual comparison (one 2× zoom in 2D slice) of original data and decompressed data produced by partition, SZ3, and our STZ on Nyx’s
+“baryon density” field. The “Rainbow Blended White” colormap in ParaView is used. The CR of partition, SZ3, and ours are 204, 205, and 206.
+Hierarchical Partition & Prediction
+Partition
+Cubic-Multi + Qt
+The progressive decompression feature allows users to decompress
+coarse representations of a dataset, reducing memory footprint
+and saving time during decompression and post-analysis when
+full-resolution recovery is unnecessary. To enable progressive decompression, data can be partitioned into multiple levels; however,
+this partitioning can disrupt spatial locality and reduce compression quality, as illustrated in Figure 3b; it can lead to significant
+distortion in the reconstructed data. Besides partitioning, SPERR
+uses wavelet transforms to decompose data. While wavelet transforms can leverage more spatial information and enable progressive
+decompression, they are computationally expensive and result in
+very low compression speeds (up to 37× slower than our solution).
+To achieve high speed, our solution adopts direct partitioning
+instead of using the wavelet transform. We then propose a hierarchical prediction approach with a series of optimizations to mitigate
+the loss of spatial locality caused by partitioning and to achieve
+significantly better compression quality, as shown in Figure 3d. We
+now detail the challenges introduced by partitioning and introduce
+our optimization methods.
+Figure 4: 2D example of 2-level partition.
+Hierarchical partition and challenges. To enable efficient
+progressive decompression and random-access decompression, we
+avoid the slow wavelet transform used in SPERR. Instead, we start
+by directly partitioning the original 3D data into 8 smaller subblocks (4 blocks for 2D data), each having half the resolution along
+every dimension. As shown in Figure 4, the partition uses a stride-2
+sampling along all axes with different starting offsets to ensure no
+overlap. After partition, each sub-block serves as a coarse representation of the original data. Progressive compression is achieved by
+compressing each sub-block separately using SZ3; decompressing
+just one sub-block (e.g., sub-block 𝑎) yields a coarse version of the
+data, while full-resolution data can be recovered by decompressing
+all the sub-blocks and reassembling them.
+2041
+Direct pred
+SZ3
+Multi-dim Interp
+Cubic-Multi-Qt + Adp
+Multi-dim + Qt
+3-level + All
+130
+PSNR
+3.1
+120
+110
+CR 0
+50
+100
+150
+200
+250
+300
+350
+Figure 5: Rate-distortion comparison of direct partition, our optimizations, and SZ3 on the Nyx dataset (top-right is better).
+However, this partitioning process disrupts spatial information
+and leads to lower compression quality. As shown in Figure 5,
+the overall rate-distortion performance of the naive partitioning
+method (labeled “Partition”, red triangle) is significantly worse
+than the original SZ3 (i.e., using SZ3 to compress the unpartitioned
+data, labeled “SZ3”, gray cycle). Figure 3 further illustrates that
+the data quality produced by the partitioning method is greatly
+worse than that of SZ3. Additionally, compressing each sampled
+sub-block separately can result in inconsistent compression errors
+and introduce noticeable “pixelated” artifacts as shown in Figure 3b.
+Prediction Optimization 1: Direct Prediction. To improve
+the quality of the decompressed data, we propose a method to better
+exploit the spatial information among partitioned sub-blocks. Each
+sub-block is highly similar to others because their sampling offsets
+differ by only 1 to 3 Manhattan units in the original grid (in the 3D
+case). As a result, redundancy exists among the sub-blocks, which
+can be leveraged to enhance compression quality. Specifically, we
+use one sub-block as a reference to predict the others and then
+compress the difference between the predicted and actual values.
+For example, as shown in the left part of Figure 6, a straightforward approach is to use the first sub-block 𝑎 as level 1 to directly
+predict the sub-blocks 𝑏/𝑐/𝑑 at level 2 (i.e., points in level 2 are
+predicted using the corresponding point in sub-block 𝑎), such that:
+𝑝𝑟𝑒𝑑𝑧,𝑦,𝑥 = 𝑎𝑧,𝑦,𝑥 .
+(1)
+In this case, the value to be compressed is the difference between
+the actual and predicted values. For instance, for sub-block 𝑏:
+𝑑𝑖 𝑓 𝑓𝑧,𝑦,𝑥 = 𝑏𝑧,𝑦,𝑥 − 𝑝𝑟𝑒𝑑𝑧,𝑦,𝑥 = 𝑏𝑧,𝑦,𝑥 − 𝑎𝑧,𝑦,𝑥 .
+(2)
+During decompression, 𝑏𝑧,𝑦,𝑥 is recovered using 𝑎𝑧,𝑦,𝑥 and the
+difference 𝑑𝑖 𝑓 𝑓𝑧,𝑦,𝑥 .
+STZ: A High Quality and High Speed Streaming Lossy Compression Framework for Scientific Data
+SC ’25, November 16–21, 2025, St Louis, MO, USA
+a000
+a000
+c000
+b000
+a001
+a000
+e000
+a101
+(a) Linear interpolation
+a010
+a011
+h000
+f000
+g000
+a100
+a001
+d000
+a001
+a101
+a100
+a101
+a100
+(b) Bi-linear interp.
+a110
+a111
+(c) Tri-linear interpolation
+Figure 7: Visualization of different interpolation cases in 3D data.
+Figure 6: 2D example of 2-level direct prediction (left) and multidimensional linear interpolation prediction (right).
+Although the similarity between sub-blocks results in relatively
+small and smooth differences, which improve compression effectiveness, the rate-distortion of the direct prediction method (labeled
+“Direct pred”, green diamond), as shown in Figure 5, offers only
+little improvement over the partition method, and only at low compression ratios (CR). Consequently, the compression performance
+of the direct prediction approach remains significantly lower than
+that of the original SZ3.
+Prediction Optimization 2: Multi-dimensional Interpolation. This approach’s main motivation is to leverage additional
+unused spatial information. As shown in the right part of Figure 6,
+the data point 𝑏 00 lies in middle between 𝑎 00 and 𝑎 01 . Therefore, instead of relying only on 𝑎 00 to directly predict 𝑏 00 , we use both 𝑎 00
+and 𝑎 01 via linear interpolation to leverage more spatial information
+and improve compression as follows:
+1
+1
+pred𝑧,𝑦,𝑥 = 𝑎𝑧,𝑦,𝑥 + 𝑎𝑧,𝑦,𝑥+1
+(3)
+2
+2
+For the data point 𝑑 00 , which lies in the middle between 𝑎 00 , 𝑎 01 ,
+𝑎 10 , and 𝑎 11 , we use its four neighboring points to predict 𝑑 00 via
+bi-linear interpolation:
+1
+1
+1
+1
+pred𝑧,𝑦,𝑥 = 𝑎𝑧,𝑦,𝑥 + 𝑎𝑧,𝑦,𝑥+1 + 𝑎𝑧,𝑦+1,𝑥 + 𝑎𝑧,𝑦+1,𝑥+1 (4)
+4
+4
+4
+4
+The linear and bi-linear interpolation is applied to other points in
+level 2, except for the boundary points, which are predicted directly
+from available data (e.g., 𝑑 11 from 𝑎 11 ).
+In the 3D case, there are seven sub-blocks at level 2 (the fullresolution level), as shown by the seven blue boxes in Figure 7.
+Three out of the seven sub-blocks at level 2 (i.e., sub-blocks 𝑏/𝑐/𝑒)
+are positioned with a 1-Manhattan-unit offset along one of the X, Y,
+or Z dimensions relative to sub-block 𝑎, as shown in Figure 7a. The
+points in these sub-blocks are next to two data points in sub-block 𝑎.
+For example, 𝑏 000 is adjacent to 𝑎 000 and 𝑎 001 . Points in sub-blocks
+𝑏 (and similarly in 𝑐 and 𝑒) are predicted using linear interpolation
+in Equation 3 with the two neighboring data in sub-block 𝑎.
+Another three sub-blocks (𝑑/𝑓 /𝑔) are positioned with a 2 Manhattan unit offset along two of the X, Y, or Z dimensions relative to
+sub-block 𝑎, as shown in Figure 7b. The points in these sub-blocks
+are adjacent to four data points in 𝑎. For example, 𝑓000 is adjacent
+to 𝑎 000 , 𝑎 001 , 𝑎 100 , and 𝑎 101 . Points in sub-blocks 𝑓 (and similarly
+in 𝑑 and 𝑔) are predicted using bilinear interpolation, as defined in
+Equation 4, based on the four adjacent data points in sub-block 𝑎.
+The final sub-block ℎ is positioned with a 3-Manhattan-unit
+offset along all three dimensions and is located diagonally to subblock 𝑎, as shown in Figure 7c. Each point in this sub-block is
+2042
+diagonally adjacent to eight data points in sub-block 𝑎 and is trilinearly interpolated using the eight adjacent points:
+1
+pred𝑥,𝑦,𝑧 =
+1
+1
+1 ∑︁ ∑︁ ∑︁
+𝑎𝑧+𝑘, 𝑦+𝑗, 𝑥+𝑖
+8
+𝑗=0 𝑖=0
+(5)
+𝑘=0
+As shown in Figure 5, multi-dimensional linear interpolation
+(labeled “Multi-dim Interp”, yellow diamond) can better leverage
+the spatial redundancy between level 1 and level 2 and improve the
+rate-distortion of the direct prediction.
+Prediction Optimization 3: Remove the SZ3 Prediction. We
+further propose removing SZ3’s original prediction step for level
+2 (i.e., sub-blocks 𝑏/𝑐/𝑑 in the 2D examples). SZ3 consists of three
+steps: first, it uses 1D spline interpolation along each dimension
+to predict the data; next, it quantizes the difference between the
+predicted and actual values; finally, it applies Huffman encoding to
+these differences.
+For the sub-blocks at level 2, predictions have already been made
+using sub-block 𝑎, and their spatial redundancy has been exploited.
+Therefore, there is no need to perform SZ3’s prediction step again.
+Specifically, after prediction using sub-block 𝑎, the difference between the predicted and original values at level 2 is saved for compression. These differences are relatively “random” (i.e., they exhibit
+little correlation). In such cases, performing a second round of SZ3
+prediction would (1) waste computational time and (2) degrade
+compression quality. As shown in Figure 5 (labeled “Multi-dim +
+Qt”, purple diamond), removing SZ3’s original prediction and applying only quantization and encoding during compression further
+improves the performance of our method.
+Prediction Optimization 4: Cubic Interpolation. We propose
+using cubic spline interpolation to further improve the prediction
+of linear interpolation. Cubic spline interpolation leverages more
+spatial information than linear interpolation and yields better performance when estimating a new data point using existing points.
+For example, as shown in Figure 8, to predict the data point 𝑏 01 ,
+in addition to 𝑎 01 and 𝑎 02 , we can also use 𝑎 00 and 𝑎 03 from 3 units
+away and apply cubic spline interpolation as follows:
+pred𝑧,𝑦,𝑥 = −
+1
+9
+9
+1
+𝑎𝑧,𝑦,𝑥 −1 + 𝑎𝑧,𝑦,𝑥 + 𝑎𝑧,𝑦,𝑥+1 − 𝑎𝑧,𝑦,𝑥+2 (6)
+16
+16
+16
+16
+We refer the reader to [47] for the detailed derivation of the cubic
+spline interpolation formula. In the 3D case, as shown in Figure 7a,
+sub-block 𝑏 is also predicted via cubic spline interpolation equation 6. Sub-blocks 𝑐 and 𝑒 follow a similar approach but apply the
+interpolation along different dimensions.
+For data point 𝑑 11 , we apply an approximate bi-cubic spline
+interpolation using the data points 𝑎 11 , 𝑎 21 , 𝑎 12 , 𝑎 22 , 𝑎 00 , 𝑎 30 , 𝑎 03 ,
+SC ’25, November 16–21, 2025, St Louis, MO, USA
+Wang et al.
+performance is achieved. As shown in Figure 5 (labeled “CubicMulti-Qt + Adp”, deep blue dotted square), the adaptive error bound
+allows our solution to achieve performance similar to SZ3 while
+yielding better data quality at higher compression ratios. As shown
+in Figure 3d, after applying all five optimizations, our solution closes
+the data quality gap between the direct partition method and the
+original SZ3, while achieving streaming compression capability.
+3.2
+Figure 8: 2D example of multi-dimensional cubic spline interpolation
+prediction for 𝑏 01 and 𝑑 11 , not all interpolations are shown for clarity.
+and 𝑎 33 , such that:
+1
+pred𝑥,𝑦,𝑧 =
+1
+9 ∑︁
+𝑎 𝑦+𝑗, 𝑥+𝑖, 𝑧 −
+32 𝑗,𝑖=0
+32
+∑︁
+𝑎 𝑦+𝑗, 𝑥+𝑖, 𝑧
+(7)
+𝑗,𝑖 ∈ { −1,2}
+This is achieved by combining two cubic spline interpolations: one
+along the diagonal formed by 𝑎 00 , 𝑎 11 , 𝑎 22 , and 𝑎 33 , and another
+along the orthogonal diagonal formed by 𝑎 03 , 𝑎 12 , 𝑎 21 , and 𝑎 30 .
+Each cubic spline interpolation contributes half of the weight. In
+the 3D case, as shown in Figure 7b, sub-block 𝑓 is also predicted
+via cubic spline interpolation using equation 7, with sub-blocks 𝑑
+and 𝑔 following the same approach along different dimensions.
+In the 3D case, where sub-block ℎ is positioned diagonally relative to 𝑎, as shown in Figure 7c. As mentioned, Points in sub-block
+ℎ are adjacent to eight data points in 𝑎 and can be tri-linearly interpolated using these eight points. To further apply an approximate
+tri-cubic spline interpolation, besides the eight neighboring points,
+eight additional outer-layer points are used for prediction (i.e.,
+Í
+𝑘,𝑗,𝑖 ∈ { −1,2} 𝑎𝑧+𝑘, 𝑦+𝑗, 𝑥+𝑖 ). This forms a combination of four cubic
+spline interpolations, each contributing 25% of the total weight:
+pred𝑥,𝑦,𝑧 =
+1
+9 ∑︁
+1
+𝑎𝑧+𝑘, 𝑦+𝑗, 𝑥+𝑖 −
+64
+64
+𝑘,𝑗,𝑖=0
+∑︁
+𝑎𝑧+𝑘, 𝑦+𝑗, 𝑥+𝑖
+𝑘,𝑗,𝑖 ∈ { −1,2}
+(8)
+As shown in Figure 5, cubic spline interpolation (labeled “CubicMulti + Qt”, light blue diamond) can further improve the compression performance compared to linear interpolation.
+Prediction Optimization 5: Adaptive Error Bound. The final
+optimization we propose is the use of adaptive error bounds across
+different hierarchical levels. Since level 1 (sub-block 𝑎) is used to
+predict level 2 (sub-blocks 𝑏/𝑐/𝑑 in 2D cases), its compression error
+propagates to level 2’s prediction. Thus, using a smaller error bound
+to level 1 can improve overall compression efficiency. Additionally,
+preserving high data quality in level 1 is a worthwhile trade-off, as
+it is frequently accessed in streaming decompression due to its role
+as a coarse representation that can be directly decompressed.
+To determine optimal error bounds for levels 1 and 2, we perform
+extensive experiments on different datasets and test various error
+bound ratios between the two levels. Our results show that when
+the error bound for level 2, 𝑒𝑏𝑙2 , is set to 2.5 times the error bound
+for level 1, 𝑒𝑏𝑙1 , i.e., 𝑒𝑏𝑙2 = 2.5 × 𝑒𝑏𝑙1 , the overall best compression
+2043
+Three-level Partition & Prediction
+The previously described partition and prediction method in §3.1
+(i.e., Figures 4, 6, and 8) uses a two-level scheme. Specifically, subblock 𝑎 represents the coarse representation (level 1) and is used to
+predict the other sub-blocks (𝑏, 𝑐, and 𝑑) at level 2.
+However, the coarsest level 1 still takes 12.5% of all the 3D data,
+meaning users must decompress at least 12.5% of the data to get
+a coarse representation, even when less data is sufficient, limiting
+the streaming capability. To further improve the flexibility of progressive decompression, allowing data to be decompressed at even
+lower resolutions, and to enhance both compression and decompression speed, we propose a three-level partitioning and prediction
+approach, as shown in Figure 9.
+In the three-level approach, the entire dataset (using 2D data as
+an example) is partitioned into seven sub-blocks: 𝐴, 𝐵, 𝐶, 𝐷, 𝑏, 𝑐, and
+𝑑. Sub-block 𝐴 serves as the coarsest level 1, obtained using stride-4
+sampling (the coarsest representation, marked in gray in the left
+of Figure 9), and is used to predict sub-blocks 𝐵, 𝐶, and 𝐷 at level
+2. Sub-blocks 𝐴, 𝐵, 𝐶, and 𝐷 together form a coarse representation
+using stride-2 sampling (marked in gray in the center of Figure 9),
+which is then used recursively to predict sub-blocks 𝑏, 𝑐, and 𝑑
+at level 3. The prediction mechanism between each level in the
+three-level method remains the same as in the two-level case. It
+uses multi-dimensional cubic spline interpolation combined with
+quantization and adaptive error bounds to ensure high compression
+quality. As shown in Figure 5, the 3-level partition method (labeled
+“3-level + All”, black dashed square) achieves compression quality
+similar to the 2-level partition and the original SZ3, with slightly
+better peak signal-to-noise ratio (PSNR) when the compression
+ratio is relatively high.
+Furthermore, the compression and decompression speed of the
+3-level partition is up to 2.2× faster than that of the 2-level partition.
+This improvement is due to the speed difference between SZ3’s and
+our prediction. In our framework, SZ3 is applied to the coarsest
+level 1, while our multi-dimensional prediction is used for the rest
+of the data. For a 2-level partition, SZ3 handles 12.5% of the data,
+and for a 3-level partition, it handles only 1.6%. Since our solution
+is faster than SZ3, applying it to a larger portion of the data results
+in an overall speedup for the 3-level partition. The speed of our
+solution and SZ3 will be detailed in §4.3.
+Our method supports more than three levels; however, for the
+tested dataset sizes, we do not propose a 4-level partition method, as
+a 3-level design already provides sufficient progressive decompression capability. For the 3-level design, the coarsest level accounts
+for only 1.6% (1/64) of the dataset, leaving 98.4% untouched during decompression. A 4-level design would increase this to 99.8%
+(511/512), offering only marginal benefits. For much larger datasets
+(e.g., 40963 ), we plan to offer an optional 4-level (or higher) version.
+STZ: A High Quality and High Speed Streaming Lossy Compression Framework for Scientific Data
+SC ’25, November 16–21, 2025, St Louis, MO, USA
+Figure 9: 2D example of three-level partition (right) and hierarchical interpolation prediction (left & center), linear interpolation was used for
+clarity. Level 1 (orange) predicts level 2 (blue), then levels 1 and 2 predict level 3. Red boxes and dashed arrows highlight examples of ROIs that
+can be decompressed independently via random-access decompression (i.e., only the predictions indicated by the dashed arrows are required).
+3.3
+Random Access De. & Progressive De.
+Progressive decompression. The hierarchical nature of our solution aligns well with the progressive decompression feature. In
+Figure 9, we decompose the original data into three levels with
+different resolutions. During decompression, users can choose to
+reconstruct only the lowest resolution by decompressing level 1.
+Users can then progressively recover higher resolutions by continuing to decompress level 2. The full-resolution data is obtained by
+additionally decompressing level 3 and assembling all three levels.
+Random access decompression. Random access decompression helps users reduce memory usage, decompression time, and
+I/O costs by allowing only the required data to be decompressed.
+Block-wise compressors like ZFP support random-access decompression because they partition the data into blocks, and each block
+is processed independently, with no dependencies between blocks
+during decompression. However, this block-wise approach breaks
+the spatial locality of the dataset and significantly degrades compression quality. In contrast, non-block-wise compressors like SZ3,
+MGARD, and SPERR capture more spatial information across the
+dataset and achieve higher compression quality. However, due to
+the strong data dependencies introduced by their transformation
+and prediction processes, they are not compatible with randomaccess decompression.
+Our solution overcomes this trade-off by enabling low-overhead
+random-access decompression for non-block-wise compression.
+This is achieved through our hierarchical partitioning and prediction. As discussed in §3.2 and illustrated in Figure 9, all data at levels
+2 and 3 depend only on nearby data from the previous resolution
+level, with no prediction dependencies within the same level.
+Specifically, after decompressing the coarsest level 1 (sub-blocks
+𝐴), we can use it to selectively predict only the ROI when reconstructing the full-resolution data. For example, as shown in Figure 9,
+to decompress only the ROI indicated by the 3 × 3 red square (from
+𝐴10 to 𝐷 10 ), we first decompress level 1 and then use it to predict
+only 𝐵 10 , 𝐶 10 , and 𝐷 10 in level 2. Next, level 1 and the points just
+decompressed in level 2 will predict only 𝑏 20 , 𝑐 20 , 𝑑 20 , 𝑐 21 , and 𝑏 30
+in level 3, skipping the prediction of all other points in levels 2
+2044
+and 3. Although decompressing level 1 introduces overhead, level 1
+takes only 1.6% of the 3D data. In other words, our solution reduces
+the prediction overhead during decompression by up to 98.4%.
+As mentioned in §2.3, although we can achieve 98.4% prediction
+savings in random-access decompression, decoding time savings
+cannot always be achieved because, to achieve high compression
+ratios, all points in each sub-block are encoded together. Specifically,
+during compression, levels 1 and 2 are used to predict level 3 (subblocks 𝑏/𝑐/𝑑), and their prediction errors are encoded. For high
+encoding efficiency, the prediction errors in each sub-block are
+encoded collectively. Therefore, during decompression to the red
+square from 𝐴10 to 𝐷 10 , to decode 𝑏 20 , 𝑐 20 , 𝑑 20 , 𝑐 21 , and 𝑏 30 , we
+must decode all points in sub-blocks 𝑏/𝑐/𝑑.
+On the other hand, decoding time can be saved when accessing
+a 1D ROI array, such as the 8 × 1 array from 𝐴00 to 𝑏 03 in Figure 9.
+In this case, for level 3, only 𝑏 00 , 𝑏 01 , 𝑏 02 , and 𝑏 03 need to be decompressed. This means that only sub-block 𝑏 in level 3 needs to be
+decoded, as no points in sub-blocks 𝑐 or 𝑑 are involved. This results
+in a 23 reduction in decoding time at level 3. Note that in 3D datasets,
+the equivalent of that 1D array is a 2D slice, which is commonly
+accessed for visualization and post-analysis. Therefore, for 2D slice
+random-access decompression, our solution can achieve up to 98.4%
+prediction savings and 58% decoding savings. The detailed saving
+for random-access decompression will be presented in §4.5.
+(a) Original data
+(b) ROI, 0.69%
+Figure 10: Vis of the ROI subset (right, 0.69% of the dataset) extracted
+using our ROI module, compared to the full Nyx dataset (left).
+SC ’25, November 16–21, 2025, St Louis, MO, USA
+Wang et al.
+PSNR
+Nyx
+WarpX
+120
+130
+100
+120
+CR 0
+50
+100
+150
+200
+250
+300
+350
+80
+0
+50
+100
+150
+Magnetic Reconnection
+250
+300
+350
+250
+300
+350
+70
+70
+PSNR
+200
+Miranda
+60
+60
+50
+50
+CR 0
+40
+50
+100
+150
+200
+250
+ZFP
+300
+350
+MGARD-X
+0
+50
+SPERR
+100
+SZ3
+150
+200
+Ours
+Figure 11: Rate-distortion of our solution and baselines on different datasets (top-right is better). Note that SPERR achieves high compression
+ratios on Magnetic Reconnection and Miranda, but its speed is significantly lower than other compressors, except for MGARD-X.
+Flexible scientific workflow. The progressive decompression
+feature can also work with random-access decompression and enable a flexible scientific workflow when determining the ROI of
+the dataset. For example, by using our streaming compression, the
+user can first progressively decompress the coarsest version of the
+dataset for visualization and identify the ROI. After that, users can
+selectively decompress only ROI with full resolution. The coarsest
+data dumped by our solution only takes 1.6% of the full data size,
+which can greatly save the decompression and visualization cost
+as well as the memory footprint. This is especially important for
+users analyzing large-scale datasets on local computers with limited resources and for even larger datasets (e.g., petabyte-scale) on
+HPC systems, where decompressed data may exceed the memory
+capacity of multiple nodes.
+Our framework also includes a module to help users to identify
+ROIs, such as 2D slices or 3D blocks. Users can choose range-based
+or maximum-value thresholding, depending on the simulation. For
+example, range thresholding suits fluid dynamic simulation because
+it effectively identifies the interface between two fluids of different
+densities, while maximum-value thresholding is more suitable for
+identifying the over-density halos in cosmology simulation. We
+compute the value range or max value for each slice/block, allowing
+users to specify a threshold or select the top 𝑥% as ROIs.
+For example, in the Nyx cosmology dataset, the ROI is the points
+with a value larger than 81.66 (to serve as the threshold for halo
+formation [9, 13]). Thus, the user can extract ROI using maximumvalue thresholding with 81.66. As shown in Fig. 10, by extracting
+just 0.69% of the dataset, our solution can capture all the halos,
+highlighting the importance of random-access decompression.
+4 Experimental Evaluation
+4.1 Experimental Setup
+Test platform. The test platform is equipped with 256 GB of memory and two 64-core, 2.25 GHz, AMD EPYC 7742 processors.
+Test datasets. We evaluated our solution on four different scientific simulation datasets, as shown in Table 2: the Nyx cosmology
+2045
+Table 2: Our tested datasets
+Per-Timestep
+Data Size
+Dataset
+Data type
+Dimensions
+Domain
+Nyx
+FP32
+5123
+512 MB
+Cosmology
+WarpX
+FP64
+2562 × 2048
+1024 MB
+Accelerator Physics
+Mag._Rec.
+FP32
+5123
+512 MB
+Plasma Physics
+Miranda
+FP32
+10243
+4096 MB
+Turbulence
+simulation [30], the WarpX plasma accelerator simulation (2022
+Gordon Bell Prize Winner) [14, 31], the Miranda hydrodynamics
+simulation [7], and the Magnetic Reconnection simulation [16].
+Comparison baseline. We compare our STZ with four SOTA
+compressors: SZ3, ZFP, MGARD-X (accelerated MGARD), and
+SPERR, using default settings. Our STZ is the only solution that supports both progressive decompression and random-access decompression. Other compressors support at most one of these features,
+while SZ3 supports neither. Please refer to Table 1 for details.
+4.2
+Evaluation on Rate-Distortion
+We plot the rate-distortion curves to compare compression quality,
+measured by the PSNR, at the same compression ratio (CR) across
+different compressors. As shown in Figure 11 (top-right indicates
+better performance), our streaming compression solution achieves
+overall high compression performance in terms of rate-distortion
+compared to the SOTA solutions.
+Specifically, our solution outperforms MGARD-X under all tested
+datasets and CRs. Furthermore, our solution yields a significantly
+better rate-distortion than ZFP. The main reason is that ZFP partitions the data into 43 blocks and processes them separately, which
+can cause each block to lose its neighbor’s spatial information,
+resulting in low compression quality.
+Compared to SZ3, our solution achieves similar rate-distortion
+performance. Although both our solution and SZ3 are based on
+interpolation, our method partitions the data to enable streaming,
+which breaks spatial locality and may reduce compression quality. However, we apply multi-dimensional interpolation, while SZ3
+STZ: A High Quality and High Speed Streaming Lossy Compression Framework for Scientific Data
+SC ’25, November 16–21, 2025, St Louis, MO, USA
+(a) Original data, WarpX
+(b) ZFP, SSIM=0.53, PSNR=61, CR=261
+(c) MGARD-X, SSIM=0.85, PSNR=76, CR=296
+(d) SZ3, SSIM=0.98, PSNR=96.8, CR=297
+(e) SPERR, SSIM=0.98, PSNR=96.1, CR=295
+(f) Ours, SSIM=0.99, PSNR=96.5, CR=297
+(g) Original data, Magnetic Reconnection
+(h) ZFP, SSIM=0.63, PSNR=46, CR=194
+(i) MGARD-X, SSIM=0.79, PSNR=51.2, CR=215
+(j) SZ3, SSIM=0.83, PSNR=51.6, CR=215
+(k) SPERR, SSIM=0.89, PSNR=57.8, CR=215
+(l) Ours, SSIM=0.83, PSNR=52.4, CR=215
+Figure 12: Visual comparison (iso-surface and zoom in 2D slice) of the original data and decompressed data produced by baseline compressors
+and our STZ at similar compression ratios (ZFP’s CRs are lower than the others), on the WarpX and Magnetic Reconnection datasets. For the
+Magnetic Reconnection dataset, the “Cool to Warm (Extended)” colormap in ParaView is used.
+uses only 1D interpolation. Our multidimensional approach captures more spatial redundancy, thereby compensating for the loss
+caused by partitioning and enabling streaming compression without sacrificing data quality. Specifically, we achieve slightly better
+reconstruction quality on Nyx and Magnetic reconnection than SZ3
+when the CR is relatively high, as shown in Figure 11, and slightly
+lower data quality on WarpX and Miranda when the CR is low.
+Compared to SPERR, our work achieves better quality across all
+CRs on Nyx and provides similar rate-distortion performance on
+WarpX at high CR. However, SPERR outperforms our solution on
+the Magnetic Reconnection and Miranda. Our understanding is that
+its global wavelet transform more effectively captures widespread
+high-frequency components for these two datasets (at the cost of
+slower speed, which will be shown in §4.3). The overall compression
+quality at the same CR is summarized in the last row of Table 1.
+2046
+In Figure 12, we further compare the visual quality (including
+SSIM [43], computed in image space) of the reconstructed data
+produced by different compressors at similar CRs (ZFP’s CRs are
+lower than the others) on the WarpX and Magnetic Reconnection
+datasets. The visual quality is consistent with the rate-distortion performance. Specifically, compared to MGARD (Figures 12c and 12i),
+our solution (Figures 12f and 12l) provides better visual quality on
+WarpX and slightly better visual quality on the Magnetic Reconnection dataset. Compared to SZ3 (Figures 12d and 12j), our solution
+achieves similar visual quality. Compared to SPERR (Figures 12e
+and 12k), our solution achieves similar visual quality on WarpX and
+slightly lower visual quality on the Magnetic Reconnection dataset.
+Compared to ZFP (Figures 12b and 12h), our solution provides significantly better visual quality, even at higher CRs. This is because
+ZFP produces noticeable block-wise compression artifacts due to
+its block-wise nature, which disrupts spatial coherence.
+SC ’25, November 16–21, 2025, St Louis, MO, USA
+Wang et al.
+Decompression
+Compression
+Table 3: Compression and decompression times (in seconds) for
+different compressors under Serial and OMP modes. OMP results are
+shown in blue. Asterisks (*) indicate that the SZ3 OMP configuration
+leads to a drop in compression ratio (CR). ZFP and MGARD-X do not
+support OpenMP acceleration for decompression.
+4.3
+Ours
+SZ3
+SPERR
+ZFP
+MGARDX
+NYX
+Serial
+OMP
+2.1
+0.3
+5.0
+1.3*
+44.6
+6.5
+1.3
+0.3
+15.7
+5.3
+Mag._Rec.
+Serial
+OMP
+2.1
+0.3
+5.0
+1.4
+32.8
+5.8
+1.1
+0.3
+17.4
+4.8
+WarpX
+Serial
+OMP
+2.5
+0.5
+4.0
+0.6
+44.3
+6.4
+2.1
+0.4
+17.9
+5.8
+Miranda
+Serial
+OMP
+18.5
+3.5
+44.9
+11.4*
+350.4
+49.4
+16.3
+2.8
+175.4
+42.4
+NYX
+Serial
+OMP
+1.1
+0.3
+7.2
+2.0*
+40.6
+5.8
+0.6
+N/A
+15.4
+N/A
+Mag._Rec.
+Serial
+OMP
+1.2
+0.3
+7.2
+2.0
+34.6
+5.7
+0.5
+N/A
+14.9
+N/A
+WarpX
+Serial
+OMP
+1.5
+0.4
+5.6
+0.8
+40.2
+5.1
+1.0
+N/A
+18.3
+N/A
+Miranda
+Serial
+OMP
+11.7
+2.9
+63.1
+17.0*
+327.3
+52.7
+6.7
+N/A
+132.6
+N/A
+Evaluation on Speed
+The compression and decompression times using different compressors on different datasets are shown in Table 3. To ensure fair
+speed comparisons, we selected error bounds that produce similar
+compression quality for SZ3 and our solution. In addition, SZ3,
+ZFP, SPERR, and MGARD-X were evaluated using the same error
+bound. Both serial and OpenMP modes were evaluated, utilizing
+eight OpenMP threads. ZFP and MGARD-X do not support OpenMP
+acceleration for decompression. Additionally, SZ3’s OpenMP mode
+can result in a reduced compression ratio compared to its serial
+mode, with up to 4% lower compression ratio on the Nyx dataset
+and up to 40% lower on the Miranda dataset.
+As shown in Table 3, in serial mode, our solution achieves the
+second-highest compression and decompression speeds among all
+baselines, only slower than ZFP, which is specifically designed
+for high-speed compression but offers low compression quality, as
+discussed in §4.2. Compared to SZ3, SPERR, and MGARD-X, our
+solution achieves compression speedups of up to 2.5×, 21×, and 9.5×,
+respectively. Additionally, our solution achieves decompression
+speedups of up to 6.5×, 37×, and 14× compared to SZ3, SPERR, and
+MGARD-X, respectively.
+In OpenMP mode, our solution achieves even higher compression speedups, as our low data dependency design provides high
+parallel efficiency. We achieve up to 4.7×, 22×, and 18× compression speedups over SZ3, SPERR, and MGARD-X. Our compression
+speed is also comparable to ZFP when using OpenMP. For decompression, we achieve speedups of up to 6.7× and 19× over SZ3 and
+SPERR. Moreover, since our solution supports OpenMP acceleration
+for decompression while ZFP does not, we achieve overall higher
+compression and decompression speeds than ZFP in OpenMP mode.
+2047
+4.4
+Discussion on the Different Interpolation
+Methods Used by SZ3 and STZ
+Although both SZ3 and our STZ are based on interpolation prediction, there are three key differences in the interpolation.
+Multi-dimensional interpolation. First, SZ3 employs only 1D
+interpolation, while our solution uses multi-dimensional interpolation. Our approach leverages more spatial information and mitigates
+the negative effects introduced by hierarchical partitioning, which
+is necessary to support streaming compression. Thus, our method
+achieves a compression quality similar to SZ3 while supporting
+random-access decompression and progressive decompression.
+Better caching efficiency. Second, our prediction method has
+better data locality. Our prediction method uses nearby data points
+to perform multi-dimensional interpolation, which is more cachefriendly. In contrast, SZ3 performs long-range 1D interpolation. For
+example, for data with a size of 𝑁 , SZ3 will use points 𝑖 0 and 𝑖 𝑁 to
+interpolate 𝑖 𝑁 , resulting in large memory jumps across the data ar2
+ray and more cache misses. In contrast, our approach accesses data
+locally and can process the entire data array sequentially in a cachealigned manner, leading to significantly better cache performance,
+thus higher compression and decompression speed.
+Less data dependency. Last, our prediction involves less data
+dependency. Prediction-based compressors like SZ3 must use decompressed data for predictions to avoid error propagation and
+ensure that errors remain within the error bound. In SZ3, the interpolation process creates strong dependencies among data points.
+At least half of the data points are used to predict others, so these
+points must be decompressed during compression to avoid error
+propagation, which incurs high overhead. In contrast, in our solution, all data points in level 3 depend solely on levels 1 and 2, with
+no dependencies among themselves. Level 3 accounts for 87.5% of
+the 3D data, and since no data point is dependent on level 3, 87.5% of
+the data does not require decompression during compression. This
+significantly reduces decompression overhead compared to SZ3 and
+improves compression speed. Moreover, reduced data dependency
+improves parallel efficiency, allowing our solution to achieve even
+higher speedup than SZ3 in OpenMP mode, as mentioned in §4.3.
+4.5
+Evaluation on Streaming Decompression
+We now demonstrate the streaming decompression capability of
+our solution, which includes both progressive decompression and
+random-access decompression.
+Progressive decompression. Figure 13 shows the visualization
+of the original data of the Miranda dataset, as well as the progressive
+reconstruction data at full (10243 ), coarse (5123 ), and the coarsest
+(2563 ) resolution. At the coarsest and coarse levels, some of the
+details were lost due to down-sampling, however, the overall structure remains clear even for the coarsest resolution. This feature
+allows users to grasp the overall structure and efficiently identify
+ROI for selective high-resolution reconstruction.
+Moreover, the decompression time for the coarsest and coarse
+levels is much shorter than that of the full-resolution. Progressive
+decompression can also greatly reduce memory usage during decompression and visualization, and shorten the visualization time.
+STZ: A High Quality and High Speed Streaming Lossy Compression Framework for Scientific Data
+(a) Original data, 10243
+(b) 10243 , SSIM=0.96, De. time=11.4s
+SC ’25, November 16–21, 2025, St Louis, MO, USA
+(c) 5123 , SSIM=0.86, De. time=2.5s
+(d) 2563 , SSIM=0.74, De. time=0.71s
+Figure 13: Volume rendering of the original data of the Miranda dataset and progressively decompressed data produced by our STZ at different
+resolutions. The CR of the full-resolution data is 447, and the corresponding decompression times (in seconds) are shown for each resolution.
+Random access decompression. Table 4 presents the decompression time for the full dataset, for random-access decompression
+of a 1003 ROI box, and to a 10242 2D slice of the Miranda dataset.
+As shown in the last column, our solution achieves overall decompression time savings of up to 67.5% for 3D box access and up to
+82.5% for 2D slice access.
+Table 4: Time breakdown (in sec) to decompress all data, randomaccess one 3D ROI box, and one 2D slice in the Miranda dataset. The
+blue text indicates the stages that can achieve savings in randomaccess decompression.
+Case
+L1 SZ3
+L2 dec.
+L2 pre.
+L2 rec.
+L3 dec.
+L3 pre.
+L3 rec.
+Sum
+All
+Box
+Slice
+0.71
+0.71
+0.71
+0.44
+0.44
+0.18
+0.64
+3E-3
+1E-3
+0.68
+3E-4
+2E-4
+2.64
+2.64
+1.15
+4.83
+2E-2
+7E-3
+1.80
+4E-3
+2E-3
+11.7
+3.8
+2.1
+Our decompression process includes multiple steps. First, SZ3
+decompresses the coarsest level 1 (first column, L1 SZ3). Then, the
+prediction errors of level 2 are decoded (L2 dec.), and level 1 is used
+to predict and restore level 2 with these errors (L2 pre.). Levels 1
+and 2 are then reassembled to reconstruct a coarse representation of
+the data (L2 rec.), which is the reverse of the partitioning performed
+during compression (Figure 4). Finally, level 3 follows the same
+procedure, using levels 1 and 2 for prediction and reconstructs the
+full-resolution data.
+As shown in Table 4, when decompressing either a 3D ROI box or
+a 2D slice, the prediction and reconstruction stages for levels 2 and
+3 (L2/3 pre. and L2/3 rec.) achieve nearly 100% savings compared to
+prediction and reconstruction of the entire dataset. This efficiency
+comes from our method’s ability to avoid intra-level dependencies
+in prediction, allowing computing only the ROI during prediction
+and reconstruction while not touching the remaining data.
+As for the decoding stages at levels 2 and 3 (i.e., L2/3 dec.), there
+exist dependencies because the data points within each sub-block
+are encoded together. This dependency necessitates decoding the
+entire sub-block to access specific data points. As discussed in §3.3,
+random-access decompression of a 3D ROI box requires decoding
+all relevant sub-blocks, resulting in no decoding time savings. In
+contrast, for random-access decompression of a 2D slice, only a
+subset of sub-blocks (e.g., 3 out of 7 in level 3) needs to be decoded,
+leading to up to 57% savings in decoding time.
+2048
+5
+Conclusion and Future Work
+We propose a streaming compression framework that enables ondemand data access and flexible analysis workflows. While all SOTA
+scientific lossy compressors support at most one of progressive
+decompression or random-access decompression, they come with
+significant sacrifices in compression quality or speed. Our work
+supports both streaming decompression features and provides high
+compression quality and high speed. Evaluation against four SOTA
+lossy compressors on four scientific datasets shows that our work
+achieves the best overall trade-off between compression quality and
+speed. Specifically, our work achieves similar compression quality
+and up to 4.7× compression speed and 6.7× decompression speed
+compared to the non-streaming compressor SZ3.
+In the future, we will improve the speed of our work through
+code optimization and leverage GPUs for further acceleration. We
+also plan to dynamically incorporate other cubic spline polynomial constraints (currently using only the not-a-knot constraint)
+to improve compression quality. In addition, we intend to enable
+random-access Huffman decoding to further reduce the overhead
+in random-access decompression."
+Acknowledgments
+This work was supported by the U.S. Department of Energy through
+the Los Alamos National Laboratory. Los Alamos National Laboratory is operated by Triad National Security, LLC, for the National
+Nuclear Security Administration of U.S. Department of Energy
+(Contract No. 89233218CNA000001). This work was also supported
+in part by the National Science Foundation under Grant Numbers 2311876, 2326495, 2247060, 2247080, 2344717, and 2514035.
+This work was also supported by the U.S. Department of Energy
+(DOE) RAPIDS-2 SciDAC project under contract number DE-AC0500OR22725.
+SC ’25, November 16–21, 2025, St Louis, MO, USA
+Wang et al.
+References
+[1] Mark Ainsworth, Ozan Tugluk, Ben Whitney, and Scott Klasky. 2018. Multilevel
+techniques for compression and reduction of scientific data—the univariate case.
+Computing and Visualization in Science 19, 5–6 (2018), 65–76.
+[2] Allison H Baker, Dorit M Hammerling, and Terece L Turton. 2019. Evaluating
+image quality measures to assess the impact of lossy data compression applied
+to climate simulation data. In Computer Graphics Forum, Vol. 38. Wiley Online
+Library, 517–528.
+[3] Rafael Ballester-Ripoll, Peter Lindstrom, and Renato Pajarola. 2020. TTHRESH:
+Tensor Compression for Multidimensional Visual Data. IEEE Transactions on
+Visualization and Computer Graphics 26, 9 (2020), 2891–2903. https://doi.org/10.
+1109/TVCG.2019.2904063
+[4] Harsh Bhatia, Duong Hoang, Nate Morrical, Valerio Pascucci, Peer-Timo Bremer,
+and Peter Lindstrom. 2022. AMM: Adaptive multilinear meshes. IEEE Transactions
+on Visualization and Computer Graphics 28, 6 (2022), 2350–2363.
+[5] Franck Cappello, Sheng Di, Sihuan Li, Xin Liang, Ali Murat Gok, Dingwen Tao,
+Chun Hong Yoon, Xin-Chuan Wu, Yuri Alexeev, and Frederic T Chong. 2019.
+Use cases of lossy compression for floating-point data in scientific data sets. The
+International Journal of High Performance Computing Applications (2019).
+[6] Xinyu Chen, Jiannan Tian, Ian Beaver, Cynthia Freeman, Yan Yan, Jianguo Wang,
+and Dingwen Tao. 2024. FCBench: Cross-Domain Benchmarking of Lossless
+Compression for Floating-Point Data. Proceedings of the VLDB Endowment 17, 6
+(2024), 1418–1431.
+[7] Andrew W. Cook, William Cabot, and Paul L. Miller. 2004. The Mixing Transition
+in Rayleigh-Taylor Instability. Journal of Fluid Mechanics 511 (2004), 333–362.
+https://doi.org/10.1017/S0022112004009681
+[8] cuZFP. 2023. https://github.com/LLNL/zfp/tree/develop/src/cuda_zfp. Online.
+[9] Marc Davis, George Efstathiou, Carlos S Frenk, and Simon DM White. 1985. The
+evolution of large-scale structure in a universe dominated by cold dark matter.
+The Astrophysical Journal 292 (1985), 371–394.
+[10] Peter Deutsch. 1996. GZIP file format specification version 4.3. Technical Report.
+[11] Sheng Di and Franck Cappello. 2016. Fast error-bounded lossy HPC data compression with SZ. In 2016 IEEE International Parallel and Distributed Processing
+Symposium. IEEE, 730–739.
+[12] Sheng Di, Jinyang Liu, Kai Zhao, Xin Liang, Robert Underwood, Zhaorui Zhang,
+Milan Shah, Yafan Huang, Jiajun Huang, Xiaodong Yu, et al. 2024. A Survey
+on Error-Bounded Lossy Compression for Scientific Datasets. arXiv preprint
+arXiv:2404.02840 (2024).
+[13] Bo Fang, Daoce Wang, Sian Jin, Quincey Koziol, Zhao Zhang, Qiang Guan,
+Surendra Byna, Sriram Krishnamoorthy, and Dingwen Tao. 2021. Characterizing
+Impacts of Storage Faults on HPC Applications: A Methodology and Insights.
+409–420. https://doi.org/10.1109/Cluster48925.2021.00048
+[14] L. Fedeli, A. Huebl, F. Boillod-Cerneux, T. Clark, K. Gott, C. Hillairet, S. Jaure, A.
+Leblanc, R. Lehe, A. Myers, C. Piechurski, M. Sato, N. Zaim, W. Zhang, J. Vay, and
+H. Vincenti. 2022. Pushing the Frontier in the Design of Laser-Based Electron
+Accelerators with Groundbreaking Mesh-Refined Particle-In-Cell Simulations on
+Exascale-Class Supercomputers. In SC22: International Conference for High Performance Computing, Networking, Storage and Analysis. IEEE Computer Society,
+Los Alamitos, CA, USA, 1–12. https://doi.org/10.1109/SC41404.2022.00008
+[15] Qian Gong, Jieyang Chen, Ben Whitney, Xin Liang, Viktor Reshniak, Tania
+Banerjee, Jaemoon Lee, Anand Rangarajan, Lipeng Wan, Nicolas Vidal, Qing
+Liu, Ana Gainaru, Norbert Podhorszki, Richard Archibald, Sanjay Ranka, and
+Scott Klasky. 2023. MGARD: A multigrid framework for high-performance,
+error-controlled data compression and refactoring. SoftwareX 24 (2023), 101590.
+[16] Fan Guo, Hui Li, William Daughton, and Yi-Hsin Liu. 2014. Formation of Hard
+Power Laws in the Energetic Particle Spectra Resulting from Relativistic Magnetic
+Reconnection. Phys. Rev. Lett. 113 (oct 2014), 155005. Issue 15. https://doi.org/10.
+1103/PhysRevLett.113.155005
+[17] Yafan Huang, Sheng Di, Guanpeng Li, and Franck Cappello. 2024. cuSZp2: A GPU
+Lossy Compressor with Extreme Throughput and Optimized Compression Ratio.
+In SC24: International Conference for High Performance Computing, Networking,
+Storage and Analysis. IEEE, 1–18.
+[18] Axel Huebl, René Widera, Felix Schmitt, Alexander Matthes, Norbert Podhorszki,
+Jong Youl Choi, Scott Klasky, and Michael Bussmann. 2017. On the Scalability
+of Data Reduction Techniques in Current and Upcoming HPC Systems from an
+Application Perspective. In High Performance Computing, Julian M. Kunkel, Rio
+Yokota, Michela Taufer, and John Shalf (Eds.). Springer International Publishing,
+Cham, 15–29. https://doi.org/10.1007/978-3-319-67630-2_2
+[19] Jinda Jia, Cong Xie, Hanlin Lu, Daoce Wang, Hao Feng, Chengming Zhang, Baixi
+Sun, Haibin Lin, Zhi Zhang, Xin Liu, and Dingwen Tao. 2024. SDP4Bit: Toward
+4-bit Communication Quantization in Sharded Data Parallelism for LLM Training.
+In Advances in Neural Information Processing Systems, A. Globerson, L. Mackey,
+D. Belgrave, A. Fan, U. Paquet, J. Tomczak, and C. Zhang (Eds.), Vol. 37. Curran
+Associates, Inc., 8734–8759. https://proceedings.neurips.cc/paper_files/paper/
+2024/file/10826a1a80f816ea98d559d7c7a97973-Paper-Conference.pdf
+[20] Wenqi Jia, Zhewen Hu, Youyuan Liu, Boyuan Zhang, Jinzhen Wang, Jinyang Liu,
+Wei Niu, Stavros Kalafatis, Junzhou Huang, Sian Jin, et al. 2024. NeurLZ: An
+2049
+Online Neural Learning-Based Method to Enhance Scientific Lossy Compression.
+arXiv preprint arXiv:2409.05785 (2024).
+[21] Sian Jin, Sheng Di, Frédéric Vivien, Daoce Wang, Yves Robert, Dingwen Tao,
+and Franck Cappello. 2024. Concealing Compression-accelerated I/O for HPC
+Applications through In Situ Task Scheduling. In EuroSys 2024.
+[22] Shaomeng Li, Peter Lindstrom, and John Clyne. 2023. Lossy Scientific Data
+Compression With SPERR. In 2023 IEEE International Parallel and Distributed
+Processing Symposium (IPDPS). 1007–1017. https://doi.org/10.1109/IPDPS54959.
+2023.00104
+[23] Xin Liang, Sheng Di, Dingwen Tao, Sihuan Li, Shaomeng Li, Hanqi Guo, Zizhong
+Chen, and Franck Cappello. 2018. Error-controlled lossy compression optimized
+for high compression ratios of scientific datasets. In 2018 IEEE International
+Conference on Big Data. IEEE, 438–447.
+[24] Xin Liang, Qian Gong, Jieyang Chen, Ben Whitney, Lipeng Wan, Qing Liu, David
+Pugmire, Rick Archibald, Norbert Podhorszki, and Scott Klasky. 2021. Errorcontrolled, progressive, and adaptable retrieval of scientific data with multilevel
+decomposition. In Proceedings of the International Conference for High Performance
+Computing, Networking, Storage and Analysis. 1–13.
+[25] Peter Lindstrom. 2014. Fixed-rate compressed floating-point arrays. IEEE Transactions on Visualization and Computer Graphics 20, 12 (2014), 2674–2683.
+[26] Jinyang Liu, Jiannan Tian, Shixun Wu, Sheng Di, Boyuan Zhang, Robert Underwood, Yafan Huang, Jiajun Huang, Kai Zhao, Guanpeng Li, et al. 2024. CUSZ-i:
+High-Ratio Scientific Lossy Compression on GPUs with Optimized Multi-Level
+Interpolation. In SC24: International Conference for High Performance Computing,
+Networking, Storage and Analysis. IEEE, 1–15.
+[27] Tao Lu, Qing Liu, Xubin He, Huizhang Luo, Eric Suchyta, Jong Choi, Norbert
+Podhorszki, Scott Klasky, Mathew Wolf, Tong Liu, et al. 2018. Understanding
+and modeling lossy compression schemes on HPC scientific data. In 2018 IEEE
+International Parallel and Distributed Processing Symposium. IEEE, 348–357.
+[28] Huizhang Luo, Dan Huang, Qing Liu, Zhenbo Qiao, Hong Jiang, Jing Bi, Haitao
+Yuan, Mengchu Zhou, Jinzhen Wang, and Zhenlu Qin. 2019. Identifying Latent
+Reduced Models to Precondition Lossy Compression. In 2019 IEEE International
+Parallel and Distributed Processing Symposium. IEEE.
+[29] Victor AP Magri and Peter Lindstrom. 2023. A general framework for progressive
+data compression and retrieval. IEEE Transactions on Visualization and Computer
+Graphics 30, 1 (2023), 1358–1368.
+[30] NYX simulation. 2019. https://amrex-astro.github.io/Nyx/. Online.
+[31] Oak Ridge Leadership Computing Facility. 2023. WarpX, granted early access
+to the exascale supercomputer Frontier, receives the high-performance computing
+world’s highest honor. https://www.olcf.ornl.gov/2022/11/17/plasma-simulationcode-wins-2022-acm-gordon-bell-prize/ Online.
+[32] Baixi Sun, Weijin Liu, J. Gregory Pauloski, Jiannan Tian, Jinda Jia, Daoce Wang,
+Boyuan Zhang, Mingkai Zheng, Sheng Di, Sian Jin, Zhao Zhang, Xiaodong Yu,
+Kamil A. Iskra, Pete Beckman, Guangming Tan, and Dingwen Tao. 2025. COMPSO:
+Optimizing Gradient Compression for Distributed Training with Second-Order
+Optimizers. In Proceedings of the 30th ACM SIGPLAN Annual Symposium on
+Principles and Practice of Parallel Programming (Las Vegas, NV, USA) (PPoPP ’25).
+Association for Computing Machinery, New York, NY, USA, 212–224. https:
+//doi.org/10.1145/3710848.3710852
+[33] Dingwen Tao, Sheng Di, Zizhong Chen, and Franck Cappello. 2017. Significantly
+improving lossy compression for scientific data sets based on multidimensional
+prediction and error-controlled quantization. In 2017 IEEE International Parallel
+and Distributed Processing Symposium. IEEE, 1129–1139.
+[34] Jiannan Tian, Sheng Di, Xiaodong Yu, Cody Rivera, Kai Zhao, Sian Jin, Yunhe
+Feng, Xin Liang, Dingwen Tao, and Franck Cappello. 2021. Optimizing errorbounded lossy compression for scientific data on GPUs. In 2021 IEEE International
+Conference on Cluster Computing (CLUSTER). IEEE, 283–293.
+[35] Jiannan Tian, Sheng Di, Kai Zhao, Cody Rivera, Megan Hickman Fulp, Robert
+Underwood, Sian Jin, Xin Liang, Jon Calhoun, Dingwen Tao, and Franck Cappello. 2020. cuSZ: An Efficient GPU-Based Error-Bounded Lossy Compression
+Framework for Scientific Data. (2020), 3–15.
+[36] Alex Ulmer, Marco Angelini, Jean-Daniel Fekete, Jörn Kohlhammer, and Thorsten
+May. 2024. A Survey on Progressive Visualization. IEEE Transactions on Visualization and Computer Graphics 30, 9 (2024), 6447–6467. https://doi.org/10.1109/
+TVCG.2023.3346641
+[37] Daoce Wang. 2025. Designing Efficient Data Reduction Approaches for MultiResolution Simulations on HPC Systems. Ph.D. Dissertation. Indiana University.
+[38] Daoce Wang, Pascal Grosset, Jesus Pulido, Tushar M. Athawale, Jiannan Tian, Kai
+Zhao, Zarija Lukić, Axel Huebl, Zhe Wang, James Ahrens, and Dingwen Tao. 2024.
+A High-Quality Workflow for Multi-Resolution Scientific Data Reduction and
+Visualization. In SC24: International Conference for High Performance Computing,
+Networking, Storage and Analysis. 1–18. https://doi.org/10.1109/SC41406.2024.
+00091
+[39] Daoce Wang, Jesus Pulido, Pascal Grosset, Sian Jin, Jiannan Tian, James Ahrens,
+and Dingwen Tao. 2022. TAC: Optimizing Error-Bounded Lossy Compression
+for Three-Dimensional Adaptive Mesh Refinement Simulations. In Proceedings of
+the 31st International Symposium on High-Performance Parallel and Distributed
+Computing. 135–147.
+STZ: A High Quality and High Speed Streaming Lossy Compression Framework for Scientific Data
+[40] Daoce Wang, Jesus Pulido, Pascal Grosset, Sian Jin, Jiannan Tian, Kai Zhao, James
+Ahrens, and Dingwen Tao. 2024. TAC+: Optimizing Error-Bounded Lossy Compression for 3D AMR Simulations. IEEE Transactions on Parallel and Distributed
+Systems 35, 3 (2024), 421–438.
+[41] Daoce Wang, Jesus Pulido, Pascal Grosset, Jiannan Tian, James Ahrens, and Dingwen Tao. 2023. Analyzing impact of data reduction techniques on visualization
+for amr applications using amrex framework. In Proceedings of the SC’23 Workshops of The International Conference on High Performance Computing, Network,
+Storage, and Analysis. 263–271.
+[42] Daoce Wang, Jesus Pulido, Pascal Grosset, Jiannan Tian, Sian Jin, Houjun Tang,
+Jean Sexton, Sheng Di, Kai Zhao, Bo Fang, et al. 2023. AMRIC: A Novel In Situ
+Lossy Compression Framework for Efficient I/O in Adaptive Mesh Refinement
+Applications. In Proceedings of the International Conference for High Performance
+Computing, Networking, Storage and Analysis. 1–15.
+[43] Zhou Wang, Alan C Bovik, Hamid R Sheikh, and Eero P Simoncelli. 2004. Image
+quality assessment: from error visibility to structural similarity. IEEE transactions
+on image processing 13, 4 (2004), 600–612.
+[44] Xuan Wu, Qian Gong, Jieyang Chen, Qing Liu, Norbert Podhorszki, Xin Liang,
+and Scott Klasky. 2024. Error-controlled Progressive Retrieval of Scientific Data
+under Derivable Quantities of Interest. In SC24: International Conference for High
+Performance Computing, Networking, Storage and Analysis. IEEE, 1–16.
+[45] Zhuoxun Yang, Sheng Di, Longtao Zhang, Ruoyu Li, Ximiao Li, Jiajun
+Huang, Jinyang Liu, Franck Cappello, and Kai Zhao. 2025. IPComp: Interpolation Based Progressive Lossy Compression for Scientific Applications.
+arXiv:2502.04093 [cs.DC] https://arxiv.org/abs/2502.04093
+[46] Emanuel Zgraggen, Alex Galakatos, Andrew Crotty, Jean-Daniel Fekete, and Tim
+Kraska. 2017. How Progressive Visualizations Affect Exploratory Analysis. IEEE
+Transactions on Visualization and Computer Graphics 23, 8 (2017), 1977–1987.
+https://doi.org/10.1109/TVCG.2016.2607714
+[47] Kai Zhao, Sheng Di, Maxim Dmitriev, Thierry-Laurent D Tonellot, Zizhong Chen,
+and Franck Cappello. 2021. Optimizing error-bounded lossy compression for
+scientific data by dynamic spline interpolation. In 2021 IEEE 37th International
+Conference on Data Engineering (ICDE). IEEE, 1643–1654.
+[48] Qing Zheng, Brian Atkinson, Daoce Wang, Jason Lee, John Patchett, Dominic
+Manno, and Gary Grider. 2024. Accelerating Viz Pipelines Using Near-Data
+Computing: An Early Experience. In SC24-W: Workshops of the International
+Conference for High Performance Computing, Networking, Storage and Analysis.
+IEEE, 326–335.
+[49] Zstandard. 2020. http://facebook.github.io/zstd/.
+2050
+SC ’25, November 16–21, 2025, St Louis, MO, USA
+SC ’25, November 16–21, 2025, St Louis, MO, USA
+Wang et al.
+Appendix: Artifact Description/Artifact Evaluation
+Artifact Description (AD)
+A Overview of Contributions and Artifacts
+A.1 Paper’s Main Contributions
+C1 We propose STZ, a streaming compression framework that
+provides high compression quality, even comparable compression quality to the non-streaming compressor SZ3.
+C2 Our STZ achieves high compression and decompression
+speeds, with high parallel efficiency.
+C3 STZ supports both progressive decompression and random
+access decompression.
+A.2
+Computational Artifacts
+𝐴1−3 https://doi.org/10.5281/zenodo.16740716
+Artifact ID
+Contributions
+Supported
+Related
+Paper Elements
+𝐴1
+𝐶1
+Figures 11
+𝐴2
+𝐶2
+Table 3
+𝐴3
+𝐶3
+Figures 13 (caption)
+Table 4
+Installation and Deployment. To streamline the review process, we
+will prepare a Singularity image for the evaluation. The user needs
+to install Singularity, download our pre-built Singularity image
+file, and then run the image file to start the evaluation. Then, the
+original four baseline compressors and our STZ need to be installed.
+Lastly, the four datasets need to be downloaded.
+Artifact Execution
+The workflow consists of two tasks: 𝑇1 and 𝑇2 , with a dependency
+𝑇1 → 𝑇2 . We provide scripts for both 𝑇1 and 𝑇2 . Task 𝑇1 is first
+performed to generate decompressed data using our STZ and the
+baselines. Subsequently, 𝑇2 evaluates the compression ratio and
+decompressed data quality in terms of PSNR for our STZ and the
+baselines. Regarding experimental parameters, we utilize the same
+input data size and error bound as in the main paper, using the same
+input dataset. The detailed input parameters will be included in
+the scripts for ease of use. The workflow will be executed multiple
+times on different datasets using different error bounds to generate
+the rate-distortion curve.
+Artifact Analysis (incl. Outputs)
+B Artifact Identification
+B.1 Computational Artifact 𝐴1
+Relation To Contributions
+See TABLE A.2 above for relations among each artifact, contribution
+supported, and related paper elements.
+Expected Results
+The expected results of the experiments should be consistent with
+those of the main paper. Specifically, under the same compression
+ratio, our STZ provides better compression quality than the baseline
+compressors MGARDX and ZFP, comparable compression quality
+to SZ3, and overall lower compression quality compared to SPERR.
+Scripts for the complete workflow will be provided.
+Expected Reproduction Time (in Minutes)
+The expected computational time for this artifact is approximately
+10 min, including around 6 min for Artifact Setup, 2 min for Artifact
+Execution, and 2 min for Artifact Analysis.
+Artifact Setup (incl. Inputs)
+Hardware. Processor: ≥ 16 cores; Storage: ≥ 128 GBs; Memory: ≥
+192 GB RAM
+Software. gcc/9.4.0 (or 9.3.0); cmake (≥3.23); python/3.8; Our STZ
+and four baselines compressors (SZ3, ZFP, SPERR, and MGARDX)
+(all packed): https://github.com/FabioGrosso/SC25-STZ
+Datasets / Inputs. The needed datasets for the evaluation can be
+obtained at (https://sdrbench.github.io/) and
+(https://klacansky.com/open-scivis-datasets/). The detailed input
+configurations will be included in the scripts we provided.
+2051
+𝑇2 will output the rate-distortion results of our STZ and the baselines on the command line, with our STZ expected to demonstrate
+better performance compared to MGARD and ZFP, overall similar performance compared to SZ3, and overall worse performance
+compared to SPERR, as evidenced by the results in Figure 11 in the
+main paper.
+B.2 Computational Artifact 𝐴2
+Expected Results
+The expected results of the experiments are consistent with those of
+the main paper. Specifically, our STZ provides higher compression
+and decompression speeds than SZ3, SPERR, and MGARDX on all
+datasets under both serial and OpenMP modes (MGARDX does not
+support OpenMP for decompression). Compared to ZFP, our STZ
+is slower under serial mode and slightly slower under OpenMP
+mode (ZFP only supports OpenMP for compression). Scripts for the
+complete workflow will be provided.
+Expected Reproduction Time (in Minutes)
+The expected computational time for this artifact is approximately
+5 min, including around 3 min for Artifact Execution and 2 min for
+Artifact Analysis.
+Artifact Setup (incl. Inputs)
+Hardware. Same as 𝐴1 .
+Software. Fulfilled by 𝐴1 .
+Datasets / Inputs. Fulfilled by 𝐴1 .
+Installation and Deployment. Fulfilled by 𝐴1 .
+STZ: A High Quality and High Speed Streaming Lossy Compression Framework for Scientific Data
+Artifact Execution
+The workflow consists of two tasks: 𝑇1 and 𝑇2 , with a dependency
+𝑇1 → 𝑇2 . We provide scripts for both 𝑇1 and 𝑇2 . Task 𝑇1 is first performed to generate decompressed data using our STZ and the baselines. Subsequently, 𝑇2 evaluates the compression and decompression time for our STZ and the baselines under serial and OpenMP
+modes. For experimental parameters, we utilize the same input
+data size due to the identical input data. We also apply the same
+error bounds as in the paper. The detailed input parameters will
+be included in the scripts. The workflow will be executed multiple
+times on different datasets using different error bounds.
+Artifact Analysis (incl. Outputs)
+𝑇2 will output the compression and decompression time of our STZ
+and the baselines on the command line, with our STZ expected to
+demonstrate higher speed compared to all the baseline compressors
+except ZFP.
+B.3 Computational Artifact 𝐴3
+Expected Results
+The expected results of the experiments are consistent with those of
+the main paper. Specifically, our STZ can support both progressive
+decompression and random access decompression. Scripts for the
+complete workflow will be provided.
+Expected Reproduction Time (in Minutes)
+The expected computational time for this artifact is approximately
+5 min, including around 3 min for Artifact Execution and 2 min for
+Artifact Analysis.
+SC ’25, November 16–21, 2025, St Louis, MO, USA
+for the coarser and coarsest data should be shorter than the full
+dataset, as shown in the captions in Figure 13 in the main paper.
+𝑇2 outputs the decompression time for the full dataset, 2D ROI
+slices, and 3D ROI box on the command line. The decompression
+times for the 2D slices and 3D box should be shorter than the full
+dataset (with the time for the 2D slices being the shortest), as shown
+in Table 4 in the main paper. Additionally, the time breakdown for
+each step in decompression will be shown, where the 2D slices
+achieve savings in decoding time, as indicated in the columns “L2
+dec.” and “L3 dec.” in Table 4.
+Artifact Evaluation (AE)
+We provide a Singularity container image to enhance reproducibility. While preparing the artifacts, we executed them on a single node from the Chameleon Cloud (https://www.chameleoncloud.
+org/), equipped with two Intel(R) Xeon(R) Platinum 8380 CPUs and
+256 GB RAM (specifically, the compute_icelake_r650 instance).
+To ensure a clearer and more streamlined workflow, as well as good
+reproducibility, we focus on reproducing the principal parts of the
+evaluation (see artifact analysis for more details).
+C.1 Computational Artifact 𝐴1
+Artifact Setup (incl. Inputs)
+(1) Install Singularity (https://singularity-tutorial.github.io/01installation/).
+(2) Download the pre-built Singularity image via GitHub.
+$ git clone https://github.com/FabioGrosso\
+/SC25-STZ-image
+$ cat SC25-STZ-image/stz.part.* > stz.sif
+(3) Build the image file (root privileges required).
+$ sudo singularity build --sandbox stz stz.sif
+Artifact Setup (incl. Inputs)
+(4) Run the image file (root privileges required) and navigate to
+the target directory.
+Hardware. Same as 𝐴1 .
+Software. Fulfilled by 𝐴1 .
+$ sudo singularity shell --writable stz
+$ cd /home/src
+Datasets / Inputs. Fulfilled by 𝐴1 .
+Artifact Execution
+Installation and Deployment. Fulfilled by 𝐴1 .
+Artifact Execution
+The workflow consists of two tasks: 𝑇1 and 𝑇2 , with no dependency between them. We provide scripts for both 𝑇1 and 𝑇2 . Task 𝑇1
+compresses the Miranda datasets using our STZ and progressively
+decompresses two coarse versions of the data (coarser and coarsest),
+as well as the full-resolution data, to demonstrate STZ’s progressive
+decompression capability. Task 𝑇2 compresses the Miranda datasets
+using our STZ and selectively decompresses a 2D region of interest
+(ROI) slice, a 3D ROI box, and the full data, to demonstrate the
+random access decompression capability of STZ. For experimental parameters, we use the same error bound as in the paper; the
+detailed input parameters are included in the scripts.
+Artifact Analysis (incl. Outputs)
+𝑇1 outputs the decompression time for the full dataset, coarser data,
+and coarsest data on the command line. The decompression times
+2052
+(1) Compress and decompress the Nyx dataset using our STZ,
+SPERR, SZ3, ZFP, and MGARD, and evaluate the data quality
+and compression ratio under both high and low CRs. (1
+minute).
+$ bash psnr-nyx.sh
+$ bash psnr-nyx-2.sh
+(2) Compress and decompress the WarpX dataset using our
+STZ, SPERR, SZ3, ZFP, and MGARD, and evaluate the data
+quality and compression ratio under both high and low CRs.
+(1 minute).
+$ bash psnr-wpx.sh
+$ bash psnr-wpx-2.sh
+(3) Compress and decompress the Magnetic Reconnection
+dataset using our STZ, SPERR, SZ3, ZFP, and MGARD, and
+evaluate the data quality and compression ratio under both
+high and low CRs. (1 minute).
+$ bash psnr-mag.sh
+$ bash psnr-mag-2.sh
+SC ’25, November 16–21, 2025, St Louis, MO, USA
+Wang et al.
+(4) Compress and decompress the Miranda dataset using our
+STZ, SPERR, SZ3, ZFP, and MGARD, and evaluate the data
+quality and compression ratio under both high and low CRs.
+(6 minutes).
+$ bash psnr-mrd.sh
+$ bash psnr-mrd-2.sh
+PSNR: 52.91 | Compression Ratio: 157.34
+------- Data Quality and CR for ZFP ------PSNR: 48.27 | Compression Ratio: 110.96
+and (low CR):
+------- Data Quality and CR for Ours ------PSNR: 63.83 | Compression Ratio: 59.82
+------- Data Quality and CR for SPERR ------PSNR: 67.18 | Compression Ratio: 66.67
+------- Data Quality and CR for SZ3 ------PSNR: 64.14 | Compression Ratio: 65.39
+------- Data Quality and CR for MGARD ------PSNR: 62.48 | Compression Ratio: 57.41
+------- Data Quality and CR for ZFP ------PSNR: 62.53 | Compression Ratio: 42.95
+Artifact Analysis (incl. Outputs)
+(1) The expected results for step 1 (high CR) are:
+------- Data Quality and CR for Ours ------PSNR: 115.03 | Compression Ratio: 352.42
+------- Data Quality and CR for SPERR ------PSNR: 115.00 | Compression Ratio: 266.67
+------- Data Quality and CR for SZ3 ------PSNR: 115.01 | Compression Ratio: 298.39
+------- Data Quality and CR for MGARD ------PSNR: 115.02 | Compression Ratio: 254.63
+------- Data Quality and CR for ZFP ------PSNR: 112.07 | Compression Ratio: 116.52
+(4) The expected results for step 4 (high CR) are:
+------- Data Quality and CR for Ours ------PSNR: 47.09 | Compression Ratio: 240.57
+------- Data Quality and CR for SPERR ------PSNR: 52.58 | Compression Ratio: 246.15
+------- Data Quality and CR for SZ3 ------PSNR: 47.05 | Compression Ratio: 212.62
+------- Data Quality and CR for MGARD ------PSNR: 44.51 | Compression Ratio: 235.47
+------- Data Quality and CR for ZFP ------PSNR: 43.03 | Compression Ratio: 57.79
+and (low CR):
+------- Data Quality and CR for Ours ------PSNR: 129.76 | Compression Ratio: 62.95
+------- Data Quality and CR for SPERR ------PSNR: 128.88 | Compression Ratio: 62.75
+------- Data Quality and CR for SZ3 ------PSNR: 129.73 | Compression Ratio: 67.99
+------- Data Quality and CR for MGARD ------PSNR: 129.64 | Compression Ratio: 45.96
+------- Data Quality and CR for ZFP ------PSNR: 129.22 | Compression Ratio: 41.94
+and (low CR):
+------- Data Quality and CR for Ours ------PSNR: 60.37 | Compression Ratio: 38.85
+------- Data Quality and CR for SPERR ------PSNR: 67.50 | Compression Ratio: 57.14
+------- Data Quality and CR for SZ3 ------PSNR: 62.25 | Compression Ratio: 42.08
+------- Data Quality and CR for MGARD ------PSNR: 54.31 | Compression Ratio: 34.52
+------- Data Quality and CR for ZFP ------PSNR: 57.02 | Compression Ratio: 28.59
+(2) The expected results for step 2 (high CR) are:
+------- Data Quality and CR for Ours ------PSNR: 97.02 | Compression Ratio: 261.15
+------- Data Quality and CR for SPERR ------PSNR: 96.90 | Compression Ratio: 278.26
+------- Data Quality and CR for SZ3 ------PSNR: 97.08 | Compression Ratio: 291.58
+------- Data Quality and CR for MGARD ------PSNR: 94.44 | Compression Ratio: 69.10
+------- Data Quality and CR for ZFP ------PSNR: 90.58 | Compression Ratio: 81.39
+These results replicate the principal component of Figure 11
+from the paper, demonstrating that our streaming compression
+solution achieves overall high compression performance in terms
+of rate-distortion (CR vs. PSNR) compared to the SOTA solutions.
+Note that we also provide scripts to produce output at other CRs,
+located in /home/src/extra. Users can execute these scripts to obtain
+results similar to those in Figure 11. The execution and results of
+the extra scripts are not shown here to save artifact reproduction
+time and simplify the process to focus on the principal results.
+Specifically, our solution consistently outperforms MGARD-X
+and ZFP across all datasets and CRs in terms of rate-distortion. Compared to SZ3, our method achieves similar performance—slightly
+better at high CRs and slightly worse at low CRs on datasets such
+as Nyx, Magnetic Reconnection, and Miranda. Against SPERR, our
+method performs better on Nyx and comparably on WarpX at high
+CRs, while SPERR performs better on Magnetic Reconnection and
+Miranda.
+and (low CR):
+------- Data Quality and CR for Ours ------PSNR: 121.97 | Compression Ratio: 34.04
+------- Data Quality and CR for SPERR ------PSNR: 122.07 | Compression Ratio: 55.65
+------- Data Quality and CR for SZ3 ------PSNR: 121.91 | Compression Ratio: 45.15
+------- Data Quality and CR for MGARD ------PSNR: 110.93 | Compression Ratio: 24.42
+------- Data Quality and CR for ZFP ------PSNR: 116.51 | Compression Ratio: 32.30
+(3) The expected results for step 3 (high CR) are:
+------- Data Quality and CR for Ours ------PSNR: 53.58 | Compression Ratio: 183.37
+------- Data Quality and CR for SPERR ------PSNR: 57.16 | Compression Ratio: 246.15
+------- Data Quality and CR for SZ3 ------PSNR: 53.22 | Compression Ratio: 174.38
+------- Data Quality and CR for MGARD -------
+C.2 Computational Artifact 𝐴2
+Artifact Setup (incl. Inputs)
+Fulfilled by 𝐴1 .
+2053
+STZ: A High Quality and High Speed Streaming Lossy Compression Framework for Scientific Data
+Artifact Execution
+(1) Compress and decompress the Magnetic Reconnection
+dataset using our STZ, SPERR, SZ3, ZFP, and MGARD in
+serial and OpenMP modes, and evaluate the speed (3 minutes).
+$ bash time-mag-se.sh
+$ bash time-mag-omp.sh
+(2) Compress and decompress the WarpX dataset using our
+STZ, SPERR, SZ3, ZFP, and MGARD in serial and OpenMP
+modes, and evaluate the speed (3 minutes).
+$ bash time-wpx-se.sh
+$ bash time-wpx-omp.sh
+(3) Compress and decompress the Nyx dataset using our STZ,
+SPERR, SZ3, ZFP, and MGARD in serial and OpenMP
+modes, and evaluate the speed (3 minutes).
+$ bash time-nyx-se.sh
+$ bash time-nyx-omp.sh
+(4) Compress and decompress the Miranda dataset using our
+STZ, SPERR, SZ3, ZFP, and MGARD in serial and OpenMP
+modes, and evaluate the speed (22 minutes).
+$ bash time-mrd-se.sh
+$ bash time-mrd-omp.sh
+SC ’25, November 16–21, 2025, St Louis, MO, USA
+------- Timing for ZFP ------Compression: 0.5s | Decompression: 1.6s
+------- Timing for Ours ------Compression: 0.5s | Decompression: 0.5s
+------- Timing for SZ ------Compression: 1.1s | Decompression: 0.7s
+------- Timing for MGARD ------Compression: 8.1s | Decompression: 26.6s
+------- Timing for SPERR ------Compression: 4.9s | Decompression: 5.2s
+(3) The expected results for step 3 (serial) are:
+------- Timing for ZFP ------Compression: 1.9s | Decompression: 0.8s
+------- Timing for Ours ------Compression: 2.6s | Decompression: 1.6s
+------- Timing for SZ ------Compression: 4.1s | Decompression: 1.6s
+------- Timing for MGARD ------Compression: 20.3s | Decompression: 21.6s
+------- Timing for SPERR ------Compression: 22.3s | Decompression: 11.6s
+and (OpenMP):
+------- Timing for ZFP ------Compression: 0.3s | Decompression: 0.8s
+------- Timing for Ours ------Compression: 0.4s | Decompression: 0.3s
+------- Timing for SZ ------Compression: 0.6s | Decompression: 0.3s
+------- Timing for MGARD ------Compression: 5.3s | Decompression: 21.2s
+------- Timing for SPERR ------Compression: 5.7s | Decompression: 5.2s
+Artifact Analysis (incl. Outputs)
+(1) The expected results for step 1 (serial) are:
+------- Timing for ZFP ------Compression: 1.9s | Decompression: 0.9s
+------- Timing for Ours ------Compression: 2.6s | Decompression: 1.7s
+------- Timing for SZ ------Compression: 4.4s | Decompression: 2.1s
+------- Timing for MGARD ------Compression: 20.4s | Decompression: 20.5s
+------- Timing for SPERR ------Compression: 28.1s | Decompression: 13.2s
+(4) The expected results for step 4 (serial) are:
+------- Timing for ZFP ------Compression: 25.3s | Decompression: 9.7s
+------- Timing for Ours ------Compression: 22.1s | Decompression: 13.9s
+------- Timing for SZ ------Compression: 35.3s | Decompression: 16.1s
+------- Timing for MGARD ------Compression: 170.2s | Decompression: 183.5s
+------- Timing for SPERR ------Compression: 120.0s | Decompression: 68.8s
+and (OpenMP):
+------- Timing for ZFP ------Compression: 0.3s | Decompression: 0.9s
+------- Timing for Ours ------Compression: 0.4s | Decompression: 0.3s
+------- Timing for SZ ------Compression: 0.6s | Decompression: 0.5s
+------- Timing for MGARD ------Compression: 6.0s | Decompression: 21.5s
+------- Timing for SPERR ------Compression: 6.9s | Decompression: 5.9s
+and (OpenMP):
+------- Timing for ZFP ------Compression: 3.7s | Decompression: 9.7s
+------- Timing for Ours ------Compression: 3.6s | Decompression: 2.8s
+------- Timing for SZ ------Compression: 6.6s | Decompression: 3.3s
+------- Timing for MGARD ------Compression: 42.0s | Decompression: 179.0s
+------- Timing for SPERR ------Compression: 29.3s | Decompression: 35.6s
+(2) The expected results for step 2 (serial) are:
+------- Timing for ZFP ------Compression: 3.2s | Decompression: 1.6s
+------- Timing for Ours ------Compression: 3.1s | Decompression: 2.3s
+------- Timing for SZ ------Compression: 7.1s | Decompression: 4.8s
+------- Timing for MGARD ------Compression: 23.7s | Decompression: 26.2s
+------- Timing for SPERR ------Compression: 19.5s | Decompression: 10.6s
+These results replicate Table 3 from the paper, demonstrating
+that our STZ solution achieves the second-highest compression
+and decompression speeds among all baselines, only slower than
+ZFP. Also, since our solution supports OpenMP for decompression
+while ZFP does not, we achieve overall higher compression and
+decompression speeds than ZFP in OpenMP mode.
+and (OpenMP):
+2054
+SC ’25, November 16–21, 2025, St Louis, MO, USA
+Wang et al.
+Note that due to differences in hardware configurations and
+system load between cloud and HPC environments, the measured
+speeds for different compressors may not exactly match the results
+reported in the paper. However, the overall ranking of compression
+speeds remains consistent (i.e., our method is only slower than
+ZFP’s serial mode).
+C.3 Computational Artifact 𝐴3
+Artifact Setup (incl. Inputs)
+Fulfilled by 𝐴1 .
+Artifact Execution
+(1) Compress the Miranda dataset using our STZ, and progressively decompress it at different resolutions. Then, use random access to decompress a 3D ROI box and a 2D ROI slice
+(1 minute).
+$ bash stream.sh
+(2) Evaluate the decompression time at different resolutions.
+$ python3 readprg.py
+(3) Evaluate the time breakdown for decompressing all data,
+randomly accessing a 3D ROI box, and a 2D slice.
+$ python3 readrd.py
+Artifact Analysis (incl. Outputs)
+(1) The expected results for step 2 are:
+------- Timing for Full Decompress (1024^3) -------
+2055
+Time: 15.00s
+------- Timing for Mid Decompress (512^3) ------Time: 2.03s
+------- Timing for Coarse Decompress (256^3) ------Time: 0.31s
+The result reproduces the decompression time reported in
+the caption of Figure 13 in the paper, demonstrating that
+progressively decompressing to lower resolutions reduces
+the overall decompression time.
+(2) The expected results for step 3 are:
+------- Timing for All Decompress ------L1 SZ3: 0.3100s | L2 dec.: 0.7957s | L2 pre.: 0.6059s |
+L2 rec.: 0.3206s | L3 dec.: 5.3621s | L3 pre.: 4.9916s |
+L3 rec.: 2.6176s | Sum: 15.0035s
+------- Timing for Box Decompress ------L1 SZ3: 0.3041s | L2 dec.: 0.7577s | L2 pre.: 0.0008s |
+L2 rec.: 0.0004s | L3 dec.: 5.2125s | L3 pre.: 0.0181s |
+L3 rec.: 0.0034s | Sum: 6.2970s
+------- Timing for Slice Decompress ------L1 SZ3: 0.3060s | L2 dec.: 0.3176s | L2 pre.: 0.0015s |
+L2 rec.: 0.0006s | L3 dec.: 2.2705s | L3 pre.: 0.0088s |
+L3 rec.: 0.0023s | Sum: 2.9073s
+The result reproduces Table 4 from the paper, showing that
+random access decompression of a 3D ROI box can save almost all the decode and predict time for levels 2 and 3 (i.e.,
+L2/3 pre. and L2/3 rec.). Additionally, random access decompression of a 2D ROI slice can further reduce the decoding
+time by 57% for levels 2 and 3 (i.e., L2/3 dec.).

@@ -1,0 +1,134 @@
+--- v001.md
++++ v002.md
+@@ -8,13 +8,13 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A set of masked images $F(x,y)$ belonging to specific semantic groups.
+-*   **Output:** The expected number of Gaussian splats (or density) for each semantic group, derived from edge counts and geometric aspect ratios.
++*   **Input:** A set of masked images $F(x,y)$ belonging to specific semantic groups [S1, unofficial].
++*   **Output:** The expected number of Gaussian splats (or density) for each semantic group, derived from edge counts and geometric aspect ratios [S1, unofficial].
+ 
+ **Data Structures:**
+-*   **Image Mask:** Binary or probability mask $F(x,y)$ isolating the semantic region of interest.
+-*   **Edge Count Map:** $e_{ij}$ representing the count of edge pixels for image $i$ in semantic group $j$.
++*   **Image Mask:** Binary or probability mask $F(x,y)$ isolating the semantic region of interest [S1, unofficial].
++*   **Edge Count Map:** $e_{ij}$ representing the count of edge pixels for image $i$ in semantic group $j$ [S1, unofficial].
+ 
+ **Steps:**
+-1.  **Masked Image Selection:** Identify the subset of training images $M$ and their corresponding masks for a specific semantic group $j$.
++1.  **Masked Image Selection:** Identify the subset of training images $M$ and their corresponding masks for a specific semantic group $j$ [S1, unofficial].
+ 2.  **Fourier Transform:** For each masked image $F(x,y)$, compute the 2D Fourier transform to obtain the frequency domain representation $F(u,v)$ [S1, unofficial].
+ 3.  **Polar Conversion:** Convert the Cartesian frequency domain data $F(u,v)$ into polar coordinates $f(\rho, \theta)$, where $\rho$ is the radial frequency and $\theta$ is the angle [S1, unofficial].
+@@ -44,5 +44,6 @@
+         
+     Returns:
+-        expected_splat_density: Float, expected splats per pixel.
++        density_1: Float, expected splats per pixel using aspect ratio a1.
++        density_2: Float, expected splats per pixel using aspect ratio a2.
+         perplexity: Float, total edge count for the group.
+     """
+@@ -50,15 +51,13 @@
+     
+     for mask, img_idx in masked_images:
+-        # Step 2 & 3: Fourier Transform and Polar Conversion (Conceptual)
+-        # In practice, we skip explicit polar integration and use Canny Edge
+-        # which approximates the high-pass filter D(rho) = delta(T - rho)
+-        
+-        # Step 4: Edge Extraction
+-        # Canny edge detection replaces the ideal high-pass filter
+-        # to explicitly set a threshold for edge selection.
+-        edges = canny_edge_detection(mask)
++        # Step 4: Edge Extraction via gradient thresholding (Canny approximation)
++        T = 0.5  # Threshold for edge selection [G]
++        gx, gy = compute_gradients(mask)
++        height, width = len(mask), len(mask[0])
++        gradient_magnitude = [[sqrt(gx[r][c]**2 + gy[r][c]**2) for c in range(width)] for r in range(height)]
++        edges = [[1.0 if gradient_magnitude[r][c] > T else 0.0 for c in range(width)] for r in range(height)]
+         
+         # Count non-zero edge pixels
+-        edge_count = count_nonzero(edges)
++        edge_count = sum(val for row in edges for val in row)
+         
+         # Step 5: Accumulate Perplexity
+@@ -70,32 +69,31 @@
+     # Constants k1, k2 are derived from overlap_ratio.
+     # Higher overlap -> smaller constants.
+-    # Specific formula for k1/k2 from overlap_ratio is not given in sources [G].
+-    # Assuming linear scaling or lookup table based on overlap.
+-    k1 = scale_constant(overlap_ratio, type='high')
+-    k2 = scale_constant(overlap_ratio, type='low')
++    k1 = scale_constant(overlap_ratio, 'high')
++    k2 = scale_constant(overlap_ratio, 'low')
+     
+     # Aspect ratios a1, a2 are typically initialized or estimated from scene geometry.
+     # If not provided, default to 1.0 [G].
+-    a1 = 1.0 
+-    a2 = 1.0
++    a1, a2 = 1.0, 1.0
+     
+-    # Calculate inverse density
++    # Calculate inverse density according to source equations
+     inv_density_1 = k1 * a1
+     inv_density_2 = k2 * a2
+     
+-    # Use the more conservative (higher density) estimate or average?
+-    # Sources define two expectations. We take the minimum p_i (max density)
+-    # or average. Source implies these are constraints.
+-    # Let's assume the density is determined by the aspect ratio scaling.
+-    # p_i = 1 / (k * a)
+-    
++    # Source defines two expectations for the same pixel density.
+     density_1 = 1.0 / inv_density_1 if inv_density_1 > 0 else 0.0
+     density_2 = 1.0 / inv_density_2 if inv_density_2 > 0 else 0.0
+     
+-    # Select the appropriate density metric. 
+-    # Source lists both. We return the primary one or average.
+-    expected_splat_density = (density_1 + density_2) / 2.0
+-    
+-    return expected_splat_density, perplexity
++    return density_1, density_2, perplexity
++
++def compute_gradients(image):
++    """Compute horizontal and vertical gradients using finite differences."""
++    height, width = len(image), len(image[0])
++    gx = [[0.0]*width for _ in range(height)]
++    gy = [[0.0]*width for _ in range(height)]
++    for r in range(height):
++        for c in range(width):
++            gx[r][c] = image[r][min(c+1, width-1)] - image[r][max(c-1, 0)]
++            gy[r][c] = image[min(r+1, height-1)][c] - image[max(r-1, 0)][c]
++    return gx, gy
+ 
+ def scale_constant(overlap_ratio, type):
+@@ -105,10 +103,6 @@
+     """
+     # Not given in the sources. [G]
+-    # Example heuristic:
+     base = 1.0
+-    if type == 'high':
+-        return base * (1.0 / (1.0 + overlap_ratio))
+-    else:
+-        return base * (0.5 / (1.0 + overlap_ratio))
++    return base * (1.0 / (1.0 + overlap_ratio)) if type == 'high' else base * (0.5 / (1.0 + overlap_ratio))
+ ```
+ 
+@@ -128,13 +122,13 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Dominated by the Canny edge detection and Fourier transforms per masked image. The complexity is $O(N \log N)$ for FFT and $O(N)$ for edge detection, where $N$ is the number of pixels in the mask.
+-*   **Memory Complexity:** Requires storage for the image masks and edge maps. No large global data structures are introduced beyond the semantic group aggregations.
+-*   **Strengths:** Effectively isolates high-frequency geometric details that naive frequency statistics miss. Reduces GPU memory consumption by controlling the number of splats per semantic group [S1, unofficial].
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
++*   **Strengths:** Effectively isolates high-frequency geometric details that naive frequency statistics miss [S1, unofficial].
+ *   **Limitations:** The method does not account for occlusion (high-opacity Gaussians blocking others), which can lead to suboptimal shape constraints for overlapping semantic regions [S1, unofficial]. The constants $k_1, k_2$ require heuristic tuning based on overlap ratio [S1, unofficial].
+-*   **When to Use:** When reconstructing scenes with distinct semantic regions requiring different geometric densities (e.g., fine details vs. smooth surfaces) and GPU memory is a constraint.
+-*   **When Not to Use:** When occlusion handling is critical for shape accuracy or when semantic segmentation masks are unavailable or unreliable.
++*   **When to Use:** Not given in the sources.
++*   **When Not to Use:** Not given in the sources.
+ 
+ ## Background
+-The method originates from the SA-GS (Semantic-Aware Gaussian Splatting) paper, which introduces geometric complexity measurement based on spectrum analysis to dynamically assign expected shapes to Gaussian splats [S1, unofficial]. It was developed to address the "fantasy surface problem" and reduce the number of splats in large scene reconstruction. The approach builds on the observation that high-frequency signals in masked images correlate with the need for denser Gaussian splats.
++The method originates from the SA-GS (Semantic-Aware Gaussian Splatting) paper, which introduces geometric complexity measurement based on spectrum analysis to dynamically assign expected shapes to Gaussian splats [S1, unofficial]. It was developed to address the "fantasy surface problem" and reduce the number of splats in large scene reconstruction [S1, unofficial]. The approach builds on the observation that high-frequency signals in masked images correlate with the need for denser Gaussian splats [S1, unofficial].
+ 
+ ## Sources

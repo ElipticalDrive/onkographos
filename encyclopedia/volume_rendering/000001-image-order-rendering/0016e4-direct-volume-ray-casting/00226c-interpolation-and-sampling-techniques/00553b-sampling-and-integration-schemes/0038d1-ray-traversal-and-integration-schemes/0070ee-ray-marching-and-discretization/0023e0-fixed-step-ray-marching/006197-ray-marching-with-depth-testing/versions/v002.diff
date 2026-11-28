@@ -1,0 +1,159 @@
+--- v001.md
++++ v002.md
+@@ -1,5 +1,5 @@
+ # Ray Marching with Depth Testing
+ 
+-Also called: Manual Depth Testing, Volumetric Ray Marching
++Also called: GPU Ray Marching, Manual Depth Testing, Ray Marching for Volume Rendering, Sequential Ray Marching
+ 
+ ## Overview
+@@ -8,10 +8,10 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Camera matrices (view/projection), ray origin $o$, ray direction $d$ (normalized), volume textures (density, temperature), depth buffer from the geometry pass, step count $N$, and opacity factor $o$ [S1].
++*   **Inputs:** Camera matrices (view/projection), ray origin $o$, normalized ray direction $d$, volume textures (density, temperature), depth buffer from the geometry pass, step count $N$, and opacity factor $o$ [S1].
+ *   **Outputs:** Final accumulated color $C_{acc}$ and opacity $\alpha_{acc}$ for the pixel [S1].
+ 
+ **Data Structures:**
+ *   **Ray:** Defined by origin $o$ and direction $d$.
+-*   **Volume Texture:** 3D texture storing density and temperature values.
++*   **Volume Texture:** 3D texture storing density and temperature values [S1].
+ *   **Depth Buffer:** Stores depth values $z_b$ for each pixel from the preceding geometry pass [S1].
+ 
+@@ -22,5 +22,5 @@
+     $$ \Delta t = \frac{t_{max} - t_{min}}{N} $$
+     where $N$ is the configurable step count [S1].
+-3.  **Marching Loop:** Iterate from $t = t_{min}$ to $t_{max}$ with increment $\Delta t$. For each step:
++3.  **Marching Loop:** Iterate $i$ from $0$ to $N-1$. For each step:
+     a.  **Position Update:** Calculate the current world position $p(t)$:
+         $$ p(t) = o + t d $$
+@@ -28,5 +28,5 @@
+     b.  **Depth Testing:** Transform the sample's world position $p(t)$ to clip space to obtain screen depth $z$. Compare $z$ against the stored depth buffer value $z_b$ with a small bias $\epsilon$ to determine the depth weight $d_w$:
+         $$ d_w := \begin{cases} 1, & \text{if } z < f(z_b + \epsilon) \\ 0, & \text{otherwise} \end{cases} $$
+-        where $f$ is the depth function mapping clip space to normalized device coordinates (typically linear or perspective division dependent on the pipeline), $z$ is the screen depth, $z_b$ is the stored depth buffer value, and $\epsilon$ is a small bias (e.g., 0.004) to handle precision issues [S1].
++        where $f$ is the depth mapping function, $z$ is the screen depth, $z_b$ is the stored depth buffer value, and $\epsilon$ is a small bias (e.g., 0.004) to handle precision issues [S1].
+     c.  **Sample and Weight:** If $d_w = 0$, discard the sample. If $d_w = 1$, sample the density texture $\tilde{d}$ and temperature at $p(t)$. Apply the depth weight to the density:
+         $$ w := \tilde{d} \cdot d_w $$
+@@ -41,13 +41,34 @@
+ **Pseudocode:**
+ ```python
++class Vec3:
++    def __init__(self, x, y, z): self.x, self.y, self.z = x, y, z
++    def __add__(self, other): return Vec3(self.x + other.x, self.y + other.y, self.z + other.z)
++    def __mul__(self, s): return Vec3(self.x * s, self.y * s, self.z * s)
++    def __getitem__(self, i): return (self.x, self.y, self.z)[i]
++
++class Vec4:
++    def __init__(self, x, y, z, w): self.x, self.y, self.z, self.w = x, y, z, w
++    def __getitem__(self, i): return (self.x, self.y, self.z, self.w)[i]
++
+ def ray_march_with_depth_testing(ray_origin, ray_direction, volume_texture, depth_buffer, step_count, opacity_factor):
+-    # 1. Calculate bounding box intersections
+-    t_min, t_max = calculate_ray_bbox_intersection(ray_origin, ray_direction, volume_bounds)
+-    
++    # 1. Calculate bounding box intersections (standard slab method) [G]
++    t_min, t_max = 0.0, 1.0
++    for axis in range(3):
++        if abs(ray_direction[axis]) > 1e-6:
++            t1 = (0.0 - ray_origin[axis]) / ray_direction[axis]
++            t2 = (1.0 - ray_origin[axis]) / ray_direction[axis]
++            t_min = max(t_min, min(t1, t2))
++            t_max = min(t_max, max(t1, t2))
++        else:
++            if ray_origin[axis] < 0.0 or ray_origin[axis] > 1.0:
++                return Vec3(0.0, 0.0, 0.0), 0.0
++    if t_min > t_max:
++        return Vec3(0.0, 0.0, 0.0), 0.0
++
+     # 2. Calculate step size
+     step_size = (t_max - t_min) / step_count
+     
+     # Initialize accumulation
+-    acc_color = vec3(0.0)
++    acc_color = Vec3(0.0, 0.0, 0.0)
+     acc_alpha = 0.0
+     
+@@ -57,10 +78,10 @@
+         position = ray_origin + t * ray_direction
+         
+-        # Transform to clip space to get screen depth
++        # Transform to clip space to get screen depth [G]
+         clip_pos = world_to_clip_space(position)
+-        z = clip_pos.z / clip_pos.w # Perspective divide for depth
++        z = clip_pos.z / clip_pos.w
+         
+         # Get stored depth buffer value for this pixel
+-        z_b = depth_buffer.get_value_at_pixel(clip_pos.xy)
++        z_b = depth_buffer.get_value_at_pixel(clip_pos.x, clip_pos.y)
+         
+         # Bias to avoid precision issues
+@@ -72,6 +93,5 @@
+             continue
+             
+-        # Sample volume
+-        # Use quasi-cubic sampling for better interpolation
++        # Sample volume using quasi-cubic sampling
+         density = quasi_cubic_sample(volume_texture, position)
+         temperature = quasi_cubic_sample(volume_texture, position, channel='temperature')
+@@ -81,5 +101,4 @@
+         
+         # Map to color and opacity via transfer functions
+-        # Note: opacity_factor is user-adjustable
+         current_alpha = weighted_density * opacity_factor
+         current_color = transfer_function_temperature_to_color(temperature)
+@@ -95,12 +114,26 @@
+     return acc_color, acc_alpha
+ 
+-def quasi_cubic_sample(texture, uv):
++def quasi_cubic_sample(texture, uv, channel='density'):
+     # Implementation from Listing 1 in [S1]
+     R = texture.dimensions()
+-    U = uv * R + 0.5
+-    F = fract(U)
+-    U = floor(U) + F * F * (3.0 - 2.0 * F)
+-    C = (U - vec3(0.5)) / R
+-    return texture_sample(texture, C)
++    U = uv * R + Vec3(0.5, 0.5, 0.5)
++    F = Vec3(U.x % 1.0, U.y % 1.0, U.z % 1.0)
++    U = Vec3(
++        (U.x - F.x) + F.x * F.x * (3.0 - 2.0 * F.x),
++        (U.y - F.y) + F.y * F.y * (3.0 - 2.0 * F.y),
++        (U.z - F.z) + F.z * F.z * (3.0 - 2.0 * F.z)
++    )
++    C = Vec3((U.x - 0.5) / R, (U.y - 0.5) / R, (U.z - 0.5) / R)
++    return texture.lookup(C, channel)
++
++def world_to_clip_space(position):
++    # Standard view-projection transform [G]
++    view_pos = apply_view_matrix(position)
++    clip_pos = apply_projection_matrix(view_pos)
++    return clip_pos
++
++def transfer_function_temperature_to_color(temperature):
++    # Standard 1D texture lookup or palette mapping [G]
++    return Vec3(temperature, temperature, temperature)
+ ```
+ 
+@@ -108,5 +141,5 @@
+ *   **Step Count ($N$):** Configurable value with options 16, 32, 64, 128, or 256. 128-256 steps provide a balance between performance and visual quality [S1].
+ *   **Bias ($\epsilon$):** A small value (e.g., 0.004) added to the depth buffer value to prevent precision issues in depth comparison [S1].
+-*   **Opacity Factor:** User-adjustable factor controlling the contribution of each sample to the accumulated opacity [S1].
++*   **Opacity Factor ($o$):** User-adjustable factor controlling the contribution of each sample to the accumulated opacity [S1].
+ 
+ **Edge Cases and Pitfalls:**
+@@ -115,6 +148,6 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear with respect to the number of steps $N$ and the number of pixels. Each pixel requires $N$ samples in the worst case.
+-*   **Memory Complexity:** Depends on the size of the volume texture and the depth buffer. The depth buffer is required from the previous pass [S1].
++*   **Time Complexity:** Linear with respect to the number of steps $N$ and the number of pixels [S1]. Each pixel requires $N$ samples in the worst case [S1].
++*   **Memory Complexity:** Depends on the size of the volume texture and the depth buffer [S1]. The depth buffer is required from the previous pass [S1].
+ *   **Performance:** 128-256 steps are recommended for a balance between performance and visual quality [S1].
+ *   **Strengths:** Correctly handles occlusion between volumes and solid geometry, reducing artifacts [S1]. Quasi-cubic sampling improves interpolation quality over linear sampling [S1].
+@@ -122,5 +155,5 @@
+ 
+ ## Background
+-This method is described in the context of real-time volumetric explosion special effects for games, implemented using WebGPU and WGSL shaders [S1]. It builds on classical volume ray casting techniques and alpha blending principles described by Max [13]. The specific implementation details, including manual depth testing and quasi-cubic sampling, are presented in the WSCG 2025 Proceedings [S1].
++This method is described in the context of real-time volumetric explosion special effects for games, implemented using WebGPU and WGSL shaders [S1]. The accumulation formula adapts classical alpha blending principles described by Max [13] [S1]. The specific implementation details, including manual depth testing and quasi-cubic sampling, are presented in the WSCG 2025 Proceedings [S1].
+ 
+ ## Sources

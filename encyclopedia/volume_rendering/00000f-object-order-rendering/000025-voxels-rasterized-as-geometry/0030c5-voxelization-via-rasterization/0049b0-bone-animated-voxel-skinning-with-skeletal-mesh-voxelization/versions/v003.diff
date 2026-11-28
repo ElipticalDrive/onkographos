@@ -1,0 +1,166 @@
+--- v002.md
++++ v003.md
+@@ -7,6 +7,6 @@
+ 
+ ## How it works
+-**Inputs:** A SkeletalMesh (LOD0 reference pose) with vertex positions, indices, and skin weights; a target voxel resolution (grid size).
+-**Outputs:** A voxel asset containing either sparse voxels (for static mode) or bone groups (for animated mode), where each bone group is a cluster of voxels assigned to a specific bone with their reference pose positions.
++**Inputs:** A SkeletalMesh (LOD0 reference pose) with vertex positions, indices, and skin weights; a target voxel resolution (grid size) [S1, unofficial].
++**Outputs:** A voxel asset containing either sparse voxels (for static mode) or bone groups (for animated mode), where each bone group is a cluster of voxels assigned to a specific bone with their reference pose positions [S1, unofficial].
+ 
+ **Data Structures:**
+@@ -35,43 +35,36 @@
+ 
+ **Pseudocode:**
+-
+ ```python
+-def voxelize_skeletal_mesh(mesh):
+-    """
+-    Voxelize a SkeletalMesh at editor time.
+-    Returns BoneGroups for animated mode or SparseVoxels for static mode.
+-    """
++def voxelize_skeletal_mesh(mesh, grid_size=32):
+     # Step 1: Extract triangles from LOD0 reference pose
+     triangles = mesh.get_lod(0).get_triangles()
+     
+     # Step 2: Conservative rasterization using SAT-based triangle-AABB intersection
+-    # Determine which voxels are covered by each triangle
+     covered_voxels = set()
+     for tri in triangles:
+-        # SAT-based intersection check for each voxel in the grid
+-        for voxel in grid:
+-            if sat_triangle_aabb_intersection(tri, voxel.aabb):
+-                covered_voxels.add(voxel)
+-                
++        for x in range(grid_size):
++            for y in range(grid_size):
++                for z in range(grid_size):
++                    voxel_aabb = get_voxel_aabb(x, y, z, grid_size)
++                    if sat_triangle_aabb_intersection(tri, voxel_aabb):
++                        covered_voxels.add((x, y, z))
++                        
+     # Step 3: Solid fill via Z-slice scanline parity algorithm
+     solid_voxels = set()
+-    for z in range(grid.height):
+-        # Scanline parity logic to fill interior
+-        solid_voxels.update(fill_z_slice(covered_voxels, z))
++    for z in range(grid_size):
++        slice_voxels = sorted([v for v in covered_voxels if v[2] == z], key=lambda v: (v[0], v[1]))
++        solid_voxels.update(fill_z_slice(slice_voxels))
+         
+     # Step 4: Propagate bone weights to interior voxels using BFS
+-    # Start from surface voxels (those in covered_voxels but not solid_voxels interior)
+     surface_voxels = covered_voxels - solid_voxels
+     queue = list(surface_voxels)
+     visited = set(queue)
+-    
+     while queue:
+-        current_voxel = queue.pop(0)
+-        # Propagate weights from neighbors
+-        for neighbor in get_neighbors(current_voxel):
+-            if neighbor not in visited and neighbor in solid_voxels:
+-                propagate_weights(current_voxel, neighbor)
+-                visited.add(neighbor)
+-                queue.append(neighbor)
++        cx, cy, cz = queue.pop(0)
++        for nx, ny, nz in get_neighbors(cx, cy, cz, grid_size):
++            if (nx, ny, nz) not in visited and (nx, ny, nz) in solid_voxels:
++                propagate_weights((cx, cy, cz), (nx, ny, nz))
++                visited.add((nx, ny, nz))
++                queue.append((nx, ny, nz))
+                 
+     # Step 5: Assign dominant bone to each voxel
+@@ -86,31 +79,18 @@
+ 
+ def assemble_bone_chunks(bone_groups, hidden_skeleton):
+-    """
+-    Assemble per-bone chunks from BoneGroups at runtime.
+-    """
++    # Step 4 (Runtime): Assemble per-bone chunks from BoneGroups
+     bone_chunks = {}
+     for bone_name, voxels in bone_groups.items():
+-        # Create a chunk component for this bone
+         chunk = create_chunk_component(voxels)
+-        
+-        # Assign unique coordinates in shared render cache
+         bone_index = get_bone_index(bone_name)
+         chunk.set_render_cache_coordinate((bone_index + 1, 0, 0))
+-        
+-        # Adjust voxel origin by reference pose bone position
+         ref_pose_pos = hidden_skeleton.get_bone_reference_pose(bone_name)
+         chunk.adjust_origin(ref_pose_pos)
+-        
+-        # Attach to hidden skeleton
+         chunk.attach_to(hidden_skeleton, bone_name)
+         bone_chunks[bone_name] = chunk
+-        
+     return bone_chunks
+ 
+ def apply_animation(anim_instance, bone_chunks):
+-    """
+-    Synchronize animation data for bone-animated mode.
+-    """
+-    # Forward movement speed, stance, attack rate, and CP ratio
++    # Step 7 (Runtime): Animation Integration
+     anim_instance.apply_presentation(
+         movement_speed=anim_instance.get_movement_speed(),
+@@ -119,9 +99,46 @@
+         cp_ratio=anim_instance.get_cp_ratio()
+     )
+-    
+-    # Propagate gameplay tags and animation triggers
+-    if bone_chunks: # Enabled only in bone-animated mode
++    if bone_chunks:
+         anim_instance.propagate_gameplay_tags()
+         anim_instance.trigger_animations()
++
++# Helper functions (standard operations [G])
++def get_voxel_aabb(x, y, z, grid_size):
++    return (x/grid_size, y/grid_size, z/grid_size, (x+1)/grid_size, (y+1)/grid_size, (z+1)/grid_size)
++
++def sat_triangle_aabb_intersection(tri, aabb):
++    # Standard Separating Axis Theorem check for triangle vs AABB [G]
++    return True  # Returns True when axes overlap; full SAT logic omitted for brevity
++
++def fill_z_slice(slice_voxels):
++    # Scanline parity fill for a 2D slice [G]
++    filled = set()
++    if not slice_voxels: return filled
++    for i in range(0, len(slice_voxels)-1, 2):
++        x1, y1 = slice_voxels[i][:2]
++        x2, y2 = slice_voxels[i+1][:2]
++        for x in range(min(x1, x2), max(x1, x2) + 1):
++            for y in range(min(y1, y2), max(y1, y2) + 1):
++                filled.add((x, y, slice_voxels[i][2]))
++    return filled
++
++def get_neighbors(x, y, z, grid_size):
++    for dx, dy, dz in [(-1,0,0),(1,0,0),(0,-1,0),(0,1,0),(0,0,-1),(0,0,1)]:
++        nx, ny, nz = x+dx, y+dy, z+dz
++        if 0 <= nx < grid_size and 0 <= ny < grid_size and 0 <= nz < grid_size:
++            yield (nx, ny, nz)
++
++def propagate_weights(src, dst):
++    # Accumulate weights from surface to interior [G]
++    dst.weights += src.weights
++
++def get_dominant_bone(weights):
++    return max(weights, key=weights.get)
++
++def create_chunk_component(voxels):
++    return {"voxels": voxels, "render_cache_coord": None, "origin_offset": None}
++
++def get_bone_index(bone_name):
++    return hash(bone_name) % 1000  # Deterministic index for cache [G]
+ ```
+ 
+@@ -138,6 +155,7 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Voxelization is performed offline at editor time, so runtime cost is dominated by chunk assembly and animation synchronization. The number of meshes scheduled per frame increases from 1 (static) to 4 (bone mode) [S1, unofficial].
+-*   **Memory Complexity:** Stores sparse voxels for static mode or bone groups for animated mode. Bone groups require storage for per-bone voxel clusters and reference pose positions [S1, unofficial].
++*   **Time Complexity:** Voxelization is performed offline at editor time, so runtime cost is dominated by chunk assembly and animation synchronization [S1, unofficial].
++*   **Memory Complexity:** Stores sparse voxels for static mode or bone groups for animated mode [S1, unofficial].
++*   **Scaling:** The number of meshes scheduled per frame increases from 1 (static) to 4 (bone mode) [S1, unofficial].
+ *   **Strengths:** Enables real-time bone animation for voxel characters without runtime skinning calculations; efficient culling via per-bone chunks [S1, unofficial].
+ *   **Limitations:** Requires offline voxelization; limited to bone-driven deformation; potential artifacts at bone boundaries if weight propagation is inaccurate [S1, unofficial].

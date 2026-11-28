@@ -1,0 +1,162 @@
+--- v006.md
++++ v007.md
+@@ -4,9 +4,9 @@
+ 
+ ## Overview
+-Local Ambient Occlusion (LAO) is a local shading technique that estimates light contributions from neighboring voxels rather than the entire volume, creating softer shadows and avoiding the complete occlusion of volume parts [S1][S3, unofficial]. It stands between local gradient shading and global lighting, typically by branching rays into random directions within a hemisphere and averaging accumulated translucency [S3, unofficial]. Unlike global lighting, LAO is view-independent and can be precomputed or updated incrementally [S1][S3, unofficial].
++Local Ambient Occlusion (LAO) is a local shading technique that estimates light contributions from neighboring voxels rather than the entire volume, creating softer shadows and avoiding the complete occlusion of volume parts [S1][S3, unofficial]. It stands between local and global shading, typically by branching rays into random directions within a hemisphere and averaging accumulated translucency [S1][S3, unofficial]. Unlike global lighting, LAO is view-independent and can be precomputed or updated incrementally [S1][S3, unofficial].
+ 
+ ## How it works
+-**Inputs:** Volume data (scalar field), Transfer Function (TF), light direction $\mathbf{l}$, kernel radius $R_\Omega$ (number of voxels/distance), kernel size $K$ (number of ray directions), and optional emission parameters.
+-**Outputs:** An ambient occlusion factor (or contribution) per sample point, stored in an LAO map or integrated into the final color.
++**Inputs:** Volume data (scalar field), Transfer Function (TF), light direction $\mathbf{l}$, kernel radius $R_\Omega$ (number of voxels/distance), kernel size $K$ (number of ray directions), and optional emission parameters [S2, unofficial][S3, unofficial][S4, unofficial][S5].
++**Outputs:** An ambient occlusion factor (or contribution) per sample point, stored in an LAO map or integrated into the final color [S3, unofficial][S4, unofficial].
+ 
+ **Data Structures:**
+@@ -22,85 +22,63 @@
+ *   $uLightCoefficient$: Normalization coefficient (default 1.0) [S2, unofficial].
+ *   $uLAOWeight$: Weight for mixing LAO into final color (default 0.69) [S2, unofficial].
++*   $uNumLAOSamples$: Number of LAO samples per pixel (default 1) [S2, unofficial].
+ 
+ **Algorithm Steps:**
+ 
+-1.  **Direction Generation:** Generate $K$ random directions within a hemisphere oriented around the light vector or surface normal. Directions can be dynamically configured by subdividing a tetrahedron, icosahedron, or octahedron [S4, unofficial].
+-    *   *Note:* If $K=1$, LAO is nearly equivalent to volumetric shading with a short ray length [S3, unofficial].
++1.  **Direction Generation:** Generate $K$ random directions within a hemisphere oriented around the light vector. Directions can be dynamically configured by subdividing a tetrahedron, icosahedron, or octahedron [S4, unofficial]. If $K=1$, LAO is nearly equivalent to volumetric shading with a short ray length [S3, unofficial].
++2.  **Ray Marching and Accumulation:** For each sample point, initialize an accumulator. Loop $uNumLAOSamples$ times. Inside, loop $t$ from 0.001 to 1.0 with step $uLAOStepSize$ [S2, unofficial]. Compute a sampling direction or half-vector: $\mathbf{h} = \text{normalize}(\mathbf{l} + \mathbf{d}_i \cdot \text{mix}(0.0, uLightRadius, t) - \mathbf{p})$ [S2, unofficial]. Sample the volume at $\mathbf{p} + \mathbf{h} \cdot t$. Accumulate the contribution weighted by distance: $A_i \leftarrow A_i + v \cdot (1.0 - t)^2$ [S2, unofficial]. Alternatively, trace voxels and average accumulated translucency [S3, unofficial].
++3.  **Normalization:** Divide the accumulated sum by $uLightCoefficient$ and clamp to $[0, 1]$ [S2, unofficial]. Average over all $K$ directions: $\text{LAO}_{\text{factor}} = \frac{1}{K} \sum_{i=1}^{K} A_i$ [S2, unofficial].
++4.  **Integration:** Add the LAO contribution to the ambient component of the BRDF model [S3, unofficial]. In the final ray-casting pass, the LAO factor modulates the diffuse/ambient term using $uLAOWeight$ [S2, unofficial].
++5.  **Incremental Update:** LAO can be updated incrementally by computing one ray direction per frame [S4, unofficial].
+ 
+-2.  **Ray Marching and Accumulation:** For each direction $i \in \{1, \dots, K\}$:
+-    *   Initialize accumulator $A_i = 0$.
+-    *   March along the ray from distance $t = 0.001$ to $t = 1.0$ (normalized) with step $uLAOStepSize$ [S2, unofficial].
+-    *   At each step $t$, sample the volume at position $\mathbf{p} + \mathbf{d}_i \cdot t$.
+-    *   Compute the LAO half-vector or sample position based on the light direction and random offset [S2, unofficial]:
+-        $$ \mathbf{h} = \text{normalize}(\mathbf{l} + \mathbf{d}_i \cdot \text{mix}(0.0, uLightRadius, t) - \mathbf{p}) $$
+-        *(Note: Source [S2, unofficial] describes a specific implementation using a half-vector; Source [S3, unofficial] describes simpler hemisphere branching. The core concept is sampling neighbors.)*
+-    *   Sample the volume value $v$ at the current position.
+-    *   Accumulate the contribution weighted by distance. Source [S2, unofficial] uses a quadratic falloff:
+-        $$ A_i \leftarrow A_i + v \cdot (1.0 - t)^2 $$
+-    *   *Alternative (Source [S3, unofficial]):* Accumulate translucency/opacity directly.
+-
+-3.  **Normalization:**
+-    *   Divide the accumulated sum by $uLightCoefficient$ and clamp to $[0, 1]$ [S2, unofficial].
+-    *   Average over all $K$ directions:
+-        $$ \text{LAO}_{\text{factor}} = \frac{1}{K} \sum_{i=1}^{K} A_i $$
+-
+-4.  **Integration:**
+-    *   Add the LAO contribution to the ambient component of the BRDF model [S3, unofficial].
+-    *   In the final ray-casting pass, the LAO factor modulates the diffuse/ambient term. The final color $C$ might be computed as:
+-        $$ C = C_{\text{base}} \cdot (1 - \text{LAO}_{\text{factor}} \cdot uLAOWeight) + C_{\text{ambient}} $$
+-        *(Implementation detail: The exact mixing formula depends on the specific renderer, but LAO typically darkens the ambient/diffuse term.)*
+-
+-5.  **Incremental Update (Optional):**
+-    *   LAO can be updated incrementally by computing one ray direction per frame [S4, unofficial]. This allows for interactive performance.
+-
+-**Pseudocode (GLSL-like fragment shader logic for a single sample):**
++**Pseudocode (Python-like fragment shader logic for a single sample):**
+ 
+ ```python
+-# Inputs:
+-# position: vec3, current sample position in volume
+-# lightDir: vec3, normalized light direction
+-# kernelRadius: float, R_Omega
+-# kernelSize: int, K
+-# stepSize: float, uLAOStepSize
++import math
++import random
+ 
+-def compute_lao(position, lightDir, kernelRadius, kernelSize, stepSize):
++def sample_volume(pos):
++    """Standard volume sampling: trilinear interpolation of scalar field followed by Transfer Function application [G]."""
++    # Implementer substitutes actual texture lookup and TF evaluation here
++    return 0.5
++
++def compute_lao(position, light_dir, kernel_radius, kernel_size, step_size, light_radius, light_coefficient, num_samples):
+     total_occlusion = 0.0
+-    
+-    # Generate K random directions in a hemisphere around lightDir
+-    # For simplicity, assume pre-generated random directions d_i
+-    for i in range(kernelSize):
+-        direction = get_random_direction_in_hemisphere(lightDir)
++    for _ in range(num_samples):
+         accumulator = 0.0
+-        
+-        # March along the ray
+-        # t represents normalized distance, scaled by kernelRadius if needed
++        # Generate random direction in hemisphere around light_dir [S2, unofficial]
++        rand_vec = (random.uniform(-1, 1), random.uniform(-1, 1), random.uniform(-1, 1))
++        rand_scale = random.random()
++        length = math.sqrt(rand_vec[0]**2 + rand_vec[1]**2 + rand_vec[2]**2)
++        if length > 0:
++            random_dir = (rand_vec[0]/length, rand_vec[1]/length, rand_vec[2]/length)
++        else:
++            random_dir = (0, 0, 1)
++        random_dir = (random_dir[0]*rand_scale, random_dir[1]*rand_scale, random_dir[2]*rand_scale)
++
+         t = 0.001
+         while t <= 1.0:
+-            # Sample position
+-            # Note: Actual world position depends on volume bounds and resolution
+-            sample_pos = position + direction * (t * kernelRadius)
+-            
+-            # Sample volume value (opacity/density)
+-            # In a real implementation, this involves texture lookup and TF application
++            # Compute half-vector/sampling direction [S2, unofficial]
++            mix_val = light_radius * t
++            half_vec = (light_dir[0] + random_dir[0] * mix_val - position[0],
++                        light_dir[1] + random_dir[1] * mix_val - position[1],
++                        light_dir[2] + random_dir[2] * mix_val - position[2])
++            h_len = math.sqrt(half_vec[0]**2 + half_vec[1]**2 + half_vec[2]**2)
++            if h_len > 0:
++                sample_dir = (half_vec[0]/h_len, half_vec[1]/h_len, half_vec[2]/h_len)
++            else:
++                sample_dir = light_dir
++
++            sample_pos = (position[0] + sample_dir[0] * t,
++                          position[1] + sample_dir[1] * t,
++                          position[2] + sample_dir[2] * t)
++
+             voxel_value = sample_volume(sample_pos)
+-            
+-            # Weight by distance (quadratic falloff as per [S2, unofficial])
+-            weight = pow(1.0 - t, 2.0)
+-            
++            weight = (1.0 - t) ** 2
+             accumulator += voxel_value * weight
+-            
+-            t += stepSize
+-            
+-        # Normalize by light coefficient (assumed 1.0 for simplicity)
+-        # Accumulate to total
+-        total_occlusion += accumulator
+-        
+-    # Average over K directions
+-    lao_factor = total_occlusion / kernelSize
+-    
+-    # Clamp to [0, 1]
+-    lao_factor = clamp(lao_factor, 0.0, 1.0)
+-    
+-    return lao_factor
++            t += step_size
++        total_occlusion += accumulator / light_coefficient
++    lao_factor = total_occlusion / num_samples
++    return max(0.0, min(1.0, lao_factor))
+ ```
+ 
+@@ -108,5 +86,5 @@
+ To include colored light emission $c_E(s)$ from sample points along the ray, the integral is modified [S5]:
+ $$ I_k(x) = \frac{1}{R_\Omega - a} \int_{a}^{R_\Omega} (1 + c_E(s)) \exp\left(-\int_{a}^{s} \tau(u) du\right) ds $$
+-Here, $c_E(s)$ is the colored light emission parameter at sample point $s$, controlled by the emissive component in the transfer function [S5]. This affects the intensity and color of point $x$ [S5].
++Here, $c_E(s)$ is the colored light emission parameter at sample point $s$, controlled by the emissive component in the transfer function [S5]. This affects the intensity and color of point $x$ [S5]. The emissive parameter is also included during the final ray-casting step to enhance luminosity [S5].
+ 
+ ## Subtopics
+@@ -114,4 +92,7 @@
+ ### [In-scattering / Emittance Integral](11184-in-scattering-emittance-integral.md)
+ The In-scattering / Emittance Integral method estimates the light scattered into a volume sample from local light sources by discretizing the emittance integral into a compositing scheme. It sets itself apart from its parent, Local Ambient Occlusion (LAO), by applying similar local sampling principles to compute in-scattered and emissive light contributions rather than just shadowing. It builds on [Local Ambient Occlusion (LAO)](4502-local-ambient-occlusion-lao.md).
++
++### Emissive Tissue Illumination
++Modifies the incident light equation to include colored light emission $c_E(s)$ from sample points along the ray [S5]. The integral becomes $I_k(x) = \frac{1}{R_\Omega - a} \int_{a}^{R_\Omega} (1 + c_E(s)) \exp\left(-\int_{a}^{s} \tau(u) du\right) ds$ [S5]. The emissive parameter $c_E(s)$ is controlled by the emissive component in the transfer function and affects the intensity and color of point $x$ [S5]. It is included during the final ray-casting step to enhance luminosity [S5].
+ 
+ ## Operating characteristics

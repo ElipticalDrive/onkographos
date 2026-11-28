@@ -1,0 +1,90 @@
+# Splat Size Culling
+Also called: Culling Small Splats
+## Overview
+Splat Size Culling is a staging optimization for object-order volume rendering that discards primitives smaller than a defined threshold before rasterization [S1]. It trades visual fidelity for real-time frame rates by reducing the workload of splats and fragments generated during the rendering pipeline [S1]. It differs from sibling methods like [Early Splat Termination](811-early-splat-termination.md) by operating at the data staging phase rather than during the per-pixel compositing phase, allowing it to prevent expensive rasterization and memory allocation for negligible contributions entirely [S1].
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of volumetric primitives (splats) $S = \{s_1, s_2, \dots, s_N\}$, where each splat $s_k$ carries a projected size metric $\sigma_k$ and associated rendering attributes [S1].
+*   **Output:** A filtered subset $S' \subseteq S$ containing only splats that meet the size requirement [S1].
+
+**Data Structures:**
+Not given in the sources.
+
+**Numbered Steps:**
+1.  Project each splat $k$ from volume space to screen space using the camera's model-view-projection matrix [G].
+2.  Compute the projected size metric $\sigma_k$ for each splat [G].
+3.  Compare $\sigma_k$ against a user-defined threshold $\tau$ [S1].
+4.  Discard splats where $\sigma_k < \tau$; otherwise, pass them to the staging buffer for rasterization [S1].
+
+**Formulas:**
+The filtering condition is defined as:
+$$S' = \{s_k \in S \mid \sigma_k \geq \tau\}$$
+where $\sigma_k$ is the projected size metric of splat $k$ and $\tau$ is the culling threshold [S1].
+
+**Parameters:**
+*   **Threshold ($\tau$):** User-configurable to balance visual quality and rendering performance [S1].
+*   **Typical Values:** Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Small-Only Scenes:** The method fails for scenes composed entirely of small splats, such as models constructed via Mesh2Splat, because all splats may be discarded or visual quality degrades significantly [S1].
+*   **Precision:** Not given in the sources.
+*   **Boundaries:** Not given in the sources.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def splat_size_culling(splats, threshold):
+    """
+    Discards splats with a projected size metric below the threshold.
+    
+    Args:
+        splats: List of splat objects or dicts. Each must have a 'projected_size' field.
+        threshold: float, the minimum projected size to retain.
+        
+    Returns:
+        List of splats that pass the culling test.
+    """
+    kept = []
+    for splat in splats:
+        if splat['projected_size'] >= threshold:
+            kept.append(splat)
+    return kept
+```
+## Subtopics
+
+### [Warp-level Culling](12279-warp-level-culling.md)
+A pre-computation optimization that rejects splats with no geometric overlap to a pixel's sub-tile before performing expensive alpha evaluation, reducing memory fetches and compute load while maintaining bit-identical output. It differs from standard blending by adding a cheap boolean bounding box overlap check before the Gaussian alpha evaluation, reducing instruction count and memory traffic. Choose it when minimizing instruction count and memory traffic is critical for tile-based rasterizers.
+
+## Operating characteristics
+**Time and Memory Complexity:**
+*   **Time:** The culling pass performs a linear $O(N)$ filter over the splat set [G].
+*   **Memory:** Reduces the number of staged splats and generated fragments, lowering memory bandwidth and buffer allocation requirements [S1].
+
+**Measured Performance:**
+*   On the GardenF scene, culling reduces staged splats from 5.79M to 1.25M and fragments from 8.16M to 1.99M [S1].
+*   Render time decreases from 9.7 ms to 2.1 ms [S1].
+
+**Scaling:**
+*   Effectiveness scales with the variance in splat sizes [S1].
+*   It works well for 3DGS-generated datasets with mixed sizes, and at greater distances where most splats become small, the majority are discarded while larger semi-representative splats remain [S1].
+
+**Strengths and Limitations:**
+*   **Strengths:** Significant reduction in workload and render time for large, heterogeneous splat datasets [S1].
+*   **Limitations:** Fails on uniformly small splat scenes (e.g., Mesh2Splat) and trades visual quality for performance, though high-quality screenshots can be captured by disabling culling [S1].
+
+**When to Use:**
+*   Use for real-time rendering of large Gaussian Splat datasets where performance is critical and some quality loss is acceptable [S1].
+*   Do not use for scenes with uniformly small primitives or when high-fidelity reconstruction is required [S1].
+## Background
+**Origin:**
+*   Introduced in "Splatshop: Efficiently Editing Large Gaussian Splat Models" [S1].
+
+**History and Development:**
+*   Developed to address the computational bottleneck of rendering millions of splats in real-time by filtering out negligible contributions during the staging phase [S1].
+*   It leverages the observation that small splats contribute minimally to the final image, allowing aggressive culling without severe visual artifacts in many cases [S1].
+
+**Where it is used:**
+*   Implemented in Splatshop for efficient editing and rendering of large Gaussian Splat models [S1].
+## Sources
+[S1] Splatshop: Efficiently Editing Large Gaussian Splat Models, https://doi.org/10.1111/cgf.70214, fetched 2026-10-31

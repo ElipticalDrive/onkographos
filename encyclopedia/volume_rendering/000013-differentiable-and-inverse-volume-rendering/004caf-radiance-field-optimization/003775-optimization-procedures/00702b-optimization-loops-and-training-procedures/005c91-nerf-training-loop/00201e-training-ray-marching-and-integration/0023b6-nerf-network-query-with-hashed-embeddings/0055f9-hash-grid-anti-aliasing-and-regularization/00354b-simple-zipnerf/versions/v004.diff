@@ -1,0 +1,146 @@
+--- v003.md
++++ v004.md
+@@ -10,5 +10,5 @@
+ 
+ **Inputs and Outputs:**
+-*   **Inputs:** Sparse set of input images (typically 4–36 views), camera poses, and intrinsics.
++*   **Inputs:** Sparse set of input images (typically 4–36 views), camera poses, and intrinsics [S1].
+ *   **Outputs:** A trained main ZipNeRF model capable of rendering novel views with reduced floaters [S1].
+ 
+@@ -17,20 +17,20 @@
+ *   **Main Model:** Uses the standard ZipNeRF hash table size $T = 2^{21}$ [S1].
+ *   **Augmented Model:** Uses a reduced hash table size $T_s = 2^{11}$ [S1].
+-*   **MLPs:** Both models use identical Multi-Layer Perceptrons (MLPs) for decoding features into color and density [S1].
++*   **MLPs:** The augmented model uses the same MLP architecture and hyperparameters as the main model, differing only in hash table size [S1].
+ 
+ **Training Procedure:**
+-The training loop minimizes a combined loss function. Let $L_m$ be the photometric loss for the main model, $L_a$ be the photometric loss for the augmented model, and $L_{aug}$ be the regularization loss derived from the augmented model's depth [S1].
++The training loop minimizes a combined loss function. Let $L_m$ be the photometric loss for the main model, $L_a$ be the photometric loss for the augmented model, and $L_{aug}$ be the depth regularization loss [S1].
+ 
+ 1.  **Initialize** the main ZipNeRF model with standard parameters and the augmented ZipNeRF model with $T_s = 2^{11}$ [S1].
+ 2.  **Iterate** for $K$ iterations (typically 50k+):
+     a.  **Sample Rays:** For each pixel, sample a set of points along the ray using the main model's proposal network [S1].
+-    b.  **Query Main Model:** Compute color $C_m$ and density $\sigma_m$ for the sampled points using the main hash grid and MLP [S1].
+-    c.  **Query Augmented Model:** Compute color $C_a$ and density $\sigma_a$ for the same points using the reduced hash grid and MLP [S1].
+-    d.  **Compute Depth:** Estimate depth $D_a$ from the augmented model's volume rendering [S1].
+-    e.  **Validate Depth:** Check if $D_a$ is reliable by reprojecting the 3D point to the closest training view and verifying consistency [S1]. If the depth is unreliable (e.g., in regions visible in only one view), discard it [S1].
++    b.  **Query Main Model:** Compute color and density for the sampled points using the main hash grid and MLP [S1].
++    c.  **Query Augmented Model:** Compute color and density for the same points using the reduced hash grid and MLP [S1].
++    d.  **Compute Depth:** Estimate depth from the augmented model's volume rendering [S1].
++    e.  **Validate Depth:** Check if the depth is reliable by reprojecting the 3D point to the closest training view and verifying consistency [S1]. If the depth is unreliable, discard it [S1].
+     f.  **Compute Losses:**
+         *   $L_m = \| C_m - C_{gt} \|^2$ [S1].
+         *   $L_a = \| C_a - C_{gt} \|^2$ [S1].
+-        *   $L_{aug}$ is applied only if the depth $D_a$ is validated [S1]. The specific form of $L_{aug}$ is not detailed in the provided notes, but it utilizes the accurate depth estimates to supervise the main model [S1].
++        *   $L_{aug}$ is applied only when the depth estimates are validated as accurate [S1]. The specific form of $L_{aug}$ is not provided in the sources [S1].
+         *   Note: Sparse depth loss $L_{sd}$ is **not** used, as COLMAP often fails or provides noisy sparse depth in these scenarios [S1].
+     g.  **Total Loss:** $L_{total} = \lambda_m L_m + \lambda_a L_a + \lambda_{aug} L_{aug}$ [S1].
+@@ -43,53 +43,70 @@
+ *   **Other Losses:** $\lambda_{sd} = 0, \lambda_{cfc} = 0, \lambda_{mc} = 0$ [S1].
+ *   **Regularization Start:** $L_{aug}$ is imposed after 5k iterations [S1].
+-*   **Hyperparameters:** $k=5, e_\tau=0.2$ (used in the regularization mechanism, exact definition not provided in notes) [S1].
++*   **Hyperparameters:** $k=5, e_\tau=0.2$ (used in the regularization mechanism, exact definition not provided in sources) [S1].
+ 
+ **Pseudocode:**
+ ```python
++# Data structures and helpers
++class HashGridNetwork:
++    def __init__(self, hash_table_size):
++        self.hash_table_size = hash_table_size
++        self.mlp = ... # Standard MLP for decoding features
++    def forward(self, rays):
++        # Query hash grid, trilinear interpolate, decode with MLP
++        return color, density
++
++def sample_rays(batch_size):
++    # Standard ray sampling for a batch of pixels
++    return rays
++
++def volume_render_depth(density):
++    # Standard volume rendering to compute expected depth
++    return depth
++
++def reproject_and_check_consistency(depth, rays, training_views):
++    # Reproject 3D points along rays to closest training view and check color consistency
++    return valid_mask
++
++def depth_regularization_loss(depth, main_net, valid_mask):
++    # Use accurate depth estimates to supervise main model geometry
++    # Exact formula not provided in sources [S1]
++    return loss
++
+ # Initialization
+-main_model = ZipNeRF(hash_table_size=2**21)
+-aug_model = ZipNeRF(hash_table_size=2**11)
+-optimizer = Optimizer([main_model.parameters(), aug_model.parameters()])
++main_net = HashGridNetwork(hash_table_size=2**21)
++aug_net = HashGridNetwork(hash_table_size=2**11)
++optimizer = Adam([main_net.parameters(), aug_net.parameters()])
+ 
+ # Training Loop
+-for iteration in range(total_iterations):
+-    # Sample rays
++for iteration in range(50000):
+     rays = sample_rays(batch_size)
+-    
++    gt_colors = get_ground_truth(rays)
++
+     # Forward pass Main Model
+-    main_outputs = main_model.forward(rays)
+-    color_main = main_outputs.color
+-    density_main = main_outputs.density
+-    
++    c_m, d_m = main_net.forward(rays)
++    loss_m = mean_squared_error(c_m, gt_colors)
++
+     # Forward pass Augmented Model
+-    aug_outputs = aug_model.forward(rays)
+-    color_aug = aug_outputs.color
+-    density_aug = aug_outputs.density
+-    
++    c_a, d_a = aug_net.forward(rays)
++    loss_a = mean_squared_error(c_a, gt_colors)
++
+     # Compute Depth from Augmented Model
+-    depth_aug = compute_depth(density_aug)
+-    
++    depth_a = volume_render_depth(d_a)
++
+     # Validate Depth Reliability
+-    # Reproject 3D points to closest training view and check consistency
+-    valid_mask = validate_depth_consistency(depth_aug, rays, training_views)
+-    
+-    # Compute Photometric Losses
+-    loss_main = mse(color_main, gt_colors)
+-    loss_aug = mse(color_aug, gt_colors)
+-    
+-    # Compute Regularization Loss (only on valid depths)
++    valid_mask = reproject_and_check_consistency(depth_a, rays, training_views)
++
++    # Compute Regularization Loss (only on valid depths, after 5k iterations)
+     if iteration > 5000:
+-        # L_aug uses depth_aug to supervise main model geometry
+-        # Exact formula for L_aug not provided in sources [S1]
+-        loss_aug_reg = compute_depth_regularization_loss(depth_aug, main_outputs, valid_mask)
++        loss_aug_reg = depth_regularization_loss(depth_a, main_net, valid_mask)
+     else:
+         loss_aug_reg = 0.0
+-        
++
+     # Total Loss
+     lambda_m = 1.0
+     lambda_a = 1.0
+     lambda_aug = 10.0
+-    total_loss = (lambda_m * loss_main) + (lambda_a * loss_aug) + (lambda_aug * loss_aug_reg)
+-    
++    total_loss = (lambda_m * loss_m) + (lambda_a * loss_a) + (lambda_aug * loss_aug_reg)
++
+     # Backpropagate and Update
+     optimizer.zero_grad()
+@@ -102,5 +119,5 @@
+ *   **Sparse Depth:** Sparse depth loss is ineffective because COLMAP often fails or provides noisy depth in sparse settings [S1].
+ *   **Performance Limits:** The augmentation does not help if the base model has very few input images (performance too low) or a large number of input views (performance saturated) [S1].
+-*   **Persistent Floaters:** Some translucent floaters may persist even with Simple-ZipNeRF, particularly in regions visible in only one training view where reliable depth supervision is unavailable [S1].
++*   **Persistent Floaters:** Some translucent floaters persist, particularly in regions visible in only one training view where reliable depth supervision is unavailable [S1].
+ 
+ ## Operating characteristics

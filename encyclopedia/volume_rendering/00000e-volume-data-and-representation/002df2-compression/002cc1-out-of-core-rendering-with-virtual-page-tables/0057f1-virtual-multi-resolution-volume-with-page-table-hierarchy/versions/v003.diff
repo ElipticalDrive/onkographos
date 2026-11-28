@@ -1,0 +1,114 @@
+--- v002.md
++++ v003.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-A virtual memory architecture for out-of-core volume visualization that replaces explicit tree structures (such as octrees or kD-trees) with a virtual multi-resolution volume addressed via normalized coordinates and translated to physical cache blocks via a hierarchy of page tables [S1, unofficial]. It differs from its parent [Out-of-Core Rendering with Virtual Page Tables](5359-out-of-core-rendering-with-virtual-page-tables.md) by explicitly defining the resolution hierarchy as a set of discrete levels with arbitrary, axis-dependent down-sampling ratios, managed through a recursive page table structure rather than a single flat table [S1, unofficial]. It avoids the overhead of tree traversal and maintenance, offering higher efficiency for deep resolution hierarchies where all visible data of a specific resolution are resident in the cache [S1, unofficial].
++A virtual memory architecture for out-of-core volume visualization that replaces explicit tree structures (such as octrees or kD-trees) with a virtual multi-resolution volume addressed via normalized coordinates and translated to physical cache blocks via a hierarchy of page tables [S1, unofficial][S2]. It differs from its parent [Out-of-Core Rendering with Virtual Page Tables](5359-out-of-core-rendering-with-virtual-page-tables.md) by explicitly defining the resolution hierarchy as a set of discrete levels with arbitrary, axis-dependent down-sampling ratios, managed through a recursive page table structure rather than a single flat table [S1, unofficial][S2]. It avoids the overhead of tree traversal and maintenance, offering higher efficiency for deep resolution hierarchies where all visible data of a specific resolution are resident in the cache [S1, unofficial][S2].
+ 
+ ## How it works
+@@ -10,5 +10,5 @@
+ ### Inputs and Outputs
+ *   **Input:** A 3D bounding box of the tissue block (queryable from the source, e.g., electron microscope), a current transfer function, and a ray-casting request specifying a desired level of detail [S1, unofficial][S2].
+-*   **Output:** Voxel values sampled from the block cache, or cache miss signals triggering asynchronous data construction [S1, unofficial].
++*   **Output:** Voxel values sampled from the block cache, or cache miss signals triggering asynchronous data construction [S1, unofficial][S2].
+ 
+ ### Data Structures
+@@ -22,5 +22,5 @@
+ 
+ **Block Cache**
+-*   Implemented as a 3D texture serving as "physical" memory [S1, unofficial].
++*   Implemented as a 3D texture serving as "physical" memory [S2].
+ *   Stores small voxel blocks, typically of size $32^3$ [S1, unofficial].
+ 
+@@ -31,5 +31,5 @@
+ *   **Level $t$ (Leaf):** Page table entries referencing voxel blocks in the block cache [S1, unofficial].
+ *   **Page Table Entry (PTE) Layout:**
+-    *   `xyz`: Indices/addresses. References either the next level of page table entries (if $t > 2$) or a block of voxels in the block cache [S1, unofficial].
++    *   `xyz`: Indices/addresses. References either the next level of page table entries (if $t > 2$) or a block of voxels in the block cache [S2].
+     *   `w`: Paging flag. One of:
+         *   `UNMAPPED`: Block not mapped to cache. Access generates a cache miss [S2].
+@@ -67,27 +67,27 @@
+     """
+     sample = 0.0
+-    
++
+     # 1. Page Directory Lookup
+     # Calculate directory index for this level and position
+     p_dir_index = (p * r_pd(l)).astype(int) % r_pd(l).shape
+-    
++
+     if p_dir_index != last_p_dir_index:
+         # Fetch page directory entry
+-        # pageDirBase[l] is the base address (xyz) for level l in the directory texture
+-        p_dir_address = pageDirBase[l] + p_dir_index
++        # pageDirBase[l].xyz is the base address (xyz) for level l in the directory texture
++        p_dir_address = pageDirBase[l].xyz + p_dir_index
+         p_dir_entry = texture3D(texPageDir, p_dir_address)
+         last_p_dir_index = p_dir_index
+     else:
+         p_dir_entry = last_p_dir_entry
+-        
++
+     paging_flag = p_dir_entry.w
+     last_p_dir_entry = p_dir_entry
+-    
++
+     if paging_flag != UNMAPPED and paging_flag != EMPTY:
+         # 2. Page Table Lookup
+         # Calculate page table index
+         p_table_index = (p * r_pt(l)).astype(int) % r_pt(l).shape
+-        p_table_address = p_dir_entry.xyz + p_table_index % b_pt
+-        
++        p_table_address = p_dir_entry.xyz + (p_table_index % b_pt)
++
+         if p_table_index != last_p_table_index:
+             p_table_entry = texture3D(texPageTableCache, p_table_address)
+@@ -95,8 +95,8 @@
+         else:
+             p_table_entry = last_p_table_entry
+-            
++
+         paging_flag = p_table_entry.w
+         last_p_table_entry = p_table_entry
+-        
++
+         if paging_flag != UNMAPPED and paging_flag != EMPTY:
+             # 3. Voxel Block Lookup
+@@ -105,13 +105,13 @@
+             voxel_address = p_table_entry.xyz + voxel_index
+             sample = texture3D(texBlockCache, voxel_address)
+-            
++
+     return sample
+ ```
+ 
+-*Note: The modulo operation `% b_pt.xyz` suggests the page table cache is tiled or wrapped [G]. The exact adjustment of `p` to local block coordinates is handled by scaling `p` with the resolution at level $l$ and taking the modulo of the block size, as shown in the pseudocode.*
++The exact adjustment of `p` to local block coordinates is handled by scaling `p` with the resolution at level $l$ and taking the modulo of the block size, as shown in the pseudocode [S2].
+ 
+ ### Edge Cases and Pitfalls
+-*   **Page Table Size:** For very large volumes, a single page table becomes too large to fit in memory. This necessitates the recursive hierarchy (depth $t > 2$) [S1, unofficial].
+-*   **Anisotropy:** Down-sampling ratios must be chosen carefully to reduce anisotropy gradually. Fixed-ratio mipmaps may not be optimal for highly anisotropic data (e.g., microscopy data) [S1, unofficial].
++*   **Page Table Size:** For very large volumes, a single page table becomes too large to fit in memory, necessitating the recursive hierarchy [S2].
++*   **Anisotropy:** Down-sampling ratios must be chosen carefully to reduce anisotropy gradually. Fixed-ratio mipmaps may not be optimal for highly anisotropic data (e.g., microscopy data) [S2].
+ *   **Empty vs. Unmapped:** Distinguish between blocks that are truly empty (zero/missing data) and those that are unmapped (data not yet loaded). Empty blocks allow skipping without cache misses; unmapped blocks trigger asynchronous requests [S2].
+ *   **Transfer Function Changes:** Blocks may become "empty" if they are transparent under the current transfer function. This state must be updated when the transfer function changes [S2].
+@@ -127,8 +127,8 @@
+ ## Operating characteristics
+ 
+-*   **Time Complexity:** Address translation is $O(t)$ where $t$ is the page table hierarchy depth, involving $t$ texture lookups (page directory + page tables). This is generally faster than tree traversal for deep hierarchies as it avoids pointer chasing and conditional branching associated with tree structures [S1, unofficial].
+-*   **Memory Complexity:** The page directory is always resident in GPU memory. Its size depends on the number of resolution levels and the granularity of the directory. Page tables are virtualized and stored in the block cache, consuming memory only for accessed regions [S1, unofficial].
++*   **Time Complexity:** Address translation is $O(t)$ where $t$ is the page table hierarchy depth, involving $t$ texture lookups (page directory + page tables) [S1, unofficial]. This is generally faster than tree traversal for deep hierarchies as it avoids pointer chasing and conditional branching associated with tree structures [S1, unofficial].
++*   **Memory Complexity:** The page directory is always resident in GPU memory [S2]. Its size depends on the number of resolution levels and the granularity of the directory [S1, unofficial]. Page tables are virtualized and stored in the block cache, consuming memory only for accessed regions [S2].
+ *   **Performance:** Efficient for deep resolution hierarchies. Maximum efficiency is achieved when all visible data of the desired resolution are resident in the cache [S1, unofficial].
+-*   **Strengths:** Scales well to extremely large volume sizes. No tree structure maintenance required. Supports arbitrary down-sampling ratios per axis.
++*   **Strengths:** Scales well to extremely large volume sizes. No tree structure maintenance required. Supports arbitrary down-sampling ratios per axis [S1, unofficial].
+ *   **Limitations:** Requires asynchronous data construction pipeline to handle cache misses. Performance degrades if cache misses are frequent due to poor data locality or insufficient cache size [S1, unofficial].
+ 
+@@ -137,5 +137,5 @@
+ *   **Origin:** Developed for the interactive visualization of petascale microscopy data streams [S1, unofficial].
+ *   **Key Paper:** Hadwiger et al., "Interactive Volume Exploration of Petascale Microscopy Data Streams" (2012) [S1, unofficial].
+-*   **History:** Designed to overcome the limitations of tree-based structures (octrees/kD-trees) for extremely large volumes, where tree traversal overhead and memory consumption become prohibitive. It leverages the GPU's texture hardware for efficient address translation and caching [S1, unofficial].
++*   **History:** Designed to overcome the limitations of tree-based structures (octrees/kD-trees) for extremely large volumes, where tree traversal overhead and memory consumption become prohibitive [S1, unofficial]. It leverages the GPU's texture hardware for efficient address translation and caching [S1, unofficial].
+ *   **Usage:** Used in visualization pipelines for electron microscopy data, where data is streamed from 2D image tiles and constructed on-the-fly [S1, unofficial].
+ 

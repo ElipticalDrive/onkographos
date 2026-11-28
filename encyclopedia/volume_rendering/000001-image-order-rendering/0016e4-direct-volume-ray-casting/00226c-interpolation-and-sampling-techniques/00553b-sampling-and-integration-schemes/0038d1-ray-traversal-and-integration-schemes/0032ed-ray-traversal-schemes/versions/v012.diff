@@ -1,0 +1,101 @@
+--- v011.md
++++ v012.md
+@@ -7,18 +7,18 @@
+ 
+ ## How it works
+-**Inputs**: Ray origin $\mathbf{o}$, direction $\mathbf{d}$, step size $\Delta t$, volume data grid with voxel colors $C_i$ and opacities $\alpha_i$ (or scalar intensities), and transfer functions mapping scalar values to $C_i, \alpha_i$.
+-**Outputs**: Final pixel color $C$ and accumulated opacity $\alpha$.
+-**Data structures**: A 3D texture or grid storing voxel attributes; per-ray accumulators for color $C$ and opacity $\alpha$.
++**Inputs**: Ray origin $\mathbf{o}$, direction $\mathbf{d}$, step size $\Delta t$, volume data grid with voxel colors $C_i$ and opacities $\alpha_i$ (or scalar intensities), and transfer functions mapping scalar values to $C_i, \alpha_i$ [G].
++**Outputs**: Final pixel color $C$ and accumulated opacity $\alpha$ [G].
++**Data structures**: A 3D texture or grid storing voxel attributes; per-ray accumulators for color $C$ and opacity $\alpha$ [G].
+ **Steps**:
+-1. Initialize accumulators: $C \leftarrow (0, 0, 0)$, $\alpha \leftarrow 0$.
+-2. Iterate along the ray from the near clipping plane to the far clipping plane with step $\Delta t$.
++1. Initialize accumulators: $C \leftarrow (0, 0, 0)$, $\alpha \leftarrow 0$ [G].
++2. Iterate along the ray from the near clipping plane to the far clipping plane with step $\Delta t$ [G].
+ 3. At each step, query the volume at position $\mathbf{p} = \mathbf{o} + t\mathbf{d}$ to obtain sample color $C_s$ and opacity $\alpha_s$ using interpolation (e.g., trilinear) [S4, unofficial].
+-4. Apply the selected aggregation scheme to update $C$ and $\alpha$.
+-5. Terminate early if $\alpha \geq 1.0$ (for Accumulate) or after traversing the full volume extent.
++4. Apply the selected aggregation scheme to update $C$ and $\alpha$ [G].
++5. Terminate early if $\alpha \geq 1.0$ (for Accumulate) or after traversing the full volume extent [S2, S3, unofficial].
+ 
+ **Formulas** (Accumulate/Front-to-Back):
+ $$C \leftarrow C_s \alpha_s (1 - \alpha) + C$$
+ $$\alpha \leftarrow \alpha_s (1 - \alpha) + \alpha$$
+-[S2, S3, S4, unofficial]
++where $C$ is the accumulated color, $\alpha$ is the accumulated opacity, $C_s$ is the sample color, $\alpha_s$ is the sample opacity, and $t$ is the current ray parameter [S2, S3, S4, unofficial].
+ 
+ Other schemes modify step 4:
+@@ -30,5 +30,5 @@
+ **Pseudocode**:
+ ```python
+-def ray_traversal(ray_origin, ray_dir, volume, step_size, scheme):
++def ray_traversal(ray_origin, ray_dir, far_plane, step_size, scheme, threshold=0.5):
+     C = [0.0, 0.0, 0.0]
+     alpha = 0.0
+@@ -36,7 +36,9 @@
+     intensity_sum = [0.0, 0.0, 0.0]
+     step_count = 0
+-    while t < volume.max_depth:
++    depth_accum = 0.0
++    while t <= far_plane:
+         p = ray_origin + ray_dir * t
+-        Cs, alpha_s = volume.sample(p)
++        # Interpolate Cs, alpha_s at p from volume grid [G]
++        Cs, alpha_s = sample_volume(p)
+         if scheme == "accumulate":
+             C = [Cs[i] * alpha_s * (1.0 - alpha) + C[i] for i in range(3)]
+@@ -45,9 +47,8 @@
+                 break
+         elif scheme == "first":
+-            if alpha_s > 0.5:
++            if alpha_s > threshold:
+                 return Cs
+         elif scheme == "max":
+-            if Cs > C:
+-                C = Cs
++            C = [max(C[i], Cs[i]) for i in range(3)]
+             alpha = 1.0
+         elif scheme == "average":
+@@ -55,9 +56,11 @@
+             step_count += 1
+         elif scheme == "depth":
+-            C = [t * alpha_s + C[i] for i in range(3)]
+-            alpha = alpha_s + alpha
++            depth_accum += t * alpha_s
++            alpha += alpha_s
+         t += step_size
+     if scheme == "average":
+         return [intensity_sum[i] / step_count for i in range(3)] if step_count > 0 else C
++    elif scheme == "depth":
++        return [depth_accum / alpha] if alpha > 0 else [0.0]
+     return C
+ ```
+@@ -74,20 +77,20 @@
+ 
+ ### Occupancy Probability (Yan et al.)
+-Casts a ray from the pixel, samples all associated voxels, and chooses the one with the highest occupancy probability. Choose it for binary occupancy visualization [S5, unofficial].
++Casts a ray from the pixel, samples all associated voxels, and chooses the one with the highest occupancy probability [S5, unofficial]. Choose it for binary occupancy visualization [S5, unofficial].
+ 
+ ### Stopping Probability (Tulsiani et al.)
+-Computes the probability that a ray stops at a certain distance, allowing rendering of depth maps, color images, and foreground masks. Choose it when differentiable depth/color outputs are needed [S5, unofficial].
++Computes the probability that a ray stops at a certain distance, allowing rendering of depth maps, color images, and foreground masks [S5, unofficial]. Choose it when differentiable depth/color outputs are needed [S5, unofficial].
+ 
+ ### Bidirectional Emission-Absorption (Henzler et al.)
+-Introduces a bidirectional emission-absorption (EA) light radiation model for emitting materials, in addition to visual hull (VH) and absorption-only (AO) models. Choose it for scenes with self-illuminating volumetric materials [S5, unofficial].
++Introduces a bidirectional emission-absorption (EA) light radiation model for emitting materials, in addition to visual hull (VH) and absorption-only (AO) models [S5, unofficial]. Choose it for scenes with self-illuminating volumetric materials [S5, unofficial].
+ 
+ ### Iterative Accumulation (Lombardi et al.)
+-Casts a ray from each pixel and iteratively accumulates color and opacity probabilities. Remaining voxels are discarded when cumulative opacity reaches a maximum value. Choose it for differentiable rendering with early termination [S5, unofficial].
++Casts a ray from each pixel and iteratively accumulates color and opacity probabilities [S5, unofficial]. Remaining voxels are discarded when cumulative opacity reaches a maximum value [S5, unofficial]. Choose it for differentiable rendering with early termination [S5, unofficial].
+ 
+ ### Surface-Weighted Sum (Jiang et al.)
+-Casts a ray from the pixel and locates the surface voxel closest to the camera. The final pixel color is computed as a weighted sum of the surface voxel and its neighboring voxels, with shading based on normals computed from voxel values. Choose it for differentiable surface rendering from signed distance fields [S5, unofficial].
++Casts a ray from the pixel and locates the surface voxel closest to the camera [S5, unofficial]. The final pixel color is computed as a weighted sum of the surface voxel and its neighboring voxels, with shading based on normals computed from voxel values [S5, unofficial]. Choose it for differentiable surface rendering from signed distance fields [S5, unofficial].
+ 
+ ## Operating characteristics
+-Time and memory complexity per ray are not given in the sources. Measured performance on specific hardware and resolution scaling are not given in the sources. Strengths include hardware-friendly early termination for the Accumulate scheme [S2, unofficial], specialized visualization modes for MIP in angiography [S2, unofficial], and X-ray simulation for Average [S2, unofficial]. Limitations include order-dependence in standard accumulation and potential aliasing without proper sampling rates [G].
++Time and memory complexity per ray are not given in the sources [G]. Measured performance on specific hardware and resolution scaling are not given in the sources [G]. Strengths include hardware-friendly early termination for the Accumulate scheme [S2, unofficial], specialized visualization modes for MIP in angiography [S2, unofficial], and X-ray simulation for Average [S2, unofficial]. Limitations include order-dependence in standard accumulation and potential aliasing without proper sampling rates [G].
+ 
+ ## Background

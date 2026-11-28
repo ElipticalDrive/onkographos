@@ -1,0 +1,141 @@
+--- v004.md
++++ v005.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-This method refines coarse camera poses by learning a per-camera correction in the SE(3) Lie algebra space, conditioned on 2D image coordinates and a learnable embedding [S2, unofficial]. It addresses the problem of pose inaccuracies in sparse or noisy initial estimates by jointly optimizing the pose corrections alongside the radiance field, avoiding the instability of direct global pose optimization [S1][S2, unofficial]. Unlike methods that rely solely on geometric consistency or robust PnP variants [S1], this approach uses a differentiable neural network to predict local SE(3) warps, allowing for end-to-end training with photometric and multi-view losses.
++This method refines coarse camera poses by learning a per-camera correction in the SE(3) Lie algebra space, conditioned on 2D image coordinates and a learnable embedding [S2, unofficial]. It addresses pose inaccuracies in sparse or noisy initial estimates by jointly optimizing the pose corrections alongside the radiance field, avoiding the instability of direct global pose optimization [S1][S2, unofficial]. Unlike methods that rely solely on geometric consistency or robust PnP variants [S1], this approach uses a differentiable neural network to predict local SE(3) warps, allowing for end-to-end training with photometric and multi-view losses. It builds on [Camera Pose Optimization](15669-camera-pose-optimization.md).
+ 
+ ## How it works
+@@ -43,5 +43,5 @@
+ 
+ 2.  **Ray Sampling:**
+-    *   For each optimization step, sample $N_{rays}$ pixel rays per image.
++    *   For each optimization step, sample $N_{rays}$ pixel rays per image [S1].
+     *   Typical values: 1024 rays for DTU/Replica, 2048 rays for LLFF [S1].
+ 
+@@ -51,9 +51,9 @@
+ 
+ 4.  **Embedding Retrieval:**
+-    *   Retrieve the embedding for the current camera $i$: $e_i = E[i]$.
++    *   Retrieve the embedding for the current camera $i$: $e_i = E[i]$ [S2, unofficial].
+     *   Expand $e_i$ to match the number of sampled rays: $E_{expanded} = \text{expand}(e_i, (-1, N_{rays}, -1))$ [S2, unofficial].
+ 
+ 5.  **Local SE(3) Prediction:**
+-    *   Concatenate 2D coordinates and embedding: $Input = \text{concat}(C_{2D}, E_{expanded}, dim=-1)$.
++    *   Concatenate 2D coordinates and embedding: $Input = \text{concat}(C_{2D}, E_{expanded}, dim=-1)$ [S2, unofficial].
+     *   Pass through Warp MLP: $\xi = \text{WarpMLP}(Input)$, where $\xi \in \mathbb{R}^{N_{rays} \times 6}$ [S2, unofficial].
+ 
+@@ -100,6 +100,6 @@
+ ### Edge Cases and Pitfalls
+ 
+-*   **Background Artifacts:** In LLFF joint optimization, applying multi-view correspondence and depth consistency losses from the start can cause the background to appear in front of the foreground. It is recommended to use only photometric loss for the first 1,000 iterations [S1].
+-*   **Hierarchical Sampling:** For LLFF, hierarchical sampling provides no significant benefit over a single MLP and increases training time. A single MLP is preferred for efficiency [S1].
++*   **Background Artifacts:** In LLFF joint optimization, applying multi-view correspondence and depth consistency losses from the start can cause the background to appear in front of the foreground [S1]. It is recommended to use only photometric loss for the first 1,000 iterations [S1].
++*   **Hierarchical Sampling:** For LLFF, hierarchical sampling provides no significant benefit over a single MLP and increases training time [S1]. A single MLP is preferred for efficiency [S1].
+ *   **Precision:** The Gram-Schmidt process for rotation reconstruction requires careful normalization to avoid numerical instability, especially when $a_1$ or the residual vector is near zero [S1].
+ 
+@@ -109,4 +109,32 @@
+ import torch
+ import torch.nn as nn
++
++def se3_to_SE3(lie_algebra):
++    """Convert SE(3) Lie algebra vector to 4x4 matrix [G]."""
++    omega = lie_algebra[..., :3]
++    trans = lie_algebra[..., 3:]
++    w = torch.stack([
++        torch.zeros_like(omega[..., 0]), -omega[..., 2], omega[..., 1],
++        omega[..., 2], torch.zeros_like(omega[..., 0]), -omega[..., 0],
++        -omega[..., 1], omega[..., 0], torch.zeros_like(omega[..., 0])
++    ], dim=-1).reshape(*lie_algebra.shape[:-1], 3, 3)
++    theta = torch.norm(omega, dim=-1, keepdim=True)
++    I3 = torch.eye(3, device=lie_algebra.device).unsqueeze(0).unsqueeze(0)
++    R = I3 + torch.sin(theta).unsqueeze(-1) * w + (1 - torch.cos(theta)).unsqueeze(-1) * torch.bmm(w, w)
++    S = I3 * theta + (1 - torch.cos(theta)).unsqueeze(-1) * w + (theta - torch.sin(theta)).unsqueeze(-1) * torch.bmm(w, w)
++    T = torch.bmm(S, trans.unsqueeze(-1)).squeeze(-1)
++    M = torch.cat([torch.cat([R, T.unsqueeze(-1)], dim=-1),
++                   torch.tensor([[[0, 0, 0, 1]]], device=lie_algebra.device).expand(*lie_algebra.shape[:-1], 1, 4)], dim=-2)
++    return M
++
++def gather_camera_cords_grid_3D(initial_pose, intr_inv, ray_indices, batch_size):
++    """Gather 3D camera coordinates for sampled rays [G]."""
++    ones = torch.ones(ray_indices.shape[0], ray_indices.shape[1], 1, device=ray_indices.device)
++    uv1 = torch.cat([ray_indices.float(), ones], dim=-1)
++    cam_coords = torch.bmm(uv1, intr_inv.transpose(-1, -2))
++    cam_coords_homo = torch.cat([cam_coords, torch.ones_like(cam_coords[..., :1])], dim=-1)
++    pose_inv = torch.inverse(initial_pose)
++    world_coords = torch.bmm(cam_coords_homo, pose_inv.transpose(-1, -2))
++    return world_coords[..., :3]
+ 
+ class LocalSE3WarpRefinement:
+@@ -115,49 +143,22 @@
+         self.warp_embedding = nn.Embedding(num_cameras, embedding_dim)
+         self.warp_mlp = warp_mlp
+-        # Initialize embeddings [G]
+         nn.init.zeros_(self.warp_embedding.weight)
+ 
+     def refine_pose(self, initial_pose, camera_indices, ray_indices, intr_inv, batch_size):
+-        # 1. Gather 3D camera coordinates for sampled rays [S2, unofficial]
+-        # Source does not provide implementation for gathering 3D coordinates from ray indices [S2, unofficial].
+         camera_cords_grid_3D = gather_camera_cords_grid_3D(
+             initial_pose, intr_inv, ray_indices, batch_size
+         )
+-        
+-        # 2. Extract 2D coordinates [S2, unofficial]
+         camera_cords_grid_2D = camera_cords_grid_3D[..., :2]
+-        
+-        # 3. Retrieve per-camera embeddings [S2, unofficial]
+         embeddings = self.warp_embedding(camera_indices)
+         num_rays = camera_cords_grid_2D.shape[1]
+         embeddings_expanded = embeddings.unsqueeze(1).expand(-1, num_rays, -1)
+-        
+-        # 4. Concatenate 2D coords and embeddings [S2, unofficial]
+         input_tensor = torch.cat((camera_cords_grid_2D, embeddings_expanded), dim=-1)
+-        
+-        # 5. Pass through Warp MLP [S2, unofficial]
+         local_se3_refine = self.warp_mlp(input_tensor)
+-        
+-        # 6. Convert SE(3) Lie algebra to SE(3) matrix [S2, unofficial]
+-        # Source does not provide implementation for SE(3) exponential map [G].
+         local_pose_refine = se3_to_SE3(local_se3_refine)
+-        
+-        # 7. Compose local refinement with base pose [S2, unofficial]
+         base_poses = initial_pose[camera_indices]
+-        base_poses_expanded = base_poses.unsqueeze(1).expand(-1, num_rays, -1, -1)
++        base_poses_expanded = base_poses.unsqueeze(1).expand(-1, num_rays, 4, 4)
+         local_pose = torch.matmul(local_pose_refine, base_poses_expanded)
+-        
+-        # 8. Aggregate poses (e.g., by averaging or selecting a representative ray)
+         refined_pose = local_pose.mean(dim=1)
+-        
+         return refined_pose
+-
+-# Source does not provide implementation for gathering 3D coordinates from ray indices [S2, unofficial].
+-def gather_camera_cords_grid_3D(initial_pose, intr_inv, ray_indices, batch_size):
+-    pass
+-
+-# Source does not provide implementation for SE(3) exponential map [G].
+-def se3_to_SE3(lie_algebra):
+-    pass
+ ```
+ 
+@@ -175,5 +176,5 @@
+ ## Operating characteristics
+ *   **Time Complexity:** The addition of multi-view correspondence loss and depth consistency objectives adds a factor of approximately 1.5 to the optimization time, regardless of the number of views [S1]. The PDC-Net for predicting matches runs at 10fps on $300 \times 400$ images [S1].
+-*   **Memory Complexity:** The method introduces memory overhead for storing per-camera embeddings and the Warp MLP. The embedding dimension is a hyperparameter [S2, unofficial].
++*   **Memory Complexity:** The method introduces memory overhead for storing per-camera embeddings and the Warp MLP [S2, unofficial].
+ *   **Performance:** The method has been validated on DTU, Replica, and LLFF datasets [S1]. It effectively corrects outlier poses and improves reconstruction quality [S3].
+ *   **Strengths:**
+@@ -184,9 +185,9 @@
+     *   May suffer from background artifacts if multi-view losses are applied too early in LLFF scenes [S1].
+     *   Relies on the quality of initial poses; poor initializations may require robust outlier handling [S3].
+-*   **When to Use:** Not given in the sources.
+-*   **When Not to Use:** Not given in the sources.
++*   **When to Use:** Not given in the sources. [G]
++*   **When Not to Use:** Not given in the sources. [G]
+ 
+ ## Background
+-The method originates from research on optimizing Neural Radiance Fields (NeRF) from sparse and noisy poses. Key contributions include:
++The method originates from research on optimizing Neural Radiance Fields (NeRF) from sparse and noisy poses [S1]. Key contributions include:
+ *   **SPARF (2023):** Introduced a method for optimizing NeRF from sparse and noisy poses using a Gram-Schmidt-like process for rotation reconstruction and specific learning rate schedules for DTU, Replica, and LLFF datasets [S1].
+ *   **Joint-TensoRF (Unofficial):** Proposed an embedding-based warp MLP approach for local SE(3) pose correction, leveraging per-camera embeddings and 2D coordinate conditioning [S2, unofficial].

@@ -1,0 +1,245 @@
+# Splat Decimation and Fusion
+
+
+## Overview
+Splat Decimation and Fusion is a post-processing method that reduces the primitive count of a textured splat model by removing redundant overlapping splats and merging those covering roughly planar areas into larger ellipses [S1]. It solves the performance bottleneck of rendering high-density splat clouds on mobile devices by minimizing new holes and enabling easier texturing through fewer, larger primitives [S1]. It differs from simple overlap removal by actively fusing geometry into minimum enclosing ellipses and employs a two-stage approach (coarse center-based and detailed contour-based) to balance computational cost with visual fidelity [S1].
+
+## How it works
+The method operates in two stages: a coarse simplification focusing on splat centers to eliminate nearby ellipses quickly, and a detailed merging stage to fuse remaining overlapping ellipses using a minimum enclosing algorithm [S1].
+
+### Inputs and Outputs
+*   **Input:** A set of splats $S$, where each splat $i$ is defined by center $s_{0i}$, normal $n_{0i}$, major axis $u_{0i}$, minor axis $v_{0i}$, and area $A_i = \|u_{0i}\| \|v_{0i}\|$ [S1].
+*   **Output:** A simplified set of splats with reduced count [S1].
+*   **Parameters:**
+    *   $\varepsilon_1 \in [0, 1]$: Scales the neighbor-search radius in Stage 1. Higher values inspect more splats [S1].
+    *   $\varepsilon_2 \in [0, 1]$: Controls the retention of splats in Stage 1 based on distance to the new center. $\varepsilon_2 = 1$ uses all merged splats [S1].
+    *   Flatness coefficient $f_i$: Used in Stage 2 to trim semiaxes in non-planar areas [S1].
+
+### Data Structures
+*   **Voxel Grid:** Used to accelerate neighbor search in Stage 1 [S1].
+*   **Splat List:** Ordered or indexed collection of splat primitives [S1].
+
+### Stage 1: Coarse Decimation
+This stage eliminates redundant splats by analyzing centers and normals [S1].
+
+1.  **Neighbor Search:** For each splat $i$, find neighbors $N_{r \cdot \varepsilon_1}(s_i)$ using voxelization [S1].
+2.  **Orientation Filter:** Identify candidates for merging with splat $i$ whose normal vectors $n_j$ form a small angle with $n_i$ [S1].
+3.  **Weighted Averaging:** Merge the candidate set $\{i+1, \dots, K\}$ with splat $i$ [S1]. Compute the new center $s'_{0i}$, normal $n'_{0i}$, and major axis $u'_{0i}$ as area-weighted averages:
+    $$ s'_{0i} = \frac{\sum_{j=i}^{K} \|u_{0j}\| \|v_{0j}\| s_j}{\sum_{j=i}^{K} \|u_{0j}\| \|v_{0j}\|} $$
+    $$ n'_{0i} = \frac{\sum_{j=i}^{K} \|u_{0j}\| \|v_{0j}\| n_j}{\sum_{j=i}^{K} \|u_{0j}\| \|v_{0j}\|} $$
+    $$ u'_{0i} = \frac{\sum_{j=i}^{K} \|u_{0j}\| \|v_{0j}\| u_j}{\sum_{j=i}^{K} \|u_{0j}\| \|v_{0j}\|} $$
+    [S1]
+4.  **Orthogonality Enforcement:** Derive the new minor axis $v'_{0i}$ to ensure orthogonality:
+    $$ v'_{0i} = n'_{0i} \wedge u'_{0i} $$
+    [S1]
+5.  **Distance-Based Retention:** Order the involved splats by increasing distance to the new center $s'_{0i}$ [S1].
+6.  **Contour Sampling:** Sample eight points uniformly from the contour of each retained ellipse [S1].
+7.  **Projection and Scaling:** Project sampled points onto the plane of the new splat (defined by $u'_{0i}$ and $v'_{0i}$) [S1]. Select maximum projections $P_u$ and $P_v$ along each axis [S1]. Compute the averaged eccentricity $\varepsilon'_i$ [S1]. Calculate the new major semiaxis length:
+    $$ \|u'_{0i}\| = \frac{\sqrt{P_u^2 + P_v^2}}{1 - \varepsilon'^2_i} $$
+    Calculate the new minor semiaxis length:
+    $$ \|v'_{0i}\| = \sqrt{1 - \varepsilon'^2_i} \cdot \|u'_{0i}\| $$
+    [S1]
+
+### Stage 2: Detailed Fusion
+This stage merges remaining overlapping pairs using a minimum enclosing ellipse algorithm [S1].
+
+1.  **Candidate Identification:** Two splats $i$ and $j$ are merging candidates if:
+    $$ \|s_{0i} - s_{0j}\| < 0.8 \cdot (\|u_{0i}\| + \|u_{0j}\|) $$
+    and their normal vectors form a small angle [S1].
+2.  **Footprint Sampling:** For candidate pair $(i, j)$, sample eight uniformly distributed points on the contour of splat $j$, along with its center $s_{0j}$, totaling nine points [S1].
+3.  **Projection:** Project these nine points onto the plane of splat $i$ [S1].
+4.  **Overlap Check:** A "footprint" is detected if a projected point lies inside ellipse $i$ [S1].
+    *   If fewer than two footprints are detected, the overlap is ignored to avoid creating holes [S1].
+    *   If seven or more footprints are detected, splat $j$ is directly removed from the model [S1].
+    *   Otherwise, proceed to merge [S1].
+5.  **Minimum Enclosing Ellipse:** Apply the minimum enclosing ellipsoid algorithm [Khachiyan 1996] using eight samples from each ellipse (16 points total) as input [S1].
+6.  **Finalization:** Keep the estimated center as the splat location [S1]. Scale the estimated semiaxes with the flatness coefficient $f_i$ to trim splats in less planar areas [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+class Splat:
+    def __init__(self, center, normal, u_axis, v_axis, u_len, v_len):
+        self.center = center  # 3D vector
+        self.normal = normal  # 3D vector
+        self.u_axis = u_axis  # 3D vector
+        self.v_axis = v_axis  # 3D vector
+        self.u_len = u_len    # float
+        self.v_len = v_len    # float
+
+def dot(a, b): return sum(x*y for x, y in zip(a, b))
+def cross(a, b): return (a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0])
+def norm(a): return math.sqrt(dot(a, a))
+def dist(a, b): return norm([a[i]-b[i] for i in range(3)])
+def normalize(a): n = norm(a); return [x/n for x in a] if n > 1e-9 else a
+
+def sample_ellipse_contour(splat, n=8):
+    points = []
+    for k in range(n):
+        theta = 2 * math.pi * k / n
+        cos_t, sin_t = math.cos(theta), math.sin(theta)
+        px = splat.center[0] + splat.u_len * cos_t * splat.u_axis[0] + splat.v_len * sin_t * splat.v_axis[0]
+        py = splat.center[1] + splat.u_len * cos_t * splat.u_axis[1] + splat.v_len * sin_t * splat.v_axis[1]
+        pz = splat.center[2] + splat.u_len * cos_t * splat.u_axis[2] + splat.v_len * sin_t * splat.v_axis[2]
+        points.append((px, py, pz))
+    return points
+
+def project_to_plane_2d(point, center, u, v):
+    vec = [point[i]-center[i] for i in range(3)]
+    x = dot(vec, u)
+    y = dot(vec, v)
+    return x, y
+
+def is_inside_ellipse(x, y, a, b):
+    return (x/a)**2 + (y/b)**2 <= 1.0
+
+def compute_averaged_eccentricity(splats):
+    eccs = [math.sqrt(1 - (s.v_len/s.u_len)**2) if s.u_len > 1e-9 else 0.0 for s in splats]
+    return sum(eccs) / len(eccs) if eccs else 0.0
+
+def splat_decimation_and_fusion(splats, epsilon1, epsilon2, flatness_coeff):
+    # Stage 1: Coarse Decimation
+    # Voxelization is used for neighbor search [S1]
+    # For implementation, we assume a helper that returns indices within radius r*epsilon1
+    # Here we use a simplified distance check for clarity, but in practice use voxel_grid.query()
+    processed = set()
+    new_splats = []
+    
+    for i, s_i in enumerate(splats):
+        if i in processed:
+            continue
+            
+        # Find neighbors within scaled radius
+        neighbors = [j for j, s_j in enumerate(splats) if j != i and dist(s_i.center, s_j.center) <= norm(s_i.u_axis) * epsilon1]
+        
+        # Filter by orientation (small angle with normal) [G]
+        candidates = [j for j in neighbors if dot(splats[j].normal, s_i.normal) > 0.9]
+        
+        if not candidates:
+            new_splats.append(s_i)
+            continue
+            
+        # Merge candidates with splat_i
+        total_area = sum(norm(splats[j].u_axis) * norm(splats[j].v_axis) for j in candidates)
+        if total_area == 0:
+            new_splats.append(s_i)
+            continue
+            
+        new_center = [(sum(norm(splats[j].u_axis)*norm(splats[j].v_axis)*splats[j].center[k] for j in candidates)) / total_area for k in range(3)]
+        new_normal = [(sum(norm(splats[j].u_axis)*norm(splats[j].v_axis)*splats[j].normal[k] for j in candidates)) / total_area for k in range(3)]
+        new_u = [(sum(norm(splats[j].u_axis)*norm(splats[j].v_axis)*splats[j].u_axis[k] for j in candidates)) / total_area for k in range(3)]
+        
+        new_normal = normalize(new_normal)
+        new_u = normalize(new_u)
+        new_v = normalize(cross(new_normal, new_u))
+        
+        # Order candidates by distance to new center [S1]
+        candidates.sort(key=lambda j: dist(splats[j].center, new_center))
+        
+        # Retain based on epsilon2 [S1]
+        retain_count = int(len(candidates) * epsilon2) + 1 if epsilon2 < 1 else len(candidates)
+        retained = candidates[:retain_count]
+        
+        # Sample contours of retained splats [S1]
+        sampled_points = []
+        for j in retained:
+            sampled_points.extend(sample_ellipse_contour(splats[j]))
+            
+        # Project to new plane [S1]
+        projected_2d = [project_to_plane_2d(p, new_center, new_u, new_v) for p in sampled_points]
+        
+        # Find max projections along axes [S1]
+        Pu = max(abs(x) for x, y in projected_2d)
+        Pv = max(abs(y) for x, y in projected_2d)
+        
+        # Calculate averaged eccentricity [S1]
+        avg_ecc = compute_averaged_eccentricity([splats[j] for j in retained])
+        
+        # Compute new semiaxes [S1]
+        denom = 1 - avg_ecc**2
+        if denom < 1e-6: denom = 1e-6
+        new_u_len = math.sqrt(Pu**2 + Pv**2) / denom
+        new_v_len = math.sqrt(1 - avg_ecc**2) * new_u_len
+        
+        new_splat = Splat(center=new_center, normal=new_normal, u_axis=new_u, v_axis=new_v, u_len=new_u_len, v_len=new_v_len)
+        new_splats.append(new_splat)
+        
+        for j in candidates:
+            processed.add(j)
+
+    # Stage 2: Detailed Fusion
+    final_splats = []
+    used = set()
+    
+    for i, s_i in enumerate(new_splats):
+        if i in used:
+            continue
+            
+        merged = False
+        for j, s_j in enumerate(new_splats):
+            if i == j or j in used:
+                continue
+                
+            # Candidate check [S1]
+            sum_major = s_i.u_len + s_j.u_len
+            if dist(s_i.center, s_j.center) < 0.8 * sum_major and dot(s_i.normal, s_j.normal) > 0.9:
+                # Sample contour of j + center [S1]
+                contour_j = sample_ellipse_contour(s_j)
+                points_to_project = contour_j + [s_j.center]
+                
+                # Project to plane of i [S1]
+                projected = [project_to_plane_2d(p, s_i.center, s_i.u_axis, s_i.v_axis) for p in points_to_project]
+                
+                # Check footprints [S1]
+                footprints = [p for p in projected if is_inside_ellipse(p[0], p[1], s_i.u_len, s_i.v_len)]
+                
+                if len(footprints) >= 7:
+                    used.add(j)
+                    continue
+                elif len(footprints) >= 2:
+                    # Merge i and j [S1]
+                    samples_i = sample_ellipse_contour(s_i)
+                    samples_j = sample_ellipse_contour(s_j)
+                    all_samples = samples_i + samples_j
+                    
+                    # Khachiyan's minimum enclosing ellipse algorithm [G]
+                    mec_center, mec_u, mec_v, mec_u_len, mec_v_len = khachiyan_minimum_enclosing_ellipse(all_samples)
+                    
+                    # Scale with flatness [S1]
+                    mec_u_len *= flatness_coeff
+                    mec_v_len *= flatness_coeff
+                    
+                    final_splats.append(Splat(center=mec_center, normal=s_i.normal, u_axis=mec_u, v_axis=mec_v, u_len=mec_u_len, v_len=mec_v_len))
+                    used.add(i)
+                    used.add(j)
+                    merged = True
+                    break
+        
+        if not merged:
+            final_splats.append(s_i)
+            
+    return final_splats
+
+def khachiyan_minimum_enclosing_ellipse(points):
+    # Standard iterative algorithm to find minimum area enclosing ellipse [G]
+    # Returns center, u_axis, v_axis, u_len, v_len
+    # Implementation omitted for brevity as it is a well-known standard algorithm [G]
+    pass
+```
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:** Designed for mobile rendering, reducing the primitive count significantly to enable smooth frame rates on handheld devices [S1].
+*   **Strengths:** Preserves sharp details by minimizing new holes; uses fewer larger splats in planar regions for easier texturing [S1].
+*   **Limitations:** The two-stage process adds computational overhead to the preprocessing pipeline; aggressive merging can distort non-planar geometry if flatness coefficients are not tuned [S1].
+
+## Background
+The method was introduced in the context of textured splat-based point clouds for rendering in handheld devices [S1]. It builds on the merging operators of progressive splatting [Wu et al. 2005] but adapts them for a two-stage decimation/fusion process to reduce computational cost and improve texturing results on mobile hardware [S1]. The minimum enclosing ellipse step references Khachiyan's algorithm [Khachiyan 1996] [S1].
+
+## Sources
+[S1] Textured splat-based point clouds for rendering in handheld devices, https://doi.org/10.1145/2775292.2782779, fetched 2026-11-03

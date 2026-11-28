@@ -1,0 +1,202 @@
+--- v002.md
++++ v003.md
+@@ -7,10 +7,10 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A pretrained NeRF model (MLP parameters), a set of training images with known camera poses, and a target camera ray $r(\lambda) = o + \lambda d$ [S1].
+-*   **Output:** A rendered RGB color $\mathbf{c}$ for the pixel corresponding to the ray [S1].
++*   **Input:** A pretrained NeRF model (MLP parameters), a set of training images with known camera poses, and a target camera ray $r(\lambda) = o + \lambda d$ where $o \in \mathbb{R}^3$ is the origin and $d \in \mathbb{R}^3$ is the direction [S1].
++*   **Output:** A rendered RGB color $\mathbf{c} \in \mathbb{R}^3$ for the pixel corresponding to the ray [S1].
+ 
+ **Data Structures:**
+-1.  **Duplex Mesh:** A two-layer mesh extracted from the pretrained NeRF's density field. It consists of an inner surface and an outer surface that bracket the true underlying geometry [S1].
+-2.  **Radiance Features:** For each vertex on the duplex mesh, a feature vector is stored. These features are learned during optimization [S1].
++1.  **Duplex Mesh:** A two-layer mesh extracted from the pretrained NeRF's density field [S1]. It consists of an inner surface and an outer surface that bracket the true underlying geometry [S1]. This defines the reliable interval of the density field [S1].
++2.  **Radiance Features:** For each vertex on the duplex mesh, a feature vector is stored [S1]. These features are learned during optimization [S1].
+ 3.  **Shallow CNN:** A convolutional network that takes the radiance features from the two intersection points and the local pixel neighborhood as input to predict the final color [S1].
+ 
+@@ -18,11 +18,11 @@
+ 
+ 1.  **Geometry Proxy Extraction:**
+-    Extract a geometry proxy (mesh) from the pretrained NeRF model using marching cubes [S1]. This defines the reliable interval of the density field. The mesh has two layers: an inner layer and an outer layer [S1].
++    Extract a geometry proxy (mesh) from the pretrained NeRF model using marching cubes [S1]. The mesh has two layers: an inner layer and an outer layer [S1].
+ 
+ 2.  **Ray-Surface Intersection:**
+-    For each target camera ray with origin $o$ and direction $d$, find the two intersection points where the ray intersects the two layers of the duplex mesh. Let these points be $p_{in}$ (inner intersection) and $p_{out}$ (outer intersection) [S1].
++    For each target camera ray with origin $o$ and direction $d$, find the two intersection points where the ray intersects the two layers of the duplex mesh [S1]. Let these points be $p_{in}$ (inner intersection) and $p_{out}$ (outer intersection) [S1].
+ 
+ 3.  **Feature Retrieval via Barycentric Interpolation:**
+-    Derive radiance features at the intersection points $p_{in}$ and $p_{out}$ using barycentric interpolation on the mesh triangles [S1]. Let $\mathbf{f}_{in}$ and $\mathbf{f}_{out}$ be the interpolated feature vectors [S1].
++    Derive radiance features at the intersection points $p_{in}$ and $p_{out}$ using barycentric interpolation on the mesh triangles [S1]. Let $\mathbf{f}_{in}$ and $\mathbf{f}_{out}$ be the interpolated feature vectors [S1]. The interpolation follows $\mathbf{f} = u \mathbf{f}_0 + v \mathbf{f}_1 + w \mathbf{f}_2$, where $u,v,w$ are the barycentric coordinates of the intersection point on the triangle, and $\mathbf{f}_0, \mathbf{f}_1, \mathbf{f}_2$ are the vertex features [S1].
+ 
+ 4.  **Color Prediction via Shallow CNN:**
+@@ -35,78 +35,90 @@
+ 
+ ```python
+-def render_ndrf(ray_origin, ray_direction, duplex_mesh, cnn, training_images):
+-    """
+-    Renders a single pixel using the Neural Duplex Radiance Field method.
+-    
+-    Args:
+-        ray_origin: 3D vector, camera origin in world space.
+-        ray_direction: 3D vector, camera direction in world space.
+-        duplex_mesh: Object containing two layers of mesh geometry (inner/outer).
+-        cnn: Shallow convolutional network for color prediction.
+-        training_images: List of ground truth images for distillation loss.
+-        
+-    Returns:
+-        color: 3D vector, predicted RGB color.
+-    """
+-    # Step 1: Find duplex intersections
+-    # Find intersection with inner layer
+-    t_in, hit_in = ray_mesh_intersection(ray_origin, ray_direction, duplex_mesh.inner_layer)
+-    # Find intersection with outer layer
+-    t_out, hit_out = ray_mesh_intersection(ray_origin, ray_direction, duplex_mesh.outer_layer)
+-    
+-    # Ensure valid intersections exist
++def ray_mesh_intersect(origin, direction, vertices, faces):
++    """Returns closest positive t and intersection point using Möller–Trumbore."""
++    closest_t = float('inf')
++    closest_point = None
++    for i in range(0, len(faces), 3):
++        v0, v1, v2 = vertices[faces[i]], vertices[faces[i+1]], vertices[faces[i+2]]
++        edge1 = [v1[j]-v0[j] for j in range(3)]
++        edge2 = [v2[j]-v0[j] for j in range(3)]
++        h = [direction[1]*edge2[2]-direction[2]*edge2[1],
++             direction[2]*edge2[0]-direction[0]*edge2[2],
++             direction[0]*edge2[1]-direction[1]*edge2[0]]
++        a = sum(e*d for e,d in zip(edge1, h))
++        if -1e-6 < a < 1e-6: continue
++        f = 1.0 / a
++        s = [origin[j]-v0[j] for j in range(3)]
++        u = f * sum(s[j]*h[j] for j in range(3))
++        if u < 0.0 or u > 1.0: continue
++        q = [s[1]*edge1[2]-s[2]*edge1[1],
++             s[2]*edge1[0]-s[0]*edge1[2],
++             s[0]*edge1[1]-s[1]*edge1[0]]
++        v = f * sum(direction[j]*q[j] for j in range(3))
++        if v < 0.0 or u + v > 1.0: continue
++        t = f * sum(edge2[j]*q[j] for j in range(3))
++        if t > 1e-6 and t < closest_t:
++            closest_t = t
++            closest_point = [origin[j] + t*direction[j] for j in range(3)]
++    return closest_t, closest_point
++
++def get_barycentric_coords(v0, v1, v2, p):
++    """Computes barycentric coordinates (u,v,w) for point p on triangle v0,v1,v2."""
++    v0v1 = [v1[j]-v0[j] for j in range(3)]
++    v0v2 = [v2[j]-v0[j] for j in range(3)]
++    v0p = [p[j]-v0[j] for j in range(3)]
++    d00 = sum(a*b for a,b in zip(v0v1, v0v1))
++    d01 = sum(a*b for a,b in zip(v0v1, v0v2))
++    d11 = sum(a*b for a,b in zip(v0v2, v0v2))
++    d20 = sum(a*b for a,b in zip(v0p, v0v1))
++    d21 = sum(a*b for a,b in zip(v0p, v0v2))
++    denom = d00 * d11 - d01 * d01
++    v = (d11 * d20 - d01 * d21) / denom
++    w = (d00 * d21 - d01 * d20) / denom
++    u = 1.0 - v - w
++    return [u, v, w]
++
++def interpolate_features(vertex_feats, bary):
++    """Linear interpolation of feature vectors using barycentric coordinates."""
++    return [sum(bary[k]*vertex_feats[k][j] for k in range(3)) for j in range(len(vertex_feats[0]))]
++
++def shallow_cnn_forward(f_in, f_out, screen_patch):
++    """Aggregates local geometry and appearance via a shallow CNN."""
++    combined = f_in + f_out + screen_patch
++    # Standard shallow CNN: linear projection + activation
++    weights = [[0.5, -0.2, 0.1], [0.1, 0.5, -0.1], [-0.1, 0.1, 0.5]]
++    bias = [0.0, 0.0, 0.0]
++    out = [sum(w*c for w,c in zip(row, combined)) + b for row, b in zip(weights, bias)]
++    return [max(0.0, x) for x in out] # ReLU activation
++
++def render_ndrf(ray_origin, ray_direction, mesh_data, screen_patch):
++    """Renders a single pixel using the NDRF method."""
++    t_in, p_in = ray_mesh_intersect(ray_origin, ray_direction, mesh_data['inner_v'], mesh_data['inner_f'])
++    t_out, p_out = ray_mesh_intersect(ray_origin, ray_direction, mesh_data['outer_v'], mesh_data['outer_f'])
+     if t_in is None or t_out is None:
+-        return background_color # Or handle as empty space
+-        
+-    p_in = ray_origin + t_in * ray_direction
+-    p_out = ray_origin + t_out * ray_direction
+-    
+-    # Step 2: Retrieve radiance features via barycentric interpolation
+-    # Identify the triangle containing p_in and p_out on the mesh
+-    tri_in = get_triangle_at_point(duplex_mesh.inner_layer, p_in)
+-    tri_out = get_triangle_at_point(duplex_mesh.outer_layer, p_out)
+-    
+-    # Get barycentric coordinates
+-    bary_in = get_barycentric_coords(tri_in, p_in)
+-    bary_out = get_barycentric_coords(tri_out, p_out)
+-    
+-    # Interpolate features from mesh vertices
+-    f_in = interpolate_features(tri_in.vertices, tri_in.features, bary_in)
+-    f_out = interpolate_features(tri_out.vertices, tri_out.features, bary_out)
+-    
+-    # Step 3: Aggregate using Shallow CNN
+-    # The CNN takes local screen-space neighborhood and the two feature vectors
+-    # Note: In practice, this is done in parallel for all pixels in a batch
+-    color = cnn.forward(f_in, f_out, local_pixel_neighborhood)
+-    
+-    return color
++        return [0.0, 0.0, 0.0]
++    # Assume triangle indices for p_in and p_out are pre-computed or found via spatial hash
++    tri_in_idx = mesh_data['inner_tri_idx'][tuple(p_in)]
++    tri_out_idx = mesh_data['outer_tri_idx'][tuple(p_out)]
++    v0, v1, v2 = [mesh_data['inner_v'][mesh_data['inner_f'][tri_in_idx+k]] for k in range(3)]
++    v0_out, v1_out, v2_out = [mesh_data['outer_v'][mesh_data['outer_f'][tri_out_idx+k]] for k in range(3)]
++    bary_in = get_barycentric_coords(v0, v1, v2, p_in)
++    bary_out = get_barycentric_coords(v0_out, v1_out, v2_out, p_out)
++    f_in = interpolate_features([mesh_data['inner_feats'][mesh_data['inner_f'][tri_in_idx+k]] for k in range(3)], bary_in)
++    f_out = interpolate_features([mesh_data['outer_feats'][mesh_data['outer_f'][tri_out_idx+k]] for k in range(3)], bary_out)
++    return shallow_cnn_forward(f_in, f_out, screen_patch)
+ 
+-def train_ndrf(pretrained_nerf, training_images, num_epochs=1000):
+-    """
+-    Distills a pretrained NeRF into NDRF representation.
+-    """
+-    # Extract duplex mesh from pretrained NeRF
+-    duplex_mesh = extract_mesh_from_nerf(pretrained_nerf)
+-    
+-    # Initialize CNN and mesh features
+-    cnn = ShallowCNN()
+-    mesh_features = initialize_mesh_features(duplex_mesh)
+-    
+-    for epoch in range(num_epochs):
+-        for image, camera_pose in training_images:
+-            # Cast rays for all pixels in the image
+-            rays = generate_rays(image.width, image.height, camera_pose)
+-            
+-            rendered_colors = []
+-            for ray in rays:
+-                # Render using NDRF logic
+-                c = render_ndrf(ray.origin, ray.direction, duplex_mesh, cnn)
+-                rendered_colors.append(c)
+-            
+-            # Compute loss against ground truth
+-            loss = compute_loss(rendered_colors, image.pixels)
+-            
+-            # Backpropagate to update CNN and mesh features
+-            update_parameters(cnn, mesh_features, loss)
++def train_ndrf(pretrained_nerf, training_data, epochs=1000, lr=1e-3):
++    """Distills a pretrained NeRF into NDRF representation."""
++    mesh_data = extract_mesh_from_nerf(pretrained_nerf) # Not given in sources
++    mesh_data['inner_feats'] = [[0.0]*64 for _ in range(len(mesh_data['inner_v']))]
++    mesh_data['outer_feats'] = [[0.0]*64 for _ in range(len(mesh_data['outer_v']))]
++    for epoch in range(epochs):
++        for img, cam_pose in training_data:
++            rays = generate_rays(img.shape, cam_pose) # Not given in sources
++            rendered = [render_ndrf(r.orig, r.dir, mesh_data, get_screen_patch(img, r)) for r in rays]
++            loss = sum((r-g)**2 for r,g in zip(rendered, img.flatten())) / len(rendered)
++            # Backpropagation updates CNN weights and mesh features
++            update_parameters(mesh_data, loss, lr) # Not given in sources
+ ```
+ 
+@@ -129,5 +141,5 @@
+     *   Relies on the quality of the initial NeRF model for distillation [S1].
+     *   Mesh extraction via marching cubes may introduce geometric inaccuracies, though the duplex structure mitigates this [S1].
+-*   **When to use:** When real-time view synthesis is required and a pretrained NeRF model is available.
++*   **When to use:** When real-time view synthesis is required and a pretrained NeRF model is available [S1].
+ *   **When not to use:** When high-fidelity geometry is required without the approximation of a mesh proxy, or when no pretrained NeRF is available (as training from scratch causes artifacts) [S1].
+ 

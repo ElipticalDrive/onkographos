@@ -1,0 +1,1098 @@
+CHAPTER 20
+Texture Level of Detail Strategies
+for Real-Time Ray Tracing
+Tomas Akenine-Möller,1 Jim Nilsson,1 Magnus Andersson,1
+Colin Barré-Brisebois,2 Robert Toth,1 and Tero Karras1
+1
+NVIDIA
+2
+SEED / Electronic Arts
+ABSTRACT
+Unlike rasterization, where one can rely on pixel quad partial derivatives, an
+alternative approach must be taken for filtered texturing during ray tracing. We
+describe two methods for computing texture level of detail for ray tracing. The first
+approach uses ray differentials, which is a general solution that gives high-quality
+results. It is rather expensive in terms of computations and ray storage, however.
+The second method builds on ray cone tracing and uses a single trilinear lookup,
+a small amount of ray storage, and fewer computations than ray differentials. We
+explain how ray differentials can be implemented within DirectX Raytracing (DXR)
+and how to combine them with a G-buffer pass for primary visibility. We present a
+new method to compute barycentric differentials. In addition, we give previously
+unpublished details about ray cones and provide a thorough comparison with
+bilinearly filtered mip level 0, which we consider as a base method.
+20.1
+INTRODUCTION
+Mipmapping [17] is the standard method to avoid texture aliasing, and all GPUs
+support this technique for rasterization. OpenGL [7, 15], for example, specifies the
+level of detail (LOD) parameter λ as
+l ( x, y ) = log2 éê r ( x, y ) ùú ,
+(1)
+where (x, y) are pixel coordinates and the function ρ may be computed as
+2
+2 ü
+2
+2
+ì
+r ( x, y ) = max ï æ ¶s ö + æ ¶t ö , æ ¶s ö + æ ¶t ö ï ,
+í ç ÷ ç ÷
+ç ÷ ç ÷ ý
+è ¶y ø è ¶y ø ï
+ïî è ¶x ø è ¶x ø
+þ
+© NVIDIA 2019
+E. Haines, T. Akenine-Möller (eds.), Ray Tracing Gems, https://doi.org/10.1007/978-1-4842-4427-2_20
+(2)
+321
+RAY TRACING GEMS
+for two-dimensional texture lookups, where (s, t) are texel coordinates, i.e., texture
+coordinates (∈ [0, 1]2) multiplied by texture resolution. See Figure 20-1. These
+functions help ensure that sampling the mipmap hierarchy occurs such that a
+screen-space pixel maps to approximately one texel. In general, GPU hardware
+computes these differentials by always evaluating pixel shaders over 2 × 2 pixel
+quads and by using per-pixel differences. Note, however, that Equation 2 is not
+conservative for a single trilinear lookup, as it does not compute a minimum
+box around the footprint. The maximum side of such a conservative box can
+be computed as ρ(x, y) = max(| ∂s/∂x| + | ∂s/∂y| , | ∂t/∂x| + | ∂t/∂y|). OpenGL allows
+use of more conservative estimates than Equation 2, but we are unaware of any
+such approach or implementation. As a consequence, it is easily shown via GPU
+texturing that most methods can produce both overblur and aliasing.
+Figure 20-1. The footprint of a pixel approximated as a parallelogram in texture space. This notation
+is used in Equation 2.
+For ray tracing, a method to compute texture LOD is desired and it should
+be capable of handling recursive ray paths as well. Since pixel quads are not
+generally available for ray tracing (except possibly for eye rays), other approaches
+are needed. This chapter describes two texturing methods for real-time ray
+tracing. The first, ray differentials [9], uses the chain rule to derive expressions
+that can accurately compute texture footprints even for specular reflections and
+refractions. Ray differentials are computationally expensive and use a substantial
+amount of per-ray data, but provide high-quality texture filtering. The second,
+called ray cones, is less expensive and uses a cone to represent ray footprints as
+they grow or shrink depending on distance and surface interactions. We describe
+implementations of these two methods in DXR. See also Chapter 21 for information
+about how to filter environment map lookups in a ray tracing engine.
+322
+TEXTURE LEVEL OF DETAIL STRATEGIES FOR REAL-TIME RAY TRACING
+20.2
+BACKGROUND
+For filtered texture mapping, it is common to use a hierarchical image pyramid,
+called a mipmap, for acceleration [17]. Each pixel footprint gets mapped to texture
+space and a λ-value is computed. This λ, together with the current fragment’s
+texture coordinates, is used to gather and trilinearly filter eight samples from
+the mipmap. Heckbert [7, 8] surveyed various texture filtering techniques, and
+McCormack et al. [10] presented a method for anisotropic sampling along with
+a survey of previous methods. Greene and Heckbert [6] presented the elliptical
+weighted average (EWA) filter, often considered the method with best quality and
+reasonable performance. EWA computes an elliptical footprint in texture space and
+samples the mipmap using several lookups with Gaussian weights. EWA can be
+used both for rasterization and for ray tracing.
+Ewins et al. [5] presented various approximations for texture LOD, and we refer
+readers to their survey of current methods. For example, they describe a crude
+approximation using a single LOD for an entire triangle. This is computed as
+æ t ö
+æt ö
+D = log2 ç a ÷ = 0.5log2 ç a ÷ ,
+ç pa ÷
+è pa ø
+è
+ø
+(3)
+where the variables ta and pa are twice the texel-space area and twice the triangle
+area in screen space, respectively. These are computed as
+ta = wh (t1x - t0x ) (t2 y - t0y ) - (t2x - t0x ) (t1y - t0y ) ,
+pa = ( p1x - p0x ) ( p2 y - p0y ) - ( p2x - p0x ) ( p1y - p0y ) ,
+(4)
+where w × h is the texture resolution, Ti = (tix, tiy) are two-dimensional texture
+coordinates for each vertex, and Pi = (pix, piy), i ∈ {0,1,2}, are the three screen-space
+triangle vertices. Twice the triangle area can also be computed in world space as
+pa = ‖(P1 - P0 ) ´ (P2 - P0 )‖,
+(5)
+where Pi now are in world space. We exploit that setup as part of our solution for
+ray cones filtering, since Equation 3 gives a one-to-one mapping between pixels
+and texels if the triangle lies on the z = 1 plane. In this case, Δ can be considered as
+a base texture level of detail of the triangle.
+323
+RAY TRACING GEMS
+Igehy [9] presented the first method to filter textures for ray tracing. He used
+ray differentials, tracked these through the scene, and applied the chain rule to
+model reflections and refractions. The computed LOD works with either regular
+mipmapping or anisotropically sampled mipmapping. Another texturing method for
+ray tracing is based on using cones [1]. Recently, Christensen et al. [3] revealed that
+they also use a ray cone representation for filtering textures in movie rendering,
+i.e., similar to what is presented in Section 20.3.4.
+20.3
+TEXTURE LEVEL OF DETAIL ALGORITHMS
+This section describes the texture LOD algorithms that we consider for real-time
+ray tracing. We improve the ray cones method (Section 20.3.4) so that it handles
+curvature at the first hit, which improves quality substantially. We also extend ray
+differentials for use with a G-buffer, which improves performance. In addition, we
+present a new method for how to compute barycentric differentials.
+20.3.1
+MIP LEVEL 0 WITH BILINEAR FILTERING
+One easy way to access textures is to sample mip level 0. This generates great
+images using many rays per pixel, but performance can suffer since repeated mip
+level 0 accesses often lead to poor texture caching. When tracing with only a few
+rays per pixel, quality will suffer, especially when minification occurs. Enabling
+bilinear filtering provides a small improvement. However, with a competent
+denoiser as a post-process, bilinear filtering may suffice, as the denoised result is
+blurred.
+20.3.2 R AY DIFFERENTIALS
+Assume that a ray is represented (see Chapter 2) as
+ˆ,
+R (t ) = O + t d
+(6)
+ˆ = d /‖d‖. The
+where O is the ray origin and d̂ is the normalized ray direction, i.e., d
+corresponding ray differential [9] consists of four vectors:
+ˆ ˆü
+ì
+ïí ¶O , ¶O , ¶ d , ¶ d ïý ,
+ïî ¶x ¶y ¶x ¶y ïþ
+(7)
+where (x, y) are the screen coordinates, with one unit between adjacent pixels.
+The core idea is to track a ray differential along each path as it bounces around in
+the scene. No matter the media that the rays traverse, all interactions along the
+324
+TEXTURE LEVEL OF DETAIL STRATEGIES FOR REAL-TIME RAY TRACING
+path are differentiated and applied to the incoming ray differential, producing an
+outgoing ray differential. When indexing into a texture, the current ray differential
+determines the texture footprint. Most equations from the ray differential paper
+[9] can be used as presented, but the differential for the eye ray direction needs
+modification. We also optimize the differential barycentric coordinate computation.
+20.3.2.1 EYE RAY SETUP
+The non-normalized eye ray direction d for a pixel at coordinate (x, y) for a w × h
+screen resolution is usually generated in DXR as
+æ x + 0.5 y + 0.5 ö
+,
+,
+p=ç
+h ÷ø
+è w
+(
+)
+c = 2px - 1, 2py - 1 ,
+and
+(8)
+æ 2x + 1 ö
+æ 2y + 1 ö
+d ( x, y ) = c x r + c y u + v = ç
+- 1÷ r + ç
+- 1÷ u + v ,
+w
+è
+ø
+è h
+ø
+or using some minor modification of this setup. Here, p ∈ [0, 1]2, where the 0.5
+values are added to get to the center of each pixel, i.e., the same as in DirectX and
+OpenGL, and thus c ∈ [−1, 1]. The right-hand, orthonormal camera basis is {r′, u′, v′},
+i.e., r′ is the right vector, u′ is the up vector, and v′ is the view vector pointing toward
+the camera position. Note that we use {r, u, v} in Equation 8, and these are just
+scaled versions of the camera basis, i.e.,
+{r , u, v } = {af r ¢, - f u¢, - v ¢},
+(9)
+where a is the aspect ratio and f = tan (ω/2), where ω is the vertical field of view.
+For eye rays, Igehy [9] computes the ray differentials for the direction as
+¶d ( d × d ) r - ( d × r ) d
+¶x =
+3
+(d × d ) 2
+and
+¶d ( d × d ) u - ( d × u ) d
+=
+,
+3
+¶y
+2
+(d × d )
+(10)
+where r is the right vector from one pixel to the next and u is the up vector, which
+in our case are
+r = d ( x + 1, y ) - d ( x, y ) =
+2af
+w
+r¢
+and u = d ( x, y + 1) - d ( x, y ) = -
+2f
+h
+u¢,
+(11)
+derived using Equation 8. This is all that is needed to set up the ray differential for
+eye rays.
+325
+RAY TRACING GEMS
+20.3.2.2 OPTIMIZED DIFFERENTIAL BARYCENTRIC COORDINATE COMPUTATION
+Any point on the triangle can be described using barycentric coordinates (u, v) as
+P0 + ue1 + ve2, where e1 = P1 − P0 and e2 = P2 − P0. Once we have found an intersection,
+we need to compute the differentials of these, i.e., ∂u/∂x, ∂u/∂y, ∂v/∂x, and ∂v/∂y. Now
+let P be an arbitrary point in space and let g be a projection vector, which is not
+parallel to the triangle plane. The point P = (px, py, pz) can be described as
+P = P0 + u e1 + v e2 + s g,
+(12)
+point on triangle plane
+where s is the projection distance. This is illustrated in Figure 20-2.
+Figure 20-2. The setup for the derivation of differential barycentric coordinate computation.
+This setup is similar to the one used in some ray/triangle intersection tests [11] and
+can be expressed as a system of linear equations and hence solved using Cramer’s
+rule, which results in
+u=
+v=
+326
+1
+1
+e ´ g ) × (P - P ) = ( ( e ´ g ) × P - ( e ´ g ) × P ) ,
+(
+k
+k
+2
+1
+k
+0
+2
+2
+0
+1
+(g ´ e ) × (P - P ) = k ( (g ´ e ) ×P - (g ´ e ) ×P ) ,
+1
+0
+1
+1
+0
+(13)
+TEXTURE LEVEL OF DETAIL STRATEGIES FOR REAL-TIME RAY TRACING
+where k = (e1 × e2) ⋅ g. From these expressions, we can see that
+¶u 1
+¶v 1
+(14)
+= ( e ´ g ) and
+= ( g ´ e1 ) .
+¶P k 2
+¶P k
+These expressions will be useful later on in the derivation. Next, assume that a
+point of intersection is computed as P = O + td (note that the ray direction vector d
+needs not be normalized), which means that we can express ∂P/∂x as
+¶P =
+¶x
+¶ (O + t d )
+¶x
+=
+¶O
+¶d ¶t
+¶t
++t
++ d = q + d,
+¶x
+¶x ¶x
+¶x
+(15)
+where q = ∂O/∂x + t(∂ d/∂x). The same is done for ∂P/∂y, where we instead use
+r = ∂O/∂y + t(∂ d/∂y). We use the results from Equations 14 and 15 together with the
+chain rule to obtain
+¶u ¶u ¶px ¶u ¶py ¶u ¶pz ¶u ¶P 1
+æ
+¶t ö
+=
++
++
+=
+×
+= (e ´ g ) × ç q + d ÷ .
+¶x ¶px ¶x ¶py ¶x ¶pz ¶x
+¶
+¶
+¶
+P
+x k 2
+x ø
+è
+(16)
+dot product
+Next, we choose g = d and simplify the previous expression to
+¶u = 1 ( e ´ d ) × æç q + ¶t d ö÷ = 1 ( e ´ d ) × q,
+¶x k 2
+¶x ø k 2
+è
+(17)
+since (e2 × d) ⋅ d = 0. Now, the expressions for which we sought can be
+summarized as
+¶u 1
+= cu × q and
+¶x k
+1
+¶v
+= c v × q and
+¶x k
+¶u 1
+= c ×r,
+¶y k u
+1
+¶v
+= cv × r ,
+¶y k
+(18)
+where
+cu = e2 ´ d, c v = d ´ e1, q =
+and
+k = ( e1 ´ e2 ) × d.
+¶O
+¶d
+¶O
+¶d
++t
++t
+,r =
+,
+¶x
+¶x
+¶y
+¶y
+(19)
+327
+RAY TRACING GEMS
+Note that q and r are evaluated using the ray differential representation in
+Equation 7 along with t, which is the distance to the intersection point. In addition,
+since w = 1 − u − v, we have
+¶w = - ¶u - ¶v ,
+¶x
+¶x ¶x
+(20)
+and similarly for ∂w/∂y.
+Once the differentials of (u, v) have been computed, they can be used to compute the
+corresponding texture-space differentials, which can be used in Equation 2, as
+¶s
+æ ¶u
+¶v
+ö
+= w ç g1x + g2x ÷ ,
+¶
+¶
+¶
+x
+x
+x
+è
+ø
+æ ¶u
+ö
+¶s
+¶v
+= w ç g1x + g2x ÷ ,
+¶y
+¶y
+è ¶y
+ø
+¶t
+æ ¶u
+¶v
+ö
+= h ç g1y + g2 y ÷ ,
+¶x
+¶
+¶
+x
+x
+è
+ø
+æ ¶u
+ö
+¶t
+¶v
+= h ç g1y + g2 y ÷ ,
+¶y
+¶y
+è ¶y
+ø
+(21)
+where w × h is the texture resolution and g1 = (g1x, g1y) = T1 − T0 and
+g2 = (g2x, g2y) = T2 − T0 are the differences of texture coordinates between
+neighboring vertices. Similarly, differentials for the ray origin O′ of a subsequent
+reflection/refraction ray can be computed as
+¶O ¢
+¶ ( x,y )
+=
+¶u
+¶v
+e1 +
+e2 .
+¶ ( x, y )
+¶ ( x, y )
+(22)
+We have seen slightly better performance using this method compared to the
+traditional implementation following Igehy’s work [9].
+20.3.3 R AY DIFFERENTIALS WITH THE G-BUFFER
+For real-time ray tracing, it is not uncommon to render the eye rays using
+rasterization into a G-buffer. When combining ray differentials [9] with a G-buffer,
+the ray differential for the eye rays can be created as usual, but the interaction at
+the first hit must use the content from the G-buffer, since the original geometry is
+not available at that time. Here, we present one method using the G-buffer, which
+we assume has been created with normals n̂ and with distances t from the camera
+to the first hit point (or alternatively the world-space position). We describe how the
+ray differential is set up when shooting the first reflection ray from the position in
+the G-buffer.
+328
+TEXTURE LEVEL OF DETAIL STRATEGIES FOR REAL-TIME RAY TRACING
+The idea of this method is simply to access the G-buffer to the right and above the
+current pixel and create a ray differential from these values. The normals and the
+distances t, for the current pixel (x, y) and for the neighbors (x + 1, y) and (x, y + 1),
+are read out from the G-buffer. Let us denote these by n̂0:0 for the current pixel,
+nˆ +1:0 for the pixel to the right, and nˆ0:+1 for the pixel above, and similarly for other
+variables. The eye ray directions ê for these neighbors are computed next. At this
+point, we can compute the ray differential of the ray origin at the first hit as
+¶O
+= t +1:0eˆ +1:0 - t0:0eˆ0:0 ,
+¶x
+(23)
+and similarly for ∂O/∂y. The ray differential direction is computed as
+ˆ
+¶d
+= r ( eˆ +1:0 ,nˆ +1:0 ) - r ( eˆ0:0 ,nˆ0:0 ) ,
+¶x
+(24)
+where r is the shader function reflect(). Similar computations are
+ˆ / ¶y . We now have all components of the ray differential,
+done for ¶d
+{¶O / ¶x, ¶O / ¶y , ¶ dˆ / ¶x, ¶ dˆ / ¶y } , which means that ray tracing with ray
+differentials can commence from the first hit.
+The method above is fast, but sometimes you hit different surfaces when
+comparing to the pixel to the right and above. A simple improvement is to test
+if │t+1:0 − t0:0│ > ε, where ε is a small number, and, if so, access the G-buffer at −1:0
+instead and use the one with the smallest difference in t. The same approach is
+used for the y-direction. This method is a bit slower but gives substantially better
+results along depth discontinuities.
+20.3.4 R AY CONES
+One method for computing texture level of detail is based on tracing cones. This
+is quite similar to the method proposed by Amanatides [1], except that we use the
+method only for texture LOD and we derive the details on how to implement this,
+which are absent in previous work. The core idea is illustrated in Figure 20-3. When
+the texture LOD λ has been computed for a pixel, the texture sampler in the GPU is
+used to perform trilinear mipmapping [17].
+329
+RAY TRACING GEMS
+Figure 20-3. Illustration of how a cone is created through a pixel and how it is transported through
+the scene, growing and shrinking. Assuming that the rectangle is textured and the other objects
+are perfectly reflective, we will perform a texture lookup at the hit point on the rectangle using the
+width of the cone and the normal there, and a textured reflection would appear in the leftmost object.
+Computation of the cone widths wi is explained in the text.
+In this section, we derive our approximation for texture LOD for ray tracing using
+ray cones. We start by deriving an approximation to screen-space mipmapping
+using cones and then extend that to handle recursive ray tracing with reflections.
+Ideally, we would like to handle all sorts of surface interactions, but we will
+concentrate on the cases shown in Figure 20-4. This excludes saddle points, which
+exist in hyperbolic paraboloids, for example.
+Figure 20-4. Illustrations of cones reflected in a planar (left), a convex (center), and a concave (right)
+surface. Note how the convex surface increases the angle of the cone, while the concave surface
+reduces it, until it becomes zero and starts growing again.
+330
+TEXTURE LEVEL OF DETAIL STRATEGIES FOR REAL-TIME RAY TRACING
+20.3.4.1 SCREEN SPACE
+The geometrical setup for a cone through a pixel is shown in Figure 20-5. The footprint
+angle, also called spread angle, of a pixel is called α, d0 is the vector from the camera to
+the hit point, and n0 is the normal at the hitpoint. This cone is tracked through a pixel
+and the cone parameters are updated at each surface the center ray hits.
+Figure 20-5. The geometrical setup of a cone through a pixel.
+The footprint width will grow with distance. At the first hit point, the cone width will
+be w0 = 2‖d0‖tan(α/2) ≈ α‖d0‖, where the index 0 will be used to indicate the first hit.
+This index will be used extensively in the next subsection. We have used the small
+angle approximation, i.e., tan α ≈ α, in this expression. The footprint projected onto
+the plane at the hit point will also change in size due to the angle between −d0 and
+n0, denoted [−d0, n0]. Intuitively, the larger the angle, the more the ray can “see” of
+the triangle surface, and consequently, the LOD should increase, i.e., texel access
+should be done higher in the mipmap pyramid. Together these factors form the
+approximated projected footprint as
+1
+,
+a‖d0‖
+ˆ∣
+∣nˆ × d
+0
+0
+(25)
+ˆ ∣models the square root of the projected area. The absolute value
+ˆ0 × d
+where∣n
+0
+is there to handle frontfacing and backfacing triangles in the same way. When
+[−d0, n0] = 0, we have only the distance dependency, and as [−d0, n0] grows, the
+projected footprint will get larger and larger toward infinity, when [−d0, n0] → π/2.
+If the value of the expression in Equation 25 doubles/halves, then we need to access
+one level higher/lower in the mipmap pyramid. Therefore, we use log2 on this term.
+Hence, a heuristic for texture LOD for the first hit, i.e., similar to what screen-space
+mipmapping produced by the GPU would yield, is
+æ
+ö
+1 ÷
+l = D0 + log2 ç a‖d0‖
+,
+ç
+∣nˆ × d
+ˆ ∣÷
+0
+0
+w
+è
+0
+ø
+(26)
+331
+RAY TRACING GEMS
+where Δ0 is described by Equations 3 and 5, i.e., using world-space vertices. Here,
+Δ0 is the base texture LOD at the triangle seen through a pixel, i.e., without any
+reflections at this point. This term needs to be added to provide a reasonable
+base LOD when the triangle is located at z = 1. This term takes changes in triangle
+vertices and texture coordinates into account. For example, if a triangle becomes
+twice as large, then the base LOD will decrease by one. The other factors in
+Equation 26 are there to push the LOD up in the mipmap pyramid, if the distance or
+the incident angle increases.
+20.3.4.2 REFLECTION
+Our next step is to generalize the method in Section 20.3.4.1 to also handle
+reflections. The setup that we use for our derivation is shown in Figure 20-6, where
+we want to compute the width, w1, of the footprint at the reflected hit point. Note
+that the angle β is a curvature measure (further described in Section 20.3.4.4) at
+the surface hit point, and it will influence how much the spread angle will grow or
+shrink due to different surface interactions. See Figure 20-4. We first note that
+w0
+æa b ö 2
+tan ç + ÷ =
+è 2 2 ø t¢
+Û
+t¢ =
+w0
+æa b ö
+2 tan ç + ÷
+è2 2ø
+(27)
+and
+w1
+æa b ö
+tan ç + ÷ = 2
+è 2 2 ø t ¢ + t1
+332
+Û
+æa b ö
++ ÷.
+è2 2ø
+w 1 = 2 (t ¢ + t1 ) tan ç
+(28)
+TEXTURE LEVEL OF DETAIL STRATEGIES FOR REAL-TIME RAY TRACING
+Figure 20-6. Top left: the geometrical setup for our computations for texture LOD for reflections,
+where the camera has been reflected in the plane of the first hit, which makes the green and blue rays
+collinear. The reflected hit point is the black circle on the green line. Bottom right: exaggerated view
+along the green and blue rays. We want to compute the footprint width w1. Note that the surface spread
+angle β models how the cone footprint grows/shrinks due to the curvature of the surface, which in this
+case is convex and so grows the footprint (β > 0).
+Next, we use the expression from Equation 27 for t′, substitute it into Equation 28,
+and arrive at
+w1
+æ
+ö
+ç
+÷
+w0
+æa b ö
+= 2ç
++ t1 ÷ tan ç + ÷
+ç
+÷
+æa b ö
+è2 2ø
+ç 2 tan ç + ÷
+÷
+è2 2ø
+è
+ø
+æa b ö
+= w 0 + 2t1 tan ç + ÷ » w 0 + (a + b ) t1,
+è2 2ø
+(29)
+where we have used the small angle approximation tanα ≈ α in the last step.
+Intuitively, this expression makes sense because w0 ≈ α‖d0‖ makes the footprint
+grow with the distance from the eye to the first hit times the size α of a pixel, and
+the second term models the growth from the first hit to the second hit, which
+depends on the distance t1 (from first to second hit) and the angle α + β.
+333
+RAY TRACING GEMS
+20.3.4.3 PIXEL SPREAD ANGLE
+In this subsection, we present a simple method to compute the spread angle α of
+a pixel, i.e., for primary rays. The angle from the camera to a pixel varies over the
+screen, but we have chosen to use a single value as an approximation for all pixels,
+i.e., we trade a bit of accuracy for faster computation. This angle α is computed as
+æ
+æy ö ö
+ç 2 tan ç ÷ ÷
+è 2 ø ÷,
+a = arctan ç
+ç
+÷
+H
+ç
+÷
+è
+ø
+(30)
+where ψ is the vertical field of view and H is the height of the image in pixels. Note
+that α is the angle to the center pixel.
+While there are more accurate ways to compute the pixel spread angle, we use
+the technique above because it generates good results and we have not seen any
+discrepancies in the periphery. In extreme situations, e.g., for virtual reality, one
+may want to use a more complex approach, and for foveated renderers with eye
+tracking [12], one may wish to use a larger α in the periphery.
+20.3.4.4 SURFACE SPREAD ANGLE FOR REFLECTIONS
+Figure 20-4 illustrates reflection interactions at different types of geometry:
+planar, convex, and concave. In addition, Figure 20-6 illustrates the surface spread
+angle β, which will be zero for planar reflections, greater than zero for convex
+reflections, and less than zero for concave reflections. Intuitively, β models the
+extra spread induced by the curvature at the hit point. In general, the two principal
+curvatures [4] at the hit point or the radius of the mean curvature normal would
+be better to model this spread. Instead, we have opted for a simpler and faster
+method, one that uses only a single number β to indicate curvature.
+If primary visibility is rasterized, then the G-buffer can be used to compute the
+surface spread angle. This is the approach that we take here, though there are
+likely other methods that could work. The normal n and the position P of the
+fragment are both stored in world space, and we use ddx and ddy (in HLSL syntax)
+to obtain their differentials. A differential of P in x is denoted ∂P/∂X.
+The left part of Figure 20-7 shows the geometry involved in the first computations
+for β. From the figure we can see that
+æ 1 ¶n ¶n ö ¶n ¶n
+f = 2arctan ç
++
++
+.
+÷»
+è 2 ¶x ¶y ø ¶x ¶y
+334
+(31)
+TEXTURE LEVEL OF DETAIL STRATEGIES FOR REAL-TIME RAY TRACING
+Figure 20-7. Left: the geometry involved in computing ϕ. Right: the view vector v is reflected around
+the normal n, which generates r. If n is perturbed by ϕ/2 into n′, we get another reflection vector r ′.
+Since [−v, n′] = θ + ϕ/2, we have [r ′, n′] = θ + ϕ/2, which means that the angle [r, r ′] = ϕ, i.e., is twice as
+large as [n, n′] = ϕ/2.
+An angular change in the normal, in our case ϕ/2, results in change in the reflected
+vector, which is twice as large [16]; this is illustrated to the right in Figure 20-7. This
+means that β = 2ϕ. We also add two additional user constants k1 and k2 for β and a
+sign factor s (all of which will be described below), resulting in β = 2k1sϕ + k2, with
+default values k1 = 1 and k2 = 0. In summary, we have
+b = 2k sf + k » 2k s ¶ n × ¶ n + ¶ n × ¶ n + k .
+1
+2
+1
+2
+¶x ¶x ¶y ¶y
+(32)
+A positive β indicates a convex surface, while a negative value would indicate a
+concave surface region. Note that ϕ is always positive. So, depending on the type of
+surface, the s factor can switch the sign of β. We compute s as
+æ ¶P ¶ n ¶P ¶ n ö
+×
++
+×
+s = sign ç
+÷,
+è ¶x ¶x ¶y ¶y ø
+(33)
+where sign returns 1 if the argument is greater than zero and −1 otherwise. The
+rationale behind this operation is that ∂P/∂x and ∂n/∂x (and similarly for y) will have
+approximately the same direction when the local geometry is convex (positive
+dot product) and approximately opposite directions when it is concave (negative
+dot product). Note that some surfaces, such as a hyperbolic paraboloid, are both
+concave and convex in all points on the surface. In these cases, we have found that
+it is better to just use s = 1. If a glossy appearance is desired, the values of k1 and
+k2 can be increased. For planar surfaces, ϕ will be 0, which means that k1 does not
+have any effect. Instead, the term k2 can be used.
+335
+RAY TRACING GEMS
+20.3.4.5 GENERALIZATION
+Let i denote the enumerated hit point along a ray path, starting at 0. That is, the
+first hit is enumerated by 0, the second by 1, and so on. All our terms for texture
+LOD for the ith hit point are then put together as
+æ
+1 ö
+ˆ ,
+÷ = D + log2 w i - log2 nˆi × d
+li = Di + log2 ç w i ×
+i
+ˆ ÷ i
+ç
+
+ˆ
+
+n
+d
+×
+i
+i ø
+è
+Eqn.3
+distance
+normal
+(34)
+and as can be seen, this is similar to Equation 26, with both a distance and a normal
+dependency. Refer to Figure 20-6 for the variables and recall that ni is the normal
+at the surface at the ith hit point and di is the vector to the ith hit point from the
+previous hit point. The base triangle LOD, Δi, now has a subscript i to indicate that
+it is the base LOD of the triangle at the ith hit point that should be used. Similar
+to before, d̂i means a normalized direction of di. Note that we have added two
+absolute value functions in Equation 34. The absolute value for the distance term
+is there because β can be negative, e.g., for concave surface points (see the right
+part of Figure 20-4). The absolute value for the normal term is there to handle
+backfacing triangles in a consistent manner.
+Note that w0 = αt0 = γ0t0 and w1 = αt0 + (α + β0)t1 = w0 + γ1t1, where we have introduced
+γ0 = α and γ1 = α + β0, and β0 is the surface spread angle at the first hit point. Hence,
+Equation 34 handles recursion, which we describe with pseudocode in Section 20.6,
+and in general it holds that
+w i = w i -1 + g iti ,
+(35)
+where γi = γi − 1 + βi − 1. This is illustrated in Figure 20-3.
+20.4
+IMPLEMENTATION
+We have implemented the ray cones and ray differentials techniques on top of
+Falcor [2] with DirectX 12 and DXR. For the texture lookups in ray cones, we
+compute λi according to Equation 34 and 35 and feed it into the SampleLevel()
+function of the texture.
+Since rasterization is highly optimized for rendering primary visibility, where
+all rays share a single origin, we always use a G-buffer pass for ray cones and
+for the ray differentials method in Section 20.3.3. When a G-buffer is used, ray
+tracing commences from the first hit described by the G-buffer. As a consequence,
+texturing is done using the GPU’s texturing units for the first hits and so, using the
+methods in this chapter, λ is computed only after that. For ray cones, βi is computed
+336
+TEXTURE LEVEL OF DETAIL STRATEGIES FOR REAL-TIME RAY TRACING
+using the G-buffer differentials from rasterization, which implies that there is a
+curvature estimate β0 at only the first hit point. In our current implementation, we
+use βi = 0 for i > 0. This means that beyond the first hit point, all interactions are
+assumed to be planar. This is not correct but gives reasonable results, and the first
+hit is likely the most important. However, when recursive textured reflections are
+apparent, this approximation can generate errors, as shown in Figure 20-8.
+Figure 20-8. Zooming in on the base of a vase reflected in a table top shows that the ray cones
+method is weaker than the method based on ray differentials in areas of recursive reflections. In the
+lower part of the ray cones image, there is a substantial amount of aliasing, which is caused by the fact
+that, in our implementation, the method assumes that all surfaces beyond the first hit are planar.
+Next, we discuss the precision of the ray cones method. The data that needs to be
+sent with each ray is one float for wi and one for γi. We have experimented with both
+fp32 and fp16 precision for β (in the G-buffer), wi, and γi, and we conclude that 16-­
+bit precision gives good quality in our use cases. In a hyperbolic paraboloid scene,
+we could not visually detect any differences, and the maximum error was a pixel
+component difference of five (out of 255). Depending on the application, textures,
+and scene geometry, it could be worthwhile to use fp16, especially when G-buffer
+storage and ray payload need to be reduced. Similarly, errors induced by using the
+small angle approximation (tan(α) ≈ α) for β resulted in nothing that was detectable
+by visual inspection. With per-pixel image differences, we could see another set
+of errors sparsely spread over the surface, with a maximum pixel component
+difference of five. This is another trade-off to be made.
+The per-triangle Δ (Equation 3) can be computed in advance for static models and
+stored in a buffer that is accessed in the shader. However, we found that it equally
+fast to recompute Δ each time a closest hit on a triangle is found. Hence, the
+ray cones method handles animated models and there are no major extra costs
+ˆ ∣ in
+for handling several texture coordinate layers per triangle. Note that∣nˆi × d
+i
+Equation 34 will approach +0.0 when the angle between these vectors approaches
+π/2 radians. This does not turn out to be a problem, as using IEEE standard 754 for
+337
+RAY TRACING GEMS
+floating-point mathematics, we have log2 (+0.0) = –inf, which makes λ = inf. This in
+turn will force the trilinear lookup to access the top level of the mipmap hierarchy,
+which is expected when the angle is π/2 radians.
+Our ray differentials implementation follows the description of Igehy [9] fairly
+well. However, we use the λ computation in Equations 1 and 2, unless otherwise
+mentioned, and the methods in Sections 20.3.2.1 and 20.3.2.2. For ray differentials,
+each ray needs 12 floats of storage, which is rather substantial.
+20.5
+COMPARISON AND RESULTS
+The methods that we use in this section are:
+>>
+Groundtruth: a ground-truth rendering (ray traced with 1,024 samples per
+pixel).
+>>
+Mip0: bilinearly filtered mip level 0.
+>>
+RayCones: ray cones method (Section 20.3.4).
+>>
+RayDiffs GB: ray differentials with the G-buffer (Section 20.3.3).
+>>
+RayDiffs RT: our implementation of ray differentials with ray tracing [9].
+>>
+RayDiffs PBRT: ray differentials implementation in the pbrt renderer [14].
+Note that Mip0, RayCones, and RayDiffs GB always use a G-buffer for primary
+visibility, while RayDiffs RT and RayDiffs PBRT use ray tracing. For all our
+performance results, an NVIDIA RTX 2080 Ti (Turing) was used with driver 416.16.
+To verify that our implementation of ray differentials [9] is correct, we compared
+it to the implementation in the pbrt renderer [14]. To visualize the resulting mip
+level of a filtered textured lookup, we use a specialized rainbow texture, shown
+in Figure 20-9. Each mip level is set to a single color. We rendered a reflective
+hyperbolic paraboloid in a diffuse room in Figure 20-10. This means that the room
+only shows the mip level as seen from the eye, while the hyperbolic paraboloid
+shows the mip level of the reflection, which has some consequences discussed
+in the caption of Figure 20-10. It is noteworthy that one can see the triangular
+structure of the hyperbolic paraboloid surface in these images. The reason for this
+is that the differentials of barycentric coordinates are not continuous across shared
+triangle edges. This is also true for rasterization, which shows similar structures.
+As a consequence, this discontinuity generates noise in the recursive reflections,
+but it does not show up visually in the rendered images in our video.
+338
+TEXTURE LEVEL OF DETAIL STRATEGIES FOR REAL-TIME RAY TRACING
+Figure 20-9. The mip level colors in the rainbow texture are selected according to this image, i.e., the
+bottom mip level (level 0) is red, level 1 is yellow, and so on. Mip levels 6 and above are white.
+Figure 20-10. Visualization of mipmap level, where red is level 0, yellow is level 1, and so on, as
+defined in Figure 20-9. Both RayCones and RayDiffs GB use a G-buffer pass for the eye rays, and so
+we used the texture derivatives generated in that pass to compute the mipmap level using the same
+formula as used by pbrt in order to get a reasonable match on the floor. Since the hyperbolic paraboloid
+is both concave and convex in all points, we used s = 1 in Equation 32. Note that the shading overlayed
+on top of the “rainbow” colors does not match perfectly, but the focus should be on the actual colors.
+The three images to the right match quite well, while RayCones is a bit different, in particular in the
+recursive reflections. This difference is to be expected, since reflections are assumed to be planar after
+the first bounce for this method.
+Some further results are shown in Figure 20-11. We have chosen the hyperbolic
+paraboloid (top) and the bilinear patch (bottom) because they are saddle surfaces
+and are difficult for RayCones, since it is based on cones that handle only isotropic
+footprints. The semicylinders were also chosen because they are hard for
+RayCones to handle as the curvature is zero along the length of the cylinder and
+bends like a circle in the other direction. As a consequence, RayCones sometimes
+shows up as more blur compared to ray differentials. It is also clear that the
+Groundtruth images are substantially more sharp than the other methods, so there
+is much to improve on for filtered texturing. A consequence of this overblurring
+is that both the peak signal-to-noise ratio (PSNR) and structural similarity index
+(SSIM) values are relatively poor. For the hyperbolic paraboloid, i.e., the top row
+in Figure 20-11, the PSNR against Groundtruth is 25.0, 26.7, and 31.0 dB for Mip0,
+RayCones, and RayDiffs RT, respectively. PSNR for Mip0 is lower as expected, but
+the numbers are low even for the other methods. This is because they produce
+more blur compared to Groundtruth. On the other hand, they alias substantially
+less than Mip0. The corresponding SSIM numbers are 0.95, 0.95, and 0.97, which
+convey a similar story.
+339
+RAY TRACING GEMS
+Figure 20-11. Comparison of textured reflections for different types of surfaces using different
+techniques. The Groundtruth images were rendered using 1,024 samples per pixel and by accessing
+mipmap level 0 for all texturing. For RayCones, we used the sign function in Equation 33.
+While still images can reveal the amount of overblurring in an image fairly well,
+it is substantially harder to truthfully show still images that expose the amount
+of aliasing they contain. As a consequence, most of our results are shown in our
+accompanying video (available on this book’s website), and we refer to this video in
+the following paragraph. We will write mm:ss to reference a particular time in the
+video, where mm is minutes and ss is seconds.
+340
+TEXTURE LEVEL OF DETAIL STRATEGIES FOR REAL-TIME RAY TRACING
+At 00:05 and 00:15 in our video, it is clear that RayCones produces images with
+substantially less aliasing, as expected, compared to Mip0, since the reflective
+object always uses mip level 0 for Mip0. At some distance, there is also a slight
+amount of temporal aliasing for RayCones, but even GPU rasterization can alias
+with mipmapping. The comparison between RayCones and Mip0 continues with
+a crop from a larger scene at 00:25, where the striped wallpaper of the room
+generates a fair amount of aliasing for Mip0, while RayCones and RayDiffs RT fare
+much better.
+We have measured the performance of the methods for two scenes: Pink Room
+and Large Interior. All renderings are done at a resolution of 3840 × 2160 pixels. To
+disregard warmup effects and other variability, we rendered the scenes through
+a camera path of 1,000 frames once, without measuring frame duration, and
+then through the same camera path again, while measuring. We repeated this
+procedure 100 times for each scene and collected the frame durations. For Mip0,
+the average frame time was 3.4 ms for Pink Room and 13.4 ms for Large Interior.
+In Figure 20-12, the average total frame times are shown for the two scenes, for
+Mip0, RayCones, RayDiffs GB, and RayDiffs RT. Pink Room is a fairly small scene,
+where the added complexity of texture level of detail computation shows up as a
+minor part of the total frame time, while for Large Interior —a significantly larger
+scene—this effect is more pronounced. For both scenes, however, the trend is quite
+clear: RayDiffs GB adds about 2× the cost and RayDiffs RT adds about 3× the cost of
+texture level of detail calculations compared to RayCones.
+Large Interior
+milliseconds
+milliseconds
+Pink Room
+4.0
+3.5
+3.0
+2.5
+2.0
+1.5
+1.0
+0.5
+0.0
+MIP-O
+RAYCONES
+RAYDIFFS GB
+RAYDIFFS RT
+20.0
+17.5
+15.0
+12.5
+10.0
+7.5
+5.0
+2.5
+0.0
+MIP-O
+RAYCONES
+RAYDIFFS GB
+RAYDIFFS RT
+Figure 20-12. Performance impact of texture level of detail selection methods: Pink Room (left) and
+Large Interior (right). The smaller scene (Pink Room) is less susceptible to an extra filtering cost, the
+larger scene (Large Interior) more so.For both scenes, however, the performance impact of RayDiffs
+GB is about 2×, and RayDiffs RT about 3×, the impact of RayCones.
+Our goal in this chapter is to provide some help in selecting a suitable texture
+filtering method for your real-time application by implementing and evaluating
+different methods and to adapt them to using a G-buffer, since that usually improves
+performance. When a sophisticated reflection filter is used to blur out the results
+or when many frames or samples are accumulated, the recommendation is to use
+the Mip0 method because it is faster and may give sufficient quality for that purpose.
+341
+RAY TRACING GEMS
+When nicely filtered reflections are required and ray storage and instruction count need
+to be minimized, we recommend RayCones. However, curvature is not taken into account
+after the first hit, which might result in aliasing in deeper reflections. In these cases, we
+recommend one of the RayDiffs methods. For larger scenes, any type of texture filtering
+will likely help performance due to better texture cache hit ratios, as pointed out by Pharr
+[13]. When using ray tracing for eye rays, we have seen slight performance improvements
+when using texture filtering instead of accessing mip level 0. Experimenting further with
+this for larger scenes will be a productive avenue for future work.
+20.6
+CODE
+In this section, we show pseudocode that closely follows our current
+implementation of RayCones. First, we need a couple of structures:
+1 struct RayCone
+2 {
+3 float width; // Called wi in the text
+4 float spreadAngle; // Called γi in the text
+5 };
+6
+7 struct Ray
+8 {
+9 float3 origin;
+10 float3 direction;
+11 };
+12
+13 struct SurfaceHit
+14 {
+15 float3 position;
+16 float3 normal;
+17 float surfaceSpreadAngle; // Initialized according to Eq. 32
+18 float distance; // Distance to first hit
+19 };
+In the next pseudocode, we follow the general flow of DXR programs for ray
+tracing. We present a ray generation program and a closest hit program, but omit
+several other programs that do not add useful information in this context. The
+TraceRay function traverses a spatial data structure and finds the closest hit. The
+pseudocode handles recursive reflections.
+1 void rayGenerationShader(SurfaceHit gbuffer)
+2 {
+3 RayCone firstCone = computeRayConeFromGBuffer(gbuffer);
+4 Ray viewRay = getViewRay(pixel);
+5 Ray reflectedRay = computeReflectedRay(viewRay, gbuffer);
+6 TraceRay(closestHitProgram, reflectedRay, firstCone);
+7 }
+8
+342
+TEXTURE LEVEL OF DETAIL STRATEGIES FOR REAL-TIME RAY TRACING
+9 R
+ayCone propagate(RayCone cone, float surfaceSpreadAngle, float hitT)
+10 {
+11 RayCone newCone;
+12 newCone.width = cone.spreadAngle * hitT + cone.width;
+13 newCone.spreadAngle = cone.spreadAngle + surfaceSpreadAngle;
+14 return newCone;
+15 }
+16
+17 RayCone computeRayConeFromGBuffer(SurfaceHit gbuffer)
+18 {
+19 RayCone rc;
+20 rc.width = 0; 
+// No width when ray cone starts
+21 rc.spreadAngle = pixelSpreadAngle(pixel); // Eq. 30
+22 // gbuffer.surfaceSpreadAngle holds a value generated by Eq. 32
+23 
+return propagate(rc, gbuffer.surfaceSpreadAngle, gbuffer.distance);
+24 }
+25
+26 void closestHitShader(Ray ray, SurfaceHit surf, RayCone cone)
+27 {
+28 // Propagate cone to second hit
+29 cone = propagate(cone, 0, hitT); 
+// Using 0 since no curvature
+30 // measure at second hit
+31 float lambda = computeTextureLOD(ray, surf, cone);
+32 float3 filteredColor = textureLookup(lambda);
+33 // use filteredColor for shading here
+34 if (isReflective)
+35 {
+36 Ray reflectedRay = computeReflectedRay(ray, surf);
+37 
+TraceRay(closestHitProgram, reflectedRay, cone); // Recursion
+38 }
+39 }
+40
+41 float computeTextureLOD(Ray ray, SurfaceHit surf, RayCone cone)
+42 {
+43 // Eq. 34
+44 float lambda = getTriangleLODConstant();
+45 lambda += log2(abs(cone.width));
+46 lambda += 0.5 * log2(texture.width * texture.height);
+47 lambda -= log2(abs(dot(ray.direction, surf.normal)));
+48 return lambda;
+49 }
+50
+51 float getTriangleLODConstant()
+52 {
+53 float P_a = computeTriangleArea(); // Eq. 5
+54 float T_a = computeTextureCoordsArea(); // Eq. 4
+55 return 0.5 * log2(T_a/P_a); // Eq. 3
+56 }
+343
+RAY TRACING GEMS
+ACKNOWLEDGMENTS
+Thanks to Jacob Munkberg and Jon Hasselgren for brainstorming help and
+comments.
+REFERENCES
+[1]
+Amanatides, J. Ray Tracing with Cones. Computer Graphics (SIGGRAPH) 18, 3 (1984), 129–135.
+[2] Benty, N., Yao, K.-H., Foley, T., Kaplanyan, A. S., Lavelle, C., Wyman, C., and Vijay, A. The Falcor
+Rendering Framework. https://github.com/NVIDIAGameWorks/Falcor, July 2017.
+[3] Christensen, P., Fong, J., Shade, J., Wooten, W., Schubert, B., Kensler, A., Friedman, S.,
+Kilpatrick, C., Ramshaw, C., Bannister, M., Rayner, B., Brouillat, J., and Liani, M. RenderMan:
+An Advanced Path-Tracing Architecture for Movie Rendering. ACM Transactions on Graphics 37, 3
+(2018), 30:1–30:21.
+[4]
+do Carmo, M. P. Differential Geometry of Curves and Surfaces. Prentice Hall Inc., 1976.
+[5] Ewins, J. P., Waller, M. D., White, M., and Lister, P. F. MIP-Map Level Selection for Texture
+Mapping. IEEE Transactions on Visualization and Computer Graphics 4, 4 (1998), 317–329.
+[6] Green, N., and Heckbert, P. S. Creating Raster Omnimax Images from Multiple Perspective Views
+Using the Elliptical Weighted Average Filter. IEEE Computer Graphics and Applications 6, 6 (1986),
+21–27.
+[7] Heckbert, P. S. Survey of Texture Mapping. IEEE Computer Graphics and Applications 6, 11 (1986),
+56–67.
+[8] Heckbert, P. S. Fundamentals of Texture Mapping and Image Warping. Master’s thesis, University of
+California, Berkeley, 1989.
+[9]
+Igehy, H. Tracing Ray Differentials. In Proceedings of SIGGRAPH (1999), pp. 179–186.
+[10] 
+McCormack, J., Perry, R., Farkas, K. I., and Jouppi, N. P. Feline: Fast Elliptical Lines for
+Anisotropic Texture Mapping. In Proceedings of SIGGRAPH (1999), pp. 243–250.
+[11] 
+Möller, T., and Trumbore, B. Fast, Minimum Storage Ray-Triangle Intersection. Journal of
+Graphics Tools 2, 1 (1997), 21–28.
+[12] 
+Patney, A., Salvi, M., Kim, J., Kaplanyan, A., Wyman, C., Benty, N., Luebke, D., and Lefohn,
+A. Towards Foveated Rendering for Gaze-Tracked Virtual Reality. ACM Transactions on Graphics
+35, 6 (2016), 179:1–179:12.
+[13] 
+Pharr, M. Swallowing the Elephant (Part 5). Matt Pharr’s blog, https://pharr.org/matt/
+blog/2018/07/16/moana-island-pbrt-5.html, July 16 2018.
+344
+TEXTURE LEVEL OF DETAIL STRATEGIES FOR REAL-TIME RAY TRACING
+[14] 
+Pharr, M., Jakob, W., and Humphreys, G. Physically Based Rendering: From Theory to
+Implementation, third ed. Morgan Kaufmann, 2016.
+[15] 
+Segal, M., and Akeley, K. The OpenGL Graphics System: A Specification (Version 4.5). Khronos
+Group documentation, 2016.
+[16] 
+Voorhies, D., and Foran, J. Reflection Vector Shading Hardware. In Proceedings of SIGGRAPH
+(1994), pp. 163–166.
+[17]
+Williams, L. Pyramidal Parametrics. Computer Graphics (SIGGRAPH) 17, 3 (1983), 1–11.
+Open Access This chapter is licensed under the terms of the Creative Commons AttributionNonCommercial-NoDerivatives 4.0 International License (http://creativecommons.org/
+licenses/by-nc-nd/4.0/), which permits any noncommercial use, sharing, distribution and
+reproduction in any medium or format, as long as you give appropriate credit to the original author(s) and the
+source, provide a link to the Creative Commons license and indicate if you modified the licensed material. You do
+not have permission under this license to share adapted material derived from this chapter or parts of it.
+The images or other third party material in this chapter are included in the chapter's Creative Commons license,
+unless indicated otherwise in a credit line to the material. If material is not included in the chapter's Creative
+Commons license and your intended use is not permitted by statutory regulation or exceeds the permitted use, you
+will need to obtain permission directly from the copyright holder.
+345

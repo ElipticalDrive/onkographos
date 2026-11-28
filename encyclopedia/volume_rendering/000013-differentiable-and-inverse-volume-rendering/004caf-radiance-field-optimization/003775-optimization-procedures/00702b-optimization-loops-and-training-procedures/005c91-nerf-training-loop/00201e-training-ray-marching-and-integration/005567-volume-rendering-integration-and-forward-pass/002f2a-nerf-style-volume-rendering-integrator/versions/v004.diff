@@ -1,0 +1,233 @@
+--- v003.md
++++ v004.md
+@@ -4,50 +4,50 @@
+ 
+ ## Overview
+-This method implements a simplified NeRF-style volume rendering integrator that accumulates emission along a ray through a medium, backed by a dense grid instead of a neural network, with no direction-dependent emission [S1, unofficial]. It differs from its sibling [NeRF Rendering (Alpha Compositing)](5124-nerf-rendering-alpha-compositing.md) by explicitly managing ray-marching state (throughput, step indices) and supporting primal/dual mode differentiation for inverse rendering tasks [S1, unofficial].
++This method computes the expected color $\hat{C}(r)$ for a ray $r$ by discretizing the medium interaction interval into a fixed number of steps and accumulating emission weighted by opacity [S1, unofficial]. It differs from standard NeRF implementations by using a dense grid for density queries rather than a neural network, and by supporting both primal and adjoint (gradient) modes for inverse rendering [S1, unofficial]. It serves as the forward pass component in differentiable volume rendering pipelines [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:**
+-- Ray $r(t) = o + td$ with near/far bounds $[t_n, t_f]$.
+-- Medium exit intersection $t_{exit}$ (from a prior intersection step).
+-- Grid query function returning density $\sigma$ and emission $L_e$ at 3D coordinates.
+-- Parameters: `queries_per_ray` ($N$), `density_noise_std`, `jittering_enabled`, `activation`.
+-
+-**Outputs:**
+-- Accumulated color $\hat{C}$.
+-- Optional depth or gradient information depending on primal/dual mode.
++**Inputs and Outputs:**
++*   **Input:** Ray $r(t) = o + td$, medium exit distance $t_f$ (from intersection), number of queries per ray $N$ (default 128), jittering flag, density noise standard deviation, activation function type.
++*   **Output:** Accumulated color $\hat{C}(r)$ and transmittance/weight sums for gradient computation.
+ 
+ **Data Structures:**
+-- `throughput`: Scalar float, initialized to 1.0. Represents accumulated transmittance $T$.
+-- `weights_sum`: Scalar float, initialized to 0.0. Represents $\sum w_i$.
+-- `result`: Vector/Scalar, initialized to 0. Accumulates $\sum w_i L_e$.
+-- `step_j`: Integer, initialized to 0. Current sample index.
+-- `t_a`: Float, initialized to 0. Previous sample position.
+-- `active_mask`: Boolean mask for rays still within the medium.
++*   **State Variables:** `result` (color accumulator), `throughput` (accumulated transmittance $T$), `weights_sum` (accumulated weight $\sum w_i$), `step_j` (current step index), `t_a` (previous sample position), `t_b` (current sample position).
++*   **Mask:** `active_mask` (boolean vector indicating which rays are still valid/inside the medium).
+ 
+-**Steps:**
+-1. **Initialization:** Set `result` = 0, `delta_L` = 0, `throughput` = 1. Determine primal mode. Intersect ray to find medium exit $t_{exit}$. Update `active_mask` to rays where $t_{exit}$ is valid.
+-2. **Step Size Calculation:** Calculate `step_size` using `step_size_for_marching(queries_per_ray, 0, t_{exit}, jittering_enabled)`. Initialize `t_a` = 0, `weights_sum` = 0, `step_j` = 0. Sample `jitter_sample` from sampler.
+-3. **Marching Loop:** While `still_walking` (mask):
+-    a. Calculate $t_b$ using `query_t_for_step(step_j + 1, step_size, jitter_sample, jittering_enabled)`.
+-    b. Calculate `actual_step` = $t_b - t_a$.
+-    c. Calculate `alpha_recip`:
+-       - If `step_j + 1 < queries_per_ray`: $\exp(-\sigma \cdot \text{actual\_step})$.
+-       - Else: 1.0.
+-       - Add $10^{-10}$ to `alpha_recip` for numerical safety [G].
+-    d. Calculate `weight` = $(1.0 - \text{alpha\_recip}) \cdot \text{throughput}$.
+-    e. Update `result`:
+-       - If primal: `result` += `weight` * $L_e$.
+-       - Else: `result` -= `weight` * $L_e$ [S1, unofficial].
+-    f. Increment `step_j`. Update `t_a` = $t_b$.
+-    g. Update `still_walking` mask: `step_j < queries_per_ray`.
+-    h. Update `throughput` *= `safe_alpha_recip` (where `safe_alpha_recip` is `alpha_recip` with safety epsilon).
+-    i. Update `weights_sum` += `weight`.
+-4. **Background Contribution:** Calculate `contribution` = $(1 - \text{weights\_sum}) \cdot L_e(t_{exit})$. Add to `result` for active pixels [S1, unofficial].
++**Parameters:**
++*   `queries_per_ray` ($N$): Number of steps. Default: 128 [S1, unofficial].
++*   `density_noise_std`: Standard deviation for density noise. Default: 0 [S1, unofficial].
++*   `jittering_enabled`: Enable stratified jittering. Default: True [S1, unofficial].
++*   `activation`: Density activation ('identity', 'relu'). Default: 'identity' [S1, unofficial].
++*   `hide_emitters`: Hide background if weights_sum is zero. Default: False [S1, unofficial].
++
++**Algorithm Steps:**
++1.  **Initialization:** Initialize `result` = 0, `throughput` = 1, `weights_sum` = 0, `step_j` = 0, `t_a` = 0. Determine if the current mode is primal or adjoint.
++2.  **Ray Intersection:** Intersect the ray with the medium boundary to find the exit distance $t_f$. Update `active_mask` to exclude rays that do not hit the medium.
++3.  **Step Size Calculation:** Calculate `step_size` based on $t_f$, $N$, and jittering. If jittering is enabled, draw a random offset `jitter_sample` from the sampler [S1, unofficial].
++4.  **Marching Loop:** While `step_j < N` and `active_mask` is true:
++    a.  **Sample Position:** Calculate $t_b$ using `query_t_for_step(step_j + 1, step_size, jitter_sample, jittering_enabled)`. Calculate `actual_step` = $t_b - t_a$.
++    b.  **Density Query:** Query the density grid at position $r(t_b)$. Apply `activation` and add noise if `density_noise_std > 0`. Let the result be $\sigma$.
++    c.  **Alpha/Weight Calculation:**
++        *   If `step_j + 1 < N`: Calculate `alpha_recip` = $\exp(-\sigma \cdot \text{actual\_step})$.
++        *   Else (last step): `alpha_recip` = 1.0.
++        *   Add epsilon ($10^{-10}$) to `alpha_recip` for numerical stability [S1, unofficial].
++        *   Calculate `weight` = $(1.0 - \text{alpha\_recip}) \cdot \text{throughput}$.
++    d.  **Accumulation:**
++        *   If primal mode: `result` += `weight` * emission($r(t_b)$).
++        *   If adjoint mode: `result` -= `weight` * emission($r(t_b)$) [S1, unofficial].
++    e.  **Update State:**
++        *   `step_j` += 1.
++        *   `t_a` = $t_b$.
++        *   `throughput` *= `alpha_recip`.
++        *   `weights_sum` += `weight`.
++        *   Update `active_mask`: false if `step_j >= N`.
++5.  **Background Contribution:** Calculate background term: `contribution` = $(1 - \text{weights\_sum}) \cdot c_{bg}$ (where $c_{bg}$ is the background color, typically white). Add to `result` for active pixels [S1, unofficial].
++6.  **Emitter Hiding:** If `hide_emitters` is true and `weights_sum` is zero, do not add emitter contributions [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def nerf_integrator(ray_o, ray_d, queries_per_ray=128, density_noise_std=0.0, 
+-                    jittering_enabled=True, activation='identity'):
+-    # 1. Initialization
++def nerf_integrator(ray_o, ray_d, t_f, N=128, jittering=True, density_noise_std=0.0, activation='identity'):
++    # Initialize state
+     result = 0.0
+     throughput = 1.0
+@@ -56,90 +56,80 @@
+     t_a = 0.0
+     
+-    # Intersect ray to find medium exit
+-    t_exit = intersect_ray(ray_o, ray_d)
+-    active_mask = (t_exit > 0)
++    # Determine mode (primal/adjoint) - assumed passed or global context
++    is_primal = True 
+     
+-    if not active_mask.any():
+-        return 0.0, 0.0
+-        
+-    # 2. Step Size Calculation
+-    step_size = step_size_for_marching(queries_per_ray, 0, t_exit, jittering_enabled)
+-    jitter_sample = sampler.sample()
++    # Calculate step size
++    step_size = t_f / N
++    jitter_sample = random.uniform(0, 1) if jittering else 0.0
+     
+-    # 3. Marching Loop
+-    still_walking = active_mask.clone()
++    # Pre-calculate jittered step positions if needed, or compute on fly
++    # For clarity, we compute t_b iteratively
+     
+-    while still_walking.any() and step_j < queries_per_ray:
+-        # Calculate t_b
+-        t_b = query_t_for_step(step_j + 1, step_size, jitter_sample, jittering_enabled)
++    while step_j < N:
++        # Calculate current sample position t_b
++        # query_t_for_step implements stratified sampling logic
++        t_b = t_a + step_size * (step_j + 1) + (jitter_sample * step_size if jittering else 0)
++        # Clamp t_b to t_f if necessary, though loop condition handles N steps
++        if t_b > t_f:
++            t_b = t_f
++            
+         actual_step = t_b - t_a
+         
+-        # Query density and emission at t_b (simplified)
+-        pos = ray_o + t_b * ray_d
+-        sigma = query_density(pos)
+-        L_e = query_emission(pos)
++        # Query density
++        pos = ray_o + ray_d * t_b
++        sigma = query_density_grid(pos)
+         
+-        # Apply activation if needed
++        # Apply activation
+         if activation == 'relu':
+-            sigma = max(0, sigma)
++            sigma = max(0.0, sigma)
++        elif activation == 'identity':
++            pass
+             
+-        # Add noise if enabled
++        # Add noise
+         if density_noise_std > 0:
+-            sigma += noise(density_noise_std)
++            sigma += random.gauss(0, density_noise_std)
+             
+-        # Calculate alpha_recip
+-        if step_j + 1 < queries_per_ray:
+-            alpha_recip = exp(-sigma * actual_step)
++        # Calculate alpha_recip and weight
++        if step_j + 1 < N:
++            alpha_recip = math.exp(-sigma * actual_step)
+         else:
+             alpha_recip = 1.0
+             
+-        # Safety epsilon
+-        alpha_recip += 1e-10
++        # Numerical stability
++        alpha_recip_safe = alpha_recip + 1e-10
+         
+-        # Calculate weight
+-        weight = (1.0 - alpha_recip) * throughput
++        weight = (1.0 - alpha_recip_safe) * throughput
+         
+-        # Update result
+-        result += weight * L_e
+-        
+-        # Update throughput and weights_sum
+-        throughput *= alpha_recip
+-        weights_sum += weight
+-        
++        # Accumulate result
++        emission = query_emission_grid(pos) # Assuming emission query
++        if is_primal:
++            result += weight * emission
++        else:
++            result -= weight * emission
++            
+         # Update state
+         step_j += 1
+         t_a = t_b
++        throughput *= alpha_recip_safe
++        weights_sum += weight
+         
+-        # Update mask
+-        still_walking = still_walking & (step_j < queries_per_ray)
+-        
+-    # 4. Background Contribution
+-    # Assuming background emission at exit
+-    L_bg = query_emission(ray_o + t_exit * ray_d)
+-    result += (1.0 - weights_sum) * L_bg
++    # Background contribution
++    background_color = [1.0, 1.0, 1.0] # Default white
++    background_term = (1.0 - weights_sum) * background_color
++    result += background_term
+     
+-    return result, weights_sum
++    return result
+ ```
+ 
+-**Parameters:**
+-- `queries_per_ray`: Number of steps for ray marching. Default: 128 [S1, unofficial].
+-- `density_noise_std`: Standard deviation for noise added to density. Default: 0 [S1, unofficial].
+-- `jittering_enabled`: Boolean flag enabling jittering for step positions. Default: True [S1, unofficial].
+-- `activation`: Activation function type for density ('identity', 'relu'). Default: 'identity' [S1, unofficial].
+-- `hide_emitters`: Boolean flag to hide background emitters if weights_sum is zero. Default: Not specified [S1, unofficial].
+-
+-**Edge Cases:**
+-- If `t_exit` is invalid, the ray is discarded.
+-- Numerical stability is maintained by adding $10^{-10}$ to `alpha_recip` [S1, unofficial].
+-- If `weights_sum` approaches 1, background contribution becomes negligible.
+-
+ ## Operating characteristics
+-- **Time Complexity:** $O(N)$ per ray, where $N$ is `queries_per_ray`.
+-- **Memory Complexity:** $O(1)$ per ray (excluding grid storage).
+-- **Strengths:** Simple implementation, differentiable, suitable for inverse rendering.
+-- **Limitations:** Dense grid may be memory-intensive for large scenes. No direction-dependent emission.
++*   **Time Complexity:** $O(N)$ per ray, where $N$ is `queries_per_ray`.
++*   **Memory Complexity:** $O(1)$ per ray for state variables, plus $O(V)$ for the density grid storage $V$.
++*   **Strengths:** Simple, differentiable, supports dense grids for fast lookup.
++*   **Limitations:** Fixed number of steps may lead to aliasing or insufficient sampling in complex regions. Dense grids consume significant memory for large scenes.
++*   **When to use:** When using dense voxel grids for density representation and needing differentiable rendering.
++*   **When not to use:** For sparse scenes where sparse data structures (like Octrees) are more efficient, or when direction-dependent emission is required (this method assumes no direction dependence [S1, unofficial]).
+ 
+ ## Background
+-Originated from NeRF (Neural Radiance Fields) [S1, unofficial]. Used in unbiased inverse volume rendering frameworks.
++This integrator is derived from the NeRF framework but adapted for unbiased inverse volume rendering using dense grids [S1, unofficial]. It originates from research into differentiable volume rendering for inverse problems [S1, unofficial].
+ 
+ ## Sources

@@ -1,0 +1,176 @@
+Parent Scene plugin: declarative 3D rendering What to build Transforms []Transform on MeshDraw and ModelDraw: one draw, N instances — a forest, a particle field, a tile floor. Every scene draw is already instanced with instances = 1 in t...
+
+scene: instancing · Issue #84 · dvoyni/cog · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+scene: instancing #84
+New issue
+Copy link
+New issue
+Copy link
+Closed
+Closed
+scene: instancing#84
+Copy link
+Assignees
+Labels
+ready-for-agentSelf-contained ticket an agent can pick upSelf-contained ticket an agent can pick up
+Description
+dvoyni
+opened on Sep 5, 2026
+Issue body actions
+Parent
+Scene plugin: declarative 3D rendering
+What to build
+Transforms []Transform on MeshDraw and ModelDraw: one draw, N instances — a forest, a particle field, a tile floor.
+Every scene draw is already instanced with instances = 1 in the degenerate case, and that machinery is built in full. What this ticket adds is making an instanced draw explicit, which is a feature rather than an optimisation and so earns its place independently — while driving the exact path the future automatic collapser will drive. Because the sort ships in v1, that collapse will be output-identical when it lands.
+Culling is per instance, not all-or-nothing, and survivors pack contiguously. The cost is N sphere tests — exactly what N separate draws would have paid.
+A blend-class instanced draw splits into N single-instance sort entries, because sorting the set by its nearest instance would composite visibly wrong.
+The instances share the draw's Plays and MorphWeights, so a hundred trees sway in lockstep and a hundred independently-animated characters need a hundred draws. Per-instance animation is out of scope. Instancing morphed geometry saves draw calls, not vertex work: 100 morphed heads is one draw and 100× the morph ALU.
+Acceptance criteria
+Transforms []Transform on both draw types; non-empty overrides the single Transform, one instance per entry
+Per-instance frustum culling with survivors packed contiguously
+A blend-class instanced draw splits into N single-instance sort entries
+firstInstance indexes within the pass's bound range, so WGSL's instance_index stays pass-relative and the shader is unchanged
+One material record per batch, padded to 256, no dedupe — documented as degenerating to one record per draw while the automatic collapse is deferred
+BatchView{MeshID, MaterialID, FirstInstance, InstanceCount} is populated correctly for a multi-instance draw
+Instances share the draw's Plays and MorphWeights; per-instance animation is explicitly out of scope
+A crate visible to two cameras is packed twice, since sorting is per pass — documented, not worked around
+A no-GPU test asserts per-instance culling counts and the packed FirstInstance/InstanceCount of each batch
+Blocked by
+scene: culling, sort classes and the sort key #76 — scene: culling, sort classes and the sort key
+scene: buffer-built meshes #82 — scene: buffer-built meshes
+Activity
+dvoyni
+added
+ready-for-agentSelf-contained ticket an agent can pick upSelf-contained ticket an agent can pick up
+on Sep 5, 2026
+dvoyni
+marked this as blocked by 2 issues on Sep 5, 2026
+scene: culling, sort classes and the sort key #76
+scene: buffer-built meshes #82
+dvoyni
+marked this as blocking on Sep 5, 2026
+demo: instancing #96
+dvoyni
+added a parent issue on Sep 5, 2026
+Implement the scene plugin #99
+dvoyni commented on Sep 5, 2026
+dvoyni
+on Sep 5, 2026
+OwnerAuthor
+More actions
+Carried from #76 (533a337): culling is one sphere test per recorded draw in culler.cull, and a blend-class draw is one sortEntry keyed by the view depth of its sphere centre. Per-instance culling with contiguous survivor packing, and the split of a blend-class instanced draw into N single-instance sort entries, both belong here — nothing in the flush does either yet.
+dvoyni commented on Sep 6, 2026
+dvoyni
+on Sep 6, 2026
+OwnerAuthor
+More actions
+Carried from #82 (2027a54): Transforms already exists and already places one draw record per instance, so three criteria here hold today — instances cull independently, a blend-class instanced draw already splits into N single-instance sort entries, and Ops still reports the one call the recorder made. Declaring the field inert was rejected as a trap, and the expansion is six lines in opQueue.Mesh.
+What is left is the collapse: today an N-instance draw is N batches of one, so BatchView.InstanceCount is always 1 and the material record degenerates to one per instance rather than one per batch. That work is in frameBuild.addDraw (scene/draw.go), which is also where ModelDraw will need the same treatment. pendingDraw already carries a params slice, so a batch has somewhere to put its shared parameters, and firstInstance is already pass-relative.
+Note the ordering constraint the collapse has to respect: survivors reach the sort in recording order and the opaque class sorts by opaqueKey(materialID, meshID), so instances of one draw are only adjacent after the sort if they share both ids — which they do, being one draw. A temporary mesh's id carries bit 31, so it never batches with a durable one.
+dvoyni
+self-assigned this
+on Sep 6, 2026
+dvoyni commented on Sep 6, 2026
+dvoyni
+on Sep 6, 2026
+OwnerAuthor
+More actions
+Done, in the working tree, awaiting commit.
+Transforms already placed one record per instance (carried from #82). What
+landed here is the collapse: an opaque instanced call's survivors are now one
+batch — one gfx draw call, one 256-byte material record, N contiguous instances.
+Acceptance
+Transforms []Transform on MeshDraw, non-empty overriding the single
+Transform, one instance per entry. ModelDraw does not exist yet — it
+lands with scene: glTF load - geometry, materials, textures and residency #86, and its Transforms is a field on a type that isn't
+written, not a second mechanism: the batching is in frameBuild.addDraw,
+which every draw type goes through.
+Per-instance frustum culling with survivors packed contiguously
+A blend-class instanced draw splits into N single-instance sort entries —
+sortClass.batched is true only for the opaque class
+firstInstance indexes within the pass's bound range; scene.wgsl is
+untouched
+One material record per batch, padded to 256, no dedupe — documented on
+addDraw as degenerating to one record per draw for everything the
+deferred automatic collapse would otherwise merge
+BatchView{MeshID, MaterialID, FirstInstance, InstanceCount} correct for a
+multi-instance draw
+Instances share the draw's animation; per-instance animation is out of
+scope, said in the MeshDraw.Transforms doc
+A crate visible to two cameras is packed twice — documented on PassView
+and on spec.md, and asserted
+No-GPU tests for the per-instance cull counts and each batch's packed
+FirstInstance/InstanceCount
+Decisions
+The batch is the call, not the key. Each record an instanced call expands
+into carries that call's group (drawRecord.group, the recording ordinal of
+the group's first record plus one — unique within a frame with no counter to
+reset, zero meaning "stands alone"). The packer collapses a run of one group;
+it does not collapse two adjacent draws that merely share a sort key.
+That distinction is load-bearing. Merging equal keys is the deferred automatic
+collapse (#49), and doing it early here would make that ticket unfalsifiable —
+and it would silently turn a WireBox's twelve edges, which share the unit box
+and the bundled material, into one batch. TestAWireBoxStaysTwelveSingleInstanceBatches
+pins that.
+A group's survivors arrive contiguous, so the run is found with a scan rather
+than a second grouping pass. The instances of one call share a mesh and a
+material and therefore a sort key; the sort's final tiebreak is the recording
+ordinal; and every other draw was recorded wholly before or wholly after the
+call. That is the ordering constraint #82 flagged, and it holds.
+Batching is per pass, because the sort is. An instanced crate two cameras
+both see is packed into both passes' instance slices. Not worked around.
+PassView.Instances still counts instances, not batches — it is not
+len(Batches) any more, which is now said out loud in its doc.
+Changes
+cog/scene, in the working tree:
+opqueue.go — drawRecord.group
+meshdraw.go — Mesh stamps the group; MeshDraw.Transforms documents what
+an instanced draw costs and what it shares
+draw.go — addDraw packs a whole batch from a []m.Mat4; frameBuild.worlds
+is the reused gather scratch
+plugin.go — sortClass and groupRun; the pack loop walks runs
+inspect.go — BatchView and PassView docs
+spec.md — three paragraphs under ### Instancing
+meshdraw_test.go, shapes_test.go — five new tests
+go test ./... passes whole in both cog and cog-examples.
+Verified by eye
+A throwaway cog-examples/cmd/scene/instancing (since #96 is the real demo):
+144 unit cubes from one Mesh call, each bobbing and turning on its own phase,
+with an explicit Bounds so the temporary mesh culls. It reported
+```
+recorded 144, culled 7, instances 137, batches 1  [0, 137)
+```
+steadily, and the frame showed 137 distinct cubes at distinct positions,
+rotations and heights — a packing that dropped or reused an instance record
+would show as a tile sitting still or copying its neighbour. Deleted afterwards.
+dvoyni
+closed this as completedon Sep 6, 2026
+dvoyni commented on Sep 6, 2026
+dvoyni
+on Sep 6, 2026
+OwnerAuthor
+More actions
+Committed as e3a4919 in cog — the eight files listed above, 267 insertions. The resolution's "awaiting commit" is superseded by this.
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+dvoyni
+Labels
+ready-for-agentSelf-contained ticket an agent can pick upSelf-contained ticket an agent can pick up
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

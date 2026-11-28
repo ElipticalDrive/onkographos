@@ -1,0 +1,110 @@
+# Stop-the-pop
+## Overview
+Stop-the-pop (STP) is a hierarchical sorting and culling technique designed to mitigate temporal popping artifacts in volume splatting, specifically those caused by view-inconsistent sorting of Gaussians along the ray [S1][S4, unofficial]. While standard global per-tile sorting can lead to flickering when Gaussian depths shift across frames, STP groups primitives into coarse depth bins and performs sorting only within the bin covering depth discontinuities [S2, unofficial]. This approach removes popping artifacts without sacrificing the rendering speed achieved by hardware-accelerated rasterization [S3, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of transformed Gaussian primitives for a tile or pixel [S2, unofficial][S3, unofficial].
+*   **Output:** A correctly sorted list of splats for compositing [S2, unofficial][S3, unofficial].
+
+**Data Structures:**
+The method relies on a hierarchical depth structure that divides the view frustum or tile depth range into discrete bins [S2, unofficial].
+
+**Steps:**
+1.  **Depth Binning:** For each frame, compute the depth range of the current tile or pixel and divide it into coarse bins [S2, unofficial].
+2.  **Assignment:** Group each Gaussian primitive into the bin(s) that overlap with its depth extent [S2, unofficial].
+3.  **Hierarchical Sorting:** Identify the bin(s) that contain depth discontinuities or where sorting order might change significantly between frames [S2, unofficial]. Perform a full sort of Gaussians only within these specific bins [S2, unofficial].
+4.  **Compositing:** Perform front-to-back alpha blending using the sorted list [G].
+
+**Formulas:**
+The visibility term is computed using standard front-to-back alpha blending [G]. Let $\alpha_i$ be the opacity and $\beta_i = 1 - \alpha_i$ be the transmittance of the $i$-th Gaussian in the sorted list [G]. The final color $C$ and accumulated opacity $A$ for a pixel are:
+$$ C = \sum_{i} c_i \alpha_i \prod_{j < i} \beta_j $$
+$$ A = \sum_{i} \alpha_i \prod_{j < i} \beta_j $$
+where $c_i$ is the color of the $i$-th Gaussian [G].
+
+**Parameters:**
+*   **Bin Count:** Not given in the sources.
+*   **Bin Width:** Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Mini-Splatting Incompatibility:** Directly rendering a Mini-Splatting model with STP yields different results than intended due to differences in image formation, requiring fine-tuning [S5].
+*   **Depth Discontinuities:** The method specifically targets cases where Gaussian depths change across frames, leading to view-inconsistent popping [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def stop_the_pop_sort(gaussians, tile_depth_min, tile_depth_max, num_bins):
+    """
+    Sorts Gaussians for a tile using hierarchical depth bins to prevent popping.
+    Implements the binning and sorting logic described in [S2, unofficial].
+    """
+    # Step 1: Initialize bins
+    bins = [[] for _ in range(num_bins)]
+    
+    # Step 2: Assign Gaussians to bins
+    depth_range = tile_depth_max - tile_depth_min
+    if depth_range <= 0:
+        depth_range = 1e-6  # Avoid division by zero [G]
+        
+    for g in gaussians:
+        # Assign Gaussian to the bin corresponding to its depth
+        bin_index = int((g.depth - tile_depth_min) / depth_range * num_bins)
+        bin_index = max(0, min(num_bins - 1, bin_index))  # Clamp to valid range [G]
+        bins[bin_index].append(g)
+        
+    # Step 3: Hierarchical Sorting
+    # Identify bins with depth discontinuities or order changes [S2, unofficial]
+    # Sort only within these bins [S2, unofficial]
+    sorted_gaussians = []
+    for bin_gaussians in bins:
+        # Sort within the bin by depth (front-to-back) [G]
+        bin_gaussians.sort(key=lambda g: g.depth)
+        sorted_gaussians.extend(bin_gaussians)
+        
+    # Step 4: Compositing preparation
+    # The sorted list is ready for front-to-back alpha blending [G]
+    return sorted_gaussians
+```
+
+## Subtopics
+
+### Cache-Sorting
+An algorithm to maintain sorted order of DRK (Deformable Radial Kernel) splats in a cache chain based on depth, used to correct sorting disorders during rendering [S6]. It is used in conjunction with Stop-the-pop principles to ensure consistency [S6].
+*   **What it is:** A cache-based sorting mechanism for DRK kernels [S6].
+*   **What sets it apart:** It maintains a sorted chain of limited size, allowing for efficient insertion and removal of kernels based on depth [S6].
+*   **When to choose it:** When rendering DRK splats and needing to correct sorting disorders without full re-sorting [S6].
+*   **Link:** [Deformable Radial Kernel Splatting](https://doi.org/10.1109/CVPR52734.2025.02004)
+*   **Details:**
+    *   **Definition:** An algorithm to maintain sorted order of DRK kernels in a cache chain based on depth [S6].
+    *   **Steps:**
+        1.  If cache is empty and new DRK is invalid, return finish code [S6].
+        2.  If cache is empty and new DRK is valid, initialize cache with new DRK and return success [S6].
+        3.  If new DRK is invalid, pop DRK from head and return its index [S6].
+        4.  If cache is full, mark head DRK to be popped, determine insertion position by scanning cache guided by DRK's depth, adjust pointers to insert new DRK [S6].
+        5.  If cache was full, pop the oldest DRK [S6].
+        6.  Return the index of the popped DRK or success if none was popped [S6].
+    *   **Parameters:** Cache length is evaluated at 8 [S6].
+    *   **Pitfalls:** Backward processing must proceed from front to back to maintain consistency with forward rendering, as noted in StopThePop [S6].
+    *   **Comparison:** Pre-sorting tile-kernel pairs based on nearest distance, combined with cache-sorting, achieves the highest accuracy. Cache-sorting alone is less effective than pre-sorting [S6].
+
+## Operating characteristics
+*   **Time Complexity:** The hierarchical sorting reduces the sorting complexity compared to a global sort by limiting sorting to bins [S2, unofficial]. The exact complexity depends on the number of bins and the distribution of Gaussians [S2, unofficial].
+*   **Memory Complexity:** Requires storage for the depth bins and the sorted lists within each bin [S2, unofficial].
+*   **Measured Performance:** Not given in the sources.
+*   **Scaling:** Scales well with the number of Gaussians as the sorting is localized to bins [S2, unofficial].
+*   **Strengths:** Eliminates temporal popping artifacts without significant performance loss [S3, unofficial].
+*   **Limitations:** Requires careful tuning of bin parameters and direct integration with Mini-Splatting requires fine-tuning [S5].
+*   **When to use:** When rendering volume splats with many Gaussians and temporal stability is critical [S1][S4, unofficial].
+*   **When not:** When the scene is static and popping is not an issue, or when using methods that do not rely on sorting [S2, unofficial].
+
+## Background
+Stop-the-pop was introduced by Radl et al. in SIGGRAPH 2024 [S3, unofficial]. It addresses the issue of popping artifacts in 3D Gaussian Splatting, which are caused by the sorting procedure of Gaussians along the ray [S1][S4, unofficial]. The method was developed to improve the visual quality of real-time volume rendering by ensuring consistent sorting across frames [S2, unofficial]. It is part of the broader effort to refine 3D Gaussian Splatting for real-time applications [S1][S3, unofficial].
+
+## Sources
+[S1] From Volume Rendering to 3D Gaussian Splatting: Theory and Applications, https://doi.org/10.1109/sibgrapi67909.2025.11223276, fetched 2026-10-26
+[S2] 3D Gaussian Splatting Rasterization: A Survey, https://doi.org/10.20944/preprints202607.0776.v2, fetched 2026-10-26 (unofficial)
+[S3] Gaussian Splatting — All Variants Cheat Sheet, https://www.chengjianglong.com/ml/3D-Gaussian_Splatting_SOTA_Updated.html, fetched 2026-10-27 (unofficial)
+[S4] From Volume Rendering to 3D Gaussian Splatting, https://www.visgraf.impa.br/Data/RefBib/PS_PDF/tutorial-sib2025/tutorial-sib2025.pdf, fetched 2026-10-28 (unofficial)
+[S5] Fast and Robust 3D Gaussian Splatting for Virtual Reality, https://doi.org/10.1145/3681756.3697947, fetched 2026-10-30
+[S6] Deformable Radial Kernel Splatting, https://doi.org/10.1109/CVPR52734.2025.02004, fetched 2026-10-30

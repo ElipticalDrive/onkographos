@@ -1,0 +1,176 @@
+--- v012.md
++++ v013.md
+@@ -1,5 +1,5 @@
+ # Adaptive Step Size Ray Marching
+ 
+-Also called: Adaptive Step Size Volume Rendering, CSRayMarch, DDVR, DDVR Raymarching Shader, Ray Marching with Adaptive Step Size, Ray Marching with Adaptive Step Size and Temporal Accumulation, Volume Rendering via Ray Marching
++Also called: Adaptive Step Size Volume Rendering, CSRayMarch, DDVR, DDVR Raymarching Shader, Ray Marching with Adaptive Step Size and Temporal Accumulation, Volume Rendering via Ray Marching
+ 
+ ## Overview
+@@ -8,6 +8,6 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Ray origin $\mathbf{o}$, normalized direction $\mathbf{d}$, 3D volume texture(s), transfer function/color map, camera parameters, and configuration parameters (step size, thresholds).
+-*   **Outputs:** Final pixel color (RGB) and alpha (A).
++*   **Inputs:** Ray origin $\mathbf{o}$, normalized direction $\mathbf{d}$, 3D volume texture(s), transfer function/color map, camera parameters, and configuration parameters (step size, thresholds) [S3, S4, unofficial].
++*   **Outputs:** Final pixel color (RGB) and alpha (A) [S3, unofficial].
+ 
+ **Data Structures:**
+@@ -42,9 +42,9 @@
+ 2.  **Step Size Calculation (Cloud-Specific Variant):**
+     *   If using cloud rendering with fine/coarse steps [S4, unofficial]:
+-        *   Calculate `totalDst` = $t_{exit} - t_{entry}$.
+-        *   Set `curFineStepSize` = $\min(\text{STEPSIZE\_FINE}, \text{totalDst} / \text{MIN\_NUM\_FINE\_STEPS})$.
+-        *   Set `curCoarseStepSize` = `curFineStepSize` $\times$ `COARSE_STEPSIZE_MULTIPLIER`.
+-        *   Set `curThreshold` = `MAX_NUM_MISSED_STEPS`.
+-        *   Set initial `dt` = `curCoarseStepSize`.
++        *   Calculate `totalDst` = $t_{exit} - t_{entry}$ [S4, unofficial].
++        *   Set `curFineStepSize` = $\min(\text{STEPSIZE\_FINE}, \text{totalDst} / \text{MIN\_NUM\_FINE\_STEPS})$ [S4, unofficial].
++        *   Set `curCoarseStepSize` = `curFineStepSize` $\times$ `COARSE_STEPSIZE_MULTIPLIER` [S4, unofficial].
++        *   Set `curThreshold` = `MAX_NUM_MISSED_STEPS` [S4, unofficial].
++        *   Set initial `dt` = `curCoarseStepSize` [S4, unofficial].
+ 
+ 3.  **Ray Marching Loop:**
+@@ -55,5 +55,5 @@
+         *   If `bVolume4D` is true, sample density from `volumeTexture` and `volumeTexture4DNextFrame`, mixing them using `interpolationFactor` and `pingpong4D` [S3, unofficial].
+         *   If `bVolume4D` is false, sample density directly from `volumeTexture` [S3, unofficial].
+-    *   **Density Threshold Check:** If density $\le 0.01$ (or $\le 0$ for clouds), proceed to step size adjustment [S3, S4, unofficial].
++    *   **Density Threshold Check:** If density $> 0.01$ (or $> 0$ for clouds), proceed to color mapping and compositing [S3, S4, unofficial].
+         *   **Cloud Variant:** Decrement `curThreshold`. If `curThreshold` $\le 0$, switch to `curCoarseStepSize` [S4, unofficial].
+     *   **Color Mapping & Compositing (if density > threshold):**
+@@ -64,5 +64,5 @@
+         *   Update accumulated color: $C_{acc} += C_{contrib}$ [S3, unofficial].
+         *   Update transmittance: $T *= (1.0 - \alpha)$ [S3, unofficial].
+-        *   **Lighting (Optional):** If density is high, calculate light contribution (e.g., single scattering toward sun) and multiply by `lightEnergy` [S2, S4, unofficial].
++        *   **Lighting (Optional):** If density is above threshold, calculate light contribution (e.g., single scattering toward sun) [S2, unofficial]. For clouds, update light energy: `lightEnergy *= phaseVal; cloudColor = lightEnergy * sunColor` [S4, unofficial].
+     *   **First Hit Storage:** If `!firstHit` and $\alpha > 0$, set `firstHit = true` and store $\mathbf{p}$ and $t$ in `positionDepthBufferImage` [S3, unofficial].
+     *   **Early Termination:** If $1.0 - T > 0.95$ (or $T < \text{EARLY\_STOP\_THRESHOLD}$), break loop [S3, S4, unofficial].
+@@ -88,8 +88,11 @@
+     t = t_entry + config.ray_offset
+     transmittance = 1.0
+-    accumulated_color = vec3(0.0)
++    accumulated_color = [0.0, 0.0, 0.0]
+     first_hit = False
+     prev_density = 0.0
+-    
++
++    # Determine step size from noise image
++    m_step_size = config.step_size if config.noise_r == 0 else config.noise_r
++
+     # Cloud-specific variables (if applicable)
+     if config.use_cloud_steps:
+@@ -100,42 +103,50 @@
+         dt = cur_coarse_step
+     else:
+-        dt = config.step_size
++        dt = m_step_size
+ 
+     while t < t_exit:
+         # Position calculation
+-        pos = ray_origin + ray_direction * t
+-        
+-        # Volume sampling
+-        uvw = local_to_tex_space(pos)
+-        density = sample_volume(uvw, volume_texture, config)
+-        
++        pos = [ray_origin[i] + ray_direction[i] * t for i in range(3)]
++
++        # Volume sampling (explicit coordinate conversion and trilinear interpolation)
++        uvw = [(pos[i] - config.bbmin[i]) / (config.bbmax[i] - config.bbmin[i]) for i in range(3)]
++        uvw = [max(0.0, min(1.0, u)) for u in uvw]
++
++        # Sample density
++        if config.bVolume4D:
++            d1 = sample_3d_texture(uvw, volume_texture)
++            d2 = sample_3d_texture(uvw, config.volume_texture_4d_next)
++            density = d1 * (1.0 - config.interpolationFactor) + d2 * config.interpolationFactor
++        else:
++            density = sample_3d_texture(uvw, volume_texture)
++
+         # Density threshold check
+         if density > 0.01:
+             # Color mapping
+             norm_density = clamp((density - config.scalar_min) / (config.scalar_max - config.scalar_min), 0.0, 1.0)
+-            s = sample_color_map(norm_density, color_map) # s is vec4 (rgb, extinction)
+-            
++            s = sample_color_map(norm_density, color_map) # s is [r, g, b, extinction]
++
+             # Compositing
+-            alpha = 1.0 - exp(-s.a * dt)
+-            contribution = transmittance * s.rgb * alpha
+-            accumulated_color += contribution
++            alpha = 1.0 - exp(-s[3] * dt)
++            contribution = [transmittance * s[0] * alpha, transmittance * s[1] * alpha, transmittance * s[2] * alpha]
++            accumulated_color = [accumulated_color[i] + contribution[i] for i in range(3)]
+             transmittance *= (1.0 - alpha)
+-            
++
+             # First hit storage
+             if not first_hit:
+                 first_hit = True
+-                store_position_depth(pos, t)
+-            
++                # store_position_depth(pos, t) # Handled externally
++
+             # Early termination
+             if 1.0 - transmittance > 0.95:
+                 break
+-                
++
+             prev_density = density
+-            
+-            # Step size adaptation (General Variant)
++
++            # Step size adaptation (General Variant from S2)
+             d_density = density - prev_density
+             new_step = get_step(d_density, transmittance, density, config.step_scale)
+             dt = (dt + new_step) * 0.5
+-            
++
+         else:
+             # Empty space handling
+@@ -147,19 +158,35 @@
+                 # Increase step size in empty space
+                 dt = min(dt * 2.0, config.max_step)
+-        
++
+         # Advance
+         t += dt
+-        
++
+     # Post-processing
+-    accumulated_color = pow(accumulated_color, vec3(1.0/2.2))
++    accumulated_color = [pow(c, 1.0/2.2) for c in accumulated_color]
+     final_alpha = 1.0 - transmittance
+-    final_color = accumulated_color * config.illumination_scale
+-    
++    final_color = [accumulated_color[i] * config.illumination_scale for i in range(3)]
++
+     # Temporal accumulation
+-    if config.accumulation and not camera_moved:
+-        last_color = load_previous_frame()
+-        final_color = last_color * (1.0 - final_alpha) + final_color * final_alpha
+-        
++    if config.accumulation and not config.camera_moved:
++        last_color = config.last_frame_color
++        final_color = [last_color[i] * (1.0 - final_alpha) + final_color[i] * final_alpha for i in range(3)]
++
+     return final_color, final_alpha
++
++# Standard helper operations [G]
++def clamp(x, lo, hi):
++    return max(lo, min(hi, x))
++
++def sample_3d_texture(uvw, tex):
++    # Trilinear interpolation of 3D volume texture at normalized coordinates uvw
++    return tex.trilinear_sample(uvw)
++
++def sample_color_map(coord, cmap):
++    # 1D color/transfer function lookup
++    return cmap.sample(coord)
++
++def get_step(d_density, transmittance, density, step_scale):
++    # Standard adaptive step function based on density gradient and transmittance
++    return step_scale * (1.0 + abs(d_density)) * transmittance
+ ```
+ 

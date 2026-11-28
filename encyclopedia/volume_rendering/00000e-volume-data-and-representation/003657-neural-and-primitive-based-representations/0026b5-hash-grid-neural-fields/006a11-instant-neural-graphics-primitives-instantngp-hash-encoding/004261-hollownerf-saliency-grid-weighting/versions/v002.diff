@@ -1,0 +1,181 @@
+--- v001.md
++++ v002.md
+@@ -8,9 +8,9 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A 3D coordinate $\mathbf{x} = (x, y, z)$; a multi-level hashgrid encoding (as defined in [HashGrid Encoding](3866-hashgrid-encoding.md)) providing a raw feature vector $\mathbf{f}$; a trainable 3D saliency grid $G$.
+-*   **Output:** A weighted feature vector $\mathbf{v}$ suitable for input to the decoding MLP.
++*   **Input:** A 3D coordinate $\mathbf{x} = (x, y, z)$; a multi-level hashgrid encoding (as defined in [HashGrid Encoding](3866-hashgrid-encoding.md)) providing a raw feature vector $\mathbf{f}$; a trainable 3D saliency grid $G$ [S1].
++*   **Output:** A weighted feature vector $\mathbf{v}$ suitable for input to the decoding MLP [S1].
+ 
+ **Data Structures:**
+-*   **Saliency Grid ($G$):** A 3D tensor of resolution $T \times T \times T$. It stores scalar saliency values.
++*   **Saliency Grid ($G$):** A 3D tensor of resolution $T \times T \times T$ storing scalar saliency values [S1].
+     *   **Initialization:** $G$ is initialized as an all-ones tensor [S1].
+     *   **Size:** $T$ is typically much smaller than the resolution of the dense feature grid. Investigated values for $T$ are 64, 96, and 128 [S1].
+@@ -33,101 +33,64 @@
+ **Pseudocode:**
+ ```python
+-import torch
+-import torch.nn.functional as F
+-
+-def hollownerf_weighting(x, hashgrid, saliency_grid, T):
++def hollownerf_weighting(x, hashgrid_fetch, saliency_grid, T):
+     """
+-    x: Tensor of shape (..., 3), input coordinates.
+-    hashgrid: Function or object to fetch raw features f from multi-level hashgrid.
+-    saliency_grid: Tensor of shape (T, T, T), the trainable saliency grid G.
+-    T: Integer, resolution of the saliency grid.
++    x: array of shape (..., 3), coordinates normalized to [0, 1]
++    hashgrid_fetch: function returning raw feature vector f
++    saliency_grid: 3D array of shape (T, T, T)
++    T: integer resolution of the saliency grid
+     Returns: Weighted feature vector v.
+     """
+     # 1. Fetch raw feature vector f from the multi-level hashgrid
+-    f = hashgrid(x)
++    f = hashgrid_fetch(x)
+     
+-    # 2. Locate the 8 surrounding voxels in the saliency grid
+-    # Assuming x is normalized or mapped to the grid space [0, T-1]
+-    # We need to compute the grid indices for the 8 corners
+-    # Note: The exact quantization depends on the coordinate system mapping.
+-    # Based on S1, xi are quantized to integers between 0 and T-1.
++    # 2. Scale coordinates to grid space [0, T-1]
++    coords = x * (T - 1)
+     
+-    # Calculate lower and upper bounds for the 8 voxels
+-    # x_float is the coordinate in grid space
+-    x_float = x * (T - 1) # Assuming mapping to [0, T-1] range for indexing
++    # 3. Compute lower and upper integer indices for the 8 surrounding voxels
++    ix_low = floor(coords[..., 0])
++    iy_low = floor(coords[..., 1])
++    iz_low = floor(coords[..., 2])
++    ix_high = ix_low + 1
++    iy_high = iy_low + 1
++    iz_high = iz_low + 1
+     
+-    # Get integer indices for the "lower" corner (floor)
+-    ix_low = x_float.long()
+-    ix_high = ix_low + 1
++    # 4. Clamp indices to valid range [0, T-1]
++    ix_low = clamp(ix_low, 0, T - 1)
++    ix_high = clamp(ix_high, 0, T - 1)
++    iy_low = clamp(iy_low, 0, T - 1)
++    iy_high = clamp(iy_high, 0, T - 1)
++    iz_low = clamp(iz_low, 0, T - 1)
++    iz_high = clamp(iz_high, 0, T - 1)
+     
+-    # Clamp indices to [0, T-1] to handle boundary conditions
+-    ix_low = torch.clamp(ix_low, 0, T - 1)
+-    ix_high = torch.clamp(ix_high, 0, T - 1)
++    # 5. Fractional parts for trilinear interpolation
++    fx = coords[..., 0] - ix_low
++    fy = coords[..., 1] - iy_low
++    fz = coords[..., 2] - iz_low
+     
+-    # Extract coordinates for the 8 voxels
+-    # Voxels are combinations of (ix_low/high, iy_low/high, iz_low/high)
+-    # We can use grid_sample or manual indexing. Manual indexing is clearer for 3D.
++    # 6. Fetch saliency values for the 8 corners
++    g000 = saliency_grid[ix_low, iy_low, iz_low]
++    g001 = saliency_grid[ix_low, iy_low, iz_high]
++    g010 = saliency_grid[ix_low, iy_high, iz_low]
++    g011 = saliency_grid[ix_low, iy_high, iz_high]
++    g100 = saliency_grid[ix_high, iy_low, iz_low]
++    g101 = saliency_grid[ix_high, iy_low, iz_high]
++    g110 = saliency_grid[ix_high, iy_high, iz_low]
++    g111 = saliency_grid[ix_high, iy_high, iz_high]
+     
+-    # Create a grid of indices for the 8 corners
+-    # Shape: (..., 8, 3)
+-    # This part requires expanding dimensions to match x's batch/shape
+-    # For simplicity, assuming x is (N, 3)
++    # 7. Trilinear interpolation
++    p_raw = (g000 * (1-fx)*(1-fy)*(1-fz) +
++             g001 * (1-fx)*(1-fy)*fz +
++             g010 * (1-fx)*fy*(1-fz) +
++             g011 * (1-fx)*fy*fz +
++             g100 * fx*(1-fy)*(1-fz) +
++             g101 * fx*(1-fy)*fz +
++             g110 * fx*fy*(1-fz) +
++             g111 * fx*fy*fz)
++             
++    # 8. Sigmoid to ensure 0 < p < 1
++    p = sigmoid(p_raw)
+     
+-    # Get fractional parts for interpolation weights
+-    fx = x_float - ix_low.float()
+-    fy = (x_float[:, 1:2] - ix_low[:, 1:2].float())
+-    fz = (x_float[:, 2:3] - ix_low[:, 2:3].float())
+-    
+-    # Fetch saliency values for the 8 corners
+-    # Indices: (x_low, y_low, z_low), (x_low, y_low, z_high), ...
+-    idx_list = [
+-        (ix_low[:, 0], ix_low[:, 1], ix_low[:, 2]),
+-        (ix_low[:, 0], ix_low[:, 1], ix_high[:, 2]),
+-        (ix_low[:, 0], ix_high[:, 1], ix_low[:, 2]),
+-        (ix_low[:, 0], ix_high[:, 1], ix_high[:, 2]),
+-        (ix_high[:, 0], ix_low[:, 1], ix_low[:, 2]),
+-        (ix_high[:, 0], ix_low[:, 1], ix_high[:, 2]),
+-        (ix_high[:, 0], ix_high[:, 1], ix_low[:, 2]),
+-        (ix_high[:, 0], ix_high[:, 1], ix_high[:, 2])
+-    ]
+-    
+-    g_values = []
+-    for ix, iy, iz in idx_list:
+-        # Gather from saliency_grid
+-        # saliency_grid is (T, T, T)
+-        # We need to index it with (ix, iy, iz)
+-        # Using advanced indexing
+-        g = saliency_grid[ix, iy, iz]
+-        g_values.append(g)
+-        
+-    g_tensor = torch.stack(g_values, dim=-1) # Shape: (N, 8)
+-    
+-    # 3. Trilinear interpolation of saliency values
+-    # Weights for interpolation
+-    w000 = (1 - fx) * (1 - fy) * (1 - fz)
+-    w001 = (1 - fx) * (1 - fy) * fz
+-    w010 = (1 - fx) * fy * (1 - fz)
+-    w011 = (1 - fx) * fy * fz
+-    w100 = fx * (1 - fy) * (1 - fz)
+-    w101 = fx * (1 - fy) * fz
+-    w110 = fx * fy * (1 - fz)
+-    w111 = fx * fy * fz
+-    
+-    # Sum of weights should be 1
+-    p_raw = (w000 * g_tensor[..., 0] +
+-             w001 * g_tensor[..., 1] +
+-             w010 * g_tensor[..., 2] +
+-             w011 * g_tensor[..., 3] +
+-             w100 * g_tensor[..., 4] +
+-             w101 * g_tensor[..., 5] +
+-             w110 * g_tensor[..., 6] +
+-             w111 * g_tensor[..., 7])
+-             
+-    # 4. Sigmoid operator
+-    p = torch.sigmoid(p_raw)
+-    
+-    # 5. Weight the feature vector
+-    v = p.unsqueeze(-1) * f
+-    
++    # 9. Weight the feature vector
++    v = p * f
+     return v
+ ```
+@@ -161,11 +124,11 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Adds a constant-time lookup and interpolation step per coordinate query, proportional to the number of voxels (8) and the dimensionality of the feature vector.
++*   **Time Complexity:** Adds a constant-time lookup and interpolation step per coordinate query, proportional to the number of voxels (8) and the dimensionality of the feature vector [G].
+ *   **Memory Complexity:** Requires additional memory for the saliency grid $G$, which is $T^3$ floats. Since $T$ is typically much smaller than the feature grid resolution, this overhead is low [S1].
+ *   **Performance:** Mitigates hash collisions by allowing important features to dominate shared buckets, potentially improving reconstruction quality in complex scenes compared to uniform collision distribution [S1].
+ *   **Strengths:** Learnable collision mitigation; differentiable model compression opportunity [S1].
+ *   **Limitations:** Requires training an additional grid; risk of over-pruning if $p$ converges to 0 [S1].
+-*   **When to Use:** When hash collisions significantly degrade reconstruction quality and uniform distribution (as in Instant-NGP) is insufficient.
+-*   **When Not to Use:** When memory is extremely constrained (though overhead is low) or when training time is a critical bottleneck due to the additional gradient computation for $G$.
++*   **When to Use:** When hash collisions significantly degrade reconstruction quality and uniform distribution (as in Instant-NGP) is insufficient [G].
++*   **When Not to Use:** When memory is extremely constrained (though overhead is low) or when training time is a critical bottleneck due to the additional gradient computation for $G$ [G].
+ 
+ ## Background

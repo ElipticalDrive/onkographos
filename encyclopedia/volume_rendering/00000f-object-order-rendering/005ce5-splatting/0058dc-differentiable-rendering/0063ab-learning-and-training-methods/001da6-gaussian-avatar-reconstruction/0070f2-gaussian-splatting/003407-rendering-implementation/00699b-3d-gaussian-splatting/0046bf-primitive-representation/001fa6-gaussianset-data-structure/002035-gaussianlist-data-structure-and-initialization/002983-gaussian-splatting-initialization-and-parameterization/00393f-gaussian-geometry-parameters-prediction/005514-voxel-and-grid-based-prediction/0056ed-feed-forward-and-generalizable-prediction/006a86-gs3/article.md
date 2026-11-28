@@ -1,0 +1,160 @@
+# GS3
+
+Also called: 3D Gaussian Splatting-based Self-Supervised framework
+
+## Overview
+GS3 is an efficient self-supervised learning framework for learning point cloud representations by integrating fast 3D Gaussian Splatting into a rendering-based pretext task [S1, unofficial]. It solves the problem of high computational cost and memory intensity inherent in existing volume rendering-based self-supervised methods [S1, unofficial]. Unlike its sibling [Ponder](16421-ponder.md), which uses differentiable volume rendering with ray marching, GS3 employs a tile-based rasterizer to render 3D Gaussians, achieving significantly faster pre-training speeds and lower memory usage [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A set of $N$ sparse-view RGB-D images $\{I_i, D_i \mid I_i \in \mathbb{R}^{H \times W \times 3}, D_i \in \mathbb{R}^{H \times W}\}_{i=1}^N$, camera intrinsic parameters $\{K_i\}_{i=1}^N$, and camera poses $\{T_i \mid T_i = [R_i | t_i]\}_{i=1}^N$, where $N$ is the number of views, and $H, W$ are image dimensions [S1, unofficial].
+*   **Outputs:** A pre-trained point cloud encoder capable of extracting features from 3D point clouds, which can be fine-tuned for downstream tasks such as 3D semantic segmentation, 3D instance segmentation, 3D object detection, and 3D scene reconstruction [S1, unofficial].
+
+**Data Structures:**
+The method operates on a set of 3D points $\mathcal{P}$ generated from the input RGB-D images [S1, unofficial]. Each point $p \in \mathcal{P}$ is associated with:
+*   Position $\mathbf{x} \in \mathbb{R}^3$ [S1, unofficial].
+*   Color $\mathbf{c} \in \mathbb{R}^3$ (RGB) [S1, unofficial].
+*   Learned features $\mathbf{f} \in \mathbb{R}^d$ (output of the point cloud encoder) [S1, unofficial].
+
+From these features, 3D Gaussian primitives are predicted [S1, unofficial]. Each Gaussian $g_j$ is defined by:
+*   Mean $\mu_j \in \mathbb{R}^3$ [G].
+*   Covariance $\Sigma_j \in \mathbb{R}^{3 \times 3}$ (parameterized by scale and rotation) [G].
+*   Opacity $\alpha_j \in [0, 1]$ [G].
+*   Color $c_j$ (typically spherical harmonics coefficients or RGB) [G].
+
+**Steps:**
+1.  **Back-projection:** For each input view $i$, back-project the RGB-D image into 3D space to generate a colored point cloud [S1, unofficial]. For each pixel $(u, v)$ with depth $d$, compute the 3D point $\mathbf{x} = [x, y, z]^T$ in the world coordinate system using the camera intrinsic matrix $K_i$ and pose $T_i = [R_i | t_i]$:
+    $$
+    \begin{bmatrix} x \\ y \\ z \\ 1 \end{bmatrix} = R_i^{-1} \left( d \cdot K_i^{-1} \begin{bmatrix} u \\ v \\ 1 \end{bmatrix} - t_i \right)
+    $$
+    Append the RGB color of the pixel to the corresponding 3D point [S1, unofficial].
+
+2.  **Feature Encoding:** Input the generated point clouds into a point cloud encoder to extract point-wise features $\mathbf{f}$ for each point [S1, unofficial].
+
+3.  **Gaussian Parameter Prediction:** Predict the 3D Gaussian primitive parameters (locations $\mu$, covariance $\Sigma$, opacity $\alpha$, and color $c$) aligned with the input points based on the learned features $\mathbf{f}$ [S1, unofficial].
+
+4.  **Rendering:** Employ a real-time tile-based rasterizer (based on 3D Gaussian Splatting) to render RGB images from the predicted 3D Gaussians given the specific camera intrinsic parameters and poses [S1, unofficial].
+
+5.  **Training:** Train the model by minimizing the difference between the rendered RGB images and the input real RGB images [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def meshgrid(width, height):
+    u = np.arange(width).reshape(1, -1)
+    v = np.arange(height).reshape(-1, 1)
+    return np.broadcast_to(u, (height, width)), np.broadcast_to(v, (height, width))
+
+def compute_l1_loss(rendered, target):
+    return np.mean(np.abs(rendered - target))
+
+def gs3_pretraining(input_rgbds, input_poses, input_intrinsics, encoder, gaussian_head, renderer):
+    """
+    input_rgbds: List of (H, W, 3) RGB images and (H, W) Depth maps
+    input_poses: List of (4, 4) transformation matrices [R|t]
+    input_intrinsics: List of (3, 3) intrinsic matrices K
+    encoder: Point cloud feature extractor
+    gaussian_head: Network predicting Gaussian params from features
+    renderer: Tile-based 3D Gaussian rasterizer
+    
+    Returns: Pre-trained encoder weights
+    """
+    points_3d_list = []
+    
+    # Step 1: Back-projection to generate colored point clouds
+    for i in range(len(input_rgbds)):
+        I, D = input_rgbds[i]
+        K = input_intrinsics[i]
+        T = input_poses[i]
+        R_inv = np.linalg.inv(T[:3, :3])
+        t = T[:3, 3]
+        
+        # Get pixel coordinates (u, v) and depth d
+        u, v = meshgrid(I.shape[1], I.shape[0])
+        d = D
+        
+        # Flatten arrays for vectorized operation
+        u_flat = u.flatten()
+        v_flat = v.flatten()
+        d_flat = d.flatten()
+        
+        # Homogeneous pixel coordinates
+        pixel_homo = np.vstack([u_flat, v_flat, np.ones_like(u_flat)])
+        
+        # Back-projection formula: x = R^-1 (d * K^-1 * [u,v,1]^T - t)
+        K_inv = np.linalg.inv(K)
+        pixel_homo_inv = K_inv @ pixel_homo
+        scaled = d_flat[:, None] * pixel_homo_inv
+        shifted = scaled - t[:, None]
+        x_world = (R_inv @ shifted.T).T # Shape: (N_pixels, 3)
+        
+        # Get RGB colors
+        colors = I.reshape(-1, 3)
+        
+        # Create point cloud: positions and colors
+        points = np.hstack([x_world, colors])
+        points_3d_list.append(points)
+        
+    # Step 2 & 3: Encode and Predict Gaussians
+    # Concatenate all points from all views for batch processing
+    all_points = np.vstack(points_3d_list)
+    positions = all_points[:, :3]
+    
+    # Extract features using encoder
+    features = encoder(positions)
+    
+    # Predict Gaussian parameters from features
+    gaussians = gaussian_head(features)
+    
+    # Step 4: Render
+    rendered_images = []
+    for i in range(len(input_rgbds)):
+        K = input_intrinsics[i]
+        T = input_poses[i]
+        # Render the full set of gaussians from this view
+        img = renderer.render(gaussians, K, T)
+        rendered_images.append(img)
+        
+    # Step 5: Compute Loss and Update
+    total_loss = 0
+    for i in range(len(input_rgbds)):
+        target = input_rgbds[i][0] # RGB image
+        rendered = rendered_images[i]
+        loss = compute_l1_loss(rendered, target)
+        total_loss += loss
+        
+    # Standard gradient descent update
+    total_loss.backward()
+    encoder.optimizer.step()
+    gaussian_head.optimizer.step()
+    encoder.zero_grad()
+    gaussian_head.zero_grad()
+    
+    return encoder
+```
+
+**Parameters:**
+*   **Rendered Image Resolution:** Pre-training time and memory usage are measured at $320 \times 240$ resolution [S1, unofficial].
+*   **Number of Views ($N$):** Sparse views (exact number not specified, but typically small, e.g., 2-4) [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Depth Accuracy:** The quality of the back-projected point cloud depends heavily on the accuracy of the input depth maps $D_i$ [S1, unofficial].
+
+## Operating characteristics
+*   **Speed:** GS3 achieves approximately $9\times$ pre-training speedup compared to the baseline method Ponder [S1, unofficial].
+*   **Memory:** GS3 uses less than $0.25\times$ the memory cost of Ponder during pre-training [S1, unofficial].
+*   **Performance Context:** Measurements were taken at a rendered image resolution of $320 \times 240$ [S1, unofficial].
+*   **Strengths:** High efficiency in pre-training due to the use of tile-based rasterization instead of ray marching [S1, unofficial]. Enables generalizable pre-training for point cloud encoders [S1, unofficial].
+*   **Limitations:** Relies on the availability of RGB-D inputs for pre-training [S1, unofficial]. Performance on downstream tasks depends on the quality of the pre-trained encoder [S1, unofficial].
+*   **When to use:** When pre-training a point cloud encoder for downstream 3D vision tasks (segmentation, detection) with limited annotations and computational resources [S1, unofficial].
+*   **When not to use:** When only RGB inputs are available without depth, or when per-scene optimization (not pre-training) is required [S1, unofficial].
+
+## Background
+GS3 was proposed by Hao Liu, Minglin Chen, Yanni Ma, Haihong Xiao, and Ying He from Nanyang Technological University, Sun Yat-Sen University, and South China University of Technology [S1, unofficial]. It was published on arXiv in November 2024 [S1, unofficial]. The method addresses the computational demands of existing rendering-based self-supervised frameworks like Ponder, which use differentiable volume rendering with dozens of point queries along each ray [S1, unofficial]. GS3 is the first attempt to explore generalizable 3D Gaussian Splatting for point cloud self-supervised learning [S1, unofficial].
+
+## Sources
+[S1] Point Cloud Unsupervised Pre-training via 3D Gaussian Splatting, https://doi.org/10.48550/arxiv.2411.18667, fetched 2026-10-26 (unofficial)

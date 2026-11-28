@@ -1,0 +1,127 @@
+# Merging Transfer Function Components
+
+Also called: TF Component Composition, Weighted Sum Opacity
+
+## Overview
+This method constructs a composite transfer function by combining multiple individual transfer function components using a weighted sum for opacity and specific strategies for color handling [S1]. It addresses the need to visualize multiple distinct features simultaneously within a single volume rendering pass [S1]. Unlike its siblings, which focus on color harmonization or blending, this method explicitly defines the mathematical composition of opacity and color from overlapping components, distinguishing between weighted blending and dominant-component selection [S1].
+
+## How it works
+**Inputs:**
+- $n$: The number of transfer function components.
+- For each component $j \in \{1, \dots, n\}$:
+  - $w_j$: The weight of component $j$ ($w_j \ge 0$) [S1].
+  - $F_j(i)$: The value of component $j$ at input intensity $i$ [S1].
+  - $c_j$: The color associated with component $j$ [S1].
+- $i$: The input intensity value (e.g., voxel scalar value) [S1].
+
+**Outputs:**
+- $A_i$: The final opacity at intensity $i$, in the range $[0, 1]$ [S1].
+- $C_i$: The final color at intensity $i$ [S1].
+
+**Data Structures:**
+The transfer function components $F_j$ are typically defined as functions over the intensity domain. In implementation, these are often stored as lookup tables (LUTs) or piecewise functions. The weights $w_j$ are scalar multipliers.
+
+**Steps:**
+
+1. **Compute Unclamped Weighted Opacity Sum:**
+   Calculate the weighted sum of the component values at the given intensity $i$:
+   $$a(i) = \sum_{j=1}^n w_j F_j(i)$$
+   where $w_j \ge 0$ [S1].
+
+2. **Clamp Opacity:**
+   Clamp the result to the valid range $[0, 1]$ to produce the final opacity $A_i$:
+   $$A_i = \begin{cases} a(i) & \text{if } a(i) \in [0, 1] \\ 0 & \text{if } a(i) < 0 \\ 1 & \text{if } a(i) > 1 \end{cases}$$
+   [S1].
+
+3. **Determine Color:**
+   Choose one of the following strategies based on the desired visual outcome:
+   - **Blending:** Calculate normalized weights and blend colors (see Subtopics).
+   - **Dominant Selection:** Select the color of the component with the highest weighted value (see Subtopics).
+
+**Pitfalls:**
+- **Wood Grain Artifacts:** Gaps in the transfer function components can cause visible "wood grain" artifacts in the rendered volume, particularly in features with sharp transitions [S1]. These artifacts arise when components are not smooth, such as those created via rectangular selection [S1]. Using smoother components, such as those from generalized selection, avoids these artifacts [S1].
+- **Color Introduction:** Blending may introduce colors not present in the original component settings, potentially causing a single feature to appear with various colors [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def merge_transfer_function_components(intensity_i, components):
+    """
+    Merges multiple transfer function components.
+    
+    Args:
+        intensity_i (float): The input scalar value (intensity).
+        components (list of dicts): List of component definitions.
+            Each dict contains:
+            - 'w': weight (float, >= 0)
+            - 'F': function or lookup table returning value at intensity_i (float)
+            - 'c': color (tuple or array of RGB values)
+            
+    Returns:
+        opacity (float): Clamped opacity in [0, 1].
+        color (tuple or array): Final blended or dominant color.
+        strategy (str): 'blend' or 'dominant'
+    """
+    n = len(components)
+    
+    # Step 1: Compute weighted sum of opacities
+    a_i = 0.0
+    for comp in components:
+        w_j = comp['w']
+        F_j_i = comp['F'](intensity_i)
+        a_i += w_j * F_j_i
+        
+    # Step 2: Clamp opacity
+    if a_i < 0:
+        opacity = 0.0
+    elif a_i > 1:
+        opacity = 1.0
+    else:
+        opacity = a_i
+        
+    # Step 3: Determine color (Example: Dominant Component)
+    # To implement blending, see Subtopics section for specific logic.
+    
+    max_weighted_value = -1.0
+    dominant_color = None
+    
+    for comp in components:
+        w_j = comp['w']
+        F_j_i = comp['F'](intensity_i)
+        weighted_val = w_j * F_j_i
+        
+        if weighted_val > max_weighted_value:
+            max_weighted_value = weighted_val
+            dominant_color = comp['c']
+            
+    return opacity, dominant_color, 'dominant'
+```
+
+## Subtopics
+
+### Blending Colors of Transfer Function Components
+A method for determining the color of overlapping components by blending their colors based on normalized weights [S1]. It ensures blended colors remain in a valid range by normalizing weights using the weighted average of the component values [S1]. The normalized weight $W_j$ for component $j$ is:
+$$W_j = \frac{w_j F_j(i)}{\sum_{k=1}^n w_k F_k(i)}$$
+where $w_j$ is the original weight, $F_j(i)$ is the component value, and $n$ is the number of components [S1]. The final color $C_i$ is:
+$$C_i = \sum_{j=1}^n W_j c_j$$
+where $c_j$ is the color of component $j$ [S1]. This method may introduce new colors not present in the original settings, and a single feature may appear with various colors [S1].
+
+### Dominant Component Color Selection
+An alternative method where the color of the visually dominant component is used for the merged color, ensuring distinct colors per feature [S1]. The final color $C_i$ is:
+$$C_i = c_j, \quad j = \operatorname{argmax}_{k \in \{1, \dots, n\}} w_k F_k(i)$$
+where $c_j$ is the color of the component $F_j$ with the maximum weighted value $w_k F_k(i)$ at intensity $i$ [S1]. Unlike blending, this method ensures different features have distinct colors, making them distinguishable in the volume rendering [S1].
+
+## Operating characteristics
+- **Time Complexity:** Linear with respect to the number of components $n$ for both opacity and color calculation [S1].
+- **Memory Complexity:** Linear with respect to the number of components $n$ to store weights, functions, and colors [S1].
+- **Performance:** The implementation is lightweight and achieves real-time performance (30–40 fps) on hardware such as an Intel Xeon E3-1246 v3 CPU and NVIDIA Quadro K4200 GPU [S1].
+- **Strengths:** Allows simultaneous visualization of multiple features; dominant selection ensures clear color distinction between features [S1].
+- **Limitations:** Blending can create unintended intermediate colors; rectangular selection can cause wood grain artifacts if components are not smooth [S1].
+
+## Background
+This method was introduced in the context of intuitive transfer function editing using relative visibility histograms [S1]. It is part of a system that includes a ray-cast volume renderer and a visibility computation module implemented on the GPU using CUDA [S1]. The approach was demonstrated on datasets such as nucleon (41×41×41) and CT-knee (379×229×305) [S1].
+
+## Sources
+[S1] Intuitive Transfer Function Editing Using Relative Visibility Histograms, https://doi.org/10.24132/jwscg.2018.26.1.6, fetched 2026-10-26

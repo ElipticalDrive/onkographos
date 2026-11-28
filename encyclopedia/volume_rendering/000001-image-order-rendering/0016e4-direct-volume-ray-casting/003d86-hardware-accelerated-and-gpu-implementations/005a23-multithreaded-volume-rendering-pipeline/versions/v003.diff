@@ -1,0 +1,184 @@
+--- v002.md
++++ v003.md
+@@ -13,5 +13,5 @@
+ **Data Structures**
+ *   **Ray Queue**: Implemented as a shift register [S1]. Each slot in the register stores the parameters of a single ray [S1].
+-    *   **Slot Layout**: Not given in the sources.
++    *   **Slot Layout**: Not given in the sources [S1].
+     *   **Capacity**: Up to 64 rays are processed simultaneously [S1].
+ 
+@@ -22,8 +22,15 @@
+ 4.  **Voxel Sampling**: The 8 neighboring voxels are read out from volume memory [S1].
+ 5.  **Interpolation**: Trilinear interpolation is performed on the 8 voxels to obtain the gray value (interpreted as opacity) of the sample point [S1].
+-6.  **Gradient Calculation**: A gradient is calculated by determining the gray value change between neighboring sample points. This gradient serves as the normal of a possible plane in the volume [S1].
++6.  **Gradient Calculation**: A gradient is calculated by determining the gray value change between neighboring sample points [S1]. This gradient serves as the normal of a possible plane in the volume [S1].
+ 7.  **Shading**: Using the plane normal, shading is performed to calculate how much light is reflected toward the viewer direction by diffuse and specular reflection [S1].
+ 8.  **Absorption Calculation**: It is calculated how much of the reflected light intensity reaches the viewing plane due to absorption [S1].
+-9.  **Compositing**: Each contribution of a ray is accumulated to represent the brightness of the considered pixel [S1].
++9.  **Compositing**: Each contribution of a ray is accumulated to represent the brightness of the considered pixel [S1]. The standard compositing equation updates accumulated color $C'$ and opacity $\alpha'$:
++    $$
++    C'_{i} = C'_{i-1} + (1 - \alpha'_{i-1}) \alpha_i C_i
++    $$
++    $$
++    \alpha'_{i} = \alpha'_{i-1} + (1 - \alpha'_{i-1}) \alpha_i
++    $$
++    where $C_i$ and $\alpha_i$ are the color and opacity of the current sample point [G].
+ 10. **Data Hazard Detection**: The system detects that the next sample point address depends on the distance value of the current sample point, which requires reading from volume memory with a delay of 3 clock cycles plus calculation delay [S1].
+ 11. **Context Switching**: Instead of inserting no-operations (stalls), the hardware switches context to the next ray in the queue to hide the memory latency [S1].
+@@ -44,24 +51,21 @@
+     return grid.sample(x, y, z)
+ 
+-def calculate_gradient(grid, pos, step):
+-    """Finite difference gradient from neighboring sample points [G]."""
+-    dx = grid.sample(pos.x + step, pos.y, pos.z) - grid.sample(pos.x - step, pos.y, pos.z)
+-    dy = grid.sample(pos.x, pos.y + step, pos.z) - grid.sample(pos.x, pos.y - step, pos.z)
+-    dz = grid.sample(pos.x, pos.y, pos.z + step) - grid.sample(pos.x, pos.y, pos.z - step)
+-    return (dx, dy, dz)
+-
+-def calculate_shading(gradient, view_dir):
++def calculate_gradient_along_ray(grid, pos, direction, step):
++    """Gradient calculated by determining gray value change between neighboring sample points along the ray [S1]."""
++    pos_next = (pos[0] + direction[0] * step, pos[1] + direction[1] * step, pos[2] + direction[2] * step)
++    pos_prev = (pos[0] - direction[0] * step, pos[1] - direction[1] * step, pos[2] - direction[2] * step)
++    val_curr = grid.sample(*pos)
++    val_next = grid.sample(*pos_next)
++    val_prev = grid.sample(*pos_prev)
++    return (val_next - val_prev) / (2.0 * step)
++
++def calculate_shading(gradient_magnitude, view_dir, light_dir):
+     """Phong shading model for diffuse and specular reflection [G]."""
+-    # Normalize gradient to get surface normal
+-    nx, ny, nz = gradient
+-    length = math.sqrt(nx*nx + ny*ny + nz*nz)
+-    if length == 0: return 0.0
+-    nx, ny, nz = nx/length, ny/length, nz/length
+-    # Simplified shading calculation
+-    return 0.5 + 0.5 * max(0, -nx*view_dir.x - ny*view_dir.y - nz*view_dir.z)
+-
+-def calculate_absorption(light, opacity):
++    # Simplified to return light intensity factor
++    return 0.5 + 0.5 * max(0.0, view_dir.dot(light_dir))
++
++def calculate_absorption(light_intensity, opacity):
+     """Beer-Lambert absorption model [G]."""
+-    return light * (1.0 - math.exp(-opacity))
++    return light_intensity * (1.0 - math.exp(-opacity))
+ 
+ def accumulate_pixel(pixel_color, pixel_alpha, color, alpha):
+@@ -142,32 +146,27 @@
+         ray = queue.peek()
+         
+-        # March ray through volume
+-        while ray.inside_volume(bounds):
+-            # Stage 1: Address Generation
+-            pos = ray.position
++        # Skip rays that have exited the volume
++        if not ray.inside_volume(bounds):
++            queue.dequeue()
++            continue
+             
+-            # Stage 2: Memory Read & Interpolation
+-            voxels = volume.read_8_neighbors(pos)
+-            opacity = trilinear_interpolate(volume, pos[0], pos[1], pos[2])
+-            
+-            # Stage 3: Gradient & Shading
+-            gradient = calculate_gradient(volume, pos, ray.step_size)
+-            light = calculate_shading(gradient, ray.direction)
+-            
+-            # Stage 4: Absorption & Compositing
+-            absorbed = calculate_absorption(light, opacity)
+-            ray.color, ray.alpha = accumulate_pixel(ray.color, ray.alpha, absorbed, opacity)
+-            
+-            # Stage 5: Update & Hazard Handling
+-            ray.advance()
+-            
+-            # ERT check
+-            if ray.alpha >= threshold:
+-                queue.dequeue()
+-                break
+-                
+-        # Re-add ray to end of queue for next cycle if still in volume
+-        if ray.inside_volume(bounds):
+-            queue.enqueue(ray)
++        # Hardware pipeline stages executed per sample point
++        pos = ray.position
++        opacity = trilinear_interpolate(volume, pos[0], pos[1], pos[2])
++        gradient_val = calculate_gradient_along_ray(volume, pos, ray.direction, ray.step_size)
++        light = calculate_shading(gradient_val, ray.direction, (0.0, 0.0, 1.0))
++        absorbed = calculate_absorption(light, opacity)
++        ray.color, ray.alpha = accumulate_pixel(ray.color, ray.alpha, absorbed, opacity)
++        ray.intensity = ray.alpha # Simplified intensity metric for ERT
++
++        ray.advance()
++
++        # Early Ray Termination
++        if ray.alpha >= threshold:
++            queue.dequeue()
++            continue
++
++        # Context switch: re-add to end of shift register queue for next cycle [S1]
++        queue.enqueue(ray)
+             
+     return rays
+@@ -180,32 +179,12 @@
+ 
+ **Edge Cases and Pitfalls**
+-*   **Data Hazard**: Sequential processing of sample points causes pipeline stalls because the next address depends on the current distance value. Without multithreading, pipeline utilization drops to less than 10% due to the 3-cycle memory delay and address calculation delay [S1].
+-*   **Queue Overflow**: The source describes the queue as a shift register with a fixed capacity (64 rays). If more rays are generated than the queue can hold, older rays may be displaced or processing may stall if the queue management logic is not explicitly defined for overflow [S1].
+-
+-## Subtopics
+-
+-### Parallel Domain-Decomposed Ray Casting
+-*   **What it is**: A method that divides the volume data into spatial domains, assigning each domain to a different processor or thread group.
+-*   **Difference**: Unlike the multithreaded pipeline which focuses on hiding latency within a single pipeline by switching rays, domain decomposition focuses on parallelizing the workload across multiple processing units by splitting the data space.
+-*   **When to choose**: Use when the volume is large and can be effectively partitioned, and when hardware supports distributed memory or multi-core parallelism.
+-*   **Link**: [Parallel Domain-Decomposed Ray Casting](3625-parallel-domain-decomposed-ray-casting.md)
+-
+-### GPU Implementation Architecture
+-*   **What it is**: The general architectural design for implementing volume rendering on GPUs, including memory hierarchies and shader models.
+-*   **Difference**: The multithreaded pipeline is a specific optimization technique for pipelined hardware (often FPGA or custom ASIC), whereas GPU architecture is a broader framework that may use different parallelism models (SIMT).
+-*   **When to choose**: Use when designing the overall system for a GPU, rather than optimizing a specific pipelined hardware unit.
+-*   **Link**: [GPU Implementation Architecture](11245-gpu-implementation-architecture.md)
+-
+-### CUDA GPU Implementation
+-*   **What it is**: A specific implementation of volume rendering using NVIDIA's CUDA programming model.
+-*   **Difference**: CUDA uses a SIMT (Single Instruction, Multiple Thread) model with warp scheduling, which is conceptually similar to multithreading but managed by the GPU driver and hardware differently than the explicit round-robin shift register described in the multithreaded pipeline.
+-*   **When to choose**: Use when targeting NVIDIA GPUs and leveraging CUDA's high-level parallelism.
+-*   **Link**: [CUDA GPU Implementation](13016-cuda-gpu-implementation.md)
++*   **Data Hazard**: Sequential processing of sample points causes pipeline stalls because the next address depends on the current distance value [S1]. Without multithreading, pipeline utilization drops to less than 10% due to the 3-cycle memory delay and address calculation delay [S1].
++*   **Queue Overflow**: The source describes the queue as a shift register with a fixed capacity (64 rays) [S1]. If more rays are generated than the queue can hold, older rays may be displaced or processing may stall if the queue management logic is not explicitly defined for overflow [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: Not given in the sources.
++*   **Time Complexity**: Not given in the sources [S1].
+ *   **Memory Complexity**: The ray queue requires storage for up to 64 rays [S1].
+ *   **Measured Performance**: Without multithreading, pipeline utilization drops to less than 10% due to 3-cycle memory delay and address calculation delay [S1]. With multithreading, pipeline utilization is maintained at a high level by calculating sample points for other rays instead of inserting no-operations [S1].
+-*   **Scaling**: Not given in the sources.
++*   **Scaling**: Not given in the sources [S1].
+ *   **Strengths**: Overcomes data hazards in pipelined volume rendering; maintains high pipeline utilization; hides memory latency [S1].
+ *   **Limitations**: Requires hardware support for context switching and a ray queue (shift register); limited to 64 concurrent rays in the described implementation [S1].
+@@ -213,4 +192,24 @@
+ *   **When not**: Use when the hardware does not support multithreading or when the volume data access pattern does not exhibit the described data hazard [G].
+ 
++## Subtopics
++
++### Parallel Domain-Decomposed Ray Casting
++*   **What it is**: A method that divides the volume data into spatial domains, assigning each domain to a different processor or thread group [G].
++*   **Difference**: Unlike the multithreaded pipeline which focuses on hiding latency within a single pipeline by switching rays, domain decomposition focuses on parallelizing the workload across multiple processing units by splitting the data space [G].
++*   **When to choose**: Use when the volume is large and can be effectively partitioned, and when hardware supports distributed memory or multi-core parallelism [G].
++*   **Link**: [Parallel Domain-Decomposed Ray Casting](3625-parallel-domain-decomposed-ray-casting.md)
++
++### GPU Implementation Architecture
++*   **What it is**: The general architectural design for implementing volume rendering on GPUs, including memory hierarchies and shader models [G].
++*   **Difference**: The multithreaded pipeline is a specific optimization technique for pipelined hardware (often FPGA or custom ASIC), whereas GPU architecture is a broader framework that may use different parallelism models (SIMT) [G].
++*   **When to choose**: Use when designing the overall system for a GPU, rather than optimizing a specific pipelined hardware unit [G].
++*   **Link**: [GPU Implementation Architecture](11245-gpu-implementation-architecture.md)
++
++### CUDA GPU Implementation
++*   **What it is**: A specific implementation of volume rendering using NVIDIA's CUDA programming model [G].
++*   **Difference**: CUDA uses a SIMT (Single Instruction, Multiple Thread) model with warp scheduling, which is conceptually similar to multithreading but managed by the GPU driver and hardware differently than the explicit round-robin shift register described in the multithreaded pipeline [G].
++*   **When to choose**: Use when targeting NVIDIA GPUs and leveraging CUDA's high-level parallelism [G].
++*   **Link**: [CUDA GPU Implementation](13016-cuda-gpu-implementation.md)
++
+ ## Background
+ The Multithreaded Volume Rendering Pipeline was introduced in the paper "Volume Rendering FPGA Hardware" by Lacroute et al. (1999) [S1]. It was developed to address the performance bottlenecks in pipelined volume rendering hardware, specifically the data hazards caused by the dependency of sample point addresses on previous distance values [S1]. The technique is particularly relevant for FPGA-based volume rendering implementations where pipeline efficiency is critical [S1].

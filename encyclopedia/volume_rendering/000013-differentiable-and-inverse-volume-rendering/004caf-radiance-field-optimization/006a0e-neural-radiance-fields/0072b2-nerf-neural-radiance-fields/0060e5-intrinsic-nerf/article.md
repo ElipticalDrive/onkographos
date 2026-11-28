@@ -1,0 +1,96 @@
+# Intrinsic NeRF
+
+Also called: Intrinsic Image Decomposition in NeRF, Intrinsic NeRF Decomposition, Intrinsic NeRF Model, IntrinsicNeRF
+
+## Overview
+Intrinsic NeRF is a NeRF variant that decouples geometry, illumination, and material properties by decomposing rendered color into reflectance and shading components, solving the ill-posed inverse rendering problem without supervision [S2]. It differs from standard NeRF by explicitly outputting physical scene attributes (density, reflectance, shading) rather than just radiance, enabling downstream tasks like relighting and material analysis [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** 3D location $\mathbf{X} \in \mathbb{R}^3$ and view direction $\mathbf{D} \in \mathbb{R}^3$ [S2].
+*   **Output:** A tuple $(\sigma, \mathbf{R}, S)$ where $\sigma \in \mathbb{R}$ is volume density, $\mathbf{R} \in \mathbb{R}^3$ is reflectance, and $S \in \mathbb{R}$ is shading [S2].
+
+**Data Structures:**
+The intrinsic function $F_I$ uses three Multi-Layer Perceptrons (MLPs) [S2]. The reflectance MLP $f_R$ takes only $\mathbf{X}$ as input and outputs $\mathbf{R}$ [S2]. The shading MLP $f_S$ takes both $\mathbf{X}$ and $\mathbf{D}$ as inputs and outputs $S$ [S2]. The density MLP $f_\sigma$ takes $\mathbf{X}$ as input and outputs $\sigma$ [S2].
+
+**Formulas:**
+The rendered color $\hat{\mathbf{C}}(\mathbf{r})$ for a ray $\mathbf{r}$ is computed via volume rendering integration from near plane $t_n$ to far plane $t_f$ [S2]:
+$$
+\hat{\mathbf{C}}(\mathbf{r}) = \int_{t_n}^{t_f} T(t) \sigma(t) S(t) \mathbf{R}(t) dt
+$$
+where $T(t) = \exp\left(-\int_{t_n}^{t} \sigma(s) ds\right)$ is the transmittance [G], $\sigma(t)$ is the volume density, $S(t)$ is the shading scalar, and $\mathbf{R}(t)$ is the reflectance vector [S2]. The product $S(t) \mathbf{R}(t)$ scales the reflectance by the shading intensity [S2].
+
+**Training:**
+The model undergoes autonomous training using only RGB images from the input dataset, with no additional lighting or material labels [S2]. The reconstruction loss is the mean squared error between the rendered color and the ground truth RGB [S2]:
+$$
+\mathcal{L} = \frac{1}{|\mathcal{R}|} \sum_{\mathbf{r} \in \mathcal{R}} \|\hat{\mathbf{C}}(\mathbf{r}) - \mathbf{C}(\mathbf{r})\|_2^2
+$$
+where $\mathbf{C}(\mathbf{r})$ is the ground truth color and $\mathcal{R}$ is the set of camera rays in a batch [S2]. The method introduces distance-conscious point-sampling and iterative clustering optimization for adaptive reflectance [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def query_intrinsic_fields(xyz, view_dir, density_mlp, reflectance_mlp, shading_mlp):
+    sigma = density_mlp(xyz)
+    R = reflectance_mlp(xyz)
+    S = shading_mlp(xyz, view_dir)
+    return sigma, R, S
+
+def render_intrinsic_ray(rays_o, rays_d, t_n, t_f, num_samples, density_mlp, reflectance_mlp, shading_mlp):
+    # Discrete approximation of the volume rendering integral [G]
+    t_vals = [t_n + i * (t_f - t_n) / (num_samples - 1) for i in range(num_samples)]
+    xyz = [[rays_o[j] + t * rays_d[j] for j in range(3)] for t in t_vals]
+    view_dir = list(rays_d)
+    sigma, R, S = query_intrinsic_fields(xyz, view_dir, density_mlp, reflectance_mlp, shading_mlp)
+    
+    deltas = [t_vals[i+1] - t_vals[i] for i in range(num_samples - 1)]
+    deltas.append(float('inf'))
+    
+    alpha = [1.0 - math.exp(-sigma[i] * deltas[i]) for i in range(num_samples)]
+    T = [1.0]
+    for i in range(1, num_samples):
+        T.append(T[-1] * (1.0 - alpha[i-1]))
+    
+    weights = [T[i] * alpha[i] for i in range(num_samples)]
+    color = [0.0, 0.0, 0.0]
+    for i in range(num_samples):
+        for c in range(3):
+            color[c] += weights[i] * S[i] * R[i][c]
+    return color
+
+def train_step(batch, density_mlp, reflectance_mlp, shading_mlp, optimizer):
+    optimizer.zero_grad()
+    # Batched ray sampling and forward pass omitted; sources do not specify batched ray traversal [G]
+    C_hat = render_intrinsic_ray(batch.rays_o, batch.rays_d, batch.t_n, batch.t_f, batch.num_samples, density_mlp, reflectance_mlp, shading_mlp)
+    loss = sum((C_hat[c] - batch.C_gt[c])**2 for c in range(3)) / 3.0
+    loss.backward()
+    optimizer.step()
+    return loss
+```
+
+**Edge Cases and Pitfalls:**
+*   **Ill-posedness:** Without supervision on shading or reflectance, the decomposition is ambiguous [S2].
+*   **Application limits:** Application to outdoor environments with extensive scenes and limited images might result in diminished detail in the rendering outcomes [S1].
+*   **Inductive bias:** The model relies on the inductive bias that reflectance is view-independent and shading is view-dependent [S2].
+
+## Subtopics
+
+### [Geometry Decomposition and Normal Regularization](4854-geometry-decomposition-and-normal-regularization.md)
+Enhances geometric consistency by computing differentiable normal maps from the volume density field and applying depth-dependent regularization loss. It solves noisy geometry issues by enforcing surface smoothness weighted by physical area.
+
+## Operating characteristics
+*   **Time Complexity:** Similar to standard NeRF training, dominated by MLP evaluations for density, reflectance, and shading per sample [G].
+*   **Memory Complexity:** Requires storing parameters for three MLPs (density, reflectance, shading) instead of one or two [G].
+*   **Strengths:** Enables inverse rendering tasks such as relighting and material analysis without explicit supervision [S1].
+*   **Limitations:** The decomposition is inherently ill-posed [S2]. Application to outdoor environments with extensive scenes and limited images might result in diminished detail [S1].
+*   **When to use:** When the goal is to extract physical scene properties (albedo, lighting) for relighting or editing, rather than just novel view synthesis [G].
+
+## Background
+Intrinsic NeRF was introduced to address the ill-posed problem of inverse rendering 3D scenes without supervision by utilizing a simplified intrinsic image decomposition model [S2]. It builds on the NeRF framework by adding explicit outputs for reflectance and shading [S2]. The method facilitates web-based applications like changing scenes, altering lighting, and creating editable new perspectives [S1].
+
+## Sources
+[S1] Neural Radiance Field-based Visual Rendering: a Comprehensive Review, https://ieeexplore.ieee.org/abstract/document/11455380, fetched 2026-10-30
+[S2] Relighting Scenes With Object Insertions in Neural Radiance Fields, https://doi.org/10.1109/TCSVT.2025.3535599, fetched 2026-10-29

@@ -1,0 +1,255 @@
+# SplatFormer Training Objective & Refinement
+
+Also called: SplatFormer
+
+## Overview
+SplatFormer is a learning-based, feed-forward 3D neural module that refines initial 3D Gaussian Splatting (3DGS) representations to enable robust novel view synthesis from out-of-distribution (OOD) camera angles [S1, unofficial]. It addresses the bias of standard 3DGS optimization, which overfits to input views and fails to generalize to unseen high-elevation perspectives, by applying a point transformer network that predicts attribute residuals [S1, unofficial]. Unlike 2D image restoration methods that suffer from multi-view inconsistencies, SplatFormer operates directly on 3D primitives, ensuring geometric consistency while recovering details lost in OOD views [S1, unofficial].
+
+## How it works
+
+### Inputs and Outputs
+*   **Input:** A set of initial 3D Gaussian splats $\{G_k\}_{k=1}^K$ generated from low-elevation input views, where each splat $G_k$ is defined by position $p_k$, scale $s_k$, opacity $\alpha_k$, quaternion rotation $q_k$, and spherical harmonics coefficients $a_k$ [S1, unofficial].
+*   **Output:** A set of refined splats $\{G'_k\}_{k=1}^K$ with updated attributes $\{G'_k = G_k + \Delta G_k\}$, where $\Delta G_k = (\Delta p_k, \Delta s_k, \Delta \alpha_k, \Delta q_k, \Delta a_k)$ are the predicted residuals [S1, unofficial].
+
+### Data Structures
+The network processes a point cloud of size $K$ [S1, unofficial].
+*   **Input Features:** Positions $p_k$ are normalized to $[0, 1]^3$ [S1, unofficial].
+*   **Latent Features:** Each splat is assigned a $V$-dimensional feature vector $v_k \in \mathbb{R}^V$, where $V=96$ [S1, unofficial].
+*   **Grid Pooling:** Spatial proximity is handled via grid pooling. The point cloud is voxelized using a grid resolution of 384 [S1, unofficial].
+
+### Network Architecture
+
+#### 1. Point Transformer Encoder ($f_\theta$)
+The encoder extracts contextual features from the initial splats using a hierarchical architecture based on PTv3 [S1, unofficial].
+
+1.  **Embedding:** Input positions pass through an MLP embedding layer [S1, unofficial].
+2.  **Down-pooling Stages:** Five stages process the features [S1, unofficial].
+    *   Stage 1: 2 attention blocks, hidden dim 64 [S1, unofficial].
+    *   Stage 2: 2 attention blocks, hidden dim 96 [S1, unofficial].
+    *   Stage 3: 2 attention blocks, hidden dim 128 [S1, unofficial].
+    *   Stage 4: 6 attention blocks, hidden dim 256 [S1, unofficial].
+    *   Stage 5: 2 attention blocks, hidden dim 512 [S1, unofficial].
+3.  **Down-sampling Grid Pooling:** Follows stages 2 through 5, with strides $(1, 2, 2, 2)$ respectively [S1, unofficial].
+4.  **Up-pooling Stages:** Four stages upsample the features [S1, unofficial].
+    *   Stage 1: Up-sampling grid pooling (stride 1), followed by 2 attention blocks, hidden dim 256 [S1, unofficial].
+    *   Stage 2: Up-sampling grid pooling (stride 2), followed by 2 attention blocks, hidden dim 128 [S1, unofficial].
+    *   Stage 3: Up-sampling grid pooling (stride 2), followed by 2 attention blocks, hidden dim 96 [S1, unofficial].
+    *   Stage 4: 2 attention blocks, hidden dim 96 [S1, unofficial].
+5.  **Output:** The encoder outputs feature vectors $v_k$ for each splat [S1, unofficial].
+
+#### 2. Feature Decoder ($g_\theta$)
+The decoder predicts residuals by combining latent features with original attributes [S1, unofficial].
+
+1.  **Concatenation:** For each splat $k$, concatenate the latent feature $v_k$ with the original attributes $G_k$ [S1, unofficial].
+2.  **MLP Branches:** Five separate MLP branches predict residuals for means, opacity, quaternion, scales, and spherical harmonics [S1, unofficial].
+    *   Each branch consists of 4 linear layers with hidden dimension 512 [S1, unofficial].
+    *   Activations: ReLU for all layers except the last [S1, unofficial].
+    *   **Mean Residual Normalization:** Apply Tanh activation to the final output of the mean residual branch to normalize $\Delta p_k$ to $[0, 1]$ [S1, unofficial].
+3.  **Initialization:** Zero-initialize the weights and biases of the final MLP layers in all branches to ensure zero initial residuals [S1, unofficial].
+
+### Training Objective
+The model is trained to minimize a combined loss function over rendered images from both input and OOD views [S1, unofficial]:
+
+$$ L_{\text{SplatFormer}} = L_1 + L_{\text{LPIPS}} $$
+
+Where:
+*   $L_1$ is the photometric loss [S1, unofficial].
+*   $L_{\text{LPIPS}}$ is the perceptual loss using the LPIPS metric [S1, unofficial].
+
+### Training Procedure
+1.  **Data Generation:**
+    *   Use 33k scenes from ShapeNet and 48k scenes from Objaverse-1.0 [S1, unofficial].
+    *   Render each scene from 32 low-elevation input views and 9 high-elevation OOD views using Blender [S1, unofficial].
+    *   Generate initial 3DGS from low-elevation views by minimizing photometric loss for 10k steps [S1, unofficial].
+2.  **Optimization:**
+    *   Use the Adam optimizer with a constant learning rate of $3 \times 10^{-5}$ [S1, unofficial].
+    *   Gradient accumulation steps: 4 [S1, unofficial].
+    *   Total iterations: 150k [S1, unofficial].
+    *   **Sampling:** At each iteration, render 4 target images consisting of 70% OOD views and 30% input views [S1, unofficial].
+    *   **Gaussian Capping:** Cap input Gaussians to 100k. If the initial 3DGS exceeds this, randomly subsample [S1, unofficial].
+
+### Inference Pipeline
+1.  **Initial Reconstruction:** Train a standard 3DGS from 32 input views using `gsplat` for 10k steps [S1, unofficial].
+2.  **Refinement:** Feed the resulting 3DGS point cloud into the trained SplatFormer encoder-decoder to obtain refined attributes [S1, unofficial].
+3.  **Rendering:** Render the refined splats using the standard 3DGS rasterization pipeline [S1, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class GridPooling(nn.Module):
+    def __init__(self, stride, grid_res=384):
+        super().__init__()
+        self.stride = stride
+        self.grid_res = grid_res
+    def forward(self, features, points):
+        # Not given in the sources. Standard grid pooling aggregates features per voxel. [G]
+        return features, points
+
+class GridPoolingUpsample(nn.Module):
+    def __init__(self, stride, grid_res=384):
+        super().__init__()
+        self.stride = stride
+        self.grid_res = grid_res
+    def forward(self, features, points):
+        # Not given in the sources. Standard grid upsampling interpolates features. [G]
+        return features, points
+
+class AttentionBlock(nn.Module):
+    def __init__(self, hidden_dim):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+    def forward(self, features, points):
+        # Not given in the sources. Standard PTv3 attention over spatial proximity. [G]
+        return features
+
+class SplatFormerEncoder(nn.Module):
+    def __init__(self, V=96):
+        super().__init__()
+        self.V = V
+        self.embedding = nn.Sequential(nn.Linear(3, 64), nn.ReLU(), nn.Linear(64, 64))
+        down_stages = [(2, 64), (2, 96), (2, 128), (6, 256), (2, 512)]
+        self.down_blocks = nn.ModuleList()
+        self.down_poolings = nn.ModuleList()
+        for i, (num_blocks, hidden_dim) in enumerate(down_stages):
+            for _ in range(num_blocks):
+                self.down_blocks.append(AttentionBlock(hidden_dim))
+            if i > 0:
+                stride = [1, 2, 2, 2][i-1]
+                self.down_poolings.append(GridPooling(stride=stride, grid_res=384))
+
+        up_stages = [(2, 256), (2, 128), (2, 96), (2, 96)]
+        self.up_blocks = nn.ModuleList()
+        self.up_poolings = nn.ModuleList()
+        for i, (num_blocks, hidden_dim) in enumerate(up_stages):
+            if i < len(up_stages) - 1:
+                stride = [1, 2, 2, 2][i]
+                self.up_poolings.append(GridPoolingUpsample(stride=stride, grid_res=384))
+            for _ in range(num_blocks):
+                self.up_blocks.append(AttentionBlock(hidden_dim))
+
+    def forward(self, points):
+        x = self.embedding(points)
+        down_idx = 0
+        block_idx = 0
+        for i in range(len(down_stages)):
+            num_blocks, _ = down_stages[i]
+            for _ in range(num_blocks):
+                x = self.down_blocks[block_idx](x, points)
+                block_idx += 1
+            if i > 0:
+                x, points = self.down_poolings[down_idx](x, points)
+                down_idx += 1
+        up_idx = 0
+        block_idx = 0
+        for i in range(len(up_stages)):
+            if i < len(up_stages) - 1:
+                x, points = self.up_poolings[up_idx](x, points)
+                up_idx += 1
+            num_blocks, _ = up_stages[i]
+            for _ in range(num_blocks):
+                x = self.up_blocks[block_idx](x, points)
+                block_idx += 1
+        return x
+
+class ResidualMLP(nn.Module):
+    def __init__(self, in_dim, out_dim, is_mean=False):
+        super().__init__()
+        self.is_mean = is_mean
+        self.fc1 = nn.Linear(in_dim, 512)
+        self.fc2 = nn.Linear(512, 512)
+        self.fc3 = nn.Linear(512, 512)
+        self.fc4 = nn.Linear(512, out_dim)
+        nn.init.zeros_(self.fc4.weight)
+        nn.init.zeros_(self.fc4.bias)
+    def forward(self, x):
+        x = F.relu(self.fc1(x))
+        x = F.relu(self.fc2(x))
+        x = F.relu(self.fc3(x))
+        out = self.fc4(x)
+        if self.is_mean:
+            out = torch.tanh(out)
+        return out
+
+class SplatFormerDecoder(nn.Module):
+    def __init__(self, V=96):
+        super().__init__()
+        # 5 branches: means, opacity, quaternion, scales, SH coefficients
+        # SH coefficients dimension depends on degree, assumed 10 here for example
+        self.branches = nn.ModuleList([
+            ResidualMLP(V + 10, 5, is_mean=(i==0)) for i in range(5)
+        ])
+    def forward(self, features, initial_splats):
+        residuals = []
+        for branch in self.branches:
+            combined = torch.cat([features, initial_splats], dim=-1)
+            residuals.append(branch(combined))
+        return residuals
+
+def train_step(model, initial_gs, target_cameras, target_gt_images, optimizer):
+    # Normalize positions to [0, 1]^3
+    points = initial_gs.positions / 255.0
+    # Encode
+    features = model.encoder(points)
+    # Decode residuals
+    residuals = model.decoder(features, initial_gs)
+    # Compute refined splats
+    refined_gs = initial_gs + residuals
+    # Render images (standard 3DGS rasterization) [G]
+    target_images = render(refined_gs, target_cameras)
+    # Compute loss: L1 + LPIPS [S1, unofficial]
+    l1 = F.l1_loss(target_images, target_gt_images)
+    lpips = perceptual_loss(target_images, target_gt_images)
+    loss = l1 + lpips
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+    return loss
+
+def infer(model, input_images):
+    # Train initial 3DGS by minimizing photometric loss for 10k steps [S1, unofficial]
+    initial_gs = train_initial_3dgs(input_images, steps=10000)
+    points = initial_gs.positions / 255.0
+    features = model.encoder(points)
+    residuals = model.decoder(features, initial_gs)
+    return initial_gs + residuals
+```
+
+### Edge Cases and Pitfalls
+*   **Gaussian Count:** If the initial 3DGS exceeds 100k Gaussians, they must be randomly subsampled before feeding into SplatFormer [S1, unofficial].
+*   **Memory Consumption:** GPU memory usage depends on the spatial distribution of Gaussians, not just the count. A spatially uniform distribution with high entropy consumes more memory than a concentrated distribution [S1, unofficial].
+*   **Initialization:** Final MLP layers must be zero-initialized to ensure the initial output matches the input 3DGS, preventing instability at the start of training [S1, unofficial].
+*   **Mean Normalization:** The Tanh activation on mean residuals restricts updates to $[0, 1]$. Ensure input positions are normalized to $[0, 1]^3$ to match this range [S1, unofficial].
+
+## Operating characteristics
+
+### Time and Memory Complexity
+*   **Training:** Requires approximately 3000 GPU hours on RTX-2080Ti for data generation and 2 days on 8 RTX-4090s for model training (150k iterations) [S1, unofficial].
+*   **Inference Memory:** Consumes ~900 MB GPU memory for 70k–100k Gaussians on an RTX-4090 [S1, unofficial].
+*   **Inference Speed:** ~108 ms per feed-forward pass for 70k–100k Gaussians on an RTX-4090 [S1, unofficial].
+*   **Scalability:** Supports up to 4 million Gaussians on an RTX-4090, though memory usage scales with spatial entropy [S1, unofficial].
+
+### Strengths and Limitations
+*   **Strengths:** Robust to OOD views (high elevation); ensures 3D consistency; faster than per-scene optimization; generalizes across object categories [S1, unofficial].
+*   **Limitations:** Struggles with fine-grained details and complex textures; efficiency bottleneck remains in training; unbounded scenes with uniform distributions increase memory consumption and remain a direction for future efficiency improvements [S1, unofficial].
+
+### When to Use
+*   Use when novel view synthesis is required from high-elevation (top-down) OOD views where standard 3DGS fails [S1, unofficial].
+*   Use when 3D consistency is critical and 2D denoising methods introduce artifacts [S1, unofficial].
+
+### When Not to Use
+*   Avoid for scenes with very fine geometric details that the model cannot recover [S1, unofficial].
+*   Avoid for unbounded scenes with large, uniform background noise, as this increases memory consumption significantly [S1, unofficial].
+
+## Background
+
+SplatFormer was introduced in a paper published at ICLR 2025 [S1, unofficial]. It addresses the limitation of 3D Gaussian Splatting, which is optimized per-scene and biased towards input views, making it poor for generalizable novel view synthesis from unseen angles [S1, unofficial]. The method leverages a large-scale dataset (ShapeNet and Objaverse-1.0) to learn data-driven priors for refining Gaussian attributes. It builds on the Point Transformer v3 (PTv3) architecture for efficient point cloud processing [S1, unofficial].
+
+## Sources
+
+[S1] SplatFormer: Point Transformer for Robust 3D Gaussian Splatting, https://doi.org/10.48550/arXiv.2411.06390, fetched 2026-10-29 (unofficial)

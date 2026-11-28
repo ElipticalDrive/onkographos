@@ -1,0 +1,167 @@
+--- v001.md
++++ v002.md
+@@ -12,93 +12,83 @@
+ 
+ **Data Structures:**
+-- Two device arrays, `dev_data1` and `dev_data2`, of size sufficient to hold the input (padded to power-of-two if required by specific implementations, though the naive method described here handles arbitrary sizes via block-level processing) [S1, S2, unofficial].
+-- The algorithm processes the input in chunks fitting within a single thread block. If $n$ exceeds the block size, the array is split into multiple blocks, and the scan is performed recursively or iteratively across blocks using intermediate kernels to propagate block sums [S2, unofficial].
++- Two device arrays, `dev_data1` and `dev_data2`, of size $n$ to double-buffer results and prevent race conditions, as threads are not guaranteed to run simultaneously [S3].
++- The algorithm processes the input in chunks fitting within a single thread block. If $n$ exceeds the block size, the array is split into multiple blocks, and intermediate kernels propagate block sums to combine results [S2, unofficial].
+ 
+ **Parameters:**
+ - `blockSize`: Number of threads per block. Typically 256 [S2, unofficial] or 512 [S1, unofficial].
+-- `ilog2ceil(n)`: The ceiling of the base-2 logarithm of $n$.
++- `ilog2ceil(n)`: The ceiling of the base-2 logarithm of $n$, determining the number of kernel launches [S3].
+ 
+ **Steps:**
+-1. **Allocation:** Allocate two device arrays `dev_data1` and `dev_data2` of size $n$ (or padded size) [S3]. Copy `idata` to `dev_data1` [S2, unofficial].
+-2. **Iteration Loop:** Calculate the number of iterations required: $L = \lceil \log_2(\min(n, \text{blockSize})) \rceil$ [S2, unofficial]. For each iteration $d$ from 1 to $L$:
+-   - Launch a kernel `kernNaiveScan` with `blocksPerGrid = \lceil n / blockSize \rceil` and `blockSize` threads [S1, unofficial].
++1. **Allocation:** Allocate two device arrays of size $n$. Copy `idata` to the first device array [S2, unofficial].
++2. **Iteration Loop:** Calculate iterations $L = \lceil \log_2(\min(n, \text{blockSize})) \rceil$ [S2, unofficial]. For each iteration $d$ from 1 to $L$:
++   - Launch a kernel with `blocksPerGrid = \lceil n / blockSize \rceil` and `blockSize` threads [S1, unofficial].
+    - The kernel parameter `offset` is $2^{d-1}$ [S1, unofficial].
+    - Inside the kernel for each thread with global index `id`:
+-     - Read `data[id]` into a local buffer or shared memory (if used, but global memory double-buffering is the standard naive approach described) [S2, unofficial][S3].
+-     - Synchronize threads within the block (`__syncthreads()`) [S2, unofficial].
+-     - If `threadIdx.x >= offset`, update the value: `buffer[id] = data[id - offset] + data[id]` [S2, unofficial].
+-     - Synchronize threads (`__syncthreads()`) [S2, unofficial].
+-     - Write `buffer[id]` back to `data[id]` (or the other buffer) [S2, unofficial].
+-   - Swap `dev_data1` and `dev_data2` pointers after each kernel launch to double-buffer results [S1, unofficial].
++     - Read `data[id]` into a local buffer.
++     - Synchronize threads within the block.
++     - If `threadIdx.x >= offset`, update the value: `buffer[id] = data[id - offset] + data[id]`.
++     - Synchronize threads.
++     - Write `buffer[id]` back to `data[id]`.
++     - Synchronize threads.
++   - Swap `dev_data1` and `dev_data2` pointers after each kernel launch to double-buffer results [S3].
+ 3. **Post-Processing (Exclusive Scan):**
+    - The result in `dev_data1` is an inclusive scan. Convert to exclusive scan:
+-     - Set `odata[0] = 0` [S1, unofficial].
++     - Set `odata[0] = 0`.
+      - Copy `dev_data1[1...n-1]` to `odata[1...n-1]` [S1, unofficial].
+    - If the input size $n$ was larger than the block size, additional kernels (`kernExtractLastElementPerBlock`, `kernAddOffsetPerBlock`, `kernShiftToExclusive`) are used to combine block results and shift to exclusive [S2, unofficial].
+ 
++**Pitfalls:**
++- The algorithm suffers from warp divergence and uncoalesced global memory accesses due to interleaved thread utilization patterns [S2, unofficial].
++- Must be tested with non-power-of-two sized arrays to ensure correctness [S3].
++- The original pseudocode and CUDA code in GPU Gems 3 Chapter 39 contain known errors (superscripting, missing braces, bad indentation) [S3].
++
+ **Pseudocode:**
+ ```python
+-def naive_scan(n, idata):
++def ilog2ceil(x):
++    """Ceiling of base-2 logarithm."""
++    if x <= 1: return 0
++    lg = 0
++    while x > 1:
++        x >>= 1
++        lg += 1
++    return lg
++
++def kernNaiveScan_thread_logic(id, tx, offset, data_src, data_dst):
++    """Thread-local logic executed by kernNaiveScan."""
++    if id < len(data_src):
++        data_dst[id] = data_src[id]
++        # __syncthreads()
++        if tx >= offset:
++            data_dst[id] = data_src[id - offset] + data_src[id]
++        # __syncthreads()
++        data_src[id] = data_dst[id]
++        # __syncthreads()
++
++def naive_scan(n, idata, block_size):
+     # 1. Allocation and Initialization
+-    dev_data1 = cuda_malloc(n * sizeof(int))
+-    dev_data2 = cuda_malloc(n * sizeof(int))
+-    cuda_memcpy(dev_data1, idata, n * sizeof(int))
+-    
+-    block_size = 256  # Typical value [S2, unofficial]
++    dev_data1 = list(idata)  # Simulates host-to-device copy
++    dev_data2 = [0] * n
++
+     log2n = ilog2ceil(min(n, block_size))
+-    
++
+     # 2. Iterative Kernel Launches
+     for d in range(1, log2n + 1):
+         offset = 1 << (d - 1)
+         blocks_per_grid = (n + block_size - 1) // block_size
+-        
+-        # Launch kernel with current data source and target
+-        # Note: In a real implementation, this is a CUDA kernel launch.
+-        # Here we describe the logic performed by threads in kernNaiveScan.
+-        
+-        launch_kernel_kernNaiveScan(
+-            blocks=blocks_per_grid,
+-            threads=block_size,
+-            n=n,
+-            data_src=dev_data1,
+-            data_dst=dev_data2,
+-            offset=offset
+-        )
+-        
++
++        # Simulate kernel launch across all threads
++        for b in range(blocks_per_grid):
++            for t in range(block_size):
++                id = b * block_size + t
++                kernNaiveScan_thread_logic(id, t, offset, dev_data1, dev_data2)
++
+         # Swap buffers for next iteration
+         dev_data1, dev_data2 = dev_data2, dev_data1
+ 
+     # 3. Convert Inclusive to Exclusive
+-    odata = cuda_malloc(n * sizeof(int))
+-    
+-    # odata[0] = 0
+-    cuda_memset(odata, 0, sizeof(int))
+-    
+-    # Copy inclusive results from index 1 to n-1
++    odata = [0] * n
+     if n > 1:
+-        cuda_memcpy(odata + 1, dev_data1 + 1, (n - 1) * sizeof(int))
+-        
++        odata[1:] = dev_data1[1:]
+     return odata
+-
+-def kernNaiveScan(n, data_src, data_dst, offset):
+-    id = blockIdx.x * blockDim.x + threadIdx.x
+-    tx = threadIdx.x
+-    
+-    if id < n:
+-        # Read from source
+-        val = data_src[id]
+-        
+-        # Synchronize to ensure all reads are complete before writes
+-        __syncthreads__()
+-        
+-        # Update logic
+-        if tx >= offset:
+-            neighbor_val = data_src[id - offset]
+-            data_dst[id] = neighbor_val + val
+-        else:
+-            data_dst[id] = val
+-            
+-        # Synchronize to ensure all writes are complete
+-        __syncthreads__()
+ ```
+ 
+@@ -106,8 +96,11 @@
+ 
+ ### [Work-Efficient Scan](10349-work-efficient-scan.md)
+-A parallel algorithm to compute the inclusive prefix sum of an array using a two-phase approach (upsweep/reduction and downsweep) to achieve work efficiency ($O(n)$ work, $O(\log n)$ depth). It builds on [Naive Parallel Prefix Sum (Scan)](10348-naive-parallel-prefix-sum-scan.md) by replacing the iterative $O(n \log n)$ work with a binary tree reduction, eliminating race conditions through in-place updates and synchronization. It is distinguished from the naive method by its tree-based structure and from hardware-optimized variants by its explicit multi-kernel orchestration for arbitrary input sizes.
++A parallel algorithm to compute the inclusive prefix sum of an array using a two-phase approach (upsweep/reduction and downsweep) to achieve work efficiency ($O(n)$ work, $O(\log n)$ depth). It builds on [Naive Parallel Prefix Sum (Scan)](10348-naive-parallel-prefix-sum-scan.md) by replacing the iterative $O(n \log n)$ work with a binary tree reduction, eliminating race conditions through in-place updates and synchronization.
+ 
+ ### Naive GPU Parallel Scan
+ A naive GPU-based parallel scan implementation, implemented in the `StreamCompaction::Naive` namespace [S2, unofficial].
++
++### 4-way Prefix Sum
++A parallel prefix sum algorithm that concurrently generates binary masks for each radix combination, computes local prefix sums, merges results, and outputs total counts per block [S4, unofficial]. It generates binary masks for each radix combination, computes the local prefix sum of the mask, merges the prefix sum results for all combinations, and sends the total number of each radix combination in each block to the output block sum array [S4, unofficial].
+ 
+ ## Operating characteristics
+@@ -126,3 +119,4 @@
+ [S1] GitHub - jichumao/Stream-Compaction, https://github.com/jichumao/Stream-Compaction, fetched 2026-10-29 (unofficial)
+ [S2] GitHub - shineyruan/CUDA-Stream-Compaction, https://github.com/shineyruan/CUDA-Stream-Compaction, fetched 2026-10-29 (unofficial)
+-[S3] Project2-Stream-Compaction/INSTRUCTION.md at main, https://github.com/CIS565-Fall-2022/Project2-Stream-Compaction/blob/main/INSTRUCTION.md, fetched 2026-10-29+[S3] Project2-Stream-Compaction/INSTRUCTION.md at main, https://github.com/CIS565-Fall-2022/Project2-Stream-Compaction/blob/main/INSTRUCTION.md, fetched 2026-10-29
++[S4] Fast 4-way parallel radix sorting on GPUs, https://www.sci.utah.edu/~csilva/papers/cgf.pdf, fetched 2026-10-29 (unofficial)

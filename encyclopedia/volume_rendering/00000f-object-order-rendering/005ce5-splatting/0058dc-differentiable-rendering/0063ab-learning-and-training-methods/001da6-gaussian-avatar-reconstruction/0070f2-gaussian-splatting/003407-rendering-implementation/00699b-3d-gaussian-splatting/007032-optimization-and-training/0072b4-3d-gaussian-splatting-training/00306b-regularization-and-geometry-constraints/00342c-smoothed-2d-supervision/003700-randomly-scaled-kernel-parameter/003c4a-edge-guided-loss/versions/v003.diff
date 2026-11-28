@@ -1,0 +1,144 @@
+--- v002.md
++++ v003.md
+@@ -8,25 +8,25 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Rendered 2D image $I'$ and ground truth 2D image $I$ (both filtered/smoothed).
+-*   **Output:** A modified loss value or gradient update that emphasizes edge regions.
++*   **Input:** Rendered 2D image $I'$ and ground truth 2D image $I$ (both filtered/smoothed) [S2, unofficial].
++*   **Output:** A modified loss value or gradient update that emphasizes edge regions [S2, unofficial].
+ 
+ **Data Structures:**
+-*   **Edge Mask:** A binary or weighted map of the same dimensions as the image ($H \times W$), indicating edge pixels.
+-*   **Learning Rate Multiplier:** A scalar factor applied to the loss gradient for edge pixels.
++*   **Edge Mask:** A binary map of the same dimensions as the image ($H \times W$), indicating edge pixels [S2, unofficial].
++*   **Learning Rate Multiplier:** A scalar factor applied to the loss gradient for edge pixels [S2, unofficial].
+ 
+ **Steps:**
+-1.  **Edge Detection:** Compute the edge mask by applying a Sobel filter to the filtered 2D images [S2, unofficial]. The Sobel operator calculates horizontal ($G_x$) and vertical ($G_y$) gradients. Pixels with gradient magnitudes exceeding a threshold (or the top percentile) are classified as edge pixels [S2, unofficial].
++1.  **Edge Detection:** Compute the edge mask by applying a Sobel filter to the filtered 2D images [S2, unofficial]. The Sobel operator calculates horizontal ($G_x$) and vertical ($G_y$) gradients [S2, unofficial]. Pixels with gradient magnitudes exceeding a threshold are classified as edge pixels [S2, unofficial].
+     *   Sobel Kernels:
+-        $$ S_x = \begin{bmatrix} -1 & -2 & -1 \\ 0 & 0 & 0 \\ 1 & 2 & 1 \end{bmatrix}, \quad S_y = \begin{bmatrix} -1 & 0 & 1 \\ -2 & 0 & 2 \\ -1 & 0 & 1 \end{bmatrix} $$
++        $$ S_x = \begin{bmatrix} -1 & -2 & -1 \\ 0 & 0 & 0 \\ 1 & 2 & 1 \end{bmatrix}, \quad S_y = \begin{bmatrix} -1 & 0 & 1 \\ -2 & 0 & 2 \\ -1 & 0 & 1 \end{bmatrix} $$ [S2, unofficial].
+     *   Gradient Magnitude at $(x,y)$: $M(x,y) = \sqrt{G_x(x,y)^2 + G_y(x,y)^2}$ [G: Standard Euclidean norm].
+ 2.  **Mask Generation:** Create a binary mask $E(x,y)$ where $E(x,y) = 1$ if $(x,y)$ is an edge pixel, and $0$ otherwise [S2, unofficial].
+-3.  **Loss Calculation:** Compute the base rendering loss (e.g., L1 or L2) between $I'$ and $I$ [S2, unofficial].
++3.  **Loss Calculation:** Compute the rendering loss between $I'$ and $I$ [S2, unofficial].
+ 4.  **Gradient Amplification:** Multiply the loss contribution of edge pixels by a factor $\alpha$ [S2, unofficial].
+     *   Typical value: $\alpha = 1.5$ [S2, unofficial].
+-5.  **Alternating Schedule:** Apply the edge-guided scaling alternately on every other training iteration [S2, unofficial]. This prevents the optimizer from becoming overly biased toward edges in a single step, allowing for balanced refinement [S2, unofficial].
++5.  **Alternating Schedule:** Apply the edge-guided scaling alternately on every other training iteration [S2, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def edge_guided_loss(rendered_img, ground_truth_img, iteration, edge_scale=1.5):
++def edge_guided_loss(rendered_img, ground_truth_img, iteration, edge_scale=1.5, threshold=0.0):
+     """
+     Computes the rendering loss with edge-guided weighting.
+@@ -36,67 +36,44 @@
+         ground_truth_img: Tensor of shape (H, W, C), the ground truth image.
+         iteration: Integer, the current training iteration index.
+-        edge_scale: Float, multiplier for edge pixels (default 1.5).
++        edge_scale: Float, multiplier for edge pixels (default 1.5) [S2, unofficial].
++        threshold: Float, magnitude cutoff for edge detection [G].
+         
+     Returns:
+         Float, the weighted loss value.
+     """
+-    # Step 1: Detect edges using Sobel filter
+-    # Compute gradients for rendered image
+-    grad_x_rendered = sobel_filter(rendered_img, kernel='horizontal')
+-    grad_y_rendered = sobel_filter(rendered_img, kernel='vertical')
+-    
+-    # Compute gradients for ground truth
+-    grad_x_gt = sobel_filter(ground_truth_img, kernel='horizontal')
+-    grad_y_gt = sobel_filter(ground_truth_img, kernel='vertical')
+-    
+-    # Compute gradient magnitudes
+-    mag_rendered = sqrt(grad_x_rendered**2 + grad_y_rendered**2)
+-    mag_gt = sqrt(grad_x_gt**2 + grad_y_gt**2)
+-    
+-    # Combine magnitudes (average of rendered and GT magnitude for robustness)
+-    # Note: Source [S2, unofficial] implies detection on filtered images; using GT for mask 
+-    # is standard practice to avoid noise in rendered edges, but source says 
+-    # "detected using Sobel filter on the filtered 2D images". 
+-    # We will use the rendered image's edge structure as it is the signal being optimized.
+-    # [G: Using rendered image edges is consistent with "edge region... from which 
+-    # learning signal... comes"].
+-    edge_mask = (mag_rendered > threshold).float() 
+-    # Note: Threshold value not explicitly given in sources. 
+-    # [G: A common heuristic is top 10-20% of pixels or a fixed magnitude cutoff. 
+-    # Implementation requires a specific threshold choice.]
+-    
+-    # Step 2: Compute base loss (L1)
++    # Step 1: Edge Detection via Sobel filter on filtered images [S2, unofficial]
++    gx_r = sobel_convolve(rendered_img, kernel_x=True)
++    gy_r = sobel_convolve(rendered_img, kernel_y=True)
++    mag_r = sqrt(gx_r**2 + gy_r**2)
++    edge_mask = (mag_r > threshold).float()
++
++    # Step 2: Base rendering loss [S2, unofficial]
+     base_loss = abs(rendered_img - ground_truth_img).mean()
+-    
+-    # Step 3: Apply edge-guided scaling alternately
+-    # Apply edge scale on even iterations (or odd, as long as it alternates)
++
++    # Step 3: Alternating schedule [S2, unofficial]
+     if iteration % 2 == 0:
+-        # Compute edge-specific loss
++        # Amplify gradient signal on edge pixels [S2, unofficial]
+         edge_loss = (edge_mask * abs(rendered_img - ground_truth_img)).mean()
+-        # Non-edge loss
+         non_edge_loss = ((1 - edge_mask) * abs(rendered_img - ground_truth_img)).mean()
+-        
+-        # Combine with amplified edge weight
+-        # [G: The source says "increase the learning rate by 1.5x on pixels in the edge region".
+-        # This is equivalent to weighting the loss term for those pixels.]
+-        weighted_loss = edge_loss * edge_scale + non_edge_loss
+-        return weighted_loss
++        return edge_loss * edge_scale + non_edge_loss
+     else:
+-        # Standard loss on alternating iterations
+         return base_loss
+ 
+-def sobel_filter(image, kernel):
++def sobel_convolve(image, kernel_x):
+     """
+-    Applies Sobel filter to an image.
++    Applies a 3x3 Sobel convolution with zero-padding for boundaries [G].
+     """
+-    if kernel == 'horizontal':
+-        s_x = [[-1, -2, -1], [0, 0, 0], [1, 2, 1]]
++    if kernel_x:
++        kernel = [[-1, -2, -1], [0, 0, 0], [1, 2, 1]]
+     else:
+-        s_y = [[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]]
+-        
+-    # Convolve image with kernel
+-    # [G: Standard 2D convolution with padding='same' or boundary handling]
+-    filtered = convolve_2d(image, s_x if kernel == 'horizontal' else s_y)
+-    return filtered
++        kernel = [[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]]
++    H, W = image.shape[:2]
++    padded = zero_pad(image, 1)
++    out = zeros_like(image)
++    for i in range(H):
++        for j in range(W):
++            patch = padded[i:i+3, j:j+3]
++            out[i, j] = sum(patch[r, c] * kernel[r, c] for r in range(3) for c in range(3))
++    return out
+ ```
+ 
+@@ -120,11 +97,9 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Adds minimal overhead. Edge detection via Sobel filter is $O(HW)$ and is lightweight [S1]. The alternating schedule means the extra computation is applied only half the time [S2, unofficial].
+-*   **Memory Complexity:** Requires storing the edge mask and gradient maps, which is $O(HW)$ [S3].
++*   **Time Complexity:** Adds minimal overhead, as edge detection via Sobel filter is lightweight [S1]. The alternating schedule means the extra computation is applied only half the time [S2, unofficial].
+ *   **Performance:** Experimentally proven crucial for successful pose refinement in ablation studies [S1]. It enables rapid convergence, reducing training iterations from 200k (typical for MLP-based methods) to 50k [S1].
+ *   **Strengths:** Mitigates weak and noisy gradients caused by aggressive filtering [S2, unofficial]. Improves robustness of joint pose optimization [S1].
+ *   **Limitations:** Requires careful tuning of the edge scale factor and threshold. May not be effective if the input images lack clear edges or are heavily noisy [S2, unofficial].
+ *   **When to use:** When using smoothed supervision or aggressive filtering that destroys high-frequency details, leading to pose drift [S2, unofficial].
+-*   **When not to use:** When the scene is very smooth with few edges, or when computational resources are extremely constrained and the overhead of edge detection is prohibitive (though the overhead is low).
+ 
+ ## Background

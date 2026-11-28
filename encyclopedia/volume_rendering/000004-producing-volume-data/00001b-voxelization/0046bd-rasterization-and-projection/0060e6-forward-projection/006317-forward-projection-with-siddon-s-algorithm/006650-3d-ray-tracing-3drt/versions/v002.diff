@@ -1,0 +1,259 @@
+--- v001.md
++++ v002.md
+@@ -8,9 +8,9 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** STL geometry, optical system parameters (projector pixel size, focal length, aperture stop size/location, vial dimensions, refractive indices), resin properties (wavelength $\lambda$, refractive index $n$), and anti-aliasing parameters.
+-*   **Outputs:** Tomographic projection images (intensity maps for 360° rotation) and/or a 3D light dose distribution within the print volume.
++*   **Inputs:** STL geometry, optical system parameters (projector pixel size, focal length, aperture stop size/location, vial dimensions, refractive indices), resin properties (wavelength $\lambda$, refractive index $n$), and anti-aliasing parameters [S1].
++*   **Outputs:** Tomographic projection images (intensity maps for 360° rotation) and a 3D light dose distribution within the print volume [S1].
+ 
+ **Data Structures:**
+-1.  **Voxel Array:** A logical 3D array where values are 1 (part present) or 0 (part absent). Converted to single-precision floating-point data type [S1].
++1.  **Voxel Array:** A logical 3D array where values are 1 (part present) or 0 (part absent), converted to single-precision floating-point [S1].
+ 2.  **Ray Direction:** Stored as a Cartesian unit vector $(x, y, z)$ [S1].
+ 3.  **Aperture Stop Definition:** Locations of non-chief rays defined on the aperture stop plane using hexagonal filling [S1].
+@@ -29,5 +29,5 @@
+     c.  Store the direction of each ray as a Cartesian unit vector [S1].
+ 3.  **Optical Propagation:** For each ray:
+-    a.  Propagate the ray from the pixel array to the first optical element.
++    a.  Propagate the ray from the pixel array to the first optical element [S1].
+     b.  At each intersection with an optical surface (e.g., lens, vial wall), compute the refracted ray direction using the vectorized form of Snell’s law [S1].
+     c.  Propagate the ray to the next surface.
+@@ -58,121 +58,155 @@
+ 
+ ```python
++import math
++
+ def calculate_3drt_projection(stl_mesh, optical_system, voxel_grid, num_rays_per_pixel=13):
+-    """
+-    Computes tomographic projections using 3D Ray Tracing.
+-    
+-    Args:
+-        stl_mesh: Geometry definition.
+-        optical_system: Dict containing projector pixel size, focal length, 
+-                        aperture stop location/size, vial dimensions, refractive indices.
+-        voxel_grid: 3D numpy array (float32) representing the target dose (1 or 0).
+-        num_rays_per_pixel: Number of rays to cast per DMD pixel.
+-        
+-    Returns:
+-        projections: 3D array (num_angles, height, width) of tomographic projections.
+-    """
+     # 1. Voxelization and Down-sampling
+     # [G] Standard mesh-to-voxel conversion. Down-sample by 4x4x4 if specified.
+     target_dose = voxelize_and_downsample(stl_mesh, voxel_grid, downsample_factor=4)
+-    
++
+     num_angles = 360
+     num_pixels = optical_system['pixel_array_size'] # (H, W)
+-    projections = np.zeros((num_angles, num_pixels[0], num_pixels[1]))
+-    
++    projections = [[0.0] * num_pixels[1] for _ in range(num_pixels[0])]
++
+     # 2. Pre-calculate Ray Paths
+-    # [G] Helper to generate ray vectors based on optical system geometry
+     ray_paths = generate_ray_paths(optical_system, num_rays_per_pixel)
+-    
++
+     for angle_idx in range(num_angles):
+-        # Rotate the target dose or the ray origin/angle for the current tomographic view
+-        current_dose = rotate_voxel_grid(target_dose, angle_idx * np.pi / 180)
+-        
++        current_dose = rotate_voxel_grid(target_dose, angle_idx * math.pi / 180)
++
+         for y in range(num_pixels[0]):
+             for x in range(num_pixels[1]):
+                 pixel_intensity = 0.0
+-                
+-                # 3. Cast N rays per pixel
+                 for r in range(num_rays_per_pixel):
+                     ray = ray_paths[angle_idx][y][x][r]
+-                    
+-                    # 4. Propagate Ray through Optical System
+-                    # [G] Apply Snell's law at each interface (projector lens, air, vial wall)
+-                    # Returns ray state (origin, direction) inside the vial
+                     ray_in_vial = propagate_through_optics(ray, optical_system)
+-                    
+-                    # 5. Intersect with Voxel Grid
+-                    # [G] Use Siddon's algorithm or similar to find voxel indices intersected by ray_in_vial
+                     intersected_voxel_indices = get_voxel_intersections(ray_in_vial, current_dose.shape)
+-                    
+-                    # 6. Calculate Intensity
+-                    # Sum of target dose values in intersected voxels
++
+                     dose_sum = 0.0
+                     for idx in intersected_voxel_indices:
+-                        dose_sum += current_dose[idx]
+-                    
++                        dose_sum += current_dose[idx[0]][idx[1]][idx[2]]
+                     pixel_intensity += dose_sum
+-                
+-                # Average or sum depending on normalization (Source implies sum for intensity calculation)
+-                # Note: Source says "intensity... is given by the sum of all voxels". 
+-                # If N>1, this accumulates dose from multiple rays.
+-                projections[angle_idx, y, x] = pixel_intensity
+-                
++                projections[y][x] = pixel_intensity
+     return projections
+ 
+ def simulate_dose(projections, optical_system, voxel_grid_shape):
+-    """
+-    Simulates the delivered light dose in the print volume.
+-    """
+-    dose_volume = np.zeros(voxel_grid_shape, dtype=np.float32)
++    dose_volume = [[[0.0] * voxel_grid_shape[2] for _ in range(voxel_grid_shape[1])] for _ in range(voxel_grid_shape[0])]
+     num_angles = 360
+     num_pixels = optical_system['pixel_array_size']
+-    
+-    # Pre-calculate ray paths for dose simulation (same as projection but with transmission losses)
+     ray_paths_dose = generate_ray_paths_with_losses(optical_system)
+-    
++
+     for angle_idx in range(num_angles):
+         for y in range(num_pixels[0]):
+             for x in range(num_pixels[1]):
+-                pixel_intensity = projections[angle_idx, y, x]
+-                
++                pixel_intensity = projections[y][x]
+                 for r in range(optical_system['num_rays_per_pixel']):
+                     ray = ray_paths_dose[angle_idx][y][x][r]
+-                    
+-                    # Propagate through optics to get ray in vial
+                     ray_in_vial = propagate_through_optics(ray, optical_system)
+-                    
+-                    # Get intersections
+                     intersected_voxel_indices = get_voxel_intersections(ray_in_vial, voxel_grid_shape)
+-                    
+-                    # Calculate Dose Contribution
+-                    # Dose = Intensity * Anti-aliasing_weight * Fresnel_loss * BeerLambert_loss
+-                    
+-                    # [G] Anti-aliasing weight is typically related to the fraction of the pixel/voxel covered.
+-                    # Source mentions "scaling weight due to the anti-aliasing method".
+-                    aa_weight = 1.0 # Placeholder for specific anti-aliasing weight calculation
+-                    
+-                    # Fresnel transmission at air-vial interface
+-                    fresnel_loss = calculate_fresnel_transmission(ray_in_vial.direction, optical_system['n_air'], optical_system['n_vial'])
+-                    
+-                    # Beer-Lambert absorption through the path length in the resin
+-                    # [G] Path length is the distance from entry point to the voxel center or exit point.
+-                    # Source says "attenuation within the volume is computed using Beer-Lambert absorption".
+-                    # Assuming a simple model: I = I0 * exp(-alpha * distance)
++
++                    aa_weight = 1.0 # [G] Anti-aliasing weight calculation not detailed in sources
++                    fresnel_loss = calculate_fresnel_transmission(ray_in_vial['direction'], optical_system['n_air'], optical_system['n_vial'])
+                     path_length = calculate_path_length(ray_in_vial, intersected_voxel_indices)
+-                    absorption_coeff = optical_system['absorption_coefficient'] # [G] Not explicitly given, assumed parameter
+-                    absorption_loss = np.exp(-absorption_coeff * path_length)
+-                    
++                    absorption_coeff = optical_system['absorption_coefficient'] # [G] Not explicitly given in sources
++                    absorption_loss = math.exp(-absorption_coeff * path_length)
++
+                     dose_contribution = pixel_intensity * aa_weight * fresnel_loss * absorption_loss
+-                    
+-                    # Add dose to intersected voxels
+-                    # [G] Distribute dose among intersected voxels based on intersection length or uniform?
+-                    # Source says "For each voxel the ray intersects, a dose is added...".
+-                    # It does not specify distribution among multiple voxels per ray. 
+-                    # Assuming uniform addition per intersected voxel for simplicity, or proportional to path length.
+-                    # Given "sum of all voxels" for projection, dose addition likely follows similar logic.
+                     for idx in intersected_voxel_indices:
+-                        dose_volume[idx] += dose_contribution
+-                        
++                        dose_volume[idx[0]][idx[1]][idx[2]] += dose_contribution
+     return dose_volume
++
++def voxelize_and_downsample(stl_mesh, voxel_grid, downsample_factor):
++    # [G] Standard mesh-to-voxel conversion. Down-sample by 4x4x4 if specified.
++    return voxel_grid
++
++def generate_ray_paths(optical_system, num_rays_per_pixel):
++    # [G] Helper to generate ray vectors based on optical system geometry
++    pass
++
++def rotate_voxel_grid(grid, angle):
++    # [G] Standard 3D rotation of voxel array
++    pass
++
++def propagate_through_optics(ray, optical_system):
++    # [G] Apply Snell's law at each interface (projector lens, air, vial wall)
++    pass
++
++def get_voxel_intersections(ray, grid_shape):
++    origin = ray['origin']
++    direction = ray['direction']
++    ox, oy, oz = origin
++    dx, dy, dz = direction
++    min_x, min_y, min_z = 0.0, 0.0, 0.0
++    max_x, max_y, max_z = float(grid_shape[0]), float(grid_shape[1]), float(grid_shape[2])
++
++    if dx == 0: step_x = 0; t_max_x = float('inf')
++    else: step_x = 1 if dx > 0 else -1; t_max_x = (max_x if dx > 0 else min_x - 1 - ox) / dx
++
++    if dy == 0: step_y = 0; t_max_y = float('inf')
++    else: step_y = 1 if dy > 0 else -1; t_max_y = (max_y if dy > 0 else min_y - 1 - oy) / dy
++
++    if dz == 0: step_z = 0; t_max_z = float('inf')
++    else: step_z = 1 if dz > 0 else -1; t_max_z = (max_z if dz > 0 else min_z - 1 - oz) / dz
++
++    ix = int(ox) if min_x <= ox < max_x else -1
++    iy = int(oy) if min_y <= oy < max_y else -1
++    iz = int(oz) if min_z <= oz < max_z else -1
++
++    if dx != 0:
++        t_x = (min_x if dx > 0 else max_x - 1) - ox
++        t_dx = step_x / dx
++    else:
++        t_x = 0.0; t_dx = 0.0
++
++    if dy != 0:
++        t_y = (min_y if dy > 0 else max_y - 1) - oy
++        t_dy = step_y / dy
++    else:
++        t_y = 0.0; t_dy = 0.0
++
++    if dz != 0:
++        t_z = (min_z if dz > 0 else max_z - 1) - oz
++        t_dz = step_z / dz
++    else:
++        t_z = 0.0; t_dz = 0.0
++
++    cells = []
++    max_iter = grid_shape[0] + grid_shape[1] + grid_shape[2] + 100
++    for _ in range(max_iter):
++        if ix >= 0 and iy >= 0 and iz >= 0:
++            cells.append((ix, iy, iz))
++
++        t_next = float('inf')
++        if dx != 0 and t_x < t_next: t_next = t_x
++        if dy != 0 and t_y < t_next: t_next = t_y
++        if dz != 0 and t_z < t_next: t_next = t_z
++
++        if t_next > t_max_x and t_next > t_max_y and t_next > t_max_z:
++            break
++
++        if dx != 0 and t_x == t_next:
++            ix += step_x; t_x += t_dx
++        if dy != 0 and t_y == t_next:
++            iy += step_y; t_y += t_dy
++        if dz != 0 and t_z == t_next:
++            iz += step_z; t_z += t_dz
++
++    return cells
++
++def calculate_fresnel_transmission(direction, n1, n2):
++    # [G] Fresnel coefficients for unpolarized light
++    cos_theta_i = abs(direction[2])
++    sin_theta_i_sq = 1.0 - cos_theta_i**2
++    sin_theta_t_sq = (n1/n2)**2 * sin_theta_i_sq
++    if sin_theta_t_sq > 1.0: return 0.0
++    cos_theta_t = math.sqrt(1.0 - sin_theta_t_sq)
++    rs = ((n1 * cos_theta_i) - (n2 * cos_theta_t)) / ((n1 * cos_theta_i) + (n2 * cos_theta_t))
++    rp = ((n1 * cos_theta_t) - (n2 * cos_theta_i)) / ((n1 * cos_theta_t) + (n2 * cos_theta_i))
++    return 0.5 * (rs**2 + rp**2)
++
++def calculate_path_length(ray, indices):
++    # [G] Path length is the distance from entry point to the voxel center or exit point.
++    # Source does not specify exact path length calculation method.
++    return 1.0
+ ```
+ 

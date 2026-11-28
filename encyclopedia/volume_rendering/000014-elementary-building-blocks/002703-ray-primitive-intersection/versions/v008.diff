@@ -1,0 +1,90 @@
+--- v007.md
++++ v008.md
+@@ -1,7 +1,8 @@
+ # Ray-primitive intersection
+ 
++Also called: Ray-object intersection, Ray-scene intersection, Ray-primitive tests
+ 
+ ## Overview
+-Ray-primitive intersection is the family of geometric algorithms that determine the intersection between a parametric ray and a specific geometric primitive (such as a box, sphere, triangle, or implicit surface) [S1, S3, unofficial]. It solves the problem of finding the closest intersection point along a ray to enable correct rendering of opaque surfaces, volume traversal bounds, and occlusion testing [S1, S2, unofficial]. This family is distinguished from [Ray-marching](52-ray-marching.md) by its reliance on exact analytical solutions for primitive shapes, whereas marching uses fixed steps [S1, unofficial]. It serves as the core evaluation step within a broader ray-scene traversal, where the test is executed for multiple objects to find the global minimum $t$ [S1, S2, unofficial].
++Ray-primitive intersection computes the geometric intersection between a parametric ray and a specific scene primitive (e.g., box, triangle, sphere, volume) to determine entry/exit points or hit status [S3, unofficial][S10]. It solves the fundamental problem of identifying which objects a viewing ray encounters, enabling early rejection of non-intersecting geometry and providing the spatial parameters ($t$) required for shading, sampling, or traversal [S1, S11, S26]. It sets itself apart from [Ray-marching](52-ray-marching.md) by relying on exact analytical solutions for specific primitive shapes rather than iterative fixed-step evaluation, and from [Ray-box intersection](776-ray-box-intersection.md) by encompassing the broader algorithmic strategies and generic interfaces used to accelerate these tests in volume rendering contexts [S1, S11, S5617].
+ 
+ ## Shared principles
+@@ -80,5 +81,5 @@
+ 
+ ### [Ray-Splat/Gaussian Intersection](7916-ray-splat-gaussian-intersection.md)
+-This family defines the geometric primitives and intersection algorithms required to determine the interaction between a viewing ray and 3D Gaussian splats, which are the fundamental primitives in Gaussian Splatting rendering. It solves the problem of efficiently identifying which splats contribute to a pixel and computing their depth and opacity for alpha blending. It is distinguished from sibling methods by its focus on ellipsoidal (Gaussian) volumes rather than polyhedral or spherical primitives, often leveraging hierarchical structures like BVHs or specific plane-intersection techniques for numerical stability.
++This family defines the geometric primitives and algorithms for determining the intersection between a camera ray and 3D Gaussian splats, which are ellipsoidal density distributions used in novel view synthesis. It solves the problem of efficiently identifying which splats contribute to a pixel's color and depth, enabling alpha blending and depth testing. It distinguishes itself from sibling methods by handling the specific anisotropic, probabilistic nature of Gaussian splats (defined by covariance matrices or scale/rotation parameters) rather than hard geometric primitives like boxes or triangles.
+ 
+ ### [Quadtree Raycasting](8208-quadtree-raycasting.md)
+@@ -86,58 +87,38 @@
+ 
+ ### Medium Stack Update
+-- **Definition**: Updates the ray's medium stack when crossing a surface, pushing a new medium if entering and popping if exiting [S4, unofficial].
+-- **Steps**: Check if transmission occurred: `isTransmitted(-ray.direction, wi, ns)`. If entering (`isEntered(wi, ns)` is true) and primitive has medium, push medium to ray. If exiting, pop medium from ray [S4, unofficial].
+-- **Formula**: Transmission Check: $(wo \cdot n < 0) \neq (wi \cdot n < 0)$. Entry Check: $wi \cdot n < 0$ [S4, unofficial].
++Updates the ray's medium stack when crossing a surface, pushing a new medium if entering and popping if exiting [S4, unofficial]. It checks if transmission occurred using $(wo \cdot n < 0) \neq (wi \cdot n < 0)$ and if entering using $wi \cdot n < 0$ [S4, unofficial].
+ 
+ ### Ray Marching via C++ Extension
+-- **Definition**: Performs ray-sphere intersection or ray marching against the SDF grid using a C++ renderer extension to find the rough intersection position for each pixel [S5, unofficial].
+-- **Steps**: Initialize output tensors for intersection position, voxel index, and ray direction. Call the C++ ray matching function with camera parameters (eye position), grid bounds, resolution, and grid data. Extract the rough intersection position, the index of the minimum corner of the intersecting voxel, and the ray direction from the outputs [S5, unofficial].
+-- **Pitfall**: Pixels with no intersection are marked by voxel_min_point_index being -1. These must be handled to avoid invalid memory access during interpolation [S5, unofficial].
++Performs ray-sphere intersection or ray marching against the SDF grid using a C++ renderer extension to find the rough intersection position for each pixel [S5, unofficial]. It initializes output tensors for intersection position, voxel index, and ray direction, then calls the C++ ray matching function with camera parameters, grid bounds, resolution, and grid data [S5, unofficial]. Pixels with no intersection are marked by `voxel_min_point_index` being -1, which must be handled to avoid invalid memory access during interpolation [S5, unofficial].
+ 
+ ### Ray Occlusion Test
+-- **Definition**: Tests if rays intersect any geometry without returning hit details, used for simple occlusion checks [S2, unofficial].
+-- **Steps**: Initialize RTCRay/RTCRay8. Set origin, direction, tnear = minDist, tfar = InfinityDist. Init context. Call rtcOccluded1 or rtcOccluded8. Return ray.tfar < 0.0f [S2, unofficial].
+-- **Parameter**: minDist: Minimum ray distance for intersection [S2, unofficial].
++Tests if rays intersect any geometry without returning hit details, used for simple occlusion checks [S2, unofficial]. It initializes `RTCRay`/`RTCRay8` with origin, direction, `tnear = minDist`, `tfar = InfinityDist`, initializes context, and calls `rtcOccluded1` or `rtcOccluded8`, returning `ray.tfar < 0.0f` [S2, unofficial].
+ 
+ ### Clipping Cell-Level Slice to Active Rays
+-- **Definition**: An optimization to reduce cell primitives in a slice by intersecting individual rays with the world-space bounding box of the current u,v slice [S6, unofficial].
+-- **Steps**: Ignore rays that have already successfully hit a cell (inactive rays), even if they intersect the slice bounding box [S6, unofficial].
++An optimization to reduce cell primitives in a slice by intersecting individual rays with the world-space bounding box of the current u,v slice [S6, unofficial]. It ignores rays that have already successfully hit a cell (inactive rays), even if they intersect the slice bounding box [S6, unofficial].
+ 
+ ### BVH-based UDF evaluation with analytic gradient
+-- **Definition**: Computes the unsigned distance from query points to a triangle mesh using a BVH, and provides an analytic gradient for backpropagation [S7, unofficial].
+-- **Steps**: Flatten input x to [N, 3]. Query BVH for distance udf, triangle ID tri_id, and barycentric coordinates uvw. Clamp uvw to [1e-9, 1-1e-9]. Interpolate nearest point on triangle using uvw and triangle vertices. Return udf reshaped to input shape. In backward pass, retrieve saved x and nearest_points. Compute diff = x - nearest_points. Compute norm = diff.norm(dim=-1, keepdim=True) + 1e-8. Gradient is grad_output scaled by diff/norm [S7, unofficial].
+-- **Formula**: $\nabla_x \text{UDF}(x) = \frac{x - p_{\text{nearest}}}{\|x - p_{\text{nearest}}\|}$ where $p_{\text{nearest}}$ is the closest point on the mesh [S7, unofficial].
+-- **Layout**: Input x shape [N, 3]. Output udf shape [N, 1]. Saved tensors: x_flat, nearest_points [S7, unofficial].
+-- **Pitfall**: uvw is clamped to [1e-9, 1-1e-9] to avoid invalid barycentric coordinates at triangle edges/corners [S7, unofficial].
++Computes the unsigned distance from query points to a triangle mesh using a BVH, and provides an analytic gradient for backpropagation [S7, unofficial]. It flattens input $x$ to $[N, 3]$, queries BVH for distance $udf$, triangle ID $tri\_id$, and barycentric coordinates $uvw$, clamps $uvw$ to $[1e-9, 1-1e-9]$, and interpolates the nearest point on the triangle using $uvw$ and triangle vertices [S7, unofficial]. The gradient is $\nabla_x \text{UDF}(x) = \frac{x - p_{\text{nearest}}}{\|x - p_{\text{nearest}}\|}$ where $p_{\text{nearest}}$ is the closest point on the mesh [S7, unofficial]. $uvw$ is clamped to avoid invalid barycentric coordinates at triangle edges/corners [S7, unofficial].
+ 
+ ### Ray Cursor
+-- **Definition**: A selection technique where a ray is emitted from the user's hand, with start point and orientation controlled by the user, selecting the first intersected object [S8, unofficial].
+-- **Steps**: Emit ray from hand position and orientation. Select first object intersected by ray. Augmentation: Cycle through all ray-object intersection points to disambiguate [S8, unofficial].
+-- **Pitfall**: Difficult to select small and distant objects due to required angular accuracy. Ray or cone may intersect multiple objects. Disambiguation metric: select object based on distance from targets to the apex and central axis of the cone [S8, unofficial].
++A selection technique where a ray is emitted from the user's hand, with start point and orientation controlled by the user, selecting the first intersected object [S8, unofficial]. It can be augmented by cycling through all ray-object intersection points to disambiguate [S8, unofficial]. It is difficult to select small and distant objects due to required angular accuracy, and rays or cones may intersect multiple objects, requiring disambiguation metrics based on distance from targets to the apex and central axis of the cone [S8, unofficial].
+ 
+ ### Ray-Image Frame Intersection
+-- **Definition**: Computes the intersection of a camera-space ray with lines parallel to the image frame axes (x=0, x=1, y=0, y=1) in normalized image coordinates [S9, unofficial].
+-- **Steps**: Extract intrinsics components: focal lengths $f_s, f_o$ and principal points $c_s, c_o$ for the same and other dimensions. Extract ray origin $o_s, o_o, o_z$ and direction $d_s, d_o, d_z$ components. Construct the 2D intersection point `xy` and 3D point `xyz = origins + t * directions`. Validate the projection: check if `xy` is in bounds $[-\epsilon, 1+\epsilon]$, if `xyz` is in front of camera ($z > -\epsilon$), and if $t > -\epsilon$ [S9, unofficial].
+-- **Formula**: $c = \frac{v - c_s}{f_s}$, where $v$ is the target coordinate value (0.0 or 1.0). $t = \frac{c o_z - o_s}{d_s - c d_z}$. This is the ray parameter $t$ at the intersection. $y_{other} = c_o + \frac{f_o (o_o (c d_z - d_s) + d_o (o_s - c o_z))}{d_z o_s - d_s o_z}$. This is the other coordinate value at the intersection [S9, unofficial].
++Computes the intersection of a camera-space ray with lines parallel to the image frame axes ($x=0, x=1, y=0, y=1$) in normalized image coordinates [S9, unofficial]. It extracts intrinsics components ($f_s, f_o, c_s, c_o$) and ray components ($o_s, o_o, o_z, d_s, d_o, d_z$), constructs the 2D intersection point `xy` and 3D point `xyz = origins + t * directions`, and validates the projection by checking if `xy` is in bounds $[-\epsilon, 1+\epsilon]$, if `xyz` is in front of camera ($z > -\epsilon$), and if $t > -\epsilon$ [S9, unofficial]. The ray parameter is $t = \frac{c o_z - o_s}{d_s - c d_z}$ where $c = \frac{v - c_s}{f_s}$ [S9, unofficial].
+ 
+ ### API-Dependent Intersection Method Selection
+-- **Comparison**: Ray/box intersection test yields better performance with compute shader and OpenCL implementations. Raster intersection test yields better performance with CUDA implementations. No single intersection method is globally superior; optimal choice depends on the target parallel API [S10].
+-- **Usage**: Best overall results achieved by combining compute shader with ray/box intersection test [S10].
++Ray/box intersection test yields better performance with compute shader and OpenCL implementations, while raster intersection test yields better performance with CUDA implementations [S10]. No single intersection method is globally superior; optimal choice depends on the target parallel API [S10]. Best overall results are achieved by combining compute shader with ray/box intersection test [S10].
+ 
+ ### Intersection using Rasterization
+-- **Definition**: An efficient way to obtain the intersection between view-rays and the volume using OpenGL rasterization [S10].
++An efficient way to obtain the intersection between view-rays and the volume using OpenGL rasterization [S10]. A simple color cube representing the boundaries of the volume is rendered; since colors and texture coordinates are in unit space $[0,1]^3$, each color represents a 3D texture coordinate of the volume, so the color of each rasterized pixel represents the texture coordinate of the intersection of one ray with the volume [S10]. This method is used with back face culling to obtain the first intersection [S10].
+ 
+ ### Procedural Ray/Box Intersection
+-- **Definition**: A method for determining ray entry and exit within the volume bounding box entirely within the fragment shader. The ray is defined by the camera position and the volume entry position [S11, unofficial].
+-- **Parameter**: Requires an exit criterion to determine when the ray has left the volume [S11, unofficial].
+-- **Pitfall**: The entire computational load for intersection and marching is placed on the fragment shader, which is a disadvantage compared to rasterization-based setup [S11, unofficial].
++A method for determining ray entry and exit within the volume bounding box entirely within the fragment shader. The ray is defined by the camera position and the volume entry position [S11, unofficial]. It requires an exit criterion to determine when the ray has left the volume [S11, unofficial]. The entire computational load for intersection and marching is placed on the fragment shader, which is a disadvantage compared to rasterization-based setup [S11, unofficial].
+ 
+ ### Scan Plane Beam Intersection
+-- **Definition**: An approximate method to determine if a camera ray intersects a caustic beam and the location of that intersection, used because exact computation is too costly for thousands of beams [S12].
+-- **Steps**: Define a scan plane, which is an auxiliary arbitrary plane containing the camera ray. Compute the intersections of the scan plane and the edges of the caustic beam to form a triangle. Minimize error from curved beam edges by choosing the scan plane normal vector to be close to the normal of the caustic triangle. Transform the view ray to the beam's local space. Select a representative point on the intersection segment ∆x (specifically the midpoint) and evaluate the area function A(y). Compute the fraction of light scattered towards the viewer based on the cross-section area (determining radiance scaling) and scattering in the participating medium [S12].
+-- **Formula**: np = rview × (rview × n4), where np is the scan plane normal, rview is the view ray direction, and n4 is the caustic triangle normal [S12].
++An approximate method to determine if a camera ray intersects a caustic beam and the location of that intersection, used because exact computation is too costly for thousands of beams [S12]. It defines a scan plane (an auxiliary arbitrary plane containing the camera ray), computes intersections of the scan plane and the edges of the caustic beam to form a triangle, and minimizes error from curved beam edges by choosing the scan plane normal vector to be close to the normal of the caustic triangle [S12]. It transforms the view ray to the beam's local space, selects a representative point on the intersection segment $\Delta x$ (specifically the midpoint), and evaluates the area function $A(y)$ [S12]. The scan plane normal is $np = r_{view} \times (r_{view} \times n_4)$, where $np$ is the scan plane normal, $r_{view}$ is the view ray direction, and $n_4$ is the caustic triangle normal [S12].
+ 
+ ## Background
+-The classification of ray-object intersections into five classes based on intersection type, data type, and early termination capability was introduced by Sobierajski et al. [S3, unofficial]. Class 1 covers geometric data intersections requiring a single point, while Classes 2-5 cover volumetric data intersections with varying requirements for early termination and value aggregation (point vs. segment, single value vs. all values) [S3, unofficial]. The use of Plücker coordinates for ray-triangle intersection was detailed in early graphics literature [S1, unofficial]. The distinction between rasterization-based and ray/box intersection-based volume entry determination was analyzed in comparisons of GPU-based volume ray casting implementations [S10]. The use of BVHs for unsigned distance field (UDF) evaluation with analytic gradients was explored in differentiable rendering contexts [S7, unofficial]. The "Ray Cursor" selection technique was introduced by Liang and Green [1994] for immersive 3D environments [S8, unofficial]. The scan plane beam intersection method for real-time volume caustics was proposed by [S12].
++The classification of ray-object intersections into five classes based on intersection type, data type, and shader information requirements was established in volumetric ray tracing literature [S3, unofficial]. Class 1 involves geometric data intersection requiring a single point, Class 2 involves volumetric data with early termination, Class 3 involves volumetric data without early termination, Class 4 involves volumetric data segment intersection with one value, and Class 5 involves volumetric data segment intersection with all values [S3, unofficial]. The choice between rasterization and ray/box intersection for volume rendering depends on the parallel API, with ray/box being superior for compute shaders/OpenCL and rasterization for CUDA [S10].
+ 
+ ## Sources

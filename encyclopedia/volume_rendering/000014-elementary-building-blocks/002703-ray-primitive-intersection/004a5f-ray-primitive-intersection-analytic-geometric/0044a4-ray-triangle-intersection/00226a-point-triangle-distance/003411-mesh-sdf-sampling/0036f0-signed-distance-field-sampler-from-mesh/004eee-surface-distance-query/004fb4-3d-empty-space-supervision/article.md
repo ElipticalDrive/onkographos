@@ -1,0 +1,164 @@
+# 3D Empty Space Supervision
+
+Also called: 3D emptiness supervision, object field emptiness loss
+
+## Overview
+3D Empty Space Supervision is a method for regularizing the non-occupied regions of a learned radiance field by supervising the "object code" using estimated surface distances [S1, unofficial]. It solves the problem of ambiguous empty space in neural rendering, where the model may incorrectly assign object semantics to background voxels [S1, unofficial]. It sets itself apart from standard volume rendering losses by explicitly computing a "surfaceness" and "emptiness" score for every sample point along a ray, allowing for targeted supervision of the object field's background channel [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A set of $K$ 3D sample points $\{p_k\}_{k=1}^K$ along a query ray; the learned density $\sigma_k$ and distance intervals $\delta_k$ for each sample; the camera-to-sample distance $d_k$; the hyperparameter $\Delta d$; the object code vector $o_k \in \mathbb{R}^{H+1}$ for each sample point.
+*   **Outputs:** The 3D empty space loss $\ell_{3d\_empty}$ and the 3D object field loss $\ell_{3d\_obj}$, which are combined with 2D losses to optimize the object field MLP [S1, unofficial].
+
+**Data Structures:**
+*   **Object Code ($o_k$):** A one-hot vector of dimension $H+1$. The first $H$ dimensions represent specific object classes, and the $(H+1)$-th dimension represents the "empty" or "background" class [S1, unofficial].
+*   **Sample Point Data:** For each $k \in \{1, \dots, K\}$:
+    *   $d_k$: Distance from camera center to sample point $k$.
+    *   $\sigma_k$: Learned density at sample point $k$.
+    *   $\delta_k$: Distance between sample point $k$ and $k+1$ (or to the ray end).
+
+**Step-by-Step Method:**
+
+1.  **Compute Transmittance and Alpha:**
+    For each sample point $k$, compute the transmittance $T_k$ and alpha $\alpha_k$ using the standard volume rendering equations [S1, unofficial]:
+    $$ T_k = \exp\left(-\sum_{i=1}^{k-1} \sigma_i \delta_i\right) $$
+    $$ \alpha_k = 1 - \exp(-\sigma_k \delta_k) $$
+    *Note: $T_1 = 1$.*
+
+2.  **Estimate Surface Distance ($d$):**
+    Calculate the approximate distance from the camera center to the surface hit point along the ray [S1, unofficial]:
+    $$ d = \sum_{k=1}^K T_k \alpha_k \delta_k $$
+
+3.  **Compute Surfaceness Score ($s_k$):**
+    For each sample point $k$, compute the surfaceness score, which measures how close the sample is to the estimated surface distance $d$ [S1, unofficial]:
+    $$ s_k = \exp\left(-(d_k - d)^2\right) $$
+
+4.  **Compute Emptiness Score ($e_k$):**
+    For each sample point $k$, compute the emptiness score. This score is high for points in front of the surface (empty space) and zero for points behind the surface [S1, unofficial]:
+    $$ e_k = (1 - s_k) \cdot \mathbbm{1}(d - \Delta d - d_k > 0) $$
+    Where $\mathbbm{1}(\cdot)$ is the indicator function: 1 if the condition is true, 0 otherwise. $\Delta d$ is a hyperparameter compensating for distance estimation inaccuracy [S1, unofficial].
+
+5.  **Compute 3D Empty Loss ($\ell_{3d\_empty}$):**
+    Supervise the last dimension of the object code ($o^{H+1}_k$), which corresponds to the empty class [S1, unofficial]:
+    $$ \ell_{3d\_empty} = -\frac{1}{K} \sum_{k=1}^K \Big ( e_k \log(o^{H+1}_k) + s_k \log(1 - o^{H+1}_k) \Big ) $$
+    *Note: The term $s_k \log(1 - o^{H+1}_k)$ encourages the empty class probability to be low at the surface.*
+
+6.  **Compute 3D Object Field Loss ($\ell_{3d\_obj}$):**
+    Push the first $H$ dimensions of the object code ($o^h_k$ for $h=1 \dots H$) to zero in empty space [S1, unofficial]:
+    $$ \ell_{3d\_obj} = - \frac{1}{K} \sum_{k=1}^K \Big ( e_k \sum_{h=1}^H \log(1 - o^h_k) \Big ) $$
+
+7.  **Total Loss:**
+    The total object field loss is the sum of the 2D object loss ($\ell_{2d\_obj}$), the 3D empty loss, and the 3D object field loss [S1, unofficial]:
+    $$ \ell = \ell_{2d\_obj} + \ell_{3d\_empty} + \ell_{3d\_obj} $$
+
+**Parameters:**
+*   $\Delta d$: Hyperparameter to compensate for inaccuracy in the estimated surface distance $d$. Typical value: $0.05$ meters [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_3d_empty_supervision(d_k, sigma, delta, object_code, delta_d=0.05):
+    """
+    Computes 3D empty space supervision losses for a single ray.
+    
+    Args:
+        d_k: Array of shape (K,), distance from camera to each sample point.
+        sigma: Array of shape (K,), learned density at each sample point.
+        delta: Array of shape (K,), distance between consecutive sample points.
+        object_code: Array of shape (K, H+1), object code for each sample point.
+                     Last dimension (H+1) is the empty/background class.
+        delta_d: Float, hyperparameter for distance inaccuracy compensation.
+    
+    Returns:
+        loss_3d_empty: Float, emptiness supervision loss.
+        loss_3d_obj: Float, object field suppression loss in empty space.
+    """
+    K = len(sigma)
+    
+    # Step 1: Compute Transmittance T_k
+    # T_k = exp(-sum_{i=1}^{k-1} sigma_i * delta_i)
+    # We compute cumulative sum of sigma * delta
+    sigma_delta = sigma * delta
+    cum_sum = np.cumsum(sigma_delta)
+    # T_k corresponds to exp(-cum_sum[k-1]) for k > 0, T_0 = 1
+    # To align with formula T_k for sample k, we need sum of previous intervals
+    # Let's define T array where T[k] is transmittance arriving at sample k
+    T = np.exp(np.concatenate(([0.0], cum_sum[:-1]))) # T[0] = exp(0) = 1
+    
+    # Step 2: Compute Alpha alpha_k
+    alpha = 1.0 - np.exp(-sigma * delta)
+    
+    # Step 3: Estimate Surface Distance d
+    # d = sum_{k=1}^K T_k * alpha_k * delta_k
+    # Note: The formula uses T_k and alpha_k for the k-th sample.
+    # In standard volume rendering, contribution of sample k is T_k * alpha_k * delta_k?
+    # Actually, standard color is sum T_k * alpha_k * color_k.
+    # Here d is weighted average of distances.
+    # The formula says d = sum T_k alpha_k delta_k.
+    # Wait, delta_k is the interval length. The distance contribution is usually T_k * alpha_k * d_k?
+    # Let's re-read [S1, unofficial]: "d = sum_{k=1}^K T_k alpha_k delta_k".
+    # This seems to be an approximation of the mean depth. 
+    # Usually mean depth is sum T_k alpha_k d_k. 
+    # However, the source explicitly writes delta_k. 
+    # Let's stick strictly to the source formula provided in [S1, unofficial].
+    d = np.sum(T * alpha * delta)
+    
+    # Step 4: Compute Surfaceness Score s_k
+    # s_k = exp(-(d_k - d)^2)
+    s = np.exp(-(d_k - d)**2)
+    
+    # Step 5: Compute Emptiness Score e_k
+    # e_k = (1 - s_k) * 1(d - delta_d - d_k > 0)
+    indicator = (d - delta_d - d_k > 0).astype(float)
+    e = (1.0 - s) * indicator
+    
+    # Step 6: Compute Losses
+    # Object code shape: (K, H+1)
+    # o_k^{H+1} is the last column
+    o_empty = object_code[:, -1]
+    o_objects = object_code[:, :-1] # First H dimensions
+    
+    # l_3d_empty = -1/K * sum( e_k * log(o_k^{H+1}) + s_k * log(1 - o_k^{H+1}) )
+    # Add epsilon to log to avoid NaN
+    eps = 1e-7
+    term1 = e * np.log(o_empty + eps)
+    term2 = s * np.log(1.0 - o_empty + eps)
+    loss_3d_empty = -np.mean(term1 + term2)
+    
+    # l_3d_obj = -1/K * sum( e_k * sum_{h=1}^H log(1 - o_k^h) )
+    # sum over H dimensions for each k
+    log_1_minus_o_objects = np.log(1.0 - o_objects + eps)
+    sum_h = np.sum(log_1_minus_o_objects, axis=1) # Shape (K,)
+    loss_3d_obj = -np.mean(e * sum_h)
+    
+    return loss_3d_empty, loss_3d_obj
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The indicator function $\mathbbm{1}(d - \Delta d - d_k > 0)$ creates a hard boundary. Small errors in $d$ can cause discontinuous changes in loss gradients. The hyperparameter $\Delta d$ smooths this by creating a buffer zone [S1, unofficial].
+*   **Degenerate Input:** If $\sigma_k = 0$ for all $k$, then $T_k=1, \alpha_k=0, d=0$. The surfaceness scores will be based on distance from camera. This is valid but may not provide useful surface supervision if no geometry is present.
+*   **Boundary Conditions:** The formula assumes $K$ samples are sufficient to capture the surface. If the surface is between samples, $d$ is an approximation.
+
+## Subtopics
+
+### Ground Density Supervision
+A supervision signal using HD map ground height fields to guide density field reconstruction, partitioning ray termination into uncertain, ground, and certain regions to avoid applying supervision where map data is unreliable [S2]. It differs from 3D Empty Space Supervision by using external map data (height fields) rather than estimated surface distances from the radiance field itself. It is chosen when high-definition maps are available for driving scenes [S2]. The method partitions the ray termination distribution into: 1) Uncertain region (obstacles not in map), 2) Ground region (surface within error tolerance $\epsilon \approx 30$cm), 3) Certain region (beneath ground) [S2]. It generates a dense triangle mesh $M_c$ from the ground height map $M$ using Delaunay triangulation and renders it to get pseudo ground truth depth $D_{pgt}$ [S2]. The loss is:
+$$ L_{gd} = \mathbb{E}_{r \in I_i} \left[ \int_{D_{pgt} - \epsilon}^{D_{pgt} + \epsilon} h(t) \frac{(t - D_{pgt})^2}{2\epsilon^2} \exp\left(-\frac{(t - D_{pgt})^2}{2\epsilon^2}\right) dt + \int_{D_{pgt} + \epsilon}^{\infty} h(t)^2 dt \right] $$
+where $h(t)$ is the ray termination distribution, and $\epsilon$ is the uncertainty parameter (typical average error ~30cm) [S2]. It also improves smoothness by sampling 2x2 patches for depth gradient computation [S2].
+
+## Operating characteristics
+*   **Time Complexity:** Linear in the number of samples $K$ per ray. The computation of $d$, $s_k$, and $e_k$ involves simple arithmetic operations and exponentials.
+*   **Memory Complexity:** Requires storing $K$ samples of density, distance, and object codes. No additional large data structures are needed beyond the object field MLP.
+*   **Strengths:** Explicitly handles empty space, preventing the model from assigning object semantics to background. Complements 2D supervision by providing 3D geometric constraints [S1, unofficial].
+*   **Limitations:** Relies on the accuracy of the estimated surface distance $d$. If the density field is poor, $d$ is inaccurate, leading to incorrect emptiness scores. The hard indicator function can cause gradient instability without $\Delta d$ [S1, unofficial].
+*   **When to use:** When learning object fields in scenes with significant empty space and 2D object masks are available. Particularly useful for geometry manipulation tasks [S1, unofficial].
+*   **When not to use:** When no object field representation is used, or when high-quality 3D ground truth geometry is available (in which case direct geometric losses might be preferred).
+
+## Background
+3D Empty Space Supervision was introduced in DM-NeRF (Deep Model-based Neural Radiance Fields) by Liu et al., published at ICLR 2023 [S1, unofficial]. The method addresses the limitation of standard NeRF which only optimizes for photometric consistency, often resulting in ambiguous geometry in empty regions. By introducing an object field and supervising it with 3D emptiness scores derived from estimated surface distances, DM-NeRF enables 3D scene geometry decomposition and manipulation from 2D images [S1, unofficial].
+
+## Sources
+[S1] DM-NeRF: 3D Scene Geometry Decomposition and Manipulation from 2D Images, https://arxiv.org/abs/2208.07227v2, fetched 2026-10-26 (unofficial)
+[S2] MapNeRF: Incorporating Map Priors into Neural Radiance Fields for Driving View Simulation, https://doi.org/10.1109/iros55552.2023.10341681, fetched 2026-10-26

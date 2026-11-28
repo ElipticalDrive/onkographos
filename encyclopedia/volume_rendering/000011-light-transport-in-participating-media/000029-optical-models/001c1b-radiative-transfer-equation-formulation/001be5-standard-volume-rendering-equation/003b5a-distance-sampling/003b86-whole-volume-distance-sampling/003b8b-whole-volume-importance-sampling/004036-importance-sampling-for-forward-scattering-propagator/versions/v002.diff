@@ -1,0 +1,285 @@
+--- v001.md
++++ v002.md
+@@ -18,7 +18,7 @@
+ 
+ ### Data Structures
+-*   **Surface Point $\vec{x}_i$**: 3D coordinates on the object surface.
+-*   **Path Length $s$**: Scalar float representing distance traveled in the medium.
+-*   **Directions $\hat{\omega}_e^i, \hat{\omega}_i^i$**: Unit 3D vectors.
++*   **Surface Point $\vec{x}_i$**: 3D coordinates on the object surface [S1].
++*   **Path Length $s$**: Scalar float representing distance traveled in the medium [S1].
++*   **Directions $\hat{\omega}_e^i, \hat{\omega}_i^i$**: Unit 3D vectors [S1].
+ *   **MIS Weights**: Standard balance heuristic weights computed from the PDFs of the two sampling strategies [S1].
+ 
+@@ -29,5 +29,5 @@
+     *   **Method A (Offset Projection)**: Sample an offset in a plane passing through the origin point $\vec{x}_o$ (camera/previous vertex) and project this point onto the surface geometry [S1].
+     *   **Method B (Ballistic Peak)**: Sample a direction for the vector $\vec{R}$ based on the marginalization of the short length weight of the propagator (Eq. 10 in source) and shoot a ray along this direction to capture the initial ballistic peak [S1].
+-    *   *Note*: This step uses local information and ray-traced projection. It is performed first while the propagator marginalized over other dimensions is still broad and smooth [S1].
++    *   *Note*: This step uses local information and ray-traced projection [S1]. It is performed first while the propagator marginalized over other dimensions is still broad and smooth [S1].
+ 
+ 2.  **Indirect Sampling (Analytical Approximation)**:
+@@ -35,5 +35,5 @@
+     *   **Sample $s$**: Use an MIS combination of analytical limit results for $G_f$ in the regimes of large and small $ps$ (where $p$ is a parameter related to the dipole model) [S1].
+     *   **Sample $\hat{\omega}_e^i$**: Sample based on the exponential weight of $G_f$ (Eq. 9 in source) [S1].
+-    *   **Sample $\hat{\omega}_i^i$**: Use the boundary BSDF $f_s$ with the sampled $\hat{\omega}_e^i$ to sample the incident direction $\hat{\omega}_i^i$. Note that $\hat{\omega}_i^i$ may point back into the medium if internal reflection occurs [S1].
++    *   **Sample $\hat{\omega}_i^i$**: Use the boundary BSDF $f_s$ with the sampled $\hat{\omega}_e^i$ to sample the incident direction $\hat{\omega}_i^i$ [S1]. Note that $\hat{\omega}_i^i$ may point back into the medium if internal reflection occurs [S1].
+ 
+ 3.  **Direct Sampling (Next Event Estimation)**:
+@@ -52,103 +52,64 @@
+     """
+     Evaluates the rendering equation for the forward scattering propagator G_f^b.
+-    
+     Args:
+         x0: Camera/previous vertex position (vec3)
+         omega0_i: Incoming direction (vec3)
+-        surface: Surface geometry object with intersection and projection methods
+-        bsdf: Surface BSDF object with sample_pdf and eval methods
++        surface: Surface geometry object with intersection and normal methods
++        bsdf: Surface BSDF object with sample, sample_adjoint, and eval methods
+         lights: List of light sources
+         dipole_model: Forward scattering dipole model providing G_f approximations
+-        
+     Returns:
+         radiance: Estimated radiance L_i
+     """
+     
+-    # Step 1: Sample surface point x_i using MIS of two methods
++    # Step 1: Sample surface point x_i using one-sample MIS
+     # Method A: Offset projection
+-    offset_a = sample_offset_in_plane_through(x0)
+-    x_i_a, valid_a = project_offset_to_surface(offset_a, surface)
+-    pdf_a = compute_pdf_offset_projection(offset_a, surface)
++    offset_a = random_vector_in_plane_through(x0)  # [G]
++    x_i_a, valid_a = project_to_surface(x0, offset_a, surface)  # [G]
++    pdf_a = compute_pdf_offset_projection(offset_a, surface)  # [G]
+     
+     # Method B: Ballistic peak sampling
+-    # Marginalize short length weight of Eq. 10 to sample direction R
+-    direction_R = sample_direction_from_short_length_weight(dipole_model)
+-    ray = Ray(x0, direction_R)
+-    hit_b = surface.intersect(ray)
++    direction_R = sample_direction_from_short_length_weight(dipole_model)  # [S1]
++    hit_b = ray_intersect(x0, direction_R, surface)  # [G]
+     x_i_b = hit_b.point if hit_b else None
+-    pdf_b = compute_pdf_ballistic_sampling(direction_R, dipole_model)
+-    
+-    # Combine using MIS (one-sample balance heuristic)
++    pdf_b = compute_pdf_ballistic_sampling(direction_R, dipole_model)  # [S1]
++    
++    # MIS combination
+     if valid_a and x_i_b is not None:
+-        # Both valid, choose one based on weights
+         weight_a = pdf_a / (pdf_a + pdf_b)
+         if random() < weight_a:
+-            x_i = x_i_a
+-            pdf_x = pdf_a
+-            strategy = "A"
++            x_i, pdf_x, strategy = x_i_a, pdf_a, "A"
+         else:
+-            x_i = x_i_b
+-            pdf_x = pdf_b
+-            strategy = "B"
++            x_i, pdf_x, strategy = x_i_b, pdf_b, "B"
+     elif valid_a:
+-        x_i = x_i_a
+-        pdf_x = pdf_a
+-        strategy = "A"
++        x_i, pdf_x, strategy = x_i_a, pdf_a, "A"
+     elif x_i_b is not None:
+-        x_i = x_i_b
+-        pdf_x = pdf_b
+-        strategy = "B"
++        x_i, pdf_x, strategy = x_i_b, pdf_b, "B"
+     else:
+-        return 0.0 # No intersection found
+-
+-    normal = surface.normal(x_i)
+-    
+-    # Step 2 & 3: Sample s, omega_e_i, omega_i_i using Indirect and Direct strategies
+-    
+-    # --- Indirect Strategy ---
+-    # Sample s based on MIS of large and small ps limits
+-    s_indirect = sample_s_from_dipole_limits(dipole_model, x_i, x0)
+-    
+-    # Sample omega_e_i based on exponential weight of G_f (Eq. 9)
+-    omega_e_indirect = sample_direction_from_exponential_weight(dipole_model, x_i, x0, s_indirect)
+-    
+-    # Sample omega_i_i from BSDF given omega_e_indirect
+-    # Note: omega_i_i might point back into medium
+-    omega_i_indirect, pdf_bsdf_indirect = bsdf.sample(omega_e_indirect, x_i)
+-    
+-    # Evaluate indirect contribution
+-    # G_0^b is the ballistic propagator, G_f is the forward scattering propagator
+-    # The full integrand involves G_0^b and the BSDF term
+-    radiance_indirect = evaluate_indirect_path(
+-        x0, omega0_i, x_i, omega_e_indirect, omega_i_indirect, 
+-        s_indirect, normal, bsdf, dipole_model, lights
+-    )
+-    pdf_indirect = compute_pdf_indirect(s_indirect, omega_e_indirect, omega_i_indirect, dipole_model, bsdf)
+-    
+-    # --- Direct Strategy (Next Event Estimation) ---
+-    # Sample direction towards a light source
+-    light, omega_i_direct, pdf_light = sample_light_direction(x_i, lights)
+-    
+-    # Sample omega_e_i into medium using adjoint BSDF
+-    omega_e_direct, pdf_bsdf_direct = bsdf.sample_adjoint(omega_i_direct, x_i)
+-    
+-    # Sample s using specialized sampler given omega_e_direct
+-    s_direct = sample_s_specialized(dipole_model, x_i, x0, omega_e_direct)
+-    
+-    # Evaluate direct contribution
+-    radiance_direct = evaluate_direct_path(
+-        x0, omega0_i, x_i, omega_e_direct, omega_i_direct,
+-        s_direct, normal, bsdf, dipole_model, light
+-    )
+-    pdf_direct = compute_pdf_direct(s_direct, omega_e_direct, omega_i_direct, dipole_model, bsdf, pdf_light)
+-    
+-    # Combine Indirect and Direct using MIS
+-    # Total PDF for the 7D sample is the sum of the two strategy PDFs
++        return 0.0  # No intersection found
++    
++    normal = surface_normal(x_i)  # [G]
++    
++    # Step 2: Indirect Sampling
++    s_indirect = sample_s_from_dipole_limits(dipole_model, x_i, x0)  # [S1]
++    omega_e_indirect = sample_direction_from_exponential_weight(dipole_model, x_i, x0, s_indirect)  # [S1]
++    omega_i_indirect, pdf_bsdf_indirect = bsdf_sample(omega_e_indirect, x_i)  # [G]
++    
++    # Step 3: Direct Sampling
++    light, omega_i_direct, pdf_light = sample_light_direction(x_i, lights)  # [G]
++    omega_e_direct, pdf_bsdf_direct = bsdf_sample_adjoint(omega_i_direct, x_i)  # [G]
++    s_direct = sample_s_specialized(dipole_model, x_i, x0, omega_e_direct)  # [S1]
++    
++    # Evaluate contributions
++    radiance_indirect = evaluate_integrand(x0, omega0_i, x_i, omega_e_indirect, omega_i_indirect, s_indirect, normal, bsdf, dipole_model, lights)  # [G]
++    pdf_indirect = pdf_x * pdf_s_indirect * pdf_omega_e_indirect * pdf_bsdf_indirect  # [G]
++    
++    radiance_direct = evaluate_integrand(x0, omega0_i, x_i, omega_e_direct, omega_i_direct, s_direct, normal, bsdf, dipole_model, lights)  # [G]
++    pdf_direct = pdf_x * pdf_light * pdf_bsdf_direct * pdf_s_direct  # [G]
++    
++    # MIS combination
+     total_pdf = pdf_indirect + pdf_direct
+-    
+     if total_pdf == 0:
+         return 0.0
+-        
+-    # Weighted sum of contributions
+     weight_indirect = pdf_indirect / total_pdf
+     weight_direct = pdf_direct / total_pdf
+@@ -156,55 +117,73 @@
+     radiance = (radiance_indirect * weight_indirect / pdf_indirect) + \
+                (radiance_direct * weight_direct / pdf_direct)
+-               
+-    # Handle back-scattering into medium via path splitting if necessary
+-    if is_direction_back_into_medium(omega_i_direct, normal):
+-        radiance = radiance_split_throughput(radiance, path_throughput_so_far)
+-        
++    
++    # Throughput management for back-scattering
++    if is_direction_back_into_medium(omega_i_direct, normal):  # [G]
++        radiance = radiance_split_throughput(radiance, path_throughput_so_far)  # [S1]
++    
+     return radiance
+ 
+-def evaluate_indirect_path(x0, omega0_i, x_i, omega_e, omega_i, s, normal, bsdf, dipole_model, lights):
+-    """Evaluates the integrand for the indirect sampling strategy."""
+-    # G_0^b(s, x0, -omega0_i, x_i, omega_e) is the ballistic propagator
+-    G_ballistic = dipole_model.ballistic_propagator(s, x0, -omega0_i, x_i, omega_e)
+-    
+-    # Surface term: L_e + integral over incoming directions
+-    # For indirect, we approximate the incoming radiance L_i using the BSDF and potentially lights
+-    # Simplified: assume L_e is 0 or sampled, and L_i comes from BSDF evaluation
+-    # The term is: [ L_e(x_i, omega_e) + integral L_i(x_i, omega_i) f_s(...) |omega_i . n| ]
+-    
+-    # Evaluate BSDF
+-    fs = bsdf.eval(omega_i, omega_e, x_i)
+-    cos_theta = abs(dot(omega_i, normal))
+-    
+-    # Approximate L_i(x_i, omega_i) - in a full path tracer, this would be recursive
+-    # Here we assume the direct lighting contribution or previous path history
+-    # For the propagator evaluation, we often look at the direct term from lights
++def evaluate_integrand(x0, omega0_i, x_i, omega_e, omega_i, s, normal, bsdf, dipole_model, lights):
++    """Evaluates the integrand for the propagator rendering equation."""
++    G_ballistic = dipole_model.ballistic_propagator(s, x0, -omega0_i, x_i, omega_e)  # [S1]
++    fs = bsdf.eval(omega_i, omega_e, x_i)  # [G]
++    cos_theta = abs(dot(omega_i, normal))  # [G]
++    
+     L_i = 0.0
+     for light in lights:
+         if light.is_visible(x_i, omega_i):
+-            L_i += light.eval_radiance(x_i, omega_i)
++            L_i += light.eval_radiance(x_i, omega_i)  # [G]
+             
+-    surface_term = L_i + fs * cos_theta # Simplified surface term
+-    
+-    # Integrand value
+-    integrand = G_ballistic * abs(dot(omega_e, normal)) * surface_term
+-    
++    surface_term = L_i + fs * cos_theta  # [G]
++    integrand = G_ballistic * abs(dot(omega_e, normal)) * surface_term  # [G]
+     return integrand
+ 
+-def evaluate_direct_path(x0, omega0_i, x_i, omega_e, omega_i, s, normal, bsdf, dipole_model, light):
+-    """Evaluates the integrand for the direct sampling strategy."""
+-    G_ballistic = dipole_model.ballistic_propagator(s, x0, -omega0_i, x_i, omega_e)
+-    
+-    fs = bsdf.eval(omega_i, omega_e, x_i)
+-    cos_theta = abs(dot(omega_i, normal))
+-    
+-    # Direct lighting from the sampled light
+-    L_e_light = light.eval_radiance(x_i, omega_i)
+-    
+-    surface_term = L_e_light + fs * cos_theta
+-    
+-    integrand = G_ballistic * abs(dot(omega_e, normal)) * surface_term
+-    
+-    return integrand
++# Standard geometric and sampling helpers [G]
++def random_vector_in_plane_through(origin):
++    theta = random() * 2 * pi
++    return vec3(cos(theta), sin(theta), 0)
++
++def project_to_surface(origin, offset, surface):
++    ray = Ray(origin, offset)
++    hit = ray_intersect(ray, surface)
++    return hit.point if hit else None, hit is not None
++
++def compute_pdf_offset_projection(offset, surface):
++    return 1.0 / (2 * pi)  # Uniform in plane
++
++def sample_direction_from_short_length_weight(model):
++    # Marginalize short length weight of Eq. 10
++    return normalize(model.sample_short_length_marginal())
++
++def compute_pdf_ballistic_sampling(direction, model):
++    return model.short_length_pdf(direction)
++
++def sample_s_from_dipole_limits(model, x_i, x0):
++    # MIS of large and small ps limits
++    s_large = model.sample_large_ps_limit()
++    s_small = model.sample_small_ps_limit()
++    return s_large if random() < 0.5 else s_small
++
++def sample_direction_from_exponential_weight(model, x_i, x0, s):
++    # Sample based on exponential weight of G_f (Eq. 9)
++    return model.sample_exponential_weight(s)
++
++def bsdf_sample(omega_in, x):
++    return bsdf.sample_pdf(omega_in, x)
++
++def sample_light_direction(x, lights):
++    return lights[0].sample_direction(x)
++
++def bsdf_sample_adjoint(omega_out, x):
++    return bsdf.sample_adjoint(omega_out, x)
++
++def sample_s_specialized(model, x_i, x0, omega_e):
++    return model.specialized_path_length_sampler(omega_e)
++
++def is_direction_back_into_medium(omega, normal):
++    return dot(omega, normal) < 0
++
++def radiance_split_throughput(radiance, throughput):
++    return radiance / max(throughput, 1e-6)
+ ```
+ 

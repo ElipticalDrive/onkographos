@@ -1,0 +1,180 @@
+--- v001.md
++++ v002.md
+@@ -4,36 +4,34 @@
+ 
+ ## Overview
+-CPU-Based Splat Sorting is a method for ordering 3D Gaussian splats for correct front-to-back alpha blending by performing the sort operation on the CPU, often asynchronously in a background thread [S1, unofficial]. It solves the problem of rendering order dependency in transparent splatting without incurring the high latency and complexity of GPU-based sorting algorithms like bitonic sort [S1, unofficial]. It differs from GPU sorting by offloading the $O(N \log N)$ comparison work to the CPU, allowing the GPU to focus exclusively on rendering, and from depth-based sorting variants by relying on a simple depth projection rather than complex opacity-weighted keys [S2, unofficial].
++CPU-Based Splat Sorting is a method for ordering volumetric primitives (specifically 3D Gaussian splats) on the central processing unit to enable correct front-to-back alpha blending. It solves the problem of transparency artifacts in object-order rendering by ensuring splats are drawn from nearest to farthest relative to the camera. It differs from GPU-based sorting (e.g., bitonic sort) by offloading the $O(N \log N)$ sorting overhead to the CPU, allowing the GPU to dedicate its resources entirely to rasterization and blending, which is particularly beneficial in constrained environments like web browsers [S1, S2, S3, unofficial].
+ 
+ ## How it works
+-The method computes a depth value for each splat, sorts the splats by this depth, and outputs a permutation index buffer for the GPU to read [S2, unofficial].
++The method transforms splat positions into view space, extracts a depth metric, and sorts the splats based on this metric. The sorted indices are then used to index into the splat data buffer during rendering.
+ 
+-**Inputs:**
+-- `viewProj`: A $4 \times 4$ view-projection matrix [S2, unofficial].
+-- `positions`: An array of $N$ 3D positions (interleaved $x, y, z$ floats) [S2, unofficial].
+-- `vertexCount`: The number of splats $N$ [S2, unofficial].
++### Inputs and Outputs
++*   **Inputs:**
++    *   `viewProj`: A $4 \times 4$ Model-View-Projection matrix [S2, unofficial].
++    *   `positions`: An array of $N$ 3D positions, typically interleaved as $(x, y, z)$ floats [S2, unofficial].
++    *   `vertexCount` ($N$): The number of splats [S2, unofficial].
++*   **Outputs:**
++    *   `depthIndex`: A vector of $N$ unsigned integers representing the original indices of the splats, sorted by depth [S2, unofficial].
+ 
+-**Outputs:**
+-- `depthIndex`: A vector of $N$ unsigned integers representing the original indices of the splats, sorted from front (smallest depth) to back (largest depth) [S2, unofficial].
++### Data Structures
++The core data structure for sorting is a vector of pairs (or a struct), where each element contains:
++1.  `depth`: A floating-point value representing the splat's distance from the camera (or projected Z-depth) [S2, unofficial].
++2.  `original_index`: The index of the splat in the original `positions` array [S2, unofficial].
+ 
+-**Data Structures:**
+-- `SplatSortEntry`: A struct or pair containing:
+-  - `depth`: A float representing the projected depth [S2, unofficial].
+-  - `original_index`: A uint32_t representing the index in the original `positions` array [S2, unofficial].
++### Steps
++1.  **Project Positions:** For each splat $i$ with position $\mathbf{p}_i = (x_i, y_i, z_i)$:
++    *   Construct a homogeneous vector $\mathbf{v}_i = (x_i, y_i, z_i, 1.0)$.
++    *   Compute the projected vector $\mathbf{p}'_i = \text{viewProj} \times \mathbf{v}_i$.
++    *   Extract the depth $d_i$. The sources specify using the normalized device coordinate Z:
++        $$ d_i = \frac{p'_i.z}{p'_i.w} $$
++        [S2, unofficial].
++2.  **Store Pairs:** Create a list of pairs $L = [(d_0, 0), (d_1, 1), \dots, (d_{N-1}, N-1)]$.
++3.  **Sort:** Sort the list $L$ in ascending order of $d_i$ (smallest depth first, i.e., closest to camera) using a standard comparison sort (e.g., Quicksort or Mergesort) [S2, S1, unofficial].
++4.  **Extract Indices:** Create the output `depthIndex` vector by extracting the `original_index` from each pair in the sorted list $L$.
+ 
+-**Steps:**
+-1.  **Project Depth:** For each splat $i$ from $0$ to $N-1$:
+-    - Retrieve the 3D position $P_i = (x_i, y_i, z_i)$ from `positions`.
+-    - Compute the homogeneous clip-space position:
+-      $$ V = \text{viewProj} \times \begin{bmatrix} x_i \\ y_i \\ z_i \\ 1 \end{bmatrix} $$
+-    - Extract the depth:
+-      $$ d_i = \frac{V_z}{V_w} $$
+-    - Store the pair $(d_i, i)$ in a temporary list [S2, unofficial].
+-
+-2.  **Sort:** Sort the list of pairs based on $d_i$ in ascending order (smallest $d_i$ first) [S2, unofficial].
+-
+-3.  **Extract Indices:** Create the output `depthIndex` vector by extracting the `original_index` from each pair in the sorted list [S2, unofficial].
+-
+-**Pseudocode:**
++### Pseudocode
+ ```python
+ def cpu_splat_sort(view_proj_matrix, positions, vertex_count):
+@@ -49,61 +47,83 @@
+         sorted_indices: List of integers
+     """
+-    # Step 1: Compute depth for each splat
+-    splat_data = []
++    # Step 1 & 2: Project and store pairs
++    depth_index_pairs = []
++    
+     for i in range(vertex_count):
+         x, y, z = positions[i]
+         
+-        # Homogeneous transformation
+-        # Assuming row-major matrix multiplication: V = M * P
+-        # P is column vector [x, y, z, 1]
+-        wx = view_proj_matrix[0][0]*x + view_proj_matrix[1][0]*y + view_proj_matrix[2][0]*z + view_proj_matrix[3][0]
+-        wy = view_proj_matrix[0][1]*x + view_proj_matrix[1][1]*y + view_proj_matrix[2][1]*z + view_proj_matrix[3][1]
+-        wz = view_proj_matrix[0][2]*x + view_proj_matrix[1][2]*y + view_proj_matrix[2][2]*z + view_proj_matrix[3][2]
+-        ww = view_proj_matrix[0][3]*x + view_proj_matrix[1][3]*y + view_proj_matrix[2][3]*z + view_proj_matrix[3][3]
++        # Homogeneous coordinate
++        # v = [x, y, z, 1.0]
+         
+-        # Perspective divide
+-        depth = wz / ww
++        # Matrix multiplication: p' = viewProj * v
++        # p'_x = M[0][0]*x + M[0][1]*y + M[0][2]*z + M[0][3]*1.0
++        # p'_y = M[1][0]*x + M[1][1]*y + M[1][2]*z + M[1][3]*1.0
++        # p'_z = M[2][0]*x + M[2][1]*y + M[2][2]*z + M[2][3]*1.0
++        # p'_w = M[3][0]*x + M[3][1]*y + M[3][2]*z + M[3][3]*1.0
+         
+-        splat_data.append((depth, i))
++        px = view_proj_matrix[0][0]*x + view_proj_matrix[0][1]*y + view_proj_matrix[0][2]*z + view_proj_matrix[0][3]
++        py = view_proj_matrix[1][0]*x + view_proj_matrix[1][1]*y + view_proj_matrix[1][2]*z + view_proj_matrix[1][3]
++        pz = view_proj_matrix[2][0]*x + view_proj_matrix[2][1]*y + view_proj_matrix[2][2]*z + view_proj_matrix[2][3]
++        pw = view_proj_matrix[3][0]*x + view_proj_matrix[3][1]*y + view_proj_matrix[3][2]*z + view_proj_matrix[3][3]
+         
+-    # Step 2: Sort by depth (ascending)
+-    # Using a stable sort is not strictly required but often preferred for consistency
+-    splat_data.sort(key=lambda item: item[0])
++        # Extract depth
++        # Note: Division by zero check is implied for valid view frustum points [G]
++        if pw == 0:
++            depth = float('inf')
++        else:
++            depth = pz / pw
++            
++        depth_index_pairs.append((depth, i))
++        
++    # Step 3: Sort by depth (ascending)
++    # Using a stable sort or standard comparison sort
++    depth_index_pairs.sort(key=lambda pair: pair[0])
+     
+-    # Step 3: Extract indices
+-    sorted_indices = [item[1] for item in splat_data]
++    # Step 4: Extract indices
++    sorted_indices = [pair[1] for pair in depth_index_pairs]
+     
+     return sorted_indices
+ ```
+ 
+-**Parameters:**
+-- Typical implementation runs asynchronously in a WebWorker [S1, unofficial].
+-- No specific kernel parameters are required as it relies on standard projection [S2, unofficial].
++### Parameters and Tuning
++*   **Integer vs. Floating-Point Sort:** Some implementations offer a parameter `integerBasedSort` [S3, unofficial]. If `true`, it uses integer-based distance calculations for performance; if `false`, it forces a slower floating-point sort, which is necessary for scenes with very large dimensions or high splat density where integer precision fails [S3, unofficial].
++*   **Distance Map Precision:** The parameter `splatSortDistanceMapPrecision` adjusts the precision of the distance map used in the sort. Larger values reduce visual artifacts caused by low precision but decrease performance [S3, unofficial].
+ 
+-**Edge Cases and Pitfalls:**
+-- **Rapid Camera Movement:** If the camera jumps between opposite sides of the scene, the Z-order may not update fast enough relative to the render loop, causing momentary transparency artifacts [S1, unofficial].
+-- **Precision:** Standard float precision is used for depth calculation [S2, unofficial].
+-- **Performance:** Sorting ~1M splats takes approximately 150ms on a typical CPU [S1, unofficial].
++### Edge Cases and Pitfalls
++*   **Camera Movement Artifacts:** Rapid camera movement (e.g., jumping between opposite sides) causes momentary transparency artifacts because the Z-order does not update fast enough relative to the render loop [S1, S3, unofficial]. The sort runs asynchronously (e.g., in a WebWorker), leading to a latency where the rendered order lags behind the actual camera position [S1, unofficial].
++*   **Large Dimensions:** Scenes with very large spatial dimensions may cause "Index out of bounds" errors or crashes during the sort, particularly when using integer-based sorting or low precision settings [S3, unofficial].
++*   **Performance Overhead:** Sorting is computationally expensive on the CPU. For ~1 million splats, sorting takes approximately 150ms, resulting in a sort rate of ~4fps, while the main render loop targets 60fps [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Splat Sorting Key Calculation](2106-splat-sorting-key-calculation.md)
+-Calculates a scalar key combining projected size and opacity to prioritize important splats, differing from simple depth sorting by ignoring camera distance in favor of visual contribution.
++This variant calculates a scalar key for each 3D Gaussian splat to determine rendering order, prioritizing "important" splats (large and opaque) over simple depth. It differs from standard depth-based sorting by ignoring camera distance in favor of visual contribution, which is more robust for Gaussian splats where size varies significantly per splat. It is chosen when correct alpha blending is required but depth alone is insufficient due to varying splat opacities and sizes. See [Splat Sorting Key Calculation](2106-splat-sorting-key-calculation.md).
+ 
+ ### [CPU Fallback Sort Path](5586-cpu-fallback-sort-path.md)
+-A specific implementation variant that uses a shader-readable structured buffer instead of GPU UAVs, chosen when GPU compute capabilities are insufficient or to avoid bitonic sort overhead.
++This path provides a CPU-side sorting and rendering fallback when GPU compute sorting is disabled or unavailable. It differs from GPU-based approaches by utilizing a shader-readable structured buffer instead of append/unordered access view (UAV) buffers, allowing the CPU to manage the sorting pipeline while the GPU focuses on rendering. It is chosen when GPU compute capabilities are insufficient or when avoiding the overhead of GPU sorting algorithms like bitonic sort is necessary. See [CPU Fallback Sort Path](5586-cpu-fallback-sort-path.md).
++
++### WASM/SIMD CPU Splat Sorting
++A specific implementation of CPU-based sorting optimized for web environments using WebAssembly (WASM) and SIMD instructions. It sorts splats by distance from the camera for correct alpha blending. It differs from generic CPU sorts by leveraging SIMD parallelism for performance. It is chosen for web-based Gaussian splatting viewers to balance performance and compatibility. Pitfalls include artifacts during fast rotation/movement and potential crashes in scenes with very large dimensions. See [WASM/SIMD CPU Splat Sorting](2106-splat-sorting-key-calculation.md) (Note: No dedicated article exists, details merged here).
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N \log N)$ for comparison-based sorting (e.g., Quicksort/Mergesort) [S1, unofficial].
+-- **Measured Performance:** Sorting ~1M splats takes ~150ms, resulting in a sort rate of approximately 4fps, while the main render runs at 60fps [S1, unofficial].
+-- **Memory Complexity:** $O(N)$ to store the depth-index pairs and the output index buffer [S2, unofficial].
+-- **Strengths:** Allows the GPU to focus entirely on rendering, avoiding the latency overhead of GPU sorting algorithms like bitonic sort which require many iterations [S1, unofficial].
+-- **Limitations:** The CPU sort is significantly slower than the GPU render loop (4fps vs 60fps), leading to potential visual artifacts during rapid camera transitions [S1, unofficial].
+-- **When to use:** When GPU sorting is unavailable, too complex to implement, or when the CPU is underutilized and can handle the asynchronous sort without blocking the render thread [S1, unofficial].
++*   **Time Complexity:** $O(N \log N)$ for the sorting step, where $N$ is the number of splats [S1, unofficial].
++*   **Memory Complexity:** $O(N)$ to store the depth-index pairs and the sorted index array [S2, unofficial].
++*   **Performance:** Sorting ~1 million splats on a CPU takes approximately 150ms, yielding a sorting throughput of ~4fps [S1, unofficial]. This is significantly slower than the target render rate of 60fps [S1, unofficial].
++*   **Strengths:**
++    *   Offloads sorting overhead from the GPU, allowing the GPU to focus entirely on rasterization and blending [S1, unofficial].
++    *   Avoids the complexity and overhead of implementing GPU-side sorting algorithms like bitonic sort [S1, unofficial].
++    *   Suitable for web environments where GPU compute shaders might be limited or unavailable [S1, S3, unofficial].
++*   **Limitations:**
++    *   High latency in updating the sort order leads to visual artifacts during rapid camera movement [S1, S3, unofficial].
++    *   CPU sorting is a bottleneck for large scenes ($N > 10^6$) [S1, unofficial].
++    *   Precision issues in large scenes can lead to crashes or incorrect ordering [S3, unofficial].
++*   **When to Use:** Web-based viewers, environments without GPU compute support, or when GPU resources are fully utilized by rendering tasks.
++*   **When Not to Use:** Real-time applications requiring strict synchronization between camera movement and transparency resolution, or scenes with extremely high splat counts where CPU sorting latency is unacceptable.
+ 
+ ## Background
+-The method was popularized in the context of web-based 3D Gaussian Splatting implementations, where file size reduction and browser compatibility are critical [S1, unofficial]. It was adopted as a fallback or primary strategy when GPU-based sorting (like bitonic sort) was deemed too heavy or when simpler transparency methods like stochastic transparency or weighted blended order-independent transparency failed to produce satisfactory results [S1, unofficial].
++CPU-based splat sorting emerged as a practical solution for rendering 3D Gaussian Splatting in web browsers, where GPU compute capabilities for sorting (e.g., via WebGPU compute shaders) were either unavailable or too complex to implement efficiently compared to the rendering pipeline. The approach was popularized by implementations like `antimatter15/splat`, which utilized WebWorkers to perform asynchronous sorting on the CPU [S1, unofficial]. It serves as a fallback or alternative to GPU-based sorting methods like bitonic sort, which, while parallelizable, introduce overhead and complexity to the GPU rendering loop [S1, unofficial]. The method is also found in libraries like `mkkellogg/GaussianSplats3D`, which offers WASM/SIMD optimizations for this CPU-based approach [S3, unofficial].
+ 
+ ## Sources
+ [S1] antimatter15/splat, https://github.com/antimatter15/splat, fetched 2026-10-27 (unofficial)
+-[S2] liaozhangsheng/gsplat-opengl, https://github.com/liaozhangsheng/gsplat-opengl, fetched 2026-10-28 (unofficial)+[S2] liaozhangsheng/gsplat-opengl, https://github.com/liaozhangsheng/gsplat-opengl, fetched 2026-10-28 (unofficial)
++[S3] mkkellogg/GaussianSplats3D, https://github.com/mkkellogg/GaussianSplats3D, fetched 2026-10-27 (unofficial)

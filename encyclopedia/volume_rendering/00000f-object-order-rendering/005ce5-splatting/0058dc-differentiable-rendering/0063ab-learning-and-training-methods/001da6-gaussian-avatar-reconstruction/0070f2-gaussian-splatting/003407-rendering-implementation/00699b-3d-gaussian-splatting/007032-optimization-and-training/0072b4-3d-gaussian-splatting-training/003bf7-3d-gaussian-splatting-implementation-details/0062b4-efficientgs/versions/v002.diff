@@ -1,0 +1,111 @@
+--- v001.md
++++ v002.md
+@@ -1,5 +1,4 @@
+ # EfficientGS
+ 
+-Also called: EfficientGS
+ 
+ ## Overview
+@@ -35,46 +34,64 @@
+ **Pseudocode:**
+ ```python
+-def efficient_gs_training(sfm_points, images, camera_poses, num_iterations):
+-    # 1. Initialization
+-    gaussians = initialize_from_sfm(sfm_points)
++def efficient_gs_training(sfm_points, images, camera_poses, num_iterations, densification_interval, pruning_interval, sh_increment_interval):
++    # 1. Initialization: Initialize Gaussians from sparse SFM points [S1]
++    gaussians = []
++    for p in sfm_points:
++        gaussians.append(Gaussian(mu=p.position, R=identity_matrix(), S=scale_vector(1.0), opacity=0.8, SH_coeffs=zero_vector()))
++        
++    # Parameters [S1]
++    densification_threshold = 0.0001  # Gradient modulus sum threshold [G]
++    pruning_threshold = 0.01          # Ray contribution threshold [G]
++    sh_disparity_threshold = 0.05     # Color disparity threshold [G]
++    pruning_start_iteration = 3000    # Iteration to begin pruning phase [G]
+     
+-    # 2. Iterative Optimization Loop
+     for iteration in range(num_iterations):
+-        # Render current view
+-        rendered_image = render(gaussians, camera_poses)
+-        
+-        # Compute loss
+-        loss = compute_color_loss(rendered_image, images)
+-        
+-        # Backpropagate and update parameters
+-        update_parameters(gaussians, loss)
+-        
+-        # 3. Selective Densification (Every few iterations)
++        # 2. Iterative Optimization: Differentiable rasterization and color loss [S1]
++        rendered_image = zeros_like(images)
++        for g in gaussians:
++            projected_cov = project_covariance_3d_to_2d(g.mu, g.R, g.S, camera_poses)
++            rendered_image += alpha_blend(rendered_image, g.opacity, projected_cov)
++        loss = mean_squared_error(rendered_image, images)
++        for g in gaussians:
++            g.mu -= learning_rate * g.mu.grad
++            g.R -= learning_rate * g.R.grad
++            g.S -= learning_rate * g.S.grad
++            g.opacity -= learning_rate * g.opacity.grad
++            g.SH_coeffs -= learning_rate * g.SH_coeffs.grad
++            
++        # 3. Selective Densification: Every few iterations, check steady state via gradient modulus sum [S1]
+         if iteration % densification_interval == 0:
+-            # Calculate gradient modulus sum for each Gaussian
+-            grad_sum = compute_gradient_modulus_sum(gaussians)
+-            
+-            # Identify non-steady state Gaussians
+-            non_steady = select_non_steady_gaussians(grad_sum, threshold)
+-            
+-            # Densify only non-steady Gaussians
+-            gaussians = densify(gaussians, non_steady)
+-            
+-        # 4. Pruning (After several densifications)
+-        if iteration % pruning_interval == 0:
+-            # Remove auxiliary Gaussians with minimal contribution
+-            gaussians = prune_gaussians(gaussians, ray_contribution_threshold)
+-            
+-            # Optimize SH of remaining Gaussians
+-            optimize_sh(gaussians)
+-            
+-        # 5. Sparse SH Order Increment (After pruning)
+-        if iteration > pruning_start_iteration:
+-            if iteration % sh_increment_interval == 0:
+-                # Assess need for higher-order SH based on color disparity
+-                color_disparity = compute_color_disparity(gaussians, images)
++            grad_sums = [sum(abs(g.mu.grad) + abs(g.R.grad) + abs(g.S.grad)) for g in gaussians]
++            non_steady_indices = [i for i, s in enumerate(grad_sums) if s > densification_threshold]
++            new_gaussians = []
++            for i, g in enumerate(gaussians):
++                if i in non_steady_indices:
++                    new_gaussians.append(clone_gaussian(g))
++                    new_gaussians.append(split_gaussian(g))
++                else:
++                    new_gaussians.append(g)
++            gaussians = new_gaussians
+                 
+-                # Increase SH order only where needed
+-                gaussians = increment_sh_order(gaussians, color_disparity, threshold)
++        # 4. Pruning: After several densifications, remove auxiliary Gaussians with minimal ray contribution [S1]
++        if iteration >= pruning_start_iteration and iteration % pruning_interval == 0:
++            ray_contributions = [0.0] * len(gaussians)
++            for g in gaussians:
++                ray_contributions[gaussians.index(g)] += g.opacity
++            to_remove = [i for i, c in enumerate(ray_contributions) if c < pruning_threshold]
++            gaussians = [g for i, g in enumerate(gaussians) if i not in to_remove]
++            optimize_sh(gaussians) # Optimize SH of remaining Gaussians [S1]
++                
++        # 5. Sparse SH Order Increment: Do not start until after pruning. Assess need based on color disparity [S1]
++        if iteration > pruning_start_iteration and iteration % sh_increment_interval == 0:
++            color_disparities = []
++            for g in gaussians:
++                max_disp = 0.0
++                for img, cam in zip(images, camera_poses):
++                    disp = abs(render_gaussian_color(g, cam) - sample_image_at_gaussian(img, g))
++                    max_disp = max(max_disp, disp)
++                color_disparities.append(max_disp)
++            to_increment = [i for i, d in enumerate(color_disparities) if d > sh_disparity_threshold]
++            for i in to_increment:
++                gaussians[i].SH_coeffs = increase_sh_band(gaussians[i].SH_coeffs)
+                 
+     return gaussians

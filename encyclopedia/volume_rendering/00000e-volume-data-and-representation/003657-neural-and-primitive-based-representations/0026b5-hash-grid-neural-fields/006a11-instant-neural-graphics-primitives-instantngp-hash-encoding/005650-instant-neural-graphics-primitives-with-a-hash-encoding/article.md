@@ -1,0 +1,114 @@
+# Instant Neural Graphics Primitives with a Hash Encoding
+
+Also called: Instant Neural Graphics Primitives with a Multiresolution Hash Encoding, Instant-NGP Multi-Resolution Hash Encoding
+
+## Overview
+Instant Neural Graphics Primitives with a Hash Encoding (Instant-NGP) drastically reduces Neural Radiance Field (NeRF) training time from days to minutes and enables interactive rendering by replacing traditional positional encoding with a multi-resolution hash grid [S2, unofficial]. It maps 3D coordinates to a sparse set of learnable feature vectors via spatial hashing, allowing the network to capture high-frequency details with significantly fewer queries than dense grid structures [S2, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** 3D spatial coordinates $\mathbf{x} \in \mathbb{R}^3$ and auxiliary inputs (e.g., view direction) [S3, abstract only].
+*   **Output:** A concatenated feature vector $\mathbf{v} \in \mathbb{R}^{L \times C}$ fed into a small neural network (MLP) to predict density and color [S3, abstract only].
+
+**Data Structures**
+The method employs a multi-resolution hash grid consisting of $L$ levels [S3, abstract only].
+*   **Level $l$ ($0 \le l < L$):** Defined by a grid resolution $R_l$ (voxels per axis) and a fixed-size hash table of size $T_l$ [S3, abstract only].
+*   **Hash Table:** An array of size $T_l$ storing trainable feature vectors [S2, unofficial]. Each entry (bucket) holds a vector of dimension $C$ (default $C=2$) [S3, abstract only].
+*   **Coordinate System:** The 3D space is discretized into voxel cubes [S1]. For a given resolution $R_l$, coordinates are mapped to the grid space $[0, R_l]^3$ [G].
+
+**Algorithm Steps**
+1.  **Ray Sampling & Empty Space Skipping:** Place sampling points along virtual rays from an object-centric perspective and skip all empty space until the object surface is hit, utilizing 10–100× fewer steps than naive dense stepping [S1][S2, unofficial].
+2.  **Voxel Corner Identification:** For each sampling point, identify the $2^d$ voxel corners surrounding it at each level $l$ [S3, abstract only].
+3.  **Hash Index Calculation:** Map each corner's integer grid coordinates $\mathbf{x}_l$ to a bucket index using the spatial hash function [S1]:
+    $$ h(\mathbf{x}) = \left( \bigoplus_{i=1}^{d} x_i \pi_i \right) \mod T_l $$
+    Where $d=3$ is the dimensionality, $x_i$ are the integer coordinates of the voxel vertex, $\pi_i$ are distinct prime constants, $\oplus$ denotes bitwise XOR, and $T_l$ is the hash table size for level $l$ [S1].
+4.  **Feature Retrieval:** Retrieve the learned feature vector $\mathbf{f}_{l,k}$ from the hash table at index $h(\mathbf{x}_{l,k})$ for each of the $2^d$ corners [S3, abstract only].
+5.  **Trilinear Interpolation:** Weight the retrieved features by the sampling point's fractional distance to each corner to generate a single interpolated feature vector per level [S1][S3, abstract only].
+6.  **Concatenation:** Concatenate the interpolated feature vectors from all $L$ levels together with any auxiliary inputs [S3, abstract only].
+7.  **Network Input & Training:** Feed the concatenated encoded input to a small MLP; backpropagate gradients from the MLP through the network and interpolation to update the looked-up feature vectors [S3, abstract only].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+# Constants for 3D hashing (d=3)
+PRIMES = (2654435761, 2246822519, 3266489917)
+
+def compute_hash_index(coords, table_size):
+    x, y, z = coords
+    h = (x * PRIMES[0]) ^ (y * PRIMES[1]) ^ (z * PRIMES[2])
+    return h % table_size
+
+def get_features_from_grid(grid_hash_tables, level_idx, point_3d):
+    table = grid_hash_tables[level_idx]
+    table_size = len(table)
+    
+    # Determine voxel corner coordinates
+    x0, y0, z0 = math.floor(point_3d[0]), math.floor(point_3d[1]), math.floor(point_3d[2])
+    fx, fy, fz = point_3d[0] - x0, point_3d[1] - y0, point_3d[2] - z0
+    
+    # Retrieve features for all 8 corners
+    features = []
+    for dx in (0, 1):
+        for dy in (0, 1):
+            for dz in (0, 1):
+                idx = compute_hash_index((x0 + dx, y0 + dy, z0 + dz), table_size)
+                features.append(table[idx])
+                
+    # Trilinear interpolation
+    c000, c100, c010, c110, c001, c101, c011, c111 = features
+    
+    c00 = c000 * (1 - fx) + c100 * fx
+    c01 = c010 * (1 - fx) + c110 * fx
+    c10 = c001 * (1 - fx) + c101 * fx
+    c11 = c011 * (1 - fx) + c111 * fx
+    
+    c0 = c00 * (1 - fy) + c01 * fy
+    c1 = c10 * (1 - fy) + c11 * fy
+    
+    return c0 * (1 - fz) + c1 * fz
+
+def encode_point(point_3d, grid_hash_tables, levels):
+    final_features = []
+    for l, R in enumerate(levels):
+        scaled_point = [p * R for p in point_3d]
+        feat = get_features_from_grid(grid_hash_tables, l, scaled_point)
+        final_features.append(feat)
+        
+    # Explicit concatenation of feature vectors
+    concatenated = []
+    for vec in final_features:
+        concatenated.extend(vec)
+    return concatenated
+```
+
+**Parameters**
+*   **Hash Table Size ($T_l$):** Tuned per task; significantly smaller than $R_l^3$ [S2, unofficial][S3, abstract only].
+*   **Number of Levels ($L$):** 16 in the reported default configuration [S3, abstract only].
+*   **Resolutions ($R_l$):** Grow geometrically from coarse to fine; finest resolution tuned per task [S3, abstract only].
+*   **Feature Dimension ($C$):** 2 in the reported default configuration [S3, abstract only].
+*   **Hash Function Choice:** Simple hashing is fast but lacks coherence; advanced methods (e.g., PCG32) add overhead without clear quality improvements [S2, unofficial].
+
+**Edge Cases and Pitfalls**
+*   **Hash Collisions:** Collisions cause grainy noise in outputs (e.g., SDFs) and aliasing of distinct points at fine levels, requiring filtering, smoothness priors, or reliance on the network to disambiguate collisions [S2, unofficial][S3, abstract only].
+*   **Precision & Boundaries:** Integer grid coordinates must be correctly clamped or handled at boundaries to avoid out-of-bounds hash lookups [G].
+*   **Gradient Dominance:** During training, gradients from more consequential samples dominate the averaged update to a shared entry, helping manage collision artifacts [S3, abstract only].
+
+## Operating characteristics
+*   **Time Complexity:** Training time is reduced to minutes, compared to hours or days for traditional NeRF [S2, unofficial].
+*   **Memory Complexity:** Uses a hash table of size $T$ instead of allocating $R^3$ vectors, significantly reducing memory usage [S2, unofficial].
+*   **Performance:** Enables interactive rendering at tens of frames per second, with rendering speeds of tens of milliseconds at 1920×1080 resolution [S2, unofficial][S3, abstract only]. Neural radiance caching achieves 133 FPS with hash encoding versus 147 FPS with triangle-wave encoding, with 0.7 ms overhead including training and runtime [S3, abstract only].
+*   **Strengths:** Fast training, interactive rendering, compact representation of high-frequency details, and trivial parallelization on modern GPUs [S2, unofficial][S3, abstract only].
+*   **Limitations:** Hash collisions cause visible roughness; simple hashing lacks spatial coherence; smaller MLP may underperform on complex view-dependent reflections compared to larger networks [S2, unofficial][S3, abstract only].
+*   **When to use:** When fast training and interactive rendering are required, and the scene can be represented with a hash grid [S2, unofficial].
+*   **When not to use:** When high coherence in the hash function is critical, or when dealing with sparse volumetric data like clouds [S2, unofficial].
+
+## Background
+Instant Neural Graphics Primitives with a Hash Encoding was introduced by Thomas Mueller, Alex Evans, Christoph Schied, and Alexander Keller in 2022 [S2, unofficial]. It builds on prior work to make input encoding trainable along with the weights of the network [S2, unofficial]. The method was developed to address the limitations of NeRF, specifically its expensive training time and slow inference [S2, unofficial]. It is applied to four tasks: gigapixel images, signed distance functions (SDFs), neural radiance caching (NRC), and NeRF [S3, abstract only].
+
+## Sources
+[S1] Performance Evaluation and Optimization of 3D Gaussian Splatting in Indoor Scene Generation and Rendering, https://doi.org/10.3390/ijgi14010021, fetched 2026-10-26
+[S2] Lecture 7 – Neural Radiance Fields Prof. Dr., https://virtualhumans.mpi-inf.mpg.de/3DVision25/slides25/pdf/Lecture_07_Neural_Radiance_Fields.pdf, fetched 2026-10-27 (unofficial)
+[S3] Instant Neural Graphics Primitives with a Multiresolution ..., https://alphaxiv.org/abs/2201.05989v2, fetched 2026-10-28 (abstract only)

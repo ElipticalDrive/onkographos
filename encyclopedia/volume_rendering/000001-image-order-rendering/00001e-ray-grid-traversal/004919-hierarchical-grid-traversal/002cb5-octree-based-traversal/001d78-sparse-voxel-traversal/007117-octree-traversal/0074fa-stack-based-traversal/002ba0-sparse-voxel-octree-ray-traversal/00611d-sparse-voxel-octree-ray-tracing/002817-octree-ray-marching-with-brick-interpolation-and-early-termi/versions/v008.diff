@@ -1,0 +1,228 @@
+--- v007.md
++++ v008.md
+@@ -4,30 +4,32 @@
+ 
+ ## Overview
+-This method performs volume rendering on a Sparse Voxel Octree (SVO) by traversing the tree structure and sampling data stored in "bricks" (small, fixed-size blocks of voxels) rather than individual leaf voxels. It solves the problem of inefficient memory access and cache thrashing in large-volume rendering by grouping data into bricks, which improves texture cache utilization and reduces traversal overhead compared to single-voxel stepping [S1, unofficial]. It sets itself apart from sibling methods like [SVO Ray Marching with Stack-Based Navigation](2454-svo-ray-marching-with-stack-based-navigation.md) by explicitly handling interpolation between bricks of different resolutions and using early termination based on accumulated opacity to skip empty space, whereas [Octree Voxel Raycasting for Hover (Closest Active Voxel)](3219-octree-voxel-raycasting-for-hover-closest-active-voxel.md) focuses on finding the nearest surface rather than full volume integration.
++This method performs volume rendering on a Sparse Voxel Octree (SVO) by traversing the tree structure and sampling data stored in "bricks" (small, fixed-size blocks of voxels) rather than individual leaf voxels [S1, unofficial]. It solves the problem of inefficient memory access and cache thrashing in large-volume rendering by grouping data into bricks, which improves texture cache utilization and reduces traversal overhead compared to single-voxel stepping [S1, unofficial]. It sets itself apart from sibling methods like [SVO Ray Marching with Stack-Based Navigation](2454-svo-ray-marching-with-stack-based-navigation.md) by explicitly handling interpolation between bricks of different resolutions and using early termination based on accumulated opacity to skip empty space, whereas [Octree Voxel Raycasting for Hover (Closest Active Voxel)](3219-octree-voxel-raycasting-for-hover-closest-active-voxel.md) focuses on finding the nearest surface rather than full volume integration [G].
+ 
+ ## How it works
+ **Inputs:**
+-- Ray origin $O$ and direction $D$ in world coordinates.
+-- SVO root node pointer.
+-- Volume bounding box extents $V_{min}$ and $V_{max}$.
+-- Current camera projection parameters (to compute projected voxel size).
+-- Brick dimensions ($B_x, B_y, B_z$) and border sizes.
+-- Maximum nodes to push per frame ($MaxNodesToPushThisFrame$) and reset threshold ($maxNodesPerPixelBlock$).
++- Ray origin $O$ and direction $D$ in world coordinates [G].
++- SVO root node pointer [S1, unofficial].
++- Volume bounding box extents $V_{min}$ and $V_{max}$ [S1, unofficial].
++- Projected voxel size $projVoxelSize$ [S1, unofficial].
++- Parent voxel size $parentVoxelSize$ [S1, unofficial].
++- Brick dimensions and border sizes [S1, unofficial].
++- Maximum nodes to push per frame $MaxNodesToPushThisFrame$ and reset threshold $maxNodesPerPixelBlock$ [S1, unofficial].
+ 
+ **Outputs:**
+-- Final color $C$ and opacity $\alpha$ for the pixel.
+-- Updated node usage statistics for asynchronous brick loading.
++- Final color $C$ and opacity $\alpha$ for the pixel [G].
++- Updated node usage statistics for asynchronous brick loading [S1, unofficial].
+ 
+ **Data Structures:**
+-- **Octree Node:** Contains a pointer to the next node in the hierarchy, a pointer to the brick data (if leaf), and metadata (depth, size).
+-- **Brick Data:** A 3D texture or buffer containing color and optionally gradient values for a block of voxels.
+-- **Node Usage List:** A queue of nodes recently traversed, used to trigger asynchronous GPU upload of their brick data.
++- **Octree Node:** Contains a pointer to the next node in the hierarchy, a pointer to the brick data (if leaf), and metadata (depth, size) [G].
++- **Brick Data:** A 3D texture or buffer containing color and optionally gradient values for a block of voxels [S1, unofficial].
++- **Node Usage List:** A queue of recently traversed nodes used to trigger asynchronous GPU upload of their brick data [S1, unofficial].
+ 
+ **Parameters:**
+-- $projVoxelSize$: Projected voxel size in world units.
+-- $parentVoxelSize$: Voxel size at the parent octree level.
+-- $k_{ChildNodeSizeScalar}$: Scalar multiplier for node size on descent (typically 0.5 for octrees).
+-- $MaxNodesToPushThisFrame$: Limit on asynchronous work per frame.
+-- $maxNodesPerPixelBlock$: Threshold for resetting the per-block traversal counter.
++- $projVoxelSize$: Projected voxel size in world units. Used for interpolation ratio [S1, unofficial].
++- $parentVoxelSize$: Voxel size at the parent octree level. Used in interpolation denominator [S1, unofficial].
++- $k_{ChildNodeSizeScalar}$: Scalar multiplier applied to $nodeSize$ and $voxelHalfSize$ on each descent step (typically 0.5 for octrees) [S1, unofficial].
++- $MaxNodesToPushThisFrame$: Maximum number of nodes allowed to be pushed to the usage list per frame [S1, unofficial].
++- $maxNodesPerPixelBlock$: Threshold for $nodeListTraversalCount$ before it resets to 0 [S1, unofficial].
++- $startPushingNodes$, $stopPushingNodes$: Implementation-specific thresholds defining the window for node list management [G].
+ 
+ **Algorithm Steps:**
+@@ -36,8 +38,8 @@
+     - Set current node $N$ to root.
+     - Set current extents $E_{min} = V_{min}$, $E_{max} = V_{max}$.
+-    - Set current node size $S = 1.0$ (normalized) or root voxel size.
++    - Set current node size $S = 1.0$.
+     - Set voxel half-size $h = RootVoxelHalfSize$.
+     - Reset traversal counters: $traversalCount = 0$, $nodeListTraversalCount = 0$.
+-    - Initialize accumulated color $C = (0,0,0,0)$ and transmittance $T = 1.0$.
++    - Initialize accumulated color $C = (0,0,0,0)$ and transmittance $T = 1.0$. [S1, unofficial]
+ 
+ 2.  **Ray-Volume Intersection Test:**
+@@ -63,5 +65,5 @@
+     c. **Interpolation Decision:**
+        Check if interpolation is enabled:
+-       - Condition: $projVoxelSize > parentVoxelSize$ (or similar scale check), $curDepth \neq 0$, and interpolation factor $> 0.001$.
++       - Condition: $projVoxelSize > parentVoxelSize$, $curDepth \neq 0$, and interpolation factor $> 0.001$.
+        - If true, compute previous brick ray position and call **TraverseBrickInterp**.
+        - Otherwise, call **TraverseBrick**.
+@@ -100,77 +102,87 @@
+ 
+ ```python
+-def render_ray(ray_origin, ray_dir, root_node, volume_extents_min, volume_extents_max, 
+-               proj_voxel_size, parent_voxel_size, max_nodes_per_block, max_nodes_per_frame):
+-    # Initialization
+-    current_node = root_node
+-    node_size = 1.0  # Normalized or root voxel size
+-    voxel_half_size = root_voxel_half_size
+-    extents_min = volume_extents_min
+-    extents_max = volume_extents_max
+-    accumulated_color = vec4(0.0)
++def render_ray(ray_origin, ray_dir, root_node, vol_min, vol_max, 
++               proj_voxel_size, parent_voxel_size, max_nodes_per_block, 
++               max_nodes_per_frame, start_pushing_nodes, stop_pushing_nodes,
++               k_child_node_size_scalar=0.5, k_tree_n=8):
++    # Initialization [S1, unofficial]
++    oct_tree_node = root_node
++    extents_min = vol_min
++    extents_max = vol_max
++    node_size = 1.0
++    voxel_half_size = 0.5  # RootVoxelHalfSize [G]
++    cur_depth = 0
++    ray_brick_pos = ray_origin
++    ray_pos = ray_origin
++    ray_dir = ray_dir / np.linalg.norm(ray_dir)
++    accumulated_color = np.array([0.0, 0.0, 0.0, 0.0])
+     transmittance = 1.0
+     traversal_count = 0
+     node_list_traversal_count = 0
+     pushed_node_count = 0
+-    cur_depth = 0
+-    
+-    # Ray-Volume Intersection Check
+-    test1 = sign(ray_origin - volume_extents_min)
+-    test2 = sign(volume_extents_max - ray_origin)
+-    inside = dot(test1, test2)
++    step = node_size * 0.1  # Fixed step size for brick marching [G]
++
++    # Ray-Volume Intersection Test [S1, unofficial]
++    test1 = np.sign(ray_pos - extents_min)
++    test2 = np.sign(extents_max - ray_pos)
++    inside = np.dot(test1, test2)
+     if inside < 3.0:
+-        # Handle ray outside volume or compute entry point
+-        pass 
+-
+-    while transmittance > 0.001 and current_node is not None:
++        # Ray origin outside volume; compute entry point or skip [G]
++        pass
++
++    while transmittance > 0.005 and oct_tree_node is not None:
++        # Increment Counters [S1, unofficial]
+         traversal_count += 1
+         node_list_traversal_count += 1
+-        
+-        # Reset counter if threshold reached
+         if node_list_traversal_count >= max_nodes_per_block:
+             node_list_traversal_count = 0
+-            
+-        # Asynchronous Node Loading
+-        if (start_pushing_nodes <= node_list_traversal_count < stop_pushing_nodes) and \
+-           (pushed_node_count < max_nodes_per_frame):
++
++        # Node Management [S1, unofficial]
++        if start_pushing_nodes <= node_list_traversal_count < stop_pushing_nodes and \
++           pushed_node_count < max_nodes_per_frame:
+             pushed_node_count += 1
+-            add_to_node_usage_list(current_node)
+-            
+-        # Determine Interpolation Mode
+-        interp_factor = compute_interpolation_factor(proj_voxel_size, parent_voxel_size)
++            # AddToNodeUsageList(oct_tree_node) [G]
++
++        # Interpolation Decision [S1, unofficial]
++        interp_factor = min(max((proj_voxel_size / parent_voxel_size) - 1.0, 0.0), 1.0)
+         enable_interp = (proj_voxel_size > parent_voxel_size) and (cur_depth != 0) and (interp_factor > 0.001)
+-        
++
+         if enable_interp:
+-            prev_brick_ray_pos = compute_prev_brick_ray_pos()
+-            color, alpha, new_transmittance = traverse_brick_interp(current_node, ray_origin, ray_dir, 
+-                                                                    prev_brick_ray_pos, interp_factor, 
+-                                                                    node_size, extents_min, extents_max)
++            prev_brick_ray_pos = ray_pos - ray_dir * step
++            # TraverseBrickInterp logic [S1, unofficial]
++            density = 0.1 * interp_factor  # Simulated brick sample [G]
++            color = np.array([0.5, 0.5, 0.5, 1.0])
++            alpha = density * step
++            transmittance *= (1.0 - alpha)
++            accumulated_color += transmittance * color
++            ray_pos += ray_dir * step
+         else:
+-            color, alpha, new_transmittance = traverse_brick(current_node, ray_origin, ray_dir, 
+-                                                             node_size, extents_min, extents_max)
+-            
+-        # Update Accumulators
+-        accumulated_color += transmittance * color
+-        transmittance = new_transmittance
+-        
+-        # Early Termination Check
+-        if transmittance < 0.005 and alpha > 0.0: # Opacity > 0.995 implies transmittance < 0.005
+-            # Ensure we actually traversed something
+-            if alpha > 0.0: 
+-                break
+-                
+-        # Descent Logic (Simplified for single step)
+-        # In a real implementation, this happens inside traverse_brick/interp or as a separate step
+-        # if moving to a child node:
+-        # brick_offset = ray_brick_position * 8
+-        # child_offset = clamp(uvec3(brick_offset), 0, 1)
+-        # ray_brick_position = brick_offset - vec3(child_offset)
+-        # extents_min += vec3(child_offset) * node_size
+-        # extents_max -= (vec3(1.0) - vec3(child_offset)) * node_size
+-        # current_node = fetch_next_node(current_node, child_offset)
+-        # node_size *= 0.5
+-        # cur_depth += 1
+-        
++            # TraverseBrick logic [S1, unofficial]
++            density = 0.1  # Simulated brick sample [G]
++            color = np.array([0.5, 0.5, 0.5, 1.0])
++            alpha = density * step
++            transmittance *= (1.0 - alpha)
++            accumulated_color += transmittance * color
++            ray_pos += ray_dir * step
++
++        # Early Termination [S1, unofficial]
++        if transmittance < 0.005 and alpha > 0.0:
++            break
++
++        # Descent Logic [S1, unofficial]
++        brick_offset = ray_brick_pos * k_tree_n
++        child_offset = np.clip(np.floor(brick_offset).astype(int), 0, 1)
++        ray_brick_pos = brick_offset - child_offset
++        extents_min += child_offset * node_size
++        extents_max -= (1.0 - child_offset) * node_size
++        oct_tree_node = fetch_next_node(oct_tree_node, child_offset)
++        node_size *= k_child_node_size_scalar
++        cur_depth += 1
++
+     return accumulated_color
++
++def fetch_next_node(node, child_idx):
++    # Simulate octree node fetch [G]
++    return node
+ ```
+ 
+@@ -186,7 +198,7 @@
+ - **Time Complexity:** $O(N)$ where $N$ is the number of visible voxels/bricks along the ray. Early termination reduces the effective $N$ significantly in sparse volumes.
+ - **Memory Complexity:** $O(V)$ where $V$ is the total volume of the SVO, but only active bricks are loaded into GPU memory. The node usage list adds $O(M)$ overhead where $M$ is the number of nodes traversed per frame.
+-- **Performance:** Improves cache coherency by accessing brick-sized blocks rather than scattered leaf voxels. Asynchronous loading hides memory latency. [S1, unofficial]
+-- **Strengths:** Efficient handling of large, sparse volumes; reduced memory bandwidth usage; supports dynamic transfer functions without texture regeneration (unlike some bricking techniques). [S1, unofficial]
+-- **Limitations:** Interpolation artifacts at brick boundaries if not handled carefully; complexity in managing asynchronous loading and node usage lists; early termination may cause visual artifacts if not tuned properly. [S1, unofficial]
++- **Performance:** Improves cache coherency by accessing brick-sized blocks rather than scattered leaf voxels.
++- **Strengths:** Efficient handling of large, sparse volumes; reduced memory bandwidth usage; supports dynamic transfer functions without texture regeneration (unlike some bricking techniques).
++- **Limitations:** Interpolation artifacts at brick boundaries if not handled carefully; complexity in managing asynchronous loading and node usage lists; early termination may cause visual artifacts if not tuned properly.
+ - **When to use:** Large-scale volume rendering where memory bandwidth is a bottleneck and the volume is sparse.
+ - **When not to use:** Dense volumes where brick overhead outweighs benefits, or when exact surface reconstruction is required without post-processing.

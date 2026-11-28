@@ -1,0 +1,124 @@
+--- v002.md
++++ v003.md
+@@ -31,5 +31,5 @@
+ **Steps:**
+ 1. **Pre-filtering**: Apply the FDK pre-filter (ramp filter and cosine weighting) on the CPU using `applyFDKPreFilter` before GPU execution [S1, unofficial].
+-2. **Device Check**: Check the device's local memory size. If insufficient, print an info message but proceed without explicit fallback [S1, unofficial].
++2. **Device Check**: Check the device's local memory size. If insufficient, the code prints info but proceeds without explicit fallback [S1, unofficial].
+ 3. **Kernel Loading**: Load the kernel source from `kernels/backprojection_local.cl` [S1, unofficial].
+ 4. **Volume Allocation**: Allocate the volume buffer and fill it with zeros [S1, unofficial].
+@@ -39,7 +39,21 @@
+    - Global X, Y sizes: $NX$ [S1, unofficial].
+ 6. **Projection Loop**: Loop over projections $p$ from $0$ to $P-1$ [S1, unofficial].
+-   - Calculate the projection angle based on $p$ and $P$ [S1, unofficial].
++   - Calculate the projection angle based on $p$ and $P$ [G].
+    - Create the projection buffer and set kernel arguments. Arguments 2 and 3 are local memory buffers (`col0`, `col1`) passed as size in bytes (address is `nullptr`) [S1, unofficial].
+    - Launch the kernel with the calculated 3D NDRange (global size, local size) [S1, unofficial].
++7. **Post-processing**: Multiply all volume voxels by $\pi / P$ [S1, unofficial].
++
++**Formulas:**
++- $t = (x - 0.5 \cdot (NX - 1)) \cdot \text{voxelSize}$ [G]
++- $z_m = (z - 0.5 \cdot (NY - 1)) \cdot \text{voxelSize}$ [S1, unofficial]
++- $\text{invU} = \text{sdd} / (\text{sdd} + t)$ [G]
++- $u_{\text{proj}} = \text{sdd} \cdot \text{invU} \cdot t$ [S1, unofficial]
++- $v_{\text{proj}} = \text{sdd} \cdot \text{invU} \cdot z_m$ [S1, unofficial]
++- $u_{\text{idx}} = 0.5 \cdot (W - 1) - u_{\text{proj}} / \text{pixelSize}$ [S1, unofficial]
++- $v_{\text{idx}} = 0.5 \cdot (H - 1) - v_{\text{proj}} / \text{pixelSize}$ [S1, unofficial]
++- $\text{weight} = (\text{sod} \cdot \text{sod}) \cdot (\text{invU} \cdot \text{invU})$ [S1, unofficial]
++- Bilinear interpolation of projection values at $(u_{\text{idx}}, v_{\text{idx}})$ using cached columns [S1, unofficial]
++- $\text{volume}[x \cdot NX \cdot NY + y \cdot NY + z] \mathrel{+}= \text{interpolated} \cdot \text{weight}$ [S1, unofficial]
++- $\text{volume}[i] \mathrel{*}= \pi / P$ for all $i$ [S1, unofficial]
+ 
+ **Pseudocode:**
+@@ -47,61 +61,56 @@
+ def reconstructGPU_Local(projections, P, W, H, NX, NY, voxelSize, pixelSize, sdd, sod):
+     TILE_Z = 64
+-    
+-    # 1. Pre-filter on CPU
+     filtered_projections = applyFDKPreFilter(projections, P, W, H, voxelSize, sdd, pixelSize)
+-    
+-    # 2. Check local memory size (implementation detail omitted, proceed regardless)
+-    
+-    # 3. Load kernel from 'kernels/backprojection_local.cl'
+-    kernel_source = load_kernel_source('kernels/backprojection_local.cl')
+-    
+-    # 4. Allocate volume buffer and zero it
+     volume = [0.0] * (NX * NX * NY)
+-    
+-    # 5. Calculate NDRange
+     local_size = (1, 1, TILE_Z)
+     gz = ((NY + TILE_Z - 1) // TILE_Z) * TILE_Z
+     global_size = (NX, NX, gz)
++    kernel_source = load_kernel_source('kernels/backprojection_local.cl')
++    kernel = compile_kernel(kernel_source)
+     
+-    # 6. Loop over projections
+     for p in range(P):
+-        angle = calculate_angle(p, P)
++        angle = (p / P) * 2.0 * 3.14159265358979323846
++        proj_buffer = create_buffer(filtered_projections, p, W, H)
++        vol_buffer = create_buffer(volume)
++        col0_size = H * 4
++        col1_size = H * 4
+         
+-        # Create projection buffer from filtered_projections for current angle
+-        proj_buffer = create_buffer(filtered_projections, p, W, H)
++        set_kernel_arg(kernel, 0, vol_buffer)
++        set_kernel_arg(kernel, 1, proj_buffer)
++        set_kernel_arg(kernel, 2, col0_size)
++        set_kernel_arg(kernel, 3, col1_size)
++        set_kernel_arg(kernel, 4, P)
++        set_kernel_arg(kernel, 5, W)
++        set_kernel_arg(kernel, 6, H)
++        set_kernel_arg(kernel, 7, NX)
++        set_kernel_arg(kernel, 8, NY)
++        set_kernel_arg(kernel, 9, voxelSize)
++        set_kernel_arg(kernel, 10, pixelSize)
++        set_kernel_arg(kernel, 11, sdd)
++        set_kernel_arg(kernel, 12, sod)
++        set_kernel_arg(kernel, 13, angle)
+         
+-        # Local memory buffers for interpolation columns
+-        local_mem_col0_size = H * 4  # sizeof(float) = 4
+-        local_mem_col1_size = H * 4
++        launch_kernel(kernel, global_size, local_size)
++        volume = read_buffer(vol_buffer)
+         
+-        # Set kernel arguments
+-        # Arg 0: volume buffer
+-        # Arg 1: proj_buffer
+-        # Arg 2: local_mem_col0_size (nullptr address)
+-        # Arg 3: local_mem_col1_size (nullptr address)
+-        # Arg 4-10: P, W, H, NX, NY, voxelSize, pixelSize, sdd, sod, angle
+-        set_kernel_arguments(kernel, proj_buffer, volume, local_mem_col0_size, local_mem_col1_size, 
+-                             P, W, H, NX, NY, voxelSize, pixelSize, sdd, sod, angle)
+-        
+-        # Launch kernel
+-        launch_kernel(kernel, global_size, local_size)
+-        
+-    # Return volume
++    scale = 3.14159265358979323846 / P
++    for i in range(len(volume)):
++        volume[i] *= scale
+     return volume
+ ```
+ 
+ **Kernel Logic (Conceptual):**
+-The kernel iterates over X and Y coordinates. For each voxel $(x, y, z)$, it calculates the projection coordinates $(u, v)$ on the detector. It uses local memory to cache two columns of the projection image (`col0` and `col1`) to facilitate bilinear interpolation of the projection value at $(u, v)$. The interpolated value is weighted by $(sod \cdot sod) / u_{proj}^2$ and accumulated into the volume [S1, unofficial].
++The kernel iterates over X and Y coordinates [S1, unofficial]. For each voxel $(x, y, z)$, it calculates the projection coordinates $(u, v)$ on the detector [S1, unofficial]. It uses local memory to cache two columns of the projection image (`col0` and `col1`) to facilitate bilinear interpolation of the projection value at $(u, v)$ [S1, unofficial]. The interpolated value is weighted by $(\text{sod} \cdot \text{sod}) \cdot (\text{invU} \cdot \text{invU})$ and accumulated into the volume [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+ - **Local Memory Overflow**: If $2 \times H \times \text{sizeof(float)}$ exceeds the device's local memory limit, the behavior is undefined or the kernel may fail. The source checks this but proceeds without fallback [S1, unofficial].
+ - **Boundary Conditions**: Projection coordinates outside $[0, W-1] \times [0, H-1]$ are skipped [S1, unofficial].
+-- **Precision**: Uses `float` for volume accumulation. Large numbers of projections may lead to precision loss.
++- **Precision**: Uses `float` for volume accumulation. Large numbers of projections may lead to precision loss [G].
+ 
+ ## Operating characteristics
+-- **Time Complexity**: $O(P \cdot NX \cdot NX \cdot NY)$, same as CPU backprojection, but optimized for GPU parallelism.
++- **Time Complexity**: $O(P \cdot NX \cdot NX \cdot NY)$, same as CPU backprojection, but optimized for GPU parallelism [G].
+ - **Memory Complexity**: $O(P \cdot W \cdot H + NX \cdot NX \cdot NY + H)$ for global buffers and local memory [S1, unofficial].
+ - **Performance**: Reduces global memory bandwidth pressure by reusing projection data in local memory [S1, unofficial].
+-- **Strengths**: Efficient memory access pattern for Z-axis reconstruction.
++- **Strengths**: Efficient memory access pattern for Z-axis reconstruction [S1, unofficial].
+ - **Limitations**: Requires sufficient local memory ($2 \cdot H \cdot 4$ bytes). No fallback if local memory is insufficient [S1, unofficial].
+ 

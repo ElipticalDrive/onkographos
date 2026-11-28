@@ -1,0 +1,78 @@
+# Distributed 3DGS Training Loop with Adaptive Workload Division
+
+Also called: Batched Distributed 3DGS Training, Grendel-GS Training Pipeline
+
+## Overview
+This method implements a distributed training workflow for 3D Gaussian Splatting that batches camera selection, divides rendering workloads across multiple GPUs using an adaptive strategy based on historical performance, synchronizes losses, and schedules densification and spherical harmonics (SH) degree updates [S1, unofficial]. It differs from standard gradient accumulation by optionally scaling gradients by batch size to avoid explicit accumulation buffers, and by dynamically balancing the computational load of rendering different camera views across the GPU cluster [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A dataset of camera poses and images, initial 3D Gaussian parameters $\mathcal{G}$, distributed environment configuration (number of GPUs, `WORLD_SIZE`), and training hyperparameters (`args`).
+*   **Outputs:** Optimized 3D Gaussian parameters, saved checkpoints, and training logs.
+
+**Data Structures:**
+*   `batched_screenspace_pkg`: A dictionary containing rendering state. Key field: `"batched_cuda_args"`, a list of CUDA argument structures. Each structure contains a `"stats_collector"` field used for adaptive workload division [S1, unofficial].
+*   `batched_losses`: A tensor of shape $(N, 2)$, where $N$ is the batch size. Index 0 holds the first loss component (L1), and index 1 holds the second loss component (used for D-SSIM calculation) [S1, unofficial].
+*   `strategy_history`: A record of past workload division decisions and their resulting performance statistics, used to adaptively select rendering strategies [S1, unofficial].
+
+**Parameters:**
+*   `args.bsz`: Batch size per iteration step. Controls the loop range and serves as the divisor for gradient scaling [S1, unofficial].
+*   `args.lambda_dssim`: Weight for the D-SSIM loss component. Default value not specified in the sources [S1, unofficial].
+*   `args.lr_scale_mode`: String controlling gradient scaling. If not equal to `"accumu"`, gradients are explicitly divided by `args.bsz` before the optimizer step [S1, unofficial].
+*   `args.local_sampling`: Boolean flag. If true, enables distributed camera index gathering across GPUs using `torch.distributed.all_gather_into_tensor` [S1, unofficial].
+*   `args.save_iterations` / `args.checkpoint_iterations`: Lists of iteration numbers triggering Gaussian saves or full checkpoint saves, respectively [S1, unofficial].
+*   `args.backend`: String specifying the rendering backend, either `"gsplat"` or another implementation [S1, unofficial].
+
+**Numbered Steps:**
+
+1.  **Initialization:** Initialize the training loop from `start_from_this_iteration` to `opt_args.iterations` with a step size of `args.bsz`. Update the progress bar every `args.bsz` iterations [S1, unofficial].
+2.  **Logging:** Log the Exponential Moving Average (EMA) loss to the progress bar every 30 batches (checked via `iteration // args.bsz % 30 == 0`) [S1, unofficial].
+3.  **State Update:** Update the learning rate and increment the trained batch counter. Clear timing accumulators. Start an NVTX range if profiling is enabled [S1, unofficial].
+4.  **SH Update:** Upscale the spherical harmonics (SH) degree by one level every 1000 iterations. This is determined by `utils.check_update_at_this_iter(iteration, args.bsz, 1000, 0)` [S1, unofficial].
+5.  **Camera Selection:** Select cameras for the current batch.
+    *   If `args.local_sampling` is true: Assert that `args.bsz` is divisible by `utils.WORLD_SIZE`. Gather local camera indices across all GPUs using `torch.distributed.all_gather_into_tensor`, convert to numpy, and fetch the corresponding camera objects [S1, unofficial].
+    *   Otherwise: Fetch cameras directly via `train_dataset.get_batched_cameras(args.bsz)` [S1, unofficial].
+6.  **Workload Division Strategy:** Initialize the workload division strategy by calling `start_strategy_final(batched_cameras, strategy_history)`. This returns `batched_strategies` (mapping cameras to rendering strategies) and `gpuid2tasks` (mapping GPUs to specific tasks) [S1, unofficial].
+7.  **Data Loading:** Load camera data from CPU memory to all GPUs using `load_camera_from_cpu_to_all_gpu(batched_cameras, batched_strategies, gpuid2tasks)` [S1, unofficial].
+8.  **Preprocessing:** Preprocess the 3D Gaussian Splatting data and perform all-to-all communication to distribute data across GPUs.
+    *   If `args.backend == "gsplat"`, call `gsplat_distributed_preprocess3dgs_and_all2all_final`.
+    *   Otherwise, call `distributed_preprocess3dgs_and_all2all_final` [S1, unofficial].
+9.  **Rendering:** Render images and extract compute locations. Call `gsplat_render_final` or `render_final` with `batched_screenspace_pkg` and `batched_strategies`. Extract the `batch_statistic_collector` from `batched_screenspace_pkg["batched_cuda_args"]` for future strategy adaptation [S1, unofficial].
+10. **Loss Computation:** Compute the loss by calling `batched_loss_computation` with the rendered images, cameras, compute locations, strategies, and statistic collectors [S1, unofficial].
+11. **Backward Pass:** Execute the backward pass: `loss_sum.backward()` [S1, unofficial].
+12. **Strategy Update:** Update the workload division strategy by calling `finish_strategy_final(batched_cameras, strategy_history, batched_strategies, batch_statistic_collector)` to record performance metrics for adaptive balancing [S1, unofficial].
+13. **Loss Synchronization:** Synchronize losses across all GPUs using `dist.all_reduce(batched_losses, op=dist.ReduceOp.SUM, group=utils.DEFAULT_GROUP)` [S1, unofficial].
+14. **EMA Update:** Update the EMA loss for logging. If `ema_loss_for_log` is `None`, set it to the mean of `batched_loss_cpu`. Otherwise, update using:
+    $$ EMA = 0.6 \cdot EMA + 0.4 \cdot \text{mean}(batched\_loss\_cpu) $$
+    [S1, unofficial].
+15. **Evaluation:** Trigger evaluation if the current iteration matches `testing_iterations`. Log validation configurations for test and train sets [S1, unofficial].
+16. **Densification:** Perform Gaussian densification by calling `gsplat_densification` or `densification` with the current iteration, scene data, Gaussian parameters, and screenspace package [S1, unofficial].
+17. **Saving:**
+    *   Save Gaussians if the current iteration is in `args.save_iterations`.
+    *   Write the `strategy_history` to a JSON file if `args.save_strategy_history` is true [S1, unofficial].
+18. **Checkpointing:** Save checkpoints if the current iteration is in `args.checkpoint_iterations`. Create the directory (handled by Rank 0), synchronize all ranks via `torch.distributed.barrier` to prevent race conditions, and save `gaussians.capture()` and the current iteration to a `.pth` file [S1, unofficial].
+
+**Formulas:**
+The combined batch loss is calculated as [S1, unofficial]:
+$$ L_{batch} = (1 - \lambda_{dssim}) \cdot L_{0} + \lambda_{dssim} \cdot (1 - L_{1}) $$
+where:
+*   $L_{0}$ is the first loss component (typically L1 loss).
+*   $L_{1}$ is the second loss component (typically D-SSIM similarity).
+*   $\lambda_{dssim}$ is `args.lambda_dssim`.
+
+**Pitfalls and Edge Cases:**
+*   **Local Sampling Constraint:** When `args.local_sampling` is enabled, `args.bsz` must be divisible by `utils.WORLD_SIZE`. The code asserts this condition: `assert args.bsz % utils.WORLD_SIZE == 0` [S1, unofficial].
+*   **Checkpoint Race Conditions:** Checkpoint saving requires rank synchronization. Rank 0 creates the directory, but all ranks must call `torch.distributed.barrier` to ensure the directory exists before any rank attempts to write to it [S1, unofficial].
+*   **Gradient Scaling:** The method distinguishes itself from standard gradient accumulation by explicitly dividing gradients by `args.bsz` when `args.lr_scale_mode != "accumu"`, avoiding the need for explicit accumulation buffers [S1, unofficial].
+
+## Operating characteristics
+*   **Complexity:** The method scales with the number of GPUs (`WORLD_SIZE`) and the batch size (`args.bsz`). The adaptive workload division adds overhead for strategy selection and history management but aims to balance rendering times across heterogeneous or unevenly loaded GPUs.
+*   **Performance:** Specific measured performance metrics (e.g., throughput in it/s, PSNR values) are not provided in the source notes for this specific method's implementation details, though the source references experiments on scenes like "bicycle" and "matrixcity" [S1, unofficial].
+*   **Strengths:** Enables training on large scenes or with large batch sizes that do not fit on a single GPU. The adaptive workload division helps mitigate stragglers caused by varying camera view complexities.
+*   **Limitations:** Requires careful synchronization of data and losses. The adaptive strategy relies on historical data, which may be suboptimal at the very beginning of training.
+
+## Background
+This method is part of the Grendel-GS project, a distributed training system for 3D Gaussian Splatting. It addresses the scalability limitations of single-GPU training by distributing the rendering and optimization workload across multiple GPUs [S1, unofficial].
+
+## Sources
+[S1] nyu-systems/Grendel-GS, https://github.com/nyu-systems/Grendel-GS, fetched 2026-10-27 (unofficial)

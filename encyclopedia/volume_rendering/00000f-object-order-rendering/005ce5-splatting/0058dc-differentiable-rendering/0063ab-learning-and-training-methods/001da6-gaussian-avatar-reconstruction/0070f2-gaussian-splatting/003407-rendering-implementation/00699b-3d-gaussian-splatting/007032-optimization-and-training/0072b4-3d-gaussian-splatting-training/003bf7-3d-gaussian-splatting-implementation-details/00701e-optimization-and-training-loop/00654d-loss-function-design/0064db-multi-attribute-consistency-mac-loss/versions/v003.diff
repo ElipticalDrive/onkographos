@@ -1,0 +1,275 @@
+--- v002.md
++++ v003.md
+@@ -4,161 +4,133 @@
+ 
+ ## Overview
+-The Multi-Attribute Consistency (MAC) loss is a regularization objective for 3D Gaussian Splatting that enforces geometric and photometric agreement between matched Gaussians across different views [S1]. It solves the ambiguity problem in sparse-view reconstruction by using high-confidence 2D pixel correspondences as anchors to jointly constrain position, shape, and appearance in a common world coordinate frame [S1]. Unlike standard photometric losses that only supervise the final rendered image, MAC loss operates directly on the Gaussian parameters, providing robust supervision that is invariant to camera rotation and resistant to outliers [S1].
++The Multi-Attribute Consistency (MAC) loss is a regularization objective for 3D Gaussian Splatting that enforces geometric and photometric agreement between matched Gaussians across different views [S1]. It solves the ambiguity problem in sparse-view reconstruction by using high-confidence 2D pixel correspondences as anchors to jointly constrain position, shape, and appearance in a common world coordinate frame [S1]. Unlike standard photometric losses that only supervise rendered pixels, MAC loss directly supervises the underlying Gaussian parameters, providing robust stability against outliers and preventing geometric degeneracy [S1].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Inputs:** A set of matched pixel pairs $M = \{(\mathbf{p}_1^k, \mathbf{p}_2^k)\}_{k=1}^K$ between two training images $I_1$ and $I_2$, where each pair has an associated joint confidence weight $w_k$. Camera-to-world transformation matrices $\mathbf{T}_{wc}^v = [\mathbf{R}^v | \mathbf{t}^v]$ for each view $v \in \{1, 2\}$. Dense predicted parameter maps for each view, containing centroids $\boldsymbol{\mu}_{\text{cam}}$, covariance matrices $\boldsymbol{\Sigma}_{\text{cam}}$, opacities $\alpha$, and spherical harmonic coefficients $\mathbf{c}$, aligned with the descriptor grid.
+-*   **Outputs:** A scalar loss value $\mathcal{L}_{\text{MAC}}$ and gradients with respect to the Gaussian parameters.
++**Inputs and Outputs**
++*   **Inputs:** A set of matched pixel pairs $M = \{ (p_1^k, p_2^k) \}_{k=1}^K$ between two training images $I_1$ and $I_2$, where each pair has an associated joint confidence weight $w_k$ [S1]. Camera-to-world transformation matrices $T_{wc}^v = [R^v | t^v]$ for each view $v \in \{1, 2\}$ [S1]. Predicted dense parameter maps for each view, containing centroid $\boldsymbol{\mu}_{\text{cam}}$, covariance $\boldsymbol{\Sigma}_{\text{cam}}$, opacity $\alpha$, and spherical harmonic coefficients $\boldsymbol{c}$ [S1].
++*   **Outputs:** A scalar loss value $\mathcal{L}_{\text{MAC}}$ and gradients with respect to the Gaussian parameters [S1].
+ 
+-**Data Structures:**
+-*   **Parameter Maps:** For each view $v$, dense tensors of shape $(H, W, D)$, where $D$ is the dimensionality of the concatenated parameters.
+-    *   Centroids: $\boldsymbol{\mu}_{\text{cam}} \in \mathbb{R}^3$ per pixel.
+-    *   Covariance: $\boldsymbol{\Sigma}_{\text{cam}} \in \text{Sym}^+(3)$ per pixel (6 unique elements or 3x3 matrix).
+-    *   Opacity: $\alpha \in \mathbb{R}$ per pixel.
+-    *   Color/SH: $\mathbf{c} \in \mathbb{R}^C$ per pixel (where $C$ depends on SH degree).
+-*   **Matches:** A list of $K$ tuples, each containing pixel coordinates $(u_1, v_1), (u_2, v_2)$ and confidence $w_k$.
++**Data Structures**
++*   **Parameter Maps:** Dense grids aligned with the descriptor grid of the input images. Each cell $(u,v)$ stores:
++    *   $\boldsymbol{\mu}_{\text{cam}} \in \mathbb{R}^3$: Camera-space centroid.
++    *   $\boldsymbol{\Sigma}_{\text{cam}} \in \text{Sym}^+(3)$: Camera-space covariance matrix (6 unique elements due to symmetry).
++    *   $\alpha \in \mathbb{R}$: Opacity.
++    *   $\boldsymbol{c} \in \mathbb{R}^D$: Spherical harmonic coefficients (dimension $D$ depends on the order of SH used).
++*   **Match Set $M$:** A list of tuples $(p_1^k, p_2^k, w_k)$, where $p$ are 2D pixel coordinates and $w_k$ is the confidence score [S1].
+ 
+-**Numbered Steps:**
++**Numbered Steps**
++1.  **Gaussian Sampling:** For each matched pixel pair $k$ with coordinates $(p_1^k, p_2^k)$, bilinearly sample the predicted parameter maps for view 1 and view 2 to obtain two Gaussians $G_1^k$ and $G_2^k$ [S1].
++    $$ G_v^k = \left( \boldsymbol{\mu}_{\text{cam}}^{v,k}, \boldsymbol{\Sigma}_{\text{cam}}^{v,k}, \alpha^{v,k}, \boldsymbol{c}^{v,k} \right), \quad v \in \{1, 2\} $$
++2.  **World-Space Transformation:** Transform the centroids and covariances from camera space to world space using the camera-to-world matrices $T_{wc}^v = [R^v | t^v]$ [S1].
++    *   Centroid:
++        $$ \boldsymbol{\mu}_{\text{world}}^{v,k} = R^v \boldsymbol{\mu}_{\text{cam}}^{v,k} + t^v $$
++    *   Covariance:
++        $$ \boldsymbol{\Sigma}_{\text{world}}^{v,k} = R^v \boldsymbol{\Sigma}_{\text{cam}}^{v,k} (R^v)^\top $$
++3.  **Depth Validation:** Check if both centroids lie in front of their respective cameras ($z_{\text{cam}} > 0$). If not, skip the positional loss for this pair [S1].
++4.  **Positional Consistency:** Compute the Huber loss between the world-space centroids [S1].
++    $$ \mathcal{L}_{\text{pos}}^{(k)} = \mathcal{H}\left( \| \boldsymbol{\mu}_{\text{world}}^{1,k} - \boldsymbol{\mu}_{\text{world}}^{2,k} \|_1 \right) $$
++    where $\mathcal{H}$ is the Huber loss function [S1].
++5.  **Shape Consistency:** Compute the loss based on the log-eigenvalues of the world-space covariance matrices. Let $\lambda_1^{v,k}, \lambda_2^{v,k}, \lambda_3^{v,k}$ be the eigenvalues of $\boldsymbol{\Sigma}_{\text{world}}^{v,k}$ [S1].
++    $$ \mathcal{L}_{\text{shape}}^{(k)} = \sum_{i=1}^3 \mathcal{H}\left( | \log \lambda_i^{1,k} - \log \lambda_i^{2,k} | \right) $$
++    *Note: Euclidean distance between covariance matrices is avoided as it does not respect the geometry of $\text{Sym}^+(3)$ or invariance to rotation/scaling [S1].*
++6.  **Appearance Consistency:** Compute the L1 loss between opacity and spherical harmonic coefficients [S1].
++    $$ \mathcal{L}_{\text{app}}^{(k)} = \| \alpha^{1,k} - \alpha^{2,k} \|_1 + \| \boldsymbol{c}^{1,k} - \boldsymbol{c}^{2,k} \|_1 $$
++7.  **Aggregation:** Combine the terms weighted by the match confidence $w_k$ [S1].
++    $$ \mathcal{L}_{\text{MAC}} = \frac{\sum_{k=1}^K w_k \left( \lambda_p \mathcal{L}_{\text{pos}}^{(k)} + \lambda_s \mathcal{L}_{\text{shape}}^{(k)} + \lambda_a \mathcal{L}_{\text{app}}^{(k)} \right)}{\sum_{k=1}^K w_k + \epsilon} $$
++    where $\lambda_p, \lambda_s, \lambda_a$ are scalar weights and $\epsilon$ is a small constant [S1].
+ 
+-1.  **Gaussian Pair Extraction:** For each matched pixel pair $k$ with coordinates $\mathbf{p}_1^k$ in view 1 and $\mathbf{p}_2^k$ in view 2:
+-    *   Bilinearly sample the predicted parameter maps at $\mathbf{p}_1^k$ to obtain Gaussian $G_1^k = (\boldsymbol{\mu}_{\text{cam}}^{1,k}, \boldsymbol{\Sigma}_{\text{cam}}^{1,k}, \alpha^{1,k}, \mathbf{c}^{1,k})$.
+-    *   Bilinearly sample the predicted parameter maps at $\mathbf{p}_2^k$ to obtain Gaussian $G_2^k = (\boldsymbol{\mu}_{\text{cam}}^{2,k}, \boldsymbol{\Sigma}_{\text{cam}}^{2,k}, \alpha^{2,k}, \mathbf{c}^{2,k})$.
+-
+-2.  **World-Space Transformation:** Transform the extracted parameters into the common world coordinate system using the camera-to-world matrices $\mathbf{T}_{wc}^v = [\mathbf{R}^v | \mathbf{t}^v]$.
+-    *   **Centroids:** Compute world-space centroids:
+-        $$ \boldsymbol{\mu}_{\text{world}}^{v,k} = \mathbf{R}^v \boldsymbol{\mu}_{\text{cam}}^{v,k} + \mathbf{t}^v $$
+-    *   **Covariances:** Transform covariance matrices to respect the rotation of the world frame:
+-        $$ \boldsymbol{\Sigma}_{\text{world}}^{v,k} = \mathbf{R}^v \boldsymbol{\Sigma}_{\text{cam}}^{v,k} (\mathbf{R}^v)^\top $$
+-    *   **Opacity and Color:** These attributes are frame-invariant in this context, so $\alpha_{\text{world}}^{v,k} = \alpha^{v,k}$ and $\mathbf{c}_{\text{world}}^{v,k} = \mathbf{c}^{v,k}$.
+-
+-3.  **Positional Consistency Loss ($\mathcal{L}_{\text{pos}}$):**
+-    *   Check validity: Only compute if the depth $z_{\text{cam}} > 0$ for both views (i.e., the Gaussians are in front of the cameras).
+-    *   Compute the $L_1$ distance between world-space centroids: $d_{\text{pos}} = \|\boldsymbol{\mu}_{\text{world}}^{1,k} - \boldsymbol{\mu}_{\text{world}}^{2,k}\|_1$.
+-    *   Apply Huber loss $\mathcal{H}$:
+-        $$ \mathcal{L}_{\text{pos}}^{(k)} = \mathcal{H}(d_{\text{pos}}) $$
+-
+-4.  **Shape Consistency Loss ($\mathcal{L}_{\text{shape}}$):**
+-    *   Compute the eigenvalues $\lambda_1, \lambda_2, \lambda_3$ of $\boldsymbol{\Sigma}_{\text{world}}^{1,k}$ and $\boldsymbol{\Sigma}_{\text{world}}^{2,k}$.
+-    *   Compute the $L_1$ distance between the log-eigenvalues:
+-        $$ \mathcal{L}_{\text{shape}}^{(k)} = \sum_{i=1}^3 |\log(\lambda_i^{1,k}) - \log(\lambda_i^{2,k})| $$
+-    *   *Note:* Euclidean distance between covariance matrices is not used because it is not invariant to rotations or uniform scaling and does not respect the geometry of the symmetric positive definite manifold $\text{Sym}^+(3)$ [S1].
+-
+-5.  **Appearance Consistency Loss ($\mathcal{L}_{\text{app}}$):**
+-    *   Compute the $L_1$ distance between opacities and spherical harmonic coefficients:
+-        $$ \mathcal{L}_{\text{app}}^{(k)} = \|\alpha^{1,k} - \alpha^{2,k}\|_1 + \|\mathbf{c}^{1,k} - \mathbf{c}^{2,k}\|_1 $$
+-
+-6.  **Aggregation:**
+-    *   Combine the terms using confidence weights $w_k$ and scalar hyperparameters $\lambda_p, \lambda_s, \lambda_a$:
+-        $$ \mathcal{L}_{\text{MAC}} = \frac{\sum_{k=1}^K w_k \left( \lambda_p \mathcal{L}_{\text{pos}}^{(k)} + \lambda_s \mathcal{L}_{\text{shape}}^{(k)} + \lambda_a \mathcal{L}_{\text{app}}^{(k)} \right)}{\sum_{k=1}^K w_k + \epsilon} $$
+-    *   $\epsilon$ is a small constant to prevent division by zero.
+-
+-**Pseudocode:**
+-
++**Pseudocode**
+ ```python
+-import torch
+-import torch.nn.functional as F
+-
+-def huber_loss(x, delta=1.0):
+-    """Standard Huber loss implementation."""
+-    abs_x = torch.abs(x)
+-    cond = (abs_x <= delta).float()
+-    loss = cond * 0.5 * x**2 + (1 - cond) * (delta * abs_x - 0.5 * delta**2)
+-    return loss
+-
+-def mac_loss(
+-    mu_cam_1, sigma_cam_1, alpha_1, c_1,
+-    mu_cam_2, sigma_cam_2, alpha_2, c_2,
+-    T_wc_1, T_wc_2,
+-    matches, w_k,
+-    lambda_p, lambda_s, lambda_a,
+-    epsilon=1e-8
+-):
++def compute_mac_loss(matched_pairs, param_maps, camera_to_world_matrices):
+     """
+-    Compute MAC Loss.
++    matched_pairs: List of tuples (p1, p2, w_k)
++                   p1, p2: (u, v) coordinates
++                   w_k: float confidence
++    param_maps: Dict mapping view_id -> {
++        'mu': (H, W, 3), 'Sigma': (H, W, 6), 'alpha': (H, W, 1), 'c': (H, W, D)
++    }
++    camera_to_world_matrices: Dict mapping view_id -> (R, t)
++    """
++    total_loss = 0.0
++    total_weight = 0.0
++    epsilon = 1e-8
+     
+-    Args:
+-        mu_cam: (K, 3) centroids in camera space
+-        sigma_cam: (K, 3, 3) covariance matrices in camera space
+-        alpha: (K,) opacities
+-        c: (K, C) spherical harmonic coefficients
+-        T_wc_1, T_wc_2: (3, 4) camera-to-world matrices [R | t]
+-        matches: List of indices or coordinates (not used directly if tensors are aligned by K)
+-        w_k: (K,) confidence weights
+-        lambda_p, lambda_s, lambda_a: Scalar weights
+-        epsilon: Small constant for numerical stability
+-    """
+-    # 1. Transform to World Space
+-    R1, t1 = T_wc_1[:, :3], T_wc_1[:, 3]
+-    R2, t2 = T_wc_2[:, :3], T_wc_2[:, 3]
+-    
+-    # Centroids: mu_world = R * mu_cam + t
+-    mu_world_1 = torch.matmul(R1, mu_cam_1.T).T + t1
+-    mu_world_2 = torch.matmul(R2, mu_cam_2.T).T + t2
+-    
+-    # Covariances: Sigma_world = R * Sigma_cam * R^T
+-    sigma_world_1 = torch.matmul(torch.matmul(R1, sigma_cam_1), R1.transpose(0, 1))
+-    sigma_world_2 = torch.matmul(torch.matmul(R2, sigma_cam_2), R2.transpose(0, 1))
+-    
+-    # 2. Positional Consistency
+-    # Check depth > 0 (assuming z is the 3rd component in camera space)
+-    # Note: The source specifies checking z_cam > 0. We assume mu_cam_1[:, 2] and mu_cam_2[:, 2] are depths.
+-    valid_mask = (mu_cam_1[:, 2] > 0) & (mu_cam_2[:, 2] > 0)
+-    
+-    pos_diff = torch.norm(mu_world_1 - mu_world_2, p=1, dim=1) # L1 norm
+-    pos_loss = huber_loss(pos_diff)
+-    
+-    # 3. Shape Consistency (Log-Eigenvalues)
+-    # Compute eigenvalues of symmetric matrices
+-    eigvals_1 = torch.linalg.eigvalsh(sigma_world_1) # (K, 3)
+-    eigvals_2 = torch.linalg.eigvalsh(sigma_world_2) # (K, 3)
+-    
+-    # Log eigenvalues
+-    log_eigvals_1 = torch.log(eigvals_1)
+-    log_eigvals_2 = torch.log(eigvals_2)
+-    
+-    shape_loss = torch.sum(torch.abs(log_eigvals_1 - log_eigvals_2), dim=1) # L1 sum over 3 eigenvalues
+-    
+-    # 4. Appearance Consistency
+-    app_alpha_loss = torch.abs(alpha_1 - alpha_2)
+-    app_c_loss = torch.norm(c_1 - c_2, p=1, dim=1) # L1 norm over SH coefficients
+-    app_loss = app_alpha_loss + app_c_loss
+-    
+-    # 5. Aggregate
+-    # Apply valid mask to losses and weights
+-    # If a match is invalid (z <= 0), its contribution should be zero or excluded.
+-    # The source says "evaluated only if z_cam > 0".
+-    pos_loss = pos_loss * valid_mask.float()
+-    shape_loss = shape_loss * valid_mask.float()
+-    app_loss = app_loss * valid_mask.float()
+-    w_k_valid = w_k * valid_mask.float()
+-    
+-    numerator = w_k_valid * (lambda_p * pos_loss + lambda_s * shape_loss + lambda_a * app_loss)
+-    denominator = torch.sum(w_k_valid) + epsilon
+-    
+-    total_loss = torch.sum(numerator) / denominator
+-    
+-    return total_loss
++    for p1, p2, w_k in matched_pairs:
++        # 1. Sample parameters from dense maps
++        mu_cam_1 = bilinear_sample(param_maps['1']['mu'], p1)
++        Sigma_cam_1 = bilinear_sample_cov(param_maps['1']['Sigma'], p1)
++        alpha_1 = bilinear_sample(param_maps['1']['alpha'], p1)
++        c_1 = bilinear_sample(param_maps['1']['c'], p1)
++        
++        mu_cam_2 = bilinear_sample(param_maps['2']['mu'], p2)
++        Sigma_cam_2 = bilinear_sample_cov(param_maps['2']['Sigma'], p2)
++        alpha_2 = bilinear_sample(param_maps['2']['alpha'], p2)
++        c_2 = bilinear_sample(param_maps['2']['c'], p2)
++        
++        # 2. Transform to world space
++        R1, t1 = camera_to_world_matrices['1']
++        R2, t2 = camera_to_world_matrices['2']
++        
++        mu_world_1 = R1 @ mu_cam_1 + t1
++        mu_world_2 = R2 @ mu_cam_2 + t2
++        
++        Sigma_world_1 = R1 @ Sigma_cam_1 @ R1.T
++        Sigma_world_2 = R2 @ Sigma_cam_2 @ R2.T
++        
++        # 3. Depth validation (check z_cam > 0)
++        # Note: z_cam is the third component of mu_cam in camera coordinates
++        if mu_cam_1[2] <= 0 or mu_cam_2[2] <= 0:
++            continue
++            
++        # 4. Positional Loss
++        pos_diff = np.linalg.norm(mu_world_1 - mu_world_2, ord=1)
++        l_pos = huber_loss(pos_diff)
++        
++        # 5. Shape Loss (Log-Eigenvalues)
++        eig_1 = np.linalg.eigvalsh(Sigma_world_1)
++        eig_2 = np.linalg.eigvalsh(Sigma_world_2)
++        # Ensure positive eigenvalues for log
++        eig_1 = np.maximum(eig_1, epsilon)
++        eig_2 = np.maximum(eig_2, epsilon)
++        
++        l_shape = 0.0
++        for i in range(3):
++            l_shape += huber_loss(np.abs(np.log(eig_1[i]) - np.log(eig_2[i])))
++            
++        # 6. Appearance Loss
++        l_app = np.linalg.norm(alpha_1 - alpha_2, ord=1) + np.linalg.norm(c_1 - c_2, ord=1)
++        
++        # 7. Aggregate
++        # Weights lambda_p, lambda_s, lambda_a are assumed to be global constants
++        weighted_term = w_k * (lambda_p * l_pos + lambda_s * l_shape + lambda_a * l_app)
++        total_loss += weighted_term
++        total_weight += w_k
++        
++    if total_weight < epsilon:
++        return 0.0
++        
++    return total_loss / (total_weight + epsilon)
+ ```
+ 
+-**Parameters:**
+-*   $\lambda_p, \lambda_s, \lambda_a$: Scalar weights for positional, shape, and appearance terms. Typical values are not explicitly given in the sources, but they balance the influence of each term [S1].
+-*   $\epsilon$: Small constant to prevent division by zero. Value not specified [S1].
++**Parameters**
++*   $\lambda_p, \lambda_s, \lambda_a$: Scalar weights for positional, shape, and appearance consistency. Values not given in the sources.
++*   $\epsilon$: Small constant to prevent division by zero. Value not given in the sources.
+ *   $\tau_{\text{conf}}$: Confidence threshold for filtering matches. If no match survives ($w_k > \tau_{\text{conf}}$), the loss for that region falls back to zero [S1].
+ 
+-**Edge Cases and Pitfalls:**
++**Edge Cases and Pitfalls**
+ *   **Geometric Degeneracy:** As a Gaussian's smallest eigenvalue $\lambda_{\min}$ approaches zero, the gradient of the log-eigenvalue shape loss scales inversely with $\lambda$ ($|\partial \mathcal{L}/\partial \lambda| \propto 1/\lambda$) [S1]. This creates a strong repulsive effect that pushes $\lambda_{\min}$ away from zero, preventing collapsed artifacts [S1].
+ *   **Ambiguous Regions:** If no match survives the confidence gating, the MAC loss is zero for that region, allowing the network to rely solely on photometric supervision [S1].
+-*   **Coordinate System:** Covariance matrices must be transformed using the rotation matrix $\mathbf{R}$ to respect the geometry of $\text{Sym}^+(3)$; using Euclidean distance in camera space is incorrect [S1].
++*   **Coordinate Systems:** Covariance matrices must be transformed using the rotation matrix $R$ from $T_{wc}$ to maintain consistency in the world frame [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear with respect to the number of matched pixel pairs $K$. The dominant operations are matrix-vector multiplications for coordinate transformation and eigenvalue decomposition for shape consistency.
+-*   **Memory Complexity:** Requires storing dense parameter maps for the views being compared. The loss computation itself is memory-efficient as it operates on sampled points.
+-*   **Strengths:** Robust to outliers due to Huber loss and confidence weighting. Respects the geometry of covariance matrices. Stabilizes training under sparse-view conditions by resolving ambiguities [S1].
+-*   **Limitations:** Requires high-quality 2D correspondences (e.g., from MASt3R/DINOv3). Performance depends on the accuracy of the pose estimation (ground truth during training, estimated at test time) [S1].
+-*   **When to use:** Sparse-view reconstruction where photometric loss alone leads to ambiguities or floating artifacts.
+-*   **When not to use:** Dense-view scenarios where photometric loss is sufficient, or when high-quality correspondences cannot be established.
++*   **Time Complexity:** Depends on the number of matched pixel pairs $K$ and the cost of bilinear sampling and eigenvalue decomposition. Eigenvalue decomposition of $3 \times 3$ symmetric matrices is constant time.
++*   **Memory Complexity:** Requires storing dense parameter maps for all views involved in the matching process.
++*   **Strengths:** Robust to outliers due to Huber loss and confidence weighting. Prevents geometric degeneracy. Improves performance under sparse-view conditions and large camera pose gaps [S1].
++*   **Limitations:** Requires reliable 2D correspondences (e.g., from MASt3R/DINOv3). Performance degrades if correspondences are inaccurate or if confidence estimation is poor [S1].
++*   **When to use:** Sparse-view reconstruction where photometric loss alone is ambiguous.
++*   **When not to use:** Dense-view scenarios with abundant, unambiguous correspondences where photometric loss is sufficient.
+ 
+ ## Background
+-The MAC loss was introduced in the MAC-Splat paper by Yang et al. [S1]. It builds on the MASt3R geometric backbone and a frozen DINOv3 encoder to obtain semantically informed 2D correspondences [S1]. The method was designed to improve reconstruction quality in sparse-view settings, showing significant gains over baselines like Splatt3R in terms of PSNR and LPIPS [S1]. It addresses the limitations of conventional losses by jointly regularizing 3D attributes in a common world frame [S1].
++The MAC loss was introduced in "MAC-Splat: Multi-Attribute Consistency for High-Fidelity Sparse-View Reconstruction" [S1]. It builds on the MASt3R geometric backbone and a frozen DINOv3 encoder to obtain semantically informed 2D correspondences [S1]. The method is designed to resolve ambiguities in 3D optimization for sparse-view reconstruction by leveraging semantic information [S1].
+ 
+ ## Sources

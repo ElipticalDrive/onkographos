@@ -1,0 +1,133 @@
+SfM, MVS, visual-inertial SLAM, 3D Gaussian Splatting and map-based localization in Rust - gsplat-train: vec4 Adam (2x) — Mip-NeRF 360 training time ~brush; 5-scene table by rsasaki0109 · Pull Request #225 · rsasaki0109/visloc-rs
+
+gsplat-train: vec4 Adam (2x) — Mip-NeRF 360 training time ~brush; 5-scene table by rsasaki0109 · Pull Request #225 · rsasaki0109/visloc-rs · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+rsasaki0109
+commented
+Sep 26, 2026
+Copy link
+Copy Markdown
+Owner
+Summary
+Halves the trainer's Adam step, which brings Mip-NeRF 360 training time to about brush's. The 5-scene comparison in docs/rust_3dgs_plan.md is updated.
+Why Adam: GSPLAT_TRAIN_PROFILE on brush-strategy bonsai at ~1M gaussians showed Adam at 18.5 ms/step, about 34% of a step and about 3x its memory-bandwidth floor.
+The change: each thread now updates 4 consecutive elements through array<vec4<f32>> bindings.
+Storage buffers in the renderer and trainer are allocated as 16-byte multiples so any of them can be bound that way.
+The zero-gradient padding lanes update by exactly zero.
+Adam: 18.5 → 9.2 ms/step.
+Profiling: the former "adam" stage is split into stats / adam / noise (0.9 / 9.2 / 0.8 ms).
+Results
+Same protocol as the doc's fair table: 30k steps, every 8th view held out, same GPU, brush strategy.
+scene
+ours PSNR / SSIM
+brush PSNR / SSIM
+ours time
+brush time
+Mip-NeRF 360 bonsai
+32.88 / 0.959
+33.02 / 0.960
+1355 s (was 1542)
+1333 s
+Mip-NeRF 360 room
+33.15 / 0.950
+32.95 / 0.951
+1278 s (was 1472)
+1184 s
+Mip-NeRF 360 garden
+27.55 / 0.865
+27.62 / 0.868
+3130 s
+3134 s
+south-building (2 runs)
+21.89, 22.30 / 0.790, 0.791
+22.69 / 0.805
+2156, 2137 s (was 2322)
+2379 s
+gerrard-hall
+19.93 / 0.711
+19.98 / 0.719
+1859 s (was 2065)
+2147 s
+south-building varies from run to run. The same settings give 21.9–22.4 dB. The pre-change exe scored 22.44 and 22.38, and a control that pads buffers but keeps the scalar Adam scored 21.98. The vec4 change is therefore not what moves it.
+Tried and reverted: per-subgroup shared-memory slots instead of the CAS float add in rasterize_backward. Backward went from 20.8 to 26–28 ms, so CAS contention was not the bottleneck.
+Test plan
+cargo test -p visloc-gsplat-train --features gpu (10 passed)
+cargo test -p visloc-gsplat-render --features gpu (16 passed, including GPU vs CPU gradient checks)
+cargo fmt --all -- --check
+30k benchmarks on all 5 scenes (table above)
+🤖 Generated with Claude Code
+https://claude.ai/code/session_01LXZ6YqkUsWkrahEp59C28U
+rsasaki0109
+and others
+added 2 commits
+September 26, 2026 18:26
+perf(gsplat-train): vec4 Adam (2x) — bonsai 30k 1542 -> 1355 s, same …
+…
+bd6003c
+```
+…PSNR
+
+Profiling brush-strategy training on Mip-NeRF 360 bonsai (GSPLAT_TRAIN_
+PROFILE, ~1M gaussians) put Adam at 18.5 ms/step (~34%), ~3x its memory-
+bandwidth floor. Each thread now updates 4 consecutive elements through
+array<vec4<f32>> bindings; storage buffers (renderer + trainer) are
+allocated as 16-byte multiples so any of them can be bound that way, and
+the zero-gradient padding lanes update by exactly zero. Adam 18.5 -> 9.2
+ms/step.
+
+bonsai 30k (brush strategy): 1542 -> 1355 s (brush 1333 s), PSNR/SSIM
+32.878/0.9589 (was 32.883/0.9588). The profile also splits the former
+"adam" stage into stats / adam / noise (0.9 / 9.2 / 0.8 ms).
+
+Tried and reverted: per-subgroup shared-memory slots instead of CAS in
+rasterize_backward (BB 128 -> 64 to fit): backward 20.8 -> 26-28 ms;
+shared-memory CAS contention was not the bottleneck.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LXZ6YqkUsWkrahEp59C28U
+```
+docs(3dgs): brush-strategy + vec4 Adam results vs brush on 5 scenes
+…
+c48a7a5
+```
+Quality within 0.14 dB of brush everywhere except south-building (room
++0.20 dB); faster than brush on garden and both COLMAP scenes, within 2%
+on bonsai and 8% on room. south-building is run-to-run noisy (21.9-22.4
+dB with the same settings; unordered atomic gradient accumulation feeds
+the refill sampling), so two runs are listed. Also records the reverted
+per-subgroup backward accumulation (slower).
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LXZ6YqkUsWkrahEp59C28U
+```
+Hide details
+View details
+rsasaki0109
+merged commit 035a0f5
+into
+main
+Sep 26, 2026
+10 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+rsasaki0109
+deleted the
+gsplat/m360-speed
+branch
+September 27, 2026 03:03
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

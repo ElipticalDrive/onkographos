@@ -1,0 +1,403 @@
+--- v012.md
++++ v013.md
+@@ -1,224 +1,211 @@
+ # 1D Transfer Function Generation and Sampling
+ 
+-Also called: 1D Transfer Function, TF1D, 1D Lookup Table with Interpolation
++Also called: 1D Transfer Function, TF1D
+ 
+ ## Overview
+-1D Transfer Function Generation and Sampling maps scalar voxel values to RGBA optical properties (color and opacity) using a 1D lookup table (LUT) [S1, book][S9]. It solves the problem of quantitative data visualization by assigning visual appearance to numerical intensity values [S1, book][S3, unofficial]. Unlike [Parametric Function Generation](5349-parametric-function-generation.md) which computes values analytically, or [Color Blending](5150-color-blending.md) which composites final pixels, this method performs a deterministic, per-voxel assignment based on a generated 1D LUT [S1, book][S3, unofficial]. It builds on [Lookup Table Implementation](5347-lookup-table-implementation.md) by defining the specific control point structures and interpolation logic required to populate the table [S4, S7, unofficial].
++1D Transfer Function Generation and Sampling maps scalar voxel values to RGBA color and opacity properties using a 1D lookup table (LUT) [S1, book][S11]. It solves the problem of quantitative data visualization by assigning visual appearance to numerical importance [S1, book]. Unlike [Parametric Function Generation](5349-parametric-function-generation.md) which computes values analytically, or [Color Blending](5150-color-blending.md) which composites final pixels, this method performs a deterministic, per-voxel assignment based on a 1D Lookup Table (LUT) [S1, book][S3, unofficial]. It builds on [Lookup Table Implementation](5347-lookup-table-implementation.md) by utilizing the generated LUT to index colors [S1, book].
+ 
+ ## How it works
+-**Inputs:**
+-*   Scalar volume data range $[x_{min}, x_{max}]$ [S2, S4, S8, unofficial].
+-*   A set of control points defining the transfer function. Each control point $i$ consists of a scalar position $p_i \in [0, 1]$ (normalized) and an RGBA color vector $c_i = (r_i, g_i, b_i)$ and/or an alpha value $\alpha_i$ [S4, S7, S8, unofficial].
+-*   Optional Gaussian opacity objects defined by mean $\mu$, standard deviation $\sigma$, and height factor [S7, unofficial].
+-*   LUT resolution $N$ (e.g., 256, 1024) [S7, S8, unofficial].
+-
+-**Outputs:**
+-*   A 1D LUT (stored as a 1D texture or SSBO) of size $N$ containing RGBA values [S2, S7, S8, unofficial].
+-*   The sampled RGBA value for any input scalar $v$.
++**Inputs and Outputs:**
++*   **Input:** A set of control points defining the transfer function. Each control point consists of a scalar position (normalized to $[0, 1]$) and an RGBA color value. Optional inputs include alpha control points and Gaussian opacity objects [S8, S9, unofficial].
++*   **Output:** A 1D texture (or array) of size $N$ (typically 256, 1024, or derived from data bit depth) containing pre-interpolated RGBA values [S7, S8, S9, unofficial].
+ 
+ **Data Structures:**
+-*   **ControlPoint:** Contains `value` (float, normalized position) and `color` (TFColor) [S4, unofficial].
+-*   **TFColor:** Contains `r`, `g`, `b`, `a` (all float, range $[0, 1]$) [S4, unofficial].
+-*   **ColorControl:** Contains `position` (float) and `color` (vec3f) [S7, unofficial].
+-*   **AlphaControl:** Contains `pos` (vec2f) where `pos.x` is value and `pos.y` is alpha [S7, unofficial].
+-*   **GaussianObject:** Contains `mean` (float), `sigma` (float), `heightFactor` (float), and `alphaArray` (vector<float>) [S7, unofficial].
+-*   **m_rgbaTable:** `vector<vec4f>` of size `resolution` [S7, unofficial].
+-*   **m_alphaArray:** `vector<float>` of size `resolution` [S7, unofficial].
++*   **ControlPoint:** A structure with fields `value` (float, normalized position) and `color` (TFColor) [S4, unofficial].
++*   **TFColor:** A structure with fields `r`, `g`, `b`, `a` (all float in $[0, 1]$) [S4, unofficial].
++*   **AlphaControl:** Fields `pos` (vec2f) where `pos.x` is the scalar position and `pos.y` is the opacity value [S8, unofficial].
++*   **GaussianObject:** Fields `mean` (float), `sigma` (float), `heightFactor` (float), and `alphaArray` (vector<float>) [S8, unofficial].
++*   **LUT Array:** A contiguous array of 4-component vectors $(R, G, B, \alpha)$, typically 32-bit floats, of size `resolution` [S2, S4, S8, unofficial].
+ 
+ **Steps:**
+ 
+ 1.  **Initialize Control Points:**
+-    *   If no control points are defined, push a default control point at position 0.0 with color $(0,0,0)$ and alpha 0.0 [S7, unofficial].
+-    *   Sort control points by their scalar position $p$ in ascending order [S4, S7, unofficial].
+-    *   If a point with the same value exists, replace it [S4, unofficial].
+-
+-2.  **Normalize Input Data Range:**
+-    *   Map raw scalar values $v$ to normalized domain $x \in [0, 1]$ using the volume's minimum and range:
+-        $$ x = \frac{v - x_{min}}{x_{max} - x_{min}} $$
+-        [S2, S3, S4, S5, S6, S8, unofficial]
+-
+-3.  **Generate LUT Entries (Color):**
+-    *   Iterate $i$ from $0$ to $N-1$.
+-    *   Compute the normalized value $v$ for this entry. Two common binning strategies exist:
+-        *   **Center-aligned:** $v = \frac{i + 0.5}{N}$ [S7, unofficial].
+-        *   **Edge-aligned:** $v = \frac{i}{N-1}$ [S7, S8, unofficial].
+-        *   *Note: Inconsistent binning between color and alpha generation can cause misalignment at boundaries [S7, unofficial].*
+-    *   Find the interval $[p_L, p_R]$ in the sorted control points such that $p_L \le v \le p_R$.
+-    *   If $v < p_0$, clamp color to $c_0$ [S7, unofficial].
+-    *   If $v > p_{last}$, clamp color to $c_{last}$ [S7, unofficial].
+-    *   Otherwise, calculate interpolation weight $w$:
+-        $$ w = \frac{|v - p_L|}{|p_R - p_L|} $$
+-        [S7, unofficial]
+-    *   Interpolate color components:
++    *   If no color control points are defined, insert a default point at position 0.0 with color $(0, 0, 0, 0)$ [S8, unofficial].
++    *   Sort all color control points by their scalar position in ascending order [S8, unofficial].
++    *   If alpha control points are provided, sort them by position as well [S8, unofficial].
++
++2.  **Determine LUT Resolution:**
++    *   Set `resolution` based on requirements. Common defaults are 256 for 8-bit data or 1024 for higher precision [S7, S8, unofficial].
++    *   Calculate the step size: $step = \frac{1.0}{resolution - 1}$ [S8, unofficial].
++
++3.  **Interpolate Color Values:**
++    *   Iterate through each index $i$ from $0$ to $resolution - 1$ [S8, unofficial].
++    *   Compute the normalized scalar value $p$ for this index. Two common binning strategies exist:
++        *   **Edge-aligned:** $p = i \cdot step$ [S8, unofficial].
++        *   **Center-aligned:** $p = \frac{i + 0.5}{resolution}$ [S8, unofficial].
++        *   *Note: Inconsistent binning between color and alpha interpolation can cause boundary misalignment [S8, unofficial].*
++    *   Find the interval $[p_L, p_R]$ in the sorted color control points such that $p_L \le p \le p_R$ [S8, unofficial].
++    *   Calculate the interpolation weight $w$:
++        $$ w = \frac{|p - p_L|}{|p_R - p_L|} $$
++        [S8, unofficial]
++    *   Interpolate the RGB color components:
+         $$ c = \text{mix}(c_L, c_R, w) $$
+-        [S7, unofficial]
+-        Where $\text{mix}(a, b, w) = a + w(b - a)$.
+-    *   Store $c$ in `m_rgbaTable[i].rgb` [S7, unofficial].
+-
+-4.  **Generate LUT Entries (Alpha):**
+-    *   If separate alpha controls are used, interpolate alpha $\alpha$ similarly using `AlphaControl` points [S7, unofficial].
+-    *   If Gaussian opacity objects are present, compute their contribution to alpha for each entry $i$:
+-        $$ \alpha_{gauss}(i) = \frac{heightFactor}{\sigma \sqrt{2\pi}} e^{-\frac{(v - \mu)^2}{2\sigma^2}} $$
+-        [S7, unofficial]
+-    *   Combine alpha sources. Sources disagree on combination logic:
+-        *   Some implementations use the maximum: $\alpha_{final} = \max(\alpha_{control}, \alpha_{gauss})$ [S7, unofficial].
+-        *   Others may multiply or blend, but the source code explicitly uses `std::max` [S7, unofficial].
+-    *   Store $\alpha_{final}$ in `m_rgbaTable[i].a` [S7, unofficial].
+-
+-5.  **Alpha Normalization (Optional):**
+-    *   Some implementations round alpha to two decimal places before storage:
+-        $$ \alpha = \lfloor \alpha \cdot 100 \rfloor / 100.0 $$
+-        [S4, unofficial]
++        where $c_L$ and $c_R$ are the colors of the left and right control points [S8, unofficial].
++    *   Store the result in the LUT at index $i$: `m_rgbaTable[i].rgb = c` [S8, unofficial].
++
++4.  **Interpolate Alpha Values:**
++    *   If alpha control points exist, repeat the interval search for the alpha controls using the same $p$ (or edge-aligned $p$) [S8, unofficial].
++    *   Calculate alpha weight $w_\alpha$ and interpolate:
++        $$ \alpha = \text{mix}(\alpha_L, \alpha_R, w_\alpha) $$
++        [S8, unofficial]
++    *   Update the alpha channel in the LUT. Some implementations use the maximum of the color-derived alpha and the alpha-control-derived alpha to allow Gaussian overrides:
++        $$ \text{m\_rgbaTable}[i].a = \max(\text{m\_rgbaTable}[i].a, \alpha) $$
++        [S8, unofficial]
++
++5.  **Apply Gaussian Opacity (Optional):**
++    *   For each Gaussian object, compute its contribution to the alpha array at each index $i$ [S8, unofficial].
++    *   Update the LUT alpha:
++        $$ \text{m\_rgbaTable}[i].a = \max(\text{m\_rgbaTable}[i].a, \text{GaussianObject}[j].\text{alphaArray}[i]) $$
++        [S8, unofficial]
+ 
+ 6.  **Upload to GPU:**
+-    *   Create a 1D texture (or 2D texture with height 1) of size $N \times 1$ with format `RGBAFloat` or `RGBA8` [S3, S7, unofficial].
+-    *   Set wrap mode to `Clamp` and filter mode to `Bilinear` (for interpolation) or `Point` (for hard labels) [S3, S7, unofficial].
+-    *   Upload the `m_rgbaTable` or `palette` data [S3, S7, unofficial].
+-
+-7.  **Sampling at Runtime:**
+-    *   For each voxel with scalar value $v$:
+-        *   Normalize $v$ to $x \in [0, 1]$ [S2, S4, S8, unofficial].
+-        *   Clamp $x$ to $[0, 1]$ to prevent out-of-bounds access [S2, S3, S4, S5, S6, S7, S8, unofficial].
+-        *   Compute index:
+-            $$ idx = \text{clamp}(\lfloor x \cdot (N-1) \rfloor, 0, N-1) $$
+-            [S3, S5, S8, unofficial]
+-        *   Sample the texture at coordinate $x$ (hardware bilinear interpolation) or lookup `LUT[idx]` [S2, S3, S7, S8, unofficial].
+-        *   Retrieve RGBA.
+-        *   **Opacity-Weighted Color:** Multiply color components by opacity for correct rendering, as color approximates both emission and absorption:
+-            $$ C_{final} = C_{sampled} \cdot \alpha_{sampled} $$
+-            [S1, book][S9]
++    *   Convert float RGBA values to 8-bit integers if using `GL_RGBA8` format: `byte = (uint8_t)(float_val * 255)` [S8, S7, unofficial].
++    *   Upload the palette to a 1D or 2D texture (e.g., `GL_TEXTURE_2D` with height 1) using `glTexImage2D` or equivalent [S8, S3, unofficial].
++    *   Set texture parameters: `WrapMode = Clamp`, `FilterMode = Bilinear` (for smooth interpolation) or `Point` (for discrete label maps) [S3, S8, unofficial].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-import math
+-
+-def generate_lut(control_points, resolution=1024):
++def generate_1d_tf(control_points, alpha_controls, gaussian_objects, resolution=1024):
+     """
+-    Generates a 1D LUT from control points.
+-    control_points: list of dicts with keys 'pos' (float 0-1), 'color' (vec3), 'alpha' (float).
+-    resolution: int, size of the LUT.
+-    Returns: list of vec4 (RGBA) of length resolution.
++    Generates a 1D transfer function LUT from control points.
++    control_points: List of (position, r, g, b, a) tuples, sorted by position.
++    alpha_controls: List of (position, alpha) tuples, sorted by position.
++    gaussian_objects: List of Gaussian objects with alpha arrays.
++    resolution: Size of the output LUT.
++    Returns: List of (r, g, b, a) tuples of length resolution.
+     """
+     if not control_points:
+-        control_points = [{'pos': 0.0, 'color': [0.0, 0.0, 0.0], 'alpha': 0.0}]
++        control_points = [(0.0, 0.0, 0.0, 0.0, 0.0)]
+     
+-    # Sort by position
+-    control_points.sort(key=lambda p: p['pos'])
+-    n_controls = len(control_points)
+-    
++    # Ensure sorted
++    control_points.sort(key=lambda x: x[0])
++    if alpha_controls:
++        alpha_controls.sort(key=lambda x: x[0])
++        
+     lut = [None] * resolution
++    step = 1.0 / (resolution - 1)
+     
+     for i in range(resolution):
+-        # Center-aligned binning [S7, unofficial]
+-        v = (i + 0.5) / resolution
+-        
+-        # Find interval
+-        # upper_bound finds first element > v
+-        ub_index = 0
+-        for k in range(n_controls):
+-            if control_points[k]['pos'] > v:
+-                ub_index = k
+-                break
+-        else:
+-            ub_index = n_controls
+-            
+-        if ub_index <= 0:
+-            # Clamp to first control point
+-            left = control_points[0]
+-            right = control_points[0]
+-            w = 0.0
+-        elif ub_index >= n_controls:
+-            # Clamp to last control point
+-            left = control_points[-1]
+-            right = control_points[-1]
++        # Edge-aligned sampling
++        p = clamp(i * step, 0.0, 1.0)
++        
++        # Interpolate Color
++        left_cp, right_cp = find_interval(control_points, p)
++        if left_cp is None:
++            left_cp = control_points[0]
++            right_cp = control_points[0]
++        if right_cp is None:
++            right_cp = control_points[-1]
++            left_cp = control_points[-1]
++            
++        if left_cp[0] == right_cp[0]:
+             w = 0.0
+         else:
+-            left = control_points[ub_index - 1]
+-            right = control_points[ub_index]
+-            # Interpolation weight [S7, unofficial]
+-            denom = right['pos'] - left['pos']
+-            if denom == 0:
+-                w = 0.0
++            w = (p - left_cp[0]) / (right_cp[0] - left_cp[0])
++            
++        r = lerp(left_cp[1], right_cp[1], w)
++        g = lerp(left_cp[2], right_cp[2], w)
++        b = lerp(left_cp[3], right_cp[3], w)
++        a = lerp(left_cp[4], right_cp[4], w)
++        
++        # Interpolate Alpha from Alpha Controls
++        if alpha_controls:
++            left_ac, right_ac = find_interval(alpha_controls, p)
++            if left_ac is None:
++                left_ac = alpha_controls[0]
++                right_ac = alpha_controls[0]
++            if right_ac is None:
++                right_ac = alpha_controls[-1]
++                left_ac = alpha_controls[-1]
++                
++            if left_ac[0] == right_ac[0]:
++                w_alpha = 0.0
+             else:
+-                w = (v - left['pos']) / denom
++                w_alpha = (p - left_ac[0]) / (right_ac[0] - left_ac[0])
+                 
+-        # Interpolate Color [S7, unofficial]
+-        r = left['color'][0] + w * (right['color'][0] - left['color'][0])
+-        g = left['color'][1] + w * (right['color'][1] - left['color'][1])
+-        b = left['color'][2] + w * (right['color'][2] - left['color'][2])
+-        
+-        # Interpolate Alpha (simplified, assuming single alpha source per point)
+-        # Note: Real implementations may separate color and alpha controls [S7, unofficial]
+-        alpha_left = left['alpha']
+-        alpha_right = right['alpha']
+-        alpha = alpha_left + w * (alpha_right - alpha_left)
+-        
+-        # Optional: Alpha normalization [S4, unofficial]
+-        alpha = math.floor(alpha * 100) / 100.0
+-        
+-        lut[i] = [r, g, b, alpha]
++            alpha_from_controls = lerp(left_ac[1], right_ac[1], w_alpha)
++            a = max(a, alpha_from_controls)
++            
++        # Apply Gaussian Opacity
++        for gauss in gaussian_objects:
++            # Assuming gaussian_objects have an alpha_array precomputed for this resolution
++            gauss_alpha = gauss.alpha_array[i]
++            a = max(a, gauss_alpha)
++            
++        lut[i] = (r, g, b, a)
+         
+     return lut
+ 
+-def sample_lut(lut, value, vmin, vmax, lut_size):
+-    """
+-    Samples the LUT for a given scalar value.
+-    """
+-    # Normalize [S2, S4, S8, unofficial]
+-    if vmax == vmin:
+-        x = 0.0
+-    else:
+-        x = (value - vmin) / (vmax - vmin)
+-        
+-    # Clamp [S2, S4, S7, unofficial]
+-    x = max(0.0, min(1.0, x))
+-    
+-    # Index calculation [S3, S5, S8, unofficial]
+-    idx = int(math.floor(x * (lut_size - 1)))
+-    idx = max(0, min(lut_size - 1, idx))
+-    
+-    # Sample
+-    rgba = lut[idx]
+-    
+-    # Opacity-weighted color [S1, book][S9]
+-    r, g, b, a = rgba
+-    return [r * a, g * a, b * a, a]
++def find_interval(points, value):
++    """Finds the two points surrounding the value."""
++    for i in range(len(points) - 1):
++        if points[i][0] <= value <= points[i+1][0]:
++            return points[i], points[i+1]
++    return None, None
++
++def lerp(a, b, t):
++    return a + t * (b - a)
++
++def clamp(x, min_val, max_val):
++    return max(min_val, min(x, max_val))
+ ```
+ 
+ ## Subtopics
+ 
++### [Voxel Color Mapping](2970-voxel-color-mapping.md)
++Voxel Color Mapping converts raw scalar data values into integer indices for a color table lookup, assigning specific RGB colors and opacity values to each voxel. It solves the problem of quantitative data visualization by mapping numerical importance to visual appearance. Unlike [Parametric Function Generation](5349-parametric-function-generation.md) which computes values analytically, or [Color Blending](5150-color-blending.md) which composites final pixels, this method performs a deterministic, per-voxel assignment based on a 1D Lookup Table (LUT). It builds on [1D Transfer Function Generation and Sampling](2689-1d-transfer-function-generation-and-sampling.md) by utilizing the generated LUT to index colors.
++
++### [Color Specification](3969-color-specification.md)
++Color Specification defines the RGBA (Red, Green, Blue, Alpha) representation used to specify color and opacity in rendering pipelines. It solves the problem of defining discrete color values with explicit transparency control, allowing background objects to be seen through semi-transparent foreground objects.
++
++### [Color Blending](5150-color-blending.md)
++Color Blending linearly interpolates between two source colors based on a scalar ratio to produce a single output color. It solves the problem of smoothly transitioning between discrete color values in volume rendering pipelines by handling red, green, blue, and alpha channels independently. It is distinguished from [Voxel Color Mapping](2970-voxel-color-mapping.md) (which maps scalar values to colors) and [1D Transfer Function Generation and Sampling](2689-1d-transfer-function-generation-and-sampling.md) (which generates the color map) by operating directly on RGBA color pairs rather than individual voxel properties or transfer function lookups.
++
++### [Parametric Function Generation](5349-parametric-function-generation.md)
++Parametric Function Generation constructs transfer functions by evaluating mathematical functions of a scalar input to determine RGBA output values, rather than relying on piecewise linear interpolation between discrete control points. It solves the problem of defining smooth, continuous, and often perceptually optimized color mappings with a compact set of parameters. It differs from its siblings by using explicit analytical formulas (such as cosines, Gaussians, or sigmoids) to define the color space trajectory, offering a global, oscillating, or localized basis for color transitions instead of the local linear segments of [Voxel Color Mapping](2970-voxel-color-mapping.md) or the fixed palettes of [Colormap LUT Generation](7229-colormap-lut-generation.md).
++
++### [Transfer Function Editor (Alpha Pins)](6772-transfer-function-editor-alpha-pins.md)
++The Transfer Function Editor (Alpha Pins) is an interactive visualization tool that maps scalar voxel values $S(x,y,z)$ to color vectors $F(x,y,z)$ and opacity $\alpha_F(x,y,z)$. It distinguishes itself from other classification methods by using a pin-based interface where users manipulate specific geometric primitives (ramps, hats, blanks) to define opacity and vertical color markers to define gradients, rather than editing a continuous curve or parametric function directly.
++
++### [Colormap LUT Generation](7229-colormap-lut-generation.md)
++Colormap LUT Generation is the procedural creation of a 1D lookup table (typically 256 entries of RGBA) from a named colormap definition or a set of key-value pairs, serving as the color mapping stage in volume rendering classification. It differs from [Parametric Function Generation](5349-parametric-function-generation.md) by using predefined discrete color gradients rather than continuous mathematical functions, and from [1D Transfer Function Generation and Sampling](2689-1d-transfer-function-generation-and-sampling.md) by focusing on the static texture creation rather than the runtime interpolation of arbitrary user-defined transfer functions.
++
+ ### Hounsfield Scale Color Mapping
+-A method to assign color values to voxels based on attenuation coefficients (e.g., from CT scans) using the Hounsfield scale [S10, unofficial]. It solves the problem of visualizing medical imaging data by mapping physical attenuation properties to colors [S10, unofficial]. Unlike generic 1D TFs which map arbitrary scalars, this method uses the specific Hounsfield Unit (HU) scale where water is 0 HU and air is -1000 HU [S10, unofficial]. It is implemented as a LUT where a color value is read out for a given HU value [S10, unofficial]. Formula: $HU = \frac{\mu_{tissue} - \mu_{water}}{\mu_{water}} \times 1000$ [S10, unofficial].
++A method to assign color values to voxels based on attenuation coefficients (e.g., from CT scans) using the Hounsfield scale [S12, unofficial]. It is implemented as a Lookup Table (LUT) where a color value is read out for a given HU value [S12, unofficial]. The Hounsfield unit is calculated as $HU = \frac{\mu_{tissue} - \mu_{water}}{\mu_{water}} \times 1000$ [S12, unofficial]. Water has a HU value of 0, and bone ranges from 500 to 1500 [S12, unofficial].
+ 
+ ### 3D Color Cube Interpolation
+-An interpolation method used in Smokeview version 4 and earlier where colors are interpolated directly within the 3D RGB color space [S2, unofficial]. It solves the problem of color mapping but introduces artifacts [S2, unofficial]. Unlike standard 1D TF generation which interpolates indices or positions along a colorbar, this method averages RGB vectors: $interpolated color = (f(c_1) + f(c_2))/2$ [S2, unofficial]. Pitfall: Interpolating between red (1,0,0) and blue (0,0,1) yields purple (0.5,0.0,0.5), which is not in the colorbar and has no physical meaning [S2, unofficial].
++An interpolation method used in Smokeview version 4 and earlier where colors are interpolated directly within the 3D RGB color space [S2, unofficial]. The interpolated color is calculated as the average: $interpolated\_color = \frac{f(c_1) + f(c_2)}{2}$, where $c_1$ and $c_2$ are integer indices [S2, unofficial]. This causes artifacts near large gradients (e.g., fire), as interpolating between red (1,0,0) and blue (0,0,1) yields purple (0.5,0.0,0.5), which is not in the colorbar and has no physical meaning [S2, unofficial].
+ 
+ ### Gradient/Color Ramp Sampling
+-A method for sampling color ramps, often shared with noise textures [S11, unofficial]. It involves reading luminance in float and truncating channels for the color ramp [S11, unofficial]. Pitfall: A GradientTexture2D with `use_hdr` keeps a channel above 1 [S11, unofficial].
++Reads luminance in float and truncates each channel for the colour ramp shared with NoiseTexture2D, as Godot does [S13, unofficial]. Runs Gradient sampler and channelToByte in float [S13, unofficial]. A pitfall is that a GradientTexture2D with use_hdr keeps a channel above 1 [S13, unofficial]. Godot-measured ramp bytes off by one drop from 1212 to 0 of 2244 [S13, unofficial]. Golden 'noisetexture2d': Max error reduces by 1/255 from ramp fix, mean error 0.776/255 → 0.735/255 [S13, unofficial].
+ 
+ ### Bilinear Image Sampling
+-Samples colors from a batch of images at specified 2D pixel coordinates [S12, unofficial]. It takes an `images` tensor and `xy_grid`, flips the grid sign, and uses `torch.nn.functional.grid_sample` with `align_corners=True` and `mode="bilinear"` [S12, unofficial]. Parameter `align_corners=True` ensures corner pixels align with grid boundaries [S12, unofficial].
++Samples colors from a batch of images at specified 2D pixel coordinates. Takes `images` tensor of shape `[batch_size, H, W, C]` and `xy_grid` of shape `[N, 2]`. Flips `xy_grid` sign, reshapes to `[batch_size, N, 1, 2]`. Permutes images to `[batch_size, C, H, W]`. Uses `torch.nn.functional.grid_sample` with `align_corners=True` and `mode="bilinear"` [S14, unofficial]. `align_corners=True` ensures corner pixels align with grid boundaries during interpolation, preventing coordinate scaling artifacts at image edges [S14, unofficial].
+ 
+ ### Labelmap Transfer Function LUT Construction
+-Constructs two 1D LUT textures (soft and hard) for labelmap transfer functions [S3, unofficial]. The soft LUT uses float precision and bilinear filtering; the hard LUT uses byte precision and point filtering [S3, unofficial]. It solves the problem of supporting both smooth interpolation for continuous data and sharp boundaries for discrete labels [S3, unofficial]. Parameter `lutSize` is constant 256 [S3, unofficial].
++Constructs two 1D LUT textures (soft and hard) for labelmap transfer functions. The soft LUT uses float precision and bilinear filtering; the hard LUT uses byte precision and point filtering [S3, unofficial]. It initializes floatPixels and bytePixels arrays of size 256 [S3, unofficial]. For each entry, it calculates the index, extracts RGBA, and stores in floatPixels. It converts float RGBA to byte RGBA by multiplying by 255, rounding, and clamping [S3, unofficial]. It creates `lutSoft` (Texture2D, RGBAFloat, Bilinear) and `lutHard` (Texture2D, RGBA32, Point) [S3, unofficial].
+ 
+ ### 2D Transfer Function
+-A volume rendering technique that maps two separate scalar fields to color and opacity using a 2D lookup table (image) [S13]. It extends the 1D approach by allowing non-separable mappings [S13]. Parameter `lookupTable` is an `ARRAY2D` of Color objects [S13]. Pitfall: Ambiguity in mapping scalar fields to axes; a prescriptive interpretation is X-axis = scalar value, Y-axis = gradient [S13].
++A volume rendering technique that maps two separate scalar fields to color and opacity using a 2D lookup table (image), extending the 1D transfer function approach [S15]. The X-axis represents the scalar `value` and the Y-axis represents the gradient of the value, `grad(value)` [S15]. Unlike separable 1D transfer functions which combine two 1D lookups (potentially saving memory), the 2D TFN allows for non-separable, arbitrary 2D mappings without implementation constraints on combination [S15].
+ 
+ ### Material Synchronization LUT Adjustment
+-An algorithm to adjust a 1D LUT mapping sample values to material indices, ensuring distribution synchronization with frame number and material centers [S14, unofficial]. It calculates a base allocation range `d` and initializes material center positions [S14, unofficial].
++An algorithm to adjust a 1D Look-Up Table (LUT) mapping sample values to material indices, ensuring that the distribution of sample values across materials is synchronized with the frame number and material centers [S16, unofficial]. It calculates the common base allocation range `d` as `frameNumber / colorKind` and initializes material center positions `indexM[i]` to `d*i + d / 2` [S16, unofficial].
++
++### BuildFunctionFromTable
++Constructs a color transfer function from a pre-existing table of colors [S17]. After calling this method, the function range will be $[x_1, x_2]$ and the function will have size `nodes` [S17]. Function values will be regularly spaced between $x_1$ and $x_2$ [S17]. The table parameter's layout is assumed to be $[R_1, G_1, B_1, R_2, G_2, B_2, \dots, R_n, G_n, B_n]$, and it is assumed to be a block of memory of size $[3 \times size]$ [S17].
++
++### Scalar Mapping Output Formats
++The output format for mapped scalars can be set to specific component counts. Default output format is RGBA if not supplied [S17].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** LUT generation is $O(N \cdot K)$ where $N$ is LUT resolution and $K$ is the number of control points (or $O(N \log K)$ if binary search is used for interval finding) [S7, unofficial]. Sampling is $O(1)$ per voxel [S2, S3, unofficial].
+-*   **Memory Complexity:** $O(N)$ for the LUT storage [S7, unofficial].
+-*   **Performance:** Hardware bilinear interpolation on 1D textures is extremely fast and efficient on GPUs [S2, S3, unofficial].
+-*   **Strengths:** Simple to implement, intuitive user interface (control points), efficient hardware support [S1, book][S2, unofficial].
+-*   **Limitations:** Linear interpolation may produce artifacts in sharp transitions; does not support higher-order interpolation (e.g., cubic splines) natively in basic implementations [S4, unofficial]. Inconsistent binning between color and alpha can cause misalignment [S7, unofficial].
+-*   **When to use:** Standard volume rendering where scalar intensity is the primary classifier [S1, book].
+-*   **When not to use:** When complex multi-dimensional data relationships (e.g., gradient magnitude) need to be visualized simultaneously; use [2D Transfer Function](5349-parametric-function-generation.md) or similar instead [S1, book][S13].
++*   **Time Complexity:** Generation is $O(N \cdot C)$ where $N$ is the LUT resolution and $C$ is the number of control points (using binary search for interval finding) or $O(N)$ if control points are sparse and iterated linearly [S8, unofficial]. Sampling is $O(1)$ per voxel [S1, book].
++*   **Memory Complexity:** $O(N)$ for the LUT storage, where $N$ is typically 256 to 65536 entries [S7, S8, unofficial].
++*   **Performance:** Hardware interpolation via 1D textures is efficient and standard [S2, S5, unofficial].
++*   **Strengths:** Simple to implement, fast runtime lookup, supports smooth color transitions [S1, book][S4, unofficial].
++*   **Limitations:** Linear interpolation may not capture complex color variations; inconsistent binning between color and alpha can cause artifacts [S4, S8, unofficial]. 3D color cube interpolation causes visual artifacts [S2, unofficial].
+ 
+ ## Background
+-The method originated with the widespread adoption of texture-based volume rendering in the late 1990s [S1, book]. The NVIDIA GPU Gems Chapter 39 (Wittenbrink et al. 1998) established the use of 1D texture lookup tables for transfer functions, emphasizing opacity-weighted color [S1, book][S9]. Smokeview (Version 6) technical documentation further detailed the implementation using 1D texture maps to interpolate color indices rather than RGB values to avoid artifacts [S2, unofficial]. Modern implementations in libraries like VTK and ANARI continue to use this paradigm, extending it to 2D and labelmap variants [S3, unofficial][S13].
++The method was described in the NVIDIA GPU Gems Chapter 39 [S1, book]. It is also detailed in the Smokeview Technical Reference Guide [S2, unofficial]. Variants and implementations are found in various open-source projects like vrdf-sdk [S3, unofficial], raycastingrendering [S4, unofficial], and TransferFunctionModule [S8, unofficial].
+ 
+ ## Sources
+@@ -229,10 +216,13 @@
+ [S5] Compressed volume rendering using deep learning, https://www.cs.umd.edu/sites/default/files/scholarly_papers/Jain.pdf, fetched 2026-10-26 (unofficial)
+ [S6] fraserlove/ossium, https://github.com/fraserlove/ossium, fetched 2026-10-27 (unofficial)
+-[S7] wilsonCernWq/TransferFunctionModule, https://github.com/wilsonCernWq/TransferFunctionModule, fetched 2026-10-27 (unofficial)
+-[S8] hopexn/VolumeRenderingParallel, https://github.com/hopexn/VolumeRenderingParallel, fetched 2026-10-27 (unofficial)
+-[S9] GPU Gems ch39, Volume rendering techniques, https://developer.nvidia.com/sites/all/modules/custom/gpugems/books/GPUGems/gpugems_ch39.html, fetched 2026-10-29
+-[S10] Volume Raycasting mit OpenCL, https://arxiv.org/abs/1609.01317v1, fetched 2026-10-26 (unofficial)
+-[S11] feat(renderer): draw FogVolume and FogMaterial into the volumetric fog, https://github.com/Vortiago/textscene-inspector/pull/732, fetched 2026-10-26 (unofficial)
+-[S12] samirangode/Volume-Rendering-and-Neural-Radiance-Fields, https://github.com/samirangode/Volume-Rendering-and-Neural-Radiance-Fields, fetched 2026-10-26 (unofficial)
+-[S13] KHR_VOLUME_TRANSFER_FUNCTION2D Extension, https://github.com/KhronosGroup/ANARI-Docs/pull/156, fetched 2026-10-27
+-[S14] RubbishKing0624/VolumeRendering, https://github.com/RubbishKing0624/VolumeRendering, fetched 2026-10-26 (unofficial)+[S7] ragmar/VolumeRender, https://github.com/ragmar/VolumeRender, fetched 2026-10-27 (unofficial)
++[S8] wilsonCernWq/TransferFunctionModule, https://github.com/wilsonCernWq/TransferFunctionModule, fetched 2026-10-27 (unofficial)
++[S9] hopexn/VolumeRenderingParallel, https://github.com/hopexn/VolumeRenderingParallel, fetched 2026-10-27 (unofficial)
++[S10] GitHub - priscilla100/medical_volume_renderer, https://github.com/priscilla100/medical_volume_renderer/, fetched 2026-10-29 (unofficial)
++[S11] GPU Gems ch39, Volume rendering techniques, https://developer.nvidia.com/sites/all/modules/custom/gpugems/books/GPUGems/gpugems_ch39.html, fetched 2026-10-29
++[S12] Volume Raycasting mit OpenCL, https://arxiv.org/abs/1609.01317v1, fetched 2026-10-26 (unofficial)
++[S13] feat(renderer): draw FogVolume and FogMaterial into the volumetric fog, https://github.com/Vortiago/textscene-inspector/pull/732, fetched 2026-10-26 (unofficial)
++[S14] samirangode/Volume-Rendering-and-Neural-Radiance-Fields, https://github.com/samirangode/Volume-Rendering-and-Neural-Radiance-Fields, fetched 2026-10-26 (unofficial)
++[S15] KHR_VOLUME_TRANSFER_FUNCTION2D Extension, https://github.com/KhronosGroup/ANARI-Docs/pull/156, fetched 2026-10-27
++[S16] RubbishKing0624/VolumeRendering, https://github.com/RubbishKing0624/VolumeRendering, fetched 2026-10-26 (unofficial)
++[S17] vtkColorTransferFunctions, http://www.vtk.org/doc/nightly/html/classvtkColorTransferFunction.html, fetched 2026-10-29

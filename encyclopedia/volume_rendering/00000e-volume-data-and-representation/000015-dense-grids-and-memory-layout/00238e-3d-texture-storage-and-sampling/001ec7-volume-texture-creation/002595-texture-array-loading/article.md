@@ -1,0 +1,114 @@
+# Texture Array Loading
+Also called: 2D Array Texture Creation
+## Overview
+This method constructs a WebGL 2D array texture from a list of external image URLs, assembling them into a contiguous 3D volume representation for rendering. It solves the problem of efficiently loading discrete 2D slices (such as terrain chunks or voxel layers) into a GPU texture object that supports 3D coordinate sampling. It differs from monolithic volume loading by treating the texture as a collection of independent 2D layers, allowing for dynamic assembly based on a directory structure rather than a single dense buffer [S1, unofficial].
+
+## How it works
+**Inputs:**
+- `urls`: An array of strings representing URLs to image files.
+- `width`: Integer width of each individual texture layer.
+- `height`: Integer height of each individual texture layer.
+
+**Outputs:**
+- A WebGL texture object bound to `gl.TEXTURE_2D_ARRAY`, containing `urls.length` layers of size `width x height`.
+
+**Data Structures:**
+- `pixels`: A `Uint8Array` storing flattened RGBA data. Size is `width * height * 4 * urls.length`.
+- `canvas`: An off-screen HTML Canvas element used for decoding images.
+
+**Steps:**
+1. **Initialize Texture Object**: Create a WebGL texture using `gl.createTexture()`. Bind it to `gl.TEXTURE_2D_ARRAY`.
+2. **Allocate Placeholder Storage**: Initialize the texture with a 1x1x1 RGBA texture (typically magenta) to allocate GPU storage. This ensures the texture object exists before data upload [S1, unofficial].
+3. **Load and Flatten Images**:
+   - For each `url` in `urls`:
+     - Load the image resource.
+     - Create a temporary canvas of size `width x height`.
+     - Draw the image onto the canvas using `ctx.drawImage()`.
+     - Extract pixel data using `ctx.getImageData(0, 0, width, height)`.
+     - Flatten the `ImageData.data` array (which is already `Uint8ClampedArray`) and append it to the `pixels` array.
+4. **Upload Data**: Call `gl.texImage3D()` with the following parameters:
+   - `target`: `gl.TEXTURE_2D_ARRAY`
+   - `level`: 0
+   - `internalformat`: `gl.RGBA`
+   - `width`: `width`
+   - `height`: `height`
+   - `depth`: `urls.length`
+   - `border`: 0
+   - `format`: `gl.RGBA`
+   - `type`: `gl.UNSIGNED_BYTE`
+   - `pixels`: The complete `Uint8Array` from Step 3.
+5. **Generate Mipmaps**: Call `gl.generateMipmap(gl.TEXTURE_2D_ARRAY)` to create lower-resolution levels.
+6. **Set Sampling Filters**:
+   - Set `gl.TEXTURE_MIN_FILTER` to `gl.NEAREST_MIPMAP_LINEAR`.
+   - Set `gl.TEXTURE_MAG_FILTER` to `gl.NEAREST`.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def load_texture_array(gl, urls, width, height):
+    # Step 1: Create and bind texture
+    texture = gl.createTexture()
+    gl.bindTexture(gl.TEXTURE_2D_ARRAY, texture)
+
+    # Step 2: Allocate placeholder storage (1x1x1 RGBA)
+    placeholder = Uint8Array([255, 0, 255, 255]) # Magenta
+    gl.texImage3D(gl.TEXTURE_2D_ARRAY, 0, gl.RGBA, 1, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, placeholder)
+
+    # Step 3: Load images and flatten data
+    pixels = Uint8Array(width * height * 4 * len(urls))
+    offset = 0
+    canvas = create_offscreen_canvas(width, height)
+    ctx = canvas.getContext('2d')
+
+    for url in urls:
+        img = load_image(url)
+        ctx.drawImage(img, 0, 0, width, height)
+        img_data = ctx.getImageData(0, 0, width, height)
+        # img_data.data is Uint8ClampedArray; copy to pixels
+        pixels.set(img_data.data, offset)
+        offset += width * height * 4
+
+    # Step 4: Upload to GPU
+    gl.texImage3D(
+        gl.TEXTURE_2D_ARRAY, 0, gl.RGBA,
+        width, height, len(urls), 0,
+        gl.RGBA, gl.UNSIGNED_BYTE, pixels
+    )
+
+    # Step 5: Generate mipmaps
+    gl.generateMipmap(gl.TEXTURE_2D_ARRAY)
+
+    # Step 6: Set filters
+    gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MIN_FILTER, gl.NEAREST_MIPMAP_LINEAR)
+    gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MAG_FILTER, gl.NEAREST)
+
+    return texture
+```
+
+**Parameters:**
+- `width`: Width of individual layers. Typical values depend on chunk size (e.g., 16, 32, 64).
+- `height`: Height of individual layers. Same constraints as `width`.
+
+**Edge Cases:**
+- **Image Loading Failure**: If an image fails to load, the corresponding layer will contain uninitialized or zero data. Error handling should be added to skip or flag failed URLs.
+- **Aspect Ratio Mismatch**: If the loaded image does not match `width x height`, `drawImage` will stretch or crop the image. Ensure source images match target dimensions or implement scaling logic.
+- **Memory Limits**: Large `urls.length` or high resolution may exceed WebGL texture size limits. Check `gl.getParameter(gl.MAX_TEXTURE_SIZE)` and `gl.MAX_ARRAY_TEXTURE_LAYERS`.
+
+## Subtopics
+
+### [Dynamic Segment Texture Array Update](16688-dynamic-segment-texture-array-update.md)
+A method for synchronizing GPU-side volumetric data with CPU-side segment definitions by rebuilding a texture array bound to shader uniforms. It solves the problem of efficiently mapping discrete, sparse voxel segments to a contiguous 3D texture array for rendering. It differs from standard volume rendering by treating the volume texture as a collection of independent 2D slices or bricks that are dynamically assembled based on a directory structure, rather than as a monolithic 3D buffer.
+
+## Operating characteristics
+- **Time Complexity**: O(N * W * H) where N is the number of URLs, and W, H are dimensions. Dominated by image decoding and pixel copying.
+- **Memory Complexity**: O(N * W * H * 4) bytes for the pixel buffer, plus GPU texture memory.
+- **Performance**: Loading is synchronous in the pseudocode above. For production, asynchronous loading with progress tracking is recommended. WebGL 2.0 supports `texImage3D` with `ImageBitmap` for faster decoding.
+- **Strengths**: Simple API, supports mipmapping, efficient for static or semi-static volumes.
+- **Limitations**: Not suitable for real-time dynamic updates without full texture recreation. WebGL 1.0 does not support `TEXTURE_2D_ARRAY` natively (requires extension).
+
+## Background
+This method is derived from WebGL practices for loading 2D array textures, often used in voxel engines and terrain rendering. The specific implementation details, including the placeholder initialization and filter settings, are documented in the Exolands project [S1, unofficial].
+
+## Sources
+[S1] kvxy/exolands, https://github.com/kvxy/exolands, fetched 2026-10-27 (unofficial)

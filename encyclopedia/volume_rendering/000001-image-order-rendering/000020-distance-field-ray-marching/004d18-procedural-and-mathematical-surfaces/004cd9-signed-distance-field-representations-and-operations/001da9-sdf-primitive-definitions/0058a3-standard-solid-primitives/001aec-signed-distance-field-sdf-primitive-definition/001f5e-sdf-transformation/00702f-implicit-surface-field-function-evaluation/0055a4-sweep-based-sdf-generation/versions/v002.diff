@@ -1,0 +1,129 @@
+--- v001.md
++++ v002.md
+@@ -12,5 +12,5 @@
+ 
+ **Data Structures:**
+-*   **Texture Storage:** The SDF is stored in a quantized format to avoid floating-point storage requirements. Common formats include `UNORM_R8` (range 0–255) or `SNORM_R8` (range -127 to 127) [S1, unofficial].
++*   **Texture Storage:** The SDF is stored in a quantized format to avoid floating-point storage requirements [S1, unofficial]. Common formats include `UNORM_R8` (range 0–255) or `SNORM_R8` (range -127 to 127) [S1, unofficial].
+ *   **Shared Memory:** A local memory buffer (`sharedMem`) used within a compute shader workgroup to store a segment of the row being processed [S1, unofficial].
+ *   **Intermediate Textures:** If the quantization factor requires high precision during intermediate calculations, intermediate result textures may require twice the bits of the input storage to prevent overflow during parabolic addition [S1, unofficial].
+@@ -22,5 +22,5 @@
+ 
+ **Algorithm Steps:**
+-1.  **Initial Rasterization (2D Context):** Render surfaces into the distance field texture. In 2D, this is done by drawing lines a couple of pixels wide to get accurate subpixel distances for the immediate vicinity of surfaces [S2, unofficial].
++1.  **Initial Rasterization (2D Context):** Render surfaces into the distance field texture [S2, unofficial]. In 2D, this is done by drawing lines a couple of pixels wide to get accurate subpixel distances for the immediate vicinity of surfaces [S2, unofficial].
+ 2.  **X-Axis Sweep:** The input texture is assumed to have already been swept in the X direction [S1, unofficial].
+ 3.  **Y-Axis Sweep:** Perform a sweep along the Y axis using an extension compute shader [S1, unofficial].
+@@ -30,10 +30,10 @@
+ 
+ **Row Processing Logic (The Sweep Pass):**
+-The core computation occurs when processing a single row (or column) of the texture. The algorithm processes a row by:
++The core computation occurs when processing a single row (or column) of the texture [S1, unofficial]. The algorithm processes a row by:
+ 1.  Loading the input value for the current invocation.
+-2.  Quantizing the value: `_out = uint(input * QUANITZATION_FACTOR)`. Values greater than `EDF_RANGE * EDF_RANGE` indicate "infinity" [S1, unofficial].
++2.  Quantizing the value: `_out = uint(input * QUANITZATION_FACTOR)` [S1, unofficial]. Values greater than `EDF_RANGE * EDF_RANGE` indicate "infinity" [S1, unofficial].
+ 3.  Storing the quantized value to `sharedMem[rowInvocationID]` [S1, unofficial].
+ 4.  Synchronizing all threads in the workgroup (`BARRIER()`) [S1, unofficial].
+-5.  Iterating over a range of offsets `i` from `-EDF_RANGE` to `EDF_RANGE` (excluding 0 for optimization) [S1, unofficial].
++5.  Iterating over a range of offsets `i` from `-EDF_RANGE` to `EDF_RANGE - 1` (excluding 0 for optimization) [S1, unofficial].
+ 6.  For each offset, calculating the wrap-around coordinate and the distance between the current invocation and the neighbor [S1, unofficial].
+ 7.  Updating the local minimum using the parabolic distance approximation [S1, unofficial].
+@@ -43,7 +43,7 @@
+ $$ \text{newDist} = \min(\text{currentDist}, \text{sharedMem}[\text{newCoordinate}] + \text{distanceBetween}^2) $$
+ Where:
+-*   $\text{currentDist}$ is the current minimum distance found for the invocation.
+-*   $\text{sharedMem}[\text{newCoordinate}]$ is the quantized distance value stored in shared memory at the neighbor's position.
+-*   $\text{distanceBetween} = \text{rowInvocationID} - \text{newCoordinate}$.
++*   $\text{currentDist}$ is the current minimum distance found for the invocation [S1, unofficial].
++*   $\text{sharedMem}[\text{newCoordinate}]$ is the quantized distance value stored in shared memory at the neighbor's position [S1, unofficial].
++*   $\text{distanceBetween} = \text{rowInvocationID} - \text{newCoordinate}$ [S1, unofficial].
+ *   $\text{newCoordinate} = \text{coordinateWrapAround}(\text{rowInvocationID} + i)$, which is typically `x % ROW_LENGTH` [S1, unofficial].
+ 
+@@ -55,47 +55,39 @@
+ **Pseudocode:**
+ ```python
+-# Assume this function runs in a compute shader for a single row/column
+-# Inputs: input_tex (texture), row_length, local_id (rowInvocationID)
+-# Outputs: output_tex (texture)
++def sweep_row(input_tex, output_tex, row_length, rowInvocationID, sharedMem, barrier_func):
++    # Constants from evidence
++    EDF_RANGE = 255  # For UNORM_R8
++    QUANITZATION_FACTOR = 255.0
++    QUANITZATION_FACTOR_RCP = 1.0 / QUANITZATION_FACTOR
+ 
+-# Constants
+-EDF_RANGE = 255 # For UNORM_R8
+-QUANITZATION_FACTOR = 255.0
+-QUANITZATION_FACTOR_RCP = 1.0 / QUANITZATION_FACTOR
+-LOCAL_WORKGROUP_SIZE_X = 256
++    # 1. Load and Quantize
++    input_val = input_tex[rowInvocationID]  # Standard texel fetch
++    _out = int(input_val * QUANITZATION_FACTOR)  # uint cast
+ 
+-# 1. Load and Quantize
+-input_val = texelFetch(input_tex, local_id).r
+-_out = uint(input_val * QUANITZATION_FACTOR)
++    # 2. Store to Shared Memory
++    sharedMem[rowInvocationID] = _out
+ 
+-# 2. Store to Shared Memory
+-sharedMem[local_id] = _out
++    # 3. Synchronize
++    barrier_func()
+ 
+-# 3. Synchronize
+-barrier()
++    # 4. Sweep Loop
++    # Evidence loop: for i from -EDF_RANGE to EDF_RANGE - 1
++    for i in range(-EDF_RANGE, EDF_RANGE):
++        # Wrap-around coordinate
++        newCoordinate = (rowInvocationID + i) % row_length
++        # Distance between
++        distanceBetween = rowInvocationID - newCoordinate
++        # Update minimum
++        candidate = sharedMem[newCoordinate] + distanceBetween * distanceBetween
++        if candidate < _out:
++            _out = candidate
+ 
+-# 4. Sweep Loop
+-# Note: In a real implementation, sharedMem must be pre-loaded with 
+-# LOCAL_WORKGROUP_SIZE_X + 2*EDF_RANGE samples if row_length > LOCAL_WORKGROUP_SIZE_X
+-for i in range(-EDF_RANGE, EDF_RANGE + 1):
+-    if i == 0:
+-        continue
+-    
+-    # Calculate neighbor coordinate with wrap-around
+-    new_coord = (local_id + i) % row_length
+-    
+-    # Calculate distance between current invocation and neighbor
+-    distance_between = local_id - new_coord
+-    
+-    # Parabolic distance approximation update
+-    # sharedMem[new_coord] contains the quantized distance from the neighbor
+-    candidate = sharedMem[new_coord] + (distance_between * distance_between)
+-    
+-    if candidate < _out:
+-        _out = candidate
++    # 5. De-quantize and Store
++    result = float(_out) * QUANITZATION_FACTOR_RCP
++    output_tex[rowInvocationID] = result  # Standard texel store
+ 
+-# 5. De-quantize and Store
+-result = float(_out) * QUANITZATION_FACTOR_RCP
+-texelStore(output_tex, local_id, result)
++    # Note: If row_length > LOCAL_WORKGROUP_SIZE_X, sharedMem must be 
++    # pre-loaded with LOCAL_WORKGROUP_SIZE_X + 2*EDF_RANGE samples 
++    # to handle wrap-around and range access [S1, unofficial].
+ ```
+ 
+@@ -108,8 +100,8 @@
+ *   **Time Complexity:** The non-optimal version (without prefix-sum/scan) has a complexity proportional to $O(\text{EDF\_RANGE})$ per pixel per sweep pass [S1, unofficial].
+ *   **Performance:** On a 320GB/s GDDR5 desktop GPU, the performance bound is around 6ms for SDF computation [S1, unofficial]. The non-optimal algorithm is expected to take between 500-1000ms assuming 2TB/s shared memory speed and `EDF_RANGE=255` [S1, unofficial].
+-*   **Memory Complexity:** Requires shared memory proportional to the workgroup size plus a halo for the sweep range. Intermediate textures may require double the bit-depth of the final output [S1, unofficial].
++*   **Memory Complexity:** Requires shared memory proportional to the workgroup size plus a halo for the sweep range [S1, unofficial]. Intermediate textures may require double the bit-depth of the final output [S1, unofficial].
+ *   **Strengths:** Efficient generation of approximate SDFs for sphere tracing; avoids expensive per-pixel analytical distance calculations; suitable for real-time rendering on GPUs [S1, S2, unofficial].
+ *   **Limitations:** The result is an approximation, not an exact Euclidean distance field; accuracy depends on `EDF_RANGE` and the initial rasterization quality; performance degrades with larger `EDF_RANGE` in the non-optimized version [S1, unofficial].
+-*   **When to use:** When an approximate SDF is sufficient for sphere tracing and performance is critical, especially on mobile or constrained hardware [S1, unofficial].
++*   **When to use:** When an approximate SDF is sufficient for sphere tracing, though the non-optimal version is slow (500–1000 ms) and requires optimizations like prefix-sum/scan or warp shuffles for performance-critical applications [S1, unofficial].
+ *   **When not to use:** When exact Euclidean distances are required for collision detection or precise ray marching [S1, unofficial].
+ 

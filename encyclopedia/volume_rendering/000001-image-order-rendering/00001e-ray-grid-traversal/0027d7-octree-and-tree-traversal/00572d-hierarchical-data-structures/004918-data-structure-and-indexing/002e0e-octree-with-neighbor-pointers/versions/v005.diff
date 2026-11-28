@@ -1,0 +1,162 @@
+--- v004.md
++++ v005.md
+@@ -4,60 +4,115 @@
+ 
+ ## Overview
+-This method augments a branch-on-need octree with explicit links to adjacent nodes, enabling direct traversal to neighboring spatial regions without ascending the parent hierarchy [S2]. It solves the latency penalty of recursive ascent in sparse octrees by allowing rays to jump horizontally across node boundaries [S1]. Unlike structures that maintain full 26-neighbor connectivity, this variant restricts pointers to the X-axis, distinguishing it from comprehensive adjacency graphs [S1].
++The Octree with Neighbor Pointers is a spatial index structure that augments a branch-on-need octree with direct links to adjacent nodes, enabling accelerated ray traversal in volume rendering by allowing direct jumps to neighboring cells without backtracking [S2]. It differs from standard octree traversals by maintaining explicit adjacency information, and specifically differs from Zhou et al. [2010] by storing only x-neighbor pointers rather than pointers to all 26 neighbors, optimizing for specific traversal patterns [S1].
+ 
+ ## How it works
+-The method constructs a spatial index on-the-fly from a view-dependent octree and encodes it into a 3D texture for GPU traversal [S2].
++**Inputs and Outputs:**
++*   **Input:** A view-dependent branch-on-need octree (typically constructed from a mesh or point cloud) [S1, S2].
++*   **Output:** A 3D texture acting as a spatial index, encoded with node types, child pointers, and neighbor pointers [S2].
+ 
+-### Inputs and Outputs
+-*   **Input:** A view-dependent branch-on-need octree representing the volume or surface data [S2].
+-*   **Output:** A 3D RGBA texture acting as the spatial index, where each node is encoded in 8 consecutive texels arranged in the X direction [S2].
++**Data Structures and Layout:**
++The structure is encoded into an 8-bit RGBA 3D texture [S2]. Each octree node is encoded in 8 consecutive texels arranged in the x-direction [S2]. The encoding uses a "tagged pointer" scheme where the Alpha (A) component determines the node kind, and the Red, Green, Blue (RGB) components store pointers [S2].
+ 
+-### Data Structures
+-The spatial index is a 3D texture with 8-bit RGBA components [S2]. Each octree node occupies 8 consecutive texels along the X-axis [S2].
++*   **Node Kind (A component):**
++    *   $A = 1.0$: Inner (non-leaf) node [S2].
++    *   $A = 0.5$: Data (leaf) node [S2].
++    *   $A = 0.0$: Empty node [S2].
++*   **Pointer Encoding (RGB components):**
++    *   **Inner Nodes:** RGB points to the first of 8 children, which are arranged consecutively in the x-direction [S2].
++    *   **Leaf Nodes:** RGB points to leaf info. This info consists of a data pointer (if not empty) and 6 consecutive texels storing neighbor pointers [S2]. The last leaf data texel contains a NULL pointer [S2].
++    *   **Neighbor Pointers:** The A value of a neighbor pointer texel encodes the octree level of the neighbor [S2].
+ 
+-**Tagged Pointer Layout (per texel):**
+-*   **RGB:** Pointer information [S2].
+-*   **A (Alpha):** Node kind tag [S2].
+-    *   $A = 1.0$: Inner node (non-leaf) [S2].
+-    *   $A = 0.5$: Data node (leaf with data) [S2].
+-    *   $A = 0.0$: Empty node [S2].
++**Construction Algorithm:**
++The structure is created on-the-fly at each frame directly from the view-dependent octree [S2]. The construction proceeds bottom-up in a breadth-first fashion using Morton ordering [S1].
+ 
+-**Inner Node Encoding:**
+-*   The RGB components of the first texel point to the first of 8 children, which are arranged consecutively in the X direction [S2].
++1.  **Initialization:** Create all nodes at the top level $n$ (typically two levels below the root to speed up traversal) [S1]. Establish x-neighbor pointers for all adjacent nodes at this level [S1].
++2.  **Propagation:** Propagate x-neighbor pointers from nodes in level $i$ to their child nodes in level $i-1$ [S1]. Specifically, link adjacent level-$(i-1)$ nodes that have different parent nodes [S1].
++3.  **Texture Encoding:** Encode the resulting structure into the 3D texture [S2]. Update the GPU texture using `glTexSubImage` [S2].
+ 
+-**Leaf Node Encoding:**
+-*   The RGB components point to leaf info: a data pointer (if not empty) and 6 consecutive texels storing neighbor pointers for the 6 faces [S2].
+-*   The last leaf data texel contains a NULL pointer [S2].
+-*   Neighbor pointers use the A component to encode the octree level of the neighbor [S2].
++**Neighbor Linking Logic:**
++Neighbor pointers link each leaf node of the octree via its six faces directly to the corresponding adjacent node of that face, or to the smallest node enclosing all adjacent nodes if there are multiple ones [S2].
+ 
+-### Construction Algorithm
+-The construction proceeds bottom-up in a breadth-first fashion [S1].
+-
+-1.  Create all nodes at the top level $n$ (typically two levels below the root to speed up traversal) [S1].
+-2.  Establish X-neighbor pointers for all adjacent nodes at the top level $n$ [S1].
+-3.  Propagate X-neighbor pointers from nodes in level $i$ to their child nodes in level $i-1$ [S1].
+-    *   Specifically, link adjacent level-$(i-1)$ nodes that have different parent nodes [S1].
+-4.  Encode the resulting structure into a 3D texture [S2].
+-    *   Update the GPU texture using `glTexSubImage` [S2].
+-
+-### Parameters
+-*   Top level $n$: Typically two levels below the root [S1].
+-*   Texture dimension $M$: Determines addressable capacity [S2].
+-
+-### Edge Cases and Pitfalls
+-*   Boundary nodes require identifying the "smallest node enclosing all adjacent nodes" when a face spans multiple child nodes of a parent [S2].
+-*   The encoding supports addressing $16 \times M$ nodes or data blocks, where $M$ is the texture dimension [S2].
+-*   Maintaining only X-neighbor pointers reduces memory but may require fallback mechanisms for Y/Z traversal if not fully implemented for all axes [S1].
++**Pseudocode:**
++```python
++def build_octree_with_neighbors(view_dependent_octree):
++    """
++    Constructs the spatial index texture for ray traversal.
++    """
++    # 1. Initialize top level nodes
++    # Assume top level is n. Create all nodes at level n.
++    top_level_nodes = create_all_nodes_at_level(view_dependent_octree, level=n)
++    
++    # Establish x-neighbor pointers for adjacent nodes at top level
++    for node in top_level_nodes:
++        node.x_neighbor = get_adjacent_node(node, direction='x')
++        
++    # 2. Propagate pointers bottom-up
++    # Iterate from level n down to 0
++    for current_level in range(n, -1, -1):
++        parent_level = current_level + 1
++        children = get_children_of_level(current_level)
++        parents = get_children_of_level(parent_level)
++        
++        for child in children:
++            # Link adjacent children with different parents
++            if child.parent != child.x_neighbor.parent:
++                child.x_neighbor = get_adjacent_node(child, direction='x')
++                
++    # 3. Encode into 3D texture
++    texture = allocate_3d_texture(width, height, depth, format=RGBA8)
++    
++    for node in view_dependent_octree.all_nodes:
++        texels = get_texel_block_for_node(node) # 8 consecutive texels in x
++        
++        if node.is_inner():
++            # A=1.0, RGB points to first child
++            set_texel_alpha(texels[0], 1.0)
++            set_texel_rgb(texels[0], get_pointer_to_first_child(node))
++            # Fill remaining 7 texels as needed for layout consistency
++        elif node.is_leaf():
++            # A=0.5, RGB points to leaf info (data + 6 neighbor pointers)
++            set_texel_alpha(texels[0], 0.5)
++            leaf_info_pointer = allocate_leaf_info_block()
++            set_texel_rgb(texels[0], leaf_info_pointer)
++            
++            # Store data pointer if not empty
++            if not node.is_empty():
++                set_texel_rgb(leaf_info_pointer, get_data_pointer(node))
++            else:
++                set_texel_rgb(leaf_info_pointer, NULL_POINTER)
++                
++            # Store 6 neighbor pointers
++            for i, direction in enumerate(['+x', '-x', '+y', '-y', '+z', '-z']):
++                neighbor = get_neighbor_node(node, direction)
++                neighbor_texel = leaf_info_pointer + (i + 1) # Consecutive texels
++                set_texel_rgb(neighbor_texel, get_pointer_to_node(neighbor))
++                # Encode level in A component
++                set_texel_alpha(neighbor_texel, get_octree_level(neighbor))
++                
++            # Last leaf data texel contains NULL pointer
++            set_texel_rgb(leaf_info_pointer + 7, NULL_POINTER)
++        else: # Empty
++            # A=0.0
++            set_texel_alpha(texels[0], 0.0)
++            
++    # Update GPU texture
++    glTexSubImage3D(GL_TEXTURE_3D, 0, 0, 0, 0, width, height, depth, GL_RGBA, GL_UNSIGNED_BYTE, texture.data)
++    
++    return texture
++```
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Construction is performed on-the-fly per frame directly from the view-dependent octree [S2]. Traversal is accelerated by direct neighbor jumps [S2].
+-*   **Memory Complexity:** The structure supports addressing $16 \times M$ nodes or data blocks, where $M$ is the texture dimension [S2].
+-*   **Measured Performance:** Not given in the sources.
+-*   **Scaling:** Not given in the sources.
+-*   **Strengths and Limitations:** Not given in the sources.
+-*   **When to Use:** Not given in the sources.
++**Time and Memory Complexity:**
++Construction is performed on-the-fly at each frame, implying $O(N)$ time complexity relative to the number of nodes in the view-dependent octree [S2]. The memory footprint is minimized by encoding only necessary data into an 8-bit RGBA texture, addressing up to $16 \times M$ nodes or data blocks, which is several orders of magnitude larger than typically needed [S2].
++
++**Strengths and Limitations:**
++*   **Strengths:** Enables direct traversal to adjacent nodes, avoiding backtracking during ray casting [S2]. The texture-based encoding is GPU-friendly and allows parallel access [S2].
++*   **Limitations:** Requires on-the-fly construction every frame, which may introduce overhead [S2]. Maintaining only x-neighbor pointers (as opposed to 26 neighbors) may limit optimization opportunities for certain traversal paths compared to more comprehensive adjacency structures [S1].
++
++**When to Use:**
++Use this structure when interactive out-of-core volume rendering requires fast, view-dependent traversal with minimal memory bandwidth, and when the scene can be represented by a branch-on-need octree [S2].
+ 
+ ## Background
+-The concept of augmenting octrees with neighbor pointers was introduced to accelerate ray traversal in volume rendering [S2]. The specific construction method using X-neighbor pointers and bottom-up propagation was detailed by Schwarz et al. in the context of fast parallel surface and solid voxelization [S1]. This approach differs from Zhou et al. [2010] by storing different payloads (mesh vs. point cloud) and maintaining only X-neighbor pointers instead of all 26 neighbors [S1].
++The Octree with Neighbor Pointers was introduced in the context of interactive out-of-core volume rendering frameworks [S2]. It builds on the principles of octree textures on GPU [S2] and shares similarities with approaches by Zhou et al. [2010], such as bottom-up breadth-first construction and Morton ordering, but distinguishes itself by focusing on x-neighbor pointers and specific payload storage [S1].
+ 
+ ## Sources

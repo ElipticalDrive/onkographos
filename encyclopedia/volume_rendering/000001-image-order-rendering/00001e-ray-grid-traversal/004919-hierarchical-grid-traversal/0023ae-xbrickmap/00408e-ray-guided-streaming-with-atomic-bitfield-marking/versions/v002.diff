@@ -1,0 +1,114 @@
+--- v001.md
++++ v002.md
+@@ -4,80 +4,64 @@
+ 
+ ## Overview
+-This method tracks which finest-level brick cells have been visited by rays to enable selective streaming and refinement, preventing redundant data transfers when multiple rays share a cell. It differs from its parent [XBrickMap](3116-xbrickmap.md) by adding a runtime occupancy buffer that complements the static hierarchical skipping with dynamic visitation history.
++This method tracks which finest-level brick cells have been visited by rays to enable selective streaming and refinement, preventing redundant data transfers when multiple rays share a cell [S1, unofficial]. It complements the static hierarchical skipping of its parent [XBrickMap](3116-xbrickmap.md) with dynamic visitation history stored in an atomic bitfield buffer [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Brick index `c` (converted to `vec3u`), grid dimensions `grid` (from indirection texture), and the current `rayVisited` atomic buffer.
+-*   **Output:** Updates the `rayVisited` buffer to mark the cell as visited.
++*   **Input:** Brick index `c` (converted to a 3D vector), grid dimensions `grid` (from the indirection texture), and the `rayVisited` atomic buffer [S1, unofficial].
++*   **Output:** Updates the `rayVisited` buffer to mark the corresponding cell as visited [S1, unofficial].
+ 
+ **Data Structures:**
+-The `rayVisited` buffer is a storage buffer of type `array<atomic<u32>>`.
+-*   **Layout:** Word 0 is unused. Cell index `i` corresponds to bit `i & 31` of word `1 + (i >> 5)`.
+-*   **Size:** The number of words is determined by the total number of finest-level bricks. A single-word buffer disables the feature.
++The `rayVisited` buffer is a storage buffer of type `array<atomic<u32>>` [S1, unofficial].
++*   **Layout:** Word 0 is unused. Cell index `i` corresponds to bit `i & 31` of word `1 + (i >> 5)` [S1, unofficial].
++*   **Size:** The buffer must accommodate all finest-level bricks. A single-word buffer disables the feature [S1, unofficial].
+ 
+ **Steps:**
+-1.  **Calculate Global Cell Index:** Convert the brick index `c` to a linear cell index:
+-    $$ \text{cell} = (c.z \times \text{grid}.y + c.y) \times \text{grid}.x + c.x $$
+-2.  **Map to Buffer:** Determine the word and bit within the `rayVisited` buffer:
+-    $$ \text{word} = 1 + (\text{cell} \gg 5) $$
+-    $$ \text{bit} = 1 \ll (\text{cell} \ \& \ 31) $$
+-3.  **Atomic Check and Set:** Perform an atomic read-modify-write. If `word < words` (total words in buffer) and the bit is not set `(atomicLoad(&rayVisited[word]) \ \& \ \text{bit}) == 0`, set the bit:
+-    $$ \text{atomicOr}(&\text{rayVisited}[\text{word}], \text{bit}) $$
++1.  **Calculate Global Cell Index:** Convert the brick index `c` to a linear cell index: `cell = (c.z * grid.y + c.y) * grid.x + c.x` [S1, unofficial].
++2.  **Map to Buffer:** Determine the word and bit within the `rayVisited` buffer: `word = 1 + (cell >> 5)` and `bit = 1 << (cell & 31)` [S1, unofficial].
++3.  **Atomic Check and Set:** Perform an atomic read-modify-write. If `word < words` (total words in buffer) and the bit is not set `(atomicLoad(&rayVisited[word]) & bit) == 0`, set the bit using `atomicOr(&rayVisited[word], bit)` [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def mark_brick_visited(c: vec3u, grid: vec3u, ray_visited: array[atomic<u32>>]:
+-    # Calculate global linear cell index
+-    cell = (c.z * grid.y + c.y) * grid.x + c.x
+-    
+-    # Map to word and bit in the atomic buffer
+-    # Word 0 is unused; cell 0 maps to bit 0 of word 1
++def mark_brick_visited(c, grid, ray_visited, words):
++    # c and grid are tuples/lists of 3 integers (x, y, z)
++    cell = (c[2] * grid[1] + c[1]) * grid[0] + c[0]
+     word_idx = 1 + (cell >> 5)
+     bit_mask = 1 << (cell & 31)
+-    
+-    # Check bounds and perform atomic OR if bit is not set
+-    # Note: 'words' is the total number of u32 words in the buffer
+     if word_idx < words:
+-        current_val = atomic_load(&ray_visited[word_idx])
++        # Simulate atomic load and compare-and-swap for GPU context
++        current_val = ray_visited[word_idx]
+         if (current_val & bit_mask) == 0:
+-            atomic_or(&ray_visited[word_idx], bit_mask)
++            ray_visited[word_idx] = current_val | bit_mask
+ 
+-def mark_iso_gradient_visited(c: vec3u, grid: vec3u, ray_visited: array[atomic<u32>>]:
+-    """
+-    Marks the center brick and its 6 axis-aligned neighbors as visited.
+-    This handles ISO gradient calculations that may sample cells outside the volume
+-    (e.g., beyond clip planes), ensuring they remain eligible for refinement.
+-    """
+-    # Mark center
+-    mark_brick_visited(c, grid, ray_visited)
+-    
+-    # Mark 6 axis-aligned neighbors
++def mark_iso_gradient_visited(c, grid, ray_visited, words):
++    # Marks the center brick and its 6 axis-aligned neighbors
++    mark_brick_visited(c, grid, ray_visited, words)
+     neighbors = [
+-        c + vec3u(1, 0, 0), c + vec3u(-1, 0, 0),
+-        c + vec3u(0, 1, 0), c + vec3u(0, -1, 0),
+-        c + vec3u(0, 0, 1), c + vec3u(0, 0, -1)
++        (c[0]+1, c[1], c[2]), (c[0]-1, c[1], c[2]),
++        (c[0], c[1]+1, c[2]), (c[0], c[1]-1, c[2]),
++        (c[0], c[1], c[2]+1), (c[0], c[1], c[2]-1)
+     ]
+     for n in neighbors:
+-        mark_brick_visited(n, grid, ray_visited)
++        mark_brick_visited(n, grid, ray_visited, words)
+ ```
+ 
+ **Parameters:**
+ *   **Buffer Size:** Must accommodate all finest-level bricks. Not given in the sources.
+-*   **Word 0:** Always unused.
++*   **Word 0:** Always unused [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **ISO Gradient Sampling:** Gradient calculations may sample cells outside the volume (e.g., beyond clip planes). These cells must be marked as visited to remain eligible for refinement. This is handled by `markIsoGradientVisited`, which marks the center brick and its 6 axis-aligned neighbors [S1, unofficial].
++*   **ISO Gradient Sampling:** Gradient calculations may sample cells outside the volume (e.g., beyond clip planes) [S1, unofficial]. These cells must be marked as visited to remain eligible for refinement [S1, unofficial]. This is handled by `markIsoGradientVisited`, which marks the center brick and its 6 axis-aligned neighbors [S1, unofficial].
+ *   **Single-Word Buffer:** If the buffer has only one word, the feature is effectively off [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(1)$ per brick visit for the atomic operation.
+-*   **Memory Complexity:** $O(N/32)$ words for $N$ bricks, plus 1 unused word.
+-*   **Strengths:** Reduces redundant streaming/refinement for shared cells.
+-*   **Limitations:** Atomic operations introduce contention. Not given in the sources.
+-*   **When to use:** When multiple rays share cells and streaming overhead is significant.
+-*   **When not:** When memory bandwidth is the primary bottleneck and atomic contention is high. Not given in the sources.
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
++*   **Strengths:** Not given in the sources.
++*   **Limitations:** Not given in the sources.
++*   **When to use:** Not given in the sources.
++*   **When not:** Not given in the sources.
+ 
+ ## Background
+-This technique is part of the Kiln renderer, a WebGPU-native out-of-core volume rendering system for multi-GB datasets. It was presented in an unofficial GitHub repository in 2026.
++This technique is part of the Kiln renderer, a WebGPU-native out-of-core volume rendering system for multi-GB datasets [S1, unofficial]. It was presented in an unofficial GitHub repository in 2026 [S1, unofficial].
+ 
+ ## Sources

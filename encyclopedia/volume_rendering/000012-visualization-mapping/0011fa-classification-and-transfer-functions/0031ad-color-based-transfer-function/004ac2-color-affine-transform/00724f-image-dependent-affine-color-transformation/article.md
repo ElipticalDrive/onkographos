@@ -1,0 +1,108 @@
+# Image-dependent affine color transformation
+
+Also called: Affine Alignment, Least-squares affine alignment, MLP-predicted affine color transformation, Per-Gaussian affine color transformation, Post-hoc affine correction
+
+## Overview
+Image-dependent affine color transformation is a post-processing or appearance modeling technique used to align a model's rendered output with ground truth data by compensating for color bias and exposure variations. It solves the problem where simple linear enhancement fails to achieve perfect alignment due to non-zero-mean noise (e.g., high ISO noise) or appearance differences between training and test conditions [S1, S2]. It is distinguished from standard linear enhancement by fitting a per-pixel or per-Gaussian affine transform ($ax+b$) via least-squares regression, and from learned appearance encodings by using a simpler, often post-hoc, statistical alignment [S1, S2].
+
+## How it works
+**Inputs and Outputs:**
+- Inputs: $x$ (ground truth image pixels), $y$ (model output image pixels).
+- Outputs: Aligned output $y'$, or alignment parameters $a$ (scale) and $b$ (shift) [S1, S2].
+
+**Data Structures:**
+- The method operates on pixel values. In RAW linear color space, it operates on raw sensor values. In RGB color space (e.g., LDR-NeRF, LDR-3DGS), it operates on standard RGB values [S1].
+- When used as an MLP-predicted transformation (SWAG baseline), an MLP predicts parameters $a_i, b_i$ for each Gaussian $i$ [S2].
+
+**Steps:**
+1. Compute the mean of the ground truth pixels $\bar{x}$ and the mean of the output pixels $\bar{y}$ [S1].
+2. Compute the covariance $\text{Cov}(x, y)$ and variance $\text{Var}(x)$ of the ground truth and output pixels [S1].
+3. Calculate the scale parameter $a$ and shift parameter $b$ using the least-squares fit formulas:
+   $$ a = \frac{\text{Cov}(x, y)}{\text{Var}(x)} $$
+   $$ b = \bar{y} - a\bar{x} $$
+   where $\text{Cov}(x, y) = \frac{1}{N}\sum_{i=1}^N (x_i - \bar{x})(y_i - \bar{y})$ and $\text{Var}(x) = \frac{1}{N}\sum_{i=1}^N (x_i - \bar{x})^2$ [S1].
+4. Apply the inverse affine transform to the output $y$ to obtain the aligned output $y'$:
+   $$ y' = \frac{y - b}{a} $$
+   This aligned output is then used for metric calculation (e.g., PSNR, SSIM) [S1].
+
+**Parameters:**
+- $x$: Ground truth pixel values.
+- $y$: Model output pixel values.
+- $a, b$: Alignment parameters derived from the statistics of $x$ and $y$ [S1].
+
+**Edge Cases and Pitfalls:**
+- **Color Space:** For methods outputting in RAW linear color space, affine alignment is performed only once in the RAW color space. For methods outputting in RGB color space (e.g., LDR-NeRF, LDR-3DGS), the alignment is performed in the RGB color space [S1].
+- **Noise:** Direct linear enhancement fails if there is color bias (non-zero-mean noise, e.g., high ISO noise), necessitating the affine correction [S1].
+- **MLP Variant:** When used as a per-Gaussian prediction (SWAG), the MLP predicts shift and scale to inject appearance variance like exposure. However, this variant cannot model all possible appearances in in-the-wild scenarios compared to learned hash encodings [S2].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_affine_alignment(x, y):
+    """
+    Compute affine alignment parameters a and b between ground truth x and output y.
+    x, y: arrays of pixel values (flattened or per-channel).
+    Returns: a (scale), b (shift).
+    """
+    # Compute means
+    mean_x = sum(x) / len(x)
+    mean_y = sum(y) / len(y)
+    
+    # Compute covariance and variance
+    cov_xy = sum((xi - mean_x) * (yi - mean_y) for xi, yi in zip(x, y)) / len(x)
+    var_x = sum((xi - mean_x) ** 2 for xi in x) / len(x)
+    
+    # Avoid division by zero
+    if var_x == 0:
+        a = 1.0
+        b = 0.0
+    else:
+        a = cov_xy / var_x
+        b = mean_y - a * mean_x
+        
+    return a, b
+
+def apply_affine_correction(y, a, b):
+    """
+    Apply inverse affine transform to y.
+    y: array of pixel values.
+    a, b: alignment parameters.
+    Returns: aligned array y'.
+    """
+    return [(yi - b) / a for yi in y]
+
+def align_and_evaluate(x, y):
+    """
+    Full pipeline: compute alignment and apply correction.
+    """
+    a, b = compute_affine_alignment(x, y)
+    y_aligned = apply_affine_correction(y, a, b)
+    return y_aligned
+```
+
+## Subtopics
+
+### MLP-predicted affine color transformation
+A variant where an MLP predicts affine parameters per Gaussian to inject appearance variance. It is simpler than full appearance encoding but less expressive. Choose when exposure variation is the primary artifact. [S2]
+
+### Post-hoc affine correction
+A test-time alignment step applied to the final rendered image. It is used for metric evaluation to compensate for training/test domain shifts (e.g., shutter speed differences). [S1]
+
+## Operating characteristics
+- **Time Complexity:** Computing $a$ and $b$ is $O(N)$ where $N$ is the number of pixels. Applying the transform is $O(N)$.
+- **Memory Complexity:** $O(N)$ to store pixel values and intermediate statistics.
+- **Performance:**
+  - On the Brandenburg Gate scene: PSNR 18.34, SSIM 0.777, LPIPS 0.313 [S2].
+  - On the Trevi Fountain scene: PSNR 19.01, SSIM 0.761, LPIPS 0.246 [S2].
+- **Strengths:** Simple to implement; effective for compensating for global color bias and exposure differences; computationally cheap.
+- **Limitations:** Cannot model complex, spatially varying appearance changes; less effective than learned appearance encodings (e.g., hash encoding) for in-the-wild scenarios with diverse perturbations [S2].
+- **When to use:** When the primary discrepancy between training and test data is global color bias or exposure (e.g., RAW vs. LDR, different shutter speeds).
+- **When not to use:** When appearance variations are complex, spatially varying, or involve occlusions that require per-Gaussian or per-pixel learned features [S2].
+
+## Background
+The method originated as a post-processing step in RawNeRF to align test-time outputs with ground truth, addressing issues caused by different shutter speeds and high ISO noise [S1]. It was later adopted as a baseline appearance modeling technique in SWAG (Splatting in the Wild images with Appearance-conditioned Gaussians), where it was implemented as an MLP-predicted affine transformation per Gaussian [S2].
+
+## Sources
+[S1] Lighting Every Darkness with 3DGS: Fast Training and Real-Time Rendering for HDR View Synthesis, https://doi.org/10.52202/079017-2549, fetched 2026-10-26
+[S2] SWAG: Splatting in the Wild images with Appearance-conditioned Gaussians, https://doi.org/10.48550/arXiv.2403.10427, fetched 2026-10-29

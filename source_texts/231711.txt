@@ -1,0 +1,114 @@
+Severity: P2 | Confidence: HIGH — mechanism read at 330a764fc14, symptom measured on an RTX 3090 / Vulkan Viewport.transparent_bg produces a fully opaque image whenever TAA or FSR2 is active. This is not a Gaussian-splatting defect and i...
+
+transparent_bg viewports are fully opaque under TAA or FSR2: both stages hardcode alpha=1.0 (upstream Godot + thirdparty, not splat-specific) · Issue #989 · klausi3D/godotGS · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+transparent_bg viewports are fully opaque under TAA or FSR2: both stages hardcode alpha=1.0 (upstream Godot + thirdparty, not splat-specific) #989
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+transparent_bg viewports are fully opaque under TAA or FSR2: both stages hardcode alpha=1.0 (upstream Godot + thirdparty, not splat-specific)#989
+Copy link
+Labels
+area:rendererRendering pipelineRendering pipelinearea:shadersGLSL shader codeGLSL shader codebugSomething isn't workingSomething isn't workingdocumentationImprovements or additions to documentationImprovements or additions to documentationpriority:P2Medium priorityMedium priorityuser-facingDirectly affects external users, docs, or public repo surfaceDirectly affects external users, docs, or public repo surface
+Description
+klausi3D
+opened on Sep 8, 2026
+Issue body actions
+Severity: P2 | Confidence: HIGH — mechanism read at 330a764fc14, symptom measured on an RTX 3090 / Vulkan
+Viewport.transparent_bg produces a fully opaque image whenever TAA or FSR2 is active. This is not a Gaussian-splatting defect and it is not caused by anything in this module.
+The control comes first, because it is the whole point
+Same scene, same binary, same capture path, one flag changed. The "mesh-only control" is a semi-transparent StandardMaterial3D quad in a transparent_bg SubViewport with no Gaussian splats in the scene at all and no Gaussian composite anywhere in the frame:
+config
+mesh-only control: partial-alpha px
+splat scene: partial-alpha px
+distinct alpha values in the frame
+no temporal stage
+86,106
+57,300
+256
+use_taa = true
+0
+0
+1
+scaling_3d_mode = SCALING_3D_MODE_FSR2
+0
+0
+1
+distinct alpha values = 1 means every one of the 518,400 pixels is alpha 255 — including background never touched by any composite.
+The control loses its alpha identically to the splat scene. Whatever destroys the alpha is downstream of, and indifferent to, Gaussian splatting.
+Mechanism
+Both temporal stages write a hardcoded alpha and tonemap then samples their output:
+servers/rendering/renderer_rd/shaders/effects/taa_resolve.glsl:380 — imageStore(output_buffer, ivec2(gl_GlobalInvocationID.xy), vec4(result, 1.0));. temporal_antialiasing() returns vec3; alpha is never carried.
+thirdparty/amd-fsr2/shaders/ffx_fsr2_callbacks_glsl.h:422 — StoreUpscaledOutput writes imageStore(rw_upscaled_output, FfxInt32x2(iPxPos), FfxFloat32x4(fColor, 1.f));.
+servers/rendering/renderer_rd/renderer_scene_render_rd.cpp:532 — RID color_texture = use_upscaled_texture ? rb->get_upscaled_texture() : rb->get_internal_texture(); so the hardcoded-alpha texture is exactly what tonemap consumes.
+servers/rendering/renderer_rd/shaders/effects/tonemap.glsl:846 → :929 passes the sampled alpha through unchanged, so the 1.0 reaches the presented target.
+Rig
+transparent_bg SubViewport (960×540, own_world_3d), Forward+ single view, composite/depth_test=true (shipped default), scale 1.0. Splat scene uses Cabin in the forest.ply (~130k splats, desktop import preset). Coverage measured against a hidden-content reference capture; alpha read from SubViewport.get_texture().get_image(), i.e. the final presented image, not an intermediate.
+Relationship to #928 / #988
+#928 was a separate defect with the same visible consequence on a different path: the Gaussian compute composite forced result_color.a = 1.0 on the pre-upscale destination. #988 fixes that, and the non-temporal row above is its evidence (57,300 partial-alpha pixels where there were 0).
+This issue is what remains, and #988 neither causes nor worsens it: both temporal stages overwrite alpha unconditionally for every texel, so the presented viewport is equally opaque before and after #988 in those configs. Found by the Codex round-2 review on #988 and confirmed there.
+Disposition asked for
+§8 disclosure. This is a user-facing limitation with a real workaround — do not combine transparent_bg with TAA or FSR2 — and belongs in the disclosure list rather than the blocker list, on the Tile sorter grow retires the old sorter before the enlarged buffers are allocated; a buffer-allocation failure then falls back per frame (unproven, pre-existing) #983 residual precedent. The acceptance bar is not yet on master (docs/governance/release-acceptance-bar.md, PR docs/governance: define the two-stage release acceptance bar (#360) #975, open), so this needs to be picked up by that document's owner rather than edited in from here.
+Upstream? This is an upstream Godot defect plus a thirdparty/amd-fsr2 one, reproducible with no module code in the frame. Worth deciding whether it is reported to Godot proper rather than living only in this tracker. Not urgent; maintainer call.
+Not to be fixed in a module PR. The remedy touches servers/ and thirdparty/, is R3, and sits on the composite↔temporal seam whose disposition is still open (GPU-001: splats absent under viewport scaling and FSR2 with composite depth_test=true (default) — composite writes an already-consumed buffer #921, GPU-001 follow-up: splat projection is unjittered while feeding temporal consumers (TAA/FSR2/MetalFX) — subpixel mismatch vs meshes #929). Bundling it would breach the small-upstream-delta rule in AGENTS.md.
+Refs #928, #988, #921, #929
+Activity
+klausi3D
+added
+bugSomething isn't workingSomething isn't working
+documentationImprovements or additions to documentationImprovements or additions to documentation
+priority:P2Medium priorityMedium priority
+area:rendererRendering pipelineRendering pipeline
+area:shadersGLSL shader codeGLSL shader code
+user-facingDirectly affects external users, docs, or public repo surfaceDirectly affects external users, docs, or public repo surface
+on Sep 8, 2026
+klausi3D
+added 2 commits that reference this issue on Sep 8, 2026
+docs/governance: add the disclosed-not-blocking table, and record pai…
+...
+9fc2cbf
+docs/governance: define the two-stage release acceptance bar (#360) (#…
+...
+2efc7b5
+klausi3D
+added 5 commits that reference this issue on Sep 20, 2026
+docs: correct the #929 residual disclosure to what #1025 measured, an…
+...
+78fb806
+docs: correct the #1025 entry - FSR2 does not ghost, and the old text…
+...
+ffe2e40
+gaussian_splatting: render splats with the engine's TAA jitter, and k…
+...
+7c16775
+docs: correct the #1025 entry - FSR2 does not ghost, and the old text…
+...
+cd77e94
+docs: state the alpha's API promise, its real limitations, and fix do…
+...
+bc77ce3
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+area:rendererRendering pipelineRendering pipelinearea:shadersGLSL shader codeGLSL shader codebugSomething isn't workingSomething isn't workingdocumentationImprovements or additions to documentationImprovements or additions to documentationpriority:P2Medium priorityMedium priorityuser-facingDirectly affects external users, docs, or public repo surfaceDirectly affects external users, docs, or public repo surface
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

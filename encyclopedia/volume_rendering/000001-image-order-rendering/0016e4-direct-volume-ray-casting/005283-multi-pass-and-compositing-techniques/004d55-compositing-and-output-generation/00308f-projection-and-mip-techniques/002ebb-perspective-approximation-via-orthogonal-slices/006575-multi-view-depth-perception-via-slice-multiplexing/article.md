@@ -1,0 +1,47 @@
+# Multi-view Depth Perception via Slice Multiplexing
+
+Also called: Off-centered parallel camera simulation, Slice selection for depth perception
+
+## Overview
+Multi-view Depth Perception via Slice Multiplexing is a technique for recovering depth perception in virtual microscopy by projecting different slices of a volume onto multiple views, effectively simulating off-centered parallel cameras [S1]. Unlike orbital camera approaches that allow different view angles, this method positions views on the same plane as the slices, using a depth step parameter to determine slice selection for each view [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A volume dataset (potentially anisotropic), a point of interest, and a depth step parameter $\Delta z$.
+*   **Output:** A set of images (views), each corresponding to a specific slice of the volume.
+
+**Data Structures:**
+The method relies on an out-of-core data structure relying on GPU texture memory, allowing trilinear interpolation of volume data using normalized coordinates [S1].
+
+**Steps:**
+1.  **Identify Central Slice:** Determine the slice index $I_z$ that contains the point of interest. This slice is always projected onto the first view (view index $i=0$) [S1].
+2.  **Calculate Slice Indices:** For each subsequent view $i$, calculate the associated slice index $s$ using the formula:
+    $$ s = I_z + i \times \Delta z $$
+    where:
+    *   $s$ is the slice index for view $i$.
+    *   $I_z$ is the index of the central slice (containing the point of interest).
+    *   $i$ is the view index (integer, typically $0, 1, 2, \dots$).
+    *   $\Delta z$ is the user-defined depth step parameter [S1].
+3.  **Alpha Generation:** Perform alpha generation using a two-step process. First, assign an alpha value to each pixel based on classification (e.g., background, interest tissues, non-interest tissues, artifacts). The user defines alpha values for each class, and each pixel is assigned the alpha value corresponding to its closest class [S1].
+4.  **Projection:** Project the identified slice $s$ onto view $i$. The choice of $\Delta z$ is at the user's discretion but must be adapted to data characteristics [S1].
+
+**Parameters:**
+*   $\Delta z$: The depth step parameter determining the separation between slices projected on adjacent views. Typical values depend on data characteristics. For example, $\Delta z = 3$ was used for dataset (b) where slice differences were small, while $\Delta z < 1$ was required for dataset (a) due to significant volume anisotropy [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Anisotropy:** High anisotropy requires $\Delta z < 1$. This is possible because the data is addressed using normalized coordinates and trilinear interpolation [S1].
+*   **Slice Visibility:** If $\Delta z < 1$ is used, the number of visible slices in a multi-view frame may be drastically reduced, though the final result is softened [S1].
+*   **Misuse of $\Delta z$:** An non-optimal $\Delta z$ may induce uncomfortable visualization, reduce the depth effect, and make the approach irrelevant [S1].
+*   **Grayscale Data:** Visualizing grayscale data works better with high-contrast or color data. An extra step may be required to colorize the data via LUTs if the data is grayscale [S1].
+
+## Operating characteristics
+*   **Performance:** Pixels assignment is performed faster on grayscale pixels compared to RGBA pixels [S1].
+*   **Hardware:** Tested on an autostereoscopic display where the user moves in front of the display to move inside the multi-view frame. The approach is also suggested for tablet devices, where moving the device left and right is more convenient than moving in front of a screen [S1].
+*   **Strengths:** Recovers depth perception in virtual microscopy. Simulates off-centered parallel cameras.
+*   **Limitations:** Views are positioned on the same plane as the slices, limiting view angles compared to orbital cameras. Data anisotropy is a critical factor that complicates the choice of $\Delta z$. Misusing $\Delta z$ can render the approach irrelevant [S1].
+
+## Background
+The method was proposed in the context of virtual microscopy to simulate depth perception using an autostereoscopic display [S1]. It addresses the challenge of visualizing volumetric data with significant anisotropy by using a slice selection strategy based on a depth step parameter [S1].
+
+## Sources
+[S1] Simulating Depth Perception in Virtual Microscopy, https://doi.org/10.1109/ISBI.2019.8759160, fetched 2026-10-26

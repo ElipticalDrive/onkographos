@@ -1,0 +1,96 @@
+# WebGPU Gaussian Splat Viewer
+
+**Faris Rafie Syahzani**
+
+University of Pennsylvania, CIS 5650: GPU Programming and Architecture, Project 5
+
+![Bicycle scene rendered from 1.06 million 3D gaussians](docs/media/hero.png)
+
+A real-time [3D Gaussian Splatting](https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/) viewer written in TypeScript and WGSL. It loads a trained scene (a `.ply` file holding about a million colored, semi-transparent 3D gaussians) and renders it in the browser from any viewpoint. The bicycle scene above renders in **6.1 ms of GPU time per frame** at 1280 × 720 on a laptop RTX 4050.
+
+The viewer has two complete rasterizers:
+
+- **Quad renderer.** Gaussians are projected in a compute pass, depth-sorted on the GPU, and drawn as instanced quads with hardware blending through one indirect draw call.
+- **Tile renderer** (extra credit). It works like the paper's CUDA rasterizer: gaussians are binned into 16 × 16 pixel tiles, sorted per tile, and composited front to back in a compute shader.
+
+It also includes an **f16 preprocess shader** (extra credit), an **opacity-aware tight-bounds optimization** that makes the quad renderer 2× faster, **GPU timestamp profiling** in the UI, and **debug views** for every stage of the pipeline.
+
+[**Live demo**](https://farisyahz.github.io/Project5-WebGPU-Gaussian-Splat-Viewer/) (bring your own scene file, see [Run locally](#run-locally)) | [**Feature video (MP4)**](docs/media/demo.mp4) | [Raw measurements](docs/benchmarks)
+
+[![Feature tour: point cloud, gaussian splats, camera presets, size multiplier, debug views, tile renderer, f16, tight bounds and zoom](docs/media/demo.gif)](docs/media/demo.mp4)
+
+## Contents
+
+- [Run locally](#run-locally)
+- [What the viewer renders](#what-the-viewer-renders)
+- [The rendering pipeline](#the-rendering-pipeline)
+- [Extra credit: tile-based rasterizer](#extra-credit-tile-based-rasterizer)
+- [Extra credit: f16 preprocess](#extra-credit-f16-preprocess)
+- [Optimization: tight splat bounds](#optimization-tight-splat-bounds)
+- [Performance analysis](#performance-analysis)
+- [Correctness](#correctness)
+- [Implementation notes](#implementation-notes)
+- [Reproduce the measurements](#reproduce-the-measurements)
+- [Limitations and future work](#limitations-and-future-work)
+- [Credits](#credits)
+
+## Run locally
+
+You need a browser with WebGPU; recent Chrome works best. On laptops with two GPUs, check on [webgpureport.org](https://webgpureport.org) that Chrome is using the discrete one.
+
+```sh
+npm install
+npm run dev
+```
+
+Scene files are not part of the repository, because they are hundreds of megabytes. Download a scene folder (a `.ply` and its `cameras.json`) from the [course scene drive](https://drive.google.com/drive/folders/1Fz0QhyDU12JTsl2e7umGi5iy_V9drrIW?usp=sharing). Then drop the `.ply` on **ply_file** and the `cameras.json` on **cam_file**. Bicycle (`bicycle_30000.cleaned.ply`, 263 MB) takes about 40 s to parse; bonsai (`bonsai.ply`, 68 MB) takes about 10 s.
+
+| Control | Action |
+|---|---|
+| Left drag | Look around |
+| Right drag | Pan |
+| Mouse wheel | Move forward / backward |
+| 0–9 | Jump to one of the training camera poses |
+| **renderer** | `pointcloud` or `gaussian` |
+| **gaussian_mode** | `quad` (sorted instanced quads) or `tile` (tile-based compute rasterizer) |
+| **gaussian_multiplier** | Scales every gaussian, 0 to 1.5 |
+| **frustum_culling**, **tight_bounds** | Toggle the two culling optimizations |
+| **debug_view** | Shows intermediate pipeline stages (see [below](#the-rendering-pipeline)) |
+| **workgroup_size**, **precision** | Preprocess workgroup size (32 to 256) and f32 / f16 math |
+| **gpu_stats** | Live per-stage GPU time from timestamp queries, plus visible gaussian and tile key counts |
+
+The `fps` counter measures the `requestAnimationFrame` loop, so it is capped by the display's refresh rate. Use `gpu_stats` to compare settings.
+
+## What the viewer renders
+
+A Gaussian Splatting scene is the output of an optimization. Starting from about 200 photos of a real scene, training fits a cloud of 3D gaussians whose rendering reproduces those photos. Each gaussian is a soft ellipsoid, stored as 62 floats in the `.ply`:
+
+| Property | Meaning | Use in the shaders |
+|---|---|---|
+| `x, y, z` | Center | Projected to the screen |
+| `scale_0..2` | Log of the ellipsoid's radii | `exp`, times the GUI multiplier |
+| `rot_0..3` | Orientation quaternion (w first) | 3D covariance |
+| `opacity` | Logit of the peak opacity | `sigmoid` |
+| `f_dc_*`, `f_rest_*` | 16 spherical-harmonic coefficients per color channel | View-dependent color |
+
+The point cloud renderer uses only the centers. The gaussian renderer uses everything:
+
+| Point cloud: 1.06 M centers, 1.1 ms | Gaussian splats: same data, 6.1 ms |
+|---|---|
+| ![Point cloud of the bicycle scene](docs/media/pointcloud.png) | ![Gaussian splat render of the bicycle scene](docs/media/gaussian.png) |
+
+The loader packs each gaussian into 24 bytes of f16 data (position, opacity, rotation and scale) plus 96 bytes of f16 spherical harmonics. So bicycle occupies 127 MB of GPU memory.
+
+## The rendering pipeline
+
+Every frame runs these stages on the GPU:
+
+| # | Stage | Kind | What it does |
+|---|---|---|---|
+| 1 | Reset | `queue.writeBuffer` | Zero the visible count and the sort's indirect dispatch size |
+| 2 | **Preprocess** | Compute | Cull, project and shade every gaussian into a 2D splat; emit sort keys |
+| 3 | **Sort** | Compute (provided radix sort) | Sort the visible splats by depth |
+| 4 | Indirect args | `copyBufferToBuffer` | Copy the visible count into the draw call's instance count |
+| 5 | **Render** | Vertex + fragment | One instanced quad per splat, alpha-blended back to front |
+
+The CPU never reads anything back. The number of splats to sort and draw is decided on the GPU and passed to the sort and to the draw through indirect buffers.

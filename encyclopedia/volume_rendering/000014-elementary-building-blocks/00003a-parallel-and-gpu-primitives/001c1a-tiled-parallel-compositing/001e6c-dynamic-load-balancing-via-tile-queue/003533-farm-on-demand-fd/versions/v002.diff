@@ -1,0 +1,306 @@
+--- v001.md
++++ v002.md
+@@ -4,169 +4,174 @@
+ 
+ ## Overview
+-Farm on Demand (FD) is a parallel isosurface extraction algorithm that utilizes the processor farm paradigm to achieve dynamic load balancing by distributing fine-grained, non-contiguous tasks to workers on demand [S1]. It distinguishes itself from static partitioning methods like [Load-Balanced Cell Assignment](4194-load-balanced-cell-assignment.md) by using a number of tasks $n_T$ strictly greater than the number of workers $num_W$, allowing for probabilistically perfect computational load balancing at the cost of increased mesh fragmentation and shared vertices [S1].
++Farm on Demand (FD) is a parallel isosurface extraction algorithm that achieves dynamic load balancing by subdividing a volumetric dataset into a large number of fine-grained tasks and distributing them to worker processes on demand [S1]. It builds on [Dynamic Load Balancing via Tile Queue](1763-dynamic-load-balancing-via-tile-queue.md) by applying the processor farm paradigm to volume data, where the master assigns small intervals of slices to workers as they become available, rather than using static partitioning [S1]. Unlike its sibling [Load Balanced Cell Assignment](4194-load-balanced-cell-assignment.md) (LBC), which uses static contiguous partitions, FD provides near-perfect computational load balancing for uneven isosurface distributions but probabilistically produces a significantly higher number of shared vertices due to non-contiguous task assignment [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+ *   **Input:** A volumetric dataset (same format as the sequential algorithm) [S1].
+-*   **Output:** An isosurface partitioned among parallel processes. Each process produces distinct Vertex, Triangle, and Index tables for each interval of slices (task) it treats [S1].
++*   **Output:** An isosurface partitioned among parallel processes. Each process produces distinct Vertex, Triangle, and Index tables for each task interval it treats [S1].
+ 
+ **Data Structures:**
+-*   **Tasks:** The dataset is subdivided into $n_T$ intervals (tasks). Normally, each task consists of $\lfloor Z_{max} / n_T \rfloor$ slices, with the last task containing the remainder [S1].
+-*   **Process Roles:** The system consists of $num_P$ parallel processes, divided into one master process and $num_W$ worker processes ($num_P = num_W + 1$) [S1].
++*   **Tasks:** The dataset is subdivided into $n_T$ intervals of slices. Each task corresponds to a specific range of Z-slices.
++*   **Shared State:** A task queue or pool managed by the master process, containing the list of available tasks [S1].
++*   **Worker State:** Each worker maintains a local buffer for the current task's data and output tables (Vertex, Triangle, Index) [S1].
+ 
+ **Parameters:**
+-*   $n_T$: Total number of tasks (intervals of slices). Constraint: $n_T > num_W$ [S1].
++*   $n_T$: Total number of tasks (intervals of slices). $n_T > num_W$ [S1].
+ *   $num_W$: Number of worker processes [S1].
+-*   $Z_{max}$: Maximum Z-dimension of the volume [S1].
++*   Task size: Normally $Z_{max} / n_T$ slices, with the last task possibly containing a different amount [S1].
+ 
+-**Algorithm Steps:**
+-1.  **Initialization:** The master process shares a node with one worker process. These are lightweight processes, so CPU sharing introduces negligible overhead [S1].
+-2.  **Subdivision:** The master subdivides the volumetric dataset into $n_T$ tasks (intervals of slices) [S1].
+-3.  **Initial Assignment:** The master randomly assigns these tasks to the $num_W$ worker processes. Tasks are assigned non-contiguously [S1].
+-4.  **Data Acquisition:** Each worker acquires the data for its assigned tasks. Unlike static methods that may read data in a single operation, FD workers acquire data in multiple I/O chunks corresponding to their assigned tasks [S1].
+-5.  **Computation Loop (On-Demand):**
+-    *   Workers execute the same isosurface extraction algorithm used in the [Load-Balanced Cell Assignment](4194-load-balanced-cell-assignment.md) (LBC) algorithm for each assigned task [S1].
+-    *   Workers monitor the computational cost of their current task. Because tasks have different amounts of active cells, workers finish at different rates.
+-    *   When a worker finishes a task, it requests a new task from the master [S1].
+-    *   The master assigns the next available task from the pool of unassigned tasks. This assignment is random and nondeterministic [S1].
+-    *   This continues until all $n_T$ tasks are completed [S1].
+-6.  **Output Generation:** For each task processed, the worker produces Vertex, Triangle, and Index tables. Consequently, the total number of output files is greater than in algorithms with fewer tasks [S1].
++**Steps:**
++1.  **Initialization:** The master process shares a node with one worker process. The master subdivides the dataset into $n_T$ tasks [S1].
++2.  **Task Distribution:** The master randomly assigns tasks to worker processes. This assignment is non-deterministic and non-contiguous [S1].
++3.  **On-Demand Request:** Workers execute the isosurface extraction algorithm (identical to the one used in LBC) for their assigned tasks. Upon completing a task, a worker requests a new task from the master [S1].
++4.  **Data Acquisition:** Workers acquire the data for their assigned tasks in multiple I/O chunks, rather than a single contiguous read [S1].
++5.  **Computation:** Workers compute the isosurface for the assigned cells. The computation is balanced implicitly because workers with tasks containing fewer active cells finish faster and request new tasks sooner [S1].
++6.  **Output Generation:** For each task, workers produce Vertex, Triangle, and Index tables. These are written to distinct files or buffers [S1].
+ 
+ **Pseudocode:**
++
+ ```python
+-def farm_on_demand(dataset, num_workers, n_tasks):
+-    """
+-    Parallel isosurface extraction using Farm on Demand paradigm.
+-    
+-    Args:
+-        dataset: The volumetric dataset.
+-        num_workers: Number of worker processes (numW).
+-        n_tasks: Total number of tasks (nT), where nT > numW.
++import random
++
++class FarmOnDemand:
++    def __init__(self, dataset, num_workers, num_tasks):
++        self.dataset = dataset
++        self.num_workers = num_workers
++        self.num_tasks = num_tasks
++        # Subdivide dataset into intervals of slices
++        self.tasks = self._subdivide_dataset(dataset, num_tasks)
++        # Master process manages the pool of available tasks
++        self.task_pool = list(self.tasks)
++        random.shuffle(self.task_pool) # Random assignment
++
++    def _subdivide_dataset(self, dataset, n):
++        """
++        Subdivides the volumetric dataset into n intervals of slices.
++        Returns a list of task objects, each containing a slice range.
++        """
++        z_max = dataset.z_dimension
++        tasks = []
++        slices_per_task = z_max / n
++        for i in range(n):
++            start_slice = int(i * slices_per_task)
++            end_slice = int((i + 1) * slices_per_task)
++            if i == n - 1:
++                end_slice = z_max # Last task may vary in size
++            tasks.append(Task(slice_range=(start_slice, end_slice)))
++        return tasks
++
++    def run(self):
++        """
++        Master process distributes tasks to workers.
++        """
++        workers = [Worker(i, self.dataset) for i in range(self.num_workers)]
+         
+-    Returns:
+-        List of output files (Vertex, Triangle, Index tables) from all workers.
+-    """
+-    # 1. Subdivide dataset into n_tasks intervals
+-    # Each task i covers a range of Z-slices.
+-    # Task size is typically Z_max / n_tasks, with the last task taking the remainder.
+-    tasks = create_tasks(dataset, n_tasks)
+-    
+-    # 2. Master process manages the task queue
+-    # The master shares a node with one worker (negligible overhead)
+-    master = MasterProcess()
+-    worker_processes = [WorkerProcess(i) for i in range(num_workers)]
+-    
+-    # 3. Initial random assignment
+-    # Shuffle tasks to ensure random distribution
+-    random.shuffle(tasks)
+-    task_queue = tasks[:]
+-    
+-    # 4. Distribute initial tasks to workers
+-    # Workers acquire data in multiple I/O chunks
+-    for i, worker in enumerate(worker_processes):
+-        if task_queue:
+-            task = task_queue.pop(0)
+-            worker.assign_task(task)
+-            worker.acquire_data_in_chunks(task)
+-            worker.start()
++        # Initial distribution
++        for worker in workers:
++            if self.task_pool:
++                task = self.task_pool.pop(0)
++                worker.assign_task(task)
++        
++        # On-demand distribution loop
++        while any(not w.is_idle() for w in workers):
++            for worker in workers:
++                if worker.is_idle() and self.task_pool:
++                    task = self.task_pool.pop(0)
++                    worker.assign_task(task)
++                elif worker.is_idle():
++                    # No more tasks, worker waits or exits
++                    pass
++
++        # Collect results
++        all_vertices = []
++        all_triangles = []
++        all_indices = []
++        for worker in workers:
++            all_vertices.extend(worker.get_vertex_tables())
++            all_triangles.extend(worker.get_triangle_tables())
++            all_indices.extend(worker.get_index_tables())
+             
+-    # 5. On-demand distribution loop
+-    # Workers request new tasks when they finish
+-    active_workers = list(worker_processes)
+-    
+-    while active_workers:
+-        # Check for finished workers
+-        finished_workers = []
+-        for worker in active_workers:
+-            if worker.is_finished():
+-                finished_workers.append(worker)
+-                
+-        for worker in finished_workers:
+-            active_workers.remove(worker)
+-            
+-            # Request new task
+-            if task_queue:
+-                new_task = task_queue.pop(0)
+-                worker.assign_task(new_task)
+-                worker.acquire_data_in_chunks(new_task)
+-                worker.start()
+-                active_workers.append(worker)
+-            else:
+-                # No more tasks, worker terminates
+-                worker.terminate()
+-                
+-    # 6. Collect results
+-    # Each worker produces Vertex, Triangle, and Index tables for each task
+-    all_output_files = []
+-    for worker in worker_processes:
+-        all_output_files.extend(worker.get_output_files())
+-        
+-    return all_output_files
++        return Isosurface(vertices=all_vertices, triangles=all_triangles, indices=all_indices)
+ 
+-class WorkerProcess:
+-    def __init__(self, id):
++class Worker:
++    def __init__(self, id, dataset):
+         self.id = id
++        self.dataset = dataset
+         self.current_task = None
+-        self.output_files = []
+-        
++        self.vertex_tables = []
++        self.triangle_tables = []
++        self.index_tables = []
++        self.busy = False
++
+     def assign_task(self, task):
+         self.current_task = task
++        self.busy = True
++        self._execute_task()
++
++    def _execute_task(self):
++        """
++        Executes the isosurface extraction algorithm for the assigned task.
++        Acquires data in multiple chunks.
++        """
++        # Acquire data in chunks
++        data_chunks = self.dataset.read_chunks(self.current_task.slice_range)
+         
+-    def acquire_data_in_chunks(self, task):
+-        # Acquire data for the task in multiple I/O chunks
+-        # This is distinct from LBC's single-operation acquisition
+-        pass
++        # Compute isosurface using the same algorithm as LBC
++        vertices, triangles, indices = isosurface_extraction_algorithm(data_chunks)
+         
+-    def is_finished(self):
+-        # Check if isosurface extraction for current task is complete
+-        # Computation uses the same algorithm as LBC
+-        return self.current_task is None or self.current_task.is_processed()
+-        
+-    def start(self):
+-        # Execute isosurface extraction for the assigned task
+-        # Produce Vertex, Triangle, and Index tables
+-        pass
+-        
+-    def get_output_files(self):
+-        return self.output_files
++        self.vertex_tables.append(vertices)
++        self.triangle_tables.append(triangles)
++        self.index_tables.append(indices)
++        self.busy = False
+ 
+-class MasterProcess:
+-    def __init__(self):
+-        pass
++    def is_idle(self):
++        return not self.busy
++
++    def get_vertex_tables(self):
++        return self.vertex_tables
++
++    def get_triangle_tables(self):
++        return self.triangle_tables
++
++    def get_index_tables(self):
++        return self.index_tables
++
++def isosurface_extraction_algorithm(data):
++    """
++    Placeholder for the specific isosurface extraction algorithm (e.g., Marching Cubes).
++    This is the same algorithm used in LBC.
++    """
++    # Implementation details of the extraction algorithm
++    # ...
++    pass
++
++class Task:
++    def __init__(self, slice_range):
++        self.slice_range = slice_range
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Shared Vertices:** Because tasks are assigned randomly and non-contiguously, processes often receive non-contiguous tasks. This leads to up to $n_T - 1$ shared slices (compared to only $num_W$ shared slices in LBC and LBAC) and probabilistically many more shared vertices [S1].
++*   **Shared Vertices:** Because tasks are assigned randomly and non-contiguously, processes often receive non-contiguous tasks. This leads to up to $n_T - 1$ shared slices (compared to only $num_W$ in LBC), resulting in a probabilistically much higher number of shared vertices [S1]. For example, in the FC-1000 dataset, FD produced 1,007,205 shared vertices compared to 195,804 for LBC [S1].
+ *   **I/O Overhead:** Workers acquire data in multiple chunks, which increases I/O overhead compared to LBC's single-operation acquisition [S1].
+-*   **Nondeterminism:** The random on-demand assignment makes the distribution nondeterministic [S1].
++*   **Mesh Quality:** The suitability of the isosurface partitioning is rarely completely satisfactory due to the high number of shared vertices, which may necessitate mesh redistribution [S1].
+ 
+ ## Subtopics
+ 
+ ### [Load Balanced on Active Cells (LBAC)](7511-load-balanced-on-active-cells-lbac.md)
+-A parallel isosurface extraction algorithm based on the data parallel paradigm with load balancing strategy based on the total number of active cells. It represents the third class of parallel algorithms.
++LBAC is a parallel isosurface extraction algorithm that partitions a 3D volume into contiguous regions along the Z-axis and dynamically balances the computational workload by equalizing the number of **active cells** (cells containing isosurface intersections) among worker processes. Unlike its sibling [Load Balanced on Cells (LBC)](52-load-balanced-on-cells-lbc.md), which distributes the total number of cells evenly but suffers from unpredictable active cell distribution, LBAC ensures near-perfect load balancing for the triangulation phase by performing a preliminary analysis of active slice weights. It builds on [Farm on Demand (FD)](7455-farm-on-demand-fd.md) by using a static, contiguous Z-axis partitioning strategy rather than FD's random task assignment, which minimizes shared vertex overhead but requires a two-phase approach to achieve balance.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The theoretical load balancing is almost perfect and cheap [S1]. Speed up depends on the isosurface distribution; generally provides good performance if the grain size is suitable [S1]. For small-medium isosurfaces, FD is often the best possibility, especially when considering I/O cost, due to uneven distribution and small size [S1].
++*   **Time Complexity:** Theoretical load balancing is almost perfect and cheap, as balancing is obtained dynamically without explicit active cell counting [S1]. Speed up depends on the isosurface distribution; generally provides good performance if the grain size is suitable [S1].
+ *   **Memory Complexity:** Not given in the sources.
+-*   **Measured Performance:**
+-    *   On the FC-1000 dataset with 16 nodes, FD produced 1,007,205 shared vertices [S1].
+-    *   On the XT-25 dataset with 16 nodes, FD produced 11,847,754 shared vertices [S1].
+-    *   For FC-1000, FD achieved a percentage of active cells received by a worker varying between 5.5% and 6.4%, indicating quite perfect balancing [S1].
+-*   **Scaling:** Not given in the sources.
+-*   **Strengths:**
+-    *   Provides good load balancing for small-medium isosurfaces due to random assignment [S1].
+-    *   Theoretically allows almost perfect and cheap load balancing [S1].
+-    *   Effective when load-balanced computation is prioritized [S1].
+-*   **Limitations:**
+-    *   Probabilistically produces many more shared vertices than LBC and LBAC because contiguous tasks are assigned to different processes [S1].
+-    *   Mesh partitioning quality is rarely completely satisfactory due to high shared vertices [S1].
+-    *   Multi-chunk I/O acquisition increases overhead compared to LBC [S1].
+-*   **When to use:** Suitable when load-balanced computation is prioritized over mesh partitioning quality, particularly for small-medium isosurfaces [S1].
+-*   **When not to use:** When mesh partitioning quality is critical or when the number of shared vertices significantly impacts downstream processing (e.g., rendering or mesh redistribution) [S1].
++*   **Measured Performance:** For small-medium isosurfaces, FD is often the best possibility, especially when considering I/O cost, due to the uneven distribution of isosurfaces and their small size [S1]. For large isosurfaces, LBAC provides better results [S1].
++*   **Strengths:** Excellent computational load balancing for uneven isosurface distributions; good performance for small-medium isosurfaces [S1].
++*   **Limitations:** Probabilistically produces many more shared vertices than LBC and LBAC; high I/O overhead due to multi-chunk data acquisition; mesh partitioning quality is often unsatisfactory [S1].
++*   **When to Use:** Suitable when load-balanced computation is prioritized over mesh partitioning quality, particularly for small-medium isosurfaces with uneven distributions [S1].
++*   **When Not to Use:** When mesh quality (low shared vertices) is critical, or for large isosurfaces where LBAC outperforms FD [S1].
+ 
+ ## Background
+-*   **Origin:** The Farm on Demand (FD) algorithm was proposed by D. D’Agostino, A. Clematis, and V. Gianuzzi [S1].
+-*   **History:** It represents the fourth class of parallel isosurface extraction algorithms, improving upon previous methods by introducing dynamic, on-demand task distribution [S1]. It is similar to the algorithm in [44], but the main difference is that the random task distribution among workers is made on demand, making the distribution nondeterministic [S1].
+-*   **Usage:** It is used in distributed environments for 3D data analysis workflows, particularly where computational load is uneven [S1].
++*   **Origin:** The Farm on Demand (FD) algorithm was proposed by D. D'Agostino, A. Clematis, and V. Gianuzzi [S1].
++*   **History:** It represents the fourth class of parallel isosurface extraction algorithms, based on the processor farm paradigm [S1]. It is similar to the algorithm proposed in [44] but differs in that the random task distribution among workers is made on demand, making the distribution nondeterministic [S1].
++*   **Usage:** It is used in distributed environments for 3D data analysis workflows, particularly where dynamic load balancing is crucial for performance [S1].
+ 
+ ## Sources

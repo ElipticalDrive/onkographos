@@ -1,0 +1,188 @@
+--- v006.md
++++ v007.md
+@@ -4,123 +4,60 @@
+ 
+ ## Overview
+-Multi-stage training protocols decompose the optimization of complex neural radiance fields or inverse rendering models into sequential phases to stabilize convergence and manage conflicting gradients [S1, S2]. Unlike single-stage end-to-end training, which often suffers from instability when optimizing heterogeneous components simultaneously, this method decouples the process into distinct steps such as pretraining, joint training, and fine-tuning [S1]. It addresses the problem of initializing dependent modules with reasonable values before introducing more complex interactions, ensuring that the model components act as expected during the final end-to-end optimization [S1].
++Multi-stage training protocols decompose complex inverse rendering or radiance field optimization into sequential phases to stabilize convergence and ensure logical dependency between network components. Unlike single-stage end-to-end training, which can suffer from gradient conflicts or poor initialization in coupled systems, this method isolates the learning of geometric priors (albedo, normals, depth) before introducing appearance or lighting variables. It is distinct from standard NeRF training by enforcing a strict hierarchy of feature learning, ensuring that coarse geometry is established before high-frequency details or complex lighting models are optimized.
+ 
+ ## How it works
++The protocol consists of a sequence of optimization phases. The specific steps depend on the architectural variant (e.g., inverse rendering vs. UV-volume human modeling), but the general logic follows a "Pretrain -> Joint -> Refine" pattern.
++
+ ### Inputs and Outputs
+-*   **Inputs:** Camera poses, images, and optionally auxiliary supervision (e.g., depth, normals, albedo) [S1, S2].
+-*   **Outputs:** Optimized neural field parameters (MLP weights, grid features, or volume densities) and associated attributes (lighting, material properties) [S1, S2].
++- **Inputs**: Training images (LDR or HDR), camera poses, and optionally semantic or geometric priors (e.g., SMPL bounds, visible surface volumes).
++- **Outputs**: Optimized network weights for all modules (Direct Prediction, Lighting, Re-prediction, UV volumes, NTS) and the final rendered images or inverse rendering results (albedo, normals, depth, lighting).
+ 
+ ### Data Structures
+-*   **Neural Networks:** Direct Prediction Module, Lighting Joint Prediction Module, and Joint Re-prediction Module [S1].
+-*   **Volumetric/Grid Representations:** 3D volumes (e.g., $128^3$) or UV-metric grids for storing features [S1, S2].
+-*   **Loss Weights:** Scalars $\lambda$ for balancing multi-task losses [S1].
+-*   **Ray Sampling Configuration:** Number of points per ray and scene bounds estimation method [S2].
++The data structures vary by variant.
++1.  **Inverse Rendering Variant [S1]**:
++    -   **Direct Prediction Module ($h_{DP}$)**: Predicts intermediate outputs $(\tilde{A}, \tilde{N}, \tilde{D})$ for albedo, normal, and depth.
++    -   **Lighting Joint Prediction Module**: Predicts lighting $\hat{L}$ based on inputs from $h_{DP}$.
++    -   **Joint Re-prediction Module**: Refines $(\tilde{A}, \tilde{N}, \tilde{D})$.
++    -   **Final Outputs**: Joint predictions $(\hat{A}, \hat{N}, \hat{D}, \hat{L})$ and intermediate outputs $(\tilde{A}, \tilde{N}, \tilde{D})$.
++2.  **UV Volume Variant [S2]**:
++    -   **UV Volumes**: Coarse geometry representation.
++    -   **Neural Texture Stack (NTS)**: High-frequency detail representation.
++    -   **Ray Sampling**: 64 points sampled along each camera ray between near/far bounds estimated by SMPL.
+ 
+-### Steps
+-The protocol follows a progressive scheme where specific submodules are trained, frozen, or jointly optimized in a defined order [S1]. The exact steps are:
+-1.  **Pretrain Direct Prediction Module:** Train the albedo, normal, and depth branches of the Direct Prediction Module independently [S1].
+-    *   **Goal:** Ensure these branches produce reasonable initial values, as they are dependencies for subsequent modules (e.g., Lighting Joint Prediction Module) [S1].
+-2.  **Joint Train Direct and Lighting Modules:** Jointly optimize the Direct Prediction Module and the Lighting Joint Prediction Module [S1].
+-    *   **Loss:** Multi-task loss $L$ combining albedo, normal, depth, lighting, visibility, and regularization terms:
+-        $$ L = \lambda_A L_{albedo} + \lambda_N L_{normal} + \lambda_D L_{depth} + \lambda_L L_{light} + \lambda_{visible} L_{visible} + \lambda_{reg} L_{reg} + \lambda_{rerender} L_{rerender} $$
+-        where $\lambda$ are hyperparameters balancing the terms [S1].
+-3.  **Train Joint Re-prediction Module:** Freeze the weights of the Direct Prediction Module and Lighting Joint Prediction Module [S1]. Train the Joint Re-prediction Module to refine albedo, normals, and depth [S1].
+-    *   **Goal:** Improve the consistency of intermediate outputs without disturbing the already learned lighting and direct appearance features [S1].
+-4.  **End-to-End Finetune:** Unfreeze all modules and jointly finetune the entire network end-to-end [S1].
+-    *   **Loss:** Multi-task loss computed on both the joint prediction outputs $(\hat{A}, \hat{N}, \hat{D}, \hat{L})$ and the intermediate outputs $(\tilde{A}, \tilde{N}, \tilde{D})$ [S1].
++### Numbered Steps
++The following steps describe the general progression, with specific details for each variant in the Subtopics section.
+ 
+-### Pseudocode
+-```python
+-def freeze_model(model):
+-    for param in model.parameters():
+-        param.requires_grad = False
++1.  **Pretrain Geometric Priors**: Train the modules responsible for coarse geometry (albedo, normal, depth) independently or with a subset of the loss. This ensures reasonable initial values for subsequent modules that depend on these properties [S1].
++2.  **Joint Train Core Modules**: Unfreeze and jointly train the geometric modules and the primary appearance/lighting modules using a multi-task loss function [S1].
++3.  **Refine/Re-predict**: Freeze the weights of the previously trained modules and train a dedicated refinement module (e.g., Joint Re-prediction) to correct errors in the geometric outputs [S1].
++4.  **End-to-End Finetune**: Jointly finetune all modules end-to-end using the full multi-task loss on both intermediate and final outputs to resolve any inconsistencies introduced by freezing [S1].
+ 
+-def unfreeze_model(model):
+-    for param in model.parameters():
+-        param.requires_grad = True
++### Formulas
++**Multi-task Loss for Inverse Rendering [S1]**:
++$$ L = \lambda_A L_{albedo} + \lambda_N L_{normal} + \lambda_D L_{depth} + \lambda_L L_{light} + \lambda_{visible} L_{visible} + \lambda_{reg} L_{reg} + \lambda_{rerender} L_{rerender} $$
++Where $\lambda$ are hyperparameters balancing the different loss terms.
+ 
+-def adjust_lr(optimizer, epoch, base_lr, decay_rate):
+-    for param_group in optimizer.param_groups:
+-        param_group['lr'] = base_lr * (decay_rate ** epoch)
+-
+-def compute_loss(preds, targets, weights):
+-    loss = 0.0
+-    for key, weight in weights.items():
+-        loss += weight * sum((p - t) ** 2 for p, t in zip(preds[key], targets[key])) / len(preds[key])
+-    return loss
+-
+-def multi_stage_training(model, data_loader, config):
+-    # Step 1: Pretrain Direct Prediction Module
+-    freeze_model(model.lighting_joint_prediction_module)
+-    freeze_model(model.joint_reprediction_module)
+-    optimizer = Adam(model.direct_prediction_module.parameters(), lr=config.lr_direct)
+-    for epoch in range(config.pretrain_epochs):
+-        adjust_lr(optimizer, epoch, config.lr_direct, config.lr_decay)
+-        for data in data_loader:
+-            optimizer.zero_grad()
+-            outputs = model.direct_prediction_module(data)
+-            loss = compute_loss(outputs, data.targets, config.loss_weights_direct)
+-            loss.backward()
+-            optimizer.step()
+-
+-    # Step 2: Joint Train Direct and Lighting Modules
+-    unfreeze_model(model.lighting_joint_prediction_module)
+-    optimizer = Adam(list(model.direct_prediction_module.parameters()) + list(model.lighting_joint_prediction_module.parameters()), lr=config.lr_joint)
+-    for epoch in range(config.joint_epochs):
+-        adjust_lr(optimizer, epoch, config.lr_joint, config.lr_decay)
+-        for data in data_loader:
+-            optimizer.zero_grad()
+-            direct_out = model.direct_prediction_module(data)
+-            lighting_out = model.lighting_joint_prediction_module(direct_out, data)
+-            loss = compute_loss({'albedo': direct_out.albedo, 'normal': direct_out.normal, 'depth': direct_out.depth, 'light': lighting_out.light, 'visible': lighting_out.visible, 'reg': lighting_out.reg}, data.targets, config.loss_weights_joint)
+-            loss.backward()
+-            optimizer.step()
+-
+-    # Step 3: Train Joint Re-prediction Module
+-    freeze_model(model.direct_prediction_module)
+-    freeze_model(model.lighting_joint_prediction_module)
+-    optimizer = Adam(model.joint_reprediction_module.parameters(), lr=config.lr_repred)
+-    for epoch in range(config.repred_epochs):
+-        adjust_lr(optimizer, epoch, config.lr_repred, config.lr_decay)
+-        for data in data_loader:
+-            optimizer.zero_grad()
+-            repred_out = model.joint_reprediction_module(data)
+-            loss = compute_loss(repred_out, data.targets, config.loss_weights_repred)
+-            loss.backward()
+-            optimizer.step()
+-
+-    # Step 4: End-to-End Finetune
+-    unfreeze_model(model.direct_prediction_module)
+-    unfreeze_model(model.lighting_joint_prediction_module)
+-    unfreeze_model(model.joint_reprediction_module)
+-    optimizer = Adam(model.parameters(), lr=config.lr_e2e)
+-    for epoch in range(config.finetune_epochs):
+-        adjust_lr(optimizer, epoch, config.lr_e2e, config.lr_decay)
+-        for data in data_loader:
+-            optimizer.zero_grad()
+-            direct_out = model.direct_prediction_module(data)
+-            lighting_out = model.lighting_joint_prediction_module(direct_out, data)
+-            repred_out = model.joint_reprediction_module(data)
+-            loss = compute_loss({'joint': lighting_out, 'intermediate': repred_out}, data.targets, config.loss_weights_e2e)
+-            loss.backward()
+-            optimizer.step()
+-```
++**Learning Rate Decay for UV Volume Variant [S2]**:
++The learning rates for UV volumes and NTS decay exponentially over epochs:
++$$ l_{uv} = 1 \times 10^{-3} \gamma_{250}^{\text{epoch}} $$
++$$ l_{nts} = 5 \times 10^{-4} \gamma_{1000}^{\text{epoch}} $$
++Where $\gamma = 1 \times 10^{-1}$ is the decay rate. Note: The sources specify different base epochs for the decay start or normalization ($250$ vs $1000$) in the exponents, implying a piecewise or distinct decay schedule for each branch [S2].
+ 
+ ### Parameters
+-*   **Learning Rate Decay:** Exponential decay is applied across stages [S1]. For UV Volume variants, decay rates $\gamma = 1 \times 10^{-1}$ are used [S2].
+-*   **Loss Weights:** $\lambda_A, \lambda_N, \lambda_D, \lambda_L, \lambda_{visible}, \lambda_{reg}, \lambda_{rerender}$ balance the multi-task loss [S1].
+-*   **Ray Sampling:** 64 points sampled along each camera ray between near and far bounds [S2].
+-*   **Optimizer:** Adam optimizer [S2].
+-*   **Scene Bounds:** Estimated based on the SMPL model [S2].
+-*   **Resolution:** Initialized visible surface volume and predicted VSG lighting resolution is $128^3$ [S1].
++-   **Optimizer**: Adam [S1, S2].
++-   **Ray Sampling**: 64 points per ray [S2].
++-   **Volume Resolution**: $128^3$ for initialized visible surface volume and predicted VSG lighting [S1].
++-   **Hardware**: Single NVIDIA A100 GPU [S2].
++-   **Training Duration**: ~200k iterations (~20 hours) for 26-view videos of 100 frames at 960x540 resolution [S2].
+ 
+ ### Edge Cases and Pitfalls
+-*   **Dependency Violation:** If the Direct Prediction Module is not pretrained, the Lighting Joint Prediction Module may receive unreasonable inputs, leading to poor convergence [S1].
+-*   **UV Volume Warm-start:** In UV-based methods, UV volumes must be learned first to warm-start coarse geometry before optimizing the Neural Texture Stack (NTS) for high-frequency signals [S2].
++-   **Dependency Violation**: In the inverse rendering variant, the Lighting Joint Prediction Module depends on the albedo/normal/depth outputs. Training them simultaneously from scratch can lead to poor convergence if the geometric priors are not reasonable [S1].
++-   **UV Volume Warm-start**: In the UV volume variant, NTS optimization is ineffective if UV volumes are not warmed up first, as NTS relies on a coarse geometry to fit high-frequency signals [S2].
++-   **Precision**: The sources do not specify floating-point precision requirements, but standard practice suggests FP32 for training stability [G].
+ 
+ ## Subtopics
+ 
+ ### [MobileNeRF Staged Training](15503-mobilenerf-staged-training.md)
+-MobileNeRF Staged Training is a multi-stage optimization protocol designed to train the MobileNeRF neural field representation efficiently on mobile hardware constraints. It addresses the challenge of jointly optimizing geometry (vertices), appearance (MLPs), and acceleration structures (grids) by decoupling them into sequential phases. Unlike standard NeRF training which optimizes all parameters simultaneously, this method fixes geometry and acceleration structures in later stages to stabilize convergence and reduce computational overhead during the final refinement of appearance features.
++MobileNeRF Staged Training is a three-stage optimization protocol that sequentially trains the geometry, acceleration structures, and appearance networks of the MobileNeRF representation. It decouples joint optimization into phases with adaptive ray marching to stabilize convergence.
+ 
+ ### [Multi-resolution Feature Grid Pre-train](17802-multi-resolution-feature-grid-pre-train.md)
+@@ -128,14 +65,16 @@
+ 
+ ### UV Volume Training Strategy
+-The UV Volume Training Strategy uses two optimization strategies for UV volumes and the Neural Texture Stack (NTS) branch [S2]. UV volumes are learned primarily in early stages to warm-start coarse geometry, while NTS is optimized later to fit high-frequency signals [S2]. The learning rate for UV volumes is calculated as $l_{\text{uv}} = 1 \times 10^{-3} \gamma^{\text{epoch}}$, where $\gamma = 1 \times 10^{-1}$ [S2]. The learning rate for NTS is calculated as $l_{\text{nts}} = 5 \times 10^{-4} \gamma^{\text{epoch}}$, where $\gamma = 1 \times 10^{-1}$ [S2]. Ray sampling uses 64 points along each camera ray between near and far bounds, with scene bounds estimated based on the SMPL model [S2]. The Adam optimizer is used [S2]. Training on 26-view videos of 100 frames at 960 × 540 resolution takes approximately 20 hours (200k iterations) on a single NVIDIA A100 GPU [S2].
++The UV Volume Training Strategy uses two distinct optimization strategies for UV volumes and the Neural Texture Stack (NTS) branch [S2]. UV volumes are learned primarily in early stages to warm-start coarse geometry, while NTS is optimized later to fit high-frequency signals [S2]. The learning rates decay exponentially: $l_{uv} = 1 \times 10^{-3} \gamma_{250}^{\text{epoch}}$ and $l_{nts} = 5 \times 10^{-4} \gamma_{1000}^{\text{epoch}}$, with $\gamma = 1 \times 10^{-1}$ [S2]. Ray sampling uses 64 points along camera rays between SMPL-estimated bounds [S2]. Training takes approximately 20 hours (200k iterations) on a single NVIDIA A100 GPU for 26-view videos of 100 frames at 960x540 resolution [S2].
+ 
+ ## Operating characteristics
+-*   **Time and Memory Complexity:** Not given in the sources.
+-*   **Measured Performance:** Training on 26-view videos of 100 frames at 960 × 540 resolution takes approximately 20 hours (200k iterations) on a single NVIDIA A100 GPU [S2].
+-*   **Strengths and Limitations:** Not given in the sources.
+-*   **When to Use and When Not to Use:** Not given in the sources.
++-   **Time Complexity**: The multi-stage approach increases total training time due to sequential phases, but reduces the risk of divergence and the need for extensive hyperparameter tuning for joint optimization [S1, S2].
++-   **Memory Complexity**: Depends on the variant. The inverse rendering variant uses a $128^3$ volume [S1]. The UV volume variant uses UV volumes and NTS, with memory optimized for real-time rendering [S2].
++-   **Strengths**: Stabilizes convergence for complex, coupled models (e.g., lighting + geometry); ensures geometric priors are reasonable before appearance optimization; allows for specialized learning rates for different components.
++-   **Limitations**: Requires careful scheduling of when to freeze/unfreeze modules; may not be necessary for simpler radiance field models that do not have strong inter-component dependencies.
++-   **When to Use**: When training inverse rendering models with separate lighting and geometry predictors, or when using UV-based representations where coarse geometry must precede fine detail.
++-   **When Not to Use**: For standard NeRF training without explicit inverse rendering components or UV mappings, where end-to-end training is sufficient.
+ 
+ ## Background
+-The multi-stage training protocol originated in the context of inverse rendering and neural radiance field optimization, where models often comprise multiple interconnected modules (e.g., direct prediction, lighting estimation, re-prediction) [S1]. It addresses the instability observed in end-to-end training of such complex systems by progressively introducing model complexity [S1]. The approach was formalized in works such as "Learning Indoor Inverse Rendering with 3D Spatially-Varying Lighting" [S1] and "UV Volumes for Real-time Rendering of Editable Free-view Human Performance" [S2].
++The Multi-stage Training Protocol originates from research in inverse rendering and human performance modeling. The inverse rendering variant was introduced in "Learning Indoor Inverse Rendering with 3D Spatially-Varying Lighting" (2021) to handle the coupling between albedo, normal, depth, and lighting predictions [S1]. The UV volume variant was introduced in "UV Volumes for Real-time Rendering of Editable Free-view Human Performance" (2023) to address the challenges of rendering editable human performances with high-frequency details [S2]. These methods address the instability of jointly optimizing geometric and photometric properties in complex neural representations.
+ 
+ ## Sources

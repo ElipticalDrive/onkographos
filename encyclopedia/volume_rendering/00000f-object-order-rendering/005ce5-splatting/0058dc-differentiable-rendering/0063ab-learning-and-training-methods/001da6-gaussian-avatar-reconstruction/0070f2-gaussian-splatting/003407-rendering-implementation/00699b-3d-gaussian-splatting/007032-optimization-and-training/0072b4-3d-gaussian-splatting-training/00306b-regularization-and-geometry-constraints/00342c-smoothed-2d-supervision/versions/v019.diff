@@ -1,0 +1,256 @@
+--- v018.md
++++ v019.md
+@@ -4,104 +4,131 @@
+ 
+ ## Overview
+-Smoothed 2D Supervision is a regularization technique that enhances the robustness of joint optimization in differentiable rendering by smoothing the 2D supervision signal [S1][S2, unofficial]. It solves the problem of unstable camera alignment and noisy gradient signals during training by blurring 2D training images with a parallel set of scheduled 2D Gaussian kernels [S2, unofficial]. Unlike methods that operate solely in the 3D domain or use fixed frequency penalties, this method restricts the spectrum of the learned 3D scene by progressively reducing the blur intensity, stabilizing the optimization process [S2, unofficial][S3]. It is distinct from [Frequency Regularization](6130-frequency-regularization.md) and [FreGS](9212-fregs.md) by applying explicit spatial convolution to the target images rather than manipulating positional encodings or loss weights directly [S3].
++Smoothed 2D Supervision is a regularization technique that enhances the robustness of joint optimization in differentiable rendering by smoothing the 2D supervision signal [S1][S2, unofficial]. It solves the problem of noisy gradients and unstable camera alignment during training by blurring training images with a scheduled set of 2D Gaussian kernels [S2, unofficial]. Unlike frequency regularization methods that operate in the Fourier domain [6130-frequency-regularization.md] or covariance transformations that modify primitive shapes [9150-3d-half-gaussian-splatting-covariance-transformation-and-reg.md], this method operates directly on the image plane supervision targets [S2, unofficial]. It stabilizes optimization by restricting the spectrum of the learned 3D scene and producing smoother image gradients [S2, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** 2D training images $I_{raw}$, camera parameters (pose, intrinsics), and current 3D scene representation (e.g., Gaussians or NeRF).
+-*   **Output:** Smoothed supervision images $I_{smooth}$ used in the rendering loss calculation.
++*   **Input:** Raw 2D training images $I_{raw}$, current iteration count $t$, and hyperparameters defining the blur schedule (initial kernel size, initial standard deviation $\sigma_0$, decay interval $k_b$, and end iteration $t_{end}$) [S2, unofficial][S4].
++*   **Output:** Smoothed supervision images $I_{smooth}$ used for computing the rendering loss [S2, unofficial].
+ 
+ **Data Structures:**
+-*   **Gaussian Kernel Parameters:** A schedule defining the standard deviation $\sigma$ and kernel size $K$ as a function of training iteration $t$.
+-*   **Blurred Image Buffer:** An image buffer of the same resolution as $I_{raw}$ storing the convolved result.
++*   **Blur Kernel:** A 2D Gaussian kernel $K$ defined by its standard deviation $\sigma$ and spatial extent (kernel size). The kernel is separable, allowing efficient convolution [S1].
++*   **Schedule State:** Variables tracking the current $\sigma$ and kernel dimensions, updated every $k_b$ iterations [S4].
+ 
+-**Numbered Steps:**
+-1.  **Initialize Schedule:** Define the initial Gaussian kernel parameters. A common configuration starts with a square kernel of size $9 \times 9$ and standard deviation $\sigma = 2.4$ [S4].
+-2.  **Iterative Blurring:** For each training iteration $t$:
+-    a. Determine the current kernel parameters $(\sigma_t, K_t)$ based on the schedule.
+-    b. Apply a 2D Gaussian blur to the raw training image $I_{raw}$ using the kernel defined by $(\sigma_t, K_t)$ to produce $I_{smooth}$ [S2, unofficial][S4].
+-    c. Render the scene to produce $I_{render}$.
+-    d. Compute the rendering loss $\mathcal{L}$ between $I_{render}$ and $I_{smooth}$ [S2, unofficial].
+-3.  **Schedule Update:** Reduce the blur intensity as training progresses. A typical schedule reduces the blur every $k_b = 100$ iterations until iteration 19,500 [S4]. The kernel size or $\sigma$ is decreased to gradually introduce higher-frequency details [S4].
+-4.  **Downsampling Adjustment:** If image downsampling is activated, the kernel size must be lowered by the scale of downsampling at the current stage to maintain consistency with the original image resolution [S4].
+-5.  **Pre-Densification Adjustment:** Lower the blurring kernel size before densifying Gaussians to introduce extra signal on the gradient of erroneous Gaussians as the noise level reduces [S4].
+-
+-**Formulas:**
+-The smoothed image $I_{smooth}(x, y)$ is computed by convolving the raw image $I_{raw}$ with a 2D Gaussian kernel $G_{\sigma}$:
+-$$ I_{smooth}(x, y) = (I_{raw} * G_{\sigma})(x, y) = \sum_{u=-K/2}^{K/2} \sum_{v=-K/2}^{K/2} I_{raw}(x-u, y-v) G_{\sigma}(u, v) $$
+-where $G_{\sigma}(u, v) = \frac{1}{2\pi\sigma^2} e^{-\frac{u^2+v^2}{2\sigma^2}}$.
+-
+-The schedule for $\sigma$ typically decreases exponentially or linearly. One source notes an exponential reduction to 0 at 10k iterations [S2, unofficial], while another specifies a step-wise reduction every 100 iterations [S4].
+-
+-**Parameters:**
+-*   Initial $\sigma$: 2.4 [S4].
+-*   Initial Kernel Size: $9 \times 9$ [S4].
+-*   Update Interval ($k_b$): 100 iterations [S4].
+-*   End of Schedule: Iteration 19,500 [S4] or 10,000 [S2, unofficial].
+-
+-**Edge Cases and Pitfalls:**
+-*   **Precision:** Ensure the convolution is performed with sufficient precision to avoid artifacts in the gradient signal [S2, unofficial].
+-*   **Boundary Conditions:** Handle image boundaries correctly during convolution (e.g., padding) to prevent edge artifacts in the supervision signal [G].
+-*   **Downsampling Mismatch:** If downsampling is used, failing to adjust the kernel size leads to incorrect frequency suppression [S4].
++**Steps:**
++1.  **Initialize Schedule:** Set the initial standard deviation $\sigma = \sigma_0$ and initial kernel size $S_{init}$ (e.g., $9 \times 9$) [S4].
++2.  **Iterative Update:** For each training iteration $t$:
++    a.  **Check Decay:** If $t > 0$ and $t \pmod{k_b} == 0$ and $t < t_{end}$, reduce the blur intensity [S4].
++    b.  **Update Parameters:** Decrease $\sigma$ and/or the kernel size. The schedule is designed to progressively reduce the standard variance to construct adaptive blurred image supervision [S3]. In specific implementations, $\sigma$ is exponentially reduced to 0 at a specific iteration (e.g., 10k) and remains 0 afterward [S2, unofficial].
++    c.  **Adjust for Downsampling:** If image downsampling is active, lower the kernel size by the scale of downsampling at the current stage to account for the initial hyperparameter choice based on original image resolutions [S4].
++    d.  **Pre-Densification Adjustment:** Lower the blurring kernel size before densifying Gaussians. This introduces extra signal on the gradient of erroneous Gaussians as the noise level reduces [S4].
++3.  **Apply Blur:** Convolve the raw training image $I_{raw}$ with the current Gaussian kernel $K(\sigma)$ to produce the smoothed image $I_{smooth}$ [S2, unofficial].
++    $$ I_{smooth} = I_{raw} * K(\sigma) $$
++4.  **Compute Loss:** Calculate the rendering loss (e.g., L1 or SSIM) between the rendered image and $I_{smooth}$ [S2, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def compute_smoothed_supervision(raw_image, iteration, initial_sigma=2.4, kernel_size=9, update_interval=100, end_iteration=19500, downscale_factor=1.0):
++def get_smoothed_supervision(raw_image, iteration, config):
+     """
+-    Computes the smoothed supervision image for a given iteration.
++    Generates smoothed supervision image based on iteration schedule.
+     
+     Args:
+-        raw_image: The original 2D training image.
++        raw_image: 2D numpy array or tensor of the training image.
+         iteration: Current training iteration number.
+-        initial_sigma: Initial standard deviation of the Gaussian kernel.
+-        kernel_size: Initial size of the square Gaussian kernel.
+-        update_interval: Number of iterations between schedule updates.
+-        end_iteration: Iteration at which blurring is fully reduced.
+-        downscale_factor: Factor by which the image is downsampled (1.0 for no downsampling).
++        config: Dictionary containing schedule parameters.
++            - sigma_0: Initial standard deviation (e.g., 2.4).
++            - kernel_size_init: Initial kernel size (e.g., 9).
++            - k_b: Iteration interval for decay (e.g., 100).
++            - t_end: Iteration at which blur becomes zero (e.g., 19500).
++            - downscale_factor: Current image downsampling scale (1.0 if none).
++            
++    Returns:
++        smoothed_image: Blurred version of raw_image.
++    """
++    # 1. Determine current sigma and kernel size
++    # Linear or exponential decay logic depends on specific implementation variant.
++    # Based on [S4]: Gradually reduce blur for every k_b iterations until t_end.
++    
++    if iteration >= config['t_end']:
++        sigma = 0.0
++        kernel_size = 1 # Effectively no blur
++    else:
++        # Calculate decay steps
++        steps = iteration // config['k_b']
+         
+-    Returns:
+-        smoothed_image: The blurred image used for supervision.
+-    """
+-    # Determine current sigma based on schedule
+-    # Schedule reduces blur over time. 
+-    # Using a linear decay from initial_sigma to 0 over end_iteration as a representative implementation
+-    # Note: Sources vary on the exact schedule function (exponential vs step-wise).
+-    # This implementation uses a linear decay for clarity, capped at 0.
++        # Example linear decay of sigma from sigma_0 to 0 over t_end
++        # Note: [S2, unofficial] mentions exponential reduction to 0 at 10k; [S4] mentions reduction until 19500.
++        # We implement a generic decay function here.
++        progress = min(iteration / config['t_end'], 1.0)
++        
++        # Linear decay of sigma
++        sigma = config['sigma_0'] * (1.0 - progress)
++        
++        # Kernel size is typically related to sigma (e.g., 6*sigma + 1)
++        # Adjusted for downsampling as per [S4]
++        base_kernel_size = int(6 * sigma + 1)
++        if base_kernel_size < 1:
++            base_kernel_size = 1
++            
++        # Apply downsampling scale adjustment
++        # "lower the kernel size by the scale of downsampling"
++        kernel_size = max(1, int(base_kernel_size / config['downscale_factor']))
++        
++        # Ensure odd kernel size for symmetry
++        if kernel_size % 2 == 0:
++            kernel_size += 1
++
++    # 2. Apply Gaussian Blur
++    if sigma == 0 or kernel_size == 1:
++        return raw_image
+     
+-    progress = min(iteration / end_iteration, 1.0)
+-    current_sigma = initial_sigma * (1.0 - progress)
++    # Create separable Gaussian kernel
++    # Kernel generation is a standard operation
++    kernel_1d = generate_gaussian_1d(kernel_size, sigma)
+     
+-    # Adjust kernel size based on sigma and downsampling
+-    # Kernel size should be proportional to sigma. 
+-    # A common rule is kernel_size ~ 6*sigma + 1, but here we scale the initial kernel size.
+-    # Also adjust for downsampling: if image is downsampled, the effective blur in original coordinates
+-    # must be larger, or the kernel in downsampled coordinates must be smaller.
+-    # Source [S4] says: "lower the kernel size by the scale of downsampling"
+-    
+-    effective_kernel_size = int(kernel_size * (current_sigma / initial_sigma) / downscale_factor)
+-    
+-    # Ensure kernel size is at least 1
+-    effective_kernel_size = max(1, effective_kernel_size)
+-    
+-    # Create Gaussian kernel
+-    # Center of the kernel
+-    center = effective_kernel_size // 2
+-    kernel = np.zeros((effective_kernel_size, effective_kernel_size))
+-    
+-    for u in range(effective_kernel_size):
+-        for v in range(effective_kernel_size):
+-            dist_sq = (u - center)**2 + (v - center)**2
+-            kernel[u, v] = np.exp(-dist_sq / (2 * current_sigma**2))
+-            
+-    # Normalize kernel
+-    kernel_sum = np.sum(kernel)
+-    if kernel_sum > 0:
+-        kernel = kernel / kernel_sum
+-        
+-    # Apply convolution
+-    # Use 'same' padding to keep image dimensions
+-    smoothed_image = convolve2d(raw_image, kernel, mode='same', boundary='symm')
++    # Apply 2D convolution using separable kernels for efficiency [S1]
++    # Horizontal pass
++    blurred_h = convolve_separable(raw_image, kernel_1d, axis=1)
++    # Vertical pass
++    smoothed_image = convolve_separable(blurred_h, kernel_1d, axis=0)
+     
+     return smoothed_image
++
++def generate_gaussian_1d(size, sigma):
++    """Generates a 1D Gaussian kernel."""
++    import numpy as np
++    x = np.arange(size) - size // 2
++    kernel = np.exp(-0.5 * (x / sigma)**2)
++    return kernel / np.sum(kernel)
++
++def convolve_separable(image, kernel_1d, axis):
++    """Applies 1D convolution along a specific axis."""
++    import numpy as np
++    # Padding to maintain size
++    pad_size = len(kernel_1d) // 2
++    if axis == 0:
++        padded = np.pad(image, ((pad_size, pad_size), (0, 0)), mode='reflect')
++        # Convolve along rows
++        result = np.zeros_like(image)
++        for i in range(image.shape[0]):
++            result[i, :] = np.convolve(padded[i+pad_size:i+pad_size+image.shape[0], :], kernel_1d, mode='valid')
++        return result
++    else: # axis == 1
++        padded = np.pad(image, ((0, 0), (pad_size, pad_size)), mode='reflect')
++        result = np.zeros_like(image)
++        for j in range(image.shape[1]):
++            result[:, j] = np.convolve(padded[:, j+pad_size:j+pad_size+image.shape[1]], kernel_1d, mode='valid')
++        return result
+ ```
++
++**Parameters:**
++*   $\sigma_0$: Initial standard deviation. Typical value: 2.4 [S4].
++*   $k_b$: Decay interval. Typical value: 100 iterations [S4].
++*   $t_{end}$: Iteration where blur is removed. Typical value: 19,500 [S4] or 10,000 [S2, unofficial].
++*   Kernel Size: Initial size $9 \times 9$ [S4].
++
++**Edge Cases and Pitfalls:**
++*   **Over-smoothing:** If the kernel is too large for too long, high-frequency details are lost, potentially leading to blurry reconstructions [S2, unofficial].
++*   **Gradient Noise:** As $\sigma \to 0$, the gradient signal becomes weaker and more susceptible to noise, particularly if the kernel magnitude $H(u, k)$ decreases linearly as $k \to 0$ [S2, unofficial]. This is why the kernel size is lowered before densification to introduce extra signal on erroneous Gaussians [S4].
++*   **Downsampling Mismatch:** Failing to adjust the kernel size relative to the downsampling scale leads to incorrect frequency suppression [S4].
+ 
+ ## Subtopics
+@@ -117,28 +144,29 @@
+ 
+ ### Platonic GAN (pGAN)
+-A learning-based method for 2D supervision per class of reconstructed objects, used here to pre-train a network for per-frame supervision of rising smoke [S5]. It improves depth artifacts but lacks temporal constraints, leading to incoherent solutions if not integrated with temporal self-supervision [S5].
++A learning-based method for 2D supervision per class of reconstructed objects, used here to pre-train a network for per-frame supervision of rising smoke [S5]. It is applied to improve depth artifacts in single-view evaluations but may lead to incoherent solutions if temporal constraints are lacking [S5].
+ 
+ ## Operating characteristics
+ **Time and Memory Complexity:**
+-The method adds a convolution step to the training loop. The complexity is $O(N \cdot K^2)$ per image per iteration, where $N$ is the number of pixels and $K$ is the kernel size. Since $K$ is small (e.g., $9 \times 9$) and decreases over time, the overhead is minimal compared to the rendering cost [S4]. Memory usage increases by the storage of the blurred image buffer [S2, unofficial].
++*   **Time:** The convolution operation is $O(N \cdot K^2)$ per image, where $N$ is the number of pixels and $K$ is the kernel size. However, using separable kernels reduces this to $O(N \cdot K)$ [S1]. The schedule updates are negligible $O(1)$ per iteration.
++*   **Memory:** Requires storing the blurred image or recomputing it on the fly. No additional large data structures are needed beyond the kernel [S1].
+ 
+ **Measured Performance:**
+-On the DTU 3-view dataset, Smoothed 2D Supervision (as part of Adaptive Gaussian Blur) achieves 19.72 PSNR, improving over the baseline of 19.54 PSNR [S3]. It reduces training iterations to 50k compared to 200k for previous MLP-based methods, reducing overall training time to 25% [S1].
+-
+-**Scaling:**
+-The method scales well with image resolution as the convolution is local. However, the kernel size must be adjusted for downsampling to maintain effective frequency control [S4].
++*   On DTU 3-view, Smoothed 2D Supervision (specifically the "Adaptive Gaussian Blur" variant) achieves 19.72 PSNR, improving over the Baseline of 19.54 PSNR [S3].
++*   It is experimentally proven crucial for successful pose refinement in ablation studies [S1].
+ 
+ **Strengths and Limitations:**
+-*   **Strengths:** Stabilizes camera alignment, restricts high-frequency noise, and reduces training time [S1][S2, unofficial].
+-*   **Limitations:** It is handcrafted and cannot fully align frequency relationships between positional encodings and pixel supervision as effectively as adaptive methods [S3].
++*   **Strengths:** Stabilizes camera alignment and joint optimization [S2, unofficial]. Reduces training iterations required (e.g., 50k vs 200k in some MLP-based methods) by providing robust gradients [S1]. Restricts the spectrum of the learned scene to prevent overfitting to noise [S2, unofficial].
++*   **Limitations:** The strategies (linear or adaptive Gaussian blur) are handcrafted and cannot fully align frequency relationships between positional encodings and pixel supervision as effectively as adaptive methods [S3].
+ 
+ **When to Use:**
+-Use when joint optimization of camera poses and scene parameters is unstable, or when training time needs to be reduced [S1]. It is particularly useful in ablation studies for pose refinement [S1].
++*   Use when joint optimization of camera poses and scene representation is unstable [S1].
++*   Use when training requires stabilization in the early phases to avoid local minima [S2, unofficial].
+ 
+ **When Not to Use:**
+-Avoid if maximum possible PSNR is required and adaptive frequency alignment is available, as handcrafted blur may not fully align with the model's frequency biases [S3].
++*   When high-frequency detail preservation is critical from the start and the overhead of managing the schedule is not justified [S3].
++*   When using an adaptive frequency regularization method that already handles spectral alignment [S3].
+ 
+ ## Background
+-Smoothed 2D Supervision was proposed as part of techniques to improve robustness in joint optimization of camera pose and decomposed low-rank tensorial radiance fields [S1][S2, unofficial]. It was inspired by spectral analysis showing that blurring 2D training images produces smoothed image gradients and stabilizes camera alignment [S2, unofficial]. The method is also referenced in the context of Trick-GS, where it is used to balance training efficiency and quality [S4].
++Smoothed 2D Supervision originated as a technique to improve the robustness of joint optimization in radiance fields and Gaussian Splatting [S1][S2, unofficial]. It was inspired by spectral analysis showing that blurring training images produces smoother gradients and stabilizes camera alignment [S2, unofficial]. The method is closely related to the Gaussian schedules used in 3D radiance fields [S2, unofficial]. It has been adopted in various forms, including "Adaptive Gaussian Blur" in few-shot NeRF [S3] and "Trick-GS" in efficient Gaussian Splatting [S4].
+ 
+ ## Sources

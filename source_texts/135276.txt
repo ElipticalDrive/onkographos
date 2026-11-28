@@ -1,0 +1,358 @@
+GPU Mesh Voxelizer Part 3: Render tons of voxels with DrawMeshInstancedIndirect – Bronson Zgeb
+Skip to content
+Posted in Compute Shaders, Graphics, Unity Programming
+GPU Mesh Voxelizer Part 3: Render tons of voxels with DrawMeshInstancedIndirect
+bronson
+posted on June 5, 2021June 5, 2021
+No Comment
+In this article, we render all the voxels from our voxelization process. If you haven’t read the previous parts, you can find part 1 here and part 2 here. We’ll generate a mesh and draw it via the `DrawMeshInstancedIndirect` API. Doing so requires us to write a custom shader as well. Let’s get started.
+Drawing tons of meshes with DrawMeshInstancedIndirect
+Our goal is to draw millions of voxels. I chose to approach this using the DrawMeshInstancedIndirect API, which draws a copy of a single mesh in a zillion different places. It works by uploading a single copy of a mesh and an array of positions to the GPU. Then in the shader, we grab the relevant position and use it to place and draw an instance of the mesh. Here’s what the drawing code looks like.
+```
+if (_drawBlocks)
+{
+    _blocksArgsBuffer.SetData(new[] {_voxelMesh.triangles.Length, _gridPointCount, 0, 0, 0});
+    _blocksMaterial.SetBuffer("_Positions", _voxelPointsBuffer);
+    Graphics.DrawMeshInstancedIndirect(_voxelMesh, 0, _blocksMaterial, _meshCollider.bounds, _blocksArgsBuffer);
+}
+```
+The `DrawMeshInstancedIndirect` API takes five arguments here:
+The mesh
+The submesh index (we won’t have submeshes, so 0 for us)
+A material
+The bounds
+An args buffer
+Let’s tackle them in order, starting with the voxel mesh.
+Generating a Voxel Mesh
+The plan is to create a small cube mesh that’s the size of one voxel, then draw as many instances of that mesh as we need. Alternatively, we could use a constant size cube and scale it, but I figure that creating a new mesh one time (or every time we change the voxel size) is cheaper than scaling every voxel every time we render. Realistically, the difference is probably negligible, but this is the choice I made.
+So, first thing’s first, we need to create the vertices. As you may know, a cube has eight unique vertices. However, if we want our cubes to have a nice flat look, we need to duplicate several vertices. Why is that? Because each vertex holds a single normal, but each vertex shares three different faces, each with its own normal. And so, if we reuse the same vertex across multiple faces, the normal will get averaged across the three faces. The result is that the lighting will be smooth across the sharp corners of the cube. To illustrate, here’s what that looks like in Blender.
+Smoothed Normals
+Sharp Normals
+So what does this mean? It means we need four vertices per cube face, even if many of those vertices share a position. Let’s write a new function to generate our voxel mesh called GenerateVoxelMesh. Here’s the skeleton of the method.
+```
+Mesh GenerateVoxelMesh(float size)
+{
+	var mesh = new Mesh();
+	// TODO:  
+	//	1. Generate the vertices
+	//	2. Generate the triangle indices
+	//	3. Assign them and recalculate Bounds and Normals
+	return mesh;
+}
+```
+Now let’s generate those vertices.
+```
+// Generate the vertices
+Vector3[] vertices =
+{
+    //Front
+    new Vector3(0, 0, 0),       // Front Bottom Left    0
+    new Vector3(size, 0, 0),    // Front Bottom Right   1
+    new Vector3(size, size, 0), // Front Top Right      2
+    new Vector3(0, size, 0),    // Front Top Left       3
+
+    //Top
+    new Vector3(size, size, 0),     // Front Top Right  4
+    new Vector3(0, size, 0),        // Front Top Left   5
+    new Vector3(0, size, size),     // Back Top Left    6
+    new Vector3(size, size, size),  // Back Top Right   7
+
+    //Right
+    new Vector3(size, 0, 0),        // Front Bottom Right  8
+    new Vector3(size, size, 0),     // Front Top Right     9
+    new Vector3(size, size, size),  // Back Top Right      10
+    new Vector3(size, 0, size),     // Back Bottom Right   11
+
+    //Left
+    new Vector3(0, 0, 0),       // Front Bottom Left    12
+    new Vector3(0, size, 0),    // Front Top Left       13
+    new Vector3(0, size, size), // Back Top Left        14
+    new Vector3(0, 0, size),    // Back Bottom Left     15
+
+    //Back
+    new Vector3(0, size, size),     // Back Top Left     16
+    new Vector3(size, size, size),  // Back Top Right    17
+    new Vector3(size, 0, size),     // Back Bottom Right 18
+    new Vector3(0, 0, size),        // Back Bottom Left  19
+
+    //Bottom
+    new Vector3(0, 0, 0),       // Front Bottom Left   20
+    new Vector3(size, 0, 0),    // Front Bottom Right  21
+    new Vector3(size, 0, size), // Back Bottom Right   22
+    new Vector3(0, 0, size)     // Back Bottom Left    23
+};
+```
+Each group of four vertices is a single face of the cube, and the origin of the cube is at the front-bottom-left vertex. It’s worth mentioning again that the width and height of a face is the size of one voxel so that we don’t have to perform any scaling.
+The next thing we need to do is define the triangles. The triangles array defines the indices of the vertices to use in clockwise order. The renderer will grab three indices from the triangles array, then use those indices to obtain three vertices from the vertex array, then draw that triangle. Here’s the triangles array definition.
+```
+//Generate the triangle indices
+int[] triangles =
+{
+    //Front
+    0, 2, 1,
+    0, 3, 2,
+
+    // Top
+    4, 5, 6,
+    4, 6, 7,
+
+    // Right
+    8, 9, 10,
+    8, 10, 11,
+
+    // Left
+    12, 15, 14,
+    12, 14, 13,
+
+    // Back
+    17, 16, 19,
+    17, 19, 18,
+
+    // Bottom
+    20, 22, 23,
+    20, 21, 22
+};
+```
+Every three indices define a single triangle, so every six defines a face.
+Finally, we set our vertices and triangles and recalculate the bounds and face normals.
+```
+//Assign them and recalculate Bounds and Normals
+mesh.SetVertices(vertices);
+mesh.SetTriangles(triangles, 0);
+mesh.RecalculateBounds();
+mesh.RecalculateNormals();
+```
+That concludes the GenerateVoxelMesh function. Next, we have to create the material. It would be nice to use a standard material, but we need to write a shader to work with our custom voxel points data.
+Surface Shader with Custom Instancing Support
+Let’s use a surface shader to help reduce the boilerplate code. That way, I can focus on explaining the essential parts. Here’s a basic surface shader for a starting point.
+```
+Shader "Custom/Basic" {
+    Properties {
+        _Color ("Color", Color) = (1,1,1,1)
+    }
+    SubShader {
+        Tags { "RenderType"="Opaque" }
+        LOD 200
+        
+        CGPROGRAM
+        #pragma surface surf Standard fullforwardshadows addshadow
+
+        // Use shader model 4.5 target to get compute shader support
+        #pragma target 4.5
+        
+        struct Input { fixed4 color : COLOR; };
+
+        fixed4 _Color;
+
+        void surf (Input IN, inout SurfaceOutputStandard o) {
+            o.Albedo = _Color.rgb;
+        }
+        ENDCG
+    }
+    FallBack Off
+}
+```
+Let’s start by adding our buffer of positions. Like in our Compute Shader, we’ll add a StructuredBuffer<float4> to hold the position of each voxel.
+```
+#ifdef UNITY_PROCEDURAL_INSTANCING_ENABLED
+StructuredBuffer<float4> _Positions;
+#endif
+```
+We wrap it in a UNITY_PROCEDURAL_INSTANCING_ENABLED block, so it’s only available if we’re using GPU Instancing. Realistically, this shader won’t work at all if we aren’t, but we have to do it regardless. The next step is to use this buffer. If you recall, the vertex positions are relative to the bottom-front-left point of their respective voxel. So, we’ll create a translation matrix that moves each vertex from this voxel local-space to world-space. Let’s write a vertex function to position the vertices.
+```
+void vert(inout appdata_full v, out Input data)
+{
+    UNITY_INITIALIZE_OUTPUT(Input, data);
+
+    #ifdef UNITY_PROCEDURAL_INSTANCING_ENABLED
+    v.vertex = mul(_Matrix, v.vertex);
+    #endif
+}
+```
+You’ll notice we wrapped the multiplication in another UNITY_PROCEDURAL_INSTANCING_ENABLED block. That’s because if we don’t have GPU instancing, we don’t have our positions buffer, so we won’t be able to position our vertices. Also, you may wonder where _Matrix came from. When we use DrawMeshInstancedIndirect we can specify a setup function to initialize per-instance data. This is where we generate _Matrix, which is the translation matrix mentioned above. Here’s what that looks like.
+```
+void setup()
+{
+    #ifdef UNITY_PROCEDURAL_INSTANCING_ENABLED
+    float4 position = _Positions[unity_InstanceID];
+    
+    _Matrix = float4x4(
+        1, 0, 0, position.x,
+        0, 1, 0, position.y,
+        0, 0, 1, position.z,
+        0, 0, 0, 1
+    );
+    #endif
+}
+```
+In this function, we first get the voxel position from our _Positions array. By the way, unity_InstanceID is automatically created by the renderer; it represents the current instance index. Then we use the position to generate a standard translation matrix. If you don’t know, a translation matrix is a matrix that will translate a vertex when the two are multiplied together. For this to all work, we still have to specify our vertex function and setup functions. We do this by modifying our #pragma statements.
+```
+#pragma surface surf Standard vertex:vert fullforwardshadows addshadow
+#pragma instancing_options procedural:setup
+```
+Add vertex:vert to the existing surface pragma to specify that we’re using a custom vertex function called vert. Then add #pragma instancing_options procedural:setup to designate that we have a per-instance function called setup. Let’s also declare _Matrix in our instance variables.
+```
+#ifdef UNITY_PROCEDURAL_INSTANCING_ENABLED
+StructuredBuffer<float4> _Positions;
+float4x4 _Matrix;
+#endif
+```
+At this point, if you drew the voxels, you’d end up with a big solid block like this:
+That’s because our _Positions array holds the position of every single voxel, whether they’re solid or not. If you recall, we marked our solid voxels by setting their w component to 1. So let’s clip all the other voxels.
+Clipping the empty voxels
+To clip empty voxels we can use the clip() function inside our surf function. This function takes a float argument, and if it’s less than 0, it’ll discard the fragment. Let’s set up a _Clip variable and initialize it in our setup() function.
+```
+// ...
+half _Clip;
+void setup()
+{
+	#ifdef UNITY_PROCEDURAL_INSTANCING_ENABLED
+	float4 position = _Positions[unity_InstanceID];
+
+	_Matrix = float4x4(
+    	    1, 0, 0, position.x,
+	    0, 1, 0, position.y,
+	    0, 0, 1, position.z,
+	    0, 0, 0, 1
+	);
+	_Clip = -1.0 + position.w;
+	#endif
+}
+// ...
+```
+Then we just call clip() in the surf function.
+```
+void surf(Input IN, inout SurfaceOutputStandard o)
+{
+    clip(_Clip);
+    o.Albedo = _Color.rgb;
+}
+```
+As a result, we can render a proper voxelized version of our mesh.
+Wrapping Up
+Let’s revisit the first block of code.
+```
+if (_drawBlocks)
+{
+    _blocksArgsBuffer.SetData(new[] {_voxelMesh.triangles.Length, _gridPointCount, 0, 0, 0});
+    _blocksMaterial.SetBuffer("_Positions", _voxelPointsBuffer);
+    Graphics.DrawMeshInstancedIndirect(_voxelMesh, 0, _blocksMaterial, _meshCollider.bounds, _blocksArgsBuffer);
+}
+```
+The final aspect to consider is the args buffer. In case you forgot, the args buffer is a buffer that holds five arguments:
+the vertices count (per instance)
+the instance count
+the starting index of the vertices
+the starting index of the indices
+some reserved value that’s always 0
+So in our case, we feed it the number of vertices in our mesh, the number of voxels we have, and the rest of the arguments are 0. By the way, I haven’t mentioned it yet, but this block of code goes inside the update loop. Here’s my entire Update method.
+```
+void Update()
+{
+    VoxelizeMeshWithGPU();
+
+    if (_drawPointGrid)
+    {
+        _gridPointMaterial.SetMatrix(LocalToWorldMatrix, transform.localToWorldMatrix);
+        _gridPointMaterial.SetVector(BoundsMin, new Vector4(_boundsMin.x, _boundsMin.y, _boundsMin.z, 0.0f));
+        _gridPointMaterial.SetBuffer(VoxelGridPoints, _voxelPointsBuffer);
+        _pointsArgsBuffer.SetData(new[] {1, _gridPointCount, 0, 0, 0});
+        Graphics.DrawProceduralIndirect(_gridPointMaterial, _meshCollider.bounds, MeshTopology.Points,
+            _pointsArgsBuffer);
+    }
+
+    if (_drawBlocks)
+    {
+        _blocksArgsBuffer.SetData(new[] {_voxelMesh.triangles.Length, _gridPointCount, 0, 0, 0});
+        _blocksMaterial.SetBuffer("_Positions", _voxelPointsBuffer);
+        Graphics.DrawMeshInstancedIndirect(_voxelMesh, 0, _blocksMaterial, _meshCollider.bounds, _blocksArgsBuffer);
+    }
+}
+```
+And the GenerateVoxelMesh function is used inside the VoxelizeMeshWithGPU method whenever the voxel size changes.
+```
+void VoxelizeMeshWithGPU()
+{
+    Profiler.BeginSample("Voxelize Mesh (GPU)");
+
+    Bounds bounds = _meshCollider.bounds;
+    _boundsMin = transform.InverseTransformPoint(bounds.min);
+
+    Vector3 voxelCount = bounds.extents / _halfSize;
+    int xGridSize = Mathf.CeilToInt(voxelCount.x);
+    int yGridSize = Mathf.CeilToInt(voxelCount.y);
+    int zGridSize = Mathf.CeilToInt(voxelCount.z);
+
+    bool resizeVoxelPointsBuffer = false;
+    if (_gridPoints == null || _gridPoints.Length != xGridSize * yGridSize * zGridSize || _voxelPointsBuffer == null)
+    {
+        _gridPoints = new Vector4[xGridSize * yGridSize * zGridSize];
+        resizeVoxelPointsBuffer = true;
+    }
+
+    if (resizeVoxelPointsBuffer || _voxelPointsBuffer == null || !_voxelPointsBuffer.IsValid())
+    {
+        _voxelPointsBuffer?.Dispose();
+        _voxelPointsBuffer = new ComputeBuffer(xGridSize * yGridSize * zGridSize, 4 * sizeof(float));
+    }
+
+
+    if (resizeVoxelPointsBuffer)
+    {
+        _voxelPointsBuffer.SetData(_gridPoints);
+
+        _voxelMesh = GenerateVoxelMesh(_halfSize * 2.0f);
+    }
+
+    if (_meshVerticesBuffer == null || !_meshVerticesBuffer.IsValid())
+    {
+        _meshVerticesBuffer?.Dispose();
+
+        var sharedMesh = _meshFilter.sharedMesh;
+        _meshVerticesBuffer = new ComputeBuffer(sharedMesh.vertexCount, 3 * sizeof(float));
+        _meshVerticesBuffer.SetData(sharedMesh.vertices);
+    }
+
+    if (_meshTrianglesBuffer == null || !_meshTrianglesBuffer.IsValid())
+    {
+        _meshTrianglesBuffer?.Dispose();
+
+        var sharedMesh = _meshFilter.sharedMesh;
+            _meshTrianglesBuffer = new ComputeBuffer(sharedMesh.triangles.Length, sizeof(int));
+        _meshTrianglesBuffer.SetData(sharedMesh.triangles);
+    }
+
+    var voxelizeKernel = _voxelizeComputeShader.FindKernel("VoxelizeMesh");
+    _voxelizeComputeShader.SetInt("_GridWidth", xGridSize);
+    _voxelizeComputeShader.SetInt("_GridHeight", yGridSize);
+    _voxelizeComputeShader.SetInt("_GridDepth", zGridSize);
+
+    _voxelizeComputeShader.SetFloat("_CellHalfSize", _halfSize);
+
+    _voxelizeComputeShader.SetBuffer(voxelizeKernel, VoxelGridPoints, _voxelPointsBuffer);
+    _voxelizeComputeShader.SetBuffer(voxelizeKernel, "_MeshVertices", _meshVerticesBuffer);
+    _voxelizeComputeShader.SetBuffer(voxelizeKernel, "_MeshTriangleIndices", _meshTrianglesBuffer);
+    _voxelizeComputeShader.SetInt("_TriangleCount", _meshFilter.sharedMesh.triangles.Length);
+
+    _voxelizeComputeShader.SetVector(BoundsMin, _boundsMin);
+
+    _voxelizeComputeShader.GetKernelThreadGroupSizes(voxelizeKernel, out uint xGroupSize, out uint yGroupSize, out uint zGroupSize);
+
+    _voxelizeComputeShader.Dispatch(voxelizeKernel,
+        Mathf.CeilToInt(xGridSize / (float) xGroupSize),
+        Mathf.CeilToInt(yGridSize / (float) yGroupSize),
+        Mathf.CeilToInt(zGridSize / (float) zGroupSize));
+    _gridPointCount = _voxelPointsBuffer.count;
+    _voxelPointsBuffer.GetData(_gridPoints);
+
+    Profiler.EndSample();
+}
+```
+Despite posting the code here, I recommend reading it in the Github project linked at the end.
+That wraps up this post on rendering our voxels. At this point, you may notice that the inside of the mesh is empty. That’s because our voxelizer works by checking triangle/voxel intersection, and there are no triangles inside the mesh. We’ll tackle that in a future post.
+Explore the complete project here on GitHub. If you like my work, join my mailing list to be notified when the next part is released.
+« GPU Mesh Voxelizer Part 2: Triangle / Voxel intersection
+GPU Mesh Voxelizer Part 4: Mesh Translation and Rotation »
+bronson
+Leave A Comment Cancel reply
+Δ

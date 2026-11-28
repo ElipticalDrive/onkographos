@@ -1,0 +1,468 @@
+--- v005.md
++++ v006.md
+@@ -3,190 +3,273 @@
+ 
+ ## Overview
+-Sparse Ray-Octree Intersection (DECIDE) is a GPU-based algorithm designed to find the first intersection of a ray with a sparse voxel octree structure, returning the hit position, normal, and node index [S2, unofficial]. It solves the problem of efficiently traversing hierarchical voxel data for rendering or editing by handling traversal, descent, and backtracking using an explicit stack [S2, unofficial]. Unlike standard recursive implementations, DECIDE uses an iterative approach with bitwise child-slot permutation and t-span calculations, making it suitable for high-performance parallel execution on GPUs [S2, unofficial][S3, unofficial].
++Sparse Ray-Octree Intersection (DECIDE) is a GPU-based algorithm for finding the first intersection of a ray with a sparse solid voxel octree, returning the hit position, normal, and node index [S2, unofficial][S3, unofficial]. It solves the problem of efficiently traversing hierarchical voxel structures to determine ray-volume intersections for rendering or collision detection. It sets itself apart from its siblings by using a fixed-size stack for traversal and descent, handling backtracking via explicit stack pops, and utilizing a specific bit-manipulation-based child selection and t-span update mechanism [S2, unofficial][S3, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Ray origin ($O$), ray direction ($D$), octree root node, maximum depth ($s_{max}$), Level of Detail (LOD) multiplier ($lod$), initial scale ($scale\_exp2$), half-scale ($half\_scale\_exp2$), transformation coefficients ($t_{coef}$, $t_{bias}$), and octant mask ($octant\_mask$) [S2, unofficial].
+-*   **Output:** Hit position ($P$), hit normal ($N$), parent node index, child index, scale, position, and t-value ($t_{min}$) [S2, unofficial]. Returns false if no intersection is found within the octree bounds [S2, unofficial].
++*   **Input:** Ray origin $\mathbf{o}$, ray direction $\mathbf{d}$ (normalized), octree root node index (typically 0), octree resolution, and a traversal stack.
++*   **Output:** Hit position $\mathbf{p}$, hit normal $\mathbf{n}$, hit distance $t_{min}$, and the index of the node/voxel hit. If no intersection is found, an invalid hit is returned.
+ 
+ **Data Structures:**
+-*   **Stack:** An array of `uvec2` entries, where each entry stores a parent node index and a float-encoded $t_{max}$ value [S2, unofficial].
+-*   **Child Descriptor:** A 32-bit integer encoding the presence of children and their indices; bits 0-6 indicate active children, bit 7 indicates if the node has children (non-leaf), and bits 17+ may indicate a far pointer offset [S2, unofficial].
+-*   **Octant Mask:** A bitmask used to permute child slot indices based on coordinate system mirroring [S2, unofficial].
++*   **TraceContext:** A struct used for the traversal stack, aligned to 16 bytes. Fields:
++    *   `o`: `glm::vec3` (origin of the node in world/object space).
++    *   `r`: `float` (radius or half-extent of the node).
++    *   `index`: `uint32_t` (node index in the octree array).
++    *   `t`: `float` (intersection distance of the node's bounding box).
++*   **Child Descriptor Masks:**
++    *   `_node_m`: A constant array of 8 `uint32_t` masks corresponding to octree child indices 0-7. Bitmasks: $m_{000}=0b00000001u$, $m_{001}=0b00000010u$, $m_{011}=0b00000100u$, $m_{010}=0b00001000u$, $m_{110}=0b00010000u$, $m_{111}=0b00100000u$, $m_{101}=0b01000000u$, $m_{100}=0b10000000u$ [S3, unofficial].
++    *   `_node_d`: A constant array of 8 `float3` vectors representing the offset direction for each octree child. Indices 0-7 map to binary coordinates $(x,y,z)$. Order: $d_{000}, d_{001}, d_{011}, d_{010}, d_{110}, d_{111}, d_{101}, d_{100}$ [S3, unofficial].
++*   **Stack:** A fixed-size array of `TraceContext` structs. Maximum depth is typically 32 [S3, unofficial].
+ 
+ **Algorithm Steps:**
+ 
+ 1.  **Initialization:**
+-    *   Initialize $t_{min} = -\infty$, $t_{max} = \infty$ [S3, unofficial].
+-    *   Calculate the corner position in t-space: $t_{corner} = pos \times t_{coef} - t_{bias}$ [S2, unofficial].
+-    *   Find the maximum t-value at the corner: $t_{c\_max} = \min(\min(t_{corner}.x, t_{corner}.y), t_{corner}.z)$ [S2, unofficial].
+-    *   Initialize stack pointer $scale = s_{max} - 1$, $h = 0.0$ [S2, unofficial].
+-    *   Set $child\_descriptor = 0u$ [S2, unofficial].
+-
+-2.  **Ray-Box Intersection Check:**
+-    *   Calculate node bounding box $(boxMin, boxMax)$ [S3, unofficial].
+-    *   Check if the ray intersects the box. If no intersection, return false [S3, unofficial].
+-
+-3.  **Traversal Loop:**
+-    *   **Termination Check:** If $ubo.lod \times t_{c\_max} \ge scale\_exp2$, break the loop [S2, unofficial].
+-    *   **Hit Detection:** If $(depth \ge currentDepth \mid\mid node \rightarrow isLeaf)$ and $node \rightarrow isActive$, a hit is found [S3, unofficial]. Compute hit position: $hitPosition = rayOrigin + rayDir \times t_{min}$ [S3, unofficial]. Compute hit normal based on the component of $centerToHit = hitPosition - node \rightarrow position$ with the maximum absolute value relative to half-size [S3, unofficial]. Set $hitAdd = !node \rightarrow isActive$ [S3, unofficial]. Return result [S2, unofficial].
+-    *   **Child Descriptor Update:** Permute child slot indices based on mirroring: $child\_shift = idx \oplus octant\_mask$ [S2, unofficial]. Shift child descriptor: $child\_masks = child\_descriptor \ll child\_shift$ [S2, unofficial].
+-    *   **Voxel Validity Check:** If $(child\_masks \& 0x8000u) \neq 0u$ and $t_{min} \le t_{max}$, the voxel is valid [S2, unofficial].
+-    *   **Descend to Child:**
+-        *   Intersect active t-span with the cube: $t_{v\_max} = \min(t_{max}, t_{c\_max})$ [S2, unofficial].
+-        *   Calculate center: $t_{center} = half\_scale\_exp2 \times t_{coef} + t_{corner}$ [S2, unofficial].
+-        *   Select child voxel entered first by checking $t_{center}$ against $t_{min}$ for each axis, updating $idx$ and $pos$ [S2, unofficial].
+-        *   If resulting t-span is non-empty ($t_{min} \le t_{v\_max}$) and non-leaf mask bit is set ($(child\_masks \& 0x0080u) \neq 0u$), descend [S2, unofficial].
+-    *   **Stack Management (Push):**
+-        *   If $t_{c\_max} < h$, push current parent to stack: $stack[scale] = uvec2(parent, floatBitsToUint(t_{max}))$ [S2, unofficial]. Update $h = t_{c\_max}$ [S2, unofficial].
+-        *   Prevent same parent from being stored again: $h = 0.0$ [S2, unofficial]. Invalidate cached child descriptor: $child\_descriptor = 0u$ [S2, unofficial].
+-    *   **Update State:**
+-        *   Update active t-span: $t_{max} = t_{v\_max}$ [S2, unofficial].
+-        *   Decrement scale: $scale--$ [S2, unofficial].
+-        *   Update $scale\_exp2 = half\_scale\_exp2$ [S2, unofficial].
+-    *   **Advance Step:**
+-        *   Step along the ray by checking $t_{corner}$ against $t_{c\_max}$ [S2, unofficial]. Update $pos$ and $step\_mask$: if $t_{corner}.x \le t_{c\_max}$, $step\_mask \oplus= 1, pos.x -= scale\_exp2$ [S2, unofficial].
+-        *   Update active t-span: $t_{min} = t_{c\_max}$ [S2, unofficial].
+-        *   Flip bits of child slot index: $idx \oplus= step\_mask$ [S2, unofficial].
+-    *   **Pop Step:**
+-        *   If bit flips disagree with ray direction ($(idx \& step\_mask) \neq 0$), find highest differing bit between positions to determine new $scale$ [S2, unofficial].
+-        *   Restore parent voxel from stack: $stackEntry = stack[scale]$ [S2, unofficial]. $parent = stackEntry.x$, $t_{max} = uintBitsToFloat(stackEntry.y)$ [S2, unofficial].
+-
+-4.  **Miss Handling:**
+-    *   If $scale \ge s_{max}$, indicate miss if outside octree [S2, unofficial].
++    *   Initialize `closest.t` to `infinity` and `closest.valid` to `false` [S3, unofficial].
++    *   If the root node is empty, return an invalid hit [S3, unofficial].
++    *   Push the root node to the stack using `add_node(0, vec3(0), resolution)` [S3, unofficial].
++    *   Inside `add_node`, intersect the ray with the node's bounding box using `_intersect_box_akari`. If the hit is valid and $t < closest.t$, proceed [S3, unofficial].
++
++2.  **Traversal Loop:**
++    *   Loop while the stack is not empty [S3, unofficial]:
++        *   Pop the top context from the stack: `ctx = stack.pop()` [S3, unofficial].
++        *   **Early Culling:** If `ctx.t >= closest.t`, continue to the next iteration (prune this branch) [S3, unofficial].
++        *   **Node Processing:**
++            *   If the node is full (`node.full()`), update `closest = hit` and return [S3, unofficial].
++            *   If the node is a leaf (`r == 2.0f`), iterate over its 8 children. For each child $i$ where the child mask bit is set, intersect the child box at $\mathbf{o} + \mathbf{d}[i]$ with radius $1.0f$. If the hit is valid and $t < closest.t$, update `closest` [S3, unofficial].
++            *   If the node is an inner node, push the context `{o, r, index, hit.t}` to the stack [S3, unofficial].
++
++3.  **Recursive/Iterative Descent (add_node implementation):**
++    *   Calculate the node's bounding box $(boxMin, boxMax)$ and check ray-box intersection. If no intersection, return false [S3, unofficial].
++    *   If the node is not at max depth and is not a leaf, iterate through its 8 children and recursively check intersection [S3, unofficial].
++    *   For each child, calculate the child origin as `ctx.o + direction * half_r` and half radius as `half_r` [S3, unofficial].
++    *   Call `add_node` recursively for the child with index `index + child_offset + i` [S3, unofficial].
++
++4.  **Hit Computation:**
++    *   Compute hit position: $\mathbf{hitPosition} = \mathbf{rayOrigin} + \mathbf{rayDir} \times t_{min}$ [S3, unofficial].
++    *   Compute hit normal:
++        *   $\mathbf{centerToHit} = \mathbf{hitPosition} - \mathbf{node->position}$ [S3, unofficial].
++        *   $\mathbf{maxComp} = \max(|\frac{centerToHit.x}{halfSize.x}|, \max(|\frac{centerToHit.y}{halfSize.y}|, |\frac{centerToHit.z}{halfSize.z}|))$ [S3, unofficial].
++        *   Determine normal based on which component equals `maxComp` [S3, unofficial].
++    *   Set `hitAdd = !node->isActive` (indicates if a new voxel should be added next to the hit) [S3, unofficial].
+ 
+ **Pseudocode:**
+ 
+ ```python
++import math
+ import struct
+ 
+-def float_to_uint(f):
+-    return struct.unpack('I', struct.pack('f', f))[0]
+-
+-def uint_to_float(u):
+-    return struct.unpack('f', struct.pack('I', u))[0]
+-
+-def cast_ray(ray_origin, ray_dir, octree_root, s_max, lod, scale_exp2, half_scale_exp2, octant_mask):
+-    # Precompute transformation coefficients
+-    t_coef = 1.0 / ray_dir
+-    t_bias = -ray_origin / ray_dir
+-    
+-    # Initialize grid position and child index
+-    pos = [ray_origin[i] / scale_exp2 for i in range(3)]
+-    idx = int(pos[0] & 1) | (int(pos[1] & 1) << 1) | (int(pos[2] & 1) << 2)
+-    
+-    t_min = -float('inf')
+-    t_max = float('inf')
+-    scale = s_max - 1
+-    h = 0.0
+-    child_descriptor = 0
+-    parent = octree_root
+-    step_mask = 0
+-    stack = [None] * s_max
+-    
+-    while True:
+-        # Calculate corner and max t
+-        t_corner = [pos[i] * t_coef[i] - t_bias[i] for i in range(3)]
+-        tc_max = min(t_corner)
++# Constants
++MAX_STACK_SIZE = 32
++INF = float('inf')
++
++# Node masks and directions as per [S3, unofficial]
++NODE_M = [0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80]
++NODE_D = [
++    (0.0, 0.0, 0.0), (0.0, 0.0, 1.0), (0.0, 1.0, 1.0), (0.0, 1.0, 0.0),
++    (1.0, 1.0, 0.0), (1.0, 1.0, 1.0), (1.0, 0.0, 1.0), (1.0, 0.0, 0.0)
++]
++
++class TraceContext:
++    def __init__(self, o, r, index, t):
++        self.o = o  # vec3
++        self.r = r  # float
++        self.index = index  # uint32
++        self.t = t  # float
++
++class Hit:
++    def __init__(self):
++        self.t = INF
++        self.valid = False
++        self.position = (0.0, 0.0, 0.0)
++        self.normal = (0.0, 0.0, 0.0)
++        self.node_index = 0
++
++def intersect_box_akari(ray_o, ray_d, box_min, box_max):
++    """
++    Intersect ray with AABB. Returns t_min, t_max if hit, else None.
++    Simplified implementation for demonstration.
++    """
++    t_min = -INF
++    t_max = INF
++    
++    for i in range(3):
++        if ray_d[i] == 0:
++            if ray_o[i] < box_min[i] or ray_o[i] > box_max[i]:
++                return None
++        else:
++            t1 = (box_min[i] - ray_o[i]) / ray_d[i]
++            t2 = (box_max[i] - ray_o[i]) / ray_d[i]
++            t_min = max(t_min, min(t1, t2))
++            t_max = min(t_max, max(t1, t2))
++            
++    if t_min > t_max:
++        return None
++    return (t_min, t_max)
++
++def get_node_bounds(node_index, resolution):
++    """
++    Get bounding box for a node index in a solid voxel octree.
++    Simplified for demonstration.
++    """
++    # Assuming a simple mapping for demonstration
++    # In reality, this depends on the octree structure and node sizes
++    size = resolution
++    x = (node_index % 2) * size / 2
++    y = ((node_index // 2) % 2) * size / 2
++    z = ((node_index // 4) % 2) * size / 2
++    
++    box_min = (x, y, z)
++    box_max = (x + size, y + size, z + size)
++    return box_min, box_max
++
++def sparse_ray_octree_intersection(ray_o, ray_d, octree, resolution):
++    stack = []
++    closest = Hit()
++    
++    # Check root node
++    root_index = 0
++    root_box_min, root_box_max = get_node_bounds(root_index, resolution)
++    hit_result = intersect_box_akari(ray_o, ray_d, root_box_min, root_box_max)
++    
++    if hit_result is None:
++        return closest
++    
++    t_min, t_max = hit_result
++    if t_min >= closest.t:
++        return closest
+         
+-        # Termination criteria
+-        if lod * tc_max >= scale_exp2:
++    # Push root to stack
++    stack.append(TraceContext(ray_o, resolution, root_index, t_min))
++    
++    while stack:
++        if len(stack) >= MAX_STACK_SIZE:
++            print("Warning: Stack overflow")
+             break
+             
+-        # Fetch child descriptor for current node
+-        child_descriptor = octree_root.get_child_descriptor(idx)
++        ctx = stack.pop()
+         
+-        # Permute and check validity
+-        child_shift = idx ^ octant_mask
+-        child_masks = child_descriptor << child_shift
++        # Early culling
++        if ctx.t >= closest.t:
++            continue
++            
++        # Get node bounds
++        node_box_min, node_box_max = get_node_bounds(ctx.index, resolution)
+         
+-        if (child_masks & 0x8000) != 0 and t_min <= t_max:
+-            tv_max = min(t_max, tc_max)
+-            t_center = [half_scale_exp2 * t_coef[i] + t_corner[i] for i in range(3)]
+-            
+-            # Select child entered first
+-            if t_center[0] > t_min:
+-                idx ^= 1
+-                pos[0] += scale_exp2
+-            if t_center[1] > t_min:
+-                idx ^= 2
+-                pos[1] += scale_exp2
+-            if t_center[2] > t_min:
+-                idx ^= 4
+-                pos[2] += scale_exp2
+-                
+-            # Descend if valid and has children
+-            if t_min <= tv_max and (child_masks & 0x0080) != 0:
+-                # Push to stack if needed
+-                if tc_max < h:
+-                    stack[scale] = (parent, float_to_uint(t_max))
+-                    h = tc_max
+-                    h = 0.0
+-                    child_descriptor = 0
++        # Re-intersect to get accurate t for this node (simplified)
++        # In practice, this might be passed from parent or calculated
++        hit_result = intersect_box_akari(ray_o, ray_d, node_box_min, node_box_max)
++        if hit_result is None:
++            continue
++            
++        t_min, t_max = hit_result
++        if t_min >= closest.t:
++            continue
++            
++        # Check if node is full or leaf
++        # Assuming octree.has_node and octree.is_full are available
++        if octree.is_full(ctx.index):
++            closest.t = t_min
++            closest.valid = True
++            closest.position = (ray_o[0] + ray_d[0] * t_min, 
++                                ray_o[1] + ray_d[1] * t_min, 
++                                ray_o[2] + ray_d[2] * t_min)
++            # Compute normal
++            center = ((node_box_min[0] + node_box_max[0])/2, 
++                      (node_box_min[1] + node_box_max[1])/2, 
++                      (node_box_min[2] + node_box_max[2])/2)
++            half_size = (node_box_max[0] - node_box_min[0])/2
++            center_to_hit = (closest.position[0] - center[0], 
++                             closest.position[1] - center[1], 
++                             closest.position[2] - center[2])
++            max_comp = max(abs(center_to_hit[0]/half_size), 
++                           abs(center_to_hit[1]/half_size), 
++                           abs(center_to_hit[2]/half_size))
++            
++            if max_comp == abs(center_to_hit[0]/half_size):
++                closest.normal = (1.0 if center_to_hit[0] > 0 else -1.0, 0.0, 0.0)
++            elif max_comp == abs(center_to_hit[1]/half_size):
++                closest.normal = (0.0, 1.0 if center_to_hit[1] > 0 else -1.0, 0.0)
++            else:
++                closest.normal = (0.0, 0.0, 1.0 if center_to_hit[2] > 0 else -1.0)
++            closest.node_index = ctx.index
++            return closest
++            
++        if ctx.r <= 1.0: # Leaf level
++            # Iterate 8 children
++            half_r = ctx.r / 2.0
++            for i in range(8):
++                if octree.has_child(ctx.index, i):
++                    child_offset = NODE_D[i]
++                    child_origin = (ctx.o[0] + child_offset[0] * half_r,
++                                    ctx.o[1] + child_offset[1] * half_r,
++                                    ctx.o[2] + child_offset[2] * half_r)
++                    child_index = octree.get_child_index(ctx.index, i)
+                     
+-                t_max = tv_max
+-                scale -= 1
+-                scale_exp2 = half_scale_exp2
+-                
+-                # Advance step
+-                if t_corner[0] <= tc_max:
+-                    step_mask ^= 1
+-                    pos[0] -= scale_exp2
+-                if t_corner[1] <= tc_max:
+-                    step_mask ^= 2
+-                    pos[1] -= scale_exp2
+-                if t_corner[2] <= tc_max:
+-                    step_mask ^= 4
+-                    pos[2] -= scale_exp2
++                    child_box_min, child_box_max = get_node_bounds(child_index, half_r)
++                    child_hit = intersect_box_akari(ray_o, ray_d, child_box_min, child_box_max)
+                     
+-                t_min = tc_max
+-                idx ^= step_mask
+-                
+-                # Pop if bit flips disagree
+-                if (idx & step_mask) != 0:
+-                    differing = max(abs(pos[0]), abs(pos[1]), abs(pos[2]))
+-                    scale = int.bit_length(int(differing)) - 1
+-                    stack_entry = stack[scale]
+-                    parent = stack_entry[0]
+-                    t_max = uint_to_float(stack_entry[1])
+-            else:
+-                # No valid child, backtrack
+-                if (idx & step_mask) != 0:
+-                    differing = max(abs(pos[0]), abs(pos[1]), abs(pos[2]))
+-                    scale = int.bit_length(int(differing)) - 1
+-                    stack_entry = stack[scale]
+-                    parent = stack_entry[0]
+-                    t_max = uint_to_float(stack_entry[1])
+-                else:
+-                    return False
++                    if child_hit is not None:
++                        ct_min, ct_max = child_hit
++                        if ct_min < closest.t:
++                            # Update closest if it's a solid voxel
++                            if octree.is_full(child_index):
++                                closest.t = ct_min
++                                closest.valid = True
++                                closest.position = (ray_o[0] + ray_d[0] * ct_min, 
++                                                    ray_o[1] + ray_d[1] * ct_min, 
++                                                    ray_o[2] + ray_d[2] * ct_min)
++                                center = ((child_box_min[0] + child_box_max[0])/2, 
++                                          (child_box_min[1] + child_box_max[1])/2, 
++                                          (child_box_min[2] + child_box_max[2])/2)
++                                half_child_size = half_r / 2.0
++                                center_to_hit = (closest.position[0] - center[0], 
++                                                 closest.position[1] - center[1], 
++                                                 closest.position[2] - center[2])
++                                max_comp = max(abs(center_to_hit[0]/half_child_size), 
++                                               abs(center_to_hit[1]/half_child_size), 
++                                               abs(center_to_hit[2]/half_child_size))
++                                
++                                if max_comp == abs(center_to_hit[0]/half_child_size):
++                                    closest.normal = (1.0 if center_to_hit[0] > 0 else -1.0, 0.0, 0.0)
++                                elif max_comp == abs(center_to_hit[1]/half_child_size):
++                                    closest.normal = (0.0, 1.0 if center_to_hit[1] > 0 else -1.0, 0.0)
++                                else:
++                                    closest.normal = (0.0, 0.0, 1.0 if center_to_hit[2] > 0 else -1.0)
++                                closest.node_index = child_index
++                                return closest
++                            else:
++                                # Push to stack
++                                stack.append(TraceContext(child_origin, half_r, child_index, ct_min))
+         else:
+-            # No valid child, backtrack
+-            if (idx & step_mask) != 0:
+-                differing = max(abs(pos[0]), abs(pos[1]), abs(pos[2]))
+-                scale = int.bit_length(int(differing)) - 1
+-                stack_entry = stack[scale]
+-                parent = stack_entry[0]
+-                t_max = uint_to_float(stack_entry[1])
+-            else:
+-                return False
+-                
+-        if scale >= s_max:
+-            return False
+-            
+-    # Compute hit point and normal
+-    hit_point = [ray_origin[i] + ray_dir[i] * t_min for i in range(3)]
+-    center_to_hit = [hit_point[i] - (pos[i] + scale_exp2 * 0.5) for i in range(3)]
+-    max_dir = max(abs(center_to_hit[i]) for i in range(3))
+-    axis_dir = [int(center_to_hit[i] / max_dir) for i in range(3)]
+-    
+-    return hit_point, axis_dir, parent, idx ^ octant_mask ^ 7, scale, pos, t_min
++            # Inner node, push children to stack
++            half_r = ctx.r / 2.0
++            for i in range(8):
++                if octree.has_child(ctx.index, i):
++                    child_offset = NODE_D[i]
++                    child_origin = (ctx.o[0] + child_offset[0] * half_r,
++                                    ctx.o[1] + child_offset[1] * half_r,
++                                    ctx.o[2] + child_offset[2] * half_r)
++                    child_index = octree.get_child_index(ctx.index, i)
++                    
++                    child_box_min, child_box_max = get_node_bounds(child_index, half_r)
++                    child_hit = intersect_box_akari(ray_o, ray_d, child_box_min, child_box_max)
++                    
++                    if child_hit is not None:
++                        ct_min, ct_max = child_hit
++                        if ct_min < closest.t:
++                            stack.append(TraceContext(child_origin, half_r, child_index, ct_min))
++                            
++    return closest
+ ```
+ 
+ **Parameters:**
++*   `stack_size`: The maximum depth of the traversal stack, set to 32. If exceeded, a warning is printed [S3, unofficial].
+ *   `ubo.lod`: Level of Detail multiplier used for termination criteria [S2, unofficial].
+ *   `ubo.frameWidth`: Width of the framebuffer, used for debug coordinates [S2, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Degenerate Input:** Empty octrees or rays with zero-length direction vectors should be checked before traversal [S3, unofficial].
++*   **Stack Overflow:** If the stack size (32) is exceeded during traversal, a warning is printed via `printf` [S3, unofficial].
++*   **Early Culling:** If the intersection distance `t` of a node is greater than or equal to the current `closest.t`, the node and its children are skipped [S3, unofficial].
++*   **Precision:** Floating-point precision issues may arise when calculating `t_min` and `t_max` for small nodes or rays nearly parallel to axes.
++*   **Empty Root:** If the root node is empty, the algorithm returns an invalid hit immediately [S3, unofficial].
+ 
+ ## Subtopics
+@@ -204,19 +287,19 @@
+ This method uses an octree to efficiently find the closest point to a ray origin among all points intersected by the ray, filtering by a maximum range.
+ 
+-### Leaf Consideration
+-Processes a leaf node by intersecting its AABB with the ray, creating a HitCandidate, and updating the best hit if the candidate is better [S5, unofficial].
+-*   **Step:** Intersect ray with bounds. If no intersection, return. Create HitCandidate. Set hit=true, leaf_id (from options.return_payload_indices ? octree.leaf_payload_indices()[leaf_id] : leaf_id), t=max(t_near, 0.0f), position=origin+direction*t, depth. If is_better_hit(candidate, best) is true, update best = candidate [S5, unofficial].
+-*   **Layout:** HitCandidate: Contains hit (bool), leaf_id (std::int32_t), t (float), position (glm::vec3), depth (std::int32_t) [S5, unofficial].
+-*   **Comparison:** is_better_hit prefers hits with smaller t. If t is equal (within kEpsilon), prefers smaller leaf_id [S5, unofficial].
++### [Leaf Consideration](5126-leaf-consideration.md)
++Leaf Consideration is the termination step in sparse ray-octree traversal where an intersected leaf node is processed to determine occlusion and record hit data. It distinguishes between pure voxel leaves and virtual leaves (intermediate nodes acting as leaves) to provide the precise intersection point and normal required for shading. It sets itself apart from sibling methods like Octree Voxel-Triangle Intersection by focusing on axis-aligned bounding box (AABB) intersection and hit recording rather than geometric primitive intersection or light gathering.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The algorithm traverses the octree depth, with each step involving constant-time bitwise operations and comparisons [S2, unofficial].
+-*   **Memory Complexity:** The stack size is proportional to the maximum depth of the octree [S2, unofficial].
+-*   **Performance:** The algorithm is designed for GPU execution, leveraging parallelism across threads [S2, unofficial]. Performance is influenced by the sparsity of the octree and the LOD parameter [S2, unofficial].
+-*   **Strengths:** Efficient handling of sparse data, explicit stack management allows for iterative traversal without recursion overhead, bitwise operations optimize child selection [S2, unofficial].
+-*   **Limitations:** Complexity of implementation due to bitwise manipulations and stack management [S2, unofficial].
++*   **Time Complexity:** $O(\log N)$ in the best case for sparse octrees, where $N$ is the number of voxels, as the traversal depth is logarithmic with respect to the resolution. In the worst case (dense octree or ray passing through many nodes), it can approach $O(N)$.
++*   **Memory Complexity:** $O(D)$, where $D$ is the maximum depth of the octree, due to the fixed-size stack. The stack size is typically limited to 32 [S3, unofficial].
++*   **Measured Performance:** Performance depends heavily on the sparsity of the octree and the coherence of the rays. GPU-based implementations benefit from parallel execution over threads [S2, unofficial].
++*   **Scaling:** Scales well with resolution due to the hierarchical nature of the octree. However, deep octrees may lead to stack overflow if the stack size is not increased [S3, unofficial].
++*   **Strengths:** Efficient for sparse scenes, reduces the number of nodes visited compared to uniform grid traversal, and provides precise intersection points and normals.
++*   **Limitations:** Requires a pre-built octree structure, and stack overflow can occur for very deep trees. Performance may degrade for highly dense or complex scenes.
++*   **When to Use:** Suitable for rendering or collision detection in scenes with sparse, hierarchical voxel data, especially on GPU architectures.
++*   **When Not to Use:** Not ideal for very dense scenes where the overhead of octree traversal outweighs the benefits, or when stack space is severely limited.
+ 
+ ## Background
+-The DECIDE algorithm is a GPU-based method for ray-octree intersection, as described in unofficial sources [S2, unofficial][S3, unofficial]. It is used in contexts requiring efficient ray casting against sparse voxel structures, such as volume rendering and 3D model editing [S3, unofficial]. The algorithm's iterative nature and use of explicit stacks make it suitable for hardware that does not support deep recursion or where stack size is limited [S2, unofficial].
++DECIDE was introduced as a GPU-based algorithm for ray-octree intersection [S2, unofficial][S3, unofficial]. It is part of the broader field of volume rendering and ray tracing, where efficient traversal of hierarchical acceleration structures is crucial. The algorithm builds on the principles of ray-node intersection logic, specifically focusing on sparse voxel octrees [Parent](22847-ray-node-intersection-logic.md).
+ 
+ ## Sources
+@@ -224,4 +307,3 @@
+ [S2] krre/origin, https://github.com/krre/origin, fetched 2026-10-26 (unofficial)
+ [S3] Mike-Leo-Smith/SolidVoxelization, https://github.com/Mike-Leo-Smith/SolidVoxelization, fetched 2026-10-27 (unofficial)
+-[S4] GitHub - saurlax/model_voxelizer: A 3D model voxelization tool that ..., https://github.com/saurlax/model_voxelizer, fetched 2026-10-30 (unofficial)
+-[S5] hectorpiteau/sparse-voxels, https://github.com/hectorpiteau/sparse-voxels, fetched 2026-10-24 (unofficial)+[S4] GitHub - saurlax/model_voxelizer: A 3D model voxelization tool that ..., https://github.com/saurlax/model_voxelizer, fetched 2026-10-30 (unofficial)

@@ -1,0 +1,184 @@
+--- v001.md
++++ v002.md
+@@ -7,99 +7,92 @@
+ 
+ ## How it works
+-**Inputs:** A scene represented as a Sparse Voxel Octree (SVO) generated from meshes (e.g., via `TreeGen`), camera parameters, and light definitions. The SVO is built with a typical depth of ~8 for quick generation, supporting up to 2048³ resolution [S1, unofficial].
++**Inputs:** A scene represented as a Sparse Voxel Octree (SVO) generated from meshes (e.g., via `TreeGen`), camera parameters, and light definitions [S1, unofficial]. The SVO is built with a typical depth of ~8 for quick generation, supporting up to 2048³ resolution [S1, unofficial].
+ 
+ **Outputs:** A rendered image written directly to an OpenGL texture [S1, unofficial].
+ 
+ **Data Structures:**
+-*   **Sparse Voxel Octree:** Recursive subdivision where empty space is never stored. Nodes are traversed using the Laine & Karras algorithm [S1, unofficial].
+-*   **Voxel Attachment:** Stored at leaf nodes (or hit points). It packs four fields into **12 bytes**:
+-    1.  Colour (3 bytes, likely RGB)
+-    2.  Normal (3 bytes, likely RGB or quantized vector)
+-    3.  Reflectivity (1 byte)
+-    4.  Index of Refraction (IOR) (5 bytes, likely fixed-point or quantized float) [S1, unofficial].
++*   **Sparse Voxel Octree:** Recursive subdivision where empty space is never stored [S1, unofficial]. Nodes are traversed using the Laine & Karras algorithm [S1, unofficial].
++*   **Voxel Attachment:** Stored at leaf nodes (or hit points) [S1, unofficial]. It packs four fields into **12 bytes**: Colour (3 bytes), Normal (3 bytes), Reflectivity (1 byte), and Index of Refraction (IOR) (5 bytes) [S1, unofficial].
+ 
+ **Algorithm Steps:**
+-1.  **Initialization:** Assign one CUDA thread per pixel [S1, unofficial].
+-2.  **Primary Ray Casting:** Cast the primary ray through the SVO using Laine & Karras traversal [S1, unofficial].
+-3.  **Hit Processing:** Upon hitting a voxel, retrieve the Voxel Attachment (colour, normal, reflectivity, IOR) [S1, unofficial].
+-4.  **Lighting Calculation:** Compute ambient, diffuse, and specular lighting based on the hit normal and material properties [S1, unofficial].
+-5.  **Shadow Rays:** For each light source, cast a shadow ray.
+-    *   **Attenuation:** Calculate point light attenuation using:
+-        $$ \text{attenuation} = \frac{1.0}{\text{light.constant\_att} + \text{light.linear\_att} \cdot d + \text{light.quadratic\_att} \cdot d^2} $$
+-        where $d$ is the light distance [S1, unofficial].
+-    *   **Spotlight Cone Check:** If the light is a spotlight, clamp the cosine of the angle between the light direction and the ray direction:
+-        $$ c = \max(0.0, \text{dot}(\text{light\_dir}, \text{normalize}(\text{light.direction}))) $$
+-        If $c < \cos(\text{light.cutoff})$, attenuation is 0. Otherwise, multiply attenuation by $c^{\text{light.exponent}}$ [S1, unofficial].
+-    *   **Self-Intersection Avoidance:** Offset the shadow ray origin to prevent self-intersection artifacts:
+-        $$ \text{origin} = \text{hit\_pos} + \text{direction} \cdot \sqrt{10} \cdot 2^{-\text{hit\_scale}} $$
+-        where $\text{hit\_scale}$ relates to the voxel size at the hit point [S1, unofficial].
+-6.  **Reflection (Optional):** If reflection is enabled, calculate the reflection vector:
+-    $$ \text{refl} = \text{norm} \cdot (2.0 \cdot \text{dot}(\text{dir}, \text{norm})) - \text{dir} $$
+-    The implementation limits recursive reflection bounces to zero (`MAX_REFLECTION_ITERATIONS = 0`) [S1, unofficial].
+-7.  **Heterogeneous Refraction:** If the voxel is see-through (IOR $\neq$ 1.0 or similar threshold):
+-    *   Bend the ray using Snell's law at the entry point.
+-    *   Step through the volume.
+-    *   At each voxel boundary, if the IOR changes, re-bend the ray using Snell's law with the new IOR [S1, unofficial].
+-8.  **Output:** Write the final color to the OpenGL texture [S1, unofficial].
++1. Convert the scene to a sparse voxel octree, ensuring empty space is never stored [S1, unofficial].
++2. Assign one CUDA thread per pixel [S1, unofficial].
++3. Cast the primary ray through the octree using the Laine & Karras traversal algorithm [S1, unofficial].
++4. On a hit, look up the voxel attachment containing colour, normal, reflectivity, and IOR [S1, unofficial].
++5. Calculate lighting using ambient, diffuse, and specular components based on the hit normal and material properties [S1, unofficial].
++6. Cast a shadow ray to each light source, applying attenuation and a spotlight cone check [S1, unofficial].
++7. If the voxel is see-through, bend the ray using Snell's law and step through the volume, re-bending at each voxel boundary with the new IOR [S1, unofficial].
++8. Write the final result directly to an OpenGL texture [S1, unofficial].
++
++**Formulas & Parameters:**
++*   Point light attenuation: $\text{attenuation} = \frac{1.0}{\text{light.constant\_att} + \text{light.linear\_att} \cdot \text{light\_distance} + \text{light.quadratic\_att} \cdot \text{light\_distance}^2}$ [S1, unofficial].
++*   Spotlight cone check: $\text{clampedCosine} = \max(0.0, \text{dot}(\text{light\_dir}, \text{normalize}(\text{light.direction})))$ [S1, unofficial]. If $\text{clampedCosine} < \cos(\text{light.cutoff})$, $\text{attenuation} = 0.0$; otherwise, $\text{attenuation} = \text{attenuation} \cdot \text{clampedCosine}^{\text{light.exponent}}$ [S1, unofficial].
++*   Shadow ray origin outset: $\text{origin} = \text{hit\_pos} + \text{direction} \cdot \sqrt{10} \cdot 2^{-\text{hit\_scale}}$ [S1, unofficial].
++*   Reflection vector: $\text{refl} = \text{norm} \cdot (2.0 \cdot \text{dot}(\text{dir}, \text{norm})) - \text{dir}$ [S1, unofficial].
++*   Parameters: $\text{MAX\_REFLECTION\_ITERATIONS} = 0$ (limits recursive reflection bounces to zero) [S1, unofficial]. Octree depth is typically ~8 [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def trace_ray(ray_origin, ray_direction, octree, lights, camera):
+-    # Step 1: Traverse SVO
+-    hit = traverse_svo_laine_karras(octree, ray_origin, ray_direction)
+-    
++import math
++
++def trace_pixel(ray_origin, ray_direction, octree, lights, camera):
++    hit = traverse_svo(octree, ray_origin, ray_direction)
+     if hit is None:
+-        return background_color
++        return [0.0, 0.0, 0.0]
+ 
+-    # Step 2: Retrieve Voxel Attachment (12 bytes)
+     colour, normal, reflectivity, ior = hit.voxel_attachment
+-    
+-    # Step 3: Lighting
+-    color = ambient_light
++    color = [0.0, 0.0, 0.0]
++
+     for light in lights:
+-        # Shadow Ray
+         light_dir = normalize(light.position - hit.position)
+-        distance = length(light.position - hit.position)
+-        
+-        # Self-intersection offset
+-        outset = sqrt(10.0) * exp2(-hit.scale)
+-        shadow_origin = hit.position + light_dir * outset
++        light_distance = length(light.position - hit.position)
++
++        outset = math.sqrt(10.0) * (2.0 ** (-hit.scale))
++        shadow_origin = [hit.position[i] + light_dir[i] * outset for i in range(3)]
+         shadow_ray = Ray(shadow_origin, light_dir)
+-        
++
+         if is_occluded(octree, shadow_ray):
+             continue
+-            
+-        # Attenuation
+-        att = 1.0 / (light.constant + light.linear * distance + light.quadratic * distance * distance)
+-        
+-        # Spotlight check
+-        if light.is_spotlight:
+-            cos_angle = max(0.0, dot(light.direction, light_dir))
+-            if cos_angle < cos(light.cutoff):
+-                att = 0.0
+-            else:
+-                att *= pow(cos_angle, light.exponent)
+-                
+-        color += att * light.color * (diffuse + specular)
+ 
+-    # Step 4: Reflection (Limited to 0 bounces in this impl)
+-    # If reflection were enabled:
+-    # refl_dir = reflect(ray_direction, normal)
+-    # color += reflectivity * trace_ray(hit.position, refl_dir, ...)
++        att = 1.0 / (light.constant_att + light.linear_att * light_distance + light.quadratic_att * light_distance * light_distance)
+ 
+-    # Step 5: Refraction
++        clamped_cosine = max(0.0, dot(light.direction, light_dir))
++        if clamped_cosine < math.cos(light.cutoff):
++            att = 0.0
++        else:
++            att *= clamped_cosine ** light.exponent
++
++        diffuse = max(0.0, dot(normal, light_dir))
++        view_dir = normalize(camera.position - hit.position)
++        half_dir = normalize([light_dir[i] + view_dir[i] for i in range(3)])
++        specular = pow(max(0.0, dot(normal, half_dir)), light.shininess)
++
++        color = [color[i] + att * light.color[i] * (diffuse + specular) for i in range(3)]
++
+     if ior != 1.0:
+         refracted_dir = refract(ray_direction, normal, 1.0 / ior)
+-        # Step through volume, re-bending at each voxel boundary
+-        color += trace_heterogeneous_volume(hit.position, refracted_dir, octree, ior)
++        vol_color = trace_heterogeneous_volume(hit.position, refracted_dir, octree, ior)
++        color = [color[i] + vol_color[i] for i in range(3)]
+ 
+     return color
+ 
++def traverse_svo(octree, origin, direction):
++    # Laine & Karras SVO traversal algorithm [G]
++    # Returns hit point, normal, scale, and voxel attachment or None
++    pass  # Standard traversal logic not fully detailed in sources [G]
++
++def is_occluded(octree, ray):
++    # Returns True if ray hits a non-empty voxel before reaching light [G]
++    pass  # Uses same traversal logic as traverse_svo [G]
++
++def refract(ray_direction, normal, eta):
++    cos_theta = dot(normalize(normal), -ray_direction)
++    r_out_perp = [eta * (ray_direction[i] + cos_theta * normal[i]) for i in range(3)]
++    r_out_parallel = [-math.sqrt(max(0.0, 1.0 - dot(r_out_perp, r_out_perp))) * normal[i] for i in range(3)]
++    return [r_out_perp[i] + r_out_parallel[i] for i in range(3)]
++
+ def trace_heterogeneous_volume(origin, direction, octree, current_ior):
+-    # Simplified step-through logic
+-    # In reality, this involves stepping voxel-by-voxor and checking IOR changes
+-    # Snell's law: n1 * sin(theta1) = n2 * sin(theta2)
+-    # Re-bend at each boundary where IOR changes
+-    pass
++    # Step through volume, re-bending at each voxel boundary with different IOR [S1, unofficial]
++    pass  # Core volume stepping logic not fully detailed in sources [G]
+ ```
+ 
+@@ -119,14 +112,11 @@
+ 
+ ## Operating characteristics
+-*   **Performance:** On an NVIDIA GTX 670 at 1024³ resolution:
+-    *   768x768: 85 fps (no effects), 65 fps (shadows), 59 fps (reflection), 32 fps (translucency) [S1, unofficial].
+-    *   1024x1024: 54 fps (no effects), 42 fps (shadows), 38 fps (reflection), 20 fps (translucency) [S1, unofficial].
+-    *   1920x1080: 26 fps (no effects), 19 fps (shadows), 17 fps (reflection), 8 fps (translucency) [S1, unofficial].
+-*   **Scaling:** Frame rate halves every time pixel count doubles past 1024x1024. Translucency performance drops to single digits at 1080p. Octree resolution scaling is efficient: each step up in resolution (8x voxels) costs only ~15% frame rate [S1, unofficial].
++*   **Performance:** On an NVIDIA GTX 670 at 1024³ resolution: 768x768 yields 85 fps (no effects), 65 fps (shadows), 59 fps (reflection), 32 fps (translucency) [S1, unofficial]. 1024x1024 yields 54 fps (no effects), 42 fps (shadows), 38 fps (reflection), 20 fps (translucency) [S1, unofficial]. 1920x1080 yields 26 fps (no effects), 19 fps (shadows), 17 fps (reflection), 8 fps (translucency) [S1, unofficial].
++*   **Scaling:** Frame rate halves every time pixel count doubles past 1024x1024 [S1, unofficial]. Translucency performance drops to single digits at 1080p [S1, unofficial]. Octree resolution scaling is efficient: each step up in resolution (8x voxels) costs only ~15% frame rate [S1, unofficial].
+ *   **Memory Usage:** 34 MB at 512³, 137 MB at 1024³, 544 MB at 2048³ [S1, unofficial].
+-*   **Limitations:** One thread per pixel causes warp divergence, making translucency expensive. Voxel cubes cause self-shadowing artifacts on smooth surfaces, requiring normal-aware ray casting which increases cost [S1, unofficial].
++*   **Limitations:** One thread per pixel causes warp divergence, making translucency expensive [S1, unofficial]. Voxel cubes cause self-shadowing artifacts on smooth surfaces, requiring normal-aware ray casting which increases cost [S1, unofficial].
+ 
+ ## Background
+-This method was developed as a BSc dissertation in Computer Games Programming at the University of Derby (2013-2014) by Catchouli [S1, unofficial]. It addresses the limitation of rasterization, which only handles surfaces, by enabling real-time GPU ray tracing for volumetric effects like clouds, smoke, and glass with internal structures. It builds on the efficient sparse voxel octree traversal algorithm by Laine and Karras (2010) [S1, unofficial].
++This method was developed as a BSc dissertation in Computer Games Programming at the University of Derby (2013-2014) by Catchouli [S1, unofficial]. It addresses the limitation of rasterization, which only handles surfaces, by enabling real-time GPU ray tracing for volumetric effects like clouds, smoke, and glass with internal structures [S1, unofficial]. It builds on the efficient sparse voxel octree traversal algorithm by Laine and Karras (2010) [S1, unofficial].
+ 
+ ## Sources

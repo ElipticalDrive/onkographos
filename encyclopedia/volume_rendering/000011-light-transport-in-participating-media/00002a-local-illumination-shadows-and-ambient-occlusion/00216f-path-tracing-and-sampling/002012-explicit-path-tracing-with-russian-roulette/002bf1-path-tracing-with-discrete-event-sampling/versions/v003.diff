@@ -1,0 +1,149 @@
+--- v002.md
++++ v003.md
+@@ -11,5 +11,5 @@
+ - Density grid $\sigma_t(\mathbf{x})$ (total extinction coefficient) [S1, unofficial].
+ - Optional temperature grid $T_{adim}(\mathbf{x})$ (normalized) [S1, unofficial].
+-- Parameters: `max_depth` (integer), `henyey_greenstein_g` (float, anisotropy), `le_scale` (float, emission scale), `temperature_scale` (float), `temperature_offset` (float), `infinite_light` (vector and multiplier) [S1, unofficial].
++- Parameters: `max_depth` (integer), `henyey_greenstein_g` (float, anisotropy), `le_scale` (float, emission scale), `temperature_scale` (float), `temperature_offset` (float), `infinite_light` (vector and multiplier), `imaging_ratio` (float) [S1, unofficial].
+ - Random Number Generator (RNG) [S1, unofficial].
+ 
+@@ -18,5 +18,5 @@
+ 
+ **Data Structures:**
+-- `MajorantTransmittanceSampler`: Manages the sampling of interaction points along the ray using the majorant density. It provides an iterator or loop over sampled points within the current ray segment [S1, unofficial].
++- `MajorantTransmittanceSampler`: Manages the sampling of interaction points along the ray using the majorant density [S1, unofficial].
+ - `Event`: Enum or integer representing {Null, Absorption, Scatter} [S1, unofficial].
+ 
+@@ -57,8 +57,7 @@
+                 2. Sample a new direction $\mathbf{d}'$ using the Henyey-Greenstein phase function with parameter $g$:
+                    $$ p(\mathbf{d}'|\mathbf{d}) = \frac{1-g^2}{4\pi (1 + g^2 - 2g(\mathbf{d} \cdot \mathbf{d}'))^{3/2}} $$
+-                   [G] (Standard HG formula, not explicitly in source but required for implementation).
++                   [G]
+                 3. Update ray origin to $\mathbf{x}$ and direction to $\mathbf{d}'$ [S1, unofficial].
+-                4. Recursively sample scattered radiance $L_{scat}$ (implementation detail for recursive call or next iteration setup) [G].
+-                5. Break the majorant loop to continue the path at the next depth level [S1, unofficial].
++                4. Break the majorant loop to continue the path at the next depth level [S1, unofficial].
+     e. If the path terminated due to Absorption or Max Depth, break the depth loop [S1, unofficial].
+ 3. If the path escaped to infinity (ray did not terminate in volume):
+@@ -80,5 +79,5 @@
+     def normalized(self):
+         l = self.length()
+-        return Vector3(self.x/l, self.y/l, self.z/l) if l > 0 else Vector3()
++        return Vector3(self.x/l, self.y/l, self.z/l) if l > 1e-8 else Vector3()
+ 
+ def intersect_volume_grid(ray_o, ray_d, bounds_min=(-10.0, -10.0, -10.0), bounds_max=(10.0, 10.0, 10.0)):
+@@ -99,5 +98,6 @@
+ 
+ class MajorantTransmittanceSampler:
+-    def __init__(self, ray_o, ray_d, t0, t1, density_grid, step_size, rng):
++    """Samples interaction points along a ray using exponential majorant sampling [G]."""
++    def __init__(self, ray_o, ray_d, t0, t1, density_grid, majorant_sigma, rng):
+         self.ray_o = ray_o
+         self.ray_d = ray_d.normalized()
+@@ -105,17 +105,16 @@
+         self.t1 = t1
+         self.density_grid = density_grid
+-        self.step_size = step_size
++        self.sigma_M = majorant_sigma  # Constant majorant density assumed [G]
+         self.rng = rng
+         self.t = t0
+         self.transmittance = 1.0
+-        self.sigma_t = density_grid.get_sigma_t(ray_o + ray_d * t0)
+         
+     def __iter__(self):
+         while self.t < self.t1:
+             yield Point(self.ray_o + self.ray_d * self.t, self.transmittance)
+-            dt = self.step_size
++            # Exponential sampling with majorant density [G]
++            dt = -math.log(self.rng.uniform(1e-7, 1.0)) / self.sigma_M
+             self.t += dt
+-            self.transmittance *= math.exp(-self.sigma_t * dt)
+-            self.sigma_t = self.density_grid.get_sigma_t(self.ray_o + self.ray_d * self.t)
++            self.transmittance *= math.exp(-self.sigma_M * dt)
+ 
+ class Point:
+@@ -127,5 +126,4 @@
+     """Simplified blackbody radiation. Returns a Vector3 approximation."""
+     if T_K <= 0: return Vector3(0.0, 0.0, 0.0)
+-    # Evaluate at representative wavelengths for RGB approximation
+     lambdas = [650e-9, 550e-9, 450e-9]
+     rgb = []
+@@ -147,12 +145,11 @@
+     phi = 2 * math.pi * v
+     
+-    # Construct orthonormal basis with d as z-axis
+     if abs(d.x) < 0.999:
+         up = Vector3(1.0, 0.0, 0.0)
+     else:
+         up = Vector3(0.0, 1.0, 0.0)
+-    right = Vector3().normalized() if d.dot(up) == 0 else Vector3(d.y * up.z - d.z * up.y, d.z * up.x - d.x * up.z, d.x * up.y - d.y * up.x)
++    right = Vector3(d.y * up.z - d.z * up.y, d.z * up.x - d.x * up.z, d.x * up.y - d.y * up.x)
+     right = right.normalized()
+-    up = Vector3().normalized() if d.dot(right) == 0 else Vector3(d.z * right.y - d.y * right.z, d.x * right.z - d.z * right.x, d.y * right.x - d.x * right.y)
++    up = Vector3(d.z * right.y - d.y * right.z, d.x * right.z - d.z * right.x, d.y * right.x - d.x * right.y)
+     up = up.normalized()
+     
+@@ -169,4 +166,5 @@
+     kb = 1.3806488e-23
+     c = 299792458.0
++    terminated = False
+ 
+     for depth in range(params.max_depth):
+@@ -175,5 +173,7 @@
+             break
+             
+-        majorant_sampler = MajorantTransmittanceSampler(ray_o, ray_d, t0, t1, density_grid, params.step_size, rng)
++        # Majorant density not specified in sources; assume a safe upper bound [G]
++        sigma_M = max(density_grid.get_sigma_t(ray_o + ray_d * t0), 1e-4)
++        majorant_sampler = MajorantTransmittanceSampler(ray_o, ray_d, t0, t1, density_grid, sigma_M, rng)
+         
+         for point in majorant_sampler:
+@@ -201,7 +201,9 @@
+                 continue
+             elif u < p_n + p_a:
++                terminated = True
+                 break
+             else:
+                 if depth == params.max_depth - 1:
++                    terminated = True
+                     break
+                 d_prime = sample_henyey_greenstein(ray_d, params.henyey_greenstein_g, rng)
+@@ -209,10 +211,11 @@
+                 ray_d = d_prime
+                 break
+-        else:
++        if terminated:
+             break
+-    else:
++            
++    if not terminated:
+         L += params.infinite_light.xyz * params.infinite_light.multiplier
+         
+-    return L
++    return L * params.imaging_ratio
+ ```
+ 
+@@ -229,15 +232,15 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Proportional to the number of sampled points along the ray, which depends on the majorant density and path length. Each point involves a discrete event sample and potentially a phase function evaluation [S1, unofficial].
++- **Time Complexity:** Proportional to the number of sampled points along the ray, which depends on the majorant density and path length [S1, unofficial].
+ - **Measured Performance:** Not given in the sources.
+-- **Scaling:** Scales with the number of samples and path depth. Efficient in sparse media due to explicit null event handling [S1, unofficial].
+-- **Strengths:** Explicit handling of absorption and null events improves efficiency in sparse media. Handles temperature-dependent emission [S1, unofficial].
+-- **Limitations:** Requires pre-computed probabilities for events.
+-- **When to use:** Suitable for participating media with sparse scattering and temperature-dependent emission.
+-- **When not to use:** Not ideal when continuous Russian Roulette is preferred for simplicity.
++- **Scaling:** Scales with the number of samples and path depth [S1, unofficial].
++- **Strengths:** Explicit handling of absorption and null events improves efficiency in sparse media [S1, unofficial].
++- **Limitations:** Requires pre-computed probabilities for events [S1, unofficial].
++- **When to use:** Suitable for participating media with sparse scattering and temperature-dependent emission [S1, unofficial].
++- **When not to use:** Not ideal when continuous Russian Roulette is preferred for simplicity [S1, unofficial].
+ 
+ ## Background
+-- **Origin:** The method is described in the unofficial source [S1, unofficial], which is a GitHub repository `Shibodd/volume_path_tracer`. The specific paper or author is not cited in the provided notes.
+-- **History:** The method appears to be a recent implementation detail in the context of volume path tracing, leveraging discrete event sampling for efficiency.
++- **Origin:** The method is described in the unofficial source [S1, unofficial], which is a GitHub repository `Shibodd/volume_path_tracer`.
++- **History:** The method appears as a recent implementation detail in the context of volume path tracing, leveraging discrete event sampling for efficiency.
+ - **Usage:** Used in the `Shibodd/volume_path_tracer` project for rendering participating media with temperature-dependent emission [S1, unofficial].
+ 

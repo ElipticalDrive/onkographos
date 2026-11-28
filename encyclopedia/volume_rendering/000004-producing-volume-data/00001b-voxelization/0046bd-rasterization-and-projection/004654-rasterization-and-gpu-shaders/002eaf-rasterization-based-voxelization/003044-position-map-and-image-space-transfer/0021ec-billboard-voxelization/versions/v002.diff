@@ -1,0 +1,198 @@
+--- v001.md
++++ v002.md
+@@ -4,73 +4,143 @@
+ 
+ ## Overview
+-Billboard Voxelization is a two-pass rasterization-based technique that converts a triangle mesh into a voxel grid by rendering instanced quads (billboards) at each voxel center. It solves the problem of mapping surface geometry to a discrete volume representation by writing the nearest voxel positions to a position map framebuffer object (FBO) [S1, unofficial]. It differs from siblings like [3D Grid Rasterization](903-3d-grid-rasterization.md) by using instanced geometry per voxel rather than rasterizing triangles directly into a 3D grid, and from [GPU Volume Kernel Voxelization](1496-gpu-volume-kernel-voxelization.md) by relying on standard 2D rasterization of billboards rather than compute shaders [S1, unofficial].
++Billboard Voxelization is a two-pass rasterization-based technique that initializes a 3D volume by rendering instanced quads (billboards) into a 2D position map framebuffer object (FBO) [S1, unofficial]. It differs from [Position Map Voxelization](2604-position-map-voxelization.md) by explicitly generating billboard geometry per voxel to write nearest-neighbor world positions, rather than relying on standard triangle rasterization into a depth buffer [S1, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-- Input: Triangle mesh vertices, voxel grid dimensions ($dim$), voxel size ($voxelSize$), voxel world positions ($voxelPosition$), camera/light projection ($P$) and view ($V$) matrices.
+-- Output: A 3D volume texture (or position map) where occupied voxels store their world position and data attributes.
++**Inputs:**
++*   A 3D voxel grid of dimension $D \times D \times D$.
++*   A bounding box defined by min/max bounds $(x_{min}, x_{max})$, $(y_{min}, y_{max})$, $(z_{min}, z_{max})$ [G].
++*   A set of source triangles (optional, for subsequent passes; this method focuses on initialization).
++*   Camera matrices: Projection ($P$), View ($V$), and a modified inverse view matrix ($V_i$) where translation components are zeroed before transposing [S1, unofficial].
++
++**Outputs:**
++*   A 2D Position Map texture (color attachment) storing world-space positions.
++*   A 3D Volume texture (initialized via the position map).
+ 
+ **Data Structures:**
+-1. **Instanced Quad Buffer:** A VAO containing a single quad (4 vertices, 3 floats each for position).
+-2. **Instance Data Buffer:** A buffer of size $dim^3$ containing `vec3` voxel positions and `float` voxel data for each voxel in the grid [S1, unofficial].
+-3. **Position Map FBO:** A framebuffer with:
+-   - Color attachment: 2D texture, format `GL_RGBA32F`, dimensions matching the window/camera viewport, nearest filtering, clamp-to-edge wrapping [S1, unofficial].
+-   - Depth attachment: Renderbuffer, format `GL_DEPTH_COMPONENT`, matching viewport dimensions [S1, unofficial].
++1.  **Position Map FBO:**
++    *   Color Attachment: 2D texture, internal format `GL_RGBA32F`, dimensions matching the window/screen resolution, filtering `GL_NEAREST`, wrapping `GL_CLAMP_TO_EDGE` [S1, unofficial].
++    *   Depth Attachment: Renderbuffer, format `GL_DEPTH_COMPONENT`, dimensions matching the window/screen resolution [S1, unofficial].
++2.  **Instanced Quad Geometry:**
++    *   Base Quad: 4 vertices, 3 floats per vertex (position), 3 floats per vertex (normal) [S1, unofficial].
++    *   Instance Data: Array of $D^3$ instances. Each instance contains:
++        *   `voxelPosition`: `vec3` (world-space center of the voxel) [S1, unofficial].
++        *   `voxelSize`: `vec3` (dimensions of the voxel, used for scaling the quad) [S1, unofficial].
++        *   `voxelData`: `float` (metadata, e.g., occupancy or type) [S1, unofficial].
+ 
+ **Steps:**
+-1. **Initialize FBO:** Bind the position FBO. Clear color and depth buffers to 0 [S1, unofficial].
+-2. **Setup Matrices:** Load the projection matrix $P$ and view matrix $V$. Compute a modified inverse view matrix $V_i$ by zeroing the translation components of $V$ before transposing [S1, unofficial]. Load uniforms: $P$, $V$, $voxelSize$, and $voxelPosition$ [S1, unofficial].
+-3. **Bind Geometry:** Bind the instanced quad VAO and the instance data buffer. Enable vertex attribute array for instance positions (location 2) [S1, unofficial].
+-4. **Render Pass:** Draw the instanced quads using `glDrawArraysInstanced`. The vertex shader transforms the quad into world space using the instance position and scales it by $voxelSize$. The fragment shader writes the voxel data and position to the position map FBO [S1, unofficial].
+-5. **Cleanup:** Unbind the VAO, volume, shader, and framebuffer [S1, unofficial].
++1.  **Initialize Position Map FBO:** Create the FBO with the specified color and depth attachments [S1, unofficial].
++2.  **Clear Buffers:** Bind the Position Map FBO. Clear color and depth buffers to 0 [S1, unofficial].
++3.  **Setup Uniforms:** Load $P$, $V$, $V_i$, light near plane, clip distance, and volume position uniforms into the shader [S1, unofficial].
++4.  **Render Billboards:**
++    *   Bind the vertex array object (VAO) containing the base quad and instance data.
++    *   Execute a draw call for instanced rendering.
++    *   **Vertex Shader:** For each instance, construct a model matrix $M$ where the scale is `voxelSize` and translation is `voxelPosition`. Compute `gl_Position = P * V * M * vec4(vertPos, 1.0)` [S1, unofficial].
++    *   **Fragment Shader:** Write the world-space position of the fragment to the color attachment. Since billboards are aligned with the camera or voxel grid, this effectively maps the 3D voxel location to 2D screen space with depth [S1, unofficial].
++5.  **Unbind:** Unbind VAO, volume, shader, and framebuffer [S1, unofficial].
+ 
+-**Vertex Shader Logic:**
+-The vertex shader constructs a model matrix $M$ from the instance data:
+-$$
+-M = \begin{bmatrix}
+-voxelSize.x & 0 & 0 & voxelPosition.x \\
+-0 & voxelSize.y & 0 & voxelPosition.y \\
+-0 & 0 & voxelSize.z & voxelPosition.z \\
+-0 & 0 & 0 & 1
+-\end{bmatrix}
+-$$
+-The final position is computed as:
+-$$
+-gl\_Position = P \times V \times M \times vec4(vertPos, 1.0)
+-$$
+-Where $vertPos$ is the local quad vertex position [-1, 1] [S1, unofficial].
++**Pseudocode:**
++```python
++def billboard_voxelization_init(dimension, window_width, window_height, voxel_bounds):
++    # 1. Create Position Map FBO
++    fbo = create_fbo()
++    color_tex = create_texture_2d(
++        width=window_width,
++        height=window_height,
++        internal_format=GL_RGBA32F,
++        filter=GL_NEAREST,
++        wrap=GL_CLAMP_TO_EDGE
++    )
++    depth_rb = create_renderbuffer(
++        width=window_width,
++        height=window_height,
++        format=GL_DEPTH_COMPONENT
++    )
++    attach_color(fbo, color_tex)
++    attach_depth(fbo, depth_rb)
+ 
+-**Parameters:**
+-- $dim$: Voxel grid dimension (e.g., 64, 128, 256) [S1, unofficial].
+-- $voxelSize$: Physical size of a voxel in world units [S1, unofficial].
+-- $P, V$: Camera matrices [S1, unofficial].
++    # 2. Generate Instance Data
++    num_voxels = dimension * dimension * dimension
++    instances = []
++    voxel_size = (voxel_bounds.max - voxel_bounds.min) / dimension
++    
++    for z in range(dimension):
++        for y in range(dimension):
++            for x in range(dimension):
++                center = voxel_bounds.min + voxel_size * (vec3(x, y, z) + 0.5)
++                instances.append({
++                    'voxelPosition': center,
++                    'voxelSize': voxel_size,
++                    'voxelData': 1.0 # Example: active voxel
++                })
+ 
+-**Edge Cases and Pitfalls:**
+-- **Precision:** Using `GL_RGBA32F` for the position map ensures high precision for world coordinates [S1, unofficial].
+-- **Depth Testing:** Standard depth testing is used to ensure only the nearest voxel position is written if billboards overlap (though in a regular grid, they typically do not overlap in screen space unless the camera is inside the volume) [S1, unofficial].
+-- **Matrix Inversion:** The modified inverse view matrix $V_i$ is used in some variants to transform normals or positions correctly without translation interference [S1, unofficial].
++    # 3. Setup Instanced Quad VAO
++    vao = create_vao()
++    bind_vao(vao)
++    
++    # Base quad geometry (4 vertices)
++    quad_vertices = [
++        vec3(-0.5, -0.5, 0), vec3(0.5, -0.5, 0),
++        vec3(0.5, 0.5, 0), vec3(-0.5, 0.5, 0)
++    ]
++    quad_normals = [
++        vec3(0, 0, 1), vec3(0, 0, 1),
++        vec3(0, 0, 1), vec3(0, 0, 1)
++    ]
++    
++    vbo_pos = create_buffer(GL_ARRAY_BUFFER, quad_vertices)
++    vbo_norm = create_buffer(GL_ARRAY_BUFFER, quad_normals)
++    
++    # Instance data buffer
++    vbo_inst = create_buffer(GL_ARRAY_BUFFER, instances)
++    
++    # Attribute layout:
++    # loc 0: vertPos (vec3)
++    # loc 1: vertNor (vec3)
++    # loc 2: voxelPosition (vec3) - instanced
++    # loc 3: voxelData (float) - instanced
++    
++    enable_vertex_attrib(0, 3, GL_FLOAT, normalize=False)
++    enable_vertex_attrib(1, 3, GL_FLOAT, normalize=False)
++    enable_vertex_attrib(2, 3, GL_FLOAT, normalize=False, instanced=True)
++    enable_vertex_attrib(3, 1, GL_FLOAT, normalize=False, instanced=True)
++    
++    bind_vao(0)
++
++    # 4. Render Pass
++    bind_fbo(fbo)
++    clear_color(0.0, 0.0, 0.0, 0.0)
++    clear_depth(1.0)
++    draw_buffers([GL_COLOR_ATTACHMENT0])
++    
++    # Load uniforms: P, V, Vi, voxelSize, voxelPosition
++    shader = load_shader('voxel_vert.glsl', 'voxel_frag.glsl')
++    use_shader(shader)
++    set_uniform_mat4(shader, 'P', projection_matrix)
++    set_uniform_mat4(shader, 'V', view_matrix)
++    set_uniform_vec3(shader, 'voxelSize', voxel_size)
++    
++    bind_vao(vao)
++    draw_arrays_instanced(GL_TRIANGLE_FAN, 0, 4, num_voxels)
++    
++    # 5. Cleanup
++    unbind_fbo()
++    unbind_vao()
++    unbind_shader()
++```
+ 
+ ## Subtopics
+ 
+ ### Position Map FBO Setup
+-Creates a Framebuffer Object (FBO) with a color attachment (position map) and a depth attachment for voxelization rendering. The color attachment is a 2D texture with internal format `GL_RGBA32F`, width and height matching window dimensions, nearest filtering, and clamp to edge wrapping. The depth attachment is a renderbuffer with format `GL_DEPTH_COMPONENT`, matching window dimensions [S1, unofficial].
++Creates the intermediate 2D storage required for the first pass. It consists of a `GL_RGBA32F` color texture for high-precision world position storage and a `GL_DEPTH_COMPONENT` renderbuffer for depth testing. Dimensions match the window size to align with the image-space intersection principle [S1, unofficial].
+ 
+ ## Operating characteristics
+-**Time and Memory Complexity:**
+-- Time: $O(N)$ where $N = dim^3$ is the number of voxels, as each voxel is processed once via instancing.
+-- Memory: $O(dim^3)$ for the instance data buffer and the position map texture [S1, unofficial].
+-
+-**Measured Performance:**
+-Performance depends on the GPU's ability to handle instanced rendering and the resolution of the position map. High-resolution grids ($dim > 256$) may require significant VRAM for the position map [S1, unofficial].
+-
+-**Strengths and Limitations:**
+-- Strengths: Simple to implement using standard rasterization; efficient for regular grids; leverages GPU instancing.
+-- Limitations: Requires a regular voxel grid; may produce artifacts if the camera is too close to the volume or if depth precision is insufficient; not suitable for hierarchical or sparse voxel structures without modification [S1, unofficial].
+-
+-**When to Use:**
+-Use when a regular voxel grid is acceptable and hardware rasterization is preferred over compute shaders. Not suitable for sparse or hierarchical volumes [S1, unofficial].
++*   **Time Complexity:** $O(N)$ where $N$ is the number of voxels ($D^3$), as each voxel is processed once as an instance.
++*   **Memory Complexity:** $O(W \times H)$ for the position map, where $W, H$ are window dimensions. The instance data is $O(D^3)$.
++*   **Strengths:** Efficiently initializes voxel positions using GPU instancing. Avoids complex 3D intersection logic by leveraging the rasterizer.
++*   **Limitations:** Resolution of the position map is tied to the window/screen resolution, not the voxel grid resolution. This can lead to aliasing or precision loss if the window resolution is low relative to the voxel grid [S1, unofficial].
++*   **When to use:** When initializing a volume grid for further processing (e.g., marching cubes) where exact world-space positions are needed per voxel.
+ 
+ ## Background
+-Originated in the context of cloud rendering and real-time volume visualization, specifically in the "Cloud-Renderer" project by Jaafersheriff [S1, unofficial]. It is used for generating voxel data for volumetric clouds and other atmospheric effects where a regular grid structure is beneficial [S1, unofficial].
++Originated in the context of cloud rendering and real-time volume visualization. The technique is documented in the `Cloud-Renderer` project by Jaafersheriff [S1, unofficial]. It builds on the principles of image-space transfer by mapping 3D voxel centers to 2D screen space via billboards.
+ 
+ ## Sources

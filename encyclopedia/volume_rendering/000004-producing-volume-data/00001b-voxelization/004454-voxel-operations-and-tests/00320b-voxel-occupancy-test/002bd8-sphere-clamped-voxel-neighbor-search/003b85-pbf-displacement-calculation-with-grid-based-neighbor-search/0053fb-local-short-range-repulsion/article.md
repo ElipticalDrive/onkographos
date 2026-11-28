@@ -1,0 +1,126 @@
+# Local Short-Range Repulsion
+
+Also called: Particle repulsion optimization, Tangential repulsive force iteration
+
+## Overview
+Local Short-Range Repulsion is a particle distribution optimization step that treats repulsive interactions as local short-range forces to optimize particle distribution [S1, unofficial]. It consists of searching for neighboring particle sets, calculating the repulsive force, and iterating the tangential repulsive force [S1, unofficial].
+
+## How it works
+
+### Inputs and Outputs
+*   **Inputs**: Particle positions $\mathbf{p}_i$ and $\mathbf{p}_j$, particle normal vectors $\mathbf{n}_i$, voxel pyramid structure defining scale levels $l$ and voxel sizes $\sigma_l$, base cell size $h_{base}$, and maximum scale level $L$ [S1, unofficial].
+*   **Outputs**: Updated particle positions $\mathbf{p}_i'$ [S1, unofficial].
+
+### Data Structures
+The method relies on an adaptively subdivided voxel pyramid [S1, unofficial]. The voxel unit is defined by scale level $l$ with size $\sigma_l$ [S1, unofficial]. The repulsion cutoff radius $h_{cutoff}$ is numerically equal to the voxel size $\sigma_l$ at the scale level $l$ to which the target particle belongs [S1, unofficial]. The source provides a formula $h_{cutoff} = h_{base} \cdot 2^{i-1-i}$, which contains a typographical error in the exponent but explicitly defines $h_{cutoff}$ as equal to $\sigma_l$ [S1, unofficial].
+
+### Steps
+1.  **Neighbor Search**: Traverse all voxels within the voxel unit containing the target particle $i$ and its 26-neighborhood [S1, unofficial]. Treat all other particles in these voxels as the neighboring particle set $N_i$ [S1, unofficial]. Map the coordinates of activated particles and their repulsion radii to the current scale to ensure consistency during force calculation [S1, unofficial].
+2.  **Repulsive Force Calculation**: For each neighbor $j \in N_i, j \neq i$, calculate the relative position vector $\mathbf{d}_{ij} = \mathbf{p}_i - \mathbf{p}_j$ [S1, unofficial]. Compute the radial distance $r = \|\mathbf{d}_{ij}\|$ [S1, unofficial]. Calculate the repulsion weight factor $\omega = (1 - r/h_{cutoff})^2$, which ensures the force is strong at close range and tends to zero as $r \to h_{cutoff}$ [S1, unofficial]. Normalize the relative position to obtain the unit vector $\hat{\mathbf{d}}_{ij} = \mathbf{d}_{ij} / \|\mathbf{d}_{ij}\|$ [S1, unofficial]. Compute the individual repulsive force contribution $\mathbf{f}_j = \hat{\mathbf{d}}_{ij} \cdot \omega$ [S1, unofficial].
+3.  **Tangential Force Iteration**: Compute the total repulsive force on particle $i$ as the vector sum $\mathbf{f}_g = \sum_{j \in N_i, j \neq i} \mathbf{f}_j$ [S1, unofficial]. Project $\mathbf{f}_g$ onto the normal direction $\mathbf{n}_i$ of particle $i$ to obtain the tangential component $\mathbf{f}_v^T = \mathbf{f}_v - \mathbf{n}_i(\mathbf{n}_i \cdot \mathbf{n}_i)$ [S1, unofficial]. The source uses $\mathbf{f}_v$ and $\mathbf{f}_g$ interchangeably in this context; $\mathbf{f}_g^T$ is used as the actual acting repulsive force to reduce impact on projection accuracy during iteration [S1, unofficial].
+4.  **Displacement Update**: Calculate the displacement $\Delta \mathbf{p}_i = \mathbf{f}_g^T \cdot 0.02$, where $0.02$ is the iteration step size chosen to balance accuracy and efficiency [S1, unofficial]. Add the displacement to the current position $\mathbf{p}_i \leftarrow \mathbf{p}_i + \Delta \mathbf{p}_i$ to complete one iteration [S1, unofficial]. Repeat iterations until equilibrium, defined as the state where the energy gradient is zero ($\frac{d\mathbf{p}_i}{dt} - \nabla E_{total} = 0$) [S1, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def local_short_range_repulsion(particles, voxel_grid, h_base, L):
+    """
+    particles: List of dicts with keys 'pos' (vec3), 'normal' (vec3)
+    voxel_grid: Spatial hash or grid structure mapping voxel coords to particle indices
+    h_base: Base cell size at finest scale
+    L: Maximum scale level
+    """
+    step_size = 0.02
+    
+    for i, p in enumerate(particles):
+        pos_i = p['pos']
+        normal_i = p['normal']
+        
+        # Determine voxel level l for particle i
+        # [G] Standard grid lookup: find voxel coordinates containing pos_i
+        voxel_coords = (
+            math.floor(pos_i[0] / h_base),
+            math.floor(pos_i[1] / h_base),
+            math.floor(pos_i[2] / h_base)
+        )
+        level_l = voxel_grid.get_level(voxel_coords)
+        
+        # Cutoff radius equals voxel size at level l
+        # [G] Assuming standard adaptive scaling: voxel_size = h_base * 2^(L - level_l)
+        voxel_size = h_base * (2 ** (L - level_l))
+        h_cutoff = voxel_size
+        
+        total_force = [0.0, 0.0, 0.0]
+        
+        # Search neighbors in 26-neighborhood of current voxel
+        # Traverse all voxels within the voxel unit and its 26-neighborhood
+        neighbor_indices = []
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for dz in (-1, 0, 1):
+                    if dx == 0 and dy == 0 and dz == 0:
+                        continue
+                    target_voxel = (voxel_coords[0] + dx, voxel_coords[1] + dy, voxel_coords[2] + dz)
+                    neighbor_indices.extend(voxel_grid.get_particles_in_voxel(target_voxel))
+        
+        for j in neighbor_indices:
+            if i == j:
+                continue
+            pos_j = particles[j]['pos']
+            
+            # Map coordinates to current scale [S1, unofficial]
+            # [G] Scale positions relative to voxel origin for consistency
+            scale_factor = 2 ** (L - level_l)
+            pos_i_scaled = [c * scale_factor for c in pos_i]
+            pos_j_scaled = [c * scale_factor for c in pos_j]
+            
+            d_ij = [pos_i_scaled[k] - pos_j_scaled[k] for k in range(3)]
+            r = math.sqrt(sum(c*c for c in d_ij))
+            
+            if r >= h_cutoff:
+                continue
+                
+            omega = (1.0 - r / h_cutoff) ** 2
+            
+            if r == 0.0:
+                continue
+                
+            d_hat_ij = [c / r for c in d_ij]
+            f_j = [d_hat_ij[k] * omega for k in range(3)]
+            
+            total_force = [total_force[k] + f_j[k] for k in range(3)]
+            
+        # Tangential projection per source: f_vT = f_v - n_i (n_i . n_i)
+        # Source uses f_v and f_g interchangeably; we use total_force as f_g
+        n_dot_n = sum(normal_i[k] * normal_i[k] for k in range(3))
+        f_tangential = [
+            total_force[k] - normal_i[k] * n_dot_n for k in range(3)
+        ]
+        
+        # Displacement update
+        displacement = [f_tangential[k] * step_size for k in range(3)]
+        p['pos'] = [p['pos'][k] + displacement[k] for k in range(3)]
+```
+
+### Parameters
+*   **Iteration Step Size**: $0.02$, chosen to balance iteration accuracy and efficiency [S1, unofficial].
+*   **Cutoff Radius**: Numerically equal to the voxel size $\sigma_l$ at the particle's scale level [S1, unofficial].
+
+### Edge Cases and Pitfalls
+*   **Zero Distance**: If $r=0$, normalization fails; skip the particle [S1, unofficial].
+*   **Scale Consistency**: Coordinates and radii must be mapped to the current scale before calculation [S1, unofficial].
+*   **Projection Formula**: The source defines the tangential component as $\mathbf{f}_v^T = \mathbf{f}_v - \mathbf{n}_i(\mathbf{n}_i \cdot \mathbf{n}_i)$, where $\mathbf{f}_v$ and $\mathbf{f}_g$ are used interchangeably for the total force [S1, unofficial].
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+*   **Origin**: Introduced in Surface Extraction for Industrial CT Based On Adaptive Particle System [S1, unofficial].
+*   **Purpose**: Optimizes particle distribution by treating repulsive interactions as local short-range forces, addressing the weakness of repulsive forces at long distances [S1, unofficial].
+*   **Development**: Part of a pipeline involving adaptive voxel pyramids, neighbor search, and energy minimization for equilibrium [S1, unofficial].
+
+## Sources
+[S1] Surface Extraction for Industrial CT Based On Adaptive Particle System, https://doi.org/10.21203/rs.3.rs-9502773/v1, fetched 2026-10-26 (unofficial)

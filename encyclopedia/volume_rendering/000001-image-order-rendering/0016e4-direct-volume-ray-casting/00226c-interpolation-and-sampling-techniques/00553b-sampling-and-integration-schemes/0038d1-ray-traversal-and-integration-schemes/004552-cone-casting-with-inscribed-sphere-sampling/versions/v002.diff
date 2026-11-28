@@ -1,0 +1,355 @@
+--- v001.md
++++ v002.md
+@@ -1,139 +1,252 @@
+ # Cone Casting with Inscribed Sphere Sampling
+ 
+-Also called: MipNeRF Cone Sampling, Tri-MipRF Cone Casting
++Also called: Cone casting, MipNeRF Cone Sampling, Tri-MipRF Cone Casting
+ 
+ ## Overview
+-This method renders a pixel as a disc on the image plane and emits a cone from the camera's projection center to sample the volume, avoiding the aliasing artifacts inherent in distance-agnostic ray casting [S1]. It sets itself apart from standard ray casting by treating the pixel area explicitly and from MipNeRF by using a set of inscribed spheres rather than anisotropic multivariate Gaussians for sampling, which aligns with isotropic pre-filtering requirements [S1].
++Cone Casting with Inscribed Sphere Sampling is a rendering technique that formulates a pixel as a disc on the image plane and emits a cone from the camera's projection center to sample the volume, avoiding the aliasing artifacts of distance-agnostic ray casting [S1]. Unlike methods that sample a cone with anisotropic multivariate Gaussians [S1], this method uses spheres inscribed within the cone, which aligns with isotropic pre-filtering strategies in the underlying feature encoding [S1]. It is primarily used in conjunction with Tri-Mip encoding to achieve anti-aliased, high-fidelity renderings of neural radiance fields [S1].
+ 
+ ## How it works
+-**Inputs:** Camera projection center $\mathbf{o}$, pixel center $\mathbf{p}_o$, pixel width $\Delta x$ and height $\Delta y$ in world coordinates, focal length $f$, base radius parameter $\beta$, near plane $t_n$, far plane $t_f$, and the 3D space's Axis-Aligned Bounding Box (AABB).
+-**Outputs:** Final pixel color $C_{out}$.
++**Inputs:**
++*   Camera parameters: optical center $\mathbf{o}$, focal length $f$, pixel width $\Delta x$ and height $\Delta y$ in world coordinates [S1].
++*   Scene bounds: Axis-Aligned Bounding Box (AABB) of the 3D space [S1].
++*   Tri-Mip encoding: Three 2D mipmap maps $\mathcal{M}$ (XY, YZ, XZ planes) [S1].
++*   MLP: A shallow neural network with weights $\Theta$ [S1].
++*   Sampling parameters: Base radius parameter $\beta$ (denoted as $\baseradius$ in source), near plane $t_n$, far plane $t_f$ [S1].
++
++**Outputs:**
++*   Final pixel color $C_{out}$ [S1].
+ 
+ **Data Structures:**
++*   **Tri-Mip Maps:** Three 2D arrays storing pre-filtered 3D features. Each map corresponds to a projection plane (XY, YZ, XZ) and contains multiple mipmap levels [S1].
+ *   **Binary Occupancy Grid:** A coarse grid marking empty vs. non-empty space to skip samples [S1].
+-*   **Distance Vector $t_i$:** A sorted vector of distances along the cone's central axis where sampling spheres are placed [S1].
++*   **Sphere Set $S$:** A list of spheres, each defined by center $\mathbf{x}$ and radius $r$ [S1].
+ 
+ **Steps:**
+ 
+-1.  **Pixel Disc Formulation:** Calculate the radius $\tilde{r}$ of the pixel disc on the image plane:
++1.  **Pixel Disc Formulation:**
++    Calculate the radius $\tilde{r}$ of the pixel disc on the image plane using the pixel dimensions in world coordinates:
+     $$ \tilde{r} = \sqrt{\frac{\Delta x \cdot \Delta y}{\pi}} $$
+-    where $\Delta x$ and $\Delta y$ are the pixel dimensions in world coordinates [S1].
+-
+-2.  **Cone Emission:** Emit a cone $C$ from the camera projection center $\mathbf{o}$ along the direction $\mathbf{d} = \mathbf{p}_o - \mathbf{o}$. The apex is at $\mathbf{o}$ and the intersection with the image plane is the disc [S1].
+-
+-3.  **Central Axis Definition:** Define the central axis of the cone as a ray:
++    [S1]
++
++2.  **Cone Emission:**
++    Define the cone $C$ originating from the camera optical center $\mathbf{o}$. The central axis direction $\mathbf{d}$ is calculated from the optical center to the pixel center $\mathbf{p}_o$:
++    $$ \mathbf{d} = \mathbf{p}_o - \mathbf{o} $$
++    The central axis of the cone is parameterized as:
+     $$ \mathbf{a}(t) = \mathbf{o} + t \mathbf{d} $$
+-    where $t$ is the distance from the origin [S1].
+-
+-4.  **Sampling Distance Determination:** Determine sampling distances $t_i$ by uniformly sampling between the camera's near $t_n$ and far $t_f$ planes, or the intersections of the cone's central axis with the AABB of the 3D space [S1].
+-
+-5.  **Sphere Sampling:** Sample the cone using a set of spheres $S(\mathbf{x}, r)$ parameterized by centers $\mathbf{x}$ and radii $r$. The centers $\mathbf{x}$ lie on the central axis, and the radii $r$ are set such that the spheres are inscribed with the cone. For a distance $t_i$, the center $\mathbf{x}_i$ and radius $r_i$ are calculated as:
++    [S1]
++
++3.  **Sampling Distance Selection:**
++    Determine a set of distances $t_i$ along the central axis. These distances are typically uniformly sampled between the camera's near plane $t_n$ and far plane $t_f$, or between the intersections of the cone's central axis with the scene's AABB [S1].
++    *   *Optimization:* Use the binary occupancy grid to skip distances $t_i$ where the sphere at that distance falls entirely within empty space [S1].
++
++4.  **Sphere Parameterization:**
++    For each distance $t_i$, calculate the sphere center $\mathbf{x}_i$ and inscribed radius $r_i$. The center lies on the central axis:
+     $$ \mathbf{x}_i = \mathbf{o} + t_i \mathbf{d} $$
++    The radius $r_i$ is calculated to ensure the sphere is inscribed within the cone at that distance. Let $\|\mathbf{v}\|_2$ denote the Euclidean norm. The formula is:
+     $$ r_i = \frac{\|\mathbf{x}_i - \mathbf{o}\|_2 \cdot f \cdot \beta}{\|\mathbf{d}\|_2 \cdot \sqrt{\left(\sqrt{\|\mathbf{d}\|_2^2 - f^2} - \beta\right)^2 + f^2}} $$
+-    where $\|\cdot\|_2$ is the Euclidean norm, $f$ is the focal length, and $\beta$ is the base radius parameter [S1].
+-
+-6.  **Volume Query and Compositing:** For each sphere $S(\mathbf{x}_i, r_i)$, query the volume density $\rho_i$ and color $\mathbf{c}_i$. Approximate the volume rendering integral using numerical quadrature. The transmittance $T_i$ and accumulated color are computed as:
+-    $$ T_i = \exp\left(-\sum_{k < i} \rho_k (t_{k+1} - t_k)\right) $$
+-    $$ C_{out} = \sum_i T_i \left(1 - \exp(-\rho_i (t_{i+1} - t_i))\right) \mathbf{c}_i $$
+-    where $t_{k+1} - t_k$ represents the distance between sampled spheres [S1].
+-
+-7.  **Optimization:** Use the binary occupancy grid to skip samples in empty areas and concentrate samples near surfaces [S1].
++    where $\beta$ is the base radius parameter [S1].
++
++5.  **Featurization (Tri-Mip Encoding):**
++    For each sphere $S_i(\mathbf{x}_i, r_i)$, extract a feature vector $\mathbf{f}_i$. This is done by orthogonally projecting the sphere onto the three Tri-Mip planes (XY, YZ, XZ). The sampling level (mipmap index) for each plane is determined by the sphere's occupied area on that plane, effectively performing area-based pre-filtering [S1].
++
++6.  **Density and Color Prediction:**
++    Feed the feature vector $\mathbf{f}_i$ and the view direction $\mathbf{d}$ into the tiny MLP to predict the density $\tau_i$ and color $\mathbf{c}_i$ for the sphere:
++    $$ [\tau_i, \mathbf{c}_i] = \text{MLP}(\mathbf{f}_i, \mathbf{d}; \Theta) $$
++    [S1]
++
++7.  **Volume Rendering Integration:**
++    Integrate the density and color of the sampled spheres using front-to-back volume rendering. The final color $C_{out}$ is computed as:
++    $$ C_{out} = \sum_{i} T_i \left(1 - \exp(-\tau_i (t_{i+1} - t_i))\right) \mathbf{c}_i $$
++    where the transmittance $T_i$ is:
++    $$ T_i = \exp\left(-\sum_{k < i} \tau_k (t_{k+1} - t_k)\right) $$
++    [S1]
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def cone_casting(o, p_o, dx, dy, f, beta, t_n, t_f, aabb, occupancy_grid, volume_query):
+-    """
+-    Render a single pixel using cone casting with inscribed sphere sampling.
++import math
++
++def cone_casting_pixel(o, d, pixel_width_world, pixel_height_world, 
++                       focal_length, base_radius, tri_mip_maps, mlp, 
++                       scene_aabb, occupancy_grid, num_samples):
++    """
++    Renders a single pixel using Cone Casting with Inscribed Sphere Sampling.
+     
+     Args:
+-        o: Camera projection center (3D vector)
+-        p_o: Pixel center in world coordinates (3D vector)
+-        dx, dy: Pixel width and height in world coordinates (floats)
+-        f: Focal length (float)
+-        beta: Base radius parameter (float)
+-        t_n, t_f: Near and far plane distances (floats)
+-        aabb: Axis-Aligned Bounding Box of the 3D space
+-        occupancy_grid: Binary grid for empty space skipping
+-        volume_query: Function returning (density, color) for a sphere center and radius
++        o: Camera optical center (3D vector).
++        d: Ray direction vector (3D vector, not necessarily normalized).
++        pixel_width_world: Width of the pixel in world units.
++        pixel_height_world: Height of the pixel in world units.
++        focal_length: Camera focal length f.
++        base_radius: Base radius parameter beta.
++        tri_mip_maps: Dictionary containing 3 mipmap maps for XY, YZ, XZ planes.
++        mlp: Neural network function mapping (features, view_dir) -> (density, color).
++        scene_aabb: Axis-Aligned Bounding Box of the scene.
++        occupancy_grid: Binary grid for empty space skipping.
++        num_samples: Number of sampling points along the axis.
+         
+     Returns:
+-        C_out: Final pixel color (3D vector)
+-    """
++        final_color: 3D vector representing the pixel color.
++    """
++    
+     # Step 1: Calculate pixel disc radius
+-    # Note: The source formula uses sqrt(area/pi). Area = dx * dy.
+-    r_tilde = math.sqrt((dx * dy) / math.pi)
+-    
+-    # Step 2 & 3: Define cone direction and central axis
+-    d = p_o - o
+-    # Normalize direction for consistent t interpretation if needed, 
+-    # but source uses d directly in norm calculations.
+-    
+-    # Step 4: Determine sampling distances
+-    # Intersect central axis with AABB to get valid t range
+-    t_min, t_max = intersect_ray_aabb(o, d, aabb)
+-    # Clamp to near/far planes
+-    t_start = max(t_min, t_n)
+-    t_end = min(t_max, t_f)
++    # Note: Source formula is r_tilde = sqrt(dx * dy / pi)
++    pixel_area = pixel_width_world * pixel_height_world
++    pixel_disc_radius = math.sqrt(pixel_area / math.pi)
++    
++    # Step 2: Define cone axis
++    # Central axis a(t) = o + t * d
++    # d is already defined as p_o - o
++    
++    # Step 3: Determine sampling distances
++    # Intersect central axis with AABB to get t_start and t_end
++    t_start, t_end = intersect_axis_with_aabb(o, d, scene_aabb)
+     
+     # Uniformly sample distances between t_start and t_end
+-    # Number of samples N is implementation detail, assumed fixed or adaptive
+-    N = 32 # Example value
+-    t_values = linspace(t_start, t_end, N)
+-    
+-    C_out = [0.0, 0.0, 0.0]
+-    accumulated_transmittance = 1.0
+-    
+-    for i in range(N):
+-        t_i = t_values[i]
+-        t_next = t_values[i+1] if i < N-1 else t_end
+-        
+-        # Step 5: Calculate sphere center and radius
+-        x_i = o + t_i * d
+-        norm_x_o = norm(x_i - o)
+-        norm_d = norm(d)
+-        
+-        # Inscribed sphere radius formula
+-        inner_sqrt = math.sqrt(norm_d**2 - f**2)
+-        denominator_term = math.sqrt((inner_sqrt - beta)**2 + f**2)
+-        r_i = (norm_x_o * f * beta) / (norm_d * denominator_term)
+-        
+-        # Optimization: Check occupancy grid
+-        if not is_non_empty(occupancy_grid, x_i, r_i):
+-            continue
++    # If occupancy grid is used, filter these t values
++    t_values = []
++    for i in range(num_samples + 1):
++        t = t_start + (t_end - t_start) * (i / num_samples)
++        # Check occupancy for sphere at this t
++        if not is_empty_in_occupancy_grid(o, d, t, base_radius, focal_length, occupancy_grid):
++            t_values.append(t)
+             
+-        # Query volume for density and color
+-        density_i, color_i = volume_query(x_i, r_i)
+-        
+-        # Step 6: Compositing
+-        # Distance between samples
+-        dt = t_next - t_i
+-        
+-        # Opacity for this segment
+-        alpha_i = 1.0 - math.exp(-density_i * dt)
++    # Ensure we have at least two points for integration
++    if len(t_values) < 2:
++        return [0.0, 0.0, 0.0]
++
++    # Step 4 & 5 & 6: Iterate and accumulate
++    final_color = [0.0, 0.0, 0.0]
++    transmittance = 1.0
++    
++    # Pre-calculate norms to avoid repeated computation
++    d_norm = math.sqrt(sum(x**2 for x in d))
++    d_norm_sq = d_norm ** 2
++    
++    # Term inside the square root in the denominator of radius formula
++    # sqrt(d_norm^2 - f^2)
++    # Note: If d_norm < f, this term is imaginary. In standard pinhole cameras, 
++    # the ray direction magnitude relates to focal length. 
++    # The source formula uses ||d||_2. We assume valid camera geometry.
++    inner_sqrt_arg = d_norm_sq - (focal_length ** 2)
++    if inner_sqrt_arg < 0:
++        inner_sqrt_arg = 0 # Guard against numerical error or invalid geometry
++    sqrt_term = math.sqrt(inner_sqrt_arg)
++    
++    denominator_base = math.sqrt((sqrt_term - base_radius)**2 + (focal_length ** 2))
++    
++    for i in range(len(t_values) - 1):
++        t_curr = t_values[i]
++        t_next = t_values[i+1]
++        dt = t_next - t_curr
++        
++        # Calculate sphere center x_i
++        # x_i = o + t_curr * d
++        x_i = [o[j] + t_curr * d[j] for j in range(3)]
++        
++        # Calculate sphere radius r_i
++        # r_i = (||x_i - o|| * f * beta) / (||d|| * denominator_base)
++        # ||x_i - o|| is simply t_curr * ||d||
++        dist_from_origin = t_curr * d_norm
++        
++        numerator = dist_from_origin * focal_length * base_radius
++        denominator = d_norm * denominator_base
++        r_i = numerator / denominator
++        
++        # Featurize sphere: Project to Tri-Mip planes and sample
++        # This requires implementing the specific Tri-Mip sampling logic
++        # which involves determining the mipmap level based on occupied area.
++        # For the purpose of this method description, we assume a function exists.
++        features = featurize_sphere_trimap(x_i, r_i, tri_mip_maps)
++        
++        # Predict density and color
++        density, color = mlp(features, d)
++        
++        # Volume rendering integration
++        # alpha = 1 - exp(-density * dt)
++        alpha = 1.0 - math.exp(-density * dt)
+         
+         # Contribution
+-        contribution = accumulated_transmittance * alpha_i * color_i
+-        C_out += contribution
++        contribution = [color[j] * alpha * transmittance for j in range(3)]
++        final_color = [final_color[j] + contribution[j] for j in range(3)]
+         
+         # Update transmittance
+-        accumulated_transmittance *= (1.0 - alpha_i)
+-        
+-    return C_out
++        transmittance *= (1.0 - alpha)
++        
++        # Early termination if fully opaque
++        if transmittance < 1e-4:
++            break
++            
++    return final_color
++
++def intersect_axis_with_aabb(o, d, aabb):
++    """
++    Helper to find t_start and t_end where the ray o + t*d intersects the AABB.
++    Returns (t_min, t_max).
++    """
++    # Standard ray-AABB intersection algorithm
++    t_min = -math.inf
++    t_max = math.inf
++    
++    for i in range(3):
++        if d[i] == 0:
++            if o[i] < aabb.min[i] or o[i] > aabb.max[i]:
++                return (math.inf, -math.inf) # No intersection
++        else:
++            t1 = (aabb.min[i] - o[i]) / d[i]
++            t2 = (aabb.max[i] - o[i]) / d[i]
++            t_enter = min(t1, t2)
++            t_exit = max(t1, t2)
++            t_min = max(t_min, t_enter)
++            t_max = min(t_max, t_exit)
++            
++    if t_min > t_max:
++        return (math.inf, -math.inf)
++        
++    return (t_min, t_max)
++
++def is_empty_in_occupancy_grid(o, d, t, base_radius, focal_length, grid):
++    """
++    Check if the sphere at distance t is in empty space.
++    """
++    # Calculate sphere center and radius to query the grid
++    d_norm = math.sqrt(sum(x**2 for x in d))
++    x_i = [o[j] + t * d[j] for j in range(3)]
++    
++    d_norm_sq = d_norm ** 2
++    inner_sqrt_arg = d_norm_sq - (focal_length ** 2)
++    if inner_sqrt_arg < 0: inner_sqrt_arg = 0
++    sqrt_term = math.sqrt(inner_sqrt_arg)
++    denominator_base = math.sqrt((sqrt_term - base_radius)**2 + (focal_length ** 2))
++    
++    dist_from_origin = t * d_norm
++    numerator = dist_from_origin * focal_length * base_radius
++    denominator = d_norm * denominator_base
++    r_i = numerator / denominator
++    
++    # Query occupancy grid at x_i with radius r_i
++    # If the entire sphere is in empty cells, return True
++    return grid.query_sphere_empty(x_i, r_i)
++
++def featurize_sphere_trimap(center, radius, tri_mip_maps):
++    """
++    Projects the sphere onto XY, YZ, XZ planes and samples the Tri-Mip maps.
++    The mipmap level is determined by the sphere's projected area.
++    """
++    # Implementation details of Tri-Mip sampling are specific to the Tri-MipRF paper.
++    # This function represents the step described in the source.
++    pass
+ ```
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Focal Length Constraint:** The formula for $r_i$ involves $\sqrt{\|\mathbf{d}\|_2^2 - f^2}$. If $\|\mathbf{d}\|_2 < f$, the term becomes imaginary. This implies the direction vector magnitude must be greater than the focal length, or $f$ must be scaled appropriately relative to the coordinate system [S1].
+-*   **Empty Space:** Without the binary occupancy grid, sampling uniformly along the axis wastes computation in empty regions [S1].
+-*   **Isotropy:** Using multivariate Gaussians (as in MipNeRF) is incompatible with isotropic pre-filtering encodings like Tri-Mip, necessitating the sphere approximation [S1].
+-
+ ## Operating characteristics
+-*   **Time Complexity:** Linear with respect to the number of samples $N$ per pixel, plus the cost of occupancy grid lookups [S1].
+-*   **Memory Complexity:** Depends on the size of the occupancy grid and the volume data structure queried [S1].
+-*   **Strengths:** Avoids aliasing artifacts by accounting for pixel area; efficient skipping of empty space via occupancy grid [S1].
+-*   **Limitations:** Approximates the cone with spheres, which may introduce minor geometric inaccuracies compared to exact integration [S1]. Requires careful tuning of the base radius parameter $\beta$ [S1].
++*   **Time Complexity:** Linear with respect to the number of sampling points $N$ along the ray, plus the cost of MLP evaluation and Tri-Mip lookups per sample [S1]. The use of the binary occupancy grid reduces the effective number of samples by skipping empty regions [S1].
++*   **Memory Complexity:** Dominated by the storage of the three Tri-Mip maps (3 2D arrays) and the shallow MLP weights [S1]. This is significantly more compact than full 3D volume representations [S1].
++*   **Strengths:** Produces anti-aliased, high-fidelity renderings in both close-up and distant views by explicitly modeling the pixel area via cone casting and inscribed spheres [S1]. It converges faster than methods using hash encoding due to the compact Tri-Mip representation [S1].
++*   **Limitations:** Requires calibrated multi-view images for reconstruction [S1]. The method is specific to the Tri-Mip encoding; it does not directly apply to other neural representations like standard NeRF or Instant-NGP without modification [S1]. The radius calculation assumes a specific camera model (pinhole) and geometry [S1].
++*   **When to use:** When rendering neural radiance fields with Tri-Mip encoding and anti-aliasing is required without the computational overhead of super-sampling [S1].
++*   **When not to use:** For standard ray-casting on dense voxel grids where pre-filtering is handled differently, or when the underlying representation is not Tri-Mip based [S1].
+ 
+ ## Background
+-The method was introduced in the context of Tri-MipRF (Tri-Mip Representation for Efficient Anti-Aliasing Neural Radiance Fields) [S1]. It addresses the limitations of standard NeRF (ray casting) and MipNeRF (anisotropic Gaussian cone sampling) by providing an isotropic area-sampling approach suitable for hash-based encodings [S1].
++Cone Casting with Inscribed Sphere Sampling was introduced in the paper "Tri-MipRF: Tri-Mip Representation for Efficient Anti-Aliasing Neural Radiance Fields" [S1]. The method addresses the flaw in previous neural rendering methods (like NeRF [S1]) that formulate pixels as single points, leading to blurriness in close-up views and aliasing in distant views [S1]. It differs from MipNeRF [S1], which uses multivariate Gaussians for cone sampling, by using inscribed spheres to align with the isotropic pre-filtering of the Tri-Mip encoding [S1]. The technique is part of the Tri-MipRF framework, which uses a compact 2D representation (Tri-Mip) for 3D content [S1].
+ 
+ ## Sources

@@ -1,0 +1,160 @@
+--- v001.md
++++ v002.md
+@@ -8,20 +8,18 @@
+ ## How it works
+ **Inputs and Outputs**
+-*   **Input:** A trained 3DGS model (Gaussian positions, covariances, and appearance attributes) optimized for rendering quality.
+-*   **Output:** A refined set of appearance attributes optimized for compression, while Gaussian positions remain fixed.
++*   **Input:** A pre-trained 3DGS model containing Gaussian positions, covariances, and appearance attributes [S1].
++*   **Output:** A refined set of appearance attributes optimized for compression, while Gaussian positions remain fixed [S1].
+ 
+ **Data Structures**
+-The method operates on the appearance attributes of the Gaussians. Specifically, it considers:
+-*   $n_{ch}$: The number of attributes per Gaussian (channels).
++The method operates on the appearance attributes of the Gaussians. Specifically, it tracks:
++*   $n_{ch}$: The number of attributes per Gaussian (channels) [S1].
+ *   $n_{ac}$: The number of AC (Alternating Current) coefficients resulting from the Reconstruction Adaptive Hierarchical Transform (RAHT) applied to the attributes [S1].
+ *   $x_{ij}$: The $j$-th transform coefficient of the $i$-th channel [S1].
+ 
+ **Numbered Steps**
+-1.  **Freeze Geometry:** Fix the positions and covariances of all Gaussians. Disable densification and pruning operations [S1].
+-2.  **Initialize Attributes:** Load the appearance attributes (e.g., spherical harmonics coefficients, opacity, scaling) from the pre-trained model [S1].
+-3.  **Define Loss Components:**
+-    *   Calculate the distortion loss $L_D$ using L1 and SSIM metrics [S1].
+-    *   Calculate the sparsity loss $L_S$ based on the RAHT coefficients of the current attributes [S1].
+-4.  **Optimize:** Perform gradient descent to minimize the total loss $L$. Quantization is included in the forward pass using a straight-through estimator to approximate gradients through the non-differentiable quantization step [S1].
++1.  **Freeze Geometry:** Fix the positions and covariances of all Gaussians; disable densification and pruning operations [S1].
++2.  **Optimize Appearance:** Enable gradient updates exclusively for appearance attributes (e.g., spherical harmonics coefficients, opacity, scaling) [S1].
++3.  **Compute Losses:** Calculate the distortion loss $L_D$ using L1 and SSIM metrics, and calculate the sparsity loss $L_S$ based on the RAHT coefficients of the current attributes [S1].
++4.  **Update with Quantization:** Include quantization in the forward pass using a straight-through estimator to approximate gradients through the non-differentiable quantization step [S1].
+ 5.  **Iterate:** Repeat the optimization for a fixed number of iterations (e.g., 2k or 5k steps) [S1].
+ 
+@@ -49,62 +47,59 @@
+ **Pseudocode**
+ ```python
+-def sparsity_promoting_finetuning(gaussians, training_data, num_iterations, lambda_ssim, lambda_s):
+-    """
+-    Fine-tune appearance attributes of 3D Gaussians to promote sparsity in RAHT domain.
+-    
+-    Args:
+-        gaussians: Object containing Gaussian positions, covariances, and appearance attributes.
+-        training_data: Set of training views for loss calculation.
+-        num_iterations: Number of optimization steps.
+-        lambda_ssim: Weight for SSIM loss (default 0.2).
+-        lambda_s: Weight for sparsity loss (default 5e-7).
+-    """
+-    # Step 1: Freeze geometry
++def sparsity_promoting_finetuning(gaussians, training_views, num_iterations, lambda_ssim, lambda_s):
++    # Step 1: Freeze geometry and disable densification
+     gaussians.positions.requires_grad = False
+     gaussians.covariances.requires_grad = False
+-    # Densification is disabled by not calling densification functions
+     
+-    # Step 2: Ensure appearance attributes require gradients
++    # Step 2: Enable gradients only for appearance attributes
+     for attr in gaussians.appearance_attributes:
+         attr.requires_grad = True
+-        
+-    optimizer = torch.optim.Adam(gaussians.appearance_attributes, lr=1e-4)
+-    
++
++    optimizer = GradientDescentOptimizer(gaussians.appearance_attributes)
++
+     for step in range(num_iterations):
+         optimizer.zero_grad()
+-        
+-        # Render current attributes
+-        rendered_images = render(gaussians, training_data)
+-        target_images = training_data.targets
+-        
+-        # Calculate Distortion Loss
+-        l1_loss = calculate_l1_loss(rendered_images, target_images)
+-        ssim_loss = calculate_ssim_loss(rendered_images, target_images)
+-        l_d = (1 - lambda_ssim) * l1_loss + lambda_ssim * ssim_loss
+-        
+-        # Calculate Sparsity Loss
+-        # Apply RAHT to attributes to get transform coefficients
+-        # Note: RAHT is applied per channel across spatially grouped Gaussians
+-        raht_coeffs = apply_raht(gaussians.appearance_attributes)
+-        
+-        # L1 norm of coefficients
+-        n_ch = gaussians.appearance_attributes.num_channels
+-        n_ac = raht_coeffs.num_ac_coefficients
+-        l_s = torch.mean(torch.abs(raht_coeffs))
+-        
+-        # Total Loss
+-        l_total = (1 - lambda_s) * l_d + lambda_s * l_s
+-        
+-        # Backpropagate
+-        l_total.backward()
+-        
+-        # Step 3: Quantization-aware update
+-        # Straight-through estimator: quantize weights for forward pass, 
+-        # but use raw gradients for update
+-        quantized_attrs = quantize(gaussians.appearance_attributes)
+-        # Forward pass with quantized attributes for next iteration's render
+-        # (Implementation detail: usually handled by custom autograd function)
+-        
++        batch_loss = 0.0
++
++        for view in training_views:
++            # Straight-through quantization: quantize for forward pass, keep raw for backward
++            quantized_attrs = straight_through_quantize(gaussians.appearance_attributes)
++
++            # Standard volume rendering pass
++            rendered_image = render(gaussians, view, quantized_attrs)
++            target_image = view.target
++
++            # Distortion loss components
++            l1_loss = sum(abs(rendered_image - target_image)) / len(rendered_image)
++            ssim_loss = 1.0 - structural_similarity(rendered_image, target_image)
++            l_d = (1 - lambda_ssim) * l1_loss + lambda_ssim * ssim_loss
++
++            # Sparsity loss on RAHT coefficients
++            raht_coeffs = apply_raht(gaussians.appearance_attributes)
++            n_ch = raht_coeffs.shape[0]
++            n_ac = raht_coeffs.shape[1]
++            l_s = sum(abs(raht_coeffs)) / (n_ch * n_ac)
++
++            batch_loss += (1 - lambda_s) * l_d + lambda_s * l_s
++
++        batch_loss.backward()
+         optimizer.step()
++
++def straight_through_quantize(attrs):
++    # Quantize for forward pass, but pass raw gradients backward
++    quantized = round_to_grid(attrs)
++    return quantized
++
++def apply_raht(attrs):
++    # Apply Reconstruction Adaptive Hierarchical Transform to attributes
++    return raht_transform(attrs)
++
++def render(gaussians, view, attrs):
++    # Standard differentiable volume rendering of Gaussians
++    return volume_render(gaussians, view, attrs)
++
++def structural_similarity(img1, img2):
++    # Standard SSIM computation
++    return compute_ssim(img1, img2)
+ ```
+ 
+@@ -112,12 +107,12 @@
+ 
+ ### JointRF Training Procedure
+-A sibling method that likely involves joint optimization of rendering and compression parameters. [JointRF Training Procedure](11657-jointrf-training-procedure.md)
++A sibling method that jointly optimizes rendering and compression parameters. It differs by focusing on joint parameter optimization rather than explicit sparsity-promoting loss in the transform domain. Choose it when joint optimization of rendering and compression is preferred over sequential fine-tuning. [JointRF Training Procedure](11657-jointrf-training-procedure.md)
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: The computational overhead is negligible because RAHT is already part of the training loop for quantization-aware fine-tuning [S1].
+-*   **Memory Complexity**: No significant additional memory overhead compared to standard fine-tuning, as it reuses existing data structures for RAHT coefficients [S1].
+-*   **Performance**: Improves rate-distortion performance by concentrating energy into fewer transform coefficients, allowing for better compression efficiency [S1].
+-*   **Strengths**: Provides flexible control over the rate-distortion trade-off via $\lambda_S$ tuning [S1].
+-*   **Limitations**: Requires additional training iterations (e.g., 2k-5k steps) [S1].
++*   **Time Complexity:** The computational overhead is negligible because RAHT is already part of the training loop for quantization-aware fine-tuning [S1].
++*   **Memory Complexity:** Not given in the sources.
++*   **Performance:** Improves rate-distortion performance by concentrating energy into fewer transform coefficients, allowing for better compression efficiency [S1].
++*   **Strengths:** Provides flexible control over the rate-distortion trade-off via $\lambda_S$ tuning [S1].
++*   **Limitations:** Requires additional training iterations (e.g., 2k-5k steps) [S1].
+ 
+ ## Background

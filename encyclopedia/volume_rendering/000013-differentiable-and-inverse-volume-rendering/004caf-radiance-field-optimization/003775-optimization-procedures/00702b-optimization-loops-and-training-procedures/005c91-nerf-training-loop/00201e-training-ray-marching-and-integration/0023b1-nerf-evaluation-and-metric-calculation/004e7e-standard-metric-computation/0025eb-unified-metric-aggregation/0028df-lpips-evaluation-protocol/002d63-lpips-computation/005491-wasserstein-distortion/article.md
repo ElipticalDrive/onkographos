@@ -1,0 +1,105 @@
+# Wasserstein Distortion
+
+Also called: Feature-space agnostic distortion metric
+
+## Overview
+Wasserstein Distortion (WD) is a perceptual image-to-image metric that compares spatially local estimates of statistics (mean and standard deviation) in deep feature space, allowing textures with large pointwise differences but similar local statistics to be considered perceptually similar [S1][S2, unofficial]. Unlike pointwise metrics such as [LPIPS Computation](5498-lpips-computation.md) which penalize phase shifts and exact pixel alignment, WD models human peripheral vision by aggregating features over local pooling regions, making it suitable for optimizing perceptual texture quality in differentiable rendering [S1][S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- **Inputs:** Ground truth image $I_{\text{gt}}$ and reconstructed image $I_{\text{pred}}$ [S1][S2, unofficial].
+- **Outputs:** A scalar distortion value $D_{\text{WD}}$ [S1][S2, unofficial].
+
+**Data Structures:**
+- Feature maps $F_{\text{gt}}, F_{\text{pred}}$: Multi-scale representations extracted from a pre-trained VGG network [S2, unofficial].
+- Pooling Kernel: A spatial window centered at each pixel used to compute local statistics [S1][S2, unofficial].
+
+**Parameters:**
+- $\sigma$: Hyperparameter controlling the trade-off between point-wise fidelity ($\sigma \to 0$) and texture re-sampling/peripheral vision mimicry (larger $\sigma$) [S2, unofficial].
+- Typical Value: $\sigma = 4$ (constant) [S1].
+- Spatially Varying $\sigma(x,y)$: Optional, allowing greater flexibility by allocating more weight to salient regions [S2, unofficial].
+- Kernel Size: Sources disagree on the exact definition; one defines the pooling kernel size directly as $\sigma$ [S1], while the other defines it as $2\sigma$ [S2, unofficial].
+
+**Steps:**
+1. **Feature Extraction:** Extract multi-scale feature representations $F_{\text{gt}}$ and $F_{\text{pred}}$ from the pre-trained VGG network for the ground truth and reconstructed images respectively [S2, unofficial].
+2. **Local Statistics Computation:** For each feature map and each spatial location $(x, y)$, apply a pooling kernel centered at $(x, y)$ to the feature map [S2, unofficial]. Compute the local mean $\mu$ and local standard deviation $\nu$ of the features within this kernel [S1]. Let $\mu, \nu$ be the statistics for the ground truth image and $\hat{\mu}, \hat{\nu}$ be the statistics for the reconstructed image [S1].
+3. **Local Distortion Calculation:** Compute the local Wasserstein distortion $d_{\text{WD}}$ at $(x, y)$ using the Root Mean Square Error (RMSE) between the local statistics [S1]:
+   $$d_{\text{WD}}(x, y) = \sqrt {(\mu - \hat {\mu })^2 + (\nu - \hat {\nu })^2}$$
+   This is equivalent to computing the squared 2-Wasserstein divergence $W_2^2$ between two 1D Gaussian distributions defined by $(\mu, \nu)$ and $(\hat{\mu}, \hat{\nu})$ [S2, unofficial].
+4. **Aggregation:** Spatially average and sum the local $d_{\text{WD}}$ values across all spatial locations and all feature maps to produce the final metric [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn.functional as F
+
+def wasserstein_distortion(features_gt, features_pred, sigma=4):
+    """
+    Computes Wasserstein Distortion between ground truth and predicted feature maps.
+    
+    Args:
+        features_gt: List of tensors [F1, F2, ...], ground truth VGG features of shape (B, C, H, W).
+        features_pred: List of tensors [F1, F2, ...], predicted VGG features of shape (B, C, H, W).
+        sigma: Hyperparameter for kernel size. Note: sources define kernel size as either sigma [S1] or 2*sigma [S2, unofficial].
+        
+    Returns:
+        Scalar tensor representing the WD score.
+    """
+    # VGG feature extraction is external to this metric [S2, unofficial].
+    
+    total_distortion = 0.0
+    # Using 2*sigma as per [S2, unofficial]; adjust to sigma if following [S1]
+    kernel_size = 2 * sigma
+    padding = kernel_size // 2
+    
+    for F_gt, F_pred in zip(features_gt, features_pred):
+        # Step 2: Local Statistics Computation
+        # Compute local mean
+        mean_gt = F.avg_pool2d(F_gt, kernel_size=kernel_size, stride=1, padding=padding)
+        mean_pred = F.avg_pool2d(F_pred, kernel_size=kernel_size, stride=1, padding=padding)
+        
+        # Compute local standard deviation: sqrt(E[X^2] - (E[X])^2)
+        sq_gt = F.avg_pool2d(F_gt ** 2, kernel_size=kernel_size, stride=1, padding=padding)
+        sq_pred = F.avg_pool2d(F_pred ** 2, kernel_size=kernel_size, stride=1, padding=padding)
+        
+        # Clamp variance to non-negative values for numerical stability [G]
+        var_gt = torch.clamp(sq_gt - mean_gt ** 2, min=0.0)
+        var_pred = torch.clamp(sq_pred - mean_pred ** 2, min=0.0)
+        std_gt = torch.sqrt(var_gt)
+        std_pred = torch.sqrt(var_pred)
+        
+        # Step 3: Local Distortion Calculation
+        # d_WD = sqrt( (mu - mu_hat)^2 + (nu - nu_hat)^2 )
+        local_distortion = torch.sqrt((mean_gt - mean_pred) ** 2 + (std_gt - std_pred) ** 2)
+        
+        # Step 4: Aggregation
+        # Spatially average over H and W, then sum across channels (feature maps)
+        total_distortion += local_distortion.mean(dim=[2, 3]).sum()
+        
+    return total_distortion
+```
+
+**Edge Cases and Pitfalls:**
+- **Precision:** When computing standard deviation, ensure numerical stability by clamping the variance to non-negative values before taking the square root to handle floating-point errors [G].
+- **Boundary Conditions:** The pooling kernel requires padding to handle image boundaries correctly; use 'same' padding or explicit reflection/replication padding [G].
+- **Texture Perception:** Pointwise metrics fail to account for phase shifts (e.g., 180-degree phase shift in textures) [S1]. WD addresses this by aggregating over local regions, but if $\sigma$ is too small, it reverts to pointwise behavior and loses this benefit [S1].
+- **Global vs Local:** WD is not the Wasserstein Distance (Earth Mover’s Distance) which measures global distribution divergence [S2, unofficial]. WD is strictly an image-to-image local statistic metric [S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** Dominated by VGG feature extraction ($O(N)$ where $N$ is pixels) and pooling operations ($O(N \cdot \sigma^2)$) [G]. Overall linear with respect to image resolution and number of feature maps [G].
+- **Memory Complexity:** Requires storing multi-scale VGG feature maps for both images [G]. Memory usage scales with image resolution and number of VGG layers [G].
+- **Measured Performance:** Not given in the sources.
+- **Scaling:** Performance scales linearly with resolution and feature map count [G]. Larger $\sigma$ increases computational cost per pixel due to larger pooling windows [S2, unofficial].
+- **Strengths:** Better matches human perceptual judgments than LPIPS or DISTS by accounting for texture realism and peripheral vision [S2, unofficial]. Permissive to texture resampling in less salient regions [S1].
+- **Limitations:** Computationally heavier than pointwise metrics due to pooling and multi-scale feature extraction [S2, unofficial]. Requires a pre-trained VGG network [S2, unofficial].
+- **When to Use:** When perceptual quality (texture realism) is more important than exact pixel-wise reconstruction fidelity, such as in differentiable rendering optimization [S1][S2, unofficial].
+- **When Not to Use:** When exact signal reconstruction is required, or when computational resources are severely limited [S2, unofficial].
+
+## Background
+Wasserstein Distortion was introduced as a feature-space agnostic distortion metric to address the limitations of pointwise metrics like LPIPS in capturing human texture perception [S1]. It is motivated by models of the human visual system suggesting that peripheral vision encodes images using summary statistics over local pooling regions rather than precise pointwise values [S1]. The metric was notably used in the context of overfitted image codecs to showcase its effectiveness in perceptual optimization [S2, unofficial]. It distinguishes itself from the global Wasserstein Distance (Earth Mover’s Distance) by focusing on local statistics matching [S2, unofficial].
+
+## Sources
+[S1] Drop-In Perceptual Optimization for 3D Gaussian Splatting, https://doi.org/10.1007/978-3-032-37350-2_25, fetched 2026-10-30
+[S2] Seeing What Matters: Perceptual Wrapper with Common Randomness for 3D Gaussian Splatting, https://doi.org/10.48550/arXiv.2606.11782, fetched 2026-10-29 (unofficial)

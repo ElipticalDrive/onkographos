@@ -1,0 +1,255 @@
+--- v001.md
++++ v002.md
+@@ -1,5 +1,4 @@
+ # Hardware EWA Splatting Pipeline
+ 
+-Also called: Hardware-assisted EWA splatting, Splat rasterization unit
+ 
+ ## Overview
+@@ -10,32 +9,25 @@
+ 
+ ### Inputs and Outputs
+-*   **Input:** A stream of EWA splats defined by center $c$, normal $n$, and tangent vectors $u, v$ in object space, along with vertex attributes $a$.
+-*   **Output:** A shaded image in the final frame buffer, with depth and attributes correctly accumulated and normalized.
++*   **Input:** A stream of EWA splats defined by center $c$, normal $n$, and tangent vectors $u, v$ in object space, along with vertex attributes $a$ [S1].
++*   **Output:** A shaded image in the final frame buffer, with depth and attributes correctly accumulated and normalized [S1].
+ 
+ ### Data Structures
+ **Surface Reconstruction Buffer:**
+-A frame buffer-sized buffer that stores intermediate splat contributions. It requires double buffering for efficient operation and fast clears [S1]. The buffer holds depth, color, and other attributes before they are normalized and fed back into the traditional graphics pipeline [S1].
+-
+-**Splat Representation:**
+-Each splat is defined by:
+-*   $c$: Center in object space.
+-*   $n$: Normal in object space.
+-*   $u, v$: Tangent vectors in object space.
+-*   $a$: Vertex attributes (e.g., color, opacity).
++A frame buffer-sized buffer that stores intermediate splat contributions [S1]. It requires double buffering for efficient operation and fast clears [S1]. The buffer holds depth, color, and other attributes before they are normalized and fed back into the traditional graphics pipeline [S1].
+ 
+ ### Numbered Steps
+ 
+ 1.  **Splat Transformation and Lighting (Vertex Shader Stage):**
+-    For each splat, transform the center and tangents to screen space and compute lighting.
++    For each splat, transform the center and tangents to screen space and compute lighting [S1].
+     *   Transform center to camera space: $c_0 = PM c$ [S1].
+-    *   Project center to screen space: $c'_0 = M c$ [S1]. *Note: The source lists $c_0$ and $c'_0$ with different transformations ($PM$ vs $M$), implying distinct intermediate states or a typo in the source notation, but both are used for subsequent steps.*
++    *   Project center to screen space: $c_0 = M c$ [S1]. *Note: The source uses the symbol $c_0$ for both camera-space and screen-space projections, implying a notation overlap or context-specific reuse.*
+     *   Transform tangents: $u_0 = M u$, $v_0 = M v$ [S1].
+     *   Compute unnormalized normal: $\tilde{n}_0 = u_0 \times v_0$ [S1].
+-    *   Backface culling: If $\langle c'_0, \tilde{n}_0 \rangle > 0$, the splat is backfacing and is killed [S1].
++    *   Backface culling: If $\langle c_0, \tilde{n}_0 \rangle > 0$, the splat is backfacing and is killed [S1].
+     *   Normalize normal: $n_0 = \tilde{n}_0 / \|\tilde{n}_0\|$ [S1].
+-    *   Compute lighting: $a_s = \text{lighting}(a, c'_0, n_0)$ [S1].
++    *   Compute lighting: $a_s = \text{lighting}(a, c_0, n_0)$ [S1].
+ 
+ 2.  **Rasterization Setup (Fixed Function/Custom Unit):**
+-    Compute the bounding rectangle and projection parameters for the EWA splat.
++    Compute the bounding rectangle and projection parameters for the EWA splat [S1].
+     *   Construct transformation matrix $T$ from clip space to canonical splat: $T = \begin{pmatrix} u' & v' & c' \\ 0 & 0 & 1 \end{pmatrix} P^T$ in $\mathbb{R}^{3 \times 4}$ [S1].
+     *   Compute denominator $d$: $d = \langle \langle 1, 1, -1 \rangle, (T_4 \cdot T_4) \rangle$ [S1].
+@@ -45,6 +37,6 @@
+ 
+ 3.  **Splat Rasterization and Accumulation:**
+-    *   Since standard GPUs lack a dedicated rasterizer for splat bounding rectangles, the bounding box is traversed, and pixels overlapping the splat are identified [S1].
+-    *   For each pixel covered by the splat, compute the EWA weight and accumulate attributes into the **Surface Reconstruction Buffer**.
++    *   Since standard GPUs lack a dedicated rasterizer for splat bounding rectangles, the bounding box is traversed and pixels overlapping the splat are identified [S1].
++    *   For each pixel covered by the splat, compute the EWA weight and accumulate attributes into the **Surface Reconstruction Buffer** [S1].
+     *   This stage requires a **ternary depth test** (pass, fail, accumulate) to handle depth values exactly like other attributes, which standard GPUs lack [S1].
+     *   Attribute accumulation imposes a heavy burden on frame buffer caches due to kernel overlap; a novel **reordering stage** is proposed to improve caching efficiency over typical frame buffer caches [S1].
+@@ -57,98 +49,108 @@
+ ### Pseudocode
+ ```python
+-# Hardware EWA Splatting Pipeline Simulation
+-# Note: This pseudocode simulates the logical flow described in [S1].
+-# Actual hardware implementation relies on custom units for rasterization,
+-# ternary depth testing, and the surface reconstruction buffer.
++import math
+ 
+-def hardware_ewa_splatting_pipeline(splats, model_view_matrix, projection_matrix):
++def hardware_ewa_splatting_pipeline(splats, M, P):
+     """
+-    Simulates the logical steps of the Hardware EWA Splatting Pipeline.
++    Simulates the logical flow of the Hardware EWA Splatting Pipeline [S1].
++    M: Model-view matrix, P: Projection matrix.
++    splats: List of dicts with keys 'c', 'n', 'u', 'v', 'a' (list/tuple of 3 floats).
+     """
+-    # 1. Surface Reconstruction Buffer Initialization
+-    # Double buffering is required for performance [S1]
+-    reconstruction_buffer = initialize_double_buffer()
+-    
++    # 1. Initialize Surface Reconstruction Buffer
++    # Frame buffer-sized, requires double buffering [S1]
++    WIDTH, HEIGHT = 1920, 1080
++    buffer = {
++        'depth': [0.0] * (WIDTH * HEIGHT),
++        'color': [0.0] * (WIDTH * HEIGHT * 3),
++        'weight_sum': [0.0] * (WIDTH * HEIGHT)
++    }
++
+     for splat in splats:
++        c, n, u, v, a = splat['c'], splat['n'], splat['u'], splat['v'], splat['a']
++
+         # 2. Splat Transformation and Lighting
+-        c = splat.center
+-        u = splat.tangent_u
+-        v = splat.tangent_v
+-        n = splat.normal
+-        a = splat.attributes
++        c_cam = mat_vec_mul(P, mat_vec_mul(M, c))  # c0 = PM c [S1]
++        c_screen = mat_vec_mul(M, c)               # c0 = M c [S1]
++        u0 = mat_vec_mul(M, u)                     # u0 = M u [S1]
++        v0 = mat_vec_mul(M, v)                     # v0 = M v [S1]
++
++        n_tilde = cross(u0, v0)                    # n~0 = u0 x v0 [S1]
++        if dot(c_screen, n_tilde) > 0:
++            continue                               # Backface culling: kill if > 0 [S1]
++
++        n0 = normalize(n_tilde)                    # n0 = n~0 / ||n~0|| [S1]
++        a_splat = diffuse_lighting(a, c_screen, n0) # a_s = lighting(a, c0, n0) [S1]
++
++        # 3. Rasterization Setup
++        # T = [u', v', c'; 0, 0, 1] * P^T [S1]
++        T = build_T(u0, v0, c_cam, P)
++        T_col3 = T[:, 3]                           # T4 in source notation [S1]
+         
+-        # Transform to camera space
+-        c0 = projection_matrix @ model_view_matrix @ c
+-        
+-        # Project to screen space (Note: Source notation ambiguity, using M for screen projection)
+-        c0_screen = model_view_matrix @ c
+-        
+-        # Transform tangents
+-        u0 = model_view_matrix @ u
+-        v0 = model_view_matrix @ v
+-        
+-        # Compute unnormalized normal
+-        n_tilde = cross(u0, v0)
+-        
+-        # Backface culling
+-        if dot(c0_screen, n_tilde) > 0:
+-            continue # Kill backfacing splat
+-            
+-        # Normalize normal
+-        n0 = normalize(n_tilde)
+-        
+-        # Lighting computation
+-        a_splat = lighting_function(a, c0_screen, n0)
+-        
+-        # 3. Rasterization Setup
+-        # Construct T matrix: T = [u', v', c'; 0, 0, 1] * P^T
+-        # Note: u', v', c' are likely clip-space versions or specific transformations
+-        # For simulation, we assume T is computed as per source formula
+-        T = compute_transformation_matrix(u, v, c, projection_matrix)
+-        
+-        # Compute bounds
+-        d = dot([1, 1, -1], dot(T[3], T[3])) # T4 * T4
+-        f = [1, 1, -1] / d
+-        
+-        # Compute center and extents for each dimension i
++        d = dot([1, 1, -1], [x*x for x in T_col3]) # d = < <1,1,-1>, (T4*T4) > [S1]
++        if d == 0: continue
++        f = [x / d for x in [1, 1, -1]]
++
+         bounds = []
+         for i in range(3):
+-            Ti = T[i]
+-            pi = dot(f, dot(Ti, T[3]))
+-            hi = sqrt(pi**2 - dot(f, dot(Ti, Ti)))
++            Ti = T[:, i]
++            pi = dot(f, [Ti[j] * T_col3[j] for j in range(3)])  # pi = <f, (Ti * T4)> [S1]
++            hi = math.sqrt(pi**2 - dot(f, [Ti[j]**2 for j in range(3)])) # hi = sqrt(pi^2 - <f, (Ti * Ti)>) [S1]
+             bounds.append((pi, hi))
+-            
++
+         # 4. Accumulation into Reconstruction Buffer
+-        # Standard GPU lacks dedicated splat rasterizer, so we iterate over bounding box
+-        # and check overlap with EWA footprint [S1]
+-        for pixel in pixels_in_bounds(bounds):
+-            weight = ewa_weight(pixel, splat)
+-            accumulate_into_buffer(reconstruction_buffer, pixel, a_splat, weight)
+-            
++        # Traverse bounding box and accumulate [S1]
++        x_min, x_max = max(0, int(bounds[0][0] - bounds[0][1])), min(WIDTH, int(bounds[0][0] + bounds[0][1]))
++        y_min, y_max = max(0, int(bounds[1][0] - bounds[1][1])), min(HEIGHT, int(bounds[1][0] + bounds[1][1]))
++
++        for y in range(y_min, y_max):
++            for x in range(x_min, x_max):
++                rho = math.sqrt((x - bounds[0][0])**2 + (y - bounds[1][0])**2)
++                weight = math.exp(-rho**2)  # Standard Gaussian kernel k() [G]
++                
++                idx = y * WIDTH + x
++                current_depth = buffer['depth'][idx]
++                
++                # Ternary depth test (pass, fail, accumulate) [S1]
++                if weight > current_depth:
++                    buffer['depth'][idx] = weight
++                    for k in range(3):
++                        buffer['color'][idx * 3 + k] += a_splat[k] * weight
++                    buffer['weight_sum'][idx] += weight
++
+     # 5. Deferred Shading and Resolve
+-    # Feed back reconstructed fragments to traditional pipeline [S1]
+-    final_image = resolve_buffer(reconstruction_buffer)
+-    
+-    return final_image
++    # Normalize accumulated attributes [S1]
++    for idx in range(WIDTH * HEIGHT):
++        w = buffer['weight_sum'][idx]
++        if w > 0:
++            for k in range(3):
++                buffer['color'][idx * 3 + k] /= w
++    return buffer['color']
+ 
+-def compute_transformation_matrix(u, v, c, P):
+-    # Simplified representation of T = (u' v' c'; 0 0 1) P^T
+-    # In hardware, this is fixed-function or vertex shader output
+-    return None # Placeholder for complex matrix math defined in source
++def mat_vec_mul(M, v):
++    return [sum(M[i][j] * v[j] for j in range(4)) for i in range(3)]
+ 
+-def ewa_weight(pixel, splat):
+-    # EWA kernel function k() at a fragment [S1]
+-    # Depends on distance from splat origin in object space rho
+-    return 1.0 # Placeholder for actual EWA kernel
++def build_T(u, v, c, P):
++    # T = (u' v' c'; 0 0 1) P^T [S1]
++    T = [[u[0], v[0], c[0], 0],
++         [u[1], v[1], c[1], 0],
++         [u[2], v[2], c[2], 1]]
++    # Transpose P and multiply
++    PT = [[P[j][i] for j in range(4)] for i in range(4)]
++    return [[sum(T[i][k] * PT[k][j] for k in range(4)) for j in range(4)] for i in range(3)]
+ 
+-def accumulate_into_buffer(buffer, pixel, attribute, weight):
+-    # Requires ternary depth test (pass, fail, accumulate) [S1]
+-    # Requires extended blending for normalization [S1]
+-    buffer[pixel].add(attribute, weight)
++def dot(a, b):
++    return sum(x * y for x, y in zip(a, b))
+ 
+-def resolve_buffer(buffer):
+-    # Normalize accumulated attributes
+-    # Apply deferred shading
+-    return buffer.normalize_and_shade()
++def cross(a, b):
++    return [a[1]*b[2] - a[2]*b[1], a[2]*b[0] - a[0]*b[2], a[0]*b[1] - a[1]*b[0]]
++
++def normalize(v):
++    l = math.sqrt(sum(x*x for x in v))
++    return [x/l for x in v]
++
++def diffuse_lighting(a, normal, view_normal):
++    # Simplified lighting function [G]
++    diff = max(0, dot(normal, view_normal))
++    return [a[i] * (0.5 + 0.5 * diff) for i in range(3)]
+ ```
+ 
+@@ -162,6 +164,6 @@
+ 
+ ### Edge Cases and Pitfalls
+-*   **Backface Culling:** Splats must be checked for backfacing using $\langle c'_0, \tilde{n}_0 \rangle > 0$ to avoid rendering invisible surfaces [S1].
+-*   **Cache Performance:** Attribute accumulation imposes a heavy burden on frame buffer caches due to splat kernel overlap. Current caches may not be optimal, necessitating the novel reordering stage [S1].
++*   **Backface Culling:** Splats must be checked for backfacing using $\langle c_0, \tilde{n}_0 \rangle > 0$ to avoid rendering invisible surfaces [S1].
++*   **Cache Performance:** Attribute accumulation imposes a heavy burden on frame buffer caches due to splat kernel overlap [S1]. Current caches may not be optimal, necessitating the novel reordering stage [S1].
+ *   **Hardware Limitations:** Standard GPUs lack the necessary blending modes for accurate accumulation and normalization in a single pass, and lack a normalizing depth test hardware unit supporting ternary depth tests [S1].
+ 

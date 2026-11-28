@@ -1,0 +1,80 @@
+# Transparent Brick Culling
+
+
+## Overview
+Transparent Brick Culling discards bricks that contain no visible data by comparing encoded brick histograms against encoded transfer functions using bitwise operations [S1]. It operates on the value distribution within a brick to determine visibility [S1].
+
+## How it works
+**Inputs and Outputs:**
+- Input: An encoded brick histogram and an encoded transfer function [G].
+- Output: A boolean indicating whether the brick should be discarded or processed [G].
+
+**Data Structures:**
+- **Encoded Transfer Function:** A bit vector representing the opacity of value ranges in the transfer function [G].
+- **Encoded Brick Histogram:** A bit vector representing the presence of voxel values in each range within the brick [G].
+
+**Steps:**
+1. Encode the current transfer function into a bit mask $T$ [G].
+2. Encode the brick's value histogram into a bit mask $H$ [G].
+3. Compute the bitwise AND: $R = T \ \& \ H$ [S1].
+4. If $R = 0$, the brick contains no values that are visible under the current transfer function; discard it. Otherwise, process the brick [S1].
+
+**Parameters:**
+- Histogram resolution: Determined by the number of bits in the encoding. Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+- **Precision:** The accuracy depends on the binning of the histogram. If the binning is too coarse, a brick with visible values might be incorrectly culled if those values fall into a bin that is considered transparent or if the binning does not align with the transfer function's critical regions [G].
+- **Updates:** The encoded transfer function must be updated whenever the user modifies the transfer function [G]. The encoded histogram must be updated whenever the brick's data changes [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def is_brick_visible(brick_histogram_bits, transfer_function_bits):
+    """
+    brick_histogram_bits: int, bitmask where bit i is 1 if brick has values in bin i
+    transfer_function_bits: int, bitmask where bit i is 1 if bin i is visible
+    Returns: True if brick should be processed, False if it should be culled
+    """
+    visible_bits = brick_histogram_bits & transfer_function_bits
+    if visible_bits == 0:
+        return False
+    return True
+```
+
+## Subtopics
+
+### Global Attribute-Based Culling
+Culls bricks based on global properties such as the transfer function, iso-value, or segmented object states [S2]. It relies on pre-computed min/max values for each brick, which are compared against the transfer function to determine if the brick is invisible [S2]. It is chosen when memory bandwidth is limited and pre-computed bounds are available, but it requires updating these bounds whenever the transfer function changes [S2]. It is used for culling against iso-surfaces and enabled/disabled objects in segmented volume rendering [S2].
+
+### Hybrid Transparent Region Removal and Skipping
+A strategy to accelerate volume raycasting by efficiently removing and skipping transparent regions using quantized binary histograms, granular resolution octrees, and a cell invisibility cache [S3]. The workflow removes transparent bricks on a brick basis, performs octree projection to support refined removal of smaller transparent regions within bricks, and uses a Cell Invisibility Cache (CIC) to skip remaining transparent cells after octree projection [S3]. Per-brick metadata stores min-max values and quantized binary histograms [S3].
+
+### Transparent Region Removal
+Converts bricked geometry and octrees to a polygonal structure rendered into a z-buffer to determine rays-volume intersections up to the resolution of the granular octree [S3]. It traverses the brick list to determine which bricks have visible data using quantized binary histograms (pre-classification) or min-max encodings (post-classification), then evaluates the octree of visible bricks to render sub-bricks containing visible data [S3]. Using more than three octree levels causes the number of polygons to exceed the rendering performance of commodity graphics hardware [S3].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+- Time: $O(1)$ per brick for the bitwise AND operation, assuming the histogram and transfer function are pre-encoded. Encoding the histogram takes $O(N)$ where $N$ is the number of voxels in the brick [G].
+- Memory: Requires storing the encoded histogram for each brick. The size depends on the histogram resolution. Not given in the sources.
+
+**Measured Performance:**
+- In a distributed volume visualization system (DViz/DHCS) with 1024x768 resolution, using this technique allowed efficient culling of transparent bricks during roaming [S1]. Specific frame rate improvements are not isolated from other optimizations in the source [S1].
+
+**Strengths and Limitations:**
+- Strengths: Efficient bitwise operations; accurate detection of transparency based on actual value distribution [S1].
+- Limitations: Requires pre-computation and storage of histograms; sensitive to histogram binning resolution [G].
+
+**When to use:**
+- Use when accurate culling is needed based on value distribution and memory allows storing histograms for all bricks [G].
+
+**When not to use:**
+- Do not use if memory is extremely constrained and only min/max bounds are feasible [G].
+
+## Background
+The technique is used in large-scale volume rendering to reduce network and memory bandwidth by avoiding the transfer and processing of invisible bricks [S1]. It is based on the value histogram technique introduced in [17] (which corresponds to a source not listed in the provided references, but the method is described in [S1]).
+
+## Sources
+[S1] Distributed Shared Memory for Roaming Large Volumes, https://doi.org/10.1109/tvcg.2006.135, fetched 2026-10-26
+[S2] State-of-the-Art in GPU-Based Large-Scale Volume Visualization, https://vcg.seas.harvard.edu/publications/20150513-stateof-the-art-in-gpu-based-large-scale-volume-visualization/paper, fetched 2026-10-24
+[S3] Memory efficient acceleration structures and techniques for CPU-based volume raycasting of large data, https://doi.org/10.1109/svvg.2004.8, fetched 2026-10-26

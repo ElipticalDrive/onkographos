@@ -1,0 +1,276 @@
+--- v004.md
++++ v005.md
+@@ -8,11 +8,11 @@
+ ## How it works
+ ### Inputs and Outputs
+-- **Input:** A rectilinear grid $H$ containing a scalar field $f$, an isovalue $\alpha$, and a specific voxel (unit cube) with scalar values $f(v_i)$ at its 8 vertices $v_0, \dots, v_7$.
+-- **Output:** A set of triangles forming the isosurface patch $\bar{S}_\alpha$ within the cube, or an empty set if no intersection exists.
++- **Input:** A rectilinear grid $H$ containing a scalar field $f$, an isovalue $\alpha$, and a specific voxel (unit cube) with scalar values $f(v_i)$ at its 8 vertices $v_0, \dots, v_7$ [S1].
++- **Output:** A set of triangles forming the isosurface patch $\bar{S}_\alpha$ within the cube, or an empty set if no intersection exists [S1].
+ 
+ ### Data Structures
+-- **Vertex Label:** Each vertex $v_i$ is assigned a label $L(v_i) \in \{+, -, =\}$.
+-- **Group of Vertices (GV):** A set of vertices in the same cube connected by a path of vertices with the same non-zero label (positive or negative) along the edges or faces of the cube.
+-- **Group of Edges (GE):** A set of edges intersected by the isosurface that are incident to vertices in a specific GV.
++- **Vertex Label:** Each vertex $v_i$ is assigned a label $L(v_i) \in \{+, -, =\}$ [S1].
++- **Group of Vertices (GV):** A set of vertices in the same cube connected by a path of vertices with the same non-zero label (positive or negative) along the edges or faces of the cube [S1].
++- **Group of Edges (GE):** A set of edges intersected by the isosurface that are incident to vertices in a specific GV [S1].
+ - **Intersection Points:** For each intersected edge, the midpoint is used as a representative point for convex hull construction [S1].
+ 
+@@ -71,5 +71,5 @@
+     3.  If $conv(W)$ is 3-dimensional:
+         - Triangulate the boundary $\partial(conv(W))$.
+-        - Remove any triangles where all three vertices belong to the same Group of Edges ($GE_i$). This ensures the tunnel topology is preserved rather than capping the ends [S1].
++        - Remove any triangles where all three vertices belong to the same Group of Edges ($GE_i$). [S1]
+ 
+     **C. Interior Point Leaves Triangulation:**
+@@ -102,6 +102,6 @@
+ 
+ ### Edge Cases and Pitfalls
+-- **Degenerate Triangles:** Occur in standard Marching Cubes when $f(v_i) = \alpha$ is treated as positive, causing three intersected edges to meet at a single point. This method avoids this by explicitly labeling such vertices as "=" and excluding them from the "positive" connectivity paths used for convex hull generation [S1].
+-- **Skinny Triangles:** Generated when two vertices are close to a grid vertex and the third is far. The convex hull approach mitigates this by using midpoints and the cube center, creating more uniform triangles [S1].
++- **Degenerate Triangles:** Occur in standard Marching Cubes when $f(v_i) = \alpha$ is treated as positive, causing three intersected edges to meet at a single point. This method avoids this by explicitly labeling such vertices as "=" and including them in the vertex sets $W_i$ for convex hull generation, which naturally prevents degenerate geometry [S1].
++- **Skinny Triangles:** Generated when two vertices are close to a grid vertex and the third is far [S1].
+ - **Duplicate Faces:** If a cube has all vertices "=", no triangulation is generated. Additionally, the algorithm must maintain a state of triangulated grid faces to prevent adjacent cubes from triangulating the same face twice [S1].
+ - **Topology Ambiguity:** Cases 6.1.1 and 6.1.2 have identical vertex/edge groups but different interpolant topologies. The interior test is mandatory to distinguish them [S1].
+@@ -110,4 +110,6 @@
+ 
+ ```python
++import math
++
+ def extended_trilinear_triangulation(cube_vertices, isovalue):
+     """
+@@ -116,14 +118,10 @@
+     Returns: list of triangles (each triangle is a tuple of 3 vertex coordinates)
+     """
+-    
+     # Step 1: Vertex Classification
+     labels = []
+     for val in cube_vertices:
+-        if val > isovalue:
+-            labels.append('+')
+-        elif val < isovalue:
+-            labels.append('-')
+-        else:
+-            labels.append('=')
++        if val > isovalue: labels.append('+')
++        elif val < isovalue: labels.append('-')
++        else: labels.append('=')
+             
+     # Step 2: Cube Classification
+@@ -132,28 +130,21 @@
+     
+     # Step 3: Group Identification
+-    # Identify Groups of Vertices (GV) and Groups of Edges (GE)
+-    # This requires graph traversal on the cube edges/faces based on labels
+     groups = identify_groups(labels, is_positive_cube)
+     
+     # Step 4: Interior Test
+-    # Determine if groups are separated or joined inside the cube
+-    # Returns category: 'Simple Leaf', 'Tunnel', or 'Interior Point'
+-    # Also returns specific case ID if it's a complex case like 13
++    # Note: The exact Chernyaev/Custodio interior test formula is not provided in the sources.
++    # A standard implementation evaluates the trilinear interpolant at critical points.
+     category, case_id = interior_test(groups, labels, is_positive_cube)
+     
+     # Step 5: Triangulation
+     triangles = []
+-    
+     if category == 'Simple Leaf':
+         for group in groups:
+             triangles.extend(simple_leaves_triangulation(group, labels))
+-            
+     elif category == 'Tunnel':
+         triangles.extend(tunnel_triangulation(groups, labels))
+-        
+     elif category == 'Interior Point':
+         triangles.extend(interior_point_triangulation(groups, labels))
+         
+-    # Handle Case 13 specific combinations
+     if case_id == '13.3':
+         triangles.extend(case_13_3_triangulation(groups, labels))
+@@ -162,91 +153,110 @@
+             triangles.extend(simple_leaves_triangulation(group, labels))
+     elif case_id == '13.5.2':
+-        # Tunnel for main structure, Simple Leaves for the opposite region
+         triangles.extend(tunnel_triangulation(groups, labels))
+-        # Apply simple leaves to the specific region diagonally opposite
+-        # Implementation detail: identify the specific group/region and triangulate
+-        triangles.extend(simple_leaves_triangulation(opposite_group, labels))
++        triangles.extend(simple_leaves_triangulation(groups[1], labels))
+         
+-    # Deduplication check would happen at the grid level, not per-cube
+     return triangles
+ 
++def identify_groups(labels, is_positive_cube):
++    # Standard graph traversal on cube skeleton to find connected components
++    # of vertices with matching non-zero labels along edges/faces.
++    # Returns list of dicts: {'vertices': [idx], 'edges': [(start, end)]}
++    groups = []
++    visited = set()
++    target_label = '+' if is_positive_cube else '-'
++    
++    for i in range(8):
++        if labels[i] == target_label and i not in visited:
++            group_verts = []
++            group_edges = []
++            stack = [i]
++            while stack:
++                v = stack.pop()
++                if v in visited: continue
++                visited.add(v)
++                group_verts.append(v)
++                for e_start, e_end in CUBE_EDGES:
++                    if (v == e_start and labels[e_end] == target_label) or \
++                       (v == e_end and labels[e_start] == target_label):
++                        if e_start not in visited: stack.append(e_start)
++                        if e_end not in visited: stack.append(e_end)
++                        group_edges.append((e_start, e_end))
++            groups.append({'vertices': group_verts, 'edges': group_edges})
++    return groups
++
++def interior_test(groups, labels, is_positive_cube):
++    # Placeholder for Chernyaev/Custodio interior test.
++    # Returns category ('Simple Leaf', 'Tunnel', 'Interior Point') and case_id.
++    # In practice, this evaluates the trilinear interpolant's critical points.
++    return 'Simple Leaf', 'None'
++
+ def simple_leaves_triangulation(group, labels):
+-    """
+-    group: dict with 'vertices' (indices) and 'edges' (indices)
+-    """
+-    # Check for all-zero cube exception
+-    if all(l == '=' for l in labels):
+-        return []
+-        
+-    # Construct W_i
++    if all(l == '=' for l in labels): return []
+     W = []
+-    for edge_idx in group['edges']:
+-        # Midpoint of the edge
+-        p1 = get_vertex_coords(edge_idx.start)
+-        p2 = get_vertex_coords(edge_idx.end)
+-        W.append(midpoint(p1, p2))
+-        
++    for e_start, e_end in group['edges']:
++        W.append(midpoint(get_vertex_coords(e_start), get_vertex_coords(e_end)))
+     for v_idx in group['vertices']:
+         if labels[v_idx] in ['+', '=']:
+             W.append(get_vertex_coords(v_idx))
+-            
+-    # Convex Hull
+     hull = convex_hull_3d(W)
+-    
+-    # Triangulate boundary
+     boundary_tris = triangulate_boundary(hull)
+-    
+-    # Remove triangles on cube faces
+-    valid_tris = []
+-    for tri in boundary_tris:
+-        if not is_on_cube_face(tri):
+-            valid_tris.append(tri)
+-            
+-    return valid_tris
++    return [tri for tri in boundary_tris if not is_on_cube_face(tri)]
+ 
+ def tunnel_triangulation(groups, labels):
+-    """
+-    groups: list of all groups in the cube
+-    """
+     W = []
+     for group in groups:
+-        for edge_idx in group['edges']:
+-            p1 = get_vertex_coords(edge_idx.start)
+-            p2 = get_vertex_coords(edge_idx.end)
+-            W.append(midpoint(p1, p2))
+-            
++        for e_start, e_end in group['edges']:
++            W.append(midpoint(get_vertex_coords(e_start), get_vertex_coords(e_end)))
+     hull = convex_hull_3d(W)
+     boundary_tris = triangulate_boundary(hull)
+-    
+-    valid_tris = []
+-    for tri in boundary_tris:
+-        # Check if all 3 vertices belong to the same Group of Edges
+-        # This requires mapping triangle vertices back to their source groups
+-        if not all_vertices_in_same_group(tri, groups):
+-            valid_tris.append(tri)
+-            
+-    return valid_tris
++    return [tri for tri in boundary_tris if not all_vertices_in_same_group(tri, groups)]
+ 
+ def interior_point_triangulation(groups, labels):
+-    """
+-    Used for Case 13 subcases involving interior loops
+-    """
+-    # Identify faces with 4 intersected edges
+     intersected_faces = find_faces_with_4_intersections(labels)
+-    
+-    # Form polygonal curve
+     polygon = form_polygonal_curve(intersected_faces, labels)
+-    
+-    # Add center vertex
+     center = get_cube_center()
+-    
+-    # Triangulate from center to polygon segments
+-    triangles = []
+-    for i in range(len(polygon)):
+-        p1 = polygon[i]
+-        p2 = polygon[(i + 1) % len(polygon)]
+-        triangles.append((center, p1, p2))
+-        
+-    return triangles
++    return [(center, polygon[i], polygon[(i + 1) % len(polygon)]) for i in range(len(polygon))]
++
++def case_13_3_triangulation(groups, labels):
++    # Combines Interior Point Leaves and Simple Leaves on negative group
++    return interior_point_triangulation(groups, labels) + simple_leaves_triangulation(groups[1], labels)
++
++# Standard geometric helpers
++CUBE_EDGES = [(0,1), (1,2), (2,3), (3,0), (4,5), (5,6), (6,7), (7,4), (0,4), (1,5), (2,6), (3,7)]
++CUBE_FACES = [(0,1,2,3), (4,5,6,7), (0,1,5,4), (2,3,7,6), (0,3,7,4), (1,2,6,5)]
++
++def get_vertex_coords(idx):
++    return [(idx>>i)&1 for i in range(3)]
++
++def midpoint(p1, p2):
++    return tuple((a+b)/2.0 for a, b in zip(p1, p2))
++
++def get_cube_center():
++    return (0.5, 0.5, 0.5)
++
++def convex_hull_3d(points):
++    # Standard 3D convex hull algorithm (e.g., QuickHull or incremental)
++    # Returns list of triangular faces
++    pass
++
++def triangulate_boundary(hull):
++    # Returns list of triangles from hull faces
++    pass
++
++def is_on_cube_face(tri):
++    # Checks if all vertices of a triangle lie on a single cube face plane
++    pass
++
++def all_vertices_in_same_group(tri, groups):
++    # Checks if all 3 vertices of a triangle belong to the same GE
++    pass
++
++def find_faces_with_4_intersections(labels):
++    # Identifies faces where all 4 edges are intersected
++    pass
++
++def form_polygonal_curve(intersected_faces, labels):
++    # Connects intersection points based on bilinear interpolant behavior
++    pass
+ ```
+ 
+@@ -256,7 +266,6 @@
+ - **Measured Performance:** In a 5x5x5 piecewise-trilinear field test, the method produced correct Betti numbers (b0=1, b1=0, b2=1), whereas the Raman and Wenger method (which uses a lookup table covering only 23 of 33 behaviors) produced incorrect Betti numbers (b0=4, b1=0, b2=4) [S1].
+ - **Strengths:** Guarantees topological correctness for all 33 cases of the trilinear interpolant; avoids degenerate and skinny triangles; handles the "=" label explicitly.
+-- **Limitations:** More complex implementation than standard Marching Cubes due to the need for group identification and interior testing; convex hull computation adds overhead compared to simple lookup table indexing [S1].
++- **Limitations:** More complex implementation than standard Marching Cubes due to the need for group identification and interior testing.
+ - **When to use:** When topological correctness and mesh quality (avoiding degenerate triangles) are critical, and the underlying scalar field is assumed to be interpolated by a trilinear function.
+-- **When not to use:** When performance is the sole constraint and topological errors are acceptable; or when the scalar field is not well-approximated by a trilinear interpolant (e.g., higher-order splines) [S1].
+ 
+ ## Background

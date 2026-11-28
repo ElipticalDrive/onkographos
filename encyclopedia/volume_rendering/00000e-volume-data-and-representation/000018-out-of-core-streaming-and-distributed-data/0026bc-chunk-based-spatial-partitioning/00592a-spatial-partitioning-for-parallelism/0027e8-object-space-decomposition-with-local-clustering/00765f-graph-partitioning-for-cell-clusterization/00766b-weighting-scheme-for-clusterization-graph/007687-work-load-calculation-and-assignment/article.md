@@ -1,0 +1,131 @@
+# Work Load Calculation and Assignment
+
+Also called: Inside-Outside Test for Load Calculation
+
+## Overview
+This method calculates the rendering workload for spatial clusters in image-space parallel volume rendering to enable effective load balancing. It solves the problem of inaccurate work estimation caused by the coarse approximation of cluster bounding boxes, which leads to uneven processor loads and excessive communication during remapping. It is distinguished from simpler bounding-box approaches by using an exact inside-outside test on triangular faces, which provides the most accurate load distribution and establishes the correct hypergraph topology for neighbor-aware remapping [S1, unofficial].
+
+## How it works
+**Inputs:** A set of spatial clusters $C$, where each cluster contains a set of triangular faces $f$. The projection of these faces onto the screen grid (pixels or coarse-grain tiles) is required.
+**Outputs:** A scalar workload value $Load(C)$ for each cluster, representing the number of screen pixels affected by the cluster.
+
+**Data Structures:**
+*   **Cluster:** A collection of triangular faces.
+*   **Face:** Defined by three vertices in 3D space, projected to 2D screen coordinates.
+*   **Screen Grid:** A discrete set of pixels or tiles covering the image plane.
+
+**Steps:**
+1.  **Iterate Clusters:** For each cluster $C$ in the scene:
+2.  **Initialize Load:** Set $Load(C) = 0$.
+3.  **Iterate Faces:** For each triangular face $f$ in cluster $C$:
+4.  **Project Face:** Project the vertices of $f$ onto the screen plane to obtain a 2D triangle.
+5.  **Inside-Outside Test:** Perform an exact inside-outside test for every pixel (or tile) in the screen grid against the projected triangle.
+    *   If a pixel $p$ lies inside the projected triangle $f$, increment the workload count for that pixel.
+    *   This step determines the exact set of pixels affected by the face [S1, unofficial].
+6.  **Aggregate:** Sum the areas (pixel counts) of all faces in the cluster. The total workload is the sum of the areas of the triangular faces [S1, unofficial]:
+    $$ Load(C) = \sum_{f \in C} Area(f) $$
+    Where $Area(f)$ is the number of pixels covered by the projected triangle $f$ [S1, unofficial].
+7.  **Return:** Output $Load(C)$ for use in the hypergraph partitioning stage.
+
+**Parameters:**
+*   **Screen Resolution:** The granularity of the inside-outside test (pixel-level or tile-level). Higher resolution increases accuracy but also computation time for the test [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Degenerate Faces:** Faces with zero area (collinear vertices) contribute zero to the load and should be handled gracefully to avoid division by zero or invalid geometry errors [G].
+*   **Precision:** The inside-outside test must be robust to floating-point inaccuracies, especially for faces near pixel boundaries [G].
+*   **Bounding Box Error:** Using bounding boxes instead of this test leads to overestimation of load for non-convex or sparse clusters, increasing error and communication overhead [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def calculate_workload(cluster):
+    """
+    Calculates the workload for a cluster using the Inside-Outside Test.
+    
+    Args:
+        cluster: A list of triangular faces. Each face is a list of 3 vertices.
+                 Each vertex is a tuple (x, y, z).
+    
+    Returns:
+        int: The total number of pixels covered by the cluster's faces.
+    """
+    total_pixels = 0
+    
+    # Get screen dimensions
+    screen_width, screen_height = get_screen_dimensions()
+    
+    for face in cluster:
+        # Project vertices to screen space (2D)
+        # Assuming a standard perspective or orthographic projection function exists
+        p1 = project_to_screen(face[0])
+        p2 = project_to_screen(face[1])
+        p3 = project_to_screen(face[2])
+        
+        # Create a set of pixels covered by this triangle
+        # This is the "Inside-Outside Test"
+        covered_pixels = get_pixels_inside_triangle(p1, p2, p3, screen_width, screen_height)
+        
+        # Add the number of covered pixels to the total workload
+        total_pixels += len(covered_pixels)
+        
+    return total_pixels
+
+def get_pixels_inside_triangle(p1, p2, p3, width, height):
+    """
+    Returns a list of pixel coordinates (x, y) inside the triangle defined by p1, p2, p3.
+    Uses a standard rasterization or point-in-triangle test.
+    """
+    pixels = []
+    # Determine bounding box of the triangle to limit search space
+    min_x = max(0, int(min(p1.x, p2.x, p3.x)))
+    max_x = min(width - 1, int(max(p1.x, p2.x, p3.x)))
+    min_y = max(0, int(min(p1.y, p2.y, p3.y)))
+    max_y = min(height - 1, int(max(p1.y, p2.y, p3.y)))
+    
+    for x in range(min_x, max_x + 1):
+        for y in range(min_y, max_y + 1):
+            if is_point_in_triangle((x, y), p1, p2, p3):
+                pixels.append((x, y))
+    return pixels
+
+def is_point_in_triangle(point, p1, p2, p3):
+    """
+    Checks if a 2D point is inside the triangle defined by p1, p2, p3.
+    Uses barycentric coordinates or cross-product method.
+    """
+    # Barycentric coordinate method
+    x, y = point
+    x1, y1 = p1.x, p1.y
+    x2, y2 = p2.x, p2.y
+    x3, y3 = p3.x, p3.y
+    
+    denom = (y2 - y3) * (x1 - x3) + (x3 - x2) * (y1 - y3)
+    if denom == 0:
+        return False # Degenerate triangle
+        
+    la = ((y2 - y3) * (x - x3) + (x3 - x2) * (y - y3)) / denom
+    lb = ((y3 - y1) * (x - x3) + (x1 - x3) * (y - y3)) / denom
+    lc = 1.0 - la - lb
+    
+    return 0 <= la <= 1 and 0 <= lb <= 1 and 0 <= lc <= 1
+```
+
+## Subtopics
+
+### [Neighbor Cluster Assignment (NCA)](23491-neighbor-cluster-assignment-nca.md)
+Neighbor Cluster Assignment (NCA) is a static data distribution scheme for parallel volume rendering where processors are assigned sets of spatially adjacent clusters.
+
+## Operating characteristics
+*   **Accuracy:** This method provides the most accurate load distribution among the tested schemes (Cluster Bounding Box, Cluster Bounding Sphere, Inside-Outside Test) [S1, unofficial].
+*   **Communication Overhead:** By providing accurate load estimates, it enables the establishment of a correct hypergraph topology for remapping. This reduces partitioning overhead and prevents unnecessary communication during cluster migration [S1, unofficial].
+*   **Computational Cost:** The inside-outside test is more computationally expensive than bounding box calculations because it requires testing every pixel against every face. However, this cost is incurred during the preprocessing/load balancing phase, not the rendering loop [S1, unofficial].
+*   **Scalability:** The accuracy of the load distribution scales with the screen resolution. Coarse-grain grids (tiles) can be used to reduce the cost of the test while maintaining reasonable accuracy [S1, unofficial].
+*   **When to Use:** Use this method when high-fidelity load balancing is critical, particularly for dynamic scenes with many rotation operations where neighbor cluster coherency is important [S1, unofficial].
+*   **When Not to Use:** Avoid if the preprocessing time for load calculation is prohibitive and approximate load balancing is acceptable.
+
+## Background
+This method originates from research on image-space parallel volume rendering, specifically in the context of hypergraph-partitioning based remapping models. It was developed to address the limitations of simpler bounding-box-based load assignment methods, which often resulted in poor load balance and excessive communication due to inaccurate work estimation [S1, unofficial]. The Inside-Outside Test was identified as the superior approach for distributing load over screen pixels and establishing the correct topology for neighbor-aware remapping [S1, unofficial].
+
+## Sources
+[S1] A hypergraph-partitioning based remapping model for image-space parallel volume rendering, http://hdl.handle.net/11693/18191, fetched 2026-10-26 (unofficial)

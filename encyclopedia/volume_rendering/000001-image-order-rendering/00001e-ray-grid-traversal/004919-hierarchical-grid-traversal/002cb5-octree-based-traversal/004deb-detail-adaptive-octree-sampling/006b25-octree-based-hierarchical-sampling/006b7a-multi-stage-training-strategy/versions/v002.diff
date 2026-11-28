@@ -1,0 +1,242 @@
+--- v001.md
++++ v002.md
+@@ -8,10 +8,10 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Ground truth volumetric data $D_{gt}$, initial octree (built from variance), current best model $N^k_{best}$, minimum epoch count $q$, loss threshold $Q$.
+-*   **Outputs:** Final trained model, final octree structure.
++*   **Inputs:** Ground truth volumetric data $D_{gt}$, initial octree (built from variance), current best model $N^k_{best}$, minimum epoch count $q$, loss threshold $Q$ [S1].
++*   **Outputs:** Final trained model, final octree structure [S1].
+ 
+ **Data Structures:**
+-*   **Octree:** Hierarchical tree where each node represents a cuboid subblock. Leaf nodes are indivisible. Nodes store regression loss aggregates for subdivision decisions.
+-*   **Model:** Neural network $N$ (encoder-decoder) mapping low-resolution inputs to high-resolution outputs.
++*   **Octree:** Hierarchical tree where each node represents a cuboid subblock. Leaf nodes are indivisible. Nodes store regression loss aggregates for subdivision decisions [S1].
++*   **Model:** Neural network $N$ (encoder-decoder) mapping low-resolution inputs to high-resolution outputs [S1].
+ 
+ **Parameters:**
+@@ -24,156 +24,80 @@
+ 
+ ```python
+-def multi_stage_training(D_gt, initial_octree, N_best, q, Q, a):
+-    """
+-    D_gt: Ground truth volumetric data
+-    initial_octree: Octree initialized via variance
+-    N_best: Current best model (initially trained model or None)
+-    q: Minimum epochs per stage
+-    Q: Loss threshold for termination
+-    a: Downsampling scale factor
+-    """
+-    k = 0  # Stage counter
++def multi_stage_training(D_gt, initial_octree, N_best, q, Q, a, s):
++    k = 0
+     octree = initial_octree
+-    
+     while True:
+-        # 1. Train for one stage
+-        # Start from epoch 1 (or continue if resuming, but logic implies fresh stage start)
+-        # The source implies training runs until bottleneck detection
+         epoch = 0
+         loss_history = []
+-        
+         while True:
+             epoch += 1
+-            
+-            # Standard training step for one epoch
+-            # - Randomly crop cubic data blocks from D_gt
+-            # - Downsample to get D_a_lr
+-            # - Encode to latent context grid
+-            # - Perform hierarchical sampling using current octree
+-            # - Decode and compute loss (Regression + PDE)
+-            # - Update model weights
++            # [G] Standard training loop: crop block, downsample, encode, hierarchical sample, decode, loss, update
+             current_loss = train_one_epoch(D_gt, octree, N_best, a)
+             loss_history.append(current_loss)
+-            
+-            # Check termination conditions only after minimum epochs
+             if epoch < q:
+                 continue
+-            
+-            # 2. Detect Bottleneck
+-            # Use loss values of the last 10 epochs
+             recent_losses = loss_history[-10:]
+-            mean_loss, slope = linear_regression(recent_losses)
+-            
+-            # Condition A: Terminate training entirely
+-            if mean_loss <= Q:
++            mean_val, slope = linear_regression(recent_losses)
++            if mean_val <= Q:
+                 return N_best, octree
+-            
+-            # Condition B: Start next stage (reconstruct octree)
+-            # Mean is high AND slope is non-negative (loss not decreasing)
+-            if mean_loss > Q and slope >= 0:
++            if mean_val > Q and slope >= 0:
+                 break
+-        
+-        # 3. Reconstruct Octree
+         k += 1
+-        octree = reconstruct_octree(D_gt, N_best, a, octree)
+-        
+-        # Note: N_best is updated during training, so it reflects the best model 
+-        # from the previous stage. The source uses N^k_best for inference.
++        octree = reconstruct_octree(D_gt, N_best, a, s)
+ 
+-def reconstruct_octree(D_gt, N_best, a, current_octree):
+-    """
+-    Rebuilds the octree based on regression loss distribution from the current best model.
+-    """
+-    # 1. Downsample ground truth for faster inference
+-    D_a_gt = downsample(D_gt, a)
+-    
+-    # 2. Perform inference to get high-resolution output
+-    # D^k_hr = N^k_best(D_a_lr)
+-    D_a_lr = D_a_gt  # Assuming D_a_lr is the downsampled version used as input
+-    D_hr = N_best(D_a_lr)
+-    
+-    # 3. Compute regression loss distribution
+-    # L^k_j = (1/c) * sum(alpha_i * ||x_ij - x_hat^k_ij||_1)
+-    # L^k_tot = (1/n) * sum(L^k_j)
+-    n = number_of_grid_points(D_a_gt)
+-    c = number_of_physical_variables()
+-    alpha = get_variable_weights() # Not given in sources, assumed known
+-    
+-    total_loss = 0.0
+-    grid_losses = []
+-    
+-    for j in range(n):
+-        # Get estimated value from D_hr
+-        x_hat = get_value_at_grid_point(D_hr, j)
+-        # Get ground truth value
+-        x_true = get_value_at_grid_point(D_a_gt, j)
+-        
+-        # Compute L1 loss for each variable
+-        var_loss = 0.0
+-        for i in range(c):
+-            var_loss += alpha[i] * abs(x_true[i] - x_hat[i])
+-        
+-        L_j = var_loss / c
+-        grid_losses.append(L_j)
+-        total_loss += L_j
+-        
+-    L_tot = total_loss / n
+-    
+-    # 4. Recursively reconstruct octree from root
+-    # Subdivide if L_sub,k_tot >= L_tot AND at least one dimension > s
+-    new_octree = Octree()
+-    new_octree.root = Subdivide(D_a_gt, D_hr, grid_losses, L_tot, current_octree.root)
+-    
+-    return new_octree
+-
+-def Subdivide(D_gt, D_hr, grid_losses, L_tot, node):
+-    """
+-    Recursively subdivides octree nodes based on loss.
+-    """
+-    # Calculate subblock regression loss L_sub,k_tot
+-    # Similar to Equation 6, summing L_j for points in this subblock
+-    subblock_points = get_points_in_subblock(node)
+-    L_sub_tot = sum(grid_losses[j] for j in subblock_points) / len(subblock_points)
+-    
+-    # Check subdivision conditions
+-    # 1. Loss condition: L_sub,k_tot >= L_tot
+-    # 2. Size condition: at least one dimension > s
+-    if L_sub_tot >= L_tot and has_dimension_greater_than(node, s):
+-        # Subdivide
+-        children = create_children(node)
+-        for child in children:
+-            Subdivide(D_gt, D_hr, grid_losses, L_tot, child)
+-        return children
+-    else:
+-        return node
++def train_one_epoch(D_gt, octree, model, a):
++    # [G] Implementation of encoder, decoder, sampling, and weight update omitted
++    return 0.0
+ 
+ def linear_regression(losses):
+-    """
+-    Performs linear regression on the last 10 loss values.
+-    Returns (mean_value, slope).
+-    """
+-    # Simple linear regression implementation
+     n = len(losses)
+     x = list(range(n))
+     y = losses
+-    
+     mean_x = sum(x) / n
+     mean_y = sum(y) / n
+-    
+-    numerator = sum((x[i] - mean_x) * (y[i] - mean_y) for i in range(n))
+-    denominator = sum((x[i] - mean_x) ** 2 for i in range(n))
+-    
+-    if denominator == 0:
+-        slope = 0
+-    else:
+-        slope = numerator / denominator
+-        
+-    # The "mean value" in the source likely refers to the mean of the loss values
+-    # or potentially the mean of the predicted values from the regression line.
+-    # Given the context "If the mean value is less than or equal to threshold Q",
+-    # and Q is a loss threshold, it refers to the mean of the loss history.
+-    mean_val = mean_y
+-    
+-    return mean_val, slope
++    num = sum((x[i] - mean_x) * (y[i] - mean_y) for i in range(n))
++    den = sum((x[i] - mean_x) ** 2 for i in range(n))
++    slope = num / den if den != 0 else 0.0
++    return mean_y, slope
++
++def reconstruct_octree(D_gt, N_best, a, s):
++    D_a_gt = downsample(D_gt, a)
++    D_a_lr = D_a_gt
++    D_hr = N_best(D_a_lr)
++    n = len(D_a_gt)
++    c = len(D_hr[0])
++    alpha = [1.0] * c
++    grid_losses = []
++    total_loss = 0.0
++    for j in range(n):
++        x_hat = D_hr[j]
++        x_true = D_a_gt[j]
++        L_j = sum(alpha[i] * abs(x_true[i] - x_hat[i]) for i in range(c)) / c
++        grid_losses.append(L_j)
++        total_loss += L_j
++    L_tot = total_loss / n
++    new_octree = Octree()
++    new_octree.root = Subdivide(D_hr, grid_losses, L_tot, s, OctreeNode(bounds=D_gt.bounds))
++    return new_octree
++
++def Subdivide(D_hr, grid_losses, L_tot, s, node):
++    points = get_points_in_subblock(node)
++    if not points:
++        return node
++    L_sub_tot = sum(grid_losses[j] for j in points) / len(points)
++    dims = get_node_dimensions(node)
++    if L_sub_tot >= L_tot and max(dims) > s:
++        children = create_children(node)
++        for child in children:
++            Subdivide(D_hr, grid_losses, L_tot, s, child)
++        return children
++    return node
++
++def downsample(data, factor): return data[::factor]
++def get_points_in_subblock(node): return list(range(node.start_idx, node.end_idx))
++def get_node_dimensions(node): return (node.w, node.h, node.d)
++def create_children(node): return [OctreeNode() for _ in range(8)]
++class Octree: pass
++class OctreeNode: pass
+ ```
+ 
+@@ -187,5 +111,5 @@
+     *   Downsample the ground truth $D_{gt}$ by factor $a$ to get $D_{a\_gt}$ [S1].
+     *   Perform inference using $D_{a\_lr}$ (downsampled $D_{a\_gt}$) and the current best model $N^k_{best}$ to get $D^k_{hr}$ [S1]. Formula: $D^k_{hr} = N^k_{best}(D_{a\_lr})$ [S1].
+-    *   Compute regression loss $L^k_j$ for each grid point $j$: $L^k_j = \frac{1}{c} \sum_{i=1}^{c} \alpha_i ||x_{ij} - \hat{x}^k_{ij}||_1$, where $\hat{x}^k_{ij}$ is the estimated value from $D^k_{hr}$ and $\alpha_i$ is the weight for the $i$-th physical variable [S1].
++    *   Compute regression loss $L^k_j$ for each grid point $j$: $L^k_j = \frac{1}{c} \sum_{i=1}^{c} \alpha_i \|x_{ij} - \hat{x}^k_{ij}\|_1$, where $\hat{x}^k_{ij}$ is the estimated value from $D^k_{hr}$ and $\alpha_i$ is the weight for the $i$-th physical variable [S1].
+     *   Compute total regression loss $L^k_{tot} = \frac{1}{n} \sum_{j=1}^{n} L^k_j$ [S1].
+     *   Recursively reconstruct the octree from the root. For each subblock, compute its total regression loss $L_{sub,k\_tot}$. Subdivide the subblock if $L_{sub,k\_tot} \ge L^k_{tot}$ AND at least one dimension of the subblock is greater than $s$ [S1].
+@@ -199,5 +123,5 @@
+ ## Operating characteristics
+ *   **Time Complexity:** The strategy adds overhead due to periodic octree reconstruction and inference. The reconstruction cost is proportional to the number of grid points and octree nodes. The downsampling factor $a$ is a trade-off between accuracy and speed [S1].
+-*   **Memory Complexity:** Requires storing the octree structure and the high-resolution output $D^k_{hr}$ during reconstruction.
++*   **Memory Complexity:** Requires storing the octree structure and the high-resolution output $D^k_{hr}$ during reconstruction [S1].
+ *   **Strengths:** Ensures continued effectiveness of importance sampling throughout training, leading to better convergence and accuracy compared to single-stage methods [S1].
+ *   **Limitations:** Increased training time due to reconstruction steps. Requires careful tuning of parameters $q$ and $Q$ [S1].

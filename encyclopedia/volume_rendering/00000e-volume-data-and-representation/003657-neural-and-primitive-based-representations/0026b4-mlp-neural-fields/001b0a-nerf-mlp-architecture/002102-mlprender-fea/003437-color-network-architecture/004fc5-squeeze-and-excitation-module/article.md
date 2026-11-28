@@ -1,0 +1,120 @@
+# Squeeze-and-Excitation Module
+
+Also called: SE Module, SE-net, Squeeze-and-Excitation Network (SE-Net), Squeeze-and-Excitation Network (SE-net) Module
+
+## Overview
+The Squeeze-and-Excitation (SE) Module is a channel attention mechanism that dynamically weights features for an MLP by suppressing redundant features and highlighting important information [S1]. In Mixer-NeRF, it is placed between the sampling layer and the inference layer to directly affect the prediction of density and color, aiding detail restoration and color accuracy in complex scenes [S1]. It builds on [Color Network Architecture](7200-color-network-architecture.md) by adding explicit inter-channel dependency modeling to the feature pipeline [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A feature tensor $F$ with spatial dimensions $H \times W$ and $C$ feature channels [S1].
+*   **Output:** A recalibrated feature tensor $F'$ with the same dimensions, where each channel is scaled by a learned weight [S1].
+
+**Data Structures:**
+*   $F \in \mathbb{R}^{H \times W \times C}$: Input feature map [S1].
+*   $z \in \mathbb{R}^{C}$: Global feature vector resulting from the squeeze operation [S1].
+*   $s \in \mathbb{R}^{C}$: Channel weight vector resulting from the excitation operation [S1].
+*   $W_1 \in \mathbb{R}^{C \times r}$: First projection matrix in the excitation MLP [S1].
+*   $W_2 \in \mathbb{R}^{r \times C}$: Second projection matrix in the excitation MLP [S1].
+*   $b_1 \in \mathbb{R}^{r}$: Bias vector for the first layer [S1].
+*   $b_2 \in \mathbb{R}^{C}$: Bias vector for the second layer [S1].
+*   $r$: Compression ratio (integer) [S1].
+
+**Parameters:**
+*   $r$: The compression ratio for the bottleneck layer in the excitation MLP [S1]. Not given in the sources.
+
+**Steps:**
+1.  **Squeeze (Global Average Pooling):** Compute the global descriptor $z$ for each channel $c$ by averaging the spatial dimensions of $F$ [S1].
+    $$ z_c = \frac{1}{H \times W} \sum_{i=1}^{H} \sum_{j=1}^{W} F_c(i, j) $$
+    where $F_c(i, j)$ is the value of channel $c$ at spatial location $(i, j)$ [S1].
+2.  **Excitation (Channel Modeling):** Process $z$ through a two-layer perceptron to generate channel weights $s$ [S1].
+    $$ s = \sigma(W_2 \cdot \text{ReLU}(W_1 \cdot z + b_1) + b_2) $$
+    where $\sigma$ is the sigmoid activation function, $\text{ReLU}$ is the rectified linear unit, and $W_1, W_2, b_1, b_2$ are the learned parameters [S1].
+3.  **Weighting (Feature Recalibration):** Multiply each channel of the input feature map $F$ by its corresponding weight $s_c$ [S1].
+    $$ F'_c = s_c \cdot F_c $$
+    This operation scales the feature response of channel $c$ by $s_c$ [S1].
+4.  **Output:** The weighted features $F'$ are passed to the subsequent NeRF branches [S1].
+    $$ \sigma = \text{MLP}_\sigma(F'), \quad c = \text{MLP}_c(F', \text{view}) $$
+    where $\sigma$ is the density output and $c$ is the color output conditioned on view direction [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def squeeze_and_excitation(F, C, r, W1, W2, b1, b2):
+    """
+    Applies the Squeeze-and-Excitation module to feature tensor F.
+    
+    Args:
+        F (list of list of list of float): Input feature tensor of shape (H, W, C).
+        C (int): Number of channels.
+        r (int): Compression ratio for the bottleneck layer.
+        W1 (list of list of float): Weight matrix of shape (r, C).
+        W2 (list of list of float): Weight matrix of shape (C, r).
+        b1 (list of float): Bias vector of shape (r,).
+        b2 (list of float): Bias vector of shape (C,).
+        
+    Returns:
+        list of list of list of float: Recalibrated feature tensor F' of shape (H, W, C).
+    """
+    H = len(F)
+    W = len(F[0])
+    
+    # Step 1: Squeeze - Global Average Pooling
+    z = [0.0] * C
+    for c in range(C):
+        total = 0.0
+        for i in range(H):
+            for j in range(W):
+                total += F[i][j][c]
+        z[c] = total / (H * W)
+        
+    # Step 2: Excitation - Two-layer Perceptron
+    # h = ReLU(W1 * z + b1)
+    h = [0.0] * r
+    for k in range(r):
+        val = b1[k]
+        for c in range(C):
+            val += W1[k][c] * z[c]
+        h[k] = max(0.0, val)
+        
+    # s_pre = W2 * h + b2
+    s_pre = [0.0] * C
+    for c in range(C):
+        val = b2[c]
+        for k in range(r):
+            val += W2[c][k] * h[k]
+        s_pre[c] = val
+        
+    # s = sigmoid(s_pre)
+    s = [1.0 / (1.0 + math.exp(-x)) for x in s_pre]
+    
+    # Step 3: Weighting - Scale features
+    F_prime = [[[0.0] * C for _ in range(W)] for _ in range(H)]
+    for i in range(H):
+        for j in range(W):
+            for c in range(C):
+                F_prime[i][j][c] = s[c] * F[i][j][c]
+                
+    return F_prime
+```
+
+**Edge Cases and Pitfalls:**
+*   **Dimensionality:** The compression ratio $r$ must be an integer such that $1 \le r < C$ [S1].
+*   **Placement:** The module is specifically designed to be placed between the sampling layer and the inference layer in Mixer-NeRF [S1].
+*   **Precision:** The sigmoid activation in the excitation step can saturate for extreme weight values, potentially suppressing channel responses entirely [G].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:** In ablation studies on the Chair and Horns scenes, adding the SE-net module improved reconstruction quality metrics compared to the baseline NeRF [S1]. It is particularly effective in complex, real, multi-view scenarios with high texture and complex lighting [S1].
+*   **Strengths:** Improves the learning of perceptual image block similarity by more than 30% compared to NeRF [S1]. Helps with detail restoration and light color in complex scenes [S1].
+*   **Limitations:** Adds computational overhead due to the additional MLP and pooling operations [S1]. The source does not provide specific latency measurements or memory usage figures [S1].
+
+## Background
+The Squeeze-and-Excitation Network (SE-Net) module was originally introduced by Cheng et al. [S1]. It was adapted for use in 3D reconstruction methods based on Neural Radiance Fields (NeRF), specifically within the Mixer-NeRF architecture, to capture spatial feature information and mix channels [S1]. The module helps filter out high-weight information and suppress redundant features, highlighting important information for the MLP [S1].
+
+## Sources
+[S1] Mixer-NeRF: Research on 3D Reconstruction Methods of Neural Radiance Fields Based on Hybrid Spatial Feature Information, https://doi.org/10.54097/0ek2xd53, fetched 2026-10-27

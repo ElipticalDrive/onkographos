@@ -1,0 +1,135 @@
+# Triangle Circum-Center Calculation
+
+Also called: Circum-center, Circumcircle Center
+
+## Overview
+Computes the circum-center and circum-radius of a triangle defined by three vertices $a, b, c$ [S1, unofficial]. It is used to derive bounding spheres for triangle-based leaf nodes in volume rendering [S1, unofficial].
+
+## How it works
+**Inputs:** Three vertices $a, b, c \in \mathbb{R}^3$ [S1, unofficial].
+**Outputs:** Absolute circum-center $C$ and circum-radius $R$ [S1, unofficial].
+**Data Structures:** No persistent data structures are required [G].
+**Parameters:** Not given in the sources [G].
+
+**Steps:**
+1. Compute edge vectors relative to $a$: $ab = b - a$, $ac = c - a$ [S1, unofficial].
+2. Compute $A(b, c) = ab \times ac$. Evaluate the denominator $2|A(b, c)|^2$. If near zero, the vertices are co-linear (degenerate) [S1, unofficial].
+3. For non-degenerate triangles, determine if the triangle is obtuse [G]. If obtuse, approximate the circum-center as the midpoint of the longest edge and the circum-radius as half the length of that edge [S1, unofficial].
+4. For non-obtuse triangles, compute the relative circum-center $m_{tri}$ using the analytic formula [S1, unofficial].
+5. Compute the absolute center $C = a + m_{tri}$ and the radius $R = |m_{tri}|$ [S1, unofficial].
+
+**Formula:**
+Let $A(u, v) = (u - a) \times (v - a)$. The relative circum-center $m_{tri}$ is:
+
+$$
+m_{tri} = \frac{|c - a|^2 A(b, c) \times (b - a) + |b - a|^2 (c - a) \times A(b, c)}{2 |A(b, c)|^2}
+$$
+
+Where:
+*   $| \cdot |$ denotes the Euclidean norm [S1, unofficial].
+*   $\times$ denotes the cross product [S1, unofficial].
+*   The denominator is $2 |A(b, c)|^2$ [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Degeneracy:** The denominator vanishes when vertices are co-linear [S1, unofficial].
+*   **Numerical Stability:** The formula uses differences of coordinates rather than absolute values, which reduces relative error since vertices are typically closer to each other than to the origin [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+from typing import Tuple, List
+
+def cross_product(u: List[float], v: List[float]) -> List[float]:
+    return [
+        u[1]*v[2] - u[2]*v[1],
+        u[2]*v[0] - u[0]*v[2],
+        u[0]*v[1] - u[1]*v[0]
+    ]
+
+def dot_product(u: List[float], v: List[float]) -> float:
+    return u[0]*v[0] + u[1]*v[1] + u[2]*v[2]
+
+def vector_sub(u: List[float], v: List[float]) -> List[float]:
+    return [u[0]-v[0], u[1]-v[1], u[2]-v[2]]
+
+def vector_norm_sq(u: List[float]) -> float:
+    return dot_product(u, u)
+
+def triangle_circum_center(a: List[float], b: List[float], c: List[float]) -> Tuple[List[float], float]:
+    ab = vector_sub(b, a)
+    ac = vector_sub(c, a)
+    
+    A_bc = cross_product(ab, ac)
+    denom_sq = 2.0 * vector_norm_sq(A_bc)
+    
+    # Fallback for degenerate (co-linear) vertices [G]
+    if denom_sq < 1e-12:
+        len_ab = math.sqrt(vector_norm_sq(ab))
+        len_ac = math.sqrt(vector_norm_sq(ac))
+        len_bc = math.sqrt(vector_norm_sq(vector_sub(c, b)))
+        max_len = max(len_ab, len_ac, len_bc)
+        if max_len == len_ab:
+            return [(a[0]+b[0])/2, (a[1]+b[1])/2, (a[2]+b[2])/2], len_ab / 2.0
+        elif max_len == len_ac:
+            return [(a[0]+c[0])/2, (a[1]+c[1])/2, (a[2]+c[2])/2], len_ac / 2.0
+        else:
+            return [(b[0]+c[0])/2, (b[1]+c[1])/2, (b[2]+c[2])/2], len_bc / 2.0
+
+    # Check for obtuse triangle [G]
+    ba = vector_sub(a, b)
+    bc = vector_sub(c, b)
+    ca = vector_sub(a, c)
+    cb = vector_sub(b, c)
+    dot_a = dot_product(ab, ac)
+    dot_b = dot_product(ba, bc)
+    dot_c = dot_product(ca, cb)
+    
+    if dot_a < 0 or dot_b < 0 or dot_c < 0:
+        len_ab = math.sqrt(vector_norm_sq(ab))
+        len_ac = math.sqrt(vector_norm_sq(ac))
+        len_bc = math.sqrt(vector_norm_sq(bc))
+        max_len = max(len_ab, len_ac, len_bc)
+        if max_len == len_ab:
+            return [(a[0]+b[0])/2, (a[1]+b[1])/2, (a[2]+b[2])/2], len_ab / 2.0
+        elif max_len == len_ac:
+            return [(a[0]+c[0])/2, (a[1]+c[1])/2, (a[2]+c[2])/2], len_ac / 2.0
+        else:
+            return [(b[0]+c[0])/2, (b[1]+c[1])/2, (b[2]+c[2])/2], len_bc / 2.0
+
+    term1_vec = cross_product(A_bc, ab)
+    term2_vec = cross_product(ac, A_bc)
+    
+    term1 = vector_norm_sq(ac) * term1_vec
+    term2 = vector_norm_sq(ab) * term2_vec
+    
+    numerator = [term1[0] + term2[0], term1[1] + term2[1], term1[2] + term2[2]]
+    m_tri = [numerator[0] / denom_sq, numerator[1] / denom_sq, numerator[2] / denom_sq]
+    
+    center = [a[0] + m_tri[0], a[1] + m_tri[1], a[2] + m_tri[2]]
+    radius = math.sqrt(vector_norm_sq(m_tri))
+    
+    return center, radius
+```
+
+## Subtopics
+
+### Tetrahedron Circum-Center Calculation
+Computes the center and radius of the sphere passing through four vertices $a, b, c, d$ [S1, unofficial]. It is chosen when tetrahedral primitives are used instead of triangles [S1, unofficial]. The relative circum-center $m_{tet}$ is:
+
+$$
+m_{tet} = \frac{|d - a|^2 A(b, c) + |c - a|^2 A(d, b) + |b - a|^2 A(c, d)}{2 \det\begin{pmatrix} [b-a]_x & [b-a]_y & [b-a]_z \\ [c-a]_x & [c-a]_y & [c-a]_z \\ [d-a]_x & [d-a]_y & [d-a]_z \end{pmatrix}}
+$$
+
+Where $A(u, v) = (u - a) \times (v - a)$ and $[u]_k$ is the $k$-th component [S1, unofficial]. The absolute center is $a + m_{tet}$ and radius is $|m_{tet}|$ [S1, unofficial]. Using differences of coordinates rather than absolute values reduces relative error, as vertices are usually nearer to each other than to the origin [S1, unofficial]. The formula becomes unstable if the denominator vanishes, which occurs when the tetrahedron is nearly degenerate (flat or needle-shaped) [S1, unofficial].
+
+## Operating characteristics
+Constant-time evaluation per primitive [G]. Numerically stable for non-degenerate triangles when using coordinate differences [S1, unofficial]. Unstable for degenerate inputs [S1, unofficial]. Not given in the sources for measured performance or scaling behavior [G].
+
+## Background
+Originated in the TetSplat paper by Museth and Lombeyda (2004) for real-time rendering and volume clipping of large meshes [S1, unofficial]. The method is adapted from reference [19] in the original paper [S1, unofficial]. It is used to derive leaf nodes for hierarchical volume representations from triangle meshes [S1, unofficial].
+
+## Sources
+[S1] TetSplat: Real-time Rendering and Volume Clipping of Large ... - Museth, https://ken.museth.org/Publications_files/Museth-Lombeyda_VIS04.pdf, fetched 2026-10-28 (unofficial)

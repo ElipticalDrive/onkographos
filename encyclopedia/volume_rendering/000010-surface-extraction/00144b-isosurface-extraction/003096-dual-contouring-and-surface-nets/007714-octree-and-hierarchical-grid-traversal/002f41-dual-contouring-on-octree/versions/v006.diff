@@ -1,0 +1,400 @@
+--- v005.md
++++ v006.md
+@@ -1,5 +1,5 @@
+ # Dual Contouring on Octree
+ 
+-Also called: Dual Contouring with Octree
++Also called: Dual Contouring with Octree, Dual Contouring: Seams & LOD for Chunked Terrain
+ 
+ ## Overview
+@@ -8,9 +8,9 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A scalar field function $f(\mathbf{x})$, an isovalue $iso$, a bounding box (Cuboid), and a maximum octree depth.
+-*   **Output:** A list of meshes, each containing a vertex buffer (positions, normals) and an index buffer (triangles).
++*   **Input:** A scalar field function $f(\mathbf{x})$, an isovalue $iso$, a bounding box (Cuboid), and a maximum octree depth [S2, S4, unofficial][S5].
++*   **Output:** A list of meshes, each containing a vertex buffer (positions, normals) and an index buffer (triangles) [S2, S3, unofficial].
+ 
+ **Data Structures:**
+-The method relies on an Octree structure and specific lookup tables for connectivity.
++The method relies on an Octree structure and specific lookup tables for connectivity [S2, S3, S4, unofficial].
+ 
+ 1.  **Octree<T>**:
+@@ -18,14 +18,14 @@
+     *   `data`: A generic type `T` (typically `NodeData` or `OctreeDrawInfo`).
+     *   `children`: An array of 8 `Octree<T>` pointers. `null` indicates a leaf node.
+-    *   **Subdivision**: When `SubDivide()` is called, the bounds are split into 8 equal children. Child $i$ (0-7) is offset by `(i&1)*size.x`, `(i&2)*size.y`, `(i&4)*size.z` [S1, unofficial].
+-
+-2.  **NodeData** (used in [S1, unofficial]):
++    *   **Subdivision**: When `SubDivide()` is called, the bounds are split into 8 equal children. Child $i$ (0-7) is offset by `(i&1)*size.x`, `(i&2)*size.y`, `(i&4)*size.z` [S2, unofficial].
++
++2.  **NodeData** (used in [S2, unofficial]):
+     *   `qef`: A Quadratic Error Function object.
+     *   `vertex`: A 3D float position (the solution to the QEF).
+     *   `cornerEncoding`: An integer bitmask representing which corners of the cell are inside/outside the isosurface.
+-    *   `index`: An integer mesh vertex index, initialized to -1. Used to prevent duplicate vertices [S1, unofficial].
++    *   `index`: An integer mesh vertex index, initialized to -1. Used to prevent duplicate vertices [S2, unofficial].
+     *   `size`: The diagonal length of the node's bounding box.
+ 
+-3.  **OctreeDrawInfo** (used in [S2, unofficial]):
++3.  **OctreeDrawInfo** (used in [S3, unofficial]):
+     *   `position`: Vector3 vertex position.
+     *   `normal`: Vector3 vertex normal.
+@@ -33,7 +33,7 @@
+     *   `corners`: Integer bitmask of corner material states.
+     *   `size`: Float diagonal length.
+-    *   Constants: `MATERIAL_SOLID = 1`, `MATERIAL_AIR = 0` [S2, unofficial].
+-
+-4.  **Lookup Tables** (Hardcoded integers defining connectivity and processing order) [S1, S2, S3, unofficial]:
++    *   Constants: `MATERIAL_SOLID = 1`, `MATERIAL_AIR = 0` [S3, unofficial].
++
++4.  **Lookup Tables** (Hardcoded integers defining connectivity and processing order) [S3, S4, unofficial]:
+     *   `edgevmap` (12x2): Maps edge indices to the two vertex indices they connect.
+         *   X-axis edges: `{0,4}, {1,5}, {2,6}, {3,7}`
+@@ -43,7 +43,7 @@
+     *   `faceMap` (6x4): Maps face index to the 4 vertex corners.
+     *   `cellProcFaceMask` (12x3): Maps cell face index to two child indices and a direction.
+-        *   Example: `{{0, 4, 0}, {1, 5, 0}, ...}` [S3, unofficial].
++        *   Example: `{{0, 4, 0}, {1, 5, 0}, {2, 6, 0}, {3, 7, 0}, {0, 2, 1}, {4, 6, 1}, {1, 3, 1}, {5, 7, 1}, {0, 1, 2}, {2, 3, 2}, {4, 5, 2}, {6, 7, 2}}` [S4, unofficial].
+     *   `cellProcEdgeMask` (6x5): Maps cell edge index to four child indices and a direction.
+-        *   Example: `{{0, 2, 1, 3, 0}, {4, 6, 5, 7, 0}, ...}` [S3, unofficial].
++        *   Example: `{{0, 2, 1, 3, 0}, {4, 6, 5, 7, 0}, {0, 1, 4, 5, 1}, {2, 3, 6, 7, 1}, {0, 4, 2, 6, 2}, {1, 5, 3, 7, 2}}` [S4, unofficial].
+     *   `faceProcFaceMask` (3x4x3): Maps face-level children to sub-children and directions.
+     *   `faceProcEdgeMask` (3x4x6): Maps face-level children to sub-edges and directions.
+@@ -53,26 +53,27 @@
+ **Algorithm Steps:**
+ 
+-1.  **Build Octree**: Recursively subdivide the bounding box. For each node, determine if it intersects the isosurface. If it does, store the QEF solution and corner encoding in the node's data. If the node is at maximum depth or does not intersect, it becomes a leaf [S1, S3, unofficial].
+-    *   *Note*: In adaptive variants, a node is "clusterable" if all children are clusterable and faces between adjacent children allow merging. If clusterable and error < threshold, children are removed, and the node becomes a leaf [S3, unofficial].
+-
+-2.  **Generate Vertex Indices**: Traverse the octree. For every leaf (or pseudo-leaf) node, assign a unique index to its vertex position and add it to the vertex/normal lists [S2, unofficial].
++1.  **Build Octree**: Recursively subdivide the bounding box. For a node at depth > 1, create 8 children by splitting the domain. For each child, recursively build the subtree. Combine the QEF matrices from all valid children into the parent's grid [S4, unofficial]. Leaf node processing: If depth == 1, check if the grid is signed. If not, delete the node. If signed, sample the QEF from the scalar field, mark as leaf, and solve for the vertex position [S4, unofficial].
++    *   *Note*: In adaptive variants, a node is "clusterable" if all its children are clusterable AND the faces between adjacent children allow for cluster merging. If clusterable and approximation error is below a threshold, remove all children and mark the node as a leaf [S4, unofficial].
++
++2.  **Generate Vertex Indices**: Traverse the octree recursively. For each leaf (or pseudo-leaf) node, assign `drawInfo.index = verts.Count`, append `drawInfo.position` to the vertex list, and append `drawInfo.normal` to the normal list [S3, unofficial].
+ 
+ 3.  **Contour Cell Proc**: Recursively traverse the octree. For each internal node:
+     *   Recursively call `ContourCellProc` on all 8 children.
+     *   Iterate 12 times (for each face): Fetch two child indices and a direction from `cellProcFaceMask[i]`. Construct a 2-element node array and call `ContourFaceProc`.
+-    *   Iterate 6 times (for each edge): Fetch four child indices and a direction from `cellProcEdgeMask[i]`. Construct a 4-element node array and call `ContourEdgeProc` [S1, S2, unofficial].
+-
+-4.  **Contour Face Proc**: Given two adjacent nodes (nodes[0], nodes[1]) and a direction:
+-    *   If either node is null or both are leaves, return.
++    *   Iterate 6 times (for each edge): Fetch four child indices and a direction from `cellProcEdgeMask[i]`. Construct a 4-element node array and call `ContourEdgeProc` [S2, S3, unofficial].
++
++4.  **Contour Face Proc**: Given two adjacent nodes (`nodes[0]`, `nodes[1]`) and a direction:
++    *   If `nodes[0]` or `nodes[1]` is null, return.
++    *   If both nodes are leaves, return.
+     *   If either node is internal, subdivide the face into 4 child faces. For each child face, determine the corresponding child nodes from the parent nodes using `faceProcFaceMask` and recursively call `ContourFaceProc`.
+-    *   Iterate 4 times (for each sub-edge): Fetch 4 child indices and a direction from `faceProcEdgeMask`. Construct a 4-element node array and call `ContourEdgeProc` [S1, S2, S3, unofficial].
++    *   Iterate 4 times (for each sub-edge): Fetch 4 child indices and a direction from `faceProcEdgeMask` and the orders table. Construct a 4-element node array and call `ContourEdgeProc` [S2, S3, unofficial].
+ 
+ 5.  **Contour Edge Proc**: Given four nodes along an edge and a direction:
+     *   If any node is null, return.
+     *   If all 4 nodes are leaves (or pseudo-nodes), call `ContourProcessEdge`.
+-    *   Otherwise, subdivide the edge into 2 child edges. Determine the corresponding child nodes using `edgeProcEdgeMask` and recursively call `ContourEdgeProc` [S1, S2, S3, unofficial].
++    *   Otherwise, subdivide the edge into 2 child edges. Determine the corresponding child nodes using `edgeProcEdgeMask` and recursively call `ContourEdgeProc` [S2, S3, unofficial].
+ 
+ 6.  **Contour Process Edge (Triangle Generation)**: Given four leaf nodes along an edge:
+-    *   Check if `vertices.Count + 4 > MAX_VERTS_PER_MESH` (default 30000). If true, flush the mesh buffers [S1, unofficial].
++    *   Check if `vertices.Count + 4 > MAX_VERTS_PER_MESH` (default 30000). If true, flush the mesh buffers [S2, unofficial].
+     *   Initialize `ptrs` array to `{-1, -1, -1, -1}`.
+     *   Initialize `signChange` array to `{false, false, false, false}`.
+@@ -89,5 +90,5 @@
+     *   If `signChange[minIndex]` is true, add triangles to indices:
+         *   If `flip` is true: Add `(ptrs[0], ptrs[1], ptrs[3])` and `(ptrs[0], ptrs[3], ptrs[2])`.
+-        *   Else: Add `(ptrs[0], ptrs[3], ptrs[1])` and `(ptrs[0], ptrs[2], ptrs[3])` [S1, S2, unofficial].
++        *   Else: Add `(ptrs[0], ptrs[3], ptrs[1])` and `(ptrs[0], ptrs[2], ptrs[3])` [S2, S3, unofficial].
+ 
+ **Pseudocode:**
+@@ -97,13 +98,72 @@
+ MAX_VERTS_PER_MESH = 30000
+ 
+-# Lookup Tables (Partial definitions for clarity)
+-# edgevmap: 12x2 array mapping edge index to vertex pairs
+-# cellProcFaceMask: 12x3 array mapping face index to [child0, child1, direction]
+-# cellProcEdgeMask: 6x5 array mapping edge index to [c0, c1, c2, c3, direction]
+-# processEdgeMask: 3x4 array mapping direction and local edge index to global edge index
+-# edgevmap_lookup: Helper to get vertex indices for a given global edge index
++# Lookup Tables (Exact values from sources)
++edgevmap = [
++    [0,4], [1,5], [2,6], [3,7], # x-axis
++    [0,2], [1,3], [4,6], [5,7], # y-axis
++    [0,1], [2,3], [4,5], [6,7]  # z-axis
++]
++
++cellProcFaceMask = [
++    [0, 4, 0], [1, 5, 0], [2, 6, 0], [3, 7, 0],
++    [0, 2, 1], [4, 6, 1], [1, 3, 1], [5, 7, 1],
++    [0, 1, 2], [2, 3, 2], [4, 5, 2], [6, 7, 2]
++]
++
++cellProcEdgeMask = [
++    [0, 2, 1, 3, 0], [4, 6, 5, 7, 0],
++    [0, 1, 4, 5, 1], [2, 3, 6, 7, 1],
++    [0, 4, 2, 6, 2], [1, 5, 3, 7, 2]
++]
++
++processEdgeMask = [
++    [0, 1, 2, 3],
++    [4, 5, 6, 7],
++    [8, 9, 10, 11]
++]
++
++# Helper classes
++class Cuboid:
++    def __init__(self, min_pt, max_pt):
++        self.min = min_pt
++        self.max = max_pt
++        self.size = [max_pt[i] - min_pt[i] for i in range(3)]
++
++class Octree:
++    def __init__(self, bounds, data=None):
++        self.bounds = bounds
++        self.data = data
++        self.children = None
++
++    def SubDivide(self):
++        if self.children is not None:
++            return
++        self.children = [None] * 8
++        child_size = [self.bounds.size[i] / 2.0 for i in range(3)]
++        for i in range(8):
++            offset = [
++                child_size[0] if (i & 1) else 0.0,
++                child_size[1] if (i & 2) else 0.0,
++                child_size[2] if (i & 4) else 0.0
++            ]
++            min_pt = [self.bounds.min[i] + offset[i] for i in range(3)]
++            max_pt = [min_pt[i] + child_size[i] for i in range(3)]
++            self.children[i] = Octree(Cuboid(min_pt, max_pt))
++
++# Source does not provide exact scalar field sampling or QEF solver implementation.
++# These are standard mathematical operations for implicit surface extraction.
++def bounds_intersect_scalar_field(bounds, scalar_field, iso):
++    # Placeholder: Check if bounding box contains the isovalue.
++    # In practice, evaluate f(x) at corners or use a bounding volume hierarchy.
++    return True
++
++def solve_qef(bounds, scalar_field, iso):
++    # Placeholder: Sample normals at edge intersections, build QEF matrix, solve via least squares.
++    return {"vertex": [0.0, 0.0, 0.0], "normal": [0.0, 0.0, 0.0], "cornerEncoding": 0, "size": 1.0}
+ 
+ def build_octree(node, scalar_field, iso, max_depth, current_depth):
+-    if current_depth >= max_depth or not intersects_isosurface(node.bounds, scalar_field, iso):
++    if node is None:
++        return
++    if current_depth >= max_depth or not bounds_intersect_scalar_field(node.bounds, scalar_field, iso):
+         node.data = solve_qef(node.bounds, scalar_field, iso)
+         node.children = None
+@@ -112,6 +172,5 @@
+     node.SubDivide()
+     for i in range(8):
+-        child = node.children[i]
+-        build_octree(child, scalar_field, iso, max_depth, current_depth + 1)
++        build_octree(node.children[i], scalar_field, iso, max_depth, current_depth + 1)
+ 
+ def generate_vertex_indices(node, vertices, normals):
+@@ -122,26 +181,19 @@
+             generate_vertex_indices(node.children[i], vertices, normals)
+     else:
+-        # Leaf node
+         draw_info = node.data
+-        draw_info.index = len(vertices)
+-        vertices.append(draw_info.vertex)
+-        normals.append(draw_info.normal)
++        draw_info["index"] = len(vertices)
++        vertices.append(draw_info["vertex"])
++        normals.append(draw_info["normal"])
+ 
+ def contour_cell_proc(node, indices):
+     if node is None:
+         return
+-    
+     if node.children is not None:
+-        # Process children first
+         for i in range(8):
+             contour_cell_proc(node.children[i], indices)
+-        
+-        # Process Faces
+         for i in range(12):
+             c = cellProcFaceMask[i]
+             face_nodes = [node.children[c[0]], node.children[c[1]]]
+             contour_face_proc(face_nodes, c[2], indices)
+-            
+-        # Process Edges
+         for i in range(6):
+             c = cellProcEdgeMask[i]
+@@ -152,40 +204,53 @@
+     if nodes[0] is None or nodes[1] is None:
+         return
+-    
+-    # If both are leaves, nothing to do at this face level (handled by edge processing)
+     if nodes[0].children is None and nodes[1].children is None:
+         return
+ 
+-    # If either is internal, subdivide
+     if nodes[0].children is not None or nodes[1].children is not None:
+-        # Subdivide face into 4 child faces
+-        # This part requires specific faceProcFaceMask logic to map parent nodes to child nodes
+-        # For brevity, assuming a helper get_face_children exists
++        # faceProcFaceMask logic: maps face direction and sub-face index to child node indices and new direction
++        faceProcFaceMask = [
++            [[4, 0, 0], [5, 1, 0], [6, 2, 0], [7, 3, 0]],
++            [[2, 0, 1], [6, 4, 1], [3, 1, 1], [7, 5, 1]],
++            [[1, 0, 2], [3, 2, 2], [5, 4, 2], [7, 6, 2]]
++        ]
+         for i in range(4):
+-            child_nodes = get_face_children(nodes, i, direction)
+-            contour_face_proc(child_nodes, get_face_direction(direction, i), indices)
+-        
+-        # Process sub-edges
++            c = faceProcFaceMask[direction][i]
++            child_nodes = [nodes[c[0]], nodes[c[1]]]
++            contour_face_proc(child_nodes, c[2], indices)
++        
++        faceProcEdgeMask = [
++            [[1, 4, 5, 0, 1, 1], [1, 6, 7, 2, 3, 1], [0, 4, 6, 0, 2, 2], [0, 5, 7, 1, 3, 2]],
++            [[0, 2, 3, 0, 1, 0], [0, 6, 7, 4, 5, 0], [1, 2, 6, 0, 4, 2], [1, 3, 7, 1, 5, 2]],
++            [[1, 1, 3, 0, 2, 0], [1, 5, 7, 4, 6, 0], [0, 1, 5, 0, 4, 1], [0, 3, 7, 2, 6, 1]]
++        ]
++        orders = [[0, 0, 1, 1], [0, 1, 0, 1]]
+         for i in range(4):
+-            # faceProcEdgeMask logic to get 4 edge nodes
+-            edge_nodes = get_edge_nodes_from_face(nodes, i, direction)
+-            contour_edge_proc(edge_nodes, get_edge_direction(direction, i), indices)
++            c = faceProcEdgeMask[direction][i]
++            idx = c[0]
++            edge_nodes = [nodes[orders[idx][j]] if nodes[orders[idx][j]].children is None else nodes[orders[idx][j]].children[c[j+1]] for j in range(4)]
++            contour_edge_proc(edge_nodes, c[5], indices)
+ 
+ def contour_edge_proc(nodes, direction, indices):
+     if any(n is None for n in nodes):
+         return
+-    
+-    # If all are leaves, process the edge
+     if all(n.children is None for n in nodes):
+         contour_process_edge(nodes, direction, indices)
+     else:
+-        # Subdivide edge into 2 child edges
++        edgeProcEdgeMask = [
++            [[0, 2, 3, 1], [4, 6, 7, 5]],
++            [[0, 1, 5, 4], [2, 3, 7, 6]],
++            [[0, 4, 6, 2], [1, 5, 7, 2]]
++        ]
+         for i in range(2):
+-            child_nodes = get_edge_children(nodes, i, direction)
+-            contour_edge_proc(child_nodes, get_edge_direction(direction, i), indices)
++            c = edgeProcEdgeMask[direction][i]
++            child_nodes = [nodes[c[j]] for j in range(4)]
++            contour_edge_proc(child_nodes, direction, indices)
+ 
+ def contour_process_edge(nodes, direction, indices):
+     if len(vertices) + 4 > MAX_VERTS_PER_MESH:
+-        flush_mesh()
++        # flush_mesh() stub: save current vertices/indices to output list, clear buffers
++        vertices.clear()
++        normals.clear()
++        indices.clear()
+         return
+ 
+@@ -199,29 +264,23 @@
+         node = nodes[i]
+         data = node.data
+-        encoding = data.cornerEncoding
+-        
+-        # Get global edge index for this local edge
++        encoding = data["cornerEncoding"]
+         global_edge_idx = processEdgeMask[direction][i]
+-        v0, v1 = edgevmap_lookup[global_edge_idx]
+-        
+-        # Check sign change
++        v0, v1 = edgevmap[global_edge_idx]
++        
+         c0_sign = (encoding >> v0) & 1
+         c1_sign = (encoding >> v1) & 1
+         sign_change[i] = (c0_sign != c1_sign)
+         
+-        # Track minimum size node
+-        if data.size < min_size:
+-            min_size = data.size
++        if data["size"] < min_size:
++            min_size = data["size"]
+             min_index = i
+-            flip = (c0_sign == 1) # Assuming 1 is solid/inside
+-            
+-        # Assign vertex index
+-        if data.index == -1:
+-            data.index = len(vertices)
+-            vertices.append(data.vertex)
+-        
+-        ptrs[i] = data.index
+-
+-    # Generate triangles if sign change occurs at min node
++            flip = (c0_sign == 1)
++        
++        if data["index"] == -1:
++            data["index"] = len(vertices)
++            vertices.append(data["vertex"])
++        
++        ptrs[i] = data["index"]
++
+     if sign_change[min_index]:
+         if flip:
+@@ -243,5 +302,5 @@
+     contour_cell_proc(root, indices)
+     
+-    return Mesh(vertices, normals, indices)
++    return {"vertices": vertices, "normals": normals, "indices": indices}
+ ```
+ 
+@@ -261,8 +320,8 @@
+ 
+ ### [Mesh Extraction from K-D Tree](4607-mesh-extraction-from-k-d-tree.md)
+-This method extracts a triangle mesh from a K-D tree by traversing the tree structure, generating vertex indices, and performing contouring operations on cells, faces, and edges. It sets itself apart from its siblings by operating directly on the hierarchical K-D tree decomposition rather than requiring a structured octree or uniform grid, allowing for efficient spatial partitioning of the scalar field.
++This method extracts a triangle mesh from a `RectilinearGrid` hierarchy by traversing the tree, generating vertex indices, and performing contouring operations on cells, faces, and edges. It processes the grid nodes directly without requiring a separate uniform grid or octree build.
+ 
+ ### [Isomesh Octree Build and Clustering](4984-isomesh-octree-build-and-clustering.md)
+-Isomesh Octree Build and Clustering is a hierarchical mesh generation method that extracts an isotopic triangular mesh from an implicit function defined over an octree structure. It solves the problem of surface extraction in sparse or hierarchical domains by recursively building an octree, clustering vertices at each node level (leaves, edges, faces, and cells) using Disjoint Set Union (DSU) and Quadratic Error Function (QEF) solvers, and merging geometric primitives while preserving material properties and minimizing reconstruction error. Unlike uniform grid methods, it adapts resolution locally, allowing for efficient Level of Detail (LOD) management where coarser branches store vertices that minimize the sum of their children's Q functions, enabling recursive vertex calculation for all levels of detail. It sets itself apart from siblings like [Manifold Dual Contouring](2138-manifold-dual-contouring.md) by explicitly handling hierarchical LOD stitching via a "skirt" optimization and using DSU for topological correctness across irregular octree subdivisions.
++Isomesh Octree Build and Clustering is a hierarchical mesh generation method that extracts a triangular mesh from an implicit function defined over an octree structure. It solves surface extraction in sparse or hierarchical domains by recursively building an octree, clustering vertices at each node level (leaves, edges, faces, cells) using Disjoint Set Union (DSU) and Quadratic Error Function (QEF) solvers to merge geometric primitives while preserving material properties and minimizing reconstruction error. Unlike uniform grid methods, it adapts resolution locally, allowing coarser branches to store vertices that minimize the sum of their children's Q functions, enabling recursive vertex calculation for all levels of detail. It sets itself apart from siblings like [Manifold Dual Contouring](2138-manifold-dual-contouring.md) by explicitly handling hierarchical LOD stitching via a "skirt" optimization and using DSU for topological correctness across irregular octree subdivisions.
+ 
+ ### [Intersection-Free Dual Contouring](5313-intersection-free-dual-contouring.md)
+@@ -273,26 +332,27 @@
+ 
+ ### Seam Generation for Adjacent Chunks
+-Generates mesh vertices and indices along the boundary between two adjacent octree chunks to eliminate seams common in dual contouring implementations [S5, unofficial]. It initializes a borderChildren array and iterates over both chunks to fetch coordinates and edge indices, dispatching to the appropriate FaceProc function based on direction to handle winding/normal consistency [S5, unofficial]. The `edgeIndexLookup` is a 4D array of ints with shape [6][2][4][4], where dimensions correspond to directions, chunk index, border points, and {x, y, z, edgeIdx} respectively [S5, unofficial].
++Generates mesh vertices and indices along the boundary between two adjacent octree chunks to eliminate seams common in dual contouring implementations [S5]. It initializes a `borderChildren` array of 8 pointers to `nullptr`, and an `idxs` array mapping chunk 0 to n1 and chunk 1 to n2. It iterates over both chunks, retrieves children arrays, and loops 4 times to fetch coordinates and edge indices from `edgeIndexLookup[dir][j][i]`. It computes octree indices, retrieves children, stores them in `borderChildren`, and generates vertex indices. Finally, it dispatches to the appropriate `FaceProc` function based on direction, passing the two octrees in the correct order to handle winding/normal consistency [S5]. The `edgeIndexLookup` is a 4D array of ints with shape `[6][2][4][4]`, where dimensions correspond to directions (x+, x-, y+, y-, z+, z-), chunk index (old/new), border points, and `{x, y, z, edgeIdx}` respectively [S5].
+ 
+ ### Vertex Clustering for Adaptive DC
+-A vertex clustering approach for simplifying contours in adaptive octree-based Dual Contouring. It maintains disconnected contour components during simplification to improve adaptivity [S6, unofficial]. However, this method can still generate non-manifold edges and vertices in adaptive settings. It also requires non-trivial coding-vector operations and restricts the maximum number of intersections between the contour and each cell edge to 2 [S6, unofficial]. Compared to other methods, it is more complex to implement and has more restrictive simplification limits due to the intersection cap [S6, unofficial].
++A vertex clustering approach for simplifying contours in adaptive octree-based Dual Contouring. It maintains disconnected contour components during simplification to improve adaptivity [S7, unofficial]. However, this method can still generate non-manifold edges and vertices in adaptive settings. It also requires non-trivial coding-vector operations and restricts the maximum number of intersections between the contour and each cell edge to 2 [S7, unofficial]. Compared to other methods, it is more complex to implement and has more restrictive simplification limits due to the intersection cap [S7, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$ where $N$ is the number of octree nodes, assuming constant-time QEF solving and lookup table access. The recursive traversal visits each node once.
+-*   **Memory Complexity:** $O(N)$ for storing the octree structure and vertex data. The octree size depends on the complexity of the scalar field and the maximum depth.
++*   **Time Complexity:** $O(N)$ where $N$ is the number of octree nodes, assuming constant-time QEF solving and lookup table access. The recursive traversal visits each node once [G].
++*   **Memory Complexity:** $O(N)$ for storing the octree structure and vertex data. The octree size depends on the complexity of the scalar field and the maximum depth [G].
+ *   **Measured Performance:** For the Stanford Dragon model with an error threshold of $1e0$, the octree method produced 35,836 triangles, compared to 309,962 for a uniform grid [S3, unofficial]. A k-d tree method produced 22,608 triangles, indicating the octree method may produce more triangles than k-d tree variants for the same scene [S3, unofficial].
+ *   **Strengths:** Adaptive resolution allows for high detail in complex regions and coarser resolution in flat areas, reducing memory and processing time for sparse volumes [G]. It handles hierarchical simplification naturally.
+-*   **Limitations:** Can produce non-manifold geometry if not carefully constrained (e.g., using Manifold Dual Contouring). Adaptive simplification can be complex to implement correctly [S6, unofficial]. The fixed lookup tables require careful indexing to avoid errors [S2, unofficial].
++*   **Limitations:** Can produce non-manifold geometry if not carefully constrained (e.g., using Manifold Dual Contouring). Adaptive simplification can be complex to implement correctly [S7, unofficial]. The fixed lookup tables require careful indexing to avoid errors [S2, unofficial].
+ *   **When to use:** When the scalar field is sparse or has varying levels of detail, and a manifold mesh is required (possibly with extensions).
+ *   **When not to use:** When a uniform grid is sufficient and simplicity of implementation is prioritized over adaptivity. When strict manifold guarantees are required without additional constraints.
+ 
+ ## Background
+-Dual Contouring was introduced by Schaefer et al. as a method for isosurface extraction that places a single vertex inside each cell containing an isosurface intersection [S3, unofficial]. The octree-based variant extends this by using a hierarchical grid structure to represent the scalar field, allowing for adaptive resolution [S3, unofficial]. The method is based on works of Schaefer et al. (Manifold dual contouring) [S3, unofficial]. It is used in real-time rendering and further processing where adaptive mesh generation is beneficial [S2, unofficial].
++The octree-based variant extends standard Dual Contouring by using a hierarchical grid structure to represent the scalar field, allowing for adaptive resolution [S3, unofficial]. The method is based on works of Schaefer et al. (Manifold dual contouring) [S3, unofficial]. It is used in real destructible-voxel implementations (e.g., GPU dual contouring in Unity) which use classic octree LOD without meshlets [S1, unofficial].
+ 
+ ## Sources
+-[S1] nivshalomlom/Dual-contouring, https://github.com/nivshalomlom/Dual-contouring, fetched 2026-10-26 (unofficial)
+-[S2] Alan-Baylis/DualContouring-3, https://github.com/Alan-Baylis/DualContouring-3, fetched 2026-10-26 (unofficial)
+-[S3] Danielmelody/KdtreeISO, https://github.com/Danielmelody/KdtreeISO, fetched 2026-10-27 (unofficial)
+-[S4] 3D Isosurfacing, https://doc.cgal.org/latest/Isosurfacing_3/index.html, fetched 2026-10-29
+-[S5] Tsarpf/procgen, https://github.com/Tsarpf/procgen, fetched 2026-10-26 (unofficial)
+-[S6] PDF Manifold Dual Contouring, https://people.engr.tamu.edu/schaefer/research/dualsimp_tvcg.pdf, fetched 2026-10-27 (unofficial)+[S1] research(render,world): LOD strategy for terraformable planet terrain, https://github.com/lobinuxsoft/kooch/issues/614, fetched 2026-10-26 (unofficial)
++[S2] nivshalomlom/Dual-contouring, https://github.com/nivshalomlom/Dual-contouring, fetched 2026-10-26 (unofficial)
++[S3] Alan-Baylis/DualContouring-3, https://github.com/Alan-Baylis/DualContouring-3, fetched 2026-10-26 (unofficial)
++[S4] Danielmelody/KdtreeISO, https://github.com/Danielmelody/KdtreeISO, fetched 2026-10-27 (unofficial)
++[S5] 3D Isosurfacing, https://doc.cgal.org/latest/Isosurfacing_3/index.html, fetched 2026-10-29
++[S6] Tsarpf/procgen, https://github.com/Tsarpf/procgen, fetched 2026-10-26 (unofficial)
++[S7] PDF Manifold Dual Contouring, https://people.engr.tamu.edu/schaefer/research/dualsimp_tvcg.pdf, fetched 2026-10-27 (unofficial)

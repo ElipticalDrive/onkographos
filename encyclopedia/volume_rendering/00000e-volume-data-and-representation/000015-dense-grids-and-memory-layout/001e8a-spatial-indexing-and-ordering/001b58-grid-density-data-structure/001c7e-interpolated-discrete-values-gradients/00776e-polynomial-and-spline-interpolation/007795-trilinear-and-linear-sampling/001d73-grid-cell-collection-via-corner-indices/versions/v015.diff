@@ -1,0 +1,264 @@
+--- v014.md
++++ v015.md
+@@ -4,37 +4,37 @@
+ 
+ ## Overview
+-Grid Cell Collection via Corner Indices is a data gathering method that retrieves the discrete values stored at the eight vertices of the grid cell enclosing a set of query points, preparing them for subsequent trilinear interpolation or surface extraction [S1, S3, unofficial]. It solves the problem of efficiently mapping arbitrary continuous coordinates to the discrete support points required by linear basis functions in dense voxel grids [S1, S3, unofficial]. It sets itself apart from higher-order methods like [Tricubic Interpolation](14963-tricubic-interpolation.md) by strictly limiting the support to the immediate 8 neighbors of the enclosing voxel, and from [VoxelGrid](2159-voxelgrid.md) by focusing on the low-level index computation and tensor gathering step rather than the high-level differentiable rendering pipeline [S2, S3, unofficial].
++Grid Cell Collection via Corner Indices is a data gathering method that retrieves the values stored at the eight vertices of the grid cell enclosing a set of query points, preparing them for trilinear interpolation or similar basis evaluations [S1, S2, S3, unofficial]. It solves the problem of efficiently mapping arbitrary continuous coordinates to the discrete support points required by the parent [Polynomial and Spline Interpolation](11104-polynomial-and-spline-interpolation.md) without computing the final weighted sum itself. It sets itself apart from higher-order methods like [B-spline Field Interpolation](11066-b-spline-field-interpolation.md) by strictly limiting the support to the immediate 8 neighbors of the enclosing voxel, and from [VoxelGrid](2159-voxelgrid.md) by focusing on the index computation and raw data retrieval step rather than the full differentiable rendering pipeline [S2, S3, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-1.  A dense grid tensor $\mathbf{G}$ of shape $(D_x, D_y, D_z, C)$, where $D$ are the grid dimensions and $C$ is the channel count (e.g., density, color, or geometry parameters) [S1, S2, S3, unofficial].
+-2.  A set of query points $\mathbf{P}$ with shape $(N, 3)$, representing coordinates in the grid's local space [S1, S2, unofficial].
+-3.  Boundary handling mode (e.g., periodic, clamping, or constant value filling) [S1, S4, unofficial].
++*   A dense grid tensor $\mathbf{G}$ of shape $(D_x, D_y, D_z, C)$, where $D$ are the spatial dimensions and $C$ is the channel count (e.g., density, color, or geometry parameters) [S1, S2, S3, unofficial].
++*   A set of query points $\mathbf{P} \in \mathbb{R}^{N \times 3}$, where $N$ is the number of points and each row is $(x, y, z)$ [S1, S2, unofficial].
++*   Optional: A stride parameter or grid resolution for coordinate normalization [S3, S4, unofficial].
+ 
+ **Outputs:**
+-1.  A gathered tensor $\mathbf{V}$ of shape $(N, 8, C)$, containing the values from the 8 corners for each query point [S1, S2, S3, unofficial].
+-2.  (Optional) A gathered position tensor $\mathbf{X}$ of shape $(N, 8, 3)$, containing the world or local coordinates of the 8 corners [S3, unofficial].
++*   A tensor of gathered values $\mathbf{V} \in \mathbb{R}^{N \times 8 \times C}$, where each point has 8 entries corresponding to the 8 corners of its enclosing cell [S1, S2, S3, unofficial].
++*   In some implementations, a `VoxSample` structure containing arrays of values and positions [S3, unofficial].
+ 
+ **Data Structures:**
+-*   **VoxSample (C-style):** A struct used in some implementations to hold the gathered data for a single cell. It contains two arrays of size 8: `values` (float array of size 8) and `positions` (vec3 array of size 8) [S3, unofficial].
+-    *   Index mapping for the 8 corners:
+-        *   Indices 0–3: Lowest Z-plane corners (sw, se, ne, nw).
+-        *   Indices 4–7: Highest Z-plane corners (sw, se, ne, nw) [S3, unofficial].
+-*   **VoxKey (PyTorch-style):** A 2D tensor of shape $(N, 8)$ storing the integer indices of the 8 corners for each query point [S2, unofficial].
+-*   **CareIdx:** A 1D tensor or array used to map or filter the gathered points [S2, unofficial].
++*   **Corner Indices:** A tensor of shape $(N \times 8, 3)$ containing integer coordinates for the 8 corners. The 8 combinations are generated from the floor and ceil of the query point's coordinates [S1, unofficial].
++*   **VoxSample (Optional):** A struct used in some C++ implementations containing:
++    *   `values`: `float[8]`
++    *   `positions`: `vec3[8]`
++    *   Index mapping: Indices 0-3 correspond to the lowest Z-plane corners (sw, se, ne, nw), and indices 4-7 correspond to the highest Z-plane corners (sw, se, ne, nw) [S3, unofficial].
+ 
+-**Algorithm Steps:**
+-1.  **Coordinate Normalization:** If the query points $\mathbf{P}$ are not already in the range $[0, 1]$ or $[0, D_d-1]$, normalize them to the grid's coordinate system [S1, S4, unofficial].
+-2.  **Index Computation:** For each query point $\mathbf{p}_i = (x, y, z)$:
+-    *   Compute the floor indices: $i_x = \lfloor x \rfloor, i_y = \lfloor y \rfloor, i_z = \lfloor z \rfloor$ [S1, S3, unofficial].
+-    *   Compute the ceil indices: $j_x = \lceil x \rceil, j_y = \lceil y \rceil, j_z = \lceil z \rceil$ [S1, S3, unofficial].
+-    *   Generate all 8 combinations of $(i_x/j_x, i_y/j_y, i_z/j_z)$ to form the corner indices [S1, S3, unofficial].
+-3.  **Boundary Handling:** Apply the specified boundary condition to the computed indices to ensure they fall within the valid grid domain $[0, D_d-1]$ [S1, S4, unofficial].
+-    *   *Periodic:* $idx = idx \mod D_d$ [S1, unofficial].
+-    *   *Clamping:* $idx = \max(0, \min(D_d-1, idx))$ [S1, S4, unofficial].
+-    *   *Constant Fill:* If out of bounds, the value is filled with a constant $cval$ during the final interpolation step, but indices must still be valid for gathering [S4, unofficial].
+-4.  **Gathering:** Index into the grid tensor $\mathbf{G}$ using the fixed corner indices to retrieve the values [S1, S3, unofficial].
+-    *   If positions are required, compute the world coordinates of the corners using the grid origin and voxel size [S3, unofficial].
+-5.  **Reshaping:** Reshape the gathered data into the output tensor $\mathbf{V}$ with shape $(N, 8, C)$ [S1, S3, unofficial].
++**Steps:**
++1.  **Coordinate Normalization (Optional):** If the grid is defined in physical space, normalize query points to the range $[0, 1]$ or $[0, D_d-1]$ depending on the implementation's indexing convention [S1, S4, unofficial].
++2.  **Index Computation:** For each query point $\mathbf{p}_i = (x_i, y_i, z_i)$:
++    *   Compute floor indices: $f_x = \lfloor x_i \rfloor, f_y = \lfloor y_i \rfloor, f_z = \lfloor z_i \rfloor$.
++    *   Compute ceil indices: $c_x = \lceil x_i \rceil, c_y = \lceil y_i \rceil, c_z = \lceil z_i \rceil$.
++    *   Generate the 8 corner index tuples by taking the Cartesian product of $\{f_x, c_x\} \times \{f_y, c_y\} \times \{f_z, c_z\}$ [S1, unofficial].
++3.  **Boundary Handling:** Fix out-of-bounds indices. Common strategies include:
++    *   Periodic boundary conditions (modulo grid dimensions) [S1, unofficial].
++    *   Clamping to the nearest valid index $[0, D_d-1]$ [S2, S3, unofficial].
++    *   Constant value filling for out-of-bounds queries, often handled by the interpolation wrapper rather than the gather step itself [S4, unofficial].
++4.  **Gathering:** Index into the grid tensor $\mathbf{G}$ using the fixed corner indices.
++    *   If using PyTorch-like indexing: `gathered = G[corner_indices]` [S1, unofficial].
++    *   If using custom C++ kernels (e.g., `gather_triinterp_geo_params`): Pass voxel keys and care indices to a CUDA kernel that performs the gather [S2, unofficial].
++5.  **Reshaping:** Reshape the flat list of gathered values back to shape $(N, 8, C)$ [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -43,101 +43,91 @@
+ import math
+ 
+-def gather_corner_indices(grid_shape, query_points, boundary_mode='clamp'):
++def grid_cell_collection_via_corner_indices(grid: torch.Tensor, points: torch.Tensor) -> torch.Tensor:
+     """
+-    Gathers the 8 corner indices for a batch of query points.
++    Collects voxel values at the 8 corners of the grid cell enclosing each input point.
+     
+     Args:
+-        grid_shape (tuple): (Dx, Dy, Dz) dimensions of the grid.
+-        query_points (torch.Tensor): Shape (N, 3), coordinates in grid space [0, D-1].
+-        boundary_mode (str): 'clamp', 'periodic', or 'constant'.
++        grid: Tensor of shape (Dx, Dy, Dz, C)
++        points: Tensor of shape (N, 3) with coordinates (x, y, z)
+         
+     Returns:
+-        torch.Tensor: Shape (N, 8, 3), integer indices of the 8 corners.
++        Tensor of shape (N, 8, C) containing the values at the 8 corners
+     """
+     # 1. Compute floor and ceil indices
+-    # Ensure coordinates are within bounds for floor/ceil to work correctly
+-    # If using 'constant' boundary, we still need valid indices for gathering,
+-    # or we handle out-of-bounds values separately. Here we assume indices are valid.
++    # Clamp to valid range [0, D-1] to handle boundary conditions
++    Dx, Dy, Dz, C = grid.shape
+     
+-    floor_indices = torch.floor(query_points).long()
+-    ceil_indices = torch.ceil(query_points).long()
++    floor_x = torch.clamp(torch.floor(points[:, 0]).long(), 0, Dx - 1)
++    floor_y = torch.clamp(torch.floor(points[:, 1]).long(), 0, Dy - 1)
++    floor_z = torch.clamp(torch.floor(points[:, 2]).long(), 0, Dz - 1)
+     
+-    # 2. Generate 8 combinations
+-    # Combinations: (floor_x, floor_y, floor_z), (floor_x, floor_y, ceil_z), ...
+-    corners = []
+-    for dx in [0, 1]:
+-        for dy in [0, 1]:
+-            for dz in [0, 1]:
+-                ix = floor_indices[:, 0] if dx == 0 else ceil_indices[:, 0]
+-                iy = floor_indices[:, 1] if dy == 0 else ceil_indices[:, 1]
+-                iz = floor_indices[:, 2] if dz == 0 else ceil_indices[:, 2]
+-                corners.append(torch.stack([ix, iy, iz], dim=1))
++    ceil_x = torch.clamp(torch.ceil(points[:, 0]).long(), 0, Dx - 1)
++    ceil_y = torch.clamp(torch.ceil(points[:, 1]).long(), 0, Dy - 1)
++    ceil_z = torch.clamp(torch.ceil(points[:, 2]).long(), 0, Dz - 1)
+     
+-    corner_indices = torch.stack(corners, dim=1) # Shape (N, 8, 3)
++    # 2. Generate all 8 combinations
++    # Order: (floor/floor/floor, floor/floor/ceil, ..., ceil/ceil/ceil)
++    # Using itertools.product logic manually for clarity
++    indices = []
++    for x in [floor_x, ceil_x]:
++        for y in [floor_y, ceil_y]:
++            for z in [floor_z, ceil_z]:
++                indices.append(torch.stack([x, y, z], dim=1))
++                
++    corner_indices = torch.cat(indices, dim=0) # Shape (N*8, 3)
+     
+-    # 3. Apply Boundary Handling
+-    if boundary_mode == 'clamp':
+-        corner_indices = corner_indices.clamp(min=0, max=torch.tensor(grid_shape) - 1)
+-    elif boundary_mode == 'periodic':
+-        corner_indices = corner_indices % torch.tensor(grid_shape)
+-    elif boundary_mode == 'constant':
+-        # For constant fill, we might clamp indices and handle the value later,
+-        # or use a specific padding strategy. Standard practice is to clamp
+-        # and then mask/replace values during interpolation.
+-        corner_indices = corner_indices.clamp(min=0, max=torch.tensor(grid_shape) - 1)
+-        
+-    return corner_indices
+-
+-def gather_grid_values(grid_tensor, corner_indices):
+-    """
+-    Retrieves values from the grid tensor using the corner indices.
++    # 3. Gather values
++    # Gather from grid using advanced indexing
++    # Note: In practice, this might be done via a custom CUDA kernel for performance
++    # Here we simulate the gather operation
++    gathered_values = grid[corner_indices[:, 0], corner_indices[:, 1], corner_indices[:, 2]] # Shape (N*8, C)
+     
+-    Args:
+-        grid_tensor (torch.Tensor): Shape (Dx, Dy, Dz, C).
+-        corner_indices (torch.Tensor): Shape (N, 8, 3), integer indices.
+-        
+-    Returns:
+-        torch.Tensor: Shape (N, 8, C), gathered values.
+-    """
+-    # Grid tensor is 4D. We need to gather from it.
+-    # corner_indices has shape (N, 8, 3) -> (x, y, z)
+-    # We need to index grid_tensor[x, y, z, :]
++    # 4. Reshape to (N, 8, C)
++    gathered_values = gathered_values.view(-1, 8, C)
+     
+-    N = corner_indices.shape[0]
+-    C = grid_tensor.shape[3]
+-    
+-    # Extract x, y, z components
+-    x = corner_indices[:, :, 0] # (N, 8)
+-    y = corner_indices[:, :, 1] # (N, 8)
+-    z = corner_indices[:, :, 2] # (N, 8)
+-    
+-    # Gather values
+-    # grid_tensor[x, y, z, :]
+-    # We can use advanced indexing
+-    values = grid_tensor[x, y, z, :] # Shape (N, 8, C)
+-    
+-    return values
++    return gathered_values
+ ```
+ 
+ **Parameters:**
+-*   `grid_shape`: The dimensions of the voxel grid $(D_x, D_y, D_z)$ [S1, S3, unofficial].
+-*   `boundary_mode`: The strategy for handling indices outside the grid bounds ('clamp', 'periodic', 'constant') [S1, S4, unofficial].
+-*   `cval`: The constant value to use for out-of-bounds queries when `boundary_mode` is 'constant' [S4, unofficial].
++*   `grid`: The dense 3D tensor. Size: $(D_x, D_y, D_z, C)$.
++*   `points`: Query coordinates. Size: $(N, 3)$.
++*   `boundary_mode`: Strategy for out-of-bounds indices (clamp, periodic, constant). Default: Clamp [S1, S4, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** Floating-point coordinates near integer boundaries may result in floor/ceil producing indices that are off by one due to precision errors. It is recommended to use a small epsilon or robust integer conversion [S1, S3, unofficial].
+-*   **Degenerate Input:** Query points exactly on the grid boundary may produce identical floor and ceil indices, resulting in duplicate corners. This is handled correctly by the algorithm but may be optimized [S1, S3, unofficial].
+-*   **Out-of-Bounds:** If the query point is outside the grid, the boundary mode determines the behavior. 'Constant' fill requires careful handling to ensure the interpolation weights do not produce invalid results [S4, unofficial].
++*   **Precision:** Floating-point coordinates near integer boundaries may result in floor/ceil ambiguity. Ensure consistent handling (e.g., always clamp) to avoid index errors [S1, S2, unofficial].
++*   **Degenerate Input:** Points exactly on grid boundaries may have ceil indices equal to $D_d$, which must be clamped to $D_d-1$ [S1, S2, unofficial].
++*   **Memory:** Gathering $N \times 8$ values can be memory-intensive for large $N$. Use streaming or batched processing if necessary [S3, unofficial].
+ 
+ ## Subtopics
+ 
++### [VoxelGrid](2159-voxelgrid.md)
++VoxelGrid is a dense, learnable 3D data structure that defines a parameterized function in 3D space by storing learnable values at the grid vertices to support efficient feature queries via trilinear interpolation. It enables differentiable trilinear interpolation of density and color, replacing coordinate-based MLPs with a fixed, axis-aligned tensor layout for efficient neural rendering. It builds on [Grid Cell Collection via Corner Indices](1518-grid-cell-collection-via-corner-indices.md) by explicitly storing values at the 8 corners of each voxel for interpolation.
++
++### [Curvilinear to Rectilinear Resampling](2248-curvilinear-to-rectilinear-resampling.md)
++This method converts a curvilinear input grid into a rectilinear output grid by estimating function values at new sample points.
++
++### [Voxel Trilinear Interpolation (SIMD)](2564-voxel-trilinear-interpolation-simd.md)
++Voxel Trilinear Interpolation (SIMD) retrieves scalar or vector values from a dense 3D volume grid at arbitrary floating-point coordinates by performing trilinear interpolation across the 8 surrounding voxel corners, optimized for Single Instruction, Multiple Data (SIMD) execution units. It solves the problem of extracting continuous fields from discrete voxel representations while maximizing throughput on modern CPUs. It sets itself apart from its sibling [3D Trilinear Interpolation](2613-3d-trilinear-interpolation.md) by explicitly structuring the computation to exploit SIMD registers (e.g., AVX/AVX2) for parallel evaluation of multiple components or channels, and from [VoxelGrid](2159-voxelgrid.md) by providing the specific low-level sampling kernel rather than the grid structure itself.
++
++### [3D Trilinear Interpolation](2613-3d-trilinear-interpolation.md)
++3D Trilinear Interpolation reconstructs the value of a scalar field at an arbitrary point within a voxel by linearly interpolating the values at the eight corners of the enclosing grid cell. It is the standard reconstruction filter for structured rectilinear volume data, providing $C^0$ continuity and smoother results than nearest-neighbor sampling at the cost of higher computational complexity. It differs from higher-order methods like [Cubic Volume Interpolation](4278-cubic-volume-interpolation.md) by using only the immediate 8 neighbors and linear weights, and from [VoxelGrid](2159-voxelgrid.md) by explicitly computing off-grid values rather than returning discrete cell contents.
++
++### [iso_corners_list_f1v4](2627-iso-corners-list-f1v4.md)
++`iso_corners_list_f1v4` is a GPU kernel variant that computes the values of one function at the eight corners of the grid cells enclosing a list of input points, enabling trilinear interpolation or surface extraction. It differs from its siblings by processing 256 consecutive lattice points per thread group across 2–4 neighboring bricks, sharing shell setup overhead among all points in the group rather than per-brick, which improves occupancy and reduces redundant memory accesses.
++
++### [Brick Volume Addressing with If-Else](3340-brick-volume-addressing-with-if-else.md)
++Brick Volume Addressing with If-Else is a method to compute memory offsets for accessing neighboring samples in a brick-structured volume, primarily for resampling or gradient computation. It solves the problem of efficiently determining whether adjacent samples lie within the current brick or in a neighboring brick by using explicit conditional checks. Unlike sibling methods that assume a uniform linear layout, this method uses an `if-else` statement to test if needed data elements are within one brick; if true, it uses fast linear addressing, otherwise it falls back to costly address calculations. It differs from its sibling [Lookup Table Addressing for Resampling](3535-lookup-table-addressing-for-resampling.md) by using runtime `if-else` branches instead of precomputed lookup tables, which incurs pipeline flush penalties but avoids table memory overhead.
++
++### [Corner Indexing and Mapping](12384-corner-indexing-and-mapping.md)
++Not given in the sources.
++
+ ### Grid Interpolation with Boundary Handling
+ A linearly interpolated grid structure used for voxel interpolation (interp5) and image plane interpolation (interp4), handling boundary conditions via constant value filling [S4, unofficial]. It wraps a 2D/3D grid of values into a callable interpolation function, supporting 4th-order (bicubic) and 5th-order interpolation with a specified constant value for out-of-bounds queries [S4, unofficial].
+-*   **Step:** 
+-    1.  Initialize `Grid2` with `grid_vals` and `cval` [S4, unofficial].
+-    2.  For `interp4`: Map coordinates $x \in [0,1]$ to grid indices: $coords = (x \cdot grid\_res) - 0.5$. Flip coords along the last axis. Use `jax.scipy.ndimage.map_coordinates` with `order=1` and `cval` [S4, unofficial].
+-    3.  For `interp5`: Map coordinates $x$ to grid indices: $coords = (x \cdot (grid\_res+1)) - 1$. Permute x and y axes using matrix $\begin{bmatrix} 0 & 1 & 0 \\ 1 & 0 & 0 \\ 0 & 0 & 1 \end{bmatrix}$. Use `jax.scipy.ndimage.map_coordinates` with `order=1` and `cval` [S4, unofficial].
++*   **Steps:**
++    1.  Initialize `Grid2` with `grid_vals` and `cval` (constant value for out-of-bounds, default 0) [S4, unofficial].
++    2.  For `interp4`: Map coordinates $x \in [0,1]$ to grid indices: $\text{coords} = (x \cdot \text{grid\_res}) - 0.5$. Flip coords along the last axis. Use `jax.scipy.ndimage.map_coordinates` with `order=1` and `cval` [S4, unofficial].
++    3.  For `interp5`: Map coordinates $x$ to grid indices: $\text{coords} = (x \cdot (\text{grid\_res}+1)) - 1$. Permute x and y axes using matrix $\begin{bmatrix} 0 & 1 & 0 \\ 1 & 0 & 0 \\ 0 & 0 & 1 \end{bmatrix}$. Use `jax.scipy.ndimage.map_coordinates` with `order=1` and `cval` [S4, unofficial].
++    4.  Return a lambda function that calls the appropriate interpolation method [S4, unofficial].
+ *   **Parameters:** `grid_vals`: `jnp.ndarray`, the voxel points to interpolate between. `cval`: `float`, constant value to fill past edges, default 0 [S4, unofficial].
+-*   **Code:** `grid_obj = Grid2(grid_vals = grid, cval=cval); predict_interp = lambda x: grid_obj.interp5(x)` [S4, unofficial].
+ 
+ ### PixelGrid2D ValueAt
+@@ -146,5 +136,5 @@
+ ### VIPER Cell Sampling with Extrapolation Flag Invalidation
+ A cell sampling technique that uses tri-linear interpolation at ray entry and exit points to check if target values lie within the cell range, combined with vertex flags to invalidate cells containing extrapolated data [S6, unofficial].
+-*   **Step:** 
++*   **Steps:**
+     1.  Interpolate data values at the exact points where a ray enters and exits a grid cell [S6, unofficial].
+     2.  Compare target values to the interpolated entry and exit values to determine if they lie within the cell [S6, unofficial].
+@@ -154,17 +144,17 @@
+     6.  After placement completes, assign a value equal to twice the largest data value found to all nodes with an unset flag [S6, unofficial].
+     7.  Write the twice-maximum value to the data file so VIPER can read it during rendering [S6, unofficial].
+-*   **Pitfall:** Tri-linear interpolation across cells containing extrapolated data (unset flags) may produce a range that falsely contains a target value [S6, unofficial]. A-buffering delays knowledge of the largest data value until all points are processed, whereas Z-buffering finds it during placement [S6, unofficial].
++*   **Pitfalls:** Tri-linear interpolation across cells containing extrapolated data (unset flags) may produce a range that falsely contains a target value [S6, unofficial]. A-buffering delays knowledge of the largest data value until all points are processed, whereas Z-buffering finds it during placement [S6, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$, where $N$ is the number of query points, as each point requires a constant number of operations (8 index lookups and boundary checks) [S1, S3, unofficial].
+-*   **Memory Complexity:** $O(N \cdot C)$, where $C$ is the channel count, to store the gathered values for all query points [S1, S3, unofficial].
+-*   **Performance:** Highly efficient on modern GPUs due to the regular memory access pattern and lack of branching (if boundary conditions are handled via clamping or periodic arithmetic) [S1, S3, unofficial]. SIMD optimizations can further accelerate the gathering and subsequent interpolation steps [S3, unofficial].
+-*   **Strengths:** Simple to implement, differentiable (if using soft indexing or standard tensor operations), and provides $C^0$ continuity [S1, S3, S4, unofficial].
+-*   **Limitations:** Only provides linear interpolation, which may result in aliasing or blurring for high-frequency content compared to higher-order methods like [Tricubic Interpolation](14963-tricubic-interpolation.md) [S3, unofficial].
+-*   **When to Use:** When computational efficiency is critical, and the grid resolution is sufficient to avoid visible artifacts from linear interpolation [S1, S3, unofficial].
+-*   **When Not to Use:** When high-frequency details are present and higher-order interpolation is required, or when the grid is very sparse [S3, unofficial].
++*   **Time Complexity:** $O(N)$ for $N$ query points, as each point requires constant-time index computation and 8 memory accesses [S1, S2, unofficial].
++*   **Memory Complexity:** $O(N \cdot C)$ for the output tensor, where $C$ is the channel count [S1, S2, unofficial].
++*   **Performance:** Highly efficient on GPUs when implemented as a custom kernel (e.g., `gather_triinterp_geo_params`) due to coalesced memory access patterns [S2, unofficial]. Performance on CPUs can be improved using SIMD optimizations [S5, unofficial].
++*   **Strengths:** Simple, differentiable, and efficient for dense grids [S1, S2, unofficial].
++*   **Limitations:** Limited to linear interpolation; not suitable for high-frequency details without higher-order methods [S3, unofficial]. Boundary handling can introduce artifacts if not carefully managed [S4, S6, unofficial].
++*   **When to use:** When trilinear interpolation is sufficient and performance is critical [S1, S2, S5, unofficial].
++*   **When not to use:** When higher-order continuity or accuracy is required [S3, unofficial].
+ 
+ ## Background
+-Grid Cell Collection via Corner Indices is a fundamental technique in volume rendering and voxel-based neural rendering, serving as the data gathering step for trilinear interpolation [S1, S2, S3, unofficial]. It is widely used in frameworks like Plenoxels and VoxelGrid for efficient feature queries [S1, S2, unofficial]. The method is also employed in scientific visualization tools like VIPER for handling extrapolated data [S6, unofficial].
++The method originates from the need for efficient sampling in neural radiance fields and voxel-based rendering, particularly in implementations like Plenoxels and Sparse Voxel Rasterization [S1, S2, unofficial]. It is a fundamental building block for differentiable volume rendering, allowing gradients to flow back to the grid values [S2, unofficial]. The specific kernel names (`gather_triinterp_geo_params`, `gather_triinterp_feat_params`) are associated with custom CUDA extensions in these frameworks [S2, unofficial].
+ 
+ ## Sources

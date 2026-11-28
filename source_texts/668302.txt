@@ -1,0 +1,172 @@
+Playing with SPH. Contribute to uoli/water-sim-unity development by creating an account on GitHub.
+
+Replace bitonic sort with GPU counting sort for the spatial lookup by uoli · Pull Request #3 · uoli/water-sim-unity · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+uoli
+commented
+Jun 10, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Summary
+Profiling showed FluidSimGPU.Sort at ~90% of sim time: ~105 bitonic merge dispatches per substep (~1800/frame), each paying FindKernel/SetBuffer/driver overhead.
+Cell keys are already integers in a small range, so the sort is replaced with a counting sort: atomic per-cell counts → two-level Blelloch exclusive scan in groupshared memory → scatter into per-cell ranges. O(n) work, six dispatches per substep.
+The scan output doubles as the start-index table, so the UpdateSpatialLookup_UpdateStartIndices kernel, the -1 sentinel logic, the power-of-two padding, the ping-pong buffers, and Sort.compute are all deleted. Neighbor loops iterate [CellStarts[key], +CellCounts[key]); the hash-collision dedupe and 3×3 cell filter are unchanged.
+Kernel ids and buffer bindings are resolved once in SetupKernels() (bindings persist on compute shaders), making the substep loop pure Dispatch calls — no per-dispatch Set* traffic.
+Merged force kernels: pressure and viscosity walked identical neighbor lists; a single ComputeForces kernel now accumulates pressure + viscosity + gravity + interaction into VelocityDelta, applied at integration. Neighbor traversal drops from 3 walks to 2 per substep.
+Bigger hash table: the cell table is now NextPowerOfTwo(2N) instead of exactly N (load factor ~0.5 instead of ~1), cutting wasted iterations over far-away bucket-mates; the modulo becomes a bit-mask. Capped at the two-level scan limit (262,144 cells; error logged beyond ~131k particles).
+Test plan
+Sim behaves the same as before (within float rounding; within-cell order is nondeterministic, force ordering between pressure/viscosity changed from sequential to simultaneous).
+Profiler: FluidSimGPU.Sort collapses from ~90% of sim time; Gfx.WaitForPresentOnGfxThread shrinks at 50k particles.
+Particle count changes at runtime reinitialize correctly (buffers + kernel bindings rebuilt).
+Non-multiple-of-512 particle counts work (scan zero-padding path).
+🤖 Generated with Claude Code
+Replace bitonic sort with a GPU counting sort for the spatial lookup
+…
+624864a
+```
+Profiling showed the sort at ~90% of sim time: the bitonic network needed
+~105 merge dispatches per substep (~1800/frame at 17 substeps), each with
+FindKernel/SetBuffer overhead, plus padded ping-pong buffers.
+
+The cell keys are already integers in [0, ParticleCount), so a counting
+sort fits exactly: count particles per cell (atomics), exclusive-scan the
+counts into per-cell start offsets (two-level Blelloch scan in groupshared
+memory, supporting up to 512*512 cells), and scatter entries into their
+cell's range. O(n) work in a fixed six dispatches per substep, and the
+scan output doubles as the start-index table, eliminating the separate
+UpdateSpatialLookup_UpdateStartIndices kernel, the -1 sentinel logic, the
+power-of-two padding, and the ping-pong buffers. Sort.compute is deleted.
+
+Neighbor loops now iterate the [CellStarts[key], +CellCounts[key]) range
+instead of walking sorted runs. The key-dedupe and 3x3 cell filter are
+unchanged.
+
+Kernel ids and buffer bindings are now resolved once in SetupKernels()
+(bindings persist on the compute shader), so the substep loop is pure
+Dispatch calls: 11 per substep with zero per-dispatch Set* overhead.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Copilot
+AI
+review requested due to automatic review settings
+June 10, 2026 20:14
+Copilot started reviewing on behalf of
+uoli
+June 10, 2026 20:14
+View session
+Copilot
+AI
+reviewed
+Jun 10, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Pull request overview
+This PR replaces the previous GPU bitonic sort used to build the spatial lookup with a GPU counting-sort pipeline (counts → two-level exclusive scan → scatter), aiming to dramatically reduce dispatch count and per-dispatch overhead in the simulation substep loop.
+Changes:
+Removed the dedicated Sort.compute bitonic sort shader (and its scene reference) in favor of a counting sort implemented inside FluidSim.compute.
+Added a two-level Blelloch exclusive scan and scatter kernels to build per-cell ranges (CellStarts/CellCounts) for neighbor iteration.
+Refactored FluidSimGPU to cache kernel IDs and persistently bind buffers once in SetupKernels(), making the substep loop primarily Dispatch calls.
+Reviewed changes
+Copilot reviewed 5 out of 5 changed files in this pull request and generated 4 comments.
+Show a summary per file
+File
+Description
+Assets/Scenes/fluid-sim.unity
+Removes the serialized reference to the deleted sort compute shader asset.
+Assets/fluid-sim/GPU/Sort.compute.meta
+Deletes the Unity meta for the removed bitonic sort shader.
+Assets/fluid-sim/GPU/Sort.compute
+Removes the bitonic merge/padded-copy GPU sort implementation.
+Assets/fluid-sim/GPU/FluidSimGPU.cs
+Switches spatial lookup construction from bitonic sort to counting-sort dispatch chain; caches kernel IDs/bindings.
+Assets/fluid-sim/GPU/FluidSim.compute
+Implements counting-sort spatial lookup kernels and updates neighbor iteration to use CellStarts/CellCounts.
+💡 Add Copilot custom instructions for smarter, more guided reviews. Learn how to get started.
+Comment thread
+Assets/fluid-sim/GPU/FluidSimGPU.cs
+m_PointDensitiesBuffer = new ComputeBuffer(ParticleCount, sizeof(float));
+m_PointDensitiesBuffer.name = "DensitiesBuffer";
+m_PointPressureBuffer = new ComputeBuffer(ParticleCount, sizeof(float));
+m_PointDensitiesBuffer.name = "PressureBuffer";
+Comment thread
+Assets/fluid-sim/GPU/FluidSimGPU.cs
+m_ViscosityDeltaBuffer.name = "ViscosityDeltaBuffer";
+m_PointBuffer.SetData(m_PointPositionData);
+m_PointDensitiesBuffer.SetData(m_PointDensitiesData);
+m_PointPressureBuffer.SetData(m_PointDensitiesData);
+Comment thread
+Assets/fluid-sim/GPU/FluidSimGPU.cs
+m_KernelViscosity = SimComputeShader.FindKernel("ComputeViscosity");
+m_KernelIntegrate = SimComputeShader.FindKernel("ComputePositionFromVelocityAndHandleCollision");
+m_GroupsParticles = Mathf.CeilToInt(ParticleCount / 64f);
+Comment thread
+Assets/fluid-sim/GPU/FluidSimGPU.cs
+Outdated
+Comment on lines
++223
+to
++224
+if (m_ScanBlockCount > k_ScanBlockSize)
+Debug.LogError($"ParticleCount {ParticleCount} exceeds the two-level scan limit of {k_ScanBlockSize * k_ScanBlockSize}.");
+Cut GPU work per substep: merge force kernels, halve hash bucket sharing
+…
+94a3466
+```
+At 50k particles the GPU is the bottleneck (Gfx.WaitForPresent dominates).
+Two reductions without quality loss:
+
+The pressure and viscosity kernels walked identical neighbor lists; they
+are merged into a single ComputeForces kernel that accumulates pressure,
+viscosity, gravity and the interaction force into VelocityDelta (renamed
+from ViscosityDelta), applied by the integration kernel. Neighbor
+traversal per substep drops from three walks to two, and a dispatch goes
+away. Both forces now read the same pre-substep velocity field.
+
+The cell table was sized exactly ParticleCount (load factor ~1), so hash
+buckets were frequently shared with far-away cells whose entries were
+iterated and rejected. The table is now NextPowerOfTwo(2 * ParticleCount)
+(capped at the scan limit of 262144), cutting bucket sharing, and the
+power-of-two size turns the hash modulo into a bit-mask.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+uoli
+merged commit cb3e871
+into
+main
+Jun 10, 2026
+uoli
+deleted the
+perf/gpu-counting-sort
+branch
+June 10, 2026 21:20
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

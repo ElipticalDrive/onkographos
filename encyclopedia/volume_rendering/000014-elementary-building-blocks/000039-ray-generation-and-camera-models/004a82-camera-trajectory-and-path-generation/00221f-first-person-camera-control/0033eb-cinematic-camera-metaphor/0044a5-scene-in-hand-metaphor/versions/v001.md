@@ -1,0 +1,50 @@
+# Scene-in-Hand Metaphor
+
+Also called: World-in-Miniature, Eyeball-in-Hand
+
+## Overview
+The Scene-in-Hand Metaphor is a navigation technique where the three-dimensional world moves in correspondence with a six degree-of-freedom (6DoF) input device [S1, unofficial]. It sets itself apart from parent techniques like the Cinematic Camera Metaphor by treating the scene as a manipulable object rather than the camera as a free-moving entity, making it particularly useful for changing viewpoints in hierarchical scenes [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 6DoF input device (e.g., a chameleon-style tracker) providing position and orientation data [S1, unofficial].
+*   **Output:** A transformation applied to the scene graph or camera matrix such that the scene rotates/transforms in the same direction as the device.
+
+**Data Structures:**
+*   **Device State:** A 6DoF pose vector $P_{dev} = [x, y, z, r_x, r_y, r_z]$ representing the physical device's position and orientation relative to a base frame [S1, unofficial].
+*   **Scene Transform:** A $4 \times 4$ homogeneous transformation matrix $M_{scene}$ applied to all scene objects [S1, unofficial].
+
+**Steps:**
+1.  **Initialize:** Set the initial scene transform $M_{scene}$ to the identity matrix $I$ or the current view state [G].
+2.  **Read Input:** Acquire the current 6DoF pose $P_{dev}$ from the input device [S1, unofficial].
+3.  **Compute Rotation:** Extract the rotational component $R_{dev}$ from $P_{dev}$ [S1, unofficial].
+4.  **Apply Rotation:** Update the scene's orientation by multiplying the current scene matrix by the device's rotation: $M_{scene} \leftarrow M_{scene} \times R_{dev}$ [S1, unofficial]. If the device is rotated clockwise, the scene rotates clockwise [S1, unofficial].
+5.  **Handle Large Movements (Ratcheting):** If a button on the device is pressed, it acts as a clutch, allowing the user to ratchet through large movements without continuous tracking drift [S1, unofficial].
+6.  **Render:** Render the scene using the updated $M_{scene}$ [G].
+
+**Parameters:**
+*   **Clutch Button:** A boolean flag on the input device. When true, rotation updates are accumulated or scaled differently to allow coarse navigation [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Drift:** Continuous integration of device rotation can lead to drift if the device's orientation sensor is noisy. Ratcheting mitigates this by allowing discrete updates [S1, unofficial].
+*   **Hierarchy:** The metaphor is specifically noted as useful for hierarchical scenes, implying that the transformation should respect the scene graph structure [S1, unofficial].
+
+## Subtopics
+
+### Bimanual Scale
+A uniform scaling technique requiring both index fingers to be placed on and dragged along the display surface [S2]. Sliding fingers apart increases scale; sliding them together decreases it. Scaling stops when either finger is lifted [S2]. It is chosen when precise, uniform scaling of a volumetric model is required using direct touch interaction [S2].
+
+## Operating characteristics
+*   **Time Complexity:** $O(1)$ per frame for pose reading and matrix multiplication [S1, unofficial].
+*   **Memory Complexity:** $O(1)$ for storing the device pose and scene transform [S1, unofficial].
+*   **Strengths:** Intuitive mapping between device motion and scene motion; effective for hierarchical navigation [S1, unofficial].
+*   **Limitations:** Requires 6DoF hardware; potential for drift without ratcheting [S1, unofficial].
+*   **When to use:** When navigating complex, hierarchical 3D structures where direct manipulation of the scene is preferred over camera movement [S1, unofficial].
+*   **When not to use:** When only 2D input is available or when precise, isolated object manipulation is needed without moving the entire context [S1, unofficial].
+
+## Background
+The technique was discussed in the context of volumetric display interaction, where traditional mouse-based navigation was found confusing [S1, unofficial]. It builds on earlier work with the "chameleon" device, which provided "eyeball in hand" navigation [S1, unofficial]. Stoakley et al. extended this concept with the "World-in-Miniature" metaphor, allowing users to manipulate a hand-held miniature copy of the virtual environment [S1, unofficial].
+
+## Sources
+[S1] Interaction with volumetric displays, http://hdl.handle.net/1807/16733, fetched 2026-10-26 (unofficial)
+[S2] Multi-finger gestural interaction with 3d volumetric displays, https://doi.org/10.1145/1029632.1029644, fetched 2026-10-28

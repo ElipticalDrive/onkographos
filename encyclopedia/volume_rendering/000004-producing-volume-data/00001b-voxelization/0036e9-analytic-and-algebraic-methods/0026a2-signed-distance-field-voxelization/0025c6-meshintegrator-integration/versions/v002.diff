@@ -1,0 +1,251 @@
+--- v001.md
++++ v002.md
+@@ -4,144 +4,131 @@
+ 
+ ## Overview
+-MeshIntegrator Integration computes a Truncated Signed Distance Field (TSDF) for a triangle mesh by writing directly into a `VoxelBlockGrid`'s `tsdf` and `weight` attributes [S1, unofficial]. It solves the problem of efficiently rasterizing arbitrary triangle meshes into a volumetric representation suitable for downstream encoding or rendering. Unlike methods that blend or accumulate values, this method overwrites every voxel within the mesh's truncation band, leaving voxels outside the band untouched [S1, unofficial].
++MeshIntegrator Integration computes a Truncated Signed Distance Function (TSDF) volume from a triangle mesh by writing distance and weight values into a `VoxelBlockGrid`. It solves the problem of converting explicit surface geometry into a bounded volumetric representation suitable for downstream rendering or reconstruction. It differs from unbounded SDF generation by operating within a fixed truncation band and overwriting voxel values rather than blending them, making it suitable for scenes where memory is constrained by the `depth_trunc` parameter [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A triangle mesh (vertices and indices), a target `VoxelBlockGrid` with `tsdf` and `weight` attributes, and configuration parameters (`trunc_dist`, `kMaxBinTriangles`, `kMaxVoxelsPerBlock`, `kMaxDispatchBinEntries`) [S1, unofficial].
+-*   **Output:** The `VoxelBlockGrid` is modified in place. Voxels within the truncation band of any triangle are overwritten with clamped distance and weight=1. Voxels in the same block but outside the band are set to `tsdf=0, weight=0`. Blocks not reached by any triangle remain unchanged [S1, unofficial].
++*   **Input:** A triangle mesh (vertices and indices) and a target `VoxelBlockGrid` with `tsdf` and `weight` attributes.
++*   **Output:** The `VoxelBlockGrid` is updated. Voxels within the mesh's truncation band are overwritten; voxels outside are untouched.
+ 
+ **Data Structures:**
+-*   **VoxelBlockGrid:** A hierarchical grid where each block holds a fixed number of voxels (`kMaxVoxelsPerBlock` = $2^{12}$ = 4096) [S1, unofficial].
+-*   **Bin:** A temporary structure storing pairs of (triangle index, block index) for triangles intersecting a block's truncation band. Maximum capacity is `kMaxBinTriangles` ($2^{16}$ = 65536) [S1, unofficial].
++*   **VoxelBlockGrid:** A sparse grid composed of blocks. Each block contains `tsdf` (float) and `weight` (float) arrays.
++*   **Bin:** A temporary structure storing pairs of (triangle index, block index) for triangles intersecting a block's truncation band.
+ *   **Scratch Memory:** ~16 bytes per grid block slot, plus storage for the largest mesh's inputs and bins. Counts, prefix sums, fill cursors, and occupied bins reside on the device [S1, unofficial].
+ 
++**Parameters:**
++*   `trunc_dist`: The truncation radius. Voxels within this distance of the mesh surface are updated.
++*   `kMaxBinTriangles`: Maximum triangles one block's bin may hold. Value: $2^{16}$ (65536) [S1, unofficial].
++*   `kMaxVoxelsPerBlock`: Maximum voxels a block may hold. Value: $2^{12}$ (4096) [S1, unofficial].
++*   `kMaxDispatchBinEntries`: Maximum bin entries one integrate dispatch measures. Value: $2^{20}$ (1048576) [S1, unofficial].
++
+ **Algorithm Steps:**
+-1.  **Binning (Two Dispatches):**
+-    *   **Count Pass:** For each triangle, determine which grid blocks its truncation band intersects. Increment a counter for each intersected block.
+-    *   **Prefix Sum:** Compute exclusive prefix sums of the counters to determine start offsets for each block's bin.
+-    *   **Fill Pass:** For each triangle, write its index and the corresponding block index into the bin at the calculated offset.
+-    *   *Constraint:* If a block's bin exceeds `kMaxBinTriangles`, the operation is refused [S1, unofficial].
+-
+-2.  **Integration (Per Block):**
+-    *   One workgroup processes one block. If the bin entries for a block exceed `kMaxDispatchBinEntries` ($2^{20}$ = 1,048,576), the work is split into multiple submissions [S1, unofficial].
+-    *   The bin entries for the block are sorted by distance to the block center (nearest first) [S1, unofficial].
+-    *   **Voxel Processing:** For each voxel in the block:
+-        *   Initialize `min_dist` = $\infty$, `best_tri_idx` = -1.
+-        *   Iterate through the sorted triangles.
+-        *   **Culling:** If the lower bound of the triangle's distance to the voxel is $\ge$ `min_dist` or $\ge$ `trunc_dist`, skip the triangle.
+-        *   **Distance Calculation:** Compute exact distance $d$ from voxel center $x$ to triangle $T$ [S2, unofficial][S4, unofficial].
+-        *   **Update:** If $d < min\_dist$, set `min_dist` = $d$ and `best_tri_idx` = $T$.
+-        *   **Termination:** Stop iterating if all remaining triangles are ruled out by the lower bound check.
+-        *   **Clamping:** If `best_tri_idx` != -1, $D(x) = \text{clamp}(d, -\text{trunc\_dist}, \text{trunc\_dist})$. Else $D(x) = 0$.
+-        *   **Weight:** If $|D(x)| \le \text{trunc\_dist}$, `weight` = 1. Else `weight` = 0.
+-        *   **Sign:** The sign of $D(x)$ is determined by the normal of the closest triangle. If the vector from the closest point on the triangle to $x$ opposes the triangle normal, $D(x)$ is negative (inside); otherwise positive (outside) [S4, unofficial].
++1.  **Binning (Count Pass):** Dispatch a kernel to count how many triangles fall within the truncation band of each block. This requires one work item per (triangle, candidate block) pair.
++2.  **Binning (Fill Pass):** Using the counts from step 1, perform a prefix sum to determine write offsets. Dispatch a kernel to fill the bins with (triangle index, block index) pairs. The bin is sorted nearest to the block center first [S1, unofficial].
++3.  **Integration (Voxel Update):** For each block, dispatch a workgroup to write its voxels. If the bin exceeds `kMaxDispatchBinEntries`, split the submission into multiple submissions [S1, unofficial].
++    *   For each voxel in the block, iterate through the sorted triangles in its bin.
++    *   Calculate the distance $d$ from the voxel center to the triangle.
++    *   If $d > \text{trunc\_dist}$ or $d$ is strictly greater than the current best distance, rule out the triangle.
++    *   Stop when all later triangles are ruled out.
++    *   Take the minimum distance. Use triangle index as a tie-breaker.
++    *   If the minimum distance $d_{min} \le \text{trunc\_dist}$:
++        *   Clamp the TSDF value: $D(x) = \text{clamp}(d_{min}, -\text{trunc\_dist}, \text{trunc\_dist})$.
++        *   Set weight: $W(x) = 1$.
++    *   Else:
++        *   Set TSDF: $D(x) = 0$.
++        *   Set weight: $W(x) = 0$.
++4.  **Completion:** Only validation totals and bounded dispatch ranges are read back from the device [S1, unofficial].
+ 
+ **Pseudocode:**
++
+ ```python
+-def mesh_integrator_integration(mesh, voxel_grid, trunc_dist):
+-    # 1. Binning
+-    # Determine blocks intersected by each triangle's truncation band
+-    block_counts = {} # block_id -> count
+-    for tri in mesh.triangles:
+-        blocks = get_intersected_blocks(tri, voxel_grid, trunc_dist)
+-        for block_id in blocks:
+-            block_counts[block_id] = block_counts.get(block_id, 0) + 1
++def mesh_integrator_integration(mesh, voxel_block_grid, trunc_dist):
++    """
++    Integrates a mesh into a VoxelBlockGrid as a TSDF.
++    """
++    # 1. Binning: Count triangles per block
++    # Identify candidate blocks for each triangle based on bounding box + trunc_dist
++    # Count occurrences of each block index
++    block_counts = count_triangles_per_block(mesh, voxel_block_grid, trunc_dist)
++    
++    # 2. Binning: Fill bins
++    # Compute prefix sums of block_counts to get offsets
++    offsets = prefix_sum(block_counts)
++    bins = allocate_bins(block_counts)
++    
++    # Fill bins with (triangle_idx, block_idx)
++    # Sort bins by distance to block center
++    fill_bins(mesh, voxel_block_grid, trunc_dist, offsets, bins)
++    
++    # 3. Integration: Update voxels
++    for block in voxel_block_grid.blocks:
++        bin_entries = bins[block.id]
++        
++        # Handle large bins by splitting dispatches
++        if len(bin_entries) > kMaxDispatchBinEntries:
++            split_and_dispatch(bin_entries, block, mesh, trunc_dist)
++        else:
++            process_block(block, bin_entries, mesh, trunc_dist)
++
++def process_block(block, bin_entries, mesh, trunc_dist):
++    """
++    Processes a single block's voxels against its bin of triangles.
++    """
++    for voxel in block.voxels:
++        best_dist = infinity
++        best_tri_idx = -1
++        
++        for tri_idx, _ in bin_entries:
++            triangle = mesh.get_triangle(tri_idx)
+             
+-    # Check capacity
+-    for block_id, count in block_counts.items():
+-        if count > 65536: # kMaxBinTriangles
+-            raise ValueError("Bin overflow: mesh too fine for voxel size")
+-
+-    # Prefix sum to get offsets
+-    offsets = {}
+-    current_offset = 0
+-    for block_id in sorted(block_counts.keys()):
+-        offsets[block_id] = current_offset
+-        current_offset += block_counts[block_id]
+-
+-    # Fill bins
+-    bins = {block_id: [] for block_id in block_counts}
+-    for tri in mesh.triangles:
+-        blocks = get_intersected_blocks(tri, voxel_grid, trunc_dist)
+-        for block_id in blocks:
+-            bins[block_id].append((tri, offsets[block_id]))
+-            offsets[block_id] += 1
+-
+-    # 2. Integration per block
+-    for block_id, tri_list in bins.items():
+-        # Sort by distance to block center
+-        block_center = get_block_center(block_id, voxel_grid)
+-        tri_list.sort(key=lambda t: distance(t[0].center, block_center))
++            # Rule out if strictly farther than current best or trunc_dist
++            if tri_idx > best_tri_idx: # Tie-break logic implied by sort order
++                # Check if triangle is strictly farther than best_dist
++                # Note: Source says "ruled out only if strictly farther... or trunc_dist"
++                # This implies we stop early if the sorted order guarantees no better distance
++                pass 
++            
++            # Calculate distance from voxel center to triangle
++            d = point_to_triangle_distance(voxel.center, triangle)
++            
++            if d < best_dist:
++                best_dist = d
++                best_tri_idx = tri_idx
+         
+-        # Split if too large
+-        if len(tri_list) > 1048576: # kMaxDispatchBinEntries
+-            process_large_bin(tri_list, block_id, voxel_grid, trunc_dist)
+-            continue
+-            
+-        process_block_voxels(tri_list, block_id, voxel_grid, trunc_dist)
+-
+-def process_block_voxels(tri_list, block_id, voxel_grid, trunc_dist):
+-    block = voxel_grid.get_block(block_id)
+-    for voxel in block.voxels:
+-        min_dist = float('inf')
+-        best_tri = None
+-        
+-        for tri, _ in tri_list:
+-            # Lower bound culling
+-            if tri.lower_bound_distance(voxel.center) >= min_dist:
+-                break
+-            if tri.lower_bound_distance(voxel.center) >= trunc_dist:
+-                break
+-                
+-            d, closest_point = point_to_triangle_distance(voxel.center, tri)
+-            
+-            if d < min_dist:
+-                min_dist = d
+-                best_tri = tri
+-                
+-        if best_tri is not None:
+-            # Determine sign
+-            normal = best_tri.normal_at(closest_point)
+-            vec = voxel.center - closest_point
+-            if dot(vec, normal) < 0:
+-                sign = -1
+-            else:
+-                sign = 1
+-            
+-            # Clamp and write
+-            tsdf = sign * min(min_dist, trunc_dist)
+-            voxel.tsdf = tsdf
+-            voxel.weight = 1 if min_dist <= trunc_dist else 0
++        # Update voxel based on best distance
++        if best_dist <= trunc_dist:
++            block.tsdf[voxel.id] = clamp(best_dist, -trunc_dist, trunc_dist)
++            block.weight[voxel.id] = 1.0
+         else:
+-            voxel.tsdf = 0
+-            voxel.weight = 0
++            block.tsdf[voxel.id] = 0.0
++            block.weight[voxel.id] = 0.0
+ 
+ def point_to_triangle_distance(point, triangle):
+-    # Standard point-to-triangle distance routine [S2, unofficial][S4, unofficial]
+-    # Returns (distance, closest_point_on_triangle)
+-    pass
++    """
++    Standard point-to-triangle distance calculation.
++    """
++    a, b, c = triangle.vertices
++    # Compute closest point on triangle to point
++    closest = closest_point_on_triangle(point, a, b, c)
++    return length(point - closest)
+ ```
+ 
+-**Parameters:**
+-*   `trunc_dist`: Truncation distance. Voxels farther than this get weight 0 [S1, unofficial].
+-*   `kMaxBinTriangles`: 65536. Max triangles per block bin [S1, unofficial].
+-*   `kMaxVoxelsPerBlock`: 4096. Max voxels per block [S1, unofficial].
+-*   `kMaxDispatchBinEntries`: 1,048,576. Max bin entries per dispatch [S1, unofficial].
++**Edge Cases and Pitfalls:**
++*   **Bin Overflow:** If a bin exceeds `kMaxBinTriangles` (65536), the mesh is refused rather than measured. Meshes far finer than voxels cause bin growth; decimate the mesh toward voxel size first [S1, unofficial].
++*   **Grid State:** The grid must be quiescent across the call. The binning kernel probes the hash table without a lock [S1, unofficial].
++*   **Overwriting:** Every voxel in the mesh's truncation band is overwritten, not blended. To convert one mesh on its own, the grid must be cleared first [S1, unofficial].
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Bin Overflow:** If the mesh is too fine relative to the voxel size, a block's bin may exceed `kMaxBinTriangles`. The method refuses to measure and requires mesh decimation [S1, unofficial].
+-*   **Grid State:** The grid must be quiescent (no concurrent writes) because the binning kernel probes a hash table without locking [S1, unofficial].
+-*   **Overwriting:** Voxels in the truncation band are overwritten, not blended. To integrate a single mesh cleanly, the grid must be cleared beforehand [S1, unofficial].
+-*   **Non-Watertight Meshes:** The sign determination relies on triangle normals. For non-watertight meshes, the winding number method is more robust than normal alignment, but this implementation uses normal alignment [S1, unofficial][S4, unofficial].
++## Subtopics
++
++### [TSDF Fusion Mesh Extraction](6831-tsdf-fusion-mesh-extraction.md)
++Extracts a triangle mesh from a TSDF volume integrated with color from 2D Gaussian Splatting. Suitable for bounded scenes with constrained memory.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N \cdot M \cdot B)$ in the worst case, where $N$ is the number of triangles, $M$ is the number of blocks, and $B$ is the number of voxels per block. In practice, spatial culling and sorting reduce this significantly. The binning step is $O(N \cdot K)$ where $K$ is the average number of blocks a triangle intersects.
+-*   **Memory Complexity:** $O(B_{grid} + N \cdot K)$ for scratch memory, where $B_{grid}$ is the number of blocks and $K$ is the average number of blocks per triangle. Scratch memory is ~16 bytes per block slot [S1, unofficial].
+-*   **Performance:** Efficient for large meshes due to parallel binning and block-wise processing. Performance degrades if meshes are excessively fine, causing bin overflows or excessive culling checks [S1, unofficial].
+-*   **Strengths:** Fast, parallelizable, handles arbitrary meshes, direct TSDF output.
+-*   **Limitations:** Requires quiescent grid, sensitive to mesh resolution vs. voxel size, overwrites existing data.
++*   **Time Complexity:** Proportional to the number of (triangle, block) pairs within the truncation band. Sorting bins adds a logarithmic factor relative to bin size.
++*   **Memory Complexity:** ~16 bytes per grid block slot plus scratch memory for bins. Scratch memory scales with the largest mesh's inputs and bins [S1, unofficial].
++*   **Strengths:** Efficient for dense meshes via spatial binning; handles truncation naturally; overwriting simplifies fusion logic.
++*   **Limitations:** Requires mesh decimation for very fine meshes to avoid bin overflow; not suitable for blending multiple meshes without clearing the grid first.
+ 
+ ## Background
+-MeshIntegrator Integration is part of the `volumetric_kit` library, specifically the `vgrid` module. It is designed for high-performance GPU-based voxelization of triangle meshes into TSDF representations for subsequent encoding or rendering [S1, unofficial].
++Originated in the `volumetric_kit` project by Tao Jin [S1, unofficial]. It is part of a pipeline for encoding and streaming volumetric grids, specifically focusing on the voxelization stage where mesh data is converted to a TSDF representation.
+ 
+ ## Sources

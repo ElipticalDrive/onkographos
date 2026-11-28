@@ -1,0 +1,98 @@
+# Linearly Annealed Dropout
+
+Also called: Linear Dropout Schedule
+
+## Overview
+Linearly Annealed Dropout (LAD) is a training regularization technique that applies a time-decaying Bernoulli mask to Gaussian primitives to suppress fragile co-adaptation and needle-like anisotropic structures in sparse-view tomography [S1, unofficial]. It enforces cross-view consistency by applying a single shared mask to all projection views in an iteration, preventing per-view masking from weakening the consistency signal [S1, unofficial]. Unlike fixed dropout, which can over-smooth density structures, LAD gradually reduces regularization to allow late-stage refinement [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+- **Input**: Current set of $N_t$ Gaussian primitives $G_t$, current training iteration $t$, initial dropout probability $p_0$, annealing horizon $T_{\text{anneal}}$, and SAES trigger iteration $t_s$.
+- **Output**: A masked Gaussian set $G_t \odot m(t)$ used for rendering and loss computation, and the updated dropout probability $p_t$ for the next iteration.
+
+**Data Structures**
+- **Mask $m(t)$**: A binary vector of size $N_t$, where $m_i(t) \in \{0, 1\}$. $m_i(t)=1$ indicates the primitive is active; $0$ indicates it is dropped.
+- **Gaussian Parameters**: The standard 3DGS parameter tensor (position, scale, rotation, opacity, spherical harmonics coefficients).
+
+**Parameters**
+- $p_0 = 0.9$: Initial dropout probability [S1, unofficial].
+- $T_{\text{anneal}} = 30,000$: Annealing duration in iterations [S1, unofficial].
+- $t_s$: Iteration at which Structure-Aware Early Stopping (SAES) is triggered [S1, unofficial].
+
+**Algorithm**
+1. **Sample Mask**: At iteration $t$, sample a single Bernoulli mask $m(t) \in \{0, 1\}^{N_t}$ where each element $m_i(t)$ is drawn independently with probability $1 - p_t$ of being 1. This mask is shared across all $K$ projection views in the current iteration [S1, unofficial].
+2. **Compute Dropout Probability**: Calculate $p_t$ using the linear schedule:
+   $$
+   p_t = \begin{cases} 
+   p_0 \cdot \max\left(0, 1 - \frac{t}{T_{\text{anneal}}}\right) & \text{if } t < t_s \\
+   0 & \text{if } t \ge t_s 
+   \end{cases}
+   $$
+   [S1, unofficial]
+3. **Apply Mask**: Compute the masked Gaussian set $G'_t = G_t \odot m(t)$, where $\odot$ denotes element-wise masking (setting parameters of dropped primitives to zero or excluding them from rendering) [S1, unofficial].
+4. **Render and Loss**: Compute the projection loss $\mathcal{L}_{\text{proj}}$ using the masked set $G'_t$ instead of the full set $G_t$ [S1, unofficial]. The base loss combines L1 and SSIM terms:
+   $$
+   \mathcal{L}_{\text{proj}}(G) = \sum_{v \in V} \left( \| \hat{P}_v(G) - P_v \|_1 + \lambda_{\text{SSIM}} \mathcal{L}_{\text{SSIM}}(\hat{P}_v(G), P_v) \right)
+   $$
+   with $\lambda_{\text{SSIM}} = 0.2$ [S1, unofficial].
+5. **Gradient Accumulation**: Dropped primitives do not contribute to rendered projections and therefore do not accumulate position gradients in that iteration [S1, unofficial]. To prevent biasing densification statistics, use the standard 3DGS gradient-accumulation buffer that averages gradients over the densification interval (100 iterations). This ensures each primitive contributes to densification proportionally to its expected retention probability $1 - p_t$ [S1, unofficial].
+6. **SAES Check**: If SAES triggers at iteration $t_s$, set $p_t = 0$ immediately for all subsequent iterations, even if $t_s < T_{\text{anneal}}$, to allow unconstrained late-stage refinement [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def linearly_annealed_dropout(G_t, t, p0, T_anneal, t_s):
+    """
+    G_t: List of N_t Gaussian primitives
+    t: Current training iteration
+    p0: Initial dropout probability (0.9)
+    T_anneal: Annealing horizon (30000)
+    t_s: SAES trigger iteration
+    Returns: Masked Gaussian set G_masked, dropout probability p_t
+    """
+    # 1. Compute dropout probability
+    if t >= t_s:
+        p_t = 0.0
+    else:
+        # Linear annealing schedule
+        p_t = p0 * max(0.0, 1.0 - t / T_anneal)
+    
+    # 2. Sample Bernoulli mask shared across all views
+    # m_i = 1 with probability (1 - p_t), 0 with probability p_t
+    # Using standard random number generation
+    retention_prob = 1.0 - p_t
+    m_t = bernoulli_sample(size=len(G_t), p=retention_prob)
+    
+    # 3. Apply mask to Gaussian parameters
+    # G_masked contains only primitives where m_t[i] == 1
+    # Implementation detail: Filter out primitives or set their contribution to zero
+    G_masked = []
+    for i, primitive in enumerate(G_t):
+        if m_t[i] == 1:
+            G_masked.append(primitive)
+            
+    return G_masked, p_t
+```
+
+**Edge Cases and Pitfalls**
+- **Per-view masking**: Avoid sampling a separate mask per view, as it weakens the cross-view consistency signal [S1, unofficial].
+- **Densification bias**: Dropped primitives do not accumulate position gradients. The gradient accumulation buffer must average over the densification interval to account for the variable retention probability [S1, unofficial].
+- **Parameter sensitivity**: A too-small $p_0$ weakens early co-adaptation suppression, while a too-large $p_0$ over-regularizes the Gaussian field [S1, unofficial].
+
+## Subtopics
+
+### [LADES](17591-lades.md)
+LADES is a ground-truth-free optimization controller for sparse-view Gaussian tomography that mitigates PVFD by combining Linearly Annealed Dropout (LAD) and Structure-Aware Early Stopping (SAES).
+
+## Operating characteristics
+- **Time Complexity**: Computational overhead is below 1% of total per-iteration time, dominated by GPU rasterization [S1, unofficial].
+- **Memory Complexity**: Adds one Bernoulli sampling per iteration ($O(N_t)$) and one element-wise mask multiplication on the Gaussian parameter tensor before rasterization [S1, unofficial].
+- **Strengths**: Effectively controls early view-specific co-adaptation and mitigates Projection-Volume Fidelity Divergence (PVFD) in sparse-view settings [S1, unofficial].
+- **Limitations**: Requires careful tuning of $p_0$ and $T_{\text{anneal}}$; too extreme values lead to underfitting or over-regularization [S1, unofficial].
+
+## Background
+LAD was introduced in the context of sparse-view 3D Gaussian tomography to address the ill-posedness of recovering 3D density fields from a finite number of projections [S1, unofficial]. It builds on the observation that needle-like anisotropic structures can fit projection data well but violate volumetric consistency [S1, unofficial]. The method is part of the LADES framework, which also includes Structure-Aware Early Stopping (SAES) [S1, unofficial].
+
+## Sources
+[S1] Projection-Volume Fidelity Divergence: Diagnosing and Controlling Optimization Drift in Sparse-View 3D Gaussian Tomography, https://doi.org/10.48550/arXiv.2606.22525, fetched 2026-10-27 (unofficial)

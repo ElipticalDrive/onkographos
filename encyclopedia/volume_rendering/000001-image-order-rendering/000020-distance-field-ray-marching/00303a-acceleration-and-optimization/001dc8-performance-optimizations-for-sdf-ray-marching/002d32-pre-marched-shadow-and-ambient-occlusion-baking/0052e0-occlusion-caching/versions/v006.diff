@@ -1,0 +1,150 @@
+--- v005.md
++++ v006.md
+@@ -12,5 +12,5 @@
+ 
+ ### Data Structures
+-*   **Occlusion Volumes ($V_{occl}$):** A grid of volumetric cells. Each cell $v_i^{occl}$ stores principal components of occlusion as SH coefficients $f_o^i$ [S1].
++*   **Occlusion Volumes ($V_{occl}$):** A grid of volumetric cells [S1]. Each cell $v_i^{occl}$ stores principal components of occlusion as SH coefficients $f_o^i$ [S1].
+ *   **Depth Cubemaps ($\{\hat{D}_p^i\}_{p=1}^6$):** Six depth maps per volume cell, captured from six non-overlapping 90-degree FoV cameras [S1].
+ *   **Occlusion Cubemaps ($\{\hat{O}_p^i\}_{p=1}^6$):** Derived from depth cubemaps, representing the occlusion state [S1].
+@@ -37,12 +37,12 @@
+ 
+ ### Parameters
+-*   **Bake Interval:** Controls caching behavior. On Start captures once at startup and re-captures if the light moves or rotates [S2, unofficial]. Every Frame enables continuous capture for dynamic occluders [S2, unofficial].
++*   **Bake Interval:** Controls caching behavior [S2, unofficial]. On Start captures once at startup and re-captures if the light moves or rotates [S2, unofficial]. Every Frame enables continuous capture for dynamic occluders [S2, unofficial].
+ *   **Shadow Resolution:** Resolution of the capture cubemaps (e.g., 512x512) [S2, unofficial].
+ *   **Ignore Rotation:** Boolean flag. If enabled, rotating the light does not trigger re-capture; the map is reprojected [S2, unofficial].
+ *   **Auto Toggle Distance:** Distance threshold beyond which occlusion is disabled for far lights [S2, unofficial].
+-*   **Check Time Interval:** Frequency of Auto Toggle distance checks. Default: 1 second [S2, unofficial].
++*   **Check Time Interval:** Frequency of Auto Toggle distance checks [S2, unofficial]. Default: 1 second [S2, unofficial].
+ 
+ ### Edge Cases and Pitfalls
+-*   **Dynamic Occluders:** If occluders move independently of the light (e.g., a fan), "On Start" baking will produce stale shadows. Use "Every Frame" or event-driven updates [S2, unofficial].
++*   **Dynamic Occluders:** If occluders move independently of the light (e.g., a fan), "On Start" baking will produce stale shadows [S2, unofficial]. Use "Every Frame" or event-driven updates [S2, unofficial].
+ *   **Rotation:** Without "Ignore Rotation," rotating a static light triggers a full re-capture, increasing cost. Enable this flag for lights with attached occluders (e.g., lamp cages) [S2, unofficial].
+ *   **Visibility:** Capture can be suspended when the light volume is not visible to any camera to save resources [S2, unofficial].
+@@ -53,75 +53,52 @@
+ def bake_occlusion_cells(volume_cells):
+     occlusion_volumes = {}
+-    for cell_id, cell_center in volume_cells.items():
++    for i, cell in enumerate(volume_cells):
++        # Six non-overlapping 90-degree FoV cameras around cell center [S1]
+         depth_cubemaps = []
+-        # Six non-overlapping 90-degree FoV cameras around cell center
+-        for face_idx in range(6):
+-            cam_dir = get_cubemap_face_direction(face_idx)
+-            cam_up = get_cubemap_face_up(face_idx)
+-            depth_cubemaps.append(render_depth_pass(cell_center, cam_dir, cam_up, fov=90.0))
+-        
++        for p in range(6):
++            # Capture depth for face p [S1]
++            # Sources do not specify the exact camera setup or rendering pipeline [G]
++            depth_cubemaps.append(render_depth_pass(cell.center, p, fov=90.0))
++        # Convert depth cubemaps to occlusion cubemaps [S1]
++        # Sources do not specify the exact conversion formula [G]
+         occlusion_cubemaps = convert_depth_to_occlusion(depth_cubemaps)
++        # Store principal components of occlusion into SH coefficients [S1]
++        # Sources do not specify the exact SH projection method [G]
+         sh_coeffs = compute_sh_coefficients(occlusion_cubemaps)
+-        occlusion_volumes[cell_id] = sh_coeffs
++        occlusion_volumes[i] = sh_coeffs
+     return occlusion_volumes
+ 
+-def decompose_occlusion(point_x, normal_n, occlusion_volumes, grid_spacing):
+-    nearest_volumes = find_8_nearest_volumes(point_x, occlusion_volumes, grid_spacing)
+-    
++def decompose_occlusion(point_x, normal_n, occlusion_volumes, grid):
++    # Find eight nearest volumes {v_k} for point x [S1]
++    # Standard grid neighbor lookup [G]
++    nearest_indices = find_8_nearest(point_x, grid)
+     total_weight = 0.0
+-    interpolated_sh = [0.0] * 15  # Standard 4th-order SH basis size [G]
+-    
+-    for vol in nearest_volumes:
+-        p_k = vol.position
+-        f_k = vol.sh_coefficients
+-        
+-        w_k = compute_trilinear_weight(point_x, p_k, grid_spacing)
+-        
+-        if dot_product(p_k - point_x, normal_n) <= 0:
++    interpolated_sh = [0.0] * 15  # Standard SH basis size [G]
++
++    for k in range(8):
++        idx = nearest_indices[k]
++        p_k = occlusion_volumes[idx].position
++        f_k = occlusion_volumes[idx].sh_coefficients
++
++        # Standard trilinear weight w_k [S1]
++        # Standard trilinear interpolation calculation [G]
++        w_k = compute_trilinear_weight(point_x, p_k, grid)
++
++        # Masked trilinear interpolation [S1]
++        if dot(p_k - point_x, normal_n) <= 0:
+             w_tilde_k = 0.0
+         else:
+             w_tilde_k = w_k
+-        
++
+         total_weight += w_tilde_k
+-        for i in range(len(interpolated_sh)):
+-            interpolated_sh[i] += w_tilde_k * f_k[i]
+-    
++        for j in range(len(interpolated_sh)):
++            interpolated_sh[j] += w_tilde_k * f_k[j]
++
++    # Normalize weights [S1]
+     if total_weight > 0:
+-        for i in range(len(interpolated_sh)):
+-            interpolated_sh[i] /= total_weight
+-    
++        for j in range(len(interpolated_sh)):
++            interpolated_sh[j] /= total_weight
++
+     return interpolated_sh
+-
+-# Standard helper definitions
+-def get_cubemap_face_direction(face_idx):
+-    directions = [(1,0,0), (-1,0,0), (0,1,0), (0,-1,0), (0,0,1), (0,0,-1)]
+-    return directions[face_idx]
+-
+-def get_cubemap_face_up(face_idx):
+-    ups = [(0,1,0), (0,1,0), (0,0,1), (0,0,-1), (0,1,0), (0,1,0)]
+-    return ups[face_idx]
+-
+-def render_depth_pass(cam_pos, cam_dir, cam_up, fov):
+-    # Standard depth buffer render for a cubemap face
+-    return depth_buffer
+-
+-def convert_depth_to_occlusion(depth_cubemaps):
+-    # Convert depth values to binary or soft occlusion masks
+-    return occlusion_masks
+-
+-def compute_sh_coefficients(occlusion_cubemaps):
+-    # Project occlusion masks onto spherical harmonic basis functions
+-    return sh_coeffs
+-
+-def find_8_nearest_volumes(point, volumes, spacing):
+-    # Grid-based neighbor lookup
+-    return [volumes[get_grid_index(point + offset)] for offset in offsets]
+-
+-def compute_trilinear_weight(point, center, spacing):
+-    # Standard trilinear interpolation weight calculation
+-    return weight
+-
+-def dot_product(a, b):
+-    return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
+ ```
+ 
+@@ -129,9 +106,9 @@
+ 
+ ### Masked-Trilinear Interpolation for AO
+-A variant of the interpolation step used in the decomposition phase. Standard trilinear interpolation weights $\{w_k\}$ are modified to $\{\tilde{w}_k\}$ by zeroing out contributions from volumes where the vector from the sample point to the volume center has a non-positive dot product with the surface normal ($ (p_k - x) \cdot n \le 0 $). This ensures that ambient occlusion is only calculated from the upper hemisphere relative to the surface normal, preventing incorrect shadowing from below [S1].
++A variant of the interpolation step used in the decomposition phase [S1]. Standard trilinear interpolation weights $\{w_k\}$ are modified to $\{\tilde{w}_k\}$ by zeroing out contributions from volumes where the vector from the sample point to the volume center has a non-positive dot product with the surface normal ($ (p_k - x) \cdot n \le 0 $) [S1]. This ensures that ambient occlusion is only calculated from the upper hemisphere relative to the surface normal, preventing incorrect shadowing from below [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** Not given in the sources.
++*   **Time Complexity:** Not given in the sources [S2, unofficial].
++*   **Memory Complexity:** Not given in the sources [S2, unofficial].
+ *   **Performance:** Eliminates per-frame shadow ray marching for static lights, significantly reducing GPU load [S2, unofficial].
+ *   **Strengths:** Ideal for static scenes with static occluders (windows, street lamps) [S2, unofficial]. Event-driven updates handle occasional changes (doors opening) efficiently [S2, unofficial].

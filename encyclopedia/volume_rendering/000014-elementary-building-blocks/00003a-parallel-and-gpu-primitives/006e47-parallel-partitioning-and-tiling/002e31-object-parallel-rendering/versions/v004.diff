@@ -1,0 +1,93 @@
+--- v003.md
++++ v004.md
+@@ -7,41 +7,55 @@
+ 
+ ## How it works
+-**Inputs:** A 3D volume dataset $V$, a set of $p$ processors, and a camera viewpoint.
+-**Outputs:** A final composite image.
++**Inputs:** A 3D volume dataset $V$, a set of $p$ processors, and a camera viewpoint [G].
++**Outputs:** A final composite image [G].
+ 
+ **Data Structures:**
+-The volume $V$ is partitioned into $p$ disjoint subvolumes $V_1, V_2, \dots, V_p$. Each processor $i$ stores $V_i$ in its local memory.
++The volume $V$ is partitioned into $p$ disjoint subvolumes $V_1, V_2, \dots, V_p$ [S1, unofficial]. Each processor $i$ stores $V_i$ in its local memory [G].
+ 
+ **Steps:**
+-1.  **Partitioning:** Divide the volume $V$ into $p$ subvolumes [S1, unofficial].
+-2.  **Assignment:** Assign each subvolume $V_i$ to a distinct processor $P_i$ [S1, unofficial].
+-3.  **Parallel Rendering:** Each processor $P_i$ independently renders its subvolume $V_i$ from the shared viewpoint to generate a local subimage $I_i$ [S1, unofficial].
+-    *   *Note:* Because a single ray may traverse multiple subvolumes assigned to different processors, the accumulation of optical properties (color and opacity) is distributed. Global Early Ray Termination (ERT) is difficult to utilize in this scheme because a processor cannot know if a ray will terminate in a remote subvolume [S1, unofficial]. Local ERT may be applied within a subvolume [S1, unofficial].
+-4.  **Compositing:** Merge the $p$ distributed subimages $\{I_1, \dots, I_p\}$ into the final image using image compositing [S1, unofficial]. This step resolves the depth ordering of fragments generated from different subvolumes.
++1. **Partitioning:** Divide the volume $V$ into $p$ subvolumes [S1, unofficial].
++2. **Assignment:** Assign each subvolume $V_i$ to a distinct processor $P_i$ [S1, unofficial].
++3. **Parallel Rendering:** Each processor $P_i$ independently renders its subvolume $V_i$ from the shared viewpoint to generate a local subimage $I_i$ [S1, unofficial]. Because accumulation tasks for a single ray can be assigned to more than one processor, it is not easy to utilize global Early Ray Termination (ERT) in this scheme [S1, unofficial]. Local ERT may be applied within a subvolume [S1, unofficial].
++4. **Compositing:** Merge the $p$ distributed subimages $\{I_1, \dots, I_p\}$ into the final image using image compositing [S1, unofficial]. This step resolves the depth ordering of fragments generated from different subvolumes [G].
+ 
+ **Pseudocode:**
+ ```python
+ def object_parallel_render(volume, viewpoint, num_processors):
+-    # Step 1: Partition volume
+-    subvolumes = partition_volume(volume, num_processors)
++    # Step 1: Partition volume into p subvolumes
++    subvolumes = [volume[i * len(volume) // num_processors : (i + 1) * len(volume) // num_processors] for i in range(num_processors)]
+     
+-    # Step 2 & 3: Parallel rendering of subvolumes
+-    # In a real distributed system, this runs on separate nodes.
+-    # Here we simulate the local computation for each processor.
+     subimages = []
+     for i in range(num_processors):
+         local_volume = subvolumes[i]
+-        # Render local subvolume. 
+-        # Rays are cast from viewpoint. 
+-        # If a ray exits local_volume, the contribution from remote subvolumes 
+-        # is not available locally, so the subimage represents only the 
+-        # visible portion from this subvolume's perspective.
+-        local_image = render_subvolume(local_volume, viewpoint)
++        # Step 3: Parallel rendering of subvolume
++        # Each processor casts rays from the viewpoint through its local subvolume.
++        # Because accumulation tasks for a single ray can be assigned to more than one processor,
++        # this step only accumulates optical properties for voxels present in local_volume.
++        local_image = []
++        for pixel_y in range(local_image_height):
++            for pixel_x in range(local_image_width):
++                ray_origin = viewpoint + pixel_to_ray_offset(pixel_x, pixel_y)
++                ray_direction = compute_direction(ray_origin, local_volume.bounds.center)
++                color, opacity = 0.0, 0.0
++                for t in range(0, local_volume.depth, sample_step):
++                    sample = local_volume.get_sample(ray_origin + ray_direction * t)
++                    alpha = sample.density * sample_step
++                    color += sample.color * alpha * (1.0 - opacity)
++                    opacity += alpha * (1.0 - opacity)
++                local_image.append((color, opacity))
+         subimages.append(local_image)
+         
+-    # Step 4: Merge subimages
+-    final_image = composite_images(subimages)
++    # Step 4: Merge subimages via image compositing
++    final_image = []
++    for pixel_idx in range(len(subimages[0])):
++        final_color, final_opacity = 0.0, 0.0
++        for subimage in subimages:
++            c, o = subimage[pixel_idx]
++            final_color += c * (1.0 - final_opacity)
++            final_opacity += o * (1.0 - final_opacity)
++        final_image.append((final_color, final_opacity))
+     return final_image
+ ```
++*(Note: `pixel_to_ray_offset` and `compute_direction` represent standard camera projection and ray generation operations [G].)*
+ 
+ ## Subtopics
+@@ -61,10 +75,10 @@
+ *   **Compositing Overhead:** Requires a final image compositing step to merge distributed subimages [S1, unofficial].
+ *   **Communication Cost:** In distributed memory systems, inter-node communication is expensive, and the compositing step may require significant data transfer [S3, unofficial].
+-*   **Algorithmic Complexity:** It is not easy to utilize global Early Ray Termination (ERT) because accumulation tasks for a single ray can be assigned to more than one processor, making it difficult to determine if a ray can be terminated early across subvolume boundaries [S1, unofficial].
++*   **Algorithmic Complexity:** Because accumulation tasks of a ray can be assigned to more than one processor, it is not easy to utilize global Early Ray Termination (ERT) in this scheme [S1, unofficial].
+ *   **Load Balancing:** Requires careful partitioning to ensure equal workload among processors, potentially requiring adaptive subdivision [S2, unofficial].
+ 
+ **Complexity:**
+-*   **Time:** $O(N/p)$ for rendering per processor, where $N$ is the total number of voxels/ray steps, plus $O(C)$ for compositing, where $C$ is the cost of communication/compositing.
+-*   **Memory:** $O(V/p)$ per processor, where $V$ is the total volume size.
++*   **Time:** $O(N/p)$ for rendering per processor, where $N$ is the total number of voxels/ray steps, plus $O(C)$ for compositing, where $C$ is the cost of communication/compositing [G].
++*   **Memory:** $O(V/p)$ per processor, where $V$ is the total volume size [G].
+ 
+ ## Background

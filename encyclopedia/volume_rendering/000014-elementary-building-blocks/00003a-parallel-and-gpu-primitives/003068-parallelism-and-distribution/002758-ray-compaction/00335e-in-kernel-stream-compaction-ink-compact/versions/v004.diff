@@ -1,0 +1,396 @@
+--- v003.md
++++ v004.md
+@@ -1,210 +1,216 @@
+ # In-Kernel Stream Compaction (InK-Compact)
++
+ Also called: In-Kernel compaction, InK-Compact
+ 
+ ## Overview
+-InK-Compact is a parallel stream compaction method that computes the output indices for valid elements entirely within a single GPU kernel, eliminating the need to launch separate prefix-sum and scatter kernels [S1, unofficial]. Unlike conventional methods such as Thrust or Chag::PP which require leaving the kernel context, InK-Compact maintains global input-output data ordering by computing thread, warp, and block offsets using atomic operations and bit-decomposition scans, thereby reducing synchronization overhead and kernel launch latency [S1, unofficial].
++In-Kernel Stream Compaction (InK-Compact) is a parallel primitive that compacts a stream of valid elements into a contiguous output array while preserving input order, executed entirely within a single GPU kernel as a device function [S1, unofficial]. It solves the performance bottleneck of conventional stream compaction methods (like Thrust or Chag::PP) which require leaving the kernel to launch separate prefix-sum and scatter kernels [S1, unofficial]. Unlike its sibling [Ray Buffer Reordering](4073-ray-buffer-reordering.md), which focuses on spatial locality, InK-Compact focuses on minimizing synchronization overhead and kernel launch latency by avoiding global memory writes for invalid elements and eliminating inter-kernel dependencies [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: An input stream $X[0 \dots N-1]$ with a validity predicate $P[0 \dots N-1]$ (where $P[i]=1$ if valid, $0$ otherwise).
+-- Output: A compacted stream $Y[0 \dots M-1]$ containing only elements where $P[i]=1$, preserving the relative order of $X$.
+-- Intermediate: An intermediate buffer $\tilde{Y}$ for local block compaction.
++*   Input: An array of $N$ elements $X[0 \dots N-1]$ with an associated predicate $P[0 \dots N-1]$ (valid/invalid).
++*   Output: An array $Y[0 \dots M-1]$ containing only elements where $P[i]$ is true, preserving their relative order from $X$.
++*   Auxiliary: An intermediate buffer $Y'$ of size $N$ (or sufficient to hold block-local outputs) and global section management structures.
+ 
+ **Data Structures:**
+-- **Section Data Structure ($S_i$):** Each section $i$ has three fields:
+-  - $S_i(f)$: Boolean flag indicating section completion.
+-  - $S_i(u)$: Offset value for the start of section $i$ in the output buffer.
+-  - $S_i(c)$: Atomic counter for the number of blocks in section $i$.
+-- **Shared Memory:**
+-  - $ww(c)(i)$: Stores the total write count for warp $i$.
+-  - $s(u)$: Stores the warp offset for the current warp.
+-  - $k(u)$: Stores the kernel offset (for InK-Collate variant).
+-- **Global Memory:**
+-  - $B(c)$: Buffer to store block counts for the section controller.
+-  - Global counter: A single integer in global device memory (for InK-Collate).
++*   **Section Management:** For a kernel divided into $S$ sections, each section $S_i$ has:
++    *   `flag` $S_i(f)$: Boolean, initially false. Becomes true when section $i$ is ready to write to final output.
++    *   `offset` $S_i(u)$: Integer, the starting index in the final output array $Y$ for section $i$.
++    *   `counter` $S_i(c)$: Integer, atomic counter for the number of blocks in section $i$ that have completed local compaction.
++*   **Block Counts:** A buffer $B(c)$ to store the total write count $k(c)$ for each block in the current section.
++*   **Shared Memory:**
++    *   `ww(c)[w(n)]`: Stores the total number of valid elements written by each warp in the block.
++    *   `s(u)[w(n)]`: Stores the warp offset for each warp.
+ 
+ **Parameters:**
+-- $w(s)$: Warp size, typically 32 threads (CUDA 4.0) [S1, unofficial].
+-- $w(n)$: Number of warps per block.
+-- $S(N)$: Section size, number of blocks per section. Chosen as 32 to fit the final bit-decomposition scan into a single warp [S1, unofficial].
++*   $w(s)$: Warp size (e.g., 32 for CUDA 4.0) [S1, unofficial].
++*   $w(n)$: Number of warps per block.
++*   $S(N)$: Section size, number of blocks per section. Typically 32, chosen so that the bit-decomposition scan for block offsets fits within a single warp [S1, unofficial].
+ 
+ **Algorithm Steps:**
+-The method consists of three conceptual stages: computing thread offset $t(u)$, warp offset $w(u)$, and block offset $b(u)$.
+-
+-1. **Thread Offset Computation ($t(u)$):**
+-   - Compute warp index: $w(i) = \lfloor t(i) / w(s) \rfloor$.
+-   - Compute warp lane: $w(l) = t(i) \pmod{w(s)}$.
+-   - Compute thread mask: $t(m) = \text{MAXINT} \gg (w(s) - w(l))$. This mask has bits $0$ to $w(l)-1$ set to 1.
+-   - Compute ballot: $b = \text{ballot}(P[t]) \ \& \ t(m)$.
+-   - Compute thread offset: $t(u) = \text{popc}(b)$.
+-   - Compute warp write count: The last thread in the warp ($w(l) = w(s)-1$) calculates $w(c) = t(u) + P[t]$.
+-   - Store $w(c)$ into shared memory $ww(c)(i)$ by the last thread only.
+-   - Perform memory fence and synchronization.
+-
+-2. **Warp Offset Computation ($w(u)$):**
+-   - Synchronize using `_syncthreads_count()` with each thread's predicate to gather total writes in the block.
+-   - Compute warp offset $w_i(u)$ using bit-decomposition scan over $\log_2(w(s))$ bits.
+-   - For each bit $j$ from $0$ to $\log_2(w(s))-1$:
+-     - $b(j) = \text{ballot}(w_i(c) \ \& \ 2^j)$.
+-     - Accumulate: $w_i(u) += \text{popc}(b(j) \ \& \ t(m)) \gg i$.
+-   - Store $w_i(u)$ in shared memory $s(u)$.
+-
+-3. **Block Offset and Compaction (Order-Preserving):**
+-   - **Stage 1 (Local Compaction):** Each block computes local offsets. Valid outputs are stored in intermediate buffer $\tilde{Y}$ at index: $\text{block\_id} \times \text{threads\_per\_block} + t(u) + w(u)$. The block computes its total write count $k(c)$.
+-   - **Stage 2 (Section Controller):** A single thread atomically increments the section counter $S_i(c)$. All blocks except the section controller (the last block in the section, where $S_i(c)$ reaches $S(N)$) exit. The section controller loads block counts into $B(c)$ and performs a bit-wise prefix sum scan to find block offsets.
+-   - **Stage 3 (Section Synchronization):** The last block in section $S_i$ waits for the flag $S_{i-1}(f)$ from the previous section to become true. Section $S_0$ proceeds immediately.
+-   - **Stage 4 (Final Write):** Once the total valid elements $t(f)$ for the section are known, the section controller sets $S_i(u) = S_{i-1}(u) + t(f)$. It sets the memory fence and then sets $S_i(f) = \text{true}$. The last block in $S_i$ moves data from $\tilde{Y}$ to the final output array $Y$ using the computed offsets.
++
++1.  **Thread Offset Computation ($t(u)$):**
++    Each thread $t(i)$ computes its local offset within its warp.
++    *   Compute warp index: $w(i) = \lfloor t(i) / w(s) \rfloor$.
++    *   Compute warp lane: $w(l) = t(i) \pmod{w(s)}$.
++    *   Compute thread mask: $t(m) = \text{MAXINT} \gg (w(s) - w(l))$. This mask has bits $0$ to $w(l)-1$ set to 1.
++    *   Compute ballot: $b = \text{ballot}(P[t(i)]) \ \& \ t(m)$.
++    *   Compute thread offset: $t(u) = \text{popc}(b)$.
++    *   Compute warp total: The last thread in the warp ($w(l) = w(s)-1$) computes $w(c) = t(u) + P[t(i)]$.
++    *   Store $w(c)$ into shared memory `ww(c)[w(i)]`.
++    *   Synchronize: `_syncthreads()` to ensure visibility.
++
++2.  **Warp Offset Computation ($w_i(u)$):**
++    Compute the offset of the current warp relative to the start of the block.
++    *   Synchronize: `_syncthreads_count()` with each thread's predicate to gather total block writes (optional for some implementations, but cited for gathering total writes) [S1, unofficial].
++    *   Perform bit-decomposition scan over $\log_2(w(s))$ bits. For each bit $j$ from $0$ to $\log_2(w(s))-1$:
++        *   $b(j) = \text{ballot}(w_i(c) \ \& \ 2^j)$. Note: $w_i(c)$ here refers to the warp count stored in shared memory, accessed by the first $w(n)$ threads of a warp.
++        *   Accumulate: $w_i(u) += \text{popc}(b(j) \ \& \ t(m)) \gg i$.
++    *   Synchronize: `_syncthreads()` to ensure all warps have computed their offsets.
++
++3.  **Stage 1: Local Block Compaction:**
++    *   Each block computes its local write count $k(c) = \sum w(c)$.
++    *   Each thread stores its valid element into the intermediate buffer $Y'$ at index:
++        $$ \text{index} = (\text{block\_id} \times \text{threads\_per\_block}) + (w(i) \times w(s)) + t(u) $$
++        *(Note: The source describes offsetting by block-id * threads-per-block + thread/warp offsets. Since $t(u)$ is within-warp offset and warp offset is implicit in the block layout, the exact linear index in $Y'$ depends on the specific buffer layout. The source implies $Y'$ is large enough to hold all potential outputs without collision within the block's allocated space.)* [S1, unofficial].
++    *   A single thread (e.g., thread 0) atomically increments the section counter: `atomicAdd(&S_i(c), 1)`.
++    *   If the block is **not** the section controller (i.e., $S_i(c)$ did not reach $S(N)$), it exits the compaction function.
++    *   If the block **is** the section controller (the last block in the section, identified by $S_i(c) == S(N)$), it proceeds to Stage 2.
++
++4.  **Stage 2: Block Offset Computation:**
++    *   The section controller loads the block counts $k(c)$ for all blocks in the section into shared memory.
++    *   It performs a bit-wise prefix sum scan on these block counts to determine the starting offset for each block within the section.
++    *   The scan is performed using bit-decomposition over $\log_2(w(s) \times w(n))$ bits, fitting into a single warp if $S(N)=32$ [S1, unofficial].
++    *   The total number of valid elements in the section, $t$, is computed.
++    *   The section offset is calculated: $S_i(u) = S_{i-1}(u) + t$ (for $i>0$). For $S_0$, $S_0(u) = 0$.
++    *   The section controller sets the flag $S_i(f) = \text{true}$ after a memory fence.
++
++5.  **Stage 3: Section Synchronization:**
++    *   Blocks in section $S_i$ (where $i>0$) wait for the flag $S_{i-1}(f)$ to become true.
++    *   Section $S_0$ proceeds immediately.
++    *   Once the flag is true, the section controller moves the compacted data from the intermediate buffer $Y'$ to the final output array $Y$ at the computed offset $S_i(u)$.
++    *   All blocks in the section then use the block-specific offsets computed in Stage 2 to write their local outputs to the final array $Y$.
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def ink_compact_kernel(input_stream, predicate, output_stream, intermediate_buffer):
+-    # Constants
+-    WARP_SIZE = 32
+-    SECTION_SIZE = 32 # Number of blocks per section
+-    
+-    # Shared memory variables
+-    shared_ww_c = [0] * WARP_SIZE # Warp counts
+-    shared_s_u = 0 # Warp offset
+-    shared_k_u = 0 # Kernel offset (for collate)
+-    
+-    # Global section data (assumed pre-allocated and zeroed)
+-    # section_flags, section_offsets, section_counters
+-    
++def ink_compact_kernel(input_data, predicates, output_buffer, section_flags, section_offsets, section_counters, intermediate_buffer, block_counts_shared):
++    # 1. Thread Offset
+     tid = get_thread_id()
+-    bid = get_block_id()
+-    warp_id = tid // WARP_SIZE
+-    lane_id = tid % WARP_SIZE
+-    
+-    # --- Step 1: Thread Offset ---
+-    # Compute mask for threads before current thread in warp
+-    thread_mask = MAXINT >> (WARP_SIZE - lane_id)
+-    
+-    # Ballot for valid predicates in warp
+-    ballot_result = ballot(predicate[tid])
+-    masked_ballot = ballot_result & thread_mask
+-    
+-    # Thread offset is population count of masked ballot
+-    t_u = popc(masked_ballot)
+-    
+-    # Warp write count (computed by last thread in warp)
+-    w_c = 0
+-    if lane_id == WARP_SIZE - 1:
+-        w_c = t_u + predicate[tid]
+-        shared_ww_c[warp_id] = w_c
+-        memory_fence()
+-        syncthreads()
+-        
+-    # --- Step 2: Warp Offset ---
+-    # Bit-decomposition scan for warp offset
+-    w_i_u = 0
+-    for j in range(log2(WARP_SIZE)):
+-        # Ballot warp counts for the j-th bit
+-        b_j = ballot(shared_ww_c[warp_id] & (1 << j))
+-        # Accumulate popcount of bits before current warp
+-        w_i_u += popc(b_j & thread_mask) >> warp_id
+-        
+-    shared_s_u = w_i_u
+-    syncthreads()
+-    
+-    # --- Step 3: Block Offset and Local Compaction ---
+-    # Calculate local output index in intermediate buffer
+-    local_offset = bid * (WARP_SIZE * get_warps_per_block()) + t_u + shared_s_u
+-    if predicate[tid]:
+-        intermediate_buffer[local_offset] = input_stream[tid]
+-        
+-    # Compute block write count k_c
+-    # This is typically the sum of all warp counts in the block
+-    # Using the syncthreads_count result from Step 2 or re-summing
+-    k_c = syncthreads_count(predicate[tid])
+-    
+-    # --- Step 4: Section Management ---
+-    # Atomic increment of section counter
+-    section_id = bid // SECTION_SIZE
+-    section_counter = atomic_add(section_counters[section_id], 1)
+-    
+-    # Determine if this block is the section controller (last block in section)
+-    is_controller = (section_counter == SECTION_SIZE - 1)
+-    
+-    if is_controller:
+-        # Load block counts into shared memory B(c)
+-        # Note: In practice, blocks must have stored their k_c somewhere accessible
+-        # or we rely on the fact that k_c was computed. 
+-        # Assuming k_c is available or stored in a global array B(c) indexed by block
+-        load_block_counts_into_shared()
+-        
+-        # Perform prefix sum on block counts to find section offsets
+-        # This fits in one warp if SECTION_SIZE <= 32
+-        section_offset = 0
+-        if section_id > 0:
+-            section_offset = section_offsets[section_id - 1]
+-            
+-        # Calculate total valid elements in this section
+-        total_valid = 0
+-        for b in range(SECTION_SIZE):
+-            total_valid += block_counts[b]
+-            
+-        section_offsets[section_id] = section_offset + total_valid
+-        memory_fence()
+-        
+-        # Wait for previous section to finish
+-        if section_id > 0:
+-            while not section_flags[section_id - 1]:
+-                pass # Spin wait
+-            
+-        # Set current section flag
+-        section_flags[section_id] = True
+-        
+-        # Move data from intermediate to final output
+-        # The last block in the section performs the final copy
+-        # Or all blocks copy based on their local offset + section_offset
+-        final_offset = local_offset + section_offsets[section_id]
+-        if predicate[tid]:
+-            output_stream[final_offset] = intermediate_buffer[local_offset]
++    warp_id = tid // warp_size
++    lane_id = tid % warp_size
++    
++    # Mask for threads before current lane
++    mask = MAXINT >> (warp_size - lane_id)
++    
++    # Ballot for valid threads before current thread
++    valid_mask = ballot(predicates[tid]) & mask
++    thread_offset = popc(valid_mask)
++    
++    # Warp total
++    if lane_id == warp_size - 1:
++        warp_total = thread_offset + predicates[tid]
++        shared_warp_totals[warp_id] = warp_total
++    sync_threads()
++    
++    # 2. Warp Offset (Bit-decomposition scan)
++    warp_offset = 0
++    for j in range(log2(warp_size)):
++        # Check if the j-th bit of the warp total is set
++        # Note: This logic assumes the first warp in the block performs the scan
++        # or that all warps participate correctly. The source specifies using
++        # ballot on the warp count bits.
++        bit_val = shared_warp_totals[warp_id] & (1 << j)
++        ballot_result = ballot(bit_val != 0) & mask
++        warp_offset += popc(ballot_result) >> j
++        
++    sync_threads()
++    
++    # 3. Stage 1: Local Compaction
++    # Calculate index in intermediate buffer
++    # Assuming intermediate buffer is sized to hold all elements without overlap per block
++    # Index = block_id * max_elements_per_block + warp_id * warp_size + thread_offset
++    # However, source says "offset by block-id * threads-per-block + thread/warp offsets"
++    # This implies a flat layout in intermediate buffer.
++    local_idx = (get_block_id() * threads_per_block) + (warp_id * warp_size) + thread_offset
++    
++    if predicates[tid]:
++        intermediate_buffer[local_idx] = input_data[tid]
++        
++    # Atomic section counter increment
++    my_section_id = get_block_id() // section_size
++    old_count = atomic_add(section_counters[my_section_id], 1)
++    
++    # Check if this block is the last in the section
++    is_controller = (old_count == section_size - 1)
++    
++    if not is_controller:
++        return # Exit early to free resources
++        
++    # 4. Stage 2: Block Offsets (Controller only)
++    # Load block counts into shared memory
++    # Assume block_counts_shared is pre-filled or filled by threads 0 of each block
++    # This part requires coordination. Source says "block-counts within the section are loaded into shared memory"
++    # We assume a mechanism to gather k(c) from all blocks in the section.
++    # For simplicity, assuming block_counts_shared is populated by the time controller runs.
++    
++    # Perform prefix sum on block counts to get block offsets
++    # This is done in shared memory by the controller's warp
++    block_offset = prefix_sum_block_counts(block_counts_shared, section_size)
++    
++    # Calculate total valid elements in section
++    total_valid = block_offset[section_size - 1] + block_counts_shared[section_size - 1]
++    
++    # Calculate section offset
++    if my_section_id == 0:
++        section_offsets[my_section_id] = 0
+     else:
+-        # Non-controller blocks:
+-        # Wait for section offset to be ready? 
+-        # In the described algorithm, non-controllers exit after Stage 2/3 
+-        # but must wait for the section offset to write to final output.
+-        # However, the text says "All blocks within the section, except for the section controller 
+-        # are allowed to exit...". This implies the controller handles the global offset logic.
+-        # But to write to Y, they need the offset.
+-        # The text says: "The last block in section Si moves the already block-compacted data... to Y".
+-        # This implies only the last block copies? Or all blocks copy?
+-        # "moves the already block-compacted data from the intermediate output array Si to the final output array Y"
+-        # Usually, all threads write their own data.
+-        # Let's assume all threads write, but need the section offset.
+-        
+-        # Wait for section offset to be computed by controller
+-        while section_offsets[section_id] == 0 and section_id > 0:
+-             pass # Spin wait for offset
+-            
+-        final_offset = local_offset + section_offsets[section_id]
+-        if predicate[tid]:
+-            output_stream[final_offset] = intermediate_buffer[local_offset]
++        # Wait for previous section to finish? No, Stage 3 handles dependency.
++        # But we need S_{i-1}(u).
++        # Source: "Si(u) = Si-1(u) + t"
++        # We must ensure S_{i-1}(u) is ready.
++        while not section_flags[my_section_id - 1]:
++            pass # Spin wait
++        
++        section_offsets[my_section_id] = section_offsets[my_section_id - 1] + total_valid
++        
++    # Set flag for next section
++    memory_fence()
++    section_flags[my_section_id] = True
++    
++    # 5. Stage 3: Write to Final Output
++    # Wait for this section's flag to be set (it is set by controller, but other blocks need to wait)
++    # Actually, other blocks exited. Only controller writes?
++    # Source: "Finally, the last block in section Si moves the already block-compacted data... to the final output array Y"
++    # And "All blocks... exit" in Stage 2 except controller.
++    # So only the controller writes the data from intermediate to final?
++    # Or do all blocks write?
++    # Source: "The last block in section Si moves the already block-compacted data from the intermediate output array Si to the final output array Y."
++    # This implies the controller performs the bulk copy or scatter.
++    
++    # Calculate final offset for this block
++    final_block_offset = section_offsets[my_section_id] + block_offset[get_block_id() % section_size]
++    
++    # Copy valid elements from intermediate to final
++    # This loop runs on the controller thread(s)
++    for i in range(threads_per_block):
++        # Check if thread i was valid in this block
++        # We need to know which threads were valid. 
++        # We can re-evaluate predicate or store validity.
++        # Assuming we can iterate through the intermediate buffer range for this block
++        start_idx = (get_block_id() * threads_per_block)
++        end_idx = start_idx + threads_per_block
++        
++        # This part is tricky without storing validity map.
++        # Alternative: The controller knows the offsets.
++        # It can copy the valid chunks.
++        pass 
++        
++    # Note: The source description of Stage 4 is slightly ambiguous about whether
++    # all blocks write or just the controller. "The last block... moves... data".
++    # This suggests the controller handles the final scatter from Y' to Y.
+ ```
+ 
+-*Note: The pseudocode above synthesizes the steps. The source specifies that non-controller blocks "exit" after incrementing the counter, but they still need to write their data. The source states "The last block in section Si moves the already block-compacted data... to Y". This suggests a potential optimization where only the last block performs the final scatter, or that the "exit" refers to exiting the *compaction logic* (atomic ops), not the kernel. Given the register burden note, it is likely all threads write, but the synchronization logic is complex. The provided pseudocode assumes all threads write to `output_stream` using the `section_offsets` computed by the controller.*
++*Note: The pseudocode above simplifies the gathering of block counts and the final scatter, as the source describes these as multi-step shared memory operations. The key constraint is that only the section controller performs the global synchronization and offset calculation, while other blocks exit early.*
+ 
+ ## Subtopics
+ 
++### [Out-of-Kernel Compaction (OfK-Compact)](7270-out-of-kernel-compaction-ofk-compact.md)
++Out-of-Kernel Compaction (OfK-Compact) is a variant where the compaction logic is executed outside the primary rendering kernel, typically by invoking a host-side library function (like Thrust) after the kernel completes. Unlike InK-Compact, which performs compaction immediately within the operating kernel to avoid synchronization overhead, OfK-Compact relies on separate kernel launches or library calls, introducing potential bottlenecks but offering a simpler implementation pattern. When implemented as an out-of-kernel wrapper, InK-Compact runs on par with Chag::PP but loses the primary advantage of avoiding kernel synchronization.
++
+ ### In-Kernel Collation (InK-Collate)
+-A compromise compaction method that preserves local ordering within a block but not global ordering of kernel blocks, avoiding inter-block dependencies [S1, unofficial]. It computes a kernel offset $k(u)$ using `atomicAdd` on a global counter by thread 0 in the block, then adds the local warp/thread offsets [S1, unofficial]. It is non-order preserving globally but shows little performance difference from InK-Compact in ray-tracing applications [S1, unofficial].
+-
+-### Out-of-Kernel Compaction (OfK-Compact)
+-A variant where InK-Compact is wrapped in a global kernel and called when data needs to be compacted, mimicking the usage pattern of Thrust and Chag::PP [S1, unofficial]. Kernels output ray indices to an output array (non-valid elements set to zero/null), and then a host-side method (like Thrust's `copy-if`) is called to compact the data [S1, unofficial]. When used this way, it runs on par with Chag::PP [S1, unofficial].
++In-Kernel Collation (InK-Collate) is a compromise compaction method that preserves local ordering within a block but not global ordering of kernel blocks, avoiding inter-block dependencies [S1, unofficial]. It computes a kernel offset $k(u)$ using an atomic add on a global counter by thread 0 in the block, then stores output at $t_f = k(u) + s(u)_{w(i)} + t(u)$ [S1, unofficial]. It shows little performance difference from InK-Compact in ray-tracing applications where global order is not strictly required, but avoids the complex section management and synchronization of InK-Compact [S1, unofficial].
+ 
+ ### Chag::PP Compaction
+-A comparison baseline where kernels output ray indices to an output array (non-valid elements set to zero/null), followed by a call to `Chag::PP.compact` to compact the items [S1, unofficial]. It is slower than InK-Compact and requires kernel synchronization before calling the host-side compaction [S1, unofficial].
++Chag::PP Compaction is a conventional out-of-kernel method where kernels output ray indices to an output array in the same location as read, setting non-valid elements to zero/null. After kernel completion, a host-side `Chag::PP.compact` method is called to compact the array [S1, unofficial]. It is slower than InK-Compact and requires kernel synchronization before calling the host-side compaction [S1, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** The method performs a constant number of passes per warp and block, with $O(\log w(s))$ complexity for the warp offset scan. The block offset computation is $O(S(N))$ for the controller.
+-- **Memory Complexity:** Requires an intermediate buffer $\tilde{Y}$ of size $N$ (or $M$) and shared memory for warp counts. The intermediate buffer allows blocks to exit early, freeing resources [S1, unofficial].
+-- **Performance:** On average, InK-Compact is 99% faster than Thrust and 28% faster than Chag::PP in ray-tracing pipeline tests on an NVIDIA 480 GTX [S1, unofficial]. When used out-of-kernel, it runs on par with Chag::PP [S1, unofficial].
+-- **Strengths:** Eliminates kernel launch overhead and synchronization between separate kernels. Reduces bottlenecks by keeping compaction within the operating kernel [S1, unofficial].
+-- **Limitations:** Causes a register burden because it runs as a device function within the operation kernel. However, on architectures like Fermi, registers used in the main work are reallocated for compaction once the main work is complete, mitigating this cost [S1, unofficial]. Requires an intermediate buffer, which increases memory usage if the data type is large [S1, unofficial].
++*   **Time Complexity:** The method performs $O(\log w(s))$ operations per thread for warp offset and $O(\log (w(s) w(n)))$ for block offset, making it efficient for typical warp/block sizes. The overall complexity is dominated by the synchronization and atomic operations, which are minimized by the section-based approach.
++*   **Memory Complexity:** Requires an intermediate buffer $Y'$ of size $N$ (or sufficient for block-local outputs) and small shared memory for warp/block counts. The source notes that the intermediate buffer can cause higher memory usage if the data type is large [S1, unofficial].
++*   **Performance:** On an NVIDIA 480 GTX, InK-Compact is on average 99% faster than Thrust and 28% faster than Chag::PP in a ray-tracing pipeline [S1, unofficial]. When used out-of-kernel, it runs on par with Chag::PP [S1, unofficial].
++*   **Strengths:** Eliminates kernel launch overhead, avoids writing invalid elements to global memory, and maintains high thread coherency in multi-kernel pipelines.
++*   **Limitations:** Register burden due to running as a device function, though mitigated by register reallocation on architectures like Fermi [S1, unofficial]. Requires careful management of section synchronization.
+ 
+ ## Background
+-InK-Compact was introduced by D. M. Hughes et al. in 2013 [S1, unofficial]. It was developed to address the inefficiencies of multi-kernel pipelines in GPGPU computing, particularly for ray-tracing-based visualization of volumetric data. The method was motivated by the need to avoid the overhead of leaving the kernel to run prefix sum and scatter kernels, as done by libraries like Thrust [S1, unofficial]. It is used in a multi-kernel isosurface ray-tracing pipeline for stages: Generation-Traversal, Traversal-Intersection, Intersection-Traversal, and Intersection-Shade [S1, unofficial].
++In-Kernel Stream Compaction was introduced by D. M. Hughes et al. in 2013 [S1, unofficial]. It was developed to address the inefficiencies of multi-kernel pipelines in GPU ray-tracing, where conventional compaction methods (Thrust, Chag::PP) required leaving the kernel to perform prefix-sum and scatter operations, causing synchronization bottlenecks. The method builds on previous work in warp-level primitives (Billeter, Harris) but introduces bit-decomposition and balloting for inter-warp scans and a novel section-based approach for block-level ordering [S1, unofficial]. It is used in multi-kernel isosurface ray-tracing pipelines for stages such as Generation-Traversal, Traversal-Intersection, Intersection-Traversal, and Intersection-Shade [S1, unofficial].
+ 
+ ## Sources

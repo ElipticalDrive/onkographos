@@ -1,0 +1,119 @@
+# Givens Rotation
+
+Also called: plane rotation
+
+## Overview
+A Givens rotation is a 2D rotation applied to a 3x3 matrix to zero out or transform specific elements, used here for QR decomposition or SVD-like iterative solving [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A $3 \times 3$ matrix $M$ and two parameters $c$ (cosine) and $s$ (sine) of the rotation angle [S1, unofficial].
+- Output: The modified matrix $M'$ with specific elements transformed [S1, unofficial].
+
+**Data Structures:**
+The matrix $M$ is a $3 \times 3$ array of floating-point numbers [S1, unofficial]. The formulas assume row-major indexing $m_{ij}$ where $i$ is the row and $j$ is the column [S1, unofficial].
+
+**Steps:**
+The method applies a rotation in a specific 2D plane (defined by two column indices) to all three rows of the matrix [S1, unofficial]. There are three variants depending on which columns are rotated [S1, unofficial]:
+
+1.  **rot01_post**: Rotates columns 0 and 1.
+    -   $m_{00}' = c m_{00} - s m_{01}$
+    -   $m_{01}' = s m_{00} + c m_{01}$
+    -   $m_{10}' = c m_{10} - s m_{11}$
+    -   $m_{11}' = s m_{10} + c m_{11}$
+    -   $m_{20}' = c m_{20} - s m_{21}$
+    -   $m_{21}' = s m_{20} + c m_{21}$
+    -   $m_{02}, m_{12}, m_{22}$ remain unchanged [S1, unofficial].
+
+2.  **rot02_post**: Rotates columns 0 and 2.
+    -   $m_{00}' = c m_{00} - s m_{02}$
+    -   $m_{02}' = s m_{00} + c m_{02}$
+    -   $m_{10}' = c m_{10} - s m_{12}$
+    -   $m_{12}' = s m_{10} + c m_{12}$
+    -   $m_{20}' = c m_{20} - s m_{22}$
+    -   $m_{22}' = s m_{20} + c m_{22}$
+    -   $m_{01}, m_{11}, m_{21}$ remain unchanged [S1, unofficial].
+
+3.  **rot12_post**: Rotates columns 1 and 2.
+    -   $m_{01}' = c m_{01} - s m_{02}$
+    -   $m_{02}' = s m_{01} + c m_{02}$
+    -   $m_{11}' = c m_{11} - s m_{12}$
+    -   $m_{12}' = s m_{11} + c m_{12}$
+    -   $m_{21}' = c m_{21} - s m_{22}$
+    -   $m_{22}' = s m_{21} + c m_{22}$
+    -   $m_{00}, m_{10}, m_{20}$ remain unchanged [S1, unofficial].
+
+**Parameters:**
+-   $c$: Cosine of the rotation angle [S1, unofficial].
+-   $s$: Sine of the rotation angle [S1, unofficial].
+-   Constraint: $c^2 + s^2 = 1$ [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def apply_givens_rotation(matrix, c, s, plane):
+    """
+    Applies a Givens rotation to a 3x3 matrix.
+    
+    Args:
+        matrix: List of 9 floats representing a 3x3 matrix in row-major order.
+                matrix[i*3 + j] corresponds to m_ij.
+        c: Float, cosine of the rotation angle.
+        s: Float, sine of the rotation angle.
+        plane: String, one of '01', '02', or '12', indicating which columns are rotated.
+        
+    Returns:
+        List of 9 floats, the modified matrix.
+    """
+    m = list(matrix)
+    
+    if plane == '01':
+        m[0] = c * matrix[0] - s * matrix[1]
+        m[1] = s * matrix[0] + c * matrix[1]
+        m[3] = c * matrix[3] - s * matrix[4]
+        m[4] = s * matrix[3] + c * matrix[4]
+        m[6] = c * matrix[6] - s * matrix[7]
+        m[7] = s * matrix[6] + c * matrix[7]
+        
+    elif plane == '02':
+        m[0] = c * matrix[0] - s * matrix[2]
+        m[2] = s * matrix[0] + c * matrix[2]
+        m[3] = c * matrix[3] - s * matrix[5]
+        m[5] = s * matrix[3] + c * matrix[5]
+        m[6] = c * matrix[6] - s * matrix[8]
+        m[8] = s * matrix[6] + c * matrix[8]
+        
+    elif plane == '12':
+        m[1] = c * matrix[1] - s * matrix[2]
+        m[2] = s * matrix[1] + c * matrix[2]
+        m[4] = c * matrix[4] - s * matrix[5]
+        m[5] = s * matrix[4] + c * matrix[5]
+        m[7] = c * matrix[7] - s * matrix[8]
+        m[8] = s * matrix[7] + c * matrix[8]
+        
+    else:
+        raise ValueError("Plane must be '01', '02', or '12'")
+        
+    return m
+```
+
+**Edge Cases and Pitfalls:**
+Not given in the sources.
+
+## Subtopics
+
+### [2x2 SVD](4377-2x2-svd.md)
+An analytical method to compute the Singular Value Decomposition (SVD) of a 2x2 matrix $M = U \Sigma V^T$. Builds on [Givens Rotation](3986-givens-rotation.md) and differs from the nearest sibling [Symmetric Givens Rotation (Jacobi SVD)](6213-symmetric-givens-rotation-jacobi-svd.md) by using a direct closed-form solution rather than iterative rotations.
+
+### [Symmetric Givens Rotation (Jacobi SVD)](6213-symmetric-givens-rotation-jacobi-svd.md)
+This method diagonalizes a $3 \times 3$ symmetric matrix by iteratively applying Givens rotations to zero out off-diagonal elements, effectively computing the eigendecomposition or solving the symmetric linear system $Ax=b$ via SVD. It is distinguished from direct algebraic solvers (like the cubic formula) by its numerical stability and iterative nature, making it suitable for tensor field analysis in volume rendering where robustness is critical. Unlike [2x2 SVD](4377-2x2-svd.md) which handles general $2 \times 2$ matrices, this method specifically targets the symmetric $3 \times 3$ case using the Schur2 rotation strategy.
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+Not given in the sources.
+
+## Sources
+[S1] tuckbone/DualContouringCSharp, https://github.com/tuckbone/DualContouringCSharp, fetched 2026-10-26 (unofficial)

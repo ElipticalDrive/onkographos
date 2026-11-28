@@ -1,0 +1,179 @@
+--- v001.md
++++ v002.md
+@@ -1,123 +1,74 @@
+ # NeRF-W Hyperparameter Configuration
+-
+ Also called: NeRF-W Training Parameters
+ 
+ ## Overview
+-NeRF-W (NeRF in the Wild) is a method for optimizing neural radiance fields from unconstrained internet photo collections containing dynamic objects and varying lighting [S1]. It solves the problem of transient artifacts (e.g., moving people, cars) dominating the rendered scene by introducing a separate "Transient" head alongside the standard "Static" geometry head [S1]. Unlike standard NeRF, which assumes a static scene, NeRF-W uses segmentation masks to exclude rays belonging to dynamic objects during training, preventing the transient head from learning scene geometry [S2]. It is distinct from [Depth-Guided NeRF Training Configuration](11916-depth-guided-nerf-training-configuration.md) by relying on semantic segmentation rather than depth priors for handling transients, and from [CLIPNeRF Training Configuration](12073-clipnerf-training-configuration.md) by not using semantic segmentation for feature alignment but rather for masking [S1, S2].
++NeRF-W (NeRF in the Wild) hyperparameter configuration defines the specific training settings for optimizing unconstrained photo collections, addressing the challenge of transient objects (moving people, vehicles) that violate the static scene assumption of standard NeRF [S1]. It distinguishes itself from static NeRF variants by employing a dual-MLP architecture (static and transient heads) and specific regularization to prevent transient components from dominating geometry [S1, S2]. Unlike Depth-Guided NeRF, it relies on photometric consistency and appearance embeddings rather than depth priors, and unlike CLIPNeRF, it does not use semantic segmentation for guidance but rather handles transients via explicit modeling or mask-based exclusion in variants [S1, S2].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** A collection of uncalibrated or partially calibrated images $I_i$ with known camera poses $P_i$ (or estimated via SfM), and semantic segmentation masks $M_i$ identifying dynamic/transient objects and background (sky) [S1, S2].
+-*   **Outputs:** A trained NeRF-W model consisting of a Base MLP, a Static MLP, and a Transient/Uncertainty MLP, capable of rendering static scene geometry and color [S1].
++*   **Input:** A set of uncalibrated or SfM-calibrated images $I_i$ with known poses $P_i$. Optional: Segmentation masks for dynamic objects (in variant).
++*   **Output:** A radiance field model defined by two MLPs (Static and Transient/Uncertainty) and embedding vectors, capable of rendering novel views.
+ 
+ **Data Structures:**
+-The model consists of three Multi-Layer Perceptrons (MLPs) [S1]:
+-1.  **Base MLP:** 8 layers, 512 hidden units. Takes positional encoding of 3D coordinates and viewing direction. Outputs intermediate features for the Static and Transient heads [S1].
+-2.  **Static MLP:** 4 layers, 128 hidden units. Takes Base MLP features and viewing direction. Outputs density $\sigma$ and view-dependent color $c_{static}$ [S1].
+-3.  **Transient/Uncertainty MLP:** 4 layers, 128 hidden units. Takes Base MLP features and viewing direction. Outputs transient color $c_{transient}$ and uncertainty/weight [S1].
+-
+-**Positional Encoding:**
+-*   Position: 15 frequencies [S1].
+-*   Viewing Direction: 4 frequencies [S1].
++1.  **Base MLP (Static):** 8 layers, 512 hidden units each.
++2.  **Static/Transient MLPs:** 4 layers, 128 hidden units each.
++3.  **Positional Encoding:**
++    *   Position $\mathbf{x}$: 15 frequencies.
++    *   Viewing direction $\mathbf{d}$: 4 frequencies.
++4.  **Embeddings:**
++    *   Appearance embedding $\mathbf{a}_i$: Dimension $n(a) = 48$ per image.
++    *   Transient object embedding $\mathbf{\tau}_i$: Dimension $n(\tau) = 16$ per image.
++5.  **Sampling:**
++    *   Training: 512 points per ray per model (coarse + fine) = 1024 total points per ray.
++    *   Evaluation: 2048 points per ray.
+ 
+ **Parameters:**
+-*   Appearance embedding dimension: $n(a) = 48$ [S1].
+-*   Transient object embedding dimension: $n(\tau) = 16$ [S1].
+-*   L1 regularizer multiplier: $\lambda_u = 0.01$ [S1].
+-*   Minimum importance threshold: $\beta_{min} = 0.03$ [S1].
+-*   Optimizer: Adam [S1].
+-*   Batch size: 2048 [S1].
+-*   Initial learning rate: $0.001$ [S1].
+-*   Learning rate decay: Ten-fold every 150,000 iterations [S1].
+-*   Total iterations: 300,000 [S1].
+-*   Sampling points: 512 per ray per model (coarse and fine) during training (1024 total); 2048 during evaluation [S1].
++*   Optimizer: Adam.
++*   Batch size: 2048.
++*   Initial learning rate: $0.001$.
++*   Learning rate decay: Ten-fold reduction every 150,000 iterations.
++*   Total iterations: 300,000.
++*   L1 regularizer multiplier: $\lambda_u = 0.01$.
++*   Minimum importance threshold: $\beta_{min} = 0.03$.
+ 
+-**Algorithm Steps:**
+-1.  **Preprocessing:** Filter input images using NIMA score (omit if < 3) and DeepLab v3 segmentation (omit if transient objects > 80% of image area) [S1].
+-2.  **Ray Sampling:** For each training iteration, sample rays through the camera. Sample 512 points along each ray for the coarse model and 512 for the fine model [S1].
+-3.  **Masking:** Use semantic segmentation masks to identify rays passing through dynamic objects. Exclude these rays from the gradient update for the Static MLP [S2].
+-4.  **Forward Pass:**
+-    *   Encode 3D positions and viewing directions using positional encoding.
+-    *   Pass through Base MLP to get features.
+-    *   Pass features through Static MLP to get density $\sigma_s$ and color $c_s$.
+-    *   Pass features through Transient MLP to get color $c_t$ and uncertainty.
+-    *   Combine colors: $c = c_s + c_t$ (or weighted combination based on uncertainty/masking) [S1, S2].
+-5.  **Volume Rendering:** Perform volume integration (compositing) over the sampled points to render the final pixel color [S1].
+-6.  **Loss Computation:**
+-    *   Compute L1 loss between rendered color and ground truth image for non-transient pixels [S2].
+-    *   Apply L1 regularizer to uncertainty with multiplier $\lambda_u = 0.01$ [S1].
+-    *   Apply minimum importance threshold $\beta_{min} = 0.03$ for sampling weights [S1].
+-7.  **Optimization:** Update model parameters using Adam optimizer with batch size 2048 [S1].
+-8.  **Learning Rate Schedule:** Decay learning rate by 10x at iteration 150,000 [S1].
+-9.  **Evaluation:** Double sampling points to 2048 per ray per model for evaluation [S1].
++**Algorithm:**
++The training minimizes a photometric loss between rendered pixels and ground-truth images. The model uses stratified sampling for coarse and fine stages.
+ 
+-**Pseudocode:**
+-```python
+-# NeRF-W Training Step
+-def nerf_w_training_step(images, masks, poses, model, optimizer):
+-    # 1. Pre-filtering (done offline)
+-    # 2. Ray Sampling
+-    rays = sample_rays(poses, num_samples=512) # Coarse
+-    rays_fine = sample_rays(poses, num_samples=512) # Fine
+-    
+-    # 3. Forward Pass
+-    # Encode positions and directions
+-    pos_enc = positional_encoding(rays.xyz, freqs_pos=15, freqs_view=4)
+-    view_enc = positional_encoding(rays.direction, freqs_pos=15, freqs_view=4)
+-    
+-    # Base MLP
+-    base_features = model.base_mlp(pos_enc)
+-    
+-    # Static Head
+-    static_output = model.static_mlp(base_features, view_enc)
+-    sigma_s, color_s = static_output.density, static_output.color
+-    
+-    # Transient Head
+-    transient_output = model.transient_mlp(base_features, view_enc)
+-    color_t, uncertainty = transient_output.color, transient_output.uncertainty
+-    
+-    # Combine colors
+-    # Note: Exact combination formula not specified in [S1], but [S2] implies masking
+-    # is used to prevent transient head from dominating.
+-    # We assume a weighted sum or masking based on semantic labels.
+-    rendered_color = color_s + color_t 
+-    
+-    # 4. Loss Computation
+-    # Identify static pixels using masks
+-    static_mask = ~masks.dynamic_objects
+-    
+-    # L1 Loss on static pixels
+-    loss_color = L1(rendered_color[static_mask], images[static_mask])
+-    
+-    # L1 Regularizer on uncertainty
+-    loss_reg = lambda_u * L1(uncertainty) # lambda_u = 0.01
+-    
+-    # Importance sampling weights (beta_min = 0.03)
+-    weights = compute_importance_weights(sigma_s, beta_min=0.03)
+-    
+-    total_loss = loss_color + loss_reg
+-    
+-    # 5. Optimization
+-    optimizer.zero_grad()
+-    total_loss.backward()
+-    optimizer.step()
+-    
+-    return total_loss
+-```
++1.  **Initialize** the Base MLP, Static MLP, and Transient/Uncertainty MLP with random weights. Initialize appearance embeddings $\mathbf{a}_i$ and transient embeddings $\mathbf{\tau}_i$ for each image $i$.
++2.  **For** each iteration $t$ from 1 to 300,000:
++    3.  **Sample** a batch of 2048 rays from the training images.
++    4.  **For** each ray in the batch:
++        5.  **Sample** 512 points along the ray for the coarse model using stratified sampling.
++        6.  **Encode** position $\mathbf{x}$ and direction $\mathbf{d}$ using positional encodings (15 and 4 frequencies respectively).
++        7.  **Compute** coarse density $\sigma_c$ and color $C_c$ using the Base MLP and Static MLP.
++        8.  **Sample** 512 points along the ray for the fine model, potentially using importance sampling based on coarse density.
++        9.  **Compute** fine density $\sigma_f$ and color $C_f$ using the Base MLP, Static MLP, and Transient/Uncertainty MLP.
++        10. **Composite** the final color $C$ using volume rendering integration over the fine samples:
++            $$ C = \sum_{i=1}^{N} T_i \alpha_i c_i $$
++            where $T_i = \exp(-\sum_{j=1}^{i-1} \sigma_j \delta_j)$, $\alpha_i = 1 - \exp(-\sigma_i \delta_i)$, and $c_i$ is the color contribution.
++        11. **Calculate** the photometric loss $L_{color}$ between $C$ and the ground-truth pixel color.
++        12. **Apply** L1 regularization on the transient components with multiplier $\lambda_u = 0.01$ to encourage sparsity in transient modeling [S1].
++        13. **Update** model weights and embeddings using Adam optimizer with learning rate $\eta_t$, where $\eta_t = 0.001 \times 0.1^{\lfloor t/150000 \rfloor}$.
++    14. **If** $t > 150,000$, reduce learning rate by factor of 10.
++15. **End For**
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Transient Head Dominance:** If the transient head is not masked, it converges faster than the geometry MLP, causing scene structures to be modeled as view-dependent transient effects rather than geometry [S2].
+-*   **Sky Reconstruction:** Textureless sky lacks motion parallax. Using a background NeRF for foreground-background separation can lead to spherical shell reconstructions. Background rays should be labeled with semantic masks and penalized as free space [S2].
+-*   **Imperfect Masks:** Semantic masks for background are not perfect and may contain foreground structures, requiring careful handling [S2].
++*   **Transient Dominance:** If the transient head is not regularized or constrained, it may converge faster than the geometry MLP, causing scene structures to be modeled as view-dependent transient effects rather than static geometry [S2].
++*   **Evaluation Sampling:** Doubling the number of samples to 2048 during evaluation is critical for high-quality rendering [S1].
++
++## Subtopics
++
++### Transient Object Handling via Segmentation Masks
++A variant method to handle dynamic objects in Internet photo collections by using segmentation masks to exclude rays belonging to dynamic objects during training [S2]. This approach avoids the issue where a transient NeRF head dominates rendered color, which occurs because the transient NeRF converges faster than the geometry MLP $d$, leading scene structures to be modeled as view-dependent transient effects [S2]. Instead of relying on the NeRF-W transient head, this method removes dynamic rays from the loss calculation [S2].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Training takes 300,000 iterations with a batch size of 2048 [S1]. The use of two MLPs (Static and Transient) increases memory and compute compared to standard NeRF [S1].
+-*   **Memory Complexity:** Requires storing parameters for Base, Static, and Transient MLPs, plus appearance and transient embeddings [S1].
+-*   **Performance:** Optimized for the Brandenburg Gate scene of the Phototourism dataset and reused for other scenes [S1].
+-*   **Strengths:** Handles dynamic objects in unconstrained photo collections [S1].
+-*   **Limitations:** Requires semantic segmentation masks for dynamic objects and background [S2]. Performance depends on the quality of segmentation masks [S2].
++*   **Time Complexity:** Training requires 300,000 iterations with a batch size of 2048. The use of two MLP stages (coarse and fine) doubles the sampling cost per ray compared to a single-stage model, but importance sampling mitigates this.
++*   **Memory Complexity:** The model stores two MLPs (Base, Static, Transient) and per-image embeddings. The appearance embedding dimension is 48, and transient embedding is 16. For $N$ images, memory scales with $N \times (48 + 16)$.
++*   **Performance:** Optimized for the Brandenburg Gate scene of the Phototourism dataset and reused for remaining scenes [S1].
++*   **Strengths:** Handles unconstrained photo collections with transient objects effectively when combined with appropriate regularization or masking [S1, S2].
++*   **Limitations:** Requires careful tuning of the transient head to prevent it from dominating geometry [S2]. Performance on textureless sky regions may suffer without additional background handling (e.g., semantic masks for free space) [S2].
+ 
+ ## Background
+-NeRF-W was introduced by Mildenhall et al. in "NeRF in the Wild: Neural Radiance Fields for Unconstrained Photo Collections" (CVPR 2021) [S1]. It addresses the challenge of applying NeRF to internet photo collections which contain transient objects and varying lighting conditions [S1]. The method was developed to handle the "in-the-wild" setting where strict calibration and static scene assumptions do not hold [S1].
++NeRF-W was introduced by Mildenhall et al. in 2021 as an extension of NeRF to handle unconstrained photo collections [S1]. The hyperparameter configuration was determined via grid search on the Brandenburg Gate scene of the Phototourism dataset and applied to other scenes in the dataset [S1]. The work addresses the challenge of view synthesis in the wild, where static scene assumptions are violated by transient objects [S1]. Subsequent works like Neural 3D Reconstruction in the Wild have explored alternative handling of transients, such as using segmentation masks to avoid the dominance of the transient head [S2].
+ 
+ ## Sources

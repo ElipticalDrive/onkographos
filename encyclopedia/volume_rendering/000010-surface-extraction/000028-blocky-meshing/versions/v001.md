@@ -1,0 +1,69 @@
+# Blocky meshing
+
+Also called: Voxel meshing, Cube meshing
+
+## Overview
+Blocky meshing is a family of surface extraction methods that convert discrete volumetric data (voxels) into polygonal meshes by treating each voxel as a primitive unit, typically a cube or a set of its faces. Unlike smooth surface extraction methods like [Isosurface extraction](30-isosurface-extraction.md) which interpolate values to create curved surfaces, blocky meshing preserves the discrete, axis-aligned nature of the input data, resulting in "blocky" geometry. The family is distinguished by its focus on optimizing the rendering of these discrete primitives through techniques such as face culling, greedy merging of coplanar faces, and GPU-driven classification, rather than topological smoothing.
+
+## Shared principles
+All methods in this family operate on a discrete grid $V$ where each cell $(x,y,z)$ has an occupancy state (e.g., solid/empty) or a material ID. The core geometric primitive is the axis-aligned bounding box (AABB) of the voxel.
+
+1.  **Discrete Representation**: The volume is represented as a 3D array. Unlike [Isosurface extraction](30-isosurface-extraction.md), no interpolation of scalar fields is performed to determine surface position; the surface lies exactly on the voxel boundaries.
+2.  **Face-Based Extraction**: The primary geometric output is the set of exposed faces of the voxels. A face is exposed if the adjacent voxel in the normal direction is empty (or has a different material ID, depending on the method).
+3.  **Axis-Aligned Normals**: All generated faces have normals aligned with the principal axes: $\pm \hat{x}, \pm \hat{y}, \pm \hat{z}$. This simplifies shading and culling logic compared to arbitrary normals in smooth meshing.
+4.  **Culling**: A fundamental optimization is the removal of internal faces. If two adjacent voxels are both solid (and treated as the same material), the shared face is not rendered. This reduces the primitive count from $6N$ (for $N$ voxels) to approximately $2N$ for dense volumes.
+
+## Subtopics
+
+### [Boolean Voxel Meshing](971-boolean-voxel-meshing.md)
+Converts a boolean occupancy grid into a triangular mesh by detecting faces at voxel boundaries. It differs from interpolation-based methods by outputting axis-aligned cube meshes directly. It explicitly generates vertex and face connectivity.
+
+### [Task Shader Cell Classification](1535-task-shader-cell-classification.md)
+A GPU-driven preprocessing stage that identifies occupied cells within a volume block and generates compact workgroup lists for downstream mesh extraction. It solves the performance bottleneck of invoking mesh shaders on empty geometry by filtering out non-occupied cells on the GPU, minimizing mesh shader invocations and increasing warp occupancy.
+
+### [Cuberille Method](1718-cuberille-method.md)
+Represents a 3D volume as a discrete set of voxels, creating a "hollow polygonal shell" approximation. It solves visualization of segmented data by projecting discrete voxel faces to the image plane. Unlike [Greedy Meshing](1776-greedy-meshing.md), it does not merge adjacent coplanar faces, resulting in higher polygon counts but simpler generation logic. It supports both Z-buffer and Painter's algorithm rendering approaches.
+
+### [Greedy Meshing](1776-greedy-meshing.md)
+Reduces rendered primitives by merging adjacent coplanar faces of identical material into larger quads. It solves the high vertex/triangle count of naive per-face rendering by minimizing draw calls. Unlike [Blocky meshing](31-blocky-meshing.md) which only culls hidden faces, greedy meshing actively expands visible faces into maximal rectangles, reducing triangle count by 1.88–2.60× compared to [Marching Cubes](52-marching-cubes.md) on typical terrain.
+
+### [Voxel Block Shape & Culling Configuration](2176-voxel-block-shape-culling-configuration.md)
+A trait-based configuration system specifying block geometry, transparency culling, and lighting. It solves the rigidity of single-boolean transparency flags by distinguishing between opaque, transparent, and fluid blocks, allowing distinct rendering paths (e.g., alpha blending for see-through solids, bespoke shaders for fluids).
+
+### [Block face vertex layout](2374-block-face-vertex-layout.md)
+Defines the static geometric primitives for a unit cube, serving as the fundamental mesh template. It specifies positions, colors, and UVs for the six faces, allowing surface extraction methods to generate meshes by instantiating these faces. It differs from siblings by providing raw vertex data without topology optimization or merging.
+
+### [Block Mesh Alpha Rendering](3569-block-mesh-alpha-rendering.md)
+A rendering technique using a custom index ordering algorithm to sort visible faces back-to-front relative to the camera's primary viewing axis, enabling correct alpha blending without full scene depth sorting.
+
+### [GPU Face Extraction](3760-gpu-face-extraction.md)
+A GPU compute-based algorithm that extracts visible faces from a voxel subchunk (16x16x16) and outputs packed quads to a buffer, handling transparency and water occlusion rules.
+
+### [Face Culling and Visibility Optimization](3861-face-culling-and-visibility-optimization.md)
+
+### [Voxel Face Mesh Generation](4212-voxel-face-mesh-generation.md)
+Generates a single quad mesh for an exposed voxel face, populating a MeshData buffer with vertices, indices, normals, UVs, tangents, and vertex colors based on face direction and block type.
+
+### [Voxel Backface Culling and Internal Face Masking](4569-voxel-backface-culling-and-internal-face-masking.md)
+Rejects invisible faces in voxel rendering by determining front/back orientation in projection space and masking faces shared between neighboring voxels.
+
+### [Voxel Chunk Mesh Generation (Face Culling)](4888-voxel-chunk-mesh-generation-face-culling.md)
+Generates a static triangle mesh for a chunk of voxels by iterating through occupied positions and generating triangles only for faces that lack an adjacent voxel.
+
+### [Greedy Meshing for Opaque/Undefined Blocks](4917-greedy-meshing-for-opaque-undefined-blocks.md)
+
+### [Mesh Assembly and Data Structure](6268-mesh-assembly-and-data-structure.md)
+
+### Beveled Chunk Meshing
+A meshing technique where every block is drawn as a beveled cube with its own panel, a dark groove where it meets neighbors, and ambient occlusion in the corners, forming a closed surface without greedy merging [S2]. For each block, it generates up to four kinds of pieces: a panel per exposed face, a strip per exposed edge, a triangle per exposed corner, and a small cap where four blocks meet along an edge [S2]. Faces and chamfers hidden by neighbors are dropped to ensure a wall is one closed surface with a groove between blocks [S2]. Caps are required to close the diamond shaft left by four chamfered blocks around an edge [S2]. The hot path must allocate nothing to maintain performance [S2]. A typical chunk takes 0.3 to 1.3 ms to mesh; a very dense chunk (hollow room of 28k triangles) takes about 7 ms [S2].
+
+### Classic Meshing
+A mesh generation technique where each voxel face is generated individually, resulting in higher vertex and index counts than greedy meshing [S3, unofficial]. Functions such as `addBackFace`, `addFrontFace`, etc., take a single voxel coordinate and append vertices and indices to buffers [S3, unofficial].
+
+## Background
+Blocky meshing originates from the early days of voxel-based video games and 3D modeling, where computational resources were limited and discrete data structures were natural for terrain and world representation. The "Cuberille" method, named after the resemblance to Minecraft-style blocks, is a foundational approach for visualizing binary voxel data [S1, unofficial]. The technique evolved to address performance bottlenecks in rendering large voxel worlds, leading to optimizations like greedy meshing to reduce draw calls [S1, S2, S4, S5, S6, S7, S8, S9, S10, S11, S13, unofficial][S14][S15, S16, S17, S18, S19, S20, unofficial][S21][S22, S23, S25, unofficial]. Modern implementations leverage GPU compute shaders and task shaders for efficient, parallel face extraction and classification [S1, unofficial][S2].
+
+## Sources
+[S1] brzez/java-voxel-engine, https://github.com/brzez/java-voxel-engine, fetched 2026-10-27 (unofficial)
+[S2] Draw the blocks: beveled chunk meshing, tier tiles, remesh budget (Phase 2c), https://github.com/austinbryanprice-droid/Claude-Survivor-Builder/pull/8, fetched 2026-10-26
+[S3] Justinj68/OM3D_PROJECT, https://github.com/Justinj68/OM3D_PROJECT, fetched 2026-10-27 (unofficial)

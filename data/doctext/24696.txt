@@ -1,0 +1,2643 @@
+# D3DVolumeRaycaster
+Volume Ray-Caster for **3D MIP** Rendering of **MRI** and **CT** volume datasets implemented in C++ and Direct3D 11.
+
+MIP stands for **M**aximum **I**ntensity **P**rojection, which means the projection of voxels with maximum intensity of a 3D volume dataset to a 2D image. It is a method in the medical imaging domain and is very often applied in CT to visualize bone structures or in MRI/CT angiography examinations.
+
+The repository contains four demo datasets, 2 x CT and 2 x MRI (only pixel data, 8 bit resolution - no DICOM dataset) to be able to start immediately to figure out how volume ray-casting works.
+
+## Screenshots of the demo datasets
+
+### CT Head, columns : 256, rows : 256, slices : 225
+![alt text](doc/screenshots/CT_Head_3DMIP_01.png)
+
+### CT Head Angio, columns : 512, rows : 512, slices : 79
+![alt text](doc/screenshots/CT_Head_Angio_3DMIP_01.png)
+
+### MRI Head TOF Angio, columns : 416, rows : 512, slices : 112
+![alt text](doc/screenshots/MR_Head_TOF_3DMIP_01.png)
+
+### MRI Abdomen Angio, columns : 384, rows : 512, slices : 80
+![alt text](doc/screenshots/MR_Abdomen_Angio_3DMIP_01.png)
+
+## Download and Install
+
+### Clone the repository
+
+```shell
+git clone https://github.com/BernhardKidalka/D3DVolumeRaycaster.git
+```
+
+If you have no local git client installed, you can also download the zip-archive of the repository and extract it to your local disk.
+
+### Building the source code
+
+**Requirements**
+
+| HW / SW | Required |
+| --- | ----------- |
+| CPU | Any AMD or Intel x64 CPU, Quad-Core CPU recommended |
+| GPU | Any AMD, NVidia or Intel DX11 compliant GPU, supporting at least Shader Model 5.0 |
+| RAM | PC with at least 8GB RAM |
+| Operating System | Windows 10 or later |
+| Compiler / IDE | Visual Studio 2022 Community Edition |
+
+The **D3DVolumeRaycaster** runs only on Windows 10 OS, as it is fully implemented on the DX11 technology stack. The hardware requirements should not be very demanding. Any Quad-Core PC, not older than 10 years, should be able to run the raycaster. Even on-board graphic should be sufficient for execution. Please use the Windows **dxdiag** tool to check your hardware/driver spec.
+
+**How to build**
+
+The repository provides a maintained Visual Studio 2022 solution. The project is pre-configured for x64 target with debug or release build configuration.
+Please open the solution
+```
+D3DVolumeRaycaster.sln
+```
+and build the solution.
+
+## External dependencies
+
+As the **DirectX SDK** is meanwhile part of the **Windows SDK**, no additional SDK installation is necessary. Everything you need comes with the Visual Studio 2022 Community installation. Please ensure that the workloads **C++** and **Game Development with C++** are selected in the Visual Studio Installer.
+
+This project uses th GUI Overlay library **AntTweakBar** for the UI controls. As the AntTweakBar project is meanwhile no longer maintained, this repository contains also the lib and dll. The build configuration takes care that AntTweakBar is linked/referenced correctly. A post-build step copies the AntTweakBar.dll to the required target binary folder.
+
+Please refer to the following link to learn more about AntTweakBar:
+[link](https://anttweakbar.sourceforge.io/doc/)
+
+## The applied Ray-Casting Method
+
+The D3DVolumeRaycaster implementation uses the ray-casting method as described in the paper **"J. Krueger, R. Westermann: Acceleration Techniques for GPU-based Volume Rendering, IEEE Visualization 2003"**. Please refer to the following link for more details about this method:
+[link](https://www.cs.cit.tum.de/cg/research/publications/2003/acceleration-techniques-for-gpu-based-volume-rendering/)
+
+### D3DVolumeRaycaster/D3DVolumeRaycasterMain.cpp
+```
+//------------------------------------------------------------------------------------------------------
+//
+// Project: Direct3D 11 based Volume Ray-Caster (3D MIP rendering mode)
+//    File: D3DVolumeRaycasterMain.cpp
+// Version: 1.0 
+//  Author: B. Kidalka
+//    Date: 2024-02-13
+//
+//    Lang: C++
+//
+// Descrip: Main entry point for Volume Ray-Caster application.
+//
+// Note   : based on DirectX SDK sample "Tutorial04 (Rotating Cube)" in section Direct3D11 Tutorials
+//------------------------------------------------------------------------------------------------------
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+//
+//------------------------------------------------------------------------------------------------------
+
+#include "stdafx.h"
+#include "RayCastRenderer.h"
+
+using namespace D3D11_VOLUME_RAYCASTER;
+
+//--------------------------------------------------------------------------------------
+// Global Variables
+//--------------------------------------------------------------------------------------
+namespace
+{
+    std::unique_ptr<RayCastRenderer> g_RayCaster;
+
+    HINSTANCE                        g_hInst = nullptr;
+    HWND                             g_hWnd = nullptr;
+};
+
+//--------------------------------------------------------------------------------------
+// Forward declarations
+//--------------------------------------------------------------------------------------
+LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
+
+//--------------------------------------------------------------------------------------
+// Register window class and create window
+//--------------------------------------------------------------------------------------
+HRESULT InitWindow(HINSTANCE hInstance, int nCmdShow)
+{
+    // register window class ...
+    WNDCLASSEX wcex;
+    wcex.cbSize = sizeof(WNDCLASSEX);
+    wcex.style = CS_HREDRAW | CS_VREDRAW;
+    wcex.lpfnWndProc = WndProc;
+    wcex.cbClsExtra = 0;
+    wcex.cbWndExtra = 0;
+    wcex.hInstance = hInstance;
+    wcex.hIcon = LoadIcon(hInstance, (LPCTSTR)IDI_APPLICATION);
+    wcex.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wcex.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+    wcex.lpszMenuName = nullptr;
+    wcex.lpszClassName = L"D3DVolumeRaycasterWindowClass";
+    wcex.hIconSm = LoadIcon(wcex.hInstance, (LPCTSTR)IDI_APPLICATION);
+    if (!RegisterClassEx(&wcex))
+    {
+        return E_FAIL;
+    }
+    // create window ...
+    g_hInst = hInstance;
+    RECT rc = { 0, 0, 1200, 800 };
+    AdjustWindowRect(&rc, WS_OVERLAPPEDWINDOW, FALSE);
+    g_hWnd = CreateWindow(
+        L"D3DVolumeRaycasterWindowClass", 
+        L"D3D11 Volume Ray-Caster",
+        WS_OVERLAPPEDWINDOW,
+        CW_USEDEFAULT,
+        CW_USEDEFAULT, 
+        rc.right - rc.left, 
+        rc.bottom - rc.top, 
+        nullptr, 
+        nullptr, 
+        hInstance,
+        nullptr);
+
+    if (!g_hWnd)
+    {
+        return E_FAIL;
+    }
+    
+    ShowWindow(g_hWnd, nCmdShow);
+
+    return S_OK;
+}
+
+//--------------------------------------------------------------------------------------
+// Main windows message callback procedure. Handles incoming windows messages
+//--------------------------------------------------------------------------------------
+LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
+{
+    PAINTSTRUCT ps;
+    HDC hdc;
+    
+    if (g_RayCaster.get() != nullptr)
+    {
+        // message routing to Ray-Caster renderer ... (so far hooked for GUI controls)
+        if (g_RayCaster->HandleMessage(hWnd, message, wParam, lParam))
+        {
+            // message alreay handled
+            return 0;
+        }
+    }
+
+    switch (message)
+    {
+    case WM_PAINT:
+        hdc = BeginPaint(hWnd, &ps);
+        if (g_RayCaster.get() != nullptr)
+        {
+            g_RayCaster->Update();
+            g_RayCaster->Render();
+        }
+        EndPaint(hWnd, &ps);
+        break;
+    case WM_SIZE:
+        if (g_RayCaster.get() != nullptr)
+        {
+            g_RayCaster->OnResize();
+        }
+        break;
+    case WM_DESTROY:
+        PostQuitMessage(0);
+        break;
+    default:
+        return DefWindowProc(hWnd, message, wParam, lParam);
+    }
+    return 0;
+}
+
+//--------------------------------------------------------------------------------------
+// Entry point to the application. Initializes everything and goes into a message 
+// processing loop. Idle time is used to render via Ray-Caster.
+//--------------------------------------------------------------------------------------
+int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _In_ LPWSTR lpCmdLine, _In_ int nCmdShow)
+{
+    UNREFERENCED_PARAMETER(hPrevInstance);
+    UNREFERENCED_PARAMETER(lpCmdLine);
+    
+    g_RayCaster = std::make_unique<RayCastRenderer>();
+
+    if (FAILED(InitWindow(hInstance, nCmdShow)))
+    {
+        return 0;
+    }
+
+    if (!g_RayCaster->Initialize(g_hWnd))
+    {
+        MessageBox(nullptr, L"Initialization of Ray-Caster Renderer failed!", L"ERROR", MB_OK);
+        g_RayCaster->Release();
+    }
+
+    // main message loop
+    MSG msg = { 0 };
+    while (WM_QUIT != msg.message)
+    {
+        if (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE))
+        {
+            TranslateMessage(&msg);
+            DispatchMessage(&msg);
+        }
+        else
+        {
+            g_RayCaster->Update();
+            g_RayCaster->Render();
+        }
+    }
+
+    g_RayCaster->Release();
+
+    return (int)msg.wParam;
+}
+```
+
+### D3DVolumeRaycaster/RayCastRenderer.cpp
+```
+//------------------------------------------------------------------------------------------------------
+//
+// Project: Direct3D 11 based Volume Ray-Caster (3D MIP rendering mode)
+//    File: RayCastRenderer.cpp
+// Version: 1.0
+//  Author: B. Kidalka
+//    Date: 2024-02-13
+//
+//    Lang: C++
+//
+// Descrip: implementation of the RayCastRenderer functionality.
+//
+//------------------------------------------------------------------------------------------------------
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+//
+//------------------------------------------------------------------------------------------------------
+
+#include "stdafx.h"
+#include "RayCastRenderer.h"
+
+using namespace DirectX;
+using namespace std;
+
+namespace D3D11_VOLUME_RAYCASTER
+{
+    //--------------------------------------------------------------------------------------
+    // RayCastRenderer implementation 
+    //--------------------------------------------------------------------------------------
+    
+    //------------------------------------------------------------------------------------------------------
+    // Default constructor
+    //------------------------------------------------------------------------------------------------------
+    RayCastRenderer::RayCastRenderer()
+    {
+    }
+
+    //------------------------------------------------------------------------------------------------------
+    // Destructor
+    //------------------------------------------------------------------------------------------------------
+    RayCastRenderer::~RayCastRenderer()
+    {
+    }
+
+    //------------------------------------------------------------------------------------------------------
+    // Create Direct3D device, device context and DXGI swapchain
+    //------------------------------------------------------------------------------------------------------
+    bool RayCastRenderer::createDeviceAndSwapChain()
+    {
+        HRESULT hr = S_OK;
+
+        UINT createDeviceFlags = 0;
+//#ifdef _DEBUG
+//        createDeviceFlags |= D3D11_CREATE_DEVICE_DEBUG;
+//#endif
+        D3D_DRIVER_TYPE driverTypes[] =
+        {
+            D3D_DRIVER_TYPE_HARDWARE,
+            D3D_DRIVER_TYPE_WARP,
+            D3D_DRIVER_TYPE_REFERENCE,
+        };
+        UINT numDriverTypes = ARRAYSIZE(driverTypes);
+
+        D3D_FEATURE_LEVEL featureLevels[] =
+        {
+            D3D_FEATURE_LEVEL_11_0,
+            D3D_FEATURE_LEVEL_10_1,
+            D3D_FEATURE_LEVEL_10_0,
+        };
+        UINT numFeatureLevels = ARRAYSIZE(featureLevels);
+
+        // create device and context ...
+        for (UINT driverTypeIndex = 0; driverTypeIndex < numDriverTypes; driverTypeIndex++)
+        {
+            driverType_ = driverTypes[driverTypeIndex];
+            hr = D3D11CreateDevice(
+                nullptr,
+                driverType_,
+                nullptr,
+                createDeviceFlags,
+                featureLevels,
+                numFeatureLevels,
+                D3D11_SDK_VERSION,
+                &pD3DDevice_,
+                &featureLevel_,
+                &pImmediateContext_
+            );
+            if (SUCCEEDED(hr))
+            {
+                break;
+            }
+        }
+        if (FAILED(hr))
+        {
+            return false;
+        }
+        
+        // obtain DXGI factory from device ...
+        IDXGIFactory1* dxgiFactory = nullptr;
+        {
+            IDXGIDevice* dxgiDevice = nullptr;
+            hr = pD3DDevice_->QueryInterface(__uuidof(IDXGIDevice), reinterpret_cast<void**>(&dxgiDevice));
+            if (SUCCEEDED(hr))
+            {
+                IDXGIAdapter* adapter = nullptr;
+                hr = dxgiDevice->GetAdapter(&adapter);
+                if (SUCCEEDED(hr))
+                {
+                    hr = adapter->GetParent(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(&dxgiFactory));
+                    SAFE_RELEASE(adapter);
+                }
+                SAFE_RELEASE(dxgiDevice);
+            }
+        }
+        if (FAILED(hr))
+        {
+            return false;
+        }
+        
+        // create swap chain ...
+        DXGI_SWAP_CHAIN_DESC scDesc { 0 };
+        scDesc.BufferCount = 1;
+        scDesc.BufferDesc.Width = canvasWidth_;
+        scDesc.BufferDesc.Height = canvasHeight_;
+        scDesc.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        scDesc.BufferDesc.RefreshRate.Numerator = 60;
+        scDesc.BufferDesc.RefreshRate.Denominator = 1;
+        scDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+        scDesc.OutputWindow = canvasHWND_;
+        scDesc.SampleDesc.Count = 1;
+        scDesc.SampleDesc.Quality = 0;
+        scDesc.Windowed = TRUE;
+
+        hr = dxgiFactory->CreateSwapChain(pD3DDevice_, &scDesc, &pSwapChain_);
+        
+        if (FAILED(hr))
+        {
+            return false;
+        }
+
+        // the Ray-Caster renderer doesn't handle full-screen swapchains so we block the ALT+ENTER shortcut
+        // of the associated canvas/window
+        dxgiFactory->MakeWindowAssociation(canvasHWND_, DXGI_MWA_NO_ALT_ENTER);
+                
+        SAFE_RELEASE(dxgiFactory);
+        
+        return true;
+    }
+    
+    //------------------------------------------------------------------------------------------------------
+    // Create render target view and bind it to the Output-Merger stage
+    //------------------------------------------------------------------------------------------------------
+    bool RayCastRenderer::createAndBindRenderTargetView()
+    {
+        HRESULT hr = S_OK;
+
+        assert(pSwapChain_);
+        assert(pD3DDevice_);
+        assert(pImmediateContext_);
+
+        // create the render target view attached to the backbuffer of the swap-chain
+        ID3D11Texture2D* pBackBuffer = nullptr;
+        hr = pSwapChain_->GetBuffer(0, __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&pBackBuffer));
+        if (FAILED(hr))
+        {
+            return false;
+        }
+
+        hr = pD3DDevice_->CreateRenderTargetView(pBackBuffer, nullptr, &pRenderTargetView_);
+        SAFE_RELEASE(pBackBuffer);
+        if (FAILED(hr))
+        {
+            return false;
+        }
+        // bind the render target view to the pipeline (Output-Merger stage)
+        pImmediateContext_->OMSetRenderTargets(1, &pRenderTargetView_, nullptr);
+
+        return true;
+    }
+    
+    //------------------------------------------------------------------------------------------------------
+    // Set the rendering viewport. This method needs to be called on initialization and every time the
+    // hosting window is resized.
+    //------------------------------------------------------------------------------------------------------
+    void RayCastRenderer::setViewport()
+    {
+        assert(pImmediateContext_);
+
+        D3D11_VIEWPORT viewPort;
+        viewPort.Width = static_cast<FLOAT>(canvasWidth_);
+        viewPort.Height = static_cast<FLOAT>(canvasHeight_);
+        viewPort.MinDepth = 0.0f;
+        viewPort.MaxDepth = 1.0f;
+        viewPort.TopLeftX = 0;
+        viewPort.TopLeftY = 0;
+
+        pImmediateContext_->RSSetViewports(1, &viewPort);
+    }
+    
+    //------------------------------------------------------------------------------------------------------
+    // Create Vertex-Shader, Pixel-Shader and input layout objects.  
+    // The creation of the input layout needs access to the vertex shader object (input signature for IA stage); 
+    // That's why it is combined with the shader object creation in this method.
+    //------------------------------------------------------------------------------------------------------
+    bool RayCastRenderer::createShaderObjectsAndInputLayout()
+    {
+        HRESULT hr = S_OK;
+
+        assert(pD3DDevice_);
+        assert(pImmediateContext_);
+        
+        // compile the ray-casting vertex shader
+        ID3DBlob* pVSBlob = nullptr;
+        hr = CompileShaderFromFile(L"RayCastingShader.fx", "VS_RAYCASTING", "vs_5_0", &pVSBlob);
+        if (FAILED(hr))
+        {
+            MessageBox(
+                nullptr,
+                L"The FX file RayCastingShader.fx cannot be compiled.  Please run this executable from the directory that contains the FX file.",
+                L"Error",
+                MB_OK
+            );
+            return false;
+        }
+
+        // create the ray-casting vertex shader
+        hr = pD3DDevice_->CreateVertexShader(pVSBlob->GetBufferPointer(), pVSBlob->GetBufferSize(), nullptr, &pRayCastingVS_);
+        if (FAILED(hr))
+        {
+            SAFE_RELEASE(pVSBlob);
+            return false;
+        }
+
+        // define the input layout (we need only the POSITION attribute for the vertex)
+        D3D11_INPUT_ELEMENT_DESC layoutDesc[] =
+        {
+            { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0 }
+        };
+        UINT numElements = ARRAYSIZE(layoutDesc);
+
+        // create the input layout
+        hr = pD3DDevice_->CreateInputLayout(
+            layoutDesc,
+            numElements,
+            pVSBlob->GetBufferPointer(),
+            pVSBlob->GetBufferSize(),
+            &pVertexLayout_
+        );
+        SAFE_RELEASE(pVSBlob);
+        if (FAILED(hr))
+        {
+            return false;
+        }
+        // set the input layout at the Input Assembler stage
+        pImmediateContext_->IASetInputLayout(pVertexLayout_);
+
+        // compile the ray-casting pixel shader
+        ID3DBlob* pPSBlob = nullptr;
+        hr = CompileShaderFromFile(L"RayCastingShader.fx", "PS_RAYCASTING", "ps_5_0", &pPSBlob);
+        if (FAILED(hr))
+        {
+            MessageBox(
+                nullptr,
+                L"The FX file RayCastingShader.fx cannot be compiled.  Please run this executable from the directory that contains the FX file.",
+                L"Error",
+                MB_OK);
+            return false;
+        }
+
+        // create the ray-casting pixel shader
+        hr = pD3DDevice_->CreatePixelShader(pPSBlob->GetBufferPointer(), pPSBlob->GetBufferSize(), nullptr, &pRayCastingPS_);
+        SAFE_RELEASE(pPSBlob);
+        if (FAILED(hr))
+        {
+            return false;
+        }
+        
+        // compile the ray-setup debug pixel shader
+        hr = CompileShaderFromFile(L"RayCastingShader.fx", "PS_RAYSETUP", "ps_5_0", &pPSBlob);
+        if (FAILED(hr))
+        {
+            MessageBox(
+                nullptr,
+                L"The FX file RayCastingShader.fx cannot be compiled.  Please run this executable from the directory that contains the FX file.",
+                L"Error",
+                MB_OK);
+            return false;
+        }
+
+        // create the ray-setup debug pixel shader
+        hr = pD3DDevice_->CreatePixelShader(pPSBlob->GetBufferPointer(), pPSBlob->GetBufferSize(), nullptr, &pRaySetupDebugPS_);
+        SAFE_RELEASE(pPSBlob);
+        if (FAILED(hr))
+        {
+            return false;
+        }
+
+        return true;
+    }
+    
+    //------------------------------------------------------------------------------------------------------
+    // Create vertex and index buffer used for rendering the proxy geometry (simple cube)  
+    //------------------------------------------------------------------------------------------------------
+    bool RayCastRenderer::createVertexAndIndexBuffer()
+    {
+        HRESULT hr = S_OK;
+
+        assert(pD3DDevice_);
+        assert(pImmediateContext_);
+        
+        // setup cube geometry for indexed rendering :
+        // we need 8 vertices for a cube with 6 faces; each face has 2 triangles (clock-wise winding order)
+        // -> 6 * 2 * 3 = 36 indices
+        
+        // create vertex buffer ...
+        VertexPos vertices[] =
+        {
+            { XMFLOAT4(-0.5f,  0.5f, -0.5f, 1.0f) },
+            { XMFLOAT4( 0.5f,  0.5f, -0.5f, 1.0f) },
+            { XMFLOAT4( 0.5f,  0.5f,  0.5f, 1.0f) },
+            { XMFLOAT4(-0.5f,  0.5f,  0.5f, 1.0f) },
+            { XMFLOAT4(-0.5f, -0.5f, -0.5f, 1.0f) },
+            { XMFLOAT4( 0.5f, -0.5f, -0.5f, 1.0f) },
+            { XMFLOAT4( 0.5f, -0.5f,  0.5f, 1.0f) },
+            { XMFLOAT4(-0.5f, -0.5f,  0.5f, 1.0f) }
+        };
+
+        vertexCount_ = ARRAYSIZE(vertices);
+
+        D3D11_BUFFER_DESC bufferDesc = { 0 };
+        bufferDesc.Usage = D3D11_USAGE_DEFAULT;
+        bufferDesc.ByteWidth = sizeof(VertexPos) * vertexCount_;
+        bufferDesc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+        bufferDesc.CPUAccessFlags = 0;
+        
+        D3D11_SUBRESOURCE_DATA InitData = { 0 };
+        InitData.pSysMem = vertices;
+        hr = pD3DDevice_->CreateBuffer(&bufferDesc, &InitData, &pVertexBuffer_);
+        if (FAILED(hr))
+        {
+            return false;
+        }
+        
+        // set vertex buffer
+        UINT stride = sizeof(VertexPos);
+        UINT offset = 0;
+        pImmediateContext_->IASetVertexBuffers(0, 1, &pVertexBuffer_, &stride, &offset);
+
+        // create index buffer ...
+        WORD indices[] =
+        {
+            3,1,0,
+            2,1,3,
+
+            0,5,4,
+            1,5,0,
+
+            3,4,7,
+            0,4,3,
+
+            1,6,5,
+            2,6,1,
+
+            2,7,6,
+            3,7,2,
+
+            6,4,5,
+            7,4,6,
+        };
+        
+        indexCount_ = ARRAYSIZE(indices);
+
+        bufferDesc.Usage = D3D11_USAGE_DEFAULT;
+        bufferDesc.ByteWidth = sizeof(WORD) * indexCount_;
+        bufferDesc.BindFlags = D3D11_BIND_INDEX_BUFFER;
+        bufferDesc.CPUAccessFlags = 0;
+        InitData.pSysMem = indices;
+        hr = pD3DDevice_->CreateBuffer(&bufferDesc, &InitData, &pIndexBuffer_);
+        if (FAILED(hr))
+        {
+            return false;
+        }
+        
+        // set index buffer
+        pImmediateContext_->IASetIndexBuffer(pIndexBuffer_, DXGI_FORMAT_R16_UINT, 0);
+
+        // set primitive topology
+        pImmediateContext_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+        return true;
+    }
+    
+    //------------------------------------------------------------------------------------------------------
+    // Create constant buffers used to pass uniform data to the shader stages
+    //------------------------------------------------------------------------------------------------------
+    bool RayCastRenderer::createConstantBuffers()
+    {
+        HRESULT hr = S_OK;
+
+        assert(pD3DDevice_);
+
+        // create the (empty) constant buffer for VS
+        D3D11_BUFFER_DESC bufferDescVS { 0 };
+        bufferDescVS.Usage = D3D11_USAGE_DEFAULT;
+        bufferDescVS.ByteWidth = sizeof(ConstantBufferVS);
+        bufferDescVS.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        bufferDescVS.CPUAccessFlags = 0;
+
+        hr = pD3DDevice_->CreateBuffer(&bufferDescVS, nullptr, &pConstantBufferVS_);
+        if (FAILED(hr))
+        {
+            return false;
+        }
+        
+        // create the (empty) constant buffer for PS
+        D3D11_BUFFER_DESC bufferDescPS { 0 };
+        bufferDescPS.Usage = D3D11_USAGE_DEFAULT;
+        bufferDescPS.ByteWidth = sizeof(ConstantBufferPS);
+        bufferDescPS.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        bufferDescPS.CPUAccessFlags = 0;
+
+        hr = pD3DDevice_->CreateBuffer(&bufferDescPS, nullptr, &pConstantBufferPS_);
+        if (FAILED(hr))
+        {
+            return false;
+        }
+        
+        // create the (empty) constant buffer for debug PS
+        D3D11_BUFFER_DESC bufferDescDbgPS { 0 };
+        bufferDescDbgPS.Usage = D3D11_USAGE_DEFAULT;
+        bufferDescDbgPS.ByteWidth = sizeof(ConstantBufferPS);
+        bufferDescDbgPS.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        bufferDescDbgPS.CPUAccessFlags = 0;
+
+        hr = pD3DDevice_->CreateBuffer(&bufferDescDbgPS, nullptr, &pConstantBufferDebugPS_);
+        if (FAILED(hr))
+        {
+            return false;
+        }
+
+        return true;
+    }
+
+    //------------------------------------------------------------------------------------------------------
+    // Set view matrix (defined through eye position, look-at vector and up-vector) depending on given camera distance
+    //------------------------------------------------------------------------------------------------------
+    void RayCastRenderer::setViewMatrix(float cameraDistance)
+    {
+        // re-initialize the view matrix
+        XMVECTOR Eye = XMVectorSet(0.0f, 0.0f, cameraDistance, 0.0f);
+        XMVECTOR At = XMVectorSet(0.0f, 0.0f, 0.0f, 0.0f);
+        XMVECTOR Up = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
+        matrixView_ = XMMatrixLookAtLH(Eye, At, Up);
+    }
+    
+    //------------------------------------------------------------------------------------------------------
+    // Set the projection matrix. This method needs to be called on initialization and every time the
+    // hosting window is resized.
+    //------------------------------------------------------------------------------------------------------
+    void RayCastRenderer::setProjectionMatrix()
+    {
+        matrixProjection_ = XMMatrixPerspectiveFovLH(XM_PIDIV4, canvasWidth_ / static_cast<FLOAT>(canvasHeight_), 0.01f, 10.0f);
+    }
+    
+    //------------------------------------------------------------------------------------------------------
+    // Calculate/Update combined World-View-Projection matrix
+    //------------------------------------------------------------------------------------------------------
+    void RayCastRenderer::calcWorldViewProjectionMatrix()
+    {
+        matrixWVP_ = matrixWorld_ * matrixRotate_ * matrixView_ * matrixProjection_; // concatenation order for left-handed coordinate system
+    }
+
+    //------------------------------------------------------------------------------------------------------
+    // Calculate bounding volume scale matrix depending of dimensions of volume raw data
+    //------------------------------------------------------------------------------------------------------
+    void RayCastRenderer::calcScaleMatrix(UINT dimX, UINT dimY, UINT dimZ)
+    {
+        // get the dimension with maximum value - this will map to the max norm value 1.0f
+        UINT maxDimValue = dimX;
+        
+        if (dimY > maxDimValue)
+        {
+            maxDimValue = dimY;
+        }
+        if (dimZ > maxDimValue)
+        {
+            maxDimValue = dimZ;
+        }
+        
+        float scaleValues[3] = { 1.0f, 1.0f, 1.0f };
+        scaleValues[0] = static_cast<float>(dimX) / maxDimValue;
+        scaleValues[1] = static_cast<float>(dimY) / maxDimValue;
+        scaleValues[2] = static_cast<float>(dimZ) / maxDimValue;
+        
+        matrixScale_ = XMMatrixScaling(scaleValues[0], scaleValues[1], scaleValues[2]);
+    }
+
+    //------------------------------------------------------------------------------------------------------
+    // Load volume raw data to internal buffer
+    //------------------------------------------------------------------------------------------------------
+    bool RayCastRenderer::loadVolumeData(char* dataFileName, UINT volColumns, UINT volRows, UINT volSlices)
+    {
+        bool bRetVal = false;
+        
+        ifstream volDataFile(dataFileName, ifstream::in | ifstream::binary);
+        volColumns_ = volColumns;
+        volRows_ = volRows;
+        volSlices_ = volSlices;
+
+        size_t expectedSize = volColumns_ * volRows_ * volSlices_;
+
+        if (volDataFile)
+        {
+            // get length of file 
+            volDataFile.seekg(0, volDataFile.end);
+            size_t length = volDataFile.tellg();
+            volDataFile.seekg(0, volDataFile.beg);
+
+            assert(length == expectedSize);
+
+            pVolumeData_ = new char[length];
+
+            // read data block
+            volDataFile.read(pVolumeData_, length);
+
+            if (volDataFile)
+            {
+                bRetVal = true;
+            }
+            volDataFile.close();
+        }
+        if (bRetVal)
+        {
+            calcScaleMatrix(volColumns_, volRows_, volSlices_);
+        }
+        else
+        {
+            matrixScale_ = XMMatrixIdentity();
+        }
+        
+        return bRetVal;
+    }
+    
+    //------------------------------------------------------------------------------------------------------
+    // Create pipeline state objects for the fixed-function units of the Direct3D 11 pipeline
+    //------------------------------------------------------------------------------------------------------
+    bool RayCastRenderer::createPipelineStateObjects()
+    {
+        HRESULT hr = S_OK;
+
+        assert(pD3DDevice_);
+
+        // create rasterizer state for wireframe rendering (backface culling on)
+        D3D11_RASTERIZER_DESC rsDesc;
+        ZeroMemory(&rsDesc, sizeof(D3D11_RASTERIZER_DESC));
+        rsDesc.FillMode = D3D11_FILL_WIREFRAME;
+        rsDesc.CullMode = D3D11_CULL_BACK;
+        rsDesc.FrontCounterClockwise = false;
+        rsDesc.DepthClipEnable = true;
+
+        hr = pD3DDevice_->CreateRasterizerState(&rsDesc, &pWireFrameRS_);
+        if (FAILED(hr))
+        {
+            return false;
+        }
+
+        // create rasterizer state for wireframe rendering (backface culling off)
+        ZeroMemory(&rsDesc, sizeof(D3D11_RASTERIZER_DESC));
+        rsDesc.FillMode = D3D11_FILL_WIREFRAME;
+        rsDesc.CullMode = D3D11_CULL_NONE;
+        rsDesc.FrontCounterClockwise = false;
+        rsDesc.DepthClipEnable = true;
+
+        hr = pD3DDevice_->CreateRasterizerState(&rsDesc, &pWireFrameNoCullingRS_);
+        if (FAILED(hr))
+        {
+            return false;
+        }
+
+        // create rasterizer state for solid rendering (backface culling on)
+        ZeroMemory(&rsDesc, sizeof(D3D11_RASTERIZER_DESC));
+        rsDesc.FillMode = D3D11_FILL_SOLID;
+        rsDesc.CullMode = D3D11_CULL_BACK;
+        rsDesc.FrontCounterClockwise = false;
+        rsDesc.DepthClipEnable = true;
+
+        hr = pD3DDevice_->CreateRasterizerState(&rsDesc, &pSolidRS_);
+        if (FAILED(hr))
+        {
+            return false;
+        }
+
+        // create rasterizer state for double-sided solid rendering (backface culling off)
+        ZeroMemory(&rsDesc, sizeof(D3D11_RASTERIZER_DESC));
+        rsDesc.FillMode = D3D11_FILL_SOLID;
+        rsDesc.CullMode = D3D11_CULL_NONE;
+        rsDesc.FrontCounterClockwise = false;
+        rsDesc.DepthClipEnable = true;
+
+        hr = pD3DDevice_->CreateRasterizerState(&rsDesc, &pSolidNoCullingRS_);
+        if (FAILED(hr))
+        {
+            return false;
+        }
+
+        return true;
+    }
+
+    //------------------------------------------------------------------------------------------------------
+    // Create 3D texture for volume raw data        
+    //------------------------------------------------------------------------------------------------------
+    bool RayCastRenderer::createVolumeTexture()
+    {
+        HRESULT hr = S_OK;
+        
+        assert(pD3DDevice_);
+        assert(pVolumeData_);
+
+        // create 3D texture for volume data
+        D3D11_TEXTURE3D_DESC texDesc { 0 };
+        texDesc.Width = volColumns_;
+        texDesc.Height = volRows_;
+        texDesc.Depth = volSlices_;
+        texDesc.MipLevels = 1;
+        texDesc.Format = DXGI_FORMAT_R8_UNORM;
+        texDesc.Usage = D3D11_USAGE_DEFAULT;
+        texDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        texDesc.CPUAccessFlags = 0;
+        texDesc.MiscFlags = 0;
+
+        // initialize texel data with loaded volume raw data
+        D3D11_SUBRESOURCE_DATA tex3DRawData { 0 };
+        tex3DRawData.pSysMem = pVolumeData_;
+        tex3DRawData.SysMemPitch = volColumns_;                 // -> row pitch in bytes
+        tex3DRawData.SysMemSlicePitch = volRows_ * volColumns_; // -> slice pitch in bytes
+
+        hr = pD3DDevice_->CreateTexture3D(&texDesc, &tex3DRawData, &p3DTexture_);
+        if (FAILED(hr))
+        {
+            return false;
+        }
+
+        // loaded raw data buffer can be deleted now 
+        SAFE_DELETE_ARRAY(pVolumeData_);
+
+        return true;
+    }
+
+    //------------------------------------------------------------------------------------------------------
+    // Create texture and corresponding sampler state objects
+    //------------------------------------------------------------------------------------------------------
+    bool RayCastRenderer::createTextureAndSamplerObjects()
+    {
+        HRESULT hr = S_OK;
+
+        assert(pD3DDevice_);
+
+        if (!createVolumeTexture()) return false;
+
+        // create texture sampler state
+        D3D11_SAMPLER_DESC samplerDesc;
+        ZeroMemory(&samplerDesc, sizeof(D3D11_SAMPLER_DESC));
+        samplerDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+        samplerDesc.AddressU = D3D11_TEXTURE_ADDRESS_BORDER;
+        samplerDesc.AddressV = D3D11_TEXTURE_ADDRESS_BORDER;
+        samplerDesc.AddressW = D3D11_TEXTURE_ADDRESS_BORDER;
+        samplerDesc.MipLODBias = 0.0f;
+        samplerDesc.MaxAnisotropy = 1;
+        samplerDesc.ComparisonFunc = D3D11_COMPARISON_NEVER;
+        samplerDesc.BorderColor[0] = 0.0f;
+        samplerDesc.BorderColor[1] = 0.0f;
+        samplerDesc.BorderColor[2] = 0.0f;
+        samplerDesc.BorderColor[3] = 0.0f;
+        samplerDesc.MinLOD = 0;
+        samplerDesc.MaxLOD = D3D11_FLOAT32_MAX;
+
+        hr = pD3DDevice_->CreateSamplerState(&samplerDesc, &pLinearTexSamplerState_);
+        if (FAILED(hr))
+        {
+            return false;
+        }
+        
+        pImmediateContext_->PSSetSamplers(0, 1, &pLinearTexSamplerState_);
+        
+        return true;
+    }
+    
+    //------------------------------------------------------------------------------------------------------
+    // Create shader resource views for volume ray casting
+    //------------------------------------------------------------------------------------------------------
+    bool RayCastRenderer::createRaycastShaderResourceViews()
+    {
+        HRESULT hr = S_OK;
+
+        assert(pD3DDevice_);
+
+        hr = pD3DDevice_->CreateShaderResourceView(p3DTexture_, nullptr, &pRaycastShaderResView_);
+        if (FAILED(hr))
+        {
+            return false;
+        }
+        return true;
+    }
+
+    //------------------------------------------------------------------------------------------------------
+    // Get the camera distance (= z position of camera)
+    //------------------------------------------------------------------------------------------------------
+    float RayCastRenderer::GetCameraDistance()
+    {
+        return cameraDistance_;
+    }
+
+    //------------------------------------------------------------------------------------------------------
+    // Set the camera distance (= z position of camera)
+    //------------------------------------------------------------------------------------------------------
+    void RayCastRenderer::SetCameraDistance(float cameraDistance)
+    {
+        cameraDistance_ = cameraDistance;
+        // new camera distance means update of view matrix
+        setViewMatrix(cameraDistance);
+        // update world-view-projection matrix as view matrix has changed
+        calcWorldViewProjectionMatrix();
+    }
+
+    //------------------------------------------------------------------------------------------------------
+    // GUI callback to get the camera distance
+    //------------------------------------------------------------------------------------------------------
+    void RayCastRenderer::guiCallbackGetCameraDistance(void* value, void* clientData)
+    {
+        *static_cast<float*>(value) = static_cast<RayCastRenderer*>(clientData)->GetCameraDistance();
+    }
+
+    //------------------------------------------------------------------------------------------------------
+    // GUI callback to set the camera distance
+    //------------------------------------------------------------------------------------------------------
+    void RayCastRenderer::guiCallbackSetCameraDistance(const void* value, void* clientData)
+    {
+        static_cast<RayCastRenderer*>(clientData)->SetCameraDistance(*(const float*)value);
+    }
+    
+    //------------------------------------------------------------------------------------------------------
+    // GUI callback for button 'CT Head' click handler -> load demo dataset CT_head_c256_r256_s225.raw
+    //------------------------------------------------------------------------------------------------------
+    void RayCastRenderer::guiCallbackBtnDataCTHead(void *clientData)
+    {
+        if (!static_cast<RayCastRenderer*>(clientData)->LoadDataset(VOLUME_DATASET::CT_HEAD))
+        {
+            MessageBox(nullptr, L"Unable to load volume dataset CT Head. Ray Casting will fail!", L"Error", MB_OK);
+        }
+    }
+    
+    //------------------------------------------------------------------------------------------------------
+    // GUI callback for button 'CT Head Angio' click handler -> load demo dataset CTA_c512_r512_s79.raw
+    //------------------------------------------------------------------------------------------------------
+    void RayCastRenderer::guiCallbackBtnDataCTHeadAngio(void *clientData)
+    {
+        if (!static_cast<RayCastRenderer*>(clientData)->LoadDataset(VOLUME_DATASET::CT_HEAD_ANGIO))
+        {
+            MessageBox(nullptr, L"Unable to load volume dataset CT Head Angio. Ray Casting will fail!", L"Error", MB_OK);
+        }
+    }
+
+    //------------------------------------------------------------------------------------------------------
+    // GUI callback for button 'MR Abdomen' click handler -> load demo dataset MR_abdomen_c384_r512_s80.raw
+    //------------------------------------------------------------------------------------------------------
+    void RayCastRenderer::guiCallbackBtnDataMRAbdomen(void *clientData)
+    {
+        if (!static_cast<RayCastRenderer*>(clientData)->LoadDataset(VOLUME_DATASET::MR_ABDOMEN))
+        {
+            MessageBox(nullptr, L"Unable to load volume dataset MR Abdomen. Ray Casting will fail!", L"Error", MB_OK);
+        }
+    }
+    
+    //------------------------------------------------------------------------------------------------------
+    // GUI callback for button 'MR Head TOF Angio' click handler -> load demo dataset MR_TOF_Angio_c416_r512_s112.raw
+    //------------------------------------------------------------------------------------------------------
+    void RayCastRenderer::guiCallbackBtnDataMRHeadTOFAngio(void *clientData)
+    {
+        if (!static_cast<RayCastRenderer*>(clientData)->LoadDataset(VOLUME_DATASET::MR_HEAD_TOF))
+        {
+            MessageBox(nullptr, L"Unable to load volume dataset MR Head TOF Angio. Ray Casting will fail!", L"Error", MB_OK);
+        }
+    }
+    
+    //------------------------------------------------------------------------------------------------------
+    // Load given dataset for volume rendering        
+    //------------------------------------------------------------------------------------------------------
+    bool RayCastRenderer::LoadDataset(VOLUME_DATASET volumeDataset)
+    {
+        bool retVal = true;
+        
+        // reset world, scale and rotate matrix
+        matrixWorld_ = XMMatrixIdentity();
+        matrixScale_ = XMMatrixIdentity();
+        matrixRotate_ = XMMatrixIdentity();
+        
+        // load volume raw data - scale matrix will be correctly initialized depending on volume dimensions
+        switch (volumeDataset)
+        {
+        case VOLUME_DATASET::CT_HEAD :
+            if (!loadVolumeData("..\\..\\data\\CT_head_c256_r256_s225.raw", 256, 256, 225)) return false;
+            break;
+        case VOLUME_DATASET::CT_HEAD_ANGIO :
+            if (!loadVolumeData("..\\..\\data\\CTA_c512_r512_s79.raw", 512, 512, 79)) return false;
+            break;
+        case VOLUME_DATASET::MR_ABDOMEN :
+            if (!loadVolumeData("..\\..\\data\\MR_abdomen_c384_r512_s80.raw", 384, 512, 80)) return false;
+            break;
+        case VOLUME_DATASET::MR_HEAD_TOF :
+            if (!loadVolumeData("..\\..\\data\\MR_TOF_Angio_c416_r512_s112.raw", 416, 512, 112)) return false;
+            break;
+        default:
+            if (!loadVolumeData("..\\..\\data\\MR_abdomen_c384_r512_s80.raw", 384, 512, 80)) return false;
+            break;
+        }
+        
+        // update world matrix
+        matrixWorld_ *= matrixScale_;
+
+        // 3D texture for volume data as well as shader resource view for ray casting shader need to be re-created
+        // -> release these resources first
+        SAFE_RELEASE(p3DTexture_);
+        SAFE_RELEASE(pRaycastShaderResView_);
+
+        // re-create 3D texture
+        if (!createVolumeTexture()) return false;
+
+        // re-create shader resource view
+        if (!createRaycastShaderResourceViews()) return false;
+        
+        return retVal;
+    }
+
+    //------------------------------------------------------------------------------------------------------
+    // Initialize GUI controls
+    //------------------------------------------------------------------------------------------------------
+    bool RayCastRenderer::initGUI()
+    {
+        bool retVal = true;
+
+        // initialize AntTweakBar which provides UI controls in combination with Direct3D 11 rendering context
+        // see http://anttweakbar.sourceforge.net/doc/
+        if (!TwInit(TW_DIRECT3D11, pD3DDevice_))
+        {
+            return false;
+        }
+
+        // provide window canvas dimensions to GUI system
+        TwWindowSize(canvasWidth_, canvasHeight_);
+
+        // create a tweak bar
+        TwBar *guiBar = TwNewBar("Settings");
+        TwDefine(" GLOBAL help='Ray-Caster Renderer Test Viewer' "); // message added to the help bar
+        int guiBarSize[2] = { 300, 520 };
+        TwSetParam(guiBar, nullptr, "size", TW_PARAM_INT32, 2, guiBarSize);
+        
+        // rendering settings
+        TwAddVarRW(guiBar, "Wireframe Mode", TW_TYPE_BOOLCPP, &renderWireframe_, "group=Rendering key=w");
+        TwAddVarRW(guiBar, "Disable Culling", TW_TYPE_BOOLCPP, &disableCulling_, "group=Rendering key=c");
+        TwAddSeparator(guiBar, nullptr, "group=Rendering");
+        TwAddVarRW(guiBar, "Render Mode", TW_TYPE_UINT32, &renderMode_, "group=Rendering min=0 max=3 keyincr=Right keydecr=Left");
+        TwAddButton(guiBar, "CommentRenderMode", nullptr, nullptr, "label='0=MIP,1=Front-Faces,2=Back-Faces,3=Ray Direction' group=Rendering");
+        TwAddSeparator(guiBar, nullptr, "group=Rendering");
+        TwAddVarCB(
+            guiBar, 
+            "Camera Distance", 
+            TW_TYPE_FLOAT, 
+            guiCallbackSetCameraDistance, 
+            guiCallbackGetCameraDistance, 
+            this, 
+            "group=Rendering min=-6 max=-0.75 step=0.01 keyincr=+ keydecr=-");
+        TwAddSeparator(guiBar, nullptr, nullptr);
+        // raycasting settings
+        TwAddVarRW(guiBar, "Sampling Step Size", TW_TYPE_FLOAT, &raycastStepSize_, "group=Ray-Casting min=0.0001 max=0.1 step=0.0001");
+        TwAddVarRW(guiBar, "Maximum Samples per Ray", TW_TYPE_UINT32, &raycastMaxSamples_, "group=Ray-Casting min=10 max=800");
+        TwAddSeparator(guiBar, nullptr, nullptr);
+        // animation settings
+        TwAddVarRW(guiBar, "Animate", TW_TYPE_BOOLCPP, &doAnimation_, "group=Animation key=a");
+        TwAddVarRW(guiBar, "Animation Speed", TW_TYPE_FLOAT, &animationSpeed_, "group=Animation min=0.0 max=4.0 step=0.01 keyincr=Up keydecr=Down");
+        TwAddVarRW(guiBar, "Target Frame-Rate (FPS)", TW_TYPE_UINT32, &targetFPS_, "group=Animation min=5 max=120");
+        TwAddVarRW(guiBar, "Lock to Target Frame-Rate", TW_TYPE_BOOLCPP, &lockToTargetFPS_, "group=Animation key=l");
+        TwAddVarRW(guiBar, "Rotation", TW_TYPE_QUAT4F, &quatRotation_, "opened=true axisz=-z group=Animation");
+        TwAddVarRW(guiBar, "Rotate X", TW_TYPE_BOOLCPP, &rotateX_, "group=Animation key=x");
+        TwAddVarRW(guiBar, "Rotate Y", TW_TYPE_BOOLCPP, &rotateY_, "group=Animation key=y");
+        TwAddVarRW(guiBar, "Rotate Z", TW_TYPE_BOOLCPP, &rotateZ_, "group=Animation key=z");
+        TwAddSeparator(guiBar, nullptr, nullptr);
+        // dataset settings
+        TwAddButton(guiBar, "CTHead", guiCallbackBtnDataCTHead, this, "group=Dataset label='CT Head'");
+        TwAddButton(guiBar, "CTHeadAngio", guiCallbackBtnDataCTHeadAngio, this, "group=Dataset label='CT Head Angio'");
+        TwAddButton(guiBar, "MRAbdomen", guiCallbackBtnDataMRAbdomen, this, "group=Dataset label='MR Abdomen'");
+        TwAddButton(guiBar, "MRHeadTOF", guiCallbackBtnDataMRHeadTOFAngio, this, "group=Dataset label='MR Head TOF Angio'");
+
+        return retVal;
+    }
+
+    //------------------------------------------------------------------------------------------------------
+    // Initialize Ray-Caster renderer - create Direct3D device and swap chain
+    //------------------------------------------------------------------------------------------------------
+    bool RayCastRenderer::Initialize(HWND canvasHWND)
+    {
+        HRESULT hr = S_OK;
+        
+        if (!loadVolumeData("..\\..\\data\\MR_TOF_Angio_c416_r512_s112.raw", 416, 512, 112))
+        {
+            MessageBox(
+                nullptr,
+                L"Unable to load volume raw data. Ray Casting will fail!",
+                L"Error",
+                MB_OK
+            );
+        }
+        
+        // store window handle of rendering canvas
+        canvasHWND_ = canvasHWND;
+
+        RECT rc;
+        GetClientRect(canvasHWND_, &rc);
+        UINT _canvasWidth = rc.right - rc.left;
+        UINT _canvasHeight = rc.bottom - rc.top;
+        
+        // create Direct3D device, device context and DXGI swapchain
+        if (!createDeviceAndSwapChain()) return false;
+        
+        // create a render target view
+        if (!createAndBindRenderTargetView()) return false;
+
+        // set initial viewport
+        setViewport();
+
+        // create vertex-shader, pixel-shader and input layout
+        if (!createShaderObjectsAndInputLayout()) return false;
+
+        // setup geometry : create vertex and index buffer for indexed rendering
+        if (!createVertexAndIndexBuffer()) return false;
+
+        // create constant buffers used for passing uniform data to shader stages
+        if (!createConstantBuffers()) return false;
+        
+        // create pipeline state objects for the fixed-function units of the D3D11 pipeline 
+        if (!createPipelineStateObjects()) return false;
+
+        // create all textures with corresponding sampler states
+        if (!createTextureAndSamplerObjects()) return false;
+        
+        // create the shader resource view for ray casting through the volume data
+        if (!createRaycastShaderResourceViews()) return false;
+
+        // setup transformation matrices ...
+        // note : we work with a left-handed coordinate system
+        // -> matrices are row-major aligned
+        // -> polygon definition in clockwise (CW) order means front-face; backface culling is ON per default
+        // NOTE : HLSL expects column-major aligned matrices; that's why all matrices are transposed before
+        //        they are passed to the vertex shader
+
+        // initialize world-view-projection matrix
+        matrixWVP_ = XMMatrixIdentity();
+        // initialize the world matrix
+        matrixWorld_ = XMMatrixIdentity();
+        // scale the unit cube to volume boundaries
+        matrixWorld_ *= matrixScale_;
+        // initialize rotation matrix
+        matrixRotate_ = XMMatrixIdentity();
+
+        // initialize the view matrix with initial camera distance
+        setViewMatrix(cameraDistance_);
+
+        // initialize the projection matrix
+        setProjectionMatrix();
+        // update world-view-projection matrix
+        calcWorldViewProjectionMatrix();
+        
+        // initialize the ray setup controller which renders cube back-faces and front-faces to separate render targets
+        if (!raySetupPass_.Initialize(pD3DDevice_, _canvasWidth, _canvasHeight)) return false;
+        
+        // initialize rotation quaternion to identity
+        quatRotation_[0] = 0.0f;
+        quatRotation_[1] = 0.0f;
+        quatRotation_[2] = 0.0f;
+        quatRotation_[3] = 1.0f;
+        
+        // initialize GUI
+        if (!initGUI())
+        {
+            return false;
+        }
+
+        // finally initialize performance counters
+        QueryPerformanceFrequency(&perfCounterFreq_);
+        QueryPerformanceCounter(&lastPerfCounter_);
+
+        return true;
+    }
+    
+    //------------------------------------------------------------------------------------------------------
+    // Release all allocated resources 
+    //------------------------------------------------------------------------------------------------------
+    void RayCastRenderer::Release()
+    {
+        // release GUI resources
+        TwTerminate();
+        // reset pipeline state
+        if (pImmediateContext_) pImmediateContext_->ClearState();
+        // rlease resources of ray setup controller
+        raySetupPass_.Release();
+        // release Direct3D COM objects ...
+        SAFE_RELEASE(pRaycastShaderResView_);
+        SAFE_RELEASE(pLinearTexSamplerState_);
+        SAFE_RELEASE(p3DTexture_);
+        SAFE_RELEASE(pSolidNoCullingRS_);
+        SAFE_RELEASE(pSolidRS_);
+        SAFE_RELEASE(pWireFrameNoCullingRS_);
+        SAFE_RELEASE(pWireFrameRS_);
+        SAFE_RELEASE(pConstantBufferDebugPS_);
+        SAFE_RELEASE(pConstantBufferPS_);
+        SAFE_RELEASE(pConstantBufferVS_);
+        SAFE_RELEASE(pVertexBuffer_);
+        SAFE_RELEASE(pIndexBuffer_);
+        SAFE_RELEASE(pVertexLayout_);
+        SAFE_RELEASE(pRayCastingVS_);
+        SAFE_RELEASE(pRayCastingPS_);
+        SAFE_RELEASE(pRaySetupDebugPS_);
+        SAFE_RELEASE(pRenderTargetView_);
+        SAFE_RELEASE(pSwapChain_);
+        SAFE_RELEASE(pImmediateContext_);
+        SAFE_RELEASE(pD3DDevice_);
+        // release internal buffer and other resources
+        SAFE_DELETE_ARRAY(pVolumeData_);
+    }
+
+    //------------------------------------------------------------------------------------------------------
+    // Update hook (timing, animation, ...)
+    //------------------------------------------------------------------------------------------------------
+    void RayCastRenderer::Update()
+    {
+        if (nullptr == pImmediateContext_ || nullptr == pD3DDevice_ || IsIconic(canvasHWND_))
+        {
+            // renderer not yet initialized or window is minimized - do nothing
+            return;
+        }
+        
+        // update target render time first (depends on GUI parameter - relevant for "locked" frame rate rendering)
+        targetRenderTime_ = 1.0 / targetFPS_;
+
+        if (lockToTargetFPS_ && deltaTimeMSec_ > 1.0)
+        {
+            // locked to target frame rate - if we are too fast we let sleep the render thread to "cool down" the GPU
+            Sleep(static_cast<DWORD>(deltaTimeMSec_));
+        }
+
+        // measure rendering timing (raw frame time in ms + frames per second (FPS) + average FPS) ...
+        double frameTime = 0.0;
+        QueryPerformanceCounter(&currentPerfCounter_);
+        if (lockToTargetFPS_ && deltaTimeMSec_ > 1.0)
+        { 
+            // frame rate is locked and our hardware would still be capable to render faster than the target render time
+            frameTime = targetRenderTime_;
+        }
+        else
+        {
+            // hardware renders as fast as possible (maybe also slower as the given target render time) - measure timing
+            frameTime = (double)(currentPerfCounter_.QuadPart - lastPerfCounter_.QuadPart) / perfCounterFreq_.QuadPart;
+        }
+        lastPerfCounter_ = currentPerfCounter_;
+
+        elapsedTime_ += frameTime;              // _elapsedTime since simulation start
+        double currentFPS = 1.0 / frameTime;    // current FPS jitters depending on background load and position of bounding cube
+                                                // calculate average FPS which gives a smoother measure of rendering performance 
+        sumFPS_ += currentFPS;
+        frameCounter_++;
+        averageFPS_ = sumFPS_ / (frameCounter_ > 0 ? frameCounter_ : 60); // in case of frameCounter overflow we assume 60 FPS
+                                                                          // dump timing info in title bar of hosting window
+        const size_t bufferSize = 256;
+        char charBuffer[bufferSize] = { 0 };
+        sprintf_s(
+            charBuffer,
+            bufferSize,
+            "D3D11 Volume Ray-Caster - frame time : %4.2f ms, FPS : %4.1f, average FPS : %4.1f - total time : %4.2f s",
+            1000.0f * frameTime,
+            currentFPS,
+            averageFPS_,
+            elapsedTime_);
+        SetWindowTextA(canvasHWND_, charBuffer);
+
+        if (doAnimation_) // == auto-rotation mode
+        {
+            // calculate rotation angle in radians 
+            // (based on measured frame time, to ensure consistent animation behaviour on different hardware)
+            float rotAngle = XM_PI * static_cast<float>(frameTime) * animationSpeed_;
+            // rotate volume depending on GUI settings ...
+            if (rotateZ_) matrixRotate_ *= XMMatrixRotationZ(rotAngle);
+            if (rotateY_) matrixRotate_ *= XMMatrixRotationY(rotAngle);
+            if (rotateX_) matrixRotate_ *= XMMatrixRotationX(rotAngle);
+            
+            // get rotation quaternion from rotation matrix (needed to update track-ball control in GUI)
+            XMVECTOR quatRotation = XMQuaternionRotationMatrix(matrixRotate_);
+            quatRotation_[0] = XMVectorGetX(quatRotation);
+            quatRotation_[1] = XMVectorGetY(quatRotation);
+            quatRotation_[2] = XMVectorGetZ(quatRotation);
+            quatRotation_[3] = XMVectorGetW(quatRotation);
+        }
+        else // manual rotation using trackball control
+        {
+            // update rotation matrix from rotation quaternion
+            XMVECTOR quatRotation = XMVectorSet(quatRotation_[0], quatRotation_[1], quatRotation_[2], quatRotation_[3]);
+            matrixRotate_ = XMMatrixRotationQuaternion(quatRotation);
+        }
+        
+        // update world-view-projection matrix
+        calcWorldViewProjectionMatrix();
+
+        // update ray controller state
+        raySetupPass_.Update();
+    }
+
+    //------------------------------------------------------------------------------------------------------
+    // Render frame
+    //------------------------------------------------------------------------------------------------------
+    void RayCastRenderer::Render()
+    {
+        if (nullptr == pImmediateContext_ || nullptr == pD3DDevice_ || IsIconic(canvasHWND_))
+        {
+            // renderer not yet initialized or window is minimized - do nothing
+            return;
+        }
+        if (nullptr == pRayCastingVS_ || nullptr == pRayCastingPS_)
+        {
+            // shader compilation failed - pipeline is not usable
+            return;
+        }
+
+        // clear the back buffer
+        pImmediateContext_->ClearRenderTargetView(pRenderTargetView_, Colors::Black);
+
+        XMMATRIX transposedMatrixWVP = XMMatrixTranspose(matrixWVP_);
+
+        ///////////////////////////////////////////////////////////////////////
+        // ray setup render pass (render results to 2D textures) ...
+
+        // render back- and front-faces textures needed for ray setup
+        raySetupPass_.Render(pImmediateContext_, &transposedMatrixWVP, indexCount_);
+        // get resource views to back- and front-faces textures needed for ray-casting
+        ID3D11ShaderResourceView *texCubeFacesRV[2] = { nullptr, nullptr };
+        raySetupPass_.GetTextureResourceViews(texCubeFacesRV);
+
+        ///////////////////////////////////////////////////////////////////////
+        // ray-casting render pass ... 
+
+        // bind the default render target view to the pipeline (Output-Merger stage)
+        pImmediateContext_->OMSetRenderTargets(1, &pRenderTargetView_, nullptr);
+        
+        // set rasterizer state to wireframe mode if required
+        if (renderWireframe_)
+        {
+            if (disableCulling_)
+            {
+                pImmediateContext_->RSSetState(pWireFrameNoCullingRS_);
+            }
+            else
+            {
+                pImmediateContext_->RSSetState(pWireFrameRS_);
+            }
+        }
+        else // solid shading with or without backface culling
+        {
+            if (disableCulling_)
+            {
+                pImmediateContext_->RSSetState(pSolidNoCullingRS_);
+            }
+            else
+            {
+                pImmediateContext_->RSSetState(pSolidRS_);
+            }
+        }
+
+        // update constant buffer for VS and PS
+        ConstantBufferVS cbVS;
+        cbVS.matrixWVP = transposedMatrixWVP;
+        pImmediateContext_->UpdateSubresource(pConstantBufferVS_, 0, nullptr, &cbVS, 0, 0);
+
+        ConstantBufferPS cbPS;
+        cbPS.canvasPixelResolution[0] = 1.0f / canvasWidth_;
+        cbPS.canvasPixelResolution[1] = 1.0f / canvasHeight_;
+        cbPS.raycastStepSize = raycastStepSize_;
+        cbPS.raycastMaxSamples = raycastMaxSamples_;
+        pImmediateContext_->UpdateSubresource(pConstantBufferPS_, 0, nullptr, &cbPS, 0, 0);
+
+        // set vertex- and pixel-shader
+        pImmediateContext_->VSSetShader(pRayCastingVS_, nullptr, 0);
+        pImmediateContext_->VSSetConstantBuffers(0, 1, &pConstantBufferVS_);
+        pImmediateContext_->PSSetConstantBuffers(0, 1, &pConstantBufferPS_);
+
+        if (0 == renderMode_) // default render mode : 3D MIP
+        {
+            pImmediateContext_->PSSetShader(pRayCastingPS_, nullptr, 0);
+        }
+        else // debug render mode : 1 = front-face, 2 = back-face, 3 = ray vector
+        {
+            ConstantBufferDebugPS cbDbgPS;
+            cbDbgPS.raySetupMode = renderMode_;
+            pImmediateContext_->UpdateSubresource(pConstantBufferDebugPS_, 0, nullptr, &cbDbgPS, 0, 0);
+            pImmediateContext_->PSSetShader(pRaySetupDebugPS_, nullptr, 0);
+            pImmediateContext_->PSSetConstantBuffers(1, 1, &pConstantBufferDebugPS_);
+        }
+
+        // set texture resources
+        pImmediateContext_->PSSetShaderResources(0, 1, &pRaycastShaderResView_);
+        pImmediateContext_->PSSetShaderResources(1, 2, texCubeFacesRV);
+
+        pImmediateContext_->DrawIndexed(indexCount_, 0, 0);
+        
+        // unbind texture resources
+        ID3D11ShaderResourceView* nullResView[3] = { nullptr, nullptr, nullptr };
+        pImmediateContext_->PSSetShaderResources(0, 3, nullResView);
+        
+        // render UI controls
+        TwDraw();
+
+        // promote back buffer to front buffer (swap buffers)
+        pSwapChain_->Present(0, 0);
+        
+        postRenderHook();
+    }
+    
+    //------------------------------------------------------------------------------------------------------
+    // Post-render hook which is called immediately after frame is rendered
+    //------------------------------------------------------------------------------------------------------
+    void RayCastRenderer::postRenderHook()
+    {
+        // post-render timing ...
+        QueryPerformanceCounter(&currentPerfCounter_);
+        renderTime_ = (double)(currentPerfCounter_.QuadPart - lastPerfCounter_.QuadPart) / perfCounterFreq_.QuadPart;
+
+        if (lockToTargetFPS_)
+        {
+            deltaTimeMSec_ = (targetRenderTime_ - renderTime_) * 1000.0;
+#ifdef _DEBUG
+            const size_t bufferSize = 256;
+            char charBuffer[bufferSize] = { 0 };
+            sprintf_s(
+                charBuffer,
+                bufferSize,
+                "target render time : %4.2f ms, render time : %4.2f ms, delta time : %4.2f ms\n",
+                1000.0f * targetRenderTime_,
+                1000.0f * renderTime_,
+                deltaTimeMSec_);
+            OutputDebugStringA(charBuffer);
+#endif
+        }
+    }
+
+    //------------------------------------------------------------------------------------------------------
+    // Resize handler - called by the hosting application every time the window size has changed  
+    // - resizes swap chain and recreates render target
+    // - resets the viewport
+    // - resets the projection matrix
+    //------------------------------------------------------------------------------------------------------
+    bool RayCastRenderer::OnResize()
+    {
+        HRESULT hr = S_OK;
+
+        // renderer not yet initialized - do nothing
+        if (pD3DDevice_ == nullptr) return true;
+
+        RECT rc;
+        GetClientRect(canvasHWND_, &rc);
+        canvasWidth_ = rc.right - rc.left;
+        canvasHeight_ = rc.bottom - rc.top;
+
+        if (0 == canvasWidth_) canvasWidth_ = 1;
+        if (0 == canvasHeight_) canvasHeight_ = 1;
+
+        // ensure to release render target view if already initialized
+        // -> avoid memory leak
+        // -> resize swap chain buffers would fail if associated resources are not yet released!
+        SAFE_RELEASE(pRenderTargetView_);
+
+        // resize the swap chain
+        hr = pSwapChain_->ResizeBuffers(1, canvasWidth_, canvasHeight_, DXGI_FORMAT_R8G8B8A8_UNORM, 0);
+        if (FAILED(hr))
+        {
+            return false;
+        }
+
+        // re-create the render target view and bind it to OM stage of Direct3D pipeline
+        if (!createAndBindRenderTargetView())
+        {
+            return false;
+        }
+
+        // reset viewport and projection matrix as window size and aspect ratio have changed
+        setViewport();
+        setProjectionMatrix();
+        // update world-view-projection matrix
+        calcWorldViewProjectionMatrix();
+
+        bool bRetVal = raySetupPass_.OnResize(pD3DDevice_, canvasWidth_, canvasHeight_);
+
+        return bRetVal;
+    }
+    
+    //------------------------------------------------------------------------------------------------------
+    // Message handler callback
+    //------------------------------------------------------------------------------------------------------
+    int CALLBACK RayCastRenderer::HandleMessage(HWND wnd, UINT message, WPARAM wParam, LPARAM lParam)
+    {
+        // route message to AntTweakBar
+        return TwEventWin(wnd, message, wParam, lParam);
+    }
+}
+```
+
+### D3DVolumeRaycaster/RayCastRenderer.h
+```
+//------------------------------------------------------------------------------------------------------
+//
+// Project: Direct3D 11 based Volume Ray-Caster (3D MIP rendering mode)
+//    File: RayCastRenderer.h
+// Version: 1.0 
+//  Author: B. Kidalka
+//    Date: 2024-02-13
+//
+//    Lang: C++
+//
+// Descrip: include file for implementation of the RayCastRenderer functionality.
+//
+//------------------------------------------------------------------------------------------------------
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+//
+//------------------------------------------------------------------------------------------------------
+#pragma once
+
+#include "stdafx.h"
+#include "RaySetupPass.h"
+#include "../extern/include/AntTweakBar.h"
+
+namespace D3D11_VOLUME_RAYCASTER
+{
+    //--------------------------------------------------------------------------------------
+    // Structures (vertex formats, constant buffers, ...)
+    //--------------------------------------------------------------------------------------
+    
+    // vertex format : POSITION
+    struct VertexPos
+    {
+        DirectX::XMFLOAT4 Position;
+    };
+
+    // constant buffer for passing data to HLSL ray casting vertex-shader
+    struct ConstantBufferVS
+    {
+        DirectX::XMMATRIX matrixWVP;        // concatenated world-view-projection matrix
+    };
+    
+    // constant buffer for passing data to HLSL ray casting pixel-shader
+    struct ConstantBufferPS
+    {
+        float canvasPixelResolution[2];     // pixel-space resolution in x- and y-direction
+        float raycastStepSize;              // sampling step size for ray casting
+        UINT  raycastMaxSamples;            // maximum number of ray casting samples
+    };
+
+    // constant buffer for passing data to HLSL debug pixel-shader
+    struct ConstantBufferDebugPS
+    {
+        UINT raySetupMode;  // debug render mode : 1 = front-face, 2 = back-face, 3 = ray vector
+        UINT padding[3];    // pad constant buffer content to 16 byte
+    };
+    
+    // enum for identifying the volume dataset to load
+    enum class VOLUME_DATASET
+    {
+        CT_HEAD = 0,
+        CT_HEAD_ANGIO,
+        MR_ABDOMEN,
+        MR_HEAD_TOF
+    };
+    
+    class RayCastRenderer
+    {
+    public:
+        // constructor / desctructor
+        RayCastRenderer(void);
+        virtual ~RayCastRenderer();
+
+        // avoid usage of copy constructor and =operator ...
+        RayCastRenderer(RayCastRenderer const&) = delete;
+        RayCastRenderer& operator= (RayCastRenderer const&) = delete;
+
+        // ------------------------------------------------------------------------------------------------------------
+        // API ...
+        
+        // initialize RayCastRenderer - create Direct3D device and swap chain
+        bool Initialize(HWND canvasHWND);
+        // release all allocated resources 
+        void Release();
+        // update hook (timing, animation, ...)
+        void Update();
+        // render a frame
+        void Render();
+        // resize handler - resizes swap chain and recreates render target 
+        bool OnResize();
+        // message handler callback
+        int CALLBACK HandleMessage(HWND wnd, UINT message, WPARAM wParam, LPARAM lParam);
+
+        // ------------------------------------------------------------------------------------------------------------
+        
+        // get the camera distance (= z position of camera)
+        float GetCameraDistance();
+        // set the camera distance (= z position of camera)
+        void SetCameraDistance(float cameraDistance);
+        // load given dataset for volume rendering        
+        bool LoadDataset(VOLUME_DATASET volumeDataset);
+        
+    protected:
+
+        // create Direct3D device, device context and DXGI swapchain
+        bool createDeviceAndSwapChain();
+        // create render target view and bind it to the Output-Merger stage
+        bool createAndBindRenderTargetView();
+        // set rendering viewport; needs to be called on initialization and every time the hosting window is resized
+        void setViewport();
+        // create Vertex-Shader, Pixel-Shader and input layout objects
+        bool createShaderObjectsAndInputLayout();
+        // create vertex and index buffer used for rendering the proxy geometry (simple cube)  
+        bool createVertexAndIndexBuffer();
+        // create constant buffers used to pass uniform data to the shader stages
+        bool createConstantBuffers();
+        // set view matrix (defined through eye position, look-at vector and up-vector) depending on given camera distance
+        void setViewMatrix(float cameraDistance);
+        // set projection matrix; needs to be called on initialization and every time the hosting window is resized
+        void setProjectionMatrix();
+        // calculate/update combined World-View-Projection matrix
+        void calcWorldViewProjectionMatrix();
+        // load volume raw data to internal buffer
+        bool loadVolumeData(char* dataFileName, UINT volColumns, UINT volRows, UINT volSlices);
+        // create pipeline state objects for the fixed-function units of the Direct3D 11 pipeline
+        bool createPipelineStateObjects();
+        // create 3D texture for volume raw data        
+        bool createVolumeTexture();
+        // create texture and corresponding sampler state objects
+        bool createTextureAndSamplerObjects();
+        // create shader resource views for volume ray casting
+        bool createRaycastShaderResourceViews();
+        // calculate bounding volume scale matrix depending of dimensions of volume raw data
+        void calcScaleMatrix(UINT dimX, UINT dimY, UINT dimZ);
+        // post-render hook which is called immediately after frame is rendered
+        void postRenderHook();
+        
+        // ------------------------------------------------------------------------------------------------------------
+        // GUI handling methods/callbacks ...
+
+        // initialize GUI controls
+        bool initGUI();
+        // GUI callback to get the camera distance
+        static void TW_CALL guiCallbackGetCameraDistance(void* value, void* clientData);
+        // GUI callback to set the camera distance
+        static void TW_CALL guiCallbackSetCameraDistance(const void* value, void* clientData);
+        // GUI callback for button 'CT Head' click handler -> load demo dataset CT_head_c256_r256_s225.raw
+        static void TW_CALL guiCallbackBtnDataCTHead(void *clientData);
+        // GUI callback for button 'CT Head Angio' click handler -> load demo dataset CTA_c512_r512_s79.raw
+        static void TW_CALL guiCallbackBtnDataCTHeadAngio(void *clientData);
+        // GUI callback for button 'MR Abdomen' click handler -> load demo dataset MR_abdomen_c384_r512_s80.raw
+        static void TW_CALL guiCallbackBtnDataMRAbdomen(void *clientData);
+        // GUI callback for button 'MR Head TOF Angio' click handler -> load demo dataset MR_TOF_Angio_c416_r512_s112.raw
+        static void TW_CALL guiCallbackBtnDataMRHeadTOFAngio(void *clientData);
+
+        // ------------------------------------------------------------------------------------------------------------
+        
+        HWND                        canvasHWND_ = nullptr;
+        UINT                        canvasWidth_ = 1200;
+        UINT                        canvasHeight_ = 800;
+
+        D3D_DRIVER_TYPE             driverType_ = D3D_DRIVER_TYPE_NULL;
+        D3D_FEATURE_LEVEL           featureLevel_ = D3D_FEATURE_LEVEL_11_0;
+        
+        ID3D11Device*               pD3DDevice_ = nullptr;
+        ID3D11DeviceContext*        pImmediateContext_ = nullptr;
+        IDXGISwapChain*             pSwapChain_ = nullptr;
+        
+        ID3D11RenderTargetView*     pRenderTargetView_ = nullptr;
+        
+        ID3D11VertexShader*         pRayCastingVS_ = nullptr;
+        ID3D11PixelShader*          pRayCastingPS_ = nullptr;
+        ID3D11PixelShader*          pRaySetupDebugPS_ = nullptr;
+
+        ID3D11InputLayout*          pVertexLayout_ = nullptr;
+        
+        ID3D11Buffer*               pVertexBuffer_ = nullptr;
+        ID3D11Buffer*               pIndexBuffer_ = nullptr;
+        ID3D11Buffer*               pConstantBufferVS_ = nullptr;
+        ID3D11Buffer*               pConstantBufferPS_ = nullptr;
+        ID3D11Buffer*               pConstantBufferDebugPS_ = nullptr;
+
+        ID3D11Texture3D*            p3DTexture_ = nullptr;
+        ID3D11SamplerState*         pLinearTexSamplerState_ = nullptr;
+        ID3D11ShaderResourceView*   pRaycastShaderResView_ = nullptr;
+        
+        ID3D11RasterizerState*      pWireFrameRS_ = nullptr;
+        ID3D11RasterizerState*      pWireFrameNoCullingRS_ = nullptr;
+        ID3D11RasterizerState*      pSolidRS_ = nullptr;
+        ID3D11RasterizerState*      pSolidNoCullingRS_ = nullptr;
+
+        DirectX::XMMATRIX           matrixWorld_;           // needs to be passed every frame on animation/transformation - otherwise constant
+        DirectX::XMMATRIX           matrixView_;            // only needs to be passed on view setup changes (e.g. new camera position) 
+        DirectX::XMMATRIX           matrixProjection_;      // only needs to be passed when projection params change (view frustum setup, window resize)
+        DirectX::XMMATRIX           matrixWVP_;             // concatenated world-view-projection matrix
+        DirectX::XMMATRIX           matrixScale_;           // scale matrix used to scale the unit-cube to the dimension ratio of the raw volume data
+        DirectX::XMMATRIX           matrixRotate_;          // rotation matrix controlled by rotation quaternion
+
+        UINT                        vertexCount_ = 0;
+        UINT                        indexCount_ = 0;
+        
+        LARGE_INTEGER               perfCounterFreq_;
+        LARGE_INTEGER               lastPerfCounter_;
+        LARGE_INTEGER               currentPerfCounter_;
+        UINT64                      frameCounter_ = 0;
+        
+        double      elapsedTime_ = 0.0;             // elapsed time since start of rendering
+        double      sumFPS_ = 0.0;                  // the summed FPS numbers
+        double      averageFPS_ = 0.0;              // average FPS number over elapsed time
+        double      renderTime_ = 0.0;              // the measured raw render time for rendering one frame
+        UINT        targetFPS_ = 60;                // the target frame-rate to achieve in locked mode
+        double      targetRenderTime_ = 1.0 / 60;   // the target render time to achieve the target FPS
+        double      deltaTimeMSec_ = 0.0;           // = _targetRenderTime - _renderTime in ms
+        bool        lockToTargetFPS_ = false;       // lock-down frame rate to target FPS (default: 60 FPS)
+
+        char*       pVolumeData_ = nullptr;
+        UINT        volColumns_ = 1;
+        UINT        volRows_ = 1;
+        UINT        volSlices_ = 1;
+
+        float       cameraDistance_ = -3.0f;
+        bool        renderWireframe_ = false;
+        bool        disableCulling_ = false;
+        
+        bool        doAnimation_ = true;
+        bool        rotateX_ = true;
+        bool        rotateY_ = true;
+        bool        rotateZ_ = false;
+        float       animationSpeed_ = 0.5f;
+        float       quatRotation_[4];          // quaternion for interactive rotation via trackball control
+
+        float       raycastStepSize_ = 0.003f; // sampling step size for ray casting
+        UINT        raycastMaxSamples_ = 550;  // maximum number of ray casting samples
+        UINT        renderMode_ = 0;           // render mode : 0 = 3D MIP (default), 1 = front-face, 2 = back-face, 3 = ray vector
+        
+        RaySetupPass    raySetupPass_;  // the render pass to create the ray vector setup
+    };
+}
+```
+
+### D3DVolumeRaycaster/RayCastingShader.fx
+```
+//------------------------------------------------------------------------------------------------------
+//
+// Project: Direct3D 11 based Volume Ray-Caster (3D MIP rendering mode)
+//    File: RayCastingShader.fx
+// Version: 1.0
+//  Author: B. Kidalka
+//    Date: 2024-02-13
+//
+//    Lang: HLSL
+//
+// Descrip: vertex- and pixel-shader for ray-casting based 3D MIP (Maximum Intensity Projection) rendering.
+//
+//------------------------------------------------------------------------------------------------------
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+//
+//------------------------------------------------------------------------------------------------------
+
+//------------------------------------------------------------------------------------------------------
+// Textures and sampler states
+//------------------------------------------------------------------------------------------------------
+Texture3D<float>  texVolumeData     : register(t0);
+Texture2D<float4> texCubeFrontFaces : register(t1);
+Texture2D<float4> texCubeBackFaces  : register(t2); 
+SamplerState      linearTexSampler  : register(s0);
+
+//--------------------------------------------------------------------------------------
+// Constant Buffer Variables
+//--------------------------------------------------------------------------------------
+// consumed by vertex-shader
+cbuffer ConstantBufferVS : register(b0)
+{
+    matrix matrixWVP;
+}
+
+// consumed by raycasting and debug pixel-shader
+cbuffer ConstantBufferPS : register(b0)
+{
+    float2 canvasPixResolution;
+    float raycastStepSize;
+    uint raycastMaxSamples;
+}
+
+// consumed by debug pixel-shader only
+cbuffer ConstantBufferDebugPS : register(b1)
+{
+    uint raySetupRenderMode;
+}
+
+//--------------------------------------------------------------------------------------
+// Struct defining vertex shader output
+//--------------------------------------------------------------------------------------
+struct VS_OUTPUT
+{
+    float4 Pos : SV_POSITION;
+};
+
+//--------------------------------------------------------------------------------------
+// Ray Casting Vertex Shader
+//--------------------------------------------------------------------------------------
+VS_OUTPUT VS_RAYCASTING(float4 Pos : POSITION)
+{
+    VS_OUTPUT output = (VS_OUTPUT)0;
+    output.Pos = mul(Pos, matrixWVP);
+    return output;
+}
+
+//--------------------------------------------------------------------------------------
+// Ray Casting Pixel Shader (3D MIP)
+//--------------------------------------------------------------------------------------
+float4 PS_RAYCASTING(VS_OUTPUT input) : SV_Target
+{
+    // calculate 2D texture coordinates in pixel-space for position look-up
+    float2 tex = input.Pos.xy * canvasPixResolution;
+    // lookup ray entry end exit position in respective 2D textures
+    float3 posRayEntry = (float3)texCubeFrontFaces.SampleLevel(linearTexSampler, tex, 0);
+    float3 posRayExit = (float3)texCubeBackFaces.SampleLevel(linearTexSampler, tex, 0);
+
+    // calculate normalized ray vector
+    float3 vecRayNorm = normalize(posRayExit - posRayEntry);
+
+    // calculate sampling step size
+    float3 sampleStep = raycastStepSize * vecRayNorm;
+
+    // start at cube front-face position (we sample front-to-back)
+    float3 posData = posRayEntry;
+
+    // initialize MIP value
+    float maxSampleValue = 0.0;
+    
+    for (uint idx = 0; idx < raycastMaxSamples; idx++)
+    {
+        // note : use the 'SampleLevel' method instead of 'Sample' to avoid gradient calculation to pixel neighborhood for LOD calculations;
+        // -> our 3D texture has only one mipmap level so we can set LOD level to zero; 
+        // -> LOD = Level Of Detail, used to correctly interpolate between two adjacent mipmaps depending on depth value, if required;
+        maxSampleValue = max(maxSampleValue, texVolumeData.SampleLevel(linearTexSampler, posData, 0));
+        posData += sampleStep;
+    }
+    return float4(maxSampleValue, maxSampleValue, maxSampleValue, 1.0);
+}
+
+//--------------------------------------------------------------------------------------
+// Ray Casting Setup Pixel Shader - intended for producing debug images
+// - cube front-faces (ray entry position)
+// - cube back-faces  (ray exit position)
+// - ray direction vector 
+//--------------------------------------------------------------------------------------
+float4 PS_RAYSETUP(VS_OUTPUT input) : SV_Target
+{
+    // calculate 2D texture coordinates in pixel-space for position look-up
+    float2 tex = input.Pos.xy * canvasPixResolution;
+    // lookup ray entry end exit position in respective 2D textures
+    float3 posRayEntry = (float3)texCubeFrontFaces.SampleLevel(linearTexSampler, tex, 0);
+    float3 posRayExit = (float3)texCubeBackFaces.SampleLevel(linearTexSampler, tex, 0);
+
+    float4 fragmentColor = float4(1.0, 1.0, 1.0, 1.0);
+    
+    // shade fragment color depending on debug shader mode ...
+    if (1 == raySetupRenderMode)
+    {
+        fragmentColor = float4(posRayEntry, 1.0);
+    }
+    else if (2 == raySetupRenderMode)
+    {
+        fragmentColor = float4(posRayExit, 1.0);
+    }
+    else
+    {
+        fragmentColor = float4(posRayExit - posRayEntry, 1.0);
+    }
+    
+    return fragmentColor;
+}
+```
+
+### D3DVolumeRaycaster/RaySetupPass.cpp
+```
+//------------------------------------------------------------------------------------------------------
+//
+// Project: Direct3D 11 based Volume Ray-Caster (3D MIP rendering mode)
+//    File: RaySetupPass.cpp
+// Version: 1.0
+//  Author: B. Kidalka
+//    Date: 2024-02-13
+//
+//    Lang: C++
+//
+// Descrip: implementation of RaySetupPass functionality.
+//
+//------------------------------------------------------------------------------------------------------
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+//
+//------------------------------------------------------------------------------------------------------
+
+#include "stdafx.h"
+#include "RaySetupPass.h"
+
+using namespace DirectX;
+
+namespace D3D11_VOLUME_RAYCASTER
+{
+    //------------------------------------------------------------------------------------------------------
+    // Default constructor
+    //------------------------------------------------------------------------------------------------------
+    RaySetupPass::RaySetupPass()
+    {
+    }
+
+    //------------------------------------------------------------------------------------------------------
+    // Destructor
+    //------------------------------------------------------------------------------------------------------
+    RaySetupPass::~RaySetupPass()
+    {
+    }
+
+    //------------------------------------------------------------------------------------------------------
+    // Create Vertex-Shader, Pixel-Shader and input layout objects
+    //------------------------------------------------------------------------------------------------------
+    bool RaySetupPass::createShaderObjectsAndInputLayout(ID3D11Device* pD3DDevice)
+    {
+        HRESULT hr = S_OK;
+
+        // compile the vertex shader
+        ID3DBlob* pVSBlob = nullptr;
+        hr = CompileShaderFromFile(L"RaySetupShader.fx", "VS", "vs_5_0", &pVSBlob);
+        if (FAILED(hr))
+        {
+            MessageBox(
+                nullptr,
+                L"The FX file RaySetupShader.fx cannot be compiled.  Please run this executable from the directory that contains the FX file.",
+                L"Error",
+                MB_OK
+            );
+            return false;
+        }
+
+        // create the vertex shader
+        hr = pD3DDevice->CreateVertexShader(pVSBlob->GetBufferPointer(), pVSBlob->GetBufferSize(), nullptr, &pRaySetupVertexShader_);
+        if (FAILED(hr))
+        {
+            SAFE_RELEASE(pVSBlob);
+            return false;
+        }
+
+        // define the input layout
+        D3D11_INPUT_ELEMENT_DESC layoutDesc[] =
+        {
+            { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0 }
+        };
+        UINT numElements = ARRAYSIZE(layoutDesc);
+
+        // create the input layout
+        hr = pD3DDevice->CreateInputLayout(
+            layoutDesc,
+            numElements,
+            pVSBlob->GetBufferPointer(),
+            pVSBlob->GetBufferSize(),
+            &pRaySetupVertexLayout_
+        );
+        SAFE_RELEASE(pVSBlob);
+        if (FAILED(hr))
+        {
+            return false;
+        }
+
+        // compile the pixel shader
+        ID3DBlob* pPSBlob = nullptr;
+        hr = CompileShaderFromFile(L"RaySetupShader.fx", "PS", "ps_5_0", &pPSBlob);
+        if (FAILED(hr))
+        {
+            MessageBox(
+                nullptr,
+                L"The FX file RaySetupShader.fx cannot be compiled.  Please run this executable from the directory that contains the FX file.",
+                L"Error",
+                MB_OK);
+            return false;
+        }
+
+        // create the pixel shader
+        hr = pD3DDevice->CreatePixelShader(pPSBlob->GetBufferPointer(), pPSBlob->GetBufferSize(), nullptr, &pRaySetupPixelShader_);
+        SAFE_RELEASE(pPSBlob);
+        if (FAILED(hr))
+        {
+            return false;
+        }
+        
+        return true;
+    }
+
+    //------------------------------------------------------------------------------------------------------
+    // Create constant buffers used to pass uniform data to the shader stages
+    //------------------------------------------------------------------------------------------------------
+    bool RaySetupPass::createConstantBuffers(ID3D11Device* pD3DDevice)
+    {
+        HRESULT hr = S_OK;
+        
+        // create constant buffer for shader parameter
+        D3D11_BUFFER_DESC bufferDsc = { 0 };
+        bufferDsc.Usage = D3D11_USAGE_DEFAULT;
+        bufferDsc.ByteWidth = sizeof(ConstantBuffer);
+        bufferDsc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        bufferDsc.CPUAccessFlags = 0;
+        hr = pD3DDevice->CreateBuffer(&bufferDsc, NULL, &pConstantBuffer_);
+        if (FAILED(hr))
+        {
+            return false;
+        }
+
+        return true;
+    }
+    
+    //------------------------------------------------------------------------------------------------------
+    // Create rasterizer state objects for back- and front-face culling
+    //------------------------------------------------------------------------------------------------------
+    bool RaySetupPass::createRasterizerStates(ID3D11Device* pD3DDevice)
+    {
+        HRESULT hr = S_OK;
+
+        // create rasterizer state for back-face culling
+        D3D11_RASTERIZER_DESC rasterStateDsc;
+        ZeroMemory(&rasterStateDsc, sizeof(rasterStateDsc));
+        rasterStateDsc.FillMode = D3D11_FILL_SOLID;
+        rasterStateDsc.CullMode = D3D11_CULL_BACK;
+        rasterStateDsc.DepthClipEnable = true;
+        hr = pD3DDevice->CreateRasterizerState(&rasterStateDsc, &pCullBackRasterizerState_);
+        if (FAILED(hr))
+        {
+            return false;
+        }
+
+        // create raterizer state for front-face culling
+        ZeroMemory(&rasterStateDsc, sizeof(rasterStateDsc));
+        rasterStateDsc.FillMode = D3D11_FILL_SOLID;
+        rasterStateDsc.CullMode = D3D11_CULL_FRONT;
+        rasterStateDsc.DepthClipEnable = true;
+        hr = pD3DDevice->CreateRasterizerState(&rasterStateDsc, &pCullFrontRasterizerState_);
+        if (FAILED(hr))
+        {
+            return false;
+        }
+        
+        return true;
+    }
+    
+    //------------------------------------------------------------------------------------------------------
+    // create texture and corresponding sampler state objects
+    //------------------------------------------------------------------------------------------------------
+    bool RaySetupPass::createTextureResources(ID3D11Device* pD3DDevice, UINT canvasWidth, UINT canvasHeight)
+    {
+        HRESULT hr = S_OK;
+
+        // create 2D texture resources for back- and front-faces
+        D3D11_TEXTURE2D_DESC texDsc = { 0 };
+        texDsc.ArraySize = 1;
+        texDsc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        texDsc.Usage = D3D11_USAGE_DEFAULT;
+        texDsc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+        texDsc.Width = canvasWidth;
+        texDsc.Height = canvasHeight;
+        texDsc.MipLevels = 1;
+        texDsc.SampleDesc.Count = 1;
+        texDsc.CPUAccessFlags = 0;
+
+        for (int idx = 0; idx < 2; idx++)
+        {
+            // create 2D texture
+            hr = pD3DDevice->CreateTexture2D(&texDsc, nullptr, &texCubeFaces_[idx]);
+            if (FAILED(hr))
+            {
+                return false;
+            }
+            // create shader resource view
+            hr = pD3DDevice->CreateShaderResourceView(texCubeFaces_[idx], nullptr, &texCubeFacesRV_[idx]);
+            if (FAILED(hr))
+            {
+                return false;
+            }
+            // create render target view
+            hr = pD3DDevice->CreateRenderTargetView(texCubeFaces_[idx], nullptr, &texCubeFacesRTV_[idx]);
+            if (FAILED(hr))
+            {
+                return false;
+            }
+        }
+        
+        return true;
+    }
+
+    //------------------------------------------------------------------------------------------------------
+    // Initialize ray setup pass renderer - create Direct3D resources
+    //------------------------------------------------------------------------------------------------------
+    bool RaySetupPass::Initialize(ID3D11Device* pD3DDevice, UINT canvasWidth, UINT canvasHeight)
+    {
+        assert(pD3DDevice);
+        assert(canvasWidth > 0);
+        assert(canvasHeight > 0);
+        
+        // create vertex-shader, pixel-shader and input layout
+        if (!createShaderObjectsAndInputLayout(pD3DDevice)) return false;
+        
+        // create constant buffers used for passing uniform data to shader stages
+        if (!createConstantBuffers(pD3DDevice)) return false;
+
+        // create needed rasterizer state objects for culling
+        if (!createRasterizerStates(pD3DDevice)) return false;
+        
+        // create all textures with corresponding sampler states
+        if (!createTextureResources(pD3DDevice, canvasWidth, canvasHeight)) return false;
+        
+        return true;
+    }
+
+    //------------------------------------------------------------------------------------------------------
+    // Release all allocated resources 
+    //------------------------------------------------------------------------------------------------------
+    void RaySetupPass::Release()
+    {
+        SAFE_RELEASE(pConstantBuffer_);
+        SAFE_RELEASE(pCullFrontRasterizerState_);
+        SAFE_RELEASE(pCullBackRasterizerState_);
+
+        for (int idx = 0; idx < 2; idx++)
+        {
+            SAFE_RELEASE(texCubeFacesRTV_[idx]);
+            SAFE_RELEASE(texCubeFacesRV_[idx]);
+            SAFE_RELEASE(texCubeFaces_[idx]);
+        }
+
+        SAFE_RELEASE(pRaySetupPixelShader_);
+        SAFE_RELEASE(pRaySetupVertexLayout_);
+        SAFE_RELEASE(pRaySetupVertexShader_);
+    }
+
+    //------------------------------------------------------------------------------------------------------
+    // Update hook (timing, animation, ...)
+    //------------------------------------------------------------------------------------------------------
+    void RaySetupPass::Update()
+    {
+        // currently nothing to do here ...
+    }
+
+    //------------------------------------------------------------------------------------------------------
+    // Render back-faces and front-faces of bounding cube to two separate 2D textures
+    //------------------------------------------------------------------------------------------------------
+    void RaySetupPass::Render(ID3D11DeviceContext* pImmediateContext, const XMMATRIX* pMatrixWVP, UINT indexCount)
+    {
+        // set vertex input layout
+        pImmediateContext->IASetInputLayout(pRaySetupVertexLayout_);
+
+        // update constant buffer - pass actual world-view-projection matrix to vertex-shader
+        ConstantBuffer cb;
+        cb.matrixWVP = *pMatrixWVP;
+        pImmediateContext->UpdateSubresource(pConstantBuffer_, 0, nullptr, &cb, 0, 0);
+
+        // set vertex shader
+        pImmediateContext->VSSetShader(pRaySetupVertexShader_, nullptr, 0);
+        pImmediateContext->VSSetConstantBuffers(0, 1, &pConstantBuffer_);
+
+        // set the pixel shader
+        pImmediateContext->PSSetShader(pRaySetupPixelShader_, nullptr, 0);
+
+        // clear render targets
+        pImmediateContext->ClearRenderTargetView(texCubeFacesRTV_[0], Colors::Black);
+        pImmediateContext->ClearRenderTargetView(texCubeFacesRTV_[1], Colors::Black);
+
+        // front-face culling (render back-faces of cube == ray exit positions)
+        pImmediateContext->RSSetState(pCullFrontRasterizerState_);
+        pImmediateContext->OMSetRenderTargets(1, &texCubeFacesRTV_[1], nullptr);
+        pImmediateContext->DrawIndexed(indexCount, 0, 0);
+
+        // back-face culling (render front-faces of cube == ray entry positions)
+        pImmediateContext->RSSetState(pCullBackRasterizerState_);
+        pImmediateContext->OMSetRenderTargets(1, &texCubeFacesRTV_[0], nullptr);
+        pImmediateContext->DrawIndexed(indexCount, 0, 0);
+    }
+
+    //------------------------------------------------------------------------------------------------------
+    // Resize handler - recreates texture resources and render targets 
+    //------------------------------------------------------------------------------------------------------
+    bool RaySetupPass::OnResize(ID3D11Device* pD3DDevice, UINT canvasWidth, UINT canvasHeight)
+    {
+        assert(pD3DDevice);
+        assert(canvasWidth > 0);
+        assert(canvasHeight > 0);
+
+        // don't forget to release texture resources before re-creation is initiated!
+        for (int idx = 0; idx < 2; idx++)
+        {
+            SAFE_RELEASE(texCubeFacesRTV_[idx]);
+            SAFE_RELEASE(texCubeFacesRV_[idx]);
+            SAFE_RELEASE(texCubeFaces_[idx]);
+        }
+
+        // re-create textures and render targets with new canvas dimensions
+        bool bRetVal = createTextureResources(pD3DDevice, canvasWidth, canvasHeight);
+
+        return bRetVal;
+    }
+    
+    //------------------------------------------------------------------------------------------------------
+    // Get resource views to front-face and back-face texture
+    //------------------------------------------------------------------------------------------------------
+    void RaySetupPass::GetTextureResourceViews(ID3D11ShaderResourceView *texCubeFacesRV[2])
+    {
+        texCubeFacesRV[0] = texCubeFacesRV_[0];
+        texCubeFacesRV[1] = texCubeFacesRV_[1];
+    }
+}
+```
+
+### D3DVolumeRaycaster/RaySetupPass.h
+```
+//------------------------------------------------------------------------------------------------------
+//
+// Project: Direct3D 11 based Volume Ray-Caster (3D MIP rendering mode)
+//    File: RaySetupPass.h
+// Version: 1.0 
+//  Author: B. Kidalka
+//    Date: 2024-02-13
+//
+//    Lang: C++
+//
+// Descrip: include file for implementation of RaySetupPass functionality. Renders cube back-faces and 
+//          front-faces to separate render targets, which are then used to calculate ray direction
+//          for the ray casting pass.
+//
+//------------------------------------------------------------------------------------------------------
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+//
+//------------------------------------------------------------------------------------------------------
+#pragma once
+
+#include "stdafx.h"
+
+namespace D3D11_VOLUME_RAYCASTER
+{
+    // constant buffer for passing data to HLSL vertex- and pixel-shader
+    struct ConstantBuffer
+    {
+        DirectX::XMMATRIX matrixWVP;    // concatenated world-view-projection matrix
+    };
+
+    class RaySetupPass
+    {
+    public:
+        // constructor / desctructor
+        RaySetupPass();
+        virtual ~RaySetupPass();
+
+        // avoid usage of copy constructor and =operator ...
+        RaySetupPass(RaySetupPass const&) = delete;
+        RaySetupPass& operator= (RaySetupPass const&) = delete;
+
+        // initialize ray setup pass renderer - create Direct3D resources
+        bool Initialize(ID3D11Device* pD3DDevice, UINT canvasWidth, UINT canvasHeight);
+        // release all allocated resources 
+        void Release();
+        // update hook (timing, animation, ...)
+        void Update();
+        // render back-faces and front-faces of bounding cube to two separate 2D textures
+        void Render(ID3D11DeviceContext* pImmediateContext, const DirectX::XMMATRIX* pMatrixWVP, UINT indexCount);
+        // resize handler - recreates render targets 
+        bool OnResize(ID3D11Device* pD3DDevice, UINT canvasWidth, UINT canvasHeight);
+        // get resource views to front-face and back-face texture
+        void GetTextureResourceViews(ID3D11ShaderResourceView *texCubeFacesRV[2]);
+
+    private:
+
+        // create Vertex-Shader, Pixel-Shader and input layout objects
+        bool createShaderObjectsAndInputLayout(ID3D11Device* pD3DDevice);
+        // create constant buffers used to pass uniform data to the shader stages
+        bool createConstantBuffers(ID3D11Device* pD3DDevice);
+        // create rasterizer state objects for back- and front-face culling
+        bool createRasterizerStates(ID3D11Device* pD3DDevice);
+        // create texture and corresponding sampler state objects
+        bool createTextureResources(ID3D11Device* pD3DDevice, UINT canvasWidth, UINT canvasHeight);
+
+        // ------------------------------------------------------------------------------------------------------------
+
+        // constant buffer for parameter transfer to shader
+        ID3D11Buffer*				pConstantBuffer_;
+        // vertex and pixel shader for rendering back- and front-faces of cube (bounding box)
+        ID3D11VertexShader*         pRaySetupVertexShader_ = nullptr;
+        ID3D11InputLayout*          pRaySetupVertexLayout_ = nullptr;
+        ID3D11PixelShader*          pRaySetupPixelShader_ = nullptr;
+        // 2D texture resources for back- and front-faces
+        ID3D11Texture2D*			texCubeFaces_[2];
+        ID3D11ShaderResourceView*	texCubeFacesRV_[2];
+        ID3D11RenderTargetView*		texCubeFacesRTV_[2];
+        // rasterizer states
+        ID3D11RasterizerState*		pCullBackRasterizerState_ = nullptr;
+        ID3D11RasterizerState*		pCullFrontRasterizerState_ = nullptr;
+    };
+}
+```
+
+### D3DVolumeRaycaster/RaySetupShader.fx
+```
+//------------------------------------------------------------------------------------------------------
+//
+// Project: Direct3D 11 based Volume Ray-Caster (3D MIP rendering mode) 
+//    File: RaySetupShader.fx
+// Version: 1.0
+//  Author: B. Kidalka
+//    Date: 2024-02-13
+//
+//    Lang: HLSL
+//
+// Descrip: vertex- and pixel-shader for ray casting setup rendering 
+//          (render cube back-faces and front-faces textures).
+//
+//------------------------------------------------------------------------------------------------------
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+//
+//------------------------------------------------------------------------------------------------------
+
+//--------------------------------------------------------------------------------------
+// Constant Buffer Variables
+//--------------------------------------------------------------------------------------
+cbuffer ConstantBuffer : register(b0)
+{
+    matrix matrixWVP;
+}
+
+//--------------------------------------------------------------------------------------
+// Struct defining vertex shader output
+//--------------------------------------------------------------------------------------
+struct VS_OUTPUT
+{
+    float4 Pos : SV_POSITION;   // position in screenspace (pixel-space)
+    float3 Tex : TEXCOORD0;     // texture coordinates == position in model space
+};
+
+//--------------------------------------------------------------------------------------
+// Vertex Shader
+//--------------------------------------------------------------------------------------
+VS_OUTPUT VS(float4 Pos : POSITION)
+{
+    VS_OUTPUT output = (VS_OUTPUT)0;
+    output.Pos = mul(Pos, matrixWVP);
+    // shift model space coordinates (-0.5 .. 0.5) to normalized texture coordinates (0.0 .. 1.0)
+    output.Tex = Pos.xyz + float3(0.5, 0.5, 0.5);
+    return output;
+}
+
+//--------------------------------------------------------------------------------------
+// Pixel Shader
+//--------------------------------------------------------------------------------------
+float4 PS(VS_OUTPUT input) : SV_Target
+{
+    // use interpolated texture coordinates as RGB colors; set alpha channel to 1.0 (full opaque)
+    return float4(input.Tex, 1.0);
+}
+```
+
+### D3DVolumeRaycaster/stdafx.cpp
+```
+//------------------------------------------------------------------------------------------------------
+//
+// Project: Direct3D 11 based Volume Ray-Caster (3D MIP rendering mode)
+//    File: stdafx.cpp
+// Version: 1.0
+//  Author: B. Kidalka
+//    Date: 2024-02-13
+//
+//    Lang: C++
+//
+// Descrip: source file that includes just the standard includes; 
+//          D3DVolumeRaycaster.pch will be the pre-compiled header; 
+//          stdafx.obj will contain the pre-compiled type information
+//
+//------------------------------------------------------------------------------------------------------
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+//
+//------------------------------------------------------------------------------------------------------
+
+#include "stdafx.h"
+
+// NOTE: reference any additional headers you need in stdafx.h and not in this file!
+
+namespace D3D11_VOLUME_RAYCASTER
+{
+    // global utility functions ...
+
+    //------------------------------------------------------------------------------------------------------
+    // Compile HLSL shaders with D3DCompile infrastructure
+    // note : starting with Visual Studio 2012, it is possible to generate pre-compiled .cso files
+    //        (cso = compiled shader object)
+    //------------------------------------------------------------------------------------------------------
+    HRESULT CompileShaderFromFile(WCHAR* szFileName, LPCSTR szEntryPoint, LPCSTR szShaderModel, ID3DBlob** ppBlobOut)
+    {
+        HRESULT hr = S_OK;
+
+        DWORD dwShaderFlags = D3DCOMPILE_ENABLE_STRICTNESS;
+#ifdef _DEBUG
+        // Set the D3DCOMPILE_DEBUG flag to embed debug information in the shaders.
+        // Setting this flag improves the shader debugging experience, but still allows 
+        // the shaders to be optimized and to run exactly the way they will run in 
+        // the release configuration of this program.
+        dwShaderFlags |= D3DCOMPILE_DEBUG;
+
+        // Disable optimizations to further improve shader debugging
+        dwShaderFlags |= D3DCOMPILE_SKIP_OPTIMIZATION;
+#endif
+
+        ID3DBlob* pErrorBlob = nullptr;
+        hr = D3DCompileFromFile(
+            szFileName,
+            nullptr,
+            nullptr,
+            szEntryPoint,
+            szShaderModel,
+            dwShaderFlags,
+            0,
+            ppBlobOut,
+            &pErrorBlob
+        );
+        if (FAILED(hr))
+        {
+            if (pErrorBlob)
+            {
+                OutputDebugStringA(reinterpret_cast<const char*>(pErrorBlob->GetBufferPointer()));
+                SAFE_RELEASE(pErrorBlob);
+            }
+            return hr;
+        }
+        SAFE_RELEASE(pErrorBlob);
+
+        return S_OK;
+    }
+}
+```
+
+### D3DVolumeRaycaster/stdafx.h
+```
+//------------------------------------------------------------------------------------------------------
+//
+// Project: Direct3D 11 based Volume Ray-Caster (3D MIP rendering mode)
+//    File: stdafx.h
+// Version: 1.0
+//  Author: B. Kidalka
+//    Date: 2024-02-13
+//
+//    Lang: C++
+//
+// Descrip: include file for standard system include files, or project specific include files that 
+// are used frequently, but are changed infrequently
+//
+//------------------------------------------------------------------------------------------------------
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+//
+//------------------------------------------------------------------------------------------------------
+#pragma once
+
+#include "targetver.h"
+
+#define WIN32_LEAN_AND_MEAN             // exclude rarely-used stuff from Windows headers
+// Windows Header Files
+#include <windows.h>
+// DirectX SDK ... 
+#include <d3d11.h>
+#include <d3dcompiler.h>
+#include <directxmath.h>
+#include <directxcolors.h>
+// standard includes
+#include <memory>
+#include <fstream>
+
+
+namespace D3D11_VOLUME_RAYCASTER
+{
+    // macro definitions ...
+    #define SAFE_DELETE(x) { if(x) delete (x); (x) = nullptr; }
+    #define SAFE_DELETE_ARRAY(x) { if(x) delete [] (x); (x) = nullptr; }
+
+    #define SAFE_RELEASE(x) { if(x) (x)->Release(); (x) = nullptr; }
+    
+    // global utility functions ...
+
+    //------------------------------------------------------------------------------------------------------
+    // Compile HLSL shaders with D3DCompile infrastructure
+    // note : starting with Visual Studio 2012, it is possible to generate pre-compiled .cso files
+    //        (cso = compiled shader object)
+    //------------------------------------------------------------------------------------------------------
+    HRESULT CompileShaderFromFile(WCHAR* szFileName, LPCSTR szEntryPoint, LPCSTR szShaderModel, ID3DBlob** ppBlobOut);
+}
+```
+
+### D3DVolumeRaycaster/targetver.h
+```
+//------------------------------------------------------------------------------------------------------
+//
+// Project: Direct3D 11 based Volume Ray-Caster (3D MIP rendering mode)
+//    File: targetver.h
+// Version: 1.0
+//  Author: B. Kidalka
+//    Date: 2024-02-13
+//
+//    Lang: C++
+//
+// Descrip: including SDKDDKVer.h defines the highest available Windows platform.
+//
+//------------------------------------------------------------------------------------------------------
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+//
+//------------------------------------------------------------------------------------------------------
+#pragma once
+
+// If you wish to build your application for a previous Windows platform, include WinSDKVer.h and
+// set the _WIN32_WINNT macro to the platform you wish to support before including SDKDDKVer.h.
+
+#include <SDKDDKVer.h>
+```

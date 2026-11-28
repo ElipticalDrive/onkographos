@@ -1,0 +1,139 @@
+# Point-Based Neural Renderer Architecture
+
+Also called: Neural Renderer
+
+## Overview
+The Point-Based Neural Renderer is a differentiable rendering module that projects a 3D point cloud and camera pose into a 2D feature map by splatting points and blending them via alpha-compositing [S1]. It enables end-to-end training by allowing photometric and perceptual loss gradients to propagate back to optimized point attributes and network weights [S1]. Unlike methods that rely on a single input image, this architecture requires fusing multiple input views and renders each point cloud individually at target viewpoints before fusion [S1].
+
+## How it works
+**Inputs:**
+1. A set of $N$ input views, each providing a rasterized point cloud with attributes: color, depth, normal, uncertainty, and a 6-component latent feature vector [S1].
+2. Camera poses for the input views and the target novel view [S1].
+3. A set of selected input views for the target view, determined by a camera selection algorithm [S1].
+
+**Outputs:**
+1. A final rendered image (RGB) for the target novel view [S1].
+
+**Data Structures:**
+*   **Point Cloud:** A list of points $P_i$ for each view $i$, where each point stores position, color, depth, normal, uncertainty, and a 6-component latent feature vector [S1].
+*   **Rasterized View:** A 2D image grid where each pixel stores accumulated attributes from splatted points, primarily the latent feature vector extended by input color channels [S1].
+*   **Feature Map:** An intermediate representation of size $H \times W \times F$, where $H$ and $W$ are image dimensions and $F$ is the feature space dimension [S1].
+
+**Parameters:**
+*   $F$: Feature space dimension. Typical value: 64 [S1].
+*   $\lambda$: Temporal filtering adaptation rate. Typical value: 0.05 [S1].
+
+**Steps:**
+1. **Reprojection and Splatting:** For each selected input view $i$, reproject the 3D points to the 2D plane of the target novel view using point splatting [S1]. Generate attribute layers for each view containing input-view colors and optimized latent features [S1].
+2. **Encoding:** Encode each view's rasterized point cloud into a feature space of $F$ dimensions using a series of convolutional residual blocks [S1]. The weights of these convolutional blocks are shared across all input views [S1].
+3. **Weight Calculation:** Compute the final blending weight $w$ for each point/pixel contribution from view $i$ [S1]. The weight is the product of three terms:
+   $$ w = w_{CS} \cdot w_{TS} \cdot w_{PD} $$
+   where:
+   *   $w_{CS}$: Camera selection weight. If view $i$ is selected, $s_i = 1.0$; otherwise, $s_i = 0.0$ [S1].
+   *   $w_{TS}$: Temporal smoothing weight. It is updated recursively to handle temporal instability:
+       $$ w_{t,i} = \lambda s_i^t + (1.0 - \lambda) w_{t-1,i} $$
+       where $t$ is the frame index, $s_i^t$ is the selection score for view $i$ at frame $t$, and $\lambda = 0.05$ [S1].
+   *   $w_{PD}$: Point visibility weight. It accounts for point visibility and penalizes pixels at grazing angles to increase the influence of front-facing views [S1]. The exact formula for $w_{PD}$ is not given in the sources [S1].
+4. **Weighted Average Pooling:** Apply weighted average pooling to the encoded feature maps from all selected views to produce a single $F$-channel image [S1]. The pooling normalizes the sum of weights per pixel:
+   $$ \text{PooledFeature}_{x,y} = \frac{\sum_{i} w_i \cdot \text{EncodedFeature}_{i,x,y}}{\sum_{i} w_i} $$
+   This normalization ensures that changing the number of selected views does not require retraining, as the magnitude distribution of features remains stable for the decoder [S1].
+5. **Decoding:** Decode the pooled features using consecutive convolutional residual blocks to generate the final rendering [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def conv_residual(input_tensor, weights, bias):
+    """Standard 2D convolution followed by ReLU and residual addition."""
+    out = input_tensor
+    for w, b in zip(weights, bias):
+        H, W, C_in = out.shape
+        kH, kW, _, C_out = w.shape
+        new_out = [[[0.0]*C_out for _ in range(W)] for _ in range(H)]
+        for y in range(H):
+            for x in range(W):
+                for c_out in range(C_out):
+                    acc = b[c_out]
+                    for ky in range(kH):
+                        for kx in range(kW):
+                            for c_in in range(C_in):
+                                acc += out[y][x][c_in] * w[ky][kx][c_in][c_out]
+                    new_out[y][x][c_out] = acc
+        out = new_out
+        out = [[[max(0.0, v) for v in row] for row in layer] for layer in out]
+        out = [[[out[y][x][c] + input_tensor[y][x][c] for c in range(C_out)] for x in range(W)] for y in range(H)]
+    return out
+
+def point_based_neural_renderer(point_clouds, poses, target_pose, selected_indices, F=64, lambda_temp=0.05):
+    # Step 1: Splat attributes to 2D grids for each selected view
+    H, W = image_dimensions
+    rasterized = []
+    for idx in selected_indices:
+        grid = [[[0.0]*14 for _ in range(W)] for _ in range(H)]
+        for point in point_clouds[idx]:
+            x, y = project_3d_to_2d(point.position, poses[idx], target_pose)
+            if 0 <= x < W and 0 <= y < H:
+                for c in range(14):
+                    grid[y][x][c] += point.attributes[c]
+        rasterized.append(grid)
+    
+    # Step 2: Encode each view with shared convolutional residual blocks
+    shared_conv_weights = [...] # Parameters for convolutional residual blocks
+    shared_conv_bias = [...]
+    encoded = [conv_residual(view, shared_conv_weights, shared_conv_bias) for view in rasterized]
+    
+    # Step 3: Compute blending weights w = w_CS * w_TS * w_PD
+    weights = []
+    for i, idx in enumerate(selected_indices):
+        w_cs = 1.0  # Camera selection score
+        w_ts_prev = get_previous_temporal_weight(idx) # From previous frame state
+        w_ts = lambda_temp * w_cs + (1.0 - lambda_temp) * w_ts_prev
+        w_pd = compute_visibility_weight(rasterized[i]) # Visibility/grazing angle penalty (formula not given in sources) [S1]
+        weights.append(w_cs * w_ts * w_pd)
+        
+    # Step 4: Weighted average pooling per pixel
+    pooled = [[[0.0]*F for _ in range(W)] for _ in range(H)]
+    for y in range(H):
+        for x in range(W):
+            sum_features = [0.0]*F
+            sum_w = 0.0
+            for i, view in enumerate(encoded):
+                w = weights[i]
+                for c in range(F):
+                    sum_features[c] += w * view[y][x][c]
+                sum_w += w
+            if sum_w > 1e-8:
+                for c in range(F):
+                    pooled[y][x][c] = sum_features[c] / sum_w
+            else:
+                for c in range(F):
+                    pooled[y][x][c] = sum_features[c]
+    
+    # Step 5: Decode pooled features
+    dec_weights = [...] # Parameters for decoder convolutional residual blocks
+    dec_bias = [...]
+    return conv_residual(pooled, dec_weights, dec_bias)
+```
+
+**Edge Cases and Pitfalls:**
+*   **Temporal Instability:** When cameras appear or disappear, the camera selection score $s_i$ changes abruptly [S1]. This is mitigated by temporal filtering with $\lambda = 0.05$ [S1].
+*   **Grazing Angles:** Pixels at grazing angles have lower visibility [S1]. The weight $w_{PD}$ penalizes these pixels to increase the influence of front-facing views [S1].
+*   **Variable View Count:** Changing the number of selected views does not require retraining because the weighted average pooling normalizes the sum of weights per pixel [S1].
+
+## Subtopics
+
+### [Neural Point Cloud Renderer](13165-neural-point-cloud-renderer.md)
+A differentiable rendering module that projects a 3D point cloud and camera pose into a 2D feature map by splatting points and blending them via alpha-compositing. It solves the problem of generating geometrically consistent feature maps for novel view synthesis by allowing photometric and perceptual loss gradients to propagate back to point positions and features during end-to-end training. Unlike SynSin, which relies on a single input image, this method requires fusing multi-view inputs, rendering each point cloud individually at target viewpoints before fusion. Choose it when generating novel views from a set of input images with known camera poses and a point cloud representation of the scene.
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources [S1].
+*   **Memory Complexity:** Not given in the sources [S1].
+*   **Strengths:** Improved temporal stability compared to previous neural renderers [S1]. Allows changing the number of selected views without retraining [S1].
+*   **Limitations:** Requires multi-view inputs [S1]. The exact formula for $w_{PD}$ is not given in the sources [S1].
+*   **When to use:** When generating novel views from a set of input images with known camera poses and a point cloud representation of the scene [S1].
+
+## Background
+The Point-Based Neural Renderer was introduced in "Point-Based Neural Rendering with Per-View Optimization" [S1]. The method was developed to address the limitations of previous neural renderers, such as temporal instability and the need for retraining when the number of input views changes [S1].
+
+## Sources
+[S1] Point-Based Neural Rendering with Per-View Optimization, https://www.youtube.com/watch?v=TupOewenSAk, fetched 2026-10-31

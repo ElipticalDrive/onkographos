@@ -1,0 +1,114 @@
+--- v003.md
++++ v004.md
+@@ -1,8 +1,5 @@
+ # Warp-Level Culling for Efficient Blending in 3D Gaussian Splatting
+-
+-
+ ## Overview
+ An optimization for the 3D Gaussian Splatting (3DGS) alpha blending stage that uses warp-level collaboration to subdivide image tiles and cull splats with no geometric overlap, avoiding expensive alpha evaluation [S1]. It improves rendering speed without changing the rendered output, implemented in the existing CUDA differentiable pipeline [S1]. Unlike sibling methods that optimize bounding volumes, this method focuses on geometric culling within the blending kernel to reduce the number of blending operations [S1].
+-
+ ## How it works
+ **Inputs and Outputs:**
+@@ -11,7 +8,7 @@
+ 
+ **Data Structures:**
+-*   **Gaussian Batch:** A contiguous array of Gaussian primitives. Each Gaussian contains screen-space center $(u, v)$, covariance matrix elements (or eigenvalues/vectors), opacity $\alpha$, and color coefficients [G].
+-*   **Tile Data:** A 2D grid of tiles covering the image. Each tile contains a list of assigned splats [G].
+-*   **Shared Memory:** Used to store the current batch of splats (size 256 splats) and rearranged data for optimized shared memory access [S1].
++*   **Gaussian Batch:** A contiguous array of Gaussian primitives processed in batches of 256 splats [S1].
++*   **Tile Data:** A 2D grid of tiles covering the image, where each tile contains a list of assigned splats [S1].
++*   **Shared Memory:** Used to store the current batch of splats and rearranged data for optimized shared memory access [S1].
+ 
+ **Algorithm Steps:**
+@@ -20,12 +17,12 @@
+ 1.  **Preprocessing:** The `preprocess_cu` kernel selects relevant 3D Gaussians and projects them into screen space as 2D splats [S1].
+ 2.  **Depth Sorting:** Splats are sorted by distance to the camera using CUB Device Radix Sort [S1].
+-3.  **Instancing:** The image is divided into tiles, and splats are duplicated into each tile they overlap. During this stage, a coarse culling is performed: the splat’s maximum opacity is computed in each assigned tile. If the opacity is below the minimum contribution threshold (8-bit RGB value of 1256), the splat is culled from that tile [S1].
++3.  **Instancing:** The image is divided into tiles, and splats are duplicated into each tile they overlap [S1]. During this stage, a coarse culling is performed: the splat’s maximum opacity is computed in each assigned tile [S1]. If the opacity is below the minimum contribution threshold (8-bit RGB value of 1256), the splat is culled from that tile [S1].
+ 4.  **Blend (Warp-Level Culling):** The `blend_cu` kernel performs alpha-over compositing [S1].
+-    *   **Tile Subdivision:** Each image tile (e.g., 16×16 pixels) is subdivided into sub-tiles. A GPU thread block is mapped to a tile, and warps within that block collaborate to process sub-tiles [S1].
+-    *   **Geometric Culling:** For each sub-tile, the warp checks if any splats in the current batch have geometric overlap with the sub-tile's pixel region. Splats with no geometric overlap are culled, avoiding the expensive alpha evaluation and compositing for those pixels [S1].
++    *   **Tile Subdivision:** Each image tile (e.g., 16×16 pixels) is subdivided into sub-tiles [S1]. A GPU thread block is mapped to a tile, and warps within that block collaborate to process sub-tiles [S1].
++    *   **Geometric Culling:** For each sub-tile, the warp checks if any splats in the current batch have geometric overlap with the sub-tile's pixel region [S1]. Splats with no geometric overlap are culled, avoiding the expensive alpha evaluation and compositing for those pixels [S1].
+     *   **Alpha-Over Compositing:** For remaining splats, the standard alpha-over formula is applied:
+         $$ C_{out} = C_{in} (1 - \alpha_{splat}) + C_{splat} \alpha_{splat} $$
+         $$ \alpha_{out} = \alpha_{in} (1 - \alpha_{splat}) + \alpha_{splat} $$
+-    *   **Batch Processing:** Splat data is processed in batches of 256 splats. Each batch is processed in two synchronization-fenced stages: fetching from DRAM and rendering [S1].
++    *   **Batch Processing:** Splat data is processed in batches of 256 splats [S1]. Each batch is processed in two synchronization-fenced stages: fetching from DRAM and rendering [S1].
+     *   **Data Rearrangement:** Splat data is rearranged into optimized structures for shared memory access to improve throughput [S1].
+ 
+@@ -48,5 +45,4 @@
+     sub_tile_x = (warp_id % WARPS_PER_TILE) * SUB_TILE_W
+     sub_tile_y = (warp_id // WARPS_PER_TILE) * SUB_TILE_H
+-    sub_tile_bounds = (sub_tile_x, sub_tile_y, SUB_TILE_W, SUB_TILE_H)
+ 
+     tile_color = [0.0, 0.0, 0.0]
+@@ -54,36 +50,24 @@
+ 
+     for batch in splat_batches:
+-        # Stage 1: Fetch batch from DRAM
+-        splat_data = batch
++        # Stage 1: Fetch batch from DRAM into shared memory
++        splat_data = batch  # Array of 256 splats
+ 
+         # Stage 2: Render with warp-level geometric culling
+-        valid_splats = []
+         for i in range(len(splat_data)):
+-            # Sources do not specify the exact geometric overlap formula.
+-            # Standard implementation checks if the 2D Gaussian's bounding box
+-            # intersects the sub-tile's pixel region.
+-            if gaussian_overlaps_region(splat_data[i], sub_tile_bounds):
+-                valid_splats.append(splat_data[i])
+-
+-        for splat in valid_splats:
+-            a = splat.opacity
+-            c = splat.color
+-            tile_color = [
+-                tile_color[0] * (1.0 - a) + c[0] * a,
+-                tile_color[1] * (1.0 - a) + c[1] * a,
+-                tile_color[2] * (1.0 - a) + c[2] * a
+-            ]
+-            tile_alpha = tile_alpha * (1.0 - a) + a
++            splat = splat_data[i]
++            # Sources do not specify the exact geometric overlap formula;
++            # standard implementation checks bounding box intersection [G].
++            cx, cy = splat.center
++            sx, sy = splat.scale
++            if abs(cx - (sub_tile_x + SUB_TILE_W / 2)) <= sx + SUB_TILE_W / 2 and \
++               abs(cy - (sub_tile_y + SUB_TILE_H / 2)) <= sy + SUB_TILE_H / 2:
++                a = splat.opacity
++                c = splat.color
++                tile_color[0] = tile_color[0] * (1.0 - a) + c[0] * a
++                tile_color[1] = tile_color[1] * (1.0 - a) + c[1] * a
++                tile_color[2] = tile_color[2] * (1.0 - a) + c[2] * a
++                tile_alpha = tile_alpha * (1.0 - a) + a
+ 
+     write_tile_to_framebuffer(tile_id, tile_color, tile_alpha)
+-
+-def gaussian_overlaps_region(splat, bounds):
+-    # Sources do not specify the exact geometric overlap formula.
+-    # Standard implementation checks if the 2D Gaussian's bounding box
+-    # intersects the sub-tile's pixel region.
+-    cx, cy = splat.center
+-    sx, sy = splat.scale
+-    bx, by, bw, bh = bounds
+-    return abs(cx - bx) < sx + bw / 2 and abs(cy - by) < sy + bh / 2
+ 
+ def write_tile_to_framebuffer(tile_id, color, alpha):
+@@ -95,11 +79,11 @@
+ 
+ ### [GEMM-GS Blending](15814-gemm-gs-blending.md)
+-GEMM-GS is a rendering optimization for 3D Gaussian Splatting (3DGS) that reformulates the opacity computation into a General Matrix Multiplication (GEMM) compatible dot-product form to leverage GPU Tensor Cores.
++GEMM-GS is a rendering optimization for 3D Gaussian Splatting (3DGS) that reformulates the opacity computation into a General Matrix Multiplication (GEMM) compatible dot-product form to leverage GPU Tensor Cores. Unlike [Warp-Level Culling for Efficient Blending in 3D Gaussian Splatting](12278-warp-level-culling-for-efficient-blending-in-3d-gaussian-spl.md), which focuses on geometric culling to reduce the number of blending operations, GEMM-GS accelerates the remaining blending computations themselves. Choose it when Tensor Core utilization is the bottleneck rather than memory bandwidth or culling overhead.
+ 
+ ## Operating characteristics
+-*   **Performance:** On NVIDIA RTX 4090, the method is up to 19% faster than Faster-GS. On NVIDIA RTX 2070 Super, the method is up to 32% faster. Across all tested GPUs (RTX 4090, RTX 3090, RTX 2070 Super), the changes reduce frame time over Faster-GS by 17% (+20% FPS) on average (geometric mean). On the RTX 2070 Super specifically, the frame time reduction is up to 24% (+32% FPS) [S1].
+-*   **Complexity:** The baseline alpha-blending GPU kernel (Faster-GS) performs two to three times slower than the optimistic theoretical bound. This method reduces that gap by eliminating redundant computations [S1].
+-*   **Strengths:** Maintains identical visual fidelity and differentiability as the original 3DGS implementation. It stays within the CUDA differentiable framework, unlike methods such as PUP 3D-GS, Sort-Free Gaussians, or VKRayGS which sacrifice image quality or differentiability [S1].
+-*   **Limitations:** Requires modification of the standard CUDA pipeline. Performance gains are hardware-dependent (tested on NVIDIA RTX 4090, 3090, 2070 Super) [S1].
++*   **Performance:** On NVIDIA RTX 4090, the method is up to 19% faster than Faster-GS [S1]. On NVIDIA RTX 2070 Super, the method is up to 32% faster [S1]. Across all tested GPUs (RTX 4090, RTX 3090, RTX 2070 Super), the changes reduce frame time over Faster-GS by 17% (+20% FPS) on average (geometric mean) [S1]. On the RTX 2070 Super specifically, the frame time reduction is up to 24% (+32% FPS) [S1].
++*   **Complexity:** The baseline alpha-blending GPU kernel (Faster-GS) performs two to three times slower than the optimistic theoretical bound [S1]. This method reduces that gap by eliminating redundant computations [S1].
++*   **Strengths:** Maintains identical visual fidelity and differentiability as the original 3DGS implementation [S1]. It stays within the CUDA differentiable framework, unlike methods such as PUP 3D-GS, Sort-Free Gaussians, or VKRayGS which sacrifice image quality or differentiability [S1].
++*   **Limitations:** Requires modification of the standard CUDA pipeline [S1]. Performance gains are hardware-dependent (tested on NVIDIA RTX 4090, 3090, 2070 Super) [S1].
+ 
+ ## Background

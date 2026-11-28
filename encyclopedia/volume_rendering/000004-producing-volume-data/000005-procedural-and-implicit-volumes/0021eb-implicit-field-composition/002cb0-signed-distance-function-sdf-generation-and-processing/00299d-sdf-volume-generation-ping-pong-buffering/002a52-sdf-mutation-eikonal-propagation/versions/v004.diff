@@ -1,0 +1,164 @@
+--- v003.md
++++ v004.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-SDF Mutation & Eikonal Propagation is a method for interactively modifying a Signed Distance Field (SDF) volume using spatial brushes (additive or subtractive) while maintaining the geometric validity of the distance field. It solves the problem of topological changes and local deformations in implicit volumes by combining ray-casted brush intersection with a local Eikonal equation solver to re-distances the affected region. It sets itself apart from fixed-resolution sculpting by allowing local refinement without global re-meshing, and from naive distance updates by ensuring the output remains a true distance field ($|\nabla d| \approx 1$) through Eikonal propagation [S1, S2, unofficial].
++SDF Mutation & Eikonal Propagation is a method for interactively modifying a Signed Distance Field (SDF) volume using spatial brushes (additive or subtractive) while maintaining the geometric validity of the distance field [S1, unofficial]. It solves the problem of topological changes and local deformations in implicit volumes by combining ray-casted brush intersection with a local Eikonal equation solver to re-distances the affected region [S1, unofficial]. It sets itself apart from fixed-resolution sculpting by allowing local refinement without global re-meshing, and from naive distance updates by ensuring the output remains a true distance field ($|\nabla d| \approx 1$) through Eikonal propagation [S1, S2, unofficial].
+ 
+ ## How it works
+@@ -12,17 +12,14 @@
+ 
+ **Data Structures:**
+-- `_sdfTexIn`, `_sdfTexOut`: 3D textures (e.g., `RWTexture3D<float>` or `Texture3D<float>`) storing the signed distance values. Layout is typically linearized 3D grid coordinates [S1, unofficial].
+-- `_mouseOrigin`, `_mouseDir`: `float4` (x,y,z,w) where xyz is the origin/direction and w is unused or padding [S1, unofficial].
+-- `_brushSize`, `_brushHeight`: `float` values defining the spatial extent and intensity of the mutation [S1, unofficial].
++- `_sdfTexIn`, `_sdfTexOut`: 3D textures (`RWTexture3D<float>` or `Texture3D<float>`) storing signed distance values [S1, unofficial].
++- `_mouseOrigin`, `_mouseDir`: `float4` where xyz is the origin/direction and w is padding [S1, unofficial].
++- `_brushSize`, `_brushHeight`: `float` values defining spatial extent and intensity [S1, unofficial].
+ 
+ **Steps:**
+-1. **Ray Casting:** Cast a ray from the camera through the mouse position to determine the interaction point in world space [S1, unofficial].
+-   ```python
+-   ray = MainCamera.ScreenPointToRay(Mouse.current.position.ReadValue())
+-   ```
+-2. **Parameter Setup:** Set mutation flags based on interaction mode. `_mouseAdd` is true for mode 0 (add), `_mouseSubtract` for mode 1 (subtract). Pass ray origin/direction as `_mouseOrigin` and `_mouseDir` [S1, unofficial].
+-3. **Kernel Dispatch:** Dispatch the `SDFMutate` compute kernel. The kernel reads from `_sdfTexIn`, applies the ray/brush mutation, and writes to `_sdfTexOut` [S1, unofficial].
+-4. **Eikonal Propagation (Optional):** If `_doEikonel` is true (i.e., `_eikonelPasses > 0`), the kernel propagates distance values outward from the mutated region to restore the distance field property [S1, unofficial].
+-5. **Decrement Passes:** Decrement `_eikonelPasses` after each dispatch. The loop continues until `_eikonelPasses` reaches zero, ensuring the carved volume is fully filled with correct distance values [S1, unofficial].
++1. Cast a ray from the camera through the mouse position to determine the interaction point in world space [S1, unofficial].
++2. Set mutation flags based on interaction mode: `_mouseAdd` is true when mode == 0, `_mouseSubtract` is true when mode == 1. Pass ray origin/direction as `_mouseOrigin` and `_mouseDir` [S1, unofficial].
++3. Pass brush parameters to the compute shader: `_brushSize`, `_brushHeight`, and `_doEikonel` (true when `_eikonelPasses > 0`) [S1, unofficial].
++4. Dispatch the `SDFMutate` kernel. The kernel reads from `_sdfTexIn`, applies the ray/brush mutation, and writes to `_sdfTexOut`. If `_doEikonel` is true, the kernel propagates distance values outward [S1, unofficial].
++5. Decrement `_eikonelPasses` after each dispatch. When subtraction ends, the loop continues until `_eikonelPasses` reaches zero, ensuring the carved volume is fully filled with correct distance values [S1, unofficial].
+ 
+ **Formulas:**
+@@ -37,8 +34,8 @@
+ 3D Eikonal:
+ $$ e_{3d}(u, g) = \frac{1}{3} \left( (u_x + u_y + u_z) + \sqrt{(u_x + u_y + u_z)^2 - 3(u_x^2 + u_y^2 + u_z^2 - g^2)} \right) $$
+-Valid only if the discriminant $d \ge 0$. If not, fallback to 2D solutions [S1, unofficial].
++Valid only if the discriminant $d \ge 0$ [S1, unofficial]. If $d < 0$, the solver falls back to 2D solutions [S1, unofficial].
+ 
+ **Parameters:**
+-- `MAX_RAYMARCH_STEPS`: Integer, maximum steps for raymarching in the renderer. Passed to both compute and fragment shaders [S1, unofficial].
++- `MAX_RAYMARCH_STEPS`: Integer, maximum number of steps allowed during raymarching in the renderer [S1, unofficial].
+ - `_brushSize`, `_brushHeight`: Float, brush dimensions and intensity [S1, unofficial].
+ - `_eikonelPasses`: Integer, number of passes for Eikonal propagation [S1, unofficial].
+@@ -51,14 +48,25 @@
+ **Pseudocode:**
+ ```python
+-# SDFMutate Kernel Pseudocode
+-# Inputs: _sdfTexIn, _sdfTexOut, _mouseOrigin, _mouseDir, _brushSize, _brushHeight, _mouseAdd, _mouseSubtract, _doEikonel
++# Global shader constants (set by host)
++_sdfTexIn = None
++_sdfTexOut = None
++_mouseOrigin = float4(0, 0, 0, 0)
++_mouseDir = float4(0, 0, 0, 0)
++_brushSize = 0.0
++_brushHeight = 0.0
++_mouseAdd = False
++_mouseSubtract = False
++_doEikonel = False
++texture_width = 0
++texture_height = 0
++texture_depth = 0
++texture_size = int3(texture_width, texture_height, texture_depth)
+ 
+ def kernelToUV(kernel):
+-    # Convert 3D kernel index to 3D UV coordinate
+-    return float3(kernel.x / textureWidth, kernel.y / textureHeight, kernel.z / textureDepth)
++    return float3(kernel.x / texture_width, kernel.y / texture_height, kernel.z / texture_depth)
+ 
+ def sdfUV(uv):
+-    # Sample SDF texture at UV
+-    return _sdfTexIn[int3(uv * textureSize)]
++    idx = int3(uv * texture_size)
++    return _sdfTexIn[idx]
+ 
+ def eikonal1d(h, v, g):
+@@ -76,5 +84,5 @@
+     n = 3.0
+     d = (xyz * xyz) - n * ((u.x * u.x + u.y * u.y + u.z * u.z) - (g * g))
+-    if d < 0:
++    if d < 0.0:
+         return False, 0.0
+     e = (1.0 / n) * (xyz + sqrt(d))
+@@ -97,34 +105,30 @@
+     return min(a, b)
+ 
+-[numthreads(8, 8, 8)]
++def is_affected_by_brush(uv, origin, direction, radius):
++    # Ray-box intersection or distance-to-ray check.
++    # Source implies this logic determines voxel inclusion [G]
++    return True  # Placeholder for ray/brush intersection logic
++
+ def SDFMutate(id):
+     uv = kernelToUV(id)
+-    currentDist = sdfUV(uv)
+-    
+-    # Check if voxel is within brush influence
+-    # Simplified: assume ray intersection logic determines if voxel is affected
+-    # In practice, this involves ray-box intersection and distance to ray
+-    
+-    if isAffectedByBrush(uv, _mouseOrigin, _mouseDir, _brushSize):
++    current_dist = sdfUV(uv)
++
++    if is_affected_by_brush(uv, _mouseOrigin, _mouseDir, _brushSize):
+         if _mouseAdd:
+-            # Additive mutation: reduce distance (bring surface closer)
+-            currentDist = max(currentDist - _brushHeight, 0.0) # Or specific additive logic
++            current_dist = max(current_dist - _brushHeight, 0.0)
+         elif _mouseSubtract:
+-            # Subtractive mutation: increase distance (carve out)
+-            currentDist = currentDist + _brushHeight
+-            
++            current_dist = current_dist + _brushHeight
++
+     if _doEikonel:
+-        # Propagate distance using Eikonal solver
+-        # Neighbors are needed for Eikonal calculation
+-        # Simplified: use neighborMin for 1D approximation or full 3D neighbors
+-        # Full implementation requires accessing 26 neighbors
+-        # For brevity, assume eikonal function handles neighbor access internally or via pre-computed neighbors
+-        # Here we simulate the call structure from [S1, unofficial]
+-        # Note: Actual implementation requires careful neighbor indexing
+-        pass # Placeholder for complex neighbor access logic not fully detailed in source
+-        
+-    _sdfTexOut[id] = currentDist
++        # Standard 3D Eikonal requires distances from 26 neighbors.
++        # The source uses a recursive 3D->2D->1D fallback pattern.
++        # We approximate neighbor access for the pseudocode structure.
++        neighbors = [sdfUV(kernelToUV(id + delta)) for delta in [(-1,0,0), (1,0,0), (0,-1,0), (0,1,0), (0,0,-1), (0,0,1)]]
++        # Full implementation requires all 26 neighbors; source implies this pattern [G]
++        eikonal_dist = eikonal(float3(neighbors[0], neighbors[1], neighbors[2]), _brushSize)
++        current_dist = min(current_dist, eikonal_dist)
++
++    _sdfTexOut[id] = current_dist
+ ```
+-*Note: The pseudocode above simplifies the neighbor access for Eikonal propagation. The source [S1, unofficial] provides the Eikonal formulas but implies a full 3D neighbor access pattern which is complex to write out fully without specific indexing helpers. The core logic of mutation and Eikonal application is preserved.*
+ 
+ ## Subtopics
+@@ -134,15 +138,15 @@
+ 
+ ### SDF-Native Hydraulic Erosion
+-SDF-Native Hydraulic Erosion performs hydraulic erosion directly on the implicit SDF isosurface rather than a mesh or heightmap. Droplets flow via tangent-projected gravity and Newton reprojection onto the evolving zero level set. Cuts and deposits are volumetric stamps into the distance field [S2, unofficial]. Steps include: Droplet Flow (tangent-projected gravity + Newton reprojection), Volumetric Stamping (cuts/deposits as stamps), Talus Slumping, Drainage (D8 priority-flood with jittered receivers and accumulation), and SDF Update (carved back into SDF, re-redistanced after every batch) [S2, unofficial]. The stream-power incision formula is $E = K \cdot A^m \cdot S^n$, where $E$ is erosion, $K$ is erodibility, $A$ is drainage area, and $S$ is slope [S2, unofficial]. Parameters include a Cut Budget (≤ 0.35 voxels/step, ≤ (2.5 + 6·depth) voxels/column) [S2, unofficial]. Pitfalls include waterfalls, which are bypassed during erosion simulation [S2, unofficial]. Validation in a 192×123×192 grid with 520.8 mm voxels showed max cut of 4.50 m vs a 5.21 m budget, with zero degenerate columns [S2, unofficial].
++SDF-Native Hydraulic Erosion performs hydraulic erosion directly on the implicit SDF isosurface rather than a mesh or heightmap [S2, unofficial]. Droplets flow via tangent-projected gravity and Newton reprojection onto the evolving zero level set [S2, unofficial]. Cuts and deposits are volumetric stamps into the distance field [S2, unofficial]. Steps include: Droplet Flow (tangent-projected gravity + Newton reprojection), Volumetric Stamping (cuts/deposits as stamps), Talus Slumping, Drainage (D8 priority-flood with jittered receivers and accumulation), and SDF Update (carved back into SDF, re-redistanced after every batch) [S2, unofficial]. The stream-power incision formula is $E = K \cdot A^m \cdot S^n$, where $E$ is erosion, $K$ is erodibility, $A$ is drainage area, and $S$ is slope [S2, unofficial]. Parameters include a Cut Budget (≤ 0.35 voxels/step, ≤ (2.5 + 6·depth) voxels/column) [S2, unofficial]. Pitfalls include waterfalls, which are bypassed during erosion simulation [S2, unofficial]. Validation in a 192×123×192 grid with 520.8 mm voxels showed max cut of 4.50 m vs a 5.21 m budget, with zero degenerate columns [S2, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Depends on the number of voxels in the brush influence region and the number of Eikonal passes. Eikonal propagation is local and parallelizable.
++- **Time Complexity:** Depends on the number of voxels in the brush influence region and the number of Eikonal passes [G].
+ - **Memory Complexity:** Requires two 3D textures for ping-pong buffering (input and output) [S1, unofficial].
+-- **Measured Performance:** Not given in the sources for general SDF Mutation. For SDF-Native Hydraulic Erosion, validation on a 192×123×192 grid was performed [S2, unofficial].
+-- **Scaling:** Scales with the number of active voxels in the brush region. Hierarchical variants can improve scaling by refining only affected areas [S1, unofficial].
+-- **Strengths:** Interactive, maintains distance field properties, supports complex topological changes.
+-- **Limitations:** Requires careful handling of Eikonal propagation to avoid artifacts. Performance can degrade with large brush sizes or many Eikonal passes.
+-- **When to Use:** Interactive sculpting, procedural terrain generation, real-time editing of implicit volumes.
+-- **When Not to Use:** Large-scale, non-interactive volume generation where global re-distancing is more efficient.
++- **Measured Performance:** Not given in the sources for general SDF Mutation [G]. For SDF-Native Hydraulic Erosion, validation on a 192×123×192 grid was performed [S2, unofficial].
++- **Scaling:** Scales with the number of active voxels in the brush region [G].
++- **Strengths:** Interactive, maintains distance field properties, supports complex topological changes [G].
++- **Limitations:** Requires careful handling of Eikonal propagation to avoid artifacts [G].
++- **When to Use:** Interactive sculpting, procedural terrain generation, real-time editing of implicit volumes [G].
++- **When Not to Use:** Large-scale, non-interactive volume generation where global re-distancing is more efficient [G].
+ 
+ ## Background

@@ -1,0 +1,82 @@
+# 3D Rendering of Incident Scenes: LiDAR to Gaussian Splat reconstruction
+
+Walk through a building with an iPhone, and a few minutes later get a navigable 3D model of it, placed on the city map, in a browser.
+
+Built for a Singapore Civil Defence Force (SCDF) hackathon in 2025 to 2026 while I was serving as a firefighter. Fireground commanders plan with 2D floor plans and whatever they can see from the street. The goal here was a pipeline that turns a quick walk-through into a photorealistic 3D scene that a commander can orbit, measure and brief from, overlaid on Google's Photorealistic 3D Tiles of the surrounding area.
+
+```
+iPhone 16 Pro                     Cloud GPU (RunPod, RTX 5090)                 MacBook (Chrome)
+─────────────────                 ────────────────────────────                 ─────────────────
+SwiftUI + ARKit app               nerfstudio splatfacto  (RGB baseline)        three.js viewer
+ RGB @ 10 Hz                      dn-splatter            (LiDAR depth +        Google 3D Tiles
+ ARKit camera poses     ──scp──▶   Omnidata normals + LiDAR init)   ──scp──▶   + Gaussian splat
+ LiDAR depth (Float32)            gsplat streaming trainer (live, incremental)  overlay, aligned
+ writes transforms.json                                                          in ENU metres
+```
+
+## What is in this repo
+
+| Path | What it is |
+|---|---|
+| `ios/` | The capture app. SwiftUI + ARKit, four Swift files. Records RGB frames, ARKit poses and LiDAR depth straight into nerfstudio's `transforms.json` format, so the COLMAP step is skipped entirely. |
+| `pipeline/` | Shell scripts that push a scan to the pod, train, and pull the `.ply` back. Two training tiers: `train_on_pod.sh` (splatfacto, RGB only) and `train_on_pod_dn.sh` (dn-splatter with LiDAR depth and normal supervision). |
+| `pipeline/stream/` | A live, incremental Gaussian splat trainer. The phone streams frames over a WebSocket, the pod trains as frames arrive, and a browser hot-swaps the latest snapshot while you are still walking. |
+| `viewer/` | Browser viewer. Overlays the trained splat on Google Photorealistic 3D Tiles with a GUI for aligning the ARKit-local scan into world coordinates. |
+| `infra/` | RunPod setup notes. |
+
+Scans, trained splats and the RunPod credentials are not in the repo.
+
+## The capture app
+
+Most phone-to-splat pipelines go through Record3D or Polycam and then a COLMAP pass to recover camera poses. ARKit already knows the poses, so the app writes them directly:
+
+- **Native nerfstudio output.** Intrinsics from `ARCamera.intrinsics`, per-frame camera-to-world matrices from `ARCamera.transform`. ARKit uses the same OpenGL axis convention nerfstudio expects, so no axis swap is needed. This removed the `ns-process-data` step and one to three minutes per run.
+- **LiDAR depth capture.** `ARFrame.sceneDepth` (256 x 192, metres) is written per frame as raw little-endian Float32, converted to `.npy` on the pod. The header records depth dimensions so the trainer can rescale the RGB intrinsics.
+- **Motion-blur rejection.** Angular velocity is computed from the quaternion delta between the last accepted frame and the current one. Frames above 1 rad/s are dropped, because rotational blur during the sensor's exposure is unrecoverable downstream and a firefighter turning quickly will produce a lot of it.
+- **Coverage overlay.** ARKit's scene-reconstruction mesh is rendered with a striped shader. Each mesh anchor accumulates in-frustum dwell time and its stripes fade out once it has been looked at for long enough, so the operator can see which parts of the room still need scanning. Same idea as Scaniverse's guidance, implemented with a SceneKit shader modifier.
+- **Optional streaming.** If a WebSocket URL is set, every accepted frame is also sent to the streaming trainer with its pose, using a small binary wire format (`pipeline/stream/_wire.py`).
+
+## Combining LiDAR with Gaussian splatting
+
+This was the part I spent the most time on. Standard 3D Gaussian Splatting is RGB-only and initialises from a sparse COLMAP point cloud. The iPhone gives you a metric depth map for free, so the question was how to use it. What I tried, in order:
+
+1. **RGB-only splatfacto, random initialisation.** The baseline. It works, but needs around 30k iterations and produces floaters in textureless regions like plain walls, which are most of a fire station.
+2. **LiDAR back-projection as the initial point cloud.** Every valid depth pixel (0.1 m to 5 m, the LiDAR's useful range) is back-projected through the scaled intrinsics and the ARKit pose into a coloured world-space point cloud, then voxel-downsampled at 1 cm. This replaces the random init with a metrically accurate one, so the optimiser starts on the surfaces instead of finding them.
+3. **Depth supervision during training.** Using dn-splatter, the rendered expected depth is compared against the LiDAR depth as an extra loss term, alongside monocular surface normals from Omnidata as a second geometric prior. This pins geometry in places where photometric loss alone is ambiguous.
+4. **Filling LiDAR holes with a monocular depth model.** LiDAR returns nothing on glass, very dark surfaces and anything beyond about five metres. In the streaming trainer, Depth Anything V2 (metric indoor variant, run in fp16) predicts dense depth for every frame, giving a depth target even where the sensor has gaps.
+5. **Incremental training for a live view.** The streaming trainer (`pipeline/stream/trainer.py`) wraps gsplat's rasteriser with a densification strategy (the original clone-split-prune strategy or MCMC), and trains a few iterations per incoming frame against a rolling 60-frame window. Because windowed sampling converges to a worse result than offline batch training, a background refinement pass over the full frame buffer runs every 30 seconds, and `batch_train.py` reuses the same loss stack for a final offline pass. The server holds one global map, so several phones in the same building contribute to the same reconstruction.
+
+The trade-off I found: LiDAR initialisation and depth loss give correct scale and much cleaner geometry on walls and floors, but the sensor's range and its blind spots on glass mean the monocular priors are not optional for a whole-building scan. The streaming mode gives a usable preview while walking, and the offline pass is what produces the final model.
+
+## Viewer
+
+`viewer/` is a static three.js page. It loads Google Photorealistic 3D Tiles via `3d-tiles-renderer`, re-oriented so a chosen latitude and longitude sits at the origin with Y up, then adds the trained `.ply` under a pivot that can be translated, rotated and scaled from a lil-gui panel to align the ARKit-local scan into east-north-up metres. Alignment is persisted in `localStorage` and can be exported as JSON. The Google Maps key is entered at runtime and never leaves the browser.
+
+## Running it
+
+Hardware: an iPhone with LiDAR (tested on iPhone 16 Pro), a Mac with Xcode, and a RunPod GPU pod with nerfstudio installed (see `infra/runpod-setup.md`).
+
+```bash
+cp .env.example .env            # pod IP, port and SSH key
+# 1. Build ios/SCDF_Lifesaver in Xcode, run on the phone, record, AirDrop the zip to the Mac
+mkdir -p scans/scan_001 && mv ~/Downloads/scan_*.zip scans/scan_001/raw.zip
+# 2. Train
+pipeline/upload_scan.sh scans/scan_001
+pipeline/train_on_pod_dn.sh scan_001     # or train_on_pod.sh for the RGB-only baseline
+pipeline/download_splat.sh scan_001
+# 3. View: serve viewer/ over HTTP and open it in Chrome
+```
+
+For the live streaming mode, see the comments at the top of `pipeline/stream/run_live.sh`.
+
+## Stack
+
+Swift, SwiftUI, ARKit, SceneKit · Python, PyTorch, gsplat, nerfstudio, dn-splatter, Depth Anything V2, Omnidata · three.js, 3d-tiles-renderer, gaussian-splats-3d · RunPod (RTX 5090), bash, WebSockets
+
+## Status
+
+Hackathon proof of concept. Single-room and single-floor scans reconstruct well. Cross-device registration (merging scans from several phones that each start in their own ARKit frame) is done by assuming a shared origin and is the obvious next piece of work.
+
+---
+
+Shahu Wagh · [shahuwagh.com](https://www.shahuwagh.com) · [github.com/Shahu-123](https://github.com/Shahu-123)

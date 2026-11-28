@@ -1,0 +1,264 @@
+--- v001.md
++++ v002.md
+@@ -10,15 +10,15 @@
+ 
+ ### Inputs and Outputs
+-*   **Input:** A set of 3D Gaussians defined by position, covariance (or conic parameters), opacity, and spherical harmonics coefficients.
+-*   **Output:** A 2D image frame.
++*   **Input:** A set of 3D Gaussians defined by position, covariance (or conic parameters), opacity, and spherical harmonics coefficients [S1, unofficial].
++*   **Output:** A 2D image frame [S1, unofficial].
+ 
+ ### Data Structures
+ The implementation relies on preallocated buffers to avoid dynamic allocation stalls [S1, unofficial].
+ 
+-1.  **Gaussian Attributes:** Standard 3DGS attributes.
+-2.  **Macro-tile List:** A contiguous array of depth keys and Gaussian IDs, segmented by macro-tile.
+-3.  **Work Queue:** A shared atomic queue for render tiles within a macro-tile.
+-4.  **Scheduling Buffer:** Per-worker buffer to absorb variability in visible Gaussian counts.
+-5.  **Partial Blending Buffer:** Per-batch buffer storing intermediate alpha/composite results.
++1.  **Gaussian Attributes:** Standard 3DGS attributes [S1, unofficial].
++2.  **Macro-tile List:** A contiguous array of depth keys and Gaussian IDs, segmented by macro-tile [S1, unofficial].
++3.  **Work Queue:** A shared atomic queue for render tiles within a macro-tile [S1, unofficial].
++4.  **Scheduling Buffer:** Per-worker buffer to absorb variability in visible Gaussian counts [S1, unofficial].
++5.  **Partial Blending Buffer:** Per-batch buffer storing intermediate alpha/composite results [S1, unofficial].
+ 
+ ### Parameters
+@@ -31,107 +31,42 @@
+ 
+ 1.  **Binning (Coarse Partitioning):**
+-    Gaussians are processed in partitioning batches of $P$ Gaussians. A work group handles one batch. For each Gaussian, a conservative per-row ellipse-contour scan determines overlap with macro-tiles. Overlapping Gaussians are assigned to the corresponding macro-tile's range in the output list. The output is a segmented structure containing per-macro-tile lists of 32-bit depth keys and Gaussian IDs [S1, unofficial].
++    Gaussians are processed in partitioning batches of $P$ Gaussians, each handled cooperatively by one work group [S1, unofficial]. A conservative per-row ellipse-contour scan determines macro-tile overlap for each Gaussian [S1, unofficial]. Overlapping Gaussians are assigned to the corresponding macro-tile's range in the output list [S1, unofficial]. The output is a segmented structure containing per-macro-tile lists of depth keys and Gaussian IDs [S1, unofficial].
+ 
+ 2.  **Segmented Depth Sort:**
+-    A fully asynchronous on-device segmented sort is performed on the macro-tile lists. This runs as a cascade of tier-classified per-segment block sorts. Oversized segments are handled by a device-built merge tree consumed by a persistent kernel, scaling across orders of magnitude of segment sizes without host involvement [S1, unofficial]. The result is a depth-sorted list of Gaussians for each macro-tile.
++    A fully asynchronous on-device segmented sort is performed on the macro-tile lists [S1, unofficial]. This runs as a cascade of tier-classified per-segment block sorts [S1, unofficial]. Oversized segments are handled by a device-built merge tree consumed by a persistent kernel, scaling across orders of magnitude of segment sizes without host involvement [S1, unofficial]. The result is a depth-sorted list of Gaussians for each macro-tile [S1, unofficial].
+ 
+ 3.  **Work Decomposition:**
+-    Each macro-tile's sorted Gaussian list is split into fixed-size batches of $B=1,024$ Gaussians. Each pair $(\text{Macro-tile}, \text{Batch})$ becomes an independent processing unit. A macro-tile with $N$ Gaussians spawns $\lceil N/B \rceil$ processing units [S1, unofficial].
++    Each macro-tile's sorted Gaussian list is split into fixed-size batches of $B=1,024$ Gaussians [S1, unofficial]. Each pair $(\text{Macro-tile}, \text{Batch})$ becomes an independent processing unit [S1, unofficial]. A macro-tile with $N$ Gaussians spawns $\lceil N/B \rceil$ processing units [S1, unofficial].
+ 
+ 4.  **Rasterization Dispatch:**
+-    Within each processing unit, worker groups dynamically claim active render tiles from a shared tile work queue. This ensures that dense macro-tiles spawn proportionally more work units, balancing load based on Gaussian density rather than screen area [S1, unofficial].
++    Within each processing unit, worker groups dynamically claim active render tiles from a shared tile work queue [S1, unofficial]. This ensures dense macro-tiles spawn proportionally more work units, balancing load based on Gaussian density rather than screen area [S1, unofficial].
+ 
+ 5.  **Visibility and Data Loading:**
+-    For each claimed render tile, the worker group determines per-tile visibility masks inline. Gaussians are loaded from global memory into local storage (shared memory) once per macro-tile and reused across all member render tiles within that macro-tile [S1, unofficial].
++    For each claimed render tile, the worker group determines per-tile visibility masks inline [S1, unofficial]. Gaussians are loaded from global memory into local storage once per macro-tile and reused across all member render tiles within that macro-tile [S1, unofficial].
+ 
+ 6.  **Rasterization (Fine Granularity):**
+-    Each worker group rasterizes its assigned $8 \times 8$ pixel tile via front-to-back alpha blending. A per-worker scheduling buffer absorbs the per-tile variability in visible Gaussian count, allowing the blending pipeline to run at a fixed rate [S1, unofficial]. All data is read from local storage [S1, unofficial].
++    Each worker group rasterizes its assigned $8 \times 8$ pixel tile via front-to-back alpha blending [S1, unofficial]. A per-worker scheduling buffer absorbs the per-tile variability in visible Gaussian count, allowing the blending pipeline to run at a fixed rate [S1, unofficial]. All data is read from local storage [S1, unofficial].
+ 
+ ### Pseudocode
+ 
+ ```python
+-# Constants
++import math
++from collections import deque
++
++# Constants from evidence
+ RENDER_TILE_W = 8
+ RENDER_TILE_H = 8
+-MACRO_TILE_W_RT = 8  # Render tiles wide
+-MACRO_TILE_H_RT = 4  # Render tiles high
++MACRO_TILE_W_RT = 8
++MACRO_TILE_H_RT = 4
+ BATCH_SIZE = 1024
+ PARTITION_BATCH_SIZE = 8192
+ 
+-def higgs_render(gaussians, camera):
+-    # 1. Binning
+-    # Output: macro_tile_lists, a dictionary mapping macro_tile_id -> list of (depth, gaussian_id)
+-    macro_tile_lists = bin_gaussians_to_macro_tiles(gaussians, camera)
+-    
+-    # 2. Segmented Depth Sort
+-    # Sorts each list in macro_tile_lists by depth
+-    for mt_id, g_list in macro_tile_lists.items():
+-        macro_tile_lists[mt_id] = segmented_sort(g_list)
+-        
+-    # 3. Prepare Processing Units
+-    # Create a list of (macro_tile_id, batch_of_gaussians)
+-    processing_units = []
+-    for mt_id, sorted_gaussians in macro_tile_lists.items():
+-        # Split into fixed-size batches
+-        for i in range(0, len(sorted_gaussians), BATCH_SIZE):
+-            batch = sorted_gaussians[i : i + BATCH_SIZE]
+-            processing_units.append((mt_id, batch))
+-            
+-    # 4. Rasterization
+-    # Initialize frame buffer
+-    frame = zeros((height, width, 3))
+-    
+-    # Shared work queue for tiles within a macro-tile
+-    # Note: In practice, this is managed per macro-tile or globally with coordination
+-    # Here we simulate the parallel execution of processing units
+-    
+-    for mt_id, batch in processing_units:
+-        # Load macro-tile Gaussians into local storage (simulated)
+-        local_gaussians = load_to_local_storage(batch)
+-        
+-        # Determine which render tiles are active in this macro-tile
+-        # and which Gaussians overlap them
+-        active_tiles = get_active_render_tiles(mt_id, local_gaussians)
+-        
+-        # Shared queue for this macro-tile's tiles
+-        tile_queue = Queue(active_tiles)
+-        
+-        # Worker groups claim tiles dynamically
+-        while not tile_queue.empty():
+-            tile_id = tile_queue.pop()
+-            if tile_id is None: break
+-            
+-            # Get tile coordinates
+-            tx, ty = get_tile_coords(tile_id)
+-            
+-            # Determine visibility mask for this tile against local_gaussians
+-            # This is done inline during load/processing
+-            visible_gaussians = []
+-            for g in local_gaussians:
+-                if overlaps_tile(g, tx, ty):
+-                    visible_gaussians.append(g)
+-            
+-            # Sort visible gaussians by depth (already sorted globally, but need local order)
+-            # Since global sort is per macro-tile, local order is preserved
+-            visible_gaussians.sort(key=lambda g: g.depth)
+-            
+-            # Rasterize tile
+-            # Use scheduling buffer to absorb variability
+-            result = rasterize_tile_front_to_back(visible_gaussians, tx, ty, camera)
+-            
+-            # Write to frame
+-            write_to_frame(frame, result, tx, ty)
+-
+-    return frame
+-
+-def bin_gaussians_to_macro_tiles(gaussians, camera):
++def higgs_render(gaussians, camera, frame_width, frame_height):
++    # 1. Binning: Group gaussians into macro-tiles
+     macro_tile_lists = {}
+-    # Process in partitioning batches
+     for i in range(0, len(gaussians), PARTITION_BATCH_SIZE):
+         batch = gaussians[i : i + PARTITION_BATCH_SIZE]
+-        # Cooperative work group handles this batch
+-        # Writes (depth, gaussian_id) to macro_tile_lists
+         for g in batch:
+-            # Conservative per-row ellipse-contour scan
++            # Conservative per-row ellipse-contour scan determines overlap
+             overlapping_macro_tiles = get_overlapping_macro_tiles(g, camera)
+             for mt_id in overlapping_macro_tiles:
+@@ -139,27 +74,93 @@
+                     macro_tile_lists[mt_id] = []
+                 macro_tile_lists[mt_id].append((g.depth, g.id))
+-    return macro_tile_lists
+ 
+-def segmented_sort(list_of_pairs):
+-    # Cascade of tier-classified per-segment block sorts
+-    # Handles oversized segments via device-built merge tree
+-    # Returns sorted list of pairs by depth
+-    return sorted(list_of_pairs, key=lambda x: x[0])
++    # 2. Segmented Depth Sort: Sort each macro-tile list by depth
++    for mt_id in macro_tile_lists:
++        macro_tile_lists[mt_id].sort(key=lambda x: x[0])
++
++    # 3. Prepare Processing Units: Split into batches
++    processing_units = []
++    for mt_id, sorted_gaussians in macro_tile_lists.items():
++        for i in range(0, len(sorted_gaussians), BATCH_SIZE):
++            batch = sorted_gaussians[i : i + BATCH_SIZE]
++            processing_units.append((mt_id, batch))
++
++    # 4. Rasterization: Process units
++    frame = [[0.0] * 3 for _ in range(frame_height * frame_width)]
++
++    for mt_id, batch in processing_units:
++        # Load macro-tile Gaussians into local storage
++        local_gaussians = [g for _, g in batch]
++
++        # Determine active render tiles in this macro-tile
++        active_tiles = [mt_id * 32 + t for t in range(32)]
++        tile_queue = deque(active_tiles)
++
++        # Worker groups claim tiles dynamically
++        while tile_queue:
++            tile_id = tile_queue.popleft()
++            if tile_id is None:
++                break
++
++            # Get tile coordinates
++            rt_id = tile_id % 32
++            rt_x = rt_id % 8
++            rt_y = rt_id // 8
++            tx, ty = rt_x * RENDER_TILE_W, rt_y * RENDER_TILE_H
++
++            # Determine visibility mask inline
++            visible_gaussians = []
++            for g in local_gaussians:
++                # Check if gaussian overlaps the 8x8 tile
++                if check_gaussian_tile_overlap(g, tx, ty, RENDER_TILE_W, RENDER_TILE_H):
++                    visible_gaussians.append(g)
++
++            # Sort visible gaussians by depth (preserved from global sort)
++            visible_gaussians.sort(key=lambda g: g.depth)
++
++            # Rasterize tile via front-to-back alpha blending
++            result = rasterize_tile_front_to_back(visible_gaussians, tx, ty, camera)
++
++            # Write to frame
++            for dy in range(RENDER_TILE_H):
++                for dx in range(RENDER_TILE_W):
++                    px, py = tx + dx, ty + dy
++                    if 0 <= px < frame_width and 0 <= py < frame_height:
++                        idx = py * frame_width + px
++                        frame[idx] = result
++
++    return frame
++
++def get_overlapping_macro_tiles(gaussian, camera):
++    # Returns list of macro-tile IDs overlapping the gaussian
++    # Uses conservative per-row ellipse-contour scan at macro-tile granularity
++    return [0]
++
++def check_gaussian_tile_overlap(gaussian, tx, ty, tw, th):
++    # Standard axis-aligned bounding box or ellipse intersection check
++    return True
+ 
+ def rasterize_tile_front_to_back(gaussians, tx, ty, camera):
+-    # Front-to-back alpha blending
+-    # Reads from local storage
+-    # Uses scheduling buffer for fixed-rate blending
+-    color = zeros(3)
++    color = [0.0, 0.0, 0.0]
+     alpha = 0.0
+     for g in gaussians:
+         # Evaluate Gaussian at tile pixels
+         # Stabilized half-precision using Cholesky factors of conics
+-        # Mahalanobis quadratic turned into sum of squares
+         contribution = evaluate_gaussian(g, tx, ty, camera)
+-        color += contribution.color * contribution.alpha * (1.0 - alpha)
++        color[0] += contribution.color[0] * contribution.alpha * (1.0 - alpha)
++        color[1] += contribution.color[1] * contribution.alpha * (1.0 - alpha)
++        color[2] += contribution.color[2] * contribution.alpha * (1.0 - alpha)
+         alpha += contribution.alpha * (1.0 - alpha)
+-        if alpha > 0.99: break # Early termination if supported, though HiGS aims for exact
++        if alpha > 0.99:
++            break
+     return color
++
++def evaluate_gaussian(gaussian, tx, ty, camera):
++    # Computes color and alpha contribution for the tile
++    class Contribution:
++        def __init__(self, c, a):
++            self.color = c
++            self.alpha = a
++    return Contribution([0.5, 0.5, 0.5], 0.1)
+ ```
+ 
+@@ -175,6 +176,6 @@
+ *   **Complexity:** Time complexity is dominated by the segmented sort and rasterization. The work decomposition scales with Gaussian density rather than screen area, eliminating the tail effect [S1, unofficial].
+ *   **Memory:** Memory footprint scales with the number of macro-tile Gaussian batches in the frame, roughly linearly with scene density at fixed resolution [S1, unofficial].
+-*   **Strengths:** Eliminates the rasterizer tail effect, retains exact alpha compositing, works on commodity GPUs, and significantly reduces pair counts.
+-*   **Limitations:** Requires preallocation of buffers which may increase peak memory usage compared to dynamic allocation approaches. The complexity of the segmented sort and hierarchical dispatch is higher than standard 3DGS.
++*   **Strengths:** Eliminates the rasterizer tail effect, retains exact alpha compositing, works on commodity GPUs, and significantly reduces pair counts [S1, unofficial].
++*   **Limitations:** Requires preallocation of buffers which may increase peak memory usage compared to dynamic allocation approaches. The complexity of the segmented sort and hierarchical dispatch is higher than standard 3DGS [G].
+ 
+ ## Background

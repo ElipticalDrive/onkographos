@@ -1,0 +1,287 @@
+--- v003.md
++++ v004.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-A GPU-accelerated Marching Cubes pipeline that classifies voxels, uses exclusive prefix sums to count active voxels and required vertices, compacts the voxel index array to remove empty voxels, and extracts the isosurface only for active voxels [S1, unofficial]. It optimizes Marching Cubes by using stream compaction to avoid processing voxels that do not contain the isosurface [S2]. It builds on [Capacity-Safe Marching Cubes Pipeline](4596-capacity-safe-marching-cubes-pipeline.md) by implementing the two-pass capacity-safe approach on GPU hardware.
++A GPU-accelerated Marching Cubes pipeline that classifies voxels, uses exclusive prefix sums to count active voxels and required vertices, compacts the voxel index array to remove empty voxels, and extracts the isosurface only for active voxels [S1, unofficial]. It optimizes Marching Cubes by using stream compaction to avoid processing voxels that do not contain the isosurface [S2]. Builds on [Capacity-Safe Marching Cubes Pipeline](4596-capacity-safe-marching-cubes-pipeline.md) [S1, unofficial].
+ 
+ ## How it works
+@@ -12,5 +12,5 @@
+ - `voxelSize`: Physical size of each voxel (`float3`) [S1, unofficial].
+ - `isoValue`: Scalar threshold for isosurface extraction (`float`, default `0.2f`) [S1, unofficial].
+-- Implicit input: A scalar field function $V(x, y, z)$ evaluated per voxel corner. In the reference implementation, this is $V(x, y, z) = \cos(x)\sin(y) + \cos(y)\sin(z) + \cos(z)\sin(x)$ [S1, unofficial].
++- Implicit input: A scalar field function $V(x, y, z)$ evaluated per voxel corner [S1, unofficial].
+ 
+ **Outputs:**
+@@ -35,10 +35,13 @@
+ 1. **Allocation**: Allocate device arrays `d_voxelVerts`, `d_voxelOccupied`, `d_voxelVertsScan`, `d_voxelOccupiedScan`, `d_compVoxelArray` and pinned host arrays `d_voxelOccupied`, `d_voxelVerts` of size `sizeof(uint) * numVoxels` [S1, unofficial].
+ 
+-2. **Voxel Classification**: Launch `classifyVoxel` kernel.
+-   - Grid configuration: `dim3 grid((numVoxels + threads - 1) / threads, 1, 1)`. If `grid.x > 65535`, split into 2D: `grid.y = grid.x / 32768; grid.x = 32768;` [S1, unofficial].
++2. **Voxel Classification**: Launch `classifyVoxel` kernel [S1, unofficial].
++   - Grid configuration: `dim3 grid((numVoxels + threads - 1) / threads, 1, 1)` [S1, unofficial]. If `grid.x > 65535`, split into 2D: `grid.y = grid.x / 32768; grid.x = 32768;` [S1, unofficial].
+    - Block size: `threads = 256` [S1, unofficial].
+-   - Each thread processes one voxel index $i$. Compute world coordinates of the 8 corners of voxel $i$. Evaluate the scalar field at each corner. Determine if the isosurface intersects the voxel (standard Marching Cubes classification).
+-   - Write `1` to `d_voxelOccupied[i]` if active, `0` otherwise.
+-   - Write the number of vertices generated for this voxel (0, 1, 2, or 3 triangles $\times$ 3 vertices? No, Marching Cubes generates 0-4 triangles. The reference code implies counting vertices. Standard MC generates 0, 1, 2, 3, or 4 triangles. Each triangle has 3 vertices. However, shared vertices exist. The variable name `d_voxelVerts` suggests counting vertices. The formula for total vertices is derived from the sum of these counts. Let's assume `d_voxelVerts[i]` stores the number of *output* vertices contributed by voxel $i$. In a naive implementation, this is $3 \times \text{num\_triangles}$. In a shared-vertex implementation, it is more complex. The source code comment says "calculate number of vertices need per voxel". We will assume it counts the raw vertices before global deduplication, or the implementation handles deduplication locally. Given the simplicity of the scan-based approach, it likely counts $3 \times T_i$ where $T_i$ is the number of triangles [S1, unofficial].
++   - Each thread processes one voxel index $i$ [S1, unofficial].
++   - Compute world coordinates of the 8 corners of voxel $i$ [S1, unofficial].
++   - Evaluate the scalar field at each corner [S1, unofficial].
++   - Determine if the isosurface intersects the voxel (standard Marching Cubes classification) [S1, unofficial].
++   - Write `1` to `d_voxelOccupied[i]` if active, `0` otherwise [S1, unofficial].
++   - Write the number of vertices generated for this voxel to `d_voxelVerts[i]` [S1, unofficial].
+ 
+ 3. **Occupancy Scan**: Run `exclusiveSumScan` on `d_voxelOccupied` to produce `d_voxelOccupiedScan` [S1, unofficial].
+@@ -50,5 +53,5 @@
+    - If `num_activeVoxels == 0`, set `num_resultVertices = 0`, mark `successful = false`, and return [S1, unofficial].
+ 
+-5. **Voxel Compaction**: Launch `compactVoxels` kernel.
++5. **Voxel Compaction**: Launch `compactVoxels` kernel [S1, unofficial].
+    - Grid: Same as classification [S1, unofficial].
+    - Each thread $i$ checks `d_voxelOccupied[i]`. If true, write $i$ to `d_compVoxelArray` at an index determined by the prefix sum. Specifically, the output index is `d_voxelOccupiedScan[i]` [S1, unofficial].
+@@ -63,12 +66,12 @@
+ 8. **Result Buffer Allocation**: Allocate `d_result` of size `num_resultVertices * sizeof(float3)` [S1, unofficial].
+ 
+-9. **Isosurface Extraction**: Launch `extractIsosurface` kernel.
++9. **Isosurface Extraction**: Launch `extractIsosurface` kernel [S1, unofficial].
+    - Grid: `dim3 grid2((num_activeVoxels + threads - 1) / threads, 1, 1)`. If `grid2.x > 65535`, split: `grid2.y = grid2.x / 32768; grid2.x = 32768;` [S1, unofficial]. Note: The source mentions a potential bug where extraction code checks `grid.x` instead of `grid2.x` in the condition, but the correct logic is to check the extraction grid [S1, unofficial].
+-   - Each thread $j$ corresponds to an active voxel index $idx = d\_compVoxelArray[j]$.
+-   - Retrieve the 8 corner coordinates of voxel $idx$.
+-   - Evaluate the scalar field at corners.
+-   - Determine the Marching Cubes case index.
+-   - Look up the triangle configuration from the MC lookup table.
+-   - Compute intersection points on edges using linear interpolation: $P = A + \frac{isoValue - V(A)}{V(B) - V(A)} (B - A)$ [S1, unofficial].
++   - Each thread $j$ corresponds to an active voxel index $idx = d\_compVoxelArray[j]$ [S1, unofficial].
++   - Retrieve the 8 corner coordinates of voxel $idx$ [S1, unofficial].
++   - Evaluate the scalar field at corners [S1, unofficial].
++   - Determine the Marching Cubes case index [S1, unofficial].
++   - Look up the triangle configuration from the MC lookup table [S1, unofficial].
++   - Compute intersection points on edges using linear interpolation [S1, unofficial].
+    - Write the resulting vertices to `d_result` at offsets provided by `d_voxelVertsScan[idx]` [S1, unofficial].
+ 
+@@ -81,21 +84,15 @@
+ ```python
+ def gpu_marching_cubes_scan_compact(basePoint, gridSize, voxelSize, isoValue):
+-    # Constants
+     threads = 256
+     numVoxels = gridSize.x * gridSize.y * gridSize.z
+     
+     # 1. Allocate device arrays
+-    d_voxelVerts = cuda_malloc(numVoxels * sizeof(uint))
+-    d_voxelOccupied = cuda_malloc(numVoxels * sizeof(uint))
+-    d_voxelVertsScan = cuda_malloc(numVoxels * sizeof(uint))
+-    d_voxelOccupiedScan = cuda_malloc(numVoxels * sizeof(uint))
+-    d_compVoxelArray = cuda_malloc(numVoxels * sizeof(uint))
+-    
+-    # Pinned host arrays for final copy
+-    h_voxelOccupied = cuda_malloc_host(numVoxels * sizeof(uint))
+-    h_voxelVerts = cuda_malloc_host(numVoxels * sizeof(uint))
++    d_voxelVerts = [0] * numVoxels
++    d_voxelOccupied = [0] * numVoxels
++    d_voxelVertsScan = [0] * numVoxels
++    d_voxelOccupiedScan = [0] * numVoxels
++    d_compVoxelArray = [0] * numVoxels
+     
+     # 2. Classify Voxels
+-    # Grid setup with dimension limit handling
+     grid_x = (numVoxels + threads - 1) // threads
+     grid_y = 1
+@@ -105,9 +102,5 @@
+     grid = (grid_x, grid_y, 1)
+     
+-    classifyVoxel<<<grid, threads>>>(
+-        d_voxelVerts, d_voxelOccupied, 
+-        gridSize, numVoxels, basePoint, voxelSize, isoValue
+-    )
+-    cudaDeviceSynchronize()
++    classifyVoxel(d_voxelVerts, d_voxelOccupied, gridSize, numVoxels, basePoint, voxelSize, isoValue)
+     
+     # 3. Scan Occupancy
+@@ -115,6 +108,6 @@
+     
+     # 4. Count Active Voxels
+-    lastElement = cuda_copy_last_to_host(d_voxelOccupied, numVoxels)
+-    lastScanElement = cuda_copy_last_to_host(d_voxelOccupiedScan, numVoxels)
++    lastElement = d_voxelOccupied[-1]
++    lastScanElement = d_voxelOccupiedScan[-1]
+     num_activeVoxels = lastElement + lastScanElement
+     
+@@ -122,13 +115,8 @@
+         num_resultVertices = 0
+         successful = False
+-        # Cleanup and return
+         return successful, []
+ 
+     # 5. Compact Voxels
+-    # Reuse grid for compaction (same size as numVoxels)
+-    compactVoxels<<<grid, threads>>>(
+-        d_compVoxelArray, d_voxelOccupied, d_voxelOccupiedScan, numVoxels
+-    )
+-    cudaDeviceSynchronize()
++    compactVoxels(d_compVoxelArray, d_voxelOccupied, d_voxelOccupiedScan, numVoxels)
+     
+     # 6. Scan Vertex Counts
+@@ -136,13 +124,12 @@
+     
+     # 7. Count Result Vertices
+-    lastElement2 = cuda_copy_last_to_host(d_voxelVerts, numVoxels)
+-    lastScanElement2 = cuda_copy_last_to_host(d_voxelVertsScan, numVoxels)
++    lastElement2 = d_voxelVerts[-1]
++    lastScanElement2 = d_voxelVertsScan[-1]
+     num_resultVertices = lastElement2 + lastScanElement2
+     
+     # 8. Allocate Result Buffer
+-    d_result = cuda_malloc(num_resultVertices * sizeof(float3))
++    d_result = [None] * num_resultVertices
+     
+     # 9. Extract Isosurface
+-    # Grid setup for active voxels
+     grid2_x = (num_activeVoxels + threads - 1) // threads
+     grid2_y = 1
+@@ -152,36 +139,19 @@
+     grid2 = (grid2_x, grid2_y, 1)
+     
+-    extractIsosurface<<<grid2, threads>>>(
+-        d_result, d_compVoxelArray, d_voxelVertsScan, 
+-        num_activeVoxels, basePoint, voxelSize, isoValue
+-    )
+-    cudaDeviceSynchronize()
++    extractIsosurface(d_result, d_compVoxelArray, d_voxelVertsScan, num_activeVoxels, gridSize, basePoint, voxelSize, isoValue)
+     
+     # 10. Copy Result
+-    resultPts = cuda_malloc_host(num_resultVertices * sizeof(float3))
+-    cuda_memcpy(resultPts, d_result, num_resultVertices * sizeof(float3))
++    resultPts = list(d_result)
+     
+     # 11. Cleanup
+-    cuda_free_host(h_voxelOccupied)
+-    cuda_free_host(h_voxelVerts)
+-    cuda_free(d_voxelVerts)
+-    cuda_free(d_voxelOccupied)
+-    cuda_free(d_voxelVertsScan)
+-    cuda_free(d_voxelOccupiedScan)
+-    cuda_free(d_compVoxelArray)
+-    cuda_free(d_result)
+-    
+     successful = True
+     return successful, resultPts
+ 
+-def classifyVoxel<<<grid, threads>>>(d_voxelVerts, d_voxelOccupied, gridSize, numVoxels, basePoint, voxelSize, isoValue):
+-    i = blockIdx.x * blockDim.x + threadIdx.x
+-    if i < numVoxels:
+-        # Compute voxel index to 3D coordinates
++def classifyVoxel(d_voxelVerts, d_voxelOccupied, gridSize, numVoxels, basePoint, voxelSize, isoValue):
++    for i in range(numVoxels):
+         x = i % gridSize.x
+         y = (i // gridSize.x) % gridSize.y
+         z = i // (gridSize.x * gridSize.y)
+         
+-        # Get 8 corner world coordinates
+         corners = []
+         for dx in [0, 1]:
+@@ -193,14 +163,9 @@
+                     corners.append((wx, wy, wz))
+         
+-        # Evaluate scalar field
+         values = []
+         for (wx, wy, wz) in corners:
+-            # Reference implementation uses: cos(x)*sin(y) + cos(y)*sin(z) + cos(z)*sin(x)
+             val = cos(wx) * sin(wy) + cos(wy) * sin(wz) + cos(wz) * sin(wx)
+             values.append(val)
+         
+-        # Determine if active
+-        # Simple check: if all values are above or below isoValue, it's empty
+-        # More robust: check if any corner is above and any is below
+         min_val = min(values)
+         max_val = max(values)
+@@ -208,12 +173,8 @@
+         if min_val <= isoValue and max_val >= isoValue:
+             d_voxelOccupied[i] = 1
+-            # Count vertices (naive: 3 vertices per triangle)
+-            # Determine MC case
+             case_index = 0
+             for k, v in enumerate(values):
+                 if v > isoValue:
+                     case_index |= (1 << k)
+-            
+-            # Lookup number of triangles
+             num_triangles = mc_table_num_triangles[case_index]
+             d_voxelVerts[i] = num_triangles * 3
+@@ -222,17 +183,20 @@
+             d_voxelVerts[i] = 0
+ 
+-def compactVoxels<<<grid, threads>>>(d_compVoxelArray, d_voxelOccupied, d_voxelOccupiedScan, numVoxels):
+-    i = blockIdx.x * blockDim.x + threadIdx.x
+-    if i < numVoxels:
++def exclusiveSumScan(output, input, size):
++    acc = 0
++    for i in range(size):
++        output[i] = acc
++        acc += input[i]
++
++def compactVoxels(d_compVoxelArray, d_voxelOccupied, d_voxelOccupiedScan, numVoxels):
++    for i in range(numVoxels):
+         if d_voxelOccupied[i] == 1:
+             out_idx = d_voxelOccupiedScan[i]
+             d_compVoxelArray[out_idx] = i
+ 
+-def extractIsosurface<<<grid, threads>>>(d_result, d_compVoxelArray, d_voxelVertsScan, num_activeVoxels, basePoint, voxelSize, isoValue):
+-    j = blockIdx.x * blockDim.x + threadIdx.x
+-    if j < num_activeVoxels:
++def extractIsosurface(d_result, d_compVoxelArray, d_voxelVertsScan, num_activeVoxels, gridSize, basePoint, voxelSize, isoValue):
++    for j in range(num_activeVoxels):
+         idx = d_compVoxelArray[j]
+         
+-        # Get 8 corner world coordinates (same as classify)
+         x = idx % gridSize.x
+         y = (idx // gridSize.x) % gridSize.y
+@@ -258,33 +222,21 @@
+                 case_index |= (1 << k)
+         
+-        # Lookup triangles
+         triangles = mc_table_triangles[case_index]
+-        num_triangles = len(triangles)
+-        
+-        # Compute intersection points
+-        # Edge interpolation: P = A + (iso - Va) / (Vb - Va) * (B - A)
+-        # This requires mapping edge indices to corner pairs
+-        # For brevity, assume a helper function exists
+-        points = []
++        offset = d_voxelVertsScan[idx]
++        point_idx = 0
+         for tri in triangles:
+             for edge_idx in tri:
+                 p = interpolate_edge(edge_idx, corners, values, isoValue)
+-                points.append(p)
+-        
+-        # Write to result
+-        offset = d_voxelVertsScan[idx]
+-        for k, p in enumerate(points):
+-            d_result[offset + k] = p
++                d_result[offset + point_idx] = p
++                point_idx += 1
+ 
+ def interpolate_edge(edge_idx, corners, values, isoValue):
+-    # Map edge index to corner pair
+-    # Standard MC edge mapping
+     edge_pairs = [
+-        (0,1), (1,2), (2,3), (3,0), # Bottom
+-        (4,5), (5,6), (6,7), (7,4), # Top
+-        (0,4), (1,5), (2,6), (3,7)  # Vertical
++        (0,1), (1,2), (2,3), (3,0),
++        (4,5), (5,6), (6,7), (7,4),
++        (0,4), (1,5), (2,6), (3,7)
+     ]
+     if edge_idx < 0 or edge_idx >= 12:
+-        return (0,0,0) # Should not happen
++        return (0,0,0)
+     
+     c1_idx, c2_idx = edge_pairs[edge_idx]
+@@ -322,5 +274,5 @@
+ 
+ ## Background
+-Originated from the ALG_MarchingCubes_GPU project by AlbertLiDesign [S1, unofficial]. It is described as an optimization in Marching Cubes using stream compaction to avoid processing empty voxels [S2]. It is used in volume rendering and medical imaging contexts [S2].
++It is described as an optimization in Marching Cubes using stream compaction to avoid processing empty voxels [S2]. It is used in volume rendering and medical imaging contexts [S2].
+ 
+ ## Sources

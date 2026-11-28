@@ -1,0 +1,127 @@
+# VDB RootNode Structure
+
+Also called: RootNode, Teschner hash function modification, VDB Hash Map Root Node, VDB RootNode, google::dense_hash_map VDB root, mRootMap
+
+## Overview
+The VDB RootNode is the topmost, sparse, and dynamically resizable node in a Sparse Voxel Octree (VDB) structure, serving as the entry point for all tree operations [S1, unofficial]. It solves the problem of supporting unbounded grid domains with minimal memory overhead by using a hash map to store child pointers or tile values, distinguishing it from fixed-domain internal nodes [S1, unofficial]. Unlike sibling [Sparse Voxel Octree Neighbor Construction](21317-sparse-voxel-octree-neighbor-construction.md) which focuses on connectivity, or [VDB LeafNode Structure](22348-vdb-leafnode-structure.md) which stores dense data, the RootNode manages the global coordinate space mapping [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Global voxel coordinates $(x, y, z)$ for access; insertion requests for new tiles or children.
+*   **Output:** A pointer to a child node, a tile value, or the background value if no data exists at the coordinate.
+
+**Data Structures:**
+The `RootNode` is defined by the template `class RootNode<Value, Child>` [S1, unofficial]. It contains the following fields:
+
+1.  **`mRootMap`**: A hash map of type `hash_map<RootKey, RootData, HashFunc>`.
+    *   `RootKey`: A tuple or struct representing the coarse global coordinate key (typically the top-level block index).
+    *   `RootData`: A struct defined as:
+        ```cpp
+        struct RootData {
+            Child* node; // Pointer to child node. NULL if this entry represents a tile.
+            pair<Value, bool> tile; // Stores the tile value and an active/inactive boolean flag.
+        };
+        ```
+    *   The hash map implementation is typically `google::dense_hash_map` [S1, unofficial].
+2.  **`mAccessors`**: A `Registry<Accessor>` that caches node pointers to amortize the cost of repeated bottom-up traversals for spatially coherent access patterns [S1, unofficial].
+3.  **`mBackground`**: A value of type `Value` representing the default return value for any coordinate not resolved to a tile or voxel [S1, unofficial].
+
+**Hash Function:**
+To replace the slower `std::map` lookup, a custom hash function is used. The hash value `rootHash` is computed from the `rootKey` components $(k_0, k_1, k_2)$ as follows [S1, unofficial]:
+
+$$
+\text{rootHash} = ((1 \ll \text{Log2N}) - 1) \ \& \ (k_0 \times 73856093 \ \oplus \ k_1 \times 19349663 \ \oplus \ k_2 \times 83492791)
+$$
+
+Where:
+*   `rootHash`: The resulting hash index.
+*   `Log2N`: A static constant estimating $\log_2$ of the expected size of `mRootMap`.
+*   `rootKey`: The coordinate key components $(k_0, k_1, k_2)$.
+*   `*`: Integer multiplication.
+*   `~` (or $\oplus$): Binary XOR.
+*   `&`: Bitwise AND.
+*   `<<`: Bitwise left shift.
+*   Constants: `73856093`, `19349663`, `83492791` are large prime numbers.
+
+This formula replaces the original Teschner hash function's expensive modulus operation with a bitwise AND, improving performance by $>2\times$, supporting negative coordinates, and reducing 32-bit integer overflow risk [S1, unofficial].
+
+**Algorithm Steps (Random Access):**
+1.  Compute the `rootKey` from the global $(x, y, z)$ coordinates.
+2.  Compute `rootHash` using the formula above.
+3.  Look up `rootHash` in `mRootMap`.
+4.  If the entry is not found:
+    *   Return `mBackground` [S1, unofficial].
+5.  If the entry is found:
+    *   Let `data` be the `RootData` associated with the key.
+    *   If `data.node` is `NULL`:
+        *   If `data.tile.second` (the boolean flag) is true (active):
+            *   Return `data.tile.first` (the value) [S1, unofficial].
+        *   Else (inactive):
+            *   Return `mBackground` [S1, unofficial].
+    *   If `data.node` is not `NULL`:
+        *   Recursively access the child node `data.node` with the remaining lower-level coordinates [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def root_node_access(root_node, x, y, z):
+    # 1. Compute root key from global coordinates
+    # Implementation detail: root_key is derived from the top-level block indices
+    # of x, y, z. The exact derivation depends on the grid's base resolution.
+    root_key = compute_root_key(x, y, z)
+    
+    # 2. Compute hash
+    # Log2N is a static constant defined in RootNode
+    hash_val = ((1 << root_node.Log2N) - 1) & (
+        (root_key[0] * 73856093) ^ 
+        (root_key[1] * 19349663) ^ 
+        (root_key[2] * 83492791)
+    )
+    
+    # 3. Lookup in hash map
+    if hash_val not in root_node.mRootMap:
+        return root_node.mBackground
+    
+    data = root_node.mRootMap[hash_val]
+    
+    # 4. Check if tile or child
+    if data.node is None:
+        # It is a tile
+        if data.tile.is_active:
+            return data.tile.value
+        else:
+            return root_node.mBackground
+    else:
+        # It is a child node, recurse
+        # Compute local coordinates for the child
+        local_coords = compute_local_coords(x, y, z, root_key)
+        return data.node.access(local_coords[0], local_coords[1], local_coords[2])
+```
+
+**Edge Cases and Pitfalls:**
+*   **Hash Collision:** While the hash function is designed for uniformity, collisions can occur. The hash map implementation handles this via chaining or open addressing [S1, unofficial].
+*   **Negative Coordinates:** The modified hash function correctly handles negative integers, unlike the original Teschner hash which might require offsetting [S1, unofficial].
+*   **Overflow:** The use of bitwise AND instead of modulus reduces the risk of 32-bit integer overflow during multiplication [S1, unofficial].
+*   **Small Map Performance:** If `mRootMap` is very small, the overhead of hash computation may make `std::map` competitive or faster, as the $O(1)$ average case advantage is negligible compared to constant factors [S1, unofficial].
+
+## Subtopics
+
+### [VDB Random Access](22363-vdb-random-access.md)
+VDB Random Access is the algorithm for accessing arbitrary voxels in a Sparse Voxel Octree by traversing the tree from the `RootNode`. It solves the problem of retrieving data values at specific $(x, y, z)$ coordinates in a sparse, unbounded domain. It is distinguished from sequential access methods by its ability to jump directly to any coordinate, and from hash-grid methods by its hierarchical structure which supports efficient pruning and tile values. It builds on [VDB RootNode Structure](22350-vdb-rootnode-structure.md).
+
+### VDB InternalNode Structure
+Internal nodes reside at intermediate levels between root and leaf, defining the B+tree depth and shape [S1, unofficial]. They encode both values and tree topology (pointers to children). `mInternalDAT` is a union storing either a pointer to a child node or a tile value. `mChildMask` encodes node topology (which children exist). `mValueMask` indicates if a tile value is active. Template parameters: `Value`, `Child`, `Log2X`, `Log2Y=Log2X`, `Log2Z=Log2Y`. Fields: `static const int sLog2X=Log2X+Child::sLog2X`, `sLog2Y=Log2Y+Child::sLog2Y`, `sLog2Z=Log2Z+Child::sLog2Z`, `sSize=1<<Log2X+Log2Y+Log2Z`; union `InternalData { Child* child; Value value; } mInternalDAT`; `BitMask<sSize> mValueMask`; `BitMask<sSize> mChildMask`; `int32_t mX, mY, mZ` [S1, unofficial]. Pitfall: Internal nodes at different tree levels can have different branching factors (`Log2w`), affecting memory footprint and performance [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** With an optimized hash map, average random lookup complexity is $O(1)$, while worst-case is $O(n)$ where $n$ is the number of entries in `mRootMap` [S1, unofficial]. Perfect hashing would allow worst-case $O(1)$ but is not theoretically possible for unbounded domains [S1, unofficial].
+*   **Memory Complexity:** The root node is sparse, storing only entries for occupied blocks. Memory usage is proportional to the number of distinct top-level blocks, not the total volume [S1, unofficial].
+*   **Performance:** Random access into `mRootMap` is slower than lookup into fixed dense direct access tables like `mInternalDAT` [S1, unofficial]. The `rootHash` computation is more expensive than the corresponding `rootKey` computation for `std::map` [S1, unofficial]. However, since `mRootMap` is expected to be very small, the overall speed advantage over `std::map` is not obvious without benchmarking [S1, unofficial].
+*   **Strengths:** Supports unbounded grid domains; small memory footprint for sparse data; efficient for random access if the hash map is well-sized.
+*   **Limitations:** Hash map overhead for very small maps; worst-case $O(n)$ performance; not suitable for dense, fully populated grids where fixed-size arrays would be more efficient.
+
+## Background
+The VDB RootNode structure was introduced in the VDB (Volume Dynamic Data) framework, specifically detailed in "VDB: High-Resolution Sparse Volumes with Dynamic Topology" by Ken Museth (2013) [S1, unofficial]. It was designed to overcome the limitations of fixed-domain internal nodes, which require large branching factors for extreme resolutions, leading to memory overheads [S1, unofficial]. The use of `google::dense_hash_map` and the modified Teschner hash function were adopted to provide efficient, unbounded spatial indexing for high-resolution volume rendering and simulation [S1, unofficial].
+
+## Sources
+[S1] VDB: High-Resolution Sparse Volumes with Dynamic Topology (Academy Award Winner) [pdf], http://www.museth.org/Ken/Publications_files/Museth_TOG13.pdf, fetched 2026-10-26 (unofficial)

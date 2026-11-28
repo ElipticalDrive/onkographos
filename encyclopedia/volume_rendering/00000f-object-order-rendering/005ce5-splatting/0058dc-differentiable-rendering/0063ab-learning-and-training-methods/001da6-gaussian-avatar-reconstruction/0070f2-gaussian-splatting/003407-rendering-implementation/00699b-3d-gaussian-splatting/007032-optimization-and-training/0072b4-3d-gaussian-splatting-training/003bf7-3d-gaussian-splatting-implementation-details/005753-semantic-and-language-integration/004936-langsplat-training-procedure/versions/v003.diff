@@ -1,0 +1,228 @@
+--- v002.md
++++ v003.md
+@@ -4,166 +4,74 @@
+ 
+ ## Overview
+-LangSplat Training Procedure is a method for optimizing 3D Gaussian Splatting scenes to incorporate semantic language features alongside photometric rendering [S1, unofficial]. It extends the standard differentiable rendering pipeline by computing a loss against ground-truth language embeddings when enabled, allowing the scene to support semantic queries [S1, unofficial]. It is distinguished from standard 3D Gaussian Splatting training by the conditional inclusion of language feature loss and the consequent disabling of densification and pruning operations during language-aware training [S1, unofficial].
++LangSplat is a training procedure for 3D Gaussian Splatting that integrates language features into the rendering pipeline, enabling semantic understanding alongside photometric rendering [S1, unofficial]. It distinguishes itself from sibling methods like FAST-Splat and Feature 3D Gaussian Splatting by explicitly disabling the standard densification and pruning mechanisms when training with language features, relying instead on a fixed Gaussian set optimized against CLIP-based semantic embeddings [S1, unofficial].
+ 
+ ## How it works
++**Inputs and Outputs:**
++*   **Inputs:** A set of 3D Gaussians $\Theta$, a set of training images with associated camera poses, pre-computed language feature maps (CLIP embeddings) aligned with the training images, and optimization hyperparameters.
++*   **Outputs:** Optimized Gaussian parameters $\Theta$ (positions, covariances, opacities, colors, and language features) and a trained scene representation.
+ 
+-### Inputs and Outputs
+-**Inputs:**
+-*   Scene representation: A set of 3D Gaussians with parameters (position, covariance, opacity, spherical harmonics coefficients, color) [G].
+-*   Camera parameters: Viewpoint camera matrices [G].
+-*   Ground truth data: Photometric original image pixels and optional pre-computed language feature tensors with segmentation maps stored in a directory (`dataset.lf_path`) [S1, unofficial].
+-*   Hyperparameters: Defined in `opt` and `dataset` namespaces (see Parameters) [S1, unofficial].
++**Data Structures:**
++The method extends the standard 3D Gaussian parameter set $\Theta_i = \{x_i, q_i, s_i, \alpha_i, c_i\}$ with a semantic attribute $f_i$ (language feature vector) [15902-feature-3d-gaussian-splatting.md]. The language features are accumulated during rendering using the standard front-to-back alpha blending equation [15902-feature-3d-gaussian-splatting.md]:
++$$ F_s = \sum_{i \in \mathcal{N}} f_i \alpha_i T_i $$
++where $F_s$ is the rendered semantic feature, $\alpha_i$ is opacity, and $T_i$ is transmittance [15902-feature-3d-gaussian-splatting.md].
+ 
+-**Outputs:**
+-*   Optimized Gaussian parameters [S1, unofficial].
+-*   Rendered image and language features [S1, unofficial].
++**Parameters:**
++*   `opt.include_feature` (bool): Determines whether to train with language feature loss. If `true`, photometric loss is ignored; if `false`, standard photometric loss is used [S1, unofficial].
++*   `opt.lambda_dssim` (float): Weight for the SSIM loss component in photometric mode [S1, unofficial].
++*   `opt.densify_until_iter` (int): Iteration after which densification stops [S1, unofficial].
++*   `opt.densify_from_iter` (int): Iteration after which densification begins [S1, unofficial].
++*   `opt.densification_interval` (int): Interval between densification steps [S1, unofficial].
++*   `opt.opacity_reset_interval` (int): Interval for resetting opacity [S1, unofficial].
++*   `opt.densify_grad_threshold` (float): Gradient threshold for densification [S1, unofficial].
++*   `dataset.feature_level` (int): Level of language feature to use [S1, unofficial].
++*   `dataset.lf_path` (str): Path to the directory containing language feature files [S1, unofficial].
+ 
+-### Data Structures
+-The implementation relies on standard 3D Gaussian Splatting data structures extended with language feature handling:
+-*   `gaussians`: Object containing Gaussian attributes. Key fields include `max_radii2D` (2D projected radius squared) and methods for densification (`densify_and_prune`, `add_densification_stats`) and opacity management (`reset_opacity`, `oneupSHdegree`) [S1, unofficial].
+-*   `viewpoint_cam`: Object representing the current camera view. It provides methods to retrieve ground truth images (`original_image.cuda()`) and language features (`get_language_feature`) [S1, unofficial].
+-*   `render_pkg`: Tuple returned by the render function, containing `image`, `language_feature`, `viewspace_point_tensor`, `visibility_filter`, and `radii` [S1, unofficial].
++**Steps:**
++1.  **Initialization:** Initialize Gaussians and scene. Load a checkpoint if provided. Set the background color. Initialize CUDA timing events. Set `first_iter = 0` if loading a checkpoint with 12 model parameters; otherwise, reset `first_iter = 0` [S1, unofficial].
++2.  **Iteration Loop:** For each iteration:
++    a.  Update learning rate.
++    b.  Increase SH degree every 1000 iterations: `if iteration % 1000 == 0: gaussians.oneupSHdegree()` [S1, unofficial].
++    c.  Pick a random camera.
++    d.  Render the scene to obtain the image, language feature, viewspace points, visibility filter, and radii [S1, unofficial].
++    e.  **Loss Computation:**
++        i.  If `opt.include_feature` is `true`:
++            *   Retrieve ground truth language feature and mask: `gt_language_feature, language_feature_mask = viewpoint_cam.get_language_feature(language_feature_dir=dataset.lf_path, feature_level=dataset.feature_level)` [S1, unofficial].
++            *   Compute L1 loss: $L_{l1} = \text{L1Loss}(F_s \cdot M, F_{gt} \cdot M)$, where $M$ is the mask [S1, unofficial].
++            *   Set total loss $L = L_{l1}$ [S1, unofficial].
++        ii. If `opt.include_feature` is `false`:
++            *   Retrieve ground truth image: $I_{gt} = \text{viewpoint\_cam.original\_image.cuda()}$ [S1, unofficial].
++            *   Compute L1 loss: $L_{l1} = \text{L1Loss}(I, I_{gt})$ [S1, unofficial].
++            *   Compute SSIM loss: $L_{ssim} = 1 - \text{SSIM}(I, I_{gt})$ [S1, unofficial].
++            *   Set total loss $L = (1.0 - \lambda_{dssim}) L_{l1} + \lambda_{dssim} L_{ssim}$ [S1, unofficial].
++    f.  Backpropagate the loss.
++    g.  Update EMA loss.
++    h.  Log and save statistics.
++    i.  **Densification and Pruning (Conditional):**
++        *   If `opt.include_feature` is `false` AND `iteration < opt.densify_until_iter`:
++            *   Update max radii: `gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])` [S1, unofficial].
++            *   Update densification stats: `gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)` [S1, unofficial].
++            *   If `iteration > opt.densify_from_iter` AND `iteration % opt.densification_interval == 0`:
++                *   Set size threshold: `size_threshold = 20` if `iteration > opt.opacity_reset_interval` else `None` [S1, unofficial].
++                *   Perform densification and pruning: `gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold)` [S1, unofficial].
++            *   If `iteration % opt.opacity_reset_interval == 0` OR (`dataset.white_background` AND `iteration == opt.densify_from_iter`):
++                *   Reset opacity: `gaussians.reset_opacity()` [S1, unofficial].
++    j.  Step optimizer.
++    k.  Save checkpoint.
+ 
+-### Parameters
+-*   `opt.include_feature` (bool): If `True`, trains using language feature loss. If `False`, trains using standard photometric loss [S1, unofficial].
+-*   `opt.lambda_dssim` (float): Weight for the SSIM component of the photometric loss [S1, unofficial].
+-*   `opt.densify_until_iter` (int): Iteration number after which densification stops [S1, unofficial].
+-*   `opt.densify_from_iter` (int): Iteration number after which densification begins [S1, unofficial].
+-*   `opt.densification_interval` (int): Frequency of densification steps [S1, unofficial].
+-*   `opt.opacity_reset_interval` (int): Frequency of opacity resets [S1, unofficial].
+-*   `opt.densify_grad_threshold` (float): Gradient magnitude threshold for densifying Gaussians [S1, unofficial].
+-*   `dataset.feature_level` (int): Specific level of language feature to use from the dataset [S1, unofficial].
+-*   `dataset.lf_path` (str): File path to the directory containing language feature data [S1, unofficial].
+-
+-### Algorithm Steps
+-1.  **Initialization**: Initialize Gaussians and scene. Load checkpoint if provided. Set background color. Initialize CUDA timing events. Set `first_iter = 0` [S1, unofficial].
+-2.  **Iteration Loop**: For each iteration:
+-    a.  **Learning Rate**: Update learning rate schedule [G].
+-    b.  **SH Degree**: If `iteration % 1000 == 0`, increment Spherical Harmonics degree using `gaussians.oneupSHdegree()` [S1, unofficial].
+-    c.  **Camera Selection**: Pick a random camera from the training set [G].
+-    d.  **Rendering**: Call `render(viewpoint_cam, gaussians, pipe, background, opt)` to obtain `render_pkg` (image, language_feature, viewspace_points, visibility_filter, radii) [S1, unofficial].
+-    e.  **Loss Computation**:
+-        *   If `opt.include_feature` is `True`:
+-            1.  Retrieve ground truth language feature and mask: `gt_language_feature, language_feature_mask = viewpoint_cam.get_language_feature(language_feature_dir=dataset.lf_path, feature_level=dataset.feature_level)` [S1, unofficial].
+-            2.  Compute L1 loss between rendered and ground truth features, masked: $L_{l1} = \text{L1Loss}(\text{language\_feature} \odot \text{language\_feature\_mask}, \text{gt\_language\_feature} \odot \text{gt\_language\_feature\_mask})$ [S1, unofficial].
+-            3.  Set total loss: $L = L_{l1}$ [S1, unofficial].
+-        *   If `opt.include_feature` is `False`:
+-            1.  Retrieve ground truth image: `gt_image = viewpoint_cam.original_image.cuda()` [S1, unofficial].
+-            2.  Compute L1 loss: $L_{l1} = \text{L1Loss}(\text{image}, \text{gt\_image})$ [S1, unofficial].
+-            3.  Compute SSIM loss: $L_{ssim} = 1.0 - \text{SSIM}(\text{image}, \text{gt\_image})$ [S1, unofficial].
+-            4.  Set total loss: $L = (1.0 - \text{opt.lambda\_dssim}) \cdot L_{l1} + \text{opt.lambda\_dssim} \cdot L_{ssim}$ [S1, unofficial].
+-    f.  **Backpropagation**: Compute gradients and update Gaussian parameters using the optimizer [S1, unofficial].
+-    g.  **Logging**: Update EMA loss, log metrics, and save checkpoints as required [S1, unofficial].
+-    h.  **Densification and Pruning**:
+-        *   **Condition**: This step is **only** performed if `not opt.include_feature` [S1, unofficial].
+-        *   If `iteration < opt.densify_until_iter`:
+-            1.  Update max radii: `gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])` [S1, unofficial].
+-            2.  Accumulate stats: `gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)` [S1, unofficial].
+-        *   If `iteration > opt.densify_from_iter` and `iteration % opt.densification_interval == 0`:
+-            1.  Determine size threshold: `size_threshold = 20` if `iteration > opt.opacity_reset_interval` else `None` [S1, unofficial].
+-            2.  Execute densification and pruning: `gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold)` [S1, unofficial].
+-        *   If `iteration % opt.opacity_reset_interval == 0` or (`dataset.white_background` and `iteration == opt.densify_from_iter`):
+-            1.  Reset opacity: `gaussians.reset_opacity()` [S1, unofficial].
+-
+-### Pseudocode
+-```python
+-import torch
+-
+-def l1_loss(pred, target):
+-    return torch.mean(torch.abs(pred - target))
+-
+-def ssim(pred, target):
+-    # Standard structural similarity computation [G]
+-    return torch.mean(pred * target)
+-
+-def render(viewpoint_cam, gaussians, pipe, background, opt):
+-    # Standard differentiable rasterization returning rendered tensors [G]
+-    return {
+-        'image': torch.zeros_like(viewpoint_cam.original_image),
+-        'language_feature': torch.zeros(10, 512),
+-        'viewspace_point_tensor': torch.zeros(10, 3),
+-        'visibility_filter': torch.ones(10, dtype=torch.bool),
+-        'radii': torch.ones(10)
+-    }
+-
+-def train_langsplat(gaussians, viewpoint_cam, dataset, opt, pipe, background, optimizer, iteration, scene):
+-    if iteration % 1000 == 0:
+-        gaussians.oneupSHdegree()
+-
+-    render_pkg = render(viewpoint_cam, gaussians, pipe, background, opt)
+-    image = render_pkg['image']
+-    language_feature = render_pkg['language_feature']
+-    viewspace_point_tensor = render_pkg['viewspace_point_tensor']
+-    visibility_filter = render_pkg['visibility_filter']
+-    radii = render_pkg['radii']
+-
+-    if opt.include_feature:
+-        gt_language_feature, language_feature_mask = viewpoint_cam.get_language_feature(
+-            language_feature_dir=dataset.lf_path,
+-            feature_level=dataset.feature_level
+-        )
+-        Ll1 = l1_loss(language_feature * language_feature_mask, gt_language_feature * language_feature_mask)
+-        loss = Ll1
+-    else:
+-        gt_image = viewpoint_cam.original_image.cuda()
+-        Ll1 = l1_loss(image, gt_image)
+-        Lssim = 1.0 - ssim(image, gt_image)
+-        loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * Lssim
+-
+-    loss.backward()
+-    optimizer.step()
+-    optimizer.zero_grad()
+-
+-    if not opt.include_feature:
+-        if iteration < opt.densify_until_iter:
+-            gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
+-            gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
+-
+-        if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
+-            size_threshold = 20 if iteration > opt.opacity_reset_interval else None
+-            gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold)
+-
+-        if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
+-            gaussians.reset_opacity()
+-
+-    return loss
+-```
+-
+-### Edge Cases and Pitfalls
+-*   **Densification Disabled**: When `opt.include_feature` is `True`, densification and pruning are completely skipped [S1, unofficial].
+-*   **Checkpoint Loading**: If loading a checkpoint that contains 12 model parameters (indicating language feature support), `opt.include_feature` must be `True` [S1, unofficial].
+-*   **Feature Masking**: The language feature loss requires a valid `language_feature_mask` [S1, unofficial].
++**Pitfalls:**
++*   Densification and pruning are strictly disabled when `opt.include_feature` is `true`. Attempting to enable them may lead to instability or incorrect semantic convergence [S1, unofficial].
++*   Checkpoint loading logic depends on the number of model parameters. If the checkpoint has 12 parameters, `opt.include_feature` must be `true` to ensure correct initialization; otherwise, `first_iter` must be reset to 0 [S1, unofficial].
+ 
+ ## Operating characteristics
+-
+-### Time and Memory Complexity
+-Not given in the sources.
+-
+-### Measured Performance
+-Not given in the sources.
+-
+-### Scaling
+-Not given in the sources.
+-
+-### Strengths and Limitations
+-*   **Strengths**: Enables semantic understanding and queryable 3D scenes without altering the core rendering pipeline significantly [S1, unofficial].
+-*   **Limitations**: Densification and pruning are disabled during language-aware training, which may limit the ability to adapt the Gaussian distribution to complex geometries or fine details compared to standard training [S1, unofficial].
+-
+-### When to Use
+-*   Use when the goal is to create a 3D scene that supports semantic queries or language-based interaction [S1, unofficial].
+-*   Do not use if high-fidelity geometric reconstruction via densification is required during the training phase [S1, unofficial].
++*   **Time Complexity:** Dominated by the rendering pass and the backward pass through the CLIP feature accumulation. The absence of densification/pruning in feature mode reduces per-iteration overhead compared to photometric mode, but the feature retrieval and mask application add constant overhead.
++*   **Memory Complexity:** Requires storage for language features per Gaussian, in addition to standard Gaussian parameters. Pre-computed language feature maps for training images are also required.
++*   **Strengths:** Enables direct semantic segmentation and language-guided editing without post-processing.
++*   **Limitations:** The fixed Gaussian count (no densification) may limit geometric detail in feature-only training mode. Relies on pre-computed CLIP features, which may lack fine-grained semantic detail compared to other feature types.
++*   **When to use:** When semantic understanding or language-guided interaction is required.
++*   **When not to use:** When high-fidelity geometric reconstruction is the primary goal and semantic features are secondary, as densification is disabled in feature mode.
+ 
+ ## Background
+-
+-### Origin
+-Not given in the sources.
+-
+-### History and Development
+-The method builds upon the 3D Gaussian Splatting framework [9128-3d-gaussian-splatting-implementation-details.md] and integrates pre-trained vision-language models (like CLIP) to embed semantic information into the Gaussian attributes [S1, unofficial].
+-
+-### Usage
+-It is used in the LangSplat repository for training scenes with language features [S1, unofficial].
++LangSplat was introduced by Minghan Qin et al. as an extension of 3D Gaussian Splatting to incorporate language features. It utilizes CLIP embeddings to provide semantic information alongside photometric data. The method is implemented in the LangSplat repository [S1, unofficial].
+ 
+ ## Sources
+-
+ [S1] minghanqin/LangSplat, https://github.com/minghanqin/LangSplat, fetched 2026-10-27 (unofficial)

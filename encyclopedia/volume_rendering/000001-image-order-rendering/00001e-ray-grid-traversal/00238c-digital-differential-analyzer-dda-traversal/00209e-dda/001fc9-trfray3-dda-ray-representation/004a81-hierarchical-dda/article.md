@@ -1,0 +1,156 @@
+# Hierarchical DDA
+
+Also called: 3-level bit pyramid traversal, Multilevel DDA Raycasting
+
+## Overview
+Hierarchical DDA accelerates ray traversal in sparse voxel grids by skipping empty regions using a multi-level occupancy hierarchy, avoiding the $O(N)$ voxel visits of standard DDA [S2, unofficial]. It sets itself apart from standard DDA by descending the hierarchy only upon hitting occupied nodes, allowing large open spaces to be skipped at coarse granularities [S1, unofficial][S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: Ray origin $\mathbf{o}$, ray direction $\mathbf{d}$ (normalized), world bounding box, and a 3-level occupancy hierarchy [S1, unofficial][S2, unofficial].
+- Output: The first intersection point or distance along the ray, or `None` if no hit occurs within bounds [S2, unofficial].
+
+**Data Structures:**
+The hierarchy is a 3-level occupancy-bit pyramid [S1, unofficial]:
+1. **Chunk Level:** Covers $64^3$ world voxels [S1, unofficial]. Contains a bitmask with 1 bit per $16^3$ tile [S1, unofficial].
+2. **Tile Level:** Covers $16^3$ world voxels [S1, unofficial]. Contains a bitmask with 1 bit per $4^3$ brick [S1, unofficial].
+3. **Brick Level:** Covers $4^3$ world voxels [S1, unofficial]. Contains a 64-bit occupancy mask with 1 bit per voxel [S1, unofficial].
+
+**Steps:**
+1. **Top-Level Traversal:** Cast the ray against the top-level hierarchy (chunks) [S2, unofficial].
+2. **Empty Space Skipping:** If the current cell is empty, skip to the next cell boundary along the ray using exact cell-boundary snapping [S1, unofficial].
+3. **Descent:** If the current cell is occupied, descend to the next lower level [S2, unofficial].
+4. **Base Level:** Once at the brick level, perform standard DDA traversal within the occupied brick to find the exact voxel intersection [S2, unofficial].
+5. **Termination:** Return the intersection point [S2, unofficial]. If the ray exits the world bounds without hitting geometry, terminate [S2, unofficial].
+
+**Parameters:**
+- Chunk size: $64^3$ voxels [S1, unofficial].
+- Tile size: $16^3$ voxels [S1, unofficial].
+- Brick size: $4^3$ voxels [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def hierarchical_dda(ray_o, ray_d, world_min, world_max, hierarchy):
+    # Compute ray bounds against world AABB [G]
+    t_min, t_max = ray_aabb_intersect(ray_o, ray_d, world_min, world_max)
+    if t_max < 0:
+        return None
+
+    levels = ['chunk', 'tile', 'brick']
+    level_dims = [64, 16, 4]
+    current_level_idx = 0
+    current_cell_min = world_min
+
+    while current_level_idx < len(levels):
+        level = levels[current_level_idx]
+        dim = level_dims[current_level_idx]
+
+        # Ray intersection with current cell AABB [G]
+        cell_max = (current_cell_min[0] + dim, current_cell_min[1] + dim, current_cell_min[2] + dim)
+        t_entry, t_exit = ray_aabb_intersect(ray_o, ray_d, current_cell_min, cell_max)
+        t_entry = max(t_entry, t_min)
+        t_exit = min(t_exit, t_max)
+
+        if t_entry >= t_exit:
+            # Miss or behind, skip to next cell boundary [G]
+            t_next = skip_to_cell(ray_o, ray_d, current_cell_min, dim)
+            if t_next > t_max:
+                return None
+            current_cell_min = advance_origin(current_cell_min, ray_d, dim, t_next - t_entry)
+            continue
+
+        # Check occupancy bit for current cell [G]
+        local_coords = tuple((current_cell_min[i] - world_min[i]) // dim for i in range(3))
+        bit_idx = local_coords[0] + local_coords[1] * dim + local_coords[2] * dim * dim
+        if not hierarchy[level].is_occupied(bit_idx):
+            # Empty, skip [G]
+            t_next = skip_to_cell(ray_o, ray_d, current_cell_min, dim)
+            if t_next > t_max:
+                return None
+            current_cell_min = advance_origin(current_cell_min, ray_d, dim, t_next - t_entry)
+            continue
+
+        # Occupied
+        if level == 'brick':
+            # Base level: standard DDA within 4x4x4 brick [G]
+            return standard_dda(ray_o, ray_d, current_cell_min, dim, t_entry, t_exit, hierarchy['brick'].mask)
+        else:
+            # Descend [G]
+            current_level_idx += 1
+            # cell_min stays the same (we are inside this occupied cell)
+
+    return None
+
+def ray_aabb_intersect(ray_o, ray_d, aabb_min, aabb_max):
+    t_min = [(aabb_min[i] - ray_o[i]) / ray_d[i] for i in range(3)]
+    t_max = [(aabb_max[i] - ray_o[i]) / ray_d[i] for i in range(3)]
+    t_entry = max(min(t_min[i], t_max[i]) for i in range(3))
+    t_exit = min(max(t_min[i], t_max[i]) for i in range(3))
+    return t_entry, t_exit
+
+def skip_to_cell(ray_o, ray_d, cell_min, dim):
+    # Compute t to next integer grid boundary along ray direction [G]
+    t_nexts = []
+    for i in range(3):
+        if ray_d[i] == 0:
+            continue
+        next_grid = cell_min[i] + dim if ray_d[i] > 0 else cell_min[i]
+        t_nexts.append((next_grid - ray_o[i]) / ray_d[i])
+    return max(t_nexts) if t_nexts else float('inf')
+
+def advance_origin(cell_min, ray_d, dim, dt):
+    return tuple(cell_min[i] + ray_d[i] * dt for i in range(3))
+
+def standard_dda(ray_o, ray_d, cell_min, dim, t_entry, t_exit, brick_mask):
+    # Standard 3D DDA inside the 4x4x4 brick [G]
+    # Initialize DDA state
+    entry_point = (ray_o[i] + ray_d[i] * t_entry for i in range(3))
+    voxel = tuple(int(entry_point[i] // 1.0) for i in range(3))
+    step = [1 if ray_d[i] > 0 else -1 for i in range(3)]
+    t_delta = [1.0 / abs(ray_d[i]) if ray_d[i] != 0 else float('inf') for i in range(3)]
+    t_max = []
+    for i in range(3):
+        next_boundary = cell_min[i] + (dim if step[i] > 0 else 0)
+        t_max.append(t_entry + (next_boundary - ray_o[i]) * t_delta[i])
+    
+    while t_entry <= t_exit:
+        # Check occupancy (simplified for 4x4x4 brick) [G]
+        if brick_mask & (1 << (voxel[0] + voxel[1] * 4 + voxel[2] * 16)):
+            return (voxel[0] + cell_min[0], voxel[1] + cell_min[1], voxel[2] + cell_min[2]), t_entry
+        
+        # Advance to next voxel [G]
+        t_entry = max(t_max[0], t_max[1], t_max[2])
+        for i in range(3):
+            if t_max[i] == t_entry:
+                voxel[i] += step[i]
+                t_max[i] += t_delta[i]
+        if t_entry > t_exit:
+            break
+    return None
+```
+
+**Edge Cases and Pitfalls:**
+- Exact cell-boundary snapping is used to skip empty space at 16- or 4-voxel granularity [S1, unofficial].
+- Standard DDA edge cases (e.g., rays parallel to grid axes) are handled by the base-level traversal logic [G].
+
+## Subtopics
+
+### [Hierarchical DDA with Chunk Stepping](8591-hierarchical-dda-with-chunk-stepping.md)
+Traces a ray through a hierarchical voxel map by stepping through chunks using a 3D DDA algorithm. It treats the lowest hierarchy level as solid $8 \times 8 \times 8$ blocks, allowing the ray to skip empty regions in $O(1)$ time per chunk boundary. Choose this when chunk-level skipping is sufficient and finer granularity is not needed.
+
+## Operating characteristics
+- **Time Complexity:** Skips large open spaces efficiently, significantly reducing voxel visits compared to standard DDA [S2, unofficial]. In dense scenes, performance degrades toward standard DDA as hierarchy skipping yields less benefit [S2, unofficial].
+- **Memory Complexity:** Requires additional memory for hierarchy bitfields [S1, unofficial].
+- **Strengths:** Efficiently handles large empty spaces; reduces memory bandwidth by skipping empty voxels [S2, unofficial].
+- **Limitations:** Hierarchy traversal overhead; less effective in dense scenes [S2, unofficial].
+- **When to Use:** Sparse voxel grids with large empty regions [S2, unofficial].
+- **When Not to Use:** Dense scenes or when memory overhead is a constraint [S2, unofficial].
+
+## Background
+Hierarchical DDA was developed to address the inefficiency of standard DDA in sparse voxel grids [S2, unofficial]. It builds on the concept of multi-level raycasting, where large open spaces are skipped by casting rays on a top-level hierarchy and descending to the base level only upon hitting geometry [S2, unofficial]. The method was initially implemented on the CPU before being ported to the GPU [S2, unofficial]. It is used in real-time voxel rendering engines to optimize ray marching performance [S1, unofficial].
+
+## Sources
+[S1] mstampfli/voxelG, https://github.com/mstampfli/voxelG, fetched 2026-10-24 (unofficial)
+[S2] Voxel Rendering Techniques - Breck Massey, https://breckmassey.com/project?id=voxelRenderingTechniques, fetched 2026-10-25 (unofficial)

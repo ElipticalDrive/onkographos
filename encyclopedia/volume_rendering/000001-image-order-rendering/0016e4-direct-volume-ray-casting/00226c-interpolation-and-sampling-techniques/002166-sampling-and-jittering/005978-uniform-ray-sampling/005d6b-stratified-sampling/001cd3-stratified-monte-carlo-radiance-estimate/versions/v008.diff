@@ -1,0 +1,238 @@
+--- v007.md
++++ v008.md
+@@ -4,116 +4,122 @@
+ 
+ ## Overview
+-The Stratified Monte Carlo Radiance Estimate is an unbiased radiance estimation technique that uses stratified sampling to reduce variance compared to uniform sampling, particularly effective for degenerate distributions [S1, unofficial]. It partitions the ray depth interval $[t_n, t_f]$ into $k$ equal-sized bins and generates one sample per bin, avoiding the clustering and gaps inherent in pure uniform sampling [S1, unofficial]. This method sets itself apart from its siblings by focusing specifically on the variance reduction of the radiance integral along a single ray segment, whereas [Batch Stratified Sampling](2730-batch-stratified-sampling.md) optimizes for batched execution and [Stratified Ray Sampling](3014-stratified-ray-sampling.md) extends stratification to the spatial domain of the image plane.
++The Stratified Monte Carlo Radiance Estimate is an unbiased radiance estimation technique that reduces variance compared to uniform sampling, particularly effective for degenerate distributions [S1, unofficial]. It sets itself apart from its sibling [Batch Stratified Sampling](2730-batch-stratified-sampling.md) by focusing on the specific integration of radiance along a single ray's path segment using stratified bins, and from [Stratified Ray Sampling](3014-stratified-ray-sampling.md) by operating on the distance parameter $t$ along the ray rather than stratifying the ray origins or directions themselves.
+ 
+ ## How it works
+ **Inputs and Outputs:**
+ *   **Inputs:** Ray origin $\mathbf{o}$, ray direction $\mathbf{d}$, near clipping plane $t_n$, far clipping plane $t_f$, and number of samples $k$.
+-*   **Outputs:** A set of sample distances $\{\tau_i\}_{i=1}^k$ along the ray, and the corresponding 3D positions $\{\mathbf{p}_i\}_{i=1}^k$. The final radiance estimate $\hat{C}(\mathbf{r})$ is computed from these samples.
++*   **Outputs:** Estimated radiance $\hat{C}(\mathbf{r})$ for the ray $\mathbf{r}$.
+ 
+ **Data Structures:**
+-The method requires storing the bin boundaries and the generated samples.
+-*   `bins`: An array of size $k+1$ containing the boundaries $t_0, \dots, t_k$.
+-*   `samples`: An array of size $k$ containing the sampled distances $\tau_i$.
+-*   `positions`: An array of size $k$ containing the 3D positions $\mathbf{p}_i$.
++The method requires storing the bin boundaries and the sampled distances. In implementation, these are often stored in structures like `RayBundle.sample_points` (3D positions) and `RayBundle.sample_lengths` (distances $t_i$) [S2, unofficial].
+ 
+ **Steps:**
+-1.  **Bin Definition:** Divide the interval $[t_n, t_f]$ into $k$ equal-sized bins. The boundaries are defined as:
+-    $$ t_i = t_n + i \cdot \frac{t_f - t_n}{k}, \quad \text{for } i = 0, \dots, k $$
+-    This creates $k$ bins where the $i$-th bin spans $[t_{i-1}, t_i]$ [S1, unofficial][S2, unofficial][S3, unofficial].
++1.  **Define Bin Boundaries:** Divide the integration interval $[t_n, t_f]$ into $k$ equal-sized bins. The boundaries $t_i$ for $i=0, \dots, k$ are defined as [S1, S3, unofficial]:
++    $$ t_i = t_n + i \cdot \frac{t_f - t_n}{k} $$
++    where $t_0 = t_n$ and $t_k = t_f$.
+ 
+-2.  **Sampling:** For each bin $i$ (where $i=1, \dots, k$), a sample $\tau_i$ is drawn.
+-    *   **Randomized (Unbiased):** A uniform random number $u_i \sim U[0, 1]$ is generated, and the sample is computed as:
++2.  **Generate Samples:** For each bin $i$ (where $i=1, \dots, k$), generate a sample $\tau_i$ within the interval $[t_{i-1}, t_i]$.
++    *   **Randomized (Unbiased):** Draw a uniform random number $u_i \sim U[0, 1]$ and compute [S1, S3, unofficial]:
+         $$ \tau_i = t_{i-1} + u_i \cdot (t_i - t_{i-1}) $$
+-        This ensures the sample is uniformly distributed within the bin [S1, unofficial][S2, unofficial][S3, unofficial].
+-    *   **Deterministic (Midpoint):** The center of the bin is used:
++    *   **Deterministic (Midpoint):** Use the center of the bin [S3, unofficial]:
+         $$ \tau_i = 0.5 \cdot (t_{i-1} + t_i) $$
+-        This is a deterministic variant that removes randomness but may introduce aliasing if the scene has periodic structures [S1, unofficial][S2, unofficial][S3, unofficial].
+ 
+-3.  **Position Calculation:** The 3D position $\mathbf{p}_i$ for each sample is calculated from the ray origin $\mathbf{o}$ and direction $\mathbf{d}$:
++3.  **Compute 3D Positions:** Calculate the 3D position $\mathbf{p}_i$ for each sample distance $\tau_i$ [S2, unofficial]:
+     $$ \mathbf{p}_i = \mathbf{o} + \tau_i \mathbf{d} $$
+ 
+-4.  **Radiance Estimation:** The stratified estimate of the radiance $\hat{C}_{\text{IW}}(\mathbf{r})$ is computed as [S1, unofficial]:
+-    $$ \hat{C}_{\text{IW}}(\mathbf{r}) = \sum_{i=1}^k (t_i - t_{i-1}) c_{\mathbf{r}}(\tau_i) \frac{dF_{\mathbf{r}}}{dt} \bigg|_{t=\tau_i} $$
+-    where $c_{\mathbf{r}}(\tau_i)$ is the color contribution at sample $\tau_i$, and $\frac{dF_{\mathbf{r}}}{dt} \big|_{t=\tau_i}$ is the derivative of the transmittance or relevant radiance term with respect to distance at $\tau_i$. The term $(t_i - t_{i-1})$ represents the width of the bin, which is constant for uniform stratification: $\Delta t = \frac{t_f - t_n}{k}$.
++4.  **Evaluate Density and Color:** Evaluate the volume density $\sigma_i$ and color contribution $c_i$ at each position $\mathbf{p}_i$.
+ 
+-**Parameters:**
+-*   $k$: Number of samples per ray. Typical values vary by scene complexity. In a 'Foggy' field experiment, $k=32$ samples matched the baseline performance of $k=256$ uniform samples. In a 'Wall' field experiment, only $k=4$ samples were needed to match the baseline [S1, unofficial].
++5.  **Compute Opacity and Transmittance:**
++    *   The distance between neighboring sampling points is $\delta_i = t_i - t_{i-1}$ [S1, unofficial].
++    *   The opacity $\alpha_i$ for the segment is [S1, unofficial]:
++        $$ \alpha_i = 1 - \exp(-\sigma_i \delta_i) $$
++    *   The transmittance $T_i$ from the ray origin to the start of bin $i$ is [S1, unofficial]:
++        $$ T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right) $$
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Precision:** When $t_f - t_n$ is very small, floating-point precision issues may arise in bin boundary calculation.
+-*   **Degenerate Distributions:** The method is particularly effective for degenerate distributions where uniform sampling performs poorly [S1, unofficial].
+-*   **Bias:** The randomized version is unbiased. The deterministic midpoint version is biased but may have lower variance in specific smooth scenarios [S1, unofficial].
++6.  **Accumulate Radiance:** Compute the final radiance estimate by summing the contributions [S1, unofficial]:
++    $$ \hat{C}(\mathbf{r}) = \sum_{i=1}^{k} T_i \alpha_i c_i $$
+ 
+ **Pseudocode:**
+ ```python
+-import numpy as np
++import math
++import random
+ 
+-def stratified_monte_carlo_radiance_estimate(o, d, t_n, t_f, k, randomize=True):
++def stratified_monte_carlo_radiance_estimate(ray_origin, ray_direction, t_near, t_far, num_samples, density_func, color_func):
+     """
+-    Compute stratified Monte Carlo radiance estimate along a ray.
++    Computes the stratified Monte Carlo radiance estimate for a single ray.
+     
+     Args:
+-        o: Ray origin (3D vector)
+-        d: Ray direction (3D vector)
+-        t_n: Near clipping plane distance
+-        t_f: Far clipping plane distance
+-        k: Number of samples
+-        randomize: If True, use random samples within bins; else use midpoints
++        ray_origin: 3D vector (x, y, z)
++        ray_direction: 3D vector (x, y, z), assumed normalized
++        t_near: float, near clipping plane distance
++        t_far: float, far clipping plane distance
++        num_samples: int, number of stratified bins k
++        density_func: function(p) -> float, returns density sigma at position p
++        color_func: function(p) -> float, returns color contribution c at position p
+         
+     Returns:
+-        positions: Array of shape (k, 3) containing 3D positions
+-        radiance_estimate: Scalar radiance estimate
++        float, estimated radiance C(r)
+     """
+-    # Step 1: Bin Definition
+-    # Create k+1 boundaries
+-    bins = np.linspace(t_n, t_f, k + 1)
++    # Step 1: Define bin boundaries
++    # t_i = t_near + i * (t_far - t_near) / k
++    # We need t_0 to t_k
++    bin_width = (t_far - t_near) / num_samples
+     
+-    # Step 2: Sampling
+-    if randomize:
+-        # Generate k uniform random numbers in [0, 1]
+-        u = np.random.uniform(0, 1, k)
+-        # Sample uniformly within each bin
+-        # bins[:-1] are lower bounds, bins[1:] are upper bounds
+-        samples = bins[:-1] + u * (bins[1:] - bins[:-1])
+-    else:
+-        # Use midpoints
+-        samples = 0.5 * (bins[:-1] + bins[1:])
++    # Precompute boundaries to avoid repeated multiplication
++    # t_bounds[i] corresponds to t_i
++    t_bounds = [t_near + i * bin_width for i in range(num_samples + 1)]
++    
++    total_radiance = 0.0
++    current_transmittance = 1.0
++    
++    # Step 2-6: Iterate over each bin
++    for i in range(1, num_samples + 1):
++        t_prev = t_bounds[i-1]
++        t_curr = t_bounds[i]
+         
+-    # Step 3: Position Calculation
+-    positions = o + samples[:, np.newaxis] * d
+-    
+-    # Step 4: Radiance Estimation
+-    # Note: The exact form of c_r(tau) and dF_r/dt depends on the specific volume rendering equation.
+-    # Here we assume a generic contribution function and transmittance derivative.
+-    # For a standard volume rendering integral, this might involve density, emission, etc.
+-    # The formula from [S1, unofficial] is:
+-    # C_hat = sum( (t_i - t_{i-1}) * c_r(tau_i) * dF_r/dt |_{t=tau_i} )
+-    
+-    bin_width = (t_f - t_n) / k
+-    
+-    # Placeholder for actual volume rendering computation
+-    # In practice, c_r(tau_i) and dF_r/dt must be computed based on the volume data at positions[i]
+-    # For demonstration, we assume these are provided by a hypothetical function
+-    contributions = np.zeros(k)
+-    transmittance_derivatives = np.zeros(k)
+-    
+-    for i in range(k):
+-        # Compute color contribution at position
+-        contributions[i] = compute_color_contribution(positions[i]) # [G]
+-        # Compute transmittance derivative at position
+-        transmittance_derivatives[i] = compute_transmittance_derivative(positions[i]) # [G]
++        # Step 2: Generate sample tau_i
++        # Using randomized uniform sampling for unbiased estimate
++        u_i = random.uniform(0.0, 1.0)
++        tau_i = t_prev + u_i * (t_curr - t_prev)
+         
+-    radiance_estimate = np.sum(bin_width * contributions * transmittance_derivatives)
+-    
+-    return positions, radiance_estimate
++        # Step 3: Compute 3D position
++        p_i = (
++            ray_origin[0] + tau_i * ray_direction[0],
++            ray_origin[1] + tau_i * ray_direction[1],
++            ray_origin[2] + tau_i * ray_direction[2]
++        )
++        
++        # Step 4: Evaluate density and color
++        sigma_i = density_func(p_i)
++        c_i = color_func(p_i)
++        
++        # Step 5: Compute opacity and transmittance
++        delta_i = t_curr - t_prev
++        alpha_i = 1.0 - math.exp(-sigma_i * delta_i)
++        
++        # T_i is the transmittance from origin to t_prev
++        # It is updated iteratively: T_i = T_{i-1} * exp(-sigma_{i-1} * delta_{i-1})
++        # However, the formula in [S1, unofficial] defines T_i as exp(-sum_{j=1}^{i-1} sigma_j delta_j)
++        # which is exactly the transmittance arriving at the start of bin i.
++        
++        # Step 6: Accumulate radiance
++        # Contribution of bin i is T_i * alpha_i * c_i
++        contribution = current_transmittance * alpha_i * c_i
++        total_radiance += contribution
++        
++        # Update transmittance for the next bin
++        # T_{i+1} = T_i * exp(-sigma_i * delta_i)
++        current_transmittance *= math.exp(-sigma_i * delta_i)
++        
++    return total_radiance
++```
+ 
+-def compute_color_contribution(pos):
+-    # [G] Placeholder for volume rendering color computation
+-    return 1.0
++**Parameters:**
++*   $k$ (num_samples): The number of stratified bins. Typical values vary by scene complexity. In a 'Foggy' field experiment, $k=32$ matched the performance of $k=256$ uniform samples [S1, unofficial]. In a 'Wall' field experiment, only $k=4$ samples were needed to match the baseline [S1, unofficial].
+ 
+-def compute_transmittance_derivative(pos):
+-    # [G] Placeholder for transmittance derivative computation
+-    return 1.0
+-```
++**Edge Cases and Pitfalls:**
++*   **Degenerate Distributions:** The method is particularly effective for degenerate distributions where uniform sampling performs poorly [S1, unofficial].
++*   **Precision:** When $\sigma_i \delta_i$ is very small, $1 - \exp(-\sigma_i \delta_i)$ can suffer from catastrophic cancellation. Use `expm1` or Taylor expansion if necessary [G].
++*   **Boundary Conditions:** Ensure $t_n < t_f$ and $k > 0$. If $t_n = t_f$, the interval is empty and radiance is 0.
+ 
+ ## Subtopics
+@@ -123,21 +129,20 @@
+ 
+ ### Ratio Estimator with Equidistant Sampling (REES)
+-REES is a stochastic integrator that distributes samples at equal distance, jittered by noise, combined with a ratio estimator using analytic unoccluded radiance [S5]. It uses the basic framework of stratified sampling paired with the analytic unoccluded radiance computation [S5]. REES yields better convergence in unoccluded parts of the scene but leads to overall poor distribution of samples in occluded parts compared to MCWVDS [S5].
++A stochastic integrator that distributes samples at equal distance, jittered by noise, combined with a ratio estimator using analytic unoccluded radiance [S5]. It uses the basic framework of stratified sampling paired with analytic unoccluded radiance computation [S5]. REES yields better convergence in unoccluded parts of the scene but leads to overall poor distribution of samples in occluded parts compared to MCWVDS [S5].
+ 
+ ### Sample Trimmed Mean Estimator
+-This technique reduces variance from rare outliers in importance sampling by using a sample trimmed mean over each pixel, discarding extreme samples [S6]. It stores multiple independent, intermediate (low sample count) results. For each pixel, it discards the top 1-5% and bottom 1-5% of samples, then averages the remaining samples [S6]. The parameter is to discard 1% to 5% of the highest and lowest samples per pixel [S6]. A pitfall is that rare outliers can be generated through occasional bad sampling decisions. The trimmed mean trades a slight bias for a large reduction in variance, reducing overall error. The estimator remains consistent because the distribution approaches Gaussian for large sample counts, making the bias zero for symmetric distributions [S6].
++A technique to reduce variance from rare outliers in importance sampling by using a sample trimmed mean over each pixel, discarding extreme samples [S6]. It stores multiple independent, intermediate (low sample count) results. For each pixel, it discards the top 1-5% and bottom 1-5% of samples, then averages the remaining samples [S6]. This trades a slight bias for a large reduction in variance, reducing overall error. The estimator remains consistent because the distribution approaches Gaussian for large sample counts, making the bias zero for symmetric distributions [S6].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(k)$ per ray, where $k$ is the number of samples. The complexity is linear in the number of samples.
+-*   **Memory Complexity:** $O(k)$ to store the samples and positions.
+-*   **Measured Performance:** In a 'Foggy' field experiment, approximately $k=32$ samples of the stratified estimate match the baseline performance of $k=256$ uniform samples [S1, unofficial]. In a 'Wall' field experiment, only $k=4$ samples of the stratified estimate are needed to match the baseline performance [S1, unofficial].
+-*   **Scaling:** The method scales linearly with the number of samples. It is effective for reducing variance without requiring a proportional increase in samples compared to uniform sampling.
+-*   **Strengths:** Reduces variance significantly compared to uniform sampling, especially for degenerate distributions. Unbiased when randomized.
+-*   **Limitations:** Requires computing bin boundaries and samples. The deterministic variant may introduce aliasing.
+-*   **When to use:** When variance reduction is critical and the integrand is smooth or degenerate. Particularly useful in differentiable rendering where stable gradients are needed [S1, unofficial].
+-*   **When not to use:** When the scene has high-frequency details that require many samples, or when computational resources are extremely limited and $k$ must be very small.
++*   **Time Complexity:** $O(k)$, where $k$ is the number of samples per ray. Each sample requires a density and color evaluation.
++*   **Memory Complexity:** $O(1)$ auxiliary memory per ray if transmittance is updated iteratively, or $O(k)$ if storing all sample points and lengths explicitly [S2, unofficial].
++*   **Measured Performance:** In field experiments, the stratified estimate significantly reduces the required sample count for convergence. For a 'Foggy' scene, $k=32$ stratified samples matched the variance of $k=256$ uniform samples [S1, unofficial]. For a 'Wall' scene, $k=4$ stratified samples were sufficient [S1, unofficial].
++*   **Strengths:** Unbiased estimate [S1, unofficial]. Lower variance than uniform sampling, especially for degenerate distributions [S1, unofficial]. Simple to implement.
++*   **Limitations:** Variance reduction is dependent on the smoothness of the integrand. If the integrand has sharp discontinuities not aligned with bin boundaries, variance may not be optimal.
++*   **When to Use:** When variance reduction is needed for volume rendering along rays, particularly in scenes with smooth or degenerate density distributions.
++*   **When Not to Use:** When computational budget is extremely tight and a biased approximation is acceptable, or when the integrand is highly oscillatory and not aligned with the stratification grid.
+ 
+ ## Background
+-The stratified Monte Carlo radiance estimate is based on the well-known technique of stratified sampling, which has been used in Monte Carlo rendering to reduce variance [S4]. The specific formulation for radiance estimation along a ray with stratified bins is detailed in [S1, unofficial]. The method has been applied in differentiable rendering contexts to improve the stability of gradients [S1, unofficial][S4]. Variants like REES have been explored for specific volume rendering scenarios [S5].
++Stratified sampling is a well-known technique used in Monte Carlo rendering to reduce variance [S4]. The specific application to radiance estimation in volume rendering, referred to as the RVS Stratified Estimate, was detailed in research on differentiable rendering with reparameterized volume sampling [S1, unofficial]. The method builds on the principle of dividing the integration interval into bins to ensure better coverage of the domain compared to purely random uniform sampling.
+ 
+ ## Sources

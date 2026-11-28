@@ -1,0 +1,118 @@
+# Stability-constrained Integration Step
+
+Also called: Stability Condition
+
+## Overview
+The Stability-constrained Integration Step is a method for determining the maximum allowable step length in the numerical integration of vector or tensor fields to ensure numerical stability. It solves the problem of integration divergence or oscillation that occurs when the step size is too large relative to the local field curvature and grid resolution. It sets itself apart from general adaptive step methods by explicitly incorporating the eigenvalues of the transformation tensor and the local grid geometry into the stability bound, rather than relying solely on error estimates of the integration scheme.
+
+## How it works
+The method calculates a conservative upper bound for the time step $\Delta\tau$ based on the local properties of the tensor field and the spatial discretization.
+
+**Inputs and Outputs:**
+*   **Inputs:**
+    *   $P$: The current integration point.
+    *   $T(P)$: The tensor field value at $P$.
+    *   $G(P)$: The length of the neighboring grid lines at $P$.
+    *   $s(\lambda)$: A scaling factor representing ray flexibility.
+*   **Outputs:**
+    *   $\Delta\tau_{max}$: The maximum stable time step.
+
+**Data Structures:**
+*   **Tensor Field:** Stored as a grid of tensors. Each tensor $T$ is a $3 \times 3$ matrix.
+*   **Grid Geometry:** Stored as a uniform or structured grid where the spacing (or neighbor distances) $G(P)$ is known or computable for each point $P$.
+
+**Steps:**
+1.  **Compute Eigenvalues:** For the tensor $T(P)$ at the current point $P$, compute the eigenvalues. Let $e(P)$ be the magnitude of the eigenvalue with the largest absolute value (or the specific eigenvalue relevant to the integration direction, as defined by the source context).
+    *   *Note:* The source defines $e(P)$ as "the magnitude of any of its eigenvalues" in the inequality context, implying the bound must hold for the worst-case eigenvalue. Typically, this refers to the spectral radius or the maximum magnitude eigenvalue to ensure stability across all principal directions.
+2.  **Determine Grid Spacing:** Identify $G(P)$, defined as the length of any of the neighboring grid lines at point $P$. In a uniform grid with spacing $h$, $G(P)$ would be $h$.
+3.  **Apply Stability Constraint:** Calculate the maximum step size using the stability condition:
+    $$ s(\lambda)\Delta\tau < \frac{1}{2} \min_P \frac{G(P)}{|e(P)|} $$
+    Rearranging for $\Delta\tau$:
+    $$ \Delta\tau < \frac{1}{2 s(\lambda)} \min_P \frac{G(P)}{|e(P)|} $$
+4.  **Select Step Size:** Choose $\Delta\tau$ such that it satisfies the inequality. A safety factor may be applied to ensure strict inequality.
+
+**Parameters:**
+*   $s(\lambda)$: A scaling factor related to ray flexibility. The source notes that large values of $s(\lambda)$ require smaller time steps. No specific default value is given.
+*   $\Delta\tau$: The integration time step.
+
+**Pitfalls and Edge Cases:**
+*   **Large Ray Flexibility:** If $s(\lambda)$ is very large, the required $\Delta\tau$ becomes very small, leading to high computational cost. The source suggests that implicit methods could address this problem when large ray flexibility is necessary for complicated data sets [S1].
+*   **Singular Tensors:** If $|e(P)|$ is zero or near-zero, the bound becomes trivial or unstable. Care must be taken to handle degenerate tensors.
+*   **Grid Anisotropy:** $G(P)$ should represent the smallest relevant grid dimension to ensure stability in all directions.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_stability_constrained_step(tensor_field, grid_spacing, point_p, scaling_factor_s_lambda):
+    """
+    Computes the maximum stable integration step size.
+    
+    Args:
+        tensor_field: A function or data structure providing T(P) for any point P.
+        grid_spacing: The length of neighboring grid lines G(P). Assumes uniform grid for simplicity.
+        point_p: The current integration point.
+        scaling_factor_s_lambda: The scaling factor s(lambda).
+        
+    Returns:
+        max_dt: The maximum stable time step.
+    """
+    # 1. Get tensor at current point
+    T = tensor_field(point_p)
+    
+    # 2. Compute eigenvalues of T
+    # Eigenvalues are roots of det(T - e*I) = 0
+    eigenvalues = compute_eigenvalues(T)
+    
+    # 3. Find the magnitude of the eigenvalue with the largest absolute value
+    # The source uses |e(P)| in the denominator. To satisfy the condition for 
+    # "any of its eigenvalues", we must consider the worst case (largest magnitude).
+    max_eigenvalue_magnitude = max(abs(e) for e in eigenvalues)
+    
+    # Handle potential division by zero if tensor is zero
+    if max_eigenvalue_magnitude == 0:
+        # If tensor is zero, there is no curvature constraint from eigenvalues.
+        # The step is limited only by other factors (e.g., error estimates).
+        # For this stability constraint specifically, the bound is infinite.
+        return float('inf')
+        
+    # 4. Get grid spacing G(P)
+    # Source defines G(P) as the length of any of its neighboring grid lines.
+    G = grid_spacing
+    
+    # 5. Apply stability formula: s(lambda) * dt < 0.5 * G(P) / |e(P)|
+    # dt < (0.5 * G(P) / |e(P)|) / s(lambda)
+    
+    numerator = 0.5 * G
+    denominator = max_eigenvalue_magnitude * scaling_factor_s_lambda
+    
+    if denominator == 0:
+        # If scaling factor is 0, the constraint is vacuous (infinite step)
+        return float('inf')
+        
+    max_dt = numerator / denominator
+    
+    return max_dt
+```
+
+## Subtopics
+
+### Implicit Integration Methods
+Alternative approach for handling large $s(\lambda)$ where explicit step constraints become prohibitive. [Implicit Methods](21525-implicit-integration-methods.md)
+
+### Error-Adaptive Step Size
+Method that adjusts step size based on local truncation error estimates rather than stability bounds. [Error Estimate](21526-error-estimate.md)
+
+## Operating characteristics
+*   **Time Complexity:** The cost is dominated by the eigenvalue decomposition of the tensor $T(P)$ at each step. For a $3 \times 3$ tensor, this is $O(1)$ but involves a constant number of arithmetic operations.
+*   **Memory Complexity:** $O(1)$ additional memory per step, assuming the tensor field is accessed from memory.
+*   **Strengths:** Provides a rigorous guarantee against numerical instability due to large field gradients or high flexibility. Simple to implement.
+*   **Limitations:** Can be overly conservative, leading to very small step sizes and slow rendering/tracing, especially when $s(\lambda)$ is large. Does not account for local truncation error, only stability.
+*   **When to use:** When numerical stability is the primary concern, or when the tensor field exhibits high variability or large eigenvalues.
+*   **When not to use:** When performance is critical and the field is smooth, or when implicit methods are available to handle large flexibility.
+
+## Background
+The stability constraint for integration steps in tensor fields was introduced in the context of visualizing light interaction with tensor fields. The method ensures that the updating rule for ray positions remains stable by limiting the step length relative to the local tensor eigenvalues and grid geometry.
+
+## Sources
+[S1] Interaction of Light and Tensor Fields, https://doi.org/10.2312/vissym/vissym03/157-166, fetched 2026-10-26

@@ -1,0 +1,283 @@
+# Bounding Volume Lossless (BVL) Compression
+
+Also called: BVL encoder, Bounding Volume Lossless
+
+## Overview
+Bounding Volume Lossless (BVL) Compression is a lossless compression method for voxelized point clouds that encodes geometry by first defining a feasible region via front/back depthmaps and then encoding the remaining inner points section-by-section along the y-axis using arithmetic context coding [S1]. It builds on [Voxel Chunk Compression](6778-voxel-chunk-compression.md) by providing a complete, lossless reconstruction of the point cloud, whereas its lossy sibling, Bounding Volumes, only reconstructs the bounding volume [S1].
+
+## How it works
+**Inputs:** A voxelized point cloud with resolutions $N_x, N_y, N_z$ along the x, y, and z axes, respectively [S1].
+**Outputs:** A compressed bitstream representing the point cloud geometry [S1].
+
+**Data Structures:**
+*   **$Z_{min}, Z_{max}$:** Depthmap images of size $N_x \times N_y$. $Z_{min}(x,y)$ is the minimum z-coordinate of a point at $(x,y)$; $Z_{max}(x,y)$ is the maximum z-coordinate. If no point exists at $(x,y)$, both are set to 0 [S1].
+*   **$R$:** Binary reconstruction image of size $N_z \times N_x$ for the current section $y_0$. $R(z,x)=1$ if a point is known/encoded at $(z,x)$, 0 otherwise [S1].
+*   **$F$:** Binary feasible region image of size $N_z \times N_x$. $F(z,x)=1$ if $Z_{min}(x,y_0) \le z \le Z_{max}(x,y_0)$, 0 otherwise [S1].
+*   **$K$:** Binary known-occupancy image of size $N_z \times N_x$. $K(z,x)=1$ if the occupancy of $(z,x)$ is known (either occupied or confirmed empty outside feasible region), 0 otherwise [S1].
+*   **$P$:** Binary image of the past section ($y_0-1$) reconstruction, size $N_z \times N_x$ [S1].
+*   **$L$:** List of pixels $(z,x)$ to be processed [S1].
+*   **$M$:** Binary marker image of size $N_z \times N_x$. $M(z,x)=1$ if $(z,x)$ is in list $L$, 0 otherwise [S1].
+*   **$T$:** Binary image of true points in the current section to be encoded [S1].
+
+**Parameters:**
+*   Structural element for morphological dilation: $3 \times 3$ [S1].
+*   Connectivity: 8-connected neighbors [S1].
+*   Context mapping functions: $I(\cdot)$ and $J(\cdot)$ [S1].
+
+**Steps:**
+
+1.  **Stage I: Depthmap Encoding**
+    1.  Generate $Z_{min}$ and $Z_{max}$ by projecting the point cloud along the z-axis onto the xy-plane [S1].
+    2.  Encode $Z_{min}$ and $Z_{max}$ using CERV (Context-based Entropy Coding for Volumetric data) [S1].
+
+2.  **Stage II: Section-by-Section Encoding**
+    For each section $y_0$ from $0$ to $N_y - 1$:
+    1.  **Initialize Reconstruction:** Initialize $R$ for section $y_0$ with points from depthmaps:
+        $$R(Z_{max}(x, y_0), x) = 1 \quad \text{and} \quad R(Z_{min}(x, y_0), x) = 1$$
+        for every $Z_{max}(x, y_0) > 0$ and $Z_{min}(x, y_0) > 0$ [S1].
+    2.  **Define Feasible Region:** Construct $F$ where $F(z, x) = 1$ for all $(z, x)$ satisfying $Z_{min}(x, y_0) \le z \le Z_{max}(x, y_0)$ [S1].
+    3.  **Initialize Known Occupancy:** Initialize $K$ such that $K(z, x) = 1$ if occupancy is known. Locations outside the feasible region are known unoccupied, so $K(z, x) = 1$ there. Locations inside the feasible region that are already in $R$ are also known [S1].
+    4.  **Initialize Processing List:**
+        *   Identify set $\phi$ of pixels in $R$ that are already reconstructed true points from depthmaps [S1].
+        *   Perform morphological dilation of $\phi$ using a $3 \times 3$ structural element [S1].
+        *   Store traversed locations in list $L$ and mark them in binary image $M$ ($M(z,x)=1$) [S1].
+    5.  **Process List:** While $L$ is not empty:
+        1.  Read current pixel $(z, x)$ from the top of $L$ [S1].
+        2.  Check if $K(z, x) = 1$. If yes, remove $(z, x)$ from $L$ (status known) and continue to next pixel [S1].
+        3.  If $K(z, x) = 0$:
+            1.  **Extract Context:**
+                *   Extract $3 \times 3$ matrix $R_{3x3}$ from $R$ centered at $(z, x)$ [S1].
+                *   Extract $3 \times 3$ matrix $B$ from past section $P$ centered at $(z, x)$ [S1].
+                *   Extract $3 \times 3$ matrix $K_{3x3}$ from $K$ centered at $(z, x)$ [S1].
+                *   Compute $A = R_{3x3} + K_{3x3}$ [S1]. Note: $R_k(z,x)$ values are 0 if unknown, 1 if encoded 0, 2 if encoded 1 [S1].
+                *   Find normalizing rotation $\alpha^*$ for $A$ to form $A_{\alpha^*}$ such that the context is rotationally invariant [S1].
+                *   Rotate $B$ by same $\alpha^*$ to form $B_{\alpha^*}$ [S1].
+                *   Form context $\zeta = (I(A_{\alpha^*}), J(B_{\alpha^*}))$ [S1].
+            2.  **Encode:** Encode $T(z, x)$ using arithmetic coding with context $\zeta$ [S1].
+            3.  **Update:**
+                *   Update context counts [S1].
+                *   Set $K(z, x) \leftarrow 1$ [S1].
+                *   Set $R(z, x) \leftarrow T(z, x)$ [S1].
+                *   Remove $(z, x)$ from $L$ [S1].
+            4.  **Expand List:** If $T(z, x) = 1$:
+                *   For each 8-connected neighbor $(z_n, x_n)$ of $(z, x)$:
+                    *   If $K(z_n, x_n) = 0$ and $M(z_n, x_n) = 0$:
+                        *   Append $(z_n, x_n)$ to $L$ [S1].
+                        *   Set $M(z_n, x_n) \leftarrow 1$ [S1].
+
+**Context Formulas:**
+The integer mappings for the context are defined as [S1]:
+$$I(A) = \sum_{j=0}^{2} \sum_{i=0}^{2} A_{ij} 3^{i+3j}$$
+$$J(B) = \sum_{j=0}^{2} \sum_{i=0}^{2} B_{ij} 2^{i+3j}$$
+where $A_{ij}$ and $B_{ij}$ are the elements of the $3 \times 3$ matrices [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def bvl_compress(point_cloud, Nx, Ny, Nz):
+    # Stage I: Depthmap Generation
+    Zmin = zeros(Nx, Ny)
+    Zmax = zeros(Nx, Ny)
+    
+    for (x, y, z) in point_cloud:
+        if Zmin[x, y] == 0 or z < Zmin[x, y]:
+            Zmin[x, y] = z
+        if z > Zmax[x, y]:
+            Zmax[x, y] = z
+            
+    # Encode depthmaps using CERV
+    bitstream = cerv_encode(Zmin) + cerv_encode(Zmax)
+    
+    # Stage II: Section Encoding
+    # P is the past section, initially all zeros or from previous section
+    P = zeros(Nz, Nx)
+    
+    for y0 in range(Ny):
+        # Initialize R with depthmap points
+        R = zeros(Nz, Nx)
+        for x in range(Nx):
+            z_min = Zmin[x, y0]
+            z_max = Zmax[x, y0]
+            if z_min > 0:
+                R[z_min, x] = 1
+            if z_max > 0:
+                R[z_max, x] = 1
+                
+        # Define Feasible Region F
+        F = zeros(Nz, Nx)
+        for x in range(Nx):
+            z_min = Zmin[x, y0]
+            z_max = Zmax[x, y0]
+            for z in range(z_min, z_max + 1):
+                if z_min > 0 and z_max > 0:
+                    F[z, x] = 1
+                    
+        # Initialize K: 1 if known (outside F or in R)
+        K = zeros(Nz, Nx)
+        for z in range(Nz):
+            for x in range(Nx):
+                if F[z, x] == 0:
+                    K[z, x] = 1
+                elif R[z, x] == 1:
+                    K[z, x] = 1
+                    
+        # Initialize L and M
+        L = []
+        M = zeros(Nz, Nx)
+        
+        # Morphological dilation of R (set phi)
+        # Identify points in R
+        phi_points = []
+        for z in range(Nz):
+            for x in range(Nx):
+                if R[z, x] == 1:
+                    phi_points.append((z, x))
+                    
+        # Dilate phi with 3x3 kernel
+        dilated_phi = set()
+        for (z, x) in phi_points:
+            for dz in [-1, 0, 1]:
+                for dx in [-1, 0, 1]:
+                    nz, nx = z + dz, x + dx
+                    if 0 <= nz < Nz and 0 <= nx < Nx:
+                        dilated_phi.add((nz, nx))
+                        
+        # Add to L and mark M
+        for (z, x) in dilated_phi:
+            L.append((z, x))
+            M[z, x] = 1
+            
+        # Process L
+        while L:
+            (z, x) = L.pop(0) # Pop from top
+            
+            if K[z, x] == 1:
+                continue
+                
+            # Extract Context
+            # R3x3 from R
+            R3x3 = extract_3x3(R, z, x)
+            # B from P
+            B = extract_3x3(P, z, x)
+            # K3x3 from K
+            K3x3 = extract_3x3(K, z, x)
+            
+            # A = R3x3 + K3x3
+            A = add_matrices(R3x3, K3x3)
+            
+            # Find normalizing rotation alpha*
+            alpha_star = find_normalizing_rotation(A)
+            
+            # Rotate A and B
+            A_rot = rotate_matrix(A, alpha_star)
+            B_rot = rotate_matrix(B, alpha_star)
+            
+            # Form context
+            I_val = map_matrix_to_int(A_rot, base=3)
+            J_val = map_matrix_to_int(B_rot, base=2)
+            context = (I_val, J_val)
+            
+            # Encode T(z,x)
+            # T(z,x) is the true value. For encoder, it's the actual occupancy.
+            # For decoder, it's reconstructed.
+            # Here we assume we are encoding the true value from point_cloud
+            # or reconstructing it if decoding.
+            # Assuming encoding:
+            true_val = 1 if (z, x, y0) in point_cloud else 0
+            
+            # Arithmetic encode true_val with context
+            bitstream += arithmetic_encode(true_val, context)
+            
+            # Update
+            K[z, x] = 1
+            R[z, x] = true_val
+            
+            # If true_val is 1, add neighbors to L
+            if true_val == 1:
+                for dz in [-1, 0, 1]:
+                    for dx in [-1, 0, 1]:
+                        if dz == 0 and dx == 0:
+                            continue
+                        nz, nx = z + dz, x + dx
+                        if 0 <= nz < Nz and 0 <= nx < Nx:
+                            if K[nz, nx] == 0 and M[nz, nx] == 0:
+                                L.append((nz, nx))
+                                M[nz, nx] = 1
+                                
+        # Update P for next section
+        P = R
+        
+    return bitstream
+
+def extract_3x3(matrix, z, x):
+    # Extract 3x3 centered at (z,x), padding with 0 if out of bounds
+    result = zeros(3, 3)
+    for i in range(3):
+        for j in range(3):
+            nz, nx = z - 1 + i, x - 1 + j
+            if 0 <= nz < matrix.shape[0] and 0 <= nx < matrix.shape[1]:
+                result[i, j] = matrix[nz, nx]
+            else:
+                result[i, j] = 0
+    return result
+
+def find_normalizing_rotation(matrix):
+    # Find rotation alpha in {0, pi/2, pi, 3*pi/2} that normalizes matrix
+    # This is a placeholder for the specific normalization logic described
+    # The paper states it uses rotational invariances.
+    # The exact algorithm for finding alpha* is not fully detailed in the notes,
+    # but it involves comparing rotated versions.
+    # We assume a function exists that returns the best alpha.
+    # [G] Placeholder for specific normalization algorithm.
+    return 0
+
+def rotate_matrix(matrix, alpha):
+    # Rotate 3x3 matrix by alpha (0, 90, 180, 270 degrees)
+    if alpha == 0:
+        return matrix
+    elif alpha == 90:
+        return rotate_90(matrix)
+    elif alpha == 180:
+        return rotate_180(matrix)
+    elif alpha == 270:
+        return rotate_270(matrix)
+    return matrix
+
+def rotate_90(matrix):
+    return transpose(flip_horizontal(matrix))
+
+def rotate_180(matrix):
+    return flip_vertical(flip_horizontal(matrix))
+
+def rotate_270(matrix):
+    return flip_horizontal(transpose(matrix))
+
+def map_matrix_to_int(matrix, base):
+    # I(A) or J(B) formula
+    total = 0
+    for j in range(3):
+        for i in range(3):
+            total += matrix[i, j] * (base ** (i + 3*j))
+    return total
+
+def add_matrices(A, B):
+    return A + B
+```
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** On the MVUB dataset (first 200 frames), BVL achieves an average of 1.11 bits-per-voxel (bpv) [S1]. Specific sequences: Andrew9 (1.14 bpv), David9 (1.08 bpv), Phil9 (1.18 bpv), Ricardo9 (1.08 bpv), Sarah9 (1.07 bpv) [S1]. On the 8i dataset (first 200 frames), BVL achieves an average of 1.05 bpv [S1]. Specific sequences: Longdress (1.03 bpv), Loot (0.97 bpv), Redandblack (1.11 bpv) [S1].
+*   **Scaling:** Not given in the sources.
+*   **Strengths:** Provides lossless reconstruction of the point cloud, unlike the lossy Bounding Volume method which only reconstructs the bounding volume [S1]. Utilizes extensive context coding to efficiently encode inner points [S1].
+*   **Limitations:** Not given in the sources.
+*   **When to use:** When lossless reconstruction of voxelized point cloud geometry is required [S1].
+*   **When not to use:** When lossy compression is acceptable and lower bitrates are prioritized over perfect reconstruction [S1].
+
+## Background
+Bounding Volume Lossless Compression was introduced in the paper "Refining The Bounding Volumes for Lossless Compression of Voxelized Point Clouds Geometry" [S1]. It builds on a recent lossy compression method that aimed at reconstructing only the bounding volume of a point cloud [S1]. The method was developed to provide a lossless alternative by adding extensive context coding to encode inner points [S1].
+
+## Sources
+[S1] Refining The Bounding Volumes for Lossless Compression of Voxelized Point Clouds Geometry, https://doi.org/10.1109/icip42928.2021.9506767, fetched 2026-10-26

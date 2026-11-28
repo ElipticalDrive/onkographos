@@ -1,0 +1,100 @@
+# Point-based Differentiable Rendering
+
+Also called: PBDR
+
+## Overview
+Point-based Differentiable Rendering (PBDR) models a 3D scene as a learnable point cloud of parameterized points and optimizes their attributes via gradient descent to reconstruct the scene from 2D images [S1, unofficial]. Unlike traditional rendering with static geometry, PBDR treats the scene representation as differentiable, enabling direct optimization of appearance and geometry through differentiable splat rendering [S1, unofficial]. It sets itself apart from sibling methods like [Pulsar Sphere-based Neural Rendering](9397-pulsar-sphere-based-neural-rendering.md) by using parameterized ellipsoids (typically Gaussians) rather than spheres or other primitives, enabling efficient view synthesis via splatting [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- **Inputs:** A set of 2D images with known camera poses (intrinsics and extrinsics) [S1, unofficial].
+- **Outputs:** A learned 3D point cloud where each point has optimized attributes (position, color, opacity, etc.) [S1, unofficial].
+
+**Data Structures:**
+The scene is represented as a collection of $N$ points, where each point $i$ is modeled as a 3D ellipsoid [S1, unofficial]. The canonical [3D Gaussian Splatting (3DGS)](40-3d-gaussian-splatting.md) point stores five attributes [S1, unofficial]:
+1. **3D Position:** $\mathbf{\mu}_i \in \mathbb{R}^3$ [S1, unofficial].
+2. **Scales:** $\mathbf{s}_i \in \mathbb{R}^3$ (representing the ellipsoid axes lengths) [S1, unofficial].
+3. **Rotation:** $\mathbf{q}_i \in \mathbb{R}^4$ (unit quaternion representing orientation) [S1, unofficial].
+4. **Opacity:** $\alpha_i \in [0, 1]$ [S1, unofficial].
+5. **Color:** Represented by spherical harmonic (SH) coefficients $\mathbf{c}_i$ [S1, unofficial].
+
+**Steps:**
+1. **Initialization:** Initialize the point cloud using an existing reconstruction method, such as COLMAP [72] or LiDAR data [S1, unofficial].
+2. **Culling:** Discard points that lie outside the camera’s field of view (frustum) [S1, unofficial].
+3. **Splatting:** Project each remaining point into the camera’s 2D image plane as a "splat" [S1, unofficial].
+4. **Rendering:** Sort the view-dependent splats by their distance to the camera plane. Compute pixel color front-to-back, blending overlapping splats until full opacity is reached [S1, unofficial].
+5. **Loss Computation:** Compare the rendered image against the ground-truth image to compute a loss [S1, unofficial].
+6. **Backpropagation:** Calculate gradients of the loss with respect to the point parameters [S1, unofficial].
+7. **Update:** Update point parameters using gradient descent (e.g., SGD) [S1, unofficial].
+8. **Densification:** Periodically increase point cloud density by adding more points to the model during training [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def train_pbdtr(training_data, initial_points, num_iterations, densification_interval):
+    points = list(initial_points)  # Each: {pos, scales, rot, opacity, sh_coeffs}
+    
+    for step in range(num_iterations):
+        batch_imgs, batch_cams = training_data[step % len(training_data)]
+        rendered_batch = []
+        
+        for img, cam in zip(batch_imgs, batch_cams):
+            # 2. Culling: Discard points outside camera frustum
+            visible = [p for p in points if cam.frustum.contains(p.pos)]
+            # 3. Splatting: Project points to 2D image plane
+            splats = []
+            for p in visible:
+                proj = cam.project(p.pos)
+                splats.append({"x": proj.x, "y": proj.y, "z": proj.z, "opacity": p.opacity, "color": p.sh_coeffs})
+            # 4. Rendering: Sort splats by depth and blend front-to-back
+            splats.sort(key=lambda s: s["z"])
+            rendered = zeros((img.height, img.width, 3))
+            alpha_accum = zeros((img.height, img.width))
+            for s in splats:
+                # Evaluate 2D Gaussian kernel at pixel grid [G]
+                kernel = exp(-(pixel_x - s["x"])**2 - (pixel_y - s["y"])**2)
+                # Front-to-back alpha compositing
+                contrib = s["opacity"] * kernel
+                rendered = rendered * (1 - contrib) + s["color"] * contrib
+                alpha_accum = alpha_accum + contrib * (1 - alpha_accum)
+            rendered_batch.append(rendered)
+            
+        # 5. Loss Computation
+        loss = sum(abs(r - g) for r, g in zip(rendered_batch, batch_imgs))
+        # 6. Backpropagation & 7. Update: compute gradients and apply gradient descent [G]
+        for i, p in enumerate(points):
+            p.pos -= 0.0001 * grad(loss, p.pos)
+            p.opacity -= 0.0001 * grad(loss, p.opacity)
+            # Update other attributes similarly
+        # 8. Densification
+        if step % densification_interval == 0:
+            # Densification logic not specified in sources [G]
+            pass
+            
+    return points
+```
+
+**Edge Cases and Pitfalls:**
+- Frustum culling discards points outside the camera’s field of view [S1, unofficial].
+- Densification periodically increases point cloud density by adding more points during training [S1, unofficial].
+- Not given in the sources.
+
+## Subtopics
+
+### [Gaian Locality Optimization](19153-gaian-locality-optimization.md)
+A two-stage procedure to optimize data access locality in distributed PBDR by assigning points and images to GPUs to minimize communication overhead. It uses graph partitioning and Z-order curve sorting to exploit spatial locality, unlike naive random distribution.
+
+### [Gaian Distributed Training System](19211-gaian-distributed-training-system.md)
+A distributed training system for PBDR that reduces communication overhead by optimizing data locality rather than randomly partitioning model state and compute. It provides a unified API exposing data access patterns for locality optimization.
+
+## Operating characteristics
+- **Measured Performance:** The Gaian system reduces communication by up to 91% and improves training throughput by 1.50–3.71× across six datasets and up to 128 GPUs [S1, unofficial]. It achieved a 12.7× speedup in computation and trained a point cloud with 500 million points (29.5 billion parameters) [S1, unofficial].
+- **Strengths:** Outperforms previous neural rendering approaches in complex scene reconstruction and photorealistic novel view synthesis [S1, unofficial].
+- **Limitations:** Random distribution of points and views in distributed settings can cause communication time to exceed compute time [S1, unofficial]. Requires periodic densification to maintain quality [S1, unofficial].
+
+## Background
+PBDR methods have recently achieved remarkable breakthroughs in complex scene reconstruction and photorealistic novel view synthesis [S1, unofficial]. The first PBDR algorithm, 3D Gaussian Splatting (3DGS), was proposed by [40] and uses 3D Gaussian ellipsoids with five attributes [S1, unofficial]. Since then, many PBDR algorithms have been proposed with different point types, including 2D Gaussian [33], 3D Convex [31], Triangle Mesh [30], and Generalized Exponential Kernel [27] [S1, unofficial]. Existing distributed works [90, 96] support distributed training for 3DGS by partitioning the point cloud across GPUs [S1, unofficial].
+
+## Sources
+[S1] Scaling Point-based Differentiable Rendering for Large-scale Reconstruction, https://doi.org/10.48550/arxiv.2512.20017, fetched 2026-10-26 (unofficial)

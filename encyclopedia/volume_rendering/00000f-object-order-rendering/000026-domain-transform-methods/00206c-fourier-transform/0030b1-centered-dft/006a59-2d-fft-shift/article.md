@@ -1,0 +1,167 @@
+# 2D FFT Shift
+
+Also called: FFT quadrant swap, zero-frequency centering
+
+## Overview
+The 2D FFT Shift rearranges the quadrants of a 2D frequency-domain array to center the zero-frequency component, swapping the first and fourth quadrants (Q1↔Q4) and the second and third quadrants (Q2↔Q3) [S1, S2, S3, unofficial]. It solves the problem of the standard Discrete Fourier Transform (DFT) output having the zero frequency at the top-left corner, which creates a visual and analytical discontinuity at the boundaries [S1, S2, unofficial]. This method builds on [Centered DFT](6328-centered-dft.md) by providing the specific permutation logic required to achieve that centered layout in 2D.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 1D array of size $N \times N$ (or $N_X \times N_Y$) representing a 2D grid in row-major order. The array contains complex or real values resulting from a 2D FFT.
+*   **Output:** The same array (in-place) or a new array (out-of-place) with quadrants swapped.
+
+**Data Structures:**
+*   The data is stored in a 1D contiguous block of memory.
+*   Indexing follows row-major order: `index = row * width + col` (or `i + N * j` for square grids) [S2, S3, unofficial].
+*   For square grids of size $N \times N$:
+    *   $sLine = N$ (length of one row) [S1, S2, unofficial].
+    *   $sSlice = N^2$ (total number of elements) [S1, S2, unofficial].
+
+**Quadrant Offsets:**
+The shift is implemented by swapping elements between diagonally opposite quadrants using precomputed offsets [S1, S2, unofficial]:
+$$ sEq1 = \frac{sSlice + sLine}{2} $$
+$$ sEq2 = \frac{sSlice - sLine}{2} $$
+For a square grid of size $N$, these simplify to:
+$$ sEq1 = \frac{N^2 + N}{2} $$
+$$ sEq2 = \frac{N^2 - N}{2} $$
+[S1, S2, unofficial]
+
+**Algorithm Steps (In-Place):**
+1.  Iterate $i$ from $0$ to $N/2 - 1$ and $j$ from $0$ to $N/2 - 1$ [S2, S3, unofficial].
+2.  Calculate the index for the first quadrant (top-left):
+    $$ idx1 = i + N \times j $$
+3.  Calculate the index for the fourth quadrant (bottom-right):
+    $$ idx2 = (N/2 + i) + N \times (N/2 + j) $$
+4.  Swap `data[idx1]` and `data[idx2]` using a temporary variable [S2, S3, unofficial].
+5.  Calculate the index for the second quadrant (top-right):
+    $$ idx1 = i + N \times (N/2 + j) $$
+6.  Calculate the index for the third quadrant (bottom-left):
+    $$ idx2 = (N/2 + i) + N \times j $$
+7.  Swap `data[idx1]` and `data[idx2]` using a temporary variable [S2, S3, unofficial].
+
+**Algorithm Steps (Out-of-Place):**
+1.  Initialize output array of size $N \times N$.
+2.  For each thread or iteration at $(xIndex, yIndex)$:
+    *   If $xIndex < N/2$ and $yIndex < N/2$:
+        $$ output[index] = input[index + sEq1] $$
+    *   If $xIndex < N/2$ and $yIndex \ge N/2$:
+        $$ output[index] = input[index - sEq2] $$
+    *   If $xIndex \ge N/2$ and $yIndex < N/2$:
+        $$ output[index] = input[index + sEq2] $$
+    *   If $xIndex \ge N/2$ and $yIndex \ge N/2$:
+        $$ output[index] = input[index - sEq1] $$
+    [S1, unofficial]
+
+**Pseudocode (In-Place, Python-like):**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def fft_shift_2d_in_place(data, N):
+    """
+    Performs an in-place 2D FFT shift on a 1D array representing an NxN grid.
+    data: list or array of size N*N
+    N: integer side length of the square grid
+    """
+    half_n = N // 2
+    
+    # Iterate over the top-left quadrant (Q1)
+    for i in range(half_n):
+        for j in range(half_n):
+            # Index in Q1 (top-left)
+            idx1 = i + N * j
+            
+            # Index in Q4 (bottom-right)
+            idx2 = (half_n + i) + N * (half_n + j)
+            
+            # Swap Q1 and Q4
+            data[idx1], data[idx2] = data[idx2], data[idx1]
+            
+            # Index in Q2 (top-right)
+            idx1 = i + N * (half_n + j)
+            
+            # Index in Q3 (bottom-left)
+            idx2 = (half_n + i) + N * j
+            
+            # Swap Q2 and Q3
+            data[idx1], data[idx2] = data[idx2], data[idx1]
+```
+
+**Pseudocode (Out-of-Place, Python-like):**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def fft_shift_2d_out_of_place(input_data, N):
+    """
+    Performs an out-of-place 2D FFT shift.
+    input_data: list or array of size N*N
+    N: integer side length of the square grid
+    Returns: new array of size N*N
+    """
+    output = [0] * (N * N)
+    half_n = N // 2
+    
+    # Precompute offsets
+    s_line = N
+    s_slice = N * N
+    s_eq1 = (s_slice + s_line) // 2
+    s_eq2 = (s_slice - s_line) // 2
+    
+    for y in range(N):
+        for x in range(N):
+            index = y * N + x
+            
+            if x < half_n and y < half_n:
+                # Q1 -> Q4 position
+                output[index] = input_data[index + s_eq1]
+            elif x < half_n and y >= half_n:
+                # Q2 -> Q3 position
+                output[index] = input_data[index - s_eq2]
+            elif x >= half_n and y < half_n:
+                # Q3 -> Q2 position
+                output[index] = input_data[index + s_eq2]
+            else:
+                # Q4 -> Q1 position
+                output[index] = input_data[index - s_eq1]
+                
+    return output
+```
+
+**Parameters:**
+*   $N$: Side length of the square 2D frequency array (e.g., 256) [S1, unofficial].
+*   $N_X, N_Y$: Width and height for rectangular grids [S2, unofficial].
+*   Block size (GPU): `dim3(32, 32, 1)` if $N > 32$, else `dim3(N, N, 1)` [S2, unofficial].
+*   Grid size (GPU): `dim3(N / blockSize.x, N / blockSize.y, 1)` [S2, unofficial].
+*   Template type $T$: Supports `char`, `unsigned char`, `short`, `unsigned short`, `int`, `unsigned int`, `float`, `double` [S3, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **In-place modification:** Requires swapping to avoid data loss; if not swapped correctly, data is overwritten before being read [S3, unofficial].
+*   **Out-of-place:** Requires separate input and output buffers [S3, unofficial].
+*   **Boundary conditions:** The logic assumes $N$ is even. If $N$ is odd, the centering is ambiguous (sources do not specify handling for odd $N$) [S1, S2, S3, unofficial].
+*   **Precision:** Standard floating-point operations are used; no special precision handling is noted [S2, S3, unofficial].
+
+## Subtopics
+
+### 3D Fourier Transform for Volume Reconstruction
+*   **What it is:** The process of converting electron density data from reciprocal space (reflection data) to real space (3D grid) using a Fourier transform, allowing visualization software to render the density [S4, unofficial].
+*   **What sets it apart:** It operates on 3D volumes and typically involves reading from MTZ files (storing reflection data as complex numbers per hkl reflection) rather than operating on a pre-computed 2D FFT array [S4, unofficial].
+*   **When to choose it:** When visualizing crystallographic data or electron density maps in programs like Coot, CCP4MG, or PyMOL [S4, unofficial].
+*   **Link:** [3D FFT Shift](20810-3d-fft-shift.md)
+
+## Operating characteristics
+*   **Time Complexity:** $O(N^2)$ for an $N \times N$ grid, as every element in the top-left quadrant is visited once to perform two swaps [S2, S3, unofficial].
+*   **Memory Complexity:** $O(1)$ auxiliary space for in-place implementation; $O(N^2)$ for out-of-place implementation [S3, unofficial].
+*   **Measured Performance:** Benchmarks on GPU (CUDA) show that for $N > 32$, a block size of $32 \times 32$ is used, while smaller grids use $N \times N$ blocks [S2, unofficial]. Profiling indicates the operation is lightweight compared to the FFT itself [S2, S3, unofficial].
+*   **Scaling:** Parallel versions distribute the outer loop iterations across threads (OpenMP) or GPU threads [S3, unofficial].
+*   **Strengths:** Simple, deterministic, and efficient for centering spectra for visualization or filtering [S1, S2, unofficial].
+*   **Limitations:** Only handles square grids in the primary description; rectangular grids require adjusted offset calculations [S2, unofficial].
+*   **When to use:** When the zero-frequency component needs to be at the center of the image/array for analysis or display [S1, S2, unofficial].
+*   **When not to use:** When memory is extremely constrained and in-place swapping is not feasible (though out-of-place is simple) [S3, unofficial].
+
+## Background
+The 2D FFT Shift is a standard post-processing step in digital signal processing and image analysis, often used after computing the 2D FFT to make the frequency spectrum easier to interpret [S1, S2, unofficial]. It is part of the broader family of domain-transform methods in volume rendering and scientific visualization [S1, S2, S3, unofficial]. The implementation details provided in the sources originate from research and benchmarking projects by Marwan Abdellah, focusing on high-performance Fourier volume rendering [S1, S2, S3, unofficial].
+
+## Sources
+[S1] marwan-abdellah/cuFVR, https://github.com/marwan-abdellah/cuFVR, fetched 2026-10-26 (unofficial)
+[S2] marwan-abdellah/FVR_Benchmarks, https://github.com/marwan-abdellah/FVR_Benchmarks, fetched 2026-10-26 (unofficial)
+[S3] marwan-abdellah/ParallelFVRBenchmarkingScripts, https://github.com/marwan-abdellah/ParallelFVRBenchmarkingScripts, fetched 2026-10-26 (unofficial)
+[S4] How do visualization programs generate electron density meshes?, https://physics.stackexchange.com/questions/301715, fetched 2026-10-30 (unofficial)

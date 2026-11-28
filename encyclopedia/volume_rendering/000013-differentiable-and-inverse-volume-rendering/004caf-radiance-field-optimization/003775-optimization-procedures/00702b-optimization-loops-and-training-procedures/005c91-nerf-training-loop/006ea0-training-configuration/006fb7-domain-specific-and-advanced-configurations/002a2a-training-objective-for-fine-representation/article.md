@@ -1,0 +1,122 @@
+# Training Objective for Fine Representation
+
+Also called: Fine Representation Training Objective, Fine-stage Training Configuration
+
+## Overview
+The training objective for the fine representation specifies the loss configuration for the second optimization phase, using the same loss types as the coarse stage but with modified regularization weights [S2]. It differs from the coarse stage objective primarily by reducing the weight of regularization terms, a modification empirically shown to yield slightly better visual quality [S2].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Training images, camera poses, and the fine representation parameters [S2].
+*   **Outputs:** Updated fine representation parameters and the computed training loss scalar [S2].
+
+**Data Structures:**
+The fine representation mirrors the coarse structure but is optimized with the adjusted loss configuration [S2].
+
+**Steps:**
+1.  Sample points along rays using the same sampling strategy as the coarse stage [S1, S2].
+2.  Query the fine representation to obtain density and color values at the sampled points [S1, S2].
+3.  Compute the rendered image color for each training ray using volume rendering [S1, S2].
+4.  Calculate the reconstruction loss between the rendered image and the ground truth image [S1, S2].
+5.  Calculate the regularization loss for the fine representation parameters [S2].
+6.  Combine the reconstruction loss and regularization loss using a reduced regularization weight [S2].
+7.  Backpropagate the combined loss and update the fine representation parameters [S2].
+
+**Formulas:**
+The total training loss is defined as:
+$$ \mathcal{L}_{fine} = \mathcal{L}_{rec} + \lambda_{reg} \mathcal{L}_{reg} $$
+
+Where:
+*   $\mathcal{L}_{rec}$ is the reconstruction loss (e.g., Mean Squared Error or L1 loss) between the rendered image and the ground truth image [S1, S2].
+*   $\mathcal{L}_{reg}$ represents regularization losses applied to the fine representation parameters [S2].
+*   $\lambda_{reg}$ is the regularization weight [S2].
+
+**Parameters:**
+*   **Regularization Weight ($\lambda_{reg}$):** The key difference from the coarse stage is that $\lambda_{reg}$ is set to a smaller value in the fine stage [S2]. The exact numerical value is not given in the sources; it is a hyperparameter tuned relative to the coarse stage [S2].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def train_fine_stage(fine_repr_params, dataset, optimizer, lambda_reg_fine):
+    """
+    Optimizes the fine representation using a reduced regularization weight.
+    
+    Args:
+        fine_repr_params: Parameters of the fine representation (e.g., voxel grid or MLP weights).
+        dataset: Iterable of (image, camera_pose) pairs.
+        optimizer: Optimizer instance for fine_repr_params.
+        lambda_reg_fine: The reduced regularization weight for the fine stage.
+        
+    Returns:
+        fine_repr_params: The updated fine representation parameters.
+    """
+    for image, camera_pose in dataset:
+        # 1. Sample points along rays using the coarse stage strategy
+        ray_origins, ray_directions, sample_points = sample_rays(camera_pose)
+        
+        # 2. Query fine representation for density and color
+        densities, colors = fine_repr_params.query(sample_points)
+        
+        # 3. Volume render the image
+        rendered_image = volume_render(ray_origins, ray_directions, densities, colors)
+        
+        # 4. Compute reconstruction loss (MSE)
+        loss_rec = sum((rendered_image - image) ** 2) / len(rendered_image)
+        
+        # 5. Compute regularization loss (L2 norm of parameters)
+        loss_reg = sum(p ** 2 for p in fine_repr_params) / len(fine_repr_params)
+        
+        # 6. Compute total loss with reduced regularization weight
+        loss = loss_rec + lambda_reg_fine * loss_reg
+        
+        # 7. Backpropagate and update
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        
+    return fine_repr_params
+
+def sample_rays(camera_pose):
+    """Standard ray sampling routine returning origins, directions, and sample points."""
+    # Implementation depends on the specific ray sampler; returns arrays of shape (num_rays, 3) and (num_rays, num_samples, 3)
+    pass
+
+def volume_render(ray_origins, ray_directions, densities, colors):
+    """Standard volume rendering routine returning rendered RGB images."""
+    # Implementation computes alpha, transmittance, and accumulated color per ray
+    pass
+```
+
+**Edge Cases and Pitfalls:**
+Not given in the sources.
+
+## Subtopics
+
+### [StyleGAN2-based Discriminator Integration](8938-stylegan2-based-discriminator-integration.md)
+This method adapts a StyleGAN2 discriminator to evaluate NeRF-rendered images, configured for 64×64 RGB inputs. It differs from sibling methods such as [Test-Time Finetuning](12983-test-time-finetuning.md) by integrating adversarial evaluation directly into the training loop rather than applying post-processing. Choose this method when perceptual sharpness and photorealistic texture synthesis are prioritized over pure pixel-wise fidelity.
+
+### [Test-Time Finetuning](12983-test-time-finetuning.md)
+Test-Time Finetuning is a post-sampling optimization step that refines a sampled scene code by minimizing a combined loss of rendering fidelity and a diffusion prior, while keeping the model parameters frozen. It addresses the limitation where reconstruction guidance alone cannot strictly enforce rendering constraints towards faithful reconstruction. It sets itself apart from two-stage generative neural field methods by retaining the prior term during the optimization of the scene code, avoiding the biased and noisy scene codes that result from ignoring this term. Choose this method when refining a fixed model for specific novel views without retraining the network weights.
+
+### Geometry-Aware Attention
+A learnable module combining spatial (pixel) and geometric (camera) attention to regulate contributions from neighbours and reduce ghosting artifacts from remaining misalignments [S3]. It computes pixel attention weights $\psi_{pix}^i \in \mathbb{R}^{w \times h}$ using a module $\mathcal{A}_{pix}$ with two convolutional layers and sigmoid activation, and camera attention weights $\psi_{cam}^i \in \mathbb{R}^1$ using a module $\mathcal{A}_{cam}$ with two fully connected layers and sigmoid activation [S3]. The final attention-regulated features are computed as $H_{i \rightarrow k}^{f^a} = \psi_{cam}^i \times \psi_{pix}^i \times H_{i \rightarrow k}^{f'}$, where $H_{i \rightarrow k}^{f'}$ are the input neighbour features [S3].
+
+### NeuRay Consistency Loss
+A loss function enforcing consistency between hitting probabilities derived from the constructed radiance field and those decoded from the NeuRay visibility feature map [S4]. It samples points $p_i$ on a pseudo test ray and computes hitting probability $h_i$ from the constructed radiance field, then decodes the distribution $t(z)$ from the NeuRay representation for the pseudo test ray [S4]. It computes a new hitting probability $\tilde{h}_i = t(z_{i+1}) - t(z_i)$ and minimizes the cross entropy between $\tilde{h}_i$ and $h_i$ via $\ell_{consist}=\frac{1}{K_t}\sum_{i=1}^{K_t} CE(\tilde{h}_i,h_i)$, where $CE$ is the cross entropy loss function [S4].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:** Empirically leads to slightly better visual quality compared to using the same regularization weights as the coarse stage [S2].
+*   **Strengths:** Allows for the capture of high-frequency details and textures that the coarse stage cannot represent.
+*   **Limitations:** Requires careful tuning of the regularization weight to balance detail capture and noise/artifact suppression.
+
+## Background
+The method was highlighted in the Direct Voxel Grid Optimization paper [S2]. The concept of multi-stage training with adjusted objectives is central to modern radiance field optimization [S2].
+
+## Sources
+[S1] Direct Voxel Grid Optimization: Super-fast Convergence for Radiance Fields Reconstruction, https://doi.org/10.1109/cvpr52688.2022.00538, fetched 2026-10-26
+[S2] Direct Voxel Grid Optimization: Super-Fast Convergence ..., https://openaccess.thecvf.com/content/CVPR2022/papers/Sun_Direct_Voxel_Grid_Optimization_Super-Fast_Convergence_for_Radiance_Fields_Reconstruction_CVPR_2022_paper.pdf, fetched 2026-10-29
+[S3] RoGUENeRF: A Robust Geometry-Consistent Universal Enhancer for NeRF, https://doi.org/10.1007/978-3-031-73254-6_4, fetched 2026-10-29
+[S4] Neural Rays for Occlusion-aware Image-based Rendering, https://doi.org/10.1109/cvpr52688.2022.00767, fetched 2026-10-26

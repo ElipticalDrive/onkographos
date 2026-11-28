@@ -1,0 +1,187 @@
+# Photon Beam Diffusion
+
+Also called: Photon Beam Diffusion for Rendering
+
+## Overview
+Photon Beam Diffusion (PBD) is a hybrid numerical method for rendering subsurface scattering in translucent materials that interprets incident light as a continuous beam of photons inside the material and uses Monte Carlo integration to solve the diffusion equation [S1, unofficial]. It solves the problem of efficiently computing accurate multiple-scattering profiles without the quantization errors or computational overhead of sum-of-Gaussians approximations used in Quantized Diffusion (QD) [S1, unofficial]. Unlike its sibling [Transient Photon Beams](3296-transient-photon-beams.md) which handles time-dependent effects, or [Photon Marching](4775-photon-marching.md) which marches through media, PBD focuses on steady-state spatial diffusion using an extended source integral, offering faster convergence and numerical stability than standard Photon Diffusion (PD) [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Material optical properties (absorption coefficient $\mu_a$, scattering coefficient $\mu_s$, anisotropy $g$, refractive indices $n_{in}, n_{out}$), surface geometry, and incident light direction/intensity [G].
+*   **Outputs:** Radiant exitance profile (BSSRDF) for multiple scattering, optionally combined with an exact single-scattering term [S1, unofficial].
+
+**Data Structures:**
+*   **Photon Beams:** Instead of discrete photon points, the method stores continuous, directional photon beams entering the surface [S1, unofficial].
+*   **Sample Distances:** An exponentially-varying set of distances $x$ is used for integration, defined as $x = 0, x_1, x_1 \cdot 1.2, x_1 \cdot 1.2^2, \dots$ with a step size of 1.2 and $x_1 \approx 0.01/\mu_t$ [S1, unofficial].
+
+**Algorithm Steps:**
+1.  Store continuous, directional photon beams entering the surface instead of discrete photon points inside the medium [S1, unofficial].
+2.  Formulate the solution as a Monte Carlo integration problem of the extended source integral, eliminating the need for quantization and sum-of-Gaussians approximations [S1, unofficial].
+3.  For each shading point, generate Monte Carlo samples along the stored photon beams using equiangular/exponential MIS sampling to achieve faster multiple scattering convergence than Photon Diffusion (PD), especially at oblique light angles [S1, unofficial]. Typically 3 to 5 samples are required [S1, unofficial].
+4.  View each Monte Carlo sample as a weighted photon (monopole) at position $\vec{x}_r(t_i)$ inside the medium [S1, unofficial].
+5.  Mirror the monopole exactly as in Photon Diffusion (PD) to compute the three boundary conditions (dipole, multipole, quadrupole) as proposed by Donner and Jensen [DJ07] [S1, unofficial].
+6.  For oblique illumination on arbitrary geometries, blend between dipole, multipole, and quadrupole boundary conditions [S1, unofficial].
+7.  Evaluate the improved diffusion model using the stored photon beams as extended beam sources [S1, unofficial].
+8.  Compute a novel diffuse exact single-scattering term simultaneously with the multi-scattering profile using the same points or rays, adding minimal overhead [S1, unofficial]. If the surface separates volumes with different indices of refraction, use a separate sample sequence starting from the critical angle, as contributions below the critical angle are zero [S1, unofficial].
+9.  Combine the single-scattering and multi-scattering profiles [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def compute_photon_beam_diffusion(shading_point, photon_beams, material_params):
+    """
+    Computes the subsurface scattering profile using Photon Beam Diffusion.
+    """
+    mu_t = material_params.mu_a + material_params.mu_s
+    x1 = 0.01 / mu_t
+    step_size = 1.2
+    distances = [0.0]
+    current_dist = x1
+    while current_dist < 10.0 / mu_t:
+        distances.append(current_dist)
+        current_dist *= step_size
+
+    multi_scatter_sum = 0.0
+    single_scatter_sum = 0.0
+    num_samples = 5  # Typically 3 to 5 [S1, unofficial]
+
+    for beam in photon_beams:
+        for i in range(num_samples):
+            t = distances[i % len(distances)]
+            sample_pos = beam.entry_point + beam.direction * t
+            profile_value = evaluate_improved_diffusion(sample_pos, shading_point, material_params)
+            mis_weight = compute_mis_weight(beam.pdf, profile_value)
+            multi_scatter_sum += profile_value * mis_weight
+
+    if material_params.include_single_scattering:
+        if material_params.has_refraction:
+            critical_angle = math.asin(material_params.n_out / material_params.n_in)
+            for angle in generate_angles_from(critical_angle, 10):
+                single_scatter_sum += compute_exact_single_scattering(shading_point, angle, material_params)
+        else:
+            single_scatter_sum = compute_exact_single_scattering(shading_point, beam.direction, material_params)
+
+    return multi_scatter_sum + single_scatter_sum
+
+def evaluate_improved_diffusion(sample_pos, shading_point, material_params):
+    """
+    Evaluates the improved diffusion model, handling boundary conditions.
+    """
+    # Mirror the monopole at sample_pos to compute boundary conditions
+    # as in Photon Diffusion (PD) [S1, unofficial]
+    mirrored_pos = mirror_across_boundary(sample_pos, material_params)
+    
+    # Calculate distance between shading point and mirrored source
+    dist = math.sqrt(sum((a - b) ** 2 for a, b in zip(shading_point, mirrored_pos)))
+    
+    # Apply improved diffusion model formula [G]
+    # Standard improved diffusion kernel: R(r) = A * (exp(-mu_eff * r) / r) * (1 + mu_eff * r)
+    mu_eff = math.sqrt(3 * material_params.mu_a * (material_params.mu_a + material_params.mu_s))
+    profile_value = (math.exp(-mu_eff * dist) / (dist + 1e-6)) * (1 + mu_eff * dist)
+    return profile_value
+
+def mirror_across_boundary(sample_pos, material_params):
+    """
+    Mirrors the source point across the boundary to enforce boundary conditions.
+    Blends dipole, multipole, and quadrupole conditions based on illumination angle [S1, unofficial].
+    """
+    # Simplified dipole mirror for planar boundary [G]
+    return [sample_pos[0], sample_pos[1], -sample_pos[2]]
+
+def compute_mis_weight(beam_pdf, profile_pdf):
+    """
+    Computes the Multiple Importance Sampling weight using the balance heuristic [G].
+    """
+    return beam_pdf / (beam_pdf + profile_pdf + 1e-6)
+
+def generate_angles_from(critical_angle, num_samples):
+    """
+    Generates equiangular/exponential sample angles starting from the critical angle.
+    """
+    angles = []
+    for i in range(num_samples):
+        angle = critical_angle + (math.pi / 2 - critical_angle) * (i / (num_samples - 1))
+        angles.append(angle)
+    return angles
+
+def compute_exact_single_scattering(shading_point, incident_direction, material_params):
+    """
+    Computes the exact diffuse single-scattering term by integrating over the hemisphere.
+    Accounts for phase function and Fresnel terms explicitly [S1, unofficial].
+    """
+    integral = 0.0
+    num_samples = 10
+    for i in range(num_samples):
+        # Sample outgoing direction in hemisphere [G]
+        theta = math.sqrt(math.random()) * math.pi / 2
+        phi = math.random() * 2 * math.pi
+        omega_o = [math.sin(theta) * math.cos(phi), math.sin(theta) * math.sin(phi), math.cos(theta)]
+        
+        # Compute phase function and Fresnel transmission [G]
+        phase = compute_phase_function(incident_direction, omega_o, material_params.g)
+        fresnel_t = compute_fresnel_transmission(incident_direction, omega_o, material_params.n_in, material_params.n_out)
+        
+        integral += phase * fresnel_t
+    return integral / num_samples
+
+def compute_phase_function(incident, outgoing, g):
+    """
+    Computes the Henyey-Greenstein phase function [G].
+    """
+    cos_theta = sum(i * o for i, o in zip(incident, outgoing))
+    return (1 - g**2) / (4 * math.pi * (1 + g**2 - 2 * g * cos_theta)**1.5)
+
+def compute_fresnel_transmission(incident, outgoing, n1, n2):
+    """
+    Computes Fresnel transmission coefficient [G].
+    """
+    cos_theta_i = max(0, sum(i * o for i, o in zip(incident, outgoing)))
+    sin_theta_i = math.sqrt(1 - cos_theta_i**2)
+    sin_theta_t = n1 / n2 * sin_theta_i
+    if sin_theta_t > 1:
+        return 0.0
+    cos_theta_t = math.sqrt(1 - sin_theta_t**2)
+    rs = ((n1 * cos_theta_i - n2 * cos_theta_t) / (n1 * cos_theta_i + n2 * cos_theta_t))**2
+    rp = ((n1 * cos_theta_t - n2 * cos_theta_i) / (n1 * cos_theta_t + n2 * cos_theta_i))**2
+    return 1.0 - (rs + rp) / 2
+```
+
+**Parameters:**
+*   **Number of Monte Carlo samples:** 3 to 5 [S1, unofficial].
+*   **Step size for exponentially-varying distances:** 1.2 [S1, unofficial].
+*   **Minimum distance ($x_1$):** $\approx 0.01/\mu_t$ [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Refraction:** If the surface separates volumes with different indices of refraction, single-scattering contributions below the critical angle are zero. A separate sample sequence starting from the critical angle must be used to guarantee a smooth single-scattering profile [S1, unofficial].
+*   **Oblique Illumination:** Requires careful handling of boundary conditions. Blending between dipole, multipole, and quadrupole boundary conditions is necessary for arbitrary geometries [S1, unofficial].
+*   **Precision:** The method is designed to be numerically stable, avoiding the quantization errors of QD [S1, unofficial].
+
+## Subtopics
+
+### Transient Photon Beams
+Handles time-dependent light transport in participating media. Choose when simulating time-resolved effects or short-pulse lasers. Link: [Transient Photon Beams](3296-transient-photon-beams.md).
+
+### Photon Marching
+Marches photons through the medium to handle complex scattering. Choose when high-order scattering in highly scattering media is required without diffusion approximation. Link: [Photon Marching](4775-photon-marching.md).
+
+## Operating characteristics
+*   **Time Complexity:** Rendering with PBD and single-scattering typically takes about 15% longer than using the classic dipole diffusion model [S1, unofficial].
+*   **Memory Complexity:** Stores continuous photon beams instead of discrete points, offering a more compact representation than storing thousands of photons [S1, unofficial].
+*   **Measured Performance:**
+    *   Speedup factor of 3.1 for a full profile when comparing 5 PBD samples with 44 Gaussians in QD [S1, unofficial].
+    *   Speedup of 21.6 when only one sample of a profile is needed [S1, unofficial].
+    *   Render time for a human head scene: 7 minutes on a multi-core PC [S1, unofficial].
+*   **Convergence:** Converges faster than Photon Diffusion (PD) with equiangular/exponential MIS sampling, especially at oblique light angles [S1, unofficial].
+*   **Strengths:** Faster, more accurate, and numerically stable than Quantized Diffusion (QD). Simpler implementation. Supports finite and multi-layer materials. Directional incident effects.
+*   **Limitations:** Assumes the exitant boundary is diffuse (though reshaped by Fresnel). Less suitable for smooth Fresnel boundaries (marble/milk) compared to Jensen et al.'s approach [S1, unofficial]. Multi-layered materials may be faster and more elegant in QD than with explicit integration [S1, unofficial].
+*   **When to Use:** For translucent materials like skin, wax, or food where accurate subsurface scattering is needed with better performance than QD and more accuracy than dipole diffusion [S1, unofficial].
+*   **When Not to Use:** For materials with smooth Fresnel boundaries (marble, milk) where Jensen et al.'s approach is more appropriate, or for time-dependent effects (use Transient Photon Beams) [S1, unofficial].
+
+## Background
+Photon Beam Diffusion was introduced by Ralf Habel, Per H. Christensen, and Wojciech Jarosz in 2013 at the Eurographics Symposium on Rendering [S1, unofficial]. It builds on the improved diffusion model [dI11] and addresses the limitations of previous methods like Quantized Diffusion (QD) and classic dipole diffusion [S1, unofficial]. The method is implemented in research and production rendering systems, including Mitsuba (point-based subsurface scattering), PRMan (point-based and ray-traced subsurface scattering), and on top of a progressive photon beam tracer [S1, unofficial].
+
+## Sources
+[S1] Photon Beam Diffusion for Rendering, https://www.scribd.com/document/255860491/Photon-Beam-Diffusion, fetched 2026-10-29 (unofficial)

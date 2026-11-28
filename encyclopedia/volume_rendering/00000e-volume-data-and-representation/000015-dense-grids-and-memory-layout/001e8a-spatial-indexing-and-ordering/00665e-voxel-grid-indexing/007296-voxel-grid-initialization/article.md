@@ -1,0 +1,179 @@
+# Voxel Grid Initialization
+
+Also called: DirectContractedVoxGO Initialization, Empty Volume Creation, Grid Activation, Probe Grid Configuration, Volume New, activate, vTable1 initialization
+
+## Overview
+Voxel Grid Initialization establishes the foundational data structures and memory layouts required for volume rendering, specifically configuring scene boundaries, grid resolutions, and active voxel states [S1, S4, unofficial][S5]. It solves the problem of transitioning from abstract scene parameters to a concrete, addressable 3D grid representation [S1, unofficial][S5]. It differs from [Coordinate Space Conversion](1785-coordinate-space-conversion.md) by focusing on memory allocation and state activation rather than coordinate transformation, and from [Sparse Voxel Storage and Chunking](15595-sparse-voxel-storage-and-chunking.md) by handling the initial population of dense or semi-dense grids before sparsification strategies are applied [G].
+
+## How it works
+### Inputs and Outputs
+*   **Inputs:**
+    *   Scene bounding box coordinates: `xyz_min`, `xyz_max` (3D vectors) [S1, S3, unofficial].
+    *   Target number of base voxels: `num_voxels_base` (integer) [S1, unofficial].
+    *   Background length/offset: `bg_len` (scalar) [S1, unofficial].
+    *   Initial alpha value: `alpha_init` (scalar) [S1, unofficial].
+    *   Optional: Existing active voxel tree structure [S2, unofficial].
+*   **Outputs:**
+    *   Initialized grid structure containing `vTable1` (voxel table), `gridSize`, and `gridVoxelSize` [S4, unofficial].
+    *   Scene center and radius parameters [S1, unofficial].
+    *   Density bias shift parameter [S1, unofficial].
+    *   Active voxel set expanded to include specific values [S2, unofficial].
+
+### Data Structures
+1.  **Grid Structure:**
+    *   `vTable1`: Pointer to unsigned integer array (`unsigned int*`) representing the voxel table [S4, unofficial].
+    *   `gridSize`: Integer representing the grid dimensions [S4, unofficial].
+    *   `gridVoxelSize`: Float representing the size of each voxel [S4, unofficial].
+2.  **Grid Creation Parameters:**
+    *   `size N`: Number of grid points along each axis. Default 100. Single value applies to all axes; three comma-separated values apply to X, Y, Z [S5].
+    *   `gridSpacing s`: Physical distance units per voxel. Default 1.0. Single value applies to all axes; three comma-separated values apply to X, Y, Z [S5].
+    *   `origin x,y,z`: Coordinates of the grid origin. Default 0.0, 0.0, 0.0 [S5].
+    *   `cellAngles α,β,γ`: Cell angles in degrees. Default 90, 90, 90°. Single value allowed if α=β=γ [S5].
+    *   `valueType`: Data type. Default float32. Supports int8/16/32, uint8/16/32, float32/64 [S5].
+
+### Steps
+1.  **Compute Scene Extents and Center:**
+    *   Calculate scene center: $c = \frac{xyz_{min} + xyz_{max}}{2}$ [S1, unofficial].
+    *   Calculate scene radius: $r = \frac{xyz_{max} - xyz_{min}}{2}$ [S1, unofficial].
+    *   Set extended bounds for background handling: $xyz_{min}^{bg} = [-1, -1, -1] - bg\_len$, $xyz_{max}^{bg} = [1, 1, 1] + bg\_len$ [S1, unofficial].
+2.  **Calculate Voxel Resolution:**
+    *   Compute base voxel size: $s_{base} = \sqrt[3]{\frac{\prod_{i=0}^{2}(xyz_{max,i}^{bg} - xyz_{min,i}^{bg})}{num\_voxels\_base}}$ [S1, unofficial].
+    *   Determine grid dimensions based on $s_{base}$ and extended bounds [S1, S3, unofficial].
+3.  **Allocate and Initialize Memory:**
+    *   Allocate memory for the voxel table (`vTable1`) using `vTableMalloc` based on `linearGridDim` [S4, unofficial].
+    *   Initialize the allocated voxel table to zeros (empty) using `vTableInitialEmpty` [S4, unofficial].
+    *   On the GPU, set `vTable1` to NULL initially, then assign the allocated memory [S4, unofficial].
+    *   Set `gridSize` and `gridVoxelSize` in the grid structure [S4, unofficial].
+4.  **Populate Active Voxels:**
+    *   Initialize `data` with currently active voxels from `active_voxels(tree)` [S2, unofficial].
+    *   Iterate all leaves in the tree [S2, unofficial].
+    *   For each leaf, iterate offsets in `off_indices(leaf.value_mask)` [S2, unofficial].
+    *   If `leaf.values[offset + 1] == value`, decode coordinate $c$ and set `data[c] = value` [S2, unofficial].
+5.  **Compute Density Bias:**
+    *   Calculate density bias shift: $act\_shift = \ln\left(\frac{1}{1 - \alpha_{init}} - 1\right)$ [S1, unofficial].
+6.  **Create Density Grid:**
+    *   Create the density grid using `grid.create_grid` with specified type and configuration [S1, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def initialize_voxel_grid(xyz_min, xyz_max, num_voxels_base, alpha_init, bg_len, tree=None, target_value=None):
+    # 1. Compute Scene Extents and Center
+    scene_center = [(xyz_min[i] + xyz_max[i]) * 0.5 for i in range(3)]
+    scene_radius = [(xyz_max[i] - xyz_min[i]) * 0.5 for i in range(3)]
+    
+    # 2. Set Extended Bounds for Background
+    xyz_min_bg = [-1.0 - bg_len, -1.0 - bg_len, -1.0 - bg_len]
+    xyz_max_bg = [1.0 + bg_len, 1.0 + bg_len, 1.0 + bg_len]
+    
+    # 3. Calculate Base Voxel Size
+    box_volume = 1.0
+    for i in range(3):
+        box_volume *= (xyz_max_bg[i] - xyz_min_bg[i])
+    voxel_size_base = (box_volume / num_voxels_base) ** (1.0 / 3.0)
+    
+    # 4. Allocate and Initialize Voxel Table
+    # linearGridDim calculation is not specified in sources [G]
+    dim_x = math.ceil((xyz_max_bg[0] - xyz_min_bg[0]) / voxel_size_base)
+    dim_y = math.ceil((xyz_max_bg[1] - xyz_min_bg[1]) / voxel_size_base)
+    dim_z = math.ceil((xyz_max_bg[2] - xyz_min_bg[2]) / voxel_size_base)
+    linear_grid_dim = dim_x * dim_y * dim_z
+    
+    # vTableMalloc allocates memory; vTableInitialEmpty sets to zeros [S4, unofficial]
+    vTable1 = [0] * linear_grid_dim
+    
+    # 5. Populate Active Voxels
+    data = {}
+    if tree is not None:
+        # Method A: From existing tree
+        for c in tree.active_voxels():
+            data[c] = tree.values[c]
+        # Method C: Activation Expansion
+        if target_value is not None:
+            for leaf in tree.leaves:
+                for offset in leaf.off_indices():
+                    if leaf.values[offset + 1] == target_value:
+                        c = leaf.decode_coordinate(offset)
+                        data[c] = target_value
+    else:
+        # Sources do not specify file-based initialization details [G]
+        pass
+        
+    # 6. Compute Density Bias
+    act_shift = math.log(1.0 / (1.0 - alpha_init) - 1.0)
+    
+    # 7. Create Density Grid
+    grid_size = linear_grid_dim
+    grid_voxel_size = voxel_size_base
+    density_grid = {
+        "vTable1": vTable1,
+        "gridSize": grid_size,
+        "gridVoxelSize": grid_voxel_size,
+        "act_shift": act_shift
+    }
+    
+    return {
+        "scene_center": scene_center,
+        "scene_radius": scene_radius,
+        "density_grid": density_grid,
+        "data": data
+    }
+```
+
+### Parameters
+*   `num_voxels_base`: Number of base voxels for resolution calculation [S1, unofficial].
+*   `alpha_init`: Initial alpha value for density bias calculation [S1, unofficial].
+*   `bg_len`: Background length/offset for extending bounds [S1, unofficial].
+*   `size N`: Number of grid points along each axis. Default 100. Single value applies to all axes; three comma-separated values apply to X, Y, Z [S5].
+*   `gridSpacing s`: Physical distance units per voxel. Default 1.0. Single value applies to all axes; three comma-separated values apply to X, Y, Z [S5].
+*   `origin x,y,z`: Coordinates of the grid origin. Default 0.0, 0.0, 0.0 [S5].
+*   `cellAngles α,β,γ`: Cell angles in degrees. Default 90, 90, 90°. Single value allowed if α=β=γ [S5].
+*   `valueType`: Data type. Default float32. Supports int8/16/32, uint8/16/32, float32/64 [S5].
+
+### Edge Cases and Pitfalls
+*   **Precision:** Floating-point inaccuracies in coordinate calculations can lead to misalignment; integer quantization is recommended for vertex deduplication in related construction steps [S1, unofficial].
+*   **Memory Allocation:** `vTableMalloc` must correctly calculate dimensions based on `linearGridDim` [S4, unofficial].
+*   **Empty Grids:** Handling empty grids requires creating a valid but empty Grid Hierarchy structure to avoid null pointer dereferences in shaders [S4, unofficial].
+
+## Subtopics
+
+### [Voxel Grid Construction](3085-voxel-grid-construction.md)
+Constructs a 3D voxel grid where each cube has 8 corner vertices, deduplicating shared corners to store them only once. The grid is centered at the origin with unit length along each dimension. It differs from naive grid generation by using integer quantization for vertex deduplication to handle floating-point inaccuracies. Choose it when generating base geometric scaffolding before populating voxel data.
+
+### [Grid Background Change](3210-grid-background-change.md)
+Updates the background value of inactive voxels in a volume grid while preserving the values of active voxels. It returns a new grid where inactive voxels holding the old background value are updated to a new background value, while active voxels remain unchanged. Choose it when modifying scene environments without altering existing geometry.
+
+### [Dense Copy Ingestion](3212-dense-copy-ingestion.md)
+Constructs a VDB grid from a dense 3D array, storing only values that differ from a specified background value as active voxels. It differs from [Voxel Grid Construction](3085-voxel-grid-construction.md) by accepting pre-existing dense memory layouts rather than generating voxels from geometric primitives, and from [VoxelGridFromList](7224-voxelgridfromlist.md) by operating on contiguous arrays rather than sparse coordinate lists. Choose it when migrating data from CPU-side dense buffers.
+
+### [Voxel Grid Storage and Voxelization](6433-voxel-grid-storage-and-voxelization.md)
+Converts continuous geometric representations, such as meshes or signed distance fields, into a discrete, dense 3D grid of scalar or boolean values. It maps world-space coordinates to array indices to produce a format suitable for downstream processing. It differs from [Voxel Grid Construction](3085-voxel-grid-construction.md) by focusing on the specific memory layout and the explicit initialization of grid bounds and dimensions, whereas Construction may imply a broader pipeline including sparse structures. Choose it when discretizing continuous geometry for rendering.
+
+### [VoxelGridFromList](7224-voxelgridfromlist.md)
+Initializes a 3D voxel grid by copying boolean values from a flat list into the grid's linear memory layout. It solves the problem of bulk-setting voxel states without iterating over spatial coordinates, relying instead on a pre-computed or assumed linear index mapping. It differs from [Voxel Grid Construction](3085-voxel-grid-construction.md) by assuming the grid structure already exists and only updating values, and from [Dense Copy Ingestion](3212-dense-copy-ingestion.md) by handling boolean flags rather than dense scalar data. Choose it for fast occupancy or mask updates.
+
+### [DirectVoxGO Model Initialization](15589-directvoxgo-model-initialization.md)
+Initializes the DirectVoxGO neural radiance field model by setting up density grids, segmentation masks, and color networks based on bounding box coordinates and voxel counts. It differs from sibling methods by explicitly calculating density bias for initial transparency and managing dual segmentation mask grids for iterative refinement, whereas siblings like [Voxel Grid Construction](3085-voxel-grid-construction.md) focus on generic grid population and [Dense Copy Ingestion](3212-dense-copy-ingestion.md) handles data transfer. Choose it when training or loading DirectVoxGO NeRF checkpoints.
+
+### [Voxel Data Initialization and Binding](6606-voxel-data-initialization-and-binding.md)
+Initializes the voxel world data by loading voxel structures from files or generating empty grids, creating the corresponding GPU buffers and textures, and setting up the bind groups required for the trace shader. It differs from its sibling [Voxel Grid Construction](3085-voxel-grid-construction.md) by focusing on the memory allocation and shader binding phase rather than the algorithmic population of voxel data, and from [Voxel Grid Population & Raymarching Setup](21267-voxel-grid-population-raymarching-setup.md) by handling the initial buffer creation before the compute shader dispatch. Choose it during the GPU resource setup phase of a rendering pipeline.
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of voxels for allocation and initialization ($O(N)$), where $N$ is the total number of voxels in the grid [G]. Population steps depend on the number of active voxels or leaves in the tree [S2, unofficial].
+*   **Memory Complexity:** Proportional to the grid size and the number of active voxels. The voxel table `vTable1` requires $O(N)$ memory [S4, unofficial].
+*   **Performance:** Initialization is a one-time cost per scene or grid update. GPU initialization involves buffer creation and data transfer, which can be optimized using `COPY_DST` usage flags [S4, unofficial].
+*   **Strengths:** Provides a standardized way to set up scene parameters and memory layouts.
+*   **Limitations:** Memory usage can be high for dense grids. Precision issues may arise if coordinate quantization is not handled carefully [S1, unofficial].
+
+## Background
+Voxel Grid Initialization is a fundamental step in volume rendering pipelines, particularly in neural radiance field (NeRF) and voxel-based rendering methods like DirectVoxGO [S1, unofficial]. The specific implementation details, such as `vTable1` initialization and density bias calculation, are characteristic of modern GPU-accelerated voxel rendering frameworks [S3, S1, unofficial]. The method is widely used in applications requiring real-time volume rendering, such as medical imaging, scientific visualization, and real-time graphics [S2, S4, unofficial].
+
+## Sources
+[S1] Jumpat/SegmentAnythingin3D, https://github.com/Jumpat/SegmentAnythingin3D, fetched 2026-10-26 (unofficial)
+[S2] tobiasosborne/Lyr.jl, https://github.com/tobiasosborne/Lyr.jl, fetched 2026-10-26 (unofficial)
+[S3] swr06/VolumetricDisplay, https://github.com/swr06/VolumetricDisplay, fetched 2026-10-26 (unofficial)
+[S4] ivandrodri/gpu-voxelizer, https://github.com/ivandrodri/gpu-voxelizer, fetched 2026-10-26 (unofficial)
+[S5] Command: volume, https://www.rbvi.ucsf.edu/chimerax/docs/user/commands/volume.html, fetched 2026-10-27

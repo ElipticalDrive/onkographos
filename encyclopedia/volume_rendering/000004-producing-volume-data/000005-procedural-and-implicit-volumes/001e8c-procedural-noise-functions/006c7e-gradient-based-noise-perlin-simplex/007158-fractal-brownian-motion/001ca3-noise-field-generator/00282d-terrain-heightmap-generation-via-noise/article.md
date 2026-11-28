@@ -1,0 +1,169 @@
+# Terrain Heightmap Generation via Noise
+
+Also called: GetHeightAtWorldLocation, Heightmap Generation via Noise, Perlin Noise Height Generation, Procedural terrain heightmap, Terrain Height Generation, World Height Noise
+
+## Overview
+This method generates a 2D terrain heightmap by converting 2D world coordinates into a 3D height value using scaled fractal noise, remapped to a specific vertical range [S1, unofficial]. It differs from its parent, the [Noise Field Generator](1302-noise-field-generator.md), by taking world-space X/Y coordinates and returning a single height value (Z) rather than a full 3D volume [S1, unofficial]. It is distinct from [FBM Combinations](3962-fbm-combinations.md) and [Domain Warped FBM](4493-domain-warped-fbm.md) by using standard additive fractal summation without domain warping [S1, unofficial].
+
+## How it works
+The method takes 2D world-space coordinates and returns a single height value [S1, unofficial]. The process involves scaling the input coordinates, computing a Fractal Brownian Motion (FBM) sum, and remapping the result to a target vertical range [S1, unofficial].
+
+### Inputs and Outputs
+*   **Inputs**:
+    *   `WorldX`, `WorldY`: 2D world-space coordinates (float) [S1, unofficial].
+    *   `Settings`: A configuration struct containing `Seed`, `Scale`, `Octaves`, `Persistence`, `Lacunarity`, `BaseHeight`, and `HeightScale` [S1, unofficial].
+*   **Outputs**:
+    *   `Height`: A single float representing the terrain elevation at `(WorldX, WorldY)` [S1, unofficial].
+
+### Data Structures
+The `Settings` struct contains:
+*   `Seed` (int32): Random seed for noise generation. Default: 1337 [S1, unofficial].
+*   `Scale` (float): World units per noise cell. Controls smoothness. Typical range: 1000-5000. Default: 2000.0f [S1, unofficial].
+*   `Octaves` (int32): Number of noise layers summed. Range: 1-8. Default: 4 [S1, unofficial].
+*   `Persistence` (float): Amplitude falloff per octave. Range: 0.0-1.0. Default: 0.5f [S1, unofficial].
+*   `Lacunarity` (float): Frequency multiplier per octave. Default: 2.0f [S1, unofficial].
+*   `BaseHeight` (float): Final output offset. Default: 0.0f [S1, unofficial].
+*   `HeightScale` (float): Final output amplitude. Default: 500.0f [S1, unofficial].
+The implementation relies on a permutation table `P` of 512 integers to handle wrap-around for gradient indices [G].
+
+### Steps
+1.  **Calculate Scale Factor**: Prevent division by zero.
+    $$ Scale = \max(Settings.Scale, \text{small\_positive\_constant}) $$
+    [S1, unofficial]
+2.  **Normalize Coordinates**: Convert world coordinates to noise space.
+    $$ NoiseX = \frac{WorldX}{Scale} $$
+    $$ NoiseY = \frac{WorldY}{Scale} $$
+    [S1, unofficial]
+3.  **Compute Raw Noise**: Calculate the fractal noise value in the range $[-1, 1]$ using the `FractalPerlin2D` function.
+    $$ Noise = FractalPerlin2D(NoiseX, NoiseY, Settings) $$
+    [S1, unofficial]
+4.  **Remap to Target Range**: Map the noise value to the final height range. Two variations exist in the sources:
+    *   **Linear Offset/Scale (Source 1)**:
+        $$ Height = BaseHeight + Noise \times HeightScale $$
+        [S1, unofficial]
+    *   **Min/Max Mapping (Source 2)**:
+        $$ Height = minHeight + \lfloor (Noise + 1.0) \times 0.5 \times (maxHeight - minHeight) \rfloor $$
+        [S2, unofficial]
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def init_permutation(seed):
+    """Initialize a 512-entry permutation table from a seed [G]."""
+    p = list(range(256))
+    # Standard Fisher-Yates shuffle seeded deterministically [G]
+    state = seed
+    for i in range(255, 0, -1):
+        state = (state * 1103515245 + 12345) & 0x7FFFFFFF
+        j = state % (i + 1)
+        p[i], p[j] = p[j], p[i]
+    return p + p  # Duplicate for wrap-around
+
+def TerrainHeightmapGeneration(WorldX, WorldY, Settings):
+    """Generates terrain height at WorldX, WorldY [S1, unofficial]."""
+    # Step 1: Calculate Scale Factor
+    scale = max(Settings.Scale, 1e-6)
+    
+    # Step 2: Normalize world coordinates
+    noise_x = WorldX / scale
+    noise_y = WorldY / scale
+    
+    # Step 3: Compute raw noise value in [-1, 1]
+    noise = FractalPerlin2D(noise_x, noise_y, Settings)
+    
+    # Step 4: Remap to target range
+    height = Settings.BaseHeight + noise * Settings.HeightScale
+    return height
+
+def FractalPerlin2D(X, Y, Settings):
+    """Computes Fractal Brownian Motion using 2D Perlin noise [S1, unofficial]."""
+    total = 0.0
+    frequency = 1.0
+    amplitude = 1.0
+    max_value = 0.0
+    
+    # Clamp octaves to valid range [1, 8] as per [S1, unofficial]
+    octaves = max(1, min(Settings.Octaves, 8))
+    
+    for _ in range(octaves):
+        raw_noise = RawPerlin2D(X * frequency, Y * frequency, Settings.Seed)
+        total += raw_noise * amplitude
+        max_value += amplitude
+        amplitude *= Settings.Persistence
+        frequency *= Settings.Lacunarity
+        
+    return total / max_value if max_value > 0 else 0.0
+
+def RawPerlin2D(X, Y, Seed):
+    """Standard 2D Perlin Noise implementation [S1, unofficial]."""
+    P = init_permutation(Seed)
+    
+    xi = int(math.floor(X)) & 255
+    yi = int(math.floor(Y)) & 255
+    
+    xf = X - math.floor(X)
+    yf = Y - math.floor(Y)
+    
+    u = Fade(xf)
+    v = Fade(yf)
+    
+    aa = P[P[xi] + yi]
+    ab = P[P[xi] + yi + 1]
+    ba = P[P[xi + 1] + yi]
+    bb = P[P[xi + 1] + yi + 1]
+    
+    g_aa = Grad(aa, xf, yf)
+    g_ba = Grad(ba, xf - 1.0, yf)
+    g_ab = Grad(ab, xf, yf - 1.0)
+    g_bb = Grad(bb, xf - 1.0, yf - 1.0)
+    
+    x1 = Lerp(u, g_aa, g_ba)
+    x2 = Lerp(u, g_ab, g_bb)
+    
+    return Lerp(v, x1, x2)
+
+def Fade(t):
+    return t * t * t * (t * (t * 6 - 15) + 10)
+
+def Lerp(t, a, b):
+    return a + t * (b - a)
+
+def Grad(hash, x, y):
+    h = hash & 3
+    if h == 0: return x + y
+    elif h == 1: return -x + y
+    elif h == 2: return x - y
+    else: return -x - y
+```
+
+### Edge Cases and Pitfalls
+*   **Division by Zero**: If `Settings.Scale` is 0, coordinate normalization fails [S1, unofficial].
+*   **Octave Clamping**: Octaves must be clamped to [1, 8] to prevent undefined behavior [S1, unofficial].
+*   **Precision**: The noise function returns values roughly in $[-1, 1]$ [S1, unofficial]. The normalization step in `FractalPerlin2D` ensures strict bounding [S1, unofficial].
+*   **Coordinate Wrap**: The permutation table lookup uses bitwise AND with 255 (`& 255`) to handle negative coordinates and large values [S1, unofficial].
+
+## Subtopics
+
+### FBM Combinations
+[FBM Combinations](3962-fbm-combinations.md) extends basic fractal summation by allowing non-standard combinations of noise layers (e.g., multiplication, subtraction) rather than simple additive summation. Choose this when you need specific spectral shapes or non-Gaussian height distributions.
+
+### Domain Warped FBM
+[Domain Warped FBM](4493-domain-warped-fbm.md) applies a secondary noise function to distort the input coordinates of the primary noise. Choose this for creating more complex, organic features like ridges or swirls that standard FBM cannot produce.
+
+## Operating characteristics
+*   **Time Complexity**: $O(O)$, where $O$ is the number of octaves [S1, unofficial].
+*   **Memory Complexity**: $O(1)$ for the noise generation itself, assuming the permutation table is pre-computed [G].
+*   **Strengths**: Simple to implement, produces smooth and organic terrain, easily adjustable via parameters [S1, unofficial].
+*   **Limitations**: The resulting terrain is purely mathematical and may lack geological realism without post-processing [S1, unofficial].
+*   **When to use**: Procedural terrain generation, placing objects at ground level, and foliage scatter without a physical landscape actor [S1, unofficial].
+*   **When not to use**: When high-fidelity, geologically accurate terrain is required, or when 3D volumetric details are needed instead of a surface heightmap [S1, unofficial].
+
+## Background
+This method is derived from procedural noise techniques popularized by Ken Perlin [G]. The specific implementation in the sources is part of an Unreal Engine 5 voxel project [S1, unofficial]. The use of Perlin noise for terrain generation is a standard technique in procedural content generation for games, allowing for infinite, deterministic landscapes [S1, unofficial]. The parent method, [Noise Field Generator](1302-noise-field-generator.md), suggests an evolution towards 3D volumetric noise, but this heightmap method remains a common 2D projection for surface-level interactions [S1, unofficial].
+
+## Sources
+[S1] Manolo94/UE5MinecraftClone, https://github.com/Manolo94/UE5MinecraftClone, fetched 2026-10-26 (unofficial)
+[S2] Justinj68/OM3D_PROJECT, https://github.com/Justinj68/OM3D_PROJECT, fetched 2026-10-27 (unofficial)

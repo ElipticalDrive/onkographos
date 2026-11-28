@@ -1,0 +1,101 @@
+# On-the-fly pre-shading
+
+Also called: Pre-shading with 3D Texturing, VanGelder and Kim pre-shading
+
+## Overview
+On-the-fly pre-shading is a fast technique that pre-shades a volume on the fly and then slices and composites an RGB volume to obtain an image with shading effects [S1, unofficial][S2, book]. It is distinguished from sibling methods like [Illumination Caching](7548-illumination-caching.md) by computing shading dynamically during the slicing process rather than caching it in a separate data structure [G], and from [Direct Volume Rendering with Phong Shading](3686-direct-volume-rendering-with-phong-shading.md) by deferring the accumulation of shading into a pre-shaded RGB texture space before compositing [G].
+
+## How it works
+**Inputs and Outputs:**
+*   Input: A scalar volume dataset $V$, transfer functions for color $C_{base}$ and opacity $\alpha$, and lighting parameters ($\mathbf{l}, k_a, k_d, k_s, n$) [G].
+*   Output: A shaded RGB image [G].
+
+**Data Structures:**
+1.  **Scalar Volume:** 3D array of scalar values [G].
+2.  **Pre-shaded RGB Volume:** A 3D texture where each voxel stores the shaded color $C_{shaded}$ [S2, book].
+3.  **Ray/Plane Parameters:** View direction, camera position, and slice spacing [G].
+
+**Steps:**
+1.  **Gradient Estimation:** For each voxel $\mathbf{p}_i$ in the volume, estimate the normal $\mathbf{n}_i$ using central finite differences [G]:
+    $$ \nabla V(\mathbf{p}_i) \approx \left( \frac{V(\mathbf{p}_i + \Delta x) - V(\mathbf{p}_i - \Delta x)}{2\Delta x}, \frac{V(\mathbf{p}_i + \Delta y) - V(\mathbf{p}_i - \Delta y)}{2\Delta y}, \frac{V(\mathbf{p}_i + \Delta z) - V(\mathbf{p}_i - \Delta z)}{2\Delta z} \right) $$
+    $$ \mathbf{n}_i = \frac{\nabla V(\mathbf{p}_i)}{\|\nabla V(\mathbf{p}_i)\|} $$
+    [G] Handle zero-gradient voxels by assigning a default normal (e.g., $(0,0,1)$) to avoid division by zero.
+
+2.  **Shading Computation:** Compute the lighting term $L(\mathbf{p}_i)$ using the Phong model [G]:
+    $$ L(\mathbf{p}_i) = k_a + k_d (\mathbf{n}_i \cdot \mathbf{l}) + k_s (\mathbf{r}_i \cdot \mathbf{v})^n $$
+    Where $\mathbf{r}_i = 2(\mathbf{n}_i \cdot \mathbf{l})\mathbf{n}_i - \mathbf{l}$ [G].
+
+3.  **Pre-shading:** Map the scalar value to base color $C_{base}$ and compute the shaded color:
+    $$ C_{shaded}(\mathbf{p}_i) = C_{base}(V(\mathbf{p}_i)) \cdot L(\mathbf{p}_i) $$
+    Store $C_{shaded}$ in the pre-shaded RGB volume [S2, book].
+
+4.  **Slicing and Compositing:** Render the pre-shaded RGB volume using 3D texturing. Slices are taken at arbitrary small distances to avoid popping [S1, unofficial][S2, book]. The RGB values are accumulated using front-to-back alpha compositing [G]. The opacity $\alpha$ is derived from the transfer function and accumulated separately or integrated with the color [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def on_the_fly_pre_shading(volume, transfer_func, light_dir, view_dir, ambient, diffuse, specular, shininess, width, height, num_samples, ray_origin, ray_direction):
+    # Step 1 & 2: Pre-shade the volume
+    shaded_volume = [[[0.0, 0.0, 0.0] for _ in range(volume.dim_z)] for _ in range(volume.dim_y)]
+    for x in range(volume.dim_x):
+        for y in range(volume.dim_y):
+            for z in range(volume.dim_z):
+                # Estimate normal using central finite differences [G]
+                dx = (volume[x+1, y, z] - volume[x-1, y, z]) / 2.0
+                dy = (volume[x, y+1, z] - volume[x, y-1, z]) / 2.0
+                dz = (volume[x, y, z+1] - volume[x, y, z-1]) / 2.0
+                mag = (dx*dx + dy*dy + dz*dz)**0.5
+                if mag == 0:
+                    normal = (0.0, 0.0, 1.0) # [G] Default normal
+                else:
+                    normal = (dx/mag, dy/mag, dz/mag)
+
+                # Compute lighting [G]
+                dot_nl = normal[0]*light_dir[0] + normal[1]*light_dir[1] + normal[2]*light_dir[2]
+                r = (2*dot_nl*normal[0] - light_dir[0], 2*dot_nl*normal[1] - light_dir[1], 2*dot_nl*normal[2] - light_dir[2])
+                dot_rv = r[0]*view_dir[0] + r[1]*view_dir[1] + r[2]*view_dir[2]
+                lighting = ambient + diffuse * dot_nl + specular * (dot_rv ** shininess)
+
+                # Map to color and shade [S2, book]
+                base_color = transfer_func.color(volume[x, y, z])
+                shaded_volume[x][y][z] = (base_color[0]*lighting, base_color[1]*lighting, base_color[2]*lighting)
+
+    # Step 3: Slice and composite [S1, unofficial][S2, book]
+    image = [[[0.0, 0.0, 0.0] for _ in range(width)] for _ in range(height)]
+    for px in range(width):
+        for py in range(height):
+            acc_color = [0.0, 0.0, 0.0]
+            acc_alpha = 0.0
+            for t in range(num_samples):
+                pos = (ray_origin[0] + t*ray_direction[0], ray_origin[1] + t*ray_direction[1], ray_origin[2] + t*ray_direction[2])
+                c_shaded = trilinear(shaded_volume, pos)
+                alpha = transfer_func.opacity(trilinear(volume, pos))
+
+                # Front-to-back compositing [G]
+                weight = alpha * (1.0 - acc_alpha)
+                acc_color[0] += c_shaded[0] * weight
+                acc_color[1] += c_shaded[1] * weight
+                acc_color[2] += c_shaded[2] * weight
+                acc_alpha += weight
+            image[py][px] = acc_color
+    return image
+
+def trilinear(tex, p):
+    # Standard trilinear interpolation [G]
+    return tex[int(p[0])][int(p[1])][int(p[2])]
+```
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ for pre-shading, where $N$ is the number of voxels [G]. Slicing is $O(R \cdot S)$, where $R$ is rays and $S$ is samples [G].
+*   **Memory Complexity:** $O(N)$ for the pre-shaded RGB volume [G].
+*   **Performance:** Fast due to one-pass shading and efficient 3D texture interpolation [S1, unofficial][S2, book].
+*   **Strengths:** High performance, no popping artifacts with small slice distances [S1, unofficial][S2, book].
+*   **Limitations:** Requires additional memory for the pre-shaded volume. Shading is static per voxel, not dynamic per sample along the ray [G].
+
+## Background
+On-the-fly pre-shading was introduced by VanGelder and Kim [S1, unofficial][S2, book]. It was developed as a fast alternative to multi-pass methods like those by Meißner et al. [S1, unofficial][S2, book] which suffered from performance loss. It leverages 3D texture hardware interpolation [S1, unofficial][S2, book].
+
+## Sources
+[S1] Overview of Volume Rendering - Stony Brook Computer Science, https://www3.cs.stonybrook.edu/~mueller/papers/volvisOverview.pdf, fetched 2026-10-27 (unofficial)
+[S2] PDF Volume Visualization and Volume Graphics, https://www3.cs.stonybrook.edu/~mueller/teaching/cse332/volvisChapter.pdf, fetched 2026-10-28 (book)

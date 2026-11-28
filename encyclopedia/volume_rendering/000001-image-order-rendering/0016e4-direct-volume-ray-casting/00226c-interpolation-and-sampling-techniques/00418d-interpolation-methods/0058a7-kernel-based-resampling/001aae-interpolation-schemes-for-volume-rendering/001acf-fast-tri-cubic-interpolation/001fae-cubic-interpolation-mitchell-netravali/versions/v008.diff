@@ -1,0 +1,130 @@
+--- v007.md
++++ v008.md
+@@ -7,17 +7,17 @@
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: A 3D volume texture $V$, a query point $\mathbf{p} = (x, y, z)$ in voxel coordinates.
+-- Output: A scalar value $f(\mathbf{p})$.
++- Input: A 3D volume texture $V$, a query point $\mathbf{p} = (x, y, z)$ in voxel coordinates [G].
++- Output: A scalar value $f(\mathbf{p})$ [G].
+ 
+ **Data Structures:**
+-- The volume $V$ is stored as a 3D array of floating-point values.
+-- The kernel $k(x)$ is defined by two real-valued parameters $B$ and $C$.
++- The volume $V$ is stored as a 3D array of floating-point values [G].
++- The kernel $k(x)$ is defined by two real-valued parameters $B$ and $C$ [S1, unofficial].
+ 
+ **Algorithm:**
+-1.  **Determine Sampling Grid:** For each dimension $d \in \{x, y, z\}$, identify the integer grid points surrounding the query coordinate $p_d$. The kernel support extends to $|x| < 2$, requiring 4 samples per dimension. Let the indices be $i-1, i, i+1, i+2$ where $i = \lfloor p_d \rfloor$.
+-2.  **Compute Relative Distances:** For each sample index $j \in \{-1, 0, 1, 2\}$, compute the relative distance $u = p_d - (i + j)$.
+-3.  **Evaluate Kernel:** Compute the weight $w = k(u)$ using the Mitchell-Netravali formula.
+-4.  **Convolve:** Sum the weighted values from all $4 \times 4 \times 4 = 64$ neighboring voxels.
+-5.  **Clamp:** Clamp the final result to the valid data range [S1, unofficial].
++1. **Determine Sampling Grid:** For each dimension $d \in \{x, y, z\}$, identify the integer grid points surrounding the query coordinate $p_d$. The kernel support extends to $|x| < 2$, requiring 4 samples per dimension [S1, unofficial]. Let the indices be $i-1, i, i+1, i+2$ where $i = \lfloor p_d \rfloor$ [G].
++2. **Compute Relative Distances:** For each sample index $j \in \{-1, 0, 1, 2\}$, compute the relative distance $u = p_d - (i + j)$ [G].
++3. **Evaluate Kernel:** Compute the weight $w = k(u)$ using the Mitchell-Netravali formula [S1, unofficial].
++4. **Convolve:** Sum the weighted values from all $4 \times 4 \times 4 = 64$ neighboring voxels [S1, unofficial].
++5. **Clamp:** Clamp the final result to the input range to prevent values outside the valid data range [S1, unofficial].
+ 
+ **Kernel Formula:**
+@@ -32,16 +32,21 @@
+ $$
+ 
+-Note: The source text uses $|x^3|$ and $|x^2|$. Since $|x|^3 = |x^3|$ and $|x|^2 = x^2$, the absolute value on the cubic term is redundant for real numbers but preserves the symmetry logic. The standard implementation uses $|x|$ for the linear term in the second case.
++Note: The source text uses $|x^3|$ and $|x^2|$. Since $|x|^3 = |x^3|$ and $|x|^2 = x^2$, the absolute value on the cubic term is redundant for real numbers but preserves the symmetry logic. The standard implementation uses $|x|$ for the linear term in the second case [G].
+ 
+ **Parameters:**
+-- $B, C$: Tuning parameters.
++- $B, C$: Tuning parameters that trade off aliasing effects (blurring, ringing, anisotropy) [S1, unofficial].
+ - Typical values:
+     - Cubic B-spline: $B=1.0, C=0.0$ [S1, unofficial].
+     - Catmull-Rom: $B=0.0, C=0.5$ [S1, unofficial].
+-- Constraint: The filter satisfies $\sum_{n=-\infty}^{\infty} k(x-n) = 1$ to prevent sample frequency ripple [S1, unofficial].
++- Constraint: The filter satisfies $\sum_{n=-\infty}^{\infty} k(x-n) = 1$ to prevent sample frequency ripple [S1, unofficial]. (The source denotes the filter function as $h(x)$ in this constraint, but $k(x)$ is used for the kernel definition [S1, unofficial].)
+ 
+ **Pseudocode:**
+ 
+ ```python
++import math
++
++def clamp(val, min_val, max_val):
++    return max(min_val, min(max_val, val))
++
+ def mitchell_netravali_kernel(x, B, C):
+     ax = abs(x)
+@@ -50,6 +55,4 @@
+     
+     if ax < 1.0:
+-        # Case |x| < 1
+-        # Coefficients from source: (12 - 9B - 6C), (-18 + 12B + 6C), (6 - 2B)
+         c3 = 12.0 - 9.0 * B - 6.0 * C
+         c2 = -18.0 + 12.0 * B + 6.0 * C
+@@ -57,6 +60,4 @@
+         return (c3 * ax3 + c2 * ax2 + c0) / 6.0
+     elif ax < 2.0:
+-        # Case 1 <= |x| < 2
+-        # Coefficients from source: (-B - 6C), (6B + 30C), (-12B - 48C), (8B + 24C)
+         c3 = -B - 6.0 * C
+         c2 = 6.0 * B + 30.0 * C
+@@ -68,37 +69,30 @@
+ 
+ def sample_volume_mitchell(volume, p, B, C, min_val, max_val):
+-    # p is (x, y, z)
+     result = 0.0
++    ix = math.floor(p[0])
++    iy = math.floor(p[1])
++    iz = math.floor(p[2])
+     
+-    # Iterate over the 4x4x4 grid
+     for dx in range(-1, 3):
+         for dy in range(-1, 3):
+             for dz in range(-1, 3):
+-                # Get voxel coordinates
+-                vx = floor(p.x) + dx
+-                vy = floor(p.y) + dy
+-                vz = floor(p.z) + dz
++                vx = ix + dx
++                vy = iy + dy
++                vz = iz + dz
+                 
+-                # Check bounds (edge case)
+                 if not volume.is_valid(vx, vy, vz):
+                     continue
+                 
+-                # Compute relative distances
+-                ux = p.x - (floor(p.x) + dx)
+-                uy = p.y - (floor(p.y) + dy)
+-                uz = p.z - (floor(p.z) + dz)
++                ux = p[0] - (ix + dx)
++                uy = p[1] - (iy + dy)
++                uz = p[2] - (iz + dz)
+                 
+-                # Compute weights
+                 wx = mitchell_netravali_kernel(ux, B, C)
+                 wy = mitchell_netravali_kernel(uy, B, C)
+                 wz = mitchell_netravali_kernel(uz, B, C)
+                 
+-                # Combine weights (separable kernel)
+                 w = wx * wy * wz
+-                
+-                # Accumulate
+                 result += w * volume.get(vx, vy, vz)
+                 
+-    # Clamp to prevent out-of-range values [S1, unofficial]
+     return clamp(result, min_val, max_val)
+ ```
+@@ -111,11 +105,11 @@
+ ## Operating characteristics
+ - **Complexity:** Time complexity is $O(1)$ per sample but with a high constant factor. In 3D, it requires 64 texture fetches per output sample [S1, unofficial].
+-- **Memory:** No additional memory beyond the volume texture.
++- **Memory:** No additional memory beyond the volume texture [G].
+ - **Strengths:** $C^1$ continuity reduces artifacts compared to linear interpolation; tunable parameters allow balancing between sharpness and smoothness [S1, unofficial].
+ - **Limitations:** High computational cost due to 64 samples; potential for values outside the input range requiring clamping [S1, unofficial].
+-- **When to use:** When high-quality, smooth reconstruction is required and performance allows for 64 samples per ray step.
++- **When to use:** When high-quality, smooth reconstruction is required and performance allows for 64 samples per ray step [G].
+ 
+ ## Background
+-The Mitchell-Netravali filter was introduced by Mitchell and Netravali in 1988 [S1, unofficial]. It is a family of cubic filters designed to provide both $C^0$ and $C^1$ continuity, preventing high-frequency leakage artifacts common in lower-order interpolations. It is widely used in image and volume rendering for its balance of sharpness and smoothness.
++The Mitchell filter was introduced by Mitchell in 1988 [S1, unofficial]. It is a family of cubic filters designed to provide both $C^0$ and $C^1$ continuity, preventing high-frequency leakage artifacts common in lower-order interpolations [S1, unofficial].
+ 
+ ## Sources

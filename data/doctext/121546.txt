@@ -1,0 +1,169 @@
+Learn how volumetric lighting and god rays work in games, from the physics of light scattering and the Beer-Lambert law to the screen-space radial blur technique used in modern game engines.
+
+Game Dev Mechanics: Volumetric Lighting (God Rays) — How It Works · MoonjumpSkip to content
+Wishlist on Steam
+Interactive 3D · Drag to orbit · scroll to zoomOpen full screen ↗
+What Is Volumetric Lighting?
+Volumetric lighting, often called god rays or crepuscular rays, is the effect you see when shafts of light become visible as they pass through a medium like dust, fog, or smoke. You've seen this in the real world when sunlight streams through a cathedral window or filters through a forest canopy. In games, it's one of the most effective tools for creating atmosphere and cinematic drama.
+Unlike standard lighting models that only compute how light interacts with surfaces, volumetric lighting simulates how light interacts with the space between surfaces. This participating medium (tiny particles suspended in air) scatters and absorbs photons along their path, making the light itself visible.
+The Physics of Light Scattering
+When a photon travels through a participating medium (fog, dust, mist), three things can happen at each point along its path:
+Absorption: The photon is absorbed by a particle and converted to heat. The light loses energy.
+Out-scattering: The photon bounces off a particle and leaves the viewing ray. From the viewer's perspective, light is lost.
+In-scattering: A photon from another direction bounces off a particle and enters the viewing ray. This is what makes the light shafts visible — photons from the light source are redirected toward your eye.
+The combined effect of absorption and out-scattering is called extinction, described by the extinction coefficient σt​. This coefficient is the sum of the absorption coefficient σa​ and the scattering coefficient σs​:
+σt​=σa​+σs​
+The Math Behind God Rays
+Beer-Lambert Law
+The fundamental equation governing how light diminishes through a medium is the Beer-Lambert Law. It tells us how much light intensity remains after traveling a distance d through a homogeneous medium:
+I=I0​e−σt​d
+Here, I0​ is the initial intensity, σt​ is the extinction coefficient, and d is the distance traveled. Higher extinction means the medium is denser (thicker fog), and light drops off faster.
+Optical Depth
+For non-homogeneous media (where density varies through space), we generalize with optical depth τ, the integral of the extinction coefficient along the ray:
+τ(a,b)=∫ab​σt​(s)ds
+The transmittance — the fraction of light that survives the journey — then becomes:
+T(a,b)=e−τ(a,b)
+Phase Functions
+When light scatters off a particle, it doesn't scatter equally in all directions. A phase function p(θ) describes the angular distribution of scattered light, where θ is the angle between the incoming and outgoing light directions.
+The Henyey-Greenstein phase function is the workhorse of real-time rendering:
+pHG​(θ)=4π(1+g2−2gcosθ)3/21−g2​
+The parameter g∈[−1,1] controls the shape of scattering. When g=0, scattering is isotropic (equal in all directions). When g>0, light scatters mostly forward, which is typical for atmospheric particles like dust and water droplets. Forward scattering is why god rays appear brightest when you look roughly toward the light source.
+The Volume Rendering Equation
+The light arriving at the camera along a ray is the sum of in-scattered light at every point along that ray, attenuated by the transmittance from that point to the camera:
+L(x,ω)=∫0D​T(x,xs​)σs​(xs​)Li​(xs​,ω)ds
+where Li​(xs​,ω) is the in-scattered radiance at point xs​, which itself depends on the light source visibility (shadow), the phase function, and the light intensity. This integral is what we approximate in real-time rendering.
+Screen-Space God Rays: The Classic Technique
+Evaluating the full volume rendering equation in real time is expensive. In 2007, Kenny Mitchell published a technique in GPU Gems 3 that fakes the look of volumetric light using a screen-space radial blur. The approach dominated god ray implementations in games for over a decade because it's fast, simple, and produces convincing results.
+The technique works in three passes:
+Pass 1 — The Occlusion Map
+First, render the scene from the camera's perspective, but replace all geometry with solid black and render the light source as a bright shape (typically a circle or sphere). The result is a black-and-white image: bright where the light is directly visible, black where geometry occludes it.
+JavaScriptCopy
+```
+// Pseudocode for the occlusion pass
+scene.overrideMaterial = blackMaterial;
+scene.background = BLACK;
+renderer.setRenderTarget(occlusionTarget);
+renderer.render(scene, camera);
+
+// Then render the light source (bright) with depth testing
+// so it's properly occluded by geometry in front of it
+scene.overrideMaterial = null;
+renderer.render(lightSourceScene, camera);
+```
+Pass 2 — Radial Blur
+Project the 3D light position into 2D screen coordinates. For each pixel in the occlusion map, sample repeatedly along the line from that pixel toward the light's screen position. Each successive sample is attenuated by a decay factor, simulating how scattered light diminishes with distance.
+GLSLCopy
+```
+uniform sampler2D tOcclusion;
+uniform vec2 uLightPos;    // light position in UV space [0,1]
+uniform float uExposure;
+uniform float uDecay;
+uniform float uDensity;
+uniform float uWeight;
+
+const int NUM_SAMPLES = 64;
+
+void main() {
+    vec2 deltaUV = (vUv - uLightPos) * uDensity / float(NUM_SAMPLES);
+    vec2 uv = vUv;
+    float illumination = 1.0;
+    vec3 color = vec3(0.0);
+
+    for (int i = 0; i < NUM_SAMPLES; i++) {
+        uv -= deltaUV;
+        vec3 samp = texture2D(tOcclusion, clamp(uv, 0.0, 1.0)).rgb;
+        samp *= illumination * uWeight;
+        color += samp;
+        illumination *= uDecay;
+    }
+
+    gl_FragColor = vec4(color * uExposure, 1.0);
+}
+```
+The key parameters control the look of the rays:
+Density — How far each ray extends outward from the light. Higher values stretch rays longer.
+Weight — The initial brightness of each sample. Controls overall ray intensity.
+Decay — How quickly brightness falls off along each ray. Values close to 1.0 (like 0.97) produce long, gradual rays; lower values produce short, punchy rays.
+Exposure — A final multiplier on the entire effect. Scales the composite brightness.
+NUM_SAMPLES — More samples mean smoother rays but higher cost. 64 is a common sweet spot.
+Pass 3 — Compositing
+The radial blur result is a texture containing only the god ray light shafts. Composite this onto the main scene render using additive blending: the ray light is simply added on top of the existing scene colors, brightening pixels where rays fall.
+JavaScriptCopy
+```
+// Render the main scene normally
+renderer.setRenderTarget(null);
+renderer.render(scene, camera);
+
+// Overlay god rays with additive blending
+godRayQuad.material.blending = THREE.AdditiveBlending;
+godRayQuad.material.map = godRaysTexture;
+renderer.render(quadScene, quadCamera);
+```
+Volumetric Ray Marching: The Advanced Approach
+Modern engines like Unreal Engine 5 and Unity's HDRP use a more physically accurate technique: volumetric ray marching. Instead of a screen-space trick, this approach steps (marches) along each camera ray through the volume, sampling the shadow map at each step to determine if that point receives light.
+JavaScriptCopy
+```
+// Pseudocode for volumetric ray marching
+function computeVolumetricLight(ray, camera, light, shadowMap) {
+    let accumLight = 0;
+    let transmittance = 1.0;
+    const stepSize = rayLength / NUM_STEPS;
+
+    for (let i = 0; i < NUM_STEPS; i++) {
+        const samplePos = ray.origin + ray.dir * (i * stepSize);
+
+        // Check shadow map: is this point lit?
+        const inShadow = sampleShadowMap(shadowMap, light, samplePos);
+
+        if (!inShadow) {
+            const phase = henyeyGreenstein(dot(ray.dir, lightDir), g);
+            const scattering = sigmaS * phase * lightIntensity;
+            accumLight += transmittance * scattering * stepSize;
+        }
+
+        // Reduce transmittance (Beer-Lambert)
+        transmittance *= exp(-sigmaT * stepSize);
+    }
+
+    return accumLight;
+}
+```
+This approach is more expensive but handles scenarios that screen-space methods cannot: multiple light sources, colored fog, varying density, and physically correct behavior from any viewing angle. The screen-space technique only works for a single, visible light source. If the light moves off-screen, the rays disappear.
+Real-World Game Examples
+Red Dead Redemption 2 — Uses volumetric ray marching with temporally reprojected samples for its sunsets and fog-filled valleys at interactive frame rates.
+The Last of Us Part II — Combines volumetric lighting with localized fog volumes to create tension in dark interiors where flashlight beams cut through dusty air.
+God of War (2018) — Uses god rays throughout its realm-travel sequences and outdoor environments to build a painterly, mythological look.
+Crysis (2007) — One of the first mainstream games to implement the screen-space god ray technique, making it a standard expectation for high-end PC games.
+Unreal Engine 5 — Provides a built-in volumetric fog system that uses froxel (frustum-aligned voxel) grids with temporal reprojection for high-quality volumetric lighting by default.
+Performance Considerations
+Volumetric lighting is one of the more expensive post-processing effects. Here are the key optimization strategies used in production:
+Half-resolution rendering: Compute the god rays at half (or quarter) the screen resolution. The effect is inherently soft and low-frequency, so the quality loss is minimal while the performance gain is 4x or more.
+Bilateral upsampling: When compositing the half-res god rays onto the full-res scene, use a depth-aware (bilateral) filter to avoid halos at depth discontinuities (object edges).
+Temporal reprojection: For ray marching approaches, use different sample offsets each frame and blend with the previous frame's result. This effectively multiplies sample count across frames while only computing a fraction per frame.
+Blue noise dithering: Offset ray march starting positions with blue noise instead of regular spacing. This converts visible banding artifacts into imperceptible noise, allowing fewer samples while maintaining quality.
+Early termination: Stop marching when transmittance drops below a threshold (e.g., 0.01). If the medium is dense enough, samples beyond that point contribute negligibly.
+The screen-space radial blur approach remains viable for many games, especially on mobile or lower-end hardware. It only requires two extra render passes and a handful of texture samples per pixel, a fraction of the cost of volumetric ray marching. The tradeoff is accuracy: it works well for a single sun-like light source but breaks down with multiple lights or when the light source moves off-screen.
+The choice between screen-space and volumetric ray marching comes down to target hardware and how prominent atmospheric lighting is in your game. God rays are among the more cost-effective visual effects available. For a relatively small performance budget, they add depth and mood to almost any scene.
+Mechanics Library
+More rendering & shaders
+No.45Rendering & shaders
+Screen Space Ambient Occlusion (SSAO)
+Screen Space Ambient Occlusion (SSAO) darkens corners, crevices, and contact points in real time by sampling the depth buffer around each pixel. This article explains the complete algorithm — from the AO integral and G-buffer setup through hemisphere kernel generation, noise rotation, the
+1 demo13 min read
+No.36Rendering & shaders
+Normal Mapping
+Normal mapping lets flat polygons appear richly detailed by encoding surface normals in a texture. Learn the math behind tangent space and the TBN matrix, walk through a GLSL implementation, and interact with a live Three.js demo that generates a brick normal map in real time.
+1 demo8 min read
+No.35Rendering & shaders
+Bloom (Post-Processing)
+Learn how bloom post-processing creates the signature cinematic glow seen in nearly every modern game. We break down the complete rendering pipeline — brightness extraction, Gaussian blur, and HDR compositing — with math, shader code, and an interactive Three.js demo.
+1 demo8 min read
+No.34Rendering & shaders
+Toon Shading (Cel Shading)
+Learn how toon shading (cel shading) works — from quantized diffuse lighting and hard specular cutoffs to inverted-hull outlines — and explore the technique with an interactive Three.js demo.
+1 demo8 min read
+Esc
+✕
+✕
+We use one analytics cookie to see which pages people read. Nothing else, and only if you say yes. Privacy policy
+Allow analyticsNo thanks

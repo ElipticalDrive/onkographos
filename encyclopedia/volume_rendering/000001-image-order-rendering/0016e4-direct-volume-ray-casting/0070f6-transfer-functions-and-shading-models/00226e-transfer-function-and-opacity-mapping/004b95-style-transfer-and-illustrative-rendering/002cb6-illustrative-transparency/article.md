@@ -1,0 +1,116 @@
+# Illustrative Transparency
+
+Also called: Curvature-Modulated Opacity
+
+## Overview
+Illustrative Transparency is a non-photorealistic rendering technique that modulates sample opacity to simulate the "100-percent-rule," where transparency falls off near object edges and increases with distance from them, thereby clarifying complex 3D structures [S1]. It combines uniform opacity from a transfer function with directional opacity from a style map, using curvature and gradient magnitude to control visibility [S1]. Unlike its sibling [Raycasting with Style Transfer and Contour Lines](11409-raycasting-with-style-transfer-and-contour-lines.md) which focuses on contour lines, this method specifically addresses opacity modulation for ghosted illustration [S1].
+
+## How it works
+**Inputs:**
+- Scalar data value at sample point (used to lookup $\alpha_u$).
+- Normal vector $\mathbf{n}$ at sample point.
+- View vector $\mathbf{v}$ from camera to sample point.
+- Gradient magnitude $|g|$ at sample point.
+- Contour threshold parameter $T\kappa_v$ (derived from curvature analysis).
+- Directional opacity tuple $\alpha_d$ from a lit sphere map (style transfer function).
+
+**Outputs:**
+- Final sample opacity $\alpha$.
+
+**Data Structures:**
+- **Lit Sphere Map:** A 1D texture (or lookup table) where each entry corresponds to a normal direction (or bin thereof) and stores an $(r, g, b, \alpha)$ tuple. The $\alpha$ component is $\alpha_d$.
+- **Transfer Function:** A 1D texture mapping scalar values to uniform opacity $\alpha_u$.
+
+**Parameters:**
+- $\alpha_u$: Uniform opacity from the transfer function. Range $[0, 1]$.
+- $\alpha_d$: Directional opacity from the lit sphere map. Range $[0, 1]$.
+- $T\kappa_v$: Contour threshold term. Not given in the sources.
+- Constant $0.5$: Empirically determined constant restricting maximum opacity enhancement [S1].
+
+**Algorithm:**
+1. Retrieve $\alpha_u$ from the transfer function based on the scalar data value.
+2. If $\alpha_u = 0$, the sample is completely transparent. Return $\alpha = 0$.
+3. Retrieve $\alpha_d$ from the lit sphere map based on the normal direction $\mathbf{n}$.
+4. If $\alpha_u = 1$, the opacity is solely determined by $\alpha_d$. Return $\alpha = \alpha_d$.
+5. Compute the contour distance term:
+   $$ \text{contour\_term} = \max(0, |\mathbf{n} \cdot \mathbf{v}| - \sqrt{T\kappa_v (2 - T\kappa_v)}) $$
+   This term is zero on the contour and increases as points move away from the contour [S1].
+6. Compute the gradient suppression term:
+   $$ \text{grad\_term} = 1 - |g| $$
+   This ranges from 0 to 1 and prevents enhancement in nearly homogeneous regions where noise causes rapid gradient direction variation [S1].
+7. Compute the final opacity:
+   $$ \alpha = \alpha_d \cdot \alpha_u \cdot (0.5 + \text{contour\_term} \cdot \text{grad\_term}) $$
+   The constant $0.5$ restricts the maximum opacity enhancement [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_illustrative_transparency(alpha_u, alpha_d, n, v, gradient_magnitude, T_kappa_v):
+    # Step 1: Handle uniform opacity constraints
+    if alpha_u == 0.0:
+        return 0.0
+    
+    # Step 2: Handle full uniform opacity case
+    if alpha_u == 1.0:
+        return alpha_d
+    
+    # Step 3: Compute contour term
+    # Note: T_kappa_v is assumed to be pre-computed or passed as a parameter
+    # The term sqrt(T_kappa_v * (2 - T_kappa_v)) is the contour threshold
+    contour_threshold = math.sqrt(T_kappa_v * (2 - T_kappa_v))
+    
+    # Dot product of normal and view vector
+    dot_nv = abs(math.dot(n, v))
+    
+    # Max(0, |n . v| - threshold)
+    contour_term = max(0.0, dot_nv - contour_threshold)
+    
+    # Step 4: Compute gradient term
+    # 1 - |g|
+    grad_term = 1.0 - gradient_magnitude
+    
+    # Step 5: Compute final opacity
+    # alpha = alpha_d * alpha_u * (0.5 + contour_term * grad_term)
+    opacity_enhancement = 0.5 + (contour_term * grad_term)
+    alpha = alpha_d * alpha_u * opacity_enhancement
+    
+    return alpha
+```
+
+**Edge Cases and Pitfalls:**
+- **Homogeneous Regions:** The term $(1 - |g|)$ prevents opacity enhancement in regions with high gradient magnitude (noise), which would otherwise cause rapid direction variation [S1].
+- **Contour Definition:** The term $\max(0, |\mathbf{n} \cdot \mathbf{v}| - \sqrt{T\kappa_v (2 - T\kappa_v)})$ is zero on the contour. If $T\kappa_v$ is not defined correctly, the contour detection may fail [S1].
+- **Opacity Enhancement Limit:** The constant $0.5$ ensures that the opacity enhancement does not exceed a certain limit, empirically determined to be effective [S1].
+
+## Subtopics
+
+### Dynamic Transparency Weighting
+A simplified non-photorealistic rendering technique for ghosted illustration that dynamically determines surface transparency based on normal vectors and view direction [S2]. Unlike the main Illustrative Transparency method which uses curvature and gradient magnitude, this model uses a global transparency weight and a shading weight exponent [S2]. It is chosen when a simpler model is sufficient and depth-based blending already provides depth-based ghosting effects, eliminating the need for a depth normalization factor present in the original Bruckner et al. model [S2].
+
+**Formula:**
+$$ \alpha = \alpha_{model} \cdot (1 - \kappa_t) \cdot \left(1 - \frac{\hat{n} \cdot \hat{v}}{2}\right)^{\kappa_s} $$
+Where:
+- $\alpha_{model}$: Base opacity of the object [S2].
+- $\hat{n}$: Normalized normal vector [S2].
+- $\hat{v}$: Normalized view direction [S2].
+- $\kappa_t$: Transparency Weight, a global parameter in screen space adjusting transparency weighting for all objects [S2].
+- $\kappa_s$: Shading Weight, a global parameter in screen space adjusting the exponent for shading-based transparency weighting [S2].
+
+**Comparison:**
+Unlike Bruckner et al. [1], this model does not include a depth normalization factor because the depth-based blending model already provides depth-based ghosting effects [S2].
+
+## Operating characteristics
+- **Time Complexity:** Not given in the sources. The method involves basic arithmetic operations and texture lookups, which are generally efficient on GPU-based ray casting approaches [S1].
+- **Memory Complexity:** Requires storage for the transfer function (1D texture) and the lit sphere map (1D texture) [S1].
+- **Strengths:** Provides a clearer depiction of transparent structures while enabling the viewer to see through them, simulating the 100-percent-rule [S1]. It allows for non-uniform opacity decrease, enhancing visual clarity [S1].
+- **Limitations:** The effectiveness of the contour threshold term $T\kappa_v$ depends on accurate curvature estimation [S1]. The constant $0.5$ is empirically determined and may not be optimal for all datasets [S1].
+- **When to use:** When illustrating complex 3D structures where transparency needs to fall off near edges and increase away from them [S1].
+- **When not to use:** When photorealistic rendering is required, or when depth-based blending is already handling ghosting effects and a simpler model is preferred [S2].
+
+## Background
+Originated in the paper "Style Transfer Functions for Illustrative Volume Rendering" by S. Bruckner and M. E. Gröller [S1]. The technique is part of a broader framework for illustrative volume rendering that uses style transfer functions to control visual properties like color and opacity [S1]. The 100-percent-rule, which this method simulates, is a common technique in illustrations where transparency falls off close to the edges of transparent objects and increases with the distance to edges [S1]. The implementation was described for a GPU-based ray casting approach using Shader Model 3.0 [S1].
+
+## Sources
+[S1] Style Transfer Functions for Illustrative Volume Rendering, https://doi.org/10.1111/j.1467-8659.2007.01095.x, fetched 2026-10-26
+[S2] Ghosted Illustration Rendering using Depth-based Blending Techniques, https://doi.org/10.15701/kcgs.2020.26.3.1, fetched 2026-10-29

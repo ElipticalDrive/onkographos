@@ -1,0 +1,167 @@
+# Frustum Culling with Depth Consistency
+
+## Overview
+Frustum Culling with Depth Consistency filters triangle meshes by retaining only faces observed across multiple camera views and geometrically consistent with reference depth maps [S1, unofficial]. It discards triangles that lie outside camera frustums, are occluded by closer geometry, or project to missing depth regions [S1, unofficial].
+
+## How it works
+**Inputs:**
+- A triangle mesh defined by vertices $V$ and faces $F$ [S1, unofficial].
+- A set of $N$ camera poses, each with a world-to-camera matrix $C_i$, intrinsics $K_i = \text{diag}(f_{x,i}, f_{y,i}, 1)$, principal point $(c_{x,i}, c_{y,i})$, and image dimensions $H_i \times W_i$ [S1, unofficial].
+- Optional reference depth maps $D_i$ for each camera pose [S1, unofficial].
+- Boolean flags: `subdivide`, `remove_occlusion`, `remove_missing_depth` [S1, unofficial].
+- Parameters: `max_edge` (0.015), `th1` (3), `eps` (0.02), `inv_ratio` (0.7) [S1, unofficial].
+
+**Outputs:**
+- A filtered mesh containing only triangles where at least one vertex has an observation count $> th1$ and no vertex has an invalid-to-observation ratio exceeding `inv_ratio` [S1, unofficial].
+
+**Data Structures:**
+- `obs_mask`: Integer array of shape $(|V|, N)$, storing the count of views in which each vertex is inside the frustum and not occluded [S1, unofficial].
+- `invalid_mask`: Integer array of shape $(|V|, N)$, storing the count of views in which each vertex projects to a pixel with invalid (missing) depth [S1, unofficial].
+
+**Steps:**
+
+1. **Subdivision (Optional):** If `subdivide` is true, subdivide the mesh using `trimesh.remesh.subdivide_to_size` with `max_edge` and `max_iter=10` to ensure sufficient sampling density [S1, unofficial].
+2. **Coordinate System Conversion:** For each camera pose $i$, apply a coordinate system conversion to the world-to-camera matrix $C_i$ to align with OpenCV/pyrender conventions by flipping the Y and Z axes: $C'_i = C_i \cdot \begin{bmatrix} 1 & 0 & 0 & 0 \\ 0 & -1 & 0 & 0 \\ 0 & 0 & -1 & 0 \\ 0 & 0 & 0 & 1 \end{bmatrix}$ [S1, unofficial]. Extract rotation $R_i$ and translation $t_i$ from $C'_i$ [G].
+3. **Depth Rendering (Optional):** If `remove_occlusion` is true, render a depth map $D^{render}_i$ for the current mesh state from camera $i$ using a rasterizer with depth-only output [S1, unofficial].
+4. **Per-Vertex Visibility Aggregation:** Initialize `obs_mask` and `invalid_mask` to zeros. For each vertex $v \in V$ and camera $i$:
+   a. **Transform to Camera Space:** $p_{cam} = R_i \cdot v + t_i$.
+   b. **Project to Normalized Device Coordinates:** $\begin{bmatrix} u' \\ v' \\ w' \end{bmatrix} = K_i \cdot p_{cam}$.
+   c. **Compute Pixel Coordinates and Depth:** $z_c = w' + 10^{-8}$, $u = u'/z_c$, $v = v'/z_c$.
+   d. **Frustum Test:** Check if the point is within the image bounds and in front of the camera: $\text{in\_frustum} = (0 \le u \le W_i - 1) \land (0 \le v \le H_i - 1) \land (z_c > 0)$.
+   e. **Occlusion Test (if `remove_occlusion`):** If `in_frustum` is true, sample the rendered depth $D^{render}_i[v, u]$. If $z_c < D^{render}_i[v, u] + \text{eps}$, increment `obs_mask[v, i]` [S1, unofficial].
+   f. **Missing Depth Test (if `remove_missing_depth`):** If `in_frustum` is true, sample the reference depth $D_i[v, u]$. If $D_i[v, u] \le 0.0$, increment `invalid_mask[v, i]` [S1, unofficial].
+5. **Triangle Validity Determination:** For each triangle $f$ with vertices $v_1, v_2, v_3$:
+   a. **Observation Count:** Calculate the total observation count for each vertex across all views: $\text{obs}_j = \sum_{i=1}^N \text{obs\_mask}[v_j, i]$ for $j \in \{1,2,3\}$. The triangle is considered observed if $\max(\text{obs}_1, \text{obs}_2, \text{obs}_3) > th1$ [S1, unofficial].
+   b. **Invalidity Check:** Calculate the total invalid count for each vertex: $\text{inv}_j = \sum_{i=1}^N \text{invalid\_mask}[v_j, i]$. The triangle is marked invalid if all three vertices satisfy $\text{inv}_j > 0.7 \cdot \text{obs}_j$ [S1, unofficial].
+   c. **Final Mask:** A triangle is retained if it is observed AND NOT invalid [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def frustum_culling_depth_consistency(mesh, cameras, depth_maps=None,
+                                      subdivide=True, max_edge=0.015,
+                                      remove_occlusion=True, remove_missing_depth=False,
+                                      th1=3, eps=0.02, inv_ratio=0.7):
+    # Step 1: Subdivision (Optional)
+    if subdivide:
+        # [S1, unofficial] Iteratively splits edges longer than max_edge up to max_iter times
+        mesh = subdivide_mesh(mesh, max_edge=max_edge, max_iter=10)
+
+    V = mesh.vertices  # Shape (N, 3)
+    F = mesh.faces     # Shape (M, 3)
+    N_views = len(cameras)
+
+    # Initialize masks
+    obs_mask = np.zeros((len(V), N_views), dtype=np.int32)
+    invalid_mask = np.zeros((len(V), N_views), dtype=np.int32)
+
+    # Coordinate system conversion matrix (OpenCV/pyrender convention)
+    coord_convert = np.array([
+        [1, 0, 0, 0],
+        [0, -1, 0, 0],
+        [0, 0, -1, 0],
+        [0, 0, 0, 1]
+    ])
+
+    # Pre-render depth maps if occlusion removal is enabled
+    rendered_depths = None
+    if remove_occlusion:
+        # [S1, unofficial] Uses pyrender with flags OFFSCREEN and DEPTH_ONLY
+        rendered_depths = render_depths(mesh, cameras)
+
+    # Step 4: Per-Vertex Visibility Aggregation
+    for i, cam in enumerate(cameras):
+        # Coordinate system conversion
+        c2w = cam['c2w'] @ coord_convert
+        R = c2w[:3, :3]
+        t = c2w[:3, 3]
+        K = cam['K']
+        H, W = cam['H'], cam['W']
+
+        # Transform vertices to camera space
+        V_cam = (R @ V.T).T + t  # Shape (N, 3)
+
+        # Project to normalized device coordinates
+        uvz = (K @ V_cam.T).T  # Shape (N, 3)
+
+        # Compute pixel coordinates and depth
+        pz = uvz[:, 2] + 1e-8
+        px = uvz[:, 0] / pz
+        py = uvz[:, 1] / pz
+
+        # Frustum test
+        in_frustum = (px >= 0) & (px <= W - 1) & (py >= 0) & (py <= H - 1) & (pz > 0)
+
+        # Occlusion test
+        if remove_occlusion:
+            rendered_d = sample_depth(rendered_depths[i], px, py, H, W)
+            not_occluded = pz < (rendered_d + eps)
+            visible = in_frustum & not_occluded
+            obs_mask[visible, i] += 1
+
+        # Missing depth test
+        if remove_missing_depth:
+            gt_d = depth_maps[i]
+            gt_d_sampled = sample_depth(gt_d, px, py, H, W)
+            invalid_depth = in_frustum & (gt_d_sampled <= 0.0)
+            invalid_mask[invalid_depth, i] += 1
+
+    # Step 5: Triangle Validity Determination
+    valid_faces = []
+    for j, face in enumerate(F):
+        v_indices = face
+        v_obs_counts = np.sum(obs_mask[v_indices], axis=1)
+        v_inv_counts = np.sum(invalid_mask[v_indices], axis=1)
+
+        # Observation count: triangle observed if max obs > th1
+        max_obs = np.max(v_obs_counts)
+        is_observed = max_obs > th1
+
+        # Invalidity check: triangle invalid if all vertices have inv > 0.7 * obs
+        is_invalid = np.all(v_inv_counts > 0.7 * v_obs_counts)
+
+        if is_observed and not is_invalid:
+            valid_faces.append(j)
+
+    return filter_mesh(mesh, valid_faces)
+
+def sample_depth(depth_map, px, py, H, W):
+    """Sample depth map at pixel coordinates using nearest-neighbor indexing."""
+    px = np.clip(px, 0, W - 1)
+    py = np.clip(py, 0, H - 1)
+    u = np.floor(px).astype(np.int32)
+    v = np.floor(py).astype(np.int32)
+    return depth_map[v, u]
+
+def subdivide_mesh(mesh, max_edge, max_iter):
+    """Subdivide mesh to meet max_edge constraint."""
+    # [S1, unofficial] Standard subdivision routine
+    pass
+
+def render_depths(mesh, cameras):
+    """Render depth maps for the mesh from all camera poses."""
+    # [S1, unofficial] Standard rasterization routine
+    pass
+
+def filter_mesh(mesh, valid_faces):
+    """Return mesh with only valid faces."""
+    return mesh.vertices, mesh.faces[valid_faces]
+```
+
+## Operating characteristics
+- **Time Complexity:** $O(N \cdot V \cdot C)$, where $N$ is the number of views, $V$ is the number of vertices, and $C$ is the cost of depth sampling/rendering [G]. Subdivision increases $V$ [S1, unofficial].
+- **Memory Complexity:** $O(N \cdot V)$ for storing observation and invalid masks [G].
+- **Strengths:** Effectively removes noise and floating artifacts by requiring multi-view consistency [S1, unofficial]. Handles occlusions explicitly via depth maps [S1, unofficial].
+- **Limitations:** Requires accurate camera poses and depth maps [S1, unofficial]. Performance degrades with large numbers of views or high-resolution depth maps [G]. Subdivision can be computationally expensive for dense meshes [S1, unofficial].
+- **When to Use:** When cleaning up meshes reconstructed from multi-view RGB-D data where depth maps are available [S1, unofficial].
+- **When Not to Use:** When depth maps are unavailable or unreliable, or when real-time performance is critical and $N$ is large [G].
+
+## Background
+The method is implemented in the `dn-splatter` project [S1, unofficial]. It combines standard frustum culling with depth consistency checks to ensure that retained geometry is both visible and geometrically consistent with input sensor data [S1, unofficial]. The approach addresses coordinate system mismatches by explicitly flipping Y and Z axes during transformation [S1, unofficial].
+
+## Sources
+[S1] maturk/dn-splatter, https://github.com/maturk/dn-splatter, fetched 2026-10-27 (unofficial)

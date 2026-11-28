@@ -1,0 +1,107 @@
+--- v002.md
++++ v003.md
+@@ -1,3 +1,4 @@
+ # Inverse Rendering Pipeline
++
+ 
+ ## Overview
+@@ -16,6 +17,6 @@
+ 
+ **Data Structures:**
+-- **SDF Network:** Multi-layer perceptron (MLP). Input: 3D position $x$. Output: scalar distance $f(x)$ and geometric feature vector. Width: 256 channels per layer [S1].
+-- **Shading Network:** MLP. Inputs: position $x$, viewing direction $v$, geometric feature vector. Output: radiance. Evaluated only at surface points [S1].
++- **SDF Network:** Multi-layer perceptron (MLP) [S1]. Input: 3D position $x$. Output: scalar distance $f(x)$ and geometric feature vector. Width: 256 channels per layer [S1].
++- **Shading Network:** MLP [S1]. Inputs: position $x$, viewing direction $v$, geometric feature vector. Output: radiance. Evaluated only at surface points [S1].
+ - **Positional Encoding:** 6-levels of sinusoidal positional encoding applied to input position $x$ [S1].
+ - **Pixel Sampling:** Monte-Carlo samples within each pixel to integrate the spatially-varying warp $\mathcal{V}$ [S1].
+@@ -62,5 +63,5 @@
+ 
+ **Edge Cases and Pitfalls:**
+-- **Silhouette Gradients:** Unbiased derivatives are non-zero only for pixels partially covered by a surface. Using a subset of pixels makes sampling these pixels rare. Mitigated by multi-scale pyramid [S1].
++- **Silhouette Gradients:** Unbiased derivatives are non-zero only for pixels partially covered by a surface [S1]. Using a subset of pixels makes sampling these pixels rare [S1]. Mitigated by multi-scale pyramid [S1].
+ - **Infinities:** SDF approximation may lead to infinities. Mitigated by padding weights with $\epsilon$ [S1].
+ - **Memory:** The method is memory-intensive. Mitigated by reducing SDF network width to 256 channels [S1].
+@@ -73,9 +74,9 @@
+ def positional_encoding(x, num_levels=6):
+     """6-levels of sinusoidal positional encoding [S1]."""
+-    scales = jnp.array([2**i for i in range(num_levels)])
+-    x = jnp.expand_dims(x * scales, axis=-1)
+-    return jnp.sin(jnp.concatenate([x, x + jnp.pi/2], axis=-1))
++    scales = 2.0 ** jnp.arange(num_levels)
++    x_enc = jnp.sin(x * scales)
++    return x_enc
+ 
+-def sdf_network(x, weights):
++def sdf_network(x, weights, epsilon=1e-6):
+     """MLP with 256 channels per layer [S1]. Returns distance and feature vector."""
+     x_enc = positional_encoding(x)
+@@ -85,16 +86,16 @@
+     dist = jnp.dot(h, weights[-1][0])
+     features = jnp.dot(h, weights[-1][1])
+-    return dist, features
++    return dist + epsilon, features
+ 
+-def shading_network(x, v, features):
++def shading_network(x, v, features, weights):
+     """MLP predicting radiance from position, view direction, and features [S1]."""
+     h = jnp.concatenate([x, v, features])
+-    for w in shading_weights:
++    for w in weights[:-1]:
+         h = jnp.tanh(jnp.dot(h, w))
+-    return jnp.dot(h, shading_weights[-1])
++    return jnp.dot(h, weights[-1])
+ 
+-def compute_normals(x, sdf_weights):
++def compute_normals(x, sdf_weights, epsilon=1e-6):
+     """Compute normals using forward-mode AD [S1]."""
+-    return jax.jacfwd(lambda x: sdf_network(x, sdf_weights)[0])(x)
++    return jax.jacfwd(lambda x: sdf_network(x, sdf_weights, epsilon)[0])(x)
+ 
+ def compute_jacobian(u, theta):
+@@ -116,25 +117,24 @@
+     for s in samples:
+         x = transform(s, theta)
+-        dist, features = sdf_network(x, theta['sdf_weights'])
+-        dist = jnp.clip(dist, -1/epsilon, 1/epsilon)
+-        normals = compute_normals(x, theta['sdf_weights'])
++        dist, features = sdf_network(x, theta['sdf_weights'], epsilon)
++        normals = compute_normals(x, theta['sdf_weights'], epsilon)
+         v = jnp.array([0.0, 0.0, 1.0])
+-        radiance = shading_network(x, v, features)
++        radiance = shading_network(x, v, features, theta['shading_weights'])
+         radiance_sum += radiance
+     return radiance_sum / len(samples)
+ 
+-def compute_full_pipeline_gradients(theta, target_image, pixel_coords):
++def compute_full_pipeline_gradients(theta, target_image, pixel_coords, epsilon=1e-6):
+     """Compute derivatives of the full pipeline using reverse-mode AD [S1]."""
+-    rendered_image = jax.vmap(render_pixel, in_axes=(0, None, None))(pixel_coords, theta)
++    rendered_image = jax.vmap(render_pixel, in_axes=(0, None, None))(pixel_coords, theta, epsilon)
+     L = jnp.mean((rendered_image - target_image) ** 2)
+     eikonal_samples = jnp.random.uniform(-1, 1, (100, 3))
+     eikonal_loss = 0.0
+     for x in eikonal_samples:
+-        grad_f = jax.grad(lambda x: sdf_network(x, theta['sdf_weights'])[0])(x)
++        grad_f = jax.grad(lambda x: sdf_network(x, theta['sdf_weights'], epsilon)[0])(x)
+         eikonal_loss += jnp.sum((jnp.linalg.norm(grad_f) - 1) ** 2)
+     eikonal_loss /= len(eikonal_samples)
+     return L + eikonal_loss
+ 
+-def optimize(target_image, initial_theta, num_iterations, pixel_coords):
++def optimize(target_image, initial_theta, num_iterations, pixel_coords, epsilon=1e-6):
+     """Multi-level optimization with pyramid [S1]."""
+     theta = initial_theta
+@@ -142,5 +142,5 @@
+     for level in pyramid_levels:
+         for i in range(num_iterations):
+-            grads = jax.grad(compute_full_pipeline_gradients)(theta, level, pixel_coords)
++            grads = jax.grad(compute_full_pipeline_gradients)(theta, level, pixel_coords, epsilon)
+             theta = theta - 0.01 * grads
+     return theta
+@@ -169,5 +169,5 @@
+ 
+ ## Background
+-Originated from the paper "Differentiable Rendering of Neural SDFs through Reparameterization" [S1]. The method builds on neural SDF representations [Yariv et al. 2020] and geometric network initialization [Atzmon and Lipman 2020]. It addresses the limitations of approximate differentiable rendering methods by providing unbiased gradients for surface boundaries [S1].
++Originated from the paper "Differentiable Rendering of Neural SDFs through Reparameterization" [S1]. The method builds on neural SDF representations [Yariv et al. 2020] and geometric network initialization [Atzmon and Lipman 2020] [S1]. It addresses the limitations of approximate differentiable rendering methods by providing unbiased gradients for surface boundaries [S1].
+ 
+ ## Sources

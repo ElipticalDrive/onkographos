@@ -1,0 +1,62 @@
+# Tree Marcher
+Also called: Tree Marcher for Generic Grids
+
+## Overview
+The Tree Marcher is a hierarchical ray traversal algorithm that steps a ray through a generic grid structure to locate intersections with active nodes [S1, S2]. It solves the problem of efficiently navigating adaptive tree structures to find the entry and exit intervals of ray-node intersections [S1, S2]. It differs from [PointTreeMarcher](7535-pointtreemarcher.md) by operating on generic grid topologies without special handling for point-grid coordinate mismatches [S2].
+
+## How it works
+### Inputs and Outputs
+The method takes an accessor object (`AccT`) for grid access and an index-space ray (`RayT`) as inputs [S1, S2]. Upon a successful step, it outputs a pointer to the intersected node (`const NodeT **node`) and the parametric interval of the intersection along the ray (`float &t0`, `float &t1`) [S1, S2].
+
+### Data Structures
+The implementation is a C++ class template with four parameters: `NodeT` (the node type being traversed), `RayT` (the ray type containing origin, direction, and a precision alias `RealType`), `AccT` (the accessor type), and `CoordT` (the coordinate type, defaulting to `Coord`) [S1, S2]. Internal type aliases are defined as `ChildT = typename NodeT::ChildNodeType`, `RealType = typename RayT::RealType`, `RealT = RealType`, and `CoordType = CoordT` [S1, S2].
+
+### Algorithm Steps
+The traversal is controlled by two primary functions: `init` and `step` [S1, S2].
+1. **Construction:** Instantiate the `TreeMarcher` with the accessor `acc` [S1, S2].
+2. **Initialization:** Call `init(indexRay)` to initialize the internal state with the provided index-space ray; this function returns `true` on success [S2]. The internal ray state is accessible via `ray()` [S1, S2].
+3. **Stepping:** Call `step(node, t0, t1)` to advance the ray through the tree [S1, S2]. If the ray intersects a node of type `NodeT`, the function populates `node`, `t0`, and `t1`, and returns `true` [S1, S2]. If the ray does not intersect a node of type `NodeT`, it returns `false` [S1, S2].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Usage pattern for TreeMarcher< NodeT, RayT, AccT, CoordT >
+# acc: instance of AccT
+# ray: instance of RayT
+
+marcher = TreeMarcher(acc)
+if not marcher.init(ray):
+    raise ValueError("Initialization failed")
+
+while True:
+    node_ptr = None
+    t0 = 0.0
+    t1 = 0.0
+    hit = marcher.step(node_ptr, t0, t1)
+    if not hit:
+        break
+    # Process intersected node at interval [t0, t1]
+    # (Node processing logic is implementation-specific and not provided in sources)
+```
+
+### Edge Cases and Pitfalls
+* **Node Type Mismatch:** The `step` function specifically targets nodes of type `NodeT`; non-matching nodes cause the function to return `false` [S1, S2].
+* **Precision:** The output parameters `t0` and `t1` use `float`, while internal ray calculations use `RayT::RealType` [S1, S2].
+* **Empty Space:** The underlying Half-Vector DDA (HDDA) performs empty-space ray-marching at all tree levels [S3].
+
+## Subtopics
+
+### [PointTreeMarcher](7535-pointtreemarcher.md)
+A specialized tree traversal algorithm for point grids that handles the coordinate system mismatch between bucketed voxel centers and DDA node corners.
+
+## Operating characteristics
+Time and memory complexity, measured performance, scaling, strengths, limitations, and usage guidelines are Not given in the sources.
+
+## Background
+The Tree Marcher is part of the NanoVDB library, developed by the Academy Software Foundation as part of the OpenVDB project [S1, S2]. It leverages the Half-Vector DDA (HDDA) algorithm for hierarchical traversal [S3]. The class template design provides flexibility in node types, ray types, and accessors for volume rendering and geometry extraction pipelines [S1, S2].
+
+## Sources
+[S1] OpenVDB: TreeMarcher< NodeT, RayT, AccT, CoordT > Class Template Reference, https://academysoftwarefoundation.github.io/openvdb/classnanovdb_1_1TreeMarcher.html, fetched 2026-10-24
+[S2] OpenVDB: TreeMarcher< NodeT, RayT, AccT, CoordT > Class Template Reference, https://openvdb.org/documentation/doxygen/classnanovdb_1_1math_1_1TreeMarcher.html, fetched 2026-10-25
+[S3] nanovdb/util/HDDA.h File Reference - OpenVDB, https://academysoftwarefoundation.github.io/openvdb/HDDA_8h.html, fetched 2026-10-25

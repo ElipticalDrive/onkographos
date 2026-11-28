@@ -1,0 +1,122 @@
+--- v008.md
++++ v009.md
+@@ -1,24 +1,108 @@
+ # Hybrid and Diffusion Representations
++
++Also called: Atomic-Continuous Priors, VDB-aware Diffusion
++
+ ## Overview
+-Hybrid and Diffusion Representations address the challenge of synthesizing 3D Gaussian Splatting (3DGS) representations from single images or text prompts without iterative optimization, thereby amortizing reconstruction costs and enabling near-real-time sampling [S1]. This family distinguishes itself from sibling methods like [Adaptive Gaussian Refinement](11448-adaptive-gaussian-refinement.md) by decoupling spatial structure generation from attribute encoding via parallel decoders or by leveraging learned diffusion priors to solve multi-view inconsistency and spurious geometry issues [S1].
+-## Shared principles
+-Not given in the sources.
++Hybrid and Diffusion Representations address the failure of standard Gaussian diffusion models to preserve sparse, high-frequency structures (such as thin wisps or exact empty space) when modeling volumetric data like VDB volumes [S1]. Unlike plain Gaussian diffusion, which tends to smooth away faint details and leak density into empty regions due to the conflict between discrete zeros and continuous heavy-tailed densities, this method introduces an atomic-continuous prior [S1]. It sets itself apart by explicitly modeling the data as a mixture of a discrete atomic component (exact zeros) and a continuous component, enabling the generation of clean, sparse volumetric structures suitable for visual effects [S1].
++
++## How it works
++**Inputs and Outputs:**
++*   **Input:** A target VDB volume (or sequence of volumes) representing density fields. For temporal sequences, the previous frame is included as an additional input channel [S1].
++*   **Output:** A generated VDB volume with preserved sparsity and structural integrity [S1].
++
++**Data Structures:**
++*   **VDB Volume:** A sparse volumetric grid where cells contain either exact zero (empty) or a real density value [S1].
++*   **Atomic-Continuous Prior:** A probabilistic mixture model defined by:
++    $$ p(x) = \pi_0\delta_0(x) + (1-\pi_0)p_{ac}(x) $$
++    where:
++    *   $\pi_0$ is the probability mass at zero (sparsity prior) [S1].
++    *   $\delta_0(x)$ is the Dirac delta function at zero [S1].
++    *   $p_{ac}(x)$ is the continuous probability density function for non-zero values [S1].
++
++**Parameters:**
++*   $\lambda$: A scaling factor used in amplitude companding to control the gradient boost for low-density structures. Value not specified in sources [G].
++*   $\pi_0$: The prior probability of a voxel being empty. Value not specified in sources [G].
++
++**Steps:**
++1.  **Amplitude Companding:** Apply a reversible log mapping to the input density values. This rebalances the training signal so that dense cores do not dominate the loss. Specifically, it boosts the gradient on faint, low-density structures by a factor of $(1 + \lambda\tilde{x})^{-1}$, where $\tilde{x}$ is the transformed value [S1]. This prevents thin wisps from being smoothed away during diffusion [S1].
++2.  **Atomic Mass Supervision:** Enforce sparsity during training using two terms:
++    *   **Soft Occupancy Target:** Used to recover the coarse shape of the volume [S1].
++    *   **Leakage Penalty:** A regularization term that pushes density values to exactly zero outside the object boundary, ensuring the result remains sparse like real VDB data [S1].
++3.  **Temporal Conditioning (for sequences):** Stack the previous frame's volume data onto the current input as an extra channel. The network learns motion dynamics from this concatenated input without requiring computationally expensive 4D attention mechanisms [S1].
++4.  **Diffusion Process:** Perform standard Gaussian diffusion steps conditioned on the hybrid prior and the companded/regularized targets [S1].
++
++**Pseudocode:**
++```python
++def atomic_continuous_diffusion(volume, prev_frame=None, lambda_param=1.0):
++    """
++    Generates a VDB volume using atomic-continuous priors.
++    volume: Input density tensor.
++    prev_frame: Optional previous frame tensor for temporal conditioning.
++    lambda_param: Scaling factor for amplitude companding.
++    """
++    # Step 1: Temporal Conditioning
++    if prev_frame is not None:
++        # Stack previous frame as an extra channel
++        input_data = torch.cat([volume, prev_frame], dim=0) # Assuming channel dimension is first
++    else:
++        input_data = volume
++
++    # Step 2: Amplitude Companding
++    # Apply reversible log mapping to rebalance training signal
++    # Boosts gradient on faint structures by (1 + lambda * x_tilde)^-1
++    # Note: Exact definition of x_tilde and the log mapping function is not provided in sources [G]
++    companded_data = apply_amplitude_companding(input_data, lambda_param)
++
++    # Step 3: Define Atomic-Continuous Prior
++    # p(x) = pi_0 * delta_0(x) + (1 - pi_0) * p_ac(x)
++    # pi_0 is the probability mass at zero
++    # delta_0(x) is the Dirac delta at zero
++    # p_ac(x) is the continuous PDF for non-zero values
++    prior = AtomicContinuousPrior(pi_0=0.9) # Example value, not specified in sources [G]
++
++    # Step 4: Atomic Mass Supervision
++    # Compute loss with soft occupancy target and leakage penalty
++    # Soft occupancy target recovers coarse shape
++    # Leakage penalty pushes density to exactly zero outside boundary
++    def loss_fn(predicted_volume, target_volume):
++        occupancy_loss = compute_soft_occupancy_loss(predicted_volume, target_volume)
++        leakage_loss = compute_leakage_penalty(predicted_volume)
++        return occupancy_loss + leakage_loss
++
++    # Step 5: Diffusion Training/Inference
++    # Standard diffusion steps conditioned on the hybrid prior and losses
++    # The network learns to denoise while respecting the atomic-continuous structure
++    generated_volume = run_diffusion_process(companded_data, prior, loss_fn)
++
++    return generated_volume
++```
++
++**Edge Cases and Pitfalls:**
++*   **Smoothing of Faint Structures:** Without amplitude companding, faint wisps are smoothed away by the Gaussian diffusion process [S1].
++*   **Density Leakage:** Without atomic mass supervision, density leaks into empty regions, violating the sparsity of VDB data [S1].
++*   **Computational Cost:** For sequences, using 4D attention is avoided to keep generation cost comparable to single-frame generation [S1].
++
+ ## Subtopics
+ 
+ ### [TriplaneGaussian](7558-triplanegaussian.md)
+-TriplaneGaussian is a feed-forward method that generates 3DGS from a single input image by decoupling the generation of spatial structure (point cloud) and attribute encoding (tri-plane) via parallel transformer-based decoders. It leverages the geometric regularity of a tri-plane to encode Gaussian attributes, improving fidelity and consistency compared to point-cloud-only approaches.
++TriplaneGaussian is a feed-forward method for generating 3D Gaussian Splatting (3DGS) representations from a single input image. It solves the problem of single-image 3D reconstruction by decoupling the generation of geometric structure (point cloud) and attribute encoding (tri-plane). It sets itself apart from direct regression methods by using a hybrid representation where a tri-plane encodes global attribute information, which is queried and augmented by local image features to predict Gaussian parameters. See [TriplaneGaussian](7558-triplanegaussian.md).
+ 
+ ### [GaussianDiffusion](9190-gaussiandiffusion.md)
+-GaussianDiffusion trains a 3D diffusion model based on a GaussianCube representation to synthesize 3D Gaussian fields directly. It solves the "Janus problem" (multi-view inconsistency) and spurious geometry ("floaters") by incorporating structured noises from multiple viewpoints and using variational 3DGS principles.
++GaussianDiffusion is a method that trains a 3D diffusion model based on a GaussianCube representation to generate 3D Gaussian fields. It solves the problem of high reconstruction latency and multi-view inconsistency inherent in iterative optimization approaches by amortizing the reconstruction cost through learned priors. Unlike iterative methods that optimize per-scene parameters, this approach enables near-real-time sampling at test time and naturally promotes multi-view coherence. It is distinct from sibling methods like TriplaneGaussian by using a voxelized Gaussian representation converted via optimal transport rather than planar projections. See [GaussianDiffusion](9190-gaussiandiffusion.md).
+ 
+ ### Text2Immersion
+-#### definition
+-- [S1] A scene generation method similar to LucidDreamer but with outlier removal and two-stage optimization.
+-#### step
+-- [S1] A process removes outliers in the point cloud.
+-- [S1] 3DGS optimization has two stages: training coarse 3DGS and refinement.
++Text2Immersion is a scene generation method similar to LucidDreamer but with outlier removal and two-stage optimization [S2]. It removes outliers in the point cloud and performs 3DGS optimization in two stages: training coarse 3DGS and refinement [S2].
++
++## Operating characteristics
++*   **Performance:** The reference model produces the cleanest VDB structure, with the biggest gains in 3D shape and temporal motion [S1].
++*   **Metrics:** Achieves an MMD-G score of 0.02 on static generation, compared to 0.24 for the vanilla baseline [S1]. For sequences, it achieves an FVD of 1345, which is approximately 2.5× lower than ModelScope (3333) and 4× lower than ZeroScope (5546) [S1].
++*   **User Evaluation:** Ranked #1 by 36 professional artists with an average rank of 1.47, ahead of every baseline [S1].
++*   **Strengths:** Preserves sparse structures (exact zeros) and fine details (thin wisps) that are typically lost in standard diffusion [S1]. Efficient temporal generation without 4D attention [S1].
++*   **Limitations:** Not given in the sources.
+ 
+ ## Background
+-Not given in the sources.
++The method originates from the VfxDB benchmark and dataset, which highlights the need for volumetric representations that can handle the dual nature of VDB data (exact zeros and continuous density) [S1]. Standard Gaussian diffusion fails to capture this mix, leading to smoothed-out details and density leakage [S1]. The atomic-continuous prior was introduced to solve this specific problem in visual effects volume generation [S1].
++
+ ## Sources
+-[S1] Recent advances in 3D Gaussian splatting, https://doi.org/10.1007/s41095-024-0436-y, fetched 2026-10-26+[S1] VfxDB: A Visual Effects Volume Dataset and Benchmark for ..., https://vfxdb-official.github.io/VfxDB/, fetched 2026-10-28
++[S2] Recent advances in 3D Gaussian splatting, https://doi.org/10.1007/s41095-024-0436-y, fetched 2026-10-26

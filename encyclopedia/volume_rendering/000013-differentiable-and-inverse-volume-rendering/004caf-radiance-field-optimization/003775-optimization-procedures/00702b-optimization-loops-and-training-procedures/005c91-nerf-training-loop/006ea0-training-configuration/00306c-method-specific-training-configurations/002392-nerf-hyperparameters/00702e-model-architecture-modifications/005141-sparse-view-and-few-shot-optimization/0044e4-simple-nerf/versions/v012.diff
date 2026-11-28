@@ -1,0 +1,268 @@
+--- v011.md
++++ v012.md
+@@ -4,179 +4,105 @@
+ 
+ ## Overview
+-Simple-NeRF is a regularization method for sparse-input Neural Radiance Fields that employs two simpler augmented NeRF models (points and views augmentations) to provide depth supervision to the main NeRF, mitigating overfitting and implausible geometries caused by high capacity and sparse views [S1, S2]. It differs from prior works requiring pre-training on large datasets or external depth models by obtaining depth supervision through augmented models trained in-situ without pre-training [S1, S2].
++Simple-NeRF is a regularization method for sparse-input Neural Radiance Fields (NeRF) that employs two simpler augmented NeRF models to provide depth supervision to the main NeRF, mitigating overfitting and implausible geometries caused by high capacity and sparse views [S1, S2]. It sets itself apart from prior works by obtaining depth supervision through augmented models trained in-situ without requiring pre-training on large datasets or external depth models [S1, S2]. Unlike RegNeRF, which uses depth smoothness priors and can fuse objects at different depths, Simple-NeRF mitigates both floaters and incorrect depth issues by learning in-situ depth priors [S2].
+ 
+ ## How it works
+-Simple-NeRF builds on the DS-NeRF baseline architecture [S1, S2], which uses a coarse and fine MLP for hierarchical sampling. The method trains two augmented NeRF models in tandem with the main NeRF to generate depth priors [S1]. These augmented models are biased toward simpler solutions to mitigate floaters and shape-radiance ambiguity [S1]. Only the main NeRF is used during inference [S1, S2].
++**Inputs and Outputs:**
++*   **Inputs:** A sparse set of $N$ input images (typically 2–4 views) and their corresponding camera poses. Optional sparse depth maps from Structure from Motion (SfM) [S2].
++*   **Outputs:** A trained main NeRF model used for novel view synthesis. Augmented models are discarded after training [S1, S2].
+ 
+-### Inputs and Outputs
+-- **Inputs**: A sparse set of input images (e.g., 2-4 views) and their camera poses. Optional sparse depth from Structure from Motion (SfM) [S2].
+-- **Outputs**: A trained main NeRF model $F_\Theta$ capable of rendering novel views. The augmented models are discarded after training [S1, S2].
++**Data Structures:**
++The architecture consists of four NeRF models trained in tandem:
++1.  **Main Model:** Standard NeRF with coarse MLP $N_1$ and fine MLP $N_2$ [S1, S2].
++2.  **Smoothing Augmentation (Points Augmentation):** An augmented NeRF with reduced positional encoding capacity [S1, S2].
++3.  **Lambertian Augmentation (Views Augmentation):** An augmented NeRF with disabled view-dependent radiance [S1, S2].
+ 
+-### Data Structures and Architecture
+-The framework consists of three parallel NeRF models:
+-1.  **Main Model**: Standard NeRF with coarse MLP $N_1$ and fine MLP $N_2$ [S1, S2].
+-    -   Coarse MLP: $\sigma_i, h_i = N_1(\gamma(\mathbf{p}_i, 0, l_p))$ [S1, S2].
+-    -   Fine MLP: $\mathbf{c}_i = N_2(h_i, \gamma(\mathbf{v}, 0, l_v))$ [S1, S2].
+-    -   Positional Encoding: $\gamma(\mathbf{x}, d_1, d_2) = [\sin(2^{d_1}\mathbf{x}), \cos(2^{d_1}\mathbf{x}), \dots, \sin(2^{d_2-1}\mathbf{x}), \cos(2^{d_2-1}\mathbf{x})]$ [S2]. When $d_1 = 0$, the raw position $\mathbf{x}$ is concatenated to the encoding [S2].
+-2.  **Smoothing (Points) Augmentation**: Reduces positional encoding degree to prevent depth discontinuities [S2].
+-    -   Coarse MLP $N_{1s}$: $\sigma_i, h_i = N_{1s}(\gamma(\mathbf{p}_i, 0, l_{ps}))$, where $l_{ps} < l_p$ [S2].
+-    -   Fine MLP $N_{2s}$: $\mathbf{c}_i = N_{2s}(h_i, \gamma(\mathbf{p}_i, l_{ps}, l_p), \gamma(\mathbf{v}, 0, l_v))$. The residual high-frequency positional encodings ($l_{ps}$ to $l_p$) are concatenated to the input of $N_{2s}$ along with latent features and view direction [S2].
+-3.  **Lambertian (Views) Augmentation**: Disables view-dependent radiance to resolve shape-radiance ambiguity [S2].
+-    -   Coarse MLP $N_{1l}$: $\sigma_i, h_i = N_{1l}(\gamma(\mathbf{p}_i, 0, l_p))$ [S2].
+-    -   Fine MLP $N_{2l}$: $\mathbf{c}_i = N_{2l}(h_i, \gamma(\mathbf{v}, 0, 0))$. The view direction is encoded with frequency 0 (effectively constant or ignored), making color prediction dependent only on position [S1, S2].
++**NeRF Preliminaries:**
++The NeRF predicts view-independent volume density $\sigma_i$ and view-dependent color $c_i$ for a point $p_i$ and viewing direction $v$ using two MLPs [S1, S2]:
++$$
++\sigma_i, h_i = N_1(\gamma(p_i, 0, l_p))
++$$
++$$
++c_i = N_2(h_i, \gamma(v, 0, l_v))
++$$
++where $h_i$ is a latent feature, $\gamma(x, d_1, d_2)$ is the positional encoding from frequency $d_1$ to $d_2$, and $l_p, l_v$ are the highest frequencies for position and view direction respectively. When $d_1=0$, $x$ is concatenated to the positional encoding [S2].
+ 
+-### Training Steps
+-1.  **Initialization**: Initialize Main Model ($N_1, N_2$), Smoothing Augmentation ($N_{1s}, N_{2s}$), and Lambertian Augmentation ($N_{1l}, N_{2l}$) [S2].
+-2.  **Forward Pass**: For each ray, sample points using coarse stratified sampling and fine dense sampling. Compute $\sigma$ and $\mathbf{c}$ for all three models [S1, S2].
+-3.  **Depth Estimation**: Compute mean depth $z$ for each model from the volume rendering integration [S1, S2].
+-4.  **Reliability Mask Computation**: Determine which depth estimates are reliable by reprojection consistency [S1, S2].
+-    -   For a pixel $q$, reproject a $k \times k$ patch around $q$ to the nearest training view using depths $z_c$ (main coarse) and $z_a$ (augmented coarse) [S1].
+-    -   Compute MSE intensities $e_c$ and $e_a$ between reprojected patches and the training image [S1].
+-    -   Define threshold $e_\tau$ [S1].
+-    -   Compute mask $m_a$ for augmented model:
+-        $$m_a = \begin{cases} 1 & \text{if } (e_a < e_c) \text{ and } (e_a < e_\tau) \\ -1 & \text{if } (e_c < e_a) \text{ and } (e_c < e_\tau) \\ 0 & \text{otherwise} \end{cases}$$ [S1].
+-    -   Compute mask $m_m$ for main model similarly [S2].
+-    -   Note: In specular regions, reprojected patch intensities may not match, causing masks to be zero [S2].
+-5.  **Loss Computation**:
+-    -   **Depth Supervision Loss ($L_{aug}$)**: Impose depth supervision using stop-gradient ($\hat{\nabla}$) on the target depth [S2].
+-        $$L_{aug} = \mathbf{1}\{m_a=1\} \odot \|z_m - \hat{\nabla}(z_a)\|^2 + \mathbf{1}\{m_m=1\} \odot \|\hat{\nabla}(z_m) - z_a\|^2$$ [S2].
+-        Apply separately for Smoothing ($L_s$) and Lambertian ($L_l$) augmentations, then sum them: $L_{aug} = L_s + L_l$ [S2].
+-    -   **Coarse-Fine Consistency Loss ($L_{cfc}$)**: Ensure hierarchical sampling consistency between coarse depth $z_c$ and fine depth $z_f$ of the main model [S2].
+-        $$L_{cfc} = \mathbf{1}\{m_f=1\} \odot \|z_c - \hat{\nabla}(z_f)\|^2 + \mathbf{1}\{m_c=1\} \odot \|\hat{\nabla}(z_c) - z_f\|^2$$ [S2].
+-        Masks $m_f$ and $m_c$ are computed similarly to $m_a$ and $m_m$ using reprojection MSE of $z_f$ and $z_c$ respectively [S2].
+-    -   **Photometric Loss**: Standard color reconstruction loss $L_{color}$ [S1].
+-6.  **Optimization**: Minimize photometric loss $L_{color}$, depth supervision loss $L_{aug}$, and coarse-fine consistency loss $L_{cfc}$ [S1, S2].
++**Augmented Model Designs:**
++1.  **Smoothing Augmentation (Points Augmentation):** Reduces the degree of positional encoding to prevent undesired depth discontinuities and floaters [S2]. The coarse MLP $N_{1s}$ receives only low-frequency positional encodings $\gamma(p_i, 0, l_{ps})$. The remaining high-frequency components $\gamma(p_i, l_{ps}, l_p)$ are concatenated to the input of the fine MLP $N_{2s}$ along with latent features $h_i$ and view direction $v$ [S2]:
++    $$
++    c_i = N_{2s}(h_i, \gamma(p_i, l_{ps}, l_p), \gamma(v, 0, l_v))
++    $$
++    This biases the model against shape-radiance ambiguity in Lambertian regions [S1, S2].
++2.  **Lambertian Augmentation (Views Augmentation):** Disables view-dependent radiance to resolve shape-radiance ambiguity and prevent duplication artifacts [S2]. The coarse MLP $N_{1l}$ predicts both density and color based on position alone [S1]:
++    $$
++    \tilde{\sigma}_i, \tilde{c}_i = N_{1l}(\gamma(p_i, 0, l_p))
++    $$
++    The fine MLP $N_{2l}$ is similarly modified to output color based on position [S1].
+ 
+-### Pseudocode
+-```python
+-def pos_enc(x, d1, d2):
+-    # Returns [sin(2^d1 x), cos(2^d1 x), ..., sin(2^(d2-1) x), cos(2^(d2-1) x)]
+-    # When d1=0, x is concatenated first [S2]
+-    enc = []
+-    for i in range(d1, d2):
+-        enc.append(sin(2**i * x))
+-        enc.append(cos(2**i * x))
+-    if d1 == 0:
+-        return concat([x] + enc)
+-    return concat(enc)
++**Mask Computation:**
++To gauge the reliability of depth estimates, the method reprojects pixels using estimated depths onto the nearest training view and compares them with the training image [S1, S2].
++For a pixel $q$, reproject a $k \times k$ patch around $q$ to the nearest training view using depths $z_c$ (main coarse) and $z_a$ (augmented coarse) [S1, S2]. Compute Mean Squared Error (MSE) intensities $e_c$ and $e_a$ between the reprojected patches and the training image [S1, S2]. Define a threshold $e_\tau$ [S1].
+ 
+-def compute_mean_depth(sigma, t):
+-    # Standard volume rendering depth integration [G]
+-    alpha = 1 - exp(-sigma * delta_t)
+-    w = alpha * cumprod(1 - alpha[:-1])
+-    return sum(w * t)
++Compute the ternary mask $m_a$ for the augmented model:
++$$
++m_a = \begin{cases} 
++1 & \text{if } (e_a \le e_c) \text{ and } (e_a \le e_\tau) \\
++-1 & \text{if } (e_c < e_a) \text{ and } (e_c \le e_\tau) \\
++0 & \text{otherwise}
++\end{cases}
++$$
++Similarly, compute mask $m_m$ for the main model [S2].
++*   $m=1$: Augmented depth is more reliable.
++*   $m=-1$: Main depth is more reliable.
++*   $m=0$: Both depths are unreliable (e.g., specular regions) [S1, S2].
+ 
+-def compute_reprojection_mse(depth_map, rays, target_view, k):
+-    # Reproject pixel coordinates using depth to target view, sample RGB, compare with target image [S1]
+-    # Returns scalar MSE per pixel
+-    pass # [G] Standard reprojection routine
++**Loss Functions:**
++1.  **Depth Supervision Loss ($L_{aug}$):** Imposes depth supervision between the main coarse depth $z_m$ and augmented coarse depth $z_a$ using stop-gradient ($\hat{\nabla}$) on the target depth [S1, S2]:
++    $$
++    L_{aug} = \mathbb{1}\{m_a=1\} \odot \|z_m - \hat{\nabla}(z_a)\|^2 + \mathbb{1}\{m_m=1\} \odot \|\hat{\nabla}(z_m) - z_a\|^2
++    $$
++    Separate losses $L_s$ (smoothing) and $L_l$ (Lambertian) are computed and summed [S2].
++2.  **Coarse-Fine Consistency Loss ($L_{cfc}$):** Ensures hierarchical sampling consistency between coarse depth $z_c$ and fine depth $z_f$ of the main model [S1, S2]:
++    $$
++    L_{cfc} = \mathbb{1}\{m_f=1\} \odot \|z_c - \hat{\nabla}(z_f)\|^2 + \mathbb{1}\{m_c=1\} \odot \|\hat{\nabla}(z_c) - z_f\|^2
++    $$
++    Masks $m_f$ and $m_c$ are computed similarly using fine depths [S2].
++3.  **Photometric Loss:** Standard volume rendering photometric loss between rendered color and training image [S1, S2].
+ 
+-def compute_mask(e_a, e_c, e_tau):
+-    if e_a < e_c and e_a < e_tau:
+-        return 1
+-    elif e_c < e_a and e_c < e_tau:
+-        return -1
+-    else:
+-        return 0
++**Training Procedure:**
++1.  Initialize Main Model ($N_1, N_2$) and Augmented Models ($N_{1s}, N_{2s}, N_{1l}, N_{2l}$) [S2].
++2.  For each training step:
++    a. Sample rays and points for coarse and fine sampling [S1, S2].
++    b. Forward pass through Main, Smoothing, and Lambertian models to obtain densities, colors, and depths [S2].
++    c. Compute reprojection MSEs $e_c, e_a$ for coarse depths [S1, S2].
++    d. Compute masks $m_a, m_m, m_f, m_c$ [S1, S2].
++    e. Compute losses $L_{aug}$ (sum of $L_s, L_l$) and $L_{cfc}$ [S2].
++    f. Compute total loss: $L_{total} = L_{color} + \lambda_1 L_{aug} + \lambda_2 L_{cfc}$ [S1, S2].
++    g. Backpropagate and update all model parameters [S2].
++3.  Inference uses only the Main Model [S1, S2].
+ 
+-def stop_grad(x):
+-    return x.detach() # [G] standard autograd operation
++**Parameters:**
++*   $e_\tau$: Threshold for reprojection MSE. Value: Not explicitly given in sources [S1].
++*   $l_{ps}$: Lowest frequency for smoothing augmentation positional encoding. Value: Not explicitly given [S2].
++*   $\lambda_1, \lambda_2$: Weights for depth supervision and consistency losses. Value: Not explicitly given [S1, S2].
+ 
+-def train_simple_nerf(images, poses, num_epochs):
+-    # Initialize models [S2]
+-    main_coarse, main_fine = MLP(), MLP()
+-    smooth_coarse, smooth_fine = MLP(), MLP()
+-    lamb_coarse, lamb_fine = MLP(), MLP()
+-
+-    l_p, l_v = 10, 4
+-    l_ps = 4
+-    e_tau = 0.1
+-    k = 3
+-
+-    for epoch in range(num_epochs):
+-        for batch in get_batches(images, poses):
+-            rays = sample_rays(batch) # [G] standard ray generation
+-
+-            # Main Model Forward
+-            pe_c_main = pos_enc(rays.p, 0, l_p)
+-            sigma_c_main, h_c_main = main_coarse(pe_c_main)
+-            z_c_main = compute_mean_depth(sigma_c_main, rays.t)
+-            pe_f_main = concat([h_c_main, pos_enc(rays.v, 0, l_v)])
+-            c_main = main_fine(pe_f_main)
+-
+-            # Fine Model Forward (for consistency loss)
+-            pe_c_fine = pos_enc(rays.p, 0, l_p)
+-            sigma_c_fine, h_c_fine = main_coarse(pe_c_fine) # [G] coarse weights shared or separate
+-            z_f_main = compute_mean_depth(sigma_c_fine, rays.t) # [G] fine depth
+-
+-            # Smoothing Augmentation Forward
+-            pe_c_smooth = pos_enc(rays.p, 0, l_ps)
+-            sigma_c_smooth, h_c_smooth = smooth_coarse(pe_c_smooth)
+-            z_c_smooth = compute_mean_depth(sigma_c_smooth, rays.t)
+-            pe_f_smooth = concat([h_c_smooth, pos_enc(rays.p, l_ps, l_p), pos_enc(rays.v, 0, l_v)])
+-            c_smooth = smooth_fine(pe_f_smooth)
+-
+-            # Lambertian Augmentation Forward
+-            pe_c_lamb = pos_enc(rays.p, 0, l_p)
+-            sigma_c_lamb, h_c_lamb = lamb_coarse(pe_c_lamb)
+-            z_c_lamb = compute_mean_depth(sigma_c_lamb, rays.t)
+-            pe_f_lamb = concat([h_c_lamb, pos_enc(rays.v, 0, 0)])
+-            c_lamb = lamb_fine(pe_f_lamb)
+-
+-            # Reprojection MSEs [S1]
+-            e_c_main = compute_reprojection_mse(z_c_main, rays, batch.train_view, k)
+-            e_c_smooth = compute_reprojection_mse(z_c_smooth, rays, batch.train_view, k)
+-            e_c_lamb = compute_reprojection_mse(z_c_lamb, rays, batch.train_view, k)
+-            e_c_fine = compute_reprojection_mse(z_f_main, rays, batch.train_view, k)
+-
+-            # Masks [S1, S2]
+-            m_smooth = compute_mask(e_c_smooth, e_c_main, e_tau)
+-            m_lamb = compute_mask(e_c_lamb, e_c_main, e_tau)
+-            m_f = compute_mask(e_c_fine, e_c_main, e_tau)
+-            m_c = compute_mask(e_c_main, e_c_fine, e_tau)
+-
+-            # Losses [S1, S2]
+-            L_color = mse(c_main, batch.rgb)
+-
+-            L_smooth = (m_smooth == 1) * (z_c_main - stop_grad(z_c_smooth))**2 + \
+-                       (m_smooth == -1) * (stop_grad(z_c_main) - z_c_smooth)**2
+-            L_lamb = (m_lamb == 1) * (z_c_main - stop_grad(z_c_lamb))**2 + \
+-                     (m_lamb == -1) * (stop_grad(z_c_main) - z_c_lamb)**2
+-            L_aug = L_smooth + L_lamb
+-
+-            L_cfc = (m_f == 1) * (z_c_main - stop_grad(z_f_main))**2 + \
+-                    (m_c == 1) * (stop_grad(z_c_main) - z_f_main)**2
+-
+-            L_total = L_color + L_aug + L_cfc
+-
+-            # Update
+-            grads = compute_gradients(L_total, [main_coarse, main_fine, smooth_coarse, smooth_fine, lamb_coarse, lamb_fine])
+-            apply_gradients(grads)
+-```
+-
+-### Parameters
+--   $e_\tau$: Threshold for reprojection MSE to filter out incorrect depth estimates. Value: Not explicitly given in sources, but used to mark depth reliable if MSE $< e_\tau$ [S1].
+--   $l_p, l_v$: Highest positional encoding frequencies for position and view. Typical values for NeRF are 10 and 4 respectively [S1, S2].
+--   $l_{ps}$: Reduced positional encoding frequency for smoothing augmentation coarse MLP. Value: Not explicitly given, but $l_{ps} < l_p$ [S2].
+-
+-### Edge Cases and Pitfalls
+--   **Specular Regions**: Reprojected patch intensities may not match, causing masks to be zero. This results in fewer supervised pixels but avoids supervision with incorrect depth estimates [S1, S2].
+--   **Single View Visibility**: In regions visible in only one training view, reliable depth supervision is not available, leading to transparent floaters [S2].
+--   **Poor Base Performance**: The method is limited to cases where the base model achieves reasonable performance but suffers from distortions; it may not help if the base model performance is very poor [S2].
+--   **Depth Variance**: The depth supervision loss is imposed only on the mean depth, not on the variance. Experiments with minimizing standard deviation led to stronger artifacts [S2].
++**Edge Cases and Pitfalls:**
++*   **Specular Regions:** Reprojected patch intensities may not match, causing masks to be zero. This results in no supervision for those pixels, preventing incorrect depth estimates but reducing the number of supervised pixels [S1, S2].
++*   **Single-View Visibility:** Transparent floaters persist in regions visible in only one training view because reliable depth supervision (requiring reprojection to a *different* view) is not available there [S2].
++*   **Poor Base Performance:** The method is limited to cases where the base model achieves reasonable performance but suffers from distortions; it may not help if the base model performance is very poor [S2].
++*   **Depth Variance:** The depth supervision loss is imposed only on the mean depth, not on the variance [S2].
+ 
+ ## Operating characteristics
+--   **Time Complexity**: Simple-NeRF queries coarse MLPs 192 times and fine MLPs 192 times (384 total), whereas standard NeRF queries coarse MLPs 64 times and fine MLPs 192 times (256 total) [S2]. Training takes approximately 1.5 times more time than standard NeRF [S2]. Disabling $L_{cfc}$ increases training time by almost 2x due to the inclusion of augmentations for the fine NeRF [S2].
+--   **Memory Complexity**: Training augmented models adds compute and memory overhead during training [S2].
+--   **Performance**:
+-    -   On LLFF dataset with 2 views: SSIM 0.6501, PSNR 19.57, LPIPS 0.2688 [S1].
+-    -   On LLFF dataset with 4 views: SSIM 0.7016, PSNR 21.99, LPIPS 0.2633 [S1].
+-    -   On RealEstate-10K with 2 views: MAE 0.3269, SROCC 0.9215 [S2].
+-    -   On NeRF-LLFF with 2 views: MAE 0.1420, SROCC 0.8480 [S2].
+--   **Strengths**: Mitigates floaters and incorrect depth issues simultaneously, unlike RegNeRF which fuses objects at different depths [S2]. Does not require pre-training on large datasets [S1].
+--   **Limitations**: Limited to sparse view scenarios where base model is reasonably good. Transparent floaters persist in single-view visible regions [S2].
++*   **Time Complexity:** Simple-NeRF queries coarse MLPs 192 times and fine MLPs 192 times (384 total) per pixel, whereas standard NeRF queries coarse MLPs 64 times and fine MLPs 192 times (256 total) [S2]. Training takes approximately 1.5 times more time than standard NeRF [S2]. Disabling $L_{cfc}$ increases training time by almost 2x due to the inclusion of augmentations for the fine NeRF [S2].
++*   **Memory Complexity:** Training augmented models adds compute and memory overhead during training [S2].
++*   **Performance:**
++    *   **LLFF (2 views):** SSIM 0.6501, PSNR 19.57, LPIPS 0.2688 [S1].
++    *   **LLFF (4 views):** SSIM 0.7016, PSNR 21.99, LPIPS 0.2633 [S1].
++    *   **RealEstate-10K (2 views):** MAE 0.3269, SROCC 0.9215 [S2].
++    *   **NeRF-LLFF (2 views):** MAE 0.1420, SROCC 0.8480 [S2].
++*   **Strengths:** Mitigates floaters and shape-radiance ambiguity without pre-training or external depth models [S1, S2].
++*   **Limitations:** Does not handle transparent floaters in single-view regions well; requires base model to have reasonable initial performance [S2].
+ 
+ ## Background
+-Simple-NeRF was introduced by Nagabhushan Somraj et al. in 2023 [S1, S2]. It is part of the Simple Radiance Fields (Simple-RF) family, which also includes Simple-TensoRF and Simple-ZipNeRF [S2]. The method is designed for few-shot/sparse input NeRF training, using DS-NeRF as the baseline architecture [S1]. It views the framework as semi-supervised learning, where sparse depth from SfM provides limited labels and remaining pixels are unlabeled data [S1, S2].
++Simple-NeRF was introduced by Nagabhushan Somraj et al. in 2023 [S1, S2]. It is part of the "Simple Radiance Fields" (Simple-RF) family, which applies similar regularization principles to other radiance field representations like TensoRF and ZipNeRF [S2]. The method builds on the DS-NeRF baseline architecture [S1, S2]. It addresses the limitations of generalized sparse NeRFs (which require large pre-training datasets) and prior regularization methods like RegNeRF (which can fuse objects) and FreeNeRF (which anneals frequencies) [S1, S2]. The approach is conceptually closest to the Dual-Student architecture, which trains an identical model in tandem, but uses augmented models with complementary abilities [S1, S2].
+ 
+ ## Sources

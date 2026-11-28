@@ -1,0 +1,144 @@
+# Bunyk et al. Ray Casting
+
+Also called: Bunyk et al, Bunyk, Kaufman, and Silva Ray Casting, Ray Casting (Bunyk, and Silva), UnstructuredGridVolumeRayCastMapper
+
+## Overview
+Bunyk et al. Ray Casting is a software-based volume rendering technique for unstructured grids that handles non-convex geometries by exploiting the discrete nature of the image plane [S1, S2, S4, unofficial]. Unlike hierarchical spatial structures that require complex search operations for re-entry, this method pre-computes boundary fragment intersections in screen space to accelerate ray traversal [S1, S2, S4, unofficial]. It is distinguished from its parent [Coarse Mesh Traversal with Dual-Ray Culling](987-coarse-mesh-traversal-with-dual-ray-culling.md) by its reliance on screen-space projection rather than dual-ray geometric culling, and from [Back-Face Culling for Ray Casting](1236-back-face-culling-for-ray-casting.md) by its explicit use of pre-projected boundary fragments to manage re-entries [S1, S2, S4, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** An unstructured grid (typically tetrahedral or polyhedral), a viewing ray for each pixel, and a transfer function mapping scalar values to color and opacity [S3].
+*   **Output:** A 2D image with integrated color and opacity values [S3].
+
+**Data Structures:**
+1.  **Boundary Fragment List:** For each pixel $(u, v)$, a list of fragments from front-facing boundary faces that project onto that pixel. Each fragment stores the entry and exit distances along the ray, or the cell ID and traversal parameters [S1, S2, S4, unofficial]. The list is sorted in front-to-back order [S1, S2, S4, unofficial].
+2.  **Pre-integration Table:** A lookup table used to accelerate the integration of optical properties along ray segments [S3].
+
+**Steps:**
+
+1.  **Pre-processing (Screen Space Projection):**
+    *   Identify all front-facing boundary faces of the unstructured grid [S1, S2, S4, unofficial].
+    *   Project these faces onto the image plane [S3].
+    *   For each pixel, determine the fragments of the front boundary faces that cover it [S1, S2, S4, unofficial].
+    *   Store these fragments in a list for the pixel, sorted from front to back [S1, S2, S4, unofficial].
+    *   [G] Initialize the pre-integration table based on the transfer function and step size.
+
+2.  **Ray Traversal and Re-entry Handling:**
+    *   For each pixel, cast a ray into the volume [S1, S2, S4, unofficial].
+    *   Determine the initial entry point into the mesh using the first fragment in the pixel's boundary fragment list [S1, S2, S4, unofficial].
+    *   Traverse the ray through the interior cells.
+    *   When the ray exits the current cell or the mesh, check the boundary fragment list for the current pixel [S1, S2, S4, unofficial].
+    *   Use the next fragment in the list to determine if and where the ray re-enters the mesh [S1, S2, S4, unofficial].
+    *   If a re-entry is detected, update the ray's current position and continue traversal from the new entry point [S1, S2, S4, unofficial].
+    *   If no further fragments exist, terminate the ray for that pixel [S1, S2, S4, unofficial].
+
+3.  **Integration:**
+    *   Integrate the optical properties (color and opacity) along the ray segments defined by the traversal [S3].
+    *   Use the pre-integration table to speed up the integration of segments within cells [S3].
+    *   Composite the results using the standard volume rendering integral [S3].
+
+4.  **Intermixed Geometry Support:**
+    *   Render opaque geometry first [S3].
+    *   Use the hardware depth buffer to clip the unstructured grid rendering, ensuring only the portion of the data closest to the viewer is rendered [S3].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def bunyk_ray_casting(grid, camera, transfer_function):
+    # Pre-processing
+    # Project front-facing boundary faces to screen space
+    # For each pixel (u, v), collect fragments of boundary faces
+    # Sort fragments front-to-back
+    boundary_fragments = compute_boundary_fragments(grid, camera)
+    
+    # Initialize pre-integration table
+    pre_int_table = build_pre_integration_table(transfer_function)
+    
+    # Ray casting loop
+    for each pixel (u, v) in image:
+        ray = camera.get_ray(u, v)
+        fragments = boundary_fragments[u, v]
+        
+        if not fragments:
+            continue
+            
+        # Initial entry
+        current_entry = fragments[0].entry_distance
+        current_exit = fragments[0].exit_distance
+        
+        # Traverse through the mesh
+        # Note: The exact internal cell traversal logic is not fully detailed in sources
+        # but relies on the pre-computed boundary fragments for re-entry
+        accumulated_color = (0, 0, 0, 0)
+        accumulated_opacity = 0
+        
+        # Simplified traversal logic based on sources
+        # The sources emphasize the use of boundary fragments for re-entry
+        # rather than detailed internal cell traversal steps
+        for i, fragment in enumerate(fragments):
+            # Determine if this fragment represents a re-entry or the initial entry
+            # The sources state that boundary fragments are used to determine re-entry
+            # and the particular cell.
+            
+            # Integrate along the segment defined by the fragment
+            # Use pre-integration table for acceleration
+            segment_color, segment_opacity = integrate_segment(
+                ray, fragment.entry_distance, fragment.exit_distance,
+                pre_int_table, transfer_function
+            )
+            
+            # Composite
+            accumulated_color, accumulated_opacity = composite(
+                accumulated_color, accumulated_opacity,
+                segment_color, segment_opacity
+            )
+            
+            # Update current position for next iteration if needed
+            # The sources imply a sequential traversal guided by fragments
+            pass
+            
+        image[u, v] = accumulated_color
+
+def integrate_segment(ray, t_start, t_end, pre_int_table, transfer_function):
+    # Integrate optical properties along the ray segment
+    # Use pre-integration table if applicable
+    # Return color and opacity
+    pass
+
+def composite(acc_color, acc_opacity, seg_color, seg_opacity):
+    # Standard volume rendering composite
+    # acc_color = acc_color + (1 - acc_opacity) * seg_color * seg_opacity
+    # acc_opacity = acc_opacity + (1 - acc_opacity) * seg_opacity
+    pass
+```
+
+**Parameters:**
+*   **Pre-integration Table:** Used to accelerate integration [S3].
+*   **Step Size:** Implicit in the pre-integration table and ray traversal [S3].
+
+**Edge Cases and Pitfalls:**
+*   **Memory Intensity:** This approach is the most memory-intensive solution among the surveyed methods, making it inappropriate for large unstructured grids [S3].
+*   **Non-Convexity:** The method is specifically designed to handle non-convexities where rays may exit and re-enter the mesh multiple times [S1, S2, S4, unofficial].
+*   **Floating-Point Robustness:** The approach is more robust to floating-point calculations compared to hierarchical spatial structures [S1, S2, S4, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** The pre-processing step involves projecting boundary faces, which is $O(N_f)$ where $N_f$ is the number of front-facing boundary faces. Ray traversal is accelerated by avoiding expensive search operations for re-entry, making it faster than hierarchical spatial structures [S1, S2, S4, unofficial].
+*   **Memory Complexity:** The method is the most memory-intensive solution due to the storage of boundary fragment lists for each pixel [S3].
+*   **Performance:** It is simpler, faster, and more robust to floating-point calculations compared to Garrity's hierarchical spatial structure approach [S1, S2, S4, unofficial].
+*   **Strengths:** Handles non-convex geometries effectively; robust to floating-point errors; simpler implementation than hierarchical methods [S1, S2, S4, unofficial].
+*   **Limitations:** High memory usage limits scalability to large unstructured grids [S3].
+*   **When to Use:** Suitable for unstructured grids with non-convex geometries where memory is not a primary constraint and robustness to floating-point errors is desired [S1, S2, S4, unofficial].
+*   **When Not to Use:** Not appropriate for large unstructured grids due to memory intensity [S3].
+
+## Background
+*   **Origin:** Proposed by Bunyk, Kaufman, and Silva [S1, S2, unofficial][S3][S4, unofficial].
+*   **History:** Garrity previously cast rays through unstructured grids by tracing intersections through neighboring cells, using a hierarchical spatial data structure to handle re-entries [S1, S2, S4, unofficial]. Bunyk et al. improved upon this by performing remaining cell intersections in bulk by projecting external faces, thus avoiding the hierarchical structure [S3]. This technique is implemented in VTK as `UnstructuredGridVolumeRayCastMapper` [S3].
+*   **Usage:** Implemented in ParaView and VTK [S3].
+
+## Sources
+[S1] A Survey of GPU-Based Volume Rendering of Unstructured Grids, https://www.sci.utah.edu/~stevec/papers/gputet_survey.pdf, fetched 2026-10-27 (unofficial)
+[S2] A Survey of GPU-Based Volume Rendering of Unstructured Grids., https://www.researchgate.net/publication/220162223_A_Survey_of_GPU-Based_Volume_Rendering_of_Unstructured_Grids, fetched 2026-10-28 (unofficial)
+[S3] PDF Parallel Unstructured Volume Rendering in ParaView, https://www.kennethmoreland.com/documents/ParallelVolRen.pdf, fetched 2026-10-27
+[S4] A Survey of GPU-Based Volume Rendering of ..., https://www.sci.utah.edu/~csilva/papers/rita2005.pdf, fetched 2026-10-29 (unofficial)

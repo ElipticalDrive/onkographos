@@ -1,0 +1,73 @@
+# Finite Repetition
+Also called: Bounded Tiling, Finite Domain Repetition, Limited Repetition
+
+## Overview
+Finite Repetition creates a bounded, tiled instance of a base Signed Distance Function (SDF) within a specified limit $l$ along each axis, preventing the infinite periodicity found in standard tiling operators [S1, S2, unofficial]. Unlike [Infinite Repetition via Dual Offset](14771-infinite-repetition-via-dual-offset.md) or standard infinite tiling, this method clamps the replication count to a finite range, making it suitable for rendering localized clusters of objects without artifacts at infinity [S1, S2, unofficial].
+
+## How it works
+**Inputs:**
+*   Query point $\mathbf{p} \in \mathbb{R}^3$.
+*   Period vector $\mathbf{c} \in \mathbb{R}^3$, defining the cell dimensions along each axis.
+*   Limit vector $\mathbf{l} \in \mathbb{R}^3$, defining the maximum number of cells to replicate in the positive and negative directions for each axis.
+
+**Outputs:**
+*   Transformed position $\mathbf{p}'$ mapped to the nearest valid cell within the bounds $[-\mathbf{l}, \mathbf{l}]$.
+
+**Data Structures:**
+*   Vectors $\mathbf{p}, \mathbf{c}, \mathbf{l}$ are typically 3-component floating-point vectors (e.g., `Vec3`).
+
+**Steps:**
+1.  Normalize the query point by the period: $\mathbf{u} = \mathbf{p} / \mathbf{c}$.
+2.  Round $\mathbf{u}$ to the nearest integer to find the cell index: $\mathbf{q}_{raw} = \text{round}(\mathbf{u})$.
+3.  Clamp the cell index to the finite limits: $\mathbf{q} = \text{clamp}(\mathbf{q}_{raw}, -\mathbf{l}, \mathbf{l})$.
+4.  Map the point back to the local coordinate system of the clamped cell: $\mathbf{p}' = \mathbf{p} - \mathbf{c} \cdot \mathbf{q}$.
+5.  Evaluate the base SDF at $\mathbf{p}'$: $d = d_{base}(\mathbf{p}')$.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def repeat_finite(p: Vec3, c: Vec3, l: Vec3) -> Vec3:
+    """
+    Maps p to the nearest cell within bounds [-l, l] with period c.
+    """
+    # Step 1 & 2: Divide by period and round to nearest integer
+    q_raw = (p / c).round()
+    
+    # Step 3: Clamp to finite limits
+    q = q_raw.clamp(-l, l)
+    
+    # Step 4: Transform point to local cell coordinates
+    p_prime = p - c * q
+    
+    return p_prime
+```
+
+**Parameters:**
+*   $\mathbf{c}$: Must be non-zero. If any component is zero, division is undefined [G].
+*   $\mathbf{l}$: Non-negative integers or floats. If $\mathbf{l} = 0$, the point is clamped to the origin cell.
+
+**Edge Cases:**
+*   **Zero Period:** Division by zero in $\mathbf{p}/\mathbf{c}$ if any component of $\mathbf{c}$ is 0.
+*   **Boundary Precision:** Rounding errors near half-integer boundaries of cells may cause jitter if $\mathbf{p}$ is extremely close to a cell boundary.
+*   **Limit Exceedance:** Points outside the limit $\mathbf{l}$ are mapped to the boundary cell (index $\pm \mathbf{l}$), not discarded.
+
+## Subtopics
+
+### [Infinite Repetition via Dual Offset](14771-infinite-repetition-via-dual-offset.md)
+Infinite Repetition via Dual Offset creates a perfect, interlocking hexagonal honeycomb pattern by combining two separate rectangular repetition grids that are offset from each other.
+
+## Operating characteristics
+*   **Time Complexity:** $O(1)$ per query. Involves basic arithmetic operations (division, rounding, clamping, subtraction).
+*   **Memory Complexity:** $O(1)$. No auxiliary data structures required.
+*   **Strengths:** Efficiently renders bounded clusters; avoids infinite recursion or memory issues associated with infinite tiling; simple implementation.
+*   **Limitations:** Creates sharp discontinuities in the derivative of the SDF at the boundaries of the limit $\mathbf{l}$, which may affect ray marching convergence or shading smoothness at the edges of the tiled region.
+*   **When to use:** When a localized, finite number of repeated objects is needed.
+*   **When not to use:** When infinite periodicity is required (use [Infinite Repetition via Dual Offset](14771-infinite-repetition-via-dual-offset.md) or standard infinite tiling) or when seamless interlocking patterns are needed without boundary artifacts.
+
+## Background
+Finite Repetition is a domain manipulation operator used in Signed Distance Field rendering to create bounded tiled structures. It is commonly implemented in GLSL and Rust-based SDF libraries for procedural geometry generation [S1, S2, unofficial].
+
+## Sources
+[S1] skmhrk1209/Torch-Sphere-Tracer, https://github.com/skmhrk1209/Torch-Sphere-Tracer, fetched 2026-10-26 (unofficial)
+[S2] bhubbard/sdf-math-rs, https://github.com/bhubbard/sdf-math-rs, fetched 2026-10-27 (unofficial)

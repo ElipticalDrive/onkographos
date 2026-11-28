@@ -1,0 +1,130 @@
+Follow-up to #490 / #502. Lower priority than #501, and worth saying why up front: this is a ~3-5x improvement on a path that #502 measured as roughly 600x too expensive. Primitives are the answer for geometry that has them. This is for ...
+
+Radiation: the grid walk's cost is the distance travelled, not the triangles tested — start from the near end and skip empty space · Issue #503 · DeGrootResearchGroup/aquaflux · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Radiation: the grid walk's cost is the distance travelled, not the triangles tested — start from the near end and skip empty space #503
+New issue
+Copy link
+New issue
+Copy link
+Closed
+#581
+Closed
+Radiation: the grid walk's cost is the distance travelled, not the triangles tested — start from the near end and skip empty space#503
+#581
+Copy link
+Description
+ctdegroot
+opened on Sep 24, 2026
+Issue body actions
+Follow-up to #490 / #502. Lower priority than #501, and worth saying why up front: this is a ~3-5x improvement on a path that #502 measured as roughly 600x too expensive. Primitives are the answer for geometry that has them. This is for the fallback — geometry that genuinely only exists as triangles — where 3-5x is still the difference between a run you start and one you do not.
+The measurement that prompts it
+grid_mask_check.py (#502) ran at 38,700 rays/s on pipe cells. ray_acceleration_probe.py (#490), same wall, same grid family, ran at roughly 130,000 rays/s on randomly placed receivers. Same geometry, same code, 3.4x apart — so something other than the triangles is setting the cost.
+Why: the walk pays per voxel crossed, and an empty voxel costs the same as a full one
+Each step of the DDA does a fixed slab of array work whatever it finds — flatten the voxel index, read its CSR row, argmin over the three axis distances, advance, compact the live rays. Only occupied voxels reach the jitted triangle test, and at 128³ that is 52 triangles over an entire walk against 65 steps (measured in #490). The profile is the bookkeeping of moving, not the geometry of hitting, and steps go as path length / voxel size — over a hundred voxel boundaries for a segment spanning this 0.9 m chamber at 8.2 mm voxels, nearly all through open water.
+A uniform grid is the one structure that cannot skip that: every voxel is the same size, so empty space is crossed at the same rate as full space.
+Why pipe cells are the worst case, and it defeats the early exit
+The walk starts at the lamp facet and travels toward the receiver. The lamp is on the axis in open water, far from any wall; the geometry that blocks these rays — the chamber end wall, the pipe wall — sits at the far end, beside the receiver. So the early exit, which is the grid's best feature, buys nothing for exactly these rays: the segment crosses the whole chamber through empty voxels and only then finds it was blocked.
+⚠️ That last paragraph is reasoning from the geometry, not a per-arm measurement. It predicts a large asymmetry between walking lamp→cell and cell→lamp on pipe receivers, and the first task here is to measure it rather than believe it.
+What to try, cheapest first
+Choose which end to start from. The predicate is symmetric — blocked is blocked — but traversal is not, because early exit rewards starting near the blocker. ⚠️ The near margin and the exclusions are defined relative to the origin, so the swap is not free and the equality tests against segment_is_cut must still hold exactly. Measure the asymmetry first; if it is real, pick the end per ray.
+A distance-to-nearest-occupied-voxel field over the grid, built once. It serves both jobs: pick the end whose distance to occupancy is smaller, and take strides through empty space instead of one voxel at a time (the sphere-tracing idea, standard in volume rendering).
+A two-level grid — coarse macro-cells over the fine grid, skipped wholesale when empty. Keeps the CSR structure and the host walk; a smaller change than the next one.
+A BVH over the triangles, which skips empty space by construction. Biggest change, loses the flat CSR layout, and its traversal is a stack rather than a stride — worth costing against (2) and (3) rather than assuming it wins.
+Do not lose
+Exactness is the contract. Every change here must keep bit equality with segment_is_cut at several resolutions, and the closed-drum leak test — a traversal that skips a voxel it should have entered fails as a bright spot in a field, not as an error.
+The work limit stays. fix(radiation): three defects the grid only showed on a real reactor, and #490's acceptance run #502 added it after an unbounded expansion got a run killed for memory.
+Host-side by design. The mask is frozen, so none of this has to be traceable, and it must not become so: a traced walk pays a static worst case of 6,588 tests a ray, worse than the brute force it replaces (Radiation: accelerate the segment-triangle test, or arbitrary geometry cannot be shadowed at all #490).
+Acceptance
+The direction asymmetry measured on the Sozzi pipe cells, both ways, at a stated cell and facet count — and recorded even if it turns out to be small.
+Whichever of (2)-(4) is built, reported as rays/s on both the pipe-cell and random-receiver populations, since the gap between those two is the thing being closed.
+Bit equality with the unaccelerated test preserved, on the existing sweep.
+Reactions are currently unavailable
+Activity
+ctdegroot
+added a commit that references this issue on Sep 24, 2026
+docs(radiation): the speed-up is a table, and my receiver figure conf…
+...
+0166c43
+ctdegroot commented on Sep 24, 2026
+ctdegroot
+on Sep 24, 2026
+MemberAuthor
+More actions
+Correction: the receiver effect is 1.7-1.9x, not 3.4x — I conflated two variables
+The issue body says the same code ran at 38,700 rays/s on pipe cells against ~130,000 on randomly placed ones, "same geometry, same code, 3.4x apart". That divided two different grids. The 38,700 is the area-sized default grid (212, 11, 114); the ~130,000 is a 128³ grid. So the quoted gap is receiver population times resolution, not receiver population.
+Measured separately, each with the other held fixed:
+varied
+fixed
+effect
+receivers: pipe cells vs random
+default grid
+1.70x and 1.87x (two runs)
+resolution: 128³ vs default
+random receivers
+2.00x and 1.33x (two runs)
+The premise survives and the mechanism is unchanged — a ray from the lamp crosses the whole chamber through empty voxels before reaching the wall beside a pipe cell, so the walk's cost is the distance travelled and not the triangles tested. But the effect this issue is chasing is worth 1.7-1.9x, not 3.4x, and the acceptance criteria should be read against that. It makes the case for (1), choosing which end to walk from, no weaker — that is the part aimed squarely at the distance — but it does lower the ceiling on what the whole issue can return.
+Priority is unchanged and, if anything, clearer: below #501, since this is now a <2x receiver-side effect on a path #502 measures as a few hundredfold too expensive.
+ctdegroot
+added a commit that references this issue on Sep 24, 2026
+docs(radiation): measure the 2x2 instead of decomposing it twice and …
+...
+2457b05
+ctdegroot commented on Sep 24, 2026
+ctdegroot
+on Sep 24, 2026
+MemberAuthor
+More actions
+The better lead here is anisotropic voxels, not walk direction
+The matched square measured after this issue was filed (recorded in .claude/rules/radiation.md, and in validation/sozzi_radiation/README.md in user-facing form) changes what the most promising item is.
+300,000 rays per corner, one process, fastest of two alternating passes
+area-sized default (212, 11, 114)
+128³
+pipe cells
+28,248 rays/s
+92,038
+randomly placed cells
+79,963
+141,451
+The two axes interact, so neither has a single factor: the receiver population is worth 2.83x at the default grid and 1.54x at 128³, while the resolution is worth 3.26x to pipe cells and 1.77x to random ones.
+The mechanism is this issue's own premise, sharpened. The default grid is near cubic at 8.2 mm; a 128³ grid over this long box is 13.6 mm along x and much finer across. Pipe-cell rays run axially, the length of the chamber, so a coarser axial voxel is worth 3.26x to them. What sets the cost is the voxel size along the axis the rays actually traverse — which is the distance-travelled story, but it says the lever is the grid's shape rather than the walk's starting end.
+So the ordering in the issue body is probably wrong. Sizing the grid anisotropically to the ray distribution looks like the bigger and much simpler win, and it is a change to _resolution alone rather than to the walk. Walk direction stays worth measuring, but it is no longer the first thing to try.
+⚠️ Not acted on, deliberately. The near-cubic rule is a shipped default and this is one scene — a long thin vessel is exactly the shape that makes near-cubic wrong, and most reactors are that shape, which is an argument for testing it on a second geometry rather than for assuming it. A cube-ish scene may well prefer the current rule.
+ctdegroot commented on Sep 26, 2026
+ctdegroot
+on Sep 26, 2026 – with Claude
+MemberAuthor
+More actions
+Three premises of this issue change with #571, which replaces the numpy array walk with one compiled (Numba) loop per ray:
+"Host-side by design" still holds: the walk is still host code and still not traced. But it is now compiled host code, so a step no longer costs a slab of array work.
+"The work limit stays" no longer applies. The compiled walk forms no (ray, triangle) array, so blocks takes no work_limit. The trap to keep is that any traversal which expands candidates needs a bound.
+The cost picture moved. Profiling the array walk (51,200-triangle wall, 200,000 rays) put ~150-180 ns per ray per voxel step into bookkeeping, and 93-99% of steps landed in empty voxels. Empty-space skipping would have been a large win there. With the compiled walk, the estimate at the default grid is that the ~80 triangle tests a ray account for most of a ray's ~4 µs of one core. That is an estimate, not a measurement. So (2)-(4) here now buy less than this issue's framing suggested, and the triangle test's own cost should be profiled first.
+The direction-asymmetry measurement in item (1) is still worth doing, since early exit rewards starting near the blocker whatever the walk costs per step. validation/radiation_grid_walk.py in #571 is a ready harness for the rays/s figures, and it checks every row against the brute force.
+Generated by Claude Code
+ctdegroot
+closed this as completedin #581on Sep 28, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

@@ -1,0 +1,161 @@
+# Gaussian-based Representation
+
+
+## Overview
+Gaussian-based representation encodes signals, data, or geometric structures as an explicit, continuous sum of parameterized Gaussian functions [S1, unofficial]. It solves the problem of representing high-dimensional data (images, 3D scenes, vector spaces) with a compact, differentiable, and analytically tractable structure [S1, unofficial]. Unlike Fourier transforms which provide global frequency decomposition, or implicit neural representations (MLPs) which require iterative evaluation, this method offers a local representation where each kernel decays rapidly, enabling closed-form operations for rendering, compression, and analysis [S1, unofficial]. It sets itself apart from Gaussian Mixture Models (GMMs) by approximating the *value* of the signal itself rather than modeling the *distribution* of data points [S1, unofficial].
+
+## How it works
+**Inputs:** A target signal $S$ (e.g., image pixels, 3D point cloud, radiance field samples) and a target number of primitives $N$ [S1, unofficial].
+**Outputs:** A set of $N$ Gaussian parameters $\{\theta_n\}_{n=1}^N$ such that the aggregate function $f(\mathbf{x})$ approximates $S$ [S1, unofficial].
+
+**Data Structures:**
+The representation consists of a list of $N$ Gaussians [S1, unofficial]. The specific fields depend on the domain dimensionality $d$:
+*   **2D Domain (e.g., Image):** Each Gaussian $n$ is an 8-tuple [S1, unofficial]:
+    *   $\boldsymbol{\mu}_n \in \mathbb{R}^2$: Center location [S1, unofficial].
+    *   $\mathbf{L}_n \in \mathbb{R}^{2 \times 2}$: Lower triangular Cholesky factor of the covariance matrix $\boldsymbol{\Sigma}_n$ (3 values: $l_{11}, l_{21}, l_{22}$) [S1, unofficial].
+    *   $\mathbf{c}_n \in \mathbb{R}^3$: Color attribute (RGB) [S1, unofficial].
+    *   *Note:* Amplitude is often normalized or absorbed into color; opacity is not required for permutation-invariant summation [S1, unofficial].
+*   **3D Domain (e.g., Scene):** Each Gaussian $n$ includes [S1, unofficial]:
+    *   $\boldsymbol{\mu}_n \in \mathbb{R}^3$: Center location [S1, unofficial].
+    *   $\mathbf{R}_n \in SO(3)$: Orientation (often stored as a quaternion $\mathbf{q}_n \in \mathbb{R}^4$) [S1, unofficial].
+    *   $\mathbf{s}_n \in \mathbb{R}^3$: Scale (log-space or linear) [S1, unofficial].
+    *   $\boldsymbol{\Sigma}_n = \mathbf{R}_n \mathbf{S}_n \mathbf{S}_n^\top \mathbf{R}_n^\top$: Covariance matrix constructed from rotation and scale to capture anisotropy [S1, unofficial].
+    *   $\mathbf{c}_n$: Radiance/Color attributes (often expanded via Spherical Harmonics for view-dependence) [S1, unofficial].
+    *   $\alpha_n$: Opacity scalar [S1, unofficial].
+
+**Core Formula:**
+The signal $f(\mathbf{x})$ at any point $\mathbf{x} \in \mathbb{R}^d$ is the sum of individual Gaussian primitives [S1, unofficial]:
+$$
+f(\mathbf{x}) = \sum_{n=1}^N G_n(\mathbf{x})
+$$
+where the $n$-th Gaussian primitive is defined as [S1, unofficial]:
+$$
+G_n(\mathbf{x}) = a_n \cdot \exp\left(-\frac{1}{2}(\mathbf{x}-\boldsymbol{\mu}_n)^\top \boldsymbol{\Sigma}_n^{-1} (\mathbf{x}-\boldsymbol{\mu}_n)\right)
+$$
+Here, $a_n$ is the amplitude (or attribute vector like color), $\boldsymbol{\mu}_n$ is the mean, and $\boldsymbol{\Sigma}_n$ is the covariance matrix [S1, unofficial].
+
+**Algorithm Steps:**
+1.  **Initialization:**
+    *   *Vectorized (EigenGS):* Map a principal-component eigenspace of the input data to Gaussian space for instant initialization [S1, unofficial].
+    *   *Feedforward:* Use a predictive neural network to infer parameters directly from input data, replacing per-instance random or iterative optimizations [S1, unofficial].
+2.  **Optimization (Fitting):**
+    *   Define a loss function $\mathcal{L}$ between the rendered/evaluated $f(\mathbf{x})$ and the target signal $S$ [S1, unofficial].
+    *   For 2D images: Use L2 (MSE) or hybrid L2+D-SSIM losses over all pixels [S1, unofficial].
+    *   For 3D scenes: Use photometric losses over multiple views or ray samples combined with sparsity, density, or geometric constraints [S1, unofficial].
+    *   Perform gradient descent to optimize $\{\boldsymbol{\mu}_n, \boldsymbol{\Sigma}_n, a_n\}$ (and other attributes) [S1, unofficial].
+3.  **Adaptive Deployment (Densification/Pruning):**
+    *   Monitor residuals or gradients [S1, unofficial].
+    *   *Splitting:* Create new Gaussians in regions with high residuals or high gradient magnitude (e.g., SplitNet, confidence-aware splitting) [S1, unofficial].
+    *   *Pruning:* Remove Gaussians where coverage is redundant or contribution is negligible [S1, unofficial].
+4.  **Rendering/Aggregation:**
+    *   *2D (Permutation-Invariant):* Compute the sum directly; alpha blending or transmittance accumulation is unnecessary as occlusion is irrelevant [S1, unofficial].
+    *   *3D (Rasterized Splatting):*
+        1.  Project each 3D Gaussian to 2D screen space (computing 2D covariance via Jacobian of projection) [S1, unofficial].
+        2.  Sort Gaussians by depth [S1, unofficial].
+        3.  Alpha-blend front-to-back to yield correct occlusion and volumetric effects [S1, unofficial].
+5.  **Compression (Optional):**
+    *   Apply vector quantization, codebook-based compression, and entropy coding (ANS, Huffman) to store parameters compactly [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def evaluate_gaussian_2d(points, mu, L, color):
+    """
+    Evaluate 2D Gaussians at query points.
+    points: (M, 2) array of query coordinates
+    mu: (2,) array, mean
+    L: (2, 2) array, lower triangular Cholesky factor of Sigma
+    color: (3,) array, RGB attribute
+    Returns: (M, 3) weighted color contributions
+    """
+    diff = points - mu  # (M, 2)
+    # Solve L @ y = diff.T for y, equivalent to y = L^{-1} (x - mu)
+    y = np.linalg.solve(L, diff.T)  # (2, M)
+    mahal_sq = np.sum(y**2, axis=0)  # (M,)
+    weights = np.exp(-0.5 * mahal_sq)  # (M,)
+    return weights[:, None] * color  # (M, 3)
+
+def render_gaussian_image(gaussians, image_shape):
+    """
+    Render a 2D image from a set of Gaussians using permutation-invariant summation.
+    gaussians: List of dicts with keys 'mu', 'L', 'color'
+    image_shape: (H, W)
+    """
+    H, W = image_shape
+    image = np.zeros((H, W, 3))
+    
+    # Create coordinate grid
+    y_coords, x_coords = np.mgrid[0:H, 0:W]
+    points = np.stack([x_coords.flatten(), y_coords.flatten()], axis=1)  # (H*W, 2)
+    
+    # Vectorized evaluation and summation
+    for g in gaussians:
+        mu = g['mu']
+        L = g['L']
+        color = g['color']
+        contributions = evaluate_gaussian_2d(points, mu, L, color)
+        image += contributions.reshape(H, W, 3)
+        
+    return image
+
+def optimize_gaussian_image(target_image, gaussians, lr=0.01, epochs=100):
+    """
+    Iterative optimization loop for Gaussian parameters.
+    Uses automatic differentiation framework (e.g., PyTorch) in practice.
+    """
+    target = target_image.astype(np.float32)
+    for epoch in range(epochs):
+        # Forward pass
+        current_image = render_gaussian_image(gaussians, target_image.shape[:2])
+        
+        # Compute loss (MSE)
+        loss = np.mean((current_image - target)**2)
+        
+        # Backward pass and parameter update
+        # Gradients d_loss/d_mu, d_loss/d_L, d_loss/d_color are computed automatically
+        # Parameters are updated: param -= lr * gradient
+        # (Implementation relies on standard autodiff; explicit gradient formulas omitted)
+        pass  # Placeholder for framework-specific gradient step
+        
+    return gaussians
+```
+
+**Parameters:**
+*   $N$: Number of Gaussians. Typical values range from thousands for images to millions for 3D scenes [S1, unofficial].
+*   $d$: Dimensionality (2 for images, 3 for scenes) [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **High-Frequency Structures:** May require very large $N$ or specialized learning schedules (e.g., multi-level fitting) [S1, unofficial].
+*   **Parameter Redundancy:** Ambiguous quaternions or covariances can lead to non-unique representations if not managed (e.g., via bounded parameterizations) [S1, unofficial].
+*   **3D Occlusion:** Requires correct depth sorting and alpha blending; naive summation fails for volumetric effects [S1, unofficial].
+
+## Subtopics
+
+### [1D Gaussian Splatting](8245-1d-gaussian-splatting.md)
+A signal representation technique that decomposes a one-dimensional signal into a weighted sum of Gaussian probability density functions (kernels). Unlike the Fourier transform, which provides a global frequency decomposition, this method offers a local representation where each kernel decays rapidly with respect to the input variable. It differs fundamentally from Gaussian Mixture Models (GMMs): while GMMs use Gaussians to model the *distribution* of data points, 1D Gaussian Splatting uses them to approximate the *value* of the signal itself.
+
+### [Gaussian Density Field Representation](9082-gaussian-density-field-representation.md)
+A compact representation of the density field $D$ as a weighted sum of Gaussians plus a hashed residual field $F$, allowing efficient modeling of fine density details. It sets itself apart from pure Gaussian splatting methods by explicitly separating coarse structure from high-frequency residuals, enabling precise reconstruction of complex media without requiring a single ultra-high-resolution representation.
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:**
+    *   **GaussianImage (2D):** 2,000 FPS, 0.4 GB memory, 44.1 dB PSNR for image compression [S1, unofficial].
+    *   **LIG (9K×9K image):** 20 FPS, 16.7–20.3 GB memory, 37.5–42.2 dB PSNR [S1, unofficial].
+    *   **3DGS (Mip-NeRF 360):** 120 FPS, 746 MB memory, 27.46 dB PSNR for scene synthesis [S1, unofficial].
+    *   **Compact 3DGS (+PP):** 128 FPS, 29 MB memory, 27.03 dB PSNR for scene synthesis [S1, unofficial].
+    *   **Hybrid mesh–GS:** 231 FPS, 0.74M splats, 24.28 dB PSNR for indoor 3D [S1, unofficial].
+    *   **GARLIC (SIFT1M 128D):** Recall@1=0.69 for K-NN classification [S1, unofficial].
+*   **Scaling:** Gaussian representations offer orders-of-magnitude faster decoding than MLP-based INRs or classic codecs (e.g., 1000–2000 FPS vs. 10–150 FPS for INR codecs) [S1, unofficial].
+*   **Strengths:** Analytic differentiability, closed-form operations, fast rendering, adaptivity via densification/pruning, hybrid compatibility with meshes and deep frameworks [S1, unofficial].
+*   **Limitations:** High parameter count for very high-frequency signals, potential for redundancy, domain-specific rendering optimizations required [S1, unofficial].
+
+## Background
+Gaussian-based representations leverage the mathematical properties of Gaussian functions, which are fundamental in statistics and signal processing [S1, unofficial]. The specific application to signal approximation and rendering has seen significant development in recent years, with key contributions including GaussianImage for 2D compression (Zhang et al., 2024), 3D Gaussian Splatting for scene reconstruction (Lee et al., 2023), and various extensions for hierarchical fitting, hybrid decomposition, and vectorized initialization (Zhu et al., 2025; Tai et al., 2025) [S1, unofficial]. The method unifies concepts from Gaussian Mixture Models, splatting techniques, and differentiable rendering [S1, unofficial].
+
+## Sources
+[S1] Gaussian-Based Representation, https://www.emergentmind.com/topics/gaussian-based-representation, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,140 @@
+# On-the-Fly GS
+
+Also called: Gaussian on-the-fly Splatting
+
+## Overview
+On-the-Fly GS is a progressive framework for near real-time 3D Gaussian Splatting (3DGS) field optimization that enables robust online training during discrete image acquisition [S1]. It addresses the limitation of standard 3DGS, which requires offline training after full Structure-from-Motion (SfM) processing [S1]. Unlike SLAM-based methods such as GS-SLAM or RTG-SLAM that require spatial and temporal continuity and often depth priors, On-the-Fly GS handles discrete images captured in an arbitrary manner without spatiotemporal continuity, relying only on a certain degree of overlap with previously registered images [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A stream of discrete RGB images captured in arbitrary order; an On-the-Fly SfM module that estimates camera poses and generates sparse point clouds [S1].
+*   **Outputs:** An optimized 3D Gaussian field that renders the scene with high fidelity as new images arrive [S1].
+
+**Data Structures:**
+*   **3D Gaussian Field:** A collection of 3D Gaussians representing the scene. Each Gaussian is defined by position, covariance (scale and rotation), opacity, and spherical harmonics coefficients for color [S1].
+*   **Image Queue:** A buffer of acquired images waiting for processing [S1].
+*   **Training State:** Per-image counters tracking the number of training iterations each image has undergone to manage learning rates [S1].
+
+**Parameters:**
+*   $N_0$: The number of initial images used to train the initial 3DGS field before progressive optimization begins [S1].
+*   **Iteration Limit:** A stricter limit on the number of training iterations in Phase 1 to prevent overfitting to the initial few images [S1].
+
+**Steps:**
+
+1.  **Phase 1: Initial 3DGS Training.**
+    *   The On-the-Fly SfM module estimates poses and generates a sparse point cloud for the first $N_0$ images [S1].
+    *   An initial 3DGS field is trained using the original 3DGS training method [S1].
+    *   A stricter limit is imposed on the number of training iterations to prevent overfitting to these initial images [S1].
+
+2.  **Phase 2: Progressive Optimization (per new image).**
+    *   As a new image arrives, the On-the-Fly SfM module updates the camera poses of both the newly acquired and previously registered images, while refining the sparse point cloud [S1].
+    *   Based on the updated sparse point cloud, newly optimized Gaussians are appended to the existing 3DGS field [S1].
+    *   **Local & Semi-Global Optimization:**
+        *   Based on overlapping relationships, each local connected image is assigned a weight [S1].
+        *   This weight determines the number of training iterations each image undergoes, prioritizing the newly added image and its local overlapping images [S1].
+    *   **Adaptive Learning Rate:**
+        *   The learning rate for each image is calculated based on the number of iterations it has undergone [S1].
+        *   Images with fewer training iterations are assigned higher learning rates, while images with more iterations receive lower learning rates [S1].
+    *   **Load-Balancing Strategy:**
+        *   A load-balancing strategy, inspired by Adr-Gaussian, is incorporated to mitigate the over-accumulation of 3D Gaussians and ensure fast training of newly added regions [S1].
+    *   **Splatting-based Parallel Computation:**
+        *   Back-propagation is re-implemented by transitioning from pixel-based parallelism to splatting-based parallel computation, drawing from Taming-3DGS, to enhance training efficiency [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Initialization
+N0 = 3  # Example value for initial images
+scene = Empty3DGaussianField()
+image_queue = Queue()
+image_iteration_counts = {} # Maps image_id -> int (iterations)
+
+def on_image_arrived(image_id, image_data):
+    image_queue.enqueue((image_id, image_data))
+    process_queue()
+
+def process_queue():
+    while not image_queue.empty():
+        image_id, image_data = image_queue.dequeue()
+        
+        # 1. Update SfM and Geometry
+        # On-the-Fly SfM updates poses and sparse points
+        poses, sparse_points = on_the_fly_sfm.update(image_id, image_data, scene)
+        
+        # 2. Initialize Gaussians for new image
+        # Append new Gaussians based on sparse points
+        new_gaussians = initialize_gaussians(sparse_points)
+        scene.append(new_gaussians)
+        
+        # 3. Determine Training Strategy
+        # Calculate weight based on overlap with existing images
+        overlap_weight = calculate_overlap_weight(image_id, scene)
+        
+        # Determine number of iterations for this image
+        # Prioritize new image and its neighbors
+        num_iterations = determine_iterations(overlap_weight, image_id)
+        
+        # 4. Adaptive Learning Rate
+        # Get current iteration count for this image
+        current_iters = image_iteration_counts.get(image_id, 0)
+        
+        # Calculate learning rate based on iterations
+        # Fewer iterations -> Higher LR
+        lr = calculate_adaptive_lr(current_iters)
+        
+        # 5. Optimization Loop
+        for i in range(num_iterations):
+            # Splatting-based parallel computation
+            # Render image from current scene state
+            rendered_image = scene.render(image_id, poses[image_id])
+            
+            # Compute loss
+            loss = compute_loss(rendered_image, image_data)
+            
+            # Back-propagate using splatting-based parallelism
+            # (Transition from pixel-based to splatting-based)
+            gradients = backprop_splatting(loss, scene, image_id, poses[image_id])
+            
+            # Update Gaussians
+            scene.update(gradients, lr)
+            
+            # Update iteration count
+            image_iteration_counts[image_id] = current_iters + 1
+            
+        # 6. Load Balancing
+        # Mitigate over-accumulation of Gaussians
+        scene.apply_load_balancing()
+
+def calculate_adaptive_lr(iterations):
+    # Higher LR for fewer iterations
+    # Lower LR for more iterations
+    # Specific formula not given in sources [G]
+    return base_lr / (1 + decay_rate * iterations)
+
+def determine_iterations(overlap_weight, image_id):
+    # Prioritize new image and overlapping neighbors
+    # Specific formula not given in sources [G]
+    return base_iterations * overlap_weight
+```
+
+**Edge Cases and Pitfalls:**
+*   **Overfitting:** Training the initial field with too few images risks overfitting to the initial few images (e.g., 2 or 3 images) [S1]. Mitigated by a stricter iteration limit in Phase 1 [S1].
+*   **Learning Rate Decay:** The standard learning rate decay strategy of original 3DGS, based on complete field quality, is not applicable because acquired images with fewer iterations exhibit lower rendering quality [S1].
+*   **Discrete Images:** The method must handle images without spatiotemporal continuity, requiring only a certain degree of overlap with previously registered images [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Near real-time optimization per new image. The method reduces training time significantly, optimizing each new image in seconds [S1].
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:** Reduces training time significantly compared to offline training [S1].
+*   **Strengths:** Enables robust online training during image acquisition; handles discrete images captured in an arbitrary manner; does not rely on depth priors [S1].
+*   **Limitations:** Requires a certain degree of overlap with previously registered images [S1].
+*   **When to use:** When near real-time 3DGS optimization is needed during image capture, especially for discrete images without spatiotemporal continuity [S1].
+*   **When not to use:** When offline training after full SfM processing is acceptable and real-time updates are not required [S1].
+
+## Background
+On-the-Fly GS was introduced by Cheng and Xin Wang in a paper published in IEEE Robotics and Automation Letters (LRA) in 2025 [S1]. It addresses the limitations of existing SLAM-based 3DGS methods (e.g., GS-SLAM, RTG-SLAM) which require spatial and temporal continuity and often depth priors [S1]. The method builds on the original 3DGS training method [S1] and incorporates strategies from Adr-Gaussian (load-balancing) [S1] and Taming-3DGS (splatting-based parallel computation) [S1].
+
+## Sources
+[S1] Gaussian On-the-Fly Splatting: A Progressive Framework for Robust Near Real-Time 3DGS Optimization, https://doi.org/10.1109/lra.2025.3632729, fetched 2026-10-30

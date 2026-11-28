@@ -1,0 +1,137 @@
+# TopoGS
+
+Also called: Topology-Aware Anchor Feature Aggregation for Large-Scale 3D Gaussian Splatting
+
+## Overview
+TopoGS is a topology-aware anchor feature aggregation framework designed to address the feature isolation problem in octree-based 3D Gaussian Splatting (3DGS) representations [S1, unofficial]. It solves the issue where anchor features at different octree levels are optimized in isolation, leading to high cross-level similarity and poor information flow [S1, unofficial]. Unlike standard uniform mean pooling which treats all adjacent-level anchors equally, TopoGS distinguishes anchors participating in valid parent/child containment relations from isolated anchors, establishing bidirectional cross-level gradient pathways [S1, unofficial]. It sets itself apart from sibling methods like [Octree-based Splatting](8067-octree-based-splatting.md) by explicitly modeling the octree's topological structure during feature aggregation rather than relying solely on spatial proximity or error metrics for primitive selection [S1, unofficial].
+
+## How it works
+TopoGS operates as a lightweight module situated between the backbone and the decoder of an octree-anchor 3DGS pipeline, leaving the octree structure and rasterization pipeline untouched [S1, unofficial]. It consists of two complementary components: Hierarchical Anchor Coupling (HAC) and Structure-Aware Containment Aggregation (SACA) [S1, unofficial].
+
+### Inputs and Outputs
+- **Input:** Anchor features for all levels of the octree hierarchy [S1, unofficial]. Specifically, for a target level $L$, it requires the mean features of level $L$, its adjacent parent level $L-1$, and its adjacent child level $L+1$ [S1, unofficial]. It also requires the spatial coordinates of anchors to determine containment relations [S1, unofficial].
+- **Output:** Refined anchor features that incorporate bidirectional cross-level context and structure-aware weighting [S1, unofficial].
+
+### Data Structures
+- **Anchor Features:** A tensor containing the learned feature vector for each Gaussian anchor [G].
+- **Octree Hierarchy:** Implicitly defined by the parent-child relationships of the octree nodes [G].
+- **Hash Map:** Used in SACA to map anchor coordinates to their containment relations efficiently [S1, unofficial].
+
+### Algorithm Steps
+
+#### 1. Hierarchical Anchor Coupling (HAC)
+HAC establishes bidirectional cross-level gradient pathways by fusing context from adjacent levels [S1, unofficial].
+
+1.  **Context Triplet Construction:** For a target octree level $L$, organize the mean features of the level itself ($F_L$), its adjacent parent level ($F_{L-1}$), and its adjacent child level ($F_{L+1}$) into a context triplet [S1, unofficial].
+2.  **Feature Fusion:** Fuse the context triplet through a shared lightweight residual MLP ($\mathcal{M}$) to obtain a level-wise feature increment $\Delta F_L$ [S1, unofficial].
+    $$ \Delta F_L = \mathcal{M}(F_{L-1}, F_L, F_{L+1}) $$
+    *Note: The specific architecture of $\mathcal{M}$ is described as a "lightweight residual MLP" but exact layer counts or hidden units are not provided in the sources [S1, unofficial].*
+3.  **Residual Injection:** Inject the level-wise feature increment residually into every anchor at the target level $L$ [S1, unofficial]. If $f_i$ is the original feature of an anchor $i$ at level $L$, the updated feature $f'_i$ is:
+    $$ f'_i = f_i + \Delta F_L $$
+
+#### 2. Structure-Aware Containment Aggregation (SACA)
+SACA modulates aggregation through octree containment, distinguishing valid parent/child relations from isolated anchors [S1, unofficial].
+
+1.  **Hash Lookup:** For each query anchor, perform a logarithmic-time hash lookup to identify anchors participating in cross-level containment relations [S1, unofficial]. The overall cost for constructing the containment mask is $O(N \log N)$, where $N$ is the number of anchors [S1, unofficial].
+2.  **Soft Weighting:** Apply a continuous soft-weighting scheme that interpolates between strict containment and uniform pooling [S1, unofficial]. This accommodates varying topological sparsity across scenes and levels [S1, unofficial].
+    *   Let $w_i$ be the weight for anchor $i$. The exact mathematical formulation of the soft-weighting scheme is not provided in the sources [S1, unofficial].
+    *   The weights are applied to aggregate features from parent and child anchors based on their containment status [S1, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def topo_gs_aggregate(anchors, level_anchors_map, containment_hash, mlp):
+    """
+    Performs TopoGS feature aggregation.
+    
+    Args:
+        anchors: List of anchor objects, each with attributes:
+                 - feature: Tensor (anchor feature vector)
+                 - position: Vector3 (spatial position)
+                 - id: int (unique identifier)
+        level_anchors_map: Dict mapping level index to list of anchors at that level.
+        containment_hash: Dict mapping anchor id to list of ids of anchors in valid containment relations.
+        mlp: Lightweight residual MLP module.
+    
+    Returns:
+        Updated list of anchors with refined features.
+    """
+    # 1. Hierarchical Anchor Coupling (HAC)
+    for level_idx, level_anchors in level_anchors_map.items():
+        # Compute mean features for current level
+        mean_current = sum(a.feature for a in level_anchors) / len(level_anchors)
+        
+        # Compute mean features for parent level
+        parent_anchors = level_anchors_map.get(level_idx - 1, [])
+        mean_parent = sum(a.feature for a in parent_anchors) / len(parent_anchors) if parent_anchors else None
+        
+        # Compute mean features for child level
+        child_anchors = level_anchors_map.get(level_idx + 1, [])
+        mean_child = sum(a.feature for a in child_anchors) / len(child_anchors) if child_anchors else None
+        
+        # Context triplet construction and fusion
+        context_triplet = (mean_parent, mean_current, mean_child)
+        level_increment = mlp(context_triplet)
+        
+        # Residual injection into every anchor at target level
+        for anchor in level_anchors:
+            anchor.feature = anchor.feature + level_increment
+
+    # 2. Structure-Aware Containment Aggregation (SACA)
+    # Containment mask construction is O(N log N) via hash lookup [S1, unofficial]
+    # Soft weighting scheme interpolates between strict containment and uniform pooling [S1, unofficial]
+    # Exact weighting formula and aggregation update rule are not provided in the sources.
+    for anchor in anchors:
+        neighbors = containment_hash.get(anchor.id, [])
+        if not neighbors:
+            continue
+            
+        # Compute soft weights (exact scheme not specified in sources)
+        weights = [1.0 / len(neighbors)] * len(neighbors)
+        
+        # Aggregate features from neighbors
+        aggregated = sum(w * neighbor.feature for w, neighbor in zip(weights, neighbors))
+        
+        # Update anchor feature (exact combination rule not specified in sources)
+        anchor.feature = anchor.feature + aggregated
+    return anchors
+```
+
+### Parameters
+- **HAC MLP:** A lightweight residual MLP [S1, unofficial]. The specific architecture (layers, hidden units) is not detailed in the sources [S1, unofficial].
+- **Soft Weighting Scheme:** A continuous scheme interpolating between strict containment and uniform pooling [S1, unofficial]. The exact interpolation parameter or function is not provided [S1, unofficial].
+
+### Edge Cases and Pitfalls
+- **Sparse Topology:** In regions with varying topological sparsity, the soft weighting scheme must adapt to avoid over-aggregating isolated anchors [S1, unofficial].
+- **Boundary Conditions:** Levels at the root or leaf of the octree may lack parent or child levels, respectively [G]. The pseudocode handles this by checking for empty neighbor lists.
+- **Precision:** The hash lookup for containment relations must be robust to floating-point precision issues in anchor positions [G].
+
+## Subtopics
+
+### Hierarchical Anchor Coupling (HAC)
+A module that establishes bidirectional cross-level gradient pathways through per-level context triplets fused by a lightweight residual MLP [S1, unofficial]. Choose this when you need to address feature isolation between adjacent octree levels without altering the topology [S1, unofficial]. See [TopoGS](topogs.md).
+
+### Structure-Aware Containment Aggregation (SACA)
+A module that modulates aggregation through octree containment, distinguishing anchors participating in valid parent/child relations from isolated anchors via hash-based matching and applying a soft weighting scheme [S1, unofficial]. Choose this when you need to handle varying topological sparsity across scenes and levels [S1, unofficial]. See [TopoGS](topogs.md).
+
+## Operating characteristics
+- **Time Complexity:** The SACA mask construction complexity is $O(N \log N)$, where $N$ is the number of anchors [S1, unofficial]. The HAC module operates at negligible cost [S1, unofficial].
+- **Memory Complexity:** Not given in the sources.
+- **Measured Performance:**
+    - On aerial scenes (Mill19), TopoGS achieves an average PSNR gain of +2.13 dB over the strongest reported PSNR baseline [S1, unofficial].
+    - On ground-level scenes (UrbanScene3D), TopoGS achieves an average PSNR gain of +1.78 dB over the strongest reported PSNR baseline [S1, unofficial].
+    - On synthetic-cartographic scenes (WHU), TopoGS achieves an average PSNR gain of +0.29 dB over the strongest reported PSNR baseline [S1, unofficial].
+    - On Tanks & Temples-Train, TopoGS improves PSNR by +1.82 dB compared to Geo-GS [S1, unofficial].
+    - On Mill19-Building, TopoGS improves PSNR by +2.67 dB compared to CityGS-X [S1, unofficial].
+    - TopoGS reduces the off-diagonal mean cosine similarity of anchor features across levels from 0.866 to 0.108 [S1, unofficial].
+- **Strengths:** Renders faster and uses lower memory compared to baselines [S1, unofficial]. Compatible with Octree-GS and Proxy-GS backbones [S1, unofficial].
+- **Limitations:** Requires hash-based lookup for containment relations, which may add overhead in highly dynamic scenes [G].
+- **When to use:** When using octree-based 3DGS representations for large-scale scenes and experiencing feature isolation or redundancy across levels [S1, unofficial].
+- **When not to use:** When the octree structure is not used or when computational resources are extremely limited and the overhead of hash lookups is prohibitive [G].
+
+## Background
+TopoGS was proposed in the paper "TopoGS: Topology-Aware Anchor Feature Aggregation for Large-Scale 3D Gaussian Splatting" [S1, unofficial]. It addresses the open question of how to respect the octree's topological structure in 3DGS representations [S1, unofficial]. The method was evaluated on ten scenes across five public benchmarks: Mill19, UrbanScene3D, Tanks & Temples, MatrixCity, and WHU [S1, unofficial]. The code is available at https://github.com/WZ-CS/TopoGS [S1, unofficial].
+
+## Sources
+[S1] TopoGS: Topology-Aware Anchor Feature Aggregation for Large-Scale 3D Gaussian Splatting, https://arxiv.org/abs/2609.27868, fetched 2026-10-30 (unofficial)

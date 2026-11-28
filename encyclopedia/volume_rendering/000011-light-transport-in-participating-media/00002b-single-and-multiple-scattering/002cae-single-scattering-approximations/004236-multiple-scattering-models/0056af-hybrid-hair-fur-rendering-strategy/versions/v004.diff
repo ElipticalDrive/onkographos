@@ -1,0 +1,372 @@
+--- v003.md
++++ v004.md
+@@ -4,254 +4,157 @@
+ 
+ ## Overview
+-This method approximates multiple scattering in dense hair and fur by treating the aggregate fiber volume as an anisotropic participating medium, while retaining explicit geometric ray tracing for direct illumination to preserve high-frequency strand details [S1]. It differs from siblings like [Heterogeneous In-scattering with Multiple Scattering](4934-heterogeneous-in-scattering-with-multiple-scattering.md) and [Riley et al. Angular Distribution Renderer](12249-riley-et-al-angular-distribution-renderer.md) by restricting geometric interactions to the first hit and handling all subsequent transport via a voxelized medium, thereby avoiding the "dry" appearance and local similarity assumptions that plague dual scattering models [S1].
++This method addresses the computational cost of simulating multiple scattering in dense hair and fur by treating the aggregate fiber volume as an anisotropic participating medium [S1]. It solves the problem of "dry" or blurred appearances in prior approximations (like Dual Scattering) by combining explicit geometric ray tracing for direct illumination with a restricted volumetric estimator for higher-order scattering [S1]. Unlike microflake models that assume opaque particles, this approach normalizes the hair BCSDF to define the phase function, preserving complex transmission paths while achieving a 7–11× speedup over ground-truth path tracing [S1].
+ 
+ ## How it works
+-**Inputs:**
+-*   Hair/fur geometry (explicit strands).
+-*   Hair BCSDF model (e.g., Yan et al. [2017a] double-cylinder model) [S1].
+-*   Lighting configuration (area lights, environment maps, etc.) [S1].
+-*   Parameters: $N$ (number of octaves), $a$ (attenuation scalar), $\gamma$ (gain scalar, $[0, 2]$), $c$ (isotropy rate, $[0, 1]$) [S1].
++The method employs a hybrid geometric–volumetric representation. Explicit fiber geometry is used for high-frequency direct illumination, while an equivalent anisotropic volumetric medium approximates the low-frequency, soft contributions of multiple scattering [S1].
+ 
+-**Outputs:**
+-*   Rendered image with direct illumination and approximated multiple scattering [S1].
++### Inputs and Outputs
++*   **Inputs:** Hair/fur geometry (strands), hair material parameters (BCSDF), lighting environment, camera parameters.
++*   **Outputs:** Rendered image with direct and multiple scattering contributions.
+ 
+-**Data Structures:**
+-1.  **Voxel Grid:** Stores local fiber density, average fiber direction, and precomputed volumetric coefficients ($\sigma_t, \sigma_s, \sigma_a$) and phase function $P(\omega_i, \omega_o)$ for each voxel. The coefficients are derived from the hair BCSDF and fiber distribution [S1].
+-2.  **Albedo Map:** A 1D function of incident inclination angle $\theta_i$ relative to local fiber direction, precomputed from the hair BCSDF [S1].
++### Data Structures
++1.  **Volumetric Medium Grid:** A 3D grid (voxelization) of the hair volume.
++    *   **Fields:**
++        *   `density`: Local fiber density.
++        *   `fiber_direction`: Average fiber orientation vector per voxel.
++        *   `sigma_t`: Extinction coefficient (derived from density and fiber properties).
++        *   `sigma_s`: Scattering coefficient.
++        *   `sigma_a`: Absorption coefficient ($\sigma_a = \sigma_t - \sigma_s$).
++        *   `phase_function`: Anisotropic phase function derived from the normalized hair BCSDF.
++2.  **Hair BCSDF:** The base single-fiber reflectance model, specifically the double-cylinder fur model by Yan et al. [2017a], which accounts for cuticle, cortex, and medulla layers [S1].
++3.  **Albedo Map:** A 1D function of the incident inclination angle $\theta_i$ relative to the local fiber direction, precomputed from the BCSDF [S1].
+ 
+-**Numbered Steps:**
++### Parameters
++*   $N$: Number of octaves in the multiple scattering summation.
++*   $a$: Scalar controlling effective attenuation, allowing deeper light penetration for higher-order terms.
++*   $\gamma$: Scalar gain parameter in $[0, 2]$ to moderate excessive color saturation [S1].
++*   $c$: Parameter in $[0, 1]$ controlling the rate at which higher-order scattering becomes isotropic [S1].
++*   *Note:* These parameters are obtained via numerical optimization using Ceres Solver with L1 loss on a studio-style lighting setup [S1].
+ 
+-1.  **Voxelization (Precomputation):**
+-    *   Rasterize hair geometry to accumulate per-pixel visibility and hair density in screen space [S1].
+-    *   Compute local fiber densities and average orientations to define the equivalent anisotropic participating medium with directionally varying extinction, absorption, and scattering coefficients [S1].
++### Steps
+ 
+-2.  **First Geometric Interaction (Direct Illumination):**
+-    *   Trace camera rays and evaluate the first intersection with explicit hair geometry [S1].
+-    *   Compute direct illumination using the hair BCSDF and standard next-event estimation [S1].
+-    *   Sample an outgoing direction from the hair BCSDF [S1].
++1.  **Precomputation (Voxelization):**
++    Voxelize the hair geometry to compute local fiber densities and average orientations. Derive the equivalent volumetric medium properties ($\sigma_t, \sigma_s, \sigma_a$) and the anisotropic phase function $P(\omega_i, \omega_o)$ by normalizing the hair BCSDF $S(\omega_i, \omega_o)$ over the sphere $\Omega$ [S1]:
++    $$ P(\omega_i, \omega_o) = \frac{S(\omega_i, \omega_o)}{\int_\Omega S(\omega_i, \omega') d\omega'} $$
++    The albedo is precomputed as a function of the incident inclination angle $\theta_i$ relative to the local fiber direction [S1].
+ 
+-3.  **Transition to Volumetric Domain:**
+-    *   Propagate the light path from the first geometric hit into the surrounding hair volume [S1].
+-    *   Restrict all subsequent light transport to the equivalent participating medium; no further geometric interactions are allowed [S1].
++2.  **Rasterization Pass:**
++    Accumulate per-pixel visibility and hair density in screen space. This provides the necessary density information for the subsequent volumetric shading pass [S1].
+ 
+-4.  **Single Scattering Estimation in Medium:**
+-    *   Sample a scattering point $p$ along the view ray within the equivalent medium using delta tracking [S1].
+-    *   Select a random light source and march along the light direction to evaluate transmittance and direct illumination at $p$ [S1].
+-    *   Evaluate the transmittance using ray marching through the heterogeneous medium [S1].
+-    *   This yields a single-scattering estimate $L_{ss}$ [S1].
++3.  **Shading Pass (First Geometric Interaction):**
++    Trace camera rays. Evaluate the first interaction explicitly on the hair geometry using standard path tracing techniques. Compute direct illumination using an arbitrary hair BCSDF and standard next-event estimation. Ensure the same scattering model is used consistently for the volumetric representation [S1].
+ 
+-5.  **Multiple Scattering Approximation (Spectral Reweighting):**
+-    *   Approximate higher-order scattering by reweighting the single-scattering estimate using a sum of scaled terms over $N$ octaves [S1].
+-    *   The total volumetric contribution $L$ is calculated as:
+-        $$ L = \sum_{i=0}^{N-1} L_i $$
+-        where each octave term $L_i$ is:
+-        $$ L_i = \sigma_s(p, \omega_i) (\gamma \cdot \text{Albedo}(p, \omega_i))^i L_{\text{light}}(\omega_i) P'_i(\omega_i, \omega_o) \exp\left(-a_i \int_0^t \sigma_t(x(s), \omega_i) ds\right) $$
+-        *   $p$: Volumetric scattering location.
+-        *   $\omega_i$: Incident direction from light.
+-        *   $\omega_o$: Outgoing direction to camera.
+-        *   $L_{\text{light}}(\omega_i)$: Incident radiance from the light source.
+-        *   $\text{Albedo}(p, \omega_i)$: Local RGB albedo from the precomputed 1D function [S1].
+-        *   $\gamma$: Scalar gain parameter ($[0, 2]$) to moderate color saturation [S1].
+-        *   $P'_i(\omega_i, \omega_o)$: Modified phase function for octave $i$.
+-        *   $a_i$: Attenuation scalar for octave $i$ (often $a_i = a \cdot i$ or similar, allowing deeper penetration for higher orders) [S1].
+-        *   $\sigma_s, \sigma_t$: Scattering and extinction coefficients at $p$ [S1].
+-    *   The modified phase function $P'_i$ is defined as a linear interpolation between the original hair phase function $P$ and an isotropic phase function $P_{\text{iso}}$:
+-        $$ P'_i(\omega_i, \omega_o) = \text{lerp}(P(\omega_i, \omega_o), P_{\text{iso}}, 1 - c^i) $$
+-        *   $c \in [0, 1]$: Controls the rate at which higher-order scattering becomes isotropic [S1].
+-    *   **Stochastic Evaluation:** To reduce variance, sample a single octave $i$ according to its relative contribution rather than summing all terms deterministically [S1].
++4.  **Transition to Medium:**
++    Sample an outgoing direction $\omega_o$ from the hair BCSDF at the first geometric hit. Propagate the light path into the surrounding hair volume. Restrict subsequent geometric interactions to at most one (the initial hit); all further transport is handled in the equivalent participating medium [S1].
+ 
+-6.  **Compositing:**
+-    *   Combine the direct illumination from Step 2 and the approximated multiple scattering from Step 5 to produce the final pixel color [S1].
++5.  **Single Scattering in Medium:**
++    Within the equivalent medium, explicitly sample at most one volumetric scattering event at point $p$ using delta tracking [Woodcock et al. 1965] in the heterogeneous medium [S1].
++    *   Sample a random light direction $\omega_i$.
++    *   Estimate direct illumination by connecting $p$ to the light source.
++    *   Evaluate transmittance along the shadow ray using ray marching through the medium:
++        $$ T = \exp \left( -\int_0^t \sigma_t(x(s), \omega_i) ds \right) $$
++    *   This yields the single-scattering estimate $L_{single}$ [S1].
+ 
+-**Pseudocode:**
++6.  **Multiple Scattering Approximation:**
++    Approximate higher-order scattering by reweighting the single-scattering estimate. The total volumetric contribution $L$ is a sum of scaled single-scattering terms over $N$ octaves [S1]:
++    $$ L = \sum_{i=0}^{N-1} L_i $$
++    where each term $L_i$ is defined as:
++    $$ L_i = \sigma_s(p, \omega_i) (\gamma \cdot \text{Albedo}(p, \omega_i))^i L_{light}(\omega_i) P'_i(\omega_i, \omega_o) \exp \left( -a_i \int_0^t \sigma_t(x(s), \omega_i) ds \right) $$
++    *   $L_{light}(\omega_i)$: Incident radiance from the light source.
++    *   $\text{Albedo}(p, \omega_i)$: Local RGB albedo at point $p$ for direction $\omega_i$. Using spectral albedo (rather than a scalar) preserves characteristic color shifts [S1].
++    *   $\gamma$: Gain parameter to prevent excessive saturation from repeated albedo application [S1].
++    *   $P'_i(\omega_i, \omega_o)$: Modified phase function for octave $i$. Since the hair phase function is not parameterized by a single eccentricity, it is defined as a linear interpolation between the original phase function $P$ and an isotropic phase function $P_{iso}$:
++        $$ P'_i(\omega_i, \omega_o) = \text{lerp}(P(\omega_i, \omega_o), P_{iso}, 1 - c^i) $$
++        Here, $c \in [0, 1]$ controls the rate of isotropization [S1].
++    *   $a_i$: Attenuation scalar for octave $i$ (typically $a_i = a \cdot i$ or similar, allowing deeper penetration for higher orders) [S1].
++
++    The summation is evaluated stochastically by sampling a single octave $i$ according to its relative contribution, rather than deterministically accumulating all terms [S1].
++
++7.  **Compositing:**
++    Composite the direct illumination from Step 3 and the volumetric multiple scattering estimate from Step 6 to produce the final pixel color [S1].
++
++### Pseudocode
+ 
+ ```python
+-def render_hybrid_hair(camera_ray, hair_geometry, voxel_grid, lights, params):
+-    """
+-    Renders a single pixel using the hybrid hair/fur strategy.
+-    
+-    Args:
+-        camera_ray: Ray from camera origin with direction.
+-        hair_geometry: Explicit hair strand data for rasterization/intersection.
+-        voxel_grid: Voxelized medium data (density, direction, coeffs).
+-        lights: List of light sources.
+-        params: Dict containing N, a, gamma, c.
+-        
+-    Returns:
+-        Color (RGB) for the pixel.
+-    """
+-    # Step 1: First Geometric Interaction
+-    hit = hair_geometry.intersect(camera_ray)
++def render_hair_fur(camera_ray, scene):
++    # 1. First Geometric Interaction
++    hit = trace_geometry(camera_ray, scene.hair_strands)
+     if hit is None:
+         return background_color
++
++    # Compute direct illumination on geometry
++    L_direct = compute_direct_illumination(hit.point, hit.normal, hit.tangent, scene.lights)
++
++    # 2. Transition to Medium
++    # Sample outgoing direction from hair BCSDF
++    omega_o = sample_bcsdf(hit.point, hit.tangent, hit.normal, scene.hair_model)
+     
+-    # Compute direct illumination using hair BCSDF
+-    # Assume BCSDF provides direct lighting contribution
+-    direct_color = compute_direct_illumination(hit, hair_geometry.bcsdf, lights)
++    # 3. Single Scattering in Equivalent Medium
++    # Sample scattering point p using delta tracking in heterogeneous medium
++    p = delta_track(scene.medium, hit.point, omega_o)
+     
+-    # Sample outgoing direction from BCSDF for volumetric transport
+-    # Note: In practice, this direction might be determined by the view ray 
+-    # or sampled based on the BCSDF lobe. The method propagates into the volume.
+-    outgoing_dir = hit.normal # Simplified: assuming transport starts from hit point
+-    # More accurately, the path continues from the hit point into the volume.
+-    # The "view ray" for the volumetric pass is effectively the ray from the hit point 
+-    # towards the camera (or the original camera ray if we consider the hit point as the start).
++    # Sample light direction
++    omega_i, L_light = sample_light(scene.lights)
+     
+-    # Step 2: Transition to Medium
+-    # We are now at 'hit.point'. We need to sample a scattering point in the volume.
+-    # The method samples a point along the view ray using delta tracking.
+-    # Here, 'view ray' refers to the ray from the hit point back to the camera 
+-    # or the original camera ray if the hit is on the front surface.
+-    # Let's assume we sample along the original camera ray segment inside the volume.
+-    
+-    # Delta tracking to find scattering point p
+-    p = delta_track_sample(camera_ray, voxel_grid)
+-    
+-    if p is None:
+-        return direct_color # No volumetric scattering found
+-    
+-    # Step 3: Single Scattering Estimation
+-    # Select a random light source
+-    light = random.choice(lights)
+-    
+-    # March along light direction to evaluate transmittance
+-    # Shadow ray from p to light
+-    shadow_ray = Ray(origin=p, direction=light.direction)
+-    transmittance = ray_march_transmittance(shadow_ray, voxel_grid)
+-    
+-    # Evaluate direct illumination at p from light
+-    # L_light is the radiance from the light source
+-    L_light = light.radiance
++    # Evaluate transmittance from p to light
++    transmittance = ray_march_transmittance(scene.medium, p, omega_i)
+     
+     # Get local properties at p
+-    sigma_s = voxel_grid.get_scattering_coefficient(p, light.direction)
+-    albedo = voxel_grid.get_albedo(p, light.direction) # 1D function lookup
++    sigma_s = scene.medium.get_sigma_s(p)
++    sigma_t = scene.medium.get_sigma_t(p)
++    albedo = scene.medium.get_albedo(p, omega_i) # RGB albedo
++    phase_func = scene.medium.get_phase_function(p, omega_i, omega_o)
+     
+-    # Get original phase function P
+-    P = voxel_grid.get_phase_function(p, light.direction, camera_ray.direction)
++    # 4. Multiple Scattering Approximation
++    # Stochastically sample one octave
++    octave = sample_octave(scene.num_octaves, sigma_s, albedo, phase_func, transmittance, L_light)
+     
+-    # Step 4: Multiple Scattering Approximation (Stochastic Octave Sampling)
+-    # Sample a single octave i based on relative contribution
+-    # Relative contribution depends on albedo^i and attenuation
+-    # We approximate weights for sampling
+-    weights = []
+-    for i in range(params['N']):
+-        # Calculate weight for octave i
+-        # Weight ~ (gamma * albedo)^i * exp(-a_i * optical_depth)
+-        # Note: a_i is not explicitly defined as a function of i in the text, 
+-        # but 'a' controls effective attenuation. We assume a_i scales with i.
+-        # Let a_i = a * (i + 1) or similar. The text says 'a' controls attenuation 
+-        # allowing deeper penetration for higher orders.
+-        # We will use a_i = a * (i + 1) as a reasonable implementation detail [G].
+-        a_i = params['a'] * (i + 1)
+-        
+-        # Optical depth along shadow ray
+-        # We already have transmittance = exp(-optical_depth)
+-        # So exp(-a_i * optical_depth) = transmittance ^ a_i
+-        octave_weight = (params['gamma'] * albedo) ** i * (transmittance ** a_i)
+-        weights.append(octave_weight)
+-        
+-    # Normalize weights and sample octave
+-    total_weight = sum(weights)
+-    if total_weight == 0:
+-        return direct_color
+-        
+-    # Sample octave i
+-    i = sample_stochastic_index(weights)
++    # Compute contribution for the sampled octave
++    # Modified phase function: lerp(original, isotropic, 1 - c^octave)
++    c = scene.params.c
++    gamma = scene.params.gamma
++    a = scene.params.a
+     
+-    # Calculate L_i
+-    # Modified phase function P'_i
+-    # P_iso is isotropic: 1 / (4 * pi)
+-    P_iso = 1.0 / (4.0 * math.pi)
++    # Isotropic phase function
++    P_iso = 1.0 / (4.0 * pi)
+     
+-    # lerp(P, P_iso, 1 - c^i)
+-    lerp_factor = 1.0 - (params['c'] ** i)
+-    P_prime = lerp(P, P_iso, lerp_factor)
++    # Interpolate phase function
++    weight = 1.0 - (c ** octave)
++    P_prime = lerp(phase_func, P_iso, weight)
+     
+-    L_i = sigma_s * (params['gamma'] * albedo) ** i * L_light * P_prime * (transmittance ** (params['a'] * (i + 1)))
++    # Attenuation factor for this octave
++    # Note: a_i is typically scaled by octave index for deeper penetration
++    a_i = a * (octave + 1) 
++    attenuation = exp(-a_i * integral_sigma_t(scene.medium, p, omega_i))
+     
+-    # Step 5: Composite
+-    final_color = direct_color + L_i
++    # Albedo raised to octave power, modulated by gamma
++    albedo_term = (gamma * albedo) ** octave
+     
+-    return final_color
+-
+-def delta_track_sample(ray, voxel_grid):
+-    """
+-    Samples a scattering point along the ray using delta tracking.
+-    Returns the point p or None if no scattering occurs.
+-    """
+-    # Standard delta tracking algorithm
+-    # 1. Find max sigma_t along ray
+-    sigma_t_max = voxel_grid.get_max_sigma_t(ray)
++    L_volumetric = sigma_s * albedo_term * L_light * P_prime * attenuation
+     
+-    # 2. Sample distance
+-    # u ~ Uniform(0, 1)
+-    u = random.uniform(0, 1)
+-    distance = -math.log(1 - u) / sigma_t_max
+-    
+-    # 3. Sample point
+-    p = ray.origin + ray.direction * distance
+-    
+-    # 4. Check if scattering occurs
+-    # Probability of scattering is sigma_s / sigma_t
+-    # We need to evaluate sigma_t and sigma_s at p
+-    sigma_t_p = voxel_grid.get_extinction_coefficient(p)
+-    sigma_s_p = voxel_grid.get_scattering_coefficient(p, ray.direction)
+-    
+-    if sigma_t_p == 0:
+-        return None
+-        
+-    v = random.uniform(0, 1)
+-    if v < sigma_s_p / sigma_t_p:
+-        return p
+-    else:
+-        # No scattering, continue? 
+-        # The method says "explicitly sample at most one volumetric scattering event".
+-        # If delta tracking rejects, we might return None or continue.
+-        # Given "at most one", if the first sample is rejected, we stop.
+-        return None
+-
+-def ray_march_transmittance(ray, voxel_grid):
+-    """
+-    Evaluates transmittance along the ray by ray marching.
+-    Returns exp(-integral(sigma_t ds)).
+-    """
+-    # Simple ray march
+-    t = 0.0
+-    dt = 0.01 # Step size
+-    sigma_t_sum = 0.0
+-    
+-    while t < ray.length:
+-        p = ray.origin + ray.direction * t
+-        sigma_t = voxel_grid.get_extinction_coefficient(p)
+-        sigma_t_sum += sigma_t * dt
+-        t += dt
+-        
+-    return math.exp(-sigma_t_sum)
++    # 5. Composite
++    return L_direct + L_volumetric
+ ```
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Spectral Phase Function:** The derived phase function is spectrally varying. However, the method avoids per-channel sampling by evaluating the phase function only for a deterministic outgoing direction (the view direction) during single-scattering estimation [S1].
+-*   **Color Saturation:** Using a scalar contribution factor instead of local RGB albedo leads to severe color loss. The method uses local RGB albedo to preserve spectral energy redistribution [S1].
+-*   **Excessive Saturation:** Repeated application of the albedo term can cause excessive color saturation. The scalar gain parameter $\gamma$ is introduced to moderate this [S1].
+-*   **Tightly Coiled Hair:** The method struggles to reproduce localized bright spots from intense multiple backscattering in highly scattering, tightly coiled hair (e.g., white Afro). It approximates these as macroscopic energy distribution instead [S1].
+-*   **Local Similarity Assumption:** Unlike Dual Scattering, this method avoids the local similarity assumption, preventing overly darkened appearances in tightly curly hairstyles where fiber orientations change rapidly [S1].
++### Edge Cases and Pitfalls
++*   **Spectral Phase Function:** The derived phase function is spectrally varying. Normally, this requires separate sampling per color channel. This method avoids this pitfall by evaluating the phase function only for a deterministic outgoing direction during single-scattering estimation, not for sampling [S1].
++*   **Color Saturation:** Using a scalar contribution factor instead of spectral albedo leads to severe color loss. Using spectral albedo can lead to excessive saturation; the parameter $\gamma$ mitigates this [S1].
++*   **Tightly Coiled Hair:** The method struggles to reproduce localized bright spots from intense multiple backscattering in highly scattering, tightly coiled hair (e.g., white Afro). It approximates these as macroscopic energy distribution, missing concentrated highlights [S1].
++*   **Local Similarity Assumption:** Unlike Dual Scattering, this method does not assume local similarity, preventing overly darkened appearances in tightly curly hairstyles where fiber orientations change rapidly [S1].
+ 
+ ## Operating characteristics
+ *   **Time Complexity:** Significantly faster than path tracing. Achieves a 7.1× to 11.06× speedup compared to ground truth path tracing at the same noise level [S1].
+-*   **Memory Complexity:** Requires storage for the voxel grid (density, direction, coefficients) and precomputed albedo maps. Not given in the sources.
++*   **Memory Complexity:** Requires storage for the voxelized medium grid (density, direction, coefficients) and precomputed albedo maps.
+ *   **Measured Performance:**
+     *   On human hair: 1.17 minutes average render time vs. 9.98 minutes for path tracing (8.53× speedup) and 2.27 minutes for Dual Scattering (1.94× speedup) [S1].
+-    *   On fur scenes: Average speedup of 3.84× compared to Extended Dual Scattering (1.17 minutes vs. 4.49 minutes) [S1].
+-    *   Samples per pixel (SPP): Requires 256 SPP for equal visual quality, whereas path tracing and Dual Scattering require 512 SPP [S1].
+-*   **Strengths:** Preserves high-frequency details via explicit geometry; captures soft volumetric illumination; robust under various lighting conditions; avoids "dry" appearance of dual scattering [S1].
+-*   **Limitations:** Cannot reproduce localized bright spots from intense multiple backscattering in tightly coiled hair; relies on precomputed parameters optimized for specific lighting setups [S1].
+-*   **When to Use:** Production rendering of dense hair and fur where performance is critical and high-frequency detail is needed [S1].
+-*   **When Not to Use:** Scenes requiring accurate reproduction of intense localized backscattering highlights in tightly coiled hair [S1].
++    *   On fur scenes: 1.17 minutes vs. 4.49 minutes for Extended Dual Scattering (3.84× speedup) [S1].
++    *   Requires 256 SPP for equal visual quality, whereas path tracing and Dual Scattering require 512 SPP [S1].
++*   **Strengths:** Preserves high-frequency details via explicit geometry; captures soft volumetric illumination; robust under various lighting conditions; avoids the "dry" appearance of dual scattering.
++*   **Limitations:** Cannot reproduce localized bright spots from intense backscattering in very dense, coiled hair; relies on precomputed parameters optimized for specific lighting setups [S1].
++*   **When to Use:** Production rendering of dense hair and fur where performance is critical and high-frequency direct lighting is important.
++*   **When Not to Use:** Scenes requiring accurate reproduction of intense, localized backscattering highlights in tightly coiled hair; scenes with highly dynamic fiber orientations that violate the voxelization assumptions (though less sensitive than dual scattering) [S1].
+ 
+ ## Background
+-*   **Origin:** Proposed by Hu, Zhu, Lin, and Zhang in 2026 [S1].
+-*   **History:** Builds on the insight that dense hair behaves like an anisotropic participating medium at the scale of multiple scattering [S1]. It improves upon prior approximations like Dual Scattering [Zinke et al. 2008] and Extended Dual Scattering [Yan et al. 2017b], which often fail for dense hair by yielding overly dry or blurred appearances [S1]. It also differs from microflake models (e.g., SGGX) which assume opaque particles [S1].
+-*   **Implementation:** Implemented in Mitsuba 0.6 [S1]. Parameters were obtained by numerical optimization using Ceres Solver with an L1 loss on a scene with only hair geometry under a studio-style configuration of three area lights [S1].
++The method was proposed by Hu, Zhu, Lin, and Zhang, published in ACM Transactions on Graphics (July 2026) [S1]. It builds on the observation that dense hair behaves like an anisotropic participating medium at the scale of multiple scattering. It improves upon Dual Scattering [Zinke et al. 2008] and Extended Dual Scattering [Yan et al. 2017b], which often fail for dense hair due to local similarity assumptions. It also differs from microflake models (SGGX, SpongeCake) by preserving transmission paths through normalization of the BCSDF [S1]. The implementation is available in Mitsuba 0.6 [S1].
+ 
+ ## Sources

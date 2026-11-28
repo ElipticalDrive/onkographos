@@ -1,0 +1,410 @@
+Powerful web graphics runtime built on WebGL, WebGPU, WebXR and glTF - Add SOG v3 loading and over-unity opacity rendering by slimbuck · Pull Request #9873 · playcanvas/engine
+
+Add SOG v3 loading and over-unity opacity rendering by slimbuck · Pull Request #9873 · playcanvas/engine · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+slimbuck
+commented
+Oct 29, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Member
+Adds support for SOG v3, proposed in playcanvas/splat-transform#362, and draws gaussians whose opacity is above 1. SOG v2 and v1 files load as before.
+SOG v3 loading
+Rotations are stored as a 24-bit exponential map in the alpha channels of means_l, means_u and scales. quats.webp is not fetched for v3.
+Opacity is a fixed byte, A = (b / 204)^2, decoded inline: 0 to 1.5625, with 1 exactly at byte 204. meta.opacity.max is written only when some gaussian's opacity exceeds 1.
+Spherical harmonics support 4 bands (a 1536-pixel-wide palette).
+SH palette labels are 24-bit: shN_labels.b holds bits 16–23, so palettes can exceed 65536 entries. This applies to the GLSL and WGSL SH chunks and the CPU iterator.
+The optional blind.webp is exposed as a resource stream, readable with getBlind() in work-buffer modifiers. The CPU iterator and decompress() output opacity_excess and the blind column.
+The extras of meta.json / lod-meta.json are exposed as resource.extras, and kept by decompress().
+The parsers report an error for unknown SOG versions.
+Over-unity opacity
+Decimation merges several gaussians into one, and the merged gaussian can carry more mass than a gaussian with opacity 1 can hold. SOG v3 and PLY (opacity_excess column) store that true opacity, up to 1.5625. The unified renderer draws such a gaussian with peak alpha 1 as an opaque core with the plain gaussian's falloff stretched over the rest of its footprint. The drawn mass is quadratic in the core's radius, so the radius that matches the opacity exactly has a closed form, and the footprint is the plain gaussian's.
+Opacity travels in the work buffer's alpha, with no extra streams, defines or settings: the renderer always draws it, and data without opacity above 1 draws as before. The large format stores it as a half float; the compact format and the GPU-sort projection cache in WebXR store it as the SOG v3 byte.
+The vertex shaders derive the core radius from alpha (gsplatPlateauCore), stretch the plain alphaClip trim past the core, and pass 1 + the radius to the fragment shader as alpha. The fragment shader remaps the distance from the centre past the core and evaluates the plain gaussian. Culls, extents, the projector and the shadow cull are unchanged.
+The anti-aliasing factor multiplies alpha before the core radius is chosen, so the quad and GPU-sort paths match and the mass stays exact.
+Overdraw mode draws every gaussian with the plain profile.
+PLY: GSplatResource adds opacity_excess to the sigmoid opacity, capped at 1.5625.
+Compact work buffer opacity
+The compact format (the default) stored opacity as a linear byte clamped to 1, so it now uses the SOG v3 byte for every scene. Existing scenes render slightly differently in compact mode. Measured against the large format, opacity is more accurate: 57.7 vs 55.1 dB on a low-opacity scene, and unchanged on a typical one. Steps are coarser near 1 and finer at low opacity. Large-format rendering is unchanged.
+Testing
+test/scene/gsplat-sog-v3.test.mjs covers v3 decoding. test/scene/gsplat-unified/gsplat-overunity.test.mjs checks that the GLSL and WGSL core-radius constants match, that the radius is 0 at opacity 1, and that each opacity in (1, 1.5625] draws its mass to within 1e-6.
+On WebGL2, a v2 SOG with SH and a PLY render byte-identical to main in the large format.
+Isolated splats at five sizes and four opacities draw the same mass on the WebGL2 and WebGPU quad paths and the GPU-sort path. With anti-aliasing, the AA/non-AA mass ratio matches σ²/(σ² + 0.3) for plain and plateau splats alike.
+An anti-aliased scene decimated six times renders within noise of this PR's earlier versions (64–87 dB against the previous shape fits, with no gap pixels).
+slimbuck
+and others
+added 4 commits
+October 28, 2026 09:57
+feat: Load SOG v3 and render gaussians with opacity above 1
+…
+dbde81c
+```
+SOG v3 loading (v2 unchanged):
+- 24-bit exponential-map rotations read from the alpha channels of means_l, means_u and scales; quats.webp is no longer fetched for v3.
+- Opacity read through meta.opacity.codebook (via the lookup texture's alpha), allowing values above 1.
+- 4 SH bands (1536-pixel palette).
+- Optional blind.webp exposed as a resource stream, with getBlind() in work-buffer modifiers; the CPU iterator and decompress() emit opacity_excess and the blind column.
+- meta.json / lod-meta.json extras exposed as resource.extras.
+- Parsers report unknown SOG versions as an error.
+
+Opacity above 1 (decimated gaussians that carry more mass than a standard gaussian) is drawn with a flat-topped plateau profile whose mass matches the stored opacity, with a 0.4 plateau shrink. An R8 work-buffer stream (splatPlateau) is added only once a resource with over-unity opacity is in the world; the copy pass solves the plateau shape once per splat. Both the quad renderer (GLSL and WGSL) and the GPU-sort projector path grow the footprint and draw the profile. app.scene.gsplat.compensation = false forces opacity <= 1 for debugging.
+
+Also fixes GSplatWorkBuffer.syncWithFormat() not rebuilding its render targets when a stream is added after creation and getTexture() has already synced the streams (affects any stream added at runtime on the GPU-sort path).
+
+Not covered: shadow and pick passes draw plateau splats at the standard extent; the PLY path ignores opacity_excess.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+feat: Render PLY opacity_excess as over-unity opacity
+…
+4e221d8
+```
+PLY files written by decimation can carry an opacity_excess column holding the opacity above 1. GSplatResource now adds it to the sigmoid opacity in the half-float color texture and reports hasOverUnity, so the unified renderer enables the plateau stream as it does for SOG v3. The uncompressed format clamps opacity to 1 unless GSPLAT_OVERUNITY is defined, so compensation off and the non-unified renderer are unchanged.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+fix: Draw over-unity plateaus consistently across passes
+…
+19ef8f4
+```
+- Attach the plateau stream before the frame's bake when a resource that needs it arrives, so the first bake writes it.
+- Cull by the plateau's grown footprint in the quad shaders, the GPU-sort projector and the shadow cull; the projector's contribution test also counts the plateau's mass.
+- Trim quads where the plateau profile falls to alphaClip, rather than scaling a plain gaussian's trim, so shadow, pick and prepass coverage matches the drawn shape.
+- Enable GSPLAT_OVERUNITY on the GPU-sort pick material and the shadow materials, which also refresh when streams are added to the format in place.
+- Keep meta.json extras when SOG data is decompressed.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+feat: Read 24-bit SH palette labels in SOG v3
+…
+54d1a4f
+```
+SOG v3 palettes may exceed 65536 entries: the label's third byte (shN_labels.b) holds bits 16-23. The GLSL and WGSL SH chunks and the CPU iterator decode it for v3 files; v2 and v1 still read 16-bit labels.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+slimbuck
+requested a review
+from mvaligursky
+October 29, 2026 14:45
+slimbuck
+self-assigned this
+Oct 29, 2026
+slimbuck
+added
+the
+area: graphics
+Graphics related issue
+label
+Oct 29, 2026
+Merge branch 'main' into sog-v3
+a30231d
+mvaligursky
+mentioned this pull request
+Oct 29, 2026
+fix: Rebuild gsplat work buffer render targets for runtime-added streams
+#9876
+Merged
+mvaligursky
+commented
+Oct 29, 2026
+Copy link
+Copy Markdown
+Contributor
+A concern about where the plateau is stored. Decimated data will be the norm for large assets (most scenes over ~1M splats), and almost all of them will have some splats with opacity above 1. In our tests the merged opacity reaches about 20. So the plateau path will be on nearly all the time, and these become permanent costs:
+Extra splatPlateau work buffer stream: one more render target in the copy pass, and one more texture read in the quad VS, the projector, the shadow cull and pick.
+9th projection cache word: entries grow from 32 B to 36 B, so most of them cross a 32-byte sector boundary. That nearly doubles the sectors the hybrid VS reads.
+Runtime detection: _checkOverUnity, the format change, the GSPLAT_OVERUNITY toggles, and the recompile plus work buffer recreation when the first decimated LOD arrives. Once most data is decimated, this mostly just adds a hitch.
+The plateau fits in the existing storage instead, with no detection at all.
+1. Work buffer: store the plateau in the alpha slot
+When the plateau is above 1, the copy pass clamps the stored opacity to exactly 1 (color.w = min(color.w, 1.0) after encodePlateau). So for those splats the alpha slot holds no information, and D' can go there. The copy pass writes color.w = A <= 1 ? A : D', and each format encodes that value. The writeSplat signature doesn't change.
+Large format (alpha is a half): the value is written as is, with no loss.
+```
+float getOpacity() {
+    // ... loads and caches cachedColor as now
+    return min(cachedColor.a, 1.0);
+}
+
+// call after getOpacity(), reads the same cached data
+float getPlateau() {
+    return max(cachedColor.a, 1.0);
+}
+```
+Compact format (alpha is the top byte of dataTransformA.w): split the byte.
+Codes 0–191 are opacity.
+Codes 192–255 are opacity 1, with log2(D') in (0, 2]. That covers D' ≤ 4, so true opacity up to ~31.5; anything above is clamped.
+```
+// writeSplat
+float a = color.a;
+uint alphaBits = a > 1.0 ?
+    191u + uint(clamp(log2(a) * 32.0 + 0.5, 1.0, 64.0)) :
+    uint(clamp(a, 0.0, 1.0) * 191.0 + 0.5);
+
+// read
+float getOpacity() {
+    uint code = cachedTransformA.a >> 24u;
+    return code > 191u ? 1.0 : float(code) / 191.0;
+}
+
+float getPlateau() {
+    uint code = cachedTransformA.a >> 24u;
+    return code > 191u ? exp2(float(code - 191u) / 32.0) : 1.0;
+}
+```
+Precision compared with the separate R8 (maximum error, true opacity 1–30):
+Separate R8
+Split byte
+Plateau mass
+±2.2%
+±2.9%
+Opacity
+±0.0020
+±0.0026
+Both are well under the error compact already has from its 8-bit log scales, up to ±8.6% in area. If low-opacity precision matters, a sqrt mapping over the 192 opacity codes would make faint splats more precise than they are today.
+Non-decimated data never produces a plateau above 1, so the decode can always be compiled in. The plateau > 1.0 branch takes the same path for every vertex and fragment of a splat. That removes:
+the splatPlateau stream
+_checkOverUnity, _enableOverUnity and _compensationVersion
+the GSPLAT_OVERUNITY toggles
+the shadow material reconfiguration
+compensation = false becomes a clamp in the copy pass. The clamp in the non-unified uncompressed.js stays.
+One detail: in the large format, alpha lives in dataColor, which the color-only (SH update) pass rewrites, so that pass needs D' too. Either keep alpha with a color write mask in the color-only pass, or replace the 24-step bisection with a cheaper solve. Compact isn't affected, because its alpha isn't in dataColor.
+2. Projection cache: stay at 8 words
+The plateau can't share the cached alpha slot. That alpha includes the AA compensation and modifySplatColor, so plateau splats can be below 1 there. But v2 is redundant. The projector writes:
+```
+v1 = l1 * dir;
+v2 = l2 * vec2f(dir.y, -dir.x);
+```
+So v2 is always v1 rotated by 90° and scaled by l2 / l1. Store that ratio and the plateau in v2's word:
+```
+// projector
+projCache[base + 5u] = pack2x16float(vec2f(l2 / max(l1, 1e-6), plateau));
+
+// hybrid VS
+let ratioPlateau = unpack2x16float(projCache[base + 5u]);
+let v2 = ratioPlateau.x * vec2f(v1.y, -v1.x);
+let plateau = ratioPlateau.y;
+```
+The cost is one multiply, and v2 stays exactly perpendicular to v1. The same change applies to XR (word 6) and pick (word 5). Color, alpha and the user varyings stay as they are, and the stride stays at 32 B.
+syncWithFormat() fix
+I've extracted the syncWithFormat() fix into #9876 so it can land on its own, with a test that adds a stream through addExtraStreams(). It can be dropped from this PR once that merges.
+mvaligursky
+added a commit
+that referenced
+this pull request
+Oct 29, 2026
+fix: Rebuild the gsplat work buffer render targets for streams added …
+…
+3112d84
+```
+…at runtime (#9876)
+
+GSplatWorkBuffer.syncWithFormat() compared the streams' format version before and after its own
+sync. GSplatStreams.getTexture() also syncs, so when a texture was fetched by name after a stream
+was added, the streams were already up to date and the render targets were never rebuilt. The
+new stream then had a texture but no attachment, and the copy pass never wrote it.
+
+Track the version the render targets were built for and rebuild whenever it is behind.
+
+Extracted from #9873.
+
+Co-authored-by: Martin Valigursky <mvaligursky@snapchat.com>
+Co-authored-by: Donovan Hutchence <slimbuck7@gmail.com>
+```
+slimbuck
+mentioned this pull request
+Oct 29, 2026
+SOG format v3 proposal
+playcanvas/splat-transform#362
+Open
+Martin Valigursky
+and others
+added 11 commits
+October 30, 2026 15:15
+Merge branch 'main' into sog-v3
+1f958c9
+test: Remove the syncWithFormat test, now covered on main
+…
+fe2ad50
+```
+The fix landed separately in playcanvas#9876 with its own test.
+```
+Merge branch 'main' into sog-v3
+…
+93635a1
+```
+Resolve the over-unity plateau against the anti-aliasing filter rework: the early size cull now tests the grown footprint (minPixelSize / grow), and the contribution cull keeps the plateau mass on the cull-lowpass determinant.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+feat: Draw over-unity gsplat opacity at exact mass, capped at 1.6
+…
+f9379f8
+```
+Matches splat-transform's SOG v3 change: opacity is stored as a fixed byte (b <= 224 holds A = (b/224)^2, b > 224 holds (1, 1.6] linearly) instead of an opacity codebook, and over-unity gaussians are drawn with the plateau that carries exactly min(A, 1.6), without the 0.4 shrink.
+
+- SOG: decodeSogOpacity for the CPU iterator, decompress() and the codebook LUT; hasOverUnity reads meta.opacity.max.
+- Copy pass (GLSL + WGSL): the plateau shape comes from a closed-form fit of the inverse mass (max error 1.3e-3) instead of a per-splat bisection, stored in the R8 stream as (D - 1) / 0.8 rather than log2(D) / 6; every decode site updated.
+- PLY: opacity + opacity_excess is clamped to 1.6 at upload.
+
+Engine vs splat-transform on a deep LOD level under the same policy: 40.4 dB WebGPU, 40.3 dB WebGL2, 41.5 dB with compensation off.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+feat: Decode SOG v3 opacity inline as (1.25 * v)^2, capped at 1.5625
+…
+0189f64
+```
+Matches splat-transform: the SOG v3 opacity byte is now A = (b/204)^2 = (1.25 * b/255)^2 (exact 0 and 1, top 1.5625), replacing the two-segment encoding. The vertex format decodes it inline, so the codebook LUT's .a is unused again.
+
+- Copy pass (GLSL + WGSL): exact-mass plateau of min(A, 1.5625), closed-form fit refitted (max error 1.1e-3), stored in R8 as (D - 1) / 0.75; decode sites updated.
+- PLY upload clamps opacity + opacity_excess at 1.5625.
+
+Engine vs splat-transform on a deep LOD level: 40.6 dB WebGPU / 40.4 dB WebGL2 with compensation, 41.4 dB without. v2 SOG renders byte-identical to main on WebGL2.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Merge branch 'main' into sog-v3
+29cc73e
+fix: Keep the gsplat plateau stream within the device's attachment li…
+…
+6801260
+```
+…mits
+
+The over-unity plateau stream (R8) is added to the work buffer only where it fits the device's color attachment count and, on WebGPU, maxColorAttachmentBytesPerSample. GSPLATDATA_LARGE alone uses 32 bytes per sample, the WebGPU spec minimum, so on such devices the stream pushed the work-buffer pass to 33 bytes and failed validation; it is now skipped with a warning and over-unity opacity draws clamped to 1, as with compensation off. Switching data format re-checks the fit.
+
+The hybrid renderer's projection-cache size check now counts the plateau word, so a cache over the storage binding limit falls back to CPU sorting instead of failing.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Merge branch 'main' into sog-v3
+671d640
+refactor: Draw over-unity gsplat opacity from alpha alone
+…
+f6485a8
+```
+Opacity above 1 (up to 1.5625) now travels in the work buffer's alpha instead of a separate plateau stream. The large format already stores it as a half float; the compact format and the WebXR projection cache store it as the SOG v3 opacity byte, (b / 204)^2.
+
+The plateau profile is squeezed radially so it ends at the plain gaussian's 2 sqrt(2) sigma, with its shape D solved so the mass stays exact. Quads, culls and extents are therefore the plain gaussian's: the vertex shaders derive D from alpha only for the trim and the fragment curve, and the compute projector, shadow cull and corner code are back to main.
+
+This removes the plateau work buffer stream, its runtime attachment and device-limit fallback, and the hybrid cache word. GSplatParams#compensation is a plain property, and the manager turns GSPLAT_OVERUNITY on through setOverUnity when it is enabled and a resource carries opacity above 1.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+fix: Fit the over-unity plateau to its drawn mass and clamp before AA
+…
+e61cbfd
+```
+The plateau shape fit preserved the mass of an untruncated profile, but the fragment shader subtracts the exp(-4) floor as normExp does, so opacity 1.5625 drew 1.625 times a plain gaussian's mass. The fit now solves against the drawn profile (D up to 1.76, within 0.011% of the target mass), and the test integrates the shader's profile.
+
+With compensation off, opacity above 1 is now clamped before the anti-aliasing factor scales it, in the vertex shaders and in the GPU-sort projector, which caps it with a new opacityMax uniform. The projector takes the over-unity setting from the per-view parameters, resolved before dispatch, so it matches the draw from the first frame.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+refactor: Drive over-unity gsplat opacity with a uniform
+…
+55fd1f4
+```
+Over-unity opacity no longer needs a shader variant or per-resource detection. GSplatParams#compensation sets an opacityExcessMax uniform on the gsplat material (0.5625 when on, 0 when off), and the vertex shaders cap opacity at 1 + opacityExcessMax before anti-aliasing scales it. The GPU-sort projector takes the same cap from the per-view parameters.
+
+A plateau splat always draws with peak alpha 1, so its alpha slot carries the plateau shape D to the fragment shader instead of a separate varying: an alpha above 1 is D. Plain splats take the same path as before.
+
+This removes the GSPLAT_OVERUNITY define, hasOverUnity on the resources, the manager's resource scan and setOverUnity on the renderers. v2 scenes render byte-identical to main in the large format, and over-unity renders match the previous build.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+mvaligursky
+commented
+Nov 5, 2026
+Copy link
+Copy Markdown
+Contributor
+I didn't look at this "Drive over-unity gsplat opacity with a uniform" commit in details, but I think the shader that copies data to work buffer should convert whatever alpha the resource has to over-unity, and then the renderer would be always unified and need to flags.
+mvaligursky
+commented
+Nov 5, 2026
+Copy link
+Copy Markdown
+Contributor
+additionally, we have two formats for work buffer:
+compact - 8 bit alpha, that should store over-opacity in 8bits as currently just remap it
+fullsize - we store alpha in 16bit, and here alpha should be stored as real f16 value directly, no decoding during rendering
+slimbuck
+commented
+Nov 5, 2026
+Copy link
+Copy Markdown
+Member
+Author
+I didn't look at this "Drive over-unity gsplat opacity with a uniform" commit in details, but I think the shader that copies data to work buffer should convert whatever alpha the resource has to over-unity, and then the renderer would be always unified and need to flags.
+yep it works like this now.
+slimbuck
+and others
+added 4 commits
+November 5, 2026 19:47
+refactor: Drop the over-unity compensation toggle
+…
+8f0caee
+```
+The work buffer copy already converts every format's opacity to its true value (above 1 for merged gaussians, up to 1.5625), so the renderers need no over-unity setting at all. GSplatParams#compensation, its opacityExcessMax uniform and the projector's opacityMax cap are removed, and the manager, renderers, projector and non-unified instance are back to main. Opacity above 1 still selects the plateau profile, with its shape carried in the alpha passed to the fragment shader.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+refactor: Fit the over-unity plateau shape with a quadratic
+…
+2306ca2
+```
+The plateau shape D for opacity A is now 1 + 1.5t - 0.25t^2 with t = A - 1. It matches the drawn mass within 0.4%, the precision of the SOG v3 opacity byte, and replaces a fitted polynomial in sqrt(t) whose extra precision the stored data cannot use. Renders match the previous fit: 64-68 dB on a decimated anti-aliased scene and 92.7 dB on its streamed LOD.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+refactor: Draw over-unity opacity as an opaque core with a stretched …
+…
+82f21d2
+```
+…gaussian edge
+
+The squeezed plateau is the plain gaussian with its radius remapped past an opaque core of radius u0 (a fraction of the quad), and its drawn mass is quadratic in u0, so u0 has a closed form in the opacity. This replaces the shape D, its quadratic fit (0.4% mass error), the squeeze and the plateau trim with one exact helper, gsplatPlateauCore. The fragment shader drops its inversesqrt and squeeze multiplies; the vertex shader passes 1 + u0 in alpha.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+fix: Keep the plain gsplat profile in overdraw mode
+…
+c5ff611
+```
+Overdraw mode passes opacity x colorRampIntensity / 32 in the fragment alpha, not 1 + a core radius, so an opaque splat at intensity 48 was drawn with a false core and at 64 divided by zero. Skip the core decoding under GSPLAT_OVERDRAW in GLSL and WGSL.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+refactor: Select the SOG decode path with a single SOG_VERSION define
+…
+6eee1f5
+```
+V3 set both SOG_V2 and SOG_V3, so SOG_V2 had come to mean "uses codebooks". Set SOG_VERSION to the file's version (1 when absent) and test it with SOG_VERSION < 2 / >= 2 / >= 3 in the GLSL and WGSL SOG chunks. The preprocessed shaders are unchanged for v1, v2 and v3.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+This branch has not been deployed
+No deployments
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+area: graphics
+Graphics related issue
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

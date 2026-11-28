@@ -1,0 +1,105 @@
+# Analytic Quadrature for Volume Radiance Integration
+
+Also called: Analytic integration for volume slices, Proposed quadrature method
+
+## Overview
+This method discretizes radiance $L(s)$ and extinction $\bar{\sigma}_t(s)$ individually to derive an analytic form for the integrated radiance, improving accuracy over standard Newton-Cotes rules (which approximate the product $T_r(s)L(s)$) and speed over Simpson's rule, particularly for dense volumes with high extinction [S1].
+
+## How it works
+**Inputs:**
+- $N$: Number of intervals (slices) along the ray [S1].
+- $s_k$: Position of the $k$-th sample point, for $k=0 \dots N$ [S1].
+- $L(s_k)$: Radiance at position $s_k$ [S1].
+- $\bar{\sigma}_t(s_k)$: Extinction coefficient at position $s_k$ [S1].
+- $\delta_k$: Length of interval $k$, defined as $|s_{k+1} - s_k|$ [S1]. Typically uniform ($\delta_k = \delta$) [S1].
+
+**Outputs:**
+- $L(x_i, \omega_o)$: Total integrated radiance at point $x_i$ in direction $\omega_o$ [S1].
+
+**Data Structures:**
+- Arrays for $L$, $\bar{\sigma}_t$, and positions $s$, indexed $0 \dots N$ [S1].
+- Scalar $\delta$ for uniform interval length [S1].
+
+**Steps:**
+1. **Compute Average Extinction:** For each interval $k \in [0, N-1]$, calculate the average extinction coefficient $\bar{\sigma}_{t,k}$ using the arithmetic mean of the endpoints:
+   $$ \bar{\sigma}_{t,k} = \frac{1}{2} (\bar{\sigma}_t(s_k) + \bar{\sigma}_t(s_{k+1})) $$
+   The extinction coefficient is assumed piecewise constant within the interval to avoid complex error functions of complex numbers, improving computational speed [S1].
+2. **Compute Interval Radiance Contribution:** For each interval $k$, calculate the integrated radiance contribution $\bar{L}(k)$ using the analytic formula derived from piecewise linear radiance and piecewise constant extinction:
+   $$ \bar{L}(k) = \frac{2L(s_k)}{\bar{\sigma}_{t,k}\delta_k} \left( e^{-\bar{\sigma}_{t,k}\delta_k} - 1 \right) + \frac{2L(s_{k+1})}{\bar{\sigma}_{t,k}\delta_k} \left( e^{\bar{\sigma}_{t,k}\delta_k} - 1 \right) e^{-\bar{\sigma}_{t,k}\delta_k} $$
+   Note: If $\bar{\sigma}_{t,k} \to 0$, this formula approaches the trapezoid rule result [S1]. Implementation should handle the limit or use a small epsilon guard [G].
+3. **Compute Cumulative Throughput:** Calculate the cumulative transmittance $T_r(k)$ up to the start of interval $k$ [S1]. For $k=0$, $T_r(0) = 1$. For $k > 0$, $T_r(k) = \prod_{l=0}^{k-1} e^{-\bar{\sigma}_{t,l}\delta_l}$ [S1]. This is computed iteratively as $T_r(k) = T_r(k-1) \cdot e^{-\bar{\sigma}_{t,k-1}\delta_{k-1}}$ [S1].
+4. **Sum Contributions:** The total radiance is the sum of the interval contributions weighted by the cumulative throughput:
+   $$ L(x_i, \omega_o) = \sum_{k=0}^{N-1} \bar{L}(k) T_r(k) $$
+   [S1]
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def analytic_quadrature_radiance(N, s, L_vals, sigma_t_vals, delta):
+    """
+    Computes radiance using analytic quadrature for volume slices.
+    
+    Args:
+        N: Number of intervals.
+        s: Array of positions [s_0, ..., s_N].
+        L_vals: Array of radiance values [L(s_0), ..., L(s_N)].
+        sigma_t_vals: Array of extinction coefficients [sigma_t(s_0), ..., sigma_t(s_N)].
+        delta: Interval length |s_{k+1} - s_k|. Assumed uniform.
+        
+    Returns:
+        Total radiance L(x_i, omega_o).
+    """
+    total_radiance = 0.0
+    cumulative_throughput = 1.0
+    
+    for k in range(N):
+        # 1. Average extinction for interval k
+        sigma_avg = 0.5 * (sigma_t_vals[k] + sigma_t_vals[k+1])
+        
+        # 2. Interval radiance contribution L_bar(k)
+        # Handle near-zero extinction to avoid division by zero
+        if sigma_avg < 1e-8:
+            # Limit as sigma_avg -> 0 corresponds to trapezoid rule
+            # Integral of linear L(s) over [0, delta] is delta * (L(0) + L(1)) / 2
+            l_bar_k = delta * (L_vals[k] + L_vals[k+1]) / 2.0
+        else:
+            term1 = (2.0 * L_vals[k] / (sigma_avg * delta)) * (math.exp(-sigma_avg * delta) - 1.0)
+            term2 = (2.0 * L_vals[k+1] / (sigma_avg * delta)) * (math.exp(sigma_avg * delta) - 1.0) * math.exp(-sigma_avg * delta)
+            l_bar_k = term1 + term2
+            
+        # 3. Add to total with current cumulative throughput
+        total_radiance += l_bar_k * cumulative_throughput
+        
+        # 4. Update cumulative throughput for next interval
+        cumulative_throughput *= math.exp(-sigma_avg * delta)
+        
+    return total_radiance
+```
+
+**Parameters:**
+- $\bar{\sigma}_t(u)$: Piecewise constant approximation of extinction. This assumption is made to improve computational speed compared to piecewise linear extinction, which would require error functions of complex numbers [S1].
+- $\delta_k$: Interval length. Typically uniform across all intervals [S1].
+
+**Edge Cases and Pitfalls:**
+- **Zero Extinction:** When $\bar{\sigma}_{t,k} \approx 0$, the division in the $\bar{L}(k)$ formula causes numerical instability [G]. The method is theoretically identical to the trapezoid rule when $\bar{\sigma}_t = 0$ [S1]. A guard clause or L'Hôpital's rule application is required [G].
+- **High Extinction:** The method maintains accuracy for high extinction values where standard Newton-Cotes rules (trapezoid/Simpson) fail because they approximate the product $T_r(s)L(s)$ directly [S1].
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$, where $N$ is the number of intervals [G]. It is faster than Simpson's rule because it avoids the more complex quadratic interpolation and dual integral calculations [S1].
+- **Memory Complexity:** $O(N)$ to store radiance and extinction samples [G].
+- **Accuracy:** Comparable to the trapezoid rule when extinction $\bar{\sigma}_t$ is low. Significantly more accurate than the trapezoid rule when $\bar{\sigma}_t$ is high, becoming comparable to Simpson's rule in accuracy [S1].
+- **Strengths:** Improved accuracy for dense volumes (e.g., flames in smoke) without the computational cost of Simpson's rule [S1]. Theoretically identical to the trapezoid rule when extinction is zero [S1].
+- **Limitations:** Requires sampling of both radiance and extinction at interval endpoints. Assumes piecewise constant extinction for speed [S1].
+- **When to use:** Rendering emissive inhomogeneous volumes with high extinction coefficients where standard quadrature rules lose accuracy [S1].
+- **When not to use:** When extinction is negligible and maximum speed is required (trapezoid rule is sufficient) [G].
+
+## Background
+- **Origin:** Proposed by T. Kuge et al. in "Real-time Indirect Illumination of Emissive Inhomogeneous Volumes using Layered Polygonal Area Lights" [S1].
+- **History:** Developed to address the inaccuracy of Newton-Cotes rules (trapezoid/Simpson) in dense participating media [S1]. These rules approximate the product of transmittance and radiance directly, leading to errors when extinction is high [S1]. The proposed method discretizes radiance and extinction individually to derive an analytic form for throughput [S1].
+- **Usage:** Used in real-time rendering of emissive volumes, such as flames inside dense smoke [S1].
+
+## Sources
+[S1] Real‐time Indirect Illumination of Emissive Inhomogeneous Volumes using Layered Polygonal Area Lights, https://doi.org/10.1111/cgf.13851, fetched 2026-10-26

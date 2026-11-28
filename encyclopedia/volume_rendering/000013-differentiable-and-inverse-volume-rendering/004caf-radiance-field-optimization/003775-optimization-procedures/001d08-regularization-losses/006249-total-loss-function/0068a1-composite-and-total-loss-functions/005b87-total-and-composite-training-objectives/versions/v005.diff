@@ -1,0 +1,190 @@
+--- v004.md
++++ v005.md
+@@ -1,51 +1,160 @@
+ # Total and Composite Training Objectives
+ 
+-Also called: Composite Loss, Multi-Component Loss, Joint Training Loss
++Also called: Composite Loss, Weighted Sum Loss, Multi-Task Loss
+ 
+ ## Overview
+-Total and Composite Training Objectives define the aggregation of heterogeneous loss terms into a single scalar value for optimizing radiance fields and Gaussian splatting models. This family of methods solves the problem of balancing conflicting objectives—such as photometric fidelity, geometric smoothness, and structural consistency—by allowing multi-stage training schedules and heterogeneous loss components (e.g., semantic, depth, and appearance) to be balanced via hyperparameter weights . Unlike single-term losses, these objectives enable the end-to-end optimization of complex representations by explicitly weighting contributions from different resolution stages or coarse/fine branches [S1, S2].
++Total and Composite Training Objectives define the framework for aggregating heterogeneous loss terms—photometric, geometric, and auxiliary—into a single scalar value for optimizing radiance fields and Gaussian splatting representations. This family solves the problem of balancing image fidelity with geometric consistency and semantic coherence, which single-term objectives cannot achieve. It sets itself apart from sibling methods by providing the structural mechanism (weighted summation) that allows distinct aspects of the representation, such as color accuracy, depth smoothness, and point cloud structure, to be guided by specific hyperparameters [S1, S2].
+ 
+ ## Shared principles
+-The core mechanism of total and composite training objectives is the construction of a total loss $L_{tot}$ as a weighted sum of individual component losses $\mathcal{L}_k$:
++The core mechanism of this family is the construction of a total loss $L_{tot}$ as a weighted sum of component losses $\mathcal{L}_k$:
+ 
+ $$ L_{tot} = \sum_{k} \lambda_k \mathcal{L}_k $$
+ 
+-where $\lambda_k$ are hyperparameter weights [S1, S2].
++where $\lambda_k$ are hyperparameter weights [S1, S2]. The specific composition of $\mathcal{L}_k$ varies by the underlying representation (NeRF, Gaussian Splatting, or Volume Grid) and the training stage.
+ 
+-Key shared principles include:
+-1.  **Heterogeneous Aggregation**: The loss function aggregates photometric rendering errors, geometric regularization terms, and auxiliary structural constraints [S1, S2].
+-2.  **Masking**: Background regions must be masked out to prevent the network from optimizing for default background colors. Masks with values of $-1$ or $0$ typically denote background and must be converted to $0$ weight multipliers .
+-3.  **Multi-Stage Capability**: The framework supports splitting training into stages with distinct loss functions, allowing for initialization, refinement, and semantic enhancement phases .
+-4.  **Uncertainty and Consistency**: Some formulations incorporate uncertainty losses or cycle-consistency constraints to balance confidence in predictions and ensure geometric coherence [S1, S2].
++### Inputs and Outputs
++*   **Inputs**: Rendered images/volumes ($\hat{I}$ or $\hat{V}$), ground truth images/volumes ($I$ or $V_{gt}$), depth maps ($\hat{D}$), masks ($M$), and camera parameters.
++*   **Outputs**: A scalar loss value $L_{tot}$ used for backpropagation.
++
++### Data Structures
++*   **Masks**: Binary or float tensors where values of $-1$ or $0$ typically denote background regions [S1]. These must be converted to $0$ weight multipliers for loss terms [S1].
++*   **Codebooks**: In Gaussian representations, rotation and scale attributes may be quantized using codebooks $Z$ .
++
++### Formulas and Components
++The specific terms included in $L_{tot}$ depend on the variant:
++
++1.  **Photometric Rendering Loss ($L_{render}$ or $L_{photo}$)**:
++    Combines L1 and SSIM losses to match pixel colors .
++    $$ L_{render}(\hat{I}, I) = \mathcal{L}_1(\hat{I}, I) + \lambda_{ssim} \mathcal{L}_{ssim}(\hat{I}, I) $$
++    Some implementations use a perceptual loss $\ell_{percept}$ in VGG feature space :
++    $$ \ell_{render}(\hat{I}, I) = \ell_1(\hat{I}, I) + \lambda \cdot \ell_{percept}(\hat{I}, I) $$
++    For volume grids, an MSE loss is used:
++    $$ \mathcal{L}_{volume}(V, V_{gt}) = \sum_{x,y,z} (V(x, y, z) - V_{gt}(x, y, z))^2 $$ 
++
++2.  **Geometric Regularization**:
++    *   **Depth Smoothness**: Encourages depth gradients to align with image gradients :
++        $$ \ell_{smooth}(I, \hat{D}) = |\partial_x \hat{D}| e^{-|\partial_x I|} + |\partial_y \hat{D}| e^{-|\partial_y I|} $$ 
++    *   **Total Variation (TV)**: Enforces smoothness on explicit feature volumes [S1]:
++        $$ L_{TV} $$ [S1]
++    *   **Gaussian Point Constraint (GPC)**: Uses a Gaussian kernel function to constrain point clouds, less sensitive to noise than Chamfer distance [S2]:
++        $$ w_{ij} = \exp \left( - \frac{\|p_i^m - p_j^{m+1}\|^2}{2\sigma_{pc}^2} \right) $$ [S2]
++
++3.  **Auxiliary/Structural Losses**:
++    *   **Masking Loss ($L_m$)**: Regularizes the number of Gaussians or background handling .
++    *   **Codebook Losses ($L_r, L_s$)**: For rotation and scale quantization in Gaussian representations :
++        $$ L_r = \sum_{n=1}^N \| \text{sg}[r_n - \hat{r}_n^{k-1}] - Z_k[i_n^k] \|_2^2 $$ 
++    *   **Semantic Losses**: Includes color, feature, DINO, and region semantic ranking (RSR) or cross-view self-enhancement (CSE) losses .
++    *   **Reprojection Loss ($L_{reproj}$)**: Ensures geometric consistency across views [S2].
++    *   **Self-Supervised Depth Loss ($L_{self-depth}$)**: Consistency between predicted and self-supervised depth [S2].
++
++### Parameters and Typical Values
++*   **$\lambda_m$**: Hyperparameter for masking regularization .
++*   **$\alpha$**: Weight for depth smoothness loss. Value: $0.01$ .
++*   **$\lambda$**: Weight for perceptual loss. Value: $0.5$ .
++*   **$\gamma$**: Exponential weight decay factor for recurrent iterations. Value: $0.9$ .
++*   **$\lambda_1, \lambda_2, \lambda_3$**: Weights for self-depth, GPC, and reprojection. Values: $0.04, 1.0, 1.0$ respectively [S2].
++*   **$\lambda_{L1}, \lambda_{ssim}$**: Weights for L1 and SSIM in rendering loss .
++*   **Batch Size**: 1024 rays [S1].
++*   **Gamma Correction**: $2.2$ used as camera response function [S1].
++
++### Numbered Steps
++1.  **Render**: Compute rendered images $\hat{I}$ or volumes $\hat{V}$ from the current model parameters (positions, opacities, colors, etc.) .
++2.  **Compute Photometric Loss**: Calculate $\mathcal{L}_1$, $\mathcal{L}_{ssim}$, or MSE between rendered and ground truth outputs .
++3.  **Compute Geometric/Auxiliary Losses**: Calculate depth smoothness, TV, GPC, or semantic losses based on the specific formulation [S1, S2].
++4.  **Apply Masking**: Identify background pixels (mask $M = -1$ or $0$) and zero out their contribution to loss terms that do not explicitly act on the mask (e.g., normals, AO, color) .
++5.  **Aggregate**: Sum the weighted losses to form $L_{tot}$ [S1, S2].
++6.  **Backpropagate**: Update model parameters using gradient descent .
++
++### Edge Cases and Pitfalls
++*   **Background Optimization**: Without masking, the network attempts to match default background colors in empty regions, complicating training . Masks must be correctly converted to zero weights [S1].
++*   **Memory Usage**: Training with full volume resolution (e.g., $256^3$) requires exhaustive GPU memory for gradients. Sub-volume sampling is required .
++*   **Codebook Training**: Codebook losses ($L_r, L_s$) are often applied only for the last 1K iterations to avoid heavy computation and ensure fast training .
++
++### Pseudocode
++```python
++def compute_overall_loss(rendered_image, gt_image, depth_map, mask, params):
++    """
++    Computes the total training loss for a radiance field or Gaussian splat.
++    
++    Args:
++        rendered_image: Tensor of shape (H, W, 3) or (B, H, W, 3)
++        gt_image: Tensor of shape (H, W, 3) or (B, H, W, 3)
++        depth_map: Tensor of shape (H, W) or (B, H, W)
++        mask: Tensor of shape (H, W) or (B, H, W) with -1/0 for background
++        params: Dict containing hyperparameters (lambda1, alpha, etc.)
++        
++    Returns:
++        total_loss: Scalar tensor
++    """
++    # 1. Photometric Loss (L1 + SSIM)
++    l1_loss = l1_loss_function(rendered_image, gt_image)
++    ssim_loss = ssim_loss_function(rendered_image, gt_image)
++    rendering_loss = l1_loss + params['lambda_ssim'] * ssim_loss
++    
++    # 2. Masking: Convert mask to weight (0 for background, 1 for foreground)
++    # Mask values of -1 or 0 denote background.
++    # Note: Some implementations use binary mask directly.
++    weight_mask = torch.where(mask > 0, torch.ones_like(mask), torch.zeros_like(mask))
++    
++    # Apply masking to rendering loss
++    masked_rendering_loss = (rendering_loss * weight_mask).mean()
++    
++    total_loss = masked_rendering_loss
++    
++    # 3. Geometric Regularization (Optional, depends on variant)
++    if params.get('use_depth_smoothness', False):
++        # Depth smoothness loss
++        dx_depth = torch.abs(depth_map[:, 1:] - depth_map[:, :-1])
++        dy_depth = torch.abs(depth_map[1:, :] - depth_map[:-1, :])
++        dx_img = torch.abs(gt_image[:, 1:, :] - gt_image[:, :-1, :])
++        dy_img = torch.abs(gt_image[1:, :, :] - gt_image[:-1, :, :])
++        
++        smooth_loss = (dx_depth * torch.exp(-dx_img)).mean() + \
++                      (dy_depth * torch.exp(-dy_img)).mean()
++        total_loss += params['alpha'] * smooth_loss
++        
++    if params.get('use_gpc', False):
++        # Gaussian Point Constraint
++        # Requires point clouds p_i, p_j and sigma_pc
++        gpc_loss = gaussian_point_constraint_loss(params['point_clouds'], params['sigma_pc'])
++        total_loss += params['lambda2'] * gpc_loss
++        
++    if params.get('use_tv', False):
++        # Total Variation on feature volumes
++        tv_loss = total_variation_loss(params['feature_volumes'])
++        total_loss += params['lambda'] * tv_loss
++        
++    return total_loss
++```
+ 
+ ## Subtopics
+ 
+ ### [Overall Training Loss](10621-overall-training-loss.md)
+-The overall training loss is the composite objective function used to optimize radiance fields and Gaussian splatting models end-to-end. It aggregates photometric rendering errors, geometric regularization terms, and auxiliary structural constraints into a single scalar value $L_{tot}$, which is minimized via gradient descent. Unlike single-term losses, this method allows for multi-stage training schedules and heterogeneous loss components (e.g., semantic, depth, and appearance) to be balanced via hyperparameter weights. It builds on [Total and Composite Training Objectives](16924-total-and-composite-training-objectives.md) by providing specific formulations for common radiance field variants. See [Overall Training Loss](10621-overall-training-loss.md).
++The overall training loss is the composite objective function used to optimize radiance fields and Gaussian splatting representations by aggregating photometric rendering errors, geometric regularization terms, and auxiliary structural constraints. It solves the problem of balancing fidelity to observed images with geometric consistency and semantic coherence in differentiable volume rendering. Unlike single-term objectives, it employs heterogeneous aggregation where individual losses are weighted by hyperparameters to guide distinct aspects of the representation, such as color accuracy, depth smoothness, and point cloud structure. See [Overall Training Loss](10621-overall-training-loss.md).
+ 
+ ### [Multi-scale Joint Training Loss](13064-multi-scale-joint-training-loss.md)
+-Multi-scale Joint Training Loss is a composite objective function used in radiance-field optimization to balance low-frequency structural consistency with high-frequency detail fidelity across multiple network stages or resolution levels. It addresses the problem of training instability and detail loss in dynamic or multi-stage rendering pipelines by jointly optimizing coarse and fine representations. Unlike single-scale losses, it explicitly weights contributions from different resolution stages or coarse/fine branches to ensure global appearance is preserved while local textures are refined. See [Multi-scale Joint Training Loss](13064-multi-scale-joint-training-loss.md).
++The Multi-scale Joint Training Loss is a composite objective function used in differentiable volume rendering to balance low-frequency structural consistency with high-frequency detail fidelity during multi-stage or multi-resolution optimization. It sets itself apart from single-scale losses by simultaneously penalizing errors across multiple network outputs or resolution stages, ensuring that the model preserves global appearance while refining local textures. It builds on [Total and Composite Training Objectives](16924-total-and-composite-training-objectives.md). See [Multi-scale Joint Training Loss](13064-multi-scale-joint-training-loss.md).
+ 
+ ### Total Loss Function for Neural Scene Reconstruction
+-- **Definition**: The total loss function combines seven components to train the neural scene reconstruction model: RGB loss ($L_c$), normal loss ($L_n$), depth loss ($L_d$), Eikonal loss ($L_e$), smooth loss ($L_s$), SRDF-SDF consistency loss ($L_{con}$), and visibility loss ($L_{vis}$) [S1].
+-- **Step**: Compute 2.5D depth and normal maps using volume rendering with the density function $\sigma_{SRDF}$ to exploit geometric cues and support training [S1].
+-- **Formula**: $\mathcal {L} = \mathcal {L}_c + \lambda _n \mathcal {L}_n + \lambda _d \mathcal {L}_d + \lambda _e \mathcal {L}_e + \lambda _s \mathcal {L}_s + \lambda _{con} \mathcal {L}_{con} + \lambda _{vis} \mathcal {L}_{vis}$, where $\lambda_{(\cdot)}$ are the loss weights [S1].
+-- **Parameter**: $\lambda_n, \lambda_d, \lambda_e, \lambda_s, \lambda_{con}, \lambda_{vis}$: Loss weights for normal, depth, Eikonal, smooth, consistency, and visibility losses respectively. Typical values are not specified in this text [S1].
++*   **Definition**: The total loss function combines seven components to train the neural scene reconstruction model: RGB loss ($L_c$), normal loss ($L_n$), depth loss ($L_d$), Eikonal loss ($L_e$), smooth loss ($L_s$), SRDF-SDF consistency loss ($L_{con}$), and visibility loss ($L_{vis}$) [S1].
++*   **Step**: Compute 2.5D depth and normal maps using volume rendering with the density function $\sigma_{SRDF}$ to exploit geometric cues and support training [S1].
++*   **Formula**: $\mathcal {L} = \mathcal {L}_c + \lambda _n \mathcal {L}_n + \lambda _d \mathcal {L}_d + \lambda _e \mathcal {L}_e + \lambda _s \mathcal {L}_s + \lambda _{con} \mathcal {L}_{con} + \lambda _{vis} \mathcal {L}_{vis}$, where $\lambda_{(\cdot)}$ are the loss weights [S1].
++*   **Parameter**: $\lambda_n, \lambda_d, \lambda_e, \lambda_s, \lambda_{con}, \lambda_{vis}$: Loss weights for normal, depth, Eikonal, smooth, consistency, and visibility losses respectively. Typical values are not specified in this text [S1].
+ 
+ ### Joint Training Losses
+-- **Formula**:
+-  - $L_{rgb} = \sum_{r \in R} ||\hat{C}(r) - C(r)||$
+-  - $L_W = ||G_{x_c->w}^W(J_{p0}) - \hat{w}||_2^2$
+-  - $L_{INN} = ||H(H^{-1}(x_v, J_{p0}), J_p) - x_v||_2^2$
+-  - $L_{Consis} = ||x'_c - x_c||_2^2$ [S2]
+-- **Parameter**:
+-  - $L_{rgb}$: Reconstruction loss between rendered RGB $\hat{C}(r)$ and input pixel RGB $C(r)$ along ray $r$ [S2].
+-  - $L_{pose}$: Pose loss ensuring INN correctly transforms point set $X_{J_p}$ (around deformed bones) to $X_{J_{p0}}$ (around canonical bones). $P$ is total points sampled around bones [S2].
+-  - $L_W$: Skinning weight loss ensuring predicted skinning weight for canonical joints is a one-hot vector $\hat{w}$ (1 for respective joint, 0 for others) [S2].
+-  - $L_{INN}$: Cycle consistency loss for INN, where $H$ transforms canonical to deformed space conditioned by posed skeleton, and $H^{-1}$ transforms view to canonical [S2].
+-  - $L_{Consis}$: Consistency loss minimizing L2 distance between INN-transformed point $x'_c$ and skinning-weight-conditioned canonical point $x_c$ [S2].
++*   **Formula**:
++    *   $L_{rgb} = \sum_{r \in R} ||\hat{C}(r) - C(r)||$ [S2]
++    *   $L_W = ||G_{x_c->w}^W(J_{p0}) - \hat{w}||_2^2$ [S2]
++    *   $L_{INN} = ||H(H^{-1}(x_v, J_{p0}), J_p) - x_v||_2^2$ [S2]
++    *   $L_{Consis} = ||x'_c - x_c||_2^2$ [S2]
++*   **Parameter**:
++    *   $L_{rgb}$: Reconstruction loss between rendered RGB $\hat{C}(r)$ and input pixel RGB $C(r)$ along ray $r$ [S2].
++    *   $L_{pose}$: Pose loss ensuring INN correctly transforms point set $X_{J_p}$ (around deformed bones) to $X_{J_{p0}}$ (around canonical bones). $P$ is total points sampled around bones [S2].
++    *   $L_W$: Skinning weight loss ensuring predicted skinning weight for canonical joints is a one-hot vector $\hat{w}$ (1 for respective joint, 0 for others) [S2].
++    *   $L_{INN}$: Cycle consistency loss for INN, where $H$ transforms canonical to deformed space conditioned by posed skeleton, and $H^{-1}$ transforms view to canonical [S2].
++    *   $L_{Consis}$: Consistency loss minimizing L2 distance between INN-transformed point $x'_c$ and skinning-weight-conditioned canonical point $x_c$ [S2].
+ 
+ ## Background
+-The concept of composite training objectives in volume rendering and neural scene reconstruction emerged alongside the development of Neural Radiance Fields (NeRF) and subsequent variants. Early works like [S1] introduced total loss functions combining RGB, normal, depth, Eikonal, smooth, consistency, and visibility losses to improve 3D geometry learning through 2.5D supervision. Later developments, such as [S2], extended these concepts to dynamic scenes, introducing joint training losses for skinning weights, pose, and cycle consistency in template-free NeRFs. The distinction between multi-stage dynamic growth (e.g., Recursive-NeRF) and coarse-fine refinement (e.g., Denoise-GS) highlights the evolution of these objectives to handle varying levels of detail and training stability [S1, S2].
++The concept of composite training objectives in neural rendering evolved from the need to regularize ill-posed inverse problems in volume rendering. Early NeRF implementations relied primarily on photometric L1/SSIM losses [S1]. As the field expanded to include dynamic scenes, explicit geometry, and Gaussian splatting, researchers introduced auxiliary losses (depth, normal, Eikonal, consistency) to enforce 3D geometric priors [S1, S2]. The "Total and Composite" family formalizes the weighted summation strategy that allows these heterogeneous terms to be optimized jointly. It is widely used in modern differentiable volume rendering pipelines, including NeRF variants, Gaussian Splatting, and neural scene reconstruction for dynamic and static scenes.
+ 
+ ## Sources

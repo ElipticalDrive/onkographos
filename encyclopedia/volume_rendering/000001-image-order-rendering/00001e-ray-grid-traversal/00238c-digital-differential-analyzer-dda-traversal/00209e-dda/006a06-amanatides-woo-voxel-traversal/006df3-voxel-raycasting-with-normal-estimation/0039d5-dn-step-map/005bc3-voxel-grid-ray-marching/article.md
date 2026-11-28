@@ -1,0 +1,111 @@
+# Voxel Grid Ray Marching
+
+Also called: Domain Traversal Algorithm, Ray-AABB Traversal, VoxelGridBase::rayMarch
+
+## Overview
+Voxel Grid Ray Marching is an algorithm to traverse a 3D voxel grid along a ray, returning the IDs of all visited cells [S2, unofficial]. It handles rays starting outside the grid by computing the entry point intersection with the bounding box [S2, unofficial]. It builds on [DN_step_map](8596-dn-step-map.md), which casts a ray into the voxel volume to find the first intersecting voxel, returning hit position, voxel data, and surface normal.
+
+## How it works
+**Inputs:** Ray origin $O$ and direction $D$ (normalized) [G]. Voxel grid bounding box defined by minimum corner $B_{min}$ and maximum corner $B_{max}$ [G]. Grid dimensions $N_x, N_y, N_z$ (number of voxels per axis) [G]. Voxel size $s$ (assumed uniform across axes) [G].
+**Outputs:** List of visited voxel indices (IDs) [S2, unofficial].
+**Data Structures:** `currentVoxel`: integer array of size 3, storing the current voxel index $(i, j, k)$ [S2, unofficial]. `steps`: integer array of size 3, storing the direction of increment for each axis ($+1$ or $-1$) [S2, unofficial]. `deltas`: float array of size 3, storing the distance to cross one voxel boundary along each axis [S2, unofficial]. `ts`: float array of size 3, storing the distance from the ray origin to the next boundary crossing along each axis [S2, unofficial]. `finalVoxels`: integer array of size 3, storing the boundary voxel index where traversal stops for each axis [S2, unofficial].
+
+**Steps:**
+1. Check if the ray origin is inside the grid box. If not, compute the intersection point with the box faces. If there is no intersection, return an empty list. Otherwise, set the start point to the intersection [S2, unofficial].
+2. Clamp the start position $P_{start}$ to ensure it lies strictly inside the last voxel to avoid boundary exclusion errors due to floating-point precision or floor operations: $P_{start} = \max(P_{start}, B_{min})$ and $P_{start} = \min(P_{start}, B_{max} - 0.01 \cdot s)$ [S2, unofficial].
+3. Determine the current voxel index containing $P_{start}$: $currentVoxel[c] = \lfloor (P_{start}[c] - B_{min}[c]) / s \rfloor$ for each axis $c \in \{x, y, z\}$ [S2, unofficial].
+4. Calculate step directions: $steps[c] = 1$ if $D[c] \ge 0$ else $-1$ [S2, unofficial].
+5. Calculate deltas (distance to cross one voxel boundary): $deltas[c] = s / |D[c]|$ [S2, unofficial]. For small direction components where $|D[c]| < 10^{-6}$, set $deltas[c] = \infty$ [S1].
+6. Calculate fractional distance from $B_{min}$ to $P_{start}$, normalized by cell size: $frac[c] = ((P_{start}[c] - B_{min}[c]) / s) - \lfloor (P_{start}[c] - B_{min}[c]) / s \rfloor$ [S2, unofficial].
+7. Initialize $ts$ and $finalVoxels$ for each axis: $ts[c] = deltas[c] \cdot (1.0 - frac[c])$ if $D[c] \ge 0$ else $deltas[c] \cdot frac[c]$ [S2, unofficial]. $finalVoxels[c] = N_c$ if $D[c] \ge 0$ else $-1$ [S2, unofficial].
+8. Traverse the grid in a loop: add $currentVoxel$ to the visited list. Find the axis $c_{min}$ with the minimum $ts[c]$ value. Increment $currentVoxel[c_{min}]$ by $steps[c_{min}]$. If $currentVoxel[c_{min}] == finalVoxels[c_{min}]$, break the loop. Otherwise, update $ts[c_{min}] \leftarrow ts[c_{min}] + deltas[c_{min}]$ [S2, unofficial].
+
+**Formulas:**
+- $P_{start} = \max(P_{entry}, B_{min})$ and $P_{start} = \min(P_{start}, B_{max} - 0.01 \cdot s)$ [S2, unofficial].
+- $currentVoxel[c] = \lfloor (P_{start}[c] - B_{min}[c]) / s \rfloor$ [S2, unofficial].
+- $steps[c] = \text{sign}(D[c])$ [S2, unofficial].
+- $deltas[c] = s / |D[c]|$ [S2, unofficial].
+- $frac[c] = ((P_{start}[c] - B_{min}[c]) / s) - \lfloor (P_{start}[c] - B_{min}[c]) / s \rfloor$ [S2, unofficial].
+- $ts[c] = deltas[c] \cdot (1.0 - frac[c])$ if $D[c] \ge 0$ else $deltas[c] \cdot frac[c]$ [S2, unofficial].
+- $finalVoxels[c] = N_c$ if $D[c] \ge 0$ else $-1$ [S2, unofficial].
+
+**Parameters:** $0.01$ is the clamping constant [S2, unofficial]. $10^{-6}$ is the threshold for zero direction components [S1].
+**Edge cases and pitfalls:** Rays starting exactly at the boundary might be excluded by `floor()` in `getCell()`. The method handles this by clamping the start position to $B_{max} - 0.01 \cdot s$ to ensure the ray starts strictly inside the last voxel [S2, unofficial]. Precision issues at boundaries are mitigated by this clamping [S2, unofficial]. Degenerate rays with zero direction magnitude are handled by setting corresponding deltas to infinity [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def voxel_grid_ray_marching(ray_origin, ray_dir, box_min, box_max, dims, cell_size):
+    """
+    Traverses a 3D voxel grid along a ray.
+    
+    Args:
+        ray_origin: (3,) array-like, ray origin point.
+        ray_dir: (3,) array-like, normalized ray direction vector.
+        box_min: (3,) array-like, minimum corner of the bounding box.
+        box_max: (3,) array-like, maximum corner of the bounding box.
+        dims: (3,) array-like, number of voxels per axis (Nx, Ny, Nz).
+        cell_size: float, size of each voxel (assumed uniform).
+        
+    Returns:
+        List of voxel indices (tuples of 3 integers) visited by the ray.
+    """
+    import numpy as np
+    
+    # Ray-AABB intersection [G]
+    inv_dir = 1.0 / ray_dir
+    t_min = (box_min - ray_origin) * inv_dir
+    t_max = (box_max - ray_origin) * inv_dir
+    t_enter = np.maximum(t_min, t_max).min()
+    t_exit = np.minimum(t_min, t_max).max()
+    if t_enter > t_exit or t_exit < 0:
+        return []
+    P_start = ray_origin + ray_dir * max(t_enter, 0.0)
+    
+    # Clamp start position [S2, unofficial]
+    P_start = np.maximum(P_start, box_min)
+    P_start = np.minimum(P_start, box_max - 0.01 * cell_size)
+    
+    # Determine current voxel [S2, unofficial]
+    current_voxel = np.floor((P_start - box_min) / cell_size).astype(int)
+    
+    # Step directions [S2, unofficial]
+    steps = np.where(ray_dir >= 0, 1, -1)
+    
+    # Deltas [S2, unofficial]
+    abs_dir = np.abs(ray_dir)
+    deltas = np.where(abs_dir > 1e-6, cell_size / abs_dir, np.inf)
+    
+    # Fractional distance [S2, unofficial]
+    frac = ((P_start - box_min) / cell_size) - np.floor((P_start - box_min) / cell_size)
+    
+    # Initialize T-values and final voxels [S2, unofficial]
+    ts = np.where(ray_dir >= 0, deltas * (1.0 - frac), deltas * frac)
+    final_voxels = np.where(ray_dir >= 0, dims, -1)
+    
+    visited_cells = []
+    while True:
+        visited_cells.append(tuple(current_voxel))
+        min_idx = np.argmin(ts)
+        current_voxel[min_idx] += steps[min_idx]
+        if current_voxel[min_idx] == final_voxels[min_idx]:
+            break
+        ts[min_idx] += deltas[min_idx]
+    return visited_cells
+```
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$, where $N$ is the number of voxels visited along the ray [S2, unofficial]. In the worst case, $N$ is proportional to the diagonal length of the grid in voxel units [S2, unofficial].
+- **Memory Complexity:** $O(1)$ auxiliary space, excluding the output list of visited voxels [S2, unofficial].
+- **Strengths:** Simple to implement, efficient for uniform grids, handles boundary conditions explicitly [S2, unofficial].
+- **Limitations:** Does not handle non-uniform voxel sizes without modification [G]. Precision issues may occur at boundaries, mitigated by clamping [S2, unofficial].
+- **When to use:** When a simple, fast traversal of a uniform voxel grid is required, and all visited voxels need to be processed [S2, unofficial].
+- **When not to use:** For non-uniform grids, or when only the first hit is needed (use [DN_step_map](8596-dn-step-map.md)) [S2, unofficial].
+
+## Background
+The algorithm is based on the Amanatides-Woo traversal method [AW87] [S1]. It is used for visualizing simulation domains and data structures, such as in smoothed particle hydrodynamics (SPH) simulations [S1]. The specific implementation details and clamping strategy are derived from the FDS-GS repository [S2, unofficial].
+
+## Sources
+[S1] Multi‐Level Memory Structures for Simulating and Rendering Smoothed Particle Hydrodynamics, https://doi.org/10.1111/cgf.14090, fetched 2026-10-28
+[S2] whoiszzj/FDS-GS, https://github.com/whoiszzj/FDS-GS, fetched 2026-10-27 (unofficial)

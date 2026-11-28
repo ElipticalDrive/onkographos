@@ -1,0 +1,139 @@
+--- v005.md
++++ v006.md
+@@ -8,5 +8,5 @@
+ ## How it works
+ **Inputs:**
+-*   Light-view map: A world position map rendered from the light's perspective, where each pixel represents a photon [S1].
++*   Light-view map: A depth/position map rendered from the light's perspective, where each pixel represents a photon [S1].
+ *   Sparse Voxel Octree: A hierarchical data structure representing the scene, where leaf nodes store photon data [S1].
+ 
+@@ -15,16 +15,67 @@
+ 
+ **Data Structures:**
+-*   **Light-View Map:** Stores world positions and depth. Resolution is typically higher than the lowest level of the voxel grid to avoid gaps [S1].
+-*   **Octree Leaf Node:** Stores photon data. Due to hardware constraints, this is implemented using a 16-bit normalized texture format to support atomic operations, denormalized upon access [S1].
+-*   **Brick Structure:** Voxels are repeated at brick boundaries to enable hardware filtering. This redundancy causes thread collisions if photons are copied directly to all required adjacent locations [S1].
++*   **Light-View Map:** Stores world positions and depth [S1]. Resolution is typically higher than the lowest level of the voxel grid to avoid gaps [S1].
++*   **Octree Leaf Node:** Stores photon data [S1]. Due to hardware constraints, this is implemented using 16-bit normalized texture formats to support atomic operations, denormalized upon access [S1].
++*   **Brick Structure:** Voxels are repeated at brick boundaries to enable hardware filtering [S1]. This redundancy causes thread collisions if photons are copied directly to all required adjacent locations [S1].
+ 
+ **Steps:**
+ 1.  **Render Light-View Map:** Render the scene from the light's view using standard rasterization to generate a world position map [S1].
+-2.  **Splat Photons:** Launch a fragment shader with one thread per light-view-map pixel [S1]. For each pixel, determine the corresponding leaf node in the octree based on the world position [S1]. Calculate the photon's energy, which is proportional to the subtended solid angle of the pixel as seen from the light [S1]. Store the photon as a direction distribution and energy in the leaf node [S1].
++2.  **Splat Photons:** Launch a fragment shader with one thread per light-view-map pixel [S1]. Determine the corresponding leaf node in the octree based on the world position [S1]. Calculate the photon's energy, which is proportional to the subtended solid angle of the pixel as seen from the light [S1]. Store the photon as a direction distribution and energy in the leaf node [S1].
+ 3.  **Handle Atomic Operations:** Since atomic add operations are only available for integer textures, use a 16-bit normalized texture format for storage [S1]. Denormalize the values when accessing them later [S1].
+ 4.  **Resolve Brick Boundary Inconsistencies:** Because voxels are repeated for adjacent bricks, direct copying causes thread collisions and bandwidth issues [S1]. Use the "Value Transfer to Neighboring Bricks" method to ensure coherence [S1, S2].
+ 
+-**Formulas:**
+-*   $E = \Omega \cdot I$, where $E$ is the stored photon energy, $\Omega$ is the subtended solid angle of the light-view map pixel as seen from the light, and $I$ is the light intensity [S1].
++**Pseudocode:**
++```python
++# Step 1: Render Light-View Map
++light_view_map = rasterize_scene_from_light_view(scene, light)
++
++# Step 2: Splat Photons
++# One thread per pixel in light_view_map
++for pixel in light_view_map:
++    world_pos = pixel.world_position
++    solid_angle = pixel.subtended_solid_angle
++
++    # Find leaf node in octree
++    leaf_node = octree.find_leaf(world_pos)
++
++    # Photon data: direction and energy
++    photon_energy = solid_angle * light_intensity
++    photon_direction = normalize(light_position - world_pos)
++
++    # Store using atomic add on 16-bit normalized texture
++    # Hardware atomic add is performed on integer representation of 16-bit float
++    leaf_node.texture_buffer.atomic_add(photon_energy, photon_direction)
++
++# Step 3: Value Transfer to Neighboring Bricks
++# To resolve brick boundary inconsistencies without atomic operations
++# Assume octree is complete for simplicity, one thread per leaf node
++
++# X-axis passes
++for leaf_node in octree.leaves:
++    right_neighbor = leaf_node.get_neighbor(axis='x', direction=+1)
++    right_neighbor.texture_buffer += leaf_node.texture_buffer
++
++for leaf_node in octree.leaves:
++    right_neighbor = leaf_node.get_neighbor(axis='x', direction=+1)
++    leaf_node.texture_buffer = right_neighbor.texture_buffer
++
++# Y-axis passes
++for leaf_node in octree.leaves:
++    top_neighbor = leaf_node.get_neighbor(axis='y', direction=+1)
++    top_neighbor.texture_buffer += leaf_node.texture_buffer
++
++for leaf_node in octree.leaves:
++    top_neighbor = leaf_node.get_neighbor(axis='y', direction=+1)
++    leaf_node.texture_buffer = top_neighbor.texture_buffer
++
++# Z-axis passes
++for leaf_node in octree.leaves:
++    front_neighbor = leaf_node.get_neighbor(axis='z', direction=+1)
++    front_neighbor.texture_buffer += leaf_node.texture_buffer
++
++for leaf_node in octree.leaves:
++    front_neighbor = leaf_node.get_neighbor(axis='z', direction=+1)
++    leaf_node.texture_buffer = front_neighbor.texture_buffer
++```
+ 
+ **Parameters:**
+@@ -33,35 +84,7 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Atomic Operations:** Hardware atomic adds are limited to integer textures. Using 16-bit normalized formats requires careful denormalization [S1].
++*   **Atomic Operations:** Hardware atomic adds are limited to integer textures [S1]. Using 16-bit normalized formats requires careful denormalization [S1].
+ *   **Thread Collisions:** Copying photons directly to all required locations in adjacent bricks leads to significant performance degradation due to parallel random scattering and bandwidth issues [S1].
+-*   **Empty Voxels:** Photons are stored at the surface, and empty voxels are collapsed. Photons are always placed at the finest level of the voxel structure [S1].
+-
+-**Pseudocode:**
+-```python
+-def splat_photons(light_view_map, octree):
+-    # One thread per pixel in light_view_map
+-    for pixel in light_view_map:
+-        world_pos = pixel.world_position
+-        solid_angle = pixel.subtended_solid_angle
+-        # Find leaf node in octree based on world position
+-        leaf_node = octree.find_leaf(world_pos)
+-        # Photon data: direction and energy proportional to solid angle
+-        photon_energy = solid_angle
+-        photon_direction = normalize(light_position - world_pos)
+-        # Atomic add on 16-bit normalized texture buffer
+-        leaf_node.texture_buffer.atomic_add(photon_energy, photon_direction)
+-
+-def transfer_to_neighbors(octree):
+-    # Six passes, two for each axis (x, y, z)
+-    for axis in ['x', 'y', 'z']:
+-        # Pass 1: Add current node's data to the neighbor in positive direction
+-        for leaf_node in octree.leaves:
+-            neighbor = leaf_node.get_neighbor(axis, direction=+1)
+-            neighbor.texture_buffer += leaf_node.texture_buffer
+-        # Pass 2: Copy summed data from neighbor back to current node
+-        for leaf_node in octree.leaves:
+-            neighbor = leaf_node.get_neighbor(axis, direction=+1)
+-            leaf_node.texture_buffer = neighbor.texture_buffer
+-```
++*   **Empty Voxels:** Photons are stored at the surface, and empty voxels are collapsed [S1]. Photons are always placed at the finest level of the voxel structure [S1].
+ 
+ ## Subtopics
+@@ -71,12 +94,12 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear with respect to the number of light-view map pixels for splatting. The value transfer step is linear with respect to the number of leaf nodes, with a constant factor of 6 passes [S1, S2].
+-*   **Memory Complexity:** Proportional to the number of leaf nodes in the octree. The use of 16-bit normalized textures reduces memory footprint compared to 32-bit floats [S1].
+-*   **Performance:** Efficient for scenes with high-resolution light-view maps. The value transfer method avoids the performance hit of atomic operations and thread collisions associated with direct copying [S1, S2].
++*   **Time Complexity:** Linear with respect to the number of light-view map pixels for splatting [S1]. The value transfer step is linear with respect to the number of leaf nodes, with a constant factor of 6 passes [S2].
++*   **Memory Complexity:** Proportional to the number of leaf nodes in the octree [S1]. The use of 16-bit normalized textures reduces memory footprint compared to 32-bit floats [S1].
++*   **Performance:** Efficient for scenes with high-resolution light-view maps [S1]. The value transfer method avoids the performance hit of atomic operations and thread collisions associated with direct copying [S1, S2].
+ *   **Strengths:** Simple implementation, efficient use of hardware filtering, avoids atomic operations in the transfer step [S2].
+-*   **Limitations:** Requires a complete octree assumption for the simplified explanation of value transfer. The 16-bit format may introduce precision issues for very high dynamic range lighting [S1].
++*   **Limitations:** Requires a complete octree assumption for the simplified explanation of value transfer [S2]. The 16-bit format may introduce precision issues for very high dynamic range lighting [S1].
+ 
+ ## Background
+-Photon Splatting was introduced in the context of Interactive Indirect Illumination Using Voxel Cone Tracing by Nishita et al. (2011) [S1, S2]. It builds on the idea of using light-view maps to capture direct illumination for subsequent indirect illumination calculations [S1]. The method was developed to address the challenges of storing photons in a sparse voxel octree while maintaining performance and accuracy [S1, S2].
++Photon Splatting was introduced in the paper *Interactive Indirect Illumination Using Voxel Cone Tracing* [S1, S2]. It builds on the idea of using light-view maps to capture direct illumination for subsequent indirect illumination calculations [S1]. The method was developed to address the challenges of storing photons in a sparse voxel octree while maintaining performance and accuracy [S1, S2].
+ 
+ ## Sources

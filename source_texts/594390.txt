@@ -1,0 +1,202 @@
+Steve's Game Library — Rust game-building libraries for AI coding agents - Design packed scene vertices after Godot's attribute compression by stevepryde · Pull Request #157 · stevepryde/sgl
+
+Design packed scene vertices after Godot's attribute compression by stevepryde · Pull Request #157 · stevepryde/sgl · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+stevepryde
+commented
+Oct 5, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Design only (AR-9), rebased onto main 9c8dd93 (#153, #154, #155 merged). This amends specs/sgl3d-architecture.md:
+adds a Vertex encoding shared contract;
+Prepared geometry: normals are now validated, and the vertices it packs follow the new contract;
+Ray source: its vertices are packed;
+Deformation: decodes the packed rest pose into f32 vertices.
+There is no code yet. Packing runs in PreparedModel::new (#135).
+Rework after the AR-10 review (owner's decision: positions stay f32)
+Positions are f32 (12 B). The per-model grid, its step, floor and splitting rules are gone.
+The ray source keeps exact positions for intersection and for what the scene builds over them (bounds, culling hierarchies, caster clusters, BVH).
+Casters' vertex buffers keep their f32 positions. This removes finding 4: a deforming instance's casters already read f32 positions from the ray source, as Design shared geometry buffers and prepared models (#135) #154 lays out, so no pipeline split is needed.
+The departure from Godot is recorded with Hyperdrive's numbers (RD-2): a 16-bit grid errs by up to 6.25 cm across its 4.5 km environment and 7.8 mm across its 650 m course, tilting 2 m tunnel panels by about 0.45° against its 0.05° reflection test.
+Bevy 9d12036 keeps positions as f32 too: crates/bevy_mesh/src/mesh.rs:339–340, ATTRIBUTE_POSITION is Float32x3.
+The Roadmap 13: Hardware ray-traced reflections and shadows #23 SNORM16 question is moot: the BLAS takes f32 positions.
+Normal and tangent use Godot's axis-angle.
+The axis is octahedral in 2 × unorm16 (Vector3::octahedron_encode, core/math/vector3.cpp:90–104), in word 3.
+The angle is a unorm16 whose half carries the handedness (_get_axis_angle, rendering_server.cpp:320–339), in the low half of word 4. It needs its own 16 bits because Godot hides it in the position's w.
+Decoding uses axis_angle_to_tbn (scene_forward_clustered.glsl:79–87).
+The frame is made orthonormal before encoding (finding 3).
+The tangent is projected onto the normal's plane and normalised, as pbr_tangent_frame does at shading.
+A tangent that vanishes under projection, or whose w is not ±1, counts as absent (asset::tangent_frames). An absent tangent takes Godot's arbitrary one (rendering_server.cpp:565–574) with w = +1. Nothing reads it, because anisotropy needs authored tangents.
+Godot's importer instead turns compression off when a tangent isn't perpendicular (modules/gltf/gltf_document.cpp:1829–1843).
+Godot takes the axis and angle from Basis::get_axis_angle (core/math/basis.cpp:751–826). That function assumes a rotation and loses conditioning approaching its 0° and 180° singularities, so SGL3D takes them from the frame's unit quaternion instead.
+Frame convention: the encoded rotation's matrix rows are (tangent, bitangent, normal), as Godot's Basis holds the frame in _get_axis_angle and axis_angle_to_tbn reconstructs its rows. The bitangent is normal × tangent, and the handedness is carried by the angle's half.
+Rounding is to nearest (RD-2 improvement). Godot's casts truncate ((uint16_t)CLAMP(v * 65535, 0, 65535)). Truncation errs by up to a whole step: 0.0146° for a normal or tangent, which is above the 0.01° bound, and a full step for UV, colour and lightmap UV.
+Chart table word: the Ray source rebase list now names the mesh record's word where its model's chart table starts.
+UV rectangle per mesh, not per model (finding 2). The mesh record carries it.
+Colour, lightmap UV and chart:
+Colour stays RGBA8 with the colour sRGB-encoded and alpha linear, clamped to 0..1.
+Lightmap UV stays 2 × unorm16; a negative UV packs as (0, 0), which also means unassigned.
+The chart index into the per-model bounds table is now 16 bits, in the high half of word 4. A model with more than 65 536 distinct chart bounds is refused.
+Layout, 8 words (32 B):
+words
+content
+0–2
+position f32 × 3
+3
+octahedral axis
+4
+angle (low half), chart index (high half)
+5
+UV
+6
+colour
+7
+lightmap UV
+Every element is a whole number of words, which is Design shared geometry buffers and prepared models (#135) #154's allocator rule.
+Nits from the review:
+The layout test ties the struct, and a GPU round trip against independent expectations ties encode to decode.
+The leaf test's UV and colour decode for cut-outs is now in the reader list.
+The deform stage decodes the normal and tangent, which need no mesh data, so DeformDispatch is unchanged; reading the mesh record was only needed for the position grid.
+Skinned bind bounds and every other structure over positions are unchanged, since positions stay f32.
+Tolerances, held by the GPU round trip:
+normal or tangent: within 0.01°, estimated from 16-bit steps; the implementation measures the maximum, including near 0° and 180°, and fixes the bound;
+UV: within extent/131 070 per axis of its mesh's rectangle;
+colour: within half an 8-bit step of its sRGB encoding;
+lightmap UV: within 1/131 070.
+Estimates (from #19's measured 463–471 B/quad in the ray source and 98–100 B/quad raster)
+today
+packed
+change
+vertex in the ray source
+88 B
+32 B
+−56 B (−64 %)
+ray source per voxel quad (4 vertices)
+463–471 B
+≈239–247 B
+−224 B (−48 %)
+raster per voxel quad (casters keep f32 positions)
+98–100 B
+98–100 B
+0
+total per voxel quad
+≈561–571 B
+≈337–347 B
+≈−40 %
+Upload falls by the same amount, since geometry upload is these ranges. Each mesh record grows by its UV rectangle and the chart table's word, and each model gains a chart table of 8 B per distinct bound. All of these are small next to 56 B per vertex.
+Obligations for the implementation PR
+Packing: pack in PreparedModel::new, switch every reader to packed_vertex.wgsl, and delete the f32 vertex record (RD-3).
+Tests:
+The GPU round trip against independent expectations: dense frame sampling including near 0°, near 180°, absent and non-orthogonal tangents; UV rectangles; colour; lightmap UV.
+The layout test for PackedVertex.
+Measurements:
+bytes per vertex and per quad;
+upload and retained memory on the streaming example and the other examples;
+per-pass GPU time for the G-buffer and fused passes, casters, world reflection rays and dynamic GI rays (RD-6).
+CHANGELOG:
+colours clamped to 0..1 at 8-bit sRGB precision;
+zero or non-finite normals refused;
+more than 65 536 distinct chart bounds per model refused;
+tiled UVs keep 16-bit precision per vertex across their mesh's UV extent, so games should wrap UVs per quad where they can (a voxel face's 0..1, an atlas cell) rather than tiling world-space UVs across a large mesh;
+otherwise no game-code changes.
+Validation (design PR)
+bun scripts/license-notices.ts check passes, and bun test scripts passes (9 tests).
+Part of #136
+🤖 Generated with Claude Code
+stevepryde
+mentioned this pull request
+Oct 5, 2026
+SGL3D: compress scene vertex attributes (Godot 4's scheme)
+#136
+Closed
+stevepryde
+force-pushed
+the
+claude/issue-136
+branch
+from
+0236f86 to
+3bb1ede
+Compare
+October 5, 2026 01:56
+stevepryde
+and others
+added 2 commits
+October 5, 2026 13:56
+Design packed scene vertices after Godot's attribute compression
+…
+f2b9a6c
+```
+Amend the SGL3D architecture (AR-9) with a vertex encoding contract:
+asset::Vertex stays the input, and the ray source keeps each vertex in
+32 bytes. Positions stay f32 (Hyperdrive's content needs them; Bevy
+keeps them too); the normal and tangent take Godot b130438's
+axis-angle encoding (octahedral axis and a 16-bit angle whose half
+holds the handedness) from an orthonormalised frame; UVs are 16-bit
+across each mesh's rectangle; colour RGBA8 with sRGB colour; lightmap
+UV 16-bit; and a 16-bit chart index replaces per-vertex lightmap
+bounds. One owner per language, every reader named, deformed vertices
+and morph displacements stay f32. Design only.
+
+Part of #136
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+State the frame's row convention, nearest rounding and the chart word
+…
+73efd76
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+stevepryde
+force-pushed
+the
+claude/issue-136
+branch
+from
+3bb1ede to
+73efd76
+Compare
+October 5, 2026 03:26
+stevepryde
+merged commit d87d64f
+into
+main
+Oct 5, 2026
+This was referenced Oct 5, 2026
+Weigh dynamic GI probes with RTXGI's wrap weight and floor and Majercik 2021's self-shadow bias
+#159
+Merged
+Prepare models off the render thread before the scene places them (#135)
+#165
+Merged
+Pack scene vertices into 32 bytes
+#167
+Merged
+stevepryde
+deleted the
+claude/issue-136
+branch
+October 13, 2026 08:21
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

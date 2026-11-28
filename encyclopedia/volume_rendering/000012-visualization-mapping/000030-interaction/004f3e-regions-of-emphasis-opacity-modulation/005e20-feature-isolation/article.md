@@ -1,0 +1,167 @@
+# Feature Isolation
+
+
+## Overview
+Feature Isolation is a focus + context technique that emphasizes a specific feature of interest by reducing the color saturation or opacity of nearby, non-target features [S1, unofficial]. It extends standard opacity modulation by applying simultaneous color saturation reduction to achieve finer visual separation of complex or bifurcated structures [S1, unofficial].
+
+## How it works
+**Inputs:**
+1. Volumetric dataset $V$ with scalar values.
+2. User-defined region of interest (ROI) $R$, defined by a spatial mask or scalar range.
+3. Rendering parameters: saturation reduction factor $S_{red} \in [0, 1]$, opacity reduction factor $\alpha_{red} \in [0, 1]$, and falloff radius $R_f$ [G].
+
+**Outputs:**
+Rendered image where features within $R$ retain full visual prominence, and nearby features have reduced saturation and/or opacity [S1, unofficial].
+
+**Data Structures:**
+* `TransferFunction`: Maps scalar value $v$ to base color $C_{base}(v)$ and base opacity $\alpha_{base}(v)$ [G].
+* `FeatureMask`: Binary 3D array $M(x,y,z)$ where $1$ indicates the feature of interest, $0$ otherwise [G].
+
+**Steps:**
+1. **Identify Feature of Interest:** Define the ROI $R$ using spatial coordinates or a target scalar range [S1, unofficial].
+2. **Compute Proximity:** Calculate a distance metric $d$ between each voxel and the nearest voxel in $R$ [G].
+3. **Calculate Modulation Factors:** Evaluate a falloff function $f(d)$ that equals $0$ inside $R$ and approaches $1$ outside, then compute $S_{mod}$ and $\alpha_{mod}$ [G].
+4. **Apply Modulation:** Convert base colors to HSV space, reduce saturation by $S_{mod}$, convert back to RGB, and scale opacity by $\alpha_{mod}$ [S1, unofficial].
+5. **Render:** Composite the final color and opacity along rays using standard volume rendering integration [G].
+
+**Formulas:**
+* Proximity: For spatial ROI, $d$ is the Euclidean distance to the nearest ROI voxel [G]. For scalar ROI, $d = |v - v_{center}|$ [G].
+* Falloff: $f(d) = \min(d / R_f, 1.0)$ [G].
+* Saturation modulation: $S_{mod} = 1 - (1 - S_{red}) \cdot f(d)$ [G].
+* Opacity modulation: $\alpha_{mod} = 1 - (1 - \alpha_{red}) \cdot f(d)$ [G].
+* Color conversion: $C_{final} = HSV2RGB(H, S_{base} \cdot S_{mod}, V)$ [G].
+* Final opacity: $\alpha_{final} = \alpha_{base} \cdot \alpha_{mod}$ [G].
+
+**Parameters:**
+* $S_{red}, \alpha_{red} \in [0, 1]$ control the maximum reduction strength [G].
+* $R_f$ defines the spatial extent of the modulation falloff [G].
+
+**Edge Cases and Pitfalls:**
+* **Precision:** If $S_{red}$ or $\alpha_{red}$ is close to $1$, nearby features may become imperceptible; a minimum opacity threshold should be applied to prevent numerical underflow [G].
+* **Boundaries:** Sharp transitions in the ROI mask can cause visible artifacts; smoothing the mask or using a soft falloff function $f(d)$ is recommended [G].
+* **Degenerate Input:** If the ROI covers the entire volume, $d=0$ everywhere, $f(d)=0$, and no modulation occurs. If the ROI is empty, all features are modulated [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def rgb_to_hsv(r, g, b):
+    """Standard RGB to HSV conversion [G]"""
+    cmax = max(r, g, b)
+    cmin = min(r, g, b)
+    delta = cmax - cmin
+    h = 0.0
+    if delta > 0:
+        if cmax == r: h = 60 * (((g - b) / delta) % 6)
+        elif cmax == g: h = 60 * (((b - r) / delta) + 2)
+        else: h = 60 * (((r - g) / delta) + 4)
+    s = 0.0 if cmax == 0 else delta / cmax
+    v = cmax
+    return h, s, v
+
+def hsv_to_rgb(h, s, v):
+    """Standard HSV to RGB conversion [G]"""
+    c = v * s
+    x = c * (1 - abs((h / 60) % 2 - 1))
+    m = v - c
+    if h < 60: r, g, b = c, x, 0
+    elif h < 120: r, g, b = x, c, 0
+    elif h < 180: r, g, b = 0, c, x
+    elif h < 240: r, g, b = 0, x, c
+    elif h < 300: r, g, b = x, 0, c
+    else: r, g, b = c, 0, x
+    return r + m, g + m, b + m
+
+def compute_distance_mask(volume_shape, roi_mask):
+    """Compute Euclidean distance transform from ROI [G]"""
+    dist = [[[float('inf')] * volume_shape[2] for _ in range(volume_shape[1])] for _ in range(volume_shape[0])]
+    for i in range(volume_shape[0]):
+        for j in range(volume_shape[1]):
+            for k in range(volume_shape[2]):
+                if roi_mask[i][j][k]:
+                    dist[i][j][k] = 0.0
+    changed = True
+    while changed:
+        changed = False
+        for i in range(volume_shape[0]):
+            for j in range(volume_shape[1]):
+                for k in range(volume_shape[2]):
+                    if dist[i][j][k] == 0.0: continue
+                    neighbors = []
+                    if i > 0: neighbors.append(dist[i-1][j][k])
+                    if i < volume_shape[0]-1: neighbors.append(dist[i+1][j][k])
+                    if j > 0: neighbors.append(dist[i][j-1][k])
+                    if j < volume_shape[1]-1: neighbors.append(dist[i][j+1][k])
+                    if k > 0: neighbors.append(dist[i][j][k-1])
+                    if k < volume_shape[2]-1: neighbors.append(dist[i][j][k+1])
+                    new_dist = min(neighbors) + 1.0
+                    if new_dist < dist[i][j][k]:
+                        dist[i][j][k] = new_dist
+                        changed = True
+    return dist
+
+def feature_isolation_rendering(volume, roi_mask, s_red, alpha_red, falloff_radius):
+    """
+    volume: 3D list of scalar values
+    roi_mask: 3D boolean list, True for feature of interest
+    s_red: float, saturation reduction strength (0 to 1)
+    alpha_red: float, opacity reduction strength (0 to 1)
+    falloff_radius: float, distance at which modulation reaches maximum
+    """
+    shape = (len(volume), len(volume[0]), len(volume[0][0]))
+    dist = compute_distance_mask(shape, roi_mask)
+    max_dist = max(max(row[k]) for row in dist for k in range(len(row[0])))
+    if max_dist == 0: max_dist = 1.0
+
+    rendered_volume = [[[0.0, 0.0, 0.0] for _ in range(shape[2])] for _ in range(shape[1])]
+    final_opacities = [[[0.0] * shape[2] for _ in range(shape[1])] for _ in range(shape[0])]
+
+    for x in range(shape[0]):
+        for y in range(shape[1]):
+            for z in range(shape[2]):
+                val = volume[x][y][z]
+                # Transfer function lookup [G]
+                c_base = [0.5, 0.5, 0.5]
+                a_base = 0.8
+
+                d = dist[x][y][z]
+                f_d = min(d / falloff_radius, 1.0)
+
+                s_mod = 1.0 - (1.0 - s_red) * f_d
+                alpha_mod = 1.0 - (1.0 - alpha_red) * f_d
+
+                h, s, v = rgb_to_hsv(*c_base)
+                s_new = s * s_mod
+                c_final = hsv_to_rgb(h, s_new, v)
+
+                a_final = a_base * alpha_mod
+
+                rendered_volume[y][z][x] = c_final
+                final_opacities[x][y][z] = a_final
+
+    # Standard front-to-back alpha compositing would be applied here [G]
+    return rendered_volume, final_opacities
+```
+
+## Subtopics
+
+### Background Suppression via Saturation
+A technique to suppress signal from background tissues to visualize injections of contrast agent, using magnetization preparation [S2]. It executes a nonselective 90° saturation pulse immediately prior to the acquisition of each image [S2]. Alternatively, a spatially or chemically selective saturation pulse can be prescribed by the user [S2]. This is particularly useful in contrast-enhanced MRI imaging where Gd-DTPA is used as a T1-shortening agent [S2].
+
+## Operating characteristics
+* **Time Complexity:** Not given in the sources.
+* **Memory Complexity:** Not given in the sources.
+* **Measured Performance:** Not given in the sources.
+* **Strengths:** Effective for separating visually similar features by altering both color and opacity [S1, unofficial].
+* **Limitations:** Requires careful tuning of saturation and opacity reduction factors [G]. May increase computational cost if complex transfer functions are used [S1, unofficial].
+* **When to Use:** When emphasizing a specific feature while maintaining context of surrounding structures, especially in complex bifurcated or mixed features [S1, unofficial].
+* **When Not to Use:** When high contrast between features is already sufficient, or when computational resources are severely limited [G].
+
+## Background
+Origin: Described in a generalized framework for illustrative visualization of time-varying data on unstructured meshes [S1, unofficial]. Related MRI background suppression techniques use magnetization preparation [S2]. Ebert and Rheingans developed illustrative visualization techniques for volumetric rendering, though their formulations typically operate on complex transfer functions applied to the entire dataset, which can reduce flexibility and increase computational cost compared to targeted feature isolation [S1, unofficial].
+
+## Sources
+[S1] Generalized Framework and Algorithms for Illustrative Visualization of Time-Varying Data on Unstructured Meshes, https://digital.library.unt.edu/ark:/67531/metadc838861/?q=illustrative volume rendering, fetched 2026-10-28 (unofficial)
+[S2] Real-Time Volume Rendered MRI for Interventional Guidance, https://pmc.ncbi.nlm.nih.gov/articles/PMC2570028/, fetched 2026-10-27

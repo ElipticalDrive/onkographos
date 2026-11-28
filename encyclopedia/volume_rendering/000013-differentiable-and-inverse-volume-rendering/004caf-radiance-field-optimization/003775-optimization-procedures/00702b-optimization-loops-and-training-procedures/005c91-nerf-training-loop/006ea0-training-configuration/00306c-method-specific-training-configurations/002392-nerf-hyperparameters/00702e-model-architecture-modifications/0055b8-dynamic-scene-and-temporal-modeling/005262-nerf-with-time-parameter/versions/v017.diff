@@ -1,0 +1,174 @@
+--- v016.md
++++ v017.md
+@@ -4,52 +4,101 @@
+ 
+ ## Overview
+-This method adapts the static Neural Radiance Field (NeRF) architecture for dynamic scenes by introducing a temporal dimension to the input space [S1]. It solves the problem of representing time-varying geometry and appearance by allowing the network to condition its density and color predictions on a specific timestamp [S1]. Unlike advanced dynamic NeRF variants that model explicit motion fields or scene graphs, this approach relies solely on the network's capacity to interpolate or extrapolate scene states through the time parameter, serving as a baseline for temporal modeling [S1].
++NeRF with Time Parameter is a baseline method for adapting static Neural Radiance Fields (NeRF) to dynamic scenes by explicitly conditioning the radiance field on a temporal coordinate [S1]. It solves the problem of representing time-varying geometry and appearance by extending the input domain of the implicit function from $(\mathbf{x}, \mathbf{d})$ to $(\mathbf{x}, \mathbf{d}, t)$ [S1]. Unlike deformation-based approaches that warp points to a canonical space, this method treats time as a direct conditioning signal [S1]. It sets itself apart from siblings like [Gear-NeRF](13848-gear-nerf.md) or [ST-NeRF](18515-st-nerf.md) by its simplicity: it modifies only the input encoding and MLP conditioning, without introducing explicit deformation fields, particle systems, or complex temporal attention mechanisms [S1].
+ 
+ ## How it works
++The method modifies the standard NeRF architecture to accept a time parameter $t$. The core task is to learn a continuous volumetric scene representation $F_\Theta: (\mathbf{x}, \mathbf{d}, t) \rightarrow (\sigma, \mathbf{c})$, where $\mathbf{x} \in \mathbb{R}^3$ is the spatial position, $\mathbf{d} \in \mathbb{R}^3$ is the viewing direction, $t \in \mathbb{R}$ is the time parameter, $\sigma$ is the volume density, and $\mathbf{c} \in \mathbb{R}^3$ is the view-dependent color [G].
++
+ **Inputs and Outputs:**
+-*   **Inputs:** A 3D spatial coordinate $\mathbf{x} \in \mathbb{R}^3$, a viewing direction $\mathbf{d} \in \mathbb{R}^3$, and a scalar time parameter $t \in \mathbb{R}$ [S1].
+-*   **Outputs:** Volume density $\sigma \in \mathbb{R}$ and view-dependent color $\mathbf{c} \in \mathbb{R}^3$ [S1].
++*   **Input:** A ray defined by origin $\mathbf{o}$ and direction $\mathbf{d}$, sampled at $N$ points $\mathbf{x}_i$ along the ray, and a specific time instance $t$.
++*   **Output:** Volume density $\sigma_i$ and color $\mathbf{c}_i$ for each sample point.
+ 
+ **Data Structures:**
+-The neural network is a Multi-Layer Perceptron (MLP). The input layer accepts the concatenated positional encodings of spatial coordinates and time. The architecture follows the standard NeRF configuration used for real forward-facing experiments [S1].
++The model consists of a Multi-Layer Perceptron (MLP) with weights $\Theta$. The input layer receives a concatenated vector of positional encodings.
++*   **Positional Encoding $\gamma(\cdot)$:** Standard NeRF positional encoding is used for spatial coordinates $\mathbf{x}$ and viewing direction $\mathbf{d}$ [S1].
++*   **Time Encoding:** The scalar time parameter $t$ is also positionally encoded using $\gamma(t)$ [S1].
+ 
+ **Steps:**
+-1.  **Positional Encoding of Time:** Apply the same positional encoding function $\gamma_t$ used for spatial coordinates to the time parameter $t$ [S1].
+-2.  **Concatenation:** Concatenate the encoded time $\gamma_t(t)$ with the encoded spatial position $\gamma_x(\mathbf{x})$ to form the combined input vector $\mathbf{z} = [\gamma_x(\mathbf{x}); \gamma_t(t)]$ [S1].
+-3.  **Network Forward Pass:** Feed $\mathbf{z}$ and the viewing direction $\mathbf{d}$ into the NeRF MLP to predict density $\sigma$ and color $\mathbf{c}$ [S1].
+-4.  **Volume Rendering:** Render the image using the standard volume rendering integral, summing contributions from sampled points along rays parameterized by time $t$ [G].
++1.  **Encode Inputs:** Compute the positional encoding for the spatial coordinates $\gamma(\mathbf{x})$ and the time parameter $\gamma(t)$ [S1].
++2.  **Concatenate:** Concatenate the spatial encoding and time encoding to form the combined spatial-temporal input vector: $\mathbf{v} = [\gamma(\mathbf{x}), \gamma(t)]$ [S1]. Note: The viewing direction $\mathbf{d}$ is typically encoded separately and concatenated later in the standard NeRF architecture (e.g., after the first hidden layer for the color branch), but the time parameter is specifically fused with the spatial features [S1].
++3.  **Forward Pass:** Pass the concatenated vector $\mathbf{v}$ through the density MLP to obtain $\sigma$ and intermediate features [S1].
++4.  **Color Prediction:** Combine the intermediate features with the encoded viewing direction $\gamma(\mathbf{d})$ and pass them through the color MLP to obtain $\mathbf{c}$ [S1].
++5.  **Volume Rendering:** Integrate $\sigma_i$ and $\mathbf{c}_i$ along the ray using standard volume rendering equations to compute the final pixel color [G].
+ 
+ **Pseudocode:**
+ ```python
+-def nerf_with_time_forward(x, d, t, network):
+-    """
+-    x: (3,) spatial coordinates
+-    d: (3,) viewing direction
+-    t: (1,) scalar time parameter
+-    network: The NeRF MLP model
+-    """
+-    # 1. Positional encoding of time
+-    # Assuming gamma_t is the same positional encoding function as gamma_x
+-    t_encoded = gamma_t(t)
+-    
+-    # 2. Concatenate with spatial encoding
+-    # gamma_x(x) is assumed to be pre-computed or computed similarly
+-    x_encoded = gamma_x(x)
+-    z = concatenate([x_encoded, t_encoded])
+-    
+-    # 3. Forward pass through the network
+-    # The network takes the concatenated encoding and direction
+-    sigma, color = network(z, d)
+-    
+-    return sigma, color
++import torch
++import torch.nn as nn
++
++class NeRFTime(nn.Module):
++    def __init__(self, D=8, W=256, skips=[4], input_ch=3, input_ch_dir=3, input_ch_time=1):
++        super().__init__()
++        # Standard NeRF architecture components
++        self.D = D
++        self.W = W
++        self.input_ch = input_ch
++        self.input_ch_dir = input_ch_dir
++        self.input_ch_time = input_ch_time
++        
++        # Density network
++        self.pts_linears = nn.ModuleList([nn.Linear(input_ch + input_ch_time, W)] + 
++                                         [nn.Linear(W, W) for _ in range(D - 1)])
++        self.output_linear = nn.Linear(W, 1) # Output sigma
++        
++        # Color network
++        self.dir_linears = nn.ModuleList([nn.Linear(W + input_ch_dir, W // 2)])
++        self.output_linear_color = nn.Linear(W // 2, 3) # Output color
++        
++        # Skips are applied to the input of the D-th layer
++        self.skips = skips
++
++    def forward(self, x, d, t):
++        """
++        x: [N, 3] spatial coordinates
++        d: [N, 3] viewing directions
++        t: [N, 1] time parameters
++        """
++        # 1. Encode time and concatenate with spatial coordinates
++        # Assuming gamma is a function that returns positional encodings
++        # In a real implementation, gamma would be applied before this module or as a layer
++        x_enc = gamma(x) # [N, L_x]
++        t_enc = gamma(t) # [N, L_t]
++        
++        # Concatenate spatial and time encodings
++        x_t_enc = torch.cat([x_enc, t_enc], dim=-1) # [N, L_x + L_t]
++        
++        # 2. Density Network
++        h = x_t_enc
++        for i, linear in enumerate(self.pts_linears):
++            h = linear(h)
++            h = torch.relu(h)
++            if i in self.skips:
++                h = torch.cat([x_t_enc, h], dim=-1)
++        
++        sigma = self.output_linear(h) # [N, 1]
++        sigma = torch.relu(sigma) # Ensure non-negative density
++        
++        # 3. Color Network
++        # Concatenate features from density network with direction encoding
++        d_enc = gamma(d) # [N, L_d]
++        h_dir = torch.cat([h, d_enc], dim=-1)
++        
++        for linear in self.dir_linears:
++            h_dir = linear(h_dir)
++            h_dir = torch.relu(h_dir)
++            
++        color = self.output_linear_color(h_dir) # [N, 3]
++        color = torch.sigmoid(color) # Ensure color in [0, 1]
++        
++        return sigma, color
+ ```
+ 
+ **Parameters:**
+-*   **Training Configuration:** The configuration reported for NeRF's real forward-facing experiments is used [S1]. Specific hyperparameters (learning rate, layer sizes) are not detailed in the sources beyond this reference [S1].
++*   **Training Configuration:** The method is trained using the configuration reported for NeRF's real forward-facing experiments [S1]. This typically includes learning rates, batch sizes, and number of iterations as defined in the original NeRF paper [S1].
++*   **Time Normalization:** The time parameter $t$ should be normalized to a consistent range (e.g., $[0, 1]$) across the sequence to ensure stable training [G].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Blurriness:** The method suffers from blurry predictions and lacks detail compared to more complex dynamic scene representations [S1].
+-*   **Lack of Dynamics Reasoning:** The model cannot explicitly reason about scene dynamics; it treats time as an additional input dimension without enforcing temporal consistency or motion constraints [S1].
+-*   **Ghosting:** While improved over vanilla NeRF, it may still exhibit artifacts if the temporal interpolation is insufficient for rapid scene changes [S1].
++*   **Blurriness:** The method suffers from blurry predictions and lacks detail compared to more complex dynamic methods [S1].
++*   **Ghosting:** Even with the time parameter, small changes in camera pose can lead to slightly different viewing directions for spatial points across frames, causing severe ghosting artifacts if the scene dynamics are not perfectly captured by the time conditioning alone [S1].
++*   **Lack of Dynamics Reasoning:** The method fails to reason about scene dynamics explicitly; it relies on the MLP to interpolate between states, which can lead to uncertain predictions in regions of high motion [S1].
+ 
+ ## Subtopics
+@@ -57,20 +106,24 @@
+ ### Temporal Compression of NeRF Models
+ A compression strategy for sequences of NeRF models that exploits temporal redundancy by treating the first model as a key-frame and compressing only the deltas between successive models [S2].
+-*   **Definition:** The system design stems from the insight that neighboring NeRF models share considerable similarities [S2].
+-*   **Training Strategy:** Each NeRF is initialized based on the previous frame’s NeRF, except for the first frame’s NeRF, which is trained from the beginning as the starting point [S2]. This encourages temporal redundancy and saves training time [S2].
+-*   **Compression Step:** For a sequence of trained NeRF models, the first model is regarded as a “key-frame” or “I-frame” [S2]. The deltas between the current frame's NeRF weights and the previous frame's NeRF weights are calculated [S2].
+-*   **Encoding:** Exponent-based quantization and Huffman coding are applied to the deltas [S2].
+-*   **Decoding:** To restore a model, the decoded deltas are accumulated to the reference model (the previous frame's model) [S2].
++*   **Definition:** This approach leverages the observation that neighboring NeRF models share considerable similarities [S2]. It treats the first model as a reference "I-frame" and stores only the weight differences (deltas) for subsequent frames [S2].
++*   **Steps:**
++    1.  Initialize the NeRF for the first frame from scratch [S2].
++    2.  For subsequent frames, initialize the new NeRF based on the previous frame's trained NeRF to encourage temporal redundancy and save training time [S2].
++    3.  Calculate the delta between the current frame's NeRF weights and the previous frame's NeRF weights [S2].
++    4.  Apply exponent-based quantization and Huffman coding to the deltas [S2].
++    5.  To restore a model, accumulate the decoded deltas to the reference model (the previous frame's model) [S2].
++*   **When to choose:** Use this when storage or transmission bandwidth is constrained and the scene dynamics are smooth enough that weight deltas are small and compressible [S2].
+ 
+ ## Operating characteristics
+-*   **Quality:** Adding a time parameter improves quality over vanilla NeRF but still lacks detail and suffers from blurry predictions [S1].
+-*   **Limitations:** It fails to reason about scene dynamics, leading to inferior performance on complex dynamic scenes compared to methods that explicitly model motion or scene graphs [S1].
+-*   **Performance:** Quantitative results on KITTI data show that while PSNR and SSIM improve over vanilla NeRF, they remain lower than advanced methods like Neural Scene Graphs [S1]. Specifically, on KITTI, NeRF + time achieves a PSNR of 24.18 and SSIM of 0.677, compared to 23.34 and 0.662 for vanilla NeRF, but significantly lower than the proposed graph method's 26.66 and 0.806 [S1].
+-*   **Use Case:** Suitable as a baseline for temporal NeRF research or for scenes with slow, smooth temporal variations where explicit motion modeling is not required [S1].
++*   **Time Complexity:** Training time is comparable to standard NeRF, as the computational graph is similar, with the addition of time encoding [S1]. However, it may require more iterations to converge to a satisfactory dynamic representation due to the increased complexity of the input space [S1].
++*   **Memory Complexity:** Memory usage is similar to standard NeRF, as the model size is determined by the MLP dimensions, which are not significantly increased by the addition of the time parameter [S1].
++*   **Performance:** On dynamic scenes (e.g., KITTI), NeRF + time achieves higher PSNR and SSIM than vanilla NeRF but significantly lower performance than methods designed for dynamics (e.g., Neural Scene Graphs) [S1]. It suffers from blurry predictions and fails to capture fine details [S1].
++*   **Strengths:** Simple to implement; requires minimal changes to the standard NeRF codebase [S1].
++*   **Limitations:** Poor handling of complex dynamics; prone to ghosting and blurring; does not explicitly model motion [S1].
++*   **When to use:** As a baseline for comparison; for scenes with very slow or minimal dynamics where simplicity is preferred over accuracy [S1].
++*   **When not to use:** For scenes with significant motion, complex interactions, or high-frequency details [S1].
+ 
+ ## Background
+-*   **Origin:** Introduced in "Neural Scene Graphs for Dynamic Scenes" by Yuang Shi et al. (CVPR 2021) [S1].
+-*   **Context:** SRNs and NeRF were originally designed for static scenes [S1]. This method represents the simplest adaptation to dynamic scenes by augmenting the input space [S1].
+-*   **Development:** It serves as a comparative baseline to demonstrate the necessity of more complex temporal modeling techniques, such as neural scene graphs, which can explicitly handle scene dynamics and novel scene compositions [S1].
++The method was introduced as a baseline to assess the capabilities of existing implicit methods for dynamic scenes [S1]. It was proposed in the context of comparing against more advanced dynamic scene representations, such as Neural Scene Graphs [S1]. The approach builds on the original NeRF paper [S1], extending its input domain to include time [S1].
+ 
+ ## Sources

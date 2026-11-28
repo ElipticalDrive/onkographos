@@ -1,0 +1,188 @@
+# Proxy-GS Cluster Rasterizer
+
+Also called: RendererRasterClustersLod
+
+## Overview
+The Proxy-GS Cluster Rasterizer is a GPU-accelerated rasterization pipeline designed for clustered 3D primitives, specifically optimized for the inference phase of Structured 3D Gaussian Splatting using Vulkan mesh shaders [S1, unofficial]. It differs from standard rasterization by employing a cluster-based traversal and culling mechanism to handle Level of Detail (LOD) structures efficiently, building on the general principles of [Rasterization and GPU Shaders](11755-rasterization-and-gpu-shaders.md). Unlike sibling methods that may rely on triangle-based intersection or simple bounding box culling, this method uses a dedicated compute-shader-driven traversal tree to manage large sets of Gaussian clusters, enabling real-time rendering with unified occlusion priors [S1, unofficial].
+
+## How it works
+The method implements a Vulkan-based pipeline where mesh shaders generate cluster data and compute shaders handle the spatial traversal and culling. The implementation requires specific Vulkan extensions and shader compilation with defined macros.
+
+### Inputs and Outputs
+*   **Inputs**: Scene geometry (meshes or point clouds converted to clusters), camera parameters (view/projection matrices), and configuration flags for cluster size and traversal features.
+*   **Outputs**: Rendered image buffers and depth maps. In the Proxy-GS context, it also supports generating depth caches for training priors [S1, unofficial].
+
+### Data Structures
+The core data management relies on the `shaderio::SceneBuilding` structure, which aggregates scene state into a single buffer object. This structure is allocated as a storage buffer (`m_sceneBuildBuffer`) with uniform and indirect buffer usage capabilities [S1, unofficial].
+
+**Layout of `shaderio::SceneBuilding`:**
+*   `numRenderInstances`: Integer count of renderable instances.
+*   `maxRenderClusters`: Integer maximum number of clusters.
+*   `maxTraversalInfos`: Integer maximum number of traversal info entries.
+*   `indirectDispatchGroups`: Structure for compute dispatch parameters (gridY=1, gridZ=1).
+*   `renderClusterInfos`: Storage buffer for cluster metadata.
+*   `instanceSortKeys`: Storage buffer for instance sorting keys (4 or 8 byte alignment).
+*   `instanceSortValues`: Storage buffer for instance sorting values (4 or 8 byte alignment).
+*   `traversalGroupInfos`: Storage buffer for traversal group information (enabled if `USE_SEPARATE_GROUPS` is set).
+*   `traversalNodeInfos`: Storage buffer for traversal node data.
+
+Additional buffers include `m_sceneDataBuffer` for cluster info and sort data, and `m_sceneTraversalBuffer` for traversal node infos, all requiring 4 or 8 byte alignment [S1, unofficial].
+
+### Parameters
+The behavior is controlled by compile-time macros and configuration flags [S1, unofficial]:
+*   `CLUSTER_VERTEX_COUNT`: Defines vertices per cluster. Value: `rscene.scene->m_maxClusterVertices`.
+*   `CLUSTER_TRIANGLE_COUNT`: Defines triangles per cluster. Value: `rscene.scene->m_maxClusterTriangles`.
+*   `MESHSHADER_WORKGROUP_SIZE`: Mesh shader workgroup size. Value: `32`.
+*   `USE_SORTING`: Boolean flag. If true, enables instance sort keys and values buffers.
+*   `USE_SEPARATE_GROUPS`: Boolean flag. If true, enables traversal group infos buffer and a separate compute shader for traversal.
+
+### Steps
+1.  **Shader Compilation**: Compile mesh and fragment shaders using the macros defined above. Compile compute shaders for traversal presort, initialization, execution, group management, and build setup [S1, unofficial].
+2.  **Buffer Allocation**:
+    *   Allocate `m_sceneBuildBuffer` for the `shaderio::SceneBuilding` struct.
+    *   Allocate `m_sceneDataBuffer` for cluster info, sort keys/values, and traversal group infos.
+    *   Allocate `m_sceneTraversalBuffer` for traversal node infos.
+3.  **Descriptor Binding**: Bind descriptor sets for the frame Uniform Buffer Object (UBO), readback Storage Buffer Object (SSBO), geometries SSBO, render instances SSBO, scene building SSBO/UBO, Hierarchical Z (HiZ) texture, and streaming buffers [S1, unofficial].
+4.  **Pipeline Creation**:
+    *   Create a pipeline layout with the descriptor set layout and a push constant range of 4 bytes.
+    *   Create the graphics pipeline linking the mesh and fragment shaders. Configure rasterization state for front-face winding and culling modes [S1, unofficial].
+5.  **Execution**: Dispatch compute shaders for traversal and culling, then execute the graphics pipeline to render the clusters [S1, unofficial].
+
+### Pseudocode
+The following pseudocode outlines the initialization and execution flow in a Python-like style, reflecting the Vulkan resource management and shader dispatch logic described in the sources.
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def initialize_proxy_gs_rasterizer(scene_config):
+    """
+    Initializes the Vulkan pipeline and buffers for the Proxy-GS Cluster Rasterizer.
+    """
+    # 1. Define compile-time macros based on scene configuration
+    CLUSTER_VERTEX_COUNT = scene_config.max_cluster_vertices
+    CLUSTER_TRIANGLE_COUNT = scene_config.max_cluster_triangles
+    MESHSHADER_WORKGROUP_SIZE = 32
+    USE_SORTING = scene_config.enable_instance_sorting
+    USE_SEPARATE_GROUPS = scene_config.enable_separate_traversal_groups
+
+    # 2. Compile Shaders
+    # Compile mesh and fragment shaders with the defined macros
+    mesh_shader = compile_shader('mesh_shader.comp', macros={
+        'CLUSTER_VERTEX_COUNT': CLUSTER_VERTEX_COUNT,
+        'CLUSTER_TRIANGLE_COUNT': CLUSTER_TRIANGLE_COUNT,
+        'MESHSHADER_WORKGROUP_SIZE': MESHSHADER_WORKGROUP_SIZE
+    })
+    fragment_shader = compile_shader('fragment_shader.frag')
+    
+    # Compile compute shaders for traversal
+    compute_shaders = [
+        compile_shader('traversal_presort.comp'),
+        compile_shader('traversal_init.comp'),
+        compile_shader('traversal_run.comp'),
+        compile_shader('traversal_groups.comp'),
+        compile_shader('traversal_build_setup.comp')
+    ]
+
+    # 3. Allocate Buffers
+    # Allocate main scene building buffer
+    m_scene_build_buffer = allocate_buffer(
+        size=sizeof(shaderio::SceneBuilding),
+        usage=VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | 
+              VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | 
+              VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT
+    )
+    
+    # Allocate scene data buffer for cluster info and sorting
+    m_scene_data_buffer = allocate_buffer(
+        size=calculate_cluster_and_sort_size(scene_config),
+        alignment=8, # 4 or 8 byte alignment as per source
+        usage=VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+    )
+    
+    # Allocate traversal node buffer
+    m_scene_traversal_buffer = allocate_buffer(
+        size=calculate_traversal_node_size(scene_config),
+        usage=VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+    )
+
+    # 4. Bind Descriptors
+    descriptor_set = create_descriptor_set()
+    descriptor_set.bind(
+        frame_ubo=bind_ubo(scene_config.frame_data),
+        readback_ssbo=bind_ssbo(m_scene_build_buffer),
+        geometries_ssbo=bind_ssbo(scene_config.geometries),
+        render_instances_ssbo=bind_ssbo(scene_config.instances),
+        scene_building_ssbo=bind_ssbo(m_scene_build_buffer),
+        scene_building_ubo=bind_ubo(scene_config.scene_uniforms),
+        hiz_texture=bind_texture(scene_config.hiz_texture),
+        streaming_buffers=bind_ssbo(scene_config.streaming_data)
+    )
+
+    # 5. Create Pipeline
+    pipeline_layout = create_pipeline_layout(
+        descriptor_set_layout=descriptor_set.layout,
+        push_constant_range=4 # 4 bytes
+    )
+    
+    graphics_pipeline = create_graphics_pipeline(
+        mesh_shader=mesh_shader,
+        fragment_shader=fragment_shader,
+        pipeline_layout=pipeline_layout,
+        rasterization_state=RasterizationState(
+            front_face=VK_FRONT_FACE_COUNTER_CLOCKWISE,
+            cull_mode=VK_CULL_MODE_BACK_BIT
+        )
+    )
+
+    return {
+        'pipeline': graphics_pipeline,
+        'buffers': {
+            'scene_build': m_scene_build_buffer,
+            'scene_data': m_scene_data_buffer,
+            'traversal': m_scene_traversal_buffer
+        },
+        'config': {
+            'use_sorting': USE_SORTING,
+            'use_separate_groups': USE_SEPARATE_GROUPS
+        }
+    }
+
+def render_frame(rasterizer_state, camera, scene_data):
+    """
+    Executes the rasterization pipeline for a single frame.
+    """
+    # Update buffers with current frame data
+    update_buffer(rasterizer_state['buffers']['scene_build'], scene_data)
+    
+    # Dispatch compute shaders for traversal if enabled
+    if rasterizer_state['config']['use_separate_groups']:
+        dispatch_compute(rasterizer_state['compute_shaders']['traversal_groups'], ...)
+    
+    # Execute graphics pipeline
+    bind_pipeline(rasterizer_state['pipeline'])
+    bind_descriptor_set(rasterizer_state['pipeline'], rasterizer_state['descriptor_set'])
+    
+    # Draw calls would be issued here based on indirect draw commands
+    # or mesh shader output
+    draw_mesh_indirect(...)
+```
+
+### Edge Cases and Pitfalls
+*   **DLSS Support**: Deep Learning Super Sampling (DLSS) is not supported in raster mode and is disabled by default [S1, unofficial].
+*   **Alignment**: Buffers for cluster info, sort keys, and traversal group infos must adhere to 4 or 8 byte alignment requirements to ensure correct GPU access [S1, unofficial].
+*   **Hardware Requirements**: The Vulkan-CUDA interop backend, used for high-performance rendering in Proxy-GS, currently requires Ubuntu Linux and an NVIDIA RTX-series compute GPU [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity**: Not given in the sources.
+*   **Memory Complexity**: Not given in the sources.
+*   **Measured Performance**: Not given in the sources.
+*   **Strengths**: Enables real-time rendering of structured 3D Gaussians with LOD support via cluster-based culling. Integrates with Vulkan for low-level GPU control.
+*   **Limitations**: Requires specific hardware (NVIDIA RTX) and OS (Ubuntu) for the Vulkan-CUDA interop backend. DLSS is incompatible with the raster mode.
+*   **When to use**: When rendering large-scale structured 3D Gaussian scenes with LOD requirements on compatible NVIDIA hardware using Vulkan.
+*   **When not to use**: When DLSS is required, or on non-NVIDIA/non-Linux platforms where the Vulkan-CUDA interop is not available.
+
+## Background
+The Proxy-GS Cluster Rasterizer is part of the Proxy-GS project, which was presented as a CVPR 2026 Oral and Best Paper Candidate [S1, unofficial]. The paper "Proxy-GS: Unified Occlusion Priors for Training and Inference in Structured 3D Gaussian Splatting" by Gao et al. (2025) introduces the method as a unified approach for training and inference [S1, unofficial]. The project builds upon previous works including Octree-GS, Scaffold-GS, and 3D Gaussian Splatting, and utilizes the `vk_lod_clusters` sample from NVIDIA for cluster-based LOD rasterization [S1, unofficial].
+
+## Sources
+[S1] Visionary-Laboratory/Proxy-GS, https://github.com/Visionary-Laboratory/Proxy-GS, fetched 2026-10-27 (unofficial)

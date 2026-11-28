@@ -1,0 +1,640 @@
+[CVPR'24 Best Student Paper] Mip-Splatting: Alias-free 3D Gaussian Splatting - Why opacity compensation on the 3D filter? This makes small Gaussians non-opaque. · Issue #48 · autonomousvision/mip-splatting
+
+Why opacity compensation on the 3D filter? This makes small Gaussians non-opaque. · Issue #48 · autonomousvision/mip-splatting · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Why opacity compensation on the 3D filter? This makes small Gaussians non-opaque. #48
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Why opacity compensation on the 3D filter? This makes small Gaussians non-opaque.#48
+Copy link
+Description
+f-dy
+opened on Sep 5, 2024
+Issue body actions
+The justification for the 3D filter in the paper comes from the fact that "a primitive smaller than 2Tˆ may result in aliasing artifacts during the splatting process, since its size is below twice the sampling interval."
+In practice, this means that there is a minimum Gaussian scale (filter_3D in the code), and the real scales are computed from the scales parameters that way:
+```
+        scales = torch.square(scales) + torch.square(self.filter_3D)
+        scales = torch.sqrt(scales)
+```
+However, the code actually implements it as a 3D Gaussian filter, and also applies opactity compensation in 3D:
+```
+        scales_square = torch.square(scales)
+        det1 = scales_square.prod(dim=1)
+        
+        scales_after_square = scales_square + torch.square(self.filter_3D) 
+        det2 = scales_after_square.prod(dim=1) 
+        coef = torch.sqrt(det1 / det2)
+        return opacity * coef[..., None]
+```
+This last part (opacity compensation), in my opinion, is wrong, because this prevents small Gaussians from being 100% opaque.
+For example, a round Gaussian that would exactly have the "parameter" scale filter_3D, and thus the "real" scale sqrt(2)*filter_3D, and a "parameter" opacity of 1, will have a "real" opacity of...
+```
+det1 = (filter_3D**2)**3
+det2 = (2*filter_3D**2)**3
+opacity = 1 * sqrt(det1/det2) = sqrt(1/8) = 0.35
+```
+35% !
+The effect is similar on larger Gaussian: no Gaussian can be 100% opaque with this 3D opacity compensation.
+Conclusion: The 3D filter should really be only about setting a minimum size, without adjusting the opacity, so that small Gaussians can be opaque.
+Of course, I totally agree with opacity compensation on 2D Gaussians (which I proposed in Oct 2023 graphdeco-inria/gaussian-splatting#294 (comment))
+Activity
+niujinshuchong commented on Sep 6, 2024
+niujinshuchong
+on Sep 6, 2024
+Member
+More actions
+Hi, you are correct. The other solution is to just restrict a minimum size for each Gaussian. I tried that at some point but found small artifacts when rendering higher resolution images (maybe just a bug in this experiment, not sure).
+Implementing it as a 3D filter makes it consistent with the 2D filter as in this case the combined effect (3D filter with kernel size 0.2 and 2D mip-filter with kernel size 0.1) will be similar to using an EWA filter (with kernel size 0.3). On the other hand, the 2D filter could also be implemented as a 3D filter by choose the 3D kernel size based on the depth of the Gaussian.
+Thanks for the pointer to the opacity compensation in the 3DGS repo. The major differences is the kernel size. As we explained in our paper, the kernel size should be chosen to approximate a single pixel. See here for a comparison #18 (comment) and more results in our paper.
+👍React with 👍2Reacted by Frédéric Devernay and Liu Jiahao
+f-dy commented on Sep 6, 2024
+f-dy
+on Sep 6, 2024
+Last edited by f-dy
+Author
+More actions
+I added return opacity on line 2 of function get_opacity_with_3D_filter to disable opacity compensation on 3D filters. Here are full benchmarks. Count is the number of Gaussians in the final model.
+TL;DR: the performance is basically unchanged but the number of Gaussians created is much higher. I am trying to examine the PLYs to see why.
+benchmark_nerf_synthetic_ours_mtmt: Multi-scale Training and Multi-scale Testing on the Mip-NeRF 360 dataset
+PSNR:
+chair
+drums
+ficus
+hotdog
+lego
+materials
+mic
+ship
+Average
+orig
+37.565
+27.765
+34.745
+39.169
+35.230
+31.988
+37.678
+32.719
+34.607
+no3dopcomp
+37.715
+27.746
+35.063
+39.104
+35.443
+31.961
+37.452
+32.699
+34.648
+SSIM:
+chair
+drums
+ficus
+hotdog
+lego
+materials
+mic
+ship
+Average
+orig
+0.991
+0.963
+0.990
+0.991
+0.988
+0.979
+0.994
+0.933
+0.979
+no3dopcomp
+0.992
+0.963
+0.991
+0.991
+0.988
+0.978
+0.994
+0.931
+0.978
+LPIPS:
+chair
+drums
+ficus
+hotdog
+lego
+materials
+mic
+ship
+Average
+orig
+0.009
+0.031
+0.009
+0.010
+0.011
+0.018
+0.005
+0.059
+0.019
+no3dopcomp
+0.008
+0.030
+0.008
+0.010
+0.010
+0.017
+0.005
+0.060
+0.019
+Count:
+chair
+drums
+ficus
+hotdog
+lego
+materials
+mic
+ship
+Average
+orig
+225042
+346217
+201422
+162532
+277335
+269540
+376341
+428152
+285822
+no3dopcomp
+352420
+441542
+379597
+193366
+416328
+327555
+359282
+470828
+367614
+benchmark_nerf_synthetic_ours_stmt: Single-scale Training and Multi-scale Testing on the Mip-NeRF 360 dataset
+PSNR:
+chair
+drums
+ficus
+hotdog
+lego
+materials
+mic
+ship
+Average
+orig
+35.615
+26.463
+32.998
+36.141
+32.853
+30.112
+31.713
+29.704
+31.950
+no3dopcomp
+35.023
+25.973
+32.726
+35.450
+32.262
+29.551
+30.965
+28.967
+31.365
+SSIM:
+chair
+drums
+ficus
+hotdog
+lego
+materials
+mic
+ship
+Average
+orig
+0.988
+0.958
+0.988
+0.987
+0.983
+0.975
+0.986
+0.922
+0.973
+no3dopcomp
+0.987
+0.954
+0.987
+0.986
+0.980
+0.972
+0.983
+0.916
+0.971
+LPIPS:
+chair
+drums
+ficus
+hotdog
+lego
+materials
+mic
+ship
+Average
+orig
+0.013
+0.035
+0.012
+0.013
+0.016
+0.019
+0.015
+0.068
+0.024
+no3dopcomp
+0.013
+0.036
+0.012
+0.014
+0.017
+0.020
+0.017
+0.071
+0.025
+Count:
+chair
+drums
+ficus
+hotdog
+lego
+materials
+mic
+ship
+Average
+orig
+267065
+342581
+187353
+193614
+295019
+240818
+409766
+442234
+297306
+no3dopcomp
+490709
+457450
+328333
+214095
+406342
+315571
+420867
+521619
+394373
+benchmark_360v2_ours: Multi-scale Training and Multi-scale Testing on the the Blender dataset
+PSNR:
+bicycle
+flowers
+garden
+stump
+treehill
+room
+counter
+kitchen
+bonsai
+Average
+orig
+25.904
+22.062
+27.973
+27.141
+22.689
+31.890
+29.288
+31.770
+32.572
+27.921
+no3dopcomp
+25.839
+21.969
+27.901
+27.088
+22.389
+31.827
+29.406
+31.696
+32.666
+27.864
+SSIM:
+bicycle
+flowers
+garden
+stump
+treehill
+room
+counter
+kitchen
+bonsai
+Average
+orig
+0.804
+0.656
+0.884
+0.802
+0.655
+0.933
+0.920
+0.936
+0.952
+0.838
+no3dopcomp
+0.800
+0.655
+0.882
+0.799
+0.651
+0.933
+0.920
+0.935
+0.951
+0.836
+LPIPS:
+bicycle
+flowers
+garden
+stump
+treehill
+room
+counter
+kitchen
+bonsai
+Average
+orig
+0.161
+0.267
+0.090
+0.181
+0.269
+0.175
+0.166
+0.107
+0.157
+0.175
+no3dopcomp
+0.161
+0.259
+0.090
+0.182
+0.266
+0.175
+0.165
+0.107
+0.157
+0.174
+Count:
+bicycle
+flowers
+garden
+stump
+treehill
+room
+counter
+kitchen
+bonsai
+Average
+orig
+7797092
+4317844
+5594857
+5742251
+5045895
+2064765
+1479042
+2143430
+1603448
+3976513
+no3dopcomp
+7959140
+4595247
+6246146
+5789040
+5429984
+2037985
+1446504
+2018380
+1564573
+4120777
+benchmark_360v2_ours_stmt: Single-scale Training and Multi-scale Testing on the the Blender dataset
+PSNR:
+bicycle
+flowers
+garden
+stump
+treehill
+room
+counter
+kitchen
+bonsai
+Average
+orig
+27.564
+23.846
+29.842
+28.045
+24.128
+33.534
+30.549
+34.144
+33.698
+29.483
+no3dopcomp
+27.286
+23.710
+29.699
+27.707
+23.773
+33.124
+30.499
+34.023
+33.712
+29.281
+SSIM:
+bicycle
+flowers
+garden
+stump
+treehill
+room
+counter
+kitchen
+bonsai
+Average
+orig
+0.871
+0.753
+0.931
+0.847
+0.743
+0.966
+0.946
+0.975
+0.973
+0.889
+no3dopcomp
+0.864
+0.751
+0.929
+0.838
+0.730
+0.962
+0.945
+0.975
+0.972
+0.885
+LPIPS:
+bicycle
+flowers
+garden
+stump
+treehill
+room
+counter
+kitchen
+bonsai
+Average
+orig
+0.103
+0.190
+0.050
+0.129
+0.196
+0.047
+0.056
+0.027
+0.032
+0.092
+no3dopcomp
+0.104
+0.180
+0.050
+0.131
+0.194
+0.048
+0.056
+0.027
+0.032
+0.091
+Count:
+bicycle
+flowers
+garden
+stump
+treehill
+room
+counter
+kitchen
+bonsai
+Average
+orig
+5405063
+3019078
+2621019
+4474809
+4254862
+1213345
+921229
+1286991
+1286176
+2720285
+no3dopcomp
+6650038
+3809712
+3588673
+6065282
+5260520
+1364150
+1135153
+1445195
+1583042
+3433529
+f-dy commented on Sep 6, 2024
+f-dy
+on Sep 6, 2024
+Author
+More actions
+@niujinshuchong Thanks you for pointing out that the 2D variance was also wrong in the 3DGS implementation! They probably mixed variance with standard deviation! (sqrt(0.1) = 0.3)
+niujinshuchong commented on Sep 7, 2024
+niujinshuchong
+on Sep 7, 2024
+Member
+More actions
+Hi, Thanks for sharing the results. Are you using the latest codebase for the above experiments? The improvements over the paper results are come from the improved densification in our GOF project https://github.com/autonomousvision/gaussian-opacity-fields. To reproduce or to compare with the paper results, you need to use a previous commit.
+f-dy commented on Sep 13, 2024
+f-dy
+on Sep 13, 2024
+Author
+More actions
+@niujinshuchong I ran the full benchmarks, see results above.
+run_mipnerf360_stmt.py didn't have metrics computation, so I made an additional script run_mipnerf360_stmt_metrics.py, and here's also the run_eval_stats.py scripts I made to build all these tables.
+run_mipnerf360_stmt_metrics.py.txt
+run_eval_stats.py.txt
+yzslab commented on Jan 20, 2025
+yzslab
+on Jan 20, 2025
+More actions
+The other solution is to just restrict a minimum size for each Gaussian. I tried that at some point but found small artifacts when rendering higher resolution images
+I conducted several simple experiments recently and found that disabling opacity compensation indeed makes artifacts more noticeable.
+The following are the rendering results of the red-circled areas in the image below after zooming in. The training was performed using images with a resolution of 1600, and the rendered image is in 4K:
+with comp.
+without comp.
+ljh12401 commented on Apr 29, 2025
+ljh12401
+on Apr 29, 2025
+More actions
+The other solution is to just restrict a minimum size for each Gaussian. I tried that at some point but found small artifacts when rendering higher resolution images
+I conducted several simple experiments recently and found that disabling opacity compensation indeed makes artifacts more noticeable.
+The following are the rendering results of the red-circled areas in the image below after zooming in. The training was performed using images with a resolution of 1600, and the rendered image is in 4K:
+with comp. without comp.
+hello, sorry for the late popping in. I'm currently also working on high-resolution aerial dataset, and found that after adding 3d smoothing filter, the aliasing effect has been eliminated effectively. However, the overall rendering quality drops. I was wondering have you ever met this problem before? thank you
+JCpeny commented on Jan 5, 2026
+JCpeny
+on Jan 5, 2026
+Last edited by JCpeny
+More actions
+@f-dy Hello, I also encountered this problem. In the original experimental settings of mip-splatting, the transparency of Gaussian decreased significantly. Because 2D formulas also contain similar ratio coefficients. I'm wondering if the coefficients of the 2D mip filter also play a role in this issue? Thank you.
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

@@ -1,0 +1,191 @@
+--- v006.md
++++ v007.md
+@@ -3,5 +3,5 @@
+ 
+ ## Overview
+-Voxel Mesh Generation (Run-based Greedy Meshing) is a CPU-based algorithm that converts voxel data into a manifold triangle mesh by merging adjacent faces into rectangular quads to reduce draw calls and vertex count [S1, S2, unofficial]. It builds on [Greedy Meshing](3519-greedy-meshing.md) by extending the 2D greedy approach to 3D chunks, specifically optimizing for generation speed over minimal triangle count [S2, unofficial]. Unlike standard greedy meshing which produces fewer triangles but requires complex data structures, this method uses a linear scan with a `done` mask to achieve significantly faster generation times, making it suitable for real-time chunk regeneration in multiplayer environments [S2, unofficial].
++Voxel Mesh Generation (Run-based Greedy Meshing) is a CPU-based algorithm that converts voxel data into a manifold triangle mesh by merging adjacent faces into rectangular quads to reduce draw calls and vertex count [S1, S2, unofficial]. It builds on [Greedy face merging](8935-greedy-face-merging.md) by extending the 2D greedy approach to 3D chunks, specifically optimizing for generation speed over minimal triangle count [S2, unofficial]. Unlike standard greedy meshing which produces fewer triangles but requires complex data structures, this method uses a linear scan with a `done` mask to achieve significantly faster generation times, making it suitable for real-time chunk regeneration in multiplayer environments [S2, unofficial].
+ 
+ ## How it works
+@@ -13,5 +13,5 @@
+ 1.  **Chunk Data:** A 1D array of size $CHUNK\_SIZE^3$ (32,768) storing block types [S2, unofficial].
+ 2.  **Visit Masks:** Six boolean arrays of size $CHUNK\_SIZE^3$ (`visitXN`, `visitXP`, `visitZN`, `visitZP`, `visitYN`, `visitYP`) to track which faces have already been generated for each block, preventing duplicates [S2, unofficial].
+-3.  **Vertex Buffer:** A dynamic integer array (`int[]`) storing packed vertex data. Each vertex is a single 32-bit integer [S2, unofficial].
++3.  **Vertex Buffer:** A dynamic integer array (`int[]`) storing packed vertex data [S2, unofficial]. Each vertex is a single 32-bit integer [S2, unofficial].
+ 4.  **Packed Vertex Layout (32-bit int):**
+     *   Bits 0–5 (6 bits): X position (0–31) [S2, unofficial].
+@@ -27,5 +27,5 @@
+ 
+ 1.  **Initialization:**
+-    *   Set `vertexBuffer.used = 0` [S2, unofficial].
++    *   Set `vertex_buffer.used = 0` [S2, unofficial].
+     *   Initialize `visitXN`, `visitXP`, `visitZN`, `visitZP`, `visitYN`, `visitYP` to `false` [S2, unofficial].
+     *   Load neighbor chunk references for X-, X+, Y-, Y+, Z-, Z+ directions. Handle boundary conditions where neighbor is null if the chunk is at the map edge [S2, unofficial].
+@@ -66,9 +66,8 @@
+ **Pseudocode:**
+ ```python
+-def generate_chunk_mesh(chunk):
+-    CHUNK_SIZE = 32
+-    CHUNK_SIZE_SQUARED = 1024
+-    CHUNK_SIZE_CUBED = 32768
+-    CHUNK_SIZE_SHIFTED = 32 << 6
++def generate_chunk_mesh(chunk_data, chunk_size=32):
++    CHUNK_SIZE_SQUARED = chunk_size * chunk_size
++    CHUNK_SIZE_CUBED = CHUNK_SIZE_SQUARED * chunk_size
++    CHUNK_SIZE_SHIFTED = chunk_size << 6
+     EMPTY = 0
+     
+@@ -82,44 +81,44 @@
+         'YP': [False] * CHUNK_SIZE_CUBED
+     }
++    buffer_capacity = 100000
+     
+-    for k in range(CHUNK_SIZE):
++    for k in range(chunk_size):
+         kCS2 = k * CHUNK_SIZE_SQUARED
+         minZEdge = (k == 0)
+-        maxZEdge = (k == CHUNK_SIZE - 1)
++        maxZEdge = (k == chunk_size - 1)
+         
+-        for i in range(CHUNK_SIZE):
+-            heightMapAccess = k * CHUNK_SIZE + i
+-            j_min = chunk.MinY[heightMapAccess]
+-            j_max = chunk.MaxY[heightMapAccess]
++        for i in range(chunk_size):
++            heightMapAccess = k * chunk_size + i
++            j_min = chunk_data.MinY[heightMapAccess]
++            j_max = chunk_data.MaxY[heightMapAccess]
+             
+             minXEdge = (i == 0)
+-            maxXEdge = (i == CHUNK_SIZE - 1)
+-            
+-            iCS = i * CHUNK_SIZE
++            maxXEdge = (i == chunk_size - 1)
++            
++            iCS = i * chunk_size
+             access = kCS2 + iCS + j_min
+             
+             for j in range(j_min, j_max):
+-                block = chunk.data[access]
++                block = chunk_data.data[access]
+                 if block.kind != EMPTY:
+                     create_run(
+-                        block=block,
+-                        i=i, j=j, k=k,
+-                        i1=i+1, k1=k+1,
+-                        y=j + chunk.chunkPosY * CHUNK_SIZE,
+-                        access=access,
++                        block=block, i=i, j=j, k=k,
++                        y=j, access=access,
+                         minX=minXEdge, maxX=maxXEdge,
+-                        minY=(j==0), maxY=(j==CHUNK_SIZE-1),
++                        minY=(j==0), maxY=(j==chunk_size-1),
+                         minZ=minZEdge, maxZ=maxZEdge,
+                         iCS=iCS, kCS2=kCS2,
+                         vertex_buffer=vertex_buffer,
+                         visit_masks=visit_masks,
+-                        chunk=chunk
++                        buffer_capacity=buffer_capacity,
++                        chunk_size=chunk_size,
++                        CHUNK_SIZE_SHIFTED=CHUNK_SIZE_SHIFTED
+                     )
+                 
+                 access += 1
+-                if len(vertex_buffer) > len(vertex_buffer) - 2048:
++                if len(vertex_buffer) > buffer_capacity - 2048:
+                     vertex_buffer.extend([0] * 2048)
+ 
+-def create_run(block, i, j, k, i1, k1, y, access, minX, maxX, minY, maxY, minZ, maxZ, iCS, kCS2, vertex_buffer, visit_masks, chunk):
++def create_run(block, i, j, k, y, access, minX, maxX, minY, maxY, minZ, maxZ, iCS, kCS2, vertex_buffer, visit_masks, buffer_capacity, chunk_size, CHUNK_SIZE_SHIFTED):
+     texture_health = (block.index_to_texture_shifted | ((block.health // 16) << 23))
+     jS = j << 6
+@@ -127,52 +126,52 @@
+     
+     # X- Face
+-    if not visit_masks['XN'][access] and True: # DrawFaceXN visibility check abstracted
++    if not visit_masks['XN'][access] and is_face_visible(access, 'XN', chunk_data): # Visibility check abstracted [G]
+         visit_masks['XN'][access] = True
+         chunk_access = access + 1
+         length = jS1
+         while length < CHUNK_SIZE_SHIFTED:
+-            if chunk.data[chunk_access].kind != block.kind: # DifferentBlock
++            if chunk_data.data[chunk_access].kind != block.kind: # DifferentBlock
+                 break
+             visit_masks['XN'][chunk_access] = True
+-            append_quad_x(vertex_buffer, x=i, yL=j, yR=length, kL=0, kR=0, normal=3, texture_health=texture_health)
++            append_quad_x(vertex_buffer, x=i, yL=j, yR=length, kL=k, kR=k, normal=3, texture_health=texture_health)
+             chunk_access += 1
+             length += (1 << 6)
+             
+     # X+ Face
+-    if not visit_masks['XP'][access] and True:
++    if not visit_masks['XP'][access] and is_face_visible(access, 'XP', chunk_data):
+         visit_masks['XP'][access] = True
+         chunk_access = access + 1
+         length = jS1
+         while length < CHUNK_SIZE_SHIFTED:
+-            if chunk.data[chunk_access].kind != block.kind:
++            if chunk_data.data[chunk_access].kind != block.kind:
+                 break
+             visit_masks['XP'][chunk_access] = True
+-            append_quad_x(vertex_buffer, x=i+1, yL=j, yR=length, kL=0, kR=0, normal=2, texture_health=texture_health)
++            append_quad_x(vertex_buffer, x=i+1, yL=j, yR=length, kL=k, kR=k, normal=2, texture_health=texture_health)
+             chunk_access += 1
+             length += (1 << 6)
+ 
+     # Z- Face
+-    if not visit_masks['ZN'][access] and True:
++    if not visit_masks['ZN'][access] and is_face_visible(access, 'ZN', chunk_data):
+         visit_masks['ZN'][access] = True
+         chunk_access = access + 1
+         length = jS1
+         while length < CHUNK_SIZE_SHIFTED:
+-            if chunk.data[chunk_access].kind != block.kind:
++            if chunk_data.data[chunk_access].kind != block.kind:
+                 break
+             visit_masks['ZN'][chunk_access] = True
+-            append_quad_z(vertex_buffer, xL=i, xR=0, yL=j, yR=length, z=0, normal=5, texture_health=texture_health)
++            append_quad_z(vertex_buffer, xL=i, xR=i, yL=j, yR=length, z=0, normal=5, texture_health=texture_health)
+             chunk_access += 1
+             length += (1 << 6)
+ 
+     # Z+ Face
+-    if not visit_masks['ZP'][access] and True:
++    if not visit_masks['ZP'][access] and is_face_visible(access, 'ZP', chunk_data):
+         visit_masks['ZP'][access] = True
+         chunk_access = access + 1
+         length = jS1
+         while length < CHUNK_SIZE_SHIFTED:
+-            if chunk.data[chunk_access].kind != block.kind:
++            if chunk_data.data[chunk_access].kind != block.kind:
+                 break
+             visit_masks['ZP'][chunk_access] = True
+-            append_quad_z(vertex_buffer, xL=i, xR=0, yL=j, yR=length, z=1, normal=4, texture_health=texture_health)
++            append_quad_z(vertex_buffer, xL=i, xR=i, yL=j, yR=length, z=1, normal=4, texture_health=texture_health)
+             chunk_access += 1
+             length += (1 << 6)
+@@ -195,4 +194,8 @@
+     buffer.append(xL | yL | shared)
+     buffer.append(xR | yR | shared)
++
++def is_face_visible(access, face, chunk_data):
++    # Placeholder for visibility logic: returns true if face is exposed to air or different block [G]
++    return True
+ ```
+ 
+@@ -224,6 +227,6 @@
+ 
+ **Strengths and Limitations:**
+-*   **Strengths:** Extremely fast generation speed (~390% faster than standard greedy meshing) [S2, unofficial]. Simple data structures and bitwise packing make it efficient for CPU execution and GPU buffering.
+-*   **Limitations:** Produces ~20% more triangles than standard greedy meshing due to less aggressive merging [S2, unofficial]. Not suitable for scenes requiring minimal polygon counts.
++*   **Strengths:** Extremely fast generation speed (~390% faster than standard greedy meshing) [S2, unofficial]. Simple data structures and bitwise packing make it efficient for CPU execution and GPU buffering [S2, unofficial].
++*   **Limitations:** Produces ~20% more triangles than standard greedy meshing due to less aggressive merging [S2, unofficial]. Not suitable for scenes requiring minimal polygon counts [S2, unofficial].
+ 
+ **When to Use:**
+@@ -231,5 +234,5 @@
+ 
+ **When Not to Use:**
+-Avoid if minimal triangle count is the primary optimization goal, or if the scene is static and can be pre-processed with slower, more optimal algorithms.
++Avoid if minimal triangle count is the primary optimization goal, or if the scene is static and can be pre-processed with slower, more optimal algorithms [S2, unofficial].
+ 
+ ## Background

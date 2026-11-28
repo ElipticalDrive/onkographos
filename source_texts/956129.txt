@@ -1,0 +1,142 @@
+Contribute to moritzbrantner/render-engine development by creating an account on GitHub.
+
+Distance fog (Bevy DistanceFog) + unclipped shadow-map depth by moritzbrantner · Pull Request #21 · moritzbrantner/render-engine · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+moritzbrantner
+commented
+Oct 31, 2026
+Copy link
+Copy Markdown
+Owner
+Closes #7
+What changed
+Scene.fog: Option<Fog>, a field-by-field mirror of Bevy DistanceFog: color (RGBA, alpha = amount), directional_light_color (RGBA, alpha = strength, 0 = off), directional_light_exponent, and falloff: FogFalloff with Linear, Exponential, ExponentialSquared and Atmospheric { extinction, inscattering }. It also has Bevy's koschmieder, from_visibility, from_visibility_squared and from_visibility_colors. Fog::default() uses Bevy's defaults.
+lit.wgsl ports Bevy's apply_fog and fog.wesl term by term, in Bevy's order. Fog is applied to the exposed colour after direct + indirect light. Sun inscattering is pow(max(dot(view, to_sun), 0), exp) × sun × exposure × shadow, with the shadow fetched using the view direction as the normal, then folded into the fog colour per falloff. The clear colour is not fogged, as in Bevy.
+Renderer fix: sun shadow maps now use unclipped depth, like Bevy's directional shadow views. With DEPTH_CLIP_CONTROL the rasterizer clamps per fragment; otherwise a fragment shader writes frag_depth, which is Bevy's emulation. Headless requests the feature when the adapter has it. The old per-vertex pancake clamp bent the stored depth of large ground triangles that reach towards a low sun. That hid the self-shadowing Bevy shows in the inscattering lookup: fog_*_sun scored mean 0.014 / p99 0.20 before the fix. It also improves sun_cascades on the GPU from 0.0005 / 0.0086 to 0.0001 / 0.0023.
+Oracle: new fog_modes scenario with 8 views, fog_{linear,exponential,exponential_squared,atmospheric} plus a _sun variant of each. The scene is a 180 m double row of pillars facing a sun at 10° elevation, with 4 Gaussian cascades and Tony McMapface. bevy_side inserts DistanceFog. Docs updated (D4, D5, README).
+Defaults picked (scenario): haze colour (0.40, 0.48, 0.58), also used as the clear colour. Linear fog runs from 5 to 90 m; exponential uses visibility 120 m; exponential squared uses visibility 100 m; atmospheric uses visibility 150 m with Bevy example colours (extinction 0.35/0.5/0.66, inscattering 0.8/0.844/1.0). Sun glow is (1.0, 0.85, 0.6, 0.5) with exponent 20.
+Oracle
+scenario
+RTX 3060 Ti FLIP mean / p99
+GPU ms engine / Bevy
+lavapipe FLIP mean / p99
+sun_shadows
+0.0001 / 0.0007
+0.106 / 0.207 (0.51×)
+0.0024 / 0.0382
+sun_cascades
+0.0001 / 0.0023
+0.183 / 0.263 (0.70×)
+0.0022 / 0.0226
+tonemap_range_noon_tony
+0.0000 / 0.0000
+0.097 / 0.208 (0.47×)*
+0.0027 / 0.0425
+tonemap_range_noon_agx
+0.0000 / 0.0000
+0.099 / 0.208 (0.48×)*
+0.0022 / 0.0440
+tonemap_range_dim_tony
+0.0000 / 0.0000
+0.108 / 0.208 (0.52×)
+0.0011 / 0.0226
+tonemap_range_dim_agx
+0.0000 / 0.0000
+0.114 / 0.204 (0.56×)
+0.0012 / 0.0309
+ibl_materials
+0.0000 / 0.0000
+0.106 / 0.286 (0.37×)*
+0.0005 / 0.0081
+ibl_materials_sun
+0.0000 / 0.0001
+0.245 / 0.347 (0.71×)
+0.0022 / 0.0308
+fog_linear
+0.0000 / 0.0000
+0.163 / 0.267 (0.61×)
+0.0017 / 0.0197
+fog_linear_sun
+0.0000 / 0.0004
+0.250 / 0.282 (0.89×)
+0.0018 / 0.0194
+fog_exponential
+0.0000 / 0.0000
+0.170 / 0.265 (0.64×)
+0.0025 / 0.0355
+fog_exponential_sun
+0.0000 / 0.0007
+0.197 / 0.297 (0.66×)
+0.0025 / 0.0334
+fog_exponential_squared
+0.0000 / 0.0000
+0.187 / 0.247 (0.76×)
+0.0028 / 0.0449
+fog_exponential_squared_sun
+0.0000 / 0.0004
+0.197 / 0.276 (0.71×)
+0.0028 / 0.0446
+fog_atmospheric
+0.0000 / 0.0000
+0.162 / 0.248 (0.65×)
+0.0020 / 0.0211
+fog_atmospheric_sun
+0.0000 / 0.0003
+0.198 / 0.276 (0.71×)
+0.0020 / 0.0204
+* In the first full GPU run these three timed at 0.46–0.70 ms (over 1.10×). Re-running each alone gave the figures above (0.47×, 0.48×, 0.37×); the GPU is shared with other work, so the first readings were noise. The worst lavapipe p99 is now fog_exponential_squared at 0.045, which comes from the f16-rounding noise D4 describes. On the GPU the same view scores 0.0000.
+Not verified
+I checked the frag_depth fallback for adapters without DEPTH_CLIP_CONTROL once, by forcing it on the GPU. sun_cascades passes, but fog_*_sun fails (0.013 / 0.19), because a per-vertex clamp still feeds clipping. Bevy's emulation has the same flaw, and both NVIDIA and lavapipe use the native path.
+🤖 Generated with Claude Code
+Distance fog (Bevy DistanceFog) and unclipped shadow-map depth
+…
+3eb34ce
+```
+Scene gains `fog: Option<Fog>` with every Bevy FogFalloff (linear,
+exponential, exponential squared, atmospheric) plus the Koschmieder
+helpers, and the directional-light inscattering with its shadow lookup.
+The shader ports Bevy's apply_fog and fog.wesl term by term on the
+exposed colour.
+
+Shadow maps now use unclipped depth like Bevy's directional shadow views
+(DEPTH_CLIP_CONTROL, else Bevy's frag_depth emulation). The per-vertex
+pancake clamp bent the depth of large ground triangles reaching towards
+a low sun and hid the self-shadowing Bevy shows in the fog inscattering.
+
+Oracle: fog_modes, 8 views (each falloff, without and with sun glow).
+
+Closes #7
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Hide details
+View details
+moritzbrantner
+merged commit b13bc40
+into
+main
+Oct 31, 2026
+4 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+moritzbrantner
+deleted the
+lighting/fog
+branch
+October 31, 2026 12:41
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

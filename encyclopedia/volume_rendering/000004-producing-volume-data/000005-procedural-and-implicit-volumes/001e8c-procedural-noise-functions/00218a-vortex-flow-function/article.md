@@ -1,0 +1,197 @@
+# Vortex Flow Function
+
+Also called: Helical Path Animation, Spiral Vortex Function, helical turbulence, swirling gas animation, vortex function
+
+## Overview
+The Vortex Flow Function is a procedural technique for generating gas animation by moving a sample point through a solid noise space along a helical or rotational path, optionally modified by noise for randomness [S1, unofficial]. It solves the problem of simulating swirling gas motion, such as steam rising from a teacup or fog rolling by, without requiring expensive fluid simulations [S1, unofficial]. It sets itself apart from sibling methods like [Worley Noise](1726-worley-noise.md) (which models cell-based structures) and [Gradient-based Noise (Perlin/Simplex)](3860-gradient-based-noise-perlin-simplex.md) (which models continuous scalar fields) by explicitly defining a vector field that rotates points around an axis based on distance and time, creating directional flow disturbances [S1, unofficial].
+
+## How it works
+The method evaluates density or displacement by perturbing a query point along a predefined flow field derived from polar coordinates extended to 3D [S1, unofficial]. It operates in two distinct variants: the Helical Path Animation for general swirling gas, and the Vortex Rotation for specific vortex dynamics [S1, unofficial]. Both variants rely on the parent family's [Procedural Noise Functions](1799-procedural-noise-functions.md) to evaluate scalar fields at displaced positions [S1, unofficial].
+
+### Inputs and Outputs
+*   **Input**: Query point $\mathbf{P}$ (or $\mathbf{pt}$), frame number `frame_num`, volume parameters (center, inverse radius squared, inverse radius), noise parameters `parms`, and noise functions `fast_noise`/`fast_turbulence` [S1, unofficial].
+*   **Output**: Density value $\rho$ for the Helical Path variant, or displacement vector $\mathbf{d}$, falloff factor `percent_to_use`, and velocity `velocity` for the Vortex Rotation variant [S1, unofficial].
+
+### Data Structures
+*   **Precomputed Tables**: `pow_table[POW_TABLE_SIZE]` maps turbulence magnitude to density, `ramp[RAMP_SIZE]` maps radial distance to density falloff, and `offset[OFFSET_SIZE]` stores precomputed vertical offset values [S1, unofficial].
+
+### Helical Path Animation (Steam/Fog)
+This variant moves a point through noise space along a helix to simulate rising or rolling gas [S1, unofficial].
+
+1.  **Initialization** (Static, once per animation sequence):
+    *   Compute `theta = (frame_num % SWIRL_FRAMES) * SWIRL` [S1, unofficial].
+    *   Compute `down = frame_num * DOWN * 3.0 + 4.0` [S1, unofficial].
+    *   Compute `cos_theta2 = RAD1 * cos(theta) + 2.0` [S1, unofficial].
+    *   Compute `sin_theta2 = RAD2 * sin(theta) - 2.0` [S1, unofficial].
+    *   Populate `pow_table` using `parms[1]` and `parms[2]` [S1, unofficial].
+    *   Populate `ramp` and `offset` tables [S1, unofficial].
+
+2.  **Path Calculation**:
+    *   Calculate noise perturbation: `tmp = fast_noise(P)` [S1, unofficial].
+    *   Calculate direction vector $\mathbf{D}$:
+        $$ D_x = P_x + \text{cos\_theta2} + \text{tmp} $$
+        $$ D_y = P_y - \text{down} + \text{tmp} $$
+        $$ D_z = P_z + \text{sin\_theta2} + \text{tmp} $$
+    *   A downward helical path (negative `down` or inverted signs) produces the visual effect of gas rising [S1, unofficial].
+
+3.  **Turbulence Evaluation**:
+    *   Evaluate turbulence at $\mathbf{D}$: `turb = fast_turbulence(D)` [S1, unofficial].
+
+4.  **Density Mapping**:
+    *   Map turbulence to density using `pow_table`:
+        $$ \rho = \text{pow\_table}[\lfloor \text{turb} \cdot 0.5 \cdot (\text{POW\_TABLE\_SIZE}-1) \rfloor] $$
+    *   The source does not specify explicit clamping for the index, relying on the noise function's output range [S1, unofficial].
+
+5.  **Radial Falloff**:
+    *   Calculate squared distance from volume center: $dist\_sq = \|\mathbf{P} - \mathbf{C}\|^2$ [S1, unofficial].
+    *   Calculate normalized density max: $density\_max = dist\_sq \cdot \text{inv\_rad\_sq}_y$ [S1, unofficial].
+    *   Add vertical offset noise: $density\_max += \text{parms}[3] \cdot \text{offset}[\text{index}]$ [S1, unofficial].
+    *   If $density\_max \ge 0.25$, interpolate from `ramp` table and multiply $\rho$ by the ramp value [S1, unofficial].
+
+6.  **Vertical Falloff**:
+    *   Calculate vertical distance: $dist = P_y - C_y$ [S1, unofficial].
+    *   If $dist > 0.0$, compute normalized distance: $dist = (dist + \text{offset}[\text{index}] \cdot 0.1) \cdot \text{inv\_rad}_y$ [S1, unofficial].
+    *   If $dist > 0.05$, compute offset factor:
+        $$ \text{offset2} = 1 - \frac{\exp((dist - 0.05) \cdot 1.111111) - 1.0}{1.718282} $$
+    *   Multiply $\rho$ by $\text{offset2} \cdot \text{parms}[1]$ [S1, unofficial].
+
+### Vortex Rotation (Angular Momentum)
+This variant calculates a displacement vector by rotating the point around a vortex axis [S1, unofficial].
+
+1.  **Distance Calculation**:
+    *   Calculate vector from center: $\mathbf{diff} = \mathbf{P} - \mathbf{C}$ [S1, unofficial].
+    *   Calculate distance: $dist = \|\mathbf{diff}\|$ [S1, unofficial].
+    *   Normalize distance: $dist2 = dist / \text{ff->distance}$ [S1, unofficial].
+
+2.  **Rotation Angle**:
+    *   Calculate angle $\theta$ based on frame and distance:
+        $$ \theta = \frac{\text{ff->parms}[0] \cdot (1 + 0.001 \cdot \text{frame\_num})}{(0.1 + dist2 \cdot 0.9)^{\text{ff->parms}[1]}} $$
+    *   For conservation of angular momentum, use $\theta = C / r$ where $r$ is distance from center [S1, unofficial].
+
+3.  **Transformation**:
+    *   Generate rotation matrix $\mathbf{M}$ about `ff->axis` using $\theta$ [S1, unofficial].
+    *   Transform point: $\mathbf{P}' = \mathbf{M} \mathbf{P}$ [S1, unofficial].
+    *   Calculate direction: $\mathbf{dir} = \mathbf{P}' - \mathbf{P}$ [S1, unofficial].
+
+4.  **Falloff and Velocity**:
+    *   Calculate `ratio_mult` based on frame ramp (`parms[4]` to `parms[5]`, max `parms[2]`) [S1, unofficial].
+    *   Determine `percent_to_use` and `velocity`:
+        *   If $dist > \text{ff->distance}$: `percent_to_use` = 0, `velocity` = 1 [S1, unofficial].
+        *   If $dist < \text{ff->falloff\_start}$: `percent_to_use` = $1.0 \cdot \text{ratio\_mult}$, `velocity` = $1.0 + (1.0 - dist/\text{ff->falloff\_start})$ [S1, unofficial].
+        *   Otherwise:
+            $$ d2 = \frac{dist - \text{ff->falloff\_start}}{\text{ff->distance} - \text{ff->falloff\_start}} $$
+            $$ \text{percent\_to\_use} = \frac{\cos(d2 \cdot \pi) + 1.0}{2} \cdot \text{ratio\_mult} $$
+            $$ \text{velocity} = 1.0 + \left(1.0 - \frac{dist}{\text{ff->falloff\_start}}\right) $$
+    *   The source does not specify the implementation of `calc_rot_mat` or `transform_XYZ` [S1, unofficial].
+
+### Pseudocode (Helical Path Variant)
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Precomputed constants and tables (values depend on implementation)
+SWIRL_FRAMES = 60
+SWIRL = 2.0 * 3.141592653589793 / SWIRL_FRAMES
+DOWN = 0.5
+RAD1 = 1.0
+RAD2 = 1.0
+OFFSET_SIZE = 256
+RAMP_SIZE = 256
+POW_TABLE_SIZE = 256
+offset = [0.0] * OFFSET_SIZE
+ramp = [1.0] * RAMP_SIZE
+pow_table = [0.0] * POW_TABLE_SIZE
+
+def fast_noise(pnt):
+    # Standard 3D noise function returning a value typically in [-1, 1] [G]
+    return 0.0
+
+def fast_turbulence(direction):
+    # Standard turbulence function returning a value typically in [-1, 1] [G]
+    return 0.0
+
+def vortex_helical(pnt, frame_num, vol_shape, parms):
+    # Static initialization (executed once per animation sequence)
+    theta = (frame_num % SWIRL_FRAMES) * SWIRL
+    down = frame_num * DOWN * 3.0 + 4.0
+    cos_theta2 = RAD1 * cos(theta) + 2.0
+    sin_theta2 = RAD2 * sin(theta) - 2.0
+    for i in range(POW_TABLE_SIZE - 1, -1, -1):
+        pow_table[i] = pow((i / (POW_TABLE_SIZE - 1)) * parms[1] * 2.0, parms[2])
+    # make_ramp_table(ramp) # Implementation not specified in sources
+
+    # 1. Calculate helical path direction with noise perturbation
+    tmp = fast_noise(pnt)
+    direction_x = pnt.x + cos_theta2 + tmp
+    direction_y = pnt.y - down + tmp
+    direction_z = pnt.z + sin_theta2 + tmp
+
+    # 2. Evaluate turbulence at the new position
+    turb = fast_turbulence((direction_x, direction_y, direction_z))
+
+    # 3. Map turbulence to base density
+    density = pow_table[int(turb * 0.5 * (POW_TABLE_SIZE - 1))]
+
+    # 4. Apply radial falloff
+    diff_x = vol_shape.center.x - pnt.x
+    diff_y = vol_shape.center.y - pnt.y
+    diff_z = vol_shape.center.z - pnt.z
+    dist_sq = diff_x**2 + diff_y**2 + diff_z**2
+    density_max = dist_sq * vol_shape.inv_rad_sq.y
+
+    index = int((pnt.x + pnt.y + pnt.z) * 100) & (OFFSET_SIZE - 1)
+    density_max += parms[3] * offset[index]
+
+    if density_max >= 0.25:
+        ramp_index = min(int((density_max - 0.25) * 4 / 3 * RAMP_SIZE), RAMP_SIZE - 1)
+        density *= ramp[ramp_index]
+
+    # 5. Apply vertical falloff
+    dist_y = pnt.y - vol_shape.center.y
+    if dist_y > 0.0:
+        dist_y_norm = (dist_y + offset[index] * 0.1) * vol_shape.inv_rad.y
+        if dist_y_norm > 0.05:
+            offset2 = (dist_y_norm - 0.05) * 1.111111
+            offset2 = 1.0 - (exp(offset2) - 1.0) / 1.718282
+            offset2 *= parms[1]
+            density *= offset2
+
+    return density
+```
+
+### Parameters
+*   `SWIRL_FRAMES`: Number of frames for one full 360-degree swirl cycle [S1, unofficial].
+*   `RAD1`, `RAD2`: Constants determining the elliptical shape of the swirling path [S1, unofficial].
+*   `ff->parms[0]`: Coefficient for the rotation angle calculation (base speed) [S1, unofficial].
+*   `ff->parms[1]`: Exponent for the distance-based rotation angle falloff (also used in vertical density falloff) [S1, unofficial].
+*   `ff->distance`: The maximum radius of the vortex influence [S1, unofficial].
+*   `ff->falloff_start`: The distance inside which the vortex has full strength [S1, unofficial].
+*   `ff->parms[2]`: Maximum strength of the vortex [S1, unofficial].
+*   `ff->parms[4]`: Frame number at which the vortex strength begins to increase [S1, unofficial].
+*   `ff->parms[5]`: Frame number at which the vortex strength reaches its maximum [S1, unofficial].
+
+### Edge Cases and Pitfalls
+*   **Discontinuities**: The radial falloff uses a hard threshold (`density_max >= 0.25`) before applying the ramp, which can cause visual discontinuities if not smoothed [S1, unofficial].
+*   **Degenerate Input**: If `ff->distance` is zero, division by zero occurs in the `dist2` calculation for the Vortex Rotation variant [S1, unofficial].
+*   **Directional Inversion**: A downward helical path (negative `down` or inverted signs) produces the visual effect of gas rising, which may be counterintuitive without parameter adjustment [S1, unofficial].
+
+## Subtopics
+
+### [Smoke Column with Helical Displacement](2743-smoke-column-with-helical-displacement.md)
+This method generates a single column of rising smoke by deforming a vertical cylinder, simulating dispersion, turbulence, and swirling motion. It builds on the [Vortex Flow Function](2538-vortex-flow-function.md) by explicitly combining vertical helical displacement for bending and swirling with height-dependent density decay and turbulence scaling to simulate the physical dispersion of a smoke plume.
+
+### [Analytical Vector Fields](3124-analytical-vector-fields.md)
+Analytical vector fields generate flow data using explicit mathematical functions of position and time, rather than retrieving values from pre-computed simulation grids or particle systems. This approach solves the problem of obtaining velocity vectors for procedural volume rendering where simulation data is unavailable or too expensive to compute in real-time [G]. Unlike [Vortex Flow Function](2538-vortex-flow-function.md), which models specific swirling motion around a cylinder, or [Smoke Column with Helical Displacement](2743-smoke-column-with-helical-displacement.md), which applies geometric displacement, analytical fields provide a general framework where any vector is determined by evaluating a function $\nu(\mathbf{v}, t)$ at a given point $\mathbf{v}$ and time $t$.
+
+## Operating characteristics
+*   **Time Complexity**: $O(1)$ per sample, assuming constant-time noise evaluation and table lookups [S1, unofficial].
+*   **Memory Complexity**: $O(N)$ for precomputed tables (`pow_table`, `ramp`, `offset`), where $N$ is table size [S1, unofficial].
+*   **Strengths**: Computationally cheap; produces visually convincing swirling effects for steam, fog, and gas without simulation [S1, unofficial].
+*   **Limitations**: Not a true physical simulation; does not conserve mass or momentum accurately unless specifically tuned (e.g., angular momentum variant) [S1, unofficial].
+*   **When to use**: Real-time gas animation, steam, fog, or any scenario requiring directional swirling motion [S1, unofficial].
+*   **When not to use**: When physically accurate fluid dynamics or complex turbulence interactions (e.g., Karman vortex streets) are required [S1, unofficial].
+
+## Background
+The technique is described in the technical report "Procedural Modeling, Animation, and Rendering of Gases, Fluids, and Textures" [S1, unofficial]. The vortex function uses some techniques by Karl Sims [S1, unofficial]. It is based on the simple 2D polar coordinate function extended to three-dimensional coordinates, where the third dimension is normally just linear movement over time [S1, unofficial].
+
+## Sources
+[S1] Procedural Modeling, Animation, and Rendering of Gases, Fluids, and Textures, https://www.researchgate.net/profile/David-Ebert-4/publication/2786953_Procedural_Modeling_Animation_and_Rendering_of_Gases_Fluids_and_Textures/links/00b7d51a73e42a3c4e000000/Procedural-Modeling-Animation-and-Rendering-of-Gases-Fluids-and-Textures.pdf, fetched 2026-10-31 (unofficial)

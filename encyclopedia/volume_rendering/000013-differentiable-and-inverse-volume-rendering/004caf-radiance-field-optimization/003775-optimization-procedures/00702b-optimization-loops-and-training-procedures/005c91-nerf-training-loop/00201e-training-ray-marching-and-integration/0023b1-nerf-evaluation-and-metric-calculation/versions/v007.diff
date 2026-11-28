@@ -1,0 +1,317 @@
+--- v006.md
++++ v007.md
+@@ -4,174 +4,134 @@
+ 
+ ## Overview
+-NeRF Evaluation and Metric Calculation is the procedure for rendering single images from a trained Radiance Field at specified camera poses and quantifying the quality of the reconstruction against ground-truth data [S1, S2, S3, unofficial]. It solves the problem of validating that the learned volumetric representation generalizes to novel viewpoints by generating RGB, depth, and disparity maps, then computing photometric and perceptual metrics [S1, S3, unofficial]. It differs from training procedures by disabling stochastic perturbations to ensure deterministic, reproducible results and by focusing on post-processing aggregation of metrics rather than gradient-based optimization [S2, S13741-standard-metric-computation.md, unofficial].
++NeRF Evaluation and Metric Calculation is the procedure for quantifying the quality of a trained Neural Radiance Field (NeRF) by rendering images from novel or held-out camera poses and comparing them against ground-truth data [S1, S2, S3, unofficial]. It solves the problem of verifying that the learned radiance field generalizes to unseen viewpoints rather than merely memorizing training views [S2, unofficial][S6]. Unlike [Training Ray Marching and Integration](2199-training-ray-marching-and-integration.md), which performs stochastic sampling with perturbation for optimization, this method uses deterministic rendering to ensure reproducible metrics [S2, unofficial]. It differs from [Standard Metric Computation](13741-standard-metric-computation.md) by encompassing the entire rendering pipeline (ray generation, chunked evaluation, and result aggregation) rather than just the post-processing statistical aggregation [S1, S2, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-*   `coarse_model`: Trained coarse NeRF model [S1, unofficial].
+-*   `fine_model`: Trained fine NeRF model [S1, unofficial].
+-*   `pose`: 4x4 camera-to-world matrix (numpy array or torch tensor) [S1, S2, unofficial].
+-*   `K`: 3x3 camera intrinsic matrix (numpy array or torch tensor) [S1, S2, unofficial].
+-*   `H`, `W`: Image height and width in pixels [S1, S3, unofficial].
+-*   `near`, `far`: Near and far plane distances for ray marching [S1, S3, unofficial].
+-*   `args`: Configuration object containing `chunk` (default 1024), `n_samples_coarse`, `n_samples_fine`, `white_bkgd`, `lindisp`, `netchunk`, `use_ndc` [S1, unofficial].
+-*   `gt_rgb`: Ground-truth RGB image for metric calculation [S3, unofficial].
+-*   `device`: Torch device (CPU/GPU) [S1, unofficial].
++- `coarse_model`: Trained coarse NeRF MLP [S1, unofficial].
++- `fine_model`: Trained fine NeRF MLP [S1, unofficial].
++- `pose`: 4x4 camera-to-world transformation matrix [S1, unofficial].
++- `H`, `W`: Image height and width in pixels [S1, unofficial].
++- `K`: 3x3 camera intrinsic matrix [S1, unofficial].
++- `near`, `far`: Near and far plane distances for ray marching [S1, unofficial].
++- `args`: Configuration object containing `chunk` (default 1024), `n_samples_coarse`, `n_samples_fine`, `white_bkgd`, `lindisp`, `netchunk`, and `use_ndc` [S1, unofficial].
++- `device`: Torch device (CPU/GPU) [S1, unofficial].
+ 
+ **Outputs:**
+-*   `rgb`: Rendered RGB image tensor/numpy array of shape `[H, W, 3]` [S1, S3, unofficial].
+-*   `depth`: Rendered depth map of shape `[H, W]` [S1, unofficial].
+-*   `disp`: Rendered disparity map of shape `[H, W]` [S1, unofficial].
+-*   `metrics`: Dictionary or list containing PSNR and SSIM values [S3, unofficial].
++- `rgb`: Rendered RGB image of shape $[H, W, 3]$ [S1, unofficial].
++- `depth`: Rendered depth map of shape $[H, W]$ [S1, unofficial].
++- `disp`: Rendered disparity map of shape $[H, W]$ [S1, unofficial].
++- Optional: PSNR and SSIM scalar values if ground truth is provided [S3, unofficial].
+ 
+ **Data Structures:**
+-*   **Rays:** Represented as two tensors `rays_o` (origins) and `rays_d` (directions), each of shape `[-1, 3]` after flattening [S1, unofficial].
+-*   **Chunks:** Rays are processed in batches of size `chunk` to manage GPU memory [S1, S2, unofficial].
+-*   **Results:** Intermediate rendering results (RGB, depth, disparity) are stored in dictionaries keyed by `_coarse` or `_fine` suffixes [S1, unofficial].
++- Rays are represented as two tensors: `rays_o` (origins) and `rays_d` (directions), both of shape $[N, 3]$ where $N = H \times W$ [S1, unofficial].
++- Results from `batchify_render` are dictionaries mapping keys (e.g., `'rgb'`, `'rgb_fine'`, `'depth'`, `'disp'`) to tensors [S1, unofficial].
+ 
+ **Steps:**
+-1.  **Initialization:** Set `coarse_model` and `fine_model` to evaluation mode (`model.eval()`) [S2, S3, unofficial]. Disable gradients using `torch.no_grad()` [S2, unofficial].
+-2.  **Input Conversion:** Convert `pose` and `K` from numpy arrays to `torch.float32` tensors on the specified `device` if they are not already [S1, S2, unofficial].
+-3.  **Ray Generation:** Generate ray origins `rays_o` and directions `rays_d` using the intrinsic matrix `K`, image dimensions `H, W`, and camera pose `pose` [S1, S3, unofficial].
+-    *   Formula for `K` (if not provided):
+-        $$ K = \begin{bmatrix} f & 0 & 0.5 W \\ 0 & f & 0.5 H \\ 0 & 0 & 1 \end{bmatrix} $$
+-        where $f$ is the focal length [S1, unofficial].
+-4.  **NDC Conversion (Optional):** If `args.use_ndc` is true, convert `rays_o` and `rays_d` to Normalized Device Coordinates using the focal length and near plane [S1, unofficial].
+-5.  **Flattening:** Reshape `rays_o` and `rays_d` to shape `[-1, 3]` [S1, unofficial].
+-6.  **Chunked Rendering:** Iterate over the flattened rays in chunks of size `chunk`:
+-    *   Extract chunk of `rays_o` and `rays_d`.
+-    *   Call the rendering function (e.g., `batchify_render` or `render_rays`) with `perturb=False` [S1, S2, unofficial].
+-    *   The rendering function queries the `coarse_model` and `fine_model` to compute volume rendering integrals [S1, unofficial].
+-    *   Concatenate results from all chunks [S2, unofficial].
+-7.  **Reshaping:** Reshape the concatenated RGB result to `[H, W, 3]`, move to CPU, and convert to numpy array [S1, unofficial]. Similarly reshape and convert depth and disparity results to `[H, W]` numpy arrays [S1, unofficial].
+-8.  **Metric Calculation:**
+-    *   **MSE:** Calculate Mean Squared Error between predicted RGB and `gt_rgb` [S3, unofficial].
+-        $$ MSE = \frac{1}{N} \sum_{i=1}^{N} (RGB_{pred}[i] - RGB_{gt}[i])^2 $$
+-    *   **PSNR:** Calculate Peak Signal-to-Noise Ratio [S3, unofficial].
+-        $$ PSNR = -10 \cdot \log_{10}(MSE) $$
+-    *   **SSIM:** Calculate Structural Similarity Index using `compare_ssim` with `full=True` and `multichannel=True` [S3, unofficial].
+-9.  **Visualization (Optional):** Create a side-by-side image of Ground Truth and Prediction [S2, unofficial]. Save predicted RGB as PNG [S3, unofficial].
+-10. **Aggregation:** Append PSNR and SSIM to lists for all test images [S3, unofficial]. Calculate mean PSNR and mean SSIM across the dataset [S3, unofficial].
++1. **Initialization**: Set `coarse_model` and `fine_model` to evaluation mode (`model.eval()`) to disable dropout and batch normalization updates [S2, S3, unofficial]. Disable gradient computation using `torch.no_grad()` [S2, unofficial].
++2. **Ray Generation**:
++   - Convert `pose` and `K` to `torch.float32` tensors on the specified `device` if they are numpy arrays [S1, unofficial].
++   - Extract focal length from `K` [S1, unofficial].
++   - Generate ray origins `rays_o` and directions `rays_d` using `get_rays(H, W, K_tensor, pose)` [S1, unofficial].
++   - Reshape `rays_o` and `rays_d` to $[-1, 3]$ [S1, unofficial].
++   - If `args.use_ndc` is true, convert rays to Normalized Device Coordinates (NDC) using `ndc_rays(H, W, focal, 1.0, rays_o, rays_d)` [S1, unofficial].
++3. **Chunked Rendering**:
++   - Call `batchify_render` with `rays_o`, `rays_d`, `chunk` size, models, bounds, and parameters [S1, unofficial].
++   - Inside `batchify_render`, iterate over rays in chunks of size `chunk` (default 1024) to manage GPU memory [S2, unofficial].
++   - For each chunk, call the rendering function (e.g., `render_rays`) with `perturb=False` to ensure deterministic results [S2, unofficial].
++   - Concatenate chunk results [S2, unofficial].
++4. **Result Extraction**:
++   - Determine output keys: if `'rgb_fine'` exists in results, use `'rgb_fine'`, `'depth_fine'`, `'disp_fine'`; otherwise fallback to `'rgb'`, `'depth'`, `'disp'` [S1, unofficial].
++   - Reshape `result[key]` to $[H, W, 3]$ for RGB and $[H, W]$ for depth/disparity [S1, unofficial].
++   - Move tensors to CPU and convert to numpy arrays [S1, unofficial].
++5. **Metric Calculation (Optional)**:
++   - If ground truth (`gt_rgb`) is available:
++     - Calculate Mean Squared Error (MSE): $L = \frac{1}{N} \sum (rgb - gt\_rgb)^2$ [S3, unofficial].
++     - Calculate PSNR: $PSNR = -10 \cdot \log_{10}(L)$ [S3, unofficial].
++     - Calculate SSIM using `compare_ssim` with `full=True` and `multichannel=True` [S3, unofficial].
++   - Save predicted RGB as PNG [S3, unofficial].
++   - Create side-by-side visualization of GT and prediction [S2, unofficial].
+ 
+ **Pseudocode:**
+-
+ ```python
+ import torch
+ import numpy as np
+-from torch.nn.functional import mse_loss
+ 
+-def evaluate_nerf(coarse_model, fine_model, pose, K, H, W, near, far, args, gt_rgb, device):
++def evaluate_nerf(coarse_model, fine_model, pose, H, W, K, near, far, args, device, gt_rgb=None):
+     """
+-    Renders a single image from a trained NeRF and computes metrics.
++    Render a single image from a NeRF and optionally compute metrics.
+     """
+-    # 1. Set models to eval mode and disable gradients
++    # 1. Initialization
+     coarse_model.eval()
+     fine_model.eval()
+     with torch.no_grad():
+-        # 2. Convert inputs to tensors
++        # 2. Ray Generation
+         if isinstance(pose, np.ndarray):
+             pose = torch.from_numpy(pose).float().to(device)
+         if isinstance(K, np.ndarray):
+-            K = torch.from_numpy(K).float().to(device)
++            K_tensor = torch.from_numpy(K).float().to(device)
++        else:
++            K_tensor = K.to(device)
+             
+-        # 3. Generate rays
+-        # Assuming get_rays is a helper defined elsewhere or implemented inline
+-        rays_o, rays_d = get_rays(H, W, K, pose)
++        # Extract focal length from K (assuming standard pinhole model)
++        focal = K_tensor[0, 0].item()
+         
+-        # 4. NDC Conversion if enabled
+-        if args.use_ndc:
+-            focal = K[0, 0].item()
+-            rays_o, rays_d = ndc_rays(H, W, focal, 1.0, rays_o, rays_d)
+-            
+-        # 5. Flatten rays
++        rays_o, rays_d = get_rays(H, W, K_tensor, pose)
+         rays_o = rays_o.reshape(-1, 3)
+         rays_d = rays_d.reshape(-1, 3)
+         
+-        # 6. Chunked Rendering
+-        chunk = args.chunk
+-        all_rgb = []
+-        all_depth = []
+-        all_disp = []
++        if args.use_ndc:
++            rays_o, rays_d = ndc_rays(H, W, focal, 1.0, rays_o, rays_d)
++            
++        # 3. Chunked Rendering
++        # batchify_render handles the chunking internally
++        results = batchify_render(
++            rays_o, rays_d, 
++            chunk=args.chunk, 
++            coarse_model=coarse_model, 
++            fine_model=fine_model,
++            near=near, far=far,
++            n_samples_coarse=args.n_samples_coarse,
++            n_samples_fine=args.n_samples_fine,
++            perturb=False, # Deterministic for evaluation
++            raw_noise_std=0.0,
++            white_bkgd=args.white_bkgd,
++            lindisp=args.lindisp,
++            netchunk=args.netchunk
++        )
+         
+-        for i in range(0, rays_o.shape[0], chunk):
+-            chunk_o = rays_o[i:i+chunk]
+-            chunk_d = rays_d[i:i+chunk]
++        # 4. Result Extraction
++        # Determine keys based on fine model presence
++        if 'rgb_fine' in results:
++            rgb_key, depth_key, disp_key = 'rgb_fine', 'depth_fine', 'disp_fine'
++        else:
++            rgb_key, depth_key, disp_key = 'rgb', 'depth', 'disp'
+             
+-            # Call batchify_render (implementation details depend on specific NeRF variant)
+-            # Key parameters: perturb=False for deterministic results
+-            result = batchify_render(
+-                chunk_o, chunk_d, 
+-                coarse_model, fine_model, 
+-                near, far, 
+-                args.n_samples_coarse, args.n_samples_fine,
+-                perturb=False, 
+-                raw_noise_std=0.0,
+-                white_bkgd=args.white_bkgd,
+-                lindisp=args.lindisp,
+-                netchunk=args.netchunk
+-            )
++        rgb_tensor = results[rgb_key].reshape(H, W, 3).cpu().numpy()
++        depth_tensor = results[depth_key].reshape(H, W).cpu().numpy()
++        disp_tensor = results[disp_key].reshape(H, W).cpu().numpy()
++        
++        # 5. Metric Calculation
++        psnr_val = None
++        ssim_val = None
++        if gt_rgb is not None:
++            # gt_rgb should be numpy array [H, W, 3]
++            mse = np.mean((rgb_tensor - gt_rgb) ** 2)
++            psnr_val = -10.0 * np.log10(mse)
++            # SSIM calculation requires imageio/skimage
++            ssim_val = compare_ssim(rgb_tensor, gt_rgb, full=True, multichannel=True)
+             
+-            # Extract keys based on presence of '_fine'
+-            rgb_key = 'rgb_fine' if 'rgb_fine' in result else 'rgb_coarse'
+-            depth_key = 'depth_fine' if 'depth_fine' in result else 'depth_coarse'
+-            disp_key = 'disp_fine' if 'disp_fine' in result else 'disp_coarse'
+-            
+-            all_rgb.append(result[rgb_key])
+-            all_depth.append(result[depth_key])
+-            all_disp.append(result[disp_key])
+-            
+-        # 7. Concatenate and Reshape
+-        rgb_tensor = torch.cat(all_rgb, dim=0).reshape(H, W, 3)
+-        depth_tensor = torch.cat(all_depth, dim=0).reshape(H, W)
+-        disp_tensor = torch.cat(all_disp, dim=0).reshape(H, W)
+-        
+-        # Move to CPU and convert to numpy
+-        rgb = rgb_tensor.cpu().numpy()
+-        depth = depth_tensor.cpu().numpy()
+-        disp = disp_tensor.cpu().numpy()
+-        
+-        # 8. Metric Calculation
+-        # gt_rgb is assumed to be numpy array [H, W, 3] in [0, 1]
+-        mse = mse_loss(torch.from_numpy(rgb).to(device), torch.from_numpy(gt_rgb).to(device))
+-        psnr = -10.0 * torch.log10(mse).item()
+-        
+-        # SSIM calculation (requires external library like skimage, implemented here as placeholder logic)
+-        ssim = calculate_ssim(rgb, gt_rgb) 
+-        
+-        return rgb, depth, disp, {'psnr': psnr, 'ssim': ssim}
+-
+-def get_rays(H, W, K, pose):
+-    """
+-    Helper to generate rays from camera parameters.
+-    """
+-    # Implementation details for ray generation
+-    # i, j = torch.meshgrid(torch.arange(W), torch.arange(H))
+-    # dirs = torch.stack([(i - K[0, 2]) / K[0, 0], -(j - K[1, 2]) / K[1, 1], -torch.ones_like(i)], -1)
+-    # ... transform by pose ...
+-    pass
+-
+-def ndc_rays(H, W, focal, near, rays_o, rays_d):
+-    """
+-    Helper to convert rays to NDC.
+-    """
+-    # Implementation details for NDC conversion
+-    pass
+-
+-def calculate_ssim(rgb_pred, rgb_gt):
+-    """
+-    Placeholder for SSIM calculation.
+-    """
+-    # In practice, use skimage.metrics.compare_ssim
+-    return 0.0
++    return rgb_tensor, depth_tensor, disp_tensor, psnr_val, ssim_val
+ ```
+ 
+-**Parameters with Typical Values:**
+-*   `chunk`: 1024 [S2, unofficial].
+-*   `perturb`: False during validation [S2, unofficial].
+-*   `raw_noise_std`: 0.0 during validation [S1, unofficial].
++**Parameters:**
++- `chunk`: Integer, default 1024. Number of rays processed per forward pass to limit memory usage [S2, unofficial].
++- `perturb`: Boolean, default `False` for evaluation. Disables jittering of sample points [S2, unofficial].
++- `raw_noise_std`: Float, default 0.0. Standard deviation of noise added to density during training; disabled in eval [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Perturbation:** Perturbation must be disabled (`perturb=False`) during validation to ensure deterministic and reproducible results [S2, unofficial].
+-*   **Memory:** Large images or high sample counts may exceed GPU memory; chunking is required [S1, S2, unofficial].
+-*   **Key Selection:** The result dictionary keys depend on whether a fine model was used; fallback to `_coarse` keys is necessary [S1, unofficial].
++- **Perturbation**: Must be disabled (`perturb=False`) during validation to ensure deterministic and reproducible results [S2, unofficial].
++- **NDC Coordinates**: If the scene uses Normalized Device Coordinates (common in synthetic datasets like Blender), rays must be converted using `ndc_rays` [S1, unofficial].
++- **Memory**: Large images or high sample counts require chunking; failure to chunk may cause OOM errors [S2, unofficial].
++- **Key Fallback**: The result dictionary keys depend on whether a fine model was used; code must check for `_fine` suffixes [S1, unofficial].
+ 
+ ## Subtopics
+@@ -195,28 +155,27 @@
+ A training objective that combines photometric color loss with a depth-supervised loss using estimated stereo depth to accelerate convergence and remove the need for a depth refinement module.
+ 
+-#### LiDAR Semantic Filtering for Evaluation
+-Identifies LiDAR points that fall within the camera's field of view, selects rays terminating on desired semantic classes (e.g., roads, sidewalks) using segmentation predictions from SegFormer, and feeds the filtered LiDAR rays into the NeRF model to perform depth rendering and predict the corresponding point cloud [S4]. Both filtered LiDAR ground truth and NeRF-predicted point clouds are accumulated for each test frame to evaluate geometry reconstruction quality [S4].
++### LiDAR Semantic Filtering for Evaluation
++Identifies LiDAR points that fall within the camera's field of view and selects rays terminating on desired semantic classes (e.g., roads, sidewalks) using segmentation predictions from SegFormer [S4]. These filtered LiDAR rays are fed into the NeRF model to perform depth rendering and predict the corresponding point cloud [S4]. Both filtered LiDAR ground truth and NeRF-predicted point clouds are accumulated for each test frame to evaluate geometry reconstruction quality [S4].
+ 
+-#### Novel View Selection Policy
+-Generates initial synthetic training data by rendering RGB-D images with uncertainty estimation from various viewpoints using U-NeRF [S5]. Prunes views based on rendering quality (depth too close, large depth/color uncertainty), applies a pre-trained E-SCRNet to get epistemic uncertainty maps, filters out unreliable pixels, and calculates mean epistemic uncertainty as a novel view score to select top-k images [S5].
++### Novel View Selection Policy
++Generates initial synthetic training data $S_{new}$ by rendering RGB-D images with uncertainty estimation from various viewpoints using U-NeRF [S5]. Prunes views if rendered depth < $z_{min}$, or if depth/color uncertainty is large [S5]. Applies a pre-trained E-SCRNet to remaining images to get epistemic uncertainty maps [S5]. Filters out unreliable pixels using color and depth uncertainties from U-NeRF [S5]. Calculates mean epistemic uncertainty as a novel view score and selects top-k images to form the final novel view set $S_{high}$ [S5].
+ 
+-#### Nerfbusters Evaluation Protocol
+-An evaluation procedure for measuring NeRF quality at novel viewpoints by using two separate camera trajectories: one for training and one for evaluation [S6]. It involves recording two videos (10-20 seconds for training, different viewpoints for evaluation), extracting poses, training a "pseudo ground truth" model on both splits to save depth/normal/visibility maps, and optimizing a NeRF on the training split to evaluate at novel viewpoints using the captured evaluation images and pseudo ground truth maps [S6]. Standard benchmarks evaluate only on held-out frames from the training sequence, which does not reflect quality at extreme novel viewpoints [S6].
++### Nerfbusters Evaluation Protocol
++An evaluation procedure for measuring NeRF quality at novel viewpoints by using two separate camera trajectories: one for training and one for evaluation [S6]. Records a 10-20 second video for the training split and a second video from different viewpoints for the evaluation split [S6]. Extracts images and computes camera poses for all images [S6]. Trains a "pseudo ground truth" model on a combination of both splits and saves depth, normal, and visibility maps for evaluation viewpoints [S6]. Optimizes a NeRF on the training split and evaluates at novel viewpoints using the captured evaluation images and the pseudo ground truth maps [S6]. Standard benchmarks evaluate only on held-out frames from the training sequence, which does not reflect quality at extreme novel viewpoints [S6].
+ 
+-#### Expected Termination Depth Synthesis
+-Synthesizes depth maps from a trained NeRF's density field by computing the expected termination depth of a ray [S7]. A ray is cast towards the camera, and the density field determines how deep into the volumetric object the ray is expected to penetrate, using that distance as the depth map value [S7]. NeRF does not directly estimate object boundaries nor directly produce depth maps; hard surfaces are simulated using a very dense but not infinitely dense field [S7]. It differs from direct depth sensors (e.g., RealSense D415) which fail on thin/reflective objects, and from MVS (e.g., COLMAP) which assumes Lambertian surfaces and fails on specularities [S7].
++### Expected Termination Depth Synthesis
++Synthesizes depth maps from a trained NeRF's density field by computing the expected termination depth of a ray [S7]. A ray is cast towards the camera, and the density field is used to determine how deep into the volumetric object the ray is expected to penetrate; that distance is used as the depth map value [S7]. NeRF does not directly estimate object boundaries nor directly produce depth maps; hard surfaces are simulated using a very dense but not infinitely dense field [S7]. Differs from direct depth sensors (e.g., RealSense D415) which fail on thin/reflective objects, and from MVS (e.g., COLMAP) which assumes Lambertian surfaces and fails on specularities [S7].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear with respect to the number of pixels ($H \times W$) and the number of samples per ray ($N$). Chunking adds overhead but prevents memory overflow.
+-*   **Memory Complexity:** Linear with respect to the chunk size. The total memory footprint is dominated by the model weights and the intermediate tensors for the current chunk.
+-*   **Measured Performance:** Not given in the sources.
+-*   **Scaling:** Scales linearly with resolution. Chunking allows processing of arbitrarily large images given sufficient time.
+-*   **Strengths:** Deterministic results (with perturb=False); provides standard industry metrics (PSNR, SSIM); supports various metric types (photometric, perceptual, semantic).
+-*   **Limitations:** Standard metrics (PSNR/SSIM) may not correlate perfectly with perceptual quality; unmasked evaluation can be misleading for novel views; depth estimation is indirect.
+-*   **When to use:** Validating trained NeRF models; comparing different NeRF architectures; generating datasets for downstream tasks.
+-*   **When not to use:** During training (use loss functions instead); when real-time rendering is required (evaluation is typically offline).
++- **Time Complexity**: Linear with respect to the number of pixels ($H \times W$) and the number of samples per ray ($N_s$). Chunking adds overhead but prevents memory overflow [S2, unofficial].
++- **Memory Complexity**: Proportional to the chunk size. A chunk of 1024 rays typically fits in modern GPU memory for standard resolutions [S2, unofficial].
++- **Performance**: Deterministic rendering is faster than training because it avoids backward passes and stochastic perturbation [S2, unofficial].
++- **Strengths**: Provides standardized, reproducible metrics (PSNR, SSIM) for comparing different NeRF architectures [S3, unofficial]. Masked evaluation prevents unfair penalties for unobserved regions [S2, unofficial].
++- **Limitations**: Standard metrics like PSNR do not correlate perfectly with perceptual quality [S3, unofficial]. Unmasked evaluation can be misleading for scenes with large unobserved areas [S2, unofficial].
++- **When to use**: For final model assessment, ablation studies, and benchmarking [S2, S3, unofficial].
++- **When not to use**: During active training optimization where stochastic sampling is required for gradient estimation [S2, unofficial].
+ 
+ ## Background
+-NeRF Evaluation and Metric Calculation originated with the introduction of Neural Radiance Fields (NeRF) by Mildenhall et al. in 2020 [S1, S3, unofficial]. The standard evaluation protocol involves rendering images at held-out camera poses and comparing them to ground truth using PSNR, SSIM, and LPIPS [S1, S3, unofficial]. Subsequent work has refined this process, introducing masked evaluation to account for novel view synthesis [S1, S2, unofficial], specialized protocols for casual captures like Nerfbusters [S6], and semantic/depth-aware metrics [S4, S7]. The method is widely used in computer vision research to benchmark novel view synthesis and 3D reconstruction quality.
++NeRF evaluation originated with the original NeRF paper (Mildenhall et al., 2020), which established PSNR, SSIM, and LPIPS as standard metrics for synthetic datasets like Blender [S1, S3, unofficial]. Early implementations focused on held-out frames from training sequences [S6]. Later work, such as Nerfbusters (Weber et al., 2023), highlighted the limitations of these benchmarks for casual captures and proposed novel-view evaluation protocols using separate training and evaluation videos [S6]. Depth synthesis from NeRFs, initially noted as a challenge due to the lack of explicit boundaries, led to methods like Expected Termination Depth [S7]. Recent extensions include semantic and LiDAR-based evaluation for large-scale scenes [S4] and uncertainty-aware novel view selection [S5].
+ 
+ ## Sources

@@ -1,0 +1,199 @@
+--- v003.md
++++ v004.md
+@@ -23,5 +23,5 @@
+ **Partitioned Occupancy Maps (POMs) and Partitioned Distance Maps (PDMs):**
+ - **Type:** `uint8` (unsigned 8-bit integer) [S1].
+-- **Layout:** Block-reduced dimensions. If the volume has dimensions $D_x \times D_y \times D_z$, the map dimensions are $\lceil D_x/b \rceil \times \lceil D_y/b \rceil \times \lceil D_z/b \rceil$ [S1].
++- **Layout:** Block-reduced dimensions, resulting in a memory footprint of $n \times V / b^3$ bytes where $V$ is the number of voxels [S1].
+ - **Content:**
+   - POM: Stores occupancy status. Value `0` indicates occupied (contains at least one voxel in the partition's intensity range), `1` indicates empty [S2, unofficial].
+@@ -87,5 +87,5 @@
+     -   For each step $i$ from $0$ to $n\_steps - 1$:
+         -   Calculate sampling position: `samplingPos = ray_start + step_vector * float(i)` [S2, unofficial].
+-        -   **Empty Space Skipping:** Use $D'$ to determine the step size [S1][S2, unofficial]. The distance map value at the current block position indicates how many blocks can be skipped [S1][S2, unofficial]. Convert this block distance to world/texture space distance and advance the ray.
++        -   **Empty Space Skipping:** Use $D'$ to determine the step size [S1][S2, unofficial]. The distance map value at the current block position indicates how many blocks can be skipped [S1][S2, unofficial]. Convert this block distance to world/texture space distance and advance the ray [G].
+         -   **Volume Sampling:**
+             -   Sample intensity from `texVolume` at `samplingPos` [S2, unofficial].
+@@ -95,5 +95,5 @@
+             -   **Interpolation:** If `enable_bicubic_filtering` is true, calculate tricubic interpolation weights and mix samples [S2, unofficial].
+         -   **Transfer Function:** Map intensity to RGBA using `texITF` [S2, unofficial]. Apply gamma correction if `itf_gamma_correction` is true [S2, unofficial].
+-        -   **Compositing:** Accumulate color and opacity. If `earlyRayTermination` is true, break loop if accumulated opacity exceeds a threshold [S2, unofficial].
++        -   **Compositing:** Accumulate color and opacity. If `earlyRayTermination` is true, break loop if accumulated opacity exceeds 0.98 [S1].
+ 
+ ### Pseudocode
+@@ -144,6 +144,5 @@
+     dist = [[[255 for _ in range(dim_x)] for _ in range(dim_y)] for _ in range(dim_z)]
+     
+-    # Multi-pass distance transform (simplified logic for demonstration)
+-    # Pass 1: Forward
++    # Forward pass
+     for z in range(dim_z):
+         for y in range(dim_y):
+@@ -157,5 +156,5 @@
+                     if z > 0: d = min(d, dist[z-1][y][x] + 1)
+                     dist[z][y][x] = d
+-    # Pass 2: Backward
++    # Backward pass
+     for z in range(dim_z-1, -1, -1):
+         for y in range(dim_y-1, -1, -1):
+@@ -186,80 +185,4 @@
+                     d_prime[z][y][x] = min(d_prime[z][y][x], pdms[idx][z][y][x])
+     return d_prime
+-
+-def ray_cast(volume, d_prime, camera_matrix, tf, params):
+-    """
+-    Performs direct volume rendering using PDM-based ESS.
+-    volume: 3D list of intensities.
+-    d_prime: 3D list of uint8 (final distance map).
+-    camera_matrix: 4x4 list of lists (inverseModelView).
+-    tf: Transfer function function/intensity map.
+-    params: dict with sampling_factor, earlyRayTermination, etc.
+-    Returns: 2D list of RGBA tuples.
+-    """
+-    dim_z, dim_y, dim_x = len(volume), len(volume[0]), len(volume[0][0])
+-    height, width = params.get('height', 100), params.get('width', 100)
+-    
+-    # Ray origin from camera matrix
+-    ray_origin = [camera_matrix[0][3], camera_matrix[1][3], camera_matrix[2][3]]
+-    
+-    minBB = [-0.5, -0.5, -0.5]
+-    maxBB = [0.5, 0.5, 0.5]
+-    
+-    image = [[[0.0, 0.0, 0.0, 0.0] for _ in range(width)] for _ in range(height)]
+-    
+-    for y in range(height):
+-        for x in range(width):
+-            # Simplified ray direction calculation for front face
+-            ray_dir = [x / width - 0.5, y / height - 0.5, -1.0]
+-            ray_len = math.sqrt(sum(c*c for c in ray_dir))
+-            ray_dir = [c/ray_len for c in ray_dir]
+-            
+-            # Intersect with Bounding Box (slab method)
+-            t0, t1 = intersect_slab(ray_origin, ray_dir, minBB, maxBB)
+-            if t0 > t1: continue
+-            
+-            ray_start = [(ray_origin[i] + ray_dir[i] * t0 - minBB[i]) / (maxBB[i] - minBB[i]) for i in range(3)]
+-            ray_stop = [(ray_origin[i] + ray_dir[i] * t1 - minBB[i]) / (maxBB[i] - minBB[i]) for i in range(3)]
+-            
+-            ray_vec = [ray_stop[i] - ray_start[i] for i in range(3)]
+-            ray_length = math.sqrt(sum(c*c for c in ray_vec))
+-            
+-            if ray_length <= 0 or ray_length > math.sqrt(3.0) or math.isnan(ray_length):
+-                continue
+-                
+-            dim_max = max(dim_z, dim_y, dim_x)
+-            n_steps = int(math.ceil(dim_max * ray_length * params['sampling_factor']))
+-            step_vector = [ray_vec[i] / ray_length * ray_length / (n_steps - 1.0) for i in range(3)]
+-            
+-            accumulated_color = [0.0, 0.0, 0.0]
+-            accumulated_alpha = 0.0
+-            
+-            for i in range(n_steps):
+-                sampling_pos = [ray_start[i] + step_vector[i] * i for i in range(3)]
+-                
+-                # ESS Step
+-                bx = int(sampling_pos[0] * dim_x / params['block_size'])
+-                by = int(sampling_pos[1] * dim_y / params['block_size'])
+-                bz = int(sampling_pos[2] * dim_z / params['block_size'])
+-                bx = max(0, min(bx, dim_x // params['block_size'] - 1))
+-                by = max(0, min(by, dim_y // params['block_size'] - 1))
+-                bz = max(0, min(bz, dim_z // params['block_size'] - 1))
+-                
+-                dist = d_prime[bz][by][bx]
+-                skip_distance = dist * params['block_size'] / dim_max
+-                sampling_pos = [sampling_pos[j] + step_vector[j] * (n_steps - 1.0) * skip_distance / ray_length for j in range(3)]
+-                
+-                intensity = sample_volume(volume, sampling_pos, params)
+-                rgba = apply_tf(tf, intensity, params)
+-                
+-                if params['earlyRayTermination'] and accumulated_alpha > 0.99:
+-                    break
+-                    
+-                c = [rgba[k] * rgba[3] * (1.0 - accumulated_alpha) for k in range(3)]
+-                accumulated_color = [accumulated_color[k] + c[k] for k in range(3)]
+-                accumulated_alpha += rgba[3] * (1.0 - accumulated_alpha)
+-                
+-            image[y][x] = accumulated_color
+-    return image
+ 
+ def intersect_slab(origin, direction, minBB, maxBB):
+@@ -273,4 +196,79 @@
+                 return (math.inf, -math.inf)
+     return (t0, t1)
++
++def ray_cast(volume, d_prime, camera_matrix, tf, params):
++    """
++    Performs direct volume rendering using PDM-based ESS.
++    volume: 3D list of intensities.
++    d_prime: 3D list of uint8 (final distance map).
++    camera_matrix: 4x4 list of lists (inverseModelView).
++    tf: Transfer function function/intensity map.
++    params: dict with sampling_factor, earlyRayTermination, etc.
++    Returns: 2D list of RGBA tuples.
++    """
++    dim_z, dim_y, dim_x = len(volume), len(volume[0]), len(volume[0][0])
++    height, width = params.get('height', 100), params.get('width', 100)
++    b = params.get('block_size', 4)
++    sampling_factor = params.get('sampling_factor', 1.0)
++    earlyRayTermination = params.get('earlyRayTermination', False)
++    
++    ray_origin = [camera_matrix[0][3], camera_matrix[1][3], camera_matrix[2][3]]
++    minBB = [-0.5, -0.5, -0.5]
++    maxBB = [0.5, 0.5, 0.5]
++    dim_max = max(dim_z, dim_y, dim_x)
++    
++    image = [[[0.0, 0.0, 0.0, 0.0] for _ in range(width)] for _ in range(height)]
++    
++    for y in range(height):
++        for x in range(width):
++            ray_dir = [x / width - 0.5, y / height - 0.5, -1.0]
++            ray_len = math.sqrt(sum(c*c for c in ray_dir))
++            ray_dir = [c/ray_len for c in ray_dir]
++            
++            t0, t1 = intersect_slab(ray_origin, ray_dir, minBB, maxBB)
++            if t0 > t1: continue
++            
++            ray_start = [(ray_origin[i] + ray_dir[i] * t0 - minBB[i]) / (maxBB[i] - minBB[i]) for i in range(3)]
++            ray_stop = [(ray_origin[i] + ray_dir[i] * t1 - minBB[i]) / (maxBB[i] - minBB[i]) for i in range(3)]
++            
++            ray_vec = [ray_stop[i] - ray_start[i] for i in range(3)]
++            ray_length = math.sqrt(sum(c*c for c in ray_vec))
++            
++            if ray_length <= 0 or ray_length > math.sqrt(3.0) or math.isnan(ray_length):
++                continue
++                
++            n_steps = int(math.ceil(dim_max * ray_length * sampling_factor))
++            step_vector = [ray_vec[i] / (n_steps - 1.0) for i in range(3)]
++            
++            accumulated_color = [0.0, 0.0, 0.0]
++            accumulated_alpha = 0.0
++            
++            for i in range(n_steps):
++                sampling_pos = [ray_start[j] + step_vector[j] * i for j in range(3)]
++                
++                # ESS Step [G]
++                bx = int(sampling_pos[0] * (dim_x / b))
++                by = int(sampling_pos[1] * (dim_y / b))
++                bz = int(sampling_pos[2] * (dim_z / b))
++                bx = max(0, min(bx, dim_x // b - 1))
++                by = max(0, min(by, dim_y // b - 1))
++                bz = max(0, min(bz, dim_z // b - 1))
++                
++                dist = d_prime[bz][by][bx]
++                texture_advance = dist * (b / dim_max)
++                sampling_pos = [sampling_pos[j] + (ray_vec[j] / ray_length) * texture_advance for j in range(3)]
++                
++                intensity = sample_volume(volume, sampling_pos, params)
++                rgba = apply_tf(tf, intensity, params)
++                
++                if earlyRayTermination and accumulated_alpha > 0.98:
++                    break
++                    
++                c = [rgba[k] * rgba[3] * (1.0 - accumulated_alpha) for k in range(3)]
++                accumulated_color = [accumulated_color[k] + c[k] for k in range(3)]
++                accumulated_alpha += rgba[3] * (1.0 - accumulated_alpha)
++                
++            image[y][x] = accumulated_color
++    return image
+ 
+ def sample_volume(volume, pos, params):

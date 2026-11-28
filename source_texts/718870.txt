@@ -1,0 +1,111 @@
+Goal Each visible section is its own cmd_draw_indexed. Group 8x4x8 sections into region buffers and issue one indirect draw per region; generate commands on the GPU in a later step. Acceptance Same image; fewer draw calls and lower CPU f...
+
+Region buffers and multi-draw indirect for terrain · Issue #23 · PhotonMC/photon-client · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Region buffers and multi-draw indirect for terrain #23
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Region buffers and multi-draw indirect for terrain#23
+Copy link
+Labels
+P3Priority 3: additive; deferred until the core is settledPriority 3: additive; deferred until the core is settledinfraInfrastructure phase workInfrastructure phase workparkedParked by the platform direction (ADR 0018)Parked by the platform direction (ADR 0018)performanceSpeed or memorySpeed or memory
+Milestone
+Infra: rendering
+Description
+BatuhanAksoyy
+opened on Oct 10, 2026
+Issue body actions
+Goal
+Each visible section is its own cmd_draw_indexed. Group 8x4x8 sections into region buffers and issue one indirect draw per region; generate commands on the GPU in a later step.
+Acceptance
+Same image; fewer draw calls and lower CPU frame time in bench; validation layer clean.
+Activity
+BatuhanAksoyy
+added this to the Infra: rendering milestone on Oct 10, 2026
+BatuhanAksoyy
+added
+infraInfrastructure phase workInfrastructure phase work
+performanceSpeed or memorySpeed or memory
+on Oct 10, 2026
+BatuhanAksoyy
+added
+P3Priority 3: additive; deferred until the core is settledPriority 3: additive; deferred until the core is settled
+on Oct 22, 2026
+BatuhanAksoyy commented on Oct 30, 2026
+BatuhanAksoyy
+on Oct 30, 2026
+CollaboratorAuthor
+More actions
+Measured before starting (HEAD 4142e31, release, 1280x720, render distance 32, vsync off, still route, 3820 sections, vanilla test server; the world still held about 1000 leftover entities, so absolute numbers are not the clean spawn scene):
+Work per frame: mean 2.8 ms, p50 2.2 ms. CPU parts p50: mesh 1.67 ms (entities), extract 0.17, backend 0.32 of which record 0.28 ms, submit/present 0.03.
+GPU scene 1.0 ms p50, of which terrain 0.73 ms, translucent 0.12, clouds/weather 0.12.
+So everything #23 can remove from the CPU is the terrain share of record, at most about 0.28 ms (13% of this frame) at 3820 sections; at render distance 20 it is less. #24's vertex packing and face grouping would act on the GPU's 0.73 ms, but the frame is CPU bound (work 2.2 ms against GPU 1.0 ms), so a GPU-only gain does not shorten frames at this size. It would matter at higher resolutions or on weaker GPUs, which I have not measured.
+Why I have not started #23: the section vertex and index buffers are already arena blocks, but each draw also pushes a per-section fade constant (bind_section). An indirect draw needs that value per draw (instance data or a storage buffer), which means a shader and vertex-input change, with the render parity cases and validation layer as the check. The gain is bounded by about 0.28 ms. Recommendation: do #23 after the entity CPU work (mesh 1.67 ms is six times larger) and only if you want the draw-call count down for its own sake; #24 waits for #23 and a measurement at a GPU-bound size. No change to the issues' acceptance text.
+Side effect, stated: to read the report I ran bench --save --name terrainprobe, which also wrote .data/runs/bench/baseline-still.json (machine-local, under .data/) with this probe run. Any earlier saved baseline for the still route is replaced; re-save one on a clean world before a --compare.
+BatuhanAksoyy commented on Oct 30, 2026
+BatuhanAksoyy
+on Oct 30, 2026
+CollaboratorAuthor
+More actions
+Owner decision (2026-10-30): #23 and #24 are not worked now. They stay open; the measurement in the comment above (terrain draw recording 0.28 ms of a 2.2 ms frame, GPU scene 1.0 ms) is the reason to revisit them later, not before the entity CPU work.
+BatuhanAksoyy commented on Oct 30, 2026
+BatuhanAksoyy
+on Oct 30, 2026
+CollaboratorAuthor
+More actions
+Change of decision (owner, performance program, tracked on #98): this issue is back in scope and moves ahead of the P3 label. Order of the program: measurement routes (done, #98), #22 pipelining, #25 instancing and parallel extract, #98 spikes, then this issue (region buffers and multi-draw indirect), then #24. Targets at 1280x720, render distance 32, vsync off: still route work p50 <= 1.0 ms and p99 <= 3.0 ms, run route p99 <= 4.0 ms, 1600 NoAI pigs still route p50 <= 2.0 ms. After this issue the three named routes run again and the numbers are posted on #98. Parity stays green and there are no UI changes.
+BatuhanAksoyy commented on Oct 30, 2026
+BatuhanAksoyy
+on Oct 30, 2026
+CollaboratorAuthor
+More actions
+Deferred in the overnight #98 session (decision recorded on #98): perf-still terrain GPU time scales with primitives, not draws (halving the index counts at an unchanged draw count halves it; 16x fewer pixels changes nothing), and perf-still is GPU-bound, so multi-draw indirect would only lower CPU record time (about 0.6 ms). It returns after the #24 directional groups if record time becomes the limit, since those add draws per section.
+BatuhanAksoyy commented on Oct 30, 2026
+BatuhanAksoyy
+on Oct 30, 2026
+CollaboratorAuthor
+More actions
+Plan after the #24 directional-group slice (31ea814): perf-still is at work p50 1.59 ms with scene GPU 1.53 ms and record 0.89 ms, so the frame is still bound by the GPU, and the CPU record time sits just under it. This issue alone cannot reach p50 <= 1.0 ms; it only shortens record.
+Slices, one commit each, each compared by interleaved A/B on the four routes against the same-session baseline:
+Measure what the per-section bind_section push constant and the per-run draws cost in record now (counter of draws and binds per frame on perf-still); no commit unless it shows a win.
+Fade as per-draw data (storage buffer indexed by draw id) so a section no longer needs a push per draw; render parity cases and validation layer as the check. Keep only if record time falls.
+Region buffers plus multi-draw indirect over the logical per-section draws (compare at logical per-section draws; ADR note for the changed draw-list representation). Keep only if record time falls and GPU time does not rise.
+Order: #24 vertex packing first when it shows a GPU win (GPU is the limit), then these slices if record time becomes the limit.
+BatuhanAksoyy commented on Oct 31, 2026
+BatuhanAksoyy
+on Oct 31, 2026
+CollaboratorAuthor
+More actions
+Slice 1 (measurement, no commit, temporary counters reverted): perf-still at 261580d averages about 846 section binds (one push-constant write plus a vertex and an index buffer bind each) and about 1830 indexed draws per terrain pass, so about 2.2 runs per section. Per pass, not per frame: a frame has one pass per terrain layer. Next: slice 2, to see whether pushing the fade per draw is a win; the counts say binds are about 46 percent of the commands a pass records, so a per-draw fade buffer can remove at most the push and keep the buffer binds. Not measured: the share of record time these binds take; that needs the A/B in slice 2.
+BatuhanAksoyy
+added
+parkedParked by the platform direction (ADR 0018)Parked by the platform direction (ADR 0018)
+on Nov 4, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+P3Priority 3: additive; deferred until the core is settledPriority 3: additive; deferred until the core is settledinfraInfrastructure phase workInfrastructure phase workparkedParked by the platform direction (ADR 0018)Parked by the platform direction (ADR 0018)performanceSpeed or memorySpeed or memory
+Type
+No type
+Projects
+No projects
+Milestone
+Infra: renderingNo due date
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

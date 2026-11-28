@@ -1,0 +1,130 @@
+# Monte-Carlo Solver
+
+Also called: TD(0) Solver, Temporal Difference Solver
+
+## Overview
+The Monte-Carlo Solver is a method for solving the light transport equation in differentiable volume rendering by applying a one-point Monte-Carlo estimator to the radiosity summation, using off-policy temporal difference learning (TD(0)) to iteratively update outgoing radiance for all kernels simultaneously [S1]. Unlike radiance caching, which solves for selected points independently, or classical iterative linear system solvers, which produce biased intermediate results, this method provides unbiased estimations of the final solution at every step [S1]. It builds on [Gradient Descent Solver](3280-gradient-descent-solver.md) by treating the radiosity update as a reinforcement learning problem where the state value is the outgoing radiance [S1].
+
+## How it works
+**Inputs:** A set of $N$ Gaussian kernels with their properties (positions, covariances, etc.), initial emissions $\mathbf{E}_i^c$, and a maximum time step $T$.
+**Outputs:** Estimated outgoing radiance $\{\mathbf{B}_1^c, \dots, \mathbf{B}_N^c\}$ for all kernels.
+
+**Data Structures:**
+The algorithm maintains three arrays of size $N$ for all kernels $i \in \{1, \dots, N\}$:
+1.  $\mathbf{S}_i^B$: Sum of radiance estimations (initialized to $\mathbf{0}$).
+2.  $\mathbf{S}_i^{B^2}$: Sum of squares of radiance estimations (initialized to $\mathbf{0}$).
+3.  $D_i$: Number of visits/updates for kernel $i$ (initialized to $0$).
+
+**Formulas:**
+The one-point Monte-Carlo estimator for kernel $i$ is defined as [S1]:
+$$ \mathbf{B}_i^c \approx \mathbf{E}_i^c + \frac{1}{\Pr[\text{choose } j]} \int_{P_i} \int_{P_j} \mathbf{f}_i(\mathbf{Y}^T \mathbf{B}_j^c) V_{ji} d\mathbf{x}' d\mathbf{x} \quad (24) $$
+where $\mathbf{f}_i$ is the BRDF response, $\mathbf{Y}$ is the spherical harmonic basis, $\mathbf{B}_j^c$ is the outgoing radiance of kernel $j$, and $V_{ji}$ is the visibility term between kernels $j$ and $i$.
+
+The update rule blends the old estimate with the new Monte-Carlo estimate using TD(0) [S1]:
+$$ \mathbf{B}_i^{c(t+1)} = \frac{t}{t+1} \times \mathbf{B}_i^{c(t)} + \frac{1}{t+1} \times \left( \mathbf{E}_i^c + \frac{1}{\text{Pr}[\text{choose } j]} \int_{P_i} \int_{P_j} \mathbf{f}_i(\mathbf{Y}^T \mathbf{B}_j^{c(t)}) V_{ji} d\mathbf{x}' d\mathbf{x} \right) \quad (25) $$
+The coefficients $\frac{t}{t+1}$ and $\frac{1}{t+1}$ satisfy the Robbins-Monro condition for convergence [S1].
+
+**Parameters:**
+*   $T$: Maximum time step. Empirically set to $64$ to balance efficiency and variance [S1].
+
+**Algorithm Steps:**
+1.  Initialize $\mathbf{S}_i^B \leftarrow \mathbf{0}$, $\mathbf{S}_i^{B^2} \leftarrow \mathbf{0}$, and $D_i \leftarrow 0$ for all $i \in \{1, \dots, N\}$ [S1].
+2.  Iterate for time steps $t$ from $1$ to $T$:
+    a.  **Select Receiving Kernels:**
+        *   If $t \leq 8$, select all kernels: $\{a_1, \dots, a_N\} \leftarrow \{1, \dots, N\}$ [S1].
+        *   Otherwise, select $N$ kernels based on variance using a function `SelectStartingIndex` [S1].
+    b.  **Select Emitting Kernels:** Stochastically find kernels for emitting radiance $\{b_1, p_1, \dots, b_N, p_N\}$ using a function `NextEvent`. The probability of choosing kernel $j$ should be proportional to the integral in Eqn. (24) [S1].
+    c.  **Calculate Estimation:** For each receiving kernel $a_i$, calculate the new estimation of received radiance $\delta_i$:
+        $$ \delta_i \leftarrow \text{NE}(a_i, b_i, p_i, \mathbf{E}_{a_i}^c, \mathbf{S}_{b_i}^B / D_{b_i}) $$
+        Here, $\text{NE}$ denotes the next event estimation function which computes the integral approximation using the current estimate of the emitting kernel's radiance $\mathbf{S}_{b_i}^B / D_{b_i}$ [S1].
+    d.  **Update Statistics:**
+        *   $\mathbf{S}_{a_i}^B \leftarrow \mathbf{S}_{a_i}^B + \delta_i$ [S1].
+        *   $\mathbf{S}_{a_i}^{B^2} \leftarrow \mathbf{S}_{a_i}^{B^2} + \delta_i^2$ [S1].
+        *   $D_{a_i} \leftarrow D_{a_i} + 1$ [S1].
+3.  After the loop, calculate the final radiance as the average: $\mathbf{B}_i^c \leftarrow \mathbf{S}_i^B / D_i$ for all $i$ [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def monte_carlo_solver(kernels, emissions, T=64):
+    N = len(kernels)
+    # Initialize data structures
+    S_B = [0.0] * N
+    S_B2 = [0.0] * N
+    D = [0] * N
+    
+    for t in range(1, T + 1):
+        # Select receiving kernels
+        if t <= 8:
+            receiving_indices = list(range(N))
+        else:
+            # Select N kernels based on variance
+            receiving_indices = select_starting_index(N, D, S_B2)
+            
+        # Stochastically find emitting kernels
+        # Returns list of tuples (emitting_kernel_index, probability)
+        emitting_events = next_event(N, kernels, S_B, D)
+        
+        # Process each receiving kernel
+        for a_idx in receiving_indices:
+            # Find corresponding emitting event for this receiving kernel
+            # In the general case, NextEvent might return a set of events for all receiving kernels
+            # Assuming NextEvent returns a list of events aligned with receiving_indices
+            b_idx, p_j = emitting_events[a_idx]
+            
+            # Calculate current estimate of emitting kernel's radiance
+            if D[b_idx] > 0:
+                B_emit = S_B[b_idx] / D[b_idx]
+            else:
+                B_emit = 0.0
+                
+            # Calculate new estimation delta
+            # NE function computes: E_a + (1/p_j) * integral approximation
+            # The integral uses B_emit as the value for B_j
+            delta = next_event_estimation(
+                kernel_a=kernels[a_idx],
+                kernel_b=kernels[b_idx],
+                prob=p_j,
+                emission=emissions[a_idx],
+                B_j=B_emit
+            )
+            
+            # Update statistics
+            S_B[a_idx] += delta
+            S_B2[a_idx] += delta * delta
+            D[a_idx] += 1
+            
+    # Final radiance
+    B_final = []
+    for i in range(N):
+        if D[i] > 0:
+            B_final.append(S_B[i] / D[i])
+        else:
+            B_final.append(0.0)
+            
+    return B_final
+```
+
+**Edge Cases and Pitfalls:**
+*   **Division by Zero:** If $D_i = 0$, the estimate $\mathbf{S}_i^B / D_i$ is undefined. The algorithm initializes $D_i=0$ and only increments it upon visit. The `NextEvent` function must handle cases where an emitting kernel has not been visited yet (e.g., by using initial emission or zero radiance) [S1].
+*   **Variance Selection:** The `SelectStartingIndex` function is not detailed in the primary algorithm but is crucial for efficiency after the initial warm-up phase ($t > 8$) [S1].
+*   **Probability Estimation:** The probability $\Pr[\text{choose } j]$ must be accurately estimated to ensure the Monte-Carlo estimator is unbiased [S1].
+
+## Subtopics
+
+### Variance-based Adaptive Monte-Carlo Solver
+A Monte-Carlo solver optimization where time steps are not synchronized across all kernels. Instead, the solver tracks the variance of the estimated outgoing radiance for each kernel over time and performs more update steps for kernels exhibiting high variance to improve efficiency [S1]. At each step, it selects $N$ elements from the set $\{1, 2, \dots, N\}$ with replacement, where the probability of selecting a specific kernel is proportional to its tracked variance, rather than selecting uniformly [S1].
+
+## Operating characteristics
+*   **Time Complexity:** The method is iterative with $T$ steps. Each step involves selecting kernels and computing next-event estimations. The complexity depends on the cost of `NextEvent` and `SelectStartingIndex`.
+*   **Memory Complexity:** $O(N)$ for storing $\mathbf{S}_i^B$, $\mathbf{S}_i^{B^2}$, and $D_i$ for $N$ kernels [S1].
+*   **Performance:** Empirically, $T=64$ balances efficiency and variance [S1]. The method is parallel-friendly [S1].
+*   **Strengths:** Provides unbiased intermediate results, unlike classical iterative linear system solvers [S1]. Simultaneously solves for all kernels, unlike radiance caching [S1].
+*   **Limitations:** Requires careful tuning of $T$ and variance-based selection strategies. The variance-based adaptive variant adds complexity to kernel selection [S1].
+
+## Background
+The Monte-Carlo Solver is based on the application of off-policy temporal difference learning (TD(0)) from reinforcement learning to the radiosity equation [S1]. It was introduced in the context of differentiable light transport with Gaussian surfels [S1]. The approach draws parallels to path tracing but replaces iterative direction selection with iterative kernel selection [S1]. The update rule relies on the Robbins-Monro condition for convergence [S1].
+
+## Sources
+[S1] Differentiable Light Transport with Gaussian Surfels via Adapted Radiosity for Efficient Relighting and Geometry Reconstruction, https://doi.org/10.1145/3763305, fetched 2026-10-27

@@ -1,0 +1,114 @@
+--- v001.md
++++ v002.md
+@@ -4,13 +4,13 @@
+ 
+ ## Overview
+-Normal Consistency Loss is a regularization term that penalizes geometric inconsistency between different normal estimates derived from a radiance field or mesh, thereby enforcing local surface smoothness and reducing artifacts such as floaters or mesh face flipping [S1, unofficial][S2]. It distinguishes itself from [Normal Smoothness Loss](4190-normal-smoothness-loss.md) by explicitly comparing normals derived from distinct geometric proxies (e.g., density gradients vs. depth maps, or adjacent mesh faces) rather than enforcing continuity along a single ray path [S1, unofficial][S2].
++Normal Consistency Loss is a regularization term that penalizes geometric inconsistency between different normal estimates derived from a radiance field or mesh, thereby enforcing local surface smoothness and reducing artifacts such as floaters or mesh face flipping [S1, unofficial][S2]. It builds on [Normal Smoothness Loss](4190-normal-smoothness-loss.md) by explicitly comparing normals derived from distinct geometric proxies (e.g., density gradients versus depth maps, or adjacent mesh faces) rather than enforcing continuity along a single ray path [S1, unofficial][S2].
+ 
+ ## How it works
+-The method operates in two distinct contexts depending on the representation: implicit radiance fields with depth supervision [S1, unofficial] or explicit mesh optimization [S2].
++The method is applied in two representation contexts based on the source literature: radiance fields with depth supervision [S1, unofficial] and joint optimization of explicit meshes with Gaussian splats [S2].
+ 
+ ### Inputs and Outputs
+ **Inputs:**
+ 1.  **Radiance Field Context:**
+-    *   $\mathbf{N}_\sigma$: Density-gradient normal, computed as the normalized gradient of the volume density $\sigma$ at a point [S1, unofficial].
++    *   $\mathbf{N}_\sigma$: Rendered density-gradient normal [S1, unofficial].
+     *   $\mathbf{N}_{\text{mean}}$: Normal estimated from the expected (mean) depth map [S1, unofficial].
+     *   $\mathbf{N}_{\text{med}}$: Normal estimated from the median depth map [S1, unofficial].
+@@ -53,20 +53,19 @@
+ ### Parameters
+ *   $\lambda_{nc}$: The weight of the normal consistency loss in the total training objective [S2].
+-*   $\lambda_n$: The weight of the radiance field normal consistency loss (used in conjunction with $\lambda_{lap}$ and $\lambda_{nc}$ in the total loss $L = L_{img} + \lambda_{lap} L_{lap} + \lambda_{nc} L_{nc} + \lambda_n L_n$) [S2].
++*   $\lambda_n$: The weight of the radiance field normal consistency loss, used in the total loss $L = L_{img} + \lambda_{lap} L_{lap} + \lambda_{nc} L_{nc} + \lambda_n L_n$ [S2].
+ 
+ ### Pseudocode
+ ```python
+-def compute_normal_consistency_loss(mesh_faces, normals, mode="mesh"):
++def compute_normal_consistency_loss(mesh_pairs, normals, mode="mesh"):
+     """
+     Computes Normal Consistency Loss.
+     
+     Args:
+-        mesh_faces: List of face indices or adjacency structure.
+-                    For 'mesh' mode: List of tuples (i, j) representing neighboring faces.
+-                    For 'radiance' mode: Not used directly; inputs are pre-computed normals.
+-        normals: Dictionary or array of normal vectors.
+-                 For 'mesh' mode: Array of shape (num_faces, 3) containing face normals n_i.
++        mesh_pairs: List of tuples (i, j) representing neighboring face indices.
++                    Ignored when mode is 'radiance'.
++        normals: Dictionary containing normal vectors.
++                 For 'mesh' mode: Array-like of shape (num_faces, 3) for face normals.
+                  For 'radiance' mode: Dict with keys 'N_sigma', 'N_mean', 'N_med'.
+-        mode: "mesh" or "radiance".
++        mode: String, either "mesh" or "radiance".
+         
+     Returns:
+@@ -74,38 +73,24 @@
+     """
+     if mode == "mesh":
+-        # L_nc = (1 / |N_f|) * sum(1 - n_i . n_j) for all neighboring face pairs
+         total_loss = 0.0
+         num_pairs = 0
+-        
+-        for i, j in mesh_faces:
+-            # Ensure normals are normalized before dot product
++        for i, j in mesh_pairs:
+             n_i = normals[i]
+             n_j = normals[j]
+-            
+-            # Dot product of two unit vectors
+             dot_product = sum(a * b for a, b in zip(n_i, n_j))
+-            
+-            # Add (1 - dot_product) to total
+             total_loss += (1.0 - dot_product)
+             num_pairs += 1
+-            
+         if num_pairs == 0:
+             return 0.0
+-            
+         return total_loss / num_pairs
+ 
+     elif mode == "radiance":
+-        # L_n = ||N_sigma - N_mean||^2 + ||N_sigma - N_med||^2
+         N_sigma = normals['N_sigma']
+         N_mean = normals['N_mean']
+         N_med = normals['N_med']
+-        
+-        # Compute squared L2 norms
+         diff_mean = [a - b for a, b in zip(N_sigma, N_mean)]
+         loss_mean = sum(d * d for d in diff_mean)
+-        
+         diff_med = [a - b for a, b in zip(N_sigma, N_med)]
+         loss_med = sum(d * d for d in diff_med)
+-        
+         return loss_mean + loss_med
+ 
+@@ -116,21 +101,12 @@
+ ### Edge Cases and Pitfalls
+ *   **Precision:** In the mesh variant, normals must be normalized before computing the dot product to ensure the range is $[-1, 1]$ [S2].
+-*   **Degenerate Input:** If no neighboring face pairs exist ($|N_f| = 0$), the denominator in the mesh formula is zero [S2]. The pseudocode handles this by returning 0.0.
++*   **Degenerate Input:** If no neighboring face pairs exist ($|N_f| = 0$), the denominator in the mesh formula is zero [S2]. The pseudocode handles this by returning $0.0$.
+ *   **Floaters:** In the radiance field variant, without this loss, density can ripple or drift between LiDAR anchors, creating floaters [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:**
+-    *   Mesh: $O(|N_f|)$, linear in the number of neighboring face pairs [S2].
+-    *   Radiance: $O(1)$ per pixel/ray, constant time relative to scene size, dependent on the cost of computing depth normals [S1, unofficial].
+-*   **Memory Complexity:**
+-    *   Mesh: $O(|N_f|)$ to store face pairs or adjacency [S2].
+-    *   Radiance: $O(1)$ auxiliary storage for normal vectors [S1, unofficial].
+-*   **Strengths:**
+-    *   Effectively suppresses floaters in front of occupied voxels in sparse voxel maps [S1, unofficial].
+-    *   Reduces mesh distortion (e.g., intersecting triangles) and face flipping during joint optimization [S2].
+-    *   Acts as a geometric prior that constrains optimization, improving surface quality [S2].
+-*   **Limitations:**
+-    *   Does not constrain the field along unmeasured rays in the radiance field variant; it only smooths between proxies [S1, unofficial].
+-    *   Requires accurate depth estimation or mesh topology [S1, unofficial][S2].
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
++*   **Strengths:** Effectively suppresses floaters in front of occupied voxels in sparse voxel maps [S1, unofficial]. Reduces mesh distortion (e.g., intersecting triangles) and face flipping during joint optimization [S2]. Acts as a geometric prior that constrains optimization, improving surface quality [S2].
++*   **Limitations:** Does not constrain the field along unmeasured rays in the radiance field variant; it only smooths between proxies [S1, unofficial]. Requires accurate depth estimation or mesh topology [S1, unofficial][S2].
+ 
+ ## Background

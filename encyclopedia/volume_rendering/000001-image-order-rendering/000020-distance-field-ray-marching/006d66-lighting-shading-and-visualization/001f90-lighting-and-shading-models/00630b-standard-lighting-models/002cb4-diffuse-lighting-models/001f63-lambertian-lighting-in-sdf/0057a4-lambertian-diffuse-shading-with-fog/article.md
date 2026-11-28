@@ -1,0 +1,134 @@
+# Lambertian Diffuse Shading with Fog
+
+Also called: Lambertian Diffuse with Fog, Lambertian Fog Shading
+
+## Overview
+This method computes the final pixel color by combining Lambertian diffuse reflection, ambient lighting, and exponential fog attenuation, then mapping the result to terminal colors with optional gamma correction. It extends [Lambertian Lighting in SDF](2023-lambertian-lighting-in-sdf.md) by adding fog density and color mapping logic specific to ASCII/ANSI console rendering.
+
+## How it works
+**Inputs:**
+- `materialColor`: A 3-component vector (X, Y, Z) representing the base color of the surface.
+- `normal`: The surface normal vector at the hit point.
+- `LightDirection`: A normalized vector representing the direction to the light source. Default: `(0.5, 1.0, -0.3)` [S1, unofficial].
+- `distance`: The raymarch distance from the camera to the hit point.
+- `FogDensity`: A scalar parameter controlling fog thickness. Default: `0.03f` [S1, unofficial].
+- `EnableFog`: A boolean flag to toggle fog application.
+- `settings.MapColorsWithGamma`: A boolean flag to toggle gamma correction.
+- `theme`: A data structure or context object containing color mapping rules (implementation-specific) [S1, unofficial].
+
+**Outputs:**
+- An ANSI escape sequence string representing the colored character to be printed to the console.
+
+**Data Structures:**
+- `materialColor`: `Vector3` or equivalent struct with components `X`, `Y`, `Z`.
+- `normal`: `Vector3` or equivalent struct.
+- `LightDirection`: `Vector3` or equivalent struct.
+
+**Steps:**
+1. Compute the Lambertian diffuse factor:
+   $$ \text{diffuse} = \max(0, \text{dot}(\text{normal}, \text{LightDirection})) $$
+   where `dot` is the standard dot product [S1, unofficial].
+
+2. Compute the fog factor using exponential decay:
+   $$ \text{fogFactor} = 1.0 - \exp(-\text{distance} \times \text{FogDensity}) $$
+   where `exp` is the natural exponential function [S1, unofficial].
+
+3. Compute the base lighting intensity. Start with an ambient component. The source notes mention "ambient light intensity is 0.25f" [S1, unofficial], but the explicit formula provided combines diffuse and ambient implicitly or assumes ambient is added before the fog step. The source formula for `lighting` update is:
+   $$ \text{lighting} = \text{lighting} \times (1.0 - \text{fogFactor}) \quad \text{if } \text{EnableFog} \text{ is true} $$
+   The source does not explicitly show the addition of ambient light to the diffuse term in the formula block, but mentions "ambient light" in the definition. We assume `lighting` is initialized with ambient or the diffuse term is scaled. Given the explicit formula `lighting = lighting * (1.0 - fogFactor)`, we assume `lighting` holds the pre-fog color intensity. The source also provides a color intensity scaling step:
+   $$ \text{colorIntensity} = \frac{\text{materialColor.X} + \text{materialColor.Y} + \text{materialColor.Z}}{3.0} $$
+   $$ \text{lighting} = \text{lighting} \times (0.7 + \text{colorIntensity} \times 0.3) $$
+   This step modulates the lighting based on the average brightness of the material color [S1, unofficial].
+
+4. Map the computed lighting to a color.
+   - If `settings.MapColorsWithGamma` is false:
+     - `finalColor = materialColor * intensity` (where `intensity` is the final `lighting` value).
+     - Clamp each component of `finalColor` to $[0, 1]$.
+     - Multiply each component by 255 and round to the nearest integer to get `r`, `g`, `b`.
+     - Return the ANSI escape sequence: `"\u001b[38;2;{r};{g};{b}m"` [S1, unofficial].
+   - If `settings.MapColorsWithGamma` is true:
+     - `finalColor = materialColor * intensity`.
+     - Clamp each component of `finalColor` to $[0, 1]$.
+     - Apply gamma correction with gamma value $0.8$:
+       $$ r = \text{pow}(\text{clamped\_X}, 1.0 / 0.8) $$
+       $$ g = \text{pow}(\text{clamped\_Y}, 1.0 / 0.8) $$
+       $$ b = \text{pow}(\text{clamped\_Z}, 1.0 / 0.8) $$
+     - Multiply each component by 255 and cast to integer.
+     - Return the ANSI escape sequence: `"\u001b[38;2;{r};{g};{b}m"` [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def lambertian_diffuse_shading_with_fog(material_color, normal, light_direction, distance, fog_density, enable_fog, use_gamma):
+    # 1. Compute diffuse lighting
+    # LightDirection default is (0.5, 1.0, -0.3) if not provided
+    diffuse = max(0.0, dot(normal, light_direction))
+    
+    # 2. Compute ambient lighting (assumed base intensity)
+    # Source mentions ambient light intensity is 0.25f. 
+    # The formula structure implies lighting starts with some base value.
+    # We assume lighting = diffuse + ambient or similar. 
+    # However, the explicit formula only shows scaling. 
+    # To be safe and follow the source's explicit "lighting = lighting * ..." structure,
+    # we assume 'lighting' is initialized with the diffuse term and ambient is handled elsewhere or implicit.
+    # Given the ambiguity, we stick to the explicit formula steps.
+    lighting = diffuse 
+    
+    # 3. Apply Fog
+    if enable_fog:
+        fog_factor = 1.0 - exp(-distance * fog_density)
+        lighting = lighting * (1.0 - fog_factor)
+        
+    # 4. Modulate by material color intensity
+    color_intensity = (material_color.x + material_color.y + material_color.z) / 3.0
+    lighting = lighting * (0.7 + color_intensity * 0.3)
+    
+    # 5. Map to Color
+    final_color = material_color * lighting
+    
+    # Clamp to [0, 1]
+    r = clamp(final_color.x, 0.0, 1.0)
+    g = clamp(final_color.y, 0.0, 1.0)
+    b = clamp(final_color.z, 0.0, 1.0)
+    
+    if use_gamma:
+        gamma = 0.8
+        r = pow(r, 1.0 / gamma)
+        g = pow(g, 1.0 / gamma)
+        b = pow(b, 1.0 / gamma)
+        
+    # Convert to 0-255 integer
+    r_int = int(round(r * 255))
+    g_int = int(round(g * 255))
+    b_int = int(round(b * 255))
+    
+    # Return ANSI code
+    return f"\u001b[38;2;{r_int};{g_int};{b_int}m"
+```
+
+**Parameters:**
+- `LightDirection`: Normalized vector. Default: `(0.5, 1.0, -0.3)` [S1, unofficial].
+- `AmbientLightIntensity`: Scalar. Default: `0.25f` [S1, unofficial]. (Note: Explicit integration into the formula is not detailed in the source's formula block, but mentioned in parameters).
+- `FogDensity`: Scalar. Default: `0.03f` [S1, unofficial].
+- `Gamma`: Scalar. Default: `0.8f` [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Division by Zero**: Not applicable in the core formulas.
+- **Negative Values**: `max(0, ...)` handles negative dot products. Clamping handles any overshoot from gamma or multiplication.
+- **Precision**: Floating point precision for `exp` and `pow` should be standard IEEE 754 single or double precision.
+- **Boundary Conditions**: If `distance` is 0, `fogFactor` is 0, so no fog attenuation occurs. If `FogDensity` is 0, `fogFactor` is 0.
+
+## Operating characteristics
+- **Time Complexity**: O(1) per hit point. The operations are basic arithmetic and trigonometric functions.
+- **Memory Complexity**: O(1). No additional data structures are required beyond the input vectors.
+- **Strengths**: Simple to implement; provides basic atmospheric depth perception via fog; integrates well with terminal rendering constraints.
+- **Limitations**: The fog model is simple exponential decay; does not account for light scattering or multiple bounces; gamma correction value is fixed in the source (0.8) which is non-standard (typically 2.2), potentially leading to washed-out or dark images depending on the display environment.
+- **When to use**: Real-time ASCII raymarching where performance is critical and visual fidelity is secondary to readability.
+- **When not to use**: High-fidelity rendering, physically based rendering, or scenes requiring accurate light transport.
+
+## Background
+This method is derived from the `csRaymarching` project, which focuses on raymarching signed distance fields (SDFs) for console output. It adapts standard Lambertian shading for the specific constraints of ANSI color codes and half-block character rendering. The use of gamma 0.8 and specific color mapping suggests an optimization for terminal display characteristics rather than physical accuracy.
+
+## Sources
+[S1] 0gecco/csRaymarching, https://github.com/0gecco/csRaymarching, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,222 @@
+# SH Glyph Ray Intersection via Root Finding
+
+Also called: Ray Tracing Spherical Harmonics Glyphs Intersection, Ray tracing Spherical Harmonics Glyphs method, Ray-Glyph Intersection Test via Polynomial Root Finding, SH glyph intersection test
+
+## Overview
+This method provides an efficient and accurate way to render Spherical Harmonics (SH) glyphs by computing all intersections between an arbitrary ray and an SH glyph [S1]. It constructs a polynomial whose roots correspond to ray-glyph intersections, avoiding the inaccuracies and high computational cost of ray marching [S1]. Unlike prior work [vPP*11] which requires precomputation per camera position and only supports primary rays natively, this method computes all intersections for arbitrary rays (including secondary rays for shadows) without precomputation [S1]. Compared to ray marching methods [vPP*11, PPv*09] whose accuracy depends on the number of steps, this method is more accurate and flexible because it finds all intersections exactly via root finding [S1].
+
+## How it works
+**Inputs:**
+*   SH coefficients $\mathbf{b} \in \mathbb{R}^{k+2}$ of degree $k \in \mathbb{N}$ (only even bands $0, 2, \dots, k$ are used) [S1].
+*   Ray origin $\mathbf{o} \in \mathbb{R}^3$ (relative to the glyph center) [S1].
+*   Normalized ray direction $\mathbf{d} \in \mathbb{S}^2$ [S1].
+
+**Outputs:**
+*   Ray parameters $t$ for all ray-glyph intersections [S1].
+
+**Data Structures:**
+*   The SH basis functions are interpreted as trivariate homogeneous polynomials in Cartesian variables $x, y, z$ [S1].
+*   Monomials are grouped by degree. For degree $k$, the monomials are all combinations of $x^a y^b z^c$ where $a+b+c=k$ [S1].
+*   The resulting polynomial for intersection has degree $2k+2$ [S1].
+
+**Steps:**
+
+1.  **Compute auxiliary vector $\mathbf{e}$:**
+    $$ \mathbf{e} := \frac{\mathbf{o} - (\mathbf{d}^\top \mathbf{o}) \mathbf{d}}{\|\mathbf{o} - (\mathbf{d}^\top \mathbf{o}) \mathbf{d}\|} $$
+    This vector is orthogonal to $\mathbf{d}$ and lies in the plane spanned by $\mathbf{o}$ and $\mathbf{d}$ [S1].
+
+2.  **Compute sample points on the unit circle:**
+    For $l \in \{0, \dots, k\}$:
+    $$ u_l := \cos\left(l \frac{\pi}{k+1}\right), \quad v_l := \sin\left(l \frac{\pi}{k+1}\right) $$
+    These points sample the unit circle in the plane defined by $\mathbf{d}$ and $\mathbf{e}$ [S1].
+
+3.  **Compute polynomial coefficients $g_i$:**
+    Define the Vandermonde-like matrix $V \in \mathbb{R}^{(k+1) \times (k+1)}$ with entries:
+    $$ V_{l,i} := u_l^i v_l^{k-i} \quad \text{for } l, i \in \{0, \dots, k\} $$
+    Evaluate the SH basis functions $\mathbf{Y}$ at the points $u_l \mathbf{d} + v_l \mathbf{e}$:
+    $$ \mathbf{y}_l := \mathbf{Y}(u_l \mathbf{d} + v_l \mathbf{e}) $$
+    Compute the coefficients $g_i$ for $i \in \{0, \dots, k\}$ by solving the linear system:
+    $$ (g_0, \dots, g_k)^\top := V^{-1} (\mathbf{b}^\top \mathbf{y}_0, \dots, \mathbf{b}^\top \mathbf{y}_k)^\top $$
+    This step effectively fits the SH values on the sampled circle to a polynomial in $u, v$ [S1].
+
+4.  **Compute upper bound $g_{\max}$:**
+    $$ g_{\max} := \sum_{i=0}^k |g_i| \sqrt{\frac{i(k-i)^{k-i}}{k^k}} $$
+    This bound estimates the maximum value of the polynomial $g(u,v)$ on the unit circle [S1].
+
+5.  **Early exit check:**
+    If $|g_{\max}| < |\mathbf{e}^\top \mathbf{o}|$, return no intersections [S1].
+
+6.  **Compute upper bound $u_{\max}$:**
+    $$ u_{\max} := \sqrt{\frac{g_{\max}^2}{(\mathbf{e}^\top \mathbf{o})^2} - 1} $$
+    This defines the interval $[-u_{\max}, u_{\max}]$ within which real roots for the intersection parameter $u$ must lie [S1].
+
+7.  **Compute intermediate coefficients $s_j$:**
+    Compute $s_0, \dots, s_{2k} \in \mathbb{R}$ using Eq. 8 from the source [S1]. (Note: The explicit formula for Eq. 8 is not provided in the source text, but it is referenced as part of the coefficient computation process).
+
+8.  **Compute final polynomial coefficients $f_i$:**
+    Compute $f_0, \dots, f_{2k+2} \in \mathbb{R}$ using Eq. 9 from the source [S1]. (Note: The explicit formula for Eq. 9 is not provided in the source text, but it is referenced as part of the coefficient computation process).
+
+9.  **Find roots:**
+    Compute all roots $u_0, \dots, u_{n-1}$ of the polynomial $P(u) = \sum_{i=0}^{2k+2} f_i u^i$ that lie within the interval $[-u_{\max}, u_{\max}]$ [S1]. The source references an iterative solver [Yuk22] for this step.
+
+10. **Compute ray parameters:**
+    For each root $u_l$:
+    $$ t_l := u_l (\mathbf{e}^\top \mathbf{o}) - (\mathbf{d}^\top \mathbf{o}) $$
+    These $t_l$ values are the distances along the ray to the intersection points [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import numpy as np
+
+def sh_glyph_intersection(b, o, d, k):
+    """
+    Compute all intersections of an SH glyph and a ray.
+    
+    Args:
+        b: SH coefficients, array of size k+2 (only even bands 0, 2, ..., k are used).
+        o: Ray origin relative to glyph center, array of size 3.
+        d: Normalized ray direction, array of size 3.
+        k: Maximum SH band index (even number).
+        
+    Returns:
+        List of ray parameters t for all intersections.
+    """
+    # Step 1: Compute auxiliary vector e
+    # o_proj = (d . o) * d
+    o_proj = np.dot(d, o) * d
+    e_vec = o - o_proj
+    norm_e = np.linalg.norm(e_vec)
+    if norm_e < 1e-12:
+        # Ray origin is on the ray direction line through the center; 
+        # e is undefined. This is a degenerate case.
+        # The source notes numerical instability for rays pointing directly at the center.
+        # We return no intersections or handle as edge case [G].
+        return []
+    e = e_vec / norm_e
+    
+    # Step 2: Compute sample points
+    # u_l, v_l for l in 0..k
+    l_indices = np.arange(k + 1)
+    angles = l_indices * math.pi / (k + 1)
+    u_l = np.cos(angles)
+    v_l = np.sin(angles)
+    
+    # Step 3: Compute polynomial coefficients g_i
+    # Construct Vandermonde-like matrix V
+    # V_{l,i} = u_l^i * v_l^(k-i)
+    V = np.zeros((k + 1, k + 1))
+    for l in range(k + 1):
+        for i in range(k + 1):
+            V[l, i] = (u_l[l] ** i) * (v_l[l] ** (k - i))
+            
+    # Evaluate SH basis Y at points u_l*d + v_l*e
+    # Note: The source does not provide the explicit implementation of Y(x,y,z) 
+    # for the given SH coefficients b. We assume a function sh_eval(b, point) exists.
+    # Y_l = b^T * Y(u_l*d + v_l*e)
+    Y_vals = np.zeros(k + 1)
+    for l in range(k + 1):
+        point = u_l[l] * d + v_l[l] * e
+        # sh_eval returns the value of the SH glyph at 'point' given coefficients b
+        Y_vals[l] = sh_eval(b, point)
+        
+    # Solve V * g = Y_vals for g
+    # g_i for i in 0..k
+    g = np.linalg.solve(V, Y_vals)
+    
+    # Step 4: Compute upper bound g_max
+    # g_max = sum_{i=0}^k |g_i| * sqrt(i * (k-i)^(k-i) / k^k)
+    g_max = 0.0
+    for i in range(k + 1):
+        term = i * ((k - i) ** (k - i)) / (k ** k)
+        g_max += abs(g[i]) * math.sqrt(term)
+        
+    # Step 5: Early exit check
+    e_dot_o = np.dot(e, o)
+    if abs(g_max) < abs(e_dot_o):
+        return []
+        
+    # Step 6: Compute upper bound u_max
+    u_max = math.sqrt((g_max ** 2 / (e_dot_o ** 2)) - 1)
+    
+    # Step 7 & 8: Compute coefficients s_j and f_i
+    # The source references Eq. 8 and Eq. 9 but does not provide the explicit formulas.
+    # We cannot implement these steps without the source formulas [G].
+    # s = compute_s(g, k) # Placeholder for Eq. 8
+    # f = compute_f(s, k) # Placeholder for Eq. 9
+    
+    # For the purpose of this article, we assume f is computed as described in the source.
+    # Since the formulas are missing, we cannot provide valid Python code for this part.
+    # We will raise an error to indicate missing implementation details from the source.
+    raise NotImplementedError("Eq. 8 and Eq. 9 formulas are not provided in the source text.")
+    
+    # Step 9: Find roots
+    # Find all roots of sum_{i=0}^{2k+2} f_i * u^i in [-u_max, u_max]
+    # Using an iterative solver [Yuk22] as referenced.
+    # We use numpy.roots for demonstration, but filter for real roots in range.
+    # Note: numpy.roots finds all roots, including complex ones.
+    coeffs = f[::-1] # numpy.roots expects highest degree first
+    roots = np.roots(coeffs)
+    
+    # Filter for real roots within [-u_max, u_max]
+    valid_roots = []
+    for r in roots:
+        if abs(r.imag) < 1e-8: # Consider real if imaginary part is negligible
+            u_real = r.real
+            if -u_max <= u_real <= u_max:
+                valid_roots.append(u_real)
+                
+    # Step 10: Compute ray parameters t_l
+    t_values = []
+    for u_l_val in valid_roots:
+        t_l = u_l_val * e_dot_o - np.dot(d, o)
+        t_values.append(t_l)
+        
+    return t_values
+
+def sh_eval(b, point):
+    """
+    Evaluate the SH glyph at a point on the unit sphere.
+    This is a placeholder. The source assumes Y(x,y,z) is known.
+    The SH basis functions are trivariate homogeneous polynomials in x, y, z.
+    """
+    x, y, z = point
+    # This function must implement the specific SH basis evaluation
+    # based on coefficients b and the homogeneous polynomial representation.
+    # Since the exact basis functions are not listed in the source for general k,
+    # this is a generic placeholder [G].
+    # For k=0, value is b[0].
+    # For k=2, value involves x^2, xy, etc.
+    # The source states SH basis functions are linear combinations of monomials.
+    return 0.0 # Placeholder
+```
+
+**Parameters:**
+*   $k$: The maximum SH band index used for truncation. The method supports truncation up to band $k=10$. Odd bands are omitted due to symmetry [S1]. Typical values in implementation are $k \le 8$ for stability, though $k \ge 10$ is supported with increased numerical issues [S1].
+*   $\varepsilon$: Error tolerance for Newton bisection, set to $2 \cdot 10^{-4} u_{\max}$ [S1].
+*   `max_iterations`: Maximum iterations for Newton bisection, set to 90 to prevent endless loops [S1].
+
+**Edge Cases and Pitfalls:**
+*   Numerical instability occurs for rays pointing directly at the glyph center with single-precision arithmetic and $k \le 8$, causing incorrect pixels near the center due to high multiplicity roots [S1]. This is handled by the iteration limit and tolerance, though artifacts may remain [S1].
+*   For $k \ge 10$, numerical issues become more serious [S1].
+*   The vector $\mathbf{e}$ is undefined if $\mathbf{o}$ is parallel to $\mathbf{d}$ (ray origin is on the ray line through the center). This is a degenerate case [G].
+
+## Operating characteristics
+*   **Time Complexity:** The method involves solving a linear system of size $(k+1) \times (k+1)$ and finding roots of a polynomial of degree $2k+2$. The root finding is done using an iterative solver [Yuk22]. The source notes that Laguerre's method (an alternative) is ~2.7 times slower due to complex arithmetic and computing more roots [S1].
+*   **Memory Complexity:** Requires storage for SH coefficients, intermediate polynomial coefficients, and the Vandermonde matrix. The source does not specify exact memory usage in bytes, but it is described as efficient [S1].
+*   **Measured Performance:** The method renders large HARDI datasets in real time on a single GPU [S1]. It is faster than prior work [vPP*11] [S1].
+*   **Strengths:** More accurate and flexible than ray marching [S1]. Computes all intersections for arbitrary rays without precomputation [S1]. Enables sophisticated shading and uncertainty visualization [S1].
+*   **Limitations:** Numerical instability for rays pointing directly at the glyph center [S1]. Increased numerical issues for $k \ge 10$ [S1].
+*   **When to use:** When high accuracy is required for SH glyph rendering, especially for secondary rays (shadows) or when precomputation is not feasible [S1].
+*   **When not to use:** When $k$ is very large ($\ge 10$) and single-precision arithmetic is used, due to numerical instability [S1]. When extreme performance is needed and lower accuracy is acceptable, ray marching might be simpler [S1].
+
+## Background
+*   **Origin:** The method was presented in "Ray Tracing Spherical Harmonics Glyphs" [S1].
+*   **History:** Prior work used ray marching [vPP*11, PPv*09] which required many samples for accuracy and did not support secondary rays natively [S1]. This method improves upon that by using polynomial root finding [S1].
+*   **Usage:** Used for visualizing high angular resolution diffusion imaging (HARDI) data [S1]. Enables volume rendering for uncertainty visualization and soft shadows [S1].
+
+## Sources
+[S1] Ray Tracing Spherical Harmonics Glyphs, https://doi.org/10.2312/vmv.20231223, fetched 2026-11-02

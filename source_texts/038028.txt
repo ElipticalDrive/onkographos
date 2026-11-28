@@ -1,0 +1,351 @@
+Contribute to fesoliveira014/c3d.c3l development by creating an account on GitHub.
+
+feat(render): froxel volumetric fog by fesoliveira014 · Pull Request #186 · fesoliveira014/c3d.c3l · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+fesoliveira014
+commented
+Sep 30, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+What changed
+Per-view froxel volumetric fog. ViewDesc.volumetric_fog gives a raster view a 16 px x 16 px x 64 slice RGBA16F volume of its HeightFog. FOG_SCATTERING fills each froxel with the slice's optical depth and the light it scatters (ambient plus the fog's sun through a Henyey-Greenstein phase, shadowed by the shadow atlas or by traced rays, zero normal so normal_bias does not move it). FOG_INTEGRATION accumulates each column. The fog helpers read the volume up to HeightFog.max_distance and continue with the analytic fog past it, so opaque surfaces, the background, blended draws and refracting readers pick it up unchanged.
+HeightFog.anisotropy (default 0.3, validated to |g| < 1); SkyFogGpu.fog_anisotropy; FogVolumeRoot; Pass.FOG_SCATTERING, Pass.FOG_INTEGRATION; LightExtraction.sun_light and fog_sun_light (the atmosphere's sun, else the first directional light).
+Path-traced views fault INVALID_ARGUMENT with the switch. A view without it records what main records.
+sky example: --volumetric-fog, --taa, a pan preset and segment, anisotropy and max_distance sliders. terrain, vegetation, water: --volumetric-fog (needs --sky).
+Docs: sky.md (new section, components, limits, example), views.md, custom_shaders.md, benchmarking.md, terrain.md, vegetation.md, water.md.
+Divergences from the proposal
+The landscape examples print FOG_SCATTERING and FOG_INTEGRATION in every pass list, as 0 without the switch, instead of only when recorded.
+--volumetric-fog without --sky returns INVALID_ARGUMENT (usage line, exit 1).
+The mutation "clip start ignored in scattering" does not fail its case: the scattering clip start and the division at the plane each give the clipped result alone. Removing both fails the clipped arm. The other nine mutations fail their case.
+Verification
+python3 scripts/build.py --test: 30 targets, 1,402 passed before, 1,403 after (one new unit test, four extended). --regen leaves the tree clean.
+Render acceptance: 142 cases before, 146 after (four new). On WSL llvmpipe (CPU, headless) the four new cases, the earlier sky cases and the clip-plane, scene-read and custom-shading cases pass, each under 5 s.
+Mutations: ten run, nine fail their case, one equivalent (above).
+llvmpipe smoke with validation, 256 x 144: sky --volumetric-fog with atlas, traced, deferred, --ssgi, --taa and --path-traced, and sky without the switch, all exit 0 with both gates passing; terrain --sky --volumetric-fog passes; terrain --volumetric-fog without --sky exits 1. vegetation and water exceed 30 s on llvmpipe and were not run.
+Timings on llvmpipe are environment only; no measured-cost rows are in docs/sky.md yet.
+GPU runs for review
+In C:\repos\c3d-review at the PR head. The before build is main at the merge base.
+```
+Set-Location C:\repos\c3d-review
+git fetch origin
+New-Item -ItemType Directory -Force build\volumetric-fog | Out-Null
+$profile = @("--opt", "O3", "--define", "C3D_PROFILE_GPU", "--define", "C3D_PROFILE_INTERNAL", "--lib", "c3d_profile")
+git switch --detach (git merge-base origin/main origin/feat/m70-volumetric-fog)
+foreach ($target in "sky", "gltf_viewer") { python scripts\build.py --target $target @profile }
+Copy-Item examples\build\sky.exe examples\build\sky-before.exe -Force
+Copy-Item examples\build\gltf_viewer.exe examples\build\gltf_viewer-before.exe -Force
+git switch --detach origin/feat/m70-volumetric-fog
+python scripts\build.py --test
+foreach ($target in "sky", "gltf_viewer", "terrain", "vegetation", "water") { python scripts\build.py --target $target @profile }
+function Run-Logged([string]$exe, [string]$name, [string[]]$arguments) {
+  & $exe @arguments > "build\volumetric-fog\$name.txt"
+  if ($LASTEXITCODE -ne 0) { Write-Output "$name exited $LASTEXITCODE" }
+}
+$sky = "examples\build\sky.exe"
+$landscape = "addons\c3d_landscape.c3l\build"
+
+# Render acceptance with validation, the four volume cases included.
+c3c test acceptance --path test\gpu\render
+
+# Validation runs.
+$volume = @("--benchmark", "60", "--gpu-timings", "--validation", "--volumetric-fog")
+Run-Logged $sky "validation_forward" $volume
+Run-Logged $sky "validation_deferred" ($volume + @("--shading", "deferred"))
+Run-Logged $sky "validation_traced" ($volume + @("--shadows", "traced"))
+Run-Logged $sky "validation_ssgi" ($volume + @("--ssgi"))
+Run-Logged $sky "validation_taa" ($volume + @("--taa"))
+Run-Logged $sky "validation_path" ($volume + @("--path-traced"))
+Run-Logged "$landscape\vegetation.exe" "validation_vegetation" @("--benchmark", "60", "--validation", "--sky", "--volumetric-fog", "--shadows", "traced")
+Run-Logged "$landscape\water.exe" "validation_water" @("--benchmark", "60", "--validation", "--sky", "--volumetric-fog")
+
+# Benchmarks, three runs each.
+foreach ($run in 1..3) {
+  Run-Logged "examples\build\sky-before.exe" "sky_before_$run" @("--benchmark", "--gpu-timings")
+  Run-Logged $sky "sky_after_$run" @("--benchmark", "--gpu-timings")
+  Run-Logged $sky "sky_volume_forward_$run" @("--benchmark", "--gpu-timings", "--volumetric-fog")
+  Run-Logged $sky "sky_volume_deferred_$run" @("--benchmark", "--gpu-timings", "--volumetric-fog", "--shading", "deferred")
+  Run-Logged $sky "sky_volume_traced_$run" @("--benchmark", "--gpu-timings", "--volumetric-fog", "--shadows", "traced")
+  Run-Logged $sky "sky_volume_taa_$run" @("--benchmark", "--gpu-timings", "--volumetric-fog", "--taa")
+  Run-Logged "examples\build\gltf_viewer-before.exe" "sponza_before_$run" @("--benchmark", "--gpu-timings", "--frames", "300", "--warmup", "60")
+  Run-Logged "examples\build\gltf_viewer.exe" "sponza_after_$run" @("--benchmark", "--gpu-timings", "--frames", "300", "--warmup", "60")
+  foreach ($example in "terrain", "vegetation", "water") {
+    Run-Logged "$landscape\$example.exe" "${example}_sky_$run" @("--benchmark", "--gpu-timings", "--sky")
+    Run-Logged "$landscape\$example.exe" "${example}_volume_$run" @("--benchmark", "--gpu-timings", "--sky", "--volumetric-fog")
+  }
+}
+Select-String -Path build\volumetric-fog\*.txt -Pattern "^gate " | ForEach-Object { "$($_.Filename): $($_.Line)" }
+git switch --detach origin/main
+```
+Judgement runs, interactive with --validation:
+sky --volumetric-fog --taa --preset pan: do sun shafts crawl or flicker while panning? If yes, the Q9 reprojection
+trigger fires and reprojection lands in this change before merge.
+sky --volumetric-fog at the valley and noon presets: banding along the ground near 200 m (the 128-slice trigger);
+blocky shafts (the 8 px trigger).
+water --sky --volumetric-fog: the reflection's fog matches the reflected scene's, with no haze in front of the
+mirror plane.
+Seam at max_distance: sky --volumetric-fog on flat ground at the noon and valley presets, looking for a ring at
+200 m; toggle the volume on and off on unshadowed haze. A visible ring is a finding.
+Banding at max_distance 500 m: the fog panel's max_distance slider at 500 in the noon and valley presets.
+Twilight with --volumetric-fog (--preset twilight): RGBA16F subnormal range, expected clean.
+Report, median of three per-run medians at 2560 × 1440: FOG_SCATTERING and FOG_INTEGRATION per view (sky main and
+mirror; water main and mirror) in forward and deferred, and FOG_SCATTERING with the atlas against traced shadows;
+FOG with and without the volume; frame time per segment with and without the switch; sky before against after
+without the switch and the six largest Sponza passes plus cpu_record_ms before and after (equal within the spread);
+each landscape example with --sky against --sky --volumetric-fog; every gate line; the trigger verdicts and the
+seam, 500 m banding and twilight judgements. Sum FOG_SCATTERING + FOG_INTEGRATION of the sky main view at 1440p,
+atlas and traced, against the page's 0.5 ms target (exit criterion at 160 × 90 × 64 with a four-cascade sun; the
+close-out records 1440p against the page's 1080p). If the traced sum exceeds 0.5 ms or the traced variant costs more
+than about 2× the atlas variant, the change returns to the reviewer before merge (Q9). The numbers go into the PR, the
+close-out and docs/sky.md "Measured cost".
+Remaining work
+The reviewer's RTX 4090 runs above, and the "Measured cost" rows in docs/sky.md from them.
+Temporal reprojection or jitter of the volume, 128 slices and 8 px froxels, only if the judgement runs trigger them.
+fesoliveira014
+added 4 commits
+September 29, 2026 22:54
+feat(render): froxel volumetric fog
+…
+0c3f0e8
+```
+Add a per-view froxel volume of the view's HeightFog, opted in with
+ViewDesc.volumetric_fog. A scattering pass fills each froxel with the
+slice's exact optical depth and the light it scatters (ambient plus the
+fog's sun through a Henyey-Greenstein phase, shadowed by the atlas or by
+traced rays); an integration pass accumulates each column front to back.
+The fog helpers read the volume up to HeightFog.max_distance and continue
+with the analytic fog past it. HeightFog gains anisotropy.
+```
+test(render): volumetric fog acceptance
+…
+3725912
+```
+Four GPU cases: without a sun the volume equals the analytic fog inside,
+beyond, clipped and on the background; the sun's in-scatter matches the
+volume-then-analytic reference on both sides of max_distance; the atlas and
+traced rays shadow the sun's in-scatter; the view switch allocates, records
+and retires the volume.
+```
+feat(examples): volumetric fog switches and the pan segment
+2ba181d
+docs(sky): volumetric fog
+42c51d2
+fesoliveira014
+commented
+Sep 30, 2026
+View reviewed changes
+fesoliveira014
+left a comment
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Review of #186 at 42c51d2: M70 change (2), froxel volumetric fog.
+No blocking findings. Two non-blocking docs findings and one nit are inline. The six doc-review changes and the three rulings are all in. CI is green at 42c51d2.
+Diff against the approved docs (revision 1 and the doc review)
+These are identical to the tasks' verbatim text: fog.glsl, both compute stages, fog.c3, the ABI rows, and the CPU and GPU tests.
+Beyond it, fog_sun_light is module-public with its docstring (review change 1).
+Scattering samples the sun at 0.5 * (start + far) (change 2).
+Check 13 sets shadow.cascades = 1 for the fixture's one-layer atlas.
+The rest matches the doc review:
+the max_distance and anisotropy sliders;
+LANDSCAPE_FOG.anisotropy = 0.3f;
+the one pack_view_sky_fog caller passes the volume explicitly.
+The froxel zero-normal invariant holds: the literal vec3(0.0) is present, and shadows.glsl is unchanged.
+Your listed divergences are fine: 0-valued pass lines without the switch, the usage exit, Pass[17], and pan before the time-lapse.
+Your mutation question: keep both clips.
+The scattering clip keeps a mirror's volume exact in RGBA16F: T = 1 and S = 0 up to the plane, so the lookup subtracts and divides nothing large or small.
+The near-division in fog_volume_segment isn't redundant. fog_behind and blended draws use it for segments that start at a surface, not at the clip.
+Neither alone is wrong for case 11, which is why only removing both fails it. No new test.
+Runs (review worktree, Windows host, NVIDIA GeForce RTX 4090, driver 610.88)
+python scripts/build.py --test: 1,403 passed, 0 failed, 30 targets.
+Acceptance: render 146 passed, with all four volume cases; profile, terrain_acceptance and water_acceptance pass.
+Validation runs are clean, with every gate passing:
+sky --volumetric-fog --benchmark 60 --validation in forward, deferred, --shadows traced, --ssgi, --taa and --path-traced (the mirror only);
+vegetation --sky --volumetric-fog --shadows traced;
+water --sky --volumetric-fog.
+Benchmarks, three runs each (18 sky and 18 landscape runs plus Sponza): every gate passes in every run.
+Medians of three per-run medians, 2560 × 1440, ms:
+Volume passes, noon
+main FOG_SCATTERING + FOG_INTEGRATION
+mirror (half size)
+forward
+0.0266 + 0.0164 = 0.043
+0.0181 + 0.0205 = 0.039
+deferred
+0.0276 + 0.0174 = 0.045
+0.0174 + 0.0205 = 0.038
+--shadows traced
+0.0266 + 0.0141 = 0.041
+0.0133 + 0.0209 = 0.034
+forward, pan / valley / twilight (no sun)
+0.048 / 0.044 / 0.027
+0.040 / 0.039 / 0.029
+Page target (0.5 ms at 160 × 90 × 64 with a four-cascade sun): met by about 10× at 0.043 ms. The close-out records 1440p against the page's 1080p.
+Q9's traced rule: not triggered. Traced is 0.95× the atlas, and far under 0.5 ms.
+FOG, main, noon: 0.0369 before, 0.0410 after without the switch (inline), 0.0430 with it.
+sky frame, forward, before / after without the switch / with it:
+noon 0.501 / 0.506 / 0.586;
+twilight 0.360 / 0.369 / 0.432;
+valley 0.429 / 0.436 / 0.522;
+time-lapse 0.504 / 0.512 / 0.597;
+pan: after 0.513, with 0.597.
+With the switch, noon: deferred 0.654, traced 0.487, --taa 0.707.
+The environment refresh is unchanged: 0.842 ms total, and sun_extract_us is 0.90.
+Sponza (gltf_viewer, no fog), before against after: cpu_record_ms 0.1444 (0.1429–0.1638) against 0.1518 (0.1424–0.1661). The six largest passes overlap before and after. No regression.
+Landscape still frame, --sky against --sky --volumetric-fog:
+terrain 1.464 against 1.488 (volume passes 0.0307 + 0.0154);
+vegetation 1.377 against 1.407 (0.0314 + 0.0154);
+water 2.369 against 2.489 (main 0.0297 + 0.0152, mirror 0.0184 + 0.0205).
+Memory: 7.03 MiB per 2560 × 1440 view, as documented.
+Judgements on the 4090 (interactive, validation on, fog density raised to 0.01 so shafts show)
+Reprojection trigger (Q9): not met. In 12 frames across a slow pan with --taa and without, the haze near the horizon changes by at most 2 levels between frames (mean 0.3–0.9) and never by 4 or more. The shadowed fog behind the boxes moves with them, with no stepping or crawl.
+128-slice trigger: not met.
+At max_distance 200 and 500 at noon, a ground column steps at most 2 levels a row.
+In the valley at 500, the page's banding case, it steps at most 1 over 35 values.
+8 px trigger: not met. The shadowed-fog edges are soft. The stair-step on the box shadow's near edge is the atlas's, the same without the volume.
+Seam at max_distance: no ring (inline on docs/sky.md, with the on/off colour difference).
+Twilight with the volume: ambient-only haze, sky 32 values over 380 rows with steps of at most 1. No subnormal banding.
+water --sky --volumetric-fog: reflections of the far peaks are no hazier than the peaks seen directly, and no veil sits in front of the mirror plane. Post dispatches go from 3 to 7, which is two views × two passes.
+Verdict: MERGE, once the "Measured cost" commit carries these numbers, the two docs lines and the nit, and I re-check that head with CI green. Only docs and example strings change, so these runs stand.
+Comment thread
+docs/sky.md
+3.98 MiB at 1920 × 1080, one heap slot, allocated with the view and freed with it.
+- Two compute passes record after the sky tables and before the fog pass: `FOG_SCATTERING` (one thread per froxel)
+and `FOG_INTEGRATION` (one thread per column, accumulating in-scatter and transmittance along the slices).
+- Volume then analytic: inside `max_distance` a pixel takes the volume's in-scatter and transmittance; past it the
+fesoliveira014
+Sep 30, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Non-blocking, docs: turning the volume on changes the haze's colour, not only adds shafts. It's most visible over the sky.
+Why: the volume lights the haze with the sun through the phase plus the SH ambient (finding 7). The analytic fog's in-scatter is the sky-view colour, so over the sky it fogs the sky with its own colour and stays invisible.
+Measured (sky at 1600 × 900, mean RGB of the upper sky):
+noon at the default density: (31, 60, 100) without the switch, (76, 91, 117) with it;
+density 0.01: the analytic sky is unchanged at (31, 60, 100), the volume's is grey at (139, 141, 149);
+pan at 0.01: (79, 104, 137) against (196, 186, 176).
+No ring at max_distance: a ground column across 200 m at noon, density 0.01, changes by at most 2 levels a row. The value is continuous as designed, and the slope change doesn't show.
+Please:
+add a sentence here, and a Limits line, saying the volume's haze is sun-lit and so brighter and greyer than the analytic fog, most over the sky, and that a view without the switch shows the analytic look;
+carry forward "a direct-sun phase term in the analytic in-scatter, so both paths agree", with the trigger "an application mixes views with and without the switch in one scene and needs one haze colour". The close-out records it; no code change here.
+Comment thread
+shaders/common/fog.glsl
+}
+// Height fog over [near, far] of a pixel's ray: the volume up to its end, the analytic fog past it.
+FogTerms height_fog_range(FrameRoot frame, SkyFogGpu sky, vec2 uv, vec3 origin, vec3 direction, float near, float far) {
+fesoliveira014
+Sep 30, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Non-blocking, for "Measured cost": the FOG pass is 0.004 ms slower on views without the volume.
+sky main view at noon, before (7ebe3d6) against after without the switch: 0.0369 (0.0369–0.0389) against 0.0410 (0.0410–0.0410); the mirror goes 0.0123 to 0.0133.
+Every other pass is unchanged within 0.001, and the pass, barrier and dispatch list is identical, so the invariant holds.
+The likely cause is the volume branch in height_fog_range/height_fog_beyond costing registers even when not taken.
+4 µs isn't worth a variant. Record it in "Measured cost" as the cost views without the switch pay.
+Comment thread
+examples/src/sky.c3
+Outdated
+fn void print_header(Options options) @local {
+io::printfn(
+"# sky shading=%s shadows=%s ssgi=%s path_traced=%s fog=%s atmosphere=%s extent=%dx%d frames=%d",
+"# sky shading=%s shadows=%s ssgi=%s path_traced=%s fog=%s atmosphere=%s volumetric_fog=%s taa=%s extent=%dx%d frames=%d",
+fesoliveira014
+Sep 30, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Nit: three new lines pass the 120 columns the rest of the file keeps:
+this header format (130);
+the usage line at :1290 (130);
+water.c3:1635 (121).
+Split each literal the way terrain.c3's header does.
+docs(sky): measured cost of the volumetric fog
+…
+750a363
+```
+Record the RTX 4090 pass times, frame deltas and judgements, state that the
+volume changes the haze colour, and split three over-long example lines.
+```
+fesoliveira014
+commented
+Sep 30, 2026
+View reviewed changes
+fesoliveira014
+left a comment
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Re-review of #186 at 750a363: M70 change (2), froxel volumetric fog.
+Every item from the review is in.
+"Measured cost": a new "Volumetric fog, RTX 4090, 2560 × 1440" subsection carries my medians line for line:
+the pass table for main and mirror, the 0.5 ms budget line and the traced 0.95×;
+FOG without the switch;
+the frame and landscape tables;
+Sponza with its ranges, and memory;
+the judgements.
+The haze colour: a Volumetric fog bullet with (31, 60, 100) → (76, 91, 117) and the two-colours note, plus the Limits line. The carry-forward goes in the close-out.
+The nit: the sky.c3 header and usage lines and the water.c3 usage line are split, as terrain.c3's header is.
+Checked at 750a363. Only docs/sky.md and example strings change.
+python scripts/build.py --target sky and --target water build.
+sky --benchmark 2 --volumetric-fog prints the header unchanged (... atmosphere=on volumetric_fog=on taa=off extent=2560x1440 frames=2).
+Both usage lines print as one line, as before.
+The library, shaders and tests are unchanged since 42c51d2, so the earlier runs stand: --test 1,403, render acceptance 146, the eight validation runs, the 36 benchmark runs and the judgements.
+Verdict: MERGE. CI is green at 750a363 (linux and windows).
+Hide details
+View details
+fesoliveira014
+merged commit e786501
+into
+main
+Sep 30, 2026
+2 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+fesoliveira014
+mentioned this pull request
+Sep 30, 2026
+Render: shadow normal bias scaled to cascade texel size
+#185
+Closed
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

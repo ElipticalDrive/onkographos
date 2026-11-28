@@ -1,0 +1,129 @@
+# Topology Change Handling
+
+Also called: Dynamic Triangulation Topology Handling
+
+## Overview
+Topology Change Handling manages the blending and splitting of surfaces in dynamic implicit surface rendering by detecting topological events on a geometric mesh and updating the underlying mechanical mesh accordingly [S1, unofficial]. It distinguishes itself from sibling methods by explicitly regenerating geometry after mechanical mesh modifications, ensuring consistency between the implicit field representation and the explicit triangulation [S1, unofficial].
+
+## How it works
+The method operates on two mesh representations: a **geometric mesh** (used for rendering and detection) and a **mechanical mesh** (the data structure used for refinement and topology management) [S1, unofficial]. The process ensures that when the implicit surface topology changes (e.g., two metaballs merge or split), the mechanical mesh is updated to reflect this new connectivity before the geometric mesh is regenerated [S1, unofficial].
+
+### Inputs and Outputs
+- **Input**: Current geometric mesh, current mechanical mesh, implicit field parameters.
+- **Output**: Updated mechanical mesh, regenerated geometric mesh.
+
+### Data Structures
+- **Triangulation**: A set of triangles $\tau$.
+- **Border Edge List**: A linked list structure where each list represents a "hole" (a boundary created by removing triangles) in the triangulation. Each node in the list contains a border edge (an edge belonging to only one triangle) [S1, unofficial].
+
+### Steps
+1. **Detect Topology Changes**: Monitor the geometric mesh for topological changes (blending or splitting) [S1, unofficial].
+2. **Apply Modifications to Mechanical Mesh**:
+   - Identify triangles $\tau$ that need removal due to the topology change.
+   - Call `ERASE(τ)` to remove triangle $\tau$ from the mechanical mesh triangulation [S1, unofficial].
+   - Call `FINDBORDERS` to identify the resulting holes [S1, unofficial].
+3. **Regenerate Geometry**: Re-compute the geometric mesh based on the updated mechanical mesh [S1, unofficial].
+
+### Procedures
+
+**ERASE(τ)**
+Removes triangle $\tau$ from the triangulation. This operation creates a hole in the mesh, defined by the edges of $\tau$ that are no longer shared with other triangles [S1, unofficial].
+
+**FINDBORDERS**
+Searches the triangulation for border edges.
+1. Iterate through the edges of the triangles that have been recently modified (optimization: not the whole triangulation) [S1, unofficial].
+2. Identify edges that belong to only one triangle (border edges) [S1, unofficial].
+3. Group neighboring border edges into linked lists. Each linked list represents one hole [S1, unofficial].
+4. Return the set of linked lists. The method assumes that each topology change creates exactly two holes (two linked lists) [S1, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def handle_topology_change(geometric_mesh, mechanical_mesh):
+    """
+    Handles blending/splitting by updating the mechanical mesh and regenerating geometry.
+    """
+    # Step 1: Detect topology changes on the geometric mesh
+    # [G] Implementation detail: Compare current geometric mesh connectivity/state 
+    # with previous state to identify merging/splitting events.
+    topology_changed = detect_topology_changes(geometric_mesh)
+    
+    if not topology_changed:
+        return
+
+    # Step 2: Apply modifications to the mechanical mesh
+    # Identify triangles to remove based on the detected change
+    triangles_to_remove = identify_triangles_for_removal(geometric_mesh, mechanical_mesh)
+    
+    for tau in triangles_to_remove:
+        # ERASE(tau): Remove triangle tau from the triangulation
+        mechanical_mesh.triangulation.remove(tau)
+        
+    # FINDBORDERS: Search for border edges and group them into linked lists
+    # Optimization: Only search among edges of triangles that have been removed/modified
+    holes = find_borders(mechanical_mesh, triangles_to_remove)
+    
+    # Step 3: Regenerate the geometry since the mechanical mesh has changed
+    geometric_mesh = regenerate_geometry(mechanical_mesh)
+    
+    return geometric_mesh
+
+def find_borders(mechanical_mesh, modified_triangles):
+    """
+    Searches the triangulation for border edges belonging to only one triangle.
+    Returns a set of linked lists, each representing one hole.
+    """
+    border_edges = set()
+    
+    # Iterate only over edges of modified triangles for efficiency
+    for tau in modified_triangles:
+        for edge in tau.edges:
+            # Check if edge belongs to only one triangle in the current triangulation
+            if mechanical_mesh.triangulation.edge_count(edge) == 1:
+                border_edges.add(edge)
+                
+    # Group neighboring border edges into linked lists
+    holes = []
+    visited_edges = set()
+    
+    for edge in border_edges:
+        if edge not in visited_edges:
+            # Start a new linked list for this hole
+            current_list = []
+            current_edge = edge
+            while current_edge not in visited_edges:
+                visited_edges.add(current_edge)
+                current_list.append(current_edge)
+                
+                # Find a neighboring border edge to continue the loop
+                # [G] Implementation detail: Find an edge in border_edges that shares 
+                # a vertex with current_edge and is not yet visited.
+                next_edge = find_next_border_edge(current_edge, border_edges, visited_edges)
+                if next_edge is None:
+                    break
+                current_edge = next_edge
+                
+            holes.append(current_list)
+            
+    return holes
+```
+
+### Parameters and Edge Cases
+- **Optimization**: `FINDBORDERS` does not need to search the whole triangulation, only the edges of triangles that have been removed or modified [S1, unofficial].
+- **Assumption**: The algorithm assumes that each topology change creates exactly two holes (two linked lists) [S1, unofficial].
+- **Pitfall**: If the assumption of two holes is violated (e.g., complex multi-object interactions), the linked list generation may fail or produce incorrect boundaries.
+
+## Subtopics
+
+## Operating characteristics
+- **Complexity**: The complexity of `FINDBORDERS` is proportional to the number of edges in the modified triangles, not the entire mesh, due to the optimization [S1, unofficial].
+- **Performance**: The method allows for refinement on extremely coarse meshes (e.g., 4 triangles for a metaball) while maintaining detail through adaptive parameters like $\alpha \cdot r = 20^\circ$ [S1, unofficial].
+- **Limitations**: The method relies on explicit detection of topology changes on the geometric mesh, which may introduce latency or require careful synchronization with the implicit field evaluation.
+
+## Background
+The method originates from the work on "Dynamic Triangulation of Implicit Surfaces: towards the handling of topology changes" [S1, unofficial]. It addresses the challenge of maintaining a consistent triangulation when implicit surfaces (like metaballs) merge or split, which is a common occurrence in dynamic scenes. The approach separates the detection (geometric mesh) from the data structure management (mechanical mesh) to facilitate efficient updates.
+
+## Sources
+[S1] Dynamic Triangulation of Implicit Surfaces: towards the handling of topology changes, https://inria.hal.science/inria-00132537, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,180 @@
+# Tri-plane Spatial Encoding with Sigma/Color MLPs
+
+Also called: KFD-NeRF Spatial Model, Spatial Neural Architecture
+
+## Overview
+This method is the spatial representation component of the KFD-NeRF pipeline, designed to encode canonical 3D points for dynamic neural radiance fields [S1]. It solves the problem of balancing high-fidelity 3D reconstruction with computational efficiency and model size, which are critical for dynamic scenes [S1]. It sets itself apart from pure MLPs by avoiding convergence difficulties and from multi-scale voxel grids by achieving significantly smaller memory footprints while maintaining comparable or superior rendering quality [S1]. It builds on the TriPlane NeRF representation by adding a specific multi-scale feature aggregation strategy and a two-MLP decoding architecture (Sigma and Color) [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Warped 3D points $\mathbf{p}$ in canonical space, view directions $\mathbf{v}$, and time $t$ (for dynamic scenes, though the spatial encoding focuses on $\mathbf{p}$) [S1].
+*   **Output:** Volume density $\sigma$ and RGB color $\mathbf{c}$ [S1].
+
+**Data Structures:**
+1.  **Tri-plane Grids:** Three axis-aligned planes ($c \in \{xy, yz, xz\}$) at four spatial scales ($s \in \{1, 2, 3, 4\}$) [S1].
+    *   Resolutions: $64^2, 128^2, 256^2, 512^2$ [S1].
+    *   Feature dimension per plane per scale: $d_{feat} = 32$ [S1].
+    *   Total encoded feature dimension: $32 \times 4 = 128$ [S1].
+2.  **Sigma Net:** Single-hidden-layer MLP [S1].
+    *   Input dimension: $128$ (encoded features) + $D_{pos}$ (positional encoded raw inputs) [S1].
+    *   Hidden dimension: $64$ [S1].
+    *   Output: Volume density $\sigma$ (scalar) and geometry features $\mathbf{g}$ (15-dimensional vector) [S1].
+3.  **Color Net:** Two-hidden-layer MLP [S1].
+    *   Input dimension: $15$ (geometry features) + $D_{SH}$ (spherical harmonics encoded view directions) [S1].
+    *   Hidden dimensions: $64, 64$ [S1].
+    *   Output: RGB color $\mathbf{c}$ [S1].
+
+**Parameters:**
+*   Positional encoding frequency: $K=5$ for spatial inputs [S1].
+*   Optimizer: Adam, learning rate $1 \times 10^{-3}$ [S1].
+*   Ray batch size: 4096 [S1].
+
+**Algorithm:**
+1.  **Positional Encoding:** Apply positional encoding to the raw canonical 3D point coordinates $\mathbf{p}$. Let $PE(\mathbf{p})$ denote this vector. The frequency is set to 5 [S1].
+2.  **Tri-plane Feature Extraction:** For each scale $s \in \{1, \dots, 4\}$:
+    a. Project the 3D point $\mathbf{p}$ onto the three axis-aligned planes ($xy, yz, xz$) to obtain 2D coordinates $\mathbf{u}_{xy}, \mathbf{u}_{yz}, \mathbf{u}_{xz}$ [S1].
+    b. Sample the feature grid at each plane for scale $s$ at the projected coordinates using bilinear interpolation. Let $F_{c,s}(\mathbf{u}_c)$ be the feature vector of dimension 32 for plane $c$ and scale $s$ [S1].
+    c. Multiply the features across the three planes: $\mathbf{f}_{s} = F_{xy,s}(\mathbf{u}_{xy}) \odot F_{yz,s}(\mathbf{u}_{yz}) \odot F_{xz,s}(\mathbf{u}_{xz})$, where $\odot$ is element-wise multiplication [S1].
+3.  **Feature Aggregation:** Concatenate the features from all four scales: $\mathbf{f}_{tri} = [\mathbf{f}_1; \mathbf{f}_2; \mathbf{f}_3; \mathbf{f}_4]$. The resulting vector has dimension 128 [S1].
+4.  **Coordinate Shift Mitigation:** Concatenate the aggregated tri-plane features with the positional encoded raw inputs to mitigate coordinate shifts caused by limited grid resolution and interpolation errors: $\mathbf{f}_{in} = [\mathbf{f}_{tri}; PE(\mathbf{p})]$ [S1].
+5.  **Sigma Net Forward Pass:** Pass $\mathbf{f}_{in}$ through the Sigma Net (1 hidden layer, dim 64) to obtain volume density $\sigma$ and geometry features $\mathbf{g}$ (dim 15) [S1].
+6.  **View Direction Encoding:** Encode the view direction $\mathbf{v}$ using spherical harmonics (SH) [S1].
+7.  **Color Net Forward Pass:** Concatenate geometry features $\mathbf{g}$ with the SH-encoded view directions. Pass this concatenation through the Color Net (2 hidden layers, dim 64) to compute the final RGB color $\mathbf{c}$ [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class TriPlaneSpatialEncoder:
+    def __init__(self, num_scales=4, base_res=64, feat_dim=32, sh_degree=3):
+        super().__init__()
+        self.num_scales = num_scales
+        self.feat_dim = feat_dim
+        self.sh_degree = sh_degree
+        
+        # Tri-plane grids: 3 planes (xy, yz, xz) x num_scales
+        # Each grid has shape (feat_dim, H, W)
+        self.planes = nn.ParameterList([
+            nn.Parameter(torch.randn(3, feat_dim, base_res * (2**i), base_res * (2**i)))
+            for i in range(num_scales)
+        ])
+        
+        # PE frequency is 5, so for 3D coords, PE_dim = 3 * 2 * 5 = 30
+        pe_dim = 3 * 2 * 5
+        # Sigma Net: 1 hidden layer, dim 64. Output: 1 sigma + 15 geometry features
+        self.sigma_net = nn.Sequential(
+            nn.Linear(128 + pe_dim, 64),
+            nn.ReLU(),
+            nn.Linear(64, 16)
+        )
+        
+        # Color Net: 2 hidden layers, dim 64. Input: 15 (geometry) + SH_dim
+        sh_dim = (sh_degree + 1) ** 2 * 3
+        self.color_net = nn.Sequential(
+            nn.Linear(15 + sh_dim, 64),
+            nn.ReLU(),
+            nn.Linear(64, 64),
+            nn.ReLU(),
+            nn.Linear(64, 3)
+        )
+        
+        # Spherical Harmonics basis function [G]
+        self.sh_basis = self._get_sh_basis(sh_degree)
+
+    def _get_sh_basis(self, degree):
+        """Generate spherical harmonics basis vectors for a given degree [G]."""
+        def sh_func(v):
+            # v: (N, 3)
+            # Returns: (N, (degree+1)^2 * 3)
+            # The sources do not give the SH evaluation formula; this is a standard graphics function [G].
+            # In practice, this maps view direction to SH coefficients.
+            pass
+        return sh_func
+
+    def positional_encoding(self, x, freq=5):
+        """Standard positional encoding for coordinates [G].
+        x: (N, 3)
+        Returns: (N, 3 * 2 * freq)
+        """
+        scales = 2.0 ** torch.arange(0, freq, device=x.device)
+        x = x.unsqueeze(-1) * scales.unsqueeze(0) # (N, 3, freq)
+        x = torch.cat([torch.sin(x), torch.cos(x)], dim=-1) # (N, 3, 2*freq)
+        return x.view(x.size(0), -1)
+
+    def forward(self, points, view_dirs):
+        """
+        points: (N, 3) canonical 3D points
+        view_dirs: (N, 3) view directions
+        Returns: sigma: (N,), color: (N, 3)
+        """
+        N = points.shape[0]
+        
+        # 1. Positional Encoding of raw points
+        pe_points = self.positional_encoding(points, freq=5) # (N, 30)
+        
+        # 2. Tri-plane Feature Extraction
+        tri_features = []
+        for s in range(self.num_scales):
+            # Sample all 3 planes for this scale
+            grid = self.planes[s] # (3, feat_dim, H, W)
+            
+            # Project points to 2D for all 3 planes
+            pts_xy = points[:, :2]
+            pts_yz = points[:, 1:3]
+            pts_xz = torch.stack([points[:, 0], points[:, 2]], dim=1)
+            
+            # Sample from grid using F.grid_sample
+            # grid_sample expects input (N, C, H, W) and grid (N, H_out, W_out, 2)
+            feats = []
+            for plane_idx in range(3):
+                grid_plane = grid[plane_idx].unsqueeze(0).expand(N, -1, -1, -1) # (N, feat_dim, H, W)
+                if plane_idx == 0:
+                    coords = pts_xy
+                elif plane_idx == 1:
+                    coords = pts_yz
+                else:
+                    coords = pts_xz
+                coords_grid = coords.unsqueeze(1).unsqueeze(1) # (N, 1, 1, 2)
+                feat = F.grid_sample(grid_plane, coords_grid, align_corners=True) # (N, feat_dim, 1, 1)
+                feats.append(feat.squeeze(-1).squeeze(-1)) # (N, feat_dim)
+            
+            # Multiply across planes: element-wise
+            feat_s = feats[0] * feats[1] * feats[2] # (N, feat_dim)
+            tri_features.append(feat_s)
+            
+        # Concatenate across scales
+        tri_features_cat = torch.cat(tri_features, dim=1) # (N, 128)
+        
+        # 3. Concatenate with PE
+        f_in = torch.cat([tri_features_cat, pe_points], dim=1) # (N, 128 + 30)
+        
+        # 4. Sigma Net
+        sigma_out = self.sigma_net(f_in) # (N, 16)
+        sigma = sigma_out[:, 0] # (N,)
+        geo_features = sigma_out[:, 1:] # (N, 15)
+        
+        # 5. Color Net
+        # Encode view directions with SH
+        sh_coeffs = self.sh_basis(view_dirs) # (N, 48) for degree 3
+        color_in = torch.cat([geo_features, sh_coeffs], dim=1) # (N, 15 + 48)
+        color = self.color_net(color_in) # (N, 3)
+        
+        return sigma, color
+```
+
+## Operating characteristics
+*   **Time Complexity:** Training time for the spatial model is 150 minutes, compared to 60 minutes for the voxel grid baseline and 43 hours for the pure MLP [S1].
+*   **Memory Complexity:** Model size is 31.5 MB, significantly smaller than the multi-scale voxel grid (2336 MB) and slightly larger than the pure MLP (0.5 MB) [S1].
+*   **Performance:** Achieves high rendering quality (PSNR 38.92, SSIM 0.990, LPIPS 0.037 on the tested dataset) [S1].
+*   **Strengths:** Avoids convergence difficulties of pure MLPs; much smaller memory footprint than voxel grids; fast convergence compared to MLPs [S1].
+*   **Limitations:** Coordinate shifts can occur due to limited grid resolution and linear interpolation errors, mitigated by concatenating raw positional encodings [S1].
+
+## Background
+This method was introduced in the KFD-NeRF paper (2024) by the authors of the source [S1]. It is part of the KFD-NeRF pipeline, which rethinks dynamic NeRF using a Kalman Filter [S1]. The spatial representation is chosen to balance the trade-offs between pure MLPs (slow convergence, low memory) and voxel grids (fast convergence, high memory) [S1].
+
+## Sources
+[S1] KFD-NeRF: Rethinking Dynamic NeRF with Kalman Filter, https://doi.org/10.1007/978-3-031-72995-9_1, fetched 2026-10-26

@@ -1,0 +1,156 @@
+# Level Set Identification
+
+Also called: Connected Component Labeling for Adaptive Mesh Refinement, Hierarchical Level Set Extraction
+
+## Overview
+Level Set Identification is a method for locating topologically connected sets of cells (level sets) within adaptive mesh refinement (AMR) datasets, where connectivity spans both grid boundaries and resolution differences. It differs from standard connected component labeling by explicitly handling the hierarchical structure of AMR grids and using a "join tree" to merge labels that span across grid patches. This method is distinct from simple thresholding as it produces discrete, labeled objects suitable for physical analysis (e.g., gravitational binding), rather than just a binary mask.
+
+## How it works
+**Inputs:**
+*   AMR dataset with hierarchical grid structure.
+*   Scalar field values associated with cells.
+*   Threshold range $[v_{min}, v_{max}]$ defining the level set.
+*   Region of interest (e.g., sphere or rectangular prism) to limit processing.
+
+**Outputs:**
+*   A collection of `ExtractedRegion` objects, each containing a unique ID and the set of cells belonging to that level set.
+
+**Data Structures:**
+*   **Cell ID Map:** A mapping from cell coordinates (grid index + refinement level) to a unique integer ID.
+*   **Level Set ID Array:** An array parallel to the cell data, storing the current connected component label for each cell. Initialized to 0 (background) or unique temporary IDs.
+*   **Join Tree:** A data structure (e.g., Union-Find or adjacency list) mapping old level set IDs to new level set IDs to resolve cross-grid merges.
+
+**Algorithm Steps:**
+
+1.  **Identify Grid Patches:** Select the subset of grids to process based on the region of interest.
+2.  **Initial Labeling (Intra-Grid):**
+    *   For each selected grid, identify finest-level cells where $v_{min} \leq v \leq v_{max}$.
+    *   Assign temporary unique IDs to these cells.
+    *   **Buffer Zone:** Extend the processing area by one cell-width beyond the grid boundary to capture cells that might connect across grids. Include these buffer cells in the labeling process.
+    *   **Recursive Propagation:** For each cell identified as a level set member:
+        1.  Update its level set ID to be the maximum of its 26 neighboring cells' IDs.
+        2.  If the new ID is greater than the original ID, repeat the update.
+        3.  Notify neighbors with lower IDs to re-examine their neighbors and update their IDs.
+        *   *Note:* This step ensures that all connected cells within a single grid (and its immediate buffer) share the same label.
+3.  **Cross-Grid Relationship Construction:**
+    *   Examine cells at the grid boundaries.
+    *   If a level set cell on the boundary is adjacent to a level set cell on a neighboring grid (or buffer), record the relationship between their current level set IDs.
+    *   Add these pairs (old ID, new ID) to the **Join Tree**.
+4.  **Flatten Join Tree:**
+    *   Process the Join Tree to ensure all nodes are unique and do not reference other nodes in the tree. This resolves transitive merges (e.g., if A merges with B, and B merges with C, A, B, and C must all share one ID).
+5.  **Coalesce Level Sets:**
+    *   Assign new, unified level set IDs to all cells referenced in the flattened Join Tree. Cells not involved in cross-grid merges retain their intra-grid labels.
+6.  **Reorder IDs:**
+    *   Reassign level set IDs such that the largest level sets (by cell count) have the lowest numerical IDs. This is often done for cache efficiency or user convenience.
+7.  **Return Objects:**
+    *   Group cells by their final level set ID into `ExtractedRegion` instances.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def identify_level_sets(amr_data, v_min, v_max, region):
+    # 1. Identify grid patches
+    grids = select_grids(amr_data, region)
+    
+    # Initialize level set ID map
+    # Key: (grid_id, cell_index), Value: level_set_id
+    level_set_ids = {}
+    
+    # 2. Intra-grid labeling
+    for grid in grids:
+        # Get cells within threshold
+        candidate_cells = [c for c in grid.cells if v_min <= c.value <= v_max]
+        
+        # Assign temporary unique IDs
+        for i, cell in enumerate(candidate_cells):
+            level_set_ids[cell] = i + 1
+            
+        # Create buffer zone (one cell width)
+        buffer_cells = get_buffer_zone(grid, level_set_ids)
+        
+        # Recursive propagation within grid and buffer
+        changed = True
+        while changed:
+            changed = False
+            for cell in candidate_cells + buffer_cells:
+                if cell not in level_set_ids:
+                    continue
+                current_id = level_set_ids[cell]
+                neighbors = get_26_neighbors(cell, grid, level_set_ids)
+                max_neighbor_id = max([level_set_ids.get(n, 0) for n in neighbors])
+                
+                if max_neighbor_id > current_id:
+                    level_set_ids[cell] = max_neighbor_id
+                    changed = True
+                    # Notify neighbors to re-examine
+                    for n in neighbors:
+                        if n in level_set_ids and level_set_ids[n] < max_neighbor_id:
+                            # Trigger re-evaluation for n
+                            pass 
+                            
+    # 3. Construct Join Tree
+    join_tree = {} # Maps old_id -> new_id
+    
+    for grid in grids:
+        boundary_cells = get_boundary_cells(grid)
+        for cell in boundary_cells:
+            if cell not in level_set_ids:
+                continue
+            current_id = level_set_ids[cell]
+            neighbors = get_26_neighbors(cell, grid, level_set_ids)
+            for n in neighbors:
+                if n in level_set_ids and n not in grid.cells: # Cross-grid neighbor
+                    neighbor_id = level_set_ids[n]
+                    if current_id != neighbor_id:
+                        join_tree[current_id] = neighbor_id
+                        join_tree[neighbor_id] = current_id
+                        
+    # 4. Flatten Join Tree
+    # Use Union-Find logic to resolve all connections
+    flattened_ids = resolve_join_tree(join_tree)
+    
+    # 5. Coalesce Level Sets
+    final_ids = {}
+    for cell, old_id in level_set_ids.items():
+        final_ids[cell] = flattened_ids.get(old_id, old_id)
+        
+    # 6. Reorder IDs
+    # Count cells per ID
+    counts = Counter(final_ids.values())
+    sorted_ids = sorted(counts.keys(), key=lambda x: counts[x], reverse=True)
+    id_mapping = {old: new for new, old in enumerate(sorted_ids, start=1)}
+    
+    for cell in final_ids:
+        final_ids[cell] = id_mapping[final_ids[cell]]
+        
+    # 7. Return Extracted Regions
+    regions = {}
+    for cell, ls_id in final_ids.items():
+        if ls_id not in regions:
+            regions[ls_id] = ExtractedRegion(ls_id)
+        regions[ls_id].add_cell(cell)
+        
+    return list(regions.values())
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Floating point comparisons for $v_{min}$ and $v_{max}$ should use epsilon tolerance if values are derived from simulations.
+*   **Buffer Zone:** The buffer zone must be large enough to capture all potential cross-grid connections (typically 1 cell width for 26-connectivity).
+*   **Degenerate Input:** Empty grids or grids with no cells in the threshold range should be handled gracefully to avoid errors in neighbor lookups.
+*   **Recursion Depth:** The recursive propagation step may require iterative implementation to avoid stack overflow in deep AMR hierarchies.
+
+## Operating characteristics
+*   **Time Complexity:** $O(N \log N)$ or $O(N)$ depending on the join tree resolution, where $N$ is the number of cells in the level set. The recursive propagation is linear in the number of cells and edges.
+*   **Memory Complexity:** $O(N)$ for storing level set IDs and the join tree.
+*   **Strengths:** Handles AMR hierarchies efficiently; produces physically meaningful objects; robust to grid boundaries.
+*   **Limitations:** Requires multiple passes over the data; join tree resolution can be complex for highly fragmented level sets.
+*   **When to Use:** When analyzing topologically connected structures in AMR data (e.g., gas clouds, shock fronts).
+*   **When Not to Use:** For simple thresholding without connectivity requirements; for non-AMR data where standard connected component labeling is sufficient.
+
+## Background
+The method was implemented in the `yt` analysis toolkit [S1]. It was used in studies of collapsing gas clouds, specifically to examine gravitational boundedness and fragmentation scales [S1]. The approach addresses the challenge of extending connected component labeling to hierarchical datasets where cells are connected across grid and refinement boundaries.
+
+## Sources
+[S1] YT: A Multi-Code Analysis Toolkit for Astrophysical Simulation Data, https://digital.library.unt.edu/ark:/67531/metadc834104/?q=fluid simulation volume rendering, fetched 2026-10-28

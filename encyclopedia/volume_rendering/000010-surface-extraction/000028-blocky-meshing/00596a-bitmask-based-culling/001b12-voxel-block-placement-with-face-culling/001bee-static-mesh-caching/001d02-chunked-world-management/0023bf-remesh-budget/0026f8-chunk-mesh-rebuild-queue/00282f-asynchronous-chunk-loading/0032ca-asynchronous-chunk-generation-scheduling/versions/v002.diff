@@ -1,0 +1,192 @@
+--- v001.md
++++ v002.md
+@@ -4,12 +4,12 @@
+ 
+ ## Overview
+-Asynchronous Chunk Generation Scheduling controls the rate at which pending voxel chunks are processed from a queue to prevent frame-rate drops during world generation. It solves the problem of synchronous mesh generation blocking the main thread by limiting the number of chunks generated per frame. It differs from its parent [Asynchronous Chunk Loading](4216-asynchronous-chynchronous-chunk-loading.md), which offloads work to a thread pool, by performing the generation logic directly on the calling thread (typically the main thread) but throttling the iteration count. It differs from siblings [Dependency Queue Gating](11597-dependency-queue-gating.md) and [Web Worker Pool for Meshing](14649-web-worker-pool-for-meshing.md) by using a simple percentage-based cap rather than dependency resolution or separate worker threads.
++Asynchronous Chunk Generation Scheduling controls the rate at which pending voxel chunks are processed from a queue to prevent frame-rate drops during world generation [S2, unofficial]. It solves the problem of synchronous mesh generation blocking the main thread by limiting the number of chunks generated per frame [S2, unofficial]. It differs from its parent [Asynchronous Chunk Loading](4216-asynchronous-chunk-loading.md), which offloads work to a thread pool, by performing the generation logic directly on the calling thread but throttling the iteration count [S2, unofficial]. It differs from siblings [Dependency Queue Gating](11597-dependency-queue-gating.md) and [Web Worker Pool for Meshing](14649-web-worker-pool-for-meshing.md) by using a simple percentage-based cap rather than dependency resolution or separate worker threads [S2, unofficial].
+ 
+ ## How it works
+-The method processes a list of pending chunk positions, validating regions and generating voxel data or retrieving saved data. It supports both synchronous (all-at-once) and asynchronous (throttled) modes.
++The method processes a list of pending chunk positions, validating regions and generating voxel data or retrieving saved data [S1, unofficial][S2, unofficial]. It supports both synchronous (all-at-once) and asynchronous (throttled) modes [S2, unofficial].
+ 
+ **Inputs and Outputs:**
+-- Input: `pendingChunks` (list of chunk identifiers), `asyncChunkGeneration` (boolean flag).
+-- Output: Updated `pendingChunks` list (processed items removed), generated chunk meshes/voxels added to the scene graph or data store.
++- Input: `pendingChunks` (list of chunk coordinate strings), `asyncChunkGeneration` (boolean flag) [S1, unofficial][S2, unofficial].
++- Output: Updated `pendingChunks` list (processed items removed), generated chunk meshes/voxels added to the scene graph or data store [S1, unofficial][S2, unofficial].
+ 
+ **Data Structures:**
+@@ -20,8 +20,5 @@
+ 
+ **Parameters:**
+-- `asyncChunkGeneration`: Boolean. If `false`, processes all pending chunks. If `true`, processes a fraction [S2, unofficial].
+-- `throttleFactor`: Fixed at `0.1` (10%) when `asyncChunkGeneration` is `true` [S2, unofficial].
+-- `minChunksPerFrame`: Fixed at `1` [S2, unofficial].
+-- `maxChunksPerFrame`: Equal to `pendingChunks.length` [S2, unofficial].
++- `asyncChunkGeneration`: Boolean. If `false`, processes all pending chunks synchronously. If `true`, processes a fraction of the queue per frame [S2, unofficial].
+ 
+ **Steps:**
+@@ -34,5 +31,5 @@
+    a. Retrieve the chunk identifier string from `pendingChunks[i]` [S2, unofficial].
+    b. Parse the string by splitting on `'|'` to obtain coordinate strings `x_str`, `y_str`, `z_str` [S2, unofficial].
+-   c. Convert coordinates to integers: `cx = int(x_str)`, `cy = int(y_str)`, `cz = int(z_str)` [S2, unofficial]. Note: Sources use bitwise OR `|0` for conversion, which is equivalent to truncation for positive integers [S2, unofficial].
++   c. Convert coordinates to integers: `cx = int(x_str)`, `cy = int(y_str)`, `cz = int(z_str)` [S2, unofficial]. The sources use bitwise OR `|0` for conversion, which truncates to a 32-bit signed integer [S2, unofficial].
+    d. Calculate the region position:
+       $$ regionX = \lfloor cx / REGION\_SIZE \rfloor $$
+@@ -51,5 +48,5 @@
+       $$ position.z = cy \times CHUNK\_SIDE $$
+       [S1, unofficial]
+-   i. Add the chunk to `chunkDict` and remove it from `pendingChunks` [S1, unofficial].
++   i. Add the chunk to `chunkDict` [S1, unofficial].
+    j. If the system is a client (`isClient`), call `showChunk(chunk)` to render it [S2, unofficial].
+ 4. After the loop, remove the processed chunks from the front of `pendingChunks` using `splice(0, count)` [S2, unofficial].
+@@ -57,80 +54,5 @@
+ **Pseudocode:**
+ ```python
+-def process_chunk_queue(pending_chunks, async_chunk_generation, region_size, chunk_side, noise_manager, is_client):
+-    if not pending_chunks:
+-        return
+-
+-    # Determine count based on async mode
+-    if not async_chunk_generation:
+-        count = len(pending_chunks)
+-    else:
+-        # 10% of pending, clamped between 1 and total length
+-        count = int(len(pending_chunks) * 0.1)
+-        count = max(1, min(count, len(pending_chunks)))
+-
+-    # Process up to 'count' chunks
+-    for i in range(count):
+-        # Parse chunk position string 'x|y|z'
+-        chunk_str = pending_chunks[i]
+-        parts = chunk_str.split('|')
+-        
+-        # Convert to integers (bitwise OR 0 ensures int conversion in JS, equivalent here)
+-        cx = int(parts[0])
+-        cy = int(parts[1])
+-        cz = int(parts[2])
+-
+-        # Calculate region position
+-        region_x = int(cx / region_size)
+-        region_y = int(cy / region_size)
+-
+-        # Determine if this is the first chunk in the region
+-        chunk_index_in_region = cx % region_size
+-
+-        # Generate or load data
+-        if chunk_index_in_region != 0:
+-            # Load from region data (implementation detail omitted in source, assumed available)
+-            chunk_data = load_from_region_data(region_x, region_y, cx, cy, cz)
+-        else:
+-            # Generate new data for the region start
+-            chunk_data = noise_manager.generate_chunk_data(cx, cy, cz)
+-
+-        # Create chunk object
+-        chunk = create_chunk_object(chunk_data)
+-
+-        # Set position
+-        chunk.position.x = cx * chunk_side
+-        chunk.position.y = 0
+-        chunk.position.z = cy * chunk_side
+-
+-        # Add to dictionary and remove from queue
+-        chunk_dict[cx, cy, cz] = chunk
+-        pending_chunks.pop(0) # Remove processed chunk
+-
+-        # Render if client
+-        if is_client:
+-            show_chunk(chunk)
+-
+-    # Note: The loop above processes one by one and removes. 
+-    # The source [S2, unofficial] describes splicing after the loop. 
+-    # To match source logic exactly where splice(0, count) is called after loop:
+-    # We must assume the loop processes items but doesn't remove them individually, 
+-    # or the source implies the removal happens in batch. 
+-    # Re-reading S2: "If count > 0, remove processed chunks from the front... via splice(0, count)".
+-    # This implies the loop iterates but the removal is batched at the end.
+-    # However, S1 says "remove from queue" inside the step. 
+-    # Merging: The loop processes the chunks. The removal is explicitly batched in S2.
+-    # Let's adjust pseudocode to match S2's explicit splice instruction at the end.
+-    
+-    # Correction for strict adherence to S2's structure:
+-    # The loop processes chunks. The removal is done via splice at the end.
+-    # But S1 says "remove from queue" inside. 
+-    # Conflict: S1 removes inside, S2 removes via splice after.
+-    # Resolution: S2 is the more detailed algorithmic description for the queue management.
+-    # We will follow S2's batch removal but ensure the loop processes the correct items.
+-    
+-    # Re-writing loop to not remove individually, then splice.
+-    pass # See final consolidated pseudocode below
+-
+-def process_chunk_queue_final(pending_chunks, async_chunk_generation, region_size, chunk_side, noise_manager, is_client):
++def process_chunk_queue(pending_chunks, async_chunk_generation, region_size, chunk_side, noise_manager, is_client, chunk_dict):
+     if not pending_chunks:
+         return
+@@ -142,5 +64,4 @@
+         count = max(1, min(count, len(pending_chunks)))
+ 
+-    # Process 'count' chunks
+     for i in range(count):
+         chunk_str = pending_chunks[i]
+@@ -150,6 +71,6 @@
+         cz = int(parts[2])
+ 
+-        region_x = int(cx / region_size)
+-        region_y = int(cy / region_size)
++        region_x = cx // region_size
++        region_y = cy // region_size
+         chunk_index_in_region = cx % region_size
+ 
+@@ -164,12 +85,26 @@
+         chunk.position.z = cy * chunk_side
+ 
+-        chunk_dict[cx, cy, cz] = chunk
++        chunk_dict[(cx, cy, cz)] = chunk
+ 
+         if is_client:
+             show_chunk(chunk)
+ 
+-    # Batch removal as per S2
+     if count > 0:
+-        del pending_chunks[0:count]
++        del pending_chunks[:count]
++
++def create_chunk_object(data):
++    class Chunk:
++        def __init__(self, d):
++            self.data = d
++            self.position = type('Pos', (), {'x': 0, 'y': 0, 'z': 0})()
++    return Chunk(data)
++
++def load_from_region_data(rx, ry, cx, cy, cz):
++    # Standard region data retrieval logic [G]
++    return {'type': 'loaded', 'coords': (cx, cy, cz)}
++
++def show_chunk(chunk):
++    # Standard render call [G]
++    pass
+ ```
+ 
+@@ -180,14 +115,14 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(k)$ per frame, where $k$ is the number of chunks processed per frame. $k$ is either $N$ (all pending) or $\lceil 0.1 N \rceil$ (throttled), where $N$ is the total pending chunks.
+-- **Memory Complexity:** $O(1)$ additional memory for the scheduling logic, excluding the memory required for the generated chunk meshes themselves.
++- **Time Complexity:** $O(k)$ per frame, where $k$ is the number of chunks processed per frame. $k$ is either $N$ (all pending) or $\lceil 0.1 N \rceil$ (throttled), where $N$ is the total pending chunks [S2, unofficial].
++- **Memory Complexity:** $O(1)$ additional memory for the scheduling logic, excluding the memory required for the generated chunk meshes themselves [G].
+ - **Performance:** Prevents frame drops by limiting generation work per frame. When `asyncChunkGeneration` is true, it ensures smooth UI updates even with large backlogs [S2, unofficial].
+-- **Strengths:** Simple to implement; effective at decoupling generation rate from frame rate on the main thread.
+-- **Limitations:** Still runs on the main thread, so heavy generation can cause stutter if the per-frame cost of a single chunk is high. Does not handle dependencies between chunks (unlike Dependency Queue Gating).
+-- **When to use:** When main-thread generation is acceptable but needs rate-limiting to maintain responsiveness.
+-- **When not to use:** When generation is too heavy for the main thread (use Asynchronous Chunk Loading or Web Worker Pool) or when chunks depend on neighbors being generated first (use Dependency Queue Gating).
++- **Strengths:** Simple to implement; effective at decoupling generation rate from frame rate on the main thread [S2, unofficial].
++- **Limitations:** Still runs on the main thread, so heavy generation can cause stutter if the per-frame cost of a single chunk is high [G]. Does not handle dependencies between chunks (unlike Dependency Queue Gating) [G].
++- **When to use:** When main-thread generation is acceptable but needs rate-limiting to maintain responsiveness [G].
++- **When not to use:** When generation is too heavy for the main thread (use Asynchronous Chunk Loading or Web Worker Pool) or when chunks depend on neighbors being generated first (use Dependency Queue Gating) [G].
+ 
+ ## Background
+-This method is derived from implementations in voxel engine frameworks, specifically noted in the Unity-based Marching Cubes implementation [S1, unofficial] and the JavaScript voxel-engine-stackgl project [S2, unofficial]. It represents a pragmatic approach to managing world generation load in real-time applications where full asynchronous offloading is not required or feasible.
++This method is derived from implementations in voxel engine frameworks, specifically noted in the Unity-based Marching Cubes implementation [S1, unofficial] and the JavaScript voxel-engine-stackgl project [S2, unofficial]. It represents a pragmatic approach to managing world generation load in real-time applications where full asynchronous offloading is not required or feasible [G].
+ 
+ ## Sources

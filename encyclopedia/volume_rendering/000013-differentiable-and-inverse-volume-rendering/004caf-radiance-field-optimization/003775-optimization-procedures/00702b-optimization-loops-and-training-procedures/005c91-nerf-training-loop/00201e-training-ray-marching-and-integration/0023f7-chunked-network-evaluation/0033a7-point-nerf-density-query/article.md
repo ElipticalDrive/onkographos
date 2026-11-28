@@ -1,0 +1,113 @@
+# Point-NeRF Density Query
+
+Also called: Chunked Density Query
+
+## Overview
+A method to compute volume density for rays in a Point-NeRF by querying a neural network with ray points and pre-computed density features, processed in chunks to manage memory [S1, unofficial]. It builds on [Chunked Network Evaluation](3177-chunked-network-evaluation.md) by specifically handling the density component of the radiance field query, separating it from RGB or feature queries to optimize memory usage during training [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: `rays_pts` (tensor of sample points along rays), `density_feature` (pre-computed density features corresponding to the points), `chunk` (integer, default 5120), `network_query_fn` (callable that queries the network), `network_fn` (network function).
+- Output: Tensor of density values for all input points.
+
+**Data Structures:**
+- `rays_pts`: Tensor of shape $(N, D)$, where $N$ is the number of sample points and $D$ is the spatial dimension (typically 3).
+- `density_feature`: Tensor of shape $(N, F_d)$, where $F_d$ is the dimension of the density feature.
+- `densities`: List of tensors, each of shape $(C, 1)$ or $(C,)$, where $C$ is the chunk size.
+
+**Steps:**
+1. Initialize an empty list `densities`.
+2. Determine the device (CPU/GPU) from the `density_feature` tensor.
+3. Iterate over `rays_pts` in chunks of size `chunk`. For each chunk index `i`:
+   a. Extract `input_feat = rays_pts[i:i + chunk]`.
+   b. Move `input_feat` to the device.
+   c. Extract `density_feat_chunk = density_feature[i:i + chunk]`.
+   d. Call `network_query_fn(input_feat, None, density_feat_chunk, network_fn)` to get the density for the current chunk.
+   e. Append the result to `densities`.
+4. Concatenate all tensors in `densities` along the default dimension (usually the first dimension) and return the result.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def point_nerf_density_query(rays_pts, density_feature, chunk=5120, network_query_fn=None, network_fn=None):
+    """
+    Compute volume density for rays in a Point-NeRF using chunked evaluation.
+    
+    Args:
+        rays_pts: Tensor of shape (N, 3) containing sample points along rays.
+        density_feature: Tensor of shape (N, F_d) containing pre-computed density features.
+        chunk: Integer, size of chunks for processing (default 5120).
+        network_query_fn: Callable that queries the network for density.
+        network_fn: The neural network function.
+        
+    Returns:
+        Tensor of density values for all input points.
+    """
+    densities = []
+    device = density_feature.device
+    
+    # Iterate over rays_pts in chunks
+    for i in range(0, rays_pts.shape[0], chunk):
+        # Extract chunk of points
+        input_feat = rays_pts[i:i + chunk].to(device)
+        
+        # Extract corresponding density features
+        density_feat_chunk = density_feature[i:i + chunk].to(device)
+        
+        # Query network for density
+        # Note: The exact signature of network_query_fn may vary, but it typically takes
+        # input features, optional other features (None here), density features, and the network.
+        chunk_density = network_query_fn(input_feat, None, density_feat_chunk, network_fn)
+        
+        # Append to list
+        densities.append(chunk_density)
+    
+    # Concatenate all density tensors
+    if densities:
+        return torch.cat(densities, dim=0)
+    else:
+        return torch.empty((0, 1), device=device)
+```
+
+**Parameters:**
+- `chunk`: Default value is 5120 (1024 * 5) [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- If `rays_pts` is empty, the function should return an empty tensor [G].
+- Precision issues may arise if the density values are very small or very large; ensure appropriate data types are used [G].
+- Boundary conditions for the last chunk (if the total number of points is not a multiple of `chunk`) are handled by slicing, which naturally handles the remainder [S1, unofficial].
+
+## Subtopics
+
+### NeRF Density and RGB Query Function
+A helper function used by ray marching to query density and optionally RGB at sample points along rays [S2, unofficial]. It converts `ray_indices` to long type, extracts ray origins and directions, computes sample positions as the midpoint between `t_starts` and `t_ends` along the ray direction, queries geometry for density (and feature if needed), and returns density as a tensor with an extra dimension [S2, unofficial]. This function is used to return both RGB and density for use in rendering [S2, unofficial].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+- Time Complexity: $O(N)$, where $N$ is the number of sample points, as each point is processed once in a chunked manner.
+- Memory Complexity: $O(C)$, where $C$ is the chunk size, as only a chunk of points and features is processed at a time.
+
+**Measured Performance:**
+- Not given in the sources.
+
+**Scaling:**
+- Scales linearly with the number of sample points.
+- Chunk size can be adjusted to balance memory usage and processing speed.
+
+**Strengths and Limitations:**
+- Strengths: Efficient memory usage due to chunked processing, suitable for large-scale Point-NeRF training.
+- Limitations: May introduce slight overhead due to chunking and concatenation.
+
+**When to Use:**
+- Use when training Point-NeRF models with large numbers of sample points to avoid out-of-memory errors.
+
+**When Not to Use:**
+- Not suitable for scenarios where memory is not a constraint and simpler, non-chunked evaluation is preferred for simplicity.
+
+## Background
+Originated in the Point-NeRF project by Xharlie [S1, unofficial]. It is used in the context of differentiable and inverse volume rendering, specifically in radiance-field optimization procedures. The method is part of the NeRF Training Loop, focusing on training ray marching and integration, and is an extension of chunked network evaluation techniques [S1, unofficial].
+
+## Sources
+[S1] Xharlie/pointnerf, https://github.com/Xharlie/pointnerf, fetched 2026-10-26 (unofficial)
+[S2] city-super/GSDF, https://github.com/city-super/GSDF, fetched 2026-10-27 (unofficial)

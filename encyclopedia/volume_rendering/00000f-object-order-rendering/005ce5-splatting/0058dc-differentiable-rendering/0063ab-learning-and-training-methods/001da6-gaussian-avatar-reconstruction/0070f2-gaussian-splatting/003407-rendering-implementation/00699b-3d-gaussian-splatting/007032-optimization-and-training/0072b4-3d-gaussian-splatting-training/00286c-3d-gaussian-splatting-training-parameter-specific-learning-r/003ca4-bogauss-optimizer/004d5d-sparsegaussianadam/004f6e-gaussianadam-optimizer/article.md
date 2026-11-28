@@ -1,0 +1,110 @@
+# GaussianAdam Optimizer
+
+
+## Overview
+GaussianAdam is a custom variant of the Adam optimizer designed specifically for 3D Gaussian Splatting that tracks per-Gaussian visibility via a last-seen step counter and maintains a learning rate history buffer for adaptive scheduling [S1, unofficial]. It differs from standard Adam by explicitly managing per-Gaussian visibility and a dedicated learning rate history buffer, enabling step-dependent learning rate scheduling per Gaussian rather than a global schedule [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** Parameter tensor `param`, gradient tensor `param.grad`, hyperparameters `lr` (base learning rate) [S1, unofficial], `eps` (numerical stability epsilon) [S1, unofficial], `feature_width` (number of contiguous scalar values per Gaussian) [S1, unofficial], `max_steps` (buffer size) [S1, unofficial], `current_step` (optimization iteration) [S1, unofficial].
+- **Output:** Updated `param` tensor and updated state dictionary [S1, unofficial].
+
+**Data Structures:**
+The state dictionary contains the following fields with exact layouts [S1, unofficial]:
+- `step`: `int64` scalar, tracking the current optimization step.
+- `exp_avg`: `float32` tensor, shape matches `param`, storing the first moment estimate.
+- `exp_avg_sq`: `float32` tensor, shape matches `param`, storing the second moment estimate.
+- `last_seen_step`: `int32` tensor, shape `(N,)`, where `N` is the number of Gaussians, storing the last step each Gaussian was visible [S1, unofficial].
+- `lr_history`: `float32` tensor, shape `(max_steps,)`, storing the learning rate history for adaptive scheduling [S1, unofficial].
+
+**Parameters:**
+- `max_steps`: `int`, maximum optimization steps for `lr_history` buffer size [S1, unofficial].
+- `lr`: `float`, base learning rate [S1, unofficial].
+- `eps`: `float`, epsilon for numerical stability in denominator [S1, unofficial].
+- `feature_width`: `int`, number of contiguous scalar values per Gaussian in the parameter group [S1, unofficial].
+
+**Numbered Steps:**
+1. Initialize state with `step` (int64), `exp_avg` (float32, same shape as param), `exp_avg_sq` (float32, same shape as param), `last_seen_step` (int32, size N), and `lr_history` (float32, size max_steps) [S1, unofficial].
+2. Compute `current_step` [S1, unofficial].
+3. Ensure `lr_history` has sufficient capacity for `current_step` [S1, unofficial].
+4. Record `lr` into `lr_history` at index `current_step` [S1, unofficial].
+5. Compute `visible` mask based on Gaussian visibility (e.g., radii or rendering contribution) [S1, unofficial].
+6. Resolve `feature_width` [S1, unofficial].
+7. Apply the Adam update using hyperparameters 0.9, 0.999, and `eps`, masking updates to visible Gaussians and using `last_seen_step` for visibility tracking [S1, unofficial].
+8. Update `state['step'].fill_(current_step)` [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def gaussian_adam_update(param, grad, state, lr, eps, feature_width, max_steps, current_step, N, visible):
+    # Guard: Skip update if gradient is None
+    if grad is None:
+        return
+
+    # Guard: feature_width must evenly divide param.numel()
+    if len(param) % feature_width != 0:
+        raise ValueError("feature_width must evenly divide param.numel()")
+
+    # Guard: N cannot be negative
+    if N < 0:
+        raise ValueError("N cannot be negative")
+
+    # Initialize state buffers if not present
+    if "exp_avg" not in state:
+        state["exp_avg"] = [0.0] * len(param)
+        state["exp_avg_sq"] = [0.0] * len(param)
+        state["last_seen_step"] = [0] * N
+        state["lr_history"] = [0.0] * max_steps
+        state["step"] = 0
+
+    # Ensure lr_history capacity
+    if current_step >= len(state["lr_history"]):
+        # Extend buffer if necessary, or clamp current_step [G]
+        pass
+
+    # Record lr in history
+    state["lr_history"][current_step] = lr
+
+    beta1, beta2 = 0.9, 0.999
+    # Update first and second moment estimates
+    for i in range(len(param)):
+        state["exp_avg"][i] = beta1 * state["exp_avg"][i] + (1 - beta1) * grad[i]
+        state["exp_avg_sq"][i] = beta2 * state["exp_avg_sq"][i] + (1 - beta2) * grad[i] ** 2
+
+    # Bias correction
+    bias_correction1 = 1 - beta1 ** current_step
+    bias_correction2 = 1 - beta2 ** current_step
+    step_size = lr * (bias_correction2 ** 0.5) / bias_correction1
+
+    # Apply update only to visible Gaussians
+    for i in range(len(param)):
+        denom = (state["exp_avg_sq"][i] ** 0.5) + eps
+        update = step_size * state["exp_avg"][i] / denom
+        if visible[i // feature_width]:
+            param[i] -= update
+
+    # Update last_seen_step and step counter
+    state["last_seen_step"] = [current_step] * N
+    state["step"] = current_step
+```
+
+**Edge Cases and Pitfalls:**
+- If `param.grad` is `None`, the update is skipped entirely [S1, unofficial].
+- `feature_width` must evenly divide `param.numel()`, otherwise a `ValueError` is raised [S1, unofficial].
+- `N` (number of Gaussians) cannot be negative [S1, unofficial].
+
+## Subtopics
+
+### Thread for CPU Adam Update
+A dedicated CPU thread for executing Adam updates on a subset of Gaussians, releasing the Python GIL to allow concurrent processing [S2]. It extends the Zero-offload implementation to allow updating a subset of Gaussians that have completed gradients at each call [S2]. A signal buffer in CPU pinned memory is used to synchronize the GPU communication stream and the CPU Adam thread [S2]. The GPU communication stream sets the gradient completion signal via DMA after the gradient transfer kernel finishes, while the CPU Adam thread waits on the signal buffer before performing the Adam update after the microbatch [S2].
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+Not given in the sources.
+
+## Sources
+[S1] XiaoBin2001/Improved-GS, https://github.com/XiaoBin2001/Improved-GS, fetched 2026-10-27 (unofficial)
+[S2] CLM: Removing the GPU Memory Barrier for 3D Gaussian Splatting, https://doi.org/10.1145/3779212.3790140, fetched 2026-10-31

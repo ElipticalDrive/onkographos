@@ -1,0 +1,68 @@
+# Harmonized Color Change
+
+Also called: Harmonic color feature emphasis
+
+## Overview
+Harmonized Color Change is a local feature enhancement technique for volume rendering that replaces a sample's computed color with its harmonic (complementary) counterpart when the sample represents a significant local density peak [S1, unofficial]. It solves the problem of subtle internal structures being lost in the global color palette by providing high-contrast visual cues for boundaries and high-density regions without altering the overall perceptual impression of the volume [S1, unofficial]. It differs from [Lightness-Controlled Color Harmonization](10770-lightness-controlled-color-harmonization.md) by using hue complementarity rather than lightness adjustment, and from [Iterative Color Matching](12841-iterative-color-matching.md) by being a direct, non-iterative replacement based on local density gradients [G].
+
+## How it works
+**Inputs:** Volume dataset $V$ with scalar density values [G]. Ray casting parameters (view direction, sample positions) [G]. Base color transfer function $C_{base}(d)$ mapping density $d$ to RGB [G]. Shading model (e.g., Phong) to compute initial sample color $C_{phong}$ [S1, unofficial]. Neighborhood radius $r$ for density averaging [G]. Threshold factor $\alpha$ for density comparison (Not given in the sources) [G].
+
+**Outputs:** Final pixel color $C_{final}$ [G].
+
+**Data Structures:** Sample point $p$ with position $\mathbf{x}$, density $d(\mathbf{x})$, and normal $\mathbf{n}$ (if shading is used) [G]. Neighborhood set $N(\mathbf{x}) = \{ \mathbf{x}_i \mid \|\mathbf{x}_i - \mathbf{x}\| \le r \}$ [G].
+
+**Steps:**
+1. **Compute Base Color:** Calculate the initial color $C_{phong}$ for the sample at $\mathbf{x}$ using the chosen shading model and the base transfer function [S1, unofficial].
+2. **Determine Harmonic Color:** Convert $C_{phong}$ to a hue-based representation (e.g., HSV or HSL) [G]. Identify the complementary hue $H_{comp}$ by rotating the hue angle by $180^\circ$ on the color circle [G]. Reconstruct the harmonic color $C_{harmonic}$ using $H_{comp}$ and the original saturation/value components [G].
+3. **Transform to CIELab:** Convert $C_{harmonic}$ to CIELab color space [S1, unofficial].
+4. **Check Density Condition:** Calculate the average density $\bar{d}$ of the neighborhood $N(\mathbf{x})$ [G]. Check if the sample's density $d(\mathbf{x})$ is significantly larger than $\bar{d}$ [S1, unofficial]. Condition: $d(\mathbf{x}) > \bar{d} + \alpha$ or $d(\mathbf{x}) > k \cdot \bar{d}$ (exact formula not given in the sources) [G].
+5. **Replace and Enhance:** If the condition is met, replace $C_{phong}$ with $C_{harmonic}$ [S1, unofficial]. Apply a lightening unsharp masking equation to emphasize the feature [S1, unofficial]. Formula: $C_{final} = C_{harmonic} + \beta (C_{harmonic} - C_{blurred})$ (Equation 4.2 in [S1, unofficial], specific coefficients not given in the sources) [G]. If the condition is not met, $C_{final} = C_{phong}$ [G].
+
+**Parameters:** Neighborhood radius $r$ (Not given in the sources) [G]. Threshold factor $\alpha$ (Not given in the sources) [G]. Lightening factor $\beta$ (Not given in the sources) [G]. Multi-scale volume hierarchy levels (2, 3, 4, 5, 6, 8, 16, 32) for applying lightening and darkening effects [S1, unofficial].
+
+**Edge Cases and Pitfalls:** At volume boundaries, the neighborhood $N(\mathbf{x})$ may be incomplete, affecting $\bar{d}$ calculation [G]. If the volume has uniform density, the condition $d(\mathbf{x}) > \bar{d}$ will never be met, and no enhancement occurs [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def harmonized_color_change(sample, neighborhood):
+    # 1. Compute Phong color
+    C_phong = compute_phong_color(sample)
+    
+    # 2. Determine harmonic color
+    H = rgb_to_hue(C_phong)
+    H_comp = (H + 180.0) % 360.0
+    C_harmonic = hue_to_rgb(H_comp, sample.saturation, sample.value)
+    
+    # 3. Transform to CIELab
+    C_harmonic_lab = rgb_to_cielab(C_harmonic)
+    
+    # 4. Check density condition
+    d_avg = mean_density(neighborhood)
+    if sample.density > d_avg:  # Condition met if significantly bigger
+        # 5. Replace and enhance
+        C_blurred = apply_blur(C_harmonic_lab)
+        C_final_lab = C_harmonic_lab + beta * (C_harmonic_lab - C_blurred)
+        return cielab_to_rgb(C_final_lab)
+    else:
+        return C_phong
+```
+
+## Subtopics
+
+### Contextual Color Ghosting
+Contextual Color Ghosting is a variant used in focus+context rendering where the context (non-focus) data is rendered in grayscale to enhance the perception of the colored focus by contrast [S2, unofficial]. It is chosen when the user wants to reduce visual clutter in the background while preserving color information in the region of interest [G]. The color of the contextual cluster can be computed using structural coloring or, if the color ghosting flag is activated, set to grayscale by considering only the node's intensity rather than RGB values [S2, unofficial]. The opacity of contextual clusters is modulated inversely proportional to the depth of the nodes in the hierarchy [S2, unofficial].
+
+## Operating characteristics
+- **Measured Performance:** Tested on volume models up to $512 \times 512 \times 512$ voxels [S1, unofficial].
+- **Strengths:** Enhances local features without changing the overall color impression; effective for pollen grain and orange data sets [S1, unofficial].
+- **When to use:** When local density peaks need to be highlighted without altering the global color scheme [G].
+
+## Background
+The method was proposed in the context of enhancing local features in volume visualization using harmonic colors to stress important details [S1, unofficial]. It was tested on various volume models, including pollen grains and orange data sets, demonstrating its effectiveness in emphasizing boundaries and high-density regions [S1, unofficial]. The approach is part of a broader effort to improve the perceptual quality of volume rendering by leveraging color theory principles [G].
+
+## Sources
+[S1] Enhanced perception in volume visualization, https://doi.org/10.5821/dissertation-2117-94929, fetched 2026-10-26 (unofficial)
+[S2] Structural focus+context rendering of multiclassified volume data, http://hdl.handle.net/2117/86811, fetched 2026-10-26 (unofficial)

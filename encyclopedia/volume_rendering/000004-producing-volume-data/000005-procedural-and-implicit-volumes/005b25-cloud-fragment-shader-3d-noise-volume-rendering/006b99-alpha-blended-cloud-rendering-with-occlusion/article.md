@@ -1,0 +1,239 @@
+# Alpha-Blended Cloud Rendering with Occlusion
+
+Also called: AlphaTest Cloud Shader, Noise-Clipped Cloud Rendering with Approximate SSS, Unity Cloud Rendering Shader
+
+## Overview
+A fragment-based cloud rendering technique that uses 3D noise sampling with alpha clipping to define volume boundaries, combined with a multi-term lighting model (diffuse, subsurface scattering approximation, view brightening, and shadows) for surface shading [S1, unofficial]. It differs from its parent [Cloud Fragment Shader (3D Noise Volume Rendering)](16861-cloud-fragment-shader-3d-noise-volume-rendering.md) by replacing simple background blending with a depth-aware occlusion mixing system that allows clouds to interact with opaque scene geometry, and by using instanced rendering to stack multiple cloud layers with varying density thresholds [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A base mesh (typically a plane or dome segment), a 3D noise texture (`_3DNoise`), camera depth normals texture (`_CameraDepthNormalsTexture`), and instanced properties for layer-specific parameters.
+*   **Outputs:** A color buffer with alpha-blended clouds and a depth buffer.
+
+**Data Structures:**
+*   **Vertex Input (`appdata`):**
+    *   `vertex`: `half4` (POSITION)
+    *   `normal`: `half3` (NORMAL)
+    *   `uv`: `float2` (TEXCOORD0)
+    *   `instanceID`: `UNITY_VERTEX_INPUT_INSTANCE_ID`
+*   **Vertex Output (`v2f`):**
+    *   `pos`: `float4` (SV_POSITION)
+    *   `worldPos`: `float3` (TEXCOORD0)
+    *   `uv`: `float3` (TEXCOORD1)
+    *   `normalW`: `half3` (TEXCOORD4)
+    *   `screenPos_xyw_depth_01_z`: `float4` (TEXCOORD5). Layout: `x = 0.5*(xc+wc)`, `y = 0.5*(yc+wc)`, `z = depth01`, `w = wc`.
+    *   `fogCoord`: `UNITY_FOG_COORDS(2)`
+    *   `shadowCoord`: `SHADOW_COORDS(3)`
+    *   `instanceID`: `UNITY_VERTEX_INPUT_INSTANCE_ID`
+*   **Instanced Properties Buffer (`Props`):**
+    *   `_NoiseTiling`: `half`
+    *   `_PosOffset`: `half`
+    *   `_ClipThres`: `half`
+
+**Numbered Steps:**
+
+1.  **Vertex Shader:**
+    1.  Setup instance ID: `UNITY_SETUP_INSTANCE_ID(v)`.
+    2.  Displace vertex: `v.vertex.xyz += v.normal * UNITY_ACCESS_INSTANCED_PROP(Props, _PosOffset)`.
+    3.  Compute clip position: `o.pos = UnityObjectToClipPos(v.vertex)`.
+    4.  Compute world position: `o.worldPos = mul(unity_ObjectToWorld, v.vertex).xyz`.
+    5.  Compute world normal: `o.normalW = UnityObjectToWorldNormal(v.normal)`.
+    6.  Compute screen position and depth: `o.screenPos_xyw_depth_01_z = ComputeScreenPos(o.pos)`. Set `o.screenPos_xyw_depth_01_z.z = COMPUTE_DEPTH_01`.
+    7.  Compute UVs: `o.uv.xyz = v.vertex.xyz * 0.5 + 0.5`.
+    8.  Animate UVs: `o.uv = o.uv * UNITY_ACCESS_INSTANCED_PROP(Props, _NoiseTiling) + _Time.y * _UVSpeed`.
+    9.  Transfer fog and shadow coordinates.
+
+2.  **Fragment Shader - Direction Setup:**
+    1.  Setup instance ID: `UNITY_SETUP_INSTANCE_ID(i)`.
+    2.  Normalize directions: `normalW`, `lightDirW`, `viewDirW`.
+    3.  Compute backlit direction: `backLitDirW = - (lightDirW + (1 - _SSSRange) * normalW)`.
+    4.  Compute shadow attenuation: `UNITY_LIGHT_ATTENUATION(atten, i, i.worldPos)`.
+
+3.  **Fragment Shader - Cosine Terms:**
+    1.  `nl = saturate((dot(normalW, lightDirW) + 0.5) / 1.5)`
+    2.  `nv = saturate(dot(normalW, viewDirW))`
+    3.  `sss = saturate(dot(normalW, backLitDirW))`
+
+4.  **Fragment Shader - Noise Sampling and Clipping:**
+    1.  Sample 3D noise: `noise = tex3D(_3DNoise, i.uv).r`.
+    2.  Compute rim inverse: `rimInv = pow(nv, 0.2)`.
+    3.  Compute dither: `dither = saturate(frac(99999 * sin( _Time.y * (i.worldPos.x + i.worldPos.y))))`.
+    4.  Blend noise with dither: `noise *= lerp(dither, 1, rimInv)`.
+    5.  Get clip threshold: `clipThres = UNITY_ACCESS_INSTANCED_PROP(Props, _ClipThres)`.
+    6.  Clip fragment: `clip(noise - clipThres)`.
+
+5.  **Fragment Shader - Lighting Terms:**
+    1.  Compute layer intensity: `layerIntensity = lerp(1, clipThres, _DepthContrast)`.
+    2.  Compute diffuse term: `diffuseTerm = pow(nl, _DiffuseContrast - max(clipThres, noise))`.
+    3.  Compute view term: `viewTerm = _ViewBrightenIntensity * pow(nv, _ViewBrightenContrast * (1 - clipThres))`.
+    4.  Compute SSS term: `sssTerm = _SSSIntensity * pow(sss, _SSSContrast + max(clipThres, noise))`.
+    5.  Assemble final factor:
+        ```python
+        finalFactor = 0
+        if(_ApplyDiffuse): finalFactor += diffuseTerm
+        if(_ApplySSS): finalFactor += sssTerm
+        if(_ApplyShadow): finalFactor *= atten
+        if(_ApplyViewBrighten): finalFactor = lerp(finalFactor, 1, viewTerm)
+        finalFactor = saturate(layerIntensity * finalFactor)
+        ```
+
+6.  **Fragment Shader - Occlusion Mixing:**
+    1.  Divide screen position xy by w: `i.screenPos_xyw_depth_01_z.xy /= i.screenPos_xyw_depth_01_z.w`.
+    2.  Sample depth from depth normals texture: `depthOpaque01 = DecodeFloatRG(tex2D(_CameraDepthNormalsTexture, i.screenPos_xyw_depth_01_z.xy).zw)`.
+    3.  Get fragment depth: `depthFrag01 = i.screenPos_xyw_depth_01_z.z`.
+    4.  Compute depth difference: `depthDiff = saturate(depthOpaque01 - depthFrag01)`.
+    5.  Smoothstep and power for occlusion: `depthDiff = pow(smoothstep(0, _OccludeeVisibleRange * 0.1, depthDiff), _OccludeeVisibility)`.
+    6.  Compute alpha: `alpha = noise * depthDiff`.
+
+7.  **Fragment Shader - Final Output:**
+    1.  Compute final color: `finalColor = fixed4(_LightColor0.rgb * lerp(_ShadowColor, _BrightColor, finalFactor), alpha)`.
+    2.  Apply fog: `UNITY_APPLY_FOG(i.fogCoord, finalColor)`.
+    3.  Return color.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Vertex Shader
+struct appdata {
+    half4 vertex : POSITION;
+    half3 normal : NORMAL;
+    float2 uv : TEXCOORD0;
+    UNITY_VERTEX_INPUT_INSTANCE_ID
+};
+
+struct v2f {
+    float4 pos : SV_POSITION;
+    float3 worldPos : TEXCOORD0;
+    float3 uv : TEXCOORD1;
+    UNITY_FOG_COORDS(2)
+    SHADOW_COORDS(3)
+    half3 normalW : TEXCOORD4;
+    float4 screenPos_xyw_depth_01_z : TEXCOORD5;
+    UNITY_VERTEX_INPUT_INSTANCE_ID
+};
+
+v2f vert(appdata v) {
+    v2f o;
+    UNITY_SETUP_INSTANCE_ID(v);
+    UNITY_TRANSFER_INSTANCE_ID(v, o);
+
+    // Displace vertex along normal
+    half posOffset = UNITY_ACCESS_INSTANCED_PROP(Props, _PosOffset);
+    v.vertex.xyz += v.normal * posOffset;
+
+    // Clip space position
+    o.pos = UnityObjectToClipPos(v.vertex);
+
+    // World space position and normal
+    o.worldPos = mul(unity_ObjectToWorld, v.vertex).xyz;
+    o.normalW = UnityObjectToWorldNormal(v.normal);
+
+    // Screen position and depth
+    o.screenPos_xyw_depth_01_z = ComputeScreenPos(o.pos);
+    o.screenPos_xyw_depth_01_z.z = COMPUTE_DEPTH_01;
+
+    // UVs
+    o.uv.xyz = v.vertex.xyz * 0.5 + 0.5;
+    half noiseTiling = UNITY_ACCESS_INSTANCED_PROP(Props, _NoiseTiling);
+    o.uv = o.uv * noiseTiling + _Time.y * _UVSpeed;
+
+    UNITY_TRANSFER_FOG(o, o.pos);
+    TRANSFER_SHADOW(o);
+    return o;
+}
+
+# Fragment Shader
+fixed4 frag(v2f i) : SV_Target {
+    UNITY_SETUP_INSTANCE_ID(i);
+
+    // Directions
+    half3 normalW = normalize(i.normalW);
+    half3 lightDirW = normalize(_WorldSpaceLightPos0.xyz);
+    half3 viewDirW = normalize(_WorldSpaceCameraPos.xyz - i.worldPos);
+    half3 backLitDirW = -(lightDirW + (1 - _SSSRange) * normalW);
+
+    // Shadow
+    UNITY_LIGHT_ATTENUATION(atten, i, i.worldPos);
+
+    // Cosine terms
+    half nl = saturate((dot(normalW, lightDirW) + 0.5) / 1.5);
+    half nv = saturate(dot(normalW, viewDirW));
+    half sss = saturate(dot(normalW, backLitDirW));
+
+    // Noise and Clipping
+    half noise = tex3D(_3DNoise, i.uv).r;
+    half rimInv = pow(nv, 0.2);
+    half dither = saturate(frac(99999 * sin(_Time.y * (i.worldPos.x + i.worldPos.y))));
+    noise *= lerp(dither, 1, rimInv);
+
+    half clipThres = UNITY_ACCESS_INSTANCED_PROP(Props, _ClipThres);
+    clip(noise - clipThres);
+
+    // Lighting Terms
+    half layerIntensity = lerp(1, clipThres, _DepthContrast);
+    half diffuseTerm = pow(nl, _DiffuseContrast - max(clipThres, noise));
+    half viewTerm = _ViewBrightenIntensity * pow(nv, _ViewBrightenContrast * (1 - clipThres));
+    half sssTerm = _SSSIntensity * pow(sss, _SSSContrast + max(clipThres, noise));
+
+    half finalFactor = 0;
+    if(_ApplyDiffuse) finalFactor += diffuseTerm;
+    if(_ApplySSS) finalFactor += sssTerm;
+    if(_ApplyShadow) finalFactor *= atten;
+    if(_ApplyViewBrighten) finalFactor = lerp(finalFactor, 1, viewTerm);
+    finalFactor = saturate(layerIntensity * finalFactor);
+
+    // Occlusion Mixing
+    float2 screenUV = i.screenPos_xyw_depth_01_z.xy / i.screenPos_xyw_depth_01_z.w;
+    half depthOpaque01 = DecodeFloatRG(tex2D(_CameraDepthNormalsTexture, screenUV).zw);
+    half depthFrag01 = i.screenPos_xyw_depth_01_z.z;
+    half depthDiff = saturate(depthOpaque01 - depthFrag01);
+    depthDiff = pow(smoothstep(0, _OccludeeVisibleRange * 0.1, depthDiff), _OccludeeVisibility);
+
+    half alpha = noise * depthDiff;
+
+    // Final Color
+    fixed4 finalColor = fixed4(_LightColor0.rgb * lerp(_ShadowColor, _BrightColor, finalFactor), alpha);
+    UNITY_APPLY_FOG(i.fogCoord, finalColor);
+    return finalColor;
+}
+```
+
+**Parameters:**
+*   `_PosOffset`: Instanced half, default 0. Normal extrusion amount.
+*   `_NoiseTiling`: Instanced half, range [0.1, 10], default 1. UV scaling.
+*   `_UVSpeed`: Float, range [0, 1], default 0.1. UV flow speed.
+*   `_ClipThres`: Instanced half, range [0, 1], default 0. Alpha clip threshold.
+*   `_DepthContrast`: Float, range [0, 1], default 0.4. Layer intensity blending.
+*   `_DiffuseContrast`: Float, range [1, 2], default 1.2. Diffuse exponent.
+*   `_SSSRange`: Float, range [0, 1], default 1. SSS direction offset.
+*   `_SSSIntensity`: Float, range [0, 1], default 0.8. SSS intensity.
+*   `_SSSContrast`: Float, range [0, 1], default 0.2. SSS exponent offset.
+*   `_ViewBrightenIntensity`: Float, range [0, 1], default 0.2. View brightening intensity.
+*   `_ViewBrightenContrast`: Float, range [1, 10], default 2. View brightening exponent.
+*   `_3DNoise`: 3D texture sampler.
+*   `_OccludeeVisibility`: Float, range [0.01, 1], default 0. Occlusion visibility strength.
+*   `_OccludeeVisibleRange`: Float, range [0, 1], default 0.1. Occlusion visible range.
+*   `_BrightColor`: Color, default (1,1,1). Lit albedo.
+*   `_ShadowColor`: Color, default (0,0,0). Shadow albedo.
+
+**Edge Cases and Pitfalls:**
+*   **Light Leaking:** The modified `nl` calculation `saturate((dot(normalW, lightDirW) + 0.5) / 1.5)` prevents light from leaking into the back of the volume by shifting and scaling the cosine term [S1, unofficial].
+*   **Depth Precision:** `SV_POSITION` input in the fragment shader cannot be used directly for clip-space Z because xy are screen pixel coordinates and zw meaning is undocumented. `ComputeScreenPos` and `COMPUTE_DEPTH_01` must be used in the vertex shader instead [S1, unofficial].
+*   **Occlusion Requirements:** Uses `_CameraDepthNormalsTexture` for occlusion depth, which requires opaque objects (`RenderType = "Opaque"`). Alternative `_CameraDepthTexture` requires `Queue <= 2500` and `ShadowCaster` pass [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** O(N) per fragment, where N is the number of cloud layers. Each layer requires a 3D texture sample, lighting calculations, and depth texture sampling.
+*   **Memory Complexity:** O(L) for instanced properties, where L is the number of layers. Requires `_CameraDepthNormalsTexture` which adds memory bandwidth pressure.
+*   **Measured Performance:** Performance scales linearly with the number of layers and resolution. The use of instanced rendering (`DrawMeshInstanced`) reduces CPU overhead compared to individual mesh draws [S1, unofficial].
+*   **Strengths:** Real-time occlusion with scene geometry, visually rich lighting model (SSS, view brightening), efficient instancing.
+*   **Limitations:** Hard edges from alpha clipping (mitigated by dithering), requires opaque geometry for occlusion, potential overdraw if layers are not sorted or culled properly.
+*   **When to Use:** Real-time cloud rendering in games where interaction with scene geometry is desired.
+*   **When Not to Use:** Offline rendering requiring physically accurate volumetric scattering, or scenes with no opaque geometry for occlusion.
+
+## Background
+Originated from the "VolumeCloud" project by Shuchang Xu, an unofficial implementation of procedural cloud rendering in Unity [S1, unofficial]. It builds on the techniques described in [Cloud Fragment Shader (3D Noise Volume Rendering)](16861-cloud-fragment-shader-3d-noise-volume-rendering.md) by adding occlusion and instancing.
+
+## Sources
+[S1] ShuchangXu/VolumeCloud, https://github.com/ShuchangXu/VolumeCloud, fetched 2026-10-26 (unofficial)

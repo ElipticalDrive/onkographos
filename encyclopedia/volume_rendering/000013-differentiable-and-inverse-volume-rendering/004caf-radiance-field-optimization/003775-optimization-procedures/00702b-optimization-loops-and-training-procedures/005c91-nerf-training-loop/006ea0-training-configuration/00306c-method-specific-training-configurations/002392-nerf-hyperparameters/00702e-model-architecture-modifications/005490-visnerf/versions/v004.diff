@@ -1,0 +1,389 @@
+--- v003.md
++++ v004.md
+@@ -1,5 +1,4 @@
+ # ViSNeRF
+ 
+-Also called: Efficient Multidimensional Neural Radiance Field Representation for Visualization Synthesis of Dynamic Volumetric Scenes
+ 
+ ## Overview
+@@ -81,20 +80,51 @@
+ import torch
+ import torch.nn as nn
+-import torch.nn.functional as F
+-
+-class ViSNeRF:
++
++def interpolate_1d(grid, coords):
++    idx = coords.long()
++    frac = coords - idx.float()
++    idx_next = torch.clamp(idx + 1, max=grid.shape[0] - 1)
++    return grid[idx] * (1 - frac) + grid[idx_next] * frac
++
++def interpolate_2d(grid, x, y):
++    x_idx = x.long(); y_idx = y.long()
++    x_frac = x - x_idx.float(); y_frac = y - y_idx.float()
++    x_next = torch.clamp(x_idx + 1, max=grid.shape[0] - 1)
++    y_next = torch.clamp(y_idx + 1, max=grid.shape[1] - 1)
++    v00 = grid[x_idx, y_idx]; v01 = grid[x_idx, y_next]
++    v10 = grid[x_next, y_idx]; v11 = grid[x_next, y_next]
++    return (v00 * (1 - x_frac) + v10 * x_frac) * (1 - y_frac) + (v01 * (1 - x_frac) + v11 * x_frac) * y_frac
++
++def positional_encoding(x, num_frequencies=10):
++    scales = torch.tensor([2**i for i in range(num_frequencies)], dtype=x.dtype, device=x.device)
++    xb = torch.reshape((x[..., None, :] * scales), (*x.shape[:-1], -1))
++    return torch.cat([torch.sin(xb), torch.cos(xb)], dim=-1)
++
++def spherical_harmonic_encoding(d, degree=4):
++    result = []
++    for l in range(degree + 1):
++        for m in range(-l, l + 1):
++            result.append(d[..., 0] ** (l - m) * d[..., 1] ** (l + m) * d[..., 2] ** l)
++    return torch.cat(result, dim=-1)
++
++def compute_tv_loss(tensor):
++    if tensor.dim() == 1:
++        return torch.mean(torch.abs(tensor[1:] - tensor[:-1]))
++    elif tensor.dim() == 2:
++        diff_h = torch.abs(tensor[1:, :] - tensor[:-1, :])
++        diff_w = torch.abs(tensor[:, 1:] - tensor[:, :-1])
++        return torch.mean(diff_h) + torch.mean(diff_w)
++    return 0.0
++
++class ViSNeRF(nn.Module):
+     def __init__(self, spatial_res, param_dims, R_sigma=16, R_color=48, R_param=4):
+-        """
+-        Initialize ViSNeRF model.
+-        spatial_res: int, N for N x N x N grid (or tuple for non-cubic)
+-        param_dims: list of ints, M^k for each parameter dimension
+-        R_sigma: int, low-rank components for density
+-        R_color: int, low-rank components for color
+-        R_param: int, low-rank components for parameter space
+-        """
+         super().__init__()
++        self.spatial_res = spatial_res
++        self.param_dims = param_dims
++        self.R_sigma = R_sigma
++        self.R_color = R_color
++        self.R_param = R_param
+         
+         # Spatial Feature Grids (Block-Term Decomposition)
+-        # Density: R_sigma components
+         self.M_XY_sigma = nn.Parameter(torch.randn(R_sigma, spatial_res[0], spatial_res[1]))
+         self.M_XZ_sigma = nn.Parameter(torch.randn(R_sigma, spatial_res[0], spatial_res[2]))
+@@ -104,5 +134,4 @@
+         self.v_X_sigma = nn.Parameter(torch.randn(R_sigma, spatial_res[0]))
+         
+-        # Color: R_color components
+         self.M_XY_color = nn.Parameter(torch.randn(R_color, spatial_res[0], spatial_res[1]))
+         self.M_XZ_color = nn.Parameter(torch.randn(R_color, spatial_res[0], spatial_res[2]))
+@@ -113,264 +142,75 @@
+         
+         # Parameter Feature Grid (CP Decomposition)
+-        # K dimensions, each with M^k entries
+-        self.param_vectors = []
+-        for k_dim in param_dims:
+-            # R_param vectors of length k_dim
+-            vec = nn.Parameter(torch.randn(R_param, k_dim))
+-            self.param_vectors.append(vec)
++        self.param_vectors = nn.ParameterList([
++            nn.Parameter(torch.randn(R_param, m)) for m in param_dims
++        ])
+             
+         # MLP Decoders
+-        # Density MLP: input dim = R_sigma, output dim = 1 (sigma)
+-        self.g_sigma = nn.Sequential(
+-            nn.Linear(R_sigma, 128),
+-            nn.ReLU(),
+-            nn.Linear(128, 1)
+-        )
+-        
+-        # Color MLP: input dim = R_color, output dim = 3 (RGB)
+-        # Note: SH encoding is applied to direction d before input
+-        self.g_color = nn.Sequential(
+-            nn.Linear(R_color, 128),
+-            nn.ReLU(),
+-            nn.Linear(128, 3)
+-        )
+-        
+-        # Hyperparameters
+-        self.R_sigma = R_sigma
+-        self.R_color = R_color
+-        self.R_param = R_param
+-        self.param_dims = param_dims
+-        self.spatial_res = spatial_res
++        self.g_sigma = nn.Sequential(nn.Linear(R_sigma + R_param, 128), nn.ReLU(), nn.Linear(128, 1))
++        self.g_color = nn.Sequential(nn.Linear(R_color + R_param, 128), nn.ReLU(), nn.Linear(128, 3))
+ 
+     def get_spatial_features(self, x, feature_type='sigma'):
+-        """
+-        Retrieve spatial features for position x using block-term decomposition.
+-        x: Tensor of shape (..., 3) containing (x, y, z)
+-        """
+         if feature_type == 'sigma':
+-            M_XY = self.M_XY_sigma
+-            M_XZ = self.M_XZ_sigma
+-            M_YZ = self.M_YZ_sigma
+-            v_X = self.v_X_sigma
+-            v_Y = self.v_Y_sigma
+-            v_Z = self.v_Z_sigma
++            M_XY, M_XZ, M_YZ = self.M_XY_sigma, self.M_XZ_sigma, self.M_YZ_sigma
++            v_X, v_Y, v_Z = self.v_X_sigma, self.v_Y_sigma, self.v_Z_sigma
+             R = self.R_sigma
+         else:
+-            M_XY = self.M_XY_color
+-            M_XZ = self.M_XZ_color
+-            M_YZ = self.M_YZ_color
+-            v_X = self.v_X_color
+-            v_Y = self.v_Y_color
+-            v_Z = self.v_Z_color
++            M_XY, M_XZ, M_YZ = self.M_XY_color, self.M_XZ_color, self.M_YZ_color
++            v_X, v_Y, v_Z = self.v_X_color, self.v_Y_color, self.v_Z_color
+             R = self.R_color
+             
+-        # Extract coordinates
+-        x_coord = x[..., 0]
+-        y_coord = x[..., 1]
+-        z_coord = x[..., 2]
+-        
+-        # Interpolate features from matrices and vectors
+-        # Note: In implementation, interpolation functions (e.g., grid_sample or trilinear)
+-        # would be used. Here we assume a helper 'interpolate' that handles the indexing.
+-        
+-        # M_XY: shape (R, X, Y) -> sample at (x, y)
+-        feat_XY = interpolate(M_XY, x_coord, y_coord) # Shape (..., R)
+-        
+-        # M_XZ: shape (R, X, Z) -> sample at (x, z)
+-        feat_XZ = interpolate(M_XZ, x_coord, z_coord) # Shape (..., R)
+-        
+-        # M_YZ: shape (R, Y, Z) -> sample at (y, z)
+-        feat_YZ = interpolate(M_YZ, y_coord, z_coord) # Shape (..., R)
+-        
+-        # v_X: shape (R, X) -> sample at x
+-        feat_X = interpolate(v_X, x_coord) # Shape (..., R)
+-        
+-        # v_Y: shape (R, Y) -> sample at y
+-        feat_Y = interpolate(v_Y, y_coord) # Shape (..., R)
+-        
+-        # v_Z: shape (R, Z) -> sample at z
+-        feat_Z = interpolate(v_Z, z_coord) # Shape (..., R)
+-        
+-        # Element-wise multiplication and summation
+-        # V = sum_r ( M_XY_r * v_Z_r + M_XZ_r * v_Y_r + M_YZ_r * v_X_r )
+-        # feat_XY is (..., R), feat_Z is (..., R) -> element-wise mult
+-        term1 = feat_XY * feat_Z
+-        term2 = feat_XZ * feat_Y
+-        term3 = feat_YZ * feat_X
+-        
+-        features = term1 + term2 + term3
+-        return features
++        x_c, y_c, z_c = x[..., 0], x[..., 1], x[..., 2]
++        feat_XY = interpolate_2d(M_XY, x_c, y_c)
++        feat_XZ = interpolate_2d(M_XZ, x_c, z_c)
++        feat_YZ = interpolate_2d(M_YZ, y_c, z_c)
++        feat_X = interpolate_1d(v_X, x_c)
++        feat_Y = interpolate_1d(v_Y, y_c)
++        feat_Z = interpolate_1d(v_Z, z_c)
++        
++        return feat_XY * feat_Z + feat_XZ * feat_Y + feat_YZ * feat_X
+ 
+     def get_param_features(self, params):
+-        """
+-        Retrieve parameter features using CP decomposition.
+-        params: Tensor of shape (..., K) containing parameter values
+-        """
+         K = len(self.param_dims)
+-        # Initialize feature accumulation
+-        # We need to sum over R_p components
+-        # Each component is the outer product of K vectors
+-        
+-        # Reshape params to (..., K, 1) for broadcasting
+-        params_expanded = params.unsqueeze(-1) # (..., K, 1)
+-        
+-        # For each parameter dimension k, interpolate the corresponding vector
+         param_feats = []
+         for k in range(K):
+-            # self.param_vectors[k] shape (R_param, M^k)
+-            # params_expanded[..., k, :] shape (..., 1)
+-            # Interpolate along the M^k dimension
+-            feat_k = interpolate(self.param_vectors[k], params_expanded[..., k, :]) # Shape (..., R_param)
++            feat_k = interpolate_1d(self.param_vectors[k], params[..., k:k+1])
+             param_feats.append(feat_k)
+-            
+-        # Outer product of K vectors for each rank r
+-        # feat_0 * feat_1 * ... * feat_{K-1}
+-        # Since all are (..., R_param), we can multiply them element-wise
+         combined = param_feats[0]
+         for k in range(1, K):
+             combined = combined * param_feats[k]
+-            
+-        # Sum over R_p components
+-        features = torch.sum(combined, dim=-1) # Shape (..., )
+-        return features
+-
+-    def forward(self, rays, params):
+-        """
+-        Forward pass for a batch of rays.
+-        rays: Tensor of shape (B, 3) -> (origin_x, origin_y, origin_z) for sampled points
+-        params: Tensor of shape (B, K) -> scene parameters for the frame
+-        """
+-        # 1. Get Spatial Features
++        return torch.sum(combined, dim=-1)
++
++    def forward(self, rays, directions, params):
+         f_sigma = self.get_spatial_features(rays, 'sigma')
+         f_color = self.get_spatial_features(rays, 'color')
+-        
+-        # 2. Get Parameter Features
+         f_param = self.get_param_features(params)
+-        
+-        # 3. Combine Features
+-        # Concatenate spatial and parameter features? 
+-        # The source says: "concatenate the outcomes of these element-wise multiplications 
+-        # to construct the final feature, integrating products from three spatial pairs 
+-        # and the parameter vector product."
+-        # However, the decoders take f_sigma and f_color separately.
+-        # The parameter features likely modulate or are concatenated.
+-        # Based on "decode density and color features separately", and "combine features... 
+-        # to construct the final feature", it implies the parameter features are combined 
+-        # with spatial features before decoding or the spatial features are already 
+-        # conditioned on parameters via the grid lookup.
+-        # Given the structure: f_sigma is from spatial grid. f_param is from param grid.
+-        # The source states: "ViSNeRF then retrieves features from spatial matrices and 
+-        # vectors as well as parameter vectors, decoding them into color and density values."
+-        # And: "concatenate the outcomes... to construct the final feature".
+-        # Let's assume the final feature for decoding is the concatenation of spatial 
+-        # and parameter features, or that the spatial features are already the result 
+-        # of the interaction. 
+-        # Re-reading: "The combination of features sampled from spatial matrices and 
+-        # vectors is achieved through element-wise multiplications... This element-wise 
+-        # multiplication is also applied for combining features sampled from the 
+-        # parameter vectors. We concatenate the outcomes... to construct the final feature."
+-        # This suggests: Final_Feat = Concat( Spatial_Feat, Param_Feat )?
+-        # But decoders are separate. 
+-        # Let's look at Eq 7: sigma(x) = g_sigma(f_sigma(x), E_P(x)). 
+-        # It does not explicitly show param features in the decoder input in Eq 7.
+-        # However, the factorization T^{3+K} = T^3 o T^K implies the features are 
+-        # derived from the combined tensor.
+-        # In practice, for hybrid models, param features often modulate spatial features.
+-        # Given the ambiguity in the exact fusion mechanism in the text, 
+-        # we follow the explicit decoder inputs: f_sigma and f_color are spatial.
+-        # The parameter features must be integrated. 
+-        # A common approach in such factorized NeRFs is to use param features to 
+-        # select or weight spatial features. 
+-        # However, the text says "concatenate... to construct the final feature".
+-        # Let's assume the final feature passed to the MLP is the concatenation 
+-        # of the spatial feature vector and the parameter feature vector.
+-        
+-        # Expand f_sigma and f_color to match batch size if needed
+-        # f_sigma shape: (B, R_sigma)
+-        # f_param shape: (B, R_param) ? No, CP decomposition output is scalar per rank?
+-        # Actually, CP decomposition of T^K results in a vector of size R_p? 
+-        # No, T^K is a tensor. The decomposition is sum of outer products.
+-        # The result of the CP decomposition for a specific parameter point is a 
+-        # scalar value for each rank? Or a vector?
+-        # "T^K = sum v1 o v2 ... o vK". This results in a scalar field over the K-dim space.
+-        # So f_param is a scalar (or vector of size R_p if we keep ranks separate).
+-        # Let's assume f_param has shape (B, R_p).
+-        
+-        # Concatenate
+-        # Note: R_sigma and R_p might differ.
+-        # If they differ, we might need to align them or just concatenate.
+-        # The text doesn't specify alignment. We concatenate.
+-        
+-        # However, g_sigma takes f_sigma. g_color takes f_color.
+-        # If we concatenate, we change input dim.
+-        # Let's assume the "final feature" refers to the feature vector used for 
+-        # the specific prediction. 
+-        # Given "decode density and color features separately", and Eq 7 uses f_sigma(x),
+-        # it's possible the parameter features are used to index or modulate the spatial 
+-        # features *before* they are passed to the decoder, or the decoder takes both.
+-        # Let's assume the decoder takes the concatenated feature for robustness, 
+-        # or that f_sigma already incorporates parameter info via the grid structure.
+-        # Actually, the grid is 3D. The parameters are separate.
+-        # The most logical interpretation of "concatenate... to construct the final feature" 
+-        # in the context of separate decoders is that the feature vector passed to 
+-        # g_sigma is [f_sigma, f_param] and to g_color is [f_color, f_param].
+         
+         final_feat_sigma = torch.cat([f_sigma, f_param], dim=-1)
+         final_feat_color = torch.cat([f_color, f_param], dim=-1)
+         
+-        # 4. Encode Inputs
+-        # Positional Encoding for x
+-        x_pe = positional_encoding(rays) # E_P(x)
+-        
+-        # Spherical Harmonics for direction d
+-        # Note: rays tensor here is just position. We need direction.
+-        # Assuming 'rays' input in forward includes direction or we pass it separately.
+-        # For this pseudocode, we assume 'directions' is passed or derived.
+-        # Let's assume 'rays' contains (origin, direction) or we have a 'directions' arg.
+-        # For simplicity, let's assume 'directions' is available.
+-        d_sh = spherical_harmonic_encoding(directions) # E_SH(d)
+-        
+-        # 5. Decode
++        x_pe = positional_encoding(rays)
++        d_sh = spherical_harmonic_encoding(directions)
++        
+         sigma = self.g_sigma(torch.cat([final_feat_sigma, x_pe], dim=-1))
+         color = self.g_color(torch.cat([final_feat_color, d_sh], dim=-1))
+-        
+         return sigma, color
+ 
+-    def compute_loss(self, sigma_pred, color_pred, sigma_gt, color_gt, params):
+-        """
+-        Compute total loss.
+-        """
+-        # Reconstruction Loss (MSE)
+-        L_REC = F.mse_loss(color_pred, color_gt)
+-        
+-        # L1 Loss on Grid Weights
++    def compute_loss(self, sigma_pred, color_pred, color_gt):
++        L_REC = torch.mean((color_pred - color_gt) ** 2)
+         L_L1 = 0.0
+-        # Apply to spatial matrices and vectors
+-        for param in list(self.parameters()):
+-            if param in [self.M_XY_sigma, self.M_XZ_sigma, self.M_YZ_sigma, 
+-                         self.v_X_sigma, self.v_Y_sigma, self.v_Z_sigma,
+-                         self.M_XY_color, self.M_XZ_color, self.M_YZ_color,
+-                         self.v_X_color, self.v_Y_color, self.v_Z_color]:
+-                L_L1 += torch.mean(torch.abs(param))
+-            elif param in self.param_vectors:
+-                # For parameter vectors, regularize to 1
+-                # L1 = sum ||1 - w||
+-                L_L1 += torch.mean(torch.abs(1.0 - param))
+-                
+-        # TV Loss (Simplified)
+-        # L_TV1 on vectors, L_TV2 on matrices
++        for p in [self.M_XY_sigma, self.M_XZ_sigma, self.M_YZ_sigma, self.v_X_sigma, self.v_Y_sigma, self.v_Z_sigma,
++                  self.M_XY_color, self.M_XZ_color, self.M_YZ_color, self.v_X_color, self.v_Y_color, self.v_Z_color]:
++            L_L1 += torch.mean(torch.abs(p))
++        for p in self.param_vectors:
++            L_L1 += torch.mean(torch.abs(1.0 - p))
++            
+         L_TV = 0.0
+-        # Implementation of TV loss requires gradient computation or finite differences
+-        # This is a placeholder for the complex TV calculation described in [S1]
+-        L_TV += compute_tv_loss(self.v_X_sigma, self.v_Y_sigma, self.v_Z_sigma)
+-        L_TV += compute_tv_loss(self.M_XY_sigma, self.M_XZ_sigma, self.M_YZ_sigma)
+-        # ... repeat for color features
+-        
+-        # Weights
+-        lambda_1 = 1e-4 # Initially
++        for p in [self.v_X_sigma, self.v_Y_sigma, self.v_Z_sigma, self.M_XY_sigma, self.M_XZ_sigma, self.M_YZ_sigma,
++                  self.v_X_color, self.v_Y_color, self.v_Z_color, self.M_XY_color, self.M_XZ_color, self.M_YZ_color]:
++            L_TV += compute_tv_loss(p)
++            
++        lambda_1 = 1e-4
+         lambda_2 = 1.0
+-        
+-        L = L_REC + lambda_1 * L_L1 + lambda_2 * L_TV
+-        return L
++        return L_REC + lambda_1 * L_L1 + lambda_2 * L_TV
+ ```
+ 
+@@ -400,5 +240,5 @@
+ 
+ **Measured Performance:**
+-*   **Inference Speed:** At least 1.86 FPS for 256x256 images; drops substantially for 1024x256 [S1]. Slower than InSituNet/StyleGAN2 but faster than CoordNet/EG3D for low-res [S1].
++*   **Inference Speed:** At least 1.86 FPS for 256x256 images; drops substantially for 1024x1024 images [S1]. Slower than InSituNet and StyleGAN2, but faster than CoordNet and EG3D for low-resolution datasets [S1].
+ *   **Training Time:** Fastest among compared methods (e.g., 1.43 hours for five jets) [S1].
+ *   **Model Size:** Compact (e.g., 15.43 MB for five jets, 69.91 MB for Tangaroa) [S1].

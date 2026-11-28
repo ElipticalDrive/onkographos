@@ -1,0 +1,95 @@
+# CUDA-accelerated Vector Field Reading with Magnitude
+
+Also called: Float4 Vector Texture Binding, Vector Field Texture Loading
+
+## Overview
+This method enables fast, linearly interpolated reading of 3D vector field values at arbitrary positions using CUDA 3D textures [S1, unofficial]. It differs from standard scalar texture loading by storing precomputed vector magnitudes in the fourth component of a `float4` structure to avoid redundant calculations during rendering [S1, unofficial].
+
+## How it works
+**Inputs:** A host-side 3D vector field dataset (typically from an NRRD file) containing $(x, y, z)$ components per grid point, along with grid dimensions $(width, height, depth)$ [S1, unofficial].
+**Outputs:** A bound CUDA texture object (`vectorFieldTex`) ready for sampling in device kernels [S1, unofficial].
+
+**Data Structures:**
+1. **Host Data Buffer:** A 1D array of `float4` with size $N = width \times height \times depth$ [S1, unofficial]. Each element stores $(v_x, v_y, v_z, |v|)$, where $|v|$ is the precomputed magnitude [S1, unofficial].
+2. **Device Array:** A `cudaArray` allocated with a channel descriptor for `float4` [S1, unofficial].
+3. **Texture Object:** A `texture<float4, cudaTextureType3D, cudaReadModeElementType>` object [S1, unofficial].
+
+**Steps:**
+1. **Precompute Magnitude:** Iterate through the raw vector data [S1, unofficial]. For each vector $\mathbf{v} = (v_x, v_y, v_z)$, compute the magnitude $m = \sqrt{v_x^2 + v_y^2 + v_z^2}$ and store it in the $w$ component of a `float4` structure [S1, unofficial].
+2. **Allocate Device Memory:** Create a channel descriptor for `float4` and allocate a 3D array on the GPU using `cudaMalloc3DArray` [S1, unofficial].
+3. **Copy Data to GPU:** Use `cudaMemcpy3D` with a pitched source pointer to copy the host `float4` array to the device 3D array [S1, unofficial]. The pitch is `width * sizeof(float4)` [S1, unofficial].
+4. **Configure Texture Object:** Set `normalized = false` (coordinates in texel space), `filterMode = cudaFilterModeLinear` (trilinear interpolation), and `addressMode[0..2] = cudaAddressModeClamp` (clamp to boundaries) [S1, unofficial].
+5. **Bind Texture:** Bind the device array to the texture object using `cudaBindTextureToArray` [S1, unofficial].
+6. **Sample Vector:** In a device kernel, read the vector at position $(x, y, z)$ using `tex3D(vectorFieldTex, x, y, z)`, which returns a `float4` containing the interpolated direction and precomputed magnitude [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def prepare_and_load_vector_field(host_vectors_3d, width, height, depth):
+    # 1. Precompute magnitude and pack into float4 array
+    total_size = width * height * depth
+    host_float4_array = [None] * total_size
+    for i in range(total_size):
+        vx = host_vectors_3d[i * 3]
+        vy = host_vectors_3d[i * 3 + 1]
+        vz = host_vectors_3d[i * 3 + 2]
+        mag = math.sqrt(vx * vx + vy * vy + vz * vz)
+        host_float4_array[i] = (vx, vy, vz, mag)
+
+    # 2. Allocate device 3D array with float4 channel format
+    channel_desc = 'float4'
+    volume_size = (width, height, depth)
+    d_volume_array = cudaMalloc3DArray(channel_desc, volume_size)
+
+    # 3. Copy host data to device using pitched pointer
+    pitch = width * 16  # sizeof(float4) is 16 bytes
+    src_ptr = make_cudaPitchedPtr(host_float4_array, pitch, width, height)
+    copy_params = {
+        'srcPtr': src_ptr,
+        'dstArray': d_volume_array,
+        'extent': volume_size,
+        'kind': 'cudaMemcpyHostToDevice'
+    }
+    cudaMemcpy3D(copy_params)
+
+    # 4. Configure texture object
+    vector_field_tex = create_texture_object()
+    vector_field_tex.normalized = False
+    vector_field_tex.filter_mode = 'linear'
+    vector_field_tex.address_mode = ['clamp', 'clamp', 'clamp']
+
+    # 5. Bind 3D array to texture
+    cudaBindTextureToArray(vector_field_tex, d_volume_array, channel_desc)
+    return vector_field_tex
+
+def sample_vector_field(tex, x, y, z):
+    # 6. Sample vector at arbitrary position
+    return tex3D(tex, x, y, z)
+```
+
+**Parameters:**
+* **Memory Overhead:** Increases memory consumption by 1/3 compared to storing only `float3` vectors [S1, unofficial].
+* **Interpolation:** Linear (trilinear) [S1, unofficial].
+* **Boundary Handling:** Clamp [S1, unofficial].
+
+**Pitfalls:**
+* **CUDA Texture Type Limitations:** CUDA 3D textures do not support `float3` channel formats directly; only `float1`, `float2`, or `float4` are supported [S1, unofficial]. This necessitates the use of `float4` with the fourth component used for magnitude (or padding) [S1, unofficial].
+* **Memory Constraints:** The 1/3 memory increase can be significant for large datasets on GPUs with limited memory [S1, unofficial].
+
+## Operating characteristics
+* **Time Complexity:** Reading a vector is $O(1)$ per query, involving a single texture fetch with hardware-accelerated trilinear interpolation [S1, unofficial].
+* **Memory Complexity:** $O(N)$ where $N$ is the number of grid points, but with a constant factor of 4 floats per point instead of 3 [S1, unofficial].
+* **Performance:** Significantly speeds up visualization compared to CPU-side interpolation or magnitude computation per sample [S1, unofficial].
+* **Strengths:** Hardware-accelerated interpolation; precomputed magnitude avoids redundant square root calculations in the rendering loop [S1, unofficial].
+* **Limitations:** Increased memory footprint; requires pre-processing step to compute magnitudes [S1, unofficial].
+* **When to use:** Real-time visualization of 3D vector fields where performance is critical and GPU memory is sufficient [S1, unofficial].
+* **When not to use:** When GPU memory is extremely constrained and magnitude is not needed for visualization [S1, unofficial].
+
+## Background
+This technique was described by Marek Fiser in the context of real-time visualization of 3D vector fields using CUDA [S1, unofficial]. It leverages the CUDA runtime API's support for 3D textures to handle the discrete nature of volumetric data, which requires interpolation for arbitrary query points [S1, unofficial]. The approach of storing magnitude in the fourth component is a workaround for the lack of `float3` texture support in CUDA at the time of writing [S1, unofficial].
+
+## Sources
+[S1] Realtime visualization of 3D vector fields using CUDA, https://marekfiser.com/projects/realtime-visualization-of-3D-vector-fields-using-CUDA/, fetched 2026-10-28 (unofficial)

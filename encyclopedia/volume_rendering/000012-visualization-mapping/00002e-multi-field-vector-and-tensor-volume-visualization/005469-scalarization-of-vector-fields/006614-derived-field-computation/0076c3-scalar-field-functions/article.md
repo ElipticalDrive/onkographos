@@ -1,0 +1,100 @@
+# Scalar Field Functions
+
+Also called: Analytical Functions for Scalar Fields, Marschner-Lobb Function, Spherical Function
+
+## Overview
+Scalar Field Functions are analytical mathematical functions used to generate synthetic scalar fields for testing and validating gradient reconstruction accuracy in volume rendering. They provide a known ground truth gradient, allowing for precise error measurement against reconstructed gradients. They are distinguished from data-driven methods by their deterministic, closed-form nature, which allows for controlled variation of spatial frequency and complexity.
+
+## How it works
+**Inputs and Outputs:**
+- Input: Spatial coordinates $\mathbf{x}$ within a defined domain (typically a unit cube).
+- Output: A scalar value $f(\mathbf{x})$.
+- Derived Output: The analytical gradient $\nabla f(\mathbf{x})$ and higher-order derivatives (e.g., Hessian) for error comparison.
+
+**Data Structures:**
+- The domain is typically a unit cube with bounding box from $(0, 0, 0)^T$ to $(1, 1, 1)^T$ [S1].
+- Coordinates $\mathbf{x}$ are 3D vectors.
+
+**Formulas:**
+
+1.  **Spherical Function:**
+    $$f(\mathbf{x}) = \|\mathbf{x} - (0.5, 0.5, 0.5)^T\|$$
+    where $\|\cdot\|$ denotes the Euclidean norm [S1].
+
+2.  **Marschner-Lobb Function:**
+    The specific formula is referenced as being defined in [16] of the source [S1]. The source does not provide the explicit algebraic expansion of the Marschner-Lobb function itself, but describes its parameterization for complexity control. It is characterized by higher spatial frequency compared to the spherical function [S1].
+
+3.  **Complexity Metric (Trace of the Hessian):**
+    For the Marschner-Lobb function, complexity is controlled by parameters $\alpha$ and $f_M$. The trace of the Hessian $Tr(H(f))$ is proportional to:
+    $$Tr(H(f)) \propto \alpha \cdot f_M$$
+    where $\alpha = 0.1i$ and $f_M = 0.1j$ for integer labels $ij$ [S1].
+
+**Parameters:**
+- Grid resolution $N$: Example value $N=48$ [S1].
+- Step size $\delta$: Example value $\delta=0.25$ [S1].
+- Integer labels $i, j$: Control the frequency/complexity of the Marschner-Lobb function [S1].
+
+**Pitfalls and Edge Cases:**
+- **Accuracy vs. Complexity:** Generally, gradient reconstruction accuracy decreases as the trace of the Hessian (complexity) increases [S1].
+- **Mesh Alignment:** Accuracy improvements can occur when the scalar field aligns with the mesh structure, particularly on regular grids compared to irregular meshes [S1]. This alignment effect is noted by Shewchuk [S1].
+- **Error Correlation:** Systematic errors may exist; for instance, 3D weighted regression may show larger mean error but higher correlation with true error than 4D unweighted regression [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def spherical_function(x):
+    """
+    Computes the spherical scalar field function.
+    x: numpy array of shape (..., 3) representing coordinates in [0,1]^3
+    """
+    center = np.array([0.5, 0.5, 0.5])
+    return np.linalg.norm(x - center, axis=-1)
+
+def marschner_lobb_complexity_metric(i, j):
+    """
+    Computes the proportional complexity (Trace of Hessian) for a Marschner-Lobb function
+    labeled with integers i and j.
+    i, j: integers
+    """
+    alpha = 0.1 * i
+    f_M = 0.1 * j
+    # The source states proportionality, not exact equality.
+    # The constant of proportionality is not given in the sources.
+    return alpha * f_M
+
+def get_ground_truth_gradient_spherical(x):
+    """
+    Computes the analytical gradient of the spherical function.
+    f(x) = ||x - c||
+    grad f(x) = (x - c) / ||x - c||
+    """
+    center = np.array([0.5, 0.5, 0.5])
+    diff = x - center
+    norm = np.linalg.norm(diff, axis=-1, keepdims=True)
+    # Avoid division by zero at the center
+    norm = np.maximum(norm, 1e-10)
+    return diff / norm
+```
+
+## Subtopics
+
+### Scalar Field Complexity Evaluation
+This variant involves using the Marschner-Lobb function with varying parameters $\alpha$ and $f_M$ to systematically evaluate gradient reconstruction accuracy. The complexity is quantified by the trace of the Hessian $Tr(H(f))$. It is chosen when one needs to test how reconstruction methods degrade with increasing spatial frequency and curvature. It is distinct from the Spherical function, which has lower and constant spatial frequency characteristics. Accuracy generally decreases as $Tr(H(f))$ increases, though mesh alignment can cause local improvements [S1].
+
+## Operating characteristics
+- **Time Complexity:** Evaluation of the analytical functions is $O(1)$ per point. Computing the Hessian trace for complexity analysis is also $O(1)$ given the parameters.
+- **Memory Complexity:** $O(1)$ for the function definition. Storage of the field on a grid is $O(N^3)$ where $N$ is the grid resolution.
+- **Performance:** The Spherical function is computationally inexpensive. The Marschner-Lobb function allows for controlled stress-testing of gradient estimators.
+- **Strengths:** Provides exact ground truth for gradient validation. Allows isolation of numerical errors from data errors.
+- **Limitations:** Synthetic nature may not fully represent "real" data complexities (e.g., noise, discontinuities). Accuracy on irregular meshes may be misleadingly high due to alignment effects [S1].
+- **When to use:** For unit testing gradient reconstruction algorithms, validating new mesh-based rendering techniques, and analyzing the impact of mesh quality on gradient accuracy.
+- **When not to use:** For final production rendering where realistic data fidelity is required, or when the mesh structure is highly irregular and misaligned with the field.
+
+## Background
+Scalar Field Functions were introduced in the context of comparing gradient estimation methods for volume rendering on unstructured meshes. The Spherical and Marschner-Lobb functions were used to generate synthetic scalar fields to evaluate the accuracy of gradient reconstruction methods by comparing them against analytically derived ground truth gradients [S1]. The Marschner-Lobb function's complexity was varied to study the relationship between field curvature (Hessian trace) and reconstruction error [S1].
+
+## Sources
+[S1] A Comparison of Gradient Estimation Methods for Volume Rendering on Unstructured Meshes, https://www.computer.org/csdl/journal/tg/2011/03/ttg2011030305/13rRUx0xPi5, fetched 2026-11-01

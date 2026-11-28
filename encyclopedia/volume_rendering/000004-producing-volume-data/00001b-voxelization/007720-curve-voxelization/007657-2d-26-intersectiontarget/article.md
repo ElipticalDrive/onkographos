@@ -1,0 +1,96 @@
+# 2D_26_intersectionTarget
+Also called: 2D mesh ensuring 26 connectivity, Diagonal target for 2D inputs
+## Overview
+The 2D_26_intersectionTarget method defines a geometric intersection test primitive for voxelizing 2D surfaces (such as triangle meshes) into a 3D voxel grid with 26-connectivity [S1, S2]. It ensures that if a surface intersects any part of a voxel, including its corners and edges, the voxel is marked as occupied, thereby preventing topological holes in the resulting volume [S1, S2]. It differs from the [2D 6-Connected Intersection Target](23484-2d-6-connected-intersection-target.md) by using diagonal lines through the voxel center rather than face centers, allowing it to detect intersections with voxel corners that the 6-connected target might miss [S1, S2].
+## How it works
+### Inputs and Outputs
+- **Input**: `voxel_point` (the 3D integer coordinates of the voxel center or corner, depending on coordinate system convention, typically the minimum corner), `vSize` (a `Vector3d` representing the voxel dimensions $w_x, w_y, w_z$).
+- **Output**: An array `IntersecTarget` of 3 `Line` objects. Each `Line` is defined by two `Point3d` endpoints.
+
+### Data Structures
+- `Point3d`: A structure with fields `x`, `y`, `z` (double precision).
+- `Vector3d`: A structure with fields `X`, `Y`, `Z` (double precision).
+- `Line`: A structure defined by two `Point3d` endpoints, `p1` and `p2`.
+- `IntersecTarget`: An array of 3 `Line` objects.
+- `Vertices`: An array of 6 `Point3d` objects.
+
+### Steps
+1. **Initialize**:
+   - Create `IntersecTarget` array of size 3.
+   - Create `Vertices` array of size 6.
+   - Calculate half-dimensions:
+     $$ u = \frac{vSize.X}{2} $$
+     $$ v = \frac{vSize.Y}{2} $$
+     $$ w = \frac{vSize.Z}{2} $$
+
+2. **Create Vertices**:
+   The vertices are located at the centers of the voxel's faces.
+   - $Vertices[0] = VoxelPoint + (u, 0, 0)$
+   - $Vertices[1] = VoxelPoint + (0, v, 0)$
+   - $Vertices[2] = VoxelPoint + (0, 0, w)$
+   - $Vertices[3] = VoxelPoint + (-u, 0, 0)$
+   - $Vertices[4] = VoxelPoint + (0, -v, 0)$
+   - $Vertices[5] = VoxelPoint + (0, 0, -w)$
+
+3. **Create Edges**:
+   Connect opposite face centers through the voxel center.
+   - For $i$ from 0 to 2:
+     - $IntersecTarget[i] = Line(Vertices[i], Vertices[i+3])$
+
+4. **Return**:
+   - Return `IntersecTarget`.
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def 2D_26_intersectionTarget(voxel_point, vSize):
+    # Initialize arrays
+    IntersecTarget = [None] * 3
+    Vertices = [None] * 6
+    
+    # Calculate half-dimensions
+    u = vSize.X / 2.0
+    v = vSize.Y / 2.0
+    w = vSize.Z / 2.0
+    
+    # Create Vertices at face centers
+    # Vertices[0] = VoxelPoint + (+u, 0, 0)
+    Vertices[0] = Point3d(voxel_point.x + u, voxel_point.y, voxel_point.z)
+    # Vertices[1] = VoxelPoint + (0, +v, 0)
+    Vertices[1] = Point3d(voxel_point.x, voxel_point.y + v, voxel_point.z)
+    # Vertices[2] = VoxelPoint + (0, 0, +w)
+    Vertices[2] = Point3d(voxel_point.x, voxel_point.y, voxel_point.z + w)
+    # Vertices[3] = VoxelPoint + (-u, 0, 0)
+    Vertices[3] = Point3d(voxel_point.x - u, voxel_point.y, voxel_point.z)
+    # Vertices[4] = VoxelPoint + (0, -v, 0)
+    Vertices[4] = Point3d(voxel_point.x, voxel_point.y - v, voxel_point.z)
+    # Vertices[5] = VoxelPoint + (0, 0, -w)
+    Vertices[5] = Point3d(voxel_point.x, voxel_point.y, voxel_point.z - w)
+    
+    # Create Edges: Connect opposite face centers
+    for i in range(3):
+        IntersecTarget[i] = Line(Vertices[i], Vertices[i+3])
+        
+    return IntersecTarget
+```
+
+### Edge Cases and Pitfalls
+- **Degenerate Voxels**: If any dimension of `vSize` is zero, the half-dimensions $u, v, w$ become zero, collapsing the lines to points. This should be handled by validating input dimensions before execution [G].
+- **Coordinate System**: The definition assumes `VoxelPoint` is the origin relative to which offsets are applied. If `VoxelPoint` represents the minimum corner, the face centers are correctly calculated as shown. If it represents the center, the offsets would be different. The sources imply `VoxelPoint` is a base corner or reference point [S1, S2].
+- **Intersection Test**: The resulting lines are used in a `TriangleIntersectsLine` test. If any of the 3 lines intersect the input surface (e.g., a triangle), the voxel is added to the voxel set [S1, S2].
+
+## Operating characteristics
+- **Time Complexity**: The construction of the intersection target is $O(1)$, involving a fixed number of arithmetic operations and array assignments. The intersection test itself depends on the number of surface primitives (e.g., triangles) tested against the 3 lines.
+- **Memory Complexity**: $O(1)$ for the intersection target structure (3 lines, 6 points).
+- **Strengths**: Ensures 26-connectivity, which is crucial for preserving the topology of thin structures and corners in 2D surface voxelization. It is more robust than 6-connected targets for diagonal features.
+- **Limitations**: It may mark voxels as occupied that do not contain the surface if the diagonal lines intersect the surface but the voxel body does not (though this is the definition of 26-connectivity). It is computationally more expensive than 6-connected targets due to the diagonal checks.
+- **When to use**: When 26-connectivity is required for the voxelized surface, such as in medical imaging or geospatial applications where topological correctness is critical.
+- **When not to use**: When 6-connectivity is sufficient and performance is a higher priority, or when the surface is known to be axis-aligned.
+
+## Background
+The method is described in the context of voxelization algorithms for geospatial applications [S1, S2]. It is part of a family of intersection targets designed to ensure specific connectivity levels (6, 18, 26) in voxel grids. The 2D_26_intersectionTarget specifically addresses the need for 26-connectivity for 2D inputs (surfaces) in a 3D grid. The algorithm is presented as Algorithm 8 in the source literature [S1, S2].
+
+## Sources
+[S1] Voxelization algorithms for geospatial applications, https://doi.org/10.1016/j.mex.2016.01.001, fetched 2026-10-26
+[S2] Voxelization algorithms for geospatial applications, https://www.sciencedirect.com/science/article/pii/S2215016116000029, fetched 2026-10-29

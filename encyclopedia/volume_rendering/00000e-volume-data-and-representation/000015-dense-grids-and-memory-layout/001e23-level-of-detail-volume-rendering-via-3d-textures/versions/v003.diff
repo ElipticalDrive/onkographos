@@ -1,0 +1,277 @@
+--- v002.md
++++ v003.md
+@@ -15,20 +15,20 @@
+ 
+ **1. Brick Decomposition**
+-The volume is decomposed into 3D bricks (subvolumes) small enough to fit into texture memory. A typical brick size is $32^3$ voxels [S3].
++The volume is decomposed into 3D bricks (subvolumes) small enough to fit into texture memory [S3].
+ 
+ **2. Texture Hierarchy**
+-Each brick maintains a local hierarchy of texture maps.
++Each brick maintains a local hierarchy of texture maps [S2].
+ *   **Level 0:** The original resolution data [S2].
+ *   **Level $k$:** A coarser resolution copy. The texture size is reduced by a factor of two compared to level $k-1$, and the width of texture elements is doubled [S1][S3].
+ *   **Alignment:** Texture elements on level $k$ are aligned such that their centers correspond to the center of an even-indexed element on the finer level $k-1$ [S1][S3].
+-*   **Domain Adaptation:** On level 0, the texture coordinate domain ranges from the center of the first element to the center of the last one. This domain is adapted for coarser levels to maintain geometric consistency [S1].
+-*   **Boundary Padding:** To guarantee continuous interpolation, additional voxels are included at subvolume boundaries. If a boundary falls between two voxels on a coarser level, both adjacent voxels must be modified/adapted [S1].
++*   **Domain Adaptation:** On level 0, the texture coordinate domain ranges from the center of the first element to the center of the last one [S1]. This domain is adapted for coarser levels to maintain geometric consistency.
++*   **Boundary Padding:** To guarantee continuous interpolation, additional voxels are included at subvolume boundaries [S1]. If a boundary falls between two voxels on a coarser level, both adjacent voxels must be modified/adapted [S1].
+ *   **Power-of-Two Expansion:** Textures are expanded and padded with zero voxels to satisfy OpenGL's power-of-two texture size restrictions [S1][S3].
+ 
+ **3. Merged Texture Hierarchy (Octree-like)**
+-To minimize memory overhead from boundary padding, textures of adjacent subvolumes are merged:
++To minimize memory overhead from boundary padding, textures of adjacent subvolumes are merged [S1].
+ *   **Level 0:** Each brick has its own texture map [S1].
+-*   **Higher Levels:** Eight adjacent subvolumes share a single texture map. The number of subvolumes sharing a texture map multiplies by 8 at each coarser level, forming an octree-like hierarchy [S1].
+-*   **Constraint:** Merging works optimally if the initial number of subvolumes in every direction is a power of two. If the count exceeds $2^{l-1}$ (where $l$ is the number of levels), additional subvolumes build their own texture sets. If fewer, the hierarchy depth is reduced by storing coarsest-level textures individually [S1].
++*   **Higher Levels:** Eight adjacent subvolumes share a single texture map [S1]. The number of subvolumes sharing a texture map multiplies by 8 at each coarser level, forming an octree-like hierarchy [S1].
++*   **Constraint:** Merging works optimally if the initial number of subvolumes in every direction is a power of two. If the count exceeds $2^{l-1}$ (where $l$ is the number of levels), additional subvolumes build their own texture sets [S1]. If fewer, the hierarchy depth is reduced by storing coarsest-level textures individually [S1].
+ 
+ ### Parameters
+@@ -53,11 +53,11 @@
+     *   *Constraint:* Ensure adjacent bricks differ by at most one level [S3].
+ 5.  **Boundary Adaptation (Interpolation):** For bricks adjacent to a coarser neighbor, adapt the finer texture to ensure scalar field continuity:
+-    *   Identify voxels at the boundary of the finer brick that do not align with the coarser grid.
++    *   Identify voxels at the boundary of the finer brick that do not align with the coarser grid [S1].
+     *   Interpolate or copy values from the coarser level into these boundary voxels of the finer brick [S1][S3].
+     *   If the boundary is at a voxel center, adapt 1 voxel; if between voxels, adapt 2 [S1].
+-6.  **Opacity Correction:** Modify the transfer function for subsampled (coarser) textures to preserve optical properties. Calculate the corrected opacity $\alpha'$ using the derived formula [S1]:
++6.  **Opacity Correction:** Modify the transfer function for subsampled (coarser) textures to preserve optical properties [S1]. Calculate the corrected opacity $\alpha'$ using the derived formula [S1]:
+     $$ \alpha' = 1 - (1 - \alpha_0)^2 $$
+     where $\alpha_0$ is the original opacity. Apply this to all opacity values in the subsampled texture [S1].
+-7.  **Polygon Clipping and Rendering:** Render bricks using slicing planes parallel to the image plane. Handle level transitions with polygon clipping to correct opacity artifacts:
++7.  **Polygon Clipping and Rendering:** Render bricks using slicing planes parallel to the image plane [S2]. Handle level transitions with polygon clipping to correct opacity artifacts:
+     *   **Case 1 (Coarser to Finer):** Clip the even-slice $i$ in the coarser brick with the perspective projection of the odd-slice $i+1$ (from the finer brick) onto slice $i$. Render the clipped polygon in region $C$ with the same opacity as the finer level [S3].
+     *   **Case 2 (Finer to Coarser):** Reconstruct the odd-slice $i+1$ in the coarser brick and clip it with the perspective projection of the even-slice $i$ (from the finer brick) onto slice $i+1$. Render the clipped polygon in region $C$ with corrected opacity $\alpha_{k+1}$ [S3].
+@@ -69,29 +69,52 @@
+ 
+ ```python
+-def build_texture_hierarchy(brick_data, max_levels):
+-    """
+-    Constructs a local texture hierarchy for a single brick.
+-    brick_data: 3D array of original voxels.
+-    max_levels: Integer, maximum number of LOD levels.
+-    Returns: List of 3D arrays, where index k is level k.
+-    """
+-    levels = [brick_data]
+-    current_data = brick_data
+-    for k in range(1, max_levels):
+-        # Apply quadratic spline filter to downsample [S2]
+-        coarser_data = apply_quadratic_spline_filter(current_data)
+-        # Expand to power-of-two size if necessary, padding with zeros [S3]
+-        coarser_data = expand_to_power_of_two(coarser_data)
+-        levels.append(coarser_data)
+-        current_data = coarser_data
+-    return levels
++def build_lod_volume(volume_data, brick_size, max_levels):
++    # 1. Decompose volume into bricks [S3]
++    bricks = []
++    for i in range(0, volume_data.shape[0], brick_size):
++        for j in range(0, volume_data.shape[1], brick_size):
++            for k in range(0, volume_data.shape[2], brick_size):
++                bricks.append(Brick(volume_data[i:i+brick_size, j:j+brick_size, k:k+brick_size]))
++                
++    # 2. Build local texture hierarchy for each brick [S2]
++    for brick in bricks:
++        brick.levels = [brick.data]
++        current = brick.data
++        for level_idx in range(1, max_levels):
++            # Quadratic spline filter for coarsening [S2]
++            current = apply_quadratic_spline_filter(current)
++            # Expand to power-of-two, pad with zeros [S3]
++            current = expand_to_power_of_two(current)
++            brick.levels.append(current)
++            
++    # 3. Merge textures into octree-like hierarchy [S1]
++    # Merge adjacent bricks into shared maps based on power-of-two grid alignment [S1]
++    merged_textures = merge_octree_hierarchy(bricks, max_levels)
++    
++    # 4. LOD Selection based on criteria [S1]
++    for brick in bricks:
++        brick.level = compute_lod_level(brick, view_params)
++        # Constraint: adjacent bricks differ by at most 1 level [S3]
++        enforce_adjacent_level_constraint(bricks)
++        
++    # 5. Boundary Adaptation for finer bricks next to coarser ones [S1]
++    for brick in bricks:
++        for neighbor in brick.adjacent_bricks:
++            if brick.level < neighbor.level:
++                adapt_fine_brick_boundary(brick, neighbor)
++                
++    # 6. Opacity Correction [S1]
++    for brick in bricks:
++        brick.levels[brick.level].opacities = correct_opacity(brick.levels[brick.level].opacities)
++        
++    # 7. Render with polygon clipping [S3]
++    render_with_clipping(bricks, view_params)
+ 
+ def apply_quadratic_spline_filter(data):
+-    """Iteratively filters data using a quadratic spline kernel to build low-pass copies [S2]."""
+-    # Standard quadratic spline downsampling: convolve with kernel, then subsample by 2
++    # Standard quadratic spline downsampling: convolve with kernel, then subsample by 2 [G]
+     return subsample_by_two(convolve_3d(data, quadratic_spline_kernel))
+ 
+ def expand_to_power_of_two(data):
+-    """Pads data with zero voxels to reach the next power-of-two dimensions."""
++    # Pads data with zero voxels to reach the next power-of-two dimensions [G]
+     new_dims = [next_power_of_two(d) for d in data.shape]
+     padded = create_zeros(new_dims)
+@@ -99,109 +122,59 @@
+     return padded
+ 
+-def adapt_boundary_fine_bricks(fine_brick_level, coarse_brick_level):
+-    """
+-    Adapts the finer brick's boundary voxels to match the coarser brick's grid
+-    to ensure continuous scalar field interpolation [S1].
+-    """
+-    # Identify boundary voxels in the fine brick that do not align with coarse grid
+-    # If boundary is at voxel center, adapt 1 voxel; if between, adapt 2 [S1]
+-    for voxel in fine_brick_level.boundary_voxels:
++def adapt_fine_brick_boundary(fine_brick, coarse_brick):
++    # Identify boundary voxels in the fine brick that do not align with coarse grid [S1]
++    for voxel in fine_brick.boundary_voxels:
++        # If boundary is at voxel center, adapt 1 voxel; if between, adapt 2 [S1]
+         # Interpolate or copy value from the corresponding location in coarse level
+-        # Since centers align with even elements of finer level, this is often a copy
+-        # for even indices, but interpolation for misaligned boundaries [S1]
+-        voxel.value = interpolate_from_coarse(voxel.position, coarse_brick_level)
+-
+-def interpolate_from_coarse(position, coarse_level):
+-    """Samples the coarse level at the given position using trilinear interpolation."""
+-    return trilinear_sample(coarse_level, position)
+-
+-def correct_opacity(transfer_function):
+-    """
+-    Applies opacity correction formula to preserve optical properties
+-    when sampling at lower resolutions [S1].
+-    """
+-    corrected_tf = {}
+-    for alpha in transfer_function:
+-        # Formula derived from equating accumulated opacities D and D' [S1]
+-        # alpha' = 1 - (1 - alpha)^2
+-        alpha_corrected = 1.0 - (1.0 - alpha) ** 2
+-        corrected_tf[alpha] = alpha_corrected
+-    return corrected_tf
+-
+-def render_brick_with_clipping(brick, level, view_params):
+-    """
+-    Renders a brick at a specific LOD level, handling boundary artifacts
+-    via polygon clipping [S3].
+-    """
+-    # 1. Determine slicing planes parallel to image plane [S2]
+-    slices = generate_slices(brick, level, view_params)
++        voxel.value = interpolate_from_coarse(voxel.position, coarse_brick)
++
++def correct_opacity(opacities):
++    # Formula derived from equating accumulated opacities D and D' [S1]
++    # alpha' = 1 - (1 - alpha)^2
++    return [1.0 - (1.0 - alpha) ** 2 for alpha in opacities]
++
++def render_with_clipping(bricks, view_params):
++    # Generate slicing planes parallel to image plane [S2]
++    slices = generate_slices(bricks, view_params)
+     
+-    # 2. Handle level transitions with clipping
+-    # Case 1: Coarser to Finer neighbor
+-    if has_finier_neighbor(brick):
+-        for even_slice_i in brick.even_slices:
+-            # Clip even-slice i with perspective projection of odd-slice i+1 from finer neighbor
+-            clipped_poly = clip_polygon(even_slice_i, finer_neighbor.odd_slice_i_plus_1)
+-            render_polygon(clipped_poly, opacity=finer_neighbor.opacity)
++    # Handle level transitions with clipping [S3]
++    for brick in bricks:
++        if has_finier_neighbor(brick):
++            for even_slice_i in brick.even_slices:
++                # Clip even-slice i with perspective projection of odd-slice i+1 from finer neighbor
++                clipped_poly = clip_polygon(even_slice_i, finer_neighbor.odd_slice_i_plus_1)
++                render_polygon(clipped_poly, opacity=finer_neighbor.opacity)
++                
++        if has_coarser_neighbor(brick):
++            for odd_slice_i_plus_1 in brick.odd_slices:
++                # Reconstruct odd-slice in coarser brick and clip with even-slice i from finer neighbor
++                reconstructed_slice = reconstruct_slice(odd_slice_i_plus_1, brick.coarser_level)
++                clipped_poly = clip_polygon(reconstructed_slice, finer_neighbor.even_slice_i)
++                render_polygon(clipped_poly, opacity=corrected_opacity)
++                
++        # Handle external boundaries
++        if no_clipping_polygons_exist():
++            insert_slices_with_smallest_sample_distance()
+             
+-    # Case 2: Finer to Coarser neighbor
+-    if has_coarser_neighbor(brick):
+-        for odd_slice_i_plus_1 in brick.odd_slices:
+-            # Reconstruct odd-slice in coarser brick and clip with even-slice i from finer neighbor
+-            reconstructed_slice = reconstruct_slice(odd_slice_i_plus_1, brick.coarser_level)
+-            clipped_poly = clip_polygon(reconstructed_slice, finer_neighbor.even_slice_i)
+-            render_polygon(clipped_poly, opacity=corrected_opacity)
+-            
+-    # 3. Handle external boundaries
+-    if no_clipping_polygons_exist():
+-        insert_slices_with_smallest_sample_distance()
+-        
+-    # 4. Sort polygons to minimize state changes [S3]
++    # Sort polygons to minimize state changes [S3]
+     sort_polygons_by_color_table()
+     render_all_polygons()
+ 
+-def generate_slices(brick, level, view_params):
+-    """Generates slicing planes parallel to the image plane for the given brick and level."""
+-    return [plane for plane in compute_slices(brick.bounding_box, view_params.camera_direction, level.sample_distance)]
+-
+-def has_finier_neighbor(brick):
+-    """Checks if the brick has an adjacent brick with a finer LOD level."""
+-    return any(neighbor.level < brick.level for neighbor in brick.adjacent_bricks)
+-
+-def has_coarser_neighbor(brick):
+-    """Checks if the brick has an adjacent brick with a coarser LOD level."""
+-    return any(neighbor.level > brick.level for neighbor in brick.adjacent_bricks)
+-
+-def no_clipping_polygons_exist():
+-    """Returns true if no clipping polygons are currently active."""
+-    return len(active_clipping_polygons) == 0
+-
+-def sort_polygons_by_color_table():
+-    """Sorts rendered polygons to minimize color table reloads."""
+-    active_clipping_polygons.sort(key=lambda p: p.color_table_index)
+-
+-def render_all_polygons():
+-    """Renders all sorted polygons to the framebuffer."""
+-    for poly in active_clipping_polygons:
+-        rasterize_and_draw(poly)
+-
+-def clip_polygon(slice_geom, projection_geom):
+-    """Computes the clipped polygon using a modified 3D Sutherland-Hodgman algorithm."""
+-    return modified_sutherland_hodgman_clip(slice_geom, projection_geom)
+-
+-def render_polygon(poly, opacity):
+-    """Renders a single clipped polygon with the specified opacity."""
+-    draw_polygon_with_opacity(poly, opacity)
+-
+-def reconstruct_slice(slice_index, coarse_level):
+-    """Reconstructs a missing odd slice in the coarser brick from neighboring data."""
+-    return interpolate_slice_from_coarse_neighbors(slice_index, coarse_level)
+-
+-def insert_slices_with_smallest_sample_distance():
+-    """Inserts additional slices with the smallest sample distance at external boundaries."""
+-    boundary_slices = compute_boundary_slices(brick.bounding_box, view_params)
+-    for s in boundary_slices:
+-        s.sample_distance = min_sample_distance
+-        active_clipping_polygons.append(s)
++# Standard graphics/math helpers [G]
++def decompose_into_bricks(data, size): ...
++def merge_octree_hierarchy(bricks, levels): ...
++def compute_lod_level(brick, params): ...
++def enforce_adjacent_level_constraint(bricks): ...
++def interpolate_from_coarse(pos, level): ...
++def generate_slices(bricks, params): ...
++def has_finier_neighbor(brick): ...
++def has_coarser_neighbor(brick): ...
++def clip_polygon(slice_geom, proj_geom): ...
++def render_polygon(poly, opacity): ...
++def reconstruct_slice(idx, level): ...
++def no_clipping_polygons_exist(): ...
++def insert_slices_with_smallest_sample_distance(): ...
++def sort_polygons_by_color_table(): ...
++def render_all_polygons(): ...
+ ```
+ 

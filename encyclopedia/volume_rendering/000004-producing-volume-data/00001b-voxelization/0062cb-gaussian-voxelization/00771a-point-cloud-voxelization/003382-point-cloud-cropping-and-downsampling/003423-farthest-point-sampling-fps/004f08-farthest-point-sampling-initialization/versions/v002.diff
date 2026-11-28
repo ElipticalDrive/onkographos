@@ -1,0 +1,163 @@
+--- v001.md
++++ v002.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Farthest Point Sampling Initialization is a method for selecting a subset of points from a point cloud such that they are maximally spread out in Euclidean space, ensuring maximum spatial coverage [S1][S2, unofficial]. It serves as the primary initialization step for primitive positions in neural rendering representations, replacing simpler nearest-neighbor heuristics to prevent the formation of overly small primitives [S1]. It builds on [Farthest Point Sampling (FPS)](7182-farthest-point-sampling-fps.md) by providing the specific iterative selection logic and CUDA-optimized implementation details required to generate the initial set of indices.
++Farthest Point Sampling Initialization is a method for selecting a subset of points from a point cloud such that they are maximally spread out in Euclidean space, ensuring maximum spatial coverage [S1][S2, unofficial]. It serves as the primary initialization step for primitive positions in neural rendering representations, replacing simpler nearest-neighbor heuristics to prevent the formation of overly small primitives [S1]. It implements the iterative selection logic and CUDA-optimized kernel calls required to generate the initial set of indices [S2, unofficial].
+ 
+ ## How it works
+@@ -12,5 +12,5 @@
+ - `offset`: An integer array of shape $(B+1)$ defining the start and end indices for $B$ batches in `xyz` [S2, unofficial].
+ - `new_offset`: An integer array of shape $(B+1)$ defining the output boundaries for the sampled points [S2, unofficial].
+-- `tmp`: A temporary float array of shape $(B, n_{max})$ initialized to a large value (e.g., $10^{10}$) to track minimum distances [S2, unofficial].
++- `tmp`: A temporary float array of shape $(B, n_{max})$ initialized to a large value ($10^{10}$) to track minimum distances [S2, unofficial].
+ 
+ **Outputs:**
+@@ -25,5 +25,5 @@
+ ### Algorithm Steps
+ 1. **Batch Processing Setup:**
+-   - Extract batch size $B$ and point count $N$.
++   - Extract batch size $B$ and point count $N$ [S2, unofficial].
+    - Reshape `xyz` to 2D $(B \times N, 3)$ and ensure it is contiguous [S2, unofficial].
+    - Compute cumulative offsets for input and output batches [S2, unofficial].
+@@ -33,11 +33,11 @@
+    - Initialize `tmp` with large values ($10^{10}$) to represent infinity [S2, unofficial].
+    - For each batch $b$:
+-     - Set the first sampled index `idx[start_m]` to the first point of the current batch (`start_n`) [S2, unofficial].
+-     - Set the reference point `old` to the coordinates of this first point [S2, unofficial].
++     - Initialize the first sampled index to the first point of the current batch (`idx[start_m] = start_n`) [S2, unofficial].
++     - Set the reference point `old` to the coordinates of this first point [G].
+ 
+ 3. **Iterative Selection (CUDA Kernel `furthestsampling_cuda_kernel`):**
+    - For each subsequent sample $j$ from `start_m + 1` to `end_m`:
+      - **Distance Update:**
+-       - Threads iterate over all points $k$ in the current batch.
++       - Threads iterate over all points $k$ in the current batch [S2, unofficial].
+        - Compute squared Euclidean distance $d$ between point $k$ and the last selected point `old` [S2, unofficial].
+        - Update `tmp[k]` to store the minimum distance from point $k$ to any selected point so far:
+@@ -46,10 +46,10 @@
+        - Each thread finds the local maximum `best` and corresponding index `besti` among its assigned points where `tmp[k] > best` [S2, unofficial].
+      - **Parallel Reduction:**
+-       - Use shared memory arrays `dists` and `dists_i` to combine local maxima into a global maximum.
++       - Use shared memory arrays `dists` and `dists_i` to combine local maxima into a global maximum [S2, unofficial].
+        - Perform a series of `__update` calls, halving the active thread count (e.g., 1024 $\to$ 512 $\to$ ... $\to$ 1) [S2, unofficial].
+        - The `__update` device function compares two entries in the shared memory arrays and keeps the one with the larger distance value [S2, unofficial].
+      - **Selection:**
+        - The index of the farthest point found (`dists_i[0]`) is stored in `idx[j]` [S2, unofficial].
+-       - Update `old` to the coordinates of the newly selected point for the next iteration [S2, unofficial].
++       - Update `old` to the coordinates of the newly selected point for the next iteration [G].
+ 
+ 4. **Completion:**
+@@ -72,21 +72,20 @@
+ ### Pseudocode
+ ```python
+-import torch
+ import math
+ 
+-def farthest_point_sampling_initialization(xyz: torch.Tensor, offset: torch.Tensor, new_offset: torch.Tensor) -> torch.Tensor:
++def farthest_point_sampling_initialization(xyz, offset, new_offset):
+     """
+     Implements Farthest Point Sampling Initialization for batched point clouds.
+     
+     Args:
+-        xyz: Tensor of shape (N, 3) containing point coordinates.
+-        offset: Tensor of shape (B+1) defining batch boundaries in xyz.
+-        new_offset: Tensor of shape (B+1) defining output boundaries.
++        xyz: List of lists or array of shape (N, 3) containing point coordinates.
++        offset: List of shape (B+1) defining batch boundaries in xyz.
++        new_offset: List of shape (B+1) defining output boundaries.
+         
+     Returns:
+-        idx: Tensor of shape (M) containing sampled indices.
++        idx: List of shape (M) containing sampled indices.
+     """
+-    B = offset.shape[0] - 1
+-    N = xyz.shape[0]
++    B = len(offset) - 1
++    N = len(xyz)
+     
+     # Determine max points in any batch
+@@ -99,13 +98,12 @@
+     # Initialize temporary distance array with large values
+     # Shape: (B, n_max)
+-    tmp = torch.full((B, n_max), 1e10, dtype=torch.float32, device=xyz.device)
++    tmp = [[1e10] * n_max for _ in range(B)]
+     
+     # Output index array
+     # Shape: (M) where M is sum of differences in new_offset
+     M = new_offset[B] - new_offset[0]
+-    idx = torch.zeros(M, dtype=torch.long, device=xyz.device)
++    idx = [0] * M
+     
+     # Process each batch
+-    current_idx_pos = 0
+     for b in range(B):
+         start_n = offset[b]
+@@ -116,39 +114,35 @@
+         n_batch = end_n - start_n
+         
+-        # Extract batch points
+-        xyz_batch = xyz[start_n:end_n] # Shape: (n_batch, 3)
+-        
+         # Initialize first point
+         idx[start_m] = start_n
+-        old_point = xyz_batch[0]
+-        
+-        # Initialize tmp for this batch
+-        # Note: In CUDA implementation, tmp is pre-allocated and passed. 
+-        # Here we simulate the logic for a single batch.
+-        # tmp[b, 0:n_batch] is already initialized to 1e10
++        old_point = xyz[start_n]
+         
+         # Iterative sampling
+         for j in range(start_m + 1, end_m):
+             # Compute distances from all points to the last selected point
+-            # old_point is xyz_batch[0] initially, then updates
+             # Compute squared Euclidean distance
+-            diff = xyz_batch - old_point.unsqueeze(0)
+-            dists = torch.sum(diff * diff, dim=1) # Shape: (n_batch)
++            dists = []
++            for k in range(n_batch):
++                p = xyz[start_n + k]
++                d = (p[0] - old_point[0])**2 + (p[1] - old_point[1])**2 + (p[2] - old_point[2])**2
++                dists.append(d)
+             
+             # Update tmp: min distance to any selected point
+-            # tmp[b, k] = min(dists[k], tmp[b, k])
+-            # We only need to update the current batch's tmp values
+-            current_tmp = tmp[b, :n_batch]
+-            tmp[b, :n_batch] = torch.minimum(dists, current_tmp)
++            for k in range(n_batch):
++                tmp[b][k] = min(dists[k], tmp[b][k])
+             
+             # Find the point with the maximum minimum distance
+-            best_dist, best_idx_local = torch.max(tmp[b, :n_batch], dim=0)
+-            best_idx_global = start_n + best_idx_local
++            best_dist = -1.0
++            best_idx_local = -1
++            for k in range(n_batch):
++                if tmp[b][k] > best_dist:
++                    best_dist = tmp[b][k]
++                    best_idx_local = k
+             
+             # Store the index
+-            idx[j] = best_idx_global
++            idx[j] = start_n + best_idx_local
+             
+             # Update old_point for next iteration
+-            old_point = xyz_batch[best_idx_local]
++            old_point = xyz[start_n + best_idx_local]
+             
+     return idx
+@@ -167,7 +161,7 @@
+ - **Memory Complexity:** $O(n_{max})$ for the temporary distance array `tmp` per batch, where $n_{max}$ is the maximum number of points in any batch [S2, unofficial].
+ - **Strengths:** Ensures uniform spatial coverage of the point cloud, which is critical for initializing neural rendering primitives to avoid artifacts and ensure stable optimization [S1].
+-- **Limitations:** Computationally expensive for large point clouds due to the iterative nature. The CUDA implementation requires careful management of shared memory and batch boundaries [S2, unofficial].
+-- **When to Use:** When initializing primitive positions for neural rendering or point cloud processing where uniform coverage is more important than speed.
+-- **When Not to Use:** When real-time performance is critical and approximate sampling is acceptable, or when the point cloud is extremely large and memory constraints prevent storing the full distance array.
++- **Limitations:** Computationally expensive for large point clouds due to the iterative nature [S2, unofficial].
++- **When to Use:** Not given in the sources.
++- **When Not to Use:** Not given in the sources.
+ 
+ ## Background

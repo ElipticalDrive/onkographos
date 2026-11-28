@@ -1,0 +1,135 @@
+--- v007.md
++++ v008.md
+@@ -4,30 +4,25 @@
+ 
+ ## Overview
+-Ambient Light Approximation simulates indirect sky illumination in participating media by integrating the entire sky hemisphere into a single upward-pointing light value, weighted by local cloud density to approximate shadowing [S1, S2, unofficial]. Unlike methods that compute full hemisphere integration or use complex spherical harmonics for ambient terms, this approach assumes the brightest ambient contribution comes from directly above, allowing the use of a single precalculated or runtime ray to determine occlusion [S1, unofficial]. It serves as a computationally efficient alternative to full multiple-scattering calculations, though it requires saturation adjustments to mitigate the resulting blue tint [S2, unofficial].
++Ambient Light Approximation simulates indirect sky illumination in participating media by integrating the sky hemisphere into a single upward-pointing light value, weighted by local cloud density to approximate shadowing [S1, S2, unofficial]. It assumes the brightest ambient contribution comes from directly above, allowing a single precalculated or runtime ray to determine occlusion instead of expensive hemisphere integration [S1, unofficial]. The method requires a saturation adjustment parameter to mitigate the blue tint caused by ignoring multiple scattering [S2, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Cloud density field (or profile), sample position, step size, transmissance, and a pre-integrated sky light color/value.
+-*   **Outputs:** Ambient light contribution added to the sample's total illumination.
++*   **Inputs:** Cloud density field (or profile), sample position, step size, transmissance, and a pre-integrated sky light color/value [S1, S2, unofficial].
++*   **Outputs:** Ambient light contribution added to the sample's total illumination [S1, unofficial].
+ 
+ **Data Structures:**
+-*   **Sky Light Value:** A single color vector or scalar value representing the integrated sky hemisphere. This can be a fixed color, a value from random sampling, or spherical harmonics coefficients [S1, unofficial].
+-*   **Ambient Density Map:** For static grids, the summed density of the upward ray can be precalculated and stored in a lower-resolution texture or grid [S1, unofficial]. If not precalculated, it is computed via a single ray march upwards [S1, unofficial].
+-*   **SkyLightLut / Ambient Probe:** In engine implementations (e.g., UE4), ambient color is sampled from a SkyLightLut generated via atmospheric scattering, or from a baked 3rd-order Spherical Harmonic (SH) Ambient Probe if atmospheric scattering is disabled [S2, unofficial].
++*   **Sky Light Value:** A single color vector or scalar value representing the integrated sky hemisphere, derived via random sampling, spherical harmonics, or a fixed representative color [S1, unofficial].
++*   **Ambient Density Map:** For static grids, the summed density of the upward ray is precalculated and stored in a lower-resolution texture or grid [S1, unofficial]. If not precalculated, it is computed via a single upward ray march [S1, unofficial].
++*   **SkyLightLut / Ambient Probe:** Engine implementations sample a `SkyLightLut` generated via atmospheric scattering for ambient color, or a baked 3rd-order Spherical Harmonic (SH) `Ambient Probe` if atmospheric scattering is disabled [S2, unofficial].
+ *   **Cloud Lut B Channel:** A texture channel storing altitude-based Ambient Occlusion (AO) values [S2, unofficial].
+ 
+ **Steps:**
+-1.  **Integrate Sky Light:** Combine the sky hemisphere into a single light value. This is done via random sampling, spherical harmonics, or by selecting a representative sky color [S1, unofficial].
+-2.  **Sample Ambient Color:** Retrieve the ambient light color. If atmospheric scattering is enabled, sample the `SkyLightLut` [S2, unofficial]. If disabled, sample the baked `Ambient Probe` (3rd-order SH) [S2, unofficial].
+-3.  **Calculate Upward Occlusion:** Determine the shadowing factor by shooting a single ray upwards from the current sample position.
+-    *   For static grids, this can be a texture lookup of a precalculated lower-resolution grid [S1, unofficial].
+-    *   Otherwise, compute the summed density along the upward ray [S1, unofficial].
+-4.  **Compute Ambient Weight:** Calculate the ambient contribution using the following logic:
++1.  **Integrate Sky Light:** Combine the sky hemisphere into a single light value using random sampling, spherical harmonics, or a fixed color [S1, unofficial].
++2.  **Sample Ambient Color:** Retrieve the ambient light color from the `SkyLightLut` or the baked `Ambient Probe` [S2, unofficial].
++3.  **Calculate Upward Occlusion:** Determine the shadowing factor by shooting a single ray upwards from the current sample position, or by looking up a precalculated density value [S1, unofficial].
++4.  **Compute Ambient Weight:** Calculate the ambient contribution using the formula:
+     $$ L_{ambient} = C_{sky} \cdot \text{weight}(p) \cdot e^{-\tau_{up}} $$
+-    Where:
+-    *   $C_{sky}$ is the sky light color/value [S1, S2, unofficial].
+-    *   $\text{weight}(p)$ is a falloff factor based on the sample's position within the cloud (e.g., `saturate(pow(profile, 0.5))`), ensuring edges receive more light than the center [S1, unofficial].
+-    *   $\tau_{up}$ is the optical depth (summed density) of the upward ray [S1, unofficial].
+-5.  **Apply Altitude AO (Optional/Engine Specific):** In some implementations, an additional AO factor is applied based on altitude. This starts at a user-defined value at the cloud bottom and increases to 1 as altitude increases, then is multiplied by the Cloud Lut B channel [S2, unofficial].
++    Where $C_{sky}$ is the sky light color/value [S1, S2, unofficial], $\text{weight}(p)$ is a position-based falloff factor (e.g., `saturate(pow(profile, 0.5))`) ensuring edges receive more light than the center [S1, unofficial], and $\tau_{up}$ is the optical depth (summed density) of the upward ray [S1, unofficial].
++5.  **Apply Altitude AO (Optional/Engine Specific):** In some implementations, an additional AO factor is applied based on altitude. This factor starts at a user-defined value at the cloud bottom, increases to 1 as altitude increases, and is multiplied by the Cloud Lut B channel [S2, unofficial].
+ 6.  **Accumulate:** Add the ambient light to the sample light, scaled by transmissance, sample density, and step size:
+     $$ L_{total} += L_{sample} \cdot T \cdot \rho \cdot \Delta s $$
+@@ -36,44 +31,26 @@
+ **Pseudocode:**
+ ```python
++import math
++
++def saturate(x):
++    return min(1.0, max(0.0, x))
++
+ def compute_ambient_light(sample_pos, cloud_profile, sky_color, upward_density_map):
+-    """
+-    Computes ambient light approximation for a volume sample.
+-    
+-    Args:
+-        sample_pos: Current 3D position in the cloud.
+-        cloud_profile: Normalized distance/profile value (0 at center, 1 at edge).
+-        sky_color: Pre-integrated sky light color (vec3).
+-        upward_density_map: Precomputed texture/grid of upward ray densities.
+-        
+-    Returns:
+-        Ambient light contribution (vec3).
+-    """
+-    # 1. Get sky light color (from LUT or SH probe if not passed directly)
+-    # In this simplified function, sky_color is assumed pre-integrated [S1, S2, unofficial]
+-    
+-    # 2. Calculate upward occlusion factor
+-    # Option A: Use precalculated map for static grids [S1, unofficial]
++    # 1. Get upward ray optical depth (precalculated lookup for static grids) [S1, unofficial]
+     tau_up = upward_density_map.sample(sample_pos)
+     
+-    # Option B: If not precalculated, march upward ray [S1, unofficial]
+-    # tau_up = 0.0
+-    # for i in range(num_up_steps):
+-    #     p = sample_pos + i * step_up * vec3(0, 1, 0)
+-    #     tau_up += density(p) * step_up
++    # 2. Calculate position-based weight (edges receive more light) [S1, unofficial]
++    weight = saturate(math.pow(cloud_profile, 0.5))
+     
+-    # 3. Calculate position-based weight (edges get more light) [S1, unofficial]
+-    # Using a modified profile for falloff
+-    weight = saturate(pow(cloud_profile, 0.5))
+-    
+-    # 4. Compute ambient contribution
+-    # Formula: SkyColor * Weight * Exp(-UpwardDensity) [S1, unofficial]
+-    ambient_light = sky_color * weight * exp(-tau_up)
++    # 3. Compute ambient contribution [S1, unofficial]
++    ambient_light = sky_color * weight * math.exp(-tau_up)
+     
+     return ambient_light
+ 
+-def integrate_ambient_into_sample(sample_light, transmissance, sample_density, step_size, ambient_light):
+-    """
+-    Adds ambient light to the current sample's total light.
+-    """
++def integrate_ambient(sample_light, transmissance, sample_density, step_size, ambient_light, altitude_factor):
++    # Apply altitude-based AO factor [S2, unofficial]
++    # Note: Exact interpolation from bottom value to 1 based on altitude is engine-specific [G]
++    ambient_light = ambient_light * altitude_factor
++    
+     # Scale ambient by transmissance, density, and step size [S1, unofficial]
+     sample_light += ambient_light * transmissance * sample_density * step_size
+@@ -82,7 +59,7 @@
+ 
+ **Parameters and Edge Cases:**
+-*   **Saturation Parameter:** An artist-adjustable parameter is often provided to reduce the saturation of the ambient light color to correct the blue tint caused by ignoring multiple scattering [S2, unofficial].
+-*   **Precision:** The upward ray data is naturally blurry, allowing for lower-resolution storage without significant visual loss [S1, unofficial].
+-*   **Multiple Scattering:** This method ignores multiple scattering in ambient light, which can cause clouds to appear unnaturally blue [S2, unofficial].
++*   **Saturation Parameter:** An artist-adjustable parameter is provided to reduce the saturation of the ambient light color, correcting the blue tint caused by ignoring multiple scattering [S2, unofficial].
++*   **Precision:** The upward ray data is naturally blurry, allowing it to be stored in a lower-resolution grid without significant visual loss [S1, unofficial].
++*   **Multiple Scattering:** The method ignores multiple scattering in ambient light, which causes clouds to appear unnaturally blue [S2, unofficial].
+ 
+ ## Subtopics
+@@ -92,14 +69,14 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(1)$ per sample if using a precalculated texture lookup for upward density [S1, unofficial]. If computing the upward ray at runtime, it is $O(N_{up})$ where $N_{up}$ is the number of steps in the upward march.
++*   **Time Complexity:** $O(1)$ per sample if using a precalculated texture lookup for upward density [S1, unofficial]. If computing the upward ray at runtime, it is $O(N_{up})$ where $N_{up}$ is the number of steps in the upward march [S1, unofficial].
+ *   **Memory Complexity:** $O(1)$ for the sky color value. $O(R_{low}^2)$ or $O(R_{low}^3)$ for the precalculated upward density map, where $R_{low}$ is the lower resolution grid size [S1, unofficial].
+ *   **Performance:** Very fast compared to full hemisphere integration or multiple scattering calculations [S1, unofficial]. The Bruneton-style variant adds a fixed cost (e.g., 0.60 ms for deferred lighting) but provides accurate sky fill for terrain [S3, unofficial].
+ *   **Strengths:** Computationally cheap; easy to implement; provides realistic shadowing for cloud undersides [S1, unofficial].
+-*   **Limitations:** Does not account for multiple scattering, leading to blue-tinted clouds [S2, unofficial]. Assumes the sky is the primary source of ambient light, which may not hold in enclosed or heavily occluded scenes.
++*   **Limitations:** Does not account for multiple scattering, leading to blue-tinted clouds [S2, unofficial]. Assumes the sky is the primary source of ambient light, which may not hold in enclosed or heavily occluded scenes [S1, unofficial].
+ *   **When to Use:** Real-time volume cloud rendering where performance is critical and full multiple scattering is too expensive [S1, S2, unofficial].
+-*   **When Not to Use:** When physically accurate multiple scattering is required, or in scenes where ground-reflected light is a significant source of ambient illumination.
++*   **When Not to Use:** When physically accurate multiple scattering is required, or in scenes where ground-reflected light is a significant source of ambient illumination [S2, unofficial].
+ 
+ ## Background
+-The method originated in real-time volumetric cloud rendering techniques, specifically popularized by Jack Tollenaar's work on volumetric clouds [S1, unofficial]. It was adopted in game engines like UE4 for atmospheric scattering and implemented in various game development contexts (e.g., by Leihuo/NetEase) to balance visual quality and performance [S2, unofficial]. The Bruneton-style irradiance table approach is derived from Eric Bruneton's work on precomputed atmospheric scattering [S3, unofficial].
++The method is used in real-time volumetric cloud rendering to balance visual quality and performance [S1, S2, unofficial]. It was adopted in game engines like UE4 for atmospheric scattering and implemented in various game development contexts to approximate shadowing efficiently [S2, unofficial]. The Bruneton-style irradiance table approach is derived from precomputed atmospheric scattering techniques [S3, unofficial].
+ 
+ ## Sources

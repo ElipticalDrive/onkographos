@@ -1,0 +1,87 @@
+# Brick Map Geometric Primitive
+
+Also called: BKM geometric primitive, brickmap geometry
+
+## Overview
+The Brick Map Geometric Primitive (BKM) is a method for rendering volumetric or surface data stored in a hierarchical brick map structure as a geometric primitive, treating each voxel as a splatted disk [S1]. It solves the problem of efficiently rendering large-scale point clouds, surfaces, and volumes by leveraging on-demand loading and level-of-detail (LOD) selection based on screen coverage [S1]. It differs from standard voxel splatting by integrating directly into the Reyes rendering architecture as a first-class geometric primitive, supporting features like motion blur, displacement, and ray tracing alongside rasterization [S1].
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** A brick map file (`.bkm`) containing hierarchical data bricks. Data attributes may include Position ($P$), Normal ($N$), Color ($C_s$), and Opacity ($O_s$) [S1].
+- **Output:** A rendered image where each brick voxel contributes a disk-shaped footprint to the screen buffer [S1].
+
+**Data Structures:**
+The brick map is a hierarchical structure of "bricks" (sub-volumes). The specific binary layout of the `.bkm` file is not defined in the sources [S1]. The hierarchy allows selection of the appropriate resolution level based on the primitive's screen size [S1].
+
+**Parameters:**
+- **ShadingRate:** Controls the granularity of rendering. Higher values reveal the disk nature of voxels; lower values provide smoother thin geometry representation at the cost of larger file sizes and more voxels [S1].
+- **Filename:** Path to the brick map file [S1].
+
+**Steps:**
+1. **Selection:** Determine the appropriate LOD level in the brick map based on the screen size of the primitive and the current shading rate [S1]. For ray tracing, select the level based on ray differential size [S1].
+2. **Loading:** Read the selected bricks on demand and cache them in a brick cache [S1].
+3. **Voxel Processing:** For each voxel in the loaded bricks:
+    a. **Geometry Definition:**
+        - If $P$ and $N$ data are baked into the brick map, use them to define the disk's position and orientation [S1].
+        - If $P$ and $N$ are absent, center the disk at the voxel's geometric center and orient it to face the camera [S1].
+    b. **Attribute Retrieval:**
+        - If $C_s$ (color) data exists in the brick map, use it; otherwise, use the global `Color` attribute [S1].
+        - If $O_s$ (opacity) data exists in the brick map, use it; otherwise, use the global `Opacity` attribute [S1] [G: Default opacity is 1.0 if not specified].
+    c. **Rasterization (Surface):** Render the voxel as a disk [S1].
+    d. **Compositing (Volume):** If the brick map represents volume data (sem-transparent voxels), alpha-composite the voxel's color and opacity into the buffer [S1].
+4. **Ray Tracing (Alternative Path):** If ray traced, march through semitransparent brick voxels along the ray, composing colors and opacities sequentially [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_brick_map_geometric_primitive(filename, shading_rate, camera):
+    # 1. Determine LOD based on screen size and shading rate
+    # [G: Implementation detail of LOD selection is not provided in sources]
+    level = select_lod(filename, shading_rate, camera)
+    
+    # 2. Load bricks on demand
+    bricks = load_bricks(filename, level)
+    
+    # 3. Process each voxel in the bricks
+    for voxel in bricks:
+        # Determine geometry
+        if voxel.has_position_and_normal():
+            pos = voxel.position
+            normal = voxel.normal
+        else:
+            pos = voxel.center
+            normal = camera.view_direction # Face camera
+            
+        # Determine attributes
+        if voxel.has_color():
+            color = voxel.color
+        else:
+            color = get_global_attribute("Color")
+            
+        if voxel.has_opacity():
+            opacity = voxel.opacity
+        else:
+            opacity = 1.0 # [G] Default opacity
+            
+        # Render as disk
+        # [G: Specific disk rasterization algorithm is not provided]
+        render_disk(pos, normal, color, opacity, shading_rate)
+```
+
+**Edge Cases and Pitfalls:**
+- **Silhouette Bloat:** Without baked $P$ and $N$ data, silhouettes are bloated because disks are centered at voxel centers and face the camera [S1].
+- **Thin Geometry:** For long, thin geometry (e.g., cylinders), points along the length are far apart. To cover gaps, disk radii must be large, causing significant silhouette bloat [S1]. The workaround is to reduce the `ShadingRate` during baking and rendering to create smaller brick voxels, increasing file size [S1].
+- **Motion Blur:** Deformation motion blur is not supported in PRMan 13.0.4 [S1].
+
+## Operating characteristics
+- **Time Complexity:** Depends on the number of visible bricks and the selected LOD level. On-demand loading reduces memory pressure but adds I/O overhead [S1].
+- **Memory Complexity:** Proportional to the number of loaded bricks in the cache [S1].
+- **Strengths:** Integrates with Reyes algorithm; supports motion blur, displacement, and ray tracing; efficient LOD management [S1].
+- **Limitations:** Silhouette quality degrades without baked normals; thin geometry requires high-resolution (small voxel) maps, increasing file size; deformation motion blur unsupported in early versions [S1].
+
+## Background
+The brick map was introduced as a 3D data structure for textures in PRMan 12.0 [S1]. In PRMan 13.0, it was extended to function as a geometric primitive on equal footing with quadrics, polygon meshes, NURBS patches, and subdivision surfaces [S1]. It is rendered using the Reyes algorithm, ray traced, motion blurred, shaded, and displacement mapped [S1].
+
+## Sources
+[S1] The Brick Map Geometric Primitive, https://smartcg.com/tech/cg/refs/man/RMS_1.0/rman/prman_technical_rendering/AppNotes/brickmapgprim.html, fetched 2026-10-28

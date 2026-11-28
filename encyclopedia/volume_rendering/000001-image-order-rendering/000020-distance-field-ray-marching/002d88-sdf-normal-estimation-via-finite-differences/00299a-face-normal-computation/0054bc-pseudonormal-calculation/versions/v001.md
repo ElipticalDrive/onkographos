@@ -1,0 +1,62 @@
+# Pseudonormal Calculation
+
+Also called: Weighted Sum of Normals
+
+## Overview
+Pseudonormal calculation is a technique used to ensure the accuracy of the sign in a mesh-based signed distance field (SDF) by computing a weighted sum of normals from incident faces [S1, unofficial]. It addresses the problem where the face normal of a single triangle breaks down or becomes unreliable near edges or vertices, which is critical when determining whether a query point lies inside or outside the mesh [S1, unofficial]. It differs from standard face normal computation by aggregating directional information from multiple surrounding triangles rather than relying on a single geometric face normal [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A query point $p$ in space, and the set of triangles incident to the Voronoi cell containing $p$ (or the mesh faces surrounding the closest feature).
+*   **Output:** A normalized vector $\mathbf{n}_{pseudo}$ representing the estimated surface normal at $p$.
+
+**Data Structures:**
+The method requires access to the geometric properties of the incident triangles: their vertices, edge vectors, and face normals.
+
+**Steps:**
+1.  Identify the set of triangles $\mathcal{T}$ that are incident to the Voronoi cell containing the query point $p$.
+2.  For each triangle $T_i \in \mathcal{T}$, compute its face normal $\mathbf{n}_i$.
+3.  Assign a weight $w_i$ to each triangle. The specific weighting scheme is not detailed in the primary source [S1, unofficial], but the method is defined as a "weighted sum" [S1, unofficial].
+4.  Compute the weighted sum of the normals:
+    $$ \mathbf{v} = \sum_{T_i \in \mathcal{T}} w_i \mathbf{n}_i $$
+5.  Normalize the result to obtain the pseudonormal:
+    $$ \mathbf{n}_{pseudo} = \frac{\mathbf{v}}{\|\mathbf{v}\|} $$
+6.  Use $\mathbf{n}_{pseudo}$ to determine the sign of the distance field or for shading purposes, providing higher accuracy than a single face normal near features [S1, unofficial].
+
+**Parameters:**
+*   Weights $w_i$: Not given in the sources for the general Pseudonormal definition [S1, unofficial].
+*   Normalization: Standard Euclidean norm.
+
+**Edge Cases and Pitfalls:**
+*   **Edge/Vertex Breakdown:** Near mesh edges or vertices, the face normal of a single triangle may be ambiguous or break down, leading to incorrect sign determination for the distance field [S1, unofficial]. The pseudonormal mitigates this by averaging contributions from adjacent faces [S1, unofficial].
+*   **Degenerate Triangles:** If incident triangles are degenerate (zero area), their normals are undefined. This requires handling or filtering of such elements [G].
+*   **Zero Vector Sum:** If the weighted sum of normals results in a zero vector (e.g., in highly symmetric or planar configurations with opposing normals), normalization fails. A fallback strategy (e.g., using the centroid normal or a default up vector) is required [G].
+
+## Subtopics
+
+### Curvature-adapted Voronoi barycenter weighting
+A specific weighting scheme used in variational implicit surface meshing to achieve curvature-adaptivity during mesh relaxation [S2]. It assigns individual weights to triangle elements inside a Voronoi cell based on the alignment of estimated normals [S2].
+*   **Definition:** A method to weight triangles adjacent to a Voronoi cell barycenter to improve approximation quality near sharp features [S2].
+*   **Formula:** The weight $\chi$ for two adjacent triangles is calculated as:
+    $$ \chi = \frac{9 - \mathbf{n}_p \cdot \mathbf{n}_1 + \mathbf{n}_2}{2 \gamma + \epsilon} $$
+    where:
+    *   $\mathbf{n}_p = -\frac{\nabla f(p)}{\|\nabla f(p)\|}$ is the estimated normal at the Voronoi cell barycenter $p$ on the implicit surface [S2].
+    *   $\mathbf{n}_1$ and $\mathbf{n}_2$ are the estimated normals on the adjacent triangles' barycenters, projected onto the surface using Newton's algorithm [S2].
+    *   $\gamma$ and $\epsilon$ are parameters defined in Equation 4 of the source [S2].
+*   **Implementation Detail:** Triangle centers of mass are used as estimation locations instead of circumcenters. This is because circumcenters of degenerate triangles are restricted to mesh edges where sharp features are located, leading to inconsistent normal estimation and inaccurate weights [S2].
+*   **Pitfall:** Using circumcenters for estimation causes issues with degenerate triangles and inconsistent normal estimation in the presence of sharp features, making the weight calculation inaccurate [S2].
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of incident triangles $N$, i.e., $O(N)$, as it requires iterating over all incident faces to sum their weighted normals [S1, unofficial].
+*   **Memory Complexity:** $O(N)$ to store the normals and weights of incident triangles [S1, unofficial].
+*   **Strengths:** Provides more accurate normal estimation near edges and vertices compared to single face normals, which is crucial for correct SDF sign determination [S1, unofficial].
+*   **Limitations:** Requires access to multiple incident triangles and their normals. The general weighting scheme is not specified in the primary source [S1, unofficial].
+*   **When to use:** When generating signed distance fields from triangle meshes and high accuracy near features is required [S1, unofficial].
+*   **When not to use:** When computational resources are extremely limited and approximate normals are acceptable, or when the mesh is purely planar and single face normals are sufficient.
+
+## Background
+The concept of the pseudonormal as a "weighted sum of the normals on incident faces" was discussed by Bærentzen and Aanæs [S1, unofficial]. They provided mathematical proof for its effectiveness in ensuring the accuracy of the mesh distance field sign in a 2002 paper [S1, unofficial]. The technique is cited in the context of generating SDFs from triangle meshes, addressing the limitations of using single face normals near geometric features [S1, unofficial].
+
+## Sources
+[S1] PDF Generating Signed Distance Fields from Triangle Meshes using Vulkan ..., https://williamwhitehouse.dev/assets/projects/2023/sdf-gen/gen-sdf-from-meshes-using-vulkan-compute-report.pdf, fetched 2026-10-30 (unofficial)
+[S2] Variational implicit surface meshing, https://doi.org/10.1016/j.cag.2009.03.016, fetched 2026-10-27

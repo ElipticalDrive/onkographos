@@ -1,0 +1,111 @@
+# Spatially Varying Gaussian Splatting (SVGS)
+
+Also called: Gaussian fragment shading, SVGS (Spatially Varying Gaussian Splatting)
+
+## Overview
+SVGS is a rendering technique that enhances the representational power of Gaussian primitives by defining color and opacity as spatially varying functions of the intersection point, rather than constant values per primitive [S1, S2]. It addresses the non-compactness of vanilla Gaussian Splatting (3DGS) and 2D Gaussian Splatting (2DGS), where a single primitive can only hold one view-dependent color and opacity, leading to ineffective representation for complex textures [S1]. Unlike its siblings, SVGS allows different rays intersecting the same primitive to yield different colors based on their intersection location [S1]. It builds on [2D Gaussian Splatting](6068-2d-gaussian-splatting.md) by utilizing 2D Gaussian surfels as the base primitive representation [S1].
+
+## How it works
+**Inputs:** Camera ray, Gaussian primitive parameters (position, covariance, base spherical harmonic coefficients), spatially varying function parameters (e.g., bilinear weights, kernel centers, or MLP weights).
+**Outputs:** Pixel color and opacity.
+
+**Data Structures:**
+*   **Gaussian Primitive:** Contains position $\mu$, covariance $\Sigma$, spherical harmonic coefficients for view-dependent color, and spatially varying function parameters. For 2DGS-based SVGS, the primitive is a 2D surfel.
+*   **Spatially Varying Function Parameters:** Varies by implementation (see Subtopics).
+    *   *Bilinear:* 4 weights per color channel and 1 weight for opacity.
+    *   *Movable Kernels:* $k$ kernel centers and weights.
+    *   *Tiny MLP:* Network weights for a 3-layer MLP.
+
+**Steps:**
+1.  **Rasterization and Intersection:** For each pixel $u$ in screen space, identify the Gaussian surfel $i$ it overlaps. Compute the intersection point $p$ between the camera ray and the Gaussian primitive [S1, S2].
+    *   For 2DGS-based SVGS, $p$ is defined in the local 2D coordinate system of the Gaussian surfel, with the Gaussian origin as $(0,0)$ and ellipse axes as coordinate axes [S1].
+    *   The coordinates $(u, v)$ in the tangent space of Gaussian surfel $i$ are computed using the inverse Jacobian of the mapping from image space to tangent space [S2]:
+        $$ (u, v) = S[:2] + J_{pr}^{-1}(u - u_i) + \delta $$
+        where $J_{pr}^{-1}$ is the inverse Jacobian, $u_i$ is the projected center, $S[:2]$ is the scale, and $\delta$ is an offset set to $0.1$ [S2].
+
+2.  **Compute Spatially Varying Attributes:** Calculate the spatially varying color function $F_c(p)$ and opacity function $F_\alpha(p)$ based on the intersection point $p$ and the primitive's specific function parameters [S1].
+
+3.  **Compute Final Color and Opacity:** Combine the view-dependent spherical harmonic color with the spatially varying component [S1]:
+    $$ c(p, d) = SH(d) + F_c(p) $$
+    $$ \alpha(p) = F_\alpha(p) $$
+    where $SH(d)$ is the view-dependent spherical harmonic color based on viewing direction $d$, and $p$ is the intersection point [S1].
+
+4.  **Normalization:** Apply a sigmoid activation to the final color and opacity to normalize them to a valid range during training and rendering [S1]. This allows intermediate $F_c$ and $F_\alpha$ values to be negative [S1].
+
+5.  **Alpha Blending:** Perform standard alpha blending with other overlapping primitives to obtain the final pixel radiance [S2].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def svgs_render(ray, gaussian_primitive, spatial_func_params):
+    # 1. Compute intersection point p in local tangent space
+    # For 2DGS-based SVGS
+    u_screen = ray.pixel_center
+    J_inv = gaussian_primitive.inverse_jacobian
+    S = gaussian_primitive.scale
+    u_i = gaussian_primitive.projected_center
+    delta = 0.1
+    
+    # Compute local coordinates (u, v)
+    # Note: S[:2] assumes S is a vector/tensor containing scale components
+    u_local = S[:2] + J_inv @ (u_screen - u_i) + delta
+    p = u_local # p = (u, v)
+    
+    # 2. Compute spatially varying functions Fc(p) and F_alpha(p)
+    # Implementation depends on the specific spatial function variant
+    # Example for Bilinear Interpolation:
+    # Fc, F_alpha = bilinear_interpolate(p, spatial_func_params)
+    
+    # Example for Tiny MLP:
+    # Fc, F_alpha = tiny_mlp_forward(p, spatial_func_params)
+    
+    # Example for Movable Kernels:
+    # Fc, F_alpha = movable_kernels_forward(p, spatial_func_params)
+    
+    # 3. Compute final color and opacity
+    SH_color = evaluate_spherical_harmonics(gaussian_primitive.sh_coeffs, ray.direction)
+    
+    final_color = SH_color + Fc
+    final_alpha = F_alpha
+    
+    # 4. Normalize via sigmoid
+    final_color = sigmoid(final_color)
+    final_alpha = sigmoid(final_alpha)
+    
+    return final_color, final_alpha
+```
+
+**Edge Cases and Pitfalls:**
+*   **Negative Values:** $F_c$ and $F_\alpha$ can take negative values. This is permissible because they are added to the spherical harmonic color and normalized by sigmoid [S1].
+*   **Intersection Calculation:** The accuracy of $p$ depends on the correct computation of the inverse Jacobian and the offset $\delta$ [S2].
+*   **Primitive Type:** The default implementation uses 2D Gaussian surfels, but the method can be extended to 3D Gaussians by treating them as ellipsoids [S1].
+
+## Subtopics
+
+### Bilinear Interpolation
+A spatially varying function implementation using bilinear interpolation over the Gaussian surfel. It is the most compact variant in terms of parameters. It sets itself apart from Movable Kernels and Tiny MLPs by using fixed basis functions (corners of the surfel) rather than learnable centers or neural networks [S1].
+
+### Movable Kernels
+SVGS with Movable Kernels is a spatially varying function implementation within the SVGS framework that defines $k$ movable exponential kernels located on a Gaussian surfel, weighted by their distance to the intersection point [S1]. It enhances scene representation by allowing sub-kernels to adapt their positions during training, providing higher flexibility and stronger expressiveness than fixed-basis methods [S1]. It sets itself apart from its sibling [Bilinear Interpolation](8729-spatially-varying-gaussian-splatting-svgs.md#bilinear-interpolation) by replacing fixed quadrant weights with learnable, gradient-driven kernel centers, and from [Tiny MLPs](8729-spatially-varying-gaussian-splatting-svgs.md#tiny-mlps) by using a compact parametric form rather than a neural network [S1].
+
+### Tiny MLPs (SVGS Variant)
+A spatially varying function implementation using a small multilayer perceptron (MLP) on each Gaussian surfel to map local coordinates to color and opacity [S1]. The MLP accepts a two-dimensional input $p=(u,v)$ and outputs the color and opacity at that location [S1]. The Tiny MLP approach has significantly more parameters than Bilinear Interpolation or Movable Kernels, as shown in Fig. 5, but performs well when Gaussian primitive numbers are limited [S1].
+
+### [Height-field Gaussian Primitive](21270-height-field-gaussian-primitive.md)
+The Height-field Gaussian Primitive is a curved local chart that combines the thin support of a 2D surfel with bending capability via a Gaussian-basis height field. It stores spatially varying appearance (color and opacity) on the same local domain, allowing a small number of patches to represent both smooth geometry and detailed texture. It sets itself apart from vanilla Gaussian Splatting by providing an explicit surface intersection and camera-linear depth, rather than volumetric accumulation through an ellipsoid.
+
+## Operating characteristics
+*   **Time Complexity:** Rendering time increases slightly compared to vanilla 2DGS/3DGS due to the computation of the spatially varying function $F_c(p)$ and $F_\alpha(p)$ for each intersection point [S1]. The complexity depends on the chosen spatial function (e.g., MLP inference vs. bilinear interpolation) [S1].
+*   **Memory Complexity:** Memory usage increases due to the storage of spatially varying function parameters. Tiny MLPs require significantly more parameters per primitive than Bilinear Interpolation or Movable Kernels [S1].
+*   **Performance:** SVGS outperforms the baseline 2DGS in novel view synthesis across all three spatially varying function designs [S1]. SVGS with movable kernels achieves the best results on multiple datasets, demonstrating strong potential for representing complex textures on relatively flat geometries [S1].
+*   **Strengths:** Improved representation of complex textures and geometry with fewer primitives compared to vanilla Gaussian Splatting [S1].
+*   **Limitations:** Increased parameter count and computational overhead per primitive compared to vanilla methods [S1].
+*   **When to use:** When scenes combine complex textures with relatively simple geometry, or when high-fidelity texture reconstruction is required with limited primitive counts [S1].
+
+## Background
+SVGS was introduced to address the limitations of vanilla Gaussian Splatting, which uses constant color and opacity per primitive, leading to non-compact representations [S1]. The method was developed to improve novel view synthesis and geometric reconstruction by allowing spatially varying attributes within a single primitive [S1]. It builds on the foundation of 2D Gaussian Splatting (2DGS) [S1]. The concept of spatially varying Gaussian splatting for inverse rendering (SVG-IR) was also explored, introducing Gaussian vertex and fragment shading analogous to traditional triangle pipelines [S2].
+
+## Sources
+[S1] SVGS: Enhancing Gaussian Splatting Using Primitives With Spatially Varying Colors., https://doi.org/10.1109/tvcg.2026.3690745, fetched 2026-10-26
+[S2] SVG-IR: Spatially-Varying Gaussian Splatting for Inverse Rendering, https://doi.org/10.1109/cvpr52734.2025.01505, fetched 2026-10-29

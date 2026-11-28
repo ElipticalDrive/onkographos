@@ -1,0 +1,128 @@
+# Hardware-assisted Volume Deformation
+
+Also called: Deformed Volume Rendering via Inverse Deformation in Fragment Shaders, Shader-based volume warping
+
+## Overview
+Hardware-assisted volume deformation renders deformed volumes by integrating the deformation process directly into the rendering pipeline, rather than pre-computing the deformed volume data [S1]. It solves the performance bottleneck of 3D resampling required for non-linear geometric transformations, enabling interactive visualization of dynamic deformations [S1]. Unlike methods that pre-compute the deformed volume (e.g., [LGL95]), this approach allows for dynamic deformations at interactive rates because the deformation is computed per-pixel in the fragment shader [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Undeformed volume data $v$ stored in a 3D texture; ray origin $o$, ray direction $d$, step size $\Delta t$; inverse deformation function $u = d^{-1}$, where $d$ maps undeformed object space to deformed object space [S1].
+*   **Output:** Rendered image with deformed geometry [S1].
+
+**Data Structures:**
+*   **3D Texture:** Stores the scalar field of the undeformed volume $v$. Coordinates in this texture correspond to undeformed object space (texture space) [S1].
+*   **Proxy Geometry:** A series of polygons aligned with the image plane (view-aligned planes) used to drive the ray marching loop [S1].
+*   **Texture Coordinates:** Assigned to each polygon fragment representing the deformed object-space coordinates for that step [S1].
+
+**Numbered Steps:**
+1.  Place the undeformed volume data $v$ into a 3D texture [S1].
+2.  Draw a series of polygons aligned with the image plane as proxy geometry, spaced uniformly in view space [S1].
+3.  Assign texture coordinates to each polygon representing the deformed object-space coordinates for the corresponding ray step [S1].
+4.  In the fragment shader, for each fragment, initialize accumulated color and opacity to zero [G].
+5.  For each step along the ray:
+    a. Compute the deformed position $p_{\text{def}} = o + d \cdot t$ [G].
+    b. Apply the inverse deformation function $u$ to $p_{\text{def}}$ to obtain undeformed object-space coordinates $p_{\text{unde}} = u(p_{\text{def}})$ [S1].
+    c. Sample the 3D texture at $p_{\text{unde}}$ to get the scalar value $s$ [S1].
+    d. Apply the transfer function to $s$ to compute color $c$ and opacity $\alpha$ [S1].
+    e. Composite front-to-back: $C'_{\text{acc}} = C'_{\text{acc}} + (1 - \alpha'_{\text{acc}}) \alpha c$, $\alpha'_{\text{acc}} = \alpha'_{\text{acc}} + (1 - \alpha'_{\text{acc}}) \alpha$ [G].
+    f. If $\alpha'_{\text{acc}}$ exceeds a threshold (typically 0.95 or 1.0), terminate the loop early [G].
+6.  Return the accumulated color and opacity [G].
+
+**Formulas:**
+The deformed volume $v'$ is defined as the composition of the undeformed volume $v$ and the inverse deformation function $u$:
+$$
+v'(x, y, z) = (v \circ u)(x, y, z)
+$$
+where $u = d^{-1}$ and $d$ is the deformation mapping from undeformed to deformed object space [S1].
+The front-to-back compositing equations update the accumulated color $C'$ and opacity $\alpha'$ at each step $i$:
+$$
+C'_{i} = C'_{i-1} + (1 - \alpha'_{i-1}) \alpha_i C_i
+$$
+$$
+\alpha'_{i} = \alpha'_{i-1} + (1 - \alpha'_{i-1}) \alpha_i
+$$
+[G]
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_deformed_volume(ray_origin, ray_direction, step_size, max_steps, 
+                           volume_texture, inv_deform, transfer_func, threshold=0.95):
+    # Initialize accumulation buffers
+    acc_color = [0.0, 0.0, 0.0, 0.0]
+    acc_alpha = 0.0
+    
+    # Ray marching loop
+    for t in range(max_steps):
+        # 1. Compute deformed position in object space
+        pos_deformed = [ray_origin[i] + ray_direction[i] * (t * step_size) for i in range(3)]
+        
+        # 2. Apply inverse deformation to get undeformed (texture) coordinates
+        pos_undeformed = inv_deform(pos_deformed)
+        
+        # 3. Sample undeformed volume texture
+        scalar = sample_3d_texture(volume_texture, pos_undeformed)
+        
+        # 4. Compute color and opacity via transfer function
+        color, alpha = transfer_func(scalar)
+        
+        # 5. Front-to-back compositing
+        weight = (1.0 - acc_alpha) * alpha
+        acc_color[0] += weight * color[0]
+        acc_color[1] += weight * color[1]
+        acc_color[2] += weight * color[2]
+        acc_color[3] += weight
+        acc_alpha += weight
+        
+        # 6. Early ray termination
+        if acc_alpha >= threshold:
+            break
+            
+    return acc_color, acc_alpha
+
+def sample_3d_texture(tex, coords):
+    # Standard trilinear interpolation clamped to texture bounds
+    # Returns scalar value at coords
+    pass
+
+def transfer_func(scalar):
+    # Maps scalar to (color, alpha)
+    # Returns (color, alpha)
+    pass
+```
+
+**Parameters:**
+*   **Inverse Deformation Function ($u$):** The mapping from deformed object space to undeformed object space [S1]. If only the forward deformation $d$ is provided, it must be inverted using scattered data interpolation [S1].
+*   **Threshold:** Early termination opacity threshold, typically 0.95 or 1.0 [G].
+
+**Edge Cases and Pitfalls:**
+*   **Aliasing:** Point sampling in the volume texture can lead to aliasing. To correctly filter the warp, the kernel radius must be determined for the spacing of the sampling in texture space, not object space [S1].
+*   **Resource Limits:** Fragment programs have limited resources, making some complex deformation functions impractical to implement directly in the shader [S1].
+*   **Gradient Calculation:** Shading requires the gradient of the deformed volume, which presents a hurdle for this method [S1].
+*   **Boundary Conditions:** Deformed coordinates may map outside the undeformed volume bounds; texture sampling must clamp or handle out-of-bounds coordinates gracefully [G].
+
+## Subtopics
+
+### Ray Deformation
+A technique where volume deforming and volume rendering are incorporated into a single process [S2, abstract only, unofficial]. It combines Free Form Deformation (FFD) and inverse ray deformation [S2, abstract only, unofficial]. Unlike standard inverse deformation which samples points, this method handles different lengths of sampled intervals in polyline segments that approximate the deformed ray, often using preintegration techniques for opacity and shading [S2, abstract only, unofficial].
+
+### Block-based Volume Deformation with Gap Filling
+A method where the volume is subdivided by hand into logical blocks [S3, book]. Each block is transformed and copied to a new location, then rendered via 3D texture-mapping hardware [S3, book]. The resulting images are composited in back-to-front order [S3, book]. Gaps that develop between displaced blocks (e.g., at bending knee joints) are filled by interpolating additional boxes in these areas along the midplane of the crack [S3, book]. This approach enables near-interactive volume deformation [S3, book].
+
+## Operating characteristics
+*   **Time Complexity:** Depends on the complexity of the inverse deformation function $u$ evaluated per fragment and the number of ray steps [S1].
+*   **Memory Complexity:** Requires storage for the undeformed volume in 3D texture memory [S1].
+*   **Strengths:** Allows for dynamic deformations at interactive rates without pre-computing the deformed volume [S1].
+*   **Limitations:** Fragment program resource limits may restrict the complexity of deformation functions [S1]. Performance issues may arise due to the large number of fragments requiring deformation computation [S1].
+*   **When to use:** Interactive non-linear registration, real-time volume animation, and animated deformation interaction techniques [S1].
+*   **When not to use:** When the deformation function is too complex for the fragment shader's instruction limit [S1].
+
+## Background
+Applying non-linear geometric transformations to volume data is common in science and medicine for correcting imaging deformations, aligning objects, and modeling for animation [S1]. Traditionally, this required computationally expensive 3D resampling, precluding dynamic deformations [S1]. This method was introduced to leverage programmable graphics hardware for integrating spatial transformations into interactive volume visualization tools [S1].
+
+## Sources
+[S1] Integrating Dynamic Deformations into Interactive Volume Visualization, https://doi.org/10.2312/vissym.eurovis06.219-226, fetched 2026-10-31
+[S2] Real Time Rendering of Deformable and Semi-Transparent Objects by Volume Rendering, https://openalex.org/W2286863887, fetched 2026-10-26 (abstract only, unofficial)
+[S3] PDF Volume Visualization and Volume Graphics, https://www3.cs.stonybrook.edu/~mueller/teaching/cse332/volvisChapter.pdf, fetched 2026-10-28 (book)

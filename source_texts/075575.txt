@@ -1,0 +1,221 @@
+subsurface scattering は人の肌を表現したり半透明な物体を表現できたりと, CG の中でも人気でもあり重要でもある表現のひとつです. 背景 subsurface scattering については, dipole 近似(Jensen et al. 200...
+
+2018 年, ナウでヤングな path tracing based subsurface scattering を実装する #RayTracing - Qiita
+8
+Go to list of users who liked
+8
+Share on X(Twitter)
+Share on Facebook
+Add to Hatena Bookmark
+more_horiz
+Delete article
+close
+Deleted articles cannot be recovered.
+Draft of this article would be also deleted.
+Are you sure you want to delete this article?
+CancelDeletedelete
+info
+More than 5 years have passed since last update.
+@syoyo(Syoyo Fujita)
+2018 年, ナウでヤングな path tracing based subsurface scattering を実装する
+RayTracing
+sss
+subsurface
+8
+Last updated at 2019-11-21Posted at 2019-11-18
+subsurface scattering は人の肌を表現したり半透明な物体を表現できたりと, CG の中でも人気でもあり重要でもある表現のひとつです.
+背景
+subsurface scattering については, dipole 近似(Jensen et al. 2001) からはじまり, d'Eon らによる Quantized diffusion モデルなど, 各種近似手法が提案されてきましたが, 昨今(2015 年以降くらい)ではレイトレーシングアルゴリズムと計算機性能の発展により, 基本モンテカルロ法(力技)で volumetric path tracing により subsurface scattering を行うのが主流になってきた感があります.
+既存のレンダラーにも搭載され, たとえば Blender cycles や Maya/Arnold の subsurface アルゴリズムで random walk と選択できるものがそれに対応します.
+(PBRT-v3 は volpath integrator が相当)
+実務的にパストレーシングで subsurface scattering を行うのは Approximate Reflectance Profiles for Efficient Subsurface Scattering, Extending the Disney BRDF to a BSDF with Integrated Subsurface Scattering に始まり, Practical and Controllable Subsurface Scattering for Production Path Tracing も Path Traced Subsurface Scattering using Anisotropic Phase
+Functions and Non-Exponential Free Flights もが提案されてきました.
+これら文献については, 背景をいろいろ省いているので, まずは PBRT-v3 や, Production Volume Rendering あたりで volumetric path tracing(Production Volume Rendering では, コースノートと製本版では内容が違うので注意. 製本版のほうがいくらか詳細が書かれています) を学んでおく必要があります.
+実装の上では以下の stackexchange の記事も参考になります.
+PBRT-v3 については, 2018 年 10 月 15 日, 製本版が web で無償公開になりました. http://www.pbr-book.org/
+BSDF のデザインは Disney principle BSDF を参考にします.
+path tracing based subsurface scattering の利点
+dipole 近似などは, multiple scattering(多重散乱)経路(表面下で 2 回以上散乱)のみをモデル化しているため, zero scatter(表面化散乱しない通常の BRDF 反射) と singgle scatter(表面下で 1 回だけ散乱し, 表面に戻ってくる経路)は別途レイトレーシング法なりラスタライズ法などで求める必要がありました.
+path tracing ベースであれば,
+zero-scatter
+single scatter
+multiple scattering
+をすべてレイトレーシングの枠組みで統一して扱うことができて実装がスッキリするという利点があります.
+(細かいところでは, 最後のほうで述べる課題のところでいろいろややこしいものが出てきはするのですが)
+実装してみる
+Cycles の $cycles/src/kernel/kernel_subsurface.h が参考になります.
+ポリゴン物体のレイトレーシングは, NanoRT や Intel Embree, NVIDIA OptiX, AMD RadeonRay など各社レイトレーシングカーネルライブラリがありますので, これらを使うことで比較的かんたんにレイトレーシング部分はセットアップできます.
+今回は CPU 実装でいろいろな環境で動くようにしたかったため, NanoRT or Intel Embree を使うことにしました.
+反射率から albedo の算出
+T.B.W.
+albedo から散乱パラメータの算出
+subsurface scattering では, 見た目の色(つまり diffuse color, diffuse texture)は, 散乱パラメータと対応しません. sigma_t, sigma_s を非直感的に指定しないといけないのですが, これは長らくアーティストや lookdev を悩ませてきたと思います.
+Chiang et al. 2016 1 の論文では, この問題を解決すべく見た目の色(albedo)から散乱パラメータを算出してコントールしやすいようにしています.
+albedo の値をいろいろ変えてモンテカルロシミュレーションし, フィッティングにより albedo, scattering distance から sigma_s, sigma_t を導出しています.
+(このコードほしい... or 優秀な sss 若人さまに実装お仕事発注したい)
+フィッティングにより求まった係数を用いて, albedo から sss パラメータの算出は cycles で以下のようになっています.
+```
+// from Cycles
+/* Random walk subsurface scattering.
+ *
+ * "Practical and Controllable Subsurface Scattering for Production Path
+ *  Tracing". Matt Jen-Yuan Chiang, Peter Kutz, Brent Burley. SIGGRAPH 2016. */
+
+ccl_device void subsurface_random_walk_remap(
+        const float A,
+        const float d,
+        float *sigma_t,
+        float *sigma_s)
+{
+        /* Compute attenuation and scattering coefficients from albedo. */
+        const float a = 1.0f - expf(A * (-5.09406f + A * (2.61188f - A * 4.31805f)));
+        const float s = 1.9f - A + 3.5f * sqr(A - 0.8f);
+
+        *sigma_t = 1.0f / fmaxf(d * s, 1e-16f);
+        *sigma_s = *sigma_t * a;
+}
+```
+さらに, Wrenninge et al. 2016 2 の論文では反射率と異方性パラメータも考慮して, albedo を算出する式を求めています.
+```
+float AlbedoFromReflectanceAnisotropic(const float r, const float g)
+{
+  const float s = 4.09712f + 4.20863f * r - std::sqrt(9.59271f + r * (41.6808f + 17.7126f * r));
+  const float s2 = s * s;
+  return (1.0f - s2) / (1.0f - g * s2);
+}
+```
+アルゴリズム
+まず, primary ray がサーフェスにあたったら, BTDF を計算します.
+Blender cycles では, 面の内側に向く diffuse BRDF になっていますので, 通常の diffuse BRDF で cosine importance sampling して内部のレイの方向を求めます.
+追跡する波長(カラーチャネル)を MIS(Balance heuristic) でサンプリングします(Blender cycles のコード参照).
+```
+// from Cycles
+ccl_device int kernel_volume_sample_channel(float3 albedo, float3 throughput, float rand, float3 *pdf)
+{
+        /* Sample color channel proportional to throughput and single scattering
+         * albedo, to significantly reduce noise with many bounce, following:
+         *
+         * "Practical and Controllable Subsurface Scattering for Production Path
+         *  Tracing". Matt Jen-Yuan Chiang, Peter Kutz, Brent Burley. SIGGRAPH 2016. */
+        float3 weights = fabs(throughput * albedo);
+        float sum_weights = weights.x + weights.y + weights.z;
+
+        if(sum_weights > 0.0f) {
+                *pdf = weights/sum_weights;
+        }
+        else {
+                *pdf = make_float3(1.0f/3.0f, 1.0f/3.0f, 1.0f/3.0f);
+        }
+
+        if(rand < pdf->x) {
+                return 0;
+        }
+        else if(rand < pdf->x + pdf->y) {
+                return 1;
+        }
+        else {
+                return 2;
+        }
+}
+```
+ちなみに, distance sampling で, どの波長を選択するかについてはいくらかやりかたがあります. たとえば Mitsuba では 4 種類あります(medium/homogeneous.cpp の sampleDistance 参照)
+```
+// From Mitsuba
+    /**
+     * This class supports the following sampling strategies for choosing
+     * a suitable scattering location when sampling the RTE
+     */
+    enum ESamplingStrategy {
+        EBalance,  /// Exponential distrib.; pick a random channel each time
+        ESingle,   /// Exponential distrib.; pick a specified channel
+        EManual,   /// Exponential distrib.; manually specify the falloff
+        EMaximum   /// Maximum-of-exponential distribution
+    };
+```
+BSDF 定義
+subsurface scattering の実装はできましたが, 他の反射や透過を含めた反射モデルのデザインをどうするかどうするかはまた別の問題としてあります.
+これも昨今流行りの Uber shader である Disney principled BSDF に subsurface 項を追加したモデルが主流な感があります.
+(Maya/Arnold のマテリアル定義はこれに沿っている感がありますね)
+Extending the Disney BRDF to a BSDF with Integrated Subsurface Scattering (Brent Burley)
+https://blog.selfshadow.com/publications/s2015-shading-course
+Blender では, 2.79beta 時点では, Principled BSDF シェーダで同様のモデル定義がなされていますが, subsurface パラメータ dmfp(diffuse mean-free path: scale, radius) の動作が Subsurface Scattering シェーダと異なるようなので注意ください. (Principled BSDF のほうでは, 散乱係数を albedo から算出していない? かも.)
+また, OSL(OpenShadingLanguage) の場合は Fresnel のノード定義が別(SSS shader node の外でフレネル項を計算)になっているのでややこしくなります.
+Arnold aiStandardSurface と完全一致しているわけではなさそうであるが, Autodesk Standard Surface というのが公開されています.
+我々が調べた限りでは, パラメータ定義やレイヤーごとの減衰の順序は aiStandardSurface と同じようです. ただし sss 自体の実装は含まれていません(OSL 実装では, シェーダのネットワークが記述されているだけで, sss 部分については OSL subsurface() 関数を呼んでいるだけです. そして OSL test render には sss の実装は含まれていない)
+より効率的なサンプリング
+ランダムウォークはシャープな形状をきちんと考慮できて楽ではありますが, やはりそのままではいくらかレンダリング効率はわるくノイズがでやすいです.
+zero-variance
+特に人の肌などでは, だいたいは表面下で散乱した光はまた外部に出て行くため, なるべく物体表面に向かってサンプリングを行うとう戦略を撮りたい
+あとは光源分布が既知であれば, 光源方向を重点的にサンプルするなど 2
+多くは MIS でうまく対処できるかと思いますが, 実装上はいくらかややこしくなってしまいますね.
+appleseed renderer にいくらか実装がありますので, 参考にしてみるとよいでしょう
+また, 昨今流行りの機械学習の手法を使い, 微分パストレーサーや CNN/RNN や reinforcement learning と組み合わせるという手もあるかもしれません(e.g. Deep Scattering: Rendering Atmospheric Clouds with Radiance-Predicting Neural Networks https://arxiv.org/abs/1709.05418)
+課題
+Arnold 的な実装だと, exit point の albedo は考慮されていない. これはこれで正しいのかもはしれない...?
+表面でフレネル反射がある場合や, glossy な BTDF の場合に, 太陽光などの平行光源ををうまく追跡できない.
+(これは SNEE(Subdivision Next-Event Estimation for Path-Traced Subsurface Scattering) や屈折に特化した manifold next event estimation https://dl.acm.org/citation.cfm?id=2858844 などでいくらか解決できるが実装がややこしくなる)
+透過物体と光源の間に, 遮蔽物や, 別の透過物体があると, 真面目に対処しようと考えるとめんどい(透過を考慮したレイの追跡を行う, sss material にヒットしたごとに random walk する必要がある).
+PBRT, mitsuba ではそのあたりきちんと処理している雰囲気ありますが, とくに GPU で volumetric path tracing で遮蔽をきちんと考慮した subsurface scattering をやろうとなると. multi-hit ray traversal が必要になってきたりと面倒です.
+形状定義の問題
+形状は watertight で, 厚みがあり穴などがきちんとふさがっている必要があります.
+また, subsurface オブジェクトが別々(異なる sss マテリアル設定がされたオブジェクト)になっていると正しく計算ができないことがあります.
+の SSS between objects にその例を見て取れます.
+効率化
+正確な計算を行うのであれば, diffuse 間接光(or subsurface scattering してサーフェスに戻ったレイ)が subsurface material にヒットした場合でも subsurface scattering 計算をする必要がありますが, これでは計算量が多くなってしまいます.
+たとえば, Blender/Cycles では, 経路のフラッグにPATH_RAY_DIFFFUSE_ANCESTOR を立てることにより, 一度 diffuse 反射しているレイの経路では subsurface 処理を行わないようにしています.
+ただし, これだと形状によってはうまく sss 効果(たとえば皮膚や milk で青っぽくなる現象)が出せないときもあります.
+正しい実装
+物理ベースレンダリングでは, 物理的に正しいというのが重要になります.
+しかし, 理論や数式通りに沿った正しい実装はなかなか困難なものがあります.
+Cycles など既存レンダラーでも動作やノイズの出方がまちまちで, なにが実装上正しいふるまいなのかというのは手探りに近いものがあり, 時間だけが溶けていきやすいです.
+単純な級やキューブで, single scatter だけであれば解析解を出してそれで比較するということもできますが, 形状が複雑だったり multiple scattering になると解析解は出せなかったりするのでなやましいです.
+NanoRT ベースで, 優秀な subsurface scattering 若人さまがだいたい正しい(Cycles, Arnold の結果にほぼ近い)実装を作成してくれました. ありがたいですね. コードは整理して近いうちに公開したいところです.
+まだ実装上間違いはあるかと思いますが, self-contained で小さめで GUI つきでそこそこインタラクティブに結果を見られるサンプルは他にない気がするので, 公開することで, 参考にして(ついでにデバッグ, 検算も)くれる人が多くでてくるといいですね.
+将来的には, 数学に詳しいひとを巻き込んでいろいろ解決するスキームを確立したいところです.
+(もしくは人工知能でよろしく解決してくれないかしらん)
+ちなみに, 解析解ベースによる検証で, 以前 PBRT-v3 の volpath で bounce の計算が間違っているのを見つけました.
+正しいシミュレーション
+をベースに検証環境を作るとよさそうです.
+2 あたりでは, omlc をベースに検証をしていたような?
+今後の展望
+最終的に出てくるアルゴリズムはそれほど複雑ではないのと, レイトレーシングの枠組みの中で実現できるので, GPU レイトレーサーと denoiser と組み合わせて, リアルタイムで人物の肌表現を path tracing based subsurface scattering でできる日も近いですね.
+TODO
+importance sampling, PDF の計算の検算を行う
+equiangular sampling も考慮してみる
+heterogeneous なマテリアルに対応する
+SNEE(Subdivision Next-Event Estimation for Path-Traced Subsurface Scattering http://drz.disneyresearch.com/~jnovak/publications/SNEE/index.html) を試したい
+より理論的に正しい実装をして, 微分可能パストレーサーと組み合わせ, 人物の肌解析, 食物の散乱解析(鮮度, 旨味, 異物判定, 画像からの散乱パラメータ推定などに利用できる)などに応用していきたい.
+優秀なレイトレーシング若人さまが, 人類史上最速でナウでヤングな path tracing based subsurface scattering 若人さまに昇華なされるスキームを確立する旅に出たい
+References
+Production Volume Rendering
+Practical and Controllable Subsurface Scattering for Production Path Tracing
+Extending the Disney BRDF to a BSDF with Integrated Subsurface Scattering https://blog.selfshadow.com/publications/s2015-shading-course
+https://renderman.pixar.com/photorealistic-head
+6. Blender cycles
+Applesheed renderer
+Rendering the Moana Island Scene Part 1: Implementing the Disney BSDF https://schuttejoe.github.io/post/disneybsdf/
+Approximate Reflectance Profiles for Efficient Subsurface Scattering, Per H. Christensen and Brent Burley. https://graphics.pixar.com/library/ApproxBSSRDF/paper.pdf
+Citations
+Practical and Controllable Subsurface Scattering for Production Path Tracing, Matt Jen-Yuan Chiang, Peter Kutz and Brent Burley. 2016 https://disney-animation.s3.amazonaws.com/uploads/production/publication_asset/153/asset/siggraph2016SSS.pdf ↩
+Path Traced Subsurface Scattering using Anisotropic Phase Functions and Non-Exponential Free Flights, Magnus Wrenninge, Ryusuke Villemin, Christophe Hery. 2016 https://graphics.pixar.com/library/PathTracedSubsurface/ ↩ ↩2 ↩3
+8
+Go to list of users who liked
+8
+comment0
+Go to list of comments
+Register as a new user and use Qiita more conveniently
+You get articles that match your needs
+You can efficiently read back useful information
+You can use dark theme
+What you can do with signing up
+Sign upLogin
+8
+Go to list of users who liked
+8
+more_horiz
+Delete article
+close
+Deleted articles cannot be recovered.
+Draft of this article would be also deleted.
+Are you sure you want to delete this article?
+CancelDeletedelete

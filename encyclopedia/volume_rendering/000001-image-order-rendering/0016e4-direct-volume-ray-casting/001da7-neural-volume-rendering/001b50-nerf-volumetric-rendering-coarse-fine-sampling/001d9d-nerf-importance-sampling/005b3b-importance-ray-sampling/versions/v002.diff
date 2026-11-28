@@ -1,0 +1,112 @@
+--- v001.md
++++ v002.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Importance Ray Sampling is a technique used in neural volume rendering to refine the distribution of sample points along a ray. It addresses the inefficiency of uniform sampling by concentrating computational effort on regions with high expected density or opacity, thereby improving rendering quality with minimal overhead [S1, unofficial]. It builds on [NeRF Importance Sampling](1565-nerf-importance-sampling.md) by explicitly defining the procedural steps for binning, smoothing, and stratified sampling within a discrete partition of the ray.
++Importance Ray Sampling is a technique used in neural volume rendering to refine the distribution of sample points along a ray [S1, unofficial]. It builds on [NeRF Importance Sampling](1565-nerf-importance-sampling.md) by explicitly defining the procedural steps for binning, smoothing, and stratified sampling within a discrete partition of the ray [S1, unofficial]. It is a sampling strategy that uses initial density estimates (weights) to sample more densely from regions expected to have objects [S1, unofficial].
+ 
+ ## How it works
+@@ -15,10 +15,10 @@
+ 
+ **Outputs:**
+-- `ts`: A sorted array of normalized parameter values $t \in [0, 1]$ representing the positions of the fine sample points along the ray.
++- `ts`: A sorted array of normalized parameter values $t \in [0, 1]$ representing the positions of the fine sample points along the ray [S1, unofficial].
+ 
+ **Data Structures:**
+-- `weights`: A tensor of shape $(B, N_c)$, where $B$ is batch size and $N_c$ is the number of coarse bins.
+-- `pmf`: Probability Mass Function tensor of shape $(B, N_c)$, normalized such that $\sum_{i} \text{pmf}_i = 1$.
+-- `lower`, `upper`: Tensors of shape $(B, N_c)$ representing the start and end normalized parameters of each coarse bin.
++- `weights`: A tensor of shape $(B, N_c)$, where $B$ is batch size and $N_c$ is the number of coarse bins [S1, unofficial].
++- `pmf`: Probability Mass Function tensor of shape $(B, N_c)$, normalized such that $\sum_{i} \text{pmf}_i = 1$ [S1, unofficial].
++- `lower`, `upper`: Tensors of shape $(B, N_c)$ representing the start and end normalized parameters of each coarse bin [S1, unofficial].
+ 
+ **Steps:**
+@@ -48,42 +48,39 @@
+ def importance_ray_sampling(volume_range, weights, alpha=1e-5, blur_pool=False, n_samples=64):
+     # 1. Partition volume range into coarse bins
+-    # Returns lower and upper bounds for each bin
+-    lower, upper = volume_range.partition()
+-    
++    lower, upper, _ = volume_range.partition()
++
+     # 2. Retrieve weights from coarse model
+     w = weights.clone()
+-    
++
+     # 3. Optional smoothing (mip-NeRF style)
+     if blur_pool:
+-        # Pad with first and last elements
+-        padded = torch.cat([w[..., :1, :], w, w[..., -1:, :]], dim=-2)
+-        # Max of adjacent pairs
+-        maxes = torch.maximum(padded[..., :-1, :], padded[..., 1:, :])
+-        # Average adjacent maxes
++        padded = concatenate([w[..., :1, :], w, w[..., -1:, :]], axis=-2)
++        maxes = maximum(padded[..., :-1, :], padded[..., 1:, :])
+         w = 0.5 * (maxes[..., :-1, :] + maxes[..., 1:, :])
+-    
++
+     # 4. Add alpha to prevent zero probabilities
+     w = w + alpha
+-    
++
+     # 5. Compute PMF
+-    pmf = w / w.sum(dim=-2, keepdim=True)
+-    
+-    # 6. Sample indices from PMF
+-    # sample_pmf draws n_samples indices for each ray in the batch
+-    inds = sample_pmf(pmf, n_samples)
+-    
++    pmf = w / sum(w, axis=-2, keepdims=True)
++
++    # 6. Sample indices from PMF using inverse transform sampling
++    cdf = cumulative_sum(pmf, axis=-2)
++    u = random_uniform(shape=w.shape[:-1] + (n_samples,))
++    inds = argmax(cast(cdf >= u[..., None], dtype=bool), axis=-2)
++
+     # 7. Generate random noise
+-    t_rand = torch.rand_like(inds, dtype=torch.float32)
+-    
++    t_rand = random_uniform(shape=inds.shape)
++
+     # 8. Gather bounds for sampled indices
+-    lower_ = gather(lower, -2, inds)
+-    upper_ = gather(upper, -2, inds)
+-    
++    lower_ = index_select(lower, axis=-2, indices=inds)
++    upper_ = index_select(upper, axis=-2, indices=inds)
++
+     # 9. Interpolate within bins
+     ts = lower_ + (upper_ - lower_) * t_rand
+-    
++
+     # 10. Sort along sample dimension
+-    ts = torch.sort(ts, dim=-2).values
+-    
++    ts = sort(ts, axis=-2)
++
+     return ts
+ ```
+@@ -94,15 +91,15 @@
+ 
+ **Edge Cases:**
+-- If all weights are zero, the addition of $\alpha$ ensures valid probabilities.
+-- If `volume_range` has only one bin, sampling degenerates to uniform distribution within that bin.
++- If all weights are zero, the addition of $\alpha$ ensures valid probabilities [G].
++- If `volume_range` has only one bin, sampling degenerates to uniform distribution within that bin [G].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Dominated by the categorical sampling and sorting steps, $O(N_c + N_r \cdot N_s \log N_s)$, where $N_c$ is coarse bins, $N_r$ is rays, and $N_s$ is samples per ray.
+-- **Memory Complexity:** $O(N_c)$ for storing weights and PMF per ray.
+-- **Strengths:** Reduces variance in regions of high density; computationally cheap compared to learning a separate importance network.
+-- **Limitations:** Relies on the accuracy of the coarse model's weights; may undersample if coarse weights are inaccurate.
++- **Time Complexity:** Dominated by the categorical sampling and sorting steps, $O(N_c + N_r \cdot N_s \log N_s)$, where $N_c$ is coarse bins, $N_r$ is rays, and $N_s$ is samples per ray [G].
++- **Memory Complexity:** $O(N_c)$ for storing weights and PMF per ray [G].
++- **Strengths:** Reduces variance in regions of high density; computationally cheap compared to learning a separate importance network [G].
++- **Limitations:** Relies on the accuracy of the coarse model's weights; may undersample if coarse weights are inaccurate [G].
+ 
+ ## Background
+-This method is implemented in the `gsgen` repository, an unofficial source for 3D generation tools [S1, unofficial]. It adapts techniques from mip-NeRF's smoothing strategy for NeRF importance sampling.
++It adapts techniques from mip-NeRF's smoothing strategy for NeRF importance sampling [S1, unofficial].
+ 
+ ## Sources

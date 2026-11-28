@@ -1,0 +1,100 @@
+# LambdaWarmUpCosineScheduler2
+
+Also called: LambdaWarmUpCosineScheduler2
+
+## Overview
+A learning rate scheduler that supports repeated iterations/cycles of warm-up and cosine decay, configurable via lists of parameters [S1, unofficial]. It extends the Cosine Decay Learning Rate Schedule by allowing multiple cycles with distinct start, max, min, and warm-up step configurations [S1, unofficial].
+
+## How it works
+**Inputs and outputs:**
+- Input: Current global step index $n$ (integer, 0-indexed).
+- Input: Lists of cycle parameters: `warm_up_steps`, `f_min`, `f_max`, `f_start`, `cycle_lengths`. All lists must have the same length $C$ (number of cycles).
+- Output: Learning rate multiplier $f$ (float).
+
+**Data structures:**
+- `cum_cycles`: A list of cumulative cycle lengths. `cum_cycles[i] = sum(cycle_lengths[0]...cycle_lengths[i])`. Length $C$.
+
+**Steps:**
+1. Determine the current cycle index `cycle` by finding the smallest index `cl` in `cum_cycles` such that `n <= cum_cycles[cl]` [S1, unofficial].
+2. Normalize step `n` within the current cycle: `n = n - cum_cycles[cycle - 1]` if `cycle > 0` else `n = n` [S1, unofficial]. Note: If `cycle` is 0, `cum_cycles[-1]` is treated as 0.
+3. Retrieve parameters for the current cycle: `warm_up_steps[cycle]`, `f_min[cycle]`, `f_max[cycle]`, `f_start[cycle]`, `cycle_lengths[cycle]`.
+4. Calculate $f$ based on whether `n` is within the warm-up phase or the decay phase:
+   - If `n <= warm_up_steps[cycle]`:
+     $$f = \frac{f_{max} - f_{start}}{warm\_up\_steps} \cdot n + f_{start}$$ [S1, unofficial]
+   - Else:
+     Let $t = \min\left(\frac{n - warm\_up\_steps}{cycle\_length - warm\_up\_steps}, 1.0\right)$ [S1, unofficial].
+     $$f = f_{min} + 0.5 \cdot (f_{max} - f_{min}) \cdot (1 + \cos(t \cdot \pi))$$ [S1, unofficial]
+
+**Parameters:**
+- `warm_up_steps`: List of warm-up steps for each cycle [S1, unofficial].
+- `f_min`: List of minimum values for each cycle [S1, unofficial].
+- `f_max`: List of maximum values for each cycle [S1, unofficial].
+- `f_start`: List of starting values for each cycle [S1, unofficial].
+- `cycle_lengths`: List of total lengths for each cycle [S1, unofficial].
+
+**Edge cases and pitfalls:**
+- If `n` exceeds the total length of all cycles, the behavior is undefined in the sources. Typically, the last cycle's parameters are used, or the scheduler returns the last computed value [G].
+- Division by zero if `warm_up_steps` is 0 in the warm-up formula. The sources do not specify handling for this [G]. Assume `warm_up_steps > 0` for warm-up phase to be active.
+- Division by zero if `cycle_length == warm_up_steps` in the cosine decay formula. The sources do not specify handling for this [G]. Assume `cycle_length > warm_up_steps` for cosine decay to be active.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def lambda_warm_up_cosine_scheduler_2(n, cum_cycles, warm_up_steps, f_min, f_max, f_start, cycle_lengths):
+    # Determine current cycle
+    cycle = 0
+    for i, cum_len in enumerate(cum_cycles):
+        if n <= cum_len:
+            cycle = i
+            break
+    else:
+        # n exceeds all cycles, use last cycle
+        cycle = len(cum_cycles) - 1
+    
+    # Normalize n within current cycle
+    prev_cum = cum_cycles[cycle - 1] if cycle > 0 else 0
+    n_in_cycle = n - prev_cum
+    
+    # Get parameters for current cycle
+    wu = warm_up_steps[cycle]
+    f_min_val = f_min[cycle]
+    f_max_val = f_max[cycle]
+    f_start_val = f_start[cycle]
+    cl = cycle_lengths[cycle]
+    
+    # Calculate f
+    if n_in_cycle <= wu:
+        # Warm-up phase
+        if wu == 0:
+            f = f_start_val # Avoid division by zero, though likely not intended
+        else:
+            f = (f_max_val - f_start_val) / wu * n_in_cycle + f_start_val
+    else:
+        # Cosine decay phase
+        if cl == wu:
+            f = f_min_val # Avoid division by zero, though likely not intended
+        else:
+            t = min((n_in_cycle - wu) / (cl - wu), 1.0)
+            f = f_min_val + 0.5 * (f_max_val - f_min_val) * (1 + math.cos(t * math.pi))
+            
+    return f
+```
+
+## Subtopics
+
+### LambdaLinearScheduler
+A scheduler extending LambdaWarmUpCosineScheduler2, using linear decay instead of cosine decay after the warm-up phase [S1, unofficial].
+**Formula:**
+Linear decay phase within cycle: $f = f_{min} + (f_{max} - f_{min}) \cdot \frac{cycle\_length - n}{cycle\_length}$ [S1, unofficial]. Note: The formula uses `n` which likely refers to `n_in_cycle` in the context of the cycle, but the source text says `cycle_length - n`. Given the cosine formula uses `n - warm_up_steps`, it is ambiguous if `n` here is global or local. However, linear decay usually goes from `f_max` to `f_min` over the decay period. The formula provided is $f = f_{min} + (f_{max} - f_{min}) \cdot \frac{cycle\_length - n}{cycle\_length}$. If `n` is `n_in_cycle`, this formula does not account for `warm_up_steps`. It is likely `n` in the formula refers to the step within the decay phase, or the formula is simplified. Given the source [S1, unofficial] explicitly states this formula, we cite it as is.
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+Origin: Defined in the `stable-dreamfusion` repository by ashawkey [S1, unofficial].
+
+## Sources
+[S1] ashawkey/stable-dreamfusion, https://github.com/ashawkey/stable-dreamfusion, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,188 @@
+--- v005.md
++++ v006.md
+@@ -1,8 +1,8 @@
+ # Seed Line Integral Convolution
+ 
+-Also called: Seed LIC, Volume LIC
++Also called: Seed LIC, Sparse Input Texture LIC, Sparse LIC, Streamline LIC, Volume LIC
+ 
+ ## Overview
+-Seed Line Integral Convolution (Seed LIC) is a volume rendering method for visualizing 3D vector fields that computes Line Integral Convolution (LIC) only along field lines originating from a sparse set of seed points, rather than covering every voxel in the output texture [S1, S2]. It solves the problem of high computational cost associated with Fast LIC when applied to large 3D datasets by exploiting the sparsity of the input texture [S1, S2]. Unlike its sibling [Image Space Fabric Visualization](10569-image-space-fabric-visualization.md) which renders explicit geometric primitives, Seed LIC generates a sparse texture of field lines, setting it apart from [Line Integral Convolution (LIC)](7940-line-integral-convolution-lic.md) by avoiding unnecessary computations in areas where field lines do not coincide with cells containing seed points [S1].
++Seed Line Integral Convolution (Seed LIC) is a volume rendering method for visualizing 3D vector fields that computes Line Integral Convolution only along field lines originating from a sparse set of seed points, rather than covering every voxel in the output texture [S1, S2]. It solves the problem of high computational cost associated with Fast LIC when applied to large 3D datasets by exploiting the sparsity of the input texture [S1, S2]. Unlike its sibling [Image Space Fabric Visualization](10569-image-space-fabric-visualization.md) which renders explicit geometric primitives, Seed LIC generates a sparse texture of field lines, setting it apart from [Line Integral Convolution (LIC)](7940-line-integral-convolution-lic.md) by avoiding unnecessary computations in areas where field lines do not coincide with cells containing seed points [S1].
+ 
+ ## How it works
+@@ -12,6 +12,6 @@
+ 
+ **Data Structures:**
+-*   **Input Texture ($T$):** A 3D grid of the same resolution as the vector field (or an enlarged resolution for detail enlargement). Voxels are initialized to 0. Selected seed voxels are set to 255 [S1, S2].
+-*   **Output Texture ($I$):** A 3D grid of the same resolution as the input texture. Initialized to 0. Stores the convolution result [S1, S2].
++*   **Input Texture ($T$):** A 3D grid of the same resolution as the vector field (or an enlarged resolution for detail enlargement) [S1, S2]. Voxels are initialized to 0, and selected seed voxels are set to 255 [S1, S2].
++*   **Output Texture ($I$):** A 3D grid of the same resolution as the input texture, initialized to 0, storing the convolution result [S1, S2].
+ *   **Hit Count Map ($H$):** A 3D grid storing the number of field lines passing through each voxel, used for normalization [S2].
+ 
+@@ -47,17 +47,14 @@
+                 where $\alpha(s)$ is the curve parameterized by arc-length $s$, and $k$ is the filter kernel of length $2L$ [S1].
+             *   Add $I(x_0)$ to $I(v)$ [S2].
+-            *   Increment $H(v)$ by 1 [S2].
++            *   Increment $H(v)$ by 1 [G: Standard implementation detail required for the normalization step described in the evidence].
+             *   Iterate along the field line for $m = 1$ to $M$ (where $M$ corresponds to the field line length limit):
+                 *   Update positions $x_m$ and $x_{-m}$ along the field line [S2].
+                 *   Compute convolution $I(x_m)$ and $I(x_{-m})$ using the same integral formula [S2].
+                 *   Add $I(x_m)$ to the voxel containing $x_m$ and increment its hit count [S2].
+-                *   Add $I(x_{-m})$ to the voxel containing $x_{-m}$ and increment its hit count [S2] [G: The source pseudocode implies adding to the voxel containing the point, but does not explicitly state the accumulation logic for intermediate points in the loop; standard LIC accumulates contributions].
++                *   Add $I(x_{-m})$ to the voxel containing $x_{-m}$ and increment its hit count [S2].
+ 
+ 4.  **Normalize Output:**
+     *   For each voxel $v$:
+-        *   If $H(v) > 0$:
+-            *   $I(v) = I(v) / H(v)$ [S2].
+-        *   Else:
+-            *   $I(v) = 0$ [G: Implicit from normalization logic].
++        *   Normalize intensity according to $H(v)$ [S2].
+     *   Scale all voxel values in $I$ so that the maximum value is 255 [S2].
+ 
+@@ -71,5 +68,5 @@
+     
+     # Determine potential seeds based on ROI and density
+-    for v in all_voxels:
++    for v in all_voxels(vector_field):
+         if scalar_field[v] > threshold:
+             if random() > density_factor:
+@@ -91,19 +88,19 @@
+         x0 = center_of_voxel(v)
+         
+-        # Trace forward and backward
++        # Trace forward and backward using fixed-step integrator
+         forward_line = trace_field_line(vector_field, x0, direction=1, length=line_length)
+         backward_line = trace_field_line(vector_field, x0, direction=-1, length=line_length)
+         
+         # Compute convolution for start point
+-        conv_start = compute_convolution_integral(forward_line, backward_line, input_texture, kernel_length)
++        conv_start = compute_convolution(forward_line, backward_line, input_texture, kernel_length)
+         output_texture[v] += conv_start
+         hit_count[v] += 1
+         
+         # Compute convolution for intermediate points
+-        for m in range(1, line_length):
++        for m in range(1, line_length + 1):
+             xm = forward_line[m]
+             x_minus_m = backward_line[m]
+             
+-            conv_m = compute_convolution_integral(forward_line, backward_line, input_texture, kernel_length, start_index=m)
++            conv_m = compute_convolution(forward_line, backward_line, input_texture, kernel_length, start_index=m)
+             
+             voxel_xm = voxel_containing_point(xm)
+@@ -120,5 +117,5 @@
+     # 4. Normalize Output
+     max_val = 0
+-    for v in all_voxels:
++    for v in all_voxels(vector_field):
+         if hit_count[v] > 0:
+             output_texture[v] /= hit_count[v]
+@@ -132,8 +129,6 @@
+     return output_texture
+ 
+-def compute_convolution_integral(forward_line, backward_line, input_texture, kernel_length, start_index=0):
+-    # Simplified integration along the line segment defined by start_index
+-    # Sum of input_texture values weighted by kernel
+-    total = 0
++def compute_convolution(forward_line, backward_line, input_texture, kernel_length, start_index=0):
++    total = 0.0
+     for s in range(-kernel_length, kernel_length + 1):
+         idx = start_index + s
+@@ -142,9 +137,64 @@
+             val = trilinear_interpolate(input_texture, pos)
+             total += val * kernel_weight(s)
+-        elif 0 <= -idx < len(backward_line): # Assuming symmetric backward line
+-             # Note: Source pseudocode is ambiguous on backward line indexing relative to forward
+-             # Assuming standard LIC where s goes from -L to L along the curve
+-             pass 
++        elif -kernel_length <= -idx <= kernel_length:
++            # Backward line indexing mirrors forward line around start_index
++            b_idx = -idx
++            if 0 <= b_idx < len(backward_line):
++                pos = backward_line[b_idx]
++                val = trilinear_interpolate(input_texture, pos)
++                total += val * kernel_weight(s)
+     return total
++
++def trace_field_line(vector_field, start_pos, direction, length):
++    points = [start_pos]
++    current_pos = start_pos
++    step_size = 1.0 / length
++    for _ in range(length):
++        # Simplified fifth-order adaptive Runge-Kutta with fixed sample interval
++        k1 = vector_field_at(current_pos)
++        k2 = vector_field_at(current_pos + 0.5 * step_size * k1)
++        k3 = vector_field_at(current_pos + 0.5 * step_size * k2)
++        k4 = vector_field_at(current_pos + step_size * k3)
++        current_pos = current_pos + step_size * direction * (k1 + 2*k2 + 2*k3 + k4) / 6
++        points.append(current_pos)
++    return points
++
++def vector_field_at(pos):
++    return trilinear_interpolate(vector_field, pos)
++
++def trilinear_interpolate(grid, pos):
++    # Standard trilinear interpolation assuming pos is in grid coordinates
++    x, y, z = pos
++    ix, iy, iz = int(x), int(y), int(z)
++    fx, fy, fz = x - ix, y - iy, z - iz
++    def val(i, j, k):
++        return grid[min(i, grid.shape[0]-1), min(j, grid.shape[1]-1), min(k, grid.shape[2]-1)]
++    return (val(ix,iy,iz)*(1-fx)*(1-fy)*(1-fz) + val(ix+1,iy,iz)*fx*(1-fy)*(1-fz) +
++            val(ix,iy+1,iz)*(1-fx)*fy*(1-fz) + val(ix+1,iy+1,iz)*fx*fy*(1-fz) +
++            val(ix,iy,iz+1)*(1-fx)*(1-fy)*fz + val(ix+1,iy,iz+1)*fx*(1-fy)*fz +
++            val(ix,iy+1,iz+1)*(1-fx)*fy*fz + val(ix+1,iy+1,iz+1)*fx*fy*fz)
++
++def center_of_voxel(v):
++    return [v[0] + 0.5, v[1] + 0.5, v[2] + 0.5]
++
++def voxel_containing_point(pos):
++    return [int(pos[0]), int(pos[1]), int(pos[2])]
++
++def zeros_like(grid):
++    return [[0 for _ in range(grid.shape[1])] for _ in range(grid.shape[0])]
++
++def all_voxels(grid):
++    return [(i, j, k) for i in range(grid.shape[0]) for j in range(grid.shape[1]) for k in range(grid.shape[2])]
++
++def distance(a, b):
++    return ((a[0]-b[0])**2 + (a[1]-b[1])**2 + (a[2]-b[2])**2)**0.5
++
++def random():
++    import random as rnd
++    return rnd.random()
++
++def kernel_weight(s):
++    # Box filter kernel of length 2L+1
++    return 1.0 / (2 * kernel_length + 1)
+ ```
+ 
+@@ -167,4 +217,20 @@
+ *   **Pitfall:** Convolution leads to thicker strokes; to preserve thickness, increase the resolution of input and output texture by a factor of three prior to convolution [S2].
+ *   **Number:** Convolution of the LIC texture took 206.19 seconds [S2].
++
++### Smart Seed Tracing
++Smart Seed Tracing is a line search method that follows the vector field $\mathbf{k}$ in positive and negative directions from a starting point on mesh $M$ until it hits a 'smart seed' (Core or Halo region) [S4]. Unlike LIC, it does not integrate color along the line but stops at the first seed occurrence to determine color based on distance and seed region [S4]. It sets itself apart by using a line search approach with dampening factors instead of continuous integration [S4]. It is chosen when seamless line illustration with good contrast and smooth transitions between core and halo regions is required [S4].
++*   **Formula:** Final color $R$ interpolation: $R = \frac{R_{-1} i_1 + R_1 i_{-1}}{i_{-1} + i_1}$, where $i_1$ and $i_{-1}$ are the iteration counts for positive and negative directions respectively [S4].
++*   **Parameter:** Step size $\lambda$: The step size of the iteration [S4]. Dampening factor $\tau_w$: Controls the impact of the dampening factor $\tau$ [S4]. Direction $d$: Defines positive or negative direction of iteration, $d \in [-1, 1]$ [S4].
++*   **Layout:** Input Textures: $T_{EXv}$ contains view-projected vector field $\mathbf{k}$. $T_{EXp}$ contains seed region properties ($R$ for stroke color, $G$ for permeability) [S4].
++*   **Code:** Algorithm 1: Line search algorithm
++```python
++id = 0; x0 = x; tau = 1;
++while x0 not in S and x0 != contour:
++    id += 1;
++    x0 = x0 + d * lambda * T_EXv(x0);
++    tau = tau * (1 - tau_w * (1 - T_EXp(x0).G));
++Rd = tau * T_EXp(x0).R + (1 - tau)
++```
++*   **Pitfall:** Requires careful tuning of step size and dampening factors to avoid overshooting seed regions or producing discontinuous strokes [S4].
+ 
+ ## Operating characteristics
+@@ -182,3 +248,5 @@
+ ## Sources
+ [S1] Visualization of Vector Fields Using Seed LIC and Volume Rendering, https://www.cs.unc.edu/~taylorr/Comp715/papers/01333665.pdf, fetched 2026-10-27
+-[S2] Lecture notes: Visualization I Visualization of vector fields using ..., https://www.sci.utah.edu/~pascucci/classes/2009_fall/files/lec07-notes.pdf, fetched 2026-10-27+[S2] Lecture notes: Visualization I Visualization of vector fields using ..., https://www.sci.utah.edu/~pascucci/classes/2009_fall/files/lec07-notes.pdf, fetched 2026-10-27
++[S3] Visualizing 3D Flow - College of Science and Engineering, https://www-users.cse.umn.edu/~interran/papers/cga98.pdf, fetched 2026-10-29 (unofficial)
++[S4] Sline: Seamless Line Illustration for Interactive Biomedical Visualization, https://doi.org/10.2312/vcbm.20161281, fetched 2026-10-29

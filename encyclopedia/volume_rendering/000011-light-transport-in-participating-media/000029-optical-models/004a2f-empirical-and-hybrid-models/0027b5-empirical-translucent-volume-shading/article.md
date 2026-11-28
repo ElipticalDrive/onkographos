@@ -1,0 +1,178 @@
+# Empirical Translucent Volume Shading
+
+Also called: Empirical volume shading model, Interactive Translucent Volume Shading, Volumetric light attenuation model
+
+## Overview
+Empirical Translucent Volume Shading is an interactive optical model for volume rendering that captures the qualitative appearance of translucency and volumetric shadows by adding a blurred indirect light contribution to the direct light term [S1]. It solves the problem of rendering semi-transparent volumetric data with realistic light transport effects at interactive rates, avoiding the computational cost of full multiple scattering simulations [S1]. Unlike physically accurate methods, it prioritizes visual fidelity (color bleeding, diffusion) over quantitative accuracy, and unlike analytical approximations, it imposes no restrictions on external illumination or optical properties [S1].
+
+## How it works
+The method computes the final eye radiance by integrating along the view ray, modulating the volume's reflectance with a composite shading term that blends direct attenuation and surface shading, and illuminating the volume with a light field that includes both direct attenuation and a blurred indirect component [S1].
+
+### Inputs and Outputs
+*   **Inputs:**
+    *   Scalar volume data field $V$ [S1].
+    *   Optical properties: extinction coefficient $\tau(x)$, indirect extinction coefficient $\tau_i(x)$ [S1].
+    *   Geometric properties: Normalized gradient of the scalar field $\nabla V / |\nabla V|$ used for surface shading [S1].
+    *   Lighting: Light intensity $I_l(0)$, light direction/source position [S1].
+    *   Parameters: Scattering factor $S(s)$, blur kernel parameter $\theta$ [S1].
+*   **Outputs:**
+    *   Final eye radiance $I_{eye}$ for each pixel [S1].
+
+### Data Structures
+*   **Volume Data:** A 3D grid of scalar values [S1].
+*   **Extinction Coefficients:** 3D grids for $\tau(x)$ and $\tau_i(x)$ [S1]. These may be derived from the scalar data or provided as separate textures [G].
+*   **Gradient Field:** Precomputed or on-the-fly normalized gradients of the scalar data for surface shading evaluation [S1].
+
+### Formulas and Definitions
+The final radiance $I_{eye}$ is calculated as [S1]:
+
+$$
+I_{eye} = I_0 * T_e(0) + \int_0^{eye} T_e(s) * C(s) * I_l(s) ds \quad (5)
+$$
+
+Where:
+*   $I_0$ is the background light intensity [S1].
+*   $T_e(0)$ is the transmittance from the eye to the start of the volume [S1].
+*   $s$ is the position along the view ray from the eye to the far plane [S1].
+*   $T_e(s)$ is the transmittance from sample $s$ to the eye:
+    $$
+    T_e(s) = \exp\left(-\int_s^{eye} \tau(x)dx\right) \quad (2)
+    $$
+    where $\tau(x)$ is the extinction coefficient at sample $x$ [S1].
+*   $C(s)$ is the composite shading term:
+    $$
+    C(s) = g(s) ((1 - S(s)) + f_s(s)S(s)) \quad (6)
+    $$
+    where:
+    *   $g(s)$ is the emission/reflective term (often derived from the scalar data value or a transfer function) [S1].
+    *   $S(s)$ is the scattering factor parameter controlling the blend between direct attenuation and surface shading [S1].
+    *   $f_s(s)$ is the Blinn-Phong shading model evaluated using the normalized gradient of the scalar data field at $s$ [S1].
+*   $I_l(s)$ is the total light intensity at sample $s$, consisting of direct and blurred indirect contributions:
+    $$
+    I_l(s) = I_l(0) * \exp\left(-\int_s^{light} \tau(x)dx\right) + I_l(0) * \exp\left(-\int_s^{light} \tau_i(x)dx\right) \text{Blur}(\theta) \quad (7)
+    $$
+    where:
+    *   $I_l(0)$ is the initial light intensity [S1].
+    *   $\tau(x)$ is the extinction coefficient [S1].
+    *   $\tau_i(x)$ is the indirect extinction coefficient [S1].
+    *   $\text{Blur}(\theta)$ is a blur operation applied to the indirect light term, parameterized by $\theta$ [S1].
+
+### Parameters
+*   **$S(s)$**: Scattering factor. Controls the weight of the surface shading term $f_s(s)$ versus the direct attenuation term $(1-S(s))$. No specific value or computation method is provided in the sources [S1].
+*   **$\theta$**: Parameter for the blur operation $\text{Blur}(\theta)$. No specific value or kernel definition is provided in the sources [S1].
+*   **$\tau(x)$**: Extinction coefficient. Used in transmittance and direct light attenuation integrals [S1].
+*   **$\tau_i(x)$**: Indirect extinction coefficient. Used in the indirect light attenuation term [S1].
+
+### Pseudocode
+The following pseudocode implements the discrete integration step for a single view ray. It assumes precomputed or accessible volume data, extinction coefficients, and standard interpolation/gradient routines [G].
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_volume_ray(ray_origin, ray_direction, volume_data, tau_grid, tau_i_grid, 
+                      light_intensity, light_direction, scattering_factor_func, 
+                      blur_kernel, blur_param, background_light, dt, num_steps, num_light_steps):
+    """
+    Renders a single ray using Empirical Translucent Volume Shading.
+    """
+    tau_integral = 0.0
+    accumulated_radiance = 0.0
+
+    for i in range(num_steps):
+        s = ray_origin + ray_direction * (i * dt)
+
+        # Sample optical and geometric properties
+        tau = interpolate_3d(tau_grid, s)
+        tau_i = interpolate_3d(tau_i_grid, s)
+        g_s = interpolate_3d(volume_data, s)
+
+        # Transmittance from eye to current sample s
+        T_e_s = exp(-tau_integral)
+
+        # Light transmittance towards light (direct)
+        tau_light_integral = 0.0
+        for j in range(num_light_steps):
+            s_light = s + light_direction * (j * dt)
+            tau_light_integral += interpolate_3d(tau_grid, s_light) * dt
+
+        # Light transmittance towards light (indirect)
+        tau_i_light_integral = 0.0
+        for j in range(num_light_steps):
+            s_light = s + light_direction * (j * dt)
+            tau_i_light_integral += interpolate_3d(tau_i_grid, s_light) * dt
+
+        # Total light intensity at s
+        direct_atten = exp(-tau_light_integral)
+        indirect_atten = exp(-tau_i_light_integral)
+        I_l_s = light_intensity * direct_atten + light_intensity * indirect_atten * blur_kernel(blur_param)
+
+        # Composite shading C(s)
+        S_s = scattering_factor_func(s)
+        normal = normalize(get_gradient_3d(volume_data, s))
+        view_dir = normalize(-ray_direction)
+        half_vec = normalize(light_direction + view_dir)
+        f_s_s = blinn_phong_shading(normal, light_direction, half_vec)
+        C_s = g_s * ((1.0 - S_s) + f_s_s * S_s)
+
+        # Accumulate radiance contribution
+        accumulated_radiance += T_e_s * C_s * I_l_s * dt
+
+        # Update transmittance integral for next step
+        tau_integral += tau * dt
+
+    # Background contribution: I_0 * T_e(0)
+    final_radiance = background_light * exp(-tau_integral) + accumulated_radiance
+    return final_radiance
+
+# Standard helper functions [G]
+def interpolate_3d(grid, pos):
+    # Trilinear interpolation from 3D grid at position pos
+    pass
+
+def get_gradient_3d(grid, pos):
+    # Central difference approximation of gradient at pos
+    pass
+
+def blinn_phong_shading(normal, light_dir, half_vec):
+    # Standard Blinn-Phong: diffuse + specular
+    return max(0.0, dot(normal, light_dir)) + max(0.0, dot(normal, half_vec)) ** 32
+
+def blur_kernel(theta):
+    # Simple Gaussian blur approximation [G]
+    def apply(value):
+        return value * exp(-theta)
+    return apply
+
+def normalize(v):
+    return v / max(1e-8, sqrt(dot(v, v)))
+
+def dot(v1, v2):
+    return sum(a * b for a, b in zip(v1, v2))
+
+def exp(x):
+    return math.exp(x)
+
+def max(a, b):
+    return a if a > b else b
+
+def sqrt(x):
+    return math.sqrt(x)
+```
+
+### Edge Cases and Pitfalls
+*   **No Full Global Illumination:** The model does not include full global illumination, backward scattering, or volumetric light sources (emission) [S1].
+*   **Blur Operation:** The definition of $\text{Blur}(\theta)$ is not provided in the sources, which may lead to implementation ambiguity [S1].
+*   **Scattering Factor:** The computation of $S(s)$ is not specified, only its usage in the blending equation [S1].
+*   **Light Transmittance:** Computing the integral from sample to light requires additional ray marching or precomputation, which is not detailed in the source [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Interactive. The model avoids the high cost of full multiple scattering simulations by using empirical approximations [S1]. The cost is dominated by ray marching through the volume and computing light transmittance, which can be optimized with techniques like empty space skipping or hierarchical data structures.
+*   **Memory Complexity:** Depends on the volume data and auxiliary grids for $\tau$ and $\tau_i$. Not given in the sources.
+*   **Strengths:** Captures qualitative appearance of translucency, color bleeding, and volumetric shadows at interactive rates. Works with arbitrary volumes and scanned data without restrictions on optical properties or external illumination [S1].
+*   **Limitations:** Not quantitatively accurate. Does not model full global illumination, backward scattering, or volumetric emission [S1]. Relies on empirical parameters ($S(s)$, $\theta$) that may require tuning [S1].
+
+## Background
+The model was presented by Kniss et al. in 2002 as an interactive shading model for volume rendering [S1]. It is based on empirical observations of the appearance of volumetric materials and some theoretical results [S1]. The goal was to realistically visualize arbitrary volumetric materials at interactive rates without restrictions on external illumination or optical properties [S1].
+
+## Sources
+[S1] Interactive Translucent Volume Rendering and Procedural Modeling, https://courses.cs.duke.edu/spring03/cps296.8/papers/kniss_volumeshading02.pdf, fetched 2026-10-26

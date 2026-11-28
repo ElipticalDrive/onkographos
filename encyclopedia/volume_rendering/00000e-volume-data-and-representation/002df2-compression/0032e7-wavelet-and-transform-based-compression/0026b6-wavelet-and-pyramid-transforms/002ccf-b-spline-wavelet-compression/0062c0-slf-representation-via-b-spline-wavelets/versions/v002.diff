@@ -1,0 +1,233 @@
+--- v001.md
++++ v002.md
+@@ -8,16 +8,16 @@
+ ## How it works
+ **Inputs:**
+-*   A 3D geometric point cloud defining surface points $p$.
+-*   Multi-view images of the scene.
+-*   Camera positions and orientations for each view.
+-*   Parameters: Number of basis functions $N$, regularization factor $\lambda > 0$, spatial smoothing factor $\beta > 0$, and maximum iterations $T$.
++*   A 3D geometric point cloud defining surface points $p$ [S1].
++*   Multi-view images of the scene [S1].
++*   Viewing directions $\omega_m$ for each observation, parameterized by spherical coordinates [S1].
++*   Parameters: Number of basis functions $N$, regularization factor $\lambda > 0$, spatial smoothing factor $\beta > 0$, and maximum iterations $T$ [S1].
+ 
+ **Outputs:**
+-*   SLF representation coefficients $\alpha(p)$ for each point $p$.
++*   SLF representation coefficients $\alpha(p)$ for each point $p$ [S1].
+ 
+ **Data Structures:**
+-*   **Point Cloud:** A set of points $p$, each associated with a list of valid camera observations.
++*   **Point Cloud:** A set of points $p$, each associated with a list of valid camera observations [S1].
+ *   **Observation Vector $c$:** For point $p$, a vector of pixel values $c = \{c_0, c_1, \dots, c_{M-1}\}$ from $M$ valid camera observations. Invalid observations (occluded or outside the camera field of view) are excluded [S1].
+-*   **Direction Vector $\omega$:** For each observation $m$, the viewing direction $\omega_m$ parameterized by spherical coordinates.
++*   **Direction Vector $\omega$:** For each observation $m$, the viewing direction $\omega_m$ parameterized by spherical coordinates [S1].
+ *   **Basis Matrix $G$:** A matrix of size $M \times N$, where element $G_{j,i} = g_i(\omega_j)$ is the value of the $i$-th basis function evaluated at the $j$-th observation direction [S1].
+ *   **Coefficient Vector $\alpha$:** A vector of size $N$, where $\alpha_i(p)$ is the coefficient for the $i$-th basis function at point $p$ [S1].
+@@ -27,5 +27,5 @@
+ $$ g_i(\theta, \gamma) = w_{i_0}\left(\frac{\theta}{2\pi}\right) w_{i_1}\left(\frac{\gamma}{2}\right) $$
+ where:
+-*   $\theta \in [-\pi, \pi]$ is the azimuth angle.
++*   $\theta \in [-\pi, \pi]$ is the azimuth angle [S1].
+ *   $\phi \in [-\pi/2, \pi/2]$ is the elevation angle, reparameterized as $\gamma = \sin(\phi) \in [-1, 1]$ to ensure equal areas in the $(\theta, \gamma)$ plane correspond to equal areas on the sphere, preserving orthogonality [S1].
+ *   $w_i$ is the $i$-th offset of the periodicized 1D B-Spline wavelet function:
+@@ -65,41 +65,79 @@
+ **Pseudocode:**
+ ```python
+-def calculate_slf_coefficients(points, observations, directions, lambda_reg, beta_smooth, max_iter):
++def calculate_slf_coefficients(points, observations, directions, lambda_reg, beta_smooth, max_iter, s0, s1):
+     """
+     Calculate SLF representation coefficients for a point cloud.
+-    
+     Args:
+         points: List of surface points p.
+         observations: Dict mapping p -> list of valid pixel values c.
+-        directions: Dict mapping p -> list of viewing directions omega.
++        directions: Dict mapping p -> list of (theta, gamma) tuples.
+         lambda_reg: Regularization factor lambda > 0.
+         beta_smooth: Spatial smoothing factor beta > 0.
+         max_iter: Maximum iteration number T.
+-        
++        s0, s1: Wavelet scales satisfying s0 = s1 + 1.
+     Returns:
+         coefficients: Dict mapping p -> vector alpha.
+     """
++    N = 2**(s0 + s1)
+     coefficients = {}
+-    
+-    # Precompute basis functions and matrices for each point
+-    # Note: In practice, G is computed per point based on its specific observation directions
+     point_data = {}
++
++    def transpose(M):
++        return [[M[j][i] for j in range(len(M))] for i in range(len(M[0]))]
++
++    def mat_mul(A, B):
++        return [[sum(A[i][k] * B[k][j] for k in range(len(B))) for j in range(len(B[0]))] for i in range(len(A))]
++
++    def solve_linear_system(A, b):
++        n = len(A)
++        aug = [A[i][:] + [b[i]] for i in range(n)]
++        for i in range(n):
++            pivot = aug[i][i]
++            for j in range(i + 1, n):
++                factor = aug[j][i] / pivot
++                for k in range(i, n + 1):
++                    aug[j][k] -= factor * aug[i][k]
++        x = [0.0] * n
++        for i in range(n - 1, -1, -1):
++            x[i] = aug[i][n]
++            for j in range(i + 1, n):
++                x[i] -= aug[i][j] * x[j]
++            x[i] /= aug[i][i]
++        return x
++
++    def construct_G(omegas, N, s0, s1):
++        M = len(omegas)
++        G = [[0.0] * N for _ in range(M)]
++        for j, (theta, gamma) in enumerate(omegas):
++            for i in range(N):
++                i0 = i // (2**s1)
++                i1 = i % (2**s1)
++                # [G] Evaluate 1D periodicized B-Spline wavelet w_i(x) per formula (5)
++                w0 = evaluate_1d_bspline_wavelet(theta / (2 * 3.14159265358979), i0, s0)
++                w1 = evaluate_1d_bspline_wavelet(gamma / 2.0, i1, s1)
++                G[j][i] = w0 * w1
++        return G
++
++    def evaluate_1d_bspline_wavelet(x, idx, scale):
++        # [G] Finite-sum approximation of w_i(x) = sum_{m in Z} psi_o(2^s x - i + m 2^s)
++        val = 0.0
++        for m in range(-5, 6):
++            arg = (2**scale) * x - idx + m * (2**scale)
++            # [G] Evaluate psi_o(x) = sum_{n=0}^q q_n N_o(2x - n)
++            psi_val = 0.0
++            for n in range(0, 10):
++                q_n = ((-1)**n) * sum(comb(o, j) * cardinal_bspline(2*o, n - j + 0.5) for j in range(o))
++                psi_val += q_n * cardinal_bspline(o, 2*arg - n)
++            val += psi_val
++        return val
++
+     for p in points:
+         c = observations[p]
+         omegas = directions[p]
+         M = len(c)
+-        N = get_num_basis_functions() # Derived from scales s0, s1
+-        
+-        # Construct G matrix: G[j, i] = g_i(omega_j)
+-        G = construct_basis_matrix(omegas, N)
+-        
+-        point_data[p] = {
+-            'c': c,
+-            'G': G,
+-            'M': M,
+-            'N': N
+-        }
+-
+-    # Initialization step
++        G = construct_G(omegas, N, s0, s1)
++        point_data[p] = {'c': c, 'G': G, 'M': M, 'N': N}
++
++    # Initialization step (Equation 2)
+     for p in points:
+         data = point_data[p]
+@@ -107,14 +145,11 @@
+         c = data['c']
+         N = data['N']
+-        
+-        # Solve alpha_0 = (G^T G + lambda * I)^-1 * G^T * c
+-        # Using a linear solver for stability
+-        GTG = G.T @ G
+-        A = GTG + lambda_reg * np.eye(N)
+-        b = G.T @ c
+-        alpha_0 = solve_linear_system(A, b)
+-        coefficients[p] = alpha_0
+-
+-    # Iterative smoothing step
++        GTG = mat_mul(transpose(G), G)
++        I = [[1.0 if i == j else 0.0 for j in range(N)] for i in range(N)]
++        A = [[GTG[i][j] + lambda_reg * I[i][j] for j in range(N)] for i in range(N)]
++        GtC = mat_mul(transpose(G), c)
++        coefficients[p] = solve_linear_system(A, GtC)
++
++    # Iterative smoothing step (Equation 3)
+     for k in range(1, max_iter + 1):
+         for p in points:
+@@ -123,37 +158,18 @@
+             c = data['c']
+             N = data['N']
+-            
+-            # Calculate average coefficient of neighbors
+-            neighbors = get_neighbors(p)
++            # [G] Retrieve adjacent points in the point cloud
++            neighbors = get_point_neighbors(p)
+             if neighbors:
+-                avg_alpha = np.mean([coefficients[n] for n in neighbors], axis=0)
++                avg_alpha = [sum(coefficients[n][i] for n in neighbors) / len(neighbors) for i in range(N)]
+             else:
+-                avg_alpha = coefficients[p] # Fallback if no neighbors
+-            
+-            # Solve alpha_k = (G^T G + (lambda + beta) * I)^-1 * (G^T c + beta * avg_alpha)
+-            GTG = G.T @ G
+-            A = GTG + (lambda_reg + beta_smooth) * np.eye(N)
+-            b = G.T @ c + beta_smooth * avg_alpha
++                avg_alpha = coefficients[p]
++            GTG = mat_mul(transpose(G), G)
++            I = [[1.0 if i == j else 0.0 for j in range(N)] for i in range(N)]
++            A = [[GTG[i][j] + (lambda_reg + beta_smooth) * I[i][j] for j in range(N)] for i in range(N)]
++            GtC = mat_mul(transpose(G), c)
++            beta_term = [beta_smooth * avg_alpha[i] for i in range(N)]
++            b = [GtC[i] + beta_term[i] for i in range(N)]
+             coefficients[p] = solve_linear_system(A, b)
+-            
+     return coefficients
+-
+-def construct_basis_matrix(omegas, N):
+-    """
+-    Constructs the basis matrix G for a set of directions.
+-    omegas: List of (theta, gamma) tuples.
+-    N: Number of basis functions.
+-    """
+-    M = len(omegas)
+-    G = np.zeros((M, N))
+-    for j, (theta, gamma) in enumerate(omegas):
+-        for i in range(N):
+-            i0 = i // (2**(s1))
+-            i1 = i % (2**(s1))
+-            # Evaluate 1D B-Spline wavelets
+-            w_i0 = evaluate_bspline_wavelet_1d(theta / (2 * np.pi), i0, s0)
+-            w_i1 = evaluate_bspline_wavelet_1d(gamma / 2, i1, s1)
+-            G[j, i] = w_i0 * w_i1
+-    return G
+ ```
+ 
+@@ -162,13 +178,13 @@
+ *   **Invalid Observations:** Observations that are occluded or outside the camera field of view must be eliminated before constructing $c$ and $G$ [S1].
+ *   **Coordinate Reparameterization:** Failure to reparameterize elevation $\phi$ as $\gamma = \sin(\phi)$ will break the orthogonality of the basis functions on the sphere, leading to inaccurate representation [S1].
+-*   **Neighbor Availability:** If a point $p$ has no neighbors, the spatial smoothing term cannot be applied. The algorithm should fall back to the initial solution or use the point's own previous iteration value [S1].
++*   **Neighbor Availability:** If a point $p$ has no neighbors, the spatial smoothing term cannot be applied. The algorithm defaults to using the point's own coefficient vector for $\bar{\alpha}$ [G].
+ 
+ ## Subtopics
+ 
+ ### [Image-Plus-Geometry Compression (IGC)](18717-image-plus-geometry-compression-igc.md)
+-A reference compression scheme for Surface Light Fields (SLF) where the source images are compressed using a standard video codec and the geometry is transmitted separately, with the SLF representation reconstructed at the decoder. It serves as a baseline to evaluate the efficiency of direct SLF coefficient compression methods, such as those using RAHT or TMC, by shifting the computationally expensive SLF construction step from the encoder to the decoder. Unlike direct SLF compression, which transmits compressed coefficients, IGC transmits raw visual data (images) and structural data (geometry), resulting in significantly higher decoder complexity.
++A reference compression scheme for Surface Light Fields (SLF) where source images are compressed using a standard video codec and geometry is transmitted separately, with the SLF representation reconstructed at the decoder. It serves as a baseline to evaluate the efficiency of direct SLF coefficient compression methods, such as those using RAHT or TMC, by shifting the computationally expensive SLF construction step from the encoder to the decoder. Unlike direct SLF compression, which transmits compressed coefficients, IGC transmits compressed images and geometry, resulting in significantly higher decoder complexity.
+ 
+ ## Operating characteristics
+-*   **Complexity:** The method involves solving a linear system for each point, which is $O(N^3)$ per point if using direct inversion, or $O(N^2)$ with iterative solvers, where $N$ is the number of basis functions. The spatial smoothing adds a neighbor averaging step. The overall complexity is dominated by the basis function evaluation and linear system solving for all points in the point cloud [S1].
++*   **Complexity:** The method involves solving a linear system for each point, with complexity dominated by basis function evaluation and matrix operations for all points in the point cloud [S1]. The spatial smoothing adds a neighbor averaging step per iteration [S1].
+ *   **Performance:** Experimental results show superior rate-distortion performance compared to the Image-Plus-Geometry (IGC) reference scheme [S1].
+ *   **Strengths:**
+@@ -182,9 +198,9 @@
+     *   Computationally expensive on the encoder side due to the iterative coefficient calculation [S1].
+     *   Performance depends on the quality of the point cloud and the validity of the observations [S1].
+-*   **When to use:** When high-quality, arbitrary viewpoint rendering is required for complex scenes with varied materials and lighting, and explicit geometry is available or can be reconstructed.
+-*   **When not to use:** When computational resources on the encoder are severely limited, or when explicit geometry is not available and cannot be reliably reconstructed.
++*   **When to use:** When high-quality, arbitrary viewpoint rendering is required for complex scenes with varied materials and lighting, and explicit geometry is available or can be reconstructed [S1].
++*   **When not to use:** When computational resources on the encoder are severely limited, or when explicit geometry is not available and cannot be reliably reconstructed [S1].
+ 
+ ## Background
+-The method was proposed in the paper "Surface Light Field Compression Using a Point Cloud Codec" [S1]. It addresses the limitations of multi-view image-based light field approaches by incorporating explicit geometry. The use of B-Spline wavelets for representing view maps is motivated by their ability to compact energy and handle local variations efficiently. The introduction of spatial smoothing for coefficient compression is a key contribution to improve coding efficiency by leveraging spatial correlation in the point cloud [S1].
++The method was proposed in the paper "Surface Light Field Compression Using a Point Cloud Codec" [S1]. It addresses the limitations of multi-view image-based light field approaches by incorporating explicit geometry [S1]. The use of B-Spline wavelets for representing view maps is motivated by their ability to compact energy and handle local variations efficiently [S1]. The introduction of spatial smoothing for coefficient compression is a key contribution to improve coding efficiency by leveraging spatial correlation in the point cloud [S1].
+ 
+ ## Sources

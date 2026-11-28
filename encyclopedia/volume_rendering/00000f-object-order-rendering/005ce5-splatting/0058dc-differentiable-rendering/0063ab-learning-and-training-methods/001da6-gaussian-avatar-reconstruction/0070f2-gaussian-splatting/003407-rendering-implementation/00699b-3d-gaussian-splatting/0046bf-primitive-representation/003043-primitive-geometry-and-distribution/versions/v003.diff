@@ -1,0 +1,116 @@
+--- v002.md
++++ v003.md
+@@ -1,77 +1,69 @@
+ # Primitive Geometry and Distribution
+ 
+-Also called: Gaussian Basis Functions, Splatting Primitives, 3D Gaussian Kernels
+ 
+ ## Overview
+-Primitive Geometry and Distribution defines the mathematical shape, parameterization, and spatial distribution of the basis functions used to represent a 3D scene in Gaussian Splatting [G]. It solves the problem of how to discretize continuous radiance fields into a set of learnable, differentiable volumetric or surface elements that can be efficiently rasterized [G]. What sets this family apart from its siblings is the specific choice of the Gaussian distribution as the primary kernel, characterized by a mean position and a covariance matrix, which allows for analytic integration during volume rendering and efficient gradient propagation [G].
++Primitive Geometry and Distribution defines the mathematical representation of individual splats (primitives) in 3D Gaussian Splatting, specifying how position, orientation, scale, and density are parameterized and projected. It solves the problem of representing complex 3D scenes with a set of differentiable, analytically tractable basis functions that can be efficiently rasterized. It sets itself apart from its siblings by establishing the baseline 3D Gaussian ellipsoid model, whereas alternatives modify the distribution shape (e.g., Student's t, Generalized Exponential), dimensionality (2D disks), or conditioning (Direct Gaussian Splatting) to address specific limitations like geometry accuracy or computational cost.
+ 
+ ## Shared principles
+-The core mechanism of 3D Gaussian Splatting relies on representing the scene as a collection of $N$ 3D Gaussian distributions [G]. Each primitive $i$ is defined by a set of parameters that determine its geometry, appearance, and opacity [G].
++The family shares the core mechanism of representing a scene as a collection of $N$ independent primitives, each defined by a mean position $\boldsymbol{\mu}$, a covariance matrix $\boldsymbol{\Sigma}$, and an opacity $\alpha$. The rendering process relies on projecting these 3D distributions into 2D screen space and alpha-compositing them.
+ 
+ ### Parameterization
+-A single 3D Gaussian primitive is defined by:
+-1. **Mean Position** ($\boldsymbol{\mu}$): A 3D vector $(x, y, z)$ representing the center of the Gaussian in world space [G].
+-2. **Covariance Matrix** ($\boldsymbol{\Sigma}$): A $3 \times 3$ symmetric positive-definite matrix that determines the shape, orientation, and scale of the Gaussian ellipsoid. To ensure positive definiteness and reduce the number of parameters from 6 to 5, $\boldsymbol{\Sigma}$ is typically decomposed using a rotation matrix $\mathbf{R}$ (derived from a quaternion $\mathbf{q}$) and a scaling matrix $\mathbf{S}$ (derived from a scale vector $\mathbf{s}$):
+-$$ \boldsymbol{\Sigma} = \mathbf{R} \mathbf{S} \mathbf{S}^T \mathbf{R}^T $$
+-where $\mathbf{S} = \text{diag}(s_x, s_y, s_z)$ [G].
+-3. **Opacity** ($\alpha$): A scalar value in $[0, 1]$ representing the intrinsic transparency of the primitive [G].
+-4. **Color/Appearance**: Usually represented by spherical harmonics (SH) coefficients or a base color vector, allowing for view-dependent appearance [G].
++Each primitive $i$ is defined by:
++1.  **Mean Position** ($\boldsymbol{\mu}_i$): A 3D vector $(x, y, z)$ in world space.
++2.  **Covariance Matrix** ($\boldsymbol{\Sigma}_i$): A $3 \times 3$ symmetric positive-definite matrix. To ensure positive definiteness and efficient optimization, $\boldsymbol{\Sigma}_i$ is parameterized by a rotation matrix $\mathbf{R}_i$ (derived from a quaternion $\mathbf{q}_i$) and a scaling vector $\mathbf{s}_i = (s_{i,x}, s_{i,y}, s_{i,z})$:
++    $$ \boldsymbol{\Sigma}_i = \mathbf{R}_i \mathbf{S}_i \mathbf{S}_i^T \mathbf{R}_i^T $$
++    where $\mathbf{S}_i = \text{diag}(s_{i,x}, s_{i,y}, s_{i,z})$ [G].
++3.  **Opacity** ($\alpha_i$): A scalar value in $[0, 1]$, often stored as an unbounded variable and activated via a sigmoid function during rendering [G].
++4.  **Appearance**: Typically represented by spherical harmonics (SH) coefficients to capture view-dependent color [G].
+ 
+-### Rendering Equation
+-The rendering process involves projecting these 3D Gaussians onto the 2D image plane [G]. For a camera with pose $\mathbf{C}$ and intrinsics, the 3D covariance $\boldsymbol{\Sigma}$ is transformed into screen space using the Jacobian of the projection transformation $\mathbf{J}$:
+-$$ \boldsymbol{\Sigma}' = \mathbf{J} \mathbf{W} \boldsymbol{\Sigma} \mathbf{W}^T \mathbf{J}^T $$
+-where $\mathbf{W}$ is the view rotation matrix [G]. The projected 2D Gaussian is then evaluated at each pixel covered by its bounding box [G]. The final color $C$ of a pixel is computed via alpha compositing (volume rendering) over all sorted primitives $i$:
+-$$ C = \sum_{i \in N} c_i \alpha_i \prod_{j=1}^{i-1} (1 - \alpha_j) $$
+-where $c_i$ is the color of the $i$-th primitive at the pixel location, and $\alpha_i$ is the accumulated opacity of the $i$-th Gaussian at that pixel, derived from the 2D Gaussian density function [G].
++### Projection
++To render, the 3D covariance $\boldsymbol{\Sigma}_i$ is projected to 2D screen space. Let $\mathbf{W}$ be the view rotation matrix and $\mathbf{J}$ be the Jacobian of the projective transformation. The 2D covariance $\boldsymbol{\Sigma}'_i$ is computed as:
++$$ \boldsymbol{\Sigma}'_i = \mathbf{J} \mathbf{W} \boldsymbol{\Sigma}_i \mathbf{W}^T \mathbf{J}^T $$
++The 2D mean $\boldsymbol{\mu}'_i$ is obtained by projecting the 3D mean $\boldsymbol{\mu}_i$ through the camera projection matrix [G].
+ 
+-### Optimization
+-The parameters are optimized using gradient descent [G]. The gradients flow through the rasterization process back to the mean, covariance, and opacity parameters [G]. The covariance matrix is updated in a way that preserves its positive definiteness, often by optimizing the scale and rotation parameters directly rather than the matrix elements [G].
++### Rasterization and Compositing
++The 2D Gaussian density at a pixel $u$ is evaluated as:
++$$ T_i(u) = \exp\left(-\frac{1}{2} (u - \boldsymbol{\mu}'_i)^T (\boldsymbol{\Sigma}'_i)^{-1} (u - \boldsymbol{\mu}'_i)\right) $$
++The effective opacity at the pixel is $\alpha_i T_i(u)$. Primitives are sorted by depth, and colors are composited using alpha blending:
++$$ C(u) = \sum_{i \in N} c_i \alpha_i T_i(u) \prod_{j=1}^{i-1} (1 - \alpha_j T_j(u)) $$
++where $c_i$ is the color of the $i$-th primitive [G].
+ 
+ ## Subtopics
+ 
+ ### [Direct Gaussian Splatting](3555-direct-gaussian-splatting.md)
+-Direct Gaussian Splatting replaces the standard covariance-derived readout with explicit per-effect parameters to avoid matrix inversions and regression products. It uses a Cholesky precision factor for opacity and a factorized query-to-position regression operator with learnable per-dimension coupling. This approach is chosen when computational efficiency in the readout phase is critical, particularly for N-dimensional splatting where standard Gaussian covariance handling becomes expensive. See [Direct Gaussian Splatting](3555-direct-gaussian-splatting.md).
++Direct Gaussian Splatting (dGS) replaces the covariance-derived conditioning of standard N-DGS with explicit per-primitive parameters, removing the need for per-primitive matrix inversions and regression products during rendering. It solves the computational bottleneck of recovering conditional mean, opacity, and covariance from a joint distribution by directly parameterizing the opacity precision and position regression operator. Unlike N-DGS, which couples position and opacity through shared covariance blocks requiring expensive linear algebra, dGS separates these effects using a Cholesky precision factor for opacity and a factorized query-to-position regression operator with learnable per-dimension coupling.
+ 
+ ### [3D Student's t Distribution Splatting](4352-3d-student-s-t-distribution-splatting.md)
+-This variant replaces Gaussian basis functions with 3D Student's t distributions as mixture components. It utilizes a principled sampler (SGHMC) and employs positive/negative components to improve parameter efficiency. This method is suitable for scenes requiring heavier-tailed distributions to model outliers or complex structures more efficiently than Gaussians. See [3D Student's t Distribution Splatting](4352-3d-student-s-t-distribution-splatting.md).
++3D Student's t Distribution Splatting (SSS) replaces the 3D Gaussian primitives of 3D Gaussian Splatting (3DGS) with flexible Student's t distributions and extends the splatting scheme to include both positive (splatting) and negative (scooping) density components. It solves the expressivity limitations of monotonic Gaussian mixtures by allowing fat-tailed distributions and non-monotonic density modeling, achieving higher parameter efficiency (reducing component counts by up to 82%) while maintaining or improving rendering quality. Unlike 3DGS, SSS requires Stochastic Gradient Hamiltonian Monte Carlo (SGHMC) for optimization to prevent mode collapse in the degree-of-freedom parameter.
+ 
+ ### [Generalized Exponential Splatting](4684-generalized-exponential-splatting.md)
+-Generalized Exponential Splatting (GES) replaces Gaussian kernels with Generalized Exponential Functions (GEF). It introduces a learnable shape parameter $\beta$ for each splat, allowing the model to better capture signals with sharp edges and high-frequency content. This reduces the number of particles required, thereby lowering the memory footprint while maintaining competitive rendering quality. It is chosen when high-frequency details are prevalent and Gaussian smoothing is insufficient. See [Generalized Exponential Splatting](4684-generalized-exponential-splatting.md).
++Generalized Exponential Splatting (GES) is a 3D scene representation method that replaces the Gaussian basis functions of 3D Gaussian Splatting with Generalized Exponential Functions (GEF). It solves the problem of high memory footprint and inefficient representation of sharp edges by introducing a learnable shape parameter $\beta$ for each primitive, allowing the splat to adapt its tail behavior. Unlike standard Gaussians which act as low-pass filters requiring many small primitives for high-frequency content, GES can model signals with abrupt discontinuities with significantly fewer components, reducing memory usage by over 50% and increasing rendering speed by up to 39%.
+ 
+ ### [2D Gaussian Splatting](6068-2d-gaussian-splatting.md)
+-2D Gaussian Splatting replaces 3D ellipsoids with 2D disks (oriented surfels) to improve spatial localization and recover high-resolution normal maps. This technique is specifically designed for surface reconstruction, where the zero-thickness nature of disks provides more accurate geometry than volumetric 3D Gaussians. It is the preferred choice when mesh extraction and normal map accuracy are primary goals. See [2D Gaussian Splatting](6068-2d-gaussian-splatting.md).
++2D Gaussian Splatting (2DGS) is a surface reconstruction and novel view synthesis technique that replaces the volumetric 3D Gaussian primitives of [3D Gaussian Splatting](1795-3d-gaussian-splatting.md) with oriented 2D disks (surfels). It solves the problem of poor spatial localization and inaccurate geometry extraction inherent in 3D Gaussians, which are symmetric and unbounded. By aligning primitives with local surface tangent planes, 2DGS enables high-resolution normal map recovery and accurate mesh extraction. It sets itself apart from [3D Gaussian Splatting](1795-3d-gaussian-splatting.md) by using surface-centric 2D disks rather than 3D ellipsoids, and from [Flattened Gaussian Ellipsoid Rendering](1667-flattened-gaussian-ellipsoid-rendering.md) by natively supporting anisotropic ellipsoidal kernels with near-zero determinant covariance within a differentiable volume rendering framework.
+ 
+ #### LinPrim Octahedron Representation
+-**Definition**
+-A scene representation using transparent polyhedra (octahedra) bounded by triangular faces with homogeneous density, optimized for differentiable volumetric rendering [S1].
+-
+-**Step**
+-- Restrict vertex positions to lie on the coordinate axes relative to the center to prevent degenerate cases and non-triangular faces [S1].
+-- Enforce symmetry by choosing a single distance to describe opposing corners, so each pair of opposite vertices shares the same distance from the center [S1].
+-- Optimize a rotation quaternion for each primitive to allow arbitrary orientation in space [S1].
+-
+-**Parameter**
+-- Octahedra memory requirement: 11 floats per primitive (omitting color), comprising center, rotation, corner distances, and opacity [S1].
+-- Spherical Harmonics (SH) coefficients: 48 floats per primitive (Degree 2), stored to capture view-dependent appearance [S1].
++- **Definition**: A scene representation using transparent polyhedra (octahedra) bounded by triangular faces with homogeneous density, optimized for differentiable volumetric rendering [S1].
++- **Steps**: Restrict vertex positions to lie on the coordinate axes relative to the center to prevent degenerate cases and non-triangular faces [S1]. Enforce symmetry by choosing a single distance to describe opposing corners, so each pair of opposite vertices shares the same distance from the center [S1]. Optimize a rotation quaternion for each primitive to allow arbitrary orientation in space [S1].
++- **Parameters**: Octahedra memory requirement is 11 floats per primitive (omitting color), comprising center, rotation, corner distances, and opacity [S1]. Spherical Harmonics (SH) coefficients are 48 floats per primitive (Degree 2), stored to capture view-dependent appearance [S1].
+ 
+ #### High-Opacity Gaussians
+-**Definition**
+-A modification where regular capped Gaussian primitives are converted to high-opacity Gaussians to boost modeling of opaque surfaces with fewer primitives [S2].
+-
+-**Step**
+-- Replace the opacity activation function with `abs()` and clamp blending weights to 1 from above during rendering [S2].
+-
+-**Parameter**
+-- Activation switch point: Midpoint of training, specifically 15K iterations [S2].
++- **Definition**: A modification where regular capped Gaussian primitives are converted to high-opacity Gaussians to boost modeling of opaque surfaces with fewer primitives [S2].
++- **Steps**: Replace the opacity activation function with `abs()` and clamp blending weights to 1 from above during rendering [S2].
++- **Parameters**: Activation switch point is the midpoint of training, specifically 15K iterations [S2].
+ 
+ #### Planar Gaussian Splatting
+-**Definition**
+-Uses planarity loss for low-frequency surfaces [S3, unofficial]. Uses planar regularization plus single-view + multi-view depth-normal consistency [S3, unofficial].
++- **Definition**: Uses planarity loss for low-frequency surfaces [S3, unofficial]. Uses planar regularization plus single-view + multi-view depth-normal consistency [S3, unofficial].
++
++#### Volumetric Shading System (VSS)
++- **Definition**: A method that represents opaque objects with Gaussian density distribution to make the visibility function differentiable, suitable for generative pose estimation [S4].
++- **Pitfalls**: VSS is hard to handle geometry with high frequency such as sharp corners, and the rendered image is blurry compared with traditional rendering methods [S4].
+ 
+ ## Background
+-The concept of using Gaussian distributions for scene representation originated with the seminal work on 3D Gaussian Splatting by Kerbl et al. (2023) [G]. The LinPrim approach represents an alternative primitive geometry, exploring polyhedral shapes for volumetric rendering [S1]. High-opacity modifications were introduced to improve the modeling of opaque surfaces [S2].
++3D Gaussian Splatting was introduced by Kerbl et al. in 2023 [G]. It emerged as a real-time alternative to Neural Radiance Fields (NeRFs), leveraging the efficiency of rasterization while maintaining high-fidelity rendering. The method builds on the concept of volumetric rendering but replaces the implicit neural network with explicit, differentiable Gaussian primitives. The family of variants described here has developed to address specific weaknesses of the original Gaussian ellipsoid, such as poor geometry representation (leading to 2DGS and LinPrim), limited expressivity for sharp features (leading to GES and SSS), and computational overhead in conditioning (leading to dGS).
+ 
+ ## Sources
+ [S1] LinPrim: Linear Primitives for Differentiable Volumetric Rendering, https://arxiv.org/abs/2501.16312, fetched 2026-10-26
+ [S2] Taming 3DGS: High-Quality Radiance Fields with Limited Resources, https://doi.org/10.1145/3680528.3687694, fetched 2026-10-30
+-[S3] Gaussian Splatting — All Variants Cheat Sheet, https://www.chengjianglong.com/ml/3D-Gaussian_Splatting_SOTA_Updated.html, fetched 2026-10-27 (unofficial)+[S3] Gaussian Splatting — All Variants Cheat Sheet, https://www.chengjianglong.com/ml/3D-Gaussian_Splatting_SOTA_Updated.html, fetched 2026-10-27 (unofficial)
++[S4] Jrender: An efficient differentiable rendering library based on Jittor, https://www.sciencedirect.com/science/article/pii/S1524070323000322, fetched 2026-11-01

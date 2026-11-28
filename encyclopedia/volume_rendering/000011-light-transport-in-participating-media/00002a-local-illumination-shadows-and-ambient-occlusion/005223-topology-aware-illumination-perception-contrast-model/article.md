@@ -1,0 +1,161 @@
+# Topology-aware illumination perception contrast model
+
+Also called: Perceptual illumination, Distance illumination, Saliency illumination, Topology-aware lighting
+
+## Overview
+The Topology-aware illumination perception contrast model is a volume rendering framework that utilizes topological attributes derived from a contour tree to automatically generate distinct illuminations for subregions, allowing users to perceive structural differences (such as importance and topological distance) via lighting cues [S1]. It specifically addresses the problem of inner structures being obscured by outer structures in semi-transparent volumes by applying less illuminance to outside structures and higher illuminance to inner structures [S1]. Unlike standard lighting models that treat all geometry equally or rely solely on spatial distance, this method maximizes visual perception differences between neighboring objects by optimizing luminance contrast based on topological saliency and persistence [S1].
+
+## How it works
+The method operates in two phases: an Initialization Phase and an Optimization Phase. It requires a pre-computed contour tree of the volume data, which is first simplified to reduce noise [S1].
+
+### Inputs and Outputs
+*   **Inputs:**
+    *   Simplified contour tree of the volume data [S1].
+    *   Initial root luminance $L_0$ (user-specified) [S1].
+    *   Initial illumination contrast ratio $\gamma_0$ (user-specified, range $[0, 1]$) [S1].
+    *   Topological attributes for each branch: persistence ($p$), volume ($v$), hypervolume ($hv$), and saddle value ($s$) [S1].
+    *   User-modulated weights: $w$ (for saliency/distance models) and $V$ (lighting speed in medium) [S1].
+*   **Outputs:**
+    *   Illumination coefficients ($k_a, k_d, k_s$) for each branch in the contour tree [S1].
+    *   Luminance distribution across the contour tree [S1].
+
+### Data Structures
+The core data structure is the **Contour Tree**, where each node represents a branch (a connected component of a level set) [S1]. Each branch node stores:
+*   **Topological Attributes:**
+    *   $p_i$: Persistence of branch $i$ [S1].
+    *   $v_i$: Volume of branch $i$ [S1].
+    *   $hv_i$: Hypervolume of branch $i$ [S1].
+    *   $s_i$: Saddle value of branch $i$ [S1].
+    *   $depth_i$: Topological depth (distance from root) [S1].
+    *   $n_{ci}$: Number of children of branch $i$ [S1].
+    *   $n_{si}$: Number of siblings (branches sharing the same parent) [S1].
+*   **Illumination State:**
+    *   $L_i$: Luminance of branch $i$ [S1].
+    *   $k_{d,i}$: Diffuse coefficient for branch $i$ [S1].
+
+### Formulas and Definitions
+
+**1. Base Illumination Model (Blinn-Phong)**
+The color $C$ of a voxel is computed as [S1]:
+$$ C = (k_a + k_d (N \cdot L)) C_{tf} + k_s (N \cdot H)^n $$
+Where:
+*   $k_a, k_d, k_s$: Ambient, diffuse, and specular coefficients [S1].
+*   $N$: Normalized gradient vector of the voxel [S1].
+*   $L$: Normalized lighting direction [S1].
+*   $H$: Normalized half-way direction [S1].
+*   $n$: Shininess exponent [S1].
+*   $C_{tf}$: Color defined by the transfer function [S1].
+
+**2. Topology-Aware Attenuation Factor ($f_{att}$)**
+Light intensity weakens over distance. The attenuation factor is defined using Stokes' law adapted for topology [S1]:
+$$ f_{att} = e^{-\alpha z} $$
+Where:
+*   $z$: Modeled as the persistence $p$ of the branch [S1].
+*   $\alpha$: Attenuation coefficient derived from Stokes' law [S1]:
+    $$ \alpha = \frac{2 \eta_{visc} \eta_{freq}^2}{3 \rho V^3} $$
+    *   $\eta_{visc}$: Dynamic viscosity (0.001002 P·s for water at 20°C) [S1].
+    *   $\rho$: Density (998.2071 kg/m³ for water at 20°C) [S1].
+    *   $\eta_{freq}$: Modeled as the number of siblings $n_{si}$ [S1].
+    *   $V$: Lighting speed in the medium (user-controlled) [S1].
+
+The modified Blinn-Phong equation becomes [S1]:
+$$ C = (k_a + k_d f_{att} (N \cdot L)) C_{tf} + k_s f_{att} (N \cdot H)^n $$
+
+**3. Just-Noticeable-Difference (JND)**
+The minimal luminance change $\Delta L_i$ required for an observer to perceive a difference, based on luminance $L_i$ [S1]:
+$$ \log(\Delta L_i) = \begin{cases} -2.86 & \text{if } \log(L_i) < -3.94 \\ (0.405 \log(L_i) + 1.6)^{2.18} - 2.86 & \text{if } -3.94 \le \log(L_i) < -1.44 \\ \log(L_i) - 0.395 & \text{if } -1.44 \le \log(L_i) < -0.0184 \\ (0.294 \log(L_i) + 0.65)^{2.7} - 0.72 & \text{if } -0.0184 \le \log(L_i) < 1.9 \\ \log(L_i) - 1.255 & \text{if } \log(L_i) \ge 1.9 \end{cases} $$
+
+**4. Illumination Contrast Ratio ($\gamma$)**
+Defined as the ratio between parent branch luminance and child branch luminance [S1]:
+$$ \gamma = \frac{L_{parent}}{L_{child}} $$
+Range $[0, 1]$. $\gamma=0$ implies the lower illumination (parent) is black; $\gamma=1$ implies equal luminance [S1]. The model aims for $\gamma < 1$ so children (inner structures) have higher luminance than parents (outer structures) [S1].
+
+**5. Saliency Illumination ($k_d$ function)**
+For "Saliency Illumination," $k_d$ is a function of topological saliency $S_{ri}$ [S1]:
+$$ k_d = w S_{ri} $$
+Where $w$ is a user weight [S1]. $S_{ri}$ is calculated using a Gaussian weighting function $\omega_{ij}$ based on topological depth difference $d(c_i, c_j)$ and maximum depth $r$ [S1]:
+$$ \omega_{ij} = e^{-\frac{d(c_i, c_j)^2}{r^2}} $$
+
+**6. Distance Illumination ($k_d$ function)**
+For "Distance Illumination," $k_d$ is a function of topological distance (depth $z$) using a Sigmoid function [S1]:
+$$ k_d = \frac{w}{2} \frac{1}{1 + e^{-z}} $$
+This assigns higher $k_d$ to deeper (inner) branches [S1].
+
+**7. Optimization Constraints**
+The optimization must satisfy [S1]:
+1.  $\Delta L_i \ge \Delta L_{JND, i}$
+2.  $\gamma_i \ge \gamma_0$
+3.  $L_i \ge L_{i,0}$ (where $L_{i,0}$ is the initial luminance from the Initialization Phase)
+
+### Algorithm Steps and Pseudocode
+The method executes two phases. Phase 1 initializes luminance using JND recursion. Phase 2 optimizes luminance distribution across depth levels, parent-to-children, and among siblings, while updating the contrast ratio via a residue flow model [S1].
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_jnd(L):
+    log_L = math.log(L)
+    if log_L < -3.94: return math.exp(-2.86)
+    elif log_L < -1.44: return math.exp((0.405 * log_L + 1.6)**2.18 - 2.86)
+    elif log_L < -0.0184: return math.exp(log_L - 0.395)
+    elif log_L < 1.9: return math.exp((0.294 * log_L + 0.65)**2.7 - 0.72)
+    else: return math.exp(log_L - 1.255)
+
+def initialize_luminance(node, parent_L):
+    if node.is_root:
+        node.L = L0
+    else:
+        delta_JND = compute_jnd(parent_L)
+        node.L = parent_L + delta_JND
+    for child in node.children:
+        initialize_luminance(child, node.L)
+
+def optimize_luminance(tree, gamma0, Q, K):
+    gamma = gamma0
+    prev_base_L = L0
+    for depth in range(1, tree.max_depth + 1):
+        base_L = prev_base_L / gamma
+        nodes_at_prev = tree.nodes_at_depth(depth - 1)
+        nodes_at_curr = tree.nodes_at_depth(depth)
+        
+        for parent in nodes_at_prev:
+            for child in parent.children:
+                init_L = child.L
+                delta_L = abs(init_L - parent.L)
+                if delta_L >= compute_jnd(parent.L):
+                    final_L = init_L
+                else:
+                    final_L = init_L + (compute_jnd(parent.L) - delta_L)
+                child.L = final_L
+                child.k_d = compute_kd(child, depth)
+        
+        for child in nodes_at_curr:
+            fb = importance_triangle_area(child.p, child.v, child.hv)
+            fd = (child.s - min_sibling_s) / (max_sibling_s - min_sibling_s)
+            child.L = base_L * fb * fd
+            
+        target_child = nodes_at_curr[0]
+        delta_h = (1.0 / Q) * (target_child.p / (K * target_child.n_ci))
+        gamma = (1.0 - delta_h) * gamma
+        prev_base_L = base_L
+```
+
+### Edge Cases and Pitfalls
+*   **Precision:** The JND formula involves logarithms and piecewise functions; care must be taken with $L_i \le 0$ (luminance must be positive) [S1].
+*   **Boundary Conditions:** $\gamma=0$ results in black parent branches; $\gamma=1$ results in no contrast between parent and child [S1].
+*   **Noise:** Raw contour trees may contain noise affecting topology; simplification is required before attribute extraction [S1].
+*   **Parameter Control:** $V$ is user-controlled, and $Q$ is a parameter in the head loss calculation [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Strengths:** Automatically emphasizes inner structures and important topological features without manual tuning of per-object lighting. Maximizes perceptual contrast based on human vision models (JND) [S1].
+*   **Limitations:** Requires pre-computation of a contour tree. The model assumes a specific relationship between topological depth and visual importance (inner = more important), which may not hold for all datasets [S1].
+*   **When to use:** When the goal is to reveal internal structures in complex, nested volumetric data (e.g., biological structures) and topological hierarchy is meaningful [S1].
+*   **When not to use:** For flat or non-nested data where topological depth does not correlate with visual importance [S1].
+
+## Background
+The method was introduced by Zhou et al. in 2016 [S1]. It builds upon previous work on topology-aware visualization, such as the use of contour trees for data segmentation and opacity transfer functions [S1]. The framework integrates concepts from psychophysics (JND) and fluid dynamics (residue flow model) to model light attenuation and contrast distribution in a topological context [S1]. It is part of the broader field of topology-aware illumination design, which includes sub-methods like "Saliency Illumination" and "Distance Illumination" [S1].
+
+## Sources
+[S1] Topology-aware illumination design for volume rendering, https://doi.org/10.1186/s12859-016-1177-4, fetched 2026-10-26

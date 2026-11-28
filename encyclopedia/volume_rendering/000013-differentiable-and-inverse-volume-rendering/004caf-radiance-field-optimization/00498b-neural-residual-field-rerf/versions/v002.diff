@@ -1,0 +1,330 @@
+--- v001.md
++++ v002.md
+@@ -14,17 +14,19 @@
+ ### Data Structures
+ 1.  **Explicit Feature Grid ($V_\sigma, V_c$):**
+-    *   $V_\sigma$: Explicit density grid. Dimensions $N_x \times N_y \times N_z$.
+-    *   $V_c$: Color feature grid. Dimensions $N_x \times N_y \times N_z$.
++    *   $V_\sigma$: Explicit density grid. Dimensions $N_x \times N_y \times N_z$ [S1].
++    *   $V_c$: Color feature grid. Dimensions $N_x \times N_y \times N_z$ [S1].
+     *   Total feature dimension $C=13$ (union of density and color features) [S1].
+ 2.  **Dense Motion Field ($D_t$):**
+-    *   Dimensions $3 \times N_x \times N_y \times N_z$.
++    *   Dimensions $3 \times N_x \times N_y \times N_z$ [S1].
+     *   Contains warping information (position offset) from frame $t$ to $t-1$ [S1].
+ 3.  **Compact Motion Grid ($M_t$):**
+-    *   Generated from $D_t$ via motion pooling. Represents the position offset from the current frame to the previous [S1].
++    *   Generated from $D_t$ via motion pooling [S1].
++    *   Represents the position offset from the current frame to the previous [S1].
+ 4.  **Residual Grid ($r_t$):**
+-    *   Dimensions $C \times N_x \times N_y \times N_z$.
++    *   Dimensions $C \times N_x \times N_y \times N_z$ [S1].
+     *   Initialized to zero. Stores residuals to compensate for warping errors and newly observed regions [S1].
+ 5.  **Global MLP ($\Phi$):**
+-    *   Two hidden layers, 128 channels each. Decodes color features to RGB [S1].
++    *   Two hidden layers, 128 channels each [S1].
++    *   Decodes color features to RGB [S1].
+ 
+ ### Parameters
+@@ -44,8 +46,8 @@
+ ### Numbered Steps
+ 
+-**Stage 1: Explicit Feature Grid Optimization (Frame 0)**
++**Stage 1: Explicit Feature Grid Optimization (Frame 0)** [S1]
+ 1.  Construct an explicit density grid $V_\sigma$ and color feature grid $V_c$ for the first frame using an initialization resolution (e.g., $125^3$) [S1].
+ 2.  For each training iteration:
+-    a. Cast rays through pixels. Sample points $p$ along rays.
++    a. Cast rays through pixels. Sample points $p$ along rays [S1].
+     b. Query density $\sigma(p)$ and color features $c_{feat}(p)$ via trilinear interpolation from $V_\sigma$ and $V_c$ [S1].
+     c. Apply softplus activation to density: $\sigma_{final}(p) = \text{softplus}(\sigma(p))$ [S1].
+@@ -55,7 +57,7 @@
+     g. Train for 5,000 iterations (coarse) and 16,000 iterations (fine) [S1].
+ 
+-**Stage 2: Sequential Optimization for Frame $t > 0$**
++**Stage 2: Sequential Optimization for Frame $t > 0$** [S1]
+ 1.  **Motion Grid Estimation:**
+-    a. Sample points $p_t$ along rays in frame $t$.
++    a. Sample points $p_t$ along rays in frame $t$ [S1].
+     b. Estimate dense motion field $D_t$ by warping points from frame $t-1$ to $t$ and minimizing photometric loss and TV loss on $D_t$ [S1].
+     c. Progressively upscale $D_t$ resolution as defined in parameters [S1].
+@@ -68,5 +70,5 @@
+     a. Initialize residual grid $r_t$ with zero values [S1].
+     b. For each training iteration:
+-        i. Sample points $p_t$ along rays in frame $t$.
++        i. Sample points $p_t$ along rays in frame $t$ [S1].
+         ii. Query base features $\hat{f}_t(p_t)$ via trilinear interpolation from warped grid [S1].
+         iii. Query residual features $r_t(p_t)$ via trilinear interpolation from $r_t$ [S1].
+@@ -99,100 +101,104 @@
+ 
+ ```python
+-import torch
+-import torch.nn as nn
+-import torch.nn.functional as F
++def trilinear_interp(grid, points):
++    # grid: (D, D, D) or (D, D, D, C)
++    # points: (N, 3) coordinates in [0, D-1]
++    # Returns interpolated values at points
++    x0 = floor(points[:, 0])
++    y0 = floor(points[:, 1])
++    z0 = floor(points[:, 2])
++    x1 = clamp(x0 + 1, max=grid.shape[0]-1)
++    y1 = clamp(y0 + 1, max=grid.shape[1]-1)
++    z1 = clamp(z0 + 1, max=grid.shape[2]-1)
++    dx = points[:, 0] - x0
++    dy = points[:, 1] - y0
++    dz = points[:, 2] - z0
++    
++    if grid.dim() == 3:
++        v00 = grid[x0, y0, z0]
++        v10 = grid[x1, y0, z0]
++        v01 = grid[x0, y1, z0]
++        v11 = grid[x1, y1, z0]
++        v001 = grid[x0, y0, z1]
++        v101 = grid[x1, y0, z1]
++        v011 = grid[x0, y1, z1]
++        v111 = grid[x1, y1, z1]
++        w000 = (1-dx)*(1-dy)*(1-dz)
++        w100 = dx*(1-dy)*(1-dz)
++        w010 = (1-dx)*dy*(1-dz)
++        w110 = dx*dy*(1-dz)
++        w001 = (1-dx)*(1-dy)*dz
++        w101 = dx*(1-dy)*dz
++        w011 = (1-dx)*dy*dz
++        w111 = dx*dy*dz
++        return (w000*v00 + w100*v10 + w010*v01 + w110*v11 +
++                w001*v001 + w101*v101 + w011*v011 + w111*v111)
++    else:
++        v00 = grid[x0, y0, z0, :]
++        v10 = grid[x1, y0, z0, :]
++        v01 = grid[x0, y1, z0, :]
++        v11 = grid[x1, y1, z0, :]
++        v001 = grid[x0, y0, z1, :]
++        v101 = grid[x1, y0, z1, :]
++        v011 = grid[x0, y1, z1, :]
++        v111 = grid[x1, y1, z1, :]
++        w000 = (1-dx)*(1-dy)*(1-dz)
++        w100 = dx*(1-dy)*(1-dz)
++        w010 = (1-dx)*dy*(1-dz)
++        w110 = dx*dy*(1-dz)
++        w001 = (1-dx)*(1-dy)*dz
++        w101 = dx*(1-dy)*dz
++        w011 = (1-dx)*dy*dz
++        w111 = dx*dy*dz
++        return (w000*v00 + w100*v10 + w010*v01 + w110*v11 +
++                w001*v001 + w101*v101 + w011*v011 + w111*v111)
++
++def volume_render(sigma, color, ray_origins, ray_dirs, near, far, num_samples):
++    # Standard volume rendering logic
++    # The sources do not provide the exact volume rendering implementation details. [G]
++    # Typically: sample points along ray, compute transmittance T, accumulate color.
++    pass
++
++def tv_loss(grid):
++    # Total variation loss on grid
++    diff_x = grid[:, 1:, :] - grid[:, :-1, :]
++    diff_y = grid[:, :, 1:] - grid[:, :, :-1]
++    diff_z = grid[1:, :, :] - grid[:-1, :, :]
++    return sqrt(diff_x**2 + diff_y**2 + diff_z**2).mean()
+ 
+ class ReRF:
+     def __init__(self, grid_size=125, channels=13):
+-        # Initialize grids
+-        self.V_sigma = nn.Parameter(torch.randn(grid_size, grid_size, grid_size))
+-        self.V_c = nn.Parameter(torch.randn(grid_size, grid_size, grid_size, channels))
+-        
+-        # Global MLP
+-        self.mlp = nn.Sequential(
+-            nn.Linear(channels, 128),
+-            nn.ReLU(),
+-            nn.Linear(128, 128),
+-            nn.ReLU(),
+-            nn.Linear(128, 3) # RGB
++        self.V_sigma = randn(grid_size, grid_size, grid_size)
++        self.V_c = randn(grid_size, grid_size, grid_size, channels)
++        self.mlp = Sequential(
++            Linear(channels, 128),
++            ReLU(),
++            Linear(128, 128),
++            ReLU(),
++            Linear(128, 3)
+         )
+-        
+-        self.optimizer = torch.optim.Adam(list(self.mlp.parameters()) + 
+-                                          [self.V_sigma, self.V_c], lr=0.002)
++        self.optimizer = Adam(list(self.mlp.parameters()) + [self.V_sigma, self.V_c], lr=0.002)
+         self.channels = channels
+         self.grid_size = grid_size
+ 
+-    def trilinear_interp(self, grid, points):
+-        # points: (N, 3) normalized to [-1, 1]
+-        # grid: (D, D, D) or (D, D, D, C)
+-        # Returns interpolated values at points
+-        # Implementation detail: Use F.grid_sample or custom kernel
+-        # Assuming points are in [-1, 1] range
+-        grid_expanded = grid.unsqueeze(0).unsqueeze(0) # (1, 1, D, D, D)
+-        points_grid = points.unsqueeze(0).unsqueeze(0).unsqueeze(0) # (1, 1, 1, 1, 3)
+-        
+-        # For density (scalar grid)
+-        if grid.dim() == 3:
+-            interp = F.grid_sample(grid_expanded, points_grid, align_corners=True)
+-            return interp.squeeze()
+-        # For feature grid (C channels)
+-        else:
+-            # grid_sample expects (N, C, H, W) or (N, C, D, H, W)
+-            # Reshape for 3D sampling
+-            N, C, D, H, W = grid_expanded.shape
+-            # points_grid shape: (1, 1, 1, 1, 3)
+-            # F.grid_sample for 3D: input (N, C, D, H, W), grid (N, H_out, W_out, D_out, 3)
+-            # Simplified for single point batch:
+-            interp = F.grid_sample(grid_expanded, points_grid, align_corners=True)
+-            return interp.squeeze()
+-
+-    def softplus(self, x):
+-        return F.softplus(x)
+-
+-    def volume_render(self, sigma, color, ray_dirs, ray_origins, near, far):
+-        # Standard volume rendering
+-        # Sample points along ray
+-        # Query sigma and color
+-        # Compute transmittance and accumulated color
+-        # Placeholder for standard volumetric rendering logic
+-        pass
+-
+-    def tv_loss(self, grid):
+-        # Total variation loss
+-        # Sum of squared differences between adjacent voxels
+-        # grid: (D, D, D)
+-        diff_x = grid[:, 1:, :] - grid[:, :-1, :]
+-        diff_y = grid[:, :, 1:] - grid[:, :, :-1]
+-        diff_z = grid[1:, :, :] - grid[:-1, :, :]
+-        return torch.sqrt(diff_x**2 + diff_y**2 + diff_z**2).mean()
+-
+-    def train_frame_0(self, images, rays, num_coarse=5000, num_fine=16000):
+-        # Stage 1: Explicit Feature Grid
++    def train_frame_0(self, rays, targets, num_coarse=5000, num_fine=16000):
++        # Stage 1: Explicit Feature Grid Optimization
+         for i in range(num_coarse + num_fine):
+             self.optimizer.zero_grad()
+-            
+-            # Sample rays
+             ray_origins, ray_dirs, targets = rays
+             
+-            # Query grid
+-            sigma = self.trilinear_interp(self.V_sigma, ray_origins)
+-            c_feat = self.trilinear_interp(self.V_c, ray_origins)
+-            
+-            # Activate density
+-            sigma = self.softplus(sigma)
+-            
+-            # Decode color
++            sigma = trilinear_interp(self.V_sigma, ray_origins)
++            c_feat = trilinear_interp(self.V_c, ray_origins)
++            
++            sigma = softplus(sigma)
+             colors = self.mlp(c_feat)
+             
+-            # Render
+-            rendered_colors = self.volume_render(sigma, colors, ray_dirs, ray_origins)
+-            
+-            # Loss
+-            loss_render = torch.mean((rendered_colors - targets)**2)
+-            
+-            # TV Loss (active only after step 1000)
++            rendered_colors = volume_render(sigma, colors, ray_origins, ray_dirs, near=0.0, far=1.0, num_samples=128)
++            
++            loss_render = mean((rendered_colors - targets)**2)
++            
+             loss_tv = 0
+             if 1000 <= i <= 12000:
+-                loss_tv = self.tv_loss(self.V_sigma)
++                loss_tv = tv_loss(self.V_sigma)
+                 
+             loss = loss_render + 0.000016 * loss_tv
+@@ -200,59 +206,41 @@
+             self.optimizer.step()
+ 
+-    def train_frame_t(self, prev_feature_grid, current_images, current_rays, 
+-                      motion_grid_size=125, residual_grid_size=125):
+-        # Stage 2: Motion and Residual
++    def train_frame_t(self, prev_feature_grid, current_rays, targets, motion_grid_size=125, residual_grid_size=125):
++        # Stage 2: Sequential Optimization
+         # 1. Motion Grid Optimization
+-        # Estimate dense motion field D_t
+-        # Generate compact motion grid M_t via pooling
+-        # Optimize M_t using L_deform
+-        # ... (Implementation of motion pooling and optimization)
++        # Estimate dense motion field D_t and generate compact motion grid M_t via motion pooling.
++        # Optimize M_t using L_deform for 3000 (coarse) + 16000 (fine) iterations with lr=1e-4.
++        # [S1] Motion pooling and dense field estimation details are implementation-specific.
+         
+-        # 2. Warp previous features
+-        # f_hat_t = warp(prev_feature_grid, M_t)
++        # 2. Warping
++        f_hat_t = warp(prev_feature_grid, M_t)
+         
+         # 3. Residual Grid Optimization
+-        r_t = nn.Parameter(torch.zeros(residual_grid_size, residual_grid_size, residual_grid_size, self.channels))
+-        optimizer_r = torch.optim.Adam([r_t], lr=0.1) # Density LR 0.1, Color LR 0.11 handled by separate param or mask
++        r_t = zeros(residual_grid_size, residual_grid_size, residual_grid_size, self.channels)
++        optimizer_r = Adam([r_t], lr=0.1)
+         
+         for i in range(5000 + 16000):
+             optimizer_r.zero_grad()
+-            
+             ray_origins, ray_dirs, targets = current_rays
+             
+-            # Query base features
+-            f_hat = self.trilinear_interp(f_hat_t, ray_origins)
+-            
+-            # Query residual
+-            r = self.trilinear_interp(r_t, ray_origins)
+-            
+-            # Final feature
++            f_hat = trilinear_interp(f_hat_t, ray_origins)
++            r = trilinear_interp(r_t, ray_origins)
++            
+             f_final = f_hat + r
+             
+-            # Decode and Render
+-            colors = self.mlp(f_final)
+-            rendered_colors = self.volume_render(None, colors, ray_dirs, ray_origins) # Sigma not needed for color loss if using feature grid directly? 
+-            # Note: ReRF uses feature grid for both density and color. 
+-            # The density is part of the feature grid. 
+-            # Need to extract density from f_final for volume rendering.
+-            
+-            # Extract density (first channel or specific index)
+-            sigma = self.softplus(f_final[..., 0]) # Assuming density is first channel
++            sigma = softplus(f_final[..., 0])
+             c_feat = f_final[..., 1:]
+             colors = self.mlp(c_feat)
+             
+-            rendered_colors = self.volume_render(sigma, colors, ray_dirs, ray_origins)
+-            
+-            loss_render = torch.mean((rendered_colors - targets)**2)
+-            
+-            # TV Loss on density residual
++            rendered_colors = volume_render(sigma, colors, ray_origins, ray_dirs, near=0.0, far=1.0, num_samples=128)
++            
++            loss_render = mean((rendered_colors - targets)**2)
++            
+             loss_tv = 0
+             if 1000 <= i <= 12000:
+-                # TV on density component of residual
+                 r_density = r_t[..., 0]
+-                loss_tv = self.tv_loss(r_density)
++                loss_tv = tv_loss(r_density)
+                 
+-            # L1 Loss on residual
+-            loss_l1 = torch.mean(torch.abs(r_t))
++            loss_l1 = mean(abs(r_t))
+             
+             loss = loss_render + 0.000016 * loss_tv + 0.01 * loss_l1
+@@ -269,6 +257,6 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Sequential optimization per frame. Motion grid optimization takes 19,000 iterations (3k coarse + 16k fine). Residual grid optimization takes 21,000 iterations (5k coarse + 16k fine) [S1].
+-*   **Memory Complexity:** Scales with grid resolution. Base resolution $125^3$, up to $250^3$. Feature dimension 13 [S1].
++*   **Time Complexity:** Sequential optimization per frame [S1]. Motion grid optimization takes 19,000 iterations (3k coarse + 16k fine) [S1]. Residual grid optimization takes 21,000 iterations (5k coarse + 16k fine) [S1].
++*   **Memory Complexity:** Scales with grid resolution [S1]. Base resolution $125^3$, up to $250^3$. Feature dimension 13 [S1].
+ *   **Performance:** Achieves three orders of magnitude compression rate compared to per-frame-based neural representations [S1].
+ *   **Strengths:** Compact representation, supports online streaming, allows pause/play/fast-forward like 2D video [S1].

@@ -1,0 +1,514 @@
+--- v004.md
++++ v005.md
+@@ -4,136 +4,34 @@
+ 
+ ## Overview
+-An interactive voxel volume renderer using path tracing that runs in modern browsers via WebGL 2.0. It renders 3D scalar fields by casting rays from the camera through the volume, accumulating color and opacity along the ray, and applying lighting/shadowing [S1, unofficial]. It differs from standard hardware-accelerated ray casting by integrating a Phong-like lighting model with soft shadows calculated via secondary light-tracing rays, rather than relying solely on front-to-back compositing of unlit colors [S1, unofficial].
++This method implements interactive voxel volume rendering in modern web browsers using WebGL 2.0, combining direct volume ray casting with path tracing techniques for lighting and shadowing [S1, unofficial]. It solves the problem of rendering 3D scalar fields (volumes) in real-time on client-side hardware by casting rays from the camera through the volume, accumulating color and opacity along the ray path, and applying diffuse/specular lighting with soft shadows [S1, unofficial]. It sets itself apart from standard direct volume ray casting by integrating a light-tracing based soft shadow calculation and normal estimation directly within the fragment shader, while distinguishing itself from pure ray marching by using a linear search through control points for transfer functions to support arbitrary non-uniform control point positions [S1, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs**
+-*   **Inputs**:
+-    *   `volume`: `highp sampler3D` containing the scalar field.
+-    *   `volume_dims`: `ivec3` defining the dimensions of the volume texture.
+-    *   `transformed_eye`: `vec3` camera position in world space.
+-    *   `vray_dir`: `vec3` ray direction per fragment.
+-    *   `lightPosition`: `vec3` light source position.
+-    *   `windowLevel`, `windowWidth`: `float` for windowing the scalar values.
+-    *   `rescaleSlope`, `rescaleIntercept`: `float` for linear transformation of raw values.
+-    *   `dt_scale`: `float` scaling factor for the ray marching step size.
+-    *   `opacityMapPositions`, `opacityMapSamples`: `highp sampler2D` storing control points for opacity mapping.
+-    *   `colorMapPositions`, `colorMapSamples`: `highp sampler2D` storing control points for color mapping.
+-    *   `numberOfOpacitySamples`, `numberOfColorSamples`: `int` counts of control points.
+-*   **Output**: `vec4` color (RGBA) for the fragment.
+-
+-**Data Structures**
+-*   **Opacity/Color Maps**: Stored in 2D textures. The first column represents positions (control points), and the second column represents samples (values). The implementation uses a linear search through these control points rather than texture sampling to allow arbitrary non-uniform positions [S1, unofficial].
+-*   **Ray Box Intersection**: Returns a `vec2` `(t0, t1)` representing the entry and exit distances along the ray.
+-
+-**Algorithm Steps**
+-
+-1.  **Ray-Box Intersection**:
+-    Compute the inverse ray direction `invDir = 1.0 / ray_dir`.
+-    Compute temporary bounds:
+-    $$ tmin\_tmp = (boxMin - ray\_orig) \times invDir $$
+-    $$ tmax\_tmp = (boxMax - ray\_orig) \times invDir $$
+-    Compute min/max bounds:
+-    $$ tmin = \min(tmin\_tmp, tmax\_tmp) $$
+-    $$ tmax = \max(tmin\_tmp, tmax\_tmp) $$
+-    Determine entry and exit:
+-    $$ t0 = \max(tmin.x, \max(tmin.y, tmin.z)) $$
+-    $$ t1 = \min(tmax.x, \min(tmax.y, tmax.z)) $$
+-    If $t0 > t1$, the ray does not intersect the volume; discard the fragment [S1, unofficial].
+-
+-2.  **Step Size Calculation**:
+-    Compute the base step size vector based on volume dimensions and ray direction:
+-    $$ dt\_vec = 1.0 / (volume\_dims \times |ray\_dir|) $$
+-    The actual step size $dt$ is:
+-    $$ dt = dt\_scale \times \min(dt\_vec.x, \min(dt\_vec.y, dt\_vec.z)) $$
+-    Note: `dt_scale` is a parameter affecting the number of samples and the Beer-Lambert approximation accuracy [S1, unofficial].
+-
+-3.  **Ray Origin Offset**:
+-    Generate a random offset to reduce aliasing using a Wang hash:
+-    $$ seed = \text{hash}(gl\_FragCoord.x + 1024.0 \times gl\_FragCoord.y) $$
+-    $$ offset = \text{WangHash}(seed) $$
+-    Initial position $p$:
+-    $$ p = transformed\_eye + (t0 + offset \times dt) \times ray\_dir $$
+-
+-4.  **Ray Marching Loop**:
+-    Initialize accumulated color `voxelColor = vec4(0.0)`.
+-    Loop $t$ from $t0$ to $t1$ with step $dt$:
+-    a.  **Sample Volume**: Get raw value `val` from `volume` at position $p$.
+-    b.  **Rescale Value**:
+-        $$ rescaled = rescaleSlope \times val + rescaleIntercept $$
+-        $$ normalized = (rescaled - windowFloor) / windowWidth $$
+-        where $windowFloor = windowLevel - windowWidth / 2.0$.
+-    c.  **Map Opacity and Color**:
+-        *   **Opacity**: Find interval $[opacityMapPositions(i-1), opacityMapPositions(i)]$ containing `normalized`. Interpolate between `opacityMapSamples(i-1)` and `opacityMapSamples(i)`. Clamp result to $[0, 1]$. Let this be $\alpha$.
+-        *   **Color**: Find interval $[colorMapPositions(i-1), colorMapPositions(i)]$ containing `normalized`. Interpolate between `colorMapSamples(i-1)` and `colorMapSamples(i)`. Let this be $C$.
+-    d.  **Beer-Lambert Approximation**:
+-        Compute intermediate color:
+-        $$ val\_color = vec4(\alpha \times C, \alpha) $$
+-        Adjust alpha for step size:
+-        $$ val\_color.a = 1.0 - pow(1.0 - val\_color.a, dt\_scale) $$
+-    e.  **Compositing**:
+-        $$ voxelColor.rgb += (1.0 - voxelColor.a) \times val\_color.a \times val\_color.rgb $$
+-        $$ voxelColor.a += (1.0 - voxelColor.a) \times val\_color.a $$
+-    f.  **Early Termination**:
+-        If $voxelColor.a \ge 0.95$, break loop [S1, unofficial].
+-    g.  **Advance**:
+-        $$ p += ray\_dir \times dt $$
+-
+-5.  **Lighting Calculation**:
+-    a.  **Normal Estimation**:
+-        Compute voxel size:
+-        $$ voxelSize = 1.0 / volume\_dims $$
+-        Compute gradient using central differences of the opacity-mapped value:
+-        $$ \nabla_x = \frac{sampleVolumeOpacity(p + voxelSize.x \hat{x}) - sampleVolumeOpacity(p - voxelSize.x \hat{x})}{2.0 \times voxelSize.x} $$
+-        (Similarly for $y$ and $z$).
+-        $$ voxelNormal = normalize(\nabla) $$
+-    b.  **Diffuse**:
+-        $$ lightDirection = normalize(lightPosition - p) $$
+-        $$ intensity = \max(dot(voxelNormal, lightDirection), 0.0) $$
+-    c.  **Specular**:
+-        If $intensity > 0.0$:
+-        $$ h = normalize(lightDirection + normalize(transformed\_eye - p)) $$
+-        $$ intSpec = \max(dot(h, voxelNormal), 0.0) $$
+-        $$ spec = specular \times pow(intSpec, shininess) $$
+-        where $shininess = 8.0$ and $specular = 0.5$ [S1, unofficial].
+-    d.  **Shadow**:
+-        If $voxelColor.a \ge 0.20$:
+-        $$ shadow = clamp(softShadow(p) \times 2.0 + 0.1, 0.0, 1.0) $$
+-        Else:
+-        $$ shadow = 1.0 $$
+-    e.  **Final Color**:
+-        $$ lightColor = shadow \times \max(intensity \times diffuse + spec, ambient) $$
+-        where $diffuse = 0.6$ and $ambient = 0.4$ [S1, unofficial].
+-        $$ finalColor = voxelColor.rgb \times lightColor $$
+-
+-6.  **Soft Shadow Calculation**:
+-    Sample 8 points around $p$ in a 3x3 grid (excluding center) with spacing:
+-    $$ delta = \min(voxelSize.x, \min(voxelSize.y, voxelSize.z)) \times 2.0 $$
+-    For each point, compute:
+-    $$ pointShadow = 1.0 - traceLight(point, lightPosition) $$
+-    $$ softShadow(p) = \frac{\sum pointShadow}{8.0} $$
+-
+-7.  **Light Tracing (Shadow Ray)**:
+-    Cast ray from `voxel` towards `light`.
+-    $$ voxelToLight = light - voxel $$
+-    $$ d = normalize(voxelToLight) $$
+-    $$ o = voxel - 1000.0 \times d $$
+-    Intersect ray $(o, d)$ with volume box to get $[start, end]$.
+-    Sample opacity along ray from $start$ to $end$ with step:
+-    $$ step = \min(voxelSize.x, \min(voxelSize.y, voxelSize.z)) / samplesPerVoxel $$
+-    where $samplesPerVoxel = 1.0$.
+-    Accumulate:
+-    $$ integrated += val / samplesPerVoxel / 4.0 $$
+-    If $integrated > 0.95$, break.
+-    Return $clamp(integrated, 0.0, 1.0)$ [S1, unofficial].
+-
+-8.  **SRGB Conversion**:
+-    Convert linear `finalColor` to SRGB for output:
+-    If $x \le 0.0031308$: return $12.92 \times x$.
+-    Else return $1.055 \times x^{1/2.4} - 0.055$ [S1, unofficial].
+-
+-**Pseudocode**
++The method operates on the fundamental loop structure of [Direct volume ray casting](19-direct-volume-ray-casting.md): for each pixel, a ray $r(t) = \mathbf{o} + t\mathbf{d}$ is defined, intersected with the volume domain, and sampled/composited along its path [G]. The traversal order is determined by the pixel's position in the image plane [G].
++
++### Inputs and Outputs
++**Inputs:**
++*   **Volume Data:** A 3D texture (`highp sampler3D`) containing the scalar field values.
++*   **Volume Dimensions:** `ivec3` representing the width, height, and depth of the volume grid.
++*   **Camera State:** `transformed_eye` (view position, `vec3`) and `vray_dir` (ray direction, `vec3`).
++*   **Lighting:** `lightPosition` (`vec3`).
++*   **Transfer Function Parameters:**
++    *   `windowLevel` and `windowWidth` (floats) for rescaling raw values.
++    *   `rescaleSlope` and `rescaleIntercept` (floats) for linear transformation: $V_{rescaled} = \text{rescaleSlope} \cdot V_{raw} + \text{rescaleIntercept}$.
++    *   Opacity Map: Defined by `numberOfOpacitySamples` pairs of positions and samples stored in two `highp sampler2D` textures (`opacityMapPositions`, `opacityMapSamples`).
++    *   Color Map: Defined by `numberOfColorSamples` pairs of positions and samples stored in two `highp sampler2D` textures (`colorMapPositions`, `colorMapSamples`).
++*   **Step Control:** `dt_scale` (float) scaling the base step size.
++
++**Output:**
++*   **Fragment Color:** `vec4` representing the final accumulated color with alpha.
++
++### Data Structures
++The transfer functions are stored in 2D textures where one dimension represents the control point position (normalized or scaled) and the other represents the sample value (color or opacity). The renderer uses a linear search through these control points rather than texture sampling to allow for arbitrary non-uniform spacing of control points [S1, unofficial].
++
++### Pseudocode
++The following pseudocode represents the fragment shader logic, rewritten in a clean Python-like style for clarity. It assumes access to standard GLSL math functions (`vec3`, `vec4`, `dot`, `normalize`, `min`, `max`, `clamp`, `pow`, `length`) and texture sampling functions (`texture`, `texelFetch`).
+ 
+ ```python
+ def wang_hash(seed):
++    """Pseudo-random number generator using Wang hash."""
+     seed = (seed ^ 61) ^ (seed >> 16)
+     seed *= 9
+@@ -143,23 +41,49 @@
+     return float(seed % 2147483647) / float(2147483647)
+ 
+-def sample_volume_opacity(position, volume_dims, window_level, window_width, rescale_slope, rescale_intercept, opacity_map_positions, opacity_map_samples):
+-    val = sample_volume(position) # Assumes trilinear sampling from 3D texture
+-    rescaled = rescale_slope * val + rescale_intercept
+-    window_floor = window_level - window_width / 2.0
+-    normalized = (rescaled - window_floor) / window_width
+-    
+-    # Linear search for opacity map
+-    alpha = 0.0
+-    for i in range(1, len(opacity_map_positions)):
+-        if opacity_map_positions[i-1] <= normalized <= opacity_map_positions[i]:
+-            t = (normalized - opacity_map_positions[i-1]) / (opacity_map_positions[i] - opacity_map_positions[i-1])
+-            alpha = opacity_map_samples[i-1] + t * (opacity_map_samples[i] - opacity_map_samples[i-1])
+-            break
+-    return clamp(alpha, 0.0, 1.0)
+-
+-def ray_box_intersection(ray_orig, ray_dir, box_min, box_max):
+-    inv_dir = 1.0 / ray_dir
+-    t_min_tmp = (box_min - ray_orig) * inv_dir
+-    t_max_tmp = (box_max - ray_orig) * inv_dir
++def srgb_conversion(x):
++    """Convert linear color to sRGB."""
++    if x <= 0.0031308:
++        return 12.92 * x
++    else:
++        return 1.055 * pow(x, 1.0 / 2.4) - 0.055
++
++def sample_volume_value(position, volume_dims, rescale_slope, rescale_intercept, window_level, window_width):
++    """Sample raw value from volume and rescale."""
++    # Assuming position is in voxel coordinates or normalized texture coordinates
++    # This step retrieves V_raw from the 3D texture
++    V_raw = texture(volume, position).r 
++    # Rescale
++    V_rescaled = rescale_slope * V_raw + rescale_intercept
++    # Normalize to [0, 1] for transfer function lookup
++    # windowFloor = windowLevel - windowWidth / 2.0
++    # normalized_val = (V_rescaled - windowFloor) / windowWidth
++    # Clamp to [0, 1]
++    normalized_val = clamp((V_rescaled - (window_level - window_width / 2.0)) / window_width, 0.0, 1.0)
++    return normalized_val
++
++def lookup_transfer_function(normalized_val, positions_tex, samples_tex, num_samples):
++    """
++    Linear search through control points to find opacity or color.
++    positions_tex: 2D texture storing control point positions.
++    samples_tex: 2D texture storing corresponding values.
++    """
++    # Find interval [positions[i-1], positions[i]] containing normalized_val
++    # This requires iterating through the num_samples control points
++    for i in range(1, num_samples + 1):
++        pos_prev = texture(positions_tex, vec2(i - 1, 0)).r # Assuming position stored in R channel
++        pos_curr = texture(positions_tex, vec2(i, 0)).r
++        if pos_prev <= normalized_val <= pos_curr:
++            # Linear interpolation
++            t = (normalized_val - pos_prev) / (pos_curr - pos_prev)
++            samp_prev = texture(samples_tex, vec2(i - 1, 0)).r
++            samp_curr = texture(samples_tex, vec2(i, 0)).r
++            return samp_prev + t * (samp_curr - samp_prev)
++    # Fallback if out of bounds
++    return 0.0
++
++def ray_box_intersection(orig, inv_dir, box_min, box_max):
++    """Compute intersection interval [t0, t1] with axis-aligned bounding box."""
++    t_min_tmp = (box_min - orig) * inv_dir
++    t_max_tmp = (box_max - orig) * inv_dir
+     t_min = min(t_min_tmp, t_max_tmp)
+     t_max = max(t_min_tmp, t_max_tmp)
+@@ -168,94 +92,99 @@
+     return vec2(t0, t1)
+ 
+-def trace_light(voxel, light_pos, volume_dims, samples_per_voxel=1.0):
+-    voxel_to_light = light_pos - voxel
++def soft_shadow(position, light_position, volume, volume_dims, voxel_size):
++    """Calculate soft shadow by sampling 8 points around the voxel."""
++    delta = min(voxel_size.x, min(voxel_size.y, voxel_size.z)) * 2.0
++    total_shadow = 0.0
++    # Sample 8 points in a 3x3 grid excluding center
++    offsets = [
++        vec3(-1, -1, -1), vec3(-1, -1, 1), vec3(-1, 1, -1), vec3(-1, 1, 1),
++        vec3(1, -1, -1), vec3(1, -1, 1), vec3(1, 1, -1), vec3(1, 1, 1)
++    ]
++    for offset in offsets:
++        point = position + offset * delta
++        # Trace light from point to light
++        point_shadow = 1.0 - trace_light(point, light_position, volume, volume_dims, voxel_size)
++        total_shadow += point_shadow
++    return total_shadow / 8.0
++
++def trace_light(start, light_pos, volume, volume_dims, voxel_size):
++    """Cast a ray from start to light to calculate integrated opacity."""
++    voxel_to_light = light_pos - start
+     d = normalize(voxel_to_light)
+-    o = voxel - 1000.0 * d
+-    box = ray_box_intersection(o, d, box_min, box_max)
+-    start = length(voxel - o)
+-    
++    o = start - 1000.0 * d # Extend ray backwards to ensure intersection
++    # Intersect with box (assumed to be known or passed)
++    # For simplicity, assume box intersection returns t_hit
++    # In the source, it intersects with the volume box
++    # Let's assume we have the box bounds
++    box_min = vec3(0, 0, 0)
++    box_max = vec3(volume_dims) # Or normalized 1.0
++    
++    # Ray-box intersection for shadow ray
++    inv_dir = 1.0 / d
++    t_hit = ray_box_intersection(o, inv_dir, box_min, box_max)
++    
++    if t_hit.x > t_hit.y:
++        return 1.0 # No intersection, fully lit
++    
++    start_dist = length(start - o)
+     integrated = 0.0
+-    step = min(volume_dims.x, min(volume_dims.y, volume_dims.z)) / samples_per_voxel
+-    current = start
+-    
+-    while current < box.y:
+-        pos = o + d * current
+-        val = sample_volume_opacity(pos, ...) # Simplified for brevity
++    samples_per_voxel = 1.0
++    
++    # March from start to box.y (exit point)
++    # Step size delta
++    delta = min(voxel_size.x, min(voxel_size.y, voxel_size.z)) / samples_per_voxel
++    
++    t = start_dist
++    while t < t_hit.y:
++        current_pos = o + d * t
++        # Sample opacity at current_pos
++        # Note: source uses sampleVolumeOpacity which applies transfer function
++        val = sample_volume_value(current_pos, volume_dims, ...) # Simplified
+         integrated += val / samples_per_voxel / 4.0
+         if integrated > 0.95:
+             break
+-        current += step
++        t += delta
+         
+     return clamp(integrated, 0.0, 1.0)
+ 
+-def soft_shadow(p, light_pos, volume_dims):
+-    voxel_size = 1.0 / volume_dims
+-    delta = min(voxel_size.x, min(voxel_size.y, voxel_size.z)) * 2.0
+-    shadow_sum = 0.0
+-    count = 0
+-    
+-    # 3x3 grid excluding center
+-    for x in [-1, 0, 1]:
+-        for y in [-1, 0, 1]:
+-            if x == 0 and y == 0: continue
+-            offset = vec3(x * delta, y * delta, 0.0) # Simplified 2D grid in plane
+-            # Note: Source says 3x3 grid, likely in a plane perpendicular to light or similar. 
+-            # Implementation detail: Source says "8 points around the voxel position p in a 3x3 grid (excluding center)"
+-            # Assuming a local coordinate system or just offsetting in x/y/z. 
+-            # Given "spacing delta", we assume offsets in x and y primarily or a 3D cross.
+-            # For strict adherence to "8 points", we assume a 3x3x3 cube excluding center? 
+-            # Source says "3x3 grid", implying 2D. Let's assume offsets in x and y.
+-            point = p + offset
+-            shadow_sum += 1.0 - trace_light(point, light_pos, volume_dims)
+-            count += 1
+-            
+-    return shadow_sum / 8.0
+-
+-def fragment_shader(vray_dir, transformed_eye, volume_dims, dt_scale, light_position, window_level, window_width, rescale_slope, rescale_intercept, opacity_map_positions, opacity_map_samples, color_map_positions, color_map_samples):
+-    # 1. Ray-Box Intersection
+-    t_hit = ray_box_intersection(transformed_eye, vray_dir, box_min, box_max)
++def main_fragment_shader():
++    # 1. Ray Generation and Discretization
++    # Compute ray direction from camera
++    # Compute ray-box intersection
++    inv_dir = 1.0 / vray_dir
++    t_hit = ray_box_intersection(transformed_eye, inv_dir, volume_min, volume_max)
++    
+     if t_hit.x > t_hit.y:
+-        discard()
+-        
+-    # 2. Step Size
++        discard_fragment() # Ray does not intersect volume
++    
++    # Step size calculation
+     dt_vec = 1.0 / (volume_dims * abs(vray_dir))
+     dt = dt_scale * min(dt_vec.x, min(dt_vec.y, dt_vec.z))
+     
+-    # 3. Ray Origin Offset
+-    seed = wang_hash(int(gl_FragCoord.x + 1024.0 * gl_FragCoord.y))
++    # Random offset for jittering
++    seed = int(gl_FragCoord.x + 1024.0 * gl_FragCoord.y)
+     offset = wang_hash(seed)
+     p = transformed_eye + (t_hit.x + offset * dt) * vray_dir
+     
+-    # 4. Ray Marching
++    # 2. Ray Marching Loop
+     voxel_color = vec4(0.0)
+     t = t_hit.x
+     while t < t_hit.y:
+-        val = sample_volume(p)
+-        rescaled = rescale_slope * val + rescale_intercept
+-        window_floor = window_level - window_width / 2.0
+-        normalized = (rescaled - window_floor) / window_width
+-        
+-        # Opacity Map
+-        alpha = 0.0
+-        for i in range(1, len(opacity_map_positions)):
+-            if opacity_map_positions[i-1] <= normalized <= opacity_map_positions[i]:
+-                t_map = (normalized - opacity_map_positions[i-1]) / (opacity_map_positions[i] - opacity_map_positions[i-1])
+-                alpha = opacity_map_samples[i-1] + t_map * (opacity_map_samples[i] - opacity_map_samples[i-1])
+-                break
+-        alpha = clamp(alpha, 0.0, 1.0)
+-        
+-        # Color Map
+-        color = vec3(0.0)
+-        for i in range(1, len(color_map_positions)):
+-            if color_map_positions[i-1] <= normalized <= color_map_positions[i]:
+-                t_map = (normalized - color_map_positions[i-1]) / (color_map_positions[i] - color_map_positions[i-1])
+-                color = color_map_samples[i-1] + t_map * (color_map_samples[i] - color_map_samples[i-1])
+-                break
+-                
+-        val_color = vec4(alpha * color, alpha)
+-        val_color.a = 1.0 - pow(1.0 - val_color.a, dt_scale)
+-        
+-        voxel_color.rgb += (1.0 - voxel_color.a) * val_color.a * val_color.rgb
+-        voxel_color.a += (1.0 - voxel_color.a) * val_color.a
++        # Sample volume value
++        normalized_val = sample_volume_value(p, volume_dims, rescale_slope, rescale_intercept, window_level, window_width)
++        
++        # Get color and opacity from transfer functions
++        color = vec3(lookup_transfer_function(normalized_val, colorMapPositions, colorMapSamples, numberOfColorSamples))
++        opacity = lookup_transfer_function(normalized_val, opacityMapPositions, opacityMapSamples, numberOfOpacitySamples)
++        
++        # Apply Beer-Lambert law approximation
++        # val_color = vec4(opacity * color, opacity)
++        # val_color.a = 1.0 - pow(1.0 - val_color.a, dt_scale)
++        # Note: The source code applies dt_scale to the opacity accumulation
++        effective_opacity = 1.0 - pow(1.0 - opacity, dt_scale)
++        
++        # Compositing
++        voxel_color.rgb += (1.0 - voxel_color.a) * effective_opacity * color
++        voxel_color.a += (1.0 - voxel_color.a) * effective_opacity
+         
+         if voxel_color.a >= 0.95:
+@@ -264,45 +193,85 @@
+         p += vray_dir * dt
+         t += dt
+-        
+-    # 5. Lighting
++    
++    # 3. Lighting Calculation
++    # Compute normal at final position p using central differences of opacity
+     voxel_size = 1.0 / volume_dims
+-    grad_x = (sample_volume_opacity(p + vec3(voxel_size.x, 0, 0), ...) - sample_volume_opacity(p - vec3(voxel_size.x, 0, 0), ...)) / (2.0 * voxel_size.x)
+-    grad_y = (sample_volume_opacity(p + vec3(0, voxel_size.y, 0), ...) - sample_volume_opacity(p - vec3(0, voxel_size.y, 0), ...)) / (2.0 * voxel_size.y)
+-    grad_z = (sample_volume_opacity(p + vec3(0, 0, voxel_size.z), ...) - sample_volume_opacity(p - vec3(0, 0, voxel_size.z), ...)) / (2.0 * voxel_size.z)
++    # Gradient of opacity
++    # sampleVolumeOpacity applies the opacity map to the rescaled value
++    # We need to sample opacity at p + epsilon and p - epsilon
++    op_p = sample_volume_value(p, volume_dims, ...) # Returns normalized val, then lookup opacity
++    # Actually, source computes gradient of sampleVolumeOpacity
++    # Let's assume a function get_opacity(pos)
++    
++    grad_x = (get_opacity(p + vec3(voxel_size.x, 0, 0)) - get_opacity(p - vec3(voxel_size.x, 0, 0))) / (2.0 * voxel_size.x)
++    grad_y = (get_opacity(p + vec3(0, voxel_size.y, 0)) - get_opacity(p - vec3(0, voxel_size.y, 0))) / (2.0 * voxel_size.y)
++    grad_z = (get_opacity(p + vec3(0, 0, voxel_size.z)) - get_opacity(p - vec3(0, 0, voxel_size.z))) / (2.0 * voxel_size.z)
++    
+     voxel_normal = normalize(vec3(grad_x, grad_y, grad_z))
+     
++    # Light direction
+     light_direction = normalize(light_position - p)
++    
++    # Diffuse
+     intensity = max(dot(voxel_normal, light_direction), 0.0)
+     
++    # Specular
+     spec = 0.0
+     if intensity > 0.0:
+-        h = normalize(light_direction + normalize(transformed_eye - p))
++        half_vector = normalize(light_direction + normalize(transformed_eye - p)) # transformed_eye is camera pos, so view dir is p - transformed_eye
++        # Source says: h = normalize(lightDirection + transformed_eye)
++        # This implies transformed_eye might be normalized or treated as a vector from origin?
++        # Assuming standard Phong: h = normalize(L + V)
++        # V is vector from surface to eye: transformed_eye - p
++        # L is vector from surface to light: light_position - p
++        # Source code: h = normalize(lightDirection + transformed_eye)
++        # This seems to assume transformed_eye is the view direction vector, not position.
++        # Let's stick to source: h = normalize(lightDirection + transformed_eye)
++        h = normalize(light_direction + transformed_eye)
+         int_spec = max(dot(h, voxel_normal), 0.0)
+-        spec = 0.5 * pow(int_spec, 8.0)
+-        
++        spec = 0.5 * pow(int_spec, 8.0) # specular=0.5, shininess=8.0
++        
++    # Shadow
+     shadow = 1.0
+     if voxel_color.a >= 0.20:
+-        shadow = clamp(soft_shadow(p, light_position, volume_dims) * 2.0 + 0.1, 0.0, 1.0)
+-        
+-    light_color = shadow * max(intensity * 0.6 + spec, 0.4)
++        # Soft shadow
++        s = soft_shadow(p, light_position, volume, volume_dims, voxel_size)
++        shadow = clamp(s * 2.0 + 0.1, 0.0, 1.0)
++        
++    # Final Color
++    ambient = 0.4
++    diffuse = 0.6
++    light_color = shadow * max(intensity * diffuse + spec, ambient)
+     final_color = voxel_color.rgb * light_color
+     
+-    # 6. SRGB
+-    if final_color.r <= 0.0031308: final_color.r = 12.92 * final_color.r
+-    else: final_color.r = 1.055 * pow(final_color.r, 1.0/2.4) - 0.055
+-    # Repeat for g, b
+-    
+-    return final_color
++    # SRGB Conversion
++    final_color = vec3(srgb_conversion(final_color.r), srgb_conversion(final_color.g), srgb_conversion(final_color.b))
++    
++    return vec4(final_color, voxel_color.a)
+ ```
+ 
++### Parameters
++*   **`dt_scale`**: A scaling factor for the step size in the ray marching loop. It affects the number of samples and the accuracy of the Beer-Lambert approximation. Typical values are not specified in the source, but it is adjustable via a "Sampling Rate" slider (0.25x to 8x) [S1, unofficial].
++*   **`rescaleSlope`** and **`rescaleIntercept`**: Linear transformation applied to raw volume values before transfer function lookup [S1, unofficial].
++*   **`windowLevel`** and **`windowWidth`**: Define the range of volume values mapped to the transfer function [S1, unofficial].
++*   **Lighting Constants**: `diffuse=0.6`, `ambient=0.4`, `specular=0.5`, `shininess=8.0` [S1, unofficial].
++
++### Edge Cases and Pitfalls
++*   **Ray-Box Intersection Failure**: If `t_hit.x > t_hit.y`, the ray does not intersect the volume bounding box. The fragment is discarded [S1, unofficial].
++*   **Early Termination**: The ray marching loop breaks if accumulated alpha `voxelColor.a >= 0.95` to save computation [S1, unofficial]. Similarly, the shadow ray tracing loop breaks if integrated opacity `integrated > 0.95` [S1, unofficial].
++*   **Precision**: The use of `highp` samplers and floats is recommended for accurate interpolation and lighting calculations [S1, unofficial].
++*   **Transfer Function Lookup**: The linear search through control points is computationally more expensive than texture sampling but allows for arbitrary non-uniform control point positions [S1, unofficial].
++
+ ## Operating characteristics
+-*   **Time Complexity**: $O(N \times M)$ where $N$ is the number of pixels and $M$ is the number of samples per ray. The shadow calculation adds a secondary ray trace for each lit voxel, significantly increasing cost.
+-*   **Memory Complexity**: Dominated by the 3D volume texture and the 2D opacity/color map textures.
+-*   **Performance**: Runs interactively in modern browsers. Performance is limited by the fragment shader execution time, particularly the shadow ray tracing which involves additional volume sampling.
+-*   **Strengths**: Interactive frame rates in web browsers; supports arbitrary non-uniform opacity/color maps; includes lighting and shadows for better depth perception.
+-*   **Limitations**: Shadow calculation is expensive; relies on linear search for maps which is slower than texture lookup; limited to WebGL 2.0 capabilities.
++*   **Time Complexity**: The complexity is dominated by the ray marching loop, which runs for $N$ steps per pixel, where $N$ is determined by the volume depth and step size `dt`. The soft shadow calculation adds a constant overhead (8 shadow rays) per pixel if the accumulated alpha is significant.
++*   **Memory Complexity**: The method requires storing the 3D volume texture and two 2D textures for the transfer functions (positions and samples). Memory usage scales with the volume resolution and the number of transfer function control points.
++*   **Measured Performance**: Performance is hardware-dependent, relying on WebGL 2.0 capabilities. The use of early termination and adjustable sampling rates allows for interactive frame rates on modern GPUs [S1, unofficial].
++*   **Strengths**: Interactive performance in web browsers; flexible transfer function definition; inclusion of lighting and shadows enhances visual quality.
++*   **Limitations**: Linear search for transfer functions can be slow for large numbers of control points; soft shadow calculation is expensive; limited to scalar volumes.
++*   **When to Use**: Real-time visualization of 3D scalar fields in web applications where lighting and shadows are desired.
++*   **When Not to Use**: When high-performance rendering of very large volumes with complex transfer functions is required, or when hardware acceleration beyond WebGL 2.0 is available and a more optimized method (e.g., GPU-accelerated ray casting) is preferred.
+ 
+ ## Background
+-This method is implemented in the repository `termijn/webgl-volumerendering` [S1, unofficial]. It demonstrates how path tracing concepts (lighting, shadows) can be integrated into a standard ray casting volume rendering pipeline within the constraints of WebGL 2.0.
++This method originates from the open-source project `termijn/webgl-volumerendering`, which provides a WebGL 2.0 based interactive voxel volume renderer using path tracing [S1, unofficial]. It is designed to run in modern browsers, leveraging the GPU for real-time rendering. The implementation combines standard volume ray casting with path tracing techniques for lighting, specifically using a light-tracing based soft shadow calculation. It is used for interactive visualization of 3D medical or scientific data in web environments.
+ 
+ ## Sources

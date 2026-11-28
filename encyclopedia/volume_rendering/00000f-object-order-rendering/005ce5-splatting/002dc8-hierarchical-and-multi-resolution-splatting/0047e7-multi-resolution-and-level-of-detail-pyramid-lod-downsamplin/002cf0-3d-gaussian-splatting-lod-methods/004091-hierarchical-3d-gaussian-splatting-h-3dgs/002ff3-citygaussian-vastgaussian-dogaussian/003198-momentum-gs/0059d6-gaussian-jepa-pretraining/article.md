@@ -1,0 +1,441 @@
+# Gaussian-JEPA Pretraining
+
+Also called: Gaussian Joint-Embedding Predictive Architecture, Gaussian-JEPA, Joint-Embedding Predictive Learning for 3D Gaussian Splats
+
+## Overview
+Gaussian-JEPA is a self-supervised pretraining method for 3D Gaussian assets that predicts latent features of masked target blocks from shared context, using joint-embedding predictive learning to avoid raw-attribute reconstruction [S1, unofficial]. It sets itself apart from Gaussian-MAE by predicting latent representations instead of reconstructing Gaussian parameters, and from contrastive methods by explicitly supervising missing spatial content through latent prediction of held-out blocks [S1, unofficial]. It builds on [Momentum-GS](6553-momentum-gs.md) by providing a robust, object-level feature representation that is consistent across stochastic resampling, which serves as a foundation for downstream tasks like shape completion and segmentation.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D Gaussian asset $X$ represented as a set of anisotropic primitives with 14 parameters each: centroids $C$ (3), opacity $O$ (1), scales $S$ (3), rotation quaternions $R$ (4), and DC spherical-harmonic coefficients $SH$ (3) [S1, unofficial].
+*   **Output:** Frozen feature representations of Gaussian tokens that capture geometric and appearance information, optimized via a joint-embedding predictive objective [S1, unofficial].
+
+**Data Structures and Layout:**
+1.  **Gaussian Primitive Vector:** 14-dimensional vector per primitive [S1, unofficial].
+2.  **Token Group:** A set of $k=32$ primitives centered around a FPS-selected centroid. Each group is processed into a single token $t_i \in \mathbb{R}^{384}$ [S1, unofficial].
+3.  **Token Sequence:** $T \in \mathbb{R}^{n \times 384}$, where $n=64$ is the number of token groups [S1, unofficial].
+4.  **Context:** $T_C \in \mathbb{R}^{(n-n_t) \times 384}$, the tokens not in any target block [S1, unofficial].
+5.  **Target Blocks:** $\{B_m\}_{m=1}^M$, non-overlapping sets of token indices [S1, unofficial].
+
+**Preprocessing:**
+1.  Sample $p=1,024$ distinct primitives from an 8,192-entry buffer with replacement [S1, unofficial].
+2.  Center centroids and divide by maximum radius to fit in a unit sphere [S1, unofficial].
+3.  Map opacity logits through sigmoid to $[-1, 1]$ [S1, unofficial].
+4.  Exponentiate log-scales, center, and normalize in 3D attribute space [S1, unofficial].
+5.  Normalize rotation quaternions to unit length and sign-canonicalize by the first component [S1, unofficial].
+6.  Multiply DC coefficients by spherical-harmonic constant, clip to $[-0.5, 0.5]$, and scale by $\sqrt{2/3}$ [S1, unofficial].
+
+**Tokenization:**
+1.  Compute centroids $C'$ of the sampled primitives [S1, unofficial].
+2.  Select $n=64$ centers $U$ using Farthest Point Sampling (FPS) on $C'$ [S1, unofficial].
+3.  For each center $u_i$, gather $k=32$ neighbors $I_i$ using hard KNN based on centroid distance [S1, unofficial].
+4.  Express neighborhood centroids relative to the group center $u_i$ [S1, unofficial].
+5.  Apply tokenizer $\psi$:
+    *   Pointwise MLP: $14 \to 128 \to 256$ with BatchNorm and ReLU [S1, unofficial].
+    *   Max pooling over the $k$ primitives to get a group descriptor [S1, unofficial].
+    *   Concatenate descriptor with each local feature [S1, unofficial].
+    *   Pointwise MLP: $512 \to 512 \to 384$ with BatchNorm and ReLU [S1, unofficial].
+    *   Max pooling to produce one $384$-D token $t_i$ per group [S1, unofficial].
+6.  Assemble $T = [t_1, \dots, t_n]$ [S1, unofficial].
+7.  Embed centers $U$ using MLP $\rho$ ($3 \to 128 \to 384$) for positional embeddings [S1, unofficial].
+
+**Multi-Scale Target Sampling:**
+1.  Define schedule $s = [s_1, \dots, s_M]$ with $s_1 \ge \dots \ge s_M$ and total budget $n_t = \sum s_m$ [S1, unofficial]. Default: $M=4, s=[11, 9, 7, 5]$ [S1, unofficial].
+2.  Initialize available indices $A_0 = \{1, \dots, n\}$ [S1, unofficial].
+3.  For $m = 1$ to $M$:
+    *   Select anchor $a_m$ uniformly from $A_{m-1}$ [S1, unofficial].
+    *   Select $s_m$ nearest available centers $B_m$ to $a_m$ [S1, unofficial].
+    *   Update $A_m = A_{m-1} \setminus B_m$ [S1, unofficial].
+4.  Context indices $C = A_M$ [S1, unofficial].
+    *   *Note:* Non-overlap applies to token-center indices. Context and target tokens may share underlying Gaussian primitives due to independent KNN neighborhoods [S1, unofficial].
+
+**Training Loop:**
+1.  **Online Encoder:** Process context $T_C$ with online encoder $f_\theta$ to get $Z_C = f_\theta(T_C, \rho(U_C)) \in \mathbb{R}^{B \times (n-n_t) \times 384}$ [S1, unofficial].
+2.  **EMA Encoder:** For each block $m$, process full token field $T$ with EMA encoder $f_\xi$ to get $H_m^\xi = f_\xi(T, \rho(U)) \in \mathbb{R}^{B \times n \times 384}$ [S1, unofficial].
+3.  **Target Selection:** Select target features $Z_m^\xi = H_m^\xi[B_m] \in \mathbb{R}^{B \times s_m \times 384}$ [S1, unofficial].
+4.  **Context Projection:** Map $Z_C$ to predictor width $D_p=192$: $Z_C' = W_p Z_C$ [S1, unofficial].
+5.  **Prediction:**
+    *   Create query $q \in \mathbb{R}^{192}$, repeat $s_m$ times: $Q_m = \mathbf{1}_{s_m} q^T$ [S1, unofficial].
+    *   Concatenate context and queries: $[Z_C'; Q_m]$ [S1, unofficial].
+    *   Embed positions: $\Pi_m = [\rho_\phi(U_C); \rho_\phi(U_{B_m})]$ where $\rho_\phi$ is $3 \to 128 \to 192$ MLP [S1, unofficial].
+    *   Pass through 4-layer Transformer predictor $h_\phi$ (width 192, 6 heads) [S1, unofficial].
+    *   Retain final $s_m$ query outputs $V_m \in \mathbb{R}^{s_m \times 192}$ [S1, unofficial].
+    *   Apply linear heads $r_b$ ($192 \to 384$) for $b \in \{\text{geo, app}\}$ to get predictions $\hat{Z}_m^b \in \mathbb{R}^{s_m \times 384}$ [S1, unofficial].
+6.  **Target Projections:**
+    *   For each $Z_m^\xi$, apply two independent MLP projectors $g_b$ ($384 \to 384 \to 384$, GELU) to get $Y_m^b$ [S1, unofficial].
+    *   Detach and normalize: $Z_m^b = \text{LN}(\text{sg}(Y_m^b))$ [S1, unofficial].
+7.  **Loss Computation:**
+    *   **Prediction Loss:** $L_{\text{pred}} = \frac{1}{M} \sum_{m=1}^M \sum_{b \in \{\text{geo, app}\}} \text{SmoothL1}(\hat{Z}_m^b, Z_m^b)$ [S1, unofficial].
+    *   **Grounding Loss:**
+        *   Concatenate all $Y^b$ across batch and blocks to $Y^b \in \mathbb{R}^{L_t \times D}$ [S1, unofficial].
+        *   Compute regularization $R_{\text{vis}}(Y^b)$:
+            *   Centering: $R_{\text{center}} = \frac{1}{D} \|\mu_b\|^2$, where $\mu_b = \frac{1}{L_t} \sum_i Y_i^b$ [S1, unofficial].
+            *   Scaling: $R_{\text{scale}} = \frac{1}{D} \sum_j (\sigma_{jb} - 1)^2$, where $\sigma_{jb} = \frac{\|Y_{:,j}^b\|_2}{\sqrt{L_t + \epsilon}}$ [S1, unofficial].
+            *   Sliced-Wasserstein: $R_{\text{shape}} = \frac{1}{L_t K} \sum_t \sum_k (P_{ik}^t - q_i)^2$, where $K=256$ random directions, $q_i = \Phi^{-1}(i/(L_t+1))$, and $P_{ik}^t$ are sorted projections [S1, unofficial].
+            *   $R_{\text{vis}}(Y^b) = R_{\text{center}} + R_{\text{scale}} + R_{\text{shape}}$ [S1, unofficial].
+        *   Cross-covariance: $\Gamma = \frac{1}{D} (Y_{\text{centered}}^{\text{geo}})^T Y_{\text{centered}}^{\text{app}}$, $L_{\text{cross}} = \|\Gamma\|_F^2 / D$ [S1, unofficial].
+        *   $L_{\text{ground}} = R_{\text{vis}}(Y^{\text{geo}}) + R_{\text{vis}}(Y^{\text{app}}) + L_{\text{cross}}$ [S1, unofficial].
+    *   **Total Loss:** $L = L_{\text{pred}} + \lambda L_{\text{ground}}$ with $\lambda = 0.1$ [S1, unofficial].
+8.  **Update:**
+    *   Update online encoder, predictor, heads, and projectors using $L$ [S1, unofficial].
+    *   Update EMA encoder: $\xi \leftarrow \tau \xi + (1-\tau) \theta$ [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class GaussianJEPA:
+    def __init__(self, n=64, k=32, p=1024, M=4, s=[11, 9, 7, 5], D=384, Dp=192):
+        self.n = n
+        self.k = k
+        self.p = p
+        self.M = M
+        self.s = s
+        self.D = D
+        self.Dp = Dp
+        self.nt = sum(s)
+        
+        # Online Encoder (12 layers, 384 width, 6 heads)
+        self.online_encoder = Encoder(depth=12, width=D, heads=6)
+        
+        # EMA Encoder (12 layers, 384 width, 6 heads)
+        self.ema_encoder = Encoder(depth=12, width=D, heads=6)
+        self.ema_momentum = 0.996
+        
+        # Context Projection
+        self.context_proj = nn.Linear(D, Dp)
+        
+        # Positional Embeddings
+        self.pos_embed_centers = nn.Sequential(
+            nn.Linear(3, 128), nn.ReLU(), nn.Linear(128, Dp)
+        )
+        
+        # Predictor (4 layers, 192 width, 6 heads)
+        self.predictor = TransformerPredictor(depth=4, width=Dp, heads=6)
+        
+        # Prediction Heads
+        self.head_geo = nn.Linear(Dp, D)
+        self.head_app = nn.Linear(Dp, D)
+        
+        # Target Projectors (384 -> 384 -> 384, GELU)
+        self.proj_geo = nn.Sequential(
+            nn.Linear(D, D), nn.GELU(), nn.Linear(D, D)
+        )
+        self.proj_app = nn.Sequential(
+            nn.Linear(D, D), nn.GELU(), nn.Linear(D, D)
+        )
+        
+        # Learned Query
+        self.query = nn.Parameter(torch.randn(1, 1, Dp))
+        
+        # Optimizer and EMA state
+        self.optimizer = None
+        self.ema_decay_schedule = None
+
+    def preprocess_gaussians(self, X):
+        # X: (p, 14)
+        # 1. Center and scale centroids to unit sphere
+        centroids = X[:, :3]
+        max_radius = torch.max(torch.norm(centroids, dim=1))
+        centroids = centroids / max_radius
+        X[:, :3] = centroids - torch.mean(centroids, dim=0) # Center again
+        
+        # 2. Opacity sigmoid to [-1, 1]
+        opacity = torch.sigmoid(X[:, 3:4]) * 2 - 1
+        X[:, 3:4] = opacity
+        
+        # 3. Log-scales exp, center, normalize
+        log_scales = X[:, 4:7]
+        scales = torch.exp(log_scales)
+        # Center and normalize in 3D attribute space
+        scales = scales - torch.mean(scales, dim=0)
+        scales = scales / (torch.norm(scales, dim=0) + 1e-6)
+        X[:, 4:7] = scales
+        
+        # 4. Quaternions normalize and sign-canonicalize
+        quats = X[:, 7:11]
+        quats = quats / torch.norm(quats, dim=1, keepdim=True)
+        # Sign canonicalize by first component
+        quats = torch.where(quats[:, 0:1] < 0, -quats, quats)
+        X[:, 7:11] = quats
+        
+        # 5. DC coefficients clip and scale
+        dc = X[:, 11:14]
+        dc = torch.clamp(dc, -0.5, 0.5)
+        dc = dc * torch.sqrt(torch.tensor(2.0/3.0))
+        X[:, 11:14] = dc
+        
+        return X
+
+    def tokenize(self, X):
+        # X: (p, 14)
+        centroids = X[:, :3]
+        
+        # FPS to select n centers
+        centers_idx = farthest_point_sample(centroids, self.n)
+        centers = centroids[centers_idx] # (n, 3)
+        
+        # KNN to gather k neighbors
+        # Returns indices of k nearest neighbors for each center
+        neighbor_indices = knn(centroids, centers, k=self.k) # (n, k)
+        
+        tokens = []
+        pos_embeds = []
+        
+        for i in range(self.n):
+            idx = neighbor_indices[i] # (k,)
+            group = X[idx] # (k, 14)
+            group_centroids = group[:, :3]
+            
+            # Express centroids relative to group center
+            group_centroids = group_centroids - centers[i]
+            
+            # Construct local features
+            local_features = torch.cat([group_centroids, group[:, 3:]], dim=1) # (k, 13)
+            
+            # Tokenizer psi
+            # Stage 1: 14->128->256 (using 13 here as per description, or 14 if including relative centroid in all)
+            # Description says "transforms each 14-D primitive... Max pooling... concatenated"
+            # Let's assume we use the 14 attributes, but centroid is relative
+            # Re-construct 14D: relative centroid (3) + opacity (1) + scale (3) + quat (4) + dc (3)
+            # Note: scale/quat/dc were normalized globally, but we use the preprocessed values
+            # The description says "retain opacity, scale, rotation, and appearance in the normalized object frame"
+            # and "Express centroid relative to group center before applying... tokenizer"
+            
+            # Re-assemble 14D for tokenizer input
+            # 1. Relative Centroid (3)
+            # 2. Opacity (1)
+            # 3. Scale (3)
+            # 4. Quaternion (4)
+            # 5. DC (3)
+            # Total 14
+            
+            # Using the preprocessed X
+            local_14 = torch.cat([
+                group[:, :3] - centers[i], # Relative centroid
+                group[:, 3:4],             # Opacity
+                group[:, 4:7],             # Scale
+                group[:, 7:11],            # Quaternion
+                group[:, 11:14]            # DC
+            ], dim=1)
+            
+            # Pointwise MLP 14->128->256
+            h = F.relu(self.tokenizer_mlp1(local_14)) # (k, 256)
+            # Max pooling
+            group_desc = torch.max(h, dim=0, keepdim=True)[0] # (1, 256)
+            # Concatenate
+            h = torch.cat([h, group_desc.expand(k, -1)], dim=1) # (k, 512)
+            # Pointwise MLP 512->512->384
+            h = F.relu(self.tokenizer_mlp2(h)) # (k, 384)
+            # Max pooling
+            token = torch.max(h, dim=0)[0] # (384,)
+            
+            tokens.append(token)
+            pos_embeds.append(self.pos_embed_centers(centers[i]))
+            
+        T = torch.stack(tokens) # (n, D)
+        P = torch.stack(pos_embeds) # (n, Dp)
+        return T, P
+
+    def forward(self, X):
+        # X: (p, 14)
+        X = self.preprocess_gaussians(X)
+        T, P = self.tokenize(X)
+        
+        # Multi-scale target sampling
+        # A0 = {0, ..., n-1}
+        available = list(range(self.n))
+        target_indices = []
+        context_indices = []
+        
+        for m in range(self.M):
+            # Select anchor uniformly from available
+            anchor_idx = random.choice(available)
+            # Select s_m nearest available centers
+            # This requires distances between centers
+            # For simplicity, assume we have precomputed or can compute
+            # NN_sm(u_am, U_Am-1)
+            # We need to find s_m indices in 'available' closest to centers[anchor_idx]
+            dists = torch.norm(P[available] - P[anchor_idx], dim=1)
+            # Get s_m smallest indices
+            s_m = self.s[m]
+            _, top_k = torch.topk(dists, s_m, largest=False)
+            selected = [available[i] for i in top_k]
+            
+            target_indices.append(selected)
+            for idx in selected:
+                available.remove(idx)
+                
+        context_indices = available
+        
+        # Online Encoder
+        Z_C = self.online_encoder(T[context_indices], P[context_indices]) # (B, n-nt, D)
+        
+        # EMA Encoder
+        Z_full_ema = self.ema_encoder(T, P) # (B, n, D)
+        
+        # Prediction
+        Z_C_proj = self.context_proj(Z_C) # (B, n-nt, Dp)
+        
+        losses = []
+        all_Y_geo = []
+        all_Y_app = []
+        
+        for m in range(self.M):
+            s_m = self.s[m]
+            idx_m = target_indices[m]
+            
+            # Target features
+            Z_m_ema = Z_full_ema[:, idx_m, :] # (B, s_m, D)
+            
+            # Query
+            Q_m = self.query.expand(-1, s_m, -1) # (1, s_m, Dp)
+            
+            # Positional embeddings for context and target
+            P_C = P[context_indices] # (n-nt, Dp)
+            P_m = P[idx_m] # (s_m, Dp)
+            Pi_m = torch.cat([P_C, P_m], dim=0) # (n-nt+s_m, Dp)
+            
+            # Predictor input
+            # Concatenate context and queries along token sequence
+            # Z_C_proj: (B, n-nt, Dp)
+            # Q_m: (1, s_m, Dp) -> expand to B
+            Q_m_batch = Q_m.expand(B, -1, -1)
+            seq = torch.cat([Z_C_proj, Q_m_batch], dim=1) # (B, n-nt+s_m, Dp)
+            
+            # Transformer
+            V_m = self.predictor(seq, Pi_m) # (B, n-nt+s_m, Dp)
+            # Retain final s_m query outputs
+            V_m = V_m[:, -(s_m):, :] # (B, s_m, Dp)
+            
+            # Heads
+            Z_hat_geo = self.head_geo(V_m) # (B, s_m, D)
+            Z_hat_app = self.head_app(V_m) # (B, s_m, D)
+            
+            # Target Projectors
+            Y_geo = self.proj_geo(Z_m_ema)
+            Y_app = self.proj_app(Z_m_ema)
+            
+            # Detach and Normalize
+            Z_geo = F.layer_norm(torch.detach(Y_geo), [self.D])
+            Z_app = F.layer_norm(torch.detach(Y_app), [self.D])
+            
+            # Prediction Loss
+            l_pred_geo = F.smooth_l1_loss(Z_hat_geo, Z_geo)
+            l_pred_app = F.smooth_l1_loss(Z_hat_app, Z_app)
+            losses.append(l_pred_geo + l_pred_app)
+            
+            all_Y_geo.append(Y_geo)
+            all_Y_app.append(Y_app)
+            
+        L_pred = sum(losses) / self.M
+        
+        # Grounding Loss
+        Y_geo_cat = torch.cat(all_Y_geo, dim=1) # (B, nt, D)
+        Y_app_cat = torch.cat(all_Y_app, dim=1) # (B, nt, D)
+        
+        # Flatten batch and tokens for grounding
+        Y_geo_flat = Y_geo_cat.view(-1, self.D)
+        Y_app_flat = Y_app_cat.view(-1, self.D)
+        
+        L_ground = self.compute_grounding(Y_geo_flat, Y_app_flat)
+        
+        L = L_pred + 0.1 * L_ground
+        return L
+
+    def compute_grounding(self, Y_geo, Y_app):
+        # R_vis for geo
+        R_geo = self.compute_r_vis(Y_geo)
+        # R_vis for app
+        R_app = self.compute_r_vis(Y_app)
+        
+        # Cross-covariance
+        Y_geo_c = Y_geo - torch.mean(Y_geo, dim=0, keepdim=True)
+        Y_app_c = Y_app - torch.mean(Y_app, dim=0, keepdim=True)
+        # Stop gradient on sigma for covariance? Description says Ye^b = Y^b - mean, then Gamma = (1/D) Ye^T Ye
+        # But R_vis uses sg(sigma). Cross-covariance formula in notes: Gamma = (1/D) * (Ye^geo)^T * Ye^app
+        # It does not mention sg for cross-covariance, but R_vis does.
+        # We follow the formula: Gamma = (1/D) * (Ye^geo)^T * Ye^app
+        
+        D = self.D
+        Lt = Y_geo.shape[0]
+        Gamma = (1.0 / D) * torch.matmul(Y_geo_c.t(), Y_app_c)
+        L_cross = torch.norm(Gamma, p='fro')**2 / D
+        
+        return R_geo + R_app + L_cross
+
+    def compute_r_vis(self, Y):
+        D = self.D
+        Lt = Y.shape[0]
+        eps = 1e-6
+        
+        # Centering
+        mu = torch.mean(Y, dim=0)
+        R_center = (1.0 / D) * torch.norm(mu)**2
+        
+        # Scaling
+        Y_c = Y - mu
+        sigma = torch.norm(Y_c, dim=0) / torch.sqrt(torch.tensor(Lt + eps))
+        R_scale = (1.0 / D) * torch.sum((sigma - 1)**2)
+        
+        # Sliced-Wasserstein
+        # K=256 directions
+        K = 256
+        # Random directions
+        directions = torch.randn(K, D, device=Y.device)
+        directions = directions / torch.norm(directions, dim=1, keepdim=True)
+        
+        projections = torch.matmul(Y, directions.t()) # (Lt, K)
+        
+        # Sort projections
+        sorted_proj, _ = torch.sort(projections, dim=0)
+        
+        # Quantiles
+        i = torch.arange(1, Lt + 1, device=Y.device).float()
+        q = torch.erfinv(2 * (i / (Lt + 1)) - 1) * torch.sqrt(torch.tensor(2.0)) # Phi^-1
+        
+        # Sum over t (Lt) and k (K)
+        # (Pik_t - qi)^2
+        # P is sorted_proj, q is quantiles
+        # We need to match sorted projections to quantiles
+        # The formula sums over t and k. 
+        # Usually SWD averages over directions and matches sorted values to quantiles
+        # R_shape = (1/(Lt*K)) * sum_t sum_k (P_{tk} - q_k)^2 ? 
+        # Or sum over k of (sorted_proj_k - q_k)^2 averaged over t?
+        # Notes: (1/(Lt*K)) * sum_t sum_k (Pik_t - qi)^2. Here qi depends on i, which is index in Lt.
+        # So for each direction k, we compare the sorted projections (across Lt) to the quantiles qi.
+        
+        # Let's assume P_{ik} is the i-th sorted projection for direction k
+        # q_i is the i-th quantile
+        
+        # Reshape for broadcasting
+        # sorted_proj: (Lt, K)
+        # q: (Lt,) -> (Lt, 1)
+        diff = sorted_proj - q.unsqueeze(1)
+        R_shape = (1.0 / (Lt * K)) * torch.sum(diff**2)
+        
+        return R_center + R_scale + R_shape
+
+    def update_ema(self):
+        # Update EMA encoder parameters
+        for ema_param, param in zip(self.ema_encoder.parameters(), self.online_encoder.parameters()):
+            ema_param.data = self.ema_momentum * ema_param.data + (1 - self.ema_momentum) * param.data
+```
+
+## Operating characteristics
+*   **Time Complexity:** Pretraining step time is 21.9% higher than Gaussian-MAE due to the blockwise target pathway [S1, unofficial].
+*   **Memory Complexity:** Peak allocated memory is 48.6% higher than Gaussian-MAE [S1, unofficial].
+*   **Performance:** On ModelNet40-GS, it reduces relative embedding drift from 0.3400 to 0.2594 (23.7% reduction) and improves R@5 from 98.89% to 99.36% [S1, unofficial]. At 55% missing groups, it gains 20.02, 26.26, and 26.81 percentage points in R@1, R@5, and R@10 over Gaussian-MAE [S1, unofficial]. On ShapeNet55-GS, it reduces Chamfer Distance by 7.4% and improves F1% by 0.80 percentage points [S1, unofficial].
+*   **Strengths:** More consistent across resampled inputs, retains more instance information under partial observations, better supports Gaussian completion [S1, unofficial].
+*   **Limitations:** Higher pretraining cost (time and memory) compared to reconstruction-based methods [S1, unofficial].
+
+## Background
+Gaussian-JEPA was introduced by [S1, unofficial] as a self-supervised learning method for 3D Gaussian assets. It adapts the Joint-Embedding Predictive Architecture (JEPA) principle to Gaussian tokens, addressing the challenges of stochastic fixed-budget resampling and coupled attributes. It builds on the observation that contrastive learning depends on augmentations and global agreement, while reconstruction methods tie targets to specific samples [S1, unofficial].
+
+## Sources
+[S1] Gaussian-JEPA: Joint-Embedding Predictive Learning for 3D Gaussian Splats, https://arxiv.org/abs/2608.15651v1, fetched 2026-10-26 (unofficial)

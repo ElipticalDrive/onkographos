@@ -1,0 +1,128 @@
+--- v003.md
++++ v004.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Incremental Lighting for In-Scattering is a method for approximating light scattering (translucency) in volume rendering by propagating and blurring indirect lighting components from slice to slice, considering only incoming light within a cone in the direction of the light source [S1]. It solves the problem of computing indirect illumination in a single-pass rendering pipeline by discarding backward-directed light relative to the light source, thereby accommodating the lack of knowledge about future slices during a front-to-back traversal [15652-forward-scattered-intensity-transport.md]. It differs from full scattering models by ignoring back-scattering during the intensity transport phase, which simplifies the hardware implementation at the cost of accuracy in dense, deep regions of the volume [15652-forward-scattered-intensity-transport.md]. It builds on [Incremental Blending for In-scattering](2880-incremental-blending-for-in-scattering.md) by introducing indirect attenuation parameters and a dedicated light buffer for scattering propagation.
++Incremental Lighting for In-Scattering is a method for approximating light scattering (translucency) in volume rendering by propagating and blurring indirect lighting components from slice to slice, considering only incoming light within a cone in the direction of the light source [S1]. It extends incremental lighting by introducing indirect attenuation parameters and a dedicated light buffer for scattering propagation [S1]. It differs from full scattering models by ignoring back-scattering during the intensity transport phase, which simplifies the hardware implementation at the cost of accuracy in dense, deep regions of the volume [S1].
+ 
+ ## How it works
+@@ -12,6 +12,6 @@
+ 
+ **Data Structures:**
+-*   **Light Buffer:** A 2D texture buffer storing indirect attenuation values. Initialized with $1 - C_L$. Uses alternating double-buffering (current and next buffers) to support read/write operations during blur.
+-*   **Perturbation Texture:** A texture used to modify texture coordinates for sampling the light buffer during the blur operation.
++*   **Light Buffer:** A 2D texture buffer storing indirect attenuation values. Initialized with $1 - C_L$. Uses alternating double-buffering (current and next buffers) to support read/write operations during blur [S1].
++*   **Perturbation Texture:** A texture used to modify texture coordinates for sampling the light buffer during the blur operation [S1].
+ *   **Frame Buffer:** Standard render target for the final image.
+ 
+@@ -54,47 +54,62 @@
+ *   **Color-Changing Penetration:** To achieve effects like white light turning red as it penetrates deeper (similar to holding a flashlight under a hand), set $A_i$ for red smaller than $A_i$ for green and blue. This results in lower attenuation of the red component [S1].
+ *   **Precision:** The method relies on 2D buffer resolution matching the viewport to produce crisp shadows with minimal aliasing artifacts [S1].
+-*   **Back-Scattering Ignored:** The method approximates scattering by considering only incoming light within a cone in the direction of the light source. Back-scattering is ignored, which may reduce accuracy in dense, deep regions [15652-forward-scattered-intensity-transport.md].
++*   **Back-Scattering Ignored:** The method approximates scattering by considering only incoming light within a cone in the direction of the light source. Back-scattering is ignored, which may reduce accuracy in dense, deep regions [S1].
+ 
+ **Pseudocode:**
+ ```python
+-# Initialization
+-light_buffer_current = texture(width, height, 1.0 - light_color)
+-light_buffer_next = texture(width, height, 0.0)
++def incremental_lighting_in_scattering(volume, light_color, sample_distance, blur_angle, num_slices, viewport_width, viewport_height):
++    # Initialize double-buffered light buffers with 1 - light_color
++    light_buffer_current = [[1.0 - c for c in light_color] for _ in range(viewport_height)]
++    light_buffer_next = [[0.0, 0.0, 0.0] for _ in range(viewport_height)]
++    frame_buffer = [[0.0, 0.0, 0.0, 1.0] for _ in range(viewport_height)]
++    
++    # Generate perturbation texture for blur sampling [G]
++    perturbation_texture = [[(dy, dx) for dx in range(-1, 2)] for dy in range(-1, 2)]
+ 
+-# For each slice along the ray
+-for slice in slices:
+-    # Pass 1: Eye Contribution
+-    for pixel in pixels:
+-        ray_sample = sample_volume(ray, slice)
+-        A_i = light_buffer_current.sample(pixel.uv)
+-        C_reflective = ray_sample.color
+-        C_contrib = C_reflective * (1.0 - A_i)
+-        frame_buffer.composite_over(pixel.uv, C_contrib, ray_sample.alpha)
++    for slice_idx in range(num_slices):
++        # Pass 1: Eye Contribution
++        for y in range(viewport_height):
++            for x in range(viewport_width):
++                sample = volume.sample_ray(x, y, slice_idx)
++                A_i = light_buffer_current[y][x]
++                C_reflective = sample.color
++                C_contrib = [C_reflective[i] * (1.0 - A_i[i]) for i in range(3)]
++                # Standard Over operator
++                alpha_out = sample.alpha + (1.0 - sample.alpha) * frame_buffer[y][x][3]
++                color_out = [
++                    (C_contrib[i] * sample.alpha + frame_buffer[y][x][i] * frame_buffer[y][x][3] * (1.0 - sample.alpha)) / alpha_out
++                    for i in range(3)
++                ]
++                frame_buffer[y][x] = color_out + [alpha_out]
+ 
+-    # Pass 2: Light Contribution & Blur
+-    for pixel in pixels:
+-        # Get indirect attenuation parameter for this slice
+-        A_i_param = slice.indirect_attenuation # A_i for RGB channels
+-        
+-        # Calculate perturbed UVs for blur
+-        blur_radius = blur_angle * sample_distance
+-        perturbed_uvs = get_perturbed_uvs(pixel.uv, blur_radius, perturbation_texture)
+-        
+-        # Sample light buffer with perturbed UVs
+-        blurred_attenuation = 0.0
+-        for uv in perturbed_uvs:
+-            val = light_buffer_current.sample(uv)
+-            blurred_attenuation += weight * val
+-        blurred_attenuation /= sum(weights)
+-        
+-        # Light Buffer Compositing
+-        C_in = A_i_param # Fragment shader color set to A_i
+-        C_target = light_buffer_next.sample(pixel.uv)
+-        C_out = C_in * (1.0 - C_target) + C_target * (1.0 - C_in)
+-        
+-        light_buffer_next.write(pixel.uv, C_out)
++        # Pass 2: Light Contribution & Blur
++        for y in range(viewport_height):
++            for x in range(viewport_width):
++                A_i_param = volume.get_indirect_attenuation(slice_idx)
++                
++                blur_radius = blur_angle * sample_distance
++                perturbed_uvs = []
++                for dy, dx in perturbation_texture:
++                    perturbed_uvs.append((y + dy, x + dx))
++                
++                blurred_attenuation = [0.0, 0.0, 0.0]
++                total_weight = 0.0
++                for py, px in perturbed_uvs:
++                    val = light_buffer_current[py][px]
++                    w = 1.0 / (1.0 + ((py - y)**2 + (px - x)**2) / (blur_radius**2 + 1e-6))
++                    blurred_attenuation = [blurred_attenuation[i] + val[i] * w for i in range(3)]
++                    total_weight += w
++                blurred_attenuation = [b / total_weight for b in blurred_attenuation]
++                
++                C_in = blurred_attenuation
++                C_target = light_buffer_next[y][x]
++                C_out = [C_in[i] * (1.0 - C_target[i]) + C_target[i] * (1.0 - C_in[i]) for i in range(3)]
++                
++                light_buffer_next[y][x] = C_out
+ 
+-    # Swap buffers
+-    light_buffer_current, light_buffer_next = light_buffer_next, light_buffer_current
++        # Swap buffers
++        light_buffer_current, light_buffer_next = light_buffer_next, light_buffer_current
++
++    return frame_buffer
+ ```
+ 
+@@ -112,7 +127,7 @@
+ *   **Measured Performance:** Runs at interactive frame rates when exploiting 3D texture mapping hardware in conjunction with a dual image buffer [S2, unofficial].
+ *   **Strengths:** Decouples the resolution of light transport from the 3D data grid, permitting accurate lighting of volumes. Produces crisp shadows with minimal aliasing artifacts by matching light propagation resolution to the viewport [S1]. Allows control over color-changing penetration effects by specifying independent alpha for each color channel [S1].
+-*   **Limitations:** Ignores back-scattering, which may reduce accuracy in dense, deep regions of the volume [15652-forward-scattered-intensity-transport.md]. Approximates scattering rather than computing it exactly.
++*   **Limitations:** Ignores back-scattering, which may reduce accuracy in dense, deep regions of the volume [S1]. Approximates scattering rather than computing it exactly.
+ *   **When to Use:** When creating convincing images of clouds and other atmospheric phenomena where translucency effects are important [S1]. When interactive frame rates are required and hardware supports 3D texture mapping and dual image buffers [S2, unofficial].
+-*   **When Not to Use:** When high accuracy in dense, deep regions is required and back-scattering effects are significant [15652-forward-scattered-intensity-transport.md].
++*   **When Not to Use:** When high accuracy in dense, deep regions is required and back-scattering effects are significant [S1].
+ 
+ ## Background

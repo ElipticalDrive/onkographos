@@ -1,0 +1,685 @@
+Godot Engine – Multi-platform 2D and 3D game engine - Add custom projection matrix support for rendering  by huwpascoe · Pull Request #110850 · godotengine/godot
+
+Add custom projection matrix support for rendering by huwpascoe · Pull Request #110850 · godotengine/godot · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+huwpascoe
+commented
+Sep 24, 2025
+Copy link
+Copy Markdown
+Contributor
+Starting point for godotengine/godot-proposals#11436
+Adds RenderingServer.camera_set_projection.
+oblique projection example (camera should be orthographic and rotated -45 degrees x axis):
+```
+extends Camera3D
+
+func _ready() -> void:
+	var p := get_camera_projection()
+	p[1][1] *= sqrt(2.0)
+	RenderingServer.camera_set_projection(get_camera_rid(), p)
+```
+huwpascoe
+requested review from
+a team
+as code owners
+September 24, 2025 02:05
+AThousandShips
+added
+enhancement
+topic:rendering
+topic:3d
+labels
+Sep 24, 2025
+AThousandShips
+added this to the
+4.x milestone
+Sep 24, 2025
+BastiaanOlij
+commented
+Sep 25, 2025
+Copy link
+Copy Markdown
+Contributor
+This is very bare bones of what I've been working on (and sadly haven't had time to continue on), I think as a starting point instead of doing the whole lot, this may be a good way forward.
+I do think that in the long run, we should deprecate all camera setters in the rendering engine and move that logic into Camera3D itself. Towards users this will be completely transparent but it opens up the door for much wider use.
+Though this is one part of what I was working on.
+The main thing that is missing here, and why these types of PRs haven't been merged in the past, is that you can specify any type of projection including many that break rendering code. Most of these are due to shortcuts we've taken in assuming symmetrical projection matrices and we already have solutions there but they are triggered by our multiview setting (as this almost always results in asymmetrical projections).
+Just like we have an is_orthogonal check in our Projection class, we should add an is_symmetrical check, and change all the logic in the rendering engine where we use unprojection shortcuts. Likely we can do this with a new define.
+We also then need to check all the multiview code and check the impact of this change there.
+AThousandShips
+changed the title
+Custom projection matrix
+Add custom projection matrix support for rendering
+Sep 25, 2025
+huwpascoe
+force-pushed
+the
+custom_projection
+branch
+from
+7ec6e9f to
+7ef065d
+Compare
+September 25, 2025 08:16
+huwpascoe
+requested a review
+from a team
+as a code owner
+September 25, 2025 08:16
+huwpascoe
+commented
+Sep 25, 2025
+Copy link
+Copy Markdown
+Contributor
+Author
+Okay, got a new Projection::is_frustum_symmetric() function.
+Where is this check needed?
+BastiaanOlij
+commented
+Sep 25, 2025
+•
+edited by Calinou
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+@huwpascoe you have to look at places like this:
+https://github.com/godotengine/godot/blob/master/servers/rendering/renderer_rd/shaders/environment/sky.glsl#L203
+```
+#ifdef USE_MULTIVIEW
+	// In multiview our projection matrices will contain positional and rotational offsets that we need to properly unproject.
+	vec4 unproject = vec4(uv_interp.x, uv_interp.y, 0.0, 1.0); // unproject at the far plane
+	vec4 unprojected = sky_scene_data.view_inv_projections[ViewIndex] * unproject;
+	cube_normal = unprojected.xyz / unprojected.w;
+
+	// Unproject will give us the position between the eyes, need to re-offset
+	cube_normal += sky_scene_data.view_eye_offsets[ViewIndex].xyz;
+#else
+	cube_normal.z = -1.0;
+	cube_normal.x = (cube_normal.z * (-uv_interp.x - params.projection.x)) / params.projection.y;
+	cube_normal.y = -(cube_normal.z * (uv_interp.y - params.projection.z)) / params.projection.w;
+#endif
+```
+Note how if we have USE_MULTIVIEW we're doing a full unproject using the inverse view projection, while in the else we're taking a shortcut that only works for symmetrical projection matrices.
+This code shouldn't be switched on multiview, instead if our projection matrix is assymmetrical, we should set a define for that (or possibly a specialisation constant) just like we do for orthogonal in a few places.
+Do note that there are many places where USE_MULTIVIEW is used to trigger code that is specific to multiview, so it's not a simple find and replace. You'll have to look at each situation and evaluate which code fragments should really be checking the projection matrix.
+BastiaanOlij
+reviewed
+Sep 25, 2025
+View reviewed changes
+Comment thread
+core/math/projection.cpp
+@@ -876,6 +876,13 @@ bool Projection::is_orthogonal() const {
+return columns[2][3] == 0.0;
+}
+bool Projection::is_frustum_symmetric() const {
+return (columns[0][1] == 0.0f && columns[0][2] == 0.0f && columns[0][3] == 0.0f &&
+BastiaanOlij
+Sep 25, 2025
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+I have to find some time to look this up, but this check seems unlikely, this looks like it would be true only for identity matrices?
+huwpascoe
+Sep 25, 2025
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+That's what's meant by symmetry no?
+```
+[ * 0 0 0 ]
+[ 0 * 0 0 ]
+[ 0 0 * * ]
+[ 0 0 * * ]
+```
+unslanted, unsheared, rectangular and unpanned.
+BastiaanOlij
+Sep 26, 2025
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+I need to find some time to double check but laying it out like that, my gut feeling says yes. So I might have read the code wrong.
+BastiaanOlij
+Sep 26, 2025
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Basically it's when left FOV = right FOV, top FOV = bottom FOV, so indeed unslanted, unsheared, rectangular and unpanned.
+huwpascoe
+force-pushed
+the
+custom_projection
+branch
+from
+30eab4b to
+14c2ec4
+Compare
+September 26, 2025 13:37
+huwpascoe
+commented
+Sep 26, 2025
+Copy link
+Copy Markdown
+Contributor
+Author
+Do note that there are many places where USE_MULTIVIEW is used to trigger code that is specific to multiview, so it's not a simple find and replace. You'll have to look at each situation and evaluate which code fragments should really be checking the projection matrix.
+I've searched every place that USE_MULTIVIEW occurs. Only the sky.glsl actually does anything with projection matrix. Everything else is a switch between scene_data and multiview_data, so maybe this isn't a big deal after all.
+clayjohn
+commented
+Sep 26, 2025
+Copy link
+Copy Markdown
+Member
+Do note that there are many places where USE_MULTIVIEW is used to trigger code that is specific to multiview, so it's not a simple find and replace. You'll have to look at each situation and evaluate which code fragments should really be checking the projection matrix.
+I've searched every place that USE_MULTIVIEW occurs. Only the sky.glsl actually does anything with projection matrix. Everything else is a switch between scene_data and multiview_data, so maybe this isn't a big deal after all.
+It will be needed by: ray casting, fog, scene shader, LOD, HLOD, SSR, SSAO, SSIL, SSS, FSR, TAA (and likely more that I can't think of off the top of my head)
+BastiaanOlij
+commented
+Sep 27, 2025
+Copy link
+Copy Markdown
+Contributor
+It will be needed by: ray casting, fog, scene shader, LOD, HLOD, SSR, SSAO, SSIL, SSS, FSR, TAA (and likely more that I can't think of off the top of my head)
+With Ray casting do you mean ray casting as in physics, or ray casting as in any effect that does any form of ray marching or other shaders side ray tracing?
+As for ray casting in physics after obtaining the ray origin and ray normal from the Camera3D object won't work seeing Camera3D is blissfully unaware of our overridden projection matrix.
+As for the others, I think most will already work, at least most I've checked when stereo rendering. Still we should indeed check each and everyone to make sure they behave as expected.
+huwpascoe
+added 2 commits
+October 3, 2025 19:46
+is_frustum_symmetric
+cd402f7
+custom projection matrix
+2bbb175
+huwpascoe
+force-pushed
+the
+custom_projection
+branch
+from
+14c2ec4 to
+5644352
+Compare
+October 3, 2025 21:02
+asymmetric projection matrix
+e23c009
+huwpascoe
+force-pushed
+the
+custom_projection
+branch
+from
+5644352 to
+e23c009
+Compare
+October 3, 2025 21:05
+akien-mga
+mentioned this pull request
+Oct 9, 2025
+Add Custom Projection to Camera3D
+#84454
+Open
+huwpascoe
+mentioned this pull request
+Nov 4, 2025
+Add custom camera scale to rendering server
+#103553
+Open
+JNSStudios
+mentioned this pull request
+Nov 15, 2025
+CI artifacts can't be used to export projects, PCK version mismatch reported
+#112461
+Open
+dawnep
+commented
+Nov 29, 2025
+Copy link
+Copy Markdown
+Just wanted to say that I am currently using this PR and it works perfectly and is the only stable solution I've found for accurately displaying pixel perfect fake 2d in a 3d world.
+Huge thank you for creating this :)
+FlowVix
+commented
+Dec 10, 2025
+Copy link
+Copy Markdown
+Just tried this PR alongside godot-rust and it's working perfectly for my purposes! Thank you so much, can't wait to see this merged.
+Glorax
+commented
+Dec 11, 2025
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+@FlowVix Unfortunately it seems unlikely that this PR will be merged anytime soon, if ever.
+To my knowledge, this PR breaks down outside of specific use cases, and only partially implements godotengine/godot-proposals/issues/11436.
+mrjustaguy
+commented
+Dec 11, 2025
+Copy link
+Copy Markdown
+Contributor
+This PR, or some other dealing with this Topic will be merged at some point, it has been discussed before and it is a Desired feature.
+Glorax
+commented
+Dec 12, 2025
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+@clayjohn @AThousandShips Perhaps a maintainer could provide some much-needed clarity on the status of this PR? Does it succeed in implementing godotengine/godot-proposals#11436 on any level, and will it be merged any time soon?
+mrjustaguy
+commented
+Dec 13, 2025
+Copy link
+Copy Markdown
+Contributor
+No apologies needed, in this case it was warranted, and has shown that there was a problem, either in willingness to comply with the stated requirements or a misunderstanding of what those requirements actually were for whatever reason.
+huwpascoe
+commented
+Dec 13, 2025
+•
+edited by lyuma
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Author
+That's... not the answer I was expecting.
+Implement the changes requested by Bastiaan
+I made the changes right after he mentioned. There's the force push from 2 months ago! Did neither of you notice? I've been waiting this whole time.
+Implement the interface outlined in Custom Camera3D projection: a practical approach godot-proposals#11436
+We agreed explicitly that this PR was only to implement the projection function on the RenderingServer. This was spoken multiple times. When this PR was merged, then I'd move onto the next step of integrating the camera with a nice UI and things.
+The fact that you are pretending like this PR is ready to merge and making Bastiaan and me seem like the bad guys is extremely disappointing behaviour and honestly makes me regret how much time I have spent assisting you
+I'm sorry for upsetting you, clay. I didn't mean to make you look like "the bad guys" at all! I thought that if I pushed with the experimental pitch that'd force your hand and have you actually review the changes because you'd seemingly ignored them for so long.
+Edit:
+After seeing the comments in the other thread suggesting I'm dishonest, you haven't even tried this PR, you've just decided it doesn't work without even testing it. Here's what I've tested, the last two I can't because lack of hardware.
+sky
+fog (since found that fog is broken!)
+volumetric
+scene shader
+LOD
+SSR
+SSAO
+SSIL
+SSS
+TAA
+FSR
+XR
+MetalFX temporal upscaler
+So yeah, it's working. Telling people that it isn't without even testing it, just because you know better, that's the problem.
+Flarkk
+commented
+Dec 13, 2025
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+We agreed explicitly that this PR was only to implement the projection function on the RenderingServer. This was spoken multiple times. When this PR was merged, then I'd move onto the next step of integrating the camera with a nice UI and things.
+@huwpascoe I wasn't part of the discussion so I can't say what was agreed.
+However you seem to say you had already planned to move on to the UI/API layer after this PR anyway.
+I'd suggest that you (or anyone) implement the UI/API layer in this PR instead. That would probably unlock it all. If you can go down this path, ping me whenever you need a review, I'll help.
+mrjustaguy
+commented
+Dec 13, 2025
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+According to the rendering meeting notes
+Do note there were a couple of meetings regarding this topic and not all of them have much in the notes so I don't have much of a clue what happened or not.
+Also..
+I made the changes right after he mentioned. There's the force push from 2 months ago! Did neither of you notice? I've been waiting this whole time.
+This is entirely possible, even if people get notifications of changes to PRs, they may be involved in so many that they just get swamped with them and miss out a few of them. Likewise a couple of Pushes doesn't always mean the work is Done, so if you think the person(s) that have requested changes, or need to review, have missed the fact it's ready, it's always worth checking up to see if they're aware of the fact.
+Obviously also if they're busy at the time and quite a bit of time has passed you can check again to make sure they didn't forget, we're human after all and we forget and mess up far more then most of us would like to admit.
+huwpascoe
+commented
+Dec 13, 2025
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Author
+According to the rendering meeting notes
+Those were referring to the feature in general, not this PR.
+I'd suggest that you (or anyone) implement the UI/API layer in this PR instead. That would probably unlock it all. If you can go down this path, ping me whenever you need a review, I'll help.
+Thank you.
+Anyone who still doubts, here's a screenshot of a distorted matrix!
+I see shadows, reflections, refractions, normals, subsurface, volumetrics, fog, a sky (working thanks to the changes from baastian), directional light, point lights, and so on... there they are.
+edit: the volumetrics world position isn't working properly, I need to fix that.
+Glorax
+commented
+Dec 13, 2025
+Copy link
+Copy Markdown
+@huwpascoe I think ClayJohn might have been a bit too harsh with his accusations. I hope you are able to work out this disagreement. Though I wouldn't expect to get much more assistance from him.
+Obviously implementing the interface is a non-starter for getting this merged. Adding it in a later PR will not cut it. So do you have any ideas for how you might begin with that?
+I'd also be interested in hearing @BastiaanOlij's input on the state of this PR.
+Glorax
+commented
+Dec 13, 2025
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+@huwpascoe @BastiaanOlij @Flarkk So once the interface is implemented and this PR gets merged, will it be able to handle the oblique camera projection (changing the angle of the near plane) that is necessary for seamless portals, or would that violate the interface's symmetry limitations?
+godotengine/godot-proposals#501
+https://www.youtube.com/watch?v=KZZ3Xw9sfvE&t=309s
+mrjustaguy
+commented
+Dec 13, 2025
+Copy link
+Copy Markdown
+Contributor
+@huwpascoe I think ClayJohn might have been a bit too harsh with his accusations. I hope you are able to work out this disagreement. Though I wouldn't expect to get much more assistance from him.
+It's clear mistakes were made by both and the only question is will they choose to dwell on the past and keep the hostilities up between each other or each own their mistakes and try to avoid repeating them and ultimately deescalate things.
+Given I don't believe there was any real malice involved on either side, nor do I see any hints of either of them being ones to hold grudges I'd say the latter is most likely to happen🤞
+Flarkk
+commented
+Dec 14, 2025
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+So once the interface is implemented and this PR gets merged, will it be able to handle the oblique camera projection (changing the angle of the near plane) that is necessary for seamless portals
+Yes it will. Oblique near/far planes are supported by the interface described in godotengine/godot-proposals#11436 (either the user sets the planes values directly, or they pick a target object to extract plane orientation from)
+Glorax
+commented
+Dec 14, 2025
+Copy link
+Copy Markdown
+@Flarkk Marvellous.
+huwpascoe
+commented
+Dec 20, 2025
+Copy link
+Copy Markdown
+Contributor
+Author
+So, the fog position... by sending in an inv_projection by uniform to multiply onto the view_pos, the x-y axis is the proper shape. But the Z axis just breaks in a weird way that makes it visible only if inside the fog volume itself.
+godot/servers/rendering/renderer_rd/shaders/environment/volumetric_fog.glsl
+Lines 135 to 138
+in
+551ce8d
+vec3 view_pos;
+view_pos.xy = (fog_unit_pos.xy * 2.0 - 1.0) * mix(scene_params.fog_frustum_size_begin, scene_params.fog_frustum_size_end, vec2(fog_unit_pos.z));
+view_pos.z = -scene_params.fog_frustum_end * fog_unit_pos.z;
+view_pos.y = -view_pos.y;
+```
+	vec4 view_pos4 = scene_params.inv_projection * vec4(view_pos, 1.0);
+	view_pos = view_pos4.xyz / view_pos4.w;
+```
+I've spent a good number of days trying every way I can think of to fix the z clip. I'm out of ideas for now.
+SchnozzleCat
+commented
+Jan 4, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Unsure if I'm messing something up, but setting the projection breaks window scaling. Is this intended as a current limitation of the PR?
+e.g.
+with a normal camera:
+2026-01-04-152222_grim_annotated.mp4
+with a camera that sets the projection:
+2026-01-04-152500_grim_annotated.mp4
+I didn't change anything between the two videos except the camera.
+This is what I ran:
+```
+    public override void _Ready()
+    {
+        var proj = GetCameraProjection();
+        var v1 = proj[1];
+        var v11 = v1[1];
+        v11 *= Mathf.Sqrt2;
+        v1[1] = v11;
+        proj[1] = v1;
+
+        RenderingServer.CameraSetProjection(GetCameraRid(), proj);
+    }
+```
+huwpascoe
+commented
+Jan 11, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+I didn't change anything between the two videos except the camera.
+Ah it would also need setting in the viewport size event.
+huwpascoe
+commented
+Jan 11, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+Given I don't believe there was any real malice involved on either side, nor do I see any hints of either of them being ones to hold grudges I'd say the latter is most likely to happen.
+I've been given a second opinion on this whole thing and it's been explained to me that regardless of grudges, I've basically poisoned everything anyway with my ignorance.
+Warning, stream of thinking:
+They were like
+these things need to be changed
+And I was like
+okay, checked, found nothing that needs changing
+...
+change the things
+...
+I checked, there's nothing
+...
+Change the things
+...
+what things? Point them out.
+...
+We did.
+...
+Why are they being so weird about this? Perhaps...they don't actually know what they want and they can't admit it! And now someone's asking and they're getting a mean sounding response. Well, guess I should call this out...
+end of stream
+Here's the important part: To them it was obvious and still is obvious to what needs changing. Whereas I just don't have the knowledge to recognize it even if it's looking right at me from the source. And while the screenshots I uploaded look fine to me there's probably all kinds of subtle things that I'm not noticing. So all I've done in the end, is slow down the people who can do what's required.
+I let everyone down and made everything worse. Sorry.
+huwpascoe
+closed this
+Jan 11, 2026
+jktrctt
+commented
+Jan 11, 2026
+Copy link
+Copy Markdown
+Tragic ending, truly. Been following this thread and I would ask that you please keep it open. It’s such an important feature and I haven’t seen anyone else building it. Personally, I’ve built a massive foundation upon it already, for better or worse
+Glorax
+commented
+Jan 11, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+@huwpascoe You haven't let everyone down. Godot hasn't been made worse by you creating this PR. Just by existing, it has already been helpful to many people. Who cares that it isn't complete enough to be merged? It's not even four months old. There are older PRs that took longer to merge, and had worse issues than yours does now.
+From my understanding, the bulk of the work has already been done. Frankly, if we all sat around waiting for the person with the perfect qualifications to come along, nothing would ever get added to this engine. What you have done here is valuable, even if you don't think it is.
+I just think it'd be a massive waste to throw all the work you've done on this in the trash.
+If you truly are just too tired and demoralized to work on this anymore, there must be a way to hand this PR off to somebody else to finish, or at least keep the option open.
+Glorax
+commented
+Jan 11, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+@huwpascoe
+Here's the important part: To them it was obvious and still is obvious to what needs changing.
+This is a communications issue. If they're noticing obvious problems in your screenshots, it's on them to point out to you what needs fixing. It's not your fault for not noticing what you don't know.
+So all I've done in the end, is slow down the people who can do what's required.
+This is patently not true. As far as I'm aware, you're the only one who is currently working on this feature, and nobody else with the expertise is actually willing to do it. It's absolutely not the case that you stepping aside will free up those more suited to the task to fast track this feature into the engine. What's more likely is that no one will volunteer, and this feature will be once again indefinitely delayed, which is precisely what happened with the last several PRs that tried to implement it.
+I don't want to put excessive pressure on you. I just want to point out that just because somebody can do something doesn't mean they will do it, and you've already done more than anyone in recent months. The fact you took time out of your life to work on this feature is commendable, and every little bit helps.
+Glorax
+commented
+Jan 11, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+@huwpascoe
+I've been given a second opinion on this whole thing and it's been explained to me that regardless of grudges, I've basically poisoned everything anyway with my ignorance.
+What do you mean by "second opinion"? Did somebody talk you into closing this PR? Because I personally think that second opinion might need a second opinion.
+ghost
+commented
+Jan 11, 2026
+Copy link
+Copy Markdown
+@huwpascoe This PR is marvelous. I have many PRs & I know the burden of adding new features. Could you please open it again? We really need this. If not, can you help me out in adding the features of this PR for a new PR? Thanks.
+AThousandShips
+added
+the
+archived
+label
+Jan 11, 2026
+AThousandShips
+removed this from the
+4.x milestone
+Jan 11, 2026
+This comment was marked as off-topic.
+Sign in to view
+Glorax
+commented
+Jan 13, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+@AR-DEV-1 I feel as though I'm partly responsible for this. Maybe if I'd said nothing in early December and hadn't poked around, this PR would still be open.
+Now who knows how long it will be before anyone else elects to work on this feature.
+I don't even know if anyone can continue developing this PR without @huwpascoe's written permission. Which is only possible if they decide to come back.
+akien-mga
+added
+the
+salvageable
+label
+Jan 13, 2026
+akien-mga
+commented
+Jan 13, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Member
+@Glorax It's great that you are excited about this feature, but I'd like to ask you to refrain from commenting so much on PRs if it's not to do a technical review or report about you testing the PR.
+When developing Godot we try not to rush implementing features, especially until we have consensus on the implementation and have validated that it does everything it should. For now concerns remain on both PRs implementing custom projection matrices for rendering, so neither has been merged yet. That's not to say that they're not useful, and if either PR works for your use case, you can cherry-pick it in your own fork and use it for your project.
+But nagging contributors and maintainers regularly like you've done the past few months adds stress to already overburdened maintainers, and possibly stress or frustration to contributors.
+We know that there is a lot of demand for this feature, and we expect that Godot will have support for this eventually, but for now neither implementation has been evaluated as sufficient by rendering maintainers, and we ask that users respect that and let us do our work without nagging.
+huwpascoe
+commented
+Jan 14, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+Tragic ending, truly. Been following this thread and I would ask that you please keep it open. It’s such an important feature and I haven’t seen anyone else building it. Personally, I’ve built a massive foundation upon it already, for better or worse
+It's not the end, the feature will come sooner or later. I haven't deleted the code, and the other pr I based this on still exists with a separate addition that Juan made so they'll pick up the pieces.
+If you need custom builds of the feature I'll be happy to help, as I'm sure will the dev team!
+I feel as though I'm partly responsible for this. Maybe if I'd said nothing in early December and hadn't poked around, this PR would still be open.
+I don't even know if anyone can continue developing this PR without @huwpascoe's written permission. Which is only possible if they decide to come back.
+It's not your fault. Anyone is permitted to complete this and take full credit for any of it, as far as I'm concerned this belongs to the godot foundation, no strings attached.
+What do you mean by "second opinion"? Did somebody talk you into closing this PR? Because I personally think that second opinion might need a second opinion.
+It was my decision. I'm not a graphics programmer, and any contributions I've made to the rendering system has been under guidance from @clayjohn and co. Because I felt like I'd shut the doors to communication, after weeks of frustration trying to fix the fog I sought help elsewhere. After explaining the situation, they were like "nope, you done messed up. Here's why." And here we are. I'm not afraid to admit when I'm wrong.
+ghost
+commented
+Jan 28, 2026
+Copy link
+Copy Markdown
+Regarding this PR, I want to know what needs to be done. I'll try to open a new PR (as this is a desirable feature). I know that it is a starting point & that there it be split in to several PRs which will implement the proposal.
+huwpascoe
+commented
+Feb 25, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+Bastiaan's implementing the feature in a new PR if you want to follow progress. It's primarily focused on VR, but this feature is a part of it. Once it's out of draft, it should be easy enough to try the custom ortho protection.
+It'll probably be some months yet before it's ready.
+#116424
+Glorax
+mentioned this pull request
+Mar 2, 2026
+Custom Camera3D projection: a practical approach
+godotengine/godot-proposals#11436
+Open
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+archived
+enhancement
+salvageable
+topic:rendering
+topic:3d
+12 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

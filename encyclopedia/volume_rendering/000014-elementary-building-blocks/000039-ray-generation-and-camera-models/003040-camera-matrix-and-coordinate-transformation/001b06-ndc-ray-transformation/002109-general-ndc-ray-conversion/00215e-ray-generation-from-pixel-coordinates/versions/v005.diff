@@ -1,0 +1,114 @@
+--- v004.md
++++ v005.md
+@@ -1,5 +1,5 @@
+ # Ray Generation from Pixel Coordinates
+ 
+-Also called: Camera Ray Generation, Camera Raycasting, Pixel to Ray Unprojection, Ray Direction Calculation, Ray Generation from Camera/NDC, Ray Generation from Pixels, Ray Generation from Screen Coordinates
++Also called: Camera Raycasting, Pixel to Ray Unprojection, Ray Direction Calculation, Ray Generation from Camera/NDC, Ray Generation from Pixels, Ray Generation from Screen Coordinates
+ 
+ ## Overview
+@@ -71,32 +71,26 @@
+     """
+     # 1. Generate pixel coordinates
+-    # Create grid of u, v indices
+     u = torch.arange(W, device=device)
+     v = torch.arange(H, device=device)
+-    uv_grid = torch.meshgrid(u, v, indexing='ij') # u, v
++    # meshgrid with indexing='xy' gives shape (H, W, 2)
++    uv_grid = torch.meshgrid(u, v, indexing='xy')
+     uv_grid = torch.stack(uv_grid, dim=-1) # (H, W, 2)
+     
+-    # Flatten to (N, 2)
+     N = W * H
+     pixels = uv_grid.view(-1, 2) # (N, 2)
+     
+-    # 2. Convert to NDC
+-    # x_ndc = (2 * u / W) - 1
+-    # y_ndc = (2 * v / H) - 1
++    # 2. Convert to NDC: x_ndc = (2*u/W) - 1, y_ndc = (2*v/H) - 1
+     ndc_xy = 2.0 * pixels / torch.tensor([W, H], device=device) - 1.0 # (N, 2)
+     
+-    # 3. Create NDC points for Origin (z_ndc = -1 for OpenGL, or 0 for some ray marchers)
+-    # Using -1 for standard OpenGL NDC near plane
++    # 3. Create NDC points for Origin (z_ndc = -1 for OpenGL near plane)
+     z_ndc_origin = -1.0
+     ndc_points_origin = torch.cat([ndc_xy, torch.full((N, 1), z_ndc_origin, device=device), torch.ones((N, 1), device=device)], dim=-1) # (N, 4)
+     
+-    # 4. Create NDC points for Direction Point (z_ndc = 1 for OpenGL far plane, or 1 for image plane)
+-    # Using 1 for standard OpenGL NDC far plane / image plane
++    # 4. Create NDC points for Direction Point (z_ndc = 1 for OpenGL far plane / image plane)
+     z_ndc_plane = 1.0
+     ndc_points_plane = torch.cat([ndc_xy, torch.full((N, 1), z_ndc_plane, device=device), torch.ones((N, 1), device=device)], dim=-1) # (N, 4)
+     
+     # 5. Unproject to World Space
+-    # Method: Use camera.unproject_points if available, else manual inverse matrix
+-    # Assuming camera.unproject_points handles the inverse projection-view and perspective division
++    # Assumes camera.unproject_points handles inverse PV matrix and perspective division
+     world_points_origin = camera.unproject_points(ndc_points_origin, from_ndc=True) # (N, 3)
+     world_points_plane = camera.unproject_points(ndc_points_plane, from_ndc=True) # (N, 3)
+@@ -119,38 +113,27 @@
+     fov_rad = math.radians(fov_deg)
+     
+-    # 1. Pixel coordinates relative to center
+     u = torch.arange(W, device=device)
+     v = torch.arange(H, device=device)
+-    uv_grid = torch.meshgrid(u, v, indexing='ij')
++    uv_grid = torch.meshgrid(u, v, indexing='xy')
+     uv_grid = torch.stack(uv_grid, dim=-1).float() # (H, W, 2)
+     
+     # Center coordinates: (0,0) at center
+-    # xy = fragCoord - size / 2.0
+     xy = uv_grid - torch.tensor([W/2.0, H/2.0], device=device) # (H, W, 2)
+     
+-    # 2. Calculate Z in camera space
+-    # z = size.y / tan(fov / 2)
+-    # Note: This assumes vertical FOV and aspect ratio handling
+-    z_cam = H / (2.0 * math.tan(fov_rad / 2.0)) # Scalar
++    # Calculate Z in camera space: z = size.y / tan(fov / 2)
++    z_cam = H / math.tan(fov_rad / 2.0) # Scalar
+     
+-    # 3. Construct direction in camera space
+-    # float3(xy, -z)
+-    # xy is (H, W, 2), z is scalar
+-    # We need to normalize (x, y, -z)
+-    # Create tensor (H, W, 3)
++    # Construct direction in camera space: float3(xy, -z)
+     xy_expanded = xy.unsqueeze(-1) # (H, W, 2, 1)
+     z_tensor = torch.full((H, W, 1), -z_cam, device=device) # (H, W, 1)
+     dir_cam = torch.cat([xy_expanded, z_tensor], dim=-1).view(-1, 3) # (N, 3)
+     
+-    # 4. Normalize
++    # Normalize
+     dir_cam = torch.nn.functional.normalize(dir_cam, dim=-1) # (N, 3)
+     
+-    # 5. Rotate to World Space
+-    # Apply rotation matrix R (3x3) to each direction
+-    # R is (3,3), dir_cam is (N,3)
+-    # world_dir = dir_cam @ R.T
++    # Rotate to World Space: world_dir = dir_cam @ R.T
+     rays_d = dir_cam @ cam_world_rot.T # (N, 3)
+     
+-    # 6. Origin is camera position
++    # Origin is camera position
+     rays_o = cam_world_pos.expand(N, -1) # (N, 3)
+     
+@@ -166,5 +149,4 @@
+ *   **Coordinate System**: Metal/OpenGL NDC may have $(0,0)$ at the upper left, requiring adjustment to center $(0,0)$ [S5, unofficial].
+ *   **Device Mismatch**: Hardcoding `.cuda()` breaks device-agnostic execution; use `camera.device` [S4, unofficial].
+-*   **Shape Mismatch**: Appending ones to NDC points must match the expected input shape of `unproject_points` (e.g., $(N, 2)$ vs $(N, 3)$) [S4, unofficial].
+ *   **Aspect Ratio**: Analytic methods must correctly handle aspect ratio if FOV is vertical vs horizontal [S8, unofficial].
+ 
+@@ -180,12 +162,10 @@
+ *   **Time Complexity**: $O(N)$ where $N = W \times H$, as each pixel is processed independently [S4, S7, unofficial].
+ *   **Memory Complexity**: $O(N)$ to store the ray origins and directions [S4, S6, unofficial].
+-*   **Performance**: Fast for static cameras; matrix inversion can be cached if the camera pose is fixed [S1, S4, unofficial].
+ *   **Strengths**: Accurate mapping from screen to world; handles arbitrary camera poses via matrix inversion [S1, S4, unofficial].
+ *   **Limitations**: Requires access to camera matrices or intrinsics; precision issues may arise with extreme FOV or large distances [S1, S5, unofficial].
+ *   **When to Use**: When rendering from a known camera position and orientation [S4, S7, unofficial].
+-*   **When Not to Use**: When using a simplified analytic ray generation for fixed FOV cameras where matrix overhead is unnecessary [S5, unofficial].
+ 
+ ## Background
+-Ray generation from pixel coordinates is a fundamental step in ray tracing and volume rendering, originating from the need to map 2D image samples to 3D space [S1, S5, unofficial]. It is widely used in neural radiance fields (NeRF) and differentiable rendering pipelines [S4, S7, unofficial]. The method relies on the inverse of the camera projection matrix to unproject pixels to world space [S1, S4, unofficial].
++Ray generation from pixel coordinates is a fundamental step in ray tracing and volume rendering, originating from the need to map 2D image samples to 3D space [S1, S5, unofficial]. The method relies on the inverse of the camera projection matrix to unproject pixels to world space [S1, S4, unofficial].
+ 
+ ## Sources

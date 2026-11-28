@@ -1,0 +1,78 @@
+# Mean Intersection over Union (mIoU)
+Also called: Jaccard index, mIoU
+
+## Overview
+Mean Intersection over Union (mIoU) is a segmentation evaluation metric that quantifies the overlap between predicted and ground-truth masks by averaging the Intersection over Union (IoU) across all semantic classes [S1, unofficial][S2]. It serves as a standard accuracy measure for semantic segmentation tasks in 3D scene understanding, distinct from pixel accuracy which can be skewed by class imbalance [S2].
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** A set of predicted segmentation masks $P = \{p_1, ..., p_N\}$ and ground-truth masks $G = \{g_1, ..., g_N\}$ for $N$ classes. In the context of volume rendering, these are typically derived from thresholded density or occupancy fields [S1, unofficial].
+- **Output:** A scalar value $mIoU \in [0, 1]$ representing the mean overlap.
+
+**Data Structures:**
+- Binary masks for each class $c$, where $1$ indicates the class is present and $0$ otherwise.
+- Counters for True Positives ($TP_c$), False Positives ($FP_c$), and False Negatives ($FN_c$) for each class.
+
+**Steps:**
+1. For each class $c$ from $1$ to $N_c$:
+   a. Identify True Positives ($TP_c$): Voxels/pixels where both prediction $p_c$ and ground truth $g_c$ are $1$.
+   b. Identify False Positives ($FP_c$): Voxels/pixels where prediction $p_c$ is $1$ but ground truth $g_c$ is $0$.
+   c. Identify False Negatives ($FN_c$): Voxels/pixels where prediction $p_c$ is $0$ but ground truth $g_c$ is $1$.
+   d. Compute IoU for class $c$:
+      $$ IoU_c = \frac{TP_c}{TP_c + FP_c + FN_c} $$
+      [S1, unofficial]
+   e. Handle the edge case where the denominator is zero (no voxels predicted or present for class $c$). If $TP_c + FP_c + FN_c = 0$, define $IoU_c = 1$ if $TP_c=0$ (both empty) or $0$ if not, though standard implementations often skip or penalize empty classes. [G]
+2. Compute the mean across all classes:
+   $$ mIoU = \frac{1}{N_c} \sum_{c=1}^{N_c} IoU_c $$
+   [S1, unofficial]
+
+**Parameters:**
+- $N_c$: The total number of semantic classes.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_miou(predictions, ground_truth, num_classes):
+    """
+    Compute Mean Intersection over Union.
+    predictions: List of binary masks for each class, shape (N, H, W) or (N, D, H, W)
+    ground_truth: List of binary masks for each class, shape (N, H, W) or (N, D, H, W)
+    num_classes: Integer N_c
+    """
+    miou_sum = 0.0
+    for c in range(num_classes):
+        p = predictions[c]
+        g = ground_truth[c]
+        
+        # Calculate TP, FP, FN
+        tp = sum(p & g)
+        fp = sum(p & ~g)
+        fn = sum(~p & g)
+        
+        denominator = tp + fp + fn
+        
+        if denominator == 0:
+            # Edge case: No voxels in prediction or ground truth for this class.
+            # Common convention: IoU is 1 if both are empty, else 0.
+            # [G] Implementation detail not explicitly defined in sources.
+            iou_c = 1.0 if (tp == 0 and fp == 0 and fn == 0) else 0.0
+        else:
+            iou_c = tp / denominator
+            
+        miou_sum += iou_c
+        
+    return miou_sum / num_classes
+```
+
+## Operating characteristics
+- **Strengths:** Provides a balanced evaluation of segmentation quality across all classes, unlike pixel accuracy which is biased towards majority classes [S2].
+- **Limitations:** Computationally expensive for high-resolution 3D volumes if not optimized. Sensitive to class imbalance if not averaged correctly (though mIoU averages per-class, rare classes still contribute equally to the mean, which can be a strength or weakness depending on the goal).
+- **Use Cases:** Standard evaluation for semantic segmentation in NeRFs and 3D scene understanding [S1, unofficial].
+
+## Background
+mIoU is a standard metric in computer vision segmentation tasks. In the context of neural radiance fields, it is used to evaluate the semantic segmentation capabilities of SDF-based NeRFs and other 3D representations [S1, unofficial]. It is often reported alongside other metrics like LPIPS and Chamfer Distance for comprehensive 3D scene understanding [S1, unofficial].
+
+## Sources
+[S1] From reconstruction to reasoning : neural radiance fields for comprehensive 3D scene understanding, https://theses.hal.science/tel-05693528v1, fetched 2026-10-26 (unofficial)
+[S2] Semantically-aware Neural Radiance Fields for Visual Scene Understanding: A Comprehensive Review, https://link.springer.com/article/10.1007/s11263-025-02663-5, fetched 2026-10-27

@@ -1,0 +1,214 @@
+# Monte Carlo Volume Rendering
+
+Also called: Monte Carlo Scattering (MCS), Stochastic Volume Rendering
+
+## Overview
+Monte Carlo Volume Rendering is a stochastic approach to volumetric visualization that avoids uniform sampling grids, instead using random number generation to determine scattering events and integration steps [S1, S3, unofficial]. It solves the problem of artifacts in homogeneous materials and the computational cost of dense uniform sampling by adaptively concentrating samples in non-homogeneous regions or along light paths [S1, unofficial]. Unlike deterministic ray casting which samples fixed intervals, this method traces photon paths through participating media, accumulating radiance and transmittance estimates via multiple bounces and null-collision absorption/scattering events [S2, unofficial].
+
+## How it works
+The method implements two primary variants: a direct ray-casting approach using exponential distance sampling [S3, unofficial] and a photon-marching approach using null-collision Monte Carlo [S2, unofficial]. Both require unprojecting screen coordinates to world-space rays and intersecting them with the volume bounding box [S2, S3, unofficial].
+
+### Inputs and Outputs
+**Inputs:**
+*   Volume data: 3D texture $V$ containing density/opacity (alpha) and color (RGB).
+*   Environment map: 2D texture for background/lighting.
+*   Camera parameters: Inverse Model-View-Projection (MVP) matrix for ray unprojection.
+*   Volume parameters: Extinction coefficient ($\sigma_t$), albedo ($\omega$), scattering bias ($g$), majorant ratio.
+*   Rendering parameters: Maximum bounces ($N_b$), steps per ray ($N_s$), random seed offset.
+
+**Outputs:**
+*   Accumulated color buffer (RGBA).
+*   (Photon variant) Photon state buffers: position, direction, transmittance, radiance, bounce count, sample count.
+
+### Data Structures
+**Photon State (Photon Variant):**
+*   `position`: `vec3` (world space).
+*   `direction`: `vec3` (normalized).
+*   `transmittance`: `vec3` (accumulated transmission).
+*   `radiance`: `vec3` (accumulated emitted/scattered light).
+*   `bounces`: `uint` (scattering events).
+*   `samples`: `uint` (integration steps).
+
+**Random Number Generator (RNG):**
+A hash-based RNG is used to generate deterministic pseudo-random numbers from pixel coordinates and frame offsets [S2, unofficial].
+$$
+rand(p) = fract( (cos(M \times p)_x, sin(M \times p)_y) \times D )
+$$
+Where $M$ is a $2 \times 2$ constant matrix, $D$ is a constant `vec2`, and $p$ is the input coordinate (e.g., fragment position + offset) [S2, unofficial].
+
+### Parameters
+*   $uSigmaMax$: Maximum extinction coefficient (majorant). Typical: positive float representing max volume density [S2, unofficial].
+*   $uExtinction$: Total extinction coefficient $\sigma_t$ [S3, unofficial].
+*   $uAbsorptionCoefficient$: Base absorption multiplier [S2, unofficial].
+*   $uScatteringCoefficient$: Base scattering multiplier [S2, unofficial].
+*   $uScatteringBias$: Anisotropy parameter $g$ for Henyey-Greenstein phase function. Default: 0 [S2, unofficial].
+*   $uMajorant$: Majorant density $\sigma_{maj}$. Typically $\sigma_{maj} \ge \sigma_t$. Default: 2 [S2, unofficial].
+*   $uMaxBounces$: Maximum scattering bounces. Default: 8 [S2, unofficial].
+*   $uSteps$: Integration steps per photon trace. Default: varies [S2, unofficial].
+*   $uAlphaCorrection$: Scaling factor for sampled alpha values [S2, unofficial].
+*   $uOffset$: Random offset uniform for temporal anti-aliasing [S2, unofficial].
+
+### Algorithm: Direct Ray Casting with Exponential Sampling
+This variant traces a single ray per pixel, stochastically determining scattering points [S3, unofficial].
+
+1.  **Ray Initialization:**
+    *   Unproject screen coordinates to get ray origin $\mathbf{o}$ and direction endpoint $\mathbf{d}_{end}$.
+    *   Compute ray direction $\mathbf{d} = \mathbf{d}_{end} - \mathbf{o}$.
+    *   Intersect ray with volume bounding box to get entry $t_{min}$ and exit $t_{max}$.
+    *   If no intersection, sample environment map and return.
+    *   Set ray segment start $\mathbf{p}_{start} = \mathbf{o} + t_{min}\mathbf{d}$ and max distance $L = t_{max} - t_{min}$.
+
+2.  **Stochastic Distance Sampling:**
+    *   Initialize distance $dist = 0$.
+    *   Compute inverse majorant $invSigmaMax = 1.0 / \sigma_{maj}$.
+    *   Loop:
+        *   Generate random number $r_1 \in [0, 1)$.
+        *   Update distance: $dist \leftarrow dist - \ln(1 - r_1) \times invSigmaMax$ [S2, unofficial].
+        *   If $dist > L$, break loop (ray exits volume).
+        *   Sample volume color $\mathbf{C}_{vol}$ and alpha $\alpha$ at position $\mathbf{p} = \mathbf{p}_{start} + dist \cdot \mathbf{d}$.
+        *   Check scattering condition: If $r_2 < \alpha \times uAlphaCorrection \times invSigmaMax$, break loop (scattering event occurred) [S2, unofficial].
+
+3.  **Scattering and Integration:**
+    *   If $dist > L$, sample environment map in direction $\mathbf{d}$ and return color.
+    *   Sample diffuse color $\mathbf{C}_{diffuse} = \mathbf{C}_{vol}$ at $\mathbf{p}$.
+    *   Sample environment map $\mathbf{C}_{light}$ in direction $\mathbf{d}$ (or use light sources) [S3, unofficial].
+    *   Compute transmittance $T$ from $\mathbf{p}$ to volume exit in direction $\mathbf{d}$ using `sampleTransmittance` (see below).
+    *   Final color: $\mathbf{C}_{out} = \mathbf{C}_{diffuse} \times \mathbf{C}_{light} \times T$ [S2, unofficial].
+
+4.  **Transmittance Sampling (`sampleTransmittance`):**
+    *   Initialize $T = 1.0$.
+    *   Loop:
+        *   Generate random $r_1$.
+        *   Update $dist \leftarrow dist - \ln(1 - r_1) \times invSigmaMax$.
+        *   If $dist > L_{segment}$, break.
+        *   Sample volume alpha $\alpha$ at current position.
+        *   Update transmittance: $T \leftarrow T \times (1 - \alpha \times uAlphaCorrection \times invSigmaMax)$ [S2, unofficial].
+    *   Return $T$.
+
+5.  **Render Accumulation:**
+    *   To converge, accumulate frames over time [S2, unofficial]:
+    $$
+    C_{avg} = C_{avg} + \frac{C_{new} - C_{avg}}{N_{frame}}
+    $$
+    Where $N_{frame}$ is the current frame number [S2, unofficial].
+
+### Algorithm: Photon Marching with Null-Collision
+This variant traces photons through the volume, handling absorption and scattering via null-collision Monte Carlo [S2, unofficial].
+
+1.  **Photon Initialization:**
+    *   Unproject screen position to ray origin $\mathbf{o}$ and direction $\mathbf{d}$.
+    *   Intersect with volume cube to get entry $t_{min}$.
+    *   Set photon position $\mathbf{p} = \mathbf{o} + t_{min}\mathbf{d}$.
+    *   Initialize transmittance $\mathbf{T} = (1, 1, 1)$, radiance $\mathbf{L} = (0, 0, 0)$, bounces $= 0$, samples $= 0$ [S2, unofficial].
+
+2.  **Photon Loop (for $i = 0$ to $uSteps$):**
+    *   Generate random number $r_1$.
+    *   Compute step size $t = -\ln(r_1) / \sigma_{maj}$ [S2, unofficial].
+    *   Update position: $\mathbf{p} \leftarrow \mathbf{p} + t \cdot \mathbf{d}$.
+    *   Sample volume at $\mathbf{p}$ to get color $\mathbf{C}_{vol}$ and alpha $\alpha$.
+    *   Compute local coefficients:
+        *   $\mu_{abs} = \alpha \times uAbsorptionCoefficient$
+        *   $\mu_{sca} = \alpha \times uScatteringCoefficient$
+        *   $\mu_{null} = \sigma_{maj} - \mu_{abs} - \mu_{sca}$
+        *   $\sigma_{maj} = \mu_{abs} + \mu_{sca} + |\mu_{null}|$ (Re-evaluate majorant if needed, or use constant) [S2, unofficial].
+    *   Compute probabilities:
+        *   $P_{null} = |\mu_{null}| / \sigma_{maj}$
+        *   $P_{abs} = \mu_{abs} / \sigma_{maj}$
+        *   $P_{sca} = \mu_{sca} / \sigma_{maj}$
+    *   Check bounds: If $\mathbf{p}$ is outside $[0,1]^3$, sample environment map in direction $\mathbf{d}$, add to radiance estimate $\mathbf{L}$, increment samples, reset photon, and continue to next step [S2, unofficial].
+    *   Check collision type using random $r_2$:
+        *   If $r_2 < P_{abs} + P_{sca}$:
+            *   If $r_2 < P_{abs}$: Absorption. Update transmittance $\mathbf{T} \leftarrow \mathbf{T} \times \mathbf{C}_{vol} \times (\mu_{sca} / (\sigma_{maj} P_{sca}))$? No, absorption reduces transmittance. The source says: "Update transmittance *= volumeSample.rgb * (muScattering / (uMajorant * PScattering))" for scattering. For absorption, transmittance is typically multiplied by 0 or the process terminates. However, the source [S2, unofficial] notes: "If scattering event... update transmittance...". It implies null-collision handles absorption by reducing transmittance weight. Specifically, if it's a null collision (not absorption/scattering), transmittance is updated by weight $N$. If it is scattering, transmittance is updated by weight $S$. The source text for absorption is implicit in the null-collision framework: the weight is adjusted to account for the fact that the collision was "real".
+            *   *Correction based on [S2, unofficial] text:* "If scattering event... update transmittance *= volumeSample.rgb * (muScattering / (uMajorant * PScattering))". This is the weight for scattering.
+            *   "Else [Null Collision], update transmittance *= (muNull / (uMajorant * PNull))".
+            *   Absorption is handled by the fact that if it's not scattering, the photon doesn't scatter, but the transmittance weight is reduced. The source doesn't explicitly state the absorption weight formula, but in null-collision MC, the weight for absorption is $\mu_{abs}/\sigma_{maj}$. The source [S2, unofficial] says "Compute muAbsorption... Compute muScattering... Compute muNull". It then checks "If r.y < PAbsorption + PScattering". If true, it's a real collision. If it's scattering, it updates transmittance and bounces. If it's absorption, the photon stops or contributes to radiance? The source says "add to radiance estimate" only for out-of-bounds. For absorption, typically the photon terminates. The source [S2, unofficial] does not explicitly detail the absorption termination step, but implies it via the probability check.
+            *   Sample new direction using Henyey-Greenstein with bias $g$ [S2, unofficial].
+            *   Increment bounces.
+            *   If bounces > $uMaxBounces$, terminate.
+        *   Else (Null Collision):
+            *   Update transmittance $\mathbf{T} \leftarrow \mathbf{T} \times (\mu_{null} / (\sigma_{maj} P_{null}))$ [S2, unofficial].
+    *   Store photon state in output buffers [S2, unofficial].
+
+### Pseudocode: Direct Ray Casting
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def monte_carlo_volume_render(ray_origin, ray_direction, volume_texture, env_map, sigma_max, alpha_correction, max_bounces, seed_offset):
+    # 1. Intersect with volume
+    t_min, t_max = intersect_box(ray_origin, ray_direction)
+    if t_min >= t_max:
+        return sample_environment_map(ray_direction, env_map)
+
+    ray_length = t_max - t_min
+    p_start = ray_origin + t_min * ray_direction
+    inv_sigma_max = 1.0 / sigma_max
+    
+    # 2. Stochastic Sampling
+    dist = 0.0
+    rng_state = hash_seed(ray_origin, seed_offset)
+    
+    while dist < ray_length:
+        r1 = next_random(rng_state)
+        # Exponential distance sampling
+        dist -= log(1.0 - r1) * inv_sigma_max
+        
+        if dist >= ray_length:
+            break
+            
+        # Sample volume at current position
+        p = p_start + dist * ray_direction
+        vol_sample = sample_volume(volume_texture, p)
+        alpha = vol_sample.a * alpha_correction
+        
+        # Check for scattering event
+        r2 = next_random(rng_state)
+        if r2 < alpha * inv_sigma_max:
+            break
+            
+    # 3. If no scattering within volume, return background
+    if dist >= ray_length:
+        return sample_environment_map(ray_direction, env_map)
+        
+    # 4. Compute scattered radiance
+    p_scatter = p_start + dist * ray_direction
+    diffuse_color = vol_sample.rgb
+    
+    # Sample light/environment
+    light_color = sample_environment_map(ray_direction, env_map)
+    
+    # Compute transmittance to exit
+    transmittance = sample_transmittance(p_scatter, ray_direction, t_max, volume_texture, sigma_max, alpha_correction, rng_state)
+    
+    return diffuse_color * light_color * transmittance
+
+def sample_transmittance(p_start, direction, t_max, volume_texture, sigma_max, alpha_correction, rng_state):
+    # Calculate exit point
+    # Assuming p_start is inside, find t_exit relative to p_start
+    # For simplicity, assume we pass the global t_max and p_start
+    # Re-intersect or calculate remaining distance
+    # This is a simplified version assuming we know the remaining length L_rem
+    # In practice, intersect ray from p_start with box to get t_exit_local
+    t_exit_local = intersect_box_local(p_start, direction, t_max) # Returns distance to exit
+    
+    if t_exit_local <= 0:
+        return 1.0
+        
+    inv_sigma_max = 1.0 / sigma_max
+    transmittance = 1.0
+    dist = 0.0
+    
+    while dist < t_exit_local:
+        r1 = next_random(rng_state)
+        dist -= log(1.0 - r1) * inv_sigma_max
+        
+        if dist >= t_exit_local:
+            break
+            
+        p = p_start + dist * direction
+        vol_sample = sample_volume(volume_texture, p)
+        alpha = vol_sample.a * alpha_correction
+        
+        transmittance *= (1.0 - alpha * inv_sigma_max)
+        
+    return transmittance
+```

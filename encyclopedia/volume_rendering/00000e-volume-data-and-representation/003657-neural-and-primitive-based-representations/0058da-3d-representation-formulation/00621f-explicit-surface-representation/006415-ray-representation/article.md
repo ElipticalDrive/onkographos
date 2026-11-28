@@ -1,0 +1,203 @@
+# Ray Representation
+
+Also called: Ray Representation with Normals, Ray-Rep, Ray-representation augmented with surface normals and materials, Tri-Dexel, Triple Ray-Rep
+
+## Overview
+Ray Representation (Ray-Rep) encodes 3D solid objects as a set of "rods" (rays) penetrating the object along each of the three principal coordinate directions, storing intersection points (surfels) and unit normals at these points [S1]. It solves the problem of performing fast constructive solid geometry (CSG) and boolean operations on complex meshes by reducing them to simple segment operations on rays, while preserving sharp corners and edges that standard voxel grids often smooth out [S1]. Unlike voxel grids, which require checking all cells, Ray-Rep allows skipping empty space and identifying only cells intersecting the surface, making it superior for adaptive triangulation and real-time editing of high-resolution details [S1].
+
+## How it works
+
+### Inputs and Outputs
+*   **Input:** A closed polygonal mesh (triangle soup) or a set of surfaces [S1].
+*   **Output:** A structured representation consisting of three sets of rays (one set per axis: X, Y, Z). Each ray contains a list of intervals (dexels) representing the interior of the object, bounded by surfels (intersection points) with associated surface normals and material indices [S1].
+
+### Data Structures
+The representation is organized as a grid of resolution $n \times n \times n$ [S1].
+
+1.  **Ray Grid:** A 3D array of rays. For a resolution $n$, there are $n^2$ rays along the X-axis, $n^2$ along the Y-axis, and $n^2$ along the Z-axis [S1].
+2.  **Ray Structure:** Each ray is a list of **Dexels** (depth pixels) [S1].
+    *   **Dexel:** A continuous interval $[t_{start}, t_{end}]$ along the ray axis, representing a segment of the object's interior [S1].
+    *   **Surfel:** The endpoints of a dexel. Each surfel stores:
+        *   Position (implicit at the boundary of the dexel) [G].
+        *   Unit Normal vector $\mathbf{n} = (n_x, n_y, n_z)$ stored as 3 floats [S1].
+        *   Material Index (optional, for heterogeneous objects) [S1].
+3.  **Precision:** Distances along rays (coordinates of surfels) are rounded to 16-bit integers to reduce working memory [S1]. Normals are stored with full precision (3 floats per normal) [S1].
+
+### Numbered Steps
+
+1.  **Ray Casting (Construction):**
+    *   Define a grid of resolution $n$ voxels per axis [S1].
+    *   Cast $n \times n$ rays through the centers of the voxels (and optionally along grid edges) for each of the three principal directions (X, Y, Z) [S1].
+    *   For each ray, compute all intersection points with the input polygonal mesh [S1].
+    *   Record the intersection parameter $t$ (distance along the ray) and the unit normal $\mathbf{n}$ at each intersection point [S1].
+    *   *Note:* For a closed object, each ray must yield an even number of intersection points (surfels), resulting in an odd number of dexels (interior intervals) [S1].
+
+2.  **Ambiguity Resolution (Inside/Outside Classification):**
+    *   Apply "majority voting" to resolve ambiguities regarding whether a voxel center is inside or outside the object [S1].
+    *   A voxel center is considered **inside** the object if it lies at the intersection of at least two dexels (intervals fully inside the object) from the three orthogonal ray sets [S1].
+    *   If an odd number of intersection points is detected on a ray, it indicates errors in the source model or too-small details; this is resolved via the majority voting mechanism or by regularization [S1].
+
+3.  **Boolean Operations (CSG):**
+    *   Boolean operations (Union, Intersection, Difference) are performed independently on each ray set [S1].
+    *   For each ray, the dexels from the two operands are merged, sorted by distance, and zero-length regions are removed [S1].
+    *   This reduces CSG to simple segment merging and sorting operations, which are computationally inexpensive [S1].
+
+4.  **Regularization (Post-Editing):**
+    *   After editing or boolean operations, regularization is required to maintain consistency and fix ambiguities caused by redundancy [S1].
+    *   **Remove small dexels:** Delete dexels with length smaller than the cell edge length [S1].
+    *   **Merge isolated dexels:** Remove or merge isolated dexels to fix classification ambiguities [S1].
+    *   **Constraint Enforcement:** Ensure no more than one intersection point per cell edge and maintain an even number of intersection points per ray for closed models [S1].
+
+5.  **Triangulation (Reconstruction):**
+    *   Use cell-based methods such as Marching Cubes, Surface Nets, EMC, DC, DMC, or CMS to reconstruct the mesh [S1].
+    *   Cubic cell edges are aligned with the Ray-Rep rays; voxel centers (or cell corners) are located at ray intersections [S1].
+    *   The normals stored at the surfels are used to reconstruct sharp features and correct surface orientation [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+class Ray:
+    def __init__(self, surfels):
+        self.surfels = surfels  # list of dicts: {'t': int, 'normal': (float,float,float), 'material': int}
+
+def create_ray(axis, i, j, n):
+    """Constructs a ray origin and direction for a grid of size n."""
+    origin = (i / n, j / n, 0.0) if axis == 'X' else (0.0, i / n, j / n) if axis == 'Y' else (i / n, 0.0, j / n)
+    direction = (1.0, 0.0, 0.0) if axis == 'X' else (0.0, 1.0, 0.0) if axis == 'Y' else (0.0, 0.0, 1.0)
+    return {'origin': origin, 'direction': direction}
+
+def cast_ray_against_mesh(ray, mesh):
+    """Standard ray-triangle intersection returning sorted list of intersections [G]."""
+    intersections = []
+    for tri in mesh:
+        t, normal, material = intersect_ray_triangle(ray, tri)
+        if t is not None:
+            intersections.append({'t': t, 'normal': normal, 'material': material})
+    intersections.sort(key=lambda x: x['t'])
+    return intersections
+
+def intersect_ray_triangle(ray, tri):
+    """Minimal ray-triangle intersection [G]. Returns t, normal, material or None."""
+    # Standard Möller–Trumbore implementation omitted for brevity [G]
+    return None, None, None
+
+def round_16bit(value):
+    """Rounds a float distance to a 16-bit integer representation [G]."""
+    return int(round(value * 65535.0)) % 65536
+
+def build_ray_representation(mesh, resolution_n):
+    """Constructs a Ray Representation from a polygonal mesh."""
+    rays = {'X': [], 'Y': [], 'Z': []}
+    for axis in ['X', 'Y', 'Z']:
+        for i in range(resolution_n):
+            for j in range(resolution_n):
+                ray = create_ray(axis, i, j, resolution_n)
+                intersections = cast_ray_against_mesh(ray, mesh)
+                surfels = []
+                for pt in intersections:
+                    surfels.append({
+                        't': round_16bit(pt['t']),
+                        'normal': pt['normal'],
+                        'material': pt.get('material', 0)
+                    })
+                rays[axis].append(Ray(surfels))
+    return rays
+
+def merge_dexels(dexels_a, dexels_b, operation):
+    """Merges two lists of dexels (intervals) based on boolean operation."""
+    all_intervals = dexels_a + dexels_b
+    all_intervals.sort(key=lambda d: d[0])
+    merged = []
+    if not all_intervals:
+        return merged
+    curr_start, curr_end = all_intervals[0]
+    for start, end in all_intervals[1:]:
+        if start < curr_end:
+            if operation == 'union':
+                curr_end = max(curr_end, end)
+            elif operation == 'intersection':
+                curr_start = max(curr_start, start)
+                curr_end = min(curr_end, end)
+                if curr_start >= curr_end:
+                    curr_start, curr_end = None, None
+            elif operation == 'difference':
+                if start < curr_start:
+                    curr_start = curr_end
+                else:
+                    curr_end = min(curr_end, start)
+                    if curr_start >= curr_end:
+                        curr_start, curr_end = None, None
+        else:
+            if curr_start is not None:
+                merged.append((curr_start, curr_end))
+            curr_start, curr_end = start, end
+    if curr_start is not None:
+        merged.append((curr_start, curr_end))
+    return merged
+
+def regularize_ray_rep(ray_rep, resolution_n):
+    """Regularizes the Ray Representation to fix inconsistencies."""
+    cell_edge = 1.0 / resolution_n
+    for axis in ['X', 'Y', 'Z']:
+        for ray in ray_rep[axis]:
+            valid_surfels = []
+            for i in range(0, len(ray.surfels) - 1, 2):
+                t_start = ray.surfels[i]['t']
+                t_end = ray.surfels[i+1]['t']
+                if t_end - t_start >= cell_edge:
+                    valid_surfels.append(ray.surfels[i])
+                    valid_surfels.append(ray.surfels[i+1])
+            if len(valid_surfels) % 2 != 0:
+                valid_surfels.pop()
+            ray.surfels = valid_surfels
+```
+
+### Parameters
+*   **Resolution ($n$):** Number of voxels/rays per axis. Typical real-time performance is achieved at $n=257$ to $513$ [S1]. CPU interactive editing is feasible at $n=65$ [S1].
+*   **Precision:** Distances are rounded to 16-bit integers [S1]. Normals are 32-bit floats [S1].
+*   **Block Resolution:** Can be varied to trade off processing speed against working memory consumption during editing and compression/decompression [S1].
+
+### Edge Cases and Pitfalls
+*   **Odd Number of Intersections:** An odd number of intersection points on a ray indicates errors in the source model or the presence of too-small details [S1]. This is resolved by majority voting or regularization [S1].
+*   **Empty Space:** Ray-Rep efficiently skips empty space, but if the object is not closed, the "inside/outside" logic may fail without proper handling of open boundaries [S1].
+*   **Consistency Maintenance:** Regularization maintains consistency by removing dexels with length smaller than the cell edge, merging isolated dexels to fix ambiguities, ensuring no more than one intersection point per cell edge, and maintaining an even number of intersection points per ray for closed models [S1].
+
+## Operating characteristics
+
+### Time and Memory Complexity
+*   **Construction:** Not given in the sources.
+*   **Boolean Operations:** Not given in the sources.
+*   **Memory:** The structure is compact and sparse. Distances are stored as 16-bit integers, reducing memory usage significantly [S1]. However, normals are stored with full precision (3 floats per surfel) [S1].
+
+### Measured Performance
+*   **GPU:** Real-time boolean operations and triangulation are possible for resolutions of 257-513 rays/voxels [S1].
+*   **CPU:** Interactive series of boolean operations are possible at a resolution of 65 rays/voxels [S1].
+
+### Strengths and Limitations
+*   **Strengths:**
+    *   Fast boolean operations and CSG [S1].
+    *   Reconstruction of sharp corners, edges, and small details [S1].
+    *   Ability to skip empty space, enabling faster adaptive triangulation compared to voxel grids [S1].
+    *   Independent processing of landscape blocks in VR/serious games [S1].
+*   **Limitations:**
+    *   Not suitable for long-term storage or compression due to high redundancy [S1].
+    *   Not designed for mesh simplification; typically built from meshes for editing and then discarded [S1].
+    *   Requires regularization after editing to maintain consistency [S1].
+
+### When to Use
+*   Use for VR/serious games with editable voxel terrain where independent block processing is required [S1].
+*   Use for architectural visualization requiring high-resolution quality reconstruction of small details and sharp edges [S1].
+*   Use when fast boolean operations on complex meshes are needed [S1].
+
+### When Not to Use
+*   Do not use for long-term storage or compression [S1].
+*   Do not use if mesh simplification is a primary requirement [S1].
+*   Avoid octrees for spatial partitioning; use kD-trees instead as they adapt better to surface features [S1].
+
+## Background
+Ray Representation (Ray-Rep) is described as one of the most efficient representations for 3D solid objects for fast boolean operations [S1]. It is considered a further development of Marching Intersections and an extension of the Triple Ray-Rep (Tri-Dexel), where objects are encoded as intervals along three coordinate axes [S1]. The representation is augmented with surface normals to allow reconstruction of sharp surface features [S1]. It is used in CAD/CAM/CAE software for geometric modeling and in virtual reality systems for designing voxel terrain [S1]. The method was highlighted in research on voxel terrain representation for VR systems in 2019 [S1].
+
+## Sources
+[S1] REPRESENTATION AND STORAGE OF VOXEL TERRAIN FOR DESIGNING VIRTUAL REALITY SYSTEMS, https://doi.org/10.26102/2310-6018/2019.24.1.019, fetched 2026-10-26

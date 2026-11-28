@@ -1,0 +1,37 @@
+# Entropy Coding and Context Modeling
+
+
+## Overview
+Entropy Coding and Context Modeling is the final stage of the compression pipeline, responsible for mapping the decorrelated and quantized coefficient symbols to a binary bitstream with minimal redundancy [S1]. It solves the problem of representing discrete data symbols using the fewest possible bits, approaching the Shannon entropy limit. It is distinguished from its siblings by focusing on the statistical distribution of symbols rather than their spatial or transform-domain relationships; while [Predictive and Differential Coding](4393-predictive-and-differential-coding.md) reduces redundancy by predicting values, and [Significance Maps and Bit-wise Encoding](5740-significance-maps-and-bit-wise-encoding.md) exploits hierarchical significance, this family relies on probability models (static or adaptive) to assign codewords.
+
+## Shared principles
+All methods in this family share the mechanism of mapping a sequence of input symbols $S = s_1, s_2, \dots, s_N$ to a binary string $B$ such that the expected length of $B$ is minimized [G]. The core principle is that symbols with higher probability of occurrence are assigned shorter codewords, while rare symbols are assigned longer codewords [G].
+
+1.  **Symbol Model:** The encoder maintains a probability model $P(s)$ for each symbol $s$ in the alphabet $\Sigma$. This model can be static (predefined) or adaptive (updated during encoding) [G].
+2.  **Codeword Assignment:** A mapping function $C: \Sigma \rightarrow \{0, 1\}^*$ assigns a unique binary string to each symbol. For prefix-free codes (e.g., Huffman), no codeword is a prefix of another, allowing unambiguous decoding [G].
+3.  **Bitstream Generation:** The input symbols are processed sequentially. For each symbol $s_i$, the corresponding codeword $C(s_i)$ is appended to the output bitstream [G].
+4.  **Decoding:** The decoder uses the same probability model and codeword mapping to parse the bitstream. It reads bits until a valid codeword is identified, outputs the corresponding symbol, and repeats [G].
+
+## Subtopics
+
+### [Significance Maps and Bit-wise Encoding](5740-significance-maps-and-bit-wise-encoding.md)
+[Significance Maps and Bit-wise Encoding](5740-significance-maps-and-bit-wise-encoding.md) is a lossless compression technique that avoids the computational overhead of traditional entropy coders by explicitly tracking the significance of transform coefficients. It operates directly on the bit-level significance of wavelet coefficients, enabling rapid decoding without complex parsing logic. It is chosen when low decoding latency is critical and the data exhibits sparse significance patterns.
+
+### [Burrows-Wheeler Transform](6541-burrows-wheeler-transform.md)
+The [Burrows-Wheeler Transform](6541-burrows-wheeler-transform.md) is a reversible permutation scheme that re-sorts a block of data according to its local context, organizing it into a form that is highly compressible for subsequent entropy coding. It is distinguished from linear decorrelation transforms by rearranging symbol positions rather than changing values. Komma et al. [KFDB07] compared its compressibility against other transforms for volume data compression. It is chosen when data exhibits strong local context dependencies that can be exploited by reordering.
+
+### Entropy Coding
+This variant describes a specific pipeline for compressing quantized DCT coefficients, often used in video and volumetric data compression [S1]. It combines multiple techniques to maximize compression efficiency [S1].
+
+1.  **3D Zigzag Scan:** Quantized DCT coefficients are arranged in a "3D zigzag" order to group similar frequencies together, specifically placing high-frequency zeros at the end of the sequence [S1].
+2.  **Run-Length Encoding (RLE):** RLE is applied to the zigzagged coefficients to group consecutive zeros (or similar values) into pairs of (value, run-length) [S1].
+3.  **DC/AC Separation:** DC coefficients (low-frequency, representing average intensity) are coded separately from AC coefficients (high-frequency, representing details) [S1].
+4.  **DPCM for DC:** DC coefficients are encoded using Differential Pulse Code Modulation (DPCM). Except for the first DC coefficient, the encoder stores the difference between the current DC coefficient and the previous one [S1]. This exploits spatial correlation between adjacent blocks.
+5.  **RLC for AC:** AC coefficients are encoded using Run-Length Coding (RLC) after the zigzag scan, capitalizing on the sparsity of high-frequency coefficients [S1].
+6.  **Huffman Coding:** Finally, Huffman coding is applied to the DPCM-coded DC coefficients and the RLE-coded AC coefficients to compress the resulting symbol stream [S1].
+
+## Background
+The specific "3D zigzag" entropy coding pipeline described in the minor variant originates from Neural Residual Radiance Fields for Streamably Free-Viewpoint Videos [S1]. The general principles of entropy coding (Huffman, RLE) are foundational in data compression, with Huffman coding introduced by David A. Huffman in 1952 [G]. The Burrows-Wheeler Transform was introduced by Burrows and Wheeler in 1994 [G]. In the context of volume rendering, these methods are used to compress the output of transform-based codecs (like wavelets or DCT) to reduce storage and bandwidth requirements for streaming and archival [S1].
+
+## Sources
+[S1] Neural Residual Radiance Fields for Streamably Free-Viewpoint Videos, https://doi.org/10.1109/cvpr52729.2023.00016, fetched 2026-10-26

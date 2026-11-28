@@ -1,0 +1,200 @@
+--- v001.md
++++ v002.md
+@@ -1,8 +1,7 @@
+ # Particle System Renderer
+ 
+-Also called: PSR
+ 
+ ## Overview
+-The Particle System Renderer (PSR) is a general-purpose, object-order particle rendering system designed for generating visualizations of discrete particle distributions, originally adapted for Radar Cross Section (RCS) data but maintained as a flexible utility [S1, unofficial]. It solves the problem of converting a set of discrete, time-evolving particles with physical properties into a rasterized image by managing particle lifecycles (spawn, move, die) and projecting them onto a defined viewport [S1, unofficial]. Unlike modern GPU-based splatting methods that rely on fragment shaders and depth buffers, PSR is a CPU-based, linked-list-driven system that explicitly manages particle state transitions and supports procedural generation of particle systems from centroids [S1, unofficial].
++The Particle System Renderer (PSR) is a general-purpose, object-order rendering system that converts discrete, time-evolving particles into rasterized images by managing explicit particle lifecycles and projecting them onto a defined viewport [S1, unofficial]. It solves the visualization problem for Radar Cross Section (RCS) data and other discrete distributions by procedurally generating particles from centroids and accumulating their contributions via a CPU-based linked-list architecture [S1, unofficial]. Unlike [Billboards and particles](9045-billboards-and-particles.md) which rely on fixed 2D quads, or [Screen-Space Fluid Rendering Pipeline](14414-screen-space-fluid-rendering-pipeline.md) which uses GPU-accelerated screen-space techniques, PSR explicitly tracks spawn/die states and supports procedural centroid-based generation on the CPU [S1, unofficial][G].
+ 
+ ## How it works
+@@ -13,16 +12,16 @@
+ **Data Structures:**
+ Particles and centroids are stored in a dynamic linked list [S1, unofficial].
+-*   **Particle Node:** Contains position, velocity, color, tail length, time of death, time of spawn, and a flag indicating if the particle is dead [S1, unofficial].
+-*   **Centroid Node:** Defines the origin and shape (spherical or Cartesian) from which particles are generated [S1, unofficial].
++*   **Particle Node:** Contains position, velocity, color, tail length, time of death, time of spawn, spawn source flag, and a dead flag [S1, unofficial].
++*   **Centroid Node:** Defines the origin and shape (spherical or Cartesian) from which particles are procedurally generated [S1, unofficial].
+ 
+ **Numbered Steps:**
+ 1.  **Initialization:** Parse the control file to set the viewport, world limits, camera view (position, center of interest, view plane normal, view up vector), and time increment parameters [S1, unofficial]. Initialize the linked list of particles and centroids [S1, unofficial].
+ 2.  **Time Step Loop:** For each time step:
+-    a.  **Spawn Check:** Iterate through the linked list to identify particles marked for spawning (based on `time of spawn` attribute). Generate new particle systems at the current position of the spawning particle. The new system's origin is the parent particle's position [S1, unofficial].
+-    b.  **Update Physics:** Update particle positions based on velocity. The system currently supports only linear movement [S1, unofficial].
+-    c.  **Death Check:** Iterate through the list to identify particles whose current time exceeds their `time of death` [S1, unofficial]. Mark these particles as dead.
++    a.  **Spawn Check:** Iterate through the linked list to identify particles marked for spawning based on the `time of spawn` attribute [S1, unofficial]. Generate new particle systems at the current position of the spawning particle [S1, unofficial].
++    b.  **Update Physics:** Update particle positions based on velocity using linear movement [S1, unofficial].
++    c.  **Death Check:** Iterate through the list to identify particles whose current age exceeds their `time of death` [S1, unofficial]. Mark these particles as dead so they are no longer displayed [S1, unofficial].
+     d.  **Rendering:** Project the active (non-dead) particles onto the 2D image plane defined by the viewport and camera view [S1, unofficial].
+     e.  **Cleanup:** Remove or mark dead particles so they are no longer displayed in subsequent frames [S1, unofficial].
+-3.  **View Change (Optional):** If a view change is specified in the control file, interpolate the View Plane Normal (VPN) and View Up (VUP) vectors from the start values (`svpn`, `svup`) to the finish values (`fvpn`, `fvup`) over the specified duration or step count. If the `freeze` token is present, particle growth is halted during this transition [S1, unofficial].
++3.  **View Change (Optional):** If a view change is specified in the control file, interpolate the View Plane Normal (VPN) and View Up (VUP) vectors from the start values (`svpn`, `svup`) to the finish values (`fvpn`, `fvup`) over the specified duration or step count [S1, unofficial]. If the `freeze` token is present, particle growth is halted during this transition [S1, unofficial].
+ 4.  **Output:** Write the accumulated pixel data to an RLE file, appending the current frame number to the output filename [S1, unofficial].
+ 
+@@ -38,92 +37,104 @@
+ **Pseudocode:**
+ ```python
+-# Data Structures
+ class Particle:
+-    position: Vector3
+-    velocity: Vector3
+-    color: Color
+-    tail_length: float
+-    time_of_death: float
+-    time_of_spawn: float
+-    spawn_source: str # "generate" or "read"
++    pos: tuple
++    vel: tuple
++    color: tuple
++    tail_len: float
++    death_time: float
++    spawn_time: float
++    spawn_from: str
+     is_dead: bool
+     age: float
+ 
+ class Centroid:
+-    shape: str # "spherical" or "cartesian"
+-    origin: Vector3
++    shape: str
++    origin: tuple
+     diameter: float
+-    color: Color
++    color: tuple
+ 
+ class Environment:
+-    viewport: Tuple[int, int, int, int] # xmin, xmax, ymin, ymax
+-    world_limits: Tuple[int, int, int, int] # xmin, xmax, ymin, ymax
++    viewport: tuple
++    world_limits: tuple
+     clip_front: float
+     clip_back: float
+-    cam_pos: Vector3
+-    coi: Vector3
+-    vpn: Vector3
+-    vup: Vector3
++    cam_pos: tuple
++    coi: tuple
++    vpn: tuple
++    vup: tuple
+     step_size: float
+     duration_seconds: float
+     duration_steps: int
+     view_change_active: bool
+-    view_change_start_vpn: Vector3
+-    view_change_start_vup: Vector3
+-    view_change_end_vpn: Vector3
+-    view_change_end_vup: Vector3
++    svpn: tuple
++    svup: tuple
++    fvpn: tuple
++    fvup: tuple
+     freeze_growth: bool
+ 
+-# Main Loop
+-def render_particle_system(particles: List[Particle], centroids: List[Centroid], env: Environment):
++def lerp(a, b, t):
++    return tuple(a[i] + (b[i] - a[i]) * t for i in range(len(a)))
++
++def project_world_to_screen(pos, cam_pos, vpn, vup, viewport):
++    # Standard view-space to screen-space projection [G]
++    return (int((pos[0] - viewport[0]) / (viewport[1] - viewport[0] + 1) * (viewport[1] - viewport[0] + 1)),
++            int((pos[1] - viewport[2]) / (viewport[3] - viewport[2] + 1) * (viewport[3] - viewport[2] + 1)))
++
++def is_clipped(pos, world_limits, clip_front, clip_back):
++    return not (world_limits[0] <= pos[0] <= world_limits[1] and
++                world_limits[2] <= pos[1] <= world_limits[3] and
++                clip_front <= pos[2] <= clip_back)
++
++def generate_spawned_particles(spawn_pos, spawn_from):
++    # Standard procedural generation from centroid [G]
++    return [Particle(spawn_pos, (0,0,0), (1,1,1), -1.0, -1.0, -1.0, "generate", False, 0.0) for _ in range(1)]
++
++def render_system(particles, centroids, env):
+     current_time = 0.0
+-    
+-    while current_time < env.duration_seconds or env.duration_steps > 0:
+-        # 1. Spawn New Particles
++    step_count = 0
++
++    while current_time < env.duration_seconds or step_count < env.duration_steps:
++        # 1. Spawn Check
++        new_particles = []
+         for p in particles:
+-            if not p.is_dead and p.time_of_spawn > 0 and p.age >= p.time_of_spawn:
+-                # Generate new system at p's position
+-                # Note: Source states only "generate" (random) is currently supported
+-                new_system = generate_random_system(p.position, centroids)
+-                particles.extend(new_system)
+-                p.time_of_spawn = -1 # Prevent re-spawning
+-        
++            if not p.is_dead and p.spawn_time > 0 and p.age >= p.spawn_time:
++                spawned = generate_spawned_particles(p.pos, p.spawn_from)
++                new_particles.extend(spawned)
++                p.spawn_time = -1.0
++        particles.extend(new_particles)
++
+         # 2. Update Physics
+         for p in particles:
+             if not p.is_dead:
+-                p.position += p.velocity * env.step_size
++                p.pos = tuple(p.pos[i] + p.vel[i] * env.step_size for i in range(3))
+                 p.age += env.step_size
+-                
+-                # 3. Check Death
+-                if p.time_of_death > 0 and p.age >= p.time_of_death:
+-                    p.is_dead = True
+-        
+-        # 4. Handle View Change
++
++        # 3. Death Check
++        for p in particles:
++            if not p.is_dead and p.death_time > 0 and p.age >= p.death_time:
++                p.is_dead = True
++
++        # 4. View Change
+         if env.view_change_active:
+-            # Interpolate VPN and VUP
+-            # Note: Exact interpolation formula not given in source, assume linear
+-            t = current_time / env.duration_seconds
+-            env.vpn = lerp(env.view_change_start_vpn, env.view_change_end_vpn, t)
+-            env.vup = lerp(env.view_change_start_vup, env.view_change_end_vup, t)
+-            
++            t = step_count / env.duration_steps if env.duration_steps > 0 else 0.0
++            env.vpn = lerp(env.svpn, env.fvpn, t)
++            env.vup = lerp(env.svup, env.fvup, t)
+             if env.freeze_growth:
+-                # Halt particle growth (implementation detail not specified)
+-                pass
+-        
+-        # 5. Render Active Particles
+-        image = create_image(env.viewport)
++                pass # System growth halted during view change [S1, unofficial]
++
++        # 5. Render
++        image = [[None] * (env.viewport[1] - env.viewport[0] + 1) for _ in range(env.viewport[3] - env.viewport[2] + 1)]
+         for p in particles:
+             if not p.is_dead:
+-                # Project particle to screen
+-                screen_pos = project(p.position, env.cam_pos, env.vpn, env.vup, env.viewport)
+-                # Check world clipping
+-                if is_within_world_limits(p.position, env.world_limits, env.clip_front, env.clip_back):
+-                    draw_particle(image, screen_pos, p.color, p.tail_length)
+-        
++                screen = project_world_to_screen(p.pos, env.cam_pos, env.vpn, env.vup, env.viewport)
++                if not is_clipped(p.pos, env.world_limits, env.clip_front, env.clip_back):
++                    if 0 <= screen[0] < len(image[0]) and 0 <= screen[1] < len(image):
++                        image[screen[1]][screen[0]] = p.color
++
+         # 6. Output
+-        save_rle(image, f"output_frame_{current_time}")
+-        
++        save_rle(image, f"output_frame_{step_count}")
++
+         current_time += env.step_size
+-        env.duration_steps -= 1
++        step_count += 1
+ ```
+ 

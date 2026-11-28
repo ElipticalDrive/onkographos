@@ -1,0 +1,108 @@
+# Low-Light NeRF (LLNeRF)
+
+
+## Overview
+Low-Light NeRF (LLNeRF) is an unsupervised method that enhances scene representation and synthesizes normal-light novel views directly from sRGB low-light images by decomposing radiance field learning into view-dependent and view-independent components [S1]. It solves the problem of training NeRF on camera-finished low dynamic range (LDR) sRGB images, which suffer from low signal-to-noise ratio, non-linearity introduced by the camera ISP, and color distortion [S1]. Unlike HDR-NeRF, which requires RAW data with exposure metadata, LLNeRF operates on standard sRGB images without ground truth supervision [S1]. It sets itself apart from sibling methods like [Rip-NeRF](15532-rip-nerf.md) or [SUDS](14964-suds.md) by explicitly modeling the multiplicative relationship between lighting intensity and intrinsic color basis to jointly enhance illumination and correct colors during optimization [S1].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A collection of camera-finished, low dynamic range (8-bit/channel) sRGB images from a low-light scene [S1].
+*   **Output:** A radiance field model capable of rendering novel views with enhanced lighting, reduced noise, and corrected colors [S1].
+
+**Data Structures and Network Architecture**
+The model extends the standard NeRF MLP architecture [S1]. The input coordinates $\tau$ (position) and view direction $d$ are processed by two separate MLPs:
+1.  **Density MLP ($F_{density}$):** Takes encoded position features. Outputs a single scalar for volume density $\sigma$ [S1].
+2.  **Feature MLP 1 ($F_1$):** Takes encoded position features and view direction $d$. Outputs a single-channel vector $v$ representing the view-dependent lighting intensity [S1].
+3.  **Feature MLP 2 ($F_2$):** Takes encoded position features. Outputs a 3-channel vector $r$ representing the view-independent intrinsic color basis [S1].
+
+The standard NeRF color branch is replaced by this decomposition. The predicted color $c$ for a sample is the element-wise product (Hadamard product) of $v$ and $r$:
+$$ c = v \bullet r $$
+where $v \in \mathbb{R}^1$ and $r \in \mathbb{R}^3$ [S1].
+
+**Rendering Equation**
+The rendering process uses the standard volume rendering integral [S1]. For a ray $r$, the final pixel color $c_r$ is:
+$$ c_r = \sum_{i=1}^N w_i c_i = \sum_{i=1}^N \left( \prod_{j=1}^{i-1} (1 - e^{-\sigma_j \delta_j}) \right) (1 - e^{-\sigma_i \delta_i}) c_i $$
+where $\delta_i = t_{i+1} - t_i$ is the distance between samples, $\sigma_i$ is the density, and $c_i$ is the color at sample $i$ [S1].
+
+**Enhancement Mechanism**
+To enhance the image, the method applies an enhancement function $\phi$ to the view-dependent component $v$ while keeping the view-independent component $r$ unchanged [S1]. The enhanced color $\hat{c}$ is computed as:
+$$ \hat{c} = \phi(v) \bullet r $$
+The function $\phi$ is typically a simple scaling or tone-mapping operation that increases the intensity of $v$ [S1]. The enhanced color $\hat{c}$ is used in the rendering equation instead of $c$ [S1].
+
+**Optimization**
+The model is optimized in an unsupervised manner. The loss function minimizes the difference between the rendered enhanced image and the input low-light image, or utilizes self-supervision constraints inherent to the decomposition [S1]. The sources do not specify the exact loss function formulation, only that the optimization is unsupervised [S1].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# LLNeRF Forward Pass
+def llnerf_forward(positions, directions, density_mlp, feature_mlp_v, feature_mlp_r, enhancement_func):
+    """
+    Computes the enhanced color for a set of points along a ray.
+    
+    Args:
+        positions: Tensor of shape (N, 3), world-space positions.
+        directions: Tensor of shape (N, 3), normalized view directions.
+        density_mlp: MLP predicting density from position features.
+        feature_mlp_v: MLP predicting view-dependent intensity v from position and direction.
+        feature_mlp_r: MLP predicting view-independent color basis r from position.
+        enhancement_func: Function phi(v) to enhance lighting intensity.
+        
+    Returns:
+        enhanced_color: Tensor of shape (N, 3), enhanced RGB colors.
+        density: Tensor of shape (N, 1), volume densities.
+    """
+    # 1. Predict Density
+    # density_mlp takes positional encoding of positions
+    density = density_mlp(positions) 
+    
+    # 2. Predict View-Dependent Component v (Lighting Intensity)
+    # feature_mlp_v takes positional encoding of positions AND directional encoding of directions
+    v = feature_mlp_v(positions, directions) 
+    # v has shape (N, 1)
+    
+    # 3. Predict View-Independent Component r (Color Basis)
+    # feature_mlp_r takes positional encoding of positions
+    r = feature_mlp_r(positions)
+    # r has shape (N, 3)
+    
+    # 4. Apply Enhancement
+    # Enhance the lighting component v
+    v_enhanced = enhancement_func(v)
+    
+    # 5. Compute Enhanced Color
+    # Element-wise multiplication: c_hat = phi(v) * r
+    enhanced_color = v_enhanced * r
+    
+    return enhanced_color, density
+
+# Note: The specific implementation of enhancement_func (phi) is not detailed in the sources [S1].
+# It is described as a function that manipulates lighting intensity [S1].
+# The positional encoding is handled by the parent [Model Architecture and Encoding](13550-model-architecture-and-encoding.md) [S1].
+```
+
+**Parameters**
+*   **Input Image Format:** 8-bit/channel sRGB [S1].
+*   **Network Depth/Width:** The sources mention "Feature MLP 1 (8x256)" and "Feature MLP 2 (1x256)" in Figure 3, suggesting hidden dimensions of 256 [S1]. The exact number of layers is not explicitly stated in the text, but Figure 3 implies a multi-layer structure [S1].
+*   **Positional Encoding:** Uses the Mip-NeRF implementation [S1].
+
+**Edge Cases and Pitfalls**
+*   **Non-Linearity:** Standard NeRF fails on low-light sRGB images because the camera ISP process changes linearity and blends scene radiance with noise [S1]. LLNeRF addresses this by decomposing the color, but the method assumes the decomposition can effectively separate lighting from color despite this non-linearity [S1].
+*   **Noise:** Low signal-to-noise ratio in sRGB images causes color distortion that NeRF cannot handle directly [S1]. The decomposition helps reduce noise by isolating it in the view-dependent component which is then enhanced [S1].
+*   **View Inconsistency:** Combining 2D low-light enhancement with NeRF causes view inconsistency. LLNeRF avoids this by performing enhancement within the 3D radiance field optimization [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:** The method produces novel view images with proper lighting, vivid colors, and details, outperforming existing low-light enhancement methods and NeRF methods [S1].
+*   **Strengths:** Works on camera-finished sRGB images without RAW data or exposure metadata; unsupervised; jointly enhances illumination, reduces noise, and corrects colors [S1].
+*   **Limitations:** Relies on the assumption that lighting can be separated into a view-dependent scalar component and a view-independent color basis, which may not hold for all complex lighting scenarios [S1]. The specific enhancement function $\phi$ is not detailed, potentially limiting reproducibility [S1].
+*   **When to use:** When only low-light sRGB images are available and RAW data is not accessible [S1].
+*   **When not to use:** When RAW data with exposure metadata is available, as HDR-NeRF might be more appropriate [S1].
+
+## Background
+LLNeRF was proposed in the paper "Lighting up NeRF via Unsupervised Decomposition and Enhancement" [S1]. It addresses the limitations of previous NeRF variants that required high-quality input images or RAW data [S1]. The method builds on the standard NeRF framework [S1] and Mip-NeRF's positional encoding [S1]. It is distinct from RawNeRF, which uses RAW data [S1], and from methods that pre-enhance images, which suffer from view inconsistency [S1].
+
+## Sources
+[S1] Lighting up NeRF via Unsupervised Decomposition and Enhancement, https://doi.org/10.1109/iccv51070.2023.01161, fetched 2026-10-29

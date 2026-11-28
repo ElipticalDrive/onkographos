@@ -1,0 +1,411 @@
+Contribute to vorflux-eng/regression-eval-repo-2 development by creating an account on GitHub.
+
+feat(uptime): Add ability to use queues to manage parallelism by vorflux[bot] · Pull Request #233 · vorflux-eng/regression-eval-repo-2 · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+vorflux
+Bot
+commented
+Oct 2, 2026
+•
+edited by vorflux-dev
+Bot
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+One potential problem we have with batch processing is that any one slow item will clog up the whole batch. This pr implements a queueing method instead, where we keep N queues that each have their own workers. There's still a chance of individual items backlogging a queue, but we can try increased concurrency here to reduce the chances of that happening
+Isolated evaluation copy. Review only. Do not merge or change the default branch.
+Session Details
+Session: View Session
+Requested by: gaurish Baliga (gaurish@vorflux.com)
+Address comments on this PR. Add (aside) to your comment to have me ignore it.
+Need help on this PR? Tag @codesmith-bot with what you need. Autofix is disabled.
+Vorflux Summary
+The testing subagent was attempted but failed before it completed any checks. All automated and manual behavior remains unverified.
+Commands run:
+```
+No test commands ran.
+```
+Result:
+```
+Stream content timeout: no meaningful progress received for 60s
+```
+Verdict
+⚠️ Issues found. The review and testing processes did not produce enough evidence for a merge recommendation.
+feat(uptime): Add ability to use queues to manage parallelism (head s…
+…
+d223d62
+```
+…napshot)
+```
+vorflux
+Bot
+assigned
+gaurish-vorflux
+Oct 2, 2026
+gaurish-vorflux
+commented
+Oct 2, 2026
+Copy link
+Copy Markdown
+@vorflux review
+vorflux-staging
+Bot
+reviewed
+Oct 2, 2026
+View reviewed changes
+vorflux-staging
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Summary
+Reviewed — found 8 issue(s) in the new thread-queue-parallel uptime results consumer path (FixedQueuePool, SimpleQueueProcessingStrategy, factory wiring, and related tests). The design intent (ordered per-group parallelism with contiguous offset commits) is clear, but lifecycle, commit thread-safety, and failure semantics are not safe to enable as written.
+Findings
+src/sentry/remote_subscriptions/consumers/queue_consumer.py
+Shared FixedQueuePool is shut down from strategy close()/join(), so the factory-owned pool dies on the first Arroyo rebalance.
+Background commit loop marks offsets committed even when Kafka commit is policy-gated / no-op (force not set).
+commit_function runs off the consumer thread and is not Arroyo/Kafka-consumer safe.
+Worker finally always complete_offsets after failures; submit errors also complete without processing (at-most-once), contradicting the strategy docstring.
+join() only re-calls close() — no drain, no final force-commit, double shutdown.
+Queues are unbounded and submit never raises MessageRejected, so claimed backpressure is missing.
+hash(group_key) % num_queues is process-randomized via PYTHONHASHSEED.
+src/sentry/remote_subscriptions/consumers/result_consumer.py
+Factory creates one long-lived pool and reuses it across create_with_partitions, which pairs badly with strategy-owned shutdown.
+tests/sentry/uptime/consumers/test_results_consumer.py
+test_thread_queue_parallel_error_handling expects commits blocked after worker errors, which conflicts with the worker finally path and with production ResultProcessor.__call__ swallowing exceptions.
+Verdict
+⚠️ Changes requested. Pool lifecycle, commit correctness/thread-safety, and failure/offset semantics need fixes before this mode is safe; risk is above the auto-approval threshold.
+Risk score: 8/10 (threshold: 3) — above the configured risk threshold
+Open in Vorflux
+Review with Vorflux
+Comment thread
+src/sentry/remote_subscriptions/consumers/queue_consumer.py
+def close(self) -> None:
+self.shutdown_event.set()
+self.commit_thread.join(timeout=5.0)
+self.queue_pool.shutdown()
+vorflux-staging
+Bot
+Oct 2, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Critical — shared pool torn down on every strategy close/rebalance
+SimpleQueueProcessingStrategy.close() (and join(), which re-calls close()) always runs self.queue_pool.shutdown(). The factory creates one FixedQueuePool and reuses it for every create_with_partitions call.
+Arroyo’s StreamProcessor closes then joins the strategy on partition revoke/reassign. After the first rebalance, workers and queues are shut down, but factory.queue_pool still points at that dead pool. The next strategy submits into shut-down queues / dead workers until process restart. factory.shutdown() only runs on full consumer exit, so it does not recover this.
+```
+def close(self) -> None:
+    self.shutdown_event.set()
+    self.commit_thread.join(timeout=5.0)
+    self.queue_pool.shutdown()  # kills factory-owned pool
+```
+Fix direction: Own the pool on the strategy (create in create_thread_queue_parallel_worker, shut down only there), or recreate the pool in create_with_partitions and never shut it down from strategy close while the factory still holds it. Also make join() drain/wait without calling close() again.
+Comment thread
+src/sentry/remote_subscriptions/consumers/result_consumer.py
+self.multiprocessing_pool = MultiprocessingPool(num_processes)
+if mode == "thread-queue-parallel":
+self.thread_queue_parallel = True
+self.queue_pool = FixedQueuePool(
+vorflux-staging
+Bot
+Oct 2, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Critical — factory-owned pool reused across strategy lifetimes
+```
+self.queue_pool = FixedQueuePool(
+    result_processor=self.result_processor,
+    identifier=self.identifier,
+    num_queues=max_workers or 20,
+)
+```
+This pool is created once on the factory and passed into every SimpleQueueProcessingStrategy. Combined with strategy close() calling queue_pool.shutdown(), the first Arroyo revoke permanently disables the mode for this process assignment cycle.
+Prefer creating the pool per strategy in create_thread_queue_parallel_worker, or recreate it whenever a new strategy is built after a prior shutdown.
+Comment thread
+src/sentry/remote_subscriptions/consumers/queue_consumer.py
+tags={"identifier": self.queue_pool.identifier},
+)
+self.commit_function(committable)
+vorflux-staging
+Bot
+Oct 2, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+High — offsets marked committed without a confirmed Kafka commit
+```
+self.commit_function(committable)
+for partition, offset in committable.items():
+    self.queue_pool.offset_tracker.mark_committed(partition, offset)
+```
+commit_function wraps Arroyo Commit and is invoked without force=True. Under ONCE_PER_SECOND (and similar policies), many calls only stage offsets. The tracker still advances last_committed and drops state via mark_committed.
+That diverges tracker state from broker commits. On rebalance/crash before a forced flush, offsets may never have been committed (reprocessing), or other logic may assume tracker state mirrors Kafka. If commit_function raises, the outer except logs but prior partial behavior is ambiguous; the success path unconditionally marks committed after a possibly no-op policy-gated call.
+Fix direction: Only mark_committed after a successful forced commit (or after an API that reports what was actually committed). Prefer committing from the main consumer thread / poll() with force=True on shutdown/rebalance join, matching CommitOffsets.join().
+Comment thread
+src/sentry/remote_subscriptions/consumers/queue_consumer.py
+self.commit_function = commit_function
+self.shutdown_event = threading.Event()
+self.commit_thread = threading.Thread(target=self._commit_loop, daemon=True)
+vorflux-staging
+Bot
+Oct 2, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+High — background commit thread is not consumer-thread-safe
+```
+self.commit_thread = threading.Thread(target=self._commit_loop, daemon=True)
+self.commit_thread.start()
+```
+commit_function closes over StreamProcessor’s commit path, which drives the Kafka consumer (stage_offsets / commit_offsets). That consumer is not safe to use from a random daemon thread while the main loop also polls. This can corrupt consumer state or crash under load/rebalance.
+Fix direction: Queue committable offsets and apply them in poll() / join() on the consumer thread (same pattern as other Arroyo strategies).
+Comment thread
+src/sentry/remote_subscriptions/consumers/queue_consumer.py
+"Unexpected error in queue worker", extra={"worker_id": self.worker_id}
+)
+finally:
+self.offset_tracker.complete_offset(work_item.partition, work_item.offset)
+vorflux-staging
+Bot
+Oct 2, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+High — failed processing still completes offsets (at-most-once; docstring is wrong)
+```
+except Exception:
+    logger.exception(...)
+finally:
+    self.offset_tracker.complete_offset(work_item.partition, work_item.offset)
+```
+Any exception still marks the offset complete, so it becomes committable. The strategy docstring claims “Only commits offsets after successful processing.” Submit-path failures (below) also add+complete offsets without processing.
+For uptime this risks lost checks / incident transitions after transient errors. Production ResultProcessor.__call__ already swallows exceptions, so many “failures” never reach this except—but when they do (or when submit fails), offsets still advance.
+Fix direction: Decide at-least-once vs at-most-once explicitly. For at-least-once, do not complete_offset on failure (and block contiguous commit). Align docs and tests with the chosen semantics.
+Comment thread
+src/sentry/remote_subscriptions/consumers/queue_consumer.py
+self.queue_pool.shutdown()
+def join(self, timeout: float | None = None) -> None:
+self.close()
+vorflux-staging
+Bot
+Oct 2, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Medium — join() does not drain work or final-commit; double-shutdown with close()
+Arroyo requires: close() (non-blocking) → join(timeout) (drain in-flight work, commit offsets, release resources). Here:
+close() already shuts the pool and joins workers with a hard 5s timeout.
+join() calls close() again (second shutdown).
+No final commit_function after drain (and no force-equivalent flush).
+In-flight work past 5s is abandoned without commit.
+Fix direction: Split close vs join; on join wait for queues/outstanding offsets (respecting timeout), force-commit committable offsets, then shut workers.
+Comment thread
+src/sentry/remote_subscriptions/consumers/queue_consumer.py
+Guarantees:
+- Items for the same group are processed in order
+- No item is lost or processed out of order
+- Natural backpressure when queues fill up
+vorflux-staging
+Bot
+Oct 2, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Medium — docstring claims natural backpressure; queues are unbounded
+```
+- Natural backpressure when queues fill up
+```
+queue.Queue() is created with no maxsize, and submit never raises MessageRejected. Under slow handlers the consumer can grow memory without bound while still reading Kafka.
+Fix direction: Bound queues (maxsize) and raise MessageRejected when full so Arroyo pauses consumption.
+Comment thread
+src/sentry/remote_subscriptions/consumers/queue_consumer.py
+"""
+Get queue index for a group using consistent hashing.
+"""
+return hash(group_key) % self.num_queues
+vorflux-staging
+Bot
+Oct 2, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Low — hash(group_key) % num_queues is process-randomized
+```
+return hash(group_key) % self.num_queues
+```
+PYTHONHASHSEED randomizes hash(str) per process. Affinity is stable within one process (ordering still holds for a given process lifetime) but is not stable across restarts. Prefer a stable hash (blake2/md5 of the key), consistent with explicit grouping maps used elsewhere.
+Comment thread
+tests/sentry/uptime/consumers/test_results_consumer.py
+break
+time.sleep(0.1)
+assert mock_processor_call.call_count == 2
+vorflux-staging
+Bot
+Oct 2, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Low — misleading error-handling test
+```
+assert len(committed_offsets) == 0 or test_partition not in committed_offsets
+```
+This asserts commits stay empty after a worker exception, but the worker always complete_offsets in finally. Production ResultProcessor.__call__ also swallows exceptions, so patching __call__ to raise does not match production and fights the implementation’s at-most-once completion path.
+Either the test is wrong for intended at-most-once behavior, or the implementation should not complete on failure. As written it encodes the opposite of the worker code if the mock actually raises inside the worker.
+vorflux
+Bot
+commented
+Oct 2, 2026
+View reviewed changes
+vorflux
+Bot
+left a comment
+Copy link
+Copy Markdown
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Summary
+Reviewed — found 5 issue(s). This change adds queue-based parallel processing for uptime results. The review covered queue ownership, offset acknowledgement, shutdown behavior, and backpressure.
+Findings
+src/sentry/remote_subscriptions/consumers/result_consumer.py
+The factory reuses a queue pool that a prior strategy permanently shuts down during rebalance.
+src/sentry/remote_subscriptions/consumers/queue_consumer.py
+Worker exceptions still mark failed messages as complete.
+Graceful shutdown abandons queued work and omits a final commit.
+Submission failures become successful acknowledgements.
+Unbounded queues do not apply backpressure and can exhaust memory.
+Verdict
+⚠️ Changes requested. Multiple deterministic paths can commit unprocessed results, and shutdown or load can cause data loss or availability failures.
+Risk score: 8/10 (threshold: 1) — above the configured risk threshold
+Review with Vorflux
+Comment thread
+src/sentry/remote_subscriptions/consumers/result_consumer.py
+self.multiprocessing_pool = MultiprocessingPool(num_processes)
+if mode == "thread-queue-parallel":
+self.thread_queue_parallel = True
+self.queue_pool = FixedQueuePool(
+vorflux
+Bot
+Oct 2, 2026
+Copy link
+Copy Markdown
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+High — data loss: FixedQueuePool is created once on the factory, but Arroyo creates and closes strategies during partition rebalances. SimpleQueueProcessingStrategy.close() permanently shuts down this shared pool. The next strategy then receives shut-down queues, and each put() raises queue.ShutDown; the submission handler catches that error and marks the message complete. Create a fresh pool inside create_with_partitions() so each strategy owns its pool.
+Comment thread
+src/sentry/remote_subscriptions/consumers/queue_consumer.py
+"Unexpected error in queue worker", extra={"worker_id": self.worker_id}
+)
+finally:
+self.offset_tracker.complete_offset(work_item.partition, work_item.offset)
+vorflux
+Bot
+Oct 2, 2026
+Copy link
+Copy Markdown
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+High — data loss: This finally block marks the offset complete even when result_processor() raises. The commit thread can then advance past an unprocessed result. Mark the offset complete only after successful processing, or route terminal failures through the established invalid-message or DLQ policy.
+Comment thread
+src/sentry/remote_subscriptions/consumers/queue_consumer.py
+def shutdown(self) -> None:
+"""Gracefully shutdown all workers."""
+for worker in self.workers:
+worker.shutdown = True
+vorflux
+Bot
+Oct 2, 2026
+Copy link
+Copy Markdown
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+High — reliability and data consistency: Setting worker.shutdown before draining makes each worker exit after its current item, leaving queued work unprocessed. close() also stops the commit thread before worker completions can receive a final commit. Stop intake, drain queued work, synchronously commit completed offsets, and then stop workers. Reserve immediate abandonment for terminate().
+Comment thread
+src/sentry/remote_subscriptions/consumers/queue_consumer.py
+self.queue_pool.offset_tracker.add_offset(
+message.value.partition, message.value.offset
+)
+self.queue_pool.offset_tracker.complete_offset(
+vorflux
+Bot
+Oct 2, 2026
+Copy link
+Copy Markdown
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+High — data loss: This broad handler converts decoder assertions, grouping failures, shut-down queues, and queue-index errors into completed offsets. For example, a negative --max-workers creates no queues, causes every submission to fail, and acknowledges every result without processing it. Propagate unexpected failures or reject the message. Only acknowledge intentionally filtered or explicitly DLQ'd messages.
+Comment thread
+src/sentry/remote_subscriptions/consumers/queue_consumer.py
+self.workers: list[OrderedQueueWorker[T]] = []
+for i in range(num_queues):
+work_queue: queue.Queue[WorkItem[T]] = queue.Queue()
+vorflux
+Bot
+Oct 2, 2026
+Copy link
+Copy Markdown
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Medium — availability: queue.Queue() is unbounded, so ingestion can retain unlimited messages when result processing is slower than Kafka input. This prevents the documented natural backpressure and can exhaust process memory. Use bounded queues and reject submissions before offset tracking when capacity is reached, so Arroyo can pause consumption.
+vorflux-dev
+Bot
+commented
+Oct 3, 2026
+Copy link
+Copy Markdown
+Summary
+The delegated review did not complete. The review subagent timed out twice after 3600 seconds, so no code findings, reading order, or risk assessment are available.
+Verdict
+⚠️ Review blocked. The available evidence is not sufficient for approval.
+Open in Vorflux
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

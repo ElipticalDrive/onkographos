@@ -1,0 +1,111 @@
+# Differentiable Pose Estimation
+
+Also called: Pose Estimation via 3DGS Gradients
+
+## Overview
+Differentiable Pose Estimation optimizes camera poses by backpropagating photometric loss gradients through a 3D Gaussian Splatting (3DGS) renderer [S1]. It solves the problem of recovering accurate camera extrinsics when initial poses are noisy or unknown, specifically enabling applications like motion deblurring where camera motion during exposure must be modeled [S1]. It distinguishes itself from SLAM-based siblings like [SplaTAM](9193-splatam.md) and [Gaussian-SLAM](9195-gaussian-slam.md) by focusing on batch optimization of poses for a static scene or trajectory rather than incremental online tracking, often leveraging the equivalence between camera transformation and Gaussian position transformation to simplify gradient computation [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A set of $N$ images, initial camera poses $T_i$ (often initialized via COLMAP), initial 3D Gaussian parameters (positions $m_i$, covariances $\Sigma_i$, opacities $\alpha_i$, and spherical harmonic color coefficients $c_i$), and camera intrinsics $K$ [S1].
+*   **Outputs:** Optimized camera poses $T_i$ or a global transformation $\hat{T}$ [S1].
+
+**Data Structures:**
+*   **Camera Pose:** Represented as a 4x4 transformation matrix $T$ or a 6-DOF vector [S1]. In the Deblur-GS variant, poses are parameterized as control points of a Bézier curve trajectory [S1].
+*   **3D Gaussians:** Defined by position $m_i$, covariance $\Sigma_i$, opacity $\alpha_i$, and spherical harmonic coefficients for color $c_i$ [S1].
+
+**Loss Function:**
+The total loss $L$ combines $L_1$ and D-SSIM terms [S1]:
+$$ L = \lambda L_1 + (1 - \lambda) L_{D-SSIM} $$
+Typical value: $\lambda = 0.2$ [S1].
+
+**Gradient Derivation:**
+The gradient of the loss with respect to the camera pose $T$ is derived by splitting the chain rule into three components: color, covariance, and position [S1]:
+$$ \frac{\partial L}{\partial T} = \sum_{i \in N} \frac{\partial L}{\partial \hat{C}} \left( \frac{\partial \hat{C}}{\partial c_i} \frac{\partial c_i}{\partial T} + \frac{\partial \hat{C}}{\partial \alpha_i} \frac{\partial \alpha_i}{\partial \Sigma'_i} \frac{\partial \Sigma'_i}{\partial T} + \frac{\partial \hat{C}}{\partial \alpha_i} \frac{\partial \alpha_i}{\partial m'_i} \frac{\partial m'_i}{\partial T} \right) $$
+Where $\hat{C}$ is the rendered color, $c_i$ is the Gaussian color, $\alpha_i$ is opacity, $\Sigma'_i$ is the projected 2D covariance, and $m'_i$ is the projected 2D position [S1].
+
+**Simplifications and Pitfalls:**
+1.  **Color Term Elimination:** The term $\frac{\partial c_i}{\partial T}$ is eliminated [S1]. The assumption is that during short optimization steps, the view-dependent color encoded in spherical harmonics remains effectively unchanged [S1].
+2.  **Covariance Term Ignorance:** The term involving $\frac{\partial \Sigma'_i}{\partial T}$ is ignored [S1]. If Gaussians form elongated ellipsoids, this term becomes large and causes instability [S1]. Ignoring it enhances robustness [S1].
+3.  **Position Term and Pose-Position Equivalence:** The remaining term involves $\frac{\partial m'_i}{\partial T}$ [S1]. The method exploits the equivalence:
+    $$ K(T \hat{T})m_i = K T (\hat{T} m_i) $$
+    Where $\hat{T}$ is an external transformation applied to the pose $T$, which is mathematically equivalent to applying $\hat{T}$ to the Gaussian position $m_i$ [S1].
+    Instead of differentiating $T$ directly, the method optimizes a global transformation $\hat{T}$ applied to all Gaussian positions $m_i$ [S1]. The gradient is computed as:
+    $$ \frac{\partial L}{\partial \hat{T}} = \frac{\partial L}{\partial \hat{m}} \frac{\partial \hat{m}}{\partial \hat{T}} $$
+    The differentiable renderer provides $\frac{\partial L}{\partial \hat{m}}$, and automatic differentiation handles $\frac{\partial \hat{m}}{\partial \hat{T}}$ [S1].
+
+**Algorithm Steps:**
+1.  Initialize 3D Gaussians and camera poses (e.g., via COLMAP) [S1].
+2.  For each training iteration:
+    a. Select a camera view or trajectory segment [S1].
+    b. Forward pass: Render the image using the current Gaussian parameters and camera pose/transformation [S1].
+    c. Compute Loss $L$ against the target image [S1].
+    d. Backward pass:
+        i. Compute $\frac{\partial L}{\partial \hat{m}}$ from the renderer's output [S1].
+        ii. Compute $\frac{\partial \hat{m}}{\partial \hat{T}}$ using automatic differentiation [S1].
+        iii. Combine to get $\frac{\partial L}{\partial \hat{T}}$ [S1].
+    e. Update parameters using an Adam optimizer [S1].
+3.  Repeat until convergence [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def optimize_pose(gaussians, camera_poses, images, intrinsics, num_iterations, lambda_l1=0.2, scene_lr=1e-3, pose_lr=1e-3, decay_start=50000, decay_end=1e-5):
+    scene_params = gaussians.parameters()
+    pose_params = camera_poses.parameters()
+    for i in range(num_iterations):
+        view_idx = i % len(images)
+        target_image = images[view_idx]
+        T = camera_poses[view_idx]
+        # Forward pass: rasterize Gaussians with current pose
+        rendered_image = rasterize_forward(gaussians, T, intrinsics)
+        # Compute photometric loss explicitly
+        l1_term = sum(abs(rendered_image - target_image)) / rendered_image.numel()
+        ssim_term = compute_ssim(rendered_image, target_image)
+        loss = lambda_l1 * l1_term + (1 - lambda_l1) * ssim_term
+        # Backward pass through differentiable renderer
+        loss.backward()
+        # Update scene parameters with fixed learning rate
+        for p in scene_params:
+            if p.grad is not None:
+                p.data -= scene_lr * p.grad
+        # Update pose parameters with exponential decay
+        progress = max(0, i - decay_start) / (num_iterations - decay_start)
+        current_pose_lr = pose_lr * (decay_end / pose_lr) ** progress
+        for p in pose_params:
+            if p.grad is not None:
+                p.data -= current_pose_lr * p.grad
+        # Zero gradients for next iteration
+        for p in scene_params:
+            if p.grad is not None: p.grad.zero_()
+        for p in pose_params:
+            if p.grad is not None: p.grad.zero_()
+```
+
+## Subtopics
+
+### Deblur-GS Implementation
+A specific implementation of differentiable pose estimation designed for motion-blurred images [S1]. It extends the differentiable Gaussian splatting rasterizer to support depth, pose, and cumulative opacity for both forward and backward propagation [S1]. It uses two separate Adam optimizers for Gaussian scene parameters and camera pose parameters [S1]. The pose learning rate exponentially decays from $1 \times 10^{-3}$ to $1 \times 10^{-5}$ [S1]. Camera motion is modeled using 7th-order Bézier interpolation with 31 sampled points on the trajectory [S1]. Training runs for 90K iterations on a single NVIDIA RTX 3090 GPU [S1].
+
+### Evaluation-time Pose Alignment
+A post-processing step used in pose-free reconstruction settings where ground-truth poses are unavailable [S2, unofficial]. Since multiple 3D scenes and camera configurations can explain the same unposed inputs, the reconstructed scene may not align with the ground-truth evaluation frame [S2, unofficial]. To resolve this, the reconstructed 3D Gaussians are frozen, and each target camera pose is optimized for 200 iterations using an L2 loss [S2, unofficial]. This alignment is not used if ground-truth poses are available [S2, unofficial].
+
+### Camera Pose Refinement for Static Background
+A method to reduce inconsistency between multi-cameras and ameliorate error introduced in SLAM algorithms for static background scenes in self-driving data, where standard SfM fails due to fewer view overlaps [S3, unofficial]. It implicitly learns a pair of refinement offsets $\Delta P = (\Delta R, \Delta T)$ for each original camera pose $P = [R, T]$, where $R \in SO(3)$ and $T \in \mathbb{R}^3$ [S3, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Depends on the number of Gaussians $N$ and the rasterization cost [S1]. Each iteration requires a forward render and backward pass [S1]. Deblur-GS uses 90K iterations [S1].
+*   **Memory Complexity:** Stores Gaussian parameters and gradients for both scene and pose [S1]. The extension to support depth and cumulative opacity increases memory overhead slightly [S1].
+*   **Strengths:** Robust to elongated Gaussian shapes by ignoring covariance gradients [S1]. Efficiently handles pose optimization by leveraging position-pose equivalence [S1].
+*   **Limitations:** Assumes short optimization steps for color invariance [S1]. Requires good initialization (e.g., COLMAP) [S1]. Pose-free settings require additional evaluation-time alignment [S2, unofficial].
+*   **When to use:** When optimizing camera poses for a static scene with known or roughly estimated initial poses, particularly in deblurring or novel view synthesis contexts [S1].
+*   **When not to use:** For online SLAM where incremental tracking is required; use [SplaTAM](9193-splatam.md) or [Gaussian-SLAM](9195-gaussian-slam.md) instead [G].
+
+## Background
+The method originates from the need to handle camera motion blur in 3D Gaussian Splatting, leading to the Deblur-GS paper [S1]. It builds on the differentiable rasterization of 3DGS [S1]. The equivalence between camera transformation and Gaussian position transformation is a key theoretical insight enabling efficient gradient computation [S1]. Evaluation-time pose alignment protocols were later formalized in pose-free reconstruction benchmarks [S2, unofficial]. Camera pose refinement for static backgrounds was introduced to address multi-camera inconsistency in self-driving datasets where SfM struggles [S3, unofficial].
+
+## Sources
+[S1] Deblur-GS: 3D Gaussian Splatting from Camera Motion Blurred Images, https://doi.org/10.1145/3651301, fetched 2026-11-08
+[S2] FineSplat: Fine Patches, Local Groups, Detailed Splats, https://arxiv.org/abs/2610.25011, fetched 2026-10-29 (unofficial)
+[S3] S-NeRF: Neural Radiance Fields for Street Views, https://doi.org/10.48550/arxiv.2303.00749, fetched 2026-10-29 (unofficial)

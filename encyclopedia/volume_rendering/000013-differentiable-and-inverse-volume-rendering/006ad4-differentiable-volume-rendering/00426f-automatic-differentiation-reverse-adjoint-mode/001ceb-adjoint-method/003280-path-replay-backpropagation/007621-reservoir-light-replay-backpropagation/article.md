@@ -1,0 +1,193 @@
+# Reservoir Light Replay Backpropagation
+
+Also called: ResLRB, Reservoir Light Tracing with Backpropagation
+
+## Overview
+Reservoir Light Replay Backpropagation (ResLRB) is a constant-memory, reverse-mode differentiable light tracing method that compresses per-path sensor connections into a single stochastically selected representative using weighted reservoir sampling [S1, unofficial]. It preserves the two-pass structure of [Path Replay Backpropagation](6780-path-replay-backpropagation.md) but trades gradient fidelity for bounded memory by discarding $N-1$ of $N$ candidate connections per path [S1, unofficial]. Unlike [LRB-3-pass](6780-lrb-3-pass.md), which retains all connections via a third traversal, ResLRB achieves constant memory at the cost of increased gradient variance [S1, unofficial].
+
+## How it works
+**Inputs:** Light path vertices $\{x_0, \dots, x_{N-1}\}$, emitter parameters $\theta$, sensor geometry.
+**Outputs:** Unbiased gradient estimate $\nabla_\theta \hat{S}$.
+
+**Data Structures:**
+*   **Reservoir Entry:** Stores the selected vertex index $R$, the cumulative weight sum $\Omega_k$, the weight of the selected connection $\omega_R$, and the accumulated ray-segment Jacobian $J_{0 \rightarrow R}^{\text{ray}}$ (for attached formulation).
+*   **Ray-Segment Jacobian ($J_{0 \rightarrow i}^{\text{ray}}$):** A $4 \times 4$ matrix representing the derivative of the ray-segment parameterization with respect to emitter parameters.
+
+**Numbered Steps:**
+
+1.  **Primal Pass (Streaming Reservoir):**
+    For each vertex $x_i$ along the light path:
+    a. Compute the sensor connection radiance $L_i$ and its weight $\omega_i$ (typically proportional to the BSDF PDF and radiance).
+    b. Update the running total weight $\Omega_k \leftarrow \Omega_k + \omega_i$.
+    c. **Reservoir Update:** With probability $p_i = \omega_i / \Omega_k$, replace the current reservoir entry with the candidate at $x_i$.
+       *   If attached formulation: Cache the current accumulated Jacobian $J_{0 \rightarrow i}^{\text{ray}}$ with the new entry.
+       *   Update $J_{0 \rightarrow i}^{\text{ray}}$ for the next iteration using forward-mode differentiation: $J_{0 \rightarrow i+1}^{\text{ray}} = J_{\text{ray}}^{(i)} \cdot J_{0 \rightarrow i}^{\text{ray}}$ [S1, unofficial].
+    d. Advance the path.
+
+2.  **Termination:**
+    When the path terminates, the reservoir holds a single index $R \in \{1, \dots, N\}$ selected with probability:
+    $$ \Pr(R = i) = \frac{\omega_i}{\Omega_k} \quad (8) $$
+    where $\Omega_k = \sum_{j=1}^k \omega_j$ is the total weight sum [S1, unofficial].
+
+3.  **Splat Contribution:**
+    Compute the reweighted splat contribution:
+    $$ \hat{S}(\bar{x}; \theta) = \frac{\Omega_k}{\omega_R} \cdot L_R(\theta) \quad (9) $$
+    This estimator is unbiased because $\mathbb{E}_R[\hat{S}] = \sum_{i=1}^k L_i$ [S1, unofficial].
+
+4.  **Adjoint Pass (Replay):**
+    a. Re-seed the PRNG with the stored seed to synchronize state [S1, unofficial].
+    b. Replay the path from $x_0$ up to the selected depth $R$.
+    c. **Reservoir Sync:** Re-execute the reservoir update logic (specifically the random number consumption) at each vertex to keep the PRNG state synchronized with the primal pass, even though the selection outcome is known [S1, unofficial].
+    d. **Jacobian Reconstruction:** At each replayed vertex $x_j$ ($j \le R$), rebuild $J_{0 \rightarrow j}^{\text{ray}}$ using the same forward-mode process as the primal pass [S1, unofficial].
+    e. **Backpropagation:**
+       i. Compute the sensor-connection Jacobian at the selected vertex $R$:
+          $$ J_R^{\text{sensor}} = \frac{\partial(L_R, u_R)}{\partial \mathbf{p}_R} \in \mathbb{R}^{5 \times 4} \quad (12) $$
+          where $\mathbf{p}_R$ is the ray-segment parameterization, $L_R$ is the 3-channel radiance, and $u_R$ is the 2-component sensor coordinate [S1, unofficial].
+       ii. Compute the total splat Jacobian:
+           $$ J_R^{\text{splat}} = J_R^{\text{sensor}} \cdot J_{0 \rightarrow R}^{\text{ray}} \quad (13) $$
+       iii. Project the image-space adjoint $\tilde{L}_R$ into the local frame via the inverse of $J_{0 \rightarrow j}^{\text{ray}}$ [S1, unofficial].
+       iv. Perform two backward operations:
+           *   Through the radiance channel weighted by $\tilde{L}_R$.
+           *   Through the position channel weighted by the position adjoint $\partial \mathcal{L} / \partial u_R$ [S1, unofficial].
+       v. Apply the log-derivative identity at each vertex $x_j$ using the downstream adjoint $\delta_{\text{rem}}$ and BSDF PDF $f_s^{(j)}$:
+           $$ \nabla_{\theta} f_s^{(j)} \cdot \frac{\delta_{\text{rem}}}{f_s^{(j)}} \quad (17) $$
+           where $\delta_{\text{rem}}$ is the remaining downstream adjoint [S1, unofficial].
+
+**Parameters:**
+*   $N$: Number of candidate sensor connections. Trade-off between gradient fidelity and memory.
+*   `res.depth`: The depth $R$ of the selected connection, determining the extent of the adjoint replay loop.
+
+**Edge Cases and Pitfalls:**
+*   **Variance:** Variance increases proportional to the number of discarded connections. In worst-case scenes (high path-sensor connectivity, e.g., Living Room), effective sample count reduces by a factor proportional to path length [S1, unofficial].
+*   **PRNG Synchronization:** The PRNG state must remain synchronized between primal and adjoint passes. Failure to re-execute reservoir update logic causes desynchronization [S1, unofficial].
+*   **Jacobian Inversion:** In attached formulation, invert $J_{0 \rightarrow j}^{\text{ray}}$. Use a determinant threshold to substitute zero matrix if $|\det J|$ is small. Inject stochastic noise for regularization at non-specular vertices [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def reslrb_primal(path_vertices, emitter_params):
+    """
+    Primal pass for ResLRB.
+    Returns: reservoir_entry, rng_state
+    """
+    reservoir = None
+    omega_total = 0.0
+    j_ray = identity_matrix(4, 4)  # J_{0->0}
+    
+    for i, x_i in enumerate(path_vertices):
+        # Compute connection weight and radiance
+        omega_i, L_i = compute_sensor_connection(x_i, emitter_params)
+        
+        # Update total weight
+        omega_total += omega_i
+        
+        # Reservoir sampling
+        if omega_total > 0:
+            p_accept = omega_i / omega_total
+            if random() < p_accept:
+                # Cache current Jacobian with the new candidate
+                j_ray_cached = copy(j_ray)
+                reservoir = {
+                    'index': i,
+                    'omega': omega_i,
+                    'omega_total': omega_total,
+                    'j_ray': j_ray_cached,
+                    'L': L_i
+                }
+        
+        # Update Jacobian for next segment
+        j_ray = j_ray_segment_jacobian(x_i) @ j_ray
+        
+    return reservoir, get_rng_state()
+
+def reslrb_adjoint(reservoir_entry, rng_state, path_vertices, emitter_params):
+    """
+    Adjoint pass for ResLRB.
+    Returns: gradient_estimate
+    """
+    set_rng_state(rng_state)
+    
+    R = reservoir_entry['index']
+    omega_R = reservoir_entry['omega']
+    omega_total = reservoir_entry['omega_total']
+    j_ray_R = reservoir_entry['j_ray']
+    L_R = reservoir_entry['L']
+    
+    # Reweighting factor
+    w_factor = omega_total / omega_R
+    
+    # Image space adjoint (from loss)
+    L_tilde_R = get_image_adjoint(R)
+    
+    # Replay path up to R
+    j_ray = identity_matrix(4, 4)
+    delta_rem = L_tilde_R  # Initial downstream adjoint
+    
+    for j in range(R + 1):
+        x_j = path_vertices[j]
+        
+        # Re-synchronize PRNG
+        if j < R:
+            # Re-execute reservoir logic to consume RNG
+            # (Simplified: assume we know the path and can re-run the exact same random calls)
+            # In practice, this involves re-computing the acceptance probability and consuming RNG
+            pass 
+        
+        # Rebuild Jacobian
+        if j > 0:
+            j_ray = j_ray_segment_jacobian(path_vertices[j-1]) @ j_ray
+            
+        # Backpropagation at vertex j
+        if j == R:
+            # Compute Sensor Jacobian
+            j_sensor = compute_sensor_jacobian(x_j, L_R)
+            j_splat = j_sensor @ j_ray_R
+            
+            # Project adjoint
+            # ... (projection logic using inverse of j_ray)
+            
+            # Radiance channel backward
+            grad_L = w_factor * L_tilde_R
+            # ... (backprop through radiance)
+            
+            # Position channel backward
+            grad_u = w_factor * get_position_adjoint(R)
+            # ... (backprop through position)
+        else:
+            # Log-derivative identity for intermediate vertices
+            f_s = compute_bsdf_pdf(x_j)
+            grad_theta = compute_bsdf_gradient(x_j) * (delta_rem / f_s)
+            # ... (accumulate gradient)
+            
+            # Update delta_rem for next step (if needed for attached formulation)
+            # In detached, delta_rem is constant L_tilde_R scaled? 
+            # Note: Eq 17 implies delta_rem is used. In detached, it's simpler.
+            pass
+            
+    return accumulated_gradient
+```
+
+## Subtopics
+
+### LRB-3-pass
+A constant-memory method that retains all connections via a third traversal, matching naive AD in expectation but requiring more computation time [S1, unofficial].
+
+### Attached Formulation
+Extends ResLRB to track geometric perturbations through the path to shift splatted sensor coordinates, adding constant storage per sample ($4 \times 4$ Jacobian matrix) [S1, unofficial].
+
+## Operating characteristics
+*   **Memory:** Constant with respect to path length. Stores only one reservoir entry per sample (one $4 \times 4$ matrix for $J_{0 \rightarrow R}^{\text{ray}}$ and one two-component vector for position adjoint in attached formulation) [S1, unofficial].
+*   **Time Complexity:** Two passes. The adjoint pass replays only up to the selected depth $R$.
+*   **Variance:** Increased compared to naive AD. Proportional to the number of discarded connections. Worst-case reduction in effective sample count by a factor proportional to path length [S1, unofficial].
+*   **Strengths:** Enables differentiable light transport at path lengths where AD-based approaches are not feasible on consumer hardware due to memory limits [S1, unofficial].
+*   **Limitations:** Higher variance than LRB-3-pass. Becomes competitive with LRB-3-pass only in scenes with high path-sensor connectivity (e.g., Living Room), where the cost of the third traversal in LRB-3-pass outweighs the reservoir overhead [S1, unofficial].
+*   **When to use:** When memory is constrained and path lengths are long, and scene connectivity is low to moderate.
+*   **When not to use:** When gradient fidelity is critical and memory is sufficient for LRB-3-pass or naive AD.
+
+## Background
+ResLRB was introduced by Linas Beresna and Eugene Fiume from Simon Fraser University in the paper "Constant-Memory Differentiable Light Tracing" (2026) [S1, unofficial]. It addresses the obstruction of applying Path Replay Backpropagation (PRB) to light tracing in constant memory, where buffered two-pass variants retain linear memory scaling with path length [S1, unofficial].
+
+## Sources
+[S1] Constant-Memory Differentiable Light Tracing, https://arxiv.org/abs/2609.32920, fetched 2026-10-29 (unofficial)

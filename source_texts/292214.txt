@@ -1,0 +1,294 @@
+Abstraction Library for Parallel Kernel Acceleration 🦙🦙🦙 - benchmark: add HeCBench scan benchmark (portable alpaka port) by psychocoderHPC-bot · Pull Request #46 · psychocoderHPC-bot/alpaka3
+
+benchmark: add HeCBench scan benchmark (portable alpaka port) by psychocoderHPC-bot · Pull Request #46 · psychocoderHPC-bot/alpaka3 · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+psychocoderHPC-bot
+commented
+Oct 11, 2026
+Copy link
+Copy Markdown
+Owner
+Port of the HeCBench scan workload to a single portable alpaka source. It splits the input into independent chunks and computes an exclusive prefix sum inside every chunk with a shared-memory Blelloch/Harris scan, in both the plain and the bank-conflict-aware variant. One kernel source drives the host CPU backend and the CUDA backend, with no native CUDA/HIP/OpenCL kernel and no backend branch.
+An independent review confirmed the code is safe. The earlier publish attempt was missing the raw performance data the README refers to; this revision commits that data as benchmark/scan/results.json and the underlying raw CSVs (see Reproduction).
+What it computes
+For an input of nelems = ceil(n / N) * N elements split into chunks of N, the reference (src/scan-cuda/main.cu, OpenMP twin src/scan-omp/main.cpp) produces a chunk-local exclusive prefix sum
+```
+out[i]   = sum(in[cN], ..., in[i-1])   for i inside chunk c, i > cN
+out[cN]  = 0
+```
+Chunks do not carry into each other: the reference resets the running total at every chunk boundary. It exercises chunk sizes N = 128, 256, 512, 1024, 2048 and element types char, short, int, long, generated with srand(123) and rand() % 5 + 1.
+The port keeps the reference semantics exactly: the same chunk-local exclusive scan and chunk-boundary reset, both kernel variants (plain scan<T,N> and bank-conflict-aware scan_bcao<T,N> with shared memory padded by x >> 5), the same element types and chunk sizes, a grid-stride loop over chunks matching the reference's 16 * multiProcessorCount grid, and an independent sequential host exclusive scan with an exact element-wise comparison.
+Provenance and license
+Reference: ORNL/HeCBench at 0a17ee47ca6072192101036d4bf292e6612f22e6
+CUDA source modeled: src/scan-cuda/main.cu
+OpenMP source modeled: src/scan-omp/main.cpp
+Upstream HeCBench is BSD-3-Clause (Copyright (c) 2020 Argonne National Laboratory, Zheming Jin; Copyright (c) 2020- Oak Ridge National Laboratory, Zheming Jin). Reference sources are kept outside this repository and are not vendored. The alpaka port and its sources are BSD-3-Clause.
+Build and run
+CPU (fwk394 host, g++ 13.2):
+```
+cmake --preset rel-host-cpu-gcc -Dalpaka_COMPILE_PEDANTIC=ON .
+cmake --build build/rel-host-cpu-gcc --target scan_alpaka -j
+OMP_NUM_THREADS=48 ./build/rel-host-cpu-gcc/benchmark/scan/scan_alpaka \
+  --n 67108864 --chunk 0 --type int --repeat 10 --samples 5
+```
+GPU (fwk394, Quadro GV100, sm_70, CUDA 12.5, g++ 13.2):
+```
+export PATH=/usr/local/cuda-12.5/bin:$PATH CUDA_HOME=/usr/local/cuda-12.5
+cmake --preset rel-cuda-nvcc-gcc -DCMAKE_CUDA_ARCHITECTURES=70 -Dalpaka_COMPILE_PEDANTIC=ON .
+cmake --build build/rel-cuda-nvcc-gcc --target scan_alpaka -j
+CUDA_VISIBLE_DEVICES=1 ./build/rel-cuda-nvcc-gcc/benchmark/scan/scan_alpaka \
+  --n 67108864 --chunk 0 --type int --repeat 10 --samples 5
+```
+References (built outside the repository at the pinned SHA):
+```
+nvcc -std=c++17 -Xcompiler -Wall -arch=sm_70 -O3 main.cu -o scan_cuda_ref
+g++ -O2 -fopenmp -std=c++17 main.cpp -o scan_omp_ref
+```
+Self-validation and tolerance rationale
+src/helper.hpp reproduces the reference input generator (srand(123), rand() % 5 + 1) and an independent sequential host exclusive scan with identical chunk semantics. After a fresh device run the result is copied back and compared element-wise against the host reference. The first mismatch prints index, expected and got, and returns a nonzero exit code.
+Tolerance: the comparison is exact (tolerance 0). A chunk-local prefix sum over a fixed integer set is an exact reduction, and the reference itself compares with memcmp/!=. For narrow types the reduction can wrap, and the host reference adds in the same type, so wrap-around matches bit for bit. Widening the tolerance would hide real ordering bugs.
+Validated element counts, including boundary and irregular sizes and values not a multiple of the chunk size: 0, 1, 2, 3, 7, 15, 63, 127, 128, 129, 255, 256, 257, 511, 512, 513, 1000, 1023, 1024, 1025, 2047, 2048, 2049, 4095, 4096, 4097, 65537, 1048575, 1048576, 1048577. All element types and both variants pass on CPU and CUDA; a size-0 input runs zero chunks and passes.
+CPU and GPU results
+Measured metric: repeat back-to-back scans between two synchronisations, divided by repeat, matching the reference scope. One warm-up scan precedes the samples. Runtime ratio = median alpaka3 / median reference; <= 1.00 match, <= 1.10 accepted.
+configuration
+backend
+alpaka3 median (us)
+reference median (us)
+runtime ratio
+variation
+validation
+status
+2^23 int ch512 scan
+GpuCuda
+295.58
+410.54
+0.72
+0.003
+exact (tol 0)
+PASS
+2^23 int ch512 scan_bcao
+GpuCuda
+209.37
+264.88
+0.79
+0.033
+exact (tol 0)
+PASS
+2^23 int ch2048 scan
+GpuCuda
+419.49
+486.74
+0.86
+0.001
+exact (tol 0)
+PASS
+2^23 int ch2048 scan_bcao
+GpuCuda
+315.19
+370.70
+0.85
+0.002
+exact (tol 0)
+PASS
+2^23 long ch2048 scan
+GpuCuda
+577.88
+649.62
+0.89
+0.002
+exact (tol 0)
+PASS
+2^23 long ch2048 scan_bcao
+GpuCuda
+354.38
+508.12
+0.70
+0.001
+exact (tol 0)
+PASS
+2^28 int ch512 scan
+GpuCuda
+7276.0
+12895.5
+0.56
+0.173
+exact (tol 0)
+PASS
+2^28 int ch512 scan_bcao
+GpuCuda
+4641.0
+5979.6
+0.78
+0.205
+exact (tol 0)
+PASS
+2^28 int ch2048 scan
+GpuCuda
+9355.6
+12153.8
+0.77
+0.151
+exact (tol 0)
+PASS
+2^28 int ch2048 scan_bcao
+GpuCuda
+6906.1
+8076.5
+0.86
+0.381
+exact (tol 0)
+PASS
+2^28 long ch2048 scan
+GpuCuda
+13163.0
+14807.4
+0.89
+0.077
+exact (tol 0)
+PASS
+2^28 long ch2048 scan_bcao
+GpuCuda
+9035.0
+11401.8
+0.79
+0.004
+exact (tol 0)
+PASS
+scan_bcao is the faster variant on the GPU in every case, matching the reference's own observation. Ratios are variant-for-variant. The CPU backend has no runtime ratio: the scan_omp_ref OpenMP target-offload program targets icpx, absent on the measurement host, and its g++ -fopenmp fallback reports FAIL. CPU correctness is validated against the independent host reference.
+Environment
+Host: fwk394, Intel Xeon W-2175 (14 cores / 28 threads), g++ 13.2.0, CMake 3.28.3, OMP_NUM_THREADS=48.
+GPU: Quadro GV100 32 GB, sm_70, CUDA 12.5; measurements used CUDA_VISIBLE_DEVICES=1.
+The assigned rosi_v100 (Tesla V100) was unreachable through the compute gateway for the whole run, so every GPU number is from the fwk394 Quadro GV100 fallback.
+Source SHAs
+alpaka3 base: 6f13700c390a09df818a255d53e730f1f9d69456 (dev)
+alpaka3 port commit: bd86ce18475cd649e7054eee15ca983bbcc8c8b8
+HeCBench reference: 0a17ee47ca6072192101036d4bf292e6612f22e6
+Performance exceptions
+None. Every measured CUDA ratio is at or below 0.89.
+Reproduction
+Commands are listed under Build and run. Raw per-run samples, exact commands, and CPU/GPU/compiler metadata are in benchmark/scan/results.json, with the raw data benchmark/scan/alpaka-gpu.csv, benchmark/scan/ref-cuda.csv, benchmark/scan/alpaka-cpu.csv, benchmark/scan/ratio.csv and benchmark/scan/provenance.txt committed alongside.
+benchmark: add HeCBench scan benchmark (portable alpaka port)
+…
+1127a7f
+```
+Port of the HeCBench `scan` workload to a single portable alpaka source. It splits the input into independent chunks and computes an exclusive prefix sum inside every chunk with a shared-memory Blelloch/Harris scan, in both the plain and the bank-conflict-aware variant. One kernel source drives the host CPU backend and the CUDA backend, with no native CUDA/HIP/OpenCL kernel and no backend branch.
+
+An independent review confirmed the code is safe. The earlier publish attempt was missing the raw performance data the README refers to; this revision commits that data as `benchmark/scan/results.json` and the underlying raw CSVs (see Reproduction).
+
+## What it computes
+
+For an input of `nelems = ceil(n / N) * N` elements split into chunks of `N`, the reference (`src/scan-cuda/main.cu`, OpenMP twin `src/scan-omp/main.cpp`) produces a chunk-local exclusive prefix sum
+
+    out[i]   = sum(in[cN], ..., in[i-1])   for i inside chunk c, i > cN
+    out[cN]  = 0
+
+Chunks do not carry into each other: the reference resets the running total at every chunk boundary. It exercises chunk sizes `N = 128, 256, 512, 1024, 2048` and element types `char, short, int, long`, generated with `srand(123)` and `rand() % 5 + 1`.
+
+The port keeps the reference semantics exactly: the same chunk-local exclusive scan and chunk-boundary reset, both kernel variants (plain `scan<T,N>` and bank-conflict-aware `scan_bcao<T,N>` with shared memory padded by `x >> 5`), the same element types and chunk sizes, a grid-stride loop over chunks matching the reference's `16 * multiProcessorCount` grid, and an independent sequential host exclusive scan with an exact element-wise comparison.
+
+## Provenance and license
+
+- Reference: [ORNL/HeCBench at `0a17ee47ca6072192101036d4bf292e6612f22e6`](https://github.com/ORNL/HeCBench/tree/0a17ee47ca6072192101036d4bf292e6612f22e6)
+- CUDA source modeled: [`src/scan-cuda/main.cu`](https://github.com/ORNL/HeCBench/blob/0a17ee47ca6072192101036d4bf292e6612f22e6/src/scan-cuda/main.cu)
+- OpenMP source modeled: [`src/scan-omp/main.cpp`](https://github.com/ORNL/HeCBench/blob/0a17ee47ca6072192101036d4bf292e6612f22e6/src/scan-omp/main.cpp)
+- Upstream HeCBench is BSD-3-Clause (Copyright (c) 2020 Argonne National Laboratory, Zheming Jin; Copyright (c) 2020- Oak Ridge National Laboratory, Zheming Jin). Reference sources are kept outside this repository and are not vendored. The alpaka port and its sources are BSD-3-Clause.
+
+## Build and run
+
+CPU (fwk394 host, g++ 13.2):
+
+    cmake --preset rel-host-cpu-gcc -Dalpaka_COMPILE_PEDANTIC=ON .
+    cmake --build build/rel-host-cpu-gcc --target scan_alpaka -j
+    OMP_NUM_THREADS=48 ./build/rel-host-cpu-gcc/benchmark/scan/scan_alpaka \
+      --n 67108864 --chunk 0 --type int --repeat 10 --samples 5
+
+GPU (fwk394, Quadro GV100, sm_70, CUDA 12.5, g++ 13.2):
+
+    export PATH=/usr/local/cuda-12.5/bin:$PATH CUDA_HOME=/usr/local/cuda-12.5
+    cmake --preset rel-cuda-nvcc-gcc -DCMAKE_CUDA_ARCHITECTURES=70 -Dalpaka_COMPILE_PEDANTIC=ON .
+    cmake --build build/rel-cuda-nvcc-gcc --target scan_alpaka -j
+    CUDA_VISIBLE_DEVICES=1 ./build/rel-cuda-nvcc-gcc/benchmark/scan/scan_alpaka \
+      --n 67108864 --chunk 0 --type int --repeat 10 --samples 5
+
+References (built outside the repository at the pinned SHA):
+
+    nvcc -std=c++17 -Xcompiler -Wall -arch=sm_70 -O3 main.cu -o scan_cuda_ref
+    g++ -O2 -fopenmp -std=c++17 main.cpp -o scan_omp_ref
+
+## Self-validation and tolerance rationale
+
+`src/helper.hpp` reproduces the reference input generator (`srand(123)`, `rand() % 5 + 1`) and an independent sequential host exclusive scan with identical chunk semantics. After a fresh device run the result is copied back and compared element-wise against the host reference. The first mismatch prints index, expected and got, and returns a nonzero exit code.
+
+Tolerance: the comparison is exact (tolerance 0). A chunk-local prefix sum over a fixed integer set is an exact reduction, and the reference itself compares with `memcmp`/`!=`. For narrow types the reduction can wrap, and the host reference adds in the same type, so wrap-around matches bit for bit. Widening the tolerance would hide real ordering bugs.
+
+Validated element counts, including boundary and irregular sizes and values not a multiple of the chunk size: `0, 1, 2, 3, 7, 15, 63, 127, 128, 129, 255, 256, 257, 511, 512, 513, 1000, 1023, 1024, 1025, 2047, 2048, 2049, 4095, 4096, 4097, 65537, 1048575, 1048576, 1048577`. All element types and both variants pass on CPU and CUDA; a size-0 input runs zero chunks and passes.
+
+## CPU and GPU results
+
+Measured metric: `repeat` back-to-back scans between two synchronisations, divided by `repeat`, matching the reference scope. One warm-up scan precedes the samples. Runtime ratio = median alpaka3 / median reference; `<= 1.00` match, `<= 1.10` accepted.
+
+| configuration | backend | alpaka3 median (us) | reference median (us) | runtime ratio | variation | validation | status |
+|---|---|---:|---:|---:|---:|---|---|
+| 2^23 int ch512 scan | GpuCuda | 295.58 | 410.54 | 0.72 | 0.003 | exact (tol 0) | PASS |
+| 2^23 int ch512 scan_bcao | GpuCuda | 209.37 | 264.88 | 0.79 | 0.033 | exact (tol 0) | PASS |
+| 2^23 int ch2048 scan | GpuCuda | 419.49 | 486.74 | 0.86 | 0.001 | exact (tol 0) | PASS |
+| 2^23 int ch2048 scan_bcao | GpuCuda | 315.19 | 370.70 | 0.85 | 0.002 | exact (tol 0) | PASS |
+| 2^23 long ch2048 scan | GpuCuda | 577.88 | 649.62 | 0.89 | 0.002 | exact (tol 0) | PASS |
+| 2^23 long ch2048 scan_bcao | GpuCuda | 354.38 | 508.12 | 0.70 | 0.001 | exact (tol 0) | PASS |
+| 2^28 int ch512 scan | GpuCuda | 7276.0 | 12895.5 | 0.56 | 0.173 | exact (tol 0) | PASS |
+| 2^28 int ch512 scan_bcao | GpuCuda | 4641.0 | 5979.6 | 0.78 | 0.205 | exact (tol 0) | PASS |
+| 2^28 int ch2048 scan | GpuCuda | 9355.6 | 12153.8 | 0.77 | 0.151 | exact (tol 0) | PASS |
+| 2^28 int ch2048 scan_bcao | GpuCuda | 6906.1 | 8076.5 | 0.86 | 0.381 | exact (tol 0) | PASS |
+| 2^28 long ch2048 scan | GpuCuda | 13163.0 | 14807.4 | 0.89 | 0.077 | exact (tol 0) | PASS |
+| 2^28 long ch2048 scan_bcao | GpuCuda | 9035.0 | 11401.8 | 0.79 | 0.004 | exact (tol 0) | PASS |
+
+`scan_bcao` is the faster variant on the GPU in every case, matching the reference's own observation. Ratios are variant-for-variant. The CPU backend has no runtime ratio: the `scan_omp_ref` OpenMP target-offload program targets `icpx`, absent on the measurement host, and its `g++ -fopenmp` fallback reports FAIL. CPU correctness is validated against the independent host reference.
+
+## Environment
+
+- Host: fwk394, Intel Xeon W-2175 (14 cores / 28 threads), g++ 13.2.0, CMake 3.28.3, `OMP_NUM_THREADS=48`.
+- GPU: Quadro GV100 32 GB, sm_70, CUDA 12.5; measurements used `CUDA_VISIBLE_DEVICES=1`.
+- The assigned `rosi_v100` (Tesla V100) was unreachable through the compute gateway for the whole run, so every GPU number is from the fwk394 Quadro GV100 fallback.
+
+## Source SHAs
+
+- alpaka3 base: `6f13700c390a09df818a255d53e730f1f9d69456` (dev)
+- alpaka3 port commit: `bd86ce18475cd649e7054eee15ca983bbcc8c8b8`
+- HeCBench reference: `0a17ee47ca6072192101036d4bf292e6612f22e6`
+
+## Performance exceptions
+
+None. Every measured CUDA ratio is at or below 0.89.
+
+## Reproduction
+
+Commands are listed under Build and run. Raw per-run samples, exact commands, and CPU/GPU/compiler metadata are in `benchmark/scan/results.json`, with the raw data `benchmark/scan/alpaka-gpu.csv`, `benchmark/scan/ref-cuda.csv`, `benchmark/scan/alpaka-cpu.csv`, `benchmark/scan/ratio.csv` and `benchmark/scan/provenance.txt` committed alongside.
+Co-authored-by: psychocoderHPC-bot <330351933+psychocoderHPC-bot@users.noreply.github.com>
+```
+psychocoderHPC-bot
+commented
+Oct 18, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Ported to the alpakaHeCBench target layout as psychocoderHPC-bot/alpakaHeCBench#16 (branch benchmark/scan-alpaka, commit 446625b7ccf0872d57a3d1c719aa3a337d08171d). The target PR builds and passes its CTest entry and contains no measurement data.
+psychocoderHPC-bot
+closed this
+Oct 18, 2026
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

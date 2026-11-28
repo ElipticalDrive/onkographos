@@ -1,0 +1,623 @@
+--- v003.md
++++ v004.md
+@@ -4,84 +4,21 @@
+ 
+ ## Overview
+-Iterative Gaussian Synopsis is a top-down strategy for constructing a hierarchy of Level of Detail (LOD) representations for 3D Gaussian Splatting [1]. It begins with a full-fidelity model and progressively derives coarser levels through adaptive, learnable pruning of anchors and downsampling of hierarchical grids, ensuring coherent simplification without the error accumulation inherent in bottom-up training [S1]. It sets itself apart from siblings like [LapisGS](6143-citygaussian-vastgaussian-dogaussian.md) by deriving coarse layers from fine ones rather than building up from coarse, and from [H-3DGS](10279-hierarchical-3d-gaussian-splatting-h-3dgs.md) by using a unified optimization with lightweight codebook/MLP updates rather than independent hierarchical structures.
++Iterative Gaussian Synopsis is a top-down strategy for constructing a hierarchy of Level-of-Detail (LOD) representations for 3D Gaussian Splatting (3DGS) [S1]. It addresses the challenges of deploying large-scale 3DGS models for progressive and adaptive rendering by deriving coarser levels from a full-fidelity model through adaptive, learnable pruning and downsampling, ensuring coherent simplification without the error accumulation typical of bottom-up training [S1]. It sets itself apart from siblings like [Octree-GS](7341-octree-gs.md) and [CityGaussian / VastGaussian / DoGaussian](6143-citygaussian-vastgaussian-dogaussian.md) by using a unified top-down unfolding framework that extracts all LODs from a single optimization, rather than building independent models or using bottom-up enhancement layers [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** SfM point cloud, training images at multiple target resolutions, hyperparameters ($L_{max}, L_g, N_c, D_c, K, \epsilon, \lambda_{SSIM}, \lambda_{vol}, \lambda_{group}, T_{full}, T_{unfold}$).
+-*   **Outputs:** A set of LOD representations $\{L_0, \dots, L_{L_{max}-1}\}$, where each LOD consists of active anchors, their pruned Gaussian properties, and level-specific codebooks/MLPs.
++*   **Input:** SfM point clouds, images at four target resolutions, and hyperparameters (grid levels, codebook size, learning rates).
++*   **Output:** A set of LOD representations $\{L_0, \dots, L_{L_{max}-1}\}$, where $L_{max}=4$ in the standard configuration [S1].
+ 
+ **Data Structures:**
+-1.  **Anchor:**
+-    *   `pos`: $R^3$ (position $x_a$).
+-    *   `offsets`: $R^{K \times 3}$ (learnable offsets $O_a$).
+-    *   `base_scale`: $R^3$ (base scaling $l_a$).
+-    *   `feature`: $R^{32}$ (initial anchor feature $f_a$).
+-    *   `soft_index`: $R^{N_c}$ (learnable vector $v_j$).
+-    *   `mask_params`: $R^K$ (learnable mask parameters $m_j$).
+-2.  **Hierarchical Grids:**
+-    *   `grids`: List of $L_g$ multiresolution hash grids $\{G_g\}_{g=1}^{L_g}$.
+-    *   `feature_dim`: 4.
+-    *   `levels`: 12 levels total.
+-3.  **Anchor Codebook:**
+-    *   `codebook`: $R^{N_c \times D_c}$ (global learnable codebook $C$).
+-    *   `N_c`: 256.
+-    *   `D_c`: 32.
+-4.  **MLPs:**
+-    *   `MLP_fuse`: Fusion MLP.
+-    *   `MLP_attr`: Attribute prediction MLPs (four separate MLPs for opacity, color, scale, rotation).
+-
+-**Numbered Steps:**
+-
+-1.  **Initialization:**
+-    *   Initialize anchors from SfM point clouds via voxelization. Each anchor $j$ has position $x_a$, feature $f_a \in R^{32}$, base scale $l_a \in R^3$, and $K$ learnable offsets $O_a \in R^{K \times 3}$ [S1].
+-    *   Initialize Hierarchical Grids $\{G_g\}_{g=1}^{L_g}$ uniformly in $[-10^{-4}, 10^{-4}]$ [S1].
+-    *   Initialize Anchor Codebook $C \in R^{N_c \times D_c}$ from Normal distribution $N(0, 1)$ [S1].
+-    *   Initialize soft-indices $v_j \in R^{N_c}$ for each anchor.
+-    *   Initialize mask parameters $m_j \in R^K$ for each anchor.
+-    *   Initialize MLPs (`MLP_fuse`, `MLP_attr`) [S1].
+-
+-2.  **Full-Fidelity Training (LOD $L_{max}-1$):**
+-    *   For $t = 1$ to $T_{full}$:
+-        *   Render a sampled view.
+-        *   Compute loss $\mathcal{L}_{full}$.
+-        *   Update all parameters (anchors, grids, codebook, MLPs, masks).
+-    *   Set discrete indices $idx_j = \text{argmax}(v_j)$ and fetch local features $f_{loc,j} = C[idx_j]$ [S1].
+-    *   This model constitutes LOD $L_{max}-1$ [S1].
+-
+-3.  **Iterative Unfolding (Top-Down):**
+-    *   For $\ell = L_{max}-1$ down to $1$:
+-        *   **Grid Downsampling:** Restrict grids to LOD $\ell-1$. Discard the finest $L_g/L_{max}$ grid levels. Retain only the coarser part. Specifically, LOD $\ell$ retains the first $3(\ell+1)$ of 12 grid levels (e.g., L3: 12, L2: 9, L1: 6, L0: 3) [S1].
+-        *   **Initialize LOD $\ell-1$ Parameters:**
+-            *   Set masks $M_{j,i} \leftarrow 1$ (all active) [S1].
+-            *   Copy codebook $C^{(\ell-1)} \leftarrow C$ [S1].
+-            *   Copy MLPs $MLP^{(\ell-1)} \leftarrow MLP$ [S1].
+-            *   Freeze anchor positions, offsets, base scales, and grids [S1].
+-        *   **Unfold Training:**
+-            *   For $t = 1$ to $T_{unfold}$:
+-                *   **Mask Update:** Compute binary mask $M_{j,i}$ using straight-through estimator:
+-                    $$M_{j,i} = \text{sg}(\mathbf{1}[\sigma(m_{j,i}) > \epsilon] - \sigma(m_{j,i})) + \sigma(m_{j,i})$$
+-                    where $\text{sg}(\cdot)$ is stop-gradient, $\mathbf{1}[\cdot]$ is indicator, $\sigma(\cdot)$ is sigmoid, and $\epsilon$ is threshold [S1].
+-                *   **Apply Mask:** Set pruned opacity and scale:
+-                    $$\hat{\alpha}_{j,i} = M_{j,i} \cdot \alpha_{j,i}$$
+-                    $$\hat{s}_{j,i} = M_{j,i} \cdot s_{j,i}$$
+-                    [S1].
+-                *   **Feature Retrieval:**
+-                    *   Compute soft weights $w_j = \text{Softmax}(v_j)$.
+-                    *   Retrieve local feature:
+-                        $$f_{loc,j} = [\text{Onehot}(\text{argmax}(w_j^T)) + w_j^T - \text{sg}(w_j^T)] \cdot C^{(\ell-1)}$$
+-                        [S1].
+-                    *   Compute hierarchical feature $f_{hier}(x_a) = [\text{Interpolate}(G_g, x_a)]_{g=1}^{L_g^{(\ell-1)}}$ using restricted grids [S1].
+-                    *   Fuse features: $F(x_a) = \text{MLP}_{fuse}(f_{hier}(x_a) \oplus f_{loc})$ [S1].
+-                *   **Attribute Prediction:**
+-                    *   Compute viewing distance $\sigma_c = \|x_a - x_c\|_2$ and direction $\vec{d}_c = \frac{x_a - x_c}{\|x_a - x_c\|_2}$ [S1].
+-                    *   Predict Gaussian properties $\{\alpha^i, c^i, s^i, r^i\}_{i=0}^k = \mathcal{F}(f_a, \sigma_c, \vec{d}_c)$ using level-specific MLPs [S1].
+-                *   **Loss Computation:**
+-                    *   Render at target resolution of LOD $\ell-1$.
+-                    *   Compute $\mathcal{L}_{LOD}$ (photometric + SSIM + sparsity) [S1].
+-                    *   Sparsity Loss: $\mathcal{L}_{mask} = \frac{1}{NK} \sum_j \sum_{i=1}^K \sigma(m_{j,i})$ [S1].
+-                    *   Group Sparsity Loss: Encourage entire anchor groups to be switched off together [S1].
+-                *   **Update:** Update masks $m_{j,i}$ (learning rate 0.01), codebook $C^{(\ell-1)}$, and MLPs per Level-aware Decoding (LAD) or Coherent Basis Modulation (CBM) configurations [S1].
+-
+-4.  **Return:** $\{L_0, \dots, L_{L_{max}-1}\}$ [S1].
++*   **Anchors:** Initialized from SfM point clouds via voxelization. Each anchor $j$ contains:
++    *   Position $\mathbf{x}_a \in \mathbb{R}^3$.
++    *   Base scaling $\mathbf{l}_a \in \mathbb{R}^3$.
++    *   Feature $\mathbf{f}_a \in \mathbb{R}^{32}$ (initially from codebook/grid).
++    *   $K$ learnable offsets $\mathbf{O}_a \in \mathbb{R}^{K \times 3}$ [S1].
++*   **Hierarchical Grids:** A set of $L_g=12$ multiresolution hash grid levels $\{G_g\}_{g=1}^{L_g}$ with feature dimension 4. Initialized uniformly in $[-10^{-4}, 10^{-4}]$ [S1].
++*   **Anchor Codebook:** A global learnable codebook $\mathbf{C} \in \mathbb{R}^{N_c \times D_c}$ with $N_c=256, D_c=32$. Initialized from $\mathcal{N}(0, 1)$ [S1].
++*   **Soft-Index:** Each anchor $j$ has a learnable vector $\mathbf{v}_j \in \mathbb{R}^{N_c}$ used to retrieve local features [S1].
++*   **Masks:** For each anchor $j$ generating $K$ Gaussians, a learnable mask parameter vector $\mathbf{m}_j \in \mathbb{R}^K$ [S1].
+ 
+ **Pseudocode:**
+@@ -92,197 +29,340 @@
+ import torch.nn.functional as F
+ 
++# Constants
++L_max = 4  # Number of LODs (0 to 3)
++L_g = 12   # Total grid levels
++K = 8      # Number of Gaussians per anchor (example)
++N_c = 256  # Codebook size
++D_c = 32   # Codebook feature dim
++T_full = 30000
++T_unfold = 10000
++epsilon = 0.5  # Threshold for mask activation
++lambda_SSIM = 0.2
++lambda_vol = 0.01
++lambda_group = 0.01
++
+ def sigmoid(x):
+-    return torch.sigmoid(x)
+-
+-def stop_gradient(x):
+-    return x.detach()
+-
+-def indicator(condition):
+-    return condition.float()
+-
+-def interpolate_grid(grid, pos):
+-    # Multi-linear interpolation of grid at pos
+-    # Returns feature vector
+-    pass
+-
+-def softmax(x, dim=-1):
+-    return F.softmax(x, dim=dim)
+-
+-def one_hot(index, num_classes):
+-    return F.one_hot(index, num_classes).float()
+-
+-class IterativeGaussianSynopsis:
+-    def __init__(self, anchors, grids, codebook, mlps, config):
+-        self.anchors = anchors # List of Anchor objects
+-        self.grids = grids # List of Lg grids
+-        self.codebook = codebook # Nc x Dc
+-        self.mlp_fuse = mlps['fuse']
+-        self.mlp_attr = mlps['attr'] # List of 4 MLPs
+-        self.config = config
+-        self.L_max = config['L_max']
+-        self.L_g = config['L_g']
+-        self.N_c = config['N_c']
+-        self.D_c = config['D_c']
+-        self.K = config['K']
+-        self.epsilon = config['epsilon']
+-        self.lambda_ssim = config['lambda_ssim']
+-        self.lambda_vol = config['lambda_vol']
+-        self.lambda_group = config['lambda_group']
+-        self.T_full = config['T_full']
+-        self.T_unfold = config['T_unfold']
+-
+-    def compute_hierarchical_feature(self, anchor_pos, current_grids):
+-        features = []
+-        for grid in current_grids:
+-            feat = interpolate_grid(grid, anchor_pos)
+-            features.append(feat)
+-        return torch.cat(features, dim=-1)
+-
+-    def compute_local_feature(self, anchor_soft_index, codebook):
+-        w_j = softmax(anchor_soft_index, dim=-1)
+-        # Straight-through estimator
+-        idx = torch.argmax(w_j, dim=-1)
+-        one_hot_idx = one_hot(idx, self.N_c)
+-        # f_loc = (one_hot + w - sg(w)) * C
+-        # Note: The source formula uses w_j^T, assuming row vector logic or transpose.
+-        # Assuming w_j is (N_c,), C is (N_c, D_c).
+-        # f_loc = (one_hot_idx + w_j - sg(w_j)) @ C.T ? 
+-        # Source: f_loc,j = [Onehot(argmax(w_j^T)) + w_j^T - sg(w_j^T)] * C
+-        # If w_j is (N_c,), w_j^T is (N_c, 1). C is (N_c, D_c).
+-        # This implies a dot product or broadcasting. 
+-        # Standard implementation: f_loc = (one_hot + w - sg(w)) @ C.T if C is (N_c, D_c) and we want (D_c,)
+-        # Or if C is (D_c, N_c), then @ C.
+-        # Given C in R^{Nc x Dc}, and result in R^{Dc}, it's likely (N_c,) @ (N_c, D_c)^T -> (D_c,)
+-        # Or (N_c, 1) * (N_c, D_c) -> element-wise? No, "retrieve".
+-        # Let's assume standard embedding lookup with STE:
+-        f_loc = (one_hot_idx + w_j - stop_gradient(w_j)) @ self.codebook.T
+-        return f_loc
+-
+-    def compute_mask(self, mask_params):
+-        sig = sigmoid(mask_params)
+-        binary = indicator(sig > self.epsilon)
+-        # M = sg(binary - sig) + sig
+-        M = stop_gradient(binary - sig) + sig
+-        return M
+-
+-    def train_full_fidelity(self, renderer, optimizer):
+-        for t in range(self.T_full):
+-            # Render view
+-            # Compute L_full
+-            # Update params
+-            pass
+-        # Convert soft indices to discrete
+-        for anchor in self.anchors:
+-            anchor.idx = torch.argmax(anchor.soft_index, dim=-1)
+-
+-    def unfold_to_lod(self, lod_level, renderer, optimizer):
+-        # Determine grid levels for this LOD
+-        # Retain first 3*(lod_level+1) of 12
+-        num_grids = 3 * (lod_level + 1)
+-        current_grids = self.grids[:num_grids]
+-        
+-        # Initialize LOD parameters
+-        # Copy codebook and MLPs
+-        lod_codebook = self.codebook.clone().detach()
+-        lod_mlp_fuse = self.mlp_fuse.clone().detach()
+-        lod_mlp_attr = [m.clone().detach() for m in self.mlp_attr]
+-        
+-        # Reset masks to 1
+-        for anchor in self.anchors:
+-            anchor.mask_params.data.fill_(10.0) # High value to ensure sigmoid ~ 1 initially
+-        
+-        # Freeze certain params
+-        # (Implementation detail: detach from computation graph or set requires_grad=False)
+-        
+-        for t in range(self.T_unfold):
+-            total_loss = 0
+-            for anchor in self.anchors:
+-                # 1. Compute Mask
+-                M = self.compute_mask(anchor.mask_params)
+-                
+-                # 2. Apply Mask to Opacity and Scale
+-                # (Assuming alpha and s are stored in anchor or predicted)
+-                # Let's assume they are predicted by MLP for simplicity in this step
+-                # Or they are attributes of the anchor.
+-                # Source: "Set pruned opacity and scale to zero if mask is 0"
+-                # alpha_hat = M * alpha
+-                # s_hat = M * s
+-                
+-                # 3. Feature Retrieval
+-                f_loc = self.compute_local_feature(anchor.soft_index, lod_codebook)
+-                f_hier = self.compute_hierarchical_feature(anchor.pos, current_grids)
+-                
+-                # 4. Fusion
+-                F_fused = lod_mlp_fuse(torch.cat([f_hier, f_loc], dim=-1))
+-                
+-                # 5. Attribute Prediction
+-                # Compute viewing distance and direction
+-                # (Requires camera pos xc)
+-                sigma_c = torch.norm(anchor.pos - xc)
+-                d_c = (anchor.pos - xc) / sigma_c
+-                
+-                # Predict properties
+-                # alpha, color, scale, rotation = MLP_attr(F_fused, sigma_c, d_c)
+-                # Note: Source says F contains 4 MLPs.
+-                
+-                # 6. Loss
+-                # Render
+-                # L_LOD = L1 + L_SSIM + L_sparsity + L_group
+-                # L_mask = mean(sigmoid(m))
+-                # L_group = ...
+-                
+-                # 7. Update
+-                # Update mask_params, lod_codebook, lod_mlp_fuse, lod_mlp_attr
+-                pass
+-            
+-            total_loss.backward()
+-            optimizer.step()
+-            optimizer.zero_grad()
+-            
+-        return lod_codebook, lod_mlp_fuse, lod_mlp_attr, current_grids
+-
+-    def run(self, renderer, optimizer):
+-        self.train_full_fidelity(renderer, optimizer)
+-        lod_results = []
+-        for lod in range(self.L_max - 1, 0, -1):
+-            codebook, mlp_fuse, mlp_attr, grids = self.unfold_to_lod(lod, renderer, optimizer)
+-            lod_results.append({
+-                'lod': lod,
+-                'codebook': codebook,
+-                'mlp_fuse': mlp_fuse,
+-                'mlp_attr': mlp_attr,
+-                'grids': grids
+-            })
+-        # L0 is the last one, or handled separately?
+-        # Source: "for l = 3 downto 1 ... Return {L0, ..., L3}"
+-        # So L0 is generated from L1.
+-        # The loop above generates L0 from L1?
+-        # If L_max=4, L3 is full. Loop 3 downto 1 generates L2, L1, L0.
+-        lod_results.append({
+-            'lod': 0,
+-            'codebook': codebook, # From last iteration
+-            'mlp_fuse': mlp_fuse,
+-            'mlp_attr': mlp_attr,
+-            'grids': grids
+-        })
+-        return lod_results
++    return 1.0 / (1.0 + torch.exp(-x))
++
++def straight_through_mask(m_ji, epsilon):
++    """
++    Computes binary mask using straight-through estimator.
++    M = sg(1[sigma(m) > eps] - sigma(m)) + sigma(m)
++    """
++    sigma = sigmoid(m_ji)
++    indicator = (sigma > epsilon).float()
++    # Stop gradient on the discrete part, pass gradient through sigma
++    mask = (indicator - sigma).detach() + sigma
++    return mask
++
++def soft_index_retrieval(v_j, C):
++    """
++    Retrieves local feature using straight-through estimator.
++    w = Softmax(v)
++    f_loc = [Onehot(argmax(w^T)) + w^T - sg(w^T)] * C
++    """
++    w = F.softmax(v_j, dim=-1)
++    # argmax returns indices, convert to one-hot
++    idx = torch.argmax(w, dim=-1)
++    one_hot = F.one_hot(idx, num_classes=N_c).float()
++    # Straight-through: gradient flows through w, but index is discrete
++    # Note: In practice, this is often implemented via custom autograd function
++    # Here we approximate the logic:
++    # f_loc = (one_hot + w - w.detach()) @ C
++    f_loc = (one_hot + w - w.detach()) @ C
++    return f_loc
++
++def interpolate_grid(G_g, x_a):
++    """
++    Multi-linear interpolation of grid level G_g at position x_a.
++    """
++    # Placeholder for actual hash grid interpolation logic
++    return G_g.interpolate(x_a)
++
++def get_hierarchical_feature(x_a, grids):
++    """
++    Concatenates interpolated features from all active grid levels.
++    """
++    features = []
++    for g in grids:
++        features.append(interpolate_grid(g, x_a))
++    return torch.cat(features, dim=-1)
++
++def predict_gaussian_attributes(f_a, sigma_c, d_c, MLP_alpha, MLP_color, MLP_scale, MLP_rot):
++    """
++    Predicts opacity, color, scale, rotation for K Gaussians.
++    """
++    alpha = MLP_alpha(torch.cat([f_a, sigma_c, d_c], dim=-1))
++    color = MLP_color(torch.cat([f_a, sigma_c, d_c], dim=-1))
++    scale = MLP_scale(torch.cat([f_a, sigma_c, d_c], dim=-1))
++    rot = MLP_rot(torch.cat([f_a, sigma_c, d_c], dim=-1))
++    return alpha, color, scale, rot
++
++def render_view(anchor_positions, anchor_features, anchors_offsets, base_scales, 
++                masks, MLP_alpha, MLP_color, MLP_scale, MLP_rot, camera_pos):
++    """
++    Renders a view using the current Gaussian parameters.
++    """
++    # Compute viewing distance and direction for each anchor
++    dist = torch.norm(anchor_positions - camera_pos, dim=-1, keepdim=True)
++    dir_vec = (anchor_positions - camera_pos) / (dist + 1e-8)
++    
++    # Predict attributes for all anchors
++    alphas, colors, scales, rots = predict_gaussian_attributes(
++        anchor_features, dist, dir_vec, MLP_alpha, MLP_color, MLP_scale, MLP_rot
++    )
++    
++    # Apply masks to opacity and scale
++    # masks shape: (N_anchors, K)
++    # alphas, scales shape: (N_anchors, K, dim)
++    masked_alphas = masks * alphas
++    masked_scales = masks * scales
++    
++    # Compute Gaussian positions: mu_i = x_a + O_i * l_a
++    # This part depends on specific 3DGS implementation details for offsets
++    # Assuming offsets are applied to base scale to determine position jitter
++    # For simplicity, we assume standard 3DGS rendering pipeline takes these params
++    # and handles the rest.
++    
++    # Render and return loss
++    # Placeholder for actual rasterization
++    rendered_img = rasterize(masked_alphas, colors, masked_scales, rots, anchor_positions)
++    return rendered_img
++
++# Main Training Loop
++def train_iterative_gaussian_synopsis(SfM_points, images):
++    # 1. Initialize Anchors
++    anchors = initialize_anchors_from_sfm(SfM_points)
++    N = len(anchors)
++    
++    # Initialize Codebook C
++    C = torch.randn(N_c, D_c)
++    
++    # Initialize Soft-Indices v_j
++    v = torch.randn(N, N_c)
++    
++    # Initialize Hierarchical Grids G_g (12 levels)
++    grids = [init_hash_grid() for _ in range(L_g)]
++    
++    # Initialize MLPs
++    MLP_fuse = nn.Linear(D_c + L_g * 4, 256) # Example dim
++    MLP_alpha = nn.Linear(256, K)
++    MLP_color = nn.Linear(256, K * 3)
++    MLP_scale = nn.Linear(256, K * 3)
++    MLP_rot = nn.Linear(256, K * 4)
++    
++    # Initialize Mask Parameters m_j
++    m = torch.randn(N, K)
++    
++    # 2. Full-Fidelity Training (LOD L_max-1)
++    for t in range(T_full):
++        # Sample a view
++        camera_pos = sample_camera_position()
++        
++        # Get Hierarchical Feature
++        f_hier = get_hierarchical_feature(anchors.position, grids)
++        
++        # Get Local Feature
++        f_loc = soft_index_retrieval(v, C)
++        
++        # Fuse Features
++        f_fused = MLP_fuse(torch.cat([f_hier, f_loc], dim=-1))
++        
++        # Render
++        # Note: In full fidelity, masks are all 1 initially or learned
++        # For simplicity, assume masks are 1 during full fidelity training
++        # or optimized alongside. The source says "minimize L_full; update all parameters"
++        rendered = render_view(anchors.position, f_fused, anchors.offsets, anchors.base_scale, 
++                               torch.ones(N, K), MLP_alpha, MLP_color, MLP_scale, MLP_rot, camera_pos)
++        
++        # Compute Loss
++        target = get_target_image(camera_pos)
++        L1 = torch.mean(torch.abs(rendered - target))
++        D_SSIM = compute_dssim(rendered, target)
++        Vol_Reg = compute_volume_regularization(anchors.base_scale) # Simplified
++        
++        L_full = (1 - lambda_SSIM) * L1 + lambda_SSIM * D_SSIM + lambda_vol * Vol_Reg
++        
++        # Update all parameters
++        L_full.backward()
++        optimizer.step()
++        optimizer.zero_grad()
++        
++    # 3. Iterative Unfolding (Top-Down)
++    # Convert soft indices to discrete for LOD L_max-1
++    idx = torch.argmax(v, dim=-1)
++    current_C = C.clone()
++    current_MLP_alpha = MLP_alpha.clone()
++    current_MLP_color = MLP_color.clone()
++    current_MLP_scale = MLP_scale.clone()
++    current_MLP_rot = MLP_rot.clone()
++    
++    LODs = {L_max - 1: {
++        'anchors': anchors,
++        'C': current_C,
++        'MLPs': [current_MLP_alpha, current_MLP_color, current_MLP_scale, current_MLP_rot],
++        'grids': grids
++    }}
++    
++    for l in range(L_max - 2, -1, -1): # From L_max-2 down to 0
++        # Restrict grids to LOD l
++        # Retains first 3*(l+1) levels. 
++        # L3: 12, L2: 9, L1: 6, L0: 3
++        num_levels = 3 * (l + 1)
++        active_grids = grids[:num_levels]
++        
++        # Initialize masks to 1 (all active)
++        current_m = torch.ones(N, K)
++        
++        # Copy Codebook and MLPs for this LOD
++        # Note: Source says "C^(l-1) <- C", "MLP^(l-1) <- MLP"
++        # This implies copying the weights from the previous (finer) LOD
++        next_C = current_C.clone()
++        next_MLP_alpha = current_MLP_alpha.clone()
++        next_MLP_color = current_MLP_color.clone()
++        next_MLP_scale = current_MLP_scale.clone()
++        next_MLP_rot = current_MLP_rot.clone()
++        
++        # Unfold Training
++        for t in range(T_unfold):
++            camera_pos = sample_camera_position()
++            
++            # Get Hierarchical Feature from active grids
++            f_hier = get_hierarchical_feature(anchors.position, active_grids)
++            
++            # Get Local Feature from modulated codebook
++            # During unfolding, we use the straight-through estimator with the current soft indices
++            # But the codebook is now next_C
++            f_loc = soft_index_retrieval(v, next_C)
++            
++            # Fuse Features
++            f_fused = MLP_fuse(torch.cat([f_hier, f_loc], dim=-1))
++            
++            # Compute Masks
++            masks = torch.zeros(N, K)
++            for j in range(N):
++                for i in range(K):
++                    masks[j, i] = straight_through_mask(current_m[j, i], epsilon)
++            
++            # Apply masks to attributes
++            # Predict attributes
++            dist = torch.norm(anchors.position - camera_pos, dim=-1, keepdim=True)
++            dir_vec = (anchors.position - camera_pos) / (dist + 1e-8)
++            
++            alphas, colors, scales, rots = predict_gaussian_attributes(
++                f_fused, dist, dir_vec, next_MLP_alpha, next_MLP_color, next_MLP_scale, next_MLP_rot
++            )
++            
++            masked_alphas = masks * alphas
++            masked_scales = masks * scales
++            
++            # Render
++            rendered = rasterize(masked_alphas, colors, masked_scales, rots, anchors.position)
++            
++            # Compute Loss
++            target = get_target_image(camera_pos)
++            L_LOD = torch.mean(torch.abs(rendered - target))
++            
++            # Sparsity Regularization
++            L_mask = torch.mean(sigmoid(current_m))
++            # Group sparsity loss (simplified)
++            L_group = torch.mean(torch.sum(sigmoid(current_m), dim=1)) # Encourages entire anchor to be pruned
++            
++            L_total = L_LOD + lambda_group * L_group
++            
++            # Update masks and level-specific MLPs/Codebook
++            # Freeze positions, offsets, scales, grids
++            L_total.backward()
++            
++            # Update only masks, C, and MLPs
++            optimizer_mask.step()
++            optimizer_C.step()
++            optimizer_MLP.step()
++            
++            # Update current_m for next iteration
++            current_m = current_m - optimizer_mask.param_groups[0]['lr'] * current_m.grad
++            
++            optimizer_mask.zero_grad()
++            optimizer_C.zero_grad()
++            optimizer_MLP.zero_grad()
++            
++        # Store LOD
++        LODs[l] = {
++            'anchors': anchors,
++            'C': next_C,
++            'MLPs': [next_MLP_alpha, next_MLP_color, next_MLP_scale, next_MLP_rot],
++            'grids': active_grids,
++            'masks': current_m
++        }
++        
++        # Prepare for next iteration (coarser LOD)
++        current_C = next_C
++        current_MLP_alpha = next_MLP_alpha
++        current_MLP_color = next_MLP_color
++        current_MLP_scale = next_MLP_scale
++        current_MLP_rot = next_MLP_rot
++        current_m = current_m # Keep masks for next step? Source says "masks <- 1" at start of loop
++        
++    return LODs
+ ```
+ 
++**Steps:**
++1.  **Initialize Full-Fidelity Model:** Train the highest LOD ($L_{max}-1$) end-to-end using hierarchical anchor features. Minimize $\mathcal{L}_{\text{full}} = (1 - \lambda_{\text{SSIM}})\mathcal{L}_1 + \lambda_{\text{SSIM}}\mathcal{L}_{\text{D-SSIM}} + \lambda_{\text{vol}}\mathcal{L}_{\text{vol}}$ [S1].
++2.  **Iterative Unfolding:** For each level $\ell$ from $L_{max}-2$ down to $0$:
++    *   **Grid Downsampling:** Discard the finest $L_g/L_{max}$ grid levels. For $L_{max}=4$, LOD $\ell$ retains the first $3(\ell+1)$ of 12 grid levels (L3: 12, L2: 9, L1: 6, L0: 3) [S1].
++    *   **Initialize Masks:** Set all mask parameters $\mathbf{m}_j$ to 1 (all Gaussians active) [S1].
++    *   **Copy Parameters:** Copy the codebook $\mathbf{C}$ and MLPs from the finer level $\ell+1$ to initialize level $\ell$ [S1].
++    *   **Optimize:** For $T_{unfold}=10,000$ iterations:
++        *   Compute binary masks $\mathbf{M}_{j,i}$ using the straight-through estimator: $\mathbf{M}_{j,i} = \text{sg}(\mathbf{1}[\sigma(m_{j,i}) > \epsilon] - \sigma(m_{j,i})) + \sigma(m_{j,i})$ [S1].
++        *   Apply masks to opacity and scale: $\hat{\alpha}_{j,i} = \mathbf{M}_{j,i} \cdot \alpha_{j,i}$ and $\hat{s}_{j,i} = \mathbf{M}_{j,i} \cdot s_{j,i}$ [S1].
++        *   Render at the target resolution of LOD $\ell-1$.
++        *   Minimize $\mathcal{L}_{\text{LOD}}$ plus sparsity regularization $\mathcal{L}_{\text{sparsity}}$ (including $\mathcal{L}_{\text{mask}}$ and group sparsity loss) [S1].
++        *   Update masks, level-specific codebook $\mathbf{C}^{(\ell)}$, and level-specific MLPs. Freeze positions, offsets, scales, and grids [S1].
++3.  **Inference:** Convert soft-indices $\mathbf{v}_j$ to discrete indices $\text{idx}_j = \text{argmax}(\mathbf{v}_j)$ and fetch local features directly from the codebook $\mathbf{C}[\text{idx}_j]$ [S1].
++
++**Formulas:**
++*   **Mask Computation:** $\mathbf{M}_{j,i} = \text{sg}(\mathbf{1}[\sigma(m_{j,i}) > \epsilon] - \sigma(m_{j,i})) + \sigma(m_{j,i})$ [S1].
++*   **Masking Loss:** $\mathcal{L}_{\text{mask}} = \frac{1}{NK} \sum_j \sum_{i=1}^K \sigma(m_{j,i})$ [S1].
++*   **Soft-Index Retrieval:** $\mathbf{w}_j = \text{Softmax}(\mathbf{v}_j)$, $\mathbf{f}_{\text{loc},j} = [\text{Onehot}(\text{argmax}(\mathbf{w}_j^T)) + \mathbf{w}_j^T - \text{sg}(\mathbf{w}_j^T)] \cdot \mathbf{C}$ [S1].
++*   **Full-Fidelity Loss:** $\mathcal{L}_{\text{full}} = (1 - \lambda_{\text{SSIM}})\mathcal{L}_1 + \lambda_{\text{SSIM}}\mathcal{L}_{\text{D-SSIM}} + \lambda_{\text{vol}}\mathcal{L}_{\text{vol}}$ [S1].
++*   **Neural Gaussian Prediction:** $\{\alpha^i, \mathbf{c}^i, \mathbf{s}^i, \mathbf{r}^i\}_{i=0}^k = \mathcal{F}(\mathbf{f}_a, \sigma_c, \vec{d}_c)$, where $\mathcal{F}$ contains four MLPs [S1].
++*   **Viewing Distance/Direction:** $\sigma_c = \|\mathbf{x} - \mathbf{x}_c\|_2$, $\vec{d}_c = \frac{\mathbf{x} - \mathbf{x}_c}{\|\mathbf{x} - \mathbf{x}_c\|_2}$ [S1].
++
++**Parameters:**
++*   $\epsilon$: Constant threshold for mask activation. Not given in the sources.
++*   $N$: Total number of anchors. Not given in the sources.
++*   $K$: Number of Neural Gaussians per anchor. Not given in the sources.
++*   $\lambda_{\text{SSIM}}$: Weight for D-SSIM. Typical value: 0.2 [S1].
++*   $\lambda_{\text{vol}}$: Weight for volume regularization. Not given in the sources.
++*   $T_{\text{full}}$: Iterations for full-fidelity training. Typical value: 30,000 [S1].
++*   $T_{\text{unfold}}$: Iterations for each unfolding step. Typical value: 10,000 [S1].
++*   Number of LODs: 4 ($L_0$ to $L_3$) [S1].
++*   Learning rate for mask updates: Typical value: 0.01 [S1].
++*   Hierarchical grid levels: 12 [S1].
++*   Hierarchical grid feature dimension: 4 [S1].
++*   LOD $\ell$ grid levels: Retains first $3(\ell+1)$ of 12. L3: 12, L2: 9, L1: 6, L0: 3 [S1].
++*   Codebook size $N_c$: 256 [S1].
++*   Codebook feature dimension $D_c$: 32 [S1].
++
++**Edge Cases and Pitfalls:**
++*   **Popping Artifacts:** The discrete nature of the hierarchy can introduce mild visual "popping" artifacts as new anchors activate during LOD transitions [S1].
++*   **Precision:** The straight-through estimator is used for non-differentiable operations (masking, indexing), which requires careful gradient management [S1].
++
+ ## Subtopics
+ 
+ ### [Level-aware Decoding](9330-level-aware-decoding.md)
+-Level-aware Decoding (LAD) is a module within the Iterative Gaussian Synopsis framework that enables efficient, level-specific interpretation of modulated features for 3D Gaussian Splatting. It solves the problem of maintaining high visual fidelity across different Levels of Detail (LOD) without storing explicit, redundant Gaussian attributes for every level. By introducing level-specific fusion and attribute-prediction Multi-Layer Perceptrons (MLPs), LAD adapts a compact, function-based predictor to each LOD's objective, ensuring structural flexibility and strict model compactness. It sets itself apart from static attribute storage by dynamically fine-tuning the decoding network for each resolution level during the unfolding process.
++A module that enables efficient, level-specific interpretation of modulated features for 3D Gaussian Splatting. It sets itself apart by dynamically fine-tuning the decoding network for each resolution level during the unfolding process, ensuring structural flexibility and strict model compactness. Choose it when you need to maintain high visual fidelity across different LODs without storing redundant Gaussian attributes.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Introduces additional training complexity compared to baseline methods due to the iterative unfolding process and sparsity regularization [S1]. Full-fidelity training takes $T_{full}$ iterations (typically 30,000), and each unfolding step takes $T_{unfold}$ iterations (typically 10,000) [S1].
+-*   **Memory Complexity:** Significantly reduces storage compared to independent per-LOD models. Uses a shared Anchor Codebook ($N_c=256, D_c=32$) and hierarchical grids, with only lightweight codebook and MLP updates for each LOD [S1].
+-*   **Measured Performance:** Evaluated across PSNR, SSIM, and LPIPS at every LOD. The Full Model consistently achieves the best performance [S1]. In progressive streaming contexts, it requires substantially less storage and enables lightweight upgrades compared to independent baselines [S1].
+-*   **Strengths:** Coherent simplification without error accumulation; high inter-layer consistency; compact representation; suitable for progressive streaming and real-time deployment [S1].
+-*   **Limitations:** Additional training complexity; limited to static scenes; mild visual "popping" artifacts during LOD transitions due to discrete hierarchy [S1].
+-*   **When to Use:** Progressive streaming, real-time 3DGS deployment, balancing compactness with high-fidelity rendering across all LODs [S1].
+-*   **When Not to Use:** Dynamic scenes; scenarios requiring continuous transitions without popping artifacts [S1].
++*   **Time Complexity:** Introduces additional training complexity compared to baseline methods due to the iterative unfolding process and sparsity regularization [S1].
++*   **Memory Complexity:** Significantly reduces storage compared to independent models by sharing hierarchical grids and using a compact codebook. The incremental payload for upgrading between levels is lightweight [S1].
++*   **Measured Performance:** Evaluated across PSNR, SSIM, and LPIPS at every LOD. The Full Model consistently achieves the best performance [S1].
++*   **Strengths:** Coherent simplification, improved inter-layer consistency, compactness, and high-fidelity rendering across all LODs [S1].
++*   **Limitations:** Additional training complexity, limited to static scenes, and potential for mild visual "popping" artifacts [S1].
++*   **When to Use:** Progressive streaming context, real-time 3DGS deployment, and balancing compactness with high-fidelity rendering across all LODs [S1].
++*   **When Not to Use:** Dynamic scenes or when independent, unconstrained static fidelity is required regardless of storage cost [S1].
+ 
+ ## Background
+-Iterative Gaussian Synopsis was introduced in "Unfolding 3D Gaussian Splatting via Iterative Gaussian Synopsis" (2026) [S1]. It addresses challenges in deploying large-scale 3DGS models for progressive and adaptive rendering. It builds on Scaffold-GS [10] and uses a top-down unfolding strategy to overcome the error accumulation and optimization conflicts of bottom-up approaches like LapisGS [18] [S1].
++Iterative Gaussian Synopsis was introduced in a paper published in IEEE Transactions on Visualization and Computer Graphics in 2026 [S1]. It addresses the limitations of bottom-up approaches like LapisGS, which build coarse layers first and add enhancements, compromising fidelity and introducing optimization conflicts [S1]. The method builds on the Scaffold-GS architecture, which uses anchors and neural prediction to reduce memory usage [S1].
+ 
+ ## Sources

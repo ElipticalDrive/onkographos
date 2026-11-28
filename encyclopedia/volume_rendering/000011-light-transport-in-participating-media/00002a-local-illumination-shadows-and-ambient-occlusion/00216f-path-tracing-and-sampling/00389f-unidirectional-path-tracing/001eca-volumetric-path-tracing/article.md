@@ -1,0 +1,183 @@
+# Volumetric Path Tracing
+
+Also called: Path Tracing Volumes, Simple Volumetric Path Tracing, SimpleVolPathIntegrator, VolpathSimpleIntegrator, volpathsimple-basic, volpathsimple-drt
+
+## Overview
+Volumetric Path Tracing is a Monte Carlo method for simulating light transport in participating media, such as fog, smoke, and clouds, by modeling color-dependent absorption and scattering [S1, unofficial][S4]. It extends classical path tracing by allowing rays to enter volumetric regions, sample scattering events within the medium, and continue random walks after each scattering interaction to support multiple scattering [S1, unofficial]. Unlike its sibling [Unidirectional Volume Boundary Estimator](3538-unidirectional-volume-boundary-estimator.md), which focuses on boundary estimation, or [Volumetric-Primitives Path Tracer](4107-volumetric-primitives-path-tracer.md), which uses primitives for acceleration, this method relies on delta tracking for volume sampling and does not perform explicit light sampling or handle surface scattering [S4]. It is primarily used for computing ground-truth results when debugging more sophisticated algorithms due to its simplicity and higher variance compared to light-sampling integrators [S4].
+
+## How it works
+**Inputs:**
+*   A camera ray $r = (o, d)$ with origin $o$ and normalized direction $d$ [S2, unofficial][S4].
+*   A scene containing a single participating medium with a convex bounding volume and a `null` BSDF at its boundary [S3, unofficial][S4].
+*   Infinite light sources (e.g., environment maps or constant lights) [S3, unofficial][S4].
+*   A maximum path depth `maxDepth` [S4].
+*   A sampler providing uniform random numbers [S4].
+
+**Outputs:**
+*   The estimated radiance $L$ along the ray [S4].
+
+**Data Structures:**
+*   `Ray`: Struct with fields `o` (origin, Vec3) and `d` (direction, Vec3, normalized) [S2, unofficial][S4].
+*   `MediumProperties`: Contains absorption coefficient $\sigma_a$, scattering coefficient $\sigma_s$, total extinction $\sigma_t = \sigma_a + \sigma_s$, and phase function [S4].
+*   `RNG`: Random number generator initialized from hashed sampler values [S4].
+
+**Parameters:**
+*   `maxDepth`: Integer, typically 5–10 [S1, unofficial][S4].
+*   $\sigma_a, \sigma_s$: Coefficients per channel (R, G, B) [S1, unofficial][S4].
+*   $\sigma_{maj}$: Majorant extinction coefficient, $\sigma_{maj} \ge \sigma_t$ everywhere in the medium [S4].
+
+**Algorithm Steps:**
+1.  Initialize radiance accumulator $L = 0$, path throughput $\beta = 1.0$, and depth $depth = 0$ [S4].
+2.  Terminate secondary wavelengths if spectral rendering is supported, estimating only the primary wavelength for simplicity [S4].
+3.  Loop while $depth < maxDepth$:
+    a.  **Intersection Test:** Find the first intersection $si$ of the current ray with the scene geometry. Determine $t_{max}$, the distance to the nearest surface intersection or the ray's maximum range [S4].
+    b.  **Delta Tracking:** If the ray is inside a medium:
+        i.  Initialize an RNG using two hashed samples from the main sampler: `hash0 = Hash(sampler.Get1D())`, `hash1 = Hash(sampler.Get1D())`, `RNG rng(hash0, hash1)` [S4].
+        ii. Sample a uniform random number $u$ and a mode selection number $u_{mode}$ from the sampler [S4].
+        iii. Perform delta tracking using the majorant $\sigma_{maj}$ to sample a distance $t$ to the next interaction event [S4].
+        iv. At the sampled point $p = o + d \cdot t$, evaluate the medium properties $\sigma_a, \sigma_s, \sigma_t$ and the transmittance $T_{maj} = \exp(-(\sigma_{maj} - \sigma_t)t)$ [S4].
+        v.  Compute event probabilities:
+            $$p_{Absorb} = \frac{\sigma_a}{\sigma_{maj}}$$
+            $$p_{Scatter} = \frac{\sigma_s}{\sigma_{maj}}$$
+            $$p_{Null} = \max(0, 1 - p_{Absorb} - p_{Scatter})$$
+            [S4]
+        vi. Select the event mode using discrete sampling with probabilities $\{p_{Absorb}, p_{Scatter}, p_{Null}\}$ based on $u_{mode}$ [S4].
+        vii. **If Absorb:** Add emission from the medium at $p$ to $L$: $L += \beta \cdot L_e(p, \omega)$ (where $L_e$ is medium emission, often 0). Terminate the path [S4].
+        viii. **If Scatter:**
+            *   If $depth \ge maxDepth$, terminate the path [S4].
+            *   Increment $depth$ [S4].
+            *   Sample a scattering direction $\omega'$ using the phase function $p(\omega \to \omega')$ and two uniform random numbers [S4].
+            *   Update throughput: $\beta = \beta \cdot \frac{p(\omega \to \omega')}{p_{Scatter}}$ [S4].
+            *   Update ray: $o = p$, $d = \omega'$ [S4].
+            *   Continue the loop to process the scattered ray [S4].
+        ix. **If Null:** Generate a new $u_{mode}$ from the RNG and continue delta tracking (sample a new distance) [S4].
+    c.  **Termination Check:** If the path was terminated in step 3b, return $L$ [S4].
+    d.  **Surface Interaction:** If a surface intersection $si$ exists:
+        i.  Get the BSDF from the intersection [S4].
+        ii. If the BSDF exists and returns a valid sample (non-delta), the integrator issues an error because it does not support surface scattering [S4].
+        iii. If the BSDF is null or the intersection is skipped, proceed to emission accumulation [S4].
+    e.  **Emission Accumulation:**
+        i.  If a surface intersection $si$ exists and was not skipped, add surface emission: $L += \beta \cdot L_e(si, -d)$ [S4].
+        ii. If no surface intersection exists, add emission from all infinite lights: $L += \beta \cdot \sum_{lights} L_e(light, ray)$ [S4].
+        iii. Return $L$ [S4].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import random
+
+def volumetric_path_tracing(ray_o, ray_d, scene, sampler, max_depth):
+    L = 0.0
+    beta = 1.0
+    depth = 0
+    # Normalize direction
+    inv_len = 1.0 / math.sqrt(sum(c*c for c in ray_d))
+    ray_d = [c * inv_len for c in ray_d]
+
+    while depth < max_depth:
+        si = scene.intersect(ray_o, ray_d)
+        t_max = si.t_hit if si else float('inf')
+        scattered = False
+        terminated = False
+
+        if scene.is_in_medium(ray_o, ray_d):
+            # Initialize RNG from hashed sampler values
+            hash0 = hash(sampler.get_1d())
+            hash1 = hash(sampler.get_1d())
+            rng = random.Random(hash0 ^ hash1)
+            u = sampler.get_1d()
+            u_mode = sampler.get_1d()
+
+            # Delta tracking loop
+            while True:
+                sigma_maj = scene.get_majorant(ray_o, ray_d, 0.0)
+                t = -math.log(1.0 - rng.random()) / sigma_maj
+                if t >= t_max:
+                    t = t_max
+                    break
+                mp = scene.get_medium_properties(ray_o, ray_d, t)
+                sigma_t = mp.sigma_a + mp.sigma_s
+                p_absorb = mp.sigma_a / sigma_maj
+                p_scatter = mp.sigma_s / sigma_maj
+                p_null = max(0.0, 1.0 - p_absorb - p_scatter)
+
+                if u_mode < p_absorb:
+                    L += beta * mp.emission
+                    terminated = True
+                    break
+                elif u_mode < p_absorb + p_scatter:
+                    depth += 1
+                    u1, u2 = rng.random(), rng.random()
+                    ps = mp.phase.sample(-ray_d, u1, u2)
+                    if not ps:
+                        terminated = True
+                    else:
+                        beta *= ps.p / p_scatter
+                        ray_o = [ray_o[i] + ray_d[i] * t for i in range(3)]
+                        ray_d = ps.wi
+                        scattered = True
+                    break
+                else:
+                    u_mode = rng.random()
+                    continue
+
+        if terminated:
+            return L
+        if scattered:
+            continue
+
+        if si:
+            bsdf = si.get_bsdf(ray_d)
+            if bsdf and bsdf.has_sample():
+                raise ValueError("SimpleVolPathIntegrator doesn't support surface scattering.")
+            else:
+                si.skip_intersection(ray_o, ray_d, si.t_hit)
+
+        if si:
+            L += beta * si.intr.le(-ray_d)
+        else:
+            for light in scene.infinite_lights:
+                L += beta * light.le(ray_o, ray_d)
+            return L
+    return L
+```
+
+## Subtopics
+
+### [Multiple Scattering Volume Path Tracing with Phase Function Sampling](1043-multiple-scattering-volume-path-tracing-with-phase-function-.md)
+Extends the basic method by explicitly connecting path vertices to lights to solve inefficiency with small/distant lights, changing the integration domain to light surface area.
+
+### [Volumetric Path Tracing with Spectral Integration](2188-volumetric-path-tracing-with-spectral-integration.md)
+Handles spectral wavelength sampling for dispersion effects using spectral MIS for channel selection.
+
+### [Volumetric Path Tracing Estimator Derivation](3830-volumetric-path-tracing-estimator-derivation.md)
+Derives the simplified Monte Carlo estimator for the generalized path contribution function, reducing the raw path integral to phase function ratios and emission.
+
+### [Volumetric Path Tracing with Transmittance Sampling](6593-volumetric-path-tracing-with-transmittance-sampling.md)
+Computes single-scattering radiance by sampling distance directly from the transmittance distribution, handling surface intersections and light emission.
+
+### [Unbiased Monte Carlo Estimator for Radiance and Radiance Derivatives](10971-unbiased-monte-carlo-estimator-for-radiance-and-radiance-der.md)
+Provides an unbiased estimator for first-order radiance derivatives, enabling differentiable rendering.
+
+### [Differentiable Volumetric Path Tracing](10982-differentiable-volumetric-path-tracing.md)
+Estimates derivatives of the RTE with respect to scene parameters (e.g., albedo) for inverse rendering.
+
+## Operating characteristics
+*   **Time Complexity:** Linear in the number of path vertices, but delta tracking can be inefficient if the majorant $\sigma_{maj}$ is much larger than the actual $\sigma_t$, leading to many null scattering events [S4].
+*   **Memory Complexity:** Low, as it avoids spatial acceleration structures for the volume itself [S4].
+*   **Performance:** High variance (MSE) compared to light-sampling integrators like [VolPathIntegrator] because it does not sample lights directly [S4]. Requires many samples per pixel (e.g., 256–512) for reasonable noise reduction [S1, unofficial][S4].
+*   **Strengths:** Simple implementation, robust for homogeneous and heterogeneous media within convex bounds, good for ground-truth generation [S4].
+*   **Limitations:** Does not handle surface scattering, requires convex bounding volumes, assumes null BSDF at boundaries, and only supports infinite light sources [S3, unofficial][S4]. Inefficient for scenes with small or distant lights due to lack of explicit light sampling [S4].
+
+## Background
+Volumetric Path Tracing was developed as an academic exercise to study light transport in participating media compared to ray marching approaches [S1, unofficial]. The `SimpleVolPathIntegrator` is described in the "Physically Based Rendering" (pbrt) book, Chapter 14, as a basic integrator for educational purposes [S4]. It uses delta tracking, a technique originally proposed by Keller for rendering participating media, to sample interaction events without requiring spatial acceleration structures for the volume itself [S4]. The method is often used as a baseline for more advanced integrators like `VolPathIntegrator` [S4].
+
+## Sources
+[S1] ainagutierrez01/Volumetric-Path-Tracing-, https://github.com/ainagutierrez01/Volumetric-Path-Tracing-, fetched 2026-10-26 (unofficial)
+[S2] MajorMeerkatThe3rd/VolumetricPathTracing, https://github.com/MajorMeerkatThe3rd/VolumetricPathTracing, fetched 2026-10-26 (unofficial)
+[S3] https://github.com/rgl-epfl/unbiased-inverse-volume-rendering, https://github.com/rgl-epfl/unbiased-inverse-volume-rendering, fetched 2026-10-26 (unofficial)
+[S4] 14.2 Volume Scattering Integrators, https://pbr-book.org/4ed/Light_Transport_II_Volume_Rendering/Volume_Scattering_Integrators, fetched 2026-10-29
+[S5] Volume Rendering and Scattering Theory, https://www.scribd.com/document/912805133/02941-Slides-07-Volumes, fetched 2026-10-29 (unofficial)
+[S6] Lighting And Transmittance, https://sergeneren.com/2019/04/26/lighting-and-transmittance/, fetched 2026-10-30 (unofficial)

@@ -1,0 +1,165 @@
+# CTDR Optimization Loop with Regularization
+
+Also called: CTDR training loop, Shape from Projections optimization
+
+## Overview
+An iterative optimization process that minimizes a composite loss function—combining data fidelity, edge, Laplacian, and flatness regularization terms—to reconstruct a 3D triangular mesh directly from 2D tomographic projection data [S1, unofficial]. It distinguishes itself from standard differentiable rendering by explicitly enforcing topological constraints via collision rollback and utilizing robust loss functions (Student-t) to handle missing data or outliers in projection masks [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A differentiable forward projector model (derived from [Shape from Projections via Differentiable Forward Projector](13333-shape-from-projections-via-differentiable-forward-projector.md)), initial mesh parameters (vertex positions, material densities $\mu$), 2D projection images $p_{batch}$, angular indices $idx\_angles$, and a wedge mask $args.wedge$ defining valid pixel regions [S1, unofficial].
+*   **Outputs:** Optimized mesh geometry and material values [S1, unofficial].
+
+**Data Structures:**
+*   `model`: Contains the differentiable mesh representation. Attributes include `mus` (material densities, size $N$), and internal tensors for forward/backward passes (e.g., `points2d_bxfx6`, `grad_points2d_bxfx6`) [S1, unofficial].
+*   `optimizer`: Adam or SGD instance [S1, unofficial].
+*   `args`: Configuration object containing weights `wedge`, `wlap`, `wflat`, and flags like `silhouette_mode` [S1, unofficial].
+
+**Numbered Steps:**
+1.  **Initialize Optimizer:** Create an optimizer using Adam with learning rate $lr$ and betas $(\beta_1=0.9, \beta_2=0.99)$, or SGD with momentum $0.9$ and `nesterov=True` [S1, unofficial].
+2.  **Forward Projection:** Compute the predicted projections $\hat{p}$, validity mask, and regularization losses by calling the model:
+    $$ \hat{p}, \text{mask\_valid}, L_{\text{edge}}, L_{\text{lap}}, L_{\text{flat}} = \text{model}(idx\_angles, args.wedge) $$
+3.  **Compute Data Loss:** Calculate the fidelity term on valid pixels [S1, unofficial].
+    *   **L2 Loss:**
+        $$ L_{\text{data}} = \frac{1}{|\Omega|} \sum_{i \in \Omega} (p_i - \hat{p}_i)^2 $$
+        where $\Omega$ is the set of indices where `mask_valid` is true [S1, unofficial].
+    *   **Student-t Loss (Alternative):** If robust fitting is required, use:
+        $$ L_{\text{data}} = \frac{1}{|\Omega|} \sum_{i \in \Omega} \log\left(1 + \left(\frac{p_i - \hat{p}_i}{\sigma}\right)^2\right) $$
+        with $\sigma=1$ [S1, unofficial].
+    *   **Background Loss (Optional):** If `silhouette_mode` is enabled, add a penalty for non-zero predictions in background regions:
+        $$ L_{\text{data}} \leftarrow L_{\text{data}} + \frac{1}{|\Omega_{bg}|} \sum_{j \in \Omega_{bg}} \hat{p}_j^2 $$
+        where $\Omega_{bg}$ are background indices [S1, unofficial].
+4.  **Compute Total Loss:** Combine data fidelity with regularization terms:
+    $$ L_{\text{total}} = L_{\text{data}} + w_{\text{edge}} L_{\text{edge}} + w_{\text{lap}} L_{\text{lap}} + w_{\text{flat}} L_{\text{flat}} $$
+    where $w_{\text{edge}}, w_{\text{lap}}, w_{\text{flat}}$ are scalar weights from `args` [S1, unofficial].
+5.  **Backpropagation:** Compute gradients via automatic differentiation:
+    $$ \nabla L_{\text{total}} = \frac{\partial L_{\text{total}}}{\partial \theta} $$
+    where $\theta$ represents mesh parameters (vertex positions, $\mu$) [S1, unofficial].
+6.  **Optimization Step:** Update parameters:
+    $$ \theta \leftarrow \theta - \eta \cdot \text{OptimizerStep}(\nabla L_{\text{total}}) $$
+    [S1, unofficial].
+7.  **Clamp Material Values:** Enforce non-negativity on material densities:
+    $$ \mu \leftarrow \max(0, \mu) $$
+    [S1, unofficial].
+8.  **Topology Preservation (Optional):** If `use_collision` is enabled, perform a collision rollback to maintain mesh topology:
+    *   Detect self-intersections or invalid topology [S1, unofficial].
+    *   Revert displacements using `keep_topology(model, search_tree, displace_prev)` [S1, unofficial].
+9.  **Convergence Check:** If the change in loss $d_{\text{loss}} < 10^{-11}$ and $d_{\text{loss}} > 0$, terminate [S1, unofficial].
+10. **Learning Rate Decay:** If `epoch + 100 == niter` and `niter > 400`, halve the learning rate [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+# Initialization
+lr = 1e-3  # Typical value not specified in sources [G]
+niter = 1000  # Not specified in sources [G]
+use_student_t = False  # Not specified in sources [G]
+silhouette_mode = False  # Not specified in sources [G]
+use_collision = False  # Not specified in sources [G]
+idx_bg = []  # Not specified in sources [G]
+search_tree = []  # Not specified in sources [G]
+displace_prev = []  # Not specified in sources [G]
+
+# Optimizer initialization
+def Adam(params, lr, betas):
+    state = {p: {'m': 0.0, 'v': 0.0} for p in params}
+    def step():
+        for p in params:
+            m, v = state[p]['m'], state[p]['v']
+            beta1, beta2 = betas
+            state[p]['m'] = beta1 * m + (1 - beta1) * p.grad
+            state[p]['v'] = beta2 * v + (1 - beta2) * p.grad**2
+            m_hat = state[p]['m'] / (1 - beta1)
+            v_hat = state[p]['v'] / (1 - beta2)
+            p.data -= lr * m_hat / (v_hat**0.5 + 1e-8)
+    return step
+
+def SGD(params, lr, momentum, nesterov):
+    state = {p: 0.0 for p in params}
+    def step():
+        for p in params:
+            buf = state[p]
+            buf = momentum * buf + p.grad
+            if nesterov:
+                p.data -= lr * (p.grad + momentum * buf)
+            else:
+                p.data -= lr * buf
+            state[p] = buf
+    return step
+
+optimizer = Adam(model.parameters(), lr=lr, betas=(0.9, 0.99))
+loss_prev = float('inf')
+
+for epoch in range(niter):
+    # 1. Forward projection
+    phat, mask_valid, edge_loss, lap_loss, flat_loss = model(idx_angles, args.wedge)
+
+    # 2. Data loss calculation
+    diff = [p_batch[i] - phat[i] for i in range(len(p_batch))]
+    valid_diff = [diff[i] for i in range(len(diff)) if mask_valid[i]]
+
+    if use_student_t:
+        sigma = 1.0
+        data_loss = sum(math.log(1 + (d / sigma)**2) for d in valid_diff) / len(valid_diff)
+    else:
+        data_loss = sum(d**2 for d in valid_diff) / len(valid_diff)
+
+    if silhouette_mode:
+        bg_loss = sum(phat[i]**2 for i in idx_bg) / len(idx_bg)
+        data_loss += bg_loss
+
+    # 3. Total loss
+    loss = data_loss + args.wedge * edge_loss + args.wlap * lap_loss + args.wflat * flat_loss
+
+    # 4. Backpropagation and step
+    # Automatic differentiation computes gradients [G]
+    optimizer.step()
+
+    # 5. Post-processing
+    loss_now = loss
+    model.mus = [max(0.0, mu) for mu in model.mus]
+
+    # 6. Topology preservation
+    if use_collision:
+        # Implementation details for keep_topology not provided in sources [G]
+        keep_topology(model, search_tree, displace_prev)
+
+    # 7. Convergence check
+    if epoch > 0:
+        dloss = loss_prev - loss_now
+        if dloss < 1e-11 and dloss > 0:
+            break
+    loss_prev = loss_now
+
+    # 8. Learning rate decay
+    if niter > 400 and (epoch + 100) == niter:
+        optimizer.lr /= 2.0
+```
+
+**Parameters:**
+*   `lr`: Learning rate. Typical value not specified, but Adam betas are $(0.9, 0.99)$ [S1, unofficial].
+*   `sigma`: Scale parameter for Student-t loss. Value: $1$ [S1, unofficial].
+*   `wedge`, `wlap`, `wflat`: Weights for edge, Laplacian, and flatness regularization. Values not specified [S1, unofficial].
+*   `niter`: Total iterations. Decay triggers at `niter > 400` [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Convergence threshold is set to $10^{-11}$, requiring high-precision loss tracking [S1, unofficial].
+*   **Boundaries:** Material values must be clamped to $\ge 0$ to prevent physical invalidity [S1, unofficial].
+*   **Topology:** Without collision rollback, the mesh may self-intersect or invert, leading to invalid projections. The `keep_topology` function handles this but requires a search tree and previous displacement buffer [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources. [S1, unofficial]
+*   **Memory Complexity:** Not given in the sources. [S1, unofficial]
+*   **Strengths:** Not given in the sources. [S1, unofficial]
+*   **Limitations:** Not given in the sources. [S1, unofficial]
+*   **When to use:** Not given in the sources. [S1, unofficial]
+*   **When not to use:** Not given in the sources. [S1, unofficial]
+
+## Background
+Not given in the sources. [S1, unofficial]
+
+## Sources
+[S1] jakeoung/ShapeFromProjections, https://github.com/jakeoung/ShapeFromProjections, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,85 @@
+# Object Space Ray Setup — Camera Space Transformation for Ray Origin, Local Space Ray Setup, Object Space Ray Casting
+
+Also called: Ray Origin Calculation for Near Plane Quad, RayCasterShaderCodeTester::NearPlaneVertexShader
+
+## Overview
+This method calculates the ray origin in volume texture space for a given vertex on the near plane quad, used for testing ray casting shaders [S1, unofficial]. It transforms a vertex from view space to world space and then maps it into the local volume coordinate system [S1, unofficial]. It differs from camera-space ray setup [4179-object-space-ray-setup-camera-space-transformation-for-ray-o.md] by operating directly on object-space vertices and using hardware interpolation of 3D UVs, rather than computing ray origins and directions in camera space [G].
+
+## How it works
+**Inputs:**
+- `gl_vertex`: Vertex position in view space (4D vector).
+- `inverse_model_view_matrix`: 4×4 matrix transforming view space to world space.
+- `vol_translation`: 3D translation vector of the volume in world space.
+- `vol_scale`: Scalar scale factor of the volume in world space.
+- `projection_matrix`: 4×4 projection matrix for clipping.
+
+**Outputs:**
+- `gl_position`: Clip-space position for rasterization.
+- `ray_position`: Ray origin in volume texture space (normalized 0–1 range, 4D vector).
+
+**Data Structures:**
+- Vectors and matrices are standard 3D/4D floating-point arrays. Matrix multiplication uses standard linear algebra conventions.
+
+**Steps:**
+1. Compute the clip-space position: `gl_position = projection_matrix @ gl_vertex` [S1, unofficial].
+2. Transform the vertex from view space to world space: `world_pos = inverse_model_view_matrix @ gl_vertex` [S1, unofficial].
+3. Extract the 3D position: `ray_position = world_pos[:3]` [S1, unofficial].
+4. Translate the position to volume-local space: `ray_position = ray_position - vol_translation` [S1, unofficial].
+5. Scale the position to volume-local space: `ray_position = ray_position / vol_scale` [S1, unofficial].
+6. Offset the position to center it in texture coordinates: `ray_position = ray_position + 0.5` [S1, unofficial].
+7. Pack the result into a 4D vector: `ray_position = [ray_position[0], ray_position[1], ray_position[2], 1.0]` [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def NearPlaneVertexShader(gl_vertex, inverse_model_view_matrix, vol_translation, vol_scale, projection_matrix):
+    # Step 1: Compute clip-space position
+    gl_position = projection_matrix @ gl_vertex
+    
+    # Step 2: Transform vertex from view space to world space
+    world_pos = inverse_model_view_matrix @ gl_vertex
+    
+    # Step 3: Extract 3D position
+    ray_position = world_pos[:3]
+    
+    # Step 4: Translate to volume-local space
+    ray_position = ray_position - vol_translation
+    
+    # Step 5: Scale to volume-local space
+    ray_position = ray_position / vol_scale
+    
+    # Step 6: Offset to center in texture coordinates
+    ray_position = ray_position + 0.5
+    
+    # Step 7: Pack result
+    ray_position = [ray_position[0], ray_position[1], ray_position[2], 1.0]
+    
+    return gl_position, ray_position
+```
+
+**Parameters:**
+- `VolTranslation`: Not given in the sources.
+- `VolScale`: Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+- Precision: Floating-point precision issues may arise if the volume is very large or very small [G].
+- Boundaries: The method assumes the volume is a unit cube centered at the origin in texture space. If the volume is not a unit cube, the offset and scale may need adjustment [G].
+- Degenerate Input: If `VolScale` is zero, division by zero will occur [G].
+
+## Subtopics
+
+### [Object Space Ray Setup via Vertex Shader UV Computation](13156-object-space-ray-setup-via-vertex-shader-uv-computation.md)
+This method establishes the geometric foundation for GPU-based volume raycasting by mapping a 3D bounding box (typically a unit cube) to screen space while simultaneously computing normalized 3D texture coordinates for each fragment. It solves the problem of translating object-space vertex positions into both clip-space positions for rasterization and valid texture lookup coordinates for the fragment shader. It differs from camera-space ray setup [4179-object-space-ray-setup-camera-space-transformation-for-ray-o.md] by operating directly on object-space vertices and using hardware interpolation of 3D UVs, rather than computing ray origins and directions in camera space [G].
+
+## Operating characteristics
+- Time Complexity: Not given in the sources.
+- Memory Complexity: Not given in the sources.
+- Measured Performance: Not given in the sources.
+- Scaling: Not given in the sources.
+
+## Background
+The method is implemented in the `VoxVizThesis` repository [S1, unofficial]. It is used in the context of volume rendering, specifically for testing ray casting shaders [S1, unofficial].
+
+## Sources
+[S1] apecoraro/VoxVizThesis, https://github.com/apecoraro/VoxVizThesis, fetched 2026-10-27 (unofficial)

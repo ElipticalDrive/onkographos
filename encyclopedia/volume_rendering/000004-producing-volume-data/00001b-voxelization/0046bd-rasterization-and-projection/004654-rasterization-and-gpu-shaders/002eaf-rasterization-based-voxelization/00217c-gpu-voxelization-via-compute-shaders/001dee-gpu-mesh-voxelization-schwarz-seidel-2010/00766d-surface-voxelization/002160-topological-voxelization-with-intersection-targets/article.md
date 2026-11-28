@@ -1,0 +1,170 @@
+# Topological Voxelization with Intersection Targets
+
+Also called: Intersection Target Voxelization, Topological Voxelization
+
+## Overview
+Topological Voxelization with Intersection Targets is a method for determining voxel inclusion based on geometric intersection with specific dual shapes, rather than geometric proximity or scan conversion [S3, unofficial]. It solves the problem of generating voxelizations that are "minimally thin" while strictly preserving topological properties such as connectivity (6, 18, or 26-connected) and separability [S3, unofficial]. Unlike [Scan Conversion](52-scan-conversion.md) which fills voxels between odd/even ray intersections, this method includes a voxel if and only if the input intersects a defined "intersection target" within that voxel, ensuring correctness independent of input tessellation [S3, unofficial].
+
+## How it works
+**Inputs:**
+*   Input geometry $S$ (primitives of dimension $k$, e.g., points, lines, triangles).
+*   Voxel grid resolution and bounds.
+*   Desired connectivity level (6, 18, or 26-connected).
+*   Effective dimension $d_{eff}$ of the input geometry (0D, 1D, or 2D) [S3, unofficial].
+
+**Outputs:**
+*   Set of voxels $S_d$ representing the voxelization.
+
+**Data Structures:**
+*   **Voxel Grid:** A 3D array or sparse structure mapping voxel coordinates $(i, j, k)$ to a boolean flag or occupancy value.
+*   **Intersection Target:** A geometric primitive (point, line, plane, or volume) defined relative to the voxel's local coordinate system. The target's dimension is $n - d_{eff}$ in $n$-dimensional space (typically $3 - d_{eff}$ in 3D) [S3, unofficial].
+
+**Algorithm Steps:**
+
+1.  **Determine Effective Dimension:** Identify the effective dimension $d_{eff}$ of the input geometry. For example, a thin hair strand represented as a tube is effectively 1D [S3, unofficial].
+2.  **Select Intersection Target:** Choose the intersection target shape for each voxel based on $d_{eff}$ and the desired connectivity. The target is the dual feature of dimension $n - d_{eff}$ [S3, unofficial].
+    *   For 1D input (curves) in 3D:
+        *   To achieve 6-connectivity (face-neighbors), the target is a 2D plane (e.g., the voxel face) [S1][S3, unofficial].
+        *   To achieve 26-connectivity (vertex-neighbors), the target is a 2D crosshair or specific 2D structure ensuring vertex adjacency [S1].
+    *   For 2D input (surfaces) in 3D:
+        *   To achieve 6-connectivity, the target is the 1D edges of the voxel [S1].
+        *   To achieve 26-connectivity, the target is a 3D crosshair centered at the voxel [S1].
+3.  **Iterate Supercover:** Identify the set of voxels belonging to the supercover of the input geometry $S$. Only these voxels need to be tested, as targets in non-supercover voxels cannot intersect $S$ [S3, unofficial].
+4.  **Test Intersection:** For each voxel $V$ in the supercover, test if the input geometry $S$ intersects the selected intersection target $T_V$ contained within $V$ [S3, unofficial].
+5.  **Handle Degeneracies:** If the intersection is degenerate (e.g., input boundary touches target boundary), apply an infinitesimal perturbation to resolve ambiguity. In practice, test shifts in $+x, +y, +z$ directions until a non-degenerate result is obtained [S3, unofficial].
+6.  **Include Voxel:** If an intersection occurs (including degenerate cases resolved by perturbation), include $V$ in the output set $S_d$ [S3, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def topological_voxelization(input_geometry, voxel_grid, connectivity):
+    """
+    Voxelizes input geometry using intersection targets.
+    
+    Args:
+        input_geometry: List of primitives (points, lines, triangles).
+        voxel_grid: 3D array or sparse map for output.
+        connectivity: Desired connectivity (6, 18, or 26).
+        
+    Returns:
+        voxel_grid with occupied voxels marked.
+    """
+    # Step 1: Determine effective dimension
+    # Note: In practice, this may require analysis of the input geometry.
+    # For a mesh of triangles, effective dimension is 2.
+    # For a set of line segments, effective dimension is 1.
+    effective_dim = determine_effective_dimension(input_geometry)
+    
+    # Step 2: Define intersection targets based on connectivity and effective dimension
+    # The target dimension is 3 - effective_dim in 3D space.
+    target_type = get_intersection_target_type(effective_dim, connectivity)
+    
+    # Step 3: Iterate over supercover voxels
+    # Optimization: Only voxels in the supercover of input_geometry are tested.
+    supercover_voxels = compute_supercover(input_geometry, voxel_grid.bounds)
+    
+    for voxel in supercover_voxels:
+        # Step 4: Get the intersection target for this voxel
+        target = voxel.get_intersection_target(target_type)
+        
+        # Step 5: Test intersection with perturbation handling
+        intersected = False
+        
+        # Try original position
+        if intersects(input_geometry, target):
+            intersected = True
+        else:
+            # Handle degenerate intersections by infinitesimal perturbation
+            # Test shifts in +x, +y, +z until non-degenerate result
+            perturbations = [
+                (epsilon, 0, 0),
+                (0, epsilon, 0),
+                (0, 0, epsilon)
+            ]
+            for dx, dy, dz in perturbations:
+                perturbed_target = target.translate(dx, dy, dz)
+                if intersects(input_geometry, perturbed_target):
+                    intersected = True
+                    break
+        
+        # Step 6: Include voxel if intersected
+        if intersected:
+            voxel.mark_occupied()
+
+def intersects(geometry, target):
+    """
+    Checks if any primitive in geometry intersects the target.
+    Uses standard geometric intersection tests.
+    """
+    for primitive in geometry:
+        if primitive.intersects(target):
+            return True
+    return False
+
+def determine_effective_dimension(geometry):
+    """
+    Determines the effective dimension of the input geometry.
+    Returns 0 for points, 1 for curves/strands, 2 for surfaces.
+    """
+    # Implementation depends on input type.
+    # If input is triangles, return 2.
+    # If input is line segments, return 1.
+    # [G] Placeholder for specific logic based on input type.
+    pass
+
+def get_intersection_target_type(effective_dim, connectivity):
+    """
+    Returns the type of intersection target based on effective dimension and connectivity.
+    """
+    # Mapping from literature [S1][S3, unofficial]:
+    # 1D input (curves):
+    #   6-connected -> 2D plane (face)
+    #   26-connected -> 2D crosshair/structure
+    # 2D input (surfaces):
+    #   6-connected -> 1D edges
+    #   26-connected -> 3D crosshair
+    if effective_dim == 1:
+        if connectivity == 6:
+            return "FACE"
+        elif connectivity == 26:
+            return "CROSSHAIR_2D"
+    elif effective_dim == 2:
+        if connectivity == 6:
+            return "EDGES"
+        elif connectivity == 26:
+            return "CROSSHAIR_3D"
+    return "UNKNOWN"
+```
+
+**Parameters:**
+*   **Connectivity Level:** 6 (face-neighbour), 18 (edge-neighbour), or 26 (vertex-neighbour) [S2].
+*   **Effective Dimension:** The dimension of the input geometry (0D, 1D, 2D) [S3, unofficial].
+*   **Perturbation Vector:** Infinitesimal vector for resolving degeneracies, e.g., $(\epsilon, 2\epsilon, 3\epsilon)$ [S3, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Mismatched Dimensions:** Using a 0D target (point) for 1D input results in chance intersections, failing to preserve connectivity. The target must be at least 2D for 1D inputs to establish 6 or 26-connectivity [S3, unofficial].
+*   **Degenerate Intersections:** Input boundaries touching voxel boundaries can cause spurious holes or thick results. Resolved by infinitesimal perturbation [S3, unofficial].
+*   **Supercover Optimization:** Testing all voxels is inefficient. Only voxels in the supercover of the input need to be considered [S3, unofficial].
+
+## Subtopics
+
+### [Intersection Target Method](5655-intersection-target-method.md)
+The Intersection Target Method is a topological voxelization strategy for effectively 1D input (lines or curves) that guarantees 8-connectivity (adjacent voxels share an edge or corner) and 4-separability (no 4-connected path of background voxels separates foreground components). It differs from geometric proximity methods by including a voxel if and only if the input intersects a specific geometric "target" shape within that voxel, ensuring topological correctness through the connectivity of these targets.
+
+## Operating characteristics
+*   **Time Complexity:** Depends on the number of voxels in the supercover and the complexity of the intersection tests. Iterating over objects is more efficient than iterating over all voxels in the bounding box [S2].
+*   **Memory Complexity:** Proportional to the number of voxels in the output voxelization.
+*   **Strengths:** Guarantees topological correctness (connectivity and separability); independent of input tessellation; supports curved primitives; produces "minimally thin" results [S3, unofficial].
+*   **Limitations:** Requires knowledge of the effective dimension of the input; intersection tests can be complex for certain target shapes; degenerate cases require careful handling [S3, unofficial].
+*   **When to Use:** When topological correctness is critical (e.g., simulation, collision detection); when input geometry is complex or curved; when tessellation-independent results are needed [S3, unofficial].
+*   **When Not to Use:** When performance is paramount and topological correctness is not required; when the effective dimension is unknown or ambiguous [S3, unofficial].
+
+## Background
+The method was introduced by Samuli Laine at NVIDIA in 2013 [S3, unofficial]. It is based on the Poincaré Duality Theorem, which establishes a primal-dual pairing between $k$-dimensional features and their $(n-k)$-dimensional duals in $n$-dimensional space [S1, S2]. Laine mathematically proved that using specific intersection targets can achieve desired connectivity levels (6 or 26-connected) [S1, S2]. The method is described in the paper "A Topological Approach to Voxelization" [S3, unofficial].
+
+## Sources
+[S1] Voxelization algorithms for geospatial applications, https://doi.org/10.1016/j.mex.2016.01.001, fetched 2026-10-26
+[S2] Voxelization algorithms for geospatial applications, https://www.sciencedirect.com/science/article/pii/S2215016116000029, fetched 2026-10-29
+[S3] PDF A Topological Approach to Voxelization - NVIDIA, https://research.nvidia.com/sites/default/files/pubs/2013-06_A-Topological-Approach/laine2013egsr_paper.pdf, fetched 2026-10-29 (unofficial)

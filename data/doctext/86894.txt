@@ -1,0 +1,2510 @@
+# Optimized voxel terrain rendering with OpenGL
+
+## Features :
+- Indirect rendering (using glMultiDrawArraysIndirectCount) for minimal CPU-GPU interactions
+- Packed mesh data (8 bytes per rectangle + 32 bytes per mesh)
+- Frustum culling in a compute shader
+- Fast greedy mesher
+- Slight random color variation for each voxel
+- Basic flying camera controller
+
+If you find any other improvements, please feel free to add them :)
+
+### include/Camera.hpp
+```
+#ifndef CAMERA_H
+#define CAMERA_H
+
+#include <glm/glm.hpp>
+#include <glm/gtx/quaternion.hpp>
+
+
+class Camera {
+public:
+    int width;
+    int height;
+    float fov;
+    float nearClip;
+    float farClip;
+
+    glm::vec3 position;
+    glm::quat orientation;
+
+    glm::vec4 farPlane; // x,y,z: normal, w: distance
+    glm::vec4 leftPlane;
+    glm::vec4 rightPlane;
+    glm::vec4 upPlane;
+    glm::vec4 downPlane;
+    glm::mat4 vpMatrix;
+
+    /**
+     * @brief Create a new camera
+     * @param width Window width (in pixels)
+     * @param height Window height (in pixels)
+     * @param fov Vertical FOV (in degrees)
+     * @param nearClip Near clipping plane distance
+     * @param farClip Far clipping plane distance
+     * @param position Initial position of the camera
+     * @param xOrientation Initial orientation around the x axis (in radians)
+     * @param yOrientation Initial orientation around the y axis (in radians)
+    **/
+    Camera(int width, int height, float fov = 60, float nearClip = 0.1, float farClip = 1500, glm::vec3 position = glm::vec3(0, 0, 0), float xOrientation = 0, float yOrientation = 0);
+
+    /**
+     * @brief Update matrix and planes based on position and orientation (must be called after changing position or orientation)
+    **/
+    void update();
+
+    /**
+     * @brief Translate the camera
+     * @param translation Translation vector (in camera space)
+    **/
+    void localTranslate(glm::vec3 translation);
+
+    /**
+     * @brief Translate the camera
+     * @param translation Translation vector (in world space)
+    **/
+    void globalTranslate(glm::vec3 translation);
+
+    /**
+     * @brief Rotate the camera
+     * @param xRotation Rotation around the x axis (in radians)
+     * @param yRotation Rotation around the y axis (in radians)
+    **/
+    void rotate(float xRotation, float yRotation);
+};
+
+
+#endif
+```
+
+### include/CameraController.hpp
+```
+#ifndef CAMERA_CONTROLLER_H
+#define CAMERA_CONTROLLER_H
+
+#include <glm/glm.hpp>
+#include <glm/gtx/quaternion.hpp>
+
+#include "GLObjects/Window.hpp"
+#include "Camera.hpp"
+
+
+class CameraController {
+public:
+    float sensitivityX;
+    float sensitivityY;
+    float speed;
+    
+    /**
+     * @brief Create a new camera controller
+     * @param window GLFW window
+     * @param camera Camera to control
+     * @param width Window width
+     * @param height Window height
+     * @param sensitivityX Mouse sensitivity on the x axis
+     * @param sensitivityY Mouse sensitivity on the y axis
+     * @param speed Camera speed
+    **/
+    CameraController(Window& window, Camera& camera, int width, int height, float sensitivityX = 0.003, float sensitivityY = 0.003, float speed = 200);
+
+    /**
+     * @brief CameraController update (must be called each frame)
+     * @param deltaTime Last frame duration (in seconds)
+    **/
+    void update(float deltaTime);
+
+private:
+    Window& window;
+    Camera& camera;
+};
+
+
+#endif
+```
+
+### include/Constants.hpp
+```
+#ifndef CONSTANTS_H
+#define CONSTANTS_H
+
+#define HORIZONTAL_SIZE 4096
+#define VERTICAL_SIZE 512
+#define CHUNK_SIZE 64
+#define HORIZONTAL_CHUNKS HORIZONTAL_SIZE / CHUNK_SIZE
+
+#endif
+```
+
+### include/FPSCounter.hpp
+```
+#ifndef FPS_COUNTER_H
+#define FPS_COUNTER_H
+
+#include "TerminalRenderer.hpp"
+
+
+class FPSCounter : private TerminalRenderer::Component {
+public:
+    /**
+     * @brief Create a new FPS counter
+     * @param renderer Terminal renderer to use
+    **/
+    FPSCounter(TerminalRenderer& renderer);
+
+    /**
+     * @brief FPSCounter update (must be called each frame)
+     * @param deltaTime Last frame duration (in seconds)
+    **/
+    void update(float deltaTime);
+
+private:
+    float time;
+    int frames;
+};
+
+
+#endif
+```
+
+### include/GenerateMesh.hpp
+```
+#ifndef MESH_GENERATOR_H
+#define MESH_GENERATOR_H
+
+#include <vector>
+#include <cstdint>
+
+#include "VoxelMesh.hpp"
+
+// IDs contains all block rows one after the other.
+// A row contains all blocks for an (x, z) coordinate in ascending order.
+// Even indices : y coordinates, odd indices : color ids.
+// Index of the start of each row in IDs : IDIndexes.
+// Index of a row in IDIndexes : (chunkX + chunkZ * horizontalChunks) + xInChunk + zInChunk * chunkSize
+// ID 0 : invisible block used to not render faces arround it.
+
+/**
+ * @brief 
+ * Generate an optimized mesh (greedy meshing) for the terrain from block IDs. 
+ * The mesh will be split in chunks and different face orientations.
+ * @param chunkStartX x start (in chunks) of the part of IDs to render
+ * @param chunkStartZ z start (in chunks) of the part of IDs to render
+ * @param chunkSizeX x size (in chunks) of the part of IDs to render
+ * @param chunkSizeZ z size (in chunks) of the part of IDs to render
+ * @param IDs Block IDs
+ * @param IDIndexes Start index for each (x, z) in IDs
+ * @param meshes Vector to add output meshes to
+ * @param squares Vector to add output squares to
+**/
+void generateMesh(uint32_t chunkStartX, uint32_t chunkStartZ, uint32_t chunkSizeX, uint32_t chunkSizeZ, int* IDs, uint32_t* IDIndexes, std::vector<VoxelMesh>& meshes, std::vector<Square>& squares);
+
+#endif
+```
+
+### include/GenerateTerrain.hpp
+```
+#ifndef GENERATE_TERRAIN
+#define GENERATE_TERRAIN
+
+#include <cstdint>
+#include <vector>
+
+/**
+ * @brief Generate a terrain
+ * @param IDs Block IDs
+ * @param IDIndexes Start index for each (x, z) in IDs
+**/
+void generateTerrain(std::vector<int>& IDs, uint32_t* IDIndexes);
+
+#endif
+```
+
+### include/TerminalRenderer.hpp
+```
+#ifndef TERMINAL_RENDERER_H
+#define TERMINAL_RENDERER_H
+
+#include <cstdio>
+#include <iostream>
+#include <vector>
+
+
+class TerminalRenderer {
+public:
+    class Component {
+    public:
+        /**
+         * @brief Create a new component
+         * @param renderer Terminal renderer to use
+         * @param lineSize Number of lines for the component
+        **/
+        Component(TerminalRenderer& renderer, int lineSize);
+
+        /**
+         * @brief Update the component
+         * @param lines New component text
+        **/
+        void update(const std::string* lines);
+
+    private:
+        TerminalRenderer& renderer;
+        int lineStart;
+        int lineSize;
+    };
+
+    /**
+     * @brief Create a new terminal renderer
+    **/
+    TerminalRenderer(FILE* output);
+
+    /**
+     * @brief Render updated components in the terminal
+    **/
+    void render();
+
+private:
+    FILE* output;
+    std::vector<char> lines;
+    int lineCount;
+    int width;
+
+    /**
+     * @brief Add a component to the terminal
+     * @param lineSize Number of lines for the component
+     * @return Line start of the component
+    **/
+    int addComponent(int lineSize);
+
+    /**
+     * @brief Update a component
+     * @param componentLines New component text
+     * @param lineStart Line start of the component
+     * @param lineSize Number of lines of the component
+    **/
+    void updateComponent(const std::string* componentLines, int lineStart, int lineSize);
+};
+
+
+#endif
+```
+
+### include/TerrainRenderer.hpp
+```
+#ifndef TERRAIN_RENDERER_H
+#define TERRAIN_RENDERER_H
+
+#include <vector>
+
+#include "GLObjects/OpenGL.hpp"
+#include "Camera.hpp"
+#include "VoxelMesh.hpp"
+
+
+class TerrainRenderer {
+public:
+    /**
+     * @brief Create a new voxel terrain renderer
+     * @param camera Camera to use to render the terrain
+    **/
+    explicit TerrainRenderer(Camera& camera);
+
+    /**
+     * @brief Add meshes to render (before starting to render)
+     * @param meshes Meshes to add
+     * @param squares Squares in the added meshes
+    **/
+    void addMeshes(const std::vector<VoxelMesh>& meshes, const std::vector<Square>& squares);
+
+    /**
+     * @brief 
+     * Prepare for render.
+     * Must be called before any call to render() and after every call to addMeshes()
+    **/
+    void prepareRender();
+
+    /**
+     * @brief Render the terrain
+    **/
+    void render();
+
+private:
+    Camera& camera;
+    gl::GraphicsShader shader;
+    std::vector<MeshData> meshData; // All meshes information (position, size, rectangles indices)
+    std::vector<Square> squares; // All rectangles (position, width, height, normal)
+    gl::Buffer squaresBuffer;
+    gl::Buffer commandsBuffer;
+    gl::VertexArray vertexArray;
+    gl::Uniform graphicsPositionUniform;
+    gl::Uniform vpMatrixUniform;
+
+    gl::ComputeShader frustumCulling;
+    gl::Buffer meshDataBuffer;
+    gl::Buffer paramsBuffer;
+    gl::Uniform frustumPositionUniform;
+    gl::Uniform farPlaneUniform;
+    gl::Uniform leftPlaneUniform;
+    gl::Uniform rightPlaneUniform;
+    gl::Uniform upPlaneUniform;
+    gl::Uniform downPlaneUniform;
+    uint32_t workGroups;
+};
+
+
+#endif
+```
+
+### include/VoxelMesh.hpp
+```
+#ifndef VOXEL_MESH_H
+#define VOXEL_MESH_H
+
+#include <cstdint>
+#include <glm/glm.hpp>
+
+
+
+enum class CubeNormal {
+    xPositive = 0,
+    xNegative = 1,
+    yPositive = 2,
+    yNegative = 3,
+    zPositive = 4,
+    zNegative = 5
+};
+
+
+// x: 0, y: 1, z: 2
+constexpr uint32_t axis(CubeNormal normal) {
+    return (uint32_t)normal >> 1;
+}
+
+// x: 1, y: 0, z: 1
+constexpr uint32_t widthAxis(uint32_t axis) {
+    return (uint32_t)1 & ~axis;
+}
+
+// x: 2, y: 2, z: 0
+constexpr uint32_t heightAxis(uint32_t axis) {
+    return (uint32_t)2 & ~axis;
+}
+
+// +: 1, -: 0
+constexpr uint32_t normalPositive(CubeNormal normal) {
+    return (uint32_t)1 & ~(uint32_t)normal;
+}
+
+// +: 0, -: 1
+constexpr uint32_t normalNegative(CubeNormal normal) {
+    return (uint32_t)1 & (uint32_t)normal;
+}
+
+// +: 1, -: -1
+constexpr int normalSign(CubeNormal normal) {
+    return (int)1 | -(int)((uint32_t)normal & (uint32_t)1);
+}
+
+
+
+class Square {
+public:
+    Square(uint32_t x, uint32_t y, uint32_t z, uint32_t w, uint32_t h, CubeNormal normal, uint32_t colorID) :
+        data1(x | (z << 13)),
+        data2(y | ((w - 1) << 9) | ((h - 1) << 15) | ((uint32_t)normal << 21) | (colorID << 24)) {}
+
+private:
+    uint32_t data1; // x (13b), z (13b)
+    uint32_t data2; // y (9b), width (6b), height (6b), normal (3b), color (8b)
+};
+
+
+
+// Mesh with all rectangles with the same normal and in the same chunk
+class VoxelMesh {
+public:
+    glm::u32vec3 position;
+    CubeNormal normal;
+    uint32_t squaresCount;
+
+    /**
+     * @brief Create a new voxel mesh
+     * @param normal Normal of all rectangles
+     * @param chunkX x index of the chunk the mesh is in
+     * @param chunkZ z index of the chunk the mesh is in
+     * @param startY y index of the chunk the mesh is in
+    **/
+    VoxelMesh(CubeNormal normal, int chunkX, int chunkZ, int startY);
+
+    /**
+     * @brief Add a new rectangle to the mesh
+     * @param x x start index of the rectangle in the plane
+     * @param y y start index of the rectangle in the plane
+     * @param depth Index of the plane
+     * @param width Width of the rectangle
+     * @param height Height of the rectangle
+     * @param colorID Color ID of the rectangle
+     * @return The square that was added (must be stored in a seperate container)
+    **/
+    Square add(int x, int y, int depth, int width, int height, int colorID);
+
+    glm::vec3 center() const {
+        return (glm::vec3)position + glm::vec3(minX + maxX, minY + maxY, minZ + maxZ) / 2.0f;
+    }
+
+    glm::vec3 size() const {
+        return glm::vec3(maxX - minX, maxY - minY, maxZ - minZ) / 2.0f;
+    }
+
+private:
+    uint32_t minX;
+    uint32_t minY;
+    uint32_t minZ;
+    uint32_t maxX;
+    uint32_t maxY;
+    uint32_t maxZ;
+};
+
+
+
+class MeshData {
+public:
+    MeshData(glm::vec3 center, glm::vec3 size, CubeNormal normal, uint32_t squareCount, uint32_t startSquare) :
+        center(center),
+        data1((uint32_t)normal | (squareCount << 3)),
+        size(size),
+        data2(startSquare) {}
+    MeshData(const VoxelMesh& mesh, uint32_t startSquare) : MeshData(mesh.center(), mesh.size(), mesh.normal, mesh.squaresCount, startSquare) {};
+
+public:
+    glm::vec3 center;
+    uint32_t data1; // normal (3b), squareCount (29b)
+    glm::vec3 size;
+    uint32_t data2; // startSquare (32b)
+};
+
+
+
+#endif
+```
+
+### shaders/fragment.glsl
+```
+#version 460 core
+
+in vec4 blockData; // x,y,z : block pos, w : light level
+in vec4 blockColor; // x,y,z: color, w: random variation ammount
+
+out vec4 color;
+
+
+#define discretization 8
+
+
+// Random value between 0 and 1
+uniform float seed;
+float random(uvec3 block) {
+    vec3 vec = fract(vec3(block) * 0.1031 + seed);
+    vec += dot(vec, vec.yzx + 33.33);
+    return fract((vec.x + vec.y) * vec.z);
+}
+
+
+void main() {
+    uvec3 blockPos = uvec3(blockData.xyz);
+    float lightLevel = blockData.w;
+    color = blockColor;
+    color *= lightLevel / 15; // Light (depending on face directions, better lighting could be added)
+    color *= 1 + color.w * ((round(random(blockPos) * discretization) / discretization) - 0.5); // Random slight color variation
+    color.w = 1;
+}
+```
+
+### shaders/frustumCulling.glsl
+```
+#version 460 core
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+
+struct MeshData {
+	vec3 center;
+	uint data1; // normal (3b), squaresCount (29b)
+	vec3 size;
+	uint data2; // startSquare (32b)
+};
+
+struct IndirectDrawArgs {
+	uint count;
+    uint instanceCount;
+    uint first;
+    uint baseInstance;
+};
+
+#define mask3Bits 7u // 0b111
+
+
+// Inputs
+uniform vec4 farPlane; // x,y,z: normal, w: distance
+uniform vec4 leftPlane;
+uniform vec4 rightPlane;
+uniform vec4 upPlane;
+uniform vec4 downPlane;
+uniform vec3 position;
+layout(binding = 0, std430) readonly restrict buffer meshDataBuffer { MeshData meshData[]; }; // All meshes information (position, size, squares indices)
+
+// Outputs
+layout(binding = 1, std430) restrict buffer commandsBuffer { IndirectDrawArgs commands[]; }; // Indices of the squares to render
+layout(binding = 0, offset = 0) uniform atomic_uint commandsCount; // Number of squares to render
+
+
+bool outsidePlane(vec3 center, vec3 size, vec4 plane) {
+	vec3 normalSign = sign(plane.xyz);
+	vec3 closestPoint = center + size * normalSign;
+	return dot(closestPoint, plane.xyz) + plane.w < 0;
+}
+
+
+// true if must render mesh
+bool cameraCulling(vec3 center, vec3 size, vec3 normal) {
+	// Ignore meshes that are invisible because of their normal
+	if (dot(center - normal * size - position, normal) > 0) return false;
+
+	// Ignore meshes outside of camera view
+	if (outsidePlane(center, size, farPlane)) return false;
+	if (outsidePlane(center, size, leftPlane)) return false;
+	if (outsidePlane(center, size, rightPlane)) return false;
+	if (outsidePlane(center, size, upPlane)) return false;
+	if (outsidePlane(center, size, downPlane)) return false;
+
+	return true;
+}
+
+
+void main() {
+	MeshData mesh = meshData[gl_GlobalInvocationID.x];
+	uint normalID = mesh.data1 & mask3Bits;
+	uint squaresCount = mesh.data1 >> 3;
+	uint startSquare = mesh.data2;
+    vec3 normal = vec3(0, 0, 0);
+    normal[normalID >> 1] = -2 * float(normalID & 1u) + 1;
+
+	if (cameraCulling(mesh.center, mesh.size, normal)) {
+		uint commandIndex = atomicCounterIncrement(commandsCount);
+		commands[commandIndex].instanceCount = squaresCount;
+		commands[commandIndex].baseInstance = startSquare;
+	}
+}
+```
+
+### shaders/vertex.glsl
+```
+#version 460 core
+
+out vec4 blockData;
+out vec4 blockColor;
+
+
+#define mask2Bits 3u             // 0b11
+#define mask3Bits 7u             // 0b111
+#define mask4Bits 15u            // 0b1111
+#define mask6Bits 63u            // 0b111111
+#define mask9Bits 511u           // 0b1111111111
+#define mask13Bits 8191u         // 0b1111111111111
+
+const uint faceLightLevels[6] = {
+    12, // x+
+    12, // x-
+    15, // y+
+    9,  // y-
+    12, // z+
+    12, // z-
+};
+
+#define COLOR(r, g, b, variation) vec4(r / 255.0, g / 255.0, b / 255.0, variation)
+const vec4 colors[5] = {
+    // r, g, b,     color variation
+    COLOR(255, 0, 0,        0),     // Error color
+    COLOR(245, 245, 60,     0.1),   // Sand
+    COLOR(15, 220, 0,       0.1),   // Grass
+    COLOR(130, 130, 135,    0.06),  // Stone
+    COLOR(235, 235, 235,    0.06)   // Snow
+};
+
+
+layout(location = 0) in uvec2 square; // x: x (13b), z (13b) ; y: y (9b), width (6b), height (6b), normal (3b), color (8b)
+
+uniform mat4 vpMatrix;
+uniform vec3 position;
+uniform float quadsInterleaving; // Size increase to remove small (1 pixel) gaps between triangles
+
+
+void main() {
+    // Unpack data
+    vec3 cubePos = vec3(square.x & mask13Bits, square.y & mask9Bits, square.x >> 13);
+    uint normalID = (square.y >> 21) & mask3Bits;
+    float width = ((square.y >> 9) & mask6Bits) + 1;
+    float height = ((square.y >> 15) & mask6Bits) + 1;
+    uint normalAxis = normalID >> 1;
+
+    // Position
+    vec3 pos = cubePos;
+    float interleaving = distance(position, cubePos) * quadsInterleaving * 0.001f;
+    pos[1u & ~normalAxis] += -interleaving + ((uint(gl_VertexID) & 1u) ^ uint(normalAxis != 0) ^ (normalID & 1u)) * (width + 2 * interleaving);
+    pos[2u & ~normalAxis] += -interleaving + (gl_VertexID >> 1) * (height + 2 * interleaving);
+    vec3 normal = vec3(0, 0, 0);
+    normal[normalAxis] = -2 * float(normalID & 1u) + 1;
+
+    // Output
+    gl_Position = vpMatrix * vec4(pos, 1);
+    blockData = vec4(pos - normal * 0.5f, faceLightLevels[normalID]);
+    blockColor = colors[square.y >> 24];
+}
+```
+
+### src/Camera.cpp
+```
+#include "Camera.hpp"
+
+#include <cmath>
+#include <glm/glm.hpp>
+#include <glm/gtx/quaternion.hpp>
+
+using namespace std;
+using namespace glm;
+
+
+// Reverse x and z axes to convert from view (x+ = left, z+ = forward) to screen view (x+ = right, z+ = backward)
+static constexpr mat4 viewtoScreenview(-1,0,0,0, 0,1,0,0, 0,0,-1,0, 0,0,0,1);
+
+
+Camera::Camera(int width, int height, float fov, float nearClip, float farClip, vec3 position, float xOrientation, float yOrientation) : 
+    width(width), 
+    height(height), 
+    fov(radians(fov)), 
+    nearClip(nearClip), 
+    farClip(farClip), 
+    position(position),
+    orientation(quat(cos(yOrientation / 2), 0, sin(yOrientation / 2), 0) * quat(cos(xOrientation / 2), sin(xOrientation / 2), 0, 0)) {
+
+    update();
+}
+
+
+void Camera::update() {
+    mat4 view = viewtoScreenview * translate(mat4_cast(quat(orientation.w, -orientation.x, -orientation.y, -orientation.z)), -position);
+    mat4 projection = perspective(fov, (float)width / height, nearClip, farClip);
+    vpMatrix = projection * view;
+    farPlane = vec4(vpMatrix[0][3] - vpMatrix[0][2], vpMatrix[1][3] - vpMatrix[1][2], vpMatrix[2][3] - vpMatrix[2][2], vpMatrix[3][3] - vpMatrix[3][2]);
+    farPlane = farPlane / length(vec3(farPlane));
+    leftPlane = vec4(vpMatrix[0][3] + vpMatrix[0][0], vpMatrix[1][3] + vpMatrix[1][0], vpMatrix[2][3] + vpMatrix[2][0], vpMatrix[3][3] + vpMatrix[3][0]);
+    leftPlane = leftPlane / length(vec3(leftPlane));
+    rightPlane = vec4(vpMatrix[0][3] - vpMatrix[0][0], vpMatrix[1][3] - vpMatrix[1][0], vpMatrix[2][3] - vpMatrix[2][0], vpMatrix[3][3] - vpMatrix[3][0]);
+    rightPlane = rightPlane / length(vec3(rightPlane));
+    upPlane = vec4(vpMatrix[0][3] - vpMatrix[0][1], vpMatrix[1][3] - vpMatrix[1][1], vpMatrix[2][3] - vpMatrix[2][1], vpMatrix[3][3] - vpMatrix[3][1]);
+    upPlane = upPlane / length(vec3(upPlane));
+    downPlane = vec4(vpMatrix[0][3] + vpMatrix[0][1], vpMatrix[1][3] + vpMatrix[1][1], vpMatrix[2][3] + vpMatrix[2][1], vpMatrix[3][3] + vpMatrix[3][1]);
+    downPlane = downPlane / length(vec3(downPlane));
+}
+
+
+void Camera::localTranslate(vec3 translation) {
+    position += orientation * translation;
+}
+
+
+void Camera::globalTranslate(vec3 translation) {
+    position += translation;
+}
+
+
+void Camera::rotate(float xRotation, float yRotation) {
+    orientation = quat(cos(yRotation / 2), 0, sin(yRotation / 2), 0) * orientation * quat(cos(xRotation / 2), sin(xRotation / 2), 0, 0);
+}
+```
+
+### src/CameraController.cpp
+```
+#include "CameraController.hpp"
+
+#include <glm/glm.hpp>
+#include <glm/gtx/quaternion.hpp>
+
+using namespace glm;
+
+
+CameraController::CameraController(Window& window, Camera& camera, int width, int height, float sensitivityX, float sensitivityY, float speed) : 
+    sensitivityX(sensitivityX), 
+    sensitivityY(sensitivityY), 
+    speed(speed),
+    window(window), 
+    camera(camera) {
+}
+
+
+void CameraController::update(float deltaTime) {
+    // Position
+    float xMove = 0;
+    float zMove = 0;
+    if (window.keyPressed(GLFW_KEY_A)) xMove += speed * deltaTime;
+    if (window.keyPressed(GLFW_KEY_D)) xMove -= speed * deltaTime;
+    if (window.keyPressed(GLFW_KEY_W)) zMove += speed * deltaTime;
+    if (window.keyPressed(GLFW_KEY_S)) zMove -= speed * deltaTime;
+    camera.localTranslate(vec3(xMove, 0, zMove));
+
+    // Rotation
+    double dx, dy;
+    window.getCursorMovement(dx, dy);
+    float xRotation = dy * sensitivityY;
+    float yRotation = -dx * sensitivityX;
+    camera.rotate(xRotation, yRotation);
+
+    camera.update();
+}
+```
+
+### src/FPSCounter.cpp
+```
+#include "FPSCounter.hpp"
+
+#include <iostream>
+
+#include "TerminalRenderer.hpp"
+
+using namespace std;
+
+
+static constexpr float refreshRate = 0.5; // Time (in seconds) between each FPS update
+
+
+FPSCounter::FPSCounter(TerminalRenderer& renderer) :
+    TerminalRenderer::Component(renderer, 1),
+    time(0),
+    frames(0) {
+}
+
+
+void FPSCounter::update(float deltaTime) {
+    time += deltaTime;
+    frames++;
+    if (time >= refreshRate) {
+        string line = "FPS: " + to_string(frames / time);
+        Component::update(&line);
+        time = 0;
+        frames = 0;
+    }
+}
+```
+
+### src/GenerateMesh.cpp
+```
+#include "GenerateMesh.hpp"
+
+#include <vector>
+#include <cstdint>
+#include <cmath>
+#include <glm/glm.hpp>
+
+#include "VoxelMesh.hpp"
+#include "Constants.hpp"
+
+using namespace std;
+using namespace glm;
+
+void generateBinarySolidBlocks(uint32_t chunkX, uint32_t chunkZ, int startY, int* IDs, uint32_t* IDIndexes, uint64_t* rows, bvec2* sides);
+void generateXZSides(uint32_t xzIndex, bool after, int startIndex, int startY, int* IDs, uint32_t* IDIndexes, bvec2* sides);
+void generateXZSides(bool after, int startIndex, bvec2* sides);
+void generateBinaryPlanes(uint32_t startXZIndex, int startY, int* IDs, uint32_t* IDIndexes, uint64_t* rows, bvec2* sides, uint64_t* planes, int* idToIndex, int idCount);
+void generateAxisBinaryPlanes(uint32_t axis, uint32_t startXZIndex, int startY, int* IDs, uint32_t* IDIndexes, uint64_t* rows, bvec2* sides, uint64_t* planes, int* idToIndex, int idCount);
+int getID(ivec3 pos, int startXZIndex, int* IDs, uint32_t* IDIndexes);
+void generateOptimizedMesh(uint32_t chunkX, uint32_t chunkZ, int startY, uint64_t* planes, int* indexToId, int idCount, vector<VoxelMesh>& meshes, vector<Square>& squares);
+void generateNormalOptimizedMesh(CubeNormal normal, uint32_t chunkX, uint32_t chunkZ, int startY, uint64_t* planes, int* indexToId, int idCount, vector<VoxelMesh>& meshes, vector<Square>& squares);
+void generateOptimizedPlane(CubeNormal normal, int depth, int idIndex, VoxelMesh& mesh, uint64_t* planes, int* indexToId, int idCount, vector<Square>& squares);
+
+
+void generateMesh(uint32_t chunkStartX, uint32_t chunkStartZ, uint32_t chunkSizeX, uint32_t chunkSizeZ, int* IDs, uint32_t* IDIndexes, vector<VoxelMesh>& meshes, vector<Square>& squares) {
+    // Find IDs in area and y range for each (x, z) chunk
+    bool* containedIDs = new bool[256] { false };
+    int idCount = 0;
+    int* minY = new int[chunkSizeX * chunkSizeZ];
+    int* maxY = new int[chunkSizeX * chunkSizeZ];
+    for (uint32_t chunkZ = chunkStartZ; chunkZ < chunkStartX + chunkSizeX; chunkZ++) {
+        for (uint32_t chunkX = chunkStartX; chunkX < chunkStartZ + chunkSizeZ; chunkX++) {
+            int chunkMinY = VERTICAL_SIZE;
+            int chunkMaxY = 0;
+            for (uint32_t i = IDIndexes[(chunkX + chunkZ * HORIZONTAL_CHUNKS) * CHUNK_SIZE * CHUNK_SIZE]; i < IDIndexes[(chunkX + chunkZ * HORIZONTAL_CHUNKS + 1) * CHUNK_SIZE * CHUNK_SIZE]; i += 2) {
+                if (IDs[i] < chunkMinY) chunkMinY = IDs[i];
+                if (IDs[i] > chunkMaxY) chunkMaxY = IDs[i];
+            }
+            minY[chunkX - chunkStartX + (chunkZ - chunkStartZ) * chunkSizeZ] = chunkMinY;
+            maxY[chunkX - chunkStartX + (chunkZ - chunkStartZ) * chunkSizeZ] = chunkMaxY;
+
+            for (uint32_t i = 1 + IDIndexes[(chunkX + chunkZ * HORIZONTAL_CHUNKS) * CHUNK_SIZE * CHUNK_SIZE]; i < IDIndexes[(chunkX + chunkZ * HORIZONTAL_CHUNKS + 1) * CHUNK_SIZE * CHUNK_SIZE]; i += 2) {
+                if (IDs[i] != 0 && !containedIDs[IDs[i]]) {
+                    containedIDs[IDs[i]] = true;
+                    idCount++;
+                }
+            }
+        }
+    }
+
+    // Map contained IDs to smallest range possible
+    int* idToIndex = new int[256];
+    int* indexToId = new int[idCount];
+    int index = 0;
+    for (int id = 0; id < 256; id++) {
+        if (containedIDs[id]) {
+            idToIndex[id] = index;
+            indexToId[index] = id;
+            index++;
+        }
+    }
+    delete[] containedIDs;
+
+    // Generate all chunks
+    uint64_t* rows = new uint64_t[CHUNK_SIZE * CHUNK_SIZE * 3];
+    bvec2* sides = new bvec2[CHUNK_SIZE * CHUNK_SIZE * 3];
+    uint64_t* planes = new uint64_t[CHUNK_SIZE * CHUNK_SIZE * idCount * 6];
+    for (uint32_t chunkZ = chunkStartZ; chunkZ < chunkStartZ + chunkSizeZ; chunkZ++) {
+        for (uint32_t chunkX = chunkStartX; chunkX < chunkStartX + chunkSizeX; chunkX++) {
+            uint32_t startXZIndex = (chunkX + chunkZ * HORIZONTAL_CHUNKS) * CHUNK_SIZE * CHUNK_SIZE;
+            int xzStartY = minY[chunkX - chunkStartX + (chunkZ - chunkStartZ) * chunkSizeZ];
+            int sizeY = maxY[chunkX - chunkStartX + (chunkZ - chunkStartZ) * chunkSizeZ] - xzStartY + 1;
+            for (int chunkY = 0; chunkY < (int)ceil((float)sizeY / CHUNK_SIZE); chunkY++) {
+                // Generate one chunk
+                fill(rows, rows + CHUNK_SIZE * CHUNK_SIZE * 3, 0);
+                fill(sides, sides + CHUNK_SIZE * CHUNK_SIZE * 3, bvec2(false, false));
+                fill(planes, planes + CHUNK_SIZE * CHUNK_SIZE * idCount * 6, 0);
+                int startY = xzStartY + chunkY * CHUNK_SIZE;
+                generateBinarySolidBlocks(chunkX, chunkZ, startY, IDs, IDIndexes, rows, sides);
+                generateBinaryPlanes(startXZIndex, startY, IDs, IDIndexes, rows, sides, planes, idToIndex, idCount);
+                generateOptimizedMesh(chunkX, chunkZ, startY, planes, indexToId, idCount, meshes, squares);
+            }
+        }
+    }
+
+    delete[] minY;
+    delete[] maxY;
+    delete[] idToIndex;
+    delete[] indexToId;
+    delete[] rows;
+    delete[] sides;
+    delete[] planes;
+}
+
+
+// rows: bit rows containing 1 if the block is solid, 0 otherwise
+// sides: 2 bools, first is true if the block before the row is solid, 0 otherwise, second is true if the block after the row is solid, 0 otherwise
+// rows and sides contain chunkSize * chunkSize elements for each axis (x, z, y)
+void generateBinarySolidBlocks(uint32_t chunkX, uint32_t chunkZ, int startY, int* IDs, uint32_t* IDIndexes, uint64_t* rows, bvec2* sides) {
+    uint32_t xzIndex = (chunkX + chunkZ * HORIZONTAL_CHUNKS) * CHUNK_SIZE * CHUNK_SIZE;
+    for (int z = 0; z < CHUNK_SIZE; z++) { // Iter chunk z
+        for (int x = 0; x < CHUNK_SIZE; x++) { // Iter chunk x
+            bvec2 ySide = bvec2(false, false);
+            for (uint32_t i = IDIndexes[xzIndex]; i < IDIndexes[xzIndex + 1]; i += 2) { // Iter world y (only solid blocks in chunk)
+                int y = IDs[i] - startY;
+                if (y >= 0 && y < CHUNK_SIZE) {
+                    rows[y + z * CHUNK_SIZE] |= (uint64_t)1 << x; // x
+                    rows[x + z * CHUNK_SIZE + CHUNK_SIZE * CHUNK_SIZE] |= (uint64_t)1 << y; // y
+                    rows[y + x * CHUNK_SIZE + 2 * CHUNK_SIZE * CHUNK_SIZE] |= (uint64_t)1 << z; // z
+                }
+                else if (y == -1) ySide.x = true;
+                else if (y == CHUNK_SIZE) ySide.y = true;
+            }
+            sides[x + z * CHUNK_SIZE + CHUNK_SIZE * CHUNK_SIZE] = ySide;
+            xzIndex++;
+        }
+    }
+
+    // x and z sides
+    if (chunkX > 0) {
+        uint32_t otherStartXZIndex = (chunkX - 1 + chunkZ * HORIZONTAL_CHUNKS) * CHUNK_SIZE * CHUNK_SIZE;
+        for (int z = 0; z < CHUNK_SIZE; z++)
+            generateXZSides(otherStartXZIndex + CHUNK_SIZE - 1 + z * CHUNK_SIZE, false, z * CHUNK_SIZE, startY, IDs, IDIndexes, sides);
+    }
+    else {
+        for (int z = 0; z < CHUNK_SIZE; z++)
+            generateXZSides(false, z * CHUNK_SIZE, sides);
+    }
+    if (chunkX < HORIZONTAL_CHUNKS - 1) {
+        uint32_t otherStartXZIndex = (chunkX + 1 + chunkZ * HORIZONTAL_CHUNKS) * CHUNK_SIZE * CHUNK_SIZE;
+        for (int z = 0; z < CHUNK_SIZE; z++)
+            generateXZSides(otherStartXZIndex + z * CHUNK_SIZE, true, z * CHUNK_SIZE, startY, IDs, IDIndexes, sides);
+    }
+    else {
+        for (int z = 0; z < CHUNK_SIZE; z++)
+            generateXZSides(true, z * CHUNK_SIZE, sides);
+    }
+    if (chunkZ > 0) {
+        uint32_t otherStartXZIndex = (chunkX + (chunkZ - 1) * HORIZONTAL_CHUNKS) * CHUNK_SIZE * CHUNK_SIZE;
+        for (int x = 0; x < CHUNK_SIZE; x++)
+            generateXZSides(otherStartXZIndex + x + (CHUNK_SIZE - 1) * CHUNK_SIZE, false, x * CHUNK_SIZE + 2 * CHUNK_SIZE * CHUNK_SIZE, startY, IDs, IDIndexes, sides);
+    }
+    else {
+        for (int x = 0; x < CHUNK_SIZE; x++)
+            generateXZSides(false, x * CHUNK_SIZE + 2 * CHUNK_SIZE * CHUNK_SIZE, sides);
+    }
+    if (chunkZ < HORIZONTAL_CHUNKS - 1) {
+        uint32_t otherStartXZIndex = (chunkX + (chunkZ + 1) * HORIZONTAL_CHUNKS) * CHUNK_SIZE * CHUNK_SIZE;
+        for (int x = 0; x < CHUNK_SIZE; x++)
+            generateXZSides(otherStartXZIndex + x, true, x * CHUNK_SIZE + 2 * CHUNK_SIZE * CHUNK_SIZE, startY, IDs, IDIndexes, sides);
+    }
+    else {
+        for (int x = 0; x < CHUNK_SIZE; x++)
+            generateXZSides(true, x * CHUNK_SIZE + 2 * CHUNK_SIZE * CHUNK_SIZE, sides);
+    }
+}
+
+
+// Generate side row at (x, z)
+void generateXZSides(uint32_t xzIndex, bool after, int startIndex, int startY, int* IDs, uint32_t* IDIndexes, bvec2* sides) {
+    uint32_t i = IDIndexes[xzIndex];
+    for (int y = 0; y < CHUNK_SIZE; y++) {
+        if (y == IDs[i] - startY) {
+            sides[startIndex + y] = bvec2(after ? sides[startIndex + y].x : true, after ? true : sides[startIndex + y].y);
+            i += 2;
+            if (i >= IDIndexes[xzIndex + 1]) return;
+        }
+    }
+}
+
+// Generate filled side row at (x, z)
+void generateXZSides(bool after, int startIndex, bvec2* sides) {
+    for (int y = 0; y < CHUNK_SIZE; y++) {
+        sides[startIndex + y] = bvec2(after ? sides[startIndex + y].x : true, after ? true : sides[startIndex + y].y);
+    }
+}
+
+
+// planes: 64 bits rows containing 1 if the face must be rendered, 0 otherwise
+// planes contains chunkSize (rows in one plane) * chunkSize (planes in one direction) * nbrIDs * 6 (x+, z+, y+, x-, z-, y-)
+void generateBinaryPlanes(uint32_t startXZIndex, int startY, int* IDs, uint32_t* IDIndexes, uint64_t* rows, bvec2* sides, uint64_t* planes, int* idToIndex, int idCount) {
+    generateAxisBinaryPlanes(0, startXZIndex, startY, IDs, IDIndexes, rows, sides, planes, idToIndex, idCount);
+    generateAxisBinaryPlanes(1, startXZIndex, startY, IDs, IDIndexes, rows, sides, planes, idToIndex, idCount);
+    generateAxisBinaryPlanes(2, startXZIndex, startY, IDs, IDIndexes, rows, sides, planes, idToIndex, idCount);
+}
+
+
+// Generate binary planes for one axis
+void generateAxisBinaryPlanes(uint32_t axis, uint32_t startXZIndex, int startY, int* IDs, uint32_t* IDIndexes, uint64_t* rows, bvec2* sides, uint64_t* planes, int* idToIndex, int idCount) {
+    ivec3 beforeX = ivec3(0, startY, 0);
+    for (int y = 0; y < CHUNK_SIZE; y++) { // Iter plane rows
+        ivec3 pos = beforeX;
+        for (int x = 0; x < CHUNK_SIZE; x++) { // Iter plane columns
+            uint64_t row = rows[x + y * CHUNK_SIZE + axis * CHUNK_SIZE * CHUNK_SIZE];
+            bvec2 side = sides[x + y * CHUNK_SIZE + axis * CHUNK_SIZE * CHUNK_SIZE];
+
+            // Find faces to render in positive direction and add them to planes
+            uint64_t shiftedRow = row >> 1;
+            if (side.y) shiftedRow |= (uint64_t)1 << 63;
+            uint64_t faceRow = row & ~shiftedRow;
+            while (faceRow != 0) {
+                int depth = __builtin_ctzll(faceRow);
+                faceRow &= ~((uint64_t)1 << depth);
+                ivec3 posDepth = pos;
+                posDepth[axis] += depth;
+                int id = getID(posDepth, startXZIndex, IDs, IDIndexes);
+                if (id != 0) {
+                    planes[y + depth * CHUNK_SIZE + idToIndex[id] * CHUNK_SIZE * CHUNK_SIZE + 2 * axis * CHUNK_SIZE * CHUNK_SIZE * idCount]
+                        |= (uint64_t)1 << x;
+                }
+            }
+
+            // Find faces to render in negative direction and add them to planes
+            shiftedRow = row << 1;
+            if (side.x) shiftedRow |= 1;
+            faceRow = row & ~shiftedRow;
+            while (faceRow != 0) {
+                int depth = __builtin_ctzll(faceRow);
+                faceRow &= ~((uint64_t)1 << depth);
+                ivec3 posDepth = pos;
+                posDepth[axis] += depth;
+                int id = getID(posDepth, startXZIndex, IDs, IDIndexes);
+                if (id != 0) {
+                    planes[y + depth * CHUNK_SIZE + idToIndex[id] * CHUNK_SIZE * CHUNK_SIZE + (2 * axis + 1) * CHUNK_SIZE * CHUNK_SIZE * idCount]
+                        |= (uint64_t)1 << x;
+                }
+            }
+
+            pos[widthAxis(axis)]++;
+        }
+        beforeX[heightAxis(axis)]++;
+    }
+}
+
+
+int getID(ivec3 pos, int startXZIndex, int* IDs, uint32_t* IDIndexes) {
+    for (uint32_t i = IDIndexes[startXZIndex + pos.x + pos.z * CHUNK_SIZE]; i < IDIndexes[startXZIndex + pos.x + pos.z * CHUNK_SIZE + 1]; i += 2) {
+        if (IDs[i] == pos.y) return IDs[i + 1];
+    }
+    return 0; // Shouldn't happen
+}
+
+
+void generateOptimizedMesh(uint32_t chunkX, uint32_t chunkZ, int startY, uint64_t* planes, int* indexToId, int idCount, vector<VoxelMesh>& meshes, vector<Square>& squares) {
+    generateNormalOptimizedMesh(CubeNormal::xPositive, chunkX, chunkZ, startY, planes, indexToId, idCount, meshes, squares);
+    generateNormalOptimizedMesh(CubeNormal::xNegative, chunkX, chunkZ, startY, planes, indexToId, idCount, meshes, squares);
+    generateNormalOptimizedMesh(CubeNormal::yPositive, chunkX, chunkZ, startY, planes, indexToId, idCount, meshes, squares);
+    generateNormalOptimizedMesh(CubeNormal::yNegative, chunkX, chunkZ, startY, planes, indexToId, idCount, meshes, squares);
+    generateNormalOptimizedMesh(CubeNormal::zPositive, chunkX, chunkZ, startY, planes, indexToId, idCount, meshes, squares);
+    generateNormalOptimizedMesh(CubeNormal::zNegative, chunkX, chunkZ, startY, planes, indexToId, idCount, meshes, squares);
+}
+
+
+void generateNormalOptimizedMesh(CubeNormal normal, uint32_t chunkX, uint32_t chunkZ, int startY, uint64_t* planes, int* indexToId, int idCount, vector<VoxelMesh>& meshes, vector<Square>& squares) {
+    VoxelMesh mesh = VoxelMesh(normal, chunkX, chunkZ, startY);
+    for (int i = 0; i < idCount; i++) {
+        for (int depth = 0; depth < CHUNK_SIZE; depth++) {
+            generateOptimizedPlane(normal, depth, i, mesh, planes, indexToId, idCount, squares);
+        }
+    }
+    if (mesh.squaresCount != 0) meshes.push_back(mesh);
+}
+
+
+void generateOptimizedPlane(CubeNormal normal, int depth, int idIndex, VoxelMesh& mesh, uint64_t* planes, int* indexToId, int idCount, vector<Square>& squares) {
+    int startIndex =
+        (int)normal * CHUNK_SIZE * CHUNK_SIZE * idCount
+        + idIndex * CHUNK_SIZE * CHUNK_SIZE
+        + depth * CHUNK_SIZE;
+    for (int y = 0; y < CHUNK_SIZE; y++) { // Iter plane rows
+        uint64_t row = planes[startIndex + y];
+        int x = row == 0 ? 64 : __builtin_ctzll(row);
+        row >>= x;
+        while (x < CHUNK_SIZE) {
+            // Expand in x
+            int width = ~row == 0 ? 64 : __builtin_ctzll(~row);
+            uint64_t checkMask = (row << (64 - width)) >> (64 - width - x);
+            uint64_t deleteMask = ~checkMask;
+            row >>= width;
+
+            // Expand in y
+            int height = 1;
+            while (y + height < CHUNK_SIZE) {
+                if ((planes[startIndex + y + height] & checkMask) != checkMask) break;
+                planes[startIndex + y + height] &= deleteMask;
+                height++;
+            }
+
+            // Add the rectangle
+            squares.push_back(mesh.add(x, y, depth, width, height, indexToId[idIndex]));
+            x += width;
+
+            // Skip zeros
+            int skip = row == 0 ? 64 : __builtin_ctzll(row);
+            x += skip;
+            row >>= skip;
+        }
+    }
+}
+```
+
+### src/GenerateTerrain.cpp
+```
+#include "GenerateTerrain.hpp"
+
+#include <cstdint>
+#include <cmath>
+#include <vector>
+
+#include "Constants.hpp"
+
+using namespace std;
+
+void generateHeightMap(int* heightMap, int* ids);
+void generateIDs(int* heightMap, int* ids, vector<int>& IDs, uint32_t* IDIndexes);
+
+
+static constexpr int amplitude = 80;
+static constexpr int blockPeriod = 500;
+static constexpr int idHeight = 50;
+
+
+void generateTerrain(vector<int>& IDs, uint32_t* IDIndexes) {
+    int* heightMap = new int[HORIZONTAL_SIZE * HORIZONTAL_SIZE];
+    int* ids = new int[HORIZONTAL_SIZE * HORIZONTAL_SIZE];
+    generateHeightMap(heightMap, ids);
+    generateIDs(heightMap, ids, IDs, IDIndexes);
+    delete[] heightMap;
+    delete[] ids;
+}
+
+
+void generateHeightMap(int* heightMap, int* ids) {
+    int index = 0;
+    for (int z = 0; z < HORIZONTAL_SIZE; z++) {
+        for (int x = 0; x < HORIZONTAL_SIZE; x++) {
+            int height = 1 + (int)(amplitude * (sin(2 * M_PI * x / blockPeriod) * sin(2 * M_PI * z / blockPeriod) + 1));
+            heightMap[index] = height;
+            ids[index] = height / idHeight + 1;
+            index++;
+        }
+    }
+}
+
+
+void generateIDs(int* heightMap, int* ids, vector<int>& IDs, uint32_t* IDIndexes) {
+    for (int chunkZ = 0; chunkZ < HORIZONTAL_CHUNKS; chunkZ++) {
+        for (int chunkX = 0; chunkX < HORIZONTAL_CHUNKS; chunkX++) {
+            for (int zInChunk = 0; zInChunk < CHUNK_SIZE; zInChunk++) {
+                for (int xInChunk = 0; xInChunk < CHUNK_SIZE; xInChunk++) {
+                    int x = chunkX * CHUNK_SIZE + xInChunk;
+                    int z = chunkZ * CHUNK_SIZE + zInChunk;
+                    int y = heightMap[x + z * HORIZONTAL_SIZE];
+                    IDIndexes[(chunkX + chunkZ * HORIZONTAL_CHUNKS) * CHUNK_SIZE * CHUNK_SIZE + xInChunk + zInChunk * CHUNK_SIZE] = IDs.size();
+
+                    // Add zeros below the block to not render invisible faces, then add the block
+                    int minSurroundingY = y - 1;
+                    if (x > 0) minSurroundingY = min(minSurroundingY, heightMap[x - 1 + z * HORIZONTAL_SIZE]);
+                    if (x < HORIZONTAL_SIZE - 1) minSurroundingY = min(minSurroundingY, heightMap[x + 1 + z * HORIZONTAL_SIZE]);
+                    if (z > 0) minSurroundingY = min(minSurroundingY, heightMap[x + (z - 1) * HORIZONTAL_SIZE]);
+                    if (z < HORIZONTAL_SIZE - 1) minSurroundingY = min(minSurroundingY, heightMap[x + (z + 1) * HORIZONTAL_SIZE]);
+                    for (int belowY = minSurroundingY; belowY < y; belowY++) {
+                        IDs.push_back(belowY);
+                        IDs.push_back(0);
+                    }
+                    IDs.push_back(y);
+                    IDs.push_back(ids[x + z * HORIZONTAL_SIZE]);
+                }
+            }
+        }
+    }
+    IDIndexes[HORIZONTAL_SIZE * HORIZONTAL_SIZE] = IDs.size();
+}
+```
+
+### src/TerminalRenderer.cpp
+```
+#include "TerminalRenderer.hpp"
+
+#include <cstdio>
+#include <cstring>
+#include <iostream>
+#if defined(_WIN32)
+#include <Windows.h>
+#elif defined(__linux__) || defined(__APPLE__)
+#include <sys/ioctl.h>
+#endif
+
+using namespace std;
+
+
+
+int getTerminalWidth() {
+#if defined(_WIN32)
+    CONSOLE_SCREEN_BUFFER_INFO sbInfo;
+    GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &sbInfo);
+    return sbInfo.dwSize.X;
+#elif defined(__linux__) || defined(__APPLE__)
+    struct winsize w;
+    ioctl(fileno(stdout), TIOCGWINSZ, &w);
+    return (int)(w.ws_col);
+#endif
+}
+
+
+
+TerminalRenderer::TerminalRenderer(FILE* output) :
+    output(output),
+    lines(vector<char>()),
+    lineCount(0),
+    width(getTerminalWidth()) {   
+}
+
+
+void TerminalRenderer::render() {
+    fprintf(output, "\u001b[%dA", lineCount);
+    fwrite(lines.data(), 1, lines.size(), output);
+}
+
+
+int TerminalRenderer::addComponent(int lineSize) {
+    int lineStart = lineCount;
+    lineCount += lineSize;
+    lines.insert(lines.end(), lineSize * (width - 1), ' ');
+    lines.push_back('\n');
+    fwrite(lines.data() + lineStart * width, 1, lineSize * width, output);
+    return lineStart;
+}
+
+
+void TerminalRenderer::updateComponent(const string* componentLines, int lineStart, int lineSize) {
+    for (int i = 0; i < lineSize; i++) {
+        size_t length = min(componentLines[i].length(), (size_t)width - 1);
+        memcpy(lines.data() + (lineStart + i) * width, componentLines[i].data(), length);
+        memset(lines.data() + (lineStart + i) * width + length, ' ', width - 1 - length);
+    }
+}
+
+
+
+TerminalRenderer::Component::Component(TerminalRenderer& renderer, int lineSize) :
+    renderer(renderer),
+    lineStart(renderer.addComponent(lineSize)),
+    lineSize(lineSize) {
+}
+
+
+void TerminalRenderer::Component::update(const string* lines) {
+    renderer.updateComponent(lines, lineStart, lineSize);
+}
+```
+
+### src/TerrainRenderer.cpp
+```
+#include "TerrainRenderer.hpp"
+
+#include <cstdlib>
+#include <vector>
+
+#include "GLObjects/OpenGL.hpp"
+#include "Camera.hpp"
+#include "VoxelMesh.hpp"
+
+using namespace gl;
+using namespace glm;
+using namespace std;
+
+
+static constexpr int threadGroupSize = 64; // Number of threads in a work group for the compute shader
+static constexpr float quadsInterleaving = 0.05f; // Remove small (1 pixel) gaps between triangles
+
+
+TerrainRenderer::TerrainRenderer(Camera& camera) :
+    camera(camera),
+    shader("shaders/vertex.glsl", "shaders/fragment.glsl"),
+    graphicsPositionUniform(shader, "position"),
+    vpMatrixUniform(shader, "vpMatrix"),
+    frustumCulling("shaders/frustumCulling.glsl"),
+    frustumPositionUniform(frustumCulling, "position"),
+    farPlaneUniform(frustumCulling, "farPlane"),
+    leftPlaneUniform(frustumCulling, "leftPlane"),
+    rightPlaneUniform(frustumCulling, "rightPlane"),
+    upPlaneUniform(frustumCulling, "upPlane"),
+    downPlaneUniform(frustumCulling, "downPlane") {
+    Uniform(shader, "seed").setValue(shader, rand() / (float)RAND_MAX);
+    Uniform(shader, "quadsInterleaving").setValue(shader, quadsInterleaving);
+    vertexArray.use();
+    commandsBuffer.use(BufferType::indirectDraw);
+    paramsBuffer.use(BufferType::parameters);
+    meshDataBuffer.use(ShaderBufferType::storage, 0);
+    commandsBuffer.use(ShaderBufferType::storage, 1);
+    paramsBuffer.use(ShaderBufferType::counters, 0);
+}
+
+
+void TerrainRenderer::addMeshes(const vector<VoxelMesh>& meshes, const vector<Square>& squares) {
+    uint32_t startSquare = this->squares.size();
+    for (VoxelMesh mesh : meshes) {
+        meshData.push_back(MeshData(mesh, startSquare));
+        startSquare += mesh.squaresCount;
+    }
+    this->squares.insert(this->squares.end(), squares.begin(), squares.end());
+}
+
+
+void TerrainRenderer::prepareRender() {
+    // Add empty meshes at the end to have a size multiple of THREAD_GROUP_SIZE
+    while (meshData.size() % threadGroupSize != 0) meshData.push_back(MeshData(vec3(0), vec3(0), CubeNormal::xPositive, 0, 0));
+    workGroups = meshData.size() / threadGroupSize;
+
+    // Create buffers
+    squaresBuffer.setDataUnique(squares.data(), squares.size(), UniqueBufferUsage::none);
+    IndirectDrawArgs* commands = new IndirectDrawArgs[meshData.size()];
+    fill(commands, commands + meshData.size(), IndirectDrawArgs { 4, 0, 0, 0 });
+    commandsBuffer.setDataUnique(commands, meshData.size(), UniqueBufferUsage::none);
+    delete[] commands;
+    meshDataBuffer.setDataUnique(meshData.data(), meshData.size(), UniqueBufferUsage::none);
+    paramsBuffer.setDataUnique<uint32_t>(nullptr, 1, UniqueBufferUsage::none);
+
+    // Create vertex array
+    vertexArray.setBuffer(0, squaresBuffer, 2 * sizeof(uint32_t), 0, 1);
+    vertexArray.setAttributeFormat(0, IntAttributeType::uint32, 2, 0);
+    vertexArray.setAttributeBuffer(0, 0);
+}
+
+
+void TerrainRenderer::render() {
+    // Frustum culling
+    frustumPositionUniform.setValue(frustumCulling, camera.position);
+    farPlaneUniform.setValue(frustumCulling, camera.farPlane);
+    leftPlaneUniform.setValue(frustumCulling, camera.leftPlane);
+    rightPlaneUniform.setValue(frustumCulling, camera.rightPlane);
+    upPlaneUniform.setValue(frustumCulling, camera.upPlane);
+    downPlaneUniform.setValue(frustumCulling, camera.downPlane);
+    paramsBuffer.clearData(sizeof(uint32_t));
+    frustumCulling.use();
+    compute(workGroups);
+    barrier(MemoryBarrier::indirectCommand);
+
+    // Draw
+    graphicsPositionUniform.setValue(shader, camera.position);
+    vpMatrixUniform.setValue(shader, camera.vpMatrix);
+    shader.use();
+    drawIndirectParam(GeometryMode::triangleStrip, meshData.size());
+}
+```
+
+### src/VoxelMesh.cpp
+```
+#include "VoxelMesh.hpp"
+
+#include <glm/glm.hpp>
+
+#include "Constants.hpp"
+
+using namespace glm;
+
+
+VoxelMesh::VoxelMesh(CubeNormal normal, int chunkX, int chunkZ, int startY) : 
+    position(u32vec3(chunkX * CHUNK_SIZE, startY, chunkZ * CHUNK_SIZE)), 
+    normal(normal),
+    squaresCount(0),
+    minX(CHUNK_SIZE),
+    minY(CHUNK_SIZE),
+    minZ(CHUNK_SIZE),
+    maxX(0),
+    maxY(0),
+    maxZ(0) {
+    position[axis(normal)] += normalPositive(normal);
+}
+
+
+Square VoxelMesh::add(int x, int y, int depth, int width, int height, int colorID) {
+    squaresCount++;
+    u32vec3 min = vec3(0, 0, 0);
+    min[widthAxis(axis(normal))] += x;
+    min[heightAxis(axis(normal))] += y;
+    min[axis(normal)] += depth;
+    u32vec3 max = min;
+    max[widthAxis(axis(normal))] += width;
+    max[heightAxis(axis(normal))] += height;
+    if (min.x < minX) minX = min.x;
+    if (min.y < minY) minY = min.y;
+    if (min.z < minZ) minZ = min.z;
+    if (max.x > maxX) maxX = max.x;
+    if (max.y > maxY) maxY = max.y;
+    if (max.z > maxZ) maxZ = max.z;
+    u32vec3 pos = min + position;
+    return Square(pos.x, pos.y, pos.z, width, height, normal, colorID);
+}
+```
+
+### src/main.cpp
+```
+#include <cstdint>
+#include <cstdio>
+#include <iostream>
+#include <chrono>
+#include <thread>
+#include <glm/glm.hpp>
+#include <glm/gtc/type_ptr.hpp>
+#include <glm/gtx/string_cast.hpp>
+
+#include "GLObjects/Window.hpp"
+#include "GLObjects/OpenGL.hpp"
+#include "Camera.hpp"
+#include "CameraController.hpp"
+#include "VoxelMesh.hpp"
+#include "TerrainRenderer.hpp"
+#include "GenerateTerrain.hpp"
+#include "GenerateMesh.hpp"
+#include "Constants.hpp"
+#include "TerminalRenderer.hpp"
+#include "FPSCounter.hpp"
+
+using namespace std;
+using namespace this_thread;
+using namespace chrono;
+using namespace chrono_literals;
+using namespace glm;
+
+
+static constexpr int windowWidth = 1920;
+static constexpr int windowHeight = 1080;
+static constexpr const char* title = "Voxel Terrain";
+static constexpr float backgroundRed = 0, backgroundGreen = 0.8, backgroundBlue = 1.0;
+
+
+int main() {
+    // Generate terrain
+    vector<int> IDs;
+    uint32_t* IDIndexes = new uint32_t[HORIZONTAL_SIZE * HORIZONTAL_SIZE + 1];
+    generateTerrain(IDs, IDIndexes);
+    vector<VoxelMesh> meshes;
+    vector<Square> squares;
+    generateMesh(0, 0, HORIZONTAL_CHUNKS, HORIZONTAL_CHUNKS, IDs.data(), IDIndexes, meshes, squares);
+    delete[] IDIndexes;
+    
+    // Initialize objects
+    Window window(windowWidth, windowHeight, title);
+    gl::init(windowWidth, windowHeight);
+    Camera camera(windowWidth, windowHeight, 60, 0.1, 9999, vec3(0, 400, 0), pi<float>() / 6, pi<float>() / 4);
+    CameraController controller(window, camera, windowWidth, windowHeight);
+    TerrainRenderer renderer(camera);
+    renderer.addMeshes(meshes, squares);
+    renderer.prepareRender();
+    TerminalRenderer terminal(stdout);
+    FPSCounter fpsCounter(terminal);
+    
+    // Main loop
+    system_clock::time_point lastTime = system_clock::now();
+    while (!window.closed()) {
+        // Delta time
+        system_clock::time_point time = system_clock::now();
+        float deltaTime = duration_cast<microseconds>(time - lastTime).count() / 1000000.0f;
+        lastTime = time;
+
+        // Update
+        controller.update(deltaTime);
+        gl::setBackground(backgroundRed, backgroundGreen, backgroundBlue);
+        renderer.render();
+        fpsCounter.update(deltaTime);
+        terminal.render();
+        window.update();
+    }
+}
+```
+
+### include/GLObjects/Buffer.hpp
+```
+#ifndef BUFFER_H
+#define BUFFER_H
+
+#include <cstdint>
+#include <memory>
+#include <glad/glad.h>
+
+namespace gl {
+
+enum class BufferUsage : GLenum {
+    streamDraw = GL_STREAM_DRAW,
+    streamRead = GL_STREAM_READ,
+    streamCopy = GL_STREAM_COPY,
+    staticDraw = GL_STATIC_DRAW,
+    staticRead = GL_STATIC_READ,
+    staticCopy = GL_STATIC_COPY,
+    dynamicDraw = GL_DYNAMIC_DRAW,
+    dynamicRead = GL_DYNAMIC_READ,
+    dynamicCopy = GL_DYNAMIC_COPY
+};
+
+
+enum class UniqueBufferUsage : GLbitfield {
+    dynamicStorage = GL_DYNAMIC_STORAGE_BIT,
+    mapRead = GL_MAP_READ_BIT,
+    mapWrite = GL_MAP_WRITE_BIT,
+    mapPersistent = GL_MAP_PERSISTENT_BIT,
+    mapCoherent = GL_MAP_COHERENT_BIT,
+    clientStorage = GL_CLIENT_STORAGE_BIT,
+    none = 0
+};
+
+
+enum class BufferType : GLenum {
+    vertices = GL_ARRAY_BUFFER,
+    indices = GL_ELEMENT_ARRAY_BUFFER,
+    indirectDraw = GL_DRAW_INDIRECT_BUFFER,
+    indirectDispatch = GL_DISPATCH_INDIRECT_BUFFER,
+    parameters = GL_PARAMETER_BUFFER,
+    pixelPack = GL_PIXEL_PACK_BUFFER,
+    pixelUnpack = GL_PIXEL_UNPACK_BUFFER,
+    query = GL_QUERY_BUFFER,
+    texture = GL_TEXTURE_BUFFER,
+    copyRead = GL_COPY_READ_BUFFER,
+    copyWrite = GL_COPY_WRITE_BUFFER,
+    storage = GL_SHADER_STORAGE_BUFFER,
+    uniform = GL_UNIFORM_BUFFER,
+    counters = GL_ATOMIC_COUNTER_BUFFER,
+    transformFeedback = GL_TRANSFORM_FEEDBACK_BUFFER
+};
+
+
+enum class ShaderBufferType : GLenum {
+    storage = GL_SHADER_STORAGE_BUFFER,
+    uniform = GL_UNIFORM_BUFFER,
+    counters = GL_ATOMIC_COUNTER_BUFFER,
+    transformFeedback = GL_TRANSFORM_FEEDBACK_BUFFER
+};
+
+
+class Buffer {
+    friend class VertexArray;
+
+public:
+    Buffer() {
+        glCreateBuffers(1, &buffer);
+    }
+
+    ~Buffer() {
+        glDeleteBuffers(1, &buffer);
+    }
+
+    Buffer(Buffer&& other) : buffer(other.buffer) {
+        other.buffer = 0;
+    }
+
+    Buffer& operator=(Buffer other) {
+        std::swap(buffer, other.buffer);
+        return *this;
+    }
+
+    Buffer(Buffer const&) = delete;
+
+    /**
+     * @brief Set the data of the buffer. No more calls to setDataUnique() can then be made.
+     * @param data Data to store in the buffer
+     * @param n Number of elements to set
+     * @param usage Usage of the buffer
+    **/
+    template<typename T> void setData(T const* data, uint32_t n, BufferUsage usage) const {
+        glNamedBufferData(buffer, n * sizeof(T), data, (GLenum)usage);
+    }
+
+    /**
+     * @brief Set the data of the buffer. No more calls to setData() or setDataUnique() can then be made.
+     * @param data Data to store in the buffer
+     * @param n Number of elements to set
+     * @param usage Usage of the buffer
+    **/
+    template<typename T> void setDataUnique(T const* data, uint32_t n, UniqueBufferUsage usage) const {
+        glNamedBufferStorage(buffer, n * sizeof(T), data, (GLenum)usage);
+    }
+
+    /**
+     * @brief Modify a part of the buffer without resizing it
+     * @param data New data to store in the buffer
+     * @param n Number of elements to modify
+     * @param start First element to get
+    **/
+    template<typename T> void modifyData(T const* data, uint32_t n, uint32_t start = 0) const {
+        glNamedBufferSubData(buffer, start * sizeof(T), n * sizeof(T), data);
+    }
+
+    /**
+     * @brief Get a part of the buffer
+     * @param n Number of elements to get
+     * @param start First element to get
+     * @return Data in the buffer
+    **/
+    template<typename T> std::unique_ptr<T[]> getData(uint32_t n, uint32_t start = 0) const {
+        std::unique_ptr<T[]> data(new T[n]);
+        glGetNamedBufferSubData(buffer, start * sizeof(T), n * sizeof(T), data.get());
+        return data;
+    }
+
+    /**
+     * @brief Set the data of the buffer to zero
+    **/
+    void clearData() const {
+        glClearNamedBufferData(buffer, GL_R32UI, GL_RED_INTEGER, GL_UNSIGNED_INT, nullptr);
+    }
+
+    /**
+     * @brief Set a part of the data of the buffer to zero
+     * @param size Size of the part of the buffer to clear (must be a multiple of 4 bytes)
+     * @param offset Start of the part of the buffer to clear
+    **/
+    void clearData(uint32_t size, uint32_t offset = 0) const {
+        glClearNamedBufferSubData(buffer, GL_R32UI, offset, size, GL_RED_INTEGER, GL_UNSIGNED_INT, nullptr);
+    }
+
+    /**
+     * @brief Use the buffer for future OpenGL calls
+     * @param type Buffer type
+    **/
+    void use(BufferType type) const {
+        glBindBuffer((GLenum)type, buffer);
+    }
+
+    /**
+     * @brief Use the buffer for future OpenGL calls
+     * @param type Buffer type
+     * @param index Buffer index
+    **/
+    void use(ShaderBufferType type, uint32_t index) const {
+        glBindBufferBase((GLenum)type, index, buffer);
+    }
+
+private:
+    GLuint buffer;
+};
+
+
+struct IndirectDrawArgs {
+    uint32_t vertexCount = 0;
+    uint32_t instanceCount = 1;
+    uint32_t firstVertex = 0;
+    uint32_t firstInstance = 0;
+};
+
+
+struct IndirectIndexedDrawArgs {
+    uint32_t indexCount = 0;
+    uint32_t instanceCount = 1;
+    uint32_t firstIndex = 0;
+    int32_t baseVertex = 0;
+    uint32_t firstInstance = 0;
+};
+
+
+struct IndirectDispatchArgs {
+    uint32_t numGroupsX = 1;
+    uint32_t numGroupsY = 1;
+    uint32_t numGroupsZ = 1;
+};
+
+}
+
+#endif
+```
+
+### include/GLObjects/OpenGL.hpp
+```
+#ifndef RENDER_H
+#define RENDER_H
+
+#include <cstdint>
+#include <glad/glad.h>
+
+#include "GLObjects/Buffer.hpp"
+#include "GLObjects/VertexArray.hpp"
+#include "GLObjects/Shader.hpp"
+#include "GLObjects/Uniform.hpp"
+
+namespace gl {
+
+enum class GeometryMode : GLenum {
+    points = GL_POINTS,
+    lineStrip = GL_LINE_STRIP, 
+    lineLoop = GL_LINE_LOOP, 
+    lines = GL_LINES, 
+    lineStripAdjacency = GL_LINE_STRIP_ADJACENCY, 
+    linesAdjacency = GL_LINES_ADJACENCY, 
+    triangleStrip = GL_TRIANGLE_STRIP, 
+    triangleFan = GL_TRIANGLE_FAN, 
+    triangles = GL_TRIANGLES, 
+    triangleStripAdjacency = GL_TRIANGLE_STRIP_ADJACENCY, 
+    trianglesAdjacency = GL_TRIANGLES_ADJACENCY,
+    patches = GL_PATCHES
+};
+
+
+enum class MemoryBarrier : GLbitfield {
+    vertices = GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT,
+    indexType = GL_ELEMENT_ARRAY_BARRIER_BIT,
+    uniform = GL_UNIFORM_BARRIER_BIT,
+    textureFetch = GL_TEXTURE_FETCH_BARRIER_BIT,
+    imageAccess = GL_SHADER_IMAGE_ACCESS_BARRIER_BIT,
+    indirectCommand = GL_COMMAND_BARRIER_BIT,
+    pixel = GL_PIXEL_BUFFER_BARRIER_BIT,
+    textureUpdate = GL_TEXTURE_UPDATE_BARRIER_BIT,
+    bufferUpdate = GL_BUFFER_UPDATE_BARRIER_BIT,
+    framebuffer = GL_FRAMEBUFFER_BARRIER_BIT,
+    transformFeedback = GL_TRANSFORM_FEEDBACK_BARRIER_BIT,
+    counter = GL_ATOMIC_COUNTER_BARRIER_BIT,
+    storage = GL_SHADER_STORAGE_BARRIER_BIT,
+    all = GL_ALL_BARRIER_BITS
+};
+
+constexpr MemoryBarrier operator|(MemoryBarrier barrier1, MemoryBarrier barrier2) {
+    return static_cast<MemoryBarrier>((GLbitfield)barrier1 | (GLbitfield)barrier2);
+}
+
+
+/**
+ * @brief Initialize glad and OpenGL
+ * @param width Window width (in pixels)
+ * @param height Window height (in pixels)
+**/
+void init(int width, int height);
+
+
+/**
+ * @brief Render background color
+ * @param r Red component
+ * @param g Green component
+ * @param b Blue component
+**/
+inline void setBackground(float r, float g, float b) {
+    glClearColor(r, g, b, 1);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+}
+
+
+/**
+ * @brief Draw call
+ * @param mode Geometry to draw
+ * @param vertexCount Number of vertices to draw
+ * @param firstVertex Index of the first vertex to draw
+**/
+inline void draw(GeometryMode mode, uint32_t vertexCount, uint32_t firstVertex = 0) {
+    glDrawArrays((GLenum)mode, firstVertex, vertexCount);
+}
+
+
+/**
+ * @brief Indexed draw call
+ * @param mode Geometry to draw
+ * @param indexType Type of the indices
+ * @param indexCount Number of indices to draw
+ * @param firstIndex Index of the first index to draw
+ * @param baseVertex Vertex index offset
+**/
+inline void drawIndexed(GeometryMode mode, IndexType indexType, uint32_t indexCount, uint32_t firstIndex = 0, int32_t baseVertex = 0) {
+    int indexSize = indexType == IndexType::uint8 ? 1 : indexType == IndexType::uint16 ? 2 : 4;
+    if (baseVertex == 0) glDrawElements((GLenum)mode, indexCount, (GLenum)indexType, reinterpret_cast<void*>(firstIndex * indexSize));
+    else glDrawElementsBaseVertex((GLenum)mode, indexCount, (GLenum)indexType, reinterpret_cast<void*>(firstIndex * indexSize), baseVertex);
+}
+
+
+/**
+ * @brief Instanced draw call
+ * @param mode Geometry to draw
+ * @param vertexCount Number of vertices to draw
+ * @param instanceCount Number of instances to draw
+ * @param firstVertex Index of the first vertex to draw
+ * @param firstInstance Index of the first instance
+**/
+inline void drawInstanced(GeometryMode mode, uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex = 0, uint32_t firstInstance = 0) {
+    if (firstInstance == 0) glDrawArraysInstanced((GLenum)mode, firstVertex, vertexCount, instanceCount);
+    else glDrawArraysInstancedBaseInstance((GLenum)mode, firstVertex, vertexCount, instanceCount, firstInstance);
+}
+
+
+/**
+ * @brief Indexed instanced draw call
+ * @param mode Geometry to draw
+ * @param indexType Type of the indices
+ * @param indexCount Number of indices to draw
+ * @param instanceCount Number of instances to draw
+ * @param firstIndex Index of the first index to draw
+ * @param baseVertex Vertex offset
+ * @param firstInstance Index of the first instance to draw
+**/
+inline void drawIndexedInstanced(GeometryMode mode, IndexType indexType, uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex = 0, uint32_t baseVertex = 0, uint32_t firstInstance = 0) {
+    int indexSize = indexType == IndexType::uint8 ? 1 : indexType == IndexType::uint16 ? 2 : 4;
+    if (firstInstance == 0) {
+        if (baseVertex == 0) glDrawElementsInstanced((GLenum)mode, indexCount, (GLenum)indexType, reinterpret_cast<void*>(firstIndex * indexSize), instanceCount);
+        else glDrawElementsInstancedBaseVertex((GLenum)mode, indexCount, (GLenum)indexType, reinterpret_cast<void*>(firstIndex * indexSize), instanceCount, baseVertex);
+    }
+    else {
+        if (baseVertex == 0) glDrawElementsInstancedBaseInstance((GLenum)mode, indexCount, (GLenum)indexType, reinterpret_cast<void*>(firstIndex * indexSize), instanceCount, firstInstance);
+        else glDrawElementsInstancedBaseVertexBaseInstance((GLenum)mode, indexCount, (GLenum)indexType, reinterpret_cast<void*>(firstIndex * indexSize), instanceCount, baseVertex, firstInstance);
+    }
+}
+
+
+/**
+ * @brief Indirect draw call with commands provided in a buffer
+ * @param mode Geometry to draw
+ * @param commandCount Number of commands to draw
+ * @param firstCommand Index of the first command to draw
+ * @param commandStride Size of a command if larger than the default size
+**/
+inline void drawIndirect(GeometryMode mode, uint32_t commandCount = 1, uint32_t firstCommand = 0, uint32_t commandStride = 0) {
+    if (commandCount == 1) glDrawArraysIndirect((GLenum)mode, reinterpret_cast<void*>(firstCommand * commandStride));
+    else glMultiDrawArraysIndirect((GLenum)mode, reinterpret_cast<void*>(firstCommand * commandStride), commandCount, commandStride);
+}
+
+
+/**
+ * @brief Indexed indirect draw call with commands provided in a buffer
+ * @param mode Geometry to draw
+ * @param indexType Type of the indices
+ * @param commandCount Number of commands to draw
+ * @param firstCommand Index of the first command to draw
+ * @param commandStride Size of a command if larger than the default size
+**/
+inline void drawIndexedIndirect(GeometryMode mode, IndexType indexType, uint32_t commandCount = 1, uint32_t firstCommand = 0, uint32_t commandStride = 0) {
+    if (commandCount == 1) glDrawElementsIndirect((GLenum)mode, (GLenum)indexType, reinterpret_cast<void*>(firstCommand * commandStride));
+    else glMultiDrawElementsIndirect((GLenum)mode, (GLenum)indexType, reinterpret_cast<void*>(firstCommand * commandStride), commandCount, commandStride);
+}
+
+
+/**
+ * @brief Indirect draw call with commands and command count provided in buffers
+ * @param mode Geometry to draw
+ * @param maxCommandCount Maximum number of commands to draw
+ * @param firstCommand Index of the first command to draw
+ * @param parameterIndex Index of the parameter to use
+ * @param commandStride Size of a command if larger than the default size
+ * @param parameterStride Size of a parameter if larger than the default size
+**/
+inline void drawIndirectParam(GeometryMode mode, uint32_t maxCommandCount, uint32_t firstCommand = 0, uint32_t parameterIndex = 0, uint32_t commandStride = 0, uint32_t parameterStride = 0) {
+    glMultiDrawArraysIndirectCount((GLenum)mode, reinterpret_cast<void*>(firstCommand * commandStride), parameterIndex * parameterStride, maxCommandCount, commandStride);
+}
+
+
+/**
+ * @brief Indirect draw call with commands and command count provided in buffers
+ * @param mode Geometry to draw
+ * @param indexType Type of the indices
+ * @param maxCommandCount Maximum number of commands to draw
+ * @param firstCommand Index of the first command to draw
+ * @param parameterIndex Index of the parameter to use
+ * @param commandStride Size of a command if larger than the default size
+ * @param parameterStride Size of a parameter if larger than the default size
+**/
+inline void drawIndexedIndirectParam(GeometryMode mode, IndexType indexType, uint32_t maxCommandCount, uint32_t firstCommand = 0, uint32_t parameterIndex = 0, uint32_t commandStride = 0, uint32_t parameterStride = 0) {
+    glMultiDrawElementsIndirectCount((GLenum)mode, (GLenum)indexType, reinterpret_cast<void*>(firstCommand * parameterStride), parameterIndex * parameterStride, maxCommandCount, commandStride);
+}
+
+
+/**
+ * @brief Dispatch a compute shader
+ * @param numGroupsX Number of work groups in the X dimension
+ * @param numGroupsY Number of work groups in the Y dimension
+ * @param numGroupsZ Number of work groups in the Z dimension
+**/
+inline void compute(uint32_t numGroupsX = 1, uint32_t numGroupsY = 1, uint32_t numGroupsZ = 1) {
+    glDispatchCompute(numGroupsX, numGroupsY, numGroupsZ);
+}
+
+
+/**
+ * @brief Dispatch a compute shader with commands provided as a buffer
+ * @param commandIndex Index of the command to use
+**/
+inline void computeIndirect(uint32_t commandIndex = 0) {
+    glDispatchComputeIndirect(commandIndex);
+}
+
+
+/**
+ * @brief Use a memory barrier to order memory accesses
+ * @param barrier Memory barrier to use
+**/
+inline void barrier(MemoryBarrier barrier) {
+    glMemoryBarrier((GLbitfield)barrier);
+}
+
+}
+
+#endif
+```
+
+### include/GLObjects/Shader.hpp
+```
+#ifndef SHADER_H
+#define SHADER_H
+
+#include <glad/glad.h>
+
+#include "GLObjects/Buffer.hpp"
+
+namespace gl {
+
+enum class ShaderType : GLenum {
+    vertex = GL_VERTEX_SHADER,
+    fragment = GL_FRAGMENT_SHADER,
+    geometry = GL_GEOMETRY_SHADER,
+    compute = GL_COMPUTE_SHADER,
+    tessControl = GL_TESS_CONTROL_SHADER,
+    tessEvaluation = GL_TESS_EVALUATION_SHADER
+};
+
+
+class Shader {
+    friend class Uniform;
+
+public:
+    Shader() : program(glCreateProgram()) {}
+
+    ~Shader() {
+        glDeleteProgram(program);
+    }
+
+    Shader(Shader&& other) : program(other.program) {
+        other.program = 0;
+    }
+
+    Shader& operator=(Shader other) {
+        std::swap(program, other.program);
+        return *this;
+    }
+
+    Shader(Shader const&) = delete;
+
+    /**
+     * @brief Use the shader for future OpenGL calls
+    **/
+    void use() const {
+        glUseProgram(program);
+    }
+
+protected:
+    GLuint program;
+
+    /**
+     * @brief Attach a new shader to the program
+     * @param path Path to the shader file
+     * @param type Shader type
+    **/
+    void attachShader(char const* path, ShaderType type) const;
+};
+
+
+class GraphicsShader : public Shader {
+public:
+    /**
+     * @brief Create a new shader for rendering
+     * @param vertexPath Path to the vertex shader file
+     * @param fragmentPath Path to the fragment shader file
+    **/
+    GraphicsShader(char const* vertexPath, char const* fragmentPath) : Shader() {
+        attachShader(vertexPath, ShaderType::vertex);
+        attachShader(fragmentPath, ShaderType::fragment);
+        glLinkProgram(program);
+    }
+};
+
+
+class ComputeShader : public Shader {
+public:
+    /**
+     * @brief Create a new compute shader
+     * @param path Path to the compute shader file
+    **/
+    explicit ComputeShader(char const* path) : Shader() {
+        attachShader(path, ShaderType::compute);
+        glLinkProgram(program);
+    }
+};
+
+}
+
+#endif
+```
+
+### include/GLObjects/Uniform.hpp
+```
+#ifndef UNIFORM_H
+#define UNIFORM_H
+
+#include <glad/glad.h>
+#include <glm/glm.hpp>
+#include <glm/gtc/type_ptr.hpp>
+
+#include "GLObjects/Shader.hpp"
+
+namespace gl {
+
+class Uniform {
+public:
+    /**
+     * @brief Get a uniform
+     * @param shader The uniform's shader
+     * @param name Name of the uniform in the shader
+    **/
+    Uniform(Shader const& shader, char const* name) :
+        location(glGetUniformLocation(shader.program, name)) {}
+
+    /**
+     * @brief Set the value of the matrix uniform
+     * @param shader The uniform's shader
+     * @param value The value to set the uniform to
+    **/
+    void setValue(Shader const& shader, glm::mat4 const& value) {
+        glProgramUniformMatrix4fv(shader.program, location, 1, GL_FALSE, value_ptr(value));
+    }
+
+    /**
+     * @brief Set the value of the vector uniform
+     * @param shader The uniform's shader
+     * @param value The value to set the uniform to
+    **/
+    void setValue(Shader const& shader, glm::vec3 const& value) {
+        glProgramUniform3fv(shader.program, location, 1, value_ptr(value));
+    }
+
+    /**
+     * @brief Set the value of the vector uniform
+     * @param shader The uniform's shader
+     * @param value The value to set the uniform to
+    **/
+    void setValue(Shader const& shader, glm::vec4 const& value) {
+        glProgramUniform4fv(shader.program, location, 1, value_ptr(value));
+    }
+
+    /**
+     * @brief Set the value of the vector uniform
+     * @param shader The uniform's shader
+     * @param value The value to set the uniform to
+    **/
+    void setValue(Shader const& shader, float value) {
+        glProgramUniform1f(shader.program, location, value);
+    }
+
+private:
+    GLint location;
+};
+
+}
+
+#endif
+```
+
+### include/GLObjects/VertexArray.hpp
+```
+#ifndef VERTEX_ARRAY_H
+#define VERTEX_ARRAY_H
+
+#include <glad/glad.h>
+
+#include "GLObjects/Buffer.hpp"
+
+namespace gl {
+
+enum class IntAttributeType : GLenum {
+    int8 = GL_BYTE,
+    uint8 = GL_UNSIGNED_BYTE,
+    int16 = GL_SHORT,
+    uint16 = GL_UNSIGNED_SHORT,
+    int32 = GL_INT,
+    uint32 = GL_UNSIGNED_INT
+};
+
+
+enum class FloatAttributeType : GLenum {
+    float16 = GL_HALF_FLOAT,
+    float32 = GL_FLOAT,
+    float64 = GL_DOUBLE,
+    fixed32 = GL_FIXED,
+    uint_10f_11f_11f = GL_UNSIGNED_INT_10F_11F_11F_REV
+};
+
+
+enum class ToFloatAttributeType : GLenum {
+    int8 = GL_BYTE,
+    uint8 = GL_UNSIGNED_BYTE,
+    int16 = GL_SHORT,
+    uint16 = GL_UNSIGNED_SHORT,
+    int32 = GL_INT,
+    uint32 = GL_UNSIGNED_INT,
+    int_2_10_10_10 = GL_INT_2_10_10_10_REV,
+    uint_2_10_10_10 = GL_UNSIGNED_INT_2_10_10_10_REV
+};
+
+
+enum class IndexType : GLenum {
+    uint8 = GL_UNSIGNED_BYTE,
+    uint16 = GL_UNSIGNED_SHORT,
+    uint32 = GL_UNSIGNED_INT,
+};
+
+
+class VertexArray {
+public:
+    VertexArray() {
+        glCreateVertexArrays(1, &array);
+    }
+
+    ~VertexArray() {
+        glDeleteVertexArrays(1, &array);
+    }
+
+    VertexArray(VertexArray&& other) : array(other.array) {
+        other.array = 0;
+    }
+
+    VertexArray& operator=(VertexArray other) {
+        std::swap(array, other.array);
+        return *this;
+    }
+
+    VertexArray(VertexArray const&) = delete;
+
+    /**
+     * @brief Add or set a buffer in the array
+     * @param index Index of the buffer
+     * @param buffer The buffer
+     * @param stride Size of an element in the buffer
+     * @param start First element to use
+     * @param instances 0 for a vertex buffer, 1 for an instance buffer, > 1 to specify the number of instances that share the same attribute
+    **/
+    void setBuffer(uint32_t index, Buffer const& buffer, uint32_t stride, uint32_t start = 0, uint32_t instances = 0) const {
+        glVertexArrayVertexBuffer(array, index, buffer.buffer, start * stride, stride);
+        if (instances > 0) glVertexArrayBindingDivisor(array, index, instances);
+    }
+
+    /**
+     * @brief Set the buffer where an attribute is stored
+     * @param attribute Index of the attribute
+     * @param buffer Index of the buffer
+    **/
+    void setAttributeBuffer(uint32_t attribute, uint32_t buffer) const {
+        glVertexArrayAttribBinding(array, attribute, buffer);
+    }
+
+    /**
+     * @brief Set the format of an integer attribute in the array
+     * @param index Index of the attribute
+     * @param type Attribute type
+     * @param components Number of components
+     * @param offset Offset of the attribute in its buffer
+     * @param enabled Whether the attribute is enabled
+    **/
+    void setAttributeFormat(uint32_t index, IntAttributeType type, uint32_t components = 1, uint32_t offset = 0, bool enabled = true) const {
+        glVertexArrayAttribIFormat(array, index, components, (GLenum)type, offset);
+        if (enabled) enableAttribute(index);
+    }
+
+    /**
+     * @brief Set the format of a floating point attribute in the array
+     * @param index Index of the attribute
+     * @param type Attribute type
+     * @param components Number of components
+     * @param offset Offset of the attribute in its buffer
+     * @param enabled Whether the attribute is enabled
+    **/
+    void setAttributeFormat(uint32_t index, FloatAttributeType type, uint32_t components = 1, uint32_t offset = 0, bool enabled = true) const {
+        if (type == FloatAttributeType::float64) glVertexArrayAttribLFormat(array, index, components, (GLenum)type, offset);
+        else glVertexArrayAttribFormat(array, index, components, (GLenum)type, GL_FALSE, offset);
+        if (enabled) enableAttribute(index);
+    }
+
+    /**
+     * @brief Set the format of a floating point attribute from integer data in the array
+     * @param index Index of the attribute
+     * @param type Attribute type
+     * @param normalize Whether to normalize the attribute when converting to a float
+     * @param components Number of components
+     * @param offset Offset of the attribute in its buffer
+     * @param enabled Whether the attribute is enabled
+    **/
+    void setAttributeFormat(uint32_t index, ToFloatAttributeType type, bool normalize, uint32_t components = 1, uint32_t offset = 0, bool enabled = true) const {
+        glVertexArrayAttribFormat(array, index, components, (GLenum)type, GL_FALSE, offset);
+        if (enabled) enableAttribute(index);
+    }
+
+    /**
+     * @brief Enable an attribute in the array
+     * @param index Index of the attribute
+    **/
+    void enableAttribute(uint32_t index) const {
+        glEnableVertexArrayAttrib(array, index);
+    }
+
+    /**
+     * @brief Disable an attribute in the array
+     * @param index Index of the attribute
+    **/
+    void disableAttribute(uint32_t index) const {
+        glDisableVertexArrayAttrib(array, index);
+    }
+
+    /**
+     * @brief Add an indices buffer to the array
+     * @param buffer The buffer to add
+     * @param indexType Data type of the indices
+    **/
+    void setIndices(Buffer const& buffer) {
+        glVertexArrayElementBuffer(array, buffer.buffer);
+    }
+
+    /**
+     * @brief Remove the indices buffer
+    **/
+    void removeIndices() {
+        glVertexArrayElementBuffer(array, 0);
+    }
+
+    /**
+     * @brief Use the array for future OpenGL calls
+    **/
+    void use() const {
+        glBindVertexArray(array);
+    }
+
+private:
+    GLuint array;
+};
+
+}
+
+#endif
+```
+
+### include/GLObjects/Window.hpp
+```
+#ifndef WINDOW_H
+#define WINDOW_H
+
+#define GLFW_INCLUDE_NONE
+#include <GLFW/glfw3.h>
+
+
+class Window {
+public:
+    int const width;
+    int const height;
+
+    /**
+     * @brief Create a GLFW window
+     * @param width Window width (in pixels)
+     * @param height Window height (in pixels)
+     * @param title Window title
+     * @param vsync Enable VSync
+    **/
+    Window(int width, int height, char const* title, bool vsync = false);
+
+    ~Window();
+
+    Window(Window&& other) = delete;
+    Window(Window const&) = delete;
+
+    /**
+     * @brief Window update (must be called each frame)
+    **/
+    void update();
+
+    /**
+     * @brief Check if the window was closed
+    **/
+    bool closed() {
+        return glfwWindowShouldClose(window);
+    }
+
+    /**
+     * @brief Check if a given key was pressed
+     * @param key Key code of the key to check
+    **/
+    bool keyPressed(int key) {
+        return glfwGetKey(window, key) == GLFW_PRESS;
+    }
+
+    /**
+     * @brief Check if a given mouse button was pressed
+     * @param button Button code of the button to check
+    **/
+    bool mouseButtonPressed(int button) {
+        return glfwGetMouseButton(window, button) == GLFW_PRESS;
+    }
+
+    /**
+     * @brief Get the cursor position
+     * @param x x position (output)
+     * @param y y position (output)
+    **/
+    void getCursorPosition(double& x, double& y) {
+        glfwGetCursorPos(window, &x, &y);
+    }
+
+    /**
+     * @brief Set the cursor position
+     * @param x x position
+     * @param y y position
+    **/
+    void setCursorPosition(double x, double y) {
+        glfwSetCursorPos(window, x, y);
+    }
+
+    /**
+     * @brief Get the movement of the cursor since the last call to this function
+     * @param dx x movement (output)
+     * @param dy y movement (output)
+    **/
+    void getCursorMovement(double& dx, double& dy) {
+        dx = cursorDx;
+        dy = cursorDy;
+        cursorDx = 0;
+        cursorDy = 0;
+    }
+
+    /**
+     * @brief Lock and hide the cursor
+    **/
+    void lockCursor();
+
+    /**
+     * @brief Unlock and show the cursor
+    **/
+    void unlockCursor();
+
+private:
+    GLFWwindow* window;
+    double lastCursorX;
+    double lastCursorY;
+    double cursorDx = 0;
+    double cursorDy = 0;
+    bool locked = false;
+};
+
+
+#endif
+```
+
+### src/GLObjects/OpenGL.cpp
+```
+#include "GLObjects/OpenGL.hpp"
+
+#include <iostream>
+#include <stdexcept>
+#include <unordered_map>
+#include <glad/glad.h>
+
+using namespace std;
+
+
+static unordered_map<GLenum, string> callbackSources = {
+    { GL_DEBUG_SOURCE_API, "API" },
+    { GL_DEBUG_SOURCE_WINDOW_SYSTEM, "Window system" },
+    { GL_DEBUG_SOURCE_SHADER_COMPILER, "Shader compiler" },
+    { GL_DEBUG_SOURCE_THIRD_PARTY, "Third party" },
+    { GL_DEBUG_SOURCE_APPLICATION, "Application" },
+    { GL_DEBUG_SOURCE_OTHER, "Other" }
+};
+
+static unordered_map<GLenum, string> callbackTypes = {
+    { GL_DEBUG_TYPE_ERROR, "Error" },
+    { GL_DEBUG_TYPE_DEPRECATED_BEHAVIOR, "Deprecated behavior" },
+    { GL_DEBUG_TYPE_UNDEFINED_BEHAVIOR, "Undefined behavior" },
+    { GL_DEBUG_TYPE_PORTABILITY, "Portability" },
+    { GL_DEBUG_TYPE_PERFORMANCE, "Performance" },
+    { GL_DEBUG_TYPE_MARKER, "Marker" },
+    { GL_DEBUG_TYPE_PUSH_GROUP, "Push group" },
+    { GL_DEBUG_TYPE_POP_GROUP, "Pop group" },
+    { GL_DEBUG_TYPE_OTHER, "Other" }
+};
+
+static unordered_map<GLenum, string> callbackSeverities = {
+    { GL_DEBUG_SEVERITY_HIGH, "High" },
+    { GL_DEBUG_SEVERITY_MEDIUM, "Medium" },
+    { GL_DEBUG_SEVERITY_LOW, "Low" },
+    { GL_DEBUG_SEVERITY_NOTIFICATION, "Notification" }
+};
+
+
+/**
+ * @brief OpenGL message callback
+**/
+static void GLAPIENTRY glCallback(GLenum source, GLenum type, GLuint id, GLenum severity, GLsizei length, GLchar const* message, void const* userParam) {
+    if (severity != GL_DEBUG_SEVERITY_NOTIFICATION) {
+        cerr << "OpenGL callback. Source: " << callbackSources[source] << ", Type: " << callbackTypes[type] << ", Severity: " << callbackSeverities[severity] << ", ID: " << id << endl <<
+                "Message: " << message << endl << endl;
+    }
+}
+
+
+namespace gl {
+
+void init(int width, int height) {
+    if (gladLoadGL() == 0) throw runtime_error("gladLoadGLLoader error");
+    glViewport(0, 0, width, height);
+    glEnable(GL_DEBUG_OUTPUT);
+    glEnable(GL_DEBUG_OUTPUT_SYNCHRONOUS);
+    glDebugMessageCallback(glCallback, 0);
+    glEnable(GL_CULL_FACE);
+    glCullFace(GL_BACK);
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_LESS);
+}
+
+}
+```
+
+### src/GLObjects/Shader.cpp
+```
+#include "GLObjects/Shader.hpp"
+
+#include <fstream>
+#include <sstream>
+
+using namespace std;
+
+namespace gl {
+
+void Shader::attachShader(char const* path, ShaderType type) const {
+    // Read file
+    ifstream file = ifstream(path);
+    stringstream stream;
+    stream << file.rdbuf();
+    string str = stream.str();
+    char const* shaderCode = str.c_str();
+    file.close();
+
+    // Compile and attach shader
+    GLuint shader = glCreateShader((GLenum)type);
+    glShaderSource(shader, 1, &shaderCode, nullptr);
+    glCompileShader(shader);
+    glAttachShader(program, shader);
+    glDeleteShader(shader);
+}
+
+}
+```
+
+### src/GLObjects/Window.cpp
+```
+#include "GLObjects/Window.hpp"
+
+#include <stdexcept>
+#include <GLFW/glfw3.h>
+
+using namespace std;
+
+
+Window::Window(int width, int height, const char* title, bool vsync) :
+    width(width),
+    height(height) {
+
+    // Init GLFW
+    if (glfwInit() == GLFW_FALSE) throw runtime_error("glfwInit error");
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 6);
+
+    // Create window
+    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+    glfwWindowHint(GLFW_OPENGL_DEBUG_CONTEXT, true);
+    window = glfwCreateWindow(width, height, title, nullptr, nullptr);
+    if (window == nullptr) throw runtime_error("glfwCreateWindow error");
+    glfwMakeContextCurrent(window);
+    if (!vsync) glfwSwapInterval(0);
+    getCursorPosition(lastCursorX, lastCursorY);
+}
+
+
+Window::~Window() {
+    glfwDestroyWindow(window);
+    glfwTerminate();
+}
+
+
+void Window::update() {
+    glfwPollEvents();
+    glfwSwapBuffers(window);
+
+    // Cursor movement and lock
+    double cursorX, cursorY;
+    getCursorPosition(cursorX, cursorY);
+    cursorDx += cursorX - lastCursorX;
+    cursorDy += cursorY - lastCursorY;
+
+    if (locked) {
+        setCursorPosition(width / 2, height / 2);
+        if (keyPressed(GLFW_KEY_ESCAPE)) unlockCursor();
+    }
+    else {
+        lastCursorX = cursorX;
+        lastCursorY = cursorY;
+        if (mouseButtonPressed(GLFW_MOUSE_BUTTON_LEFT)) lockCursor();
+    }
+}
+
+
+void Window::lockCursor() {
+    glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_HIDDEN);
+    setCursorPosition(width / 2, height / 2);
+    lastCursorX = width / 2;
+    lastCursorY = height / 2;
+    locked = true;
+}
+
+
+void Window::unlockCursor() {
+    glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+    locked = false;
+}
+```

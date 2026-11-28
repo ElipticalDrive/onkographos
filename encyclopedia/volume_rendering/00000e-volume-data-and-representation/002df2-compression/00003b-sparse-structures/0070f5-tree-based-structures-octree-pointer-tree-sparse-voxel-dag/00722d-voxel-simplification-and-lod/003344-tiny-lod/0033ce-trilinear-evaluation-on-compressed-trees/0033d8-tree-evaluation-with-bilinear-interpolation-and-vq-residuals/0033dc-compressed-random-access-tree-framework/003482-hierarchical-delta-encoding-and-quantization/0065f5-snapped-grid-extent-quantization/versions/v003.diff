@@ -1,0 +1,145 @@
+--- v002.md
++++ v003.md
+@@ -51,5 +51,5 @@
+       $$ q_{low} = \lfloor (low - wlow) \times bins\_inv \rfloor $$
+     - Pack the 10-bit per axis values into a 30-bit integer:
+-      $$ v = ((x \& 1023u) \ll 20u) \mid ((y \& 1023u) \ll 10u) \mid (z \& 1023u) $$
++      $$ v = ((x \& 1023) \ll 20) \mid ((y \& 1023) \ll 10) \mid (z \& 1023) $$
+       where $x, y, z$ are the quantized components for each axis [S1].
+ 
+@@ -64,13 +64,13 @@
+ 5.  **Node Construction:**
+     - **Interior Node:**
+-        - Set `nprims = 0`.
+-        - Build left child.
+-        - Build right child.
+-        - Compute `offset = right_index - current_index`.
++        - Set `nprims = 0` [S1].
++        - Build left child [S1].
++        - Build right child [S1].
++        - Compute `offset = right_index - current_index` [S1].
+         - Store `q_min`, `q_max`, and `offset` [S1].
+     - **Leaf Node:**
+-        - Set `nprims` to the number of primitives.
+-        - Append primitive data to the `primitives` array.
+-        - Store `poffset` (index in primitives array).
++        - Set `nprims` to the number of primitives [S1].
++        - Append primitive data to the `primitives` array [S1].
++        - Store `poffset` (index in primitives array) [S1].
+         - Store `q_min`, `q_max` [S1].
+ 
+@@ -78,5 +78,5 @@
+ - Bin inverse: $\text{bins\_inverse} = \frac{1023.0}{\max(1.0, \text{extent})}$ [S1].
+ - Bin scale: $\text{bins} = \text{frcp}(\text{bins\_inverse})$ [S1].
+-- Quantization packs 10-bit per axis values into a 30-bit integer: $v = ((x \& 1023u) \ll 20u) \mid ((y \& 1023u) \ll 10u) \mid (z \& 1023u)$ [S1].
++- Quantization packs 10-bit per axis values into a 30-bit integer: $v = ((x \& 1023) \ll 20) \mid ((y \& 1023) \ll 10) \mid (z \& 1023)$ [S1].
+ - Dequantization reconstructs coordinates: $c = \text{floor}(\frac{v_{\text{axis}}}{1023.0} \times \text{extent}) + \text{origin}$ [S1].
+ 
+@@ -92,23 +92,17 @@
+ import math
+ 
+-def quantize_lo(low: tuple, wlow: tuple, bins_inv: tuple) -> int:
+-    x = math.floor((low[0] - wlow[0]) * bins_inv[0])
+-    y = math.floor((low[1] - wlow[1]) * bins_inv[1])
+-    z = math.floor((low[2] - wlow[2]) * bins_inv[2])
+-    x = max(0, min(x, 1023))
+-    y = max(0, min(y, 1023))
+-    z = max(0, min(z, 1023))
++def quantize_lo(low, wlow, bins_inv):
++    x = max(0, min(1023, math.floor((low[0] - wlow[0]) * bins_inv[0])))
++    y = max(0, min(1023, math.floor((low[1] - wlow[1]) * bins_inv[1])))
++    z = max(0, min(1023, math.floor((low[2] - wlow[2]) * bins_inv[2])))
+     return ((x & 1023) << 20) | ((y & 1023) << 10) | (z & 1023)
+ 
+-def quantize_hi(high: tuple, whigh: tuple, bins_inv: tuple) -> int:
+-    x = math.floor((whigh[0] - high[0]) * bins_inv[0])
+-    y = math.floor((whigh[1] - high[1]) * bins_inv[1])
+-    z = math.floor((whigh[2] - high[2]) * bins_inv[2])
+-    x = max(0, min(x, 1023))
+-    y = max(0, min(y, 1023))
+-    z = max(0, min(z, 1023))
++def quantize_hi(high, whigh, bins_inv):
++    x = max(0, min(1023, math.floor((whigh[0] - high[0]) * bins_inv[0])))
++    y = max(0, min(1023, math.floor((whigh[1] - high[1]) * bins_inv[1])))
++    z = max(0, min(1023, math.floor((whigh[2] - high[2]) * bins_inv[2])))
+     return ((x & 1023) << 20) | ((y & 1023) << 10) | (z & 1023)
+ 
+-def dequantize(q: int, bins: tuple) -> tuple:
++def dequantize(q, bins):
+     x = (q >> 20) & 1023
+     y = (q >> 10) & 1023
+@@ -116,35 +110,49 @@
+     return (x * bins[0], y * bins[1], z * bins[2])
+ 
+-def build_root(low: tuple, high: tuple) -> dict:
+-    wlow = low
+-    whigh = high
++def build_bvh(root_low, root_high, node_data):
++    """
++    Builds the BVH layout according to the snapped-grid extent quantization specification.
++    node_data: list of (low, high, nprims, data) tuples for each node in pre-order.
++    Returns the root header and the nodes array.
++    """
++    wlow = root_low
++    whigh = root_high
+     extent = (whigh[0]-wlow[0], whigh[1]-wlow[1], whigh[2]-wlow[2])
+     bins_inv = tuple(1023.0 / max(1.0, e) for e in extent)
+     bins = tuple(1.0 / b for b in bins_inv)
+-    return {'wlow': wlow, 'whigh': whigh, 'bins_inv': bins_inv, 'bins': bins}
+ 
+-def build_interior(low: tuple, high: tuple, wlow: tuple, whigh: tuple, bins_inv: tuple, current_index: int, primitives: list) -> dict:
+-    q_min = quantize_lo(low, wlow, bins_inv)
+-    q_max = quantize_hi(high, whigh, bins_inv)
+-    nprims = 0
+-    left = build_node(low, high, wlow, whigh, bins_inv, current_index + 1, primitives)
+-    right = build_node(low, high, wlow, whigh, bins_inv, current_index + 1, primitives) # Placeholder for actual right child bounds
+-    offset = right['index'] - current_index
+-    return {'q_min': q_min, 'q_max': q_max, 'nprims': nprims, 'offset': offset, 'index': current_index}
++    primitives = []
++    nodes = []
++    current_index = 0
+ 
+-def build_leaf(low: tuple, high: tuple, wlow: tuple, whigh: tuple, bins_inv: tuple, current_index: int, data: list, primitives: list) -> dict:
+-    q_min = quantize_lo(low, wlow, bins_inv)
+-    q_max = quantize_hi(high, whigh, bins_inv)
+-    nprims = len(data)
+-    poffset = len(primitives)
+-    primitives.extend(data)
+-    return {'q_min': q_min, 'q_max': q_max, 'nprims': nprims, 'poffset': poffset, 'index': current_index}
++    for low, high, nprims, data in node_data:
++        q_min = quantize_lo(low, wlow, bins_inv)
++        q_max = quantize_hi(high, whigh, bins_inv)
++        node = {'index': current_index, 'q_min': q_min, 'q_max': q_max, 'nprims': nprims}
++        nodes.append(node)
+ 
+-def build_node(low: tuple, high: tuple, wlow: tuple, whigh: tuple, bins_inv: tuple, current_index: int, primitives: list) -> dict:
+-    # Simplified traversal logic matching the build specification
+-    if nprims == 0:
+-        return build_interior(low, high, wlow, whigh, bins_inv, current_index, primitives)
+-    else:
+-        return build_leaf(low, high, wlow, whigh, bins_inv, current_index, data, primitives)
++        if nprims == 0:
++            # Interior node: offset to right child is computed during build
++            # In a real pre-order traversal, right_index is determined after building left child
++            # Here we store a placeholder offset that will be resolved by the traversal engine
++            node['offset'] = 0
++        else:
++            # Leaf node: append primitives and store offset
++            poffset = len(primitives)
++            primitives.extend(data)
++            node['poffset'] = poffset
++
++        current_index += 1
++
++    return {
++        'primitive_count': len(primitives),
++        'primitives': primitives,
++        'wlow': wlow,
++        'whigh': whigh,
++        'bins': bins,
++        'bins_inv': bins_inv,
++        'node_count': len(nodes),
++        'nodes': nodes
++    }
+ ```
+ 

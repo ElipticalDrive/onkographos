@@ -1,0 +1,217 @@
+--- v003.md
++++ v004.md
+@@ -4,167 +4,66 @@
+ 
+ ## Overview
+-Bisection Trace with Gradient Inclusion is a robust ray casting algorithm that renders the zero-level-set of an implicit function $f: \mathbb{R}^3 \to \mathbb{R}$ by combining level-synchronized bisection with gradient-based inclusion functions [S1, unofficial]. It solves the problem of missing surface features during ray traversal by using interval arithmetic to guarantee that no zero-crossings are pruned incorrectly [S1, unofficial]. It distinguishes itself from standard bisection by using a Lipschitz constant derived from gradient norms to tighten the inclusion bounds, offering a configurable trade-off between generality and bound tightness [S1, unofficial].
++Bisection Trace with Gradient Inclusion is a robust ray casting method that renders the zero-level-set of an implicit function $f: \mathbb{R}^3 \to \mathbb{R}$ by combining level-synchronized bisection with gradient-based inclusion functions [S1, unofficial]. It solves the problem of missing surface features during ray traversal by using interval arithmetic to guarantee that no zero-crossings are pruned incorrectly. It differs from its siblings by leveraging gradient information to compute tighter bounds on the function's range over axis-aligned boxes, enabling more efficient pruning than Lipschitz-based methods while maintaining robustness [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:** Ray origins $\mathbf{o}$, directions $\mathbf{d}$, near/far clip planes $t_{min}, t_{max}$, implicit function $f(\mathbf{x})$, maximum bisection depth $D_{max}$, convergence threshold $\tau$, and Lipschitz constant $L$ (or 'auto') [S1, unofficial].
+-**Outputs:** Hit mask and hit distances $t$ [G].
++**Inputs:**
++- Ray origins $\mathbf{o} \in \mathbb{R}^3$ and directions $\mathbf{d} \in \mathbb{R}^3$ (normalized).
++- Ray segment bounds $t_{min}, t_{max} \in \mathbb{R}$.
++- Implicit function $f(\mathbf{x})$ and its gradient $\nabla f(\mathbf{x})$.
++- Parameters: `max_depth` (integer), `threshold` (float), `lipschitz` (float or 'auto'), `batch_size` (integer or None).
++
++**Outputs:**
++- Hit mask: Boolean array indicating which rays intersected the surface.
++- Hit distances: Float array of $t$ values for intersected rays.
+ 
+ **Data Structures:**
+-*   **Ray Batch:** Arrays of shape $(N, 3)$ for origins and directions, $(N,)$ for $t_{min}, t_{max}$, and hit status [G].
+-*   **Interval Box:** Defined by lower bound $\mathbf{lo}$ and upper bound $\mathbf{hi}$, both shape $(N, 3)$ [G].
+-*   **Inclusion Function:** Implements `evaluate(lo, hi)` returning conservative bounds $[f_{min}, f_{max}]$ for $f$ over the box [S1, unofficial].
++- **Affine Form (AA):** Represents the range of $f$ over an interval. Defined as a tuple $(x_0, \xi, \delta)$ where:
++  - $x_0$: Center value.
++  - $\xi$: Vector of coefficients for independent variables (rays).
++  - $\delta$: Scalar bound for dependent error (function evaluation uncertainty).
++  - The range is $[x_0 - \|\xi\|_1 - \delta, x_0 + \|\xi\|_1 + \delta]$.
++- **Inclusion Function:** An object implementing the `evaluate(lo, hi)` method, returning conservative bounds $[f_{min}, f_{max}]$ for $f$ over the box defined by $[\mathbf{o} + t_{lo}\mathbf{d}, \mathbf{o} + t_{hi}\mathbf{d}]$.
+ 
+ **Steps:**
+-1.  **Initialize Inclusion Function:** Create `GradientInclusion(f_np, lipschitz=lipschitz)` [S1, unofficial]. If $L$ is 'auto', estimate it by sampling gradient norms $\|\nabla f\|$ over the bounding box using automatic differentiation [S1, unofficial].
+-2.  **Batch Processing:** Divide rays into batches of size $B$ (default: process all if $B=None$) to manage memory [S1, unofficial].
+-3.  **Bisection Loop:** For each active ray in the batch:
+-    a.  Define current interval $[t_{curr\_min}, t_{curr\_max}]$ along the ray [S1, unofficial].
+-    b.  Construct axis-aligned box in $\mathbb{R}^3$ corresponding to the ray segment [S1, unofficial].
+-    c.  Evaluate inclusion function: $[f_{min}, f_{max}] = \text{Inclusion}(\text{box})$ [S1, unofficial].
+-    d.  **Pruning:** If $0 \notin [f_{min}, f_{max}]$, the interval cannot contain a zero crossing and is pruned [S1, unofficial].
+-    e.  **Bisection:** If $0 \in [f_{min}, f_{max}]$, compute midpoint $t_{mid} = (t_{curr\_min} + t_{curr\_max}) / 2$ [S1, unofficial].
+-    f.  **Refinement:** Evaluate $f$ at $\mathbf{x}_{mid} = \mathbf{o} + t_{mid}\mathbf{d}$ [S1, unofficial].
+-    g.  **Convergence:** If $|f(\mathbf{x}_{mid})| < \tau$ or interval width $< \tau$, record hit at $t_{mid}$ [S1, unofficial].
+-    h.  **Update:** If not converged, update $t_{curr\_min}$ or $t_{curr\_max}$ based on the sign of $f(\mathbf{x}_{mid})$ to maintain the zero crossing within the interval [S1, unofficial].
+-    i.  **Depth Check:** If iteration count $> D_{max}$, terminate with best estimate [S1, unofficial].
+-4.  **Newton Iteration (Optional):** Apply $k$ Newton steps for refinement if enabled [S1, unofficial].
++1. **Initialize Inclusion Function:** Create a `GradientInclusion` instance using $f$, $\nabla f$, and the Lipschitz constant $L$. If `lipschitz` is 'auto', estimate $L$ by sampling $\|\nabla f\|$ over the bounding box using automatic differentiation [S1, unofficial].
++2. **Batch Rays:** Divide rays into batches of size `batch_size` (or all rays if None) to manage memory.
++3. **Level-Synchronized Bisection Loop:** For each batch:
++   a. Initialize active rays with $t_{curr} = t_{min}$ and depth $d=0$.
++   b. While active rays exist and $d < \text{max\_depth}$:
++      i. **Evaluate Inclusion:** For each active ray, compute the box $[\mathbf{o} + t_{curr}\mathbf{d}, \mathbf{o} + (t_{curr} + \Delta t)\mathbf{d}]$ where $\Delta t$ is the current step size (initially $t_{max}-t_{min}$). Call `inclusion.evaluate(lo, hi)` to get $[f_{min}, f_{max}]$.
++      ii. **Prune:** If $f_{max} < 0$ or $f_{min} > 0$, the interval cannot contain a zero crossing. Mark the ray as missed and remove from active set.
++      iii. **Check Convergence:** If $f_{max} - f_{min} < \text{threshold}$, the interval is sufficiently small. Record $t_{curr}$ as the hit and remove from active set.
++      iv. **Bisect:** For remaining active rays, bisect the interval: $t_{new} = t_{curr} + \Delta t / 2$. Update $t_{curr} = t_{new}$ and $\Delta t = \Delta t / 2$. Increment $d$.
++4. **Newton Refinement (Optional):** For rays that hit, apply `newton_iter` steps of Newton's method to refine the hit location using $f$ and $\nabla f$ [S1, unofficial].
++
++**Formulas:**
++- **Affine Arithmetic Addition:** $a + b = (x_0^a + x_0^b, \xi^a + \xi^b, \delta^a + \delta^b)$ [S1, unofficial].
++- **Affine Arithmetic Multiplication by Scalar $\alpha$:** $\alpha \cdot a = (\alpha x_0, \alpha \xi, |\alpha| \delta)$ [S1, unofficial].
++- **Inclusion Bound:** $f(\mathbf{x}) \in [x_0 - \|\xi\|_1 - \delta, x_0 + \|\xi\|_1 + \delta]$ [S1, unofficial].
+ 
+ **Parameters:**
+-*   `max_depth`: Maximum bisection iterations [S1, unofficial].
+-*   `threshold`: Convergence tolerance $\tau$ [S1, unofficial].
+-*   `lipschitz`: Lipschitz constant $L$. If 'auto', estimated via gradient sampling [S1, unofficial].
+-*   `batch_size`: Number of rays per batch. None for all [S1, unofficial].
++- `max_depth`: Typical value 10-20. Limits bisection iterations to prevent infinite loops.
++- `threshold`: Typical value $10^{-4}$ to $10^{-6}$. Convergence criterion for interval width.
++- `lipschitz`: If 'auto', computed via gradient sampling. Otherwise, a user-provided constant.
++- `batch_size`: Controls memory usage. Larger batches improve throughput but require more GPU memory.
+ 
+-**Edge Cases & Pitfalls:**
+-*   **Degenerate Intervals:** If $t_{curr\_max} - t_{curr\_min}$ falls below machine epsilon, the interval is treated as converged to avoid infinite loops [G].
+-*   **Precision Loss:** Evaluating $f$ at endpoints far from the origin can cause catastrophic cancellation; coordinate translation or higher precision is recommended for large bounding boxes [G].
+-*   **Lipschitz Underestimation:** If $L$ is too small, the inclusion bounds may incorrectly exclude the zero crossing, causing missed hits [G].
+-
+-**Pseudocode:**
+-```python
+-import numpy as np
+-
+-def estimate_lipschitz(f_func, box_lo, box_hi, num_samples=16):
+-    """Estimate Lipschitz constant by sampling gradient norms over the bounding box [G].
+-    Sources specify using torch.autograd for exact gradient computation."""
+-    pts = box_lo + np.random.rand(num_samples, 3) * (box_hi - box_lo)
+-    grad_norms = np.zeros(num_samples)
+-    eps = 1e-5
+-    for i in range(num_samples):
+-        grad = np.zeros(3)
+-        for j in range(3):
+-            p_plus = pts[i].copy(); p_plus[j] += eps
+-            p_minus = pts[i].copy(); p_minus[j] -= eps
+-            grad[j] = (f_func(p_plus) - f_func(p_minus)) / (2 * eps)
+-        grad_norms[i] = np.linalg.norm(grad)
+-    return np.max(grad_norms)
+-
+-class GradientInclusion:
+-    """Inclusion function using gradient bounds [G]."""
+-    def __init__(self, f_func, lipschitz):
+-        self.f_func = f_func
+-        self.L = lipschitz
+-
+-    def evaluate(self, lo, hi):
+-        """Compute conservative range of f over box [lo, hi] [G].
+-        Uses mean value form: f(x) ≈ f(c) ± L * ||x - c||."""
+-        center = 0.5 * (lo + hi)
+-        radius = np.max(hi - lo, axis=-1) / 2.0
+-        f_center = self.f_func(center)
+-        f_min = f_center - self.L * radius
+-        f_max = f_center + self.L * radius
+-        return f_min, f_max
+-
+-def _trace_rays(origins, directions, t_min, t_max, hit_mask, f_np, 
+-                max_depth=15, threshold=1e-5, newton_iter=0, batch_size=None):
+-    """Robust ray casting using level-synchronized bisection with gradient inclusion [S1, unofficial]."""
+-    n_rays = origins.shape[0]
+-    if batch_size is None:
+-        batch_size = n_rays
+-
+-    # Initialize inclusion function
+-    if isinstance(hit_mask, str) and hit_mask == 'auto':
+-        box_lo = np.min(origins, axis=0)
+-        box_hi = np.max(origins, axis=0)
+-        lipschitz = estimate_lipschitz(f_np, box_lo, box_hi)
+-    else:
+-        lipschitz = hit_mask # Assume hit_mask passed as lipschitz for 'auto' logic in sources
+-        # Adjusted to match source signature: hit_mask is actually the inclusion object or lipschitz
+-        # Re-mapping to source signature: _trace_rays(origins, directions, t_min, t_max, hit_mask, inclusion, f_np, max_depth, threshold, newton_iter, batch_size)
+-        pass
+-
+-    # Simplified to match source signature exactly
+-    def run_trace(origins, directions, t_min, t_max, inclusion, f_np, max_depth, threshold, newton_iter, batch_size):
+-        n_rays = origins.shape[0]
+-        hits = np.full(n_rays, False)
+-        hit_distances = np.full(n_rays, np.inf)
+-
+-        for start in range(0, n_rays, batch_size):
+-            end = min(start + batch_size, n_rays)
+-            active = np.ones(end - start, dtype=bool)
+-
+-            cur_t_min = t_min[start:end].copy()
+-            cur_t_max = t_max[start:end].copy()
+-
+-            for _ in range(max_depth):
+-                if not np.any(active):
+-                    break
+-
+-                pts_min = origins[start:end][active] + cur_t_min[active][:, None] * directions[start:end][active]
+-                pts_max = origins[start:end][active] + cur_t_max[active][:, None] * directions[start:end][active]
+-
+-                lo = np.minimum(pts_min, pts_max)
+-                hi = np.maximum(pts_min, pts_max)
+-
+-                f_min, f_max = inclusion.evaluate(lo, hi)
+-                contains_zero = (f_min <= 0) & (f_max >= 0)
+-                active &= contains_zero
+-
+-                if not np.any(active):
+-                    break
+-
+-                t_mid = 0.5 * (cur_t_min[active] + cur_t_max[active])
+-                x_mid = origins[start:end][active] + t_mid[:, None] * directions[start:end][active]
+-                f_val = f_np(x_mid)
+-
+-                converged = np.abs(f_val) < threshold
+-                hit_indices = np.where(converged)[0]
+-                if len(hit_indices) > 0:
+-                    hits[start + hit_indices] = True
+-                    hit_distances[start + hit_indices] = t_mid[hit_indices]
+-
+-                non_converged = ~converged
+-                active &= non_converged
+-
+-                if not np.any(active):
+-                    break
+-
+-                mask_pos = f_val[non_converged] > 0
+-                cur_t_max[active] = np.where(mask_pos, t_mid, cur_t_max[active])
+-                cur_t_min[active] = np.where(mask_pos, cur_t_min[active], t_mid)
+-
+-        # Newton refinement step [G]
+-        # if newton_iter > 0: apply Newton steps to hits
+-
+-        return hits, hit_distances
+-
+-    return run_trace(origins, directions, t_min, t_max, hit_mask, f_np, max_depth, threshold, newton_iter, batch_size)
+-```
++**Edge Cases:**
++- **Degenerate Rays:** Rays with zero direction or $t_{min} \ge t_{max}$ should be handled before tracing.
++- **Precision:** Affine arithmetic can suffer from dependency problem. Use higher-order forms or interval arithmetic fallback if bounds are too loose [S1, unofficial].
++- **Lipschitz Estimation:** If 'auto', ensure sufficient samples to capture max gradient norm.
+ 
+ ## Subtopics
+ 
+-### [Interval Arithmetic Inclusion Strategies](1410-interval-arithmetic-inclusion-strategies.md)
+-Computes conservative bounds on $f$ over spatial domains. Distinguishes itself by offering a configurable trade-off between generality and bound tightness, spanning sampling-based estimates to analytic arithmetic.
+-
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N \cdot D \cdot C)$, where $N$ is number of rays, $D$ is max depth, and $C$ is cost of function evaluation [G].
+-*   **Memory Complexity:** $O(N)$ for ray state and batch processing [G].
+-*   **Strengths:** Robust against missing features due to interval pruning; configurable accuracy via Lipschitz constant [S1, unofficial].
+-*   **Limitations:** Slower than standard bisection due to inclusion function evaluation; requires gradient computation for 'auto' Lipschitz estimation [S1, unofficial].
+-*   **When to Use:** High-quality rendering of complex implicit surfaces where robustness is critical [G].
+-*   **When Not to Use:** Real-time applications with strict latency constraints or simple surfaces where standard bisection suffices [G].
++- **Time Complexity:** $O(N \cdot D)$ where $N$ is the number of rays and $D$ is the average bisection depth. Each bisection step involves an inclusion function evaluation, which is $O(1)$ per ray if precomputed, or $O(M)$ if $M$ is the number of variables in the affine form.
++- **Memory Complexity:** $O(N \cdot M)$ for storing affine forms for all active rays.
++- **Performance:** Faster than pure interval arithmetic due to tighter bounds from gradient inclusion. Slower than simple bisection due to overhead of affine arithmetic.
++- **Strengths:** Robustness against missing features; efficient pruning compared to coarse interval methods.
++- **Limitations:** Higher computational cost per step; dependency problem in affine arithmetic can lead to overestimation.
++- **When to Use:** When robustness is critical and the implicit function is differentiable.
++- **When Not to Use:** For non-differentiable functions or when performance is paramount and some feature loss is acceptable.
+ 
+ ## Background
+-Originated from the need for robust iso-surface rendering in the `iso-surface-rendering` repository by narnia-ai-mason [S1, unofficial]. It builds on level-synchronized bisection ray casting [1313-level-synchronized-bisection-ray-casting.md] and incorporates gradient-based inclusion strategies to improve bound tightness [S1, unofficial].
++The method is based on level-synchronized bisection ray casting, which ensures all rays are processed in lockstep to maximize parallel efficiency on GPUs [S1, unofficial]. Gradient inclusion strategies were introduced to improve the tightness of bounds in interval arithmetic, reducing the number of bisection steps required [S1, unofficial]. The implementation is part of the `iso-surface-rendering` library, which provides a modular framework for robust volume rendering [S1, unofficial].
+ 
+ ## Sources

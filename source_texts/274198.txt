@@ -1,0 +1,163 @@
+OptiX + GL based implementations of ANARI. Contribute to NVIDIA/VisRTX development by creating an account on GitHub.
+
+rtx: Add isosurface geometry by tarcila · Pull Request #317 · NVIDIA/VisRTX · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+tarcila
+commented
+Jun 23, 2026
+Copy link
+Copy Markdown
+Collaborator
+Implements the ANARI KHR_GEOMETRY_ISOSURFACE geometry: a surface rendered wherever a spatial field equals one or more isovalues. Because it's a geometry, it flows through the existing surface/material/AOV/shadow pipeline with no renderer changes.
+Isosurface geometry — a new primitive geometry (like Sphere/Cone) that references a SpatialField and an isovalue array, intersecting the ray with the crossing surface rather than extracting a mesh.
+Macrogrid space-skipping — traversal walks a coarse grid of macrocells (shared with volume rendering), each holding the field's value range, and skips any cell that can't bracket the isovalue. NanoVDB fields skip at the brick level too. This is what makes large fields tractable.
+Per-voxel DDA for built-in fields — once inside an active region, the four built-in samplers (structured regular/rectilinear, NanoVDB regular/rectilinear) step voxel-by-voxel via a DDA and solve the crossing analytically per cell, instead of a fixed-step march. Custom fields keep the ray-march fallback.
+Fixes uncovered while wiring this up: NanoVDB index-offset sign, sampler centering, and an integer overflow in macrocell index decomposition.
+tarcila
+added 6 commits
+June 22, 2026 20:44
+rtx: fix integer overflow in macrocell index decomposition
+…
+e510cee
+```
+In computeValueRangesGPU the z-slice stride mcDims.x * mcDims.y was
+computed as 32-bit int, overflowing for large uniform grids. Cast
+mcDims.x to size_t to match threadID and the numMCs bound above.
+```
+rtx: fix NanoVDB offsetDown sign and sampler centering maps
+…
+56c5ab1
+```
+offsetDown negated the index-bbox min: any grid whose index bbox does
+not start at 0 drove the normalized coord negative, the LUT clamped it,
+and every sample collapsed to a constant. Use +min.
+
+Also distinguish data centering in the index->LUT map. NanoVDB index
+space spans [0, N] (N voxels as cells): cell-centered fills it (scale by
+cell count N, sample centers via -0.5), node-centered fills only
+[0, N-1] and is stretched by (N-1)/N. Apply the same invariant to the
+structured-rectilinear sampler: scale by N cells vs N-1 segments.
+```
+rtx: write Quality first-hit AOVs before path termination
+…
+6fdb521
+```
+In the volume-scatter branch, first-hit AOVs (object/instance id, depth,
+normal) were written only after contribution-based path termination. A
+fully opaque but zero-albedo (black) transfer-function region still
+scatters, but sampleContribution *= albedo drives throughput to 0, so
+shouldTerminatePath breaks before setPixelIds runs, leaving object-id
+and depth unset (background) wherever the volume renders black.
+
+Move the AOV writes ahead of the termination check; they are first-hit
+metadata, independent of radiance contribution.
+```
+rtx: add ANARI isosurface geometry (khr_geometry_isosurface)
+…
+6fdaf57
+```
+Render the isosurface of a structured-regular, structured-rectilinear,
+or NanoVDB (regular + rectilinear) field as a single OptiX geometry. A
+coarse active-region brick BLAS broad-phase-culls rays; an in-program
+traversal then finds the nearest isovalue crossing and its hit point and
+normal. Both levels use the field's macrocell value-range grid for
+empty-space skipping.
+
+Nearest-filtered built-in grids use an exact voxel-DDA: the field is
+piecewise-constant, so the isosurface is axis-aligned voxel faces and a
+sign change across a face yields the crossing t and face normal directly
+(no bisection or gradient). Uniform grids walk affine sample/index space
+(shared ray t); rectilinear grids walk a non-uniform DDA whose
+voxel-boundary object positions come from an inverse axis LUT
+(index->object), avoiding a per-hit root-find.
+
+Linear-filtered fields keep the fixed-step ray march (value bracket +
+bisection + gradient normal). Custom fields have no inline sampler: they
+dispatch through the SBT callables (sampleValue/sampleNormal resolve on
+VolumeSamplingState by ADL via the shared CustomFieldSamplerInline.h,
+reused by the intersector and the volume integrator) and likewise use
+the fixed-step march. Secondary rays are offset one voxel to avoid
+self-occlusion on the voxel-scale surface.
+```
+rtx: route linear isosurfaces through the per-voxel DDA
+…
+f01f506
+```
+Linear-filtered built-in isosurfaces fell back to the generic fixed-step
+march while only nearest used the per-voxel DDA. Both filters now run the
+two-level macrocell-skip + per-voxel DDA: nearest keeps the
+piecewise-constant entry-face test; linear fits the trilinear-along-ray
+cubic per voxel (four node values -> monotone-span root find,
+linearCrossing) and reports the smallest crossing. Fixed-step march is
+now reached only by custom fields. The crossing test is factored into
+crossingTest, shared by all four grid DDAs.
+
+Also: convert iso.stepSize from object to ray-t units (non-unit dir
+under instance scale), step by integer index to avoid float drift, and
+guard normalize() against a zero gradient.
+```
+rtx: forward-difference normal for linear NanoVDB isosurface hits
+…
+3856892
+```
+At a linear isosurface hit the field value is already known (the matched
+isovalue vHit), so central-difference sampleNormal wastes taps: 6 where 3
+suffice. Add isosurfaceHitGradient, three +1-voxel forward taps against
+vHit, overridden by the NanoVDB regular and rectilinear samplers and
+resolved by ADL; the generic fallback stays on central difference. The
+forward span still reaches into the neighbour cell, so the normal stays
+smooth across cell boundaries.
+```
+tarcila
+requested a review
+from jeffamstutz
+June 23, 2026 13:33
+tarcila
+changed the title
+Add isosurface geometry to the RTX device
+rtx: Add isosurface geometry
+Jun 23, 2026
+jeffamstutz
+approved these changes
+Jun 23, 2026
+View reviewed changes
+jeffamstutz
+left a comment
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+LGTM, thanks!
+Hide details
+View details
+jeffamstutz
+merged commit 369181f
+into
+NVIDIA:next_release
+Jun 23, 2026
+8 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+tarcila
+deleted the
+isosurface
+branch
+July 2, 2026 13:11
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

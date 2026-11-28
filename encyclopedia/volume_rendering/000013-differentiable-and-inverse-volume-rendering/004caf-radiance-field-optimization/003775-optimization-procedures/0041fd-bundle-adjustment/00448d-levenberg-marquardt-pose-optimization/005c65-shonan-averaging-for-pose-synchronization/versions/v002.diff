@@ -1,0 +1,149 @@
+--- v001.md
++++ v002.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Shonan Averaging for Pose Synchronization is a method for finding a global alignment of camera poses given a set of noisy relative pose measurements from local mini-scenes [S1]. It solves the non-convex optimization problem of registering local coordinate frames into a common global reference frame by iteratively relaxing the problem into higher-dimensional special-orthogonal spaces [S1]. It sets itself apart from its siblings by explicitly handling the non-convexity of the rotation component via Shonan relaxation, whereas [Lie Algebra (Tangent Plane) Pose Optimization](14005-lie-algebra-tangent-plane-pose-optimization.md) relies on local linearization and [Derivative-free Pose Estimation via Feature Matching](11310-derivative-free-pose-estimation-via-feature-matching.md) avoids gradient-based optimization entirely.
++Shonan Averaging for Pose Synchronization finds a global alignment of camera poses given a set of noisy relative pose measurements from local mini-scenes [S1]. It solves the non-convex optimization problem of registering local coordinate frames into a common global reference frame by iteratively relaxing the problem into higher-dimensional special-orthogonal spaces [S1]. It sets itself apart from its siblings by explicitly handling the non-convexity of the rotation component via Shonan relaxation, whereas [Lie Algebra (Tangent Plane) Pose Optimization](14005-lie-algebra-tangent-plane-pose-optimization.md) relies on local linearization and [Derivative-free Pose Estimation via Feature Matching](11310-derivative-free-pose-estimation-via-feature-matching.md) avoids gradient-based optimization entirely.
+ 
+ ## How it works
+@@ -30,5 +30,5 @@
+ 
+ 3.  **Shonan Rotation Averaging:**
+-    Solve for the global rotations $R_i \in SO(3)$ by applying Shonan averaging [S1]. This method solves a convex relaxation of the rotation synchronization problem by iteratively converting the problem to higher-dimensional special-orthogonal spaces $SO(n)$ until convergence [S1].
++    Estimate the global camera rotations $R_i \in SO(3)$ using Shonan averaging, which solves a convex relaxation of the synchronization problem [S1]. This method iteratively converts the problem to higher-dimensional special-orthogonal spaces $SO(n)$ until convergence [S1].
+     *   The input to this step is the set of selected relative rotations and their associated confidence weights [S1].
+ 
+@@ -43,83 +43,74 @@
+ 
+ ```python
++import numpy as np
++
+ def shonan_averaging_pose_synchronization(mini_scenes, relative_poses, confidences):
+     """
+-    mini_scenes: List of mini-scene objects, each containing local poses and PSNR metrics.
+-    relative_poses: Dict mapping (i, j) to list of relative pose objects (R_ij, t_ij).
+-    confidences: Dict mapping (i, j) to list of confidence scores (PSNR).
++    mini_scenes: list of dicts with keys 'id', 'scale', 'psnr_i_in_i', 'psnr_i_in_j'
++    relative_poses: dict mapping (i, j) to list of dicts with 'R' (3x3), 't' (3,)
++    confidences: dict mapping (i, j) to list of floats
+     """
+     # Step 1: Resolve Scale Ambiguity
+-    # Construct MST over mini-scene centers
++    # Construct MST over mini-scene centers [G]
+     mst_edges = construct_mst(mini_scenes)
+-    
+-    # Fix reference scale and propagate
+-    reference_scene = mini_scenes[0]
+-    reference_scale = reference_scene.scale
+-    propagate_scale_through_mst(mst_edges, reference_scale)
+-    
+-    # Step 2: Select Best Relative Poses
++    # Propagate scale from reference scene through MST [G]
++    propagate_scale(mst_edges, mini_scenes)
++
++    # Step 2: Heuristic Selection for Relative Poses
+     selected_rotations = {}
+     selected_translations = {}
+-    
+     for (i, j), pose_list in relative_poses.items():
+-        if i > j:
+-            continue # Handle each pair once
+-        
++        if i > j: continue
+         best_pose = None
+-        best_psnr = -infinity
+-        
+-        for pose in pose_list:
+-            # Heuristic: Compare PSNR of camera i in its own mini-scene vs j's
+-            # Note: pose comes from a specific mini-scene context
+-            psnr_i_in_i = get_psnr(mini_scenes[i], mini_scenes[i])
+-            psnr_i_in_j = get_psnr(mini_scenes[i], mini_scenes[j])
+-            
+-            if psnr_i_in_i > psnr_i_in_j:
+-                current_confidence = psnr_i_in_i
+-            else:
+-                current_confidence = psnr_i_in_j
+-                
++        best_psnr = -float('inf')
++        for idx, pose in enumerate(pose_list):
++            # Heuristic: Compare PSNR of Ii in mini-scene Ci vs Ii in mini-scene Cj [S1]
++            psnr_i_in_i = mini_scenes[i]['psnr_i_in_i'][idx]
++            psnr_i_in_j = mini_scenes[j]['psnr_i_in_j'][idx]
++            current_confidence = psnr_i_in_i if psnr_i_in_i > psnr_i_in_j else psnr_i_in_j
+             if current_confidence > best_psnr:
+                 best_psnr = current_confidence
+                 best_pose = pose
+-        
+-        selected_rotations[(i, j)] = best_pose.R
+-        selected_translations[(i, j)] = best_pose.t
++        selected_rotations[(i, j)] = best_pose['R']
++        selected_translations[(i, j)] = best_pose['t']
+ 
+     # Step 3: Shonan Rotation Averaging
+-    # Input: selected_rotations and their confidences
+-    # Output: Global rotations R_i for all i
++    # Iteratively converts problem to higher dimensional SO(n) until convergence [S1]
+     global_rotations = shonan_rotation_averaging(selected_rotations, confidences)
+ 
+     # Step 4: Translation Optimization
+-    # Solve linear system: t_j - t_i = R_i * t_ij
+-    # Construct matrix A and vector b for least squares
++    # Solve linear system: t_j - t_i = R_i * t_ij [S1]
++    n_cameras = len(mini_scenes)
+     A = []
+     b = []
+-    
+     for (i, j), t_ij in selected_translations.items():
+         R_i = global_rotations[i]
+-        # Equation: t_j - t_i = R_i * t_ij
+-        # Reshape to linear constraints for t_i and t_j
+-        # Let t be the flattened vector of all translations
+-        # Add rows to A and b corresponding to this constraint
+-        
+-        # Row for t_i: -I
+-        # Row for t_j: I
+-        # RHS: R_i * t_ij
+-        
+-        A.append([-eye(3), eye(3)]) # Simplified representation
+-        b.append(R_i @ t_ij)
+-        
+-    # Solve least squares: min ||Ax - b||^2
+-    global_translations = solve_least_squares(A, b)
+-    
+-    # Construct final global poses
+-    global_poses = []
+-    for i in range(len(mini_scenes)):
+-        P_i = SE3(global_rotations[i], global_translations[i])
+-        global_poses.append(P_i)
+-        
+-    return global_poses
++        rhs = R_i @ t_ij
++        row_i = np.zeros((3, 3 * n_cameras))
++        row_j = np.zeros((3, 3 * n_cameras))
++        row_i[:, 3*i:3*(i+1)] = -np.eye(3)
++        row_j[:, 3*j:3*(j+1)] = np.eye(3)
++        A.extend([row_i, row_j])
++        b.extend([-rhs, rhs])
++    global_translations_flat = np.linalg.lstsq(np.vstack(A), np.concatenate(b), rcond=None)[0]
++    global_translations = [global_translations_flat[3*i:3*(i+1)] for i in range(n_cameras)]
++
++    return [{'R': global_rotations[i], 't': global_translations[i]} for i in range(n_cameras)]
++
++def construct_mst(nodes):
++    """[G] Standard MST algorithm (e.g., Kruskal's or Prim's) over mini-scene centers."""
++    pass
++
++def propagate_scale(mst_edges, mini_scenes):
++    """[G] BFS/DFS to propagate scale from reference node through MST edges."""
++    pass
++
++def shonan_rotation_averaging(rotations, confidences):
++    """[G] Off-the-shelf Shonan averaging: iteratively relaxes rotation synchronization to SO(n) until convergence."""
++    pass
++
++def solve_least_squares(A, b):
++    """[G] Standard least-squares solver (e.g., normal equations or QR decomposition)."""
++    pass
+ ```
+ 

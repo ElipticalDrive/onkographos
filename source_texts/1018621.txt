@@ -1,0 +1,150 @@
+Set of classes and utilities based on research and software developed at the Computational Visualization Center. - cloud_sky: a cloud deck over the whole world, its shade in the receivers' shaders by transfix · Pull Request #1013 · transfix/libcvc
+
+cloud_sky: a cloud deck over the whole world, its shade in the receivers' shaders by transfix · Pull Request #1013 · transfix/libcvc · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+transfix
+commented
+Nov 3, 2026
+Copy link
+Copy Markdown
+Owner
+The terrain lab had no cloud shadows, and on a large world its clouds covered only the middle. cloud_sky was one fixed 60x60x28 slab (1.28 km across in terrain_lab). Its ground shadow was a 96² bake of shade x band albedo that replaced the ground node's texture, so terrain_lab set shadow: 0. Ordinary shadows on textures are fine: buildings shade the ground through the shadow map, which dims the lighting. Only that bake replaced textures. The clouds can't use the shadow map either: they're a volume (not a caster), and the map covers 150-900 m around the camera.
+What changes
+Shade in the receivers' shaders, not their textures. The deck builds a small periodic mask: the cloud optical depth along the sun from each point of the deck's base plane. Every receiver reads it at its fragment's base-plane point and scales only the direct light (diffuse + specular), so textures and colours are untouched. Receivers are the ground: node and everything under it (every terrain LOD rung), plus the nodes in receivers: (terrain_lab: buildings, roads, props, foliage). New meshes, such as LOD rungs made late or a regenerated world, are picked up once a second. The shadow follows drift exactly (a translation) and morph exactly (the maps crossfade linearly, so the optical depths do too).
+A deck over the whole world (cvc::world::cloud_layer, GL-free, world_cloud_test):
+A few L-system cumulus maps are scattered over a periodic grid of cells: which cells hold a cloud (coverage), each cloud's offset in its cell, and a per-cell sequence of maps it morphs through.
+The period is wider than the drawn area, so each cloud has exactly one copy drawn and every texture wraps.
+Each map is scaled to its own peak. The grammar grows some variants nearly empty: variant 1 peaked at 0.054 of the shared normalization, so the old slab spent half of its morph cycle almost empty.
+The shadow and far slices integrate the volume's transfer-function opacity. Integrating raw density cast square shadows from haze the transfer function hides.
+Coverage ladder (LSYSTEM roadmap 8.4's cloud ladder, a first part):
+A pool of near VolumeNodes (6 in terrain_lab, at most 8) on the clouds nearest the camera.
+One mesh of 10 translucent shells for the rest. They sample a coarse opacity texture and turn it into optical depth along the view ray, so they read like the volumes.
+A cloud crossfades between the two. The shells cut out the near volumes' squares by uniform, so a fade never re-composites.
+The deck follows the ground's extent live (the World half slider).
+GeometryNode gains:
+shared shader inputs: one set (floats, vec3/vec4, mat4, textures) that many meshes read at draw time;
+fragment replacements applied after VTK's own, so a receiver can rewrite the lighting sum VTK generates.
+That sum is the one place both mappers keep the direct terms apart: the WebGL2 low-memory mapper scopes diffuse/specular to its lighting block and writes fragOutput0.
+terrain_lab.ari:
+The deck: 500 m cumulus, deck at 300-520 m, coverage 0.6, 6 near volumes, cast along the key light (az -60, el 28).
+The light rig: fill / environment / ambient 0.3 / 0.5 / 0.32 -> 0.15 / 0.2 / 0.2. With more light from the sky than from the sun, building and cloud shadows washed out. These are the values from the earlier native A/B; I applied them here as part of judging the cloud shadows.
+lsystem_forest.ari: horizon: 0, so the island's deck stays over the island and the camera frames it as before. The island now keeps its own band colours instead of the old 96² bake.
+Checked (Windows, Release, cvcpkg prefix)
+world_cloud_test 8/8, lsys_fields_test 6/6, cvcgl_ariadne_realize (new checks: the deck's near volumes and far shells exist; the sky's first tick wires its shade into the ground's shader, which held none before).
+arigl snapshot of terrain_lab at 1.2 km and 11.2 km (half 600 / 5600), several cameras, shade on vs shadow: 0, and a top-down debug comparing cloud and shadow positions. Shadows sit where the sun puts them and drift with the clouds.
+The WebGL2 mapper natively (CVCGL_LOWMEM_MAPPER=force): it applies the post-VTK replacement and compiles the deck's shaders. The GLSL ES compile itself is unchecked (no local emsdk).
+Cost
+Native, 1280x720 offscreen:
+The sky's tick averages 0.4 ms/frame on both the 1.2 km and the 11.2 km world.
+The shade (at most 512²) and far (at most 256² x 10) composites are spread over 8 frames, once a second. Their uploads (~0.4 ms and ~1 ms) go to double-buffered textures.
+Walking the receivers for new meshes takes ~1.5 ms, once a second.
+The old slab cost about the same: a 60x60x28 crossfade and a 96² bake every third frame. Browser: expect 2-3x the CPU on single-threaded wasm (~1 ms/frame, ~4 ms once a second). On the GPU: up to 6 small volume ray casts plus 10 shell layers' fill. Not measured in a browser yet.
+Known and left for later (docs/roadmap/GENERATED-WORLD-ROADMAP.md, G6)
+Shells streak at grazing angles near the horizon.
+Near volumes are flat white beside the shells' height shading.
+Clouds stop short of the horizon past the world's edge (the deck is in the scene's bounds, which the camera fits and clips to).
+The receiver walk is periodic.
+One top-down view showed a straight-edged cloud, likely where two near volumes' boxes overlap.
+With the forced WebGL2 mapper natively, terrain_bump itself fails to compile: it picks the normal's name by __EMSCRIPTEN__, not by mapper. That predates this PR.
+transfix
+added 2 commits
+November 3, 2026 16:25
+cloud_sky: a cloud deck over the whole world, its shade in the receiv…
+…
+ed1fbdc
+```
+…ers' shaders
+
+The terrain lab showed no cloud shadows: cloud_sky's shadow was a 96^2 bake of shade x band
+albedo that replaced the ground's texture, so terrain_lab turned it off. Its clouds were one fixed
+60x60x28 slab, 1.28 km across, so an 11.2 km world had clouds over its middle only.
+
+- cvc::world::cloud_layer (GL-free, world_cloud_test): a few L-system cumulus maps scattered over
+  a periodic grid of cells (coverage, offsets, a per-cell morph sequence), each map scaled to its
+  own peak. It makes a cell's density for a near volume, a periodic shadow mask (the optical depth
+  along the sun from the base plane) and periodic far slices, both integrating the volume's
+  transfer-function opacity, both computable a share at a time.
+- The shade is drawn in the receivers' shaders (the ground and every LOD rung, buildings, roads,
+  props): it scales the direct light at the fragment's base-plane point along the sun, and leaves
+  textures alone. GeometryNode gains shared shader inputs and post-VTK fragment replacements.
+- Coverage: a pool of near VolumeNodes on the clouds nearest the camera, one mesh of translucent
+  shells for the rest (optical depth along the view ray), crossfading between the two; the deck
+  follows the ground's extent live. Composites are spread over frames once a second.
+- terrain_lab: the deck over the world with its shade on, and a lower fill / environment /
+  ambient so building and cloud shadows read. lsystem_forest keeps its deck over the island.
+```
+cloud_sky: receivers rewrite the lighting sum both mappers write; che…
+…
+d4cfe0f
+```
+…cked on the WebGL2 mapper
+
+The WebGL2 (low-memory) mapper scopes diffuse and specular to its lighting block and writes
+fragOutput0, so code after //VTK::Light::Impl cannot reach the direct terms there. Every receiver
+now rewrites the sum vec4(ambientColor + diffuse + specular, opacity) after VTK generates it;
+natively with CVCGL_LOWMEM_MAPPER=force that mapper applies it and compiles the deck's shaders.
+```
+transfix
+enabled auto-merge (squash)
+November 3, 2026 23:05
+Hide details
+View details
+transfix
+merged commit 3bc7074
+into
+master
+Nov 3, 2026
+10 of 27 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+transfix
+deleted the
+feat/cloud-shadows-coverage
+branch
+November 3, 2026 23:40
+transfix
+mentioned this pull request
+Nov 6, 2026
+cloud_sky: clouds to the horizon, no edge-on bands, one look near and far, no straight edges
+#1029
+Merged
+transfix
+added a commit
+that referenced
+this pull request
+Nov 6, 2026
+cloud_sky: clouds to the horizon, no edge-on bands, one look near and…
+…
+38c6b07
+```
+… far, no straight edges (#1029)
+
+The five issues #1013 left:
+- The far shells leave the camera's bounds (GeometryNode::setUseBounds: VTK's UseBounds and the
+  scene's box) and reach far_reach (4 km) past the ground; a vertex past the far plane is drawn on
+  it (clip depth clamped to 0.999 w), so the deck reaches the horizon without moving the near plane.
+- Each shell marches the view ray across its slab of deck (6 samples) instead of reading one
+  layer, so the slices join into one cloud seen edge-on, from below or above.
+- The volumes stay unshaded (VTK's volume lighting reads as storm cloud) and share the shells'
+  colour ramp: grey-blue thin, white dense.
+- The grammar clamps its turtle at the grid's y edges and piled puffs against the face, which
+  the window cut off straight; each map now fades out over its outer 40% radius.
+- terrain_bump and bark name the normal by the node's mapper (GeometryNode::usesLowMemoryMapper),
+  not __EMSCRIPTEN__, so CVCGL_LOWMEM_MAPPER=force draws the whole terrain lab natively.
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

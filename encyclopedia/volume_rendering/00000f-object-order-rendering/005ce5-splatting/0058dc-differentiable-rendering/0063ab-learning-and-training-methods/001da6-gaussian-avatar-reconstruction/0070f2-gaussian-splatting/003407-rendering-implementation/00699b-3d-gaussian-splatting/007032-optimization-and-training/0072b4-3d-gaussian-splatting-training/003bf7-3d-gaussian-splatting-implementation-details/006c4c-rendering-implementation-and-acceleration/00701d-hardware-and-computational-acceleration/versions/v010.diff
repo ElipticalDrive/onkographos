@@ -1,0 +1,455 @@
+--- v009.md
++++ v010.md
+@@ -4,8 +4,8 @@
+ 
+ ## Overview
+-Hardware and Computational Acceleration encompasses methods that optimize the execution of 3D Gaussian Splatting (3DGS) on modern graphics hardware, addressing bottlenecks in memory bandwidth, arithmetic intensity, and parallelism. It solves the problem of high computational cost and memory exhaustion when rendering or training scenes with millions of primitives. Unlike sibling methods that focus on data compression [Data Compression and Storage Optimization](12943-data-compression-and-storage-optimization.md) or spatial partitioning [Occupancy Region Derivation & ϵ-Intersection Criterion](19020-occupancy-region-derivation-intersection-criterion.md), this family focuses on **execution efficiency**: restructuring kernels to better utilize GPU architectures (e.g., Tensor Cores, shared memory) and managing data movement between CPU and GPU memory hierarchies.
++Hardware and Computational Acceleration encompasses the system-level and algorithmic optimizations required to render and train 3D Gaussian Splatting (3DGS) efficiently on modern GPU architectures. It solves the bottlenecks of memory bandwidth, sorting latency, and GPU memory capacity that arise when processing scenes with tens of millions of primitives. It sets itself apart from sibling methods by focusing on **system-level distribution** (sharding across nodes), **hardware-specific kernel design** (Tensor Cores, Roofline optimization), and **memory hierarchy management** (CPU-GPU offloading) rather than just intra-GPU rasterization logic like tiling or sorting.
+ 
+ ## Shared principles
+-All methods in this family operate on the standard 3D Gaussian primitive definition provided by the parent article [Rendering Implementation and Acceleration](21069-rendering-implementation-and-acceleration.md). The core rendering operation involves projecting these 3D primitives to 2D screen space and performing alpha blending. Acceleration relies on the following shared mechanisms:
++All methods in this family operate on the set of $N$ 3D Gaussians $\{G_i\}_{i=1}^N$ defined in [Rendering Implementation and Acceleration](21069-rendering-implementation-and-acceleration.md). The core rendering operation involves projecting these 3D primitives to 2D screen space and performing alpha blending. Acceleration relies on the following shared mechanisms:
+ 
+ 1.  **Tiling:** Dividing the image plane into non-overlapping tiles (commonly $16 \times 16$ pixels) to localize Gaussian processing and enable coalesced memory accesses [S2, unofficial].
+@@ -19,49 +19,410 @@
+ RoofGS is an end-to-end acceleration method for 3D Gaussian Splatting that optimizes the rendering pipeline based on stage-specific hardware constraints identified via the Roofline model [S1, unofficial]. It addresses the inefficiency of generic optimization by applying bandwidth-reduction techniques to memory-bound front-end stages and instruction-level parallelism (ILP) enhancements to compute-bound rasterization stages [S1, unofficial]. Unlike sibling methods that focus on memory management or distributed sharding, RoofGS restructures the core rendering kernel to minimize global memory traffic and arithmetic overhead simultaneously [S1, unofficial].
+ 
++It implements four core optimizations: front-end fusion, compact attribute storage, compressed radix-sort keys, and a reorganized rasterizer with dual-pixel ILP and fast exponential evaluation [S1, unofficial]. The method operates on the standard 3D Gaussian primitive definition provided by the parent article [Rendering Implementation and Acceleration](21069-rendering-implementation-and-acceleration.md).
++
++**Data Structures:**
++1.  **Gaussian Attributes:** Compressed to reduce memory footprint. Standard third-degree SHs require 192 bytes per Gaussian in single precision ($3 \times (D_{SH} + 1)^2 \times 4$ bytes for $D_{SH}=3$) [S1, unofficial]. RoofGS uses low-bit quantization with a single shared scale for all SH coefficients [S1, unofficial].
++2.  **Depth Keys:** Compressed dynamically to reduce sorting bandwidth [S1, unofficial].
++
++**Algorithm Steps:**
++1.  **Front-End Fusion:** Merge pre-processing stages to reduce intermediate data movement [S1, unofficial].
++2.  **Compact Attribute Storage:** Quantize SH coefficients using a shared scale to reduce global memory traffic [S1, unofficial].
++3.  **Compressed Radix Sort:** Sort Gaussians by view-space depth using compressed keys to enable correct alpha blending [S1, unofficial].
++4.  **Rasterization with Dual-Pixel ILP:** Evaluate and composite Gaussians per pixel with increased instruction-level parallelism [S1, unofficial].
++
++**Formulas:**
++The baseline rasterizer evaluates the Gaussian power $p(x, y)$ for a pixel $(x, y)$ as [S1, unofficial]:
++
++$$
++p(x, y) = -\frac{1}{2} \left( a(x - w)^2 + b(x - u)(y - v) + c(y - v)^2 \right)
++$$
++
++where $(u, v)$ is the projected 2D Gaussian center, and $a, b, c$ are derived from the projected covariance matrix [S1, unofficial]. The unclamped opacity contribution is then [S1, unofficial]:
++
++$$
++\tilde{\alpha}(x, y) = o \exp(p(x, y))
++$$
++
++where $o$ is the Gaussian opacity [S1, unofficial]. RoofGS optimizes the evaluation of this exponential term and the subsequent blending loop to increase ILP [S1, unofficial].
++
++**Parameters:**
++*   **SH Degree:** Typically $D_{SH}=3$ [S1, unofficial].
++*   **Quantization Scale:** Single shared scale for all SH coefficients [S1, unofficial].
++
++**Edge Cases and Pitfalls:**
++*   **Precision Loss:** Quantization of SH coefficients may introduce visual artifacts if the shared scale is not chosen carefully [S1, unofficial].
++*   **Depth Key Compression:** Aggressive compression may lead to sorting errors if key collisions are not handled [S1, unofficial].
++
++**Pseudocode:**
++```python
++def roofgs_render(gaussians, camera, image_width, image_height):
++    # Step 1: Front-end fusion and compact attribute storage
++    # Quantize SH coefficients with a shared scale
++    compressed_gaussians = quantize_sh(gaussians, shared_scale=True)
++    
++    # Step 2: Compressed radix sort
++    # Compress depth keys and sort front-to-back
++    sorted_gaussians = compressed_radix_sort(compressed_gaussians, camera)
++    
++    # Step 3: Rasterization with dual-pixel ILP
++    image = zeros((image_height, image_width, 3))
++    alpha_image = zeros((image_height, image_width))
++    
++    for tile in tiles(image_width, image_height, 16, 16):
++        # Process tile
++        for pixel in tile_pixels(tile):
++            # Evaluate Gaussian power
++            # p(x,y) = -0.5 * (a*(x-w)^2 + b*(x-u)*(y-v) + c*(y-v)^2)
++            # Compute opacity: alpha = o * exp(p)
++            # Composite with ILP optimization
++            color, alpha = rasterize_pixel(pixel, sorted_gaussians, camera)
++            image[pixel] = color
++            alpha_image[pixel] = alpha
++            
++    return image, alpha_image
++```
++Note: The specific implementation of `quantize_sh`, `compressed_radix_sort`, and `rasterize_pixel` with ILP is detailed in the source [S1, unofficial]. The pseudocode above represents the high-level structure.
++
+ ### [Tile-Based Comparison-Free Sorting](9991-tile-based-comparison-free-sorting.md)
+ Tile-Based Comparison-Free Sorting restricts depth sorting operations to individual image tiles to avoid global synchronization, reduce hardware complexity, and achieve fixed latency per output. It solves the bottleneck of sorting millions of Gaussian points globally by leveraging the fact that alpha blending only requires correct depth ordering within the local tile. Unlike full-scene radix sort, which incurs high memory overhead and variable latency, this method provides deterministic, linear delay cycles suitable for low-power hardware.
+ 
++**Inputs and Outputs:**
++*   **Input:** A list of 3D Gaussians projected into screen space, each associated with a tile ID and a view-space depth value.
++*   **Output:** Gaussians ordered front-to-back within each tile, ready for alpha blending.
++
++**Data Structures:**
++*   **Gaussian Attributes:** Each Gaussian primitive carries a `tile_id` (identifying the $16 \times 16$ tile it overlaps) and `depth` (view-space depth).
++*   **Element Vector Table (EVT):** A bit-vector of size $N$ (where $N$ is the number of Gaussians in the current tile/batch), initialized to all 1s to track unsorted elements.
++
++**Algorithm Steps:**
++The sorting process identifies the Largest Element (LE) iteratively until all elements are sorted.
++
++1.  **Initialization:** Initialize the EVT with all 1s. This indicates that all $N$ elements are currently candidates for being the largest remaining element.
++2.  **Iterative Selection:** Repeat the following steps $N$ times (once for each Gaussian to be sorted):
++    a.  **Concurrent Phase:** Process the $N$ $n$-bit depth values using $k$ parallel clusters. Each cluster handles a partition of the elements. Starting from the most significant bit (MSB), the clusters filter out smaller values through bitwise AND operations and multiplexer-based selection in cascaded blocks.
++    b.  **Sequential Phase:** Pass the outputs from the concurrent phase to a linear array of $k$ cascaded blocks to further refine the selection and identify the single Largest Element (LE) among the candidates marked by the EVT.
++    c.  **Conflict Resolution:** If multiple elements have identical depth values, the EVT may return multiple candidates. Resolve this using bitwise inverter, bitwise AND, and an adder to compute the unique index of the first candidate:
++        $$FO_{NEW} = Fo \& (\sim Fo + 1'b1)$$
++        where $Fo$ is the output vector from the selection phase.
++    d.  **Update EVT:** Clear the bit corresponding to the identified LE in the EVT (set to 0). This removes the sorted element from future consideration.
++3.  **Termination:** The loop ends when the EVT contains all 0s, signaling that all $N$ elements have been sorted.
++
++**Parameters and Optimizations:**
++*   **Sorting Key:** The primary key is $\langle \text{tile-id}, \text{depth} \rangle$. Sorting is performed independently per tile.
++*   **Sign Bit Skipping:** Since near-plane culling excludes points with depth $< 0$, the sign bit of the depth value is always 0. The algorithm skips operations on the sign bit to reduce computational overhead.
++*   **Bit Width ($n$):** Determined by the precision required for view-space depth.
++
++**Edge Cases and Pitfalls:**
++*   **Duplicate Depths:** The conflict resolution logic ($FO_{NEW}$) is critical to handle duplicate depth values correctly, ensuring deterministic ordering even when Gaussians share the same depth.
++*   **Variable N:** The number of Gaussians per tile varies significantly across scenes and views. The hardware must handle this variability without pipeline stalls.
++
+ ### [Distributed Training and Sharding](15108-distributed-training-and-sharding.md)
+ Distributed Training and Sharding refers to the family of methods that partition the 3D Gaussian Splatting (3DGS) training and rendering pipeline across multiple GPUs to overcome single-device memory limits and accelerate large-scale reconstruction. It solves the problem of out-of-memory errors and slow training times when processing scenes with tens of millions of primitives or high-resolution scientific volume data. Unlike single-GPU baselines, these methods distribute Gaussian parameters, pixel blocks, or camera views across a GPU cluster, coordinating via communication primitives like all-to-all or all-reduce. What sets this family apart from its siblings is the focus on **system-level distribution** (sharding the model or data across nodes) rather than just intra-GPU optimization (like tiling or sorting) or inference-specific caching.
+ 
++All methods in this family operate on the standard 3D Gaussian primitive definition provided by the parent article [Rendering Implementation and Acceleration](21069-rendering-implementation-and-acceleration.md). The core rendering operation involves projecting 3D Gaussians to 2D screen space and performing alpha blending. Acceleration strategies generally rely on the following shared mechanisms:
++
++1.  **Tiling:** Dividing the image plane into non-overlapping tiles (commonly $16 \times 16$ pixels) to localize Gaussian processing and enable coalesced memory accesses.
++2.  **Sorting:** Sorting Gaussians within each tile by view-space depth (front-to-back) to enable correct alpha blending.
++3.  **Culling:** Discarding Gaussians that do not overlap with the camera frustum or specific tiles to reduce enumeration overhead.
++4.  **Memory Hierarchy Management:** Exploiting the distinction between global memory (VRAM), shared memory (on-chip), and host memory (CPU RAM) to minimize data movement .
++
+ ### [Cache-based Lazy Memory Management](17592-cache-based-lazy-memory-management.md)
+ Cache-based Lazy Memory Management (CLM) is a memory offloading strategy that enables the training of large-scale 3D Gaussian Splatting (3DGS) scenes on a single consumer-grade GPU by exploiting the inherent sparsity of Gaussian memory access patterns. Unlike naive offloading approaches that load all Gaussians to the GPU or multi-GPU solutions that require complex synchronization, CLM keeps the majority of Gaussians in CPU memory and loads only the subset accessed by the current view, overlapping communication with computation to hide latency.
+ 
++CLM operates on the standard 3D Gaussian primitive definition provided by [Rendering Implementation and Acceleration](21069-rendering-implementation-and-acceleration.md). The method manages the lifecycle of Gaussian parameters between CPU RAM and GPU VRAM to fit scenes exceeding GPU capacity.
++
++**Inputs and Outputs**
++- **Input:** A set of posed training images (views), the full list of $N$ 3D Gaussians stored in CPU memory, and the current optimizer state.
++- **Output:** Updated Gaussian parameters in CPU memory (and optionally GPU memory for the active subset) after a training iteration.
++
++**Data Structures and Layout**
++Each 3D Gaussian consists of 59 learnable parameters. These are divided into four attribute types:
++1.  **3D Position:** 3 parameters.
++2.  **Covariance (Scale + Rotation):** 3 + 4 = 7 parameters.
++3.  **Spherical Harmonics (Color):** 48 parameters.
++4.  **Opacity:** 1 parameter.
++
++Total parameters per Gaussian: $59$.
++
++During training, each parameter requires storage for:
++1.  The parameter value itself.
++2.  Its gradient.
++3.  Two additional versions for the Adam optimizer state.
++
++Each value is a 4-byte floating-point number. Thus, the memory required per parameter is $4 \times 4 = 16$ bytes. The total memory required for $N$ Gaussians is:
++$$ \text{Memory} = N \times 59 \times 16 \text{ bytes} $$
++Or equivalently:
++$$ \text{Memory} = N \times 59 \times 4 \times 4 \text{ bytes} $$
++
++
++**Algorithm Steps**
++The core strategy involves four key observations to minimize CPU-GPU communication overhead:
++
++1.  **Ahead-of-Time Access Computation:** Compute the set of Gaussians accessed by each view (training image) before the iteration begins. This allows the loading of Gaussians for the current iteration to overlap with the computation of the previous iteration.
++2.  **Caching Overlapping Gaussians:** Identify and cache Gaussians that are accessed by multiple different views. This reduces the volume of data transferred during each training iteration.
++3.  **Spatial Locality Scheduling:** Schedule training iterations such that views in the same spatial region are processed consecutively. Since views in the same region access similar Gaussians, this maximizes cache hits across successive iterations and minimizes overall communication volume.
++4.  **Overlapping Gradient and Update:** Exploit spatial locality to overlap the gradient computation phase with a substantial portion of the Gaussian parameter update phase.
++
++**Pseudocode**
++The following pseudocode implements the CLM offloading strategy. It assumes a standard 3DGS training loop where `views` is a list of training images, `gaussians` is the full dataset in CPU memory, and `active_gaussians` is the subset accessed by a specific view.
++
++```python
++def train_clm(views, gaussians, optimizer_state):
++    """
++    Train 3DGS using Cache-based Lazy Memory Management.
++    
++    Args:
++        views: List of training view objects, each containing camera pose and image.
++        gaussians: Full list of N Gaussians stored in CPU memory.
++        optimizer_state: Current state of the Adam optimizer (stored in CPU memory).
++        
++    Returns:
++        Updated gaussians and optimizer_state in CPU memory.
++    """
++    
++    # Pre-compute access patterns for all views to enable ahead-of-time loading
++    # This step determines which Gaussians are visible/active for each view.
++    access_patterns = compute_access_patterns(views, gaussians)
++    
++    # Initialize a cache for Gaussians currently resident in GPU memory
++    # The cache size is limited by available GPU memory (e.g., 24GB on RTX 4090)
++    gpu_cache = Cache()
++    
++    # Initialize overlap pipeline: previous iteration's computation might still be running
++    prev_iter_compute_task = None
++    
++    for i, view in enumerate(views):
++        # Step 1: Determine Gaussians needed for the current view
++        current_gaussian_indices = access_patterns[i]
++        
++        # Step 2: Load necessary Gaussians from CPU to GPU
++        # This operation is asynchronous and can overlap with previous computation
++        load_task = load_gaussians_to_gpu(gaussians, current_gaussian_indices, gpu_cache)
++        
++        # Wait for load to complete if it hasn't started or if dependencies require it
++        # In practice, this is managed by a pipeline to hide latency
++        load_task.wait()
++        
++        # Step 3: Perform GPU computation (Rasterization and Forward Pass)
++        # This uses the Gaussians currently in the GPU cache
++        rendered_image = rasterize(view, gpu_cache.get_active_gaussians())
++        
++        # Step 4: Compute Loss and Gradients on GPU
++        loss = compute_loss(rendered_image, view.gt_image)
++        gradients = compute_gradients(loss, gpu_cache.get_active_gaussians())
++        
++        # Step 5: Transfer Gradients to CPU and Update Parameters
++        # This overlaps with the next iteration's loading phase
++        transfer_task = transfer_gradients_to_cpu(gradients, optimizer_state, current_gaussian_indices)
++        
++        # The actual parameter update (Adam step) happens on CPU
++        # This can overlap with the loading of the NEXT iteration's Gaussians
++        update_task = update_optimizer(optimizer_state, current_gaussian_indices)
++        
++        # Manage pipeline overlap:
++        # If the previous iteration's update is not done, wait for it to free up resources
++        # or simply let the CPU handle it while GPU loads the next batch.
++        if prev_iter_compute_task:
++            prev_iter_compute_task.wait()
++            
++        # Schedule next iteration's load to start as soon as possible
++        # The key insight is that loading for iteration i+1 can start while
++        # iteration i's gradient update is happening on CPU.
++        prev_iter_compute_task = transfer_task
++        
++    return gaussians, optimizer_state
++
++def compute_access_patterns(views, gaussians):
++    """
++    Compute which Gaussians are visible for each view.
++    This is done ahead-of-time to enable overlap.
++    """
++    patterns = []
++    for view in views:
++        # Project Gaussians to screen space and check overlap with view frustum/tiles
++        # Return indices of Gaussians that contribute to the render
++        active_indices = get_visible_gaussians(view, gaussians)
++        patterns.append(active_indices)
++    return patterns
++
++def load_gaussians_to_gpu(cpu_gaussians, indices, gpu_cache):
++    """
++    Load specific Gaussians from CPU to GPU, respecting cache limits.
++    Evicts old Gaussians if cache is full.
++    """
++    # Check which indices are already in GPU cache
++    cached_indices = gpu_cache.get_indices()
++    needed_indices = [idx for idx in indices if idx not in cached_indices]
++    
++    if needed_indices:
++        # Evict if necessary to make space
++        gpu_cache.evict_if_needed(len(needed_indices))
++        
++        # Transfer data
++        gpu_data = transfer_cpu_to_gpu(cpu_gaussians, needed_indices)
++        gpu_cache.add(gpu_data, needed_indices)
++        
++    return AsyncTask() # Placeholder for async transfer task
++
++def update_optimizer(optimizer_state, indices):
++    """
++    Run Adam optimizer step on CPU for the specified Gaussian indices.
++    """
++    # Extract gradients and parameters for indices
++    grads = get_gradients(indices)
++    params = get_parameters(indices)
++    
++    # Update optimizer state (m, v) and parameters
++    new_params, new_state = adam_step(params, grads, optimizer_state[indices])
++    
++    # Write back to CPU memory
++    update_cpu_memory(indices, new_params, new_state)
++    
++    return AsyncTask()
++```
++
++**Parameters and Typical Values**
++- **Gaussian Parameter Count:** 59 per Gaussian.
++- **Memory per Parameter:** 16 bytes (4 bytes for param, 4 for gradient, 8 for optimizer state).
++- **GPU Memory Capacity:** The method is demonstrated on an NVIDIA RTX 4090 with 24GB VRAM.
++- **Scene Scale:** Successfully trained scenes with 100 million to 102 million Gaussians on a single RTX 4090.
++- **Tile Size:** Inherits the $16 \times 16$ pixel tile size from the parent [Rendering Implementation and Acceleration](21069-rendering-implementation-and-acceleration.md) .
++
++**Edge Cases and Pitfalls**
++- **Naive Offloading Overhead:** Naively offloading all Gaussians to the CPU and loading them per iteration incurs significant performance overhead due to CPU-GPU communication latency and the time required to run the Adam optimizer on the CPU.
++- **Memory Proportionality:** Naive offloading fails to scale because it still requires GPU memory proportional to the total number of Gaussians if all are loaded simultaneously.
++- **Cache Thrashing:** If the spatial locality is poor or the cache size is too small, frequent evictions and reloads can negate the benefits of offloading.
++- **Precision:** The method relies on standard 32-bit floating-point arithmetic for parameters and gradients.
++
+ ### [Cache-Less Memory (CLM)](17594-cache-less-memory-clm.md)
+ Cache-Less Memory (CLM) is a system design that enables the training and rendering of large or highly detailed 3D Gaussian Splatting scenes on a single consumer-grade GPU by offloading Gaussian parameters and optimizer computation to the CPU. It solves the problem of GPU memory exhaustion in large-scene training by leveraging sparsity and spatial locality to minimize GPU-CPU communication overhead. Unlike sibling methods that focus on sorting or tiling acceleration, CLM specifically addresses memory capacity limits through attribute-wise offloading and microbatch pipelining.
+ 
+-### Optimization Strategy
+-- **step**: Optimize static Gaussians for the initial 3000 iterations as a warm-up phase. Jointly optimize both the Gaussians and the deformation field after the warm-up phase [S1, unofficial].
+-- **formula**: Total loss $L = L_{color} + \lambda_1 \cdot L_{scales}$, where $L_{color}$ is the color loss and $\lambda_1$ is a weighting factor [S1, unofficial].
+-- **parameter**: $\lambda_1$: Weight for the scale loss, set to 0.1. $\lambda_v$: Weight for another loss term (value 0.2), though its specific definition is not detailed in this excerpt [S1, unofficial].
+-
+-### Background Color Optimization
+-- **definition**: Changing the default white background (RGB 1.0) to a gray value to improve training speed while maintaining rendering quality [S2, unofficial].
+-- **parameter**: Background value `bg`: The three same values for RGB background channels. Optimal range is $0.3 \le bg \le 0.5$ [S2, unofficial].
+-- **pitfall**: Changing the background must be balanced; while it improves speed, extreme values may negatively impact learning rate, training loss, and PSNR states [S2, unofficial].
+-- **number**: On the truck dataset with 500 training steps, setting $bg=0.4$ reduces pc time by approximately 21.85% compared to the default white background [S2, unofficial].
+-
+-### Mobile-GS Rendering
+-- **definition**: A sorting-free rendering method that uses a transmittance proxy enriched with view-dependent modulation [S3, unofficial].
+-- **formula**: Pixel color $C = (1 - T) \sum_{i=1}^N \frac{c_i \alpha_i + T c_i b_g}{\sum_{i=1}^N \alpha_i w_i} + T c_i b_g$. Weight $w_i = \phi_i^2 + \frac{\phi_i}{d_i^2} + \exp\left(\frac{x_{max}}{d_i}\right)$. $T$ is transmittance, $c_i$ is color, $\alpha_i$ is opacity, $b_g$ is background color, $d_i$ is depth, $\phi_i$ is auxiliary feature from MLP, $x_{max}$ is a constant [S3, unofficial].
+-- **comparison**: Unlike SortFreeGS which uses Gaussian depth but not scale, Mobile-GS exploits both depth and scale attributes to compute importance weight, reflecting that farther Gaussians have lower contribution and larger Gaussians provide more meaningful evidence. Unlike GES which uses a two-stage rendering pipeline (depth image then filtering), Mobile-GS is single-stage and better suited for mobile deployment [S3, unofficial].
+-
+-### GEMM-GS
+-- **definition**: An acceleration approach for 3D Gaussian Splatting that utilizes Tensor Cores on GPUs by reformulating the blending process into a GEMM-compatible form [S4].
+-- **step**: Transform the conventional 3DGS blending process into a GEMM-style formulation equivalently to leverage Tensor Cores. Develop a CUDA kernel implementing the transformed blending process, designed as a three-stage double-buffered pipeline with asynchronous memory copy to overlap computation and memory access [S4].
+-- **parameter**: Tile size: The 2D screen is divided into tiles, with $16 \times 16$ pixels mentioned as an example. Thread block size: Rendering a $16 \times 16$ tile is assigned to a thread block of 256 threads [S4].
+-- **layout**: Gaussian features computed in preprocessing include depth $d$ and RGB color $c$ [S4].
+-- **number**: GEMM-GS achieves an average 1.42× speedup over vanilla 3DGS implementation. GEMM-GS provides an additional 1.47× speedup when combined with existing acceleration approaches [S4].
+-- **comparison**: GEMM-GS is orthogonal to existing acceleration methods (compression-based or preprocessing-based), allowing it to provide additional speedup when combined with them [S4].
+-
+-### Data Placement at Scale
+-- **definition**: Strategies to manage training storage of Gaussian parameters, gradients, optimizer arrays, and rasterization intermediates, especially when exceeding GPU capacity [S5, unofficial].
+-- **comparison**: gsplat reduces memory use through its CUDA and PyTorch implementation [S5, unofficial].
+-
+-### Mixed Parallelism for 3DGS
+-- **step**: Distribute Gaussian transformation forward computations Gaussian-wise. Distribute Render Backward and Loss Backward computations pixel-wise, similar to Render Forward. Save independent states (transformed states, gradients, optimizer states, parameters) for each Gaussian on the GPU that contains their parameters. Manage activation states (significant Z-buffers, auxiliary buffers for sorting, loss intermediate activations) pixel-wise along with the image distribution. Perform densification (clone, split, prune) locally on the GPU that stores the Gaussians, as it is based on their independent variance [S6].
++CLM operates by splitting Gaussian attributes based on their necessity for frustum culling, storing only selection-critical attributes on the GPU while keeping non-critical attributes and optimizer states on the CPU. The training loop is divided into microbatches (single images) to allow overlapping communication and computation.
++
++**Inputs and Outputs**
++*   **Input:** A set of training images/views; 3D Gaussian primitives defined by position, rotation, scale, color (spherical harmonics), and opacity.
++*   **Output:** Updated Gaussian parameters and rendered images.
++
++**Data Structures and Layout**
++Gaussian attributes are split into two sets:
++1.  **Selection-critical attributes:** Position (3 floats), Rotation (4 floats), Scale (3 floats). These are stored in GPU memory for all Gaussians to enable frustum culling without loading all Gaussians. These constitute less than 20% (10 out of 59 floats) of a Gaussian's memory footprint.
++2.  **Non-critical attributes:** Color and Opacity. These are stored in CPU memory and loaded into GPU memory only when required.
++
++**Steps**
++1.  **Attribute-Wise Offload:** Store selection-critical attributes (position, rotation, scale) in GPU memory. Store non-critical attributes (color, opacity) in CPU memory.
++2.  **Frustum Culling:** Run frustum culling on the GPU using only the selection-critical attributes. A Gaussian is culled if it is outside 3 standard deviations ($3\sigma$) of its distribution. This determines the set of active Gaussians $S_i$ for microbatch $i$.
++3.  **Precise Gaussian Caching:** When preparing microbatch $i+1$, identify the intersection of active Gaussians from the previous microbatch $S_i$ and the current microbatch $S_{i+1}$.
++    *   Copy Gaussians in $S_i \cap S_{i+1}$ from microbatch $i$'s GPU tensors (already in GPU memory).
++    *   Load Gaussians in $S_{i+1} \setminus S_i$ from CPU memory.
++4.  **Forward/Backward Pass:** Perform forward and backward passes for microbatch $i+1$.
++5.  **Gradient Caching:** After microbatch $i$ finishes:
++    *   Transfer gradients only for Gaussians in $S_i \setminus S_{i+1}$ to CPU.
++    *   Copy gradients for Gaussians in $S_i \cap S_{i+1}$ into microbatch $i+1$'s gradient buffer for accumulation.
++6.  **CPU Adam Update:** Perform Adam optimizer updates on the CPU for Gaussians that are no longer active in subsequent microbatches (i.e., those in $S_i \setminus S_{i+1}$ or finalized). This overlaps with the forward/backward GPU computation of subsequent microbatches.
++7.  **Pipeline Order Optimization:** Schedule microbatches to maximize spatial locality (overlap) between consecutive microbatches.
++
++**Formulas and Parameters**
++*   **Culling Threshold:** Gaussians are culled if outside $3\sigma$ of the Gaussian's distribution.
++*   **TSP Formulation:** The scheduling problem is formulated as a Traveling Salesman Problem (TSP) where nodes are microbatches and the distance between microbatch $i$ and $j$ is the symmetric difference $|S_i \oplus S_j|$.
++*   **Memory Overhead:** The memory overhead of double-buffering for pipelining is independent of scene and batch size.
++
++**Pseudocode**
++```python
++# Initialization
++# Store selection-critical attributes (pos, rot, scale) in GPU memory for all Gaussians
++# Store non-critical attributes (color, opacity) in CPU memory
++# Initialize optimizer states on CPU
++# Define batch of images/views
++# Schedule microbatches using TSP heuristic to maximize overlap
++
++for each microbatch i in batch:
++    # 1. Frustum Culling (GPU)
++    # Use selection-critical attributes in GPU memory
++    S_i = frustum_cull_gpu(selection_critical_attributes_gpu, camera_params)
++    
++    # 2. Precise Gaussian Caching (Data Transfer)
++    # Identify intersection with previous microbatch
++    if i > 0:
++        S_prev = S_{i-1}
++        S_common = S_i ∩ S_prev
++        S_new = S_i \ S_common
++        
++        # Copy common Gaussians from previous GPU tensors
++        gpu_params_gpu[S_common] = gpu_params_prev_gpu[S_common]
++        
++        # Load new Gaussians from CPU
++        gpu_params_gpu[S_new] = cpu_params_cpu[S_new]
++    else:
++        # Load all active Gaussians from CPU
++        gpu_params_gpu[S_i] = cpu_params_cpu[S_i]
++        
++    # 3. Forward and Backward Pass (GPU)
++    # Process single image
++    loss, gradients_gpu = forward_backward_gpu(gpu_params_gpu[S_i], camera_params, image_i)
++    
++    # 4. Gradient Caching (Data Transfer)
++    if i > 0:
++        S_prev = S_{i-1}
++        S_common = S_i ∩ S_prev
++        S_to_cpu = S_prev \ S_common
++        
++        # Transfer gradients for Gaussians not in next microbatch to CPU
++        cpu_gradients_cpu[S_to_cpu] = gradients_gpu[S_to_cpu]
++        
++        # Copy gradients for common Gaussians to next microbatch's buffer
++        gradients_next_buffer[S_common] = gradients_gpu[S_common]
++    else:
++        # Transfer all gradients to CPU
++        cpu_gradients_cpu[S_i] = gradients_gpu[S_i]
++        
++    # 5. CPU Adam Update (CPU)
++    # Update parameters for Gaussians that are finalized or not in next microbatch
++    # This overlaps with the next microbatch's GPU computation
++    if i == last_microbatch or S_to_cpu is not empty:
++        cpu_optimizer_update(cpu_params_cpu[S_to_cpu], cpu_gradients_cpu[S_to_cpu])
++        
++    # Prepare for next microbatch
++    gpu_params_prev_gpu = gpu_params_gpu
++    S_{i-1} = S_i
++```
++
++**Edge Cases and Pitfalls**
++*   **Precision:** Not given in the sources.
++*   **Boundaries:** Frustum culling relies on the $3\sigma$ threshold; deviations from this standard practice may affect culling accuracy.
++*   **Degenerate Input:** Not given in the sources.
++
++#### Optimization Strategy
++- **step:** Optimize static Gaussians for the initial 3000 iterations as a warm-up phase. Jointly optimize both the Gaussians and the deformation field after the warm-up phase [S1, unofficial].
++- **formula:** Total loss $L = L_{color} + \lambda_1 \cdot L_{scales}$, where $L_{color}$ is the color loss and $\lambda_1$ is a weighting factor [S1, unofficial].
++- **parameter:** $\lambda_1$: Weight for the scale loss, set to 0.1. $\lambda_v$: Weight for another loss term (value 0.2), though its specific definition is not detailed in this excerpt [S1, unofficial].
++
++#### Background Color Optimization
++- **definition:** Changing the default white background (RGB 1.0) to a gray value to improve training speed while maintaining rendering quality [S2, unofficial].
++- **parameter:** Background value `bg`: The three same values for RGB background channels. Optimal range is $0.3 \le bg \le 0.5$ [S2, unofficial].
++- **pitfall:** Changing the background must be balanced; while it improves speed, extreme values may negatively impact learning rate, training loss, and PSNR states [S2, unofficial].
++- **number:** On the truck dataset with 500 training steps, setting $bg=0.4$ reduces pc time by approximately 21.85% compared to the default white background [S2, unofficial].
++
++#### Mobile-GS Rendering
++- **definition:** A sorting-free rendering method that uses a transmittance proxy enriched with view-dependent modulation [S3, unofficial].
++- **formula:** Pixel color $C = (1 - T) \sum_{i=1}^N \frac{c_i \alpha_i + T c_i b_g}{\sum_{i=1}^N \alpha_i w_i} + T c_i b_g$. Weight $w_i = \phi_i^2 + \frac{\phi_i}{d_i^2} + \exp \left( \frac{x_{max}}{d_i} \right)$. $T$ is transmittance, $c_i$ is color, $\alpha_i$ is opacity, $b_g$ is background color, $d_i$ is depth, $\phi_i$ is auxiliary feature from MLP, $x_{max}$ is a constant [S3, unofficial].
++- **comparison:** Unlike SortFreeGS which uses Gaussian depth but not scale, Mobile-GS exploits both depth and scale attributes to compute importance weight, reflecting that farther Gaussians have lower contribution and larger Gaussians provide more meaningful evidence [S3, unofficial]. Unlike GES which uses a two-stage rendering pipeline (depth image then filtering), Mobile-GS is single-stage and better suited for mobile deployment [S3, unofficial].
++
++#### GEMM-GS
++- **definition:** An acceleration approach for 3D Gaussian Splatting that utilizes Tensor Cores on GPUs by reformulating the blending process into a GEMM-compatible form [S4].
++- **step:** Transform the conventional 3DGS blending process into a GEMM-style formulation equivalently to leverage Tensor Cores. Develop a CUDA kernel implementing the transformed blending process, designed as a three-stage double-buffered pipeline with asynchronous memory copy to overlap computation and memory access [S4].
++- **parameter:** Tile size: The 2D screen is divided into tiles, with 16x16 pixels mentioned as an example. Thread block size: Rendering a 16x16 tile is assigned to a thread block of 256 threads [S4].
++- **layout:** Gaussian features computed in preprocessing include depth $d$ and RGB color $c$ [S4].
++- **number:** GEMM-GS achieves an average 1.42× speedup over vanilla 3DGS implementation. GEMM-GS provides an additional 1.47× speedup when combined with existing acceleration approaches [S4].
++- **comparison:** GEMM-GS is orthogonal to existing acceleration methods (compression-based or preprocessing-based), allowing it to provide additional speedup when combined with them [S4].
++
++#### Data Placement at Scale
++- **definition:** Strategies to manage training storage of Gaussian parameters, gradients, optimizer arrays, and rasterization intermediates, especially when exceeding GPU capacity [S5, unofficial].
++- **comparison:** gsplat reduces memory use through its CUDA and PyTorch implementation [S5, unofficial].
++
++#### Mixed Parallelism for 3DGS
++- **step:** Distribute Gaussian transformation forward computations Gaussian-wise. Distribute Render Backward and Loss Backward computations pixel-wise, similar to Render Forward. Save independent states (transformed states, gradients, optimizer states, parameters) for each Gaussian on the GPU that contains their parameters. Manage activation states (significant Z-buffers, auxiliary buffers for sorting, loss intermediate activations) pixel-wise along with the image distribution. Perform densification (clone, split, prune) locally on the GPU that stores the Gaussians, as it is based on their independent variance [S6].
+ 
+ ## Background
+-3D Gaussian Splatting was introduced by Kerbl et al. in 2023 [S3, unofficial]. The initial implementation relied on standard CUDA kernels for rasterization, which became a bottleneck for real-time performance on large scenes. Subsequent research focused on hardware-specific optimizations. Roofline modeling was applied to identify memory-bound stages [S1, unofficial]. Tensor Core utilization was explored through GEMM reformulation [S4]. Memory management strategies like CLM were developed to enable training on consumer hardware [S1, unofficial]. Distributed training frameworks were adapted to handle multi-GPU scaling [S5, unofficial][S6]. Mobile deployment required sorting-free approximations [S3, unofficial].
++The acceleration of 3D Gaussian Splatting has evolved from basic rasterization optimizations to complex system-level architectures. Early work focused on efficient sorting and tiling [S2, unofficial]. Subsequent research introduced hardware-specific optimizations, such as leveraging Tensor Cores via GEMM transformations [S4] and using the Roofline model to identify bottlenecks [S1, unofficial]. To address memory constraints, methods like Cache-based Lazy Memory Management (CLM) and Cache-Less Memory were developed to enable training on single consumer GPUs by offloading to CPU [S1, unofficial]. For larger scales, distributed training and sharding techniques partition data across multiple GPUs [S5, unofficial][S6]. Sorting-free methods like Mobile-GS have also emerged for mobile deployment [S3, unofficial].
+ 
+ ## Sources

@@ -1,0 +1,303 @@
+--- v004.md
++++ v005.md
+@@ -4,147 +4,177 @@
+ 
+ ## Overview
+-The Two-Step Surface Reconstruction Method extracts a target isosurface from an implicit function by filtering invalid voxels (those not intersecting the isosurface) using a low-cost rough evaluation, then accurately evaluating only the valid boundary voxels [S1]. It solves the excessive computation time of traditional Marching Cubes caused by evaluating all voxels, including those far from the surface [S1]. Unlike surface-following methods, it does not require seed voxels, ensuring complete recovery of disconnected components [S1].
++The Two-Step Surface Reconstruction Method is an acceleration technique for extracting isosurfaces from implicit functions, specifically designed to reduce the computational cost of evaluating voxels that do not intersect the target surface [S1]. It solves the problem of excessive time consumption in traditional Marching Cubes, which evaluates every voxel in the grid regardless of its proximity to the isosurface [S1]. By filtering invalid voxels using a low-cost rough evaluation and only performing high-precision evaluation on potential boundary voxels, it achieves significant speedups while maintaining mesh completeness, unlike seed-dependent surface-following methods [S1].
+ 
+ ## How it works
++The method operates on a structured 3D grid defined by a voxel size $S_c$ within the minimum bounding box of the input sampling data [S1]. It assumes the implicit function $f(x)$ is constructed via Radial Basis Function (RBF) interpolation, accelerated by the Fast Multipole Method (FMM) [S1].
++
+ ### Inputs and Outputs
+-*   **Input:** A set of scattered interpolation points $\{x_1, ..., x_N\}$ [S1].
+-*   **Output:** A triangular mesh representing the zero-level set ($S(x)=0$) of the implicit function [S1].
++*   **Inputs:**
++    *   Set of interpolation points $\{x_1, ..., x_N\}$ with associated weights $\omega_i$ and signs (interior, exterior, or on surface) [S1].
++    *   Reconstruction parameters: Voxel size $S_c$, lower expansion order $p_0$, higher expansion order $p$ [S1].
++*   **Outputs:**
++    *   A triangular mesh representing the isosurface $f(x) = 0$ [S1].
+ 
+ ### Data Structures
+-The method relies on the standard Marching Cubes lookup tables (`edgeTable`, `triangleTable`) as defined in [Marching Cubes Lookup and Configuration](52-marching-cubes-lookup-and-configuration.md) [S1]. The domain is discretized into a 3D grid of voxels $C$, each storing vertex coordinates and scalar values [S1].
++*   **Voxel Grid:** A 3D array or hash map representing the reconstruction region. Each voxel $C$ is identified by its grid coordinates.
++*   **Voxel Classification:** Each voxel is classified as:
++    *   $C_{int}$: Interior voxel (sign is unambiguously negative).
++    *   $C_{ext}$: Exterior voxel (sign is unambiguously positive).
++    *   $C_{bou}$: Boundary voxel (sign is ambiguous or value is near zero) [S1].
++*   **FMM Data:** Precomputed moments $\Psi_n(y)$ and kernel expansions for the black-box FMM [S1].
+ 
+-1.  **Implicit Function Approximation:** The function $s(x)$ is represented as:
+-    $$ s(x) = \sum_{j=1}^{N} \omega_j \Phi(x, x_j) + p(x) $$
+-    where $\Phi$ is the radial basis kernel, $\omega_j$ are weights, and $p(x)$ is a polynomial part (e.g., $p(x) = c_1 + c_2 x + c_3 y + c_4 z$) [S1].
+-2.  **FMM Expansion:** The kernel $\Phi(x, y)$ is approximated using a finite series of order $p$:
+-    $$ \Phi(x, y) = \sum_{n=1}^{p} \phi_n(x)\psi_n(y) + R_p(x, y) $$
+-    where $R_p(x, y)$ is the residual error [S1]. The moments $\Psi_n(y) = \sum_{j=1}^N \omega_j \psi_n(y_j)$ are precomputed [S1].
+-3.  **Voxel Classification:** Voxels are classified into three sets:
+-    *   $C_{int}$: Interior voxels (sign is unambiguously negative).
+-    *   $C_{ext}$: Exterior voxels (sign is unambiguously positive).
+-    *   $C_{bou}$: Boundary voxels (sign is ambiguous or near zero) [S1].
++### Formulas
++The implicit function is defined as [S1]:
++$$ s(x) = \sum_{j=1}^{N} \omega_j \Phi(x, x_j) + p(x) $$
++where $\Phi$ is the radial basis kernel and $p(x)$ is a polynomial part (e.g., $p(x) = c_1 + c_2 x + c_3 y + c_4 z$) [S1].
++
++The FMM approximates the kernel $\Phi(x, y)$ using a finite series of order $p$ [S1]:
++$$ \Phi(x, y) = \sum_{n=1}^{p} \phi_n(x)\psi_n(y) + R_p(x, y) $$
++The approximated function value $s_p(x)$ is computed as [S1]:
++$$ s_p(x) = \sum_{n=1}^{p} \Psi_n(y)\phi_n(x) $$
++where $\Psi_n(y) = \sum_{j=1}^{N} \omega_j \psi_n(y_j)$ are precomputed moments [S1].
++
++The evaluation error $\varepsilon_p$ is defined as [S1]:
++$$ \varepsilon_p = \sum_{j=1}^{N} \omega_j R_p(x, y_j) $$
+ 
+ ### Parameters
+-*   **Voxel Size ($S_c$):** Determines reconstruction precision. It is derived from a reference length $l_0$ based on the bounding box dimensions $l_1, l_2, l_3$ (where $l_{10} < l_{20} < l_{30}$ are reference axes):
+-    $$ l_0 = \begin{cases} 0.1 l_2 & \text{if } l_3 < 0.1 l_2 \\ 0.05 l_3 & \text{if } 0.1 l_2 \le l_3 \le 0.5 l_2 \\ 0.025 l_3 & \text{if } l_3 > 0.5 l_2 \end{cases} $$
+-    Then, $S_c$ is set to $5l_0$ (coarse), $l_0$ (general), or $0.3l_0$ (fine) [S1].
+-*   **Lower Expansion Order ($p_0$):** Used for rough evaluation. Recommended range: 5–8 [S1].
+-*   **Higher Expansion Order ($p$):** Used for exact evaluation. Recommended range: 9–12 [S1].
+-*   **Evaluation Error ($\varepsilon_p$):** The residual error bound for expansion order $p$:
+-    $$ \varepsilon_p = \sum_{j=1}^{N} \omega_j R_p(x, y_j) $$
+-    [S1].
++*   **Expansion Order $p$:** Controls FMM accuracy. Higher $p$ yields smaller residual but increases computation time [S1].
++    *   Recommended higher order $p$: 9 to 12 [S1].
++    *   Recommended lower order $p_0$: 5 to 8 [S1].
++*   **Voxel Size $S_c$:** Determines reconstruction precision. It is derived from a reference length $l_0$ [S1]:
++    *   Coarse: $S_c = 5l_0$
++    *   General: $S_c = l_0$
++    *   Fine: $S_c = 0.3l_0$ [S1]
++*   **Reference Length $l_0$:** Determined by the dimensions of the minimum bounding box of the sampling data ($l_1, l_2, l_3$ where $l_1 \le l_2 \le l_3$) [S1]:
++    *   If $l_3 < 0.1 l_2$: $l_0 = 0.1 l_2$
++    *   If $0.1 l_2 \le l_3 \le 0.5 l_2$: $l_0 = 0.05 l_3$
++    *   If $l_3 > 0.5 l_2$: $l_0 = 0.025 l_3$ [S1]
+ 
+-### Steps
+-1.  **Precomputation:** Precompute the FMM expansions for the RBF kernel using the black-box FMM for the specified orders $p_0$ and $p$ [S1].
+-2.  **Implicit Function Construction:** Solve the interpolation constraints to determine weights $\omega_j$ and polynomial coefficients, obtaining the implicit function $f(x)$ [S1].
+-3.  **Domain Discretization:** Determine the minimum bounding box of the sampling data. Divide this region into voxels $C$ with size $S_c$ [S1].
+-4.  **Rough Evaluation (Step 1):** Traverse all voxels $C$. For each vertex of each voxel, estimate the function value $s_{p_0}(x)$ using the FMM with the lower expansion order $p_0$ [S1].
+-5.  **Screening (Step 2):** Classify voxels based on $s_{p_0}(x)$ and the error bound $\varepsilon_{p_0}$:
+-    *   An exterior voxel is identified if $s_{p_0}(x) > 0$ and $s_{p_0}(x) - \varepsilon_{p_0} > 0$ [S1].
+-    *   An interior voxel is identified if $s_{p_0}(x) < 0$ and $s_{p_0}(x) + \varepsilon_{p_0} < 0$ [S1].
+-    *   Voxels not meeting these criteria are classified as boundary voxels $C_{bou}$ [S1].
+-    *   *Note:* The optimized $p_0$ satisfies $\varepsilon_{p_0-1} > |\sigma| > \varepsilon_{p_0} > \varepsilon_e$ where $\sigma$ is the accurate value [S1].
+-6.  **Exact Evaluation (Step 3):** Traverse only the boundary voxels $C_{bou}$. Compute accurate function values $s_p(x)$ for all 8 vertices using the FMM with the higher expansion order $p$ [S1].
+-7.  **Triangulation (Step 4):** Apply the standard Marching Cubes algorithm to each voxel in $C_{bou}$ using the accurate values and the lookup table to extract triangles [S1].
+-8.  **Mesh Assembly:** Unite all triangular facets to form the complete mesh [S1].
++### Numbered Steps
++
++1.  **Specify Parameters:** Set voxel size $S_c$, lower expansion order $p_0$, and higher expansion order $p$ [S1].
++2.  **Precompute FMM Expansions:** Use the black-box FMM to precompute the expansions of the radial basis kernel function for the given source points $\{y_j\}$ and orders $p_0, p$ [S1].
++3.  **Construct Implicit Function:** Solve the interpolation constraints from the sampling data to obtain the weight coefficients $\omega_i$ and polynomial coefficients for $s(x)$ [S1].
++4.  **Define Grid:** Determine the minimum bounding box of the sampling data. Divide this region into voxels $C$ using the specified voxel size $S_c$ [S1].
++5.  **Rough Evaluation (Coarse Pass):**
++    *   Traverse all voxels $C$.
++    *   For each voxel, estimate the sign of its vertices using the estimating function $s_{p_0}(x)$ with the lower expansion order $p_0$ via FMM [S1].
++    *   Classify each vertex:
++        *   If $s_{p_0}(x) > 0$ and $s_{p_0}(x) - \varepsilon_{p_0} > 0$, the sign is positive [S1].
++        *   If $s_{p_0}(x) < 0$ and $s_{p_0}(x) + \varepsilon_{p_0} < 0$, the sign is negative [S1].
++        *   Otherwise, the sign is ambiguous [S1].
++    *   Classify the voxel $C$:
++        *   If all vertices have the same unambiguous sign, classify as $C_{ext}$ (if positive) or $C_{int}$ (if negative) [S1].
++        *   If any vertex has an ambiguous sign, or vertices have mixed unambiguous signs, classify as $C_{bou}$ (boundary) [S1].
++6.  **Exact Evaluation (Fine Pass):**
++    *   Traverse only the boundary voxels $C_{bou}$ [S1].
++    *   Compute accurate function values for the vertices of these voxels using the estimating function $s_p(x)$ with the higher expansion order $p$ via FMM [S1].
++7.  **Marching Cubes:**
++    *   For each voxel in $C_{bou}$, determine the case index based on the signs of the 8 vertices [S1].
++    *   Use the standard Marching Cubes lookup table to define the intersection topologies [S1].
++    *   Calculate intersection positions on the edges (typically via linear interpolation) [S1].
++    *   Generate triangular facets [S1].
++8.  **Mesh Assembly:** Unite all triangular facets from all boundary voxels to form the complete triangular mesh [S1].
+ 
+ ### Pseudocode
++
+ ```python
+-def two_step_surface_reconstruction(points, weights, kernel, poly_basis, p_low, p_high, voxel_size):
+-    # Step 1: Construct implicit function s(x) = sum(omega_j * Phi(x, x_j)) + p(x)
+-    # Solve linear system for omega_j and polynomial coefficients c_k [S1]
+-    implicit_model = solve_rbf_system(points, weights, kernel, poly_basis)
++def two_step_surface_reconstruction(interpolation_points, voxel_size, p_low, p_high):
++    """
++    interpolation_points: List of tuples (x, y, z, weight, sign)
++    voxel_size: Float, size of the voxel edge
++    p_low: Integer, lower expansion order for rough evaluation
++    p_high: Integer, higher expansion order for exact evaluation
++    """
++    
++    # Step 1 & 2: Precompute FMM moments for both orders
++    # Note: In a real implementation, this uses a library like Scal-FMM
++    # Here we assume a function that returns the estimated value and error
++    fmm_low = BlackBoxFMM(interpolation_points, order=p_low)
++    fmm_high = BlackBoxFMM(interpolation_points, order=p_high)
++    
++    # Step 3: Solve interpolation constraints (simplified as pre-computed weights)
++    # The implicit function s(x) is handled by the FMM instances
++    
++    # Step 4: Define Grid
++    bounds = get_minimum_bounding_box(interpolation_points)
++    voxel_grid = create_voxel_grid(bounds, voxel_size)
++    
++    boundary_voxels = []
++    
++    # Step 5: Rough Evaluation
++    for voxel in voxel_grid:
++        vertices = voxel.get_8_vertices()
++        vertex_signs = []
++        is_boundary = False
++        
++        for v in vertices:
++            # Evaluate using low order
++            val_low, err_low = fmm_low.evaluate(v)
++            
++            # Determine sign based on error bound
++            if val_low > err_low:
++                sign = 1 # Positive
++            elif val_low < -err_low:
++                sign = -1 # Negative
++            else:
++                sign = 0 # Ambiguous
++                is_boundary = True
++            
++            vertex_signs.append(sign)
++        
++        # Classify voxel
++        if is_boundary:
++            boundary_voxels.append(voxel)
++        else:
++            # Check if all signs are same
++            if all(s == 1 for s in vertex_signs):
++                voxel.type = 'exterior'
++            elif all(s == -1 for s in vertex_signs):
++                voxel.type = 'interior'
++            else:
++                # Mixed signs but no ambiguous values? 
++                # Standard MC handles mixed signs, but if no ambiguous, 
++                # it still intersects. The source says "eliminate interior/exterior".
++                # If signs are mixed, it MUST be boundary.
++                boundary_voxels.append(voxel)
+ 
+-    # Step 2: Precompute FMM expansions for orders p_low and p_high [S1]
+-    fmm_low = BlackBoxFMM(kernel, p_low)
+-    fmm_high = BlackBoxFMM(kernel, p_high)
+-
+-    # Step 3: Define reconstruction domain
+-    min_x = min(p[0] for p in points)
+-    max_x = max(p[0] for p in points)
+-    min_y = min(p[1] for p in points)
+-    max_y = max(p[1] for p in points)
+-    min_z = min(p[2] for p in points)
+-    max_z = max(p[2] for p in points)
+-
+-    boundary_voxels = []
+-    x = min_x
+-    while x <= max_x:
+-        y = min_y
+-        while y <= max_y:
+-            z = min_z
+-            while z <= max_z:
+-                # Generate 8 vertices of the voxel
+-                vertices = [
+-                    (x, y, z), (x+voxel_size, y, z), (x, y+voxel_size, z), (x+voxel_size, y+voxel_size, z),
+-                    (x, y, z+voxel_size), (x+voxel_size, y, z+voxel_size), (x, y+voxel_size, z+voxel_size),
+-                    (x+voxel_size, y+voxel_size, z+voxel_size)
+-                ]
+-                # Step 4: Rough evaluation
+-                low_vals = [fmm_low.evaluate(v, implicit_model) for v in vertices]
+-                eps_low = fmm_low.error_bound()
+-
+-                # Step 5: Screening
+-                is_exterior = all(v > 0 and v - eps_low > 0 for v in low_vals)
+-                is_interior = all(v < 0 and v + eps_low < 0 for v in low_vals)
+-
+-                if not is_exterior and not is_interior:
+-                    boundary_voxels.append({'vertices': vertices, 'low_vals': low_vals})
+-                z += voxel_size
+-            y += voxel_size
+-        x += voxel_size
+-
+-    # Step 6: Exact evaluation
+-    accurate_vals_map = {}
+-    for bv in boundary_voxels:
+-        acc_vals = [fmm_high.evaluate(v, implicit_model) for v in bv['vertices']]
+-        accurate_vals_map[id(bv)] = acc_vals
+-
+-    # Step 7 & 8: Triangulation and assembly
+-    triangles = []
+-    for bv in boundary_voxels:
+-        acc_vals = accurate_vals_map[id(bv)]
+-        # Apply standard Marching Cubes lookup tables (edgeTable, triangleTable) [S1]
+-        tri_set = marching_cubes_triangulate(bv['vertices'], acc_vals)
+-        triangles.extend(tri_set)
+-    return triangles
+-
+-def solve_rbf_system(points, weights, kernel, poly_basis):
+-    # Standard linear algebra to solve for RBF weights and polynomial coefficients [S1]
+-    pass
+-
+-class BlackBoxFMM:
+-    def __init__(self, kernel, order):
+-        self.kernel = kernel
+-        self.order = order
+-        # Precompute multipole moments and expansions [S1]
+-        pass
+-    def evaluate(self, point, model):
+-        # Approximate RBF sum using FMM expansions [S1]
+-        pass
+-    def error_bound(self):
+-        # Return epsilon_p = sum(omega_j * R_p(x, y_j)) [S1]
+-        pass
+-
+-def marching_cubes_triangulate(vertices, values):
+-    # Standard MC algorithm using edgeTable and triangleTable [S1]
+-    pass
++    # Step 6: Exact Evaluation
++    for voxel in boundary_voxels:
++        vertices = voxel.get_8_vertices()
++        for v in vertices:
++            val_high, _ = fmm_high.evaluate(v)
++            v.value = val_high # Store accurate value
++            
++    # Step 7 & 8: Marching Cubes and Assembly
++    mesh = Mesh()
++    for voxel in boundary_voxels:
++        triangles = marching_cubes_lookup(voxel.vertices)
++        mesh.add_triangles(triangles)
++        
++    return mesh
+ ```
+ 
+ ### Edge Cases and Pitfalls
+-*   **Ambiguous Sign:** If the rough evaluation $s_{p_0}(x)$ is close to zero such that $s_{p_0}(x) - \varepsilon_{p_0} \le 0$ (for positive check) or $s_{p_0}(x) + \varepsilon_{p_0} \ge 0$ (for negative check), the sign is ambiguous. These voxels are treated as boundary voxels and undergo exact evaluation [S1].
+-*   **Small Objects:** If the target object size is smaller than the specified voxel size $S_c$, the object may not intersect any voxels, leading to failure to detect it [S1]. This requires specifying a smaller voxel size [S1].
+-*   **Sharp Features:** Like standard Marching Cubes, the method struggles to recover sharp geometric features of the target isosurface [S1].
+-*   **Seed Dependency:** Unlike Voxel Growing, this method does not depend on seed voxels, robustly handling separated geometry parts [S1].
++*   **Ambiguous Sign:** If the rough evaluation $s_{p_0}(x)$ is close to zero such that $|s_{p_0}(x)| \le \varepsilon_{p_0}$, the sign is ambiguous. The voxel is treated as a boundary voxel requiring exact evaluation [S1].
++*   **Small Objects:** If the target object size is smaller than the specified voxel size $S_c$, the object may not intersect any voxels, leading to failure reconstruction. A smaller $S_c$ must be specified [S1].
++*   **Sharp Features:** Like standard Marching Cubes, this method may struggle to recover sharp geometric features of the target isosurface [S1].
++*   **Non-Intersecting Objects:** The method may fail to detect objects that do not intersect with the voxel grid. This is mitigated by specifying a smaller voxel size [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Traditional Marching Cubes requires $O(N)$ evaluations per point for direct RBF evaluation, leading to high costs for large domains [S1]. The Two-Step method reduces total time by avoiding high-precision FMM (high $p$) for non-boundary voxels [S1]. The number of high-precision evaluations is significantly reduced [S1].
+-*   **Measured Performance:** In tests with $N=10,704$ points and $S_c=5$, the ratio of high-precision evaluations to total evaluations was 1.92% [S1]. For $N=6,999$ and $S_c=2$, the ratio was 22.53% [S1]. Efficiency improvements are more pronounced with smaller voxel sizes [S1].
+-*   **Memory Complexity:** Requires storage for the FMM data structures (moments, expansions) and the voxel grid [S1]. The memory overhead is dominated by the FMM precomputation and the list of boundary voxels, which is typically much smaller than the total voxel count [S1].
+-*   **Strengths:** Eliminates the need for seed voxels; guarantees complete reconstruction of disconnected components; significantly reduces computation time for large sparse domains compared to full-domain Marching Cubes [S1].
+-*   **Limitations:** Cannot detect objects smaller than the voxel size; limited ability to capture sharp features; accuracy depends on the choice of expansion orders $p_0$ and $p$ [S1].
++*   **Time Complexity:** Traditional Marching Cubes requires $O(N)$ evaluations per point for direct RBF evaluation, where $N$ is the number of source points [S1]. The FMM accelerates this to approximately $O(N)$ or better depending on implementation, but the constant factor is lower for the two-step method because it avoids high-precision ($p_{high}$) FMM evaluations for non-boundary voxels [S1].
++*   **Memory Complexity:** Requires storage for the voxel grid and the FMM data structures (moments) [S1].
++*   **Measured Performance:** In experiments with $N=10,704$ points and voxel size $S_c=5$, the number of high-precision evaluations ($N_{SMC,p}$) was $4.37 \times 10^5$, compared to $2.75 \times 10^7$ for traditional MC. The ratio of high-precision evaluations to total MC evaluations was 1.92% [S1]. For $N=6,999$ and $S_c=2$, the ratio was 22.53% [S1].
++*   **Strengths:**
++    *   Significantly reduces calculation for invalid voxels compared to traditional MC [S1].
++    *   Does not depend on seed voxels, ensuring complete recovery of disconnected components [S1].
++    *   More efficient than Voxel Growing for models with separated parts [S1].
++*   **Limitations:**
++    *   Requires careful selection of voxel size $S_c$ to avoid missing small objects [S1].
++    *   Accuracy depends on the choice of expansion orders $p_0$ and $p$ [S1].
++    *   May not capture sharp features as well as other methods [S1].
+ 
+ ## Background
+-The method was presented by J. Zhang and D. Zhong in *Applied Sciences* (2022) [S1]. It builds upon the principles of Signed Marching Cubes and the Fast Multipole Method to accelerate RBF-based implicit surface reconstruction [S1]. It addresses the limitations of traditional Marching Cubes (computational cost) and surface-following methods (seed dependency) [S1]. It has been implemented using the Scal-FMM library for single-point FMM and VTK for visualization [S1].
++The method was presented by J. Zhang and D. Zhong in *Applied Sciences* in 2022 [S1]. It builds upon the Signed Marching Cubes (SMC) concept, which uses the sign of the implicit function to filter voxels, and combines it with the Fast Multipole Method (FMM) to accelerate the evaluation of Radial Basis Function (RBF) implicit surfaces [S1]. The authors note that while surface-following methods improve efficiency, they rely on seed voxels and may miss disconnected parts; the two-step method addresses this by evaluating all voxels but with varying precision [S1]. The implementation in the source paper used the Scal-FMM library for FMM operations and VTK for visualization [S1].
+ 
+ ## Sources

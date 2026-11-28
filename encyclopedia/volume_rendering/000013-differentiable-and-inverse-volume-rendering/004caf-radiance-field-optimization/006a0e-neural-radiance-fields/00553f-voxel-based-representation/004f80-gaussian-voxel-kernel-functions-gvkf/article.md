@@ -1,0 +1,194 @@
+# Gaussian Voxel Kernel Functions (GVKF)
+
+Also called: GVKF (Gaussian Voxel Kernel Functions)
+
+## Overview
+Gaussian Voxel Kernel Functions (GVKF) is a method for efficient 3D surface reconstruction in open scenes that establishes a continuous scene representation based on discrete 3D Gaussian Splatting (3DGS) through kernel regression [S1]. It integrates fast 3DGS rasterization with implicit scene representations to achieve high-fidelity surface reconstruction while significantly reducing memory consumption compared to explicit Gaussian primitives [S1]. Unlike standard 3DGS which relies on discrete summation of explicit splats, GVKF replaces discrete opacity values with Gaussian kernel functions decoded from a feature vector, enabling direct mesh extraction and continuous surface representation [S1].
+
+## How it works
+GVKF builds on [Voxel-based Representation](10852-voxel-based-representation.md) by using a sparse voxel grid to manage Gaussian primitives implicitly [S1]. The method replaces the explicit optimization of Gaussian attributes with a neural decoding process, allowing for dynamic generation and pruning of Gaussians based on gradient accumulation [S1].
+
+### Inputs and Outputs
+*   **Inputs:** Downsampled Structure-from-Motion (SfM) point clouds for initialization; camera poses and image observations for training; a feature vector $F \in \mathbb{R}^d$ stored in voxels [S1].
+*   **Outputs:** A continuous scene opacity density field; a reconstructed 3D mesh surface [S1].
+
+### Data Structures
+*   **Sparse Voxel Grid:** A hierarchical grid structure initialized from SfM points, where each voxel stores a feature vector $F$ [S1].
+*   **Feature Vector ($F$):** Stored in each voxel, $F \in \mathbb{R}^d$, containing relative coordinates of Gaussians to the parent voxel center and serving as input to Multi-Layer Perceptrons (MLPs) to decode Gaussian attributes [S1].
+*   **Gradient Accumulator ($\nabla$):** A scalar value stored per voxel, accumulating gradients from 3DGS rendering after each iteration [S1].
+
+### Parameters
+*   **$m$:** The maximum number of Gaussian primitives allowed per sparse grid voxel [S1].
+*   **$\nabla_{thresh}$:** The threshold value for accumulated gradient used to trigger voxel subdivision [S1].
+*   **$d$:** The dimensionality of the feature vector $F$ [S1].
+*   **Max Depth:** The maximum subdivision depth for the voxel grid [S1].
+
+### Formulas
+The Gaussian kernel function $G(\mathbf{x})$ is defined as [S1]:
+
+$$
+G(\mathbf{x}) = \alpha \cdot \exp\left(-\frac{1}{2} (\mathbf{x}-\mathbf{p})^T \mathbf{P}^{-1} (\mathbf{x}-\mathbf{p})\right)
+$$
+
+where:
+*   $\mathbf{x}$ is the query point in 3D space [S1].
+*   $\mathbf{p} \in \mathbb{R}^3$ is the position of the Gaussian [S1].
+*   $\alpha \in \mathbb{R}$ is the opacity [S1].
+*   $\mathbf{P} \in \mathbb{R}^{3 \times 3}$ is the covariance matrix, defined as $\mathbf{P} = \mathbf{R} \mathbf{S} \mathbf{S}^T \mathbf{R}^T$ [S1].
+*   $\mathbf{R} \in \mathbb{R}^{3 \times 3}$ is the rotation matrix [S1].
+*   $\mathbf{S} \in \mathbb{R}^3$ is the scaling vector [S1].
+
+The attributes $\alpha, \mathbf{R}, \mathbf{S}, \mathbf{c}$ (color) are decoded from the feature vector $F$ and camera direction via MLPs [S1]:
+
+$$
+\alpha = \text{MLP}_{\alpha}(F, \text{camera}), \quad \mathbf{R} = \text{MLP}_{\mathbf{R}}(F), \quad \mathbf{S} = \text{MLP}_{\mathbf{S}}(F), \quad \mathbf{c} = \text{MLP}_{\mathbf{c}}(F, \text{camera})
+$$
+
+### Numbered Steps
+
+1.  **Initialization:** Generate a sparse voxel grid from downsampled SfM point clouds [S1].
+2.  **Feature Storage:** For each voxel, initialize a feature vector $F \in \mathbb{R}^d$ storing relative coordinates of Gaussians to the voxel center [S1].
+3.  **Attribute Decoding:** During rendering, decode Gaussian attributes ($\alpha, \mathbf{R}, \mathbf{S}, \mathbf{c}$) from $F$ using the defined MLPs [S1].
+4.  **Kernel Evaluation:** Compute the Gaussian kernel $G(\mathbf{x})$ for each Gaussian primitive within the voxel using the decoded attributes [S1].
+5.  **Rendering:** Perform rasterization using the computed kernel values, effectively replacing discrete opacity summation with continuous kernel regression [S1].
+6.  **Gradient Accumulation:** After each iteration, record and accumulate gradients from the 3DGS rendering process into the respective voxels, denoted as $\nabla$ [S1].
+7.  **Voxel Subdivision:** If the accumulated gradient $\nabla$ in a voxel exceeds the threshold $\nabla_{thresh}$, subdivide the voxel into eight subvoxels to increase grid resolution, continuing until the maximum depth is reached [S1].
+8.  **Pruning:** Discard voxels that are less frequently used after a specified period to manage memory [S1].
+9.  **Dynamic Management:** Dynamically generate Gaussians each iteration and recycle them post-update to reduce memory usage [S1].
+10. **Mesh Extraction:** Derive the bidirectional mapping relationship between the constructed scene opacity field and the scene surface to extract the mesh [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def diag_matrix(v):
+    """Constructs a diagonal matrix from a vector v."""
+    n = len(v)
+    return [[v[i] if i == j else 0.0 for j in range(n)] for i in range(n)]
+
+def mat_mul(A, B):
+    """Multiplies two matrices A and B."""
+    rows_A, cols_A = len(A), len(A[0])
+    rows_B, cols_B = len(B), len(B[0])
+    C = [[0.0 for _ in range(cols_B)] for _ in range(rows_A)]
+    for i in range(rows_A):
+        for j in range(cols_B):
+            for k in range(cols_A):
+                C[i][j] += A[i][k] * B[k][j]
+    return C
+
+def mat_vec_mul(M, v):
+    """Multiplies matrix M by vector v."""
+    return [sum(M[i][j] * v[j] for j in range(len(v))) for i in range(len(M))]
+
+def mat_transpose(M):
+    """Transposes matrix M."""
+    return [[M[j][i] for j in range(len(M))] for i in range(len(M[0]))]
+
+def inverse_3x3(M):
+    """Computes inverse of a 3x3 matrix M."""
+    a, b, c = M[0]
+    d, e, f = M[1]
+    g, h, i = M[2]
+    det = a*(e*i - f*h) - b*(d*i - f*g) + c*(d*h - e*g)
+    inv_det = 1.0 / det
+    inv = [
+        [(e*i - f*h)*inv_det, (c*h - b*i)*inv_det, (b*f - c*e)*inv_det],
+        [(f*g - d*i)*inv_det, (a*i - c*g)*inv_det, (c*d - a*f)*inv_det],
+        [(d*h - e*g)*inv_det, (b*g - a*h)*inv_det, (a*e - b*d)*inv_det]
+    ]
+    return inv
+
+class Voxel:
+    def __init__(self, center, depth=0):
+        self.center = center
+        self.depth = depth
+        self.feature_vector = None
+        self.accumulated_gradient = 0.0
+        self.children = []
+
+class SparseVoxelGrid:
+    def __init__(self):
+        self.voxels = {}
+
+    def insert(self, point):
+        key = tuple(round(p) for p in point)
+        if key not in self.voxels:
+            self.voxels[key] = Voxel(center=point)
+
+    def get(self, key):
+        return self.voxels.get(key)
+
+def mlp_forward(F, camera=None):
+    """Decodes Gaussian attributes from feature vector F and camera direction [G]."""
+    # Standard neural network forward pass; returns dummy values for implementation completeness
+    return 0.5, [[1,0,0],[0,1,0],[0,0,1]], [1.0, 1.0, 1.0], [1.0, 1.0, 1.0]
+
+def compute_gaussian_kernel(x, p, alpha, R, S):
+    """Computes G(x) = alpha * exp(-0.5 * (x-p)^T P^-1 (x-p))"""
+    S_diag = diag_matrix(S)
+    S_diag_sq = mat_mul(S_diag, S_diag)
+    R_T = mat_transpose(R)
+    P = mat_mul(mat_mul(R, S_diag_sq), R_T)
+    P_inv = inverse_3x3(P)
+    diff = [x[i] - p[i] for i in range(3)]
+    P_inv_diff = mat_vec_mul(P_inv, diff)
+    exponent = -0.5 * sum(diff[i] * P_inv_diff[i] for i in range(3))
+    return alpha * math.exp(exponent)
+
+def render_ray(ray_origin, ray_direction, voxel_grid, camera):
+    """Renders a ray using kernel regression over intersected voxels."""
+    intersected_voxels = voxel_grid.voxels.values()
+    color = [0.0, 0.0, 0.0]
+    transmittance = 1.0
+    for voxel in intersected_voxels:
+        if voxel.feature_vector is None:
+            continue
+        alpha, R, S, c = mlp_forward(voxel.feature_vector, camera)
+        # Position combines voxel center and relative offset stored in F
+        p = voxel.center
+        t = 1.0
+        sample_point = [ray_origin[i] + ray_direction[i] * t for i in range(3)]
+        kernel_val = compute_gaussian_kernel(sample_point, p, alpha, R, S)
+        contribution = [transmittance * kernel_val * c[i] for i in range(3)]
+        color = [color[i] + contribution[i] for i in range(3)]
+        transmittance *= (1.0 - kernel_val)
+    return color
+
+def update_grid(voxel_grid, gradients, max_depth, gradient_threshold):
+    """Updates the voxel grid based on accumulated gradients."""
+    for key, grad in gradients.items():
+        voxel = voxel_grid.get(key)
+        if voxel is None:
+            continue
+        voxel.accumulated_gradient += grad
+        if voxel.accumulated_gradient > gradient_threshold and voxel.depth < max_depth:
+            offset = 0.5
+            for dx in [-1, 1]:
+                for dy in [-1, 1]:
+                    for dz in [-1, 1]:
+                        new_center = [voxel.center[i] + offset * [dx, dy, dz][i] for i in range(3)]
+                        child = Voxel(center=new_center, depth=voxel.depth + 1)
+                        child.feature_vector = voxel.feature_vector
+                        voxel.children.append(child)
+```
+
+### Edge Cases and Pitfalls
+*   **Sparse Background Areas:** Overly large and sparse Gaussian points can significantly affect geometric representations, particularly in background areas [S1].
+*   **Memory Management:** Without dynamic generation and recycling of Gaussians, memory usage can become prohibitive in large open scenes [S1].
+*   **Gradient Threshold Tuning:** The choice of gradient threshold $\nabla_{thresh}$ critically affects the trade-off between reconstruction detail and computational cost [S1].
+
+## Operating characteristics
+*   **Memory Efficiency:** GVKF significantly reduces storage and training memory consumption compared to explicit 3DGS by using implicit continuous representation via kernel regression [S1].
+*   **Rendering Speed:** Achieves real-time rendering speed by leveraging fast 3DGS rasterization, avoiding the computational intensity of traditional volume rendering sampling [S1].
+*   **Surface Quality:** Provides better 3D surface representation and continuity compared to discrete 3DGS, which suffers from rough surface details in sparse areas [S1].
+*   **Scalability:** The sparse voxel grid and dynamic management allow scalability to large open scenes, addressing limitations of explicit methods like 2DGS in large-scale environments [S1].
+
+## Background
+GVKF was proposed to address the excessive memory consumption and rough surface details associated with discrete 3D Gaussian Splatting in open scenes [S1]. It was introduced in the paper "GVKF: Gaussian Voxel Kernel Functions for Highly Efficient Surface Reconstruction in Open Scenes" [S1]. The method builds upon the fast rasterization advantages of 3DGS while incorporating implicit scene representations to enable direct mesh extraction [S1].
+
+## Sources
+[S1] GVKF: Gaussian Voxel Kernel Functions for Highly Efficient Surface Reconstruction in Open Scenes, https://doi.org/10.52202/079017-3328, fetched 2026-10-26

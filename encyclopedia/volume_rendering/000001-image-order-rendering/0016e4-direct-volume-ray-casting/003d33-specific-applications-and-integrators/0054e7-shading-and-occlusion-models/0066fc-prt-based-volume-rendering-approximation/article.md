@@ -1,0 +1,190 @@
+# PRT-based Volume Rendering Approximation
+
+Also called: PRT计算Volume Rendering
+
+## Overview
+PRT-based Volume Rendering Approximation is a method to approximate in-scattering in volume rendering using Precomputed Radiance Transfer (PRT) and Spherical Harmonics (SH) to replace expensive double integrals with dot products and cube map lookups [S1, unofficial]. It diverges from standard Direct Volume Ray Casting [19-direct-volume-ray-casting.md] by modifying the **Compositing (Integration)** step to account for in-scattered radiance, which standard DVR ignores or approximates poorly [S1, unofficial]. It sets itself apart from siblings like [Cinematic Rendering](9473-cinematic-rendering.md) (which traces randomized photon paths) and [Directional Occlusion Shading](10970-directional-occlusion-shading.md) (which uses cone-shaped phase functions) by precomputing the angular transfer of light into SH coefficients stored in a Cube Map, allowing for real-time approximation of global illumination effects without full path tracing [S1, unofficial].
+
+## How it works
+**Inputs:**
+*   Volume dataset (implicit or explicit particles).
+*   Environment light map $L_s(w_1)$ (assumed constant across the small volume).
+*   Optical properties: Absorption coefficient $\sigma_a$, Out-scattering coefficient $\sigma_s$.
+*   Phase function $p(w_1, w)$ (anisotropic or isotropic).
+*   Camera ray definition.
+
+**Outputs:**
+*   Final pixel color $L_o$ for each ray.
+
+**Data Structures:**
+*   **Cube Map:** Stores SH coefficients.
+    *   *Variant 1 (Anisotropic):* Indexed by view direction $w$. Contains coefficients for $p(w_1, w)$. Shared across all particles.
+    *   *Variant 2 (Isotropic):* Stored per particle. Contains coefficients for transmittance $T_s(w_1)$, denoted $T_{si}$.
+*   **Environment Light Coefficients:** SH coefficients $L_i$ for the direct source light $L_s$.
+
+**Simplifications:**
+1.  **Incoming Light Approximation:** The incoming light $L_1(w_1)$ is assumed to be only direct illumination attenuated by absorption and out-scattering, ignoring multi-bounce scattering [S1, unofficial].
+    $$L_1(w_1) = L_s \times T_s(w_1)$$
+    where $L_s$ is the direct source light and $T_s(w_1)$ is the transmittance along the path from the light source to the scattering particle.
+2.  **Monte Carlo Integration:** The outer integral along the ray is approximated using 2 samples: one at the front face and one at the back face of the volume. The result is the average of these two points [S1, unofficial].
+
+**Algorithm Steps:**
+
+1.  **Precompute SH Coefficients:**
+    *   Project the term $p(w_1, w) \times T_s(w_1)$ and $L_s(w_1)$ onto Spherical Harmonics (SH) coefficients [S1, unofficial].
+    *   Since the volume is small, $L_s(w_1)$ is constant for all particles. The varying part $p(w_1, w) \times T_s(w_1)$ is projected.
+    *   *Choice of Variant:*
+        *   **Variant 1 (Anisotropic):** Ignore $T_s(w_1)$ in the projection to allow a single shared Cube Map for all particles (saving memory). Store SH coefficients for $p(w_1, w)$ in the Cube Map indexed by view direction $w$ [S1, unofficial].
+        *   **Variant 2 (Isotropic):** Assume phase function $p(w_1, w) = \frac{1}{4\pi}$. Project $T_s(w_1)$ onto SH coefficients $T_{si}$ for each particle. Compute in-scattering via dot product of environment light coefficients $L_{si}$ and particle coefficients $T_{si}$ [S1, unofficial].
+
+2.  **Render Volume to Texture (Pre-pass):**
+    *   Render the volume to a texture once.
+    *   For each ray, calculate the SH coefficients $T_i(w)$ at the front face and the back face of the volume.
+    *   Sum these values: $T_{sum}(w) = T_{front}(w) + T_{back}(w)$ [S1, unofficial].
+    *   *Note:* In Variant 1, $T_i(w)$ comes from the shared Cube Map lookup based on view direction $w$. In Variant 2, $T_i$ is the particle-specific coefficient $T_{si}$.
+
+3.  **Compute In-Scattering:**
+    *   Perform a dot product between the summed coefficients $T_{sum}$ and the environment light coefficients $L_i$ [S1, unofficial].
+    *   Multiply by $\frac{\sigma_s \times d}{2}$ to get the In-Scattering result, where $\sigma_s$ is the out-scattering coefficient and $d$ is the depth of the volume along the ray [S1, unofficial].
+    $$L_{in} = (T_{sum} \cdot L_i) \times \frac{\sigma_s \times d}{2}$$
+
+4.  **Compute Transmittance:**
+    *   Calculate the transmittance $T$ along the ray:
+    $$T = \exp\left(-\int (\sigma_s + \sigma_a) dt\right) \approx \exp\left(-(\sigma_s + \sigma_a) \times d\right)$$
+    where $d$ is the depth [S1, unofficial].
+
+5.  **Final Color:**
+    *   Sum the view-direction absorption, out-scattering, and the calculated in-scattering to get the final approximate pixel color [S1, unofficial].
+    $$L_o = L_i \times T + L_{in}$$
+    *   Note: The source text defines the full radiative transfer equation as $L_o = L_i \times T + \int T \times (\sigma_s \int p(w_1, w) L_1(w_1) dw_1) dt$. The approximation replaces the integral with the PRT dot product and Monte Carlo average [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_prt_volume_rendering(ray, volume, env_light_sh, cube_map, is_isotropic):
+    """
+    ray: object with origin, direction, and intersection points with volume (front_face, back_face)
+    volume: object with optical properties (sigma_s, sigma_a)
+    env_light_sh: list of SH coefficients for environment light L_s
+    cube_map: lookup table for anisotropic phase function SH coefficients
+    is_isotropic: boolean, if True use Variant 2, else Variant 1
+    """
+    # 1. Calculate Depth
+    depth = distance(ray.front_face, ray.back_face)
+    
+    # 2. Calculate Transmittance T
+    # T = exp(-(sigma_s + sigma_a) * depth)
+    sigma_s = volume.sigma_s
+    sigma_a = volume.sigma_a
+    T = exp(-(sigma_s + sigma_a) * depth)
+    
+    # 3. Get Incoming Light at Front and Back Faces (Simplified: Direct Light only)
+    # L1(w1) = Ls * Ts(w1)
+    # We need SH coefficients for the transfer function at front and back faces
+    
+    if is_isotropic:
+        # Variant 2: Isotropic
+        # Phase function p(w1, w) = 1/(4*pi)
+        # Project Ts(w1) onto SH coefficients T_si for each particle
+        # Note: In practice, T_si would be precomputed per particle or interpolated from volume
+        # Here we assume we can get T_si for the specific location
+        T_si_front = get_particle_sh_coefficients(ray.front_face) # Placeholder for particle-specific Ts projection
+        T_si_back = get_particle_sh_coefficients(ray.back_face)
+        
+        # Sum coefficients
+        T_sum_sh = [a + b for a, b in zip(T_si_front, T_si_back)]
+        
+        # Dot product with environment light SH coefficients
+        # L_in_raw = dot(T_sum_sh, env_light_sh)
+        L_in_raw = sum(t * l for t, l in zip(T_sum_sh, env_light_sh))
+        
+        # Multiply by sigma_s * depth / 2
+        # Also multiply by 1/(4*pi) if not included in T_si projection
+        # The source says: "dot product of environment light coefficients L_si and particle coefficients T_si"
+        # and "multiply by sigma_s * depth / 2"
+        L_in = L_in_raw * (sigma_s * depth / 2.0)
+        
+    else:
+        # Variant 1: Anisotropic
+        # Ignore Ts(w1) in projection. Store SH coefficients for p(w1, w) in Cube Map indexed by view direction w.
+        # View direction w is the ray direction
+        view_direction = ray.direction
+        
+        # Lookup SH coefficients for front and back faces
+        # Note: The source says "Ti(w) saved in cube map, accessed by w".
+        # It implies the cube map stores the SH coefficients for the phase function.
+        # We assume the cube map is indexed by the view direction (quantized to cube face).
+        sh_coeffs_front = cube_map.lookup(view_direction)
+        sh_coeffs_back = cube_map.lookup(view_direction)
+        
+        # Sum coefficients
+        T_sum_sh = [a + b for a, b in zip(sh_coeffs_front, sh_coeffs_back)]
+        
+        # Dot product with environment light SH coefficients
+        L_in_raw = sum(t * l for t, l in zip(T_sum_sh, env_light_sh))
+        
+        # Multiply by sigma_s * depth / 2
+        L_in = L_in_raw * (sigma_s * depth / 2.0)
+
+    # 4. Final Color
+    # Li is the incoming light at the front face (direct light attenuated by nothing before front face? 
+    # Or Li is the light entering the volume? The source says Li*T + In-Scattering.
+    # Li is typically the background or light entering the volume.
+    # Assuming Li is the direct light at the front face, unattenuated by volume (since T accounts for volume attenuation)
+    # However, the source formula Lo = Li * T + In-Scattering suggests Li is the light incident on the volume.
+    # For simplicity, if Li is the environment light at the front face direction, it might be looked up.
+    # But the source simplifies L1(w1) = Ls * Ts(w1). 
+    # The final sum is "view-direction absorption, out-scattering, and in-scattering".
+    # Absorption/Out-scattering term is Li * T.
+    
+    # Li is the light entering the volume. If the volume is in a lit environment, Li is the direct light at the front face.
+    # Let's assume Li is the direct light L_s at the front face direction.
+    Li = env_light_sh # This is a simplification; in reality, Li is the radiance at the front face.
+    # If Li is the SH coefficients, we need to evaluate it at the view direction?
+    # The source says "Lo = Li * T + ...". Li is a scalar radiance.
+    # Let's assume Li is the direct light intensity at the front face.
+    # For a point light or directional light, Li is constant.
+    # If Li is the environment light, we might need to evaluate the SH at the view direction.
+    # However, the source doesn't specify how Li is obtained for the first term.
+    # Given the simplification, let's assume Li is the direct light source intensity.
+    
+    # To be precise, Li is the incoming radiance at the front face.
+    # If the volume is in a scene with direct lighting, Li = L_s (if no occlusion before volume).
+    
+    # Let's use the direct light source intensity as Li for the first term.
+    # This is a simplification.
+    Li_scalar = evaluate_direct_light_at_front_face(ray.front_face)
+    
+    L_o = Li_scalar * T + L_in
+    
+    return L_o
+
+def evaluate_direct_light_at_front_face(point):
+    # Placeholder for getting direct light intensity at a point
+    # In the context of the source, Ls is the direct source light.
+    # If it's a directional light, it's constant.
+    return 1.0 # Placeholder
+```
+
+**Edge Cases and Pitfalls:**
+*   **Memory Usage:** Storing a separate Cube Map for every particle is hardware-unfriendly. Solved by ignoring $T_s(w_1)$ in Variant 1 to share one Cube Map, or using isotropic assumption in Variant 2 [S1, unofficial].
+*   **Precision:** The approximation ignores multi-bounce scattering, which may lead to inaccuracies in highly scattering media [S1, unofficial].
+*   **Boundary Conditions:** The Monte Carlo integration with 2 samples (front and back faces) may not accurately capture rapid changes in optical properties within the volume [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Precomputation of SH coefficients is $O(N \times K)$ where $N$ is the number of particles/voxels and $K$ is the number of SH bands. Rendering is $O(1)$ per pixel (Cube Map lookup + dot product).
+*   **Memory Complexity:** $O(K)$ for the shared Cube Map (Variant 1) or $O(N \times K)$ for per-particle coefficients (Variant 2).
+*   **Measured Performance:** Not given in the sources.
+*   **Scaling:** Scales well with resolution due to the $O(1)$ rendering cost, but precomputation cost increases with volume complexity.
+*   **Strengths:** Real-time approximation of in-scattering; efficient hardware implementation (Cube Map lookup).
+*   **Limitations:** Approximation errors due to ignoring multi-bounce scattering; limited accuracy for highly anisotropic scattering without per-particle data.
+*   **When to use:** Real-time volume rendering where in-scattering is important but full path tracing is too expensive.
+*   **When not to use:** High-fidelity offline rendering requiring accurate multi-bounce scattering.
+
+## Background
+The method originates from a discussion on the CSDN community, titled "PRT和Volume Rendering" (PRT and Volume Rendering) [S1, unofficial]. It applies the concept of Precomputed Radiance Transfer (PRT) to volume rendering, adapting techniques from surface rendering to handle the double integral of in-scattering. The specific implementation details, including the two variants (anisotropic and isotropic) and the Monte Carlo integration strategy, are described in this unofficial source.
+
+## Sources
+[S1] PRT和Volume Rendering - CSDN社区, https://bbs.csdn.net/topics/70014915, fetched 2026-10-30 (unofficial)

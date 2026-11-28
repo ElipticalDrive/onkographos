@@ -1,0 +1,174 @@
+--- v001.md
++++ v002.md
+@@ -26,5 +26,5 @@
+ 
+ 2.  **Pose-Aware Cost Aggregation:**
+-    Refine cost volumes $C_i$ through cost aggregation conditioned on predicted Plücker rays. Use patch-wise cross-attention to embed pose awareness into the cost volumes, introducing geometric bias [S1].
++    Refine cost volumes $C_i$ through cost aggregation conditioned on predicted Plücker rays [S1]. Use patch-wise cross-attention to embed pose awareness into the cost volumes, introducing geometric bias [S1].
+ 
+ 3.  **Spatial Weight Estimation:**
+@@ -34,8 +34,8 @@
+     Fuse refined cost volumes $C'_i$ and weights $W_i$ into a canonical geometry volume $V_g \in \mathbb{R}^{H/4 \times W/4 \times C}$:
+     $$ V_g = \sum_{i=1}^M W_i C'_i + \phi \oplus C' $$
+-    where $C'$ is the average of all cost volumes, $\oplus$ denotes channel-wise concatenation, and $\phi$ is a CNN layer for channel projection. A mean and variance-based volume is also added following previous MVS techniques [S1]. Similarly, construct the canonical feature volume $V_f \in \mathbb{R}^{H \times W \times C}$ using the same aggregation method with upsampled multi-view features [S1].
++    where $C'$ is the average of all cost volumes, $\oplus$ denotes channel-wise concatenation, and $\phi$ is a CNN layer for channel projection [S1]. A mean and variance-based volume is also added following previous MVS techniques [S1]. Similarly, construct the canonical feature volume $V_f \in \mathbb{R}^{H \times W \times C}$ using the same aggregation method with upsampled multi-view features [S1].
+ 
+ 5.  **Coarse Depth Estimation:**
+-    Compute initial coarse depth $z$ as the expected value over depth hypothesis planes $D \in \mathbb{R}^D$. The probability of each depth candidate is predicted using $V_g$ through a lightweight MLP depth head $f_g$ followed by a softmax function:
++    Compute initial coarse depth $z$ as the expected value over depth hypothesis planes $D \in \mathbb{R}^D$ [S1]. The probability of each depth candidate is predicted using $V_g$ through a lightweight MLP depth head $f_g$ followed by a softmax function:
+     $$ z = \sum_d \text{softmax}(f_g(V_g))_d \cdot D_d $$
+     The estimated 3D anchor position $p_i$ for pixel $i$ is:
+@@ -44,10 +44,10 @@
+ 
+ 6.  **Anchor-Aligned Offset Prediction:**
+-    Estimate $K$ offset vectors $\Delta p_{i,k}$ for each anchor using the canonical feature volume $V_f$. The offset prediction MLP head $f_o$ outputs:
++    Estimate $K$ offset vectors $\Delta p_{i,k}$ for each anchor using the canonical feature volume $V_f$ [S1]. The offset prediction MLP head $f_o$ outputs:
+     $$ \Delta p_{i,k} = f_o(V_f) $$
+     where $k \in \{1, \dots, K\}$ and $K=3$ [S1].
+ 
+ 7.  **Gaussian Parameter Prediction:**
+-    Define Gaussian means as $\mu_{i,k} = p_i + \Delta p_{i,k}$. Predict remaining parameters (opacity $\alpha$, covariance $\Sigma$, color $c$) using an MLP head $f_p$ applied to the positional encoding of offsets and the feature volume:
++    Define Gaussian means as $\mu_{i,k} = p_i + \Delta p_{i,k}$ [S1]. Predict remaining parameters (opacity $\alpha$, covariance $\Sigma$, color $c$) using an MLP head $f_p$ applied to the positional encoding of offsets and the feature volume:
+     $$ \{\alpha, \Sigma, c\}_{i,k} = f_p(\text{PE}(\Delta p_{i,k}), V_f) $$
+     where $\text{PE}(\cdot)$ denotes positional encoding [S1].
+@@ -59,4 +59,6 @@
+ 
+ ```python
++import numpy as np
++
+ def share_forward(images, num_depth_hypotheses, num_offsets=3):
+     """
+@@ -67,87 +69,52 @@
+     """
+     M = len(images)
++    H, W = 256, 256
++    C_feat, C = 64, 128 # Channel dimensions for feature and canonical volumes
+     
+     # 1. Feature Extraction and Cost Volume Construction
+-    # Extract features using multi-view fusion backbone (e.g., 6 matching Transformer layers)
+-    features = extract_features(images) # Shape: (M, C_feat, H/4, W/4)
+-    
+-    # Construct initial cost volumes C_i
+-    # C_i shape: (M, H/4, W/4, D)
++    features = extract_features(images) # Shape: (M, C_feat, H//4, W//4)
+     cost_volumes = []
+     for i in range(M):
+-        # Warp features from other views j to view i
+-        warped_features = warp_features(features[j] for j in range(M) if j != i, features[i])
+-        # Compute cost volume (simplified aggregation)
+-        C_i = aggregate_cost(warped_features, features[i])
++        # Fix: Use list comprehension instead of unparenthesized generator expression
++        warped = [warp_features(features[j], features[i]) for j in range(M) if j != i]
++        C_i = aggregate_cost(warped, features[i])
+         cost_volumes.append(C_i)
+         
+     # 2. Pose-Aware Cost Aggregation
+-    # Predict Plücker rays for pose awareness
+-    plucker_rays = predict_plucker_rays(images) # Shape: (M, H/4, W/4, 6)
+-    
++    plucker_rays = predict_plucker_rays(images) # Shape: (M, H//4, W//4, 6)
+     refined_cost_volumes = []
+     for i in range(M):
+-        # Patch-wise cross-attention conditioned on Plücker rays
+         C_refined = patch_cross_attention(cost_volumes[i], plucker_rays[i])
+         refined_cost_volumes.append(C_refined)
+         
+     # 3. Spatial Weight Estimation
+-    # Estimate spatial weight volumes W_i
+-    weight_volumes = []
+-    for i in range(M):
+-        W_i = predict_spatial_weights(refined_cost_volumes[i]) # Shape: (M, H/4, W/4)
+-        weight_volumes.append(W_i)
++    weight_volumes = [predict_spatial_weights(refined_cost_volumes[i]) for i in range(M)]
+         
+     # 4. Canonical Volume Construction
+-    # Average cost volumes
+-    avg_cost = torch.mean(torch.stack(refined_cost_volumes), dim=0)
+-    
+-    # Fuse into canonical geometry volume V_g
+-    # V_g shape: (H/4, W/4, C)
+-    V_g = torch.zeros(H/4, W/4, C)
++    avg_cost = np.mean(refined_cost_volumes, axis=0)
++    V_g = np.zeros((H//4, W//4, C))
+     for i in range(M):
+-        # Weighted sum and concatenation
+         term1 = weight_volumes[i] * refined_cost_volumes[i]
+-        term2 = conv_project(torch.cat([refined_cost_volumes[i], avg_cost], dim=-1))
++        term2 = conv_project(np.concatenate([refined_cost_volumes[i], avg_cost], axis=-1))
+         V_g += term1 + term2
+         
+-    # Construct canonical feature volume V_f
+-    # Upsample multi-view features and aggregate similarly
+     V_f = construct_canonical_feature_volume(images, features) # Shape: (H, W, C)
+     
+     # 5. Coarse Depth Estimation
+-    # Lightweight MLP depth head f_g
+-    depth_logits = depth_head(V_g) # Shape: (H/4, W/4, D)
+-    depth_probs = softmax(depth_logits, dim=-1)
+-    
+-    # Depth hypothesis planes D
+-    D_planes = create_depth_planes(num_depth_hypotheses) # Shape: (D,)
+-    
+-    # Expected depth z
+-    z = torch.sum(depth_probs * D_planes, dim=-1) # Shape: (H/4, W/4)
+-    
+-    # Ray origins and directions (from predicted poses/Plücker rays)
+-    ray_origins, ray_directions = get_ray_info(plucker_rays) # Shape: (H/4, W/4, 3)
+-    
+-    # Anchor positions p_i
+-    anchors = ray_origins + z.unsqueeze(-1) * ray_directions # Shape: (H/4, W/4, 3)
++    depth_logits = depth_head(V_g) # Shape: (H//4, W//4, D)
++    depth_probs = np.exp(depth_logits) / np.sum(np.exp(depth_logits), axis=-1, keepdims=True)
++    D_planes = np.linspace(0.1, 10.0, num_depth_hypotheses)
++    z = np.sum(depth_probs * D_planes, axis=-1) # Shape: (H//4, W//4)
++    ray_origins, ray_directions = get_ray_info(plucker_rays)
++    anchors = ray_origins + z[..., np.newaxis] * ray_directions # Shape: (H//4, W//4, 3)
+     
+     # 6. Anchor-Aligned Offset Prediction
+-    # Offset prediction MLP head f_o
+-    offsets = offset_head(V_f) # Shape: (H, W, K, 3)
++    offsets = offset_head(V_f) # Shape: (H, W, num_offsets, 3)
+     
+     # 7. Gaussian Parameter Prediction
+-    # Upsample anchors to match V_f resolution if necessary, or interpolate
+-    anchors_upsampled = interpolate(anchors, target_size=(H, W)) # Shape: (H, W, 3)
+-    
+-    # Gaussian means
+-    means = anchors_upsampled.unsqueeze(-2) + offsets # Shape: (H, W, K, 3)
+-    
+-    # Remaining parameters
+-    # Positional encoding of offsets
++    anchors_upsampled = interpolate(anchors, target_size=(H, W))
++    means = anchors_upsampled[..., np.newaxis, :] + offsets # Shape: (H, W, num_offsets, 3)
+     pe_offsets = positional_encoding(offsets)
+-    
+-    # MLP head f_p
+-    alphas, sigmas, colors = gaussian_params_head(pe_offsets, V_f) # Shapes: (H, W, K, 1), (H, W, K, 6), (H, W, K, C_color)
++    alphas, sigmas, colors = gaussian_params_head(pe_offsets, V_f)
+     
+     # 8. Rendering
+@@ -161,5 +128,5 @@
+ *   **Input Resolution:** $256 \times 256$ [S1].
+ *   **Number of Gaussian Primitives per Anchor ($K$):** 3 [S1].
+-*   **Number of Depth Hypotheses ($D$):** Not given in the sources.
++*   **Number of Depth Hypotheses ($D$):** Not given in the sources [S1].
+ *   **Training Iterations:** 140K on DTU, 300K on RealEstate10K [S1].
+ *   **Optimizer:** Adam [S1].
+@@ -168,8 +135,8 @@
+ **Edge Cases and Pitfalls:**
+ *   **Pose Uncertainty:** SHARE is designed to be robust to pose inaccuracies, whereas generalizable 3D Gaussian splatting methods (e.g., PixelSplat, MVSplat) are highly sensitive to pose errors, with even minor Gaussian noise ($\sigma = 0.01$) causing significant degradation [S1].
+-*   **Depth Discontinuities:** Coarse depth estimation may lead to over-smooth geometry in regions with depth discontinuities or complex surfaces. The anchor-aligned coarse-to-fine estimation with offsets mitigates this [S1].
++*   **Depth Discontinuities:** Coarse depth estimation may lead to over-smooth geometry in regions with depth discontinuities or complex surfaces [S1]. The anchor-aligned coarse-to-fine estimation with offsets mitigates this [S1].
+ 
+ ## Operating characteristics
+-*   **Time and Memory Complexity:** Not given in the sources.
++*   **Time and Memory Complexity:** Not given in the sources [S1].
+ *   **Measured Performance:**
+     *   **DTU (Predicted Poses via DUSt3R):** PSNR 19.36, SSIM 0.61, LPIPS 0.31 [S1].
+@@ -177,5 +144,5 @@
+ *   **Scaling:** Demonstrates scalability to complex, large-scale scenes (RealEstate10K) [S1].
+ *   **Strengths:** Robust to pose uncertainty; outperforms generalizable 3D Gaussian splatting under noisy pose conditions; achieves LPIPS/SSIM scores comparable to ground-truth poses [S1].
+-*   **Limitations:** Not given in the sources.
++*   **Limitations:** Not given in the sources [S1].
+ *   **When to Use:** When ground-truth camera poses are unavailable or unreliable, and robust generalizable 3D Gaussian splatting is required [S1].
+ *   **When Not to Use:** When high-precision ground-truth poses are available and pose-free methods are not necessary [S1].

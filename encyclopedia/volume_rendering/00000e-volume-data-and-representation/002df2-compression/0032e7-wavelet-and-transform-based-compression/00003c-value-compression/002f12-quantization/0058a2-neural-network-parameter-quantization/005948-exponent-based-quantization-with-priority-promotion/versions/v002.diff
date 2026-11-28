@@ -1,0 +1,193 @@
+--- v001.md
++++ v002.md
+@@ -7,11 +7,11 @@
+ 
+ ## How it works
+-**Inputs:** A tensor of floating-point weights $W$.
+-**Outputs:** A compressed bitstream of quantized indices and values, ready for entropy coding.
++**Inputs:** A tensor of floating-point weights $W$ [S1].
++**Outputs:** Quantized indices and representative values, ready for entropy coding [S1].
+ 
+ **Data Structures:**
+-*   **Bucket Map:** A dictionary or hash map where keys are tuples $(s, e)$ representing sign and exponent, and values are lists of weights belonging to that bucket.
+-*   **Bucket Representatives:** A map from $(s, e)$ to a single representative value $v_{rep}$.
+-*   **Priority List:** A sorted list of active bucket keys $(s, e)$, ordered by the magnitude of the exponent $e$ (descending).
++*   **Bucket Map:** A dictionary or hash map where keys are tuples $(s, e)$ representing sign and exponent, and values are lists of weights belonging to that bucket [S1, G].
++*   **Bucket Representatives:** A map from $(s, e)$ to a single representative value $v_{\text{rep}}$ [S1].
++*   **Priority List:** A sorted list of active bucket keys $(s, e)$, ordered by the magnitude of the exponent $e$ (descending) [S1, G].
+ 
+ **Steps:**
+@@ -23,18 +23,18 @@
+ 
+ 2.  **Bucket Representation:**
+-    For each non-empty bucket $B_{(s,e)}$, calculate the representative value $v_{rep}$ as the average of the maximum and minimum values found in that bucket:
+-    $$ v_{rep} = \frac{\max(B_{(s,e)}) + \min(B_{(s,e)})}{2} $$
+-    All weights in $B_{(s,e)}$ are replaced by $v_{rep}$ during quantization [S1].
++    For each non-empty bucket $B_{(s,e)}$, calculate the representative value $v_{\text{rep}}$ as the average of the maximum and minimum values found in that bucket:
++    $$ v_{\text{rep}} = \frac{\max(B_{(s,e)}) + \min(B_{(s,e)})}{2} $$
++    All weights in $B_{(s,e)}$ are replaced by $v_{\text{rep}}$ during quantization [S1].
+ 
+ 3.  **Priority Promotion (Bucket Reduction):**
+-    Let $N_b$ be the number of bits allocated for bucket indexing. The maximum number of distinct buckets that can be indexed is $2^{N_b} - 1$ [S1].
+-    *   Sort all active buckets by their exponent $e$ in descending order (largest exponents first).
+-    *   Select the top $K = 2^{N_b} - 1$ buckets with the largest exponents. These buckets retain their specific representatives.
+-    *   Merge all remaining buckets (those with smaller exponents) into a single "overflow" bucket.
++    Let $N_b$ be the number of bits allocated for bucket indexing [S1]. The maximum number of distinct buckets that can be indexed is $2^{N_b} - 1$ [S1].
++    *   Sort all active buckets by their exponent $e$ in descending order (largest exponents first) [S1, G].
++    *   Select the top $K = 2^{N_b} - 1$ buckets with the largest exponents. These buckets retain their specific representatives [S1].
++    *   Merge all remaining buckets (those with smaller exponents) into a single "overflow" bucket [S1].
+     *   The representative value for this overflow bucket is defined as $0$ [S1].
+-    *   This ensures that only $N_b$ bits are required to index any bucket [S1].
++    *   Assign indices $0 \dots K-1$ to the significant buckets and index $K$ to the overflow bucket, ensuring all indices fit within $N_b$ bits [S1].
+ 
+ 4.  **Compression:**
+-    Replace each weight in the tensor with the index of its assigned bucket (using $N_b$ bits) and the representative value associated with that bucket. Compress the resulting sequence of indices and values using Huffman coding [S1].
++    Replace each weight in the tensor with the index of its assigned bucket and the representative value associated with that bucket. Compress the resulting sequence of indices and values using Huffman coding [S1].
+ 
+ **Parameters:**
+@@ -61,116 +61,57 @@
+         
+     Returns:
+-        buckets: Dict mapping (sign, exponent) to representative value.
++        bucket_reps: Dict mapping (sign, exponent) to representative value.
++        key_to_index: Dict mapping (sign, exponent) to bucket index.
++        overflow_index: Index assigned to the merged overflow bucket.
+         indices: List of bucket indices for each weight.
+     """
+     # Step 1: Partition weights into buckets based on sign and exponent
+-    # Bucket key: (sign, exponent)
+-    # Bucket value: list of weights
+     buckets_data = defaultdict(list)
+     
+     for w in weights:
+-        if w == 0:
+-            # Special case for zero, typically exponent is handled as a specific bucket or merged
+-            # Based on [S1], 0 is likely merged into the overflow bucket or handled by sign/exp
+-            # Assuming standard float decomposition:
+-            sign = 0 if w >= 0 else 1
+-            # Note: Exact float decomposition logic depends on hardware/standard.
+-            # For the purpose of this algorithm, we assume access to s and e.
+-            # In Python, math.frexp returns (m, e) where m is in [0.5, 1).
+-            # Sign is separate.
++        if w == 0.0:
++            s, m, e = 0, 0.0, 0
++        else:
++            s = 0 if w > 0 else 1
+             m, e = math.frexp(abs(w))
+-            # Adjust e if w is 0
+-            if w == 0:
+-                e = 0 
+-                m = 0
+-            
+-            # Map to integer exponent for bucketing if necessary, 
+-            # but [S1] implies using the raw exponent value for sorting.
+-            # We store the exponent as is.
+-            key = (sign, e)
+-            buckets_data[key].append(w)
+-            
++        buckets_data[(s, e)].append(w)
++        
+     # Step 2: Calculate representative values for each bucket
+     bucket_reps = {}
+     for key, vals in buckets_data.items():
+-        if not vals:
+-            continue
+-        max_val = max(vals)
+-        min_val = min(vals)
+-        bucket_reps[key] = (max_val + min_val) / 2.0
++        bucket_reps[key] = (max(vals) + min(vals)) / 2.0
+         
+     # Step 3: Priority Promotion
+-    # Get all active keys
+     active_keys = list(bucket_reps.keys())
+-    
+-    # Sort by exponent (descending)
+-    # Key is (sign, exponent). We sort by exponent [1]
++    # Sort by exponent descending
+     active_keys.sort(key=lambda k: k[1], reverse=True)
+     
+-    # Max number of buckets we can index
+-    max_buckets = (1 << N_b) - 1
++    max_significant = (1 << N_b) - 1
++    significant_keys = active_keys[:max_significant]
++    # Remaining keys are merged into the overflow bucket
+     
+-    # Select top buckets
+-    selected_keys = active_keys[:max_buckets]
+-    remaining_keys = active_keys[max_buckets:]
++    key_to_index = {key: i for i, key in enumerate(significant_keys)}
++    overflow_index = max_significant  # Index for the overflow bucket
+     
+-    # Create a mapping from key to index
+-    key_to_index = {}
+-    for i, key in enumerate(selected_keys):
+-        key_to_index[key] = i
+-        
+-    # The remaining keys are merged into a single bucket represented by 0
+-    # We assign them a special index, e.g., max_buckets (if we had N_b+1 bits)
+-    # But [S1] says "only N_b bits are required". 
+-    # This implies the overflow bucket is one of the 2^N_b - 1 slots?
+-    # No, [S1] says "keep 2^N_b - 1 buckets... The rest buckets are merged into one bucket, 
+-    # which is represented by 0."
+-    # It does not explicitly say the overflow bucket gets an index. 
+-    # However, to index it, we need an index. 
+-    # If we have 2^N_b - 1 slots for "significant" buckets, we have 1 slot left 
+-    # if we use N_b bits for 2^N_b values? 
+-    # Or does the overflow bucket not need an index because it's implicit?
+-    # [S1] says "only N_b bits are required to index buckets".
+-    # If we have 2^N_b - 1 significant buckets, we can index them with N_b bits 
+-    # if we reserve one index for the overflow? 
+-    # 2^N_b total indices. 2^N_b - 1 used for significant. 1 used for overflow.
+-    # This fits perfectly.
+-    
+-    overflow_index = (1 << N_b) - 1 # The last index
+-    
+-    # Assign indices
++    # Step 4: Generate indices for each weight
+     indices = []
+     for w in weights:
+-        if w == 0:
+-             # Handle zero explicitly if needed, or let it fall into a bucket
+-             # Assuming 0 is in a bucket with exp 0 or similar
+-             pass
+-             
+-        # Re-decompose to find key
+-        sign = 0 if w >= 0 else 1
+-        m, e = math.frexp(abs(w))
+-        if w == 0: e = 0
++        if w == 0.0:
++            s, m, e = 0, 0.0, 0
++        else:
++            s = 0 if w > 0 else 1
++            m, e = math.frexp(abs(w))
++        key = (s, e)
++        indices.append(key_to_index.get(key, overflow_index))
+         
+-        key = (sign, e)
+-        
+-        if key in key_to_index:
+-            idx = key_to_index[key]
+-        else:
+-            idx = overflow_index
+-            
+-        indices.append(idx)
+-        
+-    # The representative for the overflow bucket is 0
+-    # The representatives for selected keys are in bucket_reps
+-    
+     return bucket_reps, key_to_index, overflow_index, indices
+ ```
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Partitioning is $O(N)$ where $N$ is the number of weights. Sorting buckets is $O(B \log B)$ where $B$ is the number of unique exponent/sign combinations. In practice, $B$ is small relative to $N$.
+-*   **Memory Complexity:** Requires storing the bucket representatives and the mapping. The output size is $N \times N_b$ bits for indices plus the storage for representatives.
+-*   **Performance:** Tested on NeRF architectures. Quality remains stable for $N_b > 5$ and drops significantly for $N_b < 3$ [S1].
+-*   **Strengths:** Adapts quantization granularity to the magnitude of weights, preserving important high-magnitude parameters while aggressively compressing low-magnitude ones.
+-*   **Limitations:** Lossy. Requires careful selection of $N_b$ to balance bitrate and distortion.
++*   **Performance:** Tested on NeRF architectures, rendered quality remains stable when $N_b > 5$ and drops significantly when $N_b < 3$ [S1].
++*   **Strengths:** Adapts quantization granularity to the magnitude of weights, preserving important high-magnitude parameters while aggressively compressing low-magnitude ones [S1].
++*   **Limitations:** Lossy compression that requires careful selection of $N_b$ to balance bitrate and distortion [S1].
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
+ 
+ ## Background

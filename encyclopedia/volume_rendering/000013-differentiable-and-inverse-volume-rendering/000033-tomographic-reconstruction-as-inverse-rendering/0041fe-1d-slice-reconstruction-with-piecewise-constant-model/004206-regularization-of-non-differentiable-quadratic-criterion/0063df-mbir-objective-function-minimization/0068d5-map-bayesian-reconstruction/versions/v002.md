@@ -1,0 +1,69 @@
+# MAP/Bayesian Reconstruction
+
+Also called: MAP, Maximum A Posteriori, MAP-EM, MAP-GC
+
+## Overview
+MAP/Bayesian Reconstruction is a statistical inverse problem method that incorporates prior knowledge of the object to stabilize the reconstruction and improve image quality [S1, unofficial][S2, unofficial]. It sets itself apart from standard least-squares or Maximum Likelihood methods by explicitly balancing the likelihood of the observed data against a prior probability distribution, allowing for constraints such as positivity, smoothness, or support [S2, unofficial].
+
+## How it works
+**Inputs and Outputs**
+- **Inputs**: Projection data $P$ (or $proj$), system matrix $R$ (forward projection operator), prior model parameters (e.g., regularization weight $\lambda$) [S1, unofficial][S2, unofficial].
+- **Outputs**: Reconstructed object volume $f$ [S1, unofficial][S2, unofficial].
+
+**Data Structures**
+- $f$: The object vector, typically discretized into voxels. Size $N \times 1$ [G].
+- $P$: The projection vector. Size $M \times 1$ [G].
+- $R$: The system matrix (or ray-tracing operator). Size $M \times N$ [G].
+- $\lambda$: Scalar regularization weight [S2, unofficial].
+
+**Numbered Steps**
+1. **Initialize**: Set initial estimate $f^{(0)}$ (e.g., zero or a standard reconstruction) and iteration counter $k=0$ [G].
+2. **Compute Forward Projection and Residual**: Calculate $R f^{(k)}$ and the residual $P - R f^{(k)}$ [G].
+3. **Compute Combined Gradient**: Calculate the gradient of the regularized criterion $\nabla J(f^{(k)}) = \nabla J_1(f^{(k)}) + \lambda \nabla J_2(f^{(k)})$ based on the chosen prior model (e.g., quadratic smoothness) [G].
+4. **Update**: Update the estimate using an optimization algorithm such as Gradient Conjugate (MAP-GC) or Expectation-Maximization (MAP-EM) [S2, unofficial].
+5. **Check Convergence**: If convergence criteria are met, stop. Otherwise, increment $k$ and return to Step 2 [G].
+
+**Formulas**
+The method is grounded in Bayes' theorem. The posterior probability $p(f | P)$ is proportional to the product of the likelihood $p(P | f)$ and the prior probability $p(f)$ [S2, unofficial]:
+$$
+p(f | P) = \frac{p(P | f) p(f)}{p(P)}
+$$
+Since the projections $P$ are known measurements, $p(P)$ is constant and can be ignored for optimization [S2, unofficial]. If no prior hypothesis is made, $p(f)$ is constant, reducing the problem to Maximum Likelihood [S2, unofficial]. To incorporate prior knowledge, the problem is formulated as minimizing a cost function $J(f)$ [S2, unofficial]:
+$$
+J(f) = J_1(f) + \lambda J_2(f)
+$$
+Where:
+- $J_1(f) = \| P - Rf \|^2$ is the data fidelity term (typically least-squares error) [S2, unofficial].
+- $J_2(f)$ is the prior fidelity term, encoding the prior probability $p(f)$ (e.g., smoothness or edge-preserving penalties) [S2, unofficial].
+- $\lambda$ is the regularization parameter controlling the trade-off between data fidelity and prior information [S2, unofficial].
+Alternatively, from a general statistical estimation perspective, the solution minimizes a cost function $c(f, g)$ integrated against the posterior [S1, unofficial]:
+$$
+f_{solution} = \arg \min_f \int c(f, g) p(f = g | proj) dg
+$$
+For the MAP criterion, the cost function is defined as $c(f, g) = 1 - \delta(f, g)$, where $\delta$ is the Dirac distribution at point $f$ [S1, unofficial]. This simplifies the solution to:
+$$
+f_{solution} = \arg \max_f p(f | proj)
+$$
+[S1, unofficial].
+
+**Parameters**
+- $\lambda$: The weight of the prior. It must be set empirically [S2, unofficial].
+
+**Edge Cases and Pitfalls**
+- **Tuning $\lambda$**: The parameter $\lambda$ requires empirical tuning to balance data fidelity and prior information [S2, unofficial].
+- **Convergence**: Gradient Conjugate methods are faster but more prone to non-convergence issues compared to EM methods [S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity**: Depends on the optimizer; Gradient Conjugate is faster than Expectation-Maximization [S2, unofficial]. Exact complexity values are Not given in the sources.
+- **Memory Complexity**: Requires storage for the object $f$, projections $P$, and the system matrix $R$ or its transpose $R^T$ [G]. Exact memory values are Not given in the sources.
+- **Strengths**: Improves image quality by incorporating prior knowledge; stabilizes ill-posed problems; allows for specific constraints (positivity, smoothness) [S2, unofficial].
+- **Limitations**: Requires empirical tuning of $\lambda$; prior model must be appropriate for the object; convergence can be sensitive to initialization and parameter choice [S2, unofficial].
+- **When to use**: When prior information about the object is available and standard reconstruction methods yield noisy or artifact-prone results [G].
+- **When not to use**: When no reliable prior information exists, or when computational resources are extremely limited and speed is critical over quality [G].
+
+## Background
+MAP/Bayesian reconstruction originates from statistical signal processing and tomography [G]. It was developed to address the limitations of deterministic and standard iterative methods which often produce noisy or artifact-ridden images, especially with limited or noisy data [S2, unofficial]. The method formalizes the use of prior knowledge (e.g., positivity, smoothness) within a probabilistic framework [S2, unofficial]. Key developments include the integration of MAP into iterative algorithms like EM (MAP-EM) and Gradient Conjugate (MAP-GC) [S2, unofficial]. It is used in tomographic applications [S2, unofficial].
+
+## Sources
+[S1] Reconstruction Tomographique Mojette, https://theses.hal.science/tel-00426920v1, fetched 2026-10-26 (unofficial)
+[S2] Élaboration d'une méthode tomographique de reconstruction 3D en vélocimétrie par image de particules basée sur les processus ponctuels marqués, https://hal.science/tel-01292656v3, fetched 2026-10-26 (unofficial)

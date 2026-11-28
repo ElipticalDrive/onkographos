@@ -1,0 +1,89 @@
+--- v012.md
++++ v013.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Brick Caching with LRU Replacement manages a fixed-size pool of volume data blocks, mapping logical brick coordinates to physical memory locations and evicting the least-recently-used blocks when the pool is full [S2, unofficial]. It solves the problem of limited GPU memory capacity and slow data transfer rates by ensuring that the most recently accessed brick data remains in the fast working set [S4, unofficial]. It distinguishes itself from standard spatial traversal by decoupling the processing order of blocks from the ray order within a frame, relying on a sorted auxiliary list structure to ensure cache hits for spatially coherent rays [S1]. It builds on [Brick Caching and Memory Management](17878-brick-caching-and-memory-management.md) by implementing a specific eviction policy (LRU) and often integrating with a reference texture for coordinate translation [S1].
++Brick Caching with LRU Replacement manages a fixed-size pool of volume data blocks, mapping logical brick coordinates to physical memory locations and evicting least-recently-used blocks when the pool is full [S2, unofficial]. It solves the problem of limited GPU memory capacity and slow data transfer rates by ensuring that the most recently accessed brick data remains in the fast working set [S4, unofficial]. It distinguishes itself from standard spatial traversal by decoupling the processing order of blocks from the ray order within a frame, relying on a sorted auxiliary list structure to ensure cache hits for spatially coherent rays [S1]. It builds on [Brick Caching and Memory Management](17878-brick-caching-and-memory-management.md) by implementing a specific eviction policy (LRU) and often integrating with a reference texture for coordinate translation [S1].
+ 
+ ## How it works
+@@ -95,4 +95,60 @@
+         *   Return pointer to `data` at `blk_idx` [S2, unofficial].
+ 
++### Pseudocode
++```python
++class BrickCache:
++    def __init__(self, dims, brick_size, brick_num_ratio):
++        self.brick_dims = (
++            (dims[0] + brick_size[0] - 1) // brick_size[0],
++            (dims[1] + brick_size[1] - 1) // brick_size[1],
++            (dims[2] + brick_size[2] - 1) // brick_size[2]
++        )
++        self.N_bricks = self.brick_dims[0] * self.brick_dims[1] * self.brick_dims[2]
++        self.blk_nums = int(self.N_bricks * brick_num_ratio)
++        self.brick_vol = (brick_size[0] + 1) * (brick_size[1] + 1) * (brick_size[2] + 1)
++        self.data = bytearray(self.blk_nums * self.brick_vol)
++        self.entries = [{"valid": False, "blk_idx": -1} for _ in range(self.N_bricks)]
++        self.blocks = [{"used": False} for _ in range(self.blk_nums)]
++        self.cnt_buf = [0] * (self.N_bricks * 256) # Loaded from disk
++        self.clock_pos = 0
++        self.blk_used = 0
++        self.mutex = threading.Lock()
++        self.fin = None # File handle
++
++    def get_block(self, bx, by, bz, tf1d=None):
++        if bx >= self.brick_dims[0] or by >= self.brick_dims[1] or bz >= self.brick_dims[2]:
++            return None
++        if tf1d is not None:
++            cnt_base = (bx * self.brick_dims[1] + by) * self.brick_dims[2] + bz
++            idx = 0
++            while idx < 256:
++                if self.cnt_buf[cnt_base + idx] != 0 and tf1d.sampleSimple(idx).w != 0:
++                    break
++                idx += 1
++            if idx == 256:
++                return None
++        entry_idx = bx * self.brick_dims[1] * self.brick_dims[2] + by * self.brick_dims[2] + bz
++        entry = self.entries[entry_idx]
++        if entry["valid"]:
++            self.blocks[entry["blk_idx"]]["used"] = True
++            return self.data[entry["blk_idx"] * self.brick_vol : (entry["blk_idx"] + 1) * self.brick_vol]
++        with self.mutex:
++            if self.blk_used < self.blk_nums:
++                blk_idx = next(i for i in range(self.blk_nums) if not self.blocks[i]["used"])
++                self.blk_used += 1
++            else:
++                while self.blocks[self.clock_pos]["used"]:
++                    self.clock_pos = (self.clock_pos + 1) % self.blk_nums
++                old_blk_idx = self.clock_pos
++                self.blocks[old_blk_idx]["used"] = False
++                self.entries[entry_idx]["valid"] = False
++                blk_idx = old_blk_idx
++            # Load block from file into self.data at offset blk_idx * self.brick_vol
++            entry["valid"] = True
++            entry["blk_idx"] = blk_idx
++            self.blocks[blk_idx]["used"] = True
++            return self.data[blk_idx * self.brick_vol : (blk_idx + 1) * self.brick_vol]
++```
++
+ ### Parameters
+ *   **Brick Size**: Typically $32^3$ voxels [S1]. Larger bricks reduce storage overhead but increase granularity of empty space skipping [S1].
+@@ -104,5 +160,4 @@
+ *   **Precision**: The count buffer `cnt_buf` uses 256 entries per brick, corresponding to the 256 possible transfer function sample values [S2, unofficial].
+ *   **Boundaries**: Brick coordinates must be checked against `brick_dims` to avoid out-of-bounds access [S2, unofficial].
+-*   **Concurrency**: The use of a mutex indicates this implementation is thread-safe but may suffer from contention under high load [S2, unofficial].
+ *   **Empty Detection**: The empty brick check relies on the transfer function's alpha channel (`w != 0`). If the TF is not provided, this optimization is skipped [S2, unofficial].
+ 
+@@ -158,11 +213,9 @@
+ *   **Limitations**:
+     *   Overhead of $(n+1)^3$ storage is inversely proportional to brick size [S1].
+-    *   Mutex contention may limit scalability in multi-threaded environments [S2, unofficial].
+-    *   LRU approximation (clock) may not be optimal for all access patterns compared to full LRU [S2, unofficial].
+ *   **When to Use**: Suitable for out-of-core volume rendering where data exceeds GPU memory and access patterns exhibit spatial locality [S1][S4, unofficial].
+ *   **When Not to Use**: When memory is sufficient to hold the entire volume, or when access patterns are random and LRU provides no benefit [S1].
+ 
+ ## Background
+-The method originates from real-time ray-casting techniques for discrete isosurfaces [S1]. It was developed to address the limitations of GPU memory capacity and resolution restrictions (e.g., NVIDIA GeForce 6) [S1]. The approach adapts the concept of adaptive texture maps [KE02] to volume data, using a low-resolution reference texture to map volume coordinates to a single brick cache texture resident in GPU memory [S1]. The implementation details in [S2, unofficial] reflect a C++/Qt-based parallel volume rendering system, while [S3, unofficial] and [S4, unofficial] extend the concept to web-based and out-of-core training contexts respectively.
++The method was introduced for real-time ray-casting of discrete isosurfaces to decouple volume size from GPU resolution and memory limits [S1]. It adapts the concept of adaptive texture maps [KE02] to volume data, using a low-resolution reference texture to map volume coordinates to a single brick cache texture resident in GPU memory [S1].
+ 
+ ## Sources

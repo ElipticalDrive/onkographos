@@ -1,0 +1,204 @@
+# Boundary-structure-aware transfer function
+## Overview
+Boundary-structure-aware transfer functions classify volume data by combining boundary-based and structure-based advantages, specifically addressing the limitation where standard ambient occlusion fails to distinguish objects with identical average intensities but different global structural variations [S1]. Unlike sibling methods that rely on local gradients or simple occlusion sums, this method uses the standard deviation of ambient occlusion ($O_{std}$) computed over a global field to separate materials that share similar intensity profiles but differ in their spatial arrangement or internal continuity [S1]. It constructs a 2D classification space mapping intensity (or second derivatives) against $O_{std}$, enabling robust extraction of structures with continuous intensity changes or imperfect homogeneity [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A scalar volume field $f(\mathbf{x})$ [S1].
+*   **Output:** Opacity $\alpha \in [0, 1]$ and color $C$ for each voxel, derived from a 2D histogram classification space [S1].
+
+**Data Structures:**
+1.  **Input Field:** The original scalar volume $f(\mathbf{x})$ [S1].
+2.  **Processed Field ($\vec{d}$):** A derived field used for occlusion calculation, typically $\vec{d} = f''(\mathbf{x})$ (the divergence of the gradient) to highlight boundaries and suppress interiors, or $f(\mathbf{x})$ for simple cases [S1].
+3.  **Directional Occlusion Field:** A temporary structure storing $A(\mathbf{p}, \hat{\omega}_i, \vec{d})$ for each direction $i$ [S1].
+4.  **2D Histogram:** A binning structure with axes $X$ (intensity $f(\mathbf{x})$ or $f''(\mathbf{x})$) and $Y$ ($O_{std}(\vec{d})$) [S1].
+5.  **Transfer Function Mappings:** Three 1D mappings (or a 2D lookup table) defining opacity and color based on regions in the 2D histogram [S1].
+
+**Parameters:**
+*   $T$: Number of samples along each direction $\hat{\omega}$ for computing directional occlusion [S1].
+*   $H$: Number of different directions sampled to compute the standard deviation [S1].
+*   $M(\mathbf{p}, \vec{d})$: Visibility mapping function. Application-specific; e.g., binary (1 if $\mathbf{p}$ is part of the isosurface, 0 otherwise), Gaussian weighted, or linear ramp [S1].
+
+**Algorithm Steps:**
+
+1.  **Preprocessing:** Compute the divergence of the gradient of the input field to suppress continuous intensity variations and highlight boundaries.
+    $$ \vec{d}(\mathbf{x}) = f''(\mathbf{x}) = \nabla \cdot \nabla f(\mathbf{x}) $$
+    [S1]
+    *Note: If the volume consists of simple objects with constant intensities, use $\vec{d}(\mathbf{x}) = f(\mathbf{x})$ instead [S1].*
+
+2.  **Compute Directional Occlusion:** For each voxel $\mathbf{p}$ and each of the $H$ discrete directions $\hat{\omega}_i$ (where $i = 1 \dots H$), compute the directional occlusion $A(\mathbf{p}, \hat{\omega}_i, \vec{d})$. This is approximated by summing the visibility mapping along the ray:
+    $$ A(\mathbf{p}, \hat{\omega}_i, \vec{d}) \approx \sum_{t=0}^{T} M(\mathbf{p} + t \hat{\omega}_i, \vec{d}) $$
+    [S1]
+    Here, $T$ is the number of samples along the direction [S1]. The visibility function $M$ determines which parts of the volume contribute to occlusion [S1].
+
+3.  **Compute Standard Deviation of Ambient Occlusion:** For each voxel $\mathbf{p}$, calculate the standard deviation of the $H$ directional occlusion values computed in Step 2. This quantifies the variation in structural surroundings:
+    $$ O_{std}(\mathbf{p}, \vec{d}) = \sqrt{ \frac{1}{H} \sum_{i=1}^{H} \left( A(\mathbf{p}, \hat{\omega}_i, \vec{d}) \right)^2 - \left( \frac{1}{H} \sum_{i=1}^{H} A(\mathbf{p}, \hat{\omega}_i, \vec{d}) \right)^2 } $$
+    [S1]
+    This value $O_{std}$ captures global structure information [S1]. Objects with the same intensity but different locations or shapes will have different directional occlusion patterns, resulting in distinct $O_{std}$ values, whereas standard ambient occlusion (the mean) would be identical [S1].
+
+4.  **Construct 2D Classification Space:** Create a 2D histogram where the horizontal axis represents intensity $f(\mathbf{x})$ or processed intensity $f''(\mathbf{x})$, and the vertical axis represents the standard deviation of ambient occlusion $O_{std}(\vec{d})$ [S1].
+
+5.  **Tag Regions and Assign Properties:** Identify regions in the 2D histogram corresponding to features of interest [S1]. Map these regions to opacity and color using three 1D mappings for fine control: one based on $f(\mathbf{x})$ or $f''(\mathbf{x})$, one based on $O_{std}(\vec{d})$, and a combined mapping $f(\mathbf{x}) \times O_{std}(f''(\mathbf{x})) \mapsto [0, 1]$ or $f''(\mathbf{x}) \times O_{std}(f''(\mathbf{x})) \mapsto [0, 1]$ for opacity/color [S1]. Users can "brush" regions in the 2D histogram to select specific structures, and color can be assigned based on the divergence $f''(\mathbf{x})$ to help distinguish boundaries [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def compute_boundary_structure_aware_tf(volume_f, visibility_func, num_directions=12, samples_per_dir=10):
+    """
+    Computes the boundary-structure-aware transfer function values for a volume.
+    
+    Args:
+        volume_f: 3D list/array of scalar values f(x).
+        visibility_func: Function M(p, d) that returns 1 if voxel p contributes to occlusion, 0 otherwise.
+                         Note: In practice, this is often a threshold or Gaussian filter applied to d.
+        num_directions: H, number of directions to sample.
+        samples_per_dir: T, number of samples along each ray.
+    
+    Returns:
+        opacity_map: 3D list/array of opacity values.
+        color_map: 3D list/array of RGB color values.
+    """
+    
+    # Step 1: Preprocessing
+    # Compute Laplacian f''(x) to highlight boundaries using finite differences.
+    f_double_prime = compute_laplacian_finite_diff(volume_f)
+    
+    # Decide input field d. 
+    # For complex structures with continuous changes, use f''. 
+    # For simple constant-intensity objects, use volume_f.
+    d = f_double_prime
+    
+    # Step 2 & 3: Compute Standard Deviation of Ambient Occlusion
+    H = num_directions
+    T = samples_per_dir
+    
+    # Generate H directions (Fibonacci sphere distribution)
+    directions = generate_directions(H)
+    
+    # Initialize arrays
+    shape = volume_f.shape
+    X, Y, Z = shape
+    directional_occlusions = [[[ [0.0] * H for _ in range(Z)] for _ in range(Y)] for _ in range(X)]
+    
+    for i in range(H):
+        omega = directions[i]
+        for x in range(X):
+            for y in range(Y):
+                for z in range(Z):
+                    occlusion_sum = 0.0
+                    for t in range(T):
+                        # Sample position
+                        sx = x + t * omega[0]
+                        sy = y + t * omega[1]
+                        sz = z + t * omega[2]
+                        # Check bounds
+                        if 0 <= sx < X and 0 <= sy < Y and 0 <= sz < Z:
+                            # Get value d at sample position (nearest neighbor)
+                            d_val = d[int(sx)][int(sy)][int(sz)]
+                            # Apply visibility function M
+                            m_val = visibility_func((sx, sy, sz), d_val)
+                            occlusion_sum += m_val
+                    directional_occlusions[x][y][z][i] = occlusion_sum
+
+    # Compute Mean and Mean of Squares for Standard Deviation
+    o_std = [[[0.0] * Z for _ in range(Y)] for _ in range(X)]
+    for x in range(X):
+        for y in range(Y):
+            for z in range(Z):
+                mean_a = 0.0
+                mean_sq_a = 0.0
+                for i in range(H):
+                    a = directional_occlusions[x][y][z][i]
+                    mean_a += a
+                    mean_sq_a += a * a
+                mean_a /= H
+                mean_sq_a /= H
+                o_std[x][y][z] = math.sqrt(mean_sq_a - mean_a * mean_a)
+    
+    # Step 4 & 5: Classification and Mapping
+    # Construct 2D histogram bins (conceptually)
+    # Map (f''(x), o_std) to opacity and color
+    
+    opacity_map = [[[0.0] * Z for _ in range(Y)] for _ in range(X)]
+    color_map = [[[0.0, 0.0, 0.0] for _ in range(Z)] for _ in range(Y)] for _ in range(X)]
+    
+    # Example mapping logic based on user-defined thresholds
+    # In practice, users brush regions in the 2D histogram.
+    # Here we implement a generic region-based assignment.
+    for x in range(X):
+        for y in range(Y):
+            for z in range(Z):
+                val_f = f_double_prime[x][y][z]
+                val_o = o_std[x][y][z]
+
+                # Region 1: High boundary strength and specific structural variation
+                if abs(val_f) > 0.5 and val_o > 0.2:
+                    opacity_map[x][y][z] = 1.0
+                    color_map[x][y][z] = [1.0, 0.0, 0.0]
+                # Region 2: Low boundary strength, low structural variation
+                elif abs(val_f) < 0.1 and val_o < 0.1:
+                    opacity_map[x][y][z] = 0.5
+                    color_map[x][y][z] = [0.0, 1.0, 0.0]
+                else:
+                    opacity_map[x][y][z] = 0.0
+                    color_map[x][y][z] = [0.0, 0.0, 0.0]
+
+    return opacity_map, color_map
+
+def compute_laplacian_finite_diff(volume):
+    """Simple 3D Laplacian kernel convolution using finite differences."""
+    shape = len(volume)
+    X, Y, Z = shape, len(volume[0]), len(volume[0][0])
+    lap = [[[0.0]*Z for _ in range(Y)] for _ in range(X)]
+    for x in range(1, X-1):
+        for y in range(1, Y-1):
+            for z in range(1, Z-1):
+                lap[x][y][z] = (volume[x+1][y][z] + volume[x-1][y][z] +
+                                volume[x][y+1][z] + volume[x][y-1][z] +
+                                volume[x][y][z+1] + volume[x][y][z-1] -
+                                6.0 * volume[x][y][z])
+    return lap
+
+def generate_directions(n):
+    """Generate n unit vectors uniformly distributed on a sphere using Fibonacci sphere."""
+    directions = []
+    for i in range(n):
+        idx = i + 0.5
+        y = 1.0 - (idx / n) * 2.0
+        radius = math.sqrt(1.0 - y * y)
+        theta = math.pi * (1.0 + math.sqrt(5.0)) * idx
+        directions.append((math.cos(theta) * radius, y, math.sin(theta) * radius))
+    return directions
+```
+
+**Edge Cases and Pitfalls:**
+*   **Global vs. Local Filter Size:** Standard ambient occlusion (Correa et al.) uses a local filter and fails to distinguish objects with the same intensity and local surroundings but different global locations (e.g., two balls in a box) [S1]. This method uses the whole domain (global filter) to compute $O_{std}$, solving this issue [S1].
+*   **Continuous Intensity Changes:** Kindlmann et al.'s method fails on non-Gaussian boundaries or varying intensities [S1]. By using $f''(\mathbf{x})$ to suppress continuous changes into a constant value before computing $O_{std}$, this method handles varying intensities robustly [S1].
+*   **Simple Volumes:** If the volume contains only a few objects with constant intensities, using $f''(\mathbf{x})$ may result in most values being near zero, losing information [S1]. In such cases, using $f(\mathbf{x})$ as the input field $\vec{d}$ is recommended [S1].
+*   **Visibility Function $M$:** The choice of $M$ is critical and application-specific [S1]. A binary function isolates isosurfaces, while Gaussian weights preserve soft boundaries [S1].
+
+## Operating characteristics
+*   **Complexity:** Not given in the sources.
+*   **Memory:** Not given in the sources.
+*   **Performance:** Not given in the sources. However, the global nature of the occlusion calculation (summing over the whole domain or large radii) suggests high computational cost compared to local filters [S1].
+*   **Strengths:**
+    *   Separates objects with identical intensities and local surroundings but different global structures or locations [S1].
+    *   Handles structures with continuous intensity changes (non-homogeneous interiors) better than boundary-only methods [S1].
+    *   Robust against overlapping occlusion spectra that confuse standard ambient occlusion [S1].
+*   **Limitations:**
+    *   Computationally intensive due to global ray casting for occlusion [S1].
+    *   Requires careful tuning of the visibility function $M$ and the choice between using $f(\mathbf{x})$ or $f''(\mathbf{x})$ as the input field [S1].
+
+## Background
+*   **Origin:** Proposed by Lina Yu and Hongfeng Yu from the University of Nebraska-Lincoln [S1].
+*   **Publication:** Presented at the Symposium on Visualization (SA '17) in Bangkok, Thailand, November 27-30, 2017 [S1].
+*   **Context:** The method addresses limitations in existing boundary-based methods (like Kindlmann et al.) and structure-based methods (like Correa et al.) [S1]. Correa et al.'s method uses the sum of ambient occlusion $O(f(\mathbf{x}))$, which fails to distinguish objects with similar intensities but different surroundings or locations [S1]. Kindlmann et al.'s method uses derivatives but fails on non-Gaussian boundaries [S1]. This method bridges these gaps by using the standard deviation of ambient occlusion on a processed field [S1].
+*   **Applications:** Demonstrated on MRI scans of feet (separating marrow from muscle/bone) and CT scans of engine data (separating stick-shape holes) and combustion simulations (extracting holes on flame isosurfaces) [S1].
+
+## Sources
+
+[S1] Boundary-structure-aware transfer functions for volume classification, https://doi.org/10.1145/3139295.3139306, fetched 2026-10-31

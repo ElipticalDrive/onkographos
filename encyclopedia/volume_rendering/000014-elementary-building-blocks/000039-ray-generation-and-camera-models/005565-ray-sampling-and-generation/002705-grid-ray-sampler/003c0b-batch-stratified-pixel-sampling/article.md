@@ -1,0 +1,120 @@
+# Batch Stratified Pixel Sampling
+
+Also called: Pixel Sampling and Ground Truth Retrieval
+
+## Overview
+Batch Stratified Pixel Sampling is a method used in neural reconstruction pipelines to select a subset of pixels for optimization at each training iteration [S1].
+
+## How it works
+**Inputs:**
+- Target image (texture) containing ground-truth color values [S1].
+- Batch size $N_b$ [G].
+- Image dimensions $W \times H$ [G].
+
+**Outputs:**
+- A set of $N_b$ pixel coordinates $(u, v)$ and their corresponding ground-truth color values [G].
+
+**Data Structures:**
+- Pixel coordinates: Floating-point pairs $(u, v)$ representing sub-pixel locations [G].
+- Ground-truth values: Floating-point vectors (e.g., RGB) retrieved via interpolation [S1].
+
+**Steps:**
+1. **Stratified Sampling:** Divide the image grid into a grid of strata and sample pixel coordinates within each stratum [S1].
+2. **Ground-Truth Retrieval:** Obtain ground-truth values at the sampled coordinates via bilinear interpolation on the target image [S1].
+3. **Efficient Lookup:** Implement the bilinear interpolation as a CUDA texture lookup for hardware-accelerated efficiency [S1].
+
+**Parameters:**
+- Batch size $N_b$: Number of pixels to sample [G].
+- Strata count: Not specified in sources.
+
+**Edge Cases:**
+- Boundary conditions and precision behavior: Not given in the sources.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import random
+
+def batch_stratified_pixel_sampling(target_image, batch_size, width, height):
+    """
+    Samples a batch of pixels using stratified sampling and retrieves ground truth.
+    
+    Args:
+        target_image: 2D array of pixel values.
+        batch_size: Number of pixels to sample.
+        width: Image width in pixels.
+        height: Image height in pixels.
+        
+    Returns:
+        pixels: List of (u, v) coordinates.
+        gt_values: List of interpolated color values.
+    """
+    pixels = []
+    gt_values = []
+    # Standard stratified sampling: divide image into strata grid [G]
+    strata_side = int(round(batch_size ** 0.5))
+    if strata_side * strata_side < batch_size:
+        strata_side += 1
+    strata_w = width / strata_side
+    strata_h = height / strata_side
+
+    for i in range(strata_side):
+        for j in range(strata_side):
+            if len(pixels) >= batch_size:
+                break
+            # Sample uniform sub-pixel coordinate within stratum [G]
+            u = (i + random.uniform(0, 1)) * strata_w
+            v = (j + random.uniform(0, 1)) * strata_h
+            # Clip to image bounds [G]
+            u = max(0.0, min(u, float(width - 1)))
+            v = max(0.0, min(v, float(height - 1)))
+            pixels.append((u, v))
+            # Bilinear interpolation via CUDA texture lookup [S1]
+            gt_values.append(bilinear_interpolate(target_image, u, v, width, height))
+        if len(pixels) >= batch_size:
+            break
+    return pixels, gt_values
+
+def bilinear_interpolate(image, x, y, width, height):
+    x0, y0 = int(x), int(y)
+    x1, y1 = min(x0 + 1, width - 1), min(y0 + 1, height - 1)
+    dx, dy = x - x0, y - y0
+    c00 = image[y0][x0]
+    c01 = image[y0][x1]
+    c10 = image[y1][x0]
+    c11 = image[y1][x1]
+    return (1 - dx) * (1 - dy) * c00 + dx * (1 - dy) * c01 + (1 - dx) * dy * c10 + dx * dy * c11
+```
+
+## Subtopics
+
+### Representative Pixel Selection
+A variant used in interaction-aware pruning of 3D Gaussian Splatting [S2, unofficial]. It selects view-pixel pairs by sampling around projected Gaussian centers and their neighbors to evaluate opacity responses, rather than using uniform stratified sampling [S2, unofficial].
+
+**Definition:** Selects a set of view-pixel pairs $P_b$ for a block $C_b$ by sampling around projected Gaussian centers and their neighbors [S2, unofficial].
+
+**Steps:**
+1. Initialize $P_b \leftarrow \emptyset$ and $D \leftarrow \{(0, 0), (\pm0.5, 0), (0, \pm0.5), (\pm0.35, \pm0.35)\}$ [S2, unofficial].
+2. For each selected view $v$:
+   a. Obtain projected centers $u_{vi}$ and screen radii $h_{vi}$ for $i \in C_b$ [S2, unofficial].
+   b. Generate pixel locations $p = \text{round}(u_{vi} + \max(h_{vi}, 1)\delta)$ for $h_{vi} > 0$ and $\delta \in D$ [S2, unofficial].
+   c. Remove duplicate pixels and discard those outside the image boundaries [S2, unofficial].
+   d. Add remaining view-pixel pairs $(v, p)$ to $P_b$ [S2, unofficial].
+3. Return $P_b$ [S2, unofficial].
+
+**Formula:**
+Candidate locations: $u_{vi} + \max(h_{vi}, 1)\delta$, where $\delta \in D = \{(0, 0), (\pm0.5, 0), (0, \pm0.5), (\pm0.35, \pm0.35)\}$ [S2, unofficial].
+
+**Parameters:**
+- $D$: Set of 9 offset vectors (center + 8 neighbors) used for pixel sampling [S2, unofficial].
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+Not given in the sources.
+
+## Sources
+[S1] Neural Harmonic Textures for High-Quality Primitive Based Neural Reconstruction, https://doi.org/10.1007/978-3-032-37032-7_18, fetched 2026-10-26
+[S2] SplatQ: Interaction-Aware Pruning of 3D Gaussian Splatting via Quadratic Selection, https://arxiv.org/abs/2610.13503, fetched 2026-10-29 (unofficial)

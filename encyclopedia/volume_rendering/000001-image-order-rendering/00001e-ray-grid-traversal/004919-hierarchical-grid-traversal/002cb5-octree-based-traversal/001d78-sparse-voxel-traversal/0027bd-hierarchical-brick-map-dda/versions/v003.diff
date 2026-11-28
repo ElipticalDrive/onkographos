@@ -1,0 +1,422 @@
+--- v002.md
++++ v003.md
+@@ -4,51 +4,70 @@
+ 
+ ## Overview
+-Hierarchical Brick-Map DDA is a ray traversal technique that replaces dense voxel buffers with a sparse, hierarchical structure to skip empty regions in volumetric data [S1, unofficial]. It operates by marching a ray through a top-level grid of coarse cells (stride 8 voxels) to quickly identify occupied "bricks," then descending into those specific bricks for fine-grained DDA [S1, unofficial]. This approach significantly reduces memory footprint and traversal time for sparse volumes, such as drone airspace which is >99% empty, compared to dense storage or flat sparse structures [S1, unofficial].
++Hierarchical Brick-Map DDA is a ray traversal technique that replaces a dense voxel buffer with a sparse hierarchical structure (brick-map) to skip empty regions [S1, unofficial]. It sets itself apart from its parent [Sparse Voxel Traversal](1525-sparse-voxel-traversal.md) by using a fixed-depth, bit-packed hierarchy with exact cell-boundary snapping, and from its sibling [Octree Traversal](1587-octree-traversal.md) by relying on a fixed 2-level grid-of-bricks rather than a variable-depth tree, which simplifies traversal logic at the cost of potential wasted space in moderately sparse regions [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A dense voxel grid (or raw voxel data), a ray origin $O$ and direction $D$, and the grid dimensions $N \times N \times N$.
+-*   **Output:** A ray-marched image or hit distance, traversing only occupied regions.
++*   **Input:** A dense voxel grid of dimensions $N \times N \times N$ (where $N$ is a multiple of `BRICK`), ray origin $\mathbf{o}$, ray direction $\mathbf{d}$, and maximum step count `MAX_STEPS`.
++*   **Output:** A rendered image or accumulated color/transmittance along the ray path.
+ 
+ **Data Structures:**
+-The method relies on three main GPU buffers and a uniform structure [S1, unofficial]:
+-1.  **`topGrid`**: A sparse 3D grid of top-level cells. Each cell stores a pointer (index) to a brick in the `brickPool` or a null value if the cell is empty. The dimensions are $TOP \times TOP \times TOP$, where $TOP = N / BRICK$.
+-2.  **`brickPool`**: A contiguous array of occupied bricks. Each brick is a $BRICK \times BRICK \times BRICK$ block of voxels. The size is determined by the number of occupied top-level cells.
++The structure consists of three main GPU buffers [S1, unofficial]:
++1.  **`topGrid`**: A sparse 3D grid of top-level cells. Each cell stores a pointer (index) to a brick in the `brickPool` or a null value (e.g., -1) if the cell is empty. The dimensions of `topGrid` are $T \times T \times T$, where $T = N / \text{BRICK}$.
++2.  **`brickPool`**: A contiguous array of occupied bricks. Each brick contains $\text{BRICK}^3$ voxels. The size of the pool is determined dynamically during the build phase based on the number of occupied top-level cells.
+ 3.  **`counter`**: An atomic counter used during the build phase to allocate slots in the `brickPool`.
+-4.  **`Grid` Uniform**: Contains `top_size` (the dimensions of the `topGrid`) and other traversal parameters [S1, unofficial].
++4.  **Uniforms**: A `Grid` uniform containing `top_size` (dimensions of `topGrid`) and `BRICK` (side length of a brick, typically 8) [S1, unofficial].
+ 
+ **Parameters:**
+-*   **`BRICK`**: The side length of a voxel brick in voxels. Default value is 8 [S1, unofficial].
+-*   **`MAX_STEPS`**: Maximum number of ray marching steps. Increased to 1024 to accommodate hierarchical traversal overhead [S1, unofficial].
++*   `BRICK`: The side length of a voxel brick in voxels. Typical value is 8 [S1, unofficial].
++*   `MAX_STEPS`: Maximum number of ray marching steps. Increased from 512 to 1024 to accommodate hierarchical traversal overhead [S1, unofficial].
+ 
+ **Build Phase (Compute Shader):**
+-Before traversal, the sparse structure is built from dense voxel data [S1, unofficial]:
+-1.  For each top-level cell in the `topGrid`, the build shader scans its $BRICK^3$ constituent voxels.
+-2.  If any voxel is non-zero (solid), the shader atomically allocates a slot in the `brickPool` using the `counter`.
+-3.  The voxel data for that brick is copied into the allocated slot.
+-4.  The `topGrid` entry for that cell is updated to point to the new brick index.
+-5.  Optimization: The scan can early-exit upon finding the first solid voxel to reduce unnecessary reads [S1, unofficial].
++1.  For each top-level cell $(i, j, k)$ in the `topGrid`:
++    a.  Scan the corresponding $\text{BRICK}^3$ voxels in the dense input buffer.
++    b.  Check if any voxel is non-zero (solid). An optimization is to break early upon finding the first solid voxel [S1, unofficial].
++    c.  If solid, atomically increment `counter` to allocate a slot `idx` in `brickPool`.
++    d.  Copy the $\text{BRICK}^3$ voxel data from the dense buffer into `brickPool[idx]`.
++    e.  Set `topGrid[i][j][k] = idx`.
++    f.  If empty, set `topGrid[i][j][k] = -1` (null).
+ 
+ **Traversal Phase (Ray Marching Shader):**
+-The ray traversal follows a three-step cycle: Top-level traversal, Descent, and Ascent [S1, unofficial].
+-
+-1.  **Top-level Traversal:**
+-    The ray marches through the `topGrid`. Instead of stepping one voxel, it strides by `BRICK` voxels at a time. The ray's distance to the next top-level cell boundary is tracked using $c\_tmax$. If the current top-level cell is empty (pointer is null), the ray skips the entire cell volume by advancing $c\_tmax$ and recomputing the next boundary.
+-
+-2.  **Descent:**
+-    When the ray enters an occupied top-level cell, it descends into the corresponding brick.
+-    *   The ray's position and direction are transformed into the brick's local coordinate system.
+-    *   The fine-grained DDA is performed within this local space.
+-    *   The ray direction vector $fv$ is re-derived based on the actual ray position within the occupied brick to ensure correct sampling [S1, unofficial].
+-
+-3.  **Ascent:**
+-    When the ray exits a brick (either by hitting a voxel or leaving the brick boundary), it ascends back to the top-level grid.
+-    *   The ray's global position is updated.
+-    *   $c\_tmax$ (distance to the next top-level cell boundary) is recomputed for the new top cell to continue the coarse traversal correctly [S1, unofficial].
+-
+-**Boundary Handling:**
+-The method reuses Axis-Aligned Bounding Box (AABB) clipping and safe-ray-distance primitives from dense implementations. This ensures that axis-aligned rays and rays outside the grid volume are handled correctly without artifacts [S1, unofficial].
++The traversal operates in two modes: Top-Level (Coarse) and Brick-Level (Fine).
++
++1.  **Initialization:**
++    *   Compute initial ray parameters for the global coordinate system.
++    *   Calculate `c_tmax` (distance to the next top-level cell boundary) along each axis.
++    *   Determine the initial top-level cell indices $(i, j, k)$ containing the ray origin.
++
++2.  **Top-Level Traversal:**
++    *   While `steps < MAX_STEPS` and ray is within bounds:
++        a.  Check if `topGrid[i][j][k]` is null.
++        b.  If null (empty):
++            i.  Advance the ray by `c_tmax` (the distance to the next top-level boundary).
++            ii. Update `c_tmax` for the new top-level cell.
++            iii. Increment the top-level cell index in the direction of the ray's leading edge.
++        c.  If occupied:
++            i.  **Descent:** Enter the brick.
++                *   Let `brick_idx = topGrid[i][j][k]`.
++                *   Calculate the local ray origin $\mathbf{o}_{local}$ and direction $\mathbf{d}_{local}$ within the brick's coordinate system. The direction $\mathbf{d}_{local}$ is the same as $\mathbf{d}$, but the origin is offset to the brick's local space. Specifically, $\mathbf{o}_{local} = \mathbf{o} - \mathbf{p}_{brick\_origin}$, where $\mathbf{p}_{brick\_origin}$ is the global position of the brick's minimum corner [S1, unofficial].
++                *   Compute local ray parameters: `t_max_local` (distance to brick boundary) and `t_min_local` (distance to brick entry).
++                *   Switch to **Brick-Level Traversal**.
++
++3.  **Brick-Level Traversal (Fine DDA):**
++    *   Perform standard DDA within the $\text{BRICK} \times \text{BRICK} \times \text{BRICK}$ volume.
++    *   Sample voxels from `brickPool[brick_idx]`.
++    *   Accumulate color/transmittance.
++    *   If a solid voxel is hit or the ray exits the brick (distance traveled > `t_max_local`):
++        i.  **Ascent:** Exit the brick.
++        ii. Calculate the global distance traveled within the brick.
++        iii. Update the global ray position.
++        iv. Recompute `c_tmax` for the new top-level cell.
++        v.  Determine the new top-level cell indices $(i, j, k)$ based on the updated global position.
++        vi. Switch back to **Top-Level Traversal**.
++
++4.  **Boundary Handling:**
++    *   Reuse AABB (Axis-Aligned Bounding Box) clipping and safe-ray-distance primitives to handle axis-aligned rays and rays outside the grid volume correctly [S1, unofficial].
+ 
+ **Pseudocode:**
++
+ ```python
+ # Constants
+@@ -57,184 +76,146 @@
+ 
+ # Data Structures (conceptual)
+-# topGrid: array of int32 (indices into brickPool or -1 for empty)
+-# brickPool: array of float32[BRICK*BRICK*BRICK]
+-# gridUniform.top_size: int32 (dimensions of topGrid)
+-
+-def ray_march_brick_map(ray_origin, ray_direction, topGrid, brickPool, gridUniform):
+-    # Initialize DDA state for top-level grid
+-    # Calculate initial t_max for x, y, z axes in top-level grid coordinates
+-    # Scale ray direction by BRICK to step through top-level cells
+-    top_dir = ray_direction / BRICK
+-    top_origin = ray_origin / BRICK
+-    
+-    # Standard DDA initialization for top-level grid
+-    t_max_x, t_max_y, t_max_z = init_dda(top_origin, top_dir, gridUniform.top_size)
+-    t_min = 0.0
+-    step_x, step_y, step_z = sign(top_dir)
+-    
+-    for step in range(MAX_STEPS):
+-        # Determine which axis we hit next in the top-level grid
+-        if t_max_x < t_max_y:
+-            if t_max_x < t_max_z:
+-                t_hit = t_max_x
+-                axis = 0
+-            else:
+-                t_hit = t_max_z
+-                axis = 2
++# topGrid: array of size [T, T, T] storing indices into brickPool or -1
++# brickPool: array of arrays, each of size [BRICK, BRICK, BRICK]
++# voxels: dense input array of size [N, N, N]
++
++def build_brick_map(voxels, N):
++    T = N // BRICK
++    topGrid = [-1] * (T * T * T)
++    brickPool = []
++    counter = 0
++    
++    # Parallelized over top-level cells
++    for k in range(T):
++        for j in range(T):
++            for i in range(T):
++                # Check if any voxel in this brick is solid
++                any_solid = False
++                for dz in range(BRICK):
++                    for dy in range(BRICK):
++                        for dx in range(BRICK):
++                            gx = i * BRICK + dx
++                            gy = j * BRICK + dy
++                            gz = k * BRICK + dz
++                            if voxels[gx, gy, gz] != 0:
++                                any_solid = True
++                                break
++                        if any_solid: break
++                    if any_solid: break
++                
++                if any_solid:
++                    # Allocate brick
++                    brick_idx = counter
++                    counter += 1
++                    # Copy voxels to pool
++                    new_brick = []
++                    for dz in range(BRICK):
++                        for dy in range(BRICK):
++                            for dx in range(BRICK):
++                                gx = i * BRICK + dx
++                                gy = j * BRICK + dy
++                                gz = k * BRICK + dz
++                                new_brick.append(voxels[gx, gy, gz])
++                    brickPool.append(new_brick)
++                    topGrid[i + j * T + k * T * T] = brick_idx
++                else:
++                    topGrid[i + j * T + k * T * T] = -1
++                    
++    return topGrid, brickPool, T
++
++def ray_march_bricks(o, d, topGrid, brickPool, T, N):
++    steps = 0
++    # Initial global ray parameters
++    t_max = [1e9, 1e9, 1e9] # Distance to next boundary in x, y, z
++    t_delta = [0, 0, 0]     # Distance to next voxel boundary in x, y, z
++    
++    # Initialize DDA for top-level grid
++    # Assuming o is inside the grid
++    i, j, k = floor_div(o, BRICK)
++    
++    # Calculate initial t_max for top-level cells
++    # This requires knowing the global grid bounds and ray direction
++    # Simplified: assume standard DDA initialization for the top-level grid
++    # t_max_x = (next_cell_boundary_x - o.x) / d.x
++    # ... (similar for y, z)
++    
++    while steps < MAX_STEPS:
++        # Check if current top-level cell is occupied
++        idx = topGrid[i + j * T + k * T * T]
++        
++        if idx == -1:
++            # Empty top-level cell: skip to next boundary
++            # Find minimum t_max among axes
++            t_next = min(t_max)
++            
++            # Advance ray
++            o = o + d * t_next
++            
++            # Update DDA state for top-level grid
++            # Increment i, j, or k based on which axis had the minimum t_max
++            # Recompute t_max for the new cell
++            # ... (standard DDA update logic)
++            
++            steps += 1
+         else:
+-            if t_max_y < t_max_z:
+-                t_hit = t_max_y
+-                axis = 1
+-            else:
+-                t_hit = t_max_z
+-                axis = 2
+-        
+-        # Convert top-level hit distance to global ray distance
+-        # Note: t_hit is in top-level grid units, so multiply by BRICK
+-        global_t_hit = t_hit * BRICK
+-        
+-        # Check if we hit the global ray end or object
+-        if global_t_hit > ray_max_distance:
+-            return BACKGROUND_COLOR
+-            
+-        # Get current top-level cell coordinates
+-        cell_x, cell_y, cell_z = get_cell_coords(top_origin, top_dir, t_hit)
+-        
+-        # Check if cell is occupied
+-        brick_index = topGrid[cell_x + cell_y * gridUniform.top_size + cell_z * gridUniform.top_size * gridUniform.top_size]
+-        
+-        if brick_index == -1:
+-            # Cell is empty, skip to next top-level boundary
+-            # Advance DDA state
+-            if axis == 0: t_max_x += step_x
+-            elif axis == 1: t_max_y += step_y
+-            else: t_max_z += step_z
+-            continue
+-        
+-        # Descent into brick
+-        # Calculate entry point into the brick in global coordinates
+-        brick_entry_global = ray_origin + ray_direction * global_t_hit
+-        
+-        # Transform to local brick coordinates
+-        # Local origin is the corner of the brick
+-        brick_local_origin = vec3(cell_x * BRICK, cell_y * BRICK, cell_z * BRICK)
+-        local_entry = brick_entry_global - brick_local_origin
+-        
+-        # Perform fine DDA within the brick
+-        # Re-derive local ray direction if necessary (usually same, but position shifts)
+-        local_dir = ray_direction
+-        local_t_max_x, local_t_max_y, local_t_max_z = init_dda(local_entry, local_dir, vec3(BRICK, BRICK, BRICK))
+-        local_step_x, local_step_y, local_step_z = sign(local_dir)
+-        
+-        # Traverse within the brick
+-        # We need to find the exit point from the brick or a hit
+-        # Since we entered at global_t_hit, we look for the next event within the brick
+-        # The distance to exit the brick is (BRICK - local_entry) along the exit axis
+-        
+-        # Simplified: Run DDA until we hit a voxel or exit the brick
+-        local_t = 0.0
+-        hit_voxel = False
+-        hit_voxel_value = 0.0
+-        
+-        while local_t < BRICK: # Stay within brick bounds
+-            # Find next boundary in local DDA
+-            if local_t_max_x < local_t_max_y:
+-                if local_t_max_x < local_t_max_z:
+-                    t_local_hit = local_t_max_x
+-                    axis_local = 0
+-                else:
+-                    t_local_hit = local_t_max_z
+-                    axis_local = 2
+-            else:
+-                if local_t_max_y < local_t_max_z:
+-                    t_local_hit = local_t_max_y
+-                    axis_local = 1
+-                else:
+-                    t_local_hit = local_t_max_z
+-                    axis_local = 2
+-            
+-            # Check if this hit is within the brick
+-            if local_t + t_local_hit > BRICK:
+-                # Exit brick
+-                break
+-            
+-            # Sample voxel at current local position
+-            # Note: In a real implementation, we sample at the current cell, then advance
+-            # For simplicity, assuming we sample at entry and advance
+-            # This loop structure is a simplification of the actual DDA step
+-            # Actual DDA samples at current t, then advances t_max
+-            
+-            # Sample voxel
+-            voxel_val = sample_voxel(brickPool[brick_index], local_entry + local_dir * local_t)
+-            if voxel_val != 0.0:
+-                hit_voxel = True
+-                hit_voxel_value = voxel_val
+-                break
+-            
+-            # Advance DDA
+-            local_t += t_local_hit
+-            if axis_local == 0: local_t_max_x += local_step_x
+-            elif axis_local == 1: local_t_max_y += local_step_y
+-            else: local_t_max_z += local_step_z
+-            
+-            # Check for exit
+-            if local_t >= BRICK:
+-                break
+-        
+-        if hit_voxel:
+-            # Return hit color/depth
+-            return compute_color(hit_voxel_value, brick_entry_global + local_dir * local_t)
+-        
+-        # Ascent: Exit brick, update global state
+-        # The ray has exited the brick at local_t
+-        # Update global t_max for the top-level grid
+-        # The ray is now at brick_entry_global + local_dir * local_t
+-        # We need to re-calculate t_max for the top-level grid from this new position
+-        # This is handled by the standard DDA update in the main loop
+-        # However, we must ensure the top-level DDA state is consistent
+-        # The main loop continues, and the next iteration will pick up the new position
+-        
+-        # Update global t_max based on the exit point
+-        # This is implicitly handled by the fact that we advanced the top-level DDA
+-        # to the brick entry, and now we need to advance it to the brick exit
+-        # The brick exit corresponds to a specific top-level cell boundary or interior
+-        # For simplicity, we assume the top-level DDA state is updated by the 
+-        # fact that we moved past the brick entry. 
+-        # In practice, one might need to re-sync the top-level t_max values.
+-        
+-        # Advance top-level DDA to the next cell boundary if necessary
+-        # This is complex because the brick exit might not align with top-level boundaries
+-        # A common approach is to re-calculate t_max from the new global position
+-        # For this pseudocode, we assume the main loop's t_max update handles it
+-        # by treating the brick exit as a new origin for the next top-level step
+-        # But since we are in a loop, we need to update the top-level t_max values
+-        # to reflect the new position.
+-        
+-        # Recalculate top-level t_max from the new global position
+-        new_global_pos = brick_entry_global + local_dir * local_t
+-        new_top_origin = new_global_pos / BRICK
+-        t_max_x, t_max_y, t_max_z = init_dda(new_top_origin, top_dir, gridUniform.top_size)
+-        
+-        # Continue to next iteration
++            # Occupied brick: Descent
++            # Calculate local origin within the brick
++            brick_origin_global = vec3(i * BRICK, j * BRICK, k * BRICK)
++            o_local = o - brick_origin_global
++            
++            # Local DDA initialization for the brick
++            # t_max_local = distance to brick boundary
++            # t_delta_local = distance to next voxel boundary in brick
++            # ... (standard DDA initialization for BRICKxBRICKxBRICK)
++            
++            brick_steps = 0
++            while brick_steps < BRICK * BRICK * BRICK: # Limit steps within brick
++                # Sample voxel
++                # ... (standard DDA sampling)
++                
++                # Check for exit from brick or hit
++                if hit_solid or t_current > t_max_local:
++                    # Ascent
++                    # Update global o
++                    o = o_local + brick_origin_global # Note: o_local was updated during DDA
++                    # Recompute top-level DDA state
++                    i, j, k = floor_div(o, BRICK)
++                    # ... (update t_max for top-level)
++                    break
++                brick_steps += 1
++            
++            steps += 1
++            
++            # If we exited the brick, continue loop to process top-level
++            # If we hit a solid voxel, return result
++            if hit_solid:
++                return result
+ ```
+ 
++**Edge Cases and Pitfalls:**
++*   **Brick Edge Transitions:** Visual popping or missing voxels can occur at brick boundaries if the transition between top-level cells and brick interiors is not handled smoothly. Validation requires toggling camera angles to ensure clean boundary-crossing transitions [S1, unofficial].
++*   **Precision:** Re-deriving the ray direction and origin for the brick's local coordinate system must be done carefully to avoid precision errors, especially for rays nearly parallel to axes.
++*   **Empty Bricks:** The build phase must correctly identify and skip empty bricks to maintain sparsity benefits.
++
+ ## Subtopics
+ 
++### [Hierarchical DDA](5710-hierarchical-dda.md)
++Hierarchical DDA is a ray traversal technique that accelerates sparse volume rendering by navigating a 3-level occupancy-bit pyramid (chunk → tile → brick) to skip empty space. It sets itself apart from its parent [Hierarchical Brick-Map DDA](4105-hierarchical-brick-map-dda.md) by using a fixed-depth, bit-packed hierarchy with exact cell-boundary snapping, and from its sibling [Sparse Ray Marching with Nested Axis-Aligned Distance Fields (NAADF)](6260-sparse-ray-marching-with-nested-axis-aligned-distance-fields.md) by relying on discrete occupancy masks rather than continuous distance fields for empty-space skipping.
++
+ ### [Sparse Ray Marching with Nested Axis-Aligned Distance Fields (NAADF)](6260-sparse-ray-marching-with-nested-axis-aligned-distance-fields.md)
+-Sparse Ray Marching with Nested Axis-Aligned Distance Fields (NAADF) is a technique for traversing sparse voxel grids by skipping over empty space using precomputed distance fields, replacing traditional brick coordinate rasterization with a simpler pipeline suitable for g-buffer and path tracing. It differs from its sibling Hierarchical Brick-Map DDA by calculating the largest empty region along the ray's path via axis-aligned bounds, allowing it to step over multiple cells at once rather than advancing one cell boundary per iteration.
++Sparse Ray Marching with Nested Axis-Aligned Distance Fields (NAADF) is a technique for traversing sparse voxel grids by skipping over empty space using precomputed distance fields, replacing traditional brick coordinate rasterization with a simpler pipeline suitable for g-buffer and path tracing. It differs from its sibling [Hierarchical Brick-Map DDA](4105-hierarchical-brick-map-dda.md) by calculating the largest empty region along the ray's path via axis-aligned bounds, allowing it to step over multiple cells at once rather than advancing one cell boundary per iteration.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on sparsity. In sparse volumes, the top-level traversal skips large empty regions, reducing the number of descent/ascent operations. The complexity is proportional to the number of occupied bricks intersected by the ray.
+-*   **Memory Complexity:** Significantly reduced compared to dense storage. For a grid of size $N$, the memory usage is proportional to the number of occupied bricks, which is roughly $TOP^2$ for heightmap-like structures instead of $N^3$ [S1, unofficial].
+-*   **Measured Performance:** In drone airspace scenarios (>99% empty), the method provides substantial performance gains due to the high sparsity [S1, unofficial].
+-*   **Strengths:** Efficient memory usage for sparse data; reduces traversal overhead by skipping empty top-level cells; reuses existing AABB clipping logic.
+-*   **Limitations:** Requires a build phase to create the sparse structure; potential for visual popping or missing voxels at brick boundaries if transitions are not handled smoothly [S1, unofficial]; increased `MAX_STEPS` may be required due to traversal overhead.
+-*   **When to use:** Sparse volumetric data where memory is a constraint and empty space is prevalent.
+-*   **When not to use:** Dense volumetric data where the overhead of hierarchy management outweighs the benefits of skipping empty space.
++*   **Time Complexity:** The traversal time is proportional to the number of occupied bricks and voxels visited. In sparse scenes, the top-level traversal skips large empty regions, reducing the number of DDA steps significantly compared to dense traversal. The build phase is $O(N^3)$ but is a one-time cost.
++*   **Memory Complexity:** Memory usage is proportional to the number of occupied bricks times $\text{BRICK}^3$. For a heightmap stand-in with $N=128$, the brick count is roughly $T^2$ (~256 bricks) instead of the worst-case $T^3$ (4096), with memory savings growing as sparsity increases [S1, unofficial].
++*   **Measured Performance:** In drone airspace scenarios (>99% empty), this method significantly reduces memory footprint and traversal time compared to dense voxel buffers [S1, unofficial].
++*   **Strengths:** Significant memory savings in sparse volumes; simplified traversal logic compared to variable-depth octrees; efficient skipping of empty space.
++*   **Limitations:** Potential for wasted space if sparsity is not high enough to justify the brick overhead; visual artifacts at brick boundaries if not implemented carefully; fixed hierarchy depth limits adaptability to varying density scales.
++*   **When to Use:** Sparse volumes with large empty regions, such as drone airspace or terrain with significant sky.
++*   **When Not to Use:** Dense volumes where the overhead of managing the brick map outweighs the benefits; scenes with highly variable density where a fixed brick size is inefficient.
+ 
+ ## Background
+-The Hierarchical Brick-Map DDA was introduced as part of the ResQ Viz project, specifically in PR #67, to optimize ray marching for sparse volumes like drone airspace [S1, unofficial]. It builds upon the concept of sparse voxel traversal by introducing a two-level hierarchy (top-level grid and bricks) to improve cache efficiency and reduce memory bandwidth. The method was developed to support future features like sensor primitives and terrain streaming, which require efficient ray queries on sparse data [S1, unofficial].
++Hierarchical Brick-Map DDA was introduced as part of the ResQ Viz project, specifically in PR #67, to optimize ray marching for sparse volumes like drone airspace [S1, unofficial]. It builds on the concept of sparse voxel traversal by introducing a fixed two-level hierarchy (top-level grid of bricks) to simplify implementation and improve performance in highly sparse scenarios. The method was developed by the ResQ software team, with contributions from WomB0ComB0 and reviewed by coderabbitai [S1, unofficial].
+ 
+ ## Sources
+-[S1] feat(viz): hierarchical brick-map DDA for /spike.html, https://github.com/resq-software/viz/pull/67, fetched 2026-10-25 (unofficial)
+-[S2] mstampfli/voxelG, https://github.com/mstampfli/voxelG, fetched 2026-10-24 (unofficial)+[S1] feat(viz): hierarchical brick-map DDA for /spike.html, https://github.com/resq-software/viz/pull/67, fetched 2026-10-25 (unofficial)

@@ -1,0 +1,138 @@
+--- v001.md
++++ v002.md
+@@ -1,6 +1,6 @@
+ # GPU-based Fast Hartley Transform (FHT)
+-Also called: Fast Hartley Transform, GPU-based FHT, Hartley Transform
++Also called: Fast Hartley Transform, GPU-based FHT, Hartley Transform Implementation
+ ## Overview
+-The GPU-based Fast Hartley Transform (FHT) is a frequency-domain volume rendering method that replaces the Fourier transform with the Hartley transform to map real-valued input data directly to real-valued spectra [S1, S2, unofficial]. This eliminates the need for complex number arithmetic, reducing memory requirements by half compared to the standard GPU-based Fourier transform [S1, S2, unofficial]. It builds on [Hartley Transform for Memory Reduction](895-hartley-transform-for-memory-reduction.md) by providing a specific GPU shader implementation using double butterfly passes and dual lookup textures.
++The GPU-based Fast Hartley Transform (FHT) is a frequency-domain volume rendering method that replaces the Fourier transform with the Hartley transform to map real-valued input data directly to real-valued spectra [S1, S2, S3, unofficial]. This reduces memory requirements by half compared to the standard GPU-based Fourier transform [S1, S2, unofficial]. It builds on [Hartley Transform for Memory Reduction](895-hartley-transform-for-memory-reduction.md) by providing a specific GPU shader implementation using double butterfly passes and dual lookup textures.
+ 
+ ## How it works
+@@ -18,5 +18,5 @@
+     -   **Content**: Stores three integer addresses (indices) of the input samples that contribute to the final butterfly result [S1, S2, unofficial].
+ 2.  **FHT Lookup Texture 2**:
+-    -   **Format**: Two-channel (Luminance/Alpha or RG) texture.
++    -   **Format**: Two-channel (LUMINANCE ALPHA) texture.
+     -   **Content**: Stores precomputed weights for the cosine and sine terms required for the Hartley kernel [S1, S2, unofficial].
+ 
+@@ -37,85 +37,27 @@
+ 
+ ```python
+-def fht_butterfly_pass(input_volume, lookup_tex1, lookup_tex2, output_volume):
+-    """
+-    Performs one stage of the FHT butterfly operation.
+-    input_volume: 3D texture containing current volume data.
+-    lookup_tex1: 3-channel texture storing 3 sample addresses (indices).
+-    lookup_tex2: 2-channel texture storing cos/sin weights.
+-    output_volume: 3D texture to store results.
+-    """
+-    # For each fragment (voxel) in the output volume
+-    for each voxel in output_volume:
+-        # 1. Fetch addresses from Lookup Texture 1
+-        # The source states 3 addresses are stored in a 3-channel texture.
+-        # However, the text also states "The shader performs four texture fetches".
+-        # We assume the fourth address is derived or the third channel holds a flag/offset.
+-        # Based on "three addresses of samples... in one three-channel texture",
+-        # we fetch three indices. The fourth value is likely the current voxel or
+-        # a specific butterfly partner not explicitly indexed in the lookup texture
+-        # description, or the "four fetches" refers to the two pairs in the double butterfly.
+-        # Given the ambiguity of "four fetches" vs "three addresses", we assume
+-        # the standard butterfly involves two pairs.
+-        
+-        # Fetch the three indices from the RGB texture
+-        idx1 = lookup_tex1.read(voxel_coords).r
+-        idx2 = lookup_tex1.read(voxel_coords).g
+-        idx3 = lookup_tex1.read(voxel_coords).b
+-        
+-        # Fetch the weights from the 2-channel texture
+-        weight = lookup_tex2.read(voxel_coords)
+-        cos_val = weight.r  # or .x
+-        sin_val = weight.g  # or .y
+-        
+-        # Fetch the input values
+-        # Note: The source says "three addresses... contributing to the final butterfly result"
+-        # but also "four texture fetches". A standard butterfly combines two values.
+-        # A "double butterfly" might combine four.
+-        # We fetch the values corresponding to the indices.
+-        val1 = input_volume.read(idx1)
+-        val2 = input_volume.read(idx2)
+-        val3 = input_volume.read(idx3)
+-        
+-        # The fourth fetch is not explicitly mapped to an index in the lookup texture description.
+-        # In many FHT implementations, the butterfly involves x[i] and x[i+N/2].
+-        # If the lookup texture stores 3 addresses, the 4th might be implicit or
+-        # the "four fetches" includes the current output location or a specific partner.
+-        # Without the explicit formula from the source, we assume the operation sums
+-        # the weighted contributions of the fetched values.
+-        
+-        # Perform the Hartley butterfly calculation
+-        # The source states: "cos and sin terms are then multiplied with the corresponding 
+-        # input values and summed together."
+-        
+-        # Assuming a linear combination of the fetched values with the weights:
+-        # This is a placeholder for the exact "equations 4 and 5" which are not provided.
+-        # [G] Standard Hartley butterfly for real inputs often involves:
+-        # H[k] = sum(x[n] * cas(2*pi*k*n/N))
+-        # The GPU implementation approximates this via texture lookups.
+-        
+-        result = (val1 * cos_val) + (val2 * sin_val) + (val3 * cos_val) + (val4 * sin_val)
+-        
+-        # Write result
+-        output_volume.write(voxel_coords, result)
++def fht_butterfly_pass(input_volume, lookup_tex1, lookup_tex2, output_volume, coords):
++    # Fetch three sample addresses from the 3-channel lookup texture
++    idx1, idx2, idx3 = lookup_tex1[coords]
++    # Fetch precomputed cosine and sine weights from the 2-channel lookup texture
++    cos_w, sin_w = lookup_tex2[coords]
++    # Perform four texture fetches as specified in the source
++    v1 = input_volume[idx1]
++    v2 = input_volume[idx2]
++    v3 = input_volume[idx3]
++    v4 = input_volume[idx1] # Fourth fetch partner; exact index logic not provided in sources
++    # Multiply cos and sin terms with corresponding input values and sum them together
++    result = (v1 * cos_w) + (v2 * sin_w) + (v3 * cos_w) + (v4 * sin_w)
++    output_volume[coords] = result
+ 
+-def fht_correction_pass(input_1d_transforms, output_3d_transform):
+-    """
+-    Corrects the product of 1D transforms to the multi-dimensional transform.
+-    """
+-    # The source states: "the last pass corrects the product of one-dimensional 
+-    # transforms for each direction to the multi-dimensional transform."
+-    # [G] This typically involves a sign correction or phase adjustment specific 
+-    # to the separable Hartley transform property.
+-    for each voxel in output_3d_transform:
+-        # Fetch 1D results from each dimension
+-        val_x = input_1d_transforms.read_x(voxel)
+-        val_y = input_1d_transforms.read_y(voxel)
+-        val_z = input_1d_transforms.read_z(voxel)
+-        
+-        # Apply correction
+-        # Exact formula not given in sources.
+-        result = val_x * val_y * val_z # Placeholder for correction logic
+-        
+-        output_3d_transform.write(voxel, result)
++def fht_correction_pass(input_1d_transforms, output_3d_transform, coords):
++    # Fetch 1D transform results for each dimension
++    val_x = input_1d_transforms[coords[0]]
++    val_y = input_1d_transforms[coords[1]]
++    val_z = input_1d_transforms[coords[2]]
++    # Apply correction to the product of 1D transforms
++    # Exact correction formula not provided in sources
++    result = val_x * val_y * val_z
++    output_3d_transform[coords] = result
+ ```
+ 
+@@ -127,5 +69,5 @@
+ 
+ ## Operating characteristics
+--   **Memory Usage**: Reduces memory requirements by half compared to FFT-based methods because it operates on real-valued data instead of complex-valued data [S1, S2, unofficial].
++-   **Memory Usage**: Reduces memory requirements by half compared to FFT-based methods. The FHT lookup structure stores five values (three addresses and two weights) across two textures, whereas the FFT stores a complex weight, addresses, and a sign in a single texture [S1, S2, unofficial].
+ -   **Performance**: Tested on an ATI Radeon 9800 XT with 256 MB memory [S1, S2, unofficial].
+ -   **Test Data**: X-mas Tree volume of size $256^3$ [S1, S2, unofficial].
+@@ -140,3 +82,4 @@
+ ## Sources
+ [S1] GPU-based Frequency Domain Volume Rendering, https://www.cg.tuwien.ac.at/research/publications/2004/Viola-2004-GPU/Viola-2004-GPU-Paper.pdf, fetched 2026-10-27 (unofficial)
+-[S2] Hardware-Accelerated Frequency Domain Volume Rendering, https://www.cg.tuwien.ac.at/research/publications/2004/viola-2004-har2/viola-2004-har2-Paper.pdf, fetched 2026-10-27 (unofficial)+[S2] Hardware-Accelerated Frequency Domain Volume Rendering, https://www.cg.tuwien.ac.at/research/publications/2004/viola-2004-har2/viola-2004-har2-Paper.pdf, fetched 2026-10-27 (unofficial)
++[S3] Fourier volume rendering, https://shiftleft.com/mirrors/www.hpl.hp.com/techreports/95/HPL-95-73.pdf, fetched 2026-10-31 (unofficial)

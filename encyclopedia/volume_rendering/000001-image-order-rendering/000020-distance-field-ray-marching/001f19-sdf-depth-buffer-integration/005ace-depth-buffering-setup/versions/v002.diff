@@ -1,0 +1,109 @@
+--- v001.md
++++ v002.md
+@@ -4,74 +4,51 @@
+ 
+ ## Overview
+-This method configures the graphics pipeline state to ensure that ray-marched surfaces in a Signed Distance Field (SDF) volume rendering pass correctly participate in the depth buffer. By writing the correct depth value to `SV_Depth`, the rendered volume occludes other geometry behind it and is itself occluded by geometry in front of it, solving the problem of incorrect depth ordering in hybrid rendering pipelines. It differs from sibling methods like [Deferred SDF Rendering](13554-deferred-sdf-rendering.md) by focusing specifically on the depth state configuration required for immediate occlusion culling during the volume pass, rather than deferring the entire lighting computation.
++This method configures the graphics pipeline depth state so that ray-marched surfaces in a Signed Distance Field (SDF) volume rendering pass correctly participate in the depth buffer [S1, unofficial]. By writing the correct depth value to `SV_Depth`, the rendered volume occludes geometry behind it and is itself occluded by geometry in front, solving incorrect depth ordering in hybrid pipelines [G]. It differs from [Deferred SDF Rendering](13554-deferred-sdf-rendering.md) by focusing specifically on immediate depth state configuration rather than deferring lighting computation [G].
+ 
+ ## How it works
+-The setup involves configuring the depth stencil state before the volume rendering draw call. This ensures that the depth buffer, potentially populated by a previous pass of opaque objects, is used for both reading (occlusion) and writing (depth update).
+-
+-**Inputs:**
+-- Current render target and depth stencil view.
+-- Desired depth comparison function (typically `Less`).
+-- Flag to enable depth writes.
+-
+-**Outputs:**
+-- Configured graphics pipeline state object (or equivalent API state).
+-
+-**Data Structures:**
+-- No specific data structures are created by this setup step itself. It modifies the pipeline state. However, it relies on the existence of a depth buffer (e.g., `SV_Depth` target) populated by previous passes.
+-
++**Inputs:** Current render target and depth stencil view, depth comparison function, depth write flag [G].
++**Outputs:** Configured depth stencil state [G].
++**Data Structures:** None created by this step; relies on an existing depth buffer populated by prior passes [G].
+ **Steps:**
+-1. **Enable Depth Testing:** Set the depth test function to `Less`. This ensures that a fragment is only written if its depth value is strictly less than the current value in the depth buffer.
+-2. **Enable Depth Writing:** Set the depth write mask to enabled. This allows the ray-marched surface's computed depth to update the depth buffer, occluding subsequent geometry.
+-3. **Configure Depth Stencil State:** Apply the depth test and write settings to the current render pass or pipeline state.
+-
++1. Set the depth comparison function to `Less` [S1, unofficial].
++2. Enable the depth write mask [S1, unofficial].
++3. Apply the configured depth stencil state to the current render pass or pipeline descriptor [G].
+ **Pseudocode:**
+ ```python
+-# Assuming a generic graphics API context
+-def setup_depth_buffering():
+-    # Step 1: Set depth comparison function to Less
+-    # This matches the standard behavior for opaque surfaces
+-    depth_state = DepthStencilState(
+-        depth_compare_function=CompareFunction.Less,
+-        depth_write_enabled=True,
+-        stencil_front=StencilOpState.default(),
+-        stencil_back=StencilOpState.default(),
+-        mask=0xFF,
+-        write_mask=0xFF
+-    )
+-    
+-    # Step 2: Apply depth state to the pipeline or render pass
+-    # In a typical API, this might be part of a RenderPipelineDescriptor
+-    pipeline_descriptor.depth_stencil = depth_state
+-    
+-    # Note: The depth buffer itself must be cleared or populated 
+-    # by previous passes (e.g., opaque geometry pass) before this.
+-    # [G] Ensure the depth buffer is bound to the render target.
++def setup_depth_buffering(compare_func: str = "less", write_enabled: bool = True):
++    class DepthStencilState:
++        def __init__(self, compare_func, write_enabled):
++            self.compare_func = compare_func
++            self.write_enabled = write_enabled
++            self.stencil_front = {"fail": "keep", "depth_fail": "keep", "pass": "keep"}
++            self.stencil_back = {"fail": "keep", "depth_fail": "keep", "pass": "keep"}
++            self.mask = 0xFF
++            self.write_mask = 0xFF if write_enabled else 0x00
++
++    depth_state = DepthStencilState(compare_func=compare_func, write_enabled=write_enabled)
++    pipeline_descriptor = {"depth_stencil": depth_state}
++    return pipeline_descriptor
+ ```
+-
+-**Parameters:**
+-- `depth_compare_function`: `Less` [S1, unofficial].
+-- `depth_write_enabled`: `True` [S1, unofficial].
+-
++**Parameters:** `compare_func`: `Less` [S1, unofficial]. `write_enabled`: `True` [S1, unofficial].
+ **Edge Cases and Pitfalls:**
+-- **Precision:** Depth buffer precision (16-bit vs 24-bit vs 32-bit) can affect the accuracy of occlusion, especially for large scenes or thin geometry. [G] Use 24-bit or 32-bit depth buffers for high-precision requirements.
+-- **Ordering:** If the volume rendering pass is not ordered correctly relative to opaque geometry, occlusion will be incorrect. Typically, opaque geometry is rendered first, followed by the volume pass.
+-- **Clamping:** Ensure that the depth values written by the ray marcher are within the valid range [0, 1] (or [-1, 1] depending on the API) to avoid undefined behavior.
++- **Ordering:** Opaque geometry must be rendered before the volume pass to ensure correct occlusion [G].
++- **Clamping:** Depth values written by the ray marcher must be within the valid API range (e.g., `[0, 1]` for OpenGL/Vulkan, `[-1, 1]` for DirectX) to avoid undefined behavior [G].
++- **Precision:** Depth buffer bit depth affects occlusion accuracy for large scenes or thin geometry; 24-bit or 32-bit buffers are recommended for high precision [G].
+ 
+ ## Subtopics
+ 
+-### Depth Buffer Integration for Occlusion
+-This variant emphasizes the reuse of the depth buffer from a previous pass (e.g., opaque objects and background) to occlude volume portions behind objects. It involves rendering all objects and background into a floating-point pbuffer, computing diffuse surface color in a vertex program, and outputting final color in a fragment program using standard shadow maps and light data structures. The depth buffer from this pass is then reused during the volume rendering pass to ensure that portions of the volume occluded by an object do not contribute to the final image [S2].
++### [Depth Buffer Integration for Occlusion](16810-depth-buffer-integration-for-occlusion.md)
++This variant reuses the depth buffer from a preliminary object rendering pass to discard volume fragments lying behind opaque geometry. Unlike Extended Depth Peeling, which uses wider area occluders for higher accuracy at greater computational cost, this method treats a single back-projected pixel as the occluder, offering a lighter-weight alternative for deep layers where visibility gains from complex culling diminish.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** O(1) for state setup. The actual occlusion check is performed per-fragment during the volume rendering pass, adding negligible overhead to the ray marching computation.
+-- **Memory Complexity:** O(1) for state setup. No additional memory is allocated by this step.
+-- **Performance:** Improves performance by culling volume fragments that are occluded by opaque geometry, reducing the number of ray marching steps required.
+-- **Strengths:** Simple to implement, effective for occlusion culling, integrates well with standard rendering pipelines.
+-- **Limitations:** Requires correct ordering of rendering passes. Does not handle transparent geometry or complex lighting interactions directly.
++- **Time Complexity:** O(1) for state setup; per-fragment occlusion checks add negligible overhead to ray marching [G].
++- **Memory Complexity:** O(1) for state setup; no additional memory allocated [G].
++- **Performance:** Culls volume fragments occluded by opaque geometry, reducing ray marching steps [G].
++- **Strengths:** Simple to implement, effective for immediate occlusion culling, integrates with standard pipelines [G].
++- **Limitations:** Requires correct pass ordering; does not handle transparent geometry or complex lighting directly [G].
+ 
+ ## Background
+-The concept of using depth buffers for occlusion in volume rendering is well-established. The specific integration of depth buffering with SDF ray marching is discussed in the context of lighting models for participating media, where the depth buffer from a previous pass of opaque objects is reused to occlude volume portions [S2]. The use of `Less` depth comparison and enabled depth writes is a standard practice in graphics programming, as seen in various implementations [S1, unofficial].
++Not given in the sources.
+ 
+ ## Sources
+-[S1] statusfailed/wgpu-voxel-terrain, https://github.com/statusfailed/wgpu-voxel-terrain, fetched 2026-10-27 (unofficial)
+-[S2] A lighting model for general participating media, https://doi.org/10.1145/1053427.1053446, fetched 2026-11-02+[S1] statusfailed/wgpu-voxel-terrain, https://github.com/statusfailed/wgpu-voxel-terrain, fetched 2026-10-27 (unofficial)

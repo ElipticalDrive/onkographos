@@ -1,0 +1,391 @@
+# NeO 360
+
+Also called: Neural Fields for Sparse View Synthesis of Outdoor Scenes
+
+## Overview
+NeO 360 is a generalizable neural field method for few-shot novel view synthesis of unbounded 360-degree outdoor scenes [S1]. It operates in a zero-shot manner, taking one or a few input images to render novel viewpoints without optimizing a per-scene latent code or using inference-time GAN inversion [S1]. It distinguishes itself from sibling methods like [PixelNeRF](14964-suds.md) by combining a global image-conditional tri-planar representation with local residual features and separate foreground/background rendering MLPs, enabling strong scene priors for sparse view inputs [S1].
+
+## How it works
+**Inputs and Outputs**
+*   **Inputs:** $V$ source images $\{I_v\}_{v=1}^V$ (typically $V \in \{1, 3, 5\}$), camera poses for source images, and target camera poses for novel views.
+*   **Outputs:** Rendered RGB colors $C(r)$ and optionally depth for rays $r$ in novel views.
+
+**Data Structures**
+1.  **Encoder Feature Map ($F_I$):** Output of the ResNet32 encoder. Dimensions: $512 \times H/2 \times W/2$.
+2.  **3D Feature Volume ($V_F$):** Volumetric projection of $F_I$. Dimensions: $K \times K \times K \times 512$, where $K=64$.
+3.  **Depth-Encoded Features ($V_Z$):** Output of depth-encoding MLP. Dimensions: $K \times K \times K \times 512$.
+4.  **Tri-Planar Features ($S$):** Projected 2D feature maps. Dimensions: $128 \times 120 \times 160$ per plane (xy, xz, yz).
+5.  **Rendering MLP Weights:** 7 fully connected layers (hidden dim 128) for density/color, plus 2 additional layers for color.
+
+**Numbered Steps**
+
+1.  **Feature Extraction:**
+    Pass source images through a pre-trained ResNet32 encoder $E$. Extract features from the initial convolutional layer and layers 1–3. Upsample all extracted features to spatial resolution $H/2 \times W/2$. Concatenate along the channel dimension to form $F_I \in \mathbb{R}^{512 \times H/2 \times W/2}$ [S1].
+
+2.  **Volumetric Projection:**
+    Back-project $F_I$ along every ray to a world grid $V$ to create a 3D feature volume $V_F \in \mathbb{R}^{K \times K \times K \times 512}$ [S1]. The grid resolution $K$ is set to 64 to balance expressivity and memory [S1].
+
+3.  **Depth Encoding:**
+    Pass $V_F$ through a 2-layer MLP with hidden dimension 512 to learn the depth of each feature, producing $V_Z \in \mathbb{R}^{K \times K \times K \times 512}$ [S1].
+
+4.  **Feature Aggregation (Tri-Planar Construction):**
+    Use three 2-layer MLPs (hidden dim 512) to output learned weights $w_{xy}, w_{xz}, w_{yz} \in \mathbb{R}^{K \times K \times K \times 1}$ over the volumetric feature dimensions [S1]. Apply softmax and sum over the $z, y,$ and $x$ dimensions respectively to obtain three 2D feature maps, each of dimension $K \times K \times 512$ [S1].
+
+5.  **2D Convolutional Refinement:**
+    Transform the planar features using a series of 2D convolutions and upsampling layers to produce the final tri-planar features $S$ [S1]. The architecture is:
+    *   Conv 1: Input 512 $\to$ Output 256, kernel 3, stride 2, padding 1, followed by BatchNorm and ReLU.
+    *   Conv 2: Input 256 $\to$ Output 128, kernel 3, stride 2, padding 1, followed by BatchNorm and ReLU.
+    *   Conv 3: Input 128 $\to$ Output 128, kernel 3, stride 2, padding 1, followed by BatchNorm and ReLU.
+    *   Upsample: Scale factor 2.
+    *   Conv 4: Input 128 $\to$ Output 128, kernel 3, stride 1, padding 1, followed by BatchNorm and ReLU.
+    *   Upsample: To spatial resolution $H/2 \times W/2$.
+    *   Conv 5: Input 128 $\to$ Output 128, kernel 3, stride 1, padding 1, followed by BatchNorm and ReLU.
+    The output $S$ has dimensions $128 \times 120 \times 160$ [S1].
+
+6.  **Tri-Planar Sampling:**
+    For a 3D point $\mathbf{x}$, project it into each of the three planes by taking the absolute $xy, xz,$ and $yz$ coordinates. Concatenate the sampled features and sum over the channel dimension to retrieve the global tri-planar feature $\mathbf{f}_{tp} \in \mathbb{R}^{128}$ [S1].
+
+7.  **Residual Feature Sampling:**
+    Sample the local feature map $F_I$ at the projected 2D coordinates of $\mathbf{x}$ to obtain the residual local feature $\mathbf{f}_r \in \mathbb{R}^{512}$ [S1].
+
+8.  **Positional Encoding:**
+    Apply hierarchical sinusoidal positional encoding $\gamma(\cdot)$ to the input position $\mathbf{x}$ and view direction $\mathbf{d}$ [S1, 2].
+
+9.  **MLP Forward Pass:**
+    Concatenate $\mathbf{x}$, $\mathbf{f}_{tp}$, and $\mathbf{f}_r$ as input to the first layer of the rendering MLP [S1].
+    *   **Skip Connection:** Supply the conditioning feature (from the encoder) as a skip connection to the third layer of the MLP [S1].
+    *   **Multi-View Aggregation:** If more than one image is in the input, mean pool the features along the viewing dimension in the fourth MLP layer [S1].
+    *   **Density Output:** Use the first 4 layers to output features of dimension $128$. Pass these through a final density MLP to output a single scalar $\sigma$ (volume density) for each sampled point [S1].
+    *   **Color Output:** Use two additional dedicated MLP layers (hidden dim 128) to output 3-channel RGB color $\mathbf{c}$, conditioned on the positionally-encoded viewing direction $\mathbf{d}$ and the output of the fourth MLP layer [S1].
+
+10. **Background Modeling:**
+    The method uses separate near and far background MLPs. Points are sampled based on the intersection between the ray origin and a unit sphere [S1]. The final composited color $\mathbf{c}$ is calculated as:
+    $$ \mathbf{c} = \sum_i w^b_i \mathbf{c}^b_i + \sum_i w^{nb}_i \mathbf{c}^{nb}_i + \sum_i w^o_i\mathbf{c}^o_i $$
+    where $b$ denotes background, $nb$ denotes near-background, and $o$ denotes objects/foreground [S1].
+
+11. **Regularization:**
+    Apply regularization loss $\mathcal{L}_{\mathrm{reg}}$ to encourage sparse weights for the near and far background MLPs [S1]:
+    $$ \mathcal{L}_{\mathrm{reg}}(s, w)=\sum _{i=0}^{N-1} \sum _{j=0}^{N-1} w_i w_j\left|\frac {s_i+s_{i+1}}{2}-\frac {s_j+s_{j+1}}{2}\right| +\frac {1}{3} \sum _{i=0}^{N-1} w_i^2 (s_{i+1}-s_i) $$
+    where $s$ represents samples and $w$ represents weights [S1].
+
+12. **Rendering:**
+    Compute the final pixel color $C(r)$ using volume rendering integration:
+    $$ C(r) = \sum_{k=1}^N T_k \alpha_k c_k $$
+    where $\alpha_k = 1 - \exp(-\sigma_k \delta_k)$, $T_k = \exp(-\sum_{j=1}^{k-1} \sigma_j \delta_j)$, and $c_k$ is the predicted color [S1, 2].
+
+**Pseudocode**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class NeO360:
+    def __init__(self, K=64, hidden_dim=128, enc_hidden=512):
+        # Encoder: Pre-trained ResNet32 (frozen during training)
+        self.encoder = ResNet32()
+        
+        # Volumetric Projection: Back-projection logic handled in forward
+        self.K = K
+        
+        # Depth Encoding MLP: 2 layers, hidden enc_hidden
+        self.depth_mlp = nn.Sequential(
+            nn.Linear(enc_hidden, enc_hidden),
+            nn.ReLU(),
+            nn.Linear(enc_hidden, enc_hidden)
+        )
+        
+        # Feature Aggregation MLPs: 3 MLPs for xy, xz, yz weights
+        self.weight_mlp_xy = nn.Sequential(
+            nn.Linear(enc_hidden, enc_hidden),
+            nn.ReLU(),
+            nn.Linear(enc_hidden, 1)
+        )
+        self.weight_mlp_xz = nn.Sequential(
+            nn.Linear(enc_hidden, enc_hidden),
+            nn.ReLU(),
+            nn.Linear(enc_hidden, 1)
+        )
+        self.weight_mlp_yz = nn.Sequential(
+            nn.Linear(enc_hidden, enc_hidden),
+            nn.ReLU(),
+            nn.Linear(enc_hidden, 1)
+        )
+        
+        # 2D Convolutional Blocks for Tri-Planar Features
+        # Input: K*K*512 -> Output: H/2*W/2*128
+        self.triplanar_conv = nn.Sequential(
+            nn.Conv2d(512, 256, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(256),
+            nn.ReLU(),
+            nn.Conv2d(256, 128, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(),
+            nn.Conv2d(128, 128, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(),
+            nn.Upsample(scale_factor=2),
+            nn.Conv2d(128, 128, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(),
+            nn.Upsample(scale_factor=2), # To H/2, W/2
+            nn.Conv2d(128, 128, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU()
+        )
+        
+        # Rendering MLPs
+        # First 4 layers shared for density and color features
+        self.render_mlp_shared = nn.Sequential(
+            nn.Linear(3 + 128 + 512, hidden_dim), # x(3) + ftp(128) + fr(512)
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim)
+        )
+        
+        # Density MLP: Final layer from shared features
+        self.density_mlp = nn.Linear(hidden_dim, 1)
+        
+        # Color MLP: 2 additional layers
+        self.color_mlp = nn.Sequential(
+            nn.Linear(hidden_dim + 3, hidden_dim), # Features + d(3)
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 3)
+        )
+        
+        # Background MLPs (Near and Far)
+        self.near_bg_mlp = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 3)
+        )
+        self.far_bg_mlp = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 3)
+        )
+        
+        # Background Weight MLPs (for regularization)
+        self.near_bg_weight_mlp = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1)
+        )
+        self.far_bg_weight_mlp = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1)
+        )
+
+    def positional_encoding(self, x, L=10):
+        # Standard NeRF positional encoding
+        # x: (N, 3)
+        scales = torch.tensor([2**i for i in range(L)], dtype=x.dtype, device=x.device)
+        xb = torch.reshape((x * scales[:, None]), (x.shape[0], -1))
+        pe = torch.cat((torch.sin(xb), torch.cos(xb)), dim=1)
+        return pe
+
+    def forward(self, source_images, target_cameras, N_samples=128):
+        # 1. Feature Extraction
+        # source_images: (V, 3, H, W)
+        # Extract features from ResNet32 layers 0, 1, 2, 3
+        feat_l0 = self.encoder.conv1(source_images) # (V, 64, H/2, W/2) approx
+        feat_l1 = self.encoder.layer1(source_images)
+        feat_l2 = self.encoder.layer2(source_images)
+        feat_l3 = self.encoder.layer3(source_images)
+        
+        # Upsample all to H/2 x W/2 and concatenate
+        # Note: ResNet32 layer outputs might have different strides, 
+        # assuming upsampling logic from notes: upsample all to H/2 x W/2
+        feat_l0 = F.interpolate(feat_l0, size=(source_images.shape[2]//2, source_images.shape[3]//2), mode='bilinear')
+        feat_l1 = F.interpolate(feat_l1, size=(source_images.shape[2]//2, source_images.shape[3]//2), mode='bilinear')
+        feat_l2 = F.interpolate(feat_l2, size=(source_images.shape[2]//2, source_images.shape[3]//2), mode='bilinear')
+        feat_l3 = F.interpolate(feat_l3, size=(source_images.shape[2]//2, source_images.shape[3]//2), mode='bilinear')
+        
+        F_I = torch.cat([feat_l0, feat_l1, feat_l2, feat_l3], dim=1) # (V, 512, H/2, W/2)
+        
+        # 2. Volumetric Projection
+        # Back-project F_I to 3D grid V_F (K, K, K, 512)
+        # This step involves ray casting from source cameras into the world grid
+        # V_F = volumetric_projection(F_I, source_cameras, K)
+        # For implementation, this is a complex operation. 
+        # We assume V_F is computed as KxKxKx512 tensor.
+        V_F = self._volumetric_project(F_I, source_cameras, self.K)
+        
+        # 3. Depth Encoding
+        V_F_flat = V_F.view(-1, 512)
+        V_Z_flat = self.depth_mlp(V_F_flat)
+        V_Z = V_Z_flat.view(self.K, self.K, self.K, 512)
+        
+        # 4. Feature Aggregation
+        # Compute weights for xy, xz, yz
+        V_Z_flat = V_Z.view(-1, 512)
+        w_xy_flat = self.weight_mlp_xy(V_Z_flat).view(self.K, self.K, self.K, 1)
+        w_xz_flat = self.weight_mlp_xz(V_Z_flat).view(self.K, self.K, self.K, 1)
+        w_yz_flat = self.weight_mlp_yz(V_Z_flat).view(self.K, self.K, self.K, 1)
+        
+        # Softmax and sum
+        w_xy = F.softmax(w_xy_flat, dim=2) # Sum over z
+        w_xz = F.softmax(w_xz_flat, dim=1) # Sum over x
+        w_yz = F.softmax(w_yz_flat, dim=0) # Sum over y
+        
+        # Weighted sum to get 2D planes
+        # Plane XY: Sum over Z
+        plane_xy = torch.sum(V_F * w_xy, dim=2) # (K, K, 512)
+        # Plane XZ: Sum over X
+        plane_xz = torch.sum(V_F * w_xz, dim=1) # (K, K, 512)
+        # Plane YZ: Sum over Y
+        plane_yz = torch.sum(V_F * w_yz, dim=0) # (K, K, 512)
+        
+        # 5. 2D Convolution
+        # Apply convs to each plane
+        plane_xy = self.triplanar_conv(plane_xy.permute(2, 0, 1)).permute(1, 2, 0) # (H/2, W/2, 128)
+        plane_xz = self.triplanar_conv(plane_xz.permute(2, 0, 1)).permute(1, 2, 0)
+        plane_yz = self.triplanar_conv(plane_yz.permute(2, 0, 1)).permute(1, 2, 0)
+        
+        # 6. Ray Casting and Sampling
+        # Cast rays from target_cameras
+        # x: (N, 3), d: (N, 3)
+        x, d = self._cast_rays(target_cameras, N_samples)
+        
+        # 7. Tri-Planar Sampling
+        # Project x to xy, xz, yz
+        x_xy = torch.stack([x[:, 0], x[:, 1]], dim=1) # (N, 2)
+        x_xz = torch.stack([x[:, 0], x[:, 2]], dim=1)
+        x_yz = torch.stack([x[:, 1], x[:, 2]], dim=1)
+        
+        # Sample from planes
+        # Note: Coordinates need to be normalized to [-1, 1] for grid_sample
+        ftp_xy = F.grid_sample(plane_xy.unsqueeze(0), x_xy.unsqueeze(0).unsqueeze(0), mode='bilinear', padding_mode='zeros')
+        ftp_xz = F.grid_sample(plane_xz.unsqueeze(0), x_xz.unsqueeze(0).unsqueeze(0), mode='bilinear', padding_mode='zeros')
+        ftp_yz = F.grid_sample(plane_yz.unsqueeze(0), x_yz.unsqueeze(0).unsqueeze(0), mode='bilinear', padding_mode='zeros')
+        
+        # Concatenate and sum
+        ftp = ftp_xy + ftp_xz + ftp_yz # (N, 128)
+        
+        # 8. Residual Feature Sampling
+        # Sample F_I at projected 2D coords of x
+        # This requires projecting 3D points x back to 2D image coordinates for each source view
+        fr_list = []
+        for v in range(source_images.shape[0]):
+            # Project x to view v's image plane
+            # Get 2D coords (u, v)
+            coords_v = self._project_to_image(x, source_cameras[v])
+            fr_v = F.grid_sample(F_I[v:v+1], coords_v.unsqueeze(0).unsqueeze(0), mode='bilinear', padding_mode='zeros')
+            fr_list.append(fr_v)
+        fr = torch.cat(fr_list, dim=1) # (N, 512)
+        
+        # 9. Positional Encoding
+        pe_x = self.positional_encoding(x)
+        pe_d = self.positional_encoding(d)
+        
+        # 10. MLP Forward
+        # Concatenate x, ftp, fr
+        input_mlp = torch.cat([x, ftp, fr], dim=1)
+        
+        # Layer 1
+        h1 = self.render_mlp_shared[0](input_mlp)
+        h1 = torch.relu(h1)
+        
+        # Layer 2
+        h2 = self.render_mlp_shared[1](h1)
+        h2 = torch.relu(h2)
+        
+        # Layer 3
+        h3 = self.render_mlp_shared[2](h2)
+        h3 = torch.relu(h3)
+        
+        # Skip Connection: Conditioning feature (from encoder)
+        # Mean pool features along viewing dimension if V > 1
+        if source_images.shape[0] > 1:
+            # Assuming conditioning feature is derived from F_I or similar
+            # Note: The exact "conditioning feature" skip connection is described as 
+            # "supply conditioning feature as skip connection to third layer"
+            # We assume a global feature vector C_cond is computed from source images
+            C_cond = self._get_conditioning_feature(F_I) # (N, 512) approx
+            h3 = h3 + C_cond
+            
+        # Layer 4
+        h4 = self.render_mlp_shared[3](h3)
+        h4 = torch.relu(h4)
+        
+        # Density
+        sigma = self.density_mlp(h4) # (N, 1)
+        
+        # Color
+        # Conditioned on pe_d and h4
+        color_input = torch.cat([h4, pe_d], dim=1)
+        color = self.color_mlp(color_input) # (N, 3)
+        
+        # Background Modeling
+        # Sample points for near and far background based on intersection with unit sphere
+        # This is handled by the ray sampling logic or separate sampling
+        # For simplicity, we assume sigma and color already incorporate background via the composition equation
+        # Or we compute background weights and colors separately
+        
+        # 11. Rendering
+        # Compute alpha, T, and final color
+        # delta = distance between samples
+        # alpha = 1 - exp(-sigma * delta)
+        # T = exp(-sum(sigma * delta))
+        # C = sum(T * alpha * color)
+        
+        return C
+
+    def _volumetric_project(self, F_I, cameras, K):
+        # Placeholder for complex back-projection logic
+        # Returns KxKxKx512 tensor
+        return torch.zeros(K, K, K, 512)
+
+    def _cast_rays(self, cameras, N):
+        # Placeholder for ray casting
+        # Returns x (N, 3), d (N, 3)
+        return torch.zeros(N, 3), torch.zeros(N, 3)
+
+    def _project_to_image(self, x, camera):
+        # Placeholder for 3D to 2D projection
+        return torch.zeros(x.shape[0], 2)
+
+    def _get_conditioning_feature(self, F_I):
+        # Placeholder for computing conditioning feature
+        return torch.zeros(F_I.shape[0], 512)
+```
+
+**Parameters**
+*   **Grid Resolution ($K$):** 64 [S1].
+*   **Near Clipping Plane:** 0.02 [S1].
+*   **Far Clipping Plane:** 3.0 [S1].
+*   **Coarse Samples per Ray:** 64 [S1].
+*   **Fine Samples per Ray:** 64 [S1].
+*   **Perceptual Loss Lambda:** 0.3 [S1].
+*   **Initial Learning Rate:** $5.0 \times 10^{-4}$ [S1].
+*   **Final Learning Rate:** $5.0 \times 10^{-6}$ [S1].
+*   **Total Training Epochs:** 100 [S1].
+*   **Epochs before Perceptual Loss:** 30 [S1].
+*   **Fine-tuning Learning Rate:** $5.0 \times 10^{-6}$ [S1].
+
+**Edge Cases and Pitfalls**
+*   **OOM:** Large grid sizes cause out-of-memory issues. Mitigation: Use $K=64$ [S1].
+*   **Pooling Strategy:** Pooling features along the viewing dimension too early (during tri-planar construction) hurts performance. Mitigation: Mean pool in the fourth MLP layer if multiple images are input [S1].
+*   **Naive Triplanes:** Using triplanes without generative losses or proper training degrades performance [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Training requires approximately 1 day on 8 A-100 GPUs [S1].
+*   **Memory Complexity:** Model size is 17M parameters, significantly larger than vanilla NeRF (1.2M rendering MLP) due to the ResNet encoder (~10M) and convolutional blocks [S1].
+*   **Performance:** On the NeRDS 360 dataset (Single Map, 3 views, zero-shot), NeO 360 achieves PSNR 19.35, SSIM 0.59, LPIPS 0.50 [S1]. It outperforms PixelNeRF and MVSNeRF in zero-shot and fine-tuning scenarios [S1].
+*   **Strengths:** Zero-shot generalization to novel scenes and objects; strong scene priors for unbounded 360-degree outdoor scenes; effective few-shot synthesis [S1].
+*   **Limitations:** Larger model size compared to vanilla NeRF; requires careful tuning of grid resolution to avoid OOM [S1].
+*   **When to Use:** Sparse view synthesis of outdoor 360-degree scenes where zero-shot generalization is required [S1].
+*   **When Not to Use:** Dense view synthesis where per-scene optimization is feasible and memory is constrained [S1].
+
+## Background
+NeO 360 was introduced in 2023 by the authors of the paper "NeO 360: Neural Fields for Sparse View Synthesis of Outdoor Scenes" [S1]. It was developed to address the challenges of novel view synthesis in unbounded 360-degree outdoor environments, where traditional NeRF methods struggle with generalization to novel scenes and sparse inputs [S1]. The method builds on the NeRF framework but introduces image-conditional tri-planar representations and local residual features to learn strong scene priors from large-scale datasets like NeRDS 360 [S1]. It is used for novel-view synthesis, scene decomposition, and 360-degree predictions [S1].
+
+## Sources
+[S1] NeO 360: Neural Fields for Sparse View Synthesis of Outdoor Scenes, https://doi.org/10.1109/iccv51070.2023.00843, fetched 2026-10-26
+[S2] Semantically-aware Neural Radiance Fields for Visual Scene Understanding: A Comprehensive Review, https://link.springer.com/article/10.1007/s11263-025-02663-5, fetched 2026-10-27

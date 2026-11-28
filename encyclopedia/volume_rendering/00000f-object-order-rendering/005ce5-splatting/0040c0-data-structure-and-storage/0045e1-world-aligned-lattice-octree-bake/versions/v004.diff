@@ -1,0 +1,157 @@
+--- v003.md
++++ v004.md
+@@ -6,19 +6,18 @@
+ 
+ ## How it works
+-**Inputs:** A set of Gaussian splats (position, covariance, color, spherical harmonics) and a world bounding volume.
+-**Outputs:** An HLOD octree structure, updated world bounds, and associated chunk data.
++**Inputs:** A set of Gaussian splats (position, covariance, color, spherical harmonics) and a world bounding volume [S1, unofficial].
++**Outputs:** An HLOD octree structure, updated world bounds, and associated chunk data [S1, unofficial].
+ 
+ **Data Structures:**
+-*   **Node Record:** 128 bytes. Contains node type, child pointers (or leaf chunk index), and bounds.
+-*   **Leaf Payload:** Stores importance-ordered splat data. Coordinates are stored as node-relative positions.
+-*   **Interior Payload:** Stores breadth-first traversal order information.
+-*   **World Header (v2):** 80-byte extension containing HLOD flag, world AABB, and version info.
++*   **Node Record:** 128 bytes. Contains node type, child pointers (or leaf chunk index), and bounds [S1, unofficial].
++*   **Leaf Payload:** Stores importance-ordered splat data [S1, unofficial].
++*   **Interior Payload:** Stores breadth-first traversal order information [S1, unofficial].
++*   **World Header (v2):** 80-byte extension containing HLOD flag, world AABB, and version info [S1, unofficial].
++*   **Coordinate Storage:** All stored coordinates within nodes are converted to node-relative positions [S1, unofficial].
+ 
+ **Steps:**
+-1.  **Initialization:** Start with an origin-centred root node. The root node's local coordinate system aligns with world axes [S1, unofficial].
++1.  **Initialization:** Start with an origin-centred root node for origin-plane crossings [S1, unofficial].
+ 2.  **Leaf Creation:** Group splats into leaves. Each leaf node must contain a strict maximum of 16,384 splats [S1, unofficial].
+-3.  **Ordering:**
+-    *   Leaf nodes store splats ordered by importance [S1, unofficial].
+-    *   Interior nodes store payload in breadth-first order [S1, unofficial].
++3.  **Ordering:** Leaf nodes store splats ordered by importance [S1, unofficial]. Interior nodes store payload in breadth-first order [S1, unofficial].
+ 4.  **Position Storage:** All stored coordinates within nodes are converted to node-relative positions [S1, unofficial].
+ 5.  **Optimization:** Apply single-child bit identity optimization where applicable [S1, unofficial].
+@@ -44,51 +43,59 @@
+ **Pseudocode:**
+ ```python
+-def bake_hlod(splats, world_bounds):
+-    # Initialize root node at origin
+-    root = Node(origin=(0,0,0), type='root')
+-    
+-    # Group splats into leaves with max 16,384 splats
++def bake_hlod(splats, world_bounds, data_lock):
++    # Initialize origin-centred root node
++    root = {"origin": (0.0, 0.0, 0.0), "bounds": (0.0, 0.0, 0.0), "children": [], "payload": []}
++
++    # Group splats into leaves with strict maximum of 16,384 splats per node
+     leaves = []
+-    current_leaf = Leaf()
++    current_leaf = {"splats": [], "importance": 0.0}
+     for splat in splats:
+-        if current_leaf.count >= 16384:
++        if len(current_leaf["splats"]) >= 16384:
+             leaves.append(current_leaf)
+-            current_leaf = Leaf()
+-        current_leaf.add_splat(splat)
+-    if current_leaf.count > 0:
++            current_leaf = {"splats": [], "importance": 0.0}
++        current_leaf["splats"].append(splat)
++    if len(current_leaf["splats"]) > 0:
+         leaves.append(current_leaf)
+-        
++
+     # Order leaves by importance
+-    leaves.sort(key=lambda l: l.importance, reverse=True)
+-    
+-    # Build tree structure
+-    # Apply single-child bit identity optimization
+-    # Use DC-encoding-aware merge cells
+-    tree = build_octree(root, leaves)
+-    
+-    # Calculate bounds
+-    # Union world bounds with root node bounds
+-    new_bounds = union(world_bounds, root.get_world_aabb())
+-    
+-    # Round outward to real_t precision
+-    new_bounds = round_outward(new_bounds)
+-    
+-    # Validate bounds
+-    if not is_finite(new_bounds) or has_negative_size(new_bounds):
+-        raise ValueError("Invalid bounds")
+-        
+-    # Check if new bounds enclose root
+-    if not encloses(new_bounds, root.get_world_aabb()):
+-        raise ValueError("Bounds do not enclose root")
+-        
+-    # Publish under lock
++    leaves.sort(key=lambda l: l["importance"], reverse=True)
++
++    # Build tree structure; sources do not specify the exact balancing algorithm [G]
++    tree = build_tree_from_leaves(root, leaves)
++
++    # Convert all stored coordinates to node-relative positions
++    for node in tree.traverse():
++        node["position"] = (node["position"][0] - node["parent"]["origin"][0],
++                            node["position"][1] - node["parent"]["origin"][1],
++                            node["position"][2] - node["parent"]["origin"][2])
++
++    # Apply single-child bit identity optimization; sources do not specify exact bit-packing [G]
++    apply_single_child_bit_identity(tree)
++
++    # Use DC-encoding-aware merge cells during construction; sources do not specify exact merge logic [G]
++    apply_dc_encoding_merge(tree)
++
++    # Explicit all-pass-through exit preserves payload and SH unchanged
++    # (No modification to payload/SH occurs during exit conditions)
++
++    # Compute bounds as world's bounds united with root node's bounds
++    new_bounds = (min(world_bounds[0], root["bounds"][0]), min(world_bounds[1], root["bounds"][1]),
++                  min(world_bounds[2], root["bounds"][2]), max(world_bounds[3], root["bounds"][3]),
++                  max(world_bounds[4], root["bounds"][4]), max(world_bounds[5], root["bounds"][5]))
++
++    # Round computed bounds outward to real_t precision
++    new_bounds = (round(new_bounds[0], 6), round(new_bounds[1], 6), round(new_bounds[2], 6),
++                  round(new_bounds[3], 6), round(new_bounds[4], 6), round(new_bounds[5], 6))
++
++    # Validate bounds: finite, positive size, encloses root
++    if not all(math.isfinite(v) for v in new_bounds) or has_negative_size(new_bounds) or not encloses(new_bounds, root["bounds"]):
++        return False # Failed bake preserves existing state
++
++    # Publish under existing data lock
+     with data_lock:
+-        # Capture current state for consistency
+         current_revision = get_revision()
+-        
+-        # Clear static chunks if tree is non-empty
++        # Clear static chunks if tree is non-empty to prevent stale indexing
+         if tree.is_non_empty():
+             clear_static_chunks()
+-            
+         # Install new state
+         world.tree = tree
+@@ -96,8 +103,7 @@
+         world.bounds = new_bounds
+         world.revision = current_revision + 1
+-        
+-    # Emit notifications
++
++    # Emit change notifications
+     emit_changed()
+-    
+     return True
+ ```
+@@ -116,11 +122,11 @@
+ *   **Measured Performance:** Not given in the sources.
+ *   **Scaling:** Not given in the sources.
+-*   **Strengths:** Enables efficient streaming and culling via HLOD structure; prevents false culls with bounded enclosure; maintains consistency with atomic snapshots.
+-*   **Limitations:** Strict node size limit (16,384 splats); requires careful bounds calculation to avoid culling errors; complex concurrency handling.
+-*   **When to use:** When streaming large Gaussian splat scenes is required and culling efficiency is critical.
+-*   **When not to use:** For small scenes where streaming overhead outweighs benefits; when strict real-time consistency is not required and simpler structures suffice.
++*   **Strengths:** Enables efficient streaming and culling via HLOD structure; prevents false culls with bounded enclosure; maintains consistency with atomic snapshots [S1, unofficial].
++*   **Limitations:** Strict node size limit (16,384 splats); requires careful bounds calculation to avoid culling errors; complex concurrency handling [S1, unofficial].
++*   **When to use:** When streaming large Gaussian splat scenes is required and culling efficiency is critical [S1, unofficial].
++*   **When not to use:** For small scenes where streaming overhead outweighs benefits; when strict real-time consistency is not required and simpler structures suffice [S1, unofficial].
+ 
+ ## Background
+-Originated in the GaussianSplatWorld implementation for Godot, specifically in the HLOD S1a bake feature [S1, unofficial]. It was developed to address the need for efficient level-of-detail management and streaming of Gaussian splat data in real-time rendering contexts [S1, unofficial]. The method is part of the .gsplatworld v2 format specification [S1, unofficial].
++Developed within the `godotGS` repository as part of the HLOD S1a bake feature [S1, unofficial]. It was introduced to address the need for efficient level-of-detail management and streaming of Gaussian splat data in real-time rendering contexts [S1, unofficial]. The method is part of the `.gsplatworld` v2 format specification [S1, unofficial].
+ 
+ ## Sources

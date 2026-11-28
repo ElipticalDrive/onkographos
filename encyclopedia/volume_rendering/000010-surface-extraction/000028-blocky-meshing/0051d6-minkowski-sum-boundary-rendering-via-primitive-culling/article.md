@@ -1,0 +1,222 @@
+# Minkowski Sum Boundary Rendering via Primitive Culling
+
+Also called: GPU-based Minkowski Sum Boundary Rendering via Primitive Culling, Minkowski Sum Rendering, Surface Primitive Culling
+
+## Overview
+This method renders the outer boundary of the Minkowski sum of two 2-manifold triangular meshes, $A$ and $B$, by generating a superset of surface primitives (triangles and quadrilaterals) and culling invalid ones using geometric propositions, without computing a complete boundary representation (B-rep) [S1]. It differs from B-rep based algorithms by avoiding complex 3D Boolean operations and high combinatorial complexity, instead leveraging GPU rasterization and parallel culling to generate the volumetric representation [S1]. It builds on [Blocky meshing](31-blocky-meshing.md) by providing a geometric culling mechanism for Minkowski sum boundaries.
+
+## How it works
+**Inputs:** Two input polyhedra $A$ and $B$, defined as 2-manifold triangular meshes. Let $F_A = \{f_A\}$ and $F_B = \{f_B\}$ be the boundary triangle sets, $E_A = \{e_A\}$ and $E_B = \{e_B\}$ be the edge sets, and $V_A = \{v_A\}$ and $V_B = \{v_B\}$ be the vertex sets of $A$ and $B$ respectively [S1].
+
+**Outputs:** A Vertex Buffer Object (VBO) containing only valid surface primitives and their computed normals, ready for OpenGL rendering [S1].
+
+**Data Structures:**
+1.  **Flag Array:** One entry per generated surface primitive.
+    *   `0`: Invalid (culled).
+    *   `1`: Valid triangle primitive.
+    *   `1` or `-1`: Valid quadrilateral primitive (`1` if normal is $e_A \times e_B$, `-1` if normal is $-e_A \times e_B$) [S1].
+2.  **Vertex Memory Layout:** For coalesced global memory access, vertices are stored in a Structure of Arrays (SoA) format: all x-coordinates first, then all y-coordinates, then all z-coordinates ($x_1 \dots x_n, y_1 \dots y_n, z_1 \dots z_n$) [S1].
+
+**Definitions:**
+*   **Valid Surface Primitive:** A primitive is valid if its intersection with the Minkowski sum boundary has a non-zero area. Primitives sharing only an edge or vertex with the boundary are invalid (area zero) [S1].
+*   **Concave Edge/Vertex:** An edge or vertex is concave if the interior angle is greater than 180 degrees (or equivalently, the outward normals of incident faces point inwards relative to the edge/vertex geometry). [G] Implementation typically involves checking the dot product of the edge direction with the cross product of incident face normals, or checking if the vertex lies inside the convex hull of its neighbors.
+
+**Numbered Steps:**
+
+1.  **Generate Triangle Primitives:** For each triangle $f_A \in F_A$ and each vertex $v_B \in V_B$, compute the triangle primitive $f_A \oplus v_B$. The vertices of this primitive are $\{v_A + v_B \mid v_A \in f_A\}$ [S1].
+2.  **Generate Quadrilateral Primitives:** For each edge $e_A \in E_A$ and each edge $e_B \in E_B$, compute the quadrilateral primitive $e_A \oplus e_B$. The vertices are $\{u_A + u_B, u_A + v_B, v_A + u_B, v_A + v_B\}$ where $e_A = (u_A, v_A)$ and $e_B = (u_B, v_B)$ [S1].
+3.  **Parallel Culling Test:** For each generated primitive, determine validity using the following propositions. Perform this in parallel on the GPU [S1].
+    *   **Proposition 1 (Triangle Culling):** Given $f_A \in F_A$ with outward normal $n_A$, and $e_i$ the $i$-th incident edge of $f_A$ pointing away from $v_B$. If $f_A \oplus v_B$ is valid, then $n_A \cdot e_i \le 0$ for all $e_i$. If $n_A \cdot e_i > 0$ for any $e_i$, the primitive is invalid [S1].
+    *   **Proposition 2 (Quadrilateral Culling):** Given $e_A \in E_A$ with incident triangles $f_0, f_1$ and edges $e_0, e_1$ pointing away from $e_A$; and $e_B \in E_B$ with incident triangles $f_2, f_3$ and edges $e_2, e_3$ pointing away from $e_B$. If $e_A \oplus e_B$ is valid, then either $(e_A \times e_B) \cdot e_i \le 0$ for all $i \in \{0,1,2,3\}$ OR $(e_A \times e_B) \cdot e_i \ge 0$ for all $i \in \{0,1,2,3\}$. If the signs of $(e_A \times e_B) \cdot e_i$ differ among the four edges, the primitive is invalid [S1].
+    *   **Proposition 3 (Quadrilateral Culling):** If either $e_A$ or $e_B$ is a concave edge, then $e_A \oplus e_B$ cannot be a valid quadrilateral primitive [S1].
+    *   **Proposition 4 (Triangle Culling):** If $v_B$ is a concave vertex, then $f_A \oplus v_B$ cannot be a valid triangle primitive [S1].
+4.  **Compute Normals:** For remaining valid primitives, compute the surface normal to enable back-face culling during rendering [S1].
+    *   For triangle $f_A \oplus v_B$, the normal is $n_A$ (outward normal of $f_A$) [S1].
+    *   For quadrilateral $e_A \oplus e_B$, the normal is $e_A \times e_B$ if $(e_A \times e_B) \cdot e_i \le 0$ for all $e_i$, otherwise $-e_A \times e_B$ [S1].
+5.  **Write Output:** Write primitives with non-zero flags and their computed normals to a Vertex Buffer Object (VBO) [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def minkowski_sum_boundary_rendering(mesh_A, mesh_B):
+    """
+    Renders the boundary of the Minkowski sum of two triangular meshes.
+    mesh_A, mesh_B: Objects containing vertices, triangles, and edges.
+    Returns: List of valid primitives with normals.
+    """
+    valid_primitives = []
+    
+    # Precompute concavity flags for vertices and edges of B
+    # [G] Concavity check: A vertex is concave if it is not convex. 
+    # An edge is concave if the dihedral angle is > 180 degrees (interior).
+    # This requires access to incident faces.
+    is_vertex_concave_B = compute_vertex_concavity(mesh_B)
+    is_edge_concave_B = compute_edge_concavity(mesh_B)
+    is_edge_concave_A = compute_edge_concavity(mesh_A)
+
+    # Process Triangle Primitives: f_A + v_B
+    for f_A in mesh_A.triangles:
+        n_A = f_A.outward_normal
+        v_A_list = f_A.vertices # [v0, v1, v2]
+        
+        for v_B in mesh_B.vertices:
+            if is_vertex_concave_B[v_B.id]:
+                continue # Prop 4
+            
+            # Generate primitive vertices
+            prim_verts = [v_A + v_B for v_A in v_A_list]
+            
+            # Prop 1 Check
+            valid = True
+            for v_A in v_A_list:
+                # Incident edges of f_A pointing away from v_A (current vertex in loop context? 
+                # Note: Prop 1 says "incident edge of fA pointing away from vB". 
+                # The text implies ei are edges of fA. The condition is nA . ei <= 0.
+                # The proof considers ei pointing away from vB? 
+                # Re-reading Prop 1: "ei the i-th incident edge of fA pointing away from vB".
+                # This phrasing is slightly ambiguous. Usually, edges are defined by vertices.
+                # In the proof, it considers a point P inside fA. 
+                # Standard interpretation: Check if any edge of f_A points "outward" relative to the translation direction?
+                # Actually, the proposition states: nA . ei <= 0.
+                # Let's assume ei are the three edges of f_A.
+                pass 
+            
+            # Correction on Prop 1 interpretation based on proof:
+            # The proof considers ei as edges of fA. The condition nA . ei <= 0 must hold for ALL edges.
+            # If nA . ei > 0 for ANY edge, it is invalid.
+            for edge in f_A.edges:
+                if dot(n_A, edge.vector) > 0:
+                    valid = False
+                    break
+            
+            if valid:
+                valid_primitives.append({
+                    'type': 'triangle',
+                    'verts': prim_verts,
+                    'normal': n_A,
+                    'flag': 1
+                })
+
+    # Process Quadrilateral Primitives: e_A + e_B
+    for e_A in mesh_A.edges:
+        if is_edge_concave_A[e_A.id]:
+            continue # Prop 3 (partial)
+            
+        for e_B in mesh_B.edges:
+            if is_edge_concave_B[e_B.id]:
+                continue # Prop 3 (partial)
+            
+            # Generate primitive vertices
+            # e_A = (u_A, v_A), e_B = (u_B, v_B)
+            u_A, v_A = e_A.vertices
+            u_B, v_B = e_B.vertices
+            prim_verts = [u_A + u_B, u_A + v_B, v_A + u_B, v_A + v_B]
+            
+            # Prop 2 Check
+            cross_prod = cross(e_A.vector, e_B.vector)
+            valid_sign = None
+            is_valid_prop2 = True
+            
+            # Get incident edges for e_A and e_B pointing away from the edge
+            # [G] Need to retrieve the 4 incident edges e0, e1 from f0, f1 of e_A
+            # and e2, e3 from f2, f3 of e_B.
+            incident_edges_A = get_incident_edges_away_from_edge(e_A, mesh_A)
+            incident_edges_B = get_incident_edges_away_from_edge(e_B, mesh_B)
+            all_incident = incident_edges_A + incident_edges_B
+            
+            for e_i in all_incident:
+                dot_val = dot(cross_prod, e_i.vector)
+                if dot_val == 0:
+                    continue # Zero dot product doesn't violate sign consistency
+                
+                if valid_sign is None:
+                    valid_sign = 1 if dot_val > 0 else -1
+                else:
+                    current_sign = 1 if dot_val > 0 else -1
+                    if current_sign != valid_sign:
+                        is_valid_prop2 = False
+                        break
+            
+            if is_valid_prop2:
+                # Determine normal direction
+                # If (eA x eB) . ei <= 0 for all, normal is eA x eB
+                # If (eA x eB) . ei >= 0 for all, normal is -eA x eB
+                # We need to check the sign of the dot products again to set the flag
+                all_non_pos = True
+                all_non_neg = True
+                for e_i in all_incident:
+                    dot_val = dot(cross_prod, e_i.vector)
+                    if dot_val > 0:
+                        all_non_pos = False
+                    if dot_val < 0:
+                        all_non_neg = False
+                
+                if all_non_pos:
+                    normal = cross_prod
+                    flag = 1
+                elif all_non_neg:
+                    normal = -cross_prod
+                    flag = -1
+                else:
+                    # Should have been caught by Prop 2 check, but for safety
+                    continue 
+                
+                valid_primitives.append({
+                    'type': 'quadrilateral',
+                    'verts': prim_verts,
+                    'normal': normal,
+                    'flag': flag
+                })
+
+    return valid_primitives
+
+def compute_vertex_concavity(mesh):
+    # [G] Simple heuristic: A vertex is concave if it is not convex.
+    # For a manifold mesh, this often requires checking the solid angle or 
+    # if the vertex lies inside the convex hull of its neighbors.
+    # This is a placeholder for the specific geometric test.
+    return {v.id: False for v in mesh.vertices}
+
+def compute_edge_concavity(mesh):
+    # [G] An edge is concave if the dihedral angle between incident faces is > 180.
+    # Normal check: If the angle between the normals of the two incident faces 
+    # and the edge vector indicates an "inward" fold.
+    return {e.id: False for e in mesh.edges}
+
+def get_incident_edges_away_from_edge(edge, mesh):
+    # [G] Retrieve the two faces incident to the edge.
+    # For each face, retrieve the edge opposite to the edge's vertices?
+    # No, the proposition says "edges of f0/f1 pointing away from eA".
+    # This likely refers to the other two edges of the triangle that share a vertex with eA?
+    # Or the edges of the triangle that do not include eA?
+    # In a triangle, if eA is one edge, the other two edges share vertices with eA.
+    # "Pointing away" usually means oriented such that they diverge from the edge.
+    # This function needs to return the specific vectors e0, e1, e2, e3.
+    return []
+```
+
+## Subtopics
+
+### [GPU-based Voxelization of 3D Minkowski Sum](14572-gpu-based-voxelization-of-3d-minkowski-sum.md)
+This method computes the solid and surface voxelization of the Minkowski sum of two arbitrary polyhedra directly on the GPU, bypassing the construction of a complete boundary representation (B-rep). It differs from B-rep based algorithms by avoiding complex 3D Boolean operations and high combinatorial complexity, instead leveraging GPU rasterization and depth testing to generate the volumetric representation. It builds on [Minkowski Sum Boundary Rendering via Primitive Culling](14570-minkowski-sum-boundary-rendering-via-primitive-culling.md) by extending the primitive culling concept to a full volumetric voxelization pipeline.
+
+## Operating characteristics
+**Time Complexity:** The algorithm generates $O(|F_A||V_B| + |E_A||E_B|)$ primitives. The culling step is parallelized on the GPU, with each primitive processed independently. The number of primitives is drastically reduced by culling [S1].
+
+**Memory Complexity:** Requires storing the input meshes and the generated primitives. Memory optimization is achieved by using coalesced global memory access (SoA layout) and shared memory for block-local data (16 triangles/vertices or 32 edges) [S1].
+
+**Performance:** On a Quadro FX 5800 GPU (30 multiprocessors, compute capacity 1.3), the CUDA implementation achieves a 25-30x speedup over a sequential CPU implementation on a Pentium 4 at 3 GHz [S1]. Using coalesced global memory and shared memory provides an additional 3x speedup over an unoptimized GPU version [S1].
+
+**Culling Efficiency:** For models with 500 triangles each, 1.82% of triangle primitives and 0.46% of quadrilateral primitives remain after culling. For models with 12,396 triangles each, 2.16% of triangles and 0.59% of quads remain [S1].
+
+**Strengths:** Avoids complex B-rep construction; highly parallelizable; efficient culling reduces the number of primitives to render significantly [S1].
+
+**Limitations:** The culling propositions provide necessary but not sufficient conditions for validity. Some invalid primitives (those hidden inside the boundary) may remain after culling, requiring a subsequent step (like 3D flood fill) if a complete solid voxelization is needed [S1].
+
+## Background
+The method was introduced in the paper "A GPU-based voxelization approach to 3D Minkowski sum computation" [S1]. It is designed for applications such as motion planning, penetration depth computation, and polyhedron interpolation/morphing [S1]. The algorithm leverages the fact that the boundary of the Minkowski sum of two convex polyhedra consists of triangles and quadrilaterals derived from the faces and edges of the input polyhedra [S1].
+
+## Sources
+[S1] A GPU-based voxelization approach to 3D Minkowski sum computation, https://doi.org/10.1145/1839778.1839783, fetched 2026-11-05

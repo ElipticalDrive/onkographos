@@ -1,0 +1,86 @@
+# Silhouette Edges
+
+Also called: Gradient-based silhouette detection, View-dependent edge rendering
+
+## Overview
+Silhouette Edges is a volumetric gradient-based edge detection method that emphasizes features within a density volume by rendering samples where the gradient is perpendicular to the view direction as opaque black lines [S1, unofficial]. It limits edge visibility to a specific density range to prevent the "thick line" artifact common in kernel density estimates [S1, unofficial].
+
+## How it works
+**Inputs:** Volume density field $\rho(\mathbf{x})$, gradient field $\nabla \rho(\mathbf{x})$, view direction vector $\mathbf{v}$ (normalized), emphasis range $[\rho_{min}, \rho_{max}]$, and silhouette threshold $\tau$ [S1, unofficial].
+
+**Outputs:** Final color buffer with black silhouette edges overlaid on the volume rendering [S1, unofficial].
+
+**Data Structures:** Standard ray marching state tracking current position $\mathbf{x}$, accumulated alpha $\alpha$, and accumulated color $C$ [G].
+
+**Steps:**
+1. Initialize ray marching parameters: set accumulated alpha $\alpha = 0$ and accumulated color $C = (0, 0, 0, 0)$ [G].
+2. For each sample point $\mathbf{x}$ along the ray:
+   a. Sample the density $\rho$ and gradient $\mathbf{g} = \nabla \rho(\mathbf{x})$ at $\mathbf{x}$ [S1, unofficial].
+   b. Calculate the dot product $d = \mathbf{g} \cdot \mathbf{v}$ [S1, unofficial].
+   c. Check if the sample is within the emphasis range: $\rho_{min} \le \rho \le \rho_{max}$ [S1, unofficial].
+   d. Check if the sample is a silhouette candidate: $d < \tau$ [S1, unofficial].
+   e. If both conditions are met, render the sample as fully opaque black, overriding standard volume accumulation for this sample [S1, unofficial].
+   f. Otherwise, perform standard front-to-back alpha blending using the sampled density and an opacity transfer function [S1, unofficial].
+   g. Update accumulated alpha $\alpha$ [G].
+   h. Stop if $\alpha \ge 0.96$ or the ray exits the volume [S1, unofficial].
+
+**Formulas:**
+Silhouette condition: $\mathbf{g} \cdot \mathbf{v} < \tau$
+Density emphasis condition: $\rho_{min} \le \rho \le \rho_{max}$
+Termination condition: $\alpha \ge 0.96$
+
+**Parameters:**
+$\tau$: Predefined threshold for the dot product. Not given in the sources.
+$\rho_{min}, \rho_{max}$: Range of density values for emphasis. Not given in the sources.
+$\alpha_{stop}$: Threshold for stopping ray marching. Typically $0.96$ [S1, unofficial].
+
+**Pitfalls:**
+Rendering all silhouette edges without density filtering leads to very thick edge lines that obscure most of the volume because kernel density estimation results in no completely solid surfaces [S1, unofficial].
+Precision issues may arise if the gradient magnitude is near zero, making the dot product unstable [G]. Normalize the gradient before dot product calculation.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_silhouette_edges(ray_origin, ray_direction, volume, threshold_tau, rho_min, rho_max, alpha_stop=0.96):
+    alpha = 0.0
+    color = (0.0, 0.0, 0.0, 0.0)
+    t = 0.0
+    while alpha < alpha_stop and not ray_exits_volume(ray_origin, ray_direction, t):
+        x = ray_origin + ray_direction * t
+        rho = volume.sample_density(x)
+        g = volume.sample_gradient(x)
+        d = dot(g, ray_direction)
+        if rho_min <= rho <= rho_max and d < threshold_tau:
+            color = (0.0, 0.0, 0.0, 1.0)
+            alpha = 1.0
+            break
+        else:
+            opacity = transfer_function(rho)
+            sample_color = volume.sample_color(x)
+            color = blend(color, sample_color, opacity)
+            alpha = 1.0 - (1.0 - alpha) * (1.0 - opacity)
+        t += step_size
+    return color
+```
+
+## Subtopics
+
+### Environment Map Silhouette Darkening
+A hybrid method by Gooch et al. that illustrates silhouette edges by darkening vertices based on a dot product threshold, with width varying by curvature [S2]. It uses an environment map to illustrate silhouette edges and darkens vertices that are below a low dot product threshold [S2]. It achieves a stylistic effect with silhouette width varying with curvature [S2]. This method is object-space based, contrasting with the volume-space approach of the main Silhouette Edges method [S2].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:** Not given in the sources.
+*   **Strengths:** Effectively emphasizes features within the volume by outlining regions of interest defined by the density range [S1, unofficial].
+*   **Limitations:** Can produce thick, obscuring lines if the density range is not carefully chosen or if the volume lacks sharp density transitions [S1, unofficial].
+*   **When to use:** Not given in the sources.
+*   **When not to use:** Not given in the sources.
+
+## Background
+The method was introduced in "Illustrative Rendering of Particle Systems" [S1, unofficial]. It is designed to enhance the visualization of particle systems and other volumetric data by adding illustrative edge cues [S1, unofficial]. The approach builds on standard ray casting techniques but adds a conditional opaque black rendering step based on gradient-view alignment and density thresholds [S1, unofficial].
+
+## Sources
+[S1] Illustrative Rendering of Particle Systems, https://doi.org/10.2312/pe.vmv.vmv13.177-185, fetched 2026-10-26 (unofficial)
+[S2] State of the Art Non-Photorealistic Rendering (NPR) Techniques, https://doi.org/10.2312/localchapterevents/tpcg/tpcg06/089-098, fetched 2026-10-26

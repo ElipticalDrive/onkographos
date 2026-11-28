@@ -1,0 +1,152 @@
+--- v001.md
++++ v002.md
+@@ -8,14 +8,14 @@
+ ## How it works
+ **Inputs and Outputs**
+-*   **Inputs:** A set of input images with known camera poses; an initial point cloud representation of the scene (generated via the model's own optimization or provided externally); camera parameters.
+-*   **Outputs:** A trained NeuralEditor model capable of rendering novel views; an editable point cloud where points can be moved to deform the scene; rendered images of the edited scene.
++*   **Inputs:** A set of input images with known camera poses; an initial point cloud representation of the scene; camera parameters [S1].
++*   **Outputs:** A trained NeuralEditor model capable of rendering novel views; an editable point cloud where points can be moved to deform the scene; rendered images of the edited scene [S1].
+ 
+ **Data Structures**
+ 1.  **Point Cloud ($\mathcal{P}$):** A set of 3D points $\mathbf{p}_i \in \mathbb{R}^3$. Each point stores:
+     *   Position: $\mathbf{p}_i$
+-    *   Normal vector: $\mathbf{n}_i$ (extracted to guide rendering and editing) [S1].
++    *   Normal vector: $\mathbf{n}_i$ (extracted from the point cloud geometry to guide rendering and editing) [S1].
+     *   Color/Reflection parameters: Used to model view-dependent color via the Phong reflection model [S1].
+ 2.  **K-D Tree:** A spatial data structure built over $\mathcal{P}$ to organize points into density-adaptive voxels [S1]. This enables efficient neighbor search and stable rendering by handling varying point densities [S1].
+-3.  **Neural Network ($F_\Theta$):** An MLP that maps point attributes and viewing direction to color. While the standard NeRF uses position $\mathbf{x}$ and direction $\mathbf{d}$, NeuralEditor uses the associated point's features and direction [S1].
++3.  **Neural Network ($F_\Theta$):** An MLP that maps point attributes and viewing direction to color. Unlike PointNeRF which only directly uses point locations, NeuralEditor considers the point cloud as a geometric shape and extracts normal vectors to guide rendering and editing [S1].
+ 
+ **Method Steps**
+@@ -27,6 +27,6 @@
+ 
+ 2.  **Deterministic Integration Strategy:**
+-    Standard NeRF uses stochastic sampling along rays. NeuralEditor employs a deterministic integration strategy based on the point cloud structure [S1].
+-    *   For a ray $r$, find the intersection or proximity to points in $\mathcal{P}$ using the K-D tree.
++    NeuralEditor employs a deterministic integration strategy based on the point cloud structure [S1].
++    *   For a ray $r$, find the intersection or proximity to points in $\mathcal{P}$ using the K-D tree [S1].
+     *   Compute the contribution of each point to the ray. The opacity and color of a point are functions of the viewing direction [S1].
+     *   Integrate these contributions deterministically along the ray to produce the final pixel color [S1]. This ensures stable gradients and precise point cloud reconstruction during optimization [S1].
+@@ -34,10 +34,10 @@
+ 3.  **Phong Reflection Modeling:**
+     To enhance color fidelity and geometric detail, the color output is modeled using the Phong reflection model [S1].
+-    *   Decompose the color $\mathbf{c}$ into diffuse and specular components [S1].
++    *   Decompose the color using the Phong reflection model to isolate the specular component and better represent scene geometry [S1].
+     *   The specular component depends on the view direction $\mathbf{d}$, the surface normal $\mathbf{n}$ (derived from the point cloud geometry), and the light direction (assumed or estimated) [S1].
+     *   This decomposition allows the model to better represent scene geometry and handle specular highlights, which are difficult for standard NeRFs [S1].
+ 
+ 4.  **Optimization:**
+-    Optimize the point cloud positions $\mathcal{P}$, normals $\mathcal{N}$, and neural network parameters $\Theta$ to minimize the difference between rendered images and input images [S1].
++    Optimize the point cloud positions $\mathcal{P}$ and neural network parameters $\Theta$ to minimize the difference between rendered images and input images [S1].
+     *   Use a pruning and growing strategy to maintain an optimal point density [S1].
+     *   The optimization yields a precise point cloud that accurately represents the scene geometry [S1].
+@@ -49,5 +49,5 @@
+ 
+ 6.  **Scene Morphing (Optional Extension):**
+-    Guided by a point cloud diffusion model, the method can be extended to smooth scene morphing across multiple scenes [S1]. This involves interpolating or transforming the point cloud structure between different scenes [S1].
++    Guided by a point cloud diffusion model, the method can be extended to smooth scene morphing across multiple scenes [S1]. This involves mapping associated points between point clouds to deform the shape, supporting zero-shot inference on edited scenes without additional training [S1].
+ 
+ **Pseudocode**
+@@ -60,20 +60,17 @@
+         """
+         Initialize NeuralEditor with a point cloud and a pre-built K-D tree.
+-        point_cloud: List of points, each with position (3,), normal (3,), and color params.
++        point_cloud: List of points, each with position (3,), normal (3,), sigma, and color_params.
+         kd_tree: K-D tree structure for efficient neighbor search.
+         """
+         self.points = point_cloud
+         self.kd_tree = kd_tree
+-        # Neural network parameters for Phong reflection and color prediction
+-        # Not shown: F_Theta is an MLP taking point features and view direction
+         self.network_params = None
+ 
+-    def render_ray(self, ray_origin, ray_direction, num_points_sampled):
++    def render_ray(self, ray_origin, ray_direction, step_size):
+         """
+         Render a single ray using deterministic integration over the point cloud.
++        Returns: (accumulated_color, accumulated_alpha)
+         """
+         # 1. Find relevant points using K-D tree
+-        # Find points within a certain distance or along the ray path
+-        # This replaces stochastic sampling with point-based integration
+         relevant_points = self.kd_tree.query_nearby(ray_origin, ray_direction)
+         
+@@ -86,11 +83,12 @@
+         
+         for point in relevant_points:
++            v = point.position - ray_origin
++            dist_along = np.dot(v, ray_direction)
++            if dist_along < 0:
++                continue
++                
+             # 3. Compute point contribution
+-            # Distance from ray to point
+-            dist = self._ray_point_distance(ray_origin, ray_direction, point.position)
+-            
+-            # Opacity depends on distance and point density
+-            # Simplified: Gaussian falloff based on distance
+-            opacity = self._compute_opacity(dist, point)
++            # Opacity depends on distance along ray and step size
++            opacity = 1.0 - np.exp(-point.sigma * step_size)
+             
+             if opacity < 1e-5:
+@@ -98,8 +96,6 @@
+                 
+             # 4. Compute Color using Phong Reflection Model
+-            # Normal is assumed to be stored in point or computed from neighbors
+             normal = point.normal
+             view_dir = ray_direction
+-            # Assume light direction is fixed or estimated
+             light_dir = np.array([0.0, 1.0, 0.0]) 
+             
+@@ -115,21 +111,5 @@
+                 break
+                 
+-        return accumulated_color
+-
+-    def _ray_point_distance(self, origin, direction, point_pos):
+-        """Compute distance from a point to a ray."""
+-        # Vector from ray origin to point
+-        v = point_pos - origin
+-        # Project v onto direction
+-        proj = np.dot(v, direction)
+-        # Closest point on ray
+-        closest = origin + proj * direction
+-        return np.linalg.norm(point_pos - closest)
+-
+-    def _compute_opacity(self, dist, point):
+-        """Compute opacity based on distance and point attributes."""
+-        # Simplified Gaussian opacity
+-        sigma = point.sigma_param
+-        return 1.0 - np.exp(-sigma * dist**2)
++        return accumulated_color, accumulated_alpha
+ 
+     def _phong_reflection(self, normal, view_dir, light_dir, color_params):
+@@ -137,10 +117,10 @@
+         # Diffuse component
+         diffuse = np.dot(normal, light_dir)
+-        diffuse = max(0, diffuse)
++        diffuse = max(0.0, diffuse)
+         
+         # Specular component
+         reflection = 2 * np.dot(normal, light_dir) * normal - light_dir
+         specular = np.dot(reflection, -view_dir)
+-        specular = max(0, specular)
++        specular = max(0.0, specular)
+         shininess = color_params.shininess
+         specular_color = color_params.specular * (specular ** shininess)
+@@ -170,5 +150,5 @@
+             # Sample rays from edited scene
+             rays = self.sample_rays()
+-            rendered_colors = [self.render_ray(r.origin, r.direction) for r in rays]
++            rendered_colors = [self.render_ray(r.origin, r.direction, r.step) for r in rays]
+             
+             # Compute loss against ground truth
+@@ -188,5 +168,5 @@
+ *   **Precision:** Traditional NeRFs lack user-adjustable shape editing capabilities, requiring complex space deformation or mesh conversion which may lack precision [S1]. NeuralEditor avoids this by using explicit points [S1].
+ *   **Boundary Conditions:** The deterministic integration strategy must handle rays that do not intersect any points. The sources do not specify the fallback behavior for empty space [S1].
+-*   **Normal Estimation:** Accurate normal vectors are crucial for the Phong reflection model and editing. The sources do not specify how normals are initially estimated or updated during optimization [S1].
++*   **Normal Estimation:** Normal vectors are extracted from the point cloud geometry to guide rendering and editing [S1].
+ 
+ ## Operating characteristics

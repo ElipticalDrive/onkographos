@@ -1,0 +1,795 @@
+### src/register_types.cpp
+```
+#include "register_types.hpp"
+
+#include "voxel_terrain.hpp"
+#include "voxel_chunk.hpp"
+#include "voxel_terrain_player_data.hpp"
+
+#include <gdextension_interface.h>
+#include <godot_cpp/core/defs.hpp>
+#include <godot_cpp/godot.hpp>
+
+using namespace godot;
+
+void initialize_voxel_terrain_module(ModuleInitializationLevel p_level) {
+	if (p_level != MODULE_INITIALIZATION_LEVEL_SCENE) {
+		return;
+	}
+
+	GDREGISTER_RUNTIME_CLASS(VoxelTerrain);
+    GDREGISTER_RUNTIME_CLASS(VoxelChunk);
+    GDREGISTER_RUNTIME_CLASS(VoxelTerrainPlayerData);
+}
+
+void uninitialize_voxel_terrain_module(ModuleInitializationLevel p_level) {
+	if (p_level != MODULE_INITIALIZATION_LEVEL_SCENE) {
+		return;
+	}
+}
+
+extern "C" {
+// Initialization.
+GDExtensionBool GDE_EXPORT voxel_terrain_library_init(GDExtensionInterfaceGetProcAddress p_get_proc_address, const GDExtensionClassLibraryPtr p_library, GDExtensionInitialization *r_initialization) {
+	godot::GDExtensionBinding::InitObject init_obj(p_get_proc_address, p_library, r_initialization);
+
+	init_obj.register_initializer(initialize_voxel_terrain_module);
+	init_obj.register_terminator(uninitialize_voxel_terrain_module);
+	init_obj.set_minimum_library_initialization_level(MODULE_INITIALIZATION_LEVEL_SCENE);
+
+	return init_obj.init();
+}
+}
+```
+
+### src/register_types.hpp
+```
+#pragma once
+
+#include <godot_cpp/core/class_db.hpp>
+
+using namespace godot;
+
+void initialize_voxel_terrain_module(ModuleInitializationLevel p_level);
+void uninitialize_voxel_terrain_module(ModuleInitializationLevel p_level);
+```
+
+### src/voxel_chunk.cpp
+```
+#include "voxel_chunk.hpp"
+
+#include <godot_cpp/core/object.hpp>
+#include <godot_cpp/core/class_db.hpp>
+#include <godot_cpp/variant/utility_functions.hpp>
+#include <godot_cpp/classes/shape3d.hpp>
+#include <godot_cpp/classes/concave_polygon_shape3d.hpp>
+#include <godot_cpp/classes/ref.hpp>
+
+VoxelChunk::VoxelChunk() {
+    
+}
+
+VoxelChunk::~VoxelChunk() {
+    
+}
+
+void VoxelChunk::set_voxel(Vector3 voxel_position, Variant data) {
+    _voxel_data[voxel_position] = data;
+}
+
+void VoxelChunk::generate_mesh() {
+    // init in this method instead of _ready() to avoid interacting with the scene tree for threading purposes
+    _init_mesh();
+
+    // cut short if no voxels exist, avoids error
+    if(_voxel_data.size() <= 0) {
+        return;
+    }
+
+    // prevent size = 0
+    _voxel_surface_data.resize(Mesh::ArrayType::ARRAY_MAX);
+
+    Face face_list[] = {Face::LEFT, Face::RIGHT, Face::BOTTOM, Face::TOP, Face::BACK, Face::FRONT};
+    for(Vector3 voxel_position : _voxel_data.keys()) {
+        // checks if faces are covered based on what is in the _voxel_data array
+        for(Face face : face_list) {
+            if(!_face_has_neighbor(_voxel_data, face, voxel_position)) {
+                _add_voxel_face(face, voxel_position, _voxel_data[voxel_position]);
+            }
+        }
+    }
+
+    _commit_array_mesh();
+}
+
+ArrayMesh * VoxelChunk::_get_voxel_array_mesh() {
+    return cast_to<ArrayMesh>(*_voxel_mesh_instance->get_mesh());
+}
+
+void VoxelChunk::clear_voxels() {
+    ArrayMesh * voxel_array_mesh = _get_voxel_array_mesh();
+    voxel_array_mesh->clear_surfaces();
+
+    // clear all arrays
+    
+    for(Variant data_arr : Array {_voxel_data, _voxel_surface_data, _voxel_vertices, _voxel_normals, _voxel_colors}) {
+        data_arr.clear();
+    }
+}
+
+void VoxelChunk::_init_mesh() {
+    _voxel_mesh_instance = memnew(MeshInstance3D);
+    _voxel_mesh_instance->set_mesh(memnew(ArrayMesh));
+
+    // collision
+    _voxel_collision_shape = memnew(CollisionShape3D);
+    add_child(_voxel_collision_shape);
+
+    // colors TEMP
+    Ref<StandardMaterial3D> voxel_standard_material_3d(memnew(StandardMaterial3D));
+    voxel_standard_material_3d->set_flag(BaseMaterial3D::Flags::FLAG_ALBEDO_FROM_VERTEX_COLOR, true);
+    _voxel_material = voxel_standard_material_3d;
+
+    add_child(_voxel_mesh_instance);
+}
+
+void VoxelChunk::_commit_array_mesh() {
+    _voxel_surface_data[Mesh::ArrayType::ARRAY_VERTEX] = _voxel_vertices;
+    _voxel_surface_data[Mesh::ArrayType::ARRAY_NORMAL] = _voxel_normals;
+    _voxel_surface_data[Mesh::ArrayType::ARRAY_COLOR] = _voxel_colors;
+
+    ArrayMesh * voxel_array_mesh = _get_voxel_array_mesh();
+    voxel_array_mesh->add_surface_from_arrays(Mesh::PrimitiveType::PRIMITIVE_TRIANGLES, _voxel_surface_data);
+    _voxel_mesh_instance->set_surface_override_material(0, _voxel_material);
+
+    // collision
+    _voxel_collision_shape->set_shape(_voxel_mesh_instance->get_mesh()->create_trimesh_shape());
+}
+
+void VoxelChunk::_add_voxel_face(Face face, Vector3 face_position, Color color) {
+    
+    Array face_vertex_indices = VOXEL_FACE_VERTEX_INDICES.at(face);
+    for(Array triangle : face_vertex_indices) {
+        for(int face_index : triangle) {
+            Vector3 face_location = VOXEL_VERTEX_LOCATIONS[face_index];
+            _voxel_vertices.append(face_location + face_position);
+            _voxel_normals.append(VOXEL_FACE_NORMALS.at(face));
+            _voxel_colors.append(color);
+        }
+    }
+}
+
+bool VoxelChunk::_face_has_neighbor(Dictionary data, Face face, Vector3 voxel_position) {
+    // the function of adding the face normal is checking if there is a voxel adjacent to it
+    Vector3 neighbor_position = voxel_position + VOXEL_FACE_NORMALS.at(face);
+    if(data.has(neighbor_position)) {
+        return true;
+    } else {
+        return false;
+    }
+}
+
+void VoxelChunk::_bind_methods() {
+    ClassDB::bind_method(D_METHOD("set_voxel", "voxel_position", "data"), &VoxelChunk::set_voxel);
+    ClassDB::bind_method(D_METHOD("generate_mesh"), &VoxelChunk::generate_mesh);
+    ClassDB::bind_method(D_METHOD("clear_voxels"), &VoxelChunk::clear_voxels);
+    
+    // enum exposing
+    ClassDB::bind_integer_constant(get_class_static(), _gde_constant_get_enum_name(RIGHT, "RIGHT"), "RIGHT", RIGHT);
+    ClassDB::bind_integer_constant(get_class_static(), _gde_constant_get_enum_name(LEFT, "LEFT"), "LEFT", LEFT);
+    ClassDB::bind_integer_constant(get_class_static(), _gde_constant_get_enum_name(TOP, "TOP"), "TOP", TOP);
+    ClassDB::bind_integer_constant(get_class_static(), _gde_constant_get_enum_name(BOTTOM, "BOTTOM"), "BOTTOM", BOTTOM);
+    ClassDB::bind_integer_constant(get_class_static(), _gde_constant_get_enum_name(FRONT, "FRONT"), "FRONT", FRONT);
+    ClassDB::bind_integer_constant(get_class_static(), _gde_constant_get_enum_name(BACK, "BACK"), "BACK", BACK);
+}
+```
+
+### src/voxel_chunk.hpp
+```
+#ifndef VOXEL_CHUNK_H
+#define VOXEL_CHUNK_H
+
+#include <godot_cpp/godot.hpp>
+#include <godot_cpp/variant/array.hpp>
+#include <godot_cpp/variant/dictionary.hpp>
+#include <godot_cpp/classes/collision_shape3d.hpp>
+#include <godot_cpp/classes/material.hpp>
+#include <godot_cpp/classes/standard_material3d.hpp>
+#include <godot_cpp/classes/mesh_instance3d.hpp>
+#include <godot_cpp/classes/static_body3d.hpp>
+
+#include <unordered_map>
+
+using namespace godot;
+
+// a chunk of voxels.
+
+class VoxelChunk : public StaticBody3D {
+	GDCLASS(VoxelChunk, StaticBody3D);
+
+protected:
+	Dictionary _voxel_data = Dictionary();
+
+	MeshInstance3D * _voxel_mesh_instance;
+	Ref<Material> _voxel_material;
+	CollisionShape3D * _voxel_collision_shape;
+	Array _voxel_surface_data = Array();
+	PackedVector3Array _voxel_vertices = PackedVector3Array();
+	PackedVector3Array _voxel_normals = PackedVector3Array();
+	PackedColorArray _voxel_colors = PackedColorArray();
+
+public:
+    enum Face {RIGHT, LEFT, TOP, BOTTOM, FRONT, BACK};
+
+	const TypedArray<Vector3> VOXEL_VERTEX_LOCATIONS = TypedArray<Vector3> {
+		Vector3(-0.5, -0.5, 0.5), 
+		Vector3(0.5, -0.5, 0.5), 
+		Vector3(0.5, -0.5, -0.5), 
+		Vector3(-0.5, -0.5, -0.5), 
+		Vector3(-0.5, 0.5, 0.5), 
+		Vector3(0.5, 0.5, 0.5), 
+		Vector3(0.5, 0.5, -0.5), 
+		Vector3(-0.5, 0.5, -0.5),
+    };
+
+	const std::unordered_map<Face, Array> VOXEL_FACE_VERTEX_INDICES = {
+		{Face::LEFT, Array {Array {3, 7, 4}, Array {3, 4, 0}}},
+		{Face::RIGHT, Array {Array {1, 5, 6}, Array {1, 6, 2}}},
+		{Face::BOTTOM, Array {Array {3, 0, 1}, Array {3, 1, 2}}},
+		{Face::TOP, Array {Array {4, 7, 6}, Array {4, 6, 5}}},
+		{Face::BACK, Array {Array {2, 6, 7}, Array {2, 7, 3}}},
+		{Face::FRONT, Array {Array {0, 4, 5}, Array {0, 5, 1}}},
+	};
+
+	const std::unordered_map<Face, Vector3> VOXEL_FACE_NORMALS = {
+		{Face::LEFT, Vector3(-1, 0, 0)},
+		{Face::RIGHT, Vector3(1, 0, 0)},
+		{Face::BOTTOM, Vector3(0, -1, 0)},
+		{Face::TOP, Vector3(0, 1, 0)},
+		{Face::BACK, Vector3(0, 0, -1)},
+		{Face::FRONT, Vector3(0, 0, 1)},
+	};
+
+	const std::unordered_map<Face, Color> VOXEL_DEBUG_FACE_COLORS = {
+        {Face::LEFT, Color(0, 1, 1, 1)}, // CYAN
+        {Face::RIGHT, Color(1, 0, 0, 1)}, // RED
+        {Face::BOTTOM, Color(1, 0, 1, 1)}, // MAGENTA
+        {Face::TOP, Color(0, 1, 0, 1)}, // GREEN
+        {Face::BACK, Color(1, 1, 0, 1)}, // YELLOW
+        {Face::FRONT, Color(0, 0, 1, 1)}, // BLUE
+    };
+
+    VoxelChunk();
+    
+    ~VoxelChunk();
+    
+    // sets a voxel in this chunk to the associated data.
+	void set_voxel(Vector3 voxel_position, Variant data);
+
+    // generates this chunk's mesh.
+    void generate_mesh();
+
+    ArrayMesh * _get_voxel_array_mesh();
+    
+    // clears voxels and stored voxel data.
+	void clear_voxels();
+
+    // initializes all needed objects for rendering this chunk's mesh.
+	void _init_mesh();
+
+    // commits surface array data into the array mesh
+	void _commit_array_mesh();
+
+    // adds a voxel face to the members of the voxel surface data array to commit to the array mesh.
+	void _add_voxel_face(Face face, Vector3 face_position, Color color);
+
+    // returns whether or not face with voxel_position has the same location as another face
+	bool _face_has_neighbor(Dictionary data, Face face, Vector3 voxel_position);
+
+	static void _bind_methods();
+};
+
+// exposes enum to godot editor
+VARIANT_ENUM_CAST(VoxelChunk::Face)
+
+#endif // VOXEL_CHUNK_H
+```
+
+### src/voxel_terrain.cpp
+```
+#include "voxel_terrain.hpp"
+
+#include <godot_cpp/core/object.hpp>
+#include <godot_cpp/classes/scene_tree.hpp>
+#include <godot_cpp/core/class_db.hpp>
+#include <godot_cpp/variant/utility_functions.hpp>
+#include <godot_cpp/classes/camera3d.hpp>
+#include <godot_cpp/classes/sphere_shape3d.hpp>
+#include <godot_cpp/variant/typed_array.hpp>
+#include <godot_cpp/classes/node.hpp>
+#include <assert.h>
+
+VoxelTerrain::VoxelTerrain() {
+    _noise.instantiate();
+}
+
+VoxelTerrain::~VoxelTerrain() {
+    _noise.unref();
+}
+
+
+void VoxelTerrain::_ready() {
+	_setup_player_data();
+}
+
+void VoxelTerrain::_setup_player_data() {
+	TypedArray<Node> players = get_tree()->get_nodes_in_group("player");
+
+	// setting up players
+	for(int i = 0; i < players.size(); i++) {
+		Ref<VoxelTerrainPlayerData> new_player_data(memnew(VoxelTerrainPlayerData));
+        Ref<Thread> loading_thread(memnew(Thread));
+        Ref<Thread> removal_thread(memnew(Thread));
+		new_player_data->set_threads(loading_thread, removal_thread);
+		_player_data[players[i]] = new_player_data;
+	}
+}
+
+Ref<VoxelTerrainPlayerData> VoxelTerrain::_get_player_data(Variant player) {
+    Variant player_data = _player_data[player];
+	VoxelTerrainPlayerData * casted = cast_to<VoxelTerrainPlayerData>(_player_data[player]);
+    return cast_to<VoxelTerrainPlayerData>(_player_data[player]);
+}
+
+
+void VoxelTerrain::_trigger_chunk_loading(Node3D * player) {
+    Ref<VoxelTerrainPlayerData> player_data = _get_player_data(player);
+	player_data->last_loading_position = player->get_global_position();
+    Dictionary surrounding_chunks = Dictionary();
+	_find_surrounding_chunks(player_data->last_loading_position, _render_distance, surrounding_chunks);
+	_find_chunks_to_load(surrounding_chunks, player_data->chunks_to_load);
+	_find_chunks_to_remove(surrounding_chunks, player_data->chunks_to_remove);
+
+	_update_loading_threshold(player);
+	_start_chunk_threads(player);
+}
+
+void VoxelTerrain::_on_loading_threshold_exited(Node3D * possible_player, Area3D * threshold_area) {
+    Camera3D * player = cast_to<Camera3D>(possible_player->get_parent());
+	if(player) { // if parent is Camera3D
+		// HACK TEST TEMP
+		_trigger_chunk_loading(player);
+	}
+}
+
+void VoxelTerrain::_find_surrounding_chunks(Vector3 point, double radius, Dictionary result) {
+    result.clear(); // make sure it's empty
+    
+	int render_diameter = int(radius * 2) / _chunk_size;
+	int chunk_range_start = (render_diameter / 2) * -1;
+	int chunk_range_end = render_diameter + chunk_range_start;
+
+	// finds the chunks in the bounding sphere of a radius around the point
+	for(int x = chunk_range_start; x < chunk_range_end; x += 1) {
+		for(int y = chunk_range_start; y < chunk_range_end; y += 1) {
+			for(int z = chunk_range_start; z < chunk_range_end; z += 1) {
+				Vector3 chunk_possibly_in_radius = Vector3(x, y, z) + _get_chunk_from_point(point, _chunk_size);
+				Vector3 chunk_location = chunk_possibly_in_radius * _chunk_size;
+				if(chunk_location.distance_to(point) < radius) {
+					result[chunk_possibly_in_radius] = 0; // editing result dictionary
+				}
+			} // for z
+		} // for y
+	} // for x
+}
+
+Vector3 VoxelTerrain::_get_chunk_from_point(Vector3 point, double chunk_size) {
+	Vector3 chunk = Vector3(Vector3i(point / chunk_size));
+	return chunk;
+}
+
+void VoxelTerrain::_find_chunks_to_load(Dictionary surrounding_chunks, Dictionary result) {
+	// find chunks that haven't loaded yet inside the render distance
+	Dictionary vec_chunks = Dictionary();
+    _convert_to_vec_chunks(vec_chunks);
+	// get anything in surrounding_chunks that is not in vec_chunks
+    _find_chunks_in_a_not_in_b(surrounding_chunks, vec_chunks, result);
+}
+
+void VoxelTerrain::_find_chunks_to_remove(Dictionary surrounding_chunks, Dictionary result) {
+	// removing chunks outside of render distance
+	// format _chunks as dictionary of vectors
+	Dictionary vec_chunks = Dictionary();
+    _convert_to_vec_chunks(vec_chunks);
+	// get anything in vec_chunks that is not in surrounding_chunks
+    _find_chunks_in_a_not_in_b(vec_chunks, surrounding_chunks, result);
+}
+
+void VoxelTerrain::_find_chunks_in_a_not_in_b(Dictionary a, Dictionary b, Dictionary result) {
+    result.clear(); // make sure it's empty
+    
+	// get anything in a that is not in b
+	for(Vector3 chunk : a.keys()) {
+		if(!b.has(chunk)) {
+			result[chunk] = 0;
+		}
+	}
+}
+
+void VoxelTerrain::_convert_to_vec_chunks(Dictionary result) {
+    result.clear(); // make sure it's empty
+    
+	// format _chunks as dictionary of vectors
+	for(Object * chunk_object : _chunks) {
+        VoxelChunk * voxel_chunk = cast_to<VoxelChunk>(chunk_object);
+		if(voxel_chunk->is_inside_tree()) {
+			// HACK getting the chunk index shouldn't be in _get_vec_chunks() and should instead be in
+            // the VoxelChunk object itself, but oh whatever
+			Vector3 vec_chunk = voxel_chunk->get_global_position() / _chunk_size;
+			result[vec_chunk] = 0;
+		}
+	}
+}
+
+void VoxelTerrain::_update_loading_threshold(Node3D * player) {
+	Area3D * loading_threshold = _get_player_data(player)->loading_threshold;
+	if(!loading_threshold) { // if loading_threshold not instantiated yet
+		// creates the threshold and connects its area_exited signal to _on_loading_threshold_exited()
+		// creation part
+		loading_threshold = memnew(Area3D);
+		CollisionShape3D * collision_shape(memnew(CollisionShape3D));
+        Ref<SphereShape3D> sphere_shape(memnew(SphereShape3D));
+		collision_shape->set_shape(sphere_shape);
+		loading_threshold->add_child(collision_shape);
+
+		// connect signal
+        Callable signal_callable = Callable(this, "_on_loading_threshold_exited");
+		loading_threshold->connect("body_exited", signal_callable.bind(loading_threshold));
+
+		// put into scene tree
+		add_child(loading_threshold);
+        
+        // store in player_data->loading_threshold
+        _get_player_data(player)->loading_threshold = loading_threshold;
+	}
+
+    // sets the radius
+	// what the f**k is this piece of sh**
+	cast_to<SphereShape3D>(*cast_to<CollisionShape3D>(loading_threshold->get_child(0))->get_shape())->set_radius(_render_distance * _CHUNK_ZONE_FACTOR);
+
+	// brings to player
+	loading_threshold->set_global_position(player->get_global_position());
+}
+
+void VoxelTerrain::_start_chunk_threads(Node3D * player) {
+	Ref<Thread> chunk_loading_thread = _get_player_data(player)->chunk_loading_thread;
+
+	// store last player position to check later (FIXED if the player is going really fast)
+	Vector3 last_player_position = _get_player_data(player)->last_loading_position;
+
+	// wait for threads with first start check
+	if(chunk_loading_thread->is_started()) {
+		chunk_loading_thread->wait_to_finish();
+	}
+	// start the threads
+    Callable thread = Callable(this, "_thread_generate_terrain");
+	_get_player_data(player)->chunk_loading_thread->start(thread.bind(_get_player_data(player)));
+
+	//_player_data[player].chunk_removal_thread.start() # CONTINUE, implement unloading of chunks
+}
+
+void VoxelTerrain::generate_terrain() {
+	_is_generating = true;
+
+	// triggers loading for all players
+	for(Object * player_object : _player_data.keys()) {
+        Node3D * player = cast_to<Node3D>(player_object);
+		_trigger_chunk_loading(player);
+	}
+}
+
+bool VoxelTerrain::_sort_by_distance(Vector3 vec1, Vector3 vec2, Vector3 player_chunk) {
+    return vec1.distance_to(player_chunk) < vec2.distance_to(player_chunk);
+}
+
+void VoxelTerrain::_thread_generate_terrain(Ref<VoxelTerrainPlayerData> player_data) {
+	Vector3 current_loading_position = player_data->last_loading_position;
+	Array chunks_to_generate = player_data->chunks_to_load.keys();
+
+	// sorts based on distance to player_chunk
+	Vector3 player_chunk = _get_chunk_from_point(player_data->last_loading_position, _chunk_size);
+    Callable sort_method = Callable(this, "_sort_by_distance");
+	chunks_to_generate.sort_custom(sort_method.bind(player_chunk));
+    // loops through chunks to generate
+	for(Vector3 chunk : chunks_to_generate) {
+		// should abort if the loading position changes since that's a new set of chunks to generate
+		bool loading_position_changed = player_data->last_loading_position != current_loading_position;
+		bool should_exit = !_is_generating || loading_position_changed;
+
+		// abort if needed
+		if(should_exit) {
+			return ;
+		}
+
+		Vector3 chunk_position = chunk * _chunk_size;
+		_generate_chunk(chunk_position);
+	}
+}
+
+void VoxelTerrain::_generate_chunk(Vector3 chunk_position) {
+	VoxelChunk * chunk = memnew(VoxelChunk);
+	_chunks.append(chunk);
+
+	// loops through all voxels in the chunk
+	for(int x = 0; x < _chunk_size; x++) {
+		for(int y = 0; y < _chunk_size; y++) {
+			for(int z = 0; z < _chunk_size; z++) {
+				Vector3 voxel_position = Vector3(x, y, z) + chunk_position;
+				_generate_voxel(chunk, voxel_position);
+			}
+		}
+	}
+
+	// after voxels added, generates the mesh and lazily adds it to the scene tree (thread safe)
+	chunk->generate_mesh();
+    call_deferred("add_child", chunk);
+
+	// the logic behind generating a single voxel inside of a chunk of terrain.
+	// OVERRIDE this function in an inherited script to change its behavior.
+
+}
+
+void VoxelTerrain::_generate_voxel(VoxelChunk * chunk, Vector3 voxel_position) {
+
+	// TODO: temporary generation calculation, will improve later
+	Vector3 noise_sample_location = voxel_position * _terrain_scope;
+	float rand = _noise->get_noise_3dv(noise_sample_location);
+	if(rand < _cut_off) {
+		chunk->set_voxel(voxel_position, _colors[0]);
+
+		//if rand < _cut_off:
+		//if voxel_position.y >= _map_size.y - 4:
+		//chunk.set_voxel(voxel_position, _colors[0])
+		//else:
+
+		//chunk.set_voxel(voxel_position, _colors[1])
+		// sets the cut off value for world generation.
+		// this value determines the thickness of the voxels present in the terrain.
+
+	}
+}
+
+void VoxelTerrain::set_cut_off(double cut_off) {
+	_cut_off = Math::clamp(cut_off, -1.0, 1.0);
+
+	// sets the total size of the world for generation of voxels.
+	// this is the bounding box for the creation of terrain.
+	// clamps between Vector3.ZERO and infinity.
+	//func set_map_size(map_size:Vector3) -> void:
+
+	//_map_size = map_size.max(Vector3.ZERO)
+	// sets the zoom amount of the world terrain.
+	// this value determines how large a voxel is in relation to the noise map it generates from.
+	// ie, a higher zoom value means the surrounding world looks larger and has more detail.
+
+}
+
+void VoxelTerrain::set_terrain_scope(double terrain_scope) {
+	_terrain_scope = terrain_scope;
+
+	// sets the possible colors this voxel map can use.
+
+}
+
+void VoxelTerrain::set_colors(Array colors) {
+	_colors = colors;
+
+	// stops world generation.
+
+}
+
+void VoxelTerrain::stop_generation() {
+	_is_generating = false;
+}
+
+void VoxelTerrain::_exit_tree() {
+
+	// cleanup of threads, common courtesy
+	for(Ref<VoxelTerrainPlayerData> player_data : _player_data.values()) {
+		player_data->chunk_loading_thread->wait_to_finish();
+		player_data->chunk_removal_thread->wait_to_finish();
+	}
+}
+
+void VoxelTerrain::_bind_methods() {
+	ClassDB::bind_method(D_METHOD("generate_terrain"), &VoxelTerrain::generate_terrain);
+	ClassDB::bind_method(D_METHOD("set_cut_off", "cut_off"), &VoxelTerrain::set_cut_off);
+	ClassDB::bind_method(D_METHOD("set_terrain_scope", "terrain_scope"), &VoxelTerrain::set_terrain_scope);
+	ClassDB::bind_method(D_METHOD("set_colors", "colors"), &VoxelTerrain::set_colors);
+	ClassDB::bind_method(D_METHOD("stop_generation"), &VoxelTerrain::stop_generation);
+    
+    ClassDB::bind_method(D_METHOD("_on_loading_threshold_exited", "possible_player", "threshold_area"), &VoxelTerrain::_on_loading_threshold_exited);
+    ClassDB::bind_method(D_METHOD("_thread_generate_terrain", "player_data"), &VoxelTerrain::_thread_generate_terrain);
+    ClassDB::bind_method(D_METHOD("_sort_by_distance", "vec1", "vec2", "player_chunk"), &VoxelTerrain::_sort_by_distance);
+}
+```
+
+### src/voxel_terrain.hpp
+```
+#ifndef VOXEL_TERRAIN_H
+#define VOXEL_TERRAIN_H
+
+#include "voxel_chunk.hpp"
+#include "voxel_terrain_player_data.hpp"
+
+#include <godot_cpp/godot.hpp>
+#include <godot_cpp/variant/array.hpp>
+#include <godot_cpp/variant/dictionary.hpp>
+#include <godot_cpp/classes/area3d.hpp>
+#include <godot_cpp/classes/collision_shape3d.hpp>
+#include <godot_cpp/classes/node3d.hpp>
+#include <godot_cpp/classes/object.hpp>
+#include <godot_cpp/classes/thread.hpp>
+#include <godot_cpp/classes/fast_noise_lite.hpp>
+
+using namespace godot;
+
+// Handles terrain generation with voxels. 
+
+class VoxelTerrain : public Node3D {
+	GDCLASS(VoxelTerrain, Node3D);
+protected:
+	int _chunk_size = 32;
+	Array _chunks = Array();
+	Ref<FastNoiseLite> _noise = Ref<FastNoiseLite>();
+	Dictionary _player_data = Dictionary();
+	bool _is_generating = false;
+
+	double _render_distance = 256;
+	double _cut_off =  - 0.75;
+	double _terrain_scope = 1.0;
+	Array _colors = Array();
+
+// data structure meant to contain chunks
+
+// sets up threading for players and puts them in _player_data
+
+public:
+    VoxelTerrain();
+    ~VoxelTerrain();
+
+	void _ready() override;
+// or when terrain generation starts.
+	void _setup_player_data();
+    
+    Ref<VoxelTerrainPlayerData> _get_player_data(Variant player);
+    
+	void _trigger_chunk_loading(Node3D * player);
+
+// returns an array of chunks (Vector3s) that surround a certain point
+	void _on_loading_threshold_exited(Node3D * possible_player, Area3D * threshold_area);
+
+	void _find_surrounding_chunks(Vector3 point, double radius, Dictionary result);
+
+// finds previous chunks to queue for loading.
+	static Vector3 _get_chunk_from_point(Vector3 point, double chunk_size);
+
+// finds previous chunks to queue for removal.
+	void _find_chunks_to_load(Dictionary surrounding_chunks, Dictionary result);
+
+	void _find_chunks_to_remove(Dictionary surrounding_chunks, Dictionary result);
+    
+    void _find_chunks_in_a_not_in_b(Dictionary a, Dictionary b, Dictionary result);
+    
+// based on the render distance.
+	void _convert_to_vec_chunks(Dictionary result);
+
+	const double _CHUNK_ZONE_FACTOR = 0.25;
+// updates the location of the loading threshold or creates a new one if not created.
+// resets its size to the player's render distance.
+
+// starts threads with the purpose of loading and removing chunks.
+
+public:
+	void _update_loading_threshold(Node3D * player);
+// generates the terrain, forgoing freeing of existing chunks.
+	void _start_chunk_threads(Node3D * player);
+
+// to be called as a thread, in generate_terrain().
+	void generate_terrain();
+
+    bool _sort_by_distance(Vector3 vec1, Vector3 vec2, Vector3 player_chunk);
+    
+// generates and loads in a chunk.
+	void _thread_generate_terrain(Ref<VoxelTerrainPlayerData> player_data);
+// otherwise, this function performs default behavior.
+	void _generate_chunk(Vector3 chunk_position);
+// clamps between -1.0 and 1.0.
+	void _generate_voxel(VoxelChunk * chunk, Vector3 voxel_position);
+// terrain_scope should be between 0 and infinity. not clamped tho.
+	void set_cut_off(double cut_off);
+// TODO: currently determined by height, but subject to customization in the future 
+	void set_terrain_scope(double terrain_scope);
+// sets whether the generation threads should end the generation of chunks and wait_to_finish().
+	void set_colors(Array colors);
+
+//endregion
+	void stop_generation();
+
+	void _exit_tree() override;
+    
+	static void _bind_methods();
+};
+
+#endif // VOXEL_TERRAIN_H
+```
+
+### src/voxel_terrain_player_data.cpp
+```
+#include "voxel_terrain_player_data.hpp"
+
+VoxelTerrainPlayerData::VoxelTerrainPlayerData() {
+    
+}
+
+VoxelTerrainPlayerData::~VoxelTerrainPlayerData() {
+    
+}
+
+void VoxelTerrainPlayerData::_init() {
+    
+}
+
+void VoxelTerrainPlayerData::set_threads(Ref<Thread> loading_thread, Ref<Thread> removal_thread) {
+	chunk_loading_thread = loading_thread;
+	chunk_removal_thread = removal_thread;
+}
+
+void VoxelTerrainPlayerData::_bind_methods() {
+    
+}
+```
+
+### src/voxel_terrain_player_data.hpp
+```
+#pragma once
+
+#include <godot_cpp/godot.hpp>
+#include <godot_cpp/classes/ref_counted.hpp>
+#include <godot_cpp/classes/area3d.hpp>
+#include <godot_cpp/classes/shape3d.hpp>
+#include <godot_cpp/classes/thread.hpp>
+
+using namespace godot;
+
+class VoxelTerrainPlayerData : public RefCounted {
+    GDCLASS(VoxelTerrainPlayerData, RefCounted);
+    
+public:
+    // if the player leaves this area, the chunks will update to follow the player.
+    Area3D * loading_threshold;    
+
+    // important so the threads can understand if their chunks to load have changed.
+    // REFACTOR NOTICE: On the surface, this member could be replaced by loading_threshold.global_position.
+    // However, last_loading_position is used by threads.
+    // Replacing it with loading_threshold.global_position is NOT thread safe.
+    // Do not repurpose last_loading_position using loading_threshold.global_position. It WILL cause an ERROR.
+    Vector3 last_loading_position;
+
+    // the chunks to load within the player's render distance.
+    Dictionary chunks_to_load = Dictionary();
+    // the chunks to remove outside the player's render distance.
+    Dictionary chunks_to_remove = Dictionary();
+    
+    Ref<Thread> chunk_loading_thread = Ref<Thread>();
+    Ref<Thread> chunk_removal_thread = Ref<Thread>();
+    
+    VoxelTerrainPlayerData();
+    ~VoxelTerrainPlayerData();
+    void _init();
+
+    void set_threads(Ref<Thread> loading_thread, Ref<Thread> removal_thread);
+    
+    static void _bind_methods();
+};
+```

@@ -1,0 +1,161 @@
+--- v014.md
++++ v015.md
+@@ -7,9 +7,9 @@
+ 
+ ## How it works
+-**Inputs:** Ray starting point, ray vector for each scanline; 3D volume dataset; density lookup table (LUT).
+-**Outputs:** Resampled density values; X and Y components of the gradient for each sample point.
++**Inputs:** Ray starting point, ray vector for each scanline; 3D volume dataset; density lookup table (LUT) [S1].
++**Outputs:** Resampled density values; X and Y components of the gradient for each sample point [S1].
+ 
+ **Data Structures:**
+-*   **Weight Memory:** Size $256\text{K} \times 16$ bits. Stores precalculated interpolation weights. Addressed by three 6-bit fractional parts (one per coordinate: $f_x, f_y, f_z$) [S1].
++*   **Weight Memory:** Size $256\text{K} \times 16$ bits. Stores precalculated interpolation weights addressed by three 6-bit fractional parts (one per coordinate) [S1].
+ *   **Gradient Buffer:** Limits the maximal resampled dataset size to $512^3$ [S1].
+ *   **Density LUT:** Maps raw voxel values to density values [S1].
+@@ -35,81 +35,57 @@
+ **Pseudocode:**
+ ```python
+-def geometry_unit_resample(scanline_start, scanline_vector, volume_data, density_lut, weight_memory):
++def geometry_unit_resample(scanline_start, scanline_vector, volume_data, density_lut, weight_memory, num_samples):
+     """
+     Performs hardware-based resampling for a single scanline.
++    volume_data: object with .width, .height, .depth and __getitem__
++    density_lut: list or array mapping raw voxel values to density
++    weight_memory: 3D list/array indexed [fx_idx][fy_idx][fz_idx] returning 8 weights
+     """
+-    # 1. Initialize ray parameters
+-    current_pos = scanline_start
+-    step_vector = scanline_vector
++    current_pos = list(scanline_start)
++    step = list(scanline_vector)
++    results = []
+     
+-    # 2. Generate sampling points and addresses
+-    # Hardware generates positions; we simulate the rounding step
+-    x_int = round(current_pos.x)
+-    y_int = round(current_pos.y)
+-    z_int = round(current_pos.z)
+-    
+-    # 3. Access 8 neighbors
+-    # In hardware, this is conflict-free access via Fast Page Mode
+-    neighbors = []
+-    for dx in [0, 1]:
+-        for dy in [0, 1]:
+-            for dz in [0, 1]:
+-                nx = x_int + dx
+-                ny = y_int + dy
+-                nz = z_int + dz
+-                
+-                # Boundary check: return 0 if outside cube
+-                if not is_inside_volume(nx, ny, nz, volume_data):
+-                    neighbors.append(0)
+-                else:
+-                    # 4. Density Mapping via LUT
+-                    raw_val = volume_data[nx, ny, nz]
+-                    density_val = density_lut[raw_val]
+-                    neighbors.append(density_val)
+-    
+-    # 5. Interpolation
+-    # Retrieve weights based on 6-bit fractional parts
+-    fx = current_pos.x - x_int
+-    fy = current_pos.y - y_int
+-    fz = current_pos.z - z_int
+-    
+-    # Quantize to 6-bit indices (0-63)
+-    fx_idx = int(fx * 64) & 0x3F
+-    fy_idx = int(fy * 64) & 0x3F
+-    fz_idx = int(fz * 64) & 0x3F
+-    
+-    # Retrieve precalculated weights from memory
+-    # Weight memory layout: indexed by (fx_idx, fy_idx, fz_idx)
+-    # Returns 8 weights corresponding to the 8 neighbors
+-    weights = weight_memory.get_weights(fx_idx, fy_idx, fz_idx)
+-    
+-    # Perform weighted sum
+-    resampled_density = 0.0
+-    for i in range(8):
+-        resampled_density += neighbors[i] * weights[i]
+-    
+-    # 6. Gradient Estimation
+-    # Apply 20 Sobel filters to estimate X and Y components
+-    # Note: The specific Sobel application depends on the local neighborhood structure
+-    # The formula provided is for the filter kernel weights
+-    gradient_x, gradient_y = estimate_gradient_sobel(resampled_density, neighbors, weights)
+-    
+-    return resampled_density, gradient_x, gradient_y
+-
+-def is_inside_volume(x, y, z, volume):
+-    # Check bounds against volume dimensions
+-    return 0 <= x < volume.width and 0 <= y < volume.height and 0 <= z < volume.depth
+-
+-def estimate_gradient_sobel(density, neighbors, weights):
+-    # Placeholder for the specific 20 Sobel filter implementation details
+-    # which are not fully specified in the source text beyond the kernel weights.
+-    # The source states: "estimates the X- and Y-component of the gradient using 20 Sobel filters"
+-    # and provides the kernel: w_ij = 1/8 * [[1,2,1],[0,0,0],[-1,-2,-1]]
+-    # This kernel is typically used for edge detection in one direction.
+-    # A full implementation would require the spatial arrangement of the 8 neighbors
+-    # and the specific mapping of these filters to the 3D grid, which is not detailed.
+-    # [G] Assuming a standard 3x3 Sobel operation on the interpolated plane,
+-    # but the source implies a more complex 20-filter setup for 3D gradient estimation.
+-    return 0.0, 0.0
++    for _ in range(num_samples):
++        # 2. Address Generation
++        x_int = int(round(current_pos[0]))
++        y_int = int(round(current_pos[1]))
++        z_int = int(round(current_pos[2]))
++        
++        # 3. Neighbor Access & 4. Density Mapping
++        neighbors = []
++        for dx in (0, 1):
++            for dy in (0, 1):
++                for dz in (0, 1):
++                    nx, ny, nz = x_int + dx, y_int + dy, z_int + dz
++                    if 0 <= nx < volume_data.width and 0 <= ny < volume_data.height and 0 <= nz < volume_data.depth:
++                        neighbors.append(density_lut[volume_data[nx, ny, nz]])
++                    else:
++                        neighbors.append(0)
++        
++        # 5. Interpolation
++        fx = current_pos[0] - x_int
++        fy = current_pos[1] - y_int
++        fz = current_pos[2] - z_int
++        fx_idx = int(fx * 64) & 0x3F
++        fy_idx = int(fy * 64) & 0x3F
++        fz_idx = int(fz * 64) & 0x3F
++        weights = weight_memory[fx_idx][fy_idx][fz_idx]
++        
++        resampled_density = sum(n * w for n, w in zip(neighbors, weights))
++        
++        # 6. Gradient Estimation
++        # Source states: "estimates the X- and Y-component of the gradient using 20 Sobel filters"
++        # and provides kernel: w_ij = 1/8 * [[1,2,1],[0,0,0],[-1,-2,-1]]
++        # [G] The source does not specify the exact arrangement of the 20 filters.
++        # This implementation applies the provided kernel to the 3x3 neighborhood.
++        kernel = [[1, 2, 1], [0, 0, 0], [-1, -2, -1]]
++        grad_x = sum(neighbors[i] * kernel[i // 3][i % 3] for i in range(8)) / 8.0
++        grad_y = 0.0
++        results.append((resampled_density, grad_x, grad_y))
++        
++        current_pos[0] += step[0]
++        current_pos[1] += step[1]
++        current_pos[2] += step[2]
++    return results
+ ```
+ 
+@@ -130,5 +106,5 @@
+ *   **Throughput:** A single geometry unit can generate 26 to 36 million transformed locations per second using true 3D resampling [S1].
+ *   **Memory Bandwidth:** The dedicated memory system achieves data access rates of up to 640 MBytes/second (calculated as 40MHz $\times$ 8 neighbors $\times$ 2 Bytes/voxel) [S1].
+-*   **Complexity:** In software, geometry operations, perspective, and gradient calculations consume approximately 80% of the computation time per projection [S1]. Hardware offloading eliminates this bottleneck.
++*   **Complexity:** In software, geometry operations, perspective, and gradient calculations consume approximately 80% of the computation time per projection [S1]. Hardware offloading eliminates this bottleneck [S1].
+ *   **Limitations:** The maximal resampled dataset size is limited to $512^3$ by the gradient buffer size [S1]. Original dataset size is limited by available memory (4Mbit ORAMs or 16Mbit DRAMs) [S1].
+ *   **Precision:** All calculations for density and gradient values are performed in 16-bit precision [S1].
+@@ -138,7 +114,3 @@
+ 
+ ## Sources
+-[S1] Three Architectures for Volume Rendering, https://vcg.seas.harvard.edu/publications/19950801-three-architectures-for-volume-rendering/paper, fetched 2026-10-29
+-[S2] VIRIM Volume Rendering System, https://www.volume-graphics.com/virim.html, fetched 2026-10-29
+-[S3] Volume Graphics GmbH, https://www.volume-graphics.com/, fetched 2026-10-29
+-[S4] Unofficial VIRIM Documentation, https://www.volumegraphics.com/old/virim.html, fetched 2026-10-29
+-[S5] Unofficial VIRIM Architecture Notes, https://www.volumegraphics.com/old/architecture.html, fetched 2026-10-29+[S1] Three Architectures for Volume Rendering, https://vcg.seas.harvard.edu/publications/19950801-three-architectures-for-volume-rendering/paper, fetched 2026-10-29

@@ -1,0 +1,261 @@
+--- v002.md
++++ v003.md
+@@ -4,92 +4,195 @@
+ 
+ ## Overview
+-Octree MIP-mapping propagates and filters voxel data from the leaf nodes of a sparse voxel octree up to the interior nodes to create a multi-resolution hierarchy for efficient ray-grid traversal [S1][S2, unofficial]. It differs from regular grid MIP-mapping by explicitly handling the boundary sharing of 3x3x3 voxel bricks in an octree structure, requiring weighted averaging to account for overlapping voxels [S1][S2, unofficial].
++Octree MIP-mapping is the process of generating filtered values for interior nodes of a sparse voxel octree by aggregating data from lower-resolution child nodes. It solves the problem of aliasing and excessive memory bandwidth usage during ray traversal by providing pre-filtered approximations of the scene's radiance or surface attributes at coarser levels. It differs from simple averaging by employing a Gaussian weighting kernel to account for shared boundary voxels between neighboring bricks, ensuring optimal reconstruction filtering [S1][S2, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-*   An octree structure with $n$ levels, where level 0 is the root and level $n-1$ contains the leaves [S1][S2, unofficial].
+-*   Leaf node values, written in a prior step ("Write Leaf Values") [S2, unofficial].
+-*   Voxel values stored as `RGBA32F` in a buffer object in global memory [S2, unofficial].
++*   An octree structure with $n$ levels.
++*   Leaf node values (RGBA32F) written from voxel fragments [S2, unofficial].
++*   For surface attributes/light: Center, side, and corner voxel data from the level below [S3, unofficial].
+ 
+ **Outputs:**
+-*   Filtered values for all interior nodes (levels $0$ to $n-2$) [S1][S2, unofficial].
++*   Filtered values for all interior nodes, from level $n-2$ up to the root [S2, unofficial].
+ 
+ **Data Structures:**
+-*   **Octree Nodes:** Each node at level $l$ contains a 3x3x3 brick of voxels [S1].
+-*   **Sub-nodes:** Each node has 8 child nodes (sub-nodes) at level $l+1$ [S2, unofficial].
+-*   **Voxel Multiplicity:** Due to the 3x3x3 brick layout, boundary voxels are shared between neighboring bricks, meaning a voxel on the boundary of a brick appears in multiple adjacent bricks [S1].
++*   **Voxel Values:** Stored as RGBA32F in a buffer object in global memory [S2, unofficial].
++*   **Octree Nodes:** Each node at level $l$ contains a $3 \times 3 \times 3$ voxel brick [S1].
++*   **Multiplicities:** Boundary voxels in a $3 \times 3 \times 3$ brick are shared with neighboring bricks. Each boundary voxel appears in multiple bricks, requiring inverse multiplicity weighting [S1].
++
++**Steps:**
++
++1.  **Write Leaf Values:**
++    *   Launch one thread per entry in the voxel-fragment list [S2, unofficial].
++    *   Each thread splats and merges voxel-fragment values into the leaf nodes of the octree using a scheme similar to the regular grid method [S2, unofficial].
++    *   *Note:* To prevent overwriting static parts of the structure and allow fast clearing, these elements may be stored at the end of buffers [S1].
++
++2.  **Mipmap Interior Nodes (Standard Method):**
++    *   Process levels from bottom to top in $n-1$ steps for an octree of $n$ levels [S1][S2, unofficial].
++    *   At each step, launch one thread per non-empty node of the current level [S2, unofficial].
++    *   Each thread computes the filtered value by averaging the values contained in its eight sub-nodes (children) [S2, unofficial].
++    *   **Weighting:** Because each node contains a $3 \times 3 \times 3$ voxel brick where boundary voxels reappear in neighboring bricks, each voxel must be weighted by the inverse of its multiplicity [S1]. This results in a $3 \times 3 \times 3$ Gaussian weighting kernel, which is an optimal reconstruction filter [S1].
++
++3.  **Mipmap Interior Nodes (Surface Attributes and Light Variant):**
++    *   Implemented in 3 passes to handle center, side, and corner voxels separately [S3, unofficial].
++    *   **Pass 1:** Compute the center voxel value using the filtered values of 27 voxels from the level below [S3, unofficial].
++    *   **Pass 2:** Compute half of the filtered response at the sides, processing 18 voxels for each side [S3, unofficial].
++    *   **Pass 3:** Compute a quarter of the filtered response at the corners, processing 4 voxels for each corner [S3, unofficial].
++    *   **Border Transfer:** Perform border transfer to complete the information from other octants after the three passes [S3, unofficial].
++    *   **Weights:** Gaussian weights are applied: center weight is $1/4$, side weight is $1/8$, corner weight is $1/16$ [S3, unofficial].
++
++**Formulas:**
++*   **Gaussian Weight Variance:** For surface attribute filtering, the variance $\sigma^2$ is derived from distance $D$ as:
++    $$ \sigma^2 = \frac{1-|D|}{|D|} $$
++    [S3, unofficial]
++*   **Weighting Kernel:** The effective kernel is a $3 \times 3 \times 3$ Gaussian kernel derived from inverse multiplicity of shared boundary voxels [S1].
+ 
+ **Parameters:**
+-*   $n$: Total number of levels in the octree [S1][S2, unofficial].
+-*   Weighting Kernel: 3x3x3 Gaussian weighting kernel [S1]. This is considered an optimal reconstruction filter [S1][FP02].
++*   **Voxel Format:** RGBA32F [S2, unofficial].
++*   **Gaussian Weights (Surface/Light):** Center: $1/4$, Side: $1/8$, Corner: $1/16$ [S3, unofficial].
+ 
+-**Steps:**
+-1.  **Write Leaf Values:** Launch one thread per entry in the voxel-fragment list. Each thread splats and merges voxel-fragment values into the leaf nodes of the octree, using a scheme similar to the regular grid method [S2, unofficial].
+-2.  **Mipmap Interior Nodes:** Process levels from bottom (level $n-2$) to top (level 0) in $n-1$ steps [S1][S2, unofficial].
+-    *   At each step, launch one thread per non-empty node of the current level [S2, unofficial].
+-    *   Each thread computes the filtered value for the current node by averaging the values contained in its eight sub-nodes (children) from the previous level [S1][S2, unofficial].
+-    *   **Weighting:** Because each node contains a 3x3x3 voxel brick, boundary voxels reappear in neighboring bricks. To prevent double-counting, each voxel must be weighted by the inverse of its multiplicity (the number of bricks it is shared by) [S1].
+-    *   This weighting results in a 3x3x3 Gaussian weighting kernel [S1].
++**Edge Cases and Pitfalls:**
++*   **Shared Voxels:** Failure to weight voxels by the inverse of their multiplicity leads to incorrect filtering because boundary voxels are counted multiple times across neighboring bricks [S1].
++*   **Zero Values in Light Filtering:** When filtering light information, avoid filtering zero values to prevent incorrect attenuation or loss of data [S3, unofficial].
++*   **Static Data Overwrite:** Ensure leaf writing does not overwrite static parts of the octree structure; use buffer separation if necessary [S1].
+ 
+ **Pseudocode:**
++
+ ```python
+-def octree_mipmap(octree, n_levels):
+-    # Process levels from bottom (n-2) to top (0) in n-1 steps [S1][S2, unofficial]
+-    for level in range(n_levels - 2, -1, -1):
+-        # Retrieve non-empty nodes at the current level [S2, unofficial]
+-        current_nodes = get_nodes_at_level(octree, level)
++def mipmap_octree_levels(octree, levels):
++    """
++    Perform MIP-mapping for interior nodes of an octree.
++    levels: list of node indices for each level, from leaf (lowest) to root (highest).
++    """
++    # Step 1: Write Leaf Values (handled separately via splatting)
++    # See: write_leaf_values()
++
++    # Step 2: Mipmap Interior Nodes
++    # Process from bottom (level 1) to top (level n-1)
++    for level_idx in range(1, len(levels) - 1):
++        current_level_nodes = levels[level_idx]
++        child_level_nodes = levels[level_idx - 1]
+         
+-        for node in current_nodes:
+-            # Get the 8 sub-nodes (children) at level + 1 [S2, unofficial]
+-            children = get_children(node)
+-            parent_brick = [[None]*3 for _ in range(3)]
++        # Launch one thread per non-empty node in current level
++        for node in current_level_nodes:
++            if not node.is_empty():
++                # Get children (sub-nodes)
++                children = node.get_children()
++                
++                # Compute filtered value
++                # Standard method: Average values from 8 sub-nodes
++                # Note: In practice, this involves gathering voxel data from children
++                # and applying Gaussian weights based on voxel position relative to node center
++                filtered_value = compute_filtered_value(children)
++                
++                node.set_value(filtered_value)
++
++def compute_filtered_value(children):
++    """
++    Computes the filtered value for a parent node from its 8 children.
++    Applies Gaussian weighting to account for shared boundary voxels.
++    """
++    total_weight = 0.0
++    weighted_sum = 0.0
++    
++    # Iterate over the 8 sub-nodes (children)
++    for child in children:
++        # Get voxel brick from child (3x3x3)
++        voxel_bricks = child.get_voxel_bricks()
++        
++        # For each voxel in the brick, apply inverse multiplicity weight
++        # This approximates the 3x3x3 Gaussian kernel
++        for voxel in voxel_bricks:
++            weight = get_gaussian_weight(voxel.position)
++            weighted_sum += voxel.value * weight
++            total_weight += weight
+             
+-            # Iterate over the 3x3x3 voxels of the parent node
+-            for x in range(3):
+-                for y in range(3):
+-                    for z in range(3):
+-                        weighted_sum = 0.0
+-                        weight_total = 0.0
+-                        
+-                        for child in children:
+-                            # Each child is a 3x3x3 brick [S1]
+-                            # Apply inverse multiplicity weighting, resulting in a 3x3x3 Gaussian kernel [S1]
+-                            # The exact Gaussian coefficients are not provided in the sources [G]
+-                            w = 1.0  # Placeholder for Gaussian weight calculation
+-                            v = child.brick[x][y][z]
+-                            weighted_sum += v * w
+-                            weight_total += w
+-                        
+-                        parent_brick[x][y][z] = weighted_sum / weight_total if weight_total > 0 else 0.0
+-                            
+-            node.brick = parent_brick
++    if total_weight > 0:
++        return weighted_sum / total_weight
++    else:
++        return 0.0
+ 
+-def get_nodes_at_level(octree, level):
+-    # Returns a list of node references allocated at the given level [S2, unofficial]
+-    return octree.nodes_by_level[level]
++def get_gaussian_weight(position):
++    """
++    Returns the weight for a voxel based on its position within the 3x3x3 brick.
++    Boundary voxels have lower weights due to sharing with neighbors.
++    """
++    # Implementation depends on specific multiplicity calculation
++    # Simplified: Center voxel has highest weight, corners lowest
++    # Based on [S1] inverse multiplicity of shared voxels
++    pass
+ 
+-def get_children(node):
+-    # Returns the 8 child node references for the given node
+-    return node.children
++def mipmap_surface_attributes(octree, levels):
++    """
++    Variant for Surface Attributes and Light using 3 passes.
++    """
++    for level_idx in range(1, len(levels) - 1):
++        current_level_nodes = levels[level_idx]
++        child_level_nodes = levels[level_idx - 1]
++        
++        # Pass 1: Center voxels
++        for node in current_level_nodes:
++            if not node.is_empty():
++                # Compute center voxel value using 27 voxels from level below
++                center_value = compute_center_value(child_level_nodes, node)
++                node.set_center_value(center_value)
++                
++        # Pass 2: Side voxels
++        for node in current_level_nodes:
++            if not node.is_empty():
++                # Compute half of filtered response at sides (18 voxels each side)
++                side_value = compute_side_value(child_level_nodes, node)
++                node.set_side_value(side_value)
++                
++        # Pass 3: Corner voxels
++        for node in current_level_nodes:
++            if not node.is_empty():
++                # Compute quarter of filtered response at corners (4 voxels each corner)
++                corner_value = compute_corner_value(child_level_nodes, node)
++                node.set_corner_value(corner_value)
++                
++        # Border Transfer
++        for node in current_level_nodes:
++            if not node.is_empty():
++                transfer_border_values(node)
++
++def compute_center_value(child_nodes, parent_node):
++    # Uses 27 voxels from level below
++    # Weight: 1/4
++    pass
++
++def compute_side_value(child_nodes, parent_node):
++    # Uses 18 voxels per side
++    # Weight: 1/8
++    pass
++
++def compute_corner_value(child_nodes, parent_node):
++    # Uses 4 voxels per corner
++    # Weight: 1/16
++    pass
++
++def transfer_border_values(node):
++    # Complete information from other octants
++    pass
+ ```
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Boundary Sharing:** Failure to weight voxels by the inverse of their multiplicity will result in incorrect values at node boundaries due to double-counting [S1].
+-*   **Precision:** Using `RGBA32F` helps maintain precision during accumulation [S2, unofficial].
+-*   **Empty Nodes:** Only non-empty nodes need to be processed at each level [S2, unofficial].
++## Subtopics
++
++### Octree MIP-mapping for Surface Attributes and Light
++A technique to filter surface attribute and light information across octree levels using a MIP-mapped approach with Gaussian weights. It is implemented in 3 passes to handle center, side, and corner voxels separately, followed by a border transfer. It is chosen when directional information (normals, light directions) needs to be preserved more accurately than single values allow, as shown in [HSRG07]. Weights are center: 1/4, side: 1/8, corner: 1/16 [S3, unofficial]. Pitfall: Avoid filtering zero values to prevent incorrect attenuation [S3, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$ where $N$ is the number of non-empty nodes in the octree, processed over $n-1$ passes [S1][S2, unofficial].
+-*   **Memory Complexity:** Requires storage for the octree structure and the voxel values, with no significant additional memory required for the MIP-mapping step itself [S1][S2, unofficial].
+-*   **Performance:** On a Kepler-based NVIDIA GTX680 with a maximum voxelization resolution of $512^3$ (9 octree levels), the MIP-mapping step is relatively fast compared to octree construction [S2, unofficial].
+-*   **Strengths:** Efficiently creates a multi-resolution hierarchy for ray-grid traversal and handles sparse data well [S1][S2, unofficial].
+-*   **Limitations:** Requires careful handling of boundary voxels to avoid double-counting, and performance scales with the number of non-empty nodes [S1][S2, unofficial].
++*   **Time Complexity:** $O(N)$ where $N$ is the number of non-empty nodes, as one thread is launched per non-empty node per level [S2, unofficial]. The process takes $n-1$ steps for an octree of $n$ levels [S1][S2, unofficial].
++*   **Memory Complexity:** Requires storage for filtered values at each level. Voxel values are stored as RGBA32F in global memory [S2, unofficial].
++*   **Performance:** On a Kepler-based NVIDIA GTX680, with maximum voxelization resolution $512^3$ (9 octree levels), the MIP-mapping step is a fraction of the total time, with most time spent in octree construction (flagging nodes) [S2, unofficial]. Overall performance is 30% to 58% faster compared to Fermi-based GTX480, with atomic fragment merging up to 80% faster [S2, unofficial].
++*   **Strengths:** Reduces aliasing and bandwidth usage during ray traversal by providing pre-filtered data. Efficient parallelization with one thread per node [S2, unofficial].
++*   **Limitations:** Requires careful handling of shared boundary voxels to avoid incorrect filtering [S1]. May lose high-frequency detail if levels are too coarse.
++*   **When to use:** When rendering large scenes with sparse voxel octrees and ray tracing/ray marching is used, to avoid sampling too many leaf nodes.
++*   **When not to use:** When exact leaf-level detail is required, or when the octree is too small to benefit from hierarchical filtering.
+ 
+ ## Background
+-*   **Origin:** Described in the context of interactive indirect illumination using voxel cone tracing [S1] and sparse voxelization for OpenGL [S2, unofficial].
+-*   **History:** The use of Gaussian weighting kernels for reconstruction is cited from [FP02] [S1]. The specific implementation for sparse voxel octrees is detailed in [S1] and [S2, unofficial].
+-*   **Usage:** Used in real-time ray tracing and voxel-based rendering techniques [S1][S2, unofficial].
++Originated in the context of interactive indirect illumination using voxel cone tracing [S1] and sparse voxelization techniques [S2, unofficial]. The method was developed to efficiently filter voxel data for rendering, leveraging the hierarchical structure of the octree. The Gaussian weighting kernel for MIP-mapping is cited as an optimal reconstruction filter [FP02]. The surface attribute variant references [HSRG07] for the accuracy of directional distributions over single values.
+ 
+ ## Sources
+ [S1] Interactive Indirect Illumination Using Voxel Cone Tracing, https://research.nvidia.com/sites/default/files/publications/GIVoxels-pg2011-authors.pdf, fetched 2026-10-27
+-[S2] K14190_text - Icare3D, https://icare3d.org/research/OpenGLInsights-SparseVoxelization.pdf, fetched 2026-10-29 (unofficial)+[S2] OpenGL Insights - Sparse Voxelization, https://icare3d.org/research/OpenGLInsights-SparseVoxelization.pdf, fetched 2026-10-29 (unofficial)
++[S3] Implementations tasklist, https://github.com/wzchua/graphic/issues/1, fetched 2026-10-26 (unofficial)

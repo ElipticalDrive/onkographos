@@ -1,0 +1,132 @@
+# Lit-Tensor Shading
+Also called: Lit-Tensor
+## Overview
+Lit-Tensor Shading is a volume rendering technique that illuminates tensor splats to visualize direction and curvature in tensor fields [S1][S2, unofficial]. It adapts the Blinn-Phong lighting model by deriving surface normals from the tensor's principal axes, allowing the shading to reflect the local anisotropy (linear vs. planar) of the data [S1][S2, unofficial]. Unlike Hue-balls which use color coding for deflection, Lit-Tensors use illumination to convey geometric structure [S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A tensor field $\mathbf{T}$ (symmetric positive-definite $3 \times 3$ matrix) at each voxel, light direction $l$, camera direction $e$, object color $\lambda$, and lighting coefficients $k_d, k_s, N$.
+- Output: The final intensity $I$ for each rendered voxel.
+
+**Data Structures:**
+- Tensor $\mathbf{T}$: $3 \times 3$ symmetric matrix.
+- Eigen-decomposition: $\mathbf{T} = \mathbf{E} \mathbf{\Lambda} \mathbf{E}^T$, where $\mathbf{E} = [e_1, e_2, e_3]$ contains orthonormal eigenvectors and $\mathbf{\Lambda} = \text{diag}(\lambda_1, \lambda_2, \lambda_3)$ contains eigenvalues sorted such that $\lambda_1 \ge \lambda_2 \ge \lambda_3 \ge 0$.
+
+**Steps:**
+1. **Eigen-decomposition:** Compute the eigenvalues $\lambda_1, \lambda_2, \lambda_3$ and corresponding eigenvectors $e_1, e_2, e_3$ of the tensor $\mathbf{T}$ at the current sample point.
+2. **Determine Normal $n$:** The normal vector $n$ depends on the shape of the tensor, determined by the relative magnitudes of the eigenvalues:
+   - **Planar Anisotropy:** If the tensor is approximately planar (e.g., $\lambda_1 \approx \lambda_2 \gg \lambda_3$), the normal is the smallest principal axis: $n = e_3$.
+   - **Linear Anisotropy:** If the tensor is approximately linear (e.g., $\lambda_1 \gg \lambda_2 \approx \lambda_3$), the largest principal axis $e_1$ is tangential to the desired normal. The normal $n$ is derived such that $e_1$ is perpendicular to it. Using Pythagoras's theorem, the dot product $l \cdot n$ can be rewritten as $\sqrt{1 - (l \cdot e_1)^2}$. Note: The exact vector $n$ in the linear case is not uniquely defined by $e_1$ alone without additional constraints, but the shading intensity relies on this geometric relationship [S1].
+   - **Intermediate Cases:** For other cases, smoothly interpolate between the planar and linear shading models [S2, unofficial].
+3. **Compute Lighting Vectors:**
+   - Light direction $l$ (normalized).
+   - Camera direction $e$ (normalized, from surface to eye).
+   - Half-way vector $h = \frac{l + e}{\|l + e\|}$.
+4. **Calculate Intensities:** Apply the Blinn-Phong model using the derived normal $n$:
+   - Diffuse intensity: $I_{diffuse} = k_d \lambda (l \cdot n)$
+   - Specular intensity: $I_{specular} = k_s \lambda (h \cdot n)^N$
+   - Total intensity: $I = I_{diffuse} + I_{specular}$
+   - Where $k_d, k_s$ are diffuse and specular coefficients, and $N$ is the shininess exponent [S1].
+
+**Parameters:**
+- $k_d, k_s$: Diffuse and specular reflection coefficients. Typical values depend on the desired material appearance.
+- $N$: Shininess exponent. Higher values produce sharper specular highlights.
+- $\lambda$: Base object color.
+
+**Edge Cases and Pitfalls:**
+- **Degenerate Tensors:** If eigenvalues are equal (isotropic), the normal is undefined. A fallback (e.g., identity or zero) must be chosen [G].
+- **Linear Case Ambiguity:** The normal $n$ for linear tensors is not a single vector but a plane perpendicular to $e_1$. The formula $l \cdot n = \sqrt{1 - (l \cdot e_1)^2}$ assumes $n$ is chosen to maximize the dot product with $l$ within that plane, or implies a specific geometric interpretation of "tangential" [S1]. Implementation must clarify how $n$ is constructed from $e_1$ for the specular term $(h \cdot n)^N$.
+- **Precision:** Eigen-decomposition can be numerically unstable for nearly degenerate tensors.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def lit_tensor_shading(tensor_T, light_dir_l, camera_dir_e, lambda_color, k_d, k_s, N):
+    # 1. Eigen-decomposition
+    # tensor_T is a 3x3 symmetric matrix
+    eigenvalues, eigenvectors = eigen_decompose(tensor_T)
+    # Sort eigenvalues: lambda1 >= lambda2 >= lambda3
+    # eigenvectors columns are e1, e2, e3
+    sorted_indices = argsort(eigenvalues, descending=True)
+    lambda1, lambda2, lambda3 = eigenvalues[sorted_indices]
+    e1, e2, e3 = eigenvectors[:, sorted_indices[0]], eigenvectors[:, sorted_indices[1]], eigenvectors[:, sorted_indices[2]]
+
+    # 2. Determine Normal n
+    # Check for planar vs linear anisotropy
+    # Heuristic: if lambda3 is much smaller than lambda1 and lambda2, it's planar
+    # if lambda1 is much larger than lambda2 and lambda3, it's linear
+    # For simplicity, we use a threshold or interpolation factor based on eigenvalue ratios
+    
+    # Planar case: n = e3
+    # Linear case: n is perpendicular to e1. 
+    # The source states: l . n = sqrt(1 - (l . e1)^2). 
+    # This implies we need a normal n such that its projection onto the plane perpendicular to e1 aligns with l's projection.
+    # A robust way to get n for linear case:
+    # n_linear = normalize(cross(e1, cross(e1, l))) 
+    # However, if l is parallel to e1, this fails. 
+    # The source formula suggests we might not need the explicit vector n for diffuse, but we do for specular.
+    
+    # Let's define a normal n based on shape.
+    # If planar: n = e3
+    # If linear: We need a normal. The source says e1 is tangential to n. 
+    # This phrasing is ambiguous. Usually, for a line, the normal is any vector perpendicular to the line.
+    # The formula l . n = sqrt(1 - (l . e1)^2) is only valid if n is in the plane perpendicular to e1 
+    # and aligned with the projection of l.
+    
+    # Let's implement a smooth interpolation between planar and linear normals.
+    # Define a shape parameter s. s=0 for planar, s=1 for linear.
+    # s = 1 - (lambda2 - lambda3) / (lambda1 - lambda3 + epsilon) # Example heuristic
+    
+    # For this implementation, we will use the explicit cases described.
+    
+    if lambda3 < epsilon: # Isotropic/Point-like, fallback
+        n = e1 # Arbitrary
+    elif lambda1 > threshold * lambda2: # Linear
+        # e1 is the major axis. 
+        # We need a normal n perpendicular to e1.
+        # To maximize l.n, n should be the projection of l onto the plane perpendicular to e1, normalized.
+        l_proj = l - dot(l, e1) * e1
+        if norm(l_proj) < epsilon:
+            # l is parallel to e1, pick arbitrary perpendicular
+            n = e2 
+        else:
+            n = normalize(l_proj)
+    else: # Planar or intermediate
+        # Use e3 as normal for planar
+        n = e3
+        
+    # 3. Compute Lighting Vectors
+    l = normalize(light_dir_l)
+    e = normalize(camera_dir_e)
+    h = normalize(l + e)
+    
+    # 4. Calculate Intensities
+    # Diffuse
+    l_dot_n = dot(l, n)
+    # Clamp to [0, 1] for physical correctness
+    l_dot_n = max(0.0, l_dot_n)
+    I_diffuse = k_d * lambda_color * l_dot_n
+    
+    # Specular
+    h_dot_n = dot(h, n)
+    h_dot_n = max(0.0, h_dot_n)
+    I_specular = k_s * lambda_color * (h_dot_n ** N)
+    
+    return I_diffuse + I_specular
+```
+
+## Operating characteristics
+- **Time Complexity:** Dominated by eigen-decomposition of the $3 \times 3$ tensor, which is $O(1)$ per voxel/sample.
+- **Memory Complexity:** $O(1)$ additional memory per sample for storing eigenvalues/vectors.
+- **Strengths:** Provides intuitive visual cues for direction (linear) and surface orientation (planar) in tensor fields. Integrates well with standard volume rendering pipelines.
+- **Limitations:** The normal derivation for linear tensors is ambiguous and requires heuristic choices for the specific normal vector used in the specular term. Performance is higher than simple scalar volume rendering due to eigen-decomposition.
+- **When to use:** When visualizing anisotropic tensor fields (e.g., diffusion tensors in MRI) where direction and curvature are important.
+- **When not to use:** For isotropic scalar fields or when computational resources are extremely limited.
+
+## Background
+Lit-Tensor Shading was introduced by Kindlmann and Weinstein in 1999 [S2, unofficial]. It is based on the concept of illuminating tensor representations to provide information on direction and curvature, similar to illuminated streamlines [S2, unofficial]. The method is a variation of the Blinn-Phong lighting model adapted for tensor splats [S1]. It is often compared with Hue-balls, which use color coding to show anisotropy [S2, unofficial].
+
+## Sources
+[S1] Tensor Splats: Visualising Tensor Fields by Texture Mapped Volume Rendering, https://doi.org/10.1007/978-3-540-39903-2_37, fetched 2026-10-26
+[S2] PDF Tensor Field Visualization - ETH Z, https://cgl.ethz.ch/teaching/scivis_common/stuff/StuttgartCourse/VIS-Modules-08-Tensor_Field_Visualization.pdf, fetched 2026-10-28 (unofficial)

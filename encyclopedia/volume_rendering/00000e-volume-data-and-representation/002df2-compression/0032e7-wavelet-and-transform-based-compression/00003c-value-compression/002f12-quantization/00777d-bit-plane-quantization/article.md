@@ -1,0 +1,137 @@
+# Bit Plane Quantization
+
+Also called: Multi-byte integer quantization
+
+## Overview
+Bit plane quantization is a lossy compression technique that represents each wavelet coefficient as a sum of a small number of one-byte integers (bit planes) with associated offsets and steps, enabling efficient entropy coding [S1]. It differs from scalar quantization by decomposing the dynamic range of coefficients into multiple adaptive levels rather than a single global scale, and from vector quantization by operating on individual coefficients independently [S1]. This method is specifically designed to achieve high compression ratios for 3D numerical simulation data while controlling the $L^\infty$ error in the reconstructed physical space [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 1D array of real-valued wavelet coefficients $F_i$ for $i = 1, \dots, N$, where $N = n_x \times n_y \times n_z$; a user-specified relative tolerance $\varepsilon$; and the maximum absolute value of the physical space data $\max |f_{i_x, i_y, i_z}|$ [S1].
+*   **Output:** The number of bit planes $J$; offsets $F_{\min}^{\langle j \rangle}$; quantization steps $\delta^{\langle j \rangle}$; and bit plane values $Q_i^{\langle j \rangle}$ for $i = 1, \dots, N$ and $j = 1, \dots, J$ [S1].
+
+**Data Structures:**
+*   $F_i^{\langle j \rangle}$: Residual coefficient for index $i$ at bit plane $j$. Type: double-precision float.
+*   $Q_i^{\langle j \rangle}$: Quantized integer for index $i$ at bit plane $j$. Type: unsigned 8-bit integer (0–255).
+*   $F_{\min}^{\langle j \rangle}$: Minimum residual value at bit plane $j$. Type: double-precision float.
+*   $F_{\max}^{\langle j \rangle}$: Maximum residual value at bit plane $j$. Type: double-precision float.
+*   $\delta^{\langle j \rangle}$: Quantization step size at bit plane $j$. Type: double-precision float.
+
+**Parameters:**
+*   $\varepsilon$: Relative tolerance. Represents the desired $L^\infty$ error in physical space normalized by $\max |f|$ [S1].
+*   $\eta$: Empirical constant, typically $1.75$, used to relate the wavelet space error to the physical space error [S1].
+*   $q$: Alphabet size, fixed at 256, corresponding to the C `char` type [S1].
+
+**Algorithm:**
+1.  Initialize the residual array: $F_i^{\langle 1 \rangle} = F_i$ for all $i$ [S1].
+2.  Calculate the absolute error threshold in wavelet space:
+    $$ \varepsilon_F = \varepsilon \frac{\max |f_{i_x, i_y, i_z}|}{\eta} $$
+    where the maximum is taken over all physical space elements [S1].
+3.  Set $q = 256$ and $j = 1$ [S1].
+4.  Repeat the following loop:
+    a. Find the minimum and maximum of the current residuals:
+       $$ F_{\min}^{\langle j \rangle} = \min_{k=1, \dots, N} F_k^{\langle j \rangle} $$
+       $$ F_{\max}^{\langle j \rangle} = \max_{k=1, \dots, N} F_k^{\langle j \rangle} $$
+    b. Determine the quantization step $\delta^{\langle j \rangle}$:
+       If $(F_{\max}^{\langle j \rangle} - F_{\min}^{\langle j \rangle}) / (q - 1) > \varepsilon_F$, then $\delta^{\langle j \rangle} = (F_{\max}^{\langle j \rangle} - F_{\min}^{\langle j \rangle}) / (q - 1)$.
+       Otherwise, $\delta^{\langle j \rangle} = \varepsilon_F$ [S1].
+    c. For each $i = 1, \dots, N$, compute the quantized value:
+       $$ Q_i^{\langle j \rangle} = \left[ \frac{F_i^{\langle j \rangle} - F_{\min}^{\langle j \rangle}}{\delta^{\langle j \rangle}} \right] $$
+       where $[ \cdot ]$ denotes rounding to the nearest integer [S1].
+    d. Update the residual for the next bit plane:
+       $$ F_i^{\langle j+1 \rangle} = F_i^{\langle j \rangle} - (Q_i^{\langle j \rangle} \delta^{\langle j \rangle} + F_{\min}^{\langle j \rangle}) $$
+    e. Increment $j$ [S1].
+5.  Stop when $\delta^{\langle j \rangle} < \varepsilon_F$. The final number of bit planes is $J = j - 1$ [S1].
+
+**Approximation:**
+The original coefficient $F_i$ is approximated as:
+$$ F_i \approx \sum_{j=1}^J (Q_i^{(j)} \delta^{\langle j \rangle} + F_{\min}^{\langle j \rangle}) $$
+The approximation error is no greater than $\delta^{\langle J \rangle}$ [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def bit_plane_quantization(F, max_f, epsilon, eta=1.75, q=256):
+    """
+    F: list of float, wavelet coefficients
+    max_f: float, max absolute value in physical space
+    epsilon: float, relative tolerance
+    eta: float, empirical constant (default 1.75)
+    q: int, alphabet size (default 256)
+    Returns: J, offsets, steps, bit_planes
+    """
+    N = len(F)
+    residuals = list(F)  # F_i^{<1>}
+    offsets = []
+    steps = []
+    bit_planes = []  # List of lists, bit_planes[j][i]
+    
+    # Calculate absolute error threshold
+    epsilon_F = epsilon * max_f / eta
+    
+    j = 1
+    while True:
+        # Find min and max of current residuals
+        F_min = min(residuals)
+        F_max = max(residuals)
+        
+        # Determine step size
+        range_per_bin = (F_max - F_min) / (q - 1)
+        if range_per_bin > epsilon_F:
+            delta = range_per_bin
+        else:
+            delta = epsilon_F
+            
+        offsets.append(F_min)
+        steps.append(delta)
+        
+        # Quantize and update residuals
+        current_bit_plane = []
+        new_residuals = []
+        for r in residuals:
+            # Nearest integer
+            Q = round((r - F_min) / delta)
+            current_bit_plane.append(Q)
+            
+            # Update residual: F_i^{<j+1>} = F_i^{<j>} - (Q * delta + F_min)
+            residual_update = Q * delta + F_min
+            new_residuals.append(r - residual_update)
+            
+        bit_planes.append(current_bit_plane)
+        residuals = new_residuals
+        j += 1
+        
+        # Stop condition
+        if delta < epsilon_F:
+            break
+            
+    J = len(bit_planes)
+    return J, offsets, steps, bit_planes
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The method uses double-precision floats for residuals and steps. If the dynamic range of residuals becomes very small, floating-point precision limits may affect the accuracy of the final bit planes [S1].
+*   **Boundary Conditions:** The algorithm assumes the input array $F_i$ is fully populated. If $N=0$, the algorithm is undefined [S1].
+*   **Tolerance Selection:** The parameter $\eta=1.75$ is empirical and valid for four levels of wavelet transform. Using a different number of transform levels may require adjusting $\eta$ to maintain the desired physical space error [S1].
+
+## Subtopics
+
+### Wavelet Transform
+Preprocessing step that converts physical space data to wavelet space. Sets the stage for bit plane quantization by decorrelating data. [Link](5935-wavelet-transform.md)
+
+### Entropy Coding
+Post-processing step that compresses the bit planes $Q_i^{\langle j \rangle}$ using their statistical properties. [Link](5935-entropy-coding.md)
+
+## Operating characteristics
+*   **Time Complexity:** The algorithm requires two passes over the data per bit plane (one for min/max, one for quantization). The number of bit planes $J$ depends on the data range and tolerance. Typically $J < 8$ [S1].
+*   **Memory Complexity:** The quantized data size is $J/8$ times the original size, as each bit plane uses one byte per coefficient [S1].
+*   **Performance:** The method achieves high compression ratios suitable for turbulent flow simulations [S1]. The error in physical space is controlled by $\varepsilon$, with $\eta=1.75$ ensuring $\|f - \tilde{f}\|_\infty / \max |f| \approx \varepsilon$ for four wavelet levels [S1].
+*   **Strengths:** Adaptive quantization per bit plane allows efficient representation of varying coefficient magnitudes. Simple implementation using standard integer types.
+*   **Limitations:** Lossy compression. The empirical constant $\eta$ may not be optimal for all datasets or transform levels.
+
+## Background
+Bit plane quantization was introduced in the context of wavelet-based data compression for 3D numerical simulations on regular grids [S1]. It is part of the WaveRange compression framework [S1]. The method was developed to handle the large data volumes generated by turbulent flow simulations, where traditional lossless compression is insufficient [S1].
+
+## Sources
+[S1] WaveRange: wavelet-based data compression for three-dimensional numerical simulations on regular grids, https://doi.org/10.1007/s12650-021-00813-8, fetched 2026-10-29

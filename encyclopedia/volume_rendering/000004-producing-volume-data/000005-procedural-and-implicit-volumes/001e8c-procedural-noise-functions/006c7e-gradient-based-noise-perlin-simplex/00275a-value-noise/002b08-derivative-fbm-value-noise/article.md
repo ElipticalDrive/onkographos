@@ -1,0 +1,135 @@
+# Derivative FBM (Value Noise)
+Also called: Analytic Derivative Value Noise
+
+## Overview
+Derivative FBM (Value Noise) computes the noise value and its analytic spatial derivatives simultaneously during Hermite interpolation [S1]. Unlike standard FBM, which sums noise values directly, this method accumulates the gradient magnitude across octaves to modulate each octave's contribution, creating an erosion effect where steep regions contribute less [S1].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A 2D coordinate `x` representing the spatial position.
+- Output: A scalar value representing the accumulated terrain height or density.
+- Internal: The `noised` function returns a tuple `(value, dFdx, dFdy)` [S1].
+
+**Data Structures:**
+- Corner values are retrieved via a deterministic hash function mapping integer lattice coordinates to floats [S1].
+
+**Algorithm Steps:**
+
+1.  **Lattice and Fraction:** Compute the integer lattice point `p` and the fractional offset `f` for the input coordinate `x` [S1].
+    $$ p = \lfloor x \rfloor $$
+    $$ f = x - p $$
+
+2.  **Interpolation Weights:** Compute the quintic Hermite interpolation weights `u` and their derivative `du` [S1].
+    $$ u = 3f^2 - 2f^3 $$
+    $$ du = 6f(1 - f) $$
+
+3.  **Corner Values:** Retrieve the random scalar values at the four corners of the unit cell containing `x` [S1]. Let these be `a`, `b`, `c`, and `d` corresponding to `(0,0)`, `(1,0)`, `(0,1)`, and `(1,1)` offsets from `p` [S1].
+    - Compute `hash(p + offset)` for each corner [S1].
+
+4.  **Noise Value:** Compute the interpolated noise value `n.x` using bilinear interpolation with Hermite weights [S1].
+    $$ n.x = a + (b - a)u_x + (c - a)u_y + (a - b - c + d)u_x u_y $$
+
+5.  **Noise Derivative:** Compute the analytic derivative vector `n.yz` [S1].
+    $$ n.yz = du \cdot \left( \begin{bmatrix} b - a \\ c - a \end{bmatrix} + (a - b - c + d) \begin{bmatrix} u_y \\ u_x \end{bmatrix} \right) $$
+    Note: The term `(a - b - c + d)` is multiplied by the swapped components of `u` (`u.yx`) [S1].
+
+6.  **FBM Accumulation (Erosion):** Iterate over octaves. For each octave:
+    - Accumulate the gradient: `d += n.yz` [S1].
+    - Compute the erosion factor: `1.0 / (1.0 + dot(d, d))` [S1].
+    - Update the result `a` (height): `a += b * n.x * erosion_factor` [S1].
+    - Scale amplitude `b`: Multiply by a decay factor (e.g., `0.5`) [S1].
+    - Transform coordinate `x`: Rotate and scale `x` for the next octave using a rotation matrix `m` and scale factor `scl` (e.g., `x = m * x * 2.0`) [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def hash(p):
+    """Deterministic hash function returning a float in [0, 1)."""
+    # Standard integer hash mapping 2D int coordinates to [0, 1) [G]
+    p = ((p[0] * 2654435761) & 0xFFFFFFFF, (p[1] * 2246822519) & 0xFFFFFFFF)
+    p = ((p[0] ^ p[1]) * 0x85ebca6b) & 0xFFFFFFFF
+    return (p[0] ^ (p[0] >> 13)) / 4294967296.0
+
+def noised(x):
+    """Computes value noise and its analytic derivative."""
+    p = (math.floor(x[0]), math.floor(x[1]))
+    f = (x[0] - p[0], x[1] - p[1])
+    
+    # Quintic interpolation weights
+    u = (3.0 * f[0]**2 - 2.0 * f[0]**3, 3.0 * f[1]**2 - 2.0 * f[1]**3)
+    du = (6.0 * f[0] * (1.0 - f[0]), 6.0 * f[1] * (1.0 - f[1]))
+    
+    # Retrieve corner values
+    a = hash((p[0], p[1]))
+    b = hash((p[0] + 1, p[1]))
+    c = hash((p[0], p[1] + 1))
+    d = hash((p[0] + 1, p[1] + 1))
+    
+    # Compute noise value
+    val = a + (b - a) * u[0] + (c - a) * u[1] + (a - b - c + d) * u[0] * u[1]
+    
+    # Compute noise derivative
+    # Note: u.yx swaps the components for the cross-term derivative
+    deriv = (du[0] * ((b - a) + (a - b - c + d) * u[1]),
+             du[1] * ((c - a) + (a - b - c + d) * u[0]))
+             
+    return (val, deriv[0], deriv[1])
+
+def derivative_fbm(x, num_octaves=16):
+    """Generates terrain using Derivative FBM with erosion."""
+    # Rotation matrix from source [S1]
+    m00, m01, m10, m11 = 0.8, -0.6, 0.6, 0.8
+    
+    a = 0.0
+    b = 1.0  # Initial amplitude
+    d = (0.0, 0.0)  # Accumulated gradient
+    
+    for _ in range(num_octaves):
+        n = noised(x)
+        
+        # Accumulate gradient
+        d = (d[0] + n[1], d[1] + n[2])
+        
+        # Erosion factor: 1 / (1 + |grad|^2)
+        erosion = 1.0 / (1.0 + d[0]**2 + d[1]**2)
+        
+        # Add to result
+        a += b * n[0] * erosion
+        
+        # Scale amplitude
+        b *= 0.5
+        
+        # Transform coordinate: x = m2 * x * 2.0
+        x = (m00 * x[0] * 2.0 + m01 * x[1] * 2.0,
+             m10 * x[0] * 2.0 + m11 * x[1] * 2.0)
+             
+    return a
+```
+
+**Parameters:**
+- `num_octaves`: Number of iterations. Typical value is 16 [S1].
+- `b` (initial amplitude): Initial height scale. Typical value is 1.0 [S1].
+- `b` decay: Factor by which amplitude decreases per octave. Typical value is 0.5 [S1].
+- `scale_factor`: Frequency multiplier per octave. Typical value is 2.0 [S1].
+- `rotation_matrix`: 2x2 matrix to rotate the coordinate space, reducing directional artifacts. Example: `[[0.8, -0.6], [0.6, 0.8]]` [S1].
+
+**Edge Cases and Pitfalls:**
+Not given in the sources.
+
+## Subtopics
+
+### [Noise Derivative FBM](16976-noise-derivative-fbm.md)
+A terrain generation technique that uses the analytic derivatives of value noise to modulate height accumulation in an FBM loop. It differs from standard FBM by using gradient magnitude to dampen height accumulation, and from basic Derivative FBM by explicitly returning the derivative vector for lighting and erosion calculations. [16976-noise-derivative-fbm.md]
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+Originated in shader development and documented in procedural noise technique repositories [S1]. The method builds on Value Noise and FBM, adding analytic derivatives to modulate octave contribution based on local steepness [S1].
+
+## Sources
+[S1] skills/skills/shader-dev/techniques/procedural-noise.md at main ..., https://github.com/MiniMax-AI/skills/blob/main/skills/shader-dev/techniques/procedural-noise.md, fetched 2026-10-27

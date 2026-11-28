@@ -1,0 +1,137 @@
+Problem The terrain TSL material uses fbm3D (4 octaves = 4× noise3D calls per invocation). Normal estimation uses finite differences: three separate fbm3D evaluations at (p), (p + ε_x), (p + ε_z) for h0/hx/hz — 12+ noise3D evaluations pe...
+
+Perf [high]: Reduce terrain fragment shader noise evaluations (finite-diff normals) · Issue #291 · pwretmo/deep-underworld · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Perf [high]: Reduce terrain fragment shader noise evaluations (finite-diff normals) #291
+New issue
+Copy link
+New issue
+Copy link
+Closed
+#318
+Closed
+Perf [high]: Reduce terrain fragment shader noise evaluations (finite-diff normals)#291
+#318
+Copy link
+Labels
+performance
+Description
+pwretmo
+opened on Apr 1, 2026
+Issue body actions
+Problem
+The terrain TSL material uses fbm3D (4 octaves = 4× noise3D calls per invocation). Normal estimation uses finite differences: three separate fbm3D evaluations at (p), (p + ε_x), (p + ε_z) for h0/hx/hz — 12+ noise3D evaluations per fragment just for normals, on top of the colour/displacement evaluation.
+This runs for every pixel of every terrain chunk.
+Recommended Solution
+Use analytical gradient FBM (fbm3D_deriv) — Option 2 from the original list.
+Reasons over the alternatives:
+vs Option 1 (precomputed normal map): No per-chunk texture memory, no cross-thread DataTexture transfer, no per-chunk material instance overhead. Normal quality degrades gracefully if chunk is reused.
+vs Option 3 (reduce octaves): Trades visual fidelity for speed. Analytical deriv preserves 4-octave quality while eliminating 8 of the 12 noise calls.
+Analytically exact normals: no epsilon-sensitive approximation artifacts at grazing angles.
+Net reduction: 12+ noise3D calls → 4 per fragment (one per FBM octave for both value and gradient).
+Reference: Inigo Quilez, "Gradient Noise Derivatives" (2017): https://iquilezles.org/articles/gradientnoise/
+Implementation
+Step 1: Write noised3D — gradient noise with analytical derivative
+Add a Fn or wgsl code node (alongside the existing noise3D and fbm3D definitions):
+```
+// Returns vec4(value, dvalue/dx, dvalue/dy, dvalue/dz)
+// Drop-in analytical replacement for noise3D that also yields the gradient.
+// Based on: https://iquilezles.org/articles/gradientnoise/
+vec4 noised3D(vec3 x) {
+  vec3 i = floor(x);
+  vec3 f = fract(x);
+  vec3 u = f*f*f*(f*(f*6.-15.)+10.);
+  vec3 du = 30.*f*f*(f*(f-2.)+1.);
+
+  vec3 ga = hash(i+vec3(0,0,0)), gb = hash(i+vec3(1,0,0));
+  vec3 gc = hash(i+vec3(0,1,0)), gd = hash(i+vec3(1,1,0));
+  vec3 ge = hash(i+vec3(0,0,1)), gf = hash(i+vec3(1,0,1));
+  vec3 gg = hash(i+vec3(0,1,1)), gh = hash(i+vec3(1,1,1));
+
+  float va=dot(ga,f-vec3(0,0,0)), vb=dot(gb,f-vec3(1,0,0));
+  float vc=dot(gc,f-vec3(0,1,0)), vd=dot(gd,f-vec3(1,1,0));
+  float ve=dot(ge,f-vec3(0,0,1)), vf=dot(gf,f-vec3(1,0,1));
+  float vg=dot(gg,f-vec3(0,1,1)), vh=dot(gh,f-vec3(1,1,1));
+
+  float v = va + u.x*(vb-va) + u.y*(vc-va) + u.z*(ve-va)
+              + u.x*u.y*(va-vb-vc+vd) + u.y*u.z*(va-vc-ve+vg)
+              + u.z*u.x*(va-vb-ve+vf) + u.x*u.y*u.z*(-va+vb+vc-vd+ve-vf-vg+vh);
+
+  vec3 d = ga + u.x*(gb-ga) + u.y*(gc-ga) + u.z*(ge-ga)
+             + u.x*u.y*(ga-gb-gc+gd) + u.y*u.z*(ga-gc-ge+gg)
+             + u.z*u.x*(ga-gb-ge+gf) + u.x*u.y*u.z*(-ga+gb+gc-gd+ge-gf-gg+gh)
+             + du*(vec3(vb-va,vc-va,ve-va) + u.yzx*vec3(va-vb-vc+vd,va-vc-ve+vg,va-vb-ve+vf)
+                 + u.zxy*vec3(va-vb-ve+vf,va-vb-vc+vd,va-vc-ve+vg)
+                 + u.yzx*u.zxy*(-va+vb+vc-vd+ve-vf-vg+vh));
+  return vec4(v, d);
+}
+```
+(The hash function used here is the same as in the existing noise3D implementation.)
+Step 2: Write fbm3D_deriv
+Accumulate value and gradient across 4 octaves. The derivative chain requires applying the domain-rotation matrix m to the gradient accumulator at each octave step (same m already used in fbm3D):
+```
+// Returns vec4(value, gradient_x, gradient_y, gradient_z)
+vec4 fbm3D_deriv(vec3 p) {
+  vec4 acc = vec4(0.0);
+  float amp = 0.5;
+  mat3 m = /* same rotation matrix used in fbm3D */;
+  for (int i = 0; i < 4; i++) {
+    vec4 nd = noised3D(p);
+    acc += vec4(nd.x * amp, nd.yzw * amp);
+    p = m * p * 2.0;
+    amp *= 0.5;
+  }
+  return acc;
+}
+```
+Step 3: Update _createTerrainMaterial() in Terrain.js
+Replace the three separate calls fbm3D(p), fbm3D(p + eps_x), fbm3D(p + eps_z) with one:
+```
+const fbmResult = fbm3D_deriv(worldPos);        // vec4
+const height    = fbmResult.x;                  // replaces h0
+const gradient  = fbmResult.yzw;                // replaces (hx-h0)/eps, (hz-h0)/eps
+
+// Surface normal from gradient (y-up terrain):
+const surfNorm = normalize(vec3(gradient.x.negate(), float(1.0), gradient.z.negate()));
+```
+The colour/displacement pass that previously called fbm3D(p) a 4th time now reuses height (= fbmResult.x) at no extra cost.
+Acceptance criteria
+Terrain material compiles and renders without visual regression
+Fragment stage no longer calls noise3D more than 4 times per pixel (verify via shader inspection or GPU profiler)
+Terrain chunk normal shading is visually equivalent or improved vs finite-diff
+Files
+src/environment/Terrain.js — _createTerrainMaterial()
+Shader utility module where noise3D / fbm3D are defined (same file or a shared shader utility)
+Part of #286.
+Activity
+pwretmo
+added
+performance
+on Apr 1, 2026
+pwretmo
+added a parent issue on Apr 1, 2026
+Epic: Performance optimization pass #286
+pwretmo
+closed this as completedin #318on Apr 1, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+performance
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

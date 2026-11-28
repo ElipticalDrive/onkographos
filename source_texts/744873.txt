@@ -1,0 +1,695 @@
+Spherical Hermite Maps
+arXiv:2602.20063v1 [cs.GR] 23 Feb 2026
+Mohamed Abouagour
+Indiana University
+Bloomington, Indiana, USA
+moabouag@iu.edu
+Eleftherios Garyfallidis
+Indiana University
+Bloomington, Indiana, USA
+elef@iu.edu
+Abstract
+Spherical functions appear throughout computer graphics—from spherical harmonic lighting
+and precomputed radiance transfer to view-dependent appearance in neural radiance fields,
+and from mesh level-of-detail impostors to procedural planet rendering. Efficient evaluation
+of such functions is critical for real-time applications, yet existing approaches face a quality–
+performance trade-off: bilinear lookup table (LUT) sampling is fast but produces faceting and
+discontinuous gradients, while bicubic filtering requires 16 texture samples per query. Both can
+provide derivatives in principle, but in practice most implementations use finite differences for
+normals, requiring additional samples and introducing noise.
+This paper presents Spherical Hermite Maps, a derivative-augmented LUT representation
+that resolves this trade-off. By storing function values alongside scaled partial derivatives at each
+texel of a padded cubemap, bicubic-Hermite reconstruction is enabled from only four texture
+samples (a 2 × 2 footprint) while providing continuous (C 0 ) gradients from the same samples—
+no additional texture fetches required. The key insight is that Hermite interpolation naturally
+reconstructs smooth derivatives as a byproduct of value reconstruction, making surface normals
+effectively free in terms of memory bandwidth.
+In controlled experiments, Spherical Hermite Maps improve PSNR by 8–41 dB over bilinear
+interpolation and are competitive with 16-tap bicubic quality at one-quarter the texture fetch
+cost. Compared to “fast bicubic” (4 bilinear fetches), Hermite achieves higher reconstruction
+quality while providing continuous gradients at the same sampling cost. The analytic normals
+reduce mean angular error by 9–13% on complex surfaces while yielding stable specular highlights under camera motion. Three application domains demonstrate versatility: (1) spherical
+harmonic glyph visualization for scientific data, (2) radial depth-map impostors for mesh levelof-detail, and (3) procedural planet/asteroid rendering with spherical heightfields.
+Keywords: spherical functions, real-time rendering, lookup tables, Hermite interpolation, analytic
+normals, level-of-detail, impostors, procedural planets, WebGPU
+1
+Introduction
+Spherical functions pervade computer graphics and scientific visualization. In real-time rendering,
+spherical harmonics encode view-dependent appearance for precomputed radiance transfer and
+environment lighting [13, 5]. In neural scene representations, they parameterize view-dependent
+color in radiance fields [8, 7]. In level-of-detail systems, radial depth maps encode mesh geometry as
+star-shaped surfaces for impostor rendering. In procedural content generation, spherical heightfields
+define asteroid and planetary terrain. Across these domains, the core computational pattern is the
+same: evaluate a spherical function at many directions per pixel, often under heavy overdraw, and
+compute surface normals for shading.
+1
+Figure 1: Interpolation at LUT face resolution N = 10. From left to right: ground truth (direct SH
+evaluation), nearest-neighbor lookup, bilinear reconstruction with finite-difference normals, 16-tap
+bicubic reconstruction with finite-difference normals, and Spherical Hermite Maps with analytic
+normals. Insets zoom a challenging silhouette/highlight region: bilinear exhibits faceting, finite
+differences introduce gradient noise, and bicubic retains residual error; Hermite interpolation remains faithful to the ground truth at 4× lower sampling cost than 16-tap bicubic.
+A natural representation for such surfaces is the star-shaped radial surface: x(ω) = c + R(ω)ω
+where R : S 2 → R+ defines radius as a function of direction. This representation includes SHencoded appearance glyphs, radial depth-map mesh impostors, and procedural planet/asteroid
+geometry. Rendering requires both evaluating R(ω) for ray intersection and computing the spherical
+gradient ∇S 2 R for surface normals; jointly achieving high-quality reconstruction and stable normals
+at low cost is a key bottleneck in practice.
+A standard acceleration is to precompute samples of the radial function on an angular grid—a
+per-object lookup table (LUT). Bilinear sampling is fast but produces visible faceting and unstable
+specular highlights. True bicubic filtering improves smoothness but requires 16 texture samples per
+query, making the shader bandwidth-bound.
+Both methods can provide derivatives in principle: bilinear interpolation yields gradients that
+vary within each cell but are discontinuous at cell boundaries, and shader-based bicubic can differentiate its polynomial analytically. However, in practice, most implementations rely on finite
+differences for normals, which introduces noise and causes highlights to “swim” under camera motion. Even when analytic bicubic derivatives are computed, the 16-sample footprint remains, and
+the derivatives are only C 0 continuous across cell boundaries.
+Key insight. Hermite interpolation, unlike standard polynomial interpolation, reconstructs a
+smooth function from both values and derivatives at grid points. Crucially, the same mathematical
+formulation that uses stored derivatives for reconstruction also yields continuous first derivatives
+at query points as a byproduct—from the same four texture samples, without additional texture
+fetches or finite-difference noise.
+This paper presents Spherical Hermite Maps, a derivative-augmented LUT representation that
+exploits this insight. By storing the function value alongside its first and mixed partial derivatives at each texel, bicubic Hermite reconstruction is enabled from only four texture samples (a
+2 × 2 footprint) while providing analytic gradients for shading without any additional LUT queries.
+The result is smooth silhouettes, stable specular appearance, and predictable per-fragment cost—
+properties important for both interactive graphics applications and scientific visualization work2
+flows.
+This paper makes the following contributions: A) Introducing Spherical Hermite Maps
+enabling high fidelity surface reconstruction from a few samples (2 × 2) footprint. B) Analytic
+normals from the same samples. Surface normals from continuous first derivatives via metrictensor inversion, without additional texture fetches. C) Exact SH derivative baking. For
+spherical harmonic functions, derivatives are computed by differentiating the SH basis analytically,
+eliminating discretization errors. D) Seam-consistent padding. Gutter texels ensuring seamconsistent values and derivatives across cubemap faces.
+Results are presented in 3 example applications including: a) spherical harmonic (SH) glyphs
+from real diffusion MRI data, b) mesh level-of-detail (LOD) impostors for 3D games, and c) procedural planets for scientific visualization.
+Cubic Hermite interpolation is a mathematical technique for reconstructing C 1 functions from
+values and derivatives on grids, and its tensor-product form extends naturally to 2D [1]. Derivative
+information is also commonly stored in textures for shading purposes (e.g., normal maps, derivative
+maps) and has been explored for smooth interpolation of sampled scalar fields. However, making
+Hermite interpolation practical for spherical (cubemap) LUTs requires non-trivial implementation
+details: seam-consistent cubemap padding/filtering and geometrically correct transport of per-face
+chart derivatives to spherical gradients for shading [6, 11].
+A key aspect of this work is to turn Hermite interpolation into a practical spherical LUT primitive for GPU rendering. A padded cubemap layout with seam-consistent values and derivatives
+across faces is introduced, metric-correct conversion from chart-space derivatives to spherical gradients via the cubemap metric tensor is derived, and it is demonstrated that the same four RGBA
+fetches used for value reconstruction provide analytic normals from continuous first derivatives with
+no additional texture bandwidth. Crucially, bicubic filtering requires a 4 × 4 footprint (16 samples)
+when derivatives are not stored; Hermite achieves bicubic-class reconstruction from a 2 × 2 footprint (4 samples) because derivatives and the mixed derivative are supplied at the corners. This is
+distinct from fast bicubic approximations [10], which match the 4-fetch budget but do not provide
+robust analytic derivatives and therefore fall back to finite differences for shading.
+2
+Related Work
+Many graphics pipelines repeatedly evaluate spherical functions (e.g., spherical harmonics for lighting and view-dependent appearance [13, 5, 8, 7]), motivating precomputed spherical lookup tables
+(LUTs) for real-time rendering and visualization [9, 2]. For LUT parameterization, cubemaps avoid
+pole singularities but require careful seam handling for filtering [6, 11]; padded faces are used and
+padding is extended to derivatives so both reconstruction and normals remain continuous across
+boundaries.
+Higher-order filtering typically relies on shader bicubic reconstruction (16 samples) or fast bicubic approximations using a few bilinear fetches [10]. Hermite interpolation [1] achieves C 1 continuity
+from a 2 × 2 footprint when per-texel derivatives are available. Applying it to spherical (cubemap)
+LUTs requires seam-consistent padding for both values and derivatives, and a geometrically correct
+conversion from per-face chart derivatives to spherical gradients via the cubemap metric tensor.
+Normals for LUT-rendered surfaces are often estimated with finite differences, trading extra
+samples for noisy and discontinuous gradients; storing normal/gradient maps can improve shading but does not provide higher-order value reconstruction. In contrast, Spherical Hermite Maps
+provide bicubic-class reconstruction and analytic gradients from the same four samples.
+3
+3
+Method
+Given spherical harmonic coefficients for each glyph, a derivative-augmented LUT is first baked on
+a padded cubemap. At runtime, each glyph is rendered as a billboard impostor, the view ray is
+intersected with the star-shaped surface, and the hit point is shaded using normals reconstructed
+analytically from Hermite-interpolated derivatives.
+3.1
+Surface Model and Billboard Rendering
+A spherical function r : S 2 → R at sample center c is visualized as a star-shaped radial surface:
+x(ω) = c + R(ω) ω,
+ω ∈ S2,
+(1)
+where R(ω) ≥ 0 is the rendered radius and s > 0 is a user-specified scale factor. For nonnegative
+functions, R = s · r; for signed functions, R = s · |r| with appropriate sign tracking for normal
+computation. The implicit form is F (x) = ∥x − c∥ − R(ω) where ω = (x − c)/∥x − c∥.
+Each glyph is rendered as a camera-facing billboard quad sized to enclose the surface (radius
+s · maxω r(ω)). For each fragment, a view ray p(t) = o + t d is cast from camera origin o along
+direction d through the quad. A bounding sphere of radius Rmax is first intersected to obtain
+an entry interval [tmin , tmax ], then the surface hit is refined within this bracket using bisection
+(typically 8–16 steps) followed by Newton–Raphson iteration (2–4 steps) on F (p(t)) = 0. To avoid
+unnecessary computation for distant glyphs, projected screen-space size is estimated from bounding
+radius and depth, allocating more refinement iterations to large projected glyphs.
+3.2
+Padded Cubemap Parameterization
+Directions are mapped to cubemap faces with local coordinates (u, v) ∈ [0, 1]2 per face. This yields
+six regular 2D grids, avoids pole singularities, and aligns with GPU cubemap hardware.
+To ensure continuity across face boundaries, each face is padded with a one-texel gutter. For
+interior resolution N × N , each face is stored as (N + 2) × (N + 2); interior indices {1, . . . , N }
+correspond to the original samples. Crucially, gutter texels are filled by evaluating the spherical
+function at directions corresponding to their texel centers—not by extrapolation or reflection—
+so that cross-face interpolation samples correct function values. Derivatives are treated similarly:
+derivative channels are baked for every stored texel (interior and gutter) by differentiating the
+sampled function in the per-face chart coordinates (u, v), rather than copying derivatives across
+seams.
+3.3
+Spherical Hermite Maps
+Standard bicubic filtering achieves C 1 continuity but requires a 4 × 4 texel footprint (16 samples).
+Hermite interpolation achieves the same continuity from a 2 × 2 footprint when both values and
+derivatives are available. This is exploited by storing four quantities per texel:
+
+r, ru h, rv h, ruv h2 ,
+(2)
+where h = 1/N is the texel spacing and derivatives are pre-scaled to simplify shader arithmetic.
+4
+ALGORITHM 1: Bake-time Spherical Hermite Map (per face)
+Input: spherical function r(ω); interior face resolution N
+Output: padded (N + 2) × (N + 2) RGBA face texture
+h ← 1/N
+foreach stored texel center (uk , vk ) (including gutter) do
+rk ← r ω(uk , vk )
+end
+Compute chart derivatives (ru , rv , ruv ) on the padded grid via finite differences in (u, v) (using a
+bake-time margin or one-sided stencils at the outer ring)
+For SH, compute analytic derivatives and convert to (u,v) via the chain rule.
+Store per texel as RGBA: rk , (ru h)k , (rv h)k , (ruv h2 )k
+Derivative computation. Derivatives are computed in the chart coordinates (u, v) on each face.
+In the general case, r(ω(u, v)) is evaluated at texel centers on a padded grid and (ru , rv , ruv ) are
+estimated using finite-difference stencils in (u, v); to obtain derivatives at gutter texels without
+sampling “outside” the stored texture, a small additional bake-time margin (or one-sided stencils
+on the outer ring) is used. For spherical harmonics, derivatives can alternatively be computed
+analytically in spherical coordinates and converted to (u, v) derivatives via the chain rule.
+Analytic SH derivatives. For spherical harmonic functions, exact analytic derivatives can be
+computed directly from SH coefficients by differentiating the basis functions. Since each real SH
+with respect to spherical
+basis function Ylm (θ, ϕ) has a known closed-form
+P derivative
+P coordinates,
+m (ω) is simply ∂r/∂θ =
+m
+m
+the derivative of any SH expansion r(ω) = l,m cm
+Y
+l,m cl ∂Yl /∂θ
+l l
+(and similarly for ϕ). This eliminates finite-difference discretization error entirely at bake time,
+producing derivatives that are exact to floating-point precision. For high-order SH (large L), where
+the function contains fine angular detail, analytic baking preserves accuracy that central differences
+would otherwise smooth away. The implementation supports both modes: central differences for
+generality (procedural functions, mesh distance fields) and analytic SH differentiation for maximum
+accuracy when coefficients are available. At each sampled direction ω, analytic derivatives are
+converted to face-coordinate derivatives via the chain rule, e.g., ru = ∇S 2 r · ∂ω/∂u and rv =
+∇S 2 r · ∂ω/∂v.
+Derivative accuracy and limitations. When using central differences, stored derivatives are
+analytic with respect to the Hermite interpolant, not the underlying continuous function. This
+approximation introduces discretization error proportional to h2 (the grid spacing squared), which
+decreases rapidly as LUT resolution increases. For undersampled high-frequency content, derivative
+estimates may be noisy—though no worse than runtime finite differences, and with the advantage
+of smooth C 1 interpolation across cells. When exact derivatives are required, analytic SH baking
+(described above) avoids finite-difference discretization error.
+Reconstruction. Given local coordinates (s, t) ∈ [0, 1]2 within a cell, reconstruction proceeds
+using the tensor-product cubic Hermite basis. The 1D Hermite basis functions are:
+H0 (s) = 2s3 − 3s2 + 1,
+H1 (s) = −2s3 + 3s2 ,
+(3)
+H0d (s) = s3 − 2s2 + s,
+H1d (s) = s3 − s2 .
+(4)
+5
+The 2D reconstruction is:
+X 
+Hi Hj rij + Hid Hj (ru h)ij
+r(s, t) =
+i,j∈{0,1}
+
++ Hi Hjd (rv h)ij + Hid Hjd (ruv h2 )ij , (5)
+where subscripts ij index the four cell corners. This uses all 16 quantities from the four corners (4
+channels × 4 texels), yielding bicubic-class reconstruction.
+Derivative extraction. Chart derivatives (ru , rv ) = (∂r/∂u, ∂r/∂v) are the partial derivatives
+with respect to the local cubemap face coordinates, distinct from the spherical gradient ∇S 2 r which
+lives in the tangent plane of the sphere. These chart derivatives are obtained by differentiating the
+Hermite basis:
+
+1 X ′
+ru (s, t) =
+Hi Hj rij + (Hid )′ Hj (ru h)ij + · · · .
+(6)
+h
+i,j
+These derivatives emerge from the same four texture samples used for value reconstruction—no
+additional LUT queries are needed.
+3.4
+Analytic Normals from Chart Derivatives
+For a star-shaped surface x(ω) = c + R(ω)ω, the outward normal involves the spherical gradient
+∇S 2 R. This is obtained by transporting chart derivatives through the cubemap Jacobian using
+metric tensor inversion—a key step that ensures geometric correctness.
+Let ω(u, v) be the normalized direction for face coordinates (u, v) and let e1 = ∂ω/∂u and
+e2 = ∂ω/∂v be the (unnormalized) tangent vectors. These span the tangent plane at ω but are
+generally neither orthogonal nor unit length.
+In practice, e1 and e2 are computed by differentiating the normalized cubemap direction. Let
+ω̃(u, v) be the unnormalized direction (affine in (u, v) on each face) and ω = ω̃/∥ω̃∥. Differentiating
+the normalization gives:
+∂ω
+(I3 − ωω ⊤ ) ∂ ω̃
+=
+, ξ ∈ {u, v},
+(7)
+∂ξ
+∥ω̃∥
+∂ξ
+and ∂ ω̃/∂u, ∂ ω̃/∂v are constant per face.
+The tangent-space gradient ∇S 2 R = αe1 + βe2 satisfies:
+∇S 2 R · e1 = Ru ,
+∇S 2 R · e2 = Rv .
+This yields a 2×2 linear system involving the metric tensor G:
+
+   
+g11 g12 α
+Ru
+=
+,
+g12 g22 β
+Rv
+(8)
+(9)
+where g11 = e1 · e1 , g22 = e2 · e2 , g12 = e1 · e2 . Solving via Cramer’s rule:
+α=
+g22 Ru − g12 Rv
+,
+det G
+β=
+g11 Rv − g12 Ru
+.
+det G
+(10)
+Near cube corners where det G may be small, clamping before inversion ensures numerical stability.
+The surface normal is then:
+R(ω) ω − ∇S 2 R
+n=
+.
+(11)
+∥R(ω) ω − ∇S 2 R∥
+For signed functions with R = s|r|, the chain rule is applied: ∇S 2 R = s · sign(r) · ∇S 2 r.
+6
+Table 1: Value-only PSNR (dB) for the sampled radius function r(ω) vs. direct SH evaluation (100K
+uniform random directions on S 2 ). Bicubic uses an interpolating Catmull–Rom kernel. Absolute
+dB values are not directly comparable to image-based PSNR, but the ranking is consistent.
+N
+Bilinear
+Bicubic
+Hermite
+∆(H–Bic)
+8
+16
+32
+23.1
+35.5
+48.0
+29.1
+51.5
+73.0
+32.2
+62.7
+93.1
++3.1
++11.2
++20.1
+The “free normals” property. Normals are obtained from the same Hermite evaluation used
+for value reconstruction: chart derivatives (Ru , Rv ) are produced by differentiating the Hermite
+basis, so shading does not require finite-difference neighbor samples.
+4
+Experiments
+This section evaluates Spherical Hermite Maps along three axes: reconstruction accuracy, visual quality, and sampling efficiency. The experiments compare three table-based reconstruction
+methods—bilinear, 16-tap bicubic, and Hermite—against direct spherical harmonic evaluation as
+ground truth. All methods share the same padded cubemap parameterization and differ only in
+reconstruction.
+4.1
+Experimental Setup
+Synthetic benchmarks. A representative SH glyph is rendered at degree L = 8 (fixed seed)
+with direct SH evaluation as ground truth. To avoid conflating value reconstruction and normal
+estimation, two matched metrics are reported: (i) value-only error by sampling r(ω) over many
+directions on S 2 , and (ii) shaded-image error by computing PSNR over rendered images under fixed
+lighting. For each cubemap face resolution N ∈ {8, 12, 16, 24, 32, 48, 64}, the same coefficient field
+and camera setup are evaluated.
+Visual comparisons. For qualitative assessment, synthetic SH glyphs and real diffusion MRI
+orientation distribution functions are rendered under controlled lighting. Silhouette smoothness,
+specular highlight stability, and seam artifacts at cubemap face boundaries are examined.
+Implementation. The renderer is implemented in WGSL and accessed via pygfx [12] and FURY [4],
+which provide WebGPU bindings. Precomputation is performed on the CPU during scene initialization; runtime rendering uses only GPU-resident textures.
+4.2
+Reconstruction Accuracy
+Figure 2 summarizes the shaded-image PSNR benchmark (direct SH rendering as ground truth).
+Hermite reconstruction significantly outperforms bilinear sampling, with improvements ranging
+from +8.0 dB at N = 8 to +36.1 dB at N = 32 and +41.3 dB at N = 64. Compared to 16-tap
+bicubic filtering, Hermite achieves higher PSNR (+3.1 dB at N = 8, +10.3 dB at N = 32) while
+using only 4 texture samples instead of 16. Table 1 reports the corresponding value-only PSNR
+for r(ω) sampled over random directions; it shows the same method ordering, confirming that
+Hermite’s advantage is not driven by normal estimation.
+7
+Figure 2: Image-based reconstruction accuracy versus LUT resolution for a representative L = 8
+spherical-harmonic glyph. Plot shows PSNR (higher is better) of LUT-based rendering compared
+to direct SH evaluation. Hermite consistently improves over bilinear across resolutions and exceeds
+16-tap bicubic quality while using only a 2 × 2 (four-sample) footprint.
+In the shaded-image benchmark, bilinear plateaus around 25 dB regardless of resolution because
+its reconstruction order limits accuracy even with more samples. Both bicubic and Hermite continue
+improving with resolution, with Hermite approaching 67 dB at N = 64—near the limit of singleprecision floating point.
+4.3
+Visual Quality
+Figure 1 shows a representative close-up comparison at fixed face resolution (N = 10). Bilinear
+sampling exhibits visible faceting along silhouettes. Bicubic filtering (16 taps) improves smoothness
+but retains residual error at this resolution. Hermite reconstruction produces smooth silhouettes
+from a 2 × 2 footprint; the corresponding highlight behavior is evaluated next.
+4.4
+Shading Quality and Highlight Stability
+Beyond geometric reconstruction, shading quality depends critically on normal accuracy. Figure 3
+compares shaded terrain and normal maps across methods on a procedural planet close-up. Finitedifference normals (used by bilinear and bicubic) produce noisy gradients visible in both the shaded
+surface and normal map. Hermite’s analytic normals yield smoother gradients (7.28° mean error
+vs. 7.82°–7.97° for alternatives) and more stable highlights.
+4.5
+Sampling Efficiency and Bandwidth Analysis
+Table 2 summarizes the per-query cost in terms of texture instructions (individual fetch operations) and scalar reads (a proxy for memory bandwidth). A distinction is made between texture
+instructions (GPU texture unit operations) and scalars read.
+Hermite uses 4 texture instructions (one RGBA fetch per corner of a 2 × 2 cell), compared to 16
+for point-sampled bicubic. Although hardware bilinear filtering requires only 1 texture instruction
+8
+Figure 3: Procedural planet terrain comparison at N = 48. Shaded surface. From left to right:
+ground truth, bilinear (4 taps), bicubic (16 taps), and Hermite (4 taps). Hermite achieves the
+lowest normal error (7.28°) while outperforming bicubic’s sample efficiency advantage over the 16tap baseline.
+Table 2: Extended cost comparison including fast bicubic. “Tex ops” stands for texture instructions;
+“Scalars” stands for scalar values read for a single query (multiply by 4 bytes for FP32).
+Method
+Bilinear (HW)
+Bilinear + FD
+Bicubic (16 pt)
+Fast Bicubic (4 bilin)
+Fast Bicubic + FD
+Hermite
+†
+Tex ops Scalars C 1 value continuous ∇
+1
+5
+16
+4
+8
+4
+4
+20
+16
+16
+32
+16
+No
+No
+Yes
+Yes
+Yes
+Yes
+No
+No
+Yes†
+No∗
+No
+Yes
+Gradients can be obtained by differentiating the bicubic reconstruction (extra ALU, same samples); this is
+reported as “Bicubic + analytic ∇” in Tables 5–6.
+∗
+Fast bicubic uses weighted bilinear; differentiating it is non-trivial and rarely used.
+for values, shaded rendering typically adds at least 4 offset samples for finite-difference normals
+(5 total). Hermite has access to additional derivative information, so the relevant comparison is
+quality per texture instruction (and at equal scalar storage), rather than interpolation order alone.
+Bandwidth considerations. Hermite stores 4 scalars per texel (RGBA) rather than 1 for a
+value-only texture. Each query therefore reads 4 × 4 = 16 scalar values, which remains competitive
+with bilinear+FD shaded rendering at 5 × 4 = 20 scalar values (assuming the FD stencil overlaps
+with the original sample). More importantly, Hermite’s 4-instruction footprint is friendly to texture
+cache locality and GPU scheduling, whereas the 16-instruction bicubic footprint increases cache
+pressure on complex scenes.
+Comparison with fast bicubic approximations. A common optimization approximates bicubic filtering using 4 hardware-bilinear fetches instead of 16 point samples [10]. This “fast bicubic”
+approach is an important baseline; Table 2 includes this comparison.
+Fast bicubic matches the 4-instruction budget but does not provide readily usable gradients,
+and typically falls back to finite differences for shading (8 texture ops, 32 scalars). Hermite provides
+both values and continuous gradients from the same 4 fetches.
+Equal-storage comparison. Since Hermite stores 4 values per texel, a fair comparison considers
+what value-only methods achieve with the same memory budget. At equal storage (4N 2 floats per
+9
+Table 3: Runtime performance across two GPU classes. Integrated: 100K glyphs on Intel Iris Xe.
+Discrete: 1M glyphs on NVIDIA RTX. Hermite consistently achieves 1.8× speedup over bicubic.
+Method
+Intel Iris Xe (100K) NVIDIA RTX (1M)
+FPS
+Ratio
+FPS
+Ratio
+continuous ∇
+Nearest
+14.6
+Bilinear
+10.0
+Hermite 9.0
+Bicubic
+5.1
+∗
+2.9×
+2.0×
+1.8×
+1.0×
+32
+23
+16
+9
+3.6×
+2.6×
+1.8×
+1.0×
+No
+No
+Yes
+No∗
+Bicubic uses FD normals for fair comparison. Ratio = speedup vs bicubic.
+face), Hermite at resolution N competes against bilinear at resolution 2N .
+Figure 5 compares value-only sampling at 322 against Hermite at 162 with four channels (value
++ derivatives), which matches scalar storage per face. In this representative view, Hermite slightly
+exceeds 16-tap bicubic in image PSNR (+1.2 dB) while using only 4 fetches and providing analytic
+derivatives for shading.
+In the shaded-image benchmark, bilinear at N = 16 achieves 21.4 dB PSNR, while Hermite
+at N = 8 achieves 26.4 dB—a +5.0 dB advantage for Hermite at the same storage. At higher
+resolutions, Hermite at N = 16 (45.5 dB) versus bilinear at N = 32 (24.7 dB) shows a +20.8 dB
+advantage.
+The key insight is that Hermite’s 4× storage overhead is offset by its 4× reduction in texture
+instructions and its analytic derivatives. When rendering shaded glyphs at equal storage, bilinear
+typically uses 5 texture instructions (1 value + 4 finite-difference normals), while Hermite provides
+value and normals in 4. Thus Hermite achieves better PSNR, better normals, and 20% fewer
+texture operations at equal storage, and is preferred under shaded rendering at equal storage.
+4.6
+Runtime Performance
+To validate that theoretical sampling efficiency translates to practical performance gains, rendering
+throughput is benchmarked on two GPUs: an integrated Intel Iris Xe (laptop) and a discrete
+NVIDIA RTX. Table 3 reports frame rates at face resolution N = 8.
+As a reference, direct per-fragment SH evaluation without precomputation averaged 0.35 FPS on
+Intel Iris Xe at 100K glyphs (more than an order of magnitude slower than any precomputed-table
+method), so we omit it from Table 3.
+Across both GPUs, Hermite achieves 1.8× higher frame rate than 16-tap bicubic while providing
+comparable reconstruction and analytic gradients for shading. On integrated graphics (Intel Iris
+Xe), Hermite is only 10% slower than bilinear (9.0 vs 10.0 FPS). On discrete graphics (RTX 2000
+Ada) with 10× more glyphs, Hermite remains 30% slower than bilinear (16 vs 23 FPS) but still
+delivers the same 1.8× speedup over bicubic. This consistent speedup ratio across hardware classes
+validates that Hermite’s efficiency advantage is fundamental rather than platform-specific.
+4.7
+Mipmap Derivative Handling
+A practical consideration for production use is mip-chain construction. When building lowerresolution mip levels for Hermite cubemaps, derivatives must be handled carefully. Table 4 compares
+two approaches: filtering values and recomputing derivatives at each mip level (“Consistent”) versus
+box-filtering all RGBA channels (“Naive”, as standard hardware mipmapping would do).
+At mip level 1 (16²), naive filtering produces 5.5× reduced normal accuracy than derivativeconsistent generation (7.3° vs. 1.3° mean angular error). The 95th percentile shows even larger
+10
+Table 4: LOD quality: derivative-consistent vs. naive mip generation. Normal error (degrees)
+measured against filtered ground truth. Naive mipmapping causes up to 5× worse normals at the
+first coarse LOD.
+Correct
+Naive
+Level Res Mean 95th Mean 95th Ratio
+0 322 0.4° 0.8° 0.4° 0.8° 1.0×
+1 162 1.3° 3.4° 7.3° 17.1° 5.5×
+2 82 5.4° 13.2° 15.6° 36.9° 2.9×
+3 42 21.0° 63.0° 26.8° 70.8° 1.3×
+SH degree L = 8. “Correct” recomputes derivatives per level; “Naive” box-filters all RGBA channels. Mip chains
+built offline.
+gaps: 17.1° vs. 3.4°. This occurs because box-filtered derivatives no longer represent the gradients
+of the filtered signal and break the scaled derivative interpretation in Eq. 2.
+To preserve Eq. 2 under filtering, we build mip levels by filtering the scalar field and then
+recomputing derivative channels from the filtered values using finite differences in (u, v) (central
+differences where available). Derivative-consistent mip generation is therefore essential for preserving normal quality under LOD.
+4.8
+Application: Diffusion MRI Visualization
+To validate practical applicability, Spherical Hermite Maps are applied to real diffusion MRI data.
+Figure 6 shows orientation distribution function (ODF) glyphs from a human brain dataset, rendered at 4K resolution. Data and SH fits from DIPY [3]. The smooth silhouettes and stable
+highlights enable reliable visual interpretation of fiber orientations, which is critical for clinical and
+research applications. Interactive frame rates (>30 FPS) are achieved on commodity hardware,
+enabling real-time exploration of volumetric ODF fields.
+4.9
+Application: Mesh LOD Impostors
+A practical application of Spherical Hermite Maps is radial depth-map impostors for mesh levelof-detail. Given a complex mesh, the radial depth function R(ω) = maxt {t : c + tω ∈ mesh} is
+precomputed, where c is the mesh centroid. This encodes the mesh as a star-shaped surface that
+can be rendered via ray casting against a cubemap texture, providing a view-independent LOD
+representation.
+These impostors are bandwidth-sensitive because normals are typically estimated with finite
+differences (4 additional samples per shading query), introducing noise and highlight instability.
+Hermite reconstruction provides analytic chart derivatives from the same 4 samples used for depth
+reconstruction, enabling stable shading without additional texture fetches.
+Figure 7 demonstrates this on a complex asteroid model with 69 craters (6 large, 18 medium,
+45 small), 8 tectonic ridges, 30 boulders, and 5-octave fractal noise. At face resolution 48 × 48:
+Hermite achieves 13% lower mean normal error than bilinear while using half the texture
+samples (4 vs 8) and 1.2 dB higher PSNR. Compared to bicubic, Hermite uses 5× fewer samples
+than the finite-difference baseline (4 vs 20) while achieving 17% better normal accuracy. Even
+when bicubic normals are computed analytically by differentiating the bicubic kernel (no extra
+samples), Hermite still achieves lower normal error while using 4× fewer samples (4 vs 16). The
+error reduction is most pronounced on high-frequency features like crater rims and boulder edges,
+11
+Table 5: Quantitative metrics on complex asteroid impostor (48×48 LUT).
+Method
+Samples
+PSNR
+Bilinear + FD
+4+4=8
+73.1 dB
+Bicubic + FD
+16+4=20 72.3 dB
+Bicubic + analytic ∇
+16
+72.7 dB
+Hermite
+4
+74.3 dB
+Mean Err 95th %ile Improv
+4.13°
+4.32°
+4.19°
+3.60°
+19.3°
+20.3°
+19.3°
+16.7°
+—
+-5%
+-1%
++13%
+where finite-difference noise is worst.
+4.10
+Application: Procedural Planet Rendering
+Spherical Hermite Maps also enable efficient rendering of procedural planets and asteroids defined
+by spherical heightfields. A common approach for planet rendering is to define terrain as R(ω) =
+R0 + h(ω) where h(ω) is a procedural noise function (Perlin, Simplex, or multi-octave fBm).
+For real-time applications, evaluating procedural noise per-pixel is expensive. Baking the terrain
+to a Hermite map amortizes noise evaluation and provides analytic normals for terrain shading.
+This is particularly valuable for distant planets where noise detail exceeds pixel resolution, as the
+map naturally provides filtered values.
+Figure 8 shows a procedural planet with multi-scale terrain features: large continental landmasses, mountain ranges, craters, and fine-scale surface variation. At face resolution 48 × 48:
+Table 6: Quantitative metrics on procedural planet terrain (48×48 LUT).
+Method
+Samples
+PSNR
+Bilinear + FD
+4+4=8
+23.6 dB
+Bicubic + FD
+16+4=20 23.6 dB
+Bicubic + analytic ∇
+16
+24.1 dB
+Hermite
+4
+24.8 dB
+Mean Err 95th %ile Improv
+7.94°
+8.08°
+7.87°
+7.24°
+16.1°
+15.7°
+15.5°
+14.8°
+—
+-2%
++1%
++9%
+The improvement is more modest than for the asteroid case because planetary terrain has
+more gradual variations, but Hermite still achieves 9% lower error and 1.2 dB higher PSNR while
+avoiding finite-difference sampling. Analytic bicubic derivatives reduce normal error marginally
+(+1% in Table 6) but do not change the 16-tap footprint. For distant planets rendered at low
+screen resolution, Hermite achieves this accuracy from a 2 × 2 footprint (four taps).
+5
+Discussion
+As shown experimentally Spherical Hermite Maps deliver high-order reconstruction with fewer
+texture samples than bicubic while providing analytic gradients—a practical alternative for applications requiring spherical function LUTs with accurate shading. Spherical Harmonic Maps
+are validated across spherical harmonic glyph visualization, mesh LOD impostors, and procedural
+planet rendering demonstrating wide range applicability.
+Advantages. This new approach is primarily beneficial when shading quality matters and LUT
+evaluation dominates per-fragment cost (e.g., dense spherical fields). For sparse glyphs with a few
+spherical functions, storage of 4× may not be necessary.
+12
+Limitations. Parameterization. Folded charts (e.g., octahedral maps) introduce derivative discontinuities without special handling at folds. Very low resolutions. At N < 12, seam artifacts
+can appear due to discrete derivative estimates; higher resolutions mitigate this. Storage overhead.
+Hermite stores four scalars per texel (value plus three derivatives); for tight memory budgets,
+higher-resolution value-only LUTs may be preferable. Mip/LOD generation. Derivatives must be
+recomputed per mip level; naı̈ve box-filtering of all RGBA channels breaks semantics and degrades
+normals (Table 4).
+6
+Conclusion
+This work introduces Spherical Hermite Maps, a derivative-augmented lookup table representation
+for efficient visualization of complex spherical functions using Hermite polynomials.
+By storing function values alongside scaled partial derivatives on a padded cubemap, we enable
+high fidelity interpolation from a 2×2 texel footprint with analytic surface normals at no additional
+sampling cost.
+Our experiments demonstrate substantial improvements: a) +8–41 dB PSNR over bilinear;
+exceeding 16-tap bicubic quality, b) 9–13% lower normal angular error on complex surfaces and c)
+1.8× speedup over bicubic interpolation in Intel and NVIDIA GPUs.
+13
+Figure 4: Multi-glyph shading comparison at N = 10. From left to right: ground truth, bilinear +
+finite-difference normals, bicubic + finite-difference normals, and Hermite with analytic normals.
+Insets highlight visible artifacts caused by discontinuous or noisy gradients (silhouette waviness and
+unstable specular structure); Hermite produces smooth silhouettes and stable highlights from the
+same four-sample reconstruction.
+Figure 5: Equal-storage comparison (shaded SH glyph). At matched scalar storage per face
+(322 ×1ch vs 162 ×4ch), Hermite achieves high quality results using only a 2×2 footprint and generates a slightly higher image PSNR than 16-tap bicubic (+1.2 dB), while also providing analytic
+derivatives for shading. Fast bicubic shows visible banding under specular lighting due to finitedifference normals, showing that 4 fetches alone are insufficient without analytic gradients.
+14
+Figure 6: Diffusion MRI orientation distribution function (ODF) glyphs from a human brain axial
+slice rendered at 4K resolution using our proposed Spherical Hermite Maps. Color encodes fiber
+orientation. The analytic normals produced by our reconstruction yield high quality silhouettes and
+stable specular highlights, supporting reliable visual interpretation of the underlying white-matter
+pathways.
+15
+Figure 7: Asteroid mesh impostor reconstructed from a 48 × 48 LUT per cubemap face. Top row:
+full view; bottom row: close-up. Columns show ground truth, bilinear, bicubic, and Hermite. Insets
+emphasize crater rims and boulder textures where finite-difference normals are most visibly noisy.
+Hermite achieves 13% lower mean normal error and +1.2 dB PSNR using only four texture samples
+(vs. 8–20 for alternatives).
+Figure 8: Procedural planet terrain baked into a 48 × 48 LUT per cubemap face. Insets highlight
+multi-scale terrain regions where interpolation differences are most apparent. Hermite reduces
+mean normal error by 9% while requiring only four texture samples.
+16
+References
+[1] Richard H. Bartels, John C. Beatty, and Brian A. Barsky. An Introduction to Splines for Use
+in Computer Graphics and Geometric Modeling. Morgan Kaufmann, 1987.
+[2] Martin Falk, Sebastian Grottel, Michael Krone, and Guido Reina. GPU-based glyph ray
+casting. In Interactive GPU-Based Visualization of Large Dynamic Particle Data, Synthesis
+Lectures on Visualization. Springer, 2017. doi: 10.1007/978-3-031-02604-1 3.
+[3] Eleftherios Garyfallidis, Matthew Brett, Bagrat Amirbekian, Ariel Rokem, Stefan Van
+Der Walt, Maxime Descoteaux, Ian Nimmo-Smith, and Dipy Contributors. Dipy, a library
+for the analysis of diffusion mri data. Frontiers in neuroinformatics, 8:8, 2014.
+[4] Eleftherios Garyfallidis, Serge Koudoro, Javier Guaje, Marc-Alexandre Côté, Soham Biswas,
+David Reagan, Nasim Anousheh, Filipi Silva, Geoffrey Fox, and FURY Contributors. FURY:
+advanced scientific visualization. Journal of Open Source Software, 6(64):3384, 2021. doi:
+10.21105/joss.03384.
+[5] Robin Green. Spherical harmonic lighting: The gritty details. Game Developers Conference
+course notes, 2003.
+[6] John R. Isidoro and Jason L. Mitchell. Angular extent filtering with edge fixup for seamless
+cubemap filtering. In ACM SIGGRAPH 2005 Sketches, 2005. doi: 10.1145/1187112.1187151.
+[7] Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler, and George Drettakis. 3d gaussian
+splatting for real-time radiance field rendering. ACM Transactions on Graphics, 42(4):1–14,
+2023. doi: 10.1145/3592433.
+[8] Ben Mildenhall, Pratul P. Srinivasan, Matthew Tancik, Jonathan T. Barron, Ravi Ramamoorthi, and Ren Ng. NeRF: Representing scenes as neural radiance fields for view synthesis. In
+European Conference on Computer Vision (ECCV), pages 405–421, Cham, Switzerland, 2020.
+Springer.
+[9] T. H. J. M. Peeters, V. Prčkovska, M. van Almsick, A. Vilanova, and B. M. ter Haar Romeny.
+Fast and sleek glyph rendering for interactive HARDI data exploration. In 2009 IEEE Pacific
+Visualization Symposium, pages 153–160, 2009. doi: 10.1109/PACIFICVIS.2009.4906851.
+[10] Matt Pharr, editor. GPU Gems 2: Programming Techniques for High-Performance Graphics
+and General-Purpose Computation. Addison-Wesley, 2005. ISBN 978-0321335593. Includes
+fast higher-order texture filtering techniques and GPU sampling trade-offs.
+[11] Emil Praun and Hugues Hoppe. Spherical parametrization and remeshing. ACM Transactions
+on Graphics, 22(3):340–349, 2003. doi: 10.1145/882262.882274.
+[12] pygfx Contributors. pygfx: A python render engine based on WGPU, 2024. URL https:
+//github.com/pygfx/pygfx. Version 0.6.0.
+[13] Peter-Pike Sloan, Jan Kautz, and John Snyder. Precomputed radiance transfer for real-time
+rendering in dynamic, low-frequency lighting environments. In Proceedings of SIGGRAPH,
+pages 527–536, New York, NY, 2002. ACM.
+17

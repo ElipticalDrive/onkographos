@@ -1,0 +1,196 @@
+# Direct Single Scattering via Precomputed Integral
+
+Also called: Gamma function lookup, Ldss computation
+
+## Overview
+Computes the direct single scattering radiance $L_{dss}$ for a point $P$ on a surface by evaluating a precomputed 2D integral function $\Gamma$, accounting for absorption and out-scattering along both the illumination ray and the view ray [S1, unofficial]. It differs from its parent method, [Volume Single Scattering (Monte Carlo with Point Light)](2293-volume-single-scattering-monte-carlo-with-point-light.md), by replacing stochastic Monte Carlo integration with a deterministic, texture-based lookup of the analytical integral, thereby eliminating sampling noise and reducing computational cost at the expense of precomputation memory [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Camera position (origin $O$), surface point position ($S$ or $P$), light position ($L$), surface normal ($N$), view direction ($V$), extinction coefficient ($k_t$), albedo, and material properties (Lambert/Phong).
+*   **Output:** Fragment color containing the direct single scattering radiance $L_{dss}$ and indirect single scattering radiance $L_{iss}$ (if enabled), attenuated by the view ray.
+
+**Data Structures:**
+*   `sampler1D monarctan`: 1D texture storing precomputed $\arctan$ values to avoid trigonometric instructions.
+*   `sampler2D integrale`: 2D texture storing the precomputed Gamma function $\Gamma(\lambda, \gamma)$. The dimensions depend on the range of $k_t h$ and the angular range.
+*   `sampler1D gamma_lambert`: 1D texture for indirect Lambertian scattering integration.
+*   `sampler2D gamma_phong`: 2D texture for indirect Phong scattering integration.
+*   `uniform vec4 coeff_milieu`: Contains light intensity, albedo, and extinction coefficient ($k_t$). Layout: `rgb` = $I_0 \cdot \text{albedo} \cdot k_t^2 / 4\pi$, `a` = $k_t$.
+*   `uniform vec4 poslght`: Light position in camera space.
+*   `uniform vec4 integralRange`: Scaling parameters for the Gamma function lookup. Layout: `x` = min $\Gamma_L$, `y` = range $\Gamma_L$, `z` = min $\Gamma_P$, `w` = range $\Gamma_P$.
+
+**Formulas:**
+The direct single scattering radiance is defined by the integral [S1, unofficial]:
+$$ \Gamma(\lambda, \gamma) = \int_0^\gamma \frac{\sin(\alpha)+1}{\pi} p(\alpha^+) e^{-k_t \lambda \cos(\alpha)} d\alpha $$
+where $p(\alpha^+)$ is the phase function. For isotropic scattering, $p(\alpha^+) = 1$.
+
+The final radiance $L_{dss}$ is computed as [S1, unofficial]:
+$$ L_{dss}(d, \phi) = \frac{k_t^2 \Omega_I}{4\pi S} e^{-k_t t} e^{k_t h} \left[ \Gamma\left(k_t h, \arctan\left(\frac{d-t}{h}\right)\right) - \Gamma\left(k_t h, \arctan\left(\frac{-t}{h}\right)\right) \right] $$
+Note: The source text contains a typo in the exponential term $e^{k_t h}$ which should likely be $e^{-k_t h}$ or handled via the integral definition; however, the implementation uses the difference of Gamma values scaled by $1/h$ and the extinction term. The implementation code applies `exp(-coeff_milieu.w * rayDist)` for view attenuation and uses the Gamma difference for the scattering term.
+
+**Parameters:**
+*   $k_t$: Extinction coefficient (absorption + scattering).
+*   $h$: Distance from light to the closest point on the view ray perpendicular to the light direction.
+*   $t$: Distance from light to the intersection point along the view ray (signed distance).
+*   $d$: Total distance from camera to point $P$.
+
+**Steps:**
+1.  **Compute Ray Geometry:**
+    *   Calculate view ray direction: $\vec{rayDir} = \vec{posInScene}$.
+    *   Calculate ray distance: $d = \|\vec{rayDir}\|$.
+    *   Normalize: $\vec{rayDir} = \vec{rayDir} / d$.
+    *   Compute $t$: $t = -\vec{poslght} \cdot \vec{rayDir}$.
+    *   Compute $h$: $h = \|\vec{poslght} + \vec{rayDir} \cdot t\|$.
+
+2.  **Precompute Angles via Texture Lookup:**
+    *   To avoid `atan` instructions, map the ratios $-t/h$ and $(d-t)/h$ to texture coordinates.
+    *   Scale factor used in source: 20.0.
+    *   Coordinate for $\alpha_0$ (angle at light): $z = \frac{-t/h}{20.0} + 0.5$.
+    *   Lookup: $\alpha_0 = \text{texture1D}(\text{monarctan}, z).r$.
+    *   Coordinate for $\alpha_d$ (angle at point): $w = \frac{(d-t)/h}{20.0} + 0.5$.
+    *   Lookup: $\alpha_d = \text{texture1D}(\text{monarctan}, w).r$.
+
+3.  **Lookup Gamma Function:**
+    *   Compute $\lambda = k_t \cdot h$.
+    *   Lookup $\Gamma(\lambda, \alpha_0)$: $r = \text{texture2D}(\text{integrale}, \vec{ab} = (\lambda, \alpha_0)).r$.
+    *   Lookup $\Gamma(\lambda, \alpha_d)$: $g = \text{texture2D}(\text{integrale}, \vec{ab} = (\lambda, \alpha_d)).r$.
+
+4.  **Scale Gamma Values:**
+    *   Apply linear scaling defined by `integralRange`:
+        $$ \Gamma_{scaled} = \Gamma_{raw} \cdot (\text{integralRange}.z) + \text{integralRange}.x $$
+        (Note: Source code applies `integralRange.zz` and `integralRange.xx` to the `rg` components, implying separate scaling for the two Gamma terms or a combined operation. The source code snippet shows `resultat.rg = resultat.rg*integralRange.zz + integralRange.xx;` which suggests a vector operation where `zz` is the scale and `xx` is the offset for both components).
+
+5.  **Compute Radiance:**
+    *   Calculate the scattering term: $S_{term} = \frac{g - r}{h}$.
+    *   Apply view attenuation: $L_{dss} = \text{coeff\_milieu}.xyz \cdot e^{-k_t \cdot d} \cdot S_{term}$.
+
+6.  **Depth Test:**
+    *   Ensure the fragment is the closest surface point. If `gl_FragCoord.z` is not the minimum (using equality or small epsilon), discard the fragment.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_dss(pos_in_scene, poslght, coeff_milieu, integral_range, monarctan_tex, integrale_tex, depth_tex, frag_coord):
+    """
+    Computes Direct Single Scattering radiance using precomputed integrals.
+    
+    Args:
+        pos_in_scene: vec3, position of the point in camera space (from origin).
+        poslght: vec3, light position in camera space.
+        coeff_milieu: vec4, [rgb: I0*albedo*kt^2/4pi, a: kt].
+        integral_range: vec4, [x: min_gamma, y: range_gamma, z: min_gamma, w: range_gamma].
+        monarctan_tex: 1D texture for atan lookup.
+        integrale_tex: 2D texture for Gamma lookup.
+        depth_tex: 2D texture for depth comparison.
+        frag_coord: vec4, fragment coordinates.
+        
+    Returns:
+        vec4: Final color with DSS radiance.
+    """
+    # 1. Ray Geometry
+    ray_dir = pos_in_scene
+    ray_dist = length(ray_dir)
+    if ray_dist < 1e-6:
+        return vec4(0.0)
+    ray_dir = normalize(ray_dir)
+    
+    # t: distance from light to intersection along ray (signed)
+    # Formula: t = -dot(poslght, rayDir)
+    t = -dot(poslght, ray_dir)
+    
+    # h: perpendicular distance from light to ray
+    # Formula: h = length(poslght + rayDir * t)
+    closest_point = poslght + ray_dir * t
+    h = length(closest_point)
+    
+    if h < 1e-6:
+        # Degenerate case: light is on the ray
+        return vec4(0.0)
+
+    # 2. Angle Lookups (avoiding atan)
+    # Scale factor 20.0 as per source
+    # alpha0 corresponds to angle at light: atan(-t/h)
+    # alpha_d corresponds to angle at point: atan((d-t)/h)
+    
+    # Map to [0, 1] range for texture lookup
+    # Source: (val / 20.0) + 0.5
+    coord_alpha0 = (t / (h * 20.0)) + 0.5
+    coord_alpha_d = ((ray_dist - t) / (h * 20.0)) + 0.5
+    
+    # Clamp coordinates to texture bounds if necessary
+    coord_alpha0 = clamp(coord_alpha0, 0.0, 1.0)
+    coord_alpha_d = clamp(coord_alpha_d, 0.0, 1.0)
+    
+    alpha0 = monarctan_tex[coord_alpha0] # Assuming 1D texture returns scalar
+    alpha_d = monarctan_tex[coord_alpha_d]
+
+    # 3. Gamma Lookup
+    # lambda = kt * h
+    kt = coeff_milieu.a
+    lam = kt * h
+    
+    # Lookup Gamma(lam, alpha0) and Gamma(lam, alpha_d)
+    # Texture coordinates: (lambda, angle)
+    # Note: Source uses resultat.a for lambda and resultat.b for angle
+    # Assuming texture dimensions map appropriately.
+    gamma_0 = integrale_tex[vec2(lam, alpha0)]
+    gamma_d = integrale_tex[vec2(lam, alpha_d)]
+    
+    # 4. Scale Gamma Values
+    # Source: resultat.rg = resultat.rg * integralRange.zz + integralRange.xx
+    # This implies a linear scaling for both gamma values.
+    # integralRange.x = min, integralRange.z = scale? 
+    # Source comment: integralRange.x : Minimum value of Gamma L
+    # Source code: resultat.rg * integralRange.zz + integralRange.xx
+    # Let's assume zz is scale and xx is offset for the combined operation.
+    gamma_0 = gamma_0 * integral_range.z + integral_range.x
+    gamma_d = gamma_d * integral_range.z + integral_range.x
+    
+    # 5. Compute Radiance
+    # Scattering term: (Gamma_d - Gamma_0) / h
+    scattering_term = (gamma_d - gamma_0) / h
+    
+    # View attenuation: exp(-kt * d)
+    view_attenuation = exp(-kt * ray_dist)
+    
+    # Final Color
+    # coeff_milieu.rgb contains the pre-multiplied light intensity and albedo factors
+    final_color = coeff_milieu.rgb * view_attenuation * scattering_term
+    
+    # 6. Depth Test
+    # Ensure this fragment is the closest surface
+    # Source compares gl_FragCoord.z with depthtex lookup
+    # Note: frag_coord.z is typically in [0,1] or [0, window_height] depending on context
+    # Source uses: rayDir.x = gl_FragCoord.x/1024.0; rayDir.y = gl_FragCoord.y/1024.0;
+    # This implies a 1024x1024 resolution for depthtex.
+    
+    depth_uv = vec2(frag_coord.x / 1024.0, frag_coord.y / 1024.0)
+    depth_val = depth_tex[depth_uv].x
+    
+    # Equality test with epsilon
+    if frag_coord.z > depth_val + 0.0001:
+        discard()
+        
+    return vec4(final_color, 1.0)
+```
+
+## Subtopics
+
+### [Shadow Volumes via Stencil Buffer and Shadow Planes](20435-shadow-volumes-via-stencil-buffer-and-shadow-planes.md)
+Computes hard shadows on view rays for DSS by splitting the integration ray into lit and shadowed segments using shadow volumes generated from object silhouettes. It differs from sibling methods by explicitly handling occlusion along the view ray through hardware-accelerated stencil buffer operations on infinite shadow planes, rather than relying solely on depth maps or ray marching for shadow determination.
+
+## Operating characteristics
+*   **Time Complexity:** $O(1)$ per fragment for the DSS calculation, dominated by a constant number of texture lookups (2 for `monarctan`, 2 for `integrale`) and basic arithmetic. This is significantly faster than Monte Carlo methods which require $N$ samples per pixel.
+*   **Memory Complexity:** $O(1)$ additional memory for uniforms, plus the size of the precomputed textures (`monarctan`, `integrale`, etc.). The 2D Gamma texture size depends on the resolution of $k_t h$ and the angular range.
+*   **Performance:** The method is optimized for real-time rendering by avoiding expensive trigonometric functions (`atan`, `sin`, `cos`) in favor of texture lookups [S1, unofficial].
+*   **Strengths:** Noise-free results, deterministic, fast execution on GPU.
+*   **Limitations:** Requires precomputation of the Gamma function texture, which depends on the phase function and extinction coefficient. Limited to point lights (or directional lights approximated as point lights at infinity). Shadowing requires additional geometry processing (shadow volumes) and stencil buffer operations, which can be complex to implement [S1, unofficial].
+*   **When to use:** Real-time rendering of participating media with point lights where noise-free single scattering is desired and precomputation is feasible.
+*   **When not to use:** When the phase function changes dynamically, or when multiple scattering is significant. Also not suitable for complex shadowing scenarios where shadow volumes are expensive to generate.
+
+## Background
+The method originates from the work on "Real Time Single Scattering Effects" [S1, unofficial]. It leverages the analytical formulation of single scattering radiance for isotropic or Mie-hazy phase functions, reducing the integral to a 2D lookup table. The approach was developed to optimize shader performance by replacing trigonometric computations with texture lookups and precomputed integrals.
+
+## Sources
+[S1] Real Time Single Scattering Effects, https://hal.science/hal-00622215v1, fetched 2026-10-26 (unofficial)

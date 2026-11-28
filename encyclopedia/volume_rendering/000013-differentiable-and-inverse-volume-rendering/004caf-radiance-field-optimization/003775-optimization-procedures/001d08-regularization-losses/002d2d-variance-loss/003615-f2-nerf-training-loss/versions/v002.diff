@@ -1,0 +1,197 @@
+--- v001.md
++++ v002.md
+@@ -4,8 +4,8 @@
+ 
+ ## Overview
+-The F2-NeRF training loss is a composite objective function used to optimize neural radiance fields with multiresolution hash grids, specifically designed to mitigate floating artifacts and enforce spatial smoothness in unbounded scenes. It extends the standard reconstruction loss by adding a disparity regularization term to penalize excessive inverse depth estimates and a total variation loss to ensure feature consistency across octree node boundaries. It differs from standard NeRF losses by explicitly targeting the stability of depth estimation in free-trajectory settings and the continuity of hash-grid features.
++The F2-NeRF training loss is a composite objective function for optimizing neural radiance fields with multiresolution hash grids, combining color reconstruction with disparity and total variation regularization [S1]. It specifically penalizes excessive inverse depth estimates to reduce floating artifacts and enforces feature consistency across octree node boundaries [S1].
+ 
+ ## How it works
+-The method computes the total loss as a weighted sum of three components: color reconstruction, disparity regularization, and total variation regularization.
++The method computes the total loss as a weighted sum of three components: color reconstruction, disparity regularization, and total variation regularization [S1].
+ 
+ ### Inputs and Outputs
+@@ -22,7 +22,7 @@
+ 
+ ### Data Structures
+-The implementation relies on the multiresolution hash grid structure described in the parent context. Specifically:
+-*   **Hash Table:** Stores feature vectors. In F2-NeRF, this is typically configured with 16 levels, where each level contains $2^{19}$ feature vectors of dimension 2 [S1].
+-*   **Hash Functions:** Two distinct hash functions are used to fetch features for neighboring octree nodes to compute the total variation loss.
++The implementation relies on the multiresolution hash grid structure [S1]. Specifically:
++*   **Hash Table:** Stores feature vectors. In F2-NeRF, this is configured with 16 levels, where each level contains $2^{19}$ feature vectors of dimension 2 [S1].
++*   **Hash Functions:** Two distinct hash functions are used to fetch features for neighboring octree nodes to compute the total variation loss [S1].
+ 
+ ### Parameters
+@@ -46,5 +46,4 @@
+     \mathcal{L}_{\text{recon}}(c(r), c_{\text{gt}}) = \sqrt{(c(r) - c_{\text{gt}})^2 + \epsilon}
+     $$
+-    Note: The source notation $\sqrt{(c(r) - c_{\text{gt}})^2 + \epsilon}$ implies a per-pixel or per-channel calculation followed by aggregation, or a specific variant of L1/L2. Given the square root of a squared difference plus epsilon, this is effectively a smoothed L1-like or Huber-like behavior, but strictly follows the provided formula.
+ 
+ 2.  **Disparity Loss** [S1]:
+@@ -56,5 +55,5 @@
+     \text{disp}_k = \sum_{i} w_i t_i
+     $$
+-    Here, $t_i$ is the inverse distance (disparity) of the $i$-th sample, and $w_i$ is the corresponding volume rendering weight.
++    Here, $t_i$ is the inverse distance (disparity) of the $i$-th sample, and $w_i$ is the corresponding volume rendering weight [S1].
+ 
+ 3.  **Total Variation Loss** [S1]:
+@@ -62,8 +61,10 @@
+     \mathcal{L}_{\text{TV}} = \frac{1}{n_b} \sum_{k=1}^{n_b} \|\text{feat}_0^k - \text{feat}_1^k\|_2^2
+     $$
+-    Where $\text{feat}_0^k$ and $\text{feat}_1^k$ are feature vectors fetched from the hash table using two different hash functions conditioned on the two neighboring octree nodes adjacent to the border point $k$.
++    Where $\text{feat}_0^k$ and $\text{feat}_1^k$ are feature vectors fetched from the hash table using two different hash functions conditioned on the two neighboring octree nodes adjacent to the border point $k$ [S1].
+ 
+ ### Pseudocode
+ ```python
++import math
++
+ def compute_f2_nerf_loss(rendered_color, ground_truth_color, 
+                          weights, inverse_distances, 
+@@ -74,11 +75,11 @@
+     
+     Args:
+-        rendered_color: Tensor of shape (N_rays, 3) or (N_rays,).
+-        ground_truth_color: Tensor of shape (N_rays, 3) or (N_rays,).
+-        weights: Tensor of shape (N_rays, N_samples). Alpha weights from volume rendering.
+-        inverse_distances: Tensor of shape (N_rays, N_samples). Sampled inverse depths t_i.
+-        hash_table: The multiresolution hash grid storage.
+-        hash_func_0: Hash function for the first neighboring node.
+-        hash_func_1: Hash function for the second neighboring node.
++        rendered_color: List of lists or array of shape (N_rays, channels).
++        ground_truth_color: List of lists or array of shape (N_rays, channels).
++        weights: List of lists or array of shape (N_rays, N_samples). Alpha weights from volume rendering.
++        inverse_distances: List of lists or array of shape (N_rays, N_samples). Sampled inverse depths t_i.
++        hash_table: List or array storing feature vectors.
++        hash_func_0: Callable returning hash index for first neighboring node.
++        hash_func_1: Callable returning hash index for second neighboring node.
+         epsilon: Numerical stability constant.
+         lambda_disp: Weight for disparity loss.
+@@ -86,84 +87,57 @@
+         
+     Returns:
+-        total_loss: Scalar tensor.
++        total_loss: Scalar float.
+     """
+-    n_rays = rendered_color.shape[0]
+-    
+-    # 1. Reconstruction Loss
+-    # Formula: sqrt((c(r) - c_gt)^2 + epsilon)
+-    # Assuming element-wise operations for color channels
+-    color_diff_sq = (rendered_color - ground_truth_color) ** 2
+-    recon_loss_per_ray = torch.sqrt(color_diff_sq + epsilon)
+-    # Average over rays and channels if necessary, or sum. 
+-    # Standard practice averages over the batch. The source formula implies averaging over rays for L_Disp,
+-    # and L_recon is typically averaged over pixels/rays.
+-    l_recon = torch.mean(recon_loss_per_ray)
+-    
+-    # 2. Disparity Loss
+-    # disp_k = sum_i (w_i * t_i)
+-    # L_Disp = mean_k (disp_k^2)
+-    # weights shape: (N_rays, N_samples)
+-    # inverse_distances shape: (N_rays, N_samples)
+-    disparities = torch.sum(weights * inverse_distances, dim=1) # Shape: (N_rays,)
+-    l_disp = torch.mean(disparities ** 2)
+-    
+-    # 3. Total Variation Loss
+-    # Sample n_b = 8192 points on octree borders.
+-    # For each point k, fetch features from two neighboring nodes.
+-    # L_TV = mean_k ||feat_0^k - feat_1^k||_2^2
+-    
++    n_rays = len(rendered_color)
++    n_samples = len(weights[0])
++    channels = len(rendered_color[0])
++
++    # 1. Reconstruction Loss: sqrt((c(r) - c_gt)^2 + epsilon)
++    recon_loss = 0.0
++    for i in range(n_rays):
++        diff_sq = sum((rendered_color[i][c] - ground_truth_color[i][c])**2 for c in range(channels))
++        recon_loss += math.sqrt(diff_sq + epsilon)
++    l_recon = recon_loss / n_rays
++
++    # 2. Disparity Loss: mean_k (sum_i w_i * t_i)^2
++    l_disp = 0.0
++    for k in range(n_rays):
++        disp_k = sum(weights[k][i] * inverse_distances[k][i] for i in range(n_samples))
++        l_disp += disp_k ** 2
++    l_disp /= n_rays
++
++    # 3. Total Variation Loss: mean_k ||feat_0^k - feat_1^k||_2^2
+     n_b = 8192
+-    # Generate or retrieve n_b border points. 
+-    # In implementation, these are coordinates on the boundaries of the octree nodes.
+-    border_points = sample_border_points(n_b) # [G]: Implementation detail for sampling border points
+-    
+-    feat_0_list = []
+-    feat_1_list = []
+-    
+-    for point in border_points:
+-        # Determine the two neighboring octree nodes for this point
+-        node_id_0, node_id_1 = get_neighboring_node_ids(point)
+-        
+-        # Fetch features using two different hash functions
+-        # hash_func_0 and hash_func_1 map (node_id, coordinate_offset) -> index
+-        # The source specifies "conditioned on its two neighboring octree nodes"
+-        # and "using two different hash functions".
+-        idx_0 = hash_func_0(node_id_0, point)
+-        idx_1 = hash_func_1(node_id_1, point)
+-        
+-        feat_0 = hash_table[idx_0]
+-        feat_1 = hash_table[idx_1]
+-        
+-        feat_0_list.append(feat_0)
+-        feat_1_list.append(feat_1)
+-        
+-    feat_0 = torch.stack(feat_0_list) # Shape: (n_b, feature_dim)
+-    feat_1 = torch.stack(feat_1_list) # Shape: (n_b, feature_dim)
+-    
+-    # Compute squared L2 distance
+-    tv_diff = feat_0 - feat_1
+-    l_tv = torch.mean(torch.sum(tv_diff ** 2, dim=1))
+-    
+-    # Total Loss
+-    total_loss = l_recon + lambda_disp * l_disp + lambda_tv * l_tv
+-    
+-    return total_loss
++    # [G] Implementation detail: sample n_b points on octree node boundaries
++    border_points = sample_border_points(n_b)
++    tv_sum = 0.0
++    for k in range(n_b):
++        # [G] Implementation detail: determine two neighboring octree node IDs for point k
++        node_id_0, node_id_1 = get_neighboring_node_ids(border_points[k])
++        # Fetch features using two different hash functions conditioned on nodes
++        feat_0 = hash_table[hash_func_0(node_id_0, border_points[k])]
++        feat_1 = hash_table[hash_func_1(node_id_1, border_points[k])]
++        # Compute squared L2 distance
++        diff_sq = sum((feat_0[d] - feat_1[d])**2 for d in range(len(feat_0)))
++        tv_sum += diff_sq
++    l_tv = tv_sum / n_b
++
++    return l_recon + lambda_disp * l_disp + lambda_tv * l_tv
+ ```
+ 
+ ### Edge Cases and Pitfalls
+-*   **Hash Collisions:** The total variation loss relies on fetching features from specific hash table indices. Hash collisions in the multiresolution grid may cause $\text{feat}_0$ and $\text{feat}_1$ to refer to the same or correlated features even if nodes are distinct, reducing the effectiveness of the regularization [S1].
+-*   **Border Point Sampling:** The method requires randomly sampling points on the borders of octree nodes. If the octree structure is not explicitly maintained or if border detection is inaccurate, the loss cannot be computed. The source specifies $n_b=8192$ points [S1].
+-*   **Disparity Magnitude:** The disparity loss penalizes large inverse depths. In scenes with very deep geometry, this might bias the network towards shallower depths if $\lambda_{\text{Disp}}$ is too high. The source notes this is useful to reduce "floating artifacts" [S1].
+-*   **Feature Dimension:** The hash features are small (dimension 2 in the reported implementation) [S1]. The L2 distance is computed on these low-dimensional vectors.
++*   **Border Point Sampling:** The method requires randomly sampling points on the borders of octree nodes [S1]. If the octree structure is not explicitly maintained or if border detection is inaccurate, the loss cannot be computed [S1].
++*   **Disparity Magnitude:** The disparity loss penalizes large inverse depths [S1]. In scenes with very deep geometry, this might bias the network towards shallower depths if $\lambda_{\text{Disp}}$ is too high [S1].
++*   **Feature Dimension:** The hash features are small (dimension 2 in the reported implementation) [S1]. The L2 distance is computed on these low-dimensional vectors [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The reconstruction and disparity losses are linear in the number of rays and samples. The total variation loss adds a cost proportional to $n_b$ (8192) hash lookups and vector subtractions per iteration, which is constant relative to the number of rays but adds a fixed overhead per training step.
+-*   **Memory Complexity:** No additional large memory structures are required beyond the hash table itself. The border points and fetched features are transient.
+-*   **Strengths:** Effectively reduces floating artifacts in unbounded scenes by constraining disparity. Enforces spatial smoothness in the hash grid features, leading to better generalization in free-trajectory settings.
+-*   **Limitations:** Requires explicit access to octree node boundaries and hash functions. The fixed number of border points ($n_b=8192$) may not scale perfectly with very large or complex scenes without adjustment.
+-*   **When to use:** Recommended for F2-NeRF and Instant-NGP-style architectures with multiresolution hash grids, especially in unbounded scenes with free camera trajectories.
++*   **Time Complexity:** The reconstruction and disparity losses are linear in the number of rays and samples [S1]. The total variation loss adds a cost proportional to $n_b$ (8192) hash lookups and vector subtractions per iteration, which is constant relative to the number of rays but adds a fixed overhead per training step [S1].
++*   **Memory Complexity:** No additional large memory structures are required beyond the hash table itself [S1]. The border points and fetched features are transient [S1].
++*   **Strengths:** Effectively reduces floating artifacts in unbounded scenes by constraining disparity [S1]. Enforces spatial smoothness in the hash grid features, leading to better generalization in free-trajectory settings [S1].
++*   **Limitations:** Requires explicit access to octree node boundaries and hash functions [S1]. The fixed number of border points ($n_b=8192$) may not scale perfectly with very large or complex scenes without adjustment [S1].
++*   **When to use:** Recommended for F2-NeRF and Instant-NGP-style architectures with multiresolution hash grids, especially in unbounded scenes with free camera trajectories [S1].
+ 
+ ## Background
+-The F2-NeRF training loss was introduced in the paper "F2-NeRF: Fast Neural Radiance Field Training with Free Camera Trajectories" [S1]. It builds upon the Instant-NGP architecture [S1] and addresses challenges in novel view synthesis for unbounded scenes with free trajectories. The disparity loss and total variation loss were added to stabilize training and improve visual quality in these challenging settings.
++The F2-NeRF training loss was introduced in the paper "F2-NeRF: Fast Neural Radiance Field Training with Free Camera Trajectories" [S1]. It was designed to stabilize training and improve visual quality in unbounded scenes with free camera trajectories [S1]. The disparity loss and total variation loss were added to mitigate floating artifacts and enforce feature consistency across octree boundaries [S1].
+ 
+ ## Sources

@@ -1,0 +1,295 @@
+3D Slicer extension for liver analysis and therapy planning - ENH: Offer Poisson reconstruction alongside marching cubes (ADR-0040 phase 4a) by RafaelPalomar · Pull Request #649 · ALive-research/Slicer-Liver
+
+ENH: Offer Poisson reconstruction alongside marching cubes (ADR-0040 phase 4a) by RafaelPalomar · Pull Request #649 · ALive-research/Slicer-Liver · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+RafaelPalomar
+commented
+Sep 12, 2026
+Copy link
+Copy Markdown
+Collaborator
+ADR-0040 phase 4a. The consumer seam: a segmentation segment becomes a mesh by a method the caller names. Stacked on #648; also merges #645 (the extractor), because the consumer composes both primitives and they sit on parallel branches. Relates to #310.
+Nothing changes for anyone who does not ask. ensure_target_model gains a method parameter whose absence means marching cubes, so the liver target mesh is byte-for-byte what it was.
+The choice is the deliverable
+ADR-0040 §Conformance requires PSR be offered alongside marching cubes, never as a silent replacement — and the reason isn't caution, it's that the two make a trade the surgeon owns:
+Marching cubes is exact about which voxels are in, and inherits the labelmap's voxel staircase.
+PSR approximates rather than interpolates, and will not reproduce a one-voxel spike.
+At CT resolution that staircase is a real feature of the data, not noise to be assumed away. Neither is better in general, so this module must not decide.
+An unknown method returns None rather than falling back. A caller who asked for PSR and silently got marching cubes would be comparing the two and reading the same surface twice — the failure mode that makes an A/B evaluation worthless while looking like it worked.
+Two details that the composition has to get right
+The label value is threaded, not just the image. Stage 2's segments share one binary-labelmap layer, so the image a segment hands back holds its neighbours' voxels; only the segment's own value distinguishes it. That's why the extractor tests voxels for equality. A test with two concentric labelled shells pins that the composition preserves it end to end — reconstructing label 3 must not reach into the label-7 shell wrapped around it.
+The image-to-world matrix is passed whole. A segment's labelmap is oriented — spacing, direction and origin together — so handing the extractor the matrix rather than a spacing triple is what stops an oblique acquisition being flattened into an axis-aligned assumption.
+_liver_closed_surface stays as a thin alias to the moved implementation: once a second method exists, marching cubes has no claim to being the unqualified meaning of "the surface".
+Tests run in both rows, and the split is deliberate
+The dispatch half — both methods on the menu, marching cubes still first and still the default, an unrecognised method refused — is the ADR conformance invariant, and it runs in the bare row rather than skipping. The fixture falls back to loading SegmentSurface from its source path, which is safe only because the module imports vtk and nothing else at module scope and resolves the wrapped classes lazily. If that stops being true, the fixture fails loudly instead of quietly skipping.
+That mattered: my first attempt registered a bare row that skipped all 9 tests, because LiverResectionsLib isn't importable outside a launched Slicer. A green row that only ever skips is worth nothing, and this project has paid for that lesson repeatedly (#449, #454, #459, #460).
+The default is asserted through the real dispatcher with a recording stub, not by reading the signature's default — so a later refactor that moves the default elsewhere still trips it.
+```
+bare      4 passed,  5 skipped
+launched  9 passed
+full launched LiverResections root   216 passed, 15 skipped (all pre-existing)
+Algorithm C++ suite                  15/15
+bare pytest_scaffold                 green
+```
+Next
+Phase 4b: the UI that lets the surgeon make the choice, and the :0 eyeball comparing the two on real anatomy — which is where the trade above stops being an argument and becomes something you can look at.
+Authored with assistance from Claude (Anthropic Claude Opus 5).
+RafaelPalomar
+commented
+Sep 12, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+Update — the :0 eyeball ran, and found a bug (2026-09-13)
+Reconstructing a real patient's liver put the Poisson surface 53.179 mm mean from the marching-cubes surface of the same voxels.
+Cause: the extractor dropped the labelmap's extent origin. A segment's binary labelmap is cropped to its own bounding box, so its extent never starts at zero, and Slicer's image-to-world matrix maps absolute voxel indices. The cloud came out intact, correctly shaped and correctly oriented — just translated.
+Five C++ tests passed throughout. Normals-vs-analytic-outward, deterministic subsampling, geometry-from-the-matrix, degenerate inputs, two-label no-bleed. Every one built its fixture with SetDimensions, which yields a zero-based extent, where a dropped offset is indistinguishable from a correct one. The assertions were strong; the inputs were the wrong shape.
+Fixed on #645 (BUG: Honour the labelmap's extent origin when emitting points), with TestExtentOriginIsHonoured verified red before green — without the fix, "axis 0 off by 100".
+After the fix, on the real liver:
+points
+polys
+time
+marching cubes
+145,150
+290,296
+0.10 s
+poisson depth 7
+50,598
+101,192
+14.3 s
+```
+mc  -> psr : mean 0.068  worst 0.982 mm
+psr -> mc  : mean 0.078  worst 1.020 mm
+0 degenerate normals on either surface
+```
+PSR carries the same surface in a third of the triangles, agreeing to 0.068 mm mean — so the difference is concentrated in the staircase, which is exactly what a surgeon would be choosing between.
+One rendering note for anyone repeating this: the first comparison used flat shading to expose the staircase, and inverted the result — flat shading discards per-vertex normals, so the surface with fewer, larger triangles facets more, and PSR looked rougher than marching cubes. The eyeball is only evidence if the shading is matched. The solver's normals were independently verified: all unit length, none inverted, dot = 1.0000 against normals derived from the output triangles.
+Phase 4b, also in this PR
+Maintainer decisions: PSR feeds the target mesh as well as the display, and the choice lives in Stage 2.
+apply_surface_method writes the chosen mesh into the segment's closed-surface representation — the one seam every downstream consumer already reads. The alternative was threading a method argument to the 3D display, to TargetModel, and through it to ring extraction. Installing at the representation means they inherit the choice unchanged, and makes it impossible for the rendered anatomy and the geometry the plan is computed against to disagree — a discrepancy a surgeon would have no way to see, with nothing in the UI wrong.
+Probed before building, not assumed:
+result
+read back after injection
+held
+after CreateClosedSurfaceRepresentation()
+held — Slicer won't regenerate an existing representation
+after a labelmap edit
+regenerated
+That last row is the right way round: a reconstruction of voxels the user has since changed would be stale, and looking correct is what makes stale dangerous. So the tag records what was last applied, not a guarantee of what is there, and says so.
+The tag is on the segment, not the node — a case may want a smooth liver and a staircase tumour. applied_surface_method returns None for "nobody chose", distinct from "marching cubes was chosen", so the Stage-2 UI can show an honest initial value rather than asserting a default the user never picked.
+The scene fixture builds its labelmap at a non-zero extent, for the reason above.
+```
+launched  13 passed
+bare       4 passed, 5 skipped
+Algorithm C++ suite  15/15
+```
+Still to come in 4c: the Stage-2 control itself, and an eyeball of the choice driving a real resection.
+codecov
+Bot
+commented
+Sep 12, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Codecov Report
+❌ Patch coverage is 82.40741% with 19 lines in your changes missing coverage. Please review.
+✅ Project coverage is 56.29%. Comparing base (4b71dfc) to head (5e7da02).
+Files with missing lines
+Patch %
+Lines
+...verResections/LiverResectionsLib/SegmentSurface.py
+81.55%
+19 Missing ⚠️
+Additional details and impacted files
+```
+@@             Coverage Diff             @@
+##           preview     #649      +/-   ##
+===========================================
++ Coverage    56.19%   56.29%   +0.09%     
+===========================================
+  Files          191      192       +1     
+  Lines        24430    24527      +97     
+  Branches      5512     5185     -327     
+===========================================
++ Hits         13729    13808      +79     
++ Misses        9656     9259     -397     
+- Partials      1045     1460     +415     
+```
+Flag
+Coverage Δ
+cxx
+56.29% <82.40%> (+0.09%)
+⬆️
+py
+56.29% <82.40%> (+0.09%)
+⬆️
+Flags with carried forward coverage won't be shown. Click here to find out more.
+Files with missing lines
+Coverage Δ
+LiverResections/LiverResectionsLib/TargetModel.py
+86.07% <100.00%> (+0.19%)
+⬆️
+...verResections/LiverResectionsLib/SegmentSurface.py
+81.55% <81.55%> (ø)
+... and 21 files with indirect coverage changes
+🚀 New features to boost your workflow:
+❄️ Test Analytics: Detect flaky tests, report on failures, and find test suite problems.
+RafaelPalomar
+force-pushed
+the
+feature/psr-adapter
+branch
+from
+2af4eb1 to
+8407722
+Compare
+October 23, 2026 10:36
+Base automatically changed from
+feature/psr-adapter
+to
+preview
+October 23, 2026 11:20
+RafaelPalomar
+added 2 commits
+October 23, 2026 14:44
+ENH: Offer Poisson reconstruction alongside marching cubes
+…
+d4632e3
+```
+ADR-0040 phase 4a.  SegmentSurface composes the two phase-2 and phase-3
+primitives into the operation a caller actually wants: a segmentation
+segment becomes a mesh, by a method the caller NAMES.
+
+Nothing changes for anyone who does not ask.  ensure_target_model gains
+a method parameter whose absence means marching cubes, so the liver
+target mesh is byte-for-byte what it was.  That is the point rather than
+caution: ADR-0040 §Conformance requires PSR be offered ALONGSIDE
+marching cubes, never as a silent replacement, because the two make a
+trade the surgeon owns.  Marching cubes is exact about which voxels are
+in and inherits the labelmap's staircase; PSR approximates and will not
+reproduce a one-voxel spike.  At CT resolution that staircase is a real
+feature of the data, not noise to be assumed away, so neither method is
+better in general and this module must not decide.
+
+An unknown method returns None rather than falling back.  A caller who
+asked for PSR and silently got marching cubes would be comparing the two
+and reading the same surface twice -- the failure mode that makes an A/B
+evaluation worthless while looking like it worked.
+
+The label VALUE is threaded, not just the image.  Stage 2's segments
+share one binary-labelmap layer, so the image a segment hands back holds
+its neighbours' voxels; only the segment's own value distinguishes it.
+This is why the extractor tests voxels for equality rather than
+non-zero, and a test with two concentric labelled shells pins that the
+composition preserves it end to end.
+
+The labelmap's image-to-world matrix is passed whole.  A segment's
+labelmap is oriented -- spacing, direction and origin together -- so
+handing the extractor the matrix rather than a spacing triple is what
+keeps an oblique acquisition from being flattened into an axis-aligned
+assumption.
+
+_liver_closed_surface stays as a thin alias to the moved implementation.
+Once a second method exists, marching cubes has no claim to being the
+unqualified meaning of "the surface".
+
+The Algorithm classes are imported lazily by their OWN module name.
+They are not on slicer and not on plain vtk; a resolver that looks there
+returns None and turns the feature into a silent no-op, which this
+project has shipped twice.  TargetModel's sibling import is likewise
+function-local, matching the house idiom that keeps each Lib module
+independently importable.
+
+TESTS RUN IN BOTH ROWS, and the split is deliberate.  The dispatch half
+-- both methods on the menu, marching cubes still first and still the
+default, an unrecognised method refused -- is the ADR conformance
+invariant, and it now RUNS in the bare row rather than skipping: the
+fixture falls back to loading SegmentSurface from its source path,
+which is safe only because the module imports vtk and nothing else at
+module scope and resolves the wrapped classes lazily.  A green row that
+only ever skips is worth nothing (#449, #454, #459, #460).
+
+The default is asserted through the real dispatcher with a recording
+stub rather than by reading the signature, so a later refactor that
+moves the default elsewhere still trips it.
+
+Bare: 4 passed, 5 skipped.  Launched: 9 passed.  Full launched
+LiverResections root 216 passed, 15 skipped (all pre-existing).
+Algorithm C++ suite 15/15.  Bare pytest_scaffold green.
+```
+ENH: Install the chosen surface as the segment's closed surface
+…
+5e7da02
+```
+ADR-0040 phase 4b.  apply_surface_method writes the chosen mesh INTO the
+segment's closed-surface representation, which is the one seam every
+downstream consumer already reads.
+
+The alternative was threading a method argument down each call chain --
+to the 3D display, to TargetModel, and through it to the commit-boundary
+ring extraction.  Installing at the representation instead means those
+consumers inherit the choice unchanged, and more importantly makes it
+IMPOSSIBLE for the rendered anatomy and the geometry the plan is built
+on to disagree.  A surgeon looking at a smooth liver while the resection
+is computed against a staircase would have no way to see the
+discrepancy, and nothing in the UI would be wrong.
+
+Probed before building rather than assumed.  Slicer holds an injected
+representation and does not regenerate one that already exists, so the
+defensive CreateClosedSurfaceRepresentation calls scattered through the
+codebase leave it alone.  An edit to the segment's labelmap DOES discard
+it and the surface reverts to marching cubes -- which is the right way
+round: a reconstruction of voxels the user has since changed would be
+stale, and looking correct is what makes stale dangerous.  The tag
+therefore records what was last applied, not a guarantee of what is
+there, and says so.
+
+The tag lives on the SEGMENT, not the node.  The choice is per-segment:
+a case may reasonably want a smooth liver and a staircase tumour, and
+one node-level flag cannot express that.
+
+applied_surface_method returns None for "nobody chose", distinct from
+"marching cubes was chosen".  The Stage-2 UI has to tell those apart to
+show an honest initial value rather than asserting a default the user
+never picked.
+
+The scene fixture builds its labelmap at a NON-ZERO extent, deliberately.
+A zero-based fixture cannot distinguish a correct index mapping from one
+that drops the offset -- which is precisely the bug this pipeline
+shipped, through five green C++ tests, until the phase-4 eyeball put the
+reconstruction 53 mm from the marching-cubes surface of the same voxels.
+
+Launched: 13 passed.  Bare: unchanged (the apply seam needs a scene and
+skips cleanly).  Algorithm C++ suite 15/15.
+```
+RafaelPalomar
+force-pushed
+the
+feature/psr-consumer
+branch
+from
+dd41daa to
+5e7da02
+Compare
+October 23, 2026 12:47
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

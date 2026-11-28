@@ -1,0 +1,205 @@
+--- v007.md
++++ v008.md
+@@ -4,10 +4,10 @@
+ 
+ ## Overview
+-Blinn-Phong Shading in Volume Rendering is a technique that applies the Blinn-Phong reflectance model to surface normals derived from a Signed Distance Function (SDF) during distance-field ray marching [S1, unofficial]. It differs from sibling methods by combining front-to-back volume integration with specular highlights, whereas [Phong Shading with SDF Normals](1977-phong-shading-with-sdf-normals.md) uses the Phong model and [Lambertian Lighting in SDF](2023-lambertian-lighting-in-sdf.md) restricts itself to diffuse lighting only.
++Blinn-Phong Shading in Volume Rendering is a technique that applies the Blinn-Phong reflectance model to surface normals derived from intensity gradients via central differences during ray marching [S1, unofficial]. It differs from sibling methods by combining front-to-back volume integration with specular highlights, whereas [Phong Shading with SDF Normals](1977-phong-shading-with-sdf-normal.md) uses the Phong model and [Lambertian Lighting in SDF](2023-lambertian-lighting-in-sdf.md) restricts itself to diffuse lighting only [G].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A 3D volume texture (`volumeTexture`) containing intensity data, a 1D transfer function texture (`tfTexture`), a uniform transform matrix, light position, light color, and shading parameters (diffuse, specular, ambient, shininess).
+-*   **Output:** A 2D image with accumulated color and alpha.
++*   **Input:** A 3D volume texture (`volumeTexture`) containing intensity data, a 1D transfer function texture (`tfTexture`), a uniform transform matrix, light position, light color, and shading parameters (`diffuse`, `specular`, `ambient`) [S1, unofficial].
++*   **Output:** A 2D image with accumulated color and alpha [S1, unofficial].
+ 
+ **Data Structures:**
+@@ -34,5 +34,5 @@
+ 
+ 3.  **Ray Marching Loop:**
+-    Iterate from `near` to `far`. For each step:
++    Iterate from `near` to `far` inclusive [S1, unofficial]. For each step:
+     *   Transform the current position using the uniform matrix.
+     *   Normalize coordinates to the $[0, 1]$ range.
+@@ -43,5 +43,5 @@
+ 
+ 4.  **Normal Calculation:**
+-    Compute the surface normal $\mathbf{n}$ using central differences on the intensity field. For each axis, sample the intensity at $\mathbf{pos} + \mathbf{offset}$ and $\mathbf{pos} - \mathbf{offset}$, subtract them, and normalize the resulting vector $\mathbf{delta}$ [S1, unofficial]. This aligns with the parent's principle of deriving normals from the SDF gradient [G].
++    Compute the surface normal $\mathbf{n}$ using central differences on the intensity field. For each axis, sample the intensity at $\mathbf{pos} + \mathbf{offset}$ and $\mathbf{pos} - \mathbf{offset}$, subtract them, and normalize the resulting vector $\mathbf{delta}$ [S1, unofficial].
+ 
+ 5.  **Transfer Function Lookup:**
+@@ -53,10 +53,9 @@
+     Calculate the light direction $\mathbf{l}$ (from $\mathbf{p}$ to light), view direction $\mathbf{v}$ (from $\mathbf{p}$ to camera), and half vector $\mathbf{h} = \frac{\mathbf{l} + \mathbf{v}}{\|\mathbf{l} + \mathbf{v}\|}$ [G].
+     *   Diffuse component: $D = \max(0.0, \mathbf{n} \cdot \mathbf{l}) \times \text{diffuse}$
+-    *   Specular component: $S = \text{pow}(\max(0.0, \mathbf{n} \cdot \mathbf{h}), \text{shininess}) \times \text{specular}$
++    *   Specular component: $S = \text{pow}(\max(0.0, \mathbf{n} \cdot \mathbf{h}), 10.0) \times \text{specular}$
+     *   Ambient component: $A = \text{ambient}$
+     *   Combined lit color:
+         $$ \mathbf{litColor} = \text{lightColour} \times (\mathbf{c}.rgb \times (D + A) + S) $$
+         [S1, unofficial]
+-    *   Note: `shininess` is typically set to 10.0 [S1, unofficial].
+ 
+ 7.  **Front-to-Back Composition:**
+@@ -70,37 +69,66 @@
+ 
+ ```python
+-# Vertex Shader
+-def vert_main(vertex_index: u32) -> vec4<f32>:
+-    pos = [vec2(3.0, -1.0), vec2(-1.0, -1.0), vec2(-1.0, 3.0)]
+-    return vec4(pos[vertex_index], 0.0, 1.0)
++import math
+ 
+-# Fragment Shader
+-def ray_box_intersection(bbox_min: vec3, bbox_max: vec3, ray_pos: vec3, ray_dir: vec3) -> vec2:
+-    inv_dir = 1.0 / ray_dir
++class Vec3:
++    def __init__(self, x, y, z): self.x, self.y, self.z = x, y, z
++    def __add__(self, o): return Vec3(self.x+o.x, self.y+o.y, self.z+o.z)
++    def __sub__(self, o): return Vec3(self.x-o.x, self.y-o.y, self.z-o.z)
++    def __mul__(self, s): return Vec3(self.x*s, self.y*s, self.z*s)
++    def __truediv__(self, s): return Vec3(self.x/s, self.y/s, self.z/s)
++    def dot(self, o): return self.x*o.x + self.y*o.y + self.z*o.z
++    def length(self): return math.sqrt(self.x**2 + self.y**2 + self.z**2)
++    def normalize(self):
++        l = self.length()
++        return Vec3(self.x/l, self.y/l, self.z/l) if l > 0 else self
++
++class Vec4:
++    def __init__(self, x, y, z, w): self.x, self.y, self.z, self.w = x, y, z, w
++    @property
++    def rgb(self): return (self.x, self.y, self.z)
++    def __mul__(self, m):
++        return Vec4(m[0]*self.x + m[4]*self.y + m[8]*self.z + m[12]*self.w,
++                    m[1]*self.x + m[5]*self.y + m[9]*self.z + m[13]*self.w,
++                    m[2]*self.x + m[6]*self.y + m[10]*self.z + m[14]*self.w,
++                    m[3]*self.x + m[7]*self.y + m[11]*self.z + m[15]*self.w)
++
++class Sample:
++    def __init__(self, x, y): self.x, self.y = x, y
++
++def texture_sample(tex, sampler, coords):
++    # Standard texture sampling operation; returns Sample object
++    pass
++
++def texture_dimensions(tex):
++    # Returns volume dimensions as Vec3
++    pass
++
++def ray_box_intersection(bbox_min, bbox_max, ray_pos, ray_dir):
++    inv_dir = Vec3(1.0/ray_dir.x, 1.0/ray_dir.y, 1.0/ray_dir.z)
+     bot = inv_dir * (bbox_min - ray_pos)
+     top = inv_dir * (bbox_max - ray_pos)
+-    rmin = min(top, bot)
+-    rmax = max(top, bot)
+-    t_near = max(max(rmin.x, rmin.y), rmin.z)
+-    t_far = min(min(rmax.x, rmax.y), rmax.z)
+-    return vec2(t_near, t_far)
++    rmin = Vec3(min(top.x, bot.x), min(top.y, bot.y), min(top.z, bot.z))
++    rmax = Vec3(max(top.x, bot.x), max(top.y, bot.y), max(top.z, bot.z))
++    t_near = max(rmin.x, max(rmin.y, rmin.z))
++    t_far = min(rmax.x, min(rmax.y, rmax.z))
++    return (t_near, t_far)
+ 
+-def frag_main(coord: vec2) -> vec4:
++def frag_main(coord):
+     # 1. Ray Generation
+-    pos = uniforms.transform * vec4(coord, 0.0, 1.0)
+-    dir = uniforms.transform * vec4(0.0, 0.0, 1.0, 0.0)
++    pos = uniforms.transform * Vec4(coord.x, coord.y, 0.0, 1.0)
++    dir = uniforms.transform * Vec4(0.0, 0.0, 1.0, 0.0)
+     
+     # 2. Ray-Box Intersection
+-    size = vec3(texture_dimensions(volume_texture))
+-    intersect = ray_box_intersection(vec3(0.0), size, pos.xyz, dir.xyz)
+-    near = max(0, intersect.x)
+-    far = intersect.y
++    size = texture_dimensions(volume_texture)
++    intersect = ray_box_intersection(Vec3(0.0, 0.0, 0.0), size, pos, dir)
++    near = max(0.0, intersect[0])
++    far = intersect[1]
+     
+-    acc_colour = vec4(0.0, 0.0, 0.0, 0.0)
++    acc_colour = Vec4(0.0, 0.0, 0.0, 0.0)
+     
+     # 3. Ray Marching Loop
+-    for k in range(near, far):
+-        transformed = uniforms.transform * vec4(coord, float(k), 1.0)
+-        coords = transformed.xyz / size
++    for k in range(int(near), int(far) + 1):
++        transformed = uniforms.transform * Vec4(coord.x, coord.y, float(k), 1.0)
++        coords = transformed / size
+         
+         # Sample and Convert Intensity
+@@ -109,35 +137,30 @@
+         
+         # 4. Normal Calculation (Central Differences)
+-        # Note: In a real implementation, offsets must be scaled by volume dimensions
+-        # and derivatives taken in world space or consistent local space.
+-        # Here we assume a simplified gradient estimation for the method description.
+-        eps = 1.0 / size
+-        dx = texture_sample(volume_texture, volume_sampler, coords + vec3(eps.x, 0, 0)).x - \
+-             texture_sample(volume_texture, volume_sampler, coords - vec3(eps.x, 0, 0)).x
+-        dy = texture_sample(volume_texture, volume_sampler, coords + vec3(0, eps.y, 0)).x - \
+-             texture_sample(volume_texture, volume_sampler, coords - vec3(0, eps.y, 0)).x
+-        dz = texture_sample(volume_texture, volume_sampler, coords + vec3(0, 0, eps.z)).x - \
+-             texture_sample(volume_texture, volume_sampler, coords - vec3(0, 0, eps.z)).x
+-        
+-        normal = normalize(vec3(dx, dy, dz))
++        eps = Vec3(1.0/size.x, 1.0/size.y, 1.0/size.z)
++        dx = texture_sample(volume_texture, volume_sampler, coords + eps).x - texture_sample(volume_texture, volume_sampler, coords - eps).x
++        dy = texture_sample(volume_texture, volume_sampler, coords + Vec3(0, eps.y, 0)).x - texture_sample(volume_texture, volume_sampler, coords - Vec3(0, eps.y, 0)).x
++        dz = texture_sample(volume_texture, volume_sampler, coords + Vec3(0, 0, eps.z)).x - texture_sample(volume_texture, volume_sampler, coords - Vec3(0, 0, eps.z)).x
++        normal = Vec3(dx, dy, dz).normalize()
+         
+         # 5. Transfer Function Lookup
+-        tf_index = int(intensity * uniforms.tf_size)
+-        tf_color = texture_sample(tf_texture, tf_sampler, vec3(float(tf_index) / uniforms.tf_size, 0, 0))
++        tf_index = int(intensity * uniforms.tfSize)
++        tf_color = texture_sample(tf_texture, tf_sampler, Vec3(float(tf_index) / uniforms.tfSize, 0.0, 0.0))
+         
+         # 6. Blinn-Phong Lighting
+-        light_dir = normalize(uniforms.light_pos - pos.xyz)
+-        view_dir = normalize(-pos.xyz) # Assuming camera at origin for simplicity, or use inverse transform
+-        half_dir = normalize(light_dir + view_dir)
++        light_dir = (uniforms.lightPos - pos).normalize()
++        view_dir = (-pos).normalize()
++        half_dir = (light_dir + view_dir).normalize()
+         
+-        diffuse = max(0.0, dot(normal, light_dir)) * uniforms.diffuse
+-        specular = pow(max(0.0, dot(normal, half_dir)), 10.0) * uniforms.specular # shininess = 10.0
++        diffuse = max(0.0, normal.dot(light_dir)) * uniforms.diffuse
++        specular = pow(max(0.0, normal.dot(half_dir)), 10.0) * uniforms.specular
+         ambient = uniforms.ambient
+         
+-        lit_color = uniforms.light_colour * (tf_color.rgb * (diffuse + ambient) + specular)
++        lit_color = uniforms.lightColour * (tf_color.rgb * (diffuse + ambient) + specular)
+         
+         # 7. Front-to-Back Composition
+         alpha = (1.0 - acc_colour.a) * tf_color.a
+-        acc_colour.rgb += alpha * lit_color.rgb
++        acc_colour.x += alpha * lit_color[0]
++        acc_colour.y += alpha * lit_color[1]
++        acc_colour.z += alpha * lit_color[2]
+         acc_colour.a += alpha
+         
+@@ -149,13 +172,13 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear with respect to the number of samples along the ray, which depends on the volume depth and step size. The loop breaks early if opacity threshold is reached.
+-*   **Memory Complexity:** Dominated by the storage of the 3D volume texture and the 1D transfer function texture.
+-*   **Strengths:** Provides realistic specular highlights that enhance the perception of surface curvature and depth in volumetric data.
+-*   **Limitations:** Computationally more expensive than unshaded volume rendering due to normal calculation and lighting per sample. The quality of normals depends heavily on the resolution of the volume and the step size of the ray marcher.
+-*   **When to use:** When visual clarity of internal structures and surface-like appearance is desired.
+-*   **When not to use:** When performance is critical and specular highlights are not necessary, or when the volume data is too noisy for stable normal estimation.
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
++*   **Strengths:** Not given in the sources.
++*   **Limitations:** Not given in the sources.
++*   **When to use:** Not given in the sources.
++*   **When not to use:** Not given in the sources.
+ 
+ ## Background
+-Blinn-Phong Shading in Volume Rendering, specifically implemented as Shaded Volume Rendering (SVR), was popularized by implementations such as the `ossium` project for WebGPU [S1, unofficial]. It builds upon the principles of distance-field ray marching and applies the classic Blinn-Phong reflectance model to the gradients of the volume data.
++Blinn-Phong Shading in Volume Rendering, specifically implemented as Shaded Volume Rendering (SVR), was popularized by implementations such as the `ossium` project for WebGPU [S1, unofficial]. It builds upon the principles of distance-field ray marching and applies the classic Blinn-Phong reflectance model to the gradients of the volume data [S1, unofficial].
+ 
+ ## Sources

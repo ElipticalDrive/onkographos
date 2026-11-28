@@ -1,0 +1,163 @@
+--- v001.md
++++ v002.md
+@@ -24,19 +24,19 @@
+ **Method Steps:**
+ 1.  **Generate Effective Spectrum:** Compute the effective spectrum $S(E)$ based on the tube voltage `kv`, filtration `filtr`, and detector response [S1, unofficial]. The spectrum represents the intensity distribution of X-ray photons across energies [S1, unofficial].
+-2.  **Compute Linear Attenuation:** For each material in `mats`, compute the linear attenuation coefficient $\mu(E)$ for each energy bin in $E$. This is done by retrieving the mass attenuation coefficient from a library (e.g., `xraylib.CS_Total_CP`) and multiplying by the material density $\rho$ [S1, unofficial]:
++2.  **Compute Linear Attenuation:** For each material in `mats`, compute the linear attenuation coefficient $\mu(E)$ for each energy bin in $E$ [S1, unofficial]. This is done by retrieving the mass attenuation coefficient and multiplying by the material density $\rho$ [S1, unofficial]:
+     $$ \mu(E) = \rho \cdot \frac{\mu_{\text{mass}}(E)}{10} $$
+     where $\mu_{\text{mass}}$ is in cm²/g and the factor 10 converts to mm⁻¹ [S1, unofficial].
+-3.  **Ray Integration (Monochromatic):** For each ray in the projection geometry, integrate the attenuation along the path through the volume. For a specific energy $E$, the transmitted intensity $I_{\text{mono}}(E)$ is calculated using the Beer-Lambert law:
++3.  **Ray Integration (Monochromatic):** For each ray in the projection geometry, integrate the attenuation along the path through the volume [S1, unofficial]. For a specific energy $E$, the transmitted intensity $I_{\text{mono}}(E)$ is calculated using the Beer-Lambert law:
+     $$ I_{\text{mono}}(E) = S(E) \cdot \exp\left(-\sum_i \mu_i(E) \cdot t_i\right) $$
+     where $t_i$ is the path length through material $i$ [S1, unofficial].
+-4.  **Detector Response Accumulation:** Sum the contributions across all energy bins. Assuming detector response is proportional to energy, the total detected signal before noise is:
+-    $$ I_{\text{total}} = \sum_E E \cdot I_{\text{mono}}(E) $$
+-    *Note: The source notes describe $I_{\text{total}} = \sum_E E \cdot I_{\text{noisy}}(E)$, implying noise is added per energy bin before summation or the weighting applies to the noisy signal. The standard physical model sums intensities. The source formula suggests energy-weighted summation of noisy counts.* [S1, unofficial].
+-5.  **Poisson Noise Application:** Apply Poisson statistics to simulate detector noise. The noisy count $I_{\text{noisy}}$ is derived from the expected signal scaled by photon count $N_{\text{ph}}$:
+-    $$ I_{\text{noisy}} = \frac{\text{Poisson}(I_{\text{total}} \cdot N_{\text{ph}})}{N_{\text{ph}}} $$
++4.  **Poisson Noise Application:** Apply Poisson statistics to simulate detector noise [S1, unofficial]. The noisy count $I_{\text{noisy}}$ is derived from the expected signal scaled by photon count $N_{\text{ph}}$:
++    $$ I_{\text{noisy}} = \frac{\text{Poisson}(I_{\text{mono}} \cdot N_{\text{ph}})}{N_{\text{ph}}} $$
+     where $\text{Poisson}(\lambda)$ draws a random integer from a Poisson distribution with mean $\lambda$ [S1, unofficial].
++5.  **Detector Response Accumulation:** Sum the contributions across all energy bins [S1, unofficial]. Assuming detector response is proportional to energy, the total detected signal is:
++    $$ I_{\text{total}} = \sum_E E \cdot I_{\text{noisy}}(E) $$
++    The source notes describe $I_{\text{total}} = \sum_E E \cdot I_{\text{noisy}}(E)$, implying noise is added per energy bin before summation [S1, unofficial].
+ 6.  **Logarithmic Conversion:** Convert the noisy counts to projection data (optical depth) for reconstruction:
+     $$ \text{proj} = -\ln(I_{\text{noisy}}) $$
+-    *Pitfall:* If $I_{\text{noisy}}$ is zero, $\ln(0)$ is undefined. A small epsilon or clamping is required in implementation [G].
++    *Pitfall:* If $I_{\text{noisy}}$ is zero, $\ln(0)$ is undefined [G]. A small epsilon or clamping is required in implementation [G].
+ 
+ **Pseudocode:**
+@@ -50,5 +50,5 @@
+     Args:
+         vol: numpy array [vrt, mag, hrz], float32
+-        geom: geometry description
++        geom: geometry description providing ray paths
+         mats: list of dicts with 'material', 'density'
+         E: numpy array of energies in keV
+@@ -63,64 +63,41 @@
+     """
+     # 1. Precompute linear attenuation coefficients for all materials
+-    # mu_map: dict mapping material name to numpy array of mu(E) in 1/mm
+     mu_map = {}
+     for mat_info in mats:
+         mat_name = mat_info['material']
+         rho = mat_info['density'] # g/cm^3
+-        # Get mass attenuation from xraylib (CS_Total_CP returns cm^2/g)
+-        # mass_atten: numpy array same shape as E
++        # Get mass attenuation from standard X-ray tables (cm^2/g)
+         mass_atten = get_mass_attenuation(E, mat_name) 
+         # Convert to linear attenuation in 1/mm: rho * mass / 10
+         mu_map[mat_name] = rho * mass_atten / 10.0
+ 
+-    # 2. Forward project for each energy bin
+-    # counts: numpy array matching projection geometry shape
+-    counts = np.zeros_like(geom.projection_shape, dtype=np.float32)
++    # 2. Initialize output counts array
++    counts = np.zeros(geom.num_rays, dtype=np.float32)
+     
+-    # Get ray paths and material intersections from geometry
+-    # paths: list of tuples (material_label, path_length) for each ray
+-    paths = get_ray_paths(geom, vol) 
++    # 3. Trace rays to get path lengths per material per ray
++    # ray_paths: list of arrays, ray_paths[r] is array of (material_label, path_length_mm)
++    ray_paths = trace_volume_rays(vol, geom)
+     
++    # 4. Iterate over energy bins
+     for i, energy in enumerate(E):
+-        mu_e = np.array([mu_map[m['material']][i] for m in mats]) # Not quite, need to map by label
++        # Compute monochromatic intensity for this energy
++        I_mono = np.zeros(geom.num_rays, dtype=np.float32)
+         
+-        # Calculate attenuation for each ray
+-        # I_mono = S(E) * exp(- sum(mu * t))
+-        # We need to sum mu(E) * t for each ray
+-        attenuation = np.zeros(geom.num_rays, dtype=np.float32)
+-        
+-        for ray_idx, ray_data in enumerate(paths):
++        for ray_idx, ray_data in enumerate(ray_paths):
++            attenuation = 0.0
+             for mat_label, path_len in ray_data:
+                 if mat_label in mu_map:
+-                    # Get mu for this energy
+-                    # Note: mats list might not be ordered or indexed by label directly in this loop
+-                    # Assuming a lookup table or dict for mu_map by label
+-                    mu_val = mu_map[mat_label][i]
+-                    attenuation[ray_idx] += mu_val * path_len
++                    attenuation += mu_map[mat_label][i] * path_len
++            I_mono[ray_idx] = S[i] * np.exp(-attenuation)
+         
+-        # Apply spectrum and Beer-Lambert
+-        # S[i] is intensity at energy E[i]
+-        I_mono = S[i] * np.exp(-attenuation)
+-        
+-        # Detector response: assume proportional to energy
+-        # Accumulate into counts
+-        # The source says: I_total = sum_E E * I_noisy(E)
+-        # But noise is applied per energy? Or total?
+-        # Source: I_noisy = Poisson(I_mono * N_ph) / N_ph
+-        # Then I_total = sum E * I_noisy
+-        
+-        # Let's follow the source structure strictly:
+-        # 1. Scale by photon count
++        # Apply Poisson noise per the source formula
+         expected_counts = I_mono * n_phot
+-        
+-        # 2. Add Poisson noise
+         noisy_counts = np.random.poisson(expected_counts).astype(np.float32) / n_phot
+         
+-        # 3. Weight by energy and accumulate
++        # Accumulate energy-weighted noisy counts
+         counts += energy * noisy_counts
+ 
+-    # 4. Convert to projection data
+-    # proj = -log(counts)
+-    # Guard against zero counts
++    # 5. Convert to projection data
++    # Guard against zero counts to avoid log(0)
+     counts = np.maximum(counts, 1e-10)
+     proj = -np.log(counts)
+@@ -129,11 +106,13 @@
+ 
+ def get_mass_attenuation(energy, compound):
+-    """Wrapper for xraylib.CS_Total_CP"""
+-    import xraylib
+-    energy = np.double(energy)
+-    if energy.size == 1:
+-        return xraylib.CS_Total_CP(compound, energy)
+-    else:
+-        return np.array([xraylib.CS_Total_CP(compound, e) for e in energy])
++    """Lookup mass attenuation coefficient from standard X-ray tables."""
++    # [G] Standard implementation queries a precomputed table (e.g., NIST XCOM)
++    # or calls a library like xraylib.CS_Total_CP. Returns array in cm^2/g.
++    pass
++
++def trace_volume_rays(vol, geom):
++    """Trace rays through the volume and return path lengths per material."""
++    # [G] Standard ray-marching or DDA traversal. Returns list of lists.
++    pass
+ ```
+ 
+@@ -143,12 +122,14 @@
+ A forward projection method that simulates spectral CT data, accounting for material attenuation and detector response [S1, unofficial]. It is chosen when generating synthetic projection data for a known volume and material composition, rather than reconstructing a volume from data [S1, unofficial]. It differs from general spectral simulation by being a specific API call (`model.forward_spectral`) that encapsulates the geometry and material mapping logic [S1, unofficial]. Typical parameters include `n_phot` (1e6) and a list of material dictionaries `mats` [S1, unofficial]. A key pitfall is that the output `counts` must be converted to projection data using the negative logarithm (`proj = -numpy.log(counts)`) [S1, unofficial].
+ 
++### DRR Simulation
++Simulates Digital Reconstructed Radiographs (DRRs) from CT volumes using the Beer-Lambert model for X-ray attenuation [S2, unofficial]. The intensity at pixel $(i, j)$ is $I(r) = I_0 \cdot \exp(-\int \mu(x) dx)$, where $\mu(x)$ is the linear attenuation coefficient approximated by summing normalised HU values along the projection direction [S2, unofficial]. Ray directions for pixel $(i, j)$ are $d_{ij} = \text{normalize}((i - W/2)/f, -(j - H/2)/f, -1)$ [S2, unofficial]. Standard parameters use a DRR resolution of 128 × 128 pixels, camera distance $d = 50.0$, and focal length $f = 1280$ pixels (≈ 10° FoV) [S2, unofficial]. Orthogonal camera transforms are defined as $C_{\text{cor}} = \begin{bmatrix} 1 & 0 & 0 & 0 \\ 0 & 0 & -1 & d \\ 0 & 0 & 1 & d \\ 0 & 0 & 0 & 1 \end{bmatrix}$, $C_{\text{sag}} = \begin{bmatrix} 1 & 0 & 0 & 0 \\ 0 & -1 & 0 & 0 \\ 0 & -1 & 0 & 0 \\ 0 & 0 & 0 & 1 \end{bmatrix}$, and $C_{\text{ax}} = \begin{bmatrix} 1 & 0 & 0 & 0 \\ 0 & 1 & 0 & 0 \\ 0 & 0 & 1 & d \\ 0 & 0 & 0 & 1 \end{bmatrix}$ [S2, unofficial]. This yields 49,152 training rays per patient (3 × 128 × 128) [S2, unofficial]. The simulation assumes perfect geometric calibration, exact orthogonality, noiseless scatter-free projections, and attenuation-model consistency [S2, unofficial]. Scatter in real acquisitions violates the Beer-Lambert forward model and cannot be compensated by regularisation alone [S2, unofficial].
++
+ ## Operating characteristics
+-*   **Time Complexity:** Linear with respect to the number of rays and the number of energy bins. $O(N_{\text{rays}} \cdot N_{\text{energy}})$.
+-*   **Memory Complexity:** Linear with respect to the number of rays and energy bins for storing intermediate attenuation and count arrays.
++*   **Time Complexity:** Linear with respect to the number of rays and the number of energy bins. $O(N_{\text{rays}} \cdot N_{\text{energy}})$ [G].
++*   **Memory Complexity:** Linear with respect to the number of rays and energy bins for storing intermediate attenuation and count arrays [G].
+ *   **Performance:** Dependent on the efficiency of the ray integration and the speed of the X-ray library calls (e.g., `xraylib`) [S1, unofficial].
+ *   **Strengths:** Accurately models beam hardening and spectral effects, which are absent in monochromatic simulations [S1, unofficial].
+ *   **Limitations:** Computationally expensive due to the integration over multiple energy bins [S1, unofficial]. Requires accurate knowledge of the material composition and density in the volume [S1, unofficial].
+ *   **When to use:** When simulating realistic CT data for algorithm development, especially for beam-hardening correction or material decomposition studies [S1, unofficial].
+-*   **When not to use:** When speed is critical and spectral effects are negligible, or when the material composition is unknown [S1, unofficial].
+ 
+ ## Background
+@@ -156,3 +137,4 @@
+ 
+ ## Sources
+-[S1] cicwi/flexTOMO, https://github.com/cicwi/flexTOMO, fetched 2026-10-27 (unofficial)+[S1] cicwi/flexTOMO, https://github.com/cicwi/flexTOMO, fetched 2026-10-27 (unofficial)
++[S2] Sparse-View Lung Nodule Volumetry from Digitally Reconstructed Radiographs via AReT: Anatomy-Regularized TensoRF, https://doi.org/10.48550/arxiv.2606.02639, fetched 2026-10-26 (unofficial)

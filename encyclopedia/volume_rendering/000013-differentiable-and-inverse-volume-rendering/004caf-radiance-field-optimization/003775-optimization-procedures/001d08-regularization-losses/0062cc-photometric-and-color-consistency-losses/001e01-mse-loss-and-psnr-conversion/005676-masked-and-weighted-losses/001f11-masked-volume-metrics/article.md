@@ -1,0 +1,97 @@
+# Masked Volume Metrics
+
+Also called: Effective Region of Interest (ROI) Calculation, Masked MSE and PSNR Computation, Masked Volume MSE/PSNR Computation, ROI Calculation, Region of Interest (ROI) Calculation
+
+## Overview
+Masked Volume Metrics is a method for computing evaluation metrics (such as MSE or PSNR) in volumetric rendering by excluding empty froxels from the analysis [S1, unofficial]. It solves the problem of performance and quality analysis being skewed by regions of the volume that contain no radiance and thus provide no meaningful information [S1, unofficial]. It sets itself apart from standard metrics by dynamically defining a Region of Interest (ROI) based on the union of visible radiance in the test scenario and the ground truth, ensuring that only froxels participating in light transport are evaluated [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D froxel grid representing the rendered scenario and a 3D froxel grid representing the ground truth [S1, unofficial].
+*   **Output:** A set of valid froxels ($ROI_{effective}$) used to compute the final metric, and the computed metric value (e.g., MSE) restricted to these froxels [S1, unofficial].
+
+**Data Structures:**
+*   **Froxel Grid:** A 3D array where each element (froxel) contains RGB color values [S1, unofficial].
+*   **ROI Mask:** A binary 3D mask or a set of coordinates indicating which froxels are included in the effective region [G].
+
+**Steps:**
+1.  **Identify Scenario ROI ($ROI_{scenario}$):** Iterate through the froxel grid of the test scenario [S1, unofficial]. A froxel is included in $ROI_{scenario}$ if any of its RGB channels contains a non-zero value at any point during the test scenario [S1, unofficial]. This identifies froxels affected by radiance from light sources or emission [S1, unofficial].
+2.  **Identify Truth ROI ($ROI_{truth}$):** Identify froxels that contain non-zero values in the ground truth data [S1, unofficial].
+3.  **Compute Effective ROI ($ROI_{effective}$):** Calculate the union of the scenario ROI and the truth ROI [S1, unofficial]:
+    $$ROI_{effective} = ROI_{scenario} \cup ROI_{truth}$$
+    This ensures that froxels relevant to either the algorithm's output or the ground truth are included, while completely empty regions are excluded [S1, unofficial].
+4.  **Compute Metric:** Calculate the base loss metric (e.g., MSE) only over the froxels present in $ROI_{effective}$ [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_masked_volume_metrics(rendered_volume, ground_truth_volume):
+    """
+    Compute MSE over the effective ROI defined by non-zero radiance in 
+    either the rendered scenario or the ground truth.
+    
+    Args:
+        rendered_volume: 3D list of lists of lists of lists (H, W, D, 3) representing the test scenario.
+        ground_truth_volume: 3D list of lists of lists of lists (H, W, D, 3) representing ground truth.
+        
+    Returns:
+        mse: float, the Mean Squared Error over the effective ROI.
+        roi_mask: 3D list of lists of lists (H, W, D), the mask of valid froxels.
+    """
+    H = len(rendered_volume)
+    W = len(rendered_volume[0])
+    D = len(rendered_volume[0][0])
+    C = len(rendered_volume[0][0][0])
+    
+    # Step 1 & 2: Identify scenario and truth active froxels
+    roi_mask = [[[False for _ in range(D)] for _ in range(W)] for _ in range(H)]
+    for h in range(H):
+        for w in range(W):
+            for d in range(D):
+                scenario_active = any(rendered_volume[h][w][d][c] != 0.0 for c in range(C))
+                truth_active = any(ground_truth_volume[h][w][d][c] != 0.0 for c in range(C))
+                roi_mask[h][w][d] = scenario_active or truth_active
+    
+    # Step 3 & 4: Compute MSE only over valid froxels
+    sum_sq_error = 0.0
+    count = 0
+    for h in range(H):
+        for w in range(W):
+            for d in range(D):
+                if roi_mask[h][w][d]:
+                    sq_error = sum((rendered_volume[h][w][d][c] - ground_truth_volume[h][w][d][c]) ** 2 for c in range(C))
+                    sum_sq_error += sq_error
+                    count += 1
+    
+    mse = sum_sq_error / count if count > 0 else 0.0
+    return mse, roi_mask
+```
+
+**Parameters:**
+*   **Threshold for Non-Zero:** The sources specify a strictly non-zero value for inclusion [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Empty Regions:** Completely empty regions (where both the scenario and ground truth contain only zero values) are excluded from the metric calculation, preventing them from skewing the result with zero-error counts that do not reflect visual quality [S1, unofficial].
+*   **Algorithm-Specific ROIs:** The ROI is computed separately for each tested algorithm because different methods may produce non-zero contributions in different regions of the froxel grid even in the same test scenario [S1, unofficial].
+
+## Subtopics
+
+### One-Sided RMSE for Feature Evaluation
+A numerical metric to evaluate feature difference at a certain scale, computed only for voxels where the approximation $A_f$ is within a given intensity range of interest [S2]. It is used to verify structural simplification of features by comparing the original data set $A$ to its approximation $A_f$ [S2]. The formula is:
+$$E = \sqrt{\frac{1}{m} \sum_{i,j,k} (A[i,j,k] - A_f[i,j,k])^2}$$
+where the sum is over $m$ voxels where $A_f[i,j,k]$ is within the given intensity range of interest [S2]. This is useful when interested in feature difference at a specific scale rather than global error [S2].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Strengths:** Excludes completely empty regions that do not contribute meaningful information, providing a more accurate assessment of visual quality and performance for participating media [S1, unofficial].
+*   **Limitations:** Requires access to both the rendered scenario and ground truth to compute the union ROI [S1, unofficial].
+*   **When to Use:** When evaluating volumetric rendering algorithms where in-scattering and empty regions do not contribute to the visual result, and the goal is to zoom in on froxels participating in light transport [S1, unofficial].
+
+## Background
+The method is described in the context of evaluating volumetric temporal anti-aliasing algorithms for real-time froxel-based rendering [S1, unofficial]. It is used within the Frostbite engine to ensure that evaluation metrics are not skewed by regions unaffected by in-scattering or light transport [S1, unofficial].
+
+## Sources
+[S1] Temporal Anti-Aliasing for Real-Time Froxel-Based Volumetric Rendering - Advances in volumetric temporal anti-aliasing for real-time ren dering of participating media, https://openalex.org/W7218067689, fetched 2026-11-01 (unofficial)
+[S2] Application of Tensor Approximation to Multiscale Volume Feature Representations, https://doi.org/10.2312/pe/vmv/vmv10/203-210, fetched 2026-10-26

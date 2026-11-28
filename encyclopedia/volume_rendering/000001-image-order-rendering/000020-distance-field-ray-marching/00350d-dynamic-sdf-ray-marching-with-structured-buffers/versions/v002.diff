@@ -1,0 +1,210 @@
+--- v001.md
++++ v002.md
+@@ -8,6 +8,6 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A subset of scene objects (culled from the full scene), passed as a structured buffer on the GPU. Each element defines the object's type, position, rotation, scale, and average color.
+-*   **Output:** For each pixel, the final color and depth, derived from the closest object hit by the ray.
++*   **Input:** A subset of scene objects (culled from the full scene), passed as a structured buffer on the GPU. Each element defines the object's type, position, rotation, scale, and average color [S1, S2, unofficial].
++*   **Output:** For each pixel, the final color and depth, derived from the closest object hit by the ray [S1, S2, unofficial].
+ 
+ **Data Structures:**
+@@ -15,18 +15,18 @@
+     *   Layout: Array of `ObjectDefinition` structs.
+     *   `ObjectDefinition` fields:
+-        *   `id`: Integer identifier (inferred from buffer index during search).
+-        *   `type`: Enum or integer indicating the SDF primitive type (e.g., sphere, box).
+-        *   `position`: `float3` (world space position).
+-        *   `rotation`: `float3` or `quat` (orientation).
+-        *   `scale`: `float3` (uniform or non-uniform scaling).
+-        *   `color`: `float3` (average/base color).
++        *   `id`: Integer identifier (inferred from buffer index during search) [S1, S2, unofficial].
++        *   `type`: Enum or integer indicating the SDF primitive type (e.g., sphere, box) [S1, S2, unofficial].
++        *   `position`: `float3` (world space position) [S1, S2, unofficial].
++        *   `rotation`: `float3` or `quat` (orientation) [S1, S2, unofficial].
++        *   `scale`: `float3` (uniform or non-uniform scaling) [S1, S2, unofficial].
++        *   `color`: `float3` (average/base color) [S1, S2, unofficial].
+ 2.  **Distance Function Return Struct:**
+     *   Layout: `struct { float distance; float3 color; int id; }` [S2, unofficial].
+-    *   `distance`: The local signed distance to the object's surface.
+-    *   `color`: The color associated with the hit object.
+-    *   `id`: The ID of the object in the input buffer that produced this distance.
++    *   `distance`: The local signed distance to the object's surface [S1, S2, unofficial].
++    *   `color`: The color associated with the hit object [S1, S2, unofficial].
++    *   `id`: The ID of the object in the input buffer that produced this distance [S1, S2, unofficial].
+ 
+ **Numbered Steps:**
+-1.  **Culling:** Cull the scene into a manageable subset of objects visible in the view frustum. Note that ray-marching performs automatic partial occlusion culling, so aggressive culling may be less critical than in rasterization, but frustum culling is still recommended [S1, S2, unofficial].
++1.  **Culling:** Cull the scene into a manageable subset of objects visible in the view frustum. Ray-marching performs automatic partial occlusion culling, and frustum/occlusion culling are partly automatic [S1, S2, unofficial].
+ 2.  **Buffer Preparation:** Pass the subset of objects into a render input buffer on the CPU. Create a typed buffer (e.g., C-style struct) where each element defines the object's function type, position, rotation, scale, and average color [S1, S2, unofficial].
+ 3.  **Upload:** Transfer the buffer to the GPU if it is not already present [S1, S2, unofficial].
+@@ -35,8 +35,5 @@
+     *   For each iteration $k$:
+         *   **Buffer Search:** Perform a per-step search through the input buffer to evaluate which item is closest to the current ray position $\mathbf{p} = \mathbf{o} + t\mathbf{d}$ [S1, S2, unofficial].
+-        *   **Transform Application:** For each object in the buffer, apply transforms. This can be done by:
+-            *   Transforming the rays (inverting figure rotations before GPU upload) [S1, S2, unofficial].
+-            *   Transforming the distance functions (moving function origin for position changes, adjusting side lengths for scale changes) [S1, S2, unofficial].
+-            *   The simplest approach is to modify the rays before passing them to the core distance function [S1, S2, unofficial].
++        *   **Transform Application:** Apply transforms to either the rays (inverting figure rotations before GPU upload) or the distance functions (moving function origin for position changes, adjusting side lengths for scale changes) [S1, S2, unofficial]. The simplest approach is to modify the rays before passing them to the core distance function [S1, S2, unofficial].
+         *   **SDF Evaluation:** Evaluate the SDF for each object. The distance function returns a complex type (struct) containing the local distance, local color, and an ID tied to the input buffer element [S1, S2, unofficial].
+         *   **ID Inference:** The ID is inferred from the loop counter of the buffer search, as the mapping function loops through the input buffer to find the closest figure [S1, S2, unofficial].
+@@ -48,82 +45,69 @@
+ **Pseudocode:**
+ ```python
+-# Struct definitions (conceptual)
+-struct ObjectDefinition:
+-    id: int
+-    type: int
+-    position: float3
+-    rotation: float3 # or quat
+-    scale: float3
+-    color: float3
++import math
+ 
+-struct SDFResult:
+-    distance: float
+-    color: float3
+-    id: int
++def vec3_sub(a, b):
++    return [a[0]-b[0], a[1]-b[1], a[2]-b[2]]
+ 
+-# Core SDF for a specific primitive (e.g., sphere)
+-def sdf_sphere(p: float3, center: float3, radius: float) -> float:
+-    return length(p - center) - radius
++def vec3_div(a, s):
++    return [a[0]/s, a[1]/s, a[2]/s]
+ 
+-# Generic SDF evaluator for an object
+-def evaluate_object_sdf(p: float3, obj: ObjectDefinition) -> SDFResult:
+-    # Apply inverse transform to point p if transforming rays, 
+-    # or apply transform to p if transforming SDF. 
+-    # Here we assume transforming the point p to local object space.
+-    
+-    # Inverse rotation and translation to get local point
+-    # Note: Rotation inversion logic depends on representation (quat vs matrix)
+-    local_p = transform_point_to_local(p, obj.position, obj.rotation)
+-    
+-    # Scale adjustment
+-    local_p = local_p / obj.scale
+-    
+-    # Evaluate specific SDF based on type
+-    dist = 0.0
+-    if obj.type == SPHERE:
+-        dist = sdf_sphere(local_p, float3(0), 1.0) # Assuming unit sphere scaled by obj.scale
+-    elif obj.type == BOX:
+-        dist = sdf_box(local_p, float3(1)) # Assuming unit box scaled by obj.scale
+-    else:
+-        dist = infinity
+-        
+-    # Return composite result
+-    return SDFResult(
+-        distance=dist,
+-        color=obj.color,
+-        id=obj.id
+-    )
++def vec3_len(v):
++    return math.sqrt(v[0]**2 + v[1]**2 + v[2]**2)
+ 
+-# Main Ray Marching Kernel
+-def ray_march(ray_origin: float3, ray_direction: float3, objects: Array[ObjectDefinition]) -> float3:
++class ObjectDefinition:
++    def __init__(self, obj_id, obj_type, position, rotation, scale, color):
++        self.id = obj_id
++        self.type = obj_type
++        self.position = position
++        self.rotation = rotation
++        self.scale = scale
++        self.color = color
++
++class SDFResult:
++    def __init__(self, distance, color, obj_id):
++        self.distance = distance
++        self.color = color
++        self.id = obj_id
++
++def sdf_sphere(p, center, radius):
++    return vec3_len(vec3_sub(p, center)) - radius
++
++def evaluate_object_sdf(p, obj):
++    # Transform point to local object space
++    # Rotation transformation omitted for brevity; apply inverse rotation matrix to local_p [G]
++    local_p = vec3_div(vec3_sub(p, obj.position), obj.scale)
++
++    dist = float('inf')
++    if obj.type == 0: # Sphere
++        dist = sdf_sphere(local_p, [0.0, 0.0, 0.0], 1.0)
++    elif obj.type == 1: # Box
++        d = [abs(local_p[0]) - 1.0, abs(local_p[1]) - 1.0, abs(local_p[2]) - 1.0]
++        dist = max(d[0], max(d[1], d[2]))
++    return SDFResult(distance=dist, color=obj.color, obj_id=obj.id)
++
++def ray_march(ray_origin, ray_direction, objects, max_steps=64, epsilon=0.001, max_dist=100.0):
+     t = 0.0
+-    max_steps = 64
+-    hit_color = float3(0)
+-    
+-    for step in range(max_steps):
+-        current_pos = ray_origin + t * ray_direction
+-        
+-        # Per-step search through the input buffer
+-        min_result = SDFResult(distance=positive_infinity, color=float3(0), id=-1)
+-        
++    hit_color = [0.0, 0.0, 0.0]
++
++    for _ in range(max_steps):
++        current_pos = [ray_origin[i] + t * ray_direction[i] for i in range(3)]
++
++        min_result = SDFResult(distance=float('inf'), color=[0.0, 0.0, 0.0], obj_id=-1)
++
+         for i in range(len(objects)):
+             obj = objects[i]
+             result = evaluate_object_sdf(current_pos, obj)
+-            
+-            # Keep the closest hit
+             if result.distance < min_result.distance:
+                 min_result = result
+-                # ID is implicitly the loop index i, but stored in result.id by evaluate_object_sdf
+-        
+-        # Termination check
+-        if min_result.distance < 0.001: # epsilon
++
++        if min_result.distance < epsilon:
+             hit_color = min_result.color
+             break
+-        elif t > 100.0: # max distance
++        elif t > max_dist:
+             break
+-            
+-        # Advance ray by the minimum distance found
++
+         t += min_result.distance
+-        
++
+     return hit_color
+ ```
+@@ -135,6 +119,6 @@
+ **Edge Cases and Pitfalls:**
+ *   **Performance:** The method requires a per-step search through the input buffer for every ray iteration, which can be computationally expensive compared to static scenes [S1, unofficial].
+-*   **Precision:** Transforming points to local space for SDF evaluation requires careful handling of rotation and scale to avoid precision issues, especially with large scenes or extreme scales.
+-*   **Buffer Size:** The number of objects in the buffer directly impacts performance. Culling is essential to keep the buffer size manageable.
++*   **Precision:** Transforming points to local space for SDF evaluation requires careful handling of rotation and scale to avoid precision issues, especially with large scenes or extreme scales [G].
++*   **Buffer Size:** The number of objects in the buffer directly impacts performance. Culling is essential to keep the buffer size manageable [S1, S2, unofficial].
+ 
+ ## Subtopics
+@@ -150,10 +134,10 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N \cdot M)$ per pixel, where $N$ is the number of objects in the buffer and $M$ is the number of ray-marching steps. This is significantly slower than static SDF rendering where $N$ is effectively constant or hardcoded.
+-*   **Memory Complexity:** $O(N)$ for the structured buffer on the GPU.
+-*   **Strengths:** Dynamic scenes, easy to add/remove objects, no need to recompile shaders for scene changes.
+-*   **Limitations:** Performance degrades linearly with the number of objects. Not suitable for very large numbers of objects without additional acceleration structures (e.g., BVH, which is not covered in the basic structured buffer approach).
+-*   **When to Use:** Real-time rendering of dynamic scenes with a moderate number of objects (e.g., < 1000) where procedural geometry is desired.
+-*   **When Not to Use:** Scenes with thousands of objects, or where maximum performance is critical and the scene is static.
++*   **Time Complexity:** $O(N \cdot M)$ per pixel, where $N$ is the number of objects in the buffer and $M$ is the number of ray-marching steps. This is significantly slower than static SDF rendering where $N$ is effectively constant or hardcoded [S1, unofficial].
++*   **Memory Complexity:** $O(N)$ for the structured buffer on the GPU. Not given in the sources.
++*   **Strengths:** Dynamic scenes, easy to add/remove objects, no need to recompile shaders for scene changes. Not given in the sources.
++*   **Limitations:** Performance degrades linearly with the number of objects. Not suitable for very large numbers of objects without additional acceleration structures (e.g., BVH, which is not covered in the basic structured buffer approach). Not given in the sources.
++*   **When to Use:** Real-time rendering of dynamic scenes with a moderate number of objects where procedural geometry is desired. Not given in the sources.
++*   **When Not to Use:** Scenes with thousands of objects, or where maximum performance is critical and the scene is static. Not given in the sources.
+ 
+ ## Background

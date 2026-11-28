@@ -1,0 +1,229 @@
+# World-Lattice Sun Sampling
+Also called: light-side sampling over a lattice
+## Overview
+World-Lattice Sun Sampling computes ambient room lighting by sampling a fixed world lattice of columns, ensuring that the lighting pattern does not resample or shift as the player walks, unlike viewer-centric sampling [S1, unofficial]. It differs from full bounce solvers or probe lattices by using a single probe per room, avoiding the cost of spatial variation machinery which produces blotches rather than light [S1, unofficial]. It builds on [Light Ray Sampling](4885-light-ray-sampling.md) to handle direct sunlight contributions.
+
+## How it works
+**Inputs:**
+- `eye`: Player eye position ($Vec3$).
+- `sun_true`: Normalized sun direction vector ($Vec3$).
+- `sun_col`: Sun color vector ($Vec3$).
+- `sun_ref`: Reference sun color for normalization ($Vec3$).
+- `LATTICE`: Spacing of the fixed world lattice points in world units.
+- `RANGE`: Maximum distance from the eye to consider a lattice column.
+- `FADE`: Width of the fade-out zone at the edge of the RANGE.
+- `SUN_REACH`: Maximum distance for the sun visibility check cast.
+- `LIT_GAIN`: Constant gain multiplier applied to the final spherical harmonic coefficients.
+- `PROBE_UP`: Height multiplier for the upward probe ray.
+- `steps`: Derived from `RANGE` and `LATTICE`.
+
+**Outputs:**
+- `sh`: Spherical Harmonic coefficients ($Vec4$ array, typically 4 coefficients for 1st order).
+- `intensity`: Normalized lighting intensity ($float$).
+
+**Data Structures:**
+- `sh`: Array of 4 floats representing SH coefficients $[c_0, c_1, c_2, c_3]$.
+- `hit`: Raycast result containing `center` ($Vec3$), `n` ($Vec3$, surface normal), and `id` ($Tuple$). Albedo is extracted from `hit.id.0`.
+
+**Parameters:**
+- `LATTICE`: Not given in the sources.
+- `RANGE`: Not given in the sources.
+- `FADE`: Not given in the sources.
+- `SUN_REACH`: Not given in the sources.
+- `LIT_GAIN`: Not given in the sources.
+- `PROBE_UP`: Not given in the sources.
+
+**Steps:**
+1. Initialize `sh` to zero, `weight_all` to 0.0, `lit_flux` to 0.0.
+2. Initialize counters `hits`, `faced`, `sunny`, `seen` to 0.
+3. If `sun_col.max_element() <= 1e-5`, return zero SH and intensity 0.0.
+4. Calculate the center of the lattice cell containing the eye's X and Z coordinates:
+   $$cx = \text{round}(eye.x / LATTICE) \times LATTICE$$
+   $$cz = \text{round}(eye.z / LATTICE) \times LATTICE$$
+5. Calculate the Y coordinate of the lattice cell top below or at the eye:
+   $$top = \text{floor}(eye.y / LATTICE) \times LATTICE$$
+   This prevents the ray start from being inside a solid ceiling cell.
+6. Calculate `steps`:
+   $$steps = \lfloor RANGE / LATTICE \rfloor$$
+7. Iterate `i` and `j` from `-steps` to `steps` inclusive:
+   a. Calculate world lattice point:
+      $$wx = cx + i \times LATTICE$$
+      $$wz = cz + j \times LATTICE$$
+   b. Cast a ray from $(wx + 0.5, top + 0.5, wz + 0.5)$ in direction $-Y$ with max distance $PROBE\_UP \times 2.0$.
+   c. If no hit, continue to next lattice point.
+   d. Let `hit` be the result. Calculate $cos\_sun = hit.n \cdot sun\_true$.
+   e. If $cos\_sun \le 0.0$, continue (surface not lit by sun).
+   f. Calculate face position:
+      $$face\_pos = hit.center + hit.n \times 0.51$$
+   g. Calculate vector to eye:
+      $$to\_eye = eye - face\_pos$$
+      $$d = \|to\_eye\|$$
+   h. If $d$ is not in range $[0.5, RANGE]$, continue.
+   i. Calculate fade factor:
+      $$fade = 1.0 - \text{smoothstep}(RANGE - FADE, RANGE, d)$$
+   j. If $fade \le 0.001$, continue.
+   k. Increment `weight_all` by `fade`. This normalizes the final SH to represent the average color of lit surfaces weighted by visibility.
+   l. Cast a ray from `face_pos` in direction `sun_dir` with max distance `SUN_REACH`. If a hit occurs (sun blocked), continue.
+   m. Cast a ray from `face_pos` in direction $dir = to\_eye / d$ with max distance $d - 0.05$. If a hit occurs (surface occluded from eye), continue.
+   n. Increment `seen`.
+   o. Get albedo $a$ from `hit.id.0`, normalized to $[0,1]$.
+   p. Calculate light contribution:
+      $$l = a \times sun\_col \times (cos\_sun \times fade)$$
+   q. Update SH coefficients using $g = -dir$:
+      $$sh[0] += l \times 0.282095$$
+      $$sh[1] += l \times (0.488603 \times g.y)$$
+      $$sh[2] += l \times (0.488603 \times g.z)$$
+      $$sh[3] += l \times (0.488603 \times g.x)$$
+   r. Increment `lit_flux` by $cos\_sun \times fade$.
+8. After loops, if `weight_all > 1e-4`:
+   a. Normalize SH:
+      $$sh[c] *= LIT\_GAIN / weight\_all \quad \text{for each } c \in sh$$
+   b. Calculate intensity:
+      $$sun = sun\_col.max\_element() / sun\_ref.max(1e-3)$$
+      $$intensity = \text{clamp}(lit\_flux / weight\_all \times sun, 0.0, 1.0)$$
+9. If `weight_all <= 1e-4`, set `intensity = 0.0`.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def world_lattice_sun_sampling(eye, sun_true, sun_col, sun_ref, LATTICE, RANGE, FADE, SUN_REACH, LIT_GAIN, PROBE_UP):
+    # Initialize outputs
+    sh = [0.0, 0.0, 0.0, 0.0]
+    weight_all = 0.0
+    lit_flux = 0.0
+    hits = 0
+    faced = 0
+    sunny = 0
+    seen = 0
+
+    # Early exit if no sun
+    if max(sun_col) <= 1e-5:
+        return sh, 0.0
+
+    # Calculate lattice cell center around eye
+    cx = round(eye.x / LATTICE) * LATTICE
+    cz = round(eye.z / LATTICE) * LATTICE
+    
+    # Calculate top of the cell below or at eye Y
+    top = floor(eye.y / LATTICE) * LATTICE
+    
+    # Calculate number of steps
+    steps = int(RANGE / LATTICE)
+
+    for i in range(-steps, steps + 1):
+        for j in range(-steps, steps + 1):
+            # World lattice point
+            wx = cx + i * LATTICE
+            wz = cz + j * LATTICE
+            
+            # Ray start offset to avoid block corners
+            ray_start = Vec3(wx + 0.5, top + 0.5, wz + 0.5)
+            ray_dir = Vec3(0, -1, 0)
+            max_dist = PROBE_UP * 2.0
+            
+            # Cast ray down
+            hit = cast_ray(ray_start, ray_dir, max_dist)
+            if hit is None:
+                continue
+            
+            hits += 1
+            
+            # Check if surface is lit by sun
+            cos_sun = dot(hit.n, sun_true)
+            if cos_sun <= 0.0:
+                continue
+            
+            faced += 1
+            
+            # Calculate face position slightly above surface
+            face_pos = hit.center + hit.n * 0.51
+            
+            # Vector to eye
+            to_eye = eye - face_pos
+            d = length(to_eye)
+            
+            # Check distance range
+            if d < 0.5 or d > RANGE:
+                continue
+            
+            # Calculate fade factor
+            fade = 1.0 - smoothstep(RANGE - FADE, RANGE, d)
+            if fade <= 0.001:
+                continue
+            
+            # Accumulate weight for normalization
+            weight_all += fade
+            
+            # Check if sun is visible from face
+            sun_hit = cast_ray(face_pos, sun_true, SUN_REACH)
+            if sun_hit is not None:
+                continue
+            
+            sunny += 1
+            
+            # Check if face is visible from eye
+            dir_to_eye = normalize(to_eye)
+            eye_hit = cast_ray(face_pos, dir_to_eye, d - 0.05)
+            if eye_hit is not None:
+                continue
+            
+            seen += 1
+            
+            # Get albedo
+            a = hit.id[0] # Normalized to [0,1]
+            
+            # Calculate light contribution
+            l = a * sun_col * (cos_sun * fade)
+            
+            # Update SH coefficients
+            g = -dir_to_eye
+            sh[0] += l * 0.282095
+            sh[1] += l * (0.488603 * g.y)
+            sh[2] += l * (0.488603 * g.z)
+            sh[3] += l * (0.488603 * g.x)
+            
+            # Accumulate flux for intensity
+            lit_flux += cos_sun * fade
+
+    # Normalize and calculate intensity
+    intensity = 0.0
+    if weight_all > 1e-4:
+        for c in range(4):
+            sh[c] *= LIT_GAIN / weight_all
+        
+        sun_norm = max(sun_col) / max(sun_ref, 1e-3)
+        intensity = clamp(lit_flux / weight_all * sun_norm, 0.0, 1.0)
+    else:
+        intensity = 0.0
+
+    return sh, intensity
+```
+
+**Edge Cases and Pitfalls:**
+- Probing straight down only finds floors/upward-facing surfaces. As sun gets low, beams hit walls, causing all lit columns to disappear abruptly. The fix is to drop the lattice along `-sun_dir` instead of `-Y` [S1, unofficial].
+- Starting the ray exactly at a block corner causes it to cross three boundaries at once, resulting in a zero normal and discarding the column. Offset by 0.5 to cell center [S1, unofficial].
+- Using inverse-square falloff or view cosine causes the room brightness to change as the player walks closer to the light source. The method explicitly avoids these to keep lighting a property of the room [S1, unofficial].
+
+## Subtopics
+
+### [Room Light](19312-room-light.md)
+Room Light estimates the colour of bounced light in a room by sampling what colour light lands on surfaces around the player, then skewing the ambient lighting by that answer. It differs from full bounce solvers or probe lattices by using a single probe per room, avoiding the cost of spatial variation machinery which produces blotches rather than light. It builds on [World-Lattice Sun Sampling](19311-world-lattice-sun-sampling.md) to handle direct sunlight contributions.
+
+## Operating characteristics
+- **Time Complexity:** $O(N^2)$ where $N$ is the number of lattice points along one axis (determined by `RANGE` and `LATTICE`). For each point, up to 3 ray casts are performed.
+- **Memory Complexity:** $O(1)$ auxiliary space, excluding the SH coefficients.
+- **Measured Performance:** Not given in the sources.
+- **Scaling:** Performance scales with the square of the `RANGE` and inversely with the square of `LATTICE`.
+- **Strengths:** Viewer-independent lighting pattern; avoids popping artifacts associated with viewer-centric sampling; computationally cheaper than full bounce solvers.
+- **Limitations:** Probing straight down fails for low sun angles; limited to direct sunlight contributions; requires careful tuning of `RANGE` and `FADE` to avoid abrupt changes.
+- **When to use:** When a stable, room-specific ambient lighting contribution from the sun is needed without the cost of full global illumination.
+- **When not to use:** When accurate indirect lighting or view-dependent effects are required.
+
+## Background
+Origin: Unofficial implementation in a Minecraft-alpha-style voxel game written in Rust with a custom engine [S1, unofficial].
+History and development: Part of the "Wildforge" project, which emphasizes physical simulation and ecological systems in a voxel world [S1, unofficial].
+Where it is used: In the "Wildforge" game to provide ambient lighting that reflects the room's geometry and sun exposure without shifting as the player moves.
+
+## Sources
+[S1] A Minecraft-alpha-style voxel game written in Rust with a custom engine, https://github.com/dollspace-gay/Wildforge, fetched 2026-10-26 (unofficial)

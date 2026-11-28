@@ -1,0 +1,487 @@
+The Persistence of Vision Raytracer (POV-Ray). Contribute to randomdevltd/povray development by creating an account on GitHub.
+
+Lighting: surface and volume lights, bounce, media light sampling, and whole-texture +TF by randomdevpete · Pull Request #108 · randomdevltd/povray · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+randomdevpete
+commented
+Oct 29, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Adds physically calibrated surface and volume lights, passive bounce lighting and the preparation behind them, and extends +TF texture filtering from pigments to whole textures, perturbed normals and the sky.
+Lights
+Surface lights. Any object can carry light { ... }: one-sided outward Lambertian emission over the object's actual geometry, in nits or lumens, from an explicit pigment or the material's own emission. Every light uses one finite-source connection law with a continuous directional sampler, so there is no point-light substitution and no switch by distance.
+Volume lights. interior { light { ... } } with the same calibration; scale_lumens(value, metres) converts units in both scene languages.
+Units as measured quantities. A light in nits has that mean radiance: over the area for a surface light, at the container's boundary for a volume light, whatever the pigment's colour or pattern. A unitless brightness stays a plain multiplier. Nits or lumens over an input whose luminance is zero are an error.
+Passive bounce. light { emission bounce { passes N } } makes receiving surfaces and volumes sources of the next order. Each pass reads an immutable copy of the previous one, the primary is counted once and nothing is renormalised. A light block with bounce and no pigment or emission only re-emits what it receives. Subsurface materials take part through a diffusion of each node's entering light over its neighbours, with no extra rays.
+Light in varying media. Prepared method 4 media with a varying density take the light of volume and surface lights along the camera ray at sqrt(N) samples per cell width of ray length, where N is the light's samples; each sample has its own position and its own draw on the light. A new light_samples M in a finish or media block scales what that receiver takes from every light: N × M draws per surface hit, sqrt(N) × M samples per cell width in media. Volume bounce gathers each order into directional lobes per node and re-emits it for the next order.
+Prepared source layouts for volume emitters: Cartesian or cubemap-and-radial charts with exact cell volumes, positive-mass proposals with exact integer Bernoulli draws, and shared incident fields per phase.
+Parallel, deterministic preparation. Bounce orders, subsurface bounce nodes, media, refraction and light grids prepare on every work thread with byte-identical results at any thread count, and preparation reports its progress (Preparation plan: / Preparation: <phase> <done>/<total> <elapsed>s, with finished and stalled lines).
+Texture filtering (+TF)
+With +TF, camera rays carry how their origin and direction change from one pixel to the next, and each texture layer they hit, pigment and normal, is filtered over the area the pixel covers there. This PR extends that filter:
+Whole textures and bumped normals. A filtered normal is evaluated at the pigment filter's taps, and everything that reads the perturbed normal sees that spread: diffuse light is the mean of what each tap's normal receives; specular and phong highlights widen by the normals' spread and keep their total brightness; irid, Fresnel and falloff reflection, metallic, the Fresnel loss of ambient, emission and radiosity, conserve_energy and faked caustics average over the taps; aoi and slope see each tap's own normal. Bumps finer than a pixel shade as their average instead of speckling.
+Reflected and refracted rays leave along the taps' mean normal, and their footprint widens by the normals' spread, so what they hit is filtered over the blur the bumps cause.
+uv mapping. A uv_mapping texture or normal, or a texture on a uv-mapped object, is filtered over the footprint carried into uv.
+Sky. A ray that leaves the scene averages the sky_sphere pigments over the directions its footprint spans; a reflected ray's directions that dip below the surface it left are folded back above it.
+Texture_Filter_Pigments=off / Texture_Filter_Normals=off opt a kind out; Texture_Filter_Taps=3 starts with three taps and adds the rest only where they disagree.
++TF never casts extra secondary rays. Every filtered term comes from taps of the texture at the one hit, or from the footprint a single ray already carries. A footprint can therefore reach texture that something else hides, such as a pattern clipped by another solid or a sky_sphere gradient that wraps below the horizon behind the ground, and the filter blends that texture in; make the texture continuous there, or leave +TF off for that render. A light is tested for shadow where the taps' mean normal faces it, so ray counts can differ slightly from -TF because the filtered normals differ. Where a footprint's mean normal would reflect totally while some of its taps transmit, the hit takes the usual reflection and refraction pair, the refraction about the transmitting taps, each at its filtered Fresnel share.
+Fixes
+Surface lights on unions dimmed themselves. The per-thread shadow cache kept the part of an object that blocked a ray and later tested it alone, so the light's endpoint on that part no longer matched and the part shadowed its own light; the cache now also keeps the object the roots were admitted as. A sample point now moves to its part's own root on the connecting ray, and preparation draws further area-sample rounds where a union's parts fill little of its bounds. A cylinder lathe in a union read 0.88 of the same cylinder, a cylinder in a union with a small far sphere 0.70; both now read within 1%.
+A volume light in a standalone lathe, sor, blob, superellipsoid, height_field or julia_fractal container, or an isosurface cut short by max_trace, measured its chords from the first crossing only and emitted too little (a lathe cylinder gave 0.70 of its stated intensity). Every crossing of the container now counts; ordinary tracing of those objects is unchanged.
+Subsurface single scattering from a light touching the surface (unbounded variance), a squared scattering coefficient in strided media lighting, surface-light photon weighting, entry index resolution on meshes and thin shells, compound-CSG bounce coverage, shadow traversal through coincident CSG/mesh/media boundaries, and SimpleVector::insert reading past the end (present since the initial import).
+Scenes and manual
+The media, haze, refraction, light and camera sample scenes state their lights in real units and show their options side by side in one image (four quarters or rows of a matrix) instead of behind Declare switches; the manual's images and descriptions follow them.
+Compatibility
+Scenes of version 3.7 and earlier render as before; new features work at every scene version and in both languages. Superseded unreleased syntax is removed rather than kept. Ray is 336 bytes on x86-64 GCC (208 on performance); the guard in ray.h and the "Ray size" section of doc/PERF.md record why and how to measure it.
+The texture filtering changes nothing without +TF. slopemt_37.pov was rewritten in #113 to make its patchy vegetation deliberately, since #110 corrected the normal its slope pattern reads.
+Evidence
+light_clouds.pov at 640×480, samples 16, no anti-aliasing, user-space instructions: performance 6.10T (its own scene version, media emitters), this branch 10.68T. The storm tower's scattered light is free of the speckle an earlier per-ray estimator showed, and its noise on the tower is slightly below performance's. light_samples 0.25 renders in 3.64T and light_samples 4 in 38.81T; noise halves for each fourfold increase.
+Media cost fixes in the shadow walk, volume-light chords and the shadow march cut that scene from 11.32T to 8.04T with pixel-identical output before the sampling change.
+Render suites: all 45 render suites under tests/render that cover media, bounce, volume and surface lights, subsurface, shadows, texture filtering and the 4.0 parser pass, among them surface_light (union cases), volume_light (lathe and sor containers) and media_stride_scattering (light_samples scaling). Every commit builds. Renders at 1 and 3 threads have identical pixels.
+randomdevpete
+force-pushed
+the
+feature/1772-volume-surface-light-transport
+branch
+from
+a83eb8d to
+d6c3e9a
+Compare
+October 31, 2026 17:16
+randomdevpete
+changed the title
+Lighting: surface and volume lights with passive bounce
+Lighting: surface and volume lights, bounce, media light sampling, and whole-texture +TF
+Oct 31, 2026
+randomdevpete
+added 28 commits
+October 31, 2026 20:31
+Volume lights: an interior light block with one radiance law
+…
+d61fdcc
+```
+A light block moves from media to the interior: interior { media { ... }
+light { ... } }. It states radiance as its pigment times brightness, in
+nits or as a total in lumens. Per cell the emission coefficient is the
+radiance times the media's density-weighted extinction, so the
+thick-limit radiance is the stated one for any density field; a medium
+without extinction falls back to its container's mean chord. Falloff
+follows the emitter's geometry: near-field draws take their own shadow
+rays, the far field keeps the emitter's angular extent, and a chord
+keeps its last crossing.
+
+Finite-source connections are shared between surfaces and media, keep
+boundary media on the sampled connection, trace visibility to the
+sampled endpoint, and are stratified over source power in
+low-discrepancy strata.
+
+The block is read by the classic parser, #default, the 4.0 schema, the
+tree-sitter grammar, the editor tables and the codemod. The manual and
+doc/volume-light-calibration.md describe the law; media_light,
+volume_light, volume_scattering, volume_transport, volume_visibility and
+volume_field_support test it, and the stock media scenes state their
+lights as interior lights.
+```
+Geometry: honour distance limits, keep shallow roots, bound Sturm sea…
+…
+5cecba9
+```
+…rches
+
+Intersection tests honour the caller's distance limit, so a shape stops
+searching past the depth the caller can use. Sphere tests keep shallow
+positive roots and small chords of distant spheres. Shadow crossings are
+kept in a monotonic frame along the ray (shadowsegment.h), so a shadow
+walk sees each boundary once and in order. Sturm root searches are
+bounded from the polynomial's coefficients, and a polynomial beyond the
+solver's range yields no roots instead of failing.
+
+Standalone tests: geometry_distance, sphere_intersection,
+shadow_segment, polynomial_distance.
+```
+Media: prepared method 4 density, light and phase fields
+…
+b53fe86
+```
+Prepared method 4 media separate their fixed coefficients from lighting,
+publish their density fields before tracing, and sample the camera
+distance and the volume light jointly. Constant media and prepared
+modifiers stay on fixed integration, the prepared policy holds across
+camera, shadow, photon and subsurface paths, and photon segments pass
+their bounds to the field selection. Interior light fields are immutable
+RGB fields with normalised spatial proposals on shared prepared
+coordinates (preparedfield.h, preparedlightaxis.h, preparedtransfer.h,
+interiorfield.h).
+
+Physical phases are normalised and scattering mixtures weighted by their
+coefficients; Henyey-Greenstein eccentricity must lie strictly between
+-1 and 1, with a warning for 3.7 and older scenes. A medium's appearance
+emission stays out of indirect light, and subsurface transport keeps
+finite volume light samples consistent.
+
+Render statistics report volume connection work by path. Tests cover
+joint media, mixed prepared media, publication, prepared photons,
+infinite joint media, the emission and indirect split, phases and the
+subsurface volume emitter.
+```
+Interiors: refraction fields with analytic gradients, curved-ray steps
+…
+e2ffe22
+```
+An interior can carry independent signed refraction fields, defined as
+sums of scalar functions and published with analytic gradients on the
+shared prepared coordinates. Rays bend through them by curved midpoint
+steps that are reintegrated where they cross a surface. The superseded
+media-owned refraction and inactive light options go, with their
+conversion paths and the fade_cutoff tests; refraction off stays the
+value 0 in 3.7 and older scenes.
+
+The manual, grammar, editor tables, codemod and stock scenes use the
+canonical interior light and refraction fields. Tests cover the
+refraction frontend in both languages, prepared rays, a clear axis,
+thread counts and the curved-ray step.
+```
+Volume lights: select their input from the medium's own emission
+…
+b05fdbd
+```
+light { emission } takes the combined RGB emission of the interior's own
+media, density patterns included, as the light's input, prepared from
+the owning media. Source proposals follow the interpolated emission,
+chord proposals focus on the visible part of the source's bounds
+(emitteraabb.h), and zero-power sources store no nodal proposals.
+
+Documented in the manual and the language reference; light_emission and
+emitter_aabb test it, and light_emission.pov shows it.
+```
+Bounds: certified finite bounds and look_at framing by parts
+…
+5d767ea
+```
+Shapes report certified finite bounds, half-space bounds included
+(halfspacebounds.h, doc/halfspace-bounds.md), and prepared interiors
+keep them. Stored box extents widen only where their arithmetic rounded.
+look_at frames disjoint targets in projection, and plain unions and
+other compounds without a bound of their own by their parts.
+
+Tests: finite_bounds, finite_geometry_bounds, halfspace_bounds and the
+look_at framing renders.
+```
+Surface lights
+…
+1bac2de
+```
+Objects accept a surface light { ... } block beside the interior volume
+light. It shares the pigment or emission input, brightness in nits or
+lumens, samples and transport flags, and emits outward with a Lambert
+distribution from a surface of finite, nonzero area. Emission is
+evaluated from finite parts with angular guides. Portal bodies stay out
+of sampling, a receiver does not draw its own root, and each surface
+part may state its own accuracy. Light preparation is safe to run from
+several threads.
+
+This also adds the bounce-order fields that surface and volume lights
+share (bouncefield.h, bouncegrid.h, bounceincident.h, bounceorders.h,
+bounceprepare.h) and the prepared source layouts and selectors. The
+manual, grammar, editor tables and language reference describe the
+block; surface_light and the standalone guide, bounce and source tests
+cover it, and distribution/scenes/lights/surface_light.pov shows it.
+```
+Subsurface: Fresnel ballistic light and a robust entry probe
+…
+27aef7b
+```
+Method 2 ballistic light takes Fresnel transmission. Single-scattering
+emitter light is drawn afresh at the entry point, entry directions are
+proposed from the emitter's bounds and entry points found with the
+emitter's own draw. The entry probe reaches past its surface's root
+error, reads tolerances from the part it hits, keeps the classic mesh
+inside test and settles safely. The entry IOR is worked out once per
+side, a cell's points are lit one job each, an emitter's shadow segment
+is traced once per candidate and draws that bring no light skip shading.
+
+Tests: subsurface_ballistic, subsurface_cavity_light,
+surface_part_accuracy and a finite-cylinder transport reference in
+tools/bench.
+```
+Shadows: object media up to the light and a robust shadow walk
+…
+16744ec
+```
+A shadow walk steps past any boundary it returns and finds a nearer root
+again instead of stepping past it; a coincident-surface probe starts at
+least twice the minimum hit depth back. A shadow ray's last stretch is
+dimmed by the prepared or classic media of the containers the light is
+inside, and a shadow ray to a light behind the lit surface starts on the
+surface's far side. A point light's shadow copies the ray once, and only
+for an atmosphere.
+
+Tests: csg_mesh_media_shadow, shadow_coincident_layers,
+media_shadow_end.
+```
+Bounce: surface and volume bounce orders with adaptive surface nodes
+…
+8e4366f
+```
+Light blocks accept bounce and bounce { passes N }. Each order's surface
+bounce field holds the light arriving at adaptive nodes, seeded over the
+scene's bounce area and refined from what each node measures; a lookup
+takes the nearest nodes of the surface and interpolates across
+components a CSG chart misses. Subsurface surfaces diffuse their bounce
+light between the nodes at the profile's own scale, within each
+material. A volume bounce node takes a light's falloff over its cell and
+holds each distinct beam once. Work whose result is already known is
+skipped.
+
+Preparation states its plan and reports each phase as it goes (parse,
+meshes, media, atmosphere, lights, bounce, photons) with work done
+against its total, elapsed seconds and stalls, in lines that fit the
+console. Bounce orders and every final media grid are prepared on the
+scene's work threads, and ParallelFor's failures and thread use are
+predictable, so results do not depend on the thread count; doc/PERF.md
+gives the format.
+
+The manual documents surface lights, bounce, units and preparation;
+bounce_adaptive, bounce_preparation, media_tested_density_threads and
+the bounce and subsurface patch source tests cover it.
+```
+Surface lights: exact emission per point, front-facing draws, fitted …
+…
+104ad0e
+```
+…cones
+
+A surface light's emission is evaluated exactly at each sampled point,
+on the thread that draws it. Connections are drawn among front-facing
+roots only, toward cones fitted to the emitting points, from a guide
+that every surface light prepares from the same draws.
+```
+Scene language: light block checks and nested block items
+…
+720cac0
+```
+A light block inside a light_source is reported where it is written, in
+both languages. Nested sub-block items stay inside their sub-blocks in
+the 4.0 schema, so the checker no longer accepts an item in the wrong
+block, and misplaced-item errors name the owning block as the classic
+parser does. In .pov4 a signed operand after a contextual word is read,
+a contextual word's sum is split only when the name is unbound, and a
+misplaced photon setting is named first. Grammar, editor tables and the
+language reference are regenerated.
+```
+Media: scatter ordinary lights at each step in method 4
+…
+06cc1fe
+```
+A stride of media steps scatters its light once at each step and skips
+unlit steps. Method 4 fog scatters an ordinary light alone; area light
+points scatter along their own direction; unbounded cells draw only from
+attenuating channels; densities are evaluated once per lit point, and
+media light paths keep their storage. Media photons are gathered under
+the law that lights the same medium directly.
+
+Tests: media_stride_scattering, media_ordinary_scattering.
+```
+Volume lights: one source domain, weighted cells, no classic media
+…
+8404652
+```
+Every volume light container gets the same Cartesian source domain,
+cells are weighed by how much of them the source occupies, draws aim at
+where an emitter's power is near the receiver and chord directions at
+finer lobes of its power, and estimates are prepared on every worker in
+a fixed order. Attenuation is written as a named block, and the emission
+alias is a plain multiplier of the media emission.
+
+Light blocks do not meet classic media: an object with a light block may
+not hold a method 1 to 3 medium or a subsurface method 1 finish, and a
+scattering classic medium is an error while a light block lights media.
+Errors name the file and line of each part. A constant medium's ignored
+resolution is warned of where the scene wrote one.
+
+volume_legacy_media tests the rule; the volume tests move their media to
+method 4.
+```
+Manual: physical scattering in method 4 media, with three haze scenes
+…
+7cc9ecf
+```
+A manual section on physical scattering in method 4 media, the emission
+light law, the attenuation block and bounce cost, with three real-unit
+haze scenes (street, sunbeam, torch) comparing classic and physical
+media and their images.
+```
+Bounce: volume gather by directional lobes
+…
+fd0a6eb
+```
+Volume bounce gathers the light arriving at nodes one density cell apart
+over their container: per light, stratified draws over each node's cell,
+chords from point lights, near draws bounded by the cell's receiver
+radius, and nodes no scattering reaches skipped. The light is clustered
+into up to six directional lobes per object set, which each medium
+scatters by its phase averaged over the lobe's spread
+(volumeincident.h). The gather feeds volume bounce only; camera rays
+draw the lights.
+```
+Light units: measured nits and lumens, attenuation cutoff
+…
+db8db0d
+```
+Nits are the mean radiance of the light over its surface or at its
+container's boundary, for emission and pigment inputs alike; lumens are
+the generated flux; a point emitter follows the inverse-square law and
+every emitter light weights its photons by its own path factor. Nonzero
+units over an input with zero luminance are an error. A bounce block
+without an input of its own is bounce-only. Volume light normalisation
+counts every boundary crossing, and a surface light on a union does not
+dim itself.
+
+attenuation { cutoff C } leaves a light out where its prepared power
+falls below C on the output scale (default 0.000004; 0 turns it off),
+for surface, volume and bounce lights.
+
+The stock media and light scenes state their lights in lumens or nits
+and their method 4 scattering to keep their look; the manual describes
+them.
+```
+Media: light blocks at each step, per cell width, with light_samples
+…
+33de178
+```
+Camera rays in varying prepared method 4 media take volume and surface
+lights at each integration step, or once per stride, each with one draw
+stratified along the ray and its own shadow ray. A volume or surface
+light is drawn at sqrt(N) x M positions per cell width of ray, N being
+the light's samples and M a new light_samples multiplier in finish and
+media (default 1); a surface draws round(N x M) points per hit. Media
+scatter draws are stratified over exactly their count along the cell.
+
+Cost: a shadow walk skips objects whose certified box lies behind its
+cursor, volume light chords box-test each plain shape before
+intersecting it, and a shadow media march reads a single prepared grid
+directly.
+```
+Ray: pack the new members and keep the size guard at 336 bytes
+…
+488aaa7
+```
+The shadow window flag and child counter sit beside the ray type bits,
+the key-read flag is a bit kept in the trace ticket, a ray's surface
+endpoint keeps no normal, and the active root query lives in the trace
+ticket. The size guard is 336 bytes on x86-64 GCC and Clang; doc/PERF.md
+records the layout.
+```
++TF: filter whole textures over the pixel footprint
+…
+e116440
+```
++TF filters a texture over each hit's pixel footprint: pigments, and the
+perturbed normal over a tap lattice that keeps an isotropic footprint,
+with Toksvig-style gloss, iridescence, Fresnel and conserve_energy
+reading the filtered normals. +TN filters normals alone. +TF casts no
+extra rays; footprint tolerances are bounded by the scene's own lengths,
+and a light is tested from a +TF hit only where the taps' mean normal
+faces it, shadow rays converging on a sampled emitter point.
+
+The manual, povray.1 and doc/PERF.md describe the switches, their
+opt-outs, measured error and cost; texture_filter tests them.
+```
++TF: filter the sky_sphere over a ray's footprint
+…
+2e84322
+```
+With +TF a ray that leaves the scene reads the sky_sphere over its
+footprint, reflected rays through the reflecting surface's normal; a
+filtered sky layer keeps its mean transmitted colour and a reflected
+ray's sky fold survives an unbent transmission. texture_filter tests
+what a filtered sky layer passes.
+```
++TF: refract and reflect where a filtered mean normal reflects totally
+…
+c16862e
+```
+Where a footprint's mean normal is past the critical angle but some taps
+transmit, the hit traces the ordinary reflected and refracted pair
+wherever the filtered Fresnel term transmits, instead of reflecting
+totally.
+```
+Tests: check the render suites with sh, od and awk
+…
+f35210c
+```
+The render suites read images with od and awk instead of Python, read
+includes and the check scene from distribution/, and keep their checks
+independent of console wrapping and host memory. The Windows backend
+builds without a browse database.
+```
+Scenes: bake the media light scenes' switches
+…
+1bbeb59
+```
+The blend and light media scenes show their variants side by side or
+with their switches fixed, and the street fog scene shows its four media
+as four quarters of one image; the manual describes them.
+```
+Scenes: bake the haze and refraction scenes' options
+…
+c7e6676
+```
+The refraction scenes fix their options or show their variants side by
+side, and the sunbeam and torch haze scenes show their four looks as
+four quarters of one image; the manual describes them.
+```
+Scenes: bake the camera, photon, surface light and superellipsoid scenes
+…
+824536c
+```
+The turntable scene renders twelve frames at 30 degrees, look_at_framing
+renders its three framings from one parse, surface_light.pov shows four
+sample counts, the superellipsoid scene shows native, isosurface and
+error rows, and the progressive photon scenes are lit so their caustics
+read.
+```
+Tests: render subsurface_volume_emitter in a temporary directory
+…
+17bcf00
+```
+The test wrote its images and logs into the current directory, which left
+untracked files in the source tree when run from there.
+```
+Ignore the build directories of the new unit tests
+…
+fd76f6e
+```
+make check builds each standalone test under tests/<name>/ in the build tree;
+list the new ones beside the existing entries.
+```
+randomdevpete
+force-pushed
+the
+feature/1772-volume-surface-light-transport
+branch
+from
+7a7330b to
+fd76f6e
+Compare
+October 31, 2026 21:06
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

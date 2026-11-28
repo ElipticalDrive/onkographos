@@ -1,0 +1,284 @@
+--- v007.md
++++ v008.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-HashNeRF is a neural radiance field representation that accelerates training and rendering by replacing traditional positional encoding with a trainable multi-resolution hash encoding [S2, unofficial]. It maps 3D coordinates to feature vectors in fixed-size hash tables at multiple resolutions, which are then decoded by a shallow neural network [S2, unofficial]. It sets itself apart from standard NeRF by using a generic, trainable encoding that allows the model to converge in significantly fewer iterations and with fewer parameters, while maintaining high rendering quality [S2, unofficial]. It builds on [Standard Multi-resolution Hash Encoding](13152-standard-multi-resolution-hash-encoding.md).
++HashNeRF is a neural radiance field representation that accelerates training and rendering by replacing traditional positional encoding with a trainable multi-resolution hash grid [S1][S2, unofficial]. It maps 3D coordinates to high-dimensional feature vectors via hash table lookups and trilinear interpolation, which are then decoded by a shallow neural network to predict density and color [S2, unofficial]. It sets itself apart from standard NeRF by achieving significant reductions in learning time and convergence iterations through a generic, trainable encoding that allows the network to be shallow with fewer parameters [S1][S2, unofficial].
+ 
+ ## How it works
+@@ -12,133 +12,183 @@
+ 
+ **Data Structures:**
+-The method uses $L$ hash tables (grids), indexed by resolution level $l \in \{0, \dots, L-1\}$.
+-*   **Hash Table $l$:** Contains $T_l$ entries. Each entry stores a feature vector $\mathbf{f}$ of dimension $F$.
+-*   **Total Feature Dimension:** The concatenated feature vector has dimension $L \times F$.
+-*   **Neural Network:** A shallow Multi-Layer Perceptron (MLP) with fully connected layers. It consists of two branches:
++The method relies on $L$ hash tables (grids), indexed by resolution level $l \in \{0, \dots, L-1\}$.
++*   **Hash Table $l$:** Contains $T_l$ entries. Each entry stores a feature vector of dimension $F$.
++*   **Total Feature Dimension:** $L \times F$.
++*   **Neural Network:** A shallow Multi-Layer Perceptron (MLP) with fully connected layers. It typically consists of two parts:
+     1.  **Density MLP:** Outputs log-space density $\sigma$.
+-    2.  **Color MLP:** Outputs color $\mathbf{c}$, conditioned on the viewing direction $\mathbf{d}$ and the concatenated features [S2, unofficial].
++    2.  **Color MLP:** Takes the concatenated features and viewing direction to output color $\mathbf{c}$ [S2, unofficial].
+ 
+-**Algorithm:**
++**Parameters:**
++*   $L$: Number of resolution levels. Standard implementation uses 16 levels [S1].
++*   $T_l$: Size of the hash table at level $l$. The hash index is limited by $T$ via modulo operation [S1].
++*   $F$: Dimensionality of feature vectors per level.
++*   Hardware: Implemented using Tiny-CUDA-NN library on NVIDIA GeForce RTX 3090 Ti GPUs [S1][S2, unofficial].
++
++**Algorithm Steps:**
++
+ 1.  **Coordinate Scaling:** For each level $l$, scale the input coordinate $\mathbf{x}$ by $2^l$:
+     $$ \mathbf{x}_l = 2^l \mathbf{x} $$
+ 2.  **Voxel Indexing:** Compute the integer voxel indices $\mathbf{v}_l = (v_x, v_y, v_z)$ by flooring the scaled coordinates:
+     $$ v_i = \lfloor (\mathbf{x}_l)_i \rfloor, \quad i \in \{x, y, z\} $$
+-3.  **Fractional Part:** Compute the fractional coordinates $\mathbf{u}_l = (u_x, u_y, u_z)$ for interpolation weights:
++3.  **Fractional Part:** Compute the fractional part $\mathbf{u}_l = (u_x, u_y, u_z)$ for interpolation weights:
+     $$ u_i = (\mathbf{x}_l)_i - v_i $$
+-4.  **Hashing:** Map the voxel indices to table indices using a hash function $H_l$. The hash function typically uses XOR operations on the coordinates and a prime number, modulo the table size $T$ [S1].
++4.  **Hashing:** Map the voxel indices to table indices using a hash function $H_l$. A common implementation uses a sum or XOR-based hash with modulo $T_l$ [S1, G]:
+     $$ i_l = H_l(v_x, v_y, v_z) \pmod{T_l} $$
+-    *Note: The specific hash function implementation is often a simple sum or XOR-based hash [G].*
+-5.  **Feature Retrieval and Interpolation:** Retrieve the 8 neighboring feature vectors $\mathbf{f}_{l, \mathbf{v}'}$ from table $l$ using the hashed indices. Perform trilinear interpolation to obtain the interpolated feature $\hat{\mathbf{f}}_l$:
++    *Note: The specific collision resolution strategy (e.g., chaining or open addressing) is implementation-dependent [G].*
++5.  **Feature Retrieval and Interpolation:** Retrieve feature vectors $\mathbf{f}_{l, \mathbf{v}'}$ from the 8 neighboring voxels $\mathbf{v}'$ of $\mathbf{v}_l$. Compute the interpolated feature $\hat{\mathbf{f}}_l$ using trilinear interpolation:
+     $$ \hat{\mathbf{f}}_l = \sum_{\mathbf{v}' \in \text{neighbors}(\mathbf{v}_l)} w(\mathbf{v}') \cdot \mathbf{f}_{l, \mathbf{v}'} $$
+     where the weight $w(\mathbf{v}')$ for neighbor $\mathbf{v}' = (v'_x, v'_y, v'_z)$ is:
+     $$ w(\mathbf{v}') = \prod_{i \in \{x,y,z\}} \begin{cases} u_i & \text{if } v'_i = v_i + 1 \\ 1 - u_i & \text{if } v'_i = v_i \end{cases} $$
+-6.  **Concatenation:** Concatenate the interpolated features from all $L$ levels to form the final feature vector $\mathbf{F}$:
++6.  **Feature Concatenation:** Concatenate the interpolated features from all $L$ levels to form the final feature vector $\mathbf{F}$:
+     $$ \mathbf{F} = [\hat{\mathbf{f}}_0; \hat{\mathbf{f}}_1; \dots; \hat{\mathbf{f}}_{L-1}] $$
+ 7.  **Decoding:**
+-    *   Pass $\mathbf{F}$ through the Density MLP to get $\sigma$.
+-    *   Pass $[\mathbf{F}; \mathbf{d}]$ through the Color MLP to get $\mathbf{c}$ [S2, unofficial].
+-
+-**Parameters:**
+-*   **$L$:** Number of resolution levels. Default is 16 [S1].
+-*   **$T$:** Size of the hash table (number of entries). Limits the hash index [S1].
+-*   **$F$:** Dimension of feature vectors per level.
+-*   **Hardware:** Implemented using the Tiny-CUDA-NN library [S1].
++    *   Pass $\mathbf{F}$ through the Density MLP to obtain density $\sigma$.
++    *   Pass $[\mathbf{F}; \mathbf{d}]$ through the Color MLP to obtain color $\mathbf{c}$ [S2, unofficial].
++8.  **Rendering:** Use $\sigma$ and $\mathbf{c}$ in standard volume rendering (ray marching) to compute pixel colors [S1].
+ 
+ **Pseudocode:**
++
+ ```python
+-def hash_neRF_forward(x, d, hash_tables, table_sizes, feature_dim, num_levels):
++import math
++
++def hash_function(coords, table_size):
+     """
+-    x: (3,) float32, 3D coordinate
+-    d: (3,) float32, viewing direction
+-    hash_tables: list of L tensors, each of shape (T_l, F)
+-    table_sizes: list of L integers, T_l
+-    feature_dim: int, F
+-    num_levels: int, L
++    Simple hash function mapping 3D integer coordinates to a table index.
++    Uses XOR-based hashing as a common implementation [G].
+     """
+-    features = []
++    x, y, z = coords
++    # P2048 is a prime number often used in hash grid implementations
++    p = 2048 
++    h = 0
++    h = h ^ (x * p)
++    h = h ^ (y * p * p)
++    h = h ^ (z * p * p * p)
++    return abs(h) % table_size
++
++def trilinear_interpolation(feature_grid, voxel_indices, fractional_coords, table_size):
++    """
++    Retrieves and interpolates features from a single hash table level.
+     
+-    for l in range(num_levels):
++    Args:
++        feature_grid: List of lists, feature_grid[level][index] = feature_vector
++        voxel_indices: Tuple (vx, vy, vz) of integer voxel coordinates
++        fractional_coords: Tuple (ux, uy, uz) of fractional parts
++        table_size: Size of the hash table for this level
++        
++    Returns:
++        Interpolated feature vector
++    """
++    vx, vy, vz = voxel_indices
++    ux, uy, uz = fractional_coords
++    
++    # Determine the 8 neighbors
++    neighbors = []
++    for dx in [0, 1]:
++        for dy in [0, 1]:
++            for dz in [0, 1]:
++                nx = vx + dx
++                ny = vy + dy
++                nz = vz + dz
++                neighbors.append((nx, ny, nz, dx, dy, dz))
++    
++    interpolated_feature = None
++    
++    for nx, ny, nz, dx, dy, dz in neighbors:
++        # Compute weight
++        wx = ux if dx == 1 else (1.0 - ux)
++        wy = uy if dy == 1 else (1.0 - uy)
++        wz = uz if dz == 1 else (1.0 - uz)
++        weight = wx * wy * wz
++        
++        # Hash the neighbor coordinate
++        index = hash_function((nx, ny, nz), table_size)
++        
++        # Retrieve feature
++        feature = feature_grid[index]
++        
++        # Accumulate
++        if interpolated_feature is None:
++            interpolated_feature = [w * f for w, f in zip([weight]*len(feature), feature)]
++        else:
++            interpolated_feature = [i + w * f for i, w, f in zip(interpolated_feature, [weight]*len(feature), feature)]
++            
++    return interpolated_feature
++
++def hashnerf_encode(xyz, feature_grids, levels):
++    """
++    Multi-resolution hash encoding.
++    
++    Args:
++        xyz: Input 3D coordinate (x, y, z)
++        feature_grids: List of feature grids, one per level. 
++                       feature_grids[l] is a list of feature vectors.
++        levels: List of tuples (table_size, feature_dim) for each level.
++        
++    Returns:
++        Concatenated feature vector
++    """
++    concatenated_features = []
++    
++    for l in range(len(levels)):
++        table_size, feature_dim = levels[l]
++        
+         # 1. Scale coordinate
+-        x_l = x * (2 ** l)
++        scale = 2 ** l
++        scaled_xyz = [coord * scale for coord in xyz]
+         
+         # 2. Voxel indices and fractional parts
+-        v = floor(x_l)
+-        u = x_l - v
++        voxel_indices = [math.floor(coord) for coord in scaled_xyz]
++        fractional_coords = [coord - math.floor(coord) for coord in scaled_xyz]
+         
+-        # 3. Hash indices
+-        # Simple XOR hash as per common implementation [G]
+-        # H(v) = (v_x ^ v_y ^ v_z) mod T
+-        # Note: In practice, coordinates are often offset to handle negative indices
+-        # and a prime multiplier is used for better mixing.
+-        # Here we assume a standard integer hash function H_l
+-        indices = []
+-        for i in range(8):
+-            # Determine neighbor coordinates
+-            # i is a bitmask from 0 to 7
+-            neighbor_v = v + ((i >> 0) & 1)
+-            neighbor_v = neighbor_v + ((i >> 1) & 1) * 0  # Wait, standard trilinear neighbors are v + {0,1}^3
+-            # Correct neighbor generation:
+-            # v_x + b0, v_y + b1, v_z + b2 where b in {0,1}
+-            pass
+-            
+-        # Re-do neighbor generation properly
+-        neighbor_indices = []
+-        weights = []
+-        for b0 in [0, 1]:
+-            for b1 in [0, 1]:
+-                for b2 in [0, 1]:
+-                    neighbor_v = v + [b0, b1, b2]
+-                    # Hash the neighbor voxel
+-                    # H(v) = (v_x ^ v_y ^ v_z) % T
+-                    h = (neighbor_v[0] ^ neighbor_v[1] ^ neighbor_v[2]) % table_sizes[l]
+-                    neighbor_indices.append(h)
+-                    
+-                    # Weight
+-                    w_x = u[0] if b0 == 1 else (1 - u[0])
+-                    w_y = u[1] if b1 == 1 else (1 - u[1])
+-                    w_z = u[2] if b2 == 1 else (1 - u[2])
+-                    w = w_x * w_y * w_z
+-                    weights.append(w)
++        # 3. Interpolate features
++        features = trilinear_interpolation(
++            feature_grids[l], 
++            voxel_indices, 
++            fractional_coords, 
++            table_size
++        )
+         
+-        # 4. Gather features
+-        # Gather from hash_tables[l] using neighbor_indices
+-        gathered_features = gather(hash_tables[l], neighbor_indices)
++        concatenated_features.extend(features)
+         
+-        # 5. Weighted sum
+-        interpolated_feature = sum(w * f for w, f in zip(weights, gathered_features))
+-        features.append(interpolated_feature)
+-        
+-    # 6. Concatenate
+-    F = concat(features)
++    return concatenated_features
++
++def hashnerf_decode(features, direction, density_mlp, color_mlp):
++    """
++    Decodes features into density and color.
++    """
++    # Density MLP
++    density = density_mlp(features)
+     
+-    # 7. Decode
+-    sigma = density_mlp(F)
+-    color = color_mlp(concat([F, d]))
++    # Color MLP (concatenates features and direction)
++    color_input = features + direction
++    color = color_mlp(color_input)
+     
+-    return sigma, color
++    return density, color
+ ```
++
++**Edge Cases and Pitfalls:**
++*   **Hash Collisions:** Since hash tables are finite, collisions occur. The method relies on the redundancy of multi-resolution grids and the network's ability to learn to average or prioritize features to mitigate artifacts [S1, S3].
++*   **Precision:** Floating-point precision in coordinate scaling and hashing can affect interpolation accuracy, especially at high resolutions [G].
++*   **Boundary Conditions:** Coordinates outside the defined grid bounds may require clamping or padding, though the infinite nature of the hash grid often handles this by hashing out-of-bounds coordinates directly [G].
+ 
+ ## Subtopics
+ 
+ ### [HashNeRF Architectural Variants](8688-hashnerf-architectural-variants.md)
+-These variants modify the shallow MLP decoder to improve convergence and accuracy. They explore residual connections, convolutional layers, and network depth. They address the limitations of the standard multi-layer perceptron by altering internal connectivity and layer types in the feature-decoding stage. They are distinct from the base HashNeRF method [8678-hashnerf.md] by these structural changes.
++HashNeRF Architectural Variants are specific modifications to the shallow neural network decoder used in HashNeRF, designed to optimize the trade-off between rendering accuracy (PSNR) and training time. While the standard HashNeRF uses a simple multi-layer perceptron (MLP) with linear layers, these variants explore convolutional layers, residual connections, and deeper network structures to improve feature extraction and color prediction. They differ from sibling methods like Zip-NeRF by focusing on architectural ablation of the MLP decoder rather than changing the underlying hash encoding or density estimation mechanism.
+ 
+ ### [Zip-NeRF Hash Encoding with Gaussian Expectation](11492-zip-nerf-hash-encoding-with-gaussian-expectation.md)
+-Zip-NeRF replaces the large MLP of mip-NeRF 360 with a multi-scale hash grid (based on Instant Neural Graphics Primitives) followed by a smaller MLP. It sets itself apart by modeling the query as an expectation over 3D Gaussians rather than point samples, mitigating high-frequency aliasing artifacts inherent in sparse grid representations.
+-
+-### HollowNeRF
+-HollowNeRF is a compression method that sparsifies the feature grid during training using a trainable 3D saliency mask [S3]. It predicts a saliency weight $p$ for a coordinate $\mathbf{x}$ by interpolating values from a coarse trainable 3D saliency grid $G$ and applying a sigmoid function [S3]. The feature $\mathbf{f}$ fetched from the hashgrid is scaled by $p$ to get $\mathbf{v} = p\mathbf{f}$ [S3]. A zero-skipping gate ensures $\mathbf{v}=0$ maps to $\sigma=0$ [S3]. An ADMM pruner enforces sparsity on the saliency grid during training [S3]. It uses 31% of the parameters of Instant-NGP with comparable quality, and achieves up to 1dB PSNR gain with 56% of the parameters [S3].
++Zip-NeRF Hash Encoding with Gaussian Expectation is a spatial encoding method for Neural Radiance Fields (NeRF) that replaces large multi-layer perceptrons (MLPs) with a multi-scale hash grid to store 3D features, using Gaussian expectation approximation to prevent aliasing during grid queries. It serves as an acceleration of mip-NeRF 360, replacing its large MLP with a hash encoding based on Instant Neural Graphics Primitives, followed by a smaller MLP. The method sets itself apart from standard hash-based NeRFs by explicitly modeling the query as an expectation over 3D Gaussians rather than point samples, thereby mitigating high-frequency aliasing artifacts inherent in sparse grid representations.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Training is significantly faster than standard NeRF, converging in fewer iterations (e.g., 500-1000 iterations vs. tens of thousands) [S2, unofficial]. Rendering is fast due to the shallow network and efficient hash lookups [S1].
+-*   **Memory Complexity:** Memory usage is determined by the total size of the hash tables ($\sum T_l \times F$). It is more memory-efficient than dense voxel grids for high-resolution scenes [S1].
+-*   **Performance:** Achieves excellent memory utilization and good results with minimal learning time [S1].
+-*   **Strengths:** Fast training, low memory footprint, generic and trainable encoding [S2, unofficial].
+-*   **Limitations:** Hash collisions can occur if $T$ is too small for the scene complexity [S3].
+-*   **When to use:** When fast training and rendering are required, and memory is constrained [S1][S2, unofficial].
+-*   **When not to use:** When extremely high fidelity without any aliasing is required without additional techniques like Gaussian expectation [S1].
++*   **Time Complexity:** Training time is significantly reduced compared to traditional NeRFs due to the shallow network and efficient hash lookups [S1][S2, unofficial]. Convergence occurs in fewer iterations [S2, unofficial].
++*   **Memory Complexity:** Memory usage is determined by the total size of the hash tables ($\sum T_l \times F$) plus the MLP parameters. It is more memory-efficient than dense voxel grids for high-resolution scenes [S1].
++*   **Measured Performance:** Evaluated on NVIDIA GeForce RTX 3090 Ti GPUs [S2, unofficial]. Training was evaluated at 500 and 1,000 iterations [S2, unofficial]. The dataset consisted of 100 training, 100 validation, and 200 test images (RGB + depth) [S2, unofficial].
++*   **Strengths:** Fast training, low memory footprint, generic applicability to various neural graphics primitives [S2, unofficial].
++*   **Limitations:** Hash collisions can cause artifacts if not managed; performance depends heavily on the choice of hash table sizes and number of levels [S1].
++*   **When to Use:** When fast training and rendering are prioritized over absolute highest fidelity, or when resources are limited [S1][S2, unofficial].
++*   **When Not to Use:** When maximum possible PSNR is required and training time is not a constraint, or when dealing with scenes requiring extremely fine geometric details that may suffer from hash aliasing [S1].
+ 
+ ## Background
+-HashNeRF, formally known as "Instant Neural Graphics Primitives with a Multiresolution Hash Encoding," was proposed by Thomas Müller, Alex Evans, Christoph Schied, and Alexander Keller in 2022 [S2, unofficial]. It was introduced to address the slow training times of traditional NeRF models [S2, unofficial]. The method leverages a multi-resolution hash encoding to map inputs to a higher-dimensional space, followed by a shallow neural network [S2, unofficial]. It has applications in Gigapixel approximation, generating signed distance functions, and Neural Radiance Caching [S2, unofficial]. The implementation often relies on the Tiny-CUDA-NN library [S1].
++HashNeRF, formally known as "Instant Neural Graphics Primitives with a Multiresolution Hash Encoding," was introduced by Thomas Müller, Alex Evans, Christoph Schied, and Alexander Keller in 2022 [S2, unofficial]. It was published in ACM Transactions on Graphics [S2, unofficial]. The method was developed to address the slow training times of traditional NeRFs by introducing a trainable, multi-resolution hash encoding [S1][S2, unofficial]. It has been implemented using the Tiny-CUDA-NN library [S1].
+ 
+ ## Sources

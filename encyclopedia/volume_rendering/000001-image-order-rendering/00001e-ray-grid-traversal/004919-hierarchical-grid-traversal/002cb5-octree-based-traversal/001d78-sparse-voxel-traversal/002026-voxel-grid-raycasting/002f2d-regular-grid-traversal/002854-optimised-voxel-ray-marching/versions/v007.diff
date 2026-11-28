@@ -1,0 +1,428 @@
+--- v006.md
++++ v007.md
+@@ -4,184 +4,266 @@
+ 
+ ## Overview
+-Optimised Voxel Ray Marching is a CPU-oriented ray traversal algorithm for voxel-based scenes that accelerates intersection testing by organizing voxels into fixed-size 3D sub-grids called "chunks" [S1, unofficial][S2, unofficial][S3, unofficial]. It solves the problem of inefficiently stepping through empty space in large voxel worlds by allowing the ray to skip entire chunks that contain no geometry, reducing the number of intersection checks in empty regions [S1, unofficial]. It sets itself apart from pure 3D grid traversal by maintaining a reference to the current working chunk and updating it only upon crossing chunk boundaries, thereby minimizing repeated bit-shifts, masks, and multiplication operations [S2, unofficial][S3, unofficial]. It differs from octree-based traversal by using fixed-size inner grids which simplifies implementation and memory layout [S1, unofficial].
++Optimised Voxel Ray Marching is a ray traversal algorithm for voxel-based scenes that uses fixed-length steps along the ray to traverse a 3D grid of voxels, checking for occupancy at each step [S1, S2, S3, unofficial]. It solves the problem of inefficiently stepping through empty space in large voxel worlds by optimizing memory access patterns, specifically by keeping block lookups within the current working chunk to minimize bitshifts, masks, and multiplication operations [S2, S3, unofficial]. It sets itself apart from [Regular Grid Traversal](5939-regular-grid-traversal.md) by using a chunked memory layout that reduces boundary calculation overhead, and from [Chunked Voxel Traversal](8311-chunked-voxel-traversal.md) by relying on fixed-size inner grids which simplifies implementation and memory layout [S1, S3, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-The algorithm takes a ray start position `start` (float3), a normalized ray direction `velocity` (float3), a maximum ray length `max` (float), and a global `Map` structure containing a 3D array of `Chunk` references [S2, unofficial][S3, unofficial]. It outputs a boolean `hit` (true if a solid block is intersected) and an `axis` enum indicating the face normal axis of the hit, used for reflection [S2, unofficial][S3, unofficial].
+-
+-**Data Structures:**
+-The world is partitioned into a 3D grid of chunks [S3, unofficial].
+-- **Map:** Contains a 3D array `Chunk[,,] chunks` indexed by `[chunkIndexX, chunkIndexY, chunkIndexZ]` [S2, unofficial][S3, unofficial].
+-- **Chunk:** Contains a 1D array `Block[] data` of size `CHUNK_SIZE_CUBED` (32768) [S2, unofficial][S3, unofficial].
+-- **Block:** A struct with a single byte field `byte kind` [S2, unofficial][S3, unofficial]. Layout is sequential with pack size 1.
+-- **Constants:**
+-  - `CHUNK_SIZE = 32` [S2, unofficial][S3, unofficial].
+-  - `CHUNK_SIZE_SQUARED = 1024` [S2, unofficial][S3, unofficial].
+-  - `CHUNK_SIZE_CUBED = 32768` [S2, unofficial][S3, unofficial].
+-  - `SHIFT = 5` (log2(CHUNK_SIZE)) [S2, unofficial][S3, unofficial].
+-  - `MASK = 0x1f` (31, CHUNK_SIZE - 1) [S2, unofficial][S3, unofficial].
+-  - Map dimensions: `MAP_SIZE_X = 512`, `MAP_SIZE_Y = 160`, `MAP_SIZE_Z = 512` [S3, unofficial].
+-
+-**Algorithm Steps:**
+-1. **Initialization:** Convert `start` to integer voxel coordinates: `x = floor(start.X)`, `y = floor(start.Y)`, `z = floor(start.Z)` [S2, unofficial][S3, unofficial]. Check bounds: if `x < 0` or `x >= MAP_SIZE_X` or `y < 0` or `y >= MAP_SIZE_Y` or `z < 0` or `z >= MAP_SIZE_Z`, set `hit = false` and return [S2, unofficial][S3, unofficial]. Calculate chunk indices: `chunkIndexX = x >> SHIFT`, `chunkIndexY = y >> SHIFT`, `chunkIndexZ = z >> SHIFT` [S2, unofficial][S3, unofficial]. Retrieve current chunk: `c = chunks[chunkIndexX, chunkIndexY, chunkIndexZ]` [S2, unofficial][S3, unofficial]. Calculate chunk-relative coordinates: `i = x & MASK`, `j = y & MASK`, `k = z & MASK` [S2, unofficial][S3, unofficial]. Calculate initial linear access index in chunk data: `access = j + i * CHUNK_SIZE + k * CHUNK_SIZE_SQUARED` [S2, unofficial][S3, unofficial]. Calculate end position: `end = start + velocity` [S2, unofficial][S3, unofficial]. Short-circuit: if `floor(end.X) == x` and `floor(end.Y) == y` and `floor(end.Z) == z`, check if `c` is null or `c.data[access].kind == 0`; if so, set `hit = false`, else set `hit = true`, and return [S2, unofficial][S3, unofficial].
+-2. **Direction Setup:** Initialize direction-dependent variables for each axis based on the sign of `velocity` components [S2, unofficial][S3, unofficial]. For the Y axis: if `velocity.Y > 0`, set `jStep = 1`, `jComparison = CHUNK_SIZE`, `jReset = 0`, `yAccessReset = -CHUNK_SIZE`, `yDist = (y - start.Y + 1)`; else set `jStep = -1`, `jComparison = -1`, `jReset = CHUNK_SIZE - 1`, `yAccessReset = CHUNK_SIZE`, `yDist = (start.Y - y)` [S2, unofficial][S3, unofficial]. For the X axis: if `velocity.X > 0`, set `iStep = 1`, `iComparison = CHUNK_SIZE`, `iReset = 0`, `xAccessReset = -CHUNK_SIZE`, `xAccessIncrement = CHUNK_SIZE`, `xDist = (x - start.X + 1)`; else set `iStep = -1`, `iComparison = -1`, `iReset = CHUNK_SIZE - 1`, `xAccessReset = CHUNK_SIZE`, `xAccessIncrement = -CHUNK_SIZE`, `xDist = (start.X - x)` [S2, unofficial][S3, unofficial]. For the Z axis: if `velocity.Z > 0`, set `kStep = 1`, `kComparison = CHUNK_SIZE`, `kReset = 0`, `zAccessIncrement = CHUNK_SIZE_SQUARED`, `zAccessReset = -CHUNK_SIZE_CUBED`, `zDist = (z - start.Z + 1)`; else set `kStep = -1`, `kComparison = -1`, `kReset = CHUNK_SIZE - 1`, `zAccessIncrement = -CHUNK_SIZE_SQUARED`, `zAccessReset = CHUNK_SIZE_CUBED`, `zDist = (start.Z - z)` [S2, unofficial][S3, unofficial].
+-3. **Distance Calculation:** Normalize `velocity` [S2, unofficial][S3, unofficial]. Calculate inverse absolute velocity components: `xInverted = |1 / velocity.X|`, `yInverted = |1 / velocity.Y|`, `zInverted = |1 / velocity.Z|` [S2, unofficial][S3, unofficial]. Calculate initial distance to next voxel boundary in `t`-units: if `velocity.X == 0`, `xDistance = PositiveInfinity`, else `xDistance = xInverted * xDist`; similarly for Y and Z axes [S2, unofficial][S3, unofficial]. Initialize progress `t = 0.0` [S2, unofficial][S3, unofficial].
+-4. **Traversal Loop:** While `t <= max`: check if `c` is not null and `c.data[access].kind != 0`; if true, set `hit = true` and return [S2, unofficial][S3, unofficial]. Find the closest boundary: if `yDistance < xDistance`, check if `yDistance < zDistance`; if true, advance in Y (`j += jStep`, `access += jStep`), check for chunk exit (`j == jComparison`), update chunk index and reference if needed, then update `t = yDistance`, `yDistance += yInverted`, `axis = Axis.Y` [S2, unofficial][S3, unofficial]. If `zDistance <= yDistance`, advance in Z (`k += kStep`, `access += zAccessIncrement`), check for chunk exit, update chunk index and reference if needed, then update `t = zDistance`, `zDistance += zInverted`, `axis = Axis.Z` [S2, unofficial][S3, unofficial]. Else if `xDistance <= yDistance`, check if `xDistance < zDistance`; if true, advance in X (`i += iStep`, `access += xAccessIncrement`), check for chunk exit, update chunk index and reference if needed, then update `t = xDistance`, `xDistance += xInverted`, `axis = Axis.X` [S2, unofficial][S3, unofficial]. Else, advance in Z (`k += kStep`, `access += zAccessIncrement`), check for chunk exit, update chunk index and reference if needed, then update `t = zDistance`, `zDistance += zInverted`, `axis = Axis.Z` [S2, unofficial][S3, unofficial].
+-5. **Completion:** If the loop completes without hitting a block, set `hit = false` [S2, unofficial][S3, unofficial].
+-
+-**Pseudocode:**
++The method implements a fixed-step ray marcher optimized for CPU collision detection. It differs from the standard 3D-DDA traversal described in [Regular Grid Traversal](5939-regular-grid-traversal.md) by maintaining a reference to the current "working chunk" and updating it only when the ray crosses a chunk boundary, thereby avoiding repeated chunk index calculations for every voxel step.
++
++### Inputs and Outputs
++**Inputs:**
++*   `start`: Ray origin in world/voxel space (Vector3).
++*   `velocity`: Ray direction vector (normalized).
++*   `max`: Maximum ray length in world units.
++*   `chunks`: 3D array of Chunk references indexed by `[chunkIndexX, chunkIndexY, chunkIndexZ]`.
++*   `MAP_SIZE`: World dimensions (e.g., $512 \times 160 \times 512$).
++*   `CHUNK_SIZE`: Side length of a chunk in blocks (typically 32).
++
++**Outputs:**
++*   `hit`: Boolean indicating if a solid block was intersected.
++*   `axis`: The axis (X, Y, or Z) of the face hit (used for reflection).
++
++### Data Structures
++**Chunk:**
++*   Contains a 1D array `data` of size $CHUNK\_SIZE^3$ (e.g., 32768 for size 32).
++*   `data` stores `Block` structs sequentially.
++
++**Block:**
++*   Single byte field `kind`. Value 0 indicates empty; non-zero indicates solid.
++
++**Map:**
++*   3D array `chunks[,,]` of Chunk references.
++*   Chunk indices are derived from world coordinates via bit-shifting: $idx = coord \gg SHIFT$, where $SHIFT = \log_2(CHUNK\_SIZE)$.
++*   Chunk-relative coordinates are derived via bitmask: $rel = coord \& MASK$, where $MASK = CHUNK\_SIZE - 1$.
++
++### Parameters
++*   `EPS`: $5 \times 10^{-5}$, used to offset ray origins to prevent self-intersection [S1, unofficial].
++*   `CHUNK_SIZE`: 32 [S2, S3, unofficial].
++*   `SHIFT`: 5 [S2, S3, unofficial].
++*   `MASK`: 0x1f (31) [S2, S3, unofficial].
++*   `MAP_SIZE_X/Z`: 512, `MAP_SIZE_Y`: 160 [S3, unofficial].
++
++### Algorithm Steps
++1.  **Initialization:**
++    *   Convert `start` to integer voxel coordinates: $x = \lfloor start.x \rfloor$, $y = \lfloor start.y \rfloor$, $z = \lfloor start.z \rfloor$.
++    *   Check bounds: If $(x, y, z)$ is outside `MAP_SIZE`, return `hit = false`.
++    *   Calculate chunk indices: $cx = x \gg SHIFT$, $cy = y \gg SHIFT$, $cz = z \gg SHIFT$.
++    *   Retrieve current chunk: $c = chunks[cx, cy, cz]$.
++    *   Calculate chunk-relative coordinates: $i = x \& MASK$, $j = y \& MASK$, $k = z \& MASK$.
++    *   Calculate linear access index in chunk: $access = j + i \cdot CHUNK\_SIZE + k \cdot CHUNK\_SIZE^2$.
++    *   Check start block: If $c$ is null or $c.data[access].kind == 0$, return `hit = false` (unless start/end are same block, handled separately).
++
++2.  **Direction Setup:**
++    *   Normalize `velocity`.
++    *   Calculate inverted components: $invX = |1/velocity.x|$, $invY = |1/velocity.y|$, $invZ = |1/velocity.z|$.
++    *   Initialize direction-dependent variables for each axis based on the sign of the velocity component:
++        *   If $velocity.axis > 0$:
++            *   $step = 1$
++            *   $comparison = CHUNK\_SIZE$ (boundary exit condition)
++            *   $reset = 0$
++            *   $accessReset = -CHUNK\_SIZE$ (for X/Z) or $-1$ (for Y)
++            *   $accessIncrement = CHUNK\_SIZE$ (for X) or $CHUNK\_SIZE^2$ (for Z) or $1$ (for Y)
++            *   $dist = (coord - start.coord + 1)$
++        *   If $velocity.axis < 0$:
++            *   $step = -1$
++            *   $comparison = -1$
++            *   $reset = CHUNK\_SIZE - 1$
++            *   $accessReset = CHUNK\_SIZE$ (for X/Z) or $1$ (for Y)
++            *   $accessIncrement = -CHUNK\_SIZE$ (for X) or $-CHUNK\_SIZE^2$ (for Z) or $-1$ (for Y)
++            *   $dist = (start.coord - coord)$
++    *   Calculate initial distance to next boundary in $t$-units:
++        *   $tDist_{axis} = velocity.axis == 0 ? \infty : inv_{axis} \cdot dist_{axis}$.
++
++3.  **Marching Loop:**
++    *   Initialize $t = 0.0$.
++    *   While $t \le max$:
++        *   **Occupancy Check:** If $c$ is not null and $c.data[access].kind \neq 0$, set `hit = true`, return.
++        *   **Find Closest Boundary:** Compare $tDistX, tDistY, tDistZ$.
++        *   **Advance Axis:**
++            *   Let $axis$ be the axis with the minimum $tDist$.
++            *   Update relative coordinate: $coord_{rel} += step_{axis}$.
++            *   Update access index: $access += step_{axis}$ (for Y) or $access += accessIncrement_{axis}$ (for X/Z).
++            *   **Chunk Boundary Check:** If $coord_{rel} == comparison_{axis}$:
++                *   Reset relative coordinate: $coord_{rel} = reset_{axis}$.
++                *   Update access index: $access += accessReset_{axis}$.
++                *   Update chunk index: $chunkIndex_{axis} += step_{axis}$.
++                *   Check new chunk bounds: If $chunkIndex_{axis}$ is out of map bounds, return `hit = false`.
++                *   Load new chunk: $c = chunks[cx, cy, cz]$.
++            *   Update progress: $t = tDist_{axis}$.
++            *   Update distance to next boundary: $tDist_{axis} += inv_{axis}$.
++            *   Store hit axis: $axis = axis$.
++
++4.  **Termination:**
++    *   If loop completes without hit, return `hit = false`.
++
++### Pseudocode
+ ```python
+-def ray_march(start: list, velocity: list, max_dist: float, chunks: list) -> tuple:
+-    CHUNK_SIZE = 32
+-    CHUNK_SIZE_SQ = 1024
+-    CHUNK_SIZE_CB = 32768
+-    SHIFT = 5
+-    MASK = 31
+-    MAP_SIZE_X = 512
+-    MAP_SIZE_Y = 160
+-    MAP_SIZE_Z = 512
+-    CHUNK_AMOUNT_X = 16
+-    CHUNK_AMOUNT_Y = 5
+-    CHUNK_AMOUNT_Z = 16
+-
+-    x = int(start[0])
+-    y = int(start[1])
+-    z = int(start[2])
+-
+-    if x < 0 or x >= MAP_SIZE_X or y < 0 or y >= MAP_SIZE_Y or z < 0 or z >= MAP_SIZE_Z:
+-        return False, None
+-
+-    chunk_idx_x = x >> SHIFT
+-    chunk_idx_y = y >> SHIFT
+-    chunk_idx_z = z >> SHIFT
+-
+-    c = chunks[chunk_idx_x][chunk_idx_y][chunk_idx_z]
+-
+-    i = x & MASK
+-    j = y & MASK
+-    k = z & MASK
+-
+-    access = j + i * CHUNK_SIZE + k * CHUNK_SIZE_SQ
+-
+-    end_x = int(start[0] + velocity[0])
+-    end_y = int(start[1] + velocity[1])
+-    end_z = int(start[2] + velocity[2])
+-
++def ray_march(start: Vector3, velocity: Vector3, max_dist: float, chunks: Array3D, map_size: Vector3i, chunk_size: int) -> bool:
++    # 1. Initialization
++    x = floor(start.x)
++    y = floor(start.y)
++    z = floor(start.z)
++    
++    # Bounds check
++    if x < 0 or x >= map_size.x or y < 0 or y >= map_size.y or z < 0 or z >= map_size.z:
++        return False
++
++    shift = log2(chunk_size)
++    mask = chunk_size - 1
++    
++    cx = x >> shift
++    cy = y >> shift
++    cz = z >> shift
++    
++    c = chunks[cx, cy, cz]
++    if c is None:
++        return False
++        
++    i = x & mask
++    j = y & mask
++    k = z & mask
++    
++    access = j + i * chunk_size + k * (chunk_size * chunk_size)
++    
++    # Handle single-block ray
++    end_x = floor(start.x + velocity.x * max_dist)
++    end_y = floor(start.y + velocity.y * max_dist)
++    end_z = floor(start.z + velocity.z * max_dist)
++    
+     if x == end_x and y == end_y and z == end_z:
+-        if c is None or c.data[access].kind == 0:
+-            return False, None
++        return c.data[access].kind != 0
++
++    # 2. Direction Setup
++    velocity = normalize(velocity)
++    inv_x = abs(1.0 / velocity.x) if velocity.x != 0 else infinity
++    inv_y = abs(1.0 / velocity.y) if velocity.y != 0 else infinity
++    inv_z = abs(1.0 / velocity.z) if velocity.z != 0 else infinity
++    
++    # Helper to setup axis vars
++    def setup_axis(coord, start_coord, vel_comp, size):
++        if vel_comp > 0:
++            return {
++                'step': 1, 'comparison': size, 'reset': 0,
++                'access_reset': -size, 'access_inc': size, # Simplified for Y; X/Z use size^2
++                'dist': coord - start_coord + 1
++            }
+         else:
+-            return True, None
+-
+-    if velocity[1] > 0:
+-        j_step, j_comparison, j_reset, y_access_reset, y_dist = 1, CHUNK_SIZE, 0, -CHUNK_SIZE, (y - start[1] + 1)
+-    else:
+-        j_step, j_comparison, j_reset, y_access_reset, y_dist = -1, -1, CHUNK_SIZE - 1, CHUNK_SIZE, (start[1] - y)
+-
+-    if velocity[0] > 0:
+-        i_step, i_comparison, i_reset, x_access_reset, x_access_increment, x_dist = 1, CHUNK_SIZE, 0, -CHUNK_SIZE, CHUNK_SIZE, (x - start[0] + 1)
+-    else:
+-        i_step, i_comparison, i_reset, x_access_reset, x_access_increment, x_dist = -1, -1, CHUNK_SIZE - 1, CHUNK_SIZE, -CHUNK_SIZE, (start[0] - x)
+-
+-    if velocity[2] > 0:
+-        k_step, k_comparison, k_reset, z_access_increment, z_access_reset, z_dist = 1, CHUNK_SIZE, 0, CHUNK_SIZE_SQ, -CHUNK_SIZE_CB, (z - start[2] + 1)
+-    else:
+-        k_step, k_comparison, k_reset, z_access_increment, z_access_reset, z_dist = -1, -1, CHUNK_SIZE - 1, -CHUNK_SIZE_SQ, CHUNK_SIZE_CB, (start[2] - z)
+-
+-    vel_len = (velocity[0]**2 + velocity[1]**2 + velocity[2]**2)**0.5
+-    vx, vy, vz = velocity[0]/vel_len, velocity[1]/vel_len, velocity[2]/vel_len
+-
+-    x_inv = abs(1.0 / vx) if vx != 0 else float('inf')
+-    y_inv = abs(1.0 / vy) if vy != 0 else float('inf')
+-    z_inv = abs(1.0 / vz) if vz != 0 else float('inf')
+-
+-    x_dist_t = x_inv * x_dist if vx != 0 else float('inf')
+-    y_dist_t = y_inv * y_dist if vy != 0 else float('inf')
+-    z_dist_t = z_inv * z_dist if vz != 0 else float('inf')
+-
++            return {
++                'step': -1, 'comparison': -1, 'reset': size - 1,
++                'access_reset': size, 'access_inc': -size,
++                'dist': start_coord - coord
++            }
++
++    vars_x = setup_axis(x, start.x, velocity.x, chunk_size)
++    vars_y = setup_axis(y, start.y, velocity.y, chunk_size)
++    vars_z = setup_axis(z, start.z, velocity.z, chunk_size)
++    
++    # Adjust access resets/increments for X and Z dimensions
++    vars_x['access_reset'] = -(chunk_size * chunk_size)
++    vars_x['access_inc'] = chunk_size
++    vars_z['access_reset'] = -(chunk_size * chunk_size * chunk_size)
++    vars_z['access_inc'] = chunk_size * chunk_size
++    
++    t_dist_x = inv_x * vars_x['dist'] if velocity.x != 0 else infinity
++    t_dist_y = inv_y * vars_y['dist'] if velocity.y != 0 else infinity
++    t_dist_z = inv_z * vars_z['dist'] if velocity.z != 0 else infinity
++    
+     t = 0.0
+-    axis = None
+-
++    hit_axis = None
++
++    # 3. Marching Loop
+     while t <= max_dist:
+         if c is not None and c.data[access].kind != 0:
+-            return True, axis
+-
+-        if y_dist_t < x_dist_t:
+-            if y_dist_t < z_dist_t:
+-                j += j_step
+-                access += j_step
+-                if j == j_comparison:
+-                    j = j_reset
+-                    access += y_access_reset
+-                    chunk_idx_y += j_step
+-                    if chunk_idx_y < 0 or chunk_idx_y >= CHUNK_AMOUNT_Y:
+-                        return False, None
+-                    c = chunks[chunk_idx_x][chunk_idx_y][chunk_idx_z]
+-                t = y_dist_t
+-                y_dist_t += y_inv
+-                axis = "Y"
++            return True
++            
++        # Find closest boundary
++        if t_dist_y < t_dist_x:
++            if t_dist_y < t_dist_z:
++                # Advance Y
++                j += vars_y['step']
++                access += vars_y['step']
++                
++                if j == vars_y['comparison']:
++                    j = vars_y['reset']
++                    access += vars_y['access_reset']
++                    cy += vars_y['step']
++                    if cy < 0 or cy >= map_size.y // chunk_size:
++                        return False
++                    c = chunks[cx, cy, cz]
++                    
++                t = t_dist_y
++                t_dist_y += inv_y
++                hit_axis = 'Y'
+             else:
+-                k += k_step
+-                access += z_access_increment
+-                if k == k_comparison:
+-                    k = k_reset
+-                    access += z_access_reset
+-                    chunk_idx_z += k_step
+-                    if chunk_idx_z < 0 or chunk_idx_z >= CHUNK_AMOUNT_Z:
+-                        return False, None
+-                    c = chunks[chunk_idx_x][chunk_idx_y][chunk_idx_z]
+-                t = z_dist_t
+-                z_dist_t += z_inv
+-                axis = "Z"
++                # Advance Z
++                k += vars_z['step']
++                access += vars_z['access_inc']
++                
++                if k == vars_z['comparison']:
++                    k = vars_z['reset']
++                    access += vars_z['access_reset']
++                    cz += vars_z['step']
++                    if cz < 0 or cz >= map_size.z // chunk_size:
++                        return False
++                    c = chunks[cx, cy, cz]
++                    
++                t = t_dist_z
++                t_dist_z += inv_z
++                hit_axis = 'Z'
+         else:
+-            if x_dist_t < z_dist_t:
+-                i += i_step
+-                access += x_access_increment
+-                if i == i_comparison:
+-                    i = i_reset
+-                    access += x_access_reset
+-                    chunk_idx_x += i_step
+-                    if chunk_idx_x < 0 or chunk_idx_x >= CHUNK_AMOUNT_X:
+-                        return False, None
+-                    c = chunks[chunk_idx_x][chunk_idx_y][chunk_idx_z]
+-                t = x_dist_t
+-                x_dist_t += x_inv
+-                axis = "X"
++            if t_dist_x < t_dist_z:
++                # Advance X
++                i += vars_x['step']
++                access += vars_x['access_inc']
++                
++                if i == vars_x['comparison']:
++                    i = vars_x['reset']
++                    access += vars_x['access_reset']
++                    cx += vars_x['step']
++                    if cx < 0 or cx >= map_size.x // chunk_size:
++                        return False
++                    c = chunks[cx, cy, cz]
++                    
++                t = t_dist_x
++                t_dist_x += inv_x
++                hit_axis = 'X'
+             else:
+-                k += k_step
+-                access += z_access_increment
+-                if k == k_comparison:
+-                    k = k_reset
+-                    access += z_access_reset
+-                    chunk_idx_z += k_step
+-                    if chunk_idx_z < 0 or chunk_idx_z >= CHUNK_AMOUNT_Z:
+-                        return False, None
+-                    c = chunks[chunk_idx_x][chunk_idx_y][chunk_idx_z]
+-                t = z_dist_t
+-                z_dist_t += z_inv
+-                axis = "Z"
+-
+-    return False, None
++                # Advance Z
++                k += vars_z['step']
++                access += vars_z['access_inc']
++                
++                if k == vars_z['comparison']:
++                    k = vars_z['reset']
++                    access += vars_z['access_reset']
++                    cz += vars_z['step']
++                    if cz < 0 or cz >= map_size.z // chunk_size:
++                        return False
++                    c = chunks[cx, cy, cz]
++                    
++                t = t_dist_z
++                t_dist_z += inv_z
++                hit_axis = 'Z'
++                
++    return False
+ ```
+ 
+-**Edge Cases and Pitfalls:**
+-- **Self-intersection:** In rendering contexts, shadow rays are offset by `n * EPS` (where `EPS = 5e-5`) to avoid hitting the surface they originated from [S1, unofficial].
+-- **Boundary Checking:** The `checkBoundaries` function ensures voxel coordinates are within `[0, size)` to prevent out-of-bounds memory access [S1, unofficial]. In the chunked version, chunk index bounds are checked explicitly upon chunk exit [S2, unofficial][S3, unofficial].
+-- **Null Chunks:** Chunks containing no blocks may be null (uninitialized) to save memory. The algorithm must check for `c == null` before accessing `c.data` [S2, unofficial][S3, unofficial].
+-- **Zero Velocity Components:** If a velocity component is 0, the distance to the next boundary in that axis is set to `PositiveInfinity` to prevent division by zero and infinite loops [S2, unofficial][S3, unofficial].
++### Edge Cases and Pitfalls
++*   **Self-Intersection:** When computing normals or shadow rays, offset the origin by $n \cdot EPS$ to avoid hitting the surface itself [S1, unofficial].
++*   **Null Chunks:** Empty chunks may be represented by `null` references. The algorithm must check for null before accessing `data` [S2, S3, unofficial].
++*   **Boundary Precision:** Using `floor` on the start position is standard, but floating-point inaccuracies at chunk boundaries can cause skipping or double-checking. The `EPS` offset helps mitigate this [S1, unofficial].
++*   **Zero Velocity:** If a velocity component is 0, the distance to the next boundary is infinity, preventing advancement on that axis [S2, S3, unofficial].
+ 
+ ## Subtopics
+ 
+-### [Chunked Voxel Traversal](8311-chunked-voxel-traversal.md)
+-Chunked Voxel Traversal is a hierarchical ray traversal method for sparse voxel grids that accelerates intersection testing by organizing voxels into a 3D grid of smaller 3D sub-grids called "chunks". It solves the problem of inefficiently stepping through empty space in large voxel worlds by allowing the ray to skip entire chunks that contain no geometry. It sets itself apart from pure 3D grid traversal by reducing the number of intersection checks in empty regions, and from octree-based traversal by using fixed-size inner grids which simplifies implementation and memory layout.
+-
+ ### Incremental 2x2x2 Cell Block Ray Walking
+-Incremental 2x2x2 Cell Block Ray Walking optimizes ray marching through a voxel grid by avoiding redundant cell checks when traversing a 2x2x2 block [S4, unofficial]. The walk steps a 2x2x2 block of grid cells, and after stepping along one axis, half of the block was tested in the previous step, so it tests only the 4 cells on the leading side [S4, unofficial].
++Optimizes ray marching through a voxel grid by avoiding redundant cell checks when traversing a 2x2x2 block [S4, unofficial]. It steps a 2x2x2 block of grid cells; after stepping along one axis, half of the block was tested in the previous step, so it tests only the 4 cells on the leading side [S4, unofficial]. This reduces the number of grid-walk calls and improves cache locality [S4, unofficial].
+ 
+ ## Operating characteristics
+-The traversal step per voxel is $O(1)$, dominated by bitwise operations and array lookups [S2, unofficial][S3, unofficial]. The total time is proportional to the number of voxels traversed [S2, unofficial][S3, unofficial]. Memory complexity is $O(N^3)$ for the full grid, but optimized by using sparse chunks [S2, unofficial]. Only chunks containing geometry are allocated, reducing memory footprint for sparse worlds [S2, unofficial]. On a Ryzen 5 1600 CPU, average particle collision ray march (1-10 blocks) takes 250 nanoseconds, allowing 64,000 rays per frame per thread at 60fps [S2, unofficial][S3, unofficial]. Ray length 200-400 blocks takes 3400 nanoseconds, yielding 4,700 rays per 16ms frame [S2, unofficial][S3, unofficial]. Strengths include fast CPU performance due to minimized arithmetic operations (bit-shifts/masks instead of divisions/multiplications for chunk indexing) [S2, unofficial][S3, unofficial]. Limitations include fixed chunk size potentially leading to memory overhead for very sparse worlds if many chunks are partially filled [S2, unofficial]. It is not suitable for GPU rendering where coalesced memory access and warp divergence are critical concerns (unlike [Voxel-based Ray Tracing for GI and Specular Reflections](4091-voxel-based-ray-tracing-for-gi-and-specular-reflections.md)) [S2, unofficial]. It is best used for CPU-based collision detection, particle physics, and voxel games where memory bandwidth and cache locality for chunk-local data are important [S2, unofficial][S3, unofficial]. It should not be used for GPU ray tracing, highly dense uniform grids where overhead of chunk management outweighs benefits, or scenes requiring hierarchical LOD [S2, unofficial].
++*   **Time Complexity:** Linear with respect to the number of voxels traversed. The cost per step is very low due to bitwise operations for chunk indexing.
++*   **Memory Complexity:** Depends on the sparse voxel grid implementation. Chunks are allocated on-demand, reducing memory usage for empty worlds.
++*   **Performance:** On a Ryzen 5 1600 CPU, ray marching for 1-10 blocks takes ~250 nanoseconds, allowing 64,000 rays per frame per thread at 60fps. For longer rays (200-400 blocks), it takes ~3400 nanoseconds, allowing 4,700 rays per frame [S2, S3, unofficial].
++*   **Strengths:** Extremely fast for CPU-based collision detection in voxel games. Minimizes cache misses by keeping access local to the current chunk.
++*   **Limitations:** Fixed-step nature means it may step through empty space if the grid is sparse and chunks are not hierarchical (unlike Octree-based methods). Not suitable for high-precision continuous collision detection without sub-stepping.
+ 
+ ## Background
+-Optimised Voxel Ray Marching is based on "A Fast Voxel Traversal Algorithm for Ray Tracing" by John Amanatides and Andrew Woo [S2, unofficial][S3, unofficial]. It was specifically optimized for CPU collision detection in the game "Sector's Edge" by keeping block lookups within the current working chunk to avoid repeated chunk boundary calculations [S2, unofficial][S3, unofficial]. The implementation has been documented in tutorials and open-source repositories such as "VoxelsRayTracingTutorial" and "Vercidium/voxel-ray-marching" [S1, unofficial][S2, unofficial][S3, unofficial].
++The method is based on "A Fast Voxel Traversal Algorithm for Ray Tracing" by John Amanatides and Andrew Woo [S2, S3, unofficial]. It was specifically optimized for CPU implementation in the game *Sector's Edge* by Vercidium to handle particle and projectile collisions efficiently [S2, S3, unofficial]. The optimization focuses on reducing the computational overhead of chunk boundary checks by maintaining a "current working chunk" reference [S2, S3, unofficial].
+ 
+ ## Sources

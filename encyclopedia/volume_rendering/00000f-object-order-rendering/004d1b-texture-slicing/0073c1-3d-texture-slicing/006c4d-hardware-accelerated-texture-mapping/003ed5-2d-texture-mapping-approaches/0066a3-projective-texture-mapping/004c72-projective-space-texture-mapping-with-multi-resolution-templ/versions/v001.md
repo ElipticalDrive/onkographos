@@ -1,0 +1,100 @@
+# Projective Space Texture Mapping with Multi-Resolution Templates
+
+Also called: Inverse/Forward Projection Texture Indexing, Plenoptic Surface Texture Mapping, Projective Space Texture, Projective Texture Mapping for Volume, Pseudo-Solid Texturing
+
+## Overview
+Projective Space Texture Mapping with Multi-Resolution Templates is a technique that assigns solid textures to any position within a volume object using a mathematical indexing function, effectively acting as a pseudo-procedure functional model for solid textures [S1, unofficial]. It solves the problem of degrading image quality when interpolating textures to resolutions exceeding that of the texture map by connecting 3D positions in the volume to 2D projective positions on a plenoptic surface, and then to integral coordinates in a morphed texture image [S1, unofficial]. Unlike standard texture mapping which requires explicit UV parameterization, this method uses plenoptic indexing functions to substitute mathematical/procedure models for projective space texturing [S1, unofficial]. It sets itself apart from siblings like [Cabral Texture Mapping](7257-cabral-texture-mapping.md) by explicitly utilizing a multi-resolution intermediate template generated via forward projection (DVR/DSR) and an inverse projection step for rendering, allowing for high-resolution patches to eliminate aliasing artifacts [S1, unofficial].
+
+## How it works
+The method operates in two distinct phases: forward projection to generate a multi-resolution intermediate template (plenoptic surface), and inverse projection to map the morphed texture image onto the volume during rendering.
+
+### Inputs and Outputs
+*   **Inputs:**
+    *   Volume data (scalar field).
+    *   Camera parameters (view direction, origin).
+    *   Plenoptic surface definition defined by continuous variables $u \in [0,1]$ and $v \in [0,1]$ [S1, unofficial].
+    *   Morphed texture image (2D texture map).
+*   **Outputs:**
+    *   Rendered volume image with solid texture applied.
+
+### Data Structures
+*   **Intermediate Template:** A 2D image representing the plenoptic surface. It is stored as a grid of pixels indexed by integral coordinates $(x,y)$.
+*   **Morphed Texture Image:** A 2D texture map containing the solid texture pattern. It is stored as a grid of pixels indexed by coordinates $(u,v)$ in the range $[0,1]$.
+*   **High-Resolution Patch:** A sub-region of the morphed texture image defined by vertices $(u_{a1}, v_{a1})$ and $(u_{a2}, v_{a2})$ where $u_{a1} < u_{a2}$ and $v_{a1} < v_{a2}$ [S1, unofficial].
+
+### Steps
+
+1.  **Define Plenoptic Surface Parameters:**
+    Define the plenoptic surface using two continuous variables $u \in [0,1]$ and $v \in [0,1]$ [S1, unofficial].
+
+2.  **Generate Intermediate Template (Forward Projection):**
+    Use Direct Volume Rendering (DVR) or Direct Surface Rendering (DSR) to generate the intermediate template [S1, unofficial].
+    *   Define resolution intervals for the template:
+        $$ \Delta u = \frac{1}{x_d - 1} $$
+        $$ \Delta v = \frac{1}{y_d - 1} $$
+        where $x_d$ and $y_d$ are the dimensions (width and height) of the intermediate template [S1, unofficial].
+    *   Index pixels in the template by integral coordinate pair $(x,y)$:
+        $$ u = x \cdot \Delta u $$
+        $$ v = y \cdot \Delta v $$
+    *   Adjust the origin and direction of the tracing ray in the forward projection using $u$ and $v$ to generate the template at the desired resolution [S1, unofficial].
+
+3.  **Create Morphed Texture Image:**
+    Warp and morph the source texture into the morphed texture image, ensuring that the texture coordinates correspond to the projective space defined by the plenoptic surface [S1, unofficial].
+
+4.  **Render Volume with Inverse Projection (Texture Mapping):**
+    For each point $p(X,Y,Z)$ in the volume object:
+    *   Determine the 2D projective position $(u,v)$ on the plenoptic surface corresponding to $p(X,Y,Z)$ relative to the centroid position $(O_x, O_y, O_z)$ of the plenoptic primitive [S1, unofficial].
+    *   Map $(u,v)$ to the integral coordinates $(x_a, y_a)$ in the high-resolution patch of the morphed texture image using Equation (2):
+        $$ (x_a, y_a) = \left( \frac{u - u_{a1}}{\Delta u_a}, \frac{v - v_{a1}}{\Delta v_a} \right) $$
+        where $\Delta u_a$ and $\Delta v_a$ are the resolution intervals (width and height) of the high-resolution patch, and $(u,v)$ are the coordinates in the morphed texture image [S1, unofficial].
+    *   Sample the texture value at $(x_a, y_a)$ and assign it to the voxel at $p(X,Y,Z)$ [S1, unofficial].
+
+5.  **Generate High-Resolution Patches (Optional/Advanced):**
+    To improve accuracy for specific regions, generate new high-resolution representations of rectangular areas in the template image [S1, unofficial].
+    *   Define a new rectangular area with positions $(u_1, v_1)$ and $(u_2, v_2)$ where $u_1 < u_2$ and $v_1 < v_2$ [S1, unofficial].
+    *   Calculate new resolution intervals:
+        $$ \Delta u_1 = \frac{1}{x_{d1} - 1} $$
+        $$ \Delta v_1 = \frac{1}{y_{d1} - 1} $$
+        where $x_{d1}$ and $y_{d1}$ are the dimensions of the new high-resolution representation, and $0 \le x \le x_{d1}-1, 0 \le y \le y_{d1}-1$ [S1, unofficial].
+    *   Calculate the new origin of the tracing ray for the forward projection:
+        $$ Origin(u, v) = (u_1 + x_1 \cdot (u_2 - u_1) \cdot \Delta u_1, v_1 + y_1 \cdot (v_2 - v_1) \cdot \Delta v_1) $$
+        where $x_1$ and $y_1$ are the integral coordinates in the new high-resolution representation [S1, unofficial].
+
+### Formulas
+*   **Resolution Intervals (Template):**
+    $$ \Delta u = \frac{1}{x_d - 1}, \quad \Delta v = \frac{1}{y_d - 1} $$
+    [S1, unofficial]
+*   **Pixel Indexing (Template):**
+    $$ u = x \cdot \Delta u, \quad v = y \cdot \Delta v $$
+    [S1, unofficial]
+*   **Texture Coordinate Mapping (Inverse Projection):**
+    $$ (x_a, y_a) = \left( \frac{u - u_{a1}}{\Delta u_a}, \frac{v - v_{a1}}{\Delta v_a} \right) $$
+    [S1, unofficial]
+*   **Ray Origin Adjustment (Forward Projection for High-Res Patch):**
+    $$ Origin(u, v) = (u_1 + x_1 \cdot (u_2 - u_1) \cdot \Delta u_1, v_1 + y_1 \cdot (v_2 - v_1) \cdot \Delta v_1) $$
+    [S1, unofficial]
+
+### Parameters
+*   $x_d, y_d$: Dimensions of the intermediate template. Not given in the sources for typical values, but experiments used 128x128 and 1024x1024 for the morphed texture image [S1, unofficial].
+*   $u, v$: Continuous variables in $[0,1]$ defining the plenoptic surface [S1, unofficial].
+*   $(u_{a1}, v_{a1}), (u_{a2}, v_{a2})$: Vertices of the high-resolution patch in the morphed texture image [S1, unofficial].
+
+### Edge Cases and Pitfalls
+*   **Cliff-effect:** A single pixel projected to a surface almost parallel to the direction of projection is smeared over a relatively large area of solid, introducing alias artifacts due to the finite resolution of the morphed texture image [S1, unofficial].
+*   **Solution:** Use a high-resolution texture image and a high-resolution intermediate template to eliminate cliff-effect alias artifacts reasonably [S1, unofficial]. Experiments showed that a 128x128 morphed texture image exhibited prominent cliff effects, while a 1024x1024 image greatly improved image quality [S1, unofficial].
+*   **Equation Distinction:** Equation (2) is used for projective space texture mapping during volume rendering (inverse projection). Equation (1) is used for adjusting the origin of the tracing ray in DVR/DSR to generate the plenoptic surface (forward projection). They are different and independent texture indexing functions [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** Not given in the sources.
+*   **Strengths:** Avoids degradation of rendered image quality while interpolating texture to resolutions which exceed that of the texture map [S1, unofficial]. Allows texture values to be assigned to any position within the volume object via ray projection [S1, unofficial].
+*   **Limitations:** Finite resolution of the morphed texture image can still degrade quality and introduce alias artifacts (cliff-effect) if not sufficiently high [S1, unofficial].
+*   **When to use:** When solid textures need to be applied to volume objects without explicit UV parameterization, and high-quality anti-aliasing is required [S1, unofficial].
+*   **When not to use:** When computational resources are limited and high-resolution texture maps cannot be afforded [S1, unofficial].
+
+## Background
+The method was introduced in the paper "Texture Mapping Volume Objects" [S1, unofficial]. It builds on the concept of plenoptic functions and solid textures, addressing the intermixing of volume rendering and solid texturing. The approach uses plenoptic indexing functions to substitute mathematical/procedure models for projective space (pseudo-solid) texturing [S1, unofficial]. It is related to earlier work on two-part texture mapping by Bier and Sloan [ES86] and 2.5D rendering and compositing by Froumentin and Willis [FW99] [S1, unofficial]. The technique is particularly relevant for applications involving multi-image-based textures mapping and pixel-level data-dependent interpolation [S1, unofficial].
+
+## Sources
+[S1] Texture Mapping Volume Objects, https://doi.org/10.2312/vvg.20051006, fetched 2026-10-30 (unofficial)

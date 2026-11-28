@@ -1,0 +1,128 @@
+--- v004.md
++++ v005.md
+@@ -10,6 +10,6 @@
+ 
+ ### Inputs and Outputs
+-*   **Input:** Ray origin $p \in \mathbb{R}^3$, ray direction $v \in \mathbb{R}^3$ (normalized, $|v|=1$), SDF query function $f: \mathbb{R}^3 \to \mathbb{R}$, maximum iteration count $i_{max}$, convergence threshold $\epsilon$, and method-specific parameters ($\alpha$, $\omega$, or $\sigma$).
+-*   **Output:** Distance $t \in [0, +\infty)$ traveled along the ray to the surface, or a failure state if $i_{max}$ is exceeded.
++*   **Input:** Ray origin $p \in \mathbb{R}^3$, ray direction $v \in \mathbb{R}^3$ (normalized, $|v|=1$), SDF query function $f: \mathbb{R}^3 \to \mathbb{R}$, maximum iteration count $i_{max}$, convergence threshold $\epsilon$, and method-specific parameters ($\alpha$, $\omega$, or $\sigma$) [S1][S5, S7, unofficial].
++*   **Output:** Distance $t \in [0, +\infty)$ traveled along the ray to the surface, or a failure state if $i_{max}$ is exceeded [S5, S7, unofficial].
+ 
+ ### Data Structures
+@@ -17,26 +17,29 @@
+ *   **Accumulator:** Total distance traveled $t$ [S5, S7, unofficial].
+ 
+-### Algorithm 1: Aggressive / Over-relaxed Marching
+-This variant multiplies the safe step size by a factor $\alpha > 1$ (or $\omega > 1$) to accelerate convergence, particularly for grazing rays [S1][S3, unofficial]. It requires a safety check to prevent skipping the surface if the SDF is non-conservative or the geometry is too thin [S2][S3, unofficial].
++### Algorithm 1: Over-relaxed Marching (Keinert et al.)
++This variant multiplies the safe step size by a factor $\omega > 1$ to accelerate convergence, particularly for grazing rays [S3, unofficial]. It requires a safety check to prevent skipping the surface if the SDF is non-conservative or the geometry is too thin [S3, unofficial].
+ 
+ **Parameters:**
++*   $\omega$: Over-relaxation factor. Value 1.6 [S3, unofficial].
+ *   $\alpha$: Aggressive multiplier. Default 1.5. Range 1.2–1.8 [S1].
+-*   $\omega$: Over-relaxation factor. Value 1.6 [S3, unofficial].
+ *   $\sigma$: Overstepping factor in $[0, 1]$. Typical value $\approx 1.2$ [S2].
+ *   $\lambda$: Global Lipschitz bound of the SDF [S2].
+ 
+-**Steps:**
+-1.  Initialize $t = 0$, $r_{prev} = 0$, $r_{curr} = 0$ [S3, S4, unofficial].
+-2.  Loop while $t < b$ (max distance) and iterations $< i_{max}$:
+-    3.  Query SDF: $d = f(p + t \cdot v)$ [S3, S4, unofficial].
+-    4.  Calculate safe step: $s = |d| / \lambda$ [S2].
+-    5.  Calculate over-step: $o = (1 + \sigma) \cdot s$ [S2].
+-    6.  **Safety Check:** If the over-step $o$ causes the new sphere to not overlap with the previous safe sphere (i.e., the step is too large relative to the local geometry or $d$ is negative/inside), revert to standard sphere tracing step $s$ [S2][S3, unofficial].
+-        *   *Alternative Implementation (Keinert et al.):* Calculate over-relaxed step $step = \omega \cdot |d|$. If $step > |d|$ (overshoots safe radius), retreat to $t + |d|$ (back to safe boundary) [S3, unofficial].
+-    7.  Update position: $t \leftarrow t + step$ [S3, S4, unofficial].
+-    8.  Update history: $r_{prev} \leftarrow r_{curr}$, $r_{curr} \leftarrow d$ [S3, unofficial].
+-    9.  Check convergence: If $|d| < \epsilon$, break and return $t$ [S1].
++```python
++def over_relaxed_sphere_tracing(p, v, f, omega=1.6, max_steps=1024, threshold=1e-5):
++    t = 0.0
++    for _ in range(max_steps):
++        d = f(p + t * v)
++        step = omega * abs(d)
++        # Safety check: retreat if step overshoots the safe radius
++        if step > abs(d):
++            step = abs(d)
++        t += step
++        if abs(d) < threshold:
++            return t
++    return t
++```
+ 
+-### Algorithm 2: Geometric Enhancement (Bálint and Valasek)
++### Algorithm 2: Geometric Enhancement (Bálint & Valasek)
+ This variant assumes the surface is locally flat and calculates the optimal step size using the radii of the two previous unbounding spheres [S5, S7, unofficial]. It is more expensive per step than aggressive marching but converges faster on smooth surfaces [S5, S7, unofficial].
+ 
+@@ -44,23 +47,37 @@
+ *   $\omega$: Relaxation parameter for locally concave regions. Range $\omega \in (0, 1]$ [S5, S7, unofficial]. Typical range $(0.7, 1]$ [S5, unofficial].
+ 
+-**Steps:**
+-1.  Initialize $t = 0$, $r_{i-1} = 0$, $r_i = 0$, $r_{i+1} = \infty$, $d_i = 0$ [S5, S7, unofficial].
+-2.  Loop for $i$ from 0 while $i < i_{max}$ and $r_{i+1}$ is not too small:
+-    3.  **Calculate Step Size:** Compute $d_i$ using the geometric formula derived from similar triangles [S5, S7, unofficial]:
+-        $$ d_i = r_i + \omega \cdot r_i \cdot \frac{d_i - r_{i-1} + r_i}{d_i + r_{i-1} - r_i} $$
+-        *Note: In the first iteration, $r_{i-1}=0, d_i=0$. The formula simplifies or requires a fallback to standard step size $r_i$ for the very first step if division by zero occurs [S5, S7, unofficial].*
+-    4.  **Step:** Advance ray: $t \leftarrow t + d_i$ [S5, S7, unofficial].
+-    5.  **Query:** Evaluate SDF at new position: $r_{i+1} = f(p + t \cdot v)$ [S5, S7, unofficial].
+-    6.  **Safety Check (Fallback):** If the spheres are disjoint ($d_i > r_i + r_{i+1}$), the step was too large and may have missed the surface. Reset step to conservative size: $d_i \leftarrow r_i$ [S5, S7, unofficial].
+-        *   Re-evaluate SDF at the corrected position: $r_{i+1} = f(p + (t_{old} + d_i) \cdot v)$ [S5, S7, unofficial].
+-        *   Update $t$ to reflect the corrected step [S5, S7, unofficial].
+-    7.  **Update History:** Shift values: $r_{i-1} \leftarrow r_i$, $r_i \leftarrow r_{i+1}$ [S5, S7, unofficial].
+-    8.  **Convergence:** If $|r_{i+1}| < \epsilon$, break and return $t$ [S1].
++```python
++def geometric_enhanced_sphere_tracing(p, v, f, omega=0.8, max_steps=1024, threshold=1e-5):
++    t = 0.0
++    r_prev = 0.0
++    r_curr = 0.0
++    r_next = float('inf')
++    d_i = 0.0
++    for i in range(max_steps):
++        if r_next <= threshold:
++            break
++        # Calculate step size using geometric formula
++        if d_i + r_prev - r_curr == 0:
++            d_i = r_curr # Fallback for first step
++        else:
++            d_i = r_curr + omega * r_curr * (d_i - r_prev + r_curr) / (d_i + r_prev - r_curr)
++        t += d_i
++        r_next = f(p + t * v)
++        # Safety check: fallback if spheres are disjoint
++        if d_i > r_curr + r_next:
++            d_i = r_curr
++            t -= d_i # Backtrack
++            t += d_i
++            r_next = f(p + t * v)
++        r_prev = r_curr
++        r_curr = r_next
++    return t
++```
+ 
+ ### Edge Cases and Pitfalls
+ *   **Thin Geometry:** Aggressive marching ($\alpha > 1$) can cause the ray to trespass two surfaces in a single step if the geometry is super thin, leaving the ray front end outside the shape and causing infinite marching or small holes [S1].
+-*   **Non-Conservative SDFs:** Over-relaxation is unsound if the SDF overstates the distance (is not 1-Lipschitz or conservative). It may skip surfaces entirely [S3, S7, unofficial].
++*   **Non-Conservative SDFs:** Over-relaxation is unsound if the SDF overstates the distance (is not 1-Lipschitz or conservative) [S3, unofficial]. The backtrack mechanism ensures a surface is never skipped, provided the field is conservative [S3, S7, unofficial].
+ *   **Non-Smooth Surfaces:** On fractals or non-smooth surfaces (e.g., Mandelbulb), the geometric enhancement provides only marginal improvement over basic sphere tracing, as the "locally flat" assumption fails [S5, unofficial].
+-*   **Grazing Incidence:** Standard sphere tracing is slow when the angle $\theta$ between the ray and surface normal is small. Enhanced methods mitigate this, but aggressive marching requires careful tuning of $\alpha$ to avoid instability [S1].
++*   **Grazing Incidence:** Standard sphere tracing is slow when the angle $\theta$ between the ray and surface normal is small [S1]. Enhanced methods mitigate this, but aggressive marching requires careful tuning of $\alpha$ to avoid instability [S1].
+ 
+ ## Subtopics
+@@ -73,5 +90,5 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Reduces the number of SDF queries significantly compared to standard sphere tracing. For grazing angles, the minimum number of steps $k$ decreases from $k_{std}$ to $k_{enh}$ [S1].
++*   **Time Complexity:** Reduces the number of SDF queries significantly compared to standard sphere tracing [S8, unofficial]. For grazing angles, the minimum number of steps $k$ decreases from $k_{std}$ to $k_{enh}$ [S1].
+     *   Formula for aggressive marching convergence: $k > k_{min} = \frac{\log \epsilon - \log d}{\log |1 - \alpha \sin \theta|}$ [S1].
+     *   Example: For $d=1.0, \epsilon=5 \times 10^{-5}, \theta=10^\circ$, steps decrease from 52 (conventional) to 33 (aggressive $\alpha=1.5$) [S1].
+@@ -81,9 +98,9 @@
+     *   Geometric enhancement (Bálint & Valasek) outperforms relaxed sphere tracing by up to 1.5 times on smooth surfaces and up to 50% better than Hart and Keinert et al.'s variant in error-decrease velocity [S5, S7, unofficial].
+     *   On non-smooth surfaces (Mandelbulb), it performs slightly better than basic tracing but is on par with relaxed tracing within error margins [S5, unofficial].
+-*   **Strengths:** Faster convergence on planar/smooth surfaces; stabilizes training in neural rendering by allowing sampling behind the surface [S1]; prevents geometry vanishing at grazing angles under non-uniform scaling [S3, unofficial].
++*   **Strengths:** Faster convergence on planar/smooth surfaces [S5, S7, unofficial]; stabilizes training in neural rendering by allowing sampling behind the surface [S1]; prevents geometry vanishing at grazing angles under non-uniform scaling [S3, unofficial].
+ *   **Limitations:** Risk of missing thin geometry; requires conservative SDFs; higher computational cost per step for geometric enhancement due to formula evaluation [S5, S7, unofficial].
+ 
+ ## Background
+-Enhanced Sphere Tracing originated from the need to accelerate real-time rendering of implicit surfaces. The "Relaxed Sphere Tracing" variant was introduced by Keinert et al. in 2014, proposing over-relaxation to accelerate convergence [S3, S7, unofficial]. The "Enhanced Sphere Tracing" variant, specifically the geometric approach using historical step data, was proposed by Bálint and Valasek in 2018, optimizing for locally planar surfaces [S5, S7, unofficial]. The aggressive marching strategy was also independently applied in differentiable neural rendering contexts to stabilize training and speed up forward propagation [S1].
++Enhanced Sphere Tracing originated from the need to accelerate real-time rendering of implicit surfaces [S5, unofficial]. The "Relaxed Sphere Tracing" variant was introduced by Keinert et al. in 2014, proposing over-relaxation to accelerate convergence [S3, S7, unofficial]. The "Enhanced Sphere Tracing" variant, specifically the geometric approach using historical step data, was proposed by Bálint and Valasek in 2018, optimizing for locally planar surfaces [S5, S7, unofficial]. The aggressive marching strategy was also independently applied in differentiable neural rendering contexts to stabilize training and speed up forward propagation [S1].
+ 
+ ## Sources

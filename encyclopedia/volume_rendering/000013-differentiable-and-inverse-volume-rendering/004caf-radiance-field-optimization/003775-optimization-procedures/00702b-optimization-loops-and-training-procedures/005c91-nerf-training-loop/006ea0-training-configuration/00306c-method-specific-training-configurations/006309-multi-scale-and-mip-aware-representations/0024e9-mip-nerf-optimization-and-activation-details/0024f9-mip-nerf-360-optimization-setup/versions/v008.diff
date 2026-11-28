@@ -1,0 +1,422 @@
+--- v007.md
++++ v008.md
+@@ -4,61 +4,65 @@
+ 
+ ## Overview
+-Mip-NeRF 360 optimization setup defines the training configuration for unbounded neural radiance fields, specifically addressing the challenges of large-scale, "in-the-wild" scenes with limited video memory. It combines a scene contraction function to warp unbounded space into a finite sphere with a multi-stage proposal network training loop. This method sets itself apart from standard NeRF implementations by explicitly handling unbounded depth distributions and using a stop-gradient-based proposal supervision to stabilize training without requiring additional scaling hyperparameters for the proposal loss.
++Mip-NeRF 360 Optimization Setup defines the training configuration for unbounded neural radiance fields, specifically addressing the challenge of rendering large-scale, "in-the-wild" scenes with limited video memory. It combines a scene contraction function to warp unbounded space into a finite sphere with a multi-stage proposal sampling strategy and a specific loss formulation to ensure training stability and anti-aliasing. It sets itself apart from standard NeRF implementations by explicitly handling unbounded domains through coordinate warping and using a stop-gradient mechanism to decouple proposal network optimization from the final NeRF network [S1, S2].
+ 
+ ## How it works
+-The method consists of two main components: a coordinate warping scheme for unbounded scenes and a specific training loop involving proposal networks.
++The method consists of three main components: coordinate warping for unbounded scenes, a multi-stage proposal sampling architecture, and a composite loss function optimized via Adam.
+ 
+ ### Inputs and Outputs
+-- **Inputs**: Camera poses $\mathbf{P}$, intrinsics, and a set of input images $\mathbf{I}^*$ with corresponding pixel colors $\mathbf{C}^*$.
+-- **Outputs**: A trained NeRF MLP $\Theta_{\text{NeRF}}$ and a trained Proposal MLP $\Theta_{\text{prop}}$ that can render novel views.
++- **Inputs**: Camera poses $\mathbf{P}$, intrinsics, and a set of training images $\mathbf{C}^*$.
++- **Outputs**: A trained NeRF MLP $\Theta_{\text{NeRF}}$ and a trained Proposal MLP $\Theta_{\text{prop}}$ capable of rendering novel views.
+ 
+ ### Data Structures
+ 1.  **Proposal MLP ($\Theta_{\text{prop}}$)**:
+     -   Architecture: 4 layers, 256 hidden units.
+-    -   Activations: ReLU for hidden layers, softplus for density output $\tau$.
++    -   Activations: ReLU for hidden layers, Softplus for density output $\tau$.
+ 2.  **NeRF MLP ($\Theta_{\text{NeRF}}$)**:
+     -   Architecture: 8 layers, 1024 hidden units.
+-    -   Activations: ReLU for hidden layers, softplus for density output $\tau$.
++    -   Activations: ReLU for hidden layers, Softplus for density output $\tau$.
+ 3.  **Scene Warping Function**:
+-    -   Maps 3D coordinates $\mathbf{x}$ to a unit sphere.
++    -   Maps 3D coordinates $\mathbf{x}$ to $\mathbf{x}_{\text{encoding}}$ within a unit sphere.
+ 
+ ### Step-by-Step Procedure
+ 
+-1.  **Scene Warping (Position Encoding)**:
+-    To handle unbounded scenes, input 3D coordinates $\mathbf{x}$ are warped into a finite sphere using the following contract function [S1, S2]:
+-    $$
+-    \mathbf{x}_{\text{encoding}} = \begin{cases} 
++1.  **Coordinate Warping**:
++    For each 3D point $\mathbf{x}$ sampled along a ray, apply the contraction function to map the unbounded scene into a finite domain. Points within the unit sphere remain unchanged; points outside are contracted [S1, S2]:
++    $$
++    \mathbf{x}_{\text{encoding}} = 
++    \begin{cases} 
+     \mathbf{x} & \text{if } \|\mathbf{x}\|_2 \leq 1 \\
+     \left(2 - \frac{1}{\|\mathbf{x}\|_2}\right) \frac{\mathbf{x}}{\|\mathbf{x}\|_2} & \text{if } \|\mathbf{x}\|_2 > 1
+     \end{cases}
+     $$
+-    Points within the unit sphere ($\|\mathbf{x}\|_2 \leq 1$) remain unchanged. Points outside are contracted towards the sphere boundary [S2].
+-
+-2.  **Proposal Network Evaluation and Resampling**:
+-    The proposal network is evaluated in two stages to generate sample distributions [S1]:
+-    -   **Stage 0**: Evaluate $\Theta_{\text{prop}}$ with 64 samples along the ray to produce interval midpoints $\hat{s}_0$ and weights $\hat{w}_0$.
+-    -   **Stage 1**: Resample based on $\hat{w}_0$, evaluate $\Theta_{\text{prop}}$ again with 64 samples to produce $\hat{s}_1$ and $\hat{w}_1$.
+-    These distributions $(\hat{s}_0, \hat{w}_0)$ and $(\hat{s}_1, \hat{w}_1)$ are used to supervise the proposal network.
+-
+-3.  **NeRF Network Evaluation**:
+-    -   **Stage 2**: Resample based on the final proposal distribution (typically $\hat{w}_1$), evaluate $\Theta_{\text{NeRF}}$ with 32 samples to produce final interval midpoints $s$ and weights $w$ [S1].
+-    -   Render the final color $\mathbf{C}(\mathbf{t})$ using the standard volume rendering integral with $(s, w)$.
++    This ensures that distant objects are compressed into the outer region of the unit sphere, allowing the network to model unbounded scenes with bounded memory [S2].
++
++2.  **Proposal Sampling (Two Stages)**:
++    The proposal network is evaluated twice to generate importance sampling distributions.
++    -   **Stage 0**: Sample 64 points uniformly along the ray. Evaluate $\Theta_{\text{prop}}$ to compute densities. Resample 64 points based on these densities to produce interval midpoints $\hat{s}_0$ and weights $\hat{w}_0$.
++    -   **Stage 1**: Sample 64 points uniformly. Evaluate $\Theta_{\text{prop}}$ on these points. Resample 64 points based on the updated densities to produce $\hat{s}_1$ and $\hat{w}_1$.
++    -   These stages refine the sampling distribution to focus on high-density regions [S1].
++
++3.  **NeRF Evaluation (One Stage)**:
++    -   Sample 32 points uniformly along the ray.
++    -   Evaluate $\Theta_{\text{NeRF}}$ to compute final densities and colors.
++    -   Produce final interval midpoints $s$ and weights $w$ [S1].
+ 
+ 4.  **Loss Computation**:
+-    The total loss is the sum of reconstruction loss, a distribution regularizer, and proposal supervision losses [S1]:
++    Compute the total loss $\mathcal{L}$ as the sum of reconstruction, distribution, and proposal losses, averaged over all rays in the batch [S1]:
+     $$
+     \mathcal{L} = \mathcal{L}_{\text{recon}}(\mathbf{C}(\mathbf{t}), \mathbf{C}^*) + \lambda \mathcal{L}_{\text{dist}}(\mathbf{s}, \mathbf{w}) + \sum_{k=0}^1 \mathcal{L}_{\text{prop}}(\mathbf{s}, \mathbf{w}, \hat{\mathbf{s}}^k, \hat{\mathbf{w}}^k)
+     $$
+-    -   $\mathcal{L}_{\text{recon}}$: Charbonnier loss $\sqrt{(x - x^*)^2 + \epsilon^2}$ with $\epsilon = 0.001$ [S1].
+-    -   $\mathcal{L}_{\text{dist}}$: Regularizer balancing data and regularization terms.
+-    -   $\mathcal{L}_{\text{prop}}$: Interlevel loss supervising the proposal network.
+-    -   $\lambda$: Hyperparameter balancing $\mathcal{L}_{\text{recon}}$ and $\mathcal{L}_{\text{dist}}$, set to $0.01$ [S1].
+-    -   The stop-gradient operator is applied to $\mathcal{L}_{\text{prop}}$ with respect to $\Theta_{\text{NeRF}}$, making the optimization of $\Theta_{\text{prop}}$ independent of $\Theta_{\text{NeRF}}$ [S1].
+-
+-5.  **Optimization**:
+-    -   Optimizer: Adam with $\beta_1 = 0.9$, $\beta_2 = 0.999$, $\epsilon = 10^{-6}$ [S1].
+-    -   Learning Rate: Annealed log-linearly from $2 \times 10^{-3}$ to $2 \times 10^{-5}$ over 250k iterations, with a warm-up phase of 512 iterations [S1].
+-    -   Gradient Clipping: Norm clipped to $10^{-3}$ [S1].
+-    -   Batch Size: $2^{14}$ rays [S1].
++    -   **Reconstruction Loss ($\mathcal{L}_{\text{recon}}$)**: Uses the Charbonnier loss for stability:
++        $$
++        \mathcal{L}_{\text{recon}} = \sqrt{(x - x^*)^2 + \epsilon^2}, \quad \epsilon = 0.001
++        $$
++    -   **Distribution Loss ($\mathcal{L}_{\text{dist}}$)**: Regularizes the interval sizes. The hyperparameter $\lambda$ is set to $0.01$ [S1].
++    -   **Proposal Loss ($\mathcal{L}_{\text{prop}}$)**: Supervises the proposal network using the final NeRF output. A **stop-gradient** operation is applied to the NeRF terms in this loss to make the optimization of $\Theta_{\text{prop}}$ independent of $\Theta_{\text{NeRF}}$. No scaling hyperparameter is needed for this term due to the stop-gradient [S1].
++
++5.  **Optimization Loop**:
++    -   **Optimizer**: Adam with $\beta_1 = 0.9$, $\beta_2 = 0.999$, $\epsilon = 10^{-6}$ [S1].
++    -   **Learning Rate**: Annealed log-linearly from $2 \times 10^{-3}$ to $2 \times 10^{-5}$ over 250k iterations. Includes a warm-up phase of 512 iterations [S1].
++    -   **Batch Size**: $2^{14}$ rays [S1].
++    -   **Gradient Clipping**: Norm clipped to $10^{-3}$ [S1].
++    -   **Total Iterations**: 250,000 [S1].
+ 
+ ### Pseudocode
+@@ -67,148 +71,156 @@
+ import numpy as np
+ 
+-def warp_position(x):
+-    """
+-    Warps 3D coordinates into a unit sphere.
+-    x: numpy array of shape (..., 3)
++def warp_coordinate(x):
++    """
++    Warps unbounded 3D coordinates into a unit sphere.
++    Args:
++        x: numpy array of shape (..., 3)
++    Returns:
++        warped_x: numpy array of shape (..., 3)
+     """
+     norm = np.linalg.norm(x, axis=-1, keepdims=True)
+     # Points inside unit sphere are unchanged
++    inside = norm <= 1.0
+     # Points outside are contracted
+-    # Note: The formula uses 2 - 1/||x||. 
+-    # If ||x|| <= 1, return x.
+-    # If ||x|| > 1, return (2 - 1/||x||) * (x / ||x||)
+-    
+-    mask = norm <= 1.0
+-    x_outside = x[~mask]
+-    norm_outside = norm[~mask]
+-    
+-    x_warped = np.zeros_like(x)
+-    x_warped[mask] = x[mask]
+-    
+-    # For outside points: (2 - 1/norm) * (x / norm)
+-    scale = 2.0 - 1.0 / norm_outside.squeeze()
+-    x_warped[~mask] = x_outside * (scale / norm_outside.squeeze())[:, np.newaxis]
+-    
+-    return x_warped
++    outside = ~inside
++    
++    warped_x = np.zeros_like(x)
++    warped_x[inside] = x[inside]
++    
++    # Formula: (2 - 1/||x||) * (x / ||x||)
++    scale = 2.0 - 1.0 / norm[outside]
++    direction = x[outside] / norm[outside]
++    warped_x[outside] = scale * direction
++    
++    return warped_x
+ 
+ def softplus(x):
+-    return np.log1p(np.exp(-np.abs(x))) + np.maximum(x, 0)
+-
+-def evaluate_mlp(mlp_params, x_encoded, t):
+-    """
+-    Evaluates the MLP (Proposal or NeRF) at positions x_encoded along ray t.
+-    Returns densities and colors (if NeRF).
+-    This is a placeholder for the actual MLP forward pass.
+-    """
+-    # Implementation depends on specific MLP architecture
+-    # For Proposal: returns density tau
+-    # For NeRF: returns density tau and color c
+-    pass
+-
+-def volume_render(s, w, colors):
+-    """
+-    Standard volume rendering.
+-    s: interval midpoints
+-    w: interval weights
+-    colors: RGB colors at intervals
+-    """
+-    # C = sum(w * c)
+-    return np.sum(w * colors, axis=-1)
+-
+-def train_mipnerf360(images, poses, num_iterations=250000):
+-    # Initialize Proposal MLP: 4 layers, 256 hidden, ReLU, softplus density
+-    theta_prop = init_mlp(layers=4, hidden=256, activation='relu', density_activation='softplus')
+-    
+-    # Initialize NeRF MLP: 8 layers, 1024 hidden, ReLU, softplus density
+-    theta_nerf = init_mlp(layers=8, hidden=1024, activation='relu', density_activation='softplus')
+-    
+-    # Optimizer setup
+-    optimizer = Adam(lr=2e-3, beta1=0.9, beta2=0.999, eps=1e-6)
+-    
+-    # Learning rate schedule parameters
++    """Numerically stable softplus activation."""
++    return np.logaddexp(0, x)
++
++def charbonnier_loss(pred, target, epsilon=0.001):
++    """Charbonnier loss for reconstruction."""
++    return np.sqrt((pred - target)**2 + epsilon**2)
++
++def train_mipnerf360(training_data, num_iterations=250000):
++    """
++    Simulates the training loop for Mip-NeRF 360.
++    """
++    # Hyperparameters
+     lr_start = 2e-3
+     lr_end = 2e-5
+     warmup_iters = 512
+-    total_iters = num_iterations
+-    
+-    for i in range(total_iters):
+-        # 1. Sample rays and get poses
+-        rays, gt_colors = sample_batch(poses, images)
+-        
+-        # 2. Compute learning rate
++    beta1, beta2, eps_adam = 0.9, 0.999, 1e-6
++    lambda_dist = 0.01
++    grad_clip_norm = 1e-3
++    
++    # Initialize networks
++    # Proposal MLP: 4 layers, 256 hidden, ReLU + Softplus
++    theta_prop = initialize_proposal_mlp() 
++    # NeRF MLP: 8 layers, 1024 hidden, ReLU + Softplus
++    theta_nerf = initialize_nerf_mlp()
++    
++    # Adam state
++    m_prop, v_prop = init_adam_state(theta_prop)
++    m_nerf, v_nerf = init_adam_state(theta_nerf)
++    
++    for i in range(num_iterations):
++        # 1. Learning Rate Schedule
+         if i < warmup_iters:
+             lr = lr_start * (i / warmup_iters)
+         else:
+             # Log-linear annealing
+-            # log_lr = log_start + (log_end - log_start) * ((i - warmup_iters) / (total_iters - warmup_iters))
+-            log_lr_start = np.log(lr_start)
+-            log_lr_end = np.log(lr_end)
+-            progress = (i - warmup_iters) / (total_iters - warmup_iters)
+-            lr = np.exp(log_lr_start + (log_lr_end - log_lr_start) * progress)
+-        
+-        optimizer.set_lr(lr)
+-        
+-        # 3. Warp positions
+-        # x is the 3D position along the ray
+-        x_warped = warp_position(rays.x)
+-        
+-        # 4. Proposal Network Evaluation (Stage 0)
+-        # Sample 64 points
+-        s0, w0 = sample_and_evaluate_proposal(theta_prop, x_warped, rays.t, num_samples=64)
+-        
+-        # 5. Proposal Network Evaluation (Stage 1)
+-        # Resample based on w0, evaluate again
+-        s1, w1 = sample_and_evaluate_proposal(theta_prop, x_warped, rays.t, num_samples=64, weights=w0)
+-        
+-        # 6. NeRF Network Evaluation
+-        # Resample based on w1 (final proposal), evaluate NeRF
+-        s, w, colors = sample_and_evaluate_nerf(theta_nerf, x_warped, rays.t, num_samples=32, weights=w1)
+-        
+-        # 7. Render Color
+-        c_rendered = volume_render(s, w, colors)
+-        
+-        # 8. Compute Losses
++            progress = (i - warmup_iters) / (num_iterations - warmup_iters)
++            lr = lr_start * (lr_end / lr_start) ** progress
++            
++        # 2. Sample Batch of Rays
++        rays = sample_rays(batch_size=2**14)
++        
++        # 3. Forward Pass: Proposal Stage 0
++        # Sample 64 uniform points per ray
++        t0 = sample_uniform(rays, num_samples=64)
++        x0 = get_point_on_ray(rays, t0)
++        x0_warped = warp_coordinate(x0)
++        
++        # Evaluate Proposal MLP
++        densities0 = evaluate_mlp(theta_prop, x0_warped, activation='softplus')
++        # Resample 64 points based on densities0
++        t0_resampled = resample_importance(t0, densities0, num_samples=64)
++        x0_resampled = get_point_on_ray(rays, t0_resampled)
++        x0_resampled_warped = warp_coordinate(x0_resampled)
++        densities0_resampled = evaluate_mlp(theta_prop, x0_resampled_warped, activation='softplus')
++        
++        # Compute proposal histogram 0: (s_hat_0, w_hat_0)
++        s_hat_0, w_hat_0 = compute_histogram(t0_resampled, densities0_resampled)
++        
++        # 4. Forward Pass: Proposal Stage 1
++        # Sample 64 uniform points per ray
++        t1 = sample_uniform(rays, num_samples=64)
++        x1 = get_point_on_ray(rays, t1)
++        x1_warped = warp_coordinate(x1)
++        
++        # Evaluate Proposal MLP
++        densities1 = evaluate_mlp(theta_prop, x1_warped, activation='softplus')
++        # Resample 64 points based on densities1
++        t1_resampled = resample_importance(t1, densities1, num_samples=64)
++        x1_resampled = get_point_on_ray(rays, t1_resampled)
++        x1_resampled_warped = warp_coordinate(x1_resampled)
++        densities1_resampled = evaluate_mlp(theta_prop, x1_resampled_warped, activation='softplus')
++        
++        # Compute proposal histogram 1: (s_hat_1, w_hat_1)
++        s_hat_1, w_hat_1 = compute_histogram(t1_resampled, densities1_resampled)
++        
++        # 5. Forward Pass: NeRF Evaluation
++        # Sample 32 uniform points per ray
++        t_nerf = sample_uniform(rays, num_samples=32)
++        x_nerf = get_point_on_ray(rays, t_nerf)
++        x_nerf_warped = warp_coordinate(x_nerf)
++        
++        # Evaluate NeRF MLP
++        densities_nerf = evaluate_mlp(theta_nerf, x_nerf_warped, activation='softplus')
++        # Compute final histogram: (s, w)
++        s, w = compute_histogram(t_nerf, densities_nerf)
++        
++        # Render final color C(t) from NeRF
++        C_pred = render_volume(rays, t_nerf, densities_nerf, theta_nerf)
++        C_target = get_target_color(rays)
++        
++        # 6. Loss Calculation
+         # Reconstruction Loss (Charbonnier)
+-        epsilon = 0.001
+-        l_recon = np.sqrt((c_rendered - gt_colors)**2 + epsilon**2)
+-        
+-        # Distribution Regularizer
+-        l_dist = compute_distribution_regularizer(s, w)
+-        
+-        # Proposal Loss (with stop-gradient on NeRF outputs)
+-        # L_prop compares (s, w) from NeRF with (s_hat, w_hat) from Proposal
+-        # Note: In the paper, L_prop uses the NeRF's (s, w) and Proposal's (s_hat, w_hat)
+-        # The stop-gradient is applied to the NeRF part of the loss calculation for proposal update
+-        l_prop_0 = compute_interlevel_loss(s, w, s0, w0)
+-        l_prop_1 = compute_interlevel_loss(s, w, s1, w1)
+-        
+-        # Total Loss
+-        lambda_dist = 0.01
+-        loss = np.mean(l_recon) + lambda_dist * np.mean(l_dist) + np.mean(l_prop_0) + np.mean(l_prop_1)
+-        
+-        # 9. Backpropagation
+-        # Gradient clipping
+-        grads = compute_gradients(loss, theta_nerf, theta_prop)
+-        grads = clip_gradients(grads, max_norm=1e-3)
+-        
+-        optimizer.step(theta_nerf, grads['nerf'])
+-        optimizer.step(theta_prop, grads['prop'])
++        L_recon = np.mean(charbonnier_loss(C_pred, C_target))
++        
++        # Distribution Loss (regularizer on interval sizes)
++        L_dist = compute_distribution_loss(s, w)
++        
++        # Proposal Loss (using stop-gradient on NeRF terms)
++        # L_prop compares (s, w) from NeRF with (s_hat_k, w_hat_k) from Proposal
++        # Note: Gradients for L_prop flow to theta_prop only, not theta_nerf
++        L_prop_0 = compute_proposal_loss(s, w, s_hat_0, w_hat_0, stop_grad_nerf=True)
++        L_prop_1 = compute_proposal_loss(s, w, s_hat_1, w_hat_1, stop_grad_nerf=True)
++        
++        L_total = L_recon + lambda_dist * L_dist + L_prop_0 + L_prop_1
++        
++        # 7. Backpropagation and Update
++        # Compute gradients
++        grad_prop = compute_gradients(L_prop_0 + L_prop_1, theta_prop) # L_recon and L_dist do not depend on theta_prop
++        grad_nerf = compute_gradients(L_recon + lambda_dist * L_dist + L_prop_0 + L_prop_1, theta_nerf)
++        
++        # Gradient Clipping
++        grad_prop = clip_gradients(grad_prop, grad_clip_norm)
++        grad_nerf = clip_gradients(grad_nerf, grad_clip_norm)
++        
++        # Adam Update for Proposal
++        theta_prop, m_prop, v_prop = adam_update(theta_prop, grad_prop, m_prop, v_prop, lr, beta1, beta2, eps_adam)
++        
++        # Adam Update for NeRF
++        theta_nerf, m_nerf, v_nerf = adam_update(theta_nerf, grad_nerf, m_nerf, v_nerf, lr, beta1, beta2, eps_adam)
++
++    return theta_nerf, theta_prop
+ ```
+ 
+-### Parameters
+--   **Proposal MLP**: 4 layers, 256 hidden units, ReLU, softplus density [S1].
+--   **NeRF MLP**: 8 layers, 1024 hidden units, ReLU, softplus density [S1].
+--   **Samples per Stage**: Proposal stages use 64 samples; NeRF stage uses 32 samples [S1].
+--   **Lambda ($\lambda$)**: 0.01 [S1].
+--   **Charbonnier Epsilon ($\epsilon$)**: 0.001 [S1].
+--   **Adam Hyperparameters**: $\beta_1 = 0.9$, $\beta_2 = 0.999$, $\epsilon = 10^{-6}$ [S1].
+--   **Learning Rate**: $2 \times 10^{-3}$ to $2 \times 10^{-5}$, warm-up 512 iterations [S1].
+--   **Gradient Clip Norm**: $10^{-3}$ [S1].
+--   **Total Iterations**: 250k [S1].
+-
+ ### Edge Cases and Pitfalls
+--   **Z-aliasing**: The standard interlevel loss can cause the proposal network to learn non-smooth mappings, leading to "skipped" scene content, especially with high-capacity backends like iNGP [S3]. This is mitigated by using smooth proposal supervision (see Subtopics).
+--   **Unbounded Depth**: Without warping, large scenes require excessive memory. The contraction function ensures all points are mapped to a unit sphere, but care must be taken with points exactly on the boundary $\|\mathbf{x}\|_2 = 1$ [S2].
+--   **Proposal Independence**: The stop-gradient on $\mathcal{L}_{\text{prop}}$ is critical. Without it, the NeRF gradients would interfere with the proposal network's ability to learn accurate sampling distributions [S1].
++-   **Z-aliasing**: The standard interlevel loss can cause the proposal network to learn non-smooth mappings, leading to rays "skipping" scene content. This is particularly prevalent with high-capacity backends like iNGP [S3].
++-   **Precision**: The Charbonnier loss parameter $\epsilon=0.001$ is critical for stable optimization compared to MSE [S1].
++-   **Boundary Conditions**: The warping function is continuous at $\|\mathbf{x}\|_2 = 1$, but gradients must be handled carefully during backpropagation through the conditional logic [S2].
+ 
+ ## Subtopics
+@@ -226,28 +238,14 @@
+ A method for robust view synthesis of long video sequences by dynamically allocating new local radiance fields as the camera trajectory extends, preventing global failure from pose outliers and maintaining high resolution around the camera path.
+ 
+-### Smooth Proposal Supervision
+-A method to resolve 'z-aliasing' artifacts in proposal networks by replacing the discrete interlevel loss with a continuous, smooth loss function that penalizes partial overlaps between proposal and NeRF histograms [S3]. The original Mip-NeRF 360 interlevel loss assigns equivalent loss to NeRF and proposal histogram bins regardless of overlap extent, penalizing only complete failures to overlap, leading to non-smooth density maps [S3]. The new loss prevents the proposal network from learning non-smooth mappings that occur with the previous loss, particularly when the proposal network has high capacity (e.g., iNGP backend) [S3].
+-
+-### MipNeRF-360 Depth Rendering
+-An unbounded extension of MipNeRF that uses a contract function to parameterize 3D Euclidean space within a ball of radius 2, allowing direct rendering of images and depth maps in the contracted space [S4]. Images and depth maps are rendered in the contracted space using standard NeRF equations [S4].
+-
+-### Simple Multi-Space Radiance Field (Ablation Variant)
+-A simplified module that outputs K scalars and K RGB-G vectors (4 dimensions: 3 RGB + 1 gating scaler) without efficient multi-space composition strategy, leading to over-smoothing [S5]. Rendering uses the same integral equation as NeRF to accumulate the K RGB-G vectors and get the RGB-G maps of each sub-space. The RGB-G maps are split into RGB maps and sub-space composition maps (gating maps). Softmax is applied over the gating maps along the sub-space channels and used as the weight to compose sub-space RGB maps to form the final rendering results [S5]. K is set to 8 [S5]. The lack of an efficient multi-space composition strategy introduces an over-smoothing problem [S5].
+-
+-### Mip-NeRF360 Evaluation Configuration
+-Uses the scene warping scheme identical to DVGO and Mip-NeRF360 [S6]. Keeps other components (positional encoding, point sampling, etc.) identical to TensoRF [S6]. Uses 2 scales [S6]. Mip-NeRF360 results on the dataset: garden PSNR 24.13, room PSNR 28.11, Model Size avg 12.6MB [S6].
+-
+-### MipNeRF-360 Distillation Mode
+-Implementing the MipNeRF-360 distillation mode replaces the default settings with a light proposal MLP, reducing training and inference time [S7, unofficial]. The distillation mode runs 30% faster in training and 40% faster in inference than default settings, with a PSNR drop of 0.33 [S7, unofficial].
+-
+ ## Operating characteristics
+--   **Time Complexity**: The multi-stage proposal network adds overhead compared to single-stage NeRF, but the efficient sampling reduces the number of NeRF evaluations. The distillation mode variant reduces training time by 30% and inference time by 40% [S7, unofficial].
+--   **Memory Complexity**: The scene warping allows handling of unbounded scenes within limited video memory by contracting the space into a unit sphere [S2]. Model size for standard Mip-NeRF 360 scenes is approximately 12.6MB [S6].
+--   **Performance**: On the Mip-NeRF 360 dataset, the method achieves PSNR of 24.13 on the garden scene and 28.11 on the room scene [S6].
+--   **Strengths**: Robust to large-scale, unbounded scenes; stable training with proposal networks; anti-aliased rendering.
+--   **Limitations**: Requires careful tuning of the contraction function; proposal network training can be sensitive to the interlevel loss formulation (z-aliasing) [S3].
++-   **Time Complexity**: The multi-stage proposal sampling (2 stages for proposal, 1 for NeRF) increases per-iteration cost compared to single-stage NeRF, but improves convergence speed by focusing samples on relevant geometry.
++-   **Memory Complexity**: The scene warping allows unbounded scenes to be rendered with bounded memory, as distant geometry is compressed into the unit sphere. However, the large NeRF MLP (8 layers, 1024 units) requires significant VRAM [S1].
++-   **Performance**: On the Mip-NeRF 360 dataset, the method achieves high PSNR (e.g., 24.13 on Garden, 28.11 on Room) with a model size of approximately 12.6MB [S6].
++-   **Distillation Mode**: Using a lighter proposal MLP reduces training time by 30% and inference time by 40%, with a PSNR drop of only 0.33 [S7, unofficial].
++-   **Strengths**: Robust to large-scale scenes, stable optimization via Charbonnier loss and stop-gradient, effective anti-aliasing.
++-   **Limitations**: Requires careful tuning of the warping function and learning rate schedule; potential for z-aliasing artifacts if the proposal network is too powerful without smooth supervision [S3].
+ 
+ ## Background
+-Mip-NeRF 360 was introduced by Mildenhall et al. in 2022 [S1]. It extends the original mip-NeRF by handling unbounded scenes and "in-the-wild" photo collections. The optimization setup described here is based on the implementation details provided in the original paper [S1]. The scene warping technique has been adopted by other methods such as Gaussian Position Encoding [S2] and Strivec [S6].
++Mip-NeRF 360 was introduced by Barron et al. in 2022 to address the limitations of NeRF in handling unbounded, "in-the-wild" scenes [S1]. The method builds on the concept of mip-NeRF (anti-aliasing via conical frustums) and extends it with a scene contraction function to handle large spatial extents [S1, S2]. It has become a standard baseline for unbounded NeRF training, influencing subsequent methods like Zip-NeRF and various Gaussian Splatting adaptations for urban scenes [S2, S3].
+ 
+ ## Sources

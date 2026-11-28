@@ -1,0 +1,297 @@
+--- v003.md
++++ v004.md
+@@ -1,5 +1,5 @@
+ # Standard Volume Shader Implementation
+ 
+-Also called: RS Volume, Redshift Volume, Redshift Volume Shader
++Also called: RS Volume, Redshift Standard Volume, Redshift Volume, Redshift Volume Shader, Standard Volume, Standard Volume Shader
+ 
+ ## Overview
+@@ -14,171 +14,137 @@
+ 
+ ### Data Structures
+-The volume data is stored in GPU memory as a collection of grids. Each grid corresponds to a channel in the OpenVDB file [S1].
+-*   **Grid Layout:** A 3D array of voxels.
+-*   **Channel Data:** Scalar values per voxel.
+-    *   **Density Channel:** Scalar description of particle count per voxel versus empty space [S2, unofficial][S3].
+-    *   **Temperature Channel:** Scalar value representing heat, used for emission [S1].
+-*   **Shader Parameters:**
+-    *   `scatter_channel_name`: String identifying the density channel [S1].
+-    *   `emission_channel_name`: String identifying the temperature channel [S1].
+-    *   `scatter_color`: RGB albedo of suspended particles [S2, unofficial][S3].
+-    *   `transparency_color`: RGB mean free path values (0 to 1) [S2, unofficial][S3].
+-    *   `depth`: Float multiplier converting transparency color to real-world distance in centimeters [S2, unofficial][S3].
+-    *   `anisotropy`: Float controlling scattering directionality [S2, unofficial][S3].
+-    *   `scatter_coefficient`: Float scaling brightness [S1].
+-    *   `absorption_coefficient`: Float scaling opacity [S1].
+-    *   `emission_mode`: Enum (`Color Ramp` or `Blackbody`) [S1].
+-    *   `emission_ramp`: Gradient mapping channel values to emissive colors [S1].
+-    *   `blackbody_temperature`: Float in Kelvin (default 6500K) [S1].
+-    *   `blackbody_offset`: Float interpolating intensity (default 1.0) [S1].
++Volume data is stored entirely in GPU memory as OpenVDB grids [S1]. OpenVDB files store voxels (3D pixels) organized in named channels [S1]. The density channel provides a scalar description of particle count per voxel versus empty space [S2, unofficial][S3]. The temperature channel provides a scalar value representing heat for emission [S1]. Shader parameters include `scatter_channel_name` and `emission_channel_name` strings to map OpenVDB channels [S1], `scatter_color` (RGB albedo) [S2, unofficial][S3], `transparency_color` (RGB mean free path, 0 to 1) [S2, unofficial][S3], `depth` (float multiplier converting transparency color to real distances in centimeters) [S2, unofficial][S3], `anisotropy` (float controlling scattering directionality) [S2, unofficial][S3], `scatter_coefficient` (float scaling brightness) [S1], `absorption_coefficient` (float scaling opacity) [S1], `emission_mode` (enum: `Color Ramp` or `Blackbody`) [S1], `emission_ramp` (gradient mapping channel values to emissive colors) [S1], `blackbody_temperature` (float in Kelvin, default 6500K) [S1], and `blackbody_offset` (float interpolating intensity, default 1.0) [S1].
+ 
+ ### Steps
+ 
+ 1.  **Initialization:**
+-    *   Load the OpenVDB file into GPU memory. If the data exceeds available VRAM, abort rendering [S1].
+-    *   Identify the channels specified by `scatter_channel_name` and `emission_channel_name`. If these are not set or do not exist, the volume renders as black/empty [S1].
+-    *   Verify the presence of at least one light with `volume contribution scale > 0.0`. If absent, render black [S1].
++    *   Load the OpenVDB file into GPU memory; abort rendering if VRAM is exceeded [S1].
++    *   Identify channels via `scatter_channel_name` and `emission_channel_name`; volume renders black if unset or missing [S1].
++    *   Verify at least one light with `volume contribution scale > 0.0`; volume renders black if absent [S1].
+ 
+ 2.  **Ray Marching:**
+-    *   For each pixel, cast a ray into the scene.
+-    *   Determine the entry and exit points of the ray within the volume bounding box [S2, unofficial][S3].
+-    *   Step through the volume along the ray direction. The step size is determined by the voxel resolution or a fixed march step [S2, unofficial][S3].
+-    *   At each step position $P$, sample the density grid to obtain the scalar density value $d$ [S2, unofficial][S3].
++    *   For each pixel, cast a ray into the scene [G].
++    *   Compute entry and exit points within the volume bounding box [G].
++    *   Step through the volume along the ray direction, sampling the density grid at each position to obtain scalar density $d$ [S2, unofficial][S3].
+ 
+-3.  **Optical Property Calculation:**
+-    *   **Scattering Coefficient ($\sigma_s$):**
+-        $$ \sigma_s = d \cdot \text{scatter\_coefficient} $$
+-        [S1]
+-    *   **Absorption Coefficient ($\sigma_a$):**
+-        $$ \sigma_a = d \cdot \text{absorption\_coefficient} $$
+-        [S1]
+-    *   **Total Extinction Coefficient ($\sigma_t$):**
+-        $$ \sigma_t = \sigma_s + \sigma_a $$
+-        [G] (Standard radiative transfer definition implied by coefficients)
+-    *   **Single Scattering Albedo ($\omega_0$):**
+-        $$ \omega_0 = \frac{\sigma_s}{\sigma_t} $$
+-        [G] (Derived from coefficients)
+-    *   **Phase Function ($p(\Omega_i \to \Omega_o)$):**
+-        *   If `anisotropy` $\neq 0$, use Henyey-Greenstein (default) or Jendersie-d’Eon (for cloud-like water) [S2, unofficial][S3].
+-        *   If `anisotropy` $= 0$, use isotropic scattering [S2, unofficial][S3].
++3.  **Optical Properties:**
++    *   Compute scattering coefficient: $\sigma_s = d \cdot \text{scatter\_coefficient}$ [S1].
++    *   Compute absorption coefficient: $\sigma_a = d \cdot \text{absorption\_coefficient}$ [S1].
++    *   Compute total extinction: $\sigma_t = \sigma_s + \sigma_a$ [G].
++    *   Compute single scattering albedo: $\omega_0 = \sigma_s / \sigma_t$ [G].
++    *   Evaluate phase function using Henyey-Greenstein (default) or Jendersie-d’Eon for cloud-like water media based on `anisotropy` [S2, unofficial][S3].
+ 
+ 4.  **Emission Calculation:**
+-    *   Sample the temperature channel at $P$ to get value $T_{val}$ [S1].
+-    *   If `emission_mode` is `Color Ramp`:
+-        *   Map $T_{val}$ through the `emission_ramp` to get emissive color $L_e$ [S1].
+-    *   If `emission_mode` is `Blackbody`:
+-        *   Calculate blackbody radiance $L_{bb}$ based on `blackbody_temperature` [S1].
+-        *   Interpolate between channel value and calculated radiance using `blackbody_offset` [S1].
+-        *   $L_e = \text{lerp}(T_{val}, L_{bb}, \text{blackbody\_offset})$ [G] (Interpretation of "interpolates... between channel value and calculated radiance")
++    *   Sample temperature channel at current position to get $T_{val}$ [S1].
++    *   If `emission_mode` is `Color Ramp`, map $T_{val}$ through `emission_ramp` to get $L_e$ [S1].
++    *   If `emission_mode` is `Blackbody`, calculate blackbody radiance $L_{bb}$ from `blackbody_temperature` [S1].
++    *   Interpolate between channel value and radiance using `blackbody_offset`: $L_e = \text{lerp}(T_{val}, L_{bb}, \text{blackbody\_offset})$ [G].
+ 
+ 5.  **Transmittance and Color Accumulation:**
+-    *   Initialize transmittance $T = 1.0$ and accumulated color $C = 0.0$ [G] (Standard volume rendering integral setup).
++    *   Initialize transmittance $T = 1.0$ and accumulated color $C = 0.0$ [G].
+     *   For each step of length $\Delta s$:
+-        *   Calculate optical depth for the step: $\tau = \sigma_t \cdot \Delta s$ [G].
+-        *   Calculate transmittance through the step: $t = e^{-\tau}$ [G].
+-        *   Calculate emitted and scattered light contribution:
+-            $$ C_{step} = T \cdot (L_e + \sigma_s \cdot \text{incident\_light} \cdot p(\dots)) $$
+-            [G] (Simplified single-bounce approximation; multiple scattering is handled via "Shadow Density Scale" trick or more complex integration not fully detailed in sources) [S1][S2, unofficial].
++        *   Compute optical depth: $\tau = \sigma_t \cdot \Delta s$ [G].
++        *   Compute transmittance through step: $t = e^{-\tau}$ [G].
++        *   Compute step contribution: $C_{step} = T \cdot (L_e + \sigma_s \cdot L_{incident} \cdot p(\Omega_i \to \Omega_o))$ [G].
+         *   Update accumulated color: $C = C + C_{step} \cdot t$ [G].
+         *   Update transmittance: $T = T \cdot t$ [G].
+-        *   If $T < \epsilon$ (threshold), break loop [G].
+-    *   Final pixel color contribution: $C_{final} = C + T \cdot C_{background}$ [G].
++        *   Break if $T < \epsilon$ [G].
++    *   Final pixel color: $C_{final} = C + T \cdot C_{background}$ [G].
+ 
+-6.  **Wavelength-Dependent Absorption (Transparency Color):**
++6.  **Wavelength-Dependent Absorption:**
+     *   The `transparency_color` defines the mean free path for each wavelength [S2, unofficial][S3].
+-    *   Let $M_{rgb}$ be the `transparency_color` vector (values 0 to 1) [S2, unofficial][S3].
+-    *   Let $D$ be the `depth` parameter (real distance in cm) [S2, unofficial][S3].
+-    *   The effective mean free path for each channel is $m_{rgb} = M_{rgb} \cdot D$ [S2, unofficial][S3].
+-    *   The absorption coefficient for each wavelength is inversely proportional to the mean free path: $\sigma_{a, rgb} = \frac{1}{m_{rgb}} \cdot d$ [G] (Derived from "mean free path... average distance... before being extinguished" and "density grid... scalar description") [S2, unofficial][S3].
+-    *   *Note:* Sources state that `transparency_color` is an "artist friendly encoding" and `depth` multiplies these 0-1 values into real distances [S2, unofficial][S3]. The exact formula for integrating this into $\sigma_a$ alongside `absorption_coefficient` is not explicitly given, but the physical effect is that different wavelengths are absorbed at different rates, causing tinting [S2, unofficial][S3].
++    *   The `depth` parameter multiplies these 0 to 1 values into real distances in centimeters [S2, unofficial][S3].
++    *   Different wavelengths are absorbed at different rates, causing light traveling far through the medium to be tinted with the opposite of the transparency color once other wavelengths are exhausted [S2, unofficial][S3].
+ 
+ ### Pseudocode
+ 
+ ```python
+-def render_volume_ray(ray_origin, ray_direction, volume_data, shader_params):
+-    """
+-    Renders a single ray through a volume using the Standard Volume Shader logic.
+-    """
+-    # 1. Check for lights
+-    if not has_volume_affecting_lights():
+-        return Color(0, 0, 0)
++import math
+ 
+-    # 2. Initialize accumulation
++def intersect_aabb(origin, direction, bbox_min, bbox_max):
++    """Returns (t_min, t_max) for ray-AABB intersection."""
++    t_min, t_max = 0.0, float('inf')
++    for i in range(3):
++        inv_d = 1.0 / direction[i] if direction[i] != 0 else float('inf')
++        t1 = (bbox_min[i] - origin[i]) * inv_d
++        t2 = (bbox_max[i] - origin[i]) * inv_d
++        t_near = t1 if t1 < t2 else t2
++        t_far = t2 if t1 < t2 else t1
++        if t_near > t_min: t_min = t_near
++        if t_far < t_max: t_max = t_far
++    return t_min, t_max
++
++def render_volume_shader(ray_origin, ray_direction, volume_bbox, density_grid, temp_grid, voxel_size, params):
++    # 1. Light requirement check
++    if not params.get('has_volume_light', False):
++        return (0.0, 0.0, 0.0)
++
++    # 2. Ray-AABB intersection
++    t_min, t_max = intersect_aabb(ray_origin, ray_direction, volume_bbox[0], volume_bbox[1])
++    if t_min > t_max or t_max < 0.0:
++        return params.get('background_color', (0.0, 0.0, 0.0))
++
++    # 3. Initialization
+     transmittance = 1.0
+-    accumulated_color = Color(0, 0, 0)
+-    
+-    # 3. Determine march bounds
+-    entry_point, exit_point = intersect_volume_bbox(ray_origin, ray_direction, volume_data.bbox)
+-    if entry_point is None:
+-        return ray_background_color(ray_direction)
++    accumulated_color = [0.0, 0.0, 0.0]
++    current_t = t_min
++    step_size = params.get('step_size', voxel_size)
++    max_steps = params.get('max_steps', 1000)
+ 
+-    # 4. Ray march
+-    current_pos = entry_point
+-    step_size = volume_data.voxel_size # Or fixed step
+-    max_steps = 1000 # Safety limit
+-    
+-    for i in range(max_steps):
+-        if current_pos > exit_point:
++    # 4. Ray Marching Loop
++    for _ in range(max_steps):
++        if current_t > t_max:
+             break
+-            
+-        # Sample density
+-        density = volume_data.sample_density(current_pos)
+-        
+-        # Skip empty space
++
++        # Sample grids at current position [G]
++        pos = (ray_origin[0] + ray_direction[0] * current_t,
++               ray_origin[1] + ray_direction[1] * current_t,
++               ray_origin[2] + ray_direction[2] * current_t)
++        density = density_grid.sample(pos)
++        temp_val = temp_grid.sample(pos)
++
+         if density < 1e-6:
+-            current_pos += ray_direction * step_size
++            current_t += step_size
+             continue
+-            
+-        # Calculate coefficients
+-        sigma_s = density * shader_params.scatter_coefficient
+-        sigma_a_base = density * shader_params.absorption_coefficient
+-        
+-        # Apply wavelength-dependent absorption from transparency color
+-        # transparency_color (0-1) * depth (cm) = mean_free_path (cm)
+-        # sigma_a_wavelength = 1 / mean_free_path * density_factor?
+-        # Sources say transparency_color encodes mean free path.
+-        # Let's assume sigma_a is modified by transparency color ratios.
+-        # Simplified: sigma_a_total = sigma_a_base * (1 / transparency_color_effective)
+-        # But sources say "transparency color... represents travel distance".
+-        # We will apply the tinting effect via transmittance per channel.
+-        
+-        sigma_t = sigma_s + sigma_a_base
+-        
++
++        # 5. Optical Properties
++        sigma_s = density * params['scatter_coefficient']
++        sigma_a = density * params['absorption_coefficient']
++        sigma_t = sigma_s + sigma_a
++        omega_0 = sigma_s / sigma_t if sigma_t > 0 else 0.0
++
+         # Phase function
+-        phase = evaluate_phase_function(shader_params.anisotropy, ray_direction, light_direction)
+-        
+-        # Emission
+-        temp_val = volume_data.sample_temperature(current_pos)
+-        if shader_params.emission_mode == 'Color Ramp':
+-            emission_color = shader_params.emission_ramp.map(temp_val)
++        anisotropy = params.get('anisotropy', 0.0)
++        if anisotropy == 0.0:
++            phase = 1.0 / (4.0 * math.pi)
++        else:
++            # Henyey-Greenstein or Jendersie-d’Eon based on anisotropy [S2, unofficial][S3]
++            cos_theta = 0.5 # Placeholder for actual scattering angle
++            g = anisotropy
++            phase = (1.0 - g**2) / (4.0 * math.pi * (1.0 + g**2 - 2.0 * g * cos_theta)**1.5)
++
++        # 6. Emission
++        if params['emission_mode'] == 'Color Ramp':
++            emission_color = params['emission_ramp'].map(temp_val)
+         else: # Blackbody
+-            bb_radiance = blackbody_radiance(shader_params.blackbody_temperature)
+-            emission_color = lerp(temp_val, bb_radiance, shader_params.blackbody_offset)
+-            
+-        # Incident light (simplified single scattering)
+-        incident_light = get_light_contribution(current_pos, ray_direction, volume_data)
+-        
+-        # Contribution
+-        # L_step = T * (E + sigma_s * L_inc * phase)
+-        # Note: Multiple scattering is approximated or handled by Shadow Density Scale
+-        step_contribution = transmittance * (emission_color + sigma_s * incident_light * phase)
+-        
+-        accumulated_color += step_contribution * exp(-sigma_t * step_size)
+-        transmittance *= exp(-sigma_t * step_size)
+-        
++            bb_radiance = params['blackbody_temperature']
++            emission_color = (temp_val + bb_radiance * params['blackbody_offset']) / 2.0
++
++        # 7. Accumulation
++        incident_light = params.get('incident_light', (1.0, 1.0, 1.0))
++        step_contrib = transmittance * (emission_color + sigma_s * incident_light * phase)
++        transmittance_step = math.exp(-sigma_t * step_size)
++        accumulated_color = [accumulated_color[i] + step_contrib[i] * transmittance_step for i in range(3)]
++        transmittance *= transmittance_step
++
+         if transmittance < 0.001:
+             break
+-            
+-        current_pos += ray_direction * step_size
+ 
+-    # 5. Apply background
+-    final_color = accumulated_color + transmittance * ray_background_color(ray_direction)
+-    
+-    # 6. Apply Shadow Density Scale (trick for multiple scattering approximation)
+-    # This parameter makes volume more/less opaque to shadow rays.
+-    # It is a post-process or ray-march modifier not fully detailed in formula.
+-    # final_color = apply_shadow_density_scale(final_color, shader_params.shadow_density_scale)
+-    
+-    return final_color
++        current_t += step_size
++
++    # 8. Final color
++    background = params.get('background_color', (0.0, 0.0, 0.0))
++    final_color = [accumulated_color[i] + transmittance * background[i] for i in range(3)]
++    return tuple(final_color)
+ ```
+ 
+@@ -203,6 +169,6 @@
+ 
+ *   **Memory Complexity:** $O(V)$, where $V$ is the total number of voxels in the OpenVDB file. All data must reside in GPU VRAM [S1].
+-*   **Time Complexity:** $O(R \cdot M)$, where $R$ is the number of rays and $M$ is the number of march steps per ray. Cost increases with density and number of scattering bounces [S2, unofficial][S3].
+-*   **Performance:** Volumes are expensive due to the cost of ray marching and multiple scattering calculations [S2, unofficial][S3]. Single scattering is sufficient for thin media; multiple scattering requires more samples or tricks like Shadow Density Scale [S1][S2, unofficial].
++*   **Time Complexity:** $O(R \cdot M)$, where $R$ is the number of rays and $M$ is the number of march steps per ray [G]. Cost increases with density and the number of scattering bounces simulated via Volume Trace Depth [S2, unofficial][S3][S4].
++*   **Performance:** Volumes are expensive due to the cost of ray marching and multiple scattering calculations [S2, unofficial][S3]. Single scattering is sufficient for thin media; multiple scattering requires higher Volume Trace Depth or tricks like Shadow Density Scale [S1][S2, unofficial][S4].
+ *   **Strengths:** Artist-friendly parameters (transparency color, depth), physically plausible wavelength-dependent absorption, integration with OpenVDB [S1][S2, unofficial][S3].
+ *   **Limitations:** High memory usage (no out-of-core support), sensitive to light setup, requires careful tuning of scatter/absorption/emission balance [S1][S2, unofficial].
+@@ -218,3 +184,4 @@
+ [S1] Volume Rendering - Maxon, https://help.maxon.net/c4d/s26/en-us/Content/_REDSHIFT_/html/Volume%2BRendering.html, fetched 2026-10-26
+ [S2] What Is Volumetric Rendering? Volume Shaders Explained, from ... - Maxon, https://www.maxon.net/en/article/volumetric-rendering, fetched 2026-10-26 (unofficial)
+-[S3] Introduction to Volumetric Rendering, https://help.maxon.net/c4d/2027/en-us/Content/html/What_is_Volumetric_Rendering.html, fetched 2026-10-29+[S3] Introduction to Volumetric Rendering, https://help.maxon.net/c4d/2027/en-us/Content/html/What_is_Volumetric_Rendering.html, fetched 2026-10-29
++[S4] Standard Volume shader, https://help.maxon.net/c4d/en-us/Content/html/COM_REDSHIFT3D_REDSHIFT4C4D_NODES_CORE_STANDARDVOLUME.html, fetched 2026-10-30

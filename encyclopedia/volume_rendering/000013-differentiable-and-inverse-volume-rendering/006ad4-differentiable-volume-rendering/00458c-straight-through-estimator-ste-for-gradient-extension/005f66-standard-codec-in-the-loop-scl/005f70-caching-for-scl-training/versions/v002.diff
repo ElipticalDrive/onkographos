@@ -1,0 +1,189 @@
+--- v001.md
++++ v002.md
+@@ -1,5 +1,5 @@
+ # Caching for SCL Training
+ 
+-Also called: Standard-Codec-in-the-Loop (SCL) caching
++Also called: Caching for Efficient Training, Codec Cache, Standard-Codec-in-the-Loop (SCL) caching
+ 
+ ## Overview
+@@ -18,5 +18,5 @@
+ **Parameters:**
+ *   $M$: The maximum interval between step-based refreshes. Typical value: $M=128$ [S1].
+-*   $\epsilon$: Threshold for relative change (drift) to trigger change-based refresh. Measured by normalized $\ell_2$ difference. Value not given in the sources.
++*   $\epsilon$: Threshold for relative change (drift) to trigger change-based refresh. Measured by normalized $\ell_2$ difference [S1]. Value not given in the sources.
+ 
+ **Algorithm:**
+@@ -42,128 +42,74 @@
+ **Pseudocode:**
+ ```python
++def compute_normalized_l2_drift(current, cached):
++    diff = current - cached
++    norm_diff = sqrt(sum(diff**2))
++    norm_current = sqrt(sum(current**2))
++    if norm_current == 0:
++        return 0.0
++    return norm_diff / norm_current
++
++def codec_round_trip(planes, density):
++    # Source does not specify codec implementation details [G]
++    return planes, density
++
++def volumetric_render(planes, density, rays, pose):
++    # Standard volumetric rendering step [G]
++    return render_output
++
+ def scl_training_step_with_caching(
+-    global_step: int,
+-    frame_index: int,
+-    rays: List[Tuple[Vector3, Vector3]],
+-    camera_pose: CameraPose,
+-    current_planes: Dict[str, Tensor],  # Keys: 'xy', 'xz', 'yz'
+-    current_density: Tensor,
+-    cached_decoded_planes: Dict[str, Tensor],
+-    cached_raw_planes: Dict[str, Tensor],
+-    cached_decoded_density: Tensor,
+-    cached_raw_density: Tensor,
+-    last_refresh_step: int,
+-    refresh_interval: int = 128,
+-    drift_threshold: float = 0.01  # Example value, not specified in source
+-) -> Tuple[Tensor, int, Dict[str, Tensor], Tensor, Dict[str, Tensor], Tensor]:
+-    """
+-    Performs one step of SCL training with caching.
+-    
+-    Returns:
+-        rendered_image: The rendered image tensor.
+-        new_last_refresh_step: Updated last refresh step.
+-        new_cached_decoded_planes: Updated cached decoded planes.
+-        new_cached_raw_planes: Updated cached raw planes.
+-        new_cached_decoded_density: Updated cached decoded density.
+-        new_cached_raw_density: Updated cached raw density.
+-    """
+-    
+-    # Step 1: Determine if refresh is needed
++    global_step, frame_index, rays, camera_pose,
++    current_planes, current_density,
++    cached_decoded_planes, cached_raw_planes,
++    cached_decoded_density, cached_raw_density,
++    last_refresh_step, refresh_interval, drift_threshold
++):
+     refresh_needed = False
+-    
++
+     # Step-based refresh
+     if last_refresh_step == -1 or (global_step - last_refresh_step) >= refresh_interval:
+         refresh_needed = True
+-    
++
+     # Change-based refresh
+     if not refresh_needed:
+-        # Calculate relative change for planes
+-        plane_drift = 0.0
++        total_drift = 0.0
+         for ax in ['xy', 'xz', 'yz']:
+-            current_p = current_planes[ax]
+-            cached_p = cached_raw_planes[ax]
+-            # Normalized L2 difference
+-            diff = current_p - cached_p
+-            norm_diff = torch.norm(diff)
+-            norm_current = torch.norm(current_p)
+-            if norm_current > 0:
+-                plane_drift += norm_diff / norm_current
+-        
+-        # Calculate relative change for density
+-        density_drift = 0.0
+-        current_d = current_density
+-        cached_d = cached_raw_density
+-        diff_d = current_d - cached_d
+-        norm_diff_d = torch.norm(diff_d)
+-        norm_current_d = torch.norm(current_d)
+-        if norm_current_d > 0:
+-            density_drift = norm_diff_d / norm_current_d
+-            
+-        # Combine drifts (simple sum, exact combination method not specified)
+-        total_drift = plane_drift + density_drift
+-        
++            total_drift += compute_normalized_l2_drift(current_planes[ax], cached_raw_planes[ax])
++        total_drift += compute_normalized_l2_drift(current_density, cached_raw_density)
++
+         if total_drift > drift_threshold:
+             refresh_needed = True
+ 
+-    # Step 2: Perform refresh if needed
+     if refresh_needed:
+-        # Run encode-decode codec round trip for the video segment
+-        # This updates the cache with decoded values
+-        # Note: The exact implementation of the codec round trip is external
+-        # We assume it returns the decoded planes and density
+-        new_decoded_planes, new_decoded_density = run_codec_round_trip(
+-            frame_index, current_planes, current_density
+-        )
+-        
+-        # Update cached decoded values
++        new_decoded_planes, new_decoded_density = codec_round_trip(current_planes, current_density)
+         cached_decoded_planes = new_decoded_planes
+         cached_decoded_density = new_decoded_density
+-        
+-        # Update cached raw snapshots (the unquantized values at refresh time)
+-        cached_raw_planes = {ax: current_planes[ax].clone().detach() for ax in current_planes}
+-        cached_raw_density = current_density.clone().detach()
+-        
+-        # Update last refresh step
++        cached_raw_planes = {ax: current_planes[ax] for ax in current_planes}
++        cached_raw_density = current_density
+         last_refresh_step = global_step
+-    else:
+-        # No refresh, use existing cache
+-        pass
+ 
+-    # Step 3: STE Substitution
+-    # For planes
+     rendered_planes = {}
+     for ax in ['xy', 'xz', 'yz']:
+-        cached_decoded_p = cached_decoded_planes[ax]
+-        current_p = current_planes[ax]
+-        # STE: Use cached decoded value, add gradient from current unquantized value
+-        # detach(current_p) ensures gradient flows only through the difference term
+-        # effectively passing the gradient of the unquantized value to the cached value
+-        rendered_planes[ax] = cached_decoded_p + (current_p - current_p.detach())
+-        
+-    # For density
+-    cached_decoded_d = cached_decoded_density
+-    current_d = current_density
+-    rendered_density = cached_decoded_d + (current_d - current_d.detach())
+-    
+-    # Step 4: Render
+-    # Render using the substituted (rendered) planes and density
+-    rendered_image = render_volume(rendered_planes, rendered_density, rays, camera_pose)
+-    
++        rendered_planes[ax] = cached_decoded_planes[ax] + (current_planes[ax] - detach(current_planes[ax]))
++
++    rendered_density = cached_decoded_density + (current_density - detach(current_density))
++
++    rendered_image = volumetric_render(rendered_planes, rendered_density, rays, camera_pose)
++
+     return rendered_image, last_refresh_step, cached_decoded_planes, cached_raw_planes, cached_decoded_density, cached_raw_density
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** The STE substitution relies on the difference between the current unquantized value and its detached version. If the quantization error is large, this difference may be significant, potentially affecting gradient stability [S1].
+-*   **Boundaries:** The change-based refresh depends on the normalized $\ell_2$ difference. If the current planes or density are near zero, the normalization factor becomes small, potentially leading to numerical instability or false triggers. The source does not specify a minimum norm threshold [S1].
+-*   **Degenerate Input:** If the cache is empty, a refresh is always triggered. This is handled by the step-based refresh condition ($g_{cache} == -1$ or similar) [S1].
++*   **Precision:** The STE substitution relies on the difference between the current unquantized value and its detached version [S1].
++*   **Boundaries:** The change-based refresh depends on the normalized $\ell_2$ difference. If the current planes or density are near zero, the normalization factor becomes small, potentially leading to numerical instability or false triggers [G].
++*   **Degenerate Input:** If the cache is empty, a refresh is always triggered [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The cost of the codec round trip is amortized over $M$ training steps. With $M=128$, the overhead is manageable while capturing most of the SCL training benefit [S1].
+-*   **Memory Complexity:** Requires storing additional cached decoded planes and density grids, as well as snapshots of the raw planes and density at the time of refresh. The size is proportional to the number of axes (3 for TriPlanes) and the resolution of the density grid [S1].
++*   **Time Complexity:** The cost of the codec round trip is amortized over $M$ training steps [S1].
++*   **Memory Complexity:** Requires storing additional cached decoded planes and density grids, as well as snapshots of the raw planes and density at the time of refresh [S1].
+ *   **Measured Performance:** Tab. 4 in [S1] shows that increasing $M$ yields a favorable trade-off between accuracy and training efficiency. $M=128$ captures most of the benefit of SCL training [S1].
+ *   **Strengths:** Reduces training time significantly for dynamic scenes by avoiding frequent codec invocations. The change-based refresh ensures responsiveness to rapid parameter changes early in training [S1].
+-*   **Limitations:** The cache may lag behind rapid parameter changes if the drift threshold $\epsilon$ is not set appropriately. The step-based refresh alone may not be sufficient for early training stages [S1].
+-*   **When to use:** When training SCL models on dynamic scenes where codec round trips are computationally expensive.
+-*   **When not to use:** When the scene is static and the codec overhead is negligible, or when real-time inference latency is critical and cache updates cannot be deferred [S1].
++*   **Limitations:** The cache may lag behind rapid parameter changes if the drift threshold $\epsilon$ is not set appropriately [S1].
++*   **When to use:** When training SCL models on dynamic scenes where codec round trips are computationally expensive [S1].
+ 
+ ## Background

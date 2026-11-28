@@ -1,0 +1,332 @@
+A minimalist and easy to use graphics API. Contribute to gboisse/gfx development by creating an account on GitHub.
+
+BVH Compaction support by SShikhali · Pull Request #213 · gboisse/gfx · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+SShikhali
+commented
+Jun 9, 2026
+Copy link
+Copy Markdown
+Collaborator
+Adds BVH compaction support.
+It requires extra CPU-GPU sync, so it's not recommended for dynamic geometry.
+We wait for BuildRaytracingAccelerationStructure to finish, readback the compacted size, allocate a new buffer, execute CopyRaytracingAccelerationStructure to copy BVH to a new compacted buffer, and delete the old one.
+It seems like compaction saves ~100mb of VRAM on Bistro and Toyshop scenes
+BVH Compaction support
+09240e7
+SShikhali
+requested review from
+gboisse and
+maoliver-amd
+June 9, 2026 15:51
+maoliver-amd
+commented
+Jun 10, 2026
+Copy link
+Copy Markdown
+Collaborator
+This looks like a good opportunity to add in the other BVH build flags as compact doesnt make much sense when gfx is still building BVHs with the update flag set. To really get the best from compaction we also need to not set update and allow setting the fast trace flag. I made a branch some time ago that added those flags that you can merge into this maoliver/rt-primitive
+SShikhali
+commented
+Jun 10, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+This looks like a good opportunity to add in the other BVH build flags as compact doesnt make much sense when gfx is still building BVHs with the update flag set. To really get the best from compaction we also need to not set update and allow setting the fast trace flag. I made a branch some time ago that added those flags that you can merge into this maoliver/rt-primitive
+I can see that your branch doesn't use D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PERFORM_UPDATE anymore. Is it intentional?
+maoliver-amd
+commented
+Jun 10, 2026
+Copy link
+Copy Markdown
+Collaborator
+I can see that your branch doesn't use D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PERFORM_UPDATE anymore. Is it intentional?
+Nope, that looks like a mistake on my part
+SShikhali
+commented
+Jun 10, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+This looks like a good opportunity to add in the other BVH build flags as compact doesnt make much sense when gfx is still building BVHs with the update flag set. To really get the best from compaction we also need to not set update and allow setting the fast trace flag. I made a branch some time ago that added those flags that you can merge into this maoliver/rt-primitive
+Do you suggest preventing users from using both kGfxBuildRaytracingPrimitiveFlag_Updateable and kGfxBuildRaytracingPrimitiveFlag_Compact at the same time? I think having both of them is technically valid, but it just will be slow
+maoliver-amd
+commented
+Jun 10, 2026
+Copy link
+Copy Markdown
+Collaborator
+Do you suggest preventing users from using both kGfxBuildRaytracingPrimitiveFlag_Updateable and kGfxBuildRaytracingPrimitiveFlag_Compact at the same time? I think having both of them is technically valid, but it just will be slow
+Setting both is valid and should be allowed. My comment was that currently in gfx master D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE is always set, but after this PR it should be user configurable
+More build flags
+d292c73
+SShikhali
+commented
+Jun 10, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+Do you suggest preventing users from using both kGfxBuildRaytracingPrimitiveFlag_Updateable and kGfxBuildRaytracingPrimitiveFlag_Compact at the same time? I think having both of them is technically valid, but it just will be slow
+Setting both is valid and should be allowed. My comment was that currently in gfx master D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE is always set, but after this PR it should be user configurable
+Pushed
+maoliver-amd
+reviewed
+Jun 11, 2026
+View reviewed changes
+Comment thread
+gfx.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Style
+7320b8c
+maoliver-amd
+approved these changes
+Jun 11, 2026
+View reviewed changes
+gboisse
+reviewed
+Jun 30, 2026
+View reviewed changes
+Comment thread
+gfx.cpp
+Outdated
+transitionResource(src, D3D12_RESOURCE_STATE_COPY_SOURCE, kTransitionType_Implicit);
+submitPipelineBarriers();
+dxr_command_list_->CopyBufferRegion(dst.resource_, dst.data_offset_, src.resource_, src.data_offset_, compact_size);
+finish();
+gboisse
+Jun 30, 2026
+Copy link
+Copy Markdown
+Owner
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+We cannot have a finish() in here... this is going to destroy our already-poor BVH build/update performance (see #208).
+That synchronization call must happen outside and be done by the application, so that we can do, e.g.:
+```
+gfxRaytracingPrimitiveBuild(gfx, bvh1);
+gfxRaytracingPrimitiveBuild(gfx, bvh2);
+gfxRaytracingPrimitiveBuild(gfx, bvh3);
+gfxRaytracingPrimitiveBuild(gfx, bvh4);
+
+gfxFinish(); // only one call to finish, not 3
+
+gfxRaytracingPrimitiveCompact(gfx, bvh2);
+gfxRaytracingPrimitiveCompact(gfx, bvh3);
+gfxRaytracingPrimitiveCompact(gfx, bvh4);
+```
+gboisse
+Jun 30, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+I like the fact that the readback buffer is handled directly by gfx as this seems more convenient in terms of library usage.
+But it makes the need for synchronizing quite implicit and not obvious at an API level...
+Ideally, it'd be good if we can detect the case where the user tries to build and compact with no synchronization in the middle and return a helpful error message (like "Post-build information not available yet, etc." or something).
+SShikhali
+Jul 1, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Added gfxRaytracingPrimitiveCompact 7b253d6
+finish_calls_counter_ is used to detect whether finish() was called in between the build & compact operations. If you have other ideas to detect it, please, let me know.
+maoliver-amd
+Jul 8, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Technically we dont need to wait for a finish call at all, we just need to wait some number of frames until the compaction values are ready. ~~~So there are situations where the BVH is built, but then used in rendering for a few frames until compaction can be called on it.~~~ As such waiting for finish here would be incorrect
+SShikhali
+Jul 10, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+I'm sorry, I don't fully understand what you mean here.
+Do you suggest to omit gfxFinish call and after N frames, just replace bvh internally for a compacted one?
+maoliver-amd
+Jul 10, 2026
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+No, sorry, what i was referring to is that checking finish_calls_counter_ is not the most accurate way of detecting when the buffer is ready as we dont have control over how much time may occur between gfxFinish calls (as in bvh build may be done well before 3 frames). Its a simple guarantee to check finish count but a fence would be more accurate, each compacted BVH when running compaction can either check the fence state and return error or block and wait. Upto @gboisee which he prefers
+gboisse
+Aug 10, 2026
+Copy link
+Copy Markdown
+Owner
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Indeed, gfxFinish() isn't the only valid way to synchronize here.
+I've put up a proposal for a setup that accounts for calling gfxFinish() at least once and/or gfxFrame() enough times: #227
+gboisse
+Aug 10, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+@maoliver-amd's proposal is interesting though; to make the API easier to use, we could detect whether some sync. is needed (using the mechanism from #227), but instead of returning an error, print out a simple warning and call finish() internally.
+That way, the compact function works out of the box, but with a path to make its use efficient when dealing with many BVHs 🙂
+Added gfxRaytracingPrimitiveCompact
+…
+7b253d6
+```
+- Added `gfxRaytracingPrimitiveCompact` that needs to be called after `gfxRaytracingPrimitiveBuild`. `gfxFinish` call is required in between
+```
+SShikhali
+requested a review
+from gboisse
+July 1, 2026 17:42
+VladimirMakeew
+mentioned this pull request
+Jul 24, 2026
+Update BLAS with multiple geometries
+#222
+Merged
+gboisse
+mentioned this pull request
+Aug 10, 2026
+Fix compaction completion status check
+#227
+Closed
+gboisse
+reviewed
+Aug 10, 2026
+View reviewed changes
+Comment thread
+gfx.cpp
+Comment on lines
++7527
+to
++7528
+GFX_SET_ERROR(kGfxResult_InternalError, "Can't readback compacted AS size. Possible sync issue.");
+return kGfxResult_InternalError; // Should we return an error here? Or do we just continue normally?
+gboisse
+Aug 10, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Returning an error seems preferable to silently failing I would say.
+Let's place the return before the GFX_SET_ERROR() call.
+gboisse
+reviewed
+Aug 10, 2026
+View reviewed changes
+Comment thread
+gfx.cpp
+Comment on lines
++7557
+to
++7558
+GFX_SET_ERROR(kGfxResult_InternalError, "Can't readback compacted AS size. Possible sync issue.");
+return kGfxResult_InternalError; // Should we return an error here? Or do we just continue normally?
+gboisse
+Aug 10, 2026
+Copy link
+Copy Markdown
+Owner
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Same as https://github.com/gboisse/gfx/pull/213/changes#r3751494569.
+VladimirMakeew
+mentioned this pull request
+Aug 18, 2026
+Separate BLAS's from Acceleration Structure for Independent Builds
+#219
+Merged
+SShikhali
+commented
+Aug 26, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+@maoliver-amd @gboisse, considering @VladimirMakeew's PR includes these changes, should this one be closed?
+gboisse
+commented
+Aug 26, 2026
+Copy link
+Copy Markdown
+Owner
+@maoliver-amd @gboisse, considering @VladimirMakeew's PR includes these changes, should this one be closed?
+Yes.
+SShikhali
+commented
+Aug 26, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+#219
+SShikhali
+closed this
+Aug 26, 2026
+gboisse
+deleted the
+sshikhali/bvh_compaction
+branch
+August 26, 2026 11:28
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+3 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

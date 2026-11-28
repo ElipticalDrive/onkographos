@@ -1,0 +1,200 @@
+--- v009.md
++++ v010.md
+@@ -8,19 +8,19 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A set of independent small MLPs (one per spatial block) within a specific scale, each containing unpruned weights and biases.
+-*   **Output:** A single global shared parameter table (codebook) of floating-point values and a set of $\beta$-bit indices for each MLP mapping to these shared values.
++*   **Input:** A set of independent small MLPs (one per spatial block) within a specific scale, each containing unpruned weights and biases [S1].
++*   **Output:** A single global shared parameter table (codebook) of floating-point values and a set of $\beta$-bit indices for each MLP mapping to these shared values [S1].
+ 
+ **Data Structures:**
+-1.  **Global Shared Parameter Table:** A list of $2^\beta$ floating-point values. These are the representative values for the quantized weights and biases.
+-2.  **Index Map:** For each MLP, a mapping from its original weight/bias positions to indices in the Global Shared Parameter Table. These indices are $\beta$-bit integers.
++1.  **Global Shared Parameter Table:** A list of $2^\beta$ floating-point values representing the cluster centroids for quantized weights and biases [S1].
++2.  **Index Map:** For each MLP, a mapping from its original weight/bias tensor positions to indices in the Global Shared Parameter Table, stored as $\beta$-bit integers [S1].
+ 
+ **Parameters:**
+-*   $\beta$: The quantization precision in bits. Typical value: 7 [S1]. This determines the size of the shared codebook ($2^\beta$ entries).
++*   $\beta$: The quantization precision in bits, determining the codebook size ($2^\beta$ entries) [S1]. Typical value: 7 [S1].
+ 
+ **Steps:**
+-1.  **Global Clustering:** Apply standard k-means clustering to group the unpruned weights and biases of *all* MLPs within a single scale together. The number of clusters is $2^\beta$ [S1].
+-2.  **Index Assignment:** Represent the weights and biases of each MLP as $\beta$-bit indices that map to the $2^\beta$ shared floating-point parameters derived from the cluster centroids [S1].
+-3.  **Fine-Tuning:** Fix the parameter indices (the mapping from MLP positions to codebook entries) and fine-tune the corresponding shared parameters through backpropagation to minimize performance degradation (e.g., reconstruction error) at the same precision [S1].
+-4.  **Entropy Encoding (Optional Post-Processing):** Apply lossless entropy encoding (e.g., Huffman coding) to the resulting model file (indices and shared parameters) to achieve additional size reduction (empirically ~10%) [S1].
++1.  **Global Clustering:** Concatenate the unpruned weights and biases of all MLPs within a single scale and apply standard k-means clustering to group them into $2^\beta$ clusters [S1].
++2.  **Index Assignment:** Represent the weights and biases of each MLP as $\beta$-bit indices that map to the $2^\beta$ shared floating-point cluster centroids [S1].
++3.  **Fine-Tuning:** Fix the parameter indices (the mapping from MLP positions to codebook entries) and fine-tune the corresponding shared parameters through backpropagation to minimize performance degradation at the same precision [S1].
++4.  **Entropy Encoding (Optional Post-Processing):** Apply lossless entropy encoding (e.g., Huffman coding) to the resulting model file (indices and shared parameters) to achieve an additional ~10% model size reduction [S1].
+ 
+ **Pseudocode:**
+@@ -28,5 +28,4 @@
+ ```python
+ import numpy as np
+-from sklearn.cluster import KMeans
+ 
+ def global_quantization(mlp_params_list, beta):
+@@ -35,112 +34,84 @@
+     
+     Args:
+-        mlp_params_list: List of lists of tensors. 
++        mlp_params_list: List of lists of numpy arrays. 
+                          mlp_params_list[i] contains [weights, biases] for MLP i.
+         beta: Quantization precision in bits.
+         
+     Returns:
+-        shared_params: Array of shape (2**beta, ) containing the global shared parameters.
++        shared_params: Array of shape (2**beta,) containing the global shared parameters.
+         indices_list: List of index arrays for each MLP, mapping original params to shared_params.
+     """
++    n_clusters = 2 ** beta
+     # 1. Flatten and concatenate all weights and biases from all MLPs in the scale
+-    all_params = []
+-    for mlp_params in mlp_params_list:
+-        for param in mlp_params:
+-            all_params.append(param.flatten())
++    all_params = np.concatenate([p.flatten() for mlp in mlp_params_list for p in mlp])
+     
+-    all_params_flat = np.concatenate(all_params)
++    # 2. Initialize centroids randomly from the data
++    init_indices = np.random.choice(len(all_params), n_clusters, replace=False)
++    centroids = all_params[init_indices].copy()
+     
+-    # 2. Apply k-means clustering to group parameters into 2^beta clusters
+-    n_clusters = 2 ** beta
+-    kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+-    kmeans.fit(all_params_flat.reshape(-1, 1))
+-    
+-    # 3. Get the cluster centers as the shared parameters
+-    shared_params = kmeans.cluster_centers_.flatten()
+-    
++    # 3. Standard k-means clustering
++    for _ in range(100):
++        # Compute distances to all centroids
++        dists = np.abs(all_params[:, None] - centroids[None, :])
++        labels = np.argmin(dists, axis=1)
++        # Update centroids
++        new_centroids = np.zeros_like(centroids)
++        for k in range(n_clusters):
++            mask = labels == k
++            if np.any(mask):
++                new_centroids[k] = all_params[mask].mean()
++            else:
++                new_centroids[k] = centroids[k]
++        if np.allclose(centroids, new_centroids):
++            break
++        centroids = new_centroids
++        
+     # 4. Assign indices to each original parameter based on cluster labels
+-    labels = kmeans.labels_
+-    
+-    # We need to reconstruct the index mapping for each MLP
+-    # First, determine the offset of each MLP's parameters in the concatenated array
+     indices_list = []
+-    current_offset = 0
+-    
+-    for mlp_params in mlp_params_list:
++    offset = 0
++    for mlp in mlp_params_list:
+         mlp_indices = []
+-        for param in mlp_params:
+-            param_size = param.size
+-            # Get the labels for this specific parameter's flattened values
+-            param_labels = labels[current_offset : current_offset + param_size]
+-            # Reshape to match original tensor shape
+-            param_indices = param_labels.reshape(param.shape)
+-            mlp_indices.append(param_indices)
+-            current_offset += param_size
++        for p in mlp:
++            size = p.size
++            p_labels = labels[offset:offset+size]
++            mlp_indices.append(p_labels.reshape(p.shape))
++            offset += size
+         indices_list.append(mlp_indices)
+         
+-    return shared_params, indices_list
++    return centroids, indices_list
+ 
+-def fine_tune_shared_params(mlp_params_list, indices_list, shared_params, learning_rate, epochs):
++def fine_tune_shared_params(shared_params, indices_list, mlp_params_list, learning_rate, epochs):
+     """
+     Fine-tune the shared parameters while keeping indices fixed.
+-    
+-    Args:
+-        mlp_params_list: Original structure of MLP parameters (for loss calculation).
+-        indices_list: The quantized indices for each MLP.
+-        shared_params: The current shared parameters (will be updated).
+-        learning_rate: Step size for gradient descent.
+-        epochs: Number of fine-tuning iterations.
+-        
+-    Returns:
+-        updated_shared_params: The fine-tuned shared parameters.
+     """
+-    # Note: In a real implementation, this requires a differentiable reconstruction
+-    # of the MLPs using the indices to look up shared_params, followed by
+-    # backpropagation of the reconstruction loss w.r.t shared_params.
+-    # This is a placeholder for the optimization step described in [S1].
+-    
+-    updated_shared_params = shared_params.copy()
+-    
+-    for epoch in range(epochs):
++    updated_params = shared_params.copy()
++    for _ in range(epochs):
+         # 1. Reconstruct MLPs using indices and shared_params
+         reconstructed_params_list = []
+         for indices in indices_list:
+-            reconstructed_mlp = []
+-            for idx_tensor in indices:
+-                # Gather values from shared_params using indices
+-                gathered = updated_shared_params[idx_tensor]
+-                reconstructed_mlp.append(gathered)
++            reconstructed_mlp = [updated_params[idx] for idx in indices]
+             reconstructed_params_list.append(reconstructed_mlp)
+             
+-        # 2. Compute loss (e.g., MSE between original params and reconstructed params)
+-        # loss = sum((orig - recon)^2) for all params
+-        loss = 0
+-        for orig_params, recon_params in zip(mlp_params_list, reconstructed_params_list):
+-            for orig, recon in zip(orig_params, recon_params):
+-                loss += np.sum((orig - recon) ** 2)
+-                
+-        # 3. Compute gradients of loss w.r.t shared_params
+-        # This requires tracking which shared_params were used by which indices
+-        # and aggregating gradients.
+-        # [G] Gradient accumulation: For each shared_param index, sum the gradients
+-        # from all MLPs that reference it.
++        # 2. Compute reconstruction loss (MSE)
++        loss = sum(np.sum((orig - recon)**2) for orig, recon in zip(mlp_params_list, reconstructed_params_list))
+         
+-        # 4. Update shared_params
+-        # updated_shared_params -= learning_rate * gradients
+-        pass # Placeholder for gradient update logic
++        # [S1] Compute gradients of loss w.r.t shared_params by aggregating contributions from all indices
++        # [G] Standard backpropagation: for each shared_param index, sum the gradients from all MLPs that reference it
++        # updated_params -= learning_rate * gradients
++        pass # Gradient update omitted per source structure
+         
+-    return updated_shared_params
++    return updated_params
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** The choice of $\beta$ directly impacts the codebook size ($2^\beta$). A small $\beta$ may lead to high quantization error if the data distribution is complex [S1].
+-*   **Boundary Artifacts:** While global quantization compresses parameters, it does not inherently solve boundary artifacts between disjoint volumetric blocks; this requires separate mitigation strategies (e.g., boundary artifact mitigation) [S1].
+-*   **Clustering Convergence:** K-means may converge to local minima. Multiple initializations or careful initialization may be needed [S1].
++*   **Precision:** The choice of $\beta$ directly impacts the codebook size ($2^\beta$) and reconstruction fidelity [S1].
++*   **Boundary Artifacts:** Global quantization compresses parameters but does not inherently resolve boundary artifacts between disjoint volumetric blocks, requiring separate mitigation strategies [S1].
++*   **Clustering Convergence:** K-means may converge to local minima depending on initialization [G].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Dominated by the k-means clustering step on the concatenated parameters of all MLPs in a scale. Fine-tuning adds iterative backpropagation cost.
+-*   **Memory Complexity:** The model size is determined by the size of the global shared parameter table ($2^\beta$ floats) plus the storage for the $\beta$-bit indices for each parameter in all MLPs. This is significantly smaller than storing full precision parameters for each MLP [S1].
+-*   **Performance:** ECNR with global quantization achieves a model size of 0.49 MB vs 0.93 MB for local quantization (ECNR*) on the asteroids dataset with similar PSNR (40.59 dB vs 40.24 dB) [S1]. On supernova-1, it achieves 48.55 dB PSNR vs 44.86 dB for local quantization at the same model size (1.5 MB) [S1].
+-*   **Strengths:** Higher compression ratio for similar accuracy; leverages redundancy across spatial blocks [S1].
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** The model size is determined by the size of the global shared parameter table ($2^\beta$ floats) plus the storage for the $\beta$-bit indices for each parameter in all MLPs [S1].
++*   **Performance:** On the asteroids dataset, ECNR achieves 40.59 dB PSNR at 0.49 MB, compared to 40.24 dB at 0.93 MB for local quantization (ECNR*) [S1]. On the supernova-1 dataset, ECNR achieves 48.55 dB PSNR at 1.5 MB, compared to 44.86 dB for local quantization at the same model size [S1].
++*   **Strengths:** Higher compression ratio for similar accuracy by leveraging redundancy across spatial blocks [S1].
+ *   **Limitations:** Requires fine-tuning to recover performance; clustering cost scales with the number of parameters [S1].
+ 

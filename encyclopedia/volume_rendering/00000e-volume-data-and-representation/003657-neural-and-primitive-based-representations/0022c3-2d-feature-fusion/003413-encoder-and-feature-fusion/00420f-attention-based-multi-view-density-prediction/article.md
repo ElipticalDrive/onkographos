@@ -1,0 +1,141 @@
+# Attention-based Multi-View Density Prediction
+
+Also called: Multi-view information fusion module for density
+
+## Overview
+This method aggregates 2D features from multiple reference views to predict a volume density feature $f_\sigma$ for a specific 3D point [S1]. It integrates multi-perspective information by combining local view features with global statistical summaries using a weighted pooling mechanism [S1]. It differs from its parent, [Encoder and Feature Fusion](7178-encoder-and-feature-fusion.md), by explicitly computing view-specific weights to fuse features [S1].
+
+## How it works
+**Inputs:**
+- A set of 2D features $\{f_i\}_{i=1}^m$ extracted from $m$ reference views corresponding to the 3D point [S1].
+
+**Outputs:**
+- A density feature vector $f_\sigma$ [S1].
+
+**Data Structures:**
+- $f_i \in \mathbb{R}^d$: Feature vector for view $i$ [S1].
+- $\mu \in \mathbb{R}^d$: Mean vector calculated from $\{f_i\}_{i=1}^m$ [S1].
+- $\nu \in \mathbb{R}^d$: Variance vector calculated from $\{f_i\}_{i=1}^m$ [S1].
+- $\omega_i \in [0, 1]^d$: Attention weight vector for view $i$ [S1].
+- $f_{i}^{aware} \in \mathbb{R}^d$: Multi-view aware feature for view $i$ [S1].
+
+**Steps:**
+1. **Calculate Global Statistics:** Compute the mean $\mu$ and variance $\nu$ of the input view features $\{f_i\}_{i=1}^m$ [S1]. The variance $\nu$ serves as a global pooling operator to capture global information [S1].
+   $$ \mu = \frac{1}{m} \sum_{i=1}^m f_i $$
+   $$ \nu = \frac{1}{m} \sum_{i=1}^m (f_i - \mu)^2 $$
+   [G] Standard element-wise variance calculation is assumed.
+
+2. **Integrate Local and Global Information:** For each view $i$, concatenate the view feature $f_i$ with the global features $\mu$ and $\nu$ [S1]. Feed this combined vector into a Multi-Layer Perceptron (MLP) to produce the multi-view aware feature $f_{i}^{aware}$ and the weight vector $\omega_i$ [S1]. The weight vector $\omega_i$ is constrained to the range $[0, 1]$ [S1].
+   $$ \text{concat}(f_i, \mu, \nu) \xrightarrow{\text{MLP}} (f_{i}^{aware}, \omega_i) $$
+
+3. **Weighted Averaging:** Compute the fused feature $f_{fused}$ by performing a weighted average of the multi-view aware features $f_{i}^{aware}$ using the weights $\omega_i$ [S1].
+   $$ f_{fused} = \sum_{i=1}^m \omega_i \cdot f_{i}^{aware} $$
+
+4. **Map to Density Feature:** Pass the fused feature $f_{fused}$ through an MLP to map it to the final density feature $f_\sigma$ [S1].
+   $$ f_\sigma = \text{MLP}_\sigma(f_{fused}) $$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+
+class AttentionMultiViewDensity(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        # MLP for integrating local and global info
+        # Input: 3 * dim (f_i, mu, nu)
+        # Output: 2 * dim (f_aware, omega)
+        self.integrate_mlp = nn.Sequential(
+            nn.Linear(3 * dim, dim),
+            nn.ReLU(),
+            nn.Linear(dim, 2 * dim)
+        )
+        # MLP for mapping to density feature
+        # Input: dim
+        # Output: dim (f_sigma)
+        self.density_mlp = nn.Sequential(
+            nn.Linear(dim, dim),
+            nn.ReLU(),
+            nn.Linear(dim, dim)
+        )
+
+    def forward(self, view_features):
+        """
+        view_features: Tensor of shape (m, dim) where m is number of views
+        """
+        m = view_features.shape[0]
+        
+        # Step 1: Calculate global statistics
+        mu = torch.mean(view_features, dim=0)  # (dim,)
+        nu = torch.mean((view_features - mu.unsqueeze(0)) ** 2, dim=0)  # (dim,)
+        
+        fused_features = []
+        weights = []
+        
+        # Step 2 & 3: Integrate and Weight
+        for i in range(m):
+            f_i = view_features[i]  # (dim,)
+            
+            # Concatenate f_i with mu and nu
+            combined = torch.cat([f_i, mu, nu], dim=0)  # (3*dim,)
+            
+            # Feed into MLP
+            output = self.integrate_mlp(combined)  # (2*dim,)
+            
+            # Split into f_aware and omega
+            f_aware = output[:dim]  # (dim,)
+            omega = output[dim:]    # (dim,)
+            
+            # Constrain omega to [0, 1] using sigmoid [G]
+            omega = torch.sigmoid(omega)
+            
+            fused_features.append(f_aware)
+            weights.append(omega)
+            
+        fused_features = torch.stack(fused_features, dim=0)  # (m, dim)
+        weights = torch.stack(weights, dim=0)                # (m, dim)
+        
+        # Weighted averaging (direct weighted sum per source specification)
+        f_fused = torch.sum(weights * fused_features, dim=0)  # (dim,)
+        
+        # Step 4: Map to density feature
+        f_sigma = self.density_mlp(f_fused)  # (dim,)
+        
+        return f_sigma
+```
+
+**Parameters:**
+- $\omega_i$: Weight vector for view $i$, constrained to $[0, 1]$ [S1].
+
+**Edge Cases:**
+- **Zero Variance:** If all view features are identical, $\nu = 0$ [G]. The method still functions as $\mu$ is non-zero unless features are zero [G].
+- **Empty Input:** If $m=0$, the method is undefined [G]. Ensure $m \ge 1$ [G].
+
+## Subtopics
+
+### [Attention-based Multi-Position Density Prediction](10679-attention-based-multi-position-density-prediction.md)
+This method predicts volume density $\sigma$ for samples along a ray by modeling the correlations between spatial positions using attention mechanisms. It addresses the limitation of independent density prediction by allowing samples to attend to each other, thereby capturing global and contextual information for enhanced accuracy. It differs from its parent, Attention-based Multi-View Density Prediction, which aggregates features from multiple reference views; this method operates on the sequence of samples along a single ray. It is distinct from Multi-View Feature Density Estimation, which projects 3D points to 2D image features, by operating directly on the 1D ray sample sequence.
+
+### Multi-view Cross-attention
+A method that aims to solve inconsistency issues by introducing multi-view cross-attention maps [S2, unofficial].
+
+### Transformer-based Visibility Weight Estimation
+A module that predicts visible weights for each input view via transformer-based feature matching to alleviate occlusion problems, avoiding the computational expense of constructing cost volumes [S3]. It matches local multi-view feature patches to estimate the visibility weights of each sample for anti-occlusion [S3].
+
+## Operating characteristics
+- **Time Complexity:** $O(m \cdot d^2)$ for MLP operations per view, where $m$ is the number of views and $d$ is the feature dimension [G]. Global statistics calculation is $O(m \cdot d)$ [G].
+- **Memory Complexity:** $O(m \cdot d)$ to store view features and intermediate weights [G].
+- **Strengths:** Accurately utilizes information from different perspectives, eliminates interfering components, and enhances the precision of density estimation [S1].
+- **Limitations:** Requires features from multiple reference views and depends on the quality of extracted 2D features [G].
+- **When to use:** When multi-view consistency is important for density estimation and reference views are available [G].
+- **When not to use:** When only a single view is available or computational resources are extremely limited [G].
+
+## Background
+The method is described in research on regularizing generalizable neural radiance fields with limited-view images [S1]. It addresses the inadequacy of simplistic MLP approaches for forecasting density in scenes with intricate geometric configurations [S1].
+
+## Sources
+[S1] Rugularizing generalizable neural radiance field with limited-view images, https://link.springer.com/article/10.1007/s40747-024-01696-6, fetched 2026-10-29
+[S2] PDF Recent advances in 3D Gaussian splatting - Springer, https://link.springer.com/content/pdf/10.1007/s41095-024-0436-y.pdf, fetched 2026-10-29 (unofficial)
+[S3] Local Implicit Ray Function for Generalizable Radiance Field Representation, http://arxiv.org/abs/2304.12746v1, fetched 2026-10-27

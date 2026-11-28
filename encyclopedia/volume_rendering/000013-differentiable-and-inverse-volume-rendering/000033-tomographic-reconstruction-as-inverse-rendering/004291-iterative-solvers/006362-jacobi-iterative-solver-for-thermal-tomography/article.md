@@ -1,0 +1,88 @@
+# Jacobi Iterative Solver for Thermal Tomography
+
+Also called: Inner solver, Jacobi unrolling
+
+## Overview
+An iterative method to solve the linear system $A T_{n+1} = T_n$ arising from the implicit Euler discretization of the heat equation, used as the inner solver for the differentiable physics simulation [S1, unofficial]. It sets itself apart from direct factorization methods by trading exact algebraic inversion for a fixed number of unrolled iterations, enabling efficient gradient computation via the adjoint method [S1, unofficial]. Unlike [SIRT](3101-sirt-simultaneous-iterative-reconstruction-technique.md) or [ART](6944-algebraic-reconstruction-technique-art.md), which solve tomographic projection equations directly, this method solves the forward physics step within an inverse rendering pipeline.
+
+## How it works
+**Inputs and Outputs**
+- Input: Previous frame temperature state $T_n$, system matrix $A(\alpha_\theta)$ derived from diffusivity parameters $\theta$, number of iterations $K$.
+- Output: Approximate next frame state $T_{n+1} \approx T^{(K)}$.
+
+**Data Structures**
+- $T^{(\kappa)}$: Temperature field vector of size $N_g$ (grid nodes).
+- $D$: Diagonal matrix of $A$.
+- $R$: Off-diagonal remainder matrix of $A$, such that $A = D + R$.
+- $b$: Right-hand side vector, set to $T_n$.
+
+**Parameters**
+- $K$: Number of Jacobi iterations. Value: 50 [S1, unofficial]. Chosen large enough that the residual $\|A T^{(K)} - b\|$ falls below the noise floor of camera measurements; empirically sufficient for the grid resolution and $\Delta t$ [S1, unofficial].
+- $T^{(0)}$: Initial guess. Value: $T_n$ [S1, unofficial]. Warm-started by the previous frame’s solution to accelerate convergence [S1, unofficial].
+
+**Steps**
+1. Initialize $T^{(0)} \leftarrow T_n$.
+2. For $\kappa = 0$ to $K-1$:
+   a. Compute residual vector $r^{(\kappa)} = b - R T^{(\kappa)}$.
+   b. Update temperature: $T^{(\kappa+1)} \leftarrow D^{-1} r^{(\kappa)}$.
+3. Set $T_{n+1} \leftarrow T^{(K)}$.
+
+**Formula**
+The iteration is defined as:
+$$ T^{(\kappa+1)} = D^{-1} (b - R T^{(\kappa)}), \quad \kappa = 0, 1, \dots, K-1 $$
+where $b := T_n$ [S1, unofficial]. This reduces to a 7-point stencil convolution [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def jacobi_solver(T_n, A_diag, A_off_diag, K=50):
+    """
+    Solves A * T_{n+1} = T_n using Jacobi iteration.
+    A = D + R, where D is diagonal and R is off-diagonal.
+    """
+    # Initialize with warm start
+    T_curr = T_n.clone()
+    
+    # Precompute b
+    b = T_n
+    
+    for kappa in range(K):
+        # Compute R * T_curr
+        # R is the off-diagonal part of A. 
+        # In a stencil context, this is a convolution excluding the center term.
+        R_T_curr = convolve_off_diagonal(T_curr, A_off_diag)
+        
+        # Compute D^{-1} * (b - R * T_curr)
+        # D^{-1} is element-wise division by diagonal elements
+        residual = b - R_T_curr
+        T_next = residual / A_diag
+        
+        T_curr = T_next
+        
+    return T_curr
+```
+
+**Edge Cases and Pitfalls**
+- **Ill-conditioning**: If the defect-to-bulk diffusivity ratio is $> 1:1000$, the linear system becomes severely ill-conditioned and the iterative solver stalls [S1, unofficial].
+- **Mitigation**: Use a ratio of $\sim 1:20$, which saturates the surface-temperature signature against the perfect-insulator limit while keeping the condition number compatible with efficient optimization [S1, unofficial].
+
+## Subtopics
+
+### [Adjoint Recurrence and Gradient Assembly](18936-adjoint-recurrence-and-gradient-assembly.md)
+A method to compute exact gradients of the discrete objective $J_{disc}$ with respect to parameters $\theta$ by solving an adjoint recurrence backwards in time, avoiding the storage of the full computational graph. It sets itself apart from naive backpropagation-through-time by reducing memory complexity from $O(K N_g N_t)$ to $O(N_g)$, where $K$ is the number of inner Jacobi iterations, $N_g$ is the grid size, and $N_t$ is the number of time steps.
+
+## Operating characteristics
+- **Time Complexity**: $O(K N_g)$ per time step, where $K$ is the number of iterations and $N_g$ is the grid size.
+- **Memory Complexity**: The forward solve memory cost is part of the total budget. The naive backpropagation-through-time scales as $O(K N_g N_t)$, but the adjoint method replaces this with $O(N_g)$ at the cost of one backward solve [S1, unofficial].
+- **Performance**: The iteration is expressed as a single fused kernel in standard autodiff frameworks and accelerated with `torch.compile` just-in-time autotuning [S1, unofficial].
+- **Strengths**: Allows for differentiable physics simulation with exact gradients (up to iterative tolerance) without storing the full computational graph [S1, unofficial].
+- **Limitations**: Convergence depends on diagonal dominance; ill-conditioned systems (high defect contrast) cause stalling [S1, unofficial].
+- **When to use**: When differentiable thermal simulation is required and direct factorization is too expensive or non-differentiable in the desired framework.
+- **When not to use**: When high defect contrast ($>1:1000$) is necessary and cannot be approximated by $1:20$.
+
+## Background
+Originated in the context of Neural Field Thermal Tomography, a differentiable physics approach to thermal imaging [S1, unofficial]. The method leverages the strict diagonal dominance of the discretized heat equation to ensure convergence of the Jacobi iteration to the unique exact solution [S1, unofficial]. It is used in synthetic 3D reconstruction tasks where the goal is to recover diffusivity fields from temperature measurements [S1, unofficial].
+
+## Sources
+[S1] [2603.11045] Neural Field Thermal Tomography: A Differentiable Physics ..., https://arxiv.org/abs/2603.11045, fetched 2026-10-29 (unofficial)

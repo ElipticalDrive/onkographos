@@ -1,0 +1,95 @@
+--- v017.md
++++ v018.md
+@@ -14,5 +14,5 @@
+ The primitive $i$ retains the standard 3DGS structure but uses a DARBF kernel instead of a Gaussian [S1]:
+ *   **Position:** $\mathbf{p}_i \in \mathbb{R}^3$
+-*   **Covariance:** $\boldsymbol{\Sigma}_i \in \mathbb{R}^{3 \times 3}$ (symmetric positive definite). Parameterized by rotation $\mathbf{R}_i$ and scale $\mathbf{s}_i$ as in [Parent].
++*   **Covariance:** $\boldsymbol{\Sigma}_i \in \mathbb{R}^{3 \times 3}$ (symmetric positive definite), parameterized by rotation $\mathbf{R}_i$ and scale $\mathbf{s}_i$ as in [Parent].
+ *   **Color:** $\mathbf{c}_i$ (e.g., spherical harmonics coefficients) [S1].
+ 
+@@ -25,5 +25,5 @@
+     where $\boldsymbol{\mu}'$ is the 2D projection of $\mathbf{p}_i$ [S1].
+ 
+-3.  **Evaluate DARBF Kernel:** Compute the kernel value $K(d_M)$ using a chosen DARBF function. The function must be non-negative, decaying, and anisotropic (via $d_M$) [S1].
++3.  **Evaluate DARBF Kernel:** Compute the kernel value $K(d_M)$ using a chosen DARBF function [S1]. The function must be non-negative, decaying, and anisotropic (via $d_M$) [S1].
+     *   **Half-Cosine Kernel:**
+         $$ K_{hc}(d_M) = \begin{cases} \cos\left(\frac{d_M^2}{\xi}\right) & \text{if } d_M^2 < \frac{\xi \pi}{2} \\ 0 & \text{otherwise} \end{cases} $$
+@@ -31,5 +31,5 @@
+     *   **Inverse Multiquadric (Inverse MQ):**
+         $$ K_{imq}(d_M) = \frac{1}{\sqrt{1 + d_M^2}} $$
+-        (Note: Specific parameterization for Inverse MQ in the source is implied by the formula structure, but exact scaling factors are not explicitly detailed beyond the general form [S1]).
++        [S1]
+     *   **Other DARBFs:** Modified raised cosine, modular sinc [S1].
+ 
+@@ -38,5 +38,5 @@
+     The value of $\psi$ is precomputed from closed-form regression experiments to ensure comparable accumulated opacity to Gaussians [S1].
+ 
+-5.  **Rasterization and Blending:** Sort primitives by depth. For each pixel, accumulate color using alpha blending [Parent]:
++5.  **Rasterization and Blending:** Sort primitives by depth [Parent]. For each pixel, accumulate color using alpha blending [Parent]:
+     $$ C(x') = \sum_{i \in N} \mathbf{c}_i \sigma_i(x') \prod_{j=1}^{i-1} (1 - \sigma_j(x')) $$
+     where $\sigma_i(x')$ is the effective opacity contribution of primitive $i$ at pixel $x'$ [S1, Parent].
+@@ -54,5 +54,56 @@
+ *   **Precision:** The half-cosine kernel has finite support ($d_M^2 < \frac{\xi \pi}{2}$), which must be checked to avoid evaluating cosine outside the valid domain [S1].
+ 
+-`# Pseudocode not provided in the sources.`
++```python
++def render_darbf_splat(primitives, camera_view_matrix, image_dims):
++    # primitives: list of dicts with keys 'p' (3,), 'cov' (3,3), 'alpha' (float), 'color' (3,), 'sh' (list)
++    # camera_view_matrix: 4x4 transformation to camera space
++    # image_dims: (height, width)
++    out_color = np.zeros(image_dims + (3,))
++    out_alpha = np.zeros(image_dims)
++
++    # Step 1: Project 3D primitives to 2D and compute 2D covariance
++    projected_prims = []
++    for prim in primitives:
++        p_3d = prim['p']
++        cov_3d = prim['cov']
++        # Transform position and covariance to camera frame [G]
++        p_cam = camera_view_matrix[:3, :3] @ p_3d + camera_view_matrix[:3, 3]
++        cov_cam = camera_view_matrix[:3, :3] @ cov_3d @ camera_view_matrix[:3, :3].T
++        # Skip third row and column for 2D projection [S1]
++        cov_2d = cov_cam[:2, :2]
++        mu_2d = p_cam[:2]
++        projected_prims.append({'mu': mu_2d, 'cov': cov_2d, 'alpha': prim['alpha'], 'color': prim['color'], 'sh': prim['sh']})
++
++    # Step 5 (partial): Sort primitives by depth for correct blending [Parent]
++    projected_prims.sort(key=lambda p: p['mu'][2]) # Assuming z-depth in camera frame
++
++    # Step 2-4: Evaluate kernel and blend per pixel
++    for prim in projected_prims:
++        mu = prim['mu']
++        cov = prim['cov']
++        alpha = prim['alpha']
++        color = prim['color']
++        # Compute bounding box for efficient rasterization [G]
++        bbox = compute_bounding_box(mu, cov)
++        for y in range(bbox.y_min, bbox.y_max):
++            for x in range(bbox.x_min, bbox.x_max):
++                x_prime = np.array([x, y])
++                diff = x_prime - mu[:2]
++                # Mahalanobis distance squared [S1]
++                d_M_sq = diff @ np.linalg.inv(cov) @ diff
++                # Evaluate DARBF kernel (e.g., half-cosine) [S1]
++                xi = 2.0 # shape parameter
++                if d_M_sq < xi * np.pi / 2:
++                    K = np.cos(d_M_sq / xi)
++                else:
++                    K = 0.0
++                # Apply scalar correction factor [S1]
++                psi = 1.5 # precomputed from regression
++                sigma = alpha * psi * K
++                # Alpha blending [Parent]
++                out_color[y, x] += color * sigma * (1.0 - out_alpha[y, x])
++                out_alpha[y, x] += sigma
++    return out_color
++```
+ 
+ ## Subtopics
+@@ -76,5 +127,5 @@
+ *   **Strengths and limitations:** More efficient training and lower memory footprint [S1]. Requires precomputed correction factors for non-Gaussian kernels; not all DARBFs perform equally (e.g., radial cosine had lower SSIM than half-cosine in Table 6) [S1].
+ *   **When to use:** When computational savings (training time, memory) are critical and comparable visual quality to 3DGS is acceptable [S1].
+-*   **When not to use:** Not given in the sources.
++*   **When not to use:** Not given in the sources [S1].
+ 
+ ## Background

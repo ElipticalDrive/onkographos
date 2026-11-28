@@ -1,0 +1,134 @@
+--- v007.md
++++ v008.md
+@@ -1,5 +1,5 @@
+ # Min-Max Octree Rendering
+ 
+-Also called: Hierarchical classification projection, Min-max octree entry points, Octree-based Entry Point Determination, Unclassified Volume Rendering, Unclassified Volume Rendering with Min-Max Octree, vpRenderClassifiedVolume, vpRenderRawVolume, vpRenderRawVolume algorithm
++Also called: Min-max octree entry points
+ 
+ ## Overview
+@@ -21,5 +21,5 @@
+ **Parameters:**
+ *   **base_node_size:** Size in voxels of one side of the smallest node in the octree. Controls resolution vs. memory trade-off. Typical value: 4 [S1].
+-*   **range:** Range of table indices considered "small" for classification sensitivity. Affects pruning effectiveness. [S1].
++*   **range:** Range of table indices considered "small" for classification sensitivity. Affects pruning effectiveness [S1].
+ *   **max_opacity_threshold:** Threshold for pixel opacity to stop compositing. Typical value: 0.95 [S2].
+ *   **intermediate_image_size:** Hints for work buffer allocation (`VP_INT_WIDTH_HINT`, `VP_INT_HEIGHT_HINT`) [S2].
+@@ -29,5 +29,5 @@
+ 2.  **Octree Construction:**
+     *   For each classification table, call `vpMinMaxOctreeThreshold(param_num, range)` to define sensitivity [S1].
+-    *   Call `vpCreateMinMaxOctree(root_node_size, base_node_size)` to compute the octree from the raw volume data [S1].
++    *   Call `vpCreateMinMaxOctree(vpc, root_node_size, base_node_size)` to compute the octree from the raw volume data [S1].
+     *   *Note:* If volume data changes, `vpCreateMinMaxOctree()` must be called again [S1].
+ 3.  **Rendering Loop:**
+@@ -51,24 +51,22 @@
+ **Pseudocode:**
+ ```python
+-def render_min_max_octree(volume, context):
+-    # 1. Precompute Octree (Called once or when volume changes)
+-    # Define volume parameters
+-    set_volume_size(volume.size)
+-    set_voxel_size(volume.voxel_size)
+-    set_voxel_field(volume.field)
+-    set_raw_voxels(volume.data)
++def render_min_max_octree(volume_data, context):
++    # 1. Initialization: Define unclassified volume
++    set_volume_size(context, volume_data.size)
++    set_voxel_size(context, volume_data.voxel_size)
++    set_voxel_field(context, volume_data.field)
++    set_raw_voxels(context, volume_data.array)
+     
+-    # Define classification sensitivity
+-    # range determines how sensitive the pruning is to small opacity changes
+-    vp_min_max_octree_threshold(context, param_num=0, range=10) 
++    # 2. Octree Construction
++    # Define classification sensitivity for a parameter
++    vp_min_max_octree_threshold(context, param_num=0, range=10)
+     
+-    # Build the octree
+-    # base_node_size=4 is a typical starting point
++    # Build the octree (root_node_size is reserved, typically 0)
+     vp_create_min_max_octree(context, root_node_size=0, base_node_size=4)
+     
+-    # 2. Rendering Loop
+-    while rendering_needed():
++    # 3. Rendering Loop
++    while rendering_needed(context):
+         set_view_and_shading(context)
+-        set_opacity_transfer_function(context, current_transfer_function)
++        set_opacity_transfer_function(context, context.current_transfer_function)
+         
+         # Render using the octree for acceleration
+@@ -77,19 +75,19 @@
+ def vp_render_raw_volume(context):
+     # Get intermediate image buffer size hints if not set
+-    if not context.has_intermediate_hints():
+-        max_dim = 2 * max(volume.dimensions) # No scaling bound
+-        set_state(context, VP_INT_WIDTH_HINT, max_dim)
+-        set_state(context, VP_INT_HEIGHT_HINT, max_dim)
++    if not has_intermediate_hints(context):
++        max_dim = 2 * max(context.volume_dimensions)
++        set_state(context, "VP_INT_WIDTH_HINT", max_dim)
++        set_state(context, "VP_INT_HEIGHT_HINT", max_dim)
+         
+     # Initialize entry point buffer
+     entry_points = allocate_entry_point_buffer()
+     
+-    # For each ray:
+-    for ray in rays:
+-        # Traverse min-max octree to find entry
++    # For each ray in the view:
++    for ray in context.rays:
++        # Traverse min-max octree to find first non-transparent node
+         node = traverse_octree_for_entry(ray, context.octree)
+         
+         if node is not None:
+-            # Calculate entry depth
++            # Calculate entry depth: tz + relative offset
+             node_idx = calculate_node_index(node)
+             offset = lookup_relative_offset(node_idx)
+@@ -101,12 +99,42 @@
+             # Compositing from entry_depth
+             opacity = 0.0
++            final_color = 0.0
+             for sample in ray.samples_from(entry_depth):
+                 value = sample.value
+-                alpha = transfer_function(value)
++                alpha = context.transfer_function(value)
+                 opacity += alpha * (1.0 - opacity)
++                final_color += alpha * (1.0 - opacity) * sample.color
+                 if opacity >= context.max_opacity_threshold:
+                     break
+-            entry_points[ray.id].final_color = composite_result
++            entry_points[ray.id].final_color = final_color
++
++# Helper definitions
++def set_volume_size(context, size): context.volume_size = size
++def set_voxel_size(context, size): context.voxel_size = size
++def set_voxel_field(context, field): context.voxel_field = field
++def set_raw_voxels(context, data): context.raw_voxels = data
++def vp_min_max_octree_threshold(context, param_num, range): context.classification_range[param_num] = range
++def vp_create_min_max_octree(context, root_node_size, base_node_size): context.octree = compute_min_max_octree(context.raw_voxels, base_node_size)
++def rendering_needed(context): return True
++def set_view_and_shading(context): pass
++def set_opacity_transfer_function(context, func): context.transfer_function = func
++def has_intermediate_hints(context): return "intermediate_hints" in context
++def set_state(context, key, value): context.state[key] = value
++def allocate_entry_point_buffer(): return {}
++def traverse_octree_for_entry(ray, octree): return octree.find_first_non_transparent(ray)
++def calculate_node_index(node):
++    idx = 0
++    for i, octant in enumerate(node.octants):
++        idx += octant * (8 ** (node.depth - i - 1))
++    return idx
++def lookup_relative_offset(node_idx): return context.offset_table[node_idx]
+ ```
++
++**Pitfalls and Errors:**
++*   Shading lookup tables sized incorrectly, invalid voxel fields, or invalid material types cause `VPERROR_BAD_SHADER` [S2].
++*   Singular view transformation matrix causes `VPERROR_SINGULAR` [S2].
++*   Volume size not set, invalid, or missing data causes `VPERROR_BAD_VOLUME` [S2].
++*   Opacity transfer function tables have invalid sizes or are incorrectly specified (render raw only) causing `VPERROR_BAD_CLASSIFIER` [S2].
++*   Angle between shadow light vector and viewing direction too large (>45°) causes `VPERROR_BAD_SHADOW`; fix by changing light direction or disabling shadows [S2].
+ 
+ ## Subtopics

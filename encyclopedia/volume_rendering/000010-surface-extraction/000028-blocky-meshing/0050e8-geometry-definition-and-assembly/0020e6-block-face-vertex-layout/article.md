@@ -1,0 +1,183 @@
+# Block face vertex layout
+
+Also called: Base Voxel Geometry Definition, Block.h block_faces, Cube Geometry Definition, Cube face vertices, baseBoxCorners, baseFaceVertices
+
+## Overview
+Block face vertex layout defines the static geometric primitives (vertices, indices, and attributes) for a unit cube, serving as the foundational template for generating blocky voxel meshes [S1, S2, unofficial]. It provides a canonical set of face definitions that can be instantiated per exposed voxel face [G]. Unlike smooth surface extraction methods such as [Marching Cubes](52-marching-cubes.md) which produce curved surfaces, this method preserves the discrete, axis-aligned nature of the voxel grid [G]. It differs from [Voxel Mesh Generation (Cube Construction)](11001-voxel-mesh-generation-cube-construction.md) by defining the abstract vertex structure and indexing logic for a unit cube face, whereas the child article handles the complete assembly of a single voxel's 24 vertices and indices for immediate rendering [G].
+
+## How it works
+### Inputs and Outputs
+*   **Input:** Voxel integer coordinates $(x,y,z)$, block size $S$, and face direction $D$ determined by the parent [Geometry Definition and Assembly](14339-geometry-definition-and-assembly.md) process [G].
+*   **Output:** Transformed vertex positions, colors, and UVs for the exposed face [G].
+
+### Data Structures
+Two primary layout conventions exist in the sources:
+
+1.  **Shared Vertex Layout [S1, unofficial]:**
+    *   `Cube.vertices`: Array of 8 `Vector3` positions representing the corners of a unit cube $[0,1]^3$: $(0,0,0), (1,0,0), (1,1,0), (0,1,0), (0,0,1), (1,0,1), (1,1,1), (0,1,1)$.
+    *   `Cube.uvOffsets`: Array of 4 `Vector2` UV coordinates: $(0,0), (0,1), (1,0), (1,1)$.
+    *   `Cube.quads`: Flattened array of 24 integers defining the 6 quads (2 triangles each) using the 8 vertex indices: `[0, 3, 1, 2, 5, 6, 4, 7, 3, 7, 2, 6, 1, 5, 0, 4, 4, 7, 0, 3, 1, 2, 5, 6]`.
+    *   `Cube.quadsOffsetForTris`: Array of 6 integers mapping quad indices to triangle indices for iteration: `[0, 1, 2, 2, 1, 3]` [S1, unofficial].
+
+2.  **Non-Shared Vertex Layout [S2, unofficial]:**
+    *   `block_faces[6][6]`: A 2D array where each of the 6 faces contains 6 unique vertices (no sharing between triangles or faces).
+    *   Each vertex contains: `Position` (`vec3`), `Color` (`vec3`), and `Texture Coordinate` (`vec2`) [S2, unofficial].
+
+3.  **Directional Corner Mapping [S3, unofficial]:**
+    *   `baseBoxCorners`: Array of 8 points scaled by $0.5$ to fit $[-0.5, 0.5]^3$: $[1,-1,1], [1,-1,-1], [-1,-1,-1], [-1,-1,1], [1,1,1], [1,1,-1], [-1,1,-1], [-1,1,1]$.
+    *   `baseFaceVertices`: Maps 6 directions to 4 corner indices: UP to $[5,6,7,4]$, DOWN to $[2,1,0,3]$, EAST to $[5,4,0,1]$, SOUTH to $[4,7,3,0]$, WEST to $[7,6,2,3]$, NORTH to $[6,5,1,2]$ [S3, unofficial].
+
+### Numbered Steps
+1.  Initialize the canonical vertex and index arrays based on the chosen layout [S1, S2, S3, unofficial].
+2.  Assign attributes: for the shared layout, map vertex indices to positions and UVs; for the non-shared layout, explicitly define position, color, and UV for each of the 36 vertices (6 faces $\times$ 6 vertices) [S1, S2, unofficial].
+3.  Establish consistent counter-clockwise (CCW) winding order for all triangles to support back-face culling [G]. A common pattern uses indices $(0,1,2)$ and $(3,2,1)$ relative to the quad's start [G].
+4.  Instance for rendering: when the parent algorithm identifies an exposed face at voxel $(x,y,z)$ with direction $D$, retrieve the 6 vertices for face $D$, transform positions by adding the voxel's world position (scaled by $S$) to the base quad vertices, and emit the triangles [G].
+
+### Formulas
+For a voxel at integer coordinates $(x, y, z)$ and block size $S$, the world position $P_w$ of a local vertex $P_l$ is:
+$$ P_w = (x \cdot S, y \cdot S, z \cdot S) + P_l $$
+
+### Parameters
+*   **Block Size ($S$):** The physical size of a voxel. Typical values depend on the scene scale (e.g., $1.0$ unit) [G].
+*   **Winding:** Counter-Clockwise (CCW) is standard for front-face culling in OpenGL/DirectX [G].
+
+### Edge Cases and Pitfalls
+*   **Precision:** When transforming vertices, ensure floating-point precision is sufficient to avoid z-fighting if multiple chunks share boundaries without proper padding [G].
+*   **Boundary Checks:** The vertex layout itself does not handle boundary logic; it assumes the caller has already determined the face is exposed [G].
+*   **UV Mapping:** In the shared layout, UVs are shared across faces, which may cause texture stretching or misalignment if different faces require different texture mappings. The non-shared layout allows per-face UV control [S3, S4, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+class Vec3:
+    def __init__(self, x, y, z):
+        self.x, self.y, self.z = x, y, z
+    def __mul__(self, s): return Vec3(self.x*s, self.y*s, self.z*s)
+    def __add__(self, o): return Vec3(self.x+o.x, self.y+o.y, self.z+o.z)
+
+class Vec2:
+    def __init__(self, u, v):
+        self.u, self.v = u, v
+
+# Layout 1: Shared Vertex Indices (S1)
+class CubeGeometry:
+    def __init__(self):
+        self.vertices = [
+            Vec3(0, 0, 0), Vec3(1, 0, 0), Vec3(1, 1, 0), Vec3(0, 1, 0),
+            Vec3(0, 0, 1), Vec3(1, 0, 1), Vec3(1, 1, 1), Vec3(0, 1, 1)
+        ]
+        self.uv_offsets = [Vec2(0, 0), Vec2(0, 1), Vec2(1, 0), Vec2(1, 1)]
+        self.quads = [
+            0, 3, 1, 2, 5, 6, 4, 7, 3, 7, 2, 6, 1, 5, 0, 4, 4, 7, 0, 3, 1, 2, 5, 6
+        ]
+        self.quads_offset_for_tris = [0, 1, 2, 2, 1, 3]
+
+    def get_face_vertices(self, face_index, voxel_pos, block_size):
+        base_quad_start = face_index * 4
+        v0_idx = self.quads[base_quad_start]
+        v1_idx = self.quads[base_quad_start + 1]
+        v2_idx = self.quads[base_quad_start + 2]
+        v3_idx = self.quads[base_quad_start + 3]
+
+        local_v0 = self.vertices[v0_idx] * block_size + voxel_pos
+        local_v1 = self.vertices[v1_idx] * block_size + voxel_pos
+        local_v2 = self.vertices[v2_idx] * block_size + voxel_pos
+        local_v3 = self.vertices[v3_idx] * block_size + voxel_pos
+
+        return [local_v0, local_v1, local_v2, local_v2, local_v1, local_v3]
+
+# Layout 2: Non-Shared Vertices (S2)
+class BlockFaceLayout:
+    def __init__(self):
+        self.block_faces = [[None]*6 for _ in range(6)]
+        self._init_back_face()
+        self._init_front_face()
+        self._init_left_face()
+        self._init_right_face()
+        self._init_bottom_face()
+        self._init_top_face()
+
+    def _init_back_face(self):
+        self.block_faces[0] = [
+            (Vec3(-0.5, -0.5, -0.5), Vec3(0.9, 0.9, 0.9), Vec2(0, 0)),
+            (Vec3(0.5, 0.5, -0.5), Vec3(0.9, 0.9, 0.9), Vec2(1, 1)),
+            (Vec3(0.5, -0.5, -0.5), Vec3(0.9, 0.9, 0.9), Vec2(1, 0)),
+            (Vec3(0.5, 0.5, -0.5), Vec3(0.9, 0.9, 0.9), Vec2(1, 1)),
+            (Vec3(-0.5, -0.5, -0.5), Vec3(0.9, 0.9, 0.9), Vec2(0, 0)),
+            (Vec3(-0.5, 0.5, -0.5), Vec3(0.9, 0.9, 0.9), Vec2(0, 1))
+        ]
+
+    def _init_front_face(self):
+        self.block_faces[1] = [
+            (Vec3(-0.5, -0.5, 0.5), Vec3(0.9, 0.9, 0.9), Vec2(0, 0)),
+            (Vec3(0.5, -0.5, 0.5), Vec3(0.9, 0.9, 0.9), Vec2(1, 0)),
+            (Vec3(0.5, 0.5, 0.5), Vec3(0.9, 0.9, 0.9), Vec2(1, 1)),
+            (Vec3(0.5, 0.5, 0.5), Vec3(0.9, 0.9, 0.9), Vec2(1, 1)),
+            (Vec3(-0.5, 0.5, 0.5), Vec3(0.9, 0.9, 0.9), Vec2(0, 1)),
+            (Vec3(-0.5, -0.5, 0.5), Vec3(0.9, 0.9, 0.9), Vec2(0, 0))
+        ]
+
+    def _init_left_face(self):
+        self.block_faces[2] = [
+            (Vec3(-0.5, 0.5, 0.5), Vec3(0.8, 0.8, 0.8), Vec2(1, 0)),
+            (Vec3(-0.5, 0.5, -0.5), Vec3(0.8, 0.8, 0.8), Vec2(1, 1)),
+            (Vec3(-0.5, -0.5, -0.5), Vec3(0.8, 0.8, 0.8), Vec2(0, 1)),
+            (Vec3(-0.5, -0.5, -0.5), Vec3(0.8, 0.8, 0.8), Vec2(0, 1)),
+            (Vec3(-0.5, -0.5, 0.5), Vec3(0.8, 0.8, 0.8), Vec2(0, 0)),
+            (Vec3(-0.5, 0.5, 0.5), Vec3(0.8, 0.8, 0.8), Vec2(1, 0))
+        ]
+
+    def _init_right_face(self):
+        self.block_faces[3] = [
+            (Vec3(0.5, 0.5, 0.5), Vec3(0.8, 0.8, 0.8), Vec2(1, 0)),
+            (Vec3(0.5, -0.5, -0.5), Vec3(0.8, 0.8, 0.8), Vec2(0, 1)),
+            (Vec3(0.5, 0.5, -0.5), Vec3(0.8, 0.8, 0.8), Vec2(1, 1)),
+            (Vec3(0.5, -0.5, -0.5), Vec3(0.8, 0.8, 0.8), Vec2(0, 1)),
+            (Vec3(0.5, 0.5, 0.5), Vec3(0.8, 0.8, 0.8), Vec2(0, 0)),
+            (Vec3(0.5, -0.5, 0.5), Vec3(0.8, 0.8, 0.8), Vec2(1, 0))
+        ]
+
+    def _init_bottom_face(self):
+        self.block_faces[4] = [
+            (Vec3(-0.5, -0.5, -0.5), Vec3(1.0, 1.0, 1.0), Vec2(0, 1)),
+            (Vec3(0.5, -0.5, -0.5), Vec3(1.0, 1.0, 1.0), Vec2(1, 1)),
+            (Vec3(0.5, -0.5, 0.5), Vec3(1.0, 1.0, 1.0), Vec2(1, 0)),
+            (Vec3(0.5, -0.5, 0.5), Vec3(1.0, 1.0, 1.0), Vec2(1, 0)),
+            (Vec3(-0.5, -0.5, 0.5), Vec3(1.0, 1.0, 1.0), Vec2(0, 0)),
+            (Vec3(-0.5, -0.5, -0.5), Vec3(1.0, 1.0, 1.0), Vec2(0, 1))
+        ]
+
+    def _init_top_face(self):
+        self.block_faces[5] = [
+            (Vec3(-0.5, 0.5, -0.5), Vec3(1.0, 1.0, 1.0), Vec2(0, 1)),
+            (Vec3(0.5, 0.5, 0.5), Vec3(1.0, 1.0, 1.0), Vec2(1, 0)),
+            (Vec3(0.5, 0.5, -0.5), Vec3(1.0, 1.0, 1.0), Vec2(1, 1)),
+            (Vec3(0.5, 0.5, 0.5), Vec3(1.0, 1.0, 1.0), Vec2(1, 0)),
+            (Vec3(-0.5, 0.5, -0.5), Vec3(1.0, 1.0, 1.0), Vec2(0, 1)),
+            (Vec3(-0.5, 0.5, 0.5), Vec3(1.0, 1.0, 1.0), Vec2(0, 0))
+        ]
+```
+
+## Subtopics
+
+### Per-Face Non-Shared Vertex UV Mapping
+This variant keeps each cube face as its own set of non-shared vertices, allowing UV mapping of a single cube-face texture at a time [S4, unofficial]. It is simpler than complex UV mapping for merged meshes and avoids the complexity of referencing mesh locations to forming data [S4, unofficial]. It is chosen when per-face texture differentiation is required and vertex count is not a primary constraint [S4, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(1)$ for layout definition. The cost is incurred during instance generation, proportional to the number of exposed faces [G].
+*   **Memory Complexity:** $O(1)$ for the static layout data. The vertex buffer size scales with the number of exposed faces [G].
+*   **Performance:** High vertex counts (100Ks to millions) are manageable on modern GPUs [S3, unofficial]. The primary bottleneck is often texture write/reads if heterogenous planes require unique textures [S3, unofficial].
+*   **Strengths:** Simple implementation, preserves blocky aesthetic, easy to modify per-vertex attributes (e.g., colors) [S3, unofficial].
+*   **Limitations:** High vertex count compared to shared vertex meshes; UV mapping complexity if textures vary per face [S3, unofficial].
+*   **When to use:** Blocky voxel games, terrain where vertex count is not critical, or when per-face texturing is needed [S3, unofficial].
+*   **When not to use:** Smooth surface rendering, or when memory bandwidth is severely constrained and vertex sharing is critical [G].
+
+## Background
+The method originates from early voxel rendering techniques where discrete cubes were rendered directly [G]. It is commonly used in voxel engines that prioritize simplicity and performance over geometric optimization [G]. The shared vertex layout is often associated with instanced rendering approaches, while the non-shared layout is used in simpler, immediate-mode style renderers or when per-face attributes are required [G].
+
+## Sources
+[S1] rarefushion/Cubic-Grid_Voxel_Renderer, https://github.com/rarefushion/Cubic-Grid_Voxel_Renderer, fetched 2026-10-27 (unofficial)
+[S2] Kaefaell/VoxelDemo, https://github.com/Kaefaell/VoxelDemo, fetched 2026-10-27 (unofficial)
+[S3] Hunternif/VoxelArchitecture, https://github.com/Hunternif/VoxelArchitecture, fetched 2026-10-27 (unofficial)
+[S4] Texturing different block types on an optimized voxel mesh, https://gamedev.stackexchange.com/questions/185036, fetched 2026-10-30 (unofficial)

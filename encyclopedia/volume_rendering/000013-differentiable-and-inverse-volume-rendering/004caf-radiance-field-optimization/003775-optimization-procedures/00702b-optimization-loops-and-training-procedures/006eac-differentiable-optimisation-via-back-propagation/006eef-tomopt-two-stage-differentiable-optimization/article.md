@@ -1,0 +1,131 @@
+# TomOpt Two-Stage Differentiable Optimization
+
+Also called: TomOpt
+
+## Overview
+TomOpt is a differentiable optimization pipeline that updates detector panel positions and budget assignments by minimizing a task-specific loss function using automatic differentiation [S1]. It ensures that parameter changes directly impact final task performance (e.g., fill-level prediction) rather than optimizing proxy metrics like track resolution [S1]. It is distinguished from standard differentiable rendering by its specific two-stage annealing strategy for detector geometry and the explicit decoupling of transverse ($xy$) and longitudinal ($z$) optimization phases [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Initial detector configuration (panel $xy$ positions, $z$ positions, budget assignments), a differentiable forward model of muon tomography, and a task-specific loss function (e.g., mean squared error of fill-level prediction) [S1].
+*   **Outputs:** Optimized detector parameters (panel positions and budget weights) [S1].
+
+**Data Structures:**
+The trainable parameters are grouped into five families [S1]:
+1.  $xy$ positions of detector panels above the passive volume.
+2.  $xy$ positions of detector panels below the passive volume.
+3.  $z$ positions of detector panels above the passive volume.
+4.  $z$ positions of detector panels below the passive volume.
+5.  Budget assignment (weight) per panel [S1].
+
+**Sigmoid Detector Model:**
+Detector efficiency and resolution are modeled using a sigmoid function. The smoothness parameter of this sigmoid decreases across optimization, transitioning from a smooth approximation to a sharp, physical distribution [S1].
+
+**Algorithm Steps:**
+
+1.  **Gradient Monitoring:** Monitor gradients received by the trainable parameters over 5 epochs [S1].
+2.  **Nominal Learning Rate Calculation:** Compute nominal learning rates corresponding to:
+    *   Position updates: 1 cm per epoch [S1].
+    *   Budget weight updates: 0.1 (dimensionless) [S1].
+3.  **Stage One (Global Optimization):**
+    *   Run for 10 epochs [S1].
+    *   Update all trainable parameters ($xy$ positions, $z$ positions, budget assignments) [S1].
+    *   Apply 1-cycle learning rate annealing: nominal rates increase initially for large updates, then decrease to allow convergence [S1].
+    *   Anneal the sigmoid detector model from smooth to sharp [S1].
+4.  **Stage Two (Refinement):**
+    *   Fix $xy$ positions at the center (directly above and below the passive volume) based on Stage One results and domain knowledge [S1].
+    *   Run for 10 epochs [S1].
+    *   Update only $z$ positions and budget assignments [S1].
+    *   Use smaller update steps (derived from re-monitoring gradients for 5 epochs) [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def tomopt_optimize(initial_detector, loss_fn, forward_model):
+    """
+    initial_detector: dict containing 'xy_above', 'xy_below', 'z_above', 'z_below', 'budgets'
+    loss_fn: differentiable function returning scalar loss
+    forward_model: differentiable function returning prediction given detector config
+    """
+    
+    # Stage One
+    # 1. Monitor gradients for 5 epochs to set nominal rates
+    nominal_lr_pos = 1.0e-2  # 1 cm per epoch
+    nominal_lr_budget = 0.1  # dimensionless
+    
+    # 2. Initialize sigmoid smoothness parameter (high/smooth)
+    sigmoid_smoothness = high_value
+    
+    # 3. Run 10 epochs
+    for epoch in range(10):
+        # Anneal learning rate using 1-cycle schedule
+        lr_pos = nominal_lr_pos * one_cycle_schedule(epoch, total_epochs=10)
+        lr_budget = nominal_lr_budget * one_cycle_schedule(epoch, total_epochs=10)
+        
+        # Anneal sigmoid smoothness (decrease to make sharper)
+        sigmoid_smoothness = anneal_sigmoid(epoch, total_epochs=10)
+        
+        # Compute loss and gradients
+        prediction = forward_model(initial_detector, sigmoid_smoothness)
+        loss = loss_fn(prediction)
+        gradients = compute_gradients(loss, initial_detector)
+        
+        # Update all parameters
+        initial_detector['xy_above'] -= lr_pos * gradients['xy_above']
+        initial_detector['xy_below'] -= lr_pos * gradients['xy_below']
+        initial_detector['z_above'] -= lr_pos * gradients['z_above']
+        initial_detector['z_below'] -= lr_pos * gradients['z_below']
+        initial_detector['budgets'] -= lr_budget * gradients['budgets']
+        
+    # Stage Two
+    # 1. Fix xy positions to center
+    initial_detector['xy_above'] = center_xy
+    initial_detector['xy_below'] = center_xy
+    
+    # 2. Re-monitor gradients for 5 epochs to compute new nominal rates for remaining params
+    # (Assuming smaller steps as per source)
+    nominal_lr_pos_stage2 = nominal_lr_pos * reduction_factor # [G] reduction_factor < 1
+    nominal_lr_budget_stage2 = nominal_lr_budget * reduction_factor
+    
+    # 3. Run 10 epochs
+    for epoch in range(10):
+        # Smaller update steps
+        lr_pos = nominal_lr_pos_stage2 * one_cycle_schedule(epoch, total_epochs=10)
+        lr_budget = nominal_lr_budget_stage2 * one_cycle_schedule(epoch, total_epochs=10)
+        
+        # Compute loss and gradients (only for z and budgets)
+        prediction = forward_model(initial_detector, sigmoid_smoothness)
+        loss = loss_fn(prediction)
+        gradients = compute_gradients(loss, initial_detector)
+        
+        # Update only z positions and budgets
+        initial_detector['z_above'] -= lr_pos * gradients['z_above']
+        initial_detector['z_below'] -= lr_pos * gradients['z_below']
+        initial_detector['budgets'] -= lr_budget * gradients['budgets']
+        
+    return initial_detector
+```
+
+**Edge Cases and Pitfalls:**
+*   **Local Minima:** Stage One allows large updates to escape poor initial configurations [S1].
+*   **Physical Validity:** The sigmoid annealing ensures the model approximates physical detectors only near the end of training, preventing premature convergence to non-physical solutions [S1].
+*   **Hardware Constraints:** The method was demonstrated on a CPU (Intel i7, 2018 MacBook Pro) taking ~30 minutes; GPU acceleration is not specified but implied to be beneficial for differentiable pipelines [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Not explicitly defined in asymptotic terms. Empirical measurement: ~30 minutes for the full two-stage process on a 2018 Intel i7 CPU without GPU [S1].
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:**
+    *   Stage One: Mean MSE of 0.0014 m², average absolute error on fill-level prediction of 2.8 cm [S1].
+    *   Stage Two: Mean MSE of 0.0011 m², average absolute error on fill-level prediction of 2.5 cm [S1].
+*   **Strengths:** Directly optimizes for task-specific performance (fill-level prediction) rather than proxy metrics; can refine human-designed detectors [S1].
+*   **Limitations:** Requires a differentiable forward model; computational cost depends on the complexity of the forward model and the number of epochs [S1].
+*   **When to use:** When detector design parameters (positions, weights) can be parameterized and differentiated, and the goal is to maximize a specific task metric [S1].
+*   **When not to use:** When the forward model is not differentiable or when computational resources are extremely limited relative to the cost of training [S1].
+
+## Background
+TomOpt was developed for muon tomography, specifically for estimating the fill-level of furnace ladles at metal refineries [S1]. It was introduced to allow detector designers to specify end goals numerically and optimize designs using automatic differentiation, ensuring changes have a genuine impact on final performance [S1]. The method was compared against human-designed baselines, including a paired configuration with 5 cm separation and 25 cm inter-pair spacing, and an even 10 cm spacing configuration [S1].
+
+## Sources
+[S1] TomOpt: Differential optimisation for task- and constraint-aware design of particle detectors in the context of muon tomography, https://doi.org/10.1088/2632-2153/ad52e7, fetched 2026-10-26

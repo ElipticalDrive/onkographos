@@ -1,0 +1,117 @@
+--- v002.md
++++ v003.md
+@@ -8,5 +8,5 @@
+ ## How it works
+ **Inputs:**
+-- A set of calibrated monocular 360-degree images.
++- A set of calibrated monocular 360-degree images [S1].
+ - A sparse SfM point cloud [S1].
+ - Camera poses and intrinsic parameters (focal lengths $f_x, f_y$, principal points $c_x, c_y$) [S1].
+@@ -18,5 +18,5 @@
+ **Data Structures:**
+ - **3D Gaussian:** Defined by a mean position $\mathbf{m}$, a rotation matrix $\mathbf{W}$, a scaling vector, and an opacity $o_i$ [S1]. The covariance in world space is derived from these parameters [S1].
+-- **Camera Space Point:** $\mathbf{t} = [t_x, t_y, t_z]^T$, obtained by transforming the world position $\mathbf{m}$ using the camera-to-world transformation matrix $\mathbf{T}_{cw}$ [S1].
++- **Camera Space Point:** $\mathbf{t} = [t_x, t_y, t_z]^T$, obtained by transforming the world position $\mathbf{m}$ using the world-to-camera transformation matrix $\mathbf{T}_{cw}$ [S1].
+ - **Tile Grid:** The equirectangular image is partitioned into a grid of tiles [S1].
+ 
+@@ -89,64 +89,55 @@
+     Returns: p_x, p_y tensors of shape (N,)
+     """
+-    # Compute distance t_r
+     t_r = torch.sqrt(t_x**2 + t_y**2 + t_z**2)
+-    
+-    # Compute longitude and latitude
+-    # arctan2(y, x) in standard math, but here we use arctan2(t_x/t_z)
+-    # Note: The formula in [S1] uses arctan2(t_x / t_z). 
+-    # Standard arctan2 takes (y, x). Here the "y" component is t_x and "x" component is t_z.
+     lon = torch.atan2(t_x, t_z)
+     lat = torch.asin(t_y / t_r)
+-    
+-    # Map to uniform screen space [-1, 1)
+     s_x = lon / math.pi
+     s_y = 2 * lat / math.pi
+-    
+-    # Map to pixel coordinates
+     p_x = (s_x + 1) * W / 2
+     p_y = (s_y + 1) * H / 2
+-    
+     return p_x, p_y
++
++def evaluate_2d_gaussian(delta_p, cov_2d):
++    """
++    Evaluates the 2D Gaussian PDF at offset delta_p with covariance cov_2d.
++    delta_p: Tensor of shape (2,)
++    cov_2d: Tensor of shape (2, 2)
++    Returns: float
++    """
++    det = cov_2d[0, 0] * cov_2d[1, 1] - cov_2d[0, 1] * cov_2d[1, 0]
++    inv_det = 1.0 / det
++    inv_cov = torch.tensor([
++        [cov_2d[1, 1] * inv_det, -cov_2d[0, 1] * inv_det],
++        [-cov_2d[1, 0] * inv_det, cov_2d[0, 0] * inv_det]
++    ])
++    quad = delta_p @ inv_cov @ delta_p
++    return torch.exp(-0.5 * quad) / (2 * math.pi * torch.sqrt(det))
+ 
+ def render_tile(tile_gaussians, tile_pixels, W, H):
+     """
+     Renders a single tile.
+-    tile_gaussians: List of Gaussian attributes (position, covariance, color, opacity)
+-    tile_pixels: List of pixel coordinates (p_x, p_y) in the tile
++    tile_gaussians: List of dicts with keys: 'p_x', 'p_y', 'opacity', 'color', 'covariance_2d'
++    tile_pixels: List of tuples (p_x, p_y)
+     """
+-    # Initialize output buffer
+-    # Assuming standard alpha blending accumulation
+-    # This is a simplified representation of the thread-cooperative process
+-    
+     # Sort Gaussians by t_r (distance from camera center)
+-    # t_r is computed from the Gaussian's camera-space position
+-    sorted_gaussians = sort_by_tr(tile_gaussians)
++    # t_r is precomputed or derived from camera-space position
++    sorted_gaussians = sorted(tile_gaussians, key=lambda g: g['t_r'])
+     
+     results = []
+     for p_x, p_y in tile_pixels:
+         alpha_acc = 0.0
+-        color_acc = torch.zeros(3) # Assuming RGB
++        color_acc = torch.zeros(3)
+         
+         for g in sorted_gaussians:
+-            # Compute alpha for this Gaussian at this pixel
+-            # alpha_i = o_i * G_i(delta_p)
+-            # G_i is the 2D Gaussian PDF evaluated at the offset from center
+-            delta_p = compute_offset(p_x, p_y, g.center_p_x, g.center_p_y, g.covariance)
+-            alpha_i = g.opacity * evaluate_2d_gaussian(delta_p, g.covariance)
++            delta_p = torch.tensor([p_x - g['p_x'], p_y - g['p_y']])
++            alpha_i = g['opacity'] * evaluate_2d_gaussian(delta_p, g['covariance_2d'])
+             
+-            # Stop if alpha is saturated
+             if alpha_acc >= 0.9999:
+                 break
+                 
+-            # Alpha blend
+-            weight = alpha_i * (1 - alpha_acc)
+-            color_acc = color_acc * (1 - alpha_i) + g.color * weight
++            weight = alpha_i * (1.0 - alpha_acc)
++            color_acc = color_acc * (1.0 - alpha_i) + g['color'] * weight
+             alpha_acc += weight
+             
+-            # If alpha_acc is close to 1, we can break early if desired, 
+-            # but the paper specifies stopping at 0.9999 accumulation or similar logic
+-            if alpha_acc >= 0.9999:
+-                break
+-                
+         results.append(color_acc)
+         
+@@ -178,9 +169,8 @@
+ ## Operating characteristics
+ - **Time Complexity:** Real-time rendering speed is achieved through GPU acceleration and tile-based rasterization [S1].
+-- **Memory Complexity:** Depends on the number of 3D Gaussians and the resolution of the equirectangular image [S1].
++- **Memory Complexity:** Not given in the sources.
+ - **Strengths:** Direct screen-space splatting avoids the suboptimal two-stage projection of tangent-plane methods [S1]. It does not rely on scene assumptions or deep networks, enabling application in diverse indoor and outdoor scenes [S1].
+ - **Limitations:** Not given in the sources.
+ - **When to use:** When omnidirectional novel view synthesis is required from monocular 360-degree images [S1].
+-- **When not:** When perspective images are the only input and omnidirectional output is not needed (standard 3DGS is more appropriate) [S1].
+ 
+ ## Background

@@ -1,0 +1,114 @@
+# Leaf Octree for Iso Mesh
+
+Also called: leafoctree
+
+## Overview
+The Leaf Octree is a compact spatial data structure designed to store iso-surface mesh elements (points and quads) within the leaf nodes of an octree, enabling efficient ray tracing of implicit surfaces [S1, unofficial]. It distinguishes itself from general volume rendering octrees by explicitly storing geometric primitives (vertices and faces) rather than scalar field values, and by packing node metadata into a single 32-bit word to minimize memory overhead [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+The structure is built from a set of iso-surface primitives (points and quads) extracted from a scalar field or signed distance field. The output is a hierarchical tree where internal nodes point to children or leaf nodes, and leaf nodes contain the compressed mesh data.
+
+**Data Structures:**
+
+1.  **Node Entry (`u32`):**
+    Each node in the octree is represented by a 32-bit unsigned integer containing:
+    *   `idx`: 30-bit unsigned integer. In internal nodes, this is an index into a children array. In leaf nodes, it may reference mesh data or be unused depending on implementation specifics.
+    *   `isleaf`: 1-bit boolean. `1` if the node is a leaf, `0` otherwise.
+    *   `empty`: 1-bit boolean. `1` if the node contains no geometry, `0` otherwise.
+    *   *Layout:* Bits 0-29 are `idx`, Bit 30 is `isleaf`, Bit 31 is `empty`.
+
+2.  **Quad Structure:**
+    Represents a triangular or quadrilateral face on the iso-surface.
+    *   `index[4]`: Array of 3 signed chars (`int8_t`). Stores vertex indices. The size `3` suggests a specific compact encoding or a subset of vertices for a quad (e.g., triangle fan or specific primitive type). *Note: The source specifies `index[4]` but size 3, implying a potential typo in the source or a specific 3-vertex triangle stored in a 4-slot array. We assume 3 vertices for a triangle or 4 for a quad, but the source explicitly says "3-component signed char array index[4]". This is contradictory. Given "quad structure", it likely means 4 vertices. However, "3-component" might refer to the dimensionality. Let's look closer: "3-component signed char array index[4]". This likely means `index` is an array of 4 elements, each being a signed char? No, "3-component" usually refers to vectors. Let's re-read carefully: "3-component signed char array index[4]". This is ambiguous. It could mean an array of 4 signed chars (indices), or an array of 4 vectors? Given "vertex indices", it's likely 4 indices. If they are signed chars, they are 8-bit. 4 indices * 8 bits = 32 bits. This fits well.*
+    *   `matindex`: 32-bit unsigned integer (`u32`). Index into a material or property array.
+
+3.  **Point Structure (for Iso Surface Octree variant):**
+    *   `pos`: `vec3f` (32-bit float, 3 components). World position of the point.
+    *   `ownerlo`: `u32`. Low 32 bits of the parent leaf pointer or collapsed point pointer.
+    *   `ownerhi`: `u32` (optional). High 32 bits if 64-bit pointers are used.
+    *   *Flag:* The lowest bit of `ownerlo` indicates if the point is merged.
+
+**Algorithm Steps:**
+
+1.  **Spatial Segmentation:**
+    Divide the 3D domain into subgrids. The standard constant for this segmentation is `SUBGRID = 16` [S1, unofficial].
+
+2.  **Iso-surface Extraction:**
+    Extract points and quads from the underlying scalar field using a marching-cubes-like or similar iso-surface extraction algorithm within each subgrid.
+
+3.  **Tree Construction:**
+    *   Recursively subdivide the space.
+    *   If a node contains geometry, mark `empty = 0`.
+    *   If a node is a leaf, store the mesh primitives (quads/points) in the leaf data structure.
+    *   If a node is internal, store pointers to its 8 children.
+
+4.  **Compression/Packing:**
+    *   Pack `idx`, `isleaf`, and `empty` into a single `u32` node entry.
+    *   Store quads as `index[4]` (signed chars) and `matindex` (`u32`).
+
+5.  **BVH Acceleration (Optional/Variants):**
+    In the Iso Surface Octree variant, a BVH (Bounding Volume Hierarchy) intersector is attached to leaf nodes to accelerate ray tracing against the stored primitives [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Node packing
+def pack_node(idx, isleaf, empty):
+    # idx: 30-bit unsigned int
+    # isleaf: 1-bit bool
+    # empty: 1-bit bool
+    # Layout: [empty(1)][isleaf(1)][idx(30)]
+    # Bit 31: empty, Bit 30: isleaf, Bits 0-29: idx
+    return (int(empty) << 31) | (int(isleaf) << 30) | (idx & 0x3FFFFFFF)
+
+# Quad storage
+class Quad:
+    def __init__(self, v0, v1, v2, v3, mat_idx):
+        # v0..v3 are vertex indices, stored as signed chars
+        # Note: Source says "3-component signed char array index[4]"
+        # This is interpreted as 4 signed char indices
+        self.index = [v0, v1, v2, v3] 
+        self.matindex = mat_idx
+
+# Point storage (for Iso Surface Octree variant)
+class Point:
+    def __init__(self, pos, owner_lo, owner_hi=None, is_merged=False):
+        self.pos = pos # vec3f
+        self.ownerlo = owner_lo | (1 if is_merged else 0) # LSB indicates merge
+        self.ownerhi = owner_hi
+
+# Leaf Node Structure
+class LeafNode:
+    def __init__(self):
+        self.quads = []
+        self.points = []
+        self.bvh = None # Optional BVH intersector
+```
+
+**Parameters:**
+*   `SUBGRID`: 16. Used for spatial segmentation of the domain [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Pointer Size:** The `ownerlo`/`ownerhi` structure in the Iso Surface Octree variant depends on whether 32-bit or 64-bit pointers are used. If 64-bit pointers are required, `ownerhi` must be provided [S1, unofficial].
+*   **Merged Points:** The lowest bit of `ownerlo` is reserved for the merge flag. Implementers must ensure this bit is preserved when storing/retrieving pointers [S1, unofficial].
+*   **Quad Indexing:** The source description of the quad index array ("3-component signed char array index[4]") is syntactically ambiguous. It likely implies 4 signed char indices. Implementers should verify if the "3-component" refers to the vertex dimensionality (x,y,z) or is a typo for "4-component" (4 indices). Given the context of "vertex indices", 4 indices is standard for a quad.
+
+## Subtopics
+
+### Iso Surface Octree
+An octree structure specifically for spatial segmentation used in iso-surface extraction. It supports merged points and includes a BVH (Bounding Volume Hierarchy) acceleration structure within leaf nodes for efficient ray tracing [S1, unofficial]. It differs from the basic Leaf Octree by explicitly storing point structures with owner pointers and BVH intersector references, making it more suitable for ray-traced rendering of iso-surfaces [S1, unofficial]. Choose this variant when ray tracing iso-surfaces is the primary rendering goal and BVH acceleration is needed.
+
+## Operating characteristics
+*   **Memory:** Highly compact due to 32-bit node packing and signed char vertex indices. The exact memory footprint depends on the number of primitives and the depth of the tree.
+*   **Performance:** Ray tracing performance is accelerated by the optional BVH in leaf nodes. Traversal is efficient due to the sparse nature of the octree.
+*   **Strengths:** Low memory overhead, fast ray tracing for iso-surfaces, compact storage.
+*   **Limitations:** Specific to iso-surface rendering; not a general-purpose volume rendering structure. The ambiguity in quad index storage may require implementation-specific decisions.
+
+## Background
+The Leaf Octree and its variants are described in the `mini.q` project by bsegovia [S1, unofficial]. The project appears to be a small, self-contained renderer or graphics library, focusing on efficient data structures for rendering. The specific implementation details are found in the source code of this repository.
+
+## Sources
+[S1] bsegovia/mini.q, https://github.com/bsegovia/mini.q, fetched 2026-10-26 (unofficial)

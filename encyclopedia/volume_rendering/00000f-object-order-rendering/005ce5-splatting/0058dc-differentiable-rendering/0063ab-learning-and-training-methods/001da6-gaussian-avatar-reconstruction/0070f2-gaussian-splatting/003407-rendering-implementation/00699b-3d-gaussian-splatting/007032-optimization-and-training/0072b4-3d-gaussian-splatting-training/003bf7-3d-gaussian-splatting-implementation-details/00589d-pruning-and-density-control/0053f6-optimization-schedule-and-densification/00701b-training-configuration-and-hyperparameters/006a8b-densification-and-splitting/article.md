@@ -1,0 +1,245 @@
+# Densification and Splitting
+
+Also called: 3D Gaussian Splatting Densification and Splitting
+
+## Overview
+Densification and splitting is the primary mechanism in 3D Gaussian Splatting (3DGS) for adapting the primitive population to scene complexity during optimization. It addresses the problem of insufficient geometric detail by subdividing existing Gaussians into smaller, more numerous primitives in regions where the current representation fails to reconstruct the input images accurately [S1, S2]. Unlike static initialization methods, this dynamic process allows the model to grow its capacity iteratively, balancing reconstruction fidelity against computational cost [S1]. It sets itself apart from sibling methods like [Gaussian Pruning and Removal](21353-gaussian-pruning-and-removal.md) by focusing on constructive growth rather than destructive culling, although the two are often paired in a complete density control loop [S1].
+
+## How it works
+The standard densification and splitting procedure, as defined in the original 3DGS paper and its immediate variants, operates on a per-iteration basis during the training phase. It relies on gradient-based heuristics to identify Gaussians that require refinement.
+
+### Inputs and Outputs
+*   **Inputs:**
+    *   Current set of $N$ 3D Gaussians $\mathcal{G} = \{g_1, \dots, g_N\}$.
+    *   Each Gaussian $g_i$ is defined by position $\mu_i \in \mathbb{R}^3$, covariance matrix $\Sigma_i \in \mathbb{R}^{3 \times 3}$ (or scale $s_i \in \mathbb{R}^3$ and rotation $q_i \in \mathbb{R}^4$), opacity $\alpha_i \in [0, 1]$, and spherical harmonic coefficients for color.
+    *   Positional gradients $\nabla_{\mu_i} L$ accumulated from the most recent $k$ iterations (typically $k=100$).
+    *   Opacity values $\alpha_i$.
+    *   Hyperparameters:
+        *   $N_{split}$: Number of split operations allowed per iteration.
+        *   $N_{clone}$: Number of clone operations allowed per iteration.
+        *   $\tau_{grad}$: Positional gradient magnitude threshold for splitting.
+        *   $\tau_{op}$: Opacity threshold for cloning (Gaussians with opacity below this are pruned; those above may be cloned if gradient is high).
+        *   $T_{start}$: Iteration at which densification begins.
+        *   $T_{end}$: Iteration at which densification stops.
+        *   $C_{decay}$: Decay factor for the gradient accumulation window.
+*   **Outputs:**
+    *   Updated set of Gaussians $\mathcal{G}'$, potentially with increased cardinality $N' > N$.
+
+### Data Structures
+The implementation typically maintains two parallel arrays or a single Structure of Arrays (SoA) buffer on the GPU:
+1.  **Gaussian Properties:**
+    *   `positions`: $N \times 3$ float32 tensor.
+    *   `scales`: $N \times 3$ float32 tensor (log-space or linear).
+    *   `rotations`: $N \times 4$ float32 tensor (normalized quaternions).
+    *   `opacities`: $N$ float32 tensor.
+    *   `sh_coeffs`: $N \times C$ float32 tensor (where $C$ depends on SH degree).
+2.  **Gradient Accumulators:**
+    *   `grad_accum`: $N \times 3$ float32 tensor, storing the sum of positional gradients over the last $k$ iterations.
+3.  **Selection Masks:**
+    *   `split_mask`: Boolean tensor of size $N$, indicating which Gaussians are selected for splitting.
+    *   `clone_mask`: Boolean tensor of size $N$, indicating which Gaussians are selected for cloning.
+
+### Numbered Steps
+1.  **Gradient Accumulation:**
+    For each training iteration $t$:
+    *   Render the scene and compute the loss $L$.
+    *   Compute gradients $\nabla_{\mu_i} L$ for all Gaussians.
+    *   Update the accumulator:
+        $$ \text{grad\_accum}_i = \text{grad\_accum}_i \cdot C_{decay} + \|\nabla_{\mu_i} L\|_2 $$
+    *   If $t > T_{start}$, proceed to selection.
+
+2.  **Selection for Splitting:**
+    Identify Gaussians eligible for splitting based on positional gradient magnitude and opacity:
+    *   Condition 1: $\text{grad\_accum}_i > \tau_{grad}$
+    *   Condition 2: $\alpha_i < \alpha_{threshold}$ (to avoid splitting already high-opacity, well-reconstructed Gaussians, though some implementations use a lower bound to prevent splitting very small, insignificant Gaussians).
+    *   Select the top $N_{split}$ Gaussians satisfying these conditions. Mark them in `split_mask`.
+
+3.  **Selection for Cloning:**
+    Identify Gaussians eligible for cloning (copying without subdivision):
+    *   Condition 1: $\text{grad\_accum}_i > \tau_{grad}$
+    *   Condition 2: $\alpha_i \ge \alpha_{threshold}$
+    *   Select the top $N_{clone}$ Gaussians. Mark them in `clone_mask`.
+
+4.  **Pruning (Pre-Splitting):**
+    Remove Gaussians that are too small or too transparent to contribute meaningfully:
+    *   Condition: $\alpha_i < \alpha_{prune}$ OR scale of Gaussian is below a minimum threshold.
+    *   Set opacity to 0 or remove from the list. [S1, S2]
+
+5.  **Splitting Operation:**
+    For each Gaussian $g_i$ marked in `split_mask`:
+    *   Create two new Gaussians $g_{i,1}$ and $g_{i,2}$.
+    *   **Position:** The new positions are derived from the parent's position $\mu_i$ and scale. In the standard 3DGS implementation, the new positions are sampled from the parent's Gaussian distribution, or more commonly, placed at $\mu_i \pm \delta \cdot s_i$ along the principal axes. The exact method varies:
+        *   *Standard 3DGS:* Sample two new positions from $\mathcal{N}(\mu_i, \Sigma_i)$.
+        *   *VCR-GauS (Variant):* Split along the axis with the largest scale, setting positions to evenly divide the maximum scale [S1].
+    *   **Scale:** Reduce the scale of the children. A common heuristic is to scale down by a factor (e.g., 1.6) in all dimensions, or specifically along the largest axis.
+    *   **Rotation:** Copy the parent's rotation.
+    *   **Opacity:** Initialize opacity to half the parent's opacity ($\alpha_i / 2$) or a small constant.
+    *   **Color:** Copy the parent's SH coefficients.
+    *   **Gradient:** Reset the gradient accumulator for the new Gaussians to 0.
+
+6.  **Cloning Operation:**
+    For each Gaussian $g_i$ marked in `clone_mask`:
+    *   Create a new Gaussian $g_{i,clone}$.
+    *   **Position:** Copy $\mu_i$.
+    *   **Scale:** Copy $s_i$.
+    *   **Rotation:** Copy $q_i$.
+    *   **Opacity:** Copy $\alpha_i$.
+    *   **Color:** Copy SH coefficients.
+    *   **Gradient:** Reset accumulator to 0.
+
+7.  **Concatenation:**
+    Append the new Gaussians to the existing list $\mathcal{G}$, removing the pruned ones. Update $N$.
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def densify_and_prune(gaussians, gradients_accum, iteration, config):
+    """
+    gaussians: List of Gaussian objects with attributes:
+               pos (3,), scale (3,), rot (4,), opacity (1,), sh_coeffs (C,)
+    gradients_accum: Tensor (N, 3), accumulated positional gradients
+    iteration: Current training iteration number
+    config: Dictionary containing hyperparameters
+    """
+    if iteration < config['T_start']:
+        return gaussians
+
+    N = len(gaussians)
+    grad_magnitudes = torch.norm(gradients_accum, dim=1)
+    
+    # 1. Pruning
+    prune_mask = (gaussians.opacity < config['alpha_prune']) | \
+                 (torch.max(gaussians.scale, dim=1).values < config['min_scale'])
+    
+    # Remove pruned Gaussians
+    keep_mask = ~prune_mask
+    gaussians = [g for g, k in zip(gaussians, keep_mask) if k]
+    gradients_accum = gradients_accum[keep_mask]
+    
+    # 2. Selection for Splitting and Cloning
+    # Split: High gradient, Low opacity
+    split_candidates = (grad_magnitudes > config['grad_threshold']) & \
+                       (gaussians.opacity < config['alpha_clone_threshold'])
+    
+    # Clone: High gradient, High opacity
+    clone_candidates = (grad_magnitudes > config['grad_threshold']) & \
+                       (gaussians.opacity >= config['alpha_clone_threshold'])
+    
+    # Select top N_split and N_clone
+    split_indices = torch.topk(split_candidates.float(), config['N_split'], largest=True)[1]
+    clone_indices = torch.topk(clone_candidates.float(), config['N_clone'], largest=True)[1]
+    
+    new_gaussians = []
+    new_grads = []
+    
+    # 3. Process Splitting
+    for idx in split_indices:
+        parent = gaussians[idx]
+        # Create two children
+        child1 = copy_gaussian(parent)
+        child2 = copy_gaussian(parent)
+        
+        # Adjust positions: Standard 3DGS samples from distribution
+        # child1.pos = parent.pos + sample_normal(parent.scale)
+        # child2.pos = parent.pos - sample_normal(parent.scale)
+        # Alternative (VCR-GauS): Split along largest scale axis
+        # axis = argmax(parent.scale)
+        # offset = parent.scale[axis]
+        # child1.pos = parent.pos + offset * basis_vector[axis]
+        # child2.pos = parent.pos - offset * basis_vector[axis]
+        
+        # Reduce scale
+        child1.scale = parent.scale / config['scale_divisor']
+        child2.scale = parent.scale / config['scale_divisor']
+        
+        # Halve opacity
+        child1.opacity = parent.opacity / 2.0
+        child2.opacity = parent.opacity / 2.0
+        
+        new_gaussians.extend([child1, child2])
+        new_grads.append(torch.zeros(3))
+        new_grads.append(torch.zeros(3))
+        
+    # 4. Process Cloning
+    for idx in clone_indices:
+        parent = gaussians[idx]
+        child = copy_gaussian(parent)
+        # Opacity might be reset or kept, usually kept or slightly adjusted
+        new_gaussians.append(child)
+        new_grads.append(torch.zeros(3))
+        
+    # 5. Update Gaussians List
+    # Note: In practice, this is done via tensor concatenation for GPU efficiency
+    all_gaussians = gaussians + new_gaussians
+    all_grads = torch.cat([gradients_accum, torch.stack(new_grads)])
+    
+    return all_gaussians, all_grads
+```
+
+### Edge Cases and Pitfalls
+*   **Gradient Explosion:** If the learning rate is too high, gradients can explode, causing massive densification and memory exhaustion. Clamping gradients is essential [S1].
+*   **Cluster Formation:** Standard sampling-based splitting can lead to clusters of Gaussians at the same location, causing rendering artifacts and inefficient memory usage. Deterministic splitting (e.g., along principal axes) mitigates this [S1].
+*   **Opacity Decay:** Opacity must be managed carefully. If opacity is not halved during splitting, the total opacity of the scene can exceed 1, causing over-saturation. If it decays too fast, the Gaussians become invisible [S2].
+*   **Boundary Conditions:** Densification should stop after a certain number of iterations ($T_{end}$) to allow the model to converge. Continuing densification indefinitely leads to overfitting and increased rendering time [S6, unofficial].
+
+## Subtopics
+
+### [Score-based Densification](4705-score-based-densification.md)
+Score-based Densification is a constructive training strategy for 3D Gaussian Splatting that controls model size by adding new primitives only where they improve reconstruction quality, adhering to a strict user-defined budget without requiring pruning. Unlike standard Gaussian Splatting which relies on heuristic splitting and subsequent culling, this method uses a scoring function to guide densification, ensuring the final model size is predictable and fixed. It distinguishes itself from siblings like [Gaussian Insertion and Pruning](10074-gaussian-insertion-and-pruning.md) by eliminating the need for destructive culling operations during training, thereby avoiding optimization instability and hardware constraint violations.
+
+### [Gaussian Insertion and Pruning](10074-gaussian-insertion-and-pruning.md)
+Gaussian Insertion and Pruning is a density control strategy for 3D Gaussian Splatting SLAM that manages the population of Gaussians during optimization to handle newly visible scene elements and remove geometrically unstable outliers. It differs from static densification methods by integrating insertion and pruning directly into the keyframe-based optimization loop, using rendered depth and visibility checks to maintain a coherent 3D structure without requiring strong external priors.
+
+### [Mixed-Primitive Densification](13287-mixed-primitive-densification.md)
+Mixed-Primitive Densification is a strategy for 3D Gaussian Splatting that extends the standard ellipsoidal primitive to include Gaussian triangles and lines, addressing the limitation of standard Gaussians in representing thin, linear, or planar structures. It differs from sibling methods like [Score-based Densification](4705-score-based-densification.md) and [AdpSplit](16061-adpsplit.md) by explicitly changing the geometric primitive type during densification rather than just adjusting the shape or position of existing ellipsoids. It builds on [Densification and Splitting](20677-densification-and-splitting.md) by introducing a hybrid primitive system.
+
+### [Error-guided Guided Sampling](15896-error-guided-guided-sampling.md)
+Error-guided Guided Sampling (EMS) is a densification strategy for 3D Gaussian Splatting that targets regions of high perceptual error rather than relying solely on gradient magnitude or opacity thresholds. It identifies low-SSIM training views, computes a pixel-wise error mask, and spawns new Gaussians specifically in high-error areas while using depth information and spatial masks to prevent overlapping placements and edge artifacts. Unlike standard densification which refines existing primitives based on local gradients, EMS performs a global view-based error analysis to insert new primitives where the current representation fails to reconstruct the image structure.
+
+### [AdpSplit](16061-adpsplit.md)
+AdpSplit is an error-driven adaptive split operator for 3D Gaussian Splatting that replaces fixed-cardinality random child placement with view-loss-aware child generation. It determines the number of split children and initializes their parameters from L1-pixel-error region statistics, enabling fewer densification iterations and reduced training time while preserving rendering quality. Unlike vanilla 3DGS which uses a fixed $N=2$ binary split, AdpSplit adaptively determines the number of children based on the observed error structure, avoiding the bottleneck where binary splits require $\log_2 G$ rounds to expose a structure requiring $G$ Gaussians.
+
+### [Child Gaussian Initialization](16063-child-gaussian-initialization.md)
+Child Gaussian Initialization is the specific procedure for generating the geometric and photometric properties of new 3D Gaussian primitives during the splitting phase of adaptive densification. It solves the problem of how to accurately map a parent Gaussian's error region—identified in camera space—into a valid 3D Gaussian in world space, ensuring the child is positioned on the scene geometry and oriented correctly relative to the viewing direction. It sets itself apart from generic splitting methods by explicitly unprojecting image-space covariance ellipses into world-space scales and orientations using Mahalanobis distance minimization and perspective-aware clamping, rather than simple isotropic scaling or random sampling.
+
+### [Compactness-Aware Frequency-Guided Densification (CAFe-GS)](19575-compactness-aware-frequency-guided-densification-cafe-gs.md)
+CAFe-GS is a densification strategy for 3D Gaussian Splatting that replaces the traditional positional-gradient threshold with a per-Gaussian error score modulated by local frequency cues to control the quality-compactness trade-off. It sets itself apart from its siblings by providing a single, interpretable threshold $\tau$ that allows users to explicitly favor either high fidelity or high compactness, achieving comparable PSNR to standard 3DGS with 2–4× fewer Gaussians, or up to 12–15× fewer Gaussians with a controlled 2–2.5 dB PSNR drop.
+
+### [Inhomogeneity-Based Splitting](22991-inhomogeneity-based-splitting.md)
+Inhomogeneity-Based Splitting is a densification technique for 3D Gaussian Splatting that addresses the formation of "needle-like" artifacts and sparse point clouds in large, flat, untextured regions. It sets itself apart from standard densification by explicitly measuring the ratio of principal scale eigenvalues to determine split necessity, rather than relying solely on position or opacity gradients.
+
+### Blur Splitting
+A densification step added to the 3DGS baseline that improves rendering quality and LPIPS metrics [S2]. Adding Blur Split to 3DGS baseline increases Gaussians from 3.35M to 3.74M, SSIM from 0.815 to 0.819, and LPIPS from 0.216 to 0.195 [S2].
+
+### Parallel Respawning and Densification with Edge Case Handling
+A densification strategy where respawn and densify operations are performed in parallel, requiring specific edge case handling to prevent hierarchy degeneration [S3, unofficial]. If two sibling nodes both need to be respawned, only respawn the right node. This causes the left node to become a new dead leaf, which will be respawned in the next densification iteration [S3, unofficial]. If a node needs to be respawned whose sibling is not a leaf node, replace the entire parent node with the subtree of the node being respawned [S3, unofficial]. Apply a pruning strategy: zero the opacity of Gaussians that have not contributed for a number of iterations equal to twice the size of the training set. These will be respawned in the next densification iteration [S3, unofficial].
+
+### Densify and Prune Optimization
+Adjusting and removing the `densify_and_split` operation within the `densify_and_prune` process to improve speed without impacting rendering quality [S4, unofficial].
+
+### Rendering-Guided Densification
+A densification strategy that improves the quality of re-observed parts of the environment and allows the map to be extended by densifying regions based on color and depth rendering errors [S5]. On the Replica dataset (Room0), adding densification improved PSNR from 25.58 to 25.96 dB and SSIM from 0.85 to 0.89 [S5]. Unlike methods that use separate neural networks for color and depth (e.g., Point-SLAM), this method optimizes the same Gaussian parameters for both, which can impact depth estimation but allows for unified densification [S5].
+
+### Global-to-local densification framework
+A two-phase densification strategy that separates global spatial distribution from local refinement to reduce computational redundancy in early optimization stages [S6, unofficial]. Phase 1 (Global Spread): Apply only the split operation to achieve fast and effective spatial distribution, leveraging minimal Gaussian counts to minimize redundant computation on localized details [S6, unofficial]. Phase 2 (Local Refinement): Employ both split and clone operations. Since satisfactory spatial distribution is established, clone operations enable efficient local refinement [S6, unofficial]. Tdensify: Total densification iteration count. Default value is 25K [S6, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** The densification step adds $O(N)$ overhead per iteration for gradient accumulation and selection, where $N$ is the number of Gaussians. The actual splitting and cloning operations are proportional to the number of selected Gaussians, which is typically a small fraction of $N$. However, the increasing $N$ over time leads to higher rendering and gradient computation costs.
+*   **Memory Complexity:** Memory usage scales linearly with the number of Gaussians $N$. Since densification increases $N$, memory consumption grows during training. This can lead to out-of-memory errors on GPUs with limited VRAM if the scene is complex or the hyperparameters are too aggressive [S2].
+*   **Measured Performance:** In standard 3DGS, densification typically runs for the first 3,000–5,000 iterations of a 30,000-iteration training schedule. The number of Gaussians can increase from an initial few hundred thousand to several million [S2].
+*   **Strengths:** Allows the model to adapt to varying levels of detail in the scene. Efficiently captures fine geometric structures and high-frequency textures.
+*   **Limitations:** Can lead to overfitting if not stopped early. Prone to creating "floaters" or artifacts if splitting is not guided by opacity or gradient thresholds. Computationally expensive due to the increasing number of primitives.
+*   **When to Use:** Essential for high-fidelity reconstruction of complex scenes with varying detail levels.
+*   **When Not to Use:** Not suitable for real-time applications where the number of primitives must be strictly bounded, or for scenes with very low texture where densification provides little benefit.
+
+## Background
+Densification and splitting was introduced in the original 3D Gaussian Splatting paper by Kerbl et al. in 2023 [S1]. It was designed to address the limitations of static point cloud representations by allowing the Gaussian primitives to adapt their density and size during optimization. The method has since become a standard component of 3DGS training pipelines, with numerous variants proposed to improve its efficiency, accuracy, and robustness [S2][S6, unofficial].
+
+## Sources
+[S1] VCR-GauS: View Consistent Depth-Normal Regularizer for Gaussian Surface Reconstruction, https://doi.org/10.52202/079017-4434, fetched 2026-10-29
+[S2] Mini-Splatting: Representing Scenes with a Constrained Number of Gaussians, https://doi.org/10.1007/978-3-031-72980-5_10, fetched 2026-10-26
+[S3] A LoD of Gaussians: Unified Training and Rendering for Ultra-Large Scale Reconstruction with External Memory, https://doi.org/10.48550/arXiv.2507.01110, fetched 2026-10-28 (unofficial)
+[S4] I3DGS: Improve 3D Gaussian Splatting from Multiple Dimensions, https://arxiv.org/abs/2405.06408v1, fetched 2026-10-26 (unofficial)
+[S5] High-Fidelity SLAM Using Gaussian Splatting with Rendering-Guided Densification and Regularized Optimization, https://core.ac.uk/download/685139838.pdf, fetched 2026-10-31
+[S6] Decomposing Densification in Gaussian Splatting for Faster 3D Scene Reconstruction, https://doi.org/10.48550/arXiv.2507.20239, fetched 2026-10-30 (unofficial)

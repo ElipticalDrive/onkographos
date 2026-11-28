@@ -1,0 +1,175 @@
+--- v002.md
++++ v003.md
+@@ -43,141 +43,67 @@
+ ```python
+ def ingeo_train(geometry_priors, instant_ngp_model, k, update_freq, splat_radius, target_iterations):
+-    """
+-    Train Instant-NGP with geometry priors.
+-    
+-    Args:
+-        geometry_priors: Point cloud (list of 3D points) or depth images.
+-        instant_ngp_model: Instant-NGP model instance (hash grid, density MLP, color MLP).
+-        k: Density scaling factor > 1.
+-        update_freq: Iteration interval for occupancy grid updates.
+-        splat_radius: Radius for point cloud splatting.
+-        target_iterations: Total training iterations.
+-        
+-    Returns:
+-        Trained model.
+-    """
+     # Step 1: Convert priors to initial occupancy grid
+     initial_occupancy_grid = {}
+-    
+     if isinstance(geometry_priors, list):  # Point cloud input
+         for point in geometry_priors:
+             # Splat point to nearby cells within radius
+-            nearby_cells = _get_cells_within_radius(point, splat_radius)
+-            for cell in nearby_cells:
++            for dx in range(-splat_radius, splat_radius + 1):
++                for dy in range(-splat_radius, splat_radius + 1):
++                    for dz in range(-splat_radius, splat_radius + 1):
++                        if dx*dx + dy*dy + dz*dz <= splat_radius*splat_radius:
++                            cell = (point[0] + dx, point[1] + dy, point[2] + dz)
++                            initial_occupancy_grid[cell] = 1.0
++    else:  # Depth images input
++        # Standard back-projection: map each depth pixel to 3D coordinates, mark cells as occupied
++        for depth_img in geometry_priors:
++            for u, v, d in depth_img.to_points():
++                cell = _world_to_grid_cell((u, v, d))  # Standard coordinate transformation
+                 initial_occupancy_grid[cell] = 1.0
+-    else:  # Depth images input
+-        initial_occupancy_grid = _depth_to_occupancy(geometry_priors)
+-        
++
+     instant_ngp_model.occupancy_grid = initial_occupancy_grid
+-    
+-    # Note: Model weights (MLP) are typically randomly initialized,
+-    # except if inheriting from a pretrained model (89% random weights)
+-    
++    # Model weights (MLP) are typically randomly initialized, except if inheriting from a pretrained model
++
+     for iteration in range(target_iterations):
+         # Step 2: Sample rays and compute density with scaling
+-        rays = _sample_rays()
++        rays = _sample_rays()  # Standard stratified ray sampling through camera frustum
+         densities = []
+-        
+         for ray in rays:
+-            # Get base density from MLP at sample points along ray
+             base_density = instant_ngp_model.density_mlp(ray.sample_points)
+-            
+             # Apply density scaling factor k
+-            # This ensures rays terminate quickly at the surface
+             scaled_density = base_density * k
+             densities.append(scaled_density)
+-            
++
+         # Perform volume rendering with scaled densities
+         colors = _volume_render(rays, densities, instant_ngp_model.color_mlp)
+-        
++        # Standard volume rendering: T=1.0, color=0; for each point: alpha=1-exp(-sigma*dt), color+=alpha*T*color, T*=(1-alpha)
++
+         # Compute loss and backpropagate
+         target_images = _get_target_images(iteration)
+         loss = _compute_loss(colors, target_images)
+         instant_ngp_model.update_weights(loss)
+-        
++
+         # Step 3: Update occupancy grid periodically
+         if iteration % update_freq == 0:
+             # Re-evaluate volume density to update grid
+-            # This addresses sparsity and errors in initial priors
+-            updated_grid = _update_occupancy_grid(instant_ngp_model)
+-            
++            updated_grid = {}
++            for cell in instant_ngp_model.occupancy_grid.keys():
++                density = instant_ngp_model.density_mlp(_grid_cell_to_world(cell))
++                if density > 0.0:
++                    updated_grid[cell] = 1.0
+             # Combine initial grid with updated grid
+-            instant_ngp_model.occupancy_grid = _combine_grids(
+-                initial_occupancy_grid, 
+-                updated_grid
+-            )
+-            
++            instant_ngp_model.occupancy_grid = {**initial_occupancy_grid, **updated_grid}
++
+     return instant_ngp_model
+-
+-def _get_cells_within_radius(point, radius):
+-    """Return grid cell indices within a spherical radius of a point."""
+-    cells = []
+-    # Standard grid neighbor enumeration based on radius and cell size
+-    for dx in range(-radius, radius + 1):
+-        for dy in range(-radius, radius + 1):
+-            for dz in range(-radius, radius + 1):
+-                if dx*dx + dy*dy + dz*dz <= radius*radius:
+-                    cells.append((point[0] + dx, point[1] + dy, point[2] + dz))
+-    return cells
+-
+-def _depth_to_occupancy(depth_images):
+-    """Back-project depth images to 3D occupancy grid cells."""
+-    grid = {}
+-    # Standard projection: map each depth pixel to 3D coordinates, mark cells as occupied
+-    for depth_img in depth_images:
+-        for u, v, d in depth_img.to_points():
+-            cell = _world_to_grid_cell((u, v, d))
+-            grid[cell] = 1.0
+-    return grid
+-
+-def _sample_rays():
+-    """Generate stratified rays through the camera frustum."""
+-    # Standard ray sampling for volume rendering
+-    return []
+-
+-def _volume_render(rays, densities, color_mlp):
+-    """Compute final pixel colors via volume rendering integral."""
+-    rendered = []
+-    for ray in rays:
+-        T = 1.0
+-        color = [0.0, 0.0, 0.0]
+-        for i, point in enumerate(ray.sample_points):
+-            sigma = densities[i]
+-            alpha = 1.0 - torch.exp(-sigma * ray.step_size)
+-            color += alpha * T * color_mlp(point)
+-            T *= (1.0 - alpha)
+-        rendered.append(color)
+-    return rendered
+-
+-def _compute_loss(pred, target):
+-    """Compute mean squared error loss."""
+-    return torch.mean((pred - target) ** 2)
+-
+-def _update_occupancy_grid(model):
+-    """Re-evaluate density along rays and update grid occupancy based on thresholds."""
+-    updated = {}
+-    # Standard re-projection: query density at grid centers, mark occupied if density > threshold
+-    for cell in model.occupancy_grid.keys():
+-        density = model.density_mlp(_grid_cell_to_world(cell))
+-        if density > 0.0:
+-            updated[cell] = 1.0
+-    return updated
+-
+-def _combine_grids(grid1, grid2):
+-    """Merge two occupancy grids, overwriting grid1 with grid2 data."""
+-    combined = grid1.copy()
+-    combined.update(grid2)
+-    return combined
+ ```
+ 
+ **Parameters:**
+-*   **Density Scaling Factor ($k$):** A value $> 1$ applied to initial density predictions. Exact value not given in the sources.
+-*   **Splatting Radius:** The radius within which point cloud points are splatted to grid cells. Exact value not given in the sources.
+-*   **Update Frequency:** How often the occupancy grid is re-evaluated and updated. Exact value not given in the sources.
++*   **Density Scaling Factor ($k$):** A value $> 1$ applied to initial density predictions [S1]. Exact value not given in the sources.
++*   **Splatting Radius:** The radius within which point cloud points are splatted to grid cells [S1]. Exact value not given in the sources.
++*   **Update Frequency:** How often the occupancy grid is re-evaluated and updated [S1]. Exact value not given in the sources.
+ 
+ **Edge Cases and Pitfalls:**
+ *   **Low Initial Density:** Without density scaling, randomly initialized weights produce low density, causing slow transmittance drop and gradient broadcast to occluded points, slowing training [S1].
+-*   **Sparse Priors:** Point clouds may have missing regions. Point-cloud splatting helps but may add empty cells [S1].
+-*   **Noisy Priors:** Geometry priors from RGB-D or COLMAP are noisy. Continuous grid updates are necessary to correct errors [S1].
++*   **Sparse Priors:** Point clouds may have missing regions, requiring splatting which adds empty cells [S1].
++*   **Noisy Priors:** Geometry priors from RGB-D or COLMAP are noisy, necessitating continuous grid updates [S1].
+ 
+ ## Operating characteristics

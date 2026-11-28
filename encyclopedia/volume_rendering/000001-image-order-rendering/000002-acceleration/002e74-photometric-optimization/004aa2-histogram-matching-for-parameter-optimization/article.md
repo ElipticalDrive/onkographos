@@ -1,0 +1,64 @@
+# Histogram Matching for Parameter Optimization
+
+Also called: Photometric Histogram Matching
+
+## Overview
+Histogram Matching for Parameter Optimization is a technique used in volume rendering to determine physical parameters (such as incident sunlight intensity $L_0$ and extinction coefficient $La$) by minimizing the difference between the histogram of an input photograph and the histogram of rendered example cloud volumes [S1]. It is distinguished from sibling methods like [Image-based reconstruction optimization](6677-image-based-reconstruction-optimization.md) by its specific reliance on global intensity distribution statistics (histograms) rather than pixel-wise photometric errors or structural similarity, and from [NeRFLiX](9385-nerflix.md) by its use of explicit physical parameter optimization via quasi-Newton methods rather than neural network refinement [S1, S2].
+
+## How it works
+**Inputs:**
+*   Input photograph $I_{ph}$ [S1].
+*   A set of $K$ voxel blocks $C_{ex} = \{C_1, \dots, C_K\}$ generated from an example volume database [S1].
+*   Rendering engine capable of producing images $I(L_0, L_a)$ from voxel blocks using parameters $L_0$ and $L_a$ [S1].
+
+**Outputs:**
+*   Optimized parameters $L^*_0$ and $L^*_a$ [S1].
+
+**Data Structures:**
+*   Histogram $h(I, n)$: A normalized frequency distribution of intensity levels for image $I$.
+    *   $n$: Intensity level index, ranging from $1$ to $n_L$ (total number of intensity levels).
+    *   Value: Count of pixels with intensity $n$, divided by the total number of pixels in $I$ [S1].
+
+**Algorithm:**
+1.  **Define Objective Function:** Formulate the minimization problem to find $L_0$ and $L_a$ that minimize the squared difference between the histogram of the input photograph and the histogram of the rendered image [S1]:
+    $$ \arg \min_{L_0, L_a} \sum_{n=1}^{n_L} \left[ h(I_{ph}, n) - h(I(L_0, L_a), n) \right]^2 $$
+    Where:
+    *   $n_L$ is the number of intensity levels [S1].
+    *   $h(I_{ph}, n)$ is the normalized $n$-th histogram bin of the input photograph [S1].
+    *   $h(I(L_0, L_a), n)$ is the normalized $n$-th histogram bin of the rendered image using parameters $L_0$ and $L_a$ [S1].
+
+2.  **Solve Optimization:** Solve the nonlinear least squares problem using a quasi-Newton method [S1].
+    *   [G] Initial guesses for $L_0$ and $L_a$ should be derived from the average intensity and contrast of $I_{ph}$ to ensure convergence, as quasi-Newton methods are sensitive to initialization in non-convex landscapes.
+
+3.  **Result:** The parameters yielding the minimum error are denoted as $L^*_0$ and $L^*_a$ [S1].
+
+**Parameters:**
+*   $L_0$: Incident sunlight intensity parameter [S1].
+*   $L_a$: Extinction coefficient parameter [S1].
+*   $n_L$: Number of intensity levels (e.g., 256 for 8-bit images) [S1].
+*   $\lambda$: Relative weighting coefficient. Not given in the sources for the histogram matching formula itself, but noted as $\lambda = 100$ in the context of the associated texture optimization energy function $E(x; \{z\})$ in the source [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Histogram Normalization:** The histogram must be normalized by dividing by the number of pixels in the image to ensure scale invariance [S1].
+*   **Rendering Consistency:** The rendered image $I(L_0, L_a)$ must use the same voxel blocks $C_{ex}$ and rendering pipeline as the training data to ensure the histogram difference reflects only parameter changes [S1].
+*   **Local Minima:** The nonlinear least squares problem may have local minima; the quasi-Newton method requires careful initialization [S1].
+
+## Subtopics
+
+### Image-Inspired Inverse Rendering
+A method that solves the inverse rendering problem to determine rendering parameters for realistic clouds in synthetic images by estimating parameters from real images [S2]. It differs from the standard histogram matching approach by explicitly accounting for both single and multiple scattering of light and using genetic algorithms for parameter search rather than quasi-Newton optimization [S2]. It is chosen when realistic cloud appearance requires complex scattering effects and global optimization is preferred over gradient-based methods [S2].
+
+## Operating characteristics
+*   **Time Complexity:** Depends on the number of histogram bins $n_L$, the number of rendered images evaluated during optimization, and the convergence rate of the quasi-Newton method [S1].
+*   **Memory Complexity:** Requires storage for the input photograph histogram, the rendered image histograms, and the example volume voxel blocks $C_{ex}$ [S1].
+*   **Strengths:** Robust to global illumination changes; effective for matching overall appearance and contrast [S1].
+*   **Limitations:** Does not enforce local structural fidelity; sensitive to the quality of the example volume database [S1].
+*   **When to use:** When the goal is to match the global photometric appearance of a cloud volume to a reference photograph [S1].
+*   **When not to use:** When local texture details or structural accuracy are more important than global histogram matching [S1].
+
+## Background
+Originating from the work of Dobashi et al. in "Example-based synthesis of three-dimensional clouds from photographs" [S1], this technique was developed to synthesize realistic cloud volumes by optimizing physical parameters to match input photographs [S1]. It builds on texture optimization techniques proposed by Kwatra et al. [S1]. The method is part of a broader family of image-inspired inverse rendering approaches, including those using genetic algorithms for parameter estimation [S2].
+
+## Sources
+[S1] Example-based synthesis of three-dimensional clouds from photographs, https://doi.org/10.1145/3095140.3095168, fetched 2026-10-29
+[S2] A survey of modeling, rendering and animation of clouds in computer graphics, https://doi.org/10.1007/s00371-020-01953-y, fetched 2026-10-26

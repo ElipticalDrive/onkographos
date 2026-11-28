@@ -1,0 +1,217 @@
+# Accelerated Adjoint Queries for Barnes-Hut
+Also called: Adjoint dipole sum queries, Two-stage backpropagation
+
+## Overview
+This method computes the derivatives of per-point attributes through a Barnes-Hut tree with logarithmic complexity, avoiding the linear complexity of naive automatic differentiation [S1]. It solves the problem where backpropagating gradients to leaf nodes would normally require visiting all leaves, even if the primal query terminated early at a cluster node [S1]. It sets itself apart from naive AD by decoupling the gradient accumulation from the gradient propagation, allowing the primal query's spatial pruning to apply to the adjoint computation as well [S1].
+
+## How it works
+The method uses a two-stage backpropagation scheme. It relies on the Barnes-Hut tree structure where each node $t$ stores centroidal radius $\widehat{r}_t$, centroid $\widehat{p}_t$, area $\widehat{A}_t$, and moment attributes $\widehat{b}_t$ [S1].
+
+### Inputs and Outputs
+*   **Inputs**:
+    *   $\widetilde{b}_\varepsilon$: The gradient of the loss with respect to the dipole sum output for a specific query point $x$ and regularization parameter $\varepsilon$ [S1].
+    *   $x$: The query point location [S1].
+    *   $\text{node}$: The root of the Barnes-Hut tree [S1].
+    *   $\varepsilon$: The regularization parameter [S1].
+    *   $\beta$: The Barnes-Hut opening angle parameter (threshold for cluster acceptance) [S1].
+*   **Outputs**:
+    *   Accumulated gradients in the mutable gradient attributes $\widetilde{db}_t$ of the tree nodes [S1].
+    *   Updated point cloud attributes after the full traversal [S1].
+
+### Data Structures
+Each tree node $t$ stores mutable gradient attributes $\widetilde{db}_t$ [S1]. One such attribute exists for each geometry and appearance attribute being differentiated (e.g., geometry $f$ and appearance $\ell_\alpha$) [S1]. These attributes accumulate backpropagated gradients during Stage 1 [S1].
+
+### Steps
+
+**Stage 1: Local Gradient Accumulation**
+During inverse rendering, for each primal query, an adjoint query is performed. This query backpropagates gradients only to the nodes visited by the corresponding primal query [S1].
+
+1.  **Detach Attributes**: At the start of the iteration, after tree updates, detach node attributes from leaf node attributes to ensure gradients flow correctly through the tree structure rather than just the leaves [S1].
+2.  **Adjoint Query**: For each query $(x, \varepsilon)$ with incoming gradient $\widetilde{b}_\varepsilon$, call `ADJOINTQUERY` starting from the root node [S1].
+3.  **Pruning Check**: In `ADJOINTQUERY`, check if the current node is sufficiently far from the query point $x$. The condition is:
+    $$ \| x - \text{node}.\widehat{p} \| > \beta \cdot \text{node}.\widehat{r} $$
+    If this condition holds, the node's contribution to the gradient is computed and accumulated, and the node's children are not visited [S1].
+4.  **Leaf Handling**: If the node is a leaf (has no children), its contribution is computed and accumulated [S1].
+5.  **Recursive Descent**: If the node is not a leaf and does not satisfy the pruning condition, recursively call `ADJOINTQUERY` on all children [S1].
+
+**Stage 2: Global Gradient Propagation**
+After inverse rendering concludes, a single full tree traversal is performed [S1].
+
+1.  **Traverse Tree**: Perform a post-order traversal (children before parents) or a top-down propagation depending on implementation, but the source specifies propagating from nodes to leaves. Specifically, the accumulated gradients $\widetilde{db}_t$ in internal nodes are propagated to their successor leaf nodes [S1].
+2.  **Update Attributes**: The resulting gradients at the leaf nodes are used to update the point cloud attributes [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def ADJOINTQUERY(gradient_dipole_sum, query_point, node, epsilon, beta):
+    """
+    Backpropagates gradient to the Barnes-Hut tree nodes visited by the primal query.
+    
+    Args:
+        gradient_dipole_sum: The gradient of the loss w.r.t the dipole sum value.
+        query_point: The 3D position x of the query.
+        node: The current tree node.
+        epsilon: Regularization parameter.
+        beta: Barnes-Hut threshold.
+    """
+    # Calculate distance from query point to node centroid
+    dist_sq = norm_sq(query_point - node.centroid)
+    dist = sqrt(dist_sq)
+    
+    # Pruning condition: if node is far enough, approximate contribution and stop
+    if dist > beta * node.radius:
+        # Compute the gradient contribution from this cluster
+        # The primal approximation is: A_t * S(||p_t - x|| / eps) * (b_t . (p_t - x)) / ||p_t - x||^3
+        # We need the derivative of this w.r.t the node's moment attributes b_t,
+        # scaled by the incoming gradient.
+        # Note: The source [S1] defines the primal sum approximation. 
+        # The adjoint step accumulates gradients into node.mutable_gradient_attributes.
+        
+        # Let u = p_t - x
+        u = node.centroid - query_point
+        norm_u = sqrt(norm_sq(u))
+        
+        # Compute the scalar factor from the primal kernel derivative w.r.t b_t
+        # Primal term involving b_t is: (b_t . u) / norm_u^3
+        # Derivative w.r.t b_t is: u / norm_u^3
+        # We also need to account for the rest of the primal term which is constant w.r.t b_t
+        # Primal = A_t * S(norm_u / eps) * (b_t . u) / norm_u^3
+        
+        # Gradient contribution to node's moment attribute b_t
+        # grad_b_t = gradient_dipole_sum * A_t * S(norm_u / eps) * (u / norm_u^3)
+        
+        # S is the kernel function S(r/eps). Its derivative w.r.t b_t is 0.
+        # So we only differentiate the dot product part.
+        
+        scalar_factor = node.area * kernel_S(norm_u / epsilon) / (norm_u ** 3)
+        gradient_contribution = gradient_dipole_sum * scalar_factor * u
+        
+        # Accumulate into the node's mutable gradient attribute
+        node.increment_gradient(gradient_contribution, query_point, epsilon)
+        return
+
+    # If not pruned, check if leaf
+    children = node.get_children()
+    if is_empty(children):
+        # Leaf node: accumulate gradient directly to the point's attribute
+        # The leaf's moment attribute b_t is just the point's attribute b_m.
+        # The primal contribution is A_m * P_eps(x, p_m) * b_m.
+        # Derivative w.r.t b_m is A_m * P_eps(x, p_m).
+        
+        u = node.centroid - query_point
+        norm_u = sqrt(norm_sq(u))
+        
+        # P_eps is the regularized dipole kernel. 
+        # For a leaf, the primal sum is exact: A_m * P_eps(x, p_m) * b_m
+        # The gradient w.r.t b_m is A_m * P_eps(x, p_m)
+        
+        # Note: The source [S1] uses P_eps for the primal query. 
+        # The adjoint query backpropagates to the leaf.
+        
+        # We need the value of the kernel P_eps. 
+        # The source defines the primal sum approximation for clusters. 
+        # For leaves, we use the exact contribution.
+        # The derivative of the loss L w.r.t b_m is:
+        # dL/db_m = dL/d(dipole_sum) * d(dipole_sum)/db_m
+        # d(dipole_sum)/db_m = A_m * P_eps(x, p_m)
+        
+        # P_eps(x, p) is typically defined as the derivative of the kernel S.
+        # However, the source [S1] Eq 26 approximates the sum. 
+        # For the leaf, we don't approximate.
+        
+        # Let's assume P_eps is available or computed similarly to S but for the dipole.
+        # The source mentions "regularized dipole sums".
+        
+        # Gradient contribution
+        # grad_b_m = gradient_dipole_sum * node.area * kernel_P_eps(norm_u / epsilon)
+        
+        # Since the source doesn't explicitly define P_eps formula, we assume it's the 
+        # kernel function for the dipole sum.
+        
+        # Accumulate into the leaf's gradient attribute
+        # The leaf node's mutable gradient attribute corresponds to the point's attribute
+        node.increment_gradient(gradient_dipole_sum * node.area * kernel_P_eps(norm_u / epsilon), query_point, epsilon)
+        return
+
+    # Internal node, not pruned: recurse
+    for child in children:
+        ADJOINTQUERY(gradient_dipole_sum, query_point, child, epsilon, beta)
+
+def UPDATE_POINT_ATTRIBUTES(tree_root):
+    """
+    Stage 2: Propagate accumulated gradients from nodes to leaves.
+    """
+    # The source [S1] states: "perform a single full tree traversal to propagate 
+    # accumulated gradients from all nodes to the leaf nodes."
+    
+    # This implies a top-down pass where parent gradients are added to children,
+    # or a post-order pass where children collect from parents?
+    # "propagate ... from all nodes to the leaf nodes" suggests top-down.
+    
+    # However, the adjoint query accumulates in the nodes visited.
+    # The leaves also accumulate in Stage 1.
+    # The final gradient for a point is the sum of gradients accumulated in all its ancestors 
+    # (including itself if it was visited as a leaf in a separate query? No, each query visits a path).
+    
+    # Actually, the source says: "accumulating gradients locally in mutable gradient attributes".
+    # And "propagate accumulated gradients from all nodes to the leaf nodes".
+    
+    # This suggests that the gradient stored in an internal node is the sum of gradients 
+    # from all queries that pruned at that node. This gradient must be distributed to all leaves 
+    # in that node's subtree.
+    
+    # Algorithm:
+    # 1. Initialize leaf gradients to 0.
+    # 2. Traverse tree top-down.
+    # 3. For each node, add its accumulated gradient to the gradients of all its children.
+    # 4. When reaching a leaf, the leaf's gradient is the sum of gradients propagated from all ancestors.
+    
+    # Wait, if we add parent gradient to child, the child will have the sum of all ancestors.
+    # This is O(N) if we do it naively for each leaf? No, we just pass the accumulated gradient down.
+    
+    # Let's define a function propagate(node, accumulated_gradient_from_ancestors):
+    #   current_gradient = node.mutable_gradient_attribute + accumulated_gradient_from_ancestors
+    #   if is_leaf(node):
+    #       node.point_attribute_gradient = current_gradient
+    #   else:
+    #       for child in node.children:
+    #           propagate(child, current_gradient)
+            
+    # This is O(N) total for the traversal.
+    
+    propagate(tree_root, zero_vector)
+```
+
+### Parameters
+*   $\beta$: Barnes-Hut threshold. Typical values are not specified in the sources, but standard Barnes-Hut uses $\theta \approx 0.5-1.0$. The source uses $\beta$ [S1].
+*   $\varepsilon$: Regularization parameter. Not given in the sources.
+
+### Edge Cases and Pitfalls
+*   **Naive AD Complexity**: Naive automatic differentiation results in linear complexity $O(N)$ because even if the primal query stops at a node, the node's attributes are functions of all successor leaf nodes, forcing the adjoint query to visit all leaves [S1]. This method avoids that by accumulating gradients at the node level and propagating them later [S1].
+*   **Precision**: Not given in the sources.
+*   **Boundaries**: Not given in the sources.
+
+## Subtopics
+
+### Barnes-Hut Primal Queries
+The primal method that this adjoint method accelerates. It uses the same tree structure and pruning condition to compute dipole sums in $O(\log N)$ time. [Barnes-Hut Primal Queries](52-barnes-hut-primal-queries.md)
+
+### Regularized Dipole Sums
+The mathematical foundation for the primal and adjoint computations, involving the kernel functions $S$ and $P_\varepsilon$. [Regularized Dipole Sums](52-regularized-dipole-sums.md)
+
+## Operating characteristics
+*   **Time Complexity**: $O(Q \log N + Q \log N) = O(Q \log N)$ total per iteration, where $Q$ is the number of queries and $N$ is the number of points [S1]. This is $O(Q \log N)$ for adjoint queries in Stage 1 and $O(Q \log N)$ for the full traversal in Stage 2 (updating $N$ leaf nodes, each with $O(\log N)$ ancestors) [S1].
+*   **Memory Complexity**: Not given in the sources.
+*   **Measured Performance**: Enables inverse rendering at speeds competitive with rasterization methods [S1].
+*   **Strengths**: Logarithmic complexity for both primal and adjoint queries, making it scalable for large point clouds [S1].
+*   **Limitations**: Requires a two-stage process, which may complicate implementation compared to naive AD [S1].
+*   **When to use**: When differentiating through Barnes-Hut based dipole sums for large point clouds [S1].
+*   **When not to use**: When $N$ is small enough that $O(N)$ is acceptable, or when the tree structure is not available [S1].
+
+## Background
+The method is based on the work of Barill et al. [2018] who showed how to perform primal queries for the winding number with logarithmic complexity using the classical Barnes-Hut fast summation method [Barnes and Hut 1986] [S1]. The authors of [S1] adapt this approach to regularized dipole sums and extend it to adjoint queries [S1]. The paper is "3D Reconstruction with Fast Dipole Sums" [S1].
+
+## Sources
+[S1] 3D Reconstruction with Fast Dipole Sums, https://doi.org/10.1145/3687914, fetched 2026-10-28

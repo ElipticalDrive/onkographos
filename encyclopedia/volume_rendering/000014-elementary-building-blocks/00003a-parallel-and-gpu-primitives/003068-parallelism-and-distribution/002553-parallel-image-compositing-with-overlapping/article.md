@@ -1,0 +1,140 @@
+# Parallel Image Compositing with Overlapping
+
+Also called: Distributed Image Compositing, Ray Segment Delivery
+
+## Overview
+Parallel Image Compositing with Overlapping is a distributed rendering strategy where ray segments are transmitted to responsible processors immediately upon generation, rather than waiting for local ray-tracing to complete [S1, unofficial]. This approach reduces network congestion by sending smaller, staggered messages throughout the rendering process, contrasting with non-overlapping methods that send large batches of data simultaneously after local computation [S1, unofficial]. It improves overall image compositing performance by up to 40% compared to separated rendering and compositing phases [S1, unofficial]. It builds on [Parallelism and Distribution](6265-parallelism-and-distribution.md) by overlapping communication with computation.
+
+## How it works
+**Inputs:**
+- Local volume data partition assigned to each processor [G].
+- Camera parameters (viewing direction, position) [G].
+- Image resolution and partitioning scheme [S1, unofficial].
+
+**Outputs:**
+- Final composite sub-image for each processor [S1, unofficial].
+- Global composite image (aggregated from sub-images) [G].
+
+**Data Structures:**
+- **Ray Buffer:** A two-dimensional array of linked lists. Each processor allocates an empty buffer according to image decomposition [S1, unofficial].
+    - Layout: `RayBuffer[pixel_x][pixel_y]` points to a linked list of ray segments [S1, unofficial].
+    - Each node in the linked list contains ray segment data [S1, unofficial].
+- **Image Partitioning:** Image space is partitioned evenly into horizontal strips for simplicity [S1, unofficial].
+
+**Steps:**
+1. **Initialization:** Each processor allocates an empty Ray Buffer according to the image decomposition scheme [S1, unofficial].
+2. **Local Ray Casting:** Processors traverse their local volume data. As ray segments are generated (e.g., after traversing a locally visible face), they are grouped by destination pixel [S1, unofficial].
+3. **Immediate Transmission:** Ray segments are sent immediately to the responsible processor. Groups of segments are sent following the rendering of one locally visible face to reduce message count [S1, unofficial].
+4. **Sorting:** At each processor, received ray segments are sorted into the local Ray Buffer by destination pixel [S1, unofficial].
+5. **Final Compositing:** Composite sorted ray segments in order at the end of rendering [S1, unofficial].
+6. **Result Aggregation:** Send the final subimage to the host computer [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+class RaySegment:
+    def __init__(self, color_r, color_g, color_b, opacity):
+        self.color = (color_r, color_g, color_b)
+        self.opacity = opacity
+
+class RayBuffer:
+    def __init__(self, width, height):
+        self.width = width
+        self.height = height
+        self.buckets = [[None] * height for _ in range(width)]
+
+    def add_segment(self, pixel_x, pixel_y, segment):
+        node = {"segment": segment, "next": self.buckets[pixel_x][pixel_y]}
+        self.buckets[pixel_x][pixel_y] = node
+
+    def get_segments(self, pixel_x, pixel_y):
+        segments = []
+        current = self.buckets[pixel_x][pixel_y]
+        while current:
+            segments.append(current["segment"])
+            current = current["next"]
+        return segments
+
+def composite_segments(segments):
+    r, g, b, a = 0.0, 0.0, 0.0, 0.0
+    for seg in segments:
+        alpha = seg.opacity
+        r = r + (1.0 - r) * seg.color[0] * alpha
+        g = g + (1.0 - g) * seg.color[1] * alpha
+        b = b + (1.0 - b) * seg.color[2] * alpha
+        a = a + (1.0 - a) * alpha
+    return (r, g, b, a)
+
+def parallel_compositing_overlapping(rank, size, image_width, image_height, volume_data):
+    rows_per_proc = image_height // size
+    start_row = rank * rows_per_proc
+    end_row = (rank + 1) * rows_per_proc if rank < size - 1 else image_height
+    
+    local_ray_buffer = RayBuffer(image_width, end_row - start_row)
+    
+    for y in range(start_row, end_row):
+        for x in range(image_width):
+            # Ray casting and segment generation step [G]
+            # In practice, traverse volume along ray for (x,y) and collect visible faces
+            segments = cast_ray_local(x, y, start_row, volume_data)
+            
+            for seg in segments:
+                dest_rank = seg.pixel_y // rows_per_proc
+                if dest_rank == rank:
+                    local_ray_buffer.add_segment(seg.pixel_x, seg.pixel_y - start_row, seg)
+                else:
+                    # send_segment_to(dest_rank, seg) [G]
+                    pass
+
+    final_image = [[(0.0, 0.0, 0.0, 0.0) for _ in range(end_row - start_row)] for _ in range(image_width)]
+    
+    for y in range(end_row - start_row):
+        for x in range(image_width):
+            segments = local_ray_buffer.get_segments(x, y)
+            final_image[x][y] = composite_segments(segments)
+            
+    return final_image
+
+def cast_ray_local(x, y, start_row, volume_data):
+    # Generate ray for pixel (x, y) and traverse volume to collect visible ray segments [G]
+    # Returns list of RaySegment objects with pixel coordinates
+    return []
+```
+
+**Parameters:**
+- **Image Partitioning:** Even horizontal strips are used for simplicity [S1, unofficial].
+- **Performance Gain:** Overlapping improves performance by up to 40% [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Irregular Shapes:** Irregular data shapes and partitioning cause rays to enter/exit multiple faces, creating varying numbers of local ray segments [S1, unofficial].
+- **Variable Buffer Sizes:** This variability leads to variable ray buffer sizes and linked list lengths, affecting memory management and performance [S1, unofficial].
+- **Network Congestion:** Non-overlapping approaches send large messages at once, causing congestion. Overlapping mitigates this but requires careful message grouping [S1, unofficial].
+
+## Subtopics
+
+### Ray-segment Migration (RSM)
+A variant where ray segments migrate according to mesh-cell to processor assignment [S2, unofficial]. Each processor traverses its local RayBuffer to packetize and gather ray-segment lists belonging to mesh-cells assigned to other processors into send-buffers, which are then sent via point-to-point communication [S2, unofficial]. At the end, each processor gathers all ray-segments belonging to pixels of mesh-cells assigned to itself [S2, unofficial]. The task-to-task cut-edge component of the cutsize of the current partition of the remapping graph constitutes an upper bound on the total number of ray-segments communicated in this step for all pixel-assignment schemes [S2, unofficial].
+
+### [Hierarchical MPI Image Reduction](4617-hierarchical-mpi-image-reduction.md)
+Combines per-process rendered sub-images into a single image using a binary tree reduction over MPI ranks.
+
+### Overlayed Rendering and Compositing
+A parallel execution strategy where compositing time is overlaid with rendering time by using two processes per node: one for rendering and one for compositing [S3, unofficial]. Each node runs two processes: one renders octree leaves, the other waits for partial images from child nodes, composites them, and sends them to the octree root [S3, unofficial]. A node renders an image, sends it off for compositing, then renders another image, etc. [S3, unofficial]. Determine the compositing responsibility index by the node number [S3, unofficial]. Traverse octree leaves in viewing order to allow true overlaying of rendering and compositing steps [S3, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** The overlapping approach reduces the peak network load, potentially improving overall throughput by up to 40% compared to non-overlapping methods [S1, unofficial].
+- **Memory Complexity:** Requires a Ray Buffer (2D array of linked lists) per processor, the size of which depends on the viewing position, data shape, and partitioning [S1, unofficial].
+- **Strengths:** Reduces network congestion by sending smaller messages throughout rendering [S1, unofficial]. Suitable for unstructured grids where ray segment counts vary [S1, unofficial].
+- **Limitations:** Irregular data shapes and partitioning lead to variable buffer sizes and linked list lengths, complicating memory management [S1, unofficial]. Requires sorting of ray segments at each processor [S1, unofficial].
+- **When to Use:** When network bandwidth is a bottleneck and data partitioning results in irregular ray segment distributions [S1, unofficial].
+- **When Not to Use:** When data is regular and compositing cost is low compared to ray-tracing, or when simple batch processing is sufficient [S1, unofficial].
+
+## Background
+This method was proposed for parallel volume ray-casting on distributed-memory architectures, particularly for unstructured-grid data [S1, unofficial]. It addresses the inefficiency of separating local rendering from global compositing, which causes network congestion due to large, simultaneous message transfers [S1, unofficial]. The approach leverages the fact that for regular data, compositing order can be determined a priori, but for unstructured domains, rays must be sorted by visibility order at the responsible processor [S1, unofficial].
+
+## Sources
+[S1] DTIC ADA301855: Parallel Volume Ray-Casting for Unstructured-Grid Data on Distributed-Memory Architectures., https://archive.org/details/DTIC_ADA301855, fetched 2026-10-26 (unofficial)
+[S2] Parallel direct volume rendering of unstructured grids based on object-space decomposition, http://hdl.handle.net/11693/17897, fetched 2026-10-26 (unofficial)
+[S3] Volume Visualization of AMR Data, https://graphics.cs.ucdavis.edu/~okreylos/Research/AMRVis/MainPage.html, fetched 2026-10-26 (unofficial)

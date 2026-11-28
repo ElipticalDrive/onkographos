@@ -1,0 +1,185 @@
+# Slice-based Solid Voxelization
+
+Also called: Dynamic solid slice function voxelization, GPU-accelerated multi-valued solid voxelization by slice functions, Real-time Solid Voxelization, Solid Slice Function Voxelization, Solid Voxelization by Slice Functions
+
+## Overview
+Slice-based Solid Voxelization is a GPU-accelerated algorithm that converts closed surface-based geometric objects into multi-valued solid volumetric models [S1]. Unlike binary voxelization methods that only determine occupancy, this method generates interior material properties (e.g., colors, textures, noise) for every voxel within the object's volume [S1]. It distinguishes itself from its parent [Single-pass GPU Solid Voxelization](3323-single-pass-gpu-solid-voxelization.md) by explicitly supporting diverse, non-uniform interior attributes via dynamic slice functions [S1]. It also differs from siblings like [Single-pass Solid Voxelization via XOR Bitmask Accumulation](3325-single-pass-solid-voxelization-via-xor-bitmask-accumulation.md) by avoiding logical XOR operations that produce binary outputs and missing voxels [S1].
+
+## How it works
+The method processes the volume slice-by-slice along a specified axis (typically Z), using the GPU's stencil buffer to determine interior parity and a user-defined "slice function" to assign voxel values [S1].
+
+### Inputs and Outputs
+*   **Input:**
+    *   $O$: A closed surface-based geometric object (mesh) [S1].
+    *   $N_x, N_y, N_z$: The resolution of the output volume [S1].
+    *   $B_{min}, B_{max}$: The 3D bounding box of the object [S1].
+    *   $SolidSliceFunc()$: A function defining the value of voxels inside the object [S1].
+    *   $L$: A display list or geometry representation of $O$ [S1].
+*   **Output:**
+    *   $V$: A 3D texture volume containing the voxelized solid object [S1].
+
+### Data Structures
+*   **3D Texture Volume ($V$):** Stores the final voxel data with dimensions $N_x \times N_y \times N_z$ [S1].
+*   **Stencil Buffer:** Used as a mask to track surface parity (inside/outside) [S1].
+*   **Depth Buffer:** Used for standard depth testing during rasterization [S1].
+*   **Color Buffer:** Temporarily holds the result of the slice function before masking [S1].
+
+### Parameters
+*   **Resolution:** Arbitrary, demonstrated at resolutions $64^3$, $128^3$, $256^3$, and $512^3$ [S1].
+*   **Stencil Buffer Depth:** 8-bit, sufficient for parity toggling [S1].
+*   **Depth Buffer Depth:** 24-bit [S1].
+*   **Slice Function Types:**
+    *   `FUNC_SINGLE_COLOR`: Constant color [S1].
+    *   `FUNC_COLOR_RAMP`: Color varies with Z [S1].
+    *   `FUNC_NOISE_WOOD/MARBLE/ROCK`: Procedural noise functions [S1].
+    *   `FUNC_MY_TYPE*`: Customized functions (e.g., translucent jade) [S1].
+
+### Algorithm Steps
+1.  **Initialization:**
+    *   Set viewport to $(0, 0, N_x, N_y)$ [S1].
+    *   Set orthogonal projection matrix [S1].
+    *   Set background color to $(0, 0, 0, 0)$ [S1].
+    *   Transform object $O$ so its voxelization orientation aligns with the Z-axis [S1].
+    *   Generate display list $L$ for drawing $O$ [S1].
+    *   Initialize or preprocess $SolidSliceFunc()$ [S1].
+2.  **Slice Loop:**
+    *   Iterate $i$ from $0$ to $N_z - 1$ [S1].
+    *   Check if slice $i$ is inside the bounding box defined by $B_{min}$ and $B_{max}$ [S1].
+    *   If inside, call `CreateSolidSlice(L, i, SolidSliceFunc())` [S1].
+    *   Insert the resulting slice $S_i$ into volume $V$ [S1].
+3.  **CreateSolidSlice(L, i, SolidSliceFunc):**
+    *   Clear color, stencil, and depth buffers [S1].
+    *   Initialize the depth buffer for the current slice plane with the same size as the projection window [S1].
+    *   **Parity Check:** Rasterize geometry $L$ clipped by the current slice plane. Use the stencil buffer to toggle a parity flag for front/back faces [S1].
+    *   **Function Application:** Apply $SolidSliceFunc()$ to the entire slice plane into the color buffer [S1].
+    *   **Masking:** Use the stencil buffer as a mask [S1].
+        *   If stencil value is 1 (inside), keep the color buffer value [S1].
+        *   If stencil value is 0 (outside), clear the color buffer to the background color $(0, 0, 0, 0)$ [S1].
+    *   Read the color buffer to obtain the solid slice $S_i$ [S1].
+4.  **Output:**
+    *   Return volume $V$ [S1].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def solid_voxelization(O, Nx, Ny, Nz, Bmin, Bmax, SolidSliceFunc):
+    # 1. Setup
+    viewport = (0, 0, Nx, Ny)
+    projection = orthographic_matrix(0, Nx, 0, Ny, -1, 1)
+    background = (0, 0, 0, 0)
+    O_z = align_to_z_axis(O)
+    L = compile_geometry(O_z)
+    SolidSliceFunc.preprocess()
+    V = allocate_3d_texture(Nx, Ny, Nz)
+
+    # 2. Slice Loop
+    for i in range(Nz):
+        if Bmin.z <= i < Bmax.z:
+            slice_data = create_solid_slice(L, i, Nx, Ny, SolidSliceFunc, background)
+            V.set_slice(i, slice_data)
+    return V
+
+def create_solid_slice(L, i, Nx, Ny, SolidSliceFunc, background):
+    # Clear buffers
+    color_buffer = zeros(Nx, Ny, 4)
+    stencil_buffer = zeros(Nx, Ny, dtype=int)
+    depth_buffer = zeros(Nx, Ny)
+
+    # Parity Check: Rasterize geometry clipped to slice plane i
+    for y in range(Ny):
+        for x in range(Nx):
+            ray = ray_from_pixel(x, y, viewport, projection)
+            intersections = intersect_geometry(L, ray, clip_z=i)
+            parity = 0
+            for hit in intersections:
+                if hit.face_normal.dot(ray.direction) > 0:
+                    parity += 1
+                else:
+                    parity -= 1
+            stencil_buffer[y, x] = parity
+
+    # Function Application: Apply slice function to entire plane
+    for y in range(Ny):
+        for x in range(Nx):
+            color_buffer[y, x] = SolidSliceFunc(x, y, i)
+
+    # Masking: Use stencil buffer to mask out exterior voxels
+    for y in range(Ny):
+        for x in range(Nx):
+            if stencil_buffer[y, x] == 0:
+                color_buffer[y, x] = background
+
+    return color_buffer
+
+# Helper definitions (standard operations)
+def orthographic_matrix(x0, x1, y0, y1, z0, z1):
+    return [[2/(x1-x0), 0, 0, -(x1+x0)/(x1-x0)],
+            [0, 2/(y1-y0), 0, -(y1+y0)/(y1-y0)],
+            [0, 0, -2/(z1-z0), -(z1+z0)/(z1-z0)],
+            [0, 0, 0, 1]]
+
+def align_to_z_axis(O):
+    return rotate_mesh_to_z_axis(O)
+
+def compile_geometry(O_z):
+    return O_z.triangulate()
+
+def allocate_3d_texture(Nx, Ny, Nz):
+    return empty_array(Nx, Ny, Nz, dtype=float)
+
+def ray_from_pixel(x, y, viewport, projection):
+    return unproject_pixel(x, y, viewport, projection)
+
+def intersect_geometry(L, ray, clip_z):
+    return ray_mesh_intersections(L, ray, plane_z=clip_z)
+
+def rotate_mesh_to_z_axis(O):
+    return O.apply_rotation_matrix()
+
+def ray_mesh_intersections(L, ray, plane_z):
+    hits = []
+    for tri in L.triangles:
+        t = ray_triangle_intersect(ray, tri)
+        if t is not None and t.z == plane_z:
+            hits.append(t)
+    return sorted(hits, key=lambda h: h.distance)
+
+def unproject_pixel(x, y, viewport, projection):
+    return inverse(projection) @ [x, y, 0, 1]
+
+def ray_triangle_intersect(ray, tri):
+    t = ray_plane_intersect(ray, tri.plane)
+    if t is not None and point_in_triangle(ray.origin + t*ray.direction, tri.vertices):
+        return {'z': t.z, 'face_normal': tri.normal, 'distance': t}
+    return None
+```
+
+### Formulas
+The $i$-th solid slice $S_i$ is described as [S1]:
+$$ S_i(x, y) = \{ f(x, y, i) \} \in \mathbb{R}^3 $$
+where $x = 1, \dots, N_x$, $y = 1, \dots, N_y$, and $i = 1, \dots, N_z$ [S1].
+
+The volumetric object $V$ is the set of slices [S1]:
+$$ V(z) = \{ S_i, i = 1, \dots, N_z \} $$
+
+The solid slice function $f_s$ can be a fixed value, $f(x,y)$, $f(x,y,z)$, or a customized function $f_{customized}(x,y,z)$ [S1].
+
+### Edge Cases and Pitfalls
+*   **Complex Functions:** Computing complex slice functions (e.g., Perlin noise) takes significantly more time than simple color-based functions [S1].
+*   **Anti-aliasing:** The surface boundary of the volumetric object is not generated smoothly in 2D or 3D space, leading to aliasing artifacts [S1].
+*   **Performance Scaling:** Running time is directly influenced by the number of slices ($N_z$) due to the slice-based nature of the algorithm [S1].
+*   **Memory Swapping:** Unlike older methods that required swapping data between GPU and CPU, this method stores slices directly into 3D texture memory, avoiding this bottleneck [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of slices $N_z$ and the complexity of the slice function [S1]. Performance for simple functions (e.g., `FUNC_SINGLE_COLOR`) is highly efficient, taking less than 0.5ms for resolutions up to $512^3$ even for models with 1M polygons (e.g., Buddha) [S1]. Color-ramp functions also perform under 0.5ms for $128^3$ and $256^3$ resolutions [S1].
+*   **Memory Complexity:** Requires memory for the 3D texture volume ($N_x \times N_y \times N_z$) and GPU buffers (color, depth, stencil) [S1]. The method avoids CPU-GPU memory swapping for intermediate slices [S1].
+*   **Hardware Requirements:** Tested on Nvidia GeForce 7800 GTX with 256MB texture memory, 8-bit stencil buffer, and 24-bit depth buffer [S1]. Requires support for 3D texture mapping [S1].
+*   **Strengths:** Real-time performance; supports multi-valued (non-binary) interiors; slice-independent processing allows for parallelization; supports arbitrary voxelization orientations [S1].
+*   **Limitations:** Aliasing at boundaries; performance degrades with complex procedural slice functions; dependent on $N_z$ for runtime [S1].
+
+## Background
+This method was introduced by Duoduo Liao and George Washington University in 2008 [S1]. It extends previous stencil-buffer-based solid voxelization techniques [Liao 2001, Liao 2002] by combining them with GPU acceleration and dynamic slice functions [S1]. Prior methods, such as Chen and Fang [2000], used logical XOR to generate binary volumes with missing voxels, while Liao and Fang [2002] required drawing the object twice and suffered from memory swapping issues [S1]. This approach was the first to propose dynamic solid slice functions to generate diverse solid volumes with various interior materials (rainbow, marble, wood, etc.) in real time [S1]. It is suitable for applications like volume modeling, collision detection, medical simulation, and 3D printing [S1].
+
+## Sources
+[S1] GPU-accelerated multi-valued solid voxelization by slice functions in real time, https://doi.org/10.1145/1477862.1477886, fetched 2026-11-06

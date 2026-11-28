@@ -1,0 +1,141 @@
+--- v004.md
++++ v005.md
+@@ -1,17 +1,17 @@
+ # Pinhole Camera Projection (Pixel to Camera)
+ 
+-Also called: Camera Projection and Backprojection, Camera Ray Lifting, Depth Map to Camera Coordinates, Inverse Projection, Pixel to Camera, Ray Generation from Pixel Coordinates using Intrinsics
++Also called: Pixel to Camera, Inverse Projection, Inverse Camera Projection for 3D Positioning, Camera Ray Lifting
+ 
+ ## Overview
+-This method converts 2D pixel coordinates $(u, v)$ and a depth value $z$ into 3D homogeneous coordinates in the camera coordinate frame using the camera intrinsic matrix [S1, S4, unofficial]. It solves the problem of "lifting" a depth map into 3D space, which is a prerequisite for ray generation in volume rendering and point cloud reconstruction [S3, unofficial]. It is the inverse of the camera projection operator $\pi$ [S2]. Unlike variants that assume zero skew or specific pixel centering conventions, this method provides the general algebraic backprojection formula, though implementations often simplify based on sensor assumptions [S3, S5, unofficial].
++This method converts 2D pixel coordinates $(u, v)$ and a depth value $z$ into 3D homogeneous coordinates in the camera coordinate frame using the camera intrinsic matrix [S1, S4, S5, unofficial]. It implements the backprojection operator $\pi^{-1}$, mapping a pixel $p$ and depth $z$ to a 3D point $x_c$ via $z K^{-1} \bar{p}$ [S3]. It is the inverse of the forward camera projection operator $\pi(x_c) \approx K x_c$ [S3], building on [Ray Generation from Pixel Coordinates](2514-ray-generation-from-pixel-coordinates.md) and distinct from [NDC-to-World Ray Generation](3437-ndc-to-world-ray-generation.md).
+ 
+ ## How it works
+ **Inputs:**
+-- `intrinsics`: A $3 \times 3$ matrix $K$ containing focal lengths and principal point offsets [S1, S4, unofficial].
+-- `pixel_coords`: 2D coordinates $(u, v)$ or $(x, y)$ representing pixel locations [S4, unofficial].
+-- `depth`: Depth value $z$ (distance from the camera center along the optical axis) [S4, unofficial].
++- `intrinsics`: A $3 \times 3$ matrix $K$ containing focal lengths, principal point offsets, and optionally a skew coefficient [S1, S4, S5, unofficial].
++- `pixel_coords`: 2D coordinates $(u, v)$ or $(x, y)$ representing pixel locations [S4, S5, unofficial].
++- `depth`: Depth value $z$ (distance from the camera center along the optical axis) [S4, S5, unofficial].
+ 
+ **Outputs:**
+-- `camera_coords`: A tensor of shape $(..., 4)$ containing homogeneous 3D coordinates $[X_c, Y_c, Z_c, 1]^T$ in the camera frame [S1, S4, unofficial].
++- `camera_coords`: An array of shape $(..., 4)$ containing homogeneous 3D coordinates $[X_c, Y_c, Z_c, 1]^T$ in the camera frame [S1, S4, S5, unofficial].
+ 
+ **Data Structures:**
+@@ -24,5 +24,5 @@
+   \end{bmatrix}
+   $$
+-  where $f_x, f_y$ are focal lengths in pixels, $(c_x, c_y)$ is the principal point, and $s$ is the skew coefficient [S1, S4, unofficial].
++  where $f_x, f_y$ are focal lengths in pixels, $(c_x, c_y)$ is the principal point, and $s$ is the skew coefficient [S1, S4, S5, unofficial].
+ 
+ **Steps:**
+@@ -32,6 +32,6 @@
+    - $c_x = K[0, 2]$
+    - $c_y = K[1, 2]$
+-   - $s = K[0, 1]$ (skew) [S1, S4, unofficial].
+-2. Compute the unnormalized camera space coordinates $X_{lift}$ and $Y_{lift}$ using the backprojection formula [S1, S4, unofficial]:
++   - $s = K[0, 1]$ (skew) [S1, S4, S5, unofficial].
++2. Compute the unnormalized camera space coordinates $X_{lift}$ and $Y_{lift}$ using the backprojection formula [S1, S5, unofficial]:
+    $$
+    X_{lift} = \frac{u - c_x + \frac{c_y \cdot s}{f_y} - \frac{s \cdot v}{f_y}}{f_x} \cdot z
+@@ -40,23 +40,23 @@
+    Y_{lift} = \frac{v - c_y}{f_y} \cdot z
+    $$
+-   Note: Some sources define the input pixel coordinates as $(x, y)$ instead of $(u, v)$ [S4, unofficial]. The formula for $X_{lift}$ accounts for non-zero skew $s$ [S1, S4, unofficial]. If skew is assumed to be zero (common in modern sensors), the term involving $s$ vanishes [S3, unofficial].
+-3. Set $Z_{lift} = z$ [S4, unofficial].
+-4. Construct the homogeneous coordinate vector by stacking $[X_{lift}, Y_{lift}, Z_{lift}, 1]$ along the last dimension [S1, S4, unofficial].
+-5. (Optional) Generate a validity mask where depth $z > 0$ to filter out invalid points [S3, unofficial].
++   Some implementations assume zero skew ($s=0$), simplifying $X_{lift}$ to $(u - c_x) z / f_x$ [S4, unofficial].
++3. Set $Z_{lift} = z$ [S4, S5, unofficial].
++4. Construct the homogeneous coordinate vector by stacking $[X_{lift}, Y_{lift}, Z_{lift}, 1]$ along the last dimension [S1, S4, S5, unofficial].
++5. (Optional) Generate a validity mask where depth $z > 0$ to filter out invalid points [S4, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def pixel_to_camera(intrinsics: Tensor, u: Tensor, v: Tensor, z: Tensor) -> Tensor:
++def pixel_to_camera(intrinsics, u, v, z):
+     """
+     Lifts pixel coordinates and depth to camera space homogeneous coordinates.
+     
+     Args:
+-        intrinsics: Tensor of shape (..., 3, 3) containing the camera intrinsic matrix K.
+-        u: Tensor of shape (...,) containing x-pixel coordinates.
+-        v: Tensor of shape (...,) containing y-pixel coordinates.
+-        z: Tensor of shape (...,) containing depth values.
++        intrinsics: Array of shape (..., 3, 3) containing the camera intrinsic matrix K.
++        u: Array of shape (...,) containing x-pixel coordinates.
++        v: Array of shape (...,) containing y-pixel coordinates.
++        z: Array of shape (...,) containing depth values.
+         
+     Returns:
+-        Tensor of shape (..., 4) containing homogeneous camera coordinates [X, Y, Z, 1].
++        Array of shape (..., 4) containing homogeneous camera coordinates [X, Y, Z, 1].
+     """
+     # Extract intrinsics
+@@ -68,9 +68,7 @@
+     
+     # Compute X coordinate in camera space
+-    # Formula: x = ((u - cx + cy * skew / fy - skew * v / fy) / fx) * z
+     x_lift = ((u - cx + cy * skew / fy - skew * v / fy) / fx) * z
+     
+     # Compute Y coordinate in camera space
+-    # Formula: y = ((v - cy) / fy) * z
+     y_lift = ((v - cy) / fy) * z
+     
+@@ -79,6 +77,6 @@
+     
+     # Stack into homogeneous coordinates [x, y, z, 1]
+-    ones = torch.ones_like(z_lift)
+-    camera_coords = torch.stack([x_lift, y_lift, z_lift, ones], dim=-1)
++    ones = [1.0] * len(z) if hasattr(z, '__len__') else [1.0]
++    camera_coords = list(zip(x_lift, y_lift, z_lift, ones))
+     
+     return camera_coords
+@@ -87,10 +85,10 @@
+ **Parameters:**
+ - `intrinsics`: $3 \times 3$ matrix. Typical values depend on resolution and lens, e.g., $f_x \approx 500-1000$ for standard lenses [S1, S4, unofficial].
+-- `depth`: Positive float. Must be $>0$ for valid backprojection [S3, unofficial].
++- `depth`: Positive float. Must be $>0$ for valid backprojection [S4, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-- **Zero Depth:** Division by zero or invalid geometry if $z=0$. A validity mask ($z>0$) should be applied [S3, unofficial].
+-- **Skew:** If the source assumes zero skew but the matrix contains non-zero skew, the $X_{lift}$ calculation will be incorrect if the skew term is omitted [S1, S3, unofficial].
+-- **Pixel Centering:** The formula assumes pixel coordinates refer to the top-left corner or center depending on convention. The "Continuous-to-Discrete" variant explicitly assumes pixel centers are at integer + 0.5 [S5, unofficial]. If using integer pixel indices directly, ensure consistency with the intrinsic definition [S5, unofficial].
++- **Zero Depth:** Division by zero or invalid geometry if $z=0$. A validity mask ($z>0$) should be applied [S4, unofficial].
++- **Skew:** If the source assumes zero skew but the matrix contains non-zero skew, the $X_{lift}$ calculation will be incorrect if the skew term is omitted [S1, S4, unofficial].
++- **Pixel Centering:** The formula assumes pixel coordinates refer to the top-left corner or center depending on convention. The "Continuous-to-Discrete" variant explicitly assumes pixel centers are at integer + 0.5 [S6, unofficial]. If using integer pixel indices directly, ensure consistency with the intrinsic definition [S6, unofficial].
+ - **Coordinate System:** The output is in the camera frame. To get world coordinates, it must be multiplied by the extrinsic matrix $[R|t]$ [S2].
+ 
+@@ -98,21 +96,20 @@
+ 
+ ### Continuous-to-Discrete Pixel Coordinate Conversion
+-A method to convert continuous image coordinates $(\mu'_x, \mu'_y)$ to discrete pixel coordinates $(p_i, p_j)$ [S5, unofficial]. It assumes the pixel center is at the center of a unit area box, leading to the relation $p_i + 0.5 = f_x \cdot t_x / t_z + c_x$ and $p_j + 0.5 = f_y \cdot t_y / t_z + c_y$ [S5, unofficial]. This is the forward projection step often used to map 3D points to 2D pixels, whereas the main method performs the inverse [S5, unofficial].
++A method to convert continuous image coordinates $(\mu'_x, \mu'_y)$ to discrete pixel coordinates $(p_i, p_j)$ [S6, unofficial]. It assumes the pixel center is at the center of a unit area box, leading to the relation $p_i + 0.5 = f_x \cdot t_x / t_z + c_x$ and $p_j + 0.5 = f_y \cdot t_y / t_z + c_y$ [S6, unofficial]. This is the forward projection step often used to map 3D points to 2D pixels, whereas the main method performs the inverse [S6, unofficial].
+ 
+ ## Operating characteristics
+ - **Time Complexity:** $O(N)$ where $N$ is the number of pixels/points, as it involves only element-wise arithmetic operations [S1, S4, unofficial].
+-- **Memory Complexity:** $O(N)$ to store the output homogeneous coordinates [S4, unofficial].
+-- **Strengths:** Simple, differentiable, and efficient. It directly maps depth maps to 3D points without iterative solvers [S3, unofficial].
+-- **Limitations:** Requires accurate depth and intrinsics. Errors in intrinsics (especially principal point or focal length) propagate linearly to 3D errors [S2]. Does not handle occlusions or missing depth values inherently (requires masking) [S3, unofficial].
+-- **When to use:** When generating rays for volume rendering from a known depth map and camera pose [S3, S4, unofficial].
+-- **When not to use:** When depth is unknown or unreliable, or when working in world coordinates without extrinsics [S2].
++- **Strengths:** Simple, differentiable, and efficient. It directly maps depth maps to 3D points without iterative solvers [S3].
++- **Limitations:** Requires accurate depth and intrinsics. Errors in intrinsics (especially principal point or focal length) propagate linearly to 3D errors [S2]. Does not handle occlusions or missing depth values inherently (requires masking) [S3].
++- **When to use:** When generating rays for volume rendering from a known depth map and camera pose [S3][S4, unofficial].
+ 
+ ## Background
+-The pinhole camera model is a fundamental concept in computer vision and graphics [S2]. The projection operator $\pi(x_c) \approx K x_c$ and its inverse $\pi^{-1}(p, z) = z K^{-1} \bar{p}$ are standard formulations [S2]. The method is widely used in NeRF-based approaches, Structure-from-Motion (SfM), and Gaussian Splatting pipelines to initialize 3D points from 2D observations [S2][S5, unofficial]. The specific handling of skew and pixel centering conventions varies between libraries, with some assuming zero skew for simplicity [S3, S5, unofficial].
++The projection operator $\pi(x_c) \approx K x_c$ and its inverse $\pi^{-1}(p, z) = z K^{-1} \bar{p}$ are standard formulations in camera geometry [S3]. The method is used in NeRF-based approaches and Gaussian Splatting pipelines to initialize 3D points from 2D observations [S3][S6, unofficial]. Implementations may simplify the backprojection by assuming zero skew for modern sensors [S4, unofficial].
+ 
+ ## Sources
+ [S1] albertgassol1/vf-nerf, https://github.com/albertgassol1/vf-nerf, fetched 2026-10-26 (unofficial)
+-[S2] SPARF: Neural Radiance Fields from Sparse and Noisy Poses, https://doi.org/10.1109/cvpr52729.2023.00408, fetched 2026-10-26
+-[S3] NVlabs/InstantSplat, https://github.com/NVlabs/InstantSplat, fetched 2026-10-27 (unofficial)
+-[S4] megvii-research/cv-master-ex, https://github.com/megvii-research/cv-master-ex, fetched 2026-10-27 (unofficial)
+-[S5] gsplat: An Open-Source Library for Gaussian Splatting, https://doi.org/10.48550/arXiv.2409.06765, fetched 2026-10-29 (unofficial)+[S2] Renderable Neural Radiance Map for Visual Navigation, https://doi.org/10.1109/cvpr52729.2023.00878, fetched 2026-10-26
++[S3] SPARF: Neural Radiance Fields from Sparse and Noisy Poses, https://doi.org/10.1109/cvpr52729.2023.00408, fetched 2026-10-26
++[S4] NVlabs/InstantSplat, https://github.com/NVlabs/InstantSplat, fetched 2026-10-27 (unofficial)
++[S5] megvii-research/cv-master-ex, https://github.com/megvii-research/cv-master-ex, fetched 2026-10-27 (unofficial)
++[S6] gsplat: An Open-Source Library for Gaussian Splatting, https://doi.org/10.48550/arXiv.2409.06765, fetched 2026-10-29 (unofficial)

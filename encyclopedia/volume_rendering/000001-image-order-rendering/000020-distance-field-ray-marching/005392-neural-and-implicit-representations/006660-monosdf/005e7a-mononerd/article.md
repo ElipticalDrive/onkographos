@@ -1,0 +1,73 @@
+# MonoNeRD
+
+Also called: MonoNeRD, SDF-based NeRF for Monocular 3D Detection
+
+## Overview
+MonoNeRD is a monocular 3D target detection framework that models the scene as a Signed Distance Function (SDF) to achieve dense 3D geometric and occupancy representation [S2]. It distinguishes itself from standard NeRF-based detection by treating intermediate frustum representations as SDF-based NeRFs, which effectively masks out free space and reduces ambiguity in the feature volume [S1]. This approach was the first to introduce volume rendering into the monocular 3D detection (M3D) domain, demonstrating the potential for implicit reconstruction of image-based 3D perception [S2].
+
+## How it works
+**Inputs:** Monocular images, camera parameters, and initial frustum features.
+**Outputs:** 3D voxel features, densities, RGB images, depth maps, and 3D bounding boxes for detected targets.
+
+**Data Structures:**
+*   **Frustum Features:** Intermediate feature representations aligned with the camera frustum.
+*   **3D Voxel Grid:** Regular 3D grid constructed from sampled frustum features.
+*   **SDF Field:** Signed Distance Function values associated with the voxel grid.
+*   **Radial Fields:** Auxiliary fields used in conjunction with the SDF for volume rendering.
+
+**Steps:**
+1.  **SDF Modeling:** Model the scene geometry and occupancy using a Signed Distance Function (SDF) [S2].
+2.  **Grid Sampling:** Perform grid sampling on the frustum features to construct regular 3D voxel features [S1].
+3.  **Density Estimation:** Compute corresponding densities for the voxel features [S1]. The optimization process allows the detection branch to use gradient flow from the NeRF to estimate opacity fields, effectively masking out free space [S1].
+4.  **Volume Rendering:** Employ volume rendering techniques to recover RGB images and depth maps from the SDF and radial fields [S2]. This step optimizes the frustum representations [S1].
+5.  **Detection:** Input the resulting voxel features into detection modules to identify 3D targets [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def mononerde_pipeline(image, camera_params):
+    # Step 1: Initialize SDF-based representation
+    # The scene is modeled as a Signed Distance Function (SDF)
+    sdf_field = initialize_sdf_field()
+    
+    # Step 2: Construct Frustum Features
+    # Intermediate frustum representations are created
+    frustum_features = get_frustum_features(image, camera_params)
+    
+    # Step 3: Grid Sampling
+    # Perform grid sampling on frustum features to construct regular 3D voxel features
+    voxel_features, densities = grid_sample_frustum_features(frustum_features)
+    
+    # Step 4: Optimization with Volume Rendering
+    # Optimize frustum representations using volume rendering
+    # This recovers RGB images and depth maps from the SDF and radial fields
+    # The gradient flow from NeRF helps estimate opacity fields and mask free space
+    rgb_image, depth_map = volume_render_sdf(sdf_field, voxel_features, densities)
+    
+    # Update SDF and features based on rendering loss
+    sdf_field, voxel_features = optimize_step(sdf_field, voxel_features, rgb_image, depth_map)
+    
+    # Step 5: Detection
+    # Input voxel features into detection modules
+    bounding_boxes = detection_module(voxel_features)
+    
+    return bounding_boxes, rgb_image, depth_map
+```
+
+**Edge Cases and Pitfalls:**
+*   **Free Space Ambiguity:** Without the SDF-based opacity masking, standard NeRF approaches may suffer from ambiguity in free space regions [S1].
+*   **Long-range and Occluded Objects:** The method is specifically noted for its superiority in handling long-range and occluded objects compared to explicit reconstruction methods [S2].
+
+## Operating characteristics
+*   **Strengths:** Handles long-range and occluded objects effectively; reduces ambiguity in feature volume by masking free space; establishes a new standard in monocular 3D detection using NeRFs [S1, S2].
+*   **Limitations:** Not given in the sources.
+*   **Performance:** Demonstrates superiority in handling challenging scenarios like occlusion and long-range detection [S2].
+*   **Complexity:** Not given in the sources.
+
+## Background
+MonoNeRD was proposed in 2023 [S2]. It represents a novel approach to monocular 3D target detection by integrating SDFs with NeRFs. It was the first method to introduce volume rendering into the M3D domain, highlighting the potential for implicit reconstruction in image-based 3D perception [S2]. The method builds on the concept of using NeRFs for 3D detection but enhances it by considering intermediate frustum representations as SDF-based [S1].
+
+## Sources
+[S1] Semantically-aware Neural Radiance Fields for Visual Scene Understanding: A Comprehensive Review, https://link.springer.com/article/10.1007/s11263-025-02663-5, fetched 2026-10-27
+[S2] Neural Radiance Field-based Visual Rendering: a Comprehensive Review, https://ieeexplore.ieee.org/abstract/document/11455380, fetched 2026-10-30

@@ -1,0 +1,159 @@
+--- v002.md
++++ v003.md
+@@ -23,75 +23,82 @@
+ - $\mathbf{sh}_i$: Spherical Harmonics coefficients for view-dependent appearance [S1].
+ 
+-### Step-by-Step Method
++### Pseudocode
++```python
++def render_drk(rays, primitives, tiles, sl):
++    # Precompute calibrated boundaries for culling
++    for prim in primitives:
++        for k in range(K):
++            # Calibrated radial length accounting for opacity and sharpness
++            s_ck = prim.s[k] * sqrt(-log(psi_inverse(exp(-9) / prim.o)))
++            # World-space polygon endpoints
++            prim.v[k] = prim.mu + s_ck * (cos(prim.theta[k]) * prim.Rx + sin(prim.theta[k]) * prim.Ry)
+ 
+-#### 1. Pre-computation: Calibrated Radial Lengths
+-For each radial basis $k$ of primitive $i$, compute the calibrated radial length $s_{ck,i}$ to determine the kernel boundary for culling [S1]:
+-$$ s_{ck,i} = s_{k,i} \sqrt{ -\log \left( \Psi^{-1}\left( \frac{e^{-9}}{o_i} \right) \right) } $$
+-Calculate the endpoint coordinates $\mathbf{v}_{k,i}$ in world space:
+-$$ \mathbf{v}_{k,i} = \boldsymbol{\mu}_i + s_{ck,i} (\cos(\theta_{k,i}) \mathbf{R}_{x,i} + \sin(\theta_{k,i}) \mathbf{R}_{y,i}) $$
+-These endpoints define the polygonal boundary of the kernel in the tangent plane [S1].
++    # Rasterization: Tile culling and cache sorting
++    for tile in tiles:
++        cache = []  # Array of length 8
++        for prim in potentially_intersecting_primitives(tile):
++            # Distance from camera to tangent plane intersection
++            rt = dot(prim.mu - rays.origin, prim.Rz) / dot(rays.direction, prim.Rz)
++            # Insertion sort into cache; pop smallest rt if full
++            insert_into_sorted(cache, rt, prim)
++            if len(cache) > 8:
++                cache.pop(0)  # Remove smallest rt
++        tile.cache = cache
+ 
+-#### 2. Rasterization: Tile Culling and Sorting
+-1. Divide the image into $16 \times 16$ tiles [S1].
+-2. For each tile, determine potentially intersecting primitives by projecting the kernel boundary polygon (defined by $\mathbf{v}_{k,i}$) to the image plane [S1].
+-3. For each candidate primitive, compute the distance $r_t$ from the camera to the intersection of the ray with the kernel's tangent plane:
+-   $$ r_t = \frac{(\boldsymbol{\mu}_i - \mathbf{r}_o)^T \mathbf{R}_{z,i}}{\mathbf{r}_d^T \mathbf{R}_{z,i}} $$
+-4. Maintain a sorted cache (array of length 8) of primitives for each tile, sorted by $r_t$ (ascending) [S1].
+-   - Insert new primitives into the cache using insertion sort [S1].
+-   - If the cache is full, pop the primitive with the smallest $r_t$ [S1].
++    # Pixel rendering
++    for pixel in image:
++        ray = rays[pixel]
++        alpha_accum = 0.0
++        color_accum = vec3(0.0)
++        for prim in tile.cache:
++            # A. Project to Local Tangent Coordinates [S1]
++            d = pixel_world_pos - prim.mu
++            u = dot(d, prim.Rx)
++            v = dot(d, prim.Ry)
+ 
+-#### 3. Pixel Rendering: Kernel Evaluation
+-For each pixel within a tile, and for each primitive in the sorted cache (until opacity contribution is negligible):
++            # B. Compute Polar Coordinates [S1]
++            r = sqrt(u*u + v*v)
++            if r == 0:
++                theta = 0.0  # Handle division by zero [G]
++            else:
++                theta = arccos(u / r)
++                if v < 0: theta = 2 * pi - theta  # Cover full 2pi range [G]
+ 
+-**A. Project to Local Tangent Coordinates**
+-Transform the pixel position $\mathbf{p}$ into the primitive's local tangent plane coordinates $(u, v)$:
+-1. Compute vector from center to pixel: $\mathbf{d} = \mathbf{p} - \boldsymbol{\mu}_i$ [S1].
+-2. Project onto tangent basis:
+-   $$ u = \mathbf{d}^T \mathbf{R}_{x,i} $$
+-   $$ v = \mathbf{d}^T \mathbf{R}_{y,i} $$
++            # C. Determine Radial Basis Interval [S1]
++            k = find_index(prim.theta, theta)  # Find k such that theta[k] < theta <= theta[k+1]
+ 
+-**B. Compute Polar Coordinates**
+-$$ r = \sqrt{u^2 + v^2} $$
+-$$ \theta = \arccos\left(\frac{u}{r}\right) \quad \text{Handle } r=0 \text{ as } \theta=0 \text{ [G]} $$
+-*Note: The source defines $\theta = \arccos(u/r)$ [S1]. Standard `arccos` returns values in $[0, \pi]$. To cover the full $2\pi$ range required by the ordered angles, use `atan2(-v, u)` or flip the angle when $v < 0$ [G].*
++            # D. Compute Relative Angular Distance [S1]
++            delta_theta = (theta - prim.theta[k]) * pi / (prim.theta[k+1] - prim.theta[k])
+ 
+-**C. Determine Radial Basis Interval**
+-Find index $k$ such that $\theta_{k,i} < \theta \le \theta_{k+1,i}$. Wrap around if $\theta > \theta_{K,i}$ [S1].
++            # E. Compute L2 Norm Component [S1]
++            s_bar_sq = (1 + cos(delta_theta)) / (2 * prim.s[k]**2) + \
++                       (1 - cos(delta_theta)) / (2 * prim.s[k+1]**2)
++            r2_sq = r * r
+ 
+-**D. Compute Relative Angular Distance**
+-$$ \Delta \theta_k = \frac{(\theta - \theta_{k,i})\pi}{\theta_{k+1,i} - \theta_{k,i}} $$
+-*Note: This maps the sector angle to $[0, \pi]$ for cosine weighting [S1].*
++            # F. Compute L1 Norm Component [S1]
++            # Maps diamond-shaped L1 unit ball to segment between adjacent endpoints
++            r1 = 1.0 / (abs(u / (prim.s[k] * cos(prim.theta[k]))) + \
++                        abs(v / (prim.s[k] * sin(prim.theta[k]))))
+ 
+-**E. Compute L2 Norm Component**
+-$$ \bar{s}^2 = \frac{1 + \cos(\Delta \theta_k)}{2 s_{k,i}^2} + \frac{1 - \cos(\Delta \theta_k)}{2 s_{k+1,i}^2} $$
+-$$ r_2^2 = r^2 $$
++            # G. Blended Kernel Value [S1]
++            g = exp(-(prim.eta * r1**2 + (1 - prim.eta) * r2_sq / 2) / s_bar_sq)
+ 
+-**F. Compute L1 Norm Component**
+-Calculate the L1 distance $r_1$ for point $(u,v)$ between endpoints $\mathbf{e}_k = (s_{k,i} \cos \theta_{k,i}, s_{k,i} \sin \theta_{k,i})$ and $\mathbf{e}_{k+1} = (s_{k+1,i} \cos \theta_{k+1,i}, s_{k+1,i} \sin \theta_{k+1,i})$. Correcting the garbled Eq. 7 to match the L1 diamond-mapping description:
+-$$ r_1 = \left( \left| \frac{u}{s_{k,i} \cos \theta_{k,i}} \right| + \left| \frac{v}{s_{k,i} \sin \theta_{k,i}} \right| \right)^{-1} $$
+-*Note: $r_1^2$ requires no explicit scaling term as it is inherently scaled through the inverse transformation [S1].*
++            # H. Edge Sharpening [S1]
++            alpha = prim.o * psi(g, prim.tau)
+ 
+-**G. Blended Kernel Value**
+-$$ g = \exp \left( - \frac{\eta_i r_1^2 + (1 - \eta_i) \frac{r_2^2}{2}}{\bar{s}^2} \right) $$
++            # I. Low-Pass Filtering [S1]
++            delta_pw = abs(pixel.u - prim.projected_u)
++            delta_ph = abs(pixel.v - prim.projected_v)
++            view_scale = abs(dot(ray.direction, prim.Rz))
++            alpha_filtered = max(alpha, prim.o * exp(-0.5 * (delta_pw**2 / sl**2 + delta_ph**2 / (sl**2 * view_scale**2))))
+ 
+-**H. Edge Sharpening**
+-Apply the piecewise sharpening function $\Psi(g)$ with coefficient $\tau_i$:
+-$$ \Psi(g) = \begin{cases} 
+-\frac{1-\tau_i}{1+\tau_i} g & \text{if } 0 \le g < \frac{1+\tau_i}{4} \\
+-g & \text{if } \frac{1+\tau_i}{4} \le g < \frac{3-\tau_i}{4} \\
+-\frac{1+\tau_i}{1-\tau_i} \left(g - \frac{3-\tau_i}{4}\right) + \frac{1+\tau_i}{4} & \text{if } \frac{3-\tau_i}{4} \le g \le 1
+-\end{cases} $$
+-Final opacity contribution:
+-$$ \alpha = o_i \cdot \Psi(g) $$
++            # J. Compositing
++            color_i = eval_sh(prim.sh, ray.direction)
++            color_accum += alpha_filtered * color_i * (1 - alpha_accum)
++            alpha_accum += alpha_filtered * (1 - alpha_accum)
++            if alpha_accum >= 0.999: break
+ 
+-**I. Low-Pass Filtering**
+-To prevent aliasing, apply a low-pass filter approximation:
+-$$ \tilde{\alpha} = \max \left( \alpha, o_i \cdot \exp \left( - \frac{1}{2} \left( \frac{\Delta p_w^2}{s_l^2} + \frac{\Delta p_h^2}{s_l^2 |\mathbf{r}_d \cdot \mathbf{R}_{z,i}|^2} \right) \right) \right) $$
+-Where $\Delta p_w, \Delta p_h$ are image-space distances from the pixel to the projected kernel center, and $s_l$ is the filter radius [S1].
+-
+-**J. Compositing**
+-Composite the color $\mathbf{C}_i$ (computed from SH and view direction) and opacity $\tilde{\alpha}$ using standard alpha blending:
+-$$ \mathbf{C}_{out} = \mathbf{C}_{in} + \tilde{\alpha} \mathbf{C}_i (1 - \mathbf{C}_{in}) $$
+-$$ \alpha_{out} = \alpha_{in} + \tilde{\alpha} (1 - \alpha_{in}) $$
++        image[pixel] = color_accum
++```
+ 
+ ### Parameters
+@@ -105,5 +112,4 @@
+ - **View Orthogonality**: If $\mathbf{r}_d \cdot \mathbf{R}_{z,i} \approx 0$, the kernel is viewed edge-on. The low-pass filter denominator becomes small, increasing the filter size to prevent aliasing [S1].
+ - **Degenerate Input**: If $\theta_k = \theta_{k+1}$, the sector is empty. Ensure $\theta_k$ are strictly increasing [S1].
+-
+ ## Operating characteristics
+ - **Time Complexity**: Rasterization is $O(N \cdot T)$ where $N$ is primitives and $T$ is tiles, but optimized by cache sorting (length 8) and culling [S1]. Per-pixel cost is proportional to the number of overlapping primitives in the cache (max 8) [S1].
+@@ -112,8 +118,6 @@
+ - **Strengths**: Better representation of sharp edges and straight lines; reduced overparameterization [S1].
+ - **Limitations**: More complex kernel evaluation than Gaussians; requires careful tuning of $\eta$ and $\tau$ [S1].
+-
+ ## Background
+ DRK Splatting was proposed by Yi-Hua Huang et al. in 2025 (arXiv:2412.11752v2) [S1]. It extends 2D Gaussian Splatting by introducing deformable radial bases to overcome the smoothness and symmetry constraints of Gaussians [S1]. It is backwards-compatible, reducing to a Gaussian kernel when using two orthogonal bases with specific decay rates [S1].
+-
+ ## Sources
+ [S1] Deformable Radial Kernel Splatting, https://doi.org/10.1109/CVPR52734.2025.02004, fetched 2026-10-30

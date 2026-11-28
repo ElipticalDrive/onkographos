@@ -1,0 +1,517 @@
+--- v003.md
++++ v004.md
+@@ -4,290 +4,271 @@
+ 
+ ## Overview
+-Parallel Differentiable Rasterization is a rendering method that jointly generates High Dynamic Range (HDR) and Low Dynamic Range (LDR) images from a set of 3D Gaussian primitives using two parallel rasterization pipelines, $F_{HDR}$ and $F_{LDR}$ [S1]. It differs from standard differentiable rasterization by decoupling the color representation into independent HDR and LDR streams that share the same geometric projection and alpha-blending logic, allowing for simultaneous optimization of high-intensity and standard-range views [S1].
++Parallel Differentiable Rasterization is a rendering method that jointly produces High Dynamic Range (HDR) and Low Dynamic Range (LDR) images from a set of 3D Gaussians using two parallel rasterization pipelines, $F_{HDR}$ and $F_{LDR}$ [S1]. It solves the problem of simultaneous HDR/LDR view synthesis by decoupling the color representation (HDR vs. LDR) while sharing the geometric projection and alpha-blending logic [S1]. It differs from standard differentiable rasterization by explicitly maintaining two distinct color streams for the same geometric primitives to handle wide dynamic range scenes without tone-mapping artifacts during training [S1].
+ 
+ ## How it works
+ **Inputs:**
+-*   Set of $N$ 3D Gaussians $\{G_i\}_{i=1}^N$, where each $G_i$ has mean $\boldsymbol{\mu}_i$, covariance $\boldsymbol{\Sigma}_i$, opacity $\alpha_i$, HDR color $\mathbf{c}_{hi}$, and LDR color $\mathbf{c}_{li}(\Delta t)$ [S1].
+-*   Extrinsic matrix $\mathbf{M}_{ext} \in \mathbb{R}^{4 \times 4}$ [S1].
+-*   Intrinsic matrix $\mathbf{M}_{int} \in \mathbb{R}^{3 \times 4}$ [S1].
+-*   Exposure time $\Delta t$ for LDR rendering [S1].
+-*   Image dimensions $H \times W$ [S1].
++*   Set of $N$ 3D Gaussians $\{G_i\}_{i=1}^N$, where each $G_i$ is defined by center $\mu_i \in \mathbb{R}^3$, 3D covariance $\Sigma_i \in \mathbb{R}^{3 \times 3}$, intrinsic opacity $\alpha_i \in \mathbb{R}$, and HDR color $c_{hi} \in \mathbb{R}^3$ [S1].
++*   Camera extrinsic matrix $M_{ext} \in \mathbb{R}^{4 \times 4}$ and intrinsic matrix $M_{int} \in \mathbb{R}^{3 \times 4}$ [S1].
++*   LDR exposure time $\Delta t$ [S1].
++*   LDR color parameters $c_{li}(\Delta t)$, derived from $c_{hi}$ via an MLP (fully connected $\to$ ReLU $\to$ fully connected $\to$ sigmoid) [S1].
+ 
+ **Outputs:**
+-*   Rendered HDR image $\mathbf{I}_h \in \mathbb{R}^{H \times W \times 3}$ [S1].
+-*   Rendered LDR image $\mathbf{I}_l(\Delta t) \in \mathbb{R}^{H \times W \times 3}$ [S1].
++*   Rendered HDR image $I_h \in \mathbb{R}^{H \times W \times 3}$ [S1].
++*   Rendered LDR image $I_l(\Delta t) \in \mathbb{R}^{H \times W \times 3}$ [S1].
+ 
+ **Data Structures:**
+-*   **Tile Grid:** The image plane is divided into non-overlapping tiles (e.g., $16 \times 16$ pixels) [S1].
+-*   **Gaussian List per Tile:** For each tile, a list of Gaussians whose 2D bounding boxes overlap the tile [S1].
+-*   **Sorted List:** Within each tile, Gaussians are sorted by view-space depth (front-to-back) [S1].
++*   **Gaussian Attributes:** Stored in arrays of size $N$. Fields: $\mu_i$ (vec3), $\Sigma_i$ (mat3x3), $\alpha_i$ (float), $c_{hi}$ (vec3), $c_{li}$ (vec3).
++*   **Tile Grid:** Image divided into non-overlapping tiles (e.g., $16 \times 16$ pixels). Each tile contains a list of indices of Gaussians whose 2D bounding boxes overlap the tile [S1].
++*   **Sorted List:** Within each tile, Gaussian indices are sorted by view-space depth $v_{i,z}$ (front-to-back) [S1].
+ 
+ **Steps:**
+ 
+-1.  **Probability Evaluation:** For a point $\mathbf{x} \in \mathbb{R}^3$, compute the probability density of the $i$-th Gaussian [S1]:
+-    $$
+-    P(\mathbf{x} | \boldsymbol{\mu}_i, \boldsymbol{\Sigma}_i) = \exp\left(-\frac{1}{2}(\mathbf{x} - \boldsymbol{\mu}_i)^\top \boldsymbol{\Sigma}_i^{-1} (\mathbf{x} - \boldsymbol{\mu}_i)\right)
+-    $$
+-
+-2.  **Projection of Mean:** Transform the mean $\boldsymbol{\mu}_i$ from world to camera coordinates $\mathbf{v}_i$, then to image coordinates $\mathbf{u}_i$ [S1]:
+-    $$
+-    \tilde{\mathbf{e}}_i = [\mathbf{v}_i, 1]^\top = \mathbf{M}_{ext} [\boldsymbol{\mu}_i, 1]^\top
+-    $$
+-    $$
+-    \tilde{\mathbf{u}}_i = [\mathbf{u}_i, 1]^\top = \mathbf{M}_{int} \mathbf{v}_i
+-    $$
+-    where $\mathbf{u}_i \in \mathbb{R}^2$ and $\mathbf{v}_i \in \mathbb{R}^3$ [S1].
+-
+-3.  **Covariance Transformation:** Transform the 3D covariance $\boldsymbol{\Sigma}_i$ to the camera coordinate system $\boldsymbol{\Sigma}'_i$ using the Jacobian $\mathbf{J}_i$ of the affine approximation of $\mathbf{M}_{int}\mathbf{M}_{ext}$ and the viewing transformation $\mathbf{W}_i$ (first 3 rows/cols of $\mathbf{M}_{ext}$) [S1]:
+-    $$
+-    \boldsymbol{\Sigma}'_i = \mathbf{J}_i \mathbf{W}_i \boldsymbol{\Sigma}_i \mathbf{W}_i^\top \mathbf{J}_i^\top
+-    $$
+-
+-4.  **2D Covariance Derivation:** Derive the 2D covariance $\boldsymbol{\Sigma}''_i \in \mathbb{R}^{2 \times 2}$ by removing the third row and column from $\boldsymbol{\Sigma}'_i$ [S1].
+-
+-5.  **Tiling and Assignment:** Assign each Gaussian to tiles where its 2D projection (defined by $\mathbf{u}_i$ and $\boldsymbol{\Sigma}''_i$) overlaps [S1].
+-
+-6.  **Sorting:** Sort the assigned Gaussians in each tile by view-space depth (z-coordinate in camera space) [S1].
+-
+-7.  **Rasterization (Blending):** For each pixel $\mathbf{p}$, identify the set $\mathcal{N}$ of ordered Gaussians overlapping $\mathbf{p}$ in the corresponding tile. Compute the opacity contribution $\sigma_j$ for the $j$-th Gaussian [S1]:
+-    $$
+-    \sigma_j = \alpha_j P(\mathbf{x}_j | \boldsymbol{\mu}_j, \boldsymbol{\Sigma}_j)
+-    $$
+-    where $\mathbf{x}_j$ is the intersection point between the ray from the camera optical center through $\mathbf{p}$ and the $j$-th Gaussian [S1].
+-
+-    Compute the final colors by alpha blending [S1]:
+-    $$
+-    \mathbf{I}_h(\mathbf{p}) = \sum_{j \in \mathcal{N}} \mathbf{c}_{hj} \sigma_j \prod_{k=1}^{j-1} (1 - \sigma_k)
+-    $$
+-    $$
+-    \mathbf{I}_l(\mathbf{p}|\Delta t) = \sum_{j \in \mathcal{N}} \mathbf{c}_{lj}(\Delta t) \sigma_j \prod_{k=1}^{j-1} (1 - \sigma_k)
+-    $$
+-    where $\mathbf{c}_{hj}$ is the HDR color and $\mathbf{c}_{lj}(\Delta t)$ is the LDR color with exposure time $\Delta t$ [S1].
++1.  **Project Centers:** Transform the 3D center $\mu_i$ to camera coordinates $v_i$ and then to image coordinates $u_i$ [S1].
++    $$ \tilde{e}_i = [v_i, 1]^\top = M_{ext} [\mu_i, 1]^\top $$
++    $$ \tilde{u}_i = [u_i, 1]^\top = M_{int} v_i $$
++    where $v_i \in \mathbb{R}^3$ and $u_i \in \mathbb{R}^2$ [S1].
++
++2.  **Transform Covariance:** Transform the 3D covariance $\Sigma_i$ to the camera coordinate system $\Sigma'_i$ using the viewing transformation $W_i$ and the Jacobian $J_i$ of the affine approximation of the projection $M_{int}M_{ext}$ [S1].
++    $$ \Sigma'_i = J_i W_i \Sigma_i W_i^\top J_i^\top $$
++    where $W_i$ is the first $3 \times 3$ submatrix of $M_{ext}$ and $J_i \in \mathbb{R}^{3 \times 3}$ [S1].
++
++3.  **Derive 2D Covariance:** Obtain the 2D covariance $\Sigma''_i \in \mathbb{R}^{2 \times 2}$ by removing the third row and column from $\Sigma'_i$ [S1].
++    *   *Pitfall:* This approximation skips the depth component of the covariance, which may introduce artifacts in high-curvature regions or near depth discontinuities [S1].
++
++4.  **Tiling and Sorting:**
++    *   Compute the 2D bounding box of each Gaussian using $\Sigma''_i$ and $u_i$.
++    *   Assign each Gaussian to all tiles whose pixels overlap with this bounding box [S1].
++    *   For each tile, sort the assigned Gaussians by their view-space depth $v_{i,z}$ in ascending order (front-to-back) [S1].
++
++5.  **Compute Opacity Contribution:** For each Gaussian $j$ overlapping a pixel $p$, calculate the spatial probability $P(x_j|\mu_j, \Sigma_j)$ at the intersection point $x_j$ (where the ray from the camera optical center through $p$ intersects the Gaussian) [S1].
++    $$ P(x|\mu_i, \Sigma_i) = \exp\left(-\frac{1}{2}(x - \mu_i)^\top \Sigma_i^{-1} (x - \mu_i)\right) $$
++    The effective opacity $\sigma_j$ is:
++    $$ \sigma_j = \alpha_j P(x_j|\mu_j, \Sigma_j) $$
++    where $x_j$ is the 3D point on the Gaussian surface intersected by the ray for pixel $p$ [S1].
++
++6.  **Alpha Blending:** Render the pixel $p$ by blending the colors of all $N$ ordered Gaussians overlapping $p$ in the tile [S1].
++    $$ I_h(p) = \sum_{j \in N} c_{hj} \sigma_j \prod_{k=1}^{j-1} (1 - \sigma_k) $$
++    $$ I_l(p|\Delta t) = \sum_{j \in N} c_{lj}(\Delta t) \sigma_j \prod_{k=1}^{j-1} (1 - \sigma_k) $$
++    where $c_{hj}$ is the HDR color and $c_{lj}(\Delta t)$ is the LDR color for the $j$-th Gaussian [S1].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def parallel_differentiable_rasterization(gaussians, M_ext, M_int, delta_t, tile_size):
++def parallel_differentiable_rasterization(Gaussians, M_ext, M_int, Delta_t):
+     """
+-    gaussians: List of Gaussian objects with attributes:
+-        mu: (3,) mean position
++    Gaussians: List of N objects with attributes:
++        mu: (3,) center
+         Sigma: (3,3) covariance
+         alpha: scalar opacity
+         c_h: (3,) HDR color
+-        c_l: (3,) LDR color
+     M_ext: (4,4) extrinsic matrix
+     M_int: (3,4) intrinsic matrix
+-    delta_t: float exposure time
+-    tile_size: int size of square tiles (e.g., 16)
++    Delta_t: float exposure time
++    Returns: I_h (H,W,3), I_l (H,W,3)
++    """
++    N = len(Gaussians)
++    H, W = image_height, image_width # Derived from M_int or config
++    tile_size = 16 # Common tile size
+     
+-    Returns:
+-        I_h: (H, W, 3) HDR image
+-        I_l: (H, W, 3) LDR image
+-    """
+-    H, W = image_dimensions # Derived from M_int and scene bounds
+-    num_tiles_h = ceil(H / tile_size)
+-    num_tiles_w = ceil(W / tile_size)
+-    
+-    # Initialize tile lists
+-    # tile_gaussians[tile_idx] = list of gaussian indices
+-    tile_gaussians = [[] for _ in range(num_tiles_h * num_tiles_w)]
+-    
+-    # Precompute projections for all Gaussians
++    # Precompute LDR colors if not precomputed
++    for g in Gaussians:
++        g.c_l = apply_mlp_to_hdr_color(g.c_h, Delta_t) # MLP: FC->ReLU->FC->Sigmoid
++        
++    # 1. Project and Transform
+     projected_gaussians = []
+-    for i, g in enumerate(gaussians):
+-        # 1. Project Mean
+-        mu_hom = np.append(g.mu, 1.0)
+-        v_hom = M_ext @ mu_hom
+-        v = v_hom[:3]
+-        u_hom = M_int @ v_hom
+-        u = u_hom[:2]
+-        
+-        # 2. Transform Covariance
+-        # W_i is first 3 rows/cols of M_ext
++    for i, g in enumerate(Gaussians):
++        # Homogeneous center
++        mu_h = np.append(g.mu, 1.0)
++        
++        # World to Camera
++        v_h = M_ext @ mu_h
++        v = v_h[:3]
++        
++        # Camera to Image
++        u_h = M_int @ v_h
++        u = u_h[:2]
++        
++        # Covariance transformation
+         W_i = M_ext[:3, :3]
+-        # J_i is Jacobian of affine approx of M_int @ M_ext
+-        # For standard pinhole, J_i is often approximated or computed via partial derivatives
+-        # Here we assume J_i is provided or computed as the top 3x3 of M_int @ M_ext
+-        # Note: The source defines J_i as Jacobian of affine approximation.
+-        # In practice, for perspective, this is complex. We assume J_i is available.
+-        J_i = compute_jacobian_affine_approx(M_int, M_ext, v) 
+-        
+-        Sigma_prime = J_i @ W_i @ g.Sigma @ W_i.T @ J_i.T
+-        
+-        # 3. 2D Covariance
++        # J_i is Jacobian of affine approx of M_int @ M_ext. 
++        # In practice, often approximated or computed via finite differences 
++        # or analytical derivative of projection. 
++        # Here we assume J_i is available or computed.
++        J_i = compute_jacobian_affine(M_int, M_ext) 
++        
++        Sigma_prime = J_i @ (W_i @ g.Sigma @ W_i.T) @ J_i.T
++        
++        # 2D Covariance by skipping 3rd row/col
+         Sigma_2d = Sigma_prime[:2, :2]
+         
+-        # 4. Determine Tile Coverage
+-        # Calculate bounding box of 2D Gaussian (e.g., 3-sigma)
+-        # Eigen decomposition of Sigma_2d to get axes
+-        eigenvalues, eigenvectors = np.linalg.eigh(Sigma_2d)
+-        # Bounding box half-widths
+-        half_widths = 3.0 * np.sqrt(eigenvalues)
+-        min_x = u[0] - half_widths[0]
+-        max_x = u[0] + half_widths[0]
+-        min_y = u[1] - half_widths[1]
+-        max_y = u[1] + half_widths[1]
+-        
+-        # Clip to image bounds
+-        min_x = max(0, min_x)
+-        max_x = min(W, max_x)
+-        min_y = max(0, min_y)
+-        max_y = min(H, max_y)
+-        
+-        # Assign to tiles
+-        tile_start_x = int(min_x // tile_size)
+-        tile_end_x = int(max_x // tile_size)
+-        tile_start_y = int(min_y // tile_size)
+-        tile_end_y = int(max_y // tile_size)
+-        
+-        for ty in range(tile_start_y, tile_end_y + 1):
+-            for tx in range(tile_start_x, tile_end_x + 1):
+-                if 0 <= ty < num_tiles_h and 0 <= tx < num_tiles_w:
+-                    tile_idx = ty * num_tiles_w + tx
+-                    tile_gaussians[tile_idx].append(i)
+-        
+         projected_gaussians.append({
+-            'idx': i,
++            'id': i,
+             'u': u,
+-            'v': v,
+             'Sigma_2d': Sigma_2d,
++            'v_z': v[2], # View space depth
+             'alpha': g.alpha,
+             'c_h': g.c_h,
+-            'c_l': g.c_l
++            'c_l': g.c_l,
++            'mu': g.mu,
++            'Sigma': g.Sigma
+         })
+-
+-    # Initialize output images
++        
++    # 2. Tiling and Sorting
++    # Initialize tile lists
++    tiles = {} # Key: (tile_x, tile_y), Value: list of projected_gaussians
++    for pg in projected_gaussians:
++        # Compute bounding box in pixel coordinates
++        # Approximate bbox using 2 sigma of Sigma_2d
++        bbox = compute_2d_bbox(pg['u'], pg['Sigma_2d'])
++        
++        # Determine tiles covered by bbox
++        tile_indices = get_tile_indices(bbox, tile_size, W, H)
++        
++        for t_idx in tile_indices:
++            if t_idx not in tiles:
++                tiles[t_idx] = []
++            tiles[t_idx].append(pg)
++            
++    # Sort each tile by depth (front-to-back)
++    for t_idx in tiles:
++        tiles[t_idx].sort(key=lambda g: g['v_z'])
++        
++    # 3. Rasterization
+     I_h = np.zeros((H, W, 3))
+     I_l = np.zeros((H, W, 3))
+     
+-    # Rasterize each tile
+-    for ty in range(num_tiles_h):
+-        for tx in range(num_tiles_w):
+-            tile_idx = ty * num_tiles_w + tx
+-            g_indices = tile_gaussians[tile_idx]
+-            
+-            if not g_indices:
+-                continue
+-                
+-            # Sort by view-space depth (z in camera coords)
+-            # v is camera coordinate, v[2] is depth
+-            sorted_indices = sorted(g_indices, key=lambda i: projected_gaussians[i]['v'][2])
+-            
+-            # Determine pixel range for this tile
+-            y_start = ty * tile_size
+-            y_end = min((ty + 1) * tile_size, H)
+-            x_start = tx * tile_size
+-            x_end = min((tx + 1) * tile_size, W)
+-            
+-            # For each pixel in tile
+-            for y in range(y_start, y_end):
+-                for x in range(x_start, x_end):
+-                    # Ray from camera center through pixel
+-                    # This requires inverse intrinsic matrix
+-                    # u_pixel = [x, y, 1]
+-                    # v_ray = M_int^-1 @ [x, y, 1]
+-                    # Normalize or use as direction
+-                    # Intersection x_j is needed for P(x_j | mu, Sigma)
+-                    # In standard 3DGS, P is evaluated at the projected center or intersection.
+-                    # Source says x_j is intersection point.
+-                    
+-                    # Approximation: Use the 2D Gaussian evaluation at pixel center relative to projected mean
+-                    # Or compute exact intersection. Source implies exact intersection.
+-                    # For implementation simplicity in this pseudocode, we use the 2D Gaussian PDF
+-                    # evaluated at the pixel coordinate relative to the projected mean,
+-                    # scaled by the determinant of the 2D covariance if necessary, 
+-                    # but the source formula uses P(x_j | mu, Sigma) which is 3D.
+-                    # However, the blending formula uses sigma_j = alpha_j * P(x_j | mu_j, Sigma_j).
+-                    # In many rasterizers, this is approximated by the 2D Gaussian value.
+-                    # Let's stick to the source's definition: x_j is intersection.
+-                    
+-                    # Compute ray direction
+-                    ray_dir = compute_ray_direction(x, y, M_int)
+-                    
+-                    # Find intersection with Gaussian j
+-                    # This is complex. Standard 3DGS rasterizers often approximate P(x_j) 
+-                    # by evaluating the 2D Gaussian at the pixel.
+-                    # The source formula: sigma_j = alpha_j * P(x_j | mu_j, Sigma_j)
+-                    # where x_j is the intersection.
+-                    
+-                    # To make this implementable from text:
+-                    # We will approximate P(x_j) by the 2D Gaussian density at the pixel.
+-                    # P_2d(u | u_j, Sigma_2d) = 1/(2*pi*sqrt(det)) * exp(...)
+-                    # The source doesn't specify the normalization constant for the 2D projection 
+-                    # explicitly in the blending formula, but P is defined as 3D density.
+-                    # Usually, the alpha blending uses the projected alpha.
+-                    
+-                    # Let's assume the standard 3DGS approach where sigma_j is the 
+-                    # projected alpha at the pixel.
+-                    
+-                    cum_alpha = 0.0
+-                    color_h = np.zeros(3)
+-                    color_l = np.zeros(3)
+-                    
+-                    for idx in sorted_indices:
+-                        pg = projected_gaussians[idx]
++    for t_idx, tile_gaussians in tiles.items():
++        tile_x, tile_y = t_idx
++        for y in range(tile_y * tile_size, min((tile_y + 1) * tile_size, H)):
++            for x in range(tile_x * tile_size, min((tile_x + 1) * tile_size, W)):
++                # Ray from camera center through pixel (x,y)
++                # This requires inverse projection. 
++                # For 3DGS, the intersection x_j is often approximated 
++                # or the Gaussian is treated as a volume.
++                # The formula uses x_j, the intersection point.
++                # In standard 2D splatting, we evaluate P at the pixel center 
++                # or use the 2D Gaussian directly. 
++                # The source specifies x_j is the intersection of the ray 
++                # with the Gaussian point cloud.
++                
++                # Approximation: Use pixel center in camera space or 
++                # assume x_j is close to the projected center for small Gaussians.
++                # However, the formula explicitly uses P(x_j | mu, Sigma).
++                # If we assume the Gaussian is evaluated at the pixel's ray intersection:
++                
++                # Compute ray direction for pixel (x,y)
++                # This part depends on the specific camera model implementation.
++                # For the purpose of the algorithm structure:
++                ray = get_ray_for_pixel(x, y, M_int, M_ext)
++                
++                # Find intersection x_j with the Gaussian j
++                # This is non-trivial for 3D Gaussians. 
++                # Often, for differentiable rasterization in 3DGS, 
++                # the 2D projection is used directly: sigma = alpha * exp(...)
++                # where the exponent uses the 2D distance from u_j.
++                # The source formula P(x|mu, Sigma) is 3D.
++                # However, the projection step yields Sigma_2d.
++                # Standard 3DGS uses the 2D Gaussian:
++                # sigma = alpha * exp(-0.5 * (x-pixel - u)^T Sigma_2d^-1 (x-pixel - u))
++                
++                # Let's stick to the source's explicit formula structure:
++                # I(p) = sum c_j * sigma_j * prod(1-sigma_k)
++                # sigma_j = alpha_j * P(x_j | mu_j, Sigma_j)
++                
++                # Implementation note: 
++                # If x_j is not explicitly computed, the 2D approximation is:
++                # sigma_j = alpha_j * exp(-0.5 * dist^T Sigma_2d^-1 dist)
++                
++                cumulative_alpha = 0.0
++                color_h = np.zeros(3)
++                color_l = np.zeros(3)
++                
++                for pg in tile_gaussians:
++                    # Calculate distance from pixel (x,y) to projected center u
++                    dist_vec = np.array([x, y]) - pg['u']
++                    
++                    # Compute 2D Gaussian probability
++                    # P_2d = exp(-0.5 * dist^T Sigma_2d^-1 dist)
++                    # Note: Source says P(x|mu, Sigma) is 3D. 
++                    # But Sigma_2d is derived from Sigma_3d.
++                    # We use the 2D covariance for the 2D rasterization.
++                    try:
++                        inv_Sigma_2d = np.linalg.inv(pg['Sigma_2d'])
++                        exponent = -0.5 * (dist_vec @ inv_Sigma_2d @ dist_vec)
++                        prob = np.exp(exponent)
++                    except:
++                        prob = 0.0
+                         
+-                        # Compute distance from pixel (x,y) to projected mean (u_x, u_y)
+-                        dist_sq = (x - pg['u'][0])**2 + (y - pg['u'][1])**2
++                    sigma_j = pg['alpha'] * prob
++                    
++                    # Blend
++                    weight = sigma_j * (1.0 - cumulative_alpha)
++                    color_h += pg['c_h'] * weight
++                    color_l += pg['c_l'] * weight
++                    cumulative_alpha += weight * (1.0 - (cumulative_alpha - weight)) # Simplified: cumulative_alpha += sigma_j * (1 - prev_cumulative)
++                    
++                    # Correct alpha accumulation:
++                    # new_cumulative = 1 - (1 - prev) * (1 - sigma)
++                    # weight = sigma * (1 - prev)
++                    # This loop logic needs to match the product formula:
++                    # prod_{k=1}^{j-1} (1 - sigma_k)
++                    
++                # Re-implement blending loop correctly
++                cumulative_alpha = 0.0
++                color_h = np.zeros(3)
++                color_l = np.zeros(3)
++                
++                for pg in tile_gaussians:
++                    dist_vec = np.array([x, y]) - pg['u']
++                    try:
++                        inv_Sigma_2d = np.linalg.inv(pg['Sigma_2d'])
++                        exponent = -0.5 * (dist_vec @ inv_Sigma_2d @ dist_vec)
++                        prob = np.exp(exponent)
++                    except:
++                        prob = 0.0
+                         
+-                        # Evaluate 2D Gaussian
+-                        # Sigma_2d is 2x2
+-                        try:
+-                            inv_Sigma = np.linalg.inv(pg['Sigma_2d'])
+-                            diff = np.array([x - pg['u'][0], y - pg['u'][1]])
+-                            exponent = -0.5 * diff @ inv_Sigma @ diff
+-                            # Note: Source uses P(x_j | mu, Sigma) which is 3D.
+-                            # If we use 2D approximation, we might need scaling.
+-                            # However, for differentiability, the 2D PDF is standard.
+-                            # We will use the 2D PDF value.
+-                            # P_2d = exp(exponent) / (2 * pi * sqrt(det(Sigma_2d)))
+-                            det_Sigma = np.linalg.det(pg['Sigma_2d'])
+-                            if det_Sigma <= 0:
+-                                pdf_val = 0.0
+-                            else:
+-                                pdf_val = np.exp(exponent) / (2 * np.pi * np.sqrt(det_Sigma))
+-                        except:
+-                            pdf_val = 0.0
+-                            
+-                        sigma_j = pg['alpha'] * pdf_val
+-                        
+-                        # Alpha blending
+-                        weight = sigma_j * (1 - cum_alpha)
+-                        color_h += weight * pg['c_h']
+-                        color_l += weight * pg['c_l']
+-                        cum_alpha += weight
+-                        
+-                        if cum_alpha > 0.99: # Early exit
+-                            break
+-                    
+-                    I_h[y, x] = color_h
+-                    I_l[y, x] = color_l
+-
++                    sigma_j = pg['alpha'] * prob
++                    
++                    # Contribution: c_j * sigma_j * prod_{k<j} (1 - sigma_k)
++                    # prod_{k<j} (1 - sigma_k) is (1 - cumulative_alpha)
++                    contribution = sigma_j * (1.0 - cumulative_alpha)
++                    
++                    color_h += pg['c_h'] * contribution
++                    color_l += pg['c_l'] * contribution
++                    cumulative_alpha += contribution
++                    
++                I_h[y, x] = color_h
++                I_l[y, x] = color_l
++                
+     return I_h, I_l
+ 
+-def compute_jacobian_affine_approx(M_int, M_ext, v):
+-    # Approximation: J_i is the top 3x3 of M_int @ M_ext
+-    # This is an affine approximation of the projective transform
+-    return (M_int @ M_ext)[:3, :3]
+-
+-def compute_ray_direction(x, y, M_int):
+-    # Inverse intrinsic to get direction in camera space
+-    # Assuming M_int is 3x3 for direction, or 3x4 with last col 0
+-    # Standard pinhole: x_cam = f * X/Z + cx
+-    # Direction is inverse of projection
+-    inv_M_int = np.linalg.inv(M_int[:3, :3])
+-    pixel_hom = np.array([x, y, 1.0])
+-    dir_cam = inv_M_int @ pixel_hom
+-    return dir_cam / np.linalg.norm(dir_cam)
++def apply_mlp_to_hdr_color(c_h, Delta_t):
++    # Placeholder for the specific MLP architecture described in [S1]
++    # FC -> ReLU -> FC -> Sigmoid
++    # Input: c_h, Delta_t (possibly concatenated or used as bias)
++    # Output: c_l
++    pass
++
++def compute_jacobian_affine(M_int, M_ext):
++    # Jacobian of the affine approximation of M_int @ M_ext
++    # This is a constant matrix for a given camera pose
++    M_proj = M_int @ M_ext
++    # Affine approximation usually involves the top 2 rows of the projection 
++    # for the 2D mapping, but J_i in the source is 3x3 for the 3D->3D transform 
++    # before dropping to 2D.
++    # The source says J_i is Jacobian of affine approx of Mint Mext.
++    # Since Mint Mext is 3x4, the affine part is the 3x3 rotation/scale.
++    return M_proj[:3, :3] # Simplified assumption
+ ```
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear with respect to the number of Gaussians $N$ and pixels $H \times W$, dominated by the sorting and blending steps within tiles. Tiling reduces the sorting overhead from $O(N \log N)$ to $O(N_{tile} \log N_{tile})$ per tile.
+-*   **Memory Complexity:** $O(N)$ to store Gaussian parameters and $O(H \times W)$ for the image buffers. Tile-based processing allows for lower peak memory usage if tiles are processed sequentially.
+-*   **Strengths:** Enables joint optimization of HDR and LDR views, which is critical for high-fidelity novel view synthesis in varying lighting conditions. The parallel structure allows efficient GPU implementation.
+-*   **Limitations:** Requires careful handling of the exposure time $\Delta t$ for LDR rendering. The approximation of the 2D covariance by skipping the third row/column may introduce artifacts for highly oblique views [S1].
++*   **Time Complexity:** $O(N \cdot T)$ where $N$ is the number of Gaussians and $T$ is the average number of Gaussians per tile/pixel. Sorting is $O(N \log N)$ globally or $O(N_t \log N_t)$ per tile.
++*   **Memory Complexity:** $O(N)$ for Gaussian attributes plus $O(H \cdot W)$ for the output buffers and tile structures.
++*   **Strengths:** Enables joint training of HDR and LDR representations, preserving high dynamic range information while providing standard LDR outputs. Parallel execution of $F_{HDR}$ and $F_{LDR}$ allows efficient use of GPU resources.
++*   **Limitations:** The approximation of 2D covariance by skipping the third row/column may lead to inaccuracies in depth-dependent opacity calculations [S1]. The MLP for LDR color generation adds computational overhead during training [S1].
++*   **When to use:** When the application requires both HDR and LDR outputs from the same scene representation, such as in HDR novel view synthesis or tone-mapping research.
+ 
+ ## Background
+-Parallel Differentiable Rasterization was introduced in the context of HDR-GS (HDR Gaussian Splatting) to address the limitations of standard 3D Gaussian Splatting in high dynamic range scenarios [S1]. Traditional methods struggle with the wide range of intensities found in HDR scenes, often clipping highlights or losing detail in shadows. By maintaining separate color streams for HDR and LDR, this method allows the model to learn and render both representations simultaneously, leveraging the differentiability of the rasterization process for end-to-end training [S1].
++Parallel Differentiable Rasterization was introduced in the context of HDR-GS (HDR Gaussian Splatting) [S1]. It addresses the limitation of standard 3D Gaussian Splatting, which typically operates in LDR space, by extending the rendering pipeline to handle HDR colors directly. The method builds on the shared principles of tiling, sorting, and alpha blending found in [Rendering Implementation and Acceleration](21069-rendering-implementation-and-acceleration.md).
+ 
+ ## Sources

@@ -1,0 +1,129 @@
+--- v008.md
++++ v009.md
+@@ -95,15 +95,13 @@
+     dH_dc = [0.0] * N
+     dH_dsigma = [0.0] * N
+-    # V stores the exponent for transmittance: exp(-sum(sigma_j * delta_j))
+     V = -sum(sigma[i] * delta[i] for i in range(N))
+     G = 0.0
+-    # Iterate backwards from last sample to first
+     for i in range(N - 1, -1, -1):
+         V -= sigma[i] * delta[i]
+-        transmittance_before = math.exp(V)
+-        absorption = 1.0 - math.exp(-sigma[i] * delta[i])
+-        dH_dc[i] = transmittance_before * absorption
+-        dH_dsigma[i] = G + transmittance_before * absorption * c[i]
+-        G = transmittance_before * delta[i] * math.exp(-sigma[i] * delta[i]) * c[i] - delta[i] * G
++        T = math.exp(V)
++        abs_term = 1.0 - math.exp(-sigma[i] * delta[i])
++        dH_dc[i] = T * abs_term
++        dH_dsigma[i] = G + T * abs_term * c[i]
++        G = T * delta[i] * math.exp(-sigma[i] * delta[i]) * c[i] - delta[i] * G
+     return dH_dc, dH_dsigma
+ 
+@@ -115,5 +113,4 @@
+     z = M_inv(r)
+     p = list(z)
+-    k = 0
+     while True:
+         Ap = A_p(p)
+@@ -130,5 +127,4 @@
+         r = r_new
+         x = x_new
+-        k += 1
+ 
+ def line_search(initial_gamma, alpha_dec, objective_fn):
+@@ -145,22 +141,15 @@
+ def optimize_level(grid, env_maps, images, iterations=30):
+     """Optimizes a single hierarchical level using Gauss-Newton with PCG."""
++    N_params = len(grid)
+     for _ in range(iterations):
+-        residuals = []
+-        gradients = []
++        ray_gradients = []
+         for img in images:
+             for pixel in img:
+-                # Ray casting and jittering [S2]
+                 ray_origin = [pixel.x + random.uniform(-0.5, 0.5), pixel.y + random.uniform(-0.5, 0.5)]
+-                # Ray march through voxel grid with step length = shortest voxel side [S2]
+-                # Jitter samples within half a step [S2]
+                 samples = ray_march(grid, ray_origin)
+-                # Intersect environment maps from inner to outer [S2]
+                 samples += intersect_env_maps(env_maps, ray_origin)
+-                # Compute accumulated color H_hat [S2]
+                 H_hat = volume_render(samples)
+-                # Residuals: difference between pixel color C and accumulated color H_hat [S2]
+                 r = [H_hat[i] - pixel.color[i] for i in range(3)]
+-                residuals.append(r)
+-                # Analytical derivatives [S2]
++                
+                 dH_dc, dH_dsigma = compute_derivatives(
+                     [s.sigma for s in samples],
+@@ -168,44 +157,34 @@
+                     [s.color for s in samples]
+                 )
+-                gradients.append((dH_dc, dH_dsigma, samples))
+-        # Solve A * delta = b where A = J_r^T J_r, b = -J_r^T r [S2]
+-        # A_p(p) = sum_i grad_i * (grad_i^T p) [S2]
++                ray_gradients.append((r, dH_dc, dH_dsigma, samples))
++                
+         def A_p(p):
+-            Ap = [0.0] * len(p)
+-            for dH_dc, dH_dsigma, samples in gradients:
+-                dot_prod = sum(dH_dc[i] * p[i] for i in range(len(p)))
+-                for i in range(len(p)):
+-                    Ap[i] += dH_dc[i] * dot_prod
++            Ap = [0.0] * N_params
++            for r, dH_dc, dH_dsigma, samples in ray_gradients:
++                for idx, sample in enumerate(samples):
++                    voxel_idx = sample.voxel_id
++                    dot_prod = dH_dc[idx]
++                    Ap[voxel_idx] += dot_prod * dot_prod
+             return Ap
+-        # Preconditioner M = diag(J_r^T J_r) [S2]
+-        diag_A = [sum(dH_dc[i]**2 for dH_dc, _, _ in gradients) for i in range(len(gradients[0][0]))]
++            
++        diag_A = [sum(1.0 for _ in ray_gradients) for _ in range(N_params)]
+         def M_inv(r):
+-            return [r[i] / diag_A[i] for i in range(len(r))]
+-        b = [-sum(dH_dc[i] * r[i] for dH_dc, _, _ in gradients for i in range(len(r))) for i in range(len(r))]
+-        delta = pcg_solve(A_p, b, [0.0]*len(b), M_inv)
+-        # Line search with backtracking [S2]
++            return [r[i] / diag_A[i] for i in range(N_params)]
++            
++        b_vector = [0.0] * N_params
++        for r, dH_dc, dH_dsigma, samples in ray_gradients:
++            for idx, sample in enumerate(samples):
++                voxel_idx = sample.voxel_id
++                b_vector[voxel_idx] -= sum(dH_dc[idx] * r[j] for j in range(3))
++                
++        delta = pcg_solve(A_p, b_vector, [0.0]*N_params, M_inv)
++        
+         def obj_fn(gamma):
+             return compute_objective(grid, env_maps, images, gamma * delta)
+         gamma = line_search(1.0, 0.7, obj_fn)
+-        # Update grid and env maps [S2]
+-        for i in range(len(grid)):
++        
++        for i in range(N_params):
+             grid[i] += gamma * delta[i]
+-        for i in range(len(env_maps)):
+-            env_maps[i] += gamma * delta[len(grid) + i]
+-    return grid, env_maps
+-
+-def main():
+-    levels = 5
+-    current_res = 32
+-    grid = init_grid(current_res)
+-    env_maps = init_env_maps(current_res)
+-    for level in range(levels):
+-        grid, env_maps = optimize_level(grid, env_maps, images, iterations=30)
+-        if level < levels - 1:
+-            next_res = current_res * 2
+-            grid = interpolate(grid, next_res)
+-            env_maps = interpolate_env_maps(env_maps, next_res)
+-            current_res = next_res
+-    return grid, env_maps
++    return grid
+ ```
+ 

@@ -1,0 +1,128 @@
+# Volumetric Light Shafts (URP Raymarching)
+Also called: God Rays, Light Shafts, VolumetricLightURP
+
+## Overview
+Volumetric Light Shafts (URP Raymarching) is a real-time post-processing technique for rendering volumetric light scattering (fog beams, atmospheric lighting) in the Unity Universal Render Pipeline (URP) by performing per-pixel raymarching through a main light's shadow map [S2, unofficial]. It approximates single in-scattering from a single directional light source, modulated by a Henyey-Greenstein phase function and estimated occlusion derived from realtime shadow sampling [S2, unofficial]. Unlike slice-based volume rendering or complex shadow-map methods, it requires no preprocessing, extra scene geometry, or high fill rate, making it significantly cheaper than full volumetric ray marching [S2, unofficial]. However, it is limited to a single light source and lacks full volumetric depth information, leading to artifacts when foreground objects obscure background light shafts [S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Screen-space position (fragment world position), camera world position, main light realtime shadow map, light position, light color/intensity, and material parameters (density, step count, max distance, scattering multiplier) [S2, unofficial].
+*   **Output:** Accumulated volumetric light color and alpha, added additively to the screen buffer [S2, unofficial].
+
+**Data Structures:**
+*   **Shader Constants:**
+    *   `_BaseColor` (float4): Base color of the volumetric effect. Default: `(1, 1, 1, 1)` [S2, unofficial].
+    *   `_Density` (float): Density of the volume. Default: `0.5`. Range: `0` to `1` [S2, unofficial].
+    *   `_StepCount` (int): Number of raymarching steps. Default: `64`. Range: `16` to `128` [S2, unofficial].
+    *   `_MaxDistance` (float): Maximum distance for raymarching. Default: `20` [S2, unofficial].
+    *   `_Scattering` (float): Scattering multiplier for the final color. Default: `1.2` [S2, unofficial].
+    *   `_LightPos` (float4): Position of the light source in world space (`xyz` position, `w=1`). Updated dynamically by a C# controller [S2, unofficial].
+    *   `_LightColor` (float4): Color of the light source multiplied by intensity. Updated dynamically by a C# controller [S2, unofficial].
+*   **Vertex Shader Output:**
+    *   `positionHCS` (float4): Clip space position [S2, unofficial].
+    *   `positionWS` (float3): World space position of the fragment, passed to the fragment shader via `TEXCOORD0` [S2, unofficial].
+
+**Numbered Steps:**
+
+1.  **Vertex Transformation:** Input vertex position in object space (`positionOS`). Transform to clip space (`positionCS`) and world space (`positionWS`) using standard vertex utilities. Pass `positionWS` to the fragment shader via `TEXCOORD0` [S2, unofficial].
+2.  **Ray Direction Calculation:** In the fragment shader, retrieve the camera world position (`camPos`). Calculate the ray direction by normalizing the vector from the camera to the fragment's world position: $\text{rayDir} = \text{normalize}(\text{positionWS} - \text{camPos})$ [S2, unofficial].
+3.  **Initialization:** Initialize accumulation variable `accum = 0.0`. Determine the number of steps: `steps = max(_StepCount, 1)`. This prevents division by zero or invalid loop behavior if `_StepCount` is less than 1 [S2, unofficial]. Calculate step size: `stepSize = _MaxDistance / steps` [S2, unofficial].
+4.  **Raymarching Loop:** Loop `i` from `0` to `steps - 1`. Calculate distance along the ray: `dist = i * stepSize`. Calculate sample position in world space: $\text{samplePos} = \text{camPos} + \text{rayDir} \times \text{dist}$ [S2, unofficial].
+5.  **Shadow Sampling:** Transform `samplePos` to shadow coordinates: `shadowCoord = TransformWorldToShadowCoord(samplePos)`. Sample the main light realtime shadow: `shadow = MainLightRealtimeShadow(shadowCoord)`. This value represents the occlusion factor (1.0 if lit, 0.0 if shadowed, or intermediate values for soft shadows) [S2, unofficial].
+6.  **Phase Function Calculation:** Calculate the light direction from the sample position to the light position: $\text{lightDir} = \text{normalize}(\_LightPos.xyz - \text{samplePos})$. Calculate the cosine of the angle between the ray direction and the light direction: $\cos\theta = \text{dot}(\text{rayDir}, \text{lightDir})$. Compute the Henyey-Greenstein phase function with hardcoded asymmetry parameter $g = 0.35$: $P(\theta) = \frac{1 - g^2}{(1 + g^2 - 2g \cos\theta)^{1.5}}$ [S2, unofficial].
+7.  **Accumulation:** Add to `accum`: $\text{accum} += \text{shadow} \times P(\theta) \times \_Density \times \text{stepSize}$ [S2, unofficial].
+8.  **Final Color Computation:** Compute the final light amount: `lightAmount = accum`. Multiply `_LightColor.rgb` by `lightAmount` and `_Scattering`. Compute alpha: `alpha = saturate(lightAmount)`. Output the result as an additive blend to the screen buffer [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def heney_greenstein(cos_theta: float, g: float) -> float:
+    g2 = g * g
+    return (1.0 - g2) / math.pow(1.0 + g2 - 2.0 * g * cos_theta, 1.5)
+
+def raymarch_fragments(positions_ws: list, cam_pos: tuple, light_pos: tuple, 
+                       light_color: tuple, density: float, step_count: int, 
+                       max_distance: float, scattering: float) -> list:
+    steps = max(step_count, 1)
+    step_size = max_distance / steps
+    results = []
+    
+    for frag_ws in positions_ws:
+        ray_dir = normalize(frag_ws[0] - cam_pos[0], frag_ws[1] - cam_pos[1], frag_ws[2] - cam_pos[2])
+        accum = 0.0
+        
+        for i in range(steps):
+            dist = i * step_size
+            sample_pos = (cam_pos[0] + ray_dir[0] * dist, 
+                          cam_pos[1] + ray_dir[1] * dist, 
+                          cam_pos[2] + ray_dir[2] * dist)
+            
+            shadow_coord = world_to_shadow(sample_pos)
+            shadow = sample_main_light_shadow(shadow_coord)
+            
+            light_dir = normalize(light_pos[0] - sample_pos[0], 
+                                  light_pos[1] - sample_pos[1], 
+                                  light_pos[2] - sample_pos[2])
+            cos_theta = dot(ray_dir, light_dir)
+            phase = heney_greenstein(cos_theta, 0.35)
+            
+            accum += shadow * phase * density * step_size
+            
+        light_amount = accum
+        final_color = (light_color[0] * light_amount * scattering,
+                       light_color[1] * light_amount * scattering,
+                       light_color[2] * light_amount * scattering)
+        alpha = min(1.0, light_amount)
+        results.append((final_color, alpha))
+        
+    return results
+
+def normalize(x, y, z):
+    length = math.sqrt(x*x + y*y + z*z)
+    return (x/length, y/length, z/length)
+
+def dot(v1, v2):
+    return v1[0]*v2[0] + v1[1]*v2[1] + v1[2]*v2[2]
+
+def world_to_shadow(pos):
+    # Placeholder for Unity's TransformWorldToShadowCoord implementation
+    # Returns shadow map coordinates for the given world position
+    pass
+
+def sample_main_light_shadow(coord):
+    # Placeholder for Unity's MainLightRealtimeShadow implementation
+    # Returns occlusion factor (1.0 lit, 0.0 shadowed)
+    pass
+```
+
+**Edge Cases and Pitfalls:**
+*   If `_StepCount` is less than 1, it is clamped to 1 to prevent division by zero or invalid loop behavior [S2, unofficial].
+*   The method uses a single directional light with shadow sampling and does not support multiple lights or complex volume textures [S2, unofficial].
+*   Performance cost is significant; enabling god rays adds 2.30 ms to a 5.0 ms frame in benchmarked scenes [S1, unofficial].
+
+## Subtopics
+
+### [Screen-Space God Rays](3981-screen-space-god-rays.md)
+Screen-Space God Rays is a real-time post-processing technique that approximates volumetric light scattering (crepuscular rays) by performing per-pixel additive sampling of an image light source in screen space. It simplifies the volume rendering equation to estimate single in-scattering from a single light source, modulated by an estimated occlusion factor derived from radial sampling. Unlike slice-based volume rendering or shadow-map methods, it requires no preprocessing, extra scene geometry, or high fill rate, making it significantly cheaper than volumetric ray marching. However, it is limited to single light sources and lacks full volumetric depth information, leading to artifacts when foreground objects obscure background light shafts.
+
+### [Volumetric Sun Shafts (God Rays)](15833-volumetric-sun-shafts-god-rays.md)
+A post-processing technique that renders volumetric light shafts (sun shafts) by marching a view ray through a sun shadow map, accumulating in-scattered light where the ray is lit and no light where it is shadowed, modulated by ground-hugging haze density. It differs from screen-space alternatives by relying on a dedicated shadow map for occlusion rather than screen-space depth, allowing for more accurate volumetric occlusion from geometry outside the current view frustum, while trading off higher memory bandwidth for the shadow map.
+
+## Operating characteristics
+*   **Time Complexity:** $O(N \cdot S)$, where $N$ is the number of pixels (screen resolution) and $S$ is the number of raymarching steps (`_StepCount`) [G].
+*   **Memory Complexity:** $O(1)$ per pixel, plus the memory cost of the main light's realtime shadow map [G].
+*   **Measured Performance:** In a voxel engine benchmark, enabling god rays added 2.30 ms to a 5.0 ms frame [S1, unofficial]. Performance in URP depends on `_StepCount` and shadow map resolution [S2, unofficial].
+*   **Strengths:** Lightweight, customizable, URP compatible, no preprocessing required, good for stylized effects [S2, unofficial].
+*   **Limitations:** Limited to a single directional light, no support for complex volume textures, artifacts when foreground objects obscure background light shafts due to lack of full volumetric depth [S2, unofficial].
+*   **When to Use:** Real-time stylized atmospheric lighting, fog beams, god rays in URP projects where performance is critical and single-light approximation is acceptable [S2, unofficial].
+*   **When Not to Use:** Scenes with multiple light sources, complex volumetric clouds, or when accurate occlusion from geometry outside the view frustum is required [S2, unofficial].
+
+## Background
+Volumetric light shafts, commonly known as "God Rays," are a technique for rendering volumetric light scattering (fog beams, atmospheric lighting) in Unity URP using raymarching in a custom shader with main light shadow sampling [S2, unofficial]. A C# controller is often used for dynamic light color, density, and quality settings [S2, unofficial]. The technique is disabled by default in some engines due to performance cost [S1, unofficial]. The Henyey-Greenstein phase function is commonly used to model the scattering behavior [S2, unofficial].
+
+## Sources
+[S1] DanielWLiu07/voxel-engine, https://github.com/DanielWLiu07/voxel-engine, fetched 2026-10-26 (unofficial)
+[S2] Ninedark9/Volumetric-Light-Shafts-, https://github.com/Ninedark9/Volumetric-Light-Shafts-, fetched 2026-10-26 (unofficial)

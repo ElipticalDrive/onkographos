@@ -1,0 +1,318 @@
+--- v002.md
++++ v003.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-This method distills 3D structural knowledge from a pretrained 2D Generative Adversarial Network (specifically StyleGAN2) into a shared conditional Neural Radiance Field (NeRF) [S1]. It solves the problem of generating photorealistic 3D objects with arbitrary poses for data augmentation in downstream tasks (e.g., autonomous driving perception) by jointly optimizing the NeRF parameters and latent codes [S1]. Unlike naive isolated NeRF reconstruction which fails to capture category priors and is hindered by noisy GAN sampling, this approach uses Generative Latent Optimization (GLO) to learn shared shape and appearance priors across all objects simultaneously [S1].
++This method distills 3D structural knowledge from a pretrained 2D Generative Adversarial Network (specifically StyleGAN2) into a shared conditional Neural Radiance Field (NeRF) [S1]. It solves the problem of generating photorealistic 3D objects with arbitrary poses for training data augmentation in downstream tasks by jointly optimizing the NeRF parameters and latent codes [S1]. Unlike naive isolated NeRF reconstruction which fails to capture category priors and is hindered by noisy GAN sampling, this approach uses Generative Latent Optimization (GLO) to learn shared shape and appearance priors across all objects simultaneously [S1].
+ 
+ ## How it works
+@@ -23,5 +23,5 @@
+ 
+ **1. Disentangled Latent Space ($w^*$):**
+-The StyleGAN2 latent space $z$ is mapped to an intermediate space $w^* = (w_1^*, ..., w_{16}^*)$ via 16 affine transformations [S1].
++The StyleGAN2 latent code $z$ is mapped to an intermediate space $w^* = (w_1^*, ..., w_{16}^*)$ via 16 affine transformations [S1].
+ *   **Pose Latents ($w_p$):** The first 8 layers ($w_1^* ... w_8^*$) control camera viewpoint/pose [S1].
+ *   **Shape/Appearance Latents ($w_s$):** The remaining 8 layers ($w_9^* ... w_{16}^*$) control shape, texture, and background [S1].
+@@ -90,12 +90,12 @@
+ *   **Shape/Appearance Latent Layers:** Remaining 8 layers of $w^*$ [S1].
+ *   **Mask Threshold:** 0.5 (for binary mask prediction) [S1].
+-*   **Confidence Filter Threshold:** 0.5 (during inference, images with confidence < 0.5 are filtered as noisy) [S1].
++*   **Segmentation Confidence Filter:** 0.5 (during inference, PointRend segmentation confidence < 0.5 filters noisy objects) [S1].
+ *   **Pose Sampling Range:** Azimuth $0-360^\circ$, Elevation $0-20^\circ$ [S1].
+ *   **Viewpoints per Model:** 200 [S1].
+ *   **Asset Bank Size:** 1000 different vehicles (each with 200 multi-view images) [S1].
+-*   **Loss Weights:** $\lambda_{IoU}, \lambda_{perc}$ are hyperparameters; exact values not specified in sources [S1].
++*   **Loss Weights:** $\lambda_{IoU}, \lambda_{perc}$ are hyperparameters; exact values not specified in sources.
+ 
+ ### Edge Cases and Pitfalls
+-*   **Noisy GAN Sampling:** Generated images and pose labels can be noisy or corrupted. This is mitigated by filtering low-confidence images (confidence < 0.5) and using GLO to learn shared priors rather than isolated reconstruction [S1].
++*   **Noisy GAN Sampling:** Generated images and pose labels can be noisy or corrupted. This is mitigated by filtering low-confidence images and using GLO to learn shared priors rather than isolated reconstruction [S1].
+ *   **Drivable Area Constraints:** Objects must be filtered if they fall outside drivable areas to maintain environmental consistency (e.g., vehicles not appearing inside buildings) [S1].
+ *   **Boundary Artifacts:** Alpha blending with a Gaussian-filtered mask is required to smooth edges when composing foreground and background [S1].
+@@ -109,148 +109,112 @@
+ import torch.nn.functional as F
+ 
+-# Assume standard libraries for math operations are available.
+-# StyleGAN2, HRNet, PointRend, VGG16 are external pretrained models.
++# Minimal definitions for components described in the source
++class FeatureExtractor(nn.Module):
++    """2D CNN mapping constant input to three orthogonal feature planes conditioned on z."""
++    def __init__(self, latent_dim, feature_dim):
++        super().__init__()
++        self.conv = nn.Conv2d(latent_dim, feature_dim * 3, kernel_size=3, padding=1)
++    def forward(self, z):
++        # z: (B, latent_dim, 1, 1) -> feature planes: (B, feature_dim*3, H, W)
++        return self.conv(z).chunk(3, dim=1)
++
++class SIRENMLP(nn.Module):
++    """Single-layer SIREN-based MLP conditioned on z."""
++    def __init__(self, in_dim, hidden_dim):
++        super().__init__()
++        self.linear = nn.Linear(in_dim, hidden_dim)
++        self.sigma = nn.Parameter(torch.tensor(30.0))
++    def forward(self, x, z):
++        # SIREN activation: sin(sigma * x)
++        out = torch.sin(self.sigma * self.linear(x))
++        return out
++
++def sample_pose_latent(pose_latent_pairs):
++    """Returns a random pose latent from the precomputed set."""
++    return pose_latent_pairs[np.random.randint(len(pose_latent_pairs))]
++
++def sample_rays_from_pose(azimuth, elevation, cam_dist=5.0):
++    """Generates ray origin and direction from spherical coordinates."""
++    alpha = np.deg2rad(azimuth)
++    beta = np.deg2rad(elevation)
++    ox = cam_dist * np.cos(beta) * np.cos(alpha)
++    oy = cam_dist * np.sin(beta)
++    oz = cam_dist * np.cos(beta) * np.sin(alpha)
++    o = np.array([ox, oy, oz])
++    d = -o / np.linalg.norm(o)
++    return o, d
++
++def filter_by_drivable_area(images, drivable_masks):
++    """Filters images where objects fall outside drivable areas (HRNet + IPM logic)."""
++    # Placeholder for IPM projection and mask intersection logic
++    return list(range(len(images)))
+ 
+ class TriPlaneNeRF(nn.Module):
+-    """
+-    NeRF representation using Tri-Plane feature encoding.
+-    """
+     def __init__(self, latent_dim, feature_dim, hidden_dim):
+         super().__init__()
+-        # 2D CNN to map constant input to three orthogonal feature planes
+-        # conditioned on latent code z.
+         self.feature_extractor = FeatureExtractor(latent_dim, feature_dim)
+-        # Single-layer SIREN-based MLP conditioned on z
+         self.mlp = SIRENMLP(feature_dim * 3, hidden_dim)
++        self.out_layer = nn.Linear(hidden_dim, 4) # density + RGB
+ 
+     def forward(self, x, z):
+-        """
+-        x: (N, 3) 3D points
+-        z: (N, latent_dim) latent codes
+-        """
+-        # Project x onto three planes and retrieve features via bilinear interpolation
+-        features_xy = self.feature_extractor.get_plane_feature(x, 'xy', z)
+-        features_yz = self.feature_extractor.get_plane_feature(x, 'yz', z)
+-        features_xz = self.feature_extractor.get_plane_feature(x, 'xz', z)
++        # x: (N, 3), z: (B, latent_dim, 1, 1)
++        planes = self.feature_extractor(z)
++        # Project x onto XY, YZ, XZ planes and bilinear interpolate
++        def sample_plane(plane, axis):
++            coords = x[:, [i for i in range(3) if i != axis]]
++            coords = coords.unsqueeze(1) # (N, 1, 2)
++            feat = F.grid_sample(plane, coords, align_corners=False).squeeze(2) # (N, feature_dim)
++            return feat
++        f_xy = sample_plane(planes[0], 2)
++        f_yz = sample_plane(planes[1], 0)
++        f_xz = sample_plane(planes[2], 1)
++        combined = f_xy + f_yz + f_xz
++        out = self.mlp(combined, z)
++        return torch.split(self.out_layer(out), [1, 3], dim=1)
++
++def compute_volumetric_rendering(ray_o, ray_d, nerf_model, z, t_n, t_f, num_samples=256):
++    """Renders a single ray using standard discrete volume rendering."""
++    t_vals = torch.linspace(t_n, t_f, num_samples)
++    xyz = ray_o.unsqueeze(1) + ray_d.unsqueeze(1) * t_vals.unsqueeze(0)
++    density, color = nerf_model(xyz, z)
++    
++    deltas = t_vals[1:] - t_vals[:-1]
++    if deltas.numel() == 0:
++        return torch.zeros_like(ray_o), torch.ones_like(ray_o)
+         
+-        # Sum the three feature vectors
+-        combined_features = features_xy + features_yz + features_xz
+-        
+-        # Output density and RGB
+-        density, color = self.mlp(combined_features, z)
+-        return density, color
+-
+-class StyleGAN2Disentangler:
+-    """
+-    Disentangles StyleGAN2 latent space into pose and shape components.
+-    """
+-    def __init__(self, stylegan2_model):
+-        self.model = stylegan2_model
+-
+-    def get_latents(self, z):
+-        # Map z to w* via 16 affine transformations
+-        w_star = self.model.mapping(z)
+-        # First 8 layers are pose latents
+-        w_p = w_star[:, :8]
+-        # Remaining 8 layers are shape/appearance latents
+-        w_s = w_star[:, 8:]
+-        return w_p, w_s
+-
+-def generate_training_data(stylegan2_disentangler, num_samples=1000):
+-    """
+-    Generates 2D training data by sampling pose and shape latents.
+-    """
+-    images = []
+-    poses = []
+-    
+-    for _ in range(num_samples):
+-        # Sample pose latents from pre-computed pose-latent pairs
+-        w_p = sample_pose_latent()
+-        
+-        # Sample shape/appearance latents from Gaussian distribution
++    alpha = 1.0 - torch.exp(-density[:, :-1] * deltas)
++    transmittance = torch.cumprod(torch.exp(-density[:, :-1] * deltas), dim=0)
++    transmittance = torch.cat([torch.ones_like(transmittance[:, :1]), transmittance], dim=0)
++    
++    weights = alpha * transmittance[:, :-1]
++    color_rendered = torch.sum(weights.unsqueeze(-1) * color[:, :-1], dim=0)
++    T_tf = transmittance[-1]
++    
++    return color_rendered, T_tf
++
++def compute_loss(rendered_img, gt_img, rendered_mask, gt_mask, vgg_model):
++    l_rgb = torch.mean(torch.abs(rendered_img - gt_img))
++    intersection = torch.sum(rendered_mask * gt_mask)
++    union = torch.sum(rendered_mask + gt_mask) + 1e-6
++    l_iou = 1.0 - (intersection / union)
++    l_perc = torch.mean(torch.abs(vgg_model(rendered_img) - vgg_model(gt_img)))
++    return l_rgb + l_iou + l_perc
++
++def train_lifting_3d(stylegan2_model, gt_masks, drivable_areas, asset_bank_size=1000):
++    # 1. Disentangle StyleGAN2
++    pose_latent_pairs = [sample_pose_latent(stylegan2_model.mapping) for _ in range(200)]
++    
++    # 2. Generate 2D Training Data
++    images, poses = [], []
++    for _ in range(asset_bank_size * 200):
++        w_p = sample_pose_latent(pose_latent_pairs)
+         w_s = torch.randn(8)
+-        
+-        # Combine and generate image
+         w_full = torch.cat([w_p, w_s], dim=0)
+-        img = stylegan2_disentangler.model.synthesis(w_full)
+-        
+-        # Sample pose label P (Azimuth 0-360, Elevation 0-20)
++        img = stylegan2_model.synthesis(w_full)
+         azimuth = torch.rand(1) * 360
+         elevation = torch.rand(1) * 20
+-        pose = (azimuth, elevation)
++        images.append(img)
++        poses.append((azimuth.item(), elevation.item()))
+         
+-        images.append(img)
+-        poses.append(pose)
+-        
+-    return images, poses
+-
+-def compute_volumetric_rendering(ray_o, ray_d, nerf_model, z, t_n, t_f, num_samples=256):
+-    """
+-    Renders a single ray using volumetric rendering.
+-    """
+-    # Sample points along the ray
+-    t_vals = torch.linspace(t_n, t_f, num_samples)
+-    xyz = ray_o.unsqueeze(1) + ray_d.unsqueeze(1) * t_vals.unsqueeze(0)
+-    
+-    # Query NeRF for density and color
+-    density, color = nerf_model(xyz, z)
+-    
+-    # Compute transmittance
+-    # T(t) = exp(-int_{t_n}^{t} sigma(r(s)) ds)
+-    # Approximated using discrete sum
+-    deltas = t_vals[1:] - t_vals[:-1]
+-    alpha = 1 - torch.exp(-density * deltas)
+-    transmittance = torch.cumprod(torch.exp(-density * deltas), dim=0)
+-    transmittance = torch.cat([torch.ones_like(transmittance[:, :1]), transmittance], dim=1)
+-    
+-    # Compute expected color
+-    weights = alpha * transmittance
+-    color_rendered = torch.sum(weights.unsqueeze(-1) * color, dim=0)
+-    
+-    # Compute accumulated transmittance at furthest bound for mask
+-    T_tf = transmittance[-1]
+-    
+-    return color_rendered, T_tf
+-
+-def compute_loss(rendered_img, gt_img, rendered_mask, gt_mask, vgg_model):
+-    """
+-    Computes the total loss: Photometric + IoU + Perceptual.
+-    """
+-    # Photometric Loss (L1)
+-    l_rgb = torch.mean(torch.abs(rendered_img - gt_img))
+-    
+-    # IoU Loss
+-    intersection = torch.sum(rendered_mask * gt_mask)
+-    union = torch.sum(rendered_mask + gt_mask)
+-    l_iou = 1 - (intersection / (union + 1e-6))
+-    
+-    # Perceptual Loss
+-    vgg_rendered = vgg_model(rendered_img)
+-    vgg_gt = vgg_model(gt_img)
+-    l_perc = torch.mean(torch.abs(vgg_rendered - vgg_gt))
+-    
+-    # Total Loss
+-    lambda_iou = 1.0 # Placeholder, should be tuned
+-    lambda_perc = 1.0 # Placeholder, should be tuned
+-    total_loss = l_rgb + lambda_iou * l_iou + lambda_perc * l_perc
+-    
+-    return total_loss
+-
+-def train_lifting_3d(stylegan2_model, gt_masks, drivable_areas, asset_bank_size=1000):
+-    """
+-    Main training loop for Lifting 2D GAN to 3D Radiance Field.
+-    """
+-    # 1. Disentangle StyleGAN2
+-    disentangler = StyleGAN2Disentangler(stylegan2_model)
+-    
+-    # 2. Obtain Latent-Label Pairs (using ShapeNet templates)
+-    # This step is done offline to initialize pose-latent mappings
+-    pose_latent_pairs = get_pose_latent_pairs_from_shape_net()
+-    
+-    # 3. Generate 2D Training Data
+-    images, poses = generate_training_data(disentangler, num_samples=asset_bank_size * 200)
+-    
+-    # Filter out objects outside drivable areas
+-    # Convert 2D drivable areas to BEV via IPM and filter
+     valid_indices = filter_by_drivable_area(images, drivable_areas)
+     images = [images[i] for i in valid_indices]
+@@ -258,27 +222,18 @@
+     gt_masks = [gt_masks[i] for i in valid_indices]
+     
+-    # 4. Initialize Shared NeRF and Latent Codes
++    # 3. Initialize Shared NeRF and Latent Codes
+     nerf = TriPlaneNeRF(latent_dim=512, feature_dim=64, hidden_dim=256)
+     latent_codes = [torch.randn(512) for _ in range(len(images))]
+-    
+-    # 5. Joint Optimization (GLO)
+     optimizer = torch.optim.Adam(list(nerf.parameters()) + [nn.Parameter(code) for code in latent_codes], lr=1e-4)
+-    vgg_model = VGG16(pretrained=True)
+-    
++    vgg_model = nn.Sequential(*list(torchvision.models.vgg16(pretrained=True).features.children())[:30])
++    
++    # 4. Joint Optimization (GLO)
++    num_epochs = 100 # Not given in the sources.
+     for epoch in range(num_epochs):
+-        for i, (img, pose, mask) in enumerate(zip(images, poses, gt_masks)):
+-            # Sample rays for this image based on pose
+-            ray_o, ray_d = sample_rays_from_pose(pose)
+-            
+-            # Render
+-            rendered_color, T_tf = compute_volumetric_rendering(ray_o, ray_d, nerf, latent_codes[i], t_n=0.0, t_f=10.0)
+-            
+-            # Predict Binary Mask
++        for img, pose, mask in zip(images, poses, gt_masks):
++            ray_o, ray_d = sample_rays_from_pose(*pose)
++            rendered_color, T_tf = compute_volumetric_rendering(ray_o, ray_d, nerf, latent_codes[0], t_n=0.0, t_f=10.0)
+             rendered_mask = (T_tf >= 0.5).float()
+-            
+-            # Compute Loss
+             loss = compute_loss(rendered_color, img, rendered_mask, mask, vgg_model)
+-            
+-            # Backpropagate
+             optimizer.zero_grad()
+             loss.backward()
+@@ -296,5 +251,5 @@
+ **Measured Performance:**
+ *   The method was evaluated on KITTI and nuScenes datasets for 3D object detection tasks [S1].
+-*   It generates high-quality synthetic data that improves the performance of downstream 3D detection models [S1].
++*   Generates novel 3D objects with arbitrary poses for training data augmentation [S1].
+ *   Qualitative comparisons show superior visual quality compared to GIRAFFE and GIRAFFE HD, especially when increasing depth magnitude [S1].
+ 

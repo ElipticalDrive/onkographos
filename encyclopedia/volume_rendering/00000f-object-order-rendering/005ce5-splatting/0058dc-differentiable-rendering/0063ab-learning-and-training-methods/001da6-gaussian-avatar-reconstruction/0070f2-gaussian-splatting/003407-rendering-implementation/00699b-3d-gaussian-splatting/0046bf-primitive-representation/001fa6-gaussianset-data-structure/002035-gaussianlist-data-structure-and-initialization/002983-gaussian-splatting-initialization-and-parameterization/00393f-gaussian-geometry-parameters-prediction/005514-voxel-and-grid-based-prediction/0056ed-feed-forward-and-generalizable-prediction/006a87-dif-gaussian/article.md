@@ -1,0 +1,194 @@
+# DIF-Gaussian
+
+
+## Overview
+DIF-Gaussian is a feed-forward neural network that reconstructs a 3D volume from multi-view 2D projections by predicting 3D Gaussian parameters at sampled points and decoding features via Gaussian interpolation [S1, unofficial]. It differs from sibling methods by explicitly modeling the feature aggregation step as a differentiable Gaussian splatting operation, allowing the network to learn spatial priors directly in the Gaussian domain rather than through standard grid-based or point-based interpolation [S1, unofficial].
+
+## How it works
+**Inputs:**
+*   Multi-view 2D projections [S1, unofficial].
+
+**Outputs:**
+*   Reconstructed 3D volume values at query points [S1, unofficial].
+
+**Data Structures:**
+The method outputs a dictionary `gs_params` containing the following fields with exact layouts:
+*   `feats`: Feature vectors, shape `[B, C, K]` where $B$ is batch size, $C$ is feature dimension, and $K$ is the number of Gaussians [S1, unofficial].
+*   `offsets`: Gaussian mean offsets, shape `[B, K, 3]` [S1, unofficial].
+*   `det`: Determinant of the covariance matrix, shape `[B, K]` [S1, unofficial].
+*   `inv`: Inverse of the covariance matrix, shape `[B, K, 3, 3]` [S1, unofficial].
+
+**Parameters:**
+*   `gs_res`: Grid resolution for point spacing [S1, unofficial].
+*   `p_dist_scaling`: Scaling factor for point distance [S1, unofficial].
+*   `o_scaling`: Offset scaling factor [S1, unofficial].
+*   `s_scaling`: Scaling factor for Gaussian size [S1, unofficial].
+*   `t`: Temperature/scale factor for Gaussian parameters, computed as $t = 1.0 / \text{gs\_cfg}.t$ [S1, unofficial].
+
+**Steps:**
+1.  **Encoding:** Encode multi-view projections using a U-Net to extract features [S1, unofficial].
+2.  **Feature Query:** Query view features at projected 3D points using max-pooling fusion to obtain `p_feats` [S1, unofficial].
+3.  **MLP Processing:** Pass fused features through `gs_feats_mlp` and `gs_params_mlp` [S1, unofficial].
+4.  **Parameter Decoding:** Decode Gaussian parameters (offsets, scaling, rotation) from MLP outputs [S1, unofficial].
+5.  **Covariance Computation:** Compute the covariance matrix, its determinant, and its inverse [S1, unofficial].
+6.  **Inference/Rendering:** Interpolate features at query points using Gaussian weights, concatenate with view features, and pass through a point decoder to predict volume values [S1, unofficial].
+
+**Formulas:**
+The point distance $\text{p\_dist}$ is computed as:
+$$ \text{p\_dist} = \frac{1}{\text{gs\_res}} \times \text{p\_dist\_scaling} $$
+[S1, unofficial].
+
+The maximum offset distance is:
+$$ \text{max\_dist} = \text{p\_dist} \times 0.5 \times \text{o\_scaling} $$
+[S1, unofficial].
+
+The offsets are decoded from the MLP output `offsets_raw` as:
+$$ \text{offsets} = (\sigma(\text{offsets\_raw}) - 0.5) \times 2 \times \text{max\_dist} $$
+where $\sigma$ is the sigmoid function [S1, unofficial].
+
+The mean scale is:
+$$ s_{\text{mean}} = \sqrt{\text{p\_dist}} $$
+[S1, unofficial].
+
+The scale $s$ is decoded from `s_raw` as:
+$$ s = \sigma(s_{\text{raw}}) \times 2 \times \text{s\_scaling} \times s_{\text{mean}} + (1 - \text{s\_scaling}) \times s_{\text{mean}} $$
+[S1, unofficial]. This maps the sigmoid output $(0, 1)$ to the range $((1-k)d, (1+k)d)$ where $k = \text{s\_scaling}$ and $d = s_{\text{mean}}$ [S1, unofficial].
+
+The rotation $r$ is taken directly from the MLP output as a quaternion of shape `[B, K, 4]` [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import numpy as np
+
+def build_rotation(q):
+    """Converts quaternion [B, 4] (w, x, y, z) to rotation matrix [B, 3, 3]."""
+    w, x, y, z = q[:, 0], q[:, 1], q[:, 2], q[:, 3]
+    R = torch.zeros((q.size(0), 3, 3), dtype=torch.float, device=q.device)
+    R[:, 0, 0] = 1 - 2 * (y*y + z*z)
+    R[:, 0, 1] = 2 * (x*y - w*z)
+    R[:, 0, 2] = 2 * (x*z + w*y)
+    R[:, 1, 0] = 2 * (x*y + w*z)
+    R[:, 1, 1] = 1 - 2 * (x*x + z*z)
+    R[:, 1, 2] = 2 * (y*z - w*x)
+    R[:, 2, 0] = 2 * (x*z - w*y)
+    R[:, 2, 1] = 2 * (y*z + w*x)
+    R[:, 2, 2] = 1 - 2 * (x*x + y*y)
+    return R
+
+def build_covariance(s, q):
+    """Computes covariance matrix from scale [B, N, 3] and quaternion [B, N, 4]."""
+    b, n = s.shape[:2]
+    s_flat = s.reshape(b * n, 3)
+    q_flat = q.reshape(b * n, 4)
+    R = build_rotation(q_flat)
+    L = torch.zeros((b * n, 3, 3), dtype=torch.float, device=s.device)
+    L[:, 0, 0] = s_flat[:, 0]
+    L[:, 1, 1] = s_flat[:, 1]
+    L[:, 2, 2] = s_flat[:, 2]
+    L = R @ L
+    Cov = L @ L.transpose(1, 2)
+    return Cov.reshape(b, n, 3, 3)
+
+def query_gs(query_points, gs_centers, gs_params):
+    """Interpolates features at query points using Gaussian weights [G]."""
+    feats = gs_params['feats']      # [B, C, K]
+    inv = gs_params['inv']          # [B, K, 3, 3]
+    det = gs_params['det']          # [B, K]
+    centers = gs_centers            # [B, K, 3]
+
+    diff = query_points.unsqueeze(2) - centers.unsqueeze(1)  # [B, P, K, 3]
+    inv_diff = torch.matmul(diff, inv)                       # [B, P, K, 3]
+    dist = torch.sum(inv_diff * diff, dim=3)                 # [B, P, K]
+
+    weights = torch.exp(-0.5 * dist) / torch.sqrt(det)       # [B, P, K]
+    weights = weights / (weights.sum(dim=2, keepdim=True) + 1e-8)
+
+    interp_feats = torch.matmul(feats.transpose(1, 2), weights.transpose(1, 2)) # [B, C, P]
+    return interp_feats
+
+class PointDecoder(torch.nn.Module):
+    """Point-wise prediction network with residual connections [S1, unofficial]."""
+    def __init__(self, channels, residual=True, use_bn=True):
+        super().__init__()
+        self.residual = residual
+        self.mlps = torch.nn.ModuleList()
+        for i in range(len(channels) - 1):
+            modules = []
+            if i == 0 or not self.residual:
+                modules.append(torch.nn.Conv1d(channels[i], channels[i + 1], kernel_size=1))
+            else:
+                modules.append(torch.nn.Conv1d(channels[i] + channels[0], channels[i + 1], kernel_size=1))
+            if i != len(channels) - 1:
+                if use_bn:
+                    modules.append(torch.nn.BatchNorm1d(channels[i + 1]))
+                modules.append(torch.nn.LeakyReLU(inplace=True))
+            self.mlps.append(torch.nn.Sequential(*modules))
+
+    def forward(self, x):
+        x_ = x
+        for i, m in enumerate(self.mlps):
+            if i != 0 and self.residual:
+                x = torch.cat([x, x_], dim=1)
+            x = m(x)
+        return x
+
+def dif_gaussian_forward(gs_cfg, gs_res, encoder_output, p_feats, query_points, query_gs_points):
+    """Main forward pass for DIF-Gaussian [S1, unofficial]."""
+    # 1. Parameter Decoding
+    gs_params_raw = encoder_output['gs_params_raw']
+    t = 1.0 / gs_cfg.t
+    gs_params = gs_params_raw / t
+
+    p_dist = 1.0 / gs_res * gs_cfg.p_dist_scaling
+    max_dist = p_dist * 0.5 * gs_cfg.o_scaling
+    s_mean = np.sqrt(p_dist)
+
+    offsets_raw = gs_params[:, :3, :].transpose(1, 2) # [B, K, 3]
+    offsets = (torch.sigmoid(offsets_raw) - 0.5) * 2 * max_dist
+
+    s_raw = gs_params[:, 3:6, :].transpose(1, 2) # [B, K, 3]
+    s = torch.sigmoid(s_raw) * 2 * gs_cfg.s_scaling * s_mean + (1 - gs_cfg.s_scaling) * s_mean
+
+    r = gs_params[:, 6:, :].transpose(1, 2) # [B, K, 4]
+
+    Cov = build_covariance(s, r)
+    det = torch.linalg.det(Cov)
+    inv = torch.linalg.inv(Cov)
+
+    gs_params_dict = {
+        'feats': encoder_output['feats'],
+        'offsets': offsets,
+        'det': det,
+        'inv': inv
+    }
+
+    # 2. Feature Interpolation
+    interp_feats = query_gs(query_points, query_gs_points, gs_params_dict)
+
+    # 3. Point-wise Prediction
+    p_feats_final = torch.cat([p_feats, interp_feats], dim=1)
+    # Example channel configuration matching typical decoder stacks
+    p_pred = PointDecoder([p_feats_final.size(1)] + [64, 64, 1])(p_feats_final)
+    return p_pred, gs_params_dict
+```
+
+**Edge Cases and Pitfalls:**
+*   **U-Net Padding Mismatch:** When using skip connections in the U-Net encoder, upsampling may cause dimension mismatches. This is handled by padding the upsampled feature map using `F.pad` with `diffX // 2` and `diffY // 2` to align with the skip connection features [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:** Not given in the sources.
+*   **Strengths:** Explicitly models spatial feature aggregation using Gaussian splatting [S1, unofficial].
+*   **Limitations:** Relies on a fixed grid resolution (`gs_res`) for point spacing [S1, unofficial].
+*   **When to use:** Suitable for 3D volume reconstruction from multi-view projections, such as in CBCT (Cone Beam Computed Tomography) [S1, unofficial].
+*   **When not to use:** Not suitable for per-scene optimization or scenes where camera poses are unknown and uncalibrated [Parent].
+
+## Background
+The method builds on the principles of feed-forward generalizable reconstruction, extending them by incorporating Gaussian splatting for feature interpolation [Parent, S1]. It is used for CBCT volume reconstruction [S1, unofficial].
+
+## Sources
+[S1] xmed-lab/DIF-Gaussian, https://github.com/xmed-lab/DIF-Gaussian, fetched 2026-10-27 (unofficial)

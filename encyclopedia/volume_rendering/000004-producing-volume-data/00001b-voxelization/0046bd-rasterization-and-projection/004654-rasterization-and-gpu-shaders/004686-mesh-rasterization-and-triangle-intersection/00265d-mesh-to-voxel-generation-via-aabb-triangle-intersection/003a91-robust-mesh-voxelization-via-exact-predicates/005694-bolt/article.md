@@ -1,0 +1,71 @@
+# Bolt
+
+Also called: Bypass expensive BVH query for exterior voxels, Bolt: Skip expensive BVH queries for exterior voxels
+
+## Overview
+Bolt is an optimization for solid voxelization that bypasses the expensive Boundary Volume Hierarchy (BVH) distance query for voxels determined to be exterior to the mesh [S1, S2, unofficial]. It distinguishes itself from standard solid voxelization by assigning a dummy positive distance to exterior voxels when no narrow band is requested, thereby avoiding redundant geometric calculations for points guaranteed to be discarded by the interiority filter [S1, S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A voxel center point $P$, a boolean `is_inside` indicating if $P$ is inside the mesh (derived from a scanline parity check), an optional parameter `narrow_band`, and a boolean `surface_only` indicating the voxelization mode [S2, S4, unofficial].
+- Output: The Signed Distance Field (SDF) value $d$ for the voxel center [S1, S2, unofficial].
+
+**Data Structures:**
+- `narrow_band`: An optional flag. When `None`, the optimization is active [S1, S2, unofficial]. When `Some`, the BVH query is performed regardless of interior/exterior status [S1, S2, unofficial].
+- `is_inside`: A boolean result from a parity check that determines if a voxel is inside the mesh [S1, S2, unofficial].
+- `surface_only`: A boolean flag. When `false`, the algorithm operates in solid voxelization mode and applies the optimization [S2, S4, unofficial].
+
+**Steps:**
+1. For each voxel center $P$, determine if it is inside the mesh (`is_inside`) and check the `surface_only` and `narrow_band` parameters [S2, S4, unofficial].
+2. If `surface_only` is `false`, `narrow_band` is `None`, AND the voxel is exterior (`!is_inside`), assign the distance $d = 1.0$ [S1, S4, unofficial].
+3. Otherwise (if `surface_only` is `true`, `narrow_band` is specified, OR the voxel is interior), compute the exact distance using the mesh's BVH query: $d = \text{compute\_exact\_mesh\_distance}(P, \text{False})$ cast to `f32` [S1, S2, unofficial].
+4. In solid voxelization mode (`surface_only = false`), apply the filter $d \le 0.0$ to discard exterior voxels [S1, S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_sdf_bolt(point, is_inside, narrow_band, surface_only):
+    # Bolt optimization: skip expensive BVH query for exterior voxels
+    # in solid voxelization mode when no narrow band is requested.
+    # These points are guaranteed to be discarded by the d <= 0.0 filter.
+    if not surface_only and narrow_band is None and not is_inside:
+        return 1.0  # Dummy positive value; alternatives use float('inf') [S2, S3, unofficial]
+    
+    # Compute exact distance via BVH query for interior voxels,
+    # exterior voxels when narrow band is requested, or surface voxelization.
+    # The second argument (False) requests exact mode.
+    exact_dist = compute_exact_mesh_distance(point, False)
+    return float(exact_dist)
+
+def compute_exact_mesh_distance(point, exact_flag):
+    # Standard BVH distance query implementation [G]
+    # Returns the exact Euclidean distance from point to the mesh surface.
+    pass
+```
+
+**Parameters:**
+- `narrow_band`: Optional. When `None`, the optimization is active. When `Some`, the BVH query is performed regardless of interior/exterior status [S1, S2, unofficial].
+- `is_inside`: Boolean result from a parity check [S1, S2, unofficial].
+- `surface_only`: Boolean. When `false`, solid voxelization mode is active and the optimization applies [S2, S4, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Boundary Misclassification:** Points exactly on the mesh surface may be classified as outside by the parity test if the implementation uses `partition_point(|&hx| hx <= x)`, which excludes hits at the same x coordinate [S1, S2, unofficial].
+- **Data Loss:** Previously, these boundary samples received `distance == 0` and passed the `sdf <= 0.0` filter. With Bolt, they receive `1.0` (or `+inf`) and are dropped [S1, S2, unofficial].
+- **Impact:** This can remove valid boundary voxels or cause small meshes to produce no solid particles on aligned/coarse grids [S1, S2, unofficial]. The optimization must ensure exact-surface voxels are retained or handled correctly [S2, unofficial].
+- **Test Case Compatibility:** The optimization intentionally returns a dummy positive value instead of the exact distance for exterior voxels. Test suites expecting exact distances for exterior points will fail unless `surface_only` is `true` or `narrow_band` is provided, which forces the exact BVH query path [S1, S2, unofficial].
+
+## Operating characteristics
+- **Performance:** Benchmarks show a performance improvement of approximately 3.5% to 5.2% on standard tests for solid voxelization [S2, unofficial]. Another benchmark measured a drop from approximately 32.5ms to 29.5ms per loop over 100 sample passes for a small cube with 125,000 potential voxels [S1, unofficial].
+- **Scaling:** The improvement scales with grid resolution and scene sparsity, as high-resolution solid grids contain a large percentage of sampled voxels residing outside the target mesh bounds [S1, S2, unofficial].
+- **Strengths:** Drastically reduces processing time by avoiding unnecessary BVH queries for exterior points in solid voxelization [S1, S2, unofficial].
+- **Limitations:** Potential loss of boundary voxels if the parity test misclassifies surface points as exterior, particularly on coarse or aligned grids [S1, S2, unofficial].
+
+## Background
+Bolt was introduced as a performance optimization in the `voxelizer-rs` project to bypass expensive BVH queries for exterior voxels in solid voxelization mode when a narrow band is not specified [S1, S2, unofficial]. It was implemented by lhemerly and reviewed by Jules in June 2026 [S1, S2, unofficial]. The optimization addresses the computational redundancy of calculating exact Signed Distance Fields for points that are guaranteed to be discarded by the interiority filter in solid voxelization workflows [S3, S4, unofficial].
+
+## Sources
+[S1] ⚡ Bolt: Bypass BVH query for exterior solid voxels, https://github.com/lhemerly/voxelizer-rs/pull/161, fetched 2026-10-27 (unofficial)
+[S2] ⚡ Bolt: Bypass expensive BVH query for exterior voxels, https://github.com/lhemerly/voxelizer-rs/pull/188, fetched 2026-10-27 (unofficial)
+[S3] ⚡ Bolt: Bypass BVH query for exterior voxels in solid voxelization, https://github.com/lhemerly/voxelizer-rs/pull/199, fetched 2026-10-27 (unofficial)
+[S4] ✨ [performance improvement] Bolt: Skip expensive BVH queries for exterior voxels, https://github.com/lhemerly/voxelizer-rs/pull/138, fetched 2026-10-27 (unofficial)

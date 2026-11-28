@@ -1,0 +1,157 @@
+--- v009.md
++++ v010.md
+@@ -4,107 +4,67 @@
+ 
+ ## Overview
+-CLIPNeRF is a training configuration for text-driven stylization of Neural Radiance Fields (NeRFs) that enforces semantic consistency between rendered views and text prompts using the CLIP embedding space [S2]. It distinguishes itself from standard NeRF optimization by freezing density-related parameters and minimizing a directional loss based on cosine similarity between image and text embeddings, rather than minimizing pixel-wise reconstruction error [S1]. This approach enables global style transfer but requires specific memory-efficient rendering strategies to handle high-resolution inputs [S1].
++CLIPNeRF is a text-guided stylization method for Neural Radiance Fields (NeRF) that enforces the trajectory of stylization in the CLIP embedding space by measuring cosine similarity between rendered images and text prompts [S2]. It distinguishes itself from standard NeRF optimization by freezing density-related parameters and optimizing only the color/feature fields to minimize the negative cosine similarity between a target text prompt and the rendered view [S1].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Inputs:** A pre-trained NeRF model (density and color networks), a source image $I_{src}$, a target text prompt $t_{tgt}$, and optionally a source text prompt $t_{src}$ for relative loss.
+-*   **Outputs:** A stylized NeRF model where the color network is adapted to match the text prompt while preserving the scene geometry.
++**Inputs:**
++*   A pre-trained NeRF model (density and color networks).
++*   A source image $\mathbf{I}_{src}$ (optional, for relative loss).
++*   A target text prompt $\mathbf{t}_{tgt}$ and optionally a source text prompt $\mathbf{t}_{src}$.
++*   A camera pose sampled from the training dataset.
++
++**Outputs:**
++*   A stylized rendered image patch $\mathbf{I}_{tgt}$.
++*   Updated color/feature network parameters.
+ 
+ **Data Structures:**
+-*   **NeRF Model:** Two Multi-Layer Perceptrons (MLPs) as defined in [Model Architecture and Encoding](13550-model-architecture-and-encoding.md). The density network predicts volume density $\sigma$, and the color network predicts color $\mathbf{c}$.
+-*   **CLIP Encoder:** A Vision Transformer (ViT-B/32) [S1] that maps images to embeddings $\mathcal{E}_i$ and text prompts to embeddings $\mathcal{E}_t$.
+-*   **Patch Buffer:** A temporary buffer storing rendered pixel values for a $128 \times 128$ patch [S1].
++*   **CLIP Encoder:** Uses CLIP ViT-B/32 [S1]. The image encoder $\mathcal{E}_i$ and text encoder $\mathcal{E}_t$ produce normalized embedding vectors $\hat{\mathbf{e}}_i$ and $\hat{\mathbf{e}}_t$.
++*   **NeRF Model:** Two MLPs (density and color) connected by a bottleneck feature vector $\mathbf{e}$ [Parent]. The density network parameters are frozen during this specific optimization loop [S1].
++*   **Rendering Patch:** A $128 \times 128$ pixel patch is rendered. Rays are sampled with a stride of 5, covering a $640 \times 640$ receptive field of the original image [S1].
+ 
+ **Parameters:**
+ *   **Iterations:** 500 [S1].
+-*   **Optimizer:** Adam with learning rate $\eta = 0.0001$ [S1].
+-*   **Patch Size:** $128 \times 128$ pixels [S1].
+-*   **Ray Sampling Stride:** 5 within the patch, resulting in a receptive field of $640 \times 640$ on the original image scale [S1].
+-*   **Importance Sampling Points:** 16 per ray during patch rendering [S1].
+-*   **Fine MLP Samples:** 80 total (64 coarse + 16 fine) [S1].
++*   **Optimizer:** Adam with learning rate $0.0001$ [S1].
++*   **Sampling:** Importance sampling points during patch rendering are reduced to 16 for memory efficiency [S1]. The fine MLP uses 64 coarse + 16 fine samples, totaling 80 samples per ray [S1].
++*   **Text Encoder:** CLIP ViT-B/32 [S1].
+ 
+-**Steps:**
+-1.  **Freeze Density:** Freeze all parameters in the NeRF density network. Only the color network parameters are updated [S1].
+-2.  **Sample View:** Randomly sample a camera pose from the training dataset [S1].
+-3.  **Render Patch:**
+-    *   Cast rays through the $128 \times 128$ patch with stride 5 [S1].
+-    *   Perform volume rendering using importance sampling with 16 points per ray and 80 total samples in the fine MLP [S1].
+-    *   Store the resulting low-resolution stylized image $I_{tgt}$ [S1].
+-4.  **Compute Loss:** Calculate the directional CLIP loss. Two variants are described:
+-    *   **Absolute Directional CLIP Loss:** Measures cosine similarity between the rendered image embedding and the target text embedding [S2].
+-        $$ \mathcal{L}_{dir} = 1 - \langle \hat{\mathcal{E}}_i(I_{tgt}), \hat{\mathcal{E}}_t(t_{tgt}) \rangle $$
+-        where $\hat{\mathcal{E}}_i$ and $\hat{\mathcal{E}}_t$ are normalized embeddings [S2].
+-    *   **Relative Directional CLIP Loss:** Measures the trajectory from source to target in CLIP space, using both source and target text prompts [S2].
+-        $$ \mathcal{L}_{dir} = 1 - \langle \hat{\mathcal{E}}_i(I_{tgt}) - \hat{\mathcal{E}}_i(I_{src}), \hat{\mathcal{E}}_t(t_{tgt}) - \hat{\mathcal{E}}_t(t_{src}) \rangle $$
+-        where $I_{src}$ is the embedding of the source image [S2].
+-5.  **Update:** Minimize $\mathcal{L}_{dir}$ using Adam [S1].
++**Loss Functions:**
++Two variants of the directional CLIP loss are used. Let $\langle \cdot, \cdot \rangle$ denote the dot product.
+ 
+-**Pseudocode:**
+-```python
+-def clipnerf_train_step(nerf_model, clip_encoder, text_prompt, source_image=None, source_text=None):
+-    # 1. Freeze density network parameters
+-    for param in nerf_model.density_network.parameters():
+-        param.requires_grad = False
+-        
+-    # 2. Sample random camera pose
+-    pose = sample_random_pose()
+-    
+-    # 3. Render patch (128x128) with stride 5
+-    # Rays are cast with stride 5 to cover 640x640 receptive field
+-    patch_size = 128
+-    stride = 5
+-    rays = generate_rays(pose, patch_size, stride)
+-    
+-    # Volume rendering with reduced sampling for memory efficiency
+-    # 16 importance samples per ray, 80 total samples in fine MLP
+-    num_samples = 16
+-    fine_samples = 80
+-    rendered_patch = volume_render(nerf_model, rays, num_samples, fine_samples)
+-    
+-    # 4. Compute CLIP embeddings
+-    img_embedding = clip_encoder.encode_image(rendered_patch)
+-    text_embedding = clip_encoder.encode_text(text_prompt)
+-    
+-    # Normalize embeddings
+-    img_embedding = normalize(img_embedding)
+-    text_embedding = normalize(text_embedding)
+-    
+-    # 5. Calculate Loss
+-    if source_image is not None and source_text is not None:
+-        # Relative Directional CLIP Loss
+-        src_img_embedding = clip_encoder.encode_image(source_image)
+-        src_text_embedding = clip_encoder.encode_text(source_text)
+-        src_img_embedding = normalize(src_img_embedding)
+-        src_text_embedding = normalize(src_text_embedding)
+-        
+-        direction_img = img_embedding - src_img_embedding
+-        direction_text = text_embedding - src_text_embedding
+-        
+-        # Cosine similarity
+-        similarity = dot_product(direction_img, direction_text)
+-        loss = 1.0 - similarity
+-    else:
+-        # Absolute Directional CLIP Loss
+-        similarity = dot_product(img_embedding, text_embedding)
+-        loss = 1.0 - similarity
+-        
+-    return loss
+-```
++1.  **Absolute Directional CLIP Loss:** Measures cosine similarity between the rendered stylized image $\mathbf{I}_{tgt}$ and the target text prompt $\mathbf{t}_{tgt}$ [S2].
++    $$ \mathcal{L}_{dir} = 1 - \langle \hat{\mathcal{E}}_i(\mathbf{I}_{tgt}), \hat{\mathcal{E}}_t(\mathbf{t}_{tgt}) \rangle $$
++    This guides the NeRF rendering with a global direction of the target text, independent of a reference starting point [S2].
++
++2.  **Relative Directional CLIP Loss:** Transfers the source image $\mathbf{I}_{src}$ to the target domain guided by the CLIP-space trajectory embedded by a pair of text prompts $(\mathbf{t}_{src}, \mathbf{t}_{tgt})$ [S2].
++    $$ \mathcal{L}_{dir} = 1 - \langle \hat{\mathcal{E}}_i(\mathbf{I}_{tgt}) - \hat{\mathcal{E}}_i(\mathbf{I}_{src}), \hat{\mathcal{E}}_t(\mathbf{t}_{tgt}) - \hat{\mathcal{E}}_t(\mathbf{t}_{src}) \rangle $$
++    This ensures the stylization trajectory is relative to the source rather than absolute [S2].
++
++**Algorithm:**
++1.  Initialize NeRF model with pre-trained density and color networks.
++2.  Freeze all parameters related to the density network [S1].
++3.  For iteration $k = 1$ to $500$:
++    a. Sample a random camera pose from the training dataset [S1].
++    b. Render a $128 \times 128$ patch $\mathbf{I}_{tgt}$ using the current color network, sampling rays with stride 5 and 16 importance samples per ray [S1].
++    c. Encode $\mathbf{I}_{tgt}$ using $\mathcal{E}_i$ to get $\hat{\mathcal{E}}_i(\mathbf{I}_{tgt})$ [S2].
++    d. Encode text prompt(s) using $\mathcal{E}_t$ to get $\hat{\mathcal{E}}_t(\mathbf{t}_{tgt})$ and optionally $\hat{\mathcal{E}}_t(\mathbf{t}_{src})$ [S2].
++    e. Compute $\mathcal{L}_{dir}$ using either the absolute or relative formula [S2].
++    f. Compute gradient of $\mathcal{L}_{dir}$ with respect to the color network parameters.
++    g. Update color network parameters using Adam optimizer with learning rate $0.0001$ [S1].
++4.  Return the updated NeRF model.
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Memory Constraints:** Naive differentiable rendering of high-resolution images is intractable due to memory limits [S1]. The patch-based approach is required [S1].
+-*   **Mode Collapse:** The absolute directional CLIP loss can cause mode collapse of the generator and reduce generation diversity [S2].
+-*   **Insufficient Magnitude:** Directional loss alone may struggle to reach sufficient stylization magnitude, resulting in weak style transfer [S2]. This is because it measures directional similarity but ignores actual distance in embedding space [S2].
++*   **Memory Constraints:** Naive differentiable rendering of high-resolution images is intractable due to memory constraints [S1]. The patch-based rendering with stride 5 is required [S1].
++*   **Mode Collapse:** The absolute directional CLIP loss can cause mode-collapse of the generator and hurt generation diversity [S2].
++*   **Insufficient Magnitude:** The directional CLIP loss measures directional similarity between normalized embedded vectors but ignores their actual distances, struggling to reach sufficient stylization magnitude [S2]. This results in weak or insufficient style transfer [S2].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Dependent on the number of iterations (500) and the cost of volume rendering per patch [S1]. The use of reduced sampling (16 points) and small patches ($128 \times 128$) significantly reduces per-step time compared to full-resolution rendering [S1].
+-*   **Memory Complexity:** Reduced by rendering patches instead of full images [S1]. The memory footprint is dominated by the CLIP ViT-B/32 model and the NeRF MLPs [S1].
+-*   **Strengths:** Enables text-driven stylization without requiring 3D ground truth labels [S2]. Preserves scene geometry by freezing density parameters [S1].
+-*   **Limitations:** May produce insufficient stylization magnitude if only directional loss is used [S2]. Absolute directional loss risks mode collapse [S2]. Performance is sensitive to the choice of text prompts [S2].
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Reduced by using $128 \times 128$ patches and 16 importance samples per ray instead of full-resolution rendering [S1].
++*   **Strengths:** Enables text-driven stylization of NeRFs [S2].
++*   **Limitations:** Absolute loss causes mode collapse; directional loss lacks magnitude control [S2].
+ *   **When to use:** When text-guided stylization of a NeRF is required and computational resources are limited [S1].
+-*   **When not to use:** When high-fidelity, uniform stylization magnitude is critical without additional global contrastive losses [S2].
++*   **When not to use:** When high diversity or strong magnitude of stylization is critical, as absolute loss reduces diversity and directional loss lacks magnitude [S2].
+ 
+ ## Background
+-CLIPNeRF was introduced by Wang et al. in 2021 as an extension of StyleGAN-NADA [Gal et al. 2021] to 3D scene representation [S2]. It utilizes the CLIP model [S1] to bridge the gap between 2D image-text alignment and 3D radiance fields. The method was developed to address the lack of significant descriptions for reproducing NeRF editing results, providing a practical implementation for text-driven NeRF stylization [S1]. It builds on the concept of directional loss in CLIP space, first applied to image editing, and adapts it to the volume rendering pipeline [S2].
++CLIPNeRF was introduced by Wang et al. in 2021 [S2]. It extends the absolute directional CLIP loss first designed in StyleCLIP [Patashnik et al. 2021] for face image editing to generative NeRF editing [S2]. The relative directional loss variant was further explored in StyleGAN-NADA [Gal et al. 2021] and applied to NeRF-Art [S2].
+ 
+ ## Sources

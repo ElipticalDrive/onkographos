@@ -1,0 +1,207 @@
+--- v001.md
++++ v002.md
+@@ -8,19 +8,18 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** A set of posed RGB images $\{I_k\}$ of a static scene.
+-*   **Outputs:** A reconstructed 3D mesh extracted from the learned neural SDF, and a neural representation (hash grids + MLPs) capable of rendering novel views.
++*   **Inputs:** A set of posed RGB images $\{I_k\}$ of a static scene [S2].
++*   **Outputs:** A reconstructed 3D mesh extracted from the learned neural SDF, and a neural representation (hash grids + MLPs) capable of rendering novel views [S2].
+ 
+ **Data Structures:**
+-1.  **Multi-resolution Hash Grids:** A set of $L$ hash grids, where each grid $l \in \{1, \dots, L\}$ has a resolution $T_l$ (number of entries). Each entry stores a feature vector $\mathbf{f} \in \mathbb{R}^D$ (typically $D=4$). The hash function maps a 3D coordinate $\mathbf{x}$ to a grid index and a local position within the cell [S2][S4, unofficial].
+-2.  **SDF MLP:** A Multi-Layer Perceptron that takes the aggregated hash features and outputs a scalar Signed Distance Field value $\tilde{s}$ and a raw color $\tilde{\mathbf{c}}$ [S2].
+-3.  **Color MLP:** A separate Multi-Layer Perceptron (or part of the same network) that outputs the view-dependent color $\mathbf{c}$ given the hash features and viewing direction $\mathbf{d}$ [S2].
++1.  **Multi-resolution Hash Grids:** A set of $L$ hash grids, where each grid $l \in \{1, \dots, L\}$ has a resolution $T_l$ (number of entries) [S2][S4, unofficial]. Each entry stores a feature vector $\mathbf{f} \in \mathbb{R}^D$ [G]. The hash function maps a 3D coordinate $\mathbf{x}$ to a grid index and a local position within the cell [S2][S4, unofficial].
++2.  **SDF MLP:** A Multi-Layer Perceptron that takes the aggregated hash features and outputs a scalar Signed Distance Field value $\tilde{s}$ [S2].
++3.  **Color MLP:** A separate Multi-Layer Perceptron that outputs the color $\mathbf{c}$ given the hash features and viewing direction $\mathbf{d}$ [S2][G].
+ 
+ **Numbered Steps:**
+-
+-1.  **Sampling:** For each pixel in the training images, cast a ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$. Sample $N$ points $\{t_i\}_{i=1}^N$ along the ray within the scene bounds [S2].
+-2.  **Hash Encoding:** For each sampled point $\mathbf{x}_i$, query all $L$ hash grids. Interpolate the feature vectors from the grid cells surrounding $\mathbf{x}_i$ and concatenate them to form the input feature vector $\mathbf{h}_i$ [S2].
++1.  **Sampling:** For each pixel in the training images, cast a ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$ [S2]. Sample $N$ points $\{t_i\}_{i=1}^N$ along the ray within the scene bounds [S2].
++2.  **Hash Encoding:** For each sampled point $\mathbf{x}_i$, query all $L$ hash grids to retrieve multi-resolution features [S2].
+ 3.  **Neural Prediction:**
+-    *   Feed $\mathbf{h}_i$ into the SDF MLP to predict the raw signed distance $\tilde{s}_i$ [S2].
+-    *   Feed $\mathbf{h}_i$ and the viewing direction $\mathbf{d}$ into the Color MLP to predict the raw color $\tilde{\mathbf{c}}_i$ [S2].
++    *   Feed the aggregated features into the SDF MLP to predict the raw signed distance $\tilde{s}_i$ [S2].
++    *   Feed the aggregated features and the viewing direction $\mathbf{d}$ into the Color MLP to predict the raw color $\tilde{\mathbf{c}}_i$ [S2][G].
+ 4.  **SDF-based Volume Rendering:** Convert the raw SDF $\tilde{s}_i$ to density $\sigma_i$ and opacity $\alpha_i$ using a softplus activation and a scaling factor $\beta$ (temperature) [S2]:
+     $$
+@@ -30,8 +29,8 @@
+     \alpha_i = 1 - \exp(-\sigma_i \Delta t_i)
+     $$
+-    where $\Delta t_i$ is the distance between adjacent samples. The final color is computed using the standard front-to-back volume rendering equation (see [Direct volume ray casting](19-direct-volume-ray-casting.md)) [S2].
++    where $\Delta t_i$ is the distance between adjacent samples [G]. The final color is computed using the standard front-to-back volume rendering equation (see [Direct volume ray casting](19-direct-volume-ray-casting.md)) [S2].
+ 5.  **Loss Computation:** Minimize the photometric loss between rendered and ground truth images, and a surface regularization loss based on the mean curvature of the SDF level sets [S3].
+ 6.  **Optimization with Numerical Gradients:**
+-    *   Instead of using analytical gradients (backpropagation through the hash grid lookups) for the hash grid features, Neuralangelo uses **numerical gradients** to update the hash grid parameters [S4, unofficial].
++    *   Instead of using analytical gradients for the hash grid features, Neuralangelo uses **numerical gradients** to update the hash grid parameters [S4, unofficial].
+     *   Compute the gradient of the loss with respect to the hash grid features $\mathbf{f}$ using finite differences with a step size $\epsilon$:
+         $$
+@@ -46,11 +45,36 @@
+ import numpy as np
+ 
+-def neuralangelo_forward(ray_o, ray_d, hash_grids, sdf_mlp, color_mlp, num_samples, beta):
++def softplus(x):
++    return np.log(np.exp(x) + 1)
++
++def trilinear_interpolate(grid, coords):
++    """Standard trilinear interpolation on a 3D grid [G]."""
++    # coords: (N, 3), grid: (Dx, Dy, Dz, D)
++    # Simplified for pseudocode: assumes grid is already flattened or indexed
++    # In practice, this hashes coordinates, finds 8 neighbors, and interpolates weights.
++    return np.zeros((coords.shape[0], grid.shape[-1]))
++
++def query_hash_grid(points, hash_grids):
++    """
++    Queries multi-resolution hash grids for points.
++    points: (N, 3) coordinates
++    hash_grids: list of L grids, each with shape (T_l, D)
++    Returns: (N, D_total) aggregated features
++    """
++    features = []
++    for grid in hash_grids:
++        # Hash coordinates to indices and interpolate features [G]
++        feats = trilinear_interpolate(grid, points)
++        features.append(feats)
++    return np.concatenate(features, axis=-1)
++
++def neuralangelo_forward(ray_o, ray_d, t_near, t_far, hash_grids, sdf_mlp, color_mlp, num_samples, beta):
+     """
+     Forward pass for Neuralangelo rendering.
+     ray_o: Camera origin (3,)
+     ray_d: Camera direction (3,)
+-    hash_grids: List of L hash grids, each is a dict mapping hash_index -> feature_vector
+-    sdf_mlp: Function taking features -> (sdf, color_raw)
++    t_near, t_far: Ray segment bounds
++    hash_grids: List of L hash grids
++    sdf_mlp: Function taking features -> (sdf,)
+     color_mlp: Function taking features, view_dir -> color
+     num_samples: Number of points along the ray
+@@ -60,70 +84,42 @@
+     t_vals = np.linspace(t_near, t_far, num_samples)
+     points = ray_o + t_vals[:, None] * ray_d  # Shape: (num_samples, 3)
++    delta_t = t_vals[1] - t_vals[0]  # Uniform step size [G]
++
++    # 2. Hash Encoding
++    h = query_hash_grid(points, hash_grids)  # Shape: (num_samples, D_total)
++
++    # 3. Neural Prediction
++    sdf_raw = sdf_mlp(h)  # Shape: (num_samples,)
++    color_raw = color_mlp(h, ray_d)  # Shape: (num_samples, 3)
++
++    # 4. SDF to Density and Opacity
++    sigma = softplus(-beta * sdf_raw)  # Shape: (num_samples,)
++    alpha = 1.0 - np.exp(-sigma * delta_t)  # Shape: (num_samples,)
++
++    # 5. Volume Rendering (Front-to-Back)
++    transmittance = np.ones(num_samples + 1)
++    for i in range(num_samples):
++        transmittance[i+1] = transmittance[i] * (1.0 - alpha[i])
+     
+-    # 2. Hash Encoding
+-    features_list = []
+-    for grid in hash_grids:
+-        # Query hash grid for all points
+-        # This involves hashing coordinates, finding neighbors, and trilinear interpolation
+-        # Simplified: assume get_features returns (num_samples, D)
+-        feats = query_hash_grid(points, grid)
+-        features_list.append(feats)
+-    
+-    # Concatenate features from all resolutions
+-    h = np.concatenate(features_list, axis=-1)  # Shape: (num_samples, D_total)
+-    
+-    # 3. Neural Prediction
+-    # SDF MLP predicts signed distance
+-    sdf_raw = sdf_mlp(h)  # Shape: (num_samples,)
+-    
+-    # Color MLP predicts color
+-    # Note: In some implementations, color is predicted from the same features
+-    color_raw = color_mlp(h, ray_d)  # Shape: (num_samples, 3)
+-    
+-    # 4. SDF to Density and Opacity
+-    # sigma = softplus(-beta * sdf)
+-    sigma = np.maximum(0, -beta * sdf_raw) # Softplus approximation or explicit softplus
+-    # alpha = 1 - exp(-sigma * delta_t)
+-    delta_t = np.diff(t_vals, append=t_far)
+-    alpha = 1.0 - np.exp(-sigma * delta_t)
+-    
+-    # 5. Volume Rendering
+-    # T_i = product(1 - alpha_j) for j < i
+-    transmittance = np.cumprod(1.0 - alpha)
+-    transmittance = np.concatenate([[1.0], transmittance[:-1]])
+-    
+-    weights = alpha * transmittance
++    weights = alpha * transmittance[:-1]
+     color_out = np.sum(weights[:, None] * color_raw, axis=0)
+     
+     return color_out, sdf_raw, alpha
+ 
+-def update_hash_grids_numerical(hash_grids, loss_fn, points, ray_d, sdf_mlp, color_mlp, step_size):
++def update_hash_grids_numerical(hash_grids, loss_fn, points, ray_d, sdf_mlp, color_mlp, step_size, learning_rate):
+     """
+     Update hash grid features using numerical gradients.
+     """
+-    # For each grid, compute numerical gradient
+     for grid in hash_grids:
+-        # Get current features
+-        current_feats = get_features_from_grid(grid)
+-        
+-        # Compute loss with current features
++        current_feats = grid.copy()
+         loss_current = loss_fn(points, ray_d, hash_grids, sdf_mlp, color_mlp)
+         
+-        # Perturb features in a random direction
+         direction = np.random.randn(*current_feats.shape)
+-        
+-        # Add perturbation
+         perturbed_feats = current_feats + step_size * direction
+-        set_features_to_grid(grid, perturbed_feats)
+-        
+-        # Compute loss with perturbed features
++        grid[:] = perturbed_feats
+         loss_perturbed = loss_fn(points, ray_d, hash_grids, sdf_mlp, color_mlp)
+         
+-        # Compute numerical gradient
+         grad = (loss_perturbed - loss_current) / (2 * step_size) * direction
+-        
+-        # Update features
+-        new_feats = current_feats - learning_rate * grad
+-        set_features_to_grid(grid, new_feats)
++        grid[:] = current_feats - learning_rate * grad
+ ```
+ 
+@@ -131,24 +127,24 @@
+ *   **Step Size ($\epsilon$):** Controls the magnitude of numerical gradient updates. Large steps ($> \text{grid size}$) enable cross-cell communication; small steps ($< \text{grid size}$) approximate analytical gradients [S4, unofficial].
+ *   **Beta ($\beta$):** Temperature parameter for SDF-to-density conversion. Not given in the sources.
+-*   **Hash Grid Resolutions:** Typically 14 levels, with resolutions ranging from $2^{16}$ to $2^{20}$ entries per grid. Not given in the sources.
++*   **Hash Grid Resolutions:** Number of levels and specific resolutions. Not given in the sources.
+ 
+ **Edge Cases and Pitfalls:**
+ *   **Highly Reflective Scenes:** Neuralangelo struggles with highly reflective surfaces, potentially missing structures like buttons or eyes [S4, unofficial].
+-*   **Step Size Selection:** Using a step size too small initially may fail to smooth the geometry; using one too large may introduce noise. The coarse-to-fine schedule mitigates this [S4, unofficial].
++*   **Step Size Scheduling:** The coarse-to-fine optimization schedule mitigates convergence issues by starting with large steps for smooth geometry and decreasing them for fine details [S2][S4, unofficial].
+ 
+ ## Subtopics
+ 
+ ### Hash Grid Encoding
+-A sparse feature representation that maps 3D coordinates to multi-resolution feature vectors using hash functions. It enables efficient training and rendering by reducing memory footprint and computation compared to dense grids. Choose this when memory efficiency and training speed are critical [S2].
++A sparse feature representation that maps 3D coordinates to multi-resolution feature vectors using hash functions [S2][G]. It enables efficient training and rendering by reducing memory footprint and computation compared to dense grids [G]. Choose this when memory efficiency and training speed are critical [S2].
+ 
+ ### SDF-based Volume Rendering
+-A rendering technique that uses Signed Distance Fields to define geometry. It provides more stable surface extraction and better regularization than density-based NeRFs. Choose this when high-fidelity mesh extraction is required [S2].
++A rendering technique that uses Signed Distance Fields to define geometry [S2]. It provides more stable surface extraction and better regularization than density-based NeRFs [S3]. Choose this when high-fidelity mesh extraction is required [S2].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Training time is significantly reduced compared to standard NeRFs due to the use of hash grids, but numerical gradient computation adds overhead per step. Rendering time is fast due to the efficient hash lookups. Not given in the sources.
+-*   **Memory Complexity:** Memory usage is proportional to the total number of hash grid entries. It is much more memory-efficient than dense voxel grids. Not given in the sources.
++*   **Time Complexity:** Training time is significantly reduced compared to standard NeRFs due to the use of hash grids, but numerical gradient computation adds overhead per step [S4, unofficial]. Rendering time is fast due to the efficient hash lookups [G].
++*   **Memory Complexity:** Memory usage is proportional to the total number of hash grid entries [G]. It is much more memory-efficient than dense voxel grids [G].
+ *   **Measured Performance:** Neuralangelo achieves state-of-the-art results in both view synthesis and geometry reconstruction on datasets like DTU and Tanks and Temples [S3].
+ *   **Strengths:** High-fidelity surface reconstruction, ability to handle large-scale scenes, no need for auxiliary data (depth/segmentation) [S2].
+-*   **Limitations:** Struggles with highly reflective scenes [S4, unofficial]. Numerical gradients may be slower to converge than analytical gradients if not scheduled properly [S4, unofficial].
++*   **Limitations:** Struggles with highly reflective scenes [S4, unofficial].
+ 
+ ## Background

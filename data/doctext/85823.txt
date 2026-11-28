@@ -1,0 +1,653 @@
+# RayMarching
+
+![RayMarching](https://user-images.githubusercontent.com/46959992/132410526-96dd01d0-6de9-4799-90bd-bcf235d30183.JPG)
+
+Rendered a scene using the signed distance functions of some simple shapes. The ray-marching in this project uses a technique called sphere-tracing to optimise efficiency and accuracy. A simple Blinn-Phong lightimg model is used.
+
+Simple 2D and 3D visualisations of sphere tracing are shown below:
+
+![SphereTracing2D](https://user-images.githubusercontent.com/46959992/132410534-cb0b6677-033e-463d-b187-fc374a5cd324.png)
+![SphereTracing3D](https://user-images.githubusercontent.com/46959992/132410537-155c66b2-9a90-4b1b-b030-5fbebab9205c.JPG)
+
+### Assets/Scripts/Practice/Master.cs
+```
+﻿using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+
+public class Master : MonoBehaviour
+{
+    public ComputeShader computeShader;
+    public RenderTexture renderTexture;
+
+    // Start is called before the first frame update
+    void Start()
+    {
+
+    }
+
+    // Update is called once per frame
+    void Update()
+    {
+        
+    }
+
+    private void OnRenderImage(RenderTexture src, RenderTexture dest)
+    {
+        if (renderTexture == null)
+        {
+            renderTexture = new RenderTexture(256, 256, 24);
+            renderTexture.enableRandomWrite = true;
+            renderTexture.Create();
+        }
+        computeShader.SetTexture(0, "Result", renderTexture);
+        computeShader.SetFloat("Resolution", renderTexture.width);
+        computeShader.Dispatch(0, renderTexture.width / 8, renderTexture.height / 8, 1);
+
+        Graphics.Blit(renderTexture, dest);
+    }
+}
+```
+
+### Assets/Scripts/Practice/Practice.compute
+```
+﻿// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel CSMain
+
+// Create a RenderTexture with enableRandomWrite flag and set it
+// with cs.SetTexture
+RWTexture2D<float4> Result;
+
+float Resolution;
+
+[numthreads(8,8,1)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+	float x = id.x / Resolution;
+	float y = id.y / Resolution;
+    Result[id.xy] = float4(x, y, 0.0, 0.0);
+}
+```
+
+### Assets/Scripts/RayMarching/RayMarching.compute
+```
+﻿#pragma kernel CSMain
+
+Texture2D<float4> Source;
+RWTexture2D<float4> Destination;
+
+float4x4 cameraToWorld;
+float4x4 cameraInverseProjection;
+
+float3 lightDirection;
+
+static const float maxDst = 100;
+static const float epsilon = 0.001f;
+
+struct Shape {
+
+    float3 position;
+    float3 size;
+    float3 colour;
+    int shapeType;
+    int operation;
+    float blendStrength;
+};
+
+StructuredBuffer<Shape> shapes;
+int numShapes;
+
+struct Ray 
+{
+    float3 origin;
+    float3 direction;
+};
+
+Ray CreateCameraRay(float2 uv, float3 origin);
+Ray CreateRay(float3 origin, float3 direction);
+
+float4 GetSceneData(float3 eye);
+float GetShapeDisance(Shape shape, float3 eye);
+float Sphere_SDF(float3 eye, float3 centre, float radius);
+float Cube_SDF(float3 eye, float3 centre, float3 size);
+float Torus_SDF(float3 eye, float3 centre, float r1, float r2);
+
+float4 Combine(float dstA, float dstB, float3 colourA, float3 colourB, int operation, float blendStrength);
+float4 Blend(float a, float b, float3 colA, float3 colB, float k);
+float3 CalcNormal(float3 p);
+float CalculateLighting(float3 viewDir, float3 p, float3 normal);
+
+[numthreads(8,8,1)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+    uint width, height;
+    //Gets the texture size imformation
+    Destination.GetDimensions(width, height);
+    Destination[id.xy] = Source[id.xy];
+
+    // Gets the width and height in the range of -1 to 1
+    float2 uv = id.xy / float2(width, height) * 2 - 1;
+    float rayDst = 0;
+
+    //Create initial ray from the camera origin
+    float3 camOrigin = mul(cameraToWorld, float4(0, 0, 0, 1)).xyz;
+    Ray ray = CreateCameraRay(uv, camOrigin);
+    int marchSteps = 0;
+
+    while (rayDst < maxDst)
+    {
+        marchSteps++;
+        float4 nextStepData = GetSceneData(ray.origin); // (R,G,B,Distance)
+        float dst = nextStepData.w;
+        if (dst <= epsilon) // ray has hit a surface
+        {
+            float3 pointOnSurface = ray.origin + ray.direction * dst;
+
+            // Calculate lighting
+            float3 normal = CalcNormal(pointOnSurface - ray.direction * epsilon);
+            float lighting = CalculateLighting(ray.direction, pointOnSurface, normal);
+            float3 col = nextStepData.xyz;
+
+            Destination[id.xy] = float4(col * lighting, 1);
+            break;
+        }
+        //Move the origin to the next point
+        ray.origin += ray.direction * dst;
+        rayDst += dst;
+    }
+    // If the ray has reached max distance then use the background colour
+   if (rayDst >= maxDst)
+       Destination[id.xy] = float4(0.2,0.2,0.25, 1);
+}
+
+float3 CalcNormal(float3 p) {
+    float x = GetSceneData(float3(p.x + epsilon, p.y, p.z)).w - GetSceneData(float3(p.x - epsilon, p.y, p.z)).w;
+    float y = GetSceneData(float3(p.x, p.y + epsilon, p.z)).w - GetSceneData(float3(p.x, p.y - epsilon, p.z)).w;
+    float z = GetSceneData(float3(p.x, p.y, p.z + epsilon)).w - GetSceneData(float3(p.x, p.y, p.z - epsilon)).w;
+    return normalize(float3(x, y, z));
+}
+
+float CalculateLighting(float3 viewDir, float3 p, float3 normal)
+{
+    float ambient = 0.2f;
+    float diffuse = saturate(dot(normal, -lightDirection));
+
+    // Phong lighting model
+    //float3 reflectDir = reflect(-lightDirection, normal);
+    //float spec = pow(max(dot(viewDir, reflectDir), 0.0), 32);
+
+    // Blinn-Phong lighting model
+    float3 halfwayDir = normalize(-lightDirection - viewDir);
+    Float spec = pow(max(dot(normal, halfwayDir), 0.0), 64.0);
+
+    return saturate(ambient + diffuse)+ spec;
+}
+
+Ray CreateCameraRay(float2 uv, float3 origin)
+{
+    float3 direction = mul(cameraInverseProjection, float4(uv, 0, 1)).xyz;
+    direction = mul(cameraToWorld, float4(direction, 0)).xyz;
+    direction = normalize(direction);
+    return CreateRay(origin, direction);
+}
+
+Ray CreateRay(float3 origin, float3 direction) 
+{
+    Ray ray;
+    ray.origin = origin;
+    ray.direction = direction;
+    return ray;
+}
+
+float4 GetSceneData(float3 eye)
+{
+    float globalDst = maxDst;
+    float3 globalColour = 1;
+
+    for (int i = 0; i < numShapes; i++)
+    {
+        Shape shape = shapes[i];
+        float localDst = GetShapeDisance(shape, eye);
+        float3 localColour = shape.colour;
+
+        float4 globalCombined = Combine(globalDst, localDst, globalColour, localColour, shape.operation, shape.blendStrength);
+        globalColour = globalCombined.xyz;
+        globalDst = globalCombined.w;
+    }
+    return float4(globalColour, globalDst);
+}
+
+float GetShapeDisance(Shape shape, float3 eye)
+{
+    if (shape.shapeType == 0) 
+    {
+        return Sphere_SDF(eye, shape.position, shape.size.x);
+    }
+    else if (shape.shapeType == 1) 
+    {
+        return Cube_SDF(eye, shape.position, shape.size);
+    }
+    else if (shape.shapeType == 2) 
+    {
+        return Torus_SDF(eye, shape.position, shape.size.x, shape.size.y);
+    }
+    //return maxDst if shapeType isn't supported
+    return maxDst;
+}
+
+float Sphere_SDF(float3 eye, float3 centre, float radius)
+{
+    return distance(eye, centre) - radius;
+}
+float Cube_SDF(float3 eye, float3 centre, float3 size)
+{
+    float3 o = abs(eye - centre) - size;
+    float ud = length(max(o, 0));
+    float n = max(max(min(o.x, 0), min(o.y, 0)), min(o.z, 0));
+    return ud + n;
+}
+float Torus_SDF(float3 eye, float3 centre, float r1, float r2)
+{
+    float2 q = float2(length((eye - centre).xz) - r1, eye.y - centre.y);
+    return length(q) - r2;
+}
+
+float4 Combine(float dstA, float dstB, float3 colourA, float3 colourB, int operation, float blendStrength)
+{
+    float dst = dstA;
+    float3 colour = colourA;
+
+    if (operation == 0) {
+        if (dstB < dstA) {
+            dst = dstB;
+            colour = colourB;
+        }
+    }
+    // Blend
+    else if (operation == 1) {
+        float4 blend = Blend(dstA, dstB, colourA, colourB, blendStrength);
+        dst = blend.w;
+        colour = blend.xyz;
+    }
+    // Cut
+    else if (operation == 2) {
+        // max(a,-b)
+        if (-dstB > dst) {
+            dst = -dstB;
+            colour = colourB;
+        }
+    }
+    // Mask
+    else if (operation == 3) {
+        // max(a,b)
+        if (dstB > dst) {
+            dst = dstB;
+            colour = colourB;
+        }
+    }
+    return float4(colour, dst);
+}
+
+// polynomial smooth min (k = 0.1);
+float4 Blend(float a, float b, float3 colA, float3 colB, float k)
+{
+    float h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
+    float blendDst = lerp(b, a, h) - k * h * (1.0 - h);
+    float3 blendCol = lerp(colB, colA, h);
+    return float4(blendCol, blendDst);
+}
+```
+
+### Assets/Scripts/RayMarching/RayMarching.cs
+```
+﻿using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+
+[ExecuteInEditMode, ImageEffectAllowedInSceneView]
+public class RayMarching : MonoBehaviour
+{
+    [SerializeField]
+    private ComputeShader raymarchingShader;
+
+    RenderTexture target;
+    Camera cam;
+    Light lightSource;
+    List<ComputeBuffer> buffersToDispose;
+
+    struct ShapeData
+    {
+        public Vector3 position;
+        public Vector3 scale;
+        public Vector3 colour;
+        public int shapeType;
+        public int operation;
+        public float blendStrength;
+
+        public static int GetSize()
+        {
+            return sizeof(float) * 10 + sizeof(int) * 2;
+        }
+    }
+
+    void Init()
+    {
+        cam = Camera.current;
+        lightSource = FindObjectOfType<Light>();
+    }
+
+    private void OnRenderImage(RenderTexture source, RenderTexture destination)
+    {
+        Init();
+        buffersToDispose = new List<ComputeBuffer>();
+
+        InitRenderTexture();
+        CreateScene();
+        SetParameters();
+
+        raymarchingShader.SetTexture(0, "Source", source);
+        raymarchingShader.SetTexture(0, "Destination", target);
+
+        //Organise the thread groups so there is one thread per pixel on the screen
+        int threadGroupsX = Mathf.CeilToInt(cam.pixelWidth / 8.0f);
+        int threadGroupsY = Mathf.CeilToInt(cam.pixelHeight / 8.0f);
+        raymarchingShader.Dispatch(0, threadGroupsX, threadGroupsY, 1);
+
+        Graphics.Blit(target, destination);
+
+        foreach (var buffer in buffersToDispose)
+        {
+            buffer.Dispose();
+        }
+    }
+
+    void InitRenderTexture()
+    {
+        // Checks if the RenderTexture exists and matches the dimensions of the camera
+        if (target == null || target.width != cam.pixelWidth || target.height != cam.pixelHeight)
+        {
+            if (target != null)
+            {
+                //Discard the current render texture and make a new one
+                target.Release();
+            }
+            target = new RenderTexture(cam.pixelWidth, cam.pixelHeight, 0, RenderTextureFormat.ARGBFloat, RenderTextureReadWrite.Linear);
+            target.enableRandomWrite = true;
+            target.Create();
+        }
+    }
+
+    void CreateScene()
+    {
+        List<Shape> allShapes = new List<Shape>(FindObjectsOfType<Shape>());
+        // order all of teh shapes by their operation
+        allShapes.Sort((a, b) => a.operation.CompareTo(b.operation));
+
+        ShapeData[] shapeData = new ShapeData[allShapes.Count];
+        for (int i = 0; i < allShapes.Count; i++)
+        {
+            var s = allShapes[i];
+            Vector3 col = new Vector3(s.colour.r, s.colour.g, s.colour.b);
+            shapeData[i] = new ShapeData()
+            {
+                position = s.Position,
+                scale = s.Scale,
+                colour = col,
+                shapeType = (int)s.shapeType,
+                operation = (int)s.operation,
+                blendStrength = s.blendStrength * 3
+            };
+        }
+
+        ComputeBuffer shapeBuffer = new ComputeBuffer(shapeData.Length, ShapeData.GetSize());
+        shapeBuffer.SetData(shapeData);
+        raymarchingShader.SetBuffer(0, "shapes", shapeBuffer);
+        raymarchingShader.SetInt("numShapes", shapeData.Length);
+
+        buffersToDispose.Add(shapeBuffer);
+    }
+
+    void SetParameters()
+    {
+        raymarchingShader.SetMatrix("cameraToWorld", cam.cameraToWorldMatrix);
+        raymarchingShader.SetMatrix("cameraInverseProjection", cam.projectionMatrix.inverse);
+        raymarchingShader.SetVector("lightDirection", lightSource.transform.forward);
+    }
+}
+```
+
+### Assets/Scripts/RayMarching/Shape.cs
+```
+﻿using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+
+public class Shape : MonoBehaviour
+{
+    public enum ShapeType { Sphere, Cube, Torus };
+    public enum Operation { None, Blend, Cut, Mask }
+
+    public ShapeType shapeType;
+    public Operation operation;
+    public Color colour = Color.white;
+    [Range(0, 1)]
+    public float blendStrength;
+
+    public Vector3 Position
+    {
+        get
+        {
+            return transform.position;
+        }
+    }
+
+    public Vector3 Scale
+    {
+        get
+        {
+            return transform.localScale;
+        }
+    }
+}
+```
+
+### Assets/Scripts/SphereTracing/SphereTracing.cs
+```
+﻿using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+
+public struct Circle
+{
+    public float radius;
+    public Vector2 centre;
+}
+
+public class SphereTracing : MonoBehaviour
+{
+    public float maxDst = 100.0f;
+    public float minDst = 0.0001f;
+    public Circle[] circles;
+    int numCircles = 0;
+    public GameObject tracingCircle;
+    GameObject viewPoint;
+    Vector2 direction;
+
+    void Start()
+    {
+        viewPoint = GameObject.Find("ViewPoint");
+
+        GameObject[] circleObjects;
+        circleObjects = GameObject.FindGameObjectsWithTag("circle");
+        circles = new Circle[circleObjects.Length];
+        for (int i = 0; i < circleObjects.Length; i++)
+        {
+            circles[i].radius = circleObjects[i].transform.localScale.x / 2.0f;
+            circles[i].centre.x = circleObjects[i].transform.position.x;
+            circles[i].centre.y = circleObjects[i].transform.position.y;
+            numCircles++;
+        }
+    }
+
+    // Update is called once per frame
+    void Update()
+    {
+        DetectCursor();
+        BeginTracing();
+    }
+
+    public void DetectCursor()
+    {
+        Vector3 mousePos = Camera.main.ScreenToWorldPoint(Input.mousePosition);
+        mousePos.z = 0.0f;
+        direction = mousePos - viewPoint.transform.position;
+        direction.Normalize();
+    }
+
+    public void BeginTracing()
+    {
+        //Clear old circles
+        GameObject[] oldCircles = GameObject.FindGameObjectsWithTag("tracing");
+        for (int i = 0; i < oldCircles.Length; i++)
+        {
+            Destroy(oldCircles[i].gameObject);
+        }
+
+        int iterations = 200;
+        Vector2 p = viewPoint.transform.position;
+        float dst = maxDst;
+        do
+        {
+            dst = SignedDstToScene(p);
+            TraceCircle(dst, p);
+            p += (direction * dst);
+            iterations--;
+        }
+        while (dst > minDst && dst < maxDst);
+    }
+
+    public void TraceCircle(float size, Vector2 p)
+    {
+        Vector2 newScale = new Vector2(size * 2, size * 2);
+        GameObject go = Instantiate(tracingCircle, p, Quaternion.identity);
+        go.transform.localScale = newScale;
+    }
+
+    public float Length(Vector2 v)
+    {
+        return Mathf.Sqrt(v.x*v.x + v.y*v.y);
+    }
+    public float SignedDstToCircle(Vector2 p, Vector2 centre, float radius)
+    {
+        return Length(centre - p) - radius;
+    }
+
+    public float SignedDstToScene(Vector2 p)
+    {
+        float dstToScene = maxDst;
+        for (int i = 0; i < numCircles; i++)
+        {
+            float dstToCircle = SignedDstToCircle(p, circles[i].centre, circles[i].radius);
+            dstToScene = Mathf.Min(dstToCircle, dstToScene);
+        }
+        return dstToScene;
+    }
+}
+```
+
+### Assets/Scripts/SphereTracing3D/SphereTracing3D.cs
+```
+﻿using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+
+public struct Sphere
+{
+    public float radius;
+    public Vector3 centre;
+}
+
+public class SphereTracing3D : MonoBehaviour
+{
+    public float maxDst = 20.0f;
+    public float minDst = 0.0001f;
+    public Sphere[] spheres;
+    int numSpheres = 0;
+    public GameObject tracingSphere;
+    public GameObject ray;
+    Vector3 rayDirection;
+
+
+    // Start is called before the first frame update
+    void Start()
+    {
+        GameObject[] sphereObjects;
+        sphereObjects = GameObject.FindGameObjectsWithTag("sphere");
+        spheres = new Sphere[sphereObjects.Length];
+        for (int i = 0; i < sphereObjects.Length; i++)
+        {
+            spheres[i].radius = sphereObjects[i].transform.localScale.x / 2.0f;
+            spheres[i].centre = sphereObjects[i].transform.position;
+            numSpheres++;
+        }
+    }
+
+    // Update is called once per frame
+    void Update()
+    {
+        rayDirection = ray.transform.localRotation * ray.transform.forward;
+        rayDirection.Normalize();
+
+        BeginTracing();
+    }
+
+    public void BeginTracing()
+    {
+        //Clear old spheres
+        GameObject[] oldSpheres = GameObject.FindGameObjectsWithTag("tracing");
+        for (int i = 0; i < oldSpheres.Length; i++)
+        {
+            Destroy(oldSpheres[i].gameObject);
+        }
+        int iterations = 10;
+        Vector3 p = ray.transform.position;
+        float dst = maxDst;
+        do
+        {
+            dst = SignedDstToScene(p);
+            TraceSphere(dst, p);
+            p += (rayDirection * dst);
+            iterations--;
+        }
+        while ( dst > minDst && dst < maxDst);
+    }
+
+    public void TraceSphere(float size, Vector3 p)
+    {
+        Vector3 newScale = new Vector3(size * 2, size * 2, size * 2);
+        GameObject go = Instantiate(tracingSphere, p, Quaternion.identity);
+        go.transform.localScale = newScale;
+    }
+
+    public float Length(Vector3 v)
+    {
+        return Mathf.Sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
+    }
+
+    public float SignedDstToSphere(Vector3 p, float s)
+    {
+        return Length(p) - s;
+    }
+
+    public float SignedDstToScene(Vector3 p)
+    {
+        float dstToScene = maxDst;
+        for (int i = 0; i < numSpheres; i++)
+        {
+            float dstToSphere = SignedDstToSphere(spheres[i].centre - p, spheres[i].radius);
+            dstToScene = Mathf.Min(dstToSphere, dstToScene);
+        }
+        return dstToScene;
+    }
+}
+```

@@ -1,0 +1,431 @@
+--- v001.md
++++ v002.md
+@@ -4,43 +4,58 @@
+ 
+ ## Overview
+-Slot-guided Feature Lifting is a method for learning object-centric radiance fields that encodes scene representations from source views using Slot-Attention, lifts 2D features to 3D to capture fine-grained details, and uses a point-slot mapping to decode 3D representations for rendering color and segmentation masks [S1]. It differs from sibling methods like uORF, uOCF, and sVORF by computing a single radiance field rather than $K$ fields for each slot, and by explicitly lifting 2D features from source views to 3D space to provide detailed texture information, whereas alternatives often rely solely on MLP-encoded positional features [S1].
++Slot-guided Feature Lifting is a method for learning object-centric radiance fields that encodes scene representations from source views using Slot-Attention, lifts 2D features to 3D to capture fine-grained details, and uses a point-slot mapping to decode 3D representations for rendering color and segmentation masks [S1]. It differs from sibling methods like uORF, uOCF, and sVORF by computing only a single radiance field rather than $K$ fields (one per slot), which significantly reduces training time and memory overhead [S1].
+ 
+ ## How it works
+-**Inputs and Outputs**
+-*   **Inputs:** $L$ source views $\{I_l\}_{l=1}^L$ (where $L=1$ for single-view input), camera intrinsics and extrinsics for source and target views.
+-*   **Outputs:** Rendered color $\hat{\mathbf{C}}(\mathbf{r})$ and volume density $\sigma$ for rays $\mathbf{r}$ in the target view.
+-
+-**Data Structures**
+-*   **2D Feature Maps:** $\mathbf{F}^{2D}_l \in \mathbb{R}^{H \times W \times D_f}$ extracted from each source view $I_l$.
+-*   **Object Slots:** $\mathbf{S} = \{\mathbf{s}_1, \dots, \mathbf{s}_K\} \in \mathbb{R}^{K \times D_s}$, the output of Slot-Attention.
+-*   **Lifted Feature Field:** $\mathbf{F}_{\text{lift}} \in \mathbb{R}^{N \times L \times D_f}$, containing 2D features for $N$ sampled 3D points projected from $L$ views.
+-*   **Point Features:** $\mathbf{F}_p \in \mathbb{R}^{N \times D_p}$, the fused 3D features for each point.
+-*   **Positional Embeddings:** $\mathbf{E}_p \in \mathbb{R}^{N \times D_p}$, preserving spatial information of 3D points.
+-*   **Attention Weights:** $\mathbf{A}_p \in \mathbb{R}^{N \times (K+1)}$, mapping points to slots.
+-
+-**Numbered Steps**
+-
+-1.  **Extract 2D Features:** Extract feature maps $\mathbf{F}^{2D}_l$ from each source view $I_l$ using a shared encoder network [S1].
+-2.  **Object-Centric Encoding:** Obtain object-centric scene features (slots) $\mathbf{S} = \{\mathbf{s}_1, \dots, \mathbf{s}_K\}$ from the 2D features $\{\mathbf{F}^{2D}_l\}$ using Slot-Attention [S1].
+-3.  **Ray Sampling:** For a target view, sample points $\mathbf{P} = \{\mathbf{p}_1, \dots, \mathbf{p}_N\}$ along each ray $\mathbf{r}$ [S1].
+-4.  **Feature Lifting:** Project each 3D point $\mathbf{p}_i$ onto the image coordinates $\pi(\mathbf{p}_i)$ of all source views. Retrieve the corresponding 2D features to form the lifted feature field $\mathbf{F}_{\text{lift}}$:
+-    $$ \mathbf{F}_{\text{lift}}(\mathbf{p}_i) = [\mathbf{F}^{2D}_1[\pi(\mathbf{p}_i)], \dots, \mathbf{F}^{2D}_L[\pi(\mathbf{p}_i)]] $$
+-    where $\mathbf{F}_{\text{lift}} \in \mathbb{R}^{N \times L \times D_f}$ [S1].
+-5.  **Feature Fusion:** Pool the multi-view lifted features to obtain 3D point features $\mathbf{F}_p$. Compute the mean and variance across the view dimension $L$:
+-    $$ \mathbf{F}_p = \text{MLP}([\text{Mean}(\mathbf{F}_{\text{lift}}), \text{Var}(\mathbf{F}_{\text{lift}})]) + \mathbf{E}_p $$
+-    For single-view input ($L=1$), ignore the variance term: $\mathbf{F}_p = \text{MLP}(\mathbf{F}_{\text{lift}}) + \mathbf{E}_p$ [S1].
+-6.  **Point-Slot Mapping (Attention):** Calculate attention weights $\mathbf{A}_p$ to map points to slots. Define query as a function of point features $q(\cdot)$ and key as a function of slots $k(\cdot)$:
+-    $$ \mathbf{A}_p = q(\tilde{\mathbf{F}}_p) \cdot k(\mathbf{S}_1)^T $$
+-    where $\tilde{\mathbf{F}}_p$ is the processed point feature and $\mathbf{S}_1$ refers to the $K$ object slots (ignoring the empty slot) [S1].
+-7.  **Density Prediction:** Estimate volume density $\sigma_i$ for the $i$-th point using the attention weights $\mathbf{A}_p^{i, 1:K+1}$ (last $K$ slots, ignoring the first empty slot) and a weight matrix $\mathbf{W}_p^{i, 1:K+1}$:
+-    $$ \sigma_i = \sum (\mathbf{W}_p^{i, 1:K+1} \odot \text{ReLU}(\mathbf{A}_p^{i, 1:K+1})) $$
+-    where $\odot$ is the Hadamard product [S1].
+-8.  **Color Prediction:** Add the point features $\mathbf{F}_p$ with positional embeddings $\mathbf{E}_p$ and pass through an MLP to predict color $\mathbf{c}$ [S1].
+-9.  **Rendering:** Render the final color $\hat{\mathbf{C}}(\mathbf{r})$ using standard volume rendering with the predicted $\sigma$ and $\mathbf{c}$ [S1].
+-
+-**Random Masking (Training Only)**
+-To prevent degenerate reliance on lifted features, randomly mask lifted features $\mathbf{F}_p$ during training, using only positional embeddings $\mathbf{E}_p$ for masked points. Use a cosine annealing schedule for the masking ratio from 0.99 to 0 over 30,000 steps [S1].
+-
+-**Pseudocode**
++**Inputs:** A set of $L$ source views $\{I_l\}_{l=1}^L$ (typically $L=1$ for single-view input) and their associated camera parameters.
++**Outputs:** Rendered color images $\hat{C}(r)$ and segmentation masks for a target view.
++
++**Data Structures:**
++*   $F^{2D}_l \in \mathbb{R}^{H \times W \times D_f}$: 2D feature maps extracted from source view $l$.
++*   $S \in \mathbb{R}^{K \times D_s}$: Object-centric scene features (slots), where $K$ is the number of objects.
++*   $P \in \mathbb{R}^{N \times 3}$: 3D points sampled along rays in the target view.
++*   $E_p \in \mathbb{R}^{N \times D_p}$: Positional embeddings for 3D points.
++*   $F_{lift} \in \mathbb{R}^{N \times L \times D_f}$: Lifted feature field containing 2D features projected from all source views.
++*   $F_p \in \mathbb{R}^{N \times D_p}$: Final 3D point features.
++*   $A_p \in \mathbb{R}^{N \times K}$: Attention weights used for density estimation.
++*   $W_p \in \mathbb{R}^{N \times (K+1)}$: Point-slot mapping weights.
++
++**Steps:**
++
++1.  **Extract 2D Features:** Extract feature maps $F^{2D}_l$ from each source view $I_l$ using a shared encoder network [S1].
++2.  **Slot-Attention Encoding:** Obtain object-centric scene features $S = \{s_1, \dots, s_K\}$ from the 2D features $\{F^{2D}_l\}$ using Slot-Attention [S1]. The slots are initialized with learnable parameters rather than random sampling to improve optimization [S1].
++3.  **Ray Sampling:** For a target view, sample $N$ points $P = \{p_1, \dots, p_N\}$ along each ray $r$ [S1].
++4.  **Feature Lifting:** Project each 3D point $p$ onto the image coordinates $\pi(p)$ of each source view to retrieve corresponding 2D features. Construct the lifted feature field $F_{lift}$:
++    $$
++    F_{lift}(p) = \left[ F^{2D}_1[\pi(p)], \dots, F^{2D}_L[\pi(p)] \right]
++    $$
++    where $F^{2D}_l[\pi(p)]$ denotes the feature vector at pixel coordinates $\pi(p)$ in view $l$ [S1].
++5.  **Feature Fusion:** Pool the multi-view lifted features to obtain 3D point features $F_p$. For multi-view input:
++    $$
++    F_p = \text{MLP}\left( \left[ \text{Mean}(F_{lift}), \text{Var}(F_{lift}) \right] \right) + E_p
++    $$
++    For single-view input ($L=1$), ignore the variance term:
++    $$
++    F_p = \text{MLP}(F_{lift}) + E_p
++    $$
++    Here, $E_p$ preserves spatial information [S1].
++6.  **Random Masking (Training Only):** To prevent degenerate reliance on lifted features, randomly mask $F_p$ using only $E_p$. The masking ratio follows a cosine annealing schedule from 0.99 to 0 over 30,000 steps [S1].
++7.  **Point-Slot Mapping:** Calculate point-slot mapping weights $W_p$ using a cross-attention-based allocation transformer between $F_p$ and $S$ [S1].
++8.  **Density Estimation:** Compute attention weights $A_p$ for density prediction:
++    $$
++    A_p = q(F_p) \cdot k(S_1)^T
++    $$
++    where $S_1$ refers to the $K$ object slots (ignoring the empty slot). Estimate density $\sigma_i$ for the $i$-th point:
++    $$
++    \sigma_i = \sum_{j=1}^{K+1} W_p^{i,j} \odot \text{ReLU}(A_p^{i,j})
++    $$
++    where $\odot$ is the Hadamard product, and the sum includes the empty slot (index $K+1$) [S1].
++9.  **Color Prediction:** Add $F_p$ with $E_p$ and pass through an MLP to predict color $c_i$ [S1].
++10. **Volume Rendering:** Render the final color $\hat{C}(r)$ using standard volume rendering:
++    $$
++    \hat{C}(r) = \sum_{i=1}^{N} T_i [1 - \exp(-\sigma_i \delta_i)] c_i
++    $$
++    where $T_i = \exp(-\sum_{j=1}^{i-1} \sigma_j \delta_j)$ and $\delta_i$ is the distance between adjacent volumes [S1].
++
++**Pseudocode:**
+ 
+ ```python
+@@ -50,151 +65,170 @@
+ 
+ class SlotGuidedFeatureLifting:
+-    def __init__(self, num_slots=K, feature_dim=Df, slot_dim=Ds, point_dim=Dp):
+-        self.num_slots = num_slots
+-        self.encoder = nn.Conv2d(3, feature_dim, kernel_size=3, padding=1) # Placeholder for 2D feature extractor
+-        self.slot_attention = SlotAttention(num_slots, feature_dim, slot_dim)
++    def __init__(self, num_slots, feature_dim, hidden_dim):
++        self.K = num_slots
++        self.D_f = feature_dim
++        self.D_p = hidden_dim
++        # MLP for feature fusion and color prediction
+         self.fusion_mlp = nn.Sequential(
+-            nn.Linear(2 * feature_dim, point_dim),
++            nn.Linear(2 * feature_dim, hidden_dim),
+             nn.ReLU(),
+-            nn.Linear(point_dim, point_dim)
++            nn.Linear(hidden_dim, hidden_dim)
+         )
+-        self.point_to_slot_q = nn.Linear(point_dim, slot_dim)
+-        self.slot_to_slot_k = nn.Linear(slot_dim, slot_dim)
+-        self.density_head = nn.Linear(slot_dim, 1)
+-        self.color_head = nn.Sequential(
+-            nn.Linear(point_dim, point_dim),
++        self.color_mlp = nn.Sequential(
++            nn.Linear(hidden_dim, hidden_dim),
+             nn.ReLU(),
+-            nn.Linear(point_dim, 3)
++            nn.Linear(hidden_dim, 3) # RGB
+         )
+-        self.masking_ratio = 0.99
+-        self.max_masking_steps = 30000
++        # Learnable slot initialization
++        self.slots = nn.Parameter(torch.randn(self.K, hidden_dim))
++        # Positional embedding generator (e.g., sine/cosine)
++        self.pos_embed = PositionalEmbedding(hidden_dim)
++        # Masking schedule parameters
++        self.max_mask_ratio = 0.99
++        self.mask_steps = 30000
+         self.current_step = 0
+ 
+-    def extract_2d_features(self, images):
+-        # images: (B, L, 3, H, W)
+-        B, L, _, H, W = images.shape
+-        images = images.view(B * L, 3, H, W)
+-        features = self.encoder(images) # (B*L, Df, H, W)
+-        return features.view(B, L, features.shape[1], H, W)
+-
+-    def get_slots(self, features):
+-        # features: (B, L, Df, H, W)
+-        B, L, Df, H, W = features.shape
+-        # Flatten spatial dimensions for SlotAttention
+-        features_flat = features.permute(0, 1, 3, 4, 2).reshape(B, L * H * W, Df)
+-        # SlotAttention returns slots S of shape (B, K, Ds)
+-        slots = self.slot_attention(features_flat)
+-        return slots
+-
+-    def lift_features(self, features_2d, points_3d, camera_params):
+-        # features_2d: (B, L, Df, H, W)
+-        # points_3d: (B, N, 3)
+-        # camera_params: intrinsics and extrinsics for L views
+-        B, L, Df, H, W = features_2d.shape
+-        N = points_3d.shape[1]
+-        
+-        # Project 3D points to 2D image coordinates for each view
+-        # Returns 2D coordinates (x, y) normalized to [-1, 1] or [0, 1] depending on grid_sample
+-        # Assuming grid_sample expects normalized coordinates [-1, 1]
+-        coords_2d = project_points_to_image(points_3d, camera_params) # (B, N, L, 2)
+-        
+-        # Reshape for grid_sample: (B*L, N, 1, 2)
+-        coords_2d = coords_2d.view(B * L, N, 1, 2)
+-        
+-        # Sample features from 2D feature maps
+-        # features_2d is (B, L, Df, H, W), need (B*L, Df, H, W)
+-        features_2d_flat = features_2d.view(B * L, Df, H, W)
+-        
+-        # grid_sample output: (B*L, Df, N, 1)
+-        sampled_features = F.grid_sample(features_2d_flat, coords_2d, align_corners=True)
+-        
+-        # Reshape back to (B, L, Df, N) then (B, N, L, Df)
+-        lifted_features = sampled_features.view(B, L, Df, N).permute(0, 3, 1, 2)
+-        return lifted_features # (B, N, L, Df)
+-
+-    def fuse_features(self, lifted_features, points_3d, step):
+-        # lifted_features: (B, N, L, Df)
+-        B, N, L, Df = lifted_features.shape
+-        
+-        # Compute mean and variance across L views
+-        mean_features = lifted_features.mean(dim=2) # (B, N, Df)
+-        if L > 1:
+-            var_features = lifted_features.var(dim=2) # (B, N, Df)
+-            fused_input = torch.cat([mean_features, var_features], dim=-1) # (B, N, 2*Df)
++    def extract_2d_features(self, views):
++        # views: [B, L, H, W, 3]
++        # Returns F_2D: [B, L, H, W, D_f]
++        # Implementation depends on specific encoder (e.g., ResNet)
++        # [G] Placeholder for encoder logic
++        pass
++
++    def slot_attention(self, f_2d):
++        # f_2d: [B, L, H, W, D_f]
++        # Flatten spatial dims
++        B, L, H, W, D_f = f_2d.shape
++        f_flat = f_2d.view(B, L * H * W, D_f)
++        
++        # Slot-Attention mechanism
++        # [G] Standard Slot-Attention implementation:
++        # 1. Initialize slots with self.slots
++        # 2. Attention: q=slots, k=f_flat, v=f_flat
++        # 3. Update slots with mean-pooled attended values
++        # 4. Return updated slots S: [B, K, D_s]
++        slots = self.slots.unsqueeze(0).expand(B, -1, -1)
++        # Simplified attention logic for brevity
++        # In practice, use the specific Slot-Attention module from the paper
++        return slots 
++
++    def lift_features(self, f_2d, points_3d, camera_params):
++        # f_2d: [B, L, H, W, D_f]
++        # points_3d: [B, N, 3]
++        # camera_params: projection matrices
++        # Returns F_lift: [B, N, L, D_f]
++        B, N, _ = points_3d.shape
++        L = f_2d.shape[1]
++        
++        # Project 3D points to 2D coordinates for each view
++        # [G] Implement projection using camera intrinsics/extrinsics
++        # pi(p) -> (u, v) normalized to [-1, 1] or [0, 1]
++        coords = project_to_2d(points_3d, camera_params) # [B, N, 2]
++        
++        # Sample features from F_2D using bilinear interpolation
++        # F_lift[b, n, l, :] = F_2D[b, l, pi(p_n)]
++        F_lift = torch.zeros(B, N, L, self.D_f, device=points_3d.device)
++        for l in range(L):
++            # Grid sample F_2D[:, l, :, :, :] at coords
++            F_lift[:, :, l, :] = grid_sample(f_2d[:, l, :, :, :], coords)
++        return F_lift
++
++    def fuse_features(self, F_lift, points_3d, is_single_view=False):
++        # F_lift: [B, N, L, D_f]
++        # Returns F_p: [B, N, D_p]
++        B, N, L, D_f = F_lift.shape
++        
++        # Mean pooling over views
++        mean_feat = F_lift.mean(dim=2) # [B, N, D_f]
++        
++        if not is_single_view:
++            # Variance pooling over views
++            var_feat = F_lift.var(dim=2) # [B, N, D_f]
++            fused = torch.cat([mean_feat, var_feat], dim=-1) # [B, N, 2*D_f]
+         else:
+-            fused_input = mean_features # (B, N, Df)
++            fused = mean_feat # [B, N, D_f]
+             
+-        # Apply MLP
+-        point_features = self.fusion_mlp(fused_input) # (B, N, Dp)
++        # MLP
++        F_p = self.fusion_mlp(fused) # [B, N, D_p]
+         
+         # Add positional embeddings
+-        pos_embeds = get_positional_embeddings(points_3d) # (B, N, Dp)
+-        point_features = point_features + pos_embeds
+-        
+-        # Random Masking
+-        if self.training:
+-            masking_ratio = self.masking_ratio * (1 - step / self.max_masking_steps)
+-            mask = torch.rand(B, N, 1, device=point_features.device) > masking_ratio
+-            point_features = point_features * mask + pos_embeds * (~mask)
++        E_p = self.pos_embed(points_3d) # [B, N, D_p]
++        F_p = F_p + E_p
++        
++        return F_p
++
++    def get_mask_ratio(self):
++        # Cosine annealing from 0.99 to 0 over 30k steps
++        progress = min(self.current_step / self.mask_steps, 1.0)
++        return self.max_mask_ratio * 0.5 * (1 + torch.cos(torch.tensor(progress * torch.pi)))
++
++    def forward(self, views, points_3d, camera_params, is_single_view=False):
++        # 1. Extract 2D features
++        F_2D = self.extract_2d_features(views)
++        
++        # 2. Slot-Attention
++        S = self.slot_attention(F_2D) # [B, K, D_s]
++        
++        # 3. Lift features
++        F_lift = self.lift_features(F_2D, points_3d, camera_params)
++        
++        # 4. Fuse features
++        F_p = self.fuse_features(F_lift, points_3d, is_single_view)
++        
++        # 5. Random Masking
++        mask_ratio = self.get_mask_ratio()
++        if self.training and mask_ratio > 0:
++            mask = torch.rand(F_p.shape, device=F_p.device) < mask_ratio
++            # Replace masked features with positional embeddings only
++            E_p = self.pos_embed(points_3d)
++            F_p = torch.where(mask.unsqueeze(-1), E_p, F_p)
+             
+-        return point_features
+-
+-    def predict_density(self, point_features, slots):
+-        # point_features: (B, N, Dp)
+-        # slots: (B, K, Ds)
+-        
+-        # Query from point features
+-        queries = self.point_to_slot_q(point_features) # (B, N, Ds)
+-        
+-        # Key from slots
+-        keys = self.slot_to_slot_k(slots) # (B, K, Ds)
+-        
+-        # Attention weights: (B, N, K)
+-        # Note: Source mentions ignoring the first empty slot, so we take last K slots
+-        # Assuming slots[0] is empty, we use slots[:, 1:, :]
+-        keys = keys[:, 1:, :] # (B, K, Ds)
+-        
+-        attention_weights = torch.bmm(queries, keys.transpose(1, 2)) # (B, N, K)
+-        
+-        # Density prediction
+-        # sigma_i = sum(W_p * ReLU(A_p))
+-        # Assuming W_p is a learnable weight vector per slot, shape (K,)
+-        # Here we simplify: density is a linear combination of ReLU(attention)
+-        relu_attention = F.relu(attention_weights)
+-        density = self.density_head(relu_attention).squeeze(-1) # (B, N)
+-        
+-        return density, attention_weights
+-
+-    def predict_color(self, point_features):
+-        # point_features: (B, N, Dp)
+-        color = self.color_head(point_features) # (B, N, 3)
+-        return color
+-
+-    def forward(self, images, points_3d, camera_params, step):
+-        # 1. Extract 2D features
+-        features_2d = self.extract_2d_features(images)
+-        
+-        # 2. Get slots
+-        slots = self.get_slots(features_2d)
+-        
+-        # 3. Lift features
+-        lifted_features = self.lift_features(features_2d, points_3d, camera_params)
+-        
+-        # 4. Fuse features
+-        point_features = self.fuse_features(lifted_features, points_3d, step)
+-        
+-        # 5. Predict density
+-        density, attention_weights = self.predict_density(point_features, slots)
+-        
+-        # 6. Predict color
+-        color = self.predict_color(point_features)
+-        
+-        return density, color
+-
+-    def update_masking_schedule(self, step):
+-        self.current_step = step
++        # 6. Point-Slot Mapping (Simplified)
++        # [G] Implement cross-attention between F_p and S
++        # A_p = q(F_p) @ k(S)^T
++        # [G] Assume q and k are linear projections
++        q_fp = F_p @ self.q_proj # [B, N, K]
++        k_s = S @ self.k_proj # [B, K, K]
++        A_p = torch.bmm(q_fp, k_s.transpose(1, 2)) # [B, N, K]
++        
++        # 7. Density Estimation
++        # sigma_i = sum(W_p^{i, 1:K+1} o ReLU(A_p^{i, 1:K+1}))
++        # [G] W_p is obtained from another MLP/Attention
++        # For simplicity, assume W_p is learned or derived from A_p
++        # The paper uses W_p from point-slot mapping module
++        # Here we approximate with softmax of A_p for demonstration
++        W_p = F.softmax(A_p, dim=-1) # [B, N, K]
++        
++        # ReLU on attention weights
++        A_p_relu = F.relu(A_p)
++        
++        # Density calculation
++        # Note: Paper sums over K+1 slots (including empty). 
++        # Assuming W_p has shape [B, N, K+1] and A_p has [B, N, K+1]
++        # For this implementation, we assume K slots + 1 empty slot
++        # Extend A_p and W_p to K+1
++        A_p_ext = torch.cat([A_p_relu, torch.zeros_like(A_p[:, :, :1])], dim=-1)
++        W_p_ext = torch.cat([W_p, torch.zeros_like(W_p[:, :, :1])], dim=-1)
++        
++        sigma = torch.sum(W_p_ext * A_p_ext, dim=-1) # [B, N]
++        
++        # 8. Color Prediction
++        # Add F_p with E_p (already done in fuse_features, but re-add if masked)
++        # Pass into MLP
++        c = self.color_mlp(F_p) # [B, N, 3]
++        
++        # 9. Volume Rendering
++        # [G] Standard volume rendering loop
++        # T_i = exp(-sum(sigma_j * delta_j))
++        # C = sum(T_i * (1 - exp(-sigma_i * delta_i)) * c_i)
++        # delta_i is distance between points
++        # [G] Implement volume rendering
++        pass
++
++    def step(self):
++        self.current_step += 1
+ ```
+ 
+-**Parameters**
++**Parameters:**
+ *   **Optimizer:** Lion [S1].
+ *   **Learning Rate:** $5 \times 10^{-5}$ [S1].
+@@ -204,19 +238,17 @@
+ *   **Masking Schedule:** Cosine annealing from 0.99 to 0 over 30,000 steps [S1].
+ 
+-**Edge Cases and Pitfalls**
+-*   **Single-View Input:** When $L=1$, the variance term in feature fusion is ignored to avoid ambiguity [S1].
+-*   **Empty Slot:** The first slot in $\mathbf{S}$ is treated as an empty slot and ignored in density prediction calculations [S1].
+-*   **Degenerate Reliance:** Without random masking, the model may rely too heavily on lifted features, ignoring slot alignment. The masking schedule prevents this [S1].
++**Edge Cases and Pitfalls:**
++*   **Single-View Input:** When $L=1$, the variance term in feature fusion is ignored. The model must handle this branch explicitly [S1].
++*   **Empty Slot:** The density calculation includes an "empty slot" (index $K+1$) to account for background or unassigned points. This slot is ignored in the slot-attention output $S_1$ but included in the density summation [S1].
++*   **Degenerate Reliance:** Without random masking, the model may rely too heavily on lifted features, ignoring slots. The masking schedule is critical to enforce alignment between slots and 3D point grids [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Training time is 30 hours on a single Nvidia RTX 3090 GPU for the Room-Diverse dataset, which is 5x faster than uORF's 6 days [S1].
+-*   **Memory Complexity:** Uses a single radiance field, whereas uORF, uOCF, and sVORF compute $K$ fields for each slot, leading to higher memory usage in those methods [S1].
+-*   **Strengths:** Captures more detailed texture, shape, and pose of objects compared to baselines. Faster convergence due to feature lifting providing detailed information. Reduced computation overhead by requiring only 1,024 (or even 256) sampled rays for training with reconstruction loss, as it does not use auxiliary losses on the fully rendered image [S1].
+-*   **Limitations:** Requires Slot-Attention, which may add complexity to the training pipeline. Performance depends on the quality of 2D feature extraction and the effectiveness of the lifting process.
+-*   **When to Use:** Suitable for object-centric radiance field learning where scene decomposition and detailed texture capture are important. Particularly effective when computational resources are limited compared to multi-field methods.
+-*   **When Not to Use:** If real-time rendering is the primary constraint and the overhead of Slot-Attention and feature lifting is prohibitive. If the scene does not have distinct objects that benefit from slot-based decomposition.
++*   **Time Complexity:** Training time is approximately 30 hours on a single Nvidia RTX 3090 GPU for the Room-Diverse dataset, which is 5x faster than uORF (6 days) [S1].
++*   **Memory Complexity:** Uses a single radiance field, whereas uORF, uOCF, and sVORF compute $K$ fields (one per slot), leading to lower memory usage [S1].
++*   **Strengths:** Faster convergence due to feature lifting providing detailed information; efficient rendering with fewer sampled rays (1,024 or even 256) due to no auxiliary losses on fully rendered images [S1].
++*   **Limitations:** Requires Slot-Attention, which may be sensitive to initialization (mitigated by learnable slot initialization) [S1].
+ 
+ ## Background
+-Slot-guided Feature Lifting (SlotLifter) was introduced in the paper "SlotLifter: Slot-Guided Feature Lifting for Learning Object-Centric Radiance Fields" [S1]. It builds upon the concept of object-centric learning using Slot-Attention and applies it to the domain of neural radiance fields. The method addresses the limitations of NeRF, which lacks generalization capabilities and requires individual optimization for each scene, by leveraging shared prior knowledge from source views [S1]. It improves upon previous methods like uORF by using a single radiance field and explicit feature lifting, resulting in faster training and better detail capture [S1].
++SlotLifter was introduced to improve object-centric radiance field learning by combining Slot-Attention with feature lifting. It addresses the limitations of NeRF, which lacks generalization and requires per-scene optimization [S1]. The method builds on [Attention-Based Volumetric Rendering](21739-attention-based-volumetric-rendering.md) by incorporating learnable embeddings and attention mechanisms. It was evaluated on synthetic (CLEVR-567, Room-Chair, Room-Diverse, Room-Texture) and real-world (Kitchen-Shiny, Kitchen-Matte) datasets [S1].
+ 
+ ## Sources

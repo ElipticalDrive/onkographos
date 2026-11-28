@@ -1,0 +1,288 @@
+# LSE-3D
+
+Also called: LSE-3D coder, LSE-3D coding method, Least Square Estimation in 3-D
+
+## Overview
+LSE-3D is a lossless compression scheme for volumetric images that uses 3D adaptive least-square linear prediction for decorrelation and context-based Golomb-Rice entropy coding for residuals [S1, unofficial]. It is designed to be simple but efficient with low computational requirements, specifically for volumetric medical datasets [S1, unofficial]. Unlike wavelet-based schemes such as 3D-SPIHT and 3D QT-L, LSE-3D does not support resolution and quality scalability or progressive coding, but achieves similar compression efficiency with significantly lower computational cost (up to 50% less floating-point operations per voxel) [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A volumetric image $S$ of bit precision $b$, where voxel values are in $[0, 2^b - 1]$.
+- Output: A compressed bitstream of prediction residuals.
+
+**Data Structures:**
+- **Voxel Grid:** 3D array of integers.
+- **Context Vector:** A vector of differences between adjacent voxels, quantized to determine the entropy coding context.
+- **Prediction Coefficients:** A vector $\vec{\alpha}$ of size $N$.
+- **Training Window:** A vector $\vec{x}$ of size $M$ containing past voxel values.
+- **Covariance Matrix:** An $N \times N$ matrix $C^T C$.
+
+**Parameters:**
+- $N$: The order of the linear predictor (number of nearest causal neighbors).
+- $M$: The size of the context used for linear coefficient assessment. Typical values are chosen around $N^2$ [S1, unofficial].
+- $T$: A predefined threshold for prediction error. If the error does not exceed $T$, linear coefficients are not recalculated to reduce computational load. $T$ is bit-depth dependent [S1, unofficial].
+- Number of models: 365 distinct probabilistic models (and corresponding Golomb-Rice codes) are used, selected based on the quantized context value [S1, unofficial].
+
+**Steps:**
+
+1.  **Scan Order:** Voxels are scanned in raster order along slices. For a current voxel $S(m_o, n_o, p_o)$, a 3D causal neighborhood is defined using voxels $S(m, n, p)$ ordered by 3D Euclidean distance:
+    $$d_{3-D} = \sqrt{(m-m_o)^2 + (n-n_o)^2 + (p-p_o)^2}$$
+    The $k$-th nearest neighbor in the causal context is denoted as $S(i-k)$ [S1, unofficial].
+
+2.  **Linear Prediction:** Compute the predicted value $\hat{S}(i)$ using the $N$ nearest causal neighbors:
+    $$\hat{S}(i) = \sum_{k=1}^N \alpha_k S(i-k)$$
+    where $\alpha_k$ are the prediction coefficients [S1, unofficial].
+
+3.  **Coefficient Update (Conditional):**
+    - Calculate the prediction error $e = \lfloor S(i) - \hat{S}(i) \rfloor$.
+    - If $|e| > T$, update the coefficients $\vec{\alpha}$:
+        - Construct the training window vector $\vec{x} = [S(i-1) \dots S(i-M)]^T$.
+        - Construct the $M \times N$ matrix $C$ where $C_{m,n} = S(i-m-n)$.
+        - Compute $\vec{\alpha} = (C^T C)^{-1} C^T \vec{x}$.
+        - Use Cholesky decomposition to invert $C^T C$ (since it is definite positive) for half the computational cost of Gauss-Jordan elimination [S1, unofficial].
+        - **Pitfall:** If $C^T C$ is singular, initialize $\alpha_k = 1/N$ for all $k$, assuming the prediction is the mean value of the context [S1, unofficial].
+    - If $|e| \le T$, keep the previous coefficients [S1, unofficial].
+
+4.  **Error Representation:**
+    - Represent the prediction error $e$ in modulo-$2^b$ range $[-2^{b-1}, 2^{b-1}-1]$. This allows recovery of $S$ without extra bits because $S$ is known to be in $[0, 2^b - 1]$ [S1, unofficial].
+
+5.  **Bias Correction:**
+    - Estimate and remove the nonzero average value (bias) of the prediction error distribution for the current context before coding [S1, unofficial].
+
+6.  **Interleaving:**
+    - Interleave positive and negative values of the prediction error to map the two-sided geometric distribution into a one-sided distribution of non-negative integers [S1, unofficial].
+
+7.  **Context Calculation:**
+    - Calculate the context value by quantizing a vector of pixel differences $[d - b, b - c, c - a]$, where $a, b, c, d$ are adjacent pixels as defined in the standard context model (Figure 2 in [S1, unofficial]) [S1, unofficial].
+
+8.  **Entropy Coding:**
+    - Estimate the prediction error distribution for the current context using errors from the past.
+    - Select the appropriate Golomb-Rice code from the 365 models based on the estimated distribution [S1, unofficial].
+    - **Run-mode:** When processing low entropy regions with null context value, simplify the algorithm to code only the run-length value [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def lse_3d_encode(volume, N, M, T, bit_depth):
+    """
+    Encodes a volumetric image using LSE-3D.
+    
+    Args:
+        volume: 3D numpy array of voxel values.
+        N: Order of linear predictor.
+        M: Size of training window.
+        T: Error threshold for coefficient update.
+        bit_depth: Bit precision b.
+        
+    Returns:
+        compressed_bits: List of encoded bits.
+    """
+    H, W, D = volume.shape
+    alpha = np.ones(N) / N  # Initialize coefficients
+    context_errors = {}  # Store past errors for each context
+    
+    # Initialize Golomb-Rice parameters for 365 contexts
+    # In a real implementation, this would be a lookup table or dynamic estimator
+    gr_params = [0] * 365 
+    
+    compressed_bits = []
+    
+    for p in range(D):
+        for n in range(W):
+            for m in range(H):
+                # Get current voxel
+                S_i = volume[m, n, p]
+                
+                # 1. Get causal neighbors ordered by 3D Euclidean distance
+                neighbors = get_causal_neighbors(volume, m, n, p, N)
+                S_neighbors = [neighbors[k][2] for k in range(N)] # Extract values
+                
+                # 2. Linear Prediction
+                S_hat = sum(alpha[k] * S_neighbors[k] for k in range(N))
+                
+                # 3. Prediction Error
+                e = floor(S_i - S_hat)
+                
+                # 4. Coefficient Update
+                if abs(e) > T:
+                    # Get training window of size M
+                    training_window = get_training_window(volume, m, n, p, M)
+                    x = np.array(training_window)
+                    
+                    # Construct matrix C
+                    # C is M x N, C[m,n] = S(i-m-n)
+                    C = np.zeros((M, N))
+                    for i_m in range(M):
+                        for i_n in range(N):
+                            # Calculate index for S(i-m-n) based on causal order
+                            # This requires mapping the linear index i to 3D coordinates
+                            # and finding the (m+n)-th neighbor
+                            idx = get_neighbor_index(m, n, p, i_m + i_n)
+                            C[i_m, i_n] = volume[idx]
+                            
+                    # Compute alpha = (C^T C)^-1 C^T x
+                    # Use Cholesky decomposition for efficiency
+                    try:
+                        CTC = C.T @ C
+                        L = cholesky_decompose(CTC) # L is lower triangular
+                        # Solve L y = C^T x
+                        y = solve_triangular(L, C.T @ x, lower=True)
+                        # Solve L^T alpha = y
+                        alpha = solve_triangular(L.T, y, lower=False)
+                    except SingularMatrixError:
+                        alpha = np.ones(N) / N # Fallback to mean
+                        
+                # 5. Modulo-2^b representation
+                e_mod = e % (2**bit_depth)
+                if e_mod >= 2**(bit_depth-1):
+                    e_mod -= 2**bit_depth
+                    
+                # 6. Context Calculation
+                # Get adjacent pixels a, b, c, d
+                a, b, c, d = get_adjacent_pixels(volume, m, n, p)
+                diff_vector = [d - b, b - c, c - a]
+                context_val = quantize_context(diff_vector)
+                
+                # 7. Bias Correction and Interleaving
+                # Estimate bias from context_errors[context_val]
+                bias = estimate_bias(context_errors.get(context_val, []))
+                e_corrected = e_mod - bias
+                
+                # Interleave positive and negative values
+                e_interleaved = interleave(e_corrected)
+                
+                # 8. Entropy Coding
+                if context_val == 0: # Run-mode
+                    # Code run-length
+                    run_length = count_consecutive_same_voxels(volume, m, n, p)
+                    compressed_bits.extend(encode_golomb_rice(run_length, gr_params[0]))
+                else:
+                    # Select GR code based on context
+                    # Update error history
+                    if context_val not in context_errors:
+                        context_errors[context_val] = []
+                    context_errors[context_val].append(e_corrected)
+                    
+                    # Update GR parameter based on distribution
+                    gr_param = update_gr_param(context_errors[context_val])
+                    gr_params[context_val] = gr_param
+                    
+                    compressed_bits.extend(encode_golomb_rice(e_interleaved, gr_param))
+                    
+    return compressed_bits
+
+def get_causal_neighbors(volume, m, n, p, N):
+    """
+    Returns N nearest causal neighbors of (m, n, p) ordered by 3D Euclidean distance.
+    Causal means neighbors with coordinates <= current in raster order.
+    """
+    neighbors = []
+    # Iterate over all voxels in causal region
+    for mp in range(p + 1):
+        for np_ in range(W if mp < p else n + 1):
+            for mp_ in range(H if (mp < p or np_ < n) else m + 1):
+                if mp == p and np_ == n and mp_ == m:
+                    continue
+                dist = sqrt((mp - m)**2 + (np_ - n)**2 + (mp_ - p)**2)
+                neighbors.append((dist, mp_, np_, mp))
+    # Sort by distance and take top N
+    neighbors.sort(key=lambda x: x[0])
+    return neighbors[:N]
+
+def get_training_window(volume, m, n, p, M):
+    """
+    Returns M past voxel values for the training window.
+    """
+    window = []
+    # Get M nearest causal neighbors
+    neighbors = get_causal_neighbors(volume, m, n, p, M)
+    for _, mp_, np_, mp in neighbors:
+        window.append(volume[mp_, np_, mp])
+    return window
+
+def get_adjacent_pixels(volume, m, n, p):
+    """
+    Returns a, b, c, d as defined in Figure 2 of [S1, unofficial].
+    Typically: a = S(m-1, n, p), b = S(m, n-1, p), c = S(m-1, n-1, p), d = S(m, n, p-1)
+    Or similar causal neighbors. Exact definition from Figure 2 is required.
+    Assuming standard JPEG-LS context:
+    a = left, b = above, c = above-left, d = above-above or similar in 3D.
+    For 3D, d is likely from previous slice.
+    """
+    # Placeholder for exact neighbor definition from Figure 2
+    # a = volume[m-1, n, p] if m>0 else 0
+    # b = volume[m, n-1, p] if n>0 else 0
+    # c = volume[m-1, n-1, p] if m>0 and n>0 else 0
+    # d = volume[m, n, p-1] if p>0 else 0
+    # This is a guess; the exact definition from Figure 2 is critical.
+    # Since Figure 2 is not provided, we assume a standard causal context.
+    # Let's assume d is the voxel from the previous slice at the same position.
+    a = volume[m-1, n, p] if m > 0 else 0
+    b = volume[m, n-1, p] if n > 0 else 0
+    c = volume[m-1, n-1, p] if m > 0 and n > 0 else 0
+    d = volume[m, n, p-1] if p > 0 else 0
+    return a, b, c, d
+
+def quantize_context(diff_vector):
+    """
+    Quantizes the difference vector to a context index.
+    """
+    # Simple quantization: sum of absolute differences or similar
+    # Exact quantization method from [S1, unofficial] is not specified beyond "quantizing"
+    # Assume a simple mapping for now
+    return sum(abs(d) for d in diff_vector) % 365
+
+def estimate_bias(errors):
+    """
+    Estimates the bias (mean) of the error distribution.
+    """
+    if not errors:
+        return 0
+    return sum(errors) / len(errors)
+
+def interleave(e):
+    """
+    Interleaves positive and negative values.
+    e >= 0 -> 2*e
+    e < 0 -> -2*e - 1
+    """
+    if e >= 0:
+        return 2 * e
+    else:
+        return -2 * e - 1
+
+def encode_golomb_rice(value, param):
+    """
+    Encodes a value using Golomb-Rice code with parameter param.
+    """
+    # q = value // (2^param)
+    # r = value % (2^param)
+    # Encode q in unary, r in binary
+    q = value >> param
+    r = value & ((1 << param) - 1)
+    bits = []
+    # Unary encoding of q
+    bits.extend([1] * q)
+    bits.append(0)
+    # Binary encoding of r
+    bits.extend([(r >> i) & 1 for i in range(param)])
+    return bits
+```
+
+## Operating characteristics
+- **Time Complexity:** The computational cost is dominated by the linear prediction and coefficient update. For low values of $T$, the coefficient update is performed frequently, but the use of Cholesky decomposition reduces the cost. The method delivers up to 50% less computational load than wavelet-based algorithms [S1, unofficial].
+- **Memory Complexity:** Requires storing the volume, prediction coefficients, and error history for context estimation. The training window size $M$ affects memory usage.
+- **Compression Efficiency:** Achieves similar coding performance to wavelet-based schemes (3D-SPIHT, 3D QT-L) for low values of $T$ [S1, unofficial]. Compression Efficiency (CE) is computed as:
+  $$CE = \frac{\text{Orig. Image Size} - \text{Compressed Image Size}}{\text{Orig. Image Size}} \times 100$$
+- **Strengths:** Low computational cost, simple implementation, good performance on medical volumetric data.
+- **Limitations:** No resolution or quality scalability, no progressive coding [S1, unofficial]. Performance depends on the choice of parameters $N, M, T$.
+- **When to use:** When computational resources are limited and lossless compression of volumetric medical data is required.
+- **When not to use:** When progressive transmission or scalability is needed.
+
+## Background
+LSE-3D was proposed by C. Alberola-López et al. from the Laboratorio de Procesado de Imagen, E.T.S.I. Telecomunicación, Univ. Valladolid, Spain [S1, unofficial]. It was presented as a novel lossless compression method for volumetric medical datasets, contrasting with existing wavelet-based methods [S1, unofficial]. The method was evaluated on MR, CT, PET, and ECHO volumes [S1, unofficial].
+
+## Sources
+[S1] A LOSSLESS COMPRESSION ALGORITHM BASED ON PREDICTIVE CODING FOR VOLUMETRIC MEDICAL DATASETS, https://openalex.org/W1543541545, fetched 2026-11-01 (unofficial)

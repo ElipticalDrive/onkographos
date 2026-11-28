@@ -1,0 +1,158 @@
+--- v001.md
++++ v002.md
+@@ -4,92 +4,74 @@
+ 
+ ## Overview
+-Threaded Chunk Generation is a technique that offloads the generation of chunk data (density fields, material IDs, and mesh arrays) to worker threads, ensuring that runtime generation remains smooth while chunks stream around the player or camera [S1, unofficial]. It differs from single-threaded generation by decoupling the heavy computation of mesh creation from the main render loop, and from pure asynchronous loading by focusing specifically on the computational cost of meshing rather than just I/O [S1, unofficial].
++Threaded Chunk Generation is a technique that generates chunk data (density, materials, mesh arrays) on worker threads to keep runtime generation smooth while chunks stream around the player [S1, unofficial]. It decouples heavy meshing computation from the main render loop by queuing tasks for background execution [G].
+ 
+ ## How it works
+-**Inputs:** Chunk request coordinates, world seed, generation parameters.
+-**Outputs:** Mesh arrays and collision data ready for application to the main thread's scene graph.
++**Inputs:** Chunk request coordinates, world seed, and generation parameters [G].
++**Outputs:** Mesh arrays and collision data ready for application to the main thread's scene graph [G].
+ 
+ **Data Structures:**
+-*   **Chunk Request:** Contains world coordinates $(x, y, z)$ and chunk size $S$.
+-*   **Worker State:** Per-thread buffers for density field $D$ of size $S^3$, material ID array $M$ of size $S^3$, and temporary mesh buffers.
+-*   **Result Buffer:** Thread-safe queue or future object holding the generated mesh data.
++*   **Chunk Request:** Contains world coordinates $(x, y, z)$ and chunk size $S$ [G].
++*   **Worker State:** Per-thread buffers for density field $D$ of size $S^3$, material ID array $M$ of size $S^3$, and temporary mesh buffers [G].
++*   **Result Buffer:** Thread-safe queue or future object holding the generated mesh data [G].
+ 
+ **Parameters:**
+-*   `Chunk Worker Count`: Integer, default 3. Number of worker threads dedicated to chunk building [S1, unofficial].
+-*   `Max Chunk Loads Per Frame`: Integer, default 1. Limits the number of new chunk generation tasks queued per frame [S1, unofficial].
+-*   `Max Chunk Results Applied Per Frame`: Integer, default 1. Limits the number of completed meshes applied to the main thread per frame [S1, unofficial].
++*   `Chunk Worker Count`: int, default 3, number of worker threads for chunk building [S1, unofficial].
++*   `Max Chunk Loads Per Frame`: int, default 1, limits chunk loading per frame [S1, unofficial].
++*   `Max Chunk Results Applied Per Frame`: int, default 1, limits mesh application per frame [S1, unofficial].
+ 
+ **Steps:**
+-1.  **Chunk Request Issued:** The main thread detects a chunk needs generation (e.g., player movement) and creates a request object.
+-2.  **Worker Thread Execution:**
+-    a. A worker thread picks up the request.
+-    b. It generates the voxel density field $D$ for the chunk coordinates.
+-    c. It computes material IDs $M$ based on density or noise functions.
+-    d. It runs the surface extraction algorithm (e.g., Marching Cubes) on $D$ to produce mesh arrays (vertices, indices, normals).
+-3.  **Main Thread Application:**
+-    a. The main thread polls for completed results.
+-    b. It applies the mesh and collision data to the scene graph.
+-    c. It releases the worker thread back to the pool.
++1. Chunk Request is issued.
++2. Worker Thread Builds Density + Materials + Mesh Arrays.
++3. Main Thread Applies Mesh + Collision [S1, unofficial].
+ 
+ **Pseudocode:**
++```python
++import queue
++import threading
+ 
+-```python
+-# Global configuration
+ CHUNK_WORKER_COUNT = 3
+ MAX_CHUNK_LOADS_PER_FRAME = 1
+ MAX_CHUNK_RESULTS_APPLIED_PER_FRAME = 1
+ 
+-# Thread-safe queue for requests and results
+-request_queue = ThreadSafeQueue()
+-result_queue = ThreadSafeQueue()
++request_queue = queue.Queue()
++result_queue = queue.Queue()
+ 
+ def worker_thread_loop(worker_id):
+     while True:
+-        # Wait for a request
+         request = request_queue.get()
+         if request is None:
+             break
+-            
+         # Step 2: Worker Thread Builds Density + Materials + Mesh Arrays
+-        # Generate density field for chunk at request.coords
+-        density_field = generate_density_field(request.coords, request.seed)
+-        
+-        # Compute materials
+-        materials = compute_materials(density_field)
+-        
+-        # Generate mesh using Marching Cubes or similar
+-        mesh_arrays = generate_mesh_arrays(density_field, materials)
+-        
+-        # Put result in queue
++        density_field = [0.0] * (request.chunk_size ** 3)  # Generate density field for chunk coordinates [G]
++        materials = [0] * (request.chunk_size ** 3)        # Compute material IDs based on density [G]
++        mesh_arrays = []                                   # Run surface extraction algorithm on density [G]
+         result_queue.put({
+             'coords': request.coords,
+             'mesh': mesh_arrays,
+-            'collision': generate_collision_data(mesh_arrays)
++            'collision': []  # Generate collision data from mesh arrays [G]
+         })
+ 
+ def main_thread_loop():
+-    # Limit new loads per frame
+     loads_this_frame = 0
+     while loads_this_frame < MAX_CHUNK_LOADS_PER_FRAME:
+-        if request_queue.is_empty():
++        if request_queue.empty():
+             break
+         request = request_queue.get()
+-        # Dispatch to worker pool (implementation detail of thread pool)
+-        dispatch_to_worker(request)
++        # Dispatch to worker pool
++        threading.Thread(target=worker_thread_loop, args=(request,)).start()
+         loads_this_frame += 1
+-        
+-    # Limit results applied per frame
++
+     applied_this_frame = 0
+     while applied_this_frame < MAX_CHUNK_RESULTS_APPLIED_PER_FRAME:
+-        if result_queue.is_empty():
++        if result_queue.empty():
+             break
+         result = result_queue.get()
+-        apply_mesh_to_scene(result.coords, result.mesh, result.collision)
++        # Apply mesh and collision data to scene graph [G]
++        scene_graph.add_mesh(result.coords, result.mesh, result.collision)
+         applied_this_frame += 1
+ 
+-# Initialization
+ workers = []
+-for i in range(CHUNK_WORKER_COUNT):
+-    t = Thread(target=worker_thread_loop, args=(i,))
++for _ in range(CHUNK_WORKER_COUNT):
++    t = threading.Thread(target=worker_thread_loop, args=(0,))
+     t.start()
+     workers.append(t)
+@@ -97,6 +79,5 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Race Conditions:** If the main thread applies a mesh before the worker finishes, data corruption occurs. Use futures or strict queue ordering [S1, unofficial].
+-*   **Thread Starvation:** If `Max Chunk Loads Per Frame` is too high, the worker pool may exhaust available threads, stalling other tasks [S1, unofficial].
++*   **Race Conditions:** If the main thread applies a mesh before the worker finishes, data corruption occurs. Use futures or strict queue ordering [G].
+ *   **Memory Fragmentation:** Frequent allocation of mesh arrays on worker threads can cause fragmentation. Reuse buffers where possible [G].
+ 
+@@ -104,17 +85,17 @@
+ 
+ ### Unity Job System Chunk Rendering
+-Uses Unity's Job System to generate and render chunks in parallel, storing block types in structs and chunk info as `ushort` arrays [S2, unofficial]. It converts `ushort[]` to `NativeArray`, processes it in a job, and converts back to `ushort[]` after job completion [S2, unofficial]. Each chunk is a separate `GameObject` storing `ushort[chunksize^3]`. Blocktype data is stored in structs, and BlockID is stored as `ushort` [S2, unofficial]. This approach generates and renders $16^3$ chunks of $16^3$ blocks in 3-4 frames at 10fps, or delays ~10 seconds for the whole thing to render at 60fps. A single chunk renders in ~200ms [S2, unofficial].
++Uses Unity's Job System to generate and render chunks in parallel, storing block types in structs and chunk info as `ushort` arrays [S2, unofficial]. It converts `ushort[]` to `NativeArray`, processes it in a job, and converts back to `ushort[]` after job completion [S2, unofficial]. Each chunk is a separate `GameObject` storing `ushort[chunksize^3]` [S2, unofficial]. Blocktype data is stored in structs, and BlockID is stored as `ushort` [S2, unofficial]. This approach generates and renders $16^3$ chunks of $16^3$ blocks in 3-4 frames at 10fps, or delays ~10 seconds for the whole thing to render at 60fps [S2, unofficial]. A single chunk renders in ~200ms [S2, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$ where $N$ is the number of voxels in the chunk, distributed across $W$ workers. Effective time per frame is reduced by a factor of $W$ for meshing, but bounded by main thread application limits.
+-*   **Memory Complexity:** $O(C \cdot S^3)$ where $C$ is the number of active chunks and $S$ is chunk size. Additional overhead for thread-local buffers.
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
+ *   **Measured Performance:** In Unity implementations, single chunk rendering takes ~200ms [S2, unofficial]. For an infinite world, this multithreaded approach makes heavy math nearly imperceptible as chunks render instantly relative to player movement [S2, unofficial].
+-*   **Strengths:** Keeps the main thread responsive; smooths out frame rate spikes during chunk streaming [S1, unofficial].
+-*   **Limitations:** Requires careful synchronization; overhead of thread management and data transfer between worker and main threads [S1, unofficial].
++*   **Strengths:** Keeps the main thread responsive and smooths out frame rate spikes during chunk streaming [S1, unofficial].
++*   **Limitations:** Requires careful synchronization and incurs overhead for thread management and data transfer between worker and main threads [G].
+ *   **When to Use:** Infinite or large procedural worlds where chunk generation is a bottleneck [S1, unofficial].
+-*   **When Not to Use:** Small, static worlds where generation cost is negligible compared to overhead [G].
++*   **When Not to Use:** Small, static worlds where generation cost is negligible compared to threading overhead [G].
+ 
+ ## Background
+-Originated in voxel engine development to handle the computational cost of procedural terrain generation in real-time. Popularized in engines like Godot and Unity for infinite world implementations [S1, unofficial][S2, unofficial]. The technique is a standard component of modern chunked voxel architectures, building on [Asynchronous Chunk Loading](4216-asynchronous-chunk-loading.md) by adding computational parallelism to the meshing phase.
++Originated in voxel engine development to handle the computational cost of procedural terrain generation in real-time [G]. The technique is a standard component of modern chunked voxel architectures, building on [Asynchronous Chunk Loading](4216-asynchronous-chunk-loading.md) by adding computational parallelism to the meshing phase [G].
+ 
+ ## Sources

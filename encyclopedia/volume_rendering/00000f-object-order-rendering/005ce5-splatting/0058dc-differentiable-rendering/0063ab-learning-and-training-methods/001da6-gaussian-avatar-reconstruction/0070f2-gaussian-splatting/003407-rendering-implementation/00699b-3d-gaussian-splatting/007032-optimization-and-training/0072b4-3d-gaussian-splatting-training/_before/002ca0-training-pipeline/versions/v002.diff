@@ -1,0 +1,143 @@
+--- v001.md
++++ v002.md
+@@ -4,62 +4,103 @@
+ 
+ ## Overview
+-The training pipeline for 3D Gaussian Splatting is an iterative optimization loop that minimizes a photometric loss between rendered images and ground truth views [S1, unofficial]. It differs from static rendering by continuously updating Gaussian parameters (position, covariance, opacity, color) via gradients computed through a differentiable rasterizer [S1, unofficial].
++The Training Pipeline is the iterative optimization loop for 3D Gaussian Splatting that uses a differentiable rasterizer and a loss function to refine a set of 3D Gaussians [S1, unofficial]. It solves the problem of reconstructing a scene from multi-view images by adjusting Gaussian parameters to minimize rendering error [S1, unofficial]. It is distinguished from its siblings by its explicit management of the training state (weights and point cloud) within the loop, contrasting with specialized gradient computation methods like MaskGaussian or distributed implementations like Grendel-GS [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:**
+-*   `sparsePointCloud`: Initial set of 3D points with attributes.
+-*   `pointCloudExtraFeatures`: Additional attributes (e.g., SH coefficients, masks).
+-*   `cameraPose`: Camera extrinsics and intrinsics for the current training step.
+-*   `ImageFromMultiViews`: Ground truth images corresponding to `cameraPose`.
++The pipeline operates as a standard differentiable rendering optimization loop.
++
++**Inputs and Outputs:**
++*   **Inputs:** A sparse point cloud (`sparsePointCloud`), extra features associated with the points (`pointCloudExtraFeatures`), and camera poses (`cameraPose`) for the training views. Ground truth images (`ImageFromMultiViews`) are also required for loss computation.
++*   **Outputs:** Updated Gaussian parameters (position, covariance, opacity, color, SH coefficients) stored in the training state.
+ 
+ **Data Structures:**
+-*   `WeightToTrain`: State object containing the mutable Gaussian parameters (`sparsePointCloud`, `pointCloudExtraFeatures`) [S1, unofficial].
++The core state is held in `WeightToTrain`, which contains:
++1.  `sparsePointCloud`: The geometric representation of the Gaussians (positions, covariances).
++2.  `pointCloudExtraFeatures`: Attribute data (opacity, colors, spherical harmonics coefficients).
+ 
+ **Steps:**
+-1.  **Rasterization:** Pass `sparsePointCloud`, `pointCloudExtraFeatures`, and `cameraPose` to the Rasterizer [S1, unofficial]. The Rasterizer performs alpha-blending to produce a `rasterized_image` [S1, unofficial].
+-2.  **Loss Computation:** Compare `rasterized_image` with `ImageFromMultiViews` using a Loss function (e.g., L1, SSIM) [S1, unofficial].
+-3.  **Gradient Calculation:** Compute gradients of the loss with respect to the parameters in `WeightToTrain` [S1, unofficial].
+-4.  **Update:** Apply gradients to update `WeightToTrain` [S1, unofficial].
++1.  **Initialization:** Initialize `WeightToTrain` with the input `sparsePointCloud` and `pointCloudExtraFeatures` [S1, unofficial].
++2.  **Forward Pass:**
++    *   Pass `sparsePointCloud`, `pointCloudExtraFeatures`, and `cameraPose` to the Rasterizer [S1, unofficial].
++    *   The Rasterizer computes the rendered image by alpha-blending the Gaussians projected onto the image plane [S1, unofficial].
++    *   Output: `rasterized_image`.
++3.  **Loss Computation:**
++    *   Compare `rasterized_image` with the corresponding ground truth image from `ImageFromMultiViews` [S1, unofficial].
++    *   Compute the loss $\mathcal{L}$ (e.g., L1 loss, SSIM loss) [S1, unofficial].
++4.  **Backward Pass:**
++    *   Compute the gradient of the loss with respect to the trainable parameters [S1, unofficial].
++    *   Gradients flow through the rasterizer to update `WeightToTrain` [S1, unofficial].
++5.  **Update:**
++    *   Apply the gradients to update the parameters in `WeightToTrain` using an optimizer (e.g., Adam) [S1, unofficial].
++    *   Repeat steps 2-5 for a specified number of iterations.
+ 
+ **Pseudocode:**
+ ```python
+-def training_step(sparsePointCloud, pointCloudExtraFeatures, cameraPose, ImageFromMultiViews):
+-    # 1. Rasterize
+-    rasterized_image = Rasterizer(sparsePointCloud, pointCloudExtraFeatures, cameraPose)
++def training_pipeline(sparse_point_cloud, point_cloud_extra_features, camera_poses, ground_truth_images, optimizer, num_iterations):
++    """
++    Iterative optimization loop for 3D Gaussian Splatting.
+     
+-    # 2. Compute Loss
+-    loss = Loss(rasterized_image, ImageFromMultiViews)
++    Args:
++        sparse_point_cloud: Initial 3D Gaussian positions and covariances.
++        point_cloud_extra_features: Initial Gaussian attributes (opacity, colors, SH).
++        camera_poses: Camera extrinsics and intrinsics for training views.
++        ground_truth_images: List of ground truth images for training views.
++        optimizer: Optimization algorithm (e.g., Adam).
++        num_iterations: Total number of training steps.
++    """
++    # Initialize training state
++    weight_to_train = {
++        "sparse_point_cloud": sparse_point_cloud,
++        "point_cloud_extra_features": point_cloud_extra_features
++    }
+     
+-    # 3. Backpropagate
+-    gradients = loss.backward()
+-    
+-    # 4. Update Weights
+-    WeightToTrain.update(gradients)
+-    
+-    return loss
++    for iteration in range(num_iterations):
++        # Select a random training view or batch
++        view_index = random_selection(len(camera_poses))
++        camera_pose = camera_poses[view_index]
++        gt_image = ground_truth_images[view_index]
++        
++        # Forward pass: Rasterize
++        # The rasterizer projects Gaussians and alpha-blends them
++        rasterized_image = rasterize(
++            weight_to_train["sparse_point_cloud"],
++            weight_to_train["point_cloud_extra_features"],
++            camera_pose
++        )
++        
++        # Loss computation
++        # Compute loss between rasterized image and ground truth
++        loss = compute_loss(rasterized_image, gt_image)
++        
++        # Backward pass: Compute gradients
++        # Gradients are computed with respect to weight_to_train parameters
++        gradients = compute_gradients(loss, weight_to_train)
++        
++        # Update parameters
++        optimizer.step(gradients, weight_to_train)
++        
++        # Optional: Log metrics
++        log_metrics(iteration, loss, weight_to_train)
+ ```
+ 
+-**Parameters:**
+-*   Learning rate: Not given in the sources.
+-*   Loss weights: Not given in the sources.
+-
+-**Edge Cases:**
+-*   Precision: Not given in the sources.
+-*   Boundaries: Not given in the sources.
++**Edge Cases and Pitfalls:**
++*   **Precision:** Floating-point precision in the rasterizer and gradient computation can affect convergence, especially for small Gaussians [G].
++*   **Degenerate Input:** If the sparse point cloud is too sparse, the initial rendering may be poor, leading to slow convergence or local minima [G].
++*   **Memory:** Large scenes may exceed GPU memory during the forward/backward pass, requiring batched processing or out-of-core techniques [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Mini-Splatting Pipeline](9235-mini-splatting-pipeline.md)
+-A training pipeline for 3D Gaussian Splatting that manages Gaussian count via densification, simplification, and depth reinitialization phases.
++A variant that manages Gaussian count through densification and simplification.
+ 
+ ## Operating characteristics
+-*   Time Complexity: Not given in the sources.
+-*   Memory Complexity: Not given in the sources.
+-*   Performance: Not given in the sources.
+-*   Strengths: Not given in the sources.
+-*   Limitations: Not given in the sources.
++*   **Time Complexity:** Linear with respect to the number of Gaussians and pixels per iteration. Total time is proportional to the number of iterations.
++*   **Memory Complexity:** Linear with respect to the number of Gaussians.
++*   **Strengths:** Simple, modular, and leverages existing differentiable rendering infrastructure.
++*   **Limitations:** Standard 3D Gaussian Splatting training can be memory-intensive for large scenes. Convergence speed depends on the initial point cloud quality and learning rate schedule.
++*   **When to use:** Standard reconstruction tasks where memory is not a critical constraint.
++*   **When not to use:** When memory is severely limited (consider Mini-Splatting) or when distributed training is required (consider Grendel-GS).
+ 
+ ## Background
+-The iterative optimization loop is a standard approach for training differentiable rendering models [S1, unofficial]. It relies on the differentiability of the rasterization process to enable gradient-based optimization of 3D scene representations [S1, unofficial].
++The training pipeline is based on the original 3D Gaussian Splatting paper [S1, unofficial]. It represents the core optimization mechanism described in the foundational work, adapted for implementation in frameworks like Taichi [S1, unofficial].
+ 
+ ## Sources

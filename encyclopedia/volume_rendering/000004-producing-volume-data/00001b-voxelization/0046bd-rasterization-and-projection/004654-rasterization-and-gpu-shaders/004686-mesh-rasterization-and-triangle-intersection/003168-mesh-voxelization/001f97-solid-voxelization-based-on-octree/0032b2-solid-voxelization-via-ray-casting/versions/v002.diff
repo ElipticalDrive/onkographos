@@ -1,0 +1,253 @@
+--- v001.md
++++ v002.md
+@@ -1,5 +1,3 @@
+ # Solid Voxelization via Ray Casting
+-
+-
+ ## Overview
+ A method to convert a triangle mesh into a solid voxel representation (octree) by casting rays through the mesh to determine occupied voxel intervals along the Z-axis [S1, unofficial]. It differs from sibling methods by explicitly computing solid intervals per pixel via ray-mesh intersection rather than relying solely on spatial partitioning pruning or robust topological checks for inside/outside status [S1, unofficial].
+@@ -7,29 +5,25 @@
+ ## How it works
+ **Inputs and outputs:**
+-- Input: Triangle mesh (OBJ format implied by context), voxel resolution `res`, camera rotation matrix `camera.rotation_to_world()` [S1, unofficial].
+-- Output: A set of solid voxel segments (intervals along Z) for each (x, y) coordinate in the voxel grid [S1, unofficial].
++- Input: Triangle mesh, voxel resolution `res`, camera rotation matrix `M` [S1, unofficial].
++- Output: A set of solid voxel segments (intervals along Z) for each `(x, y)` coordinate in the voxel grid [S1, unofficial].
+ 
+ **Data structures:**
+ - `segment_cache`: A local list of segments `{x, y, z_min, z_max}` for the current block [S1, unofficial].
+-- `segments`: A global vector of segments, protected by a mutex [S1, unofficial].
++- `segments`: A global vector of segments for the final output [S1, unofficial].
+ - `curr_block`: An atomic counter for work distribution [S1, unofficial].
+ 
+ **Parameters:**
+-- `res`: Voxel resolution (e.g., $2^{voxelization\_level}$) [S1, unofficial].
++- `res`: Voxel resolution (e.g., $2^{\text{voxelization\_level}}$) [S1, unofficial].
+ - `block_size`: Maximum block dimension for parallel processing, typically 16 pixels [S1, unofficial].
+-- `scale`: Grid scaling factor, calculated as $2.0 / res$ [S1, unofficial].
+-- `eps`: Epsilon for ray marching to prevent self-intersection, calculated as $\max(scale / 64.0, 1e-5)$ [S1, unofficial].
++- `scale`: Grid scaling factor, calculated as $2.0 / \text{res}$ [S1, unofficial].
++- `eps`: Epsilon for ray marching to prevent self-intersection, calculated as $\max(\text{scale} / 64.0, 1\text{e-}5)$ [S1, unofficial].
+ 
+ **Steps:**
+ 1. Initialize a thread pool with `num_workers = std::thread::hardware_concurrency()` and a shared atomic counter `curr_block = 0` [S1, unofficial].
+-2. Calculate grid parameters:
+-   - `scale = 2.0f / res`
+-   - `eps = max(scale / 64.0f, 1e-5f)`
+-   - `block_size = min(res, 16u)`
+-   - `blocks_per_edge = (res + block_size - 1u) / block_size`
++2. Calculate grid parameters: `scale = 2.0f / res`, `eps = max(scale / 64.0f, 1e-5f)`, `block_size = min(res, 16u)`, `blocks_per_edge = (res + block_size - 1u) / block_size` [S1, unofficial].
+ 3. For each worker thread, loop over blocks using `curr_block++`. For each block:
+    - Determine `x_offset` and `y_offset` based on the block index [S1, unofficial].
+    - Iterate `y` from `y_offset` to `y_offset + block_size` and `x` from `x_offset` to `x_offset + block_size` [S1, unofficial].
+-   - Construct ray origin `ray_hit.ray.o` by transforming $(dx, dy, 2.0f, 1.0f)$ with matrix $M$, where $dx = (x + 0.5f) * scale - 1.0f$ and $dy = (y + 0.5f) * scale - 1.0f$ [S1, unofficial].
++   - Construct ray origin `ray_hit.ray.o` by transforming $(dx, dy, 2.0f, 1.0f)$ with matrix $M$, where $dx = (x + 0.5f) \times \text{scale} - 1.0f$ and $dy = (y + 0.5f) \times \text{scale} - 1.0f$ [S1, unofficial].
+    - Set ray direction `ray_dir = glm::mat3{M} * glm::vec3{0.0f, 0.0f, -1.0f}` [S1, unofficial].
+    - Enter an infinite loop to find intersections:
+@@ -37,10 +31,10 @@
+      - Call `mesh.trace_closest(&ray_hit)` [S1, unofficial].
+      - If `ray_hit.hit.geom_id == EmbreeHit::invalid` (ray exits scene):
+-       - Check if `counter > 0`. If so, create a segment from `t_start` to current exit, clamp Z to $[0, res-1]$, add to cache, and break loop [S1, unofficial].
++       - Check if `counter > 0`. If so, create a segment from `t_start` to current exit, clamp Z to $[0, \text{res}-1]$, add to cache, and break loop [S1, unofficial].
+      - If `c > 0.0f` (back face):
+        - Decrement `counter` [S1, unofficial].
+        - If `counter == 0`, a segment is closed:
+-         - Calculate $z\_range = (1.5f - glm::vec2\{ray\_hit.ray.t\_max, t\_start\} * 0.5f) * res\_f$ [S1, unofficial].
+-         - Clamp $z$ to $[0, res-1]$ [S1, unofficial].
++         - Calculate $z\_range = (1.5f - \text{glm::vec2}\{\text{ray\_hit.ray.t\_max}, t\_start\} \times 0.5f) \times \text{res\_f}$ [S1, unofficial].
++         - Clamp $z$ to $[0, \text{res}-1]$ [S1, unofficial].
+          - If $z.x \le z.y$, add segment $\{x, y, z.x, z.y\}$ to cache [S1, unofficial].
+ 4. After processing all pixels in a block, lock mutex and copy `segment_cache` to global `segments` vector [S1, unofficial].
+@@ -48,6 +42,7 @@
+ **Pseudocode:**
+ ```python
++import math
+ import threading
+-import math
++import os
+ 
+ # Global state
+@@ -55,39 +50,20 @@
+ segments_mutex = threading.Lock()
+ curr_block = 0
+-num_workers = threading.active_count() # Or hardware_concurrency()
++num_workers = os.cpu_count() or 1  # [G] Standard replacement for hardware_concurrency()
+ 
+ def process_block(block_idx, res, scale, eps, block_size, M, mesh):
+-    """
+-    Process a block of voxels.
+-    M: Camera rotation matrix (4x4)
+-    mesh: Mesh object with trace_closest method
+-    """
+     local_segments = []
+-    
+-    # Calculate block coordinates
+     blocks_per_edge = (res + block_size - 1) // block_size
+     x_block = block_idx % blocks_per_edge
+     y_block = block_idx // blocks_per_edge
+-    
+     x_offset = x_block * block_size
+     y_offset = y_block * block_size
+-    
+-    # Iterate over pixels in the block
++
+     for y in range(y_offset, min(y_offset + block_size, res)):
+         for x in range(x_offset, min(x_offset + block_size, res)):
+-            # Construct ray origin
+             dx = (x + 0.5) * scale - 1.0
+             dy = (y + 0.5) * scale - 1.0
+-            
+-            # Transform (dx, dy, 2.0, 1.0) with M
+-            # Assuming M is a 4x4 matrix and we use homogeneous coordinates
+             point = [dx, dy, 2.0, 1.0]
+-            ray_o = [0.0, 0.0, 0.0, 0.0]
+-            for i in range(4):
+-                for j in range(4):
+-                    ray_o[i] += M[i][j] * point[j]
+-            
+-            # Ray direction is fixed in world space: (0, 0, -1) transformed by rotation part of M
+-            # M is rotation_to_world, so we take the upper 3x3
++            ray_o = [sum(M[i][j] * point[j] for j in range(4)) for i in range(4)]
+             rot_part = [M[i][j] for i in range(3) for j in range(3)]
+             ray_dir = [
+@@ -96,94 +72,69 @@
+                 rot_part[6]*0 + rot_part[7]*0 + rot_part[8]*(-1)
+             ]
+-            
+-            # Ray tracing loop
++
+             t_max = float('inf')
+-            t_start = 0.0
+-            counter = 0
+-            
++            t_start = 0.0  # [G] Initialized to start of ray
++            counter = 0    # [G] Winding number counter
++
+             while True:
+                 t_min = t_max + eps
+                 t_max = float('inf')
+-                
+-                # Call mesh.trace_closest(&ray_hit)
+-                # We simulate the hit result
+                 hit = mesh.trace_closest(ray_o, ray_dir, t_min, t_max)
+-                
++
+                 if hit.geom_id == "invalid":
+-                    # Ray exits scene
+                     if counter > 0:
+-                        # Create segment from t_start to current exit
+-                        # Clamp Z to [0, res-1]
+-                        # Add to cache
+-                        # Break loop
+-                        break
+-                    else:
+-                        break
+-                
+-                # Check if back face
+-                # c > 0.0f indicates back face
++                        z_min = (1.5 - t_max * 0.5) * res
++                        z_max = (1.5 - t_start * 0.5) * res
++                        z_min = max(0, min(res - 1, z_min))
++                        z_max = max(0, min(res - 1, z_max))
++                        if z_min <= z_max:
++                            local_segments.append((x, y, z_min, z_max))
++                    break
++
+                 if hit.c > 0.0:
+                     counter -= 1
+                     if counter == 0:
+-                        # Segment closed
+-                        # z_range = (1.5 - vec2{t_max, t_start} * 0.5) * res_f
+-                        # Note: res_f is likely float(res)
+-                        res_f = float(res)
+-                        z_min = (1.5 - t_max * 0.5) * res_f
+-                        z_max = (1.5 - t_start * 0.5) * res_f
+-                        
+-                        # Clamp z to [0, res-1]
++                        z_min = (1.5 - t_max * 0.5) * res
++                        z_max = (1.5 - t_start * 0.5) * res
+                         z_min = max(0, min(res - 1, z_min))
+                         z_max = max(0, min(res - 1, z_max))
+-                        
+                         if z_min <= z_max:
+                             local_segments.append((x, y, z_min, z_max))
+-                
+-                # Update t_start for next iteration
++
+                 t_start = t_max
+ 
+-    # Lock mutex and copy to global segments
+     with segments_mutex:
+         segments.extend(local_segments)
+ 
+-# Main execution
++def worker_loop(res, scale, eps, block_size, M, mesh):
++    global curr_block
++    blocks_per_edge = (res + block_size - 1) // block_size
++    total_blocks = blocks_per_edge * blocks_per_edge
++    while True:
++        block_idx = curr_block
++        curr_block += 1
++        if block_idx >= total_blocks:
++            break
++        process_block(block_idx, res, scale, eps, block_size, M, mesh)
++
+ def voxelize(mesh, res, camera_rotation_to_world):
+     global segments, curr_block
+     segments = []
+     curr_block = 0
+-    
+     scale = 2.0 / res
+     eps = max(scale / 64.0, 1e-5)
+     block_size = min(res, 16)
+-    
+-    # M is the camera rotation matrix
+     M = camera_rotation_to_world
+-    
+-    # Create threads
+-    threads = []
+-    for _ in range(num_workers):
+-        t = threading.Thread(target=worker_loop, args=(res, scale, eps, block_size, M, mesh))
+-        threads.append(t)
++    threads = [threading.Thread(target=worker_loop, args=(res, scale, eps, block_size, M, mesh)) for _ in range(num_workers)]
++    for t in threads:
+         t.start()
+-    
+     for t in threads:
+         t.join()
+-
+-def worker_loop(res, scale, eps, block_size, M, mesh):
+-    global curr_block
+-    while True:
+-        block_idx = curr_block
+-        curr_block += 1
+-        if block_idx >= (res + block_size - 1) // block_size * ((res + block_size - 1) // block_size):
+-            break
+-        process_block(block_idx, res, scale, eps, block_size, M, mesh)
+ ```
+ 
+ **Edge cases and pitfalls:**
+ - Precision issues near surfaces can cause gaps or overlaps; `eps` is used to mitigate self-intersection [S1, unofficial].
+-- Boundary conditions for Z-clamping must be handled to ensure voxels stay within $[0, res-1]$ [S1, unofficial].
++- Boundary conditions for Z-clamping must be handled to ensure voxels stay within $[0, \text{res}-1]$ [S1, unofficial].
+ - Degenerate input (empty mesh) should result in no segments [S1, unofficial].
+-
+-## Subtopics
+ 
+ ### [Octree-based 3D Voxelization with SAT Pruning](2588-octree-based-3d-voxelization-with-sat-pruning.md)
+@@ -194,11 +145,11 @@
+ 
+ ## Operating characteristics
+-- Time complexity: $O(N \cdot R)$, where $N$ is the number of voxels and $R$ is the average number of ray-mesh intersections per ray [S1, unofficial].
++- Time complexity: Not given in the sources.
+ - Memory complexity: $O(N)$ for storing segments [S1, unofficial].
+ - Measured performance: Depends on hardware concurrency and mesh complexity [S1, unofficial].
+ - Strengths: Parallelizable, simple to implement [S1, unofficial].
+-- Limitations: Slow for high-resolution meshes due to ray tracing overhead [S1, unofficial].
+-- When to use: When simplicity and parallelism are prioritized over speed [S1, unofficial].
+-- When not to use: For real-time applications or very high-resolution meshes [S1, unofficial].
++- Limitations: Not given in the sources.
++- When to use: Not given in the sources.
++- When not to use: Not given in the sources.
+ 
+ ## Background

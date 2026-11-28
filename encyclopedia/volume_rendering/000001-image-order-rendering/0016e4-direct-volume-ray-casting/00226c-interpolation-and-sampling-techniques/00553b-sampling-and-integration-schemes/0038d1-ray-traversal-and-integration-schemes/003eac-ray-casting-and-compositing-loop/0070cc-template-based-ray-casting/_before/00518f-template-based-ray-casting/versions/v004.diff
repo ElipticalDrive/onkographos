@@ -1,0 +1,135 @@
+--- v003.md
++++ v004.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Template-based Ray-Casting is a hardware-accelerated direct volume rendering technique that optimizes memory access patterns by processing voxels in planar slices parallel to the image plane [S1, unofficial]. It distinguishes itself from shear-warp methods by performing full tri-linear interpolation and supporting sub-pixel ray origins, thereby eliminating view-dependent artifacts during base-plane switches [S1, unofficial].
++Template-based Ray-Casting is a hardware-accelerated direct volume rendering technique that optimizes memory access by processing voxels in planar slices parallel to the base plane [S1, unofficial]. It distinguishes itself from shear-warp methods by performing full tri-linear interpolation and supporting sub-pixel ray origins, thereby eliminating view-dependent artifacts during base-plane switches [S1, unofficial].
+ 
+ ## How it works
+@@ -16,7 +16,7 @@
+ 
+ **Steps:**
+-1.  **Base Plane Identification:** Identify the volume face (plane of voxels) that is most parallel and nearest to the current image plane. This plane becomes the base plane [S1, unofficial].
+-2.  **Ray Generation:** Cast rays from each pixel on the base plane into the volume dataset. Rays may start at sub-pixel locations to support supersampling and prevent artifacts [S1, unofficial].
+-3.  **Voxel Access:** Read and process voxels in planes parallel to the base plane. Within each slice, voxels are accessed in top-to-bottom scanline order to maximize memory bandwidth efficiency [S1, unofficial].
++1.  **Base Plane Identification:** Identify the volume face (plane of voxels) that is most parallel and nearest to the current image plane [S1, unofficial].
++2.  **Ray Generation:** Cast rays from each pixel on the base plane into the volume dataset [S1, unofficial].
++3.  **Voxel Access:** Read and process voxels in planes parallel to the base plane, accessing memory a scanline at a time in top-to-bottom order [S1, unofficial].
+ 4.  **Interpolation:** Perform tri-linear interpolation on the sampled voxel values [S1, unofficial].
+ 5.  **Compositing & Warping:** Accumulate color and opacity along the ray path within the base plane buffer, then warp the resulting base-plane image onto the final image plane using 2D texture mapping [S1, unofficial].
+@@ -24,17 +24,16 @@
+ **Pseudocode:**
+ ```python
+-def template_based_ray_casting(volume, volume_dims, camera_origin, camera_u, camera_v, image_width, image_height, base_plane_origin, base_plane_u, base_plane_v, base_plane_z_step, warp_matrix):
++def template_based_ray_casting(volume, volume_dims, camera_origin, camera_u, camera_v, image_width, image_height, base_plane_origin, base_plane_u, base_plane_v, voxel_size, warp_matrix):
+     # 1. Identify base plane (parameters passed for self-containment)
+     # 2. Initialize base plane buffer
+-    base_image = [[0.0, 0.0] for _ in range(image_width * image_height)]
++    base_image = [[0.0, 0.0] for _ in range(image_height * image_width)]
+ 
+-    # 3. Process rays for each pixel in the base plane
++    # 3. Process rays for each pixel on the base plane
+     for py in range(image_height):
+         for px in range(image_width):
+-            # Ray origin on base plane (supports sub-pixel locations)
+-            ray_o = base_plane_origin + base_plane_u * px + base_plane_v * py
+-            # Ray direction towards camera origin
+-            ray_d = camera_origin - ray_o
+-            ray_d = normalize(ray_d)
++            ray_o = (base_plane_origin[0] + base_plane_u[0] * px + base_plane_v[0] * py,
++                     base_plane_origin[1] + base_plane_u[1] * px + base_plane_v[1] * py,
++                     base_plane_origin[2] + base_plane_u[2] * px + base_plane_v[2] * py)
++            ray_d = normalize((camera_origin[0] - ray_o[0], camera_origin[1] - ray_o[1], camera_origin[2] - ray_o[2]))
+ 
+             color = 0.0
+@@ -42,25 +41,22 @@
+ 
+             # 4. Traverse volume in slice-parallel order
+-            # Voxels are read in top-to-bottom scanline order within slices
+-            t = 0.0
+-            while t < 1.0:
+-                pos = ray_o + ray_d * t
+-                # Map position to volume coordinates
+-                vx, vy, vz = map_to_volume_coords(pos, volume_dims)
++            t_min, t_max = compute_ray_volume_bounds(ray_o, ray_d, volume_dims, voxel_size)
++            t = t_min
++            while t < t_max:
++                pos = (ray_o[0] + ray_d[0] * t, ray_o[1] + ray_d[1] * t, ray_o[2] + ray_d[2] * t)
++                # 5. Tri-linear interpolation
++                sample = tri_linear_interpolate(volume, pos, volume_dims, voxel_size)
+ 
+-                # Read voxel (each read once per frame in hardware)
+-                sample = volume[vx][vy][vz]
++                # Front-to-back compositing
++                alpha_out = alpha + (1.0 - alpha) * sample.alpha
++                color_out = color + (1.0 - alpha) * sample.color * sample.alpha
++                color, alpha = color_out, alpha_out
+ 
+-                # Tri-linear interpolation
+-                interp_sample = tri_linear_interpolate(volume, pos, volume_dims)
+-
+-                # Compositing step (front-to-back)
+-                color, alpha = composite_step(interp_sample, color, alpha)
+-
+-                t += base_plane_z_step
++                # Step through voxels (hardware reads scanlines top-to-bottom)
++                t += voxel_size / max(abs(ray_d[0]), abs(ray_d[1]), abs(ray_d[2]))
+ 
+             base_image[py * image_width + px] = (color, alpha)
+ 
+-    # 5. Warp base plane to image plane
++    # 6. Warp base plane to final image plane
+     final_image = warp_image(base_image, image_width, image_height, warp_matrix)
+     return final_image
+@@ -70,12 +66,27 @@
+     return (v[0]/mag, v[1]/mag, v[2]/mag)
+ 
+-def map_to_volume_coords(pos, dims):
+-    return (int(pos[0]), int(pos[1]), int(pos[2]))
++def compute_ray_volume_bounds(ray_o, ray_d, dims, voxel_size):
++    t_min = 0.0
++    t_max = float('inf')
++    for i in range(3):
++        if ray_d[i] == 0.0:
++            if ray_o[i] < 0.0 or ray_o[i] > dims[i] * voxel_size:
++                return (0.0, 0.0)
++        else:
++            t1 = (0.0 - ray_o[i]) / ray_d[i]
++            t2 = (dims[i] * voxel_size - ray_o[i]) / ray_d[i]
++            if t1 > t2: t1, t2 = t2, t1
++            if t1 > t_min: t_min = t1
++            if t2 < t_max: t_max = t2
++    return (t_min, t_max)
+ 
+-def tri_linear_interpolate(volume, pos, dims):
+-    x, y, z = pos
+-    x0, y0, z0 = int(x), int(y), int(z)
++def tri_linear_interpolate(volume, pos, dims, voxel_size):
++    gx, gy, gz = pos[0]/voxel_size, pos[1]/voxel_size, pos[2]/voxel_size
++    x0, y0, z0 = int(gx), int(gy), int(gz)
+     x1, y1, z1 = x0+1, y0+1, z0+1
+-    fx, fy, fz = x-x0, y-y0, z-z0
++    fx, fy, fz = gx-x0, gy-y0, gz-z0
++    x0, x1 = max(0, min(x0, dims[0]-1)), max(0, min(x1, dims[0]-1))
++    y0, y1 = max(0, min(y0, dims[1]-1)), max(0, min(y1, dims[1]-1))
++    z0, z1 = max(0, min(z0, dims[2]-1)), max(0, min(z1, dims[2]-1))
+     v000 = volume[x0][y0][z0]
+     v100 = volume[x1][y0][z0]
+@@ -97,9 +108,4 @@
+     return a + (b - a) * t
+ 
+-def composite_step(sample, color, alpha):
+-    new_alpha = alpha + sample * (1 - alpha)
+-    new_color = color + sample * (1 - alpha)
+-    return new_color, new_alpha
+-
+ def warp_image(base_image, width, height, matrix):
+     final = [[0.0, 0.0] for _ in range(width * height)]
+@@ -119,5 +125,5 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **View-dependent artifacts:** Occur when switching base planes if sub-pixel ray starting locations are not supported. VolumePro prevents this by allowing sub-pixel ray origins and tri-linear interpolation [S1, unofficial].
++*   **View-dependent artifacts:** Occur when switching base planes if sub-pixel ray starting locations are not supported [S1, unofficial]. VolumePro prevents this by allowing sub-pixel ray origins and performing tri-linear interpolation [S1, unofficial].
+ 
+ ## Subtopics

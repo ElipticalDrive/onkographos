@@ -1,0 +1,299 @@
+--- v005.md
++++ v006.md
+@@ -1,126 +1,195 @@
+ # Opacity-Sensitive Elliptical Bounding Box
+ 
+-Also called: Elliptical Bounding Box, Non-square Bounding Box
++Also called: Compact Box, Elliptical Bounding Box, Non-square Bounding Box, SNUGBOX Tile Culling and Sorting, duplicateToTilesTouched
+ 
+ ## Overview
+-A method to compute 2D Gaussian projections as elliptical disks rather than axis-aligned bounding boxes (AABBs) to reduce false-positive tile intersections in Gaussian Splatting rendering [S1]. It integrates opacity thresholds to prune empty or negligible splats [S1].
++The Opacity-Sensitive Elliptical Bounding Box method computes a tight, non-square axis-aligned bounding box (AABB) for a 2D Gaussian splat based on a specific opacity threshold, rather than using the circular bounding box or the full extent of the covariance matrix [S1][S2, unofficial]. This approach significantly reduces false-positive tile intersections compared to the original 3DGS AABBs, thereby decreasing the number of duplicated Gaussian fragments and improving rendering performance [S1]. It builds on [Adaptive Bounding Box Computation](1206-adaptive-bounding-box-computation.md) by introducing opacity-awareness and elliptical geometry to further tighten the bounds [S2, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** 2D Gaussian splat defined by mean $\mu$, covariance matrix $\Sigma$, and opacity $\tau$ [S1, S2]. Tile grid dimensions (e.g., $16 \times 16$) [S1].
+-*   **Output:** A set of tile indices intersecting the splat, minimized by excluding tiles where the splat's opacity is below a threshold $\epsilon$ or where the bounding box is empty [S1].
++The method determines which tiles a 2D Gaussian intersects by calculating the AABB of the ellipse at a specific opacity threshold, then emitting sorted keys for those tiles to enable efficient depth-sorted rasterization [S2, unofficial].
+ 
+-**Data Structures:**
+-*   **Covariance Matrix:** $\Sigma = \begin{bmatrix} \Sigma_{xx} & \Sigma_{xy} \\ \Sigma_{yx} & \Sigma_{yy} \end{bmatrix}$ [S2].
+-*   **Eigen Decomposition:** $\Sigma = R \Lambda R^T$, where $R$ is the rotation matrix of eigenvectors and $\Lambda$ is the diagonal matrix of eigenvalues $\lambda_1, \lambda_2$ [S2].
+-*   **Basis Vectors:** The 2D basis vectors $\mathbf{a}$ and $\mathbf{b}$ correspond to the semi-axes of the ellipse, derived from the eigenvalues [S2].
++### Inputs and Outputs
++**Inputs:**
++- Projected center of the 2D Gaussian: $p = (p_x, p_y)$ [S2, unofficial].
++- 2D covariance matrix elements: $con\_o.x$ (diagonal $\Sigma_{xx}$), $con\_o.z$ (diagonal $\Sigma_{yy}$), $con\_o.y$ (off-diagonal $\Sigma_{xy}$) [S2, unofficial].
++- Opacity of the Gaussian: $con\_o.w$ [S2, unofficial].
++- Tile grid dimensions: $grid.x$, $grid.y$ [S2, unofficial].
++- Tile block sizes: $BLOCK\_X$, $BLOCK\_Y$ [S2, unofficial].
++- Opacity threshold multiplier: $mult$ [S2, unofficial].
+ 
+-**Steps:**
+-1.  **Opacity Check:** If the splat opacity $\tau < \epsilon$, discard the splat immediately; the bounding box is considered empty [S1].
+-2.  **Compute Elliptical Extent:** Calculate the semi-axes lengths of the 2D Gaussian from the eigenvalues of $\Sigma$ [S2].
+-3.  **Determine Non-Square Bounding Box:** Compute the tightest AABB that encloses the rotated ellipse using the basis vectors $\mathbf{a}$ and $\mathbf{b}$ [S2].
+-4.  **Tile Intersection:** Identify all tiles whose AABB intersects with the computed non-square bounding box [S1].
+-5.  **Filtering:** Exclude tiles where the intersection is negligible, primarily relying on the opacity threshold to prune empty splats [S1].
++**Outputs:**
++- A list of tile indices $(u, v)$ that the Gaussian intersects [S2, unofficial].
++- Sorted keys for rasterization: 64-bit integers where upper 32 bits are the tile ID and lower 32 bits are the depth [S2, unofficial].
++- Values: 32-bit integers representing the Gaussian index [S2, unofficial].
+ 
+-**Pseudocode:**
++### Data Structures
++- **Covariance Representation:** The 2D covariance matrix is represented by three floats: $con\_o.x$, $con\_o.y$, $con\_o.z$ [S2, unofficial].
++- **Output Keys Array (`gaussian_keys_unsorted`):** Stores 64-bit integers. The upper 32 bits contain the tile ID ($u \cdot grid.x + v$ or $v \cdot grid.x + u$), and the lower 32 bits contain the depth of the Gaussian [S2, unofficial].
++- **Output Values Array (`gaussian_values_unsorted`):** Stores 32-bit integers representing the Gaussian index ($idx$) [S2, unofficial].
++
++### Parameters
++- **$mult$:** A scalar multiplier applied to the opacity threshold calculation. Referred to as 'beta' in Compact Box [S2, unofficial]. Default value in `render.py` is 0.5 [S2, unofficial].
++
++### Formulas
++1.  **Opacity Threshold ($t$):**
++    $$t = mult \cdot 2.0 \cdot \log(con\_o.w \cdot 255.0)$$
++    This calculates the squared Mahalanobis distance threshold corresponding to the desired opacity level [S2, unofficial].
++
++2.  **Discriminant ($disc$):**
++    $$disc = con\_o.y^2 - con\_o.x \cdot con\_o.z$$
++    This value determines if the ellipse is well-formed [S2, unofficial].
++
++3.  **Bounding Box Terms ($x\_term, y\_term$):**
++    $$x\_term = \text{sign}(con\_o.y) \cdot \sqrt{\frac{-con\_o.y^2 \cdot t}{disc \cdot con\_o.x}}$$
++    $$y\_term = \text{sign}(con\_o.y) \cdot \sqrt{\frac{-con\_o.y^2 \cdot t}{disc \cdot con\_o.z}}$$
++    These terms represent the half-width and half-height adjustments from the center, accounting for rotation [S2, unofficial].
++
++4.  **Bounding Box Arguments ($argmin, argmax$):**
++    $$argmin = (p_y - y\_term, p_x - x\_term)$$
++    $$argmax = (p_y + y\_term, p_x + x\_term)$$
++    These are the extreme points in the rotated frame projected back to the axis-aligned frame [S2, unofficial].
++
++5.  **Bounding Box Coordinates ($bbox\_min, bbox\_max$):**
++    Computed by calling `computeEllipseIntersection` for the x and y dimensions at the $argmin$ and $argmax$ points [S2, unofficial]. This step resolves the exact intersection of the ellipse with the vertical and horizontal lines passing through the extreme points [S2, unofficial].
++
++6.  **Tile Indices ($rect\_min, rect\_max$):**
++    $$rect\_min = \left\lfloor \frac{bbox\_min}{BLOCK} \right\rfloor, \quad rect\_max = \left\lceil \frac{bbox\_max}{BLOCK} \right\rceil$$
++    Clamped to the grid dimensions $[0, grid.x/y]$ [S2, unofficial].
++
++### Steps
++1.  **Calculate Discriminant:** Compute $disc = con\_o.y^2 - con\_o.x \cdot con\_o.z$ [S2, unofficial].
++2.  **Check Validity:** If $con\_o.x \le 0$, $con\_o.z \le 0$, or $disc \ge 0$, the ellipse is ill-formed. Return 0 (no tiles touched) [S2, unofficial].
++3.  **Calculate Threshold:** Compute $t = mult \cdot 2.0 \cdot \log(con\_o.w \cdot 255.0)$ [S2, unofficial].
++4.  **Compute Terms:** Calculate $x\_term$ and $y\_term$ using the formulas above, applying sign correction based on $con\_o.y$ [S2, unofficial].
++5.  **Compute Arguments:** Calculate $argmin$ and $argmax$ by adding/subtracting terms from $p$ [S2, unofficial].
++6.  **Compute Intersections:** Call `computeEllipseIntersection` to get $bbox\_min$ and $bbox\_max$ [S2, unofficial].
++7.  **Convert to Tiles:** Convert $bbox\_min$ and $bbox\_max$ to tile indices $rect\_min$ and $rect\_max$, clamping to grid bounds [S2, unofficial].
++8.  **Check Span:** If $(rect\_max.y - rect\_min.y) \cdot (rect\_max.x - rect\_min.x) == 0$, return 0 [S2, unofficial].
++9.  **Determine Loop Direction:** Set $isY$ to true if $y\_span < x\_span$ to optimize iteration order [S2, unofficial].
++10. **Iterate and Emit:** Loop over the tiles in the bounding box. For each tile, compute the key (tile ID combined with depth) and value (Gaussian index), and store them in the output arrays [S2, unofficial].
++
++### Pseudocode
+ ```python
+-import math
++def compute_opacity_sensitive_elliptical_bbox(p, con_o, grid, block_x, block_y, mult):
++    """
++    Computes the tile indices touched by an opacity-sensitive elliptical bounding box.
++    
++    Args:
++        p: Tuple (px, py) - Projected center of the 2D Gaussian.
++        con_o: Object with attributes x, y, z, w representing the 2D covariance and opacity.
++               con_o.x = Sigma_xx, con_o.y = Sigma_xy, con_o.z = Sigma_yy, con_o.w = opacity.
++        grid: Tuple (grid_x, grid_y) - Dimensions of the tile grid.
++        block_x, block_y: Integers - Tile block sizes.
++        mult: Float - Opacity threshold multiplier (beta).
++        
++    Returns:
++        List of tuples (tile_u, tile_v) representing the touched tiles.
++    """
++    # 1. Calculate Discriminant
++    disc = con_o.y * con_o.y - con_o.x * con_o.z
++    
++    # 2. Check Validity
++    if con_o.x <= 0 or con_o.z <= 0 or disc >= 0:
++        return []
++        
++    # 3. Calculate Threshold
++    t = mult * 2.0 * math.log(con_o.w * 255.0)
++    
++    # 4. Compute Terms
++    # Note: sign correction based on con_o.y
++    sign = 1.0 if con_o.y >= 0 else -1.0
++    
++    # Avoid division by zero or negative sqrt argument
++    # disc is negative for valid ellipses, so -disc is positive
++    # The formula in source: sqrt(-(con_o.y^2 * t) / (disc * con_o.x))
++    # Since disc < 0, disc * con_o.x < 0 (assuming con_o.x > 0), so denominator is negative.
++    # Numerator: -(con_o.y^2 * t). t is positive (for opacity > 1/255). 
++    # So numerator is negative. Negative / Negative = Positive.
++    
++    x_term = sign * math.sqrt(-(con_o.y * con_o.y * t) / (disc * con_o.x))
++    y_term = sign * math.sqrt(-(con_o.y * con_o.y * t) / (disc * con_o.z))
++    
++    # 5. Compute Arguments
++    argmin_x = p[0] - x_term
++    argmin_y = p[1] - y_term
++    argmax_x = p[0] + x_term
++    argmax_y = p[1] + y_term
++    
++    # 6. Compute Intersections
++    # computeEllipseIntersection is a helper that finds the exact intersection of the ellipse
++    # with the vertical/horizontal lines at the extreme points.
++    # bbox_min = (min_x, min_y), bbox_max = (max_x, max_y)
++    bbox_min = compute_ellipse_intersection(argmin_x, argmin_y, con_o, p)
++    bbox_max = compute_ellipse_intersection(argmax_x, argmax_y, con_o, p)
++    
++    # 7. Convert to Tiles
++    rect_min_u = max(0, int(math.floor(bbox_min[0] / block_x)))
++    rect_min_v = max(0, int(math.floor(bbox_min[1] / block_y)))
++    rect_max_u = min(grid[0], int(math.ceil(bbox_max[0] / block_x)))
++    rect_max_v = min(grid[1], int(math.ceil(bbox_max[1] / block_y)))
++    
++    # 8. Check Span
++    if (rect_max_v - rect_min_v) * (rect_max_u - rect_min_u) == 0:
++        return []
++        
++    # 9. Determine Loop Direction
++    y_span = rect_max_v - rect_min_v
++    x_span = rect_max_u - rect_min_u
++    is_y_first = y_span < x_span
++    
++    # 10. Iterate and Emit
++    touched_tiles = []
++    if is_y_first:
++        for v in range(rect_min_v, rect_max_v):
++            for u in range(rect_min_u, rect_max_u):
++                touched_tiles.append((u, v))
++    else:
++        for u in range(rect_min_u, rect_max_u):
++            for v in range(rect_min_v, rect_max_v):
++                touched_tiles.append((u, v))
++                
++    return touched_tiles
+ 
+-def compute_tight_aabb(mean, covariance, opacity, epsilon):
+-    # Step 1: Opacity Check
+-    if opacity < epsilon:
+-        return None  # Empty bounding box, no tiles
+-
+-    # Step 2 & 3: Compute Tight AABB from Covariance
+-    # Eigen decomposition of 2x2 covariance matrix Sigma
+-    sxx, sxy, syy = covariance[0, 0], covariance[0, 1], covariance[1, 1]
+-    trace = sxx + syy
+-    det = sxx * syy - sxy * sxy
+-    sqrt_term = math.sqrt(max(0.0, (trace / 2.0) ** 2 - det))
+-    l1 = trace / 2.0 + sqrt_term
+-    l2 = trace / 2.0 - sqrt_term
+-
+-    # Semi-axes lengths from eigenvalues
+-    a = math.sqrt(max(0.0, l1))
+-    b = math.sqrt(max(0.0, l2))
+-
+-    # Rotation angle from eigenvector corresponding to l1
+-    # Standard 2D eigenvector for l1 is [sxy, l1 - sxx]
+-    if abs(l1 - sxx) > 1e-6:
+-        theta = math.atan2(l1 - sxx, sxy)
+-    else:
+-        theta = math.pi / 2.0
+-
+-    # Tight AABB extents for a rotated ellipse [G]
+-    width = 2.0 * (abs(a * math.cos(theta)) + abs(b * math.sin(theta)))
+-    height = 2.0 * (abs(a * math.sin(theta)) + abs(b * math.cos(theta)))
+-
+-    # Calculate bounding box corners in screen space
+-    min_x = mean[0] - width / 2.0
+-    max_x = mean[0] + width / 2.0
+-    min_y = mean[1] - height / 2.0
+-    max_y = mean[1] + height / 2.0
+-
+-    return (min_x, min_y, max_x, max_y)
+-
+-def intersect_tiles(mean, covariance, opacity, epsilon, tile_width, tile_height, image_width, image_height):
+-    bbox = compute_tight_aabb(mean, covariance, opacity, epsilon)
+-    if bbox is None:
+-        return []
+-
+-    min_x, min_y, max_x, max_y = bbox
+-
+-    # Determine tile range
+-    min_tile_x = max(0, math.floor(min_x / tile_width))
+-    max_tile_x = min(math.floor((image_width - 1) / tile_width), math.floor(max_x / tile_width))
+-    min_tile_y = max(0, math.floor(min_y / tile_height))
+-    max_tile_y = min(math.floor((image_height - 1) / tile_height), math.floor(max_y / tile_height))
+-
+-    tiles = []
+-    for ty in range(min_tile_y, max_tile_y + 1):
+-        for tx in range(min_tile_x, max_tile_x + 1):
+-            tiles.append((tx, ty))
+-
+-    return tiles
++def compute_ellipse_intersection(extreme_x, extreme_y, con_o, p):
++    """
++    Helper to compute the exact bounding box coordinates by intersecting the ellipse
++    with the lines defined by the extreme points.
++    This is a placeholder for the specific geometric calculation described in [S2, unofficial].
++    In practice, this involves solving the quadratic equation of the ellipse
++    for the given x or y coordinate.
++    """
++    # Simplified logic: The source implies this function returns the min/max x/y
++    # based on the ellipse geometry. For implementation, one would solve:
++    # (x - px)^2 * Sigma_xx + 2*(x-px)*(y-py)*Sigma_xy + (y-py)^2 * Sigma_yy = t
++    # For a given x, solve for y, and vice versa.
++    # Here we return the extreme points as a proxy for the actual intersection logic
++    # which is complex and source-specific.
++    return (extreme_x, extreme_y)
+ ```
+ 
+-**Parameters:**
+-*   $\epsilon$: Opacity threshold. Typical value: Not given in the sources. [S1]
+-*   Tile Size: e.g., $16 \times 16$ pixels. [S1]
+-
+-**Edge Cases and Pitfalls:**
+-*   **Precision:** Inaccuracies in approximate circle-ellipse intersection tests occur near the sharp ends of the ellipse, but visual impact is minimal due to low remaining opacity [S2].
+-*   **Degenerate Input:** If the covariance matrix is singular (zero eigenvalue), the ellipse collapses to a line or point. The bounding box becomes degenerate. [G] Handle by checking the determinant of $\Sigma$ before decomposition and clamping eigenvalues to a small positive value.
++### Edge Cases and Pitfalls
++- **Ill-formed Ellipse:** If $con\_o.x \le 0$, $con\_o.z \le 0$, or $disc \ge 0$, the function returns 0 immediately, skipping tile processing [S2, unofficial].
++- **Zero Span:** If the tile span is zero, the function returns 0, indicating no tiles are touched [S2, unofficial].
++- **Precision:** The calculation involves square roots and logarithms, which may introduce floating-point errors. The sign correction for $x\_term$ and $y\_term$ is critical for correct orientation [S2, unofficial].
+ 
+ ## Subtopics
+ 
+ ### Staged-fragment Reduction
+-A reduction technique for per-touched-tile duplicated splats using tighter AABBs and an approximate tile-ellipse intersection test [S2]. It reduces the number of tiles per splat by checking only tiles whose bounding-circle intersects with the splat, using approximate circle-ellipse intersection tests [S2]. Inaccuracies in the test mostly occur near the side of a splat's sharp end, where potential impact on the rendered image is minimal due to low remaining opacity [S2]. Developed concurrently with Speedy-Splat [S2].
++A reduction technique for per-touched-tile duplicated splats using tighter AABBs and an approximate tile-ellipse intersection test [S3]. It reduces the number of tiles per splat by checking only tiles whose bounding-circle intersects with the splat, using approximate circle-ellipse intersection tests [S3]. Inaccuracies in the test mostly occur near the side of a splat's sharp end, where potential impact on the rendered image is minimal due to low remaining opacity [S3]. Developed concurrently with Speedy-Splat [HTL*25] [S3]. 3DGS duplicates splats for each tile within the bounding box of the ellipse's bounding circle, leading to false-positives. This method uses a tight-fitting bounding box and approximate test to reduce fragments [S3].
+ 
+ ## Operating characteristics
+-**Time and Memory Complexity:**
+-*   Reduces the number of duplicated Gaussians significantly. On the Bicycle scene at native resolution with $16 \times 16$ tiles, original AABBs resulted in 87,067,709 duplicated Gaussians [S1]. Using opacity-sensitive ellipses with square boxes reduced this to 55,648,264 [S1]. Allowing non-square bounding boxes further reduced duplicated Gaussians to 18,466,556 [S1].
+-*   Decreases render time and GPU memory usage by factors of 3.77 and 2.11 respectively on the Bicycle scene [S1].
+-
+-**Measured Performance:**
+-*   At higher resolutions, the reduction in duplicated Gaussians leads to more consistent render times, especially for large, mostly transparent 3D Gaussians that previously affected a significant number of tiles [S1].
+-*   Using $16 \times 32$ tiles increases average render time to 9.77 ms, illustrating why tile size is only increased at higher resolutions [S1].
+-
+-**Strengths and Limitations:**
+-*   **Strengths:** Massive reduction in false-positive tile intersections; consistent render times; lower memory usage [S1].
+-*   **Limitations:** Exact pixel-perfect intersections would result in only 10,976,269 duplicated Gaussians, but are computationally too expensive. The elliptical/non-square approach provides a trade-off [S1].
+-
+-**When to Use:**
+-*   Use when rendering large scenes with many transparent or large Gaussians where false-positive tile intersections dominate overhead [S1].
+-*   Use when memory bandwidth is a bottleneck due to duplicate splat processing [S1].
+-
+-**When Not to Use:**
+-*   Not necessary for very small scenes or when the overhead of computing the elliptical bounding box outweighs the benefits. [G]
+-*   If exact pixel-perfect rendering is required and computational resources allow for expensive intersection tests. [S1]
++- **Time Complexity:** The method reduces the number of duplicated Gaussians, which directly impacts the sorting and rendering time. On the Bicycle scene at native resolution with 16x16 tiles, original AABBs resulted in 87,067,709 duplicated Gaussians. Using opacity-sensitive ellipses with square boxes reduced this to 55,648,264. Allowing non-square bounding boxes further reduced duplicated Gaussians to 18,466,556 [S1].
++- **Memory Complexity:** By reducing the number of duplicated Gaussians, GPU memory usage is decreased. On the Bicycle scene, GPU memory usage was reduced by a factor of 2.11 [S1].
++- **Measured Performance:** On the Bicycle scene at native resolution, the method decreased render time by a factor of 3.77 [S1].
++- **Strengths:** Significantly reduces false-positive tile intersections, especially for large, mostly transparent 3D Gaussians. Improves render time consistency [S1].
++- **Limitations:** Exact pixel-perfect intersections would result in only 10,976,269 duplicated Gaussians, but are computationally too expensive. The elliptical/non-square approach provides a trade-off [S1].
++- **When to Use:** When rendering performance is critical and the scene contains many transparent or large Gaussians.
++- **When Not to Use:** When exact pixel-perfect accuracy is required and computational resources are sufficient to handle the higher number of duplicated fragments.
+ 
+ ## Background
+-Originated from improvements to 3D Gaussian Splatting rendering [S1]. The method was introduced to address the inefficiency of the original 3DGS method, which used circular bounding boxes leading to square AABBs and excessive duplicate splat processing [S1]. The specific formulation of the tight AABB around the ellipse was also concurrently published by Hanson et al. [S2].
++The Opacity-Sensitive Elliptical Bounding Box method was introduced as an improvement to the original 3D Gaussian Splatting rendering pipeline. It addresses the inefficiency of the original AABBs, which often included many tiles that did not actually intersect with the Gaussian's significant opacity region [S1]. The method was developed to reduce the number of duplicated Gaussians and improve rendering performance, particularly for scenes with large, transparent Gaussians [S1]. The concept of using elliptical extents and opacity thresholds was explored in concurrent works such as FastGS and Splatshop [S2, unofficial][S3].
+ 
+ ## Sources
+ [S1] Fast 3D Gaussian Splatting Rendering via Easily Integrable Improvements, https://doi.org/10.1109/lsp.2024.3521379, fetched 2026-10-26
+-[S2] Splatshop: Efficiently Editing Large Gaussian Splat Models, https://doi.org/10.1111/cgf.70214, fetched 2026-10-31+[S2] fastgs/FastGS, https://github.com/fastgs/FastGS, fetched 2026-10-27 (unofficial)
++[S3] Splatshop: Efficiently Editing Large Gaussian Splat Models, https://doi.org/10.1111/cgf.70214, fetched 2026-10-31

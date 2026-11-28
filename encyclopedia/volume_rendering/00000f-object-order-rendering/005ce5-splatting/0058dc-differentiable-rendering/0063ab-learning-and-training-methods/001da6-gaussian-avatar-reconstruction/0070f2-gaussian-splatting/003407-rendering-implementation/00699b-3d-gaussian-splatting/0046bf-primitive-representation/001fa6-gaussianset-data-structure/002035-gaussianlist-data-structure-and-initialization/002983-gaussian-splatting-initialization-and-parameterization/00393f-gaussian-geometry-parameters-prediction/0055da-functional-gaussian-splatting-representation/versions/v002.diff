@@ -1,0 +1,105 @@
+--- v001.md
++++ v002.md
+@@ -13,7 +13,7 @@
+ **Data Structures**
+ The representation relies on a **Feature Triplane** $t$ to encode the global latent features of the Gaussian set [S1].
+-*   **Layout:** $t \in \mathbb{R}^{H \times W \times C \times 3}$.
++*   **Layout:** $t \in \mathbb{R}^{H \times W \times C \times 3}$ [S1].
+ *   **Components:** Three orthogonal feature planes $\{t_{XY}, t_{XZ}, t_{YZ}\}$ aligned with the coordinate axes [S1].
+-*   **Feature Extraction:** For any 3D query location $q_j$, the corresponding feature vector $f_j$ is obtained by projecting $q_j$ onto the three orthogonal planes and concatenating the tri-linearly interpolated features from each plane [S1].
++*   **Feature Extraction:** For any 3D query location $q_j$, the corresponding feature vector $f_j$ is obtained by projecting $q_j$ onto the three orthogonal planes and concatenating the interpolated features from each plane [S1].
+ 
+ **Mathematical Formulation**
+@@ -26,5 +26,5 @@
+ \Sigma_i = r_i s_i s_i^T r_i^T
+ $$
+-Here, $r_i \in \mathbb{R}^4$ (quaternion) and $s_i \in \mathbb{R}$ (scale vector/matrix depending on implementation, typically diagonal) [S1]. The appearance is controlled by opacity $o_i \in \mathbb{R}$ and color $c_i \in \mathbb{R}^3$ [S1].
++Here, $r_i \in \mathbb{R}^4$ (quaternion) and $s_i \in \mathbb{R}$ (scale parameters) [S1]. The appearance is controlled by opacity $o_i \in \mathbb{R}$ and color $c_i \in \mathbb{R}^3$ [S1].
+ 
+ **The Three Functions**
+@@ -68,39 +68,50 @@
+     """
+     Extracts features from the triplane for a 3D query point.
+-    triplane_t: Tensor of shape (3, H, W, C) representing [t_XY, t_XZ, t_YZ]
+-    query_point_q: Array of shape (3,) representing (x, y, z)
++    triplane_t: List of 3 tensors [t_XY, t_XZ, t_YZ], each shape (H, W, C)
++    query_point_q: Tuple (x, y, z)
+     Returns: Feature vector f_j
+     """
+-    # Project query point onto the three orthogonal planes
+-    # t_XY: project (x, y, z) -> (x, y)
+-    # t_XZ: project (x, y, z) -> (x, z)
+-    # t_YZ: project (x, y, z) -> (y, z)
+-    
+-    coords_xy = query_point_q[:2] # (x, y)
+-    coords_xz = [query_point_q[0], query_point_q[2]] # (x, z)
+-    coords_yz = query_point_q[1:] # (y, z)
+-    
+-    # Tri-linear interpolation (or bi-linear for 2D planes) at projected coordinates
+-    # Note: Standard triplane implementations use bi-linear interpolation on 2D planes.
+-    # Assuming 'interp' handles normalization of coordinates to [0,1] or [-1,1]
+-    f_xy = interpolate_bilinear(triplane_t[0], coords_xy)
+-    f_xz = interpolate_bilinear(triplane_t[1], coords_xz)
+-    f_yz = interpolate_bilinear(triplane_t[2], coords_yz)
+-    
+-    # Concatenate features from all three planes
+-    f_j = concatenate([f_xy, f_xz, f_yz])
+-    return f_j
++    x, y, z = query_point_q
++    # Project onto XY, XZ, YZ planes. Coordinates assumed normalized to [0, 1].
++    f_xy = interpolate_bilinear(triplane_t[0], x, y)
++    f_xz = interpolate_bilinear(triplane_t[1], x, z)
++    f_yz = interpolate_bilinear(triplane_t[2], y, z)
++    return concatenate_channels([f_xy, f_xz, f_yz])
++
++def interpolate_bilinear(plane, u, v):
++    """Bilinear interpolation on a 2D feature plane of shape (H, W, C)."""
++    H, W, C = plane.shape
++    u_idx = u * (W - 1)
++    v_idx = v * (H - 1)
++    u0, v0 = int(floor(u_idx)), int(floor(v_idx))
++    u1, v1 = min(u0 + 1, W - 1), min(v0 + 1, H - 1)
++    du, dv = u_idx - u0, v_idx - v0
++    c00 = plane[v0, u0, :]
++    c01 = plane[v0, u1, :]
++    c10 = plane[v1, u0, :]
++    c11 = plane[v1, u1, :]
++    top = c00 * (1 - du) + c01 * du
++    bottom = c10 * (1 - du) + c11 * du
++    return top * (1 - dv) + bottom * dv
++
++def concatenate_channels(features):
++    """Concatenate a list of 1D feature vectors along the channel dimension."""
++    result = []
++    for f in features:
++        result.extend(f)
++    return result
+ 
+ def predict_gaussian_attributes(f_j):
+     """
+     Predicts Gaussian attributes from the extracted feature vector.
+-    f_j: Feature vector from get_triplane_feature
++    f_j: Feature vector
+     Returns: Predicted probability, color, rotation, scale, opacity
+     """
+-    # Apply neural predictors
++    # Neural predictors psi_pf, psi_cf, psi_tf.
++    # Exact network architecture is not specified in the sources [G].
++    # Represented here as standard function calls.
+     p_hat = psi_pf(f_j)
+     c_hat = psi_cf(f_j)
+     r_hat, s_hat, o_hat = psi_tf(f_j)
+-    
+     return p_hat, c_hat, r_hat, s_hat, o_hat
+ ```
+@@ -108,8 +119,8 @@
+ **Edge Cases and Pitfalls**
+ *   **Truncation:** The GauPF relies on a truncation function $\lambda$ to handle points far from any Gaussian center; failure to truncate can lead to numerical instability or incorrect probability mapping [S1].
+-*   **Discretization:** While the representation is continuous, the final output requires extracting discrete Gaussians. The source notes an "octree-guided sampling and optimization" algorithm for this extraction, implying that naive sampling from the continuous functions may not yield optimal discrete primitives without this post-processing step [S1].
++*   **Discretization:** While the representation is continuous, the final output requires extracting discrete Gaussians [S1]. The source notes an "octree-guided sampling and optimization" algorithm for this extraction, implying that naive sampling from the continuous functions may not yield optimal discrete primitives without this post-processing step [S1].
+ 
+ ## Operating characteristics
+-*   **Complexity:** The representation itself is a continuous function evaluation, which is computationally lightweight during inference compared to managing large discrete lists. However, training requires encoding the entire Gaussian set into a latent vector and decoding to a triplane, adding overhead [S1].
++*   **Complexity:** The representation itself is a continuous function evaluation, which is computationally lightweight during inference compared to managing large discrete lists [S1]. However, training requires encoding the entire Gaussian set into a latent vector and decoding to a triplane, adding overhead [S1].
+ *   **Strengths:** Enables the use of powerful generative models (VAEs, LDMs) on 3DGS data by solving the discreteness and unstructured nature of raw Gaussians [S1]. Allows for conditional generation (e.g., from text) and unconditional generation of Gaussians at arbitrary numbers [S1].
+ *   **Limitations:** Requires a discretization/extraction algorithm to convert the continuous functions back into renderable 3DGS primitives, which adds complexity to the pipeline [S1].

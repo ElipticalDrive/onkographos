@@ -1,0 +1,170 @@
+# Marching Cubes without Skinny Triangles
+
+Also called: Improved Marching Cubes, MC with Edge Groups, Unified Macet with New Table
+
+## Overview
+This method reduces the generation of degenerate (skinny) triangles in the Marching Cubes algorithm, which are problematic for numerical simulations due to ill-conditioning [S1]. It sets itself apart from standard Marching Cubes by modifying the triangulation lookup table to avoid specific "edge groups" that cause poor quality, and by applying a unified edge transformation to perturb intersection vertices [S1]. Unlike post-processing approaches, it integrates these improvements directly into the extraction pipeline [S1].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A scalar field $f(x, y, z)$, an isosurface value $k$, and a 3D grid of cells.
+- Output: A triangular mesh approximating the level set $f(x, y, z) = k$.
+
+**Data Structures:**
+- **Sign Index:** An 8-bit integer derived from the signs of the 8 vertices of a cube relative to $k$.
+- **Triangulation Table:** A modified lookup table. Standard MC cases 5, 12, 11, and the complement of case 6 are retriangulated to remove "Edge Group 2" (the primary cause of degenerate triangles). This updates 96 entries (or 120 if including the complement of case 6) [S1].
+- **Edge Groups:** There are 8 edge groups derived from cube symmetries. The method specifically targets Edge Group 2 [S1].
+
+**Algorithm Steps:**
+
+1.  **Vertex Sign Computation:** For each cell, compute the sign of each of the 8 vertices by comparing the scalar value $f(x_i, y_i, z_i)$ with the isosurface value $k$.
+2.  **Case Indexing:** Form an 8-bit case index from the vertex signs. Use this index to look up the active edges and the modified triangulation table [S1].
+3.  **Triangulation with Edge Group Avoidance:**
+    -   If the case is 5, 12, or 11, or the complement of case 6, use the retriangulated entries that exclude Edge Group 2 [S1].
+    -   If the case is 9, or the complement of case 3, insert a new vertex into the cell to remove Edge Group 2 entirely [S1].
+        -   For **Case 9**: Place the new vertex at the cell center [S1].
+        -   For **Complement of Case 3**: Place the new vertex at the midpoint of the longest edge of the original triangulation if artifacts occur (specifically when intersection vertices are close to negative vertices) [S1]. Otherwise, the cell center may be used, but the midpoint heuristic is the robust fallback described [S1].
+4.  **Unified Edge Transformation (Macet Variant):** For all generated triangles, perform edge transformations to improve vertex placement [S1].
+    -   Identify the edge extreme closest to the isosurface [S1].
+    -   Apply 8 interleaved transformation steps to this closest extreme: 4 gradient steps and 4 tangential steps [S1].
+    -   Move the other extreme of the edge to the edge midpoint [S1].
+
+**Formulas:**
+-   **Triangle Quality:** Measured by the radii ratio $\rho$ of the incircle to the circumcircle, normalized between 0 (degenerate) and 1 (equilateral) [S1].
+-   **Edge Transformation:** The transformation is formulated as a projection of the edge midpoint onto the plane tangent to the isosurface. The unified approach uses interleaved gradient and tangential steps to achieve this without neighborhood analysis [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def marching_cubes_without_skinny_triangles(grid, isovalue):
+    """
+    Extracts isosurface from grid using improved Marching Cubes.
+    grid: 3D array of scalar values.
+    isovalue: The threshold k for the isosurface.
+    """
+    triangles = []
+    
+    # Precomputed modified triangulation table entries for cases 5, 12, 11, and complement of 6
+    # These entries exclude Edge Group 2.
+    # For cases 9 and complement of 3, special handling with new vertices is required.
+    modified_table = load_modified_mc_table() 
+    
+    for each cell in grid:
+        # Step 1: Compute vertex signs
+        vertex_signs = []
+        for i in range(8):
+            if grid[cell.vertex[i]] >= isovalue:
+                vertex_signs.append(1)
+            else:
+                vertex_signs.append(0)
+        
+        # Step 2: Form case index
+        case_index = 0
+        for i in range(8):
+            case_index |= (vertex_signs[i] << i)
+        
+        # Step 3: Determine triangulation
+        if case_index in [5, 12, 11, 255 - 6]: # 255-6 is complement of 6
+            # Use retriangulated entries that avoid Edge Group 2
+            edge_intersections = get_edge_intersections(cell, case_index, isovalue)
+            tri_indices = modified_table[case_index]
+            triangles.extend(generate_triangles(edge_intersections, tri_indices))
+            
+        elif case_index == 9:
+            # Insert vertex at cell center
+            cell_center = get_cell_center(cell)
+            edge_intersections = get_edge_intersections(cell, case_index, isovalue)
+            # Connect center to active edge intersections based on modified topology
+            triangles.extend(generate_triangles_with_center(cell_center, edge_intersections, case_index))
+            
+        elif case_index == 255 - 3: # Complement of 3
+            edge_intersections = get_edge_intersections(cell, case_index, isovalue)
+            # Check for artifacts: if intersections are close to negative vertices
+            if has_artifacts(cell, edge_intersections):
+                # Place new vertex at midpoint of longest edge of original triangulation
+                longest_edge = find_longest_edge_in_original_mc_triangulation(cell, case_index)
+                new_vertex = midpoint(longest_edge.start, longest_edge.end)
+            else:
+                new_vertex = get_cell_center(cell)
+            triangles.extend(generate_triangles_with_center(new_vertex, edge_intersections, case_index))
+            
+        else:
+            # Standard cases or others not explicitly modified for Edge Group 2 removal
+            # Apply unified edge transformation to all edges
+            edge_intersections = get_edge_intersections(cell, case_index, isovalue)
+            transformed_intersections = apply_unified_edge_transformation(edge_intersections, cell)
+            tri_indices = modified_table.get(case_index, standard_table[case_index])
+            triangles.extend(generate_triangles(transformed_intersections, tri_indices))
+
+    return triangles
+
+def apply_unified_edge_transformation(edge_intersections, cell):
+    """
+    Applies 8 interleaved steps (4 gradient, 4 tangential) to the edge extreme
+    closest to the isosurface. Moves the other extreme to the midpoint.
+    """
+    transformed = {}
+    for edge_id, intersection in edge_intersections.items():
+        # Identify the two extremes of the edge
+        v1, v2 = edge_intersections[edge_id].vertices
+        # Determine which extreme is closer to the isosurface
+        # This requires evaluating the function or distance to the implicit surface
+        # For simplicity, assume we have a function to find the closest extreme
+        closest_extreme, other_extreme = find_closest_extreme_to_isosurface(v1, v2, cell)
+        
+        # Apply 8 interleaved steps
+        current_pos = closest_extreme
+        for step in range(4):
+            # Gradient step
+            current_pos = gradient_step(current_pos, cell)
+            # Tangential step
+            current_pos = tangential_step(current_pos, cell)
+            
+        # The other extreme is moved to the midpoint
+        midpoint_pos = midpoint(v1, v2)
+        
+        transformed[edge_id] = TriangleVertex(current_pos, midpoint_pos)
+        
+    return transformed
+
+def gradient_step(pos, cell):
+    # Move along the gradient direction towards the isosurface
+    # [G] Implementation detail: compute gradient of scalar field at pos
+    grad = compute_gradient(pos, cell)
+    return pos + step_size * normalize(grad)
+
+def tangential_step(pos, cell):
+    # Move along the tangent plane to the isosurface
+    # [G] Implementation detail: project displacement onto tangent plane
+    grad = compute_gradient(pos, cell)
+    # Displacement is orthogonal to gradient
+    return pos # [G] Specific tangential displacement logic depends on Macet formulation details not fully explicit in text, but implies projection onto tangent plane. 
+               # The text says "projection operation of the edge midpoint onto the plane tangent of the isosurface".
+               # The unified approach interleaves gradient and tangential steps.
+               # A precise implementation would require the specific vector math for the tangential step, 
+               # which is described as part of the Macet algorithm variant.
+               # For the purpose of this article, we note the step exists.
+               # [G] Assuming the tangential step adjusts the position to lie on the tangent plane defined by the gradient.
+               # A common implementation is: pos = pos - dot(pos - midpoint, grad) / dot(grad, grad) * grad
+               # But the text says "interleaved". Let's stick to the high-level description.
+               pass
+```
+
+**Note on Pseudocode:** The `tangential_step` and `gradient_step` are placeholders for the specific vector operations defined in the Macet algorithm. The text states the transformation is a "projection operation of the edge midpoint onto the plane tangent of the isosurface" and that the unified approach uses "interleaved edge transformations using gradient and tangential transformations". The exact vector math for these steps is not fully detailed in the provided text, but the structure of 4 gradient and 4 tangential steps is specified [S1].
+
+## Operating characteristics
+-   **Time Complexity:** Similar to standard Marching Cubes, with minor overhead for edge transformation and new vertex placement [S1].
+-   **Memory Complexity:** Slightly higher due to the modified lookup table and potential new vertices [S1].
+-   **Performance:** Significantly improves triangle quality. For Chest CT data, the minimum angle $\theta_0$ improves from 0.08 to 17.9, and the radii ratio $\rho$ improves from 0.0 to 0.46 [S1].
+-   **Strengths:** Produces better-shaped triangles suitable for numerical simulations without post-processing [S1].
+-   **Limitations:** Requires a modified lookup table and additional computation for edge transformations [S1].
+
+## Background
+-   **Origin:** Proposed by [S1] to address the issue of degenerate triangles in Marching Cubes, which are unsuitable for finite element simulations [S1].
+-   **History:** Builds on previous work by Dietrich et al. regarding retriangulation and Macet's edge transformation algorithm [S1].
+-   **Usage:** Used in isosurface grid generation for numerical simulations [S1].
+
+## Sources
+[S1] Marching Cubes without Skinny Triangles, https://doi.org/10.1109/mcse.2009.34, fetched 2026-10-27

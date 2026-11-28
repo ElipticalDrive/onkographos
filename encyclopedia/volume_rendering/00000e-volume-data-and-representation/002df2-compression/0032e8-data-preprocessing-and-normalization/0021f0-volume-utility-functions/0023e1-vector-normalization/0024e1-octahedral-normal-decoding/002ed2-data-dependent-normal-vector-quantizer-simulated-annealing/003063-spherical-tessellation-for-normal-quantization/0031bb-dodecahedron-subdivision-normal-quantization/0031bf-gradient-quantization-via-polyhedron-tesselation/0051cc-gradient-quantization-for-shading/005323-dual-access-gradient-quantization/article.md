@@ -1,0 +1,115 @@
+# Dual Access Gradient Quantization
+
+Also called: Dual access gradient quantization data structure, Dual-Index Lookup, Gradient Quantization with Dual-Index Lookup, QuantizeGradient
+
+## Overview
+Dual Access Gradient Quantization is a data structure and algorithm for accelerating gradient-dependent volume rendering, specifically silhouette extraction and shading [S1]. It solves the problem of efficiently storing and retrieving quantized gradient vectors for every voxel, reducing memory usage from 12 bytes (three 32-bit floats) to 2 bytes per voxel while maintaining fast access times [S1]. It distinguishes itself from standard quantization by providing "dual access": it supports immediate lookup for pre-computed indices and allows fast approximation for arbitrary normalized vectors via a pre-filled index table, minimizing expensive inner product calculations during rendering [S1].
+
+## How it works
+The method consists of a quantization function, a two-table data structure, and a pre-processing step to enable arbitrary vector lookup [S1].
+
+**Inputs and Outputs**
+*   **Input:** A normalized gradient vector $\hat{G} = (\hat{G}_x, \hat{G}_y, \hat{G}_z)$ where each component is in $[-1.0, 1.0]$ [S1].
+*   **Output:** A 16-bit integer index pointing to an entry in the Gradient Table [S1].
+*   **Parameters:**
+    *   $\gamma$: An integer scale factor chosen at compile time that determines the trade-off between quality and speed [S1]. Typical value: 31 [S1].
+    *   $b$: The minimum number of bits required to represent $(\gamma \times 2) + 1$ [S1]. For $\gamma=31$, $2\gamma+1 = 63$, which fits in 6 bits, so $b=6$ [S1].
+
+**Data Structures**
+1.  **Gradient Table:** An array of unique quantized gradient vectors $\hat{V}$ [S1]. Each entry stores the normalized vector [S1]. The size is dynamic but bounded by the total number of possible quantized values [S1]. For $\gamma=31$, the table contains 4,874 entries [S1].
+2.  **Index Table:** An array of integers mapping a packed integer representation (`res`) to an index in the Gradient Table [S1].
+    *   Size: $2^{3b}$ [S1]. For $\gamma=31$ ($b=6$), the size is $2^{18} = 262,144$ entries [S1].
+    *   Initialization: All entries are initialized to $-1$ [S1].
+3.  **Voxel Storage:** A 3D RGB texture where each voxel stores the 2-byte index [S1]. The high-order byte is stored in the Red component, and the low-order byte in the Green component [S1]. The Blue component is unused [S1].
+
+**Algorithm: QuantizeGradient**
+The following pseudocode implements the core quantization and table population logic [S1].
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def QuantizeGradient(G_hat, gamma, b, index_table, gradient_table):
+    """
+    Quantizes a normalized gradient vector and returns its index.
+    Populates the gradient and index tables if the vector is new.
+    """
+    # 1. Scale and round to integers
+    # V components are in range [-gamma, gamma]
+    V_x = round(G_hat.x * gamma)
+    V_y = round(G_hat.y * gamma)
+    V_z = round(G_hat.z * gamma)
+
+    # 2. Pack into a single integer 'res'
+    # res is in range [0, 2^(3b)]
+    res = (V_x + gamma) << (2 * b) + \
+          (V_y + gamma) << b + \
+          (V_z + gamma)
+
+    # 3. Check if this quantized vector already exists
+    if index_table[res] == -1:
+        # Allocate next entry in gradient table
+        idx = len(gradient_table)
+        
+        # Store the normalized vector in the gradient table
+        # [G] Implementation detail: V must be normalized back to unit length.
+        magnitude = (V_x**2 + V_y**2 + V_z**2) ** 0.5
+        if magnitude == 0:
+            gradient_table.append((0.0, 0.0, 0.0))
+        else:
+            gradient_table.append((V_x / magnitude, V_y / magnitude, V_z / magnitude))
+        
+        # Store the index in the index table
+        index_table[res] = idx
+        return idx
+    else:
+        return index_table[res]
+```
+
+**Pre-processing: Filling the Index Table**
+After all voxel gradients have been processed and the Gradient Table is built, the Index Table is incomplete (sparse) [S1]. To enable fast lookup for *arbitrary* normalized vectors (not just those present in the dataset), the table is filled with the closest existing index [S1].
+
+1.  Iterate through all slots `i` in the Index Table [S1].
+2.  If `Index_Table[i]` is $-1$ (empty):
+    *   Find the slot `j` in the Index Table such that `Index_Table[j]` is not $-1$ and the quantized vector corresponding to `j` is closest to the vector corresponding to `i` [S1].
+    *   Set `Index_Table[i] = Index_Table[j]` [S1].
+3.  This process effectively sorts the index table by proximity, allowing any arbitrary 3D vector to be quantized to a `res` value, looked up in the table, and returned as the closest pre-quantized gradient index [S1].
+*Note: The exact search algorithm for finding the closest slot is not provided in the sources [G].*
+
+**Usage in Rendering**
+*   **Pre-computed Gradients:** For voxels where the gradient is known (e.g., from the base volume), `QuantizeGradient` is called, and the returned index is stored in the voxel's RGB texture [S1].
+*   **Arbitrary Gradients:** During rendering (e.g., after B-spline subdivision of a Region of Interest), new normalized gradient vectors $\hat{G}_{new}$ are generated [S1]. To find their index:
+    1.  Apply Lines 1-2 of `QuantizeGradient` to $\hat{G}_{new}$ to compute `res` [S1].
+    2.  Look up `Index_Table[res]` [S1].
+    3.  The returned value is the index of the closest pre-quantized gradient in the Gradient Table [S1].
+
+**Edge Cases and Pitfalls**
+*   **Zero Vector:** If $\hat{G} = (0,0,0)$, the magnitude is 0 [S1]. The pseudocode above handles this by storing a zero vector [S1]. In practice, gradients are rarely exactly zero, but normalization must guard against division by zero [G].
+*   **Precision:** The use of `round` and integer arithmetic minimizes floating-point errors during quantization [S1]. However, the final lookup for arbitrary vectors relies on the pre-processing step filling all gaps; if the pre-processing is skipped, empty slots return invalid indices [S1].
+*   **Memory Overhead:** The Index Table consumes significant memory (262,144 integers for $\gamma=31$) [S1]. The source notes a total overhead of < 700KB for the entire structure [S1].
+
+## Operating characteristics
+*   **Time Complexity:**
+    *   Quantization: $O(1)$ per voxel for pre-computed gradients [S1].
+    *   Arbitrary Lookup: $O(1)$ per vector after pre-processing [S1].
+*   **Memory Complexity:**
+    *   Per Voxel: 2 bytes (index) [S1].
+    *   Gradient Table: 4,874 entries for $\gamma=31$ [S1].
+    *   Index Table: 262,144 entries for $\gamma=31$ [S1].
+    *   Total Overhead: < 700 KB reported for the system [S1].
+*   **Performance:**
+    *   Achieves a 6:1 compression rate compared to storing 3 floats (12 bytes) per gradient [S1].
+    *   Rendering using this method is 5–10 times faster than performing inner products directly in the GPU for similar datasets [S1].
+    *   Access times are very fast with $\gamma=31$ [S1].
+*   **Strengths:**
+    *   Extremely fast lookup for both stored and arbitrary vectors [S1].
+    *   Low memory footprint per voxel [S1].
+    *   Small number of inner products required during rendering [S1].
+*   **Limitations:**
+    *   Pre-processing is required to support arbitrary vector lookup [S1].
+    *   Accuracy depends on $\gamma$; higher $\gamma$ increases table size and pre-processing time but improves accuracy [S1].
+
+## Background
+The method was introduced in the context of real-time super-resolution contextual close-up of clinical volumetric data [S1]. It addresses the need for fast silhouette extraction and shading in direct volume rendering, where gradient calculations are expensive [S1]. The technique leverages the properties of B-spline subdivision, which preserves vector normalization, allowing gradients to be quantized without repeated normalization costs [S1].
+
+## Sources
+[S1] Real-Time Super Resolution Contextual Close-up of Clinical Volumetric Data, https://doi.org/10.2312/vissym/eurovis06/347-354, fetched 2026-10-26

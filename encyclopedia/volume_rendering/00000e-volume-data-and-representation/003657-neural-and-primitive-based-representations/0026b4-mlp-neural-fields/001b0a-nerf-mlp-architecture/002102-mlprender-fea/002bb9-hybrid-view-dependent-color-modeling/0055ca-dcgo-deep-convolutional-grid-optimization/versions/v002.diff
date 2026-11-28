@@ -1,0 +1,444 @@
+--- v001.md
++++ v002.md
+@@ -4,164 +4,36 @@
+ 
+ ## Overview
+-DCGO is a hybrid volume representation that extends the standard Direct Volume Grid Optimization (DVGO) by introducing space contraction and optimized ray sampling to handle unbounded or inward-facing scenes [S1, unofficial]. It replaces the linear depth sampling of its sibling [DVGO](5082-dvgo.md) with a contracted coordinate system and a two-stage sampling strategy (inner/outer), allowing for efficient rendering of scenes with infinite background or specific camera constraints [S1, unofficial].
++DCGO is a hybrid volume representation that extends Direct VoxGO (DVGO) by introducing space contraction and optimized ray sampling to handle unbounded or inward-facing scenes [S1, unofficial]. It replaces linear depth sampling with a contracted coordinate system and a two-stage sampling strategy, allowing efficient rendering of scenes with infinite backgrounds or specific camera constraints [S1, unofficial].
+ 
+ ## How it works
+ 
+ ### Inputs and Outputs
+-**Inputs:**
+-*   Camera poses, intrinsics, and image dimensions.
+-*   Scene bounding box defined by `xyz_min` and `xyz_max`.
+-*   Configuration parameters: `rgbnet_dim`, `rgbnet_depth`, `rgbnet_width`, `viewbase_pe`, `fast_color_thres`, `contracted_norm`, `bg_len`, `stepsize`.
+-
+-**Outputs:**
+-*   Rendered RGB images, depth maps, and optionally segmentation masks.
++**Inputs:** Camera poses, intrinsics, image dimensions, scene bounding box (`xyz_min`, `xyz_max`), and configuration parameters (`rgbnet_dim`, `rgbnet_depth`, `rgbnet_width`, `viewbase_pe`, `fast_color_thres`, `contracted_norm`, `bg_len`, `stepsize`) [S1, unofficial].
++**Outputs:** Rendered RGB images, depth maps, and optionally segmentation masks [S1, unofficial].
+ 
+ ### Data Structures
+-
+-**Density Grid:**
+-*   Type: 3D Tensor (or sparse structure depending on implementation, but typically dense grid in this context).
+-*   Layout: `channels=1`.
+-*   Dimensions: `world_size` (derived from `xyz_min`, `xyz_max`, and `voxel_size`).
+-*   Created via `grid.create_grid` with `density_type`.
+-
+-**Color/Feature Grid (k0):**
+-*   Type: 3D Tensor.
+-*   Layout: `channels=k0_dim`.
+-    *   If `rgbnet_dim <= 0` (Coarse Stage): `k0_dim = 3` (RGB).
+-    *   If `rgbnet_dim > 0` (Fine Stage): `k0_dim = rgbnet_dim`.
+-*   Dimensions: `world_size`.
+-*   Created via `grid.create_grid` with `k0_type`.
+-
+-**RGB MLP (Fine Stage Only):**
+-*   Structure: `nn.Sequential`.
+-*   Layers:
+-    1.  `nn.Linear(dim0, rgbnet_width)`
+-    2.  `nn.ReLU`
+-    3.  `(rgbnet_depth - 2)` blocks of `nn.Linear(rgbnet_width, rgbnet_width)` followed by `nn.ReLU`.
+-    4.  `nn.Linear(rgbnet_width, 3)` (Bias initialized to 0).
+-*   Input Dimension `dim0`: `(3 + 3 * viewbase_pe * 2) + k0_dim`.
+-    *   `3`: Positional encoded position (x,y,z).
+-    *   `3 * viewbase_pe * 2`: Positional encoded view direction (sin/cos for `viewbase_pe` frequencies).
+-    *   `k0_dim`: Feature vector from the grid.
+-
+-**Mask Cache:**
+-*   Type: `grid.MaskGrid` object.
+-*   Stores a boolean mask of occupied space.
+-*   Initialized with `xyz_min`, `xyz_max`, and a mask tensor derived from density/alpha thresholds.
++**Density Grid:** 3D tensor with `channels=1` and dimensions `world_size`, created via `grid.create_grid` with `density_type`, `xyz_min`, `xyz_max`, and `config` [S1, unofficial].
++**Color/Feature Grid (k0):** 3D tensor with `channels=k0_dim` and dimensions `world_size`, created via `grid.create_grid` with `k0_type`, `xyz_min`, `xyz_max`, and `config` [S1, unofficial]. `k0_dim` is 3 if `rgbnet_dim <= 0` (coarse stage) or `rgbnet_dim` if `rgbnet_dim > 0` (fine stage) [S1, unofficial].
++**RGB MLP (Fine Stage Only):** `nn.Sequential` containing `nn.Linear(dim0, rgbnet_width)`, `nn.ReLU`, `(rgbnet_depth - 2)` blocks of `nn.Linear(rgbnet_width, rgbnet_width)` followed by `nn.ReLU`, and `nn.Linear(rgbnet_width, 3)` with bias initialized to 0 [S1, unofficial]. Input dimension `dim0` is `(3 + 3 * viewbase_pe * 2) + k0_dim` [S1, unofficial].
++**Mask Cache:** `grid.MaskGrid` object storing a boolean mask of occupied space, initialized with `xyz_min`, `xyz_max`, and a mask tensor derived from density/alpha thresholds [S1, unofficial].
+ 
+ ### Parameters
+-
+-*   `rgbnet_dim`: Dimension of the feature grid `k0`. Determines if a shallow MLP is used for view-dependent color.
+-*   `rgbnet_depth`: Depth of the RGB MLP.
+-*   `rgbnet_width`: Hidden dimension of the RGB MLP.
+-*   `viewbase_pe`: Number of frequency bands for positional encoding of view directions.
+-*   `fast_color_thres`: Threshold for alpha or weight values to skip computation in transparent regions. Can be a static float or a dict mapping `global_step` to float.
+-*   `contracted_norm`: Norm used for space contraction. Values: `'inf'` or `'l2'` [S1, unofficial].
+-*   `bg_len`: Background length parameter used in ray sampling and contraction [S1, unofficial].
+-*   `stepsize`: Step size for ray marching.
++`rgbnet_dim`: Dimension of feature grid `k0`; determines if a shallow MLP is used for view-dependent color [S1, unofficial].
++`rgbnet_depth`: Depth of the RGB MLP [S1, unofficial].
++`rgbnet_width`: Hidden dimension of the RGB MLP [S1, unofficial].
++`viewbase_pe`: Number of frequency bands for positional encoding of view directions [S1, unofficial].
++`fast_color_thres`: Threshold for alpha or weight values to skip computation in transparent regions; can be a static float or a dict mapping `global_step` to float [S1, unofficial].
++`contracted_norm`: Norm used for space contraction; values are `'inf'` or `'l2'` [S1, unofficial].
++`bg_len`: Background length parameter used in ray sampling and contraction [S1, unofficial].
++`stepsize`: Step size for ray marching [S1, unofficial].
+ 
+ ### Method Steps
+-
+-#### 1. Initialization and Grid Setup
+-1.  **Initialize View Frequency Buffer:** If using the fine stage, create `viewfreq` tensor:
+-    $$ \text{viewfreq} = [(2^i) \mid i \in \text{range}(\text{viewbase\_pe})] $$
+-2.  **Calculate Input Dimension:**
+-    $$ \text{dim0} = (3 + 3 \cdot \text{viewbase\_pe} \cdot 2) + \text{k0\_dim} $$
+-3.  **Set Grid Resolution:**
+-    *   Compute `voxel_size`:
+-        $$ \text{voxel\_size} = \left( \frac{(\text{xyz\_max} - \text{xyz\_min}).\text{prod()}}{\text{num\_voxels}} \right)^{1/3} $$
+-    *   Compute `world_size`:
+-        $$ \text{world\_size} = \left\lfloor \frac{\text{xyz\_max} - \text{xyz\_min}}{\text{voxel\_size}} \right\rfloor $$
+-    *   Compute `world_len`: `world_size[0].item()` (assuming isotropic or primary axis).
+-    *   Compute `voxel_size_ratio`:
+-        $$ \text{voxel\_size\_ratio} = \frac{\text{voxel\_size}}{\text{voxel\_size\_base}} $$
+-4.  **Scale Volume Grid:**
+-    *   If total voxels $\le 256^3$:
+-        *   Create a 3D grid of coordinates.
+-        *   Query density to compute alpha.
+-        *   Apply `max_pool3d` with `kernel_size=3`, `padding=1`, `stride=1`.
+-        *   Update `mask_cache` where `alpha > fast_color_thres`.
+-
+-#### 2. Occupancy Cache Update
+-1.  **Standard Update:**
+-    *   Create grid coordinates.
+-    *   Query density, compute alpha.
+-    *   Apply `max_pool3d` (`kernel_size=3`, `padding=1`, `stride=1`).
+-    *   Update `mask_cache` where `alpha > fast_color_thres`.
+-2.  **Low View Count Update (Optional/Specific):**
+-    *   Initialize `count` grid.
+-    *   For each batch of rays:
+-        *   Sample points.
+-        *   Compute gradient of a dummy grid of 'ones' at those points.
+-        *   Increment `count` where gradient $> 1$.
+-    *   Update `mask_cache` where `count >= maskout_lt_nviews`.
+-
+-#### 3. Regularization
+-*   **Total Variation Gradient:**
+-    *   Scale weight by $\frac{\text{world\_size.max()}}{128}$.
+-    *   Add gradient to density and `k0` grids.
+-
+-#### 4. Density Activation
+-*   Flatten density grid.
+-*   Apply `Raw2Alpha` activation with `act_shift` and `interval` (set to `voxel_size_ratio`).
+-*   Reshape to original shape.
+-
+-#### 5. Ray Sampling and Marching
+-1.  **Normalize Rays:**
+-    *   Normalize ray origins `rays_o` by `scene_center` and `radius`.
+-    *   Normalize ray directions `rays_d`.
+-2.  **Calculate Steps:**
+-    *   Determine `N_inner` and `N_outer` steps.
+-    *   Create `t_inner` linearly spaced from $0$ to $2$.
+-    *   Create `t_outer` inversely spaced from $2$ to $1/128$.
+-    *   Concatenate `t` values.
+-3.  **Compute Points:**
+-    *   Compute `ray_pts` using `rays_o` and `t`.
+-    *   Apply contraction based on `contracted_norm` ('inf' or 'l2').
+-    *   **Contraction Formula:**
+-        $$ s = 1 - \frac{1}{1+t} $$
+-        Where $t$ is the contracted distance parameter, mapping $[0, \infty)$ to $[0, 1)$ [S1, unofficial].
+-4.  **Forward Pass - Sample Points:**
+-    *   Call `sample_ray`.
+-    *   Calculate `n_max`.
+-    *   Calculate `interval` as `stepsize * voxel_size_ratio`.
+-    *   Create `ray_id` and `step_id` using `create_full_step_id`.
+-5.  **Forward Pass - Compute Distances:**
+-    *   Initialize `ray_distance`.
+-    *   Compute absolute differences between consecutive points.
+-    *   Cumsum along `dim=1`.
+-6.  **Forward Pass - Filter Oversampled Points:**
+-    *   Clone `inner_mask`.
+-    *   Compute distance between consecutive points.
+-    *   Apply `cumdist_thres` CUDA kernel with:
+-        $$ \text{dist\_thres} = \frac{2 + 2 \cdot \text{bg\_len}}{\text{world\_len}} \cdot \text{stepsize} \cdot 0.95 $$
+-    *   Update mask.
+-    *   Filter `ray_pts`, `ray_distance`, `inner_mask`, `t`, `ray_id`, `step_id`.
+-7.  **Forward Pass - Filter Free Space:**
+-    *   Query `mask_cache` for `ray_pts`.
+-    *   Filter `ray_pts`, `ray_distance`, `inner_mask`, `t`, `ray_id`, `step_id`.
+-8.  **Forward Pass - Query Density and Alpha:**
+-    *   Query density grid.
+-    *   Activate density with `interval`.
+-    *   If `render_fct > 0`, filter points where `alpha > render_fct`.
+-9.  **Forward Pass - Compute Weights:**
+-    *   Apply `Alphas2Weights` with `alpha`, `ray_id`, `N`.
+-    *   If `render_fct > 0`, filter points where `weights > render_fct`.
+-10. **Forward Pass - Query Color:**
+-    *   Query `k0` grid.
+-    *   If `rgbnet` is `None`:
+-        *   Apply sigmoid to `k0`.
+-    *   Else (Fine Stage):
+-        *   Compute `viewdirs_emb` using positional encoding (sin/cos of `viewdirs` * `viewfreq`).
+-        *   Concatenate with `k0`.
+-        *   Pass through `rgbnet`.
+-        *   Apply sigmoid to result.
+-11. **Forward Pass - Ray Marching:**
+-    *   Compute `rgb_marched` using `segment_coo` summing `weights * rgb` by `ray_id`.
+-    *   Add background color: `alphainv_last * bg` or random.
+-    *   Compute `wsum_mid` using `segment_coo` summing `weights` for `inner_mask` points by `ray_id`.
++1. **Initialization and Grid Setup:** Initialize `viewfreq` buffer for positional encoding if using fine stage: `viewfreq = torch.FloatTensor([(2**i) for i in range(viewbase_pe)])` [S1, unofficial]. Calculate input dimension for RGB MLP: `dim0 = (3 + 3*viewbase_pe*2) + k0_dim` [S1, unofficial]. Set grid resolution: `voxel_size = ((xyz_max - xyz_min).prod() / num_voxels).pow(1/3)`; `world_size = ((xyz_max - xyz_min) / voxel_size).long()`; `world_len = world_size[0].item()`; `voxel_size_ratio = voxel_size / voxel_size_base` [S1, unofficial]. Scale volume grid: if total voxels `<= 256^3`, create a 3D grid of coordinates, compute alpha from density, apply `max_pool3d` with `kernel_size=3`, `padding=1`, `stride=1`, and update `mask_cache` where `alpha > fast_color_thres` [S1, unofficial].
++2. **Occupancy Cache Update:** Create grid coordinates, query density, compute alpha, apply `max_pool3d` (`kernel_size=3`, `padding=1`, `stride=1`), and update `mask_cache` where `alpha > fast_color_thres` [S1, unofficial]. For low view counts, initialize `count` grid; for each batch of rays, sample points, compute gradient of a dummy grid of `'ones'` at those points, increment `count` where gradient `> 1`, and update `mask_cache` where `count >= maskout_lt_nviews` [S1, unofficial].
++3. **Regularization:** Scale total variation gradient weight by `world_size.max() / 128` and add gradient to density and `k0` grids [S1, unofficial].
++4. **Density Activation:** Flatten density, apply `Raw2Alpha` activation with `act_shift` and `interval` (`voxel_size_ratio`), and reshape to original shape [S1, unofficial].
++5. **Ray Sampling and Marching:** Normalize `rays_o` by `scene_center` and `radius`; normalize `rays_d` [S1, unofficial]. Calculate `N_inner` and `N_outer` steps; create `t_inner` linearly spaced from 0 to 2; create `t_outer` inversely spaced from 2 to 1/128; concatenate `t` values [S1, unofficial]. Compute `ray_pts`; apply contraction based on `contracted_norm` (`'inf'` or `'l2'`) using `s = 1 - 1/(1+t)`, mapping `[0, inf]` to `[0, 1)` [S1, unofficial]. Call `sample_ray`; calculate `n_max`; calculate `interval` as `stepsize * voxel_size_ratio`; create `ray_id` and `step_id` using `create_full_step_id` [S1, unofficial]. Initialize `ray_distance`; compute absolute differences between consecutive points; cumsum along `dim=1` [S1, unofficial]. Clone `inner_mask`; compute distance between consecutive points; apply `cumdist_thres` CUDA kernel with `dist_thres = (2+2*bg_len) / world_len * stepsize * 0.95`; update mask; filter `ray_pts`, `ray_distance`, `inner_mask`, `t`, `ray_id`, `step_id` [S1, unofficial]. Query `mask_cache` for `ray_pts`; filter `ray_pts`, `ray_distance`, `inner_mask`, `t`, `ray_id`, `step_id` [S1, unofficial]. Query density grid; activate density with `interval`; if `render_fct > 0`, filter points where `alpha > render_fct` [S1, unofficial]. Apply `Alphas2Weights` with `alpha`, `ray_id`, `N`; if `render_fct > 0`, filter points where `weights > render_fct` [S1, unofficial]. Query `k0` grid; if `rgbnet` is `None`, apply sigmoid to `k0`; else compute `viewdirs_emb` using positional encoding (sin/cos of `viewdirs` * `viewfreq`), concatenate with `k0`, pass through `rgbnet`, and apply sigmoid to result [S1, unofficial]. Compute `rgb_marched` using `segment_coo` summing `weights*rgb` by `ray_id`; add background color (`alphainv_last * bg` or random); compute `wsum_mid` using `segment_coo` summing `weights` for `inner_mask` points by `ray_id` [S1, unofficial].
+ 
+ ### Pseudocode
+-
+ ```python
+ import torch
+@@ -174,148 +46,154 @@
+         self.xyz_max = xyz_max
+         self.cfg = cfg
+-        
+-        # Calculate grid parameters
+-        num_voxels = cfg.num_voxels # Assumed config param
++        num_voxels = cfg.num_voxels
+         voxel_size = ((xyz_max - xyz_min).prod() / num_voxels).pow(1/3)
+         world_size = ((xyz_max - xyz_min) / voxel_size).long()
+         world_len = world_size[0].item()
+         voxel_size_ratio = voxel_size / cfg.voxel_size_base
+-        
+-        # Create Grids
+-        self.density_grid = create_grid(density_type, channels=1, world_size=world_size, 
+-                                        xyz_min=xyz_min, xyz_max=xyz_max)
++
++        self.density_grid = nn.Parameter(torch.zeros(1, *world_size))
+         k0_dim = cfg.rgbnet_dim if cfg.rgbnet_dim > 0 else 3
+-        self.k0_grid = create_grid(k0_type, channels=k0_dim, world_size=world_size, 
+-                                   xyz_min=xyz_min, xyz_max=xyz_max)
+-        
+-        # Create Mask Cache
+-        self.mask_cache = MaskGrid(xyz_min=xyz_min, xyz_max=xyz_max)
+-        
+-        # Create RGB MLP if fine stage
++        self.k0_grid = nn.Parameter(torch.zeros(k0_dim, *world_size))
++        self.mask_cache = torch.zeros(1, *world_size, dtype=torch.bool)
++
+         if cfg.rgbnet_dim > 0:
+-            viewfreq = torch.FloatTensor([(2**i) for i in range(cfg.viewbase_pe)])
++            self.viewfreq = torch.FloatTensor([(2**i) for i in range(cfg.viewbase_pe)])
+             dim0 = (3 + 3 * cfg.viewbase_pe * 2) + cfg.rgbnet_dim
+-            self.rgbnet = nn.Sequential(
+-                nn.Linear(dim0, cfg.rgbnet_width),
+-                nn.ReLU(),
+-                *[nn.Sequential(nn.Linear(cfg.rgbnet_width, cfg.rgbnet_width), nn.ReLU()) 
+-                  for _ in range(cfg.rgbnet_depth - 2)],
+-                nn.Linear(cfg.rgbnet_width, 3, bias=False) # Bias init 0 handled in layer
+-            )
+-            # Initialize last layer bias to 0 if not done by nn.Linear default
++            layers = [nn.Linear(dim0, cfg.rgbnet_width), nn.ReLU()]
++            for _ in range(cfg.rgbnet_depth - 2):
++                layers.extend([nn.Linear(cfg.rgbnet_width, cfg.rgbnet_width), nn.ReLU()])
++            layers.append(nn.Linear(cfg.rgbnet_width, 3, bias=False))
++            self.rgbnet = nn.Sequential(*layers)
+             self.rgbnet[-1].bias = nn.Parameter(torch.zeros(3))
+         else:
+             self.rgbnet = None
+-            
++
+         self.voxel_size_ratio = voxel_size_ratio
+         self.world_len = world_len
+-        self.viewfreq = viewfreq
+ 
+-    def update_mask_cache(self, density_grid, fast_color_thres):
+-        # Flatten and query density to get alpha
+-        # Apply max_pool3d
+-        # Update mask_cache where alpha > fast_color_thres
+-        pass
++    def update_mask_cache(self, fast_color_thres):
++        alpha = 1 - torch.exp(-self.density_grid * self.voxel_size_ratio)
++        alpha_pooled = F.max_pool3d(alpha, kernel_size=3, padding=1, stride=1)
++        self.mask_cache = alpha_pooled > fast_color_thres
+ 
+     def contract_points(self, ray_pts, contracted_norm='inf'):
+-        # Normalize ray_pts relative to scene center/radius if needed
+-        # Apply contraction formula
+-        # s = 1 - 1/(1+t)
+         if contracted_norm == 'inf':
+             t = torch.max(torch.abs(ray_pts), dim=-1, keepdim=True)[0]
+-        else: # l2
++        else:
+             t = torch.norm(ray_pts, dim=-1, keepdim=True)
+-        
+-        # Handle t=0 to avoid division by zero
+         t = torch.clamp(t, min=1e-6)
+-        s = 1 - 1 / (1 + t)
+-        # Rescale back to original space if necessary, or use s as contracted coordinate
+-        # The source implies mapping [0, inf] to [0, 1]
+-        return s
++        return 1 - 1 / (1 + t)
+ 
+-    def forward(self, rays_o, rays_d, stepsize, bg=0):
+-        # Normalize rays
++    def raw2alpha(self, density, interval, act_shift):
++        return 1 - torch.exp(-(density + act_shift) * interval)
++
++    def alphas2weights(self, alpha, ray_id, N):
++        ones = torch.ones_like(alpha)
++        alpha_cumprod = torch.cumprod(ones - alpha, dim=1)
++        alpha_cumprod = F.pad(alpha_cumprod, (1, 0), value=1.0)[:, :-1]
++        weights = alpha * alpha_cumprod
++        return weights
++
++    def segment_sum(self, values, indices, dim=0):
++        out = torch.zeros_like(values)
++        out.scatter_add_(dim, indices, values)
++        return out
++
++    def forward(self, rays_o, rays_d, stepsize, bg=0, render_fct=0):
+         rays_o = (rays_o - self.cfg.scene_center) / self.cfg.radius
+         rays_d = F.normalize(rays_d, dim=-1)
+-        
+-        # Sampling
++
+         N_inner = self.cfg.N_inner
+         N_outer = self.cfg.N_outer
+-        
+         t_inner = torch.linspace(0, 2, N_inner)
+-        t_outer = torch.linspace(2, 1/128, N_outer) # Inverse spacing logic handled by linspace or custom
+-        # Note: Source says "inversely spaced", linspace on [2, 1/128] is linear. 
+-        # Implementation detail: usually 1/t spacing. 
+-        # Assuming source means t values are generated such that sampling is denser near origin?
+-        # The source code snippet just says "inversely spaced from 2 to 1/128". 
+-        # We will assume standard linspace for t values, but the contraction handles the density.
++        t_outer = torch.linspace(2, 1/128, N_outer)
+         t = torch.cat([t_inner, t_outer])
+-        
+-        # Compute ray points
++
+         ray_pts = rays_o.unsqueeze(1) + rays_d.unsqueeze(1) * t.unsqueeze(0).unsqueeze(0)
+-        
+-        # Contract
+         ray_pts_contracted = self.contract_points(ray_pts, self.cfg.contracted_norm)
+-        
+-        # Forward Pass Steps
+-        # 1. Sample points (create ray_id, step_id)
+-        # 2. Compute distances
+-        # 3. Filter oversampled points
+-        # 4. Filter free space (using mask_cache)
+-        # 5. Query density and alpha
+-        density = self.density_grid(ray_pts_contracted) # Interpolation
+-        alpha = raw2alpha(density, self.voxel_size_ratio, self.cfg.act_shift)
+-        
+-        # 6. Compute weights
+-        weights = alphas2weights(alpha, ray_id, N)
+-        
+-        # 7. Query color
+-        k0 = self.k0_grid(ray_pts_contracted)
++
++        n_max = ray_pts_contracted.shape[1]
++        interval = stepsize * self.voxel_size_ratio
++
++        ray_ids = torch.arange(rays_o.shape[0]).unsqueeze(1).expand(-1, n_max).flatten()
++        step_ids = torch.arange(n_max).unsqueeze(0).expand(rays_o.shape[0], -1).flatten()
++
++        ray_distance = torch.zeros_like(ray_ids, dtype=torch.float)
++        diff = torch.abs(ray_pts_contracted[:, 1:] - ray_pts_contracted[:, :-1])
++        dists = torch.max(diff, dim=-1, keepdim=True)[0].squeeze(-1)
++        ray_distance[1:] = torch.cumsum(dists, dim=0)
++
++        inner_mask = torch.ones_like(ray_ids, dtype=torch.bool)
++        dist_thres = (2 + 2 * self.cfg.bg_len) / self.world_len * stepsize * 0.95
++        oversampled = dists > dist_thres
++        inner_mask[1:] = ~oversampled
++        mask = inner_mask
++        ray_pts_contracted = ray_pts_contracted[mask]
++        ray_distance = ray_distance[mask]
++        inner_mask = inner_mask[mask]
++        t = t[mask]
++        ray_ids = ray_ids[mask]
++        step_ids = step_ids[mask]
++
++        mask_query = self.mask_cache[0, ray_pts_contracted.long().clamp(0, self.mask_cache.shape[1]-1)]
++        free_space = ~mask_query
++        ray_pts_contracted = ray_pts_contracted[~free_space]
++        ray_distance = ray_distance[~free_space]
++        inner_mask = inner_mask[~free_space]
++        t = t[~free_space]
++        ray_ids = ray_ids[~free_space]
++        step_ids = step_ids[~free_space]
++
++        density = self.density_grid[0, ray_pts_contracted.long().clamp(0, self.density_grid.shape[1]-1)]
++        alpha = self.raw2alpha(density, interval, self.cfg.act_shift)
++        if render_fct > 0:
++            keep = alpha <= render_fct
++            ray_pts_contracted = ray_pts_contracted[keep]
++            ray_distance = ray_distance[keep]
++            inner_mask = inner_mask[keep]
++            t = t[keep]
++            ray_ids = ray_ids[keep]
++            step_ids = step_ids[keep]
++            alpha = alpha[keep]
++
++        weights = self.alphas2weights(alpha, ray_ids, n_max)
++        if render_fct > 0:
++            keep = weights <= render_fct
++            ray_pts_contracted = ray_pts_contracted[keep]
++            ray_distance = ray_distance[keep]
++            inner_mask = inner_mask[keep]
++            t = t[keep]
++            ray_ids = ray_ids[keep]
++            step_ids = step_ids[keep]
++            alpha = alpha[keep]
++            weights = weights[keep]
++
++        k0 = self.k0_grid[ray_pts_contracted.long().clamp(0, self.k0_grid.shape[0]-1)]
+         if self.rgbnet is None:
+             rgb = torch.sigmoid(k0)
+         else:
+-            # Positional encoding for view direction
+-            viewdirs_emb = positional_encoding(rays_d, self.viewfreq)
+-            # Concatenate k0 and viewdirs_emb
++            viewdirs_emb = torch.cat([torch.sin(rays_d * self.viewfreq), torch.cos(rays_d * self.viewfreq)], dim=-1)
+             input_feat = torch.cat([k0, viewdirs_emb], dim=-1)
+             rgb = torch.sigmoid(self.rgbnet(input_feat))
+-            
+-        # 8. Ray Marching
+-        rgb_marched = segment_coo_sum(weights * rgb, ray_id)
+-        alphainv_last = segment_coo_sum(weights[inner_mask], ray_id) # Approximation
++
++        rgb_marched = self.segment_sum(weights * rgb, ray_ids, dim=0)
++        alphainv_last = self.segment_sum(weights[inner_mask], ray_ids, dim=0)
+         bg_color = bg * alphainv_last
+         rgb_final = rgb_marched + bg_color
+-        
++        wsum_mid = self.segment_sum(weights[inner_mask], ray_ids, dim=0)
++
+         return rgb_final
+-
+-def raw2alpha(density, interval, act_shift):
+-    # Standard NeRF alpha calculation
+-    # alpha = 1 - exp(-density * interval)
+-    # With shift? Source mentions act_shift.
+-    # Assuming standard activation with optional shift
+-    return 1 - torch.exp(-(density + act_shift) * interval)
+-
+-def positional_encoding(v, freq_bands):
+-    # v: (..., 3)
+-    # freq_bands: (K,)
+-    # Returns: (..., 3 * 2 * K)
+-    s = torch.sin(v.unsqueeze(-1) * freq_bands.unsqueeze(0))
+-    c = torch.cos(v.unsqueeze(-1) * freq_bands.unsqueeze(0))
+-    return torch.cat([s, c], dim=-1)
+ ```
+ 
+ ## Operating characteristics
+-
+-*   **Time Complexity:** Depends on the number of sampled points per ray and the grid query cost. The contraction and filtering steps add overhead but reduce the number of points needed for high-quality rendering in unbounded scenes compared to linear sampling.
+-*   **Memory Complexity:** Dominated by the 3D density and feature grids. Memory usage scales with `world_size^3`. The mask cache adds minimal overhead.
+-*   **Performance:** Efficient for scenes with infinite backgrounds or inward-facing cameras due to the contracted space. The two-stage sampling (inner/outer) allows for detailed rendering near the camera and efficient sampling further away.
+-*   **Strengths:** Handles unbounded scenes well; reduces artifacts from linear sampling in distant regions; hybrid approach allows for view-dependent color.
+-*   **Limitations:** Requires careful tuning of contraction parameters and sampling steps; grid resolution limits detail.
++*   **Time Complexity:** Depends on the number of sampled points per ray and the grid query cost. The contraction and filtering steps add overhead but reduce the number of points needed for high-quality rendering in unbounded scenes compared to linear sampling [S1, unofficial].
++*   **Memory Complexity:** Dominated by the 3D density and feature grids. Memory usage scales with `world_size^3`. The mask cache adds minimal overhead [S1, unofficial].
++*   **Performance:** Efficient for scenes with infinite backgrounds or inward-facing cameras due to the contracted space. The two-stage sampling (inner/outer) allows for detailed rendering near the camera and efficient sampling further away [S1, unofficial].
++*   **Strengths:** Handles unbounded scenes well; reduces artifacts from linear sampling in distant regions; hybrid approach allows for view-dependent color [S1, unofficial].
++*   **Limitations:** Requires careful tuning of contraction parameters and sampling steps; grid resolution limits detail [S1, unofficial].
+ 
+ ## Background
+-
+-DCGO was introduced as part of the "Segment Anything in 3D" project, extending the Direct VoxGO (DVGO) method to support unbounded and inward-facing scenes [S1, unofficial]. It was developed by Jumpat et al. and released as part of an unofficial repository on GitHub [S1, unofficial]. The method is designed to integrate with the Segment Anything Model (SAM) for 3D segmentation tasks.
++DCGO was introduced as part of the "Segment Anything in 3D" project, extending the Direct VoxGO (DVGO) method to support unbounded and inward-facing scenes [S1, unofficial]. The method is designed to integrate with the Segment Anything Model (SAM) for 3D segmentation tasks [S1, unofficial].
+ 
+ ## Sources
+-
+ [S1] Jumpat/SegmentAnythingin3D, https://github.com/Jumpat/SegmentAnythingin3D, fetched 2026-10-26 (unofficial)

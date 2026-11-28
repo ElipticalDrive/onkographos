@@ -1,0 +1,164 @@
+# Camera-to-Object Space Transformation & MVP Computation
+
+Also called: Box/mesh overlay rendering with MVP matrix, prerender matrix setup, view direction transform
+
+## Overview
+This method precomputes the Model-View-Projection (MVP) matrix and transforms camera parameters into object space to support shader-based rendering, specifically enabling box or mesh overlays in volume visualization [S2, unofficial]. It distinguishes itself by explicitly handling the synchronization of projection types (perspective vs. orthographic) via shader defines and providing the inverse-transformed camera direction and position for local-space calculations [S2, unofficial]. It builds on [Camera Pose Transformation](1672-camera-pose-transformation.md) by consuming the pose data to construct the final transformation chain.
+
+## How it works
+**Inputs:**
+- Camera object with properties: `isPerspectiveCamera` (boolean), viewport dimensions (`viewport_w`, `viewport_h`), field of view (`_fov_deg`), and methods `getWorldDirection()`, `getWorldPosition()`.
+- Scene configuration: near plane (`0.01`), far plane (`100.0`) [S1, unofficial].
+- Model matrix construction logic (`_build_model_matrix()`) [S1, unofficial].
+- View matrix construction logic (`_build_view_matrix()`) [S1, unofficial].
+
+**Outputs:**
+- `mvp`: 4x4 matrix (float32) representing the combined transformation [S1, unofficial].
+- `local_view_direction`: 3D vector in object space [S2, unofficial].
+- `local_camera_position`: 3D vector in object space [S2, unofficial].
+- Shader state updates: `material.defines['ENABLE_PERSPECTIVE_PROJECTION']` and `material.needsUpdate` [S2, unofficial].
+
+**Data Structures:**
+- `mvp`: `np.float32` array of shape (4, 4) [S1, unofficial].
+- `local_view_direction`, `local_camera_position`: 3D vectors (x, y, z) [S2, unofficial].
+- `ENABLE_PERSPECTIVE_PROJECTION`: Shader define flag, present (value 1) or absent (deleted) [S2, unofficial].
+
+**Steps:**
+1. **Compute Aspect Ratio:**
+   Calculate the aspect ratio to prevent division by zero or distortion:
+   $$ \text{aspect\_ratio} = \frac{\text{viewport\_w}}{\max(\text{viewport\_h}, 1)} $$
+   [S1, unofficial]
+
+2. **Check Projection Type:**
+   Determine if the camera is perspective:
+   $$ \text{isPerspective} = \text{camera.isPerspectiveCamera} $$
+   [S2, unofficial]
+   If `isPerspective` differs from the current state, update the shader material:
+   - If perspective: set `material.defines['ENABLE_PERSPECTIVE_PROJECTION'] = 1`.
+   - If orthographic: delete `material.defines['ENABLE_PERSPECTIVE_PROJECTION']`.
+   - Set `material.needsUpdate = true`.
+   [S2, unofficial]
+
+3. **Compute Projection Matrix:**
+   Generate the projection matrix using the field of view, aspect ratio, and clipping planes:
+   $$ \text{proj} = \text{perspective\_matrix}(\text{fov\_deg}, \text{aspect\_ratio}, 0.01, 100.0) $$
+   [S1, unofficial]
+   *Note: The specific formula for `perspective_matrix` is not provided in the sources, but it typically follows standard OpenGL/DirectX conventions [G].*
+
+4. **Compute View and Model Matrices:**
+   $$ \text{view} = \text{self.\_build\_view\_matrix()} $$
+   $$ \text{model} = \text{self.\_build\_model\_matrix()} $$
+   [S1, unofficial]
+   *Note: `_build_view_matrix()` and `_build_model_matrix()` are implementation-specific helpers that construct the respective 4x4 matrices from camera pose and scene graph data [S1, unofficial].*
+
+5. **Compute MVP Matrix:**
+   Multiply the matrices in the order: Projection, then View, then Model.
+   $$ \text{mvp} = (\text{proj} \otimes \text{view} \otimes \text{model}).\text{astype}(\text{np.float32}) $$
+   [S1, unofficial]
+   Where $\otimes$ denotes matrix multiplication.
+
+6. **Transform Camera Direction to Object Space:**
+   - Get the world-space direction:
+     $$ \text{world\_view\_direction} = \text{camera.getWorldDirection()} $$
+   - Apply the inverse of the model-view matrix (denoted as $M^{-1}$ in sources, effectively the inverse of the combined model-view transform) to get local direction:
+     $$ \text{local\_view\_direction} = \text{world\_view\_direction} \cdot M^{-1} $$
+   [S2, unofficial]
+   *Note: `applyMatrix4` typically transforms a vector by a 4x4 matrix. For direction vectors, the translation component is ignored [G].*
+
+7. **Transform Camera Position to Object Space:**
+   - Get the world-space position:
+     $$ \text{world\_camera\_position} = \text{camera.getWorldPosition()} $$
+   - Apply the inverse matrix:
+     $$ \text{local\_camera\_position} = \text{world\_camera\_position} \cdot M^{-1} $$
+   [S2, unofficial]
+
+8. **Render Overlay (Optional):**
+   Pass the computed `mvp` to the box/mesh overlay renderer:
+   $$ \text{self.\_box\_overlay.render}(\text{mvp}, \text{self.show\_box}, \text{self.show\_mesh}) $$
+   [S1, unofficial]
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def compute_mvp_and_transform(camera, viewport_w, viewport_h, fov_deg, show_box, show_mesh, _build_view_matrix, _build_model_matrix):
+    """
+    Computes MVP matrix and transforms camera pose to object space.
+    """
+    # 1. Compute Aspect Ratio
+    aspect_ratio = viewport_w / max(viewport_h, 1)
+    
+    # 2. Check Projection Type and Update Shader Defines
+    is_perspective = camera.isPerspectiveCamera
+    # Assume current_perspective is tracked externally or derived from shader state
+    # This step modifies material state, which is outside pure function scope, 
+    # so we return the flag for the caller to handle or assume material is passed.
+    # For this self-contained function, we just compute the values.
+    
+    # 3. Compute Projection Matrix
+    # Standard perspective projection matrix construction [G]
+    # fov_deg is in degrees, convert to radians
+    fov_rad = np.radians(fov_deg)
+    f = 1.0 / np.tan(fov_rad / 2.0)
+    near = 0.01
+    far = 100.0
+    proj = np.array([
+        [f / aspect_ratio, 0, 0, 0],
+        [0, f, 0, 0],
+        [0, 0, (far + near) / (near - far), -1],
+        [0, 0, (2 * far * near) / (near - far), 0]
+    ], dtype=np.float32)
+    
+    # 4. Compute View and Model Matrices
+    view = _build_view_matrix()
+    model = _build_model_matrix()
+    
+    # 5. Compute MVP Matrix
+    mvp = (proj @ view @ model).astype(np.float32)
+    
+    # 6. Transform Camera Direction to Object Space
+    # Get world direction (normalized)
+    world_view_direction = camera.getWorldDirection()
+    # Compute inverse of Model-View matrix for direction transform
+    # Note: Model-View is view @ model. Inverse is (view @ model)^-1 = model^-1 @ view^-1
+    # Sources use Minv, implying the inverse of the combined transformation applied to vertices.
+    # For a direction vector, we only need the upper 3x3 rotation part of the inverse.
+    mv = view @ model
+    mv_inv = np.linalg.inv(mv)
+    local_view_direction = world_view_direction @ mv_inv[:3, :3]
+    
+    # 7. Transform Camera Position to Object Space
+    world_camera_position = camera.getWorldPosition()
+    # For position, we use the full 4x4 inverse, treating position as a point (w=1)
+    pos_homogeneous = np.array([world_camera_position[0], world_camera_position[1], world_camera_position[2], 1.0])
+    local_pos_homogeneous = mv_inv @ pos_homogeneous
+    local_camera_position = np.array([local_pos_homogeneous[0], local_pos_homogeneous[1], local_pos_homogeneous[2]])
+    
+    return mvp, local_view_direction, local_camera_position
+```
+
+**Parameters:**
+- `ENABLE_PERSPECTIVE_PROJECTION`: Shader define flag. If present, fragment shader uses perspective projection logic; if deleted, it uses orthographic logic [S2, unofficial].
+- `u_time`: Uniform set to `0.0` (hardcoded, noted as FIXME) [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Division by Zero:** Aspect ratio calculation uses `max(viewport_h, 1)` to prevent division by zero if height is 0 [S1, unofficial].
+- **Shader Synchronization:** Failure to update `material.needsUpdate` when projection type changes will result in incorrect rendering [S2, unofficial].
+- **Vector vs. Point Transformation:** Direction vectors should not be translated; using the full 4x4 matrix inverse on a direction vector without homogenization or ignoring the translation column can introduce errors [G]. The sources imply `applyMatrix4` handles this correctly for directions [S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ for matrix multiplications and vector transformations, assuming fixed-size 4x4 matrices.
+- **Memory Complexity:** $O(1)$ for storing the MVP matrix and transformed vectors.
+- **Strengths:** Centralizes transformation logic for overlays; handles both perspective and orthographic projections seamlessly via shader defines [S2, unofficial].
+- **Limitations:** The `u_time` uniform is hardcoded to 0.0, limiting dynamic time-based effects in overlays [S2, unofficial]. The method relies on specific helper functions (`_build_view_matrix`, `_build_model_matrix`) whose implementation details are not provided [S1, unofficial].
+- **When to Use:** When rendering 3D overlays (boxes, meshes) aligned with the camera view in a volume rendering pipeline [S1, S2, unofficial].
+- **When Not to Use:** When dynamic time-based shader effects are required for overlays without modifying the hardcoded `u_time` [S2, unofficial].
+
+## Background
+This method is derived from the `unray` and `clearvolume-plus` projects, which are unofficial implementations of volume rendering tools [S1, S2, unofficial]. It addresses the need for consistent coordinate transformation between camera space and object space for overlay rendering in web-based or Python-based volume visualization frameworks. The approach of using shader defines to toggle projection types is a common pattern in WebGL-based renderers [S2, unofficial].
+
+## Sources
+[S1] xwghua/clearvolume-plus, https://github.com/xwghua/clearvolume-plus, fetched 2026-10-26 (unofficial)
+[S2] vidartf/unray, https://github.com/vidartf/unray, fetched 2026-10-27 (unofficial)

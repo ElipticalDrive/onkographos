@@ -1,0 +1,830 @@
+Tile and Slide : A New Framework for Scaling NeRF from Local to Global 3D
+Earth Observation
+Camille Billouard1,2
+Dawa Derksen1
+Alexandre Constantin1
+camillebillouard314@gmail.com
+dawa.derksen@cnes.fr
+alexandre.constantin@cnes.fr
+Bruno Vallet2
+arXiv:2507.01631v2 [cs.CV] 31 Jul 2025
+bruno.vallet@ign.fr
+1
+2
+CNES, Toulouse, France
+Univ Gustave Eiffel, ENSG, IGN, LASTIG, F-94160 Saint-Mandé, France
+Figure 1. We propose a new framework, to scale up NeRFs without scaling up hardware requirements by an out-of-core strategy. Top row
+represents: Novel View Synthesis (NVS). Second row: the corresponding depth map with highest part in dark blue and lowest in red. The
+2\times 2 window shows the dynamic adjustment to focus on unexplored regions while maintaining persistent information.
+Abstract
+Neural Radiance Fields (NeRF) have recently emerged
+as a paradigm for 3D reconstruction from multiview satellite imagery. However, state-of-the-art NeRF methods are
+typically constrained to small scenes due to the memory
+footprint during training, which we study in this paper. Previous work on large-scale NeRFs palliate this by dividing
+the scene into NeRFs. This paper introduces Snake-NeRF,
+a framework that scales to large scenes. Our out-of-core
+method eliminates the need to load all images and networks
+simultaneously, and operates on a single device. We achieve
+this by dividing the region of interest into NeRFs that 3D
+tile without overlap. Importantly, we crop the images with
+overlap to ensure each NeRFs is trained with all the neces-
+sary pixels. We introduce a novel 2\times 2 3D tile progression
+strategy and segmented sampler, which together prevent 3D
+reconstruction errors along the tile edges. Our experiments
+conclude that large satellite images can effectively be processed with linear time complexity, on a single GPU, and
+without compromise in quality.
+1. Introduction
+Mapping the Earth in 3D has been a longstanding goal in
+various communities, spanning from Computer Vision to
+Remote Sensing [49, 65].
+In this domain, the Neural Radiance Field (NeRF, [37])
+has emerged as a versatile paradigm for novel view synthe-
+sis and 3D reconstruction and demonstrates state-of-the-art
+performance on street-level imagery “in the wild” [9, 23,
+33, 60]. More widely, the success of Neural Fields has triggered a large number of studies taking the concept far beyond handheld cameras [17]. NeRFs are particularly interesting for overhead imagery due to their ability to handle
+various data sources (e.g. LiDAR and optical [19]) within a
+common 3D representation.
+In the context of Remote Sensing, NeRF-based methods promise to handle the challenges of multi-date imagery,
+including varying lighting conditions [13], transient objects [31], radiometric shifts [32], and seasonal effects [16].
+Nonetheless, to be effective in operational settings, extensive areas spanning dozens to hundreds of square kilometers need to be mapped in 3D. This raises the question
+of how to properly scale NeRFs to large areas. Following [11, 12, 25] we consider that an algorithm is scalable
+under 3 conditions.
+1. The algorithm should run in linear time (or faster) with
+respect to the input size : time = O(N )
+2. The runtime memory should never exceed a fixed memory budget : memory = O(1)
+3. The tiled algorithm As and the reference (untiled) algorithm A should produce similar quality, if not identical
+results on any input x : As (x) ≈ A(x)
+The definition of scalability concerns the ability to handle increasing input sizes efficiently. In our case, the input
+size is the total number of pixels N = Nim × AROI × SR2 .
+This paper focuses on scaling to a larger surface area AROI
+while considering as constant the number of images Nim ,
+and the Spatial Resolution SR (in pix/m).
+Previous research works show that NeRFs do not trivially scale to large scenes [28, 46, 50, 56, 59]. Intuitively, larger scenes contain more information, and therefore should require either larger NeRFs, or multiple NeRFs.
+Considering that the memory footprint during training is
+linearly proportional to NeRF size, the first solution is impossible (condition 2). This motivates the need for a principled approach to seamlessly train multiple NeRFs on a large
+scene with a limited GPU memory budget.
+This paper presents a novel approach for scaling NeRFs
+to large images, specifically adapted to overhead imagery
+(satellite, airborne, UAV, ...). Our contributions can be listed
+as follows:
+• A tiling strategy based on a square grid according to
+east/north (UTM coordinates), adapted to large-scale
+Earth Observation scenes with an extremely low Z variation (≈200m) compared to the other axes (≈10km).
+• A 2\times 2 sliding window mechanism to ensure each ray is
+used at least once in a training batch with all the necessary
+NeRFs in memory.
+• A segmented ray sampler that samples per-bounding box,
+rather than on the entire ray, to guarantee seamless ren-
+dering along rays that intersect multiple bounding boxes.
+• Experimental results on a benchmark dataset of Very
+High Spatial Resolution (VHRS) multi-view satellite images [26] that highlights:
+– The ability to effectively train a set of non-overlapping
+NeRFs on a single GPU without introducing 3D reconstruction errors along the edges of their domains.
+– The importance of our design choices, particularly the
+use of multi-resolution hash tables to encode the geometry of the scene combined with a global color network
+as in NeRF-XL [28].
+2. Related works
+3D models of the surface are useful for many downstream
+Earth Observations applications, including land cover classification, flood simulation, image orthorectification [24],
+Digital Twins for disaster response [58], environment impact analysis [30].
+2.1. Neural fields for satellite imagery
+In this context, NeRFs have proven to be an elegant solution
+to handling many of the challenges of multi-date satellite
+imagery.
+Shadow-NeRF [13] tackled the issue of varying lighting conditions, while Sat-NeRF [31] improved the camera
+model and introduced the notion of transient uncertainty.
+Notable contributions to the field include: EO-NeRF [32]
+for geometric shadow mapping, Season-NeRF [16] for
+seasonal effects, BRDF-NeRF [63] which incorporates a
+physics-based Bidirectional Reflectance Distribution Function (BRDF), SparseSat-NeRF [62] in sparse views context,
+Sat-mesh [41] for extracting meshes. Recent works [39, 45]
+propose to improve pan-sharpening, or to extract semantic
+classes [52]. Another topic of study is the application of
+neural fields to Synthetic Aperture Radar [14]. Across altitudes, NeRFs have been used to extract the 3D geometry
+of space objects (e.g. satellites, debris) in orbit [20, 34], on
+asteroids [8] and on the Moon [1].
+Several works have taken a key step towards scaling, by
+accelerating the training time from a dozen hours to a few
+minutes per scene. This has been achieved using Tensorial
+Decompositions (Sat-TensoRF) [64] Neural Graphics Primitives (SAT-NGP) [6], and more recently Gaussian Splatting
+(EOGS) [2].
+While Gaussian Splatting [21] has shown promise in 3D
+reconstruction in satellite imagery [2], its application to
+large-scale imagery presents significant challenges. Specifically, the approximation of satellite sensors as affine cameras, which works well for smaller images, introduces precision errors at larger scales. This leads to inaccuracies in
+mapping pixel locations to ground coordinates, which is
+crucial for accurate ray casting. This limitation is critical
+in the context of large-scale satellite imagery, where high
+precision is essential for accurate 3D reconstruction.
+However, none of these works truly scale to large areas,
+because they do not respect the 3 conditions given in Section 1. The reason is that for large areas the volume of training rays exceeds the memory budget.
+vide the scene into multiple NGP representations [6, 38]
+without overlap. In contrast to NeRF-XL, we propose a
+single GPU framework that does not modify the original
+NeRF rendering equation or the loss function [37], in order to accommodate more complex loss functions in the future [4, 13, 31, 33].
+2.2. Large-scale NeRF
+3. Problem formulation
+Much of the research into scaling NeRFs is based on the
+idea of dividing the scene into multiple NeRFs [35, 48, 51,
+54, 55, 57]. This idea first emerged in Kilo-NeRF [42], who
+proposed to distill a pretrained NeRF into a large number
+of NeRFs following a 3D voxel grid. This is done in an effort to reduce inference cost and enable real-time rendering.
+Alone, this idea does not scale to large areas, as it requires
+a pre-trained “reference/teacher” NeRF to distill the color
+and density outputs directly into the “student” NeRFs (without ray rendering). Nonetheless, the idea of sub-division
+of the scene into smaller, non-overlapping NeRFs is fundamental to our scaling approach. Kilo-NeRF showed that
+improved rendering speed and identical quality could be
+achieved with a regular subdivision as long as each NeRFs
+receives all the information required to learn its 3D domain.
+Two relevant steps towards scaling NeRFs were BlockNeRF and Mega-NeRF [46, 50]. The authors addressed
+the issue of scaling NeRF using a set of centroids, which
+equates to dividing the scene into NeRFs with overlap. The
+rays are rendered according to the NeRFs that they intersect.
+This is done by combining the inference results weighted by
+a function of the distance of each sample to the NeRFs centroid. While the edge errors could be handled in this way,
+we believe that NeRF overlap should be avoided entirely to
+reduce redundant storage of information and optimize rendering time.
+Grid-guided NeRF [56] introduced a hybrid between
+grid-aligned local NeRFs with a multi-resolution 2D feature
+grid representation (a Tensorial Radiance Field). While this
+solution scales elegantly to larger areas due to the pyramidal
+nature of the representation, they did not address the issue
+of information division in the feature grid, and scaling to arbitrarily large areas which would require feature grids that
+would no longer fit into memory.
+Since then, NeRF-XL [28] proposed massively parallel
+training by dispatching each NeRFs on its own GPU. This
+work is particularly relevant as they entirely avoid overlap
+in the NeRFs. This is achieved by introducing a segmented
+rendering equation that aggregates the transmittance and estimated color of each ray segment into a final pixel color.
+NeRF-XL introduced the idea of sharing the color network
+across NeRFs, which regularizes appearance across large
+areas.
+While these approaches share similarities to ours, one
+difference with Block-NeRF and Mega-NeRF is that we di-
+Our fundamental goal is to transform large multi-view satellite images into local, efficient volumetric representations
+that can be used for 3D reconstruction, novel view synthesis, and to extract domain-specific features of interest
+(albedo, shadows, transient objects, etc.).
+To prove the ability to function within a real-world setting, we constrain our framework to the minimal case: a
+single GPU device. Under this hard constraint, entire sets
+of multi-view satellite images cannot be loaded into memory at once. For a typical scene of interest (10km by 10km
+at 30cm Ground Sample Distance) covered by 20 satellite
+images, the image set weights 200GB and we estimate that
+a NeRF covering this area at image resolution would weight
+around 600GB. Furthermore, the ray origin and direction
+vector needs to be stored during training for each ray (in
+float32 for sufficient precision) which would add 1.4TB.
+Such volumes obviously do not fit on a single GPU. In this
+paper, we propose solutions to address this problem:
+• A partition of the 3D scene of interest in individual tiles
+• A cropping mechanism to load exactly the relevant parts
+of the images during training. This is different from ray
+batching, which occurs on each individual partition.
+• An on-the-fly computation of ray coordinates from the
+RPCs of each image
+Catastrophic forgetting
+Tiling NeRFs require special care to avoid catastrophic forgetting. We perform a simple experiment to illustrate the
+impact of naı̈ve image cropping on a single NeRF. First,
+we divide the area into a 2\times 2 grid following the XY
+(East/North) directions. We call R the ray set that covers
+the whole scene, and Ri a subset of rays that intersects with
+a sub-division of the scene, with i ∈ {1, . . . , 4}, indicating the lower left, upper left, lower right, and upper right
+quadrants. For this experiment we train the NeRF in four
+sequential rounds, using samples from each subsets of rays
+Ri , one at a time.
+Figure 2 shows that training on a subset of rays {Ri , i >
+1} leads to a loss of information on rays {Rj , j < i}. This
+phenomenon is largely known within the Deep Learning
+community as Catastrophic Forgetting [22]: when a neural
+network is re-trained with new data that covers a different
+region of the input domain than its training data, it may no
+longer produce coherent results on the previously seen domain.
+4. Proposed method
+Figure 2. Catastrophic forgetting on the scene JAX 214 from [26].
+We train a NeRF by sampling only from rays in one area at a time.
+Each time we train a new area, the NeRF progressively forgets the
+other areas.
+This experiment shows an example on JAX 214 scene
+where once the image crops of a trained area are unloaded,
+the NeRF is unable to learn new areas without forgetting
+the previously learned ones. We propose to overcome this
+by dividing the scene into non-overlapping NeRFs. This allows us to store persistent information in the NeRFs that
+are already trained. Our approach guarantees by construction that after fully training a NeRFs, the information that it
+has learned can not be lost.
+Divide and conquer
+Kilo-NeRF [42] observes that multiple non-overlapping
+NeRFs are far more efficient in terms of memory and rendering speed than a single large NeRF [42]. When the
+NeRFs are trained with all the necessary information, the
+rendering quality is equivalent to the single model. Therefore, we seek to propose a straightforward and simple approach to divide the scene into NeRFs, without heavily
+changing the standard pipeline of NeRF training and inference.
+Second row of Figure 9 shows that simply tiling the images and reconstructing each area as a separate NeRF incurs errors along the edges of the tiles. Indeed, most 3D
+reconstruction algorithms rely on a spatial neighborhood of
+pixels in the images to extract the altitude of the visible surfaces [5, 15, 27, 36, 43]. Near the edges of a 3D tile, the spatial neighborhood is incomplete, which leads to errors in the
+3D reconstruction. In many cases, the solution to this problem is to 3D tile the scene with overlapping margins and to
+stitch the 3D maps along the 3D tile edges. A common strategy is to statistically aggregate the altitude/density/color
+predictions in overlapping areas [46, 50], weighted according to the distance to the 3D tile edge. However, this may
+incur blurring or other errors in the overlap area [10, 28].
+Instead, we seek to avoid overlap altogether, given
+that non-overlapping NeRFs are generally faster and more
+memory-efficient than overlapping NeRFs. As shown
+in Kilo-NeRF [42] and NeRF-XL [28], non-overlapping
+NeRFs are able to produce fast, high-quality rendering, if
+they are trained with all of the necessary information.
+We aim to define a neural radiance field over a large 3D
+scene by tiling this scene and defining an individual NeRF
+on each 3D tile.
+First, in Section 4.1, we specify the architecture of the
+NeRFs that we use to describe a radiance field over a 3D
+tile. In Section 4.2, we present the process of partitioning the 3D scene into non-overlapping tiles. In Section 4.3,
+we explain the partitioning of images based on their ground
+coverage. Next, in Section 4.4, we introduce the window
+displacement process over the entire scene. Finally, in Section 4.5, we detail our segmented sampling mechanism.
+4.1. NeRFs architecture
+A NeRF is a network that predicts the color of a scene
+viewed from a certain point. This is achieved by generating a 3D ray from each pixel of the rendered scene and
+sampling points along this 3D ray. A NeRF receives the
+coordinates of these samples in the [0; 1]3 space mapped
+to the corresponding ground 3D tile. We chose the NGP
+representation [38] in which these coordinates are used to
+query multi-resolution feature vectors. The feature vectors
+are provided as input to a local density network that outputs the density estimation at the given coordinate, and a
+feature vector which we call the density embedding. This
+embedding, in turn, forms the input of a global color network which is shared across NeRFs. We take inspiration
+from NeRF-XL [28], which demonstrates the regularizing
+effect of a global color network.
+Additionally, the NGP features and density networks
+are trained with individual optimizers and schedulers. The
+global color network has its own separate optimizer and
+scheduler. We experimentally find that pursuing learning
+without resetting the learning rate favors more effective and
+continuous learning. During training, we follow the standard procedure of SAT-NGP [6] and cull samples that fall
+in empty space using a coarse voxel grid. The voxel density
+is used to provide the sample density for each ray segment.
+4.2. 3D tiles generation
+The first step is to 3D tile the region of interest (ROI) following a regular square grid [50, 56] along the east-north
+UTM coordinates. In our experiments, we consider a simplified scenario where the minimum and maximum Z values
+are known in advance. These altitude bounds are equal for
+all bounding boxes.
+These coordinates will be used to crop the images, and
+therefore define the ray batches. Moreover, we perform
+UTM-to-local transformation of ray origins and directions
+to ensure the samples fall within the [0; 1]3 space known to
+be required for NeRF training [13]. Figure 3 illustrates this
+3D tiling.
+ure 9). Therefore, without overlap, loading multiple NeRFs
+into memory becomes necessary at some point during training to properly learn the edges between their domains.
+For this reason and to ensure optimal utilization of GPU
+memory, regardless of its capacity, we propose a consistent
+approach of training 4 NeRFs at a time, following a 2\times 2
+window. Importantly, we include rays that fall within any
+of the 4 NeRFs loaded in memory, and exclude rays that
+intersect with NeRFs not loaded in memory. See Figure 5
+for a simple 1D example.
+Figure 3. Individual non-overlapping tiles are defined relative to
+their specific UTM partitions, ensuring contiguous spatial segmentation. The partitioning of images is based on their ground coverage, taking into account the minimum and maximum altitudes.
+The highlighted areas in orange and purple indicate regions where
+the projections of the 3D tiles in the image overlap.
+4.3. Image crop from ground tiles
+Thanks to the RPC camera model [3], we can project points
+from the 3D space to image coordinates. For each 3D tile
+and each input image, we create a crop of the images containing the projections of the 8 corners of the 3D tile. To
+limit the memory footprint, when processing a set of tiles,
+we will load only the corresponding NeRFs and crops. This
+approach guarantees that the 3D tile of each loaded NeRF
+is fully covered by the loaded images (see Figure 3). This
+alleviates the need to fully load an entire large image into
+memory at any moment, something that is commonly overlooked in NeRF pipelines.
+4.4. Sliding window
+In the overhead scenario, given the low incidence angle of the satellite, each ray can intersect at most
+3 tiles.
+We call the rays intersecting more than
+one 3D tile shared rays (Figure 4).
+Consider the
+setting where a single NeRF is trained at a time.
+In this scenario, if the shared
+rays are included as training rays,
+they will not be able to propagate
+any gradient onto the neighboring
+NeRFs that are not loaded in memory. This means that objects outside the bounding box will be explained as “floaters” (density estiFigure 4. View from
+mation errors) inside the bounding
+above, orange ray
+box, as shown in Figure 9. On the
+intersecting a maxiother hand, excluding shared rays
+mum of 3 NeRFs.
+altogether results in a low information density along the edges of the 3D tile also incurs density estimation errors. This phenomenon occurs systematically along the edges of the overall region of interest (Fig-
+Figure 5. Rays (purple arrows) intersecting only bounding box
+currently in memory (blue), will be accepted for sampling. Conversely, rays (yellow arrows) intersecting a NeRF that is not currently in memory (red) will not be accepted.
+Near the edge of the 2\times 2 area, the rays that intersect NeRFs not loaded in memory are excluded. This
+implies a lower information density in this area.If the
+area has not yet been learned, this introduces reconstruction errors. However, these excluded rays will be
+accepted and processed when the sliding window advances over them, thereby correcting any reconstruction
+errors. If the area has already been learned, we find
+that the low information density does not cause catastrophic forgetting. Applying the standard NeRF color consistency loss [37] on rays that intersect only the NeRF
+in memory is sufficient to preserve learned information.
+After a fixed number of iterations, we
+slide the 2\times 2 window across the
+scene to cover the entire area, following the ”snake” pattern in Figure 6. This implies that each NeRF is
+trained 1, 2 or 4 times respectively for
+corners, edges, and central tiles. This
+strategy maintains high spatial localFigure 6. Window sliding path
+ity by reducing the distance between
+in a 4\times 4 grid.
+grid areas to be processed and minimizing the need to reload recently processed data. This
+strategy ensures that only the 2 adjacent NeRFs models are
+loaded or unloaded into memory. A key to the success of
+our method relies on continuing the training rounds without
+resetting the optimizer. If the rays that the NeRF has already
+seen are discarded from the training batch, the NeRF suffers
+from catastrophic forgetting, illustrated in Section 3. Presenting the NeRF with information it has already received
+is akin to a recall strategy that is commonly used in Continual Learning [7, 40, 44, 53, 61].
+Once the rays that intersect all 4 NeRFs are computed,
+we randomly select a batch of rays for stochastic gradient
+descent. We perform the standard NeRF procedure on these
+rays: sampling, rendering, and propagating the color consistency loss [37] onto the parameters of the representation.
+4.5. Segmented sampler
+A key component of our algorithm is to sample along an entire ray which is crossing multiple NeRFs. For each NeRF
+viewed by a ray, we identify near/far (resp. N/F) rays as
+shown in Figure 7.
+Figure 7. Ray segmentation before sampling (left) ensuring domain continuity, in contrast to a ray that is sampled and then distributed based on its belonging to the NeRF (right). Ni for near i,
+Fi for far i and Si for segment i
+Figure 7 shows the difference between our proposed
+sampling and NeRF-XL sampling distribution across models. Rather than sampling along the entire ray (and distributing the samples across NeRFs) we propose to sample separately on each ray segment S1 and S2 , after identifying
+near/far points at the edges of the tiles. We find that this
+avoids false creation of matter near the limit between two
+segments (see Figure 8). This stems from the observation
+that NeRFs are unable to precisely learn near the borders
+of a 3D domain if the near/far points do not fall exactly on
+the limits of this domain. In the Figure 7, our method on
+the left guarantees continuity of the domain (purple dot),
+whereas the method on the right does not ensure this continuity and introduces uncertainty at the boundaries. We
+believe this phenomenon may be accentuated in our case
+due to the sparse number of views (10–20) compared to the
+datasets used in NeRF-XL with typically hundreds of views.
+One may observe that the point at the intersection between the ray and the bounding box is sampled twice. First
+as the far bound of S1 and again as the near bound of S2 .
+Considering that the NeRF rendering (Equation (3) [37])
+takes into account the δx between successive samples, the
+density estimation at N2 will be ignored in the rendering.
+Thankfully, the bounding box is crossed from both sides, so
+even with relatively sparse views, the NeRFs at either side
+are able to correctly learn the density along the edge.
+Figure 8. Left: novel view synthesis, Right: depth map. When
+training with uniform sampling (NeRF-XL, [28]), we observe a
+thin wall of hallucinated matter along the edges of the tiles.
+4.6. Implementation
+We release an open-source highly parallelized implementation of our method, leveraging the computational power of
+modern GPUs to achieve efficient and scalable performance
+thanks to the following contributions :
+• On-the-fly Ray Calculation: We compute the origin and
+direction of rays on-the-fly, in a massively parallelized
+manner with custom CUDA kernel. To the best of our
+knowledge, other methods in 2.1, pre-calculate all rays
+in float32 (crucial for maintaining high precision). Our
+approach avoids storing all rays in memory.
+• Dynamic Segment Distribution: The distribution of segments is also performed utilizing massively parallelized
+custom CUDA kernel. In our parallelized approach, computation times are reduced by a factor of 10 compared to
+sequential and non-parallelized settings, underscoring the
+efficiency of our method.
+Our implementation is built upon known frameworks
+: Nerfstudio [47] and NerfAcc [29]. By employing custom CUDA kernels, we achieve significant speed-ups and
+optimizations. The source code and all related data will
+be available, ensuring reproducibility and further research.
+The training procedure shares the same loss function and
+optimization strategy as I-NGP [38].
+5. Experimental results
+5.1. Dataset
+To demonstrate the validity of our approach in a controlled
+setting we base our experiments on the IEEE 2019 Data Fusion Contest [26]. This dataset contains over 60 scenes with
+between 10 and 20 pan-sharpened multi-view Worldview-3
+images at a 0.3m spatial resolution over Jacksonville and
+Omaha, USA.
+5.2. Experimental setup
+Our goal is to prove the capacity of our approach to effectively scale to large areas following the 3 conditions which
+we remind here. First, the computation time should be at
+most linear with respect to the input size, in our case, the
+area of the region of interest. Second, the memory footprint
+should never go beyond a fixed limit. Third, the result of the
+scaled and unscaled algorithms should at least be similar, if
+not identical.
+The NeRF framework allows us to control the computation time by increasing or decreasing the number of iterations. Suppose each training iteration takes a time tit . We
+fix the number of iterations per NeRF to nit , which results
+in a linear time complexity with respect to the total number
+of NeRFs per row (H) and column (W ), Nnerfs = HW ,
+used over the area of interest.
+a reference. We seek to quantify the error introduced by
+the unscaled algorithm, independently of the errors of the
+reference. We perform this evaluation on the Novel View
+Synthesis task by measuring the Peak Signal to Noise Ratio / Structural SIMilarity (PSNR/SSIM) between images,
+as well as on the 3D reconstruction task by measuring the
+Mean Absolute Error (MAE) between the depth maps.
+5.4. Results and analysis
+time = tit Nnerfs Nit = tit HW nit .
+While we can select any values for H and W , we postulate that the optimal value of HW should increase proportionally (w.r.t.) the area of the region of interest.
+The second condition is theoretically verified due to the
+fact that we only need to load ray subsets and 4 NeRFs at
+a time in memory, which can be dimensioned to fit within
+any GPU memory.
+The third condition is difficult to prove theoretically
+given the stochastic nature of gradient descent. With different initializations, the NeRFs will not converge to a strictly
+identical solution as a global NeRF trained on the same data.
+We therefore seek to verify the third condition empirically
+by showing that the scaling approach does not introduce
+any significant reconstruction errors, particularly along the
+edges of the NeRFs.
+To quantify the similarity of the scaled and unscaled algorithms, we compare the images Novel View Synthesis
+(NVS) and depth maps (DSM) of :
+• The reference algorithm (ideal case with unlimited memory), equivalent to running a single NeRF on the entire
+scene with all images at same time,
+• Unscaled algorithm training the NeRFs one at a time.
+• Our scaled approach, Snake-NeRF (Section 4).
+These experiments cannot be accomplished on a large
+area given that the reference needs to be executable for the
+comparison. Therefore we focus this comparison on four
+small areas and verify the equivalency of the scaled and reference algorithms on different urban landscapes.
+5.3. Evaluation metrics
+We evaluate the quality of our scaling algorithm in 2 distinct ways. First we evaluate the absolute quality of the
+generated images and DSMs by comparing the reference,
+unscaled, and scaled versions to the ground truth test images and LiDAR DSM. We consider scaling to be successful if the scaled algorithm reaches the same performance as
+the reference algorithm.
+Second we evaluate the relative quality of the scaled and
+unscaled algorithms, considering the reference algorithm as
+Figure 9. The reference algorithm (Top), utilizes a single model
+to learn the entire scene. Errors are caused by shadows and transient effects. The unscaled case (Middle) where a single NeRFs
+is trained at a time, demonstrates significant artefacts along the 3D
+tile edges. Snake-NeRF (Bottom) shows similar performance to
+the reference algorithm, while being applicable to large areas.
+Figure 9 illustrates the Novel View Synthesis on an unseen test image (left) and the depth map (right) for the three
+methods we compare. In the top row, we show the reference
+algorithm, where the entire scene is contained in a single
+block. We observe that errors occur in areas affected by
+shadows and transient objects.
+The second row displays unscaled algorithm, that involves training each NeRF independently, while including
+rays that intersect neighboring bounding boxes. This clearly
+introduces boundary reconstruction errors, most evident in
+the depth map where density errors appear on the bounding
+box edges. This occurs because the NeRFs attempt to explain density and color that is outside their bounding box
+by hallucinating matter within their bounding box, as mentioned in Section 4.4.
+The final row demonstrates our proposed scaling
+method. As shown in Table 1, the NVS results closely
+Table 1. Quantitative evaluation of our proposed method across four distinct JAX datasets. The table presents absolute PSNR and SSIM
+values relative to the ground truth, alongside comparative metrics against a reference algorithm. Optimal results are highlighted in bold.
+Additional comparative analyses are provided in the supplementary materials.
+JAX 214
+JAX 175
+JAX 165
+JAX 168
+PSNR
+SSIM
+MAE
+PSNR
+SSIM
+MAE
+PSNR
+SSIM
+MAE
+PSNR
+SSIM
+MAE
+(abs/rel)
+(abs/rel)
+(rel)
+(abs/rel)
+(abs/rel)
+(rel)
+(abs/rel)
+(abs/rel)
+(rel)
+(abs/rel)
+(abs/rel)
+(rel)
+19.10/-
+0.90/-
+-
+19.72/-
+0.83/-
+-
+16.21/-
+0.79/-
+-
+19.34/-
+0.84/-
+-
+Unscaled
+15.82/16.22
+0.72/0.78
+0.07
+14.4/15.53
+0.59/0.62
+0.08
+15.13/15.97
+0.61/0.68
+0.09
+15.90/16.42
+0.74/0.79
+0.06
+Ours: grid 3\times 3
+19.30/21.80
+0.86/0.93
+0.06
+19.45/26.14
+0.80/0.94
+0.03
+17.3/23.86
+0.81/0.94
+0.03
+19.20/26.02
+0.80/0.93
+0.03
+Ours: grid 4\times 4
+19.16/23.22
+0.87/0.95
+0.06
+18.96/24.42
+0.77/0.91
+0.04
+17.9/24.10
+0.80/0.95
+0.04
+19.53/26.09
+0.81/0.94
+0.02
+Methods
+Reference case
+resemble the unscaled version, achieving similar PSNR
+SSIM. The depth map contains no visible error patterns
+along the edges of the boundaries, indicating that our
+method effectively learns the continuity between neighboring domains of our NeRFs models. In fact, we observe
+that the differences between Snake-NeRF and the unscaled
+version (Figure 10, bottom) are concentrated on the areas
+where the NeRF is uncertain [18]. Given the simplistic
+NeRF model employed in this experiment, elements such as
+shadows, transient objects, and particularly water (visible in
+the top left of the Middle and Bottom depth maps) present
+inherent modeling challenges. These difficulties lead to instability across various model initializations. This explains
+the difference in Table 1, between the Reference case and
+our Scaled method.
+Figure 10. Differences between depth maps considering the reference algorithm. The unscaled case (Top), where each NeRFs
+is learned separately, hallucinates false matter along the 3D tile
+edges. For Snake-NeRF (Bottom), the differences are concentrated in areas that are ambiguous in the dataset (water, shadows,
+transient objects).
+6. Conclusion
+In conclusion, our research introduces an innovative solution to the challenge of scalability in 3D reconstruction using NeRF methods with high-resolution satellite imagery.
+Our approach is versatile and can be applied to scale various NeRF solutions proposed for satellite imagery, including Sat-NeRF [31], EO-NeRF [32], Season-NeRF [16], and
+SUNDIAL [4].
+Our experiments show that scaling to large satellite images is possible with a NeRF framework, as long as:
+• Each ray is trained with all intersecting NeRFs in memory
+• Each NeRF is continuously trained with sufficient information density across its entire input domain (X, Y, Z)
+7. Limitations and future work
+To validate our scaling algorithm in a controlled scenario,
+we utilized an open dataset that covers relatively small areas [26]. In fact, there are no publicly available datasets
+of multi-view satellite imagery over large areas on which
+we can release reproducible results, preventing further comparisons with multiple sets of data. Our hope is that the
+open-source release of our code will enable private owners
+of such datasets to benefit from our scaling methodology.
+Additionally, our method does not incorporate the latest
+advancements in NeRFs for 3D Earth Observation, such as
+explicit modeling of shadows, transient objects, and albedo
+(or similar inverse rendering algorithms such as Gaussian
+Splatting [21]). Future work will explore the integration of
+these improvements within the context of scaling up.
+Finally, while we address the case for a single GPU, a
+multi-GPU extension could be beneficial to further speedup training times on large areas. Across different altitudes,
+our cropping method derived from the RPC projection function can also be adapted to aerial applications.
+8. Acknowledgements
+This work was performed using HPC resources from CNES
+Computing Center (DOI 10.24400/263303/CNES C3). The
+elevations figures was computed using xDEM package
+(DOI 10.5281/zenodo.4809697). The authors would like to
+thank the Johns Hopkins University Applied Physics Laboratory and IARPA for providing the data used in this study,
+and the IEEE GRSS Image Analysis and Data Fusion Technical Committee for organizing the Data Fusion Contest.
+References
+[1] Caleb Adams, Ignacio Lopez-Francos, Ariel Deutsch,
+Ellemieke Van Kints, and Aiden Hammond. Design and
+development of a neural surface rendering model for lunar
+satellite photogrammetry. image, 110:50, 2024. 2
+[2] Luca Savant Aira, Gabriele Facciolo, and Thibaud Ehret.
+Gaussian splatting for efficient satellite image photogrammetry. In 2025 IEEE/CVF Conference on Computer Vision
+and Pattern Recognition (CVPR 2025), 2025. 2
+[3] Roland Akiki, Roger Marı́, Carlo De Franchis, Jean-Michel
+Morel, and Gabriele Facciolo. Robust rational polynomial
+camera modelling for sar and pushbroom imaging. In 2021
+IEEE International Geoscience and Remote Sensing Symposium IGARSS, pages 7908–7911, 2021. 5
+[4] Nikhil Behari, Akshat Dave, Kushagra Tiwary, William
+Yang, and Ramesh Raskar. Sundial: 3d satellite understanding through direct ambient and complex lighting decomposition. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 522–532, 2024.
+3, 8
+[5] Ross A Beyer, Oleg Alexandrov, and Scott McMichael. The
+Ames Stereo Pipeline: NASA’s open source software for deriving and processing terrain data. Earth and Space Science,
+5(9):537–548, 2018. 4
+[6] Camille Billouard, Dawa Derksen, Emmanuelle Sarrazin,
+and Bruno Vallet. SAT-NGP: Unleashing neural graphics
+primitives for fast relightable transient-free 3D reconstruction from satellite imagery. In IGARSS 2024-2024 IEEE
+International Geoscience and Remote Sensing Symposium,
+pages 8749–8753. IEEE, 2024. 2, 3, 4
+[7] Zhipeng Cai and Matthias Müller. Clnerf: Continual learning
+meets nerf. In Proceedings of the IEEE/CVF International
+Conference on Computer Vision, pages 23185–23194, 2023.
+6
+[8] Shihan Chen, Bo Wu, Hongliang Li, Zhaojin Li, and Yi Liu.
+Asteroid-nerf: A deep-learning method for 3d surface reconstruction of asteroids. Astronomy & Astrophysics, 687:A278,
+2024. 2
+[9] Xingyu Chen, Qi Zhang, Xiaoyu Li, Yue Chen, Ying Feng,
+Xuan Wang, and Jue Wang. Hallucinated neural radiance
+fields in the wild. In 2022 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pages 12933–
+12942, 2022. 2
+[10] Yu Chen and Gim Hee Lee. Scalar-nerf: scalable largescale neural radiance fields for scene reconstruction. arXiv
+preprint arXiv:2311.16657, 2023. 4
+[11] Rémi Cresson, Julien Michel, Arnaud Mallen, and Pierre
+Lassalle. Large scale segmentation algorithm for object
+based image analysis suitable for hpc architectures in hybrid
+distributed-shared memory context. In GEOBIA 2018-From
+pixels to ecosystems and global sustainability, 2018. 2
+[12] Dawa Derksen, Jordi Inglada, and Julien Michel. Scaling up
+slic superpixels using a tile-based approach. IEEE transactions on Geoscience and Remote Sensing, 57(5):3073–3085,
+2019. 2
+[13] Dawa Derksen and Dario Izzo. Shadow neural radiance
+fields for multi-view satellite photogrammetry. In 2021
+IEEE/CVF Conference on Computer Vision and Pattern
+Recognition Workshops (CVPRW), pages 1152–1161, 2021.
+2, 3, 4
+[14] Thibaud Ehret, Roger Marı́, Dawa Derksen, Nicolas Gasnier, and Gabriele Facciolo. Radar fields: An extension of
+radiance fields to sar. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages
+564–574, 2024. 2
+[15] Gabriele Facciolo, Carlo de Franchis, and Enric MeinhardtLlopis. Automatic 3D reconstruction from multi-date satellite images. In 2017 IEEE Conference on Computer Vision
+and Pattern Recognition Workshops (CVPRW), pages 1542–
+1551, 2017. 4
+[16] Michael Gableman and Avinash Kak. Incorporating season
+and solar specificity into renderings made by a NeRF architecture using satellite images. IEEE Transactions on Pattern
+Analysis and Machine Intelligence, 46(6):4348–4365, 2024.
+2, 8
+[17] Kyle Gao, Yina Gao, Hongjie He, Denning Lu, Linlin Xu,
+and Jonathan Li. NeRF: Neural radiance field in 3D vision,
+a comprehensive review. arXiv e-prints, pages arXiv–2210,
+2022. 2
+[18] Lily Goli, Cody Reading, Silvia Sellán, Alec Jacobson,
+and Andrea Tagliasacchi. Bayes’ rays: Uncertainty quantification for neural radiance fields. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, pages 20061–20070, 2024. 8
+[19] Juyeop Han, Guilherme Cavalheiro, Josef Biberstein, Elham
+Alkabawi, Shahad Alqhatni, Fadwa Alaskar, Eman Bin Khunayn, and Sertac Karaman. Calisa-nerf: Neural radiance
+field with pinhole camera images lidar point clouds and satellite imagery for urban scene representation. In Proceedings
+of the Winter Conference on Applications of Computer Vision, pages 442–450, 2025. 2
+[20] Aneesh M Heintz and Mason Peck. Spacecraft state estimation using neural radiance fields. Journal of Guidance,
+Control, and Dynamics, 46(8):1596–1609, 2023. 2
+[21] Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler,
+and George Drettakis. 3d gaussian splatting for real-time
+radiance field rendering. ACM Trans. Graph., 42(4):139(1–
+14), 2023. 2, 8
+[22] James Kirkpatrick, Razvan Pascanu, Neil Rabinowitz, Joel
+Veness, Guillaume Desjardins, Andrei A Rusu, Kieran
+Milan, John Quan, Tiago Ramalho, Agnieszka GrabskaBarwinska, et al. Overcoming catastrophic forgetting in neural networks. Proceedings of the national academy of sciences, 114(13):3521–3526, 2017. 3
+[23] Zhengfei Kuang, Kyle Olszewski, Menglei Chai, Zeng
+Huang, Panos Achlioptas, and Sergey Tulyakov. NeROIC:
+Neural rendering of objects from online image collections.
+ACM Transactions on Graphics (TOG), 41(4):1–12, 2022. 2
+[24] Kartik Kuckreja, Muhammad Sohail Danish, Muzammal
+Naseer, Abhijit Das, Salman Khan, and Fahad Shahbaz
+Khan. Geochat: Grounded large vision-language model for
+remote sensing. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR),
+pages 27831–27840, June 2024. 2
+[25] Pierre Lassalle, Jordi Inglada, Julien Michel, Manuel Grizonnet, and Julien Malik. A scalable tile-based framework
+for region-merging segmentation. IEEE Transactions on
+Geoscience and Remote Sensing, 53(10):5473–5485, 2015.
+2
+[26] Bertrand Le Saux, Naoto Yokoya, Ronny Hansch, Myron
+Brown, and Greg Hager. 2019 data fusion contest [technical
+committees]. IEEE Geoscience and Remote Sensing Magazine, 7(1):103–105, 2019. 2, 4, 6, 8
+[27] Matthew J Leotta, Chengjiang Long, Bastien Jacquet,
+Matthieu Zins, Dan Lipsa, Jie Shan, Bo Xu, Zhixin Li, Xu
+Zhang, Shih-Fu Chang, et al. Urban semantic 3D reconstruction from multiview satellite imagery. In 2019 IEEE/CVF
+Conference on Computer Vision and Pattern Recognition
+Workshops (CVPRW), pages 1451–1460, 2019. 4
+[28] Ruilong Li, Sanja Fidler, Angjoo Kanazawa, and Francis
+Williams. Nerf-xl: Scaling nerfs with multiple gpus. In
+European Conference on Computer Vision, pages 92–107.
+Springer, 2024. 2, 3, 4, 6
+[29] Ruilong Li, Hang Gao, Matthew Tancik, and Angjoo
+Kanazawa. Nerfacc: Efficient sampling accelerates nerfs. In
+Proceedings of the IEEE/CVF international conference on
+computer vision, pages 18537–18546, 2023. 6
+[30] Yanwen Luo and Jiang He and. Evaluation of the urban heat
+island effect based on 3D modeling and planning indicators
+for urban planning proposals. Journal of Asian Architecture
+and Building Engineering, 0(0):1–23, 2024. 2
+[31] Roger Marı́, Gabriele Facciolo, and Thibaud Ehret. SatNeRF: Learning multi-view satellite photogrammetry with
+transient objects and shadow modeling using RPC cameras.
+In 2022 IEEE/CVF Conference on Computer Vision and Pattern Recognition Workshops (CVPRW), pages 1310–1320,
+2022. 2, 3, 8
+[32] Roger Marı́, Gabriele Facciolo, and Thibaud Ehret. Multidate earth observation NeRF: The detail is in the shadows.
+In Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition, pages 2034–2044, 2023. 2,
+8
+[33] Ricardo Martin-Brualla, Noha Radwan, Mehdi SM Sajjadi,
+Jonathan T Barron, Alexey Dosovitskiy, and Daniel Duckworth. NeRF in the wild: Neural radiance fields for unconstrained photo collections. In 2021 IEEE/CVF Conference
+on Computer Vision and Pattern Recognition (CVPR), pages
+7206–7215, 2021. 2, 3
+[34] Anne Mergy, Gurvan Lecuyer, Dawa Derksen, and Dario
+Izzo. Vision-based neural scene representations for spacecraft. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 2002–2011,
+2021. 2
+[35] Zhenxing Mi and Dan Xu. Switch-nerf: Learning scene decomposition with mixture of experts for large-scale neural
+radiance fields. In The Eleventh International Conference on
+Learning Representations, 2022. 3
+[36] Julien Michel, Emmanuelle Sarrazin, David Youssefi, Myriam Cournet, Fabrice Buffe, Jean-Marc Delvit, Aurélie Emilien, Julien Bosman, Olivier Melet, and Céline L’Helguen.
+A new satellite imagery stereo pipeline designed for scalability, robustness and performance. ISPRS Annals of the
+Photogrammetry, Remote Sensing and Spatial Information
+Sciences, 5-2-2020:171–178, 2020. 4
+[37] Ben Mildenhall, Pratul P Srinivasan, Matthew Tancik,
+Jonathan T Barron, Ravi Ramamoorthi, and Ren Ng. NeRF:
+Representing scenes as neural radiance fields for view synthesis. In Computer Vision – ECCV 2020, pages 405–421,
+2020. 1, 3, 5, 6
+[38] Thomas Müller, Alex Evans, Christoph Schied, and Alexander Keller. Instant neural graphics primitives with a multiresolution hash encoding. ACM Trans. Graph., 41(4), 2022. 3,
+4, 6
+[39] Emilie Pic, Thibaud Ehret, Gabriele Facciolo, and Roger
+Marı́. Pseudo pansharpening nerf for satellite image collections. In IGARSS 2024-2024 IEEE International Geoscience
+and Remote Sensing Symposium, pages 2650–2655. IEEE,
+2024. 2
+[40] Ryan Po, Zhengyang Dong, Alexander W Bergman, and
+Gordon Wetzstein. Instant continual learning of neural radiance fields. In Proceedings of the IEEE/CVF International
+Conference on Computer Vision, pages 3334–3344, 2023. 6
+[41] Yingjie Qu and Fei Deng. Sat-mesh: Learning neural implicit surfaces for multi-view satellite reconstruction. Remote
+Sensing, 15(17):4297, 2023. 2
+[42] Christian Reiser, Songyou Peng, Yiyi Liao, and Andreas
+Geiger. Kilonerf: Speeding up neural radiance fields with
+thousands of tiny mlps. In Proceedings of the IEEE/CVF
+international conference on computer vision, pages 14335–
+14345, 2021. 3, 4
+[43] Ewelina Rupnik, Mehdi Daakir, and Marc PierrotDeseilligny. MicMac–a free, open-source solution for photogrammetry. Open Geospatial Data, Software and Standards, 2(14), 2017. 4
+[44] Prajwal Singh, Ashish Tiwari, Gautam Vashishtha, and
+Shanmuganathan Raman. c3-nerf: Modeling multiple scenes
+via conditional-cum-continual neural radiance fields. arXiv
+preprint arXiv:2411.19903, 2024. 6
+[45] Michael Sprintson, Rama Chellappa, and Cheng Peng. Fusionrf: High-fidelity satellite neural radiance fields from
+multispectral and panchromatic acquisitions. arXiv preprint
+arXiv:2409.15132, 2024. 2
+[46] Matthew Tancik, Vincent Casser, Xinchen Yan, Sabeek Pradhan, Ben Mildenhall, Pratul P Srinivasan, Jonathan T Barron,
+and Henrik Kretzschmar. Block-nerf: Scalable large scene
+neural view synthesis. In Proceedings of the IEEE/CVF conference on computer vision and pattern recognition, pages
+8248–8258, 2022. 2, 3, 4
+[47] Matthew Tancik, Ethan Weber, Evonne Ng, Ruilong Li,
+Brent Yi, Terrance Wang, Alexander Kristoffersen, Jake
+Austin, Kamyar Salahi, Abhik Ahuja, et al. Nerfstudio: A
+modular framework for neural radiance field development.
+In ACM SIGGRAPH 2023 conference proceedings, pages 1–
+12, 2023. 6
+[48] Yifu Tao, Yash Bhalgat, Lanke Frank Tarimo Fu, Matias
+Mattamala, Nived Chebrolu, and Maurice Fallon. Silvr:
+Scalable lidar-visual reconstruction with neural radiance
+fields for robotic inspection. In IEEE International Conference on Robotics and Automation (ICRA), 2024. 3
+[49] Devis Tuia, Konrad Schindler, Begüm Demir, Xiao Xiang
+Zhu, Mrinalini Kochupillai, Sašo Džeroski, Jan N van Rijn,
+Holger H Hoos, Fabio Del Frate, Mihai Datcu, et al. Artificial intelligence to advance earth observation: A review
+of models, recent trends, and pathways forward. IEEE Geoscience and Remote Sensing Magazine, 2024. 1
+[50] Haithem Turki, Deva Ramanan, and Mahadev Satyanarayanan. Mega-NeRF: Scalable construction of largescale NeRFs for virtual fly-throughs. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, pages 12922–12931, 2022. 2, 3, 4
+[51] Haithem Turki, Jason Y Zhang, Francesco Ferroni, and Deva
+Ramanan. Suds: Scalable urban dynamic scenes. In Proceedings of the IEEE/CVF Conference on Computer Vision
+and Pattern Recognition, pages 12375–12385, 2023. 3
+[52] Valentin Wagner, Sebastian Bullinger, Christoph Bodensteiner, and Michael Arens. Semantic neural radiance fields
+for multi-date satellite data. In Proceedings of the Winter Conference on Applications of Computer Vision, pages
+1238–1246, 2025. 2
+[53] Yuze Wang, Junyi Wang, Chen Wang, Wantong Duan, Yongtang Bao, and Yue Qi. Scarf: Scalable continual learning framework for memory-efficient multiple neural radiance fields. In Computer Graphics Forum, volume 43, page
+e15255. Wiley Online Library, 2024. 6
+[54] Xiuchao Wu, Jiamin Xu, Xin Zhang, Hujun Bao, Qixing Huang, Yujun Shen, James Tompkin, and Weiwei Xu.
+Scanerf: Scalable bundle-adjusting neural radiance fields for
+large-scale scene rendering. ACM Trans. Graph., 42(6), Dec.
+2023. 3
+[55] Xiuchao Wu, Jiamin Xu, Zihan Zhu, Hujun Bao, Qixing
+Huang, James Tompkin, and Weiwei Xu. Scalable neural indoor scene rendering. ACM Trans. Graph., 41(4), July 2022.
+3
+[56] Linning Xu, Yuanbo Xiangli, Sida Peng, Xingang Pan,
+Nanxuan Zhao, Christian Theobalt, Bo Dai, and Dahua Lin.
+Grid-guided neural radiance fields for large urban scenes. In
+Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 8296–8306, 2023. 2, 3,
+4
+[57] Leyuan Yang, Bailin Deng, and Juyong Zhang. Scalable
+and high-quality neural implicit representation for 3D reconstruction. IEEE Transactions on Visualization and Computer
+Graphics, pages 1–17, 2025. 3
+[58] Sihan Yu, Qiyun Lei, Chao Liu, Nan Zhang, Shuaishuai
+Shan, and Xiaoming Zeng and. Application research on digital twins of urban earthquake disasters. Geomatics, Natural
+Hazards and Risk, 14(1):2278274, 2023. 2
+[59] Guangyun Zhang, Chaozhong Xue, and Rongting Zhang.
+SuperNeRF: High-precision 3D reconstruction for largescale scenes. IEEE Transactions on Geoscience and Remote
+Sensing, 2024. 2
+[60] Jason Zhang, Gengshan Yang, Shubham Tulsiani, and Deva
+Ramanan. NeRS: Neural reflectance surfaces for sparse-view
+3D reconstruction in the wild. Advances in Neural Information Processing Systems, 34:29835–29847, 2021. 2
+[61] Letian Zhang, Ming Li, Chen Chen, and Jie Xu. Il-nerf:
+Incremental learning for neural radiance fields with camera
+pose alignment. arXiv preprint arXiv:2312.05748, 2023. 6
+[62] Lulin Zhang and Ewelina Rupnik. Sparsesat-NeRF: Dense
+depth supervised neural radiance fields for sparse satellite
+images. In ISPRS Annals 2023, 2023. 2
+[63] Lulin Zhang, Ewelina Rupnik, Tri Dung Nguyen, Stéphane
+Jacquemoud, and Yann Klinger. Brdf-nerf: Neural radiance
+fields with optical satellite images and brdf modelling. arXiv
+preprint arXiv:2409.12014, 2024. 2
+[64] Tongtong Zhang, Yu Zhou, Yuanxiang Li, and Xian Wei.
+Satensorf: Fast satellite tensorial radiance field for multidate
+satellite imagery of large size. IEEE Transactions on Geoscience and Remote Sensing, 62:1–15, 2024. 2
+[65] Qiang Zhao, Le Yu, Zhenrong Du, Dailiang Peng, Pengyu
+Hao, Yongguang Zhang, and Peng Gong. An overview of
+the applications of Earth observation satellite data: impacts
+and future trends. Remote Sensing, 14(8):1863, 2022. 1

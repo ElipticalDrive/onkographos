@@ -1,0 +1,260 @@
+--- v001.md
++++ v002.md
+@@ -4,119 +4,179 @@
+ 
+ ## Overview
+-Brood-based Vector Quantization is a lossy compression method that reduces the storage size of inter-level data residuals in hierarchical tree structures by grouping them into blocks (broods) and replacing each block with a codebook index [S1, unofficial]. It sets itself apart from standard uniform-grid VQ by operating on tree-based residuals, which allows it to correct coarse-level errors in finer levels and yield significantly less error for the same bit rate [S1, unofficial]. It builds on [Vector Quantization](907-vector-quantization.md) by applying it specifically to the residual vectors associated with sibling nodes in a spatial hierarchy.
++Brood-based Vector Quantization is a lossy compression technique for spatially coherent data stored in adaptive trees (such as quadtrees or octrees). It solves the problem of storing inter-level data residuals by grouping them into "broods" (blocks of $2^d$ children) and replacing each block with a single codebook index [S1, unofficial]. It sets itself apart from standard VQ applied to uniform grids by operating on the residuals of an adaptive tree structure, which yields significantly less error for the same bit rate because it corrects coarse-level errors in finer levels and exploits spatial coherence [S1, unofficial]. It builds on [Vector Quantization](907-vector-quantization.md) by applying it specifically to residual vectors derived from tree broods.
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A hierarchical data tree $T$ containing multi-dimensional data values (e.g., pixel intensities, volumetric samples).
+-*   **Output:** A VQ tree $T'$, which is one level shorter than $T$. Each leaf node in $T'$ stores a codebook index representing the residuals of a brood (block of children) in $T$.
++*   **Input:** An adaptive primal tree $T$ containing spatially coherent data (e.g., a single-channel image or volume).
++*   **Output:** A VQ tree $T'$, which is one level shorter than $T$. Each leaf node in $T'$ stores a codebook index that encodes the residuals for a brood of samples in the leaves of $T$.
+ 
+ **Data Structures:**
+-*   **VQ Tree ($T'$):** A tree structure where each node stores a fixed-length index.
+-    *   **Index Size:** 7 bits for internal levels (supporting a codebook of 128 elements).
+-    *   **Finest Level ($L$):** 8 bits (supporting a codebook of 256 elements) because all nodes at this level are leaves, allowing the omission of leaf-child bits [S1, unofficial].
+-*   **Codebook:** A set of $K$ codevectors. For 2D single-channel data, each codevector is 4-dimensional (representing 4 pixel residuals). For color images, it is 12-dimensional. Codevectors are quantized to 8 bits per coordinate to reduce size [S1, unofficial].
++*   **VQ Tree $T'$:** A tree structure where each node stores a codebook index.
++    *   **Internal Nodes:** Store a 7-bit index (for a codebook size of 128).
++    *   **Leaves at Finest Level $L$:** Store an 8-bit index (for a codebook size of 256).
++*   **Codebook:** A set of $K$ codevectors. Each codevector is a vector of residuals.
++    *   **Dimension:** For 2D single-channel data, the residual vector $v$ has dimension 4 (representing the 4 pixel residuals of a brood). For color images, it is 12-dimensional [S1, unofficial].
++    *   **Quantization:** Codevectors are quantized to 8 bits per coordinate to reduce storage size [S1, unofficial].
+ 
+-**Algorithm Steps:**
+-1.  **Residual Calculation:** For each parent node in the original tree $T$, compute the residuals between the children's data values and the parent's value (or predicted value). Group these residuals into vectors corresponding to broods (blocks of $2^d$ children in $d$ dimensions) [S1, unofficial].
+-2.  **Codebook Generation:** For each level of the tree (except the finest, which uses a fixed 256-entry codebook), generate a codebook using $k$-means clustering on the residual vectors [S1, unofficial].
+-    *   Use cluster teleportation to escape local minima [S1, unofficial].
++**Steps:**
++1.  **Compute Residuals:** For each node in the original tree $T$ (except the root and finest leaves), compute the residual vector $v$ consisting of the differences between the children's values and the parent's value. A brood consists of the $2^d$ children of a parent node.
++2.  **Cluster Residuals:** For each level of the tree (except the finest level $L$), collect all residual vectors from the broods at that level. Apply $k$-means clustering to these vectors to generate a codebook of size $K=128$ [S1, unofficial].
++    *   Use cluster teleportation to escape local minima during $k$-means convergence [S1, unofficial].
+     *   Quantize the resulting codevectors to 8 bits per coordinate [S1, unofficial].
+-3.  **Quantization:** Replace each residual vector in the brood with the index of the nearest codevector in the level-specific codebook.
+-4.  **Tree Construction:** Construct $T'$ such that each node stores the 7-bit (or 8-bit at level $L$) index. $T'$ has one fewer level than $T$ because each node in $T'$ encodes the residuals of a brood in $T$ [S1, unofficial].
++3.  **Quantize Finest Level:** For the finest level $L$, all nodes are leaves. Omit the leaf-child bit. Use a separate codebook of size $K=256$ with 8-bit indices [S1, unofficial].
++4.  **Encode Indices:** Replace each brood's residual vector in the original tree with the index of the nearest codevector in the corresponding level's codebook. Store these indices in the VQ tree $T'$.
++
++**Formulas:**
++*   **Residual Vector:** For a brood of children $c_1, \dots, c_{2^d}$ and parent $p$, the residual vector $v$ is:
++    $$ v = [c_1 - p, c_2 - p, \dots, c_{2^d} - p] $$
++*   **Distance Metric:** The distance between a residual vector $v$ and a codevector $c$ is typically the Euclidean distance (implied by $k$-means minimization of intra-cluster variance) [S1, unofficial].
++
++**Parameters:**
++*   **Codebook Size:** 128 elements for internal levels (7-bit index). 256 elements for the finest level (8-bit index) [S1, unofficial].
++*   **Codevector Precision:** 8 bits per coordinate [S1, unofficial].
++
++**Edge Cases and Pitfalls:**
++*   **Undefined Data:** Some subtrees may extend beyond the defined spatial domain, resulting in undefined residual values. These must be handled by ignoring undefined components during distance computation and centroid updates (see [VQ with Undefined Data](8007-vq-with-undefined-data.md)) [S1, unofficial].
++*   **Local Minima:** $k$-means can converge to local minima. Cluster teleportation is recommended to improve codebook quality [S1, unofficial].
++*   **Precision:** Quantizing codevectors to 8 bits per coordinate reduces accuracy but is necessary for compact storage [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def brood_based_vq(tree T, codebook_size=128):
++def brood_based_vq(tree T, d=2):
+     """
+-    Compresses tree T into a VQ tree T' using brood-based vector quantization.
++    Compresses tree T using brood-based vector quantization.
++    Returns VQ tree T'.
+     """
+     T_prime = new Tree()
+-    levels = T.levels()
++    levels = get_all_levels(T)
+     
+-    # Process all levels except the finest
++    # Process each level except the finest
+     for level in levels[:-1]:
+-        # Step 1: Collect residual vectors for all broods at this level
+         residuals = []
+-        for node in T.nodes_at_level(level):
+-            children = node.children
+-            # Compute residual vector v from children's data
+-            v = compute_residual_vector(children)
++        nodes = get_nodes_at_level(T, level)
++        
++        # Collect residuals for all broods at this level
++        for node in nodes:
++            children = get_children(node)
++            if len(children) == 2**d:
++                # Compute residual vector
++                v = [child.value - node.value for child in children]
++                residuals.append(v)
++        
++        # Compute codebook using k-means
++        codebook = k_means(residuals, k=128, teleportation=True)
++        # Quantize codevectors to 8 bits per coordinate
++        codebook = quantize_codevectors(codebook, bits=8)
++        
++        # Store codebook in T' (implementation detail: map level to codebook)
++        store_codebook(T_prime, level, codebook)
++        
++        # Quantize residuals to indices
++        for i, node in enumerate(nodes):
++            children = get_children(node)
++            if len(children) == 2**d:
++                v = [child.value - node.value for child in children]
++                index = find_nearest_codebook_index(v, codebook)
++                # Create corresponding node in T'
++                create_node_in_T_prime(T_prime, level, i, index)
++
++    # Process finest level L
++    finest_level = levels[-1]
++    nodes = get_nodes_at_level(T, finest_level)
++    residuals = []
++    
++    # For finest level, residuals are relative to parent (which is at level-1)
++    # However, the source implies we treat leaves as broods of their parent's children
++    # The source says "at the finest level L... use an 8-bit codebook index"
++    # We assume residuals are computed similarly, but with a larger codebook
++    
++    for node in nodes:
++        parent = get_parent(node)
++        if parent is not None:
++            # Get all siblings of this node
++            siblings = get_siblings(node)
++            # Compute residual relative to parent
++            v = [sibling.value - parent.value for sibling in siblings]
+             residuals.append(v)
++            
++    codebook_L = k_means(residuals, k=256, teleportation=True)
++    codebook_L = quantize_codevectors(codebook_L, bits=8)
++    store_codebook(T_prime, finest_level, codebook_L)
++    
++    for i, node in enumerate(nodes):
++        parent = get_parent(node)
++        siblings = get_siblings(node)
++        v = [sibling.value - parent.value for sibling in siblings]
++        index = find_nearest_codebook_index(v, codebook_L)
++        create_node_in_T_prime(T_prime, finest_level, i, index)
+         
+-        # Step 2: Generate codebook using k-means
+-        # Quantize codevectors to 8 bits per coordinate
+-        codebook = kmeans(residuals, k=codebook_size, teleportation=True, quantize_bits=8)
+-        
+-        # Step 3: Quantize residuals to indices
+-        indices = []
+-        for v in residuals:
+-            idx = find_nearest_codevector(v, codebook)
+-            indices.append(idx)
+-            
+-        # Step 4: Build nodes for T'
+-        # Each node in T' corresponds to a brood in T
+-        # T' is one level shorter, so we map broods to nodes in T'
+-        create_nodes_in_T_prime(T_prime, indices, level)
+-
+-    # Handle finest level L separately
+-    finest_level = levels[-1]
+-    residuals = []
+-    for node in T.nodes_at_level(finest_level):
+-        children = node.children
+-        v = compute_residual_vector(children)
+-        residuals.append(v)
+-        
+-    # Use 256-entry codebook, 8-bit index
+-    codebook = kmeans(residuals, k=256, teleportation=True, quantize_bits=8)
+-    indices = [find_nearest_codevector(v, codebook) for v in residuals]
+-    create_nodes_in_T_prime(T_prime, indices, finest_level)
+-    
+     return T_prime
+ 
+-def compute_residual_vector(children):
++def k_means(data, k, teleportation=False):
+     """
+-    Computes the residual vector from a brood of children.
+-    For 2D single-channel, returns a 4D vector of pixel residuals.
++    Standard k-means clustering with optional teleportation.
++    Returns list of k codevectors.
+     """
+-    # Implementation depends on specific residual definition (e.g., child - parent)
+-    # [G] Assuming standard residual: child_value - parent_value
+-    parent_val = children[0].parent.value
+-    return [child.value - parent_val for child in children]
++    # Initialize centroids (e.g., random selection or k-means++)
++    centroids = initialize_centroids(data, k)
++    
++    while not converged(centroids, data):
++        # Assign each data point to nearest centroid
++        assignments = assign_clusters(data, centroids)
++        
++        # Update centroids
++        new_centroids = update_centroids(data, assignments, k)
++        
++        # Teleportation step to escape local minima [S1, unofficial]
++        if teleportation and should_teleport(centroids, new_centroids):
++            new_centroids = teleport(centroids, new_centroids)
++            
++        centroids = new_centroids
++        
++    return centroids
+ 
+-def kmeans(data, k, teleportation, quantize_bits):
++def quantize_codevectors(codebook, bits=8):
+     """
+-    Performs k-means clustering with teleportation and codevector quantization.
++    Quantize each coordinate of each codevector to 'bits' precision.
+     """
+-    # [G] Standard k-means implementation with teleportation heuristic
+-    # and post-clustering quantization of centroids to quantize_bits
+-    pass
++    quantized = []
++    for cv in codebook:
++        q_cv = [quantize_coord(c, bits) for c in cv]
++        quantized.append(q_cv)
++    return quantized
+ 
+-def find_nearest_codevector(v, codebook):
++def quantize_coord(value, bits):
+     """
+-    Finds the index of the codevector closest to v.
++    Quantize a single float value to 'bits' precision.
++    [G] Assuming symmetric range [-1, 1] or similar; exact range depends on data normalization.
+     """
+-    # [G] Euclidean distance minimization
+-    pass
++    # Placeholder for specific quantization scheme (e.g., uniform or adaptive)
++    # Not given in sources. Assume standard uniform quantization.
++    min_val = -1.0
++    max_val = 1.0
++    levels = 2**bits
++    normalized = (value - min_val) / (max_val - min_val)
++    index = int(normalized * levels)
++    index = max(0, min(levels - 1, index))
++    return min_val + (index / levels) * (max_val - min_val)
+ ```
+-
+-**Edge Cases and Pitfalls:**
+-*   **Undefined Data:** If residual blocks contain undefined values (e.g., outside domain bounds), standard $k$-means fails. The algorithm must ignore undefined components during distance calculation and centroid updates [S1, unofficial].
+-*   **Finest Level:** The finest level $L$ requires special handling because all nodes are leaves. An 8-bit index and 256-entry codebook are used instead of the 7-bit/128-entry scheme to improve accuracy [S1, unofficial].
+-*   **Precision:** Codevectors are quantized to 8 bits per coordinate, which may introduce additional error but reduces codebook size [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Adaptive VQ Tree Construction](7771-adaptive-vq-tree-construction.md)
+-Adaptive VQ Tree Construction is a method for building a simplified, error-bounded vector quantization (VQ) tree from a complete mipmap hierarchy. It solves the problem of achieving a target compression rate while strictly bounding the $L_\infty$ approximation error at all resolution levels to a user-defined tolerance $\tau$. It sets itself apart from standard VQ by adaptively pruning fine-level broods (blocks of children) based on their contribution to the global error, rather than uniformly quantizing all levels. It builds on [Brood-based Vector Quantization](7595-brood-based-vector-quantization.md) by adding a topology simplification step that removes redundant nodes.
++Adaptive VQ Tree Construction is a method for compressing spatially coherent data by building a simplified, error-bounded tree structure on top of a complete Vector Quantization (VQ) compressed tree. It solves the problem of achieving a specific target compression rate or maximum approximation error by selectively removing ("pruning") fine-level detail nodes that contribute negligible error. It sets itself apart from standard VQ tree methods by dynamically altering the tree topology based on a global error tolerance $\tau$, rather than using a fixed resolution hierarchy.
++
++### [VQ with Undefined Data](8007-vq-with-undefined-data.md)
++This method extends vector quantization (VQ) to handle residual blocks where some data values are undefined, such as those falling outside the defined spatial domain. It solves the problem of introducing quantization error for non-existent data by ignoring undefined components during both distance computation and centroid updates. It differs from standard VQ by modifying the $k$-means convergence steps to be robust to missing data, and from [Adaptive VQ Tree Construction](7771-adaptive-vq-tree-construction.md) by focusing specifically on the data handling aspect rather than tree pruning logic.
+ 
+ ## Operating characteristics
+-*   **Compression Ratio:** For a complete quadtree, brood-based VQ with 128-element codebooks (7-bit indices) yields approximately 1.75 bits per data sample at the finest level, or 2.33 bits per data sample when accounting for all levels [S1, unofficial].
+-*   **Error:** Tree-based VQ yields significantly less error than VQ applied to a uniform grid of blocks [S1, unofficial].
+-*   **Memory:** The VQ tree $T'$ is one level shorter than the original tree $T$, reducing the number of nodes [S1, unofficial].
+-*   **Strengths:** Efficient random access; corrects coarse-level errors in finer levels; handles sparse/undefined data.
+-*   **Limitations:** Lossy compression; requires careful handling of undefined data; codebook generation is computationally intensive ($k$-means).
++*   **Compression Ratio:** For a 2D single-channel image, a codebook of 128 elements yields 1.75 bits per data sample at the finest level, or 2.33 bits per data sample when accounting for all levels [S1, unofficial].
++*   **Accuracy:** Tree-based VQ yields significantly less error than VQ applied to a uniform grid of blocks [S1, unofficial].
++*   **Complexity:** Time complexity is dominated by $k$-means clustering at each level. Memory complexity is proportional to the size of the VQ tree plus the codebooks.
++*   **Strengths:** Efficient random access, low bit rate, good visual quality for spatially coherent data.
++*   **Limitations:** Lossy compression, requires adaptive tree structure, sensitive to local minima in clustering.
+ 
+ ## Background
+-Brood-based Vector Quantization was introduced in the paper "Compressed Random-Access Trees for Spatially Coherent Data" by S. Lefebvre and H. Hoppe [S1, unofficial]. It is used in the context of compressed random-access trees for spatially coherent data, enabling efficient storage and retrieval of hierarchical data structures.
++Brood-based Vector Quantization was introduced by Sylvain Lefebvre and Hugues Hoppe in their 2007 paper "Compressed Random-Access Trees for Spatially Coherent Data" [S1, unofficial]. It is used in the context of compressed random-access trees for spatially coherent data, such as images and volumes.
+ 
+ ## Sources

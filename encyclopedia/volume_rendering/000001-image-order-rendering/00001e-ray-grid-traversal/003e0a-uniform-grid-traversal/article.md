@@ -1,0 +1,146 @@
+# Uniform Grid Traversal
+Also called: Uniform Grid Acceleration
+## Overview
+Uniform Grid Traversal accelerates volume rendering by partitioning the scene into a regular, axis-aligned voxel grid, allowing rays to skip empty space and quickly locate occupied voxels [S1]. It differs from sibling methods by assuming fixed, uniform spacing between grid cells, which simplifies traversal to incremental index updates, unlike [Computational Space Traversal](10339-computational-space-traversal.md) which handles curvilinear grids [G].
+## How it works
+**Inputs and Outputs:**
+- Input: Ray origin $\mathbf{o}$, ray direction $\mathbf{d}$, grid bounds $[\min_x, \min_y, \min_z]$ and $[\max_x, \max_y, \max_z]$, grid resolution $(N_x, N_y, N_z)$ [G].
+- Output: Sequence of visited voxel indices $(i, j, k)$ and corresponding entry/exit distances along the ray [G].
+
+**Data Structures:**
+The grid is stored as a 3D array of size $N_x \times N_y \times N_z$ containing particle lists or density values [G]. The traversal state maintains:
+- Current voxel indices: $i, j, k$ (integers) [G].
+- Step directions: $s_x, s_y, s_z \in \{-1, 0, 1\}$, determined by the sign of $\mathbf{d}$ [G].
+- Distance to next boundary: $t_{max_x}, t_{max_y}, t_{max_z}$ (floats), representing the ray parameter $t$ at which the ray crosses the next grid plane perpendicular to each axis [G].
+- Delta distances: $t_{\Delta x}, t_{\Delta y}, t_{\Delta z}$ (floats), representing the distance between consecutive grid planes along the ray [G].
+
+**Formulas:**
+1.  **Voxel Size:** $\Delta x = \frac{\max_x - \min_x}{N_x}$, $\Delta y = \frac{\max_y - \min_y}{N_y}$, $\Delta z = \frac{\max_z - \min_z}{N_z}$ [G].
+2.  **Step Direction:** $s_i = \begin{cases} 1 & \text{if } d_i > 0 \\ -1 & \text{if } d_i < 0 \\ 0 & \text{if } d_i = 0 \end{cases}$ for $i \in \{x, y, z\}$ [G].
+3.  **Delta Distances:** $t_{\Delta i} = \frac{\Delta i}{|d_i|}$ if $d_i \neq 0$, else $\infty$ [G].
+4.  **Initial Voxel Index:** $i_0 = \lfloor \frac{o_x - \min_x}{\Delta x} \rfloor$, clamped to $[0, N_x-1]$ (analogous for $j, k$) [G].
+5.  **Initial Boundary Distances:** $t_{max_i} = \frac{b_i - o_i}{d_i}$ if $d_i \neq 0$, else $\infty$, where the boundary coordinate $b_i = (i_0 + 1)\Delta i + \min_i$ if $d_i > 0$, and $b_i = i_0\Delta i + \min_i$ if $d_i < 0$ [G].
+
+**Algorithm Steps:**
+1.  Compute voxel sizes, step directions, delta distances, and initial voxel indices [G].
+2.  Compute initial boundary distances $t_{max_x}, t_{max_y}, t_{max_z}$ using the actual ray origin [G].
+3.  Initialize $t_{entry} = 0.0$ [G].
+4.  Loop while the current voxel indices remain within grid bounds:
+    a.  Record the current cell and the interval $[t_{entry}, t_{exit}]$ where $t_{exit} = \min(t_{max_x}, t_{max_y}, t_{max_z})$ [G].
+    b.  Identify the axis $k$ with the minimum $t_{max}$ [G].
+    c.  Advance the index in axis $k$: $\text{index}_k \leftarrow \text{index}_k + s_k$ [G].
+    d.  Update the boundary distance for axis $k$: $t_{max_k} \leftarrow t_{max_k} + t_{\Delta k}$ [G].
+    e.  Update $t_{entry} \leftarrow t_{exit}$ [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def uniform_grid_traversal(ray_origin, ray_direction, grid_min, grid_max, resolution):
+    # 1. Voxel sizes
+    dx = (grid_max[0] - grid_min[0]) / resolution[0]
+    dy = (grid_max[1] - grid_min[1]) / resolution[1]
+    dz = (grid_max[2] - grid_min[2]) / resolution[2]
+
+    # 2. Step directions and delta distances
+    step_x = 1 if ray_direction[0] > 0 else (-1 if ray_direction[0] < 0 else 0)
+    step_y = 1 if ray_direction[1] > 0 else (-1 if ray_direction[1] < 0 else 0)
+    step_z = 1 if ray_direction[2] > 0 else (-1 if ray_direction[2] < 0 else 0)
+    
+    t_delta_x = dx / abs(ray_direction[0]) if ray_direction[0] != 0 else float('inf')
+    t_delta_y = dy / abs(ray_direction[1]) if ray_direction[1] != 0 else float('inf')
+    t_delta_z = dz / abs(ray_direction[2]) if ray_direction[2] != 0 else float('inf')
+
+    # 3. Initial voxel indices (clamped to grid bounds)
+    i = int((ray_origin[0] - grid_min[0]) / dx)
+    j = int((ray_origin[1] - grid_min[1]) / dy)
+    k = int((ray_origin[2] - grid_min[2]) / dz)
+    i = max(0, min(resolution[0] - 1, i))
+    j = max(0, min(resolution[1] - 1, j))
+    k = max(0, min(resolution[2] - 1, k))
+
+    # 4. Initial t_max (distance to next boundary from ACTUAL origin)
+    b_x = (i + 1) * dx + grid_min[0] if step_x == 1 else i * dx + grid_min[0]
+    b_y = (j + 1) * dy + grid_min[1] if step_y == 1 else j * dy + grid_min[1]
+    b_z = (k + 1) * dz + grid_min[2] if step_z == 1 else k * dz + grid_min[2]
+    
+    t_max_x = (b_x - ray_origin[0]) / ray_direction[0] if ray_direction[0] != 0 else float('inf')
+    t_max_y = (b_y - ray_origin[1]) / ray_direction[1] if ray_direction[1] != 0 else float('inf')
+    t_max_z = (b_z - ray_origin[2]) / ray_direction[2] if ray_direction[2] != 0 else float('inf')
+
+    t_entry = 0.0
+    visited = []
+
+    # 5. Traversal loop
+    while 0 <= i < resolution[0] and 0 <= j < resolution[1] and 0 <= k < resolution[2]:
+        t_exit = min(t_max_x, t_max_y, t_max_z)
+        visited.append((i, j, k, t_entry, t_exit))
+        
+        if t_max_x <= t_max_y and t_max_x <= t_max_z:
+            i += step_x
+            t_max_x += t_delta_x
+        elif t_max_y <= t_max_x and t_max_y <= t_max_z:
+            j += step_y
+            t_max_y += t_delta_y
+        else:
+            k += step_z
+            t_max_z += t_delta_z
+            
+        t_entry = t_exit
+        
+    return visited
+```
+
+**Parameters:**
+- Grid Resolution $(N_x, N_y, N_z)$: No analytical formula exists for the optimal resolution [S1]. Empirically, a resolution yielding roughly one particle per voxel achieves optimum performance for uniformly distributed particles [S1]. For the Bench scene with $2 \times 10^5$ particles, $60 \times 60 \times 60$ is optimal [S1].
+
+**Edge Cases and Pitfalls:**
+- **Zero Direction:** If a ray component is zero, $t_{\Delta}$ becomes infinite, and the ray never crosses a grid plane in that dimension; the step direction is set to $0$ and $t_{max}$ is initialized to $\infty$ [G].
+- **Precision Errors:** Intersections exactly on grid boundaries may suffer from floating-point rounding; standard practice is to treat the ray as having just entered the voxel or to apply a small epsilon guard [G].
+- **Low Resolution:** If grid resolution is much lower than optimal (e.g., $< 60 \times 60 \times 60$ for the Bench scene), performance degrades because too many particles reside in each voxel [S1].
+
+## Subtopics
+
+### [Computational Space Traversal](10339-computational-space-traversal.md)
+Computational Space Traversal renders data on curvilinear grids by mapping the irregular physical domain to a regular computational space. It solves the difficulty of resampling scalar values along a ray in distorted geometry by performing the traversal in the regular computational space, where standard incremental grid traversal applies. Unlike [Uniform Grid Traversal](9652-uniform-grid-traversal.md), which assumes uniform spacing, this method handles arbitrary hexahedral meshes by transforming ray segments and vectors using Jacobian matrices.
+
+### [Grid Traversal Setup (DDA)](12499-grid-traversal-setup-dda.md)
+Grid Traversal Setup (DDA) initializes the parameters required for a 3D Digital Differential Analyzer (DDA) to traverse a voxel grid along a ray. It computes the initial voxel indices, step directions, and distances to the next voxel boundaries for the ray start and end points within the traversal range. This method sets the stage for the iterative traversal loop, distinguishing itself from computational space traversal by operating directly in grid coordinates and from one-pass over-allocated methods by computing exact boundary distances. It solves the problem of robustly determining where a ray enters a voxel grid and how it progresses through adjacent voxels, handling edge cases such as rays parallel to grid axes.
+
+### [Grid Traversal (One-Pass Over-Allocated)](14347-grid-traversal-one-pass-over-allocated.md)
+A single-pass algorithm to traverse voxel grids, using pre-allocated maximum memory to avoid a second pass. It differs from [Grid Traversal (Two-Pass)](12499-grid-traversal-two-pass.md) by allocating buffers large enough for the worst-case scenario upfront, trading memory for a single kernel launch.
+
+### [Robust Grid Traversal](9923-robust-grid-traversal.md)
+Robust Grid Traversal is a grid traversal modification that prevents numerical robustness errors by keeping the closest intersection parameter even if it falls outside the current cell, terminating only when the cell's maximum ray parameter exceeds this closest intersection.
+
+### Micro 64-tree
+A compact 64-way full tree that summarizes the occupancy of an underlying uniform grid in a hierarchy, designed to speed up grid traversals on a GPU [S2, abstract only, unofficial]. Each node in the tree represents a voxel, with its occupancy represented by a single bit [S2, abstract only, unofficial]. Each node is subdivided into a 64-subgrid, which is stored in a single 64-bit word [S2, abstract only, unofficial]. The micro 64-tree is built on top of a uniform grid [S2, abstract only, unofficial]. The GPU grid construction algorithm is improved by computing precise triangle-cell intersections [S2, abstract only, unofficial]. Non-overlapping triangle-cell pairs are precluded before sorting during the construction phase [S2, abstract only, unofficial]. The micro 64-tree is built bottom-up from the uniform grid using parallel reductions [S2, abstract only, unofficial]. The top levels of the micro 64-tree are pre-loaded into the shared memory of a GPU to support on-chip traversals across coarse levels [S2, abstract only, unofficial]. The traversal algorithm navigates the ray through the 64-subgrids at different levels [S2, abstract only, unofficial]. A concise context for each level is stored in the GPU's registers to facilitate vertical moves during traversal [S2, abstract only, unofficial]. The micro 64-tree reduces traversal steps, decreases memory bandwidth consumption, and significantly improves the efficiency of ray tracing on a GPU, with small overheads in memory and building time [S2, abstract only, unofficial].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+- Time: The traversal cost per ray is proportional to the number of voxels visited. In the worst case (ray passing through all voxels), it is $O(N_x + N_y + N_z)$ [G]. In practice, it is much faster due to empty space skipping [G].
+- Memory: The grid requires $O(N_x N_y N_z)$ space to store the voxel data or occupancy flags [G].
+
+**Measured Performance:**
+- In the Bench scene with $2 \times 10^5$ particles, optimal performance is achieved at a grid resolution of $60 \times 60 \times 60$ [S1].
+- Runtime grows steadily as grid resolution increases due to additional grid traversal costs [S1].
+- A resolution much lower than optimal (e.g., $< 60 \times 60 \times 60$ for the Bench scene) results in poor performance because too many particles reside in each voxel [S1].
+
+**Scaling:**
+- Performance scales with the number of particles and the efficiency of the grid traversal. Higher resolutions reduce the number of particles per voxel but increase traversal overhead [S1].
+
+**Strengths and Limitations:**
+- Strengths: Effective for uniformly distributed data [S1].
+- Limitations: Sensitive to resolution choice [S1].
+
+**When to Use:**
+- Use when data is uniformly distributed and the scene is dense enough to benefit from spatial partitioning [S1].
+
+**When Not to Use:**
+- Do not use for non-uniform or curvilinear grids without modification (use [Computational Space Traversal](10339-computational-space-traversal.md) instead) [S1].
+
+## Background
+Uniform Grid Traversal is commonly used in volume rendering and particle rendering to accelerate ray traversal for uniformly distributed particles [S1].
+## Sources
+[S1] Rendering discrete participating media using geometrical optics approximation, https://doi.org/10.1007/s41095-021-0253-5, fetched 2026-10-26
+[S2] A micro 64-tree structure for accelerating ray tracing on a GPU, https://openalex.org/W195613556, fetched 2026-10-24 (abstract only, unofficial)

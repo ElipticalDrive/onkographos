@@ -1,0 +1,1291 @@
+The Vesuvius Challenge monorepo. Contribute to ScrollPrize/villa development by creating an account on GitHub.
+
+VC3D: Fiber Map workspace (interactive fiber network unroll) by skyward7187 · Pull Request #1459 · ScrollPrize/villa · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+skyward7187
+commented
+Aug 14, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+VC3D: Fiber Map workspace (interactive fiber network unroll)
+Adds a permanent Fiber Map tab to VC3D: an interactive 2D map of manually linked
+H/V fiber networks, unrolled about the scroll umbilicus. It is a C++ port of the
+fiber_network_unroll.py review tool's top_clusters.png view, live against the fibers
+loaded in the app.
+Note: after #1454 was squash-merged, this branch was rebuilt from main as four
+reviewable commits on 2026-08-21; the previous head is preserved at the tag
+archive/fiber-map-workspace-20260819. A comment below maps every prior finding to
+its fate. The three core-side files the old branch carried are gone — that work was
+lifted into #1454 and is upstream.
+What it does
+Layout (vc3d::fiber_map::buildLayout, FiberNetworkLayout.{hpp,cpp} — byte-identical
+to the reviewed tag): extrinsic unroll — x = unwrapped angle about the umbilicus × the
+network's median radius, y = z. Per-fiber whole-turn offsets are snapped by walking the
+branch-link graph Prim-style (best-agreeing link first), so crossings coincide and loops
+close by construction; links whose endpoints still disagree by more than 0.25 turns are
+flagged suspect. Networks are packed side by side, ordered inner→outer by median
+umbilicus radius on a fixed tick grid. Traced runs draw solid; interpolation-only runs
+draw faint and dashed. Line-point tails are clipped to the outermost control points,
+keeping the one sample beyond each so a run still reaches them.
+Workspace (FiberMapWorkspace.{hpp,cpp}): QGraphicsView map plus a left "Fibers"
+dock grouped by network. Clicking a fiber in the list highlights it in the map and vice
+versa; the highlighted fiber shows its control points, and ctrl+right-click on one
+offers "Go to control point N in <fiber>". Right-drag pans and the wheel zooms,
+matching the volume viewers. Link markers reuse the line-annotation branch palette;
+colours follow the application theme in light and dark. Toolbar: top-networks and
+min-fibers spinboxes plus an explicit Rebuild layout button.
+Stable identity. Runtime fiber ids are reassigned on every package load, so the
+snapshot and layout carry each fiber's file name and the control-point action resolves
+it through fiberIdForFileName() when the action fires. A stale map cannot navigate to
+whatever fiber inherited an id.
+Staleness: one derived decision
+The layout never rebuilds itself, and fiber edits do not notify the workspace at all:
+there are no connections to the controller or to CState. The controller keeps counters
+that are cheap to bump — the fiber generation (bumped at exactly two mutation sites),
+a package counter, and #1454's umbilicus counter — plus a stat()-level fingerprint over
+the resolver's own candidate scan, covering the umbilicus file changing underneath VC3D.
+The workspace compares them at the moments that matter: on tab show, on rebuild, and
+before acting on a click, a fiber-list selection, or a control-point menu action. The
+accepted cost is deferred detection — a tab already visible when something changes keeps
+its picture until the user does something.
+The whole decision is one pure function of two dependency sets
+(FiberMapStaleness.hpp), so each arm is asserted rather than read:
+a different package, or a different grid (voxel counts), leaves the layout
+meaningless — geometry unrolled over one set of voxels says nothing about another —
+so it is cleared;
+changed fibers, a changed umbilicus, a changed voxel size, or changed
+layout settings leave it out of date: the banner says so and the map refuses to
+act, but the geometry survives for the rebuild. The voxel size belongs here whether or
+not the umbilicus scale came from it: the layout's smoothing sigma, resample step,
+label pads, panel tick and minimum gap are all physical quantities converted through
+that figure. PHerc0139_ds2 holds two volumes of one scan with byte-identical voxel
+counts and recorded voxel sizes 2.5% apart, and switching between them marks the map
+stale rather than discarding it.
+Two structural changes relative to the reviewed tag, both from the same invariant —
+staleness is derived from the dependency comparison wherever a dependency can express
+it, and latched only where it cannot:
+The stale reason is a member, not the label's text — and the latched reason is a
+second member beside it, so a higher-priority derived reason displayed over a latch
+and later reverted resurfaces the latch's own wording. The status label's five
+writers are enumerated in the workspace commit, and rebuildLayout()'s last act is a
+full dependency refresh, so a build summary can never be what a stale map is left
+saying — the fix for the final review round's finding 3, made structural rather than
+patched. The mid-build umbilicus race is expressed as data for the same reason: the
+fingerprint is recorded before the snapshot parses the file, so a rewrite the token
+can see (size or mtime moved — its stated contract) leaves the recorded token
+disagreeing with the disk and the end-of-rebuild refresh raises the banner through
+the ordinary arm.
+The settings spinboxes join the dependency value instead of latching a flag. A
+setting changed and changed back reads as current again, as does one scan's volume
+switched away and back — a derived reason clears itself when its cause reverts. The
+one latch left is the menu callback's file-name fallback, which fires only when a name
+stops resolving under an unchanged generation — an invariant violation nothing in the
+dependency sets can prove wrong, so only a rebuild clears it.
+An empty layout is still a built layout, tracked separately from "nothing built yet" — a
+map built before an umbilicus was attached would otherwise go on reporting that it found
+none indefinitely.
+Every interaction is gated, including the fiber list. The currentItemChanged
+handler evaluates without mutating and queues the destructive half for the next turn of
+the event loop, because a clear would delete the QTreeWidgetItem the signal is still
+being delivered with. The control-point menu callback captures the full dependency set
+at menu-build time and re-compares through the same shared decision when the action
+fires, applied non-destructively inside menu.exec()'s nested event loop.
+Data and units
+LineAnnotationController::fiberMapSnapshot() exports geometry, per-segment traced
+flags, branch links (pending included), the umbilicus and the frame it is in.
+Umbilicus framing is the shared implementation's job, end to end. The resolver
+picks the file (resolveScrollUmbilicus, umbilicus: frame metadata, project attachment, shared resolver #1454); deriveUmbilicusScale() carries its
+coordinates into the fibers' frame — stamped grid dimensions (exact integers), then
+the stamped voxel size, then the power-of-two grid inference — and
+decideUmbilicusLoadAction() says what may be acted on. Fiber geometry is never
+consulted: where annotation happens to reach says nothing about the grid the umbilicus
+was drawn on. A stamp naming a volume this project has is cross-checked against it via
+core umbilicusStampContradiction(), and a contradicted stamp — dimensions or voxel
+size — is refused outright with the helper's reason. The old branch's inline copy of
+this check refused only the dimension case (the voxel-size case warned and scaled
+anyway — the final round's finding 1) and skipped the dimension check entirely when
+the named volume's voxel size was unreadable; both fail-opens are gone by construction.
+A stamp naming an unattached volume resolves but is labeled unverified; a registered
+volume (transform.json) is called out as outside what a scalar mapping can express.
+UseLegacy is refused here deliberately: the legacy reading is line annotation's
+compatibility path (its registration inverse or raw points) and this consumer has
+none, so the pre-rebuild status line words an unstamped file conditionally —
+"(unstamped — frame must be inferred)" — rather than calling usable a file a rebuild
+may refuse.
+Voxel size is never assumed. It comes from deriveAnnotationFrame() (umbilicus: frame metadata, project attachment, shared resolver #1454,
+via the controller's annotationFrame()): the exact coordinate factor from the
+open-data tags, else the store's own pyramid position — never a resolution ratio where
+something exact was said. The layout computes in voxels; physical units appear
+only in labels, and fall back to vx when the voxel size is unknown rather than
+printing a wrong centimetre figure.
+Testing
+test_fiber_map_staleness (16 slots): every arm of the dependency decision, including
+the new ones — settings changes mark stale and revert to fresh, changed fibers outrank
+changed settings in the naming order, and the unknown→known voxel-size transition (an
+untagged store derives factor 1 with full extents under umbilicus: frame metadata, project attachment, shared resolver #1454's exact-factor
+semantics) marks stale in both directions without clearing. Every new arm was
+mutation-checked: deleting the settings arm fails exactly the two settings cases,
+reordering it ahead of the fibers arm fails exactly the ordering case, and turning the
+voxel-size arm into a clear fails exactly the two relabel cases.
+test_fiber_network_layout (7 slots, needs -DVC_TESTING=ON): network filtering,
+whole-turn offset snapping and loop closure, suspect-link detection, pending-link
+plumbing, units and tail clipping, traced/interpolated run splitting, and voxel
+geometry being independent of the voxel size.
+Suite green at each of the four commits individually: 150/150 after the first two,
+151/151 after the tests land (ctest -LE network; exclusion by label, since
+-E network also matches this PR's own layout test). No new warnings.
+Headless launch with a project loaded (--volpkg, offscreen): zero umbilicus
+resolution and zero fiber-map log lines at startup — the status lookup is structurally
+reachable only from tab show and interaction, and neither fired.
+Read-verified only: the widget wiring around the staleness decision. The offscreen
+controller fixture the earlier review discussion pointed to did not survive umbilicus: frame metadata, project attachment, shared resolver #1454's
+restart, and a CState-plus-package harness is beyond this PR; the decision itself is
+unit-tested, and the label has three writers, enumerated in the workspace commit.
+Known gaps
+WindingMark::number is computed and tested but not rendered: the gridlines are
+drawn, the numbers beside them are not. The reference script labels them and this
+should too; deliberately not added without seeing it on screen.
+Label chips do not avoid each other (the reference script's greedy collision layout is
+deliberately not ported); the panel ground and z-extent lines are the only framing.
+Frame equality is not pose proof (final round, finding 2, inherited from umbilicus: frame metadata, project attachment, shared resolver #1454):
+AnnotationFrame carries no origin or pose, so equal voxel counts and voxel size are
+also consistent with a crop or a registration, and a switch to such a volume would
+leave the map looking fresh. Fixing it needs volume-identity plumbing beyond this PR.
+Smaller declared residuals — the fingerprint's metadata-token limits, the
+registered-volume note not being a tracked dependency, tag edits over-bumping the
+fiber generation, and the un-enumerated remainder of transient _fibers windows —
+are listed at the end of the finding-fate comment below. Happy to file any of these
+as tracked issues.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_01F4hFeiv8gESQtoxvniqprG
+skyward7187
+requested a review
+from hendrikschilling
+as a code owner
+August 14, 2026 20:08
+vercel
+Bot
+commented
+Aug 14, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+The latest updates on your projects. Learn more about Vercel for GitHub.
+Project
+Deployment
+Actions
+Updated (UTC)
+scrollprize-org
+Ready
+Preview
+Aug 24, 2026 11:06am
+skyward7187
+assigned
+hendrikschilling
+Aug 14, 2026
+skyward7187
+force-pushed
+the
+fiber-map-workspace
+branch
+from
+3cec0bb to
+ad9ad47
+Compare
+August 15, 2026 01:32
+skyward7187
+force-pushed
+the
+umbilicus-logistics
+branch
+from
+85c5be1 to
+693d57d
+Compare
+August 17, 2026 01:10
+skyward7187
+force-pushed
+the
+fiber-map-workspace
+branch
+from
+ad9ad47 to
+33d3c9d
+Compare
+August 17, 2026 01:10
+hendrikschilling
+commented
+Aug 17, 2026
+Copy link
+Copy Markdown
+Contributor
+Some comments for the long codex comments:
+yes runtime ids should not be persisted, can be used but should be mapped to filenames as being the persistant ids
+yes we should not silently assume a resoution. Also best to make internal work on base (or fiber) voxels - then just use units for display - this way if no units are available we can just fall back to vx instead of displaying something wrong
+du we need scale guessing?
+sounds like additional overhead/hooks we don't currently want (I think this should be separate - if normal fiber changes should interact then by just incrementing a generation number (preferred) or a changed flag, so the fiber network unroll can check if its based on stale data or not when its opened/refreshed.
+```
+  1. P1: A stale map can open the wrong fiber after reloading or switching projects. Fiber changes only update the status label; the old scene, runtime IDs, and control-point actions      
+     remain active. Runtime IDs are reassigned sequentially on each load, so an old ID can identify a different fiber in the new package. Clicking the stale map can therefore navigate to  
+     the wrong annotation. Disable interaction when stale, clear the scene, or resolve actions through stable filenames. stale handling
+     (https://github.com/ScrollPrize/villa/blob/33d3c9dfae23246646afbe016ca2d0e3e5bceaf0/volume-cartographer/apps/VC3D/FiberMapWorkspace.cpp#L557-L575), navigation action
+     (https://github.com/ScrollPrize/villa/blob/33d3c9dfae23246646afbe016ca2d0e3e5bceaf0/volume-cartographer/apps/VC3D/FiberMapWorkspace.cpp#L1119-L1126), runtime ID reassignment
+     (https://github.com/ScrollPrize/villa/blob/33d3c9dfae23246646afbe016ca2d0e3e5bceaf0/volume-cartographer/apps/VC3D/LineAnnotationController.cpp#L10531-L10540).
+
+  2. P2: Physical units silently assume 2.4 µm for ordinary volpkgs. The snapshot defaults to 2.4, replacing it only when the current volume has open-data coordinate-identity tags. Any    
+     normal local project at another voxel size gets incorrect centimeters, radius, scroll height, smoothing distance, and stamped-umbilicus scaling. It should derive the base voxel size  
+     from the current volume when coordinate identity is absent, or fail if the frame cannot be established. default
+     (https://github.com/ScrollPrize/villa/blob/33d3c9dfae23246646afbe016ca2d0e3e5bceaf0/volume-cartographer/apps/VC3D/LineAnnotationController.hpp#L144-L153), conditional override        
+     (https://github.com/ScrollPrize/villa/blob/33d3c9dfae23246646afbe016ca2d0e3e5bceaf0/volume-cartographer/apps/VC3D/LineAnnotationController.cpp#L6083-L6096).
+
+  3. P2: Valid unstamped umbilici are rejected for geographically small fiber sets. Scale guessing compares the fibers’ total Z span with the entire umbilicus using IoU and refuses scores 
+     below 0.25. A correct fiber network occupying less than one quarter of the scroll height naturally fails this test. The scale should come from volume dimensions/metadata where        
+     possible; a subset should be tested for containment and scale consistency, not equal global extent. guessing logic
+     (https://github.com/ScrollPrize/villa/blob/33d3c9dfae23246646afbe016ca2d0e3e5bceaf0/volume-cartographer/apps/VC3D/LineAnnotationController.cpp#L6213-L6257).
+
+  4. P3: The supposedly inactive tool adds synchronous filesystem work to normal annotation operations. The Fiber Map is permanently constructed, and markStale() resolves and parses the   
+     umbilicus on every fibersChanged, fiberSaved, and fibersDeleted signal, even when the tab is never used. Those signals also overlap, causing repeated resolution. Cache this status or 
+     resolve it only when the workspace is visible. status resolution
+     (https://github.com/ScrollPrize/villa/blob/33d3c9dfae23246646afbe016ca2d0e3e5bceaf0/volume-cartographer/apps/VC3D/FiberMapWorkspace.cpp#L355-L373), connections
+     (https://github.com/ScrollPrize/villa/blob/33d3c9dfae23246646afbe016ca2d0e3e5bceaf0/volume-cartographer/apps/VC3D/FiberMapWorkspace.cpp#L557-L564).
+```
+skyward7187
+force-pushed
+the
+fiber-map-workspace
+branch
+from
+33d3c9d to
+edb82a1
+Compare
+August 17, 2026 13:35
+skyward7187
+commented
+Aug 17, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+All four of your points are implemented, across three commits on top of the original
+workspace commit. Taking them in your numbering:
+1. Runtime ids should be mapped to filenames as the persistent ids. Done. The
+snapshot and the layout now carry each fiber's file name, and the ctrl+right-click action
+resolves it through a new fiberIdForFileName() when the action fires rather than using
+the id captured when the map was built. If the file is gone the action marks the map stale
+and logs instead of navigating. Combined with point 4, a stale map also refuses to act at
+all, so the "opens the wrong fiber after a reload" path is closed from both ends.
+2. Don't silently assume a resolution; work internally in base voxels and use units for
+display, falling back to vx. Done, in both halves.
+FiberMapSnapshot::voxelSizeUm is now std::optional<double> with no default. It comes
+from the volume's open-data coordinate identity, else the volume's own level-0 resolution
+(voxelSize() / 2^baseScaleLevel()), else it stays unset — the 2.4 µm default is gone.
+The layout then computes in voxels end to end: the cm-suffixed fields became voxel
+fields, the conversion is gone, and the tuning parameters (smoothing sigma, resample step,
+label pads, panel tick, minimum gap) are passed in as voxel quantities, derived from their
+physical intents when the voxel size is known and taking documented defaults equal to
+their 2.4 µm values when it isn't. Physical units now appear only in labels, and where
+the voxel size is unknown they read vx — a network header shows r ≈ 5167 vx instead of
+a centimetre figure that would have been wrong.
+I split that into two commits so the wide unit conversion is revertable on its own, and
+held it to "no change for a known voxel size": the pre-change layout was compiled beside
+the new one and six synthetic scenarios run through both, matching structurally with a
+worst deviation under 4e-13 cm (multiply re-association only).
+One consequence worth flagging: the frame label no longer prints a µm figure when the
+scale came from stamped dimensions, since that figure played no part in the mapping — it
+names the grid instead (umbilicus: 8174×8174×18946 grid → ×4), which is what the mapping
+actually used.
+3. Do we need scale guessing? Not from the fibers, no — that logic is deleted. Where
+the annotation happens to reach says nothing about which grid the umbilicus was drawn on,
+and using it failed in both directions on real data (an earlier coverage score picked a
+too-large scale and made the plot look like a 3D scroll; the intersection-over-union
+version that replaced it rejects a legitimate umbilicus whenever annotation covers little
+of the scroll, which is what the automated review caught).
+What replaced it is deterministic rather than a guess: stamped grid dimensions against
+the fibers' grid — exact integer ratios, no micrometres in the geometry path at all — else
+the stamped voxel size, else identifying which power-of-two downsample of the fibers' grid
+the points fit inside and nearly fill (≥60% of that grid's z extent; since candidates sit a
+factor of two apart, that bound makes the match unique rather than needing a tie-break),
+else refuse with a message naming the remedy. On PHercParis4 the dimensions give exactly
+×4, which is the value the old heuristic was guessing at.
+4. Don't add overhead/hooks; increment a generation number so the unroll can check
+whether it is based on stale data when opened or refreshed. Done exactly that. The
+workspace no longer connects fibersChanged / fiberSaved / fibersDeleted at all;
+LineAnnotationController exposes fiberDataGeneration(), bumped where the loaded fiber
+set changes (emitFiberSummaries(), which every in-memory mutation already routes
+through, plus the save path). The workspace records the generation its layout came from
+and compares it on tab show, on rebuild, and before acting on a click or the context menu
+— that last one because a change while the tab is frontmost would otherwise leave a stale
+map interactive, which is the same hazard as point 1. Umbilicus status is resolved at most
+once per generation, and the startup path no longer touches the filesystem at all (checked
+on a headless launch: zero umbilicus resolution before the tab is opened).
+Also in this stack since you last looked: link markers now use the line-annotation branch
+palette so a crossing reads the same here as in the slice views, the map follows the
+application theme in light and dark, right-drag pans as in the volume viewers, connected
+components are called networks throughout rather than clusters, and a fiber-selection
+bug is fixed: QGraphicsPathItem::shape() ignores that a pen is cosmetic and strokes the
+path with the pen width taken as scene units, so every fiber carried an invisible
+clickable ribbon vastly wider than the drawn line and stacking order rather than proximity
+decided which fiber a click hit. Selection is now decided purely by nearest-segment
+distance.
+Gaps I'd rather state than have you find: the voxel-size resolution and the cm/vx
+display are compile- and read-verified only (the former needs a VolumePkg/CState
+fixture, the latter lives in a QMainWindow, and neither fits the layout-only test
+target), and the level-0 fallback hasn't been exercised against a real untagged or
+non-2.4 µm store because none was available here.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_01Xb3JfFAJa5ZTGGRe5xbqmh
+skyward7187
+mentioned this pull request
+Aug 17, 2026
+umbilicus: frame metadata, project attachment, shared resolver
+#1454
+Merged
+hendrikschilling
+commented
+Aug 17, 2026
+Copy link
+Copy Markdown
+Contributor
+i dont find it important but probably fix for completeness with the others
+```
+  1. P1: Lower-scale-only volumes still produce the wrong Fiber Map frame.
+     LineAnnotationController.cpp:6110-6145 divides voxelSize() by 2^baseScaleLevel, correctly recovering base-voxel size, but annotationZSlices and fiberGridXyz at :6238-6252 are expanded
+     only through open-data tags. For an untagged volume rebased at level 2, Volume.cpp:1367-1370 exposes level-2 dimensions while :1413-1425 exposes the corresponding larger voxel size.  
+     The snapshot therefore combines base voxel size with dimensions four times too small. Umbilicus scale inference, stamped-dimension matching, and displayed scroll extent can all be    
+     wrong by 4×.
+
+  2. P2: Staleness tracks only fiber data, although the snapshot also depends on the active volume and attached umbilicus.
+     FiberMapWorkspace.cpp:623-635 compares only fiberDataGeneration(). Switching volumes emits CState::volumeChanged, but the workspace does not observe it. Attaching or detaching an     
+     umbilicus also does not change the fiber generation. Consequently, an existing map can remain “fresh” with old voxel units, grid dimensions, scroll extent, or umbilicus geometry. The 
+     cached umbilicus status has the same problem.
+
+  3. P2: Save completion causes false staleness after a successful rebuild.
+     In-memory changes already increment the generation through emitFiberSummaries() at LineAnnotationController.cpp:11058-11064. Successful asynchronous saves increment it again
+     at :13547-13555, despite changing no geometry used by fiberMapSnapshot(). If the user rebuilds while a save is pending, the queued completion invalidates that newly built map; their  
+     next interaction is rejected as stale.
+
+  4. P2: The stale-map navigation race is narrowed but not completely closed.
+     FiberMapWorkspace.cpp:1210-1217 checks staleness before opening QMenu::exec(), but the triggered callback at :1248-1259 does not recheck the generation. The nested menu event loop    
+     permits a reload while it is open. If the new package contains the same filename, fiberIdForFileName() can resolve and navigate to that different annotation. Capture the generation or
+     rerun refreshStaleState() inside the callback.
+```
+skyward7187
+force-pushed
+the
+fiber-map-workspace
+branch
+from
+edb82a1 to
+9ca0115
+Compare
+August 17, 2026 18:00
+skyward7187
+force-pushed
+the
+umbilicus-logistics
+branch
+from
+a6a7bdd to
+bd5f0da
+Compare
+August 17, 2026 19:13
+skyward7187
+force-pushed
+the
+fiber-map-workspace
+branch
+from
+9ca0115 to
+fa8f128
+Compare
+August 17, 2026 19:13
+skyward7187
+commented
+Aug 17, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+Rebased onto current main (via the updated base PR), and all four review points are
+addressed. Taking them in the order they compound rather than the order they were raised.
+1 — the annotation frame was derived twice. The snapshot's voxel size honoured a stamped
+source resolution and fell back to the store's level-0 resolution; its voxel counts were only
+ever multiplied by an open-data scale factor, with no reference to baseScaleLevel(). On an
+untagged rebased store that pairs a level-0 resolution with level-N counts, so the map
+reported a scroll 2^N too short and handed deriveUmbilicusScale() a target grid that could
+refuse a correctly stamped umbilicus over an axis-ratio mismatch the pairing had invented.
+The shared derivation is in the base PR, since the function it corrects lives there; both of
+this PR's inline copies now call it. Worth noting for review: the reviewer that found this
+also flagged the ratio validation in fiberMapSnapshot() as a fourth instance. I don't think
+it is — that block only fires when the three axis ratios disagree with each other, and
+scaling all three by the same factor cannot change whether they agree. It deliberately
+tolerates a uniform rescale, so it is untouched.
+2 — the redundant bump on save completion. Removed, and its comment was wrong on both
+counts. saveSessionAsFiber() does go through emitFiberSummaries(), and does so after
+already adding or updating the entry in _fibers — so the mutation that prompted the save
+had bumped the generation. The save changes nothing a snapshot reads: the task only writes to
+disk, the result carries no fiber state back, and the fileName a later navigation resolves
+by is assigned at session creation. The second bump made every save look like fresh fiber
+data.
+3 — staleness ignored the frame and the umbilicus. A rebuilt layout depends on the
+coordinate frame the unroll happens in and on which umbilicus resolves, neither of which the
+fiber generation covers.
+They are not equally severe, so they aren't treated alike. Changed fibers or a changed
+umbilicus leave the map out of date — the existing banner. A changed coordinate frame
+leaves it meaningless, since geometry unrolled about one grid says nothing about another,
+so that clears the layout outright, as does a package switch, where the fibers themselves are
+gone.
+Comparing the derived frame rather than the volume's identity is what makes this usable in
+practice: two stores of one scan at different downsample levels derive the same frame, so
+switching between them costs nothing, while a store of a different scan does not compare
+equal. That behaviour is asserted in test_annotation_frame.
+On the mechanism, since the generation counter here was a deliberate choice: fibers still use
+it, with no hook on the annotation path. The umbilicus gets a fingerprint rather than a
+signal because attaching, detaching or repointing it emits nothing at all — it is the
+project's field plus a stat(), never the resolver's directory search, and a file found by
+discovery rather than named by the project is out of scope and documented as such. Only the
+package switch takes a connection, and only because it cannot wait for the next interaction:
+leaving another scroll's fibers on screen until the user clicks is showing a wrong picture
+rather than a late one. That slot drops the layout and does nothing else.
+This also fixed the umbilicus status cache, which was keyed to the fiber generation and so
+threw the answer away on every save to redo filesystem work that could not have changed. It
+keys on the umbilicus fingerprint now.
+4 — the control-point menu could act on a stale index. menu.exec() runs a nested event
+loop, so the fiber set can change while the menu is open. Resolving the runtime id from the
+file name already handled a reload reassigning ids, but not an edit changing the fiber's
+control points, which would leave the captured index meaning a different point or none. The
+generation is captured at menu-build time and compared before navigating.
+Full suite 150/150. That count is one higher than I have been reporting, and the reason is
+worth flagging: my sweeps used ctest -E network, which quietly matched
+fiber_network_layout and excluded this PR's own layout test from every run I called green.
+It passes, and the exclusion is by label now.
+The patch tracer is still not converted to the shared resolver — noted in the base PR as a
+follow-up, not done here.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_01Xb3JfFAJa5ZTGGRe5xbqmh
+hendrikschilling
+commented
+Aug 17, 2026
+Copy link
+Copy Markdown
+Contributor
+again 2 probably not that important:
+```
+  1. P2: Empty layouts never become stale.
+     rebuildLayout() records the dependencies and sets _stale = false before potentially producing zero networks (FiberMapWorkspace.cpp:717-786). But refreshStaleState() immediately       
+     returns when _layout.networks.empty() (FiberMapWorkspace.cpp:668-672).
+     Consequently, a map built with no umbilicus, no qualifying network, or no fibers will not notice later fiber, frame, or umbilicus changes, even when reopened.
+
+  2. P2: Active-volume and umbilicus changes remain visually undetected while the tab stays visible.
+     Only vpkgChanged is connected (FiberMapWorkspace.cpp:582-596). volumeChanged and umbilicus attachment changes are checked only on show or interaction. The old map can therefore remain
+     displayed with a fresh-looking status until the user clicks. This means follow-up comment 2 is only partially addressed.
+
+  3. P2: The context-menu callback checks only fiber generation.
+     The callback at FiberMapWorkspace.cpp:1314-1336 closes the reported fiber-reload/runtime-ID race. However, a coordinate-frame change during QMenu::exec() does not change the fiber    
+     generation, so navigation can still proceed from a map built in another frame. Calling refreshStaleState() inside the callback would cover all dependencies.
+```
+skyward7187
+force-pushed
+the
+fiber-map-workspace
+branch
+from
+fa8f128 to
+f09cd21
+Compare
+August 17, 2026 23:01
+skyward7187
+commented
+Aug 17, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+All three addressed in f09cd210e, rebased onto the updated base. They are the same defect
+three times over: a dependency recorded when the layout was built, but not re-examined at the
+moment it mattered.
+1 — empty layouts never became stale. Correct, and the likeliest case is the worst one:
+a map built before an umbilicus was attached went on saying it had found none indefinitely,
+which is the state that started this whole thread. An empty result is still a result, derived
+from dependencies that go out of date, so the early-out now keys on nothing built yet rather
+than no networks.
+That distinction is load-bearing rather than pedantic. The guard cannot simply be dropped:
+before a first build _layoutFrame is default-constructed while the current frame is
+populated, so the comparison would differ on every check and clear the layout each time,
+resetting the view fit and redoing scene work indefinitely.
+2 — a visible tab kept showing a superseded map. Also correct, and the asymmetry was mine
+to answer for: I justified connecting vpkgChanged on the grounds that waiting for the next
+click shows a wrong picture rather than a late one, then did not apply that argument to a
+volume switch.
+volumeChanged is connected, and clears only when the derived frame actually differs — so
+switching between downsample levels of one scan still costs nothing, which is the property
+test_annotation_frame pins. The umbilicus needed a signal, since attach and detach announce
+nothing: CState::umbilicusChanged is added in the base PR beside the attach action, and
+consumed here. It marks stale rather than clearing, because the fibers and the frame are
+unchanged — only where they land. The fingerprint stays, since it still covers the file being
+rewritten in place, which no signal reports.
+3 — the callback checked only the fiber generation. Correct; it now compares every
+dependency captured when the menu was built.
+I did not take the suggested route of calling refreshStaleState() there, though it would
+indeed cover all dependencies. That function can reach clearLayout(), which deletes the
+scene's items and rebuilds it, and the callback runs inside menu.exec()'s nested event loop
+while the press that opened the menu is still unwinding. Comparison gives identical coverage
+without mutating the scene from that context; the clear happens at the next natural moment.
+Two smaller things fell out. markStale() takes its reason, so the status line names what
+changed instead of always blaming the fibers — the spinbox connections became lambdas because
+a pointer-to-member connect cannot carry an argument the signal does not supply, and a
+settings change was never a fiber change anyway. And the snapshot now reports the frame it was
+built in rather than leaving the workspace to derive it a second time: two calls read live
+volume state and could disagree, which would tag a layout with a frame it was not built in.
+Full suite green, 150/150.
+The three fixes are widget-level state machines inside a QMainWindow, which the layout-only
+test target cannot construct, so they are read- and compile-verified plus VC3D launch-checked
+only. Worth exercising by hand, and I have not been able to do the third: rebuild with no
+umbilicus then attach one and watch the status change without clicking; rebuild then switch
+between levels of one scan and confirm the map is untouched; rebuild then switch to a volume of
+a genuinely different scan and confirm it clears while the tab is visible — no such store was
+available here; open a control-point menu, change fibers behind it, confirm navigation is
+refused.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_01Xb3JfFAJa5ZTGGRe5xbqmh
+skyward7187
+commented
+Aug 17, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+@hendrikschilling — separate from this PR's contents: the Synthetic rendering regression
+job looks like it needs its reference re-baselined or its tolerance widened, and it is failing
+on main too, so it will block other PRs as well.
+The check requires a modeled-runtime score <= 1.10x reference. Seven samples over the last
+few hours, on code none of these changes touch:
+Where
+Scenario
+Score
+Result
+#1454 @ a6a7bddcb
+parallel/fallback_3
+1.162x
+fail
+#1454 rerun
+parallel/fallback_3
+1.103x
+fail
+#1454 rerun
+parallel/fallback_3
+1.074x
+pass
+main @ 57f7f5cfb
+parallel/fallback_3
+1.179x
+fail
+#1459 earlier
+—
+—
+pass
+#1459 @ f09cd210e
+parallel/mixed_correlated
+1.276x
+fail
+Two things stand out. The threshold sits inside the run-to-run spread rather than above it —
+1.074x to 1.179x on the same scenario and effectively the same code — so a pass or fail is
+close to a coin toss. And the scenario that trips has started varying, which is what noise
+looks like rather than a regression.
+main's own head scores 1.179x, i.e. the branch these PRs merge into fails its own gate.
+My guess at the trigger is 4153f62f4 ("Speed up QuadSurface::gen() warps by hoisting the
+separable x axis"), which landed in main today and changes exactly what this benchmark
+measures — its own CI run failed as well. If that change moved real performance, the stored
+reference is simply stale; if it made timing more variable, the tolerance is the thing to
+revisit. I have not touched either, since it is not mine to re-baseline.
+One further note in case it bites someone else: an earlier run of this job was cancelled at
+the 15-minute cap while still inside actions/checkout@v4, before installing Valgrind or
+building anything. The aggregate CI job counts a cancellation as a failure, so it surfaces as
+a red "CI" with no useful log — worth knowing when the artifact upload also reports "no files
+were found".
+🤖 Generated with Claude Code
+https://claude.ai/code/session_01Xb3JfFAJa5ZTGGRe5xbqmh
+skyward7187
+commented
+Aug 17, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+One more data point, and it is the clearest of the set: re-running that job on the same
+commit, changing nothing, took parallel/mixed_correlated from 1.276x to 1.061x and
+parallel/fallback_3 to 1.057x. Both comfortably inside the 1.10x limit that the identical
+code had failed minutes earlier.
+A ~20% swing between consecutive runs of one commit puts the threshold well inside the noise,
+so passing this check is currently closer to luck than to a statement about performance. This
+PR is green now, but only because I re-ran it.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_01Xb3JfFAJa5ZTGGRe5xbqmh
+hendrikschilling
+commented
+Aug 18, 2026
+Copy link
+Copy Markdown
+Contributor
+For 1. the best solution is to not directly signal anything but just set a stale/generation flag which the workspace can evaluate when its opened/shown.
+```
+  1. P2: The hidden workspace still introduces synchronous filesystem work.
+     FiberMapWorkspace.cpp:599-615 calls clearLayout() on package or meaningful volume changes. clearLayout() invalidates the cache and immediately calls withCachedUmbilicusStatus()       
+     at :689-698, which reaches resolveScrollUmbilicus() at LineAnnotationController.cpp:6093-6095. Because the workspace is permanently constructed at CWindow.cpp:2626-2629, switching    
+     projects or frames can search directories and parse the umbilicus even when the Fiber Map was never opened. This partially reintroduces the earlier inactive-tool overhead finding.    
+
+  2. P2: Automatically discovered umbilici are absent from the dependency fingerprint.
+     LineAnnotationController.cpp:6055-6084 fingerprints only the explicit project field and its resolved file. The ordinary resolver path at :6216-6217 can instead discover an umbilicus  
+     beside the volpkg or segments. Replacing, deleting, or adding that file leaves the fingerprint unchanged, so the map and cached status remain “fresh” and interactive with obsolete    
+     geometry. The code explicitly acknowledges this gap at :6080-6083, but it contradicts the claim that every dependency is tracked.
+
+  3. P2: Fiber Map still duplicates the umbilicus framing implementation.
+     LineAnnotationController.cpp:6255-6405 manually repeats dimension matching, voxel-size scaling, and grid inference instead of calling the shared deriveUmbilicusScale() and load-      
+     decision helpers from PR 1454. Therefore there are still two independent framing implementations, contrary to the earlier requirement. Changes and bug fixes in the shared
+     implementation will not automatically reach Fiber Map.
+
+  4. P3: Dimensions-only metadata is still labeled “unstamped.”
+     LineAnnotationController.cpp:6098-6102 appends (unstamped) whenever voxelsize_um is missing, even when the complete dimension triplet exists and is the preferred authoritative frame  
+     statement. PR 1454 fixed this exact classification in the attach dialog, but Fiber Map duplicated the old condition.
+```
+skyward7187
+force-pushed
+the
+fiber-map-workspace
+branch
+from
+f09cd21 to
+6fb3302
+Compare
+August 18, 2026 11:33
+skyward7187
+commented
+Aug 18, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+All four in 6fb3302e7.
+3 — the duplicated framing. You are right, and I told you otherwise. I wrote on #1454 that
+"framing is shared, not reimplemented… both consumers call it". That was false:
+fiberMapSnapshot() reimplemented the stamped-dimension test, the voxel-size fallback and the
+grid inference, down to its own copy of the coverage threshold, and never called
+deriveUmbilicusScale(). 160 lines of it are gone.
+4 was the same duplication showing a second way — the classification fixed for the attach
+dialog still sat here in its old form, so a dimensions-only file was labelled unstamped when
+exact integer counts are the preferred statement.
+Two consequences worth being explicit about. Sharing the implementation means sharing its
+refusal, so a file whose stated frame does not fit is refused here too instead of falling
+through to a weaker reading — the same behaviour change line annotation took, for the same
+reason. And it costs a diagnostic: the old copy distinguished a conflicting stamp from an
+ambiguous or under-covered inference and quoted the coverage it measured ("2 candidate grids,
+best z coverage 61%"), where deriveUmbilicusScale() reports only that it could not answer.
+Those collapse into one "could not determine the umbilicus frame". I chose that over widening the
+shared function's contract to keep #1454 still; the near-miss number is the part I would most
+want back, and it is recoverable later by giving the helper a failure reason.
+1 — hidden workspace doing filesystem work. Correct, and it was mine from the previous
+round. Done your way: no connections at all. The controller keeps a package counter and an
+umbilicus counter, both an integer bump, and the workspace compares them where it already
+compares the fiber generation — on show, on rebuild, and before acting on a click. Two counters
+rather than one because they mean different things to a holder: a new project invalidates the
+layout outright, a new umbilicus only moves where it lands.
+The CState pointer the workspace was given last round is gone with the connections, so nothing
+outside the controller is observed.
+The accepted cost is deferred detection: a tab already visible when the volume or umbilicus
+changes keeps its picture until the user does something. I checked whether that was reachable,
+and it is — the volume selector is in dockWidgetVolumes, a dock rather than a tab, and Attach
+Umbilicus is a global menu action — so it is a real trade rather than a theoretical one, and
+consistent with your earlier read that this one is not important.
+2 — discovered files outside the fingerprint. umbilicusCandidatePaths() comes out of the
+resolver so both use one list: the resolver to search it, the fingerprint to stat it. Absent
+candidates are recorded as absent, since a file appearing is exactly what needs noticing, and
+the canonical dedup comes along with the extraction so one file reachable through two roots
+cannot read as a change. Statting is cheap — it was the JSON parse that made doing this the
+resolver's way too expensive. The counters cover what VC3D itself does; this covers the file
+changing underneath it.
+Full suite green, 150/150, and umbilicusCandidatePaths has tests for agreement with the
+resolver, both recognised names being offered, canonical dedup, and paths being offered before
+the file exists.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_01Xb3JfFAJa5ZTGGRe5xbqmh
+skyward7187
+force-pushed
+the
+umbilicus-logistics
+branch
+from
+65c7ee7 to
+4bd4367
+Compare
+August 18, 2026 12:00
+skyward7187
+force-pushed
+the
+fiber-map-workspace
+branch
+from
+6fb3302 to
+182440c
+Compare
+August 18, 2026 12:00
+hendrikschilling
+commented
+Aug 18, 2026
+Copy link
+Copy Markdown
+Contributor
+```
+ 1. P2: Fiber-list clicks bypass stale-state checks.
+     FiberMapWorkspace.cpp:564-581 handles currentItemChanged directly, unlike scene clicks and control-point menus, which call refreshStaleState(). After fibers, the package, frame, or   
+     umbilicus changes while the tab remains visible, clicking the tree continues interacting with the obsolete map without marking it stale. It does not navigate to the wrong fiber, but  
+     it leaves stale geometry looking current. The handler should call refreshStaleState() first.
+
+  2. P2: The fingerprint tracks files the resolver explicitly ignores.
+     LineAnnotationController.cpp:6162-6178 always fingerprints automatic-discovery candidates. However, ScrollUmbilicus.cpp:139-170 returns immediately when the project has an explicit   
+     umbilicus. Therefore changing an ignored nearby umbilicus.json can falsely invalidate the Fiber Map and block interaction. It also performs unnecessary synchronous path
+     canonicalization and filesystem stats on map clicks. Discovery candidates should only be included when pkg.umbilicus() is empty; shadowed lower-priority candidates should ideally be  
+     excluded too.
+```
+skyward7187
+force-pushed
+the
+umbilicus-logistics
+branch
+from
+4bd4367 to
+03cafac
+Compare
+August 18, 2026 19:39
+skyward7187
+force-pushed
+the
+fiber-map-workspace
+branch
+from
+182440c to
+30b9260
+Compare
+August 18, 2026 19:39
+skyward7187
+commented
+Aug 18, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+Both fixed.
+1 — fiber-list clicks bypass the gate. Gated now, but not by calling refreshStaleState()
+directly: that can reach clearLayout(), which clears the tree and so deletes the
+QTreeWidgetItem the signal is still being delivered with. Evaluation and application are split —
+the handler reads the fiber id off the item first, evaluates without mutating, and queues the
+destructive half. The control-point menu callback also gained the package and umbilicus counters it
+was missing, and now compares the full frame rather than only the grid.
+The decision itself moved to FiberMapStaleness.hpp as a pure function of two dependency sets, so
+every arm is asserted instead of read. I have answered these rounds with "it lives in a
+QMainWindow, so read-verified only", and that was never true: this repo already runs offscreen
+widget tests and already builds a CState in test_line_annotation_generated_views.
+Clearing also narrowed. It keyed on sameAnnotationFrame(), so a raw↔surf switch on
+PHerc0139_ds2 — identical voxel counts, 2.5% apart in recorded voxel size — discarded a build you
+had asked for. Different voxel counts clear; a differing µm figure marks stale.
+2 — the fingerprint tracks files the resolver ignores. scanUmbilicusCandidates() is the
+resolver's own scan, exposed rather than mirrored — removing the per-root stop now fails the
+resolver's name-priority test as well as the dependency tests, which is the only proof I trust that
+two things are one implementation. Shadowed names are out of the list; absent higher-priority names
+stay, since one appearing changes the answer. Measured: field set → 1 dependency; field removed → 3,
+with the existing estimated_umbilicus.json correctly absent.
+A self-review pass found six more, all fixed. The worst was mine from this round: I added a
+"relabel only" arm claiming a voxel-size change moved nothing but labels. Wrong — the layout's
+smoothing sigma, resample step, pads, panel tick and gap all convert through that figure, so a
+rebuild really would place things differently. Also: a queued verdict computed before the queue
+drained; an umbilicus token recorded after the snapshot had already parsed the file; union-find
+joining components on links whose control-point indices were never validated, pulling unconnected
+fibers into networks where they counted toward minFibers; a mutation path that upserts _fibers
+without bumping the generation; and fiberBounds() never returning usable bounds at all — it seeded
+with a zero-size QRectF and tested isNull(), but a zero-size rect is null, so united() was
+never reached, label chips were never placed and tree selection never centred the view.
+Non-network suite 151/151. Two description corrections: WindingMark::number is computed and tested
+but not drawn, so "numbered" overstated it; and tails are clipped to the outermost control points
+keeping one sample beyond each, not strictly beyond them.
+Read-verified only: the widget wiring around the decision, and the cm/vx display — no
+identity-tagged store and no second scan with fibers exist here.
+skyward7187
+force-pushed
+the
+umbilicus-logistics
+branch
+from
+03cafac to
+2f6f6c5
+Compare
+August 18, 2026 23:38
+skyward7187
+force-pushed
+the
+fiber-map-workspace
+branch
+from
+30b9260 to
+b3c9f10
+Compare
+August 18, 2026 23:38
+hendrikschilling
+commented
+Aug 19, 2026
+Copy link
+Copy Markdown
+Contributor
+```
+  1. P2: A contradicted voxel-size stamp can still produce an actionable map.
+     volume-cartographer/apps/VC3D/LineAnnotationController.cpp:6513 detects when an attached named volume disagrees with voxelsize_um, but only adds a warning. If StampedVoxelSize        
+     supplied the scale, that disagreement means the factor itself is wrong; the points are still scaled and returned at :6568. This case should be refused like the dimension
+     contradiction.
+
+  2. P2: Equal dimensions and voxel size are treated as proof of the same coordinate frame.
+     volume-cartographer/apps/VC3D/AnnotationFrame.hpp:102 and :128 compare only extent and voxel size. Switching to another crop/scan with identical metadata therefore leaves the map     
+     fresh and interactive. This is an inherited limitation from PR 1454, but PR 1459 relies on it for stale-state safety.
+
+  3. P3: The “umbilicus changed during rebuild” warning is immediately overwritten.
+     volume-cartographer/apps/VC3D/FiberMapWorkspace.cpp:809 marks the result stale, but the normal status assignment at :916 replaces the warning. _stale remains true, so subsequent      
+     clicks are rejected without explaining why.
+```
+skyward7187
+mentioned this pull request
+Aug 19, 2026
+umbilicus: remaining consumers and UI of the shared resolver
+#1538
+Closed
+skyward7187
+force-pushed
+the
+umbilicus-logistics
+branch
+from
+2f6f6c5 to
+b9a7589
+Compare
+August 19, 2026 15:51
+Base automatically changed from
+umbilicus-logistics
+to
+main
+August 20, 2026 19:02
+skyward7187
+and others
+added 4 commits
+August 21, 2026 11:24
+VC3D: fiber network unroll layout library
+…
+9ee74e6
+```
+vc3d::fiber_map::buildLayout, a C++ port of fiber_network_unroll.py's
+top_clusters view: extrinsic unroll about the umbilicus (x = unwrapped
+angle x the network's median radius, y = z), whole-turn offsets snapped
+by walking the branch-link graph best-agreeing link first so crossings
+coincide and loops close by construction, links still disagreeing by
+more than 0.25 turns flagged suspect, networks packed inner to outer on
+a fixed tick grid, traced runs split from interpolation-only runs, and
+line-point tails clipped to the outermost control points keeping the
+one sample beyond each.
+
+Everything is in voxels of the frame the fibers are annotated in; the
+layout never learns the voxel size. The tuning lengths in LayoutParams
+carry documented defaults equal to their physical intents at 2.4 um for
+the one case where no voxel size is known; a caller that knows it is
+expected to convert each intent itself.
+
+No consumer yet: the workspace arrives separately. test_fiber_network_
+layout covers network filtering, offset snapping and loop closure,
+suspect-link detection, pending-link plumbing, units and tail clipping,
+run splitting, and voxel geometry being independent of the voxel size.
+
+Rebuilt from archive/fiber-map-workspace-20260819 onto main after #1454
+merged; the layout files and test are byte-identical to the tag.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01F4hFeiv8gESQtoxvniqprG
+```
+VC3D: fiber map snapshot API on the line annotation controller
+…
+9e57f45
+```
+fiberMapSnapshot() exports what a fiber-map view needs: per-fiber
+geometry, traced flags, branch links (pending included), each fiber's
+file name as its stable identity, and the umbilicus brought into the
+fibers' frame — plus the frame itself, reported rather than left for a
+holder to re-derive, since a second annotationFrame() call reads live
+volume state and could answer differently.
+
+The umbilicus half lives in umbilicusForSnapshot(): the shared
+resolver's answer, scaled through deriveUmbilicusScale(), gated by
+decideUmbilicusLoadAction(), and cross-checked against the volume the
+stamp names via umbilicusStampContradiction(). Relative to the
+pre-restart branch (archive/fiber-map-workspace-20260819) this replaces
+an inline copy of the cross-check that had two defects the core helper
+does not: a voxel-size contradiction only warned while the points were
+scaled and returned anyway, and the dimension check was gated on the
+named volume's voxel size being readable, so contradictory dimensions
+failed open when it was not. Refusal now carries the helper's reason.
+UseLegacy is refused here deliberately — the legacy reading is line
+annotation's compatibility path, and this consumer has none — and
+umbilicusStatus() words an unstamped file conditionally ("frame must be
+inferred") rather than calling plainly usable a file a rebuild may
+refuse. The unverified-stamp and registered-volume (transform.json)
+notes stay, as does the level/µm/grid frame labeling; both notes are
+read at build time only and say so, since neither the named volume nor
+its transform is a staleness dependency.
+
+Staleness support, for a holder that must cost annotation work nothing
+when unopened: fiberDataGeneration() settles in exactly two places —
+emitFiberSummaries(), where most in-memory mutations land, and
+scheduleBranchMetadataSaves(), which upserts _fibers on paths that
+return without emitting summaries. Three more bumps cover transient
+windows where _fibers deviates from the described set while a nested
+event loop can run: the merge and split handlers insert the new fibers
+and defer retiring the originals through callbacks that spin nested
+loops, and loadFibersForCurrentPackage() clears the set before a
+broken-link prompt can exec(). A map built before such an edit goes
+stale at the window bump; one built inside the window goes stale at the
+settling bump — what no counter can give is a mid-window map reading
+stale while still inside its window, stated in place. Save completion
+deliberately does not bump: the mutation that prompted the save already
+did, and the task writes to disk without carrying fiber state back.
+packageGeneration() bumps on project replacement. umbilicusGeneration()
+and the umbilicusChanged connection are main's own (from #1454) and are
+not duplicated here; umbilicusFingerprint() complements them by
+statting the resolver's own candidate scan, covering the file changing
+underneath VC3D, which nothing in-process announces.
+
+FiberMapSnapshot carries no umbilicusScaleSource: the pre-restart field
+existed for a relabel-only staleness arm that its final revision
+removed, leaving the field written but read nowhere.
+
+fiberIdForFileName() resolves a recorded file name to the current
+runtime id at activation time; annotationFrame() moves to the public
+section unchanged for the same holders.
+
+No consumer yet; the workspace arrives separately.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01F4hFeiv8gESQtoxvniqprG
+```
+VC3D: fiber map staleness as one derived decision
+…
+3df783e
+```
+FiberMapStaleness.hpp: whether a built Fiber Map layout is still
+current, out of date, or meaningless, as a pure function of two
+dependency sets — what the layout was built from and what a rebuild
+would use now. Package and grid changes clear (geometry unrolled over
+one set of voxels says nothing about another); fiber, umbilicus,
+voxel-size and settings changes mark stale and the geometry survives
+for the rebuild.
+
+Two changes relative to the pre-restart branch
+(archive/fiber-map-workspace-20260819):
+
+The layout-shaping settings (top networks, min fibers) join the
+dependency value instead of being latched imperatively when a spinbox
+moves. The latch could not be proved wrong by anything, so a setting
+changed and then changed back left an exactly-current layout stale;
+comparison can, so it reads as current again.
+
+The bool-plus-fixed-reason latch input narrows to a latched *reason*
+string reserved for the holder's invariant-violation defenses (a fiber
+file name that no longer resolves under an unchanged generation) —
+staleness nothing in the dependency sets can express. It survives until
+the layout it describes is rebuilt or cleared; the clearing arms
+outrank it, and a higher-priority derived reason may be displayed over
+it while its cause holds, so the holder keeps the latched wording in
+its own field rather than in the status line. Everything derivable
+deliberately does not latch, which is also what lets one scan's volume
+switched away and back read as current, the property the frame
+comparison always promised.
+
+test_fiber_map_staleness grows from 12 to 16 slots: settings changes
+mark stale with a settings reason, a reverted setting is fresh again,
+changed fibers outrank changed settings in the naming order, and the
+unknown-to-known voxel-size transition (an untagged store now derives
+factor 1 with full extents under #1454's exact-factor semantics) marks
+stale in both directions without clearing. Every new arm was
+mutation-checked: deleting the settings arm fails exactly the two
+settings cases, reordering it ahead of the fibers arm fails exactly the
+ordering case, and turning the voxel-size arm into a clear fails
+exactly the two relabel cases.
+
+No consumer yet; the workspace arrives next.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01F4hFeiv8gESQtoxvniqprG
+```
+VC3D: Fiber Map workspace
+…
+31e8140
+```
+The permanent Fiber Map tab: a QGraphicsView map of the unrolled fiber
+networks with a fiber dock, bidirectional highlight, right-drag pan,
+wheel zoom, theme-aware colors, and ctrl+right-click navigation to a
+control point, resolved by file name at activation time because runtime
+ids are reassigned on every load.
+
+Staleness is enforced at the four moments that matter — tab show,
+rebuild, and before acting on any scene click, fiber-list selection, or
+control-point menu action — through the one decision in
+FiberMapStaleness.hpp. Two structural changes relative to the
+pre-restart branch (archive/fiber-map-workspace-20260819), both derived
+from the same invariant: staleness is *derived* from the dependency
+comparison wherever a dependency can express it, and latched only where
+it cannot.
+
+The stale reason lives in a _staleReason member, never in the status
+label's text, and the latched reason in a field of its own beside it —
+a higher-priority derived reason (a voxel-size change, say) can be
+displayed over a latch and then revert, and the latch must resurface
+with its original wording rather than whatever the label last said. The
+label has five writers — showStale(), the fresh-verdict restore, the
+clear, showEvent()'s nothing-built branch, and the build summary — and
+rebuildLayout()'s last act is refreshStaleState(), so a summary can
+never be what a stale map is left saying. That closes the last open
+review finding (the mid-build umbilicus race warning at the old :809
+was overwritten by the summary at :916 while _stale stayed true): the
+race is now expressed as data — the umbilicus fingerprint is recorded
+*before* the snapshot parses the file, so a mid-parse rewrite that
+moves the file's size or mtime (the token's stated contract; a
+same-size rewrite inside one timestamp tick is beyond it) leaves the
+recorded token disagreeing with the disk and the final refresh raises
+the banner through the ordinary arm. The stale banner also re-shows on
+every stale gate rather than only when its wording changes, so the
+cached umbilicus suffix it carries follows a fingerprint change instead
+of freezing at the first reason. showEvent()'s nothing-built branch
+keys on _layoutBuilt, not on an empty network list — a built-but-empty
+map keeps its real summary on re-show, and a cleared map keeps its
+clear reason (the stored resting status) rather than a generic prompt.
+
+The settings spinboxes stop latching a stale flag and join the
+dependency value; their slots just call refreshStaleState(). A setting
+changed and changed back reads as current again, as does one scan's
+volume switched away and back — a derived reason clears itself when its
+cause reverts, restoring the last resting status. The one latch left is
+markStale() on the menu callback's file-name fallback, which fires only
+when a name stops resolving under an unchanged generation — an
+invariant violation nothing in the dependency sets can prove wrong, so
+it ends only with a rebuild or a clear. That callback now captures a
+FiberMapDependencies value and re-compares through staleVerdictFor()
+instead of a hand-rolled five-way check, applied non-destructively
+because it runs inside menu.exec()'s nested event loop.
+
+The decision arms are unit-tested (test_fiber_map_staleness, 16 slots,
+every new arm mutation-checked); the widget wiring around them is
+compile- and read-verified only. The offscreen controller fixture the
+old branch's review discussion pointed to (test_line_annotation_
+generated_views) did not survive #1454's restart, and building a
+CState-plus-package harness is beyond this port — stated here rather
+than discovered.
+
+currentFrame() is gone (its one caller was the five-way check), and the
+snapshot's dropped umbilicusScaleSource was never read here.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01F4hFeiv8gESQtoxvniqprG
+```
+skyward7187
+force-pushed
+the
+fiber-map-workspace
+branch
+from
+b3c9f10 to
+31e8140
+Compare
+August 21, 2026 16:41
+skyward7187
+commented
+Aug 21, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+After #1454 was squash-merged, this branch was rebuilt from main as four commits
+(layout library → controller snapshot API → staleness decision → workspace); the
+previous head is preserved at archive/fiber-map-workspace-20260819. The three
+core-side files the old branch carried (scanUmbilicusCandidates and friends) are
+upstream in #1454 verbatim, so this PR now has zero core changes. Below is every
+finding from the five review rounds and every defect I disclosed along the way, mapped
+to its fate in the rebuild. "Carried" means the fix is present in the rebuilt code;
+where a mechanism was superseded, the replacement is named.
+Round 1 (Aug 17):
+Stale map can open the wrong fiber (P1) — carried: file names are the persistent
+identity (fiberIdForFileName() resolves at activation time), and every
+interaction is gated by the staleness decision.
+2.4 µm silently assumed (P2) — carried: voxelSizeUm is optional with no default,
+the layout computes in voxels, labels fall back to vx.
+Scale guessing from fiber extent (P2) — carried: deleted; the scale comes from
+deriveUmbilicusScale() (stamped dimensions, stamped voxel size, grid inference,
+else refusal), now core code with core tests.
+Inactive tool doing synchronous filesystem work (P3) — carried: no connections to
+the controller or CState at all; counters compared on show/rebuild/interaction.
+Round 2 (Aug 17):
+Lower-scale-only volumes get the wrong frame (P1) — carried, upstream: the shared
+deriveAnnotationFrame() lives in umbilicus: frame metadata, project attachment, shared resolver #1454 (since improved there with the exact
+coordinate factor); this PR consumes it through annotationFrame() and derives
+nothing itself.
+Staleness tracked only fibers (P2) — carried: the dependency set is fibers,
+package, umbilicus counter + fingerprint, frame, and now the layout settings.
+Save completion caused false staleness (P2) — carried: no generation bump on save
+completion; the mutation that prompted the save already bumped.
+Menu race narrowed but not closed (P2) — carried and simplified: the callback
+captures the full dependency set and re-compares through the same shared decision
+function everything else uses.
+Round 3 (Aug 17):
+Empty layouts never became stale (P2) — carried: "nothing built yet" is tracked
+apart from "no networks".
+Visible tab kept a superseded map (P2) — superseded: the connections this was
+first fixed with were removed in round 4 at your direction, in favour of counters
+compared at the next show or interaction. The deferred detection is the accepted
+trade and is documented in the PR description.
+Menu callback checked only the fiber generation (P2) — carried, same mechanism as
+round 2 item 4.
+Round 4 (Aug 18):
+Hidden workspace still reached the resolver via clearLayout (P2) — carried: no
+connections; two counters (package, umbilicus) plus the fingerprint.
+Discovered umbilici absent from the fingerprint (P2) — carried:
+umbilicusFingerprint() stats the resolver's own candidate scan
+(scanUmbilicusCandidates(), now upstream), so the two cannot disagree.
+Fiber Map duplicated the framing implementation (P2) — carried and completed: the
+scale derivation was already shared; the rebuild also replaces the inline stamp
+cross-check with core umbilicusStampContradiction() (see final round, item 1).
+Dimensions-only files labeled "unstamped" (P3) — carried: umbilicusStatus()
+gates the suffix on umbilicusFrameClaim().any(). The suffix itself now reads
+"(unstamped — frame must be inferred)", because the Fiber Map refuses a
+no-statement file whose frame inference fails (it has no legacy reading to fall
+back on, unlike line annotation), and the status line must not call such a file
+plainly usable.
+Round 5 (Aug 18):
+Fiber-list clicks bypassed the gate (P2) — carried: the currentItemChanged
+handler evaluates without mutating and queues the destructive half, because a
+clear deletes the QTreeWidgetItem the signal is delivered with.
+Fingerprint tracked files the resolver ignores (P2) — carried, same as round 4
+item 2.
+Self-disclosed alongside round 5, all carried: the "relabel-only" voxel-size arm was
+wrong and every voxel-size change now marks stale (unit-tested, mutation-checked); the
+queued tree-handler verdict is re-evaluated when it fires rather than carried into the
+queue; union-find no longer joins networks on links with invalid control-point
+indices; the scheduleBranchMetadataSaves() upsert path bumps the generation;
+fiberBounds() returns real bounds (the zero-size-QRectF-is-null bug). Earlier
+disclosures also carried: the cosmetic-pen shape() hit-test bug (selection is by
+nearest segment), the snapshot reporting the frame it was built in rather than letting
+the holder re-derive it, and suite counts by -LE network rather than -E network.
+One earlier mechanism is superseded rather than carried: the spinbox handlers no
+longer mark stale imperatively with a settings reason — the settings joined the
+dependency value, so the same comparison that catches everything else catches them,
+and a setting changed and changed back reads as current again instead of latching.
+Final round (Aug 19):
+Contradicted voxel-size stamp still produced an actionable map (P2) — fixed:
+the inline cross-check is gone; umbilicusForSnapshot() calls core
+umbilicusStampContradiction() and passes its verdict to the 4-argument
+decideUmbilicusLoadAction(), which refuses on either contradiction. The rebuild
+also removed a second fail-open the inline copy had that no round caught: its
+dimension check was gated on the named volume's voxel size being readable, so
+contradictory dimensions passed silently when it was not. The core helper's
+dimension test does not depend on the voxel size.
+Equal dimensions + voxel size treated as proof of the same frame (P2) —
+inherited limitation, declared: AnnotationFrame carries no origin or pose,
+so equal counts are also consistent with a crop or a registration, exactly as you
+said. Fixing it needs volume-identity plumbing beyond this PR; it is in the
+description's known gaps and I am happy to file it as a tracked issue.
+Stale-reason warning overwritten by the status assignment (P3) — fixed
+structurally: the reason lives in a member, not the label text; the label's
+writers are enumerated in the workspace commit; and rebuildLayout()'s last act
+is a full dependency refresh, so a build summary cannot be a stale map's final
+word. The mid-build race itself became data: the umbilicus fingerprint is
+recorded before the snapshot parses, so a rewrite the token can see (size or
+mtime moved) is caught by the ordinary comparison.
+Known residuals, declared rather than found (all pre-existing in the reviewed
+branch, none regressed here; each is small and I can file issues):
+The fingerprint is a metadata token (size + mtime): a same-size rewrite inside one
+timestamp tick, or content swapped and restored between the pre-build read and the
+post-build check, is beyond it. Its header says so.
+The named volume's transform.json decides the "registered volume" label on the
+scale, but is not part of the dependency set, so adding or removing a registration
+after a build changes only what the next rebuild would say.
+Generic tag edits bump the fiber generation although the snapshot never reads tags:
+a deliberate over-approximation (a needless rebuild prompt is bounded; a missed one
+shows a wrong picture).
+The generation now also bumps at the start of the three structural windows where
+_fibers transiently deviates while nested event loops can run (merge, split,
+package reload). Those bumps make a map built before the edit stale immediately,
+and the settling bump makes a map built inside the window stale at settlement —
+what no counter can give is a mid-window map reading stale while still inside its
+own window; the code says so in place. Those three windows were traced; other
+structural edits settle through emitFiberSummaries() in the same call, and I have
+not enumerated every path beyond that. A single choke point for _fibers mutation
+would make this structural; offered as a tracked issue.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_01Xb3JfFAJa5ZTGGRe5xbqmh
+Merge branch 'main' into fiber-map-workspace
+f49a536
+vercel
+Bot
+deployed
+to
+Preview
+August 24, 2026 11:06
+View deployment
+Hide details
+View details
+hendrikschilling
+merged commit de3c249
+into
+main
+Aug 24, 2026
+30 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+hendrikschilling
+deleted the
+fiber-map-workspace
+branch
+August 24, 2026 14:13
+Bullo27
+mentioned this pull request
+Aug 24, 2026
+Show a coordinate frame gizmo at the top right of each viewport.
+#1579
+Merged
+Hide environments
+Show environments
+This branch was successfully deployed
+1 active
+deployment
+Preview
+—
+f49a536c
+Deployed
+Aug 24, 2026 by
+vercel[bot]
+View deployment
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

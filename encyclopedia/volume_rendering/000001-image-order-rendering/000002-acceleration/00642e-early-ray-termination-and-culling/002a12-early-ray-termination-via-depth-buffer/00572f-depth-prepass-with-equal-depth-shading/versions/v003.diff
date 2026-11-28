@@ -1,0 +1,80 @@
+--- v002.md
++++ v003.md
+@@ -7,6 +7,6 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A set of overlapping opaque primitives (spheres) [S1, unofficial].
+-*   **Output:** A rendered image where only the nearest primitive contributes to the final color per pixel [S1, unofficial].
++*   **Input:** A set of overlapping opaque spheres [S1, unofficial].
++*   **Output:** A rendered image where only the nearest sphere contributes to the final color per pixel [S1, unofficial].
+ 
+ **Data Structures:**
+@@ -15,33 +15,27 @@
+ 
+ **Steps:**
+-1.  **Depth Prepass:** Render the primitives to a depth buffer to record the depth of the nearest surface for each pixel using a dedicated shader (`room_spheres_depth.wgsl`) [S1, unofficial].
+-2.  **Shading Pass:** Render the primitives again to compute shading and ray tracing using a dedicated shader (`room_spheres_shade.wgsl`) [S1, unofficial]. Set the depth comparison function to `Equal` and disable depth writes (`depth_write: false`) [S1, unofficial]. This ensures the fragment shader runs only if the current primitive's depth matches the depth stored in the buffer from the prepass, effectively selecting the nearest primitive [S1, unofficial].
+-3.  **Depth Consistency:** Apply the `@invariant` qualifier to the clip-space position input in the shaders [S1, unofficial]. This ensures consistent depth rounding across the two separate rendering passes, preventing visual artifacts at primitive boundaries due to floating-point precision differences between passes or GPUs [S1, unofficial].
++1.  **Depth Prepass:** Render the spheres to a depth buffer to record the depth of the nearest surface for each pixel using a dedicated shader (`room_spheres_depth.wgsl`) [S1, unofficial].
++2.  **Shading Pass:** Render the spheres again to compute shading and ray tracing using a dedicated shader (`room_spheres_shade.wgsl`) [S1, unofficial]. Set the depth comparison function to `Equal` and disable depth writes (`depth_write: false`) [S1, unofficial]. This ensures the fragment shader runs only if the current sphere's depth matches the depth stored in the buffer from the prepass, effectively selecting the nearest sphere [S1, unofficial].
++3.  **Depth Consistency:** Apply the `@invariant` qualifier to the clip-space position input in the shaders [S1, unofficial]. This ensures consistent depth rounding across the two separate rendering passes, preventing visual artifacts at sphere boundaries due to floating-point precision differences between passes or GPUs [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def run_depth_prepass_with_equal_depth_shading(primitives, projection_matrix, view_matrix):
+-    # Initialize depth buffer with maximum depth
+-    depth_buffer = [[float('inf') for _ in range(width)] for _ in range(height)]
+-    frame_buffer = [[None for _ in range(width)] for _ in range(height)]
+-
++def run_depth_prepass_with_equal_depth_shading(spheres, pipeline_state):
+     # Step 1: Depth Prepass
+-    # Render primitives to depth buffer with standard depth testing
+-    for prim in primitives:
+-        clip_pos = projection_matrix @ view_matrix @ vec4(prim.position, 1.0)
+-        pixel = clip_pos.xy
+-        if 0 <= pixel.x < width and 0 <= pixel.y < height:
+-            depth_buffer[pixel.y][pixel.x] = min(depth_buffer[pixel.y][pixel.x], clip_pos.z)
++    pipeline_state.depth_test = True
++    pipeline_state.depth_write = True
++    pipeline_state.depth_compare = 'Less'  # Standard depth test
++    pipeline_state.shader = 'room_spheres_depth.wgsl'
++    # Standard GPU render pass execution [G]
++    render_pass(spheres)
+ 
+     # Step 2: Shading Pass
+-    # Render primitives again with Equal depth comparison and no depth writes
+-    for prim in primitives:
+-        clip_pos = projection_matrix @ view_matrix @ vec4(prim.position, 1.0)
+-        pixel = clip_pos.xy
+-        if 0 <= pixel.x < width and 0 <= pixel.y < height:
+-            # Depth test is set to 'Equal' in the render pipeline state
+-            if depth_buffer[pixel.y][pixel.x] == clip_pos.z:
+-                color = compute_shading_and_ray_tracing(prim)
+-                frame_buffer[pixel.y][pixel.x] = color
++    pipeline_state.depth_test = True
++    pipeline_state.depth_write = False
++    pipeline_state.depth_compare = 'Equal'
++    pipeline_state.shader = 'room_spheres_shade.wgsl'
++    pipeline_state.position_invariant = True  # @invariant qualifier
++    # Standard GPU render pass execution [G]
++    render_pass(spheres)
+ ```
+ 
+@@ -52,13 +46,12 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Apple GPUs:** Built-in hidden-surface removal is disabled when impostors use `discard`, causing every overlapping primitive to run full shading and ray tracing; the depth prepass restores per-pixel culling [S1, unofficial].
+-*   **Depth Consistency:** Without `@invariant`, the same comparison drops to 46 pixels (0.004%) where two overlapping spheres meet at the same 24-bit depth; the old draw kept the first sphere drawn, and the equal-depth pass keeps the last [S1, unofficial]. With the prepass also off, it drops to 3 pixels, by 1/255 [S1, unofficial].
+-*   **Silhouette Artifacts:** The `@invariant` qualifier may cause minor silhouette boundary shifts (single pixels on sphere silhouettes) due to different rounding in development vs. release builds, flipping some rim pixels between the sphere and what is behind it [S1, unofficial].
+-*   **Ordering:** The equal-depth pass keeps the last primitive drawn that matches the depth [S1, unofficial].
++*   **Apple GPUs:** Built-in hidden-surface removal is disabled when impostors use `discard`, causing every sphere in a pile to run full shading and ray tracing; the depth prepass restores per-pixel culling [S1, unofficial].
++*   **Opaque Walls:** Drawing walls after spheres to leverage depth testing was slower (4.7 ms vs 4.1 ms) because walls are opaque and the GPU's hidden-surface removal already skips them [S1, unofficial].
++*   **Draw Order:** The equal-depth pass keeps the last primitive drawn that matches the depth [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### Depth Consistency Handling via @invariant
+-Uses the `@invariant` qualifier on clip-space positions to ensure consistent depth rounding across separate rendering passes, preventing visual artifacts at sphere boundaries [S1, unofficial]. It accepts minor silhouette boundary shifts (single pixels on sphere silhouettes) to guarantee depth consistency across pipelines on different GPUs [S1, unofficial]. Without it, the same `rt=on` comparison drops to 46 pixels (0.004%) where two overlapping spheres meet at the same 24-bit depth; the old draw kept the first sphere drawn there, and the equal-depth pass keeps the last [S1, unofficial]. With the prepass also off, it drops to 3 pixels, by 1/255 [S1, unofficial].
++Uses the `@invariant` qualifier on clip-space positions to ensure consistent depth rounding across separate rendering passes, preventing visual artifacts at sphere boundaries [S1, unofficial]. It accepts minor silhouette boundary shifts (single pixels on sphere silhouettes) to guarantee depth consistency across pipelines on different GPUs [S1, unofficial]. Without `@invariant`, the same `rt=on` comparison drops to 46 pixels (0.004%) where two overlapping spheres meet at the same 24-bit depth; the old draw kept the first sphere drawn there, and the equal-depth pass keeps the last [S1, unofficial]. With the prepass also off, it drops to 3 pixels, by 1/255 [S1, unofficial].
+ 
+ ## Operating characteristics

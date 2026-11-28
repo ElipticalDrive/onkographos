@@ -1,0 +1,151 @@
+--- v001.md
++++ v002.md
+@@ -1,97 +1,83 @@
+ # IoU Loss
+-
+ Also called: Intersection over Union (IoU) Loss
+ 
+ ## Overview
+-IoU Loss is a binary segmentation loss metric used in inverse volume rendering to optimize the spatial occupancy of a radiance field. It computes the ratio of overlapping voxels above a threshold to the total union of predicted and target voxels [S1, unofficial]. Unlike the parent MSE Loss which minimizes pixel-wise RGB intensity errors, IoU Loss focuses on geometric consistency by penalizing discrepancies in the binary occupancy mask derived from the predicted density [S1, unofficial].
++IoU Loss is a binary segmentation metric used to optimize the occupancy or density fields in differentiable volume rendering by measuring the overlap between predicted and target voxel sets. It differs from pixel-wise photometric losses like [MSE Loss and PSNR Conversion](1651-mse-loss-and-psnr-conversion.md) by operating on binarized volumetric occupancy rather than continuous RGB values, making it robust to intensity ambiguities and suitable for structural consistency [S1, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs**
+-- Input: Predicted density field $\hat{v}$ (scalar per voxel), target occupancy field $t_v$ (binary or scalar per voxel).
+-- Output: Scalar loss value $L_{IoU}$.
++**Inputs and Outputs:**
++- Input: Predicted occupancy/density field $\hat{v}$ (continuous values per voxel), target occupancy field $t_v$ (binary or continuous ground truth), and a binarization threshold $\tau$.
++- Output: A scalar loss value $L_{IoU} = 1 - \text{IoU}$, where $\text{IoU}$ is the Intersection over Union ratio.
+ 
+-**Data Structures**
+-- $\hat{v}$: Tensor of predicted density values.
+-- $t_v$: Tensor of target values (ground truth occupancy).
+-- $\tau$: Threshold parameter for binarization.
++**Data Structures:**
++- Voxel grids are represented as dense tensors or sparse structures where each element $v$ corresponds to a spatial location.
++- $\hat{v}$ contains predicted probabilities or density values.
++- $t_v$ contains target values (typically 1 for occupied, 0 for empty).
+ 
+-**Parameters**
++**Formula:**
++The Intersection over Union is calculated as [S1, unofficial]:
++$$ \text{IoU} = \frac{|\{v \mid \hat{v} > \tau\} \cap \{v \mid t_v > 0\}|}{|\{v \mid \hat{v} > \tau\} \cup \{v \mid t_v > 0\}|} $$
++Where:
++- $|\cdot|$ denotes the cardinality (count) of voxels in the set.
++- $\{v \mid \hat{v} > \tau\}$ is the set of predicted voxels exceeding the threshold $\tau$.
++- $\{v \mid t_v > 0\}$ is the set of target voxels considered occupied.
++- The intersection $\cap$ represents voxels correctly predicted as occupied (True Positives).
++- The union $\cup$ represents all voxels predicted or targeted as occupied (True Positives + False Positives + False Negatives).
++
++**Parameters:**
+ - $\tau$: Prediction threshold for binarization. Default value is 0.9 [S1, unofficial].
+ 
+-**Steps**
+-1. **Binarization**: Convert continuous predictions and targets into binary masks.
+-   - Predicted mask $M_{pred}$: $M_{pred}[v] = 1$ if $\hat{v}[v] > \tau$, else $0$.
+-   - Target mask $M_{target}$: $M_{target}[v] = 1$ if $t_v[v] > 0$, else $0$.
+-   - Note: The target condition $t_v > 0$ implies any non-zero target value is considered occupied [S1, unofficial].
+-
+-2. **Compute Intersection**: Calculate the number of voxels where both masks are 1.
+-   - $Intersection = |\{v \mid M_{pred}[v] = 1\} \cap \{v \mid M_{target}[v] = 1\}|$
+-
+-3. **Compute Union**: Calculate the number of voxels where at least one mask is 1.
+-   - $Union = |\{v \mid M_{pred}[v] = 1\} \cup \{v \mid M_{target}[v] = 1\}|$
+-
+-4. **Calculate IoU**:
+-   $$ \text{IoU} = \frac{Intersection}{Union} $$
+-
+-5. **Calculate Loss**:
+-   $$ L_{IoU} = 1 - \text{IoU} $$
+-   - Minimizing $L_{IoU}$ maximizes the IoU score.
+-
+-**Edge Cases and Pitfalls**
+-- **Division by Zero**: If the union is empty (no predicted or target voxels above threshold), the IoU is undefined. A small epsilon ($\epsilon$) should be added to the denominator to prevent NaN gradients [G].
+-- **Threshold Sensitivity**: The choice of $\tau$ significantly impacts the gradient signal. A high threshold (e.g., 0.9) makes the loss sensitive to high-density regions, potentially ignoring low-density but valid structures [S1, unofficial].
+-- **Non-Differentiability**: The binarization step is non-differentiable. In practice, this loss is often used for evaluation or as a regularizer where gradients are approximated or passed through straight-through estimators, or it is applied to soft probabilities in a differentiable variant not detailed in the primary source [G]. The source describes it as a "metric" but uses it in optimization contexts [S1, unofficial].
+-
+-**Pseudocode**
++**Pseudocode:**
+ ```python
+-def iou_loss(predicted_density, target_occupancy, threshold=0.9, epsilon=1e-6):
++def iou_loss(predicted_occupancy, target_occupancy, threshold=0.9):
+     """
+-    Computes the IoU Loss for volume rendering occupancy.
++    Computes the IoU loss for volumetric segmentation.
+     
+     Args:
+-        predicted_density: Tensor of predicted density values.
+-        target_occupancy: Tensor of target occupancy values.
+-        threshold: Threshold for binarizing predictions.
+-        epsilon: Small value to prevent division by zero.
++        predicted_occupancy: Tensor of predicted occupancy/density values.
++        target_occupancy: Tensor of target occupancy values (binary or continuous).
++        threshold: Float, threshold for binarizing predictions.
+         
+     Returns:
+-        Scalar loss value.
++        Float, the IoU loss (1 - IoU).
+     """
+     # Binarize predictions
+-    pred_mask = (predicted_density > threshold).float()
++    pred_binary = (predicted_occupancy > threshold).float()
+     
+-    # Binarize targets (any non-zero value is considered occupied)
+-    target_mask = (target_occupancy > 0).float()
++    # Binarize targets (assuming > 0 means occupied)
++    target_binary = (target_occupancy > 0).float()
+     
+-    # Compute intersection
+-    intersection = (pred_mask * target_mask).sum()
++    # Compute intersection and union
++    intersection = (pred_binary * target_binary).sum()
++    union = (pred_binary + target_binary).sum()
+     
+-    # Compute union
+-    union = (pred_mask + target_mask).clamp(min=0, max=1).sum()
+-    
+-    # Compute IoU
+-    iou = intersection / (union + epsilon)
+-    
+-    # Loss is 1 - IoU
+-    loss = 1.0 - iou
+-    
+-    return loss
++    # Handle edge case where union is zero (no occupied voxels in either)
++    if union == 0:
++        return 0.0
++        
++    iou = intersection / union
++    return 1.0 - iou
+ ```
++
++**Edge Cases and Pitfalls:**
++- **Division by Zero:** If both predicted and target sets are empty (union is 0), the IoU is undefined. A common convention is to return 0 loss or a specific penalty [G].
++- **Threshold Sensitivity:** The choice of $\tau$ significantly impacts the gradient signal. A high threshold (e.g., 0.9) makes the loss sparse and less sensitive to small density changes [S1, unofficial].
++- **Non-Differentiability:** The binarization step $(\hat{v} > \tau)$ is non-differentiable. In practice, this is often handled by using straight-through estimators or by optimizing the continuous values with a differentiable approximation (e.g., sigmoid) before applying the threshold for evaluation [G].
+ 
+ ## Subtopics
+ 
+ ### [Instance Segmentation Loss](10594-instance-segmentation-loss.md)
+-Training the instance branch $\Theta_i$ with multi-view consistent 2D instance segmentation maps while keeping $\Theta_\sigma$ and $\Theta_c$ fixed.
++Trains the instance branch $\Theta_i$ of a radiance field using multi-view consistent 2D instance segmentation maps, while keeping the density $\Theta_\sigma$ and color $\Theta_c$ branches fixed. It distinguishes itself from sibling methods by explicitly optimizing for per-instance class probabilities rather than just binary occupancy or appearance, addressing the fragmentation caused by inconsistent 2D masks across views. It builds on [IoU Loss](7110-iou-loss.md) by providing the probabilistic supervision signal required for differentiable instance field training.
+ 
+ ## Operating characteristics
+-- **Time Complexity**: $O(N)$ where $N$ is the number of voxels, as it requires a single pass to compute masks and sums.
+-- **Memory Complexity**: $O(N)$ to store the binary masks if computed explicitly, or $O(1)$ if computed in a streaming fashion.
+-- **Strengths**: Directly optimizes for geometric overlap, which is often more relevant for reconstruction quality than pixel-wise RGB error. It is robust to color variations.
+-- **Limitations**: Non-differentiable binarization makes gradient-based optimization challenging without approximations. Sensitive to the threshold parameter $\tau$.
+-- **When to use**: When geometric accuracy is prioritized over photometric fidelity, or as a regularizer to enforce clean occupancy boundaries.
+-- **When not to use**: When fine-grained color or texture details are critical, or when the target occupancy is sparse and the threshold leads to empty unions.
++- **Time Complexity:** $O(N)$, where $N$ is the number of voxels, as it requires a single pass to compute sums for intersection and union.
++- **Memory Complexity:** $O(N)$ to store the binary masks or intermediate tensors.
++- **Strengths:** Robust to scale and intensity variations; directly optimizes structural overlap; effective for binary segmentation tasks in volume rendering.
++- **Limitations:** Non-differentiable binarization requires special handling for gradient-based optimization; sensitive to threshold selection; less informative for continuous density estimation compared to MSE.
++- **When to Use:** When the goal is to optimize the geometric structure or occupancy of a volume rather than photometric appearance.
++- **When Not to Use:** When fine-grained intensity accuracy is required or when the ground truth is not binary.
+ 
+ ## Background
+-IoU Loss originates from computer vision segmentation tasks and has been adapted for inverse volume rendering in tomographic additive manufacturing contexts. It is used in the Dr. TVAM framework to optimize the density field for accurate 3D reconstruction [S1, unofficial].
++IoU Loss originated in computer vision for image segmentation tasks and has been adapted for differentiable volume rendering to supervise occupancy fields. In the context of inverse rendering for tomographic volumetric additive manufacturing, it is used to ensure that the reconstructed volume matches the target geometry [S1, unofficial].
+ 
+ ## Sources

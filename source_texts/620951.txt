@@ -1,0 +1,358 @@
+An offline Android app for street artists, using AR to project images onto walls using a confidence-based voxel mapping system. - Phase 0: reconcile the display-rotation convention (convention B) by HereLiesAz · Pull Request #1797 · HereLiesAz/GraffitiXR
+
+Phase 0: reconcile the display-rotation convention (convention B) by HereLiesAz · Pull Request #1797 · HereLiesAz/GraffitiXR · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+HereLiesAz
+commented
+Aug 1, 2026
+•
+edited by sourcery-ai
+Bot
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Implements IMPLEMENTATION.md Phase 0 todos 0.2–0.6 and 0.8. 0.7 is not done and is called out below rather than quietly ticked.
+Landed without E0b at the user's direction — they are running the device test themselves. Nothing here depends on its outcome except the decision to build it.
+The fix
+Convention B: everything on the capture side lives in display orientation. The bitmap and intrinsics already did; the view matrix did not, because it came from camera.pose.inverse(), which ARCore documents as the physical camera "relative to the image readout". MetricMarks.glViewToCvDisplay applies the missing R_z; MetricFingerprintBuilder.buildSingle routes through it.
+The direction was derived, not guessed. At rotationNeeded = 90 the capture path maps pixel (u,v) → (rawH − v, u) and swaps fx/fy, so a sensor ray becomes
+```
+d_d = ((cy_s − v)/fy_s, (u − cx_s)/fx_s, 1) = (−d_s.y, d_s.x, 1) = R_z(+90)·d_s
+```
+Hence display = R_z(+rotationDeg) · sensor, pre-multiplied since p_display = R_z (V_sensor p_world). This is the same model that reproduces §8.1's table exactly, so the published figures and the fix now rest on one model rather than two.
+buildSingle's new rotationDeg has no default — a default would let a caller silently reinstate the defect.
+0.6 settled which convention is right, not just whether the composition changes
+PoseFusion.composeCorrected needs no change, and the reason is decisive. vCurrent is Camera.getViewMatrix, which ARCore documents as "incorporates the display orientation … equivalent to camera.getDisplayOrientedPose().inverse().asMatrix()".
+So the live side of that composition was always display-oriented, while capture stored sensor-frame points. The two sides never agreed. Convention B moves capture to display and they now do — convention A would have required changing the live side too. That is a stronger result than the design's "recommendation: B".
+0.5 — every consumer of the capture view matrix, with a verdict
+Site
+Verdict
+MetricFingerprintBuilder.buildSingle
+Routed through glViewToCvDisplay
+MetricFingerprintBuilder.assemble
+Unchanged — two-keyframe triangulation; glViewToCv left alone per the design, and it has no live caller
+PlaneMarks.backProject
+Unchanged by design; it faithfully intersects whatever frame it is given. CAUTION block replaced with a frame contract
+PoseFusion.composeCorrected
+Unchanged, and now correct — see above
+ArViewModel.targetCaptureViewMatrix
+Storage only; rotation travels beside it as targetDisplayRotation
+MainViewModel.fingerprintViewMatrix
+Not migrated — this is 0.7
+SlamManager.restoreWallFingerprintMetric
+Not migrated — same gap
+ArRenderer.mappingViewMatrix (updateCamera)
+Unchanged; feeds native mapping, not capture geometry
+0.7 is still open — the honest gap
+A fingerprint saved before this change stores sensor-frame points. It is no worse than before — the live side was already display-frame and the pair never agreed — but it is not fixed either, and nothing tells the user. Adding captureRotationDeg to Fingerprint and refusing to reload a legacy one is persistence and migration work, separable from the frames, and it is not done here.
+0.8 — tests
+The five CHARACTERIZATION tests are inverted, but not by flipping assertions on the old fixture. Handing backProject a hand-built rzView mismatch and asserting it is now exact would assert nothing — a deliberately wrong frame is still wrong. They now go through glViewToCvDisplay exactly as buildSingle does, at 4 obliquities × 4 rotations, asserting <1 mm. Ground truth is still constructed forward.
+A negative control asserts the old wiring still produces hundreds of mm on the identical fixture, so a degenerate converter or an empty sample set cannot pass.
+New MetricMarksDisplayViewTest checks the converter against hand-written literal matrices, not a locally rebuilt R_z — which would have compared the implementation with itself and passed under a transpose.
+Mutation-tested, because §8.3 warns every rotation sign must be right or the overlay lands worse than today: transposing R_z in rotateZ fails 8 tests across both files.
+Testing
+:feature:ar:testDebugUnitTest — 184 passing, 0 failures. :app:compileDebugKotlin green.
+Kotlin only — no native change, so the NDK gate is untouched, and a green unit-test run says nothing about it either way.
+Also included: azNavRail 11.8, verified resolving on the real debugRuntimeClasspath rather than falling back to a cached 11.7.
+Generated by Claude Code
+Summary by Sourcery
+Align capture-side view matrices with display orientation using the new display-rotated CV converter and plumbed rotation metadata, closing the depth-skew defect while pinning the chosen convention in tests and docs.
+New Features:
+Introduce MetricMarks.glViewToCvDisplay to convert GL view matrices into CV view matrices in the display camera frame using a quadrant rotation.
+Propagate capture display rotation (rotationDeg) through MainActivity, MainViewModel, ArViewModel, and into MetricFingerprintBuilder.buildSingle so the view matrix matches the rotated bitmap and intrinsics.
+Enhancements:
+Replace PlaneMarks back-projection caution with a clear frame contract that requires callers to supply view matrices in the same frame as pixels and intrinsics.
+Add focused PoseFusion tests to verify composeCorrected behaves correctly under the chosen display-oriented convention and to guard against inconsistent future changes.
+Build:
+Bump azNavRail dependency from 11.7 to 11.8 in the Gradle version catalog.
+Documentation:
+Mark IMPLEMENTATION.md Phase 0 items 0.2, 0.3, 0.4, 0.5, 0.6, and 0.8 as completed, and document the remaining persistence gap for legacy fingerprints.
+Clarify documentation around the capture/display-rotation convention and the resolved frame mismatch in PlaneMarks.
+Tests:
+Refactor PlaneMarksObliquityTest from characterization of the old defect into regression guards that exercise the real capture path across multiple obliquities and rotations, including a negative control for the old wiring.
+Add MetricMarksDisplayViewTest to validate glViewToCvDisplay against hand-computed matrices and enforce exact, quadrant-based rotations.
+Extend PoseFusionTest with rotation-specific cases that detect residual frame mismatches and confirm that rotating both sides together cancels as a consistent convention must.
+Chores:
+Update version.properties with a new build and patch version to reflect these changes.
+claude
+added 2 commits
+August 1, 2026 06:33
+Phase 0: reconcile the display-rotation convention (convention B)
+…
+dd5eeb5
+```
+Implements IMPLEMENTATION.md Phase 0 todos 0.2-0.6 and 0.8. 0.7 is NOT done and
+is called out below.
+
+Landed without E0b at the user's direction; they are running the device test
+themselves. Nothing here depends on its outcome except the decision to build it.
+
+THE FIX. Convention B: everything on the capture side lives in display
+orientation. The bitmap and intrinsics already did; the view matrix did not,
+because it came from camera.pose.inverse(), which ARCore documents as the
+physical camera "relative to the image readout". MetricMarks.glViewToCvDisplay
+now applies the missing R_z, and MetricFingerprintBuilder.buildSingle routes
+through it.
+
+DIRECTION, derived rather than guessed. At rotationNeeded=90 the capture path
+maps pixel (u,v) -> (rawH - v, u) and swaps fx/fy, so a sensor ray d_s becomes
+((cy_s - v)/fy_s, (u - cx_s)/fx_s, 1) = (-d_s.y, d_s.x, 1) = R_z(+90) d_s.
+Hence display = R_z(+rotationDeg) * sensor, pre-multiplied since
+p_display = R_z (V_sensor p_world). This is the same convention that reproduces
+PAPER.md 8.1's table exactly, so the model behind the published figures and the
+model behind the fix are now the same model.
+
+WHY CONVENTION B IS THE CONSISTENT ONE, not merely a self-consistent one. 0.6
+asked whether PoseFusion.composeCorrected needs a matching change. It does not,
+and the reason is decisive: vCurrent is Camera.getViewMatrix, which ARCore
+documents as "incorporates the display orientation ... equivalent to
+camera.getDisplayOrientedPose().inverse().asMatrix()". The LIVE side of that
+composition was always display-oriented while capture stored sensor-frame points,
+so the two sides never agreed. Phase 0 moves capture to display and they now do.
+Convention A would have required changing the live side too.
+
+0.5 AUDIT. Every consumer of the capture view matrix, with a verdict:
+
+  MetricFingerprintBuilder.buildSingle        ROUTED through glViewToCvDisplay.
+  MetricFingerprintBuilder.assemble           UNCHANGED. Two-keyframe triangulation.
+                                              glViewToCv left alone per the design;
+                                              also has no live caller — buildSingle
+                                              is the only entry point reached from
+                                              ArViewModel:2167 and MainViewModel:300.
+  PlaneMarks.backProject                      UNCHANGED by design. It faithfully
+                                              intersects whatever frame it is given;
+                                              the defect was the caller's. CAUTION
+                                              block replaced with a frame contract.
+  PoseFusion.composeCorrected                 UNCHANGED, and now correct — see above.
+  ArViewModel.targetCaptureViewMatrix         Storage only; the rotation travels
+                                              beside it as targetDisplayRotation.
+  MainViewModel.fingerprintViewMatrix         Persisted for later restore. NOT
+                                              migrated — this is exactly what 0.7 is
+                                              for; see below.
+  SlamManager.restoreWallFingerprintMetric    NOT migrated. Same gap as above.
+  ArRenderer.mappingViewMatrix (updateCamera) UNCHANGED. Feeds native mapping, not
+                                              the capture geometry path.
+
+0.7 IS STILL OPEN, deliberately, and it is the honest gap in this commit. A
+fingerprint saved before this change stores sensor-frame points. It is no WORSE
+than before — the live side was already display-frame and the pair never agreed —
+but it is not fixed either, and nothing tells the user. Adding captureRotationDeg
+to Fingerprint and refusing to reload a legacy one is persistence and migration
+work, separable from the frames, and it is not done here.
+
+0.8 / TESTS. PlaneMarksObliquityTest's five CHARACTERIZATION tests are inverted.
+They no longer hand backProject a hand-built rzView mismatch — that would assert
+nothing, since a deliberately wrong frame is still wrong. They now go through
+MetricMarks.glViewToCvDisplay exactly as buildSingle does, at four obliquities
+(0/20/40/60) x four rotations (0/90/180/270), asserting <1 mm. Ground truth is
+still constructed forward. A negative control asserts the OLD wiring still
+produces hundreds of mm on the identical fixture, so a degenerate converter or an
+empty sample set cannot pass.
+
+New MetricMarksDisplayViewTest checks the converter against HAND-WRITTEN literal
+matrices, not against a locally rebuilt R_z, which would have compared the
+implementation with itself and passed under a transpose.
+
+MUTATION-TESTED, because 8.3 warns every rotation sign must be right or the
+overlay lands worse than today: transposing R_z in rotateZ fails 8 tests across
+both files.
+
+feature:ar unit tests: 184 passing, 0 failures. :app:compileDebugKotlin green.
+Kotlin only — no native change, so the NDK gate is untouched by this and a green
+unit-test run says nothing about it either way.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011Q5WXFiVLeN4sXa9bPCSDA
+```
+Update azNavRail to 11.8
+…
+09fe33f
+```
+Version catalog bump only. Verified it actually resolves rather than falling back
+to a cached 11.7: `:app:dependencies --configuration debugRuntimeClasspath` shows
+com.github.HereLiesAz.AzNavRail:aznavrail:11.8 on every path.
+
+:app:compileDebugKotlin green, so no source-compatible API changed.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011Q5WXFiVLeN4sXa9bPCSDA
+```
+gemini-code-assist
+Bot
+commented
+Aug 1, 2026
+Copy link
+Copy Markdown
+Contributor
+Caution
+The consumer version of Gemini Code Assist on GitHub has been sunset. All code review activity has officially ceased.
+sourcery-ai
+Bot
+commented
+Aug 1, 2026
+Copy link
+Copy Markdown
+Contributor
+Reviewer's Guide
+Implements Phase 0 of the display-rotation convention (“Convention B”) on the capture side: introduces a display-oriented CV view-matrix converter, routes single-capture fingerprint construction through it with explicit rotation plumbing, tightens the PlaneMarks frame contract, and adds focused tests to pin the rotation direction, factor order, and regression characteristics; persistence migration (0.7) is explicitly left open.
+Sequence diagram for display-oriented single-capture fingerprint build
+```
+sequenceDiagram
+    actor User
+    participant MainActivity
+    participant MainViewModel
+    participant MetricFingerprintBuilder
+    participant MetricMarks
+    participant PlaneMarks
+
+    User ->> MainActivity: confirmTargetCapture()
+    MainActivity ->> MainViewModel: handleConfirmTargetCapture(bitmap, intrinsics, viewMatrix, wallPlane, rotationDeg)
+    MainViewModel ->> MainViewModel: handleSingleCapture(bitmap, intrinsics, viewMatrix, wallPlane, rotationDeg)
+    MainViewModel ->> MetricFingerprintBuilder: buildSingle(slamManager, bitmap, glView, intr, planePointWorld, planeNormalWorld, anchorModel, rotationDeg)
+    MetricFingerprintBuilder ->> MetricMarks: glViewToCvDisplay(glView, rotationDeg)
+    MetricMarks ->> MetricMarks: rotateZ(cvView, rotationDeg)
+    MetricMarks -->> MetricFingerprintBuilder: cvView
+    MetricFingerprintBuilder ->> PlaneMarks: backProject(pixels, cvView, planePointWorld, planeNormalWorld)
+    PlaneMarks -->> MetricFingerprintBuilder: wallPointsCamera
+    MetricFingerprintBuilder -->> MainViewModel: Fingerprint
+```
+Loading
+File-Level Changes
+Change
+Details
+Files
+Introduce a display-oriented CV view-matrix converter and supporting rotation helper for the capture path.
+Add MetricMarks.glViewToCvDisplay(view, rotationDeg) that wraps glViewToCv and pre-multiplies an R_z(+rotationDeg) in the camera frame
+Normalize rotationDeg into [0,360) and require multiples of 90, throwing on invalid inputs
+Implement rotateZ(cv, deg) using exact integer sine/cosine literals for quadrant rotations, modifying only rows 0 and 1 of the CV view matrix
+feature/ar/src/main/java/com/hereliesaz/graffitixr/feature/ar/anchor/MetricMarks.kt
+Route single-capture fingerprint building through the new display-oriented view converter and plumb rotation through the app and doodle capture paths.
+Extend MetricFingerprintBuilder.buildSingle to take a mandatory rotationDeg parameter and use glViewToCvDisplay instead of glViewToCv
+Plumb rotationDeg from MainActivity → MainViewModel → handleSingleCapture → MetricFingerprintBuilder.buildSingle for the main capture flow
+Plumb displayRotation as rotationDeg into MetricFingerprintBuilder.buildSingle in ArViewModel’s doodle path
+feature/ar/src/main/java/com/hereliesaz/graffitixr/feature/ar/anchor/MetricFingerprintBuilder.kt
+app/src/main/java/com/hereliesaz/graffitixr/MainViewModel.kt
+app/src/main/java/com/hereliesaz/graffitixr/MainActivity.kt
+feature/ar/src/main/java/com/hereliesaz/graffitixr/feature/ar/ArViewModel.kt
+Clarify and enforce the PlaneMarks frame contract under Convention B without changing its geometry implementation.
+Replace the prior CAUTION comment with a Phase 0 frame contract stating cvView must be in the same frame as pixels and intrinsics
+Document that capture callers must now use MetricMarks.glViewToCvDisplay for display-oriented captures
+Update backProject’s cvView parameter documentation to reflect the requirement that it match the pixels/intrinsics frame
+feature/ar/src/main/java/com/hereliesaz/graffitixr/feature/ar/anchor/PlaneMarks.kt
+Add targeted tests to pin glViewToCvDisplay’s behavior, the corrected capture path geometry, and PoseFusion’s consistency under Convention B, including regression and negative controls.
+Add MetricMarksDisplayViewTest covering glViewToCvDisplay at 0/90/180/270° against hand-written expected matrices, round-trip behavior, rotation normalization, rejection of non-quadrant angles, and exactness of quadrant rotations
+Rewrite PlaneMarksObliquityTest characterization tests into Phase 0 regression guards that exercise the full capture path via glViewToCvDisplay across multiple obliquities and rotations, assert sub-millimetre errors, collapse of spread, full mark retention, flat error curves, and a negative control verifying the old wiring still fails
+Extend PoseFusionTest with tests that show a residual R_z between pnpMat and vCurrent displaces the anchor as expected, and that rotating both sides together cancels out, pinning factor order and frame consistency
+feature/ar/src/test/java/com/hereliesaz/graffitixr/feature/ar/anchor/MetricMarksDisplayViewTest.kt
+feature/ar/src/test/java/com/hereliesaz/graffitixr/feature/ar/anchor/PlaneMarksObliquityTest.kt
+feature/ar/src/test/java/com/hereliesaz/graffitixr/feature/ar/anchor/PoseFusionTest.kt
+Update implementation documentation and dependencies to reflect completed Phase 0 items and library/version changes.
+Mark IMPLEMENTATION.md Phase 0 todos 0.2–0.6 and 0.8 as completed, with notes on the remaining open item 0.7 and the new testing strategy and mutation testing for rotation signs
+Increment versionBuild and versionPatch in version.properties
+Bump azNavRail dependency from 11.7 to 11.8 in libs.versions.toml
+docs/research/IMPLEMENTATION.md
+version.properties
+gradle/libs.versions.toml
+Tips and commands
+Interacting with Sourcery
+Trigger a new review: Comment @sourcery-ai review on the pull request.
+Continue discussions: Reply directly to Sourcery's review comments.
+Generate a GitHub issue from a review comment: Ask Sourcery to create an
+issue from a review comment by replying to it. You can also reply to a
+review comment with @sourcery-ai issue to create an issue from it.
+Generate a pull request title: Write @sourcery-ai anywhere in the pull
+request title to generate a title at any time. You can also comment
+@sourcery-ai title on the pull request to (re-)generate the title at any time.
+Generate a pull request summary: Write @sourcery-ai summary anywhere in
+the pull request body to generate a PR summary at any time exactly where you
+want it. You can also comment @sourcery-ai summary on the pull request to
+(re-)generate the summary at any time.
+Generate reviewer's guide: Comment @sourcery-ai guide on the pull
+request to (re-)generate the reviewer's guide at any time.
+Resolve all Sourcery comments: Comment @sourcery-ai resolve on the
+pull request to resolve all Sourcery comments. Useful if you've already
+addressed all the comments and don't want to see them anymore.
+Dismiss all Sourcery reviews: Comment @sourcery-ai dismiss on the pull
+request to dismiss all existing Sourcery reviews. Especially useful if you
+want to start fresh with a new review - don't forget to comment
+@sourcery-ai review to trigger a new review!
+Customizing Your Experience
+Access your dashboard to:
+Enable or disable review features such as the Sourcery-generated pull request
+summary, the reviewer's guide, and others.
+Change the review language.
+Add, remove or edit custom review instructions.
+Adjust other review settings.
+Getting Help
+Contact our support team for questions or feedback.
+Visit our documentation for detailed guides and information.
+Keep in touch with the Sourcery team by following us on X/Twitter, LinkedIn or GitHub.
+HereLiesAz
+marked this pull request as ready for review
+August 1, 2026 06:48
+gemini-code-assist
+Bot
+commented
+Aug 1, 2026
+Copy link
+Copy Markdown
+Contributor
+Caution
+The consumer version of Gemini Code Assist on GitHub has been sunset. All code review activity has officially ceased.
+sourcery-ai
+Bot
+reviewed
+Aug 1, 2026
+View reviewed changes
+sourcery-ai
+Bot
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Sorry @HereLiesAz, you have reached your weekly rate limit of 500000 diff characters.
+Please try again later or upgrade to continue using Sourcery
+Hide details
+View details
+HereLiesAz
+merged commit 8b286cd
+into
+main
+Aug 1, 2026
+11 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+HereLiesAz
+deleted the
+claude/e0b-camera-rotation-defect-30up81
+branch
+August 1, 2026 06:48
+This was referenced Aug 1, 2026
+Retract the 0.6 claim; Phase 0 checked one factor and declared three sound
+#1798
+Merged
+Phase 0 remainder (0.10, 0.7, 0.11) + 6a.4's RNG seed
+#1799
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

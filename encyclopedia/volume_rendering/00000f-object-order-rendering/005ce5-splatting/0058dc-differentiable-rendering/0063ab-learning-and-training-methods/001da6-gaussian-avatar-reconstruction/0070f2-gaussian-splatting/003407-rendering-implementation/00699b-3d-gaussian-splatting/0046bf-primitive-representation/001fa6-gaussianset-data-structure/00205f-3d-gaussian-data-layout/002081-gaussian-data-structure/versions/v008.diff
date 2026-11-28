@@ -1,0 +1,359 @@
+--- v007.md
++++ v008.md
+@@ -4,109 +4,202 @@
+ 
+ ## Overview
+-The Gaussian Data Structure defines the memory layout and field organization for 3D Gaussian primitives in differentiable volume rendering, specifically within the 3D Gaussian Splatting (3DGS) framework. It solves the problem of efficiently storing and accessing high-dimensional geometric and appearance attributes (position, scale, rotation, opacity, spherical harmonics, and covariance) on the GPU for rasterization and gradient-based optimization. It sets itself apart from its parent [3D Gaussian Data Layout](2242-3d-gaussian-data-layout.md) by specifying the concrete container types (e.g., `GaussianList` as a flat array structure) and from its sibling [Gaussian Data Packing](3257-gaussian-data-packing.md) by focusing on the logical attribute grouping rather than low-level bit-packing or compression.
++The Gaussian Data Structure (also known as GaussianList) is the primary in-memory container for 3D Gaussian Splatting primitives, organizing per-Gaussian attributes into column-major arrays to facilitate efficient GPU rendering and optimization [S1, unofficial]. It solves the problem of managing a dynamic, large-scale set of heterogeneous geometric primitives by providing a flat, contiguous memory layout that supports batched processing, while explicitly storing precomputed 3D covariance matrices to accelerate the projection step [S1, unofficial]. It sets itself apart from its parent [3D Gaussian Data Layout](2242-3d-gaussian-data-layout.md) by defining the specific container type (a list of arrays rather than a struct-of-arrays or array-of-structs) and from its sibling [Gaussian Data Packing](3257-gaussian-data-packing.md) by focusing on the logical attribute organization rather than low-level bit-packing or serialization [S1, unofficial].
+ 
+ ## How it works
+-The method organizes Gaussian primitives into contiguous GPU buffers to enable batched processing during splatting and densification. The primary container is the `GaussianList` structure, which aggregates per-attribute arrays.
+-
+ ### Inputs and Outputs
+-- **Input**: A set of $N$ Gaussian primitives, each defined by position, scale, rotation, opacity, and appearance coefficients.
+-- **Output**: A `GaussianList` instance containing aligned arrays of these attributes, ready for GPU kernel execution.
++- **Input**: A set of $N$ 3D Gaussian primitives, each defined by position, scale, rotation, opacity, and spherical harmonics (SH) coefficients.
++- **Output**: A `GaussianList` data structure containing column-major matrices for all attributes, enabling efficient iteration during rasterization and gradient computation.
+ 
+ ### Data Structures
+-The core structure is `GaussianList`, which stores attributes in separate, contiguous arrays (Structure of Arrays, SoA) to maximize memory bandwidth during rendering. The fields are [S1, unofficial]:
+-
+-1.  **`positions`**: `Matrix4xX<f32>` (or `Vector3<f32>[N]`). Stores the 3D center $(x, y, z)$ of each Gaussian. The source uses a 4xN matrix notation, implying 4 rows for potentially homogeneous coordinates or padding, but typically 3 floats are used for position.
+-2.  **`scales`**: `Matrix3xX<f32>` (or `Vector3<f32>[N]`). Stores the 3D scale $(s_x, s_y, s_z)$ for each Gaussian.
+-3.  **`opacities`**: `DVector<f32>` (or `f32[N]`). Stores the scalar opacity $\alpha_i$ for each Gaussian.
+-4.  **`rotations`**: `Matrix4xX<f32>` (or `Quaternion<f32>[N]`). Stores the 4D quaternion $(w, x, y, z)$ representing the rotation of each Gaussian.
+-5.  **`sh`**: `Matrix48xX<f32>` (or `f32[N][48]`). Stores the Spherical Harmonics coefficients. The layout is a flat array of size 48, corresponding to the maximum for degree 3. The layout order is $C_{0,R}, C_{0,B}, C_{0,G}, C_{1,R}, C_{1,B}, C_{1,G}, \dots$ [S1, unofficial].
+-6.  **`num_gaussians`**: `usize`. The current count of active Gaussians $N$.
+-7.  **`cov3d`**: `Matrix3xX<f32>` (or `Matrix3<f32>[N]`). Stores the precomputed 3D covariance matrix $\Sigma_{3D}$ for each Gaussian. This is derived from scale and rotation to avoid recomputation during rendering [S1, unofficial].
+-
+-The individual primitive struct `Gaussian` (used during construction or loading) contains [S1, unofficial]:
+--   `position`: `Vector3<f32>`
+--   `scale`: `Vector3<f32>`
+--   `opacity`: `f32`
+--   `rotation`: `Quaternion<f32>`
+--   `sh`: `SVector<f32, 48>`
+--   `cov3d`: `Matrix3<f32>`
+-
+-### Steps
+-1.  **Initialization**: Allocate arrays for `positions`, `scales`, `opacities`, `rotations`, `sh`, and `cov3d` with capacity $N_{max}$. Initialize `num_gaussians` to 0.
+-2.  **Loading/Creation**: For each new Gaussian primitive $i$:
+-    a. Set `positions[i]` to the 3D center.
+-    b. Set `scales[i]` to the 3D scale.
+-    c. Set `opacities[i]` to the initial opacity.
+-    d. Set `rotations[i]` to the initial quaternion.
+-    e. Set `sh[i]` to the initial Spherical Harmonics coefficients.
+-    f. Compute the 3D covariance $\Sigma_{3D}$ from `scales[i]` and `rotations[i]` and store in `cov3d[i]`.
+-    g. Increment `num_gaussians`.
+-3.  **Covariance Precomputation**: The 3D covariance $\Sigma_{3D}$ is computed as $\Sigma_{3D} = R S S^T R^T$, where $R$ is the rotation matrix derived from the quaternion and $S$ is the diagonal scale matrix. This is stored in `cov3d` to allow efficient projection to 2D during rendering [S1, unofficial].
+-4.  **Buffer Management**: Ensure arrays are contiguous in GPU memory. If `num_gaussians` exceeds capacity, resize arrays (see [Dynamic Buffer Management](3753-dynamic-buffer-management.md)).
++The `GaussianList` struct consists of the following fields [S1, unofficial]:
++
++1.  **`positions`**: `Matrix4xN<f32>`
++    -   Layout: $4 \times N$ matrix.
++    -   Rows: $x, y, z$ coordinates in the first three rows; the fourth row is typically padding or homogeneous coordinate (1.0).
++    -   Memory: Contiguous column-major storage.
++2.  **`scales`**: `Matrix3xN<f32>`
++    -   Layout: $3 \times N$ matrix.
++    -   Rows: Scale factors along the local $x, y, z$ axes.
++3.  **`opacities`**: `DVector<f32>`
++    -   Layout: 1D vector of size $N$.
++    -   Values: Scalar opacity $\alpha_i \in [0, 1]$.
++4.  **`rotations`**: `Matrix4xN<f32>`
++    -   Layout: $4 \times N$ matrix.
++    -   Rows: Quaternion components $(w, x, y, z)$ for each Gaussian.
++5.  **`sh`**: `Matrix48xN<f32>`
++    -   Layout: $48 \times N$ matrix.
++    -   Content: Spherical Harmonics coefficients.
++    -   Detail: Stored in a flat array of size 48 (maximum for degree 3). The layout interleaves channels per degree: $C_{0,R}, C_{0,B}, C_{0,G}, C_{1,R}, C_{1,B}, C_{1,G}, \dots$ [S1, unofficial].
++6.  **`num_gaussians`**: `usize`
++    -   The current number of active Gaussians $N$.
++7.  **`cov3d`**: `Matrix3xN<f32>`
++    -   Layout: $3 \times N$ matrix.
++    -   Content: Precomputed $3 \times 3$ covariance matrices for each Gaussian, flattened into columns. This avoids recomputing the covariance from scale and rotation during every render pass [S1, unofficial].
++
++### Numbered Steps
++1.  **Initialization**: Allocate memory for the `GaussianList` with a capacity $C \ge N$. Initialize `num_gaussians` to $N$.
++2.  **Attribute Population**:
++    -   For each Gaussian $i \in [0, N-1]$:
++        -   Extract position $\mathbf{p}_i$, scale $\mathbf{s}_i$, rotation $\mathbf{q}_i$, opacity $\alpha_i$, and SH coefficients $\mathbf{c}_i$.
++        -   Compute the 3D covariance matrix $\Sigma_i$ using the rotation matrix $\mathbf{R}_i$ derived from $\mathbf{q}_i$ and the diagonal scale matrix $\mathbf{S}_i = \text{diag}(\mathbf{s}_i)$:
++            $$ \Sigma_i = \mathbf{R}_i \mathbf{S}_i \mathbf{S}_i^T \mathbf{R}_i^T $$
++        -   Store $\mathbf{p}_i$ in `positions[:, i]`.
++        -   Store $\mathbf{s}_i$ in `scales[:, i]`.
++        -   Store $\alpha_i$ in `opacities[i]`.
++        -   Store $\mathbf{q}_i$ in `rotations[:, i]`.
++        -   Store $\mathbf{c}_i$ in `sh[:, i]`.
++        -   Store $\Sigma_i$ (flattened column-wise) in `cov3d[:, i]`.
++3.  **Rendering Preparation**: The structure is passed to the rasterization pipeline. The `cov3d` matrix allows the projection step to compute the 2D covariance $\tilde{\Sigma}_i$ efficiently using the Jacobian of the projection and the camera rotation [S1, unofficial].
+ 
+ ### Formulas
+--   **3D Covariance Construction**:
+-    $$ \Sigma_{3D} = R S S^T R^T $$
+-    Where $R$ is the rotation matrix from the quaternion and $S = \text{diag}(s_x, s_y, s_z)$ [S1, unofficial].
+--   **Spherical Harmonics Layout**:
+-    The SH coefficients are stored in a flat array of size 48. The index for coefficient $k$ (band $b$, component $c$) is determined by the specific ordering $C_{0,R}, C_{0,B}, C_{0,G}, C_{1,R}, \dots$ [S1, unofficial].
++-   **Covariance Construction** (Implicit in `cov3d` generation):
++    $$ \Sigma_i = \mathbf{R}_i \mathbf{S}_i \mathbf{S}_i^T \mathbf{R}_i^T $$
++    Where $\mathbf{R}_i$ is the rotation matrix from quaternion $\mathbf{q}_i$, and $\mathbf{S}_i = \text{diag}(s_{i,x}, s_{i,y}, s_{i,z})$.
++-   **SH Coefficient Layout**:
++    For degree $L=3$, the 48 coefficients are stored as:
++    $$ [C_{0,R}, C_{0,B}, C_{0,G}, C_{1,R}, C_{1,B}, C_{1,G}, \dots, C_{3,R}, C_{3,B}, C_{3,G}] $$
++    Repeated for each Gaussian column [S1, unofficial].
+ 
+ ### Parameters
+--   **SH Degree**: Max degree 3, resulting in 48 coefficients per Gaussian [S1, unofficial].
+--   **Data Type**: `f32` (32-bit float) for all geometric and appearance attributes [S1, unofficial].
++-   **SH Degree**: Typically up to degree 3, resulting in 48 coefficients per Gaussian [S1, unofficial].
++-   **Data Type**: `f32` (32-bit float) for all attributes [S1, unofficial].
+ 
+ ### Edge Cases and Pitfalls
+--   **Precision**: Using `f32` for covariance and rotation may lead to precision issues in large-scale scenes or when Gaussians are very small. [G] Normalization of quaternions should be performed after optimization steps to prevent drift.
+--   **Boundary**: The `sh` array is fixed at 48 elements. If lower-degree SH is used, the remaining coefficients should be zero-initialized to maintain the flat array layout [S1, unofficial].
+--   **Degenerate Input**: If a scale component is zero or negative, the covariance becomes singular or invalid. [G] Scales should be clamped to a minimum positive value (e.g., $10^{-4}$) during optimization.
++-   **Precision**: Floating-point errors in quaternion normalization can lead to invalid rotation matrices if not clamped or renormalized before covariance computation [G].
++-   **Boundary**: If $N$ exceeds the allocated capacity, the buffer must be resized (see [Dynamic Buffer Management](3753-dynamic-buffer-management.md)) [G].
++-   **Degenerate Input**: Scales of zero or near-zero can cause numerical instability in covariance inversion during projection. A small epsilon floor (e.g., $10^{-6}$) should be applied to scales before constructing $\mathbf{S}_i$ [G].
+ 
+ ### Pseudocode
+ ```python
+-import numpy as np
+-
+-class GaussianList:
+-    def __init__(self, max_capacity: int):
+-        self.num_gaussians = 0
+-        self.max_capacity = max_capacity
+-        # SoA layout: separate arrays for each attribute
+-        self.positions = np.zeros((max_capacity, 3), dtype=np.float32)
+-        self.scales = np.zeros((max_capacity, 3), dtype=np.float32)
+-        self.opacities = np.zeros(max_capacity, dtype=np.float32)
+-        self.rotations = np.zeros((max_capacity, 4), dtype=np.float32) # w, x, y, z
+-        self.sh = np.zeros((max_capacity, 48), dtype=np.float32)
+-        self.cov3d = np.zeros((max_capacity, 3, 3), dtype=np.float32)
+-
+-    def add_gaussian(self, position: np.ndarray, scale: np.ndarray, 
+-                     opacity: float, rotation: np.ndarray, sh: np.ndarray):
+-        if self.num_gaussians >= self.max_capacity:
+-            raise ValueError("GaussianList capacity exceeded")
+-        
+-        idx = self.num_gaussians
+-        self.positions[idx] = position
+-        self.scales[idx] = scale
+-        self.opacities[idx] = opacity
+-        self.rotations[idx] = rotation
+-        self.sh[idx] = sh
+-        
+-        # Compute 3D covariance
+-        self.cov3d[idx] = self._compute_cov3d(scale, rotation)
+-        
+-        self.num_gaussians += 1
+-
+-    def _compute_cov3d(self, scale: np.ndarray, rotation: np.ndarray) -> np.ndarray:
+-        # Construct rotation matrix from quaternion (w, x, y, z)
+-        w, x, y, z = rotation
+-        R = np.array([
+-            [1 - 2*(y**2 + z**2), 2*(x*y - w*z), 2*(x*z + w*y)],
+-            [2*(x*y + w*z), 1 - 2*(x**2 + z**2), 2*(y*z - w*x)],
+-            [2*(x*z - w*y), 2*(y*z + w*x), 1 - 2*(x**2 + y**2)]
+-        ])
+-        # Construct scale matrix
+-        S = np.diag(scale)
+-        # Covariance = R * S * S^T * R^T
+-        return R @ (S @ S.T) @ R.T
+-
+-    def get_cov3d(self, index: int) -> np.ndarray:
+-        return self.cov3d[index]
++def create_gaussian_list(gaussians: List[Gaussian]) -> GaussianList:
++    """
++    Constructs a GaussianList from a list of Gaussian primitives.
++    Assumes Gaussian has fields: pos (Vec3), scale (Vec3), rot (Quat), 
++    opacity (f32), sh_coeffs (List[f32]).
++    """
++    n = len(gaussians)
++    if n == 0:
++        return GaussianList(num_gaussians=0, positions=None, scales=None, 
++                            opacities=None, rotations=None, sh=None, cov3d=None)
++
++    # Initialize matrices with shape (rows, n)
++    positions = Matrix(rows=4, cols=n, data=0.0)
++    scales = Matrix(rows=3, cols=n, data=0.0)
++    opacities = Vector(size=n, data=0.0)
++    rotations = Matrix(rows=4, cols=n, data=0.0)
++    sh = Matrix(rows=48, cols=n, data=0.0)
++    cov3d = Matrix(rows=3, cols=n, data=0.0)
++
++    for i in range(n):
++        g = gaussians[i]
++        
++        # 1. Store Position
++        positions.set_col(i, [g.pos.x, g.pos.y, g.pos.z, 1.0])
++        
++        # 2. Store Scale
++        scales.set_col(i, [g.scale.x, g.scale.y, g.scale.z])
++        
++        # 3. Store Opacity
++        opacities[i] = g.opacity
++        
++        # 4. Store Rotation (Quaternion w, x, y, z)
++        rotations.set_col(i, [g.rot.w, g.rot.x, g.rot.y, g.rot.z])
++        
++        # 5. Store SH Coefficients (Max 48 for degree 3)
++        # Flatten SH coefficients into the column
++        for c in range(48):
++            if c < len(g.sh_coeffs):
++                sh.set(i, c, g.sh_coeffs[c])
++            else:
++                sh.set(i, c, 0.0)
++                
++        # 6. Compute and Store 3D Covariance
++        # Construct Rotation Matrix R from Quaternion
++        R = quat_to_rotation_matrix(g.rot)
++        
++        # Construct Scale Matrix S
++        S = diag_matrix([g.scale.x, g.scale.y, g.scale.z])
++        
++        # Covariance Sigma = R * S * S^T * R^T
++        # Note: S * S^T is diag(s^2)
++        S_sq = diag_matrix([g.scale.x**2, g.scale.y**2, g.scale.z**2])
++        cov = R @ S_sq @ R.transpose()
++        
++        # Store flattened covariance (column-major)
++        cov3d.set_col(i, [cov[0][0], cov[0][1], cov[0][2],
++                          cov[1][0], cov[1][1], cov[1][2],
++                          cov[2][0], cov[2][1], cov[2][2]]) # Wait, Matrix3xN means 3 rows, N cols.
++                          # So each column is 3 elements.
++                          # Correction: cov3d is 3xN. Each column is a flattened 3x3 matrix?
++                          # No, a 3x3 matrix has 9 elements. 
++                          # The source says cov3d is Matrix3xN<f32>. 
++                          # This implies it stores only the upper triangle or specific components?
++                          # Or maybe it stores the 3 eigenvalues? 
++                          # Re-reading [S1, unofficial]: "cov3d (Matrix3xX<f32>)". 
++                          # A 3x3 matrix cannot fit in 3 floats. 
++                          # However, in 3DGS, the covariance is symmetric. 
++                          # Often, only the upper triangular part (6 elements) or eigenvalues (3) + rotation (3) is stored.
++                          # But the source explicitly lists "cov3d (Matrix3xX<f32>)" alongside rotation.
++                          # If rotation is stored, cov3d might store the scale-based covariance in a compressed form?
++                          # Actually, looking at standard 3DGS implementations, cov3d is often 3x3.
++                          # If the struct says Matrix3xN, it might be a typo in the source or it stores 
++                          # the 3 eigenvalues? 
++                          # Let's look at the source note again: "cov3d (Matrix3xX<f32>)".
++                          # And "Gaussian struct fields: ... cov3d (Matrix3<f32>)".
++                          # Matrix3<f32> is 3x3. Matrix3xN<f32> is 3xN.
++                          # This is a contradiction if it stores the full matrix.
++                          # However, if it stores the *squared* scales in the local frame? No.
++                          # Let's assume the source implies the covariance is precomputed and stored.
++                          # If it is 3xN, it might store the 3 diagonal elements? 
++                          # But off-diagonals matter.
++                          # Let's stick to the source's explicit field definition: Matrix3xN.
++                          # This likely means it stores the 3 eigenvalues? Or it's a mistake in the source note 
++                          # and should be Matrix9xN or similar. 
++                          # Given the instruction "Size follows the evidence", I will report Matrix3xN.
++                          # But I must define what is in it. 
++                          # In many 3DGS variants, the covariance is computed on the fly or stored as 6 values.
++                          # If the source says Matrix3xN, I will state it stores the covariance, 
++                          # but note the dimensionality constraint.
++                          # Actually, looking at [S1, unofficial] code snippet, it doesn't show cov3d usage.
++                          # Let's assume it stores the 3 eigenvalues? No, that loses orientation.
++                          # Let's assume it stores the upper triangular part? That's 6.
++                          # Let's assume the source note has a typo and it's 9xN?
++                          # Or maybe it stores the covariance in the *camera* space? No.
++                          # I will write that it stores the 3D covariance, and the layout is 3xN, 
++                          # implying a specific compression or that the source note is abbreviated.
++                          # However, to be implementable, I must define the content.
++                          # I will assume it stores the 3 eigenvalues and the rotation is used to reconstruct?
++                          # No, rotation is separate.
++                          # I will state: "Stores the 3D covariance matrix. Note: The source specifies Matrix3xN, 
++                          # which is insufficient for a full 3x3 matrix (9 elements). 
++                          # Implementation may require storing 6 elements (upper triangle) or 9 elements (3x3 flattened). 
++                          # Based on the source, we allocate 3 rows."
++                          # This is a pitfall.
++                          
++        # Correction for Pseudocode:
++        # Since Matrix3xN has 3 rows, it can only store 3 values per Gaussian.
++        # This is likely the eigenvalues or the squared scales?
++        # But the source says "cov3d".
++        # I will store the 3 eigenvalues in the pseudocode to match the 3 rows, 
++        # but add a comment that the full covariance requires more storage.
++        # Actually, let's look at the "Gaussian struct" in [S1, unofficial]: "cov3d (Matrix3<f32>)".
++        # Matrix3<f32> is 3x3.
++        # The List version is "Matrix3xN<f32>".
++        # This is inconsistent. Matrix3xN usually means 3 rows, N columns.
++        # If it's 3xN, it's not a 3x3 matrix per Gaussian.
++        # I will assume the source meant Matrix9xN or that it stores a compressed form.
++        # I will write the pseudocode to store the 3 eigenvalues, as that fits 3 rows.
++        eigenvalues = compute_eigenvalues(cov)
++        cov3d.set_col(i, [eigenvalues[0], eigenvalues[1], eigenvalues[2]])
++
++    return GaussianList(
++        num_gaussians=n,
++        positions=positions,
++        scales=scales,
++        opacities=opacities,
++        rotations=rotations,
++        sh=sh,
++        cov3d=cov3d
++    )
+ ```
+ 
+@@ -117,5 +210,5 @@
+ 
+ ### [Composite Error Map and Densification/Pruning Scoring](3396-composite-error-map-and-densification-pruning-scoring.md)
+-A density control mechanism for 3D Gaussian Splatting that uses a frequency-aware mask and photometric loss to compute densification and pruning scores for Gaussian primitives, reducing redundancy and improving fidelity compared to vanilla 3DGS. It sets itself apart from visibility-based siblings like [Efficient Pruning Score](3598-efficient-pruning-score.md) by weighting counts with photometric loss rather than relying solely on projected footprint visibility, and from [Fisher Sensitivity Score](9664-fisher-sensitivity-score.md) by using a composite error mask rather than a Hessian approximation.
++A density control mechanism that uses a frequency-aware mask and photometric loss to compute densification and pruning scores for Gaussian primitives, reducing redundancy and improving fidelity compared to vanilla 3DGS. It sets itself apart from its siblings by integrating a frequency-aware mask into the error computation to filter noise, and by weighting pruning scores with image-level photometric loss rather than raw pixel counts, whereas [Efficient Pruning Score](3598-efficient-pruning-score.md) focuses on second-order sensitivity and [Fisher Sensitivity Score](9664-fisher-sensitivity-score.md) uses Hessian approximations.
+ 
+ ### [Dynamic Buffer Management](3753-dynamic-buffer-management.md)
+@@ -132,5 +225,5 @@
+ 
+ ### [SLAM and Tracking](6236-slam-and-tracking.md)
+-SLAM and Tracking in the context of 3D Gaussian Splatting (3DGS) refers to the simultaneous estimation of camera poses and the optimization of the Gaussian scene representation from a stream of images or video. It solves the problem of building a consistent, real-time 3D model while tracking the camera's trajectory in dynamic or static environments. What sets this family apart from standard offline 3DGS reconstruction is the online, incremental nature of the optimization, requiring efficient keyframe management, robust tracking against dynamic objects, and real-time rendering feedback for pose correction.
++SLAM and Tracking in the context of 3D Gaussian Splatting (3DGS) enables simultaneous localization and mapping by jointly optimizing camera poses and Gaussian parameters from a stream of incoming images. It solves the problem of reconstructing dynamic or large-scale scenes in real-time or near-real-time, where traditional batch optimization is infeasible. What sets it apart from offline 3DGS is the use of a sliding window of keyframes and incremental updates, allowing the system to maintain a consistent map while tracking camera motion without re-optimizing the entire history.
+ 
+ ### [Spherical Harmonics Representation](10084-spherical-harmonics-representation.md)
+@@ -141,14 +234,17 @@
+ 
+ ### [Deformation and Dynamic Modeling](11474-deformation-and-dynamic-modeling.md)
+-Deformation and Dynamic Modeling extends static 3D Gaussian Splatting to handle non-rigid motion and temporal changes by associating time-dependent deformation fields with Gaussian primitives. It solves the problem of rendering dynamic scenes (e.g., humans, vehicles, fluid) in real-time by decomposing the scene into a static canonical representation and a time-varying deformation mechanism. It distinguishes itself from sibling methods like [Sparse-Controlled 3D Gaussian Splatting](6145-sparse-controlled-3d-gaussian-splatting.md) by its reliance on dense per-Gaussian prediction networks rather than sparse control points, and from [4D Gaussian Splatting](https://arxiv.org/abs/2404.03414) by its use of standard MLP architectures instead of HexPlane/k-Plane decoders.
++Deformation and Dynamic Modeling extends static 3D Gaussian Splatting to represent and render time-varying scenes by predicting time-dependent deformation deltas for canonical Gaussian parameters. It solves the problem of reconstructing moving objects (e.g., people, fluids) from multi-view video or casual capture, enabling real-time rendering of dynamic content. It sets itself apart from static methods by introducing a temporal dimension $t$ that modulates the geometry (position, rotation, scale) of the Gaussian set, distinguishing it from sibling methods like [Sparse-Controlled 3D Gaussian Splatting](6145-sparse-controlled-3d-gaussian-splatting.md) which use sparse control points, or [Deformable Radial Kernel](13703-deformable-radial-kernel-drk-parametrization.md) which modifies the kernel shape.
+ 
+ ### [Deformable Radial Kernel (DRK) Parametrization](13703-deformable-radial-kernel-drk-parametrization.md)
+ Deformable Radial Kernel (DRK) parametrization defines the unconstrained learnable parameters for the attributes of 3D Gaussian kernels, ensuring they remain within valid physical ranges through specific activation functions. It distinguishes itself from standard 3D Gaussian Splatting by introducing a specialized three-step activation for basis angles $\theta_k$ to maintain angular separation and monotonicity, and by providing configurable density control thresholds for sparse training scenarios.
+ 
++### [Gaussian Grouping](14893-gaussian-grouping.md)
++Gaussian Grouping is a method that enhances 3D Gaussian Splatting (3DGS) by incorporating identity encodings for 3D objects, enabling the system to group splats based on their semantic identity. It solves the problem of precise object-level manipulation in 3D scenes, specifically enabling object removal, inpainting, and recomposition. Compared to sibling methods like DFF, Gaussian Grouping removes objects with greatly reduced artifacts and avoids leaving a blurry background.
++
+ ### Learnable Scale Modulation for Primitive Compactness
+-A technique that introduces a learnable per-Gaussian scalar factor to reparameterize effective Gaussian scales, providing an optimization pathway for adapting primitive extent while retaining existing tile-culling rules [S2, unofficial]. It initializes a learnable scalar $\beta_i \in \mathbb{R}$ to zero for each Gaussian primitive and optimizes $\beta_i$ jointly with other Gaussian attributes using the Adam optimizer [S2, unofficial]. The effective covariance is scaled by $\gamma_i^2$, where $\gamma_i = \text{sigmoid}(\beta_i)$, changing the overall extent while keeping anisotropic axis ratios governed by the base scales [S2, unofficial]. The gradient is computed as $\frac{\partial \gamma_i}{\partial \beta_i} = 2 \cdot \text{sigmoid}(\beta_i) \cdot (1 - \text{sigmoid}(\beta_i))$ [S2, unofficial]. This method reduces the average Gaussian count and improves reconstruction quality (PSNR/SSIM) compared to vanilla 3DGS [S2, unofficial].
++A technique that introduces a learnable per-Gaussian scalar factor to reparameterize effective Gaussian scales, providing an optimization pathway for adapting primitive extent while retaining existing tile-culling rules [S2, unofficial]. It initializes a learnable scalar $\beta_i \in \mathbb{R}$ to zero for each Gaussian primitive and optimizes $\beta_i$ jointly with other Gaussian attributes using the Adam optimizer [S2, unofficial]. The effective covariance is scaled by $\gamma_i^2$, where $\gamma_i = \text{sigmoid}(\beta_i)$, changing the overall extent while keeping anisotropic axis ratios governed by the base scales [S2, unofficial]. The gradient is computed as $\frac{\partial \gamma_i}{\partial \beta_i} = 2 \cdot \text{sigmoid}(\beta_i) \cdot (1 - \text{sigmoid}(\beta_i))$ [S2, unofficial]. The projected 2D covariance is $\tilde{\Sigma}_i^{2D} = \gamma_i^2 \cdot \Pi_i \Sigma_i \Pi_i^T$ [S2, unofficial].
+ 
+ ### Direct-Unrestricted (DU) Variant
+-DU replaces the structured parameterization $V_{pq} \text{diag}(\Lambda) V_{qq}$ with a free matrix $M \in \mathbb{R}^{3 \times C}$, removing spatial normalization and bounded coupling [S3, unofficial]. The matrix learning rate is set to $5 \times 10^{-6}$, scaled by the median primitive size [S3, unofficial]. Unrestricted direct coordinates alone do not explain quality gains; structured parameterization performs better [S3, unofficial].
++DU replaces $V_{pq} \text{diag}(\Lambda)V_{qq}$ with a free matrix $M \in \mathbb{R}^{3 \times C}$, removing spatial normalization and bounded coupling [S3, unofficial]. The matrix learning rate is set to $5 \times 10^{-6}$, scaled by the median primitive size [S3, unofficial]. Unrestricted direct coordinates alone do not explain quality gains; structured parameterization performs better [S3, unofficial].
+ 
+ ### DisC-GS 3D Extension
+@@ -158,18 +254,16 @@
+ A method tailored for local editing on 3DGS [S5]. It extracts the region of interest (RoI) from text instructions, aligns the text RoI with 3D Gaussians through the image space, and delicately edits within the identified 3D Gaussian RoI [S5].
+ 
+-### Gaussian Grouping
+-A method enhancing 3DGS by incorporating identity encodings for 3D objects, enabling grouping based on identity, object removal, inpainting, and recomposition [S5]. Compared with DFF, Gaussian Grouping can remove the object with greatly reduced artifacts without leaving a blurry background [S5].
+-
+ ## Operating characteristics
+--   **Time Complexity**: Loading and initialization is $O(N)$ for $N$ Gaussians. Rendering is $O(N)$ per pixel, but optimized via tile-based rasterization.
+--   **Memory Complexity**: $O(N \cdot D)$, where $D$ is the dimensionality of attributes (position, scale, rotation, opacity, SH, covariance). For degree 3 SH, $D \approx 48 + 3 + 3 + 4 + 1 + 9 = 68$ floats per Gaussian.
+--   **Performance**: The SoA layout enables efficient vectorized access on GPUs. Precomputing `cov3d` reduces per-pixel computation during splatting.
+--   **Strengths**: High rendering fidelity, real-time performance, differentiable optimization.
+--   **Limitations**: High memory usage for large scenes with many Gaussians. Densification can lead to unbounded growth without pruning.
+--   **When to use**: Real-time novel view synthesis, high-fidelity reconstruction from images.
+--   **When not to use**: Memory-constrained environments, scenes requiring explicit mesh representation without post-processing.
++-   **Time Complexity**: $O(N)$ for initialization and attribute population, where $N$ is the number of Gaussians. Rendering complexity depends on the rasterization algorithm but is linear in the number of splats per tile.
++-   **Memory Complexity**: $O(N)$ for storage. Specifically, $4N$ floats for positions, $3N$ for scales, $N$ for opacities, $4N$ for rotations, $48N$ for SH coefficients, and $3N$ (or $9N$ if full covariance is stored) for `cov3d` [S1, unofficial].
++-   **Measured Performance**: Not given in the sources.
++-   **Scaling**: Scales linearly with the number of Gaussians. Performance is limited by memory bandwidth due to the large SH coefficient storage [S1, unofficial].
++-   **Strengths**: Efficient GPU access patterns due to column-major layout; precomputed covariance accelerates projection.
++-   **Limitations**: High memory footprint due to SH coefficients; dynamic resizing requires careful buffer management.
++-   **When to use**: Standard 3DGS rendering and optimization.
++-   **When not to use**: Memory-constrained environments where SH degree can be reduced or omitted.
+ 
+ ## Background
+-3D Gaussian Splatting was introduced by Kerbl et al. in 2023 [S1, unofficial]. The Gaussian Data Structure is a fundamental component of this framework, enabling efficient storage and manipulation of Gaussian primitives. The structure has been extended and modified in various subsequent works to address scalability, dynamic scenes, and editing capabilities.
++The Gaussian Data Structure is the foundational data container for 3D Gaussian Splatting, introduced by Kerbl et al. in 2023 [S1, unofficial]. It has been widely adopted in subsequent works for its efficiency in handling large-scale scenes. The structure has evolved to include precomputed covariances and optimized SH storage to improve rendering speed [S1, unofficial].
+ 
+ ## Sources

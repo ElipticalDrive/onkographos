@@ -1,0 +1,184 @@
+Bug report It looks to me like the colormap used for volume rendering is currently not exposed to user, and can only be changed by building a custom transfer function from the ground up. This look like a simple enough change but I'd like...
+
+Volume rendering colormap is not directly exposed · Issue #2804 · yt-project/yt · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Volume rendering colormap is not directly exposed #2804
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Volume rendering colormap is not directly exposed#2804
+Copy link
+Labels
+api-consistencynaming conventions, code deduplication, informative error messages, code smells...naming conventions, code deduplication, informative error messages, code smells...question
+Description
+neutrinoceros
+opened on Aug 3, 2020
+Issue body actions
+Bug report
+It looks to me like the colormap used for volume rendering is currently not exposed to user, and can only be changed by building a custom transfer function from the ground up.
+This look like a simple enough change but I'd like someone with more experience in VR to weigh in: what would be the best way to expose this/which user-facing function should expose it (yt.create_scene ? Scene.render ? source.set_cmap in the fashion of source.set_log ?) ?
+https://yt-project.org/docs/dev/visualizing/volume_rendering.html#volume-rendering-components
+Reactions are currently unavailable
+Activity
+neutrinoceros
+added
+question
+api-consistencynaming conventions, code deduplication, informative error messages, code smells...naming conventions, code deduplication, informative error messages, code smells...
+on Aug 3, 2020
+neutrinoceros commented on Oct 19, 2021
+neutrinoceros
+on Oct 19, 2021
+MemberAuthor
+More actions
+I can't remember why I wanted to do this and it doesn't seem to have caught anyone else's attention so I'll just close this.
+neutrinoceros
+closed this as completedon Oct 19, 2021
+jzuhone
+reopened this on Aug 5, 2025
+jzuhone commented on Aug 5, 2025
+jzuhone
+on Aug 5, 2025
+Contributor
+More actions
+@neutrinoceros I'm re-opening this because now it has caught others' attention. :) @matthewturk who is our current VR guru? I'm not sure the best place to expose this.
+👀React with 👀1Reacted by Clément Robert
+jzuhone commented on Aug 5, 2025
+jzuhone
+on Aug 5, 2025
+Contributor
+More actions
+For context, here is a script where the user does build the transfer function and they cannot even get the colormap to change:
+https://docs.google.com/document/d/1SmxjoOKJYPBP4erAknK2-2IbwxdgIiCNtf_B-66yzQE/edit?tab=t.0
+matthewturk commented on Aug 5, 2025
+matthewturk
+on Aug 5, 2025
+Member
+More actions
+Thanks for the detail -- I'll take a look.
+matthewturk commented on Aug 5, 2025
+matthewturk
+on Aug 5, 2025
+Member
+More actions
+I've dug in a bit, and here are my initial thoughts.
+The fix to the python files, in allowing the MultiVariateTransferFunction is (going to be) correct.
+The functionality for the MVTF seems to mostly still be there.
+The way the transfer_function attribute is set up for the TransferFunctionHelper object, which doesn't support the MVTF.
+We have to re-construct the sampler object to get the modified transfer function in.
+I get a segfault with these things, but, that segfault (to me) says that it's now actually using the MVTF machinery.
+I had to make a few changes to the yt source, but I don't think any were necessary other than what you provided. The big change I had to make was to add these lines right after cam.resolution = (256, 256) in Multivariate_TF.py:
+```
+source._transfer_function = mv
+source.set_sampler(cam)
+```
+This re-triggers the "create a sampler" machinery and also updates the (hidden) transfer function attribute. I'll continue looking at the segfault now.
+matthewturk commented on Aug 5, 2025
+matthewturk
+on Aug 5, 2025
+Member
+More actions
+Oops, turns out I made a mistake and the segfault is pointing to a different error, so don't worry about that part ... I have a bit more work to do. :)
+matthewturk commented on Aug 5, 2025
+matthewturk
+on Aug 5, 2025
+Member
+More actions
+The further I dig in, the more I think it might be working mostly as expected, but it's just not clear the way it's expected to work.
+The add_field_table call is supposed to receive an individual TransferFunction object, of which the ColorTransferFunction actually has four (.red, .green, .blue and .alpha). So I believe the thing we're supposed to be doing is more akin to:
+```
+mv.add_field_table(tf_temp.red, field_id=0, weight_field_id=-1, weight_table_id=-1)  # temperature → RGB
+mv.add_field_table(tf_temp.green, field_id=0, weight_field_id=-1, weight_table_id=-1)  # temperature → RGB
+mv.add_field_table(tf_temp.blue, field_id=0, weight_field_id=-1, weight_table_id=-1)  # temperature → RGB
+mv.add_field_table(tf_density.red, field_id=1, weight_field_id=-1, weight_table_id=-1)   # density → Alpha
+
+# Link channels 
+mv.link_channels(table_id = 0, channels = [0])
+mv.link_channels(table_id = 1, channels = [1])
+mv.link_channels(table_id = 2, channels = [2])
+mv.link_channels(table_id = 3, channels = [3, 4, 5])       
+```
+But that produces an empty image for me. (I think the weight field might also need to be set in this case.) The way the code works is described at https://yt-project.github.io/yt-4.0-paper/ under "Transfer Function Sampler" but that speaks specifically to the way it works for a traditional ColorTransferFunction. The PlanckTransferFunction may be a place to look, which is next up on my list. You may have success with it, but it definitely demonstrates the use of weighting and whatnot.
+So I think we're actually not that far off, but getting the exact items right is tricky. (I'm also wondering if I missed something with whether temperature should be logged or not, and if that's killing my images.)
+chrishavlin commented on Aug 13, 2025
+chrishavlin
+on Aug 13, 2025
+Contributor
+More actions
+The PlanckTransferFunction may be a place to look, which is next up on my list
+oh hey, i was just trying to use this :) (no useful info to add yet)
+matthewturk commented on Aug 13, 2025
+matthewturk
+on Aug 13, 2025
+Member
+More actions
+For what it's worth, I've been looking into the PlanckTransferFunction to better understand things, and I found these two scripts from long-long-ago that use it:
+https://gist.github.com/matthewturk/46d207c5a601b6bd9194f1ee977e0ee4
+Neither will run, but the points that stick out at me:
+```
+    planck = vr.PlanckTransferFunction( (tmi,tma), (0.0, 1.0), nbins=1024,
+                                        anorm=8e4,
+                                        red='I', green='R', blue='U')
+```
+This is synced to a RelativeDensity derived field, which is the clamped ratio of density. It's also not done in log space!
+If I can update them I will do so.
+chrishavlin commented on Aug 14, 2025
+chrishavlin
+on Aug 14, 2025
+Last edited by chrishavlin
+Contributor
+More actions
+Just for clarity: I think the original issue here as @neutrinoceros posed is a little different from what we've been discussing.
+For single-field rendering, the color-mapping works just fine, and it would be pretty easy to, for example expose a control to set or modify the colormap used for a default colormap (more below).
+The question of multi-variate TF rendering is separate: I'm pretty sure the reason the bug report above shows an inability to change the colormap is simply that the MV TF is just not being used (they are setting the TF with source.tfh.tf = mvtf and not calling source.set_transfer_function, because source.set_transfer_function will error with a MV TF right now. If you don't call that set_transfer_function, all you get is the default TF). So fixing support for MV TF is a separate problem, I think we should open a new issue (I'll do that now).
+Exposing colormap for single-field rendering
+On the topic of @neutrinoceros 's original issue, when you call create_scene, a default transfer function gets built, ultimately from:
+yt/yt/visualization/volume_rendering/transfer_function_helper.py
+Lines 117 to 127
+in
+f50dfe4
+def setup_default(self):
+"""Setup a default colormap
+Creates a ColorTransferFunction including 10 gaussian layers whose
+colors sample the 'nipy_spectral' colormap. Also attempts to scale the
+transfer function to produce a natural contrast ratio.
+"""
+self.tf.add_layers(10, colormap="nipy_spectral")
+factor = self.tf.funcs[-1].y.size / self.tf.funcs[-1].y.sum()
+self.tf.funcs[-1].y *= 2 * factor
+It'd be feasible to add a colormap kwarg to create_scene to control the colormap used there, would need to add the kwarg to several different functions but I don't think that'd be hard.
+A source.set_cmap would work if there was some careful validation: if you construct a transfer function manually, source.set_cmap would only make sense where you have a transfer function that maps to a colormap: e.g., it would not make sense to apply a colormap if you've added gaussians manually or if you've added a TF that uses separate colormaps for different ranges. So I think a set_cmap would only make sense if the user has not made any manual modifications to the transfer function, and that seems annoying/difficult to track with the current design of the transfer function handler.
+Rather than a source.set_cmap, I think it'd be better to have a source.reset_transfer_function(cmap: str | None = None) so that it's very clear that it's over-riding any existing transfer functions.
+chrishavlin commented on Aug 14, 2025
+chrishavlin
+on Aug 14, 2025
+Contributor
+More actions
+Ok, I suggest MV TF discussion move over to #5257 :)
+Happy to keep this issue open -- I think exposing some control for the colormap used in default TF construction is a good idea.
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+api-consistencynaming conventions, code deduplication, informative error messages, code smells...naming conventions, code deduplication, informative error messages, code smells...question
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

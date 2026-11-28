@@ -1,0 +1,129 @@
+--- v004.md
++++ v005.md
+@@ -6,22 +6,22 @@
+ 
+ ## How it works
+-The algorithm operates in-place on a single device array for a single block, or across multiple kernel launches for arrays larger than a single block [S2, unofficial][S3]. It requires the input size to be padded to the next power of two for internal tree operations, though the final output matches the original size [S2, unofficial][S3].
++For a single block, it operates in-place on a device array [S3]. For arrays larger than a single block, it uses multiple kernel launches across hierarchical levels [S2, unofficial]. It requires the input size to be padded to the next power of two for internal tree operations, though the final output matches the original size [S2, unofficial][S3].
+ 
+ ### Inputs and Outputs
+-- **Input**: Array `idata` of size $n$ (arbitrary integer or floating-point type).
+-- **Output**: Array `odata` of size $n$ containing the inclusive prefix sum.
++- **Input**: Array `idata` of size $n$ (arbitrary integer or floating-point type) [S2, unofficial].
++- **Output**: Array `odata` of size $n$ containing the inclusive prefix sum [S2, unofficial].
+ - **Auxiliary**: For multi-block execution, arrays `dev_idata`, `dev_buffer`, and `dev_odata` of size `num_scans` are used to manage hierarchical reduction levels [S2, unofficial].
+ 
+ ### Data Structures
+ For multi-block execution [S2, unofficial]:
+-- `dev_idata`: Array of pointers to device memory, size `num_scans`. `dev_idata[i]` holds the input for level $i$.
+-- `dev_buffer`: Array of pointers to device memory, size `num_scans`. `dev_buffer[i]` holds intermediate results for level $i$.
+-- `dev_odata`: Array of pointers to device memory, size `num_scans`. `dev_odata[i]` holds the final exclusive results for level $i$.
+-- `array_sizes`: Array of integers, size `num_scans`. `array_sizes[i]` is the number of elements at level $i$.
+-- `grid_sizes`: Array of integers, size `num_scans`. `grid_sizes[i]` is the number of blocks at level $i$.
++- `dev_idata`: Array of pointers to device memory, size `num_scans`. `dev_idata[i]` holds the input for level $i$ [S2, unofficial].
++- `dev_buffer`: Array of pointers to device memory, size `num_scans`. `dev_buffer[i]` holds intermediate results for level $i$ [S2, unofficial].
++- `dev_odata`: Array of pointers to device memory, size `num_scans`. `dev_odata[i]` holds the final exclusive results for level $i$ [S2, unofficial].
++- `array_sizes`: Array of integers, size `num_scans`. `array_sizes[i]` is the number of elements at level $i$ [S2, unofficial].
++- `grid_sizes`: Array of integers, size `num_scans`. `grid_sizes[i]` is the number of blocks at level $i$ [S2, unofficial].
+ 
+ ### Parameters
+ - `block_size`: CUDA block size. Profiling indicates optimal performance at 128 threads per block [S2, unofficial], though 512 is also cited as optimal in other contexts [S1, unofficial]. Values like 1024 are suboptimal due to reduced GPU parallelism [S1, unofficial].
+-- `n`: Input array size.
++- `n`: Input array size [S2, unofficial].
+ - `n_pad`: Padded size, calculated as $2^{\lceil \log_2 n \rceil}$ [S2, unofficial].
+ 
+@@ -65,5 +65,5 @@
+        - If `(id % (1 << (d + 1))) == 0`:
+          - `idata[id + (1 << (d + 1)) - 1] += idata[id + (1 << d) - 1]` [S2, unofficial].
+-     - Synchronize threads (`__syncthreads()`) after each `d` [S2, unofficial].
++     - Synchronize threads after each `d` [S2, unofficial].
+ 
+ 2. **Reset Last Element**:
+@@ -74,7 +74,7 @@
+      - If `(id % (1 << (d + 1))) == 0`:
+        - `temp = idata[id + (1 << d) - 1]`
+-       - `idata[id + (1 << d) - 1] = idata[id + (d + 1) - 1]`
+-       - `idata[id + (d + 1) - 1] += temp` [S2, unofficial].
+-     - Synchronize threads (`__syncthreads()`) after each `d` [S2, unofficial].
++       - `idata[id + (1 << d) - 1] = idata[id + (1 << (d + 1)) - 1]`
++       - `idata[id + (1 << (d + 1)) - 1] += temp` [S2, unofficial].
++     - Synchronize threads after each `d` [S2, unofficial].
+ 
+ 4. **Convert Exclusive to Inclusive**:
+@@ -86,4 +86,14 @@
+ ### Pseudocode
+ ```python
++import math
++
++def ilog2ceil(x):
++    """Returns ceil(log2(x)) for x > 0."""
++    return math.ceil(math.log2(x)) if x > 1 else 1
++
++def sync_threads():
++    """Synchronizes all threads in the block."""
++    pass  # Represents a hardware barrier
++
+ def work_efficient_scan_kernel(n, block_size, idata, odata):
+     """
+@@ -91,8 +101,9 @@
+     Assumes idata is padded to power of two size internally if necessary.
+     """
+-    tid = threadIdx.x
++    tid = 0  # Represents threadIdx.x
+     id = tid
+-    log2n = ilog2ceil(n) # Ceiling log2 of n
+-    
++    n_pad = 1 << ilog2ceil(n)
++    log2n = ilog2ceil(n)
++
+     # Upsweep Phase
+     for d in range(log2n):
+@@ -100,8 +111,8 @@
+             idx_left = id + (1 << d) - 1
+             idx_right = id + (1 << (d + 1)) - 1
+-            if idx_right < len(idata): # Guard for non-power-of-two padding
++            if idx_right < n_pad:
+                 idata[idx_right] += idata[idx_left]
+-        __syncthreads()
+-    
++        sync_threads()
++
+     # Reset Last Element
+     reduction_sum = 0
+@@ -109,6 +120,6 @@
+         reduction_sum = idata[id]
+         idata[id] = 0
+-    __syncthreads()
+-    
++    sync_threads()
++
+     # Downsweep Phase
+     for d in range(log2n - 1, -1, -1):
+@@ -116,10 +127,10 @@
+             idx_left = id + (1 << d) - 1
+             idx_right = id + (1 << (d + 1)) - 1
+-            if idx_right < len(idata): # Guard
++            if idx_right < n_pad:
+                 temp = idata[idx_left]
+                 idata[idx_left] = idata[idx_right]
+                 idata[idx_right] += temp
+-        __syncthreads()
+-        
++        sync_threads()
++
+     # Convert Exclusive to Inclusive
+     if tid == block_size - 1 or id == n - 1:
+@@ -141,5 +152,5 @@
+ 
+ ### GPU Scan with Shared Memory and Hardware Optimization
+-An optimized GPU scan implementation using shared memory and bank conflict avoidance, based on GPU Gems 3 Chapter 39 Examples 39.1 and 39.2 [S3]. It optimizes memory access patterns to avoid shared memory bank conflicts [S3]. The size of shared memory is dynamic and related to the block size. Occupancy is affected by the amount of shared memory used per block relative to the SM's limit [S3]. Using maximum shared memory per block reduces occupancy (e.g., max 1 block per SM), which may not yield best performance [S3].
++An optimized GPU scan implementation using shared memory and bank conflict avoidance, based on GPU Gems 3 Chapter 39 Examples 39.1 and 39.2 [S3]. It optimizes memory access patterns to avoid shared memory bank conflicts [S3]. The size of shared memory is dynamic and related to the block size [S3]. Occupancy is affected by the amount of shared memory used per block relative to the SM's limit [S3]. Using maximum shared memory per block reduces occupancy (e.g., max 1 block per SM), which may not yield best performance [S3].
+ 
+ ## Operating characteristics
+@@ -150,5 +161,5 @@
+ - **Scaling**: Performance improves with block size up to an optimal point (128 or 512 threads per block), after which it degrades due to reduced parallelism [S1, S2, unofficial].
+ - **Strengths**: Work-efficient, suitable for arbitrary input sizes (with padding), in-place operation for single blocks.
+-- **Limitations**: SM workload imbalance in upsweep phase, non-optimal memory access patterns, requires extra memory for non-power-of-two sizes.
++- **Limitations**: SM workload imbalance in upsweep phase, non-optimal memory access patterns, requires extra memory for non-power-of-two sizes [S1, unofficial][S3].
+ 
+ ## Background

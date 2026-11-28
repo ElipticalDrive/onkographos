@@ -1,0 +1,435 @@
+--- v003.md
++++ v004.md
+@@ -4,204 +4,266 @@
+ 
+ ## Overview
+-GsplatVolumeLighting is a volume lighting and occlusion technique for 3D Gaussian Splatting that ray-marches through a 3D density texture to compute transmittance for shadow and volume occlusion, combined with per-light attenuation and diffuse shading [S1, unofficial]. It extends the standard 3D Gaussian Splatting rendering pipeline by adding a secondary pass that evaluates volumetric shadows and ambient/direct lighting contributions for each splat, allowing splats to cast and receive shadows from volumetric objects [S1, unofficial]. Unlike standard 3DGS which assumes unoccluded lighting or simple environment maps, this method integrates a 3D density field to modulate light transport, enabling realistic indoor or complex outdoor scenes where splats interact with volumetric geometry [S1, unofficial].
++GsplatVolumeLighting is a volume lighting and occlusion technique for 3D Gaussian Splatting (3DGS) that ray-marches through a 3D density texture to compute transmittance for shadow and volume occlusion, combined with per-light attenuation and diffuse shading [S1, unofficial]. It extends the standard 3DGS rendering pipeline by adding physically-based lighting calculations that account for volumetric occlusion, allowing splats to cast and receive shadows within a defined volume [S1, unofficial]. Unlike sibling methods that may rely on screen-space effects or simplified depth occlusion, this method uses explicit 3D texture sampling to determine light transport through space [S1, unofficial].
+ 
+ ## How it works
+-The method operates in two main phases: a volume transmittance calculation (shadow march) and a per-splat lighting evaluation. It is implemented as a shader extension within the UnitySplats package [S1, unofficial].
+ 
+ ### Inputs and Outputs
+ **Inputs:**
+-*   **Splat Data:** World-space center position, normal vector, and view direction for the current splat being shaded [S1, unofficial].
+-*   **Light Data:** Up to 4 lights, each with type (directional, point, or spot), position/direction, color, and attenuation parameters [S1, unofficial].
+-*   **Volume Data:**
+-    *   `_GsplatVolumeDensity`: A `sampler3D` texture storing density. The R8 channel encodes $\sqrt{\text{normalized optical depth}}$ [S1, unofficial].
+-    *   `_GsplatVolumeBoundsMin/Max`: `float4` defining the axis-aligned volume bounds in local space [S1, unofficial].
+-    *   `_GsplatVolumeBoundsInvSize`: `float4` containing the inverse dimensions of the volume bounds [S1, unofficial].
+-    *   `_GsplatVolumeOcclusionParams`: `float4` packing:
+-        *   `x`: Optical-depth scale (0 disables volume lighting) [S1, unofficial].
+-        *   `y`: Number of sample steps (clamped 1–24) [S1, unofficial].
+-        *   `z`: Start distance for the march [S1, unofficial].
+-    *   `_GsplatVolumeAmbientColor`: `float3` ambient color [S1, unofficial].
+-    *   `_GsplatVolumeLightingParams`: `float4` packing:
+-        *   `y`: Ambient intensity multiplier [S1, unofficial].
+-        *   `z`: Direct lighting intensity multiplier [S1, unofficial].
+-    *   `_GsplatVolumeLightColors`: Array of `float3` light colors [S1, unofficial].
+-    *   `GSPLAT_VOLUME_OPAQUE_DEPTH`: Constant `8.0`. Transmittance below $\exp(-8)$ is treated as fully opaque [S1, unofficial].
++*   **3D Density Texture (`_GsplatVolumeDensity`):** A `sampler3D` texture where the R8 channel encodes $\sqrt{\text{normalized optical depth}}$ [S1, unofficial].
++*   **Volume Bounds:** Axis-aligned bounding box defined by `_GsplatVolumeBoundsMin` and `_GsplatVolumeBoundsMax` in local space [S1, unofficial].
++*   **Light Parameters:** Up to 4 lights, defined by type (directional, point, spot), position, direction, color, and attenuation parameters [S1, unofficial].
++*   **Splat Data:** 3D Gaussian center, normal, and view direction [S1, unofficial].
++*   **Configuration Parameters (`_GsplatVolumeOcclusionParams`):**
++    *   `x`: Optical-depth scale (strength). If 0, occlusion is disabled [S1, unofficial].
++    *   `y`: Number of sample steps (clamped 1–24) [S1, unofficial].
++    *   `z`: Start distance offset [S1, unofficial].
++*   **Lighting Parameters (`_GsplatVolumeLightingParams`):**
++    *   `y`: Ambient lighting multiplier [S1, unofficial].
++    *   `z`: Direct lighting multiplier [S1, unofficial].
++*   **Ambient Color (`_GsplatVolumeAmbientColor`):** RGB color for ambient lighting [S1, unofficial].
++*   **Light Colors (`_GsplatVolumeLightColors`):** RGB colors for up to 4 lights [S1, unofficial].
+ 
+ **Outputs:**
+-*   Final shaded color for the splat, combining ambient and direct lighting modulated by volumetric transmittance [S1, unofficial].
++*   **Final Illumination:** A scalar intensity value (0.0 to 1.0+) representing the lit color contribution for the splat [S1, unofficial].
+ 
+ ### Data Structures
+-The volume density is stored in a 3D texture (`sampler3D`). The bounds are defined by two `float4` vectors (`_GsplatVolumeBoundsMin`, `_GsplatVolumeBoundsMax`) representing the minimum and maximum corners of the axis-aligned bounding box (AABB) in local space. The inverse size (`_GsplatVolumeBoundsInvSize`) is precomputed as $1 / (\text{BoundsMax} - \text{BoundsMin})$ to facilitate UVW coordinate conversion [S1, unofficial].
++*   **`_GsplatVolumeBoundsMin/Max`:** `float4` vectors defining the AABB in local space.
++*   **`_GsplatVolumeBoundsInvSize`:** `float4` containing the inverse dimensions of the volume bounds ($1 / (\text{Max} - \text{Min})$) [S1, unofficial].
++*   **`_GsplatVolumeOcclusionParams`:** `float4` packing `(optical_depth_scale, sample_steps, start_distance, unused)` [S1, unofficial].
++*   **`_GsplatVolumeLightingParams`:** `float4` packing `(unused, ambient_multiplier, direct_multiplier, unused)` [S1, unofficial].
++*   **Light Structure (per light):**
++    *   `position`: `float4` (w > 0.5 indicates point/spot light) [S1, unofficial].
++    *   `direction`: `float4` (xyz: direction, w: range fade parameter) [S1, unofficial].
++    *   `color`: `float3` [S1, unofficial].
++    *   `type`: `float` (< 0.5 directional, > 1.5 spot) [S1, unofficial].
++    *   `spot_params`: `float2` (cosine threshold, falloff power) [S1, unofficial].
+ 
+ ### Algorithm Steps
+ 
+-1.  **Enable Check:** If `_GsplatVolumeEnabled == 0`, return base color with no volume lighting [S1, unofficial].
+-2.  **Light Direction Transformation:** Transform the light direction to the local space of the volume using `_GsplatVolumeWorldToLocal`. Normalize the direction. If the length is $\le 10^{-6}$, return transmittance $1.0$ (no occlusion) [S1, unofficial].
+-3.  **Ray-Box Intersection:**
+-    *   Compute `directionSign` using `lerp(-1.0, 1.0, step(0.0, direction))` to handle ray direction signs [S1, unofficial].
+-    *   Clamp the ray direction magnitude to $10^{-5}$ to prevent division by zero [S1, unofficial].
+-    *   Calculate entry ($t_0$) and exit ($t_1$) distances against `BoundsMin` and `BoundsMax`.
+-    *   Compute `farDistance` as the minimum of the far plane distances along each axis.
+-    *   Return `max(0.0, min(farDistance.x, min(farDistance.y, farDistance.z)))` as the maximum ray length within the volume [S1, unofficial].
+-4.  **Light-Specific Ray Clamping:**
+-    *   For point lights (`lightPosition.w > 0.5`), clamp the ray length to the Euclidean distance from the splat's local center to the light position [S1, unofficial].
+-    *   Calculate `usableLength = rayLength - startDistance`. If `usableLength <= 10^{-5}`, return transmittance $1.0$ [S1, unofficial].
+-5.  **March Setup:**
+-    *   Determine `sampleCount = clamp((int)round(_GsplatVolumeOcclusionParams.y), 1, 24)` [S1, unofficial].
+-    *   Compute `stepLength = usableLength / sampleCount` [S1, unofficial].
+-    *   Initialize UVW coordinates at the midpoint of the first step:
+-        $$ \text{uvw} = (\text{localCenter} + \text{localDirection} \cdot (\text{startDistance} + 0.5 \cdot \text{stepLength}) - \text{boundsMin}) \cdot \text{invSize} $$
+-    *   Compute step delta: $\text{uvwStep} = \text{localDirection} \cdot \text{stepLength} \cdot \text{invSize}$ [S1, unofficial].
+-6.  **Volume Transmittance Calculation:**
+-    *   Initialize `opticalDepth = 0.0` [S1, unofficial].
+-    *   Loop up to `sampleCount` times:
+-        *   If `sampleIndex >= sampleCount` or `opticalDepth >= GSPLAT_VOLUME_OPAQUE_DEPTH`, break [S1, unofficial].
+-        *   If `uvw` is outside $[0, 1]$ bounds, skip sample [S1, unofficial].
+-        *   Sample the R8 channel of `_GsplatVolumeDensity` at `uvw`. Let $d_i$ be the sampled value [S1, unofficial].
+-        *   Add $d_i^2$ to `opticalDepth` [S1, unofficial].
+-        *   Advance `uvw += uvwStep` [S1, unofficial].
+-    *   Compute transmittance:
+-        $$ T = \exp(-\text{strength} \cdot \text{opticalDepth}) $$
+-        where `strength` is `_GsplatVolumeOcclusionParams.x` [S1, unofficial].
+-7.  **Per-Splat Lighting Evaluation:**
+-    *   Transform splat center to world space. Transform and normalize the normal. If $\text{dot}(\text{worldNormal}, \text{viewDirection}) < 0.0$, flip the normal [S1, unofficial].
+-    *   Compute ambient:
+-        $$ \text{ambient} = \text{_GsplatVolumeAmbientColor.rgb} \cdot \text{_GsplatVolumeLightingParams.y} $$
+-    *   Initialize `direct = 0.0` [S1, unofficial].
+-    *   For each light (max 4):
+-        *   Compute vector to light (`toLight`) and distance squared [S1, unofficial].
+-        *   Compute attenuation:
+-            *   For directional lights (`lightType < 0.5`): `attenuation = 1.0` [S1, unofficial].
+-            *   For point/spot lights:
+-                $$ \text{normalizedDistanceSquared} = \text{distanceSquared} \cdot \text{lightDirection.w} $$
+-                $$ \text{rangeFade} = \text{saturate}(1.0 - \text{normalizedDistanceSquared}^2) $$
+-                $$ \text{attenuation} = \frac{\text{rangeFade}^2}{\text{distanceSquared}} $$
+-        *   If spot light (`lightType > 1.5`):
+-            $$ \text{spotCosine} = \text{dot}(\text{lightDirection.xyz}, -\text{toLight}) $$
+-            $$ \text{spot} = \text{saturate}((\text{spotCosine} - \text{spotParams.x}) \cdot \text{spotParams.y}) $$
+-            $$ \text{attenuation} *= \text{spot}^2 $$
+-        *   Compute visibility using the transmittance $T$ calculated in step 6 [S1, unofficial].
+-        *   Add to direct:
+-            $$ \text{direct} += \text{_GsplatVolumeLightColors[lightIndex].rgb} \cdot (\text{irradiance} \cdot T) $$
+-        *   If `irradiance <= 0.0`, skip transmittance calculation for this light to save compute [S1, unofficial].
+-    *   Scale direct lighting by `_GsplatVolumeLightingParams.z` [S1, unofficial].
+-    *   Return $\max(\text{ambient} + \text{direct}, 0.0)$ [S1, unofficial].
++1.  **Enable Check:** If `_GsplatVolumeEnabled == 0`, return 1.0 (no volume lighting) [S1, unofficial].
++
++2.  **Light Loop:** Initialize `direct = 0.0` and `ambient` [S1, unofficial].
++    *   Compute `ambient = _GsplatVolumeAmbientColor.rgb * _GsplatVolumeLightingParams.y` [S1, unofficial].
++
++3.  **For each light (max 4):**
++    *   **Transform Light Direction:** Transform light direction to local space using `_GsplatVolumeWorldToLocal`. Normalize it. If length $\le 10^{-6}$, skip this light [S1, unofficial].
++    *   **Compute Visibility (Ray Marching):**
++        *   Calculate ray-box exit distance. Compute `directionSign` via `lerp(-1.0, 1.0, step(0.0, direction))`. Clamp direction magnitude to $10^{-5}$ to prevent division by zero. Compute $t_0/t_1$ against `boundsMin`/`boundsMax`. Return `max(0.0, min(farDistance.x, min(farDistance.y, farDistance.z)))` [S1, unofficial].
++        *   If point light (`lightPosition.w > 0.5`), clamp ray length to Euclidean distance from `localCenter` to light position [S1, unofficial].
++        *   Calculate `usableLength = rayLength - startDistance`. If `usableLength <= 10^{-5}`, set `transmittance = 1.0` [S1, unofficial].
++        *   Determine `sampleCount = clamp((int)round(_GsplatVolumeOcclusionParams.y), 1, 24)`. Compute `stepLength = usableLength / sampleCount` [S1, unofficial].
++        *   Initialize UVW coordinates at midpoint of first step: `uvw = (localCenter + localDirection * (startDistance + 0.5 * stepLength) - boundsMin) * invSize`. Compute step delta: `uvwStep = localDirection * stepLength * invSize` [S1, unofficial].
++        *   Initialize `opticalDepth = 0.0`.
++        *   **Loop** up to `sampleCount` samples:
++            *   If `sampleIndex >= sampleCount` or `accumulated opticalDepth >= GSPLAT_VOLUME_OPAQUE_DEPTH`, break [S1, unofficial].
++            *   If `uvw` outside $[0,1]$ bounds, skip sample [S1, unofficial].
++            *   Sample R8 channel $d_i$. Square it ($d_i^2$) and add to `opticalDepth`. Advance `uvw += uvwStep` [S1, unofficial].
++        *   Compute Transmittance: $T = \exp(-\text{strength} \cdot \text{opticalDepth})$, where `strength` is `_GsplatVolumeOcclusionParams.x` and `GSPLAT_VOLUME_OPAQUE_DEPTH = 8.0` [S1, unofficial].
++    *   **Compute Irradiance:**
++        *   Compute vector `toLight` and distance.
++        *   **Attenuation:**
++            *   If directional light (`lightType < 0.5`), `attenuation = 1.0` [S1, unofficial].
++            *   If point/spot light, compute `distanceSquared`. Compute `normalizedDistanceSquared = distanceSquared * lightDirection.w`. Compute `rangeFade = saturate(1.0 - normalizedDistanceSquared^2)`. `attenuation = rangeFade^2 / distanceSquared` [S1, unofficial].
++        *   **Spot Cone:** If `lightType > 1.5`, compute `spotCosine = dot(lightDirection.xyz, -toLight)`. Compute `spot = saturate((spotCosine - spotParams.x) * spotParams.y)`. `attenuation *= spot^2` [S1, unofficial].
++        *   **Visibility Application:** `visibility = T`. Add to direct: `direct += _GsplatVolumeLightColors[lightIndex].rgb * (irradiance * visibility)` [S1, unofficial].
++    *   **Pitfall Guard:** If `irradiance <= 0.0`, skip transmittance calculation for this light to avoid expensive marches [S1, unofficial].
++
++4.  **Final Compositing:**
++    *   Scale direct lighting: `direct *= _GsplatVolumeLightingParams.z` [S1, unofficial].
++    *   Return `max(ambient + direct, 0.0)` [S1, unofficial].
+ 
+ ### Pseudocode
+ 
+ ```python
+-def gsplat_volume_lighting(splat, lights, volume_params, volume_texture, bounds_min, bounds_max, bounds_inv_size):
+-    if not volume_params.enabled:
+-        return splat.base_color
+-
+-    # 1. Light Direction in Local Space
+-    local_light_dir = world_to_local(splat.light_direction)
+-    local_light_dir = normalize(local_light_dir)
+-    if length(local_light_dir) <= 1e-6:
+-        return splat.base_color * 1.0 # No occlusion
+-
+-    # 2. Ray-Box Intersection
+-    direction_sign = lerp(-1.0, 1.0, step(0.0, local_light_dir))
+-    local_light_dir = clamp(local_light_dir, 1e-5, 1e5) # Prevent div by zero
+-    
+-    t0 = (bounds_min - splat.local_center) / local_light_dir
+-    t1 = (bounds_max - splat.local_center) / local_light_dir
+-    
+-    t_enter = max(min(t0), min(t1)) # Simplified logic based on source description
+-    t_exit = min(max(t0), max(t1))
+-    
+-    ray_length = max(0.0, min(t_exit.x, min(t_exit.y, t_exit.z)))
+-    
+-    # 3. Light-Specific Clamping
+-    if splat.light_type == POINT_LIGHT:
+-        dist_to_light = length(splat.light_position - splat.world_center)
+-        ray_length = min(ray_length, dist_to_light)
+-        
+-    usable_length = ray_length - volume_params.start_distance
+-    if usable_length <= 1e-5:
+-        return splat.base_color * 1.0
+-
+-    # 4. March Setup
+-    sample_count = clamp(round(volume_params.sample_steps), 1, 24)
+-    step_length = usable_length / sample_count
+-    
+-    uvw = (splat.local_center + local_light_dir * (volume_params.start_distance + 0.5 * step_length) - bounds_min) * bounds_inv_size
+-    uvw_step = local_light_dir * step_length * bounds_inv_size
+-    
+-    optical_depth = 0.0
+-    
+-    # 5. Volume Transmittance
+-    for i in range(sample_count):
+-        if optical_depth >= 8.0: # GSPLAT_VOLUME_OPAQUE_DEPTH
+-            break
+-        if not (0.0 <= uvw.x <= 1.0 and 0.0 <= uvw.y <= 1.0 and 0.0 <= uvw.z <= 1.0):
+-            uvw += uvw_step
++def gsplat_volume_lighting(splat_center, splat_normal, view_direction, 
++                           light_positions, light_directions, light_colors, light_types,
++                           light_spot_params, light_range_params,
++                           volume_density_texture, volume_bounds_min, volume_bounds_max,
++                           volume_inv_size, occlusion_params, lighting_params, ambient_color):
++    """
++    Computes volume lighting for a single 3D Gaussian splat.
++    
++    Args:
++        splat_center: float3, center of the splat in world space.
++        splat_normal: float3, normal of the splat.
++        view_direction: float3, direction from camera to splat.
++        light_positions: list of float4, (x,y,z, w>0.5 for point/spot).
++        light_directions: list of float4, (x,y,z: dir, w: range param).
++        light_colors: list of float3, RGB colors.
++        light_types: list of float, <0.5 dir, >1.5 spot.
++        light_spot_params: list of float2, (cosine_thresh, falloff_power).
++        light_range_params: list of float, range fade params (stored in light_directions.w).
++        volume_density_texture: 3D texture sampler (R8 channel = sqrt(optical_depth)).
++        volume_bounds_min: float3, AABB min.
++        volume_bounds_max: float3, AABB max.
++        volume_inv_size: float3, 1/(bounds_max - bounds_min).
++        occlusion_params: float4, (strength, sample_count, start_dist, unused).
++        lighting_params: float4, (unused, ambient_mult, direct_mult, unused).
++        ambient_color: float3, ambient RGB.
++        
++    Returns:
++        float3, final lit color contribution.
++    """
++    if not _GsplatVolumeEnabled:
++        return float3(1.0, 1.0, 1.0)
++
++    # Transform splat center to local space for volume calculation
++    local_center = world_to_local(splat_center)
++    
++    # Transform and normalize normal, flipping if back-facing
++    world_normal = transform_normal(splat_normal)
++    view_dir = normalize(view_direction)
++    if dot(world_normal, view_dir) < 0.0:
++        world_normal = -world_normal
++
++    # Ambient lighting
++    ambient = ambient_color * lighting_params.y
++    
++    direct_lighting = float3(0.0, 0.0, 0.0)
++
++    for i in range(4): # Max 4 lights
++        light_pos = light_positions[i]
++        light_dir_vec = light_directions[i]
++        light_type = light_types[i]
++        
++        # Transform light direction to local space
++        local_light_dir = normalize(world_to_local_direction(light_dir_vec.xyz))
++        if length(local_light_dir) <= 1e-6:
+             continue
+-            
+-        d = sample_r8(volume_texture, uvw)
+-        optical_depth += d * d
+-        uvw += uvw_step
+-        
+-    transmittance = exp(-volume_params.optical_depth_scale * optical_depth)
+-
+-    # 6. Lighting Evaluation
+-    world_normal = normalize(transform_normal(splat.normal))
+-    if dot(world_normal, splat.view_direction) < 0.0:
+-        world_normal = -world_normal
+-        
+-    ambient = volume_params.ambient_color * volume_params.ambient_intensity
+-    
+-    direct = 0.0
+-    for light in lights:
+-        to_light = light.position - splat.world_center
++
++        # Compute ray length to light or infinity
++        ray_length = compute_ray_box_exit(local_center, local_light_dir, 
++                                          volume_bounds_min, volume_bounds_max)
++        
++        # Clamp for point lights
++        if light_pos.w > 0.5:
++            dist_to_light = length(local_center - world_to_local(light_pos.xyz))
++            ray_length = min(ray_length, dist_to_light)
++
++        usable_length = ray_length - occlusion_params.z
++        if usable_length <= 1e-5:
++            transmittance = 1.0
++        else:
++            # Ray marching for occlusion
++            sample_count = clamp(round(occlusion_params.y), 1, 24)
++            step_length = usable_length / sample_count
++            strength = occlusion_params.x
++            
++            # Initialize UVW at midpoint of first step
++            uvw = (local_center + local_light_dir * (occlusion_params.z + 0.5 * step_length) - volume_bounds_min) * volume_inv_size
++            uvw_step = local_light_dir * step_length * volume_inv_size
++            
++            optical_depth = 0.0
++            for s in range(sample_count):
++                if optical_depth >= 8.0 / strength: # GSPLAT_VOLUME_OPAQUE_DEPTH
++                    break
++                if uvw.x < 0.0 or uvw.x > 1.0 or uvw.y < 0.0 or uvw.y > 1.0 or uvw.z < 0.0 or uvw.z > 1.0:
++                    uvw += uvw_step
++                    continue
++                
++                # Sample R8 channel
++                d = sample_r8(volume_density_texture, uvw)
++                optical_depth += d * d
++                uvw += uvw_step
++            
++            transmittance = exp(-strength * optical_depth)
++
++        # Compute irradiance and attenuation
++        to_light = light_pos.xyz - splat_center
+         dist_sq = dot(to_light, to_light)
+         
+-        # Attenuation
+-        if light.type == DIRECTIONAL:
++        if light_type < 0.5: # Directional
+             attenuation = 1.0
+-        else:
+-            norm_dist_sq = dist_sq * light.direction_w
+-            range_fade = saturate(1.0 - norm_dist_sq * norm_dist_sq)
++            irradiance = 1.0 # Assume uniform
++        else: # Point/Spot
++            normalized_dist_sq = dist_sq * light_dir_vec.w
++            range_fade = saturate(1.0 - normalized_dist_sq * normalized_dist_sq)
+             attenuation = (range_fade * range_fade) / dist_sq
+-            
+-        # Spot Falloff
+-        if light.type == SPOT:
+-            spot_cos = dot(light.direction, -normalize(to_light))
+-            spot = saturate((spot_cos - light.spot_inner) * light.spot_outer)
+-            attenuation *= spot * spot
+-            
+-        irradiance = light.color * attenuation
++            irradiance = attenuation # Simplified, usually includes light intensity
++            
++            # Spot cone
++            if light_type > 1.5:
++                spot_cosine = dot(light_dir_vec.xyz, -normalize(to_light))
++                spot = saturate((spot_cosine - light_spot_params[i].x) * light_spot_params[i].y)
++                attenuation *= spot * spot
++                irradiance = attenuation
++
++        # Skip if no light contribution
+         if irradiance <= 0.0:
+             continue
+-            
+-        direct += irradiance * transmittance
+-        
+-    direct *= volume_params.direct_intensity
+-    return max(ambient + direct, 0.0)
++
++        # Apply visibility
++        visibility = transmittance
++        direct_lighting += light_colors[i] * (irradiance * visibility)
++
++    # Scale and combine
++    direct_lighting *= lighting_params.z
++    final_color = max(ambient + direct_lighting, 0.0)
++    
++    return final_color
++
++def compute_ray_box_exit(origin, direction, bounds_min, bounds_max):
++    """
++    Computes the exit distance of a ray from an AABB.
++    """
++    # Clamp direction to prevent division by zero
++    dir = clamp(direction, -1e5, 1e5) # Or specific logic from source
++    # Source uses: directionSign via lerp(-1.0, 1.0, step(0.0, direction))
++    # And clamps magnitude to 1e-5
++    
++    # Standard slab method
++    t0 = (bounds_min - origin) / direction
++    t1 = (bounds_max - origin) / direction
++    
++    t_enter = max(min(t0.x, t1.x), min(t0.y, t1.y), min(t0.z, t1.z))
++    t_exit = min(max(t0.x, t1.x), max(t0.y, t1.y), max(t0.z, t1.z))
++    
++    # Return max(0.0, t_exit) assuming ray starts inside or we want exit point
++    # Source says: return max(0.0, min(farDistance.x, min(farDistance.y, farDistance.z)))
++    # This implies farDistance is the exit vector.
++    
++    return max(0.0, t_exit)
+ ```
+ 
+ ### Parameters and Typical Values
+-*   **Sample Steps (`_GsplatVolumeOcclusionParams.y`):** Clamped between 1 and 24. Higher values increase accuracy but reduce performance. Typical value: 8–16 [S1, unofficial].
+-*   **Optical Depth Scale (`_GsplatVolumeOcclusionParams.x`):** Controls the sensitivity of the density texture. A value of 0 disables volume lighting [S1, unofficial].
+-*   **Opaque Depth Threshold:** Constant `8.0`. Transmittance below $\exp(-8) \approx 3.35 \times 10^{-4}$ is considered fully opaque [S1, unofficial].
+-*   **Direction Clamp:** $10^{-5}$ to prevent division by zero during ray-box intersection [S1, unofficial].
++*   **Sample Steps (`_GsplatVolumeOcclusionParams.y`):** Clamped between 1 and 24. Typical value not specified, but higher values increase accuracy at cost of performance [S1, unofficial].
++*   **Optical Depth Scale (`_GsplatVolumeOcclusionParams.x`):** Controls density strength. 0 disables occlusion [S1, unofficial].
++*   **Opaque Depth Threshold:** Constant `8.0`. Transmittance below $\exp(-8)$ is treated as fully opaque [S1, unofficial].
+ 
+ ### Edge Cases and Pitfalls
+ *   **Division by Zero:** Ray-box intersection fails if ray direction is zero. Mitigated by clamping direction magnitude to $10^{-5}$ [S1, unofficial].
+-*   **Performance:** Over-marching into fully opaque regions wastes compute. Mitigated by early exit when `opticalDepth >= 8.0` [S1, unofficial].
+-*   **Back-Facing Lights:** Lights behind the splat or out of range can trigger expensive shadow marches. Mitigated by skipping transmittance calculation when `irradiance <= 0.0` [S1, unofficial].
+-*   **Precision:** The R8 texture format stores $\sqrt{\text{normalized optical depth}}$. Squaring the sampled value recovers the optical depth contribution. Precision loss in R8 may affect subtle shadow gradients [S1, unofficial].
++*   **Over-marching:** Marching into fully opaque regions wastes compute. Mitigated by early exit when `opticalDepth >= GSPLAT_VOLUME_OPAQUE_DEPTH / strength` [S1, unofficial].
++*   **Back-facing Lights:** Lights behind the splat or out of range can trigger expensive shadow marches. Mitigated by skipping transmittance calculation when `irradiance <= 0.0` [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N \cdot L \cdot S)$, where $N$ is the number of splats, $L$ is the number of lights (max 4), and $S$ is the number of samples per light (max 24). The constant factor is small due to early exits and fixed sample counts.
+-*   **Memory Complexity:** $O(V)$ for the 3D density texture, where $V$ is the volume resolution. The texture is typically small (e.g., 64x64x64) to fit in cache.
+-*   **Performance:** The method adds a per-splat cost proportional to the number of lights and samples. It is most expensive when splats are in dense volumetric regions or when many lights are active. Early exit on opaque regions helps maintain performance in shadowed areas [S1, unofficial].
+-*   **Strengths:** Provides physically plausible volumetric shadows and occlusion for 3DGS. Integrates seamlessly with Unity's lighting pipeline. Supports multiple light types (directional, point, spot) [S1, unofficial].
+-*   **Limitations:** Limited to 4 lights. Fixed sample count may not adapt to varying density gradients. R8 texture precision limits shadow smoothness. Requires a 3D density texture to be authored or generated [S1, unofficial].
+-*   **When to Use:** Indoor scenes, complex outdoor environments with volumetric fog or occlusion, or when splats need to interact with volumetric geometry. Not suitable for simple outdoor scenes with only directional sunlight where performance is critical [S1, unofficial].
++
++### Time and Memory Complexity
++*   **Time Complexity:** $O(N \cdot S)$, where $N$ is the number of lights (max 4) and $S$ is the number of samples per ray (max 24). The ray-box intersection is $O(1)$ [S1, unofficial].
++*   **Memory Complexity:** $O(V)$, where $V$ is the size of the 3D density texture. The texture is typically R8, so memory usage is $1 \text{ byte} \times \text{width} \times \text{height} \times \text{depth}$ [S1, unofficial].
++
++### Measured Performance
++*   Specific performance metrics (FPS, memory usage) are not provided in the sources [S1, unofficial].
++*   The method is implemented in UnitySplats for Unity 6, supporting GPU and CPU sorting paths [S1, unofficial].
++
++### Strengths and Limitations
++*   **Strengths:** Provides physically plausible volumetric occlusion and lighting for 3DGS. Integrates with standard Unity lighting pipelines (Built-in, URP, HDRP) [S1, unofficial].
++*   **Limitations:** Limited to 4 lights. Performance scales with sample count and texture resolution. Requires a 3D density texture to be authored or generated [S1, unofficial].
++
++### When to Use
++*   Use when volumetric shadows and occlusion are required for 3DGS content in a Unity environment [S1, unofficial].
++*   Not suitable for real-time applications with very high sample counts or large volumes due to ray-marching cost [S1, unofficial].
+ 
+ ## Background
+-GsplatVolumeLighting is part of the UnitySplats package, an unofficial but widely used extension for rendering 3D Gaussian Splatting in Unity 6 [S1, unofficial]. It was developed to address the lack of volumetric lighting and shadowing in standard 3DGS renderers, which typically rely on environment maps or simple ambient occlusion [S1, unofficial]. The method is based on ray-marching through a 3D density texture, a technique common in volumetric rendering, adapted for the splat-based representation of 3DGS [S1, unofficial]. It is used in the UnitySplats package for volume occlusion and lighting of 3D Gaussian Splatting content in Unity 6 [S1, unofficial].
++
++### Origin and History
++*   GsplatVolumeLighting is part of the **UnitySplats** package, a cross-platform Unity 6 package for rendering 3D Gaussian Splatting content [S1, unofficial].
++*   UnitySplats is a modified and substantially extended fork of `wuyize25/gsplat-unity` [S1, unofficial].
++*   The method was developed to support volume occlusion and lighting for 3DGS in Unity, addressing the lack of native volumetric lighting in standard 3DGS renderers [S1, unofficial].
++
++### Usage
++*   Used in the **UnitySplats** package for rendering 3DGS content in Unity 6 [S1, unofficial].
++*   Supports Built-in Render Pipeline, URP, and HDRP [S1, unofficial].
+ 
+ ## Sources
++
+ [S1] UnitySplats, https://github.com/arloopa/UnitySplats, fetched 2026-10-27 (unofficial)

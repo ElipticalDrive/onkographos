@@ -1,0 +1,238 @@
+# Spherical Coordinate GPU Ray Casting with 3D Textures
+
+Also called: Ray casting in spherical coordinates, Single-pass spherical volume rendering
+
+## Overview
+This method renders volumetric data distributed in spherical coordinates by stepping along decreasing spherical shells (constant radius intervals) rather than fixed Cartesian increments [S1, unofficial]. It solves the problem of rendering spherical volumes, such as atmospheric scattering or celestial bodies, by converting Cartesian ray-sphere intersection points directly into texture coordinates for a 3D texture [S1, unofficial]. Unlike Cartesian ray casting, this approach avoids interpolation artifacts in spherical domains but requires a ray-sphere intersection test per shell [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A 3D texture `vol_txr` containing voxel intensities, vertex position `pos` in clip space $[-1, 1]$, and uniform parameters: `aspect` (aspect ratio), `focal_length` (distance from focal point to znear), `zoom` (frustum scaling), `tm_eye` (view matrix), `vol_xs`, `vol_ys`, `vol_zs` (texture resolutions), and `saturation` (intensity threshold).
+*   **Outputs:** A fragment color `frag_col`.
+
+**Data Structures:**
+*   **3D Texture (`vol_txr`):**
+    *   Format: `GL_R16F` (16-bit floating point, single channel) [S1, unofficial].
+    *   Dimensions: $(vol\_xs, vol\_ys, vol\_zs)$ [S1, unofficial].
+    *   Axis Order: The texture axes are mapped as $(s, t, p) = (\text{latitude}, \text{radius}, \text{longitude})$ [S1, unofficial]. Specifically, $s$ corresponds to latitude $\theta$, $t$ to radius $r$, and $p$ to longitude $\phi$ [S1, unofficial].
+    *   Wrapping: `GL_CLAMP_TO_EDGE` on all axes [S1, unofficial].
+    *   Filtering: `GL_NEAREST` [S1, unofficial].
+
+**Parameters:**
+*   `aspect`: Aspect ratio of the view. Typical value: 1.0 [S1, unofficial].
+*   `focal_length`: Distance from focal point to znear plane. Typical value: 1.0 [S1, unofficial].
+*   `zoom`: Scaling factor for the view frustum. Typical value: 1.0 [S1, unofficial].
+*   `saturation`: Threshold value for voxel intensity to stop ray tracing. Typical value: 1000.0 [S1, unofficial].
+*   `dr`: Step size for radius, calculated as $1.0 / vol\_ys$ [S1, unofficial].
+
+**Algorithm Steps:**
+
+1.  **Vertex Shader: Ray Generation**
+    For each vertex with clip-space position `pos` $(pos.x, pos.y)$:
+    1.  Compute the eye-space position $p$:
+        $$ p = tm\_eye \times \begin{bmatrix} pos.x / (zoom \times aspect) \\ pos.y / zoom \\ 0.0 \\ 1.0 \end{bmatrix} $$
+    2.  Set ray start position $ray\_pos = p.xyz$.
+    3.  Compute ray direction $ray\_dir$:
+        $$ ray\_dir = \text{normalize}(p.xyz - tm\_eye \times \begin{bmatrix} 0.0 \\ 0.0 \\ -focal\_length \\ 1.0 \end{bmatrix}.xyz) $$
+    4.  Pass $ray\_pos$ and $ray\_dir$ to the fragment shader.
+
+2.  **Fragment Shader: Initialization**
+    1.  Normalize the interpolated ray direction: $dp = \text{normalize}(ray\_dir)$.
+    2.  Set current radius $r = 1.0$.
+    3.  Set step size $dr = 1.0 / vol\_ys$.
+    4.  Set current color accumulator $c = 0.0$.
+
+3.  **Fragment Shader: Ray-Sphere Loop**
+    Loop while $r > 10^{-10}$, decrementing $r$ by $dr$:
+    1.  Compute inverse squared radius: $\_rr = 1.0 / (r \times r)$.
+    2.  Create ellipsoid parameter vector $rr = (\_rr, \_rr, \_rr)$. This represents the coefficients for a sphere of radius $r$ centered at the origin, where the implicit equation is $x^2/r^2 + y^2/r^2 + z^2/r^2 = 1$.
+    3.  Perform ray-sphere intersection test for ray $(p, dp)$ against the sphere defined by $rr$.
+        *   Compute coefficients for the quadratic equation $at^2 + bt + c = 0$:
+            $$ a = 2 \times (dp.x^2 \times \_rr + dp.y^2 \times \_rr + dp.z^2 \times \_rr) $$
+            $$ b = 2 \times (p.x \times dp.x \times \_rr + p.y \times dp.y \times \_rr + p.z \times dp.z \times \_rr) $$
+            $$ c = (p.x^2 \times \_rr + p.y^2 \times \_rr + p.z^2 \times \_rr) - 1.0 $$
+        *   Compute discriminant: $d = b^2 - 4ac$ (Note: The source code uses $d = b^2 - 2ac$ because the coefficients $a$ and $b$ in the source code are pre-multiplied by 2. The standard quadratic formula uses $b^2-4ac$. The source code's $a_{src} = 2a_{std}$ and $b_{src} = 2b_{std}$. Thus $b_{src}^2 - 4a_{src}c = 4b_{std}^2 - 8a_{std}c = 4(b_{std}^2 - 2a_{std}c)$. The source code computes $d = b_{src}^2 - 2a_{src}c$ which is actually $b_{src}^2 - 4a_{std}c$. Wait, let's look at the source code carefully: `d=((b*b)-(2.0*a*c));`. Here `a` and `b` are the pre-multiplied by 2 values. So `d = (2b_std)^2 - 2(2a_std)c = 4b_std^2 - 4a_std c = 4(b_std^2 - a_std c)`. This is incorrect for the standard discriminant $b^2-4ac$. However, the roots are calculated as `l0=(-b+d)/a`. Let's stick to the source code's logic for implementation:
+            $$ d = b^2 - 2ac $$
+            If $d < 0$, no intersection.
+            $$ l_0 = (-b + \sqrt{d}) / a $$
+            $$ l_1 = (-b - \sqrt{d}) / a $$
+            Sort $l_0, l_1$ such that $l_0$ is the smaller positive root. If no positive root exists, skip this shell.
+    4.  If intersection exists at distance $l_0$:
+        *   Update ray start position: $p = p + l_0 \times dp$.
+        *   Convert Cartesian position $p$ to spherical coordinates:
+            *   Longitude $\phi$: $a = \text{atan2}(p.y, p.x)$. Adjust to $[0, 2\pi]$ using custom quadrant logic (see Pitfalls).
+            *   Latitude $\theta$: $b = \arcsin(p.z / r)$.
+            *   Radius: $r$.
+        *   Normalize coordinates to texture ranges $[0, 1]$:
+            *   If $a < 0$, $a = a + 2\pi$.
+            *   Adjust latitude: $b = b + \pi/2$.
+            *   Texture coordinates: $s = a / 2\pi$, $t = r$, $p = b / \pi$.
+            *   Note: The source code comment states axis order is latitude, radius, longitude. So texture lookup is `texture(vol_txr, vec3(s, t, p))`.
+        *   Fetch voxel intensity: $c_{voxel} = \text{texture}(vol\_txr, (s, t, p)).r$.
+        *   Check saturation: If $c_{voxel} > saturation$, clamp $c_{voxel} = saturation$ and break the loop.
+        *   Otherwise, continue to the next smaller radius.
+
+4.  **Fragment Shader: Output**
+    1.  Normalize final color: $c = c_{voxel} / saturation$.
+    2.  Output color: $frag\_col = (c, c, c, 1.0)$.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Vertex Shader
+def vertex_shader(pos_clip, tm_eye, focal_length, zoom, aspect):
+    # pos_clip is (pos.x, pos.y) in [-1, 1]
+    # Compute eye-space position
+    p_eye = tm_eye * vec4(pos_clip.x / (zoom * aspect), pos_clip.y / zoom, 0.0, 1.0)
+    ray_pos = p_eye.xyz
+    
+    # Compute ray direction
+    focal_point_eye = tm_eye * vec4(0.0, 0.0, -focal_length, 1.0)
+    ray_dir = normalize(p_eye.xyz - focal_point_eye.xyz)
+    
+    return ray_pos, ray_dir
+
+# Fragment Shader Helpers
+def atanxy(x, y):
+    """Custom atan2 returning values in [0, 2*pi]"""
+    pi = 3.14159265358979323846
+    pi2 = 2.0 * pi
+    zero = 1.0e-30
+    
+    sx = 0
+    if x < -zero: sx = -1
+    if x > zero: sx = 1
+    
+    sy = 0
+    if y < -zero: sy = -1
+    if y > zero: sy = 1
+    
+    if sx == 0 and sy == 0: return 0.0
+    if sx == 0 and sy > 0: return 0.5 * pi
+    if sx == 0 and sy < 0: return 1.5 * pi
+    if sy == 0 and sx > 0: return 0.0
+    if sy == 0 and sx < 0: return pi
+    
+    a = abs(y / x)
+    a = atan(a)
+    
+    if x > 0 and y > 0: pass
+    elif x < 0 and y > 0: a = pi - a
+    elif x < 0 and y < 0: a = pi + a
+    elif x > 0 and y < 0: a = pi2 - a
+    
+    return a
+
+def ray_sphere_intersect(p0, dp, r):
+    """
+    Returns (hit, l0) where hit is boolean and l0 is the distance to the first intersection.
+    Ray: p = p0 + t * dp
+    Sphere: x^2/r^2 + y^2/r^2 + z^2/r^2 = 1
+    """
+    rr = 1.0 / (r * r)
+    
+    # Coefficients for quadratic equation at^2 + bt + c = 0
+    # Note: Source code uses pre-multiplied a and b by 2, and discriminant b^2 - 2ac
+    # Standard: a_std = dp^2 * rr, b_std = 2 * p0 * dp * rr, c_std = p0^2 * rr - 1
+    # Source: a_src = 2 * a_std, b_src = 2 * b_std, c_src = c_std
+    # Source Discriminant: d = b_src^2 - 2 * a_src * c_src
+    # This is mathematically inconsistent with standard quadratic formula if interpreted strictly,
+    # but we follow the source code's implementation exactly.
+    
+    a_src = 2.0 * (dp.x**2 * rr + dp.y**2 * rr + dp.z**2 * rr)
+    b_src = 2.0 * (p0.x * dp.x * rr + p0.y * dp.y * rr + p0.z * dp.z * rr)
+    c_src = (p0.x**2 * rr + p0.y**2 * rr + p0.z**2 * rr) - 1.0
+    
+    d = b_src**2 - 2.0 * a_src * c_src
+    
+    if d < 0.0:
+        return False, 0.0
+    
+    sqrt_d = sqrt(d)
+    l0 = (-b_src + sqrt_d) / a_src
+    l1 = (-b_src - sqrt_d) / a_src
+    
+    # Sort roots
+    if abs(l0) > abs(l1):
+        l0, l1 = l1, l0
+    
+    # Find smallest positive root
+    if l0 < 0.0:
+        if l1 < 0.0:
+            return False, 0.0
+        l0 = l1
+    
+    return True, l0
+
+def fragment_shader(ray_pos, ray_dir, vol_txr, vol_ys, saturation):
+    dp = normalize(ray_dir)
+    p = ray_pos
+    r = 1.0
+    dr = 1.0 / vol_ys
+    c_voxel = 0.0
+    
+    while r > 1e-10:
+        _rr = 1.0 / (r * r)
+        rr = vec3(_rr, _rr, _rr)
+        
+        hit, l0 = ray_sphere_intersect(p, dp, r)
+        
+        if hit:
+            p = p + l0 * dp
+            
+            # Convert to spherical coordinates
+            # Longitude
+            a = atanxy(p.x, p.y)
+            # Latitude
+            b = asin(p.z / r)
+            
+            # Normalize to [0, 1] for texture
+            if a < 0.0:
+                a += 2.0 * 3.14159265358979323846
+            
+            b += 0.5 * 3.14159265358979323846
+            
+            s = a / (2.0 * 3.14159265358979323846)
+            t = r
+            p_tex = b / 3.14159265358979323846
+            
+            # Fetch from texture (axis order: latitude, radius, longitude)
+            c_voxel = texture(vol_txr, vec3(s, t, p_tex)).r
+            
+            if c_voxel > saturation:
+                c_voxel = saturation
+                break
+        
+        r -= dr
+    
+    c_final = c_voxel / saturation
+    return vec4(c_final, c_final, c_final, 1.0)
+```
+
+## Subtopics
+
+### Spherical Ray Casting
+The parent method that defines the general approach of casting rays in spherical coordinates. This method is a specific GPU implementation using 3D textures. [Spherical Ray Casting](14104-spherical-ray-casting.md)
+
+### Spherical Lens Projection
+A sibling method that handles projection onto a spherical lens, potentially used for different camera models. [Spherical Lens Projection](18274-spherical-lens-projection.md)
+
+### Spherical Light Grid for Shadows
+A sibling method for computing shadows using spherical light grids, distinct from the volume rendering focus of this method. [Spherical Light Grid for Shadows](19872-spherical-light-grid-for-shadows.md)
+
+## Operating characteristics
+*   **Time Complexity**: The loop runs $vol\_ys$ times (once per radius shell). Each iteration involves a ray-sphere intersection test and a texture fetch. Complexity is $O(vol\_ys)$ per fragment.
+*   **Memory Complexity**: Dominated by the 3D texture storage, $O(vol\_xs \times vol\_ys \times vol\_zs)$.
+*   **Performance**: The method is efficient for spherical volumes as it avoids complex ray marching through empty space. However, the ray-sphere intersection test per shell adds computational overhead compared to simple linear stepping in Cartesian coordinates for non-spherical volumes.
+*   **Strengths**: Avoids interpolation artifacts in spherical domains; simple implementation for spherical volumes; single-pass rendering.
+*   **Limitations**: Only suitable for spherical volumes; requires ray-sphere intersection tests; precision issues may arise near the origin or with very small radii; assumes uniform radial sampling.
+*   **When to use**: Rendering atmospheric scattering, celestial bodies, or any data naturally distributed in spherical coordinates.
+*   **When not to use**: Rendering Cartesian volumes or non-spherical domains.
+
+## Background
+This method originates from a Stack Overflow answer by an unofficial source, describing a single-pass GPU ray casting technique using 3D textures in spherical coordinates [S1, unofficial]. It is used for rendering spherical volumes where the data is naturally stored in spherical coordinates.
+
+## Sources
+[S1] GPU ray casting (single pass) with 3d textures in spherical coordinates, https://www.stackoverflow.com/questions/55528378, fetched 2026-10-28 (unofficial)

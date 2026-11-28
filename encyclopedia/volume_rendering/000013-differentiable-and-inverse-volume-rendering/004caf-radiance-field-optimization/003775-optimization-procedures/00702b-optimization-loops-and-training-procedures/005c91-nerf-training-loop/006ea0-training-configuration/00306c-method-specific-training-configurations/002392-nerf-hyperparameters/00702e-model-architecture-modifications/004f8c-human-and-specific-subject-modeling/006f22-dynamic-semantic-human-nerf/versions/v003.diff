@@ -1,0 +1,290 @@
+--- v002.md
++++ v003.md
+@@ -4,47 +4,42 @@
+ 
+ ## Overview
+-Dynamic Semantic Human NeRF extends static radiance field optimization to model dynamic human motion by learning a continuous function $G_\omega$ that maps geometry and appearance variations across frames [S1, unofficial]. It differs from sibling methods by conditioning the neural radiance field on semantically meaningful latent codes from the imGHUM model (shape $\beta$, pose $\theta$, and root transformation $T$), enabling interpolation to novel poses and shapes rather than relying solely on temporal interpolation or explicit mesh tracking [S1, unofficial].
++Dynamic Semantic Human NeRF extends the NeRF framework to model dynamic human motion by learning a consistent continuous function for geometry and appearance variations across frames [S1, unofficial]. It solves the problem of rendering humans in motion by warping observations into a canonical reference frame using the imGHUM prior, allowing a single radiance field to represent articulated human bodies [S1, unofficial]. It differs from static human NeRF variants by conditioning the network on semantic latent codes (shape $\beta$, pose $\theta$, and root transformation $T$) to generalize to novel poses and shapes, and by using a residual Signed Distance Field (SDF) to capture fine-grained details like clothing deformation [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Multi-view video sequences of a human subject; pre-computed imGHUM latent codes $(\beta, \theta, T)$ for each frame; camera poses.
+-*   **Outputs:** A canonical NeRF function $F_\omega$ and residual SDF function $\Delta H_\omega$ that can render novel views and novel poses/shapes.
++*   **Inputs:** 2D image observations with camera parameters; semantic latent codes for shape $\beta$, pose $\theta$, and root transformation $T$ derived from imGHUM fitting; viewing direction $\mathbf{v}$.
++*   **Outputs:** Volume density $\sigma$, view-dependent color $\mathbf{c}$, and residual SDF value $\Delta d$.
+ 
+ **Data Structures:**
+-*   **imGHUM Latent Codes:**
+-    *   $\beta \in \mathbb{R}^{10}$: Shape parameters.
+-    *   $\theta \in \mathbb{R}^{72}$: Pose parameters (SMPL joint rotations).
+-    *   $T \in \mathbb{R}^{4 \times 4}$: Root transformation matrix (position and orientation of the human root relative to the scene).
+-*   **Canonical Point Descriptor:** A 4D vector $(s, d)$ where $s$ is semantic information and $d$ is signed distance, derived from imGHUM.
+-*   **Bounding Box $\mathcal{B}$:** A 3D box enclosing the human subject.
++*   **Canonical Point Descriptor:** A 4D vector $(s, d)$, where $s$ is the semantic label and $d$ is the signed distance to the body surface [S1, unofficial].
++*   **Bounding Box $\mathcal{B}$:** A 3D axis-aligned bounding box enclosing the human subject. Points outside $\mathcal{B}$ are treated as static background [S1, unofficial].
+ 
+ **Method Steps:**
+ 
+-1.  **Warping to Canonical Space:**
+-    For a spatial point $\mathbf{x}$ in a source frame, determine if it lies within the human bounding box $\mathcal{B}$.
+-    *   If $\mathbf{x} \notin \mathcal{B}$: Treat as background. No warping is applied; the point is processed by a standard static background NeRF or handled separately [S1, unofficial].
+-    *   If $\mathbf{x} \in \mathcal{B}$: Apply the imGHUM warping function $H_\omega$. First, transform $\mathbf{x}$ into the canonical frame using the inverse root transformation $T^{-1}$. Then, map the transformed point to the canonical descriptor $(s, d)$ using the pose $\theta$ and shape $\beta$:
+-        $$ (d, s) = H_\omega(T^{-1}\mathbf{x}, \beta, \theta) $$
+-        Two points $\mathbf{x}$ and $\mathbf{x}'$ from different frames (with codes $(\beta, \theta, T)$ and $(\beta', \theta', T')$) are in correspondence if their descriptors are identical: $(s, d|\beta, \theta, T) = (s', d'|\beta', \theta', T')$ [S1, unofficial].
++1.  **Canonical Warping via imGHUM:**
++    The pre-trained imGHUM model provides spatial correspondences. For a spatial point $\mathbf{x}$ in a specific frame defined by parameters $(\beta, \theta, T)$, apply the warping function $H_\omega$:
++    $$ (s, d) = H_\omega(T^{-1}\mathbf{x}, \beta, \theta) $$
++    Here, $T^{-1}\mathbf{x}$ transforms the point into the canonical coordinate system relative to the root. The function $H_\omega$ outputs the canonical point descriptor $(s, d)$ [S1, unofficial].
++    *Note:* This warping is applied only to points inside the bounding box $\mathcal{B}$ to reduce computation and memory usage, as the background is invariant to human motion [S1, unofficial].
+ 
+-2.  **NeRF and Residual SDF Definition:**
+-    Define the canonical NeRF function $F_\omega$ and residual SDF function $\Delta H_\omega$ conditioned on the canonical descriptor and latent codes:
+-    *   **NeRF:** $F_\omega: (s, d, \theta, T) \rightarrow (c, \sigma)$.
+-        *   $\sigma$: Volume density (geometry).
+-        *   $c$: Color (appearance).
+-    *   **Residual SDF:** $\Delta H_\omega: (s, d, \theta) \rightarrow \Delta d$.
+-        *   $\Delta d$: Residual signed distance correction [S1, unofficial].
++2.  **NeRF Conditioning:**
++    The standard NeRF function $F_\omega$ is modified to accept the canonical descriptor $(s, d)$ and semantic codes as input:
++    $$ (\sigma, \mathbf{c}) = F_\omega(s, d, \theta, T) $$
++    *   **Geometry ($\sigma$):** Conditioned on pose $\theta$ to model fine-grained geometric variations such as clothing deformation [S1, unofficial].
++    *   **Appearance ($\mathbf{c}$):** Conditioned on pose $\theta$ and root transformation $T$. The conditioning on $T$ accounts for illumination effects due to the person's relative position and rotation with respect to the scene, without affecting geometry [S1, unofficial].
+ 
+-3.  **Conditioning Strategy:**
+-    *   **Geometry ($\sigma, \Delta d$):** Conditioned on pose code $\theta$. This captures fine-grained geometric variations such as clothing deformation and skin stretching [S1, unofficial].
+-    *   **Appearance ($c$):** Conditioned on both pose code $\theta$ and root transformation $T$. The conditioning on $T$ accounts for illumination effects caused by the relative position and rotation of the person with respect to the scene lighting, without affecting geometry [S1, unofficial].
++3.  **Residual SDF Modeling:**
++    A residual SDF function $\Delta H_\omega$ predicts the deviation from the imGHUM surface:
++    $$ \Delta d = \Delta H_\omega(s, d, \theta) $$
++    This residual captures personalized geometric details on top of the skin surface provided by imGHUM [S1, unofficial].
+ 
+-4.  **Training Objective:**
+-    Minimize rendering loss (photometric error) and a regularization loss $L_{reg}$ on the residual distance $\Delta d$. The regularization term ensures $\Delta d \le 0$, enforcing that the imGHUM surface resides within the learned geometry and that $\Delta d$ models personalized details on top of the skin surface [S1, unofficial].
++4.  **Regularization:**
++    A regularization term $L_{reg}$ is applied to constrain the residual distance $\Delta d$ to be non-positive:
++    $$ \Delta d \le 0 $$
++    This ensures that the imGHUM surface remains within the learned geometry, with $\Delta d$ modeling details on top of the skin surface [S1, unofficial].
+ 
+ 5.  **Inference and Generalization:**
+-    *   To render a novel pose or shape, assign new latent codes $(\beta_{new}, \theta_{new})$ and compute the corresponding canonical descriptors.
+-    *   To prevent overfitting to specific training poses, add Gaussian noise to the input codes $(\theta, T)$ during training [S1, unofficial].
+-    *   If training with sparse views, apply the same Gaussian noise technique to the viewing direction vector $\mathbf{v}$ conditioned in the NeRF [S1, unofficial].
++    *   **Novel Poses/Shapes:** During inference, assign different latent codes $(\beta, \theta)$ to transfer learned geometry and appearance to unseen configurations [S1, unofficial].
++    *   **Noise Injection:** Add Gaussian noise to the input codes $(\theta, T)$ to prevent overfitting to pose-dependent deformation and appearance effects [S1, unofficial]. If sparse views are available, apply the same noise technique to the viewing direction $\mathbf{v}$ conditioning [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -53,159 +48,73 @@
+ import numpy as np
+ 
+-def get_canonical_descriptor(x, beta, theta, T_inv):
++def dynamic_semantic_human_nerf_forward(x, camera_params, beta, theta, T, imghum_model, nerf_model, sdf_model, bbox):
+     """
+-    Maps a spatial point x to a canonical descriptor (s, d) using imGHUM.
+-    x: (3,) spatial point in world coordinates.
+-    beta: (10,) shape code.
+-    theta: (72,) pose code.
+-    T_inv: (4,4) inverse root transformation.
+-    Returns: s (semantic vector), d (signed distance scalar).
+-    Note: Implementation details of H_omega are provided by the pre-trained imGHUM model.
++    Forward pass for Dynamic Semantic Human NeRF.
++    
++    Args:
++        x: Spatial point (3,) in world coordinates.
++        camera_params: Camera extrinsics and intrinsics.
++        beta: Shape latent code.
++        theta: Pose latent code.
++        T: Root transformation (4x4 matrix).
++        imghum_model: Pre-trained imGHUM model (fixed).
++        nerf_model: NeRF network F_omega.
++        sdf_model: Residual SDF network Delta_H_omega.
++        bbox: Bounding box defining the human region.
++        
++    Returns:
++        sigma: Volume density.
++        c: Color.
++        delta_d: Residual SDF.
+     """
+-    # Transform point to canonical frame
+-    x_canonical = T_inv @ np.concatenate([x, [1.0]])
++    # Check if point is inside the human bounding box
++    if not is_inside_bbox(x, bbox):
++        # Background: Standard NeRF or static representation
++        # [G] Assuming a separate static background NeRF or simple color
++        return static_background_render(x, camera_params)
++
++    # 1. Canonical Warping
++    # Transform point to canonical frame relative to root
++    x_canonical = np.linalg.inv(T) @ np.append(x, 1.0)
+     x_canonical = x_canonical[:3]
+     
+-    # Apply imGHUM warping to get semantic and distance info
+-    # This is a black-box call to the pre-trained imGHUM network
+-    s, d = imghum_warp(x_canonical, beta, theta)
+-    return s, d
++    # Get semantic descriptor (s, d) from imGHUM
++    # imGHUM is pre-trained and kept fixed
++    s, d_imghum = imghum_model.get_descriptor(x_canonical, beta, theta)
++    
++    # 2. Residual SDF Prediction
++    # Predict deviation from imGHUM surface
++    delta_d = sdf_model.predict(s, d_imghum, theta)
++    
++    # 3. NeRF Prediction
++    # Condition on semantic descriptor, pose, and root transformation
++    sigma, c = nerf_model.predict(s, d_imghum, theta, T)
++    
++    return sigma, c, delta_d
+ 
+-def query_neRF(s, d, theta, T, v):
+-    """
+-    Queries the canonical NeRF for color and density.
+-    s: (semantic_dim,) semantic descriptor.
+-    d: (1,) signed distance.
+-    theta: (72,) pose code.
+-    T: (4,4) root transformation.
+-    v: (3,) viewing direction.
+-    Returns: c (color), sigma (density).
+-    """
+-    # Concatenate inputs for the neural network
+-    # Note: The exact concatenation order and embedding layers are defined by the source architecture.
+-    # We assume a standard MLP input layer.
+-    input_vector = np.concatenate([s, d, theta, T.flatten(), v])
+-    
+-    # Forward pass through F_omega
+-    # F_omega is a multi-layer perceptron
+-    c, sigma = f_omega_network(input_vector)
+-    return c, sigma
+-
+-def train_step(batch):
+-    """
+-    Single training step.
+-    batch: Dictionary containing images, camera poses, and imGHUM codes (beta, theta, T).
+-    """
+-    loss = 0.0
+-    
+-    for frame in batch:
+-        image = frame['image']
+-        camera_pose = frame['camera_pose']
+-        beta = frame['beta']
+-        theta = frame['theta']
+-        T = frame['T']
+-        T_inv = np.linalg.inv(T)
+-        
+-        # Sample rays through the image
+-        rays = sample_rays(image.shape, camera_pose)
+-        
+-        rendered_colors = []
+-        residuals = []
+-        
+-        for ray in rays:
+-            # Sample points along the ray
+-            points = sample_points_along_ray(ray, num_samples=128)
+-            
+-            c_list = []
+-            sigma_list = []
+-            d_list = []
+-            
+-            for p in points:
+-                # Check if point is inside human bounding box B
+-                if is_inside_box(p, batch['bounding_box']):
+-                    # Get canonical descriptor
+-                    s, d = get_canonical_descriptor(p, beta, theta, T_inv)
+-                    
+-                    # Query NeRF
+-                    c, sigma = query_neRF(s, d, theta, T, ray.direction)
+-                    
+-                    c_list.append(c)
+-                    sigma_list.append(sigma)
+-                    d_list.append(d)
+-                else:
+-                    # Background handling (simplified)
+-                    # Assume background is static or handled by a separate static NeRF
+-                    # For this method, we assume background is not warped
+-                    c, sigma = query_background_neRF(p, ray.direction)
+-                    c_list.append(c)
+-                    sigma_list.append(sigma)
+-                    d_list.append(0.0) # No residual for background
+-            
+-            # Volume rendering
+-            rendered_color = volume_render(c_list, sigma_list, ray.near, ray.far)
+-            rendered_colors.append(rendered_color)
+-            
+-            # Collect residuals for regularization
+-            residuals.extend(d_list)
+-            
+-        rendered_image = reconstruct_image(rendered_colors, image.shape)
+-        
+-        # Photometric loss
+-        loss += mse_loss(rendered_image, image)
+-        
+-        # Regularization loss on residual SDF
+-        # Ensure delta_d <= 0
+-        reg_loss = sum([max(0, d) for d in residuals])
+-        loss += lambda_reg * reg_loss
+-        
+-    return loss
+-
+-def render_novel_pose(beta_new, theta_new, T_new, camera_pose):
+-    """
+-    Render a novel view/pose using learned NeRF.
+-    """
+-    # Add Gaussian noise for generalization
+-    theta_noisy = theta_new + np.random.normal(0, 0.01, theta_new.shape)
+-    T_noisy = T_new + np.random.normal(0, 0.01, T_new.shape)
+-    
+-    # Proceed with standard ray marching using noisy codes
+-    # ...
+-    pass
++def is_inside_bbox(x, bbox):
++    """Check if point x is within the bounding box."""
++    return np.all(x >= bbox.min) and np.all(x <= bbox.max)
+ ```
+ 
+ **Parameters:**
+-*   $\lambda_{reg}$: Weight for the residual SDF regularization. Not given in the sources.
+-*   Noise standard deviation for $(\theta, T)$: Not given in the sources.
+-*   Bounding box $\mathcal{B}$: Defined by the extent of the human subject in the scene. Not given in the sources.
++*   **Gaussian Noise:** Standard deviation not specified in sources [G]. Applied to $\theta$ and $T$ during training/inference for generalization [S1, unofficial].
++*   **Regularization Weight:** Not specified in sources [G]. Applied to $L_{reg}$ to enforce $\Delta d \le 0$ [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Background Handling:** The method explicitly excludes points outside the bounding box $\mathcal{B}$ from warping to save computation. If the bounding box is poorly estimated, background points may be incorrectly warped or vice versa [S1, unofficial].
+-*   **imGHUM Accuracy:** The quality of the canonical mapping depends on the accuracy of the pre-trained imGHUM model. Errors in imGHUM fitting can propagate to the NeRF [S1, unofficial].
+-*   **Sparse Views:** When views are sparse, conditioning on viewing direction $\mathbf{v}$ requires noise injection to prevent overfitting [S1, unofficial].
+-
+-## Subtopics
+-
+-### [LISA](12036-lisa.md)
+-Uses a different approach to dynamic human modeling, focusing on local implicit shape representations. Choose when fine-grained local geometry is prioritized over global semantic latent codes.
+-
+-### [Unified Volumetric Avatar (UVA)](13784-unified-volumetric-avatar-uva.md)
+-Unifies body, face, and hands in a single volumetric representation. Choose when full-body including facial expressions is required.
+-
+-### [HumanNeRF](13842-humannerf.md)
+-A baseline static NeRF for humans. Choose for static subjects or as a baseline for comparison.
+-
+-### [HumanNeRF-SE](15640-humannerf-se.md)
+-Incorporates self-occlusion handling. Choose when self-occlusion artifacts are a primary concern.
++*   **imGHUM Fitting Errors:** Fitting imGHUM to dynamic sequences can introduce errors. The sources suggest fine-tuning imGHUM pose and shape parameters, but details are cut off [S1, unofficial].
++*   **Background Handling:** Points outside the bounding box are not warped, assuming static background. Incorrect bbox definition may lead to artifacts at the human-background boundary [S1, unofficial].
++*   **Sparse Views:** Requires additional noise injection on viewing direction $\mathbf{v}$ to prevent overfitting [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the number of sampled points and the cost of querying the imGHUM warping function. Warping is only applied inside the bounding box $\mathcal{B}$, reducing computation compared to warping the entire scene [S1, unofficial].
+-*   **Memory Complexity:** Stores the canonical NeRF and residual SDF networks. Memory usage is lower than methods that store per-frame volumes because it uses a single canonical representation [S1, unofficial].
+-*   **Strengths:** Generalizes to novel poses and shapes via latent code interpolation; efficient background handling; leverages strong geometric priors from imGHUM [S1, unofficial].
+-*   **Limitations:** Relies on the accuracy of the pre-trained imGHUM model; may struggle with extreme deformations outside the training distribution; requires accurate bounding box estimation [S1, unofficial].
+-*   **When to Use:** Dynamic human rendering with novel pose/shape synthesis requirements.
+-*   **When Not to Use:** Static scenes; scenes with significant non-human dynamic objects; when high-precision per-frame mesh alignment is available and latent code interpolation is not needed.
++*   **Time Complexity:** Not explicitly given. Warping is applied only within bounding box $\mathcal{B}$, improving computation time compared to full-volume warping [S1, unofficial].
++*   **Memory Complexity:** Lowered by restricting warping to $\mathcal{B}$ [S1, unofficial].
++*   **Strengths:** Generalizes to novel poses and shapes via semantic latent codes; captures fine-grained details via residual SDF; efficient background handling [S1, unofficial].
++*   **Limitations:** Relies on accurate imGHUM fitting; performance may degrade with sparse views without additional noise techniques [S1, unofficial].
++*   **When to Use:** Rendering dynamic humans in motion with novel pose/shape generalization.
++*   **When Not to Use:** Static scenes or scenes without articulated human subjects.
+ 
+ ## Background
+-Dynamic Semantic Human NeRF (H-NeRF) was introduced in the paper "H-NeRF: Neural Radiance Fields for Rendering and Temporal Reconstruction of Humans in Motion" [S1, unofficial]. It builds on the concept of warping observations into a canonical reference frame, a technique popularized in earlier works [36, 38] (cited in the source). The method specifically integrates the imGHUM model, which provides semantic shape and pose latent codes, to enable interpolation and generalization to unseen poses and shapes, addressing limitations of prior dynamic NeRF methods that lacked semantic conditioning [S1, unofficial].
++Dynamic Semantic Human NeRF (H-NeRF) was introduced in the paper "H-NeRF: Neural Radiance Fields for Rendering and Temporal Reconstruction of Humans in Motion" [S1, unofficial]. It builds on prior work in dynamic NeRFs [36, 38] by integrating the imGHUM prior, which provides semantically meaningful latent codes for shape and pose, enabling interpolation and extrapolation to novel configurations [S1, unofficial].
+ 
+ ## Sources

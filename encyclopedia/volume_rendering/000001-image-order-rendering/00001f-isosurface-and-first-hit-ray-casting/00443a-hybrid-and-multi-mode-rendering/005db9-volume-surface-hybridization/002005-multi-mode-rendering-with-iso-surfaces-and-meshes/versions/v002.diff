@@ -1,0 +1,252 @@
+--- v001.md
++++ v002.md
+@@ -4,121 +4,161 @@
+ 
+ ## Overview
+-Multi-Mode Rendering with Iso-sururface and Meshes is a hybrid rendering technique that combines hardware-accelerated ray-triangle intersection for explicit surface geometry (meshes) and implicit iso-surfaces with volume ray marching for scalar field data [S1]. It solves the problem of efficiently rendering scenes containing both dense volumetric data and sparse, high-frequency surface details by leveraging separate bounding volume hierarchies (BVHs) and shortening the volume integration range based on the nearest surface hit [S1]. Unlike pure volume rendering, it prioritizes surface geometry for occlusion and depth cues, and unlike pure mesh rendering, it retains the ability to visualize internal structures up to the surface boundary [S1].
++This method renders scenes containing volumetric data, implicit isosurfaces, and explicit triangle meshes in a single pass by combining hardware-accelerated ray-triangle intersection with volume ray marching [S1]. It solves the problem of efficiently integrating volume density up to a potentially occluding surface (mesh or isosurface) by using separate Bounding Volume Hierarchies (BVHs) for each data type [S1]. Unlike pure volume rendering, it shortens the integration path at the first detected surface hit, and unlike pure mesh rendering, it retains volumetric opacity and color accumulation for the space between the camera and that surface [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** A scalar field dataset (structured AMR or regular grid), a set of triangle meshes, an iso-value for implicit surface generation, a transfer function for volume coloring/opacity, and a camera ray defined by origin $\mathbf{o}$ and direction $\mathbf{d}$.
+-*   **Outputs:** A final color and opacity for each pixel, potentially including ambient occlusion values.
++*   **Inputs:** A camera ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$, a triangle mesh BVH, an isosurface BVH (built from a scalar field $f(\mathbf{p})$ and isovalue $\tau$), a volume BVH (built from scalar fields), and clipping plane parameters defining $[t_{min}, t_{max}]$.
++*   **Outputs:** Final pixel color and opacity.
+ 
+ **Data Structures:**
+-The method maintains three distinct spatial acceleration structures [S1]:
+-1.  **Volume BVH:** A BVH built over the volume data bricks/regions to accelerate empty space skipping during ray marching.
+-2.  **Iso-surface BVH:** A BVH built over the implicit iso-surface geometry. This structure is rebuilt whenever the iso-value changes [S1].
+-3.  **Mesh BVH:** A BVH built over the explicit triangle meshes, utilizing hardware-accelerated ray-triangle intersection (e.g., RTX) [S1].
++*   **Mesh BVH:** Standard BVH containing triangle primitives, optimized for hardware-accelerated intersection (e.g., RTX) [S1].
++*   **Iso-surface BVH:** BVH representing the implicit surface defined by $f(\mathbf{p}) = \tau$. This structure is rebuilt whenever the isovalue $\tau$ changes [S1].
++*   **Volume BVH:** BVH representing the sparse volumetric data, allowing empty space skipping [S1].
+ 
+ **Algorithm Steps:**
+-1.  **Mesh Intersection:** Trace the input ray against the Mesh BVH using hardware-accelerated ray-triangle intersection to find the nearest intersection distance $t_{mesh}$ [S1].
+-2.  **Iso-surface Intersection:** Transform the ray into the volume coordinate space. Trace the transformed ray against the Iso-surface BVH to find the nearest intersection distance $t_{iso}$ [S1].
+-3.  **Ray Shortening:** Determine the effective end of the volume integration range $t_{end}$ [S1]:
+-    *   If a surface hit exists ($t_{mesh} < \infty$ or $t_{iso} < \infty$), set $t_{end} = \min(t_{mesh}, t_{iso})$.
+-    *   If no surface hit exists, $t_{end}$ is determined by the clipping plane's $ray.tmax$ or the volume boundary.
+-    *   *Note:* Clipping planes are implemented by constraining the ray's $[ray.tmin, ray.tmax]$ intervals [S1].
+-4.  **Volume Integration:** Trace the shortened ray (from $ray.tmin$ to $t_{end}$) through the Volume BVH. Perform ray marching to integrate the volume data (color and opacity) up to the surface hit point [S1].
+-5.  **Surface Shading (Optional):** If a surface was hit, shade the surface point using local shading models and/or ambient occlusion [S1].
+-6.  **Composite:** Combine the volume contribution (from step 4) and the surface contribution (from step 5) using standard alpha compositing.
++1.  **Clip Ray:** Adjust the ray's valid interval to $[t_{min}, t_{max}]$ based on user-defined clipping planes [S1].
++2.  **Mesh Intersection:** Trace the ray against the Mesh BVH using hardware-accelerated ray-triangle intersection to find the nearest hit point $t_{mesh}$ [S1].
++3.  **Iso-surface Intersection:** Transform the ray into the volume coordinate space. Trace the transformed ray against the Iso-surface BVH to find the nearest hit point $t_{iso}$ [S1].
++4.  **Determine Shortest Hit:** Identify the nearest surface hit $t_{hit} = \min(t_{mesh}, t_{iso})$ within the clipped interval. If no surface is hit, $t_{hit}$ remains undefined or extends to $t_{max}$ [S1].
++5.  **Shorten Ray:** If a surface hit exists ($t_{hit}$ is defined), the integration range for the volume is shortened to $[t_{min}, t_{hit}]$ [S1].
++6.  **Volume Integration:** Trace the (potentially shortened) ray through the Volume BVH. Perform ray marching to integrate the volume density and color up to $t_{hit}$ (or $t_{max}$ if no surface was hit) [S1].
++7.  **Shading:** Compute local shading (ambient, diffuse, specular) at the surface hit point if a surface was encountered. Compute ambient occlusion using additional rays if enabled [S1].
+ 
+ **Pseudocode:**
+ ```python
+-def render_ray(ray_o, ray_d, mesh_bvh, iso_bvh, volume_bvh, transfer_func, clipping_planes):
+-    # 1. Clip ray based on clipping planes
+-    t_min = max(ray_o.tmin, clipping_planes.tmin)
+-    t_max = min(ray_o.tmax, clipping_planes.tmax)
++def render_multi_mode_ray(ray_origin, ray_direction, t_min, t_max, 
++                          mesh_bvh, iso_bvh, volume_bvh, 
++                          volume_space_transform, isovalue, 
++                          enable_ao):
++    """
++    Renders a single ray using hybrid mesh, isosurface, and volume data.
++    """
++    # Step 1: Clip ray interval
++    t_start = t_min
++    t_end = t_max
+     
+-    # 2. Trace against Mesh BVH (Hardware Accelerated)
+-    hit_mesh = mesh_bvh.intersect(ray_o, ray_d, t_min, t_max)
+-    t_mesh = hit_mesh.t if hit_mesh else float('inf')
++    # Step 2: Trace against Mesh BVH
++    hit_mesh = False
++    t_mesh = infinity
++    if mesh_bvh.intersects(ray_origin, ray_direction, t_start, t_end):
++        hit_mesh = True
++        t_mesh = mesh_bvh.get_nearest_hit_t(ray_origin, ray_direction, t_start, t_end)
++        
++    # Step 3: Trace against Iso-surface BVH
++    # Transform ray to volume space for iso-surface check
++    vol_ray_origin, vol_ray_direction = volume_space_transform(ray_origin, ray_direction)
+     
+-    # 3. Transform ray to volume space and trace against Iso-surface BVH
+-    ray_vol = transform_to_volume_space(ray_o, ray_d)
+-    hit_iso = iso_bvh.intersect(ray_vol, t_min, t_max)
+-    t_iso = hit_iso.t if hit_iso else float('inf')
++    hit_iso = False
++    t_iso = infinity
++    # Note: The BVH intersection returns t in volume space parameterization
++    if iso_bvh.intersects(vol_ray_origin, vol_ray_direction, t_start, t_end):
++        hit_iso = True
++        t_iso = iso_bvh.get_nearest_hit_t(vol_ray_origin, vol_ray_direction, t_start, t_end)
++        
++    # Step 4: Determine nearest surface hit
++    t_surface = infinity
++    if hit_mesh and hit_iso:
++        t_surface = min(t_mesh, t_iso)
++    elif hit_mesh:
++        t_surface = t_mesh
++    elif hit_iso:
++        t_surface = t_iso
++        
++    # Step 5: Shorten ray for volume integration
++    t_volume_end = t_end
++    if t_surface < infinity:
++        t_volume_end = t_surface
++        
++    # Step 6: Volume Integration
++    color = vec3(0.0)
++    opacity = 0.0
+     
+-    # 4. Determine integration end point
+-    t_end = min(t_mesh, t_iso, t_max)
+-    
+-    # 5. Volume Ray Marching
+-    volume_color = vec3(0.0)
+-    volume_opacity = 0.0
+-    current_t = t_min
+-    
+-    # March through volume BVH
+-    while current_t < t_end:
++    # March from t_start to t_volume_end using Volume BVH for acceleration
++    current_t = t_start
++    while current_t < t_volume_end:
++        # Use BVH to skip empty space and find next sample point
++        next_t = volume_bvh.get_next_sample_t(current_t, t_volume_end)
++        
+         # Sample volume data at current_t
+-        sample = volume_bvh.sample(ray_o, ray_d, current_t)
+-        color, opacity = transfer_func(sample)
++        # Note: Actual sampling requires mapping ray t to voxel coordinates
++        sample_pos = ray_origin + current_t * ray_direction
++        sample_color, sample_opacity = volume_bvh.sample_volume(sample_pos)
+         
+-        # Composite
+-        alpha = opacity * (1.0 - volume_opacity)
+-        volume_color += color * alpha
+-        volume_opacity += alpha
++        # Alpha compositing
++        alpha = sample_opacity * (1.0 - opacity)
++        color += sample_color * alpha
++        opacity += alpha
+         
+-        # Advance step size (could be adaptive or fixed)
+-        current_t += step_size
+-        
+-        if volume_opacity >= 1.0:
++        if opacity >= 1.0:
+             break
+             
+-    # 6. Surface Shading (if hit)
+-    surface_color = vec3(0.0)
+-    if t_mesh < t_iso:
+-        # Use mesh hit point
+-        hit_point = ray_o + ray_d * t_mesh
+-        normal = mesh_bvh.get_normal(hit_point)
+-        surface_color = shade_mesh(hit_point, normal, ambient_occlusion=True)
+-    elif t_iso < t_mesh:
+-        # Use iso-surface hit point
+-        hit_point_vol = ray_vol + ray_vol.d * t_iso
+-        hit_point = transform_to_world_space(hit_point_vol)
+-        normal = iso_bvh.get_normal(hit_point_vol)
+-        surface_color = shade_iso_surface(hit_point, normal, ambient_occlusion=True)
++        current_t = next_t
+         
+-    # 7. Final Composite
+-    final_color = volume_color + surface_color * (1.0 - volume_opacity)
+-    return final_color
++    # Step 7: Surface Shading (if hit)
++    if t_surface < infinity:
++        hit_pos = ray_origin + t_surface * ray_direction
++        
++        # Determine if hit was mesh or iso-surface for normal calculation
++        normal = vec3(0.0)
++        if hit_mesh and t_mesh <= t_iso:
++            normal = mesh_bvh.get_normal_at_hit(ray_origin, ray_direction, t_mesh)
++        else:
++            # For iso-surface, normal is gradient of f at hit_pos
++            normal = compute_gradient(isovalue, hit_pos)
++            
++        # Local shading model
++        surface_color = compute_phong_shading(hit_pos, normal, ray_direction)
++        
++        # Ambient Occlusion (optional, adds 2 rays per pixel)
++        ao_factor = 1.0
++        if enable_ao:
++            ao_factor = compute_ambient_occlusion(hit_pos, normal)
++            
++        surface_color *= ao_factor
++        
++        # Composite surface color over volume
++        # The surface is opaque, so it replaces the accumulated volume behind it
++        # However, standard hybrid rendering usually implies the surface 
++        # is the *end* of the volume integration. 
++        # If the surface is opaque, the final color is the surface color.
++        # If the surface is semi-transparent, standard compositing applies.
++        # Based on "shorten the ray... to integrate... up to that point", 
++        # the surface is treated as the terminator.
++        final_color = surface_color
++    else:
++        final_color = color
++        
++    return final_color, opacity
++
++def compute_gradient(isovalue, point):
++    """
++    Computes the normal for an isosurface using analytic gradients 
++    as preferred for quality and speed [S1].
++    """
++    # Analytic gradient is used by default [S1]
++    # This requires access to the underlying scalar field function f(p)
++    # grad_f = df/dx, df/dy, df/dz
++    return normalize(grad_f(point))
+ ```
+ 
+ **Parameters:**
+-*   **Iso-value:** Threshold for generating the implicit surface. Changing this requires rebuilding the Iso-surface BVH [S1].
+-*   **Ambient Occlusion:** Supported for depth cues, typically requiring two additional rays per pixel for surface and iso-surface geometry [S1].
+-*   **Clipping Planes:** Defined by $[ray.tmin, ray.tmax]$ intervals to control the integration range [S1].
++*   **Isovalue ($\tau$):** The scalar threshold for the isosurface. Changing this requires rebuilding the Iso-surface BVH [S1].
++*   **Clipping Planes:** Defined by $t_{min}$ and $t_{max}$ on the ray [S1].
++*   **Ambient Occlusion:** Enabled by default for depth cues, requiring two additional rays per pixel for surface and iso-surface geometry [S1].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Iso-value Change:** The Iso-surface BVH must be fully rebuilt when the iso-value changes, which can be computationally expensive [S1].
+-*   **Coordinate Space:** Rays must be correctly transformed between world and volume space for accurate iso-surface intersection [S1].
+-*   **Precision:** Hardware-accelerated intersection may have precision limits; however, the method relies on the BVH for coarse culling and hardware for exact triangle tests [S1].
+-
+-## Subtopics
+-
+-### Iso-surface BVH Construction
+-Builds a BVH for implicit surfaces defined by a scalar field threshold. Chosen when the surface topology changes frequently or is defined analytically. Links to [Iso-surface and first-hit ray casting](20-isosurface-and-first-hit-ray-casting.md).
+-
+-### Hardware-Accelerated Mesh Tracing
+-Uses RTX hardware for triangle intersection. Chosen for explicit, static, or frequently updated mesh geometry. Links to [Triangular Mesh Scene Rendering](4644-triangular-mesh-scene-rendering.md).
+-
+-### Volume BVH Marching
+-Uses a BVH to skip empty space during ray marching. Chosen for sparse or large-scale volumetric data. Links to [Cell-Based First-Hit Ray Casting](1039-cell-based-first-hit-ray-casting.md).
++*   **Iso-surface BVH Rebuild:** The Iso-surface BVH must be rebuilt whenever the isovalue changes, as the geometry is implicit and sparse [S1].
++*   **Gradient Continuity:** Analytic gradients are preferred over central differences for speed and quality, though they may not always be continuous [S1].
++*   **Multifield Support:** The system supports color-mapping an isosurface from one scalar field using colors from another (e.g., flow velocity on vorticity) [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Dominated by the cost of BVH traversals and ray marching. The mesh and iso-surface intersections are $O(\log N)$ due to BVHs, while volume marching is $O(K)$ where $K$ is the number of samples within the shortened ray segment [S1].
+-*   **Memory Complexity:** Requires storing three BVHs (Volume, Iso-surface, Mesh) and the underlying scalar field data [S1].
+-*   **Performance:** The method leverages hardware acceleration for mesh and iso-surface intersections, which are often sparse, allowing for efficient empty space skipping [S1]. Volume marching is optimized by shortening the ray length based on surface hits [S1].
+-*   **Strengths:** Supports mixed content (volumes, implicit surfaces, explicit meshes) in a single pipeline. Provides accurate depth cues via surface shading and ambient occlusion [S1].
+-*   **Limitations:** Requires rebuilding the Iso-surface BVH when the iso-value changes [S1]. Complex to implement due to the need for multiple BVHs and coordinate space transformations [S1].
+-*   **When to Use:** Ideal for scientific visualization where both internal volume structures and external surface boundaries need to be rendered simultaneously [S1].
+-*   **When Not to Use:** When only pure volume rendering or pure mesh rendering is required, as the overhead of managing multiple BVHs is unnecessary [S1].
++*   **Time Complexity:** Dominated by BVH traversal for all three data structures (Mesh, Iso, Volume). Hardware-accelerated mesh intersection is highly efficient [S1].
++*   **Memory Complexity:** Requires maintaining three separate BVHs. The Iso-surface BVH size depends on the sparsity of the isosurface [S1].
++*   **Strengths:** Efficient empty space skipping via BVHs; supports hybrid scenes with meshes, implicit surfaces, and volumes; hardware acceleration for meshes [S1].
++*   **Limitations:** Iso-surface BVH must be rebuilt on isovalue change; requires significant memory for multiple BVHs [S1].
+ 
+ ## Background
+-The method was introduced in the context of the ExaBricks renderer, which targets large-scale structured AMR data [S1]. It was developed to support realistic evaluation conditions by combining various rendering modes, including implicit isosurfaces and direct volume rendering [S1]. The approach exploits the sparsity of iso-surfaces for efficient empty space skipping and leverages modern GPU hardware for ray-triangle intersection [S1].
++This method is part of the ExaBricks framework for ray tracing structured AMR data, developed by Wald et al. [S1]. It leverages the ExaBricks data structure to handle sparse volumetric data and integrates with modern GPU ray-tracing hardware (RTX) for mesh intersection [S1].
+ 
+ ## Sources
+-[S1] PDF Ray Tracing Structured AMR Data Using ExaBricks, https://www.sci.utah.edu/~wald/Publications/2020/exabrick/exabrick.pdf, fetched 2026-10-30+[S1] Ray Tracing Structured AMR Data Using ExaBricks, https://www.sci.utah.edu/~wald/Publications/2020/exabrick/exabrick.pdf, fetched 2026-10-30

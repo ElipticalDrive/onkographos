@@ -1,0 +1,71 @@
+# OBJ Mesh Loader & Triangulator
+Also called: OBJ Mesh Loading and Triangulation, tinyobj OBJ Loader
+## Overview
+Reads an OBJ file, extracts vertices and faces, and ensures all polygons are triangulated [S1, unofficial]. It differs from [PLY Mesh Loader & Normal Calculator](2859-ply-mesh-loader-normal-calculator.md) by parsing the Wavefront OBJ format rather than PLY, and specifically handles the triangulation step which the parent method does not perform.
+## How it works
+Inputs: OBJ file path. Outputs: Triangulated vertex positions and face indices.
+Data structures:
+- `tinyobj::ObjReaderConfig`: Configuration object. Field: `triangulate` (bool).
+- `tinyobj::ObjReader`: Reader object. Method: `ParseFromFile`.
+
+Steps:
+1. Create `tinyobj::ObjReaderConfig` instance.
+2. Set `reader_config.triangulate = true` [S1, unofficial].
+3. Create `tinyobj::ObjReader` instance.
+4. Call `reader.ParseFromFile(filepath, reader_config)` [S1, unofficial].
+5. Extract vertices and faces from the reader's internal storage.
+
+Pseudocode:
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Pseudocode based on [S1, unofficial]
+# Note: This uses the tinyobj library API as described in the source.
+# A pure implementation from scratch would require parsing ASCII text,
+# handling 1-based indexing, and fan-triangulating N-gons.
+
+def load_obj_triangulate(filepath):
+    # 1. Create config
+    reader_config = ObjReaderConfig()
+    
+    # 2. Enable triangulation
+    reader_config.triangulate = True
+    
+    # 3. Create reader
+    reader = ObjReader()
+    
+    # 4. Parse file
+    # This method handles the parsing and triangulation internally
+    reader.ParseFromFile(filepath, reader_config)
+    
+    # 5. Extract data
+    # The source implies the data is available after parsing.
+    # In tinyobj, this is typically accessed via reader.GetVertices() 
+    # and reader.GetFaces() or similar, but exact accessor names are not 
+    # provided in the source snippet.
+    vertices = reader.GetVertices()
+    faces = reader.GetFaces()
+    
+    return vertices, faces
+```
+
+## Subtopics
+
+### [OBJ Mesh Export](14775-obj-mesh-export.md)
+Writes a 3D mesh to an OBJ file, supporting optional per-vertex RGB colors.
+
+## Operating characteristics
+Time and memory complexity: Not given in the sources.
+Measured performance: Not given in the sources.
+Strengths: Simple API, built-in triangulation.
+Limitations: Relies on external library (tinyobj).
+When to use: When OBJ format is required and triangulation is needed.
+When not: When PLY is preferred or custom parsing is required.
+
+## Background
+Origin: Part of the Mesh2Volume project [S1, unofficial].
+History: Uses the tinyobj library for parsing.
+Usage: Used in mesh-to-volume conversion pipelines.
+
+## Sources
+[S1] zzilch/Mesh2Volume, https://github.com/zzilch/Mesh2Volume, fetched 2026-10-26 (unofficial)

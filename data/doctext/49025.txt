@@ -1,0 +1,5712 @@
+### Assets/Shaders/DistanceField_Shader.shader
+```
+Shader "Custom/DistanceField_Shader" {
+	Properties {
+	//CameraTarget
+    _CameraTarget 	("Camera Target", Vector) = (0,0,0,0)
+    _CameraUp		("Camera Up", Vector) = (0,0,0,0)
+    //Objects
+    _ObjectPosition ("Object Position", Vector) = (0,0,0,0)
+    _DisplaceStrength ("Displacement Strength", float) = 0.0
+    //Sphere
+    _SphereRadius ("Sphere Radius", Float) = 0.2
+    //Torus
+    _TorusInnerRadius ("Torus Inner Radius", Float) = 0.1
+    _TorusOuterRadius ("Torus Outer Radius", Float) = 0.2
+    
+    //Color
+    _BackgroundColor ("Background Color", Color) = (1.0,1.0,1.0,1.0)
+
+	}	
+	SubShader {
+		Tags { "RenderType"="Opaque" }
+		Pass
+			{
+                GLSLPROGRAM   
+                #include "UnityCG.glslinc"             
+                                       
+                #ifdef VERTEX  
+                void main()
+                {          
+                    gl_Position = gl_ModelViewProjectionMatrix * gl_Vertex;
+                }
+                #endif  
+                #ifdef FRAGMENT
+                
+                //Camera
+                uniform vec3 _CameraTarget;
+                uniform vec3 _CameraPosition;
+                uniform vec3 _CameraUp;
+               	
+               	//Object
+               	uniform float _DisplaceStrength;
+               	uniform vec3 _ObjectPosition;
+               	uniform mat4 _ObjectRotation;
+               	//Sphere
+               	uniform float _SphereRadius;
+               	//Torus
+               	uniform float _TorusInnerRadius;
+               	uniform float _TorusOuterRadius;
+               	
+               	
+               	//Colors
+               	uniform vec4 _BackgroundColor;
+               	
+               	
+				////////////////////////////////////////
+				//
+				// Distance Functions
+	
+				//Sphere
+				//Smallest distance from pos to ball (ballPos, ballRadius)
+				float dBall(vec3 pos, vec3 ballPos, float ballRadius)
+				{   
+   					float d = length(pos - ballPos) - ballRadius;
+    				return d;
+				}
+				
+				//Torus - Signed
+				//Smallest distance form pos to torus with specified radii
+				float sdTorus( vec3 pos, vec3 torusPos, float innerRadius,float outerRadius)
+				{
+					vec3 adjustedPosition=pos-torusPos;
+ 					vec2 q = vec2(length(adjustedPosition.xz)-outerRadius,adjustedPosition.y);
+  					return length(q)-innerRadius;
+				}
+				
+				////////////////////////////////////////
+				//
+				// Helper Functions
+				
+				//Displace by sin values, used for cool distortion efect
+				float displacement(vec3 pos)
+				{
+					vec3 displaceValue;
+					float displaceStrength=_DisplaceStrength;
+					
+					displaceValue.x=sin(pos.x*displaceStrength);
+					displaceValue.y=sin(pos.y*displaceStrength);
+					displaceValue.z=sin(pos.z*displaceStrength);
+					
+					return displaceValue.x*displaceValue.y*displaceValue.z;
+				}
+				
+				//Repeat the object using modulus
+				vec3 opRep( vec3 p, vec3 c )
+				{
+    				vec3 q = mod(p,c)-0.5*c;
+    				return q;
+				}
+				
+//				vec3 opTx( vec3 p, mat4 m )
+//				{
+//				    vec3 q = inverse(m)*p;
+//				    return q;
+//				}
+				
+				// Distance to closest scene hit
+				float map(vec3 pos)
+				{
+					mat4 rotation;
+					rotation[0].xyzw=vec4(3.0, 1.0, 2.0,3.0);
+					rotation[1].xyzw=vec4(3.0, 1.0, 2.0,3.0);
+					rotation[2].xyzw=vec4(3.0, 1.0, 2.0,3.0);
+					rotation[3].xyzw=vec4(3.0, 1.0, 2.0,3.0);
+					
+//					vec3 rotatedPositon = opTx(pos,rotation);
+					vec3 repeatedPosition=opRep(pos,vec3(1.0,1.0,1.0));
+					
+					//Sphere
+					vec3 spherePosition=_ObjectPosition;
+					float sphereDistance = dBall(repeatedPosition, _ObjectPosition, _SphereRadius);
+					
+					//Torus
+					float torusDistance = sdTorus(repeatedPosition,_ObjectPosition, _TorusInnerRadius,_TorusOuterRadius);
+					
+				    return min(sphereDistance,torusDistance)+displacement(pos);
+				}
+				
+
+				// Uses map function (smallest distance to scene) for
+				// approximating normal at pos
+				vec3 approxNormal(vec3 pos)
+				{
+				    float epsilon = 0.0001;
+					vec2 t = vec2(0, epsilon);
+				    vec3 n = vec3(
+				    	map(pos + t.yxx) - map(pos - t.yxx),
+	           	  		map(pos + t.xyx) - map(pos - t.xyx),
+	              		map(pos + t.xxy) - map(pos - t.xxy));
+    				return normalize(n);
+				}
+
+				vec3 getColor(vec3 rayPos, vec3 rayDir)
+				{
+    				vec3 color = _BackgroundColor.xyz;
+    				
+    				for (int i = 0; i < 128; ++i)
+    				{
+    					float d = map(rayPos);
+        				rayPos += d * rayDir;
+        				if (d < 0.001)
+        				{
+        					color =  abs(approxNormal(rayPos));
+        				    break;
+        				}
+    				}
+    				
+    				return color;
+				}
+
+				void main(void)
+				{
+					vec2 uv = gl_FragCoord.xy / _ScreenParams.xy;
+    				float aspect = _ScreenParams.x / _ScreenParams.y;
+    
+    				// Make uv go [-0.5, 0.5] and scale uv.x according to aspect ratio
+    				uv -= .5;
+    				uv.x = aspect * uv.x;
+    
+    				// Initialize camera stuff
+    				vec3 camPos = _CameraPosition;
+    				vec3 camTarget = _CameraTarget;
+    				vec3 camUp = _CameraUp;//vec3(0.3, 0.9, -.1);
+    				vec3 camDir = normalize(camTarget - camPos);
+    				vec3 camRight = normalize(cross(camUp, camDir));
+    				camUp = normalize(cross(camDir, camRight));
+    
+    				vec3 rayPos = camPos;
+    				vec3 rayDir = normalize(camDir + uv.x * camRight + uv.y * camUp);
+    
+    				// Raymarch scene to get pixel color
+    				vec3 color = getColor(rayPos, rayDir);
+    
+    				// Set pixel color
+					gl_FragColor = vec4(color, 1.0);
+				}
+                #endif                          
+                ENDGLSL
+    		}
+		} 
+	FallBack "Diffuse"
+}
+```
+
+### Assets/Shaders/DistanceSphere_Shader.shader
+```
+﻿
+// Original Source: http://www.iquilezles.org/apps/shadertoy/
+// Thanks to Inigo Quilez
+// Modified by Ippokratis Bournellis http://ippomed.com
+ 
+Shader "Custom/DistanceSphere"
+{    
+    Properties
+    {
+    _LightX ("Rim Intensity", Float) = 1.0
+    _LightY ("Rim Intensity", Float) = 1.0
+   
+    }
+    SubShader
+    {
+        Tags { "Queue" = "Geometry" }
+        Pass
+            {            
+                GLSLPROGRAM   
+                
+                #include "UnityCG.glslinc"  
+                                    
+                                       
+                #ifdef VERTEX  
+                void main()
+                {          
+                    gl_Position = gl_ModelViewProjectionMatrix * gl_Vertex;
+                }
+                #endif  
+ 
+                #ifdef FRAGMENT
+                 
+                uniform float _LightX;
+               	uniform float _LightY;
+ 
+ 				//Calculate object distance
+                float inObj(in vec3 p)
+                {
+                	//Sphere
+//                   return  length(p)-3.0;
+                   //Cube
+//                    return length(max(abs(p)-1.0,0.0));
+                    //Torus
+                    vec2 q = vec2(length(p.xz)-2.0,p.y);
+ 					 return length(q)-0.2;
+                }
+               
+                void main(void)
+                {
+                  //Center the uv
+                  vec2 vPos=-1.0+2.0*gl_FragCoord.xy/_ScreenParams.xy;
+                  //Camera properties
+                  vec3 vuv=vec3(0.0,1.0,0.0);//camera up
+                  vec3 vrp = vec3(0.0,0.0,0.0);//camera rotation
+                  vec3 prp= vec3(0.0,4.0,3.0);//camera position
+                  //Camera setup, voodoo atm
+                  vec3 vpn=normalize(vrp-prp);
+                  vec3 u=normalize(cross(vuv,vpn));
+                  vec3 v=cross(vpn,u);
+                  vec3 vcv=(prp+vpn);
+                  vec3 scrCoord=vcv+vPos.x*u*_ScreenParams.x/_ScreenParams.y+vPos.y*v;
+                  vec3 scp=normalize(scrCoord-prp);
+               
+                  //Raymarching, voodoo atm
+                  vec2 e = vec2(_LightX,_LightY);
+                  const float maxd=5.0;
+                  float s=0.1;
+                  vec3 c,p,n;
+               
+                  //speed optimization -advance ray (simple raytracing) until plane y=3.0
+                  //voodoo atm
+                  float f=-(prp.y-3.0)/scp.y;
+                 
+                  if (f>0.0) p=prp+scp*f;
+                  else f=maxd;
+               
+                  for(int i=0;i<128;i++)
+                  {
+                    if (abs(s)<.01||f>maxd) break;
+                    f+=s;
+                    p=prp+scp*f;
+                   
+                    s=inObj(p);
+                  }
+                 
+                  if (f<maxd)
+                  {
+                    if(p.y<-3.0)//do not draw below the plane level
+                    {
+                        return;
+                    }
+                    else
+                    {
+                      //Color
+                      c = vec3(1.0,0.0,0.0); //sphere color      
+                      n=normalize(
+                        vec3(s-inObj(p-e.xyy),//This produces
+                             s-inObj(p-e.yxy),//a lit sphere
+                             s-inObj(p-e.yyx))//
+                                             );//
+                    }
+                    float b=dot(n,normalize(prp-p));
+                   
+                    gl_FragColor=vec4((b*c+pow(b,32.0))*(1.0-f*.0004),1.0);//Voodoo lighting stuff
+                  }
+                  else gl_FragColor=vec4(0,0.2,0,1);//Color of the horizon
+                }
+                #endif                          
+                ENDGLSL        
+            }
+     }
+    FallBack "Diffuse"
+}
+```
+
+### Assets/Shaders/Fractal_Shader.shader
+```
+﻿
+// Original Source: http://www.iquilezles.org/apps/shadertoy/
+// Thanks to Inigo Quilez
+// Modified by Ippokratis Bournellis http://ippomed.com
+ 
+Shader "Custom/Mandelbrot"
+{    
+    Properties
+    {
+   
+    }
+    SubShader
+    {
+        Tags { "Queue" = "Geometry" }
+        Pass
+            {            
+                GLSLPROGRAM                          
+                #ifdef VERTEX  
+                void main()
+                {          
+                    gl_Position = gl_ModelViewProjectionMatrix * gl_Vertex;
+                }
+                #endif  
+ 
+                #ifdef FRAGMENT
+                #include "UnityCG.glslinc"
+ 
+                float inObj(in vec3 p)
+                {
+                   return  length(p)-3.0;
+                }
+               
+                
+                //new
+                #define AA 2
+
+void main( void )
+{
+    vec3 col = vec3(0.0);
+    
+#if AA>1
+    for( int m=0; m<AA; m++ )
+    for( int n=0; n<AA; n++ )
+    {
+        vec2 p = (-_ScreenParams.xy + 2.0*(gl_FragCoord.xy+vec2(float(m),float(n))/float(AA)))/_ScreenParams.y;
+        float w = float(AA*m+n);
+        float time = _Time.y + 0.5*(1.0/24.0)*w/float(AA*AA);
+#else    
+        vec2 p = (-_ScreenParams.xy + 2.0*gl_FragCoord.xy)/_ScreenParams.y;
+        float time = _Time.y;
+#endif
+    
+        float zoo = 0.62 + 0.38*cos(.07*time);
+        float coa = cos( 0.15*(1.0-zoo)*time );
+        float sia = sin( 0.15*(1.0-zoo)*time );
+        zoo = pow( zoo,8.0);
+        vec2 xy = vec2( p.x*coa-p.y*sia, p.x*sia+p.y*coa);
+        vec2 c = vec2(-.745,.186) + xy*zoo;
+
+        float l = 0.0;
+	    vec2 z  = vec2(0.0);
+        for( int i=0; i<256; i++ )
+         {
+            // z = z*z + c		
+    		z = vec2( z.x*z.x - z.y*z.y, 2.0*z.x*z.y ) + c;
+		
+    		if( dot(z,z)>(256.0*256.0) ) break;
+
+    		l += 1.0;
+        }
+
+    	// ------------------------------------------------------
+        // smooth interation count
+    	// float sco = co - log2(log(length(z))/log(256.0));
+	
+        // equivalent optimized smooth interation count
+    	float sl = l - log2(log2(dot(z,z))) + 4.0;
+        
+    	// ------------------------------------------------------
+	
+        float al = smoothstep( -0.1, 0.0, sin(0.5*6.2831*_Time.y ) );
+        l = mix( l, sl, al );
+
+        col += 0.5 + 0.5*cos( 3.0 + l*0.15 + vec3(0.0,0.6,1.0));
+#if AA>1
+    }
+    col /= float(AA*AA);
+#endif
+
+    gl_FragColor = vec4( col, 1.0 );
+}
+
+//endnew
+                #endif                          
+                ENDGLSL        
+            }
+     }
+    FallBack "Diffuse"
+}
+```
+
+### Assets/Shaders/Mandelbrot_Binary_Shader.shader
+```
+﻿
+// Original Source: http://www.iquilezles.org/apps/shadertoy/
+// Thanks to Inigo Quilez
+// Modified by Ippokratis Bournellis http://ippomed.com
+ 
+Shader "Custom/Mandelbrot_Binary"
+{    
+    Properties
+    {
+   		
+    }
+    SubShader
+    {
+        Tags { "Queue" = "Geometry" }
+        Pass
+            {            
+                GLSLPROGRAM                          
+                #ifdef VERTEX  
+                void main()
+                {          
+                    gl_Position = gl_ModelViewProjectionMatrix * gl_Vertex;
+                }
+                #endif  
+ 
+                #ifdef FRAGMENT
+                #include "UnityCG.glslinc"
+ 
+                float inObj(in vec3 p)
+                {
+                   return  length(p)-3.0;
+                }
+               
+                //new
+                #define AA 2
+
+void main( void )
+{
+    vec3 col = vec3(0.0);
+    
+#if AA>1
+    for( int m=0; m<AA; m++ )
+    for( int n=0; n<AA; n++ )
+    {w
+        vec2 p = (-_ScreenParams.xy + 2.0*(gl_FragCoord.xy+vec2(float(m),float(n))/float(AA)))/_ScreenParams.y;
+        float w = float(AA*m+n);
+        float time = _Time.y + 0.5*(1.0/24.0)*w/float(AA*AA);
+#else    
+        vec2 p = (-_ScreenParams.xy + 2.0*gl_FragCoord.xy)/_ScreenParams.y;
+        float time = _Time.y;
+#endif
+    
+        float zoo = 0.62 + 0.38*cos(.07*time);
+        float coa = cos( 0.15*(1.0-zoo)*time );
+        float sia = sin( 0.15*(1.0-zoo)*time );
+        zoo = pow( zoo,8.0);
+        vec2 xy = vec2( p.x*coa-p.y*sia, p.x*sia+p.y*coa);
+        vec2 c = vec2(-.745,.186) + xy*zoo;
+
+        float l = 0.0;
+	    vec2 z  = vec2(0.0);
+        for( int i=0; i<256; i++ )
+         {
+            // z = z*z + c		
+    		z = vec2( z.x*z.x - z.y*z.y, 2.0*z.x*z.y ) + c;
+		
+    		if( dot(z,z)>(256.0*256.0) ) break;
+
+    		l += 1.0;
+        }
+
+    	// ------------------------------------------------------
+        // smooth interation count
+    	// float sco = co - log2(log(length(z))/log(256.0));
+	
+        // equivalent optimized smooth interation count
+    	float sl = l - log2(log2(dot(z,z))) + 4.0;
+        
+    	// ------------------------------------------------------
+	
+        float al = smoothstep( -0.1, 0.0, sin(0.5*6.2831 ) );
+        l = mix( l, sl, al );
+
+        col += 0.5 + 0.5*cos( 3.0 + l*0.15 + vec3(0.0,0.6,1.0));
+#if AA>1
+    }
+    col /= float(AA*AA);
+#endif
+
+    gl_FragColor = vec4( col, 1.0 );
+}
+
+//endnew
+                #endif                          
+                ENDGLSL        
+            }
+     }
+    FallBack "Diffuse"
+}
+```
+
+### Assets/Shaders/Mandelbrot_Colored_Shader.shader
+```
+﻿
+// Original Source: http://www.iquilezles.org/apps/shadertoy/
+// Thanks to Inigo Quilez
+// Modified by Ippokratis Bournellis http://ippomed.com
+ 
+Shader "Custom/Mandelbrot_Colored"
+{    
+    Properties
+    {
+   
+    }
+    SubShader
+    {
+        Tags { "Queue" = "Geometry" }
+        Pass
+            {            
+                GLSLPROGRAM                          
+                #ifdef VERTEX  
+                void main()
+                {          
+                    gl_Position = gl_ModelViewProjectionMatrix * gl_Vertex;
+                }
+                #endif  
+ 
+                #ifdef FRAGMENT
+                #include "UnityCG.glslinc"
+ 
+                float inObj(in vec3 p)
+                {
+                   return  length(p)-3.0;
+                }
+               
+                
+                //new
+                #define AA 2
+
+void main( void )
+{
+    vec3 col = vec3(0.0);
+    
+#if AA>1
+    for( int m=0; m<AA; m++ )
+    for( int n=0; n<AA; n++ )
+    {
+        vec2 p = (-_ScreenParams.xy + 2.0*(gl_FragCoord.xy+vec2(float(m),float(n))/float(AA)))/_ScreenParams.y;
+        float w = float(AA*m+n);
+        float time = _Time.y + 0.5*(1.0/24.0)*w/float(AA*AA);
+#else    
+        vec2 p = (-_ScreenParams.xy + 2.0*gl_FragCoord.xy)/_ScreenParams.y;
+        float time = _Time.y;
+#endif
+    
+        float zoo = 0.62 + 0.38*cos(.07*time);
+        float coa = cos( 0.15*(1.0-zoo)*time );
+        float sia = sin( 0.15*(1.0-zoo)*time );
+        zoo = pow( zoo,8.0);
+        vec2 xy = vec2( p.x*coa-p.y*sia, p.x*sia+p.y*coa);
+        vec2 c = vec2(-.745,.186) + xy*zoo;
+
+        float l = 0.0;
+	    vec2 z  = vec2(0.0);
+        for( int i=0; i<256; i++ )
+         {
+            // z = z*z + c		
+    		z = vec2( z.x*z.x - z.y*z.y, 2.0*z.x*z.y ) + c;
+		
+    		if( dot(z,z)>(256.0*256.0) ) break;
+
+    		l += 1.0;
+        }
+
+    	// ------------------------------------------------------
+        // smooth interation count
+    	// float sco = co - log2(log(length(z))/log(256.0));
+	
+        // equivalent optimized smooth interation count
+    	float sl = l - log2(log2(dot(z,z))) + 4.0;
+        
+    	// ------------------------------------------------------
+	
+        float al = smoothstep( -0.1, 0.0, sin(0.5*6.2831*_Time.y ) );
+        l = mix( l, sl, al );
+
+        col += 0.5 + 0.5*cos( 3.0 + l*0.15 + vec3(0.0,0.6,1.0));
+#if AA>1
+    }
+    col /= float(AA*AA);
+#endif
+
+    gl_FragColor = vec4( col, 1.0 );
+}
+
+//endnew
+                #endif                          
+                ENDGLSL        
+            }
+     }
+    FallBack "Diffuse"
+}
+```
+
+### Assets/Shaders/Mandelbulb.shader
+```
+Shader "Custom/Mandelbulb"
+{    
+    Properties
+    {
+    
+    _Power ("Power", float) = 6.0
+   
+    }
+    SubShader
+    {
+        Tags { "Queue" = "Geometry" }
+        Pass
+            {            
+                GLSLPROGRAM
+					
+                // #define DEBUG 1
+
+                #ifdef VERTEX
+                uniform vec2 screen;
+                varying vec2 surfacePosition;
+
+                void main()
+                {
+                    gl_Position = gl_ModelViewProjectionMatrix * gl_Vertex;
+                    surfacePosition = vec2(gl_Position.x/screen.x*512.0, gl_Position.y/screen.y*512.0);
+                }
+                #endif  
+                
+                #ifdef FRAGMENT
+                uniform float _Power;
+
+                #include "UnityCG.glslinc"
+#ifdef GL_ES
+//precision highp float;
+precision mediump float;
+#endif
+
+uniform float time;
+varying vec2 surfacePosition;
+  
+#define e     2.7182818284590452353602874713526 //eulers number
+#define sqpi  1.7724538509055160272981674833411 //square root of pi
+#define phi   1.6180339887498948482045868343656 //golden ratio
+#define hfpi  1.5707963267948966192313216916398 //half pi, 1/pi
+#define cupi  1.4645918875615232630201425272638 //cube root of pi
+#define prpi  1.4396194958475906883364908049738 //pi root of pi
+#define lnpi  1.1447298858494001741434273513531 //logn(pi);
+#define trpi  1.0471975511965977461542144610932 //one third of pi, pi/3
+#define thpi  0.99627207622074994426469058001254//tanh(pi)
+#define lgpi  0.4971498726941338543512682882909 //log(pi)      
+#define rcpi  0.31830988618379067153776752674503// reciprocal of pi  , 1/pi 
+#define rcpipi  0.0274256931232981061195562708591 // reciprocal of pipi  , 1/pipi
+
+float tt = ((time));
+#define ptpi 1385.4557313670110891409199368797 //powten(pi)
+#define pipi  36.462159607207911770990826022692 //pi pied, pi^pi
+#define picu  31.006276680299820175476315067101 //pi cubed, pi^3
+#define pepi  23.140692632779269005729086367949 //powe(pi);
+#define chpi  11.59195327552152062775175205256  //cosh(pi)
+#define shpi  11.548739357257748377977334315388 //sinh(pi)
+#define pisq  9.8696044010893586188344909998762 //pi squared, pi^2
+#define twpi  6.283185307179586476925286766559  //two pi, 2*pi
+#define pi    3.1415926535897932384626433832795 //pi
+float t = (rcpi*(pi+tt/pisq))+pepi;
+float k = (lgpi*(pi+tt/chpi))+chpi;
+
+vec3 qAxis = normalize(vec3(sin(t*(prpi)), cos(k*(cupi)), cos(k*(hfpi)) ));
+vec3 wAxis = normalize(vec3(cos(k*(-trpi)/pi), sin(t*(rcpi)/pi), sin(k*(lgpi)/pi) ));
+vec3 sAxis = normalize(vec3(cos(t*(trpi)), sin(t*(-rcpi)), sin(k*(lgpi)) ));
+float axe = pow(qAxis.x+qAxis.y+qAxis.z+wAxis.x+wAxis.y+wAxis.z+sAxis.x+sAxis.y+sAxis.z,2.0);
+
+vec3 camPos = (vec3(0.0, 0.0, -1.0));
+vec3 camUp  = (vec3(0.0,1.0,0.0));
+float focus = pi;
+vec3 camTarget = vec3(0.1)*sAxis;
+
+vec3 rotate(vec3 vec, vec3 axis, float ang)
+{
+    return vec * cos(ang) + cross(axis, vec) * sin(ang) + axis * dot(axis, vec) * (1.0 - cos(ang));
+}
+
+
+
+vec3 pin(vec3 v)
+{
+    vec3 q = vec3(0.0);
+   
+    q.x = sin(v.x)*0.5+0.5;
+    q.y = sin(v.y+0.66666667*pi)*0.5+0.5;
+    q.z = sin(v.z+1.33333333*pi)*0.5+0.5;
+   
+    return normalize(q);
+}
+
+vec3 spin(vec3 v)
+{
+    for(int i = 1; i <6; i++)
+    {
+        v=pin((v.yzx*pi)*(float(i)));
+    }
+    return v.zxy;
+}
+
+
+float map(vec3 p)
+{
+    const int MAX_ITER = 64;
+    const float BAILOUT=4.0;
+    float Power=_Power;
+
+    vec3 v = p;
+    vec3 c = v;
+
+    float r=0.0;
+    float d=1.0;
+    for(int n=0; n<=MAX_ITER; ++n)
+    {
+        r = length(v);
+        if(r>BAILOUT) break;
+
+        float theta = acos(v.z/r);
+        float phe = atan(v.y, v.x);
+        d = pow(r,Power-1.0)*Power*d+1.0;
+
+        float zr = pow(r,Power);
+        theta = theta*Power;
+        phe = phe*Power;
+        v = (vec3(sin(theta)*cos(phe), sin(phe)*sin(theta), cos(theta))*zr)+c;
+    }
+    return 0.5*log(r)*r/d;
+}
+vec3 nrm(vec3 p) {
+    vec2 q = vec2(0.00002, 0.00002);
+    return normalize(vec3( 
+    		 map(p + q.yxx) - map(p - q.yxx),
+             map(p + q.xyx) - map(p - q.xyx),
+             map(p + q.xxy) - map(p - q.xxy) ));
+}
+
+void main( void )
+{
+    vec2 pos = (surfacePosition)*twpi;//(sin(t*pi)+2.0);
+    float ang = (sin(t*lnpi)*pi)+(distance(sAxis,wAxis)+distance(qAxis,sAxis)+distance(wAxis,qAxis));
+    camPos = phi*(camPos * cos(ang) + cross(qAxis, camPos) * sin(ang) + qAxis * dot(qAxis, camPos) * (1.0 - cos(ang)));
+   
+    vec3 camDir = normalize(camTarget-camPos);
+    camUp = rotate(camUp, camDir, sin(t*prpi)*pi);
+    vec3 camSide = cross(camDir, camUp);
+    vec3 sideNorm=normalize(cross(camUp, camDir));
+    vec3 upNorm=cross(camDir, sideNorm);
+    vec3 worldFacing=(camPos + camDir);
+    vec3 rayDir = -normalize((worldFacing+sideNorm*pos.x + upNorm*pos.y - camDir*((focus))));
+   
+    float show=0.0;
+   
+    float t = .01;
+    float s = 1.;
+    float temp = 0.;
+    for(int i = 0 ; i < 150; i++) {
+    temp = map((camPos + rayDir * (t*pi)))*0.4;
+        if(temp < 0.0001) {show = 1.0;break;}
+        if(t>pi){break;} 
+        t += temp;
+        s+=0.05;
+    }
+    vec3 clr = (camPos + rayDir*(t*pi));
+    clr =show*max(pin(clr)*abs(dot(rayDir,nrm(clr))),spin(clr)*abs(dot(rayDir,nrm(clr))))/(s);
+    //clr = (show*(spin(clr))/(s))*(dot(nrm(clr),rayDir));
+    gl_FragColor = vec4(clr, 1.0);
+}                
+                #endif       
+                ENDGLSL        
+            }
+     }
+    FallBack "Diffuse"
+}
+```
+
+### Assets/Cardboard/DemoScene/Teleport.cs
+```
+﻿// Copyright 2014 Google Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+using UnityEngine;
+using System.Collections;
+
+[RequireComponent(typeof(Collider))]
+public class Teleport : MonoBehaviour {
+  private Vector3 startingPosition;
+
+  void Start() {
+    startingPosition = transform.localPosition;
+    SetGazedAt(false);
+  }
+
+  public void SetGazedAt(bool gazedAt) {
+    GetComponent<Renderer>().material.color = gazedAt ? Color.green : Color.red;
+  }
+
+  public void Reset() {
+    transform.localPosition = startingPosition;
+  }
+
+  public void ToggleVRMode() {
+    Cardboard.SDK.VRModeEnabled = !Cardboard.SDK.VRModeEnabled;
+  }
+
+  public void TeleportRandomly() {
+    Vector3 direction = Random.onUnitSphere;
+    direction.y = Mathf.Clamp(direction.y, 0.5f, 1f);
+    float distance = 2 * Random.value + 1.5f;
+    transform.localPosition = direction * distance;
+  }
+}
+```
+
+### Assets/Cardboard/Editor/CardboardEditor.cs
+```
+// Copyright 2014 Google Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+using System.Collections;
+using UnityEditor;
+using UnityEngine;
+using UnityEditor.Callbacks;
+
+[CustomEditor(typeof(Cardboard))]
+[InitializeOnLoad]
+public class CardboardEditor : Editor {
+#if UNITY_IOS
+  GUIContent syncWithCardboardLabel = new GUIContent("Sync with Cardboard App",
+      "Enables the 'Sync with Google Cardboard' slider in the viewer settings dialog.");
+#endif
+
+  GUIContent distortionCorrectionLabel = new GUIContent("Distortion Correction",
+      "Whether distortion correction is performed the SDK.");
+
+  GUIContent vrModeLabel = new GUIContent("VR Mode Enabled",
+      "Sets whether VR mode is enabled.");
+
+  GUIContent alignmentMarkerLabel = new GUIContent("Alignment Marker",
+      "Whether to draw the alignment marker. The marker is a vertical line that splits " +
+      "the viewport in half, designed to help users align the screen with the Cardboard.");
+
+  GUIContent settingsButtonLabel = new GUIContent("Settings Button",
+      "Whether to draw the settings button. The settings button opens the " +
+      "Google Cardboard app to allow the user to  configure their individual " +
+      "settings and Cardboard headset parameters.");
+
+  GUIContent autoDriftCorrectionLabel = new GUIContent("Auto Drift Correction",
+      "When enabled, drift in the gyro readings is estimated and removed.");
+
+  GUIContent tapIsTriggerLabel = new GUIContent("Tap Is Trigger",
+      "Whether screen taps are treated as trigger events.");
+
+  GUIContent neckModelScaleLabel = new GUIContent("Neck Model Scale",
+      "The scale factor of the builtin neck model [0..1].  To disable, set to 0.");
+
+  GUIContent editorSettingsLabel = new GUIContent("Editor Mock Settings",
+      "Controls for the in-editor emulation of Cardboard.");
+
+  GUIContent autoUntiltHeadLabel = new GUIContent("Auto Untilt Head",
+      "When enabled, just release Ctrl to untilt the head.");
+
+  GUIContent simulateDistortionLabel = new GUIContent("Simulate Distortion Correction",
+      "Whether to perform distortion correction in the editor.");
+
+  GUIContent screenSizeLabel = new GUIContent("Screen Size",
+      "The screen size to emulate.");
+
+  GUIContent deviceTypeLabel = new GUIContent("Device Type",
+      "The Cardboard device type to emulate.");
+
+  public override void OnInspectorGUI() {
+    GUI.changed = false;
+
+    Cardboard cardboard = (Cardboard)target;
+
+#if UNITY_IOS
+    cardboard.SyncWithCardboardApp =
+        EditorGUILayout.Toggle(syncWithCardboardLabel, cardboard.SyncWithCardboardApp);
+#endif
+    cardboard.VRModeEnabled =
+        EditorGUILayout.Toggle(vrModeLabel, cardboard.VRModeEnabled);
+    cardboard.DistortionCorrection =
+        EditorGUILayout.Toggle(distortionCorrectionLabel, cardboard.DistortionCorrection);
+    cardboard.EnableAlignmentMarker =
+        EditorGUILayout.Toggle(alignmentMarkerLabel, cardboard.EnableAlignmentMarker);
+    cardboard.EnableSettingsButton =
+        EditorGUILayout.Toggle(settingsButtonLabel, cardboard.EnableSettingsButton);
+    cardboard.AutoDriftCorrection =
+        EditorGUILayout.Toggle(autoDriftCorrectionLabel, cardboard.AutoDriftCorrection);
+    cardboard.TapIsTrigger =
+        EditorGUILayout.Toggle(tapIsTriggerLabel, cardboard.TapIsTrigger);
+    cardboard.NeckModelScale =
+        EditorGUILayout.Slider(neckModelScaleLabel, cardboard.NeckModelScale, 0, 1);
+
+    EditorGUILayout.Separator();
+
+    EditorGUILayout.LabelField(editorSettingsLabel);
+
+    cardboard.autoUntiltHead =
+        EditorGUILayout.Toggle(autoUntiltHeadLabel, cardboard.autoUntiltHead);
+    cardboard.simulateDistortionCorrection =
+        EditorGUILayout.Toggle(simulateDistortionLabel, cardboard.simulateDistortionCorrection);
+    cardboard.ScreenSize = (CardboardProfile.ScreenSizes)
+        EditorGUILayout.EnumPopup(screenSizeLabel, cardboard.ScreenSize);
+    cardboard.DeviceType = (CardboardProfile.DeviceTypes)
+        EditorGUILayout.EnumPopup(deviceTypeLabel, cardboard.DeviceType);
+
+    if (GUI.changed) {
+      EditorUtility.SetDirty(cardboard);
+    }
+  }
+
+  static CardboardEditor() {
+    EditorUserBuildSettings.activeBuildTargetChanged += CheckGraphicsAPI;
+  }
+
+  [PostProcessBuild]
+  public static void CheckGraphicsAPI(BuildTarget target, string path) {
+    CheckGraphicsAPI();
+  }
+
+  private static void CheckGraphicsAPI() {
+    if (EditorUserBuildSettings.activeBuildTarget == BuildTarget.iPhone
+        && !Application.isPlaying
+        && Object.FindObjectOfType<Cardboard>() != null
+        && PlayerSettings.targetIOSGraphics != TargetIOSGraphics.OpenGLES_2_0
+        && PlayerSettings.targetIOSGraphics != TargetIOSGraphics.OpenGLES_3_0) {
+      Debug.LogWarning("iOS Graphics API should be set to OpenGL for best distortion-"
+        + "correction performance in Cardboard.");
+    }
+  }
+}
+```
+
+### Assets/Cardboard/Editor/StereoControllerEditor.cs
+```
+﻿// Copyright 2014 Google Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+using UnityEngine;
+using UnityEditor;
+using System.Collections;
+using System.Linq;
+
+[CustomEditor(typeof(StereoController))]
+public class StereoControllerEditor : Editor {
+  // Name of button, and part of "Undo ..." message.
+  public const string ACTION_NAME = "Update Stereo Cameras";
+
+  private GUIContent updateButton =
+    new GUIContent(ACTION_NAME, "Copy all Camera settings to the stereo cameras.");
+
+  public override void OnInspectorGUI() {
+    DrawDefaultInspector();
+    GUILayout.BeginHorizontal(GUILayout.ExpandHeight(false));
+    GUILayout.FlexibleSpace();
+    if (GUILayout.Button(updateButton, GUILayout.ExpandWidth(false))) {
+      var controller = (StereoController)target;
+      DoUpdateStereoCameras(controller.gameObject);
+    }
+    GUILayout.FlexibleSpace();
+    GUILayout.EndHorizontal();
+  }
+
+  [MenuItem("Component/Cardboard/Update Stereo Cameras", true)]
+  public static bool CanUpdateStereoCameras() {
+    // Make sure all selected items have valid cameras.
+    return Selection.gameObjects.Where(go => CanUpdateStereoCameras(go)).Count()
+        == Selection.gameObjects.Length;
+  }
+
+  [MenuItem("CONTEXT/Camera/Update Stereo Cameras", true)]
+  public static bool CanUpdateStereoCamerasContext(MenuCommand command) {
+    var camera = (Camera)command.context;
+    return CanUpdateStereoCameras(camera.gameObject);
+  }
+
+  [MenuItem("Component/Cardboard/Update Stereo Cameras")]
+  public static void UpdateStereoCameras() {
+    foreach (var go in Selection.gameObjects) {
+      DoUpdateStereoCameras(go);
+    }
+  }
+
+  [MenuItem("CONTEXT/Camera/Update Stereo Cameras")]
+  public static void UpdateStereoCamerasContext(MenuCommand command) {
+    var camera = (Camera)command.context;
+    DoUpdateStereoCameras(camera.gameObject);
+  }
+
+  private static bool CanUpdateStereoCameras(GameObject go) {
+    return go != null &&
+           go.hideFlags == HideFlags.None &&
+           go.GetComponent<Camera>() != null &&
+           go.GetComponent<CardboardEye>() == null;
+  }
+
+  private static void DoUpdateStereoCameras(GameObject go) {
+    // Make sure there is a StereoController.
+    var controller = go.GetComponent<StereoController>();
+    if (controller == null) {
+      controller = go.AddComponent<StereoController>();
+      Undo.RegisterCreatedObjectUndo(controller, ACTION_NAME);
+    }
+
+    // Remember current state of stereo rig.
+#if !UNITY_5
+    bool hadSkybox = go.GetComponent<SkyboxMesh>() != null;
+#endif
+    bool hadHead = controller.Head != null;
+    bool hadEyes = controller.Eyes.Length > 0;
+
+    controller.AddStereoRig();
+
+    // Support undo...
+
+#if !UNITY_5
+    // Skybox mesh.  Deletes it if camera is not Main.
+    var skybox = go.GetComponent<SkyboxMesh>();
+    if (skybox != null) {
+      if (!hadSkybox) {
+        Undo.RegisterCreatedObjectUndo(skybox, ACTION_NAME);
+      } else if (go.GetComponent<Camera>().tag != "MainCamera") {
+        Undo.DestroyObjectImmediate(skybox);
+      }
+    }
+#endif
+
+    // Head.
+    var head = go.GetComponent<CardboardHead>();
+    if (head != null && !hadHead) {
+        Undo.RegisterCreatedObjectUndo(head, ACTION_NAME);
+    }
+
+    // Eyes. Synchronizes them with controller's camera too.
+    foreach (var eye in controller.Eyes) {
+      if (!hadEyes) {
+        Undo.RegisterCreatedObjectUndo(eye.gameObject, ACTION_NAME);
+      } else {
+        Undo.RecordObject(eye.GetComponent<Camera>(), ACTION_NAME);
+        eye.CopyCameraAndMakeSideBySide(controller);
+      }
+    }
+  }
+}
+```
+
+### Assets/Cardboard/Resources/RadialUndistortionEffect.shader
+```
+﻿// Copyright 2014 Google Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+Shader "Cardboard/Radial Undistortion" {
+
+  Properties {
+    _MainTex ("Base (RGB)", 2D) = "white" {}
+  }
+
+  SubShader {
+    Tags { "RenderType" = "Opaque" }
+    LOD 150
+
+    Pass {
+      CGPROGRAM
+      #include "UnityCG.cginc"
+      #pragma vertex vert
+      #pragma fragment frag
+
+      struct v2f {
+        float4 vertex  : SV_POSITION;
+        half2 texcoord : TEXCOORD0;
+      };
+
+      sampler2D _MainTex;
+      float4    _MainTex_ST;
+
+      float4 _Distortion;   // Radial distortion coefficients.
+      float4 _Projection;   // Bits of the lens-affected projection matrix.
+      float4 _Unprojection; // Bits of the no-lens projection matrix.
+
+      v2f vert (appdata_base v) {
+        // This is totally standard code, including the _MainTex transform.
+        v2f o;
+        o.vertex = mul(UNITY_MATRIX_MVP, v.vertex);
+        o.texcoord = TRANSFORM_TEX(v.texcoord, _MainTex);
+        return o;
+      }
+
+      fixed4 frag (v2f i) : SV_Target {
+        // i.texcoord refers to the onscreen pixel we want to color.  We have to find the
+        // corresponding pixel in the rendered texture, which means going through the lens'
+        // distortion transformation.
+        // First: go from these onscreen texture coordinates back into camera space, using parts
+        // of the projection matrix for the "no lens" frustum.  (We don't need the whole matrix
+        // because we don't care about Z.)
+        float2 tex = (i.texcoord + _Unprojection.zw) / _Unprojection.xy;
+        // Second: Radially distort the vector according to the lens' coefficients (pincushion).
+        float r2 = dot(tex, tex);
+        tex *= 1 + (_Distortion.x + _Distortion.y * r2) * r2;
+        // Reproject the vector into the lens-affected frustum to get the texture coordinates
+        // to look up.
+        tex = saturate(tex * _Projection.xy - _Projection.zw);
+        // Get the color.
+        fixed vignette = saturate(min(min(tex.x, 1-tex.x), min(tex.y, 1-tex.y)) / 0.03);
+        fixed4 col = lerp(fixed4(0,0,0,1), tex2D(_MainTex, tex), vignette);
+        return col;
+      }
+      ENDCG
+    }
+  }
+
+}
+```
+
+### Assets/Cardboard/Resources/SolidColor.shader
+```
+﻿// Copyright 2015 Google Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+Shader "Cardboard/SolidColor" {
+    Properties {
+        _Color ("Main Color", COLOR) = (1,1,1,1)
+    }
+    SubShader {
+        Pass { Color [_Color] }
+    }
+}
+```
+
+### Assets/Cardboard/Scripts/Cardboard.cs
+```
+﻿// Copyright 2014 Google Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+using UnityEngine;
+using System;
+using System.Collections;
+using System.Collections.Generic;
+
+// The Cardboard object communicates with the head-mounted display in order to:
+// -  Query the device for viewing parameters
+// -  Retrieve the latest head tracking data
+// -  Provide the rendered scene to the device for distortion correction
+public class Cardboard : MonoBehaviour {
+  // The singleton instance of the Cardboard class.
+  public static Cardboard SDK {
+    get {
+      if (sdk == null) {
+        sdk = UnityEngine.Object.FindObjectOfType<Cardboard>();
+      }
+      if (sdk == null) {
+        Debug.Log("Creating Cardboard object");
+        var go = new GameObject("Cardboard");
+        sdk = go.AddComponent<Cardboard>();
+        go.transform.localPosition = Vector3.zero;
+      }
+      return sdk;
+    }
+  }
+  private static Cardboard sdk = null;
+
+  public bool DistortionCorrection {
+    get {
+      return distortionCorrection;
+    }
+    set {
+      if (value != distortionCorrection && device != null) {
+        device.SetDistortionCorrectionEnabled(value && NativeDistortionCorrectionSupported);
+      }
+      distortionCorrection = value;
+    }
+  }
+  [SerializeField]
+  private bool distortionCorrection = true;
+
+  public bool VRModeEnabled {
+    get {
+      return vrModeEnabled;
+    }
+    set {
+      if (value != vrModeEnabled && device != null) {
+        device.SetVRModeEnabled(value);
+      }
+      vrModeEnabled = value;
+    }
+  }
+  [SerializeField]
+  private bool vrModeEnabled = true;
+
+  public bool EnableAlignmentMarker {
+    get {
+      return enableAlignmentMarker;
+    }
+    set {
+      if (value != enableAlignmentMarker && device != null) {
+        device.SetAlignmentMarkerEnabled(value && NativeUILayerSupported);
+      }
+      enableAlignmentMarker = value;
+    }
+  }
+  [SerializeField]
+  private bool enableAlignmentMarker = true;
+
+  public bool EnableSettingsButton {
+    get {
+      return enableSettingsButton;
+    }
+    set {
+      if (value != enableSettingsButton && device != null) {
+        device.SetSettingsButtonEnabled(value && NativeUILayerSupported);
+      }
+      enableSettingsButton = value;
+    }
+  }
+  [SerializeField]
+  private bool enableSettingsButton = true;
+
+  public bool TapIsTrigger = true;
+
+  public float NeckModelScale {
+    get {
+      return neckModelScale;
+    }
+    set {
+      value = Mathf.Clamp01(value);
+      if (!Mathf.Approximately(value, neckModelScale) && device != null) {
+        device.SetNeckModelScale(value);
+      }
+      neckModelScale = value;
+    }
+  }
+  [SerializeField]
+  private float neckModelScale = 0.0f;
+
+  public bool AutoDriftCorrection {
+    get {
+      return autoDriftCorrection;
+    }
+    set {
+      if (value != autoDriftCorrection && device != null) {
+        device.SetAutoDriftCorrectionEnabled(value);
+      }
+      autoDriftCorrection = value;
+    }
+  }
+  [SerializeField]
+  private bool autoDriftCorrection = true;
+
+#if UNITY_IOS
+  public bool SyncWithCardboardApp {
+    get {
+      return syncWithCardboardApp;
+    }
+    set {
+      if (value && value != syncWithCardboardApp) {
+        Debug.LogWarning("Remember to enable iCloud capability in Xcode, "
+            + "and set the 'iCloud Documents' checkbox. "
+            + "Not doing this may cause the app to crash if the user tries to sync.");
+      }
+      syncWithCardboardApp = value;
+    }
+  }
+  [SerializeField]
+  private bool syncWithCardboardApp = false;
+#endif
+
+#if UNITY_EDITOR
+  // Mock settings for in-editor emulation of Cardboard while playing.
+  public bool autoUntiltHead = true;
+
+  // Whether to perform distortion correction in the editor.
+  public bool simulateDistortionCorrection = true;
+
+  // Use unity remote as the input source.
+  [HideInInspector]
+  public bool UseUnityRemoteInput = false;
+
+  public CardboardProfile.ScreenSizes ScreenSize {
+    get {
+      return screenSize;
+    }
+    set {
+      if (value != screenSize) {
+        screenSize = value;
+        device.UpdateScreenData();
+      }
+    }
+  }
+  [SerializeField]
+  private CardboardProfile.ScreenSizes screenSize = CardboardProfile.ScreenSizes.Nexus5;
+
+  public CardboardProfile.DeviceTypes DeviceType {
+    get {
+      return deviceType;
+    }
+    set {
+      if (value != deviceType) {
+        deviceType = value;
+        device.UpdateScreenData();
+      }
+    }
+  }
+  [SerializeField]
+  public CardboardProfile.DeviceTypes deviceType = CardboardProfile.DeviceTypes.CardboardJun2014;
+#endif
+
+  // The VR device that will be providing input data.
+  private static BaseVRDevice device;
+
+  public bool NativeDistortionCorrectionSupported { get; private set; }
+
+  public bool NativeUILayerSupported { get; private set; }
+
+  // The texture that Unity renders the scene to. This is sent to the VR device,
+  // which renders it to screen, correcting for lens distortion.
+  public RenderTexture StereoScreen {
+    get {
+      // Don't need it except for distortion correction.
+      if (!distortionCorrection || !vrModeEnabled) {
+        return null;
+      }
+      if (stereoScreen == null && NativeDistortionCorrectionSupported) {
+        StereoScreen = CreateStereoScreen();  // Note: use set{}
+      }
+      return stereoScreen;
+    }
+    set {
+      if (value == stereoScreen) {
+        return;
+      }
+      if (!NativeDistortionCorrectionSupported && value != null) {
+        Debug.LogError("Can't set StereoScreen: native distortion correction is not supported.");
+        return;
+      }
+      if (stereoScreen != null) {
+        stereoScreen.Release();
+      }
+      stereoScreen = value;
+      if (stereoScreen != null && !stereoScreen.IsCreated()) {
+        stereoScreen.Create();
+      }
+      if (device != null) {
+        device.SetStereoScreen(stereoScreen);
+      }
+    }
+  }
+  private static RenderTexture stereoScreen = null;
+
+  public bool UseDistortionEffect {
+    get {
+      return !NativeDistortionCorrectionSupported && distortionCorrection && vrModeEnabled
+          && SystemInfo.supportsRenderTextures;
+    }
+  }
+
+  // Describes the current device, including phone screen.
+  public CardboardProfile Profile {
+    get {
+      return device.Profile;
+    }
+  }
+
+  // Distinguish the stereo eyes.
+  public enum Eye {
+    Left,
+    Right,
+    Center
+  }
+
+  // When asking for project, viewport, etc, whether to assume viewing through
+  // the lenses.
+  public enum Distortion {
+    Distorted,   // Viewing through the lenses
+    Undistorted  // No lenses
+  }
+
+  // The transformation of head from origin in the tracking system.
+  public Pose3D HeadPose {
+    get {
+      return device.GetHeadPose();
+    }
+  }
+
+  // The transformation from head to eye.
+  public Pose3D EyePose(Eye eye) {
+    return device.GetEyePose(eye);
+  }
+
+  // The projection matrix for a given eye.
+  public Matrix4x4 Projection(Eye eye, Distortion distortion = Distortion.Distorted) {
+    return device.GetProjection(eye, distortion);
+  }
+
+  // The screen-space rectangle each eye should render into.
+  public Rect Viewport(Eye eye, Distortion distortion = Distortion.Distorted) {
+    return device.GetViewport(eye, distortion);
+  }
+
+  // The distance range from the viewer in user-space meters where objects
+  // may be viewed comfortably in stereo.  If the center of interest falls
+  // outside this range, the stereo eye separation should be adjusted to
+  // keep the onscreen disparity within the limits set by this range.
+  public Vector2 ComfortableViewingRange {
+    get {
+      return defaultComfortableViewingRange;
+    }
+  }
+  private readonly Vector2 defaultComfortableViewingRange = new Vector2(1.0f, 100000.0f);
+
+  private void InitDevice() {
+    if (device != null) {
+      device.Destroy();
+    }
+    device = BaseVRDevice.GetDevice();
+    device.Init();
+
+    List<string> diagnostics = new List<string>();
+    NativeDistortionCorrectionSupported = device.SupportsNativeDistortionCorrection(diagnostics);
+    if (diagnostics.Count > 0) {
+      Debug.LogWarning("Built-in distortion correction disabled. Causes: ["
+                       + String.Join("; ", diagnostics.ToArray()) + "]");
+    }
+    diagnostics.Clear();
+    NativeUILayerSupported = device.SupportsNativeUILayer(diagnostics);
+    if (diagnostics.Count > 0) {
+      Debug.LogWarning("Built-in UI layer disabled. Causes: ["
+                       + String.Join("; ", diagnostics.ToArray()) + "]");
+    }
+
+    device.SetVRModeEnabled(vrModeEnabled);
+    device.SetDistortionCorrectionEnabled(distortionCorrection
+        && NativeDistortionCorrectionSupported);
+    device.SetAlignmentMarkerEnabled(enableAlignmentMarker
+        && NativeUILayerSupported);
+    device.SetSettingsButtonEnabled(enableSettingsButton
+        && NativeUILayerSupported);
+    device.SetNeckModelScale(neckModelScale);
+    device.SetAutoDriftCorrectionEnabled(autoDriftCorrection);
+
+    device.UpdateScreenData();
+  }
+
+  // NOTE: Each scene load causes an OnDestroy of the current SDK, followed
+  // by and Awake of a new one.  That should not cause the underlying native
+  // code to hiccup.  Exception: developer may call Application.DontDestroyOnLoad
+  // on the SDK if they want it to survive across scene loads.
+  void Awake() {
+    if (sdk == null) {
+      sdk = this;
+    }
+    if (sdk != this) {
+      Debug.LogWarning("Cardboard SDK object should be a singleton.");
+      enabled = false;
+      return;
+    }
+#if UNITY_IOS
+    Application.targetFrameRate = 60;
+#endif
+    InitDevice();
+    AddDummyCamera();
+    StereoScreen = null;
+  }
+
+  public event Action OnTrigger;
+
+  public event Action OnTilt;
+
+  public bool Triggered { get; private set; }
+
+  public bool Tilted { get; private set; }
+
+  private bool updated = false;
+
+  private CardboardUILayer uiLayer = null;
+
+  public void UpdateState() {
+    if (!updated) {
+      device.UpdateState();
+      if (TapIsTrigger) {
+        if (Input.GetMouseButtonUp(0)) {
+          device.triggered = true;
+        }
+        if (Input.GetKeyUp(KeyCode.Escape)) {
+          device.tilted = true;
+        }
+      }
+      updated = true;
+    }
+  }
+
+  private void DispatchEvents() {
+    Triggered = device.triggered;
+    Tilted = device.tilted;
+    device.triggered = false;
+    device.tilted = false;
+
+    if (Tilted) {
+      if (OnTilt != null) {
+        OnTilt();
+      }
+    }
+    if (Triggered) {
+      if (OnTrigger != null) {
+        OnTrigger();
+      }
+    }
+  }
+
+  private void AddDummyCamera() {
+    var go = gameObject;
+    if (go.GetComponent<Camera>()) {
+      go = new GameObject("CardboardDummy");
+      go.transform.parent = gameObject.transform;
+    }
+    var cam = go.AddComponent<Camera>();
+    cam.clearFlags = CameraClearFlags.SolidColor;
+    cam.backgroundColor = Color.black;
+    cam.cullingMask = 0;
+    cam.useOcclusionCulling = false;
+    cam.depth = -100;
+  }
+
+  IEnumerator EndOfFrame() {
+    while (true) {
+      yield return new WaitForEndOfFrame();
+      UpdateState();
+      device.PostRender(vrModeEnabled);
+      if (vrModeEnabled && !NativeUILayerSupported) {
+        if (uiLayer == null) {
+          uiLayer = new CardboardUILayer();
+        }
+        uiLayer.Draw();
+      }
+      DispatchEvents();
+      updated = false;
+    }
+  }
+
+  // Return a StereoScreen with sensible default values.
+  public RenderTexture CreateStereoScreen() {
+    return device.CreateStereoScreen();
+  }
+
+  // Reset the tracker so that the user's current direction becomes forward.
+  public void Recenter() {
+    device.Recenter();
+  }
+
+  // Set the screen coordinates of the mouse/touch event.
+  public void SetTouchCoordinates(int x, int y) {
+    device.SetTouchCoordinates(x, y);
+  }
+
+  void OnEnable() {
+    device.OnPause(false);
+    StartCoroutine("EndOfFrame");
+  }
+
+  void OnDisable() {
+    StopCoroutine("EndOfFrame");
+    device.OnPause(true);
+  }
+
+  void OnApplicationPause(bool pause) {
+    device.OnPause(pause);
+  }
+
+  void OnApplicationFocus(bool focus) {
+    device.OnFocus(focus);
+  }
+
+  void OnLevelWasLoaded(int level) {
+    device.Reset();
+  }
+
+  void OnDestroy() {
+    if (device != null) {
+      device.Destroy();
+    }
+    if (sdk == this) {
+      sdk = null;
+    }
+  }
+
+  void OnApplicationQuit() {
+    device.OnApplicationQuit();
+  }
+
+  //********* OBSOLETE ACCESSORS *********
+
+  [System.Obsolete("Use DistortionCorrection instead.")]
+  public bool nativeDistortionCorrection {
+    get { return DistortionCorrection; }
+    set { DistortionCorrection = value; }
+  }
+
+  [System.Obsolete("InCardboard is deprecated.")]
+  public bool InCardboard { get { return true; } }
+
+  [System.Obsolete("Use Triggered instead.")]
+  public bool CardboardTriggered { get { return Triggered; } }
+
+  [System.Obsolete("Use HeadPose instead.")]
+  public Matrix4x4 HeadView { get { return HeadPose.Matrix; } }
+
+  [System.Obsolete("Use HeadPose instead.")]
+  public Quaternion HeadRotation { get { return HeadPose.Orientation; } }
+
+  [System.Obsolete("Use HeadPose instead.")]
+  public Vector3 HeadPosition { get { return HeadPose.Position; } }
+
+  [System.Obsolete("Use EyePose() instead.")]
+  public Matrix4x4 EyeView(Eye eye) {
+    return EyePose(eye).Matrix;
+  }
+
+  [System.Obsolete("Use EyePose() instead.")]
+  public Vector3 EyeOffset(Eye eye) {
+    return EyePose(eye).Position;
+  }
+
+  [System.Obsolete("Use Projection() instead.")]
+  public Matrix4x4 UndistortedProjection(Eye eye) {
+    return Projection(eye, Distortion.Undistorted);
+  }
+
+  [System.Obsolete("Use Viewport() instead.")]
+  public Rect EyeRect(Eye eye) {
+    return Viewport(eye, Distortion.Distorted);
+  }
+
+  [System.Obsolete("Use ComfortableViewingRange instead.")]
+  public float MinimumComfortDistance { get { return ComfortableViewingRange.x; } }
+
+  [System.Obsolete("Use ComfortableViewingRange instead.")]
+  public float MaximumComfortDistance { get { return ComfortableViewingRange.y; } }
+}
+```
+
+### Assets/Cardboard/Scripts/CardboardEye.cs
+```
+﻿// Copyright 2014 Google Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+using UnityEngine;
+using System.Reflection;
+
+// Controls one camera of a stereo pair.  Each frame, it mirrors the settings of
+// the parent mono Camera, and then sets up side-by-side stereo with an appropriate
+// projection based on the head-tracking data from the Cardboard.SDK object.
+// To enable a stereo camera pair, enable the parent mono camera and set
+// Cardboard.SDK.vrModeEnabled = true.
+// NOTE: If you programmatically change the set of CardboardEyes belonging to a
+// StereoController, be sure to call InvalidateEyes() on it in order to reset its
+// cache.
+[RequireComponent(typeof(Camera))]
+public class CardboardEye : MonoBehaviour {
+  // Whether this is the left eye or the right eye.
+  public Cardboard.Eye eye;
+
+  [Tooltip("Culling mask layers that this eye should toggle relative to the parent camera.")]
+  public LayerMask toggleCullingMask = 0;
+
+  // The stereo controller in charge of this eye (and whose mono camera
+  // we will copy settings from).
+  private StereoController controller;
+  public StereoController Controller {
+    // This property is set up to work both in editor and in player.
+    get {
+      if (transform.parent == null) { // Should not happen.
+        return null;
+      }
+      if ((Application.isEditor && !Application.isPlaying) || controller == null) {
+        // Go find our controller.
+        return transform.parent.GetComponentInParent<StereoController>();
+      }
+      return controller;
+    }
+  }
+
+  public CardboardHead Head {
+    get {
+      return GetComponentInParent<CardboardHead>();
+    }
+  }
+
+#if UNITY_5
+  // For backwards source code compatibility, since we refer to the camera component A LOT in
+  // this script.
+  new private Camera camera;
+
+  void Awake() {
+    camera = GetComponent<Camera>();
+  }
+#endif
+
+  void Start() {
+    var ctlr = Controller;
+    if (ctlr == null) {
+      Debug.LogError("CardboardEye must be child of a StereoController.");
+      enabled = false;
+    }
+    // Save reference to the found controller.
+    controller = ctlr;
+    // Add an image effect when playing in the editor to preview the distortion correction, since
+    // native distortion corrrection is only available on the phone.
+    if (Application.isPlaying && !Cardboard.SDK.NativeDistortionCorrectionSupported
+        && SystemInfo.supportsRenderTextures) {
+      var effect = GetComponent<RadialUndistortionEffect>();
+      if (effect == null) {
+        effect = gameObject.AddComponent<RadialUndistortionEffect>();
+      }
+    }
+  }
+
+  private void FixProjection(ref Matrix4x4 proj, float near, float far, float ipdScale) {
+    // Adjust for non-fullscreen camera.  Cardboard SDK assumes fullscreen,
+    // so the aspect ratio might not match.
+    float aspectFix = camera.rect.height / camera.rect.width / 2;
+    proj[0, 0] *= aspectFix;
+
+    // Adjust for IPD scale.  This changes the vergence of the two frustums.
+    Vector2 dir = transform.localPosition; // ignore Z
+    dir = dir.normalized * ipdScale;
+    proj[0, 2] *= Mathf.Abs(dir.x);
+    proj[1, 2] *= Mathf.Abs(dir.y);
+
+    // Cardboard had to pass "nominal" values of near/far to the SDK, which
+    // we fix here to match our mono camera's specific values.
+    proj[2, 2] = (near + far) / (near - far);
+    proj[2, 3] = 2 * near * far / (near - far);
+  }
+
+  private void Setup() {
+    // Shouldn't happen because of the check in Start(), but just in case...
+    if (controller == null) {
+      return;
+    }
+
+    var monoCamera = controller.GetComponent<Camera>();
+    Matrix4x4 proj = Cardboard.SDK.Projection(eye);
+
+    CopyCameraAndMakeSideBySide(controller, proj[0,2], proj[1,2]);
+
+    // Zoom the stereo cameras if requested.
+    float lerp = Mathf.Clamp01(controller.matchByZoom) * Mathf.Clamp01(controller.matchMonoFOV);
+    // Lerping the reciprocal of proj(1,1) so zooming is linear in the frustum width, not the depth.
+    float monoProj11 = monoCamera.projectionMatrix[1, 1];
+    float zoom = 1 / Mathf.Lerp(1 / proj[1, 1], 1 / monoProj11, lerp) / proj[1, 1];
+    proj[0, 0] *= zoom;
+    proj[1, 1] *= zoom;
+
+    // Calculate stereo adjustments based on the center of interest.
+    float ipdScale;
+    float eyeOffset;
+    controller.ComputeStereoAdjustment(proj[1, 1], transform.lossyScale.z,
+                                       out ipdScale, out eyeOffset);
+
+    // Set up the eye's view transform.
+    transform.localPosition = ipdScale * Cardboard.SDK.EyePose(eye).Position +
+                              eyeOffset * Vector3.forward;
+
+    // Set up the eye's projection.
+    float near = monoCamera.nearClipPlane;
+    float far = monoCamera.farClipPlane;
+    FixProjection(ref proj, near, far, ipdScale);
+    camera.projectionMatrix = proj;
+
+    if (Application.isEditor) {
+      // So you can see the approximate frustum in the Scene view when the camera is selected.
+      camera.fieldOfView = 2 * Mathf.Atan(1 / proj[1, 1]) * Mathf.Rad2Deg;
+    }
+
+    // Set up variables for an image effect that will do distortion correction, e.g. the
+    // RadialDistortionEffect.  Note that native distortion correction should take precedence
+    // over an image effect, so if that is active then we don't need to compute these variables.
+    // (Exception: we're in the editor, so we use the image effect to preview the distortion
+    // correction, because native distortion correction only works on the phone.)
+    if (Cardboard.SDK.UseDistortionEffect) {
+      Matrix4x4 realProj = Cardboard.SDK.Projection(eye, Cardboard.Distortion.Undistorted);
+      FixProjection(ref realProj, near, far, ipdScale);
+      // Parts of the projection matrices that we need to convert texture coordinates between
+      // distorted and undistorted frustums.  Include the transform between texture space [0..1]
+      // and NDC [-1..1] (that's what the -1 and the /2 are for).  Also note that the zoom
+      // factor is removed, because that will interfere with the distortion calculation.
+      Vector4 projvec = new Vector4(proj[0, 0] / zoom, proj[1, 1] / zoom,
+                                    proj[0, 2] - 1, proj[1, 2] - 1) / 2;
+      Vector4 unprojvec = new Vector4(realProj[0, 0], realProj[1, 1],
+                                      realProj[0, 2] - 1, realProj[1, 2] - 1) / 2;
+      Shader.SetGlobalVector("_Projection", projvec);
+      Shader.SetGlobalVector("_Unprojection", unprojvec);
+      CardboardProfile p = Cardboard.SDK.Profile;
+      Shader.SetGlobalVector("_Undistortion",
+                             new Vector4(p.device.inverse.k1, p.device.inverse.k2));
+      Shader.SetGlobalVector("_Distortion",
+                             new Vector4(p.device.distortion.k1, p.device.distortion.k2));
+    }
+
+    if (controller.StereoScreen == null) {
+      Rect rect = camera.rect;
+      if (!Cardboard.SDK.DistortionCorrection
+          || Cardboard.SDK.UseDistortionEffect) {
+        // We are rendering straight to the screen.  Use the reported rect that is visible
+        // through the device's lenses.
+        Rect view = Cardboard.SDK.Viewport(eye);
+        if (eye == Cardboard.Eye.Right) {
+          rect.x -= 0.5f;
+        }
+        rect.width *= 2 * view.width;
+        rect.x = view.x + 2 * rect.x * view.width;
+        rect.height *= view.height;
+        rect.y = view.y + rect.y * view.height;
+      }
+      if (Application.isEditor) {
+        // The Game window's aspect ratio may not match the fake device parameters.
+        float realAspect = (float)Screen.width / Screen.height;
+        float fakeAspect = Cardboard.SDK.Profile.screen.width / Cardboard.SDK.Profile.screen.height;
+        float aspectComparison = fakeAspect / realAspect;
+        if (aspectComparison < 1) {
+          rect.width *= aspectComparison;
+          rect.x *= aspectComparison;
+          rect.x += (1 - aspectComparison) / 2;
+        } else {
+          rect.height /= aspectComparison;
+        }
+      }
+      camera.rect = rect;
+    }
+  }
+
+  // Called by StereoController to run the whole render pipeline for this camera.
+  public void Render()
+  {
+    Setup();
+
+    // Use the "fast" or "slow" method.  Fast means the camera draws right into one half of
+    // the stereo screen.  Slow means it draws first to a side buffer, and then the buffer
+    // is written to the screen. The slow method is provided because a lot of Image Effects
+    // don't work if you draw to only part of the window.
+    if (controller.directRender) {
+      // Redirect to our stereo screen.
+      camera.targetTexture = controller.StereoScreen;
+      // Draw!
+      camera.Render();
+    } else {
+      // Save the viewport rectangle and reset to "full screen".
+      Rect pixRect = camera.pixelRect;
+      camera.rect = new Rect (0, 0, 1, 1);
+      // Redirect to a temporary texture.  The defaults are supposedly Android-friendly.
+      RenderTexture stereoScreen = controller.StereoScreen;
+      int screenWidth = stereoScreen ? stereoScreen.width : Screen.width;
+      int screenHeight = stereoScreen ? stereoScreen.height : Screen.height;
+      int depth = stereoScreen ? stereoScreen.depth : 16;
+      RenderTextureFormat format = stereoScreen ? stereoScreen.format : RenderTextureFormat.RGB565;
+      camera.targetTexture = RenderTexture.GetTemporary((int)pixRect.width, (int)pixRect.height,
+                                                        depth, format);
+      // Draw!
+      camera.Render();
+      // Blit the temp texture to the stereo screen.
+      RenderTexture oldTarget = RenderTexture.active;
+      RenderTexture.active = stereoScreen;
+      GL.PushMatrix();
+      GL.LoadPixelMatrix(0, screenWidth, screenHeight, 0);
+      // Camera rects are in screen coordinates (bottom left is origin), but DrawTexture takes a
+      // rect in GUI coordinates (top left is origin).
+      Rect blitRect = pixRect;
+      blitRect.y = screenHeight - pixRect.height - pixRect.y;
+      // Blit!
+      Graphics.DrawTexture(blitRect, camera.targetTexture);
+      // Clean up.
+      GL.PopMatrix();
+      RenderTexture.active = oldTarget;
+      RenderTexture.ReleaseTemporary(camera.targetTexture);
+    }
+    camera.targetTexture = null;
+  }
+
+  // Alternate means of rendering stereo, when you don't plan to switch in and out of VR mode:
+  // In the editor, disable the MainCamera's camera component.  Enable the two stereo eye
+  // camera components.  Note: due to a quirk of Unity, there must be at least one camera
+  // not rendering to a texture, preferably last in order.  If necessary, add a dummy camera
+  // to the scene with a high depth value, it's clear flags set to "Don't Clear", and culling mask
+  // set to Nothing.
+  void OnPreCull() {
+    if (camera.enabled) {
+      Setup();
+      camera.targetTexture = controller.StereoScreen;
+    }
+  }
+
+  // Helper to copy camera settings from the controller's mono camera.
+  // Used in OnPreCull and the custom editor for StereoController.
+  // The parameters parx and pary, if not left at default, should come from a
+  // projection matrix returned by the SDK.
+  // They affect the apparent depth of the camera's window.  See OnPreCull().
+  public void CopyCameraAndMakeSideBySide(StereoController controller,
+                                          float parx = 0, float pary = 0) {
+#if UNITY_5
+#if UNITY_EDITOR
+    // Member variable 'camera' not always initialized when this method called in Editor.
+    // So, we'll just make a local of the same name.
+    var camera = GetComponent<Camera>();
+#endif
+#endif
+
+    // Sync the camera properties.
+    camera.CopyFrom(controller.GetComponent<Camera>());
+    camera.cullingMask ^= toggleCullingMask.value;
+
+    // Reset transform, which was clobbered by the CopyFrom() call.
+    // Since we are a child of the mono camera, we inherit its
+    // transform already.
+    // Use nominal IPD for the editor.  During play, OnPreCull() will
+    // compute a real value.
+    float ipd = CardboardProfile.Default.device.lenses.separation * controller.stereoMultiplier;
+    transform.localPosition = (eye == Cardboard.Eye.Left ? -ipd/2 : ipd/2) * Vector3.right;
+    transform.localRotation = Quaternion.identity;
+    transform.localScale = Vector3.one;
+
+    // Set up side-by-side stereo.
+    // Note: The code is written this way so that non-fullscreen cameras
+    // (PIP: picture-in-picture) still work in stereo.  Even if the PIP's content is
+    // not going to be in stereo, the PIP itself still has to be rendered in both eyes.
+    Rect rect = camera.rect;
+
+    // Move away from edges if padding requested.  Some HMDs make the edges of the
+    // screen a bit hard to see.
+    Vector2 center = rect.center;
+    center.x = Mathf.Lerp(center.x, 0.5f, Mathf.Clamp01(controller.stereoPaddingX));
+    center.y = Mathf.Lerp(center.y, 0.5f, Mathf.Clamp01(controller.stereoPaddingY));
+    rect.center = center;
+
+    // Semi-hacky aspect ratio adjustment because the screen is only half as wide due
+    // to side-by-side stereo, to make sure the PIP width fits.
+    float width = Mathf.SmoothStep(-0.5f, 0.5f, (rect.width + 1) / 2);
+    rect.x += (rect.width - width) / 2;
+    rect.width = width;
+
+    // Divide the outside region of window proportionally in each half of the screen.
+    rect.x *= (0.5f - rect.width) / (1 - rect.width);
+    if (eye == Cardboard.Eye.Right) {
+      rect.x += 0.5f; // Move to right half of the screen.
+    }
+
+    // Adjust the window for requested parallax.  This affects the apparent depth of the
+    // window in the main camera's screen.  Useful for PIP windows only, where rect.width < 1.
+    float parallax = Mathf.Clamp01(controller.screenParallax);
+    if (controller.GetComponent<Camera>().rect.width < 1 && parallax > 0) {
+      // Note: parx and pary are signed, with opposite signs in each eye.
+      rect.x -= parx / 4 * parallax; // Extra factor of 1/2 because of side-by-side stereo.
+      rect.y -= pary / 2 * parallax;
+    }
+
+    camera.rect = rect;
+  }
+}
+```
+
+### Assets/Cardboard/Scripts/CardboardHead.cs
+```
+﻿// Copyright 2014 Google Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+using UnityEngine;
+
+public class CardboardHead : MonoBehaviour {
+  // Which types of tracking this instance will use.
+  public bool trackRotation = true;
+  public bool trackPosition = true;
+
+  // If set, the head transform will be relative to it.
+  public Transform target;
+
+  // Determine whether head updates early or late in frame.
+  // Defaults to false in order to reduce latency.
+  // Set this to true if you see jitter due to other scripts using this
+  // object's orientation (or a child's) in their own LateUpdate() functions,
+  // e.g. to cast rays.
+  public bool updateEarly = false;
+
+  // Where is this head looking?
+  public Ray Gaze {
+    get {
+      UpdateHead();
+      return new Ray(transform.position, transform.forward);
+    }
+  }
+
+  private bool updated;
+
+  void Update() {
+    updated = false;  // OK to recompute head pose.
+    if (updateEarly) {
+      UpdateHead();
+    }
+  }
+
+  // Normally, update head pose now.
+  void LateUpdate() {
+    UpdateHead();
+  }
+
+  // Compute new head pose.
+  private void UpdateHead() {
+    if (updated) {  // Only one update per frame, please.
+      return;
+    }
+    updated = true;
+    Cardboard.SDK.UpdateState();
+
+    if (trackRotation) {
+      var rot = Cardboard.SDK.HeadPose.Orientation;
+      if (target == null) {
+        transform.localRotation = rot;
+      } else {
+        transform.rotation = rot * target.rotation;
+      }
+    }
+
+    if (trackPosition) {
+      Vector3 pos = Cardboard.SDK.HeadPose.Position;
+      if (target == null) {
+        transform.localPosition = pos;
+      } else {
+        transform.position = target.position + target.rotation * pos;
+      }
+    }
+  }
+}
+```
+
+### Assets/Cardboard/Scripts/CardboardProfile.cs
+```
+﻿using System;
+using UnityEngine;
+
+// Measurements of a particular phone in a particular Cardboard device.
+[System.Serializable]
+public class CardboardProfile {
+  public CardboardProfile Clone() {
+    return new CardboardProfile {
+      screen = this.screen,
+      device = this.device
+    };
+  }
+
+  // Information about the screen.  All distances in meters, measured as the phone is expected
+  // to be placed in the Cardboard, i.e. landscape orientation.
+  [System.Serializable]
+  public struct Screen {
+    public float width;   // The long edge of the phone.
+    public float height;  // The short edge of the phone.
+    public float border;  // Distance from bottom of the cardboard to the bottom edge of screen.
+  }
+
+  // Information about the lens placement in the Cardboard.  All distances in meters.
+  [System.Serializable]
+  public struct Lenses {
+    public float separation;     // Center to center.
+    public float offset;         // Offset of lens center from top or bottom of cardboard.
+    public float screenDistance; // Distance from lens center to the phone screen.
+
+    public int alignment;  // Determines whether lenses are placed relative to top, bottom or
+                           // center.  It is actually a signum (-1, 0, +1) relating the scale of
+                           // the offset's coordinates to the device coordinates.
+
+    public const int AlignTop = -1;    // Offset is measured down from top of device.
+    public const int AlignCenter = 0;  // Center alignment ignores offset, hence scale is zero.
+    public const int AlignBottom = 1;  // Offset is measured up from bottom of device.
+  }
+
+  // Information about the viewing angles through the lenses.  All angles in degrees, measured
+  // away from the optical axis, i.e. angles are all positive.  It is assumed that left and right
+  // eye FOVs are mirror images, so that both have the same inner and outer angles.  Angles do not
+  // need to account for the limits due to screen size.
+  [System.Serializable]
+  public struct MaxFOV {
+    public float outer;  // Towards the side of the screen.
+    public float inner;  // Towards the center line of the screen.
+    public float upper;  // Towards the top of the screen.
+    public float lower;  // Towards the bottom of the screen.
+  }
+
+  // Information on how the lens distorts light rays.  Also used for the (approximate) inverse
+  // distortion.  Assumes a radially symmetric pincushion/barrel distortion model.
+  [System.Serializable]
+  public struct Distortion {
+    public float k1;
+    public float k2;
+
+    public float distort(float r) {
+      float r2 = r * r;
+      return ((k2 * r2 + k1) * r2 + 1) * r;
+    }
+  }
+
+  [System.Serializable]
+  public struct Device {
+    public Lenses lenses;
+    public MaxFOV maxFOV;
+    public Distortion distortion;
+    public Distortion inverse;
+  }
+
+  // The combined set of information about a Cardboard profile.
+  public Screen screen;
+  public Device device;
+
+  // The vertical offset of the lens centers from the screen center.
+  public float VerticalLensOffset {
+    get {
+      return (device.lenses.offset - screen.border - screen.height/2) * device.lenses.alignment;
+    }
+  }
+
+  // Some known profiles.
+
+  public enum ScreenSizes {
+    Nexus5,
+    Nexus6,
+    GalaxyS6,
+    GalaxyNote4,
+    LGG3,
+    iPhone4,
+    iPhone5,
+    iPhone6,
+    iPhone6p,
+  };
+
+  public static readonly Screen Nexus5 = new Screen {
+    width = 0.110f,
+    height = 0.062f,
+    border = 0.004f
+  };
+
+  public static readonly Screen Nexus6 = new Screen {
+    width = 0.133f,
+    height = 0.074f,
+    border = 0.004f
+  };
+
+  public static readonly Screen GalaxyS6 = new Screen {
+    width = 0.114f,
+    height = 0.0635f,
+    border = 0.0035f
+  };
+
+  public static readonly Screen GalaxyNote4 = new Screen {
+    width = 0.125f,
+    height = 0.0705f,
+    border = 0.0045f
+  };
+
+  public static readonly Screen LGG3 = new Screen {
+    width = 0.121f,
+    height = 0.068f,
+    border = 0.003f
+  };
+
+  public static readonly Screen iPhone4 = new Screen {
+    width = 0.075f,
+    height = 0.050f,
+    border = 0.0045f
+  };
+
+  public static readonly Screen iPhone5 = new Screen {
+    width = 0.089f,
+    height = 0.050f,
+    border = 0.0045f
+  };
+
+  public static readonly Screen iPhone6 = new Screen {
+    width = 0.104f,
+    height = 0.058f,
+    border = 0.005f
+  };
+
+  public static readonly Screen iPhone6p = new Screen {
+    width = 0.112f,
+    height = 0.068f,
+    border = 0.005f
+  };
+
+  public enum DeviceTypes {
+    CardboardJun2014,
+    CardboardMay2015,
+    GoggleTechC1Glass,
+  };
+
+  public static readonly Device CardboardJun2014 = new Device {
+    lenses = {
+      separation = 0.060f,
+      offset = 0.035f,
+      screenDistance = 0.042f,
+      alignment = Lenses.AlignBottom,
+    },
+    maxFOV = {
+      outer = 40.0f,
+      inner = 40.0f,
+      upper = 40.0f,
+      lower = 40.0f
+    },
+    distortion = {
+      k1 = 0.441f,
+      k2 = 0.156f
+    },
+    inverse = ApproximateInverse(0.441f, 0.156f)
+  };
+
+  public static readonly Device CardboardMay2015 = new Device {
+    lenses = {
+      separation = 0.062f,
+      offset = 0.035f,
+      screenDistance = 0.037f,
+      alignment = Lenses.AlignBottom,
+    },
+    maxFOV = {
+      outer = 50.0f,
+      inner = 50.0f,
+      upper = 50.0f,
+      lower = 50.0f
+    },
+    distortion = {
+      k1 = 0.26f,
+      k2 = 0.27f
+    },
+    inverse = ApproximateInverse(0.26f, 0.27f)
+  };
+
+  public static readonly Device GoggleTechC1Glass = new Device {
+    lenses = {
+      separation = 0.065f,
+      offset = 0.036f,
+      screenDistance = 0.058f,
+      alignment = Lenses.AlignBottom,
+    },
+    maxFOV = {
+      outer = 50.0f,
+      inner = 50.0f,
+      upper = 50.0f,
+      lower = 50.0f
+    },
+    distortion = {
+      k1 = 0.3f,
+      k2 = 0
+    },
+    inverse = ApproximateInverse(0.3f, 0)
+  };
+
+  // Nexus 5 in a v1 Cardboard.
+  public static readonly CardboardProfile Default = new CardboardProfile {
+    screen = Nexus5,
+    device = CardboardJun2014
+  };
+
+  public static CardboardProfile GetKnownProfile(ScreenSizes screenSize, DeviceTypes deviceType) {
+    Screen screen;
+    switch (screenSize) {
+      case ScreenSizes.Nexus6:
+        screen = Nexus6;
+        break;
+      case ScreenSizes.GalaxyS6:
+        screen = GalaxyS6;
+        break;
+      case ScreenSizes.GalaxyNote4:
+        screen = GalaxyNote4;
+        break;
+      case ScreenSizes.LGG3:
+        screen = LGG3;
+        break;
+      case ScreenSizes.iPhone4:
+        screen = iPhone4;
+        break;
+      case ScreenSizes.iPhone5:
+        screen = iPhone5;
+        break;
+      case ScreenSizes.iPhone6:
+        screen = iPhone6;
+        break;
+      case ScreenSizes.iPhone6p:
+        screen = iPhone6p;
+        break;
+      default:
+        screen = Nexus5;
+        break;
+    }
+    Device device;
+    switch (deviceType) {
+      case DeviceTypes.CardboardMay2015:
+        device = CardboardMay2015;
+        break;
+      default:
+        device = CardboardJun2014;
+        break;
+    }
+    return new CardboardProfile { screen = screen, device = device };
+  }
+
+  public void GetLeftEyeVisibleTanAngles(ref float[] result) {
+    // Tan-angles from the max FOV.
+    float fovLeft = (float) Math.Tan(-device.maxFOV.outer * Math.PI / 180);
+    float fovTop = (float) Math.Tan(device.maxFOV.upper * Math.PI / 180);
+    float fovRight = (float) Math.Tan(device.maxFOV.inner * Math.PI / 180);
+    float fovBottom = (float) Math.Tan(-device.maxFOV.lower * Math.PI / 180);
+    // Viewport size.
+    float halfWidth = screen.width / 4;
+    float halfHeight = screen.height / 2;
+    // Viewport center, measured from left lens position.
+    float centerX = device.lenses.separation / 2 - halfWidth;
+    float centerY = -VerticalLensOffset;
+    float centerZ = device.lenses.screenDistance;
+    // Tan-angles of the viewport edges, as seen through the lens.
+    float screenLeft = device.distortion.distort((centerX - halfWidth) / centerZ);
+    float screenTop = device.distortion.distort((centerY + halfHeight) / centerZ);
+    float screenRight = device.distortion.distort((centerX + halfWidth) / centerZ);
+    float screenBottom = device.distortion.distort((centerY - halfWidth) / centerZ);
+    // Compare the two sets of tan-angles and take the value closer to zero on each side.
+    result[0] = Math.Max(fovLeft, screenLeft);
+    result[1] = Math.Min(fovTop, screenTop);
+    result[2] = Math.Min(fovRight, screenRight);
+    result[3] = Math.Max(fovBottom, screenBottom);
+  }
+
+  public void GetLeftEyeNoLensTanAngles(ref float[] result) {
+    // Tan-angles from the max FOV.
+    float fovLeft = device.inverse.distort((float)Math.Tan(-device.maxFOV.outer * Math.PI / 180));
+    float fovTop = device.inverse.distort((float)Math.Tan(device.maxFOV.upper * Math.PI / 180));
+    float fovRight = device.inverse.distort((float)Math.Tan(device.maxFOV.inner * Math.PI / 180));
+    float fovBottom = device.inverse.distort((float)Math.Tan(-device.maxFOV.lower * Math.PI / 180));
+    // Viewport size.
+    float halfWidth = screen.width / 4;
+    float halfHeight = screen.height / 2;
+    // Viewport center, measured from left lens position.
+    float centerX = device.lenses.separation / 2 - halfWidth;
+    float centerY = -VerticalLensOffset;
+    float centerZ = device.lenses.screenDistance;
+    // Tan-angles of the viewport edges, as seen through the lens.
+    float screenLeft = (centerX - halfWidth) / centerZ;
+    float screenTop = (centerY + halfHeight) / centerZ;
+    float screenRight = (centerX + halfWidth) / centerZ;
+    float screenBottom = (centerY - halfWidth) / centerZ;
+    // Compare the two sets of tan-angles and take the value closer to zero on each side.
+    result[0] = Math.Max(fovLeft, screenLeft);
+    result[1] = Math.Min(fovTop, screenTop);
+    result[2] = Math.Min(fovRight, screenRight);
+    result[3] = Math.Max(fovBottom, screenBottom);
+  }
+
+  public Rect GetLeftEyeVisibleScreenRect(float[] undistortedFrustum) {
+    float dist = device.lenses.screenDistance;
+    float eyeX = (screen.width - device.lenses.separation) / 2;
+    float eyeY = VerticalLensOffset + screen.height / 2;
+    float left = (undistortedFrustum[0] * dist + eyeX) / screen.width;
+    float top = (undistortedFrustum[1] * dist + eyeY) / screen.height;
+    float right = (undistortedFrustum[2] * dist + eyeX) / screen.width;
+    float bottom = (undistortedFrustum[3] * dist + eyeY) / screen.height;
+    return new Rect(left, bottom, right - left, top - bottom);
+  }
+
+  // Solves a least-squares matrix equation.  Given the equation A * x = y, calculate the
+  // least-square fit x = inverse(A * transpose(A)) * transpose(A) * y.  The way this works
+  // is that, while A is typically not a square matrix (and hence not invertible), A * transpose(A)
+  // is always square.  That is:
+  //   A * x = y
+  //   transpose(A) * (A * x) = transpose(A) * y   <- multiply both sides by transpose(A)
+  //   (transpose(A) * A) * x = transpose(A) * y   <- associativity
+  //   x = inverse(transpose(A) * A) * transpose(A) * y  <- solve for x
+  // Matrix A's row count (first index) must match y's value count.  A's column count (second index)
+  // determines the length of the result vector x.
+  private static double[] solveLeastSquares(double[,] matA, double[] vecY) {
+    int numSamples = matA.GetLength(0);
+    int numCoefficients = matA.GetLength(1);
+    if (numSamples != vecY.Length) {
+      Debug.LogError("Matrix / vector dimension mismatch");
+      return null;
+    }
+    if (numCoefficients != 2) {
+      Debug.LogError("Only 2 coefficients supported.");
+      return null;
+    }
+
+    // Calculate transpose(A) * A
+    double[,] matATA = new double[numCoefficients, numCoefficients];
+    for (int k = 0; k < numCoefficients; ++k) {
+      for (int j = 0; j < numCoefficients; ++j) {
+        double sum = 0.0;
+        for (int i = 0; i < numSamples; ++i) {
+          sum += matA[i, j] * matA[i, k];
+        }
+        matATA[j, k] = sum;
+      }
+    }
+
+    // Calculate the inverse of transpose(A) * A.  Inverting isn't recommended for numerical
+    // stability, but should be ok for small and well-behaved data sets.  Using manual matrix
+    // inversion here (hence the restriction of numCoefficients to 2 in this function).
+    double[,] matInvATA = new double[numCoefficients, numCoefficients];
+    double det = matATA[0, 0] * matATA[1, 1] - matATA[0, 1] * matATA[1, 0];
+    matInvATA[0, 0] = matATA[1, 1] / det;
+    matInvATA[1, 1] = matATA[0, 0] / det;
+    matInvATA[0, 1] = -matATA[1, 0] / det;
+    matInvATA[1, 0] = -matATA[0, 1] / det;
+
+    // Calculate transpose(A) * y
+    double[] vecATY = new double[numCoefficients];
+    for (int j = 0; j < numCoefficients; ++j) {
+      double sum = 0.0;
+      for (int i = 0; i < numSamples; ++i) {
+        sum += matA[i, j] * vecY[i];
+      }
+      vecATY[j] = sum;
+    }
+
+    // Now matrix multiply the previous values to get the result.
+    double[] vecX = new double[numCoefficients];
+    for (int j = 0; j < numCoefficients; ++j) {
+      double sum = 0.0;
+      for (int i = 0; i < numCoefficients; ++i) {
+        sum += matInvATA[i, j] * vecATY[i];
+      }
+      vecX[j] = sum;
+    }
+    return vecX;
+  }
+
+  public static Distortion ApproximateInverse(float k1, float k2, float maxRadius = 1,
+                                              int numSamples = 10) {
+    return ApproximateInverse(new Distortion { k1=k1, k2=k2 }, maxRadius, numSamples);
+  }
+
+  public static Distortion ApproximateInverse(Distortion distort, float maxRadius = 1,
+                                              int numSamples = 10) {
+    const int numCoefficients = 2;
+
+    // R + k1*R^3 + k2*R^5 = r, with R = rp = distort(r)
+    // Repeating for numSamples:
+    //   [ R0^3, R0^5 ] * [ K1 ] = [ r0 - R0 ]
+    //   [ R1^3, R1^5 ]   [ K2 ]   [ r1 - R1 ]
+    //   [ R2^3, R2^5 ]            [ r2 - R2 ]
+    //   [ etc... ]                [ etc... ]
+    // That is:
+    //   matA * [K1, K2] = y
+    // Solve:
+    //   [K1, K2] = inverse(transpose(matA) * matA) * transpose(matA) * y
+    double[,] matA = new double[numSamples, numCoefficients];
+    double[] vecY = new double[numSamples];
+    for (int i = 0; i < numSamples; ++i) {
+      float r = maxRadius * (i + 1) / (float) numSamples;
+      double rp = distort.distort(r);
+      double v = rp;
+      for (int j = 0; j < numCoefficients; ++j) {
+        v *= rp * rp;
+        matA[i, j] = v;
+      }
+      vecY[i] = r - rp;
+    }
+    double[] vecK = solveLeastSquares(matA, vecY);
+    return new Distortion {
+      k1 = (float)vecK[0],
+      k2 = (float)vecK[1]
+    };
+  }
+}
+```
+
+### Assets/Cardboard/Scripts/CardboardUILayer.cs
+```
+﻿// Copyright 2015 Google Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+using UnityEngine;
+
+public class CardboardUILayer {
+  // The gear has 6 identical sections, each spanning 60 degrees.
+  const float kAnglePerGearSection = 60;
+
+  // Half-angle of the span of the outer rim.
+  const float kOuterRimEndAngle = 12;
+
+  // Angle between the middle of the outer rim and the start of the inner rim.
+  const float kInnerRimBeginAngle = 20;
+
+  // Distance from center to outer rim, normalized so that the entire model
+  // fits in a [-1, 1] x [-1, 1] square.
+  const float kOuterRadius = 1;
+
+  // Distance from center to depressed rim, in model units.
+  const float kMiddleRadius = 0.75f;
+
+  // Radius of the inner hollow circle, in model units.
+  const float kInnerRadius = 0.3125f;
+
+  // Center line thickness in DP.
+  const float kCenterLineThicknessDp = 4;
+
+  // Button width in DP.
+  const int kButtonWidthDp = 28;
+
+  // Factor to scale the touch area that responds to the touch.
+  const float kTouchSlopFactor = 1.5f;
+
+  static readonly float[] Angles = {
+    0, kOuterRimEndAngle, kInnerRimBeginAngle,
+    kAnglePerGearSection - kInnerRimBeginAngle, kAnglePerGearSection - kOuterRimEndAngle
+  };
+
+  private Material material;
+  private float centerWidthPx;
+  private float buttonWidthPx;
+  private float xScale;
+  private float yScale;
+  private Matrix4x4 xfm;
+
+  private void ComputeMatrix() {
+    centerWidthPx = kCenterLineThicknessDp / 160.0f * Screen.dpi / 2;
+    buttonWidthPx = kButtonWidthDp / 160.0f * Screen.dpi / 2;
+    xScale = buttonWidthPx / Screen.width;
+    yScale = buttonWidthPx / Screen.height;
+    xfm = Matrix4x4.TRS(new Vector3(0.5f, yScale, 0), Quaternion.identity,
+        new Vector3(xScale, yScale, 1));
+  }
+
+  public CardboardUILayer() {
+    material = new Material(Shader.Find("Cardboard/SolidColor"));
+    material.color = new Color(0.8f, 0.8f, 0.8f);
+    if (!Application.isEditor) {
+      ComputeMatrix();
+    }
+  }
+
+  public void Draw() {
+    if (Cardboard.SDK.NativeUILayerSupported) {
+      return;
+    }
+    GL.Clear(true, false, Color.black);
+    material.SetPass(0);
+    if (Application.isEditor) {
+      ComputeMatrix();
+    }
+    if (Cardboard.SDK.EnableAlignmentMarker) {
+      int x = Screen.width / 2;
+      int w = (int)centerWidthPx;
+      int h = (int)(2 * kTouchSlopFactor * buttonWidthPx);
+      GL.PushMatrix();
+      GL.LoadPixelMatrix();
+      GL.Begin(GL.QUADS);
+      GL.Vertex3(x - w, h, 0);
+      GL.Vertex3(x - w, Screen.height - h, 0);
+      GL.Vertex3(x + w, Screen.height - h, 0);
+      GL.Vertex3(x + w, h, 0);
+      GL.End();
+      GL.PopMatrix();
+    }
+    if (Cardboard.SDK.EnableSettingsButton) {
+      GL.PushMatrix();
+      GL.LoadOrtho();
+      GL.MultMatrix(xfm);
+      GL.Begin(GL.TRIANGLE_STRIP);
+      for (int i = 0, n = Angles.Length * 6; i <= n; i++) {
+        float theta = (i / Angles.Length) * kAnglePerGearSection + Angles[i % Angles.Length];
+        float angle = (90 - theta) * Mathf.Deg2Rad;
+        float x = Mathf.Cos(angle);
+        float y = Mathf.Sin(angle);
+        float mod = Mathf.PingPong(theta, kAnglePerGearSection / 2);
+        float lerp = (mod - kOuterRimEndAngle) / (kInnerRimBeginAngle - kOuterRimEndAngle);
+        float r = Mathf.Lerp(kOuterRadius, kMiddleRadius, lerp);
+        GL.Vertex3(kInnerRadius * x, kInnerRadius * y, 0);
+        GL.Vertex3(r * x, r * y, 0);
+      }
+      GL.End();
+      GL.PopMatrix();
+    }
+  }
+}
+```
+
+### Assets/Cardboard/Scripts/GazeInputModule.cs
+```
+﻿// The MIT License (MIT)
+//
+// Copyright (c) 2014, Unity Technologies & Google, Inc.
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+//   The above copyright notice and this permission notice shall be included in
+//   all copies or substantial portions of the Software.
+//
+//   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+//   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+//   FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+//   AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+//   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+//   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+//   THE SOFTWARE.
+
+using UnityEngine;
+using UnityEngine.EventSystems;
+
+// An implementation of the BaseInputModule that uses the player's gaze and the magnet trigger
+// as a raycast generator.  To use, attach to the scene's EventSystem object.  Set the Canvas
+// object's Render Mode to World Space, and set its Event Camera to a (mono) camera that is
+// controlled by a CardboardHead.  If you'd like gaze to work with 3D scene objects, add a
+// PhysicsRaycaster to the gazing camera, and add a component that implements one of the Event
+// interfaces (EventTrigger will work nicely).  The objects must have colliders too.
+public class GazeInputModule : BaseInputModule {
+  [Tooltip("Whether gaze input is active in VR Mode only (true), or all the time (false).")]
+  public bool vrModeOnly = false;
+
+  [Tooltip("Optional object to place at raycast intersections as a 3D cursor. " +
+           "Be sure it is on a layer that raycasts will ignore.")]
+  public GameObject cursor;
+
+  // Time in seconds between the pointer down and up events sent by a magnet click.
+  // Allows time for the UI elements to make their state transitions.
+  [HideInInspector]
+  public float clickTime = 0.1f;  // Based on default time for a button to animate to Pressed.
+
+  // The pixel through which to cast rays, in viewport coordinates.  Generally, the center
+  // pixel is best, assuming a monoscopic camera is selected as the Canvas' event camera.
+  [HideInInspector]
+  public Vector2 hotspot = new Vector2(0.5f, 0.5f);
+
+  private PointerEventData pointerData;
+
+  public override bool ShouldActivateModule() {
+    if (!base.ShouldActivateModule()) {
+      return false;
+    }
+    return Cardboard.SDK.VRModeEnabled || !vrModeOnly;
+  }
+
+  public override void DeactivateModule() {
+    base.DeactivateModule();
+    if (pointerData != null) {
+      HandlePendingClick();
+      HandlePointerExitAndEnter(pointerData, null);
+      pointerData = null;
+    }
+    eventSystem.SetSelectedGameObject(null, GetBaseEventData());
+    if (cursor != null) {
+      cursor.SetActive(false);
+    }
+  }
+
+  public override bool IsPointerOverGameObject(int pointerId) {
+    return pointerData != null && pointerData.pointerEnter != null;
+  }
+
+  public override void Process() {
+    CastRayFromGaze();
+    UpdateCurrentObject();
+    PlaceCursor();
+    HandlePendingClick();
+    HandleTrigger();
+  }
+
+  private void CastRayFromGaze() {
+    if (pointerData == null) {
+      pointerData = new PointerEventData(eventSystem);
+    }
+    pointerData.Reset();
+    pointerData.position = new Vector2(hotspot.x * Screen.width, hotspot.y * Screen.height);
+    eventSystem.RaycastAll(pointerData, m_RaycastResultCache);
+    pointerData.pointerCurrentRaycast = FindFirstRaycast(m_RaycastResultCache);
+    m_RaycastResultCache.Clear();
+  }
+
+  private void UpdateCurrentObject() {
+    // Send enter events and update the highlight.
+    var go = pointerData.pointerCurrentRaycast.gameObject;
+    HandlePointerExitAndEnter(pointerData, go);
+    // Update the current selection, or clear if it is no longer the current object.
+    var selected = ExecuteEvents.GetEventHandler<ISelectHandler>(go);
+    if (selected == eventSystem.currentSelectedGameObject) {
+      ExecuteEvents.Execute(eventSystem.currentSelectedGameObject, GetBaseEventData(),
+                            ExecuteEvents.updateSelectedHandler);
+    }
+    else {
+      eventSystem.SetSelectedGameObject(null, pointerData);
+    }
+  }
+
+  private void PlaceCursor() {
+    if (cursor == null)
+      return;
+    var go = pointerData.pointerCurrentRaycast.gameObject;
+    cursor.SetActive(go != null);
+    if (cursor.activeInHierarchy) {
+      Camera cam = pointerData.enterEventCamera;
+      // Note: rays through screen start at near clipping plane.
+      float dist = pointerData.pointerCurrentRaycast.distance + cam.nearClipPlane;
+      cursor.transform.position = cam.transform.position + cam.transform.forward * dist;
+    }
+  }
+
+  private void HandlePendingClick() {
+    if (!pointerData.eligibleForClick || !Cardboard.SDK.Triggered
+        && Time.unscaledTime - pointerData.clickTime < clickTime) {
+      return;
+    }
+
+    // Send pointer up and click events.
+    ExecuteEvents.Execute(pointerData.pointerPress, pointerData, ExecuteEvents.pointerUpHandler);
+    ExecuteEvents.Execute(pointerData.pointerPress, pointerData, ExecuteEvents.pointerClickHandler);
+
+    // Clear the click state.
+    pointerData.pointerPress = null;
+    pointerData.rawPointerPress = null;
+    pointerData.eligibleForClick = false;
+    pointerData.clickCount = 0;
+  }
+
+  private void HandleTrigger() {
+    if (!Cardboard.SDK.Triggered) {
+      return;
+    }
+    var go = pointerData.pointerCurrentRaycast.gameObject;
+
+    // Send pointer down event.
+    pointerData.pressPosition = pointerData.position;
+    pointerData.pointerPressRaycast = pointerData.pointerCurrentRaycast;
+    pointerData.pointerPress =
+        ExecuteEvents.ExecuteHierarchy(go, pointerData, ExecuteEvents.pointerDownHandler)
+        ?? ExecuteEvents.GetEventHandler<IPointerClickHandler>(go);
+
+    // Save the pending click state.
+    pointerData.rawPointerPress = go;
+    pointerData.eligibleForClick = true;
+    pointerData.clickCount = 1;
+    pointerData.clickTime = Time.unscaledTime;
+  }
+}
+```
+
+### Assets/Cardboard/Scripts/Pose3D.cs
+```
+// Copyright 2014 Google Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+using UnityEngine;
+
+public class Pose3D {
+  // Right-handed to left-handed matrix converter (and vice versa).
+  protected static readonly Matrix4x4 flipZ = Matrix4x4.Scale(new Vector3(1, 1, -1));
+
+  public Vector3 Position { get; protected set; }
+  public Quaternion Orientation { get; protected set; }
+  public Matrix4x4 Matrix { get; protected set; }
+
+  public Matrix4x4 RightHandedMatrix {
+    get {
+      return flipZ * Matrix * flipZ;
+    }
+  }
+
+  public Pose3D() {
+    Position = Vector3.zero;
+    Orientation = Quaternion.identity;
+    Matrix = Matrix4x4.identity;
+  }
+
+  public Pose3D(Vector3 position, Quaternion orientation) {
+    Set(position, orientation);
+  }
+
+  public Pose3D(Matrix4x4 matrix) {
+    Set(matrix);
+  }
+
+  protected void Set(Vector3 position, Quaternion orientation) {
+    Position = position;
+    Orientation = orientation;
+    Matrix = Matrix4x4.TRS(position, orientation, Vector3.one);
+  }
+
+  protected void Set(Matrix4x4 matrix) {
+    Matrix = matrix;
+    Position = matrix.GetColumn(3);
+    Orientation = Quaternion.LookRotation(matrix.GetColumn(2), matrix.GetColumn(1));
+  }
+}
+
+public class MutablePose3D : Pose3D {
+  public new void Set(Vector3 position, Quaternion orientation) {
+    base.Set(position, orientation);
+  }
+
+  public new void Set(Matrix4x4 matrix) {
+    base.Set(matrix);
+  }
+
+  public void SetRightHanded(Matrix4x4 matrix) {
+    Set(flipZ * matrix * flipZ);
+  }
+}
+```
+
+### Assets/Cardboard/Scripts/RadialUndistortionEffect.cs
+```
+﻿// Copyright 2014 Google Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+using UnityEngine;
+using System.Collections;
+
+// Applies the inverse of the lens distortion to the image.  The image is "undistorted" so
+// that when viewed through the lenses (which redistort), the image looks normal.  In the case
+// of Cardboard, the lenses apply a pincushion distortion, so this effect applies a barrel
+// distortion to counteract that.
+[RequireComponent(typeof(Camera))]
+public class RadialUndistortionEffect : MonoBehaviour {
+
+#if UNITY_EDITOR
+  private StereoController controller;
+#endif
+  private Material material;
+
+  void Awake() {
+    if (!SystemInfo.supportsRenderTextures) {
+      Debug.Log("Radial Undistortion disabled: render textures not supported.");
+      return;
+    }
+    Shader shader = Shader.Find("Cardboard/Radial Undistortion");
+    if (shader == null) {
+      Debug.Log("Radial Undistortion disabled: shader not found.");
+      return;
+    }
+    material = new Material(shader);
+  }
+
+#if UNITY_EDITOR
+  void Start() {
+    var eye = GetComponent<CardboardEye>();
+    if (eye != null) {
+      controller = eye.Controller;
+    }
+  }
+#endif
+
+  void OnRenderImage(RenderTexture source, RenderTexture dest) {
+    // Check if we found our shader, and that native distortion correction is OFF (except maybe in
+    // the editor, since native is not available here).
+    bool disabled = material == null || !Cardboard.SDK.UseDistortionEffect;
+#if UNITY_EDITOR
+    bool mainCamera = controller != null && controller.GetComponent<Camera>().tag == "MainCamera";
+    disabled |= !mainCamera || !Cardboard.SDK.simulateDistortionCorrection;
+#endif
+    if (disabled) {
+      // Pass through, no effect.
+      Graphics.Blit(source, dest);
+    } else {
+      // Undistort the image.
+      Graphics.Blit(source, dest, material);
+    }
+  }
+}
+```
+
+### Assets/Cardboard/Scripts/StereoController.cs
+```
+﻿// Copyright 2014 Google Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+using UnityEngine;
+using System.Collections;
+using System.Linq;
+
+// Controls a pair of CardboardEye objects that will render the stereo view
+// of the camera this script is attached to.
+[RequireComponent(typeof(Camera))]
+public class StereoController : MonoBehaviour {
+  [Tooltip("Whether to draw directly to the output window (true), or " +
+           "to an offscreen buffer first and then blit (false).  Image " +
+           " Effects and Deferred Lighting may only work if set to false.")]
+  public bool directRender = true;
+
+  // Adjusts the level of stereopsis for this stereo rig.  Note that this
+  // parameter is not the virtual size of the head -- use a scale on the head
+  // game object for that.  Instead, it is a control on eye vergence, or
+  // rather, how cross-eyed or not the stereo rig is.  Set to 0 to turn
+  // off stereo in this rig independently of any others.
+  [Tooltip("Set the stereo level for this camera.")]
+  [Range(0,1)]
+  public float stereoMultiplier = 1.0f;
+
+  // The stereo cameras by default use the actual optical FOV of the Cardboard device,
+  // because otherwise the match between head motion and scene motion is broken, which
+  // impacts the virtual reality effect.  However, in some cases it is desirable to
+  // adjust the FOV anyway, for special effects or artistic reasons.  But in no case
+  // should the FOV be allowed to remain very different from the true optical FOV for
+  // very long, or users will experience discomfort.
+  //
+  // This value determines how much to match the mono camera's field of view.  This is
+  // a fraction: 0 means no matching, 1 means full matching, and values in between are
+  // compromises.  Reasons for not matching 100% would include preserving some VR-ness,
+  // and that due to the lens distortion the edges of the view are not as easily seen as
+  // when the phone is not in VR-mode.
+  //
+  // Another use for this variable is to preserve scene composition against differences
+  // in the optical FOV of various Cardboard models.  In all cases, this value simply
+  // lets the mono camera have some control over the scene in VR mode, like it does in
+  // non-VR mode.
+  [Tooltip("How much to adjust the stereo field of view to match this camera.")]
+  [Range(0,1)]
+  public float matchMonoFOV = 0;
+
+  // Determines the method by which the stereo cameras' FOVs are matched to the mono
+  // camera's FOV (assuming matchMonoFOV is not 0).  The default is to move the stereo
+  // cameras (matchByZoom = 0), with the option to instead do a simple camera zoom
+  // (matchByZoom = 1).  In-between values yield a mix of the two behaviors.
+  //
+  // It is not recommended to use simple zooming for typical scene composition, as it
+  // conflicts with the VR need to match the user's head motion with the corresponding
+  // scene motion.  This should be reserved for special effects such as when the player
+  // views the scene through a telescope or other magnifier (and thus the player knows
+  // that VR is going to be affected), or similar situations.
+  //
+  // Note that matching by moving the eyes requires that the centerOfInterest object
+  // be non-null, or there will be no effect.
+  [Tooltip("Whether to adjust FOV by moving the eyes (0) or simply zooming (1).")]
+  [Range(0,1)]
+  public float matchByZoom = 0;
+
+  // Matching the mono camera's field of view in stereo by moving the eyes requires
+  // a designated "center of interest".  This is either a point in space (an empty
+  // gameobject) you place in the scene as a sort of "3D cursor", or an actual scene
+  // entity which the player is likely to be focussed on.
+  //
+  // The FOV adjustment is done by moving the eyes toward or away from the COI
+  // so that it appears to have the same size on screen as it would in the mono
+  // camera.  This is disabled if the COI is null.
+  [Tooltip("Object or point where field of view matching is done.")]
+  public Transform centerOfInterest;
+
+  // The COI is generally meant to be just a point in space, like a 3D cursor.
+  // Occasionally, you will want it to be an actual object with size.  Set this
+  // to the approximate radius of the object to help the FOV-matching code
+  // compensate for the object's horizon when it is close to the camera.
+  [Tooltip("If COI is an object, its approximate size.")]
+  public float radiusOfInterest = 0;
+
+  // If true, check that the centerOfInterest is between the min and max comfortable
+  // viewing distances (see Cardboard.cs), or else adjust the stereo multiplier to
+  // compensate.  If the COI has a radius, then the near side is checked.  COI must
+  // be non-null for this setting to have any effect.
+  [Tooltip("Adjust stereo level when COI gets too close or too far.")]
+  public bool checkStereoComfort = true;
+
+  // For picture-in-picture cameras that don't fill the entire screen,
+  // set the virtual depth of the window itself.  A value of 0 means
+  // zero parallax, which is fairly close.  A value of 1 means "full"
+  // parallax, which is equal to the interpupillary distance and equates
+  // to an infinitely distant window.  This does not affect the actual
+  // screen size of the the window (in pixels), only the stereo separation
+  // of the left and right images.
+  [Tooltip("Adjust the virtual depth of this camera's window (picture-in-picture only).")]
+  [Range(0,1)]
+  public float screenParallax = 0;
+
+  // For picture-in-picture cameras, move the window away from the edges
+  // in VR Mode to make it easier to see.  The optics of HMDs make the screen
+  // edges hard to see sometimes, so you can use this to keep the PIP visible
+  // whether in VR Mode or not.  The x value is the fraction of the screen along
+  // either side to pad, and the y value is for the top and bottom of the screen.
+  [Tooltip("Move the camera window horizontally towards the center of the screen (PIP only).")]
+  [Range(0,1)]
+  public float stereoPaddingX = 0;
+
+  [Tooltip("Move the camera window vertically towards the center of the screen (PIP only).")]
+  [Range(0,1)]
+  public float stereoPaddingY = 0;
+
+  // Flags whether we rendered in stereo for this frame.
+  private bool renderedStereo = false;
+
+#if !UNITY_EDITOR
+  // Cache for speed, except in editor (don't want to get out of sync with the scene).
+  private CardboardEye[] eyes;
+#endif
+
+  // Returns the CardboardEye components that we control.
+  public CardboardEye[] Eyes {
+    get {
+#if UNITY_EDITOR
+      CardboardEye[] eyes = null;  // Local variable rather than member, so as not to cache.
+#endif
+      if (eyes == null) {
+        eyes = GetComponentsInChildren<CardboardEye>(true)
+               .Where(eye => eye.Controller == this)
+               .ToArray();
+      }
+      return eyes;
+    }
+  }
+
+  // Clear the cached array of CardboardEye children.
+  // NOTE: Be sure to call this if you programmatically change the set of CardboardEye children
+  // managed by this StereoController.
+  public void InvalidateEyes() {
+#if !UNITY_EDITOR
+    eyes = null;
+#endif
+  }
+
+  // Returns the nearest CardboardHead that affects our eyes.
+  public CardboardHead Head {
+    get {
+      return Eyes.Select(eye => eye.Head).FirstOrDefault();
+    }
+  }
+
+  // Where the stereo eyes will render the scene.
+  public RenderTexture StereoScreen {
+    get {
+      return GetComponent<Camera>().targetTexture ?? Cardboard.SDK.StereoScreen;
+    }
+  }
+
+  // In the Unity editor, at the point we need it, the Screen.height oddly includes the tab bar
+  // at the top of the Game window.  So subtract that out.
+  private int ScreenHeight {
+    get {
+      return Screen.height - (Application.isEditor && StereoScreen == null ? 36 : 0);
+    }
+  }
+
+  void Awake() {
+    AddStereoRig();
+  }
+
+  // Helper routine for creation of a stereo rig.  Used by the
+  // custom editor for this class, or to build the rig at runtime.
+  public void AddStereoRig() {
+    if (Eyes.Length > 0) {  // Simplistic test if rig already exists.
+      return;
+    }
+    CreateEye(Cardboard.Eye.Left);
+    CreateEye(Cardboard.Eye.Right);
+    if (Head == null) {
+      gameObject.AddComponent<CardboardHead>();
+    }
+#if !UNITY_5
+    if (GetComponent<Camera>().tag == "MainCamera" && GetComponent<SkyboxMesh>() == null) {
+      gameObject.AddComponent<SkyboxMesh>();
+    }
+#endif
+  }
+
+  // Helper routine for creation of a stereo eye.
+  private void CreateEye(Cardboard.Eye eye) {
+    string nm = name + (eye == Cardboard.Eye.Left ? " Left" : " Right");
+    GameObject go = new GameObject(nm);
+    go.transform.parent = transform;
+    go.AddComponent<Camera>().enabled = false;
+#if !UNITY_5
+    if (GetComponent<GUILayer>() != null) {
+      go.AddComponent<GUILayer>();
+    }
+    if (GetComponent("FlareLayer") != null) {
+      go.AddComponent("FlareLayer");
+    }
+#endif
+    var cardboardEye = go.AddComponent<CardboardEye>();
+    cardboardEye.eye = eye;
+    cardboardEye.CopyCameraAndMakeSideBySide(this);
+  }
+
+  // Given information about a specific camera (usually one of the stereo eyes),
+  // computes an adjustment to the stereo settings for both FOV matching and
+  // stereo comfort.  The input is the [1,1] entry of the camera's projection
+  // matrix, representing the vertical field of view, and the overall scale
+  // being applied to the Z axis.  The output is a multiplier of the IPD to
+  // use for offseting the eyes laterally, and an offset in the eye's Z direction
+  // to account for the FOV difference.  The eye offset is in local coordinates.
+  public void ComputeStereoAdjustment(float proj11, float zScale,
+                                      out float ipdScale, out float eyeOffset) {
+    ipdScale = stereoMultiplier;
+    eyeOffset = 0;
+    if (centerOfInterest == null || !centerOfInterest.gameObject.activeInHierarchy) {
+      return;
+    }
+
+    // Distance of COI relative to head.
+    float distance = (centerOfInterest.position - transform.position).magnitude;
+
+    // Size of the COI, clamped to [0..distance] for mathematical sanity in following equations.
+    float radius = Mathf.Clamp(radiusOfInterest, 0, distance);
+
+    // Move the eye so that COI has about the same size onscreen as in the mono camera FOV.
+    // The radius affects the horizon location, which is where the screen-size matching has to
+    // occur.
+    float scale = proj11 / GetComponent<Camera>().projectionMatrix[1, 1];  // vertical FOV
+    float offset =
+        Mathf.Sqrt(radius * radius + (distance * distance - radius * radius) * scale * scale);
+    eyeOffset = (distance - offset) * Mathf.Clamp01(matchMonoFOV) / zScale;
+
+    // Manage IPD scale based on the distance to the COI.
+    if (checkStereoComfort) {
+      float minComfort = Cardboard.SDK.ComfortableViewingRange.x;
+      float maxComfort = Cardboard.SDK.ComfortableViewingRange.y;
+      if (minComfort < maxComfort) {  // Sanity check.
+        // If closer than the minimum comfort distance, IPD is scaled down.
+        // If farther than the maximum comfort distance, IPD is scaled up.
+        // The result is that parallax is clamped within a reasonable range.
+        float minDistance = (distance - radius) / zScale - eyeOffset;
+        ipdScale *= minDistance / Mathf.Clamp(minDistance, minComfort, maxComfort);
+      }
+    }
+  }
+
+  void OnEnable() {
+    StartCoroutine("EndOfFrame");
+  }
+
+  void OnDisable() {
+    StopCoroutine("EndOfFrame");
+  }
+
+  void OnPreCull() {
+    if (!Cardboard.SDK.VRModeEnabled) {
+      // Nothing to do.
+      return;
+    }
+
+    Cardboard.SDK.UpdateState();
+
+    // Turn off the mono camera so it doesn't waste time rendering.
+    // Note: mono camera is left on from beginning of frame till now
+    // in order that other game logic (e.g. Camera.main) continues
+    // to work as expected.
+    GetComponent<Camera>().enabled = false;
+
+    // Render the eyes under our control.
+    foreach (var eye in Eyes) {
+      eye.Render();
+    }
+
+    // Remember to reenable.
+    renderedStereo = true;
+  }
+
+  IEnumerator EndOfFrame() {
+    while (true) {
+      // If *we* turned off the mono cam, turn it back on for next frame.
+      if (renderedStereo) {
+        GetComponent<Camera>().enabled = true;
+        renderedStereo = false;
+      }
+      yield return new WaitForEndOfFrame();
+    }
+  }
+}
+```
+
+### Assets/Plugins/iOS/CardboardAppController.h
+```
+// Copyright 2015 Google Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#import "UnityAppController.h"
+#import "UnityAppController+Rendering.h"
+#import "UnityAppController+ViewHandling.h"
+
+// Unity 4.6.2 added a category to the app controller.
+#if UNITY_VERSION < 462
+#import "UnityInterface.h"
+#else
+#import "UnityAppController+UnityInterface.h"
+#endif
+
+// Unity 4 used a different method name to create the UnityView.
+#if UNITY_VERSION < 500
+#define createUnityView initUnityViewImpl
+#endif
+
+@interface CardboardAppController : UnityAppController
+
+- (void)preStartUnity;
+
+- (UnityView *)createUnityView;
+
+- (void)startSettingsDialog:(UIViewController *)dialog;
+
+- (void)stopSettingsDialog;
+
+- (void)pause:(bool)paused;
+
+@end
+```
+
+### Assets/Plugins/iOS/CardboardView.h
+```
+// Copyright 2015 Google Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#import "UI/UnityView.h"
+#import "UI/UnityViewControllerBase.h"
+
+@interface CardboardView : UnityView
+
+- (void)touchesBegan:(NSSet *)touches withEvent:(UIEvent *)event;
+
+- (void)touchesEnded:(NSSet *)touches withEvent:(UIEvent *)event;
+
+- (void)touchesCancelled:(NSSet *)touches withEvent:(UIEvent *)event;
+
+- (void)touchesMoved:(NSSet *)touches withEvent:(UIEvent *)event;
+
+@end
+```
+
+### Assets/Scripts/Fractal/DistanceField.cs
+```
+/**
+This work is licensed under a Creative Commons Attribution 3.0 Unported License.
+http://creativecommons.org/licenses/by/3.0/deed.en_GB
+
+You are free:
+
+to copy, distribute, display, and perform the work
+to make derivative works
+to make commercial use of the work
+*/
+
+using UnityEngine;
+
+[ExecuteInEditMode]
+[AddComponentMenu("Image Effects/FractalEffect")]
+public class DistanceField : ImageEffectBase {
+
+//	[Header("Camera Target")]
+//	public Vector3 cameraTarget;
+
+	[Header("Objects")]
+	public Vector3 objectPosition;
+	public Vector3 objectRotation;
+	[Range(0.0f,1.0f)]
+	public float displacementStrength;
+
+	[Header("Sphere")]
+	[Range(0.0f,1.0f)]
+	public float sphereRadius=.2f;
+	
+	[Header("Torus")]
+	[Range(0.0f,1.0f)]
+	public float torusInnerRadius=.1f;
+	[Range(0.0f,1.0f)]
+	public float torusOuterRadius=.2f;
+	
+	[Header("Colors")]
+	public Color backgroundColor=new Color(0.1607843137f,0.1607843137f,0.1607843137f);
+	// Called by camera to apply image effect
+	void OnRenderImage (RenderTexture source, RenderTexture destination) {
+
+		//DistanceField
+		Transform mainCameraTransform=GetComponent<Transform>();
+
+		Quaternion objectRotationQuaternion = Quaternion.Euler(objectRotation);
+		Matrix4x4 objectRotationMatrix = Matrix4x4.TRS(Vector3.zero, objectRotationQuaternion, Vector3.one);
+		
+		//Camera
+		material.SetVector("_CameraTarget",mainCameraTransform.forward+mainCameraTransform.position);
+		material.SetVector("_CameraUp",mainCameraTransform.up);
+		material.SetVector("_CameraPosition",mainCameraTransform.position);
+		//Objects
+		material.SetVector("_ObjectPosition",objectPosition);
+		material.SetMatrix("_ObjectRotation",objectRotationMatrix);
+		material.SetFloat("_DisplaceStrength",displacementStrength);
+		//Sphere
+		material.SetFloat("_SphereRadius",sphereRadius);
+		//Torus
+		material.SetFloat("_TorusInnerRadius",torusInnerRadius);
+		material.SetFloat("_TorusOuterRadius",torusOuterRadius);
+
+		//Colors
+		material.SetColor("_BackgroundColor",backgroundColor);
+
+		Graphics.Blit (source, destination, material);
+	}
+}
+```
+
+### Assets/Scripts/Fractal/FractalEffect.cs
+```
+/**
+This work is licensed under a Creative Commons Attribution 3.0 Unported License.
+http://creativecommons.org/licenses/by/3.0/deed.en_GB
+
+You are free:
+
+to copy, distribute, display, and perform the work
+to make derivative works
+to make commercial use of the work
+*/
+
+using UnityEngine;
+
+[ExecuteInEditMode]
+[AddComponentMenu("Image Effects/FractalEffect")]
+public class FractalEffect : ImageEffectBase {
+
+	[Range(-1.0f,1.0f)]
+	public float lightX,lightY;
+
+	[Header("Camera Target")]
+	public Vector3 cameraTarget;
+
+	[Header("Objects")]
+	public Vector3 objectPosition;
+	[Range(-15.0f,15.0f)]
+	public float displacementStrength;
+
+	[Header("Sphere")]
+	[Range(0.0f,1.0f)]
+	public float sphereRadius=.2f;
+	
+	[Header("Torus")]
+	[Range(0.0f,1.0f)]
+	public float torusInnerRadius=.1f;
+	[Range(0.0f,1.0f)]
+	public float torusOuterRadius=.2f;
+	
+	[Header("Colors")]
+	public Color backgroundColor=new Color(0.1607843137f,0.1607843137f,0.1607843137f);
+
+	// Called by camera to apply image effect
+	void OnRenderImage (RenderTexture source, RenderTexture destination) {
+		material.SetFloat("time", Time.time);
+		material.SetFloat("_LightX",lightX);
+		material.SetFloat("_LightY",lightY);
+
+		//DistanceField
+
+		//Camera
+		material.SetVector("_CameraTarget",cameraTarget);
+		//Objects
+		material.SetVector("_ObjectPosition",objectPosition);
+		material.SetFloat("_DisplaceStrength",displacementStrength);
+		//Sphere
+		material.SetFloat("_SphereRadius",sphereRadius);
+		//Torus
+		material.SetFloat("_TorusInnerRadius",torusInnerRadius);
+		material.SetFloat("_TorusOuterRadius",torusOuterRadius);
+
+		//Colors
+		material.SetColor("_BackgroundColor",backgroundColor);
+
+		Graphics.Blit (source, destination, material);
+	}
+}
+```
+
+### Assets/Scripts/Fractal/ImageEffectBase.cs
+```
+using UnityEngine;
+
+[RequireComponent (typeof(Camera))]
+[AddComponentMenu("")]
+public class ImageEffectBase : MonoBehaviour {
+	/// Provides a shader property that is set in the inspector
+	/// and a material instantiated from the shader
+	public Shader   shader;
+	private Material m_Material;
+
+	protected virtual void Start ()
+	{
+		// Disable if we don't support image effects
+		if (!SystemInfo.supportsImageEffects) {
+			enabled = false;
+			return;
+		}
+		
+		// Disable the image effect if the shader can't
+		// run on the users graphics card
+		if (!shader || !shader.isSupported)
+			enabled = false;
+	}
+
+	protected Material material {
+		get {
+			if (m_Material == null) {
+				m_Material = new Material (shader);
+				m_Material.hideFlags = HideFlags.HideAndDontSave;
+			}
+			return m_Material;
+		} 
+	}
+	
+	protected virtual void OnDisable() {
+		if( m_Material ) {
+			DestroyImmediate( m_Material );
+		}
+	}
+}
+```
+
+### Assets/Scripts/Fractal/Mandelbulb.cs
+```
+/**
+This work is licensed under a Creative Commons Attribution 3.0 Unported License.
+http://creativecommons.org/licenses/by/3.0/deed.en_GB
+
+You are free:
+
+to copy, distribute, display, and perform the work
+to make derivative works
+to make commercial use of the work
+*/
+
+using UnityEngine;
+
+[ExecuteInEditMode]
+[AddComponentMenu("Image Effects/Mandelbulb")]
+public class Mandelbulb : ImageEffectBase {
+
+    [Range(3f,5f)]
+    public float power;
+    
+    // Called by camera to apply image effect
+    void OnRenderImage (RenderTexture source, RenderTexture destination) {
+
+        material.SetFloat("time", Time.time);
+        material.SetFloat("_Power",power);
+
+        material.SetVector("screen", new Vector2(Screen.width, Screen.height));
+        
+        Graphics.Blit (source, destination, material);
+    }
+}
+```
+
+### Assets/Scripts/Utility/Tracker.cs
+```
+﻿using UnityEngine;
+using System.Collections;
+
+public class Tracker : MonoBehaviour {
+
+	void Update(){
+		if(Input.GetMouseButtonDown(0)){
+//			Application.LoadLevel(Application.loadedLevel);
+		}
+	}
+}
+```
+
+### Assets/Scripts/Utility/TrackerEditor.cs
+```
+﻿#if UNITY_EDITOR
+using UnityEngine;
+using UnityEditor;
+using System.Collections;
+
+[CustomEditor (typeof(Tracker))]
+class TrackerEditor : Editor {
+	
+	Transform[] children ;
+	void OnEnable(){
+		Transform myTransform = ((Tracker) target).transform;
+		children = new Transform[myTransform.childCount];
+		for (int i=0; i<children.Length; ++i) {
+			children [i] = myTransform.GetChild (i);
+		}
+	}
+	static readonly float disableColorValue=.85f;
+	Color disabledColor = new Color(disableColorValue,disableColorValue,disableColorValue);
+	public override void OnInspectorGUI ()
+	{
+		GUILayout.Space(10);
+		GUILayout.BeginHorizontal ();
+
+		for(int i=0;i<children.Length;++i){
+			GUIStyle currentStyle = EditorStyles.miniButtonMid;
+			if(i==0)
+				currentStyle=EditorStyles.miniButtonLeft;
+			if(i==children.Length-1)
+				currentStyle=EditorStyles.miniButtonRight;
+			if(!children[i].gameObject.activeSelf){
+				GUI.backgroundColor=disabledColor;
+					GUI.color=disabledColor;
+			}
+			if(GUILayout.Button(children[i].gameObject.name,currentStyle)){
+				SetCam(i);
+			}
+			GUI.backgroundColor=Color.white;
+			GUI.color=Color.white;
+		}
+//		if (GUILayout.Button ("Main", EditorStyles.miniButtonLeft)) {
+//			SetCam(0);
+//		}
+//		if(GUILayout.Button("OVR",EditorStyles.miniButtonMid)){
+//			SetCam(1);
+//		}
+//		if (GUILayout.Button ("Dive", EditorStyles.miniButtonRight)) {
+//			SetCam(2);
+//		}
+		GUILayout.EndHorizontal ();
+		GUILayout.Space(10);
+	}
+
+
+	// Use this for initialization
+	void SetCam (int index)
+	{
+		for (int i=0; i<children.Length; ++i) {
+			children[i].gameObject.SetActive(index==i);
+		}
+	}
+}
+#endif
+```
+
+### Assets/Scripts/Utility/Utility.cs
+```
+﻿using UnityEngine;
+using System.Collections;
+using System.Collections.Generic;
+
+public class Utility : MonoBehaviour {
+
+	// Use this for initialization
+	void Start () {
+	
+	}
+	
+	// Update is called once per frame
+	void Update () {
+	
+	}
+	public static Vector2 GetRandomVector2(float range){
+		return new Vector2 (Random.Range (-range, range), Random.Range (-range, range));
+	}
+	public static Vector3 GetRandomVector3(float range){
+		return new Vector3 (Random.Range (-range, range), Random.Range (-range, range), Random.Range (-range, range));
+	}
+	public static Vector3 Interp(Vector3[] pts, float t){
+		int numSections = pts.Length - 3;
+		int currPt = Mathf.Min(Mathf.FloorToInt(t * (float) numSections), numSections - 1);
+		float u = t * (float) numSections - (float) currPt;
+		
+		Vector3 a = pts[currPt];
+		Vector3 b = pts[currPt + 1];
+		Vector3 c = pts[currPt + 2];
+		Vector3 d = pts[currPt + 3];
+		
+		return .5f * (
+			(-a + 3f * b - 3f * c + d) * (u * u * u)
+			+ (2f * a - 5f * b + 4f * c - d) * (u * u)
+			+ (-a + c) * u
+			+ 2f * b
+			);
+	}	
+	public static Vector3[] PathControlPointGenerator(Vector3[] path){
+		Vector3[] suppliedPath;
+		Vector3[] vector3s;
+		
+		//create and store path points:
+		suppliedPath = path;
+		
+		//populate calculate path;
+		int offset = 2;
+		vector3s = new Vector3[suppliedPath.Length+offset];
+		System.Array.Copy(suppliedPath,0,vector3s,1,suppliedPath.Length);
+		
+		//populate start and end control points:
+		//vector3s[0] = vector3s[1] - vector3s[2];
+		vector3s[0] = vector3s[1] + (vector3s[1] - vector3s[2]);
+		vector3s[vector3s.Length-1] = vector3s[vector3s.Length-2] + (vector3s[vector3s.Length-2] - vector3s[vector3s.Length-3]);
+		
+		//is this a closed, continuous loop? yes? well then so let's make a continuous Catmull-Rom spline!
+		if(vector3s[1] == vector3s[vector3s.Length-2]){
+			Vector3[] tmpLoopSpline = new Vector3[vector3s.Length];
+			System.Array.Copy(vector3s,tmpLoopSpline,vector3s.Length);
+			tmpLoopSpline[0]=tmpLoopSpline[tmpLoopSpline.Length-3];
+			tmpLoopSpline[tmpLoopSpline.Length-1]=tmpLoopSpline[2];
+			vector3s=new Vector3[tmpLoopSpline.Length];
+			System.Array.Copy(tmpLoopSpline,vector3s,tmpLoopSpline.Length);
+		}	
+		
+		return(vector3s);
+	}
+	public static Vector3 RotatePointAroundPivot(Vector3 point, Vector3 pivot, Vector3 angles) {
+		Vector3 dir = point - pivot; // get point direction relative to pivot
+		dir = Quaternion.Euler(angles) * dir; // rotate it
+		point = dir + pivot; // calculate rotated point
+		return point; // return it
+	}
+	public static AnimationCurve GetCurve_Linear(float duration){
+		return AnimationCurve.Linear(Time.time,0,Time.time+duration,1f);
+	}
+	public static AnimationCurve GetCurve_Ease(float duration){
+		return AnimationCurve.EaseInOut(Time.time,0,Time.time+duration,1f);
+	}
+	
+	
+	public static string Truncate(string source, int length){
+		if(source == null) return null;
+		
+		if (source.Length > length){
+			int index = source.Substring(0, length).LastIndexOf(' ');
+			if(index==-1){
+				index=length-1;
+			}
+			source = source.Insert(index, "\n");
+			
+			if (source.Substring(index).Length > length) {
+				source = source.Substring(0, index + length) + "...";
+			}
+		}
+		return source;
+	}
+	
+	//Utility function: print Dictionary of List of Dictionary
+	public static void printDictList (Dictionary<string,  List<Dictionary<string, string>>> d)
+	{
+		foreach (KeyValuePair<string, List<Dictionary<string, string>>> kvp in d) {
+			Debug.Log (kvp.Key + "------------------------------");
+			printList (kvp.Value);
+		}
+	}
+	
+	//Utility function: print List of Dictionary
+	public static void printList (List<Dictionary<string, string>> list)
+	{
+		foreach (Dictionary<string, string> i in list) {
+			foreach (string k in i.Keys) {
+				Debug.Log (k + " " + i [k]);
+			}
+		}
+	}
+
+}
+```
+
+### Assets/Scripts/Utility/Utility_GroupObjects.cs
+```
+﻿
+#if UNITY_EDITOR
+using UnityEngine;
+using UnityEditor;
+using System.Collections;
+
+public static class Utility_GroupObjects  {
+
+	[MenuItem("GameObject/Group Objects", false, 0)]
+	static void Init () {
+		// create temporary camera for rendering
+		Transform activeTransform = Selection.activeTransform;
+		if(activeTransform!=null){
+			GameObject newObject = new GameObject();
+			newObject.transform.parent=activeTransform.parent;
+			newObject.transform.SetSiblingIndex(activeTransform.GetSiblingIndex());
+			newObject.name=activeTransform.gameObject.name+"_Group";
+			if(activeTransform.GetComponent<RectTransform>()){
+				newObject.AddComponent<RectTransform>();
+			}
+			newObject.transform.localScale=activeTransform.localScale;
+			newObject.transform.rotation=activeTransform.rotation;
+			newObject.transform.position=activeTransform.position;
+			activeTransform.parent=newObject.transform;
+		
+			Selection.activeTransform=newObject.transform;
+		}
+	}
+	
+	
+}
+#endif
+```
+
+### Assets/Cardboard/Legacy/DemoScene/TeleportLegacyUI.cs
+```
+﻿// Copyright 2014 Google Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+using UnityEngine;
+using System.Collections;
+
+public class TeleportLegacyUI : Teleport {
+  private CardboardHead head;
+
+  void Awake() {
+    head = Camera.main.GetComponent<StereoController>().Head;
+    CardboardOnGUI.IsGUIVisible = true;
+    CardboardOnGUI.onGUICallback += this.OnGUI;
+  }
+
+  void Update() {
+    RaycastHit hit;
+    bool isLookedAt = GetComponent<Collider>().Raycast(head.Gaze, out hit, Mathf.Infinity);
+    SetGazedAt(isLookedAt);
+    if (Cardboard.SDK.Triggered && isLookedAt) {
+      TeleportRandomly();
+    }
+  }
+
+  void OnGUI() {
+    if (!CardboardOnGUI.OKToDraw(this)) {
+      return;
+    }
+    if (GUI.Button(new Rect(50, 50, 200, 50), "Reset")) {
+      Reset();
+    }
+    if (GUI.Button(new Rect(50, 110, 200, 50), "Recenter")) {
+      Cardboard.SDK.Recenter();
+    }
+    if (GUI.Button(new Rect(50, 170, 200, 50), "VR Mode")) {
+      ToggleVRMode();
+    }
+  }
+
+  void OnDestroy() {
+    CardboardOnGUI.onGUICallback -= this.OnGUI;
+  }
+}
+```
+
+### Assets/Cardboard/Legacy/Resources/GUIScreen.shader
+```
+﻿// Copyright 2014 Google Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+Shader "Cardboard/GUIScreen" {
+  Properties {
+    _MainTex ("Texture", 2D) = "white" {}
+  }
+  SubShader {
+    Tags { "Queue" = "Overlay" }
+    Lighting Off Cull Off Fog { Mode Off } ZTest Always ZWrite Off
+    Blend SrcAlpha OneMinusSrcAlpha
+    Pass {
+      SetTexture [_MainTex] { combine texture double }
+    }
+  }
+  Fallback Off
+}
+```
+
+### Assets/Cardboard/Legacy/Resources/SkyboxMesh.shader
+```
+﻿// Copyright 2014 Google Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// Original code by Nora
+// http://stereoarts.jp
+//
+// Retrieved from:
+// https://developer.oculusvr.com/forums/viewtopic.php?f=37&t=844#p28982
+
+Shader "Cardboard/SkyboxMesh" {
+  Properties {
+    _Color ("Main Color", Color) = (1,1,1,1)
+    _MainTex ("Texture", 2D) = "white" {}
+  }
+  Category {
+   Tags { "Queue"="Background" }
+    ZWrite Off
+    Lighting Off
+    Fog {Mode Off}
+    BindChannels {
+      Bind "Color", color
+      Bind "Vertex", vertex
+      Bind "TexCoord", texcoord
+    }
+    SubShader {
+      Pass {
+        SetTexture [_MainTex] {
+          Combine texture
+        }
+        SetTexture [_MainTex] {
+          constantColor [_Color]
+          combine previous * constant
+        }
+      }
+    }
+  }
+}
+```
+
+### Assets/Cardboard/Legacy/Scripts/CardboardAndroidDevice.cs
+```
+﻿// Copyright 2015 Google Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+#if UNITY_ANDROID
+
+using System.Runtime.InteropServices;
+using UnityEngine;
+
+// Android device using the Google Cardboard SDK for Android.
+public class CardboardAndroidDevice : AndroidBaseVRDevice {
+  [DllImport("RenderingPlugin")]
+  private static extern void InitFromUnity(int textureID);
+
+  // Event IDs supported by our native render plugin.
+  private const int kPerformDistortionCorrection = 1;
+  private const int kDrawCardboardUILayer = 2;
+
+  private const string cardboardClass =
+      "com.google.vrtoolkit.cardboard.plugins.unity.UnityCardboardActivity";
+
+  private Matrix4x4 headView = new Matrix4x4();
+  private Matrix4x4 leftEyeView = new Matrix4x4();
+  private Matrix4x4 rightEyeView = new Matrix4x4();
+
+  private float[] frameInfo = null;
+
+  public override void Init() {
+    ConnectToActivity();
+  }
+
+  protected override void ConnectToActivity() {
+    try {
+      using (AndroidJavaClass player = new AndroidJavaClass(cardboardClass)) {
+        cardboardActivity = player.CallStatic<AndroidJavaObject>("getActivity");
+      }
+    } catch (AndroidJavaException e) {
+      cardboardActivity = null;
+      Debug.LogError("Cannot access UnityCardboardActivity. "
+        + "Verify that the jar is in Assets/Plugins/Android. " + e);
+    }
+  }
+
+  public override void SetDistortionCorrectionEnabled(bool enabled) {
+    CallActivityMethod("setDistortionCorrectionEnabled", enabled);
+  }
+
+  public override void SetVRModeEnabled(bool enabled) {
+    CallActivityMethod("setVRModeEnabled", enabled);
+  }
+
+  public override void SetAlignmentMarkerEnabled(bool enabled) {
+    CallActivityMethod("setAlignmentMarkerEnabled", enabled);
+  }
+
+  public override void SetSettingsButtonEnabled(bool enabled) {
+    CallActivityMethod("setSettingsButtonEnabled", enabled);
+  }
+
+  public override void SetNeckModelScale(float scale) {
+    CallActivityMethod("setNeckModelFactor", scale);
+  }
+
+  public override void SetAutoDriftCorrectionEnabled(bool enabled) {
+    CallActivityMethod("setGyroBiasEstimationEnabled", enabled);
+  }
+
+  public override void SetStereoScreen(RenderTexture stereoScreen) {
+    if (cardboardActivity != null) {
+      InitFromUnity(stereoScreen != null ? stereoScreen.GetNativeTextureID() : 0);
+    }
+  }
+
+  public override void UpdateState() {
+    // Pass nominal clip distances - will correct later for each camera.
+    if (!CallActivityMethod(ref frameInfo, "getFrameParams", 1.0f /* near */, 1000.0f /* far */)) {
+      return;
+    }
+
+    // Extract the matrices (currently that's all we get back).
+    int j = 0;
+    for (int i = 0; i < 16; ++i, ++j) {
+      headView[i] = frameInfo[j];
+    }
+    for (int i = 0; i < 16; ++i, ++j) {
+      leftEyeView[i] = frameInfo[j];
+    }
+    for (int i = 0; i < 16; ++i, ++j) {
+      leftEyeDistortedProjection[i] = frameInfo[j];
+    }
+    for (int i = 0; i < 16; ++i, ++j) {
+      rightEyeView[i] = frameInfo[j];
+    }
+    for (int i = 0; i < 16; ++i, ++j) {
+      rightEyeDistortedProjection[i] = frameInfo[j];
+    }
+    for (int i = 0; i < 16; ++i, ++j) {
+      leftEyeUndistortedProjection[i] = frameInfo[j];
+    }
+    for (int i = 0; i < 16; ++i, ++j) {
+      rightEyeUndistortedProjection[i] = frameInfo[j];
+    }
+
+    leftEyeUndistortedViewport = new Rect(frameInfo[j], frameInfo[j+1],
+                                          frameInfo[j+2], frameInfo[j+3]);
+    leftEyeDistortedViewport = leftEyeUndistortedViewport;
+    j += 4;
+    rightEyeUndistortedViewport = new Rect(frameInfo[j], frameInfo[j+1],
+                                           frameInfo[j+2], frameInfo[j+3]);
+    rightEyeDistortedViewport = rightEyeUndistortedViewport;
+
+    // Convert views to left-handed coordinates because Unity uses them
+    // for Transforms, which is what we will update from the views.
+    // Also invert because the incoming matrices go from camera space to
+    // cardboard space, and we want the opposite.
+    // Lastly, cancel out the head rotation from the eye views,
+    // because we are applying that on a parent object.
+    leftEyePose.SetRightHanded(headView * leftEyeView.inverse);
+    rightEyePose.SetRightHanded(headView * rightEyeView.inverse);
+    headPose.SetRightHanded(headView.inverse);
+  }
+
+  override public void UpdateScreenData() {
+    CardboardProfile.Device device = new CardboardProfile.Device();
+    CardboardProfile.Screen screen = new CardboardProfile.Screen();
+
+    float[] lensData = null;
+    if (CallActivityMethod(ref lensData, "getLensParameters")) {
+      device.lenses.separation = lensData[0];
+      device.lenses.offset = lensData[1];
+      device.lenses.screenDistance = lensData[2];
+      device.lenses.alignment = (int)lensData[3];
+    }
+
+    float[] screenSize = null;
+    if (CallActivityMethod(ref screenSize, "getScreenSizeMeters")) {
+      screen.width = screenSize[0];
+      screen.height = screenSize[1];
+      screen.border = screenSize[2];
+    }
+
+    float[] distCoeff = null;
+    if (CallActivityMethod(ref distCoeff, "getDistortionCoefficients")) {
+      device.distortion.k1 = distCoeff[0];
+      device.distortion.k2 = distCoeff[1];
+    }
+
+    float[] invDistCoeff = null;
+    if (CallActivityMethod(ref invDistCoeff, "getInverseDistortionCoefficients")) {
+      device.inverse.k1 = invDistCoeff[0];
+      device.inverse.k2 = invDistCoeff[1];
+    }
+
+    float[] maxFov = null;
+    if (CallActivityMethod(ref maxFov, "getLeftEyeMaximumFOV")) {
+      device.maxFOV.outer = maxFov[0];
+      device.maxFOV.upper = maxFov[1];
+      device.maxFOV.inner = maxFov[2];
+      device.maxFOV.lower = maxFov[3];
+    }
+
+    Profile.screen = screen;
+    Profile.device = device;
+  }
+
+  public override void Recenter() {
+    CallActivityMethod("resetHeadTracker");
+  }
+
+  public override void SetTouchCoordinates(int x, int y) {
+    CallActivityMethod("setTouchCoordinates", x, y);
+  }
+
+  public override void PostRender(bool vrMode) {
+    if (vrMode) {
+      if (Cardboard.SDK.DistortionCorrection && Cardboard.SDK.NativeDistortionCorrectionSupported) {
+        GL.IssuePluginEvent(kPerformDistortionCorrection);
+      }
+      if (Cardboard.SDK.EnableAlignmentMarker || Cardboard.SDK.EnableSettingsButton) {
+        GL.IssuePluginEvent(kDrawCardboardUILayer);
+      }
+      GL.InvalidateState();
+    }
+  }
+}
+
+#endif
+```
+
+### Assets/Cardboard/Legacy/Scripts/CardboardOnGUI.cs
+```
+﻿// Copyright 2014 Google Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+using UnityEngine;
+
+// A utility class for redirecting OnGUI()-based UI elements onto a texture,
+// which can be drawn on a surface in the scene and thus appear in stereo.
+// The auxiliary CardboardOnGUIWindow class handles displaying the texture
+// in the scene.  CardboardOnGUI captures the OnGUI() calls, which need to be
+// modified slightly for this to work, and handles feeding back fake mouse
+// events into the Unity player based on the user's head and trigger actions.
+//
+// If the option is available, it is probably better to use a real 3D
+// GUI such as the new Unity4.6+ system.  But if you just want to get
+// existing projects based on OnGUI() to work in Cardboard, this class
+// can help.
+public class CardboardOnGUI : MonoBehaviour {
+
+  // The type of an OnGUI() method.
+  public delegate void OnGUICallback();
+
+  // Add a gameobject's OnGUI() to this event, which is called during the
+  // redirection phase to capture the UI in a texture.
+  public static event OnGUICallback onGUICallback;
+
+  // Unity is going to call OnGUI() methods as usual, in addition to them
+  // being called by the onGUICallback event.  To prevent this double
+  // call from affecting game logic, modify the OnGUI() method.  At the
+  // very top, add "if (!CardboardOnGUI.OKToDraw(this)) return; ".
+  // This will ensure only one OnGUI() call sequence occurs per frame,
+  // whether in VR Mode or not.
+  private static bool okToDraw;
+  public static bool OKToDraw(MonoBehaviour mb) {
+    return okToDraw && (mb == null || mb.enabled && mb.gameObject.activeInHierarchy);
+  }
+
+  // Unlike on a plain 2D screen, in Cardboard the edges of the screen are
+  // very hard to see.  UI elements will likely have to be moved towards
+  // the center for the user to be able to interact with them.  As this would
+  // obscure the view of the rest of the scene, the class provides this flag to
+  // hide or show the entire in-scene rendering of the GUI, so it can be shown
+  // only when the user needs it.
+  private static bool isGUIVisible;
+  public static bool IsGUIVisible {
+    get {
+      return isGUIVisible && Cardboard.SDK.VRModeEnabled && SystemInfo.supportsRenderTextures;
+    }
+    set {
+      isGUIVisible = value;
+    }
+  }
+
+  // A wrapper around the trigger event that lets the GUI, when it
+  // is visible, steal the trigger for mouse clicking.  Call this
+  // instead of Cardboard.SDK.CardboardTriggered when this behavior
+  // is desired.
+  public static bool Triggered {
+    get {
+      return !IsGUIVisible && Cardboard.SDK.Triggered;
+    }
+  }
+
+  [Tooltip("The color and transparency of the overall GUI screen.")]
+  public Color background = Color.clear;
+
+  // Texture that captures the OnGUI rendering.
+  private RenderTexture guiScreen;
+
+  void Awake() {
+    if (!SystemInfo.supportsRenderTextures) {
+      Debug.LogWarning("CardboardOnGUI disabled.  RenderTextures are not supported, "
+                       + "either due to license or platform.");
+      enabled = false;
+    }
+  }
+
+  void Start() {
+    Create();
+  }
+
+  // Sets up the render texture and all the windows that will show parts of it.
+  public void Create() {
+    if (guiScreen != null) {
+      guiScreen.Release();
+    }
+    RenderTexture stereoScreen = Cardboard.SDK.StereoScreen;
+    int width = stereoScreen ? stereoScreen.width : Screen.width;
+    int height = stereoScreen ? stereoScreen.height : Screen.height;
+    guiScreen = new RenderTexture(width, height, 0, RenderTextureFormat.ARGB32);
+    guiScreen.Create();
+    foreach (var guiWindow in GetComponentsInChildren<CardboardOnGUIWindow>(true)) {
+      guiWindow.Create(guiScreen);
+    }
+  }
+
+  void LateUpdate() {
+    // When not in VR Mode, let normal OnGUI() calls proceed.
+    okToDraw = !Cardboard.SDK.VRModeEnabled;
+  }
+
+  void OnGUI() {
+    if (!IsGUIVisible) {
+      return;  // Nothing to do.
+    }
+    // OnGUI() is called multiple times per frame: once with event type "Layout",
+    // then once for each user input (key, mouse, touch, etc) that occurred in this
+    // frame, then finally once with event type "Repaint", during which the actual
+    // GUI drawing is done.  This last phase is the one we have to capture.
+    RenderTexture prevRT = null;
+    if (Event.current.type == EventType.Repaint) {
+      // Redirect rendering to our texture.
+      prevRT = RenderTexture.active;
+      RenderTexture.active = guiScreen;
+      GL.Clear(false, true, background);
+    }
+    if (onGUICallback != null) {
+      // Call all the OnGUI methods that have registered.
+      okToDraw = true;
+      onGUICallback();
+      okToDraw = false;
+    }
+    if (Event.current.type == EventType.Repaint) {
+      CardboardOnGUIMouse cgm = GetComponent<CardboardOnGUIMouse>();
+      if (cgm != null) {
+        cgm.DrawPointerImage();
+      }
+      // Clean up.
+      RenderTexture.active = prevRT;
+    }
+  }
+}
+```
+
+### Assets/Cardboard/Legacy/Scripts/CardboardOnGUIMouse.cs
+```
+﻿// Copyright 2014 Google Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+using UnityEngine;
+using System.Collections;
+
+public class CardboardOnGUIMouse : MonoBehaviour {
+
+  // If the app supports the use of some other pointing device, e.g. a gamepad
+  // or bluetooth mouse, then this field can be left null.  When set to a
+  // CardboardHead instance, then the user's head in effect becomes the mouse
+  // pointer and the Cardboard trigger becomes the mouse button.  The user
+  // looks at a GUI button and pulls the trigger to click it.
+  [Tooltip("The CardboardHead which drives the simulated mouse.")]
+  public CardboardHead head;
+
+  // The image to draw into the captured GUI texture representing the current
+  // mouse position.
+  [Tooltip("What to draw on the GUI surface for the simulated mouse pointer.")]
+  public Texture pointerImage;
+
+  [Tooltip("The size to draw the pointer in screen coordinates. " +
+           "Leave at 0,0 to use actual image size.")]
+  public Vector2 pointerSize;
+
+  [Tooltip("The screen pixel of the image to position over the mouse point.")]
+  public Vector2 pointerSpot;
+
+  // Whether to draw a pointer on the GUI surface, so the user can see
+  // where they are about to click.
+  private bool pointerVisible;
+  private int pointerX;
+  private int pointerY;
+
+  void LateUpdate() {
+    if (head == null) {  // Pointer not being controlled by user's head, so we bail.
+      pointerVisible = true;  // Draw pointer wherever Unity thinks the mouse is.
+      return;
+    }
+    if (!CardboardOnGUI.IsGUIVisible) {
+      pointerVisible = false;  // No GUI == no pointer to worry about.
+      return;
+    }
+    // Find which CardboardOnGUIWindow the user's gaze intersects first, if any.
+    Ray ray = head.Gaze;
+    CardboardOnGUIWindow hitWindow = null;
+    float minDist = Mathf.Infinity;
+    Vector2 pos = Vector2.zero;
+    foreach (var guiWindow in GetComponentsInChildren<CardboardOnGUIWindow>()) {
+      RaycastHit hit;
+      if (guiWindow.GetComponent<Collider>().Raycast(ray, out hit, Mathf.Infinity)
+          && hit.distance < minDist) {
+        minDist = hit.distance;
+        hitWindow = guiWindow;
+        pos = hit.textureCoord;
+      }
+    }
+    if (hitWindow == null) {
+      // Don't draw the pointer unless the user is looking at a pixel of the GUI screen.
+      pointerVisible = false;
+      return;
+    }
+    // Convert from the intersected window's texture coordinates to screen coordinates.
+    pos.x = hitWindow.rect.xMin + hitWindow.rect.width * pos.x;
+    pos.y = hitWindow.rect.yMin + hitWindow.rect.height * pos.y;
+    pointerX = (int)(pos.x * Screen.width);
+    pointerY = (int)(pos.y * Screen.height);
+    // Move the mouse/touch point to the determined screen point.
+    // Unity GUI Y-coordinates ascend top-to-bottom, as do the quad's texture coordinates,
+    // while screen Y-coordinates ascend bottom-to-top.
+    Cardboard.SDK.SetTouchCoordinates(pointerX, Screen.height - pointerY);
+    // OK to draw the pointer image.
+    pointerVisible = true;
+  }
+
+  // Draw the fake mouse pointer.  Called by CardboardOnGUI after the rest of the UI is done.
+  public void DrawPointerImage() {
+    if (pointerImage == null || !pointerVisible || !enabled) {
+      return;
+    }
+    Vector2 pos = Input.mousePresent ? (Vector2)Input.mousePosition
+                                     : new Vector2(pointerX, pointerY);
+    Vector2 spot = pointerSpot;
+    Vector2 size = pointerSize;
+    if (size.sqrMagnitude < 1) {  // If pointerSize was left == 0, just use size of image.
+      size.x = pointerImage.width;
+      size.y = pointerImage.height;
+    }
+    GUI.DrawTexture(new Rect(pos.x - spot.x, Screen.height - pos.y - spot.y, size.x, size.y),
+                    pointerImage, ScaleMode.StretchToFill);
+  }
+}
+```
+
+### Assets/Cardboard/Legacy/Scripts/CardboardOnGUIWindow.cs
+```
+﻿// Copyright 2014 Google Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+using UnityEngine;
+
+// Works with CardboardOnGUI to show all or part of the OnGUI-rendered
+// UI on a mesh in the scene.  There should be one or more of these
+// as children of the CardboardOnGUI gameobject.  Each one specifies
+// the region of the captured OnGUI screen to show on its own mesh.
+// This allows you to place pieces of the GUI in the scene at different
+// distances and angles to the user without having to change any of the
+// OnGUI methods themselves.
+//
+// The rendering code here takes care of shader and texture setup.  The
+// choice of mesh is yours, but a quad looks good.  The mesh is scaled to
+// match the aspect ratio of the screen region shown.  The attached
+// collider is used for ray instersection with the user's gaze, so it
+// should return texture coordinates that match those of the meshfilter.
+//
+// Individual portions of the GUI can be turned on or off by enabling
+// this component independently of the sibling gameobjects.
+[RequireComponent(typeof(MeshFilter))]
+[RequireComponent(typeof(MeshRenderer))]
+[RequireComponent(typeof(Collider))]
+public class CardboardOnGUIWindow : MonoBehaviour {
+  private MeshRenderer meshRenderer;
+
+  void Reset() {
+    rect = new Rect(0,0,1,1);  // Make window show the full GUI screen.
+  }
+
+  [Tooltip("The portion of the OnGUI screen to show in this window. " +
+           "Use the same units as for Camera viewports.")]
+  public Rect rect;
+
+  void Awake() {
+    meshRenderer = GetComponent<MeshRenderer>();
+    if (!SystemInfo.supportsRenderTextures) {
+      enabled = false;
+    }
+  }
+
+  // Make a material that points to the target texture.  Texture scale
+  // and offset will be controlled by rect.
+  public void Create(RenderTexture target) {
+    meshRenderer.material = new Material(Shader.Find("Cardboard/GUIScreen")) {
+      mainTexture = target,
+      mainTextureOffset = rect.position,
+      mainTextureScale = rect.size
+    };
+  }
+
+  // Turn off this window.
+  void OnDisable() {
+    meshRenderer.enabled = false;
+  }
+
+  void LateUpdate() {
+    // Only render window when the overall GUI is enabled.
+    meshRenderer.enabled = CardboardOnGUI.IsGUIVisible;
+    // Keep material and object scale in sync with rect.
+    meshRenderer.material.mainTextureOffset = rect.position;
+    meshRenderer.material.mainTextureScale = rect.size;
+    float aspect = (Screen.width * rect.width) /
+                   (Screen.height * rect.height);
+    transform.localScale = new Vector3(aspect, 1, 1);
+  }
+}
+```
+
+### Assets/Cardboard/Legacy/Scripts/SkyboxMesh.cs
+```
+// Copyright 2014 Google Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// Original code by Nora
+// http://stereoarts.jp
+//
+// Retrieved from:
+// https://developer.oculusvr.com/forums/viewtopic.php?f=37&t=844#p28982
+//
+// Modified by Google:
+//   Combined the 6 separate meshes into a single mesh with submeshes.
+//
+// Usage:
+//   Attach to a camera object, and it meshifies the camera's skybox at runtime.
+//   The skybox is automatically scaled to fit just inside the far clipping
+//   plane and is kept centered on the camera.
+
+using UnityEngine;
+
+[RequireComponent(typeof(Camera))]
+public class SkyboxMesh : MonoBehaviour {
+#if UNITY_5
+  void Awake() {
+    Debug.Log("SkyboxMesh is not needed in Unity 5");
+    Component.Destroy(this);
+  }
+#else
+  public enum Shape {
+    Sphere,
+    Cube,
+  }
+
+  public Shape shape = Shape.Sphere;
+  public int segments = 32;
+  public int layer = 0;
+
+  private GameObject skybox;
+
+  void Awake() {
+    var sky = GetComponent<Skybox>();
+    Material skymat = sky != null ? sky.material : RenderSettings.skybox;
+    if (skymat == null) {
+      enabled = false;
+      return;
+    }
+
+    skybox = new GameObject(skymat.name + "SkyMesh");
+    skybox.transform.parent = transform;
+    skybox.transform.localPosition = Vector3.zero;
+    skybox.layer = layer;
+
+    var filter = skybox.AddComponent<MeshFilter>();
+    filter.mesh = _CreateSkyboxMesh();
+
+    Material mat = new Material(Shader.Find("Cardboard/SkyboxMesh"));
+    var render = skybox.AddComponent<MeshRenderer>();
+    render.sharedMaterials = new Material[] {
+        new Material(mat) { mainTexture = skymat.GetTexture("_FrontTex") },
+        new Material(mat) { mainTexture = skymat.GetTexture("_LeftTex")  },
+        new Material(mat) { mainTexture = skymat.GetTexture("_BackTex")  },
+        new Material(mat) { mainTexture = skymat.GetTexture("_RightTex") },
+        new Material(mat) { mainTexture = skymat.GetTexture("_UpTex")    },
+        new Material(mat) { mainTexture = skymat.GetTexture("_DownTex")  }
+    };
+    render.castShadows = false;
+    render.receiveShadows = false;
+  }
+
+  void LateUpdate() {
+    var camera = GetComponent<Camera>();
+    // Only visible if the owning camera needs it.
+    skybox.GetComponent<Renderer>().enabled =
+      camera.enabled && (camera.clearFlags == CameraClearFlags.Skybox);
+    // Scale up to just fit inside the far clip plane.
+    Vector3 scale = transform.lossyScale;
+    float far = camera.farClipPlane * 0.95f;
+    if (shape == Shape.Cube) {
+      far /= Mathf.Sqrt(3);  // Corners need to fit inside the frustum.
+    }
+    scale.x = far / scale.x;
+    scale.y = far / scale.y;
+    scale.z = far / scale.z;
+    // Center on the camera.
+    skybox.transform.localPosition = Vector3.zero;
+    skybox.transform.localScale = scale;
+    // Keep orientation fixed in the world.
+    skybox.transform.rotation = Quaternion.identity;
+  }
+
+  Mesh _CreateMesh() {
+    Mesh mesh = new Mesh();
+
+    int hvCount2 = this.segments + 1;
+    int hvCount2Half = hvCount2 / 2;
+    int numVertices = hvCount2 * hvCount2;
+    int numTriangles = this.segments * this.segments * 6;
+    Vector3[] vertices = new Vector3[numVertices];
+    Vector2[] uvs = new Vector2[numVertices];
+    int[] triangles = new int[numTriangles];
+
+    float scaleFactor = 2.0f / (float)this.segments;
+    float uvFactor = 1.0f / (float)this.segments;
+
+    if (this.segments <= 1 || this.shape == Shape.Cube) {
+      float ty = 0.0f, py = -1.0f;
+      int index = 0;
+      for (int y = 0; y < hvCount2; ++y, ty += uvFactor, py += scaleFactor) {
+        float tx = 0.0f, px = -1.0f;
+        for (int x = 0; x < hvCount2; ++x, ++index, tx += uvFactor, px += scaleFactor) {
+          vertices[index] = new Vector3(px, py, 1.0f);
+          uvs[index] = new Vector2(tx, ty);
+        }
+      }
+    } else {
+      float ty = 0.0f, py = -1.0f;
+      int index = 0, indexY = 0;
+      for (int y = 0; y <= hvCount2Half;
+          ++y, indexY += hvCount2, ty += uvFactor, py += scaleFactor) {
+        float tx = 0.0f, px = -1.0f, py2 = py * py;
+        int x = 0;
+        for (; x <= hvCount2Half; ++x, ++index, tx += uvFactor, px += scaleFactor) {
+          float d = Mathf.Sqrt(px * px + py2 + 1.0f);
+          float theta = Mathf.Acos(1.0f / d);
+          float phi = Mathf.Atan2(py, px);
+          float sinTheta = Mathf.Sin(theta);
+          vertices[index] = new Vector3(
+              sinTheta * Mathf.Cos(phi),
+              sinTheta * Mathf.Sin(phi),
+              Mathf.Cos(theta));
+          uvs[index] = new Vector2(tx, ty);
+        }
+        int indexX = hvCount2Half - 1;
+        for (; x < hvCount2; ++x, ++index, --indexX, tx += uvFactor, px += scaleFactor) {
+          Vector3 v = vertices[indexY + indexX];
+          vertices[index] = new Vector3(-v.x, v.y, v.z);
+          uvs[index] = new Vector2(tx, ty);
+        }
+      }
+      indexY = (hvCount2Half - 1) * hvCount2;
+      for (int y = hvCount2Half + 1; y < hvCount2;
+          ++y, indexY -= hvCount2, ty += uvFactor, py += scaleFactor) {
+        float tx = 0.0f, px = -1.0f;
+        int x = 0;
+        for (; x <= hvCount2Half; ++x, ++index, tx += uvFactor, px += scaleFactor) {
+          Vector3 v = vertices[indexY + x];
+          vertices[index] = new Vector3(v.x, -v.y, v.z);
+          uvs[index] = new Vector2(tx, ty);
+        }
+        int indexX = hvCount2Half - 1;
+        for (; x < hvCount2; ++x, ++index, --indexX, tx += uvFactor, px += scaleFactor) {
+          Vector3 v = vertices[indexY + indexX];
+          vertices[index] = new Vector3(-v.x, -v.y, v.z);
+          uvs[index] = new Vector2(tx, ty);
+        }
+      }
+    }
+
+    for (int y = 0, index = 0, ofst = 0; y < this.segments; ++y, ofst += hvCount2) {
+      int y0 = ofst, y1 = ofst + hvCount2;
+      for (int x = 0; x < this.segments; ++x, index += 6) {
+        triangles[index + 0] = y0 + x;
+        triangles[index + 1] = y1 + x;
+        triangles[index + 2] = y0 + x + 1;
+        triangles[index + 3] = y1 + x;
+        triangles[index + 4] = y1 + x + 1;
+        triangles[index + 5] = y0 + x + 1;
+      }
+    }
+
+    mesh.vertices = vertices;
+    mesh.uv = uvs;
+    mesh.triangles = triangles;
+    return mesh;
+  }
+
+  CombineInstance _CreatePlane(Mesh mesh, Quaternion rotation) {
+    return new CombineInstance() {
+        mesh = mesh,
+        subMeshIndex = 0,
+        transform = Matrix4x4.TRS(Vector3.zero, rotation, Vector3.one)};
+  }
+
+  Mesh _CreateSkyboxMesh() {
+    Mesh mesh = _CreateMesh();
+    var comb = new CombineInstance[] {
+        _CreatePlane(mesh, Quaternion.identity),
+        _CreatePlane(mesh, Quaternion.Euler(0.0f, 90.0f, 0.0f)),
+        _CreatePlane(mesh, Quaternion.Euler(0.0f, 180.0f, 0.0f)),
+        _CreatePlane(mesh, Quaternion.Euler(0.0f, 270.0f, 0.0f)),
+        _CreatePlane(mesh, Quaternion.Euler(-90.0f, 0.0f, 0.0f)),
+        _CreatePlane(mesh, Quaternion.Euler(90.0f, 0.0f, 0.0f))};
+    Mesh skymesh = new Mesh();
+    skymesh.CombineMeshes(comb, false, true);
+    return skymesh;
+  }
+#endif
+}
+```
+
+### Assets/Cardboard/Legacy/Scripts/StereoLensFlare.cs
+```
+﻿// Copyright 2014 Google Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+using UnityEngine;
+using System.Collections;
+
+// Replacement for directional lens flares in stereo, which like skyboxes
+// (see SkyboxMesh.cs) do not consider the separation of the eyes.
+// Attach this script to a positional lens flare to create a stereo-
+// aware directional flare.  It keeps the flare positioned away well from
+// the camera along its own forward vector.
+[RequireComponent(typeof(LensFlare))]
+public class StereoLensFlare : MonoBehaviour {
+#if UNITY_5
+  void Awake() {
+    Debug.Log("StereoLensFlare is not needed in Unity 5.");
+    Component.Destroy(this);
+  }
+#else
+  [Tooltip("Fraction of the camera's far clip distance " +
+           "at which to position the flare.")]
+  [Range(0,1)]
+  public float range = 0.75f;
+
+  // Position the flare relative to the camera about to render it.
+  void OnWillRenderObject() {
+    transform.position = Camera.current.transform.position -
+                         range * Camera.current.farClipPlane * transform.forward;
+  }
+#endif
+}
+```
+
+### Assets/Cardboard/Scripts/VRDevices/AndroidBaseVRDevice.cs
+```
+﻿// Copyright 2015 Google Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+#if UNITY_ANDROID
+
+using UnityEngine;
+using System.Collections.Generic;
+
+public abstract class AndroidBaseVRDevice : BaseVRDevice {
+  protected AndroidJavaObject cardboardActivity;
+
+  public override bool SupportsNativeDistortionCorrection(List<string> diagnostics) {
+    bool support = base.SupportsNativeDistortionCorrection(diagnostics);
+    if (cardboardActivity == null) {
+      diagnostics.Add("Cannot access Activity");
+    }
+    return support;
+  }
+
+  public override void Destroy() {
+    if (cardboardActivity != null) {
+      cardboardActivity.Dispose();
+      cardboardActivity = null;
+    }
+    base.Destroy();
+  }
+
+  protected virtual void ConnectToActivity() {
+    try {
+      using (AndroidJavaClass player = new AndroidJavaClass("com.unity3d.player.UnityPlayer")) {
+        cardboardActivity = player.GetStatic<AndroidJavaObject>("currentActivity");
+      }
+    } catch (AndroidJavaException e) {
+      cardboardActivity = null;
+      Debug.LogError("Exception while connecting to the Activity: " + e);
+    }
+  }
+
+  protected virtual bool CallActivityMethod(string name, params object[] args) {
+    return CallObjectMethod(cardboardActivity, name, args);
+  }
+
+  protected virtual bool CallActivityMethod<T>(ref T result, string name, params object[] args) {
+    return CallObjectMethod(ref result, cardboardActivity, name, args);
+  }
+
+  protected AndroidJavaObject Create(string className, params object[] args) {
+    try {
+      return new AndroidJavaObject(className, args);
+    } catch (AndroidJavaException e) {
+      Debug.LogError("Exception creating object " + className + ": " + e);
+      return null;
+    }
+  }
+
+  protected static bool CallObjectMethod(AndroidJavaObject jo, string name, params object[] args) {
+    if (jo == null) {
+      Debug.LogError("Object is null when calling method " + name);
+      return false;
+    }
+    try {
+      jo.Call(name, args);
+      return true;
+    } catch (AndroidJavaException e) {
+      Debug.LogError("Exception calling method " + name + ": " + e);
+      return false;
+    }
+  }
+
+  protected static bool CallObjectMethod<T>(ref T result, AndroidJavaObject jo, string name,
+                                            params object[] args) {
+    if (jo == null) {
+      Debug.LogError("Object is null when calling method " + name);
+      return false;
+    }
+    try {
+      result = jo.Call<T>(name, args);
+      return true;
+    } catch (AndroidJavaException e) {
+      Debug.LogError("Exception calling method " + name + ": " + e);
+      return false;
+    }
+  }
+}
+
+#endif
+```
+
+### Assets/Cardboard/Scripts/VRDevices/AndroidVRDevice.cs
+```
+﻿// Copyright 2015 Google Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+#if UNITY_ANDROID
+
+using UnityEngine;
+
+public class AndroidVRDevice : VRDevice {
+  private AndroidJavaObject activityListener;
+
+  public override void Init() {
+#if UNITY_5
+    debugDisableNativeDistortion = true;
+#endif
+    base.Init();
+    ConnectToActivity();
+  }
+
+  protected override void ConnectToActivity() {
+    base.ConnectToActivity();
+    if (cardboardActivity != null) {
+      activityListener = Create("com.google.vr.platform.unity.UnityVrActivityListener");
+    }
+  }
+
+  public override void SetVRModeEnabled(bool enabled) {
+    CallObjectMethod(activityListener, "setVRModeEnabled", enabled);
+  }
+
+  public override void SetTouchCoordinates(int x, int y) {
+    CallObjectMethod(activityListener, "setTouchCoordinates", x, y);
+  }
+
+  public override void LaunchSettingsDialog() {
+    CallObjectMethod(activityListener, "launchSettingsDialog");
+  }
+
+  protected override void ProcessEvents() {
+    base.ProcessEvents();
+    if (!Cardboard.SDK.TapIsTrigger) {
+      if (triggered) {
+        CallObjectMethod(activityListener, "injectSingleTap");
+      }
+      if (tilted) {
+        CallObjectMethod(activityListener, "injectKeypress", 111);  // Escape key.
+      }
+    }
+  }
+
+  public override void Destroy() {
+    if (activityListener != null) {
+      activityListener.Dispose();
+    }
+    base.Destroy();
+  }
+}
+
+#endif
+```
+
+### Assets/Cardboard/Scripts/VRDevices/BaseVRDevice.cs
+```
+﻿// Copyright 2015 Google Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#if !UNITY_EDITOR
+#if UNITY_ANDROID
+#define ANDROID_DEVICE
+#elif UNITY_IPHONE
+#define IPHONE_DEVICE
+#endif
+#endif
+
+using UnityEngine;
+using System.Collections.Generic;
+using System.Text.RegularExpressions;
+using System;
+
+// Represents a vr device that this plugin interacts with.
+// Please do not interact with this class directly, instead use the interface in Cardboard.cs.
+public abstract class BaseVRDevice {
+  private static BaseVRDevice device = null;
+
+  protected BaseVRDevice() {
+    Profile = CardboardProfile.Default.Clone();
+  }
+
+  public CardboardProfile Profile { get; protected set; }
+
+  public abstract void Init();
+
+  public virtual bool SupportsNativeDistortionCorrection(List<string> diagnostics) {
+    bool support = true;
+    if (!SystemInfo.supportsRenderTextures) {
+      diagnostics.Add("RenderTexture (Unity Pro feature) is unavailable");
+      support = false;
+    }
+    if (!SupportsUnityRenderEvent()) {
+      diagnostics.Add("Unity 4.5+ is needed for UnityRenderEvent");
+      support = false;
+    }
+    return support;
+  }
+
+  public virtual bool SupportsNativeUILayer(List<string> diagnostics) {
+    bool support = true;
+    if (!SupportsUnityRenderEvent()) {
+      diagnostics.Add("Unity 4.5+ is needed for UnityRenderEvent");
+      support = false;
+    }
+    return support;
+  }
+
+  public bool SupportsUnityRenderEvent() {
+    bool support = true;
+    if (Application.isMobilePlatform) {
+      try {
+        string version = new Regex(@"(\d+\.\d+)\..*").Replace(Application.unityVersion, "$1");
+        if (new Version(version) < new Version("4.5")) {
+          support = false;
+        }
+      } catch {
+        Debug.LogWarning("Unable to determine Unity version from: " + Application.unityVersion);
+      }
+    }
+    return support;
+  }
+
+  public virtual RenderTexture CreateStereoScreen() {
+    Debug.Log("Creating new default cardboard screen texture.");
+    return new RenderTexture(Screen.width, Screen.height, 16, RenderTextureFormat.RGB565);
+  }
+
+  public abstract void SetDistortionCorrectionEnabled(bool enabled);
+  public abstract void SetVRModeEnabled(bool enabled);
+  public abstract void SetAlignmentMarkerEnabled(bool enabled);
+  public abstract void SetSettingsButtonEnabled(bool enabled);
+  public abstract void SetNeckModelScale(float scale);
+  public abstract void SetAutoDriftCorrectionEnabled(bool enabled);
+
+  public abstract void SetStereoScreen(RenderTexture stereoScreen);
+
+  public Pose3D GetHeadPose() {
+    return this.headPose;
+  }
+  protected MutablePose3D headPose = new MutablePose3D();
+
+  public Pose3D GetEyePose(Cardboard.Eye eye) {
+    switch(eye) {
+      case Cardboard.Eye.Left:
+        return leftEyePose;
+      case Cardboard.Eye.Right:
+        return rightEyePose;
+      default:
+        return null;
+    }
+  }
+  protected MutablePose3D leftEyePose = new MutablePose3D();
+  protected MutablePose3D rightEyePose = new MutablePose3D();
+
+  public Matrix4x4 GetProjection(Cardboard.Eye eye,
+                                 Cardboard.Distortion distortion = Cardboard.Distortion.Distorted) {
+    switch(eye) {
+      case Cardboard.Eye.Left:
+        return distortion == Cardboard.Distortion.Distorted ?
+            leftEyeDistortedProjection : leftEyeUndistortedProjection;
+      case Cardboard.Eye.Right:
+        return distortion == Cardboard.Distortion.Distorted ?
+            rightEyeDistortedProjection : rightEyeUndistortedProjection;
+      default:
+        return Matrix4x4.identity;
+    }
+  }
+  protected Matrix4x4 leftEyeDistortedProjection;
+  protected Matrix4x4 rightEyeDistortedProjection;
+  protected Matrix4x4 leftEyeUndistortedProjection;
+  protected Matrix4x4 rightEyeUndistortedProjection;
+
+  public Rect GetViewport(Cardboard.Eye eye,
+                          Cardboard.Distortion distortion = Cardboard.Distortion.Distorted) {
+    switch(eye) {
+      case Cardboard.Eye.Left:
+        return distortion == Cardboard.Distortion.Distorted ?
+            leftEyeDistortedViewport : leftEyeUndistortedViewport;
+      case Cardboard.Eye.Right:
+        return distortion == Cardboard.Distortion.Distorted ?
+            rightEyeDistortedViewport : rightEyeUndistortedViewport;
+      default:
+        return new Rect();
+    }
+  }
+  protected Rect leftEyeDistortedViewport;
+  protected Rect rightEyeDistortedViewport;
+  protected Rect leftEyeUndistortedViewport;
+  protected Rect rightEyeUndistortedViewport;
+
+  public bool triggered;
+  public bool tilted;
+
+  public abstract void UpdateState();
+
+  public abstract void UpdateScreenData();
+
+  public abstract void Recenter();
+
+  public abstract void PostRender(bool vrMode);
+
+  public virtual void SetTouchCoordinates(int x, int y) {
+    // Do nothing
+  }
+
+  public virtual void OnPause(bool pause) {
+    if (!pause) {
+      UpdateScreenData();
+    }
+  }
+
+  public virtual void OnFocus(bool focus) {
+    // Do nothing.
+  }
+
+  public virtual void Reset() {
+    Recenter();
+  }
+
+  public virtual void OnApplicationQuit() {
+    // Do nothing.
+  }
+
+  public virtual void Destroy() {
+    if (device == this) {
+      device = null;
+    }
+  }
+
+  // Helper functions.
+  protected void ComputeEyesFromProfile() {
+    // Compute left eye matrices from screen and device params
+    Matrix4x4 leftEyeView = Matrix4x4.identity;
+    leftEyeView[0, 3] = -Profile.device.lenses.separation / 2;
+    leftEyePose.Set(leftEyeView);
+
+    float[] rect = new float[4];
+    Profile.GetLeftEyeVisibleTanAngles(ref rect);
+    leftEyeDistortedProjection = MakeProjection(rect[0], rect[1], rect[2], rect[3], 1, 1000);
+    Profile.GetLeftEyeNoLensTanAngles(ref rect);
+    leftEyeUndistortedProjection = MakeProjection(rect[0], rect[1], rect[2], rect[3], 1, 1000);
+
+    leftEyeUndistortedViewport = Profile.GetLeftEyeVisibleScreenRect(rect);
+    leftEyeDistortedViewport = leftEyeUndistortedViewport;
+
+    // Right eye matrices same as left ones but for some sign flippage.
+    Matrix4x4 rightEyeView = leftEyeView;
+    rightEyeView[0, 3] *= -1;
+    rightEyePose.Set(rightEyeView);
+
+    rightEyeDistortedProjection = leftEyeDistortedProjection;
+    rightEyeDistortedProjection[0, 2] *= -1;
+    rightEyeUndistortedProjection = leftEyeUndistortedProjection;
+    rightEyeUndistortedProjection[0, 2] *= -1;
+
+    rightEyeUndistortedViewport = leftEyeUndistortedViewport;
+    rightEyeUndistortedViewport.x = 1 - rightEyeUndistortedViewport.xMax;
+    rightEyeDistortedViewport = rightEyeUndistortedViewport;
+  }
+
+  private static Matrix4x4 MakeProjection(float l, float t, float r, float b, float n, float f) {
+    Matrix4x4 m = Matrix4x4.zero;
+    m[0, 0] = 2 * n / (r - l);
+    m[1, 1] = 2 * n / (t - b);
+    m[0, 2] = (r + l) / (r - l);
+    m[1, 2] = (t + b) / (t - b);
+    m[2, 2] = (n + f) / (n - f);
+    m[2, 3] = 2 * n * f / (n - f);
+    m[3, 2] = -1;
+    return m;
+  }
+
+  public static BaseVRDevice GetDevice() {
+    if (device == null) {
+#if UNITY_EDITOR
+      device = new UnityEditorDevice();
+#elif ANDROID_DEVICE
+      //device = new CardboardAndroidDevice();
+      device = new AndroidVRDevice();
+#elif IPHONE_DEVICE
+      device = new iOSVRDevice();
+#else
+      throw new InvalidOperationException();
+#endif
+    }
+    return device;
+  }
+}
+```
+
+### Assets/Cardboard/Scripts/VRDevices/UnityEditorDevice.cs
+```
+// Copyright 2015 Google Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+#if UNITY_EDITOR
+
+using UnityEngine;
+using UnityEditor;
+using System.Collections.Generic;
+
+// Sends simulated values for use when testing within the Unity Editor.
+public class UnityEditorDevice : BaseVRDevice {
+  // Simulated neck model.
+  private static readonly Vector3 neckOffset = new Vector3(0, 0.075f, -0.08f);
+
+  // Use mouse to emulate head in the editor.
+  private float mouseX = 0;
+  private float mouseY = 0;
+  private float mouseZ = 0;
+
+  public override void Init() {
+    Input.gyro.enabled = true;
+  }
+
+  public override bool SupportsNativeDistortionCorrection(List<string> diagnostics) {
+    return false;  // No need for diagnostic message.
+  }
+
+  public override bool SupportsNativeUILayer(List<string> diagnostics) {
+    return false;  // No need for diagnostic message.
+  }
+
+  public override RenderTexture CreateStereoScreen() {
+    return null;  // No need for it in the editor.
+  }
+
+  public override void SetDistortionCorrectionEnabled(bool enabled) {}
+  public override void SetVRModeEnabled(bool enabled) {}
+  public override void SetAlignmentMarkerEnabled(bool enabled) {}
+  public override void SetSettingsButtonEnabled(bool enabled) {}
+  public override void SetNeckModelScale(float scale) {}
+  public override void SetAutoDriftCorrectionEnabled(bool enabled) {}
+
+  public override void SetStereoScreen(RenderTexture stereoScreen) {}
+
+  private Quaternion initialRotation = Quaternion.identity;
+
+  private bool remoteCommunicating = false;
+  private bool RemoteCommunicating {
+    get {
+      if (!remoteCommunicating) {
+#if UNITY5
+        remoteCommunicating = EditorApplication.isRemoteConnected;
+#else
+        remoteCommunicating = Vector3.Dot(Input.gyro.rotationRate, Input.gyro.rotationRate) > 0.05;
+#endif
+      }
+      return remoteCommunicating;
+    }
+  }
+
+  public override void UpdateState() {
+    Quaternion rot;
+    if (Cardboard.SDK.UseUnityRemoteInput && RemoteCommunicating) {
+      var att = Input.gyro.attitude * initialRotation;
+      att = new Quaternion(att.x, att.y, -att.z, -att.w);
+      rot = Quaternion.Euler(90, 0, 0) * att;
+    } else {
+      bool rolled = false;
+      if (Input.GetKey(KeyCode.LeftAlt) || Input.GetKey(KeyCode.RightAlt)) {
+        mouseX += Input.GetAxis("Mouse X") * 5;
+        if (mouseX <= -180) {
+          mouseX += 360;
+        } else if (mouseX > 180) {
+          mouseX -= 360;
+        }
+        mouseY -= Input.GetAxis("Mouse Y") * 2.4f;
+        mouseY = Mathf.Clamp(mouseY, -85, 85);
+      } else if (Input.GetKey(KeyCode.LeftControl) || Input.GetKey(KeyCode.RightControl)) {
+        rolled = true;
+        mouseZ += Input.GetAxis("Mouse X") * 5;
+        mouseZ = Mathf.Clamp(mouseZ, -85, 85);
+      }
+      if (!rolled && Cardboard.SDK.autoUntiltHead) {
+        // People don't usually leave their heads tilted to one side for long.
+        mouseZ = Mathf.Lerp(mouseZ, 0, Time.deltaTime / (Time.deltaTime + 0.1f));
+      }
+      rot = Quaternion.Euler(mouseY, mouseX, mouseZ);
+    }
+    var neck = (rot * neckOffset - neckOffset.y * Vector3.up) * Cardboard.SDK.NeckModelScale;
+    headPose.Set(neck, rot);
+
+    triggered = Input.GetMouseButtonUp(0);
+    tilted = Input.GetKeyUp(KeyCode.Escape);
+  }
+
+  public override void PostRender(bool vrMode) {
+    // Do nothing.
+  }
+
+  public override void UpdateScreenData() {
+    Profile = CardboardProfile.GetKnownProfile(Cardboard.SDK.ScreenSize, Cardboard.SDK.DeviceType);
+    ComputeEyesFromProfile();
+  }
+
+  public override void Recenter() {
+    mouseX = mouseZ = 0;  // Do not reset pitch, which is how it works on the phone.
+    if (RemoteCommunicating) {
+      //initialRotation = Quaternion.Inverse(Input.gyro.attitude);
+    }
+  }
+}
+
+#endif
+```
+
+### Assets/Cardboard/Scripts/VRDevices/VRDevice.cs
+```
+﻿// Copyright 2015 Google Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+using UnityEngine;
+
+using AOT;
+using System.Runtime.InteropServices;
+using System.Collections.Generic;
+
+public abstract class VRDevice :
+#if UNITY_ANDROID
+AndroidBaseVRDevice
+#else
+BaseVRDevice
+#endif
+{
+  // Event IDs sent up from native layer.
+  private const int kTriggered = 1;
+  private const int kTilted = 2;
+  private const int kProfileChanged = 3;
+  private const int kLaunchSettingsDialog = 4;
+
+  private float[] headData = new float[16];
+  private float[] viewData = new float[16 * 6 + 8];
+  private float[] profileData = new float[13];
+
+  private Matrix4x4 headView = new Matrix4x4();
+  private Matrix4x4 leftEyeView = new Matrix4x4();
+  private Matrix4x4 rightEyeView = new Matrix4x4();
+
+  private Queue<int> eventQueue = new Queue<int>();
+
+  protected bool debugDisableNativeProjections = false;
+  protected bool debugDisableNativeDistortion = false;
+  protected bool debugDisableNativeUILayer = false;
+
+  public override bool SupportsNativeDistortionCorrection(List<string> diagnostics) {
+    bool supported = base.SupportsNativeDistortionCorrection(diagnostics);
+    if (debugDisableNativeDistortion) {
+      supported = false;
+      diagnostics.Add("Debug override");
+    }
+    return supported;
+  }
+
+  public override bool SupportsNativeUILayer(List<string> diagnostics) {
+    bool supported = base.SupportsNativeUILayer(diagnostics);
+    if (debugDisableNativeUILayer) {
+      supported = false;
+      diagnostics.Add("Debug override");
+    }
+    return supported;
+  }
+
+  public override void SetDistortionCorrectionEnabled(bool enabled) {
+    EnableDistortionCorrection(enabled);
+  }
+
+  public override void SetAlignmentMarkerEnabled(bool enabled) {
+    EnableAlignmentMarker(enabled);
+  }
+
+  public override void SetSettingsButtonEnabled(bool enabled) {
+    EnableSettingsButton(enabled);
+  }
+
+  public override void SetNeckModelScale(float scale) {
+    SetNeckModelFactor(scale);
+  }
+
+  public override void SetAutoDriftCorrectionEnabled(bool enabled) {
+    EnableAutoDriftCorrection(enabled);
+  }
+
+  public override void Init() {
+    // Get landscape dimensions, even if app starts in portrait.
+    int width = Mathf.Max(Screen.width, Screen.height);
+    int height = Mathf.Min(Screen.height, Screen.width);
+
+    Start(width, height, Screen.dpi, Screen.dpi);
+    SetEventCallback(OnVREvent);
+  }
+
+  public override void SetStereoScreen(RenderTexture stereoScreen) {
+    SetTextureId(stereoScreen != null ? stereoScreen.GetNativeTextureID() : 0);
+  }
+
+  public override void UpdateState() {
+    GetHeadPose(headData, Time.smoothDeltaTime);
+    ExtractMatrix(ref headView, headData);
+    headPose.SetRightHanded(headView.inverse);
+  }
+
+  public override void UpdateScreenData() {
+    UpdateProfile();
+    if (debugDisableNativeProjections) {
+      ComputeEyesFromProfile();
+    } else {
+      UpdateView();
+    }
+  }
+
+  public override void Recenter() {
+    ResetHeadTracker();
+  }
+
+  public override void PostRender(bool vrMode) {
+    if (vrMode) {
+      GL.IssuePluginEvent(0);
+      GL.InvalidateState();
+    }
+    ProcessEvents();
+  }
+
+  public override void OnApplicationQuit() {
+    Stop();
+    base.OnApplicationQuit();
+  }
+
+  private void UpdateView() {
+    GetViewParameters(viewData);
+    int j = 0;
+
+    j = ExtractMatrix(ref leftEyeView, viewData, j);
+    j = ExtractMatrix(ref rightEyeView, viewData, j);
+    leftEyePose.SetRightHanded(leftEyeView.inverse);
+    rightEyePose.SetRightHanded(rightEyeView.inverse);
+
+    j = ExtractMatrix(ref leftEyeDistortedProjection, viewData, j);
+    j = ExtractMatrix(ref rightEyeDistortedProjection, viewData, j);
+    j = ExtractMatrix(ref leftEyeUndistortedProjection, viewData, j);
+    j = ExtractMatrix(ref rightEyeUndistortedProjection, viewData, j);
+
+    leftEyeUndistortedViewport.Set(viewData[j], viewData[j+1], viewData[j+2], viewData[j+3]);
+    leftEyeDistortedViewport = leftEyeUndistortedViewport;
+    j += 4;
+
+    rightEyeUndistortedViewport.Set(viewData[j], viewData[j+1], viewData[j+2], viewData[j+3]);
+    rightEyeDistortedViewport = rightEyeUndistortedViewport;
+    j += 4;
+  }
+
+  private void UpdateProfile() {
+    GetProfile(profileData);
+    CardboardProfile.Device device = new CardboardProfile.Device();
+    CardboardProfile.Screen screen = new CardboardProfile.Screen();
+    device.maxFOV.outer = profileData[0];
+    device.maxFOV.upper = profileData[1];
+    device.maxFOV.inner = profileData[2];
+    device.maxFOV.lower = profileData[3];
+    screen.width = profileData[4];
+    screen.height = profileData[5];
+    screen.border = profileData[6];
+    device.lenses.separation = profileData[7];
+    device.lenses.offset = profileData[8];
+    device.lenses.screenDistance = profileData[9];
+    device.lenses.alignment = (int)profileData[10];
+    device.distortion.k1 = profileData[11];
+    device.distortion.k2 = profileData[12];
+    device.inverse = CardboardProfile.ApproximateInverse(device.distortion);
+    Profile.screen = screen;
+    Profile.device = device;
+  }
+
+  private static int ExtractMatrix(ref Matrix4x4 mat, float[] data, int i = 0) {
+    // Matrices returned from our native layer are in row-major order.
+    for (int r = 0; r < 4; r++) {
+      for (int c = 0; c < 4; c++, i++) {
+        mat[r, c] = data[i];
+      }
+    }
+    return i;
+  }
+
+  public abstract void LaunchSettingsDialog();
+
+  protected virtual void ProcessEvents() {
+    int[] events = null;
+    lock (eventQueue) {
+      int num = eventQueue.Count;
+      if (num > 0) {
+        events = new int[num];
+        eventQueue.CopyTo(events, 0);
+        eventQueue.Clear();
+      }
+    }
+    if (events == null) {
+      return;
+    }
+    foreach (int eventID in events) {
+      switch (eventID) {
+        case kTriggered:
+          triggered = true;
+          break;
+        case kTilted:
+          tilted = true;
+          break;
+        case kProfileChanged:
+          UpdateScreenData();
+          break;
+        case kLaunchSettingsDialog:
+          LaunchSettingsDialog();
+          break;
+      }
+    }
+  }
+
+  [MonoPInvokeCallback(typeof(VREventCallback))]
+  private static void OnVREvent(int eventID) {
+    VRDevice device = GetDevice() as VRDevice;
+    // This function is called back from random native code threads.
+    lock(device.eventQueue) {
+      device.eventQueue.Enqueue(eventID);
+    }
+  }
+
+#if UNITY_IOS
+  private const string dllName = "__Internal";
+#else
+  private const string dllName = "vrunity";
+#endif
+
+  delegate void VREventCallback(int eventID);
+
+  [DllImport(dllName)]
+  private static extern void Start(int width, int height, float xdpi, float ydpi);
+
+  [DllImport(dllName)]
+  private static extern void SetEventCallback(VREventCallback callback);
+
+  [DllImport(dllName)]
+  private static extern void SetTextureId(int id);
+
+  [DllImport(dllName)]
+  private static extern void EnableDistortionCorrection(bool enable);
+
+  [DllImport(dllName)]
+  private static extern void EnableAlignmentMarker(bool enable);
+
+  [DllImport(dllName)]
+  private static extern void EnableSettingsButton(bool enable);
+
+  [DllImport(dllName)]
+  private static extern void EnableAutoDriftCorrection(bool enable);
+
+  [DllImport(dllName)]
+  private static extern void SetNeckModelFactor(float factor);
+
+  [DllImport(dllName)]
+  private static extern void ResetHeadTracker();
+
+  [DllImport(dllName)]
+  private static extern void GetProfile(float[] profile);
+
+  [DllImport(dllName)]
+  private static extern void GetHeadPose(float[] pose, float fps);
+
+  [DllImport(dllName)]
+  private static extern void GetViewParameters(float[] viewParams);
+
+  [DllImport(dllName)]
+  private static extern void Stop();
+}
+```
+
+### Assets/Cardboard/Scripts/VRDevices/iOSVRDevice.cs
+```
+﻿// Copyright 2015 Google Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+#if UNITY_IOS
+
+using System.Runtime.InteropServices;
+using System.Collections.Generic;
+
+public class iOSVRDevice : VRDevice {
+  // Native code libraries use OpenGL, but Unity picks Metal for iOS by default.
+  bool isOpenGL = false;
+
+  public override bool SupportsNativeDistortionCorrection(List<string> diagnostics) {
+    bool support = base.SupportsNativeDistortionCorrection(diagnostics);
+    if (!isOpenGL) {
+      diagnostics.Add("Requires OpenGL");
+      support = false;
+    }
+    return support;
+  }
+
+  public override bool SupportsNativeUILayer(List<string> diagnostics) {
+    bool support = base.SupportsNativeUILayer(diagnostics);
+    if (!isOpenGL) {
+      diagnostics.Add("Requires OpenGL");
+      support = false;
+    }
+    return support;
+  }
+
+  public override void SetVRModeEnabled(bool enabled) {
+    setVRModeEnabled(enabled);
+  }
+
+  public override void Init() {
+    isOpenGL = isOpenGLAPI();
+    setSyncWithCardboardEnabled(Cardboard.SDK.SyncWithCardboardApp);
+    base.Init();
+  }
+
+  public override void PostRender(bool vrMode) {
+    // Do not call GL.IssuePluginEvent() unless OpenGL is the graphics API.
+    base.PostRender(vrMode && isOpenGL);
+  }
+
+  private bool debugOnboarding = false;
+
+  public override void OnFocus(bool focus) {
+    if (focus && (debugOnboarding || !isOnboardingDone())) {
+      debugOnboarding = false;
+      launchOnboardingDialog();
+    }
+  }
+
+  public override void OnPause(bool pause) {
+    if (!pause) {
+      readProfile();
+    }
+  }
+
+  public override void LaunchSettingsDialog() {
+    launchSettingsDialog();
+  }
+
+  [DllImport("__Internal")]
+  private static extern bool isOpenGLAPI();
+
+  [DllImport("__Internal")]
+  private static extern void setVRModeEnabled(bool enabled);
+
+  [DllImport("__Internal")]
+  private static extern void setSyncWithCardboardEnabled(bool enabled);
+
+  [DllImport("__Internal")]
+  private static extern void readProfile();
+
+  [DllImport("__Internal")]
+  private static extern bool isOnboardingDone();
+
+  [DllImport("__Internal")]
+  private static extern void launchOnboardingDialog();
+
+  [DllImport("__Internal")]
+  private static extern void launchSettingsDialog();
+}
+
+#endif
+```

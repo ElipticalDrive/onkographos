@@ -1,0 +1,601 @@
+--- v001.md
++++ v002.md
+@@ -4,289 +4,342 @@
+ 
+ ## Overview
+-This method traverses one or more axis-aligned voxel grids to generate sample points and interval boundaries for volume rendering, specifically designed for GPU execution [S1, unofficial]. It differs from standard DDA by supporting multiple overlapping grids with priority-based occupancy masking and employing cone-angle-based adaptive step sizing to vary sample density with distance from the camera [S1, unofficial]. It is primarily used in the `nerfacc` library for accelerating NeRF and 3D Gaussian Splatting rendering pipelines [S1, unofficial].
++A CUDA kernel that marches rays through one or more axis-aligned voxel grids using precomputed, sorted entry/exit intersections to generate sample points and interval boundaries [S1, unofficial]. It handles empty cells by skipping them and fills continuous segments, supporting both fixed step sizes and cone-angle-aware adaptive stepping [S1, unofficial]. It sets itself apart from standard DDA by decoupling the grid boundary traversal from the sample generation, allowing for variable step sizes that scale with distance from the camera origin [S1, unofficial].
+ 
+ ## How it works
+-The method operates on a batch of rays, processing them in parallel. It relies on precomputed sorted intersection distances between rays and grid boundaries to efficiently skip empty space and manage multiple grids.
+-
+-### Inputs and Outputs
+-**Inputs:**
+-*   `rays_o`: Ray origins, shape `[n_rays, 3]` [S1, unofficial].
+-*   `rays_d`: Ray directions, shape `[n_rays, 3]` [S1, unofficial].
+-*   `rays_mask`: Optional boolean mask, shape `[n_rays]`, to skip specific rays [S1, unofficial].
+-*   `binaries`: Voxel occupancy grids, shape `[n_grids, resx, resy, resz]`, boolean type [S1, unofficial].
+-*   `aabbs`: Axis-aligned bounding boxes for each grid, shape `[n_grids, 6]` (min/max x, y, z), float type [S1, unofficial].
+-*   `t_sorted`: Sorted intersection distances for all grids, shape `[n_rays, n_grids * 2]` [S1, unofficial].
+-*   `t_indices`: Grid IDs corresponding to each intersection in `t_sorted`, shape `[n_rays, n_grids * 2]` [S1, unofficial].
+-*   `hits`: Boolean flags indicating if a ray hits a grid, shape `[n_rays, n_grids]` [S1, unofficial].
+-*   `near_planes`: Near clipping planes for each ray, shape `[n_rays]` [S1, unofficial].
+-*   `far_planes`: Far clipping planes for each ray, shape `[n_rays]` [S1, unofficial].
+-*   `step_size`: Base step length for ray marching. Default `1e-3`. If `<= 0.0`, the kernel records steps through each voxel cell instead of marching [S1, unofficial].
+-*   `cone_angle`: Controls linear increase of step size with distance. Must be `>= 0.0`. A value of `0.0` means uniform marching with `step_size` [S1, unofficial].
+-*   `traverse_steps_limit`: Maximum number of traversal steps/samples per ray. Default `None` (unlimited). If `<= 0`, no limit is applied [S1, unofficial].
+-*   `over_allocate`: Boolean flag. If `true`, memory is pre-allocated based on limits for single-pass traversal. If `false`, a two-pass approach (count then fill) is used [S1, unofficial].
+-
+-**Outputs:**
+-*   `intervals`: PackedRaySegmentsSpec containing interval values, ray indices, `is_left`, `is_right` flags, and `chunk_cnts` [S1, unofficial].
+-*   `samples`: PackedRaySegmentsSpec containing sample values, ray indices, `is_valid` flags, and `chunk_cnts` [S1, unofficial].
+-*   `terminate_planes`: Optional float array, shape `[n_rays]`, storing the final traversal distance `t_last` [S1, unofficial].
+-
+-### Data Structures
+-The algorithm uses packed segment specifications for outputs to handle variable-length outputs per ray efficiently on GPU.
+-*   `PackedRaySegmentsSpec`: Contains `vals` (float array of samples/interval bounds), `ray_indices` (int array mapping to ray ID), `is_left`/`is_right`/`is_valid` (boolean flags), and `chunk_cnts` (int array storing the count of elements per ray) [S1, unofficial].
+-
+-### Parameters
+-*   `step_size`: Default `1e-3` [S1, unofficial].
+-*   `cone_angle`: Default `0.0` (uniform) [S1, unofficial].
+-*   `traverse_steps_limit`: Default `None` [S1, unofficial].
+-*   `dt_max`: Hard upper bound for step size, typically `1e10f` [S1, unofficial].
+-
+-### Algorithm Steps
+-The traversal is performed in a CUDA kernel parallelized over rays (`tid = blockIdx.x * blockDim.x + threadIdx.x`) [S1, unofficial].
++**Inputs and Outputs:**
++*   **Inputs:**
++    *   `rays_o`: Ray origins, shape `[n_rays, 3]` [S1, unofficial].
++    *   `rays_d`: Ray directions, shape `[n_rays, 3]` [S1, unofficial].
++    *   `rays_mask`: Optional boolean mask, shape `[n_rays]`, to skip specific rays [S1, unofficial].
++    *   `binaries`: Occupancy grids, shape `[n_grids, resx, resy, resz]`, boolean values indicating occupied cells [S1, unofficial].
++    *   `aabbs`: Axis-aligned bounding boxes for each grid, shape `[n_grids, 6]` (min/max x, y, z) [S1, unofficial].
++    *   `hits`: Boolean array, shape `[n_rays, n_grids]`, indicating if a ray intersects a grid [S1, unofficial].
++    *   `t_sorted`: Sorted intersection distances, shape `[n_rays, n_grids * 2]` [S1, unofficial].
++    *   `t_indices`: Grid IDs corresponding to each intersection in `t_sorted`, shape `[n_rays, n_grids * 2]` [S1, unofficial].
++    *   `near_planes`: Near plane distances, shape `[n_rays]` [S1, unofficial].
++    *   `far_planes`: Far plane distances, shape `[n_rays]` [S1, unofficial].
++    *   `step_size`: Base step length. Default `1e-3` [S1, unofficial]. If `<= 0.0`, the kernel records steps through each voxel cell instead of marching [S1, unofficial].
++    *   `cone_angle`: Controls linear increase of step size with distance. Must be `>= 0.0`. A value of `0.0` means uniform marching with `step_size` [S1, unofficial].
++    *   `traverse_steps_limit`: Maximum number of traversal steps per ray. Enables early termination. Default `None` (unlimited). If `<= 0`, no limit is applied [S1, unofficial].
++    *   `over_allocate`: Boolean flag. If `true`, memory is pre-allocated based on limits for single-pass traversal. If `false`, a two-pass approach is used [S1, unofficial].
++    *   `first_pass`: Boolean flag indicating if this is the counting pass (for two-pass allocation) [S1, unofficial].
++*   **Outputs:**
++    *   `intervals`: PackedRaySegmentsSpec containing `vals` (start/end distances), `ray_indices`, `is_left`, `is_right`, and `chunk_cnts` [S1, unofficial].
++    *   `samples`: PackedRaySegmentsSpec containing `vals` (sample positions), `ray_indices`, `is_valid`, and `chunk_cnts` [S1, unofficial].
++    *   `terminate_planes`: Optional array, shape `[n_rays]`, storing the final `t_last` for each ray [S1, unofficial].
++
++**Data Structures:**
++The algorithm relies on pre-sorted intersection arrays `t_sorted` and `t_indices`. `t_sorted` contains the $2 \times n\_grids$ intersection points for each ray, sorted by distance. `t_indices` maps these distances to the specific grid ID. The occupancy is stored in `binaries`, a multi-dimensional boolean array.
++
++**Parameters:**
++*   `step_size`: `1e-3` [S1, unofficial].
++*   `cone_angle`: `0.0` (uniform) to positive values [S1, unofficial].
++*   `traverse_steps_limit`: `None` [S1, unofficial].
++
++**Algorithm Steps:**
+ 
+ 1.  **Initialization:**
+-    *   If `rays_mask` is provided and `rays_mask[tid]` is false, terminate the thread [S1, unofficial].
+-    *   If not the first pass and `intervals.chunk_cnts[tid] == 0`, terminate [S1, unofficial].
++    *   Compute thread ID: `tid = blockIdx.x * blockDim.x + threadIdx.x` [S1, unofficial].
++    *   If `rays_mask` is provided and `rays_mask[tid]` is false, terminate [S1, unofficial].
++    *   If not `first_pass` and `intervals.chunk_cnts[tid] == 0`, terminate (optimization for rays with no intersections) [S1, unofficial].
+     *   Initialize `t_last = near_planes[tid]`, `continuous = false`, `n_intervals = 0`, `n_samples = 0` [S1, unofficial].
+-    *   Determine the start index in `t_sorted` based on the number of grids [S1, unofficial].
+-
+-2.  **Loop over Intersections:**
+-    *   Iterate through the sorted intersection distances `t_sorted` for the current ray. The loop runs from `base_t_sorted` to `base_t_sorted + n_grids * 2 - 1` [S1, unofficial].
+-    *   For each pair of intersections (entry/exit) associated with a grid:
+-        *   Calculate valid interval bounds clamped to near/far planes:
+-            $$
+-            \text{this\_tmin} = \max(\text{t\_sorted}[i], \text{near\_planes}[tid])
+-            $$
+-            $$
+-            \text{this\_tmax} = \min(\text{t\_sorted}[i + 1], \text{far\_planes}[tid])
+-            $$
+-        *   If `this_tmin >= this_tmax`, skip this interval (invalid/zero-length) [S1, unofficial].
+-
+-3.  **Grid Traversal and Step Sizing:**
+-    *   Setup AABB traversal for the current grid using `setup_traversal` to compute voxel step `delta`, distance to next boundary `tdist`, and indices [S1, unofficial].
+-    *   **Empty Cell Handling:** If the current voxel `binaries[cell_id]` is false:
+-        *   Set `continuous = false` [S1, unofficial].
+-        *   If `step_size <= 0.0`, set `t_last = t_traverse` (the end of the empty segment) [S1, unofficial].
+-        *   If `step_size > 0.0`, march `t_last` forward using adaptive step size until `t_last + dt * 0.5 >= t_traverse` [S1, unofficial].
+-    *   **Occupied Cell Handling:** If `binaries[cell_id]` is true:
+-        *   Calculate `t_next` (the end of the current voxel traversal) [S1, unofficial].
+-        *   If `step_size <= 0.0`, set `t_next = t_traverse` [S1, unofficial].
+-        *   If `step_size > 0.0`:
+-            *   Calculate adaptive step size `dt` (see Formula).
+-            *   Check if `t_last + dt * 0.5 >= t_traverse`. If so, break the inner loop (end of voxel) [S1, unofficial].
+-            *   Otherwise, set `t_next = t_last + dt` and record the sample [S1, unofficial].
+-            *   Update `t_last = t_next` [S1, unofficial].
+-
+-4.  **Adaptive Step Size Formula:**
+-    The step size $dt$ is calculated based on the current distance $t$ along the ray:
+-    $$
+-    dt = \text{clamp}(t \cdot \text{cone\_angle}, dt_{min}, dt_{max})
+-    $$
+-    Where:
+-    *   $t$ is the current distance along the ray (`t_last`) [S1, unofficial].
+-    *   $dt_{min}$ is the `step_size` parameter [S1, unofficial].
+-    *   $dt_{max}$ is `1e10f` [S1, unofficial].
+-
+-5.  **Output Writing:**
+-    *   If `intervals.chunk_cnts` is not null and not the first pass:
+-        *   If `!continuous`: Write left interval (`t_last`) with `is_left=true`, `is_right=true`. Increment `n_intervals` twice [S1, unofficial].
+-        *   If `continuous`: Write right interval (`t_next`) with `is_left` set on previous index, `is_right=true`. Increment `n_intervals` once [S1, unofficial].
+-    *   Advance traversal to the next voxel using `single_traversal` [S1, unofficial]. If it returns false, break the loop [S1, unofficial].
+-
+-6.  **Finalization:**
+-    *   Set `terminate_planes[tid] = t_last` if the output array is provided [S1, unofficial].
+-    *   Set `intervals.chunk_cnts[tid] = n_intervals` and `samples.chunk_cnts[tid] = n_samples` [S1, unofficial].
+-
+-### Pseudocode
++    *   Determine the start index in `t_sorted` for this ray: `base_t_sorted` (derived from `t_indices` or precomputed offsets, assumed to be known or computed via prefix sum in preprocessing) [S1, unofficial]. The loop iterates `i` from `base_t_sorted` to `base_t_sorted + n_grids * 2 - 1` [S1, unofficial].
++
++2.  **Interval Processing Loop:**
++    *   For each intersection pair `(t_sorted[i], t_sorted[i+1])`:
++        *   Compute valid interval bounds:
++            $$this\_tmin = \max(t\_sorted[i], near\_planes[tid])$$
++            $$this\_tmax = \min(t\_sorted[i+1], far\_planes[tid])$$
++        *   If `this_tmin >= this_tmax`, skip this interval (invalid or zero-length) [S1, unofficial].
++        *   **Step Size Calculation:**
++            *   If `step_size <= 0.0f`:
++                *   Set `t_last = this_tmin` [S1, unofficial].
++            *   Else:
++                *   Calculate adaptive step size:
++                    $$dt = \text{clamp}(t\_last \cdot cone\_angle, step\_size, 1e10f)$$
++                    where $t$ is the current distance along the ray [S1, unofficial].
++                *   March `t_last` forward in a `while` loop until `t_last + dt * 0.5f >= this_tmin` [S1, unofficial].
++                *   Set `continuous = true` after the first valid interval is processed [S1, unofficial].
++
++3.  **Voxel Traversal within Interval:**
++    *   Setup AABB traversal for the current grid (identified by `t_indices[i]`):
++        *   Create `AABBSpec` from `aabbs + level * 6` [S1, unofficial].
++        *   Call `setup_traversal` to compute `delta` (voxel step vector), `tdist` (distance to next grid boundary), and initial indices (`step_index`, `current_index`, `final_index`) [S1, unofficial].
++    *   **Inner Loop (Voxel Stepping):**
++        *   While `t_traverse < this_tmax` and `traverse_steps_limit` not exceeded:
++            *   Get cell ID from current indices [S1, unofficial].
++            *   **Check Occupancy:**
++                *   If `!binaries[cell_id]` (Empty):
++                    *   Set `continuous = false` [S1, unofficial].
++                    *   If `step_size <= 0.0f`, set `t_last = t_traverse` [S1, unofficial].
++                    *   Else, march `t_last` forward using `_calc_dt` until `t_last + dt * 0.5f >= t_traverse` [S1, unofficial].
++                    *   Advance traversal to next cell using `single_traversal` [S1, unofficial].
++                *   If `binaries[cell_id]` (Occupied):
++                    *   Calculate `t_next` (position of next voxel boundary or end of interval) [S1, unofficial].
++                    *   If `step_size <= 0.0f`, `t_next = t_traverse` [S1, unofficial].
++                    *   Else:
++                        *   Calculate `dt` using `_calc_dt(t_last, cone_angle, step_size, 1e10f)` [S1, unofficial].
++                        *   If `t_last + dt * 0.5f >= t_traverse`, break inner loop (next sample would be beyond current voxel boundary) [S1, unofficial].
++                        *   Else, `t_next = t_last + dt` [S1, unofficial].
++                    *   **Write Samples:**
++                        *   Calculate sample position:
++                            $$sample\_pos = (t\_next + t\_last) \cdot 0.5f$$
++                            [S1, unofficial].
++                        *   Write sample to `samples.vals` [S1, unofficial].
++                        *   Increment `n_samples` [S1, unofficial].
++                    *   **Write Intervals:**
++                        *   If `intervals.chunk_cnts != nullptr` and `!first_pass`:
++                            *   If `!continuous`:
++                                *   Write left interval (`t_last`) with `is_left=true`, `is_right=false` [S1, unofficial].
++                                *   Increment `n_intervals` [S1, unofficial].
++                            *   Write right interval (`t_next`) with `is_left=false`, `is_right=true` [S1, unofficial].
++                            *   Increment `n_intervals` [S1, unofficial].
++                            *   If `!continuous` previously, set `is_left=true` on the previous index (logic implies merging or marking continuity) [S1, unofficial].
++                            *   Set `continuous = true` [S1, unofficial].
++                        *   If `step_size <= 0.0f`, the logic simplifies to recording voxel boundaries directly [S1, unofficial].
++                    *   Advance traversal: Call `single_traversal(tdist, current_index, overflow_index, step_index, delta)`. If it returns false, break loop [S1, unofficial].
++
++4.  **Finalization:**
++    *   If `terminate_planes` is not null, set `terminate_planes[tid] = t_last` [S1, unofficial].
++    *   If `intervals.chunk_cnts` is not null, set `intervals.chunk_cnts[tid] = n_intervals` [S1, unofficial].
++    *   If `samples.chunk_cnts` is not null, set `samples.chunk_cnts[tid] = n_samples` [S1, unofficial] [S1, unofficial].
++
++**Pseudocode:**
++
+ ```python
+-def ray_grid_traversal_adaptive(
+-    rays_o, rays_d, rays_mask, binaries, aabbs, 
+-    t_sorted, t_indices, hits, near_planes, far_planes,
+-    step_size, cone_angle, traverse_steps_limit, over_allocate
++import math
++
++def ray_grid_traversal_kernel(
++    rays_o, rays_d, rays_mask, binaries, aabbs, hits,
++    t_sorted, t_indices, near_planes, far_planes,
++    step_size, cone_angle, traverse_steps_limit, over_allocate, first_pass
+ ):
+-    """
+-    Simulates the GPU kernel logic for Ray Grid Traversal with Adaptive Step Sizing.
+-    This is a sequential simulation for clarity; the actual implementation is parallelized over rays.
+-    """
+-    n_rays = len(rays_o)
+-    n_grids = len(binaries)
+-    
+-    # Output containers
+-    intervals_vals = []
+-    intervals_ray_indices = []
+-    intervals_is_left = []
+-    intervals_is_right = []
+-    intervals_chunk_cnts = [0] * n_rays
+-    
+-    samples_vals = []
+-    samples_ray_indices = []
+-    samples_is_valid = []
+-    samples_chunk_cnts = [0] * n_rays
+-    
+-    terminate_planes = [0.0] * n_rays
+-
+-    for tid in range(n_rays):
+-        # 1. Skip masked rays
+-        if rays_mask is not None and not rays_mask[tid]:
++    # Assume these are available in the kernel context
++    tid = get_thread_id()
++    
++    # Skip masked rays
++    if rays_mask is not None and not rays_mask[tid]:
++        return
++
++    # Skip rays with no intersections in subsequent passes
++    if not first_pass and intervals.chunk_cnts[tid] == 0:
++        return
++
++    t_last = near_planes[tid]
++    continuous = False
++    n_intervals = 0
++    n_samples = 0
++    
++    # Determine start index for this ray's intersections
++    # In practice, t_indices might be used to find the start, 
++    # or a prefix sum array provides the base offset.
++    # Here we assume a simplified loop over all potential intersections 
++    # for clarity, but in reality, base_t_sorted is computed.
++    # For this implementation, we iterate based on the number of grids.
++    # Note: The source implies iterating through sorted intersections.
++    # We assume t_sorted and t_indices are structured such that 
++    # each ray has n_grids * 2 entries.
++    
++    # Calculate base index for this ray's intersections
++    # This usually requires a prefix sum of hits or similar preprocessing.
++    # For the sake of the kernel logic, we assume we have a pointer/offset.
++    # Let's assume a simplified loop structure as per source description.
++    
++    # Source: "Loop over intersections i from base_t_sorted to base_t_sorted + n_grids * 2 - 1"
++    # We will simulate this with a range if base_t_sorted is known.
++    # Since base_t_sorted is not an input, it's likely computed from hits/t_indices.
++    # We'll assume a helper `get_ray_intersection_start(tid)` exists or is precomputed.
++    
++    start_idx = get_ray_intersection_start(tid) # [G] Helper to find start index
++    end_idx = start_idx + len(aabbs) * 2
++    
++    for i in range(start_idx, end_idx, 2):
++        if i + 1 >= len(t_sorted):
++            break
++            
++        this_tmin = max(t_sorted[i], near_planes[tid])
++        this_tmax = min(t_sorted[i+1], far_planes[tid])
++        
++        if this_tmin >= this_tmax:
+             continue
+             
+-        # 2. Initialize state
+-        t_last = near_planes[tid]
+-        continuous = False
+-        n_intervals = 0
+-        n_samples = 0
+-        
+-        # Base index in sorted intersections for this ray
+-        # Assuming t_sorted is structured per ray
+-        base_idx = tid * n_grids * 2
+-        
+-        # 3. Loop over intersections
+-        # t_sorted has shape [n_rays, n_grids * 2]
+-        # We iterate through pairs of intersections for each grid
+-        for g in range(n_grids):
+-            idx_start = base_idx + g * 2
+-            t_min_raw = t_sorted[idx_start]
+-            t_max_raw = t_sorted[idx_start + 1]
+-            
+-            # Clamp to near/far planes
+-            this_tmin = max(t_min_raw, near_planes[tid])
+-            this_tmax = min(t_max_raw, far_planes[tid])
+-            
+-            # Skip invalid intervals
+-            if this_tmin >= this_tmax:
+-                continue
+-                
+-            # Determine if this grid is hit
+-            if not hits[tid, g]:
+-                continue
+-                
+-            # Setup AABB traversal for this grid
+-            # In the actual kernel, this computes delta, tdist, etc.
+-            # Here we simulate stepping through voxels in this interval
+-            # Note: The actual kernel uses a specific AABB traversal setup
+-            # For this pseudocode, we assume we are inside the grid bounds
+-            # and need to march from this_tmin to this_tmax
+-            
+-            # Get grid resolution and AABB
+-            res = binaries[g].shape
+-            aabb = aabbs[g] # [min_x, min_y, min_z, max_x, max_y, max_z]
+-            
+-            # Simple simulation of voxel stepping within this_tmin to this_tmax
+-            # The actual kernel uses 'setup_traversal' and 'single_traversal'
+-            # which handle the DDA logic internally.
+-            
+-            current_t = this_tmin
+-            
+-            # While loop to march through voxels in this interval
+-            # The kernel handles this via the intersection pairs, 
+-            # but internally it steps voxel by voxel.
+-            # For the purpose of the adaptive step logic:
+-            
+-            while current_t < this_tmax:
+-                # Determine current voxel index (simplified)
+-                # In reality, this is done via the traversal state
+-                # voxel_idx = floor((current_t * direction + origin - aabb_min) / voxel_size)
+-                
+-                # Check occupancy
+-                # Note: The kernel checks 'binaries[cell_id]'
+-                # We simulate checking if the cell is occupied
+-                # In a real implementation, we'd need the full DDA state
+-                # Here we assume we are in an occupied cell for sample generation
+-                # or empty for skipping.
+-                
+-                # For the sake of the adaptive step logic described in [S1, unofficial]:
+-                # If empty: continuous = False, t_last = this_tmax (end of segment)
+-                # If occupied: march with adaptive steps
+-                
+-                # Simulating occupied cell logic
++        # Step size logic
++        if step_size <= 0.0:
++            t_last = this_tmin
++        else:
++            dt = clamp(t_last * cone_angle, step_size, 1e10)
++            while t_last + dt * 0.5 < this_tmin:
++                t_last += dt
++            continuous = True
++            
++        # Get grid ID for this interval
++        grid_id = t_indices[i]
++        
++        # Setup AABB traversal
++        # AABBSpec creation and setup_traversal are assumed to be implemented
++        # based on aabbs[grid_id] and ray properties.
++        aabb = aabbs[grid_id] # [min_x, min_y, min_z, max_x, max_y, max_z]
++        
++        # Compute delta, tdist, indices
++        # This is a simplified representation of setup_traversal
++        delta, tdist, step_index, current_index, final_index = setup_traversal(
++            rays_o[tid], rays_d[tid], this_tmin, this_tmax, aabb
++        )
++        
++        t_traverse = this_tmin
++        
++        # Inner loop for voxel traversal
++        steps = 0
++        while t_traverse < this_tmax:
++            if traverse_steps_limit is not None and traverse_steps_limit > 0:
++                if steps >= traverse_steps_limit:
++                    break
++            steps += 1
++            
++            # Get cell ID
++            cell_id = get_cell_id(current_index, binaries.shape[1:]) # [G] Helper
++            
++            if not binaries[grid_id][cell_id]:
++                # Empty cell
++                continuous = False
+                 if step_size <= 0.0:
+-                    # Fixed step to boundary
+-                    t_next = this_tmax
++                    t_last = t_traverse
+                 else:
+-                    # Adaptive step
+                     dt = clamp(t_last * cone_angle, step_size, 1e10)
+-                    
+-                    # Check if next step exceeds interval end
+-                    if t_last + dt * 0.5 >= this_tmax:
+-                        t_next = this_tmax
++                    while t_last + dt * 0.5 < t_traverse:
++                        t_last += dt
++                
++                # Advance to next cell
++                if not single_traversal(tdist, current_index, step_index, delta):
++                    break
++                t_traverse += tdist # Simplified advancement
++            else:
++                # Occupied cell
++                # Calculate t_next
++                if step_size <= 0.0:
++                    t_next = t_traverse # Or next boundary? Source says t_traverse
++                else:
++                    dt = clamp(t_last * cone_angle, step_size, 1e10)
++                    if t_last + dt * 0.5 >= t_traverse:
++                        # Break if next sample is beyond current voxel boundary
++                        # But we need to process the current voxel?
++                        # Source: "break if so"
++                        break
+                     else:
+                         t_next = t_last + dt
+-                        # Record sample
+-                        sample_val = (t_next + t_last) * 0.5
+-                        samples_vals.append(sample_val)
+-                        samples_ray_indices.append(tid)
+-                        samples_is_valid.append(True)
+-                        n_samples += 1
+-                        t_last = t_next
+-                
+-                # If we reached the end of the interval
+-                if t_next >= this_tmax:
+-                    current_t = this_tmax
+-                    # Handle interval output
++                
++                # Write sample
++                sample_pos = (t_next + t_last) * 0.5
++                if not first_pass:
++                    samples.vals.append(sample_pos)
++                    samples.ray_indices.append(tid)
++                    samples.is_valid.append(True)
++                    n_samples += 1
++                
++                # Write intervals
++                if intervals.chunk_cnts is not None and not first_pass:
+                     if not continuous:
+                         # Write left interval
+-                        intervals_vals.append(t_last)
+-                        intervals_ray_indices.append(tid)
+-                        intervals_is_left.append(True)
+-                        intervals_is_right.append(True)
+-                        n_intervals += 2 # Left and Right
+-                    else:
+-                        # Write right interval
+-                        intervals_vals.append(t_next)
+-                        intervals_ray_indices.append(tid)
+-                        intervals_is_left.append(False) # Left was written previously
+-                        intervals_is_right.append(True)
++                        intervals.vals.append(t_last)
++                        intervals.ray_indices.append(tid)
++                        intervals.is_left.append(True)
++                        intervals.is_right.append(False)
+                         n_intervals += 1
+                     
++                    # Write right interval
++                    intervals.vals.append(t_next)
++                    intervals.ray_indices.append(tid)
++                    intervals.is_left.append(False)
++                    intervals.is_right.append(True)
++                    n_intervals += 1
++                    
+                     continuous = True
++                
++                t_last = t_next
++                
++                # Advance traversal
++                if not single_traversal(tdist, current_index, step_index, delta):
+                     break
+-                else:
+-                    # Continue to next voxel
+-                    # In real kernel, 'single_traversal' advances the index
+-                    # Here we just advance t_last
+-                    pass
+-
+-        # Finalize counts
+-        intervals_chunk_cnts[tid] = n_intervals
+-        samples_chunk_cnts[tid] = n_samples
++                t_traverse += tdist # Simplified
++
++    # Finalize
++    if terminate_planes is not None:
+         terminate_planes[tid] = t_last
+-
+-    return {
+-        'intervals': {
+-            'vals': intervals_vals,
+-            'ray_indices': intervals_ray_indices,
+-            'is_left': intervals_is_left,
+-            'is_right': intervals_is_right,
+-            'chunk_cnts': intervals_chunk_cnts
+-        },
+-        'samples': {
+-            'vals': samples_vals,
+-            'ray_indices': samples_ray_indices,
+-            'is_valid': samples_is_valid,
+-            'chunk_cnts': samples_chunk_cnts
+-        },
+-        'terminate_planes': terminate_planes
+-    }
++        
++    if intervals.chunk_cnts is not None:
++        intervals.chunk_cnts[tid] = n_intervals
++        
++    if samples.chunk_cnts is not None:
++        samples.chunk_cnts[tid] = n_samples
+ 
+ def clamp(val, min_val, max_val):
+-    if val < min_val: return min_val
+-    if val > max_val: return max_val
+-    return val
++    return max(min_val, min(val, max_val))
++
++def setup_traversal(ray_o, ray_d, t_min, t_max, aabb):
++    # Simplified AABB traversal setup
++    # Returns delta (step vector), tdist (time to next boundary), indices
++    # This is a placeholder for the actual DDA logic
++    # [G] Standard DDA setup
++    inv_dir = 1.0 / ray_d
++    t_min_aabb = (aabb[:3] - ray_o) * inv_dir
++    t_max_aabb = (aabb[3:] - ray_o) * inv_dir
++    
++    t_enter = max(max(t_min_aabb), t_min)
++    t_exit = min(min(t_max_aabb), t_max)
++    
++    if t_enter >= t_exit:
++        return None, 0, None, None, None
++        
++    # Compute voxel steps
++    # [G] Assuming unit voxel size for simplicity, real implementation uses resolution
++    delta = ray_d # Direction vector scaled by voxel size?
++    # Actual implementation computes delta based on resolution and AABB
++    delta = [1.0, 1.0, 1.0] # Placeholder
++    
++    # Compute tdist to next boundary
++    # [G] Standard DDA tdist calculation
++    tdist = 1.0 # Placeholder
++    
++    return delta, tdist, 0, 0, 0
++
++def single_traversal(tdist, current_index, step_index, delta):
++    # Advance one voxel
++    # [G] Standard DDA step
++    # Determine which axis we are exiting
++    # Update current_index
++    # Return False if out of bounds
++    return True
++
++def get_cell_id(index, shape):
++    # Convert linear index to 3D coordinates
++    # [G] Simple modulo arithmetic
++    z = index // (shape[0] * shape[1])
++    y = (index // shape[0]) % shape[1]
++    x = index % shape[0]
++    return (x, y, z)
++
++def get_ray_intersection_start(tid):
++    # [G] Helper to find start index in t_sorted/t_indices
++    # This would typically use a prefix sum of hits
++    return tid * 2 # Simplified assumption
+ ```
+ 
+-### Edge Cases and Pitfalls
+-*   **Overlapping Grids:** The order of grids matters. The grid with the lower index (front) has higher priority when examining occupancy status. If grids overlap, the first grid's occupancy status overwrites the second grid's [S1, unofficial].
+-*   **Invalid Intervals:** If the clamped near bound is greater than or equal to the clamped far bound (e.g., due to `near_plane > far_plane` or grid boundaries), the interval is skipped to prevent zero-length or negative-length marching segments [S1, unofficial].
+-*   **Zero Step Size:** If `step_size <= 0.0`, the kernel records steps through each voxel cell instead of marching, effectively disabling adaptive sampling in favor of voxel-boundary traversal [S1, unofficial].
+-*   **Memory Allocation:** If `over_allocate` is false, a two-pass approach is required: the first pass counts the number of intervals/samples, and the second pass fills the data [S1, unofficial].
++**Edge Cases and Pitfalls:**
++*   **Overlapping Grids:** The order of grids matters. The grid with the lower index (front) has higher priority. If grids overlap, the first grid's occupancy status overwrites the second's [S1, unofficial].
++*   **Invalid Intervals:** If `near_plane > far_plane` or grid boundaries result in `this_tmin >= this_tmax`, the interval is skipped [S1, unofficial].
++*   **Precision:** Floating-point precision issues may arise when comparing `t_last + dt * 0.5f` with boundaries. The use of `0.5f` suggests a margin for error or centering logic [S1, unofficial].
++*   **Two-Pass Allocation:** If `over_allocate` is false, a two-pass approach is required. The first pass counts intervals/samples, and the second pass fills them. This requires persistent storage of `chunk_cnts` between passes [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear with respect to the number of rays and the number of voxels traversed per ray. The adaptive step size reduces the number of samples for rays far from the origin, improving performance for large scenes [S1, unofficial].
+-*   **Memory Complexity:** Depends on the output size. If `over_allocate` is true, memory is pre-allocated based on `traverse_steps_limit`, which can be wasteful if the limit is not tight. If false, a two-pass approach is used, requiring temporary storage for counts [S1, unofficial].
+-*   **Performance:** Optimized for GPU execution using CUDA. It is designed for high-throughput ray marching in NeRF and 3D Gaussian Splatting [S1, unofficial].
+-*   **Strengths:** Supports multiple grids, adaptive step sizing, and efficient empty space skipping.
+-*   **Limitations:** Requires precomputed sorted intersections. Overlapping grids require careful ordering.
++*   **Time Complexity:** Linear with respect to the number of rays and the number of voxels traversed per ray. The adaptive step size can reduce the number of samples for distant rays, improving performance [S1, unofficial].
++*   **Memory Complexity:** Depends on the output buffers. If `over_allocate` is true, memory is allocated based on `traverse_steps_limit * 2` for intervals and `traverse_steps_limit` for samples. If false, a two-pass approach is used, requiring less initial memory but two kernel launches [S1, unofficial].
++*   **Performance:** Optimized for GPU execution using CUDA. Efficiently handles sparse voxel grids by skipping empty cells [S1, unofficial].
++*   **Strengths:** Adaptive step sizing reduces sample count for distant objects. Handles multiple grids and occupancy masks. Efficient empty space skipping.
++*   **Limitations:** Requires precomputed sorted intersections. Overlapping grid handling is simplistic (first grid wins). Two-pass allocation adds overhead if `over_allocate` is false.
++*   **When to Use:** NeRF and 3D Gaussian Splatting rendering pipelines where adaptive sampling is beneficial [S1, unofficial].
++*   **When Not to Use:** When uniform sampling is required and `cone_angle` is 0. When overlapping grids with complex occlusion rules are needed.
+ 
+ ## Background
+-This method is implemented in the `nerfacc` library, a general NeRF acceleration toolbox [S1, unofficial]. It is used in the context of CNC (Neural Compression of NeRFs) and other NeRF rendering pipelines [S1, unofficial]. The specific kernel is named `traverse_grids` or `traverse_grids_kernel` [S1, unofficial].
++The method is implemented in the `nerfacc` library, a general NeRF acceleration toolbox [S1, unofficial]. It is used in the CNC (Context-based Neural Compression) framework for efficient ray marching in NeRF and 3D Gaussian Splatting rendering pipelines [S1, unofficial]. The specific implementation is found in the `YihangChen-ee/CNC` repository [S1, unofficial].
+ 
+ ## Sources

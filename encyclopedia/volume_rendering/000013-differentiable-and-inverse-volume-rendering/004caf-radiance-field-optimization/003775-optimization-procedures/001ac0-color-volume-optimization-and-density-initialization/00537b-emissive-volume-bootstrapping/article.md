@@ -1,0 +1,117 @@
+# Emissive Volume Bootstrapping
+
+Also called: Emissive-Absorbing Initialization, Two-stage Emissive-Absorbing-Scattering Optimization
+
+## Overview
+Emissive Volume Bootstrapping is an initialization strategy for inverse volume rendering that overcomes local minima in the loss landscape of volumetric scattering coefficients [S1]. It solves the problem of gradient-based optimization getting stuck when reconstructing participating media by first optimizing a simplified, nonphysical model consisting of purely emissive and absorbing volumes, then using the resulting densities to initialize the physical scattering volume optimization [S1]. It sets itself apart from direct scattering optimization by decoupling density estimation from albedo estimation, leveraging the faster convergence of emissive-only models [S1].
+
+## How it works
+**Inputs:**
+- Reference images of a scene containing participating media.
+- Camera poses and intrinsics for the reference images.
+- A volumetric representation (e.g., voxel grid) capable of storing extinction coefficient $\sigma_t$, emission $L_e$, and scattering albedo $\alpha$.
+
+**Outputs:**
+- Initialized parameters for the physical scattering volume: extinction coefficient $\sigma_t$ and scattering albedo $\alpha$.
+
+**Data Structures:**
+The method operates on a volumetric grid. Each voxel stores:
+1. $\sigma_t$: Extinction coefficient (scalar).
+2. $L_e$: Emission color (RGB vector).
+3. $\alpha$: Scattering albedo (scalar, typically initialized to a constant).
+
+**Steps:**
+
+1. **Optimize Emissive Volume:**
+   Optimize a simplified volume model that assumes no scattering (maximum path depth one). The volume is defined by extinction $\sigma_t$ and emission $L_e$. The rendering equation for a ray with transmittance $T$ and emitted color $L_e$ along the path is:
+   $$ L = \int_0^\infty T(t) \sigma_t(t) L_e(t) dt $$
+   where $T(t) = \exp(-\int_0^t \sigma_t(\tau) d\tau)$.
+   The optimization minimizes the difference between rendered images and reference images. This step benefits from minimal variance and fast convergence because it avoids the complexity of scattering integrals [S1].
+
+2. **Extract Density:**
+   Retrieve the optimized extinction coefficient $\sigma_t$ from the emissive volume optimization. This value serves as the initialization for the physical medium's extinction [S1].
+
+3. **Initialize Scattering Volume:**
+   Initialize the physical scattering volume parameters:
+   - Set the extinction coefficient $\sigma_t$ to the value obtained in Step 2.
+   - Initialize the scattering albedo $\alpha$ to a constant value, typically $0.6$ [S1]. Experiments showed that converting the optimized emission $L_e$ into initial albedo values did not perform better than this constant initialization [S1].
+
+4. **Optimize Scattering Albedo:**
+   Optimize the scattering volume, keeping $\sigma_t$ fixed or allowing small adjustments, while optimizing primarily for the scattering albedo $\alpha$. The albedo linearly relates to pixel color and is not affected by the opposing gradients in occlusion terms that govern the extinction coefficient, making it easy to recover [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def emissive_volume_bootstrap(reference_images, cameras, grid_resolution):
+    """
+    Performs two-stage optimization to initialize a scattering volume.
+    
+    Args:
+        reference_images: List of target RGB images.
+        cameras: List of camera parameters (pose, intrinsics).
+        grid_resolution: Resolution of the voxel grid.
+        
+    Returns:
+        sigma_t: Initialized extinction coefficient grid.
+        alpha: Initialized albedo grid.
+    """
+    
+    # Step 1: Optimize Emissive Volume
+    # Initialize emissive volume parameters
+    sigma_t_emissive = initialize_sigma_t(grid_resolution) # e.g., small constant
+    L_e_emissive = initialize_L_e(grid_resolution)       # e.g., zero or mean color
+    
+    # Define loss function for emissive model (no scattering)
+    def emissive_loss(params):
+        sigma_t, L_e = params
+        rendered_images = []
+        for img, cam in zip(reference_images, cameras):
+            # Render using only emission and absorption
+            # Path depth = 1
+            color = render_emissive_ray(cam, sigma_t, L_e)
+            rendered_images.append(color)
+        
+        # Compute MSE loss
+        loss = mean_squared_error(rendered_images, reference_images)
+        return loss
+
+    # Optimize sigma_t and L_e
+    # Using gradient descent or similar optimizer
+    opt_emissive = Optimizer([sigma_t_emissive, L_e_emissive])
+    for iteration in range(max_iterations_emissive):
+        loss = emissive_loss([sigma_t_emissive, L_e_emissive])
+        loss.backward()
+        opt_emissive.step()
+        
+    # Extract optimized sigma_t
+    sigma_t_final = sigma_t_emissive.clone()
+    
+    # Step 2: Initialize Scattering Volume
+    # Initialize albedo to a constant value
+    alpha = torch.full_like(sigma_t_final, 0.6)
+    
+    # sigma_t is already initialized from Step 1
+    
+    return sigma_t_final, alpha
+```
+
+**Edge Cases and Pitfalls:**
+- **Local Minima:** Direct optimization of scattering parameters can get stuck in local minima where the loss landscape is complex due to opposing gradients in occlusion terms [S1]. This method mitigates that by separating density and albedo optimization [S1].
+- **Albedo Initialization:** Converting optimized emission $L_e$ into initial albedo values does not perform better than initializing albedo from a constant value (e.g., 0.6) [S1].
+- **Dense Objects:** The method is particularly helpful for inverse rendering of dense objects, resulting in increased sharpness and reconstruction accuracy [S1].
+
+## Operating characteristics
+- **Time Complexity:** The first stage (emissive optimization) converges faster in terms of iteration count and runtime because the maximum path depth is one and variance is minimal [S1]. The second stage (scattering optimization) benefits from a good initialization, leading to rapid convergence [S1].
+- **Memory Complexity:** Requires storage for $\sigma_t$, $L_e$, and $\alpha$ per voxel. The emissive stage requires temporary storage for $L_e$, which is discarded after initialization.
+- **Strengths:** Overcomes local minima in the loss landscape; provides interpretable $\sigma_t$ values; easily implemented as a special case of scattering volume optimization; significantly improves sharpness and reconstruction accuracy for dense objects [S1].
+- **Limitations:** Relies on the assumption that low-order scattering dominates color, which may not hold for all media; the nonphysical emissive model may not perfectly capture the density of highly scattering media [S1].
+- **When to Use:** When optimizing scattering volumes for participating media, especially dense objects, and when direct optimization leads to local minima or poor convergence [S1].
+- **When Not to Use:** When the media is highly transparent or when high-order scattering effects are dominant and cannot be approximated by the emissive model [S1].
+
+## Background
+The method was introduced by Merlin Nimier-David, Thomas Müller, Alexander Keller, and Wenzel Jakob in 2022 in the paper "Unbiased Inverse Volume Rendering with Differential Trackers" [S1]. It addresses the issue of local minima in inverse rendering of scattering media, which was observed during the development of unbiased inverse volume rendering techniques [S1]. The approach leverages the convergence properties of emissive volumes, similar to voxel-based radiance fields, to bootstrap the optimization of physical scattering parameters [S1].
+
+## Sources
+[S1] Unbiased inverse volume rendering with differential trackers, https://doi.org/10.1145/3528223.3530073, fetched 2026-11-01

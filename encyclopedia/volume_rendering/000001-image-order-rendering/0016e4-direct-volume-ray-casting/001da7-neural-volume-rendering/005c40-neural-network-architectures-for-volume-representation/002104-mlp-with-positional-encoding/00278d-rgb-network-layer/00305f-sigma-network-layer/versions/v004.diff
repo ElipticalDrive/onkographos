@@ -1,0 +1,190 @@
+--- v003.md
++++ v004.md
+@@ -1,107 +1,57 @@
+ # Sigma Network Layer
+ ## Overview
+-The Sigma Network Layer is a reparameterization technique used in neural volume rendering to subdivide the output channels of color and density samples by modifying the last layer of each subnetwork, ensuring that the final rendered colors remain unaffected by the subdivision [S2, unofficial]. It builds on the [RGB Network Layer](4051-rgb-network-layer.md) by extending the reparameterization strategy to the density prediction branch, allowing for increased model capacity or parallelism without altering the underlying radiance field representation [S2, unofficial].
++The Sigma Network Layer computes the volume density $\sigma$ along a ray in neural volume rendering. It builds on the [RGB Network Layer](4051-rgb-network-layer.md) by applying the same multi-layer perceptron forward pass to predict density instead of color, enabling alpha compositing during ray marching [S1, unofficial].
+ 
+ ## How it works
+-The method operates in two distinct phases: a static reparameterization of network weights and biases to support channel subdivision, and a dynamic execution of the forward pass using shared memory optimizations for density computation.
++The layer executes a two-hidden-layer perceptron forward pass on coordinate embeddings to produce density values, using shared memory for thread-block parallelism [S1, unofficial].
+ 
+ ### Inputs and Outputs
+ **Inputs:**
+-- `org_weight`: Original weight tensor of shape $[N, d_{out}, d_{in}]$, where $N$ is the number of subnetworks.
+-- `org_bias`: Original bias tensor of shape $[N, d_{out}]$.
+-- `xyzs_embedding`: Input coordinate embeddings of shape $[N, d_{in}]$.
++- `xyzs_embedding`: Input coordinate embeddings of shape $[N, d_{in}]$, where $N$ is the number of subnetworks/rays and $d_{in}$ is the input dimension [S1, unofficial].
++- `sigma_weights`: Flattened weight tensor containing all parameters for the two hidden layers [S1, unofficial].
++- `block_dim`: Thread block dimension [S1, unofficial].
++- `sigma_n_input`: Number of input neurons ($d_{in}$) [S1, unofficial].
++- `net_width`: Hidden layer width [S1, unofficial].
++- `sigma_sm_preload`: Number of weight elements preloaded to shared memory [S1, unofficial].
++- `sigma_n_output`: Number of output neurons (typically 1 for density) [S1, unofficial].
++- `sigma_layer1_base`: Base index in `sigma_weights` for the second hidden layer [S1, unofficial].
++- `did_launch_num`: Threshold indicating active subnetworks in the current launch [S1, unofficial].
+ 
+ **Outputs:**
+-- `modified_weight`: Reparameterized weight tensor.
+-- `modified_bias`: Reparameterized bias tensor.
+-- `density`: Computed density values $\sigma$.
++- `out_1`: Density array indexed by `temp_hit`, storing $\sigma$ values [S1, unofficial].
++- `final_embedding`: Array storing hidden layer outputs `hid2` for all subnetworks [S1, unofficial].
+ 
+ ### Data Structures
+-The implementation relies on specific tensor layouts to facilitate the channel splitting and concatenation operations described in the sources.
+-
+-1.  **Bias Rearrangement**: The bias tensor $[N, d_{out}]$ is rearranged into $[N, d_{out}/4, 4]$ by splitting the output dimension $d_{out}$ into $c=4$ channels. This is achieved via a permutation operation.
+-2.  **Weight Rearrangement**: The weight tensor $[N, d_{out}, d_{in}]$ is rearranged into $[N, d_{out}/2, 2, d_{in}]$ by splitting the output dimension $d_{out}$ into $c=2$ channels.
++- `weight`: Shared memory array of size `sigma_sm_preload` holding preloaded network weights [S1, unofficial].
++- `input_val`: Shared memory array of shape $[d_{in}, \text{block\_dim}]$ holding coordinate embeddings for the current block [S1, unofficial].
++- `hid1`: Shared memory array of shape $[\text{net\_width}, \text{block\_dim}]$ storing first hidden layer activations [S1, unofficial].
++- `hid2`: Shared memory array of shape $[\text{sigma\_n\_output}, \text{block\_dim}]$ storing second hidden layer activations [S1, unofficial].
+ 
+ ### Parameters
+-- `block_dim`: Thread block dimension.
+-- `sigma_n_input`: Number of input neurons.
+-- `sigma_model_size`: Model size parameter.
+-- `net_width`: Width of the hidden layer.
+-- `sigma_sm_preload`: Number of weight elements preloaded to shared memory.
+-- `sigma_n_output`: Number of output neurons (typically 1 for density).
+-- `sigma_layer1_base`: Base index for the second hidden layer weights.
++- `block_dim`, `sigma_n_input`, `sigma_model_size`, `net_width`, `sigma_sm_preload`, `sigma_n_output`, `sigma_layer1_base` [S1, unofficial].
+ 
+ ### Algorithm Steps
+-
+-#### Phase 1: Reparameterization (Static)
+-This phase modifies the network parameters to allow for channel subdivision while preserving the original function output [S2, unofficial].
+-
+-1.  **Bias Transformation**:
+-    - Rearrange `org_bias` from $[N, d_{out}]$ to $[N, d_{out}/4, 4]$.
+-    - Concatenate the rearranged bias along the channel dimension (dim=2) with itself.
+-    - Rearrange the result back to $[N, d_{out}]$.
+-2.  **Weight Transformation**:
+-    - Rearrange `org_weight` from $[N, d_{out}, d_{in}]$ to $[N, d_{out}/2, 2, d_{in}]$.
+-    - Concatenate the rearranged weight along the channel dimension (dim=2) with itself.
+-    - Rearrange the result back to $[N, d_{out}, d_{in}]$.
+-3.  **Return**: The modified `weight` and `bias`.
+-
+-#### Phase 2: Density Computation (Dynamic)
+-This phase computes the density $\sigma$ using a multi-threaded approach, likely on a GPU using a compute shader or similar parallel execution model (e.g., Taichi) [S1, unofficial].
+-
+-1.  **Initialization**: Iterate over subnetworks `sn` in `self.padd_block_network[None]`. Calculate thread ID `tid = sn % block_dim`.
+-2.  **Weight Preloading**: Preload network weights into shared memory `weight` array: `weight[k] = self.sigma_weights[k]` for `k` in `range(self.sigma_sm_preload)`.
+-3.  **Input Loading**: Load input embeddings into shared memory `input_val`: `input_val[i, tid] = self.xyzs_embedding[sn, i]` for `i` in `range(self.sigma_n_input)`. Synchronize threads: `ti.simt.block.sync()`.
+-4.  **First Hidden Layer**: If `sn < did_launch_num`, compute the first hidden layer. For each neuron `i` in `range(self.net_width)`, compute the dot product of input and weights:
+-    $$ \text{temp} = \sum_{j} \text{input\_val}[j, \text{tid}] \times \text{weight}[i \times \text{sigma\_n\_input} + j] $$
+-    Store result in `hid1[i, tid]`.
+-5.  **Second Hidden Layer (Output)**: Compute the density output. For each output `i` in `range(self.sigma_n_output)`, apply ReLU activation to `hid1` and compute the dot product with the second layer weights:
+-    $$ \text{temp} = \sum_{j} \text{data\_type}(\max(0.0, \text{hid1}[j, \text{tid}])) \times \text{weight}[\text{sigma\_layer1\_base} + i \times \text{net\_width} + j] $$
+-    Store in `hid2[i, tid]`.
+-6.  **Final Density**: Compute the final density using the exponential function:
+-    $$ \sigma = \exp(\text{hid2}[0, \text{tid}]) $$
+-    Store the result: `self.out_1[self.temp_hit[sn]] = data_type(ti.exp(hid2[0, tid]))`.
+-7.  **Storage**: Store all hidden layer outputs: `self.final_embedding[sn, i] = hid2[i, tid]`.
++1. Iterate over each subnetwork index `sn` in `self.padd_block_network[None]` [S1, unofficial].
++2. Calculate thread ID: `tid = sn % block_dim` [S1, unofficial].
++3. Preload network weights into shared memory: `weight[k] = self.sigma_weights[k]` for `k` in `range(self.sigma_sm_preload)` [S1, unofficial].
++4. Load input embeddings into shared memory: `input_val[i, tid] = self.xyzs_embedding[sn, i]` for `i` in `range(self.sigma_n_input)` [S1, unofficial].
++5. Synchronize threads within the block: `ti.simt.block.sync()` [S1, unofficial].
++6. If `sn < did_launch_num`, compute the first hidden layer: for each neuron `i` in `range(self.net_width)`, compute $\text{temp} = \sum_{j=0}^{d_{in}-1} \text{input\_val}[j, \text{tid}] \times \text{weight}[i \times d_{in} + j]$, and store in `hid1[i, tid]` [S1, unofficial].
++7. Compute the second hidden layer (density output): for each output `i` in `range(self.sigma_n_output)`, compute $\text{temp} = \sum_{j=0}^{\text{net\_width}-1} \text{ReLU}(\text{hid1}[j, \text{tid}]) \times \text{weight}[\text{sigma\_layer1\_base} + i \times \text{net\_width} + j]$, and store in `hid2[i, tid]` [S1, unofficial].
++8. Compute final density: `self.out_1[self.temp_hit[sn]] = \exp(\text{hid2}[0, \text{tid}])` [S1, unofficial].
++9. Store all hidden layer outputs: `self.final_embedding[sn, i] = hid2[i, tid]` [S1, unofficial].
+ 
+ ### Pseudocode
+-
+ ```python
+-def reparameterize_sigma_layer(org_weight, org_bias):
+-    """
+-    Reparameterizes the sigma network layer to support channel subdivision.
+-    org_weight: Tensor of shape [n_subnetworks, d_out, d_in]
+-    org_bias: Tensor of shape [n_subnetworks, d_out]
+-    Returns: modified_weight, modified_bias
+-    """
+-    # Bias transformation
+-    # Rearrange bias from [N, d_out] to [N, d_out/4, 4]
+-    bias = rearrange(org_bias, 'n (d c) -> n d c', c=4)
+-    # Concatenate bias with itself along channel dimension
+-    bias = concatenate([bias, bias], dim=2)
+-    # Rearrange back to [N, d_out]
+-    bias = rearrange(bias, 'n d c -> n (d c)')
+-
+-    # Weight transformation
+-    # Rearrange weight from [N, d_out, d_in] to [N, d_out/2, 2, d_in]
+-    weight = rearrange(org_weight, 'n (d c) i -> n d c i', c=2)
+-    # Concatenate weight with itself along channel dimension
+-    weight = concatenate([weight, weight], dim=2)
+-    # Rearrange back to [N, d_out, d_in]
+-    weight = rearrange(weight, 'n d c i -> n (d c) i')
+-
+-    return weight, bias
+-
+-def compute_sigma_density(sn, tid, xyzs_embedding, sigma_weights, net_width, 
+-                          sigma_n_input, sigma_n_output, sigma_layer1_base, 
++def compute_sigma_density(sn, tid, xyzs_embedding, sigma_weights, 
++                          block_dim, sigma_n_input, net_width, sigma_sm_preload,
++                          sigma_n_output, sigma_layer1_base, did_launch_num,
+                           hid1, hid2, out_1, temp_hit, final_embedding):
+-    """
+-    Computes the density for a specific subnetwork and thread.
+-    """
+     # Load input embeddings into shared memory
+     for i in range(sigma_n_input):
+         input_val[i, tid] = xyzs_embedding[sn, i]
+     
+-    # Synchronize threads
+-    ti.simt.block.sync()
++    # Synchronize threads within the block
++    sync_block()
+ 
+     # First hidden layer computation
+@@ -117,11 +67,11 @@
+         temp = 0.0
+         for j in range(net_width):
+-            # ReLU activation
++            # ReLU activation: max(0.0, x) [G]
+             activated = max(0.0, hid1[j, tid])
+-            temp += data_type(activated) * sigma_weights[sigma_layer1_base + i * net_width + j]
++            temp += activated * sigma_weights[sigma_layer1_base + i * net_width + j]
+         hid2[i, tid] = temp
+ 
+     # Final density computation
+-    density = data_type(ti.exp(hid2[0, tid]))
++    density = math.exp(hid2[0, tid])
+     out_1[temp_hit[sn]] = density
+     
+@@ -132,19 +82,22 @@
+ 
+ ### Edge Cases and Pitfalls
+-- **Precision**: The use of `data_type` suggests potential precision issues if not explicitly defined. Standard floating-point precision (FP32) is typical, but FP16 may be used for performance, requiring careful handling of underflow/overflow in the exponential function.
+-- **Boundary Conditions**: The condition `sn < did_launch_num` implies that not all subnetworks may be active in every launch. Proper initialization of `hid1` and `hid2` for inactive threads is necessary to avoid garbage values.
+-- **Shared Memory Synchronization**: The `ti.simt.block.sync()` call is critical to ensure all threads have loaded their input embeddings before proceeding to the computation phase. Failure to synchronize can lead to race conditions.
++- **Precision Casting**: The source uses `data_type` wrappers around `exp` and `max` operations, indicating explicit type casting is required to match the target hardware's floating-point format [S1, unofficial].
++- **Boundary Conditions**: The guard `sn < did_launch_num` means inactive subnetworks skip the first hidden layer computation; `hid1` and `hid2` must be zero-initialized or properly scoped to avoid garbage values [S1, unofficial].
++- **Shared Memory Synchronization**: The block synchronization step is mandatory before reading `input_val` and `weight`; omitting it causes race conditions across threads [S1, unofficial].
++
++## Subtopics
++
++### [Subdivision of Output Layers](18075-subdivision-of-output-layers.md)
++A reparameterization technique that increases the number of depth samples during training by duplicating and rearranging weight and bias tensors in the last layer, preserving the network's output for existing rays. Choose this when training requires finer depth sampling without altering the radiance field representation.
+ 
+ ## Operating characteristics
+-- **Time Complexity**: The reparameterization step is $O(N \cdot d_{out} \cdot d_{in})$ and is performed once. The density computation is $O(N \cdot \text{net\_width} \cdot d_{in})$ per ray sample.
+-- **Memory Complexity**: The reparameterized weights and biases have the same size as the original parameters. Shared memory usage is proportional to `sigma_sm_preload` and `sigma_n_input`.
+-- **Performance**: The use of shared memory and parallel thread execution allows for efficient computation of density values, particularly on GPU architectures.
+-- **Strengths**: Allows for increased model capacity without changing the final rendered output. Efficient parallel execution.
+-- **Limitations**: Requires careful management of shared memory and synchronization. The reparameterization adds complexity to the model implementation.
++- **Time Complexity**: $O(N \cdot d_{in} \cdot d_h)$ per ray sample for the forward pass, where $d_{in}$ is input dimension and $d_h$ is hidden width [S1, unofficial].
++- **Memory Complexity**: Shared memory usage is $O(d_{in} + d_h + d_{out})$ per thread block, plus global storage for embeddings and outputs [S1, unofficial].
++- **Strengths**: High parallelism via shared memory preloading; explicit control over thread-block execution; compatible with GPU compute shaders [S1, unofficial].
++- **Limitations**: Requires careful shared memory management and explicit synchronization; precision casting adds minor overhead; inactive thread guards must be handled correctly [S1, unofficial].
+ 
+ ## Background
+-The Sigma Network Layer is part of the neural volume rendering pipeline, specifically within the context of progressively-connected light field networks. It was introduced to address the need for efficient view synthesis by subdividing output predictions while maintaining consistency with the original network's output [S2, unofficial]. The implementation details provided in the notes are from an unofficial Taichi-based renderer [S1, unofficial].
++The Sigma Network Layer is used in neural volume rendering pipelines to predict volumetric density along rays, complementing color prediction networks [S1, unofficial]. Its implementation details originate from a Taichi-based neural graphics pipeline renderer [S1, unofficial].
+ 
+ ## Sources
+-[S1] Linyou/taichi-ngp-renderer, https://github.com/Linyou/taichi-ngp-renderer, fetched 2026-10-27 (unofficial)
+-[S2] Progressively-connected Light Field Network for Efficient View Synthesis, https://doi.org/10.48550/arxiv.2207.04465, fetched 2026-10-27 (unofficial)+[S1] Linyou/taichi-ngp-renderer, https://github.com/Linyou/taichi-ngp-renderer, fetched 2026-10-27 (unofficial)

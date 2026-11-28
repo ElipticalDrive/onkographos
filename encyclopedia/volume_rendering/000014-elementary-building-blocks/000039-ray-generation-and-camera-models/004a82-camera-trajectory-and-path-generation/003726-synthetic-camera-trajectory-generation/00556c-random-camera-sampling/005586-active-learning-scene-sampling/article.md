@@ -1,0 +1,116 @@
+# Active Learning Scene Sampling
+
+Also called: Bayesian Optimization Scene Sampler
+
+## Overview
+Active Learning Scene Sampling finds optimal camera poses (position and rotation) that minimize the deviation of median render time from a target time budget using Bayesian optimization [S1, unofficial]. It differs from its parent, Random Camera Sampling, by intelligently selecting viewpoints based on performance feedback rather than uniform random selection [S1, unofficial].
+
+## How it works
+**Inputs:**
+- `time_budget` (float): Target render time in seconds or milliseconds [S1, unofficial].
+- `num_samples` (int): Number of initialization and iteration points for the Bayesian optimizer [S1, unofficial].
+- `default_lod_params` (List[float]): Default Level-of-Detail parameters, typically `[1.0, 1.0, 1.0, 1.0]` [S1, unofficial].
+- `sampler_params`: Object containing `min_point` and `max_point` defining the spatial bounds for camera positions [S1, unofficial].
+
+**Outputs:**
+- Best position and rotation keys starting with `p_` and `r_` extracted from the optimizer's maximum result [S1, unofficial].
+
+**Data Structures:**
+- Search bounds `pbounds`: Dictionary mapping parameter names to `(min, max)` tuples for position `(x, y, z)` and rotation `(r_x, r_y, r_z)` [S1, unofficial].
+- State object: Contains `pos` (position vector) and quaternion representation of rotation [S1, unofficial].
+
+**Steps:**
+1. Define search bounds `pbounds` for position coordinates $(x, y, z)$ and rotation Euler angles $(r_x, r_y, r_z)$ using `sampler_params.min_point` and `sampler_params.max_point` [S1, unofficial].
+2. Initialize a `BayesianOptimization` instance with a loss function [S1, unofficial].
+3. The loss function computes the absolute difference between the measured render time and the `time_budget`:
+   $$ \text{loss} = | \text{render\_time} - \text{time\_budget} | $$
+4. Inside the loss function, for each set of optimizer kwargs:
+   a. Set `sample_state.pos` from the optimizer's position kwargs [S1, unofficial].
+   b. Convert Euler angles to a quaternion using the standard library:
+      $$ \text{quat}_{xyzw} = \text{Rotation.from\_euler}("XYZ", [r_x, r_y, r_z]).\text{as\_quat}() $$
+   c. Reorder quaternion components from $[x, y, z, w]$ to $[w, x, y, z]$ to match the engine's expected format [S1, unofficial]:
+      $$ \text{quat}_{engine} = \text{vkgs\_py.quat}(w, x, y, z) $$
+   d. Pass the state to the model to predict LOD parameters using `default_lod_params` if not specified [S1, unofficial].
+   e. Call `engine.sample()` to perform the rendering and measure the actual render time [S1, unofficial].
+5. Run the optimization loop with `init_points=num_samples` and `n_iter=num_samples` [S1, unofficial].
+6. Extract the best position and rotation from `optimizer.max["params"]`, filtering keys starting with `p_` and `r_` [S1, unofficial].
+
+**Pitfalls:**
+- Quaternion component ordering varies between libraries. The implementation explicitly reorders $[x, y, z, w]$ to $[w, x, y, z]$ before passing to the engine [S1, unofficial].
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+from scipy.spatial.transform import Rotation
+from bayes_opt import BayesianOptimization
+
+def active_learning_scene_sampling(time_budget, num_samples, default_lod_params, sampler_params):
+    """
+    Finds optimal camera poses minimizing deviation from target render time.
+    """
+    # Define search bounds
+    # Note: Exact bounds logic depends on sampler_params structure
+    pbounds = {
+        'p_x': (sampler_params.min_point[0], sampler_params.max_point[0]),
+        'p_y': (sampler_params.min_point[1], sampler_params.max_point[1]),
+        'p_z': (sampler_params.min_point[2], sampler_params.max_point[2]),
+        'r_x': (-180, 180), # Typical Euler range, adjust if specified
+        'r_y': (-180, 180),
+        'r_z': (-180, 180)
+    }
+
+    def loss_function(p_x, p_y, p_z, r_x, r_y, r_z):
+        # 1. Set position
+        pos = [p_x, p_y, p_z]
+        
+        # 2. Convert Euler to Quaternion [x, y, z, w]
+        rot = Rotation.from_euler("XYZ", [r_x, r_y, r_z])
+        quat_xyzw = rot.as_quat()
+        
+        # 3. Reorder to [w, x, y, z] for engine
+        w, x, y, z = quat_xyzw[3], quat_xyzw[0], quat_xyzw[1], quat_xyzw[2]
+        quat_engine = (w, x, y, z)
+        
+        # 4. Predict LOD params (placeholder for model logic)
+        lod_params = default_lod_params
+        
+        # 5. Measure render time
+        # engine.sample() is assumed to be available in context
+        render_time = engine.sample(pos, quat_engine, lod_params)
+        
+        # 6. Return negative loss (BayesianOptimization maximizes)
+        return -abs(render_time - time_budget)
+
+    optimizer = BayesianOptimization(
+        f=loss_function,
+        pbounds=pbounds,
+        random_state=1
+    )
+
+    # Run optimization
+    optimizer.maximize(
+        init_points=num_samples,
+        n_iter=num_samples,
+    )
+
+    # Extract best params
+    best_params = optimizer.max['params']
+    best_pos = [best_params['p_x'], best_params['p_y'], best_params['p_z']]
+    best_rot = [best_params['r_x'], best_params['r_y'], best_params['r_z']]
+    
+    return best_pos, best_rot
+```
+
+## Operating characteristics
+- **Time Complexity:** Depends on the number of iterations (`num_samples`) and the cost of each render evaluation. Bayesian optimization typically requires fewer evaluations than grid search but each evaluation is expensive (full render) [S1, unofficial].
+- **Memory Complexity:** Low, storing only the optimizer state and current sample parameters [S1, unofficial].
+- **Strengths:** Automatically tunes camera poses to meet specific performance budgets (e.g., frame rate targets) [S1, unofficial].
+- **Limitations:** Requires a differentiable or measurable render time metric; sensitive to the choice of `num_samples` and search bounds [S1, unofficial].
+- **When to use:** When rendering performance is critical and camera viewpoints need to be optimized for a specific time budget [S1, unofficial].
+- **When not to use:** When uniform coverage is required regardless of performance, or when render time is not a reliable metric for scene complexity [S1, unofficial].
+
+## Background
+This method originates from the CLOD-3DGS project by Facebook Research, which uses Bayesian optimization to manage Level-of-Detail (LOD) parameters and camera sampling for 3D Gaussian Splatting [S1, unofficial]. It addresses the need for efficient rendering of large-scale 3D scenes by adapting camera poses to maintain target frame rates [S1, unofficial].
+
+## Sources
+[S1] facebookresearch/CLOD-3DGS, https://github.com/facebookresearch/CLOD-3DGS, fetched 2026-10-27 (unofficial)

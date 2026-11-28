@@ -1,0 +1,135 @@
+# Tiny MLP for Density and Color Estimation
+Also called: Rip-NeRF MLP
+## Overview
+The Tiny MLP is a lightweight neural network component used in Rip-NeRF to estimate the density $\tau$ and view-dependent color $c$ of a sampled sphere $S$ [S1]. It builds on [InstantNGP Network Architecture](5049-instantngp-network-architecture.md) by mapping the Ripmap-Encoding feature vector $f$ and the encoded view direction $d$ to radiance properties [S1]. It sets itself apart from sibling methods like [iNGP Texture Storage](5826-ingp-texture-storage.md) by using a dedicated small MLP for density/color prediction rather than relying solely on texture lookups for these specific outputs, and differs from [HyperINR](10461-hyperinr.md) by using a fixed-width MLP with specific activation constraints rather than hypernetworks [S1].
+## How it works
+**Inputs and Outputs:**
+- Input: Feature vector $f$ (dimension 160) and view direction $d$ (3D unit vector) [S1].
+- Outputs: Density $\tau$ (scalar) and color $c$ (3D vector) [S1].
+
+**Data Structures:**
+- The MLP has a fixed width of 128 neurons per hidden layer [S1].
+- The network consists of 5 layers total: 2 initial layers processing $f$, and 3 final layers processing the combination of $f_{geo}$ and $d$ [S1].
+
+**Steps:**
+1. **Feature Processing:** The input feature vector $f$ is passed through the first two MLP layers using ReLU activations [S1].
+2. **Density and Geometric Feature Extraction:** The output of the second layer is linearly projected and split into a scalar density $\tau$ and a 15-dimensional geometric feature $f_{geo}$ [S1].
+3. **View Direction Encoding:** The view direction $d$ is encoded using spherical harmonics [S1].
+4. **Color Estimation:** The encoded view direction is concatenated with $f_{geo}$ and passed through the final three MLP layers to estimate the view-dependent color $c$ [S1].
+
+**Formulas:**
+- Density output activation: $\tau = \text{clip}(\exp(\tau_{\text{raw}}), -10, 10)$, where a truncated exponential function is applied to the density head output [S1].
+- Color output: The final layer produces $c$ via a linear projection after ReLU activations in intermediate layers [S1].
+
+**Parameters:**
+- Feature dimension: 160 [S1].
+- MLP width: 128 [S1].
+- Activation: ReLU for all hidden layers; truncated exponential for the density output layer [S1].
+
+**Pitfalls:**
+- The implementation relies on `tiny-cuda-nn` for fused and half-precision operations [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def relu(x):
+    return max(0.0, x)
+
+def truncated_exp(x, lower=-10.0, upper=10.0):
+    return max(lower, min(upper, math.exp(x)))
+
+def spherical_harmonics_encode(d, degree=3):
+    # Standard spherical harmonics encoding for 3D direction d, degree 3 yields 48 coefficients [G]
+    x, y, z = d
+    # Normalized SH basis functions for L=0..3
+    f0 = 0.2820947917738781
+    f1 = 0.4886025119029199
+    f2 = 1.0925484305920792
+    f3 = 0.31539156525252003
+    f4 = 0.5462742152960396
+    f5 = 0.5905922952834844
+    f6 = 2.890611442640554
+    f7 = 0.4570457994644658
+    f8 = 0.3731763325901154
+    f9 = 1.0925484305920792
+    f10 = 0.7316003623145051
+    f11 = 0.5905922952834844
+    f12 = 2.890611442640554
+    f13 = 0.5905922952834844
+    f14 = 1.0925484305920792
+    f15 = 0.31539156525252003
+    
+    out = [0.0] * 48
+    # L=0
+    out[0] = f0
+    # L=1
+    out[1] = -f1 * y
+    out[2] = f1 * z
+    out[3] = -f1 * x
+    # L=2
+    out[4] = f2 * x * y
+    out[5] = -f2 * y * z
+    out[6] = f4 * z * z - f3
+    out[7] = -f2 * x * z
+    out[8] = f2 * (x * x - y * y)
+    # L=3
+    out[9] = -f6 * x * y * z
+    out[10] = f6 * y * (z * z - 1.0/3.0)
+    out[11] = f7 * x * (x * x - 3.0 * y * y)
+    out[12] = f8 * z * (z * z - 3.0 * y * y)
+    out[13] = f9 * z * (z * z - 1.0/3.0)
+    out[14] = f10 * x * (z * z - 1.0/3.0)
+    out[15] = f11 * (x * x * x - 3.0 * x * y * y)
+    return out
+
+def forward_tiny_mlp(f, d, W1, b1, W2, b2, W_head, b_head, W3, b3, W4, b4, W5, b5):
+    # f: list of 160 floats
+    # d: list of 3 floats (unit vector)
+    
+    # Layer 1: 160 -> 128
+    h1 = [relu(sum(f[j] * W1[j][i] for j in range(160)) + b1[i]) for i in range(128)]
+    
+    # Layer 2: 128 -> 128
+    h2 = [relu(sum(h1[j] * W2[j][i] for j in range(128)) + b2[i]) for i in range(128)]
+    
+    # Project to density and geometric feature (1 + 15 = 16)
+    head_out = [sum(h2[j] * W_head[j][i] for j in range(128)) + b_head[i] for i in range(16)]
+    tau_raw = head_out[0]
+    f_geo = head_out[1:16]
+    
+    # Density output
+    tau = truncated_exp(tau_raw)
+    
+    # View direction encoding (degree 3 -> 48 dims)
+    view_enc = spherical_harmonics_encode(d)
+    
+    # Concatenate f_geo and view_enc
+    combined = f_geo + view_enc  # Size 15 + 48 = 63
+    
+    # Layer 3: 63 -> 128
+    h3 = [relu(sum(combined[j] * W3[j][i] for j in range(63)) + b3[i]) for i in range(128)]
+    
+    # Layer 4: 128 -> 128
+    h4 = [relu(sum(h3[j] * W4[j][i] for j in range(128)) + b4[i]) for i in range(128)]
+    
+    # Layer 5: 128 -> 3 (color)
+    c = [sum(h4[j] * W5[j][i] for j in range(128)) + b5[i] for i in range(3)]
+    
+    return tau, c
+```
+## Subtopics
+## Operating characteristics
+- Time Complexity: Not given in the sources. [G]
+- Memory Complexity: Not given in the sources. [G]
+- Performance: Optimized for fused and half-precision operations using `tiny-cuda-nn` [S1].
+- Strengths: The architecture is described as efficient [S1].
+- Limitations: Not given in the sources. [G]
+- When to use: Not given in the sources. [G]
+- When not to use: Not given in the sources. [G]
+## Background
+The Tiny MLP was introduced in Rip-NeRF (2024) as a component for density and color estimation [S1]. It aligns with Tri-MipRF for consistency [S1]. It is implemented using `tiny-cuda-nn` [S1].
+## Sources
+[S1] Rip-NeRF: Anti-aliasing Radiance Fields with Ripmap-Encoded Platonic Solids, https://arxiv.org/abs/2405.02386v1, fetched 2026-10-26

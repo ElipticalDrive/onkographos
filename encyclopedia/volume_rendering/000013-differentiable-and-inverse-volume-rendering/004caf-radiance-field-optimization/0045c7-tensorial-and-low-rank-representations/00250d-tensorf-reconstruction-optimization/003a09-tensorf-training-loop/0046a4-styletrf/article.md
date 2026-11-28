@@ -1,0 +1,164 @@
+# StyleTRF
+
+Also called: StyleTRF (S3)
+
+## Overview
+StyleTRF is a method for stylized view generation that decouples style adaptation from view capture by fine-tuning the appearance component of a pre-optimized Tensorial Radiance Field (TensoRF) using sparse stylized priors [S1]. It sets itself apart from joint optimization methods like SNeRF by freezing the geometric density parameters of the scene representation, thereby preserving crisp geometry while adapting appearance, and by using a deterministic CNN-based stylization module (Johnson et al.) to ensure 3D consistency across viewpoints [S1].
+
+## How it works
+**Inputs:**
+- A set of posed ground-truth images of a scene [S1].
+- A reference style image [S1].
+- Camera poses (obtained via COLMAP for real scenes or Blender for synthetic scenes) [S1].
+
+**Outputs:**
+- A fine-tuned TensoRF representation capable of rendering stylized novel views [S1].
+
+**Data Structures:**
+The scene is represented using the VM-48 variant of TensoRF, which employs Vector-Matrix decomposition (a special case of Block Term Decomposition) [S1].
+- **Density Tensor ($T_\sigma$):** Stores volumetric density. These parameters are frozen during the style adaptation phase [S1].
+- **Appearance Tensor ($T_C$):** Stores color/appearance vectors. These parameters are optimized during the style adaptation phase [S1].
+- **Voxel Grid:** The effective resolution starts at $128^3$ and is upsampled to $640^3$ for real-world scenes (or $300^3$ for synthetic scenes) [S1].
+- **Interpolation:** Bi-linear interpolation is used for matrices, and linear interpolation is used for vectors within the VM-decomposed representation during ray queries and upsampling [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def style_trf(ground_truth_images, camera_poses, style_image):
+    # Phase 1: Pre-optimization of TensoRF
+    # Initialize VM-48 representation: density grid (128^3) and appearance grid (128^3)
+    density_grid = create_voxel_grid(shape=(128, 128, 128))
+    appearance_grid = create_voxel_grid(shape=(128, 128, 128))
+    optimizer = Adam(parameters=[density_grid, appearance_grid], lr=0.02)
+
+    for iteration in range(15000):
+        # Sample 4096 rays from camera poses
+        rays = generate_rays(camera_poses, count=4096)
+        # Render colors using volumetric rendering
+        rendered_colors = volumetric_render(density_grid, appearance_grid, rays)
+        # Calculate losses
+        l1_loss = mean_absolute_error(rendered_colors, ground_truth_images[rays])
+        tv_loss = compute_tv_loss(density_grid, appearance_grid)
+        total_loss = l1_loss + tv_loss
+        # Update parameters
+        optimizer.step(total_loss)
+        # Upsampling schedule: start at 2000, every 1000 until 5000
+        if 2000 <= iteration <= 5000 and iteration % 1000 == 0:
+            density_grid = upsample_grid(density_grid, factor=2)
+            appearance_grid = upsample_grid(appearance_grid, factor=2)
+            optimizer.lr = 0.02  # Re-initialize LR after upsampling [S1]
+
+    # Phase 2: Preprocessing Stylization Module
+    # Train Johnson et al. CNN for the specific style on COCO2014 dataset [S1]
+    # Note: Sources do not provide implementation details for the CNN training loop.
+    stylization_cnn = train_cnn(style_image, dataset="COCO2014")
+
+    # Phase 3: Generate and Stylize Priors
+    # Render sparse novel views (20-30 views in spiral trajectory)
+    novel_cameras = generate_spiral_trajectory(count=30)
+    novel_views = volumetric_render(density_grid, appearance_grid, novel_cameras)
+    # Stylize these views using the pre-trained CNN
+    stylized_priors = [stylization_cnn(view) for view in novel_views]
+
+    # Phase 4: Fine-tuning Appearance
+    # Freeze density parameters
+    density_grid.requires_grad = False
+    # Optimize only appearance vectors using stylized priors
+    appearance_optimizer = Adam(parameters=[appearance_grid], lr=0.02)
+    for iteration in range(1000):
+        rays = generate_rays(novel_cameras, count=len(stylized_priors))
+        rendered_colors = volumetric_render(density_grid, appearance_grid, rays)
+        style_loss = mean_absolute_error(rendered_colors, stylized_priors)
+        appearance_optimizer.step(style_loss)
+
+    return density_grid, appearance_grid
+
+def volumetric_render(density_grid, appearance_grid, rays):
+    """
+    Computes color C from transmittance tau_q, color c_q, density sigma, and step size Delta.
+    C = sum_{q=1}^{Q} tau_q * c_q
+    tau_q = product_{p=1}^{q-1} exp(-sigma_p * Delta_p)
+    """
+    colors = []
+    for ray in rays:
+        color = 0.0
+        transmittance = 1.0
+        # Q samples along the ray (0-based indexing maps to 1-based formula)
+        for q in range(ray.Q):
+            sigma_q = query_grid(density_grid, ray.position[q])
+            c_q = query_grid(appearance_grid, ray.position[q])
+            delta_q = ray.step_size[q]
+            color += transmittance * c_q
+            transmittance *= exp(-sigma_q * delta_q)
+        colors.append(color)
+    return colors
+
+def compute_tv_loss(density_grid, appearance_grid):
+    """
+    L_TV = (1/N) * sum( sqrt(Delta^2 T_sigma) + 0.1 * sqrt(Delta^2 T_C) )
+    Delta^2 is squared difference between neighboring values.
+    N is total number of parameters.
+    Density and appearance weighted in ratio 10:1 [S1].
+    """
+    N = density_grid.numel() + appearance_grid.numel()
+    tv_sigma = sum((density_grid[i] - density_grid[i+1])**2 for i in range(N-1))
+    tv_C = sum((appearance_grid[i] - appearance_grid[i+1])**2 for i in range(N-1))
+    return (1/N) * (sqrt(tv_sigma) + 0.1 * sqrt(tv_C))
+```
+
+**Formulas:**
+- **Volumetric Rendering:**
+  $$C = \sum_{q=1}^{Q} \tau_q c_q$$
+  where $\tau_q = \prod_{p=1}^{q-1} \exp(-\sigma_p \Delta_p)$. $C$ is the final color, $\tau_q$ is the transmittance, $c_q$ is the color, $\sigma$ is the density, and $\Delta$ is the step size [S1].
+
+- **Total Variation Loss:**
+  $$L_{TV} = \frac{1}{N} \sum \left( \sqrt{\Delta^2 T_\sigma} + 0.1 \sqrt{\Delta^2 T_C} \right)$$
+  where $\Delta^2$ is the squared difference between neighboring values in the tensors, $N$ is the total number of parameters in the TensoRF representation $T$, $T_\sigma$ represents the density value, and $T_C$ represents the appearance value. The density and appearance are weighted in a ratio of 10:1 [S1].
+
+**Parameters:**
+- **TensoRF Variant:** VM-48 (Vector-Matrix decomposition) [S1].
+- **Optimizer:** Adam [S1].
+- **Learning Rate:** 0.02 (re-initialized to 0.02 after upsampling) [S1].
+- **Voxel Grid Resolution:** Effective resolution starts at $128^3$. Upsampled every 1000 iterations starting at iteration 2000 until 5000 iterations, reaching $640^3$ for real-world scenes and $300^3$ for synthetic scenes [S1].
+- **Training Iterations (Pre-optimization):** 15,000 iterations [S1].
+- **Training Iterations (Style Fine-tuning):** 1,000 iterations [S1].
+- **Rays per Iteration:** 4,096 rays [S1].
+- **Number of Stylized Priors:** 20–30 (or 30–40) randomly sampled camera positions around the object [S1].
+- **Stylization Module:** Johnson et al. [20] (trained on COCO2014) [S1].
+
+**Edge Cases and Pitfalls:**
+- **Optimizing from scratch (Strategy S1):** Fails because stylized priors may not share exact geometry with ground truth, leading to geometric artifacts [S1].
+- **Unconstrained optimization (Strategy S2):** Optimizing both density and appearance simultaneously leads to fuzzy geometry and artifacts in thin structures because limit-free optimization alters geometry components [S1].
+- **Stylization Module Choice:** Using Gatys et al. [10] causes inconsistencies across nearby viewpoints because it starts with white noise and depends on initialization/optimizer, making it unreliable for 3D consistency [S1].
+- **Micro-details:** Strategy S2 struggles to capture micro-details and may lose geometry [S1].
+
+## Operating characteristics
+- **Time Complexity:**
+  - Pre-optimization of TensoRF: 10–15 minutes [S1].
+  - Stylization Module Training (per style): ~20 minutes [S1].
+  - Style Fine-tuning: 40–50 seconds [S1].
+  - Rendering (800x800 image): 4–5 seconds [S1].
+- **Memory Complexity:**
+  - Memory footprint of TensoRF VM-48: 10–15 MB [S1].
+- **Strengths:**
+  - Decouples style adaptation from view capture [S1].
+  - Preserves crisp geometry by freezing density [S1].
+  - Fast style adaptation (40–50 seconds) [S1].
+  - Low memory footprint compared to MLP-based NeRFs (~1GB) [S1].
+  - Stable stylization across close-by viewpoints using Johnson et al. [S1].
+- **Limitations:**
+  - Requires pre-optimization of the scene [S1].
+  - Relies on the quality of the sparse priors; insufficient priors may lead to incomplete style transfer [S1].
+- **When to use:**
+  - When crisp geometry preservation is critical and fast style adaptation is desired [S1].
+  - When 3D consistency across viewpoints is required [S1].
+- **When not to use:**
+  - When joint optimization of geometry and style is preferred (e.g., if the style implies geometric changes) [S1].
+  - When real-time training is required (pre-optimization takes 10-15 mins) [S1].
+
+## Background
+StyleTRF was introduced in the paper "StyleTRF: Stylizing Tensorial Radiance Fields" presented at ICVGIP’22 in December 2022 [S1]. It builds upon the TensoRF representation [6] and the Johnson et al. stylization method [20] [S1]. It addresses limitations in previous methods like SNeRF [29], which uses Gatys et al. [10] and joint optimization, leading to higher training times and potential 3D inconsistencies [S1].
+
+## Sources
+[S1] StyleTRF: Stylizing Tensorial Radiance Fields✱, https://doi.org/10.1145/3571600.3571643, fetched 2026-10-26

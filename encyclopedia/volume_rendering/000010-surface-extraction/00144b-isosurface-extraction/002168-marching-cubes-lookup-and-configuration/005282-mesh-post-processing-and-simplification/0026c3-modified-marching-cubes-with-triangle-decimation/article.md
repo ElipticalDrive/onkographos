@@ -1,0 +1,157 @@
+# Modified Marching Cubes with Triangle Decimation
+
+Also called: 3D Isosurface Generation (Marching Cubes), Marching Cubes with Decimation
+
+## Overview
+This method generates an isosurface from a 3D scalar field by applying a modified Marching Cubes algorithm that resolves topological ambiguities, followed by a triangle decimation step to reduce mesh complexity and improve visual quality [S1, unofficial]. It distinguishes itself from standard Marching Cubes by explicitly handling ambiguity cases and reducing the triangle count through vertex averaging and re-triangulation [S1, unofficial].
+
+## How it works
+**Inputs:** A 3D scalar field defined on a structured grid (e.g., FDS grid), an isovalue threshold $L$, and the grid dimensions [S1, unofficial].
+**Outputs:** A triangle mesh $M = (V, T)$ with vertex positions, connectivity, and per-vertex normal vectors [S1, unofficial].
+
+**Data Structures:**
+*   **Grid:** 3D array of scalar values $T(x,y,z)$ [S1, unofficial].
+*   **Cube:** A unit cell aligned with the grid, defined by 8 corner nodes indexed 0 to 7 [S1, unofficial].
+*   **Case Index:** An 8-bit integer (0–255) representing the binary state of the cube corners relative to $L$ [S1, unofficial].
+*   **Mesh:** Lists of vertices $V$ and triangles $T$. Each triangle references 3 vertices [S1, unofficial].
+
+**Steps:**
+
+1.  **Grid Partitioning:** Split the region to be contoured into cubes, each aligned with the underlying grid [S1, unofficial].
+2.  **Cube Processing:** For each cube:
+    a.  **Corner Numbering:** Number the 8 corners from 0 to 7 [S1, unofficial].
+    b.  **Binary Encoding:** For each corner beginning with corner 0, assign 1 if the value exceeds $L$, 0 otherwise [S1, unofficial]. Use the resulting 8-digit binary number (0 to 255) to determine the case number [S1, unofficial].
+    c.  **Triangulation:** Triangulate the cube surface, storing vertex locations and edge numbers according to the determined case [S1, unofficial].
+3.  **Triangle Decimation:** Eliminate small triangles (any triangle with two or more vertices closest to the same node) [S1, unofficial]. Replace removed triangle vertices with a vertex with coordinates that are the average of the three removed vertices coordinates [S1, unofficial]. Re-triangulate using this new vertex [S1, unofficial].
+4.  **Normal Estimation:** For each vertex: determine triangles sharing the vertex [S1, unofficial]. Determine the normal vector (normalized with length 1.0) of each triangle using the vertex [S1, unofficial]. Construct a harmonic weighted average of triangle normal vectors where all weights sum to 1.0 and each weight is inversely proportional to the corresponding triangle area [S1, unofficial]. Store the resulting average along with vertex data [S1, unofficial].
+
+**Formulas:**
+
+*   **Uncertainty Bound:** The uncertainty $\Delta x$ in isosurface location between two node data value pairs $(x_1, T_1)$ and $(x_2, T_2)$ is bounded by [S1, unofficial]:
+    $$ \left| \frac{\Delta x}{x_2 - x_1} \right| \leq \frac{\max(|\Delta T_1|, |\Delta T_2|)}{|T_2 - T_1|} $$
+    where $\Delta T_1$ and $\Delta T_2$ are the uncertainty in $T_1$ and $T_2$ at $x_1$ and $x_2$ respectively [S1, unofficial].
+
+*   **Vertex Normal:** The normal $\mathbf{V}_i$ for vertex $i$ is determined by summing over all triangles $n$ connected to vertex $i$ as [S1, unofficial]:
+    $$ \mathbf{V}_i = \sum_n \frac{\mathbf{U}_n}{A_n} / \sum_n \frac{1}{A_n} = \sum_n \frac{\mathbf{u}_n \times \mathbf{v}_n}{\|\mathbf{u}_n \times \mathbf{v}_n\|^2} / \sum_n \frac{1}{\|\mathbf{u}_n \times \mathbf{v}_n\|} $$
+    where for the $n$-th triangle, $\mathbf{u}_n$ and $\mathbf{v}_n$ are two sides, $A_n = \|\mathbf{u}_n \times \mathbf{v}_n\|$ is the triangle area, and $\mathbf{U}_n = \mathbf{u}_n \times \mathbf{v}_n / A_n$ is a unit vector normal to the triangle [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def modified_marching_cubes_with_decimation(grid, isovalue, grid_shape):
+    """
+    grid: 3D array of scalar values T(x,y,z)
+    isovalue: L, the threshold for isosurface extraction
+    grid_shape: tuple (nx, ny, nz)
+    Returns: vertices (V), triangles (T), normals (N)
+    """
+    V = []
+    T = []
+    # Standard MC edge pairs and corner positions [G]
+    EDGE_PAIRS = [(0,1), (1,2), (2,3), (3,0), (4,5), (5,6), (6,7), (7,4), (0,4), (1,5), (2,6), (3,7)]
+    CORNER_POS = [(0,0,0), (1,0,0), (1,1,0), (0,1,0), (0,0,1), (1,0,1), (1,1,1), (0,1,1)]
+    # Lookup table for triangulation not detailed in source [S1, unofficial]
+    # TRI_TABLE[case_index] returns list of edge-pair indices for each of the 256 cases
+
+    # Step 1 & 2: Marching Cubes
+    for z in range(grid_shape[2] - 1):
+        for y in range(grid_shape[1] - 1):
+            for x in range(grid_shape[0] - 1):
+                # 2a: Number corners 0-7
+                corners = [grid[x + dx, y + dy, z + dz] for dz in (0, 1) for dy in (0, 1) for dx in (0, 1)]
+                
+                # 2b: Binary encoding
+                case_index = sum(1 << i for i, val in enumerate(corners) if val > isovalue)
+                
+                # Interpolate vertices on edges crossing isovalue
+                edge_verts = []
+                for e_idx, (p1, p2) in enumerate(EDGE_PAIRS):
+                    v1, v2 = corners[p1], corners[p2]
+                    if (v1 - isovalue) * (v2 - isovalue) < 0:
+                        t = (isovalue - v1) / (v2 - v1)
+                        pos = tuple((1 - t) * CORNER_POS[p1][k] + t * CORNER_POS[p2][k] for k in range(3))
+                        edge_verts.append(pos)
+                    else:
+                        edge_verts.append(None)
+                
+                # 2c: Triangulate using case index
+                for tri_edges in TRI_TABLE[case_index]:
+                    tri_verts = [edge_verts[e] for e in tri_edges]
+                    if all(v is not None for v in tri_verts):
+                        T.append(tri_verts)
+                        for v in tri_verts:
+                            if v not in V:
+                                V.append(v)
+
+    # Step 3: Triangle Decimation
+    triangles_to_remove = []
+    for tri in T:
+        # Determine closest grid node for each vertex
+        closest_nodes = [get_closest_grid_node(v, grid_shape) for v in tri]
+        # Check if two or more vertices share the same closest node
+        if len(set(closest_nodes)) < 3:
+            triangles_to_remove.append(tri)
+
+    new_vertices = []
+    for tri in triangles_to_remove:
+        v1, v2, v3 = tri
+        # Average coordinates
+        new_v = tuple((v1[k] + v2[k] + v3[k]) / 3.0 for k in range(3))
+        new_vertices.append(new_v)
+        # Re-triangulation replaces removed vertices with new_v and connects to local neighbors [S1, unofficial]
+
+    # Step 4: Normal Estimation
+    N = []
+    for i, v in enumerate(V):
+        adjacent_triangles = [tri for tri in T if v in tri]
+        sum_weighted_normal = [0.0, 0.0, 0.0]
+        sum_inverse_area = 0.0
+        
+        for tri in adjacent_triangles:
+            p0, p1, p2 = tri
+            u = [p1[k] - p0[k] for k in range(3)]
+            v_vec = [p2[k] - p0[k] for k in range(3)]
+            cross = [u[1]*v_vec[2] - u[2]*v_vec[1],
+                     u[2]*v_vec[0] - u[0]*v_vec[2],
+                     u[0]*v_vec[1] - u[1]*v_vec[0]]
+            area = (cross[0]**2 + cross[1]**2 + cross[2]**2)**0.5
+            
+            if area > 0:
+                unit_normal = [c / area for c in cross]
+                weight = 1.0 / area
+                sum_weighted_normal = [sum_weighted_normal[k] + unit_normal[k] * weight for k in range(3)]
+                sum_inverse_area += weight
+        
+        if sum_inverse_area > 0:
+            normal = [sum_weighted_normal[k] / sum_inverse_area for k in range(3)]
+            N.append(normal)
+        else:
+            N.append([0.0, 0.0, 0.0])
+            
+    return V, T, N
+
+def get_closest_grid_node(vertex, grid_shape):
+    # Returns integer grid coordinates (x, y, z) closest to vertex position [G]
+    return tuple(int(round(coord)) for coord in vertex)
+```
+
+**Edge Cases and Pitfalls:**
+*   **Ambiguities:** The source mentions a "modified" algorithm to remove ambiguities but does not specify the modification [S1, unofficial].
+*   **Decimation Criteria:** The criterion "two or more vertices closest to the same node" requires a robust definition of "closest" (e.g., Euclidean distance to grid nodes) [S1, unofficial].
+*   **Re-triangulation:** The step "re-triangulate using this new vertex" is vague. It likely involves creating new triangles connecting the new vertex to the neighbors of the collapsed region, but the exact connectivity update is not defined [S1, unofficial].
+*   **Precision:** The uncertainty formula suggests that data uncertainty $\Delta T$ directly impacts spatial accuracy. High uncertainty in the input grid leads to larger $\Delta x$ [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:** Reduces storage requirements and improves visual quality by removing small, high-aspect-ratio triangles [S1, unofficial].
+*   **Strengths:** Handles ambiguities, reduces mesh complexity, provides smooth normals via harmonic averaging.
+*   **Limitations:** The decimation and re-triangulation steps are not fully detailed, potentially leading to implementation ambiguity. The method is specific to the FDS grid structure mentioned in the source [S1, unofficial].
+
+## Background
+The method originates from the Smokeview visualization tool for Fire Dynamics Simulation (FDS) data. It is described in the Smokeview Technical Reference Guide, which details the implementation of isosurface generation for fire simulation data [S1, unofficial].
+
+## Sources
+[S1] Smokeview (Version 6) A Tool for Visualizing Fire Dynamics Simulation Data Volume II : Technical Reference Guide, https://doi.org/10.6028/nist.sp.1017-2, fetched 2026-10-26 (unofficial)

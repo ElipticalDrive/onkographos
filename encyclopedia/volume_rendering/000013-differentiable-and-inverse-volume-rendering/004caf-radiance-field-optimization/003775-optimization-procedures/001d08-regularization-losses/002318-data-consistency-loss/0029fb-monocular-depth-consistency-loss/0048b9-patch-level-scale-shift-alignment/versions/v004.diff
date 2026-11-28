@@ -1,0 +1,196 @@
+--- v003.md
++++ v004.md
+@@ -1,5 +1,5 @@
+ # Patch-level Scale-Shift Alignment
+ 
+-Also called: Patch-level fitting, Patch-wise scale-shift fitting, Patch-wise scale-shift invariant loss
++Also called: Patch-level fitting, Patch-level scale-shift adjustment, Patch-wise scale-shift fitting, Patch-wise scale-shift invariant loss
+ 
+ ## Overview
+@@ -9,15 +9,15 @@
+ **Inputs and Outputs:**
+ *   **Inputs:**
+-    *   $S$: The set of images in the scene.
+-    *   $D^*_i(p)$: The predicted depth value at pixel $p$ for image $i \in S$ (rendered or estimated).
+-    *   $\bar{D}_i(p)$: The target depth value at pixel $p$ for image $i \in S$ (monocular depth prior or ground truth).
+-    *   $P$: The set of pixels belonging to a specific non-overlapping patch.
++    *   $S$: The set of images in the scene [S1, unofficial].
++    *   $D^*_i(p)$: The predicted depth value at pixel $p$ for image $i \in S$ (rendered or estimated) [S1, unofficial].
++    *   $\bar{D}_i(p)$: The target depth value at pixel $p$ for image $i \in S$ (monocular depth prior or ground truth) [S1, unofficial].
++    *   $P$: The set of pixels belonging to a specific non-overlapping patch [S1, unofficial].
+ *   **Outputs:**
+-    *   $w_i$: The scale parameter for the patch.
+-    *   $q_i$: The shift parameter for the patch.
+-    *   $L$: The total alignment loss.
++    *   $w_i$: The scale parameter for the patch [S1, unofficial].
++    *   $q_i$: The shift parameter for the patch [S1, unofficial].
++    *   $L$: The total alignment loss [S1, unofficial].
+ 
+ **Data Structures:**
+-*   The depth map is partitioned into a grid of non-overlapping patches.
++*   The depth map is partitioned into a grid of non-overlapping patches [S1, unofficial].
+ *   Standard implementation uses a patch resolution of $80 \times 80$ pixels [S1, unofficial].
+ 
+@@ -26,8 +26,8 @@
+ 
+ **Steps:**
+-1.  Partition the depth map of each image $i \in S$ into non-overlapping patches of size $80 \times 80$ pixels.
++1.  Partition the depth map of each image $i \in S$ into non-overlapping patches of size $80 \times 80$ pixels [S1, unofficial].
+ 2.  For each patch $P$ in each image $i$, define the optimization objective to find scale $w_i$ and shift $q_i$ that minimize the alignment error between the predicted depth $D^*_i(p)$ and the target depth $\bar{D}_i(p)$ [S1, unofficial].
+-3.  Solve for the optimal parameters $(w_i, q_i)$ using a closed-form least-squares solution.
+-4.  Compute the loss contribution for the patch using the aligned parameters.
++3.  Solve for the optimal parameters $(w_i, q_i)$ using a closed-form least-squares solution [S1, unofficial].
++4.  Compute the loss contribution for the patch using the aligned parameters [S1, unofficial].
+ 5.  Sum the loss contributions across all patches and all images in the set $S$ to obtain the total loss $L$ [S1, unofficial].
+ 
+@@ -39,10 +39,10 @@
+ $$
+ 
+-where $w_i$ and $q_i$ are the patch-specific scale and shift, $D^*_i(p)$ is the predicted depth, and $\bar{D}_i(p)$ is the target depth.
++where $w_i$ and $q_i$ are the patch-specific scale and shift, $D^*_i(p)$ is the predicted depth, and $\bar{D}_i(p)$ is the target depth. The norm $\| \cdot \|$ denotes the L2 norm (or squared error) consistent with the least-squares optimization criterion [S1, unofficial].
+ 
+ The parameters $(w_i, q_i)$ are determined by minimizing the sum of squared errors within the patch [S1, unofficial]:
+ 
+ $$
+-(w_i, q_i) = \arg \min_{w_i, q_i} \sum_{p \in P} \| (w_i D^*_i(p) + q_i) - \bar{D}_i(p) \|
++(w_i, q_i) = \arg \min_{w_i, q_i} \sum_{p \in P} \| (w_i D^*_i(p) + q_i) - \bar{D}_i(p) \|^2
+ $$
+ 
+@@ -73,95 +73,46 @@
+     total_loss = 0.0
+     
+-    # Iterate over non-overlapping patches
+     for y in range(0, H, patch_size):
+         for x in range(0, W, patch_size):
+-            # Define patch boundaries
+             y_end = min(y + patch_size, H)
+             x_end = min(x + patch_size, W)
+             
+-            # Extract patch data
+             p_pred = predicted_depth[y:y_end, x:x_end]
+             p_target = target_depth[y:y_end, x:x_end]
+             
+-            # Flatten patches to 1D arrays
+             pred_flat = p_pred.flatten()
+             target_flat = p_target.flatten()
+-            
+-            # Number of pixels in the current patch
+             N = len(pred_flat)
+             
+-            # If patch is empty, skip
+             if N == 0:
+                 continue
++            
++            # Construct feature vector [D*, 1] for each pixel
++            features = np.column_stack((pred_flat, np.ones(N)))
++            
++            # Compute closed-form least-squares solution: h = (X^T X)^-1 X^T y
++            XtX = features.T @ features
++            Xty = features.T @ target_flat
++            
++            # Guard against singular matrix (zero variance in predicted depth) [G]
++            if np.linalg.det(XtX) < 1e-12:
++                continue
+                 
+-            # Construct design matrix A where each row is [D*, 1]
+-            # A shape: (N, 2)
+-            A = np.column_stack((pred_flat, np.ones(N)))
++            h_opt = np.linalg.solve(XtX, Xty)
++            w, q = h_opt
+             
+-            # Solve least squares: min || A @ h - target_flat ||^2
+-            # h = [w, q]^T
+-            # Using numpy's linear algebra solver for stability
+-            # h_opt = (A^T A)^-1 A^T target
+-            try:
+-                h_opt, residuals, rank, s = np.linalg.lstsq(A, target_flat, rcond=None)
+-                w, q = h_opt
+-                
+-                # Compute aligned prediction
+-                aligned_pred = w * pred_flat + q
+-                
+-                # Compute L1 loss for this patch (as per formula definition using norm)
+-                # Note: The formula uses ||...|| which typically implies L1 or L2.
+-                # The optimization uses least-squares (L2), but the loss summation 
+-                # in the source text uses ||...||. We follow the source's explicit 
+-                # summation formula which uses the norm. 
+-                # Standard interpretation of ||x|| in loss contexts without square 
+-                # often implies L1, but given the optimization is L2, we compute 
+-                # the residual magnitude. To be precise to the source formula 
+-                # L = sum ||...||, we sum the absolute differences (L1) or 
+-                # squared differences? The source writes ||...|| in the loss 
+-                # but minimizes squared error. 
+-                # Re-reading source: "L = sum || (w D* + q) - D_bar ||"
+-                # Usually, if optimization is L2, the loss is L2. 
+-                # However, the text explicitly writes the norm without square in L.
+-                # We will compute the L2 norm of the residual vector for the patch 
+-                # or sum of absolute errors? 
+-                # Let's look at Eq 1: L = sum ||...||. Eq 2 minimizes sum ||...||^2.
+-                # It is common to use the same norm for loss and optimization.
+-                # Given Eq 3 uses squared error (D - D_bar)^2, the optimization is L2.
+-                # The loss L in Eq 1 likely represents the L2 norm (Euclidean distance) 
+-                # of the residual vector, or the sum of absolute errors.
+-                # Given "least-square alignment", we assume the loss is the sum of 
+-                # squared errors or the L2 norm. 
+-                # Let's stick to the explicit formula: sum of norms. 
+-                # If ||x|| is Euclidean norm, then it is sqrt(sum(res^2)).
+-                # If ||x|| is L1 norm, it is sum(|res|).
+-                # In computer vision depth consistency, L1 is very common.
+-                # However, the optimization is strictly L2.
+-                # We will compute the L2 norm of the residual vector for the patch 
+-                # to match the "norm" notation, or simply sum the squared errors 
+-                # if the notation was loose. 
+-                # Let's assume the standard L2 loss (sum of squares) for consistency 
+-                # with the least-squares optimization, as is typical in such papers.
+-                # But the source text says: L = sum ||...||. 
+-                # Let's implement the L2 norm of the residual vector for the patch.
+-                
+-                residual = aligned_pred - target_flat
+-                patch_loss = np.linalg.norm(residual) # L2 norm of the vector
+-                total_loss += patch_loss
+-                
+-            except np.linalg.LinAlgError:
+-                # Fallback if matrix is singular (e.g., all depths are constant)
+-                # [G] If the patch has zero variance in predicted depth, 
+-                # the least squares solution is undefined. 
+-                # We treat the loss as 0 or skip.
+-                pass
+-                
++            # Compute aligned prediction and residual
++            aligned_pred = w * pred_flat + q
++            residual = aligned_pred - target_flat
++            
++            # Accumulate loss using squared error per patch, consistent with least-squares optimization [S1, unofficial]
++            total_loss += np.sum(residual ** 2)
++            
+     return total_loss
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Singular Matrices:** If the predicted depth within a patch is constant (zero variance), the matrix $\sum \vec{D}_i(p) \vec{D}_i(p)^T$ may be singular or ill-conditioned, making the least-squares solution unstable [G]. A guard should check for variance or use a pseudo-inverse.
+-*   **Boundary Conditions:** Patches at the image boundaries may be smaller than $80 \times 80$ if the image dimensions are not multiples of the patch size. The algorithm must handle these partial patches correctly by adjusting $N$ in the summations [S1, unofficial].
+-*   **Depth Inconsistency:** The method assumes that within a local patch, a linear scale-shift transformation is sufficient to align the depths. If local depth structures are highly non-linear or contain significant noise, the local fit may introduce artifacts [S1, unofficial].
++*   **Singular Matrices:** If the predicted depth within a patch is constant (zero variance), the matrix $\sum \vec{D}_i(p) \vec{D}_i(p)^T$ becomes singular, making the least-squares solution undefined [G]. A guard should check for variance or use a pseudo-inverse [G].
++*   **Boundary Conditions:** Patches at the image boundaries may be smaller than $80 \times 80$ if the image dimensions are not multiples of the patch size [G]. The loop bounds naturally handle these partial patches without modifying the summation logic [G].
+ 
+ ## Subtopics
+@@ -171,13 +122,13 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The complexity is linear with respect to the number of pixels in the depth map, $O(H \times W)$, as each pixel is processed exactly once within its respective patch. The per-patch least-squares solution involves a fixed-size $2 \times 2$ matrix inversion, which is $O(1)$ per patch.
+-*   **Memory Complexity:** $O(H \times W)$ to store the depth maps. The additional memory for patch processing is minimal, requiring storage for the $2 \times 2$ matrix and vectors of size $N$ (patch pixel count) during the solve step.
+-*   **Strengths:** Significantly reduces misalignment errors in rendered depth maps compared to image-level fitting, especially in scenes with depth inconsistencies among different objects [S1, unofficial]. It adapts locally to the depth structure.
+-*   **Limitations:** Computationally more expensive than global fitting due to the repeated matrix operations. It may overfit to noise in the monocular depth prior if the patches are too small or the prior is unreliable [G].
++*   **Time Complexity:** The complexity is linear with respect to the number of pixels in the depth map, $O(H \times W)$, as each pixel is processed exactly once within its respective patch [G]. The per-patch least-squares solution involves a fixed-size $2 \times 2$ matrix inversion, which is $O(1)$ per patch [G].
++*   **Memory Complexity:** $O(H \times W)$ to store the depth maps [G]. The additional memory for patch processing is minimal, requiring storage for the $2 \times 2$ matrix and vectors of size $N$ (patch pixel count) during the solve step [G].
++*   **Strengths:** Significantly reduces misalignment errors in rendered depth maps compared to image-level fitting, especially in scenes with depth inconsistencies among different objects [S1, unofficial]. It adapts locally to the depth structure [S1, unofficial].
++*   **Limitations:** Computationally more expensive than global fitting due to the repeated matrix operations [G]. It may overfit to noise in the monocular depth prior if the patches are too small or the prior is unreliable [G].
+ *   **When to use:** Use when monocular depth priors exhibit local scale/shift variations that a global fit cannot correct, such as in sparse-view NeRF training where MDE outputs may have inconsistent absolute scales across different regions [S1, unofficial].
+-*   **When not to use:** Avoid if computational resources are extremely limited and global alignment is sufficient, or if the depth prior is known to be globally consistent.
++*   **When not to use:** Avoid if computational resources are extremely limited and global alignment is sufficient, or if the depth prior is known to be globally consistent [G].
+ 
+ ## Background
+-Patch-level Scale-Shift Alignment was introduced in the context of boosting radiance fields from sparse inputs using monocular depth adaptation. It is a core component of the DaRF (Depth-aware Radiance Fields) method [S1, unofficial]. The technique builds upon the concept of scale-shift invariant loss [39] and least-square alignment [53], adapting them to a patch-wise granularity to handle the limitations of global fitting in complex scenes [S1, unofficial]. It is applied in DaRF to refine MDE depth maps during sparse-view NeRF training [S1, unofficial].
++Patch-level Scale-Shift Alignment was introduced in the context of boosting radiance fields from sparse inputs using monocular depth adaptation [S1, unofficial]. It is a core component of the DaRF (Depth-aware Radiance Fields) method [S1, unofficial]. The technique builds upon the concept of scale-shift invariant loss [39] and least-square alignment [53], adapting them to a patch-wise granularity to handle the limitations of global fitting in complex scenes [S1, unofficial]. It is applied in DaRF to refine MDE depth maps during sparse-view NeRF training [S1, unofficial].
+ 
+ ## Sources

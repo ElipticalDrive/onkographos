@@ -1,0 +1,269 @@
+--- v009.md
++++ v010.md
+@@ -4,130 +4,113 @@
+ 
+ ## Overview
+-This method is a display-only rendering technique for trained 3D Gaussian Splatting (3DGS) scenes that projects 3D Gaussian distributions into 2D screen-space quads, sorts them by camera-space depth on the CPU, and renders them using hardware-instanced drawing with standard alpha blending [S1, S2, S5, S6, unofficial]. It solves the problem of visualizing large-scale, photorealistic 3D scenes reconstructed via Gaussian Splatting by treating each splat as a billboard-like primitive [S1, S2, unofficial]. It sets itself apart from its siblings by relying on CPU-side depth sorting to resolve the non-commutative nature of alpha blending, avoiding the complexity of GPU-based tile-based rasterization or order-independent transparency (OIT) algorithms [S3, S6, unofficial]. Unlike [Tiled 2D Gaussian Splatting Rasterization](2061-tiled-2d-gaussian-splatting-rasterization.md), which rasterizes tiles, this method uses a single instanced draw call (or batched calls) to render all visible splats [S2, S5, unofficial].
++This method renders trained 3D Gaussian Splatting (3DGS) scenes by projecting 3D Gaussians into 2D screen-space quads, sorting them by camera-space depth on the CPU, and drawing them using hardware-instanced rendering with standard alpha blending [S1, S2, S3, S5, S6, unofficial]. It solves the problem of visualizing large-scale, photorealistic 3D scenes on client-side hardware (Android, iOS, Web, ROS RViz) without requiring neural network inference or server-side ray tracing [S1, S3, unofficial]. It sets itself apart from its siblings by performing the sorting explicitly on the CPU (often via radix sort or JS native sort) and using a single instanced draw call, whereas [Tiled 2D Gaussian Splatting Rasterization](2061-tiled-2d-gaussian-splatting-rasterization.md) performs sorting and rasterization entirely on the GPU, and [Gaussian Splat Rendering (Screen-Space Quad)](2075-gaussian-splat-rendering-screen-space-quad.md) describes the general mechanism without specifying the CPU-side sorting implementation [S2, S3, S6, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** A set of $N$ 3D Gaussians defined by means $\mu$, covariances $\Sigma_{3D}$ (derived from rotations $q$ and scales $s$), opacities $\alpha$, and spherical harmonic (SH) coefficients $c$. A camera defined by view matrix $V$ and projection matrix $P$.
+-*   **Outputs:** A 2D image buffer containing the composited RGB color and alpha channel.
++*   **Inputs:** A set of $N$ 3D Gaussians defined by means $\boldsymbol{\mu}$, covariances $\boldsymbol{\Sigma}_{3D}$ (derived from rotation $q$ and scale $s$), opacities $\alpha$, and spherical harmonic (SH) coefficients. Camera view matrix $\mathbf{V}$ and projection matrix $\mathbf{P}$.
++*   **Outputs:** A 2D image with color and alpha channels.
+ 
+ **Data Structures:**
+-1.  **Gaussian Data:** Each Gaussian $i$ stores:
+-    *   Centroid $\mu_i \in \mathbb{R}^3$ [S1, unofficial].
+-    *   Opacity $\alpha_i \in \mathbb{R}$ (raw, sigmoided at render time) [S1, unofficial].
+-    *   Scale $s_i \in \mathbb{R}^3$ (exponentiated at render time) [S1, unofficial].
+-    *   Rotation $q_i \in \mathbb{R}^4$ (normalized quaternion) [S1, unofficial].
+-    *   SH Coefficients $c_i$ [S1, S2, unofficial].
+-2.  **Sort Entries:** A list of $N$ entries, each containing `cameraZ` (float) and `splatIndex` (uint) [S1, unofficial].
+-3.  **Vertex Buffers:**
+-    *   **Quad VBO:** Static buffer containing 4 vertices for a unit quad with corners at $(-1,-1), (1,-1), (-1,1), (1,1)$ [S1, S5, unofficial].
+-    *   **Instance VBO:** Dynamic buffer of size $N \times \text{sizeof(float)}$ storing the sorted indices $0 \dots N-1$ [S2, unofficial].
+-    *   **Texture Buffer Objects (TBOs) / Data Textures:**
+-        *   `splatPositionScale`: RGBA16F texture. Layout: $xyz$ = center position (model space), $w$ = billboard half-extent (scale) [S5, S6, unofficial].
+-        *   `splatColorOpacity`: RGBA16F texture. Layout: $rgb$ = SH0 color (or precomputed color), $a$ = straight opacity [S5, S6, unofficial].
+-        *   *Note:* Some implementations use TBOs (Texture Buffer Objects) with `RGBA32UI` for base data (32 bytes/splat) and `RGBA16F` for SH coefficients [S2, unofficial].
++*   **Splat Data:** Stored in textures or buffers. For Filament/WebGL implementations, two square RGBA16F textures are used: `splatPositionScale` (layout: $xyz=$ center position, $w=$ scale) and `splatColorOpacity` (layout: $rgb=$ SH0 color, $a=$ opacity) [S5, S6, unofficial]. For C++ OpenGL, a `GpuGaussian` struct (44 bytes: centroid 12B, opacity 4B, scale 12B, rotation 16B) is used [S1, unofficial].
++*   **Index Buffer:** A dynamic write-only vertex buffer (VBO) of size $N \times \text{sizeof(float)}$ containing sorted splat indices (0 to $N-1$) [S2, unofficial].
++*   **Sort Entries:** For CPU sorting, a struct `SplatSortEntry` containing `cameraZ` (float, 4 bytes) and `splatIndex` (size_t, 8 bytes) is used [S1, unofficial]. In JavaScript, a `BigInt64Array` (`depthMix`) of size $2 \times N$ is used, where even offsets store the index and odd offsets store the packed depth [S3, unofficial].
+ 
+-**Numbered Steps:**
++**Steps:**
+ 
+-1.  **Activation and Covariance Construction:**
+-    *   Normalize rotation: $q_{norm} = q / \|q\|$ [Parent].
+-    *   Exponentiate scales: $s_{eff} = \exp(s)$ [Parent].
+-    *   Construct 3D covariance: $\Sigma_{3D} = R S S^T R^T$, where $R$ is the rotation matrix from $q_{norm}$ and $S = \text{diag}(s_{eff})$ [Parent].
++1.  **Frustum Culling and Filtering:**
++    Transform 3D means to camera space: $\boldsymbol{\mu}' = \mathbf{V} \boldsymbol{\mu}$ [Parent]. Project to image plane: $\boldsymbol{\mu}_{2D}$ [Parent]. Perform frustum culling to remove off-screen Gaussians (image bounds and near/far planes with a FOV margin ratio of 0.3) [S4, unofficial]. Skip Gaussians with opacity $\alpha_{eff} < 0.05$ (or 0.01 in some implementations) [S4, S1, unofficial].
+ 
+-2.  **Camera Space Transformation:**
+-    *   Transform mean to camera space: $\mu' = V \mu$ [Parent].
+-    *   Transform covariance to camera space: $\Sigma' = V_{1:3, 1:3} \Sigma_{3D} V_{1:3, 1:3}^T$ [Parent].
++2.  **CPU Sorting:**
++    Compute the camera-space depth for each remaining splat.
++    *   *C++:* Extract $z$ from `view * vec4(centroid, 1.0)` [S1, unofficial].
++    *   *JavaScript:* Compute `depth = 10000 + viewProj[2]*x + viewProj[6]*y + viewProj[10]*z` [S3, unofficial].
++    Sort the splats by increasing camera-space $Z$ (far-to-near order, as the camera looks down the negative $Z$ axis) [S1, unofficial].
++    *   *Optimization:* Re-sort only when the camera direction delta exceeds a threshold (e.g., 1% of bounding radius) to avoid redundant computation [S5, S3, unofficial].
++    Reorder the Gaussian and SH data arrays based on the sorted indices [S1, unofficial].
+ 
+-3.  **Projection to Screen Space:**
+-    *   Compute Jacobian $J$ of the projective projection at $\mu'$ [Parent].
+-    *   Compute 2D screen-space covariance: $\Sigma_{2D} = J \Sigma' J^T$ [Parent].
+-    *   Compute 2D mean: $\mu_{2D} = \begin{pmatrix} \frac{f_x \mu'_x}{\mu'_z} + c_x \\ \frac{f_y \mu'_y}{\mu'_z} + c_y \end{pmatrix}$ [Parent].
++3.  **Batching (if necessary):**
++    If the number of splats $N$ exceeds the hardware limit for instanced drawing (e.g., 65,535 instances due to 16-bit index buffers), split the sorted list into multiple batches [S5, S6, unofficial].
+ 
+-4.  **Culling and Sorting:**
+-    *   **Culling:** Discard Gaussians if $\mu'_z < z_{near}$ or outside the view frustum (including image bounds and near/far planes with a FOV margin ratio of 0.3) [S4, Parent, unofficial]. Discard if opacity $\alpha_{eff} < 0.05$ (or 0.01 in some implementations) [S4, S1, unofficial].
+-    *   **Sorting:** Sort the remaining $M$ Gaussians by increasing camera-space Z ($\mu'_z$) to achieve far-to-near order (since camera looks down negative Z) [S1, S3, unofficial].
+-        *   *Optimization:* Re-sort only when camera direction delta exceeds a threshold (e.g., 1% of bounding radius) to avoid redundant computation [S5, S6, unofficial].
+-        *   *Implementation:* Use CPU radix sort or standard sort on a worker thread [S5, S3, unofficial].
++4.  **Vertex Shader Execution (Per Instance):**
++    For each instance $i$ (representing a splat):
++    *   Fetch attributes from textures or buffers using `gl_InstanceID` [S5, unofficial].
++    *   Compute clip space position: $\mathbf{clip} = \mathbf{P} \mathbf{V} \begin{pmatrix} \boldsymbol{\mu}' \\ 1 \end{pmatrix}$ [S1, unofficial].
++    *   Compute the 2D screen-space covariance $\boldsymbol{\Sigma}_{2D}$ using the Jacobian $\mathbf{J}$ of the projection [Parent].
++    *   Perform eigen-decomposition of $\boldsymbol{\Sigma}_{2D}$ to find eigenvalues $\lambda_1, \lambda_2$ and eigenvectors $\mathbf{e}_1, \mathbf{e}_2$. Add jitter (0.3) to diagonal elements for stability [S1, unofficial].
++        $$ \lambda_1 = \max(\text{mid} + \text{radius}, 0.01), \quad \lambda_2 = \max(\text{mid} - \text{radius}, 0.01) $$
++        where $\text{mid} = 0.5(a+d)$, $\text{radius} = \sqrt{\max(\text{mid}^2 - \det, 0)}$, and $a,d$ are diagonal elements of $\boldsymbol{\Sigma}_{2D}$ [S1, unofficial].
++    *   Compute 3-sigma principal half-axes: $\mathbf{b}_1 = 3\sqrt{\lambda_1}\mathbf{e}_1$, $\mathbf{b}_2 = 3\sqrt{\lambda_2}\mathbf{e}_2$ [S1, unofficial].
++    *   Compute vertex offset in NDC: $\Delta \text{NDC} = \frac{\text{quadCorner}.x \cdot \mathbf{b}_1 + \text{quadCorner}.y \cdot \mathbf{b}_2}{\text{viewportSize} \cdot 0.5}$ [S1, unofficial].
++    *   Set final position: $\mathbf{gl\_Position} = \begin{pmatrix} \text{ndc}.xy + \Delta \text{NDC}, \text{ndc}.z, 1.0 \end{pmatrix}$ [S1, unofficial].
++    *   Pass `splatCoord` (quadCorner), `splatColor` (SH evaluation), and `splatOpacity` ($\sigma(\alpha)$) to the fragment shader [S1, unofficial].
+ 
+-5.  **Data Upload:**
+-    *   Reorder Gaussian and SH data based on sorted indices [S1, unofficial].
+-    *   Upload sorted data to instance VBOs or data textures (`splatPositionScale`, `splatColorOpacity`) [S5, S2, unofficial].
+-    *   If $N > 65535$ (16-bit index limit), split into multiple batches [S5, S6, unofficial].
++5.  **Fragment Shader Execution:**
++    *   Compute power term: $p = -4.5 \cdot \text{dot}(\text{splatCoord}, \text{splatCoord})$ [S1, unofficial].
++    *   Discard if $p < -9.0$ (equivalent to $e^{-9} \approx 0$) [S1, unofficial].
++    *   Compute final alpha: $\alpha_{frag} = \min(0.99, \text{splatOpacity} \cdot \exp(p))$ [S1, unofficial].
++    *   Discard if $\alpha_{frag} < 0.001$ [S1, unofficial].
++    *   Output color: $\text{FragColor} = \begin{pmatrix} \text{splatColor} \\ \alpha_{frag} \end{pmatrix}$ [S1, unofficial].
+ 
+-6.  **Rasterization and Compositing (Vertex Shader):**
+-    *   For each instance $i$, fetch attributes from textures using `gl_InstanceID` [S5, unofficial].
+-    *   Compute clip space position: `clip = P * V * vec4(splatCentroid, 1.0)` [S1, unofficial].
+-    *   Compute 2D covariance components with jitter:
+-        $$ a = \Sigma_{2D}[0][0] + 0.3, \quad b = \Sigma_{2D}[1][0], \quad d = \Sigma_{2D}[1][1] + 0.3 $$
+-        [S1, unofficial]
+-    *   Eigen-decompose the 2x2 covariance:
+-        $$ \text{det} = ad - b^2, \quad \text{mid} = 0.5(a+d), \quad \text{rad} = \sqrt{\max(\text{mid}^2 - \text{det}, 0.0)} $$
+-        $$ \lambda_1 = \max(\text{mid} + \text{rad}, 0.01), \quad \lambda_2 = \max(\text{mid} - \text{rad}, 0.01) $$
+-        [S1, unofficial]
+-    *   Compute eigenvectors:
+-        $$ e_1 = \begin{cases} \text{normalize}(b, \lambda_1 - a) & \text{if } |b| > 10^{-5} \\ (1,0) & \text{if } a \ge d \\ (0,1) & \text{otherwise} \end{cases}, \quad e_2 = (-e_{1y}, e_{1x}) $$
+-        [S1, unofficial]
+-    *   Compute 3-sigma principal half-axes in pixels:
+-        $$ b_1 = 3\sqrt{\lambda_1} e_1, \quad b_2 = 3\sqrt{\lambda_2} e_2 $$
+-        [S1, unofficial]
+-    *   Compute vertex offset in NDC:
+-        $$ \text{deltaPixel} = \text{quadCorner}.x \cdot b_1 + \text{quadCorner}.y \cdot b_2 $$
+-        $$ \text{deltaNdc} = \text{deltaPixel} / (\text{viewportSize} \cdot 0.5) $$
+-        [S1, unofficial]
+-    *   Set final position: `gl_Position = vec4(ndc.xy + deltaNdc, ndc.z, 1.0)` [S1, unofficial].
+-    *   Pass `splatCoord` (quadCorner), `splatColor` (SH evaluation), and `splatOpacity` ($\sigma(\alpha)$) to fragment shader [S1, unofficial].
+-
+-7.  **Fragment Shader:**
+-    *   Compute power term: $p = -4.5 \cdot \text{dot}(\text{splatCoord}, \text{splatCoord})$ [S1, unofficial].
+-    *   Discard if $p < -9.0$ (approx $e^{-9} \approx 0$) [S1, unofficial].
+-    *   Compute final alpha: $\alpha_{final} = \min(0.99, \text{splatOpacity} \cdot \exp(p))$ [S1, unofficial].
+-    *   Discard if $\alpha_{final} < 0.001$ [S1, unofficial].
+-    *   Output color: `FragColor = vec4(splatColor, alpha_final)` [S1, unofficial].
+-    *   **Blending:** Use premultiplied-alpha blending: `glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)` [S1, Parent, unofficial]. Depth test is disabled [S1, unofficial].
++6.  **Alpha Compositing:**
++    Enable blending: `glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)` [S1, unofficial]. Disable depth test [S1, unofficial]. Draw all splats back-to-front using `glDrawArraysInstanced` [S1, unofficial].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def render_cpu_sorted_instanced(gaussians, camera, viewport_size):
++def render_3dgs_cpu_sorted(gs, camera, viewport_size):
+     """
+-    Render 3D Gaussians using CPU sorting and instanced drawing.
++    gs: List of Gaussian objects with means, covariances, opacities, sh_coeffs.
++    camera: Object with view_matrix, projection_matrix, width, height.
++    viewport_size: (W, H) tuple.
+     """
+-    # 1. Camera Space Transformation
+-    means_cam = camera.transform_world_to_cam(gaussians.means)
++    # 1. Transform and Filter
++    view_mat = camera.view_matrix
++    proj_mat = camera.projection_matrix
+     
+-    # 2. Culling
+-    visible_indices = []
+-    for i, mean in enumerate(means_cam):
+-        if mean.z < camera.z_near:
++    # Transform means to camera space
++    means_cam = [view_mat * vec4(g.mean, 1.0) for g in gs]
++    
++    # Frustum culling and opacity filter
++    valid_indices = []
++    for i, g in enumerate(gs):
++        if g.opacity < 0.05:
+             continue
+-        if gaussians.opacities[i] < 0.05:
++        # Simple frustum check (implementation detail omitted, see S4)
++        if not is_in_frustum(means_cam[i], camera):
+             continue
+-        visible_indices.append(i)
++        valid_indices.append(i)
+         
+-    if not visible_indices:
+-        return empty_image()
+-
+-    # 3. Sorting (Far-to-Near)
+-    # Camera looks down negative Z, so smaller Z is farther.
+-    # Sort by increasing Z.
+-    sort_keys = [(means_cam[i].z, i) for i in visible_indices]
+-    sort_keys.sort(key=lambda x: x[0])
+-    sorted_indices = [idx for _, idx in sort_keys]
++    # 2. CPU Sorting
++    # Create sort entries: (camera_z, original_index)
++    sort_entries = []
++    for i in valid_indices:
++        z = means_cam[i].z # Camera looks down negative Z
++        sort_entries.append((z, i))
++        
++    # Sort by increasing Z (far to near)
++    sort_entries.sort(key=lambda x: x[0])
+     
+-    # 4. Data Upload (Conceptual)
+-    # Upload sorted indices to Instance VBO
+-    # Upload sorted attributes to Data Textures (PositionScale, ColorOpacity)
+-    instance_data = get_instance_data(sorted_indices, gaussians)
+-    upload_to_gpu(instance_data)
+-
+-    # 5. Rendering Setup
++    # Reorder GS data based on sorted indices
++    sorted_gs = [gs[i] for _, i in sort_entries]
++    
++    # 3. Batching (if needed)
++    MAX_INSTANCES = 65535
++    batches = []
++    for i in range(0, len(sorted_gs), MAX_INSTANCES):
++        batches.append(sorted_gs[i:i+MAX_INSTANCES])
++        
++    # 4. Rendering Loop
+     glDisable(GL_DEPTH_TEST)
+     glEnable(GL_BLEND)
+     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+-
+-    # 6. Draw
+-    # Single instanced draw call (or batched if N > 65535)
+-    glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, len(sorted_indices))
+     
+-    return get_framebuffer()
++    for batch in batches:
++        # Upload batch data to GPU (textures or VBOs)
++        upload_batch_to_gpu(batch)
++        
++        # Draw instanced quads
++        # Vertex shader handles projection, covariance projection, and quad expansion
++        # Fragment shader handles Gaussian falloff and alpha
++        glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, len(batch))
+ ```
+ 
+@@ -135,35 +118,38 @@
+ 
+ ### [Tiled 2D Gaussian Splatting Rasterization](2061-tiled-2d-gaussian-splatting-rasterization.md)
+-Tiled 2D Gaussian Splatting Rasterization is a GPU-optimized, tile-based rendering method for 3D Gaussian Splatting (3DGS) that partitions the image plane into macro-tiles (typically 16×16 or 32×32 pixels) to efficiently composite sorted Gaussian primitives via iterative alpha-blending. It solves the performance bottleneck of evaluating millions of splats against every pixel by binning Gaussians to tiles, sorting them by depth, and processing each tile in parallel using CUDA thread blocks with shared memory synchronization. Unlike its sibling [Gaussian Splat Rendering (Screen-Space Quad)](2075-gaussian-splat-rendering-screen-space-quad.md) which relies on standard graphics pipeline alpha blending, or [Non-Tiled 2D Gaussian Splatting with Transmittance Culling](2067-non-tiled-2d-gaussian-splatting-with-transmittance-culling.md) which iterates over Gaussians, this method explicitly manages memory and computation per tile to enable real-time training and rendering.
++A GPU-parallel, tile-based method that sorts splats on the GPU using radix sort, enabling real-time performance for millions of splats. Choose this for high-performance desktop/mobile rendering where GPU compute is available.
+ 
+ ### [Gaussian Splat Rendering (Screen-Space Quad)](2075-gaussian-splat-rendering-screen-space-quad.md)
+-Gaussian Splat Rendering (Screen-Space Quad) is a display-only rendering technique that projects 3D Gaussian distributions into 2D screen-space quads and renders them using instanced drawing with standard alpha blending. It solves the problem of visualizing large-scale, photorealistic 3D scenes reconstructed via Gaussian Splatting by treating each splat as a billboard-like primitive. It sets itself apart from its siblings by defining the fundamental geometry generation and quad-drawing mechanism without specifying the sorting implementation or advanced shading extensions. Unlike [Tiled 2D Gaussian Splatting Rasterization](2061-tiled-2d-gaussian-splatting-rasterization.md), which rasterizes tiles, this method relies on CPU-side depth sorting to resolve the non-commutative nature of alpha blending.
++A display-only technique using CPU-side depth sorting and instanced drawing. Choose this for general-purpose visualization where explicit CPU sorting is preferred over GPU compute shaders.
+ 
+ ### [Depth-First Splat Sorting](2850-depth-first-splat-sorting.md)
+-Depth-First Splat Sorting is a preprocessing step for 3D Gaussian Splatting rendering that sorts visible Gaussian splats by camera-space depth before they are expanded into per-tile fragments. It solves the problem of high sorting overhead inherent in the original 3DGS pipeline, where fragments (one per tile a splat touches) are sorted using a combined 48-bit key. By sorting the smaller set of visible splats first, this method reduces the number of items to sort by a factor of 1.5 to 4, significantly lowering computational cost while maintaining correct depth ordering for subsequent rasterization.
++A preprocessing step that sorts visible splats before tile expansion, reducing sorting overhead. Choose this as a drop-in optimization for tiled renderers.
+ 
+ ### [Splatapult Gaussian Splat Renderer](6749-splatapult-gaussian-splat-renderer.md)
+-Splatapult is a display-only renderer for trained 3D Gaussian Splatting scenes that projects 3D Gaussian distributions into 2D screen-space quads, sorts them by camera-space depth on the GPU (or CPU fallback), and renders them using hardware-instanced drawing with standard alpha blending. It distinguishes itself from sibling renderers by providing a complete, standalone implementation of the GPU-based multi-radix sorting pipeline required for correct depth ordering in instanced rendering, supporting VR via OpenXR and optional full spherical harmonic (SH) color evaluation.
++A standalone renderer with a complete GPU-based multi-radix sorting pipeline and VR support. Choose this for VR applications requiring high performance.
+ 
+ ### [SortFree Weighting](8006-sortfree-weighting.md)
+-SortFree Weighting is an Order-Independent Transparency (OIT) approximation for 3D Gaussian Splatting that eliminates the computational bottleneck of depth sorting by replacing non-commutative alpha blending with a commutative weighted-sum blending scheme. Unlike standard 3D Gaussian Splatting which requires CPU-side depth sorting of splats per pixel, SortFree allows parallel accumulation of Gaussian colors in a single pass, trading strict physical accuracy for rendering efficiency and temporal stability. It sets itself apart from siblings like [Depth-aware Order-independent Rendering](9460-depth-aware-order-independent-rendering.md) by using a fixed analytical depth falloff rather than neural networks to predict view-dependent weights.
++An order-independent transparency approximation that eliminates sorting. Choose this when visual stability is less critical than rendering speed, or on hardware without sorting capabilities.
+ 
+ ### [Unity Mobile Implementation](9536-unity-mobile-implementation.md)
+-This method implements a display-only renderer for trained 3D Gaussian Splatting scenes within the Unity engine, optimized for mobile compatibility. It solves the problem of rendering high-fidelity Gaussian avatars on constrained hardware by relying exclusively on a warped canonical mesh for rigging and using a standard front-to-back alpha blending pipeline. It sets itself apart from its siblings by prioritizing maximum compatibility with existing game engine workflows (Mixamo rigging) and mobile stability over the raw performance optimizations found in tiled or sort-free variants.
++A Unity-optimized renderer for mobile compatibility. Choose this for game engine integration on mobile devices.
+ 
+ ### [CPU-based Gaussian Splatting Thumbnailer](14038-cpu-based-gaussian-splatting-thumbnailer.md)
+-This method generates low-resolution preview images (thumbnails) from trained 3D Gaussian Splatting scenes using a pure CPU pipeline optimized for speed via Just-In-Time (JIT) compilation. It solves the problem of slow interactive preview generation by simplifying the rendering model—omitting Gaussian rotation and complex shading—and leveraging Numba to accelerate Python-based numerical loops. It differs from its parent, [3D Gaussian Splatting Rendering (CPU-Sorted, Instanced)](2058-3d-gaussian-splatting-rendering-cpu-sorted-instanced.md), by explicitly excluding rotation data and using a simplified, approximate blending function rather than full alpha compositing, prioritizing execution time over visual fidelity.
++A pure CPU thumbnail generator using JIT compilation and simplified blending. Choose this for fast preview generation where visual fidelity is secondary.
++
++### [Support Guard](17686-support-guard.md)
++A fault-mitigation technique that clamps parameters to prevent corruption. Choose this for spaceborne or robotic hardware where reliability is critical.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Sorting takes $O(N \log N)$ on the CPU [S5, unofficial]. Rendering is $O(N)$ for the draw call, but fragment shading cost depends on the number of overlapping splats per pixel.
+-*   **Memory Complexity:** $O(N)$ for storing Gaussian data and sorted indices [S1, S2, unofficial]. VRAM usage for textures is $\approx 28$ bytes/splat for SH0, totaling $\approx 14$ MB for 500k splats [S5, unofficial].
+-*   **Measured Performance:** CPU radix sort of ~500k depth keys takes a few milliseconds on a worker thread [S5, unofficial]. Sorting 8k splats in JS takes ~1 ms [S5, unofficial]. Mobile-GS reports up to 127 FPS on modern mobile GPUs using this instanced approach with first-order SH [S5, unofficial].
+-*   **Strengths:** Simple implementation; works on hardware without compute shaders (e.g., older WebGL, Filament 1.71.5) [S5, unofficial]; stable visual output with correct alpha blending [S1, unofficial].
+-*   **Limitations:** Less efficient than tile-based GPU rasterization for large scenes due to CPU sorting overhead and lack of early ray termination [S1, S5, unofficial]; limited by 16-bit index buffer (65535 instances per draw call) requiring batching [S5, unofficial]; SH degree limited to 0 or 1 on mobile to stay within VRAM [S5, unofficial].
+-*   **When to use:** Display-only visualization, web viewers, mobile apps with limited GPU compute support, or when simplicity is prioritized over maximum performance [S5, S6, unofficial].
+-*   **When not to use:** Real-time training, very large scenes (>1M splats) on low-end hardware, or when order-independent transparency is required without sorting [S1, S5, unofficial].
++*   **Time Complexity:** Sorting dominates the CPU cost. CPU radix sort of ~500k depth keys takes a few milliseconds on a worker thread [S5, unofficial]. JS native sort takes ~1 ms for 8k splats [S5, unofficial]. Re-sorting is gated on camera movement, not every frame [S5, S3, unofficial].
++*   **Memory Complexity:** $O(N)$ for storing splat data. SH0 splats require ~28 bytes/splat in RGBA16F textures (~14 MB VRAM for 500k splats) [S5, unofficial].
++*   **Performance:** Mobile-GS reports up to 127 FPS on modern mobile GPUs using first-order SH and OIT [S5, unofficial]. However, CPU sorting is less efficient than the official 3DGS renderer's tile-based CUDA rasterizer [S1, unofficial].
++*   **Strengths:** Simple implementation, works on hardware without compute shaders (e.g., older WebGL, Filament 1.71.5) [S5, unofficial], compatible with standard alpha blending pipelines.
++*   **Limitations:** CPU sorting becomes a bottleneck for very large scenes (>1M splats) [S1, unofficial]. Limited to SH0 or SH1 on mid-range mobile to stay within VRAM budgets [S5, unofficial]. Instance count limited to 65,535 per draw call, requiring batching [S5, unofficial].
++*   **When to use:** Display-only visualization on Android, iOS, Web, and ROS RViz [S2, S5, S6, unofficial]. When GPU compute shaders are unavailable or undesirable.
++*   **When not to use:** Real-time interactive rendering of massive scenes (>1M splats) where GPU sorting is required [S1, unofficial].
+ 
+ ## Background
+-This method is based on the paper "3D Gaussian Splatting for Real-Time Radiance Field Rendering" by Kerbl et al. (2023) [S1, unofficial]. It was popularized by the "3D Gaussian Splatting in a Weekend" tutorial [S1, unofficial] and implemented in various open-source projects such as RVizSplat [S2, unofficial], Gaussian-Splatting-WebViewers [S3, unofficial], and Splaty [S4, unofficial]. It is used in Android SplatNode, Filament-based renderers, and web viewers [S5, S6, unofficial].
++This method is based on the paper "3D Gaussian Splatting for Real-Time Radiance Field Rendering" by Kerbl et al. (2023) [S1, unofficial]. It was developed as a display-only renderer for trained 3DGS scenes, initially popularized by the "3D Gaussian Splatting in a Weekend" tutorial [S1, unofficial]. It has been implemented in various contexts, including RViz for ROS [S2, unofficial], web viewers [S3, unofficial], Android/iOS via Filament [S5, unofficial], and Unity [S6, unofficial]. The approach was chosen for its simplicity and compatibility with standard graphics APIs when GPU compute shaders were not available or practical [S5, unofficial].
+ 
+ ## Sources

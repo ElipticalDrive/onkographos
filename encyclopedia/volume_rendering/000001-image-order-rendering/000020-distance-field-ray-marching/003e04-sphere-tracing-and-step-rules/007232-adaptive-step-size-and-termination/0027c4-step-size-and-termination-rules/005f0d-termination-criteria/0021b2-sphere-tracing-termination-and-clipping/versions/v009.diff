@@ -1,0 +1,247 @@
+--- v008.md
++++ v009.md
+@@ -4,98 +4,100 @@
+ 
+ ## Overview
+-Sphere Tracing Termination and Clipping defines the conditions under which a ray-marching loop halts, ensuring the algorithm returns a valid intersection point or correctly identifies a miss. It solves the problem of premature termination (missing surfaces due to large steps) and infinite loops (rays escaping to infinity or oscillating). It sets itself apart from sibling methods like [Standard Constant Step Ray Marching](1080-standard-constant-step-ray-marching.md) by leveraging the Lipschitz continuity of the Signed Distance Function (SDF) to guarantee safety without fixed step sizes, and from [Interval Raymarching](13020-interval-raymarching.md) by relying on point-wise distance evaluations rather than interval arithmetic bounds.
++Sphere Tracing Termination and Clipping defines the conditions under which a ray marching loop in a Signed Distance Field (SDF) terminates, either by finding a surface intersection, determining no intersection exists, or hitting safety limits. It solves the problem of infinite loops and visual artifacts (such as "aura" or "swimming") caused by premature termination or precision errors. It sets itself apart from [Ray Marching with Early Termination](17724-ray-marching-with-early-termination.md) by focusing specifically on the geometric and numerical constraints of sphere tracing (distance-field stepping) rather than general volumetric opacity accumulation.
+ 
+ ## How it works
+-The method operates on a ray defined by origin $\mathbf{o}$ and normalized direction $\mathbf{d}$, parameterized by distance $t$. The core loop evaluates the SDF $f(\mathbf{p})$ at $\mathbf{p} = \mathbf{o} + t\mathbf{d}$ to determine step size and check termination.
++The method combines standard sphere tracing termination with specific clipping and oscillation checks to ensure robustness.
+ 
+-### Inputs and Outputs
+-*   **Inputs:** Ray origin $\mathbf{o}$, ray direction $\mathbf{d}$, SDF function $f(\mathbf{p})$, maximum iteration count $k_{max}$, stopping distance threshold $\delta$, far plane clipping depth $t_{clip}$, and optional oscillation tolerance.
+-*   **Outputs:** Boolean `hit` (true if surface intersected), final distance $t$, and intersection point $\mathbf{p}$.
++**Inputs:**
++- Ray origin $O$ and direction $D$.
++- SDF function $f(p)$ returning signed distance.
++- Parameters: $\delta$ (stopping distance threshold), $k_{max}$ (max iterations), $d_{far}$ (far plane depth).
+ 
+-### Data Structures
+-*   **State:** Current distance $t$, previous distance $t_{prev}$ (for oscillation check), minimum screen-space distance $d_{min}$ (for screen-space selection), and corresponding point $\mathbf{p}_{min}$.
+-*   **Constants:** $\delta = 0.0003$ [S1], $k_{max} = 200$ [S1], $t_{clip} = 5.0$ [S1].
++**Outputs:**
++- Intersection point $P$ and validity flag.
+ 
+-### Numbered Steps
+-1.  **Initialization:** Set $t = 0.0$, $t_{prev} = 0.0$, $d_{min} = \infty$, $\mathbf{p}_{min} = \mathbf{o}$.
+-2.  **Iteration Loop:** For $i$ from $0$ to $k_{max} - 1$:
+-    a.  **Far Plane Clip:** If $t > t_{clip}$, terminate and return `hit = false` [S1].
+-    b.  **Position Evaluation:** Compute $\mathbf{p} = \mathbf{o} + t\mathbf{d}$.
+-    c.  **SDF Evaluation:** Compute $d = f(\mathbf{p})$.
+-    d.  **Surface Hit Check:** If $d < \delta$, terminate and return `hit = true`, $t$ [S1].
+-    e.  **Oscillation Check:** If $|t - t_{prev}| < 6\delta$, terminate and return `hit = false` (or handle as miss) [S1].
+-    f.  **Screen-Space Tracking:** If $d < d_{min}$, update $d_{min} = d$ and $\mathbf{p}_{min} = \mathbf{p}$ [S5, unofficial].
+-    g.  **Step Size Calculation:** Compute $\Delta t = d$ (assuming unit Lipschitz constant) or $\Delta t = d / \lambda$ [S2].
+-    h.  **Advance:** Set $t_{prev} = t$, then $t = t + \Delta t$.
+-3.  **Post-Loop Handling:**
+-    a.  If loop finished without hit:
+-        i.  **Screen-Space Selection:** If using screen-space intersection selection, return `hit = false` but use $\mathbf{p}_{min}$ as the closest approach point for shading or aura elimination [S5, unofficial].
+-        ii. **Dynamic Epsilon:** If secondary rays, compute $\epsilon_{dynamic} = 2\max(\epsilon_{min}, |f(\mathbf{p})|)$ to prevent self-intersection [S5, unofficial].
++**Data Structures:**
++- `current_pos`: Vector3, initialized to $O$.
++- `dist`: Float, initialized to $f(O)$.
++- `prev_dist`: Float, initialized to `dist`.
++- `step_count`: Integer, initialized to 0.
++- `min_screen_dist`: Float, initialized to $\infty$ (for Screen-Space Intersection Selection).
++- `min_screen_pos`: Vector3, initialized to $O$ (for Screen-Space Intersection Selection).
+ 
+-### Formulas
+-*   **Stopping Criterion:** Terminate if $d < \delta$ [S1].
+-*   **Oscillation Detection:** Terminate if $|t_{current} - t_{previous}| < 6\delta$ [S1].
+-*   **Cone Tracing Threshold (Adaptive):** $\hat{\epsilon}(\hat{s}) = \hat{s} \hat{r}_p$, where $\hat{s}$ is distance in undeformed space and $\hat{r}_p$ is pixel radius in undeformed space [S2].
+-*   **Pixel Radius in Undeformed Space:** $\hat{r}_p = s r_p J_D^{-1}$, where $s$ is distance in deformed space, $r_p$ is pixel radius in deformed space, and $J_D^{-1}$ is the inverse Jacobian determinant [S2].
+-*   **Dynamic Epsilon:** $\epsilon_{dynamic} = 2\max(\epsilon_{min}, |f(\mathbf{p})|)$ [S5, unofficial].
++**Steps:**
++1. **Far Plane Clip:** If the ray origin is beyond $d_{far}$, terminate immediately as no intersection is possible within the view volume.
++2. **Loop:** While `step_count` < $k_{max}$:
++    a. **Sample SDF:** Compute `dist` = $f(\text{current\_pos})$.
++    b. **Screen-Space Tracking (Optional):** If using Screen-Space Intersection Selection, project `current_pos` to screen space and compute the distance to the object surface in screen space. If this distance is less than `min_screen_dist`, update `min_screen_dist` and `min_screen_pos`.
++    c. **Termination Check 1 (Surface Hit):** If `dist` < $\delta$, terminate. The intersection is at `current_pos`.
++    d. **Termination Check 2 (Screen-Space Threshold):** If using Screen-Space Intersection Selection, if `min_screen_dist` $\le$ half the pixel distance, terminate. Return `min_screen_pos` as the intersection point (even if `dist` $\ge \delta$).
++    e. **Oscillation Check:** Compute oscillation metric $osc = | \text{dist} - \text{prev\_dist} |$. If $osc < 6\delta$, terminate. This prevents infinite loops when the ray is stuck near a surface due to precision issues or grazing angles [S1].
++    f. **Update History:** Set `prev_dist` = `dist`.
++    g. **Step Forward:** `current_pos` += `dist` * $D$.
++    h. **Increment:** `step_count` += 1.
++3. **No Intersection:** If the loop exits without hitting a surface, return "No Intersection". If Screen-Space Intersection Selection was active and no hit was found, return `min_screen_pos` as the closest point to avoid aura artifacts [S5, unofficial].
+ 
+-### Parameters
+-*   $\delta = 0.0003$: Stopping distance threshold [S1].
+-*   $k_{max} = 200$: Maximum sphere tracing iterations [S1].
+-*   $t_{clip} = 5.0$: Far plane clipping depth [S1].
+-*   $\epsilon_{min}$: Minimum epsilon value to prevent precision issues when $f(\mathbf{p}) \approx 0$ [S5, unofficial].
++**Parameters:**
++- $\delta = 0.0003$ [S1].
++- $k_{max} = 200$ [S1].
++- $d_{far} = 5$ [S1].
+ 
+-### Edge Cases and Pitfalls
+-*   **Oscillation:** Rays may oscillate near the surface if the step size is not reduced sufficiently. The check $|t_{current} - t_{previous}| < 6\delta$ detects this and terminates the ray to prevent infinite loops [S1].
+-*   **Self-Intersection:** Secondary rays (refraction/reflection) may immediately re-intersect the surface due to floating-point inaccuracies. Using a global $\epsilon$ is insufficient; dynamic epsilon based on local $f(\mathbf{p})$ is required [S5, unofficial].
+-*   **Surface Swimming:** If the error threshold $\hat{\epsilon}$ is too high, the surface appears to shift position depending on the view direction [S2].
+-*   **Grazing Rays:** Standard termination may miss grazing intersections, causing "aura" artifacts. Screen-space tracking allows selecting the closest point even if the ray does not strictly intersect within $\delta$ [S5, unofficial].
++**Edge Cases and Pitfalls:**
++- **Grazing Rays:** Standard termination may leave rays ending in empty space, creating "aura" artifacts. Screen-Space Intersection Selection mitigates this by selecting the closest approach point [S5, unofficial].
++- **Oscillation:** Rays near surfaces may oscillate between positive and negative distances due to floating-point precision. The oscillation check $|d_b - d_{b-1}| < 6\delta$ detects this and terminates the ray [S1].
++- **Precision:** The threshold $\delta$ must be chosen carefully; too high causes "swimming" artifacts, too low causes precision errors [S2].
+ 
+-### Pseudocode
++**Pseudocode:**
+ ```python
+-def sphere_trace_termination_and_clipping(ray_origin, ray_direction, sdf_func, 
+-                                          max_iterations=200, delta=0.0003, 
+-                                          far_plane_clip=5.0, use_screen_space=False):
+-    t = 0.0
+-    t_prev = 0.0
+-    d_min = float('inf')
+-    p_min = ray_origin
++def sphere_trace_termination(O, D, f, delta=0.0003, k_max=200, d_far=5.0, use_screen_space=False, pixel_dist=0.0):
++    current_pos = O
++    dist = f(current_pos)
++    prev_dist = dist
++    step_count = 0
+     
+-    for i in range(max_iterations):
+-        # Far plane clipping
+-        if t > far_plane_clip:
+-            return False, t, ray_origin + ray_direction * t
++    min_screen_dist = float('inf')
++    min_screen_pos = O
++    
++    # Far plane clipping
++    if length(O) > d_far:
++        return None, False
++
++    while step_count < k_max:
++        # Sample SDF
++        dist = f(current_pos)
+         
+-        p = ray_origin + ray_direction * t
+-        d = sdf_func(p)
++        # Screen-space tracking
++        if use_screen_space:
++            screen_dist = compute_screen_space_distance(current_pos, O, D, pixel_dist)
++            if screen_dist < min_screen_dist:
++                min_screen_dist = screen_dist
++                min_screen_pos = current_pos
++            
++            # Termination if close enough in screen space
++            if min_screen_dist <= 0.5 * pixel_dist:
++                return min_screen_pos, True
++
++        # Termination if surface hit
++        if dist < delta:
++            return current_pos, True
+         
+-        # Surface hit check
+-        if d < delta:
+-            return True, t, p
++        # Oscillation check
++        oscillation = abs(dist - prev_dist)
++        if oscillation < 6 * delta:
++            # If screen-space tracking is active, return closest point to avoid aura
++            if use_screen_space:
++                return min_screen_pos, True
++            return None, False
++
++        prev_dist = dist
+         
+-        # Screen-space tracking for grazing rays
+-        if use_screen_space and d < d_min:
+-            d_min = d
+-            p_min = p
+-            
+-        # Oscillation check
+-        if abs(t - t_prev) < 6 * delta:
+-            # Terminate to prevent infinite loop
+-            if use_screen_space:
+-                return False, t, p_min
+-            return False, t, p
+-            
+-        # Step size calculation (assuming Lipschitz constant lambda = 1)
+-        # In general: step = d / lambda
+-        step = d
+-        
+-        # Advance
+-        t_prev = t
+-        t += step
+-        
+-    # Max iterations reached
++        # Step forward
++        current_pos = current_pos + dist * D
++        step_count += 1
++
++    # No intersection found
+     if use_screen_space:
+-        return False, t, p_min
+-    return False, t, ray_origin + ray_direction * t
++        return min_screen_pos, True
++    return None, False
+ ```
+ 
+@@ -103,45 +105,47 @@
+ 
+ ### [Affine Arithmetic Early Skip Test](4313-affine-arithmetic-early-skip-test.md)
+-A constant-time heuristic to detect non-collision within a working interval, avoiding expensive root-finding.
++The Affine Arithmetic Early Skip Test is a constant-time heuristic used in distance-field ray marching to detect if a ray does not collide with an object within a specific working interval, thereby avoiding expensive root-finding operations. It distinguishes itself from sibling methods like Bracketed Newton Bisection (BNB) by providing immediate non-collision detection and a conservative starting point for subsequent searches, rather than searching for monotonic intervals of derivatives.
+ 
+ ### [Dynamic Epsilon for Self-Intersection Prevention](4318-dynamic-epsilon-for-self-intersection-prevention.md)
+-Computes a local offset $\varepsilon_{\text{dynamic}}$ at each intersection to prevent self-intersection artifacts in secondary rays.
++Dynamic epsilon is a method for preventing self-intersection artifacts in secondary rays (such as refraction or reflection) within sphere tracing by computing a local offset dynamically at each intersection point, rather than using a global constant. It solves the problem where global epsilon values are inappropriate for sphere tracing because intersection distances from the surface exhibit large variations, particularly when screen-space termination metrics are used. Unlike siblings that may use fixed offsets or affine arithmetic, this method adapts the offset magnitude to the local signed distance bound, ensuring robustness against precision issues near the surface while maintaining performance.
+ 
+ ### [Convex Object Optimization](4367-convex-object-optimization.md)
+-Accelerates interior traversal by using convex bounding volumes to determine entry and exit points, reducing iterations.
++Convex Object Optimization is a technique for accelerating sphere tracing through convex objects represented by a signed distance field (SDF) enclosed by a convex bounding volume. It solves the problem of inefficient ray marching when the ray origin lies inside the object, where standard sphere tracing requires many small steps to traverse the interior. It sets itself apart from standard sphere tracing by avoiding internal steps entirely for internal origins, and from gradient-based optimizations by relying only on the bounding volume geometry rather than per-step gradient computations.
+ 
+ ### [Discontinuity Reduction via Fixed-Point Iteration](4368-discontinuity-reduction-via-fixed-point-iteration.md)
+-Post-processing step to smooth discontinuities in $f(p)$ and reduce procedural texturing artifacts.
++Discontinuity reduction via fixed-point iteration is a post-processing step applied to intersection points retrieved by sphere tracing to smooth out discontinuities in the signed distance function $f(p)$ and reduce artifacts in procedural texturing. It sets itself apart from its siblings by trading a slight increase in average geometric error for significantly reduced visual discontinuities across the screen-space domain, whereas [Affine Arithmetic Early Skip Test](4313-affine-arithmetic-early-skip-test.md) focuses on skipping empty space and [Dynamic Epsilon for Self-Intersection Prevention](4318-dynamic-epsilon-for-self-intersection-prevention.md) focuses on preventing self-intersection artifacts.
+ 
+ ### [Ray Intersection with Grazing Point Detection](4463-ray-intersection-with-grazing-point-detection.md)
+-Tracks the grazing point (tangent contact) during marching to resolve contacts missed by standard termination.
++A ray intersection method that performs sphere tracing to find the primary intersection while simultaneously tracking the 'grazing point' (the point on the surface where the ray direction is tangent to the surface normal, indicated by a zero directional derivative). It returns the intersection time, validity, grazing point status, and the grazing point position. It sets itself apart from standard sphere tracing by explicitly identifying and refining grazing contacts, which are often missed or poorly resolved by standard termination rules.
+ 
+ ### [Gradient Magnitude Windowing](8299-gradient-magnitude-windowing.md)
+-Binary filtering technique discarding samples with gradient magnitude below a threshold $t_g$ to reduce noise.
++Gradient Magnitude Windowing is a binary filtering technique used in distance-field ray marching to discard ray samples that do not lie on significant object surfaces. It solves the problem of rendering noise or empty space by ensuring that only samples with a gradient magnitude exceeding a specific threshold $t_g$ contribute to the final image. It sets itself apart from siblings like [Affine Arithmetic Early Skip Test](4313-affine-arithmetic-early-skip-test.md) by relying on local derivative magnitude rather than geometric bounds or arithmetic error propagation.
+ 
+ ### Cone Tracing Error Threshold
+-A method to determine the adaptive error threshold $\hat{\epsilon}$ based on ray distance and pixel footprint, ensuring rays terminate when the pixel cone intersects the surface [S2]. The threshold is calculated as $\hat{\epsilon}(\hat{s}) = \hat{s} \hat{r}_p$, where $\hat{s}$ is the distance along the ray in undeformed space and $\hat{r}_p$ is the radius of one pixel in undeformed space [S2]. The pixel radius is computed as $\hat{r}_p = s r_p J_D^{-1}$, where $s$ is distance in deformed space, $r_p$ is pixel radius in deformed space, and $J_D^{-1}$ is the inverse Jacobian determinant [S2]. This threshold is applied during adaptive integration to bound error [S2]. If the threshold is too high, artifacts manifest as the surface "swimming", appearing in different places depending on view direction [S2].
++A method to determine the adaptive error threshold $\hat{\epsilon}$ based on the ray distance and pixel footprint, ensuring rays terminate when the pixel cone intersects the surface [S2]. It calculates the threshold as $\hat{\epsilon}(\hat{s}) = \hat{s} \hat{r}_p$, where $\hat{s}$ is the distance along the ray in undeformed space and $\hat{r}_p$ is the radius of one pixel in undeformed space [S2]. The pixel radius is computed as $\hat{r}_p = s r_p J_D^{-1}$, where $s$ is the distance in deformed space, $r_p$ is the pixel radius in deformed space, and $J_D^{-1}$ is the inverse Jacobian determinant [S2]. If the threshold is too high, artifacts manifest as the surface 'swimming', appearing in different places depending on view direction [S2].
+ 
+ ### Blend Mode
+-A rendering mode that traverses voxels and sums their value until value accumulation results in enough content, either being opaque for early termination or containing greater than zero content for blending with a user-specified background [S3, unofficial]. The high cost of voxel access can shrink or invert performance gains of block walking and culling in this mode [S3, unofficial].
++A rendering mode that traverses voxels and sums their value until value accumulation results in enough content, either being opaque for early termination or containing greater than zero content for blending with a user-specified background [S3, unofficial]. It traverses voxels and sums their value, checking if value accumulation results in enough content: either opaque for early termination or greater than zero for blending with background [S3, unofficial]. The high cost of voxel access can shrink or invert performance gains of block walking and culling in this mode [S3, unofficial].
+ 
+ ### Optimized Binary Search with Local Lipschitz Bounds
+-A binary search method that recursively subdivides an interval, using local Lipschitz bounds to exclude intervals earlier and shrink sub-intervals asymmetrically [S4]. The interval $e=[a,b]$ is shrunk to $[e_a, e_b]$ using $e_a = a + |f(a)|/\lambda(e)$ and $e_b = b - |f(b)|/\lambda(e)$ [S4]. This reduces field function query count and provides timing speed-ups compared to standard binary search [S4].
++A binary search method that recursively subdivides an interval, using local Lipschitz bounds to exclude intervals earlier and shrink sub-intervals asymmetrically [S4]. It uses the local Lipschitz bound $\lambda(e)$ to exclude intervals earlier in the recursive bisection process [S4]. It shrinks the interval $e=[a,b]$ to $[e_a, e_b]$ using $e_a = a + |f(a)|/\lambda(e)$ and $e_b = b - |f(b)|/\lambda(e)$ to improve bisection efficiency [S4]. Compared to standard binary search which cuts the segment in two equal parts, this method reduces the number of field function queries similarly to Segment Tracing and provides timing speed-ups [S4].
+ 
+ ### Screen-Space Intersection Selection
+-A technique to eliminate 'aura' artifacts caused by rays grazing objects. Instead of using the last step of a non-intersecting ray, it uses the point where the ray was closest to the object in screen space, and terminates the ray when this screen-space distance equals half the pixel distance [S5, unofficial]. If the ray does not intersect, it returns the position corresponding to the minimum screen-space distance found during the march [S5, unofficial].
++A technique to eliminate 'aura' artifacts caused by rays grazing objects. Instead of using the last step of a non-intersecting ray, it uses the point where the ray was closest to the object in screen space, and terminates the ray when this screen-space distance equals half the pixel distance [S5, unofficial]. During ray marching, it tracks the minimum distance between the ray position and the object surface in screen space (or the minimum $f(p)$ value relative to screen projection) [S5, unofficial]. It terminates the ray march if the screen-space distance from the ray to the object becomes less than or equal to half the distance between adjacent pixels [S5, unofficial]. If the ray does not intersect the object, it returns the position corresponding to the minimum screen-space distance found during the march as the intersection point [S5, unofficial].
+ 
+ ### Pile-Top Ray Clipping
+-Clips upward-tracing rays to the top of a particle pile to prevent walking through empty cells up to the ceiling [S6, unofficial]. It runs a 64-thread compute pass to find the highest sorted particle center and clips rays to the slab under this maximum height plus the largest particle radius [S6, unofficial].
++Clips upward-tracing rays to the top of a particle pile to prevent walking through empty cells up to the ceiling [S6, unofficial]. It runs a 64-thread compute pass (pile_top.wgsl) each frame to find the highest sorted particle center [S6, unofficial]. It clips rays to the slab under this maximum height plus the largest particle radius [S6, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(k)$, where $k$ is the number of iterations until termination. Typically bounded by $k_{max}$ [S1].
+-*   **Memory Complexity:** $O(1)$ auxiliary space for state variables [S1].
+-*   **Performance:** The oscillation check and screen-space tracking add minimal overhead but significantly improve robustness against infinite loops and visual artifacts [S1][S5, unofficial]. Cone tracing adds computational cost for Jacobian evaluation but improves quality [S2].
+-*   **Strengths:** Guarantees no surface penetration (if Lipschitz constant is known), handles complex implicit surfaces, prevents infinite loops via oscillation detection.
+-*   **Limitations:** Requires Lipschitz continuity; fails for non-Lipschitz functions without modification; oscillation check may terminate rays prematurely if not tuned correctly [S1].
++- **Time Complexity:** $O(k)$ where $k$ is the number of iterations, bounded by $k_{max}$. Oscillation and screen-space checks add constant overhead per step.
++- **Memory Complexity:** $O(1)$ auxiliary memory per ray.
++- **Performance:** The oscillation check and screen-space tracking add minimal overhead but significantly improve visual quality by preventing aura and infinite loops [S1][S5, unofficial]. Cone tracing error threshold adapts performance to view direction, potentially reducing steps for distant objects but requiring Jacobian computation [S2].
++- **Strengths:** Robust against precision errors and grazing angles. Prevents infinite loops.
++- **Limitations:** Screen-space tracking requires projection calculations. Cone tracing requires deformation Jacobians.
++- **When to use:** Standard sphere tracing in SDF rendering, especially for real-time applications where visual artifacts must be minimized.
++- **When not to use:** When exact intersection points are required without approximation, or when the SDF is not available.
+ 
+ ## Background
+-Originating from John C. Hart's 1994 paper "Sphere Tracing: A Geometric Method for the Antialiased Ray Tracing of Implicit Surfaces" [S1, implied context], the method has been refined to handle practical issues like oscillation and far-plane clipping. The specific parameters $\delta=0.0003$, $k_{max}=200$, and far plane clip of 5.0 are documented in the Neural Geometric Level of Detail paper [S1]. Screen-space intersection selection and dynamic epsilon were proposed to address grazing rays and self-intersection in enhanced sphere tracing [S5, unofficial]. Cone tracing was introduced to provide principled error thresholds for deformed SDFs [S2].
++Sphere tracing was introduced by John C. Hart in 1994 [S1]. The specific termination criteria including oscillation checks and far plane clipping were detailed in the Neural Geometric Level of Detail paper [S1]. Cone tracing for error thresholds was proposed for deformed SDFs [S2]. Screen-space intersection selection was proposed to address aura artifacts in enhanced sphere tracing [S5, unofficial]. Pile-top clipping was used in voxel GI particle rendering [S6, unofficial].
+ 
+ ## Sources

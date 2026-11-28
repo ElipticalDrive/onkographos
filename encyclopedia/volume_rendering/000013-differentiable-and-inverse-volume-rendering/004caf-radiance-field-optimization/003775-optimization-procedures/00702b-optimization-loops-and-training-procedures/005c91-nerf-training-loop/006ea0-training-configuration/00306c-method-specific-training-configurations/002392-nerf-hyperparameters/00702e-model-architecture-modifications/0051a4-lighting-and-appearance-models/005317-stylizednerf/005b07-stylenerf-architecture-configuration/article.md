@@ -1,0 +1,117 @@
+# StyleNeRF Architecture Configuration
+
+Also called: StyleNeRF hyperparameters
+
+## Overview
+StyleNeRF extends the original Neural Radiance Field (NeRF) architecture by integrating a style-based generator to handle illumination changes and synthesize high-resolution images [S1, unofficial]. It differs from standard NeRF by introducing a low-dimensional appearance code and style-based MLPs, setting it apart from siblings like StylizedNeRF which may use different stylization mechanisms [14882-stylizednerf.md].
+
+## How it works
+**Inputs and Outputs:**
+- **Inputs:** Camera parameters, 3D coordinates, and a latent style vector.
+- **Outputs:** Volume density ($\sigma$) and view-dependent color ($c$).
+
+**Data Structures:**
+- **Appearance Code:** A 16-dimensional vector ($z_{app} \in \mathbb{R}^{16}$) stored and optimized individually for every frame [S2, unofficial].
+- **Mapping Network:** 8 fully connected layers [S1, unofficial].
+- **Latent/Style Dimensions:** 512 [S1, unofficial].
+- **Foreground Field MLP:** Hidden units = 256 [S1, unofficial].
+- **Background Field MLP:** Hidden units = 128 [S1, unofficial].
+- **Fourier Features:** Dimension $L=10$ [S1, unofficial].
+
+**Network Layout:**
+The architecture follows the StyleGAN2 configuration for layers after 2D aggregation. Feature sizes decrease from 512 (for 32x32 resolution) down to 32 (for 1024x1024 resolution) [S1, unofficial].
+
+**Parameters:**
+- **Learning Rate:** The mapping network uses a learning rate $100\times$ lower than the default [S1, unofficial].
+- **Batch Size:** 64 [S1, unofficial].
+- **Training Iterations:** 25,000 images [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# StyleNeRF Architecture Configuration
+# Based on StyleGAN2 defaults and A-NeRF modifications
+
+class StyleNeRF:
+    def __init__(self):
+        # Mapping network: 8 FC layers, latent/style dim 512
+        self.mapping_net = MappingNetwork(layers=8, latent_dim=512, style_dim=512)
+        
+        # Appearance code: 16-dim, per-frame optimization
+        self.appearance_code_dim = 16
+        
+        # Fourier feature dimension
+        self.L = 10
+        
+        # MLP hidden units
+        self.foreground_hidden_units = 256
+        self.background_hidden_units = 128
+        
+        # Feature sizes for 2D aggregation layers
+        # Decreases from 512 (32x32) to 32 (1024x1024)
+        self.feature_sizes = {
+            32: 512,
+            64: 256, # Example interpolation
+            128: 128,
+            256: 64,
+            512: 32,
+            1024: 32
+        }
+
+    def get_appearance_code(self, frame_index):
+        """
+        Retrieve or initialize the 16-dimensional appearance code for a specific frame.
+        This code is optimized individually per frame.
+        """
+        # Implementation detail: Store as a learnable parameter tensor
+        # Shape: (1, 16)
+        return self.appearance_codes[frame_index]
+
+    def build_mlp(self, input_dim, hidden_units, output_dim):
+        """
+        Build the style-based MLP for foreground or background fields.
+        """
+        # Uses Fourier features with L=10
+        # Hidden units: 256 for foreground, 128 for background
+        pass
+
+    def configure_learning_rate(self, base_lr):
+        """
+        Set mapping network learning rate to 1/100th of base.
+        """
+        return base_lr / 100.0
+```
+
+**Edge Cases and Pitfalls:**
+- The low dimensionality (16) of the appearance code is critical to learning global effects without deteriorating the benefits of relative encoding [S2, unofficial].
+- Using higher dimensional codes (e.g., 128 as in NeuralBody baselines) may lead to suboptimal learning of global effects [S2, unofficial].
+
+## Subtopics
+
+### [StylizedNeRF](14882-stylizednerf.md)
+Uses a different approach to stylization; StyleNeRF uses a style-based generator.
+
+### [Physical Imaging Model with Spherical Harmonics](16376-physical-imaging-model-with-spherical-harmonics.md)
+Uses spherical harmonics for lighting; StyleNeRF uses appearance codes.
+
+### [StyleRF-VolVis](16573-stylerf-volvis.md)
+Focuses on volume visualization; StyleNeRF focuses on high-resolution image synthesis.
+
+### [Non-Photorealistic Style Editing](16597-non-photorealistic-style-editing.md)
+General style editing; StyleNeRF is a specific architecture for 3D-aware generation.
+
+## Operating characteristics
+- **Time Complexity:** Training takes approximately three days on 8 Tesla V100 GPUs for 25,000 images [S1, unofficial].
+- **Memory Complexity:** Not given in the sources.
+- **Strengths:** Handles illumination changes effectively; generates high-resolution images (up to 1024x1024) [S1, unofficial].
+- **Limitations:** Requires careful tuning of appearance code dimensionality [S2, unofficial].
+- **When to use:** When high-resolution, style-controlled 3D-aware synthesis is needed [S1, unofficial].
+- **When not to use:** When computational resources are limited or real-time inference is required [S1, unofficial].
+
+## Background
+StyleNeRF was proposed in "StyleNeRF: A Style-based 3D-Aware Generator for High-resolution Image Synthesis" [S1, unofficial]. It builds on the original NeRF architecture [42] and concurrent works on handling illumination changes [36, 49] [S2, unofficial]. The architecture reuses parameters from StyleGAN2 [S1, unofficial].
+
+## Sources
+[S1] StyleNeRF: A Style-based 3D-Aware Generator for High-resolution Image Synthesis, https://doi.org/10.48550/arxiv.2110.08985, fetched 2026-10-26 (unofficial)
+[S2] A-NeRF: Articulated Neural Radiance Fields for Learning Human Shape, Appearance, and Pose, https://doi.org/10.48550/arxiv.2102.06199, fetched 2026-10-30 (unofficial)

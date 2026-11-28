@@ -1,0 +1,97 @@
+# Separable 2D Lighting Transfer Function Construction
+
+Also called: Separable 2D Lighting TF Construction
+
+## Overview
+This method constructs the final 2D Lighting Transfer Function (LTF) by summing multiple separable 2D components, each generated from a pair of 1D transfer function widgets [S1, unofficial][S2]. It solves the problem of assigning specific lighting coefficients (ambient, diffuse, specular) to material boundaries and homogeneous regions in a volume, allowing users to control how light interacts with scalar data boundaries independently of opacity [S1, unofficial][S2]. It differs from non-separable LTF construction by decomposing the 2D response into a sum of outer products of 1D functions, enabling intuitive user interface design via diagonal pairs in a line-based histogram [S1, unofficial][S2].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of $N$ pairs of 1D transfer function widgets. Each pair consists of a source 1D widget $T_{source}(s_1)$ and a destination 1D widget $T_{dest}(s_2)$, where $s_1$ and $s_2$ are scalar values at the start and end of a material boundary line in the 2D LTF domain [S1, unofficial][S2]. Each widget is associated with lighting coefficients: ambient $A_i$, diffuse $D_i$, and specular $S_i$ [S1, unofficial][S2].
+*   **Output:** A final 2D Lighting Transfer Function $LTF(s_1, s_2)$, which is generally non-separable [S1, unofficial][S2].
+
+**Data Structures:**
+*   **1D Widget:** Defined by a function mapping scalar value to intensity. In implementation, this is typically a piecewise linear or polynomial function defined over the scalar range $[min, max]$ [S1, unofficial][S2].
+*   **Lighting Coefficients:** For each widget pair $i$, a triplet $(A_i, D_i, S_i)$ [S1, unofficial][S2].
+
+**Steps:**
+1.  **Define Widget Pairs:** For each material boundary or homogeneous region of interest, define a pair of 1D transfer functions: one for the source axis (Scalar 1, $s_1$) and one for the destination axis (Scalar 2, $s_2$) [S1, unofficial][S2]. These correspond to the start and end points of diagonal lines in the 2D LTF histogram [S1, unofficial][S2].
+2.  **Assign Coefficients:** Assign ambient, diffuse, and specular terms to each 1D widget in the pair [S1, unofficial][S2].
+3.  **Compute Separable Component:** For each pair $i$, compute the separable 2D transfer function $LTF_i(s_1, s_2)$ by taking the product of the source 1D function and the transpose of the destination 1D function, scaled by the lighting coefficients [S1, unofficial][S2].
+    *   Formula:
+        $$ LTF_i(s_1, s_2) = (A_i + D_i \cdot T_{source}(s_1) \cdot T_{dest}(s_2) + S_i \cdot T_{source}(s_1) \cdot T_{dest}(s_2)) $$
+        *Note: The sources describe the product of the 1D functions yielding a separable 2D function, which is then multiplied by the lighting terms. The exact combination of ambient/diffuse/specular with the 1D products is described as "assigning... terms... that the transfer function will be multiplied by" [S1, unofficial][S2]. A standard interpretation for lighting transfer is that the 1D functions modulate the intensity, and the coefficients scale the final color contribution. A precise implementation might be:*
+        $$ LTF_i(s_1, s_2) = A_i + D_i \cdot T_{source}(s_1) \cdot T_{dest}(s_2) + S_i \cdot T_{source}(s_1) \cdot T_{dest}(s_2) $$
+        *Or if the 1D functions represent the reflectivity distribution directly:*
+        $$ LTF_i(s_1, s_2) = (A_i + D_i + S_i) \cdot T_{source}(s_1) \cdot T_{dest}(s_2) $$
+        *Given the ambiguity in the exact algebraic combination of A, D, S with the 1D products in the text, the core operation is the outer product of the 1D widgets [S1, unofficial][S2].*
+4.  **Sum Components:** Sum all $N$ separable 2D transfer functions to create the final non-separable 2D LTF [S1, unofficial][S2]:
+    $$ LTF(s_1, s_2) = \sum_{i=1}^{N} LTF_i(s_1, s_2) $$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def construct_separable_2d_ltf(widget_pairs):
+    """
+    Construct the final 2D Lighting Transfer Function by summing separable components.
+    
+    Args:
+        widget_pairs: List of tuples, each containing:
+            - source_widget: Function T_source(s1)
+            - dest_widget: Function T_dest(s2)
+            - ambient: Float A_i
+            - diffuse: Float D_i
+            - specular: Float S_i
+            
+    Returns:
+        A function LTF(s1, s2) representing the final 2D lighting transfer function.
+    """
+    def ltf(s1, s2):
+        total = 0.0
+        for pair in widget_pairs:
+            t_source = pair.source_widget(s1)
+            t_dest = pair.dest_widget(s2)
+            
+            # Compute the separable 2D component for this pair
+            # The sources state: "product of one of the 1D transfer functions 
+            # with the transpose of the other yields a separable 2D lighting 
+            # transfer function" and "assign ambient, diffuse, and specular 
+            # terms for each widget that the transfer function will be multiplied by"
+            # Assuming the 1D functions modulate the lighting coefficients:
+            # LTF_i = (A + D * T_src * T_dst + S * T_src * T_dst)
+            # Or potentially: LTF_i = (A + D + S) * T_src * T_dst
+            # Given "assign... terms... multiplied by", we apply coefficients to the product.
+            # A common LTF structure is: Color = Ambient + Diffuse * NdotL + Specular * NdotH^n
+            # Here, T_src and T_dest likely represent the geometric terms (like NdotL) 
+            # derived from the scalar boundary.
+            
+            # Implementation based on "product... yields separable... multiplied by terms"
+            product = t_source * t_dest
+            component = pair.ambient + pair.diffuse * product + pair.specular * product
+            
+            total += component
+            
+        return total
+    return ltf
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Summing many separable components may lead to precision issues if the values vary widely. [G] Ensure floating-point stability.
+*   **Boundaries:** The 1D widgets must be defined over the valid scalar range of the volume data. Values outside this range should be clamped or handled as zero. [G]
+*   **Degenerate Input:** If a widget pair has zero width (source and destination scalar values are identical), the contribution may be negligible or undefined. [G]
+
+## Operating characteristics
+*   **Time Complexity:** Construction is $O(N \cdot K)$, where $N$ is the number of widget pairs and $K$ is the resolution of the 1D widgets (or the number of samples used to define them). Rendering lookup is $O(1)$ per voxel if the final 2D LTF is precomputed into a texture.
+*   **Memory Complexity:** $O(M \cdot N)$ for storing the final 2D LTF texture of size $M \times M$ (where $M$ is the scalar resolution), plus $O(N)$ for the widget definitions.
+*   **Strengths:** Provides high user control over lighting at material boundaries. Independent of opacity. Intuitive UI via diagonal pairs [S1, unofficial][S2].
+*   **Limitations:** The final LTF is non-separable, requiring a full 2D lookup. Construction complexity increases with the number of boundaries. [S1, unofficial][S2]
+*   **When to use:** When precise control over lighting at specific material interfaces is required, and the user interface can benefit from line-based selection. [S1, unofficial][S2]
+*   **When not to use:** For simple homogeneous volumes where a single 1D LTF suffices, or when performance constraints prohibit 2D texture lookups.
+
+## Background
+This method was introduced in the context of Lighting Transfer Functions for Direct Volume Rendering [S1, unofficial][S2]. It builds on the concept of using 2D LTFs to encode lighting information based on scalar value pairs sampled along the gradient direction [S2]. The approach allows users to specify lighting for specific material boundaries by selecting diagonal pairs in a line-based histogram, offering a high degree of control over volume illustration [S1, unofficial][S2]. It is distinct from methods that attenuate lighting based on homogeneity, such as those by Kniss et al. [S1, unofficial][S2].
+
+## Sources
+[S1] Lighting Transfer Functions for Direct Volume Rendering, https://escholarship.org/uc/item/71g7h4kx, fetched 2026-10-26 (unofficial)
+[S2] PDF Lighting Transfer Functions Using Gradient Aligned Sampling, https://www.cs.ucdavis.edu/~ma/papers/lightingtf.pdf, fetched 2026-10-29

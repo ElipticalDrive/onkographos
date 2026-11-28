@@ -1,0 +1,218 @@
+--- v003.md
++++ v004.md
+@@ -1,86 +1,158 @@
+ # Average Importance Compositing
++
++
+ ## Overview
+-Average Importance Compositing is a rendering technique that modulates the visibility of objects along a viewing ray based on their relative importance, allowing less important objects to remain visible but sparse rather than being completely removed [S2, unofficial]. It differs from Maximum Importance Projection (MImP) by preserving the spatial relationships and high-curvature areas of occluding context objects, which MImP may obscure [S2, unofficial].
++Average Importance Compositing is a technique in importance-driven volume rendering that partially suppresses less important objects along a viewing ray rather than removing them completely, allowing sparse representation of occluding structures while preserving high-curvature areas and spatial relationships [S2, S3, unofficial]. Unlike Maximum Importance Projection (MImP), which completely removes less important objects, this method assigns a sparseness level to each object based on the fraction of its importance relative to the sum of importance of all intersected objects, ensuring that context objects remain visible but attenuated [S2, S3, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs**
+-*   **Inputs:**
+-    *   A set of $n$ objects intersected by a viewing ray $r$ [S2, unofficial].
+-    *   An importance value $I_o$ for each object $o$ [S2, unofficial].
+-    *   Footprint images for each object, which define the spatial coverage of the object in the image plane [S2, unofficial].
+-*   **Outputs:**
+-    *   A compositing result for each pixel, where the contribution of each object is modulated by a sparseness factor and its footprint value [S2, unofficial].
++**Inputs and Outputs:**
++*   **Input:** A set of segmented objects (or features) along a viewing ray $r$, each with an associated importance value $I_o$. A base sparseness factor $\beta$ (typically between 0.1 and 1.0, though specific implementations may vary) [S1, S3, unofficial]. Footprint images for each object, which can be binary or grayscale (distance-transformed) [S2, unofficial].
++*   **Output:** A rendered pixel color and opacity, where the contribution of each object is modulated by its calculated sparseness factor $S_o$ [S2, S3, unofficial].
+ 
+-**Data Structures**
+-*   **Footprint Image:** A 2D image (grayscale) corresponding to the object's projection [S2, unofficial]. Each pixel value $F_o$ represents the footprint coverage, ranging from 0 (no coverage) to 1 (full coverage), with values below 1 indicating the transition area [S2, unofficial].
+-*   **Importance Value:** A scalar $I_o$ associated with each object [S2, unofficial].
++**Data Structures:**
++*   **Object Importance ($I_o$):** A scalar value representing the visual or semantic importance of object $o$.
++*   **Footprint Image:** A 2D image (or mask) corresponding to the projection of object $o$. In the basic binary approach, values are 0 or 1. In the smooth transition approach, values are in $[0, 1]$ derived from a distance transform [S2, unofficial].
++*   **Ray Intersection List:** A list of objects intersected by ray $r$, indexed $i = 1 \dots n_r$.
+ 
+-**Steps**
+-1.  **Footprint Lookup:** For each pixel in the final image, determine which objects cover that pixel by looking up the footprint images of all intersected objects [S2, unofficial].
+-2.  **Sum Importance:** Calculate the sum of importance values for all objects covering the current pixel [S2, unofficial]. Let $n_r$ be the number of objects intersected by the ray at the current pixel location [S2, unofficial]. The sum is $\sum_{i=1}^{n_r} I_i$ [S2, unofficial].
+-3.  **Calculate Sparseness:** For each object $o$ covering the pixel, calculate its sparseness factor $S_o$ using the formula:
+-    $$ S_o = \frac{I_o}{\sum_{i=1}^{n_r} I_i} $$
+-    where $I_o$ is the importance of object $o$ and $I_i$ is the importance of the $i$-th intersected object [S2, unofficial].
+-4.  **Modulate Contribution:** Multiply the object's importance $I_o$ by its footprint value $F_o$ at the current pixel and by the sparseness factor $S_o$ [S2, unofficial]. Note that footprint values below 1 are part of the transition area, ensuring smooth boundaries [S2, unofficial].
++**Steps:**
++1.  **Cast Ray:** Cast a ray $r$ through the volume [S1, unofficial].
++2.  **Identify Intersections:** Determine the set of $n_r$ objects intersected by ray $r$ [S3, unofficial].
++3.  **Sum Importance:** Calculate the total importance $I_{sum}$ along the ray by summing the importance values of all intersected objects:
++    $$ I_{sum} = \sum_{i=1}^{n_r} I_i $$
++    [S1, S3, unofficial]
++4.  **Calculate Sparseness:** For each object $o$ intersected by the ray, calculate its sparseness factor $S_o$:
++    $$ S_o = \frac{I_o}{I_{sum}} $$
++    [S2, S3, unofficial]
++    *Note: Some sources describe a base sparseness factor $\beta$ such that the effective sparseness is $\beta / I_{sum}$ or similar, but the core definition in [S2, S3, unofficial] is the normalized fraction. The example in [S1, unofficial] uses $0.1 / 0.8 = 0.125$, implying a base factor of 0.1 is multiplied or used as a divisor baseline, but the formula $S_o = I_o / \sum I_i$ is the primary definition for the "average" aspect. We adhere to the normalized fraction definition as the primary method, with the base factor potentially scaling the final opacity/modulation [S1, S2, S3, unofficial].*
++5.  **Evaluate Footprint Coverage:**
++    *   **Binary Approach:** For each pixel, lookup the binary footprint of each object to determine if it covers the pixel [S2, unofficial].
++    *   **Smooth Approach:** Use a grayscale footprint image (derived from a distance transform) to determine the coverage value $F_o(p) \in [0, 1]$ for pixel $p$ [S2, unofficial].
++6.  **Modulate Optical Properties:** Combine the object's color $C_o$ and opacity $\alpha_o$ with the sparseness factor $S_o$ and footprint value $F_o(p)$ (if using smooth footprints). The effective opacity $\alpha'_o$ and color $C'_o$ are modulated. A common implementation multiplies the opacity by the sparseness factor and potentially the footprint value:
++    $$ \alpha'_o = \alpha_o \cdot S_o \cdot F_o(p) $$
++    [S2, S3, unofficial]
++    *Note: [S3, unofficial] mentions that color saturation can also be modulated by $S_o$ to attract focus, while [S2, unofficial] states the object importance is multiplied by the footprint value. The compositing then proceeds using standard front-to-back over-operator with these modulated values.*
++7.  **Composite:** Perform standard front-to-back compositing using the modulated color and opacity values for all intersected objects [S3, unofficial].
+ 
+-**Pseudocode**
++**Pseudocode:**
+ ```python
+-def average_importance_compositing(pixel_x, pixel_y, objects, footprints):
++def average_importance_compositing(ray, objects, base_sparseness_factor=0.1):
+     """
+-    pixel_x, pixel_y: Integer coordinates of the current pixel.
+-    objects: List of objects intersected by the ray. Each object has .id and .importance.
+-    footprints: Dictionary mapping object_id to a 2D list representing the grayscale footprint image.
++    ray: Ray object with intersection points and normals
++    objects: List of objects intersected by the ray, each having:
++             - importance: float I_o
++             - footprint: 2D array or function footprint_value(u, v) returning [0,1]
++             - color: float3 C_o
++             - opacity: float alpha_o
++    base_sparseness_factor: float beta, used to scale the sparseness level [S1, unofficial]
+     
+     Returns:
+-    total_weight: The accumulated weighted contribution for the pixel.
++    final_color: float3
++    final_opacity: float
+     """
+-    total_importance = 0.0
+-    covering_objects = []
++    # Step 1: Sum importance of all intersected objects
++    total_importance = sum(obj.importance for obj in objects)
+     
+-    # Step 1 & 2: Lookup footprints and sum importance
++    # Handle edge case: no objects or zero importance
++    if total_importance == 0:
++        return (0.0, 0.0, 0.0), 0.0
++
++    # Step 2: Calculate sparseness factors
++    # S_o = I_o / sum(I_i)
++    # Note: [S1, unofficial] example implies a base factor might be involved in the "Level of Sparseness"
++    # calculation, but [S2, S3, unofficial] define S_o as the fraction. 
++    # We use the fraction as the primary modulation factor, potentially scaled by base factor
++    # if the implementation requires a specific "level" threshold. 
++    # Based on [S1, unofficial] "Level of sparseness = 0.1 / 0.8", it seems the base factor 
++    # acts as a numerator for the sparseness level if we interpret "Level" as the 
++    # attenuation factor. However, [S2, unofficial] says S_o = I_o / sum. 
++    # Let's stick to the normalized fraction S_o as the sparseness factor [S2, S3, unofficial].
++    
++    sparseness_factors = []
+     for obj in objects:
+-        # Retrieve footprint value at pixel coordinates
+-        # Assumes footprints[obj.id] is a 2D list indexed as [y, x]
+-        footprint_val = footprints[obj.id][pixel_y][pixel_x]
++        s_o = obj.importance / total_importance
++        sparseness_factors.append(s_o)
++
++    # Step 3: Modulate optical properties and composite
++    # Standard front-to-back compositing
++    accumulated_color = (0.0, 0.0, 0.0)
++    accumulated_opacity = 0.0
++    
++    # Sort objects by depth (front to back) if not already sorted
++    # Assuming objects are sorted by distance from camera
++    for i, obj in enumerate(objects):
++        # Get footprint value at current ray intersection pixel coordinates
++        # footprint_value returns [0, 1]
++        footprint_val = obj.footprint_value(ray.u, ray.v)
+         
+-        # Only consider objects with non-zero coverage
+-        if footprint_val > 0.0:
+-            total_importance += obj.importance
+-            covering_objects.append((obj, footprint_val))
++        # Calculate modulated opacity
++        # Alpha is modulated by sparseness factor S_o and footprint value
++        modulated_opacity = obj.opacity * sparseness_factors[i] * footprint_val
++        
++        # If modulated opacity is negligible, skip
++        if modulated_opacity < 1e-6:
++            continue
+             
+-    # Handle edge case: no objects cover the pixel
+-    if total_importance == 0.0:
+-        return 0.0
+-
+-    # Step 3 & 4: Calculate sparseness and modulate contribution
+-    total_weight = 0.0
+-    for obj, footprint_val in covering_objects:
+-        # Calculate sparseness factor S_o = I_o / sum(I_i)
+-        sparseness = obj.importance / total_importance
++        # Standard Over Operator:
++        # C_out = C_in + C_obj * alpha_obj * (1 - alpha_in)
++        # alpha_out = alpha_in + alpha_obj * (1 - alpha_in)
+         
+-        # Modulate contribution: importance * footprint * sparseness
+-        contribution = obj.importance * footprint_val * sparseness
+-        total_weight += contribution
++        # Note: [S3, unofficial] mentions color saturation modulation. 
++        # For simplicity, we modulate color by sparseness too, or keep it constant.
++        # The prompt asks for implementation from text. [S2, unofficial] says "object importance 
++        # is additionally always multiplied by the footprint value". 
++        # It does not explicitly say color is multiplied by S_o, but opacity is.
++        # We will modulate opacity by S_o and footprint.
+         
+-    return total_weight
++        # Modulate color? [S3, unofficial] says "difference between traditional volume rendering... 
++        # controlling color values with the level of sparseness factor... independently from opacity".
++        # This suggests color saturation can be modulated. We'll apply a simple 
++        # saturation reduction or keep it as is. Let's assume color is also modulated 
++        # by sparseness for consistency with "sparse representation" [S2, unofficial].
++        modulated_color = tuple(c * sparseness_factors[i] for c in obj.color)
++        
++        # Composite
++        remaining_opacity = 1.0 - accumulated_opacity
++        accumulated_color = tuple(
++            accumulated_color[k] + modulated_color[k] * modulated_opacity * remaining_opacity
++            for k in range(3)
++        )
++        accumulated_opacity += modulated_opacity * remaining_opacity
++        
++        if accumulated_opacity >= 1.0:
++            break
++            
++    return accumulated_color, accumulated_opacity
+ ```
+ 
+-**Parameters**
+-*   **Footprint Smoothing:** The footprint images must be smoothed to avoid sharp transitions [S2, unofficial]. The source notes that binary footprints generate "jagged object boundaries" and that footprints should be converted to grayscale to achieve smooth transitions [S2, unofficial]. The specific smoothing kernel or growth method is not detailed in the provided text [G].
++**Parameters:**
++*   **Base Sparseness Factor ($\beta$):** A scalar value controlling the overall transparency level. [S1, unofficial] uses 0.1 in its example, while [S4, unofficial] reports results with levels 0.75, 0.5, and 0.25. The exact role of this factor varies: in [S1, unofficial] it appears to be the numerator for the "Level of Sparseness" ($0.1 / \sum I$), whereas [S2, S3, unofficial] define sparseness purely as the normalized importance fraction. Implementers should check if the "Level of Sparseness" is used directly as an opacity multiplier or if the normalized fraction is used. Given the name "Average Importance", the normalized fraction is the key differentiator from MImP [S2, S3, unofficial].
++*   **Footprint Type:** Binary or Grayscale (Distance Transform). Grayscale is preferred for smooth transitions [S2, unofficial].
+ 
+-**Edge Cases and Pitfalls**
+-*   **Sharp Transitions:** Using binary footprints results in visible jaggy object boundaries [S2, unofficial].
+-*   **Zero Sum:** If no objects cover a pixel, the sum of importance is zero, leading to division by zero [G]. This must be handled by returning a background color or zero contribution [G].
++**Edge Cases and Pitfalls:**
++*   **Sharp Transitions:** Using binary footprints results in jaggy object boundaries and sharp transitions in visibility [S2, unofficial].
++*   **Zero Importance:** If the sum of importance is zero, division by zero occurs. Guard against this by returning transparent/black [G].
++*   **Occlusion Artifacts:** Unlike MImP, this method preserves spatial relationships better, but if importance values are poorly estimated, less important objects might still obscure important ones if their sparseness factor is not low enough [S2, unofficial].
++
++## Subtopics
++
++### Importance Metric I1
++An importance metric based on accumulated blending weights, defined as the sum of blending weights of a Gaussian across all intersecting rays ($I_1^i = \sum_{j=1}^{K} w_{ij}$) [S5]. This metric is particularly effective for indoor scenes with low-uncertainty Gaussians but may preserve background elements (sky, distant objects) in outdoor scans if not filtered [S5].
+ 
+ ## Operating characteristics
+-*   **Complexity:** The method requires iterating over all objects intersected by a ray to sum their importance and then iterating again to compute the final contribution [G]. This is $O(n)$ per pixel, where $n$ is the number of intersected objects [G].
+-*   **Strengths:** It allows for a sparse representation of occluding objects while keeping high-curvature areas visible, providing better spatial relationship clarity than MImP [S2, unofficial].
+-*   **Limitations:** Without smoothing, it produces jagged boundaries [S2, unofficial]. It requires storing and accessing footprint images for all objects, increasing memory usage compared to methods that do not use footprints [G].
+-*   **When to use:** Choose when preserving spatial relationships and high-curvature details of less important context objects is prioritized over complete occlusion [S2, unofficial].
++*   **Time Complexity:** Linear with respect to the number of intersected objects per ray $n_r$ for the importance summation and sparseness calculation. The footprint lookup is $O(1)$ per object per pixel if precomputed [S2, unofficial].
++*   **Memory Complexity:** Requires storage for footprint images for each object. Binary footprints are compact; grayscale distance-transformed footprints require more memory [S2, unofficial].
++*   **Performance:** The method is computationally more expensive than MImP due to the need to sum importance values and calculate sparseness for all objects along the ray, rather than just selecting the maximum [S2, S3, unofficial].
++*   **Strengths:** Preserves spatial relationships between focus and context objects; allows high-curvature areas of occluding objects to remain visible; provides smooth transitions with grayscale footprints [S2, S3, unofficial].
++*   **Limitations:** Sharp transitions with binary footprints; requires precomputed importance values and footprints; not interactive in early implementations [S2, S4, unofficial].
++*   **When to Use:** When it is critical to see the spatial arrangement of multiple objects and the relative importance of occluding structures, rather than just the single most important object [S2, unofficial].
++*   **When Not to Use:** When maximum performance is required and occlusion artifacts are acceptable, or when the goal is to completely isolate the most important feature [S2, unofficial].
+ 
+ ## Background
+-Average Importance Compositing was introduced as part of the importance-driven volume rendering framework to handle the visibility of multiple objects along a ray by considering their relative importance [S2, unofficial]. It was developed as an alternative to Maximum Importance Projection (MImP), which completely removes less important objects [S2, unofficial].
++Average Importance Compositing was introduced by Ivan Viola and M. Eduard Gröller in their 2004 paper "Importance-Driven Volume Rendering" [S3, S4, unofficial]. It is part of a family of importance-driven rendering techniques that aim to automatically guide the viewer's attention in volume visualization. The method was implemented as a plugin in the J-Vision medical workstation and demonstrated on datasets such as the Leopard Gecko and Monster Study [S4, unofficial]. It builds on the concept of importance-driven rendering, where visual cues like opacity and color saturation are modulated based on object importance [S3, unofficial].
+ 
+ ## Sources
+ [S1] Illustrative Visualization for Medicine and Science, https://doi.org/10.2312/egt.20061068, fetched 2026-10-26 (unofficial)
+-[S2] (PDF) Importance-Driven Volume Rendering, https://www.researchgate.net/publication/220943935_Importance-Driven_Volume_Rendering, fetched 2026-11-03 (unofficial)+[S2] (PDF) Importance-Driven Volume Rendering, https://www.researchgate.net/publication/220943935_Importance-Driven_Volume_Rendering, fetched 2026-11-03 (unofficial)
++[S3] Importance-Driven Volume Rendering, https://www.cg.tuwien.ac.at/research/publications/2004/Viola-2004-ImpX/Viola-2004-ImpX-paper.pdf, fetched 2026-10-29 (unofficial)
++[S4] PDF Importance-Driven Volume Rendering, https://www.cg.tuwien.ac.at/research/vis/adapt/2004_idvr/idvr.pdf, fetched 2026-10-29 (unofficial)
++[S5] Mini-Splatting: Representing Scenes with a Constrained Number of Gaussians, https://doi.org/10.1007/978-3-031-72980-5_10, fetched 2026-10-26

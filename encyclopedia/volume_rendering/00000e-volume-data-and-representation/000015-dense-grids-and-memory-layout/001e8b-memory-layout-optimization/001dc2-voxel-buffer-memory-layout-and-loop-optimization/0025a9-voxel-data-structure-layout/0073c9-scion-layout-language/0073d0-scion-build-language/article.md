@@ -1,0 +1,145 @@
+# Scion Build Language
+
+Also called: Build specification
+
+## Overview
+The Scion Build Language is a declarative language for specifying the transformation from logical trees to physical representations [S1]. It defines the constructor: how to populate physical storage from a logical term [S1]. It serves as the counterpart to the Scion Layout Language, which defines the destructor (physical → logical) [S1]. Together, they express a bidirectional mapping between logical and physical representations [S1].
+
+What sets it apart from its siblings is its explicit control over memory materialization order (preorder/postorder) and its ability to compute relative offsets and pack auxiliary metadata directly into reference types during construction [S1]. Unlike single-phase construction methods that build specialized layouts directly during tree construction, Scion adopts a two-phase approach, treating the logical tree as immutable input to cleanly separate topology optimization from physical layout optimization [S1].
+
+## How it works
+
+### Inputs and Outputs
+*   **Input:** A logical tree structure (Abstract Data Type) assumed to be fixed and immutable [S1].
+*   **Output:** A physical memory layout populated according to the build specification and the corresponding layout definition [S1].
+
+### Data Structures
+The language operates on terms within a recursive Algebraic Data Type (ADT). Key internal concepts include:
+*   **Reference (`this`):** A unique identifier for the current term, typically an index into a contiguous array [S1].
+*   **Variant Signatures:** Declarations containing the original fields from the logical ADT [S1].
+*   **Indirect Groups:** Arrays of data (e.g., primitives) stored separately from node headers [S1].
+
+### Syntax and Primitives
+
+#### 1. Node Declaration
+A build block declares the layout order and the variant signature.
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+build NodeName[order=pre] {
+    build VariantSignature {
+        # Body
+    }
+}
+```
+*   `order=pre`: Emits the parent node before recursively visiting children [S1].
+*   `order=post`: Emits the parent node after all descendants have been visited [S1].
+*   Note: `order` affects only memory layout, not dependency resolution [S1].
+
+#### 2. Field Construction
+*   **Copy:** `build field_name` copies a field from the logical tree to the physical storage [S1].
+*   **Literal Assignment:** `build field_name = value` stores a literal value (e.g., discriminant tags) [S1].
+*   **Recursive Construction:** Fields with recursive ADT types are constructed in a recursive, depth-first manner [S1]. For example, `build left` fully materializes the left child and all its descendants before subsequent statements execute [S1].
+
+#### 3. Structural Primitives
+*   **`this`:** Refers to the unique reference (index) of the current term [S1].
+*   **`append(x, n)`:** Appends `n` elements of `x` to an indirect group. Returns the starting position. The location is automatically inferred by the layout mapping [S1].
+*   **`return e`:** Produces the reference to the constructed term. `e` must evaluate to the reference type declared in the layout specification [S1].
+
+#### 4. Reference Manipulation
+*   **Relative Offsets:** Compute offsets using `this`. Example: `build c_o = R - this` computes the offset to the right child `R` relative to the current node [S1].
+*   **Metadata Packing:** Slice the reference to store auxiliary information in unused bits. Example: `this[48:63] = metadata` stores metadata in bits 48–63 of a 64-bit pointer [S1].
+
+### Pseudocode
+The following pseudocode implements the PBRTv4 LinearBVH build specification [S1]. It assumes a logical tree with `Interior` and `Leaf` variants.
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Global state for indirect arrays
+primitive_data = []
+
+def build_linear_bvh(tree):
+    # Root initialization if needed
+    # ...
+
+    def build_interior(node):
+        # Declare variant signature and order
+        # build Interior(bounds : AABB, left: BVH, right: BVH)
+        
+        # 1. Copy bounds from logical tree
+        bounds = node.bounds
+        
+        # 2. Store discriminant value (0 for interior)
+        nprims = 0
+        
+        # 3. Build left child (recursive, depth-first)
+        # build left
+        left_ref = build_interior(node.left) if node.left else None
+        
+        # 4. Build right child and save its reference
+        # build right
+        right_ref = build_interior(node.right) if node.right else None
+        
+        # 5. Compute relative offset to right child
+        # build c_o = R - this
+        # 'this' is the index of the current node
+        # 'right_ref' is the index of the right child
+        c_o = right_ref - current_node_index
+        
+        # 6. Return current node's reference
+        return current_node_index
+
+    def build_leaf(node):
+        # Declare variant signature
+        # build Leaf(bounds : AABB, nprims: u16, data: Triangle[nprims])
+        
+        # 1. Copy bounds
+        bounds = node.bounds
+        
+        # 2. Copy nprims
+        nprims = node.nprims
+        
+        # 3. Append primitive data to indirect array
+        # build p_o = append(data, nprims)
+        # append returns the starting position in the indirect array
+        p_o = append(primitive_data, node.data)
+        
+        # 4. Return current node's reference
+        return current_node_index
+
+    # Execute build based on tree topology
+    # ...
+```
+
+### Parameters and Edge Cases
+*   **Consistency:** A field appearing in a layout’s split branch of a group must be populated by a corresponding build statement. Conversely, every build statement must target a field that exists in the layout [S1].
+*   **Dependency Resolution:** The parent node may compute fields that depend on values from its children in preorder layouts if those values have already been constructed [S1].
+*   **Precision:** Slicing references (e.g., `this[48:63]`) relies on unused bits in pointer types. This is valid only if the pointer type has sufficient width (e.g., 64-bit) and the used bits do not conflict with valid address ranges [S1].
+
+## Operating characteristics
+
+### Time and Memory Complexity
+*   **Time:** Linear with respect to the number of nodes in the logical tree, as each node is visited once [S1].
+*   **Memory:** Depends on the physical layout defined by the Scion Layout Language. The two-phase approach incurs additional latency and memory overhead from intermediate naïve layout construction compared to single-phase methods [S1].
+
+### Strengths and Limitations
+*   **Strengths:** Cleanly separates tree topology optimization from physical layout optimization, simplifying end-to-end construction [S1]. Enables layout-specific encodings (e.g., discriminant tags, relative offsets) that are absent from the logical representation [S1].
+*   **Limitations:** Requires the tree topology to be fixed before layout specialization begins, which is natural for static scenes but less suitable for dynamic scenes where construction costs are not amortized [S1].
+
+### When to Use
+*   Use when you need to decouple logical tree structure from physical memory layout [S1].
+*   Use for static scenes where construction costs are amortized over many traversal queries [S1].
+*   Use when you need to pack auxiliary metadata into reference types or compute relative offsets during construction [S1].
+
+## Background
+
+### Origin
+The Scion Build Language was introduced in the paper "Decoupling Data Layouts from Bounding Volume Hierarchies" [S1]. It is part of the Scion framework, which provides a declarative approach to BVH construction.
+
+### History and Development
+Prior work used single-phase construction to build specialized physical layouts directly during tree construction [S1]. Scion adopts a two-phase approach, assuming the tree topology is fixed before layout specialization begins [S1]. This approach was chosen to simplify end-to-end construction by separating topology optimization from physical layout optimization [S1].
+
+## Sources
+
+[S1] Decoupling Data Layouts from Bounding Volume Hierarchies, https://arxiv.org/pdf/2511.15028, fetched 2026-10-29

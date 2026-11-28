@@ -1,0 +1,99 @@
+Procedural World: April 2011
+Monday, April 11, 2011
+Just happy to be outside
+Another screenshot of a familiar model coming out of the voxelization mill:
+Spring is here and the Buddha is just happy to be out. As the ancient people said, if you can see the Buddha smile, voxelization is working fine.
+No comments:
+Email ThisBlogThis!Share to XShare to FacebookShare to Pinterest
+Labels:
+Voxelization
+Voxelization Stats
+Just to complement the earlier post, here are some facts about this voxelization method.
+Here you can see the Standford dragon after voxelization in a 128x128x128 grid:
+The original model has 260,000 triangles. The resulting mesh resolution for 128x128x128 is much lower, so a lot of detail is necessarily lost. Still the voxelization preserves the key features of the model.
+This runs in 14 milliseconds on an ATI 4770.
+4 comments:
+Email ThisBlogThis!Share to XShare to FacebookShare to Pinterest
+Labels:
+Stats,
+Voxelization
+Saturday, April 9, 2011
+OpenCL Voxelization
+If you are going down the voxel way, odds are at some point you will need to include polygonal assets in your workflow.
+For me it happened when I integrated the output of the architecture L-System into the voxel world. Architecture is produced as a collection of polygonal volumes, I needed to translate those volumes into voxels.
+As usual, it had to be fast. It also needed to be accurate, Sharp features in the original polygon mesh should appear in the voxelized version.
+There are several approaches to voxelization. One is to use the GPU to render slices of the polygonal object and then construct the voxel information out of the slices. Another way to do it is to compute a 3D distance field, that is, the distance from each point in space to the closest polygon surface. In GPU Gems 3 there is a nice implementation of this method. And then there is the classical method, which is to shoot rays to the polygonal solid and construct the voxels from the intersections.
+I chose to implement a flavor of the classical method. The clean intersection points it produced would help later when reconstructing the surface. I also suspected the ray-tracing nature of this approach would translate well into OpenCL or CUDA.
+In particular my method is inspired on this one (PDF link). The article is very detailed, but if you want to skip reading it here is the basic idea:
+It uses a regular grid. Each element in the grid is a voxel. One of the coordinate planes is used to build a Quad-tree. All the triangles in the polygonal mesh are projected into this plane and inserted in the Quad-tree. I stole an image from the article above that illustrates this phase:
+In this image all the triangles are indexed in a Quad-tree aligned to the XZ plane (assuming Y goes up).
+The next step is to shoot rays perpendicular to the Quad-tree plane. Each ray is intersected with all the triangles found in that cell of the Quad-tree. This is actually why a Quad-tree is used. It allows to test only the triangles that potentially intersect the ray.
+Each ray may intersect several triangles along its path. For each voxel that is visited by the ray, the algorithm must find a way to tell whether it is inside or outside the solid. This is actually simple. If we assume the polygonal volume is closed, then it is possible to count how many intersections we passed before getting to the current voxel. If the number is odd, the voxel is inside the volume, if it is even, it is outside.
+This other image, also from the same article, shows this principle:
+And that's it. Once you have sent enough rays to cover the grid, the voxelized solid is there.
+This method, however, could not produce the results I needed. It only tells you if a voxel is solid or not. I needed a 3D density field. Also I wanted it to preserve the sharp corners in the original mesh, which is something this method doesn't consider. And last but not least, this algorithm is not very fast. Ray-casting on CPU quickly becomes expensive as grid resolution goes up.
+This is what I did:
+First, instead of having just one Quad-tree, I built three of them. One for each coordinate plane. I realized I had to cast rays along the three main axis instead of just one as the original method does.
+Why? The original method only cares about voxel occupancy. In my case I needed to record the normals at the intersection points. If rays are shot only in the Y direction, any polygons perpendicular to the plane XZ would never be intersected, their normals would be unknown. And it is not only that. For a sharp edge to be reconstructed, you need at least two intersections inside a voxel. To reconstruct a vertex, you need three rays.
+The following screenshot shows how sharp features are reconstructed. This is a cube that is not aligned with any of the coordinate axis, still its sharp features are preserved.
+The Quad-trees are built on the CPU as a pre-processing phase. It takes less than 1% of the entire cost of the voxelization, so it is something I won't move into the GPU soon.
+Next, the OpenCL voxelization kernel runs. Each instance of the kernel processes a single ray. Before invoking the kernel I make sure all the rays are packaged in sequence, regardless of their direction.
+The ray has access to the corresponding Quad-tree so it can iterate through the list of triangles in that cell of the Quad-tree. For each triangle it will test if there is an intersection. If that is the case, it writes the coordinates to an array.
+Then comes a twist. The voxelization method I described before relies on counting how many intersections were found up to the current voxel. For this to work, the list of intersections needs to be sorted. Sorting the intersections in the CPU is no problem, but inside the OpenCL kernel it could get messy very quickly. How to get around this?
+I realized that it was still possible to determine if a voxel was inside or outside without having to sort the intersections. The trick is to "flip" the occupancy state of all voxels preceding the current intersection point. If the count is odd, the voxel will flip an odd number of times and it will remain set at the end. If the counter is even, the voxel will finish empty.
+You can see this in the following series of images. The intersection points are marked in red, and as you can see they arrive in any order:
+I'm satisfied with the speed of this method. Anyway there are some optimizations I could do. If some restrictions are imposed on the polygonal solids, it will be possible to insert triangles already sorted in the Quad-tree. This means the OpenCL rasterization only will need to do one pass per ray. Right now each intersection requires its own pass.
+But I'm still on the look for a faster voxelization method. If you know of something better please let me know.
+20 comments:
+Email ThisBlogThis!Share to XShare to FacebookShare to Pinterest
+Labels:
+CUDA,
+OpenCL,
+Voxel,
+Voxelization
+Friday, April 1, 2011
+Tree Bits
+In an earlier post I mentioned that I was using a Space Colonization algorithm to grow trees. This was more about producing an internal representation of the tree, for instance a list of line segments describing the tree trunk and branches. Still somehow the tree needs to materialize into voxels. In this post I will describe how I have done it so far.
+If you remember another post, at some point I had decided to go into a full isosurface representation of the world. This means that for any point of the 3D space a density value is defined. If the value is positive, the point is inside a solid. If it is negative, it is outside. And if it is zero, it means this point is in the surface and should be visualized.
+The question is, how to create a density function that will result in a tree?
+You will find two different entities in your typical tree: the leaves and the branches --which include the trunk as some sort of over-sized branch. It made sense that the tree density function was the sum of two different density functions, one for the leaves and one for the branches.
+For the trunk and branches, the colonization algorithm was producing a series of connected segments. This was just a collection of start and end points. First I needed to compute the girth of each branch.
+Long time ago Leonardo DaVinci noticed a rule about tree branches. It seems that when a branch splits into two or more branches, the cross-section areas of the new branches add up to the area of the original branch.
+At the right you can see a doodle I took from his handbook that illustrates this point.
+This is also called the pipe model. It kind of makes sense when you think most trees just need to move their juices up and down.
+With this in mind, it is possible to back-track the hierarchy of connected segments starting from the thinnest and adding up the areas down to the trunk. A the end of this process each segment will have its starting and end diameters defined.
+That was the easy part, but this is still far from a real density function.
+If you remember yet another post, I was computing all the density functions using OpenCL kernels. Each instance of the kernel would take a point in 3D space and compute the density function.
+I wrote a new kernel for a density function based on a list of segments. It is fairly straightforward to compute the value, as the following image shows:
+Here the large dot is the point in 3D space we need to compute. The line coming out of this point is the shortest distance from the point to the segment. If you subtract the radius of the cone at that position from the length of this line you will end up with the distance from the point to the surface of the cone. This distance is the value of the density function for the field.
+The tricky part is making this fast. In theory each point should be tested against each segment. For a high density grids and large number of segments the naive approach is just too slow.
+The first obvious optimization is to avoid testing all segments. If only segments that are reasonably close are tested it would make a big difference. So I stored the segments in an octree and tested only those segments that were in the neighbor cells to the point.
+To speed up access to the octree in OpenCL, I made sure I was moving the octree data into local memory before going over the list of segments. You can see this trick in the ATI Stream OpenCL examples, specifically the one about solving the N-body problem. This case is similar to the N-body, only that some bodies are points are some other are segments.
+Now, this produced segments that were far too smooth. For pipes or columns they would be great. Tree trunks and branches are not that regular. I realized I needed to add some noise to the segment surfaces.
+This was a rather small change. Instead of using the regular segment radius (noted as "r" in the image before), we can affect this radius by a 3D noise. For this to work, you need to pick the right coordinates to evaluate the noise function. A good approach is to use the point where the shortest line intersects the smooth cone volume, that is, the same point we were using before to compute the density field. Using these coordinates we evaluate the noise function. This returns a value we can use to offset the radius of the cone and produce a new distance to the volume.
+In the following image you can see the effect this produces. By playing with the noise type and properties you can achieve different effects. Instead of a noise function you could also use cellular fields like the ones described by Worley.
+This works for branches, roots and trunks. What about the other half of the problem, the leaves?
+I chose to address this in a peculiar way. Maybe my eyesight is not alright, but when looked from a distance, a forest looks more like a field of clouds than a massive collection of individual leaves. You can see the leaves as some sort of noise in the profile of the crowns. One of my goals is to have individual objects that are too distant still blend properly in the background, instead of just disappearing from the view.
+Now this works only if the trees are healthy and full of leaves. It is a limitation of my approach. I will see how far I can go with this before considering an alternative. It becomes very apparent when you are really close to the leaves that they are just a really noisy volume.
+I have an idea to address this, which is to render additional billboards on the client based on the crown polygons. This is similar to what most games do when rendering grass. I would render tree leaves instead.
+With that out of the way, we can start thinking about the tree crown as a cloud. Its definition is quite simple, just a list of ellipsoids. When a branch ends, the colonization algorithm inserts a point in the cloud. The diameter of the ellipsoid at that point is a function of the size of the tree and how distant this point is from the main branches.
+If enough ellipsoids are created they eventually blend into some sort of cloud. The density function of this cloud is computed in a kernel very similar to the one used for the segments.
+Adding a lot of noise helps making the crown more interesting. This noise needs large low frequency amplitudes but also a lot of high frequency detail too. The low frequencies break the appearance of the base ellipsoids while the high frequency resemble the look of the individual leaves.
+The following image shows the results:
+I know there is a lot of room for improvement. I still plan to revisit the generation of trees. I want more realistic trunks and roots, and also create new types of trees.
+As I said before, individual leaves will be rendered by instancing on the client. This should improve a lot the realism of this method. What you have seen here is rather the content generation side of it. I also plan to revisit the global illumination solution to add light scattering in the tree crowns.
+Until then, I hope this will inspire you to make some voxel trees of your own.
+3 comments:
+Email ThisBlogThis!Share to XShare to FacebookShare to Pinterest
+Labels:
+Dual Contouring,
+Octree,
+OpenCL,
+Tree,
+Voxel,
+Voxel Tree
+Newer Posts
+Older Posts
+Home
+Subscribe to:
+Posts (Atom)

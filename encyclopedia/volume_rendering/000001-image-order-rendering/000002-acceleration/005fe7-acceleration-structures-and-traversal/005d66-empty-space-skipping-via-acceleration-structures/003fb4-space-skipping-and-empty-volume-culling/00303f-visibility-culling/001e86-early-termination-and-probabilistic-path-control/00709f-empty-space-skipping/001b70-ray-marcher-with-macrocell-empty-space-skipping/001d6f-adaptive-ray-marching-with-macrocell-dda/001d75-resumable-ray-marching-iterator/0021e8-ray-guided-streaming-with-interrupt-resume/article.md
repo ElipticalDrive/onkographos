@@ -1,0 +1,96 @@
+# Ray-Guided Streaming with Interrupt/Resume
+
+Also called: Basic Tree Updates via Interrupting and Resuming, Resumable Ray Marching Iterator, Simple Interrupting and Resuming, Tree Updates via Interrupting and Resuming
+
+## Overview
+A method to handle missing GPU memory data by stopping ray tracing, communicating to the CPU for loading, and resuming the algorithm at the last ray position, requiring multiple passes per frame [S1][S2, unofficial]. It sets itself apart from sibling methods by explicitly pausing the GPU ray marcher to allow CPU-driven data structure adaptation, rather than relying solely on pre-loaded hierarchical structures or probabilistic culling.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Ray state (position, direction), current volume data structure (partial in GPU memory), Z-Buffer.
+*   **Output:** Final color accumulation for the frame.
+
+**Data Structures:**
+Ray status information is maintained in two Multiple Render Targets (MRTs) [S1][S2, unofficial]:
+1.  **MRT 0:** Stores preliminary output color accumulation and current marching position in space.
+2.  **MRT 1:** Stores the missing node ID.
+
+**Numbered Steps:**
+1.  **Block Terminated Pixels:** Use the Z-Buffer to block terminated pixels, relying on z-cull and early-Z GPU features to prevent execution of inactive pixels [S1][S2, unofficial].
+2.  **Start Ray Tracing:** Begin the ray tracing process [S2, unofficial].
+3.  **Check Data Availability:** If data is missing for the current ray step, stop the ray and communicate this to the CPU [S1][S2, unofficial].
+4.  **Maintain Status:** Store the ray's preliminary output color accumulation, the missing node ID, and the current marching position in the two MRTs [S1][S2, unofficial].
+5.  **Download Missing IDs:** Download the missing node IDs from the GPU to the CPU [S1][S2, unofficial].
+6.  **CPU Adaptation:** The CPU adapts the data structure based on the missing node IDs and initiates the loading of the missing data [S1][S2, unofficial].
+7.  **Resume Ray Tracing:** Initiate the next rendering pass using a proxy surface. Use the MRTs as input textures. The early-Z technique ensures that only active pixels (those with missing data or continuing rays) execute the fragment shader [S1][S2, unofficial].
+8.  **Repeat:** Continue steps 2-7 until the frame is complete or all rays have terminated [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Pseudocode for Ray-Guided Streaming with Interrupt/Resume
+# Assumes a GPU ray marcher kernel and CPU data loader
+
+def render_frame():
+    # Initialize MRTs
+    mrt_color_position = create_mrt() # Stores color and position
+    mrt_missing_id = create_mrt()     # Stores missing node IDs
+    
+    # Initial ray setup
+    rays = initialize_rays()
+    
+    while not all_rays_terminated(rays):
+        # Step 1: Block terminated pixels via Z-Buffer (handled by GPU hardware)
+        
+        # Step 2-4: Ray Marching with Interruption
+        missing_ids = []
+        for ray in rays:
+            if ray.data_available:
+                ray.step()
+                update_mrt_color_position(mrt_color_position, ray)
+            else:
+                # Stop ray and record status
+                ray.status = "INTERRUPTED"
+                missing_ids.append(ray.missing_node_id)
+                update_mrt_color_position(mrt_color_position, ray)
+                update_mrt_missing_id(mrt_missing_id, ray.missing_node_id)
+        
+        # Step 5-6: CPU Communication and Data Loading
+        if missing_ids:
+            download_missing_ids_to_cpu(missing_ids)
+            cpu_adapt_data_structure(missing_ids)
+            cpu_load_missing_data()
+        
+        # Step 7: Resume with Proxy Surface
+        render_proxy_surface(mrt_color_position, mrt_missing_id)
+        
+        # Update rays for next pass
+        rays = update_rays_from_mrt(mrt_color_position, mrt_missing_id)
+        
+    return final_image_from_mrt_color_position(mrt_color_position)
+```
+
+**Parameters:**
+*   **Proxy Surface:** A simple geometry (e.g., a plane) used to trigger the fragment shader for active pixels in subsequent passes [S1][S2, unofficial].
+*   **Early-Z:** A GPU feature used to cull inactive pixels before fragment shader execution [S1][S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Multiple Passes:** The method requires multiple rendering passes per frame, which can impact performance if data is frequently missing [S1][S2, unofficial].
+*   **CPU-GPU Synchronization:** Downloading missing IDs and loading data introduces synchronization overhead [S1][S2, unofficial].
+*   **Frustum Culling:** Data lying outside the frustum is not explicitly tested for, but is not loaded because rays do not traverse it [S1][S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Multiple passes per frame, depending on the frequency of missing data.
+*   **Memory Complexity:** Requires MRTs for ray status and CPU memory for data structure adaptation.
+*   **Strengths:** Loaded data is directly traversed by the ray; no data outside the frustum is loaded; CPU does not need to track needed LODs [S1][S2, unofficial].
+*   **Limitations:** Rudimentary system; multiple passes can be slow; CPU-GPU synchronization overhead [S1][S2, unofficial].
+*   **When to Use:** When GPU memory is limited and data must be streamed on-demand [S1][S2, unofficial].
+*   **When Not to Use:** When real-time performance is critical and data can fit in GPU memory [S1][S2, unofficial].
+
+## Background
+Originated in the context of GigaVoxels and Ray-Guided Streaming for efficient and detailed voxel rendering [S1][S2, unofficial]. It is a simple approach to handle complex data that does not fully reside in GPU memory [S1][S2, unofficial].
+
+## Sources
+[S1] GigaVoxels, https://doi.org/10.1145/1507149.1507152, fetched 2026-10-24
+[S2] [PDF] Ray-Guided Streaming for Efficient and Detailed Voxel Rendering, https://www-sop.inria.fr/reves/Basilic/2009/CNLE09/CNLE09.pdf, fetched 2026-10-26 (unofficial)

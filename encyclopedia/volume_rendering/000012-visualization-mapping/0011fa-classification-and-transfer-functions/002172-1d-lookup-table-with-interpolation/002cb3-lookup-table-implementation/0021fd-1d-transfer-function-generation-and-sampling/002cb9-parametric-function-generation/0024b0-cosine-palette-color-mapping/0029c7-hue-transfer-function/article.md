@@ -1,0 +1,79 @@
+# Hue Transfer Function
+
+Also called: Hue Cycle Transfer Function, Smoothstep Hue Mapping
+
+## Overview
+The Hue Transfer Function is a procedural method that maps a scalar input value to an RGB color by cycling through hue bands using smoothstep functions [S1, unofficial]. It serves as a specific implementation of color mapping within volume rendering classification, distinct from parent [Cosine Palette Color Mapping](3359-cosine-palette-color-mapping.md) by using piecewise linear interpolation (smoothstep) rather than trigonometric functions to define color transitions [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+- Input: A scalar value $x$ (typically normalized to $[0, 1]$) [S1, unofficial].
+- Output: An RGBA color vector $(R, G, B, A)$ [S1, unofficial].
+
+**Data Structures**
+- `HUE`: A constant float representing the width of one hue segment, defined as $1/6$ [S1, unofficial].
+
+**Parameters**
+- `HUE`: $1/6 \approx 0.16666666666666$ [S1, unofficial].
+
+**Algorithm**
+The function calculates the red, green, and blue channels independently using the `smoothstep` function [S1, unofficial]. The `smoothstep(edge0, edge1, x)` function returns 0 if $x \le edge0$, 1 if $x \ge edge1$, and performs smooth Hermite interpolation between 0 and 1 otherwise [G].
+
+1. Calculate the Red channel $r$:
+   $$r = \text{smoothstep}(HUE, 2HUE, x) - \text{smoothstep}(4HUE, 5HUE, x)$$
+2. Calculate the Green channel $g$:
+   $$g = \text{smoothstep}(0, HUE, x) - \text{smoothstep}(3HUE, 4HUE, x)$$
+3. Calculate the Blue channel $b$:
+   $$b = \text{smoothstep}(2HUE, 3HUE, x) - \text{smoothstep}(5HUE, 6HUE, x)$$
+4. Return the final color:
+   $$RGB = (1-r, g, b)$$
+   $$A = 1.0$$
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def hue_transfer_function(x: float) -> tuple:
+    # HUE is 1/6
+    h = 1.0 / 6.0
+    
+    # Helper for smoothstep: returns 0 if x <= edge0, 1 if x >= edge1, else smooth interpolation
+    def smoothstep(edge0: float, edge1: float, x: float) -> float:
+        if x <= edge0:
+            return 0.0
+        if x >= edge1:
+            return 1.0
+        # Standard smoothstep interpolation
+        t = (x - edge0) / (edge1 - edge0)
+        return t * t * (3.0 - 2.0 * t)
+
+    # Calculate channels
+    r = smoothstep(h, 2 * h, x) - smoothstep(4 * h, 5 * h, x)
+    g = smoothstep(0.0, h, x) - smoothstep(3 * h, 4 * h, x)
+    b = smoothstep(2 * h, 3 * h, x) - smoothstep(5 * h, 6 * h, x)
+
+    # Return inverted red, green, blue, and alpha 1.0
+    return (1.0 - r, g, b, 1.0)
+```
+
+**Edge Cases and Pitfalls**
+- Precision errors in floating-point arithmetic may cause discontinuities at the boundaries of the hue segments if not handled carefully [G].
+
+## Subtopics
+
+### [HSV Hue Color Mapping](7085-hsv-hue-color-mapping.md)
+Maps scalar values to the hue channel of the HSV color model, keeping saturation and value constant. It allows lighting effects to modulate saturation and value without altering the semantic meaning of the hue, ensuring the mapping remains invertible even under illumination. It is distinct from RGB mapping, where lighting affects all channels, and from texture-based uncertainty visualization, which doubles polygon count [G].
+
+## Operating characteristics
+- Time Complexity: $O(1)$ per sample, as it involves a fixed number of arithmetic operations and smoothstep evaluations [G].
+- Memory Complexity: $O(1)$, requiring only a few scalar variables [G].
+- Strengths: Simple to implement, computationally inexpensive, and produces smooth color transitions [G].
+- Limitations: The color palette is fixed and may not be suitable for all data distributions [G].
+- When to use: When a simple, smooth, cyclic color mapping is needed for scalar data visualization in volume rendering [G].
+- When not to use: When specific color semantics or perceptual uniformity are critical, or when the data distribution requires a non-cyclic mapping [G].
+
+## Background
+It is part of a family of procedural transfer functions that use mathematical functions to generate color maps without relying on predefined lookup tables [S1, unofficial].
+
+## Sources
+[S1] terier/vpt, https://github.com/terier/vpt, fetched 2026-10-26 (unofficial)

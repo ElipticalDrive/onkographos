@@ -1,0 +1,107 @@
+# CTF Color Blending
+
+Also called: Structural Coloring
+
+## Overview
+CTF Color Blending is a method for computing the final color of volume rendering voxels by interpolating between cluster-based colors (derived from a Classification and Transfer Function, or CTF) and voxel-specific colors (derived from the voxel's own transfer function or material properties) using a user-specified blending factor [S1, unofficial]. It solves the problem of balancing semantic classification clarity with local data fidelity, allowing users to emphasize structural groupings while retaining fine-grained material appearance [S1, unofficial]. It differs from [Lightness-Controlled Color Harmonization](10770-lightness-controlled-color-harmonization.md) by focusing on semantic cluster blending rather than perceptual lightness constraints, and from [Harmonized Color Change](14285-harmonized-color-change.md) by using a linear interpolation of color sources rather than global palette adjustments. It operates within the broader [Color Composition](13205-color-composition.md) framework.
+
+## How it works
+The method combines two color sources: the "cluster color" (representing a semantic class or node in a classification graph) and the "voxel color" (representing the raw data value or local transfer function output). The combination is controlled by a single scalar parameter $\beta$.
+
+**Inputs and Outputs:**
+- Input: Cluster color $c_{cluster} = (r_c, g_c, b_c)$, Voxel color $c_{voxel} = (r_v, g_v, b_v)$, Blending factor $\beta$.
+- Output: Final color $c_{final} = (r_f, g_f, b_f)$.
+
+**Data Structures:**
+Colors are represented as 3-component vectors (RGB). The blending factor $\beta$ is a float in the range $[0, 1]$.
+
+**Steps:**
+1. Retrieve the cluster color $c_{cluster}$ associated with the current voxel's classification label. This is typically determined during a graph traversal or classification step where each class node stores an attribute color [S1, unofficial].
+2. Retrieve the voxel color $c_{voxel}$ from the voxel's transfer function or material definition.
+3. Compute the final color using linear interpolation:
+   $$ c_{final} = \beta \cdot c_{cluster} + (1 - \beta) \cdot c_{voxel} $$
+   where the operation is component-wise:
+   $$ r_f = \beta r_c + (1 - \beta) r_v $$
+   $$ g_f = \beta g_c + (1 - \beta) g_v $$
+   $$ b_f = \beta b_c + (1 - \beta) b_v $$
+4. Clamp the resulting components to the valid color range (e.g., $[0, 1]$ or $[0, 255]$ depending on the representation) [G].
+
+**Parameters:**
+- $\beta$: Blending factor. Range $[0, 1]$.
+  - $\beta = 0$: Output is purely the voxel color.
+  - $\beta = 1$: Output is purely the cluster color.
+  - Typical values: Not specified in sources. User-specified [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- If $\beta$ is outside $[0, 1]$, the interpolation may produce out-of-gamut colors. Clamping is required [G].
+- If the cluster color or voxel color is undefined (e.g., empty voxel with no cluster), the method requires a fallback. In the specific implementation of [Fragment Color and Material Pipeline](#fragment-color-and-material-pipeline), empty voxels or specific conditions may default to a texture lookup or a base color [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def ctf_color_blending(cluster_color: Vec3, voxel_color: Vec3, beta: float) -> Vec3:
+    """
+    Blends cluster color and voxel color using factor beta.
+    
+    Args:
+        cluster_color: RGB color of the semantic class.
+        voxel_color: RGB color from the voxel's transfer function.
+        beta: Blending factor in [0, 1].
+        
+    Returns:
+        Final blended RGB color.
+    """
+    # Clamp beta to [0, 1] to prevent out-of-gamut results
+    beta = max(0.0, min(1.0, beta))
+    
+    # Linear interpolation
+    r = beta * cluster_color.r + (1.0 - beta) * voxel_color.r
+    g = beta * cluster_color.g + (1.0 - beta) * voxel_color.g
+    b = beta * cluster_color.b + (1.0 - beta) * voxel_color.b
+    
+    return Vec3(r, g, b)
+```
+
+## Subtopics
+
+### Fragment Color and Material Pipeline
+A variant that integrates CTF color blending with a full material rendering pipeline, including outlier detection, thermal mapping, and lighting. It selects the base color based on flags (`outlierColouring`, `thermalColouring`) and `colorIndex`, then applies semi-transparency blending, normal perturbation, and shadowing. It is chosen when detailed material appearance (shading, bump mapping) is required alongside classification. It differs from the basic blending method by adding complex material interactions and conditional color sources [S2, unofficial].
+- **Base Color Selection:** If `outlierColouring == 1`, use `HSV(colorIndex, 0.99, 0.99)`. Else if `thermalColouring != 1` and `colorIndex != VOXEL_EMPTY`, use `HSV(colorIndex, 0.99, 0.99)`. Else if `thermalColouring == 1`, use `vec3(colorIndex)`. Else, use `texture(texKadSampler, textCoord)` [S2, unofficial].
+- **Semi-transparency Blending:** Mixes `current_color.xyz` with `texture(texSemiTransparentSampler, textCoord).xyz` using the texture's alpha as weight, preserving original alpha [S2, unofficial].
+- **Normal Perturbation:** If `bumpMappingDisplacement` is active, returns `vec3((2.0 * texture(texBumpSampler, textCoord)) - 1.0f)`; otherwise returns the input normal [S2, unofficial].
+- **Final Composition:** Computes shadow factors via `depthTextureUniform`, passes them to `lightUniform` along with material colors and normal, and outputs `fColor = vec4(reflectionColor, fragKad.w)` [S2, unofficial].
+- **Parameters:** `thermalColouring` (uint, 0 or 1), `outlierColouring` (uint, 0 or 1), `materialScattering` (float, substitutes ambient lighting), `shininess` (float, specular exponent) [S2, unofficial].
+
+### Kernel-based Color Aggregation
+A variant that aggregates contributions from multiple spatial kernels to determine the final texture color. It selects the top $K_c$ contributing kernels and computes an alpha-weighted average, adding it as a residual to a global base color. It is chosen when smooth, overlapping material representations are needed, such as in geodesic Gaussian splatting. It differs from basic blending by using a dynamic, data-driven aggregation of multiple kernel contributions rather than a fixed cluster/voxel pair [S3].
+- **Definition:** Aggregation of kernel contributions to determine final texture color using a dynamic selection of top-contributing kernels and alpha-weighted partition of unity, added as a residual to a global base color [S3].
+- **Formula:** $C(p) = c_{base} + \frac{\sum_{s \in K(p)} \alpha_s(p) \cdot c_s}{\sum_{s \in K(p)} \alpha_s(p)}$, where $K(p)$ is the set of top-contributing kernels at point $p$, $\alpha_s(p)$ is the spatial footprint of kernel $s$, and $c_s$ is the color of kernel $s$ [S3].
+- **Parameters:** $K_c$ (number of top-contributing kernels), $c_{base}$ (optimisable global base color) [S3].
+
+### Foreground-Background CoC Merging
+A variant that merges Circle of Confusion (CoC) values for foreground and background layers by taking the maximum. It is used in depth-of-field rendering to ensure correct blur accumulation across layers. It differs from color blending by operating on scalar depth-of-field metrics rather than RGB color values [S4, unofficial].
+- **Definition:** Merges foreground overlap CoC with background CoC by taking the maximum [S4, unofficial].
+- **Steps:**
+  1. Sample foreground overlap alpha: `float fgCoc = tex2D(_FgOverlap, ...).a;` [S4, unofficial].
+  2. Calculate the background CoC using the depth-based formula described in 'Depth-based Circle of Confusion (CoC) Calculation' [S4, unofficial].
+  3. Return the maximum of the background CoC and the foreground CoC across all channels: `return max(color.aaaa, float4(fgCoc, fgCoc, fgCoc, fgCoc));` [S4, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ per voxel for the basic blending method, as it involves a single linear interpolation [S1, unofficial]. The Kernel-based variant is $O(K_c)$ per voxel, where $K_c$ is the number of top kernels [S3].
+- **Memory Complexity:** $O(1)$ for the basic method, storing only the current cluster and voxel colors. The Kernel-based variant requires storing kernel parameters and colors for active kernels [S3].
+- **Measured Performance:** Not given in the sources.
+- **Scaling:** The basic method scales linearly with the number of voxels. The Kernel-based method scales with the number of active kernels per voxel, which may vary spatially [S3].
+- **Strengths:** Simple to implement and tune; allows smooth transition between semantic and data-driven appearance; supports complex material interactions in variants [S1, S2, unofficial].
+- **Limitations:** Requires pre-computed cluster colors; the blending factor $\beta$ may require manual tuning for optimal visual results [S1, unofficial].
+- **When to use:** When a balance between classification clarity and material detail is desired [S1, unofficial].
+- **When not to use:** When pure semantic visualization (no material detail) or pure data-driven visualization (no semantic grouping) is sufficient [S1, unofficial].
+
+## Background
+The concept of blending cluster colors with voxel colors in the context of CTF was introduced in the work on "Structural focus+context rendering of multiclassified volume data" [S1, unofficial]. This approach leverages the graph-based classification of volume data, where each class node stores a color attribute, and blends it with the voxel's own transfer function output using a user-specified factor $\beta$ [S1, unofficial]. The term "Structural Coloring" is used as an alias, emphasizing the role of structural classification in the color determination process [S1, unofficial].
+
+## Sources
+[S1] Structural focus+context rendering of multiclassified volume data, http://hdl.handle.net/2117/86811, fetched 2026-10-26 (unofficial)
+[S2] AlfonsoLRz/tpc-anomalies, https://github.com/AlfonsoLRz/tpc-anomalies, fetched 2026-10-27 (unofficial)
+[S3] Heat Kernel Textures the Geodesic Gaussians That Do Not Splat, https://doi.org/10.1007/978-3-032-37595-7_17, fetched 2026-10-29
+[S4] dario-zubovic/metaballs, https://github.com/dario-zubovic/metaballs, fetched 2026-10-26 (unofficial)

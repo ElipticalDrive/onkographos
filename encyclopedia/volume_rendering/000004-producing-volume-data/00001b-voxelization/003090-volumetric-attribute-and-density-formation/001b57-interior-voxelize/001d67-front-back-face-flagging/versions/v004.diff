@@ -1,0 +1,216 @@
+--- v003.md
++++ v004.md
+@@ -4,141 +4,112 @@
+ 
+ ## Overview
+-Front/Back Face Flagging assigns a boolean orientation flag to voxels intersected by a mesh surface, distinguishing whether the intersecting triangle is front-facing or back-facing relative to a specified filling direction [S1]. This method solves the ambiguity of surface orientation during voxelization, providing the necessary geometric context for subsequent interior filling algorithms to determine which voxels lie inside the mesh [S1]. It differs from sibling methods like [Stochastic Ray-Casting Voxelization](1067-stochastic-ray-casting-voxelization.md) or [Ray-Cast Style Voxel Filling](1502-ray-cast-style-voxel-filling.md) by explicitly tracking surface normal orientation per voxel rather than relying on ray intersection counts or probabilistic sampling to determine volume status [S1].
++Front/Back Face Flagging assigns a boolean orientation flag to voxels intersected by a mesh surface, distinguishing whether the intersecting triangle is front-facing or back-facing relative to a specified filling direction. This method solves the ambiguity of surface orientation during voxelization, providing the necessary geometric context for subsequent interior filling algorithms to determine which voxels lie inside the solid mesh. It differs from sibling methods like [Stochastic Ray-Casting Voxelization](1067-stochastic-ray-casting-voxelization.md) by relying on explicit geometric normal calculations rather than probabilistic sampling, and from [Tight Voxelization (Point-in-Mesh Test)](1709-tight-voxelization-point-in-mesh-test.md) by marking surface voxels with orientation data rather than just binary containment.
+ 
+ ## How it works
+-**Inputs:**
+-*   A triangular mesh defined by vertices $A, B, C$.
+-*   A 3D voxel grid (array of voxel structures).
+-*   A filling direction vector $\vec{d}$ (e.g., $(0, 0, 1)$) [S1].
+-
+-**Outputs:**
+-*   The voxel grid where intersected voxels have `fill = 1` and `front` flag set according to the triangle's orientation relative to $\vec{d}$ [S1].
++**Inputs:** A triangular mesh (list of triangles with vertices), a voxel grid (array of voxel structures), and a filling direction vector $\vec{d}$.
++**Outputs:** The voxel grid with `fill` and `front` flags updated for all voxels intersected by the mesh.
+ 
+ **Data Structures:**
+-Each voxel in the grid contains at least the following fields:
+-*   `fill`: Boolean or integer (1 if the voxel is part of the mesh surface, 0 otherwise).
+-*   `front`: Boolean indicating if the intersecting triangle is front-facing relative to $\vec{d}$.
+-*   `position`: Vector3 representing the center of the voxel [S1].
++The voxel structure contains at minimum:
++- `fill`: Boolean or integer (0/1), indicating if the voxel is part of the mesh surface.
++- `front`: Boolean, indicating if the intersecting triangle is front-facing relative to $\vec{d}$.
++- `position`: Vector3, the center of the voxel.
++- `bounds`: AABB, the spatial extent of the voxel.
+ 
+-**Algorithm Steps:**
+-
+-1.  **Triangle Normal Calculation:**
+-    Compute the unnormalized normal $\vec{n}_{raw}$ using the cross product of two edge vectors:
+-    $$ \vec{n}_{raw} = (B - A) \times (C - A) $$
+-    Normalize to get $\vec{n}$:
+-    $$ \vec{n} = \frac{\vec{n}_{raw}}{\|\vec{n}_{raw}\|} $$
+-    [S1]
+-
+-2.  **Front/Back Determination:**
+-    Calculate the dot product between the triangle normal $\vec{n}$ and the filling direction $\vec{d}$. The triangle is considered front-facing if the dot product is less than or equal to zero:
+-    $$ \text{front} = (\vec{n} \cdot \vec{d} \le 0) $$
+-    This implies that if the normal points opposite to the viewing/filling direction, the face is front-facing [S1].
+-
+-3.  **Voxel Intersection and Flagging:**
+-    For each voxel in the grid:
+-    a. Check if the voxel's Axis-Aligned Bounding Box (AABB) intersects the triangle. This is typically done by checking if the triangle's AABB intersects the voxel's AABB, followed by a precise plane-AABB intersection test [S1].
+-    b. If an intersection occurs:
+-       i. Set `voxel.fill = 1`.
+-       ii. If `voxel.fill` was previously 0 (not yet marked), set `voxel.front = front`.
+-       iii. If `voxel.fill` was already 1 (already marked by another triangle), update the flag using logical AND:
+-       $$ \text{voxel.front} = \text{voxel.front} \ \& \ \text{front} $$
+-       This prioritizes the back-facing state; if a voxel is intersected by both a front and a back face, the resulting flag is false (back) [S1].
++**Steps:**
++1. **Triangle Normal Calculation:** For each triangle with vertices $\vec{a}, \vec{b}, \vec{c}$, compute the edge vectors $\vec{f_0} = \vec{b} - \vec{a}$ and $\vec{f_1} = \vec{c} - \vec{a}$. Calculate the unnormalized normal $\vec{n}_{raw} = \vec{f_1} \times \vec{f_0}$. Normalize to get $\vec{n} = \frac{\vec{n}_{raw}}{||\vec{n}_{raw}||}$.
++2. **Front/Back Determination:** Compute the dot product $dot = \vec{n} \cdot \vec{d}$. The triangle is considered front-facing if $dot \le 0$. This condition implies the normal points generally opposite to the filling direction.
++3. **Voxel Intersection:** Determine which voxels in the grid intersect the triangle. This is typically done by checking the triangle's AABB against voxel AABBs or using a rasterization-like approach.
++4. **Flag Update:** For each intersected voxel:
++   - Set `voxel.fill = 1`.
++   - If `voxel.fill` was previously 0 (not yet marked), set `voxel.front = front`.
++   - If `voxel.fill` was already 1 (already intersected by another triangle), update the flag using logical AND: `voxel.front = voxel.front & front`. This prioritizes the back-facing state (if `front` is false, the result is false; if `front` is true, it remains unchanged only if it was already true, but effectively, if a back-facing triangle intersects, it overrides a previous front-facing flag only if the logic is interpreted as "back takes precedence". The source code `voxel.front = voxel.front & front` means if `front` is false (back), the result is false. If `front` is true (front), the result is the previous value. Thus, a back-facing triangle forces the flag to false (back), while a front-facing triangle preserves the existing state. This implements the rule: "prioritize the back").
++   - Update the voxel in the volume array.
+ 
+ **Pseudocode:**
+-
+ ```python
+-def compute_front_back_flag(triangle, voxel_grid, fill_direction):
++def front_back_face_flagging(triangles, voxel_grid, fill_direction):
+     """
+-    triangle: object with attributes a, b, c (Vector3)
+-    voxel_grid: 3D array of Voxel objects
+-    fill_direction: Vector3
++    triangles: List of Triangle objects, each with vertices a, b, c.
++    voxel_grid: 3D array of Voxel objects.
++    fill_direction: Vector3, e.g., (0, 0, 1).
+     """
+-    # 1. Calculate Normal
+-    edge1 = triangle.b - triangle.a
+-    edge2 = triangle.c - triangle.a
+-    normal_raw = cross(edge1, edge2)
+-    normal = normalize(normal_raw)
+-    
+-    # 2. Determine Front/Back status for this triangle
+-    # Front if dot product <= 0
+-    is_front = dot(normal, fill_direction) <= 0.0
+-    
+-    # 3. Iterate over voxels (optimization: only check voxels within triangle's AABB)
+-    for x, y, z in voxel_grid.indices_intersecting(triangle.aabb):
+-        voxel = voxel_grid[x, y, z]
++    for tri in triangles:
++        # 1. Calculate Normal
++        f0 = tri.b - tri.a
++        f1 = tri.c - tri.a
++        normal_raw = cross(f0, f1)
++        normal = normalize(normal_raw)
+         
+-        # Check intersection between triangle and voxel AABB
+-        if intersects_triangle_aabb(triangle, voxel.aabb):
++        # 2. Determine Front/Back
++        # Front if dot(normal, fill_direction) <= 0
++        is_front = dot(normal, fill_direction) <= 0.0
++        
++        # 3. Find Intersecting Voxels
++        # Assuming a helper function that returns list of (x, y, z) indices
++        intersecting_voxels = get_intersecting_voxel_indices(tri, voxel_grid)
++        
++        for (x, y, z) in intersecting_voxels:
++            voxel = voxel_grid[x, y, z]
++            
++            # Mark as filled
+             voxel.fill = 1
+-            voxel.position = voxel.aabb.center
++            voxel.position = voxel_grid.get_center(x, y, z)
+             
+-            if voxel.fill == 0:
+-                # First time marking this voxel
++            # 4. Update Front Flag
++            # If not yet filled, set flag directly
++            if voxel.fill == 0: # This check is technically redundant if we set fill=1 above, 
++                                # but logically we check if it was *previously* unfilled.
++                                # Based on source: "If the voxels are not yet filled"
++                                # We need to check the state *before* setting fill=1.
++                                pass 
++            
++            # Correct logic based on source snippet:
++            # if(voxel.fill & 1 == 0) { voxel.front = front; }
++            # else { voxel.front = voxel.front & front; }
++            
++            if (voxel.fill & 1) == 0:
+                 voxel.front = is_front
+             else:
+-                # Already marked: prioritize back (AND logic)
+-                # If current is_front is False (back), result becomes False
+-                # If current is_front is True (front), result stays True only if new is_front is True
++                # Prioritize back: if is_front is False (back), result is False.
++                # If is_front is True (front), result is previous value.
+                 voxel.front = voxel.front and is_front
+             
++            voxel.fill = 1
+             voxel_grid[x, y, z] = voxel
+-
+-def intersects_triangle_aabb(triangle, aabb):
+-    """
+-    Simplified intersection check using Plane-AABB intersection.
+-    """
+-    # Create plane from triangle
+-    # Plane equation: N . X + D = 0
+-    # D = -N . A
+-    normal = triangle.normal
+-    distance = -dot(normal, triangle.a)
+-    plane = Plane(normal, distance)
+-    
+-    # Check if plane intersects AABB
+-    center = aabb.center
+-    extents = aabb.max - center
+-    
+-    # Project extents onto normal
+-    r = (abs(plane.normal.x) * extents.x +
+-         abs(plane.normal.y) * extents.y +
+-         abs(plane.normal.z) * extents.z)
+-    
+-    # Distance from plane center to AABB center
+-    s = dot(plane.normal, center) - plane.distance
+-    
+-    return abs(s) <= r
+ ```
+ 
+ **Parameters:**
+-*   `fill_direction`: The direction vector used to determine orientation. In the reference implementation, this is $(0, 0, 1)$ [S1].
++- `fill_direction`: The direction vector used to determine front/back orientation. Typical value: $(0, 0, 1)$ (forward Z-axis) [S1].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Degenerate Triangles:** If the triangle vertices are collinear, the normal calculation results in a zero vector, causing normalization to fail. [G] Guard against zero-length normals by skipping such triangles.
+-*   **Non-Watertight Meshes:** If the mesh is not closed, the front/back flags may not correctly enclose a volume, leading to incorrect interior filling in subsequent steps [S1].
+-*   **Precision:** Floating-point precision errors in the dot product or cross product may cause ambiguous orientation for triangles nearly parallel to the filling direction. [G] Use a small epsilon threshold when comparing the dot product to zero if necessary.
++- **Degenerate Triangles:** Triangles with zero area (collinear vertices) produce zero-length normals. Normalization will fail or produce NaN. Guard against this by checking `||\vec{n}_{raw}|| < \epsilon` [G].
++- **Precision:** Floating-point precision in dot product calculations may cause ambiguity on coplanar surfaces. Using a small epsilon for the comparison $dot \le \epsilon$ can help [G].
++- **Multiple Intersections:** The AND logic assumes that if a voxel is hit by both front and back faces, the back face is the "true" surface orientation for filling. This may not hold for non-manifold geometry or complex self-intersecting meshes [S1].
+ 
+ ## Subtopics
+ 
+-### Inside-Outside Voxelization
+-Determines whether a grid cell is inside or outside a solid obstacle using stencil buffer operations, inspired by stencil shadow volumes [S2, unofficial]. It renders the input triangle mesh into each slice of a 3D texture using an orthogonal projection, initializing a stencil buffer to zero. Stencil operations increment for back faces and decrement for front faces (with wrapping). Interior cells receive a nonzero stencil value [S2, unofficial]. It depends on having one back face for every front face, making it best suited to watertight closed meshes [S2, unofficial]. Far clip plane is set to infinity, and near clip plane matches the depth of the current slice [S2, unofficial].
++### [Inside-Outside Voxelization](3081-inside-outside-voxelization.md)
++Determines whether a grid cell is inside or outside a solid obstacle using stencil buffer operations, inspired by stencil shadow volumes. It differs from Front/Back Face Flagging by using GPU stencil buffers rather than CPU-side geometric flagging, and is chosen when hardware-accelerated rasterization is available and the scene is complex [3081-inside-outside-voxelization.md].
+ 
+ ### Solid Mesh Auto-Fill
+-A feature to auto-fill the interior of a surface mesh during voxelization, converting the mesh into a solid volume [S3]. It is considerably slower and not robust, potentially leading to artifacts and holes in complex meshes [S3]. Setting this flag turns off greyscale values (background becomes 0, mesh becomes 255) because material data inside the mesh is unavailable [S3]. The flag is ignored if the input contains only Tetrahedron data or if the `use_tetra` flag is set, as these are not surface meshes [S3].
++A feature to auto-fill the interior of a surface mesh during voxelization, converting the mesh into a solid volume. It is not a separate flagging method but a consumer of the flagging data. It is slower and less robust than other methods, potentially leading to artifacts and holes in complex meshes. It turns off greyscale values (background 0, mesh 255) because internal material data is unknown. It is ignored if the input is Tetrahedron data or if the `use_tetra` flag is set [S2].
+ 
+ ### Inside/Outside Inversion
+-By default, values above the surface level are considered internal. When enabled, this option swaps the inside and outside definitions [S4].
++By default, values above the surface level are considered internal. When enabled, this option swaps the inside and outside. This is a post-processing or configuration step that inverts the interpretation of the filled voxels, rather than changing the flagging algorithm itself [S3].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N \cdot M)$, where $N$ is the number of triangles and $M$ is the number of voxels intersected by those triangles. In practice, spatial acceleration structures (like AABB trees or voxel grids) reduce the number of intersection tests [S1].
+-*   **Memory Complexity:** $O(V)$, where $V$ is the total number of voxels in the grid, as each voxel stores `fill` and `front` flags [S1].
+-*   **Strengths:** Simple to implement; provides explicit orientation data required for directional filling algorithms [S1].
+-*   **Limitations:** Requires a defined filling direction; does not inherently handle non-watertight meshes or complex topology without additional logic [S1]. The related "Solid Mesh Auto-Fill" variant is noted as slow and prone to artifacts [S3].
++- **Time Complexity:** $O(N \cdot M)$, where $N$ is the number of triangles and $M$ is the average number of voxels intersected per triangle. The intersection test is $O(1)$ per voxel, but finding intersecting voxels can be expensive if not optimized (e.g., using spatial hashing or bounding volume hierarchies).
++- **Memory Complexity:** $O(V)$, where $V$ is the total number of voxels in the grid, as each voxel stores `fill` and `front` flags.
++- **Strengths:** Simple to implement; provides explicit geometric orientation; deterministic.
++- **Limitations:** Sensitive to triangle winding order; requires a defined filling direction; may produce incorrect results for non-manifold or self-intersecting meshes; the AND logic for multiple intersections is heuristic [S1].
++- **When to use:** When a simple, deterministic surface orientation is needed for interior filling, and the mesh is well-formed.
++- **When not to use:** For complex, non-manifold meshes where robustness is critical; when GPU acceleration is preferred (use Inside-Outside Voxelization instead).
+ 
+ ## Background
+-The method originates from real-time GPU-based voxelization techniques, specifically detailed in the context of Unity graphics programming and real-time fluid simulation [S1][S2, unofficial]. It is used to prepare voxel data for subsequent interior filling processes, such as those found in fluid dynamics simulations where distinguishing between interior and exterior voxels is critical [S1][S2, unofficial].
++The method originates from real-time GPU-based voxelization techniques, specifically as described in "Real-Time GPU-Based Voxelizer" by Frederic [S1]. It is used in Unity-based graphics programming to prepare mesh data for volume rendering or collision detection. The concept of using front/back flags to distinguish interior from exterior is a common heuristic in voxelization algorithms that rely on directional filling.
+ 
+ ## Sources
+ [S1] Real-Time GPU-Based Voxelizer - GitHub Pages, https://freder.github.io/UnityGraphicsProgrammingBook1/html-translated/vol2/Chapter%201%20_%20Real-Time%20GPU-Based%20Voxelizer.html, fetched 2026-10-27
+-[S2] PDF Real-Time Simulation and Rendering of 3D Fluids, https://wo1fsea.github.io/files/About_NavMesh/P5_GPU_Gems_3_Real-Time_Simulation_and_Rendering_of_3D_Fluids.pdf, fetched 2026-10-27 (unofficial)
+-[S3] CudaVox · PyPI, https://pypi.org/project/CudaVox/, fetched 2026-10-27
+-[S4] FireSmoke Rendering - Phoenix for 3ds Max, https://documentation.chaos.com/space/PHX4MAX/124396558, fetched 2026-10-27+[S2] CudaVox · PyPI, https://pypi.org/project/CudaVox/, fetched 2026-10-27
++[S3] FireSmoke Rendering - Phoenix for 3ds Max, https://documentation.chaos.com/space/PHX4MAX/124396558, fetched 2026-10-27

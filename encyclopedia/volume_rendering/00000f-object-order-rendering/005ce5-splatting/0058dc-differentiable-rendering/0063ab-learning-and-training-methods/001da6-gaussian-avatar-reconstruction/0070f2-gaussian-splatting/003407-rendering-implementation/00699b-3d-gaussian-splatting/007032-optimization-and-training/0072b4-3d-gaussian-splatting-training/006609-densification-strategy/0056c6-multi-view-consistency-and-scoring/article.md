@@ -1,0 +1,25 @@
+# Multi-view Consistency and Scoring
+
+
+## Overview
+Multi-view Consistency and Scoring is a family of densification strategies for 3D Gaussian Splatting that evaluates Gaussian primitives across multiple camera views to guide densification and pruning operations. It builds on [Densification Strategy](6234-densification-strategy.md) by incorporating multi-view photometric loss and alpha contributions to identify regions requiring refinement or removal. Unlike its siblings [Multi-view Alpha-based Densification and Pruning](15406-multi-view-alpha-based-densification-and-pruning.md) and [Multi-View Consistency Scoring for Densification](15464-multi-view-consistency-scoring-for-densification.md), this family explicitly integrates importance and pruning scores derived from multi-view photometric loss and alpha contributions into the standard gradient masks, ensuring that densification occurs only where geometry is consistently unresolved across views.
+
+## Shared principles
+The shared principles for this family are defined in [Densification Strategy](6234-densification-strategy.md).
+
+## Subtopics
+
+### [Multi-view Alpha-based Densification and Pruning](15406-multi-view-alpha-based-densification-and-pruning.md)
+Replaces single-view gradient-based criteria with multi-view evaluation to constrain Gaussian count and ensure structural consistency. It explicitly integrates importance and pruning scores derived from photometric loss and alpha contributions into the standard gradient masks.
+
+### [Multi-View Consistency Scoring for Densification](15464-multi-view-consistency-scoring-for-densification.md)
+Computes per-Gaussian scores based on multi-view photometric consistency to guide both densification (importance) and pruning. It differs from standard gradient-based densification by aggregating L1 reconstruction errors across multiple camera views, identifying Gaussians that consistently fail to reconstruct the scene geometry or appearance.
+
+### Multi-view augmented densification
+A densification module that adjusts the densification threshold based on multi-view discrepancies to help 3D Gaussians fit each view better and capture finer scene details [S1]. When the measured discrepancies between views become large, it increases the densification effect by adding half of the original densification threshold ($\beta/2$) to the active threshold [S1]. The method relies on a Heaviside step function $H(\cdot)$ to gate the discrepancy calculation, returning 1 if the input is $\ge 0$, which prevents negative discrepancy values from triggering densification [S1]. The adjusted threshold is defined as $\hat{\beta} = \beta - \frac{\beta}{2} H(r_\tau^i - 1)$, where $\tau$ is a predefined hyperparameter adjusting the extent of the discrepancy between each camera, and $\beta$ is the original baseline threshold for standard Gaussian densification [S1].
+
+## Background
+The concept of multi-view consistency in Gaussian Splatting was introduced in MVGS (Multi-view-regulated Gaussian Splatting for Novel View Synthesis) [S1]. The method regulates densification through multi-view constraints to facilitate better multi-view training and capture finer scene details [S1].
+
+## Sources
+[S1] MVGS: Multi-view-regulated Gaussian Splatting for Novel View Synthesis, https://doi.org/10.48550/arXiv.2410.02103, fetched 2026-11-03

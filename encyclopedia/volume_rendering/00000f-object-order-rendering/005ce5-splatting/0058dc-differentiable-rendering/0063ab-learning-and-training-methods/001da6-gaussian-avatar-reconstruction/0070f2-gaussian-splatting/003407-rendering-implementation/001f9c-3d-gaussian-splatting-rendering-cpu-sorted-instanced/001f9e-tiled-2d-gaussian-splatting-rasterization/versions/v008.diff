@@ -1,0 +1,428 @@
+--- v007.md
++++ v008.md
+@@ -1,183 +1,176 @@
+ # Tiled 2D Gaussian Splatting Rasterization
+ 
+-Also called: 3D Gaussian Splatting Rasterization (GPU), 3DGS Rasterization, Gaussian Rasterization (GPU)
++Also called: 3D Gaussian Rasterization (Forward Pass), 3D Gaussian Splatting Forward Rendering Pipeline, 3DGS Rasterization, CUDA Gaussian Rasterizer, CudaRasterizer::Rasterizer::forward, Gaussian Rasterization (GPU), Tile-based Gaussian Rasterization, Tiled Rendering of 3DGS
+ 
+ ## Overview
+-Tiled 2D Gaussian Splatting Rasterization is a highly optimized, differentiable GPU-based rendering method for 3D Gaussian Splatting that partitions the image plane into macro-tiles to enable efficient, parallel alpha-blending [S1, S3, unofficial]. It solves the performance bottleneck of naive splatting by grouping pixels into tiles, sorting Gaussians by depth once per tile, and using shared memory to minimize global memory traffic during the compositing pass [S1, S3, unofficial]. Unlike its sibling [Gaussian Splat Rendering (Screen-Space Quad)](2075-gaussian-splat-rendering-screen-space-quad.md), which relies on standard graphics pipeline alpha blending via quad primitives, this method performs explicit pixel-wise accumulation in a compute or fragment shader, allowing for precise control over transmittance and early termination [S4, unofficial][S5].
++Tiled 2D Gaussian Splatting Rasterization is a GPU-optimized, tile-based rendering method for 3D Gaussian Splatting (3DGS) that partitions the image plane into macro-tiles (typically 16×16 or 32×32 pixels) to efficiently composite sorted Gaussian primitives via iterative alpha-blending [S1, S2, S3, S4, S5, S6, unofficial]. It solves the performance bottleneck of evaluating millions of splats against every pixel by binning Gaussians to tiles, sorting them by depth, and processing each tile in parallel using CUDA thread blocks with shared memory synchronization [S1, S2, S4, S5, unofficial]. Unlike its sibling [Gaussian Splat Rendering (Screen-Space Quad)](2075-gaussian-splat-rendering-screen-space-quad.md) which relies on standard graphics pipeline alpha blending, or [Non-Tiled 2D Gaussian Splatting with Transmittance Culling](2067-non-tiled-2d-gaussian-splatting-with-transmittance-culling.md) which iterates over Gaussians, this method explicitly manages memory and computation per tile to enable real-time training and rendering [S1, S2, S6, unofficial].
+ 
+ ## How it works
+-**Inputs:**
+-- 3D Gaussian attributes: Mean position $\mu_i \in \mathbb{R}^3$, 3D covariance $\Sigma_i \in \mathbb{R}^{3 \times 3}$ (or rotation/scale), opacity logit $o_i \in \mathbb{R}$, and Spherical Harmonics (SH) coefficients for color.
+-- Camera parameters: Intrinsics ($f_x, f_y, c_x, c_y$), extrinsics (world-to-camera rotation $R$ and translation $t$), image dimensions ($W, H$), and near/far planes.
+-- Rasterization parameters: Tile size (typically $16 \times 16$ or $32 \times 32$ pixels), sigma multiplier (typically 3.0) for bounding box extent, and transmittance threshold for early termination (e.g., 0.99) [S1, S3, unofficial].
+-
+-**Outputs:**
+-- Rendered color image $C \in \mathbb{R}^{3 \times H \times W}$.
+-- Rendered alpha image $\alpha \in \mathbb{R}^{H \times W}$.
+-- Intermediate transmittance values $T$ (for backward pass) [S2, unofficial].
++**Inputs and Outputs:**
++*   **Inputs:** 3D Gaussian parameters (means $\mathbf{x}$, scales $\mathbf{s}$, rotations $\mathbf{r}$, opacities $\alpha_{logit}$, spherical harmonics coefficients $\mathbf{c}_{SH}$), camera parameters (view matrix $\mathbf{V}$, projection matrix $\mathbf{P}$, focal lengths $f_x, f_y$, image dimensions $W, H$), and background color $\mathbf{b}$ [S1, S4, S5, S6, unofficial].
++*   **Outputs:** Rendered color image $\mathbf{C}$ (shape $[3, H, W]$), accumulated alpha $\mathbf{A}$ (shape $[H, W]$), and auxiliary buffers for gradients (depth, surface distance, etc.) [S4, S5, S6, unofficial].
+ 
+ **Data Structures:**
+-1. **Gaussian Attributes:** Stored in Structure-of-Arrays (SoA) format on the GPU for coalesced memory access.
+-2. **Tile Bins:** An array defining the start and end indices of Gaussians assigned to each tile in the sorted list.
+-3. **Sorted Gaussian List:** A list of Gaussian indices sorted first by tile ID, then by view-space depth (back-to-front) within each tile [S1, S3, unofficial].
+-
+-**Steps:**
+-
+-1. **Camera Space Transformation:**
+-   Transform Gaussian means to camera space: $\mu_{cam} = R \mu_{world} + t$ [S3, unofficial].
+-   Transform 3D covariance to camera space: $\Sigma_{cam} = R \Sigma_{world} R^T$ [S3, unofficial].
+-
+-2. **2D Projection and Covariance Approximation:**
+-   Project means to 2D image coordinates $(u, v)$ using pinhole camera model [S3, unofficial].
+-   Compute the 2D covariance matrix $\Sigma_{2D}$ using the Jacobian $J$ of the projection function and the view matrix $W$:
+-   $$ \Sigma_{2D} = J W \Sigma_{cam} W^T J^T $$
+-   Approximate $\Sigma_{2D}$ by ignoring the third row/column of $J$ (affine approximation) or using a more precise method with an epsilon term $\epsilon$ to prevent singularities:
+-   $$ \Sigma'_{2D} = \begin{bmatrix} \Sigma_{2D,11} + \epsilon & \Sigma_{2D,12} \\ \Sigma_{2D,12} & \Sigma_{2D,22} + \epsilon \end{bmatrix} $$
+-   [S3, S4, unofficial].
+-
+-3. **Conic Computation:**
+-   Compute the inverse of the 2D covariance (conic matrix) $K = \Sigma_{2D}^{-1}$:
+-   $$ K = \begin{bmatrix} a & b \\ b & c \end{bmatrix} $$
+-   where $a = \Sigma'_{2D,22}/\det(\Sigma'_{2D})$, $b = -\Sigma'_{2D,12}/\det(\Sigma'_{2D})$, $c = \Sigma'_{2D,11}/\det(\Sigma'_{2D})$ [S3, unofficial].
+-
+-4. **Bounding Box and Tile Assignment:**
+-   Compute the axis-aligned bounding box (AABB) for each Gaussian in screen space. The radius is typically defined as $r = \lceil 3 \sqrt{\lambda_{max}} \rceil$ where $\lambda_{max}$ is the larger eigenvalue of $\Sigma_{2D}$ [S1, unofficial].
+-   Assign each Gaussian to all tiles that intersect its AABB [S1, S3, unofficial].
+-   *Optimization:* Use tighter bounding boxes (e.g., SnugBox or AccuTile) to reduce over-assignment [S1, unofficial].
+-
+-5. **Sorting:**
+-   Generate a unique ID for each Gaussian-tile intersection.
+-   Sort the Gaussians globally by tile ID, and within each tile, sort by view-space depth (back-to-front) using a radix sort [S1, S3, unofficial].
+-   Compute tile bin edges to know the range of Gaussians belonging to each tile in the sorted list [S2, S3, unofficial].
+-
+-6. **Rasterization (Per Tile):**
+-   Assign one CUDA thread block (or GPU workgroup) to each tile [S1, unofficial].
+-   Threads cooperatively fetch the sorted Gaussians for their assigned tile from global memory into shared memory [S1, unofficial][S5].
+-   For each pixel $(u, v)$ in the tile:
+-   a. Initialize accumulated color $C_{pix} = 0$ and transmittance $T_{pix} = 1.0$ [S3, unofficial].
+-   b. Iterate through the sorted Gaussians in the tile.
+-   c. Compute the squared Mahalanobis distance:
+-      $$ dist\_sq = a(u - u_{mean})^2 + 2b(u - u_{mean})(v - v_{mean}) + c(v - v_{mean})^2 $$
+-      [S3, unofficial].
+-   d. Compute opacity $\alpha_i$ at the pixel:
+-      $$ \alpha_i = \text{sigm}(o_i) \exp(-\frac{1}{2} dist\_sq) $$
+-      [S3, S4, unofficial].
+-   e. Compute contribution:
+-      $$ C_{contrib} = c_i \cdot \alpha_i \cdot T_{pix} $$
+-      [S1, unofficial].
+-   f. Update pixel color and transmittance:
+-      $$ C_{pix} \leftarrow C_{pix} + C_{contrib} $$
+-      $$ T_{pix} \leftarrow T_{pix} \cdot (1 - \alpha_i) $$
+-      [S1, unofficial].
+-   g. **Early Termination:** If $T_{pix} < 1 - \text{threshold}$ (e.g., 0.01), stop processing further Gaussians for this pixel [S1, S3, unofficial].
+-
+-7. **Background Compositing:**
+-   After processing all tiles, add the background color $C_{bg}$ weighted by the final transmittance:
+-   $$ C_{final}(u, v) = C_{pix}(u, v) + C_{bg}(u, v) \cdot T_{pix}(u, v) $$
+-   [S3, unofficial].
++The method relies on three primary state buffers allocated on the GPU [S4, S5, unofficial]:
++1.  **GeometryState** (per-Gaussian, size $P$):
++    *   `depths`: float, view-space depth of Gaussian mean.
++    *   `means2D`: float2, projected 2D center $(u, v)$.
++    *   `conic_opacity`: float4, inverse 2D covariance matrix components $(a, b, c)$ and pre-computed opacity term. Specifically, the conic matrix $\mathbf{C}^{-1} = \begin{bmatrix} a & b \\ b & c \end{bmatrix}$ [S4, S5, S6, unofficial].
++    *   `rgb`: float3, pre-computed color from SH evaluation.
++    *   `tiles_touched`: uint32_t, count of tiles the Gaussian overlaps.
++    *   `point_offsets`: uint32_t, starting index in the flattened binning list.
++2.  **BinningState** (sorting buffers):
++    *   `point_list_keys_unsorted`: uint64_t, 64-bit key encoding tile ID and Gaussian index.
++    *   `point_list_unsorted`: uint32_t, Gaussian index.
++    *   `point_list_keys`: uint64_t, sorted keys.
++    *   `point_list`: uint32_t, sorted Gaussian indices.
++    *   `list_sorting_space`: char*, temporary space for radix sort.
++3.  **ImageState** (per-pixel/tile):
++    *   `accum_alpha`: float, accumulated transmittance (initially 1.0).
++    *   `n_contrib`: uint32_t, number of Gaussians contributing to the pixel.
++    *   `ranges`: uint2, start and end indices in `point_list` for each tile.
++
++**Numbered Steps:**
++
++1.  **Preprocessing and Projection:**
++    For each Gaussian $i$ with $P$ total Gaussians:
++    a. Transform mean $\mathbf{x}_i$ to camera space: $\mathbf{x}_i^c = \mathbf{V} \mathbf{x}_i$.
++    b. Rotate 3D covariance $\Sigma_i$ to camera space: $\Sigma_i^c = \mathbf{R}_V \Sigma_i \mathbf{R}_V^T$.
++    c. Project to 2D screen space using the Jacobian of the perspective projection to compute the 2D covariance $\Sigma_i^{2D}$ [S4, S6, unofficial].
++    d. Compute the 2D conic (inverse covariance) $\mathbf{C}_i^{-1} = (\Sigma_i^{2D})^{-1} = \begin{bmatrix} a_i & b_i \\ b_i & c_i \end{bmatrix}$ [S4, S5, S6, unofficial].
++    e. Evaluate Spherical Harmonics to get color $\mathbf{c}_i$ and apply opacity sigmoid: $\alpha_i = \sigma(\alpha_{logit, i})$ [S4, S6, unofficial].
++    f. Compute axis-aligned bounding box (AABB) or bounding radius to determine which tiles the Gaussian overlaps. A Gaussian is assigned to a tile if its ellipse intersects the tile [S1, S4, S6, unofficial].
++    g. Generate sorting keys: For each overlapping tile $t$, create a 64-bit key combining tile ID and depth (for sorting), and duplicate the Gaussian index [S4, S5, unofficial].
++
++2.  **Binning and Sorting:**
++    a. Collect all (key, value) pairs from all Gaussians into unsorted arrays `point_list_keys_unsorted` and `point_list_unsorted` [S4, S5, unofficial].
++    b. Perform a device-side radix sort on `point_list_keys_unsorted` to group Gaussians by tile and sort them by depth within each tile [S4, S5, unofficial].
++    c. Identify tile ranges: Scan the sorted keys to find the start and end indices for each tile in the sorted `point_list` array, storing these in `ImageState.ranges` [S4, S5, unofficial].
++
++3.  **Tile-Based Rasterization (Forward Pass):**
++    a. Launch a CUDA kernel where each thread block is assigned to one tile [S1, S2, S4, unofficial].
++    b. Each thread block loads the sorted Gaussians for its tile into shared memory `Shmem` [S2, S4, unofficial].
++    c. For each pixel $(u, v)$ in the tile (mapped to a thread):
++        i. Initialize accumulated transmittance $T = 1.0$ and color $\mathbf{C} = \mathbf{b}$ [S4, S6, unofficial].
++        ii. Iterate through the sorted Gaussians for this tile. For each Gaussian $i$:
++            - Compute squared Mahalanobis distance: $dist\_sq = a_i (u - u_i)^2 + 2 b_i (u - u_i)(v - v_i) + c_i (v - v_i)^2$ [S6, unofficial].
++            - Compute opacity contribution: $\alpha_i^{pixel} = \alpha_i \exp(-\frac{1}{2} dist\_sq)$ [S7, unofficial].
++            - Update color and transmittance:
++              $$\mathbf{C} \leftarrow \mathbf{C} + \mathbf{c}_i \alpha_i^{pixel} T$$
++              $$T \leftarrow T (1 - \alpha_i^{pixel})$$
++            - Early termination: If $T < \epsilon$ (e.g., 0.01), break the loop [S1, S6, unofficial].
++        iii. Store final $\mathbf{C}$ and $1-T$ (alpha) to image buffers [S4, S6, unofficial].
++    d. Synchronize threads within the block to ensure shared memory consistency [S2, unofficial].
++
++4.  **Background Compositing:**
++    Add the background color weighted by the final transmittance: $\mathbf{C}_{final} = \mathbf{C} + \mathbf{b} (1 - \mathbf{A})$ [S6, unofficial].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def tiled_rasterization(gaussians, camera, tile_size=32):
+-    # 1. Transform to camera space
+-    means_cam = camera.transform_points_world_to_cam(gaussians.means)
+-    covs_cam = camera.rotate_covariances_world_to_cam(gaussians.cov3d)
++import torch
++import math
++
++def tiled_gaussian_rasterization(
++    means2D: torch.Tensor,      # [P, 2]
++    conics: torch.Tensor,       # [P, 3] (a, b, c)
++    opacities: torch.Tensor,    # [P]
++    colors: torch.Tensor,       # [P, 3]
++    depths: torch.Tensor,       # [P]
++    tile_ranges: torch.Tensor,  # [num_tiles, 2] (start, end indices in sorted list)
++    sorted_gaussian_indices: torch.Tensor, # [num_rendered]
++    image_width: int,
++    image_height: int,
++    tile_size: int = 16,
++    bg_color: torch.Tensor = torch.tensor([0.0, 0.0, 0.0])
++):
++    """
++    Simulates the tiled rasterization logic for a single tile.
++    In practice, this is executed in parallel by CUDA threads.
++    """
++    num_tiles_x = math.ceil(image_width / tile_size)
++    num_tiles_y = math.ceil(image_height / tile_size)
+     
+-    # 2. Project to 2D
+-    means_2d = camera.project_points_cam_to_image_plane(means_cam)
+-    covs_2d = camera.approximate_2d_covariances(covs_cam, means_cam, means_2d)
++    # Initialize output buffers
++    out_color = torch.zeros((3, image_height, image_width), dtype=torch.float32)
++    out_alpha = torch.zeros((image_height, image_width), dtype=torch.float32)
+     
+-    # 3. Compute Conics (Inverse Covariance)
+-    # Add epsilon to diagonal for stability
+-    eps = 0.3
+-    det = (covs_2d[:, 0, 0] + eps) * (covs_2d[:, 1, 1] + eps) - covs_2d[:, 0, 1]**2
+-    a = (covs_2d[:, 1, 1] + eps) / det
+-    b = -covs_2d[:, 0, 1] / det
+-    c = (covs_2d[:, 0, 0] + eps) / det
+-    
+-    # 4. Compute Bounding Boxes and Assign to Tiles
+-    # sigma_multiplier typically 3.0
+-    radius = sigma_multiplier * sqrt(max(eigenvalue(covs_2d)))
+-    bboxes = compute_axis_aligned_bounding_box(means_2d, radius)
+-    tile_assignments = assign_gaussians_to_tiles(bboxes, tile_size, image_width, image_height)
+-    
+-    # 5. Sort Gaussians
+-    # Create unique IDs: (tile_idx << 32) | gaussian_idx
+-    isect_ids = generate_intersect_ids(tile_assignments)
+-    sorted_indices = torch.sort(isect_ids).indices
+-    sorted_gaussian_ids = torch.gather(gaussians.ids, 0, sorted_indices)
+-    
+-    # Compute tile bins (start/end index in sorted list for each tile)
+-    tile_bins = compute_tile_bin_edges(tile_assignments, num_tiles)
+-    
+-    # 6. Rasterize Kernel (Executed on GPU)
+-    # Each thread block handles one tile
+-    output_color = torch.zeros(3, image_height, image_width)
+-    output_alpha = torch.zeros(image_height, image_width)
+-    final_transmittance = torch.ones(image_height, image_width)
+-    
+-    for tile_idx in range(num_tiles):
+-        start_idx, end_idx = tile_bins[tile_idx]
+-        if start_idx == end_idx:
+-            continue
+-            
+-        # Fetch sorted Gaussians for this tile
+-        tile_gaussian_ids = sorted_gaussian_ids[start_idx:end_idx]
+-        tile_opacities = gaussians.opacities[tile_gaussian_ids]
+-        tile_means = means_2d[tile_gaussian_ids]
+-        tile_conics = torch.stack([a[tile_gaussian_ids], b[tile_gaussian_ids], c[tile_gaussian_ids]], dim=1)
+-        tile_colors = eval_spherical_harmonics_color(gaussians.sh_coeffs, tile_gaussian_ids, camera.directions)
+-        
+-        # Get pixel coordinates for this tile
+-        u_start = tile_idx % (image_width // tile_size) * tile_size
+-        v_start = (tile_idx // (image_width // tile_size)) * tile_size
+-        u_end = min(u_start + tile_size, image_width)
+-        v_end = min(v_start + tile_size, image_height)
+-        
+-        for u_pix in range(u_start, u_end):
++    # Iterate over tiles (in reality, each tile is a CUDA block)
++    for tile_y in range(num_tiles_y):
++        for tile_x in range(num_tiles_x):
++            tile_idx = tile_y * num_tiles_x + tile_x
++            
++            # Get range of Gaussians for this tile from the sorted list
++            start_idx = tile_ranges[tile_idx, 0].item()
++            end_idx = tile_ranges[tile_idx, 1].item()
++            
++            if start_idx >= end_idx:
++                continue
++                
++            # Extract Gaussians for this tile
++            tile_gaussian_indices = sorted_gaussian_indices[start_idx:end_idx]
++            tile_means2D = means2D[tile_gaussian_indices]
++            tile_conics = conics[tile_gaussian_indices]
++            tile_opacities = opacities[tile_gaussian_indices]
++            tile_colors = colors[tile_gaussian_indices]
++            
++            # Pixel bounds for this tile
++            u_start = tile_x * tile_size
++            v_start = tile_y * tile_size
++            u_end = min(u_start + tile_size, image_width)
++            v_end = min(v_start + tile_size, image_height)
++            
++            # Process pixels in this tile
+             for v_pix in range(v_start, v_end):
+-                if final_transmittance[v_pix, u_pix] < 0.01:
+-                    continue
++                for u_pix in range(u_start, u_end):
++                    accumulated_color = bg_color.clone()
++                    accumulated_transmittance = 1.0
+                     
+-                accumulated_color = 0.0
+-                current_transmittance = final_transmittance[v_pix, u_pix]
+-                
+-                for i in range(len(tile_gaussian_ids)):
+-                    op = tile_opacities[i]
+-                    u_mean, v_mean = tile_means[i]
+-                    a_val, b_val, c_val = tile_conics[i]
+-                    color = tile_colors[i]
++                    # Iterate over Gaussians sorted by depth
++                    for i in range(len(tile_gaussian_indices)):
++                        # Early termination if transmittance is low
++                        if accumulated_transmittance < 0.01:
++                            break
++                            
++                        u_mean = tile_means2D[i, 0]
++                        v_mean = tile_means2D[i, 1]
++                        a, b, c = tile_conics[i, 0], tile_conics[i, 1], tile_conics[i, 2]
++                        alpha_logit = tile_opacities[i]
++                        color = tile_colors[i]
++                        
++                        # Compute opacity at pixel
++                        du = u_pix - u_mean
++                        dv = v_pix - v_mean
++                        dist_sq = a * du**2 + 2 * b * du * dv + c * dv**2
++                        
++                        # Sigmoid opacity and Gaussian falloff
++                        alpha_pixel = torch.sigmoid(alpha_logit) * torch.exp(-0.5 * dist_sq)
++                        
++                        # Alpha blending
++                        accumulated_color = accumulated_color + color * alpha_pixel * accumulated_transmittance
++                        accumulated_transmittance = accumulated_transmittance * (1 - alpha_pixel)
+                     
+-                    du = u_pix - u_mean
+-                    dv = v_pix - v_mean
+-                    dist_sq = a_val * du**2 + 2 * b_val * du * dv + c_val * dv**2
++                    # Store results
++                    out_color[:, v_pix, u_pix] = accumulated_color
++                    out_alpha[v_pix, u_pix] = 1 - accumulated_transmittance
+                     
+-                    alpha = sigmoid(op) * exp(-0.5 * dist_sq)
+-                    
+-                    accumulated_color += color * alpha * current_transmittance
+-                    current_transmittance *= (1 - alpha)
+-                    
+-                    if current_transmittance < 0.01:
+-                        break
+-                
+-                output_color[:, v_pix, u_pix] = accumulated_color
+-                final_transmittance[v_pix, u_pix] = current_transmittance
+-                output_alpha[v_pix, u_pix] = 1 - current_transmittance
+-
+-    # 7. Composite Background
+-    bg_color = torch.zeros(3, image_height, image_width) # Or user-provided
+-    output_color += bg_color * (1 - output_alpha).unsqueeze(0)
+-    
+-    return output_color, output_alpha
++    return out_color, out_alpha
+ ```
+ 
++**Parameters:**
++*   `tile_size`: Default 16×16 or 32×32 pixels [S1, S6, unofficial].
++*   `sigma_multiplier`: Multiplier for Gaussian extent (e.g., 3.0) to determine bounding box size [S6, unofficial].
++*   `epsilon`: Transmittance threshold for early termination (e.g., 0.01) [S1, S6, unofficial].
++
++**Edge Cases and Pitfalls:**
++*   **Non-RGB Channels:** If the scene has non-RGB channels (`NUM_CHANNELS != 3`) and `colors_precomp` is not provided, the method throws a runtime error [S4, S5, unofficial].
++*   **Invisible Gaussians:** Gaussians with `tiles_touched == 0` must be skipped during key generation to avoid invalid memory writes [S5, unofficial].
++*   **Precision:** Floating-point precision in the Mahalanobis distance calculation can affect small Gaussians [S6, unofficial].
++*   **Camera Model:** Restricted to pinhole cameras; cannot compute arbitrary light paths [S8].
++
+ ## Subtopics
+ 
+ ### [Non-Tiled 2D Gaussian Splatting with Transmittance Culling](2067-non-tiled-2d-gaussian-splatting-with-transmittance-culling.md)
+-A rasterization method for 3D Gaussian Splatting that iterates over Gaussians rather than tiles, using axis-aligned bounding boxes to limit pixel iteration and transmittance-based early ray termination for performance optimization. It produces visually identical results to tiled rasterization in most cases but is significantly faster due to early stopping and better culling.
+-
+-### [Opacity-Thresholded Tile Intersection Filtering](2109-opacity-thresholded-tile-intersection-filtering.md)
+-This method filters out 3D Gaussians during the tile intersection phase of tiled rasterization if their opacity falls below a specified threshold, treating their bounding box as effectively empty. It addresses the performance bottleneck caused by large, mostly transparent Gaussians that intersect many tiles but contribute negligible color, thereby reducing the number of Gaussians that require sorting and shading. It sets itself apart from sibling methods by operating specifically on the opacity attribute during the initial culling stage rather than relying on depth, transmittance, or sorting optimizations.
++A rasterization method that iterates over Gaussians rather than tiles, using axis-aligned bounding boxes to limit pixel iteration and transmittance-based early ray termination for performance optimization. It produces visually identical results to tiled rasterization in most cases but is significantly faster due to early stopping and better culling.
+ 
+ ### [Gaussian Splat Projection and Sorting](3369-gaussian-splat-projection-and-sorting.md)
+@@ -194,5 +187,5 @@
+ 
+ ### [Tile-based Rasterization with Radix Sort](7921-tile-based-rasterization-with-radix-sort.md)
+-Tile-based rasterization with radix sort is a GPU-parallel rendering method for 3D Gaussian Splatting that divides the image into tiles to manage memory and processing load, assigning Gaussians to tiles based on their axis-aligned bounding boxes [Parent]. It sets itself apart from non-tiled alternatives by using a single global radix sort to bin splats by tile ID and sort them by depth simultaneously, enabling efficient per-tile processing by GPU thread blocks.
++Tile-based rasterization with radix sort is a GPU-parallel rendering method for 3D Gaussian Splatting that replaces per-pixel sorting with a single global radix sort to establish depth ordering per tile. It solves the performance bottleneck of evaluating millions of splats against every pixel by dividing the image into tiles (typically $16 \times 16$ or $32 \times 32$ pixels) and assigning each Gaussian to the tiles it overlaps, creating one work item per (Gaussian, tile) pair. Unlike [Non-Tiled 2D Gaussian Splatting with Transmittance Culling](2067-non-tiled-2d-gaussian-splatting-with-transmittance-culling.md) which processes pixels individually, or [Gaussian Splat Projection and Sorting](3369-gaussian-splat-projection-and-sorting.md) which may use less efficient sorting strategies, this method bins splats by tile ID and sorts them by depth in a single pass, enabling real-time performance for millions of splats by allowing one GPU thread block to process each tile's sorted list.
+ 
+ ### [Gaussian Splatting Rendering with Camera Pose Override](7971-gaussian-splatting-rendering-with-camera-pose-override.md)
+@@ -206,44 +199,62 @@
+ 
+ ### [DP-GES Rendering](12576-dp-ges-rendering.md)
+-A rendering method that combines 2D surfels with semi-transparent boundaries and 3D Gaussians to achieve high-fidelity, sort-free Gaussian splatting with correct transmittance modulation, eliminating aliasing and popping artifacts.
++DP-GES is a sort-free rendering method that combines 2D surfels with semi-transparent boundaries and 3D Gaussians to achieve high-fidelity novel view synthesis, eliminating aliasing and popping artifacts while enabling correct transmittance modulation. It sets itself apart from its parent [Tiled 2D Gaussian Splatting Rasterization](2061-tiled-2d-gaussian-splatting-rasterization.md) and sibling [Non-Tiled 2D Gaussian Splatting with Transmittance Culling](2067-non-tiled-2d-gaussian-splatting-with-transmittance-culling.md) by introducing a two-stage pipeline: Stage 1 uses z-buffer-based depth peeling to extract the nearest three layers of depth, color, and opacity from surfels, and Stage 2 splats 3D Gaussians without sorting, modulating their weights by the transmittance from the peeled surfel layers. Unlike GES, which uses fully opaque surfels, DP-GES uses semi-transparent boundaries to mitigate aliasing from depth testing and allow differentiable joint optimization.
+ 
+ ### [Per-fragment Voxel-Cell Mask Injection](12613-per-fragment-voxel-cell-mask-injection.md)
+-A technique to inject a per-fragment Signed Distance Field (SDF) evaluation into a compiled fragment shader using THREE.Material.onBeforeCompile, producing clean cube-shaped carves without forking the underlying renderer.
++Per-fragment Voxel-Cell Mask Injection is a technique for carving 3D Gaussian Splatting scenes by injecting a per-fragment Signed Distance Field (SDF) evaluation into a compiled fragment shader. It solves the problem of creating clean, cube-shaped holes in a splat cloud without forking the underlying renderer or deleting whole splats. It differs from its sibling [Non-Tiled 2D Gaussian Splatting with Transmittance Culling](2067-non-tiled-2d-gaussian-splatting-with-transmittance-culling.md) and the baseline [H2](2061-tiled-2d-gaussian-splatting-rasterization.md) approach by operating at the fragment level using a 3D texture lookup, producing sharp cube edges instead of the rough masking artifacts caused by per-splat deletion.
++
++### [Thread-efficient Partial Rendering](13363-thread-efficient-partial-rendering.md)
++Thread-efficient partial rendering is a GPU rasterization optimization for 3D Gaussian Splatting (3DGS) designed to reduce the computational overhead of multi-view training. It solves the problem of low GPU utilization caused by naive binary masking in tiled rendering, where idle threads wait for active threads to finish. Unlike naive multi-view training which renders all pixels for all views, or naive partial rendering with masks which leaves most threads in a block idle, this method maintains the same number of training pixels as single-view training while maximizing parallelization by assigning multiple GPU blocks to a single tile.
++
++### [3D Gaussian Splatting Rasterization (GPU)](13469-3d-gaussian-splatting-rasterization-gpu.md)
++A torch.autograd.Function implementing the forward and backward passes for Gaussian rasterization, handling argument restructuring and buffer management.
++
++### [4D Gaussian Rasterization](13946-4d-gaussian-rasterization.md)
++Renders a scene represented by 4D Gaussians (3D spatial + 1D temporal) into a 2D image for a specific viewpoint and timestamp. It handles time-dependent opacity, position offsets, and spherical harmonics evaluation in 4D.
++
++### [vtkPointGaussianMapper](14148-vtkpointgaussianmapper.md)
++A mapper that renders point clouds as simple points or anisotropic 3D Gaussian splats without requiring verts cells, supporting per-point scale, rotation, opacity, and emissive properties.
+ 
+ ### Mobile-GS
+ A memory-centric rendering design for smartphones that loads only the Gaussians visible in the current view frustum from flash storage, uses a quantized integer representation for positions and colors, and performs the blending in a lower-precision shader [S1, unofficial].
+ 
+-### FlashGS
+-A method focusing on accelerating the forward process by partitioning the screen into finer tiles and scheduling them on a multi-GPU pipeline [S1, unofficial].
+-
+ ### 4D Gaussian Splatting Motion Evaluation
+-A technique for rendering time-varying 3D captures (volumetric video) by storing static per-splat attributes and per-splat motion coefficients in extra textures, evaluated in the vertex shader from a time uniform, avoiding per-frame CPU sorting and texture uploads [S6, unofficial]. It stores static per-splat attributes (position, scale, rotation, color) in standard splat buffers and per-splat motion coefficients (linear or polynomial trajectory parameters) and temporal opacity window parameters in extra textures [S6, unofficial]. The current playback time is passed as a uniform to the vertex shader, where motion coefficients are evaluated to compute current position and opacity [S6, unofficial]. Sorting is performed only occasionally, as motions are assumed to be small enough to not require per-frame sorting for visual correctness [S6, unofficial].
++A technique for rendering time-varying 3D captures (volumetric video) by storing static per-splat attributes and per-splat motion coefficients in extra textures, evaluated in the vertex shader from a time uniform, avoiding per-frame CPU sorting and texture uploads [S9, unofficial]. It stores static per-splat attributes (position, scale, rotation, color) in standard splat buffers, stores per-splat motion coefficients (linear or polynomial trajectory parameters) and temporal opacity window parameters in extra textures, passes the current playback time as a uniform to the vertex shader, evaluates the motion coefficients against the time uniform to compute the current position and opacity for each splat, and performs sorting only occasionally, as motions are assumed to be small enough to not require per-frame sorting for visual correctness [S9, unofficial].
+ 
+ ### AABB Culling for Gaussian Splatting
+-A culling technique that uses an axis-aligned bounding box of the projected Gaussian ellipse to reduce ineffective rendering expenses, specifically addressing the inability of bounding circles to cull low-opacity pairs in the minor axis direction [S7]. It sets the partial derivatives of the ellipse function $F = Ax^2 + By^2 + Cxy + D$ to 0 to find extrema, solving for $x_{max}$ and $y_{max}$ to construct the bounding box [S7]. Tiles are then culled based on this bounding box [S7].
++A culling technique that uses an axis-aligned bounding box of the projected Gaussian ellipse to reduce ineffective rendering expenses, specifically addressing the inability of bounding circles to cull low-opacity pairs in the minor axis direction [S10]. It sets the partial derivatives to 0 to find extrema, substitutes the coordinate relationships into the ellipse function to solve for the maximum coordinate values $x_{max}$ and $y_{max}$, and culls tiles based on the axis-aligned bounding box constructed by $x_{max}$ and $y_{max}$, which correspond to the half-width $w$ and half-height $h$ of the bounding box [S10].
+ 
+ ### Load Balancing for Pixel-parallel Splatting
+-A strategy to address uneven computational load across pixel threads in Gaussian rasterization by reducing the number of Gaussians rendered for heavy-load pixels and increasing it for light-load pixels [S7]. It uses a load balancing loss with weight $\lambda_{load}$ (typically 0.45) and reduces the sum of weights for remaining losses to 0.55 [S7].
++A strategy to address uneven computational load across pixel threads in Gaussian rasterization by reducing the number of Gaussians rendered for heavy-load pixels and increasing it for light-load pixels [S10]. The sum of weights for remaining losses ($\lambda_{L1} + \lambda_{ssim}$) typically has a value of 0.55 [S10].
+ 
+ ### Tight Quad Rasterization with Eigenvalue Decomposition
+-Represents each 3D Gaussian as a quad in Gaussian rasterization [S8]. It decomposes eigenvalues of anisotropic 3D Gaussians into rotation and scale components (2D Eigenvalues in screenspace) [S8]. It computes a non-axis-aligned quad and incorporates splat alpha value into the bound rectangle calculation for tighter fits [S8].
++Represents each 3D Gaussian as a quad in Gaussian rasterization, decomposes eigenvalues of anisotropic 3D Gaussians into rotation and scale components (2D Eigenvalues in screenspace), and computes a non-axis-aligned quad and incorporates splat alpha value into the bound rectangle calculation for tighter fits [S11].
++
++### Adaptive Region Selection
++A rendering strategy for novel viewpoints that prioritizes local Gaussians with higher contributions to avoid floating artifacts and holes [S12]. It trains a coarse global Gaussian representation by downsampling point clouds and images and avoiding densification, renders novel viewpoint using local and global Gaussians separately, calculates matching score $S$ for each local-global Gaussian pair: $S = (1 - \lambda)L1 + \lambda LSSIM$, sorts local Gaussians in descending order based on matching scores, calculates projection opacity $o_i(p)$ for each pixel $p$ and Gaussian $G_i$, and applies the formula $w_i = o_i(p) \prod_{j=1}^{i-1} (1 - o_j(p))$ if $\sum_{j=1}^{i-1} o_j(p) < \beta$; $w_i = 0$ if $\sum_{j=1}^{i-1} o_j(p) \ge \beta$, where $\beta$ is a hyperparameter threshold for overlapped opacity [S12].
+ 
+ ## Operating characteristics
+-**Time Complexity:** $O(N \cdot T)$ where $N$ is the number of Gaussians and $T$ is the number of tiles, but effectively reduced by early termination and culling. The sorting step is $O(N \log N)$ or $O(N)$ with radix sort [S1, S3, unofficial].
+-**Memory Complexity:** $O(N + W \cdot H)$ for storing Gaussian attributes, sorted indices, and tile bins [S1, S3, unofficial].
+-**Performance:** Achieves real-time rendering speeds (e.g., >200 FPS) on modern GPUs by minimizing memory traffic through shared memory usage within tiles [S1, unofficial][S5].
+-**Strengths:** High performance, differentiable (supports gradient computation for training), and scalable to large scenes [S1, S2, unofficial].
+-**Limitations:** Restricted to pinhole cameras and unable to compute arbitrary light paths (e.g., reflections, refractions) [S5]. Linear scaling with Gaussian density for small Gaussians due to tile-based evaluation, unlike ray tracing which can scale logarithmically [S5].
++*   **Time Complexity:** $O(P \log P)$ for sorting, where $P$ is the number of Gaussians, plus $O(T \cdot K \cdot N)$ for rasterization, where $T$ is the number of tiles, $K$ is the average number of Gaussians per tile, and $N$ is the number of pixels per tile [S1, S4, S5, unofficial].
++*   **Memory Complexity:** $O(P)$ for Gaussian buffers and $O(W \cdot H)$ for image buffers [S4, S5, unofficial].
++*   **Performance:** Enables real-time rendering (100+ FPS) for scenes with millions of Gaussians on modern GPUs [S1, S6, unofficial].
++*   **Strengths:** High performance, differentiable for training, efficient memory usage via tiling [S1, S3, S4, unofficial].
++*   **Limitations:** Restricted to pinhole cameras, linear scaling with Gaussian count regardless of size, potential for aliasing if not properly filtered [S8].
++*   **When to Use:** Real-time training and rendering of 3DGS scenes [S1, S5, unofficial].
++*   **When Not to Use:** Scenes requiring complex light transport or non-pinhole cameras [S8].
+ 
+ ## Background
+-Originated with the 3D Gaussian Splatting paper by Kerbl et al. (2023) [S1, unofficial][S5]. It was developed to enable real-time, high-quality novel view synthesis from sparse images, leveraging the efficiency of tile-based rasterization adapted from traditional graphics pipelines [S1, unofficial][S5]. The method has become the standard for rendering 3D Gaussian Splatting scenes due to its balance of speed and quality [S5].
++Tiled 2D Gaussian Splatting Rasterization was introduced as part of the 3D Gaussian Splatting (3DGS) paper by Kerbl et al. in 2023 [S1, unofficial]. It was developed to address the computational bottleneck of rendering millions of Gaussian primitives in real-time, enabling both fast training and interactive novel view synthesis. The method has since become the standard rasterization pipeline for 3DGS and its variants [S1, S3, S4, S5, unofficial].
+ 
+ ## Sources
+ [S1] 3D Gaussian Splatting Rasterization: A Survey, https://doi.org/10.20944/preprints202607.0776.v2, fetched 2026-10-26 (unofficial)
+-[S2] OpenSplat – 3D gaussian splatting in C++ with CPU and GPU support, https://github.com/pierotofy/OpenSplat, fetched 2026-10-26 (unofficial)
+-[S3] sascha-kirch/splaty, https://github.com/sascha-kirch/splaty, fetched 2026-10-07 (unofficial)
+-[S4] SplattingAvatar, https://arxiv.org/abs/2403.05087, fetched 2026-10-27 (unofficial)
+-[S5] GRay: Ray Tracing 3D Gaussians Near the Speed of Splats, https://doi.org/10.1145/3804496, fetched 2026-10-29
+-[S6] Explore: Gaussian splatting, OpenUSD, AI world generation, volumetric video — study, https://github.com/sceneview/sceneview/issues/4023, fetched 2026-10-27 (unofficial)
+-[S7] AdR-Gaussian: Accelerating Gaussian Splatting with Adaptive Radius, https://doi.org/10.1145/3680528.3687675, fetched 2026-10-26
+-[S8] Shape-Shifting Splats: Realtime Context Translation for Gaussian Splatting in VR, https://doi.org/10.1109/vr67842.2026.00046, fetched 2026-11-01+[S2] Efficient multi-view training for 3D Gaussian Splatting, https://doi.org/10.48550/arxiv.2506.12727, fetched 2026-10-26 (unofficial)
++[S3] OpenSplat – 3D gaussian splatting in C++ with CPU and GPU support, https://github.com/pierotofy/OpenSplat, fetched 2026-10-26 (unofficial)
++[S4] Lewis-Stuart-11/3DGS-to-PC, https://github.com/Lewis-Stuart-11/3DGS-to-PC, fetched 2026-10-27 (unofficial)
++[S5] XiaoBin2001/Improved-GS, https://github.com/XiaoBin2001/Improved-GS, fetched 2026-10-27 (unofficial)
++[S6] sascha-kirch/splaty, https://github.com/sascha-kirch/splaty, fetched 2026-10-27 (unofficial)
++[S7] SplattingAvatar, https://arxiv.org/abs/2403.05087, fetched 2026-10-27 (unofficial)
++[S8] GRay: Ray Tracing 3D Gaussians Near the Speed of Splats, https://doi.org/10.1145/3804496, fetched 2026-10-29
++[S9] Explore: Gaussian splatting, OpenUSD, AI world generation, volumetric video — study, https://github.com/sceneview/sceneview/issues/4023, fetched 2026-10-27 (unofficial)
++[S10] AdR-Gaussian: Accelerating Gaussian Splatting with Adaptive Radius, https://doi.org/10.1145/3680528.3687675, fetched 2026-10-26
++[S11] Shape-Shifting Splats: Realtime Context Translation for Gaussian Splatting in VR, https://doi.org/10.1109/vr67842.2026.00046, fetched 2026-11-01
++[S12] TraGraph-GS: Trajectory Graph-based Gaussian Splatting for Arbitrary Large-Scale Scene Rendering., https://doi.org/10.1109/tpami.2026.3709368, fetched 2026-10-26

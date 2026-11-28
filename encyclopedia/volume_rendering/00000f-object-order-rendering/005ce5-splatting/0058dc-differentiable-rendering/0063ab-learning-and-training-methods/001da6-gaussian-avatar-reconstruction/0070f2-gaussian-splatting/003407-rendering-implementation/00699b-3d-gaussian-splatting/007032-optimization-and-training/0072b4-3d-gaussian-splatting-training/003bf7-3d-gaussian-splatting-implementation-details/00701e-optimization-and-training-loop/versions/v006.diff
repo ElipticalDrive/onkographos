@@ -1,0 +1,184 @@
+--- v005.md
++++ v006.md
+@@ -1,124 +1,116 @@
+ # Optimization and Training Loop
+ 
+-Also called: 3D Gaussian Splatting Training, 3DGS Optimization
++Also called: 3DGS Training, Gaussian Optimization
+ 
+ ## Overview
+-The Optimization and Training Loop family encompasses the iterative procedures used to minimize the photometric and geometric error between rendered images and ground-truth observations by adjusting the parameters of 3D Gaussian primitives. It solves the problem of reconstructing a high-fidelity, view-dependent radiance field from sparse or dense input views by leveraging differentiable rasterization to compute explicit gradients [S2][S1, unofficial]. What sets this family apart from non-differentiable methods (like random search) or implicit neural fields (like NeRFs) is the ability to optimize millions of explicit geometric primitives simultaneously with high computational efficiency, often within a fixed iteration budget (e.g., 30,000 steps) rather than a convergence threshold [S2][S1, unofficial].
++The Optimization and Training Loop is the iterative process that minimizes the photometric difference between rendered images and ground-truth training views by adjusting the parameters of a set of 3D Gaussians. It distinguishes itself from blind search methods by using stochastic gradient descent to compute precise update directions for millions of parameters simultaneously, leveraging a differentiable rasterizer to propagate errors back to the 3D primitives [S2]. It sets itself apart from sibling methods like [TurboGS](15697-turbogs.md) and [Error-Guided Sparse Pixel Sampling](15708-error-guided-sparse-pixel-sampling.md) by typically performing dense, per-tile rasterization and loss evaluation, whereas those siblings introduce sparsity or error-guided sampling to accelerate convergence.
+ 
+ ## Shared principles
+-All methods in this family share the core mechanism of stochastic gradient descent (SGD) applied to the parameters of a set of 3D Gaussians $\mathcal{G} = \{g_i\}_{i=1}^N$. Each Gaussian $i$ is defined by:
+-*   Position $\mathbf{p}_i \in \mathbb{R}^3$
+-*   Covariance $\Sigma_i$ (often parameterized as rotation $\mathbf{q}_i$ and scale $\mathbf{s}_i$)
+-*   Opacity $\alpha_i \in [0, 1]$
+-*   Spherical Harmonics (SH) coefficients $\mathbf{c}_{i, l}$ for view-dependent color
++The core mechanism common to all training loops in this family is the minimization of a composite loss function $\mathcal{L}$ between the rendered image $\hat{I}$ and the ground-truth image $I_{gt}$ [S1, unofficial][S2]. The standard photometric baseline is a weighted sum of L1 loss and differentiable Structural Similarity (D-SSIM) [S1, unofficial][S2]:
++$$ \mathcal{L}_{img} = (1 - \lambda) \mathcal{L}_{L1} + \lambda \mathcal{L}_{D-SSIM} $$
++where $\mathcal{L}_{L1}$ is the average absolute difference between corresponding pixel colors, and $\mathcal{L}_{D-SSIM}$ measures local structure, contrast, and texture [S2]. The weight $\lambda$ is typically 0.2 [S2][S1, unofficial].
+ 
+-The optimization loop typically follows these steps:
+-1.  **Sampling:** Randomly select one or more training views (images and camera poses) from the dataset [S2][S1, unofficial].
+-2.  **Rendering:** Project the 3D Gaussians to 2D screen space and alpha-blend them using a differentiable rasterizer to produce a rendered image $\hat{I}$ [S1, unofficial][S2].
+-3.  **Loss Computation:** Compute a loss $\mathcal{L}$ between $\hat{I}$ and the ground-truth image $I_{gt}$ [S2][S1, unofficial]. The standard photometric loss is a weighted sum:
+-    $$ \mathcal{L}_{img} = (1 - \lambda) \mathcal{L}_{L1} + \lambda \mathcal{L}_{D-SSIM} $$
+-    where $\mathcal{L}_{L1}$ is the L1 loss and $\mathcal{L}_{D-SSIM}$ is the differentiable Structural Similarity index loss [S2][S1, unofficial]. The weight $\lambda$ is typically 0.2 [S2][S1, unofficial].
+-4.  **Backpropagation:** Compute gradients $\nabla \mathcal{L}$ with respect to all Gaussian parameters using automatic differentiation through the rasterizer [S2][S1, unofficial].
+-5.  **Update:** Update the Gaussian parameters using the Adam optimizer with $\beta_1 = 0.9$ and $\beta_2 = 0.99$ [S1, unofficial][S2].
+-6.  **Densification/Pruning:** Periodically (e.g., every $k$ iterations), evaluate gradient magnitudes and opacity thresholds to split high-gradient Gaussians or prune low-opacity ones, adapting the density of the representation [S1, unofficial][S2].
++The optimization uses the Adam optimizer with $\beta_1 = 0.9$ and $\beta_2 = 0.99$ [S1, unofficial][S2]. Training typically runs for a fixed number of iterations, commonly around 30,000 for standard scenes, though specific schedules vary (e.g., [Gaussian Primitive Training Schedule](18977-gaussian-primitive-training-schedule.md) uses ~6,000) [S2]. The process does not stop at a specific loss threshold because the loss curve continues to creep down with diminishing returns; a fixed iteration budget is used instead [S2].
++
++Gaussian parameters $\mathcal{G} = \{g_i\}_{i=1}^N$ include position $\mathbf{p}_i \in \mathbb{R}^3$, covariance $\Sigma_i$ (parameterized by rotation quaternion $\mathbf{q}_i \in \mathbb{R}^4$ and scale vector $\mathbf{s}_i \in \mathbb{R}^3$), opacity $\alpha_i \in [0, 1]$, and Spherical Harmonics (SH) coefficients $\mathbf{c}_{i, l}$ for view-dependent color [S2][S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [3D Gaussian Splatting Training Loop](15139-3d-gaussian-splatting-training-loop.md)
+-The standard 3DGS training loop is a stochastic gradient descent procedure that minimizes photometric loss to optimize Gaussian parameters. It distinguishes itself by computing explicit gradients via a differentiable rasterizer, allowing millions of parameters to be corrected simultaneously. It operates on a fixed iteration budget (typically 30,000 steps) and periodically densifies/prunes Gaussians.
++The standard iterative optimization process. It distinguishes itself by using dense per-tile rasterization and standard densification/pruning strategies based on gradient magnitudes and opacity thresholds. Choose this for general-purpose high-fidelity reconstruction when computational resources are sufficient.
+ 
+ ### [TurboGS](15697-turbogs.md)
+-TurboGS accelerates training by dynamically focusing optimization on perceptually informative pixels while skipping well-reconstructed regions. It addresses redundant computation by using error-guided sparse pixel sampling, tile-level structure-aware losses, and a moment-damped hybrid solver, achieving up to ~10× speedup.
++An error-guided training framework that accelerates optimization by dynamically focusing computation on perceptually informative pixels. It sets itself apart by replacing dense per-tile rasterization with a sparse pixel sampling strategy guided by persistent error and age maps, while introducing a tile-level Normalized Cross-Correlation (NCC) loss and a moment-damped Levenberg-Marquardt solver. Choose this when training speed is critical and fine details must be preserved in high-error regions.
+ 
+ ### [Error-Guided Sparse Pixel Sampling](15708-error-guided-sparse-pixel-sampling.md)
+-This strategy replaces dense per-pixel rasterization with sparse, error-guided sampling. It differs from siblings by defining specific tile-wise sampling logic and EMA update rules for error and age maps, forming the foundation for frameworks like TurboGS.
++A training acceleration strategy that restricts loss evaluation and gradient computation to a sparse subset of pixels per tile. It solves the problem of redundant gradient computation in well-reconstructed regions. Unlike random sampling, it prioritizes high-error regions to preserve high-frequency details. Choose this when memory bandwidth is a bottleneck or for very large scenes.
+ 
+ ### [Frequency Guided Resolution Scheduler](15751-frequency-guided-resolution-scheduler.md)
+-This method schedules rendering resolution by distributing steps based on frequency energy. It calculates a switch point based on the ratio of low-frequency energy to total energy, ensuring high-resolution optimization begins only after low-frequency structure is captured.
++A strategy to schedule rendering resolution throughout optimization by distributing steps based on frequency energy. It accelerates training by starting with low-resolution images and progressively switching to high-resolution images as the model learns low-frequency structures. Choose this to reduce optimization complexity and avoid the high computational cost of optimizing high frequencies from the start.
+ 
+ ### [Multi-View Regulated Gaussian Splatting](15783-multi-view-regulated-gaussian-splatting.md)
+-MVGS imposes multi-view coherent (MVC) constraints to enhance consistency and stabilize gradients. Unlike single-view optimization, it aggregates gradients from multiple views per iteration. It is distinguished by its plug-and-play nature and integration of cross-intrinsic guidance.
++A training strategy that aggregates gradients from multiple training views in each optimization step to enforce multi-view consistency. Unlike standard single-view optimization, it jointly updates parameters using the sum of gradients from $M$ views, reducing gradient variance. Choose this to stabilize gradient descent and prevent conflicts with physical restrictions, especially in scenes with ambiguous geometry.
+ 
+ ### [Mip-Splatting Training Loop & Evaluation Pipeline](17975-mip-splatting-training-loop-evaluation-pipeline.md)
+-This pipeline handles camera sampling, subpixel-aware rendering, hybrid loss computation, and adaptive densification for Mip-Splatting. It distinguishes itself by introducing subpixel jittering for rendered and ground-truth images, and dynamically adjusting SH degree to prevent high-frequency artifacts.
++Defines the complete training iteration for Mip-Splatting, handling camera sampling, subpixel-aware rendering, hybrid loss computation, and adaptive densification. It distinguishes itself by incorporating subpixel jittering during rendering and ground truth resampling to mitigate aliasing artifacts. Choose this when rendering at varying distances to prevent aliasing and improve visual quality.
+ 
+ ### [Distributed 3DGS Training Loop with Adaptive Workload Division](18650-distributed-3dgs-training-loop-with-adaptive-workload-divisi.md)
+-This method implements a distributed training workflow that batches camera selection and divides rendering workloads across multiple GPUs using an adaptive strategy history. It differs from standard gradient accumulation by optionally scaling gradients by batch size and dynamically balancing computational load.
++Implements a distributed training workflow that batches camera selection and divides rendering workloads across multiple GPUs using an adaptive strategy history. It differs from standard gradient accumulation by optionally scaling gradients by batch size to avoid explicit accumulation buffers. Choose this for large-scale scenes that exceed single-GPU memory or require faster training via parallelization.
+ 
+ ### [Sparse SH Order Increment](18689-sparse-sh-order-increment.md)
+-SOI reduces GPU memory by initializing all Gaussians with SH order 0 and selectively promoting them to higher orders based on view-dependent color error. It exploits SH redundancy, guaranteeing better quality for a given sparse rate than random selection.
++A training-time optimization strategy that reduces GPU memory consumption by dynamically increasing the Spherical Harmonics (SH) order only for Gaussians that exhibit significant view-dependent color variation. Unlike standard 3DGS which initializes all Gaussians with full SH coefficients, SOI starts with SH order 0 and selectively promotes specific Gaussians. Choose this when memory is constrained or for scenes with large static regions where high-frequency color variation is unnecessary.
+ 
+ ### [Regression-based FisherRF](18747-regression-based-fisherrf.md)
+-This variant replaces direct variance-to-pixel mapping with a meta-regression model to estimate pixel-wise rendering uncertainty. It differs from original FisherRF by aligning with PRIMU's feature map regression approach.
++A variant of the FisherRF uncertainty estimation method that replaces the direct aggregation of color parameter variances with a meta-regression model to predict pixel-wise uncertainty. It groups Gaussian primitive parameter variances into six distinct categories and feeds them into a regression network. Choose this as a baseline for comparing uncertainty estimation quality in scene separation and out-of-scene generalization experiments.
+ 
+ ### [Gaussian Primitive Training Schedule](18977-gaussian-primitive-training-schedule.md)
+-This method reduces training iterations from ~300,000 to ~6,000 by leveraging dense initial point cloud initialization. It splits optimization into two short phases separated by pseudo-view depth refinement.
++A specific training schedule that significantly reduces the total number of optimization iterations required to converge, leveraging dense initial point cloud initialization. It solves the problem of excessive training time by splitting the process into two phases with intermediate depth optimization. Choose this when using a dense initialization (e.g., from SfM or depth estimators) and aiming for faster convergence (~6,000 iterations vs. ~30,000).
+ 
+ ### [Loss Function Design](19337-loss-function-design.md)
+-This family defines objective functions extending standard photometric loss with geometric consistency, semantic alignment, and surface regularization. It differs from siblings focusing on efficiency by directly modifying the gradient signal sent to primitives.
++This family defines the objective functions used to optimize the parameters of 3D Gaussians. It solves the problem of guiding the stochastic gradient descent process to produce high-fidelity, geometrically consistent, and semantically meaningful representations. What sets this family apart is the extension beyond standard photometric reconstruction (L1/SSIM) to include geometric consistency constraints, cross-modal semantic alignment, and surface regularization.
+ 
+ ### [Local 3DGS Optimization](20073-local-3dgs-optimization.md)
+-This iterative method estimates relative camera pose between two nearby images by optimizing a local 3DGS representation against photometric loss. It sets itself apart by freezing Gaussian attributes after initialization and learning only pose parameters.
++An iterative method for estimating the relative camera pose between two nearby images by optimizing a local 3D Gaussian Splatting representation against photometric loss. It solves the problem of camera pose estimation in COLMAP-free pipelines. It differs from global optimization methods by freezing the geometric attributes of a locally initialized Gaussian set and learning only the rigid body transformation (pose) parameters. Choose this for incremental pose estimation or SLAM applications where global optimization is too costly.
+ 
+ ### [Immediate 3D Gaussian Splat Reconstruction](20247-immediate-3d-gaussian-splat-reconstruction.md)
+-This streaming pipeline processes unordered RGB images to produce a real-time 3DGS model. It distinguishes itself by focusing on the pipeline structure for incremental input, interleaving feature matching, pose estimation, and optimization.
++A streaming pipeline that processes an unordered sequence of RGB images to produce a real-time 3D Gaussian Splatting model. It addresses the problem of incremental reconstruction from pose-free inputs by maintaining global consistency through loop closure and a covisibility graph. Choose this for real-time or near-real-time reconstruction of large-scale scenes without pre-computed camera poses.
+ 
+ ### [Active View Selection and Residual Learning for 3DGS](20899-active-view-selection-and-residual-learning-for-3dgs.md)
+-SA-ResGS combines residual learning with self-augmented pre-filtering to improve active view selection. It distinguishes itself by integrating a reliable view selection sequence (via SA-HashGS) that enables residual supervision in sparse regions.
++A training framework that combines active view selection with residual learning to improve reconstruction quality under sparse view conditions. It addresses the instability of standard active view selection methods by introducing a self-augmented pre-filtering mechanism and a residual supervision signal. Choose this when training data is sparse and standard view selection leads to unstable training.
+ 
+ ### [Uncertainty-Guided Residual Learning for 3DGS](20901-uncertainty-guided-residual-learning-for-3dgs.md)
+-This strategy mitigates vanishing gradients in weakly contributing, high-uncertainty Gaussians. Unlike standard dropout, it explicitly targets supervision toward uncertain Gaussians by combining full renders with uncertainty-intensified renders.
++This method addresses the vanishing gradient problem in 3D Gaussian Splatting where weakly contributing, high-uncertainty Gaussians receive insufficient supervision signals. It introduces a residual learning strategy that combines a standard full render with an "uncertainty-intensified" render generated from a targeted subset of Gaussians. Choose this to improve training stability and reconstruction quality in sparse-view settings.
+ 
+ ### [Submap-based Gaussian SLAM Mapping](21005-submap-based-gaussian-slam-mapping.md)
+-This method manages incremental 3DGS construction in SLAM by dividing the trajectory into "submaps". It solves unbounded memory growth by resetting the model periodically while maintaining global consistency.
++This method manages the incremental construction of a 3D Gaussian Splatting model within a Simultaneous Localization and Mapping (SLAM) framework by partitioning the scene into localized "submaps". Unlike global optimization approaches, it restricts optimization to a local subset of Gaussians and keyframes. Choose this for real-time or near-real-time mapping in large-scale environments.
+ 
+ ### [Neural Parametric Gaussians Optimization](21236-neural-parametric-gaussians-optimization.md)
+-NPGs optimization is a two-stage procedure for monocular non-rigid object reconstruction. It distinguishes itself by decoupling the learning of the underlying non-rigid template from high-frequency detail rendering, preventing "template collapse".
++A two-stage optimization procedure designed for high-fidelity monocular non-rigid object reconstruction. It addresses the ill-posed nature of reconstructing dynamic geometry from single-view video by combining a coarse parametric point model, regularized by a low-rank deformation basis, with 3D Gaussians. Choose this for dynamic object reconstruction where standard 3DGS might suffer from geometric collapse.
+ 
+ ### [3D Gaussian Splatting Optimization](22286-3d-gaussian-splatting-optimization.md)
+-This method defines the specific training protocol for 3DGS, addressing instability in optimizing anisotropic covariances from sparse views. It employs a staged SH introduction schedule and resolution warm-up to prevent incorrect diffuse color estimation.
++This method defines the stochastic gradient descent training procedure for 3D Gaussian Splatting, optimizing the position, covariance, opacity, and spherical harmonics coefficients of a set of 3D Gaussians to minimize photometric error. It distinguishes itself by combining anisotropic covariance optimization with a specific densification strategy and a staged introduction of spherical harmonics bands. Choose this as the baseline implementation for standard 3DGS training.
+ 
+ ### [Gradient Modification](22461-gradient-modification.md)
+-These techniques alter backpropagated signals to address vanishing gradients or discontinuous boundaries. They set themselves apart by injecting surrogate gradients or filtering noisy signals, distinct from acceleration or sampling methods.
++Gradient modification techniques adjust the backpropagated gradients of 3D Gaussian parameters to address specific optimization challenges such as vanishing gradients, discontinuous boundaries, or gradient confusion from imperfect supervision. Unlike standard 3D Gaussian Splatting which relies on direct automatic differentiation, these methods intervene in the gradient computation step. Choose this when standard gradients lead to suboptimal convergence or artifacts.
+ 
+-#### PyGS Optimization
+-- **Definition:** Optimization using combined MSE and SSIM loss with density control strategies adapted from 3DGS, preserving multi-scale structure [S1, unofficial].
+-- **Steps:** Apply splitting and cloning from 3DGS for density control; newly split/cloned Gaussians remain in original level/cluster. Routinely reassess and reassign Gaussian levels based on scales to preserve multi-scale characteristics [S1, unofficial].
+-- **Formula:** $\mathcal{L} = \lambda \cdot \text{MSE}(C, \hat{C}) + (1 - \lambda) \cdot \text{SSIM}(C, \hat{C})$, where $\lambda$ balances terms, $C$ is ground-truth color, and $\hat{C}$ is rendered color [S1, unofficial].
++### PyGS Optimization
++- **Definition**: The optimization process using a combined MSE and SSIM loss, along with density control strategies adapted from 3DGS, while preserving the multi-scale structure [S1, unofficial].
++- **Steps**: Apply splitting and cloning strategies from 3DGS for density control. Newly split/cloned Gaussians remain in their original level and cluster. Routinely reassess and reassign the levels of Gaussians based on their scales to preserve the multi-scale characteristics and balanced distribution across levels [S1, unofficial].
++- **Formula**: $\mathcal{L} = \lambda \cdot \text{MSE}(C, \hat{C}) + (1 - \lambda) \cdot \text{SSIM}(C, \hat{C})$ where $\lambda$ is a hyperparameter balancing the terms, $C$ is ground-truth color, and $\hat{C}$ is rendered color [S1, unofficial].
+ 
+-#### Global Latent Optimization (GLO)
+-- **Definition:** Handles photometric inconsistencies (exposure/white-balance) by co-optimizing a per-view latent vector mapped via an MLP to a linear transformation of SH coefficients [S2].
+-- **Formula:** $\hat{c}_i = a \odot c_i + b$, where $\hat{c}_i$ are transformed coefficients, $c_i$ are original SH coefficients, $\odot$ is Hadamard product, $b$ models brightness, and $a$ provides white-balance. $a, b = Q(z_n; \theta_Q)$, where $Q$ is an MLP taking latent $z_n \in \mathbb{R}^{64}$ [S2].
+-- **Parameters:** $z_n \in \mathbb{R}^{64}$ per camera view; $\theta_Q$ are trainable MLP parameters [S2].
+-- **Pitfall:** A reduced model prevents $z_n$ from explaining distractors as per-image adjustments [S2].
++### Global Latent Optimization (GLO)
++- **Definition**: A method to handle photometric inconsistencies (automatic exposure/white-balance) by co-optimizing a per-view latent vector mapped via an MLP to a linear transformation of spherical harmonic coefficients [S2].
++- **Formula**: $\hat{c}_i = a \odot c_i + b$, where $\hat{c}_i$ are the transformed coefficients, $c_i$ are the original spherical harmonic coefficients, $\odot$ is the Hadamard product, $b$ models brightness changes, and $a$ provides white-balance expressive power. $a, b = Q(z_n; \theta_Q)$, where $Q$ is an MLP taking latent $z_n \in \mathbb{R}^{64}$ [S2].
++- **Parameters**: $z_n \in \mathbb{R}^{64}$, a latent vector per input camera view; $\theta_Q$, trainable parameters of the MLP $Q$ [S2].
++- **Pitfall**: A reduced model prevents $z_n$ from explaining distractors as per-image adjustments, which would happen in a simpler GLO [S2].
+ 
+-#### Progressive Resolution Scheduling
+-- **Definition:** Gradually increases rendering resolution during training to improve convergence speed and reduce overhead, starting from low resolution [S3].
+-- **Formula:** $R_t = R_{max} \cdot (\frac{t}{T})^\gamma$, where $R_t$ is resolution at step $t$, $R_{max}$ is final resolution, $T$ is total steps, and $\gamma$ controls growth rate [S3].
+-- **Parameters:** Initial resolution: 540x960. Final resolution: 1080x1920 [S3].
++### Progressive Resolution Scheduling
++- **Definition**: A training strategy that gradually increases rendering resolution during training to improve convergence speed and reduce computational overhead, starting from low resolution and increasing toward the target [S3].
++- **Formula**: $R_t = R_{max} \cdot (\frac{t}{T})^\gamma$, where $R_t$ is the resolution at training step $t$, $R_{max}$ is the final resolution, $T$ is the total training steps, and $\gamma$ controls the growth rate [S3].
++- **Parameters**: Initial resolution: 540x960. Final resolution: 1080x1920 [S3].
+ 
+-#### Frequency-Spectrum Regularization
+-- **Definition:** Uses differences in frequency spectra of rendered and reference images to progressively regularize the model from coarse, low-frequency structures to fine, high-frequency details [S4].
++### Frequency-Spectrum Regularization
++- **Definition**: A method that uses differences in frequency spectra of rendered and reference images to progressively regularize the model from coarse, low-frequency structures to fine, high-frequency details [S4].
+ 
+-#### SuGaR Pipeline
+-- **Definition:** Pipeline to extract meshes from 3DGS and build hybrid representations for composition and animation [S5, unofficial].
+-- **Steps:** 1. Short vanilla 3DGS optimization (7k iterations) to position Gaussians. 2. SuGaR optimization to align Gaussians with scene surface. 3. Mesh extraction. 4. SuGaR refinement (Gaussians + mesh). 5. Textured mesh extraction (Optional) for Blender visualization [S5, unofficial].
++### SuGaR Pipeline
++- **Definition**: A pipeline to extract meshes from 3D Gaussian Splatting and build hybrid representations that enable easy composition and animation in Gaussian Splatting scenes by manipulating the mesh [S5, unofficial].
++- **Steps**: 1. Short vanilla 3DGS optimization: optimizing a vanilla 3D Gaussian Splatting model for 7k iterations, in order to let Gaussians position themselves in the scene. 2. SuGaR optimization: optimizing Gaussians alignment with the surface of the scene. 3. Mesh extraction: extracting a mesh from the optimized Gaussians. 4. SuGaR refinement: refining the Gaussians and the mesh together to build a hybrid Mesh+Gaussians representation. 5. Textured mesh extraction (Optional): extracting a traditional textured mesh from the refined SuGaR model as a tool for visualization, composition and animation in Blender using our Blender add-on [S5, unofficial].
+ 
+-#### Geometric Initialization
+-- **Definition:** Initializes 3DGS primitives directly from a retrieved CAD mesh surface rather than SfM point clouds, providing strong inductive bias [S6, unofficial].
+-- **Steps:** Define target primitives $N_{splats}$. Draw area-weighted uniform random samples from mesh surface for initial positions $\mu_{can}^{(i)}$. Recover surface normals $n_i$ by casting rays toward mesh interior. Initialize rotation quaternion $q_i$ to shortest-arc rotation aligning local z-axis with $n_i$, creating oriented disks tangent to the mesh [S6, unofficial].
+-- **Pitfall:** Standard 3DGS densification/pruning (cloning/splitting) is not employed to maintain strict adherence to CAD surface geometry [S6, unofficial].
++### Geometric Initialization
++- **Definition**: Initializing 3D Gaussian primitives directly from the retrieved CAD mesh surface rather than SfM point clouds, providing strong inductive bias [S6, unofficial].
++- **Steps**: Define target number of primitives $N_{splats}$. Draw area-weighted uniform random sample of points from mesh surface to obtain initial canonical positions $\mu_{can}^{(i)}$. Recover surface normals $n_i$ by casting ray from sample toward mesh interior and reading triangle normal of intersected face. Initialize rotation quaternion $q_i$ to shortest-arc rotation aligning local z-axis with $n_i$, creating oriented disk tangent to mesh [S6, unofficial].
++- **Pitfall**: Standard 3DGS densification/pruning (cloning/splitting) is not employed to maintain strict adherence to the CAD surface geometry [S6, unofficial].
+ 
+-#### C LUNO GS
+-- **Definition:** Compact framework for Language 3DGS combining semantics-aware Gaussian sparsification and attribute vector quantization in a unified constrained objective, solved via alternating primal-dual procedure [S7, unofficial].
+-- **Steps:** Optimization alternates among: 1) Primal Update (differentiable scene optimization), 2) Sparsification Update (cardinality projection on opacities), 3) Vector Quantization Update (quantization of attributes), and 4) Dual Update (Lagrange multiplier updates) [S7, unofficial].
+-- **Formula:** Rendering loss: $L_{RGB} = (1 - \lambda)L_1 + \lambda L_{D-SSIM}$, where $\lambda \in [0, 1]$ balances the terms [S7, unofficial].
++### C LUNO GS
++- **Definition**: A compact framework for Language 3DGS that combines semantics-aware Gaussian sparsification and attribute vector quantization in a unified constrained objective, solved via an alternating primal-dual procedure [S7, unofficial].
++- **Steps**: The optimization alternates among four updates: 1) Primal Update (differentiable scene optimization), 2) Sparsification Update (cardinality projection on opacities), 3) Vector Quantization Update (quantization of attributes), and 4) Dual Update (Lagrange multiplier updates) [S7, unofficial].
++- **Formula**: Rendering loss: $L_{RGB} = (1 - \lambda)L_1 + \lambda L_{D-SSIM}$, where $\lambda \in [0, 1]$ balances the terms [S7, unofficial].
+ 
+-#### Gaussian Optimization with Photometric Gradients
+-- **Definition:** Refinement step optimizing SH coefficients and Gaussian structures using visual-derived photometric gradients to enhance photorealism and density [S8].
+-- **Steps:** Optimize SH coefficients using photometric gradients from captured images. Refine LiDAR Gaussian structures using images from various perspectives [S8].
++### Gaussian Optimization with Photometric Gradients
++- **Definition**: A refinement step that optimizes the spherical harmonic coefficients and Gaussian structures using visual-derived photometric gradients to enhance photorealism and density [S8].
++- **Steps**: Optimize the spherical harmonic coefficients of the Gaussians using photometric gradients derived from captured images. Refine the LiDAR Gaussian structures using images captured from various perspectives [S8].
+ 
+ ## Background
+-3D Gaussian Splatting (3DGS) was introduced by Kerbl et al. in 2023 [S2]. The method builds on the principles of differentiable rendering and splatting, adapting them to explicit 3D Gaussian primitives. The original training loop was designed to optimize these primitives from Structure-from-Motion (SfM) points, using a fixed iteration budget and periodic densification to achieve high-quality novel view synthesis at interactive frame rates. Subsequent research has expanded the training loop to address issues such as training speed [S1, unofficial], multi-view consistency [S1, unofficial], uncertainty estimation [S1, unofficial], and integration with other modalities like LiDAR [S8] and CAD models [S6, unofficial].
++3D Gaussian Splatting (3DGS) was introduced by Kerbl et al. in 2023 [S2]. The method builds on the differentiable rasterization techniques from Kopanas et al. (2021) and uses NVIDIA CUB sorting routines for Radix sort [S1, unofficial]. The standard optimization loop was designed to handle millions of parameters efficiently, using a fixed iteration budget (typically 30,000) and a combination of L1 and D-SSIM losses [S2]. Subsequent developments have focused on accelerating this loop (e.g., TurboGS, Error-Guided Sparse Pixel Sampling), improving convergence (e.g., Frequency Guided Resolution Scheduler, Gaussian Primitive Training Schedule), and extending the loss function to include geometric, semantic, and uncertainty-based constraints [S1, unofficial][S3, S4][S5, S6, S7, unofficial][S8].
+ 
+ ## Sources

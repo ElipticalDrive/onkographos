@@ -1,0 +1,279 @@
+--- v001.md
++++ v002.md
+@@ -1,96 +1,203 @@
+ # SDF Transformations and Operations
+-Also called: SDF Boolean and Transform Operations, Smooth Blending and Domain Repetition
++
++Also called: SDF Boolean and Transform Operations, SDF Primitives & Operations > Smooth Blending and CSG Operations > SDF Transformations and Operations, Smooth Blending and Domain Repetition, Smooth Minimum, Smooth Union
+ 
+ ## Overview
+-This method defines the mathematical operations for modifying Signed Distance Fields (SDFs) via geometric transformations, Boolean combinations, and spatial repetitions. It solves the problem of constructing complex procedural geometry from simple primitives without explicit mesh data. What sets it apart is the ability to maintain the distance field property (Euclidean distance to the surface) through min/max blending and coordinate manipulation, enabling efficient ray marching of intricate scenes [S1, unofficial].
++This method defines the geometric primitives and algebraic operations used to construct complex Signed Distance Fields (SDFs) from simple shapes. It solves the problem of representing arbitrary geometry procedurally by combining basic primitives through spatial transformations, domain repetitions, and Boolean set operations (union, intersection, subtraction) [S1, S2, unofficial]. It is distinguished from raw primitive definitions by its focus on the *composition* of fields, allowing for smooth blending and tiling rather than just static shape placement [S2, unofficial].
+ 
+ ## How it works
+-### Inputs and outputs
+-- **Inputs**: A 3D point $\mathbf{p}$, primitive SDF functions $d_i(\mathbf{p})$, transformation matrices or functions $T(\mathbf{p})$, and blending parameters $\alpha$.
+-- **Outputs**: A scalar distance value $d(\mathbf{p})$.
+-
+-### Data structures
+-- **Point**: 3D vector $\mathbf{p} = (x, y, z)$.
+-- **Transformation**: $3 \times 3$ rotation matrix $R$ and translation vector $\mathbf{t}$, or a composed function $T(\mathbf{p})$.
+-- **Blending parameter**: Scalar $\alpha > 0$ (softness).
+-
+-### Steps and Formulas
+-
+-1. **Basic Boolean Operations**
+-   Combine two SDFs $d_1(\mathbf{p})$ and $d_2(\mathbf{p})$:
+-   - **Union**: $d_{union}(\mathbf{p}) = \min(d_1(\mathbf{p}), d_2(\mathbf{p}))$
+-   - **Intersection**: $d_{intersect}(\mathbf{p}) = \max(d_1(\mathbf{p}), d_2(\mathbf{p}))$
+-   - **Subtraction**: $d_{sub}(\mathbf{p}) = \max(d_1(\mathbf{p}), -d_2(\mathbf{p}))$
+-
+-2. **Smooth Blending (Soft Union/Intersection)**
+-   Approximates smooth transitions between shapes using the $\min_\alpha$ operator:
+-   $$ \min_\alpha(a, b) = \frac{a + b - \sqrt{(a - b)^2 + \alpha^2}}{2} $$
+-   - **Smooth Union**: $d_{soft\_union}(\mathbf{p}) = \min_\alpha(d_1(\mathbf{p}), d_2(\mathbf{p}))$
+-   - **Smooth Intersection**: $d_{soft\_intersect}(\mathbf{p}) = \max_\alpha(d_1(\mathbf{p}), d_2(\mathbf{p}))$ where $\max_\alpha(a, b) = \frac{a + b + \sqrt{(a - b)^2 + \alpha^2}}{2}$
+-   - **Parameter $\alpha$**: Controls softness. Smaller values approximate hard Boolean operations. Typical values: $0.01$ to $0.5$ [S1, unofficial].
+-
+-3. **Geometric Transformations**
+-   To transform a primitive, modify the query point $\mathbf{p}$ before evaluating the SDF:
+-   - **Translation**: $d(\mathbf{p}) = d_{prim}(\mathbf{p} - \mathbf{t})$
+-   - **Rotation**: $d(\mathbf{p}) = d_{prim}(R^T (\mathbf{p} - \mathbf{t}))$
+-   - **Scaling**: $d(\mathbf{p}) = d_{prim}(\mathbf{s}^{-1} (\mathbf{p} - \mathbf{t})) / \min(|\mathbf{s}|)$
+-     - Note: Scaling distorts the distance field. The distance must be divided by the scale factor to maintain correct metric properties. Uniform scaling is preferred to avoid anisotropic distortion [S1, unofficial].
+-
+-4. **Domain Repetition (Tiling)**
+-   Repeats a primitive pattern infinitely in space by mapping the query point into a local cell:
+-   $$ \mathbf{p}_{local} = \mathbf{p} - \text{round}(\mathbf{p} / \text{period}) \times \text{period} $$
+-   - **Implementation**: Use modulo arithmetic or floor functions to wrap coordinates.
+-   - **Pitfall**: Discontinuities at tile boundaries can cause artifacts if not handled carefully. The `round` function ensures symmetry around the origin of each tile [S1, unofficial].
++The method operates on a point $\mathbf{x}$ in 3D space. It applies geometric transformations to the coordinate space before evaluating a primitive SDF, and combines multiple SDF values using Boolean or smooth approximation functions.
++
++### Inputs and Outputs
++*   **Input:** A query point $\mathbf{x} \in \mathbb{R}^3$.
++*   **Input:** Primitive SDF functions $S_i(\mathbf{x})$ (e.g., sphere, box).
++*   **Input:** Transformation parameters (translation $\mathbf{t}$, rotation matrix $\mathbf{R}$, scale $s$).
++*   **Input:** Smooth blending parameter $\alpha$ (or $k$).
++*   **Output:** A scalar distance value $d \in \mathbb{R}$.
++
++### Data Structures
++For implementation in buffers (e.g., GPU compute shaders), operations are often stored in a tree structure. The specific layout for an SDF operation block is defined as [S3, unofficial]:
++
++**SdfOpSpecificBlock**
++*   `mat4s`: Array of 2 `Mat4` matrices.
++*   `vec4s`: Array of 3 `Vec4` vectors.
++*   `floats`: Array of 2 `f32` scalars.
++
++**SdfBoundingBoxBlock**
++*   `matrix`: `Mat4`.
++*   `scale`: `Vec4`.
++*   `full_inverse`: `Mat4`.
++*   `trans_inverse`: `Mat4`.
++
++**SdfOpBlock** (Parent container)
++*   `op_code`: `u32` (Operation identifier).
++*   `is_primitive`: `bool`.
++*   `parent_is_union`: `bool`.
++*   `len`: `u32`.
++*   `level`: `u32`.
++*   `op_specific`: `SdfOpSpecificBlock`.
++*   `bounding_box`: `SdfBoundingBoxBlock`.
++*   `other_box`: `SdfBoundingBoxBlock`.
++
++### Numbered Steps
++
++1.  **Transform Coordinates:** To apply a transformation to a primitive, the query point $\mathbf{x}$ must be transformed into the primitive's local space. This requires the *inverse* of the object's transformation matrix.
++    *   Subtract translation: $\mathbf{p} = \mathbf{x} - \mathbf{t}$.
++    *   Apply rotation: $\mathbf{p} = \mathbf{R}^T \mathbf{p}$ (assuming $\mathbf{R}$ is orthonormal).
++    *   Apply scale: $\mathbf{p} = \mathbf{p} / s$.
++    *   *Note:* The resulting distance must be divided by the scale factor $s$ to maintain correct distance metric properties [S2, G, unofficial].
++
++2.  **Evaluate Primitive:** Compute the distance $d_i = S_i(\mathbf{p})$ for the transformed point.
++
++3.  **Domain Repetition (Optional):** If tiling is required, apply a modulo operation to the local coordinates before evaluation.
++    *   $\mathbf{p}_{mod} = \mathbf{p} - \lfloor \mathbf{p} / \mathbf{period} + 0.5 \rfloor \cdot \mathbf{period}$.
++    *   Evaluate $S_i(\mathbf{p}_{mod})$ [S2, unofficial].
++
++4.  **Combine Fields:** Combine the distances from multiple primitives using one of the following methods:
++    *   **Exact Union:** $d_{union} = \min(d_1, d_2)$.
++    *   **Exact Intersection:** $d_{intersect} = \max(d_1, d_2)$.
++    *   **Exact Subtraction:** $d_{sub} = \max(d_1, -d_2)$ (subtracting shape 2 from shape 1) [S2, unofficial].
++    *   **Smooth Union:** Use a smooth minimum function to approximate the union with a blendable transition [S2, unofficial].
++
++### Formulas
++
++**Smooth Minimum (Exponential)**
++The exponential smooth minimum function provides a smooth approximation of the union. It is controlled by a parameter $k$ (or $\alpha$) [S2, unofficial]:
++
++$$ \text{smin}(a, b, k) = -k \cdot \log_2(e^{-a/k} + e^{-b/k}) $$
++
++Alternatively, using base-2 exponentials as cited in [S2, unofficial]:
++
++$$ \text{smin}(a, b, k) = -k \cdot \log_2(2^{-a/k} + 2^{-b/k}) $$
++
++**Smooth Minimum (Polynomial/Hermite)**
++A common alternative implementation (often attributed to Inigo Quilez) uses a polynomial approximation [S2, G, unofficial]:
++
++$$ h = \text{clamp}\left(\frac{0.5 + 0.5(b - a)}{k}, 0.0, 1.0\right) $$
++$$ \text{smin}(a, b, k) = \text{lerp}(b, a, h) - k \cdot h \cdot (1.0 - h) $$
++
++### Parameters
++*   **$k$ (or $\alpha$):** The smoothness factor. Smaller values yield a sharper transition closer to the exact min/max; larger values yield a smoother, more blended result. Typical values depend on the scale of the scene [S2, unofficial].
++*   **Scale ($s$):** Must be positive. The final distance is divided by $|s|$ [S2, unofficial].
++
++### Edge Cases and Pitfalls
++*   **Interior Distance Breaks:** Exact union breaks the interior distance field (returning a greater distance than it should), which can break outline thickness or require more raymarching steps [S2, unofficial].
++*   **Exterior Distance Breaks:** Exact intersection and subtraction break the exterior distance field [S2, unofficial].
++*   **Distortion:** Smooth blending functions are no longer exact distance fields but distorted approximations. The more distorted they become (large $k$), the more difficult they may be to work with for precise raymarching [S2, unofficial].
++*   **Precision:** Division by scale and floating-point modulo operations in domain repetition can introduce precision artifacts at large coordinates [G].
+ 
+ ### Pseudocode
++
+ ```python
+-def smooth_min(a, b, alpha):
+-    """Smooth union approximation."""
+-    h = clamp(0.5 + 0.5 * (b - a) / alpha, 0.0, 1.0)
+-    return lerp(b, a, h) - alpha * h * (1.0 - h)
++import math
+ 
+ def transform_point(p, rotation_matrix, translation, scale):
+-    """Apply inverse transform to point for SDF evaluation."""
+-    # Translate
+-    p = p - translation
+-    # Rotate (inverse rotation is transpose for orthogonal matrices)
+-    p = dot(rotation_matrix, p)
+-    # Scale (divide by scale factor)
+-    p = p / scale
++    """
++    Apply inverse transform to point for SDF evaluation.
++    Assumes rotation_matrix is orthonormal.
++    """
++    # 1. Translate
++    p = [p[i] - translation[i] for i in range(3)]
++    
++    # 2. Rotate (apply inverse rotation, which is transpose for orthonormal)
++    # p_new[i] = sum(rotation_matrix[j][i] * p[j]) for j in 0..2
++    p_rotated = [0.0, 0.0, 0.0]
++    for i in range(3):
++        for j in range(3):
++            p_rotated[i] += rotation_matrix[j][i] * p[j]
++    p = p_rotated
++    
++    # 3. Scale
++    p = [p[i] / scale for i in range(3)]
++    
+     return p
+ 
+-def sdf_with_transforms(p, primitive_sdf, rotation, translation, scale):
+-    """Evaluate SDF with geometric transformations."""
+-    p_transformed = transform_point(p, rotation, translation, scale)
+-    return primitive_sdf(p_transformed) / abs(scale)
+-
+-def domain_repetition(p, period, primitive_sdf):
+-    """Repeat primitive pattern in 3D space."""
+-    p_mod = p - floor(p / period + 0.5) * period
+-    return primitive_sdf(p_mod)
++def sdf_sphere(p, center, radius):
++    """Primitive SDF for a sphere."""
++    return math.sqrt(sum((p[i] - center[i])**2 for i in range(3))) - radius
++
++def smooth_min_exponential(a, b, k):
++    """
++    Exponential smooth minimum.
++    """
++    if k == 0:
++        return min(a, b)
++    return -k * math.log2(math.pow(2, -a/k) + math.pow(2, -b/k))
++
++def smooth_min_polynomial(a, b, k):
++    """
++    Polynomial smooth minimum.
++    """
++    if k == 0:
++        return min(a, b)
++    h = max(0.0, min(1.0, 0.5 + 0.5 * (b - a) / k))
++    return (1.0 - h) * a + h * b - k * h * (1.0 - h)
++
++def sdf_union_exact(d1, d2):
++    """Exact union."""
++    return min(d1, d2)
++
++def sdf_intersect_exact(d1, d2):
++    """Exact intersection."""
++    return max(d1, d2)
++
++def sdf_subtract_exact(d1, d2):
++    """
++    Subtract shape 2 from shape 1.
++    """
++    return max(d1, -d2)
++
++def sdf_with_transform_and_smooth_union(p_query, center1, radius1, 
++                                        center2, radius2, 
++                                        rotation, translation, scale, 
++                                        smoothness_k):
++    """
++    Evaluate a scene with two spheres, one transformed, combined with smooth union.
++    """
++    # Transform point for the second sphere
++    p2 = transform_point(p_query, rotation, translation, scale)
++    
++    # Evaluate primitives
++    d1 = sdf_sphere(p_query, center1, radius1)
++    d2 = sdf_sphere(p2, [0,0,0], radius2) / abs(scale) # Normalize distance by scale
++    
++    # Combine with smooth union
++    return smooth_min_exponential(d1, d2, smoothness_k)
++
++def domain_repetition(p, period, primitive_sdf_func, *args):
++    """
++    Repeat a primitive pattern in 3D space.
++    """
++    # Calculate modulo with offset for centering
++    p_mod = [p[i] - math.floor(p[i] / period[i] + 0.5) * period[i] for i in range(3)]
++    
++    # Evaluate primitive on modulated coordinates
++    return primitive_sdf_func(p_mod, *args)
+ ```
+ 
+ ## Subtopics
+ 
+-### [Smooth Blending and CSG Operations](14568-smooth-blending-and-csg-operations.md)
+-Hard Boolean operations using min/max.
+-
+-### [SDF Primitive Definitions](14567-sdf-primitive-definitions.md)
+-Basic shapes (sphere, box, etc.).
+-
+-### [SDF Transformations and Operations](14569-sdf-transformations-and-operations.md)
+-This article.
++### SDF Operation Block
++A data structure used in buffer-based SDF implementations to store operation metadata and parameters. It includes operation codes, primitive flags, and specific blocks for matrices, vectors, and bounding boxes. It allows for efficient traversal of the SDF tree on the GPU [S3, unofficial].
++
++### SDF Union Operation
++The basic set operation combining two shapes. It takes the minimum of the two distance fields. It is the foundation for constructing complex shapes but breaks the interior distance field, potentially affecting outline thickness or raymarching convergence [S2, unofficial].
++
++### SDF Subtraction
++A set operation removing one shape from another. Implemented as the maximum of the first shape's distance and the negated second shape's distance. It breaks the exterior distance field [S2, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity**: $O(1)$ per primitive evaluation. Total time scales linearly with the number of primitives in the scene.
+-- **Memory Complexity**: $O(1)$ storage. No volumetric grid required.
+-- **Strengths**: Infinite resolution, compact representation, efficient for complex scenes with many instances.
+-- **Limitations**: No internal details (hollow objects are tricky), scaling distorts distance field, smooth blending introduces approximation error.
+-- **When to use**: Procedural geometry, soft shadows, ambient occlusion approximation, infinite tiling.
+-- **When not to use**: Need for exact internal geometry, non-uniform scaling with high precision requirements.
++*   **Time Complexity:** $O(1)$ per primitive evaluation. Total time is proportional to the number of primitives in the scene graph.
++*   **Memory Complexity:** $O(N)$ where $N$ is the number of primitives/operations stored in the tree [S3, unofficial].
++*   **Strengths:** Infinite resolution, compact storage (code vs. voxels), easy to modify geometry.
++*   **Limitations:** Smooth blending is an approximation, not an exact SDF. Exact Boolean operations break distance field properties (interior/exterior) [S2, unofficial].
++*   **When to use:** Procedural modeling, raymarched rendering, real-time graphics where memory bandwidth is limited.
++*   **When not to use:** When exact distance field properties are required for all Boolean combinations (requires JFA or other exact methods) [S2, unofficial].
+ 
+ ## Background
+-Inigo Quilez produced the first results recognizable as modern SDF in 2007, demonstrating techniques for efficient soft shadows, smooth blending, and domain repetition [S1, unofficial]. This work built upon earlier concepts by Alex Evans (2006) and Keenan Crane (2005), focusing on constraining fields to be Euclidean distances for efficient ray marching [S1, unofficial].
++The modern SDF raymarching technique was pioneered by Inigo Quilez in 2007, building on earlier work by Alex Evans (2006) and Keenan Crane (2005). Quilez demonstrated the first results recognizable as modern SDF, including techniques for efficient soft shadows, smooth blending, and domain repetition [S1, unofficial]. The smooth minimum functions and spatial modulation techniques described here are central to his tutorials and the subsequent community adoption of SDFs in real-time graphics [S2, unofficial].
+ 
+ ## Sources
+-[S1] Raymarching Distance Fields, https://iquilezles.org/articles/raymarchingdf/, fetched 2026-10-27 (unofficial)+[S1] Raymarching Distance Fields, https://iquilezles.org/articles/raymarchingdf/, fetched 2026-10-27 (unofficial)
++[S2] Signed Distance Fields - by Xor - GM Shaders, https://mini.gmshaders.com/p/sdf, fetched 2026-10-27 (unofficial)
++[S3] holger-kibur/sdf, https://github.com/holger-kibur/sdf, fetched 2026-10-27 (unofficial)

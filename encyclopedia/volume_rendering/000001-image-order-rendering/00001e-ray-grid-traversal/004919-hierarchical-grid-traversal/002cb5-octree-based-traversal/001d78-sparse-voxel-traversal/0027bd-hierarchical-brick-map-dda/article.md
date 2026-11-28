@@ -1,0 +1,166 @@
+# Hierarchical Brick-Map DDA
+
+Also called: Multi-level DDA with brick map, Sparse brick-map ray marching
+
+## Overview
+Hierarchical Brick-Map DDA is a ray traversal technique that replaces dense voxel buffers with a sparse, hierarchical structure to skip empty regions in volumetric data [S1, unofficial]. It operates by maintaining a top-level grid of cells (typically stride 8 voxels) that point to allocated "bricks" containing fine-grained voxel data; if a top-level cell is empty, the ray strides over the entire cell volume, descending only into occupied bricks for local DDA [S1, unofficial]. This approach significantly reduces memory footprint and traversal time for sparse volumes, such as drone airspace which is >99% empty, compared to dense voxel storage or non-hierarchical sparse methods [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A dense voxel grid (or SDF field) defined on a global coordinate system; ray origin $O$ and direction $D$ [S1, unofficial].
+*   **Output:** Ray-marched color/depth, with traversal skipping empty space [S1, unofficial].
+
+**Data Structures:**
+The method relies on three primary GPU buffers and a uniform structure [S1, unofficial]:
+1.  **`topGrid`**: A sparse 3D grid where each cell contains a pointer (index) to a brick in the `brickPool`, or a null value if the cell is empty [S1, unofficial]. The dimensions are defined by `top_size` [S1, unofficial].
+2.  **`brickPool`**: A contiguous array of occupied bricks [S1, unofficial]. Each brick stores $BRICK^3$ voxel values [S1, unofficial].
+3.  **`counter`**: An atomic counter used during the build phase to allocate slots in `brickPool` [S1, unofficial].
+4.  **`Grid` Uniform**: Contains `top_size` (dimensions of the top-level grid) and `BRICK` (side length of a brick in voxels, typically 8) [S1, unofficial].
+
+**Parameters:**
+*   $BRICK$: Side length of a voxel brick. Default value is 8 [S1, unofficial].
+*   $MAX\_STEPS$: Maximum number of ray marching steps. Increased to 1024 to accommodate hierarchical overhead and longer paths in sparse data (up from 512 in dense implementations) [S1, unofficial].
+
+**Build Phase (Compute Shader):**
+Before traversal, the sparse structure is built from dense data [S1, unofficial]:
+1.  For each top-level cell in the global grid:
+2.  Scan the $BRICK^3$ voxels corresponding to that cell [S1, unofficial].
+3.  If any voxel is non-zero (solid), atomically allocate a slot in `brickPool` using `counter` [S1, unofficial].
+4.  Copy the voxel data into the allocated slot [S1, unofficial].
+5.  Update the corresponding entry in `topGrid` to point to the new brick index [S1, unofficial].
+
+**Traversal Phase (Ray Marching Shader):**
+The traversal uses a multi-level Digital Differential Analyzer (DDA) [S1, unofficial]:
+1.  **Initialization:** Compute initial ray parameters ($t_{min}, t_{max}$) and step sizes [G]. Initialize top-level cell coordinates $(x, y, z)$ based on ray origin [G].
+2.  **Top-Level Traversal Loop:**
+    *   While $t < t_{max}$ and steps $< MAX\_STEPS$:
+    *   Check if the current top-level cell $(x, y, z)$ is occupied (pointer in `topGrid` is not null) [G].
+    *   **If Empty:**
+        *   Calculate the distance to the next top-level cell boundary along the ray direction [G].
+        *   Update $t \leftarrow t + \Delta t_{top}$ [G].
+        *   Update $(x, y, z)$ to the next top-level cell indices [G].
+        *   Continue loop.
+    *   **If Occupied:**
+        *   **Descent:** Retrieve the brick index from `topGrid`. Map the ray origin and direction into the local coordinate system of the brick [G]. Re-derive the fine-grained ray direction vector $fv$ based on the actual ray position within the occupied brick to ensure correct sampling [S1, unofficial].
+        *   **Fine-Grained DDA:** Perform standard voxel DDA within the brick's local bounds [G].
+        *   **Ascent:** When the ray exits the brick (either hitting a surface or leaving the brick boundary):
+            *   Map the exit point back to global coordinates [G].
+            *   Recompute $c_{tmax}$ (distance to the next top-level cell boundary) for the new top cell to resume coarse traversal correctly [S1, unofficial].
+            *   Update $(x, y, z)$ to the new top-level cell [G].
+            *   Continue loop.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def ray_march_brick_map(ray_origin, ray_direction, top_grid, brick_pool, top_size, brick_size=8, max_steps=1024):
+    BRICK = brick_size
+    MAX_STEPS = max_steps
+    t = 0.0
+    steps = 0
+    inv_dir = [1.0 / d if d != 0 else 1e9 for d in ray_direction]
+    step = [1 if d > 0 else -1 for d in ray_direction]
+
+    tx = int(ray_origin[0] // BRICK)
+    ty = int(ray_origin[1] // BRICK)
+    tz = int(ray_origin[2] // BRICK)
+
+    t_max_top_x = (tx + step[0]) * BRICK - ray_origin[0] if inv_dir[0] < 1e9 else 0.0
+    t_max_top_y = (ty + step[1]) * BRICK - ray_origin[1] if inv_dir[1] < 1e9 else 0.0
+    t_max_top_z = (tz + step[2]) * BRICK - ray_origin[2] if inv_dir[2] < 1e9 else 0.0
+    t_max_top = min(t_max_top_x, t_max_top_y, t_max_top_z)
+
+    in_brick = False
+    local_origin = [0.0, 0.0, 0.0]
+    local_inv_dir = [0.0, 0.0, 0.0]
+    local_t_max_x = 0.0
+    local_t_max_y = 0.0
+    local_t_max_z = 0.0
+
+    while steps < MAX_STEPS:
+        steps += 1
+        if not in_brick:
+            if t >= t_max_top:
+                if ray_direction[0] > 0: tx += 1; t_max_top_x += BRICK * inv_dir[0]
+                elif ray_direction[0] < 0: tx -= 1; t_max_top_x -= BRICK * inv_dir[0]
+                if ray_direction[1] > 0: ty += 1; t_max_top_y += BRICK * inv_dir[1]
+                elif ray_direction[1] < 0: ty -= 1; t_max_top_y -= BRICK * inv_dir[1]
+                if ray_direction[2] > 0: tz += 1; t_max_top_z += BRICK * inv_dir[2]
+                elif ray_direction[2] < 0: tz -= 1; t_max_top_z -= BRICK * inv_dir[2]
+                t_max_top = min(t_max_top_x, t_max_top_y, t_max_top_z)
+                t += BRICK
+                continue
+
+            brick_idx = top_grid[tx, ty, tz]
+            if brick_idx is None:
+                t += t_max_top
+                if ray_direction[0] > 0: tx += 1; t_max_top_x += BRICK * inv_dir[0]
+                elif ray_direction[0] < 0: tx -= 1; t_max_top_x -= BRICK * inv_dir[0]
+                if ray_direction[1] > 0: ty += 1; t_max_top_y += BRICK * inv_dir[1]
+                elif ray_direction[1] < 0: ty -= 1; t_max_top_y -= BRICK * inv_dir[1]
+                if ray_direction[2] > 0: tz += 1; t_max_top_z += BRICK * inv_dir[2]
+                elif ray_direction[2] < 0: tz -= 1; t_max_top_z -= BRICK * inv_dir[2]
+                t_max_top = min(t_max_top_x, t_max_top_y, t_max_top_z)
+                continue
+            else:
+                in_brick = True
+                brick_origin_global = (tx * BRICK, ty * BRICK, tz * BRICK)
+                local_origin = [(ray_origin[i] + ray_direction[i] * t) - brick_origin_global[i] for i in range(3)]
+                local_inv_dir = [1.0 / ray_direction[i] for i in range(3)]
+                local_t_max_x = (BRICK - local_origin[0]) * local_inv_dir[0] if local_inv_dir[0] > 0 else -local_origin[0] * local_inv_dir[0]
+                local_t_max_y = (BRICK - local_origin[1]) * local_inv_dir[1] if local_inv_dir[1] > 0 else -local_origin[1] * local_inv_dir[1]
+                local_t_max_z = (BRICK - local_origin[2]) * local_inv_dir[2] if local_inv_dir[2] > 0 else -local_origin[2] * local_inv_dir[2]
+                continue
+
+        dt_local = min(local_t_max_x, local_t_max_y, local_t_max_z)
+        if dt_local <= 0:
+            in_brick = False
+            t += dt_local
+            current_global_pos = [ray_origin[i] + ray_direction[i] * t for i in range(3)]
+            t_max_top_x = (tx + step[0]) * BRICK - current_global_pos[0] if inv_dir[0] < 1e9 else 0.0
+            t_max_top_y = (ty + step[1]) * BRICK - current_global_pos[1] if inv_dir[1] < 1e9 else 0.0
+            t_max_top_z = (tz + step[2]) * BRICK - current_global_pos[2] if inv_dir[2] < 1e9 else 0.0
+            t_max_top = min(t_max_top_x, t_max_top_y, t_max_top_z)
+            if ray_direction[0] > 0: tx += 1; t_max_top_x += BRICK * inv_dir[0]
+            elif ray_direction[0] < 0: tx -= 1; t_max_top_x -= BRICK * inv_dir[0]
+            if ray_direction[1] > 0: ty += 1; t_max_top_y += BRICK * inv_dir[1]
+            elif ray_direction[1] < 0: ty -= 1; t_max_top_y -= BRICK * inv_dir[1]
+            if ray_direction[2] > 0: tz += 1; t_max_top_z += BRICK * inv_dir[2]
+            elif ray_direction[2] < 0: tz -= 1; t_max_top_z -= BRICK * inv_dir[2]
+            t_max_top = min(t_max_top_x, t_max_top_y, t_max_top_z)
+            continue
+
+        if local_t_max_x <= local_t_max_y and local_t_max_x <= local_t_max_z:
+            local_t_max_x += BRICK * local_inv_dir[0]
+        elif local_t_max_y <= local_t_max_x and local_t_max_y <= local_t_max_z:
+            local_t_max_y += BRICK * local_inv_dir[1]
+        else:
+            local_t_max_z += BRICK * local_inv_dir[2]
+        t += dt_local
+    return None
+```
+
+**Edge Cases and Pitfalls:**
+*   **Brick Edge Transitions:** Visual popping or missing voxels can occur at brick boundaries if the transition between top-level cells and brick interiors is not handled smoothly [S1, unofficial]. Validation requires toggling camera angles to ensure clean boundary-crossing transitions [S1, unofficial].
+*   **Axis-Aligned Rays:** The method reuses AABB (Axis-Aligned Bounding Box) clipping and safe-ray-distance primitives from dense implementations to handle axis-aligned rays and rays outside the grid volume correctly without artifacts [S1, unofficial].
+
+## Subtopics
+
+### [Sparse Ray Marching with Nested Axis-Aligned Distance Fields (NAADF)](6260-sparse-ray-marching-with-nested-axis-aligned-distance-fields.md)
+Sparse Ray Marching with Nested Axis-Aligned Distance Fields (NAADF) is a technique for traversing sparse voxel grids by skipping over empty space using precomputed distance fields, replacing traditional brick coordinate rasterization with a simpler pipeline suitable for g-buffer and path tracing. It differs from its sibling [Hierarchical Brick-Map DDA](4105-hierarchical-brick-map-dda.md) by calculating the largest empty region along the ray's path via axis-aligned bounds, allowing it to step over multiple cells at once rather than advancing one cell boundary per iteration.
+
+## Operating characteristics
+*   **Time Complexity:** $O(k)$ where $k$ is the number of occupied bricks intersected by the ray, plus the cost of traversing empty top-level cells [G]. In sparse scenes, $k \ll N^3$ (where $N$ is the global resolution) [G].
+*   **Memory Complexity:** $O(B \cdot BRICK^3)$ where $B$ is the number of occupied bricks [G]. For a heightmap stand-in with $N=128$, the brick count is roughly $top^2$ (~256 bricks) instead of the worst-case $top^3$ (4096) [S1, unofficial]. Memory savings grow with sparsity [S1, unofficial].
+*   **Measured Performance:** For drone airspace (>99% empty), the method significantly reduces traversal time compared to dense voxel buffers [S1, unofficial].
+*   **Strengths:** Significant memory reduction in sparse volumes; efficient skipping of empty space; compatible with GPU compute shaders for build phase [G].
+*   **Limitations:** Requires a build phase to construct the sparse structure; potential for visual artifacts at brick boundaries if not implemented carefully; increased $MAX\_STEPS$ may be required due to hierarchical overhead [G].
+*   **When to Use:** Sparse volumetric data (e.g., drone airspace, large outdoor scenes with sparse objects) [G].
+*   **When Not to Use:** Dense volumetric data (e.g., medical CT scans with high fill rate) where the overhead of hierarchical traversal may not justify the memory savings, or when dynamic updates are frequent and costly [G].
+
+## Background
+Hierarchical Brick-Map DDA was introduced as part of the ResQ Viz project, specifically in PR #67, to optimize ray marching for sparse volumes like drone airspace [S1, unofficial]. It builds upon the concept of sparse voxel traversal and brick-based storage, adapting it for GPU-based ray marching with WebGPU [S1, unofficial]. The method addresses the inefficiency of dense voxel buffers in highly sparse environments by introducing a two-level hierarchy: a coarse top-level grid and fine-grained bricks [S1, unofficial].
+
+## Sources
+[S1] feat(viz): hierarchical brick-map DDA for /spike.html, https://github.com/resq-software/viz/pull/67, fetched 2026-10-25 (unofficial)
+[S2] Ray tracing of signed distance function grids, https://www.jcgt.org/published/0011/03/06/paper-lowres.pdf, fetched 2026-10-25 (unofficial)

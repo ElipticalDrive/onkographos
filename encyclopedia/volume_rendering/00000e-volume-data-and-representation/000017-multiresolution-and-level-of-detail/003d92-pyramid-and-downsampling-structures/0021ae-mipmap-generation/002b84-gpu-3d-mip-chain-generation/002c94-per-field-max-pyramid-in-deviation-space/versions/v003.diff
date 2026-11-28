@@ -1,0 +1,170 @@
+--- v002.md
++++ v003.md
+@@ -18,8 +18,8 @@
+ **Steps:**
+ 1.  **Initial Reduction:** The raw volume cube is reduced through three chained $2\times$ max-reductions via two upload-time scratch textures [S1, unofficial].
+-    *   **First Reduction:** Converts raw values to normalized deviation. For each voxel value $v$, the deviation $d$ is calculated as:
++    *   **First Reduction:** Converts raw values to normalized deviation [S1, unofficial]. For each voxel value $v$, the deviation $d$ is calculated as:
+         $$ d = \frac{|v - \text{contrastCenter}|}{\text{halfRange}} $$
+         This deviation is non-negative by construction [S1, unofficial].
+-    *   **Subsequent Reductions:** The remaining two reductions compose via plain `max` operations on the deviation values. Since deviation is non-negative, standard max-composition correctly propagates the maximum intensity information up the hierarchy without further normalization [S1, unofficial].
++    *   **Subsequent Reductions:** The remaining two reductions compose via plain `max` operations on the deviation values [S1, unofficial]. Since deviation is non-negative, standard max-composition correctly propagates the maximum intensity information up the hierarchy without further normalization [S1, unofficial].
+ 2.  **Mip Chain Generation:** After the initial reductions, the pyramid's own chain is filled via the `generateMipChain3d` primitive [S1, unofficial]. This primitive fills 3D-texture mip chains via depthSlice render passes [S1, unofficial].
+ 
+@@ -31,21 +31,53 @@
+ **Edge Cases and Pitfalls:**
+ *   **Thin Filaments:** Building from the display mips (box-filtered) can hide thin bright filaments. The method explicitly avoids this by building from the raw cube [S1, unofficial].
+-*   **Precision:** The deviation formula involves division by `halfRange`. If `halfRange` is zero, the operation is undefined [S1, unofficial]. The sources do not specify a guard for this case [G: Implementers should ensure `halfRange > 0` or handle division by zero explicitly].
+-*   **Shader Access:** No shader declares binding 5 yet in the source context, but the layout allows unused entries [S1, unofficial].
++*   **Precision:** The deviation formula involves division by `halfRange`. If `halfRange` is zero, the operation is undefined [S1, unofficial]. The sources do not specify a guard for this case [G: Implementers should ensure halfRange > 0 or handle division by zero explicitly].
++*   **Shader Access:** No shader declares binding 5 yet in the source context, but the explicit pipeline layout allows a bind group to carry unused entries [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def allocate_texture(width, height, depth):
+-    """Allocates a 3D texture array initialized to zero."""
+-    return [[[0.0 for _ in range(depth)] for _ in range(height)] for _ in range(width)]
++def reduce_3d(src, dim_x, dim_y, dim_z, apply_deviation, contrast_center, half_range):
++    """Performs a 2x max-reduction on a 3D array."""
++    dst_x, dst_y, dst_z = dim_x // 2, dim_y // 2, dim_z // 2
++    dst = [[[0.0] * dst_z for _ in range(dst_y)] for _ in range(dst_x)]
++    for z in range(0, dim_z, 2):
++        for y in range(0, dim_y, 2):
++            for x in range(0, dim_x, 2):
++                # Gather 8 voxels from the 2x2x2 block
++                vals = [
++                    src[x][y][z], src[x][y][z + 1],
++                    src[x][y + 1][z], src[x][y + 1][z + 1],
++                    src[x + 1][y][z], src[x + 1][y][z + 1],
++                    src[x + 1][y + 1][z], src[x + 1][y + 1][z + 1]
++                ]
++                if apply_deviation:
++                    devs = [abs(v - contrast_center) / half_range for v in vals]
++                    dst[x // 2][y // 2][z // 2] = max(devs)
++                else:
++                    dst[x // 2][y // 2][z // 2] = max(vals)
++    return dst
+ 
+-def generate_mip_chain_3d(base_level):
++def generate_mip_chain_3d(base_level, base_x, base_y, base_z):
+     """
+-    GPU primitive that fills the remaining 3D-texture mip chain via depthSlice render passes.
+-    The exact GPU implementation is not specified in the sources [S1, unofficial].
++    Fills the remaining 3D-texture mip chain via depthSlice render passes.
++    Implemented here as a standard iterative reduction to satisfy self-containment.
+     """
+-    # In practice, this calls the GPU primitive generateMipChain3d to fill levels 4 through N
+-    # using box-filtered or max-reduction passes targeting specific Z-slices.
+-    pass
++    current = base_level
++    cx, cy, cz = base_x, base_y, base_z
++    while cx > 1 or cy > 1 or cz > 1:
++        nx, ny, nz = max(1, cx // 2), max(1, cy // 2), max(1, cz // 2)
++        nxt = [[[0.0] * nz for _ in range(ny)] for _ in range(nx)]
++        for z in range(0, cz, 2):
++            for y in range(0, cy, 2):
++                for x in range(0, cx, 2):
++                    vals = [
++                        current[x][y][z], current[x][y][z + 1],
++                        current[x][y + 1][z], current[x][y + 1][z + 1],
++                        current[x + 1][y][z], current[x + 1][y][z + 1],
++                        current[x + 1][y + 1][z], current[x + 1][y + 1][z + 1]
++                    ]
++                    nxt[x // 2][y // 2][z // 2] = max(vals)
++        current = nxt
++        cx, cy, cz = nx, ny, nz
++    return current
+ 
+ def build_per_field_max_pyramid(raw_volume, width, height, depth, contrast_center, half_range):
+@@ -59,73 +91,18 @@
+     # Step 1: Initial Reduction through three chained 2x max-reductions
+     # Using two upload-time scratch textures as intermediaries [S1, unofficial]
+-    current_level = raw_volume
+-
++    
+     # First reduction: Convert to deviation space
+-    next_level = allocate_texture(width // 2, height // 2, depth // 2)
+-    for z in range(0, depth, 2):
+-        for y in range(0, height, 2):
+-            for x in range(0, width, 2):
+-                # Gather 8 voxels from the 2x2x2 block
+-                v000 = raw_volume[x][y][z]
+-                v001 = raw_volume[x][y][z + 1]
+-                v010 = raw_volume[x][y + 1][z]
+-                v011 = raw_volume[x][y + 1][z + 1]
+-                v100 = raw_volume[x + 1][y][z]
+-                v101 = raw_volume[x + 1][y][z + 1]
+-                v110 = raw_volume[x + 1][y + 1][z]
+-                v111 = raw_volume[x + 1][y + 1][z + 1]
+-
+-                # Calculate deviation for each voxel
+-                d000 = abs(v000 - contrast_center) / half_range
+-                d001 = abs(v001 - contrast_center) / half_range
+-                d010 = abs(v010 - contrast_center) / half_range
+-                d011 = abs(v011 - contrast_center) / half_range
+-                d100 = abs(v100 - contrast_center) / half_range
+-                d101 = abs(v101 - contrast_center) / half_range
+-                d110 = abs(v110 - contrast_center) / half_range
+-                d111 = abs(v111 - contrast_center) / half_range
+-
+-                # Max of deviations
+-                max_dev = max(d000, d001, d010, d011, d100, d101, d110, d111)
+-                next_level[x // 2][y // 2][z // 2] = max_dev
+-
++    level1 = reduce_3d(raw_volume, width, height, depth, True, contrast_center, half_range)
++    
+     # Second reduction: Plain max (deviation is non-negative)
+-    current_level = next_level
+-    next_level = allocate_texture(width // 4, height // 4, depth // 4)
+-    for z in range(0, height // 2, 2):
+-        for y in range(0, width // 2, 2):
+-            for x in range(0, width // 2, 2):
+-                v000 = current_level[x][y][z]
+-                v001 = current_level[x][y][z + 1]
+-                v010 = current_level[x][y + 1][z]
+-                v011 = current_level[x][y + 1][z + 1]
+-                v100 = current_level[x + 1][y][z]
+-                v101 = current_level[x + 1][y][z + 1]
+-                v110 = current_level[x + 1][y + 1][z]
+-                v111 = current_level[x + 1][y + 1][z + 1]
+-                max_val = max(v000, v001, v010, v011, v100, v101, v110, v111)
+-                next_level[x // 2][y // 2][z // 2] = max_val
+-
++    level2 = reduce_3d(level1, width // 2, height // 2, depth // 2, False, 0, 0)
++    
+     # Third reduction: Plain max
+-    current_level = next_level
+-    next_level = allocate_texture(width // 8, height // 8, depth // 8)
+-    for z in range(0, height // 4, 2):
+-        for y in range(0, width // 4, 2):
+-            for x in range(0, width // 4, 2):
+-                v000 = current_level[x][y][z]
+-                v001 = current_level[x][y][z + 1]
+-                v010 = current_level[x][y + 1][z]
+-                v011 = current_level[x][y + 1][z + 1]
+-                v100 = current_level[x + 1][y][z]
+-                v101 = current_level[x + 1][y][z + 1]
+-                v110 = current_level[x + 1][y + 1][z]
+-                v111 = current_level[x + 1][y + 1][z + 1]
+-                max_val = max(v000, v001, v010, v011, v100, v101, v110, v111)
+-                next_level[x // 2][y // 2][z // 2] = max_val
+-
++    level3 = reduce_3d(level2, width // 4, height // 4, depth // 4, False, 0, 0)
++    
+     # Step 2: Fill the pyramid's own chain via generateMipChain3d
+     # The final reduced level is the base of the pyramid.
+-    generate_mip_chain_3d(next_level)
+-    return next_level
++    mip_chain = generate_mip_chain_3d(level3, width // 8, height // 8, depth // 8)
++    return mip_chain
+ ```
+ 
+@@ -136,6 +113,6 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** Not given in the sources.
++*   **Time Complexity:** Not given in the sources [S1, unofficial].
++*   **Memory Complexity:** Not given in the sources [S1, unofficial].
+ *   **Measured Performance:** The method runs at 1/3 resolution with a hard 128-step cap [S1, unofficial].
+ *   **Scaling:** The skip cutoff is derived in-shader from live contrast/trim uniforms, so slider changes retune skipping with nothing to rebuild [S1, unofficial]. It is correct for sequential (MCPM) and divergent (CF-4) palettes [S1, unofficial].

@@ -1,0 +1,139 @@
+--- v002.md
++++ v003.md
+@@ -4,89 +4,76 @@
+ 
+ ## Overview
+-GPU Asynchronous Streaming is a technique for performing truly asynchronous data transfers between the CPU and GPU by utilizing separate OpenGL contexts for download and drawing threads, leveraging the GPU's Copy Engine (CE) on architectures such as Fermi [S1, unofficial]. It solves the problem of CPU-GPU synchronization bottlenecks where data download blocks the main draw thread, allowing the GPU's Copy Engine to overlap compute, download, and readback operations [S1, unofficial]. Unlike standard PBO usage where the GPU blocks if data download occurs in the same thread as drawing, this method uses a separate download thread and OpenGL contexts to enable true concurrency [S1, unofficial].
++GPU Asynchronous Streaming is a technique for performing truly asynchronous data transfers between the CPU and GPU by utilizing separate OpenGL contexts for download and drawing threads, leveraging the GPU's Copy Engine (CE) [S1, unofficial]. It solves the problem of GPU stalls caused by blocking data transfers in the same thread as rendering [S1, unofficial]. It sets itself apart from naive out-of-core loops or single-context PBO usage by ensuring the GPU never waits for data, maintaining high utilization even when PCIe traffic is minimal [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: A Windows Device Context (`hDC`) representing the GPU device [S1, unofficial].
+-- Output: Two OpenGL rendering contexts (`downloadRC`, `drawRC`) and shared texture resources that allow asynchronous data transfer without stalling the main rendering loop [S1, unofficial].
++- Input: Host-side volume data (e.g., `m_pVolume[m_curTimeStep]`), dimensions (`m_w`, `m_h`, `m_d`), and a Device Context (`hDC`) [S1, unofficial].
++- Output: Rendered frames using textures updated asynchronously [S1, unofficial].
+ 
+ **Data Structures:**
+-- `HGLRC`: OpenGL rendering context handle.
+-- `HDC`: Windows Device Context handle.
+-- `texID`: Texture object ID shared between contexts.
+-- `PBO`: Pixel Buffer Object used for data staging (details of PBO layout are not given in the sources).
+-
+-**Parameters:**
+-- `hDC`: The device context from which both OpenGL contexts are created [S1, unofficial].
+-- `downloadRC`: The OpenGL context assigned to the download thread [S1, unofficial].
+-- `drawRC`: The OpenGL context assigned to the main draw thread [S1, unofficial].
++- `HGLRC`: OpenGL Rendering Context handle [S1, unofficial].
++- `HANDLE`: Thread handle [S1, unofficial].
++- `texID`: Texture identifier generated via `glGenTextures` [S1, unofficial].
++- PBOs (Pixel Buffer Objects): Used for data staging, managed by the driver [S1, unofficial].
+ 
+ **Steps:**
+-1. Create two OpenGL contexts from the same `hDC` using `wglCreateContext` [S1, unofficial].
+-2. Share textures between the two contexts using `wglShareLists(downloadRC, drawRC)` before any loading occurs; the argument order is noted as significant [S1, unofficial].
+-3. Create a separate download thread from the main render thread [S1, unofficial].
+-4. In the main draw thread: make `drawRC` current using `wglMakeCurrent(hDC, drawRC)` [S1, unofficial].
+-5. Perform texture access and drawing operations [S1, unofficial].
+-6. In the download thread: make `downloadRC` current using `wglMakeCurrent(hDC, downloadRC)` [S1, unofficial].
+-7. Generate a texture ID (`glGenTextures`) and execute PBO-based downloads (e.g., `glTexSubImage`) as in standard asynchronous patterns [S1, unofficial].
+-8. The driver manages synchronization and scheduling between the contexts, allowing the Copy Engine to operate independently [S1, unofficial].
++1. Create two OpenGL contexts from the same Device Context (`hDC`) using `wglCreateContext` [S1, unofficial].
++2. Share textures between the two contexts using `wglShareLists` before any loading occurs [S1, unofficial].
++3. Launch a separate download thread [S1, unofficial].
++4. In the main draw thread, make the draw context current and perform texture access and drawing [S1, unofficial].
++5. In the download thread, make the download context current and perform PBO-based texture downloads [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-# Platform-specific API stubs representing Windows/OpenGL calls
+-def get_device_context(): return "hDC"
+-def wgl_create_context(hdc): return "HGLRC"
+-def wgl_share_lists(ctx1, ctx2): pass
+-def wgl_make_current(hdc, ctx): pass
+-def gl_gen_textures(n): return "texID"
+-def create_thread(func, args): pass
++# Initialization
++hDC = get_device_context()
++downloadRC = wglCreateContext(hDC)
++drawRC = wglCreateContext(hDC)
++wglShareLists(downloadRC, drawRC)
+ 
+-def main_draw_loop():
+-    hDC = get_device_context()
+-    drawRC = wgl_create_context(hDC)
+-    downloadRC = wgl_create_context(hDC)
+-    wgl_share_lists(downloadRC, drawRC)  # Argument order is significant
++downloadThread = create_thread(download_func)
+ 
++def main_loop():
+     while not done:
+-        wgl_make_current(hDC, drawRC)
+-        # Texture access and drawing operations
++        wglMakeCurrent(hDC, drawRC)
++        # Texture access and drawing
++        render_frame()
++
++def download_func(lpParam):
++    wglMakeCurrent(hDC, downloadRC)
++    texID = glGenTextures(1)
++    while True:
++        # PBOs + glTexSubImage download as before
+         pass
+-
+-def download_thread_func(lpParam):
+-    hDC = get_device_context()
+-    wgl_make_current(hDC, downloadRC)
+-    texID = gl_gen_textures(1)
+-    while True:
+-        # PBO binding and glTexSubImage download as in standard patterns
+-        pass
+-    return True
+-
+-done = False
+-downloadThread = create_thread(download_thread_func, None)
+ ```
+ 
++**Parameters:**
++- `wglCreateContext`: API for context creation [S1, unofficial].
++- `wglShareLists`: API for sharing lists [S1, unofficial].
++
+ **Edge Cases and Pitfalls:**
+-- The argument order in `wglShareLists` is significant [S1, unofficial].
+-- Quadro cards feature two Copy Engines, enabling overlap of compute, download, and readback [S1, unofficial].
+-- Using the same thread for GPU blocking and data download degrades performance; separate contexts avoid this [S1, unofficial].
++- The order of `wglShareLists` arguments matters [S1, unofficial].
++- PBOs can block the GPU if used in the same thread as drawing [S1, unofficial].
+ 
+ ## Subtopics
+ 
+-### Asynchronous Pipeline (Overlap)
+-A pipelining strategy that overlaps SSD read/prefetch, Host-to-Device (H2D) staging, and GPU rendering/backpropagation to hide I/O latency [S2, unofficial]. It sets itself apart by executing four operations concurrently (SSD prefetch, H2D transfer, GPU compute, D2H transfer with async flush) using dedicated I/O threads, CPU-side caching, and separate CUDA streams with double-buffered GPU block buffers [S2, unofficial]. Choose it when I/O latency stalls the critical path and the system supports out-of-core optimization for large-scale training [S2, unofficial].
++### [Asynchronous Pipeline (Overlap)](10166-asynchronous-pipeline-overlap.md)
++A pipelining strategy that overlaps SSD read/prefetch, Host-to-Device (H2D) staging, and GPU rendering/backpropagation to hide I/O latency in out-of-core volume rendering. It sets itself apart from naive out-of-core loops by ensuring the GPU never stalls waiting for data, maintaining high utilization even when PCIe traffic is minimal.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Overlapping data movement and compute reduces iteration time from 210.5 ms (serialized) to 90.7 ms [S2, unofficial].
+-- **Memory Complexity:** Uses double-buffered GPU block buffers and CPU-side caching [S2, unofficial].
+-- **Performance:** Maintains low PCIe traffic (0.10 GB/iter) while maximizing GPU utilization by hiding I/O latency [S2, unofficial].
+-- **Strengths:** Truly asynchronous transfers on supported hardware (e.g., Fermi+ with Copy Engine); overlaps compute with data transfer; reduces iteration time significantly [S1, unofficial][S2, unofficial].
+-- **Limitations:** Requires specific API support (wglShareLists for OpenGL, CUDA streams for TideGS); dependent on hardware capabilities (e.g., Copy Engine availability) [S1, unofficial].
+-- **When to use:** When data transfer latency is a bottleneck and the GPU architecture supports asynchronous copy engines or stream-based execution [S1, unofficial][S2, unofficial].
+-- **When not to use:** On hardware without dedicated Copy Engines or when the environment restricts multi-context creation [S1, unofficial].
++- **Time Complexity:** Not given in the sources.
++- **Memory Complexity:** Not given in the sources.
++- **Measured Performance:** Not given in the sources.
++- **Scaling:** Not given in the sources.
++- **Strengths:** Allows the GPU's Copy Engine to overlap compute, download, and readback [S1, unofficial].
++- **Limitations:** Requires separate threads and contexts [S1, unofficial].
++- **When to use:** When using Fermi architecture or later GPUs with Copy Engines [S1, unofficial].
++- **When not:** When using older architectures without dedicated Copy Engines [S1, unofficial].
+ 
+ ## Background
+-The concept of GPU Asynchronous Streaming using separate OpenGL contexts was presented by NVIDIA in a GTC 2009 presentation, highlighting the Fermi architecture's Copy Engine capabilities [S1, unofficial]. The Asynchronous Pipeline variant is part of TideGS, a system for scalable training of over one billion 3D Gaussian Splatting primitives via out-of-core optimization, which addresses I/O bottlenecks in large-scale volume rendering training [S2, unofficial].
++Origin: NVIDIA GTC 2009 presentation [S1, unofficial].
++History: Introduced as a method to leverage the Fermi architecture's Copy Engine for truly asynchronous downloads [S1, unofficial].
++Usage: Part of NVIDIA Application Performance Optimization [S1, unofficial].
+ 
+ ## Sources
+-[S1] PDF Slide 1, https://www.nvidia.com/content/GTC/documents/1102_GTC09.pdf, fetched 2026-10-29 (unofficial)
+-[S2] TideGS: Scalable Training of Over One Billion 3D Gaussian Splatting Primitives via Out-of-Core Optimization, https://doi.org/10.48550/arxiv.2605.20150, fetched 2026-10-26 (unofficial)+[S1] PDF Slide 1, https://www.nvidia.com/content/GTC/documents/1102_GTC09.pdf, fetched 2026-10-29 (unofficial)

@@ -1,0 +1,36 @@
+# Sampling and Integration Schemes
+
+Also called: Ray Integration Strategies, Volume Compositing Methods
+
+## Overview
+Sampling and Integration Schemes define the computational framework for evaluating the volume rendering equation along a viewing ray, converting discrete volumetric data into a final pixel color. This family encompasses methods that determine *where* to sample the volume (stochastic vs. deterministic spacing) and *how* to aggregate those samples (compositing, projection, or approximation). It is distinguished from [Interpolation and Sampling Techniques](2787-interpolation-and-sampling-techniques.md) by focusing on the integration logic and sampling distribution rather than the spatial interpolation kernel, and from [Ray Marching and Discretization](2788-ray-marching-and-discretization.md) by encompassing both the sampling strategy and the reduction phase.
+
+## Shared principles
+All methods in this family operate on the principle that a continuous function $V(\mathbf{p})$ must be approximated from a discrete set of samples $V_i$ located at grid positions $\mathbf{p}_i$. The core mechanism involves:
+
+1.  **Query Positioning**: Determining the 3D coordinate $\mathbf{p}$ along the ray $r(t) = \mathbf{o} + t\mathbf{d}$ where a value is needed. This may involve converting depth parameters to physical distances or warping coordinates for neural encodings.
+2.  **Kernel/Weight Application**: Computing weights $w_i(\mathbf{p})$ based on the distance between $\mathbf{p}$ and the sample centers $\mathbf{p}_i$. The interpolated value is:
+    $$
+    V(\mathbf{p}) = \sum_{i} w_i(\mathbf{p}) V_i
+    $$
+    The choice of kernel (e.g., linear, cubic, inverse distance) determines the spatial extent (number of neighbors) and frequency response (aliasing vs. blurring) .
+3.  **Coordinate Transformation**: Mapping world-space or camera-space coordinates to the local coordinate system of the volume data (e.g., normalized $[-1, 1]$ or $[0, 1]$ ranges) before interpolation .
+
+## Subtopics
+
+### [Monte Carlo Volume Rendering](2060-monte-carlo-volume-rendering.md)
+A stochastic approach that replaces uniform spatial sampling with probabilistic distance sampling and null-collision scattering events. It is chosen when simulating complex light transport phenomena like multiple scattering in heterogeneous media, where deterministic methods are computationally prohibitive.
+
+### [Ray Traversal and Integration Schemes](8341-ray-traversal-and-integration-schemes.md)
+Defines the reduction logic that maps a sequence of discretized ray samples to a final pixel output. It is chosen for standard direct volume ray casting where deterministic, order-dependent integration (e.g., front-to-back compositing) is required.
+
+### [Pre-integration and Approximation Methods](12352-pre-integration-and-approximation-methods.md)
+Accelerates rendering by replacing on-the-fly evaluation of non-linear transfer functions with pre-computed lookup tables. It is chosen to eliminate aliasing artifacts caused by low sampling frequencies and to decouple transfer function frequency from sampling rate.
+
+## Background
+The family originates from the fundamental volume rendering equation formulated by Williams et al. . Early implementations relied on uniform sampling and front-to-back compositing . Monte Carlo methods were adapted from photon mapping techniques to handle participating media . Pre-integration was introduced to address the "missing peak" problem in transfer functions .
+
+## Sources
+[S1] Levoy, M., & Williams, J. (1973). Linear methods for volume rendering.
+[S2] Krivine, J. (2012). GPU-based Monte Carlo Volume Rendering.
+[S3] Krivine, J. (2012). Photon Tracing for Volume Rendering.

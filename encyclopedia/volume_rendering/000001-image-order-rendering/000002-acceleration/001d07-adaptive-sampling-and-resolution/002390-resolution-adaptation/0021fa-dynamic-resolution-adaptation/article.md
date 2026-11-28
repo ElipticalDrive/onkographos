@@ -1,0 +1,106 @@
+# Dynamic Resolution Adaptation
+
+Also called: ComputeReductionFactor, Frame Rate Maintenance via Resolution Adjustment
+
+## Overview
+Dynamic Resolution Adaptation dynamically adjusts the render viewport reduction factor based on the previous frame's render time and an allocated time budget to maintain a target frame rate [S1, unofficial]. It belongs to the Resolution Adaptation family, which modulates sampling rates or resolution based on performance metrics rather than using a fixed strategy [G].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** `ReductionFactor` (current reduction factor, range $(0.0, 1.0]$), `TimeToDraw` (time taken to render the previous frame, $\ge 0.0$), `allocatedTime` (time budget for the next frame in seconds) [S1, unofficial].
+*   **Output:** `newReductionFactor` (updated reduction factor, range $(0.0, 1.0]$) [S1, unofficial].
+
+**Data Structures:**
+The method operates on scalar floating-point values without requiring complex data structures [S1, unofficial].
+
+**Steps:**
+1.  **Validate Inputs:** Ensure `ReductionFactor` is in $(0.0, 1.0]$ and `TimeToDraw` is $\ge 0.0$ [S1, unofficial].
+2.  **Compute Adjustment:** Calculate the new reduction factor based on the ratio of `TimeToDraw` to `allocatedTime` [S1, unofficial].
+3.  **Clamp:** Ensure the resulting `newReductionFactor` is strictly greater than $0.0$ and less than or equal to $1.0$ [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_new_reduction_factor(reduction_factor, time_to_draw, allocated_time):
+    # Validate inputs: ReductionFactor must be in (0.0, 1.0], TimeToDraw >= 0.0 [S1, unofficial]
+    if not (0.0 < reduction_factor <= 1.0):
+        raise ValueError("ReductionFactor must be in (0.0, 1.0]")
+    if time_to_draw < 0.0:
+        raise ValueError("TimeToDraw must be >= 0.0")
+    if allocated_time <= 0.0:
+        raise ValueError("AllocatedTime must be > 0.0")
+
+    # Compute new ReductionFactor based on time budget and previous frame time [S1, unofficial]
+    # The exact mathematical formula is not provided in the sources.
+    # [G] A standard control loop approach scales the factor inversely with the time ratio:
+    # new_factor = current_factor * (allocated_time / time_to_draw)
+    if time_to_draw == 0.0:
+        time_to_draw = 1e-9  # [G] Guard against division by zero for degenerate input
+    new_reduction_factor = reduction_factor * (allocated_time / time_to_draw)
+
+    # Clamp to valid range (0.0, 1.0] [S1, unofficial]
+    if new_reduction_factor <= 0.0:
+        new_reduction_factor = 1e-6  # [G] Small positive epsilon to maintain valid state
+    if new_reduction_factor > 1.0:
+        new_reduction_factor = 1.0
+
+    return new_reduction_factor
+```
+
+**Parameters:**
+*   `allocatedTime`: Double in seconds representing the time budget for the next frame [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   Requires `ReductionFactor` to be $> 0.0$ and $\le 1.0$ [S1, unofficial].
+*   Requires `TimeToDraw` to be $\ge 0.0$ [S1, unofficial].
+*   If `allocatedTime` is zero or negative, the method is undefined [S1, unofficial].
+*   Division by zero must be guarded if `TimeToDraw` evaluates to exactly $0.0$ [G].
+
+## Subtopics
+
+### [Dynamic Frame Rate Adaptation](8221-dynamic-frame-rate-adaptation.md)
+Dynamic Frame Rate Adaptation is a runtime adjustment system that tracks rendering performance and adjusts the distribution of resolution levels on the fly to maintain a consistently high update rate above a set threshold. It solves the problem of performance instability in volume rendering, where small parametric changes can cause frame rate dips leading to cybersickness. It sets itself apart from static resolution schemes by continuously shifting the "anchor points" between resolution levels based on the gradient of recent frame times, rather than using fixed blending factors. See [Dynamic Frame Rate Adaptation](8221-dynamic-frame-rate-adaptation.md).
+
+### [Time-critical level-of-detail selection](9455-time-critical-level-of-detail-selection.md)
+An algorithm that performs automatic level-of-detail selection to match different parameters like the desired frame rate by predicting rendering time and dynamically selecting the level-of-detail for the next frame. It attempts to predict the rendering time by collecting performance statistics and dynamically selecting the level-of-detail for the next frame. The desired frame rate is a parameter used to match the level-of-detail selection. Not given in the sources.
+
+### [Foveated Rendering](11952-foveated-rendering.md)
+Foveated rendering is a technique for eye-tracked displays that increases performance by reducing the resolution of the rendered image (or hologram) outside the user's tracked foveal position. It differs from sibling methods like [Dynamic Resolution Adaptation](2683-dynamic-resolution-adaptation.md) by relying on biological gaze data rather than temporal frame budgets. It is distinct from [Dynamic Frame Rate Adaptation](8221-dynamic-frame-rate-adaptation.md) as it maintains a constant frame rate by reducing spatial fidelity rather than temporal fidelity. See [Foveated Rendering](11952-foveated-rendering.md).
+
+### [Render State Machine](12246-render-state-machine.md)
+The Render State Machine is a threaded control mechanism that manages rendering resolution and interruption based on camera movement and user actions to maintain a target frame rate. It operates as a finite state machine that transitions between resolution tiers ('high', 'low_move', 'low_static') in response to specific actions ('move', 'static', 'rerender', 'step'). It distinguishes itself from sibling methods by explicitly handling interruption via Python trace functions to discard incomplete outputs, ensuring viewer consistency. See [Render State Machine](12246-render-state-machine.md).
+
+## Operating characteristics
+**Time and Memory Complexity:**
+Not given in the sources.
+
+**Measured Performance:**
+Not given in the sources.
+
+**Scaling:**
+Not given in the sources.
+
+**Strengths and Limitations:**
+*   **Strengths:** Maintains target frame rate by dynamically adjusting resolution [S1, unofficial].
+*   **Limitations:** The exact formula for adjustment is not specified, making implementation dependent on inference [S1, unofficial].
+
+**When to Use:**
+Not specified in the sources.
+
+**When Not to Use:**
+Not specified in the sources.
+
+## Background
+**Origin:**
+Not given in the sources.
+
+**History and Development:**
+Not given in the sources.
+
+**Where it is Used:**
+Not given in the sources.
+
+## Sources
+[S1] bozorgi/VTKMultiVolumeRayCaster, https://github.com/bozorgi/VTKMultiVolumeRayCaster, fetched 2026-10-26 (unofficial)
+[S2] Volume Visualization and Compositing on Large-Scale Displays Using Handheld Touchscreen Interaction, https://doi.org/10.25781/kaust-d5m7l, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,122 @@
+--- v002.md
++++ v003.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-A method to generate a point cloud with normals from a mesh by rendering normal and depth buffers from a specific camera viewpoint and reprojecting the buffer data into world space [S1, unofficial]. It differs from direct mesh sampling by relying on rasterization to handle visibility and occlusion, effectively acting as a "virtual laser scan" from a single viewpoint [S1, unofficial]. It builds on [Depth Map to Absolute Camera Coordinates](7984-depth-map-to-absolute-camera-coordinates.md) by providing the specific reprojection logic required to convert rendered buffers into 3D points.
++A method to generate a point cloud with normals from a mesh by rendering normal and depth buffers from a specific camera viewpoint and reprojecting the buffer data into world space [S1, unofficial]. It differs from direct mesh sampling by relying on rasterization to handle visibility and occlusion, effectively acting as a "virtual laser scan" from a single viewpoint [S1, unofficial]. It builds on [Depth Map to Absolute Camera Coordinates](7984-depth-map-to-absolute-camera-coordinates.md) by providing the specific reprojection logic required to convert rendered buffers into 3D points [S1, unofficial].
+ 
+ ## How it works
+@@ -44,5 +44,5 @@
+ 
+ 4.  **Revert Depth Processing:**
+-    The rendered depth is typically non-linear. Revert to linear clip-space depth $z_{clip}$ using:
++    Revert to linear clip-space depth $z_{clip}$ using:
+     $$ z_{clip} = \frac{z_{far} + z_{near} - \frac{2 z_{near} z_{far}}{depth_{buffer}}}{z_{far} - z_{near}} $$
+     Store this as `self.depth` [S1, unofficial].
+@@ -83,10 +83,11 @@
+     [S1, unofficial]
+ 
++**Pitfalls:**
++If the camera is inside the model, the visibility check in `is_visible` must account for depth comparison against the stored depth buffer to determine if a point is occluded [S1, unofficial].
++
+ **Pseudocode:**
+ 
+ ```python
+ import numpy as np
+-import pyrender
+-import trimesh
+ 
+ class Scan:
+@@ -103,16 +104,6 @@
+         self.camera_position = np.matmul(self.camera_transform, np.array([0, 0, 0, 1]))[:3]
+         
+-        # Create camera and get projection matrix
+-        # Note: pyrender PerspectiveCamera expects yfov, aspectRatio, znear, zfar
+-        self.camera = pyrender.PerspectiveCamera(
+-            yfov=fov, 
+-            aspectRatio=1.0, 
+-            znear=z_near, 
+-            zfar=z_far
+-        )
+-        self.projection_matrix = self.camera.get_projection_matrix()
+-        
+-        # Render buffers
+-        # render_normal_and_depth_buffers is a helper that returns depth and color buffers
++        # Sources do not provide the full implementation of camera creation and rendering [G].
++        self.projection_matrix = np.eye(4)
+         depth_buffer, color_buffer = self._render_buffers()
+         
+@@ -127,5 +118,4 @@
+ 
+         # Revert depth processing to get clip-space depth
+-        # Formula: z_clip = (z_far + z_near - (2 * z_near * z_far) / depth) / (z_far - z_near)
+         self.depth = (z_far + z_near - (2.0 * z_near * z_far) / depth_buffer) / (z_far - z_near)
+         
+@@ -163,38 +153,14 @@
+ 
+     def _render_buffers(self):
+-        """Helper to render depth and normal buffers using pyrender."""
+-        scene = pyrender.Scene()
+-        scene.add(pyrender.Mesh.from_trimesh(self.mesh))
+-        scene.add(self.camera)
+-        
+-        # Render depth
+-        r = pyrender.OffscreenRenderer(self.resolution, self.resolution)
+-        color, depth = r.render(scene, flags=pyrender.constants.RenderFlags.RGBA | pyrender.constants.RenderFlags.DEPTH_ONLY)
+-        
+-        # Extract normal buffer if needed (pyrender doesn't natively support normal buffer rendering 
+-        # in standard OffscreenRenderer without custom shaders or extensions. 
+-        # Assuming a helper exists that renders normals to color buffer if calculate_normals is True)
+-        if self.calculate_normals:
+-            # Placeholder for actual normal buffer rendering logic which might require 
+-            # a custom shader or library extension not detailed in standard pyrender API.
+-            # In the source context, this is handled by render_normal_and_depth_buffers.
+-            # We assume 'color' here represents the normal buffer if calculated, 
+-            # but standard pyrender returns RGBA color. 
+-            # For implementation fidelity based on [S1, unofficial], we assume a specific rendering path 
+-            # that outputs normals to the color buffer.
+-            pass 
+-            
+-        return depth, color
++        """Helper to render depth and normal buffers using a graphics API."""
++        # Sources do not give the rendering implementation; typically handled by a graphics API [G].
++        return np.zeros((self.resolution, self.resolution)), np.zeros((self.resolution, self.resolution, 3))
+ 
+     def is_visible(self, points):
+         """Check if points are visible from this scan's perspective."""
+-        # Visibility check logic: transform points to clip space, check depth buffer
+-        # This requires projecting points and comparing against self.depth
+-        # Implementation details omitted as per source brevity, but involves:
+-        # 1. Transform points to camera space
+-        # 2. Project to clip space
+-        # 3. Check if projected depth is less than stored depth buffer value at that pixel
+-        # [S1, unofficial]
+-        pass
++        # Sources do not give the full implementation of is_visible [G].
++        # If the camera is inside the model, the visibility check must account for depth comparison 
++        # against the stored depth buffer to determine if a point is occluded [S1, unofficial].
++        return np.ones(points.shape[0], dtype=bool)
+ ```
+ 
+@@ -202,17 +168,11 @@
+ 
+ ### Surface Point Cloud Generation via Scans
+-A variant that generates a complete surface point cloud by aggregating scans from multiple viewpoints. It uses a Fibonacci sphere distribution to generate camera angles, ensuring uniform coverage. For each angle, a `Scan` object is created with specific parameters: `fov=1.0472`, `z_near=bounding_radius`, `z_far=3*bounding_radius`, and `resolution=400`. The points and normals from all scans are concatenated to form the final `SurfacePointCloud` [S1, unofficial].
++A variant that generates a complete surface point cloud by aggregating scans from multiple viewpoints [S1, unofficial]. It uses a Fibonacci sphere distribution to generate camera angles, ensuring uniform coverage [S1, unofficial]. For each angle, a `Scan` object is created with specific parameters: `fov=1.0472`, `z_near=bounding_radius`, `z_far=3*bounding_radius`, and `resolution=400` [S1, unofficial]. The points and normals from all scans are concatenated to form the final `SurfacePointCloud` [S1, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Linear with respect to the number of pixels in the resolution ($O(R^2)$) for rendering and reprojection. Aggregating multiple scans scales linearly with the number of scans.
+-- **Memory Complexity:** Linear with respect to the number of visible pixels. The depth and color buffers require $O(R^2)$ memory.
+-- **Performance:** Depends heavily on the rendering engine's speed. Pyrender is relatively slow for high-resolution scans compared to GPU-based rasterization libraries.
+-- **Strengths:** Handles occlusion naturally via the depth buffer. Provides normals aligned with the view direction (corrected to face outward). Simple to implement using standard graphics libraries.
+-- **Limitations:** Resolution-dependent; high resolution is needed for smooth surfaces. Single-scan scans suffer from occlusion and back-face visibility issues. Requires the camera to be outside the mesh for accurate visibility checks [S1, unofficial].
+-- **When to use:** When a view-dependent point cloud is sufficient, or when generating a multi-view point cloud for SDF reconstruction.
+-- **When not to use:** When a complete, watertight, and resolution-independent surface representation is required (use mesh sampling or SDF instead).
++Not given in the sources.
+ 
+ ## Background
+-Originated in the `mesh_to_sdf` library by marian42, which uses virtual laser scans to generate point clouds for Signed Distance Field (SDF) reconstruction [S1, unofficial]. The method leverages standard graphics pipeline operations (projection, rasterization, depth testing) to sample the mesh surface.
++Originated in the `mesh_to_sdf` library by marian42, which uses virtual laser scans to generate point clouds for Signed Distance Field (SDF) reconstruction [S1, unofficial].
+ 
+ ## Sources

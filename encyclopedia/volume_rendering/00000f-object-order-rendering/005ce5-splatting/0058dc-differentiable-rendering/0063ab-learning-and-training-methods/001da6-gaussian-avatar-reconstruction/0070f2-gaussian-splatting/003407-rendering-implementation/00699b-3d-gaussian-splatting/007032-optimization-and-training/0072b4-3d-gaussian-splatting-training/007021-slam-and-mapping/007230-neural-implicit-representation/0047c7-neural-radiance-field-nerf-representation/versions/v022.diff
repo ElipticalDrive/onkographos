@@ -1,0 +1,276 @@
+--- v021.md
++++ v022.md
+@@ -4,167 +4,144 @@
+ 
+ ## Overview
+-Neural Radiance Field (NeRF) representation encodes a 3D scene as a continuous volumetric function or an explicit set of discrete primitives, enabling high-quality novel view synthesis and SLAM mapping from sparse 2D images [S1][S2, unofficial][S3]. It solves the problem of reconstructing complex geometry and appearance without requiring explicit mesh extraction by mapping spatial coordinates, viewing directions, and phase coefficients to radiance values [S1][S4]. Unlike explicit point-based solutions that require Multi-View Stereo data, this representation achieves high-quality results using only Structure-from-Motion (SfM) points as input [S3]. It sets itself apart from sibling methods by supporting both implicit neural field evaluation (Photon Fields, standard NeRF) and explicit GPU-friendly Gaussian splatting, trading memory for rendering speed while maintaining competitive training times [S2, unofficial][S3].
++Neural Radiance Fields (NeRF) represent a 3D scene as a continuous volumetric function that maps spatial coordinates and view directions to color and volume density, enabling high-quality novel view synthesis via differentiable volume rendering [S4]. While the term broadly covers implicit neural representations, in the context of this article's specific source material, it also encompasses explicit variants like 3D Gaussian Splatting, which replaces neural network evaluation with differentiable rasterization of 3D Gaussians to achieve real-time performance [S2, unofficial][S3]. Unlike traditional ray-marching NeRFs that evaluate a neural network at hundreds of points per ray, 3D Gaussian Splatting projects explicit 3D Gaussian blobs onto the screen, avoiding neural inference during rendering [S3].
+ 
+ ## How it works
+-The representation encompasses implicit neural fields that map inputs to radiance, and explicit Gaussian primitives that are rasterized directly [S4][S3]. The core mechanism involves initializing primitives from SfM point clouds, optimizing parameters via differentiable rendering, and interleaving density control to maintain compactness [S2, unofficial][S3].
++The method varies significantly depending on whether the representation is implicit (standard NeRF/Photon Fields) or explicit (3D Gaussian Splatting). The following sections detail both, as both are cited under the "NeRF Representation" umbrella in the provided sources.
+ 
+ ### Inputs and Outputs
+-*   **Inputs:** 3D spatial coordinates $\mathbf{x} \in [0,1]^3$, view direction $\vec{\omega}$ in normalized spherical coordinates, and phase function coefficient $g \in [-1,1]$ (for Photon Fields) [S1]. For tracking variants, input is a camera pose $\mathbf{x} \in SE(3)$ [S4].
+-*   **Outputs:** Predicted RGB indirect radiance values (Photon Fields) [S1], or volume density $\sigma \in \mathbb{R}^+$ and view-dependent color $\mathbf{c} \in \mathbb{R}^3$ (standard NeRF) [S4]. For Gaussian variants, outputs are rendered images via alpha compositing of projected splats [S3].
++*   **Inputs:** A set of 2D images with known camera poses (typically obtained via Structure-from-Motion, SfM) [S3]. For Photon Fields, additional inputs include light source positions and phase function coefficients [S1].
++*   **Outputs:** A rendered RGB image for a novel viewpoint, or a trained scene representation (neural network weights or 3D Gaussian parameters) [S4, S3].
+ 
+ ### Data Structures
+-*   **Hashgrid Encoding:** Positions and directions are encoded using a multi-resolution hash map with 16 grid levels, 8 features per level, a 2× scaling factor between levels, and a hash table size of $2^{19}$ [S1]. Phase $g$ is left unencoded [S1].
+-*   **Neural Network:** A 5-layer perceptron with 64 neurons per layer and ReLU activations between hidden layers, with no output activation [S1]. For tracking variants, a 2-layer MLP with 128 neurons per layer is used [S4].
+-*   **3D Gaussians:** Each Gaussian stores position (mean $\mu$), a full 3D covariance matrix $\Sigma$, opacity $\alpha$, and spherical harmonics (SH) coefficients for view-dependent color [S3]. Each Gaussian stores approximately 59 learnable numbers [S2, unofficial].
+ 
+-### Numbered Steps
+-1.  **Initialization:** Generate a sparse 3D point cloud from camera calibration via Structure-from-Motion (SfM) [S3]. Each point becomes the starting position of one 3D Gaussian [S2, unofficial][S3].
+-2.  **Photon Tracing (Photon Fields variant):** Trace photons from random light sources through the volume [S1]. Store photons past their first interaction [S1]. Assign each photon a scattering coefficient $g$ from a discrete set [S1].
+-3.  **Data Sampling & Ground Truth Estimation:** Generate training batches of size $2^{16}$ containing uniform grid coordinates, random directions, and phase coefficients [S1]. Compute ground truth radiance using a phase-specific KNN range query with $K=1024$ neighbors and a maximum query radius $r$ [S1].
+-4.  **Target Encoding:** Encode radiance values logarithmically to normalize them to $[0,1]$ using precision parameter $\psi$ (typically 4-6) [S1]. Clamp values below $10^{-\psi}$ to 1 (mapping to 0 after inverse) [S1].
+-5.  **Network Evaluation & Optimization:** Pass encoded inputs through the MLP to predict log-encoded radiance [S1]. Compute loss against ground truth and backpropagate to update network weights [S1]. For Gaussian variants, backpropagate through the differentiable rasterizer to update position, covariance, opacity, and SH coefficients directly [S2, unofficial][S3].
+-6.  **Adaptive Density Control:** Interleave optimization with density control steps: clone small Gaussians in under-reconstructed regions, split large Gaussians covering too much detail, and prune transparent Gaussians [S2, unofficial][S3].
+-7.  **Rendering:** Project 3D Gaussians to 2D ellipses using the camera Jacobian [S3]. Divide the screen into 16×16 tiles, assign Gaussians to overlapping tiles, sort by depth front-to-back, and blend colors using alpha compositing [S2, unofficial][S3].
++#### Implicit Representation (Photon Fields / Standard NeRF)
++*   **Neural Network:** A Multi-Layer Perceptron (MLP) or hash-grid encoded network [S1, S4].
++    *   *Photon Fields:* 5-layer MLP, 64 neurons per layer, ReLU activations [S1].
++    *   *Standard NeRF (Active Scout):* 2-layer MLP, 128 neurons per layer [S4].
++*   **Encoding:** Multi-resolution hash map encoding for positions (3D) and directions (2D) [S1, S4].
++    *   *Photon Fields:* 16 grid levels, 8 features per level, 2x scaling factor, hash table size $2^{19}$ [S1].
++*   **Photon Map (Photon Fields only):** A collection of photons stored in a GPU-accelerated kd-tree for spatial queries [S1]. Each photon stores position, direction, intensity, and a phase coefficient $g$ [S1].
+ 
+-### Formulas
+-*   **Core Mapping (Photon Fields):** $P_{\phi}(x, g, \vec{\omega}) = (R, G, B)$, approximating indirect radiance $L_i(x, \vec{\omega}) = \int_{\Omega_{4\pi}} p_g(x, \vec{\omega}, \vec{\omega}_i) L(x, \vec{\omega}_i) d\omega_i$ [S1].
+-*   **KNN Radiance Estimation:** $L_i(x, \vec{\omega}) \approx \sum_{n=1}^K p_g(x, \vec{\omega}, \vec{\omega}_n) \frac{\Phi_n}{4\pi r^3}$, where $\Phi_n$ is photon intensity and $p_g$ is the Henyey-Greenstein phase function [S1].
+-*   **Logarithmic Target Encoding:** $L_i'(x, \vec{\omega}) = \begin{cases} -\frac{\log_{10}(L_i(x, \vec{\omega}))}{\psi} & \text{if } L_i(x, \vec{\omega}) > \frac{1}{10^{\psi}} \\ 1 & \text{otherwise} \end{cases}$ [S1].
+-*   **Inverse Transformation:** $L_i(x, \vec{\omega}) = 10^{-L_i'(x, \vec{\omega})} \cdot \Psi$ [S1].
+-*   **3D Gaussian Function:** $G(x) = e^{-\frac{1}{2}x^T\Sigma^{-1}x}$, where $x$ is the vector from the mean [S3].
+-*   **Covariance Projection:** $\Sigma' = JW\Sigma W^T J^T$, where $J$ is the Jacobian of the affine approximation of the projective transformation and $W$ is the viewing transformation [S3].
+-*   **Alpha Blending:** $C = \sum_{i=1}^N T_i \alpha_i \mathbf{c}_i$, where $T_i = \prod_{j=1}^{i-1} (1 - \alpha_j)$ and $\alpha_i = 1 - \exp(-\sigma_i \delta_i)$ [S3].
+-*   **Loss Function (Tracking):** $\ell = \lambda_1 \ell_{rgb} + \lambda_2 \ell_{depth}$, using L1 loss with tuned hyper-parameters [S4].
++#### Explicit Representation (3D Gaussian Splatting)
++*   **3D Gaussian Primitive:** Each Gaussian is defined by learnable parameters [S3]:
++    *   **Position:** Mean $\mu \in \mathbb{R}^3$ [S3].
++    *   **Covariance:** $\Sigma \in \mathbb{R}^{3 \times 3}$, parameterized by a rotation matrix $R$ and scale vector $S$ such that $\Sigma = R S S^T R^T$ to ensure positive semi-definiteness [S3].
++    *   **Opacity:** $\alpha \in [0, 1)$, constrained via sigmoid activation [S3].
++    *   **Color:** Spherical Harmonics (SH) coefficients for view-dependent color [S3].
++*   **Scene Size:** 1–5 million Gaussians for typical scenes [S3]. Each Gaussian stores approximately 59 learnable numbers [S2, unofficial].
++
++### Steps
++
++#### 1. Initialization
++*   **Standard NeRF/Photon Fields:** Initialize the neural network weights randomly [S1, S4].
++*   **3D Gaussian Splatting:** Initialize the set of 3D Gaussians using the sparse point cloud generated by SfM [S3]. Each SfM point becomes the mean position $\mu$ of one Gaussian [S2, unofficial].
++
++#### 2. Training Data Generation (Photon Fields Specific)
++*   Generate batches of size $2^{16}$ containing uniformly sampled grid coordinates $x \in [0,1]^3$, random uniform directions $\vec{\omega}$, and phase coefficients $g$ [S1].
++*   Compute ground truth radiance $L_i(x, \vec{\omega})$ using a KNN query on the photon map with $K=1024$ neighbors [S1].
++*   Encode the target radiance logarithmically to $[0,1]$ using precision parameter $\psi$ (typically 4–6) [S1]:
++    $$
++    L_i'(x, \vec{\omega}) = \begin{cases} -\frac{\log_{10}(L_i(x, \vec{\omega}))}{\psi} & \text{if } L_i(x, \vec{\omega}) > 10^{-\psi} \\ 1 & \text{otherwise} \end{cases}
++    $$
++    [S1]
++
++#### 3. Rendering
++
++**Implicit (Ray Marching):**
++1.  For each pixel, cast a ray from the camera.
++2.  Sample points $x(s)$ along the ray [S4].
++3.  Query the neural network $F$ at each point to get color $\mathbf{c}$ and density $\sigma$ [S4].
++4.  Compute transmittance $T_i = \prod_{j=1}^{i-1} \exp(-\sigma_j \delta_j)$ and accumulated color [S4].
++
++**Explicit (3D Gaussian Splatting):**
++1.  **Projection:** Project each 3D Gaussian to 2D. The 2D covariance $\Sigma'$ in camera coordinates is computed using the Jacobian $J$ of the affine approximation of the projective transformation and the viewing transformation $W$:
++    $$
++    \Sigma' = J W \Sigma W^T J^T
++    $$
++    [S3]
++2.  **Tiling:** Divide the screen into tiles (e.g., 16x16 pixels). Assign each Gaussian to overlapping tiles [S2, unofficial].
++3.  **Sorting:** Sort Gaussians within each tile by depth (front-to-back) using a fast GPU sort [S2, unofficial].
++4.  **Rasterization/Blending:** For each pixel, blend colors front-to-back using alpha compositing [S2, unofficial]:
++    $$
++    C = \sum_{i=1}^N T_i \alpha_i \mathbf{c}_i, \quad T_i = \prod_{j=1}^{i-1} (1 - \alpha_j)
++    $$
++    where $\alpha_i$ is the opacity of the $i$-th Gaussian at the pixel [S3].
++
++#### 4. Optimization
++*   **Loss Function:** Minimize the difference between rendered and ground truth images.
++    *   *Standard NeRF:* $\ell = \lambda_1 \ell_{rgb} + \lambda_2 \ell_{depth}$, using L1 loss for both [S4].
++    *   *3D Gaussian Splatting:* L1 loss combined with Structural Similarity (SSIM) [S2, unofficial].
++*   **Gradient Update:**
++    *   *Implicit:* Update network weights via Stochastic Gradient Descent (SGD) [S4].
++    *   *Explicit:* Backpropagate gradients directly to Gaussian parameters (position, covariance, opacity, SH coefficients) [S3]. Gradients are computed explicitly to avoid overhead [S3].
++*   **Adaptive Density Control (3D Gaussian Splatting only):**
++    *   *Cloning:* Clone small Gaussians in under-reconstructed regions [S2, unofficial].
++    *   *Splitting:* Split large Gaussians that cover too much detail [S2, unofficial].
++    *   *Pruning:* Remove Gaussians that become nearly transparent [S2, unofficial].
++    *   These steps are interleaved with optimization to maintain compactness and handle geometry ambiguities [S3].
+ 
+ ### Parameters
+-*   **$\psi$:** Maximum desired floating point precision in digits beyond zero. Values of 4 to 6 are sufficient [S1].
+-*   **$G$:** Discrete phase coefficients for photon assignment. $G = \{-0.75, 0.0, 0.75\}$ balances tracing speed and field quality [S1].
+-*   **$K$:** Number of neighbors in KNN query. $K=1024$ is used [S1].
+-*   **Batch Size:** $2^{16}$ samples per batch [S1].
+-*   **Scene Size:** 1-5 million Gaussians for tested scenes [S3].
+-
+-### Pseudocode
+-```python
+-import math
+-import numpy as np
+-
+-def compute_log_encoding(L, psi):
+-    threshold = 1.0 / (10 ** psi)
+-    return np.where(L > threshold, -np.log10(L) / psi, 1.0)
+-
+-def compute_inverse_encoding(L_prime, psi):
+-    return (10 ** (-L_prime)) * psi
+-
+-def compute_knn_radiance(photon_map, x, omega, g, K, r_max):
+-    candidates = [p for p in photon_map if p.phase == g]
+-    distances = [np.linalg.norm(p.position - x) for p in candidates]
+-    valid = [(p, d) for p, d in zip(candidates, distances) if d <= r_max]
+-    valid.sort(key=lambda t: t[1])
+-    valid = valid[:K]
+-    if not valid:
+-        return 0.0
+-    r = valid[-1][1]
+-    radiance = 0.0
+-    for p, d in valid:
+-        phase = 1.0 / (4.0 * math.pi)
+-        radiance += phase * p.intensity / (4.0 * math.pi * r**3)
+-    return radiance
+-
+-def train_photon_field(photon_map, network, batch_size=2**16, psi=4, K=1024, r_max=1.0):
+-    # Sources do not provide implementation for KD-tree construction; typically uses GPU spatial hashing.
+-    kd_tree = None
+-    for step in range(10000):
+-        x = np.random.uniform(0, 1, (batch_size, 3))
+-        omega = np.random.uniform(-1, 1, (batch_size, 3))
+-        omega = omega / np.linalg.norm(omega, axis=1, keepdims=True)
+-        g = np.random.choice([-0.75, 0.0, 0.75], batch_size)
+-        L_i = np.array([compute_knn_radiance(photon_map, x[i], omega[i], g[i], K, r_max) for i in range(batch_size)])
+-        L_i_prime = compute_log_encoding(L_i, psi)
+-        L_i_pred = network.forward(x, omega, g)
+-        loss = np.mean((L_i_pred - L_i_prime)**2)
+-        network.backward(loss)
+-        network.update()
+-
+-def render_gaussian_splats(gaussians, camera_matrix, image_width, image_height):
+-    tiles = [(y, x) for y in range(0, image_height, 16) for x in range(0, image_width, 16)]
+-    rendered_image = np.zeros((image_height, image_width, 3))
+-    for ty, tx in tiles:
+-        # Sources do not provide implementation for tile overlap check.
+-        tile_gaussians = [g for g in gaussians if True]
+-        # Sources do not provide implementation for depth sorting.
+-        tile_gaussians.sort(key=lambda g: 0)
+-        for pixel_y in range(ty, min(ty + 16, image_height)):
+-            for pixel_x in range(tx, min(tx + 16, image_width)):
+-                T = 1.0
+-                color = np.zeros(3)
+-                for g in tile_gaussians:
+-                    # Sources do not provide implementation for 2D Gaussian evaluation.
+-                    alpha = 0.5 * g.opacity
+-                    alpha = 1.0 - np.exp(-alpha)
+-                    color += T * alpha * g.color
+-                    T *= (1.0 - alpha)
+-                rendered_image[pixel_y, pixel_x] = color
+-    return rendered_image
+-
+-def optimize_gaussians(gaussians, gt_image, rendered_image, lr=0.01):
+-    # Sources do not provide implementation for SSIM loss.
+-    loss = np.mean(np.abs(rendered_image - gt_image))
+-    for g in gaussians:
+-        # Sources do not provide implementation for gradient computation.
+-        grad = None
+-        if grad is not None:
+-            g.position -= lr * grad.position
+-            # Sources do not provide implementation for covariance update.
+-            g.covariance = None
+-            g.opacity = 1.0 / (1.0 + np.exp(-g.opacity - lr * grad.opacity))
+-            g.color -= lr * grad.color
+-    # Sources do not provide implementation for adaptive density control.
+-    gaussians = gaussians
+-    return gaussians
+-```
++*   **$\psi$ (Precision):** Maximum desired floating point precision digits beyond zero. Values 4–6 are sufficient [S1].
++*   **$G$ (Phase Coefficients):** Discrete set of scattering coefficients. $\{-0.75, 0.0, 0.75\}$ is a common choice [S1].
++*   **$\lambda_1, \lambda_2$:** Loss weights, tuned to balance $\ell_{rgb}$ and $\ell_{depth}$ magnitudes [S4].
++*   **Batch Size:** $2^{16}$ for Photon Fields training batches [S1].
+ 
+ ### Edge Cases and Pitfalls
+-*   **Precision:** Radiance values span wide dynamic ranges; logarithmic encoding is required to normalize targets to $[0,1]$ for stable training [S1].
+-*   **Covariance Validity:** Directly optimizing the covariance matrix $\Sigma$ is invalid because gradient descent cannot easily constrain it to be positive semi-definite. It must be parameterized as $R S S^T R^T$ to ensure validity [S2, unofficial][S3].
+-*   **Unbounded Scenes:** Rays extending to infinity cause mismatches between predicted density and true density. Model occupancy as a Bernoulli random variable to handle open sky and reduce wasteful exploration [S4].
+-*   **Artifacts:** Floating artifacts and needle-like Gaussians appear in regions seen by few cameras. Zooming in/out causes aliasing, and the representation does not directly yield a clean surface or mesh [S2, unofficial].
++*   **Covariance Validity:** Directly optimizing the covariance matrix $\Sigma$ is invalid because gradient descent cannot easily constrain it to be positive semi-definite. It must be parameterized via $R$ and $S$ [S3].
++*   **Unbounded Scenes:** For scenes with sky/infinity, rays extend indefinitely, causing density mismatches. Solution: Model occupancy as a Bernoulli random variable to handle the probability of hitting an obstacle vs. going to infinity [S4].
++*   **Artifacts:** 3D Gaussian Splatting may produce floating artifacts and needle-like Gaussians in regions seen by few cameras, and aliasing when zooming [S2, unofficial].
++*   **SAM Inaccuracy:** In Mask Inverse Rendering variants, if the Segment Anything Model (SAM) is inaccurate, the projection loss fails. A negative refinement term is required to ensure consistency across views [S5].
+ 
+ ## Subtopics
+ 
+ ### [Scene NeRF](12484-scene-nerf.md)
+-Isolates and renders the static background of a scene by training a NeRF exclusively on pixels identified as background via human segmentation masks. It differs from standard NeRF by explicitly excluding dynamic foreground elements and employing an emptiness regularizer to prevent artifacts in empty space.
++Isolates static background by training exclusively on background pixels, using an emptiness regularizer.
+ 
+ ### [NeRF-OSR](14477-nerf-osr.md)
+-A neural radiance field approach for outdoor scene relighting that learns a neural representation of scene geometry, diffuse albedo, and illumination-dependent shadows from images captured at different viewpoints and times. Unlike standard NeRF which learns a Lambertian model under fixed lighting, NeRF-OSR decomposes the scene into spatial occupancy, illumination, shadowing, and diffuse albedo reflectance, enabling physical relighting and albedo editing.
++Outdoor scene relighting that decomposes scene into geometry, albedo, and illumination for physical relighting.
+ 
+ ### [Explicit Volumetric Rendering with Multiple View Aggregation](15335-explicit-volumetric-rendering-with-multiple-view-aggregation.md)
+-Models scene geometry and appearance as an explicit RGB$\alpha$ volume to amortize rendering across multiple views. Unlike implicit field evaluations or sparse ray sampling, this approach generates a dense volumetric representation that enables real-time rendering and the use of structural losses like SSIM during training.
++Models scene as an explicit RGB$\alpha$ volume to amortize rendering across views, enabling real-time rendering and SSIM losses.
+ 
+ ### [Dynamic Neural Radiance Fields](16398-dynamic-neural-radiance-fields.md)
+-Models the appearance and dynamics of a human face using an implicit volumetric representation. It combines a neural scene representation network with a low-dimensional morphable model to handle facial dynamics, conditioning the network on expression parameters and per-frame latent codes. Unlike static NeRF methods, it requires only a single view from a fixed camera instead of an expensive calibrated multi-view rig.
++Models dynamic human faces using a morphable model conditioned on expression parameters and latent codes, requiring only monocular input.
+ 
+ ### [Neural Network Pruning for NeRF](17703-neural-network-pruning-for-nerf.md)
+-Compresses a NeRF by removing weights with the smallest magnitudes from the fully-connected neural network representing the scene. Unlike traditional 3D compression which stores redundant 2D images, this approach compresses the functional representation directly, avoiding the inefficiency of decoding multiple images before rendering. It relies on unstructured magnitude pruning of the MLP weights rather than structural changes to the scene representation.
++Compresses NeRF by pruning small-magnitude MLP weights, reducing storage and inference time.
+ 
+ ### [Scene Auto-Encoder](17789-scene-auto-encoder.md)
+-Encodes a set of RGB images with known camera poses and depth measurements into a 3D neural field represented as density and feature voxel grids. It differs from continuous MLP mappings by explicitly constructing a discrete voxel-based representation via a 2D CNN encoder and frustum lifting, enabling novel view synthesis and latent compression.
++Encodes RGB images into discrete density and feature voxel grids via 2D CNN encoder and frustum lifting.
+ 
+ ### [Bi-level Neural Volume Fusion](19888-bi-level-neural-volume-fusion.md)
+-A dense 3D reconstruction method that incrementally integrates noisy depth maps into a global neural implicit representation using a bi-level fusion strategy. It combines local-level weighted averaging for efficient integration with global-level neural rendering optimization to ensure geometric coherence. Unlike methods relying solely on latent code integration or single-MLP global representations, BNV-Fusion uses a volume of latent codes to encode local geometry, improving detail and scalability while maintaining near real-time performance.
++Incrementally integrates noisy depth maps into a global neural implicit representation using local weighted averaging and global neural rendering optimization.
+ 
+ ### [Neural Radiance Field Codebooks (NRC)](21345-neural-radiance-field-codebooks-nrc.md)
+-A scalable method for learning object-centric representations through novel view reconstruction. It differs from standard NeRF by mapping continuous spatial features to a discrete, finite codebook of object categories, allowing for constant rendering compute regardless of object count and supporting an unbounded number of objects per scene.
++Maps continuous spatial features to a discrete codebook for scalable, object-centric representations with constant rendering compute.
++
++### Mask Inverse Rendering
++Projects 2D masks from SAM into 3D space to form 3D masks. Optimizes volume values $V(r(t))$ or mask values $m_{gi}$ to increase confidence where SAM predicts foreground. Uses loss $L_{proj} = - \sum_{r \in R(I)} MSAM(r) \cdot M(r)$, potentially with a negative refinement term $\lambda \sum (1 - MSAM(r)) \cdot M(r)$ to handle SAM inaccuracies [S5].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Training is competitive with the fastest previous methods; for 51 minutes of training, it achieves state-of-the-art quality comparable to Mip-NeRF360 [S3]. Rendering performance reaches real-time rates ($\ge$ 30 fps) at 1080p resolution on established datasets [S3].
+-*   **Memory Complexity:** Memory usage increases from a few megabytes for implicit NeRF networks to hundreds of megabytes for explicit Gaussian Splatting representations [S2, unofficial].
+-*   **Performance:** On standard hardware, Gaussian Splatting variants offer $>$100 FPS rendering, while neural inference replaces costly photon tracing for global illumination [S2, unofficial][S1]. Integrals are implemented using quadrature, and techniques can skip known free space to speed up rendering [S4].
+-*   **Strengths:** Real-time novel view synthesis, handles complex lighting and reflections implicitly, requires only SfM points as input, and supports direct parameter optimization without neural network evaluation for explicit variants [S2, unofficial][S3].
+-*   **Limitations:** Floating artifacts and needle-like Gaussians in sparsely viewed regions, aliasing during zoom, inability to directly extract clean meshes, and higher memory footprint compared to implicit fields [S2, unofficial].
+-*   **When to Use:** When real-time performance and high visual quality are required simultaneously, or for rapid scene capture in robotics, mapping, and digital humans [S2, unofficial][S3].
+-*   **When Not to Use:** When explicit mesh extraction is strictly required, or when memory constraints are extremely tight and implicit fields are preferred [S2, unofficial].
++*   **Time Complexity:**
++    *   *Standard NeRF:* Training takes many hours (e.g., 48 hours for Mip-NeRF360 quality) [S3]. Rendering is slow (seconds per image) due to ray marching and network evaluation [S2, unofficial].
++    *   *3D Gaussian Splatting:* Training is competitive with fast methods (e.g., InstantNGP), achieving SOTA quality in ~51 minutes [S3]. Rendering is real-time ($\ge 30$ fps at 1080p) [S3].
++*   **Memory Complexity:**
++    *   *Standard NeRF:* Low memory usage (few megabytes for network weights) [S2, unofficial].
++    *   *3D Gaussian Splatting:* High memory usage (hundreds of megabytes for millions of Gaussians) [S2, unofficial].
++*   **Strengths:**
++    *   High visual quality comparable to SOTA NeRF methods [S3].
++    *   Real-time rendering capability (Gaussian Splatting) [S3].
++    *   No need for MVS data; works with sparse SfM points [S3].
++    *   Explicit representation allows flexible geometry creation/destruction [S3].
++*   **Limitations:**
++    *   Gaussian Splatting lacks a clean surface/mesh extraction [S2, unofficial].
++    *   Aliasing issues when zooming in/out [S2, unofficial].
++    *   Floating artifacts in sparse-view regions [S2, unofficial].
++*   **When to Use:**
++    *   Use Standard NeRF for high-quality offline rendering with limited memory.
++    *   Use 3D Gaussian Splatting for real-time applications (VR, robotics, web) where training speed and rendering FPS are critical [S2, unofficial].
+ 
+ ## Background
+-The representation was introduced by Kerbl and colleagues at SIGGRAPH 2023, building on earlier neural field and point-based rendering research [S2, unofficial][S3]. Photon Field Networks (INGP) were developed to accelerate global illumination computation by replacing expensive photon tracing with constant-time neural network inference that scales slower than baseline methods [S1]. The method is widely used in virtual reality games, film, robotics, mapping, digital humans, ecommerce, and cultural heritage preservation [S2, unofficial]. It has been evaluated on established datasets including those by Barron et al. [2022], Hedman et al. [2018], and Knapitsch et al. [2017] [S3].
++Neural Radiance Fields were introduced by Mildenhall et al. in 2020, revolutionizing novel view synthesis by representing scenes as continuous volumetric functions [S4]. The field has evolved to include implicit global illumination methods like Photon Field Networks (2023), which use neural networks to approximate in-scattered radiance [S1], and explicit methods like 3D Gaussian Splatting, introduced by Kerbl et al. at SIGGRAPH 2023, which replaced neural evaluation with differentiable rasterization for real-time performance [S2, unofficial][S3]. These methods are used in virtual reality, film, robotics, and cultural heritage [S2, unofficial].
+ 
+ ## Sources

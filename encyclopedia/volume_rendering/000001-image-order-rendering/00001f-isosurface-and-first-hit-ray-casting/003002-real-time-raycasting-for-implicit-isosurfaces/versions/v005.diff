@@ -1,0 +1,258 @@
+--- v004.md
++++ v005.md
+@@ -10,5 +10,5 @@
+ 
+ **Inputs and Outputs:**
+-*   **Input:** A regularly sampled scalar volume $V$ defined on a 3D grid. An isovalue $\tau$. Camera parameters (origin $\mathbf{o}$, direction $\mathbf{d}$ per pixel).
++*   **Input:** A regularly sampled scalar volume $V$ defined on a 3D grid. An isovalue $\tau$. Camera parameters (origin $\mathbf{o}$, direction $\mathbf{d}$ per pixel) [G].
+ *   **Output:** A final color image. Intermediate floating-point images for intersection positions, gradient components, and Hessian matrix components [S1].
+ 
+@@ -23,5 +23,5 @@
+ **Algorithm Steps:**
+ 
+-1.  **Ray Casting Initialization:** For each pixel, define a ray $r(t) = \mathbf{o} + t\mathbf{d}$ in world space. Rays are started on block bounding faces and cast into the volume [S1].
++1.  **Ray Casting Initialization:** For each pixel, define a ray $r(t) = \mathbf{o} + t\mathbf{d}$ in world space. Rays are started on block bounding faces and cast into the volume [S1][G].
+ 2.  **Traversal with Empty Space Skipping:**
+     *   Use the incremental traversal method by Amanatides and Woo to traverse cells [S3, book].
+@@ -53,27 +53,18 @@
+ 
+ ```python
+-# Global constants
+-ISOVALUE = 0.5
+-NUM_REFINEMENT_STEPS = 3
+-HIERARCHY_LEVELS = 3 # Top, 2 intermediate, data
++import math
+ 
+ def render_volume(volume_data, camera, isovalue):
+-    """
+-    Main rendering pipeline.
+-    volume_data: 3D array or texture of scalar values.
+-    camera: Contains origin o and direction d per pixel.
+-    isovalue: The threshold tau.
+-    """
+     width, height = camera.resolution
+-    # Intermediate images
+-    intersection_image = create_float_image(width, height)
+-    gradient_image = create_float_image(width, height, channels=3)
+-    hessian_image = create_float_image(width, height, channels=9)
+-    
+-    # Precompute hierarchy if not already done
+-    hierarchy = build_trilevel_hierarchy(volume_data)
+-    
+-    # Dynamic cache for bricks if volume > memory
+-    cache = DynamicBrickCache(volume_data, hierarchy)
++    # Initialize intermediate floating-point images
++    intersection_image = [[None] * width for _ in range(height)]
++    gradient_image = [[[0.0] * 3 for _ in range(width)] for _ in range(height)]
++    hessian_image = [[[0.0] * 9 for _ in range(width)] for _ in range(height)]
++    
++    # Precompute trilevel hierarchy (min/max for macrocells)
++    hierarchy = compute_hierarchy(volume_data)
++    
++    # Dynamic cache for bricks if volume exceeds memory
++    cache = BrickCache(volume_data, hierarchy)
+     
+     for y in range(height):
+@@ -87,44 +78,39 @@
+             if hit_point is not None:
+                 # Stage 2: Image Space Derivatives
+-                # Use tri-cubic filtering to evaluate derivatives at hit_point
+                 grad = evaluate_gradient_tricubic(volume_data, hit_point)
+                 hess = evaluate_hessian_tricubic(volume_data, hit_point)
+                 
+-                gradient_image.set(x, y, grad)
+-                hessian_image.set(x, y, hess)
+-                intersection_image.set(x, y, hit_point)
++                gradient_image[y][x] = grad
++                hessian_image[y][x] = hess
++                intersection_image[y][x] = hit_point
+             else:
+-                intersection_image.set(x, y, None)
++                intersection_image[y][x] = None
+ 
+     # Stage 3: Image Space Shading
+-    final_image = create_color_image(width, height)
++    final_image = [[(0.0, 0.0, 0.0)] * width for _ in range(height)]
+     for y in range(height):
+         for x in range(width):
+-            hit_point = intersection_image.get(x, y)
++            hit_point = intersection_image[y][x]
+             if hit_point is not None:
+-                grad = gradient_image.get(x, y)
+-                hess = hessian_image.get(x, y)
++                grad = gradient_image[y][x]
++                hess = hessian_image[y][x]
+                 
+                 normal = normalize(grad)
+                 curvature = compute_curvature(grad, hess)
+                 
+-                # Apply shading model
+                 color = apply_shading_model(hit_point, normal, curvature, camera)
+-                final_image.set(x, y, color)
++                final_image[y][x] = color
+             else:
+-                final_image.set(x, y, background_color)
++                final_image[y][x] = (0.0, 0.0, 0.0)
+                 
+     return final_image
+ 
+ def cast_ray(ray_o, ray_d, isovalue, hierarchy, cache):
+-    """
+-    Traverses the volume using hierarchy and cache, finds intersection.
+-    """
+-    # Initialize traversal with Amanatides and Woo method
++    # Initialize traversal using Amanatides and Woo method
+     cell = find_initial_cell(ray_o, ray_d, hierarchy)
+     
+     while cell is not None:
+         # Check min/max in hierarchy to skip empty cells
+-        if not isovalue_in_range(cell.min, cell.max):
++        if not (cell.min <= isovalue <= cell.max):
+             cell = next_cell_in_traversal(ray_o, ray_d, cell, hierarchy)
+             continue
+@@ -133,8 +119,8 @@
+         if cell.is_leaf():
+             # Analytic intersection with trilinear interpolation
+-            roots = solve_cubic_trilinear_intersection(ray_o, ray_d, cell)
++            roots = solve_cubic_trilinear_intersection(ray_o, ray_d, cell, isovalue)
+             
+             # Filter roots within cell bounds
+-            valid_roots = [t for t in roots if 0 <= t <= cell.max_t]
++            valid_roots = [t for t in roots if 0.0 <= t <= 1.0]
+             
+             if valid_roots:
+@@ -143,5 +129,5 @@
+                 
+                 # Iterative refinement (constant steps)
+-                for _ in range(NUM_REFINEMENT_STEPS):
++                for _ in range(3):
+                     hit_point = refine_intersection(hit_point, ray_o, ray_d, isovalue)
+                     
+@@ -152,14 +138,9 @@
+     return None
+ 
+-def solve_cubic_trilinear_intersection(ray_o, ray_d, cell):
+-    """
+-    Solves rho(xa + t xb, ya + t yb, za + t zb) - tau = 0
+-    using trilinear interpolation within the cell.
+-    Returns list of real roots t.
+-    """
++def solve_cubic_trilinear_intersection(ray_o, ray_d, cell, isovalue):
+     # Coefficients of cubic polynomial a*t^3 + b*t^2 + c*t + d = 0
+     # Derived from trilinear interpolation of cell corners
+     a, b, c, d = compute_cubic_coefficients_trilinear(ray_o, ray_d, cell)
+-    d -= ISOVALUE
++    d -= isovalue
+     
+     roots = solve_cubic_equation(a, b, c, d)
+@@ -167,32 +148,28 @@
+ 
+ def evaluate_gradient_tricubic(volume_data, point):
+-    """
+-    Evaluates gradient using tri-cubic filtering.
+-    """
+     # Tri-cubic filter coefficients and derivatives
+     # Return vector (dx, dy, dz)
+-    pass
++    # Not given in the sources. Standard tri-cubic gradient evaluation [G].
++    return [0.0, 0.0, 0.0]
+ 
+ def evaluate_hessian_tricubic(volume_data, point):
+-    """
+-    Evaluates Hessian matrix using tri-cubic filtering.
+-    """
+     # Tri-cubic filter second derivatives
+-    # Return 3x3 matrix
+-    pass
++    # Return 3x3 matrix flattened
++    # Not given in the sources. Standard tri-cubic Hessian evaluation [G].
++    return [0.0] * 9
+ 
+ def compute_curvature(grad, hess):
+-    """
+-    Computes extrinsic curvature from gradient and Hessian.
+-    """
+     # K = (n^T H n) / |grad| where n = grad/|grad|
+-    pass
++    norm_grad = math.sqrt(sum(g*g for g in grad))
++    if norm_grad == 0: return 0.0
++    n = [g/norm_grad for g in grad]
++    # Hessian is 3x3 flattened
++    H = [[hess[i*3+j] for j in range(3)] for i in range(3)]
++    nHn = sum(n[i] * sum(H[i][j] * n[j] for j in range(3)) for i in range(3))
++    return nHn / norm_grad
+ 
+ def apply_shading_model(point, normal, curvature, camera):
+-    """
+-    Applies Blinn-Phong, tone shading, or curvature transfer functions.
+-    """
+-    # Standard lighting
+-    light_dir = normalize(vec3(0.5, 1.0, 0.5))
++    # Standard Blinn-Phong lighting
++    light_dir = normalize([0.5, 1.0, 0.5])
+     view_dir = normalize(camera.origin - point)
+     half_dir = normalize(light_dir + view_dir)
+@@ -201,9 +178,60 @@
+     specular = pow(max(dot(normal, half_dir), 0.0), 32.0)
+     
+-    # Curvature-based coloring
++    # Curvature-based coloring via transfer function
+     curvature_color = map_curvature_to_color(curvature)
+     
+-    base_color = mix(vec3(0.8), curvature_color, 0.5)
+-    return base_color * (0.2 + 0.8 * diffuse) + vec3(1.0) * specular
++    base_color = mix([0.8, 0.8, 0.8], curvature_color, 0.5)
++    return tuple(base_color[i] * (0.2 + 0.8 * diffuse) + specular for i in range(3))
++
++# Helper functions for standard operations
++def normalize(v):
++    l = math.sqrt(sum(x*x for x in v))
++    return [x/l for x in v] if l > 0 else [0.0, 0.0, 0.0]
++
++def dot(v1, v2):
++    return sum(a*b for a, b in zip(v1, v2))
++
++def mix(v1, v2, t):
++    return [v1[i] * (1.0 - t) + v2[i] * t for i in range(len(v1))]
++
++def compute_hierarchy(volume_data):
++    # Compute min/max for trilevel hierarchy macrocells
++    # Not given in the sources. Standard spatial hierarchy construction [G].
++    pass
++
++def BrickCache(volume_data, hierarchy):
++    # Manage brick loading into GPU texture memory
++    # Not given in the sources. Standard dynamic caching logic [G].
++    pass
++
++def find_initial_cell(ray_o, ray_d, hierarchy):
++    # Compute initial grid cell from ray origin using Amanatides & Woo
++    # Not given in the sources. Standard ray-grid initialization [G].
++    pass
++
++def next_cell_in_traversal(ray_o, ray_d, cell, hierarchy):
++    # Step to next cell along ray direction
++    # Not given in the sources. Standard Amanatides & Woo traversal step [G].
++    pass
++
++def refine_intersection(hit_point, ray_o, ray_d, isovalue):
++    # Iterative refinement step (e.g., Newton or bisection)
++    # Not given in the sources. Standard root refinement [G].
++    return hit_point
++
++def compute_cubic_coefficients_trilinear(ray_o, ray_d, cell):
++    # Derive cubic coefficients from trilinear interpolation at cell corners
++    # Not given in the sources. Standard trilinear expansion [G].
++    return 0.0, 0.0, 0.0, 0.0
++
++def solve_cubic_equation(a, b, c, d):
++    # Solve a*t^3 + b*t^2 + c*t + d = 0 for real roots
++    # Not given in the sources. Standard cubic solver [G].
++    return []
++
++def map_curvature_to_color(curvature):
++    # Lookup color from 1D/2D transfer function based on curvature
++    # Not given in the sources. Standard transfer function lookup [G].
++    return [0.0, 0.0, 0.0]
+ ```
+ 

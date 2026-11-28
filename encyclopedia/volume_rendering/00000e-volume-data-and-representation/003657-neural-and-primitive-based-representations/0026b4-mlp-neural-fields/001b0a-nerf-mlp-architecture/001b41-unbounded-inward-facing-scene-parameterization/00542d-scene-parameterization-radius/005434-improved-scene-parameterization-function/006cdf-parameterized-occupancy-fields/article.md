@@ -1,0 +1,184 @@
+# Parameterized Occupancy Fields
+
+Also called: Contraction Function, Coordinate Parameterization
+
+## Overview
+Parameterized Occupancy Fields is a coordinate transformation method that contracts an infinite 3D space into a bounded occupancy field to handle unbounded scenes, specifically in LiDAR-free 3D occupancy prediction [S1]. It preserves high resolution for an inner region of interest (ROI) while scaling point distribution inversely with distance in the outer region to reduce memory consumption [S1]. It differs from its parent, the Improved Scene Parameterization Function, by explicitly defining a piecewise contraction function with adjustable ROI proportions and derivative continuity constraints, tailored for 3D voxel grid generation rather than just position encoding for neural fields [S1].
+
+## How it works
+**Inputs:**
+- 3D coordinates $r = (x, y, z)$ in the ego coordinate system.
+- Pre-defined inside region bound $r_b$ (e.g., $[-40, -40, -1, 40, 40, 5.4]$ meters for nuScenes) [S1].
+- ROI proportion parameter $\alpha \in [0, 1]$ (typical value 0.667) [S1].
+
+**Outputs:**
+- Parameterized coordinates $r'_{pc}$ in the bounded occupancy field space.
+- Inverse mapping allows reconstruction of ego coordinates from parameterized space for feature aggregation [S1].
+
+**Data Structures:**
+- The method operates on scalar coordinates per axis. The transformation is applied independently to each dimension $x, y, z$ [S1].
+- Parameters $a$ and $b$ are derived constants ensuring $C^1$ continuity [S1].
+
+**Formulas:**
+The transformation function $f(r)$ maps the normalized coordinate $r' = r/r_b$ to the parameterized space. For a single dimension with normalized input $r'$:
+
+$$
+f(r') = 
+\begin{cases} 
+\alpha \cdot r' & \text{if } |r'| \le 1 \\
+\frac{r'}{|r'| \cdot \frac{1-a}{|r'|} + b} & \text{if } |r'| > 1 
+\end{cases}
+$$
+
+where:
+- $\alpha$ is the proportion of the ROI in parameterized space [S1].
+- $a = \frac{1-\alpha}{\alpha}$
+- $b = \frac{1-2\alpha}{\alpha}$
+
+These parameters $a$ and $b$ are derived from the continuity conditions at the boundary $|r'|=1$:
+$$ \lim_{r' \to 1^+} f(r') = \lim_{r' \to 1^-} f(r') $$
+$$ \lim_{r' \to 1^+} f'(r') = \lim_{r' \to 1^-} f'(r') $$
+
+**Inverse Function:**
+To map points back from the parameterized coordinate system $P_{pc} = [x_{pc}, y_{pc}, z_{pc}]^T$ to the ego coordinate system $P = [x, y, z]^T$, the inverse function $f^{-1}$ is used for each axis [S1]:
+
+$$ P = [f^{-1}_x(x_{pc}), f^{-1}_y(y_{pc}), f^{-1}_z(z_{pc})]^T $$
+
+**Algorithm Steps:**
+1.  **Generate Parameterized Points:** For each voxel in the parameterized coordinate system, generate the corresponding point $P_{pc} = [x_{pc}, y_{pc}, z_{pc}]^T$ [S1].
+2.  **Map to Ego Space:** Compute the inverse transformation for each coordinate to obtain the 3D point $P$ in the ego coordinate system using $f^{-1}$ [S1].
+3.  **Project to 2D:** Project the 3D point $P$ to the 2D image planes of multiple cameras defined by extrinsic matrices $T_i$ and intrinsic matrices $K_i$ [S1].
+4.  **Interpolate Features:** Use bilinear interpolation $\langle \cdot \rangle$ to extract 2D features $F_i$ from the image feature planes $X_i$ at the projected locations:
+    $$ F_i = \langle X_i, \text{proj}(P, T_i, K_i) \rangle $$
+    where $\text{proj}$ is the projection function [S1].
+5.  **Aggregate Features:** Average the multi-camera 2D features to obtain volume features:
+    $$ F_{vol} = \frac{1}{N} \sum_{i=1}^{N} F_i $$
+    where $N$ is the number of cameras [S1].
+6.  **Predict Occupancy:** Employ a 3D convolution network to extract features from $F_{vol}$ and predict the final occupancy outputs [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def compute_params(alpha):
+    """Compute continuity parameters a and b from alpha."""
+    if alpha == 0:
+        raise ValueError("Alpha cannot be 0")
+    a = (1 - alpha) / alpha
+    b = (1 - 2 * alpha) / alpha
+    return a, b
+
+def forward_transform(r_prime, alpha):
+    """
+    Map normalized coordinate r' to parameterized space.
+    r_prime: float, normalized coordinate (r / r_b)
+    alpha: float, ROI proportion
+    """
+    abs_r = abs(r_prime)
+    if abs_r <= 1.0:
+        return alpha * r_prime
+    else:
+        a, b = compute_params(alpha)
+        # Formula: r' / (|r'| * (1-a)/|r'| + b)
+        # Simplifies to: r' / (1 - a + b * |r'|)
+        # Note: The source formula is r' / (|r'| * (1-a)/|r'| + b)
+        # |r'| * (1-a)/|r'| is (1-a) for r' != 0
+        denominator = (1 - a) + b * abs_r
+        return r_prime / denominator
+
+def inverse_transform(r_pc, alpha):
+    """
+    Map parameterized coordinate r_pc back to normalized space r'.
+    r_pc: float, coordinate in parameterized space
+    alpha: float, ROI proportion
+    """
+    abs_r_pc = abs(r_pc)
+    # Threshold in parameterized space is alpha * 1 = alpha
+    if abs_r_pc <= alpha:
+        # Inverse of alpha * r' is r' / alpha
+        return r_pc / alpha
+    else:
+        # Inverse of r' / (1 - a + b * |r'|)
+        # Let y = r_pc. y = r' / (1 - a + b * |r'|)
+        # y * (1 - a + b * |r'|) = r'
+        # y * (1 - a) + y * b * |r'| = r'
+        # If r' > 0: y(1-a) + y*b*r' = r' => r'(1 - y*b) = y(1-a) => r' = y(1-a)/(1-y*b)
+        # If r' < 0: y(1-a) - y*b*r' = r' => r'(1 + y*b) = y(1-a) => r' = y(1-a)/(1+y*b)
+        # General form: r' = sign(r_pc) * |r_pc| * (1-a) / (1 - b * |r_pc|)
+        a, b = compute_params(alpha)
+        numerator = abs_r_pc * (1 - a)
+        denominator = 1 - b * abs_r_pc
+        if denominator == 0:
+            raise ValueError("Denominator zero in inverse transform")
+        r_prime = numerator / denominator
+        return r_prime * math.copysign(1, r_pc)
+
+def parameterize_occupancy_field(points, r_b, alpha):
+    """
+    Apply parameterized occupancy field transformation to a batch of 3D points.
+    points: list of tuples (x, y, z) in ego space
+    r_b: float, inside region bound (scalar, assuming isotropic or max dimension)
+    alpha: float, ROI proportion
+    """
+    transformed_points = []
+    for x, y, z in points:
+        # Normalize by r_b
+        x_norm = x / r_b
+        y_norm = y / r_b
+        z_norm = z / r_b
+        
+        # Apply forward transform
+        x_pc = forward_transform(x_norm, alpha)
+        y_pc = forward_transform(y_norm, alpha)
+        z_pc = forward_transform(z_norm, alpha)
+        
+        transformed_points.append((x_pc, y_pc, z_pc))
+    return transformed_points
+
+def unparameterize_occupancy_field(points_pc, r_b, alpha):
+    """
+    Map parameterized points back to ego space.
+    points_pc: list of tuples (x_pc, y_pc, z_pc)
+    r_b: float, inside region bound
+    alpha: float, ROI proportion
+    """
+    ego_points = []
+    for x_pc, y_pc, z_pc in points_pc:
+        x_norm = inverse_transform(x_pc, alpha)
+        y_norm = inverse_transform(y_pc, alpha)
+        z_norm = inverse_transform(z_pc, alpha)
+        
+        x = x_norm * r_b
+        y = y_norm * r_b
+        z = z_norm * r_b
+        
+        ego_points.append((x, y, z))
+    return ego_points
+```
+
+**Parameters:**
+- $\alpha$: Proportion of the region of interest in the parameterized space. Typical value: 0.667 [S1].
+- $r_b$: Pre-defined inside region bound. For nuScenes, the inside region is $[-40\text{m}, -40\text{m}, -1\text{m}, 40\text{m}, 40\text{m}, 5.4\text{m}]$ [S1]. The implementation assumes a scalar $r_b$ for normalization; if dimensions differ, $r_b$ should be applied per-axis or as the maximum bound [S1].
+
+**Edge Cases and Pitfalls:**
+- $\alpha = 0$: Division by zero in parameter calculation. Not given in the sources, but mathematically invalid [S1].
+- Denominator zero in inverse transform: Occurs if $1 - b|r_{pc}| = 0$. With $\alpha=0.667$, $b \approx -0.5$, so $1 + 0.5|r_{pc}| = 0$ has no real solution for $|r_{pc}| \ge 0$. However, for other $\alpha$, this must be checked [S1].
+- Boundary continuity: The function is $C^1$ continuous at $|r'|=1$ by design, but precision issues may arise near the boundary if floating-point errors accumulate [S1].
+
+## Operating characteristics
+- **Time Complexity:** The transformation is $O(1)$ per point. The overall pipeline involves projection and bilinear interpolation, which are $O(N)$ for $N$ voxels and cameras.
+- **Memory Complexity:** By contracting the outer region, the method reduces the effective volume that needs high-resolution representation, thus reducing memory consumption for the occupancy grid [S1].
+- **Performance:** On the nuScenes dataset, OccNeRF using this method achieves an mIoU of 0.768 and mAP of 0.882, outperforming SimpleOcc (mIoU 0.753, mAP 0.877) [S1].
+- **Strengths:** Preserves high resolution for the ROI (inner region) while efficiently representing unbounded outer regions.
+- **Limitations:** Requires careful tuning of $\alpha$ and $r_b$. The contraction may lose detail in the outer region if $\alpha$ is too high.
+- **When to use:** LiDAR-free 3D occupancy prediction in unbounded scenes where memory is a constraint.
+- **When not to use:** Bounded scenes where standard Euclidean coordinates suffice.
+
+## Background
+Parameterized Occupancy Fields was introduced in OccNeRF (2025) to address the challenge of 3D occupancy prediction in LiDAR-free environments with unbounded scenes [S1]. It builds on the need to handle infinite spatial domains by contracting them into a finite parameterized space, inspired by previous works on coordinate parameterization [S1]. The method is specifically designed to balance the resolution of the region of interest (e.g., around the ego vehicle) with the memory efficiency of representing distant objects.
+
+## Sources
+[S1] OccNeRF: Advancing 3D Occupancy Prediction in LiDAR-Free Environments, https://doi.org/10.1109/tip.2025.3567828, fetched 2026-10-29

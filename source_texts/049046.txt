@@ -1,0 +1,122 @@
+# Jellyfish School — art from pure mathematics
+
+There is no 3D model here. No mesh, no textures, no artwork of any kind. The jellyfish exist only as a set of equations, evaluated independently for every pixel, every frame. Change a coefficient and the creature changes shape.
+
+<p align="center">
+  <img src="poster.jpg" width="380" alt="Poster: a glowing blue-violet jellyfish under three equations describing the ray, the bell pulse and the tentacle wave">
+</p>
+
+Built with [Manim Community](https://www.manim.community/) and an original GLSL fragment shader. Manim keeps the clock and typesets the mathematics; the GPU solves the geometry.
+
+<p align="center">
+  <img src="docs/preview.jpg" width="300" alt="Still frame of the animation: a scalloped translucent bell with long trailing tentacles drifting in near-black water">
+</p>
+
+The rendered animation is committed as [`jellyfish.mp4`](jellyfish.mp4) — 1080x1920, 60 fps, 10 seconds.
+
+## How a picture comes out of an equation
+
+Nothing is ever *drawn*. Instead, each pixel asks a question about space.
+
+**1. Every pixel casts a ray.** A pixel is a direction looking out from the camera, so the points it can see form a line:
+
+$$p(s) = o + s\,\hat{r}$$
+
+**2. A function answers "how far to the nearest surface?"** This is a *signed distance field*. `sdBell`, `sdTentacles` and `sdArms` each take a point in 3D space and return the distance to that part of the animal. Nothing is stored — the shape is defined entirely by the arithmetic.
+
+**3. The ray walks forward by whatever distance is safe.** If the nearest surface is 0.4 units away, the ray can step 0.4 units without passing through anything. Repeat. When the distance falls near zero, the ray has found the surface, and that pixel gets a colour. This is *ray marching*, and it makes the image a solved equation rather than a rasterised object.
+
+## How the mathematics creates life
+
+A static distance field gives a sculpture. Motion comes from making the coefficients functions of time — and the *shape* of those functions decides whether it reads as alive or mechanical.
+
+**The swim cycle is deliberately asymmetric.** A real jellyfish snaps its bell shut and then coasts. A sine wave spends equal time contracting and relaxing, which looks robotic; this spends 28% of the cycle contracting and 72% gliding:
+
+```glsl
+x < 0.28 ? smoothstep(0.0, 1.0, x / 0.28)
+         : 1.0 - smoothstep(0.0, 1.0, (x - 0.28) / 0.72)
+```
+
+**Squeezing conserves the animal's shape.** That pulse $p(t)$ drives radius and height in *opposite* directions, so contracting makes the bell narrow and tall, exactly as a real bell deforms:
+
+$$R = 1.00 + 0.13\,p(t), \qquad H = 0.80 - 0.22\,p(t)$$
+
+**Follow-through comes from a phase lag.** Tentacles are placed by polar repetition, then each strand takes its own phase offset from `hash11(idx)` so they never move as one rigid sheet. The wave also arrives later further down the strand, which is what produces the trailing, unforced drift:
+
+$$\text{ring} = R\,(0.98 - 0.06\,d_n) + (0.05 + 0.78\,d_n^{2})\,\sin(1.55\,d - 2t + \phi)$$
+
+**Thin geometry is accumulated, not intersected.** Hair-thin tentacles hit as hard surfaces would flicker as they slip between sample points from one frame to the next. Instead each step adds a soft contribution, $e^{-95\,d}$, so a strand fades in smoothly rather than popping. This single choice is most of what makes the motion look fluid.
+
+## Running it
+
+Requires [`uv`](https://docs.astral.sh/uv/), `ffmpeg`, and a driver supporting OpenGL 3.3.
+
+```powershell
+uv sync
+.\render.ps1
+```
+
+Roughly one minute of rendering per 10 seconds of output on integrated graphics. Options:
+
+```powershell
+.\render.ps1 -Duration 15 -StartTime 4 -Fps 30 -OutFile study.mp4
+```
+
+Single frames are near-instant, which is the sane way to iterate on a shader:
+
+```powershell
+uv run python preview.py 4          # one frame at t=4
+uv run python preview.py 2 5 8      # contact sheet
+```
+
+## Colour, measured rather than guessed
+
+`palette.py` reports mean RGB across the shadow, midtone and highlight bands of an image.
+
+```powershell
+uv run python palette.py preview.png
+```
+
+Matching a look by eye is unreliable; measuring it is not. Comparing against a reference showed its shadows held *near-zero* red and green, while this render was carrying roughly three times too much green — the difference between deep blue-violet water and a washed-out teal. The cause is worth knowing: `pow(col, 1/2.2)` gamma **lifts near-black hard**, so a linear value of 0.001 surfaces as visible haze. "Almost zero" is not zero. The shader therefore applies a channel-wise black point, subtracting more red and green than blue:
+
+```glsl
+col = max(col - vec3(0.0175, 0.0160, 0.0060), vec3(0.0));
+```
+
+## The poster
+
+[`poster.jpg`](poster.jpg) composites a rendered frame with the governing equations typeset by Manim's `MathTex`.
+
+```powershell
+uv run manim -s -r 1080,1920 -o poster poster.py Poster
+```
+
+This step needs LaTeX, since `MathTex` shells out to it — the animation itself does not. On Windows:
+
+```powershell
+winget install --id MiKTeX.MiKTeX --exact --scope user
+initexmf --set-config-value "[MPM]AutoInstall=1"
+```
+
+The `AutoInstall` line matters: without it MiKTeX blocks on an interactive prompt the first time Manim requests a package.
+
+## Things worth knowing if you fork this
+
+| Where | Controls |
+| --- | --- |
+| `SCHOOL_DATA` | position and scale; index 0 is the hero |
+| `SCHOOL_TILT` | viewing angle per jellyfish |
+| `GLOW` / `HOT` | body colour and the white-clipping cores |
+| `pulse`, and `0.42` in `pc` | swim rhythm |
+| `sdTentacles` | strand count (`TAU / 40.0`), length, curl |
+| black point in `main` | shadow depth and colour purity |
+
+- **The camera lives in GLSL**, so Manim's own camera does not move it. Manim supplies the timeline: a `ValueTracker` feeds the `u_time` uniform, and the GPU re-evaluates every equation per pixel per frame.
+- **`Shader.set_uniform` swallows unknown names silently.** A typo, or a uniform the compiler optimised away, fails without complaint. Verify by rendering two timestamps and diffing them.
+- **`renderer = opengl` in `manim.cfg` is ignored** — the OpenGL renderer must be selected with the `--renderer=opengl` CLI flag, which `render.ps1` passes. Resolution and frame rate in the config file *are* honoured.
+- **Manim's OpenGL renderer draws meshes after mobjects**, so a full-screen shader quad paints over any text. `poster.py` sidesteps this by baking the frame to an image first.
+- Manim's shader API is experimental, so the dependency is pinned. Re-check shader compilation and a short export before upgrading.
+
+## Licence
+
+MIT — see [LICENSE](LICENSE).

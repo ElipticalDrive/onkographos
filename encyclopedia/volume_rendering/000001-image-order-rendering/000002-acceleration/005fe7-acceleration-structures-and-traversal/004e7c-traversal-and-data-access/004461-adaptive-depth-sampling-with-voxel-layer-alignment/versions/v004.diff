@@ -1,0 +1,182 @@
+--- v003.md
++++ v004.md
+@@ -4,122 +4,87 @@
+ 
+ ## Overview
+-Adaptive Depth Sampling with Voxel Layer Alignment is an acceleration technique for ray traversal that reduces the computational cost of trilinear interpolation by aligning sample points with voxel layers to enable bilinear interpolation, while skipping intermediate samples via adaptive depth sampling [S1, S2, unofficial]. It differs from standard trilinear interpolation by exploiting ray direction to align samples with voxel layers, allowing bilinear interpolation (lower cost) for half the points, and skipping intermediate points via adaptive depth sampling [S2, unofficial].
++Adaptive Depth Sampling with Voxel Layer Alignment is an acceleration technique for ray traversal that reduces the computational cost of trilinear interpolation by aligning sample points with voxel layers to enable bilinear interpolation, while skipping intermediate samples via adaptive depth sampling [S1, S2, unofficial]. It differs from standard trilinear interpolation by exploiting ray direction to align samples with voxel layers, allowing bilinear interpolation for half the points, and skipping intermediate points via adaptive depth sampling [S2, unofficial].
+ 
+ ## How it works
+-The method operates on a regular 3D grid where voxels are aligned to integer coordinates. It assumes the ray traversal has already determined the entry and exit points within the volume [G].
+-
+-**Inputs:**
+-*   Ray origin $\mathbf{o}$ and direction $\mathbf{d}$ (normalized).
+-*   Volume bounding box $[x_{min}, x_{max}] \times [y_{min}, y_{max}] \times [z_{min}, z_{max}]$.
+-*   Grid dimensions $N_x, N_y, N_z$.
+-*   Voxel spacing $\Delta x, \Delta y, \Delta z$ (assumed uniform for simplicity, or incorporated into $\mathbf{d}$).
+-
+-**Outputs:**
+-*   A sequence of sample positions $\mathbf{p}_i$ and their corresponding interpolated values.
+-
+-**Data Structures:**
+-*   The volume data is stored in a 3D array or texture.
+-*   No auxiliary structures are required beyond the ray parameters and volume bounds.
++The method operates on a regular 3D grid where voxels are aligned to a uniform spacing [S2, unofficial]. Standard ray casting inputs (ray origin, direction, volume bounds, and voxel spacing) are assumed [G]. The algorithm produces a sequence of sample positions and their interpolated values [G]. No auxiliary data structures are required beyond the volume data and ray parameters [S2, unofficial].
+ 
+ **Steps:**
+ 
+-1.  **Determine the reference axis:** Identify the axis perpendicular to the parallel voxel layers that are traversed fastest by the current ray. This is the axis corresponding to the largest component of the ray direction vector $\mathbf{d}$. Let this axis be $k \in \{x, y, z\}$ [S1, S2, unofficial].
+-2.  **Decide the first sampling position:** Calculate the position where the ray enters the volume. Adjust this entry point slightly if necessary to ensure the first sample lies on a voxel layer along the reference axis $k$, or calculate the offset to the nearest voxel layer [S1, S2, unofficial].
+-3.  **Calculate sampling interval $l$:** Determine the sampling interval $l$ along the ray such that every alternate sampling point lies exactly on a voxel layer perpendicular to the reference axis $k$. If the voxel spacing along axis $k$ is $\Delta_k$, and the ray direction component along $k$ is $d_k$, the distance between adjacent voxel layers along the ray is $\Delta_k / |d_k|$. To have every *alternate* point on a layer, the interval $l$ is set to $2 \cdot (\Delta_k / |d_k|)$ [S1, S2, unofficial].
+-4.  **Sample and Interpolate:**
+-    *   For sample points lying exactly on a voxel layer (every other point starting from the first), use **bilinear interpolation** in the two axes perpendicular to the reference axis $k$. This is significantly cheaper than trilinear interpolation [S1, S2, unofficial].
+-    *   For sample points lying between voxel layers, use **simplified trilinear interpolation** [S1, S2, unofficial].
+-    *   Apply **adaptive depth sampling** to skip the time-consuming points between layers. Specifically, skip every other sample point along the ray. Since the points on the layers are already sampled with bilinear interpolation, and the points between layers are skipped, the algorithm effectively samples only the points on the voxel layers [S1, S2, unofficial].
++1. **Determine the reference axis:** Identify the axis perpendicular to the parallel voxel layers that are traversed fastest by the current ray [S2, unofficial]. This corresponds to the axis with the largest absolute component in the ray direction vector [G]. Let this axis be $k \in \{x, y, z\}$.
++2. **Decide the first sampling position:** Set the initial sampling position to the point where the ray enters the volume [S1, S2, unofficial].
++3. **Calculate sampling interval $l$:** Compute the interval $l$ along the ray such that every alternate sampling point lies exactly on a voxel layer perpendicular to the reference axis $k$ [S2, unofficial]. The sources specify the condition but do not provide the explicit mathematical formula; the interval is derived from the voxel spacing along $k$ and the ray's direction component along $k$ [G].
++4. **Sample and Interpolate:** Use bilinear interpolation for each sampling point lying on a voxel layer, and simplified trilinear interpolation for points between layers [S2, unofficial]. Apply adaptive depth sampling to skip the time-consuming points between layers [S2, unofficial]. Specifically, skip every other sample point along the ray [S1, S2, unofficial].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def adaptive_depth_sampling_ray_casting(ray_origin, ray_direction, volume_bounds, volume_data, grid_dims, voxel_spacing):
+-    # 1. Determine reference axis (axis of fastest traversal)
+-    abs_d = abs(ray_direction)
+-    ref_axis = argmax(abs_d) # 0 for x, 1 for y, 2 for z
+-    
+-    # 2. Calculate distance between voxel layers along the ray for the reference axis
+-    # Voxel spacing along the reference axis
++def adaptive_depth_sampling_ray_casting(ray_origin, ray_direction, volume_min, volume_max, voxel_spacing, ref_axis):
++    # Standard slab intersection to find entry/exit t values [G]
++    t_min = -float('inf')
++    t_max = float('inf')
++    for i in range(3):
++        if abs(ray_direction[i]) < 1e-9:
++            if ray_origin[i] < volume_min[i] or ray_origin[i] > volume_max[i]:
++                return []
++        else:
++            t1 = (volume_min[i] - ray_origin[i]) / ray_direction[i]
++            t2 = (volume_max[i] - ray_origin[i]) / ray_direction[i]
++            t_min = max(t_min, min(t1, t2))
++            t_max = min(t_max, max(t1, t2))
++    if t_min > t_max:
++        return []
++
++    # Step 3: Calculate interval l so every alternate point lands on a voxel layer along ref_axis [S2, unofficial]
+     delta_k = voxel_spacing[ref_axis]
+-    # Component of ray direction along reference axis
+     d_k = ray_direction[ref_axis]
+-    
+-    # Distance between adjacent voxel layers along the ray
+-    dist_between_layers = delta_k / abs(d_k)
+-    
+-    # 3. Calculate sampling interval l for every alternate point on a layer
+-    # We want every 2nd point to be on a layer, so we skip one layer's worth of distance
+-    l = 2 * dist_between_layers
+-    
+-    # 4. Determine entry point into volume
+-    t_entry = compute_ray_volume_intersection(ray_origin, ray_direction, volume_bounds)
+-    
+-    # Adjust entry point to align with first voxel layer if desired, 
+-    # or simply start at t_entry and let the first sample be the "layer" sample.
+-    # The method states "decide the first sampling position when the ray reaches the volume".
+-    # We assume the first sample is at t_entry.
+-    
++    if abs(d_k) < 1e-9:
++        return [] # Ray parallel to voxel layers; fallback required [G]
++    l = 2.0 * delta_k / abs(d_k)
++
++    # Step 2: First sampling position at volume entry [S1, S2, unofficial]
++    t = t_min
+     samples = []
+-    t = t_entry
+-    
+-    while t < compute_ray_volume_exit(ray_origin, ray_direction, volume_bounds):
+-        # Calculate sample position
+-        sample_pos = ray_origin + t * ray_direction
++
++    while t <= t_max:
++        pos = ray_origin + t * ray_direction
++        # Check if sample lies on a voxel layer along the reference axis [G]
++        grid_coord = pos[ref_axis] / delta_k
++        is_on_layer = abs(grid_coord - round(grid_coord)) < 1e-6
++
++        if is_on_layer:
++            # Step 4: Bilinear interpolation on aligned layers [S2, unofficial]
++            val = bilinear_interpolation(pos, voxel_spacing, ref_axis)
++            samples.append((pos, val))
++        # Points between layers are skipped by adaptive depth sampling [S2, unofficial]
+         
+-        # Check if sample_pos is on a voxel layer along ref_axis
+-        # A point is on a layer if its coordinate along ref_axis is an integer multiple of delta_k
+-        # relative to the volume origin.
+-        # Let's assume volume origin is (0,0,0) for simplicity, or adjust accordingly.
+-        coord_k = sample_pos[ref_axis]
+-        is_on_layer = is_close_to_integer(coord_k / delta_k)
+-        
+-        if is_on_layer:
+-            # Use bilinear interpolation in the other two axes
+-            val = bilinear_interpolation(sample_pos, volume_data, grid_dims, voxel_spacing, ref_axis)
+-        else:
+-            # This point is skipped by adaptive depth sampling in the "skip every other" strategy.
+-            # However, the description says "use simplified trilinear interpolation for the other sampling points".
+-            # But then it says "skipping over every other sample point".
+-            # The optimization is to SKIP the points between layers.
+-            # So we do NOT process points between layers.
+-            pass
+-            
+-        # Adaptive Depth Sampling: Skip the next point (which would be between layers)
+-        # We advance by 2 * dist_between_layers, so the next point is on a layer.
++        # Step 3/4: Advance by l to land on the next aligned layer [S2, unofficial]
+         t += l
+-        
+-        samples.append((sample_pos, val))
+-        
++
+     return samples
+ 
+-def is_close_to_integer(val, epsilon=1e-6):
+-    return abs(val - round(val)) < epsilon
+-
+-def bilinear_interpolation(pos, volume_data, grid_dims, voxel_spacing, ref_axis):
+-    # Interpolate in the two axes NOT equal to ref_axis
+-    # This is a standard bilinear interpolation in 3D space, fixing the ref_axis coordinate
+-    # Implementation details omitted for brevity, but standard bilinear interp.
++def bilinear_interpolation(pos, voxel_spacing, ref_axis):
++    # Standard bilinear interpolation in the two axes perpendicular to ref_axis [G]
++    # Implementation depends on specific grid layout and data format.
+     pass
+ ```
+ 
+ **Parameters:**
+-*   Sampling interval $l$: Calculated as $2 \cdot \Delta_k / |d_k|$ [S1, S2, unofficial].
+-*   Adaptive depth factor: Skip every other sample point (factor of 2) [S1, S2, unofficial].
++* Sampling interval $l$: Chosen so every alternate sampling point lies exactly on a voxel layer [S2, unofficial].
++* Adaptive depth factor: Skip every other sample point along the ray [S1, S2, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Ray parallel to a voxel layer:** If $d_k \approx 0$, the ray is parallel to the voxel layers of axis $k$. The distance between layers becomes infinite. This case must be handled separately, likely by choosing a different reference axis or falling back to standard trilinear interpolation [G].
+-*   **Precision:** Floating-point errors may cause points that should be on a layer to be slightly off. Use a tolerance $\epsilon$ when checking `is_on_layer` [G].
+-*   **Boundary conditions:** Ensure the ray entry and exit calculations are robust to avoid sampling outside the volume [G].
++* **Ray parallel to a voxel layer:** If the direction component along the reference axis is near zero, the ray is parallel to the voxel layers and the interval calculation divides by zero [G]. This requires a fallback to standard traversal or axis selection [G].
++* **Precision:** Floating-point accumulation errors may cause points that should be on a layer to drift slightly off; a tolerance threshold is required when checking layer alignment [G].
++* **Boundary conditions:** The slab intersection must correctly handle rays originating inside or outside the volume to avoid out-of-bounds sampling [G].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The method reduces the number of interpolation operations by half (skipping every other point) and reduces the cost of the remaining interpolations from trilinear to bilinear. The sources state that the algorithm saved about 70% of ray traversal time by skipping over every other point along each ray [S1, S2, unofficial].
+-*   **Memory Complexity:** No additional memory structures are required beyond the volume data and ray parameters.
+-*   **Strengths:** Significant speedup in ray traversal time. Exploits the regular structure of the voxel grid.
+-*   **Limitations:** Only applicable to regular 3D grids. Requires careful handling of ray direction to determine the reference axis. May introduce artifacts if the skipping rate is too high for the scene's frequency content, though the sources do not discuss this trade-off explicitly [G].
+-*   **When to use:** When rendering regular 3D volumes with high performance requirements and the ray traversal is a bottleneck. Particularly effective when combined with other acceleration techniques like boundary cell-based ray casting [S2, unofficial].
++* **Time Complexity:** The method reduces the number of interpolation operations by half and lowers the cost of the remaining interpolations from trilinear to bilinear [S2, unofficial]. Experimental results show the algorithm saved about 70% of ray traversal time by skipping over every other sample point along each ray [S1, S2, unofficial].
++* **Memory Complexity:** No additional memory structures are required beyond the volume data and ray parameters [S2, unofficial].
++* **Strengths:** Significant speedup in ray traversal time by exploiting the regular structure of the voxel grid [S2, unofficial].
++* **Limitations:** Only applicable to regular 3D grids [S2, unofficial].
++* **When to use:** When rendering regular 3D volumes with high performance requirements and ray traversal is the bottleneck, particularly when combined with boundary cell-based ray casting [S2, unofficial].
+ 
+ ## Background
+-The method was proposed in the context of high-performance parallel volume rendering, specifically as part of a fast serial ray casting algorithm [S1, S2, unofficial]. It is described in the NASA Technical Reports Server publication "Time-Critical Volume Rendering" [S1, S2, unofficial]. The technique is somewhat similar to Levoy's optimization of adaptive image sampling within the image plane [S1, S2, unofficial].
++The method was proposed in the context of high-performance parallel volume rendering as part of a fast serial ray casting algorithm [S2, unofficial]. It is described in the NASA Technical Reports Server publication "Time-Critical Volume Rendering" [S1, S2, unofficial]. The technique is somewhat similar to Levoy's optimization of adaptive image sampling within the image plane [S1, S2, unofficial].
+ 
+ ## Sources

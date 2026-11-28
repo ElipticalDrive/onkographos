@@ -1,0 +1,142 @@
+--- v003.md
++++ v004.md
+@@ -4,68 +4,103 @@
+ 
+ ## Overview
+-A technique to store a 3D scalar field in a 2D texture by tiling the 3D volume into 2D slices, allowing efficient GPU access via texture lookups [S1, unofficial]. It maps 3D coordinates to 2D texture coordinates using a tiling scheme where the Z-coordinate determines the tile position, enabling standard 2D texture sampling hardware to access volumetric data [S1, unofficial].
++Tiled 2D Texture Storage for 3D Fields is a technique to store a 3D scalar field in a 2D texture by tiling the 3D volume into 2D slices, allowing efficient GPU access via texture lookups [S1, unofficial]. It solves the problem of accessing 3D volume data on GPUs that lack efficient 3D texture support or when memory bandwidth for 3D textures is a bottleneck, by mapping the 3D coordinates to 2D UV space . Unlike [2D Texture-Based Volume Rendering with Z-Slice Packing](4269-2d-texture-based-volume-rendering-with-z-slice-packing.md) which arranges Z-slices in a fixed grid layout within a 2D texture to enable standard bilinear filtering for Z-interpolation, this method specifically tiles the volume into a larger 2D texture where the Z-coordinate determines the tile . It is distinct from [Point Cloud Volumetric Rendering via 2D Atlas](4879-point-cloud-volumetric-rendering-via-2d-atlas.md) as it operates on dense grids rather than point clouds .
+ 
+ ## How it works
+ **Inputs and Outputs**
+-- Input: A 3D scalar field of dimensions $N_x \times N_y \times N_z$ [S1, unofficial].
+-- Input: `tilesX`, the number of tiles along the X-axis of the 2D texture [S1, unofficial].
+-- Output: A 2D texture of dimensions $W \times H$ containing the tiled volume data [S1, unofficial].
++- Input: A 3D scalar field of dimensions $W \times H \times D$ (width, height, depth).
++- Input: `tilesX`, the number of tiles along the X-axis of the 2D texture.
++- Output: A 2D texture of dimensions $W_{tex} \times H_{tex}$ containing the tiled volume data.
+ 
+ **Data Structures**
+-The 2D texture is organized as a grid of tiles [S1, unofficial]. Each tile corresponds to a slice of the 3D volume [S1, unofficial]. Bit packing and exact field layouts are not given in the sources [S1, unofficial].
++- The 2D texture is treated as a grid of tiles. Each tile corresponds to a slice of the 3D volume along the Z-axis.
++- The texture dimensions are determined by the tiling layout:
++  - $W_{tex} = \text{tilesX} \times W$
++  - $H_{tex} = \lceil D / \text{tilesX} \rceil \times H$
++- Each texel in the 2D texture stores a single scalar value from the 3D field.
++
++**Steps**
++1. Determine the tiling parameters. Let `tilesX` be the number of tiles along the X-axis. The number of tiles along the Y-axis is `tilesY = ceil(D / tilesX)`.
++2. For each voxel $(x, y, z)$ in the 3D field where $0 \le x < W$, $0 \le y < H$, $0 \le z < D$:
++   a. Calculate the tile coordinates for the Z-slice:
++      - `tileX = z % tilesX`
++      - `tileY = z / tilesX` (integer division)
++   b. Calculate the 2D texture coordinates $(u, v)$:
++      - $u = \text{tileX} \times W + x$
++      - $v = \text{tileY} \times H + y$
++   c. Store the scalar value of the voxel at $(u, v)$ in the 2D texture.
++
++**Formulas**
++- Tile X coordinate: $\text{tileX} = z \pmod{\text{tilesX}}$
++- Tile Y coordinate: $\text{tileY} = \lfloor z / \text{tilesX} \rfloor$
++- Texture U coordinate: $u = \text{tileX} \times W + x$
++- Texture V coordinate: $v = \text{tileY} \times H + y$
+ 
+ **Parameters**
+-- `tilesX`: The number of tiles along the X-axis of the 2D texture. It determines the tiling layout [S1, unofficial].
+-- `gridSize`: The resolution of the volume in the X and Y dimensions, used to calculate texture coordinates [S1, unofficial].
++- `tilesX`: The number of tiles along the X-axis of the 2D texture. It determines the tiling layout [S1, unofficial]. Typical values depend on the aspect ratio of the volume and the desired tile size, but are not specified in the sources.
+ 
+-**Mapping Formula**
+-To map a 3D coordinate $(x, y, z)$ to 2D texture coordinates $(u, v)$ [S1, unofficial]:
+-1. Calculate the tile indices for the Z-coordinate [S1, unofficial]:
+-   $$tileX = z \pmod{tilesX}$$
+-   $$tileY = \lfloor z / tilesX \rfloor$$
+-2. Calculate the texture coordinates [S1, unofficial]:
+-   $$u = tileX \cdot gridSize + x$$
+-   $$v = tileY \cdot gridSize + y$$
++**Edge Cases and Pitfalls**
++- The depth $D$ may not be evenly divisible by `tilesX`. In this case, the last row of tiles in the Y-direction will have unused space. Care must be taken to ensure that sampling does not access these unused areas or that they are padded with appropriate values (e.g., 0 or NaN) [G].
++- Precision issues may arise if the texture coordinates are not calculated correctly, especially for large volumes. Using integer arithmetic for tile and coordinate calculations is recommended to avoid floating-point errors [G].
+ 
+ **Pseudocode**
+ ```python
+-def map_3d_to_2d_texture(x, y, z, tilesX, gridSize):
++def store_3d_field_in_2d_texture(field_3d, tilesX):
+     """
+-    Maps 3D volume coordinates to 2D texture coordinates.
++    Stores a 3D scalar field into a 2D texture using tiling.
+     
+     Args:
+-        x: X coordinate in volume (0 <= x < gridSize)
+-        y: Y coordinate in volume (0 <= y < gridSize)
+-        z: Z coordinate in volume (0 <= z < N_z)
+-        tilesX: Number of tiles along X-axis of the 2D texture
+-        gridSize: Spatial resolution of the volume in X and Y dimensions
++        field_3d: A 3D array of shape (W, H, D) containing the scalar field.
++        tilesX: The number of tiles along the X-axis of the 2D texture.
+         
+     Returns:
+-        (u, v): 2D texture coordinates
++        A 2D array of shape (W_tex, H_tex) representing the tiled texture.
+     """
+-    # Bounds checking not given in sources [G]
+-    tileX = z % tilesX
+-    tileY = z // tilesX
+-    u = tileX * gridSize + x
+-    v = tileY * gridSize + y
+-    return u, v
++    W, H, D = field_3d.shape
++    
++    # Calculate texture dimensions
++    tilesY = (D + tilesX - 1) // tilesX  # Ceiling division
++    W_tex = tilesX * W
++    H_tex = tilesY * H
++    
++    # Initialize 2D texture with a default value (e.g., 0)
++    texture_2d = np.zeros((H_tex, W_tex))
++    
++    for z in range(D):
++        for y in range(H):
++            for x in range(W):
++                # Calculate tile coordinates
++                tile_x = z % tilesX
++                tile_y = z // tilesX
++                
++                # Calculate texture coordinates
++                u = tile_x * W + x
++                v = tile_y * H + y
++                
++                # Store the value
++                texture_2d[v, u] = field_3d[x, y, z]
++                
++    return texture_2d
+ ```
+-
+-**Edge Cases and Pitfalls**
+-Not given in the sources [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [2D Texture-Based Volume Rendering with Z-Slice Packing](4269-2d-texture-based-volume-rendering-with-z-slice-packing.md)
+-What it is: Renders a 3D scalar field by storing Z-slices in a tiled 2D texture grid, allowing 3D sampling via 2D texture lookups and trilinear interpolation. What sets it apart: Differs from standard 3D texture sampling by mapping 3D coordinates to a 2D atlas, requiring explicit slice indexing and offset calculation in the shader. When to choose: Choose it when leveraging 2D texture hardware for volume rendering is required. Link: [2D Texture-Based Volume Rendering with Z-Slice Packing](4269-2d-texture-based-volume-rendering-with-z-slice-packing.md)
++2D Texture-Based Volume Rendering with Z-Slice Packing is a technique that stores a 3D scalar field as a 2D texture composed of a grid of Z-slices, allowing 3D sampling via 2D texture lookups and trilinear interpolation. It solves the problem of accessing 3D volume data on GPUs that lack efficient 3D texture support or when memory bandwidth for 3D textures is a bottleneck, by mapping the 3D coordinates to 2D UV space. Unlike [Tiled 2D Texture Storage for 3D Fields](2740-tiled-2d-texture-storage-for-3d-fields.md) which tiles the volume into a larger 2D texture, this method specifically arranges Z-slices in a fixed grid layout within a 2D texture to enable standard bilinear filtering for Z-interpolation. It is distinct from [Point Cloud Volumetric Rendering via 2D Atlas](4879-point-cloud-volumetric-rendering-via-2d-atlas.md) as it operates on dense grids rather than point clouds.
+ 
+ ### [Point Cloud Volumetric Rendering via 2D Atlas](4879-point-cloud-volumetric-rendering-via-2d-atlas.md)
+-What it is: A real-time GPU-accelerated technique for rendering 3D volumetric data (specifically point clouds or scalar fields) by storing the volume in a 2D texture atlas and rendering it as a point cloud where each point represents a voxel/sample. What sets it apart: Differs from standard volume rendering by encoding the depth of each sample in the atlas layout to allow correct sorting and rendering order without traditional depth buffering for the volume itself. When to choose: Choose it for real-time point cloud or scalar field rendering on constrained hardware. Link: [Point Cloud Volumetric Rendering via 2D Atlas](4879-point-cloud-volumetric-rendering-via-2d-atlas.md)
++A real-time GPU-accelerated technique for rendering 3D volumetric data (specifically point clouds or scalar fields) by storing the volume in a 2D texture atlas and rendering it as a point cloud where each point represents a voxel/sample. The depth of each sample is encoded in the atlas layout to allow correct sorting and rendering order without traditional depth buffering for the volume itself. It achieves 60Hz on GTX1080 for a 4k atlas, while Intel 630 graphics render a 2k atlas at ~20fps.
+ 
+ ## Operating characteristics
+-Not given in the sources.
++- Time Complexity: $O(W \times H \times D)$ for storing the 3D field into the 2D texture.
++- Memory Complexity: $O(W_{tex} \times H_{tex})$ for the 2D texture, where $W_{tex} = \text{tilesX} \times W$ and $H_{tex} = \lceil D / \text{tilesX} \rceil \times H$.
++- Measured Performance: Not given in the sources.
++- Scaling: The method scales with the size of the 3D field and the chosen tiling layout. Larger `tilesX` values may reduce the height of the 2D texture but increase its width, and vice versa.
++- Strengths: Allows efficient GPU access to 3D volume data using 2D texture lookups, which are widely supported and optimized on GPUs.
++- Limitations: The tiling layout may introduce discontinuities at tile boundaries if not handled carefully. The method is specific to dense grids and does not apply to point clouds.
++- When to use: When 3D texture support is limited or inefficient on the target GPU, or when memory bandwidth for 3D textures is a bottleneck.
++- When not to use: When the GPU has efficient 3D texture support and memory bandwidth is not a concern, or when rendering point clouds.
+ 
+ ## Background
+-This technique is used in GPU-based volume rendering and marching cubes implementations to leverage 2D texture hardware for 3D data access [S1, unofficial].
++The technique is described in the context of WebGL2 GPU Marching Cubes [S1, unofficial]. The specific implementation details are found in the GitHub repository [S1, unofficial].
+ 
+ ## Sources

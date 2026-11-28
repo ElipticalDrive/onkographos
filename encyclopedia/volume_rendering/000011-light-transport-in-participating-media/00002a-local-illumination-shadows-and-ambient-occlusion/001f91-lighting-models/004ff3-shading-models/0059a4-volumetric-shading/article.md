@@ -1,0 +1,112 @@
+# Volumetric Shading
+
+Also called: Fire Shader, Global Occlusion, Smoke Shader, Volumetric Render Settings, Volumetric Shadow, secondary scatter
+
+## Overview
+Volumetric shading is a local illumination technique that captures shadow information and global occlusion effects in translucent participating media by branching a secondary ray towards the light source at each primary ray sample location [S1][S2, unofficial]. It differs from gradient-based shading (e.g., [Gradient-based shading](13956-gradient-based-shading.md)) by computing transmittance at runtime rather than using pre-computed shadow maps, thereby reducing memory occupancy while providing global ambient occlusion [S1][S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Primary ray sample position $x'$, view direction $\vec{o}$, light source position $x_m$, incident radiance $L_m$, phase function parameters, and user-defined parameters for ray reach and sampling distance [S1][S2, unofficial].
+*   **Outputs:** Shaded radiance $L_{in}(x', \vec{o})$ incorporating volumetric shadow effects [S1].
+
+**Data Structures:**
+No specific complex data structures are required beyond standard ray traversal buffers; the method relies on runtime computation of transmittance along the secondary ray to avoid shadow map memory overhead [S1].
+
+**Parameters:**
+*   `GlobalIlluminationReach`: The maximum length of the secondary ray to consider [S2, unofficial].
+*   `VolumeShadowSamplingDistFactor`: The sampling distance for the secondary rays; increasing this value speeds up rendering [S2, unofficial].
+*   `Partial Shadow Ray`: A setting where only a fraction (e.g., 10%) of the secondary ray length is considered, used to speed up rendering [S2, unofficial].
+*   Maximum proportion of the shadow ray: A user-adjustable parameter limiting the reach of the shadow ray; when small, the method is equivalent to local ambient occlusion with one sampled direction [S1].
+
+**Algorithm Steps:**
+1.  For each sample point $x'$ on the primary ray, branch a secondary ray towards the light source position $x_m$ [S1][S2, unofficial].
+2.  Traverse the secondary ray from the sample position $x_0$ to the end position $x$ (or up to `GlobalIlluminationReach`) to calculate the global occlusion factor [S1][S2, unofficial].
+3.  Compute the transmittance $T(x_m, x')$ along the secondary ray at runtime [S1].
+4.  Evaluate the Henyey-Greenstein phase function $\Phi(x', \vec{i}, \vec{o})$ for the in-scatter direction $\vec{i}$ (from light to sample) and out-scatter direction $\vec{o}$ (from sample to viewer) [S1].
+5.  Integrate the shadow contribution using the formula below [S1].
+6.  Sum the lighting effects over all light sources and their incident radiance $L_m$ [S1].
+
+**Formula:**
+The incident radiance $L_{in}(x', \vec{o})$ due to volumetric shading $L_{vs}$ is calculated as [S1]:
+
+$$
+L_{in}(x', \vec{o}) = L_{vs} = \sum_{m}^{lights} \int_{x_0}^{x} \Phi(x', \vec{i}, \vec{o}) L_m T(x_m, x') dx'
+$$
+
+Where:
+*   $\Phi(x', \vec{i}, \vec{o})$ is the Henyey-Greenstein phase function [S1].
+*   $L_m$ is the incident radiance from light source $m$ [S1].
+*   $T(x_m, x')$ is the transmittance from the light source position $x_m$ to the sample $x'$ [S1].
+*   The integration is performed from the sample position $x_0$ to the end position $x$ [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def heney_greenstein_phase(i_dir, o_dir, g):
+    """Standard Henyey-Greenstein phase function [G]."""
+    cos_theta = max(-1.0, min(1.0, dot(i_dir, o_dir)))
+    g2 = g * g
+    denom = 1.0 + g2 - 2.0 * g * cos_theta
+    return (1.0 - g2) / (4.0 * math.pi * (denom ** 1.5))
+
+def volumetric_shading(sample_point, view_direction, lights, volume_data, params):
+    """
+    Calculate volumetric shading for a single sample point.
+    
+    Args:
+        sample_point: Position x' on the primary ray.
+        view_direction: Out-scatter direction o.
+        lights: List of light sources, each containing position x_m and incident radiance L_m.
+        volume_data: Accessor to volume density/opacity data.
+        params: Dictionary containing GlobalIlluminationReach, VolumeShadowSamplingDistFactor, etc.
+        
+    Returns:
+        Shaded radiance contribution from volumetric shading.
+    """
+    total_radiance = 0.0
+    for light in lights:
+        light_pos = light.position
+        light_radiance = light.radiance
+        ray_direction = normalize(light_pos - sample_point)
+        max_length = params.get('GlobalIlluminationReach', float('inf'))
+        if params.get('Partial Shadow Ray', False):
+            max_length = max_length * 0.1
+        step_size = params.get('VolumeShadowSamplingDistFactor', 1.0)
+        transmittance = 1.0
+        current_pos = sample_point
+        # Numerical integration of the shadow contribution along the secondary ray
+        while distance(current_pos, light_pos) < max_length:
+            density = volume_data.get_density(current_pos)
+            # Update transmittance from light to current_pos as we step towards the light
+            transmittance *= math.exp(density * step_size)
+            in_scatter_direction = -ray_direction
+            phase_value = heney_greenstein_phase(in_scatter_direction, view_direction, params.get('phase_params', 0.0))
+            # Accumulate integral contribution: Phi * L_m * T * dx
+            total_radiance += phase_value * light_radiance * transmittance * step_size
+            current_pos += ray_direction * step_size
+    return total_radiance
+```
+
+**Edge Cases and Pitfalls:**
+*   **Noise Sensitivity:** Small features are dampened by volumetric shading, which can be detrimental if the data contains significant noise [S2, unofficial].
+*   **Performance:** The method is computationally demanding; full shadow rays can lead to test failures on GPUs that are not powerful enough [S2, unofficial].
+*   **Local vs Global:** When the reach of the shadow ray is relatively small, the rendering method is equivalent to local ambient occlusion technique with one sampled direction [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Computationally demanding due to the traversal of secondary rays for every sample point [S2, unofficial]. Render time does not necessarily increase linearly with file size; translucent tissues (more voxels traversed) require significantly more time (e.g., almost twice the render time for Head CT data compared to other datasets) [S2, unofficial].
+*   **Memory Complexity:** Low memory occupancy compared to shadow map approaches, as transmittance is computed at runtime [S1].
+*   **Strengths:** Captures global shadow effects and improves understanding of spatial relations and object size in translucent media [S1]. Reduces memory usage compared to shadow maps [S1].
+*   **Limitations:** Can dampen small features and noise [S2, unofficial]. Computationally expensive, potentially causing GPU test failures on weaker hardware [S2, unofficial].
+*   **When to use:** When global occlusion effects are desired in translucent media and memory is constrained, or when improving spatial perception in medical volume data is required [S1][S2, unofficial].
+*   **When not to use:** When performance is critical and hardware is limited, or when preserving small noisy features is important [S2, unofficial].
+
+## Background
+Volumetric shading was introduced as a relatively efficient technique to capture shadow information in participating media [S1]. It is often referred to as shadow ray or secondary scatter [S1]. Perceptual studies have shown that volumetric shadow improves understanding of spatial relations and object size [S1]. The method has been implemented in production rendering pipelines and in libraries such as VTK.js for in-browser cinematic volume rendering [S1][S2, unofficial].
+
+## Sources
+[S1] Interactive, in-browser cinematic volume rendering of medical images, https://doi.org/10.1080/21681163.2022.2145239, fetched 2026-10-26
+[S2] Cinematic Volume Rendering in Your Web Browser: VolView and VTK.js, https://www.kitware.com/cinematic-volume-rendering/, fetched 2026-10-27 (unofficial)

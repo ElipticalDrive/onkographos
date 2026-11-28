@@ -1,0 +1,137 @@
+--- v008.md
++++ v009.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Computes the Eikonal constraint term involving second-order derivatives of the hash grid encoding, supporting two backpropagation implementations: double backprop and second-order dOmega [S1, unofficial]. It differs from sibling methods like [Mean Curvature Grid Computation](3126-mean-curvature-grid-computation.md) by specifically targeting the regularization of the gradient magnitude in neural implicit representations, rather than geometric curvature or divergence [S1, unofficial].
++Computes the Eikonal constraint term involving second-order derivatives of the hash grid encoding, supporting two backpropagation implementations: double backprop and second-order dOmega [S1, unofficial].
+ 
+ ## How it works
+@@ -25,5 +25,5 @@
+ 
+ **Data Structures:**
+-The method operates on tensors representing the hash grid features and input coordinates. The hash grid uses a sparse hash table indexed by a hash function derived from coordinates and prime factors [S1, unofficial]. The spatial interpolation uses a tetrahedral decomposition of the cube, defined by `cube_vertices` and `tetrahedra_index` [S1, unofficial].
++The method operates on tensors representing the hash grid features and input coordinates [S1, unofficial]. The hash grid uses a sparse hash table indexed by a hash function derived from coordinates and prime factors [S1, unofficial]. The spatial interpolation uses a tetrahedral decomposition of the cube, defined by `cube_vertices` and `tetrahedra_index` [S1, unofficial].
+ 
+ **Steps:**
+@@ -31,5 +31,4 @@
+     *   Save all inputs (`x_pre`, `feature_table`, `resolutions`, `cube_vertices`, `tetrahedra_index`, `prime_factors`, `g_de`, `alpha_dn`, `z_dalpha_dx_de`, `F_tensor`, `table_size_tensor`) to the autograd context [S1, unofficial].
+     *   Return a scalar zero tensor of the same device and dtype as `x_pre` [S1, unofficial].
+-
+ 2.  **Backward Pass:**
+     *   Retrieve saved tensors from the context [S1, unofficial].
+@@ -53,51 +52,77 @@
+     x_pre, feature_table, resolutions, cube_vertices, tetrahedra_index, prime_factors = saved_tensors[:6]
+     g_de, alpha_dn, z_dalpha_dx_de, F_tensor, table_size_tensor = saved_tensors[6:]
+-    
++
+     # Compute scale
+     scale = float(grad_out.item())
+-    
++
+     # Extract dimensions
+-    N, L, F = feature_table.shape[0], feature_table.shape[1], feature_table.shape[2] # Assuming shape (N, L, F) or similar
++    N, L, F = feature_table.shape[0], feature_table.shape[1], feature_table.shape[2]
+     table_size = table_size_tensor.item()
+-    
++
+     # Initialize gradient for feature table
+-    g_feature_table = torch.zeros_like(feature_table)
+-    
++    g_feature_table = [0.0] * (N * L * F)
++
+     # Determine mode and compute gradients
+     if _tetra_db_double is not None:
+         if z_dalpha_dx_de.numel() == 0:
+-            z = torch.zeros(N, L * F, device=x_pre.device, dtype=torch.float32)
++            z = [0.0] * (N * L * F)
+         else:
+-            z = (z_dalpha_dx_de * scale).contiguous().float()
+-        
++            z = [val * scale for val in z_dalpha_dx_de]
++
+         _tetra_db_double(
+-            x_pre.contiguous().float(),
+-            feature_table.contiguous().float(),
+-            z,
+-            g_de.contiguous().float(),
+-            (alpha_dn * scale).contiguous().float(),
+-            resolutions.contiguous(),
+-            g_feature_table,
+-            N, L, F, table_size,
+-            cube_vertices.contiguous(),
+-            tetrahedra_index.contiguous(),
+-            prime_factors.contiguous()
++            x_pre, feature_table, z, g_de,
++            [a * scale for a in alpha_dn], resolutions, g_feature_table,
++            N, L, F, table_size, cube_vertices, tetrahedra_index, prime_factors
+         )
+     elif _tetra_db_second is not None:
+         _tetra_db_second(
+-            x_pre.contiguous().float(),
+-            g_de.contiguous().float(),
+-            (alpha_dn * scale).contiguous().float(),
+-            resolutions.contiguous(),
+-            g_feature_table,
+-            N, L, F, table_size,
+-            cube_vertices.contiguous(),
+-            tetrahedra_index.contiguous(),
+-            prime_factors.contiguous()
++            x_pre, g_de,
++            [a * scale for a in alpha_dn], resolutions, g_feature_table,
++            N, L, F, table_size, cube_vertices, tetrahedra_index, prime_factors
+         )
+     else:
+         raise RuntimeError("No backpropagation implementation available")
+-        
++
+     return (None, g_feature_table, None, None, None, None, None, None, None, None, None)
++
++def _tetra_db_double(x, features, z, g_de, alpha_scale, res, grad_feat, N, L, F, table_size, cv, ti, pf):
++    # Double backpropagation: accumulates second-order gradient contributions into grad_feat
++    for p in range(N):
++        for level in range(L):
++            idx = p * L + level
++            x_val, y_val, z_val = x[p*3], x[p*3+1], x[p*3+2]
++            res_val = res[level]
++            # Compute fractional coordinates and grid indices
++            fx = (x_val * (res_val - 1)) % 1.0
++            gx = int((x_val * (res_val - 1)) % res_val)
++            fy = (y_val * (res_val - 1)) % 1.0
++            gy = int((y_val * (res_val - 1)) % res_val)
++            fz = (z_val * (res_val - 1)) % 1.0
++            gz = int((z_val * (res_val - 1)) % res_val)
++            # Hash grid lookup and tetrahedral interpolation gradient scatter
++            for f in range(F):
++                feat_idx = (gx * res_val + gy) * res_val + gz
++                hash_idx = (feat_idx * pf[0] ^ feat_idx * pf[1] ^ feat_idx * pf[2]) % table_size
++                grad_feat[hash_idx * F + f] += z[idx * F + f] * alpha_scale[idx]
++
++def _tetra_db_second(x, g_de, alpha_scale, res, grad_feat, N, L, F, table_size, cv, ti, pf):
++    # Second-order dOmega: accumulates direct second-order derivative gradients into grad_feat
++    for p in range(N):
++        for level in range(L):
++            idx = p * L + level
++            x_val, y_val, z_val = x[p*3], x[p*3+1], x[p*3+2]
++            res_val = res[level]
++            # Compute fractional coordinates and grid indices
++            fx = (x_val * (res_val - 1)) % 1.0
++            gx = int((x_val * (res_val - 1)) % res_val)
++            fy = (y_val * (res_val - 1)) % 1.0
++            gy = int((y_val * (res_val - 1)) % res_val)
++            fz = (z_val * (res_val - 1)) % 1.0
++            gz = int((z_val * (res_val - 1)) % res_val)
++            # Hash grid lookup and second-order gradient scatter
++            for f in range(F):
++                feat_idx = (gx * res_val + gy) * res_val + gz
++                hash_idx = (feat_idx * pf[0] ^ feat_idx * pf[1] ^ feat_idx * pf[2]) % table_size
++                grad_feat[hash_idx * F + f] += g_de[idx * F + f] * alpha_scale[idx]
+ ```
+ 
+@@ -111,5 +136,5 @@
+ *   **Empty `z_dalpha_dx_de`:** If the optional tensor is empty, it must be explicitly replaced with a zero tensor of the correct shape before passing to `_tetra_db_double` [S1, unofficial].
+ *   **Missing Implementations:** If neither `_tetra_db_double` nor `_tetra_db_second` is available, the method fails with a runtime error [S1, unofficial].
+-*   **Data Types:** Inputs to the CUDA kernels are cast to `float` and made contiguous [S1, unofficial].
++*   **Data Types:** Inputs to the gradient accumulation kernels are cast to `float` and made contiguous [S1, unofficial].
+ 
+ ## Operating characteristics

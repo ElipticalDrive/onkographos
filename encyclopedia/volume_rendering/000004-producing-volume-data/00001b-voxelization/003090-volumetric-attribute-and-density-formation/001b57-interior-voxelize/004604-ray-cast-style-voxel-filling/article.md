@@ -1,0 +1,151 @@
+# Ray-Cast Style Voxel Filling
+
+Also called: FillVolume, Front-to-Back Scanline Fill, Z-Direction Interior Fill
+
+## Overview
+Ray-Cast Style Voxel Filling determines the interior of a mesh by casting rays along the +Z axis through a pre-classified surface grid and marking voxels as solid when they intersect an outward-facing triangle [S1, unofficial][S2]. It solves the problem of distinguishing interior from exterior voxels by using deterministic geometric intersection tests instead of topological flood-fill or winding numbers [S1, unofficial][S2]. Unlike [Solid Voxelization](1695-solid-voxelization.md), which uses two-level grids or 3D scan-filling to handle complex topology robustly, this method relies on linear Z-axis scanning and interval marking [S1, unofficial][S2]. It differs from [Stochastic Ray-Casting Voxelization](1067-stochastic-ray-casting-voxelization.md) by testing specific grid cells against all mesh triangles rather than using probabilistic sampling [S1, unofficial][S2].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D voxel grid where surface voxels are already classified as `FrontFace`, `BackFace`, or `Empty` based on their normal relative to the +Z direction [S2]. A mesh defined by vertex positions and triangle indices [S1, unofficial].
+*   **Output:** The same voxel grid, with interior voxels marked as `Solid` (`isSolid = 1.0`) and interval voxels marked with `fill = 1` [S1, unofficial][S2].
+
+**Data Structures:**
+*   **Voxel Grid:** A 3D array or structured buffer. Voxels store surface classification (`isFrontFace`, `isBackFace`, or empty) and interior status (`isSolid`, `fill`) [S1, unofficial][S2].
+*   **Mesh Data:**
+    *   `_MeshVertices`: `StructuredBuffer<float3>` containing vertex positions [S1, unofficial].
+    *   `_MeshTriangleIndices`: `StructuredBuffer<int>` containing triangle vertex indices [S1, unofficial].
+    *   `_TriangleCount`: Integer count of triangles [S1, unofficial].
+
+**Parameters:**
+*   `_GridWidth`, `_GridHeight`, `_GridDepth`: Dimensions of the voxel grid [S1, unofficial].
+*   `_CellHalfSize`: Half the side length of a voxel [S1, unofficial].
+*   `_BoundsMin`: Minimum corner of the voxelization bounds [S1, unofficial].
+*   `_WorldToLocalMatrix`: Transformation matrix to convert world-space coordinates to local space for intersection tests [S1, unofficial].
+
+**Algorithm Steps:**
+1.  **Dispatch Check:** For each thread, check if the thread ID exceeds grid dimensions. If so, return [S1, unofficial].
+2.  **Grid Iteration:** Iterate through all voxels $(x, y, z)$ in row-major order [S2].
+3.  **Skip Empty/Solid:** If the voxel at $(x, y, z)$ is `Empty`, continue to the next $z$ [S2]. If the voxel is already `Solid` (`isSolid > 0.0`), return immediately [S1, unofficial].
+4.  **Find Front Face:** Starting from current $z$, increment `ifront` while `ifront < depth` and `volume[x, y, ifront]` is a `FrontFace` [S2].
+5.  **Check Bounds:** If `ifront >= depth`, break the $z$-loop [S2].
+6.  **Find Back Face:** Set `iback = ifront` [S2]. Increment `iback` while `iback < depth` and `volume[x, y, iback]` is `Empty` [S2]. If `iback >= depth`, break the $z$-loop [S2]. If `volume[x, y, iback]` is a `BackFace`, continue incrementing `iback` while it remains a `BackFace` [S2].
+7.  **Ray Casting:** Calculate `cellSize = _CellHalfSize * 2.0` [S1, unofficial]. Compute the voxel center in world space as `id * cellSize + _CellHalfSize + _BoundsMin`, then transform it to local space using `_WorldToLocalMatrix` [S1, unofficial]. Set `rayDirection = float3(0, 0, 1)` (+Z direction) [S1, unofficial]. Initialize `minDistance = 10000000.0`, `minDistanceNormal = float3(0,0,0)`, and `didIntersect = false` [S1, unofficial]. Iterate through all triangles: load vertices, test intersection, and if `hitDistance < minDistance`, update `minDistance`, `minDistanceNormal`, and set `didIntersect = true` [S1, unofficial].
+8.  **Mark Solid:** If `didIntersect` is true and `dot(minDistanceNormal, rayDirection) > 0` (outward-facing), set `_Voxels[voxelIndex].isSolid = 1.0` [S1, unofficial].
+9.  **Fill Interval:** Fill all voxels from $z2 = ifront$ to $iback - 1$ with `fill = 1` [S2].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Compute Shader Kernel: FillVolume
+# Inputs: voxels (list of Voxel), mesh_vertices (list of float3), mesh_indices (list of int),
+#         triangle_count (int), cell_half_size (float), grid_width (int), grid_height (int), grid_depth (int),
+#         bounds_min (float3), world_to_local_matrix (4x4 matrix)
+
+class Voxel:
+    def __init__(self):
+        self.is_solid = 0.0
+        self.is_front_face = False
+        self.is_back_face = False
+        self.is_empty = True
+        self.fill = 0.0
+        self.position = float3(0, 0, 0)
+
+class Triangle:
+    def __init__(self, a, b, c):
+        self.a = a
+        self.b = b
+        self.c = c
+
+# [G] Standard ray-triangle intersection (e.g., Möller–Trumbore).
+# Returns (hit_distance, hit_normal) or (None, None) if no hit.
+def ray_triangle_intersect(ray_origin, ray_direction, tri):
+    # Implementation omitted: standard graphics primitive [G]
+    pass
+
+def fill_volume(voxels, mesh_vertices, mesh_indices, triangle_count, cell_half_size, 
+                grid_width, grid_height, grid_depth, bounds_min, world_to_local_matrix):
+    cell_size = cell_half_size * 2.0
+    
+    for x in range(grid_width):
+        for y in range(grid_height):
+            for z in range(grid_depth):
+                idx = x + grid_width * (y + grid_height * z)
+                
+                # Skip empty or already solid voxels
+                if voxels[idx].is_empty:
+                    continue
+                if voxels[idx].is_solid > 0.0:
+                    continue
+
+                # Find front face boundary
+                ifront = z
+                while ifront < grid_depth and voxels[x + grid_width * (y + grid_height * ifront)].is_front_face:
+                    ifront += 1
+                if ifront >= grid_depth:
+                    break
+
+                # Find back face boundary
+                iback = ifront
+                while iback < grid_depth and not voxels[x + grid_width * (y + grid_height * iback)].is_empty:
+                    iback += 1
+                if iback >= grid_depth:
+                    break
+                while iback < grid_depth and voxels[x + grid_width * (y + grid_height * iback)].is_back_face:
+                    iback += 1
+
+                # Ray casting from current voxel center
+                voxel_center_local = float3(x, y, z) * cell_size + float3(cell_half_size, cell_half_size, cell_half_size)
+                voxel_center_world = voxel_center_local + bounds_min
+                ray_origin = transform(voxel_center_world, world_to_local_matrix)
+                ray_direction = float3(0, 0, 1)
+
+                min_distance = 10000000.0
+                min_distance_normal = float3(0, 0, 0)
+                did_intersect = False
+
+                for i in range(0, triangle_count * 3, 3):
+                    tri = Triangle(
+                        mesh_vertices[mesh_indices[i]],
+                        mesh_vertices[mesh_indices[i+1]],
+                        mesh_vertices[mesh_indices[i+2]]
+                    )
+                    hit_distance, hit_normal = ray_triangle_intersect(ray_origin, ray_direction, tri)
+                    if hit_distance is not None and hit_distance < min_distance:
+                        min_distance = hit_distance
+                        min_distance_normal = hit_normal
+                        did_intersect = True
+
+                # Mark solid if outward-facing intersection found
+                if did_intersect and dot(min_distance_normal, ray_direction) > 0.0:
+                    voxels[idx].is_solid = 1.0
+
+                # Fill interior interval
+                for z2 in range(ifront, iback):
+                    idx_z2 = x + grid_width * (y + grid_height * z2)
+                    voxels[idx_z2].fill = 1.0
+```
+
+## Subtopics
+
+### [Slice Filling (Simple)](1691-slice-filling-simple.md)
+Slice Filling (Simple) fills a 2D slice of the voxel grid along one axis by scanning from both ends toward the center. It solves the problem of determining interior voxels by marking empty space in a buffer until an existing solid voxel is encountered, at which point the scan in that direction stops. It processes slices independently along the X, Y, or Z axis.
+
+### [Solid Voxelization](1695-solid-voxelization.md)
+Solid Voxelization fills the interior of a mesh with voxels, producing a fully occupied volume rather than just a surface shell. It extends surface voxelization by determining which interior voxels are enclosed by the mesh boundary. Unlike [Ray-Cast Style Voxel Filling](1502-ray-cast-style-voxel-filling.md), which relies on Z-axis scanning to identify front-to-back intervals, Solid Voxelization employs a two-level grid model for GPU implementations or a 3D scan-filling operation for CPU implementations.
+
+## Operating characteristics
+*   **Time Complexity:** $O(N \cdot T)$, where $N$ is the number of voxels and $T$ is the number of triangles. Each voxel potentially tests against all triangles [S1, unofficial].
+*   **Memory Complexity:** $O(N + V + I)$, where $N$ is voxel count, $V$ is vertex count, and $I$ is index count [S1, unofficial].
+*   **Performance:** Performance scales linearly with mesh complexity and grid resolution. High triangle counts cause significant slowdowns due to per-voxel ray-triangle intersection tests [S1, unofficial].
+*   **Strengths:** Simple to implement on GPU using compute shaders; deterministic results for convex or simple concave meshes [S1, unofficial][S2].
+*   **Limitations:** Requires pre-classified surface voxels; sensitive to mesh orientation and self-intersections; slow for high-poly meshes [S1, unofficial][S2].
+*   **When to Use:** Small to medium complexity meshes where rapid implementation and deterministic output are prioritized [S1, unofficial].
+
+## Background
+Originating from real-time GPU-based voxelization techniques, this method is described in tutorials and code samples for Unity compute shaders [S1, unofficial][S2]. It is part of a pipeline that first generates surface voxels and then fills the interior using ray-casting logic [S1, unofficial][S2].
+
+## Sources
+[S1] bzgeb/UnityGPUMeshVoxelizerPart5, https://github.com/bzgeb/UnityGPUMeshVoxelizerPart5, fetched 2026-10-26 (unofficial)
+[S2] Real-Time GPU-Based Voxelizer - GitHub Pages, https://freder.github.io/UnityGraphicsProgrammingBook1/html-translated/vol2/Chapter%201%20_%20Real-Time%20GPU-Based%20Voxelizer.html, fetched 2026-10-27

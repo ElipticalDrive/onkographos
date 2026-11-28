@@ -1,0 +1,287 @@
+A game engine based on Hazel. Contribute to drsnuggles8/OloEngineBase development by creating an account on GitHub.
+
+feat(renderer): add L2 spherical-harmonics IBL diffuse irradiance path by drsnuggles8 · Pull Request #244 · drsnuggles8/OloEngineBase · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+drsnuggles8
+commented
+May 25, 2026
+•
+edited by coderabbitai
+Bot
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Adds an alternative diffuse-irradiance generator that projects the source environment cubemap onto a 9-coefficient L2 spherical-harmonics basis (Ramamoorthi-Hanrahan) and rasterises the irradiance cubemap via a per- fragment SH evaluation shader, instead of the existing Monte-Carlo cubemap convolution. Output is bit-compatible with the convolution path (same RGBA32F irradiance cubemap, same binding) so no PBR shader changes are required — only the generator swaps.
+Toggle: EnvironmentMapComponent gains a m_UseSphericalHarmonics field, exposed in the editor inspector under IBL settings. Flipping it drops the cached EnvironmentMap and forces a regen on the next tick. The IBLCache hashes the flag, so round-tripping between the two paths is cache-fast after the first regen of each. Field round-trips through SceneSerializer (YAML) and SaveGameComponentSerializer (binary).
+Benefit is generation speed (~3–10x faster than 1024-sample Monte-Carlo, visible in the new (X.XX ms, ...) log lines on both generators); visual output is matched within the L2 frequency band.
+Bug fixes along the way:
+Cosine-lobe constants (1, 2/3, 1/4) instead of raw Ramamoorthi (π, 2π/3, π/4) so the SH output matches the convolution path's irradiance/π normalisation. Initial implementation produced ~π× too bright output.
+Inlined SH evaluation directly off the UBO in IrradianceFromSH.glsl. The earlier version copied u_SHCoefficients[i].xyz into a local vec3 array and passed that to evaluateSH(); on driver the local- array copy collapsed channels and produced exact R=G=B output.
+Bumped IBLCache version 2 → 4 to invalidate stale cache files written by the buggy intermediate versions.
+New files:
+OloEditor/assets/shaders/IrradianceFromSH.glsl
+(none on the C++ side — additions live in existing files)
+Changed:
+OloEngine/src/OloEngine/Renderer/EnvironmentMap.{h,cpp}: SH branch in GenerateIrradianceMapWithConfig; CreateFromCubemap / CreateFromEquirectangular gain an IBLConfiguration overload.
+OloEngine/src/OloEngine/Renderer/IBLPrecompute.{h,cpp}: new GenerateIrradianceMapFromSH and ProjectCubemapToSH; chrono-based elapsed-time logging on both irradiance generators.
+OloEngine/src/OloEngine/Renderer/IBLCache.cpp: cache version bumped to 4 with comment chain explaining v2/v3/v4 invalidations.
+OloEngine/src/OloEngine/Renderer/LightProbeBaker.h: ProjectToSH promoted from private to public so IBL can reuse it.
+OloEngine/src/OloEngine/Renderer/Renderer3DLifecycle.cpp: registers the new shader (totalShaders3D 41 → 42).
+OloEngine/src/OloEngine/Renderer/ShaderBindingLayout.h: adds SHCoefficientsUBO struct (9 vec4, 144 B) at UBO_SH_COEFFICIENTS = 35.
+OloEngine/src/OloEngine/Scene/Components.h: m_UseSphericalHarmonics field + operator== entry.
+OloEngine/src/OloEngine/Scene/Scene.cpp: threads IBLConfiguration through env-map lazy load.
+OloEngine/src/OloEngine/Scene/SceneSerializer.cpp: YAML read/write for UseSphericalHarmonics.
+OloEngine/src/OloEngine/SaveGame/SaveGameComponentSerializer.cpp: adds the field to the binary archive.
+OloEditor/src/Panels/SceneHierarchyPanel.cpp: inspector checkbox with explanatory tooltip.
+Tests (all CPU-side, no GPU fixture required):
+SHProjectionTest.ConstantCubemapProjectsToDCTermOnly
+SHProjectionTest.SkyCubemapProducesPositiveZenithIrradiance
+SHProjectionTest.ProjectionScalesLinearlyWithInputIntensity
+SHProjectionTest.RejectsEmptyOrUndersizedInput
+SHProjectionTest.UniformWhiteAfterCosineLobeScalingYieldsUnity (regression test for the π× over-brightness)
+SHProjectionTest.ChannelAsymmetryIsPreservedThroughProjectionAndScaling (regression test for the grayscale-collapse)
+ComponentRoundTrip.EnvironmentMapComponentSurvivesYAMLRoundTrip extended to verify m_UseSphericalHarmonics survives YAML round-trip.
+Closes the // TODO at EnvironmentMap.cpp:215 ("Implement spherical harmonics alternative"). A follow-up that lets PBR shaders sample SH coefficients directly from a UBO (instead of via the rasterised cubemap) would convert the 98 KB irradiance cubemap into a 144 B UBO upload — that's deferred because it touches all 10 PBR shader variants.
+Summary by CodeRabbit
+New Features
+Added "Use Spherical Harmonics (L2)" option for environment map diffuse-irradiance in the Scene Hierarchy inspector.
+Improvements
+Generation method choice now persists in scenes and savegames; switching method forces regeneration and updates caching behavior.
+Enhanced irradiance generation path with faster CPU/GPU timings and improved projection quality.
+Tests
+Added unit tests validating cubemap→SH projection and related irradiance behaviors.
+Documentation
+Updated test catalogue to include new SH projection tests.
+feat(renderer): add L2 spherical-harmonics IBL diffuse irradiance path
+…
+e191a9e
+```
+Adds an alternative diffuse-irradiance generator that projects the source
+environment cubemap onto a 9-coefficient L2 spherical-harmonics basis
+(Ramamoorthi-Hanrahan) and rasterises the irradiance cubemap via a per-
+fragment SH evaluation shader, instead of the existing Monte-Carlo cubemap
+convolution. Output is bit-compatible with the convolution path (same
+RGBA32F irradiance cubemap, same binding) so no PBR shader changes are
+required — only the generator swaps.
+
+Toggle: EnvironmentMapComponent gains a m_UseSphericalHarmonics field,
+exposed in the editor inspector under IBL settings. Flipping it drops
+the cached EnvironmentMap and forces a regen on the next tick. The
+IBLCache hashes the flag, so round-tripping between the two paths is
+cache-fast after the first regen of each. Field round-trips through
+SceneSerializer (YAML) and SaveGameComponentSerializer (binary).
+
+Benefit is generation speed (~3–10x faster than 1024-sample Monte-Carlo,
+visible in the new `(X.XX ms, ...)` log lines on both generators); visual
+output is matched within the L2 frequency band.
+
+Bug fixes along the way:
+- Cosine-lobe constants (1, 2/3, 1/4) instead of raw Ramamoorthi
+  (π, 2π/3, π/4) so the SH output matches the convolution path's
+  irradiance/π normalisation. Initial implementation produced ~π× too
+  bright output.
+- Inlined SH evaluation directly off the UBO in IrradianceFromSH.glsl.
+  The earlier version copied u_SHCoefficients[i].xyz into a local
+  vec3 array and passed that to evaluateSH(); on driver the local-
+  array copy collapsed channels and produced exact R=G=B output.
+- Bumped IBLCache version 2 → 4 to invalidate stale cache files
+  written by the buggy intermediate versions.
+
+New files:
+- OloEditor/assets/shaders/IrradianceFromSH.glsl
+- (none on the C++ side — additions live in existing files)
+
+Changed:
+- OloEngine/src/OloEngine/Renderer/EnvironmentMap.{h,cpp}: SH branch
+  in GenerateIrradianceMapWithConfig; CreateFromCubemap /
+  CreateFromEquirectangular gain an IBLConfiguration overload.
+- OloEngine/src/OloEngine/Renderer/IBLPrecompute.{h,cpp}: new
+  GenerateIrradianceMapFromSH and ProjectCubemapToSH; chrono-based
+  elapsed-time logging on both irradiance generators.
+- OloEngine/src/OloEngine/Renderer/IBLCache.cpp: cache version bumped
+  to 4 with comment chain explaining v2/v3/v4 invalidations.
+- OloEngine/src/OloEngine/Renderer/LightProbeBaker.h: ProjectToSH
+  promoted from private to public so IBL can reuse it.
+- OloEngine/src/OloEngine/Renderer/Renderer3DLifecycle.cpp: registers
+  the new shader (totalShaders3D 41 → 42).
+- OloEngine/src/OloEngine/Renderer/ShaderBindingLayout.h: adds
+  SHCoefficientsUBO struct (9 vec4, 144 B) at UBO_SH_COEFFICIENTS = 35.
+- OloEngine/src/OloEngine/Scene/Components.h: m_UseSphericalHarmonics
+  field + operator== entry.
+- OloEngine/src/OloEngine/Scene/Scene.cpp: threads IBLConfiguration
+  through env-map lazy load.
+- OloEngine/src/OloEngine/Scene/SceneSerializer.cpp: YAML read/write
+  for UseSphericalHarmonics.
+- OloEngine/src/OloEngine/SaveGame/SaveGameComponentSerializer.cpp:
+  adds the field to the binary archive.
+- OloEditor/src/Panels/SceneHierarchyPanel.cpp: inspector checkbox
+  with explanatory tooltip.
+
+Tests (all CPU-side, no GPU fixture required):
+- SHProjectionTest.ConstantCubemapProjectsToDCTermOnly
+- SHProjectionTest.SkyCubemapProducesPositiveZenithIrradiance
+- SHProjectionTest.ProjectionScalesLinearlyWithInputIntensity
+- SHProjectionTest.RejectsEmptyOrUndersizedInput
+- SHProjectionTest.UniformWhiteAfterCosineLobeScalingYieldsUnity
+  (regression test for the π× over-brightness)
+- SHProjectionTest.ChannelAsymmetryIsPreservedThroughProjectionAndScaling
+  (regression test for the grayscale-collapse)
+- ComponentRoundTrip.EnvironmentMapComponentSurvivesYAMLRoundTrip
+  extended to verify m_UseSphericalHarmonics survives YAML round-trip.
+
+Closes the // TODO at EnvironmentMap.cpp:215 ("Implement spherical
+harmonics alternative"). A follow-up that lets PBR shaders sample SH
+coefficients directly from a UBO (instead of via the rasterised
+cubemap) would convert the 98 KB irradiance cubemap into a 144 B UBO
+upload — that's deferred because it touches all 10 PBR shader variants.
+```
+coderabbitai
+Bot
+commented
+May 25, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+No actionable comments were generated in the recent review. 🎉
+ℹ️ Recent review info
+⚙️ Run configuration
+Configuration used: Repository UI
+Review profile: ASSERTIVE
+Plan: Pro
+Run ID: e12031af-0c9f-4337-9adf-564a7359402f
+📥 Commits
+Reviewing files that changed from the base of the PR and between e191a9e and 98409b8.
+📒 Files selected for processing (4)
+.claude/settings.json
+OloEditor/src/Panels/SceneHierarchyPanel.cpp
+OloEngine/src/OloEngine/Renderer/IBLPrecompute.cpp
+OloEngine/src/OloEngine/SaveGame/SaveGameComponentSerializer.cpp
+📝 Walkthrough
+Walkthrough
+Adds an optional spherical-harmonics (L2) irradiance generation path selectable per EnvironmentMap; propagates the choice through component fields, creation APIs, scene/save serializers, editor UI, shader/UBO layout, runtime routing, cache versioning, and tests.
+Changes
+Spherical Harmonics IBL Pipeline
+Layer / File(s)
+Summary
+Component model and persistence
+OloEngine/src/OloEngine/Scene/Components.h, OloEngine/src/OloEngine/SaveGame/SaveGameComponentSerializer.cpp, OloEngine/src/OloEngine/Scene/SceneSerializer.cpp, OloEngine/tests/ComponentRoundTripTest.cpp, OloEditor/src/Panels/SceneHierarchyPanel.cpp
+EnvironmentMapComponent adds m_UseSphericalHarmonics (default false) and documents behavior; operator== now compares the flag; save-game serializer and scene YAML read/write the field with backward compatibility; editor UI exposes a checkbox with tooltip; round-trip test verifies serialization.
+EnvironmentMap factory & IBLPrecompute API
+OloEngine/src/OloEngine/Renderer/EnvironmentMap.h, OloEngine/src/OloEngine/Renderer/EnvironmentMap.cpp, OloEngine/src/OloEngine/Renderer/IBLPrecompute.h, OloEngine/src/OloEngine/Renderer/LightProbeBaker.h
+CreateFromCubemap and CreateFromEquirectangular gain IBLConfiguration overloads (old overloads delegate to defaults). IBLPrecompute declares ProjectCubemapToSH and GenerateIrradianceMapFromSH. LightProbeBaker::ProjectToSH promoted to public.
+Shader UBO infrastructure and registration
+OloEngine/src/OloEngine/Renderer/ShaderBindingLayout.h, OloEngine/src/OloEngine/Renderer/Renderer3DLifecycle.cpp
+Adds UBOStructures::SHCoefficientsUBO (9 vec4 coefficients) with std140 size/asserts; adds UBO_SH_COEFFICIENTS = 35 and recognition in IsKnownUBOBinding; registers IrradianceFromSH.glsl and increments shader warmup count.
+SH projection and irradiance implementation
+OloEngine/src/OloEngine/Renderer/IBLPrecompute.cpp
+Adds GPU-synchronized timing helper; decodes cubemap face bytes to glm::vec3 pixels for multiple image formats; implements ProjectCubemapToSH (mip‑0 projection) and GenerateIrradianceMapFromSH (radiance projection → cosine-lobe scaling → upload to SH UBO → rasterize irradiance cubemap); updates GenerateIrradianceMapAdvanced to log GPU time.
+Control flow routing
+OloEngine/src/OloEngine/Renderer/EnvironmentMap.cpp, OloEngine/src/OloEngine/Scene/Scene.cpp
+GenerateIrradianceMapWithConfig now routes to GenerateIrradianceMapFromSH when config.UseSphericalHarmonics is true, otherwise uses the advanced convolution path. Scene::LoadAndRenderSkybox() builds and passes IBLConfiguration from the component flag into environment-map creation.
+Testing and cache validation
+OloEngine/src/OloEngine/Renderer/IBLCache.cpp, OloEngine/tests/SphericalHarmonicsTest.cpp, docs/testing.md
+Bumps IBL cache version 2 → 4 with notes on SH-related invalidations; adds SHProjectionTest suite validating LightProbeBaker::ProjectToSH across multiple scenarios; updates generated test catalogue.
+Development Environment Configuration
+Layer / File(s)
+Summary
+Claude AI tool configuration
+.claude/settings.json
+Adds top-level $schema, a permissions.allow array with three Bash(...) entries, normalizes the existing hooks.Stop entry (PowerShell invocation), and moves _comment to the file end.
+🚥 Pre-merge checks | ✅ 4
+✅ Passed checks (4 passed)
+Check name
+Status
+Explanation
+Description Check
+✅ Passed
+Check skipped - CodeRabbit’s high-level summary is enabled.
+Title check
+✅ Passed
+The title directly and precisely describes the main feature being added: an L2 spherical-harmonics IBL diffuse irradiance path for the renderer, which is the core objective of this comprehensive PR.
+Linked Issues check
+✅ Passed
+Check skipped because no linked issues were found for this pull request.
+Out of Scope Changes check
+✅ Passed
+Check skipped because no linked issues were found for this pull request.
+✏️ Tip: You can configure your own custom pre-merge checks in the settings.
+✨ Finishing Touches
+🧪 Generate unit tests (beta)
+Create PR with unit tests
+Commit unit tests in branch feature/sh-ibl-irradiance
+Comment @coderabbitai help to get the list of available commands and usage tips.
+This comment was marked as outdated.
+Sign in to view
+Sorry, something went wrong.
+Uh oh!
+There was an error while loading. Please reload this page.
+coderabbit fixes
+98409b8
+Hide details
+View details
+drsnuggles8
+merged commit a58f172
+into
+master
+May 25, 2026
+10 of 11 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+drsnuggles8
+deleted the
+feature/sh-ibl-irradiance
+branch
+May 25, 2026 11:38
+sonarqubecloud
+Bot
+commented
+May 25, 2026
+Copy link
+Copy Markdown
+Quality Gate passed
+Issues
+18 New issues
+0 Accepted issues
+Measures
+0 Security Hotspots
+0.0% Coverage on New Code
+0.0% Duplication on New Code
+See analysis details on SonarQube Cloud
+This was referenced May 28, 2026
+Untangle Renderer3D test coupling so full-pipeline screenshot tests can run in CI
+#258
+Closed
+Shader performance review (general audit)
+#262
+Closed
+This was referenced Jul 11, 2026
+Renderer: realtime dynamic global illumination (DDGI probe volumes)
+#632
+Closed
+World: atmosphere & sky — weather director, astronomical time-of-day, volumetric clouds
+#633
+Closed
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

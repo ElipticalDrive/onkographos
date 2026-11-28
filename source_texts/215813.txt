@@ -1,0 +1,156 @@
+## Observed failure
+
+`mesh.hex.octree` fails on 6 of the 23 corpus parts. Corpus settings: size = 1/25 of the bounding-box diagonal, default `max_depth` 2, cap 500 000 cells.
+
+| part | result |
+|---|---|
+| i-beam, cantilever-i-beam | `the core's boundary has components of genus [0, 0], the part [0]: the part has walls 2.000 thick, thinner than 3 cells of the deepest level (0.924); use a smaller size, more levels, or a structured (swept) hex mesh` |
+| thin-wall-enclosure | same message, walls 1.000 thick, deepest level 0.479 |
+| bent-tube | same message, walls 0.984 thick, deepest level 0.536 |
+| thin-ribs | `limit reached: the grid needs more than 500000 cells` |
+| spline-vase | `limit reached: the grid needs more than 500000 cells` |
+| pinhole-block | `octree hex meshing failed after 2 builds: the feature corner at [9.76, 10.18, 10.53] has no vertex; refining for another build needs more than 250000 grid cells` |
+
+The parts that do mesh are refined far more than their geometry needs. The thickness rule (3 cells across every wall) drives the whole 5 mm plate of `analytic-plate-hole` to the finest level everywhere: 163 664 hexes from a requested size of about 8.9 mm. The filleted bracket ends up at a uniform fine size the same way.
+
+![The 200 × 100 × 5 plate with a 20 mm hole, octree all-hex at the corpus size (about 8.9 mm): the thickness rule refines the whole plate to the deepest level, 163 664 hexes](https://raw.githubusercontent.com/jyviko/fieldcraft/issue-media/issue-85-plate-octree.png)
+
+![The 8 mm filleted L-bracket, octree all-hex: 30 676 hexes, uniformly at the finest level](https://raw.githubusercontent.com/jyviko/fieldcraft/issue-media/issue-85-bracket-octree.png)
+
+## Reproduction
+
+Commit `8caa0d1` (main):
+
+```sh
+cargo xtask corpus --part i-beam --no-write
+cargo xtask corpus --part thin-wall-enclosure --no-write
+cargo xtask corpus --part bent-tube --no-write
+cargo xtask corpus --part thin-ribs --no-write
+cargo xtask corpus --part spline-vase --no-write
+cargo xtask corpus --part pinhole-block --no-write
+```
+
+Or from a script, with a part's design written by the corpus tool:
+
+```sh
+cargo run --release -p fieldcraft-testkit --bin corpus -- --part i-beam --design i-beam.solidcraft
+cat > octree.json <<'EOF'
+[{"command": "geometry.open", "params": {"path": "i-beam.solidcraft"}},
+ {"command": "mesh.hex.octree", "params": {"max_depth": 2, "max_elements": 2000000}}]
+EOF
+cargo run --release -p fieldcraft-cli -- run octree.json
+```
+
+## Evidence
+
+From the runs above (octree column, wall clock on an Apple M-series laptop):
+
+| part | octree result | octree ms |
+|---|---|---|
+| i-beam | thin-wall error, first build | 1 402 |
+| thin-wall-enclosure | thin-wall error, first build | 2 959 |
+| bent-tube | thin-wall error, first build | 605 |
+| thin-ribs | 500 000-cell cap | 1 913 |
+| spline-vase | 500 000-cell cap | 5 489 |
+| pinhole-block | feature corner without a vertex, 2 builds, then the 250 000-cell retry cap | 2 065 |
+
+**One more level makes thin walls mesh, at a cost far out of proportion.** Same script, `max_depth` 3, cap 2 000 000:
+
+| part | `max_depth` 2 | `max_depth` 3 | for comparison: structured sweep (`mesh.hex.generate`) |
+|---|---|---|---|
+| i-beam | thin-wall error (1.6 s) | **713 728 hexes**, 673 816 grid cells, min scaled Jacobian < 0.001, 305 s | 336 hexes |
+| bent-tube | thin-wall error (0.7 s) | **1 183 992 hexes**, 1 533 832 grid cells, min SJ 0.406, 332 s | 192 hexes |
+| thin-wall-enclosure | thin-wall error (1.7 s) | `limit reached: the grid needs more than 2000000 cells` | 894 hexes |
+
+## Expected behaviour
+
+- **Depth is chosen up front.** The mesher computes the refinement depth a part needs from its thinnest wall and narrowest patch before it builds anything. It does not fail with "use more levels", and it does not discover the need through rebuilds. When the depth or the cell count that geometry needs is over the caps, it fails at once, naming the wall thickness, the depth it would need and its estimated cell count.
+- **Concave refined regions get transition templates** instead of being split out to their orthogonal hull. Curvature can then refine more than one level (`curvature_levels` is 1 today for this reason). Thin and curved parts get graded meshes: fine where the geometry is, coarse inside.
+- **References:**
+  - R. Schneiders, *Algorithms for quadrilateral and hexahedral mesh generation*, VKI lecture notes 2000, §5 (the modified edge rule);
+  - Y. Ito, A. M. Shih, B. K. Soni, *Octree-based reasonable-quality hexahedral mesh generation using a new set of refinement templates*, IJNME 77(13):1809–1833, 2009 (templates for concave edges);
+  - M. Livesu, L. Pitzalis, G. Cherchi, *Optimal dual schemes for adaptive grid based hexmeshing*, ACM TOG 41(2):15, 2022, §4.2 (concave transitions) and §6 (weakly balanced grids).
+
+## Investigation
+
+- **Thin walls fail on the first build, without retries.** The thickness rule splits a cell where a wall is thinner than `thickness_cells` (3) cells ([`needs_split`, crates/mesh/src/octree/mod.rs#L431-L438](https://github.com/jyviko/fieldcraft/blob/develop/crates/mesh/src/octree/mod.rs#L431-L438)). When the deepest level still cannot cross a wall, it records the thinnest such wall in `too_thin`. If the core's topology then does not match the part, `build` returns that as a hard error ([#L528-L539](https://github.com/jyviko/fieldcraft/blob/develop/crates/mesh/src/octree/mod.rs#L528-L539)), so the retry loop ([#L253-L276](https://github.com/jyviko/fieldcraft/blob/develop/crates/mesh/src/octree/mod.rs#L253-L276)) never runs for it. This issue previously said thin walls "retry up to 4 rebuilds before failing". They do not: they fail at once, and only pinhole-block retries. The depth needed is computable before building: d = ⌈log₃(thickness_cells · h / t_min)⌉ for root size h, from the per-triangle thicknesses that [`triangle_thickness` (#L346)](https://github.com/jyviko/fieldcraft/blob/develop/crates/mesh/src/octree/mod.rs#L346) already computes.
+- **Concave regions are closed by refinement.** After balancing, [`Tree::close` (grid.rs#L204-L238)](https://github.com/jyviko/fieldcraft/blob/develop/crates/mesh/src/octree/grid.rs#L204-L238) splits every leaf whose marked-corner pattern has no template. [`templates::classify` (templates.rs#L91-L92)](https://github.com/jyviko/fieldcraft/blob/develop/crates/mesh/src/octree/templates.rs#L91-L92) accepts only none / corner / edge / face / full. A leaf at a concave corner of a finer region gets an unsupported pattern, is split, and the split propagates. The module docs state this limit and the upgrade path ([mod.rs#L48-L62](https://github.com/jyviko/fieldcraft/blob/develop/crates/mesh/src/octree/mod.rs#L48-L62)). This is also why curvature refinement is capped at `curvature_levels` = 1 ([#L428-L430](https://github.com/jyviko/fieldcraft/blob/develop/crates/mesh/src/octree/mod.rs#L428-L430)).
+- **Not yet measured: how much of the count comes from closure and how much from the thickness rule itself.** An isotropic octree must put 3 cells across a wall over the wall's whole area, and concave templates will not change that. Measure it first: count leaves split by `needs_split` and leaves added by `close`, per level, on i-beam (depth 3), bent-tube (depth 3), filleted-bracket and spline-vase. This decides how much each half of the fix buys.
+- **pinhole-block has a different cause.** Its failure comes from the feature map ([`map_features`, map.rs#L257](https://github.com/jyviko/fieldcraft/blob/develop/crates/mesh/src/octree/map.rs#L257)): a feature corner of a 0.6 mm pinhole gets no core-boundary vertex. Up-front depth from the narrowest patch (`pt.width < 2e` in `needs_split`) should reach the needed level on the first build. If it still fails, split it into its own issue.
+
+## Where to look
+
+- [crates/mesh/src/octree/mod.rs#L1-L67](https://github.com/jyviko/fieldcraft/blob/develop/crates/mesh/src/octree/mod.rs#L1-L67): the pipeline, why 3-refinement templates, and the convex limit.
+- [crates/mesh/src/octree/mod.rs#L96-L138](https://github.com/jyviko/fieldcraft/blob/develop/crates/mesh/src/octree/mod.rs#L99-L138): `OctreeOptions` and the defaults (`max_depth` 2, `curvature_levels` 1, `thickness_cells` 3, `attempts` 4).
+- [crates/mesh/src/octree/mod.rs#L214-L279](https://github.com/jyviko/fieldcraft/blob/develop/crates/mesh/src/octree/mod.rs#L214-L279): `octree_hex_mesh`, the root size and the retry loop (`RETRY_GROWTH`, `RETRY_MIN_CELLS`).
+- [crates/mesh/src/octree/mod.rs#L411-L446](https://github.com/jyviko/fieldcraft/blob/develop/crates/mesh/src/octree/mod.rs#L411-L448): `needs_split`, the size, curvature, thickness and narrow-patch rules.
+- [crates/mesh/src/octree/mod.rs#L481-L500](https://github.com/jyviko/fieldcraft/blob/develop/crates/mesh/src/octree/mod.rs#L481-L500): `tree`, which refines level by level, then hints, then closure.
+- [crates/mesh/src/octree/grid.rs](https://github.com/jyviko/fieldcraft/blob/develop/crates/mesh/src/octree/grid.rs): the 27-tree, strong balance (`balance_from`), `marks` and `close`, plus the random-tree conformity test.
+- [crates/mesh/src/octree/templates.rs](https://github.com/jyviko/fieldcraft/blob/develop/crates/mesh/src/octree/templates.rs): the five node-marking templates, in sixths of a leaf on the integer lattice, with exhaustive tests of faces, volume and validity.
+- [crates/engine/src/cmd/octree.rs](https://github.com/jyviko/fieldcraft/blob/develop/crates/engine/src/cmd/octree.rs): `mesh.hex.octree` (`max_depth` 0..=5).
+- [crates/testkit/src/runner.rs#L229-L252](https://github.com/jyviko/fieldcraft/blob/develop/crates/testkit/src/runner.rs#L229-L252): the corpus octree column (size, 500 000 cap).
+- [docs/meshing/literature.md](https://github.com/jyviko/fieldcraft/blob/develop/docs/meshing/literature.md): section B1. B1.5 Livesu 2022 (dual schemes, §4.2 concave), B1.6 Pitzalis 2021, B1.7 Schneiders (the modified edge rule), B1.8 Ito–Shih–Soni 2009, B1.9 HybridOctree_Hex, B1.10 MCHex. The "Implemented" note records why the dual schemes were not adopted.
+- [docs/meshing/corpus.md](https://github.com/jyviko/fieldcraft/blob/develop/docs/meshing/corpus.md): the octree columns.
+
+## Approach
+
+Two parts, in this order.
+
+**1. Up-front depth and budget.**
+
+- Before building the tree, compute the needed depth: the smallest level whose edge e satisfies t_min ≥ `thickness_cells` · e for the thinnest wall, and 2e ≤ the narrowest patch width. Clamp it to the option's cap. Treat `max_depth` as a cap rather than a fixed depth.
+- Estimate the leaf count cheaply: the wall area times the cells per area at each level, or a dry run of `needs_split` over the levels without meshing. If it is over `max_elements`, fail at once with the numbers.
+- Keep the retry loop for what is genuinely local (feature map, untangling), not for depth.
+
+**2. Concave transitions.** Pick one of these and justify the choice in the module docs and the literature notes:
+
+- (a) **Schneiders' modified edge rule** (VKI notes §5): every edge with a marked end is split in three, with buffer layers in the face templates. This removes the odd-parity patterns (a hexahedron with seven marked corners has 51 boundary quads, which no hex mesh fills, by Mitchell's parity condition). Concave refined regions then close without hull growth. Ito, Shih & Soni 2009 give templates for concave edges, but that paper has not been obtained yet (B1.8). If you use it, get it and cite its sections.
+- (b) **The dual schemes of Livesu, Pitzalis & Cherchi 2022**, which are complete for balanced grids, concave transitions included, and also allow weakly balanced grids (§6). The literature notes record why they were not adopted: the reference pipeline's ILP and retried heuristics. A contributor who takes this route must install the schemes deterministically, without an ILP solver. cinolib (MIT) may be read; its TetGen/Triangle wrappers may not.
+
+Either way:
+
+- keep the integer-lattice construction, so shared vertices merge exactly;
+- extend the exhaustive template tests (every mask: faces conform, volume exact, every hex valid) and the random-tree conformity test in grid.rs;
+- then raise `curvature_levels` toward `max_depth` and re-measure.
+
+## Acceptance criteria
+
+- [ ] The needed depth is computed up front. A part whose walls need more depth than the cap fails on the first build with a message giving the thinnest wall, the depth needed and the estimated cells. It never "fails after N builds" for thickness.
+- [ ] Transition templates (or dual schemes) cover concave refined regions. The exhaustive template test covers every new pattern, and random balanced trees mesh conforming and valid (extend `random_trees_close_into_conforming_valid_meshes`).
+- [ ] The PR reports leaves from the refinement criteria versus leaves added by closure, before and after, for filleted-bracket, spline-vase, analytic-sphere, i-beam and bent-tube.
+- [ ] With default options at the corpus size and cap (500 000): i-beam, cantilever-i-beam, bent-tube and spline-vase mesh. thin-wall-enclosure and thin-ribs either mesh, or fail at once with the up-front budget message. Every part that meshes today still meshes, with min scaled Jacobian not lower than today's (docs/meshing/corpus.md).
+- [ ] Element counts fall on curved parts that already mesh (analytic-sphere, analytic-torus, filleted-bracket, rounded-box, loft-transition), with the volume error not worse than today.
+- [ ] The oracle case `octree-filleted-bracket` passes its reference tolerance. If its mesh changes, the fixture is re-blessed in the PR with the reason (docs/verification.md).
+- [ ] Every loop stays capped (closure rounds, cells, attempts), the result is deterministic (same mesh on repeated runs), and hostile options (`max_depth` 5 on a large part, `max_elements` 1) return errors and never panic.
+- [ ] `docs/meshing/corpus.md` is regenerated, and the module docs and `docs/meshing/literature.md` are updated: what was adopted and the new limits.
+
+## How to test
+
+```sh
+cargo test -p fieldcraft-mesh octree
+cargo test -p fieldcraft-engine octree
+cargo xtask corpus --part i-beam --no-write            # one part while iterating
+cargo xtask corpus --part spline-vase --no-write
+cargo xtask corpus                                     # all parts; rewrites docs/meshing/corpus.md
+cargo xtask oracle --case octree-filleted-bracket
+```
+
+Unit tests go in `crates/mesh/src/octree/tests.rs` and the `grid.rs`/`templates.rs` test modules:
+
+- an L-shaped refined region (a concave corner) closes without splitting outside its bounding box;
+- a slab of thickness t gets exactly the computed depth;
+- the budget error is immediate.
+
+## Getting started
+
+```sh
+git clone https://github.com/jyviko/fieldcraft && cd fieldcraft
+cargo build --release -p fieldcraft-testkit
+cargo test -p fieldcraft-mesh
+```
+
+The corpus builds its parts with SolidCraft (AGENTS.md, "Test geometry is our own"). Read [AGENTS.md](https://github.com/jyviko/fieldcraft/blob/develop/AGENTS.md) (exact predicates, determinism, bounded loops) first.
+
+---
+
+**Claiming and clean-room rules.** Comment on this issue to claim it. The maintainer assigns it and adds **claimed** ([CONTRIBUTING.md](https://github.com/jyviko/fieldcraft/blob/develop/CONTRIBUTING.md)). Open a draft PR early with `Closes #85`. Work from the papers cited here only. Permissive code noted in docs/meshing/literature.md (cinolib MIT, HybridOctree_Hex BSD-3) may be read, and anything adapted goes in ATTRIBUTION.md. Never read GPL-family code (CGAL, Gmsh, Netgen, TetGen, …) or code without a licence (Gao et al.'s repository). Never use meshes or results from commercial meshing products.

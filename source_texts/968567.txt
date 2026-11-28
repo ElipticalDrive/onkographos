@@ -1,0 +1,1039 @@
+PHP extension for GPU rendering (OpenGL, Vulkan, Metal), audio, video recording, streaming & input - feat(shader): geometry / tessellation stages, layered rendering, HLSL stage overrides by hmennen90 · Pull Request #23 · phpolygon/php-vio
+
+feat(shader): geometry / tessellation stages, layered rendering, HLSL stage overrides by hmennen90 · Pull Request #23 · phpolygon/php-vio · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+hmennen90
+commented
+Sep 9, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Summary
+This PR adds geometry and tessellation stages to vio_shader, then builds layered rendering on top of them. Layered rendering gives single-pass cube shadows and cascaded shadow maps; it covers phases 1–4 of GEOMETRY-STAGES-PLAN.md.
+It runs on OpenGL, D3D11, D3D12, Vulkan and Metal. Metal has no geometry stage, so layers and viewports are picked from the vertex stage there.
+On the way, the PR closes the remaining backend gaps:
+Vulkan: texture updates, storage images and async compute.
+Metal: stencil, layered targets and multiple viewports.
+D3D: gl_in[].gl_Position / gl_InvocationID in GLSL geometry stages.
+Geometry / tessellation stages
+API:
+vio_shader() takes 'geometry', and 'tess_control' + 'tess_eval' as a pair.
+vio_pipeline() gets 'patch_vertices' and VIO_PATCHES. Tessellation stages imply it; without them it is refused.
+vio_shader_reflect() reports the extra stages.
+Refusal: A stage is refused (warning + false) when the backend reports VIO_FEATURE_GEOMETRY / _TESSELLATION as 0. Audit gate 099 is unchanged.
+OpenGL: All stages go into one program. The program-binary cache key covers all five stages.
+Vulkan: Native SPIR-V stages.
+Varyings are matched along VS → TCS → TES → GS → FS.
+The clip-space fixup goes only into the last stage that writes the position (GS: before every EmitVertex()).
+Extra stages keep their default uniform blocks on dynamic bindings 30–32; pipelines use a patch list plus tessellation state.
+D3D11/D3D12: gs/hs/ds_5_x are built from SPIR-V and compiled through the cached path (DXIL under shader_model => 6).
+The flags come from a SPIRV-Cross + FXC probe.
+Geometry works. Hull/domain do not: SPIRV-Cross has no HLSL tessellation backend, so on D3D tessellation goes through the HLSL override (phase 3).
+Fix: SPIRV-Cross placed the GS depth remap after every Append. GS output therefore kept GL depth, and everything with z < 0 was clipped. Each appended vertex is now converted.
+New: SPIRV-Cross's HLSL backend rejects gl_in[i].gl_Position and gl_InvocationID. vio rewrites the module before transpiling: the position becomes an SV_Position input, and gl_InvocationID comes from SV_GSInstanceID + [instance(N)]. Plain GLSL geometry shaders and GS instancing now work on D3D without an override, so VIO_FEATURE_GEOMETRY_INSTANCING is 1 there.
+Metal tessellation (phase 4):
+The vertex stage runs as a compute kernel, one thread per vertex × instance.
+The control stage runs as a kernel with one threadgroup per patch. It writes the control points, patch constants and half-precision tessellation factors.
+The evaluation stage becomes a [[patch]] vertex function after drawPatches.
+The kernels run in a command buffer committed ahead of the frame. After an async dispatch in the same frame they go into the frame buffer instead, and the draw's textures and viewports are restored.
+Indexed draws are de-indexed on the CPU. vio_draw_indirect reads the records on the CPU, and vio_draw_instanced_from_buffer binds the SSBO in the vertex kernel.
+Not supported: isolines and point_mode.
+The SPIR-V → MSL transpiler moved into the plain-C header vio_metal_msl.h, so its output can be checked against SPIRV-Cross without a Mac.
+Layered rendering (phase 1)
+1a – array targets: vio_render_target(['layers' => N]) creates 2D array targets (colour or depth_only); 'cube' + 'depth_only' creates a depth cube.
+Each layer can be bound, read back, and sampled through sampler2DArray / vio_render_target_cubemap.
+Flag: VIO_FEATURE_RENDER_TARGET_LAYERED.
+1b/1c – all layers: vio_bind_render_target($ctx, $rt, VIO_RT_ALL_LAYERS) binds every layer at once.
+gl_Layer from the GS, or from the VS with VIO_FEATURE_VERTEX_LAYER, picks the destination.
+vio_clear clears all layers.
+Flags: VIO_FEATURE_LAYERED_RENDER / _VERTEX_LAYER.
+1d – viewports: vio_viewports($ctx, [[x, y, w, h], …]) sets up to 16 viewports, picked with gl_ViewportIndex.
+Flag: VIO_FEATURE_MULTI_VIEWPORT.
+Vulkan sets all of a pipeline's max_viewports viewports before each draw.
+Metal:
+2DArray colour + depth, Depth32Float cubes; colour cubes now get a cube depth.
+renderTargetArrayLength plus [[render_target_array_index]] / [[viewport_array_index]] from the vertex function, and setViewports:count:.
+Requires the Mac2 / Apple5 GPU family.
+vio adds the #extension that SPIRV-Cross omits for gl_ViewportIndex in the VS.
+Phase 2 – GS instancing and adjacency
+GS instancing: VIO_FEATURE_GEOMETRY_INSTANCING covers layout(invocations = N) on OpenGL (4.0 / ARB_gpu_shader5), Vulkan, and now D3D (see above).
+Adjacency topologies: VIO_LINES_ADJACENCY / _LINE_STRIP_ / VIO_TRIANGLES_ADJACENCY / _TRIANGLE_STRIP_ on every backend with a geometry stage.
+Adjacency index buffer: vio_mesh(['adjacency' => true]) builds it.
+Edges are matched by vertex position, so meshes that duplicate vertices per face still find their neighbours.
+An open edge repeats the triangle's own opposite vertex.
+Phase 3 – HLSL stage overrides (D3D tessellation)
+vio_shader(['hlsl' => ['tess_control' | 'tess_eval' | 'geometry' => src]]): D3D11/D3D12 compile the given HLSL instead of the transpiled GLSL stage. New flag: VIO_FEATURE_HLSL_STAGE_OVERRIDE.
+The GLSL stage stays required: GL, Vulkan and Metal use it, and it defines the uniform layout. D3DReflect warns when the HLSL register(b0) cbuffer does not match those uniforms.
+The override also compiles under shader model 6 (DXIL).
+Backend gaps closed
+Vulkan:
+vio_texture_update: staging buffer + transient command buffer into level 0.
+Storage images: the compute descriptor layout comes from the kernel's reflection, and 'storage' => true images live in GENERAL.
+['async' => true]: the dispatch is recorded into the frame command buffer; the pass is closed, fenced by barriers, and resumed with LOAD. Every dispatch gets its own descriptor set and a params snapshot. vio_compute_wait inside a frame submits the frame so far and reopens it.
+Vulkan render targets: re-binding a target used to clear it (loadOp CLEAR, depth DONT_CARE). Passes now LOAD/STORE with steady image layouts, as on GL/D3D.
+Metal stencil: the swapchain and colour targets use Depth32Float_Stencil8. Pipelines build a stencil state plus a stencil-less one for targets without the plane.
+OpenGL comparison sampling: sampler*Shadow was undefined (no GL_TEXTURE_COMPARE_MODE) and returned the raw depth. A comparison sampler object (LEQUAL, linear) is now bound per draw. D3D11 depth cubes and Metal cubes get one for samplerCubeShadow.
+OpenGL batch: vio_submit_batch never bound a record's pipeline (it compared backend_pipeline, which is always NULL there).
+OpenGL indirect: vio_draw_indirect now uses the pipeline topology instead of GL_TRIANGLES.
+CI
+macOS runs brew update before installing and stops if spirv-cross is older than 1.4.363.0. The runner image had installed 1.4.357.0 from stale metadata.
+Test 094 runs again (the MSL struct-array stride fix, MSL: Fix layout of struct arrays whose ArrayStride exceeds the packed struct size KhronosGroup/SPIRV-Cross#2678); the skip env and deps-patches/ are removed.
+Test 143 joins the WARP list.
+Test plan
+109–110: 109 geometry (now including a point at z = −0.5) and 110 tessellation; Vulkan added to the backend loop. 110 and 140 now also run on Metal (macOS CI).
+135: GS/tess pipelines through batch / instanced / uint16 / indirect / vertex-storage draws, in HDR / MRT / MSAA / stencil targets, and through the shader cache (fails with the old cache keys).
+136–142:
+136 layered targets, 137 layered rendering, 138 multiple viewports
+139 GS instancing + adjacency, 140 HLSL stage overrides (also on D3D12 with shader_model => 6)
+141 comparison samplers, 142 render-target rebind keeps content
+136–138, 141 and 142 also run on Metal.
+143 (new): GLSL geometry stage with gl_in[0].gl_Position and gl_InvocationID. Passes on OpenGL, D3D11, D3D12 and Vulkan.
+096 / 098 storage images + async compute: now iterate D3D11, D3D12 and Vulkan as well. All four Windows backends report OK; Vulkan stays clean under validation for 093/096/098/126.
+Local, RTX 2080: OpenGL, D3D11, D3D12 and Vulkan pass, with the Vulkan validation and D3D11/D3D12 debug layers clean. Full suite on Windows: 145 passed, 0 failed, 5 skipped (Metal ×4, macOS Vulkan).
+macOS CI (Metal): 110, 113, 136, 137, 138, 140, 141 and 142 pass.
+🤖 Generated with Claude Code
+hmennen90
+and others
+added 8 commits
+October 3, 2026 00:05
+feat(shader): geometry and tessellation stages for vio_shader
+…
+c01044c
+```
+vio_shader() takes three optional stages next to vertex/fragment:
+'geometry', and 'tess_control' + 'tess_eval' (always a pair). vio_pipeline()
+gains 'patch_vertices' (1..32, default 3) and the VIO_PATCHES topology; a
+pipeline whose shader has tessellation stages always draws patches.
+vio_shader_reflect() reports the extra stages under the same keys.
+
+The stage is refused up front (warning + false) when the backend reports
+VIO_FEATURE_GEOMETRY / VIO_FEATURE_TESSELLATION as 0, so no backend ever sees
+a stage it cannot compile and php_vio.c grows no backend branch (audit gate
+099 unchanged).
+
+OpenGL: all stages link into one program (vio_opengl_compile_program). Mesh
+draws now use the bound pipeline's topology instead of a hard-coded
+GL_TRIANGLES, so VIO_POINTS / VIO_LINES / VIO_PATCHES take effect on GL too
+(the topology is stored as vio_topology, not GLenum: GL_POINTS is 0). A
+uniform declared in several stages is emitted by SPIRV-Cross as one struct
+uniform per stage (_19.u_mvp, _27.u_mvp); set_uniform now writes every match.
+
+D3D11/D3D12: SPIR-V -> HLSL gs/hs/ds_5_0|5_1. The GL->D3D depth fixup is
+applied only in the last position-writing stage (vio_spirv_to_hlsl_ex),
+otherwise SPIRV-Cross converts once per stage. Each extra stage has its own
+constant block (vio_shader_stage_cb) bound through the new vtable slot
+bind_stage_constants (D3D11: GS/HS/DSSetConstantBuffers b0; D3D12: a root
+CBV slice from the per-frame ring). The D3D12 root signature grows by
+per-visibility mirrors of the CBV, SRV table and sampler table for
+GEOMETRY/HULL/DOMAIN (VIO_D3D12_RP_*), re-pointed at flush time; D3D11
+mirrors texture binds into the extra stages. bind_pipeline explicitly
+unbinds absent stages so a previous pipeline's GS cannot linger.
+
+The D3D flags are honest: they are 1 only when the linked SPIRV-Cross emits
+HLSL for the stage AND FXC accepts it (vio_hlsl_stage_supported +
+d3d1x_stage_supported, probed once per process; VIO_DEBUG_STAGE_PROBE=1
+prints the reason). SPIRV-Cross main (2026-09) emits geometry shaders only
+when input positions come from user varyings - gl_in[].gl_Position leaves an
+unresolved gl_in behind - and has no hull/domain emission at all, so on
+Direct3D geometry works with the varying pattern (verified on D3D11/D3D12
+WARP against a SPIRV-Cross main build) and tessellation reports 0. The
+Vulkan SDK 1.3.296 on the Windows CI predates both, so tests 109/110 skip on
+D3D there; tests/core/074 no longer pins these two flags for D3D.
+
+Tests: tests/render3d/109 (point -> quad via GS, GS uniform, unbind
+regression) and 110 (quad patch -> disc whose edge count follows the TCS
+uniform u_level) iterate over opengl/d3d11/d3d12/metal. Gallery scenes
+geometry_shader and tessellation added to examples/gallery.php.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01V7gA3BNA7Vze5XjSPYrSdd
+```
+feat(vulkan): geometry and tessellation stages
+…
+1362f9c
+```
+The Vulkan 3D pipeline accepts the optional vio_shader stages that OpenGL
+and D3D already had. Vulkan consumes the SPIR-V natively, so it has none of
+the SPIRV-Cross HLSL limits: geometry shaders may read gl_in[].gl_Position
+and tessellation works. VIO_FEATURE_GEOMETRY / TESSELLATION follow the
+device features geometryShader / tessellationShader, which are now enabled
+at device creation (plus shaderTessellationAndGeometryPointSize when
+available).
+
+- Shader round trip: every stage goes SPIR-V -> Vulkan GLSL -> SPIR-V in
+  pipeline order VS -> TCS -> TES -> GS -> FS. Varying locations are matched
+  by name along the whole chain instead of only VS -> FS.
+- The clip-space fixup (y = -y, z = (z + w) / 2) moves to the last stage that
+  writes gl_Position: in front of every EmitVertex() in a geometry shader,
+  at the end of main in a tessellation-evaluation shader, otherwise in the
+  vertex shader as before.
+- The default uniform blocks of the extra stages get dynamic bindings 30..32
+  in the per-frame upload ring; the new bind_stage_constants slot uploads
+  them like push_cbuffers does for VS / FS.
+- Pipelines carry all stages, use PATCH_LIST plus a tessellation state
+  (patch_vertices) when tessellation stages are present, and keep the stages
+  in every render-pass / format / sample-count variant.
+- Samplers that only an extra stage declares are appended to the GL-unit map
+  in the same order php_vio.c merges them.
+- Shader-cache keys of each stage hash the SPIR-V of all earlier stages and
+  whether the stage carries the fixup: the same vertex SPIR-V compiles
+  differently with and without a geometry stage.
+
+Tests 109 and 110 now iterate over Vulkan as well; 074 no longer pins the two
+device-dependent flags for Vulkan. Both tests pass on an RTX 2080 with the
+Khronos validation layer enabled and no messages.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+fix(d3d): compile geometry / hull / domain stages through the cached …
+…
+e7b2e5c
+```
+…path
+
+The extra stages called D3DCompile directly, so they bypassed the on-disk
+DXBC cache that VS / PS use since the shader-cache feature. On D3D12 with
+shader_model => 6 it was worse: VS and PS became DXIL through DXC while the
+geometry stage stayed FXC DXBC, and a PSO cannot mix the two. Both backends
+now route the stages through d3d11_compile_cached / d3d12_compile_cached,
+which pick the cache and, on D3D12, the DXC profile.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+fix(batch): bind record pipelines on OpenGL in vio_submit_batch
+…
+92b9fa6
+```
+vio_submit_batch skipped a record's pipeline when pipe->backend_pipeline
+equalled the last one it bound, starting from NULL. OpenGL has no backend
+pipeline object, so backend_pipeline is always NULL there and no record
+pipeline was ever bound: a batch only worked when the caller had bound the
+right pipeline before it. The change check now compares the VioPipeline
+itself.
+
+Found by test 135, which submits geometry / tessellation pipelines through
+a batch without binding them first.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+fix(shader): patch topology on indirect draws, refuse patches without…
+…
+6b13e9a
+```
+… tessellation
+
+OpenGL's vio_draw_indirect still drew GL_TRIANGLES; it now uses the bound
+pipeline's draw mode like the other mesh draws, so tessellation and
+geometry pipelines work through indirect draws too.
+
+vio_pipeline refuses VIO_PATCHES when the shader has no tessellation stages.
+Every API rejects that combination (GL_INVALID_OPERATION at draw time,
+pipeline creation failure on Vulkan / D3D12); refusing it up front gives one
+clear warning instead of a backend-specific failure later.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+test(render3d): geometry and tessellation stages on every draw path
+…
+43e5171
+```
+Test 135 covers what arrived after the stage feature was first written:
+- draw paths: vio_submit_batch, vio_draw_instanced, uint16 index buffers,
+  vio_draw_indirect, vio_draw_instanced_from_buffer
+- pipeline variants: HDR, two-attachment MRT, 4x MSAA and stencil targets
+  (D3D12 PSO variants, Vulkan render-pass variants)
+- the shader cache: shader A draws a quad from triangles, shader B expands a
+  point into the same quad in a geometry stage with the SAME vertex and
+  fragment source. Both must produce the same image in either order, from a
+  cold and from a warm cache. With the previous keys this fails on OpenGL
+  (A loads B's program binary) and on Vulkan (mirrored image, the vertex
+  stage was cached with or without the clip-space fixup).
+- VIO_PATCHES without tessellation stages is refused.
+
+Added to the Windows WARP list together with 109 and 110.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+docs: geometry and tessellation stages in CLAUDE.md
+…
+65adc03
+```
+Feature-matrix rows for both stages (Vulkan native, D3D through the
+SPIRV-Cross probe), the Vulkan stage chain and cache-key rules, the API /
+gate / per-backend notes, the API example, tests 109, 110 and 135, and the
+next free test number 136.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+docs: plan the follow-up work for geometry / tessellation stages
+…
+172d508
+```
+GEOMETRY-STAGES-PLAN.md collects what the stage feature left out, phased by
+value and by what the Windows dev machine can test: layered rendering
+(array / depth-cube targets, gl_Layer from the GS or the vertex stage,
+multiple viewports), GS instancing and adjacency topologies, D3D
+tessellation through per-stage HLSL overrides, and Metal tessellation via
+compute. Stream output and a Metal geometry stage are explicitly out of
+scope.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+hmennen90
+force-pushed
+the
+feat/geometry-tessellation-stages
+branch
+from
+0823788 to
+172d508
+Compare
+October 3, 2026 05:28
+hmennen90
+and others
+added 20 commits
+October 3, 2026 07:58
+feat(render-target): array and depth-cube render targets
+…
+df29559
+```
+vio_render_target(['layers' => N]) creates a 2D array target (2..64 layers,
+colour or depth_only, every layer with its own depth), and 'cube' together
+with 'depth_only' now creates a depth cube instead of being refused. Both are
+gated on the new VIO_FEATURE_RENDER_TARGET_LAYERED. They are the building
+blocks for single-pass point-light and cascaded shadow maps
+(GEOMETRY-STAGES-PLAN Phase 1a); for now one layer is bound at a time.
+
+- vio_bind_render_target($ctx, $rt, $layer) and vio_read_render_target($rt,
+  $layer) take an array layer where they took a cube face.
+- vio_render_target_texture() hands an array out as sampler2DArray
+  (is_array); a cube target is refused there and goes through
+  vio_render_target_cubemap(), which now also wraps a depth cube.
+- Arrays are single attachment, single-sampled and have no mip chain;
+  vio_generate_mipmaps() returns false for them.
+
+OpenGL: cube and array targets share one path. Colour and depth both carry
+the layer structure (GL_TEXTURE_2D_ARRAY / cubemap with DEPTH24_STENCIL8), and
+a layer is attached with glFramebufferTextureLayer or the cube-face target.
+The colour cube's depth changes from one shared 2D texture to a depth cube,
+so every face has its own depth, which a later layered bind needs.
+
+Test 090 now expects a depth cube to be refused only when the backend lacks
+the feature.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+feat(vulkan): array and depth-cube render targets
+…
+6561510
+```
+Cube targets were a 6-layer colour image with one shared 2D depth. Every
+layered target now has a depth image with the same layer structure (cube
+compatible for cubes), a depth view and a framebuffer per layer, and
+whole-image CUBE / 2D_ARRAY views for sampling. 'layers' => N arrays reuse the
+per-(layer, level) framebuffers of the cube path. depth_only cubes sample
+through vio_render_target_cubemap, arrays through vio_render_target_texture
+(2D_ARRAY view). Readback takes the layer.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+feat(d3d11): array and depth-cube render targets
+…
+a497b9c
+```
+The depth texture has one slice per layer (TEXTURECUBE for cubes) and a DSV
+per slice (d3d11_face_dsvs; d3d11_dsv aliases slice 0). Colour arrays use the
+cube path's per-(layer, mip) RTVs with a TEXTURE2DARRAY SRV, and depth-only
+targets get a TEXTURE2DARRAY / TEXTURECUBE SRV. A depth-only layer bind sets
+only the DSV.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+feat(d3d12): array and depth-cube render targets
+…
+df0c9b7
+```
+Same layout as D3D11: a depth resource with one slice per layer, a DSV heap
+with one descriptor per layer (new dsv_descriptor_size), colour arrays
+through the cube path's per-(layer, level) RTVs, and TEXTURE2DARRAY /
+TEXTURECUBE SRVs. The initial clear covers every DSV, and readback addresses
+the layer's subresource.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+test(render3d): layered render targets on every backend
+…
+611018b
+```
+Test 136 covers a 3-layer colour array (clear + quad per layer, readback per
+layer, sampler2DArray sampling), a 2-layer depth array (depth per layer,
+readback and .r sampling), a depth cube (depth per face, readback and
+samplerCube .r through vio_render_target_cubemap) and the option contract.
+It passes on OpenGL, D3D11, D3D12 and Vulkan, also with the Vulkan
+validation and D3D debug layers. 074 pins the new flag; 136 joins the WARP
+list.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+docs: layered render targets in CLAUDE.md
+…
+11ee0a4
+```
+Feature-matrix row, test 136 and the next free test number 137.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+fix(d3d): remap depth on every geometry-shader vertex
+…
+02cb0d0
+```
+SPIRV-Cross's FIXUP_DEPTH_CONVENTION puts gl_Position.z = (z + w) / 2 at the
+end of the geometry entry point, after every Append, so it never reached an
+emitted vertex. Geometry-shader output kept GL depth in [-1, 1] on D3D11 and
+D3D12: depth tests compared the wrong values and everything with z < 0 was
+clipped. Tests 109 and 135 only drew at z = 0, so they never saw it.
+
+For geometry stages vio_spirv_to_hlsl_ex now leaves the option off and
+converts the copy that is appended (stage_output.gl_Position) in front of
+each Append. The static gl_Position stays untouched, so a vertex emitted
+twice is not converted twice. Test 109 draws a point at z = -0.5, which was
+clipped before.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+feat(render-target): layered rendering with VIO_RT_ALL_LAYERS
+…
+274353e
+```
+vio_bind_render_target($ctx, $rt, VIO_RT_ALL_LAYERS) binds every face / layer
+of a cube or array target at once (level 0). gl_Layer in the geometry stage,
+or in the vertex stage with VIO_FEATURE_VERTEX_LAYER, picks the destination
+per primitive, and vio_clear clears every layer. A point-light shadow cube or
+all CSM cascades now render in one pass (GEOMETRY-STAGES-PLAN 1b / 1c).
+
+New flags: VIO_FEATURE_LAYERED_RENDER (all-layer binds plus a stage that can
+pick the layer) and VIO_FEATURE_VERTEX_LAYER. The bind goes through the
+existing bind_render_target_face slot with the VIO_RT_ALL_LAYERS sentinel, so
+php_vio.c gains no backend branch.
+
+OpenGL: layered attachments via glFramebufferTexture (3.2); the vertex-stage
+route needs GL_ARB_shader_viewport_layer_array.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+feat(vulkan): layered rendering
+…
+b3df4f1
+```
+Layered targets get 2D_ARRAY attachment views over every layer (colour at
+level 0, depth) and a framebuffer with layers = N. A VIO_RT_ALL_LAYERS bind
+opens the pass on it, and vio_clear covers every bound layer
+(VkClearRect.layerCount = cur_layers). For gl_Layer in the vertex stage the
+device enables VK_EXT_shader_viewport_index_layer when present, which sets
+VIO_FEATURE_VERTEX_LAYER.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+feat(d3d11): layered rendering
+…
+a9fee65
+```
+Behind the per-layer views, every layered target gets one RTV and one DSV
+spanning all slices (level 0). A VIO_RT_ALL_LAYERS bind sets them, and
+SV_RenderTargetArrayIndex from the geometry or vertex shader picks the slice.
+VIO_FEATURE_VERTEX_LAYER follows D3D11_OPTIONS3's
+VPAndRTArrayIndexFromAnyShaderFeedingRasterizer, and LAYERED_RENDER needs
+either that or a geometry stage.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+feat(d3d12): layered rendering
+…
+896371a
+```
+One more RTV and DSV per layered target spans every slice; a VIO_RT_ALL_LAYERS
+bind uses them. SV_RenderTargetArrayIndex from the vertex shader is core
+D3D12 (emulated by drivers without native support), so both flags are 1.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+test(render3d): layered rendering on every backend
+…
+93ef074
+```
+Test 137 checks that:
+- vio_clear with every layer bound clears every layer;
+- one draw through a geometry stage with gl_Layer fills each array layer
+  with its own colour;
+- one draw fills a depth cube with a different depth per face (the
+  point-light shadow case);
+- gl_Layer = gl_InstanceIndex in the vertex stage works without a geometry
+  stage;
+- VIO_RT_ALL_LAYERS on a plain target warns.
+
+It passes on OpenGL, D3D11, D3D12 and Vulkan, also under the Vulkan
+validation and D3D debug layers. 074 pins the new flags for the null
+backend, and 137 joins the WARP list.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+docs: layered rendering in CLAUDE.md
+…
+70358cb
+```
+Feature-matrix row, the D3D geometry-shader depth note, test 137 and the next
+free test number 138.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+feat(viewport): vio_viewports for several viewports at once
+…
+db14754
+```
+vio_viewports($ctx, [[x, y, w, h], ...]) sets up to VIO_MAX_VIEWPORTS (16)
+viewports in the vio_viewport coordinate convention. gl_ViewportIndex in the
+geometry stage, or in the vertex stage with VIO_FEATURE_VERTEX_LAYER, picks
+one per primitive; primitives that do not write it use viewport 0, and
+vio_viewport() returns to one viewport. With it, every CSM cascade renders
+into one shadow atlas in one pass (GEOMETRY-STAGES-PLAN 1d).
+
+The new vtable slot set_viewports takes count * {x, y, w, h}. A single entry
+goes through set_viewport. More than one is gated on the new
+VIO_FEATURE_MULTI_VIEWPORT.
+
+OpenGL: glViewportIndexedf (GL 4.1 / ARB_viewport_array). glViewport already
+resets every indexed viewport.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+fix(shader): declare the viewport/layer extension SPIRV-Cross omits
+…
+2f0cc2e
+```
+SPIRV-Cross writes gl_ViewportIndex in a vertex or tessellation-evaluation
+stage without GL_ARB_shader_viewport_layer_array (it does add one for
+gl_Layer), so glslang on the Vulkan path and the GL driver rejected the
+round-tripped shader. vio_glsl_require_viewport_layer_ext() inserts the
+#extension after #version when either built-in is used and no
+viewport/layer extension is declared. Both the GL transpile and the Vulkan
+round trip call it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+feat(d3d): multiple viewports
+…
+fb432d9
+```
+D3D11: RSSetViewports with several entries. The 3D rasterizer state does not
+scissor, so no scissor rects are needed. D3D12: a viewport and a scissor
+rect per entry; D3D12 always scissors, and a viewport without a rect draws
+nothing. SV_ViewportArrayIndex from the geometry or vertex shader selects
+the viewport.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+feat(vulkan): multiple viewports
+…
+d4bba15
+```
+The device enables multiViewport when available (max_viewports = min(16,
+maxViewports)). Viewport count is part of a Vulkan pipeline, so every 3D
+pipeline is built with max_viewports viewports, and vk3d_prepare sets all of
+them before each draw. Unused entries repeat viewport 0. Pass begins,
+swapchain resumes and vio_viewport record their single viewport
+(vio_vk_note_viewport), and vio_viewports stores the list for the next
+draw.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+test(render3d): multiple viewports on every backend
+…
+1196ff7
+```
+Test 138 splits a 32x16 target into two 16x16 viewports. It checks:
+- gl_ViewportIndex from a geometry stage draws one triangle per viewport;
+- a shader without gl_ViewportIndex lands in viewport 0 only;
+- gl_ViewportIndex = gl_InstanceIndex works in the vertex stage;
+- vio_viewport afterwards returns to one full viewport;
+- vio_viewports rejects bad arguments.
+
+It passes on OpenGL, D3D11, D3D12 and Vulkan, also under the Vulkan
+validation and D3D debug layers; Vulkan 3D tests 113, 120, 123, 124 and 135
+stay clean under validation with the 16-viewport pipelines. 074 pins the
+flag for the null backend, and 138 joins the WARP list.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+docs: multiple viewports and the phase-1 API in CLAUDE.md
+…
+f9de857
+```
+Feature-matrix row, the gl_ViewportIndex extension note, an API example for
+layered targets and viewports, test 138 and the next free test number 139.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+ci(macos): run test 094 again, SPIRV-Cross 1.4.363.0 has the stride fix
+…
+1f65f77
+```
+KhronosGroup/SPIRV-Cross#2678 (94d59e5) is part of vulkan-sdk-1.4.363.0
+(compare 94d59e5...vulkan-sdk-1.4.363.0: ahead), and Homebrew's spirv-cross
+formula has been on 1.4.363.0 since 2026-09-29. This removes the stop-gaps:
+- VIO_SKIP_SPIRV_CROSS_LAYOUT_TEST in both macOS jobs,
+- the matching SKIPIF in tests/backends/094,
+- deps-patches/ (the stride patch for older SPIRV-Cross checkouts).
+
+CLAUDE.md now names 1.4.363.0 as the minimum for Metal.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+hmennen90
+changed the title
+feat(shader): geometry and tessellation stages for vio_shader
+feat(shader): geometry / tessellation stages and layered rendering
+Oct 3, 2026
+hmennen90
+and others
+added 6 commits
+October 3, 2026 08:58
+ci(macos): update Homebrew before installing, require spirv-cross 1.4…
+…
+d6cb52b
+```
+….363.0
+
+The previous run installed spirv-cross 1.4.357.0 although the formula has
+been on 1.4.363.0 since 2026-09-29 (Homebrew/homebrew-core#314121): the
+runner image ships stale Homebrew metadata and does not auto-update, so test
+094 failed on Metal ([51,153,128], the uniforms after the struct array still
+read shifted). Both macOS jobs now run `brew update` first and stop with a
+clear error when the installed spirv-cross is older than 1.4.363.0, instead
+of failing later in 094.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+feat(shader): GS instancing flag and adjacency topologies
+…
+b2c573b
+```
+VIO_FEATURE_GEOMETRY_INSTANCING says whether layout(invocations = N) works,
+running the geometry stage N times per primitive (gl_InvocationID), e.g. one
+invocation per cube face together with gl_Layer.
+
+- OpenGL: GL 4.0 or ARB_gpu_shader5.
+- Vulkan: implied by geometryShader (maxGeometryShaderInvocations >= 32).
+- D3D11/D3D12: a new probe variant (VIO_PROBE_GS_INSTANCED) runs a canonical
+  instanced GS through SPIRV-Cross and FXC. SPIRV-Cross cannot emit
+  gl_InvocationID for an HLSL geometry shader ("Unsupported builtin in HLSL:
+  8"), so the flag is 0 there today and turns on by itself once it can. On
+  D3D a loop in the GS covers the same cases (test 137).
+
+VIO_LINES_ADJACENCY, VIO_LINE_STRIP_ADJACENCY, VIO_TRIANGLES_ADJACENCY and
+VIO_TRIANGLE_STRIP_ADJACENCY hand the geometry stage each primitive with its
+neighbours (4 / 6 vertices) for silhouettes, outlines and shadow volumes. They
+map to GL_*_ADJACENCY, D3D *_ADJ (PSO type LINE / TRIANGLE) and Vulkan
+*_WITH_ADJACENCY. vio_pipeline refuses them without a geometry stage, because
+only that stage sees the extra vertices.
+
+vio_mesh(['adjacency' => true]) turns a triangle list, indexed or not, into the
+TRIANGLES_ADJACENCY index buffer: per triangle a, n(ab), b, n(bc), c, n(ca).
+Edges are matched by vertex position (sorted canonical ids and sorted edge
+records, O(n log n)), so meshes that duplicate vertices per face still find
+their neighbours. An open edge repeats the triangle's own opposite vertex.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+test(render3d): GS instancing and adjacency topologies
+…
+b1952ca
+```
+Test 139 covers:
+- four GS invocations drawing four quadrants;
+- a cube filled in one draw with invocations = 6 and gl_Layer;
+- TRIANGLES_ADJACENCY via the mesh helper: a quad with per-triangle
+  duplicated vertices has one neighbour per triangle, a lone triangle none;
+- LINES_ADJACENCY vertex order;
+- the refusals.
+
+OpenGL and Vulkan run every part; D3D11/D3D12 run the adjacency parts (no
+GS instancing there, see the flag). It passes under the Vulkan validation
+and D3D debug layers, and 139 joins the WARP list.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+feat(d3d): HLSL overrides for the geometry and tessellation stages
+…
+e51ddaf
+```
+vio_shader(['hlsl' => ['geometry' | 'tess_control' | 'tess_eval' => src]])
+lets D3D11 and D3D12 compile hand-written HLSL instead of the transpiled
+GLSL stage. SPIRV-Cross emits no hull / domain shaders and no
+gl_InvocationID in an HLSL geometry shader, so this is how D3D gets
+tessellation and [instance(N)] (GEOMETRY-STAGES-PLAN Phase 3, generalised
+from a tessellation-only flag to every optional stage).
+
+- New flag VIO_FEATURE_HLSL_STAGE_OVERRIDE (1 on D3D11 / D3D12). vio_shader
+  accepts a geometry or tessellation stage whose feature flag is 0 when the
+  override covers it. The GLSL stage stays required: OpenGL / Vulkan use it,
+  and its reflected uniforms define the cbuffer layout.
+- The override goes through the cached compile path (hs/ds/gs_5_x, DXIL
+  under shader model 6). It is used as written: no depth fixup, so the source
+  outputs D3D clip space.
+- vio_d3d_check_override_cbuffer (new vio_d3d_shader_check.h) reflects the
+  compiled blob with D3DReflect and warns when a uniform of the GLSL stage is
+  missing from the register(b0) cbuffer or sits at another offset. DXIL is
+  skipped.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+test(render3d): HLSL stage overrides
+…
+04168e1
+```
+Test 140 draws test 110's tessellated disc with hull / domain HLSL on D3D
+and the GLSL stages on OpenGL / Vulkan from the same vio_shader call, and an
+instanced GS through [instance(4)]. It also checks that a cbuffer without
+the GLSL uniform warns and that bad 'hlsl' arguments are refused. It passes
+on all four backends, under the debug / validation layers, and on D3D12
+with shader_model => 6 (DXC). 074 pins the flag for D3D and the null
+backend; 140 joins the WARP list.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+docs: phases 2 and 3 in CLAUDE.md, plan status
+…
+614ec38
+```
+Feature-matrix rows for GS instancing, adjacency topologies and HLSL stage
+overrides; D3D tessellation is now available through the override. Also:
+the override contract, tests 139 / 140, the next free test number 141, and
+the status table in GEOMETRY-STAGES-PLAN.md (phases 1-3 done, phase 4 and
+Metal open).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+hmennen90
+changed the title
+feat(shader): geometry / tessellation stages and layered rendering
+feat(shader): geometry / tessellation stages, layered rendering, HLSL stage overrides
+Oct 3, 2026
+hmennen90
+and others
+added 11 commits
+October 3, 2026 09:29
+fix(opengl): comparison sampling for sampler*Shadow
+…
+58fc126
+```
+OpenGL never set GL_TEXTURE_COMPARE_MODE, so sampler2DShadow,
+sampler2DArrayShadow and samplerCubeShadow on a depth target were undefined.
+On NVIDIA they returned the raw depth (0.5 instead of 0 / 1). Setting compare
+mode on the texture itself is not an option: the same depth targets are also
+read raw through sampler2D.
+
+The backend now follows the D3D model, where the shader's sampler type picks
+the sampler. Per program it caches the locations of the shadow samplers
+(glGetActiveUniform, array elements expanded; entries die with the program).
+Around every 3D draw it binds one comparison sampler object (LEQUAL, linear
+PCF, opaque white border) to the units those samplers read, and releases them
+afterwards. Plain sampler2D reads and the 2D batch on the same unit are
+unaffected. The sampler object is recreated for each GL context.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+fix(d3d11): comparison sampler for depth cubes
+…
+a25fe00
+```
+A depth cube handed out by vio_render_target_cubemap was always bound with
+the plain linear cube sampler, so samplerCubeShadow (SampleCmp) returned 0.
+Depth cubes now carry a second comparison sampler (LESS_EQUAL, linear), and
+vio_bind_cubemap picks it when the bound shader's sampler at that unit is a
+shadow sampler, as the 2D texture path already does. samplerCube .r keeps
+the plain sampler.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+test(render3d): comparison samplers on every backend
+…
+f966a51
+```
+Test 141 covers:
+- sampler2DShadow, sampler2DArrayShadow per layer and samplerCubeShadow per
+  face, with references just below and above the stored depth;
+- in one frame: a shadow draw, a raw sampler2D read of the same texture,
+  and a 2D sprite on unit 0.
+
+It passes on OpenGL, D3D11, D3D12 and Vulkan, also under the validation /
+debug layers. With the GL comparison sampler disabled it fails on OpenGL
+(raw depth instead of 0 / 1). 141 joins the WARP list; CLAUDE.md describes
+the GL model.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+fix(vulkan): re-binding a render target keeps colour and depth
+…
+29c5940
+```
+Vulkan render-target passes used loadOp CLEAR with an UNDEFINED initial
+layout, and the depth of colour targets was stored with DONT_CARE. Every bind
+therefore wiped the target to the last vio_clear colour and lost its depth,
+while OpenGL and D3D keep what was drawn. An engine that renders into a
+target in several passes (decals after the opaque pass, a second cascade
+pass) got a different image on Vulkan.
+
+Passes now LOAD and STORE colour, depth and stencil; MSAA colour is stored
+too, so the next bind can load it. Every image is initialised at creation
+and kept in a steady layout between passes, which the passes now name as
+their initial layout:
+- colour: cleared to 0, SHADER_READ_ONLY;
+- multisampled colour: cleared to 0, COLOR_ATTACHMENT;
+- depth: depth 1 / stencil 0, DEPTH_STENCIL_ATTACHMENT, or READ_ONLY for
+  depth_only targets.
+vio_clear (vkCmdClearAttachments) is the only clear, as on every other
+backend. Render-pass compatibility is unchanged (load/store ops and layouts
+are not part of it), so existing pipeline variants still apply.
+
+Test 142 checks plain, HDR, MSAA, array-layer and cube-face targets, with
+the rebind in the next frame and in the same frame. It passes on OpenGL,
+D3D11, D3D12 and Vulkan; the Vulkan render-target tests stay clean under
+the validation layer.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+test(render3d): Metal depth convention in test 141
+…
+21e5f9a
+```
+Metal keeps NDC z in 0..1 without vio's clip-space fixup, so a quad at z = 0
+stores depth 0 there, not 0.5. Test 141 hard-coded (z + 1) / 2 and failed on
+the macOS CI: ref 0.4 compared against depth 0, and the raw read was 0. The
+expected depth now follows the backend: z on Metal, (z + 1) / 2 elsewhere.
+The 2D target is filled at z = 0.5, and the references sit +-0.1 / +-0.05
+around the stored value.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+feat(metal): tessellation stages via compute kernels and drawPatches
+…
+33002eb
+```
+Metal has no hull or domain stages, so VIO_FEATURE_TESSELLATION was 0
+there. A shader with tess_control + tess_eval now compiles into three
+parts:
+- the vertex stage as a compute kernel (SPIRV-Cross
+  vertex_for_tessellation), one thread per (vertex, instance), with a
+  stage-input descriptor per mesh stride;
+- the control stage as a kernel (multi_patch_workgroup), a threadgroup
+  per patch, writing control points, patch constants and half-precision
+  tessellation factors;
+- the evaluation stage as a [[patch]] post-tessellation vertex function
+  that reads the control points from those buffers
+  (raw_buffer_tese_input).
+Every draw runs both kernels in their own command buffer, committed
+ahead of the frame's, into ring slices, then calls drawPatches on the
+open render encoder, so bound textures, viewport and scissor stay.
+Indexed draws are de-indexed on the CPU (mesh buffers are Shared).
+
+Notes:
+- The control kernel writes the factor struct of the evaluation
+  stage's domain, so the TES domain is set on the TCS compiler. The TES
+  gets the TCS output vertex count.
+- gl_TessCoord keeps the GL lower-left origin, with the winding
+  mirrored to match.
+- Isolines, point_mode, indirect draws and storage-instanced draws of
+  tessellation pipelines are refused with a warning.
+- The stage constant blocks reach Metal through bind_stage_constants.
+
+The SPIR-V -> MSL transpiler and the resource tables move into the
+plain-C header vio_metal_msl.h, so the MSL can be checked against
+SPIRV-Cross without a Mac. Test 074 pins TESSELLATION = COMPUTE and
+GEOMETRY = 0 for Metal; 110 and 140 now run on Metal.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+feat(vulkan): texture updates, storage images and async compute in th…
+…
+39652e8
+```
+…e frame
+
+Vulkan was the only backend without vio_texture_update and storage
+images, and its async dispatches ran synchronously.
+
+- vio_texture_update copies a region into level 0 of a 2D texture
+  through a staging buffer on the transient command buffer. Queue
+  order and a shader-read -> transfer -> shader-read barrier cover
+  frames in flight; every draw of the open frame sees the new texels.
+- Compute pipelines take their descriptor-set layout from the kernel's
+  reflection (storage buffers, storage images and the params UBO at
+  their own bindings) instead of the fixed SSBO 0/1 + UBO 2 contract.
+- 'storage' => true textures get STORAGE usage, start zeroed and live
+  in GENERAL, so imageStore and sampling need no layout changes.
+  vio_compute_bind_image binds them; VIO_FEATURE_STORAGE_IMAGE = 1.
+- ['async' => true] inside a frame records the dispatch into the frame
+  command buffer:
+  - the open pass is closed, the dispatch is fenced by memory barriers
+    on both sides, and the pass resumes with LOAD on the same target
+    and layer, viewports restored;
+  - every dispatch gets its own descriptor set from per-frame pools and
+    a params snapshot in the frame upload ring.
+- vio_compute_wait inside a frame submits the frame so far, waits and
+  reopens it (vio_vk_flush_frame); after vio_end it drains the queue.
+  vio_storage_buffer_read waits implicitly.
+- Compute pipelines freed while a dispatch may be pending go through
+  the frame graveyard.
+
+Tests 096 and 098 now iterate D3D11, D3D12 and Vulkan as well; all four
+Windows backends report OK, and Vulkan stays clean under the validation
+layer for 093, 096, 098 and 126.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+feat(d3d): gl_in[].gl_Position and gl_InvocationID in GLSL geometry s…
+…
+659716b
+```
+…tages
+
+SPIRV-Cross's HLSL backend rejects two geometry-shader builtins with
+"Unsupported builtin in HLSL": the input position gl_in[i].gl_Position
+and gl_InvocationID. On D3D a GS therefore had to read its position
+from a user varying, and GS instancing (layout(invocations = N)) needed
+the HLSL override, so VIO_FEATURE_GEOMETRY_INSTANCING stayed 0.
+
+vio_spirv_to_hlsl_ex now rewrites geometry modules before transpiling:
+- access chains gl_in[i].member0 point at a new input array
+  vio_gl_in_Position at a free location. Its TEXCOORD semantic becomes
+  SV_Position, which links with the vertex stage's position output.
+- the gl_InvocationID builtin becomes a Private variable. main() takes
+  SV_GSInstanceID, assigns it, and gets [instance(N)] from the
+  Invocations execution mode.
+Modules without these builtins pass through unchanged. The GS-instancing
+probe now succeeds on D3D11 and D3D12, so the flag follows it.
+
+Test 143 draws a quad around gl_in[0].gl_Position and two instanced
+quads coloured by gl_InvocationID. It passes on OpenGL, D3D11, D3D12 and
+Vulkan, also under the D3D debug layers and Vulkan validation. Test 139
+(GS instancing) now runs the plain GLSL shader on D3D as well.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+feat(metal): stencil, layered render targets, gl_Layer, multiple view…
+…
+dd57ce5
+```
+…ports
+
+Metal reported VIO_FEATURE_STENCIL, RENDER_TARGET_LAYERED,
+LAYERED_RENDER, VERTEX_LAYER and MULTI_VIEWPORT as 0. Metal has no
+geometry stage, but layer and viewport selection work from the vertex
+function.
+
+- Stencil: the swapchain and colour render targets use
+  Depth32Float_Stencil8 (depth_only, cube and array targets keep
+  Depth32Float, as they are sampled and read back as depth).
+  - Passes attach the stencil plane and clear it to 0.
+  - Pipelines build a stencil depth state (same test on both faces)
+    plus a stencil-less one for targets without the plane, and set
+    the reference value.
+  - PSO and 2D variants carry the stencil format.
+- Layered targets: 'layers' => N creates 2DArray colour and depth; a
+  depth_only cube is a Depth32Float cube; colour cubes get a cube depth
+  instead of one shared 2D depth.
+  - A bind selects the slice of colour and depth.
+  - VIO_RT_ALL_LAYERS sets renderTargetArrayLength, so vio_clear clears
+    every layer and gl_Layer from the vertex stage
+    ([[render_target_array_index]]) picks one.
+  - Readback and vio_render_target_cubemap handle the depth cube.
+  - samplerCubeShadow gets a compare sampler.
+  - Arrays refuse vio_generate_mipmaps.
+- vio_viewports: setViewports / setScissorRects (scissors clamped to the
+  target), gl_ViewportIndex via [[viewport_array_index]]. PSOs set
+  inputPrimitiveTopology, which macOS requires for both.
+- The layered / viewport-index flags need the Mac2 or Apple5 family.
+
+Tessellation draws also cover the remaining draw paths:
+- vio_draw_indirect reads the argument records on the CPU (Shared
+  buffer) after waiting for this frame's async dispatches;
+- vio_draw_instanced_from_buffer binds the SSBO in the vertex kernel;
+- after an async dispatch in the same frame, the kernels go into the
+  frame command buffer behind it. The pass is closed and reopened, and
+  the draw's fragment textures and viewports are restored.
+
+Test 136 uses z values inside 0..1 and the Metal depth convention; 074
+pins the new Metal flags.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+fix(metal): vio_viewport drops the vio_viewports scissors; 141 cube d…
+…
+3625b3b
+```
+…epths inside 0..1
+
+On the macOS CI, test 138 part D failed: vio_viewports clips viewport 0
+to its own rect, and vio_viewport only set a new viewport, so a
+full-target draw afterwards stayed clipped to the left half. A single
+viewport after vio_viewports now resets the scissor to the target.
+
+Test 141 filled the depth cube with z from -0.8: Metal clips z < 0
+(NDC z is 0..1 there), so faces 0..2 kept depth 1 and compared lit. The
+faces now use z 0.1..0.85, which every backend stores.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+docs: feature matrix after Metal tessellation, Vulkan compute, D3D GS…
+…
+d85f522
+```
+… builtins
+
+- CLAUDE.md:
+  - matrix rows brought up to the code: D3D cube-RT mips, D3D12 and
+    Vulkan texture updates, Vulkan storage images and async compute,
+    D3D GS instancing, Metal tessellation, stencil, layered targets
+    and viewports;
+  - the stale MSAA footnote replaced;
+  - the Vulkan compute path, Metal stencil / layered targets and the
+    D3D geometry rewrite described;
+  - test count and next free number updated.
+- GEOMETRY-STAGES-PLAN.md: all phases done; Hull/Domain from GLSL on D3D
+  stays with the HLSL override (SPIRV-Cross has no HLSL tessellation
+  backend).
+- build.yml: test 143 joins the WARP list.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Hide details
+View details
+hmennen90
+merged commit ff45cb0
+into
+main
+Oct 3, 2026
+7 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

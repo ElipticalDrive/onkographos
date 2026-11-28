@@ -1,0 +1,104 @@
+# Bounding Shape Optimization
+
+Also called: Bounding Shape Culling
+
+## Overview
+Bounding Shape Optimization accelerates volumetric rendering by skipping density evaluations in empty space using pre-defined bounding shapes [S1, unofficial]. It solves the problem of inefficiently stepping through empty space by restricting ray marching to regions where density is non-zero [S2, unofficial]. Unlike [Beam Optimization](932-beam-optimization.md) which optimizes for caustic beams, or [Block Culling](5431-block-culling.md) which uses grid-based culling, this method generalizes the concept of space-leaping by allowing arbitrary closed geometry (e.g., spheres, cylinders) to define the volume extent [S1, unofficial][S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   Input: Ray origin $O$, ray direction $D$, density field $\rho(x)$, and a bounding shape definition $B$.
+*   Output: Rendered color and opacity for the ray.
+
+**Data Structures:**
+The bounding shape $B$ is defined by its geometric parameters. For a sphere, this is the center $C$ and radius $R$. For other shapes, the intersection function must be defined. The density field is sampled only within the bounds of $B$.
+
+**Steps:**
+1.  **Define Boundaries:** Identify the region where density is non-zero. This is modeled as a bounding shape $B$ [S1, unofficial]. The closer $B$ is to the actual density field, the fewer "useless" steps are performed [S1, unofficial].
+2.  **Compute Intersections:** Use a surface rendering technique to find the intersection points of the ray $(O, D)$ with the bounding shape $B$. This yields the entry point $t_{in}$ and exit point $t_{out}$ along the ray [S1, unofficial].
+3.  **Ray Marching:** Perform classical volumetric rendering only for samples located between $t_{in}$ and $t_{out}$ [S1, unofficial].
+4.  **Step Size Adaptation (Optional):** To improve performance, step sizes can increase as the ray progresses through the medium, as imprecisions have less impact further along the ray [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_ray_with_bounding_shape(ray_origin, ray_direction, density_field, bounding_shape):
+    # Step 1 & 2: Find intersection with bounding shape
+    # For a sphere with center C and radius R:
+    # oc = ray_origin - C
+    # a = dot(ray_direction, ray_direction)
+    # b = 2.0 * dot(oc, ray_direction)
+    # c = dot(oc, oc) - R * R
+    # discriminant = b * b - 4 * a * c
+    
+    # If no intersection, return background color
+    if discriminant < 0:
+        return background_color
+
+    sqrt_disc = sqrt(discriminant)
+    t_enter = (-b - sqrt_disc) / (2.0 * a)
+    t_exit = (-b + sqrt_disc) / (2.0 * a)
+
+    # If the ray starts inside, adjust t_enter
+    if t_enter < 0:
+        t_enter = 0.0
+        t_exit = t_exit # Keep exit as is, or recalculate if needed
+
+    # Step 3 & 4: Volumetric rendering inside bounds
+    color = vec3(0.0)
+    opacity = 0.0
+    t = t_enter
+    step_size = initial_step_size
+    
+    while t < t_exit and opacity < 1.0:
+        # Sample density at current position
+        pos = ray_origin + ray_direction * t
+        density = density_field.sample(pos)
+        
+        # Accumulate color and opacity
+        # Standard volume integration (e.g., front-to-back)
+        attenuation = exp(-density * step_size)
+        color += (1.0 - opacity) * density * step_size * light_color
+        opacity += (1.0 - opacity) * (1.0 - attenuation)
+        
+        # Adaptive step size: increase step size as we go deeper [S1, unofficial]
+        # This is a heuristic; specific formula not provided in sources [G]
+        step_size = step_size * 1.1 
+        
+        t += step_size
+
+    return color
+```
+
+**Parameters:**
+*   **Bounding Shape Choice:** The type of geometry used (e.g., Sphere, Cylinder, Box). Sphere Marching is selected in the reference implementation for its simplicity and efficiency [S1, unofficial].
+*   **Container Definition Fineness:** Finer container definitions (tighter bounds) improve volume render efficiency by reducing the number of samples taken in empty space [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Ray Origin Inside:** If the ray origin is inside the bounding shape, $t_{enter}$ must be clamped to 0 or the negative root must be ignored to avoid backward marching [G].
+*   **Tightness:** Loose bounding shapes result in unnecessary density evaluations. The optimization gain is directly proportional to how tightly the shape fits the non-zero density region [S1, unofficial].
+*   **Intersection Precision:** Floating-point errors in intersection calculation can cause rays to miss the volume or march slightly outside it, leading to artifacts or wasted computation [G].
+
+## Subtopics
+
+### [Convex Polyhedron Bounding](8027-convex-polyhedron-bounding.md)
+Convex Polyhedron Bounding is a space-leaping technique for direct volume rendering that accelerates ray traversal by enclosing objects within a convex polyhedron. It solves the problem of inefficiently stepping through empty space by allowing rays to skip large volumes of non-data voxels. Unlike [Bounding Shape Optimization](7750-bounding-shape-optimization.md) which generalizes the concept, this method specifically constructs a convex hull around the object, and differs from [Bounding Volume Extrusion](8410-bounding-volume-extrusion.md) by using a general polyhedron rather than a prism tailored for caustic beams.
+
+### Container-based Ray Marching
+Container-based Ray Marching uses closed geometry as a bounding container to ray march only where there actually is density, improving efficiency [S2, unofficial]. It restricts ray marching to regions where density exists, using closed geometry as a bounding container [S2, unofficial]. Finer container definitions improve volume render efficiency compared to coarse or non-existent containers [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Reduces the number of density evaluations from $O(N)$ (where $N$ is the total ray length in steps) to $O(N_{inside})$, where $N_{inside}$ is the number of steps within the bounding shape.
+*   **Memory Complexity:** Requires storage for the bounding shape parameters and the density field. No additional large data structures are needed beyond the shape definition [S1, unofficial].
+*   **Strengths:** Significant performance boost in scenes with mostly empty density fields [S1, unofficial]. Simple to implement for basic shapes like spheres and boxes.
+*   **Limitations:** Requires pre-defining or computing the bounding shape. If the density field is dense or irregularly shaped, the bounding shape may not provide significant culling benefits. Does not handle dynamic deformation of the density field automatically without updating the bounds [S1, unofficial].
+*   **When to Use:** Ideal for procedural noise fields, interstellar dust, or solar flares where large portions of the volume are empty [S1, unofficial].
+*   **When Not to Use:** When the density field fills the entire volume or when the bounding shape computation cost outweighs the savings from culling.
+
+## Background
+Bounding Shape Optimization was introduced in the context of real-time rendering of interstellar dust clouds and solar flares [S1, unofficial]. The method leverages the hypothesis that such density fields are mostly empty, allowing for significant performance gains by skipping empty space [S1, unofficial]. It is also discussed in the context of production volume rendering, where closed geometry containers are used to optimize ray marching efficiency [S2, unofficial].
+
+## Sources
+[S1] Sculpting procedural noise: real-time rendering of interstellar dust clouds and solar flares, https://openalex.org/W4293584834, fetched 2026-10-26 (unofficial)
+[S2] PDF Production Volume Rendering - Clemson University, https://jtessen.people.clemson.edu/reports/papers_files/ProdVolRender.pdf, fetched 2026-10-27 (unofficial)

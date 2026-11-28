@@ -1,0 +1,140 @@
+Experiment on autonomous agentic development of a high-performance ion Monte Carlo simulation code for radiotherapy - DEV-015: 3-D voxel grid with ray/voxel DDA traversal (Stage 3) by wahln · Pull Request #45 · e0404/autonomous-ion-mc
+
+DEV-015: 3-D voxel grid with ray/voxel DDA traversal (Stage 3) by wahln · Pull Request #45 · e0404/autonomous-ion-mc · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+wahln
+commented
+Sep 11, 2026
+Copy link
+Copy Markdown
+Contributor
+Summary
+Adds a true 3-D voxel geometry so the scattering path transports through a patient-like Nx×Ny×Nz grid at arbitrary incidence — the remaining Stage-3 Voxelized geometries capability (beyond the slab/layered phantoms the V3 gates used), and a Stage-4 prerequisite (decision 0020).
+Approach
+VoxelGrid3D — lab-axis-aligned, per-voxel mass density, single material (density-only first cut); flat index (i·Ny+j)·Nz+k; a from_voxel_slab reduction constructor and a uniform factory.
+Amanatides-Woo voxel DDA, per-step recompute, phrased as a strict generalization of the beam-frame 1-D limiter: the material coordinate u = n̂·p and its step limit become three lab-axis coordinates u_k = p0[k] + mᵏ·q (mᵏ = rows of the beam-frame R) with a per-axis distance to the next voxel face; the step is clipped to the nearest face. Axis-parallel rays → infinite face distance; on-face ties → direction-aware s_tie = 1e-4 mm nudge. Geometry state is recomputed each step, so no float state drifts between backends. The grid is not rotated (an oblique beam already exercises full 3-D traversal).
+Parallel drivers (_run_scattering_reference_grid3d, csda_scattering_grid3d_kernel + ScatteringGrid3DKernel), dispatched on geometry type — the 1-D VoxelSlab path is untouched and stays bit-exact.
+Files
+src/ionmc/transport/geometry.py (VoxelGrid3D), src/ionmc/transport/engine.py (constructor branch + grid reference driver + dispatch), src/ionmc/backend/warp_transport.py (grid kernel + launcher), src/ionmc/transport/__init__.py
+decisions/0020-voxelized-3d-grid-dda.md, validation/v3_voxel_grid_3d.py, tests/ionmc/test_voxel_grid_3d.py
+docs: physics, validation, roadmap (DEV-014 → completed at f9e3c90, V3 closed; DEV-015 added)
+Validation
+Host GPU (RTX A6000, CUDA, Warp 1.17.0), SHA 45f3ee2, run RUN-20260911T001659Z-0c7182e2 — all 7 gates pass:
+gate
+result
+single-column grid reduces to VoxelSlab
+bit-exact (cum 0.0)
+homogeneous box vs WaterSlab
+energy 0.0, R80 0.0
+oblique beam vs independent Siddon WET oracle
+rel diff 1.7e-5
+energy conservation (contained)
+balance -1e-14
+reference vs Warp CPU (grid, scattering)
+depth-dose 1.0e-3 (DDA face-flip budget 3e-3), σ_x tight
+CUDA σ_x vs Fermi-Eyges / CUDA vs CPU depth dose
+< 1 % / 6.1e-5
+Note on the cross-backend tolerance: the reference(float64)-vs-Warp(float32) depth-dose cumulative is ~1e-3 (looser than the 1-D path's ~1e-4) because the DDA clips at every voxel face (~160 z-crossings + lateral crossings per history), so float32-vs-float64 near-corner face-decision flips decorrelate proportionally more histories. This is a genuine, understood property of the accelerated DDA, not a bug: the same-precision CUDA-vs-CPU depth dose is tight (6.1e-5), a deterministic (scattering-off) grid run stays tight (~3e-6), and σ_x (the physics metric) agrees. Documented in decision 0020.
+Local full pytest suite green (reference + Warp CPU). Recorded as VAL-20260911-001833-C6FCC3.
+Deferred
+Per-voxel material map (a pure data extension of the flat arrays), grid rotation, a 3-D lab-frame scoring volume, non-uniform spacing, and CT/Hounsfield ingestion.
+🤖 Generated with Claude Code
+Autonomous IonMC Agent
+and others
+added 2 commits
+September 11, 2026 02:16
+DEV-015: 3-D voxel grid with ray/voxel DDA traversal (Stage 3)
+…
+45f3ee2
+```
+Add a true 3-D voxel geometry so the scattering path can transport through a
+patient-like Nx*Ny*Nz grid at arbitrary incidence -- the remaining Stage-3
+"Voxelized geometries" capability, beyond the slab/layered phantoms the V3 gates
+used (decision 0020).
+
+- geometry: VoxelGrid3D (lab-axis-aligned, per-voxel mass density, single
+  material -- density-only cut), flat index (i*Ny+j)*Nz+k; a from_voxel_slab
+  reduction constructor and a uniform factory.
+- traversal: Amanatides-Woo voxel DDA, per-step recompute, phrased in the
+  beam-frame idiom -- the 1-D material coordinate u = n.p and its step limit
+  generalise to three lab-axis coordinates u_k = p0[k] + m^k.q (m^k = rows of the
+  beam-frame R) with a per-axis distance to the next voxel face; the step is
+  clipped to the nearest face. Axis-parallel rays take an infinite face distance;
+  on-face ties use a direction-aware s_tie = 1e-4 mm nudge. Grid not rotated (an
+  oblique beam already exercises full 3-D traversal).
+- parallel drivers: _run_scattering_reference_grid3d and a new Warp kernel
+  csda_scattering_grid3d_kernel + ScatteringGrid3DKernel, dispatched on geometry
+  type; the 1-D VoxelSlab path is untouched (bit-exact). run() rejects grids.
+- decision 0020; validation/v3_voxel_grid_3d.py; tests/ionmc/test_voxel_grid_3d.py;
+  docs (physics, validation, roadmap: DEV-014 completed at f9e3c90 / V3 closed,
+  DEV-015 added).
+
+Validated locally (reference + Warp CPU): a single-column grid reduces to the
+VoxelSlab BIT-FOR-BIT; a homogeneous box matches WaterSlab at the step-partition
+level; an oblique beam through an off-axis dense insert stops where an independent
+Siddon WET integral reaches the water CSDA range (rel diff 1.7e-5); energy is
+conserved for a contained beam; and reference/Warp CPU agree (sigma_x tight,
+depth-dose cumulative 1.0e-3 within the DDA face-flip budget). CUDA gates pending
+the host run. Full pytest suite green.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+```
+Address DEV-015 review: correct energy-conservation claim, add no-dri…
+…
+715abd3
+```
+…ft check
+
+Independent review (no blockers) raised two should-fix documentation/validation-
+honesty items and cheap minors; source behaviour is unchanged except a docstring.
+
+- Decision 0020 overstated the energy-conservation gate: it claimed an
+  "escaped-energy accumulator on the grid path" that does not exist. Corrected to
+  state the gate is containment-only (deposited-vs-in, escaped == 0 for a beam
+  contained in a wide box), and list the escaped-energy accumulator as deferred.
+- Validation: add a signed no-drift check to warp_cpu_vs_reference. The signed
+  cumulative at the last bin is the total deposited-energy relative difference;
+  for two energy-conserving contained runs it must be ~0. Measured 3.7e-9 (vs the
+  1.0e-3 max |cumulative| excursion), proving the depth-dose difference is a
+  zero-mean float32 face-flip decorrelation wiggle, not a systematic range/energy
+  bias -- the discriminator against a subtle DDA bug. Gate now also asserts
+  |signed_total_drift| <= 1e-4.
+- Decision 0020: the on-face nudge is applied per-axis independently (no
+  cross-axis x<y<z tie ordering, which the wording implied and which is not
+  needed); document the source-must-lie-in-box precondition (a point outside is
+  clamped to the edge voxel), also noted in the grid driver docstring.
+- docs: the single-column reduction is bit-for-bit "for the uniform-spacing case"
+  (up to the float reconstruction of the faces), not unconditionally.
+
+Local: the scoring-grid validation passes every CPU gate incl. the new no-drift
+check (signed drift 3.7e-9); ruff/format/mypy clean. CUDA gates pending the host
+run.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+```
+Hide details
+View details
+wahln
+merged commit d0df873
+into
+develop
+Sep 11, 2026
+4 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

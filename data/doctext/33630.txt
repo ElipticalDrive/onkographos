@@ -1,0 +1,2351 @@
+# dmc
+Dual Marching Cubes Implementation in C++  
+[reference](https://www.cs.rice.edu/~jwarren/papers/dmc.pdf)
+
+![cube](dmc.png "cube")
+
+## Features
+- Header-only  
+  `#include <dmc/dmc.hpp>`
+
+## Requirements
+
+### Supported Compilers
+- Visual Studio 2017
+- Clang (>=3.8.1)
+
+### External Libraries
+- Boost C++ Libraries (>= 1.64.0)
+- Eigen (>= 3.3.3)
+
+## License
+The BSD 3-Clause License (see [LICENSE](LICENSE))
+
+### src/main.cpp
+```
+#include <dmc/dmc.hpp>
+#include <iostream>
+#include <fstream>
+#include <iomanip>
+#include <chrono>
+
+template <class Scalar>
+struct test_object : dmc::dual_object<Scalar, test_object<Scalar>>
+{
+private:
+	typedef dmc::object<Scalar> base_type;
+
+public:
+	using typename base_type::scalar_type;
+	using typename base_type::vector_type;
+
+	template <class T>
+	T templated_value(const dmc::vector<T, 3>& p) const
+	{
+		auto cube1 = 1.0 - p.norm_l_inf();
+		auto cube2 = 1.0 - (p - dmc::vector<T, 3>(0.5, 0.5, 0.5)).norm_l_inf();
+
+		return std::min(cube1, -cube2);
+	}
+};
+
+int main(int /*argc*/, char* /*argv*/ [])
+{
+	dmc::tree_config<double> config;
+	config.grid_width = 0.1;
+	config.tolerance = 0.001;
+
+	auto start_time = std::chrono::high_resolution_clock::now();
+
+	dmc::tree<double> t({-3.0, -3.0, -3.0}, {3.0, 3.0, 3.0}, config);
+
+	double last_progress = 0.0;
+
+	test_object<double> obj;
+
+	t.generate(obj, [&](double progress) {
+		if (progress > last_progress + 0.01)
+		{
+			std::cout << std::fixed << std::setprecision(3) << progress << std::endl;
+			last_progress = progress;
+		}
+	});
+
+	auto generated_time = std::chrono::high_resolution_clock::now();
+
+	auto triangles = t.enumerate();
+
+	auto enumerated_time = std::chrono::high_resolution_clock::now();
+
+	std::cout << "Generation: " << std::fixed << std::setprecision(2) << std::chrono::duration<double>(generated_time - start_time).count() << "s" << std::endl;
+	std::cout << "Enumeration: " << std::fixed << std::setprecision(2) << std::chrono::duration<double>(enumerated_time - generated_time).count() << "s" << std::endl;
+
+	std::ofstream os("a.stl", std::ios::binary);
+	write_stl(os, triangles);
+}
+```
+
+### include/dmc/branch_tree_node.hpp
+```
+#pragma once
+#include "tree_node.hpp"
+#include <memory>
+
+namespace dmc
+{
+	template <class Scalar>
+	class branch_tree_node : public tree_node<Scalar>
+	{
+	public:
+		typedef tree_node<Scalar> base_type;
+
+		explicit branch_tree_node(const std::array<base_type*, 8>& children)
+			: children_(children)
+		{
+		}
+
+		const std::array<base_type*, 8>& children() const
+		{
+			return children_;
+		}
+
+	private:
+		std::array<base_type*, 8> children_;
+	};
+}
+```
+
+### include/dmc/dmc.hpp
+```
+#pragma once
+#include "object.hpp"
+#include "tree.hpp"
+#include "io.hpp"
+#include "functions.hpp"
+```
+
+### include/dmc/dual.hpp
+```
+#pragma once
+#include "vector.hpp"
+#include <boost/operators.hpp>
+#include <iostream>
+
+namespace dmc
+{
+	template <class Scalar, int Dimension>
+	class dual
+		: boost::addable<dual<Scalar, Dimension>
+		, boost::addable<dual<Scalar, Dimension>, Scalar
+		, boost::subtractable<dual<Scalar, Dimension>
+		, boost::subtractable<dual<Scalar, Dimension>, Scalar
+		, boost::multipliable<dual<Scalar, Dimension>
+		, boost::multipliable<dual<Scalar, Dimension>, Scalar
+		, boost::dividable<dual<Scalar, Dimension>
+		, boost::dividable<dual<Scalar, Dimension>, Scalar
+		, boost::equality_comparable<dual<Scalar, Dimension>
+		, boost::equality_comparable<dual<Scalar, Dimension>, Scalar
+		, boost::less_than_comparable<dual<Scalar, Dimension>
+		, boost::less_than_comparable<dual<Scalar, Dimension>, Scalar
+		>>>>>>>>>>>>
+	{
+	public:
+		typedef Scalar scalar_type;
+		static const int dimension = Dimension;
+		typedef vector<scalar_type, dimension> vector_type;
+
+		dual() = default;
+
+		dual(scalar_type value)
+			: value_(value)
+		{
+		}
+
+		dual(scalar_type value, const vector_type& grad)
+			: value_(value)
+			, grad_(grad)
+		{
+		}
+
+		scalar_type& value()
+		{
+			return value_;
+		}
+
+		const scalar_type& value() const
+		{
+			return value_;
+		}
+
+		vector_type& grad()
+		{
+			return grad_;
+		}
+
+		const vector_type& grad() const
+		{
+			return grad_;
+		}
+
+		const dual& operator+() const
+		{
+			return *this;
+		}
+
+		dual operator-() const
+		{
+			return dual(-value_, -grad_);
+		}
+
+		dual& operator+=(const dual& rhs)
+		{
+			value_ += rhs.value_;
+			grad_ += rhs.grad_;
+			return *this;
+		}
+
+		dual& operator-=(const dual& rhs)
+		{
+			value_ -= rhs.value_;
+			grad_ -= rhs.grad_;
+			return *this;
+		}
+
+		dual& operator*=(const dual& rhs)
+		{
+			grad_ = value_ * rhs.grad_ + rhs.value_ * grad_;
+			value_ *= rhs.value_;
+			return *this;
+		}
+
+		dual& operator/=(const dual& rhs)
+		{
+			grad_ = (grad_ * rhs.value_ - value_ * rhs.grad_) / (rhs.value_ * rhs.value_);
+			value_ /= rhs.value_;
+			return *this;
+		}
+
+		friend bool operator==(const dual& lhs, const dual& rhs)
+		{
+			return lhs.value_ == rhs.value_;
+		}
+
+		friend bool operator<(const dual& lhs, const dual& rhs)
+		{
+			return lhs.value_ < rhs.value_;
+		}
+
+		friend dual abs(const dual& d)
+		{
+			return d.value() < static_cast<scalar_type>(0.0) ? -d : d;
+		}
+
+		friend dual sqrt(const dual& d)
+		{
+			auto value = std::sqrt(d.value());
+			auto grad = value * static_cast<scalar_type>(0.5) * d.grad() / d.value();
+			return dual(value, grad);
+		}
+
+		friend dual sin(const dual& d)
+		{
+			auto value = std::sin(d.value());
+			auto grad = d.grad() * std::cos(d.value());
+			return dual(value, grad);
+		}
+
+		friend dual cos(const dual& d)
+		{
+			auto value = std::cos(d.value());
+			auto grad = -d.grad() * std::sin(d.value());
+			return dual(value, grad);
+		}
+
+	private:
+		scalar_type value_{};
+		vector_type grad_;
+	};
+
+	template <class Scalar, int Dimension>
+	Scalar value(const dual<Scalar, Dimension>& d)
+	{
+		return d.value();
+	}
+
+	template <class Scalar>
+	Scalar value(const Scalar& value)
+	{
+		return value;
+	}
+
+	template <class Scalar, int Dimension>
+	Scalar grad(const dual<Scalar, Dimension>& d)
+	{
+		return d.grad();
+	}
+
+	template <class Scalar, int Dimension>
+	std::ostream& operator<<(std::ostream& os, const dual<Scalar, Dimension>& d)
+	{
+		os << "{ " << d.value() << ", " << d.grad().transpose() << " }";
+		return os;
+	}
+}
+```
+
+### include/dmc/functions.hpp
+```
+#pragma once
+
+namespace dmc
+{
+	template <class Scalar>
+	Scalar clamp(Scalar x, Scalar minimum, Scalar maximum)
+	{
+		return std::min(std::max(x, minimum), maximum);
+	}
+
+	template <class Scalar>
+	Scalar smooth_union(Scalar x1, Scalar x2, Scalar k)
+	{
+		auto h = clamp<Scalar>(0.5 + 0.5 * (x2 - x1) / k, 0.0, 1.0);
+		return lerp(x2, x1, h) - k * h * (1.0 - h);
+	}
+}
+```
+
+### include/dmc/io.hpp
+```
+#pragma once
+#include "triangle.hpp"
+#include <algorithm>
+#include <iostream>
+#include <vector>
+
+namespace dmc
+{
+#pragma pack(push)
+#pragma pack(1)
+
+	struct stl_header
+	{
+		char comment[80];
+		std::uint32_t num_triangles;
+	};
+
+	struct stl_triangle
+	{
+		vector3f normal;
+		vector3f p1;
+		vector3f p2;
+		vector3f p3;
+		std::uint16_t dummy;
+	};
+
+#pragma pack(pop)
+
+	template <class Scalar>
+	void write_stl(std::ostream& os, const std::vector<triangle<Scalar>>& triangles)
+	{
+		stl_header header =
+			{
+				"Generated by dmc",
+				static_cast<std::uint32_t>(triangles.size()),
+			};
+
+		os.write(reinterpret_cast<const char*>(&header), sizeof(header));
+
+		std::vector<stl_triangle> stl_triangles(triangles.size());
+
+		std::transform(triangles.begin(), triangles.end(), stl_triangles.begin(),
+					   [](const auto& t) {
+						   stl_triangle result;
+						   result.p1 = t.p1().template cast<float>();
+						   result.p2 = t.p2().template cast<float>();
+						   result.p3 = t.p3().template cast<float>();
+
+						   return result;
+					   });
+
+		os.write(reinterpret_cast<const char*>(stl_triangles.data()), sizeof(stl_triangle) * stl_triangles.size());
+	}
+}
+```
+
+### include/dmc/leaf_tree_node.hpp
+```
+#pragma once
+#include "tree_node.hpp"
+#include "vertex.hpp"
+
+namespace dmc
+{
+	template <class Scalar>
+	class leaf_tree_node : public tree_node<Scalar>
+	{
+	public:
+		typedef tree_node<Scalar> base_type;
+
+		using typename base_type::scalar_type;
+		typedef dmc::vertex<scalar_type> vertex_type;
+
+		explicit leaf_tree_node(const vertex_type& vertex)
+			: vertex_(vertex)
+		{
+		}
+
+		const vertex_type& vertex() const
+		{
+			return vertex_;
+		}
+
+	private:
+		vertex_type vertex_;
+	};
+}
+```
+
+### include/dmc/marching_cubes.hpp
+```
+#pragma once
+#include "math_util.hpp"
+#include "triangle.hpp"
+#include "vertex.hpp"
+
+namespace dmc
+{
+	template <class Scalar, class Receiver>
+	void marching_cubes(
+		const std::array<const vertex<Scalar>*, 8>& vertices,
+		Receiver receiver)
+	{
+		struct procedure
+		{
+			int trans[8];
+			bool flip;
+			int code;
+		};
+
+		static procedure table[256] =
+			{
+				/* 00000000 */ {{0, 1, 2, 3, 4, 5, 6, 7}, false, 0b00000000},
+				/* 00000001 */ {{0, 1, 2, 3, 4, 5, 6, 7}, false, 0b00000001},
+				/* 00000010 */ {{1, 0, 3, 2, 5, 4, 7, 6}, true, 0b00000001},
+				/* 00000011 */ {{0, 1, 2, 3, 4, 5, 6, 7}, false, 0b00000011},
+				/* 00000100 */ {{2, 3, 0, 1, 6, 7, 4, 5}, true, 0b00000001},
+				/* 00000101 */ {{0, 2, 1, 3, 4, 6, 5, 7}, true, 0b00000011},
+				/* 00000110 */ {{0, 1, 2, 3, 4, 5, 6, 7}, false, 0b00000110},
+				/* 00000111 */ {{0, 1, 2, 3, 4, 5, 6, 7}, false, 0b00000111},
+				/* 00001000 */ {{3, 2, 1, 0, 7, 6, 5, 4}, false, 0b00000001},
+				/* 00001001 */ {{1, 0, 3, 2, 5, 4, 7, 6}, true, 0b00000110},
+				/* 00001010 */ {{1, 3, 0, 2, 5, 7, 4, 6}, false, 0b00000011},
+				/* 00001011 */ {{1, 0, 3, 2, 5, 4, 7, 6}, true, 0b00000111},
+				/* 00001100 */ {{2, 3, 0, 1, 6, 7, 4, 5}, true, 0b00000011},
+				/* 00001101 */ {{2, 3, 0, 1, 6, 7, 4, 5}, true, 0b00000111},
+				/* 00001110 */ {{3, 2, 1, 0, 7, 6, 5, 4}, false, 0b00000111},
+				/* 00001111 */ {{0, 1, 2, 3, 4, 5, 6, 7}, false, 0b00001111},
+				/* 00010000 */ {{4, 5, 6, 7, 0, 1, 2, 3}, true, 0b00000001},
+				/* 00010001 */ {{0, 4, 2, 6, 1, 5, 3, 7}, true, 0b00000011},
+				/* 00010010 */ {{0, 1, 4, 5, 2, 3, 6, 7}, true, 0b00000110},
+				/* 00010011 */ {{0, 1, 4, 5, 2, 3, 6, 7}, true, 0b00000111},
+				/* 00010100 */ {{0, 2, 4, 6, 1, 3, 5, 7}, false, 0b00000110},
+				/* 00010101 */ {{0, 2, 4, 6, 1, 3, 5, 7}, false, 0b00000111},
+				/* 00010110 */ {{0, 1, 2, 3, 4, 5, 6, 7}, false, 0b00010110},
+				/* 00010111 */ {{0, 1, 2, 3, 4, 5, 6, 7}, false, 0b00010111},
+				/* 00011000 */ {{0, 1, 2, 3, 4, 5, 6, 7}, false, 0b00011000},
+				/* 00011001 */ {{0, 1, 2, 3, 4, 5, 6, 7}, false, 0b00011001},
+				/* 00011010 */ {{1, 0, 5, 4, 3, 2, 7, 6}, false, 0b00011001},
+				/* 00011011 */ {{0, 1, 2, 3, 4, 5, 6, 7}, false, 0b00011011},
+				/* 00011100 */ {{2, 0, 6, 4, 3, 1, 7, 5}, true, 0b00011001},
+				/* 00011101 */ {{0, 2, 1, 3, 4, 6, 5, 7}, true, 0b00011011},
+				/* 00011110 */ {{0, 1, 2, 3, 4, 5, 6, 7}, false, 0b00011110},
+				/* 00011111 */ {{0, 1, 2, 3, 4, 5, 6, 7}, false, 0b00011111},
+				/* 00100000 */ {{5, 4, 7, 6, 1, 0, 3, 2}, false, 0b00000001},
+				/* 00100001 */ {{1, 0, 5, 4, 3, 2, 7, 6}, false, 0b00000110},
+				/* 00100010 */ {{1, 5, 3, 7, 0, 4, 2, 6}, false, 0b00000011},
+				/* 00100011 */ {{1, 0, 5, 4, 3, 2, 7, 6}, false, 0b00000111},
+				/* 00100100 */ {{0, 1, 4, 5, 2, 3, 6, 7}, true, 0b00011000},
+				/* 00100101 */ {{0, 1, 4, 5, 2, 3, 6, 7}, true, 0b00011001},
+				/* 00100110 */ {{1, 0, 3, 2, 5, 4, 7, 6}, true, 0b00011001},
+				/* 00100111 */ {{0, 1, 4, 5, 2, 3, 6, 7}, true, 0b00011011},
+				/* 00101000 */ {{1, 3, 5, 7, 0, 2, 4, 6}, true, 0b00000110},
+				/* 00101001 */ {{1, 0, 3, 2, 5, 4, 7, 6}, true, 0b00010110},
+				/* 00101010 */ {{1, 3, 5, 7, 0, 2, 4, 6}, true, 0b00000111},
+				/* 00101011 */ {{1, 0, 3, 2, 5, 4, 7, 6}, true, 0b00010111},
+				/* 00101100 */ {{3, 1, 7, 5, 2, 0, 6, 4}, false, 0b00011001},
+				/* 00101101 */ {{1, 0, 3, 2, 5, 4, 7, 6}, true, 0b00011110},
+				/* 00101110 */ {{1, 3, 0, 2, 5, 7, 4, 6}, false, 0b00011011},
+				/* 00101111 */ {{1, 0, 3, 2, 5, 4, 7, 6}, true, 0b00011111},
+				/* 00110000 */ {{4, 5, 6, 7, 0, 1, 2, 3}, true, 0b00000011},
+				/* 00110001 */ {{4, 5, 0, 1, 6, 7, 2, 3}, false, 0b00000111},
+				/* 00110010 */ {{5, 4, 1, 0, 7, 6, 3, 2}, true, 0b00000111},
+				/* 00110011 */ {{0, 1, 4, 5, 2, 3, 6, 7}, true, 0b00001111},
+				/* 00110100 */ {{4, 6, 0, 2, 5, 7, 1, 3}, true, 0b00011001},
+				/* 00110101 */ {{0, 4, 1, 5, 2, 6, 3, 7}, false, 0b00011011},
+				/* 00110110 */ {{0, 1, 4, 5, 2, 3, 6, 7}, true, 0b00011110},
+				/* 00110111 */ {{0, 1, 4, 5, 2, 3, 6, 7}, true, 0b00011111},
+				/* 00111000 */ {{5, 7, 1, 3, 4, 6, 0, 2}, false, 0b00011001},
+				/* 00111001 */ {{1, 0, 5, 4, 3, 2, 7, 6}, false, 0b00011110},
+				/* 00111010 */ {{1, 5, 0, 4, 3, 7, 2, 6}, true, 0b00011011},
+				/* 00111011 */ {{1, 0, 5, 4, 3, 2, 7, 6}, false, 0b00011111},
+				/* 00111100 */ {{0, 1, 2, 3, 4, 5, 6, 7}, false, 0b00111100},
+				/* 00111101 */ {{0, 1, 2, 3, 4, 5, 6, 7}, false, 0b00111101},
+				/* 00111110 */ {{1, 0, 3, 2, 5, 4, 7, 6}, true, 0b00111101},
+				/* 00111111 */ {{0, 1, 2, 3, 4, 5, 6, 7}, false, 0b00111111},
+				/* 01000000 */ {{6, 7, 4, 5, 2, 3, 0, 1}, false, 0b00000001},
+				/* 01000001 */ {{2, 0, 6, 4, 3, 1, 7, 5}, true, 0b00000110},
+				/* 01000010 */ {{0, 2, 4, 6, 1, 3, 5, 7}, false, 0b00011000},
+				/* 01000011 */ {{0, 2, 4, 6, 1, 3, 5, 7}, false, 0b00011001},
+				/* 01000100 */ {{2, 6, 0, 4, 3, 7, 1, 5}, false, 0b00000011},
+				/* 01000101 */ {{2, 0, 6, 4, 3, 1, 7, 5}, true, 0b00000111},
+				/* 01000110 */ {{2, 3, 0, 1, 6, 7, 4, 5}, true, 0b00011001},
+				/* 01000111 */ {{0, 2, 4, 6, 1, 3, 5, 7}, false, 0b00011011},
+				/* 01001000 */ {{2, 3, 6, 7, 0, 1, 4, 5}, false, 0b00000110},
+				/* 01001001 */ {{2, 3, 0, 1, 6, 7, 4, 5}, true, 0b00010110},
+				/* 01001010 */ {{3, 2, 7, 6, 1, 0, 5, 4}, true, 0b00011001},
+				/* 01001011 */ {{2, 3, 0, 1, 6, 7, 4, 5}, true, 0b00011110},
+				/* 01001100 */ {{2, 3, 6, 7, 0, 1, 4, 5}, false, 0b00000111},
+				/* 01001101 */ {{2, 3, 0, 1, 6, 7, 4, 5}, true, 0b00010111},
+				/* 01001110 */ {{2, 3, 0, 1, 6, 7, 4, 5}, true, 0b00011011},
+				/* 01001111 */ {{2, 3, 0, 1, 6, 7, 4, 5}, true, 0b00011111},
+				/* 01010000 */ {{4, 6, 5, 7, 0, 2, 1, 3}, false, 0b00000011},
+				/* 01010001 */ {{4, 6, 0, 2, 5, 7, 1, 3}, true, 0b00000111},
+				/* 01010010 */ {{4, 5, 0, 1, 6, 7, 2, 3}, false, 0b00011001},
+				/* 01010011 */ {{0, 4, 2, 6, 1, 5, 3, 7}, true, 0b00011011},
+				/* 01010100 */ {{6, 4, 2, 0, 7, 5, 3, 1}, false, 0b00000111},
+				/* 01010101 */ {{0, 2, 4, 6, 1, 3, 5, 7}, false, 0b00001111},
+				/* 01010110 */ {{0, 2, 4, 6, 1, 3, 5, 7}, false, 0b00011110},
+				/* 01010111 */ {{0, 2, 4, 6, 1, 3, 5, 7}, false, 0b00011111},
+				/* 01011000 */ {{6, 7, 2, 3, 4, 5, 0, 1}, true, 0b00011001},
+				/* 01011001 */ {{2, 0, 6, 4, 3, 1, 7, 5}, true, 0b00011110},
+				/* 01011010 */ {{0, 2, 1, 3, 4, 6, 5, 7}, true, 0b00111100},
+				/* 01011011 */ {{0, 2, 1, 3, 4, 6, 5, 7}, true, 0b00111101},
+				/* 01011100 */ {{2, 6, 0, 4, 3, 7, 1, 5}, false, 0b00011011},
+				/* 01011101 */ {{2, 0, 6, 4, 3, 1, 7, 5}, true, 0b00011111},
+				/* 01011110 */ {{2, 0, 3, 1, 6, 4, 7, 5}, false, 0b00111101},
+				/* 01011111 */ {{0, 2, 1, 3, 4, 6, 5, 7}, true, 0b00111111},
+				/* 01100000 */ {{4, 5, 6, 7, 0, 1, 2, 3}, true, 0b00000110},
+				/* 01100001 */ {{4, 5, 6, 7, 0, 1, 2, 3}, true, 0b00010110},
+				/* 01100010 */ {{5, 4, 7, 6, 1, 0, 3, 2}, false, 0b00011001},
+				/* 01100011 */ {{4, 5, 0, 1, 6, 7, 2, 3}, false, 0b00011110},
+				/* 01100100 */ {{6, 7, 4, 5, 2, 3, 0, 1}, false, 0b00011001},
+				/* 01100101 */ {{4, 6, 0, 2, 5, 7, 1, 3}, true, 0b00011110},
+				/* 01100110 */ {{0, 4, 2, 6, 1, 5, 3, 7}, true, 0b00111100},
+				/* 01100111 */ {{0, 4, 2, 6, 1, 5, 3, 7}, true, 0b00111101},
+				/* 01101000 */ {{7, 6, 5, 4, 3, 2, 1, 0}, true, 0b00010110},
+				/* 01101001 */ {{0, 1, 2, 3, 4, 5, 6, 7}, false, 0b01101001},
+				/* 01101010 */ {{7, 5, 3, 1, 6, 4, 2, 0}, true, 0b00011110},
+				/* 01101011 */ {{0, 1, 2, 3, 4, 5, 6, 7}, false, 0b01101011},
+				/* 01101100 */ {{7, 6, 3, 2, 5, 4, 1, 0}, false, 0b00011110},
+				/* 01101101 */ {{0, 2, 1, 3, 4, 6, 5, 7}, true, 0b01101011},
+				/* 01101110 */ {{3, 7, 1, 5, 2, 6, 0, 4}, true, 0b00111101},
+				/* 01101111 */ {{0, 1, 2, 3, 4, 5, 6, 7}, false, 0b01101111},
+				/* 01110000 */ {{4, 5, 6, 7, 0, 1, 2, 3}, true, 0b00000111},
+				/* 01110001 */ {{4, 5, 6, 7, 0, 1, 2, 3}, true, 0b00010111},
+				/* 01110010 */ {{4, 5, 0, 1, 6, 7, 2, 3}, false, 0b00011011},
+				/* 01110011 */ {{4, 5, 0, 1, 6, 7, 2, 3}, false, 0b00011111},
+				/* 01110100 */ {{4, 6, 0, 2, 5, 7, 1, 3}, true, 0b00011011},
+				/* 01110101 */ {{4, 6, 0, 2, 5, 7, 1, 3}, true, 0b00011111},
+				/* 01110110 */ {{4, 0, 6, 2, 5, 1, 7, 3}, false, 0b00111101},
+				/* 01110111 */ {{0, 4, 2, 6, 1, 5, 3, 7}, true, 0b00111111},
+				/* 01111000 */ {{7, 6, 5, 4, 3, 2, 1, 0}, true, 0b00011110},
+				/* 01111001 */ {{0, 4, 2, 6, 1, 5, 3, 7}, true, 0b01101011},
+				/* 01111010 */ {{5, 7, 4, 6, 1, 3, 0, 2}, true, 0b00111101},
+				/* 01111011 */ {{0, 1, 4, 5, 2, 3, 6, 7}, true, 0b01101111},
+				/* 01111100 */ {{6, 7, 4, 5, 2, 3, 0, 1}, false, 0b00111101},
+				/* 01111101 */ {{0, 2, 4, 6, 1, 3, 5, 7}, false, 0b01101111},
+				/* 01111110 */ {{0, 1, 2, 3, 4, 5, 6, 7}, false, 0b01111110},
+				/* 01111111 */ {{0, 1, 2, 3, 4, 5, 6, 7}, false, 0b01111111},
+				/* 10000000 */ {{7, 6, 5, 4, 3, 2, 1, 0}, true, 0b00000001},
+				/* 10000001 */ {{1, 3, 5, 7, 0, 2, 4, 6}, true, 0b00011000},
+				/* 10000010 */ {{3, 1, 7, 5, 2, 0, 6, 4}, false, 0b00000110},
+				/* 10000011 */ {{1, 3, 5, 7, 0, 2, 4, 6}, true, 0b00011001},
+				/* 10000100 */ {{3, 2, 7, 6, 1, 0, 5, 4}, true, 0b00000110},
+				/* 10000101 */ {{2, 3, 6, 7, 0, 1, 4, 5}, false, 0b00011001},
+				/* 10000110 */ {{3, 2, 1, 0, 7, 6, 5, 4}, false, 0b00010110},
+				/* 10000111 */ {{3, 2, 1, 0, 7, 6, 5, 4}, false, 0b00011110},
+				/* 10001000 */ {{3, 7, 1, 5, 2, 6, 0, 4}, true, 0b00000011},
+				/* 10001001 */ {{3, 2, 1, 0, 7, 6, 5, 4}, false, 0b00011001},
+				/* 10001010 */ {{3, 1, 7, 5, 2, 0, 6, 4}, false, 0b00000111},
+				/* 10001011 */ {{1, 3, 5, 7, 0, 2, 4, 6}, true, 0b00011011},
+				/* 10001100 */ {{3, 2, 7, 6, 1, 0, 5, 4}, true, 0b00000111},
+				/* 10001101 */ {{2, 3, 6, 7, 0, 1, 4, 5}, false, 0b00011011},
+				/* 10001110 */ {{3, 2, 1, 0, 7, 6, 5, 4}, false, 0b00010111},
+				/* 10001111 */ {{3, 2, 1, 0, 7, 6, 5, 4}, false, 0b00011111},
+				/* 10010000 */ {{5, 4, 7, 6, 1, 0, 3, 2}, false, 0b00000110},
+				/* 10010001 */ {{4, 5, 6, 7, 0, 1, 2, 3}, true, 0b00011001},
+				/* 10010010 */ {{5, 4, 7, 6, 1, 0, 3, 2}, false, 0b00010110},
+				/* 10010011 */ {{5, 4, 1, 0, 7, 6, 3, 2}, true, 0b00011110},
+				/* 10010100 */ {{6, 7, 4, 5, 2, 3, 0, 1}, false, 0b00010110},
+				/* 10010101 */ {{6, 4, 2, 0, 7, 5, 3, 1}, false, 0b00011110},
+				/* 10010110 */ {{1, 0, 3, 2, 5, 4, 7, 6}, true, 0b01101001},
+				/* 10010111 */ {{1, 0, 3, 2, 5, 4, 7, 6}, true, 0b01101011},
+				/* 10011000 */ {{7, 6, 5, 4, 3, 2, 1, 0}, true, 0b00011001},
+				/* 10011001 */ {{1, 5, 3, 7, 0, 4, 2, 6}, false, 0b00111100},
+				/* 10011010 */ {{5, 7, 1, 3, 4, 6, 0, 2}, false, 0b00011110},
+				/* 10011011 */ {{1, 5, 3, 7, 0, 4, 2, 6}, false, 0b00111101},
+				/* 10011100 */ {{6, 7, 2, 3, 4, 5, 0, 1}, true, 0b00011110},
+				/* 10011101 */ {{2, 6, 0, 4, 3, 7, 1, 5}, false, 0b00111101},
+				/* 10011110 */ {{1, 3, 0, 2, 5, 7, 4, 6}, false, 0b01101011},
+				/* 10011111 */ {{1, 0, 3, 2, 5, 4, 7, 6}, true, 0b01101111},
+				/* 10100000 */ {{5, 7, 4, 6, 1, 3, 0, 2}, true, 0b00000011},
+				/* 10100001 */ {{5, 4, 1, 0, 7, 6, 3, 2}, true, 0b00011001},
+				/* 10100010 */ {{5, 7, 1, 3, 4, 6, 0, 2}, false, 0b00000111},
+				/* 10100011 */ {{1, 5, 3, 7, 0, 4, 2, 6}, false, 0b00011011},
+				/* 10100100 */ {{7, 6, 3, 2, 5, 4, 1, 0}, false, 0b00011001},
+				/* 10100101 */ {{1, 3, 0, 2, 5, 7, 4, 6}, false, 0b00111100},
+				/* 10100110 */ {{3, 1, 7, 5, 2, 0, 6, 4}, false, 0b00011110},
+				/* 10100111 */ {{1, 3, 0, 2, 5, 7, 4, 6}, false, 0b00111101},
+				/* 10101000 */ {{7, 5, 3, 1, 6, 4, 2, 0}, true, 0b00000111},
+				/* 10101001 */ {{1, 3, 5, 7, 0, 2, 4, 6}, true, 0b00011110},
+				/* 10101010 */ {{1, 3, 5, 7, 0, 2, 4, 6}, true, 0b00001111},
+				/* 10101011 */ {{1, 3, 5, 7, 0, 2, 4, 6}, true, 0b00011111},
+				/* 10101100 */ {{3, 7, 1, 5, 2, 6, 0, 4}, true, 0b00011011},
+				/* 10101101 */ {{3, 1, 2, 0, 7, 5, 6, 4}, true, 0b00111101},
+				/* 10101110 */ {{3, 1, 7, 5, 2, 0, 6, 4}, false, 0b00011111},
+				/* 10101111 */ {{1, 3, 0, 2, 5, 7, 4, 6}, false, 0b00111111},
+				/* 10110000 */ {{5, 4, 7, 6, 1, 0, 3, 2}, false, 0b00000111},
+				/* 10110001 */ {{4, 5, 6, 7, 0, 1, 2, 3}, true, 0b00011011},
+				/* 10110010 */ {{5, 4, 7, 6, 1, 0, 3, 2}, false, 0b00010111},
+				/* 10110011 */ {{5, 4, 1, 0, 7, 6, 3, 2}, true, 0b00011111},
+				/* 10110100 */ {{6, 7, 4, 5, 2, 3, 0, 1}, false, 0b00011110},
+				/* 10110101 */ {{4, 6, 5, 7, 0, 2, 1, 3}, false, 0b00111101},
+				/* 10110110 */ {{1, 5, 3, 7, 0, 4, 2, 6}, false, 0b01101011},
+				/* 10110111 */ {{1, 0, 5, 4, 3, 2, 7, 6}, false, 0b01101111},
+				/* 10111000 */ {{5, 7, 1, 3, 4, 6, 0, 2}, false, 0b00011011},
+				/* 10111001 */ {{5, 1, 7, 3, 4, 0, 6, 2}, true, 0b00111101},
+				/* 10111010 */ {{5, 7, 1, 3, 4, 6, 0, 2}, false, 0b00011111},
+				/* 10111011 */ {{1, 5, 3, 7, 0, 4, 2, 6}, false, 0b00111111},
+				/* 10111100 */ {{7, 6, 5, 4, 3, 2, 1, 0}, true, 0b00111101},
+				/* 10111101 */ {{1, 0, 3, 2, 5, 4, 7, 6}, true, 0b01111110},
+				/* 10111110 */ {{1, 3, 5, 7, 0, 2, 4, 6}, true, 0b01101111},
+				/* 10111111 */ {{1, 0, 3, 2, 5, 4, 7, 6}, true, 0b01111111},
+				/* 11000000 */ {{6, 7, 4, 5, 2, 3, 0, 1}, false, 0b00000011},
+				/* 11000001 */ {{6, 4, 2, 0, 7, 5, 3, 1}, false, 0b00011001},
+				/* 11000010 */ {{7, 5, 3, 1, 6, 4, 2, 0}, true, 0b00011001},
+				/* 11000011 */ {{2, 3, 0, 1, 6, 7, 4, 5}, true, 0b00111100},
+				/* 11000100 */ {{6, 7, 2, 3, 4, 5, 0, 1}, true, 0b00000111},
+				/* 11000101 */ {{2, 6, 3, 7, 0, 4, 1, 5}, true, 0b00011011},
+				/* 11000110 */ {{3, 2, 7, 6, 1, 0, 5, 4}, true, 0b00011110},
+				/* 11000111 */ {{2, 3, 0, 1, 6, 7, 4, 5}, true, 0b00111101},
+				/* 11001000 */ {{7, 6, 3, 2, 5, 4, 1, 0}, false, 0b00000111},
+				/* 11001001 */ {{2, 3, 6, 7, 0, 1, 4, 5}, false, 0b00011110},
+				/* 11001010 */ {{3, 7, 2, 6, 1, 5, 0, 4}, false, 0b00011011},
+				/* 11001011 */ {{3, 2, 1, 0, 7, 6, 5, 4}, false, 0b00111101},
+				/* 11001100 */ {{2, 3, 6, 7, 0, 1, 4, 5}, false, 0b00001111},
+				/* 11001101 */ {{2, 3, 6, 7, 0, 1, 4, 5}, false, 0b00011111},
+				/* 11001110 */ {{3, 2, 7, 6, 1, 0, 5, 4}, true, 0b00011111},
+				/* 11001111 */ {{2, 3, 0, 1, 6, 7, 4, 5}, true, 0b00111111},
+				/* 11010000 */ {{6, 7, 4, 5, 2, 3, 0, 1}, false, 0b00000111},
+				/* 11010001 */ {{4, 6, 5, 7, 0, 2, 1, 3}, false, 0b00011011},
+				/* 11010010 */ {{5, 4, 7, 6, 1, 0, 3, 2}, false, 0b00011110},
+				/* 11010011 */ {{4, 5, 6, 7, 0, 1, 2, 3}, true, 0b00111101},
+				/* 11010100 */ {{6, 7, 4, 5, 2, 3, 0, 1}, false, 0b00010111},
+				/* 11010101 */ {{6, 4, 2, 0, 7, 5, 3, 1}, false, 0b00011111},
+				/* 11010110 */ {{2, 6, 0, 4, 3, 7, 1, 5}, false, 0b01101011},
+				/* 11010111 */ {{2, 0, 6, 4, 3, 1, 7, 5}, true, 0b01101111},
+				/* 11011000 */ {{6, 7, 2, 3, 4, 5, 0, 1}, true, 0b00011011},
+				/* 11011001 */ {{6, 2, 4, 0, 7, 3, 5, 1}, true, 0b00111101},
+				/* 11011010 */ {{7, 5, 6, 4, 3, 1, 2, 0}, false, 0b00111101},
+				/* 11011011 */ {{2, 3, 0, 1, 6, 7, 4, 5}, true, 0b01111110},
+				/* 11011100 */ {{6, 7, 2, 3, 4, 5, 0, 1}, true, 0b00011111},
+				/* 11011101 */ {{2, 6, 0, 4, 3, 7, 1, 5}, false, 0b00111111},
+				/* 11011110 */ {{2, 3, 6, 7, 0, 1, 4, 5}, false, 0b01101111},
+				/* 11011111 */ {{2, 3, 0, 1, 6, 7, 4, 5}, true, 0b01111111},
+				/* 11100000 */ {{7, 6, 5, 4, 3, 2, 1, 0}, true, 0b00000111},
+				/* 11100001 */ {{4, 5, 6, 7, 0, 1, 2, 3}, true, 0b00011110},
+				/* 11100010 */ {{5, 7, 4, 6, 1, 3, 0, 2}, true, 0b00011011},
+				/* 11100011 */ {{5, 4, 7, 6, 1, 0, 3, 2}, false, 0b00111101},
+				/* 11100100 */ {{6, 7, 4, 5, 2, 3, 0, 1}, false, 0b00011011},
+				/* 11100101 */ {{6, 4, 7, 5, 2, 0, 3, 1}, true, 0b00111101},
+				/* 11100110 */ {{7, 3, 5, 1, 6, 2, 4, 0}, false, 0b00111101},
+				/* 11100111 */ {{3, 2, 1, 0, 7, 6, 5, 4}, false, 0b01111110},
+				/* 11101000 */ {{7, 6, 5, 4, 3, 2, 1, 0}, true, 0b00010111},
+				/* 11101001 */ {{3, 7, 1, 5, 2, 6, 0, 4}, true, 0b01101011},
+				/* 11101010 */ {{7, 5, 3, 1, 6, 4, 2, 0}, true, 0b00011111},
+				/* 11101011 */ {{3, 1, 7, 5, 2, 0, 6, 4}, false, 0b01101111},
+				/* 11101100 */ {{7, 6, 3, 2, 5, 4, 1, 0}, false, 0b00011111},
+				/* 11101101 */ {{3, 2, 7, 6, 1, 0, 5, 4}, true, 0b01101111},
+				/* 11101110 */ {{3, 7, 1, 5, 2, 6, 0, 4}, true, 0b00111111},
+				/* 11101111 */ {{3, 2, 1, 0, 7, 6, 5, 4}, false, 0b01111111},
+				/* 11110000 */ {{4, 5, 6, 7, 0, 1, 2, 3}, true, 0b00001111},
+				/* 11110001 */ {{4, 5, 6, 7, 0, 1, 2, 3}, true, 0b00011111},
+				/* 11110010 */ {{5, 4, 7, 6, 1, 0, 3, 2}, false, 0b00011111},
+				/* 11110011 */ {{4, 5, 6, 7, 0, 1, 2, 3}, true, 0b00111111},
+				/* 11110100 */ {{6, 7, 4, 5, 2, 3, 0, 1}, false, 0b00011111},
+				/* 11110101 */ {{4, 6, 5, 7, 0, 2, 1, 3}, false, 0b00111111},
+				/* 11110110 */ {{4, 5, 6, 7, 0, 1, 2, 3}, true, 0b01101111},
+				/* 11110111 */ {{4, 5, 6, 7, 0, 1, 2, 3}, true, 0b01111111},
+				/* 11111000 */ {{7, 6, 5, 4, 3, 2, 1, 0}, true, 0b00011111},
+				/* 11111001 */ {{5, 4, 7, 6, 1, 0, 3, 2}, false, 0b01101111},
+				/* 11111010 */ {{5, 7, 4, 6, 1, 3, 0, 2}, true, 0b00111111},
+				/* 11111011 */ {{5, 4, 7, 6, 1, 0, 3, 2}, false, 0b01111111},
+				/* 11111100 */ {{6, 7, 4, 5, 2, 3, 0, 1}, false, 0b00111111},
+				/* 11111101 */ {{6, 7, 4, 5, 2, 3, 0, 1}, false, 0b01111111},
+				/* 11111110 */ {{7, 6, 5, 4, 3, 2, 1, 0}, true, 0b01111111},
+				/* 11111111 */ {{0, 1, 2, 3, 4, 5, 6, 7}, false, 0b11111111},
+			};
+
+		int index = 0;
+
+		for (int i = 0; i < 8; ++i)
+			if (vertices[i]->sign())
+				index += 1 << i;
+
+		const auto& proc = table[index];
+
+		if (proc.code == 0b00000000 || proc.code == 0b11111111)
+			return;
+
+		std::array<const vertex<Scalar>*, 8> trans_vertices;
+
+		for (int i = 0; i < 8; ++i)
+			trans_vertices[i] = vertices[proc.trans[i]];
+
+		std::array<vector<Scalar, 3>, 12> points;
+
+		auto calculate_point = [&](int edge_index, int vertex_index1, int vertex_index2) {
+			const auto& v1 = *trans_vertices[vertex_index1];
+			const auto& v2 = *trans_vertices[vertex_index2];
+
+			if (v1.sign() != v2.sign())
+			{
+				auto ratio = invlerp(v1.offset(), v2.offset(), static_cast<Scalar>(0.0));
+				points[edge_index] = lerp(v1.position(), v2.position(), ratio);
+			}
+		};
+
+		calculate_point(0, 0, 1);
+		calculate_point(1, 2, 3);
+		calculate_point(2, 4, 5);
+		calculate_point(3, 6, 7);
+		calculate_point(4, 0, 2);
+		calculate_point(5, 1, 3);
+		calculate_point(6, 4, 6);
+		calculate_point(7, 5, 7);
+		calculate_point(8, 0, 4);
+		calculate_point(9, 1, 5);
+		calculate_point(10, 2, 6);
+		calculate_point(11, 3, 7);
+
+		auto append = [&](int index1, int index2, int index3) {
+			const auto& p1 = points[index1];
+			const auto& p2 = points[index2];
+			const auto& p3 = points[index3];
+
+			if (proc.flip)
+				receiver(make_triangle(p1, p2, p3));
+			else
+				receiver(make_triangle(p3, p2, p1));
+		};
+
+		switch (proc.code)
+		{
+		case 0b00000001:
+			append(0, 4, 8);
+			break;
+		case 0b00000011:
+			append(4, 8, 9);
+			append(5, 4, 9);
+			break;
+		case 0b00000110:
+			append(0, 9, 4);
+			append(4, 9, 10);
+			append(10, 9, 5);
+			append(10, 5, 1);
+			break;
+		case 0b00000111:
+			append(8, 9, 10);
+			append(1, 10, 9);
+			append(5, 1, 9);
+			break;
+		case 0b00001111:
+			append(8, 9, 10);
+			append(9, 11, 10);
+			break;
+		case 0b00010110:
+			append(0, 8, 4);
+			append(1, 10, 5);
+			append(5, 10, 9);
+			append(9, 10, 2);
+			append(2, 10, 6);
+			break;
+		case 0b00010111:
+			append(1, 10, 5);
+			append(5, 10, 9);
+			append(2, 9, 10);
+			append(2, 10, 6);
+			break;
+		case 0b00011000:
+			append(1, 5, 11);
+			append(2, 8, 6);
+			break;
+		case 0b00011001:
+			append(1, 4, 6);
+			append(1, 6, 11);
+			append(11, 6, 2);
+			append(11, 2, 5);
+			append(5, 2, 0);
+			break;
+		case 0b00011011:
+			append(2, 9, 6);
+			append(6, 9, 11);
+			append(6, 11, 1);
+			append(1, 4, 6);
+			break;
+		case 0b00011110:
+			append(0, 8, 4);
+			append(2, 9, 6);
+			append(6, 9, 10);
+			append(10, 9, 11);
+			break;
+		case 0b00011111:
+			append(2, 9, 6);
+			append(6, 9, 10);
+			append(10, 9, 11);
+			break;
+		case 0b00111100:
+			append(4, 5, 8);
+			append(8, 5, 9);
+			append(10, 6, 11);
+			append(11, 6, 7);
+			break;
+		case 0b00111101:
+			append(6, 7, 10);
+			append(10, 7, 11);
+			append(0, 5, 9);
+			break;
+		case 0b00111111:
+			append(6, 7, 10);
+			append(10, 7, 11);
+			break;
+		case 0b01101001:
+			append(0, 5, 9);
+			append(1, 4, 10);
+			append(2, 6, 8);
+			append(3, 7, 11);
+			break;
+		case 0b01101011:
+			append(1, 4, 8);
+			append(1, 8, 11);
+			append(11, 8, 7);
+			append(7, 8, 2);
+			append(3, 6, 10);
+			break;
+		case 0b01101111:
+			append(2, 6, 8);
+			append(3, 7, 11);
+			break;
+		case 0b01111110:
+			append(0, 8, 4);
+			append(3, 7, 11);
+			break;
+		case 0b01111111:
+			append(3, 7, 11);
+			break;
+		}
+	}
+}
+```
+
+### include/dmc/math_util.hpp
+```
+#pragma once
+
+namespace dmc
+{
+	template <class T>
+	auto squared(const T& t)
+	{
+		return t * t;
+	}
+
+	template <class T>
+	auto sign(const T& t)
+	{
+		if (t < static_cast<T>(0))
+			return static_cast<T>(-1);
+
+		if (t > static_cast<T>(0))
+			return static_cast<T>(1);
+
+		return static_cast<T>(0);
+	}
+
+	template <class T, class U>
+	auto lerp(T x1, T x2, U ratio)
+	{
+		return x1 + (x2 - x1) * ratio;
+	}
+
+	template <class T>
+	auto invlerp(T x1, T x2, T x)
+	{
+		return (x - x1) / (x2 - x1);
+	}
+}
+```
+
+### include/dmc/object.hpp
+```
+#pragma once
+#include "vector.hpp"
+#include "dual.hpp"
+
+namespace dmc
+{
+	template <class Scalar>
+	class object
+	{
+	public:
+		typedef Scalar scalar_type;
+		typedef vector<scalar_type, 3> vector_type;
+		typedef dual<scalar_type, 3> dual_type;
+
+		virtual dual_type value_grad(const vector_type& p) const = 0;
+
+		virtual scalar_type value(const vector_type& p) const = 0;
+	};
+
+	template <class Scalar, class Derived>
+	class dual_object : public object<Scalar>
+	{
+	private:
+		typedef object<Scalar> base_type;
+
+	public:
+		using typename base_type::scalar_type;
+		using typename base_type::vector_type;
+		using typename base_type::dual_type;
+
+		virtual dual_type value_grad(const vector_type& p) const override
+		{
+			typedef dual<scalar_type, 3> dual_type;
+			typedef vector<dual_type, 3> dual_vector_type;
+
+			dual_type dx(p.x(), vector_type(static_cast<scalar_type>(1.0), static_cast<scalar_type>(0.0), static_cast<scalar_type>(0.0)));
+			dual_type dy(p.y(), vector_type(static_cast<scalar_type>(0.0), static_cast<scalar_type>(1.0), static_cast<scalar_type>(0.0)));
+			dual_type dz(p.z(), vector_type(static_cast<scalar_type>(0.0), static_cast<scalar_type>(0.0), static_cast<scalar_type>(1.0)));
+			dual_vector_type dp(dx, dy, dz);
+
+			return derived().templated_value(dp);
+		}
+
+		virtual scalar_type value(const vector_type& p) const override
+		{
+			return derived().templated_value(p);
+		}
+
+	private:
+		const Derived& derived() const
+		{
+			return static_cast<const Derived&>(*this);
+		}
+	};
+}
+```
+
+### include/dmc/tree.hpp
+```
+#pragma once
+#include "branch_tree_node.hpp"
+#include "leaf_tree_node.hpp"
+#include "marching_cubes.hpp"
+#include "object.hpp"
+#include "triangle.hpp"
+#include "tree_config.hpp"
+#include "tree_node.hpp"
+#include "vector.hpp"
+#include <eigen3/Eigen/Core>
+#include <eigen3/Eigen/Dense>
+#include <boost/pool/object_pool.hpp>
+#include <algorithm>
+#include <array>
+#include <memory>
+#include <vector>
+#include <random>
+#include <functional>
+#include <omp.h>
+
+namespace dmc
+{
+	template <class Scalar>
+	class tree
+	{
+	public:
+		typedef Scalar scalar_type;
+		typedef vector<scalar_type, 3> vector_type;
+		typedef dual<scalar_type, 3> dual_type;
+		typedef object<scalar_type> object_type;
+		typedef tree_config<scalar_type> config_type;
+		typedef tree_node<scalar_type> node_type;
+		typedef branch_tree_node<scalar_type> branch_node_type;
+		typedef leaf_tree_node<scalar_type> leaf_node_type;
+		typedef vertex<scalar_type> vertex_type;
+		typedef triangle<vector_type> triangle_type;
+
+		explicit tree(const vector_type& minimum, const vector_type& maximum, const config_type& config = config_type())
+			: minimum_(minimum)
+			, config_(config)
+			, branch_pool_(omp_get_max_threads())
+			, leaf_pool_(omp_get_max_threads())
+		{
+			auto v = maximum - minimum;
+
+			auto scaler = [&](auto x) {
+				return std::max(static_cast<scalar_type>(1.0), std::ceil(x / config_.grid_width));
+			};
+
+			size_ = v.map(scaler).template cast<std::size_t>();
+
+			children_.resize(size_.product());
+		}
+
+		void generate(const object_type& obj, const std::function<void(double)>& progress_receiver)
+		{
+			generate(obj, &progress_receiver);
+		}
+
+		void generate(const object_type& obj, const std::function<void(double)>* progress_receiver = nullptr)
+		{
+			auto total_size = size_.x() * size_.y() * size_.z();
+
+			std::size_t progress = 0;
+
+			if (progress_receiver)
+			{
+				(*progress_receiver)(0.0);
+			}
+
+			std::vector<std::size_t> indices(total_size);
+
+			for (std::size_t i = 0; i < total_size; ++i)
+			{
+				indices[i] = i;
+			}
+
+			std::mt19937 gen;
+			std::shuffle(indices.begin(), indices.end(), gen);
+
+#pragma omp parallel for schedule(dynamic)
+			for (std::ptrdiff_t i = 0; i < static_cast<std::ptrdiff_t>(total_size); ++i)
+			{
+				auto j = indices[i];
+				auto ix = j % size_.x();
+				auto iy = j / size_.x() % size_.y();
+				auto iz = j / size_.x() / size_.y();
+				auto minimum = minimum_ + vector<std::size_t, 3>(ix, iy, iz).cast<scalar_type>() * config_.grid_width;
+				auto maximum = minimum_ + vector<std::size_t, 3>(ix + 1, iy + 1, iz + 1).cast<scalar_type>() * config_.grid_width;
+				children_[index(ix, iy, iz)] = generate_impl(obj, minimum, maximum, 0);
+
+				if (progress_receiver)
+				{
+#pragma omp critical
+					{
+						(*progress_receiver)(static_cast<double>(++progress) / static_cast<double>(total_size));
+					}
+				}
+			}
+		}
+
+		std::vector<triangle_type> enumerate()
+		{
+			auto total_size = size_.x() * size_.y() * size_.z();
+
+			std::vector<std::size_t> indices(total_size);
+
+			for (std::size_t i = 0; i < total_size; ++i)
+			{
+				indices[i] = i;
+			}
+
+			std::mt19937 gen;
+			std::shuffle(indices.begin(), indices.end(), gen);
+
+			std::vector<std::vector<std::pair<std::size_t, triangle_type>>> local_triangles(omp_get_max_threads());
+
+#pragma omp parallel for schedule(dynamic)
+			for (std::ptrdiff_t i = 0; i < static_cast<std::ptrdiff_t>(total_size); ++i)
+			{
+				auto j = indices[i];
+				auto ix = j % size_.x();
+				auto iy = j / size_.x() % size_.y();
+				auto iz = j / size_.x() / size_.y();
+
+				auto receiver = [&](const triangle_type& t) {
+					local_triangles[omp_get_thread_num()].emplace_back(j, t);
+				};
+
+				enumerate_impl_c(*children_[index(ix, iy, iz)], receiver);
+
+				if (ix != size_.x() - 1)
+					enumerate_impl_f_x(*children_[index(ix, iy, iz)], *children_[index(ix + 1, iy, iz)], receiver);
+
+				if (iy != size_.y() - 1)
+					enumerate_impl_f_y(*children_[index(ix, iy, iz)], *children_[index(ix, iy + 1, iz)], receiver);
+
+				if (iz != size_.z() - 1)
+					enumerate_impl_f_z(*children_[index(ix, iy, iz)], *children_[index(ix, iy, iz + 1)], receiver);
+
+				if (ix != size_.x() - 1 && iy != size_.y() - 1)
+				{
+					enumerate_impl_e_xy(
+						*children_[index(ix, iy, iz)],
+						*children_[index(ix + 1, iy, iz)],
+						*children_[index(ix, iy + 1, iz)],
+						*children_[index(ix + 1, iy + 1, iz)],
+						receiver);
+				}
+
+				if (iy != size_.y() - 1 && iz != size_.z() - 1)
+				{
+					enumerate_impl_e_yz(
+						*children_[index(ix, iy, iz)],
+						*children_[index(ix, iy + 1, iz)],
+						*children_[index(ix, iy, iz + 1)],
+						*children_[index(ix, iy + 1, iz + 1)],
+						receiver);
+				}
+
+				if (ix != size_.x() - 1 && iz != size_.z() - 1)
+				{
+					enumerate_impl_e_xz(
+						*children_[index(ix, iy, iz)],
+						*children_[index(ix + 1, iy, iz)],
+						*children_[index(ix, iy, iz + 1)],
+						*children_[index(ix + 1, iy, iz + 1)],
+						receiver);
+				}
+
+				if (ix != size_.x() - 1 && iy != size_.y() - 1 && iz != size_.z() - 1)
+				{
+					enumerate_impl_v(
+						*children_[index(ix, iy, iz)],
+						*children_[index(ix + 1, iy, iz)],
+						*children_[index(ix, iy + 1, iz)],
+						*children_[index(ix + 1, iy + 1, iz)],
+						*children_[index(ix, iy, iz + 1)],
+						*children_[index(ix + 1, iy, iz + 1)],
+						*children_[index(ix, iy + 1, iz + 1)],
+						*children_[index(ix + 1, iy + 1, iz + 1)],
+						receiver);
+				}
+			}
+
+			std::vector<std::pair<std::size_t, triangle_type>> merged_triangles;
+
+			for (const auto& triangles : local_triangles)
+			{
+				merged_triangles.insert(merged_triangles.end(), triangles.begin(), triangles.end());
+			}
+
+			std::stable_sort(merged_triangles.begin(), merged_triangles.end(), [](const auto& lhs, const auto& rhs) {
+				return lhs.first < rhs.first;
+			});
+
+			std::vector<triangle_type> result(merged_triangles.size());
+
+			std::transform(merged_triangles.begin(), merged_triangles.end(), result.begin(), [](const auto& t) {
+				return t.second;
+			});
+
+			return result;
+		}
+
+	private:
+		std::size_t index(std::size_t ix, std::size_t iy, std::size_t iz) const
+		{
+			return iz * size_.y() * size_.x() + iy * size_.x() + ix;
+		}
+
+		node_type* generate_impl(const object_type& obj, const vector_type& minimum, const vector_type& maximum, std::size_t depth)
+		{
+			std::array<vector_type, 8> points = {{
+				{minimum.x(), minimum.y(), minimum.z()},
+				{maximum.x(), minimum.y(), minimum.z()},
+				{minimum.x(), maximum.y(), minimum.z()},
+				{maximum.x(), maximum.y(), minimum.z()},
+				{minimum.x(), minimum.y(), maximum.z()},
+				{maximum.x(), minimum.y(), maximum.z()},
+				{minimum.x(), maximum.y(), maximum.z()},
+				{maximum.x(), maximum.y(), maximum.z()},
+			}};
+
+			std::array<dual_type, 8> values;
+
+			auto sanitize = [](scalar_type x) {
+				return std::isnan(x) ? 0.0 : x;
+			};
+
+			std::transform(points.begin(), points.end(), values.begin(), [&](const auto& p) {
+				auto d = obj.value_grad(p);
+				d.grad() = d.grad().map(sanitize);
+				return d;
+			});
+
+			Eigen::Matrix<scalar_type, 11, 4> a;
+
+			for (int i = 0; i < 8; ++i)
+			{
+				a(i, 0) = values[i].grad().x();
+				a(i, 1) = values[i].grad().y();
+				a(i, 2) = values[i].grad().z();
+				a(i, 3) = static_cast<scalar_type>(-1.0);
+			}
+
+			a(8, 0) = config_.nominal_weight;
+			a(8, 1) = 0.0;
+			a(8, 2) = 0.0;
+			a(8, 3) = 0.0;
+			a(9, 0) = 0.0;
+			a(9, 1) = config_.nominal_weight;
+			a(9, 2) = 0.0;
+			a(9, 3) = 0.0;
+			a(10, 0) = 0.0;
+			a(10, 1) = 0.0;
+			a(10, 2) = config_.nominal_weight;
+			a(10, 3) = 0.0;
+
+			Eigen::Matrix<scalar_type, 11, 1> b;
+
+			auto medium = (minimum + maximum) * static_cast<scalar_type>(0.5);
+
+			for (int i = 0; i < 8; ++i)
+				b(i) = dot_product(values[i].grad(), points[i] - medium) - values[i].value();
+
+			b(8) = 0.0;
+			b(9) = 0.0;
+			b(10) = 0.0;
+
+			Eigen::Matrix<scalar_type, 4, 1> x = a.jacobiSvd(Eigen::ComputeFullU | Eigen::ComputeFullV).solve(b);
+
+			auto center = vector_type(x(0), x(1), x(2)) + medium;
+			auto offset = obj.value(center);
+
+			auto error = scalar_type();
+
+			for (int i = 0; i < 8; ++i)
+				error += squared(offset - values[i].value() - dot_product(values[i].grad(), center - points[i]));
+
+			if (depth >= config_.maximum_depth || error < squared(config_.tolerance))
+			{
+				return leaf_pool_[omp_get_thread_num()].construct(vertex_type(center, offset));
+			}
+			else
+			{
+				std::array<node_type*, 8> nodes = {{
+					generate_impl(obj, {minimum.x(), minimum.y(), minimum.z()}, {medium.x(), medium.y(), medium.z()}, depth + 1),
+					generate_impl(obj, {medium.x(), minimum.y(), minimum.z()}, {maximum.x(), medium.y(), medium.z()}, depth + 1),
+					generate_impl(obj, {minimum.x(), medium.y(), minimum.z()}, {medium.x(), maximum.y(), medium.z()}, depth + 1),
+					generate_impl(obj, {medium.x(), medium.y(), minimum.z()}, {maximum.x(), maximum.y(), medium.z()}, depth + 1),
+					generate_impl(obj, {minimum.x(), minimum.y(), medium.z()}, {medium.x(), medium.y(), maximum.z()}, depth + 1),
+					generate_impl(obj, {medium.x(), minimum.y(), medium.z()}, {maximum.x(), medium.y(), maximum.z()}, depth + 1),
+					generate_impl(obj, {minimum.x(), medium.y(), medium.z()}, {medium.x(), maximum.y(), maximum.z()}, depth + 1),
+					generate_impl(obj, {medium.x(), medium.y(), medium.z()}, {maximum.x(), maximum.y(), maximum.z()}, depth + 1),
+				}};
+
+				return branch_pool_[omp_get_thread_num()].construct(nodes);
+			}
+		}
+
+		template <class Receiver>
+		void enumerate_impl_c(const node_type& n, Receiver receiver)
+		{
+			if (auto b = dynamic_cast<const branch_node_type*>(&n))
+			{
+				enumerate_impl_c(*b->children()[0], receiver);
+				enumerate_impl_c(*b->children()[1], receiver);
+				enumerate_impl_c(*b->children()[2], receiver);
+				enumerate_impl_c(*b->children()[3], receiver);
+				enumerate_impl_c(*b->children()[4], receiver);
+				enumerate_impl_c(*b->children()[5], receiver);
+				enumerate_impl_c(*b->children()[6], receiver);
+				enumerate_impl_c(*b->children()[7], receiver);
+
+				enumerate_impl_f_x(*b->children()[0], *b->children()[1], receiver);
+				enumerate_impl_f_x(*b->children()[2], *b->children()[3], receiver);
+				enumerate_impl_f_x(*b->children()[4], *b->children()[5], receiver);
+				enumerate_impl_f_x(*b->children()[6], *b->children()[7], receiver);
+
+				enumerate_impl_f_y(*b->children()[0], *b->children()[2], receiver);
+				enumerate_impl_f_y(*b->children()[1], *b->children()[3], receiver);
+				enumerate_impl_f_y(*b->children()[4], *b->children()[6], receiver);
+				enumerate_impl_f_y(*b->children()[5], *b->children()[7], receiver);
+
+				enumerate_impl_f_z(*b->children()[0], *b->children()[4], receiver);
+				enumerate_impl_f_z(*b->children()[1], *b->children()[5], receiver);
+				enumerate_impl_f_z(*b->children()[2], *b->children()[6], receiver);
+				enumerate_impl_f_z(*b->children()[3], *b->children()[7], receiver);
+
+				enumerate_impl_e_xy(*b->children()[0], *b->children()[1], *b->children()[2], *b->children()[3], receiver);
+				enumerate_impl_e_xy(*b->children()[4], *b->children()[5], *b->children()[6], *b->children()[7], receiver);
+
+				enumerate_impl_e_yz(*b->children()[0], *b->children()[2], *b->children()[4], *b->children()[6], receiver);
+				enumerate_impl_e_yz(*b->children()[1], *b->children()[3], *b->children()[5], *b->children()[7], receiver);
+
+				enumerate_impl_e_xz(*b->children()[0], *b->children()[1], *b->children()[4], *b->children()[5], receiver);
+				enumerate_impl_e_xz(*b->children()[2], *b->children()[3], *b->children()[6], *b->children()[7], receiver);
+
+				enumerate_impl_v(
+					*b->children()[0],
+					*b->children()[1],
+					*b->children()[2],
+					*b->children()[3],
+					*b->children()[4],
+					*b->children()[5],
+					*b->children()[6],
+					*b->children()[7],
+					receiver);
+			}
+		}
+
+		template <class Receiver>
+		void enumerate_impl_f_x(const node_type& n1, const node_type& n2, Receiver receiver)
+		{
+			auto b1 = dynamic_cast<const branch_node_type*>(&n1);
+			auto b2 = dynamic_cast<const branch_node_type*>(&n2);
+
+			if (b1 || b2)
+			{
+				enumerate_impl_f_x(b1 ? *b1->children()[1] : n1, b2 ? *b2->children()[0] : n2, receiver);
+				enumerate_impl_f_x(b1 ? *b1->children()[3] : n1, b2 ? *b2->children()[2] : n2, receiver);
+				enumerate_impl_f_x(b1 ? *b1->children()[5] : n1, b2 ? *b2->children()[4] : n2, receiver);
+				enumerate_impl_f_x(b1 ? *b1->children()[7] : n1, b2 ? *b2->children()[6] : n2, receiver);
+
+				enumerate_impl_e_xy(
+					b1 ? *b1->children()[1] : n1,
+					b2 ? *b2->children()[0] : n2,
+					b1 ? *b1->children()[3] : n1,
+					b2 ? *b2->children()[2] : n2,
+					receiver);
+
+				enumerate_impl_e_xy(
+					b1 ? *b1->children()[5] : n1,
+					b2 ? *b2->children()[4] : n2,
+					b1 ? *b1->children()[7] : n1,
+					b2 ? *b2->children()[6] : n2,
+					receiver);
+
+				enumerate_impl_e_xz(
+					b1 ? *b1->children()[1] : n1,
+					b2 ? *b2->children()[0] : n2,
+					b1 ? *b1->children()[5] : n1,
+					b2 ? *b2->children()[4] : n2,
+					receiver);
+
+				enumerate_impl_e_xz(
+					b1 ? *b1->children()[3] : n1,
+					b2 ? *b2->children()[2] : n2,
+					b1 ? *b1->children()[7] : n1,
+					b2 ? *b2->children()[6] : n2,
+					receiver);
+
+				enumerate_impl_v(
+					b1 ? *b1->children()[1] : n1,
+					b2 ? *b2->children()[0] : n2,
+					b1 ? *b1->children()[3] : n1,
+					b2 ? *b2->children()[2] : n2,
+					b1 ? *b1->children()[5] : n1,
+					b2 ? *b2->children()[4] : n2,
+					b1 ? *b1->children()[7] : n1,
+					b2 ? *b2->children()[6] : n2,
+					receiver);
+			}
+		}
+
+		template <class Receiver>
+		void enumerate_impl_f_y(const node_type& n1, const node_type& n2, Receiver receiver)
+		{
+			auto b1 = dynamic_cast<const branch_node_type*>(&n1);
+			auto b2 = dynamic_cast<const branch_node_type*>(&n2);
+
+			if (b1 || b2)
+			{
+				enumerate_impl_f_y(b1 ? *b1->children()[2] : n1, b2 ? *b2->children()[0] : n2, receiver);
+				enumerate_impl_f_y(b1 ? *b1->children()[3] : n1, b2 ? *b2->children()[1] : n2, receiver);
+				enumerate_impl_f_y(b1 ? *b1->children()[6] : n1, b2 ? *b2->children()[4] : n2, receiver);
+				enumerate_impl_f_y(b1 ? *b1->children()[7] : n1, b2 ? *b2->children()[5] : n2, receiver);
+
+				enumerate_impl_e_xy(
+					b1 ? *b1->children()[2] : n1,
+					b1 ? *b1->children()[3] : n1,
+					b2 ? *b2->children()[0] : n2,
+					b2 ? *b2->children()[1] : n2,
+					receiver);
+
+				enumerate_impl_e_xy(
+					b1 ? *b1->children()[6] : n1,
+					b1 ? *b1->children()[7] : n1,
+					b2 ? *b2->children()[4] : n2,
+					b2 ? *b2->children()[5] : n2,
+					receiver);
+
+				enumerate_impl_e_yz(
+					b1 ? *b1->children()[3] : n1,
+					b2 ? *b2->children()[1] : n2,
+					b1 ? *b1->children()[7] : n1,
+					b2 ? *b2->children()[5] : n2,
+					receiver);
+
+				enumerate_impl_e_yz(
+					b1 ? *b1->children()[2] : n1,
+					b2 ? *b2->children()[0] : n2,
+					b1 ? *b1->children()[6] : n1,
+					b2 ? *b2->children()[4] : n2,
+					receiver);
+
+				enumerate_impl_v(
+					b1 ? *b1->children()[2] : n1,
+					b1 ? *b1->children()[3] : n1,
+					b2 ? *b2->children()[0] : n2,
+					b2 ? *b2->children()[1] : n2,
+					b1 ? *b1->children()[6] : n1,
+					b1 ? *b1->children()[7] : n1,
+					b2 ? *b2->children()[4] : n2,
+					b2 ? *b2->children()[5] : n2,
+					receiver);
+			}
+		}
+
+		template <class Receiver>
+		void enumerate_impl_f_z(const node_type& n1, const node_type& n2, Receiver receiver)
+		{
+			auto b1 = dynamic_cast<const branch_node_type*>(&n1);
+			auto b2 = dynamic_cast<const branch_node_type*>(&n2);
+
+			if (b1 || b2)
+			{
+				enumerate_impl_f_z(b1 ? *b1->children()[4] : n1, b2 ? *b2->children()[0] : n2, receiver);
+				enumerate_impl_f_z(b1 ? *b1->children()[5] : n1, b2 ? *b2->children()[1] : n2, receiver);
+				enumerate_impl_f_z(b1 ? *b1->children()[6] : n1, b2 ? *b2->children()[2] : n2, receiver);
+				enumerate_impl_f_z(b1 ? *b1->children()[7] : n1, b2 ? *b2->children()[3] : n2, receiver);
+
+				enumerate_impl_e_xz(
+					b1 ? *b1->children()[4] : n1,
+					b1 ? *b1->children()[5] : n1,
+					b2 ? *b2->children()[0] : n2,
+					b2 ? *b2->children()[1] : n2,
+					receiver);
+
+				enumerate_impl_e_xz(
+					b1 ? *b1->children()[6] : n1,
+					b1 ? *b1->children()[7] : n1,
+					b2 ? *b2->children()[2] : n2,
+					b2 ? *b2->children()[3] : n2,
+					receiver);
+
+				enumerate_impl_e_yz(
+					b1 ? *b1->children()[4] : n1,
+					b1 ? *b1->children()[6] : n1,
+					b2 ? *b2->children()[0] : n2,
+					b2 ? *b2->children()[2] : n2,
+					receiver);
+
+				enumerate_impl_e_yz(
+					b1 ? *b1->children()[5] : n1,
+					b1 ? *b1->children()[7] : n1,
+					b2 ? *b2->children()[1] : n2,
+					b2 ? *b2->children()[3] : n2,
+					receiver);
+
+				enumerate_impl_v(
+					b1 ? *b1->children()[4] : n1,
+					b1 ? *b1->children()[5] : n1,
+					b1 ? *b1->children()[6] : n1,
+					b1 ? *b1->children()[7] : n1,
+					b2 ? *b2->children()[0] : n2,
+					b2 ? *b2->children()[1] : n2,
+					b2 ? *b2->children()[2] : n2,
+					b2 ? *b2->children()[3] : n2,
+					receiver);
+			}
+		}
+
+		template <class Receiver>
+		void enumerate_impl_e_xy(
+			const node_type& n1,
+			const node_type& n2,
+			const node_type& n3,
+			const node_type& n4,
+			Receiver receiver)
+		{
+			auto b1 = dynamic_cast<const branch_node_type*>(&n1);
+			auto b2 = dynamic_cast<const branch_node_type*>(&n2);
+			auto b3 = dynamic_cast<const branch_node_type*>(&n3);
+			auto b4 = dynamic_cast<const branch_node_type*>(&n4);
+
+			if (b1 || b2 || b3 || b4)
+			{
+				enumerate_impl_e_xy(
+					b1 ? *b1->children()[3] : n1,
+					b2 ? *b2->children()[2] : n2,
+					b3 ? *b3->children()[1] : n3,
+					b4 ? *b4->children()[0] : n4,
+					receiver);
+
+				enumerate_impl_e_xy(
+					b1 ? *b1->children()[7] : n1,
+					b2 ? *b2->children()[6] : n2,
+					b3 ? *b3->children()[5] : n3,
+					b4 ? *b4->children()[4] : n4,
+					receiver);
+
+				enumerate_impl_v(
+					b1 ? *b1->children()[3] : n1,
+					b2 ? *b2->children()[2] : n2,
+					b3 ? *b3->children()[1] : n3,
+					b4 ? *b4->children()[0] : n4,
+					b1 ? *b1->children()[7] : n1,
+					b2 ? *b2->children()[6] : n2,
+					b3 ? *b3->children()[5] : n3,
+					b4 ? *b4->children()[4] : n4,
+					receiver);
+			}
+		}
+
+		template <class Receiver>
+		void enumerate_impl_e_yz(
+			const node_type& n1,
+			const node_type& n2,
+			const node_type& n3,
+			const node_type& n4,
+			Receiver receiver)
+		{
+			auto b1 = dynamic_cast<const branch_node_type*>(&n1);
+			auto b2 = dynamic_cast<const branch_node_type*>(&n2);
+			auto b3 = dynamic_cast<const branch_node_type*>(&n3);
+			auto b4 = dynamic_cast<const branch_node_type*>(&n4);
+
+			if (b1 || b2 || b3 || b4)
+			{
+				enumerate_impl_e_yz(
+					b1 ? *b1->children()[6] : n1,
+					b2 ? *b2->children()[4] : n2,
+					b3 ? *b3->children()[2] : n3,
+					b4 ? *b4->children()[0] : n4,
+					receiver);
+
+				enumerate_impl_e_yz(
+					b1 ? *b1->children()[7] : n1,
+					b2 ? *b2->children()[5] : n2,
+					b3 ? *b3->children()[3] : n3,
+					b4 ? *b4->children()[1] : n4,
+					receiver);
+
+				enumerate_impl_v(
+					b1 ? *b1->children()[6] : n1,
+					b1 ? *b1->children()[7] : n1,
+					b2 ? *b2->children()[4] : n2,
+					b2 ? *b2->children()[5] : n2,
+					b3 ? *b3->children()[2] : n3,
+					b3 ? *b3->children()[3] : n3,
+					b4 ? *b4->children()[0] : n4,
+					b4 ? *b4->children()[1] : n4,
+					receiver);
+			}
+		}
+
+		template <class Receiver>
+		void enumerate_impl_e_xz(
+			const node_type& n1,
+			const node_type& n2,
+			const node_type& n3,
+			const node_type& n4,
+			Receiver receiver)
+		{
+			auto b1 = dynamic_cast<const branch_node_type*>(&n1);
+			auto b2 = dynamic_cast<const branch_node_type*>(&n2);
+			auto b3 = dynamic_cast<const branch_node_type*>(&n3);
+			auto b4 = dynamic_cast<const branch_node_type*>(&n4);
+
+			if (b1 || b2 || b3 || b4)
+			{
+				enumerate_impl_e_xz(
+					b1 ? *b1->children()[5] : n1,
+					b2 ? *b2->children()[4] : n2,
+					b3 ? *b3->children()[1] : n3,
+					b4 ? *b4->children()[0] : n4,
+					receiver);
+
+				enumerate_impl_e_xz(
+					b1 ? *b1->children()[7] : n1,
+					b2 ? *b2->children()[6] : n2,
+					b3 ? *b3->children()[3] : n3,
+					b4 ? *b4->children()[2] : n4,
+					receiver);
+
+				enumerate_impl_v(
+					b1 ? *b1->children()[5] : n1,
+					b2 ? *b2->children()[4] : n2,
+					b1 ? *b1->children()[7] : n1,
+					b2 ? *b2->children()[6] : n2,
+					b3 ? *b3->children()[1] : n3,
+					b4 ? *b4->children()[0] : n4,
+					b3 ? *b3->children()[3] : n3,
+					b4 ? *b4->children()[2] : n4,
+					receiver);
+			}
+		}
+
+		template <class Receiver>
+		void enumerate_impl_v(
+			const node_type& n1,
+			const node_type& n2,
+			const node_type& n3,
+			const node_type& n4,
+			const node_type& n5,
+			const node_type& n6,
+			const node_type& n7,
+			const node_type& n8,
+			Receiver receiver)
+		{
+			auto b1 = dynamic_cast<const branch_node_type*>(&n1);
+			auto b2 = dynamic_cast<const branch_node_type*>(&n2);
+			auto b3 = dynamic_cast<const branch_node_type*>(&n3);
+			auto b4 = dynamic_cast<const branch_node_type*>(&n4);
+			auto b5 = dynamic_cast<const branch_node_type*>(&n5);
+			auto b6 = dynamic_cast<const branch_node_type*>(&n6);
+			auto b7 = dynamic_cast<const branch_node_type*>(&n7);
+			auto b8 = dynamic_cast<const branch_node_type*>(&n8);
+
+			if (b1 || b2 || b3 || b4 || b5 || b6 || b7 || b8)
+			{
+				enumerate_impl_v(
+					b1 ? *b1->children()[7] : n1,
+					b2 ? *b2->children()[6] : n2,
+					b3 ? *b3->children()[5] : n3,
+					b4 ? *b4->children()[4] : n4,
+					b5 ? *b5->children()[3] : n5,
+					b6 ? *b6->children()[2] : n6,
+					b7 ? *b7->children()[1] : n7,
+					b8 ? *b8->children()[0] : n8,
+					receiver);
+			}
+			else
+			{
+				auto l1 = static_cast<const leaf_node_type*>(&n1);
+				auto l2 = static_cast<const leaf_node_type*>(&n2);
+				auto l3 = static_cast<const leaf_node_type*>(&n3);
+				auto l4 = static_cast<const leaf_node_type*>(&n4);
+				auto l5 = static_cast<const leaf_node_type*>(&n5);
+				auto l6 = static_cast<const leaf_node_type*>(&n6);
+				auto l7 = static_cast<const leaf_node_type*>(&n7);
+				auto l8 = static_cast<const leaf_node_type*>(&n8);
+
+				std::array<const vertex_type*, 8> vertices = {{
+					&l1->vertex(),
+					&l2->vertex(),
+					&l3->vertex(),
+					&l4->vertex(),
+					&l5->vertex(),
+					&l6->vertex(),
+					&l7->vertex(),
+					&l8->vertex(),
+				}};
+
+				marching_cubes<scalar_type>(vertices, receiver);
+			}
+		}
+
+		vector_type minimum_;
+		config_type config_;
+
+		std::size_t grid_size_;
+		scalar_type grid_width_;
+
+		vector<std::size_t, 3> size_;
+		std::vector<node_type*> children_;
+
+		std::vector<boost::object_pool<branch_node_type>> branch_pool_;
+		std::vector<boost::object_pool<leaf_node_type>> leaf_pool_;
+	};
+}
+```
+
+### include/dmc/tree_config.hpp
+```
+#pragma once
+#include <cstddef>
+
+namespace dmc
+{
+	template <class Scalar>
+	struct tree_config
+	{
+		typedef Scalar scalar_type;
+
+		scalar_type grid_width = static_cast<scalar_type>(1.0);
+		scalar_type tolerance = static_cast<scalar_type>(0.1);
+		std::size_t maximum_depth = static_cast<std::size_t>(-1);
+		scalar_type nominal_weight = static_cast<scalar_type>(0.1);
+	};
+}
+```
+
+### include/dmc/tree_node.hpp
+```
+#pragma once
+#include "vector.hpp"
+#include <boost/noncopyable.hpp>
+
+namespace dmc
+{
+	template <class Scalar>
+	class tree_node : boost::noncopyable
+	{
+	public:
+		typedef Scalar scalar_type;
+		typedef vector<scalar_type, 3> vector_type;
+
+		virtual ~tree_node()
+		{
+		}
+	};
+}
+```
+
+### include/dmc/triangle.hpp
+```
+#pragma once
+#include "vector.hpp"
+
+namespace dmc
+{
+	template <class Vector>
+	class triangle
+	{
+	public:
+		typedef Vector vector_type;
+
+		triangle()
+		{
+		}
+
+		triangle(const vector_type& p1, const vector_type& p2, const vector_type& p3)
+			: p1_(p1)
+			, p2_(p2)
+			, p3_(p3)
+		{
+		}
+
+		const vector_type& p1() const
+		{
+			return p1_;
+		}
+
+		const vector_type& p2() const
+		{
+			return p2_;
+		}
+
+		const vector_type& p3() const
+		{
+			return p3_;
+		}
+
+	private:
+		vector_type p1_;
+		vector_type p2_;
+		vector_type p3_;
+	};
+
+	template <class Vector>
+	auto make_triangle(const Vector& p1, const Vector& p2, const Vector& p3)
+	{
+		return triangle<Vector>(p1, p2, p3);
+	}
+
+	typedef triangle<vector3d> triangle3d;
+	typedef triangle<vector3f> triangle3f;
+}
+```
+
+### include/dmc/vector.hpp
+```
+#pragma once
+#include "vector_base.hpp"
+#include <iostream>
+
+namespace dmc
+{
+	template <class Scalar, int Dimension>
+	class vector : public vector_base<vector<Scalar, Dimension>, Scalar, Dimension>
+	{
+	};
+
+	template <class Scalar>
+	class vector<Scalar, 2> : public vector_base<vector<Scalar, 2>, Scalar, 2>
+	{
+	private:
+		typedef vector_base<vector<Scalar, 2>, Scalar, 2> base_type;
+
+	public:
+		using base_type::dimension;
+		using typename base_type::scalar_type;
+
+		vector()
+		{
+		}
+
+		vector(scalar_type x_, scalar_type y_)
+		{
+			x() = x_;
+			y() = y_;
+		}
+
+		const scalar_type& x() const
+		{
+			return (*this)[0];
+		}
+
+		scalar_type& x()
+		{
+			return (*this)[0];
+		}
+
+		const scalar_type& y() const
+		{
+			return (*this)[1];
+		}
+
+		scalar_type& y()
+		{
+			return (*this)[1];
+		}
+	};
+
+	template <class Scalar>
+	class vector<Scalar, 3> : public vector_base<vector<Scalar, 3>, Scalar, 3>
+	{
+	private:
+		typedef vector_base<vector<Scalar, 3>, Scalar, 3> base_type;
+
+	public:
+		using base_type::dimension;
+		using typename base_type::scalar_type;
+
+		vector()
+		{
+		}
+
+		vector(scalar_type x_, scalar_type y_, scalar_type z_)
+		{
+			x() = x_;
+			y() = y_;
+			z() = z_;
+		}
+
+		scalar_type& x()
+		{
+			return (*this)[0];
+		}
+
+		const scalar_type& x() const
+		{
+			return (*this)[0];
+		}
+
+		scalar_type& y()
+		{
+			return (*this)[1];
+		}
+
+		const scalar_type& y() const
+		{
+			return (*this)[1];
+		}
+
+		scalar_type& z()
+		{
+			return (*this)[2];
+		}
+
+		const scalar_type& z() const
+		{
+			return (*this)[2];
+		}
+
+		vector<Scalar, 2>& xy()
+		{
+			return reinterpret_cast<vector<Scalar, 2>&>(x());
+		}
+
+		const vector<Scalar, 2>& xy() const
+		{
+			return reinterpret_cast<vector<Scalar, 2>&>(x());
+		}
+
+		vector<Scalar, 2>& yz()
+		{
+			return reinterpret_cast<vector<Scalar, 2>&>(y());
+		}
+
+		const vector<Scalar, 2>& yz() const
+		{
+			return reinterpret_cast<vector<Scalar, 2>&>(y());
+		}
+	};
+
+	template <class Scalar>
+	class vector<Scalar, 4> : public vector_base<vector<Scalar, 4>, Scalar, 4>
+	{
+	private:
+		typedef vector_base<vector<Scalar, 4>, Scalar, 4> base_type;
+
+	public:
+		using base_type::dimension;
+		using typename base_type::scalar_type;
+
+		vector()
+		{
+		}
+
+		vector(scalar_type x_, scalar_type y_, scalar_type z_, scalar_type w_)
+		{
+			x() = x_;
+			y() = y_;
+			z() = z_;
+			w() = w_;
+		}
+
+		vector(const vector<scalar_type, 3>& xyz_, scalar_type w_)
+		{
+			xyz() = xyz_;
+			w() = w_;
+		}
+
+		scalar_type& x()
+		{
+			return (*this)[0];
+		}
+
+		const scalar_type& x() const
+		{
+			return (*this)[0];
+		}
+
+		scalar_type& y()
+		{
+			return (*this)[1];
+		}
+
+		const scalar_type& y() const
+		{
+			return (*this)[1];
+		}
+
+		scalar_type& z()
+		{
+			return (*this)[2];
+		}
+
+		const scalar_type& z() const
+		{
+			return (*this)[2];
+		}
+
+		scalar_type& w()
+		{
+			return (*this)[3];
+		}
+
+		const scalar_type& w() const
+		{
+			return (*this)[3];
+		}
+
+		vector<Scalar, 2>& xy()
+		{
+			return reinterpret_cast<vector<Scalar, 2>&>(x());
+		}
+
+		const vector<Scalar, 2>& xy() const
+		{
+			return reinterpret_cast<vector<Scalar, 2>&>(x());
+		}
+
+		vector<Scalar, 2>& yz()
+		{
+			return reinterpret_cast<vector<Scalar, 2>&>(y());
+		}
+
+		const vector<Scalar, 2>& yz() const
+		{
+			return reinterpret_cast<vector<Scalar, 2>&>(y());
+		}
+
+		vector<Scalar, 2> xz() const
+		{
+			return vector<Scalar, 2>(x(), z());
+		}
+
+		vector<Scalar, 2> yx() const
+		{
+			return vector<Scalar, 2>(y(), x());
+		}
+
+		vector<Scalar, 2> zx() const
+		{
+			return vector<Scalar, 2>(z(), x());
+		}
+
+		vector<Scalar, 2> zy() const
+		{
+			return vector<Scalar, 2>(z(), y());
+		}
+
+		vector<Scalar, 3>& xyz()
+		{
+			return reinterpret_cast<vector<Scalar, 3>&>(x());
+		}
+
+		const vector<Scalar, 3>& xyz() const
+		{
+			return reinterpret_cast<const vector<Scalar, 3>&>(x());
+		}
+	};
+
+	template <class Scalar1, class Scalar2, int Dimension, class F>
+	auto combine(const vector<Scalar1, Dimension>& v1, const vector<Scalar2, Dimension>& v2, F f)
+	{
+		typedef typename std::result_of<F(Scalar1, Scalar2)>::type result_scalar_type;
+
+		vector<result_scalar_type, Dimension> result;
+
+		for (int i = 0; i < Dimension; ++i)
+			result[i] = f(v1[i], v2[i]);
+
+		return result;
+	}
+
+	template <class Scalar, int Dimension>
+	vector<Scalar, Dimension> minimum(const vector<Scalar, Dimension>& v1, const vector<Scalar, Dimension>& v2)
+	{
+		return combine(v1, v2, [](auto x, auto y) { return std::min(x, y); });
+	}
+
+	template <class Scalar, int Dimension>
+	vector<Scalar, Dimension> maximum(const vector<Scalar, Dimension>& v1, const vector<Scalar, Dimension>& v2)
+	{
+		return combine(v1, v2, [](auto x, auto y) { return std::max(x, y); });
+	}
+
+	template <class Scalar, int Dimension>
+	Scalar dot_product(const vector<Scalar, Dimension>& v1, const vector<Scalar, Dimension>& v2)
+	{
+		Scalar result = Scalar();
+
+		for (int i = 0; i < Dimension; ++i)
+			result += v1[i] * v2[i];
+
+		return result;
+	}
+
+	template <class Scalar>
+	Scalar cross_product(const vector<Scalar, 2>& v1, const vector<Scalar, 2>& v2)
+	{
+		return v1.x() * v2.y() - v1.y() * v2.x();
+	}
+
+	template <class Scalar>
+	vector<Scalar, 3> cross_product(const vector<Scalar, 3>& v1, const vector<Scalar, 3>& v2)
+	{
+		return vector<Scalar, 3>(
+			v1.y() * v2.z() - v1.z() * v2.y(),
+			v1.z() * v2.x() - v1.x() * v2.z(),
+			v1.x() * v2.y() - v1.y() * v2.x());
+	}
+
+	template <class Scalar, int Dimension>
+	std::ostream& operator<<(std::ostream& os, const vector<Scalar, Dimension>& v)
+	{
+		for (int i = 0; i < Dimension; ++i)
+		{
+			if (i != 0)
+				os << ", ";
+
+			os << v[i];
+		}
+
+		return os;
+	}
+
+	typedef vector<double, 3> vector3d;
+	typedef vector<float, 3> vector3f;
+}
+```
+
+### include/dmc/vector_base.hpp
+```
+#pragma once
+#include "math_util.hpp"
+#include <boost/assert.hpp>
+#include <boost/operators.hpp>
+#include <cmath>
+#include <limits>
+#include <numeric>
+
+namespace dmc
+{
+	template <class Scalar, int Dimension>
+	class vector;
+
+	template <class Derived, class Scalar, int Dimension>
+	class vector_base
+		: boost::addable<Derived
+		, boost::subtractable<Derived
+		, boost::multipliable<Derived, Scalar
+		, boost::dividable<Derived, Scalar
+		, boost::equality_comparable<Derived
+		>>>>>
+	{
+	public:
+		typedef Scalar scalar_type;
+		static const int dimension = Dimension;
+
+		scalar_type* data()
+		{
+			return &values_[0];
+		}
+
+		const scalar_type* data() const
+		{
+			return &values_[0];
+		}
+
+		scalar_type& operator[](int index)
+		{
+			BOOST_ASSERT(0 <= index && index < dimension);
+			return values_[index];
+		}
+
+		const scalar_type& operator[](int index) const
+		{
+			BOOST_ASSERT(0 <= index && index < dimension);
+			return values_[index];
+		}
+
+		Derived operator-() const
+		{
+			return map([](auto x) { return -x; });
+		}
+
+		const Derived& operator+() const
+		{
+			return derived();
+		}
+
+		Derived& operator+=(const Derived& rhs)
+		{
+			for (int i = 0; i < dimension; ++i)
+				(*this)[i] += rhs[i];
+			return derived();
+		}
+
+		Derived& operator-=(const Derived& rhs)
+		{
+			for (int i = 0; i < dimension; ++i)
+				(*this)[i] -= rhs[i];
+			return derived();
+		}
+
+		Derived& operator*=(scalar_type rhs)
+		{
+			for (int i = 0; i < dimension; ++i)
+				(*this)[i] *= rhs;
+			return derived();
+		}
+
+		Derived& operator/=(scalar_type rhs)
+		{
+			for (int i = 0; i < dimension; ++i)
+				(*this)[i] /= rhs;
+			return derived();
+		}
+
+		template <class F>
+		vector<typename std::result_of<F(scalar_type)>::type, dimension> map(F f) const
+		{
+			vector<typename std::result_of<F(scalar_type)>::type, dimension> result;
+			for (int i = 0; i < dimension; ++i)
+				result[i] = f((*this)[i]);
+			return result;
+		}
+
+		template <class T>
+		auto cast() const
+		{
+			return map([](auto x) { return static_cast<T>(x); });
+		}
+
+		auto sign() const
+		{
+			return map([](auto x) { return dmc::sign(x); });
+		}
+
+		template <class T, class F>
+		auto reduce(T t, F f) const
+		{
+			for (int i = 0; i < dimension; ++i)
+				t = f(t, (*this)[i]);
+			return t;
+		}
+
+		template <class F>
+		auto reduce(F f) const
+		{
+			auto t = (*this)[0];
+			for (int i = 1; i < dimension; ++i)
+				t = f(t, (*this)[i]);
+			return t;
+		}
+
+		auto sum() const
+		{
+			return reduce([](auto x, auto y) {
+				return x + y;
+			});
+		}
+
+		auto product() const
+		{
+			return reduce([](auto x, auto y) {
+				return x * y;
+			});
+		}
+
+		auto abs() const
+		{
+			return map([](auto x) { using std::abs; return abs(x); });
+		}
+
+		auto norm_l1() const
+		{
+			return abs().sum();
+		}
+
+		auto squared() const
+		{
+			return map([this](auto x) { return x * x; });
+		}
+
+		auto norm_l2_sq() const
+		{
+			return squared().sum();
+		}
+
+		auto norm_l2() const
+		{
+			using std::sqrt;
+			return sqrt(norm_l2_sq());
+		}
+
+		auto norm_l_inf() const
+		{
+			return abs().max();
+		}
+
+		auto max() const
+		{
+			return reduce([](auto x, auto y) { using std::max; return max(x, y); });
+		}
+
+		auto min() const
+		{
+			return reduce([](auto x, auto y) { using std::min; return min(x, y); });
+		}
+
+		bool try_normalize()
+		{
+			auto n = norm_l2();
+			if (n < std::numeric_limits<scalar_type>::epsilon())
+				return false;
+
+			*this /= n;
+			return true;
+		}
+
+		Derived clamp(const Derived& minimum, const Derived& maximum)
+		{
+			Derived result;
+			for (int i = 0; i < dimension; ++i)
+				result[i] = std::max(minimum[i], std::min(maximum[i], (*this)[i]));
+			return result;
+		}
+
+		static Derived all(scalar_type s)
+		{
+			Derived result;
+			for (int i = 0; i < dimension; ++i)
+				result[i] = s;
+			return result;
+		}
+
+		friend bool operator==(const Derived& lhs, const Derived& rhs)
+		{
+			for (int i = 0; i < dimension; ++i)
+				if (lhs[i] != rhs[i])
+					return false;
+
+			return true;
+		}
+
+	private:
+		Derived& derived()
+		{
+			return static_cast<Derived&>(*this);
+		}
+
+		const Derived& derived() const
+		{
+			return static_cast<const Derived&>(*this);
+		}
+
+		scalar_type values_[dimension] = {};
+	};
+}
+```
+
+### include/dmc/vertex.hpp
+```
+#pragma once
+#include "vector.hpp"
+
+namespace dmc
+{
+	template <class Scalar>
+	class vertex
+	{
+	public:
+		typedef Scalar scalar_type;
+		typedef vector<scalar_type, 3> vector_type;
+
+		vertex(const vector_type& position, scalar_type offset)
+			: position_(position)
+			, offset_(offset)
+			, sign_(offset < static_cast<scalar_type>(0.0))
+		{
+		}
+
+		const vector_type& position() const
+		{
+			return position_;
+		}
+
+		scalar_type offset() const
+		{
+			return offset_;
+		}
+
+		bool sign() const
+		{
+			return sign_;
+		}
+
+	private:
+		vector_type position_;
+		scalar_type offset_;
+		bool sign_;
+	};
+}
+```

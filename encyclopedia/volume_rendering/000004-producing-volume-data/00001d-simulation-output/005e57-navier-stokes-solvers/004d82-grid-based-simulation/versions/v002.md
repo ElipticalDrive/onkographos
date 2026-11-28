@@ -1,0 +1,28 @@
+# Grid-Based Simulation
+
+
+## Overview
+Grid-Based Simulation discretizes physical sources (fluids, smoke, fire) into a volumetric representation on a structured spatial domain [G]. It differs from particle-based siblings like [Gaussian Splashing](1387-gaussian-splashing.md) and [Position Based Fluids](1765-position-based-fluids.md) by storing state in fixed voxel arrays, which enables efficient divergence and advection calculations via 3D textures [G].
+
+## Shared principles
+Builds on [Simulation output](15-simulation-output.md). All methods in this family map a conceptual or physical source into a discrete or analytic volumetric representation suitable for rendering [G]. The core mechanism involves establishing a spatial domain, assigning values based on physical state or geometric intersection, and storing the result in discrete arrays or computing it on-the-fly [G].
+
+## Subtopics
+
+### [Voxel-based 3D Fire Simulation](3411-voxel-based-3d-fire-simulation.md)
+Solves the incompressible Navier-Stokes equations on a structured 3D voxel grid to simulate fire dynamics, explicitly coupling buoyancy forces driven by temperature gradients and vorticity confinement to restore curling smoke behavior. Chosen when fire-specific thermodynamic properties and smoke dynamics are required.
+
+### [GPU-based Fluid Simulation with Voxel Rendering](7400-gpu-based-fluid-simulation-with-voxel-rendering.md)
+Integrates real-time incompressible fluid simulation with sparse voxel-based rasterization on graphics hardware, leveraging Direct3D geometry shaders for rendering and compute shaders for simulation. Chosen for efficiently visualizing general fluid dynamics within a voxel engine by bypassing CPU-GPU data transfer bottlenecks through a GPU-only pipeline.
+
+### [Niagara Fluids Volume Rendering](7739-niagara-fluids-volume-rendering.md)
+Repurposes the engine's built-in grid-based fluid simulation system to render large volumetric datasets by ignoring simulation physics and utilizing the rendering pipeline and material integration. Chosen for native engine integration and material flexibility in Unreal Engine 5, despite excessive VRAM overhead and lower effective resolution.
+
+### Volume-Conserving Voxel Water Simulation
+Simulates water as a volume-conserving voxel field that falls, spreads, and settles, with an infinite ocean source [S1, unofficial]. Water falls, spreads, and settles within the voxel grid [S1, unofficial]. The ocean acts as an infinite source that floods craters dug below sea level [S1, unofficial]. Debris buoyancy is simulated: planks, logs, crates, barrels, and TNT float and right themselves, while stone, brick, and metal sink [S1, unofficial]. Mixed wreckage tilts toward its heavy end, floating pieces drift on a slow current, wash ashore, or become waterlogged [S1, unofficial].
+
+## Background
+Grid-based fluid simulation originates from the Eulerian approach to computational fluid dynamics [G]. It has been adapted for real-time graphics to simulate smoke, fire, and water by leveraging GPU compute shaders for the Navier-Stokes solver [G].
+
+## Sources
+[S1] 12.8B destructible voxels rendered in the browser with Rust WASM custom engine, https://github.com/cktang88/2.5d-experiment, fetched 2026-10-26 (unofficial)

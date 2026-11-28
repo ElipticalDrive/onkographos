@@ -1,0 +1,171 @@
+--- v002.md
++++ v003.md
+@@ -1,108 +1,97 @@
+ # Compact View-dependent Color
++
+ Also called: Grid-based Neural Field for Color
+ 
+ ## Overview
+-Compact View-dependent Color replaces per-Gaussian Spherical Harmonics (SH) coefficients with a shared grid-based neural field to represent view-dependent color, reducing parameters from 48 per Gaussian to a compact shared representation [S1, S2]. Unlike sibling methods that apply post-processing transformations [DAVIGS](12021-davigs.md), factorize illumination [3iGS](13977-3igs-factorised-tensorial-illumination-for-3d-gaussian-splat.md), or use image-conditioned modulation [SWAG](14315-swag-splatting-in-the-wild-images-with-appearance-conditione.md), this method substitutes directional encoding with a spatial-hash-based MLP, addressing disk space explosion from high-order SH storage [S2].
++Compact View-dependent Color replaces the storage of per-Gaussian Spherical Harmonics (SH) coefficients with a shared grid-based neural field to predict view-dependent color, significantly reducing memory usage from 48 parameters per Gaussian to a compact global representation [S1]. Unlike [Spherical Harmonics Optimization](14206-spherical-harmonics-optimization.md) which retains SH bases, this method maps spatial position and view direction to color via a hash grid and MLP, offering a parameter-efficient alternative for [Gaussian Splatting](../3d-gaussian-splatting.md) rendering [S1, S3].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** 3D position $\mathbf{p}_n \in \mathbb{R}^3$ and view direction $\mathbf{d} \in \mathbb{R}^3$ for a specific Gaussian $n$ [S1, S3].
+-*   **Output:** View-dependent color $\mathbf{c}_n(\mathbf{d}) \in \mathbb{R}^3$ [S1].
++*   **Input:** 3D position $p_n \in \mathbb{R}^3$ of the $n$-th Gaussian, view direction $d \in \mathbb{R}^3$, and 0-degree SH coefficients (RGB channels, view-independent) [S1].
++*   **Output:** View-dependent color $c_n(d) \in \mathbb{R}^3$ [S1].
+ 
+ **Data Structures:**
+-1.  **Hash Grid:** A sparse hash table mapping contracted 3D coordinates to feature vectors [S3].
+-2.  **Tiny MLP:** A small multi-layer perceptron $f(\cdot; \theta)$ that takes positional features and view direction to predict RGB color [S1].
+-3.  **Gaussian Attributes:** Each Gaussian $i$ stores the contracted 3D position $\mathbf{x}_{\text{encoding}}^{(i)}$, covariance matrix $\boldsymbol{\Sigma}_i$, base opacity $\alpha_i$, and retrieves color $\mathbf{c}_i$ from the neural field [S2]. The Gaussian no longer stores SH coefficients [S1].
++1.  **Hash Grid:** A sparse hash table mapping quantized 3D coordinates to feature vectors. The grid is shared across all Gaussians [S1, S3].
++2.  **Tiny MLP:** A small multi-layer perceptron with parameters $\theta$ that takes the concatenated hash grid feature and view direction as input [S1].
+ 
+-**Numbered Steps:**
+-1.  **Contraction:** Map the unbounded 3D position $\mathbf{p}_n$ to a bounded range using the mip-NeRF 360 contraction function [S1]:
++**Steps:**
++1.  **Contraction:** Map the unbounded position $p_n$ to a bounded range $[-1, 1]^3$ using the contraction function from mip-NeRF 360 [S1].
+     $$
+-    \text{contract}(\mathbf{p}_n) = 
++    \text{contract}(p_n) = 
+     \begin{cases} 
+-    \mathbf{p}_n & \text{if } \|\mathbf{p}_n\| \le 1 \\
+-    \frac{\mathbf{p}_n}{\|\mathbf{p}_n\|} (2 - \|\mathbf{p}_n\|) & \text{if } \|\mathbf{p}_n\| > 1
++    p_n & \text{if } \|p_n\| \le 1 \\
++    \frac{p_n}{\|p_n\|} (2 - \|p_n\|) & \text{if } \|p_n\| > 1 
+     \end{cases}
+     $$
+-    Let $\mathbf{p}'_n = \text{contract}(\mathbf{p}_n)$ [S1].
+-2.  **Hash Encoding:** Query the hash grid using $\mathbf{p}'_n$ to retrieve a positional feature vector $\mathbf{f}_{\text{pos}}$ [S3].
+-3.  **Color Prediction:** Compute the view-dependent color using the tiny MLP [S1]:
++    where $\|p_n\|$ is the Euclidean norm [S1].
++2.  **Hash Encoding:** Query the hash grid using the contracted position $\text{contract}(p_n)$ to retrieve a feature vector $f_{pos}$ [S1, S3].
++3.  **Color Prediction:** Concatenate $f_{pos}$ with the view direction $d$ and pass through the MLP $f(\cdot; \theta)$ to predict the color [S1, S3].
+     $$
+-    \mathbf{c}_n(\mathbf{d}) = f(\mathbf{p}'_n, \mathbf{d}; \theta)
++    c_n(d) = f(\text{contract}(p_n), d; \theta)
+     $$
+-4.  **Base Color Initialization:** Use 0-degree SH components (constant color, same channels as RGB) converted to RGB as a base term, which improves performance over direct RGB representation [S1].
+-
+-**Parameters:**
+-*   **Hash Grid Resolution/Size:** Not given in the sources.
+-*   **MLP Architecture:** Described as "tiny" [S1]. Specific layer sizes and activation functions are not given in the sources.
+-*   **Contraction Function:** Standard mip-NeRF 360 contraction [S1].
+-
+-**Edge Cases and Pitfalls:**
+-*   **Unbounded Space:** The contraction function is critical to handle unbounded scenes; without it, hash grid queries for distant points would be invalid or require infinite grid size [S1].
+-*   **Precision:** The contraction maps large coordinates to the unit sphere boundary, potentially losing fine-grained positional detail for very distant points [S1].
++4.  **Base Color Integration:** The method uses 0-degree SH components (RGB) as a base color input or residual, converting them to RGB colors to slightly increase performance compared to representing RGB directly [S1].
+ 
+ **Pseudocode:**
+ ```python
+-import math
+-
+-def contract(p):
+-    """Contracts unbounded 3D position p to bounded range [-1, 1]^3 [S1]."""
+-    norm = math.sqrt(sum(x**2 for x in p))
++def contract(p: Vector3) -> Vector3:
++    """
++    Contracts unbounded position p to bounded range [-1, 1]^3.
++    Based on mip-NeRF 360 contraction [S1].
++    """
++    norm = magnitude(p)
+     if norm <= 1.0:
+         return p
+-    return [(x / norm) * (2.0 - norm) for x in p]
++    else:
++        return (p / norm) * (2.0 - norm)
+ 
+-def hash_grid_lookup(position):
+-    """Queries hash grid for positional features. Implementation details are not given in the sources."""
+-    # Standard hash grid lookup: maps contracted 3D coordinate to feature vector.
+-    # The sources do not specify the hash function, feature dimension, or collision handling.
+-    return [0.0] * 16  # Placeholder for feature vector dimension
+-
+-def mlp_predict(features, view_direction):
+-    """Predicts RGB color using the tiny MLP. Architecture details are not given in the sources."""
+-    # The MLP takes positional features and view direction as input [S1, S3].
+-    # Specific layer sizes, weights, and activation functions are not given in the sources.
+-    return [0.0, 0.0, 0.0]  # Placeholder for RGB output
+-
+-def get_view_dependent_color(raw_position, view_direction):
+-    """Computes view-dependent color for a Gaussian using a grid-based neural field [S1, S3]."""
+-    # 1. Contract position to bounded range
+-    contracted_pos = contract(raw_position)
++def get_view_dependent_color(p: Vector3, d: Vector3, hash_grid: HashGrid, mlp: MLP) -> Vector3:
++    """
++    Computes view-dependent color for a Gaussian at position p with view direction d.
++    Uses a shared hash grid and tiny MLP [S1, S3].
++    """
++    # Step 1: Contract position to bounded space
++    p_contracted = contract(p)
+     
+-    # 2. Query hash grid for positional features
+-    pos_features = hash_grid_lookup(contracted_pos)
++    # Step 2: Query hash grid for positional features
++    # The hash grid maps quantized coordinates to feature vectors
++    feature_pos = hash_grid.query(p_contracted)
+     
+-    # 3. Compute color via tiny MLP
+-    # Concatenate positional features and view direction before MLP inference
+-    input_vector = pos_features + view_direction
+-    color = mlp_predict(input_vector, view_direction)
++    # Step 3: Combine with view direction
++    # Concatenate positional features and view direction
++    input_vector = concatenate(feature_pos, d)
++    
++    # Step 4: Predict color via MLP
++    # f(theta) is the tiny MLP with parameters theta
++    color = mlp.forward(input_vector)
+     
+     return color
+ ```
+ 
++**Parameters:**
++*   **Hash Grid Resolution:** Not given in the sources.
++*   **MLP Architecture:** Described as "tiny" [S1]. Specific layer sizes and activation functions are not given in the sources.
++*   **SH Degree:** 0-degree (RGB only) is used for the base color component [S1].
++
++**Edge Cases and Pitfalls:**
++*   **Unbounded Space:** The contraction function is necessary because the hash grid operates on a bounded domain; without it, positions outside $[-1, 1]^3$ would not be handled correctly [S1].
++*   **Precision:** The contraction function involves division by norm, requiring care for $p_n \approx 0$ [G].
++
+ ## Subtopics
+ 
+-### DAVIGS
+-Applies a learned affine transformation to the rendered image based on 3D position and view embedding [G]. Choose when you want to preserve per-Gaussian SH but correct global color shifts. [DAVIGS](12021-davigs.md)
++### Gaussian Directional Encoding
++A strategy to reduce disk space explosion from high-order SH by using view-dependent color $c_\theta$ from a grid-based neural network, using only 0-degree SH during training [S2]. The model representation is $\{( N (x_{encoding}^{(i)}, \Sigma_i ), \alpha_i , c_i )\}_{i=1}^n$, where $c_i$ is obtained from MLPs $f$ [S2].
+ 
+-### 3iGS (Factorised Tensorial Illumination)
+-Separates scene lighting (tensor grid) from material properties (BRDF features) to model specular effects [G]. Choose when modeling specular effects and complex lighting is required. [3iGS](13977-3igs-factorised-tensorial-illumination-for-3d-gaussian-splat.md)
+-
+-### Spherical Harmonics Optimization
+-Optimizes the SH coefficients directly or reduces their degree [G]. Choose when you need standard view-dependent shading without neural network overhead. [Spherical Harmonics Optimization](14206-spherical-harmonics-optimization.md)
+-
+-### SWAG
+-Uses an MLP and per-image embeddings to modulate color and opacity [G]. Choose when handling transient objects or appearance synthesis across different images. [SWAG](14315-swag-splatting-in-the-wild-images-with-appearance-conditione.md)
++### Hash-Grid and MLP Color Representation
++A method to eliminate storing attributes for each Gaussian by using a hash-grid and MLP to predict view-dependent color based on position and view direction [S3]. Positions are input into the hash-grid, and the resultant feature along with the view-direction are provided to the MLP to retrieve the color [S3].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Rendering time depends on the hash grid lookup and MLP inference per Gaussian [S1].
+-*   **Memory Complexity:** Significantly reduces memory usage compared to base 3DGS [S1, S2]. Base 3DGS uses 48 parameters (SH degree 3) per Gaussian for color [S1]. This method replaces those 48 parameters with a shared grid and MLP, storing only the base attributes and shared network weights [S1, S2].
+-*   **Measured Performance:** On Mip-NeRF 360, the method achieved PSNR 29.91 with training time 17m 51s and 254 fps, compared to 3DGS PSNR 29.87, 19m 22s, and 154 fps [S1].
+-*   **Strengths:** Reduces disk space explosion from high-order SH; improves training speed and rendering FPS; handles unbounded scenes via contraction [S1, S2].
+-*   **Limitations:** Relies on a neural network for color, which may introduce slight inference overhead compared to simple SH evaluation; requires careful tuning of hash grid and MLP [S1].
+-*   **When to use:** When disk space is a constraint, or when high-order SH causes overfitting or slow training [G].
+-*   **When not to use:** When maximum rendering speed is critical and SH evaluation is faster than MLP inference on the target hardware; when precise control over per-Gaussian directional shading is needed without shared field assumptions [G].
++*   **Memory Complexity:** Reduces per-Gaussian memory from 48 parameters (for SH degree 3) to a shared grid and MLP, significantly lowering total scene memory [S1].
++*   **Time Complexity:** Rendering requires a hash grid query and MLP forward pass per Gaussian, which is generally faster than evaluating SH basis functions [S1].
++*   **Performance:** On Mip-NeRF 360, the method achieved PSNR 29.91 with training time 17m 51s and 254 fps, compared to 3DGS baseline PSNR 29.87, 19m 22s, and 154 fps (tested on NVIDIA A6000/A100) [S1].
++*   **Strengths:** Parameter efficiency, reduced disk space, and faster training/inference compared to high-order SH [S1, S2].
++*   **Limitations:** Relies on the capacity of the hash grid and MLP to capture complex view-dependent effects; may struggle with highly specular or complex lighting compared to high-degree SH [S1, S2].
+ 
+ ## Background
+-The method was introduced in [S1], motivated by the parameter inefficiency of storing 48 SH coefficients per Gaussian in standard 3D Gaussian Splatting [S1]. It draws inspiration from mip-NeRF 360's contraction function for handling unbounded spaces [S1]. A similar approach is also discussed in [S2], which highlights the reduction in disk space and the use of 0-degree SH for base color [S2].
++Originated in "Compact 3D Gaussian Representation for Radiance Field" (CVPR 2024) [S1], motivated by the parameter inefficiency of storing 48 SH coefficients per Gaussian in standard 3DGS [S1]. It builds on the contraction function from mip-NeRF 360 [S1] and hash grid techniques from neural radiance fields [S1, S3]. Variants like HO-Gaussian apply this to urban scenes to handle lighting variations [S2].
+ 
+ ## Sources

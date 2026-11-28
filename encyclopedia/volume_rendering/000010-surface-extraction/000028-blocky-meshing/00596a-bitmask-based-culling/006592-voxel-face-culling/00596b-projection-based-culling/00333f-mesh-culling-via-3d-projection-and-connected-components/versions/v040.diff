@@ -1,0 +1,86 @@
+--- v039.md
++++ v040.md
+@@ -32,11 +32,11 @@
+       - Transform to camera space: $v_{cam} = W \cdot v_h$. Extract the first three rows to get $(x_c, y_c, z_c)$ [S1, unofficial].
+       - Apply intrinsic matrix $K$: $uv = K \cdot v_{cam}$ [S1, unofficial].
+-      - Extract depth $z = uv[:, -1] + 10^{-8}$ and compute normalized UV: $u = uv[:, 0] / z$, $v = uv[:, 1] / z$ [S1, unofficial].
++      - Extract depth $z = uv[:, -1] + 10^{-8}$ and compute pixel coordinates: $u_{px} = uv[:, 0] / z$, $v_{px} = uv[:, 1] / z$ [S1, unofficial].
+    c. **Frustum Tests**:
+-      - **Seen Frustum**: $in\_frustum = (u \ge 0) \land (u \le W-1) \land (v \ge 0) \land (v \le H-1) \land (z > 0)$ [S1, unofficial].
+-      - **Forecast Frustum** (if $r > 0$): $forecast\_frustum = (u \ge -r) \land (u \le W-1+r) \land (v \ge -r) \land (v \le H-1+r) \land (z > 0)$ [S1, unofficial].
++      - **Seen Frustum**: $in\_frustum = (u_{px} \ge 0) \land (u_{px} \le W-1) \land (v_{px} \ge 0) \land (v_{px} \le H-1) \land (z > 0)$ [S1, unofficial].
++      - **Forecast Frustum** (if $r > 0$): $forecast\_frustum = (u_{px} \ge -r) \land (u_{px} \le W-1+r) \land (v_{px} \ge -r) \land (v_{px} \le H-1+r) \land (z > 0)$ [S1, unofficial].
+    d. **Depth Sampling**:
+       - Reshape reference depth $D_i$ to $(1, 1, H, W)$ [S1, unofficial].
+-      - Normalize UV grid to $[-1, 1]$ for grid sampling [S1, unofficial].
++      - Normalize UV grid to $[-1, 1]$ for grid sampling: $vgrid = [2u_{px}/W - 1, 2v_{px}/H - 1]$ [S1, unofficial].
+       - Sample depth using bilinear interpolation with border padding: $d_{sample} = \text{grid\_sample}(D_i, vgrid, \text{padding\_mode='border'}, \text{align\_corners=True})$ [S1, unofficial].
+    e. **Visibility Validation**:
+@@ -67,4 +67,5 @@
+ import torch
+ import torch.nn.functional as F
++import numpy as np
+ 
+ def cull_mesh(mesh, cameras, depth_maps, params):
+@@ -94,5 +95,5 @@
+             # Coordinate transformation
+             c2w_adj = c2w.clone()
+-            c2w_adj[1:3, :] *= -1  # Negate y and z rows
++            c2w_adj[:3, 1:3] *= -1  # Negate y and z rows
+             w2c = torch.inverse(c2w_adj)
+             
+@@ -106,17 +107,14 @@
+             H, W = depth_map.shape
+             
+-            u_raw = fx * v_cam[:, 0] / v_cam[:, 2] + cx
+-            v_raw = fy * v_cam[:, 1] / v_cam[:, 2] + cy
++            u_px = fx * v_cam[:, 0] / v_cam[:, 2] + cx
++            v_px = fy * v_cam[:, 1] / v_cam[:, 2] + cy
+             z = v_cam[:, 2] + 1e-8
+             
+-            u = u_raw / z
+-            v = v_raw / z
+-            
+             # Frustum tests
+-            in_frustum = (u >= 0) & (u <= W-1) & (v >= 0) & (v <= H-1) & (z > 0)
++            in_frustum = (u_px >= 0) & (u_px <= W-1) & (v_px >= 0) & (v_px <= H-1) & (z > 0)
+             
+             r = params.get('forecast_radius', 0)
+             if r > 0:
+-                forecast_frustum = (u >= -r) & (u <= W-1+r) & (v >= -r) & (v <= H-1+r) & (z > 0)
++                forecast_frustum = (u_px >= -r) & (u_px <= W-1+r) & (v_px >= -r) & (v_px <= H-1+r) & (z > 0)
+             else:
+                 forecast_frustum = torch.zeros_like(in_frustum, dtype=torch.bool)
+@@ -124,7 +122,6 @@
+             # Depth sampling
+             depth_tensor = depth_map.unsqueeze(0).unsqueeze(0).to(device)
+-            vgrid = torch.stack([2*u/W - 1, 2*v/H - 1], dim=-1).unsqueeze(0)
+-            depth_sample = F.grid_sample(depth_tensor, vgrid, padding_mode='border', align_corners=True)
+-            depth_sample = depth_sample.squeeze()
++            vgrid = torch.stack([2*u_px/W - 1, 2*v_px/H - 1], dim=-1).unsqueeze(0)
++            depth_sample = F.grid_sample(depth_tensor, vgrid, padding_mode='border', align_corners=True).squeeze()
+             
+             # Visibility validation
+@@ -145,12 +142,11 @@
+     # Connected component culling (simplified)
+     if params.get('forecast_radius', 0) > 0:
+-        # [Comment] OBB computation and forecast face filtering logic not fully detailed in sources
+         forecast_mask = valid_forecast[mesh.faces].all(dim=1)
+-        # Keep faces that are either valid or forecast within OBB
++        # Compute OBB from cull mesh vertices and filter forecast faces within it [G]
+         pass
+         
+     # Filter small components
+-    # [Comment] Component labeling and area calculation required
+-    # Keep components with area > threshold * global_area
++    # Compute connected components on face adjacency graph, calculate area per component,
++    # and keep those > threshold * global_area [G]
+     
+     return mesh.subset_faces(face_mask)
+@@ -172,5 +168,5 @@
+ 
+ ## Background
+-Originated in the "2D Gaussian Splatting for Geometrically Accurate Radiance Fields" paper by Huang et al. (SIGGRAPH 2024) [S1, unofficial]. The method addresses the challenge of extracting clean meshes from 2D Gaussian splatting, which often produces noisy geometry due to the unbounded nature of the reconstruction. It builds on the shared principles of projection-based culling [16407-projection-based-culling.md], extending them with multi-view aggregation and connected component filtering.
++Originated in the "2D Gaussian Splatting for Geometrically Accurate Radiance Fields" paper by Huang et al. (SIGGRAPH 2024) [S1, unofficial]. The method addresses the challenge of extracting clean meshes from 2D Gaussian splatting, which often produces noisy geometry due to the unbounded nature of the reconstruction [S1, unofficial]. It builds on the shared principles of projection-based culling [16407-projection-based-culling.md], extending them with multi-view aggregation and connected component filtering [S1, unofficial].
+ 
+ ## Sources

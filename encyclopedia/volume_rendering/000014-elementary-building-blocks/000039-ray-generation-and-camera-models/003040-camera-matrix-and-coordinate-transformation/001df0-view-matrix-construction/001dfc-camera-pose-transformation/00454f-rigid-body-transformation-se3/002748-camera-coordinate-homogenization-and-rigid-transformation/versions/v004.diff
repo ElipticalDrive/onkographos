@@ -1,0 +1,136 @@
+--- v003.md
++++ v004.md
+@@ -1,34 +1,28 @@
+ # Camera Coordinate Homogenization and Rigid Transformation
+-
+ Also called: Homogenize and Transform Points/Vectors, Rigid Body Transformation via Homogeneous Coordinates
+ 
+ ## Overview
+-This method converts 3D points and vectors into homogeneous coordinates and applies a rigid body transformation (rotation and translation) to map them between coordinate frames, typically from camera space to world space [S1, unofficial]. It builds on [Camera Pose Transformation](1672-camera-pose-transformation.md) [G].
++This method applies a rigid body transformation (rotation and translation) to 3D points or vectors using homogeneous coordinates and matrix multiplication. It solves the problem of unifying translation and rotation into a single linear operation, which is essential for composing complex camera poses and scene transforms in volume rendering. It differs from [3D Coordinate Transformation (Translation + Rotation)](6721-3d-coordinate-transformation-translation-rotation.md) by combining rotation and translation into a single $4 \times 4$ matrix multiplication rather than separating them into sequential vector additions and rotations.
+ 
+ ## How it works
+-**Inputs:**
+-- `points`: Tensor of shape $(\dots, 3)$ containing 3D coordinates [S1, unofficial].
+-- `vectors`: Tensor of shape $(\dots, 3)$ containing direction vectors [S1, unofficial].
+-- `transformation`: A $4 \times 4$ rigid transformation matrix (or batched equivalent) representing the pose [G].
+-
+-**Outputs:**
+-- `transformed_points`: Tensor of shape $(\dots, 3)$ with points transformed to the target frame [G].
+-- `transformed_vectors`: Tensor of shape $(\dots, 3)$ with vectors transformed to the target frame [G].
++**Inputs and Outputs:**
++- Input: A set of 3D points or vectors (shape $N \times 3$ or $B \times N \times 3$) and a rigid transformation matrix (extrinsics, shape $B \times 4 \times 4$ or $4 \times 4$).
++- Output: Transformed 3D points or vectors (same shape as input).
+ 
+ **Data Structures:**
+-- Homogeneous coordinates are represented as a tensor of shape $(\dots, 4)$ [S1, unofficial].
+-- The transformation matrix is a $4 \times 4$ matrix where the upper-left $3 \times 3$ submatrix is the rotation $R$ and the upper-right $3 \times 1$ column is the translation $t$ [G]. The bottom row is $[0, 0, 0, 1]$ [G].
++- Homogeneous Coordinates: A 4D vector where the first three components are the original 3D coordinates and the fourth component is a scalar.
++- Rigid Transformation Matrix: A $4 \times 4$ matrix representing the SE(3) transformation.
+ 
+ **Steps:**
+-1. **Homogenize Points:** Append a $1$ to the last dimension of the point tensor [S1, unofficial].
+-   $$ \mathbf{p}_h = [\mathbf{p}, 1] $$
+-2. **Homogenize Vectors:** Append a $0$ to the last dimension of the vector tensor [S1, unofficial].
+-   $$ \mathbf{v}_h = [\mathbf{v}, 0] $$
+-3. **Apply Transformation:** Perform matrix multiplication using the transformation matrix $T$ and the homogeneous coordinates via einsum [S1, unofficial].
+-   $$ \mathbf{p}'_h = T \mathbf{p}_h $$
+-   $$ \mathbf{v}'_h = T \mathbf{v}_h $$
+-4. **De-homogenize:** Discard the last coordinate (the 4th component) to return to 3D space [G].
+-   $$ \mathbf{p}' = \mathbf{p}'_h[0:3] $$
+-   $$ \mathbf{v}' = \mathbf{v}'_h[0:3] $$
++1. **Homogenize Points:** Append a 1 to the end of each point's coordinate vector. For a point $p = (x, y, z)$, the homogeneous coordinate is $p_h = (x, y, z, 1)$.
++2. **Homogenize Vectors:** Append a 0 to the end of each vector's coordinate vector. For a vector $v = (x, y, z)$, the homogeneous coordinate is $v_h = (x, y, z, 0)$. This ensures translation does not affect direction vectors.
++3. **Apply Transformation:** Multiply the homogeneous coordinates by the rigid transformation matrix using Einstein summation. For a transformation matrix $T$ and homogeneous coordinates $p_h$, the result is $p'_h = T \cdot p_h$.
++4. **Dehomogenize:** Extract the first three components of the resulting homogeneous vector to obtain the transformed 3D point or vector.
++
++**Formulas:**
++- Homogenization of points: $p_h = [x, y, z, 1]^T$
++- Homogenization of vectors: $v_h = [x, y, z, 0]^T$
++- Transformation: $p'_h = T \cdot p_h$
++- Dehomogenization: $p' = [p'_h[0], p'_h[1], p'_h[2]]$
+ 
+ **Pseudocode:**
+@@ -36,44 +30,55 @@
+ import torch
+ 
+-def transform_rigid(points, vectors, transformation):
+-    # 1. Homogenize points by appending 1
+-    points_h = torch.cat([points, torch.ones_like(points[..., :1])], dim=-1)
+-    # 2. Homogenize vectors by appending 0
+-    vectors_h = torch.cat([vectors, torch.zeros_like(vectors[..., :1])], dim=-1)
+-    # 3. Apply rigid transformation via einsum (column-vector convention)
+-    points_h_transformed = torch.einsum("...ij,...j->...i", transformation, points_h)
+-    vectors_h_transformed = torch.einsum("...ij,...j->...i", transformation, vectors_h)
+-    # 4. De-homogenize: take the first 3 components
+-    transformed_points = points_h_transformed[..., :3]
+-    transformed_vectors = vectors_h_transformed[..., :3]
+-    return transformed_points, transformed_vectors
++def homogenize_and_transform(points, transformation_matrix):
++    """
++    Applies a rigid body transformation to 3D points using homogeneous coordinates.
++    
++    Args:
++        points: Tensor of shape (..., 3) containing 3D points.
++        transformation_matrix: Tensor of shape (..., 4, 4) containing the rigid transformation.
++        
++    Returns:
++        Transformed 3D points of shape (..., 3).
++    """
++    # Step 1: Homogenize points by appending a 1
++    # Shape: (..., 4)
++    homogeneous_points = torch.cat([points, torch.ones_like(points[..., :1])], dim=-1)
++    
++    # Step 2: Apply rigid transformation via einsum
++    # einsum(transformation, homogeneous_coordinates, "... i j, ... j -> ... i")
++    # This performs matrix multiplication: T @ p_h
++    transformed_homogeneous = torch.einsum("...ij,...j->...i", transformation_matrix, homogeneous_points)
++    
++    # Step 3: Dehomogenize by extracting the first three components
++    # Shape: (..., 3)
++    transformed_points = transformed_homogeneous[..., :3]
++    
++    return transformed_points
+ ```
+ 
+ **Parameters:**
+-- `transformation`: The $4 \times 4$ matrix. Typically derived from camera extrinsics [G].
+-- `points`/`vectors`: Data types should match the transformation matrix precision (e.g., `float32` or `float64`) [G].
++- `transformation_matrix`: The $4 \times 4$ rigid transformation matrix. Typical values are derived from camera extrinsics.
+ 
+ **Edge Cases and Pitfalls:**
+-- **Vector Homogenization:** Vectors must be homogenized with $0$, not $1$ [S1, unofficial]. Using $1$ incorrectly applies the translation component to the vector [S1, unofficial].
+-- **Matrix Multiplication Order:** The transformation matrix must be applied on the left ($T \mathbf{p}$) as shown in the einsum signature `"... i j, ... j -> ... i"` [S1, unofficial]. If using row-vector conventions ($\mathbf{p}^T T$), the matrix must be transposed [G].
+-- **Batch Dimensions:** The `einsum` handles arbitrary batch dimensions `...` [S1, unofficial]. Ensure input tensors have compatible batch shapes [G].
++- **Vectors vs Points:** Ensure vectors are homogenized with a 0, not a 1, to prevent translation from affecting them [S1, unofficial].
++- **Precision:** Use floating-point arithmetic to avoid precision issues during matrix multiplication [G].
++- **Batching:** The method supports batched operations, where the transformation matrix and points can have leading batch dimensions [S1, unofficial].
+ 
+ ## Subtopics
+ 
+-### 3D Coordinate Transformation (Translation + Rotation)
+-This variant applies sequential translation and rotation matrices using $3 \times 3$ matrices and manual vector addition, rather than homogeneous $4 \times 4$ matrices [S2, unofficial]. It treats points as row vectors [S2, unofficial]. The transformation is defined as $\mathbf{p}' = R_x(\text{x\_rad}) R_y(\text{y\_rad}) R_z(\text{z\_rad}) (R_x(\text{x\_rad\_translate}) R_y(\text{y\_rad\_translate}) R_z(\text{z\_rad\_translate}) \mathbf{p}_{\text{rel}} + \mathbf{p}_{\text{abs}})$, where $R_z(\theta) = \begin{bmatrix} \cos\theta & -\sin\theta & 0 \\ \sin\theta & \cos\theta & 0 \\ 0 & 0 & 1 \end{bmatrix}$ [S2, unofficial]. Steps involve multiplying the relative point by translation rotation matrices, adding absolute coordinates, then multiplying by intrinsic rotation matrices [S2, unofficial]. Pitfall: This method uses $3 \times 3$ matrices for 3D points but multiplies a 1D array on the left (`np.matmul(rel_point, matrix)`), which works in NumPy but is mathematically a row-vector transformation ($\mathbf{p}^T M$) [S2, unofficial]. Translation is manually added as vector addition rather than using 4x4 homogeneous matrices [S2, unofficial].
++### [3D Coordinate Transformation (Translation + Rotation)](6721-3d-coordinate-transformation-translation-rotation.md)
++Applies rigid body transformation using sequential matrix multiplications and vector addition. Chosen when explicit separation of rotation and translation is required, such as in voxel rendering engines.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N)$ for $N$ points/vectors, dominated by the matrix-vector multiplication ($4 \times 4$ matrix multiply is constant time per point) [G].
+-- **Memory Complexity:** $O(N)$ to store homogeneous coordinates during transformation [G].
+-- **Strengths:** Handles both points and vectors correctly; supports batched operations via `einsum` [S1, unofficial].
+-- **Limitations:** Requires constructing the full $4 \times 4$ matrix; less intuitive for pure rotation or pure translation cases compared to specialized methods [G].
+-- **When to use:** When transforming a set of points/vectors between coordinate frames defined by a rigid pose [G].
+-- **When not to use:** For simple rotations or translations where a specialized method is more readable or efficient [G].
++- **Time Complexity:** $O(N)$ for $N$ points, as each point undergoes a constant-time matrix-vector multiplication.
++- **Memory Complexity:** $O(N)$ to store homogeneous coordinates.
++- **Strengths:** Unifies rotation and translation into a single operation, simplifying composition of multiple transformations. Efficient for batched operations.
++- **Limitations:** Requires conversion to and from homogeneous coordinates, which adds a small overhead. Not suitable for non-rigid transformations.
++- **When to Use:** When applying rigid body transformations to 3D points or vectors in a unified manner, especially in camera pose transformations.
++- **When Not to Use:** When non-rigid transformations are needed, or when explicit separation of rotation and translation is required for specific algorithmic reasons.
+ 
+ ## Background
+-This method is a standard technique in computer graphics and robotics for coordinate frame transformations [G]. It is implemented in [S1, unofficial] using PyTorch tensor operations and in [S2, unofficial] using NumPy matrix multiplications [S1, unofficial][S2, unofficial]. The use of homogeneous coordinates allows translation and rotation to be combined into a single linear operation [G]. Not given in the sources.
++This method is commonly used in computer graphics and robotics for transforming coordinates between different reference frames. It is based on the mathematical framework of homogeneous coordinates and SE(3) transformations. The implementation details are derived from the `pixelsplat` repository, which uses this approach for camera coordinate transformations in volume rendering [S1, unofficial].
+ 
+ ## Sources
+-[S1] dcharatan/pixelsplat, https://github.com/dcharatan/pixelsplat, fetched 2026-10-27 (unofficial)
+-[S2] anb2473/Python-Voxel-Rendering-Engine, https://github.com/anb2473/Python-Voxel-Rendering-Engine, fetched 2026-10-27 (unofficial)+[S1] dcharatan/pixelsplat, https://github.com/dcharatan/pixelsplat, fetched 2026-10-27 (unofficial)

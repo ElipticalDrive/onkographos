@@ -1,0 +1,75 @@
+# Point-in-OBB Inclusion Test
+
+Also called: SdfBoundingBox::contains
+
+## Overview
+The Point-in-OBB Inclusion Test determines whether a 3D point lies within the volume of an Oriented Bounding Box (OBB). It solves the problem of spatial containment queries for axis-aligned or arbitrarily rotated rectangular prisms. It sets itself apart from general ray-primitive intersection methods by operating on a single static point rather than a ray, and from [Ray-box intersection](8356-ray-box-intersection.md) by returning a boolean containment result rather than intersection distances. It builds on [Ray-Volume and Bounding Box Intersection](10057-ray-volume-and-bounding-box-intersection.md).
+
+## How it works
+**Inputs and Outputs**
+- Input: A point $\mathbf{p}$ (typically a `Vec3` or `Vec4` with $w=1$) and an OBB defined by its transformation matrix $\mathbf{M}$ and scale $\mathbf{s}$.
+- Output: A boolean indicating if $\mathbf{p}$ is inside the OBB.
+
+**Data Structures**
+The OBB is represented by a transformation matrix $\mathbf{M}$ (mapping local unit box coordinates to world space) and a scale vector $\mathbf{s}$ representing the half-extents or full extents depending on the local space definition. The source uses a local space where the box spans $[-1, 1]$ in each dimension [S1, unofficial]. The inverse transformation $\mathbf{M}^{-1}$ (accessed as `full_inverse`) is required to transform points from world space to the OBB's local space.
+
+**Steps**
+1. Transform the point $\mathbf{p}$ from world space to the OBB's local space using the inverse of the OBB's transformation matrix:
+   $$ \mathbf{p}_{local} = \mathbf{M}^{-1} \mathbf{p} $$
+   [S1, unofficial]
+2. Check if all coordinates of $\mathbf{p}_{local}$ lie within the range $[-1, 1]$. This is equivalent to checking if the maximum absolute value of the coordinates is less than or equal to 1.0:
+   $$ \max(|p_{local,x}|, |p_{local,y}|, |p_{local,z}|) \le 1.0 $$
+   [S1, unofficial]
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def point_in_obb(point: Vec4, bbox: SdfBoundingBoxBlock) -> bool:
+    # Transform point to local space using the inverse matrix
+    # Note: bbox.full_inverse is the inverse of the transformation matrix
+    trans = bbox.full_inverse * point
+    
+    # Check if all coordinates are within [-1, 1]
+    # This is equivalent to checking if the max absolute value <= 1.0
+    max_abs = max(abs(trans.x), max(abs(trans.y), abs(trans.z)))
+    return max_abs <= 1.0
+```
+
+**Parameters**
+- The local space bounds are fixed at $[-1, 1]$ for the unit box representation used in the source [S1, unofficial].
+- The scale vector $\mathbf{s}$ is part of the OBB definition but is not directly used in the inclusion test itself, as the inclusion test relies on the inverse transformation which already accounts for scale and rotation [S1, unofficial].
+
+**Edge Cases and Pitfalls**
+- **Precision**: Floating-point precision errors may cause points on the boundary to be classified incorrectly. Using a small epsilon for the comparison $\le 1.0$ might be necessary in some contexts, though the source uses exact comparison [S1, unofficial].
+- **Degenerate Input**: If the OBB has zero volume (scale is zero or matrix is singular), the inverse transformation may be undefined or produce NaNs. The source does not explicitly handle this case [S1, unofficial].
+- **Homogeneous Coordinates**: The point should be provided in homogeneous coordinates with $w=1$ for correct transformation [S1, unofficial].
+
+## Subtopics
+
+### OBB Point Distance
+Computes the signed distance from a point to an OBB. It uses the same local space transformation logic as the inclusion test but calculates the distance to the box surface. It also provides a method to compute the maximum distance from a point to any vertex of the OBB for conservative culling.
+- **Definition**: Computes the distance from a point to an OBB in the shader context. Uses the same logic as `SdfBoundingBox::distance_to`. Computes the maximum distance from a point to any vertex of the OBB. Used for conservative culling or bounds checking [S1, unofficial].
+- **Steps**:
+  1. Transform point to local space: `trans = bbox.full_inverse * point` [S1, unofficial].
+  2. Compute scaled distance vector: `q_local = (trans.abs() - Vec4::splat(1.0)) * bbox.scale` [S1, unofficial].
+  3. Return distance: `q_local.max(Vec4::ZERO).length() + q_local.x.max(q_local.y.max(q_local.z)).min(0.0)` [S1, unofficial].
+  4. For maximum distance to vertices: Define the 8 vertices of the unit box: $(1,1,1,1), (-1,1,1,1), (1,-1,1,1), (-1,-1,1,1), (1,1,-1,1), (-1,1,-1,1), (1,-1,-1,1), (-1,-1,-1,1)$ [S1, unofficial].
+  5. For each vertex $\mathbf{x}$, compute the distance to the point: `((bbox.matrix * x) - point).length()` [S1, unofficial].
+  6. Return the maximum of these distances [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity**: $O(1)$ for the inclusion test, involving a matrix-vector multiplication and a few comparisons.
+- **Memory Complexity**: $O(1)$, requiring storage for the point and the OBB transformation matrix.
+- **Measured Performance**: Not given in the sources.
+- **Scaling**: Performance is independent of scene complexity as it operates on a single point and one OBB.
+- **Strengths**: Fast, simple, and robust for point containment queries.
+- **Limitations**: Only works for points, not rays. Requires the inverse transformation matrix.
+- **When to use**: When checking if a specific point (e.g., a sample position) is inside a bounding volume.
+- **When not to use**: When ray-primitive intersection is needed (use [Ray-box intersection](8356-ray-box-intersection.md)).
+
+## Background
+The method is derived from Signed Distance Field (SDF) operations on bounding boxes, specifically as implemented in the `holger-kibur/sdf` library. It is used in shader contexts for distance field rendering and culling.
+
+## Sources
+[S1] holger-kibur/sdf, https://github.com/holger-kibur/sdf, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,128 @@
+--- v002.md
++++ v003.md
+@@ -13,5 +13,5 @@
+ - `unconditional_guidance_scale`: Scalar for guidance strength [S1, unofficial].
+ - `timesteps`: Sequence of timesteps to traverse [S1, unofficial].
+-- `ddim_use_original_steps`: Boolean flag determining whether to use the original DDPM timesteps (`self.ddpm_num_timesteps`) or the subsampled DDIM timesteps (`self.ddim_timesteps`) [S1, unofficial].
++- `ddim_use_original_steps`: Boolean flag determining whether to use the original DDPM timesteps (`ddpm_num_timesteps`) or the subsampled DDIM timesteps (`ddim_timesteps`) [S1, unofficial].
+ - `model`: The noise prediction model [S1, unofficial].
+ - `alphas`, `alphas_prev`, `sigmas`, `sqrt_one_minus_alphas`: Precomputed schedule parameters corresponding to the timesteps [S1, unofficial].
+@@ -19,4 +19,5 @@
+ - `temperature`: Scalar multiplier for the noise term [S1, unofficial].
+ - `log_every_t`: Interval for logging intermediate states [S1, unofficial].
++- `ddpm_num_timesteps`, `ddim_timesteps`: Scheduler timestep arrays [S1, unofficial].
+ 
+ **Outputs:**
+@@ -33,9 +34,9 @@
+    - If $x_T$ is `None`, set $img = \mathcal{N}(0, I)$ with shape `shape` on `device` [G].
+    - If `timesteps` is `None`:
+-     - If `ddim_use_original_steps` is true, use `self.ddpm_num_timesteps` steps.
+-     - Else, use `self.ddim_timesteps` [S1, unofficial].
++     - If `ddim_use_original_steps` is true, use `ddpm_num_timesteps` steps [S1, unofficial].
++     - Else, use `ddim_timesteps` [S1, unofficial].
+    - If `timesteps` is provided, subset it:
+-     - $subset\_end = \lfloor \min(\frac{timesteps}{len(self.ddim\_timesteps)}, 1) \times len(self.ddim\_timesteps) \rfloor - 1$ [S1, unofficial].
+-     - $timesteps = self.ddim\_timesteps[:subset\_end]$ [S1, unofficial].
++     - $subset\_end = \lfloor \min(\frac{timesteps}{len(ddim\_timesteps)}, 1) \times len(ddim\_timesteps) \rfloor - 1$ [S1, unofficial].
++     - $timesteps = ddim\_timesteps[:subset\_end]$ [S1, unofficial].
+    - Determine `time_range`:
+      - If `ddim_use_original_steps` is true, `time_range = list(reversed(range(0, timesteps)))` [S1, unofficial].
+@@ -54,9 +55,9 @@
+    - If `mask` is not `None`:
+      - Assert `x0` is not `None` [S1, unofficial].
+-     - Compute $img\_orig = q\_sample(x0, ts)$ (forward diffusion process) [S1, unofficial].
++     - Compute $img\_orig = q\_sample(x0, ts)$ (forward diffusion process) [G].
+      - Update $img = img\_orig \times mask + (1 - mask) \times img$ [S1, unofficial].
+ 
+ 4. **Noise Prediction and History Update:**
+-   - Call `p_sample_plms(img, cond, ts, index, ...)` to obtain $(img, pred\_x0, e_t)$ [S1, unofficial].
++   - Call `p_sample_plms(img, cond, ts, index, unconditional_conditioning, unconditional_guidance_scale, model, old_eps)` to obtain $(img, pred\_x0, e_t)$ [S1, unofficial].
+    - Append $e_t$ to `old_eps` [S1, unofficial].
+    - If $len(old\_eps) \ge 4$, remove the oldest element (`old_eps.pop(0)`) [S1, unofficial].
+@@ -68,10 +69,10 @@
+ 
+ 6. **Inside `p_sample_plms`:**
+-   - Compute $e_t = \text{model\_output}(x, t)$ [S1, unofficial].
++   - Compute $e_t = \text{model}(x, t, c)$ [S1, unofficial].
+    - If `unconditional_conditioning` is not `None` and `unconditional_guidance_scale` $\neq 1.0$:
+      - $x\_in = \text{concat}([x] \times 2)$
+      - $t\_in = \text{concat}([t] \times 2)$
+-     - $c\_in = \text{concat}([unconditional\_conditioning, c])$
+-     - $e\_t\_uncond, e\_t = \text{model}(x\_in, t\_in, c\_in).chunk(2)$
++     - $c\_in = \text{concat}([unconditional\_conditioning, c])$ [S1, unofficial].
++     - $e\_t\_uncond, e\_t = \text{model}(x\_in, t\_in, c\_in).chunk(2)$ [S1, unofficial].
+      - $e_t = e\_t\_uncond + unconditional\_guidance\_scale \times (e_t - e\_t\_uncond)$ [S1, unofficial].
+ 
+@@ -79,4 +80,5 @@
+    - Compute $e_t'$ based on the length of `old_eps`:
+      - If $len(old\_eps) == 0$:
++       - $e\_t\_next = e_t$
+        - $e_t' = \frac{e_t + e_{t+1}}{2}$ (Pseudo Improved Euler) [S1, unofficial].
+      - If $len(old\_eps) == 1$:
+@@ -102,8 +104,11 @@
+ **Pseudocode:**
+ ```python
++import torch
++import numpy as np
++
+ def plms_sample(img, cond, unconditional_conditioning, unconditional_guidance_scale,
+                 timesteps, ddim_use_original_steps, alphas, alphas_prev, sigmas,
+                 sqrt_one_minus_alphas, mask, x0, temperature, log_every_t,
+-                model, device, batch_size):
++                model, device, batch_size, ddpm_num_timesteps, ddim_timesteps):
+     # 1. Initialization
+     if img is None:
+@@ -111,10 +116,10 @@
+     if timesteps is None:
+         if ddim_use_original_steps:
+-            timesteps = self.ddpm_num_timesteps
++            timesteps = ddpm_num_timesteps
+         else:
+-            timesteps = self.ddim_timesteps
++            timesteps = ddim_timesteps
+     else:
+-        subset_end = int(min(timesteps / len(self.ddim_timesteps), 1) * len(self.ddim_timesteps)) - 1
+-        timesteps = self.ddim_timesteps[:subset_end]
++        subset_end = int(min(timesteps / len(ddim_timesteps), 1) * len(ddim_timesteps)) - 1
++        timesteps = ddim_timesteps[:subset_end]
+ 
+     if ddim_use_original_steps:
+@@ -135,10 +140,11 @@
+         if mask is not None:
+             assert x0 is not None
+-            img_orig = q_sample(x0, ts)
++            alpha_ts = alphas[ts]
++            img_orig = torch.sqrt(alpha_ts) * x0 + torch.sqrt(1 - alpha_ts) * torch.randn_like(x0)
+             img = img_orig * mask + (1. - mask) * img
+ 
+         # 4. Noise Prediction & History Update
+         img, pred_x0, e_t = p_sample_plms(img, cond, ts, index, unconditional_conditioning,
+-                                          unconditional_guidance_scale, model)
++                                          unconditional_guidance_scale, model, old_eps)
+         old_eps.append(e_t)
+         if len(old_eps) >= 4:
+@@ -152,7 +158,7 @@
+     return img, intermediates
+ 
+-def p_sample_plms(x, cond, t, index, unconditional_conditioning, unconditional_guidance_scale, model):
++def p_sample_plms(x, cond, t, index, unconditional_conditioning, unconditional_guidance_scale, model, old_eps):
+     # 6. Inside p_sample_plms
+-    e_t = get_model_output(x, t)
++    e_t = model(x, t, cond)
+     if unconditional_conditioning is not None and unconditional_guidance_scale != 1.0:
+         x_in = torch.cat([x] * 2)
+@@ -201,9 +207,9 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Not given in the sources.
+-- **Memory Complexity:** Not given in the sources.
+-- **Measured Performance:** Not given in the sources.
+-- **Strengths and Limitations:** Not given in the sources.
+-- **When to use/not:** Not given in the sources.
++- **Time Complexity:** Not given in the sources [S1, unofficial].
++- **Memory Complexity:** Not given in the sources [S1, unofficial].
++- **Measured Performance:** Not given in the sources [S1, unofficial].
++- **Strengths and Limitations:** Not given in the sources [S1, unofficial].
++- **When to use/not:** Not given in the sources [S1, unofficial].
+ 
+ ## Background

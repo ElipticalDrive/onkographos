@@ -1,0 +1,119 @@
+# Cube Map Rendering
+
+
+## Overview
+Cube Map Rendering projects a 3D scene onto the six faces of a surrounding cube to render environment maps or volumetric data [S2, S1, unofficial]. It decouples scene projection from screen-space rasterization by leveraging the GPU's native cube map sampling hardware [G].
+
+## How it works
+The method utilizes the graphics pipeline to render a cube map representation of the volume.
+
+**Inputs and Outputs:**
+- **Inputs:** 3D volume data or geometry, camera position, camera orientation, cube map face resolution ($S \times S$), and shader programs [S1, S2, unofficial].
+- **Outputs:** A 2D screen image derived from the cube map faces [S1, unofficial].
+
+**Data Structures:**
+- **Cube Mesh:** Vertex positions define a cube from -1 to 1 in XYZ, consisting of 6 faces with 2 triangles each (36 vertices total) [S2, unofficial].
+- **Constant Buffers (CBVs):** Per-object data, per-frame data, and sample resolution (`CB_SAMPLE_RES`) [S1, unofficial].
+- **Cube Map Texture:** 2D texture array or 6 separate 2D textures, each of size $S \times S$ [G].
+- **Shader Resource View (SRV):** Bound to the cube map at a specific Level of Detail (LOD) [S1, unofficial].
+- **Sampler:** Linear filtering with clamp addressing mode [S1, unofficial].
+
+**Steps:**
+1. Set Vertex Shader and Pixel Shader [S1, unofficial].
+2. Disable depth writing: `glDepthMask(GL_FALSE)` [S2, unofficial].
+3. Set primitive topology to `TRIANGLESTRIP` [S1, unofficial].
+4. Update view matrix to remove translation: `glm::mat4(glm::mat3(viewMatrix))` [S2, unofficial].
+5. Set rasterizer state to `CULL_FRONT`, depth stencil to `NONE`, and blend state to `PREMULTIPLIED` [S1, unofficial].
+6. Bind CBVs for per-object, per-frame, and sample resolution to slots 0 in both Vertex and Pixel Shaders [S1, unofficial].
+7. Bind SRV for the cube map at a specific LOD to slot 0 in the Pixel Shader [S1, unofficial].
+8. Bind a `LINEAR_CLAMP` sampler to slot 0 in the Pixel Shader [S1, unofficial].
+9. Draw 4 vertices with 6 instances, corresponding to the 6 cube faces [S1, unofficial].
+10. Re-enable depth writing: `glDepthMask(GL_TRUE)` [S2, unofficial].
+11. Set rasterizer state to `CULL_BACK` [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_cube_map(command_list, fluid, frame_index, render_method):
+    # Clear render target and depth
+    command_list.clear_depth_stencil_view(depth_view, clear_flag=1, depth=1.0)
+    command_list.set_render_targets([render_target_view], [depth_view])
+    # Set viewport and scissor
+    viewport = Viewport(0.0, 0.0, width, height)
+    scissor_rect = Rect(0, 0, width, height)
+    command_list.rasterizer_set_viewports([viewport])
+    command_list.rasterizer_set_scissor_rects([scissor_rect])
+    # Render light probe if active
+    if light_probe_active:
+        light_probe.render_environment(command_list, frame_index)
+    # Select rendering method
+    if render_method == "RAY_MARCH_MERGED":
+        fluid.render(command_list, frame_index, mode="RAY_MARCH_CUBEMAP")
+    elif render_method == "RAY_MARCH_SEPARATE":
+        fluid.render(command_list, frame_index, mode="OPTIMIZED")
+    elif render_method == "RAY_MARCH_DIRECT_MERGED":
+        fluid.render(command_list, frame_index, mode="RAY_MARCH_DIRECT")
+    # ... other cases
+
+def fluid_render_cubemap(command_list, frame_index, mode):
+    # 1. Set Shaders
+    command_list.set_vertex_shader("VS_CUBE")
+    command_list.set_pixel_shader("PS_CUBE")
+    # 2. Disable depth writing
+    command_list.set_depth_mask(False)
+    # 3. Set Topology
+    command_list.set_primitive_topology("TRIANGLESTRIP")
+    # 4. Update view matrix to remove translation
+    view_matrix = glm.mat4(glm.mat3(view_matrix))
+    # 5. Set Rasterizer/Depth/Blend State
+    command_list.set_rasterizer_state("CULL_FRONT")
+    command_list.set_depth_stencil_state("NONE")
+    command_list.set_blend_state("PREMULTIPLIED")
+    # 6. Bind CBVs
+    command_list.set_constant_buffer_vs(slot=0, buffer=per_object_cb)
+    command_list.set_constant_buffer_vs(slot=0, buffer=per_frame_cb)
+    command_list.set_constant_buffer_vs(slot=0, buffer=sample_res_cb)
+    command_list.set_constant_buffer_ps(slot=0, buffer=per_object_cb)
+    command_list.set_constant_buffer_ps(slot=0, buffer=per_frame_cb)
+    command_list.set_constant_buffer_ps(slot=0, buffer=sample_res_cb)
+    # 7. Bind SRV and Sampler
+    command_list.set_shader_resource_view_ps(slot=0, resource=cube_map_srv)
+    command_list.set_sampler_ps(slot=0, sampler="LINEAR_CLAMP")
+    # 8. Draw
+    command_list.draw_instanced(vertex_count=4, instance_count=6)
+    # 9. Re-enable depth writing
+    command_list.set_depth_mask(True)
+    # 10. Switch Culling
+    command_list.set_rasterizer_state("CULL_BACK")
+```
+
+**Parameters:**
+- $S$: Cube map face resolution. Typical values depend on hardware capabilities and memory constraints. Not given in the sources. [G]
+- LOD: Level of Detail for the cube map texture. Not given in the sources. [G]
+
+**Edge Cases and Pitfalls:**
+- **Precision:** Floating-point precision in the vertex shader when transforming cube vertices can affect alignment. [G] Ensure consistent winding order to avoid culling issues.
+- **Boundaries:** The `LINEAR_CLAMP` sampler handles out-of-bounds access by clamping, which may introduce artifacts at the edges of the cube faces if the volume does not perfectly fit the cube. [G] Normalize coordinates carefully to avoid sampling outside the valid volume bounds.
+
+## Subtopics
+
+### Equirectangular Rendering via Cube Map Projection
+This variant renders a 360-degree equirectangular image by projecting the scene onto a cube map and then mapping the cube faces to the equirectangular format [S3, unofficial]. It defines rotation matrices for the six cube faces relative to the base camera orientation using `rotation_matrix(axis, angle_deg)` [S3, unofficial]. For each face, the face pose is computed as `face_pose = m @ base_poses` where `m[:3,:3] = R_f.T` [S3, unofficial]. The 3D vector is mapped to 2D UV coordinates on the hit face using specific lambda functions (e.g., for the front face: `u = v.x/v.z`, `v = v.y/v.z`) [S3, unofficial]. Sampling is performed using `F.grid_sample` with a grid in the range `[-1, 1]` and `align_corners=True` [S3, unofficial]. The intrinsics tensor has shape `(B, 4)` with values `[S/2, S/2, S/2, S/2]`, representing $f_x, f_y, c_x, c_y$ for a 90-degree FOV [S3, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** Depends on the cube map resolution $S$ and the number of samples per ray. [G]
+- **Memory Complexity:** Requires storage for the cube map texture ($6 \times S \times S \times \text{channels}$) and constant buffers. [G]
+- **Performance:** Efficient for hardware that supports cube map sampling. [G]
+- **Strengths:** Leverages GPU hardware for texture sampling; decouples volume traversal from screen-space projection. [G]
+- **Limitations:** Requires additional memory for the cube map; mapping back to screen space may introduce distortion if not handled correctly. [G]
+- **When to use:** Suitable for environments where cube map sampling is available and efficient, such as in real-time rendering of volumetric effects or environment mapping. [G]
+- **When not to use:** When memory is constrained or when the scene geometry is highly irregular and does not fit well into a cube map structure. [G]
+
+## Background
+Cube Map Rendering is used in various graphics applications, including real-time fluid simulation and environment mapping [S1, S2, unofficial]. The specific implementation described here is part of the FluidX12 project, which demonstrates cubemap-space ray marching for fluid rendering [S1, unofficial]. The variant involving equirectangular projection is used in the spirulae-splat project for 3D Gaussian Splatting [S3, unofficial].
+
+## Sources
+[S1] StarsX/FluidX12, https://github.com/StarsX/FluidX12, fetched 2026-10-26 (unofficial)
+[S2] StormCreeper/Voxel_Game, https://github.com/StormCreeper/Voxel_Game, fetched 2026-10-27 (unofficial)
+[S3] notlasandu/spirulae-splat, https://github.com/notlasandu/spirulae-splat, fetched 2026-10-27 (unofficial)

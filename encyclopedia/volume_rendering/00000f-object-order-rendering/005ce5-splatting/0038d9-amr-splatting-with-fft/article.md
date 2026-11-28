@@ -1,0 +1,180 @@
+# AMR Splatting with FFT
+
+Also called: Data projection on a Cartesian grid, splatting technique
+
+## Overview
+AMR Splatting with FFT is a volume rendering technique for Adaptive Mesh Refinement (AMR) data that converts cells into size-weighted points, projects them to a 2D plane, and convolves them with a Gaussian kernel using the Fast Fourier Transform (FFT) to produce a summation plot [S1, unofficial][S2, unofficial]. Unlike direct octree ray tracing, which is computationally expensive for high-resolution data, this method projects data onto a Cartesian grid to leverage optimized standard ray-tracing-like algorithms, producing images close to Maximum Intensity Projection (MIP) maps with adaptive Gaussian blur [S1, unofficial][S2, unofficial]. It is primarily used for semi-interactive exploration of large AMR datasets where speed is prioritized over exact ray-traced precision [S1, unofficial][S2, unofficial].
+
+## How it works
+The method operates by decomposing the AMR hierarchy into leaf nodes relevant to the current view, converting them into 2D splats, and accumulating their contributions via frequency-domain convolution.
+
+### Inputs and Outputs
+*   **Inputs:**
+    *   AMR dataset (hierarchical grid structure).
+    *   Camera parameters (view direction, projection plane definition).
+    *   Scalar physical values associated with each cell.
+*   **Outputs:**
+    *   A 2D image (summation plot) representing the volume projection.
+
+### Data Structures
+*   **AMR Cell:** Defined by its center position, physical value (density/scalar), and size (resolution level).
+*   **Projection Map:** A 2D Cartesian grid (image buffer) initialized to zero, where contributions from all levels are accumulated.
+*   **Gaussian Kernel:** A 2D Gaussian function used for smoothing.
+
+### Steps
+1.  **Leaf Node Identification:** Determine the maximum resolution level involved in the camera-defined image. Only cells ranked at this maximum level of resolution are considered as leaves [S1, unofficial]. This ensures that reading every cell of the dataset is never required, optimizing performance [S1, unofficial].
+2.  **Point Conversion:** Convert each AMR leaf cell into a point with additional size information. The size of the point is determined by the AMR cell size [S1, unofficial][S2, unofficial].
+3.  **Projection:** Project the center points of the AMR cells onto the 2D projection plane [S1, unofficial].
+4.  **Histogram Computation:** For every pixel of the image, compute a 2D histogram weighted with the scalar physical value observed from the projected points [S1, unofficial].
+5.  **Gaussian Convolution via FFT:** Transform the 1D projected points (histogram) into 2D disks by convolving with a 2D Gaussian kernel [S1, unofficial]. This is performed using the Fast Fourier Transform (FFT), as multiplication in Fourier space corresponds to a convolution product in spatial space [S1, unofficial].
+    *   *Note:* The implementation described uses Numpy's FFT module on the CPU [S1, unofficial].
+6.  **Accumulation:** Add all maps obtained for every AMR level to produce the final image [S1, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def amr_splatting_fft(amr_data, camera_params, image_shape):
+    """
+    Render AMR data using splatting with FFT convolution.
+    
+    Args:
+        amr_data: List of AMR cells, each containing:
+            - center: (x, y, z) coordinates
+            - value: scalar physical value
+            - size: cell size (determines splat radius)
+        camera_params: Object defining the projection plane and view direction.
+        image_shape: Tuple (height, width) of the output image.
+        
+    Returns:
+        numpy.ndarray: 2D image buffer.
+    """
+    # Initialize the final accumulation buffer
+    final_image = np.zeros(image_shape, dtype=np.float32)
+    
+    # Identify relevant leaf nodes based on camera-defined max resolution
+    # [S1, unofficial]: Only cells ranked with the maximum level of resolution are considered as leaves.
+    leaf_cells = get_leaf_cells(amr_data, camera_params)
+    
+    # Process each level or cell group
+    # [S1, unofficial]: A different map is computed for every AMR level involved.
+    # For simplicity, we process all leaves together if they share the same projection logic,
+    # or iterate through levels if distinct maps are required before addition.
+    
+    for cell in leaf_cells:
+        # Step 1: Project cell center to 2D plane
+        # [S1, unofficial]: Corresponding AMR cell center points are projected on the projection plan.
+        u, v = project_to_plane(cell.center, camera_params)
+        
+        # Step 2: Determine splat size based on cell size
+        # [S1, unofficial][S2, unofficial]: Size information depends on the AMR cell size.
+        radius = map_cell_size_to_radius(cell.size)
+        
+        # Step 3: Create a sparse contribution map for this cell
+        # Instead of iterating pixels, we can build a histogram or sparse array.
+        # However, for FFT convolution, we typically place the value at the projected coordinate.
+        # To handle multiple cells, we accumulate them into a 2D grid first.
+        pass
+
+    # Efficient approach: Accumulate all points into a 2D histogram/grid first
+    # [S1, unofficial]: A 2D histogram is computed for every pixel of the image, weighted with the scalar physical value.
+    histogram = np.zeros(image_shape, dtype=np.float32)
+    
+    for cell in leaf_cells:
+        u, v = project_to_plane(cell.center, camera_params)
+        # Handle boundary checks
+        if 0 <= u < image_shape[1] and 0 <= v < image_shape[0]:
+            histogram[v, u] += cell.value
+            
+    # Step 4: Convolve with Gaussian Kernel using FFT
+    # [S1, unofficial]: Transform 1D projected points into 2D disks by doing a convolution product with a 2D Gaussian kernel.
+    # This step is done using the Fast Fourier Transform (FFT).
+    
+    # Define Gaussian Kernel
+    # The kernel size should be sufficient to cover the maximum splat radius.
+    kernel_size = 2 * int(map_cell_size_to_radius(max(c.size for c in leaf_cells))) + 1
+    kernel = create_gaussian_kernel(kernel_size)
+    
+    # Perform FFT convolution
+    # FFT of histogram and kernel
+    fft_histogram = np.fft.fft2(histogram)
+    fft_kernel = np.fft.fft2(kernel, s=histogram.shape)
+    
+    # Multiply in Fourier space
+    fft_result = fft_histogram * fft_kernel
+    
+    # Inverse FFT to get spatial domain result
+    result = np.real(np.fft.ifft2(fft_result))
+    
+    # Step 5: Accumulate results
+    # [S1, unofficial]: All maps obtained for every level are added.
+    # If processing per-level, we would add 'result' to 'final_image' inside the loop.
+    final_image += result
+    
+    return final_image
+
+def create_gaussian_kernel(size):
+    """Create a 2D Gaussian kernel."""
+    # [S1, unofficial][S2, unofficial]: Gaussian kernel is used for adaptive blur.
+    sigma = size / 6.0  # Typical sigma for covering the kernel
+    y, x = np.ogrid[-size//2:size//2+1, -size//2:size//2+1]
+    kernel = np.exp(-(x**2 + y**2) / (2 * sigma**2))
+    return kernel
+
+def get_leaf_cells(amr_data, camera_params):
+    """Filter AMR data to return only relevant leaf cells."""
+    # [S1, unofficial]: Reading every cells of the dataset is never required.
+    # Implementation detail: Traverse octree/hierarchy to find leaves within the view frustum.
+    # This is a placeholder for the specific traversal logic of the AMR structure.
+    return [cell for cell in amr_data if is_leaf(cell) and is_in_view(cell, camera_params)]
+
+def project_to_plane(center, camera_params):
+    """Project 3D center to 2D image coordinates."""
+    # Standard perspective or orthographic projection logic.
+    # Returns (u, v) coordinates.
+    pass
+
+def map_cell_size_to_radius(cell_size):
+    """Map AMR cell size to splat radius in pixels."""
+    # Depends on camera distance and image resolution.
+    pass
+```
+
+### Parameters
+*   **Gaussian Kernel Width:** Must be large enough to cover the splatted disk size. If points are not large enough to fill the image, the underlying grid structure may become visible [S2, unofficial].
+*   **FFT Grid Size:** Must be a power of two for optimal performance in many FFT implementations, though Numpy handles general sizes.
+
+### Edge Cases and Pitfalls
+*   **Grid Alignment Artifacts:** Grid alignment may appear on resulting images due to the discrete nature of the projection and FFT [S1, unofficial].
+    *   *Mitigation:* Increase splatted disk/point sizes or add a random shift to point positions [S1, unofficial]. Note that these solutions lead to lower image quality [S1, unofficial].
+*   **Memory and Compute Cost:** Projecting data to a Cartesian grid incurs high memory cost and computing time, limiting its use for very high-resolution octrees [S2, unofficial].
+*   **Resolution Mismatch:** If the splat size is too small relative to the pixel grid, aliasing or grid visibility occurs [S2, unofficial].
+
+## Subtopics
+
+### Hierarchical and Multi-Resolution Splatting
+Handles AMR data by processing different resolution levels separately or hierarchically, reducing overdraw and improving performance. Choose when dealing with large dynamic range AMR datasets where coarse levels can be rendered quickly [5618-hierarchical-and-multi-resolution-splatting.md].
+
+### Splat Sorting and Composition
+Determines the order in which splats are composited to handle transparency correctly. While FFT splatting often produces a summation plot (MIP-like), sorting is needed for alpha-blended transparency. Choose when accurate transparency is required over intensity projection [8126-splat-sorting-and-composition.md].
+
+### Significant Voxel Extraction
+Identifies which voxels or cells contribute significantly to the final image, allowing for culling of empty or low-value cells. Choose when optimizing performance for sparse AMR data [9025-significant-voxel-extraction.md].
+
+## Operating characteristics
+*   **Time Complexity:** Dominated by the FFT operation, which is $O(N \log N)$ where $N$ is the number of pixels in the image, plus the cost of projecting $M$ cells ($O(M)$). This is generally faster than ray casting for dense views but slower than simple rasterization for very sparse data.
+*   **Memory Complexity:** Requires storage for the 2D image buffer and the FFT workspace, proportional to the image resolution. High-resolution octrees can lead to high memory costs due to the Cartesian grid projection [S2, unofficial].
+*   **Performance:** Produces semi-interactive visualization speeds [S1, unofficial]. Implementation on CPU using Numpy's FFT module is described [S1, unofficial]. Parallel projection and FFT processes can speed up the process [S2, unofficial].
+*   **Strengths:** Easy processing of complex AMR structures; produces images close to ray-traced MIP maps; semi-interactive speed [S1, unofficial].
+*   **Limitations:** High memory and compute cost for high-resolution octrees; grid alignment artifacts; lower image quality if mitigations (random shift, larger splats) are used [S1, unofficial][S2, unofficial].
+*   **When to Use:** Quick exploration of large AMR datasets; generating MIP-like visualizations; when hardware acceleration for ray casting is not available or too slow.
+*   **When Not to Use:** When exact ray-traced transparency is required; when memory is severely constrained; when high-resolution static images are needed without artifacts.
+
+## Background
+The technique is described in the context of the PYMSES project for visualizing AMR simulations, particularly from the RAMSES code [S1, unofficial][S2, unofficial]. It builds on the splatting technique described by Westover (1990) [S1, unofficial]. The use of FFT for convolution is attributed to Thomas Jansen (2004) [S1, unofficial]. The implementation was developed by Chapon (2011) as part of a Ph.D. thesis at Universite Paris 7 [S1, unofficial][S2, unofficial]. It is used in the `amrviewer` GUI of PYMSES for semi-interactive exploration of astrophysical data [S2, unofficial].
+
+## Sources
+[S1] Volume Rendering of AMR Simulations, https://doi.org/10.48550/arxiv.1210.8014, fetched 2026-10-26 (unofficial)
+[S2] PDF Visualization of Octree Adaptive Mesh Refinement (AMR) in Astrophysical ..., https://www.aspbooks.org/publications/461/837.pdf, fetched 2026-10-30 (unofficial)

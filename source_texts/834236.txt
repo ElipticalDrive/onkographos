@@ -1,0 +1,180 @@
+Voxel game set in a world of floating islands. Contribute to generatives/clear_skies development by creating an account on GitHub.
+
+Mesh streamed terrain in the column job by generatives · Pull Request #99 · generatives/clear_skies · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+generatives
+commented
+Oct 22, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Before: each loaded chunk waited in the mesher's queue for its own job. The mesher runs at most cores/2 jobs, and each result lands a frame later, so it meshed at most about cores/2 chunks a frame. While flying, thousands of chunks waited and the fog held back for them.
+After: streamed chunks (full detail and every coarse level, generated or saved) are meshed on the loading worker right after they're made, so they arrive meshed and wait only for their upload. The mesher's own jobs are left for edits, ships, and chunks whose neighbour changed. Declan tested in game: startup to full distance went from 60 s to 45 s, and loading now stays ahead while flying.
+How: the loader's single preparer becomes an ordered list of stages (IChunkPreparer). Each stage runs over all of a job's chunks before the next starts, and it gets the job's chunks so it can look across borders. Today's stages are opacity packing, then meshing (ChunkMeshSystem.Stage). The mesh rides on the chunk as PreparedMesh, and ChunkMeshSystem uploads it within its existing 4 ms budget, nearest first, once the chunk is drawn.
+Only see-through faces are culled across borders in the streamed world, so the stage records which neighbour each face was meshed against. Chunks from the same job don't mark each other for a remesh. A see-through face beside a chunk from another job gets remeshed after the upload.
+A solid chunk with solid chunks above and below it isn't meshed while loading. About 4 in 10 island chunks are solid, and most end up buried. When it's uploaded it's cleared if buried, or gets a mesh job if not.
+Light-map bakes, which the faster meshing exposed:
+A chunk with light maps isn't drawn until they've been baked once. The budget (BakeQuadBudget, 65,536 quads a frame) now covers every static volume, the world's chunks as well as each coarse level's. Whatever is left of it each frame goes to chunks that have never been baked, finest level first, including chunks out of view. Each baked chunk gets LightmapsBakedFlag.
+The swaps treat an unbaked chunk as not ready, so a level doesn't fade out before the level replacing it can be drawn.
+The Chunk Rendering panel shows how many chunks in view are still waiting for their first bake.
+Headless flight probe, release build, 4 cores, levels to 2048 blocks (before the buried skip):
+stages: packing
+packing + mesh
+Initial load to idle
+55.4 s
+56.9 s (2,330 chunks meshed)
+Flat x catch-up
+89.5 s
+96.5 s
+Dive catch-up
+49.5 s
+52.6 s
+Mesh per chunk (worker)
+1.13 ms
+The fog itself is left alone here. Moving to a fixed fog with per-chunk fade-in is the next PR.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_01Viog2jB5FEaR1EkdsXp5cz
+claude
+added 9 commits
+October 22, 2026 21:48
+Mesh streamed terrain in the column job
+…
+ac70316
+```
+The loader's preparers become an ordered list of stages, each run over all of a
+job's chunks before the next, with the job's chunks to look across borders.
+ChunkMeshSystem adds a mesh stage: streamed chunks (full detail and coarse,
+generated or saved) arrive meshed and wait only for their upload, instead of a
+separate mesh job each. A see-through face beside a chunk from another job is
+remeshed after upload; chunks of the same job don't remesh each other.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Viog2jB5FEaR1EkdsXp5cz
+```
+Leave solid chunks between solid chunks unmeshed until uploaded
+…
+fe4b287
+```
+About four in ten non-air chunks of an island are all opaque, and most are
+buried once their sides load: main never meshed those (the mesher's buried fast
+path). The mesh stage now leaves a solid chunk with solid chunks above and below
+it in the job unmeshed; as it's uploaded it's cleared if buried, or given a mesh
+job if not.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Viog2jB5FEaR1EkdsXp5cz
+```
+Chunk Rendering panel: coarse chunks waiting for their first light-ma…
+…
+36a9b8b
+```
+…p bake
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Viog2jB5FEaR1EkdsXp5cz
+```
+Pace coarse mesh uploads to the light-map bake budget
+…
+e27485c
+```
+A coarse chunk isn't drawn until its light maps are baked once, at most 65,536
+quads a frame, but the fog counts it ready once meshed. With meshes made as
+chunks load, thousands arrived at once and showed only after the fog had passed.
+Coarse meshes made as they loaded now upload at most a bake budget's quads a
+frame, after full detail's.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Viog2jB5FEaR1EkdsXp5cz
+```
+Revert "Pace coarse mesh uploads to the light-map bake budget"
+…
+a419a12
+```
+This reverts commit e27485c.
+```
+Fog waits for a coarse chunk's first light-map bake
+…
+5d9d923
+```
+A coarse chunk isn't drawn until its light maps are baked once (to a budget of
+quads a frame), but the swaps and the fog counted it ready once meshed and lit:
+with meshes made as chunks load, thousands arrived at once and appeared after the
+fog had passed. ChunkRenderSystem now flags a coarse chunk LightmapsBakedFlag once
+baked, and spends what the frame's budget leaves on never-baked ones out of view,
+so every one is baked in the end. With WaitsForBake (set where terrain is drawn)
+the swaps treat an unbaked chunk as not ready: the finer level stays, and the fog
+holds for it ("its light maps' first bake").
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Viog2jB5FEaR1EkdsXp5cz
+```
+Merge main (two coarse levels by default); bake budget and first-bake…
+…
+eb88034
+```
+… wait for every level
+
+Merges main. Then the light-map bake budget and the first-bake flag cover every
+static volume, the world's chunks as well as each coarse level's (the budget was
+the coarse levels' only, as BakeQuadBudget now), and the fog and the swaps wait
+for any chunk's first bake: full detail with no coarse levels holds the fog too.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Viog2jB5FEaR1EkdsXp5cz
+```
+Fog skips coarser stand-ins inside level 1; first bakes finest first;…
+…
+0981f67
+```
+… panel keeps the nearest hold
+
+A coarser level's chunk wholly inside level 1's range only stands in till level 1
+is ready there, so the fog waits on level 1 there instead of on the stand-in's
+first bake. Never-baked chunks are baked finest level first. The Distant Terrain
+panel keeps the nearest fog hold of the last 5 seconds, since a short one is gone
+before it can be read.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Viog2jB5FEaR1EkdsXp5cz
+```
+Take the fog's first-bake hold back out
+…
+8d40b85
+```
+The fog is moving to a fixed distance with chunks fading in on their own (next
+PR), so it no longer waits on first bakes; the swaps still do, so a level doesn't
+fade out before the one replacing it can be drawn.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Viog2jB5FEaR1EkdsXp5cz
+```
+generatives
+mentioned this pull request
+Oct 22, 2026
+Fixed fog at the last level's edge, chunks fade in after their first bake
+#100
+Closed
+generatives
+closed this
+Oct 23, 2026
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

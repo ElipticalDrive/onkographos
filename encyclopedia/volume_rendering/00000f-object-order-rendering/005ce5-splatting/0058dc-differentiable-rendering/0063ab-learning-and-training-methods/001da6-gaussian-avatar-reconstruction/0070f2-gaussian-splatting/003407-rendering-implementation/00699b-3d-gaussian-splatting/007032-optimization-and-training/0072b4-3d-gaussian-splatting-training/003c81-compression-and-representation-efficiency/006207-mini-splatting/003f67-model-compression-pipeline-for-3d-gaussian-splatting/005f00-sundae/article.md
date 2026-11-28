@@ -1,0 +1,103 @@
+# SUNDAE
+
+Also called: Spectrally Pruned Gaussian Fields with Neural Compensation
+## Overview
+SUNDAE is a graph-based compression method for 3D Gaussian Splatting that reduces computational load by pruning redundant Gaussians while preserving key scene details [S1, S2]. It distinguishes itself from direct splatting by shifting to feature splatting, utilizing a neural compensation head to interpolate features and recover fine details lost during pruning [S1, S2].
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of 3D Gaussians $\{G_i\}$ with attributes (position, covariance, opacity, spherical harmonics coefficients, color).
+*   **Output:** A pruned subset of Gaussians and a neural network model for feature reconstruction.
+
+**Data Structures:**
+*   **Gaussian Graph:** Nodes represent Gaussians. Edges represent spatial relationships or proximity between Gaussians [S2].
+*   **Neural Compensation Head:** A lightweight convolutional neural network (CNN) [S1, S2].
+
+**Steps:**
+1.  **Graph Construction:** Construct a graph where nodes are the 3D Gaussians. Edges are established to capture spatial relationships between Gaussians [S2].
+2.  **Spectral Pruning:** Apply a band-limited graph filter to the constructed graph. This filter selectively down-samples (prunes) the Gaussians, removing redundant ones while attempting to preserve key scene details [S2].
+3.  **Feature Splatting Setup:** Instead of rendering directly from the pruned Gaussians' full attributes, the method shifts to feature splatting [S1].
+4.  **Neural Compensation:** Employ a lightweight neural network-based feature interpolation head (CNN) to recover fine details that were potentially lost during the pruning process [S1, S2]. This compensates for the information loss from down-sampling [S2].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Pseudocode for SUNDAE compression pipeline
+# Note: Exact architectural details of the CNN and graph filter are not provided in sources [S1, S2].
+
+def sundae_compress(gaussians):
+    """
+    Compress 3D Gaussians using SUNDAE.
+    
+    Args:
+        gaussians: List of Gaussian objects with position, covariance, opacity, SH, color.
+        
+    Returns:
+        pruned_gaussians: Subset of input Gaussians.
+        neural_head: Trained CNN for feature interpolation.
+    """
+    # Step 1: Construct graph based on spatial relationships
+    # [S2]
+    graph = build_graph(gaussians)
+    
+    # Step 2: Apply band-limited graph filter to prune
+    # [S2]
+    pruned_gaussians = apply_bandlimited_graph_filter(graph, gaussians)
+    
+    # Step 3: Train neural compensation head
+    # [S1, S2]
+    # The head interpolates features to recover lost details.
+    # Training likely involves minimizing reconstruction error between 
+    # original rendering and pruned+compensated rendering.
+    neural_head = train_cnn_head(pruned_gaussians, gaussians)
+    
+    return pruned_gaussians, neural_head
+
+def build_graph(gaussians):
+    """
+    Construct a graph where nodes are Gaussians and edges represent spatial relationships.
+    [S2]
+    """
+    # Implementation detail not provided in sources.
+    # Typically involves k-NN or distance-based thresholding.
+    pass
+
+def apply_bandlimited_graph_filter(graph, gaussians):
+    """
+    Apply a band-limited graph filter to select a subset of Gaussians.
+    [S2]
+    """
+    # Implementation detail not provided in sources.
+    pass
+
+def train_cnn_head(pruned_gaussians, original_gaussians):
+    """
+    Train a lightweight CNN to interpolate features and recover fine details.
+    [S1, S2]
+    """
+    # Implementation detail not provided in sources.
+    pass
+```
+
+**Parameters:**
+*   **Band-limited graph filter cutoff:** Not given in the sources.
+*   **Neural network architecture:** Lightweight CNN [S1, S2]. Specific layers or dimensions are not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Information Loss:** Pruning may remove critical details; the neural compensation head is designed to counteract this [S2].
+*   **Graph Construction:** The method relies on capturing spatial relationships; the specific metric for edge creation is not defined in the sources [S2].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Reduces memory usage by pruning Gaussians and using a lightweight neural network for compensation [S1, S2].
+*   **Performance:** The method aims to balance efficient Gaussian placement with the preservation of visual quality [S2].
+*   **Strengths:** Preserves key scene details while reducing redundancy; shifts to feature splatting for potentially more efficient representation [S1, S2].
+*   **Limitations:** Requires training and storing a neural network for compensation [S1, S2].
+*   **When to use:** When hardware-oriented deployment requires reduced computational complexity and memory usage for 3DGS [S1].
+*   **When not to use:** When real-time inference without neural network overhead is required.
+
+## Background
+SUNDAE (Spectrally Pruned Gaussian Fields with Neural Compensation) is a graph-based compression method for 3D Gaussian Splatting [S1, S2]. It was introduced to push contextual modeling in 3DGS to a finer granularity [S1]. The method is cited as reference [39] in [S1] and [54] in [S2].
+## Sources
+[S1] Compression in 3D Gaussian Splatting: A Survey of Methods, Trends, and Future Directions, https://doi.org/10.1109/TCSVT.2026.3676048, fetched 2026-10-26
+[S2] 3DGS.zip: A survey on 3D Gaussian Splatting Compression Methods, https://arxiv.org/abs/2407.09510v5, fetched 2026-10-26

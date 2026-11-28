@@ -1,0 +1,114 @@
+# Octree Mesh Construction
+
+Also called: Isotopic Octree Meshing, Octree-based Marching Cubes variant
+
+## Overview
+Octree Mesh Construction generates an isotopic triangular mesh from an implicit function defined over an octree structure [S1]. It solves the problem of surface extraction in sparse or hierarchical domains by placing vertices at edge midpoints and connecting them into closed chains per cell, ensuring topological correctness (isotopy) regardless of the octree's irregular subdivision [S1]. Unlike uniform grid methods, it adapts resolution locally, though it requires careful handling of nested loops to maintain manifold topology [S1].
+
+## How it works
+**Inputs:** An octree where each leaf cell $C$ has an associated scalar function $F$ and gradient $\nabla F$. The octree must be balanced such that for every leaf, either the function value range $\Box F(C)$ does not contain zero, or the squared gradient norm $\langle \Box \nabla F(C), \Box \nabla F(C) \rangle > 0$ [S1].
+**Outputs:** A triangular mesh representing the isosurface $F(x)=0$.
+
+**Data Structures:**
+*   **Octree Node:** Contains bounding box, subdivision status, and references to children.
+*   **Edge Vertices:** A vertex is placed at the geometric center of any octree edge where the scalar function signs differ at the two endpoints.
+*   **Face Segments:** Pairs of vertices on the same face are connected by line segments.
+*   **Cell Chains:** Closed loops of segments on the boundary of each cell.
+
+**Steps:**
+1.  **Balance Octree:** Ensure the octree satisfies the isotopy condition: $0 \notin \Box F(C) \quad \vee \quad \langle \Box \nabla F(C), \Box \nabla F(C) \rangle > 0$ for all leaves $C$ [S1].
+2.  **Place Vertices:** For every edge of the octree, if the function signs at the endpoints are opposite, create a vertex at the edge's center [S1].
+3.  **Connect Face Segments:** For each face of the octree, identify pairs of vertices lying on that face and connect them with segments [S1].
+4.  **Form Cell Chains:** For each cell, the segments on its boundary form one or more closed chains [S1].
+5.  **Triangulate Chains:**
+    *   If a cell contains two nested loops, connect them with triangles to form an annulus [S1].
+    *   In all other cases (single loop), close the loop with triangles to form a topological disk [S1].
+    *   *Note:* For top and bottom faces, the connection order does not affect isotopy if a vertical parametrizable direction is assumed [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def construct_octree_mesh(octree):
+    # Step 1: Ensure isotopy condition is met
+    for leaf in octree.leaves():
+        f_range = leaf.function_range()
+        grad_norm_sq = dot(leaf.gradient_range(), leaf.gradient_range())
+        if 0 in f_range and grad_norm_sq <= 0:
+            raise ValueError("Isotopy condition violated")
+
+    vertices = {} # Map edge_key -> vertex_position
+    segments = [] # List of (v1, v2)
+    
+    # Step 2: Place vertices at edge centers with sign change
+    for edge in octree.edges():
+        sign_start = sign(edge.node_start.function_value())
+        sign_end = sign(edge.node_end.function_value())
+        if sign_start != sign_end:
+            center = (edge.node_start.position + edge.node_end.position) / 2.0
+            vertices[edge.key] = center
+
+    # Step 3: Connect vertices pairwise on faces
+    for face in octree.faces():
+        face_vertices = [vertices[e.key] for e in face.edges if e.key in vertices]
+        # Connect pairwise. The source implies a specific pairing strategy 
+        # based on the face geometry, but does not specify the exact algorithm 
+        # for pairing beyond "pairwise". [G] Assuming simple adjacency pairing 
+        # on the face boundary for implementation completeness.
+        for i in range(0, len(face_vertices) - 1, 2):
+            segments.append((face_vertices[i], face_vertices[i+1]))
+
+    # Step 4 & 5: Form chains and triangulate per cell
+    mesh_triangles = []
+    for cell in octree.cells():
+        # Gather segments on this cell's boundary
+        cell_segments = [s for s in segments if s[0] in cell.boundary_edges and s[1] in cell.boundary_edges]
+        
+        # Form closed chains from segments
+        chains = form_closed_chains(cell_segments)
+        
+        if len(chains) == 2:
+            # Nested loops: create annulus
+            mesh_triangles.extend(triangulate_annulus(chains[0], chains[1]))
+        else:
+            # Single loop or other: create disk
+            for chain in chains:
+                mesh_triangles.extend(triangulate_disk(chain))
+                
+    return mesh_triangles
+
+def form_closed_chains(segments):
+    # [G] Standard graph traversal to find cycles in the segment graph
+    # Returns list of lists of vertices
+    pass
+
+def triangulate_annulus(inner_chain, outer_chain):
+    # [G] Triangulate between two concentric loops
+    pass
+
+def triangulate_disk(chain):
+    # [G] Fan triangulation or ear clipping for a single loop
+    pass
+```
+
+## Subtopics
+
+### Octree-based Dual Contouring
+Generates a mesh from noise data using an octree structure instead of a uniform voxel grid, intended for procedural terrain generation with LOD swapping [S2, unofficial]. It builds the octree recursively and then generates the mesh by allocating vertex and index buffers [S2, unofficial]. Unlike the isotopic method, it uses Dual Contouring principles [S2, unofficial].
+*   **When to choose:** When procedural terrain generation with LOD swapping is required and Dual Contouring is preferred over isotopic marching [S2, unofficial].
+*   **Pitfall:** Cannot generate meshes at different LOD levels without regenerating the octree, because the simplification function is controlled by resolution `res` during build [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Depends on octree depth and number of leaves. Balancing and traversal are $O(N)$ where $N$ is the number of octree nodes.
+*   **Memory Complexity:** Proportional to the number of octree edges and faces.
+*   **Strengths:** Maintains isotopic topology (no self-intersections or holes) even with irregular octree subdivision [S1]. Adapts to sparse data.
+*   **Limitations:** Requires careful balancing to satisfy isotopy conditions [S1]. The triangulation of nested loops (annuli) is complex [S1].
+*   **When to use:** When topological correctness is critical in hierarchical/volumetric data [S1].
+*   **When not:** When simple uniform grid extraction is sufficient and performance is paramount [S1].
+
+## Background
+Originated in the context of isotopic approximation of implicit curves and surfaces [S1]. The method ensures that the generated mesh is topologically equivalent to the implicit surface, even when the underlying grid is an irregular octree [S1]. It builds on the concept of placing vertices at edge midpoints and forming closed chains [S1].
+
+## Sources
+[S1] Isotopic approximation of implicit curves and surfaces, https://doi.org/10.1145/1057432.1057465, fetched 2026-10-29
+[S2] DMeville/Unity-Fast-Dual-Contouring, https://github.com/DMeville/Unity-Fast-Dual-Contouring, fetched 2026-10-26 (unofficial)

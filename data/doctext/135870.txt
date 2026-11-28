@@ -1,0 +1,232 @@
+How Does It Work?
+Voxel Quest
+Home
+News
+Videos
+Gallery
+Contact or Subscribe
+downloads and source
+How Does It Work?
+4/7/2014
+15 Comments
+I get asked this somewhat frequently, so I guess it is better for me to explain it once in a post rather than to everyone who asks. If anything is unclear, just ask me about it! Also, if you have not seen the latest demo, take a look now. Also, please vote on Steam Greenlight (cough cough self promotion).
+Voxel Generation
+VQ is written with OpenGL, GLSL, C++, remote javascript via websocket (runs without it, just for the remote editor), and potentially Lua in the future.
+The majority of voxel generation and rendering occurs in GLSL, but higher level things are determined in C++ (i.e. where objects should be placed, the parameters specifying object materials and types, etc).
+How is is possible to render billions of voxels to screen (without an sort of compression like octrees), when that would clearly wipe out GPU and/or system memory? The trick is that voxels are rapidly generated, rendered, and discarded. Even though the voxels are discarded, collision detection is still possible as explained later.
+There is only one buffer that gets written to for voxel data, and this buffer is only bound by maximum GPU texture sizes. It writes to this buffer to generate the voxels, then renders those voxels to a bitmap so that they are stored in a chunk or page (I use the terms "chunk" and "page" interchangeably quite often).
+From there, the program can just place these pages on the screen in the appropriate position, just as it might with a tile-based 2D or 2.5D isometric engine.
+You can't easily render to a 3D volume (there are ways, like this). Or you can just do ray tracing and not render each voxel implicitly. I don't touch 3D textures, and every single voxel is explicitly generated. So how do I avoid 3D textures? I just use a long 2D texture and treat it as a column of slices in a volume. This texture is currently 128x(128*128) in size, or 128x16384, but it the size can be changed, even in realtime. 16384 is the maximum texture width on most modern cards (and like I said, I'm building this over a 3 year timeline, so that might improve or become the common standard). Here is the old slice layout and the new layout:
+Rendering Steps
+Run the voxel generation shader on the 2D slice texture.
+For each point on the 2D slice texture, determine the corresponding 3D point (clamped in 0-1 range). That is, based on the y coordinate, find the current slice number (this is the z value). Within that slice, find out the y distance from the top of the slice, this will be the y coordinate. Lastly, the x coordinate is the same as it would be on a normal 2D texture. Here is some glsl pseudo code (there are better / faster ways to do this, but this is more readable):
+uniform vec3 worldMin; // the max coordinates for this chunk
+uniform vec3 worldMax; // the min coordinates for this chunk
+uniform float volumePitch; // number of voxels per chunk side
+varying vec2 TexCoord0; // the texture coordinates on the slice texture
+// may need this if GL_EXT_gpu_shader4 not specified
+int intMod(int lhs, int rhs) {
+return lhs - ( (lhs/rhs)*rhs );
+}
+void main() {
+// 2d coords input
+vec2 xyCoordsIn = vec2(TexCoord0);
+// we are trying to find these 3d coords based on the
+// above 2d coords
+vec3 xyzCoordsOut = vec3(0.0);
+int iVolumePitch = int(volumePitch);
+int yPos = int( volumePitch*volumePitch*xyCoordsIn.y );
+// convert the xyCoordsIn to the xyzCoordsOut
+xyzCoordsOut.x = xyCoordsIn.x;
+xyzCoordsOut.y = float(intMod(yPos,iVolumePitch))/volumePitch;
+xyzCoordsOut.z = float(yPos/iVolumePitch)/volumePitch;
+vec3 worldPosInVoxels = vec3(
+mix(worldMin.x, worldMax.x, xyzCoordsOut.x),
+mix(worldMin.y, worldMax.y, xyzCoordsOut.y),
+mix(worldMin.z, worldMax.z, xyzCoordsOut.z)
+);
+}
+Once you have this 3d point, you have the world coordinates based on the position in the slice texture that you are rendering to. You can also get object-space coordinates based off of this coordinate and the object position in worldspace. Using these coordinates we can do all kinds of generation.
+After generating voxels for the current chunk, it renders the voxel data to screen, then the buffer we used for voxel generation gets discarded and reused for the next chunk. To render, it just shoots a ray from the front of the chunk to the back - I won't go into detail explaining this because others have done it much better than I could. See one example of how this is done here. In my case, the volume cube that gets ray marched is isometric, so it is exactly the shape of an imperfect hexagon (with sides that have a 0.5 slope, for clean lines, in the style of traditional pixel art).
+What gets rendered? Depth, normals, and texture information. This information is later used in the deferred rendering to produce a result.
+Each chunk gets rendered to a 2D texture. These are then just rendered to the screen in back to front order (you can do front to back, but it requires a depth texture). As these chunks fall out of distance, their textures get reused for closer chunks.
+Even though voxel data is discarded, collision and other calculations can be performed based on the depth values that get rendered, within the shader, or on the CPU side using the info of the closest objects.
+Grass
+Grass is rendered in screen space. There still are artifacts from this method, but there are ways around it.
+Each blade is either a quad or single polygon (optional).
+It renders every blade to the same space on the screen (at a user-defined interval of x voxels), but the length of the blade is just based on the texture information under it.
+If there is a grass texture under it, then the grass blades have a normal length in that spot. Otherwise, they have a length of zero.
+This information is actually blurred in a prepass so that grass fades away as it approaches non-grass areas.
+The grass is animated by adding up some sine waves, similar to how water waves might be produced. For most performance, grass can be disabled. Alternately the grass can be static for some performance increase. Animated grass takes the most performance but does not drain resources too much surprisingly.
+Grass can be applied to anything, with different materials as well. Could be useful for fur, maybe?
+Water and Transparency
+Water need not be at sea level, and it can fill any space (not necessarily cubic) (you can see in some of the demo video that the water does not flow through building walls).
+Water could potentially flood an area on breaking its source container, but this is not yet implemented.
+Water is rendered to a static area on the screen, as in the screenshot above.
+This area then has a ray marched through it to produce volumetric waves (this is done in screenspace).
+Water and transparent voxels are rendered to a separate layer.
+The deferred rendering is done in two passes, one for each layer.
+The layer under transparent objects is blurred for murky water, frosted glass, etc (simulate scattering).
+These results are then combined in a final pass.
+Transparent objects are subject to normal lighting. In addition, they reproject light (as seen with the windows at nighttime and the lanterns). This is not really phsyically correct, but it looks much more interesting visually.
+Water has multiple effects. If you look very closely, there are bubbles that rise. There are also (faked) caustics. There are even very subtle light rays that move through the water (also faked). Lots of faking. :)
+Lighting
+Lighting, as mentioned, is done in a deferred pass.
+All lights are currently point lights, but spot lights could easily be done (just give each light a direction vector and do a dot product between the current light ray and that direction vector). Additionally, directional lights would be trivial as well.
+The light count is dynamically adjusted based on how many lights fall within the screen area (in other words, lights are culled).
+Lighting utilizes Screen Space Ambient Occlusion (SSAO), ray-marched shadows, multiple colored lights, radiosity (lighting based on light bounces), and fairly involved (but very unscientific) color grading. The number of samples for shadows, SSAO, etc can be adjusted to tweak between better performance and better visuals.
+Lights have more properties than just color and distance. Any light can sort of do a transform on the material color (multiplication and adding), which allows you to easily colorize materials. For example, in reality if you shined a red light on a blue object, the object would be black because a blue object reflects no red light (I think?). In this engine, you can colorize the object.
+You can even "flood" areas where the light does not hit to ensure colorization (this is done with the global light at nighttime to ensure everything gets that blue "moonlight" tint, even if under a shadow).
+Colorization is not really a simple function - it is hard to get a balance of luminosity (which tends towards white, or uncolored light) and color, which tends away from white or grey. You can see in the screenshot above that lights get brighter as intensity increases, but they still colorize the areas (box color does not represent light color here - all boxes are white regardless).
+On top of everything else, I do a saturation pass which basicallly averages the light color at that spot, then "pushes" the light color away from that average using a mix (i.e. mix(averageLight, coloredLight, 1.2) ).
+In general, I find it best to avoid simple lighting as it will produce flat, ugly results. Fake it as much as you want - this is as much of an art as it is a science. :)
+Trees
+Trees are all unique. Only two types are shown (barren trees and this Dr Suess crap that I accidentally produced). Many more types can be produced by changing the rules (number of generations, number of splits, split uniformity, length, split angle, etc).
+Image Source: Wikipedia
+The trees use quadratic Bezier curves for the branches. Each Bezier curve has a start radius and an end radius. It determines within the voxel generation how far it is from all the nearby Bezier curves and produces a result based on this, which determines the wood rings, bark area, etc. This distance calculation is relatively cheap and not 100 percent accurate, but good enough for my purposes.
+The distance calculation just uses line-point distance. The basis for this line is determined from the tangent (green line in the image above) and it also takes into account the other base lines to determine the closest t value for the curve (clamped in the zero to one range of course).
+In order to simplify the data structures and rules for the trees, there are separate rulesets for the roots and for the rest of the tree - this seems to cover all cases I can think of for plants so it probably will stay this way.
+The leafs are just spheres for right now. Each sphere uses the same procedural texture as the roof shingles, just with different parameters. This produces the leaf pattern. A cone shape will probably be used with the same shingle pattern for pine trees (again, I prefer style and simplicity over total realism).
+Geometry and Primitives
+Geometry uses superellipsoids and a "slice-27 grid" (best term I could think of). What is a "slice-27 grid?" If you are familiar with Flash's slice-9 grids, it is the 3D equivalent. Basically, think of it like a rounded rectangle, only 3D, and the corners can be almost any shape.
+You can specify many things on a primitive, including corner distance (independently even for xyz, like if you wanted to make a really tall roof), wall thickness, or a bounding box to determine the visible region (useful if you want to, say, cut off the bottom of a shape which would otherwise be symmetrical).
+Image source: Wikipedia
+Building segments are a single on of these primitives, only they use very advanced texturing to determine the floors, beams, building level offsets, and so forth. Variations in the building, such as doors and windows, are separate primitives.
+You can easily combine primitives using Voronoi style distance (typically clamped to the xy or ground plane). You can also do more advanced boolean intersections and give various materials priority (for example, the roof is designed to not intersect into the brick, but its support beams are).
+Texturing occurs volumetrically in object space. Texture coordinates are automatically generated so as to minimize distortion.
+Texture coordinates are always measured in meters, so that it can scale independently of voxel size.
+Even special materials can be applied to joint weldings, such as the wooden beams that occur at this intersection above.
+UVW coordinates are generated that run along the length of the object, along its height, and finally into its depth (into the walls).
+Any material can be given a special id to distinguish it for when normals are generated later. You can see this effect in the boards above - their normals do not merge together, but instead they appear as distinct boards (by the way this is an old shot obviously and this distinction has improved much further).
+Map and World Generation
+The first thing that occurs in map generation is creating the terrain. It takes a bunch of heightmaps based on real world data. Getting this data is not exactly easy, but here is one way to do it.
+I take 3 heightmaps and combine them into an RGB image (could be 4 in RGBA). This is an optimization that allows me to do one texture read and retrieve 3 heightmaps at the same time. This is currently just done with 6 heightmaps overall, but each one is very big.
+I make this heightmap combo seamless in photoshop (look up tutorials on seamless textures in Google for how to do this).
+It samples from random areas on these heightmaps and stitches them together based on some simplex noise - you can almost think of it like using the clone stamp tool in Photoshop if you are familiar with that.
+This generates the macroscopic terrain. It recursively samples from this map (which is still seamless, by the way) in order to produce finer and finer details in the terrain, right down to the voxel level. Phsyically correct? No. Looks ok? Yes. :)
+So, I could set the sea level at an arbitrary value (say, half the maximum terrain height) but this lends itself to a problem: What if I only want x percent of the planet to be covered by water? I solve this problem by sort of making a histogram of terrain heights (i.e. how many pixels contain a given height?). It then lines up these amounts. If I want the planet to be 50 percent water, I simply look halfway down the line and see what the terrain height is there.
+Next, it places cities randomly that meet certain conditions (i.e. above sea level, even though cities can grow into the water with docks).
+City roads are built using maze generation, in particular recursive back tracking. Here is a great source of maze generation algorithms.
+This generation creates many windy roads, which is great for cul-de-sacs but bad for ease of transportation. I place main city streets at a given interval. Doesn't look great, but it works.
+Inter city roads were probably the hardest part. Seems like it would be an easy problem but its not. Finding a road from one city to another is relatively "easy" (it is actually quite hard on its own though), but what if two cities have roads that run close by each other? How do you optimize paths such that redundant roads are eliminated?
+Roads are generated by creating a line between two cities, and then recursively breaking that line in half and adjusting the midpoint such that the terrain delta (change in height) is minimized. There is a severe penalty for crossing water, so bridges are minimized. This produces fairly realistic roads that strike a balance between following terrain isolines and not having a path that is too indirect. After the line is broken down many times, it creates a trail of breadcrumbs as shown in the image above. Note how many redundant breadcrumb trails there are.
+It then dilates these points until they connect, forming solid borders. After that, it color-codes each region (like map coloring, kind of). See image below.
+Then the dilated regions are shrunk back down and the colored regions which are too small are merged with neighboring regions. Finally, roads are regenerated along these new borders.
+Ship routes are generated the same way as roads, only there is a severe penalty when measuring the delta if land is crossed. Ship routes do account for water depth as it is generally a good heuristic for avoiding land to follow the deepest sea route.
+Conclusion
+This really only covers a fraction of what goes into the engine, but I hope it answers many of your questions. If you have additional questions, feel free to ask. Thanks for reading! :)
+Followup Questions:
+Questions from Slight0 (italics) with my response (bold):
+Not totally sure the best place to reply, here or the article, so I'll default to here.
+I was very excited and eager to read your post and it turned out to be very well made as I would have expected. It certainly answered a lot of questions about some of your approaches, though I did read all of your other posts beforehand and so was already somewhat enlightened coming into it on certain topics. I appreciate the depth and outside references that explain your methods and I'm sure many others will find it interesting as well.
+I can't help but feel like you skimmed over the one thing I wanted to hear the most about and that was the whole "chunking" process. It is one thing to generate a tree, a maze, a house, or a road system given a starting point and it's another thing to do that in a way that is continuous and chunked. I believe it's a bit easier to take a space and say "generate a church here" than it is to grab a quarter of that space and say "generate the bottom left corner of the church" then move up a quarter space and say "generate the top left corner, now the top right, etc". In your first picture you show an exploded landscape complete with a tree which is broken into many chunks. That might as well be black magic to me as I can't imagine how you would generate a tree like that chunk by chunk.
+Perhaps you don't? Perhaps you generate the overworld as a set of meta data, similar to the chronology that you described in your post (you may have intended that to be obvious, heh) and from that metadata you work from the top downwards and essentially generate things THEN split them into chunks? You have a finite starting space, though huge, and work down from that. The specifics of this process allude me as I haven't thought on it much, but it does sound a bit easier than a bottom-up approach were you generate complex structures point by point. However, it sounds like this supposed top-down approach would take up a lot of space and would require you to generate the entire world's metadata before hand which might take a while.
+Some insight into the whole chunking process would be awesome. Thanks for everything.
+P.S. If you're at all confused as to what I'm asking; when your algorithm sees a chunk that it needs to generate at whatever resolution, does it query some higher model/metadata that has already been generate before hand? Or is every bit of the procedural generation happening on demand, on the spot, when it is needed to the point where generating the whole world (or some sort of optimized form of it) would be unnecessary?
+Lets take the simplest case, drawing a really big cube that has boundaries which fall across multiple chunks. I could draw each section of the cube explicitly, but that would quickly turn into a nightmare even with something as simple as a cube (you have to account for the areas partially consumed and so forth). Instead, imagine that I am drawing the exact same cube in every chunk. The only thing that changes are the active voxel coordinates. For each chunk, I specify start and end coordinates in world space (a bounding box). From this, I can derive the relative coordinates (object space) and determine where a given voxel is on the current object being rendered. I pass in a list of objects to the shader with various parameters, and each object gets evaluated like this.
+In this sense, all procedural generation at the voxel level is happening voxel by voxel in the shader (GLSL). But the larger parameters that describe the objects (i.e. the bounds for a building segment) are described outside the shader, in C++. For example, each tree branch is described in C++ (start point, end point, control point, start thickness, end thickness, etc). A bounding box is computed for each branch, and whatever chunks this bounding box falls in are evaluated within the shader to generate the voxel representation of the branch.
+So, yes, it all happens from the top down. I generate high level structures and parameters that describe the objects to be generated in C++, and then from there each object is evaluated at the voxel level inside a shader based on locality to the current camera position.
+Everything gets generated by locality. First a world map is generated, then cities and roads are placed. From there, find the nearest neighborhood and generate the street layout and building segment layout for it. Thus you don't have to generate everything immediately, and you can regenerate anything because it is all deterministic (based on a seed).
+Chunks are redundant, so that they can be produced in parallel without seams - although each chunk is only rendered within its bounds, the voxels generated for it are 1.x times the size in terms of dimensions (current 1.25 I think, but open to change). This allows me to generate normals seamlessly inside the shader.
+15 Comments
+Slight0
+4/10/2014 07:48:20 am
+Very nice write up; was very informative and interesting.
+Really hoped you would touch more on the methodolgy behind chunk based generation as it applies to the big picture. For example, a tree is split into many chunks, so how is only part of the tree generated? Is the entire tree calculated before hand and stored in a light data format that gets queried when a chunk is within the bounding box of the tree? Is it truly bottom-up or top-down or a mixture?
+More info here http://discourse.vq.bitnamiapp.com/t/seeking-information-on-how-procedural-structures-are-generated-in-chunked-voxel-worlds/27/4
+All insight is appreciated.
+Reply
+Gavan Woolery
+4/10/2014 08:56:02 am
+Yep, I got that discourse comment, I will give you a full response as soon as I get a second (traveling at the moment and otherwise loaded with work) :)
+Reply
+Gavan Woolery
+4/22/2014 04:59:43 am
+Response is now up (bottom of this article).
+Reply
+Real Estate in Tirunelveli
+link
+5/28/2014 05:08:10 pm
+nice posts
+Reply
+Alex
+9/23/2014 08:57:02 pm
+Hi there.
+Nice post.
+I would like to ask, if you generate everything real-time in front of the camera, how can the player dig arc like holes(tunnels) underneath the ground for example? I mean, how do you save that alteration of the terrain, if you use full volumes without octrees or the like?
+Reply
+Gavan Woolery
+9/24/2014 03:31:44 am
+Alex:
+There are many ways to do it, I will describe the way it is currently done and one other way it can be done in the engine with little modification.
+Currently, it only stores user changes to the terrain as they occur, rather than saving the entire volume. So, if I dig out a 4x4x4 chunk of voxels, it stores that change to a list, uncompressed. But I've found it counterproductive to store such changes on an individual voxel basis, because typically users dig out larger portions of terrain at a time. It stores these changes in larger chunks (say, 16^3 voxels per chunk or something), and then renders them with bilinear filtering so the resulting substraction is smoothed out. Using bilinear filtering produces a curved surface between voxels, but across them more of a curved stair-step effect.
+If you wanted to get a perfectly spherical or smooth tunnel, the engine supports this as well. As mentioned, it supports boolean geometry. So, if I wanted to subtract a sphere from the terrain, I simply define a center point and a radius, and all voxels within that radius get subtracted. Similarly, I could do distance from a line to subtract a line with spherical ends to it (a pill shape, kind of).
+Reply
+Alex
+9/24/2014 04:57:16 am
+Hi Gaven.
+Ok, I understand. But this sound like a lot of data, if the player edits much terrain.
+I am currently also doing a game and I am also doing Volume stuff. Well, I moved from 3d to 2d, because I couldn't achieve the detail I liked without having the GPU memory exploded. But actually, my 2d algorithm works perfeclty the same as the 3d one but it generates a lot more data than the 3d version.
+So I extract the octree/quadtree on the gpu also using GLSL and my own C++ engine. And it took me a lot of time to do it. But what I can say is, you actually can do A LOT more with an octree/quadtree. Not only do you need just a fraction of memory compared to the full volume you also gain a spatial stucture for CPU(or GPU) intersection testing. And this is also burning fast.
+I store everything in a linear list(GL texture buffer) and just index from parent to child. So I have a svo buffer, a material id buffer for pure volume cells and material/material interface cells. Depending on the node type, the right material id is fetched. If the player edits the terrain, I just redo the quadtree in the 127x127 block. It also work for 3d blocks as mentioned. So you can have 127x127 blocks that only contain one material with a texture buffer with size 1! The same goes for 3d.
+I just want to say, by looking at your videos, you could do a lot more, if you used octrees. But coming up with a GPU algorithm is not as simple, at least for me.
+This might not help you much, but I really wish you the best. Your project looks very nice to me. Good luck.
+Gavan Woolery
+9/24/2014 05:33:07 am
+@Alex - (sorry cant reply directly, only lets me reply two levels deep here) --
+If I were storing all the voxels, octrees would be beneficial. But I am not storing any of the voxels! :) Everything is rendered, then dumped. Wherever possible, the voxels are described in terms of higher level procedural algorithms, including where they have been destroyed. In the past 6 months, I've improved everything dramatically (as you will see soon on the next demo), so performance is much better now. Octrees would actually be counterproductive because I have no need to compress or store the voxels - I need to work with the uncompressed version as I can do calculations faster and generate/dump voxels faster.
+Alex
+9/24/2014 05:59:03 am
+Gavan.
+So you are talking about implicit or parametric surfaces or the like, I suppose. I see that you do not need to store any of these in discrete data form. I just wonder how you want to represent data the the player actually edited a lot. Worst case scenario, the player reshapes the whole world, if you considered this case. Do you possibly store the implicit function that the player used for her edit function? Just wondering. Because I experimented a lot with this stuff.
+Reply
+Gavan Woolery
+9/24/2014 06:09:59 am
+You could store every click the user made, or every action they took and compress it with whatever means necessary. But to be honest, I'm prioritizing certain things above others in the engine, and allowing the user to modify every single voxel in the world is an edge case for me right now that will be addressed based on how much of an issue it is for users. Right now, its efficient enough such that a user could click a million times to remove a chunk of terrain and not use up much storage (in fact, that could probably be stored with four ints (3 x,y,z, 1 int for brush radius) per click (16 bytes) -- hence 16 MB of data for a million clicks). I'm mostly using voxels because of their great properties for procedural generation, not to make a Minecraft-like game (although if someone makes such a modification to the engine, more power to them). Less emphasis is on where users dig/destroy stuff, more emphasis is just on making a procedurally-generated world and a game around it. Hope that clarifies it a bit :)
+Reply
+Alex
+9/24/2014 03:35:18 pm
+Ok, I see that you go in another direction then a Minecraft like game. I think, if most people read "Voxel" they automatically assume Minecraft. Especially the younger audience. They don't realize that voxels where there before Minecraft, I think.
+Just one more question to your edit idea. So you store every edit by a math function like for example a sphere with center and radius. Which is a very simple function. Lets assume users do that 1 million edits. How about intersection testing? Will you merge the spheres? Because you can not do intersection testing with 1 million edits the users did on one block. I also can not see that you will be able to redo the block with 1 million edits done on multiple blocks.
+Yet another question. How is the GPU usage when running the game. When I read through your article here, I see a lot of screen space stuff, like lighting, ray casting and the grass? And if the player moves continuously, you also need to extract your world... How is that doing?
+Still another question. Actually, you could help me out here a bit. I also planned to do the grass rendering in screen space. So, do you distribute the quads across the screen? Do you render a specific amound of quads every frame and then you scale based on the material id?
+Speaking of the material id. Can you call a shader per material or do you do huge lookup in a material shader?
+Gavan Woolery
+9/24/2014 04:39:59 pm
+To address your questions:
+-- "Just one more question to your edit idea. So you store every edit by a math function like for example a sphere with center and radius. Which is a very simple function. Lets assume users do that 1 million edits."
+So, really its a matter of the user working around the limitations of the engine, not the engine catering to every possible user need. A user can add a limitted amount of geometry per area (say, a hundred or so shapes per cubic meter). For most users, this should be sufficient as they can represent whatever they are trying to do with just a few shapes every cubic meter.
+-- "How about intersection testing? Will you merge the spheres?"
+All geometry is processed in a boolean manner according to whatever rules are specified (or the user can edit these rules pretty easily in the shader). Every geometry is given a type (really just a list of enums) which get applied in that order (i.e. first draw the terrain, then draw any subtracted shapes from it, etc).
+-- "Yet another question. How is the GPU usage when running the game. When I read through your article here, I see a lot of screen space stuff, like lighting, ray casting and the grass? And if the player moves continuously, you also need to extract your world... How is that doing?"
+GPU usage has improved a lot since the March demo (both in terms of memory and performance). Mem usage has been reduced by a factor of 16 to 64 times less memory, with little to no visual impact.
+GPU usage has been toned down a lot with added settings (i.e. ability to dynamically adjust the number of samples used for shadow, AO, and radiosity) and some optimizations. Grass is now rendered as voxels, rather than with polygons. Its no longer animated, but it could be in theory (same way the water is animated).
+-- "Still another question. Actually, you could help me out here a bit. I also planned to do the grass rendering in screen space. So, do you distribute the quads across the screen? Do you render a specific amound of quads every frame and then you scale based on the material id?"
+Yes this is exactly what was done. ALL quads are rendered (say, one every 4 or 16 pixels of screen space), and then scaled down based on the material parameters. I would not attempt to dynamically adjust the buffer for grass, keep it the same size (unless using a geom shader, but I have not tested that).
+-- "Speaking of the material id. Can you call a shader per material or do you do huge lookup in a material shader?"
+You can do either. I look up the materials in a pre-rendered lighting table (how the material behaves based on how much light is hitting it). Some materials have special rules applied (i.e. the glass and water).
+Alex
+9/24/2014 05:35:09 pm
+Gavan.
+Thanks for taking your time to answer the questions.
+I really wish you all the best for your project.
+Looking forward to your next demo video.
+Reply
+RagingRabbit
+1/21/2018 05:14:51 am
+Hey Gavan, thanks for your explanation! This really made me curious.
+However there are still a few things I don't understand (might be because I'm still fairly new to voxels and ray tracing in general).
+After you generated the voxel data, how exactly are you rendering them? Are you using a "normal" grid tracing algorithm?
+Because I always got terrible performance when tracing a few thousand voxels using this method.
+The article you linked which explains the whole volumetric tracing stuff makes it seem like it's just that - rendering the chunk bounds to a texture using rasterization and then tracing the individual chunks.
+I'm planning to create a voxel engine myself, still can't decide whether I should use pure rasterization or ray tracing though.
+I'd be happy to hear from you.
+Reply
+Strongsville Garage Door Repairs
+link
+5/21/2024 08:27:47 am
+Thanks for this!
+Reply
+Leave a Reply.
+RSS Feed
+Legal Information

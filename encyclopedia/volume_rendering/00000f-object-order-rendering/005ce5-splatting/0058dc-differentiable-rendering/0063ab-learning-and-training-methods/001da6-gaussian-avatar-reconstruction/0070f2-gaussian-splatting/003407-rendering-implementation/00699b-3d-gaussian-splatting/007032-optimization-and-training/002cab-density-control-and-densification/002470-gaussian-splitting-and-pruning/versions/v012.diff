@@ -1,0 +1,161 @@
+--- v011.md
++++ v012.md
+@@ -7,14 +7,14 @@
+ 
+ ## How it works
+-**Inputs:** A set of $N$ 3D Gaussians $\{G_i\}$ with parameters (position $\mathbf{p}_i$, covariance $\mathbf{\Sigma}_i$, opacity $\alpha_i$, color $c_i$, weight $\lambda_i$), a dataset of views, and a loss function $L$.
+-**Outputs:** A modified set of Gaussians with updated positions, covariances, opacities, and colors.
++**Inputs:** A set of $N$ 3D Gaussians $\{G_i\}$ with parameters (position $\mathbf{p}_i$, covariance $\mathbf{\Sigma}_i$, opacity $\alpha_i$, color $c_i$, weight $\lambda_i$), a dataset of views, and a loss function $L$ [S1, unofficial].
++**Outputs:** A modified set of Gaussians with updated positions, covariances, opacities, and colors [S1, unofficial].
+ 
+ **Data Structures:**
+-*   **Gaussian List:** Array of $N$ objects. Each object stores:
+-    *   $\mathbf{p}_i \in \mathbb{R}^3$: Position.
+-    *   $\mathbf{\Sigma}_i \in \mathbb{R}^{3 \times 3}$: Covariance matrix (or its Cholesky decomposition/eigenvalues/eigenvectors).
+-    *   $\lambda_i \in \mathbb{R}$: Weight (often stored as log-weight for optimization stability).
+-    *   $c_i \in \mathbb{R}^3$: Color (often stored as inverse-sigmoid for optimization stability).
+-    *   $\alpha_i \in [0, 1]$: Opacity.
++*   **Gaussian List:** Array of $N$ objects [S1, unofficial]. Each object stores:
++    *   $\mathbf{p}_i \in \mathbb{R}^3$: Position [S1, unofficial].
++    *   $\mathbf{\Sigma}_i \in \mathbb{R}^{3 \times 3}$: Covariance matrix (or its Cholesky decomposition/eigenvalues/eigenvectors) [S1, unofficial].
++    *   $\lambda_i \in \mathbb{R}$: Weight (often stored as log-weight for optimization stability) [S1, unofficial].
++    *   $c_i \in \mathbb{R}^3$: Color (often stored as inverse-sigmoid for optimization stability) [S1, unofficial].
++    *   $\alpha_i \in [0, 1]$: Opacity [S1, unofficial].
+ *   **Ray Batch:** A random subset of rays from the dataset (typically 5% of total rays) [S1, unofficial].
+ *   **Statistics:** Running means and standard deviations for weights ($\mu_\lambda, \sigma_\lambda$) and average losses ($\mu_{\bar{l}}, \sigma_{\bar{l}}$) [S1, unofficial].
+@@ -49,5 +49,5 @@
+     *   **New Covariances:** Create two new Gaussians with identical covariance matrices reconstructed from the initial eigenvalues and eigenvectors, but with the dominant eigenvalue scaled:
+         $$ \sigma_{1_{a,b}} = \sigma_1 \sqrt{1 - \frac{2}{\pi}} $$
+-        [S1, unofficial]. The other eigenvalues remain unchanged [S1, unofficial].
++        [S1, unofficial].
+     *   **New Weights:** Set the log-weights of the new Gaussians by adding Gaussian noise to the initial log-weight:
+         $$ \log(\lambda_{a,b}) = \log(\lambda) + \mathcal{N}(0, \epsilon_w) $$
+@@ -72,11 +72,11 @@
+         gaussians: List of Gaussian objects with attributes:
+                    - p: position (3,)
+-                   - sigma: covariance matrix (3,3) or eigenvalues/vectors
+-                   - lambda: weight (scalar)
+-                   - c: color (3,)
++                   - sigma: covariance matrix (3,3)
++                   - lambda_val: weight (scalar)
++                   - c: color in inverse-sigmoid space (3,)
+                    - alpha: opacity (scalar)
+         rays_batch: List of ray objects, each with:
+                     - loss: scalar loss value L_j
+-                    - weights: list of weights w_i for contributing Gaussians
++                    - weights: list of weights w_i for contributing Gaussians (aligned with gaussians list)
+         z_lambda: Z-score threshold for pruning
+         z_l: Z-score threshold for splitting
+@@ -88,37 +88,19 @@
+     """
+     # Step 2: Weight Statistics
+-    weights = [g.lambda_val for g in gaussians]
++    weights = np.array([g.lambda_val for g in gaussians])
+     mu_lambda = np.mean(weights)
+     sigma_lambda = np.std(weights)
+     
+     # Step 3: Pruning
+-    # Remove Gaussians where lambda_i <= mu_lambda - z_lambda * sigma_lambda
+-    pruned_indices = []
+-    for i, g in enumerate(gaussians):
+-        if g.lambda_val <= mu_lambda - z_lambda * sigma_lambda:
+-            pruned_indices.append(i)
+-    
+-    # Remove pruned Gaussians (reverse order to maintain indices)
+-    for i in reversed(pruned_indices):
+-        gaussians.pop(i)
+-        
+-    # Re-index remaining gaussians for loss calculation
+-    # Note: In practice, weights w_i,j must be recomputed or stored from the forward pass
+-    # Here we assume rays_batch contains pre-computed weights for the current Gaussians
+-    # If Gaussians were removed, the mapping must be adjusted. 
+-    # For simplicity, we assume rays_batch is filtered or weights are aligned.
++    pruned_mask = weights <= (mu_lambda - z_lambda * sigma_lambda)
++    gaussians = [g for g, keep in zip(gaussians, ~pruned_mask) if keep]
+     
+     # Step 4: Loss Estimation
+-    # Estimate average loss for each remaining Gaussian
+-    average_losses = []
+     M = len(rays_batch)
+-    
+-    # Initialize sum of losses for each Gaussian
+     loss_sums = np.zeros(len(gaussians))
+     
+     for ray in rays_batch:
+         L_j = ray.loss
+-        # ray.weights should correspond to the current gaussians list
+-        # Assuming ray.weights is a list of weights for the current gaussians
++        # ray.weights corresponds to the current gaussians list
+         for i, w_ij in enumerate(ray.weights):
+             loss_sums[i] += L_j * w_ij
+@@ -131,22 +113,12 @@
+     
+     # Step 6: Splitting
+-    new_gaussians = []
+-    split_indices = []
+-    
+-    for i, g in enumerate(gaussians):
+-        if average_losses[i] >= mu_l + z_l * sigma_l:
+-            split_indices.append(i)
+-            
+-    # Process splits
+-    # We need to handle the removal of original and addition of new ones carefully
+-    # Create a new list for the next iteration
++    split_mask = average_losses >= (mu_l + z_l * sigma_l)
+     next_gaussians = []
+     
+     for i, g in enumerate(gaussians):
+-        if i in split_indices:
+-            # Perform Split
++        if split_mask[i]:
+             # Eigen-decomposition
+             eigenvalues, eigenvectors = np.linalg.eigh(g.sigma)
+-            # Sort by eigenvalue descending to get dominant
++            # Sort descending to get dominant eigenvalue/vector
+             idx = np.argsort(eigenvalues)[::-1]
+             eigenvalues = eigenvalues[idx]
+@@ -163,5 +135,4 @@
+             
+             # New covariances
+-            # Scale dominant eigenvalue
+             sigma_1_new = sigma_1 * np.sqrt(1 - 2 / np.pi)
+             eigenvalues_new = eigenvalues.copy()
+@@ -169,6 +140,5 @@
+             
+             # Reconstruct covariance matrix
+-            Sigma_a = eigenvectors @ np.diag(eigenvalues_new) @ eigenvectors.T
+-            Sigma_b = Sigma_a.copy()
++            Sigma_new = eigenvectors @ np.diag(eigenvalues_new) @ eigenvectors.T
+             
+             # New weights (log-space)
+@@ -179,13 +149,10 @@
+             
+             # New colors (inverse-sigmoid space)
+-            # Assuming g.c is stored in inverse-sigmoid space for optimization
+-            # If g.c is in RGB, convert to inverse-sigmoid first
+-            # For this pseudocode, we assume g.c is in the unconstrained parameterization space
+             c_a = g.c + np.random.normal(0, epsilon_c, 3)
+             c_b = g.c + np.random.normal(0, epsilon_c, 3)
+             
+             # Create new Gaussian objects
+-            g_a = Gaussian(p=mu_a, sigma=Sigma_a, lambda_val=lambda_a, c=c_a, alpha=g.alpha)
+-            g_b = Gaussian(p=mu_b, sigma=Sigma_b, lambda_val=lambda_b, c=c_b, alpha=g.alpha)
++            g_a = Gaussian(p=mu_a, sigma=Sigma_new, lambda_val=lambda_a, c=c_a, alpha=g.alpha)
++            g_b = Gaussian(p=mu_b, sigma=Sigma_new, lambda_val=lambda_b, c=c_b, alpha=g.alpha)
+             
+             next_gaussians.append(g_a)
+@@ -214,10 +181,9 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The method requires an additional forward pass to compute per-ray losses and weights for a batch of rays, followed by statistical computations ($O(N)$ for mean/std) and splitting operations. The splitting itself is $O(N)$ in the worst case if all Gaussians are split.
+-*   **Memory Complexity:** Increases the number of Gaussians, potentially up to $2N$ if all are split, though typically only a subset is split. Requires storage for the ray batch and intermediate loss statistics.
+-*   **Strengths:** Deterministic and statistically grounded, avoiding the heuristic nature of gradient-based methods. It allows for iterative refinement after initial convergence, improving detail in high-error regions [S1, unofficial].
+-*   **Limitations:** Requires a full forward pass to compute losses and weights, which can be computationally expensive. The splitting criteria are global (based on batch statistics), which may not adapt as quickly to local variations as gradient-based methods.
++*   **Time Complexity:** The method requires an additional forward pass to compute per-ray losses and weights for a batch of rays, followed by statistical computations ($O(N)$ for mean/std) and splitting operations [S1, unofficial]. The splitting itself is $O(N)$ in the worst case if all Gaussians are split [G].
++*   **Memory Complexity:** Increases the number of Gaussians, potentially up to $2N$ if all are split, though typically only a subset is split [G]. Requires storage for the ray batch and intermediate loss statistics [G].
++*   **Strengths:** Deterministic and statistically grounded, avoiding the heuristic nature of gradient-based methods [S1, unofficial]. It allows for iterative refinement after initial convergence, improving detail in high-error regions [S1, unofficial].
++*   **Limitations:** Requires a full forward pass to compute losses and weights, which can be computationally expensive [S1, unofficial]. The splitting criteria are global (based on batch statistics), which may not adapt as quickly to local variations as gradient-based methods [G].
+ *   **When to use:** When a deterministic, statistically robust method is preferred over heuristic gradient-based densification, or when initial convergence has been reached and further refinement is needed [S1, unofficial].
+-*   **When not to use:** When computational resources are limited and the overhead of the additional forward pass is prohibitive, or when real-time adaptation is required during training [S1, unofficial].
+ 
+ ## Background

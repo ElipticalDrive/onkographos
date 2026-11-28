@@ -1,0 +1,515 @@
+--- v009.md
++++ v010.md
+@@ -4,283 +4,275 @@
+ 
+ ## Overview
+-On-the-Fly GS Progressive Training is a method for incrementally optimizing a 3D Gaussian Splatting (3DGS) field as new images are acquired in real-time or near real-time [S1]. It solves the problem of maintaining rendering quality and training efficiency when the scene geometry expands dynamically, preventing the model from overfitting to initial views while avoiding the computational cost of retraining the entire scene from scratch [S1]. It differs from static 3DGS training by partitioning optimization into three phases (initial, progressive, final) and using hierarchical image weighting to prioritize local updates, and from other incremental methods by employing a load-balancing loss and splatting-based parallel gradient accumulation to stabilize Gaussian distribution and accelerate convergence [S1].
++On-the-Fly GS Progressive Training is a method for incrementally optimizing a 3D Gaussian Splatting (3DGS) field as new images are acquired in a streaming or sequential manner [S1]. It solves the problem of maintaining high-fidelity reconstruction quality and training efficiency when the scene geometry expands dynamically, avoiding the need to retrain the entire model from scratch for every new view [S1]. It distinguishes itself from standard offline training by integrating a hierarchical image weighting scheme and adaptive learning rates to prioritize new data while preventing catastrophic forgetting of previously learned regions [S1].
+ 
+ ## How it works
+-The method operates in three distinct phases: Initial Training, Progressive Training, and Final Optimization [S1].
+ 
+ ### Inputs and Outputs
+ **Inputs:**
+-- A sequence of incoming images $I_{new}$.
+-- An existing 3DGS field $\mathcal{G}$ (set of Gaussians with position $\mathbf{p}$, covariance $\mathbf{\Sigma}$, opacity $\alpha$, and spherical harmonics coefficients).
+-- A sparse point cloud $\mathcal{P}$ from On-the-Fly SfM.
+-- Camera poses for existing and new images.
++*   A sequence of incoming RGB images.
++*   An existing 3DGS field (Gaussians with position $\mathbf{p}$, scale $\mathbf{s}$, rotation $\mathbf{q}$, opacity $\alpha$, and color coefficients).
++*   A sparse point cloud and camera poses estimated by an On-the-Fly SfM module [S1].
+ 
+ **Outputs:**
+-- Updated 3DGS field $\mathcal{G}'$.
+-- Updated camera poses and sparse point cloud $\mathcal{P}'$.
++*   An updated 3DGS field with new Gaussians appended and existing parameters optimized [S1].
+ 
+ ### Data Structures
+-- **3DGS Field $\mathcal{G}$**: A list of Gaussian primitives. Each Gaussian $g$ contains:
+-  - $\mathbf{p} \in \mathbb{R}^3$: Center position.
+-  - $\mathbf{R} \in SO(3)$: Rotation matrix (or quaternion).
+-  - $\mathbf{s} \in \mathbb{R}^3$: Scaling factors.
+-  - $\alpha \in [0, 1]$: Opacity.
+-  - $\mathbf{c}_l$: Spherical harmonics coefficients for view-dependent color.
+-- **Sparse Point Cloud $\mathcal{P}$**: A set of 3D points $\{\mathbf{q}_k\}$ with associated feature descriptors.
+-- **Search Tree**: A spatial index (e.g., KD-Tree) built over $\mathcal{P}$ for nearest-neighbor queries.
+-- **Image Weight Map**: A structure storing weights $\omega_i$ for each registered image $i$.
++*   **3DGS Field:** Standard 3DGS representation.
++*   **Sparse Point Cloud:** A set of 3D points $\mathbf{P}$ with associated depths and normals, updated by On-the-Fly SfM [S1].
++*   **Search Tree:** A spatial index (e.g., KD-Tree) built over the existing sparse point cloud $\mathbf{P}$ to facilitate nearest-neighbor queries [S1].
++*   **Image Overlap Matrix $M$:** A matrix where $M_{i,j}$ stores the number of matched feature points between image $i$ and image $j$ [S1].
++*   **Image Weights $\omega$:** A dynamic array storing the hierarchical weight $\omega_{ki}$ for each image $i$ in layer $k$ [S1].
++*   **Gaussian Count per Pixel $G_p$:** For a given image, the number of Gaussians splatting onto pixel $p$ [S1].
+ 
+ ### Parameters
+-- $N_0$: Number of initial images for Phase 1. Typical value: 30 [S1].
+-- $T_{init}$: Initial training iterations for Phase 1. Typical value: 2,000 [S1].
+-- $T_I$: Total training iterations per new image in Phase 2. Typical value: 200 [S1].
+-- $N_m$: Number of top-weighted images for local optimization. Typical value: 10 [S1].
+-- $T_a$: Predefined iterations for satisfactory quality. Typical value: 200 [S1].
+-- $\eta^0$: Initial learning rate. Typical value: $1.6 \times 10^{-4}$ [S1].
+-- $\eta^f$: Final learning rate. Typical value: $1.6 \times 10^{-6}$ [S1].
+-- $\lambda_1$: Weight for $L_1$-Loss. Typical value: 0.47 [S1].
+-- $\lambda_{ssim}$: Weight for SSIM-Loss. Typical value: 0.12 [S1].
+-- $\lambda_{load}$: Weight for Load-Balancing-Loss. Typical value: 0.41 [S1].
+-- $d_{thresh}$: Distance threshold for classifying new points. Not given in the sources.
++*   $N_0$: Number of initial images for Phase 1. Typical value: 30 [S1].
++*   $T_{init}$: Initial training iterations for Phase 1. Typical value: 2,000 [S1].
++*   $T_I$: Total training iterations performed for each new fly-in image in Phase 2. Typical value: 200 [S1].
++*   $N_m$: Number of top-weighted images selected for local optimization. Typical value: 10 [S1].
++*   $T_a$: Predefined parameter representing iterations required for satisfactory rendering quality. Typical value: 200 [S1].
++*   $\eta^0$: Initial learning rate. Typical value: $1.6 \times 10^{-4}$ [S1].
++*   $\eta^f$: Final learning rate. Typical value: $1.6 \times 10^{-6}$ [S1].
++*   $\lambda_1$: Weight for $L_1$-Loss. Typical value: 0.47 [S1].
++*   $\lambda_{ssim}$: Weight for SSIM-Loss. Typical value: 0.12 [S1].
++*   $\lambda_{load}$: Weight for Load-Balancing-Loss. Typical value: 0.41 [S1].
++*   Distance Threshold: Predefined threshold for classifying new points in the sparse cloud [S1].
+ 
+ ### Steps
+ 
+ #### Phase 1: Initial 3DGS Training
+-1.  **Initialization**: Use On-the-Fly SfM to estimate poses and generate a sparse point cloud $\mathcal{P}_0$ for the first $N_0$ images [S1].
+-2.  **Training**: Train the initial 3DGS field $\mathcal{G}_0$ using the standard 3DGS rendering and optimization pipeline for $T_{init}$ iterations [S1]. This prevents overfitting to the small initial subset [S1].
+-
+-#### Phase 2: Progressive 3DGS Training
++1.  Acquire the first $N_0$ images.
++2.  Run On-the-Fly SfM to estimate poses and generate a sparse point cloud for these $N_0$ images [S1].
++3.  Initialize the 3DGS field using the standard 3DGS densification method on these $N_0$ images [S1].
++4.  Perform $T_{init}$ (2,000) training iterations to establish a baseline field, preventing overfitting to the small initial subset [S1].
++
++#### Phase 2: Progressive 3DGS Training (Per New Image)
+ For each newly acquired image $n$:
+ 
+-1.  **Pose and Point Cloud Update**:
+-    -   Estimate the pose of image $n$ using On-the-Fly SfM.
+-    -   Perform local Bundle Adjustment (BA) to optimize the pose of image $n$ and its connected neighbors, updating the sparse point cloud $\mathcal{P}$ [S1].
+-
+-2.  **Gaussian Initialization**:
+-    -   Construct a search tree (e.g., KD-Tree) over the current sparse point cloud $\mathcal{P}$ [S1].
+-    -   For each point $\mathbf{q}$ in the new image's point cloud, query the search tree for the nearest neighbor distance $d$.
+-    -   If $d > d_{thresh}$, classify $\mathbf{q}$ as a new point.
+-    -   Initialize new Gaussians at these new points and append them to $\mathcal{G}$ [S1].
+-
+-3.  **Hierarchical Image Weighting**:
+-    -   Calculate weights $\omega_i$ for all registered images $i$ to determine training priority [S1].
+-    -   **Layer 1 (New Image)**: Set weight for the new image $n$: $\omega_{1,1} = 1$ [S1].
+-    -   **Layer 2 (Direct Overlap)**: For images $i$ with direct overlap with $n$ (match count $M_{i,n} > 0$):
+-        $$ \omega_{2,i} = M_{i,n} $$
++1.  **Pose and Cloud Update:** On-the-Fly SfM estimates the pose of image $n$ and performs local Bundle Adjustment (BA) to optimize poses of neighboring images, updating the global sparse point cloud $\mathbf{P}$ [S1].
++2.  **New Gaussian Initialization:**
++    *   Construct a search tree for the current sparse point cloud $\mathbf{P}$ [S1].
++    *   Query points from image $n$ against the tree.
++    *   Points with a shortest distance to existing points in $\mathbf{P}$ exceeding the predefined threshold are classified as **newly added points** [S1].
++    *   Initialize these new points as new Gaussians and append them to the 3DGS field [S1].
++3.  **Hierarchical Image Weighting:** Calculate weights for all registered images to determine training priority [S1].
++    *   **Layer 1 (New Image):** Set weight $\omega_{11} = 1$ for the new image $n$ [S1].
++    *   **Layer 2 (Direct Overlap):** For images $i$ with direct overlap ($M_{i,n} \neq 0$), calculate:
++        $$ \omega_{2i} = M_{i,n} $$
+         where $M_{i,n}$ is the number of matched feature points between image $i$ and image $n$ [S1].
+-    -   **Layer $k$ (Indirect Overlap, $k \ge 3$)**: For images in layer $k$, let $N_{k-1}$ be the number of images in layer $k-1$. The weight $\omega_{k,i}$ for image $i$ in layer $k$ is:
+-        $$ \omega_{k,i} = \frac{\sum_{j=1}^{N_{k-1}} \omega_{j}^{(k-1)} \times M_{j,ki}^{(k-1)}}{N_{k-1}} $$
+-        where $\omega_{j}^{(k-1)}$ is the weight of image $j$ in layer $k-1$, and $M_{j,ki}^{(k-1)}$ is the match count between image $j$ (from layer $k-1$) and image $i$ (from layer $k$) [S1].
+-
+-4.  **Training Iteration Allocation**:
+-    -   Perform $T_I$ total iterations. Split into Local ($T_I/2$) and Semi-Global ($T_I/2$) optimization [S1].
+-    -   **Local Optimization**: Select the top $N_m$ images with the highest weights as key training targets. For each key image $i$ with weight $\omega_i$, calculate its allocated iterations $T_{im}$:
++    *   **Layer $k$ (Indirect Overlap, $k \ge 3$):** For images in layer $k$, calculate weights based on layer $k-1$:
++        $$ \omega_{ki} = \frac{\sum_{j=1}^{N_{k-1}} \omega_{j}^{(k-1)} \times M_{j,ki}^{(k-1)}}{N_{k-1}} $$
++        where $\omega_{j}^{(k-1)}$ is the weight of image $j$ in layer $k-1$, $M_{j,ki}^{(k-1)}$ is the match count between image $j$ and image $i$, and $N_{k-1}$ is the number of images in layer $k-1$ [S1].
++4.  **Training Iteration Allocation:** Perform $T_I$ (200) total iterations, split into Local and Semi-Global optimization [S1].
++    *   **Local Optimization ($T_I/2$ iterations):** Select the top $N_m$ (10) images with the highest weights. For each key image $i$ with weight $\omega_i$, allocate iterations $T_{im}$:
+         $$ T_{im} = \frac{1 - e^{-\omega_i}}{\sum_{j=1}^{N_m} (1 - e^{-\omega_j})} \times T_I $$
+-        Train the 3DGS field using these images for their respective $T_{im}$ iterations [S1].
+-    -   **Semi-Global Optimization**: Distribute the remaining $T_I/2$ iterations evenly among the other (non-key) images [S1].
+-
+-5.  **Adaptive Learning Rate**:
+-    -   For each image $j$ trained for $T_j$ iterations, calculate the base learning rate $\eta_j^c$:
+-        $$ t_i = \min\left(1, \frac{T_j}{T_a}\right) $$
+-        $$ \eta_j^c = (\eta_j^0)^{1-t_i} \times (\eta_j^f)^{t_i} $$
+-        where $T_a$ is the threshold for satisfactory quality [S1].
+-    -   Adjust for overlapping images. Let $I$ be the set of images overlapping with $j$ ($M_{i,j} > 0$), and $N_I$ be the count. The final learning rate $\eta_j$ is:
+-        $$ \eta_j = \frac{\eta_j^c + \sum_{i \in I} M_{i,j} \times \eta_i^c}{N_I + 1} $$
+-        This accounts for the quality of neighboring views [S1].
+-
+-6.  **Loss Function and Optimization**:
+-    -   Calculate the Load-Balancing-Loss $L_{load}$ for the current training image. Let $G_p$ be the number of Gaussians associated with pixel $p$.
+-        $$ L_{load} = \text{std}(G_p) \quad \text{for } p \in \text{image} $$
+-    -   Compute the total loss:
++        Train the 3DGS field on these images for their allocated $T_{im}$ iterations [S1].
++    *   **Semi-Global Optimization ($T_I/2$ iterations):** Distribute the remaining $T_I/2$ iterations evenly among all other registered images [S1].
++5.  **Adaptive Learning Rate Update:** For each image $j$ trained for $T_j$ iterations, calculate the base learning rate $\eta_j^c$:
++    $$ t_i = \min\left(1, \frac{T_j}{T_a}\right) $$
++    $$ \eta_j^c = (\eta_j^0)^{1-t_i} \times (\eta_j^f)^{t_i} $$
++    Adjust for overlapping images. Let $I$ be the set of overlapping images with $M_{i,j} > 0$ and $N_I$ be the count. The final learning rate $\eta_j$ is:
++    $$ \eta_j = \frac{\eta_j^c + \sum_{i \in I} M_{i,j} \times \eta_i^c}{N_I + 1} $$
++    [S1].
++6.  **Loss Calculation and Optimization:**
++    *   Calculate $L_{load} = \text{std}(G_p)$, where $G_p$ is the number of Gaussians associated with pixel $p$ in the current image [S1].
++    *   Compute total loss:
+         $$ L_{total} = \lambda_1 L_1 + \lambda_{ssim} L_{ssim} + \lambda_{load} L_{load} $$
+-    -   Update the 3DGS field parameters using gradient descent. Gradients are accumulated per Gaussian (Splatting-based parallelism) to reduce thread contention [S1].
++    *   Perform gradient descent using Splatting-based parallelism (gradient accumulation per Gaussian) [S1].
+ 
+ #### Phase 3: Final Optimization
+-1.  **Global Bundle Adjustment**: Once all images are acquired, perform global BA on all estimated poses [S1].
+-2.  **Rapid Optimization**: Apply additional optimization iterations to the final 3DGS field to improve overall rendering quality [S1].
++1.  After all images are acquired, perform global Bundle Adjustment (BA) on all estimated poses [S1].
++2.  Apply rapid additional optimization to the final 3DGS field to improve overall rendering quality [S1].
+ 
+ ### Pseudocode
+ 
+ ```python
+-import math
+-import numpy as np
+-
+-def on_the_fly_gs_training(initial_images, subsequent_images, initial_sparse_cloud, search_tree):
+-    """
+-    Main entry point for On-the-Fly GS Progressive Training.
+-    """
+-    # Phase 1: Initial Training
+-    # N0 = 30, T_init = 2000
+-    g_field = initialize_3dgs(initial_sparse_cloud)
+-    g_field = train_3dgs(g_field, initial_images, iterations=2000)
++def on_the_fly_gs_training(image_stream, initial_params):
++    """
++    Main loop for On-the-Fly GS Progressive Training.
++    image_stream: Iterator yielding (image_id, image_data, depth_data)
++    initial_params: Dict containing N0, T_init, T_I, N_m, T_a, eta_0, eta_f, 
++                    lambda_1, lambda_ssim, lambda_load
++    """
++    
++    # Phase 1: Initialization
++    initial_images = []
++    for _ in range(initial_params['N0']):
++        initial_images.append(next(image_stream))
++        
++    # Estimate poses and sparse cloud for initial images
++    sparse_cloud, poses = on_the_fly_sfm(initial_images)
++    
++    # Initialize 3DGS field
++    gs_field = initialize_3dgs(initial_images, sparse_cloud, poses)
++    
++    # Train initial field
++    train_3dgs(gs_field, initial_images, iterations=initial_params['T_init'])
+     
+     # Phase 2: Progressive Training
+-    for new_img in subsequent_images:
+-        # 1. Update Pose and Cloud
+-        new_pose = on_the_fly_sfm_estimate_pose(new_img, g_field.poses)
+-        local_ba(new_pose, g_field.poses, g_field.sparse_cloud)
++    for new_image in image_stream:
++        new_id = new_image.id
++        
++        # 1. Update Pose and Sparse Cloud
++        # On-the-Fly SfM updates poses of new and neighboring images
++        sparse_cloud, poses = on_the_fly_sfm_update(sparse_cloud, poses, new_image)
+         
+         # 2. Initialize New Gaussians
+-        new_points = get_sparse_points_from_image(new_img, new_pose)
++        # Build search tree for existing sparse cloud
++        search_tree = build_search_tree(sparse_cloud)
++        
+         new_gaussians = []
+-        for pt in new_points:
+-            dist = search_tree.query_nearest_neighbor(pt)
+-            if dist > THRESHOLD: # THRESHOLD not given in sources
+-                new_gaussians.append(create_gaussian(pt))
+-        g_field.append_gaussians(new_gaussians)
+-        
+-        # 3. Hierarchical Weighting
+-        weights = calculate_hierarchical_weights(new_img, g_field.images, g_field.matches)
+-        
+-        # 4. Training Allocation
+-        # Local Optimization: Top Nm=10 images
+-        top_images = get_top_n_images(weights, N_m=10)
+-        local_iterations = TI / 2 # TI = 200
+-        
+-        # Calculate iterations for each key image
+-        key_iterations = {}
+-        sum_denom = sum(1 - math.exp(-w) for w in [weights[i] for i in top_images])
+-        for img in top_images:
+-            w = weights[img]
+-            t_im = ((1 - math.exp(-w)) / sum_denom) * TI
+-            key_iterations[img] = t_im
+-            
+-        # Train on key images
+-        for img, t_im in key_iterations.items():
+-            g_field = train_3dgs(g_field, [img], iterations=t_im, learning_rate_strategy='adaptive')
+-            
+-        # Semi-Global Optimization: Remaining iterations
+-        other_images = [img for img in g_field.images if img not in top_images]
+-        if other_images:
+-            iter_per_img = (TI / 2) / len(other_images)
+-            for img in other_images:
+-                g_field = train_3dgs(g_field, [img], iterations=iter_per_img, learning_rate_strategy='adaptive')
+-                
++        for point in new_image.sparse_points:
++            # Query nearest neighbor in existing cloud
++            dist = search_tree.query_distance(point)
++            if dist > initial_params['distance_threshold']:
++                new_gaussians.append(create_gaussian_from_point(point))
++        
++        # Append new Gaussians to field
++        gs_field.append(new_gaussians)
++        
++        # 3. Hierarchical Image Weighting
++        # Calculate overlap matrix M for new image against all registered images
++        M = calculate_overlap_matrix(new_image, registered_images)
++        
++        # Layer 1: New image weight
++        weights = {new_id: 1.0}
++        
++        # Layer 2: Direct overlap
++        for img_id, overlap_count in M.items():
++            if overlap_count > 0:
++                weights[img_id] = overlap_count
++        
++        # Layer 3+: Indirect overlap (recursive calculation)
++        # Note: In practice, this requires iterating through layers until convergence or max depth
++        # Simplified for pseudocode: assume M captures all necessary indirect links or 
++        # the loop handles layer-by-layer propagation
++        for k in range(3, max_layer + 1):
++            for img_id in registered_images:
++                if img_id not in weights:
++                    # Calculate weight based on previous layer neighbors
++                    prev_layer_neighbors = get_neighbors_in_layer(k-1, img_id, M)
++                    if prev_layer_neighbors:
++                        numerator = sum(weights[n] * M[n][img_id] for n in prev_layer_neighbors)
++                        weights[img_id] = numerator / len(prev_layer_neighbors)
++        
++        # 4. Training Iteration Allocation
++        # Sort images by weight descending
++        sorted_images = sorted(registered_images + [new_id], key=lambda x: weights.get(x, 0), reverse=True)
++        
++        # Local Optimization: Top N_m images
++        local_images = sorted_images[:initial_params['N_m']]
++        local_iterations = initial_params['T_I'] // 2
++        
++        # Calculate iterations for each local image
++        local_iter_alloc = {}
++        sum_denom = sum(1 - math.exp(-weights.get(img, 0)) for img in local_images)
++        for img in local_images:
++            w = weights.get(img, 0)
++            local_iter_alloc[img] = int((1 - math.exp(-w)) / sum_denom * local_iterations)
++            
++        # Train on local images
++        for img in local_images:
++            train_3dgs(gs_field, [img], iterations=local_iter_alloc[img], 
++                       learning_rate=get_adaptive_lr(img, local_iter_alloc[img], initial_params))
++                       
++        # Semi-Global Optimization: Remaining images
++        remaining_images = [img for img in registered_images + [new_id] if img not in local_images]
++        semi_global_iterations = initial_params['T_I'] // 2
++        if remaining_images:
++            iter_per_img = semi_global_iterations // len(remaining_images)
++            for img in remaining_images:
++                train_3dgs(gs_field, [img], iterations=iter_per_img,
++                           learning_rate=get_adaptive_lr(img, iter_per_img, initial_params))
++
+     # Phase 3: Final Optimization
+-    global_ba(g_field.poses)
+-    g_field = train_3dgs(g_field, all_images, iterations=RAPID_OPT_ITERS)
+-    return g_field
+-
+-def calculate_hierarchical_weights(new_img, all_images, matches):
+-    """
+-    Calculates weights based on direct and indirect overlap.
+-    """
+-    weights = {}
+-    weights[new_img] = 1.0
+-    
+-    # Layer 2: Direct Overlap
+-    layer_2 = []
+-    for img in all_images:
+-        if img == new_img: continue
+-        m_in = matches.get((img, new_img), 0)
+-        if m_in > 0:
+-            weights[img] = m_in
+-            layer_2.append(img)
+-            
+-    # Layer 3+: Indirect Overlap
+-    # Note: The source describes a recursive layer calculation.
+-    # For implementation, we iterate layers until no new images are added.
+-    current_layer = layer_2
+-    layer_idx = 2
+-    
+-    while current_layer:
+-        next_layer = []
+-        for img in all_images:
+-            if img in weights: continue # Already weighted
+-            # Check if connected to any image in current_layer
+-            # The formula uses M_{j,ki}^{(k-1)}
+-            # We approximate by summing contributions from all images in previous layer
+-            numerator = 0.0
+-            count_prev = len(current_layer)
+-            if count_prev == 0: break
+-            
+-            for prev_img in current_layer:
+-                m_prev = matches.get((prev_img, img), 0)
+-                w_prev = weights[prev_img]
+-                numerator += w_prev * m_prev
+-                
+-            if numerator > 0:
+-                w_ki = numerator / count_prev
+-                weights[img] = w_ki
+-                next_layer.append(img)
+-                
+-        current_layer = next_layer
+-        layer_idx += 1
+-        
+-    return weights
+-
+-def train_3dgs(g_field, images, iterations, learning_rate_strategy='fixed'):
+-    """
+-    Performs optimization for a set of images.
++    poses = global_bundle_adjustment(poses, gs_field)
++    train_3dgs(gs_field, all_images, iterations=final_opt_iterations)
++
++def get_adaptive_lr(img_id, T_j, params):
++    """
++    Calculates adaptive learning rate for image img_id trained for T_j iterations.
++    """
++    eta_0 = params['eta_0']
++    eta_f = params['eta_f']
++    T_a = params['T_a']
++    
++    # Base learning rate interpolation
++    t_i = min(1.0, T_j / T_a)
++    eta_c = (eta_0 ** (1 - t_i)) * (eta_f ** t_i)
++    
++    # Adjust for overlapping images
++    # Assume get_overlapping_images returns list of image IDs with M > 0
++    overlapping_imgs = get_overlapping_images(img_id)
++    N_I = len(overlapping_imgs)
++    
++    # Sum of weighted learning rates from overlaps
++    # Note: This requires recursive or pre-calculated eta values for overlaps
++    # In a real implementation, this might be an iterative update or require 
++    # storing eta values per image history.
++    overlap_sum = 0
++    for i in overlapping_imgs:
++        # Retrieve M_ij and eta_i^c
++        M_ij = get_overlap_count(img_id, i)
++        eta_i_c = get_cached_base_lr(i) # Assumed helper
++        overlap_sum += M_ij * eta_i_c
++        
++    eta_j = (eta_c + overlap_sum) / (N_I + 1)
++    return eta_j
++
++def train_3dgs(gs_field, images, iterations, learning_rate):
++    """
++    Performs gradient descent on the 3DGS field for specified images.
+     Uses Splatting-based parallelism (gradient accumulation per Gaussian).
+     """
+     for step in range(iterations):
+-        # Render images
+-        rendered_images = []
++        loss = 0
++        gradients = {} # Accumulate gradients per Gaussian
++        
+         for img in images:
+-            rendered = render_gaussians(g_field, img.pose)
+-            rendered_images.append(rendered)
+-            
+-        # Compute Losses
+-        total_loss = 0.0
+-        for img in images:
+-            # L1 and SSIM
+-            l1 = compute_l1_loss(rendered_images[images.index(img)], img.gt)
+-            ssim = compute_ssim_loss(rendered_images[images.index(img)], img.gt)
+-            
+-            # Load Balancing Loss
+-            # G_p: number of Gaussians per pixel
+-            g_counts = get_gaussian_counts_per_pixel(rendered_images[images.index(img)], g_field)
+-            l_load = np.std(g_counts)
+-            
+-            # Weighted Loss
+-            loss = LAMBDA_1 * l1 + LAMBDA_SSIM * ssim + LAMBDA_LOAD * l_load
+-            
+-            # Adaptive Learning Rate
+-            if learning_rate_strategy == 'adaptive':
+-                # Calculate T_j for this image (accumulated over steps)
+-                # In a real loop, T_j is tracked per image
+-                # For this pseudocode, we assume T_j is known or updated
+-                t_i = min(1.0, T_j / T_a)
+-                eta_c = (ETA_0 ** (1 - t_i)) * (ETA_F ** t_i)
+-                
+-                # Adjust for overlap
+-                overlapping_imgs = get_overlapping_images(img, g_field.images)
+-                sum_eta = 0
+-                for o_img in overlapping_imgs:
+-                    # Need eta_i^c for overlapping images
+-                    # Simplified: assume we have precomputed or cached eta_i^c
+-                    sum_eta += matches.get((o_img, img), 0) * eta_i_c_cached[o_img]
+-                
+-                n_I = len(overlapping_imgs)
+-                eta_j = (eta_c + sum_eta) / (n_I + 1)
+-            else:
+-                eta_j = ETA_0
+-                
+-            # Backpropagate with eta_j
+-            # Gradient accumulation per Gaussian
+-            g_field.backward(loss, eta_j)
+-            
+-        total_loss += loss
+-        
+-    return g_field
++            # Render image using current gs_field
++            rendered_img = render(gs_field, img.camera_pose)
++            
++            # Calculate L1, SSIM, and Load-Balancing Loss
++            L1 = calculate_l1_loss(rendered_img, img.gt_image)
++            SSIM = calculate_ssim_loss(rendered_img, img.gt_image)
++            
++            # Load balancing: std of Gaussian count per pixel
++            G_p = get_gaussian_counts_per_pixel(rendered_img, gs_field)
++            L_load = calculate_std(G_p)
++            
++            total_loss = (params['lambda_1'] * L1 + 
++                          params['lambda_ssim'] * SSIM + 
++                          params['lambda_load'] * L_load)
++            
++            loss += total_loss
++            
++            # Backpropagate gradients
++            # Splatting-based parallelism: accumulate gradients for each Gaussian
++            grads = backpropagate(gs_field, rendered_img, img.gt_image)
++            accumulate_gradients(gradients, grads)
++            
++        # Update Gaussians using accumulated gradients
++        update_gs_field(gs_field, gradients, learning_rate)
+ ```
+ 
+-### Edge Cases and Pitfalls
+--   **Threshold Selection**: The distance threshold $d_{thresh}$ for classifying new points is critical. If too low, existing points are re-initialized, causing instability. If too high, new geometry is missed. Not given in the sources [S1].
+--   **Overfitting in Phase 1**: Training too long on initial images leads to poor generalization. The strict iteration limit ($T_{init}=2000$) mitigates this [S1].
+--   **Gradient Contention**: Standard per-pixel gradient accumulation causes atomic operation bottlenecks. The method uses per-Gaussian accumulation to avoid this [S1].
+--   **Learning Rate Inconsistency**: Without adaptive learning rates, regions trained fewer times may have lower quality. The overlap-aware learning rate adjustment addresses this [S1].
+-
+ ## Operating characteristics
+--   **Time Complexity**: The method is designed for near real-time optimization. Each new image triggers $T_I=200$ iterations. The hierarchical weighting limits the number of images optimized per step, focusing on local updates [S1]. Splatting-based parallelism reduces training time by eliminating thread contention [S1].
+--   **Memory Complexity**: Memory usage scales with the number of Gaussians. The load-balancing loss helps control the total number of Gaussians, preventing abnormal accumulation [S1].
+--   **Performance**: Evaluated on RGB datasets (3DGS, Mip-NeRF 360, On-the-Fly SfM, Replica) using an RTX 4090 GPU. It achieves competitive PSNR and SSIM compared to offline methods like Adr-Gaussian and Taming-3DGS, and SLAM-based methods like GS-SLAM and RTG-SLAM [S1].
+--   **Strengths**: Robust to dynamic scene expansion, prevents overfitting, accelerates training via parallelism and load balancing.
+--   **Limitations**: Requires On-the-Fly SfM for pose estimation and sparse cloud generation. Performance depends on the quality of SfM and feature matching [S1].
++
++*   **Time Complexity:** The method is designed for near real-time optimization. Each new image triggers $T_I$ (200) iterations. The hierarchical weighting and local/semi-global split ensure that only a subset of images ($N_m=10$) receive intensive local optimization, while others receive minimal updates. This scales linearly with the number of new images, unlike global re-optimization which scales quadratically or worse with scene size [S1].
++*   **Memory Complexity:** Memory usage grows with the number of Gaussians. The load-balancing loss helps control the total number of Gaussians by penalizing regions with excessive Gaussian density, preventing uncontrolled growth [S1].
++*   **Performance:** On an RTX 4090 GPU, the method achieves significant speedups over offline training by avoiding redundant computations on stable regions. The splatting-based parallelism reduces training time by eliminating thread contention associated with per-pixel gradient accumulation [S1].
++*   **Strengths:**
++    *   Robust to dynamic scene expansion.
++    *   Prevents catastrophic forgetting via hierarchical weighting.
++    *   Efficient training through adaptive learning rates and load balancing.
++*   **Limitations:**
++    *   Relies on the accuracy of the On-the-Fly SfM module for pose and sparse cloud estimation [S1].
++    *   Performance depends on the quality of feature matching ($M_{i,j}$) for weight calculation.
++    *   May require careful tuning of the distance threshold for new Gaussian initialization [S1].
+ 
+ ## Background
+-On-the-Fly GS Progressive Training was proposed in the paper "Gaussian On-the-Fly Splatting: A Progressive Framework for Robust Near Real-Time 3DGS Optimization" [S1]. It builds on the original 3DGS method [32] and integrates concepts from Taming 3DGS [7] for parallelism. The method addresses the limitations of static 3DGS training when applied to sequential image streams, such as those from SLAM systems or UAVs [S1].
++
++On-the-Fly GS Progressive Training was introduced in the paper "Gaussian On-the-Fly Splatting: A Progressive Framework for Robust Near Real-Time 3DGS Optimization" [S1]. It addresses the limitations of standard 3DGS, which requires offline training on all images, making it unsuitable for streaming or SLAM applications where images arrive sequentially. The method builds on the principles of progressive training and integrates techniques from Taming 3DGS for efficient gradient accumulation [S1].
+ 
+ ## Sources
++
+ [S1] Gaussian On-the-Fly Splatting: A Progressive Framework for Robust Near Real-Time 3DGS Optimization, https://doi.org/10.1109/lra.2025.3632729, fetched 2026-10-30

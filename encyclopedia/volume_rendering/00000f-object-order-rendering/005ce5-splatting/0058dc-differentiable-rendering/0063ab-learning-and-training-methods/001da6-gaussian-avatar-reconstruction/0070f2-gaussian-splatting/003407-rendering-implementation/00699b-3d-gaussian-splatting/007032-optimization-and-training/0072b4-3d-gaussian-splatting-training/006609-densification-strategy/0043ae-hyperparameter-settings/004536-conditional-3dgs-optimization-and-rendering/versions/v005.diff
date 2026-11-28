@@ -1,0 +1,194 @@
+--- v004.md
++++ v005.md
+@@ -8,13 +8,13 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A sequence of images (video) with known camera poses and timestamps.
+-*   **Output:** A set of 7D Gaussians (3D position, 3D covariance, 3D color, opacity) conditioned on time and view direction, rendered as a video sequence.
++*   **Input:** A sequence of images (video) with known camera poses and timestamps [S1].
++*   **Output:** A rendered video sequence generated from the conditional Gaussians [S1].
+ 
+ **Data Structures:**
+ The core data structure is the Gaussian, defined by:
+-*   Mean position $\mu \in \mathbb{R}^3$.
+-*   Conditional Covariance $\Sigma_{cond} \in \mathbb{R}^{7 \times 7}$, which encodes spatial, temporal, and angular correlations.
+-*   Color coefficients $c \in \mathbb{R}^3$.
+-*   Conditional Opacity $\alpha_{cond}$, modulated by time and direction.
++*   Mean position $\mu \in \mathbb{R}^3$ [G].
++*   Conditional Covariance $\Sigma_{cond} \in \mathbb{R}^{7 \times 7}$, which encodes spatial, temporal, and angular correlations [S1].
++*   Color coefficients $c \in \mathbb{R}^3$ [G].
++*   Conditional Opacity $\alpha_{cond}$, modulated by time and direction [S1].
+ 
+ **Method Steps:**
+@@ -24,5 +24,5 @@
+     $$ \Sigma_{cond} = U D U^T $$
+     where $U$ is an orthogonal matrix and $D$ is a diagonal matrix of singular values [S1].
+-    *   Define rotation matrix $R = U$.
++    *   Define rotation matrix $R = U$ [S1].
+     *   Define scale vector $S = \text{diag}(D)$ [S1].
+     *   Ensure a right-handed coordinate system by adjusting the last column of $R$:
+@@ -33,5 +33,5 @@
+     Leverage temporal cues for Gaussian splitting in addition to spatial gradients [S1]. Quantify spatial-temporal correlation using the magnitude of the off-diagonal block $\Sigma_{pt}$ of $\Sigma_{cond}$, which captures interaction between spatial and temporal components [S1].
+     *   Split a Gaussian if:
+-        1.  $|\Sigma_{pt}| > 0.05$ (relative to screen extent).
++        1.  $|\Sigma_{pt}| > 0.05$ (relative to screen extent) [S1].
+         2.  Normalized temporal scale (derived from $\Sigma_t$) $> 0.25$ [S1].
+     This ensures regions with significant motion dynamics are densely represented [S1].
+@@ -58,94 +58,87 @@
+ 
+ ```python
++import math
++
++def project_to_image_plane(mu, Sigma, K, R_w2c, t_w2c):
++    """Projects 3D mean and covariance to 2D image plane."""
++    mu_cam = [R_w2c[i][j]*mu[j] + t_w2c[i] for i in range(3) for j in range(3)]
++    Sigma_cam = [[sum(R_w2c[i][k]*Sigma[k][l]*R_w2c[j][l] for l in range(3)) for l in range(3)] for i in range(3) for j in range(3)]
++    x, y, z = mu_cam
++    if z <= 0.01:
++        return None, None
++    f_x, f_y = K[0][0], K[1][1]
++    c_x, c_y = K[0][2], K[1][2]
++    T = [[f_x/z, 0, -f_x*x/(z*z)],
++         [0, f_y/z, -f_y*y/(z*z)],
++         [0, 0, 0]]
++    Sigma_2d = [[sum(T[i][k]*Sigma_cam[k][l]*T[j][l] for l in range(2)) for l in range(2)] for i in range(2) for j in range(2)]
++    mu_2d = [f_x * (x/z) + c_x, f_y * (y/z) + c_y]
++    return mu_2d, Sigma_2d
++
++def splat_2d_gaussians(gaussians, width, height):
++    """Renders 2D Gaussians with depth-aware alpha blending."""
++    gaussians_sorted = sorted(gaussians, key=lambda g: g['z'])
++    image = [[0.0, 0.0, 0.0] for _ in range(height * width)]
++    alpha_accum = [[0.0] for _ in range(height * width)]
++    for g in gaussians_sorted:
++        mu, Sigma, color, alpha, z = g['mu'], g['Sigma'], g['color'], g['alpha'], g['z']
++        std_x, std_y = math.sqrt(Sigma[0][0]), math.sqrt(Sigma[1][1])
++        bbox = [max(0, int(mu[0] - 3*std_x)), max(0, int(mu[1] - 3*std_y)),
++                min(width, int(mu[0] + 3*std_x)), min(height, int(mu[1] + 3*std_y))]
++        for y in range(bbox[1], bbox[3]):
++            for x in range(bbox[0], bbox[2]):
++                dx, dy = x - mu[0], y - mu[1]
++                exp = -0.5 * (dx*dx/Sigma[0][0] + dy*dy/Sigma[1][1])
++                if exp > -4.0:
++                    idx = y * width + x
++                    contrib = alpha * math.exp(exp)
++                    new_alpha = alpha_accum[idx][0] + contrib
++                    if new_alpha > 0.999:
++                        image[idx] = color
++                        alpha_accum[idx][0] = 1.0
++                    else:
++                        image[idx] = [c1*alpha_accum[idx][0] + c2*contrib for c1, c2 in zip(image[idx], color)]
++                        alpha_accum[idx][0] = new_alpha
++    return image
++
+ def decompose_conditional_covariance(Sigma_cond):
+-    """
+-    Extracts scale and rotation from the conditional covariance matrix.
+-    Args:
+-        Sigma_cond: 7x7 conditional covariance matrix.
+-    Returns:
+-        R: 3x3 rotation matrix.
+-        S: 3D scale vector.
+-    """
+-    # SVD decomposition
++    """Extracts scale and rotation from the conditional covariance matrix."""
+     U, D, Vt = np.linalg.svd(Sigma_cond)
+-    
+-    # Define rotation and scale
+-    R = U[:, :3]  # Extract 3x3 spatial rotation block
+-    S = np.diag(D)[:3]  # Extract top 3 singular values as scale
+-    
+-    # Ensure right-handed coordinate system
++    R = U[:, :3]
++    S = np.diag(D)[:3]
+     det_R = np.linalg.det(R)
+     if det_R < 0:
+         R[:, 2] = -R[:, 2]
+-        
+     return R, S
+ 
+ def check_splitting_criteria(Sigma_cond, screen_extent):
+-    """
+-    Determines if a Gaussian should be split based on temporal cues.
+-    Args:
+-        Sigma_cond: 7x7 conditional covariance matrix.
+-        screen_extent: Normalization factor for screen size.
+-    Returns:
+-        bool: True if splitting criteria are met.
+-    """
+-    # Extract off-diagonal block Sigma_pt (interaction between spatial and temporal)
+-    # Assuming layout: [Spatial (3x3), Temporal/Angular (4x4)]
+-    # Sigma_pt corresponds to the cross-terms between spatial (0-2) and temporal/angular (3-6)
+-    Sigma_pt = Sigma_cond[0:3, 3:7]
+-    
+-    # Calculate magnitude of spatial-temporal correlation
++    """Determines if a Gaussian should be split based on temporal cues."""
++    Sigma_pt = Sigma_cond[0:3][3:7]
+     correlation_magnitude = np.linalg.norm(Sigma_pt)
+-    
+-    # Check threshold relative to screen extent
+     if correlation_magnitude <= 0.05 * screen_extent:
+         return False
+-        
+-    # Calculate normalized temporal scale from Sigma_t (temporal block)
+-    Sigma_t = Sigma_cond[3:7, 3:7]
+-    # Assuming temporal scale is derived from the trace or max eigenvalue of Sigma_t
+-    # Note: Exact derivation of "normalized temporal scale" from Sigma_t is not fully specified in [S1] beyond "derived from"
+-    # We assume it refers to the magnitude of temporal variance components.
++    Sigma_t = Sigma_cond[3:7][3:7]
+     temporal_scale = np.max(np.linalg.eigvals(Sigma_t))
+-    
+     if temporal_scale > 0.25:
+         return True
+-        
+     return False
+ 
+ def render_conditional_gaussians(gaussians, camera_params, time_t, view_dir_d):
+-    """
+-    Renders the scene using conditional 3DGS.
+-    Args:
+-        gaussians: List of Gaussian objects with conditional parameters.
+-        camera_params: Camera intrinsic and extrinsic matrices.
+-        time_t: Current time step.
+-        view_dir_d: Current view direction.
+-    Returns:
+-        Image tensor.
+-    """
+-    # 1. Conditional Slicing: Convert 7DGS to 3DGS-compatible format
+-    # This involves evaluating the conditional dependencies for the current t and d
++    """Renders the scene using conditional 3DGS."""
+     projected_gaussians = []
+     for g in gaussians:
+-        # Get conditional mean and covariance for current t, d
+         mu_cond = g.get_conditional_mean(time_t, view_dir_d)
+         Sigma_cond = g.get_conditional_covariance(time_t, view_dir_d)
+-        
+-        # 2. Project to 2D
+-        # Standard perspective projection
+-        mu_2d, Sigma_2d = project_to_image_plane(mu_cond, Sigma_cond, camera_params)
+-        
++        mu_2d, Sigma_2d = project_to_image_plane(mu_cond, Sigma_cond, camera_params['K'], camera_params['R_w2c'], camera_params['t_w2c'])
++        if mu_2d is None:
++            continue
+         projected_gaussians.append({
+             'mu': mu_2d,
+             'Sigma': Sigma_2d,
+             'color': g.color,
+-            'opacity': g.get_conditional_opacity(time_t, view_dir_d)
++            'alpha': g.get_conditional_opacity(time_t, view_dir_d),
++            'z': mu_cond[2]
+         })
+-        
+-    # 3. Splatting
+-    # Differentiable rasterization
+-    image = splat_2d_gaussians(projected_gaussians, image_width, image_height)
+-    
++    image = splat_2d_gaussians(projected_gaussians, camera_params['width'], camera_params['height'])
+     return image
+ ```
+@@ -168,5 +161,4 @@
+ *   **Limitations:** Requires careful tuning of modulation parameters ($\lambda_d, \lambda_t$) and thresholds for splitting [S1].
+ *   **When to Use:** Dynamic scenes with significant motion and view-dependent appearance changes [S1].
+-*   **When Not to Use:** Static scenes where standard 3DGS is sufficient and more efficient [S1].
+ 
+ ## Background

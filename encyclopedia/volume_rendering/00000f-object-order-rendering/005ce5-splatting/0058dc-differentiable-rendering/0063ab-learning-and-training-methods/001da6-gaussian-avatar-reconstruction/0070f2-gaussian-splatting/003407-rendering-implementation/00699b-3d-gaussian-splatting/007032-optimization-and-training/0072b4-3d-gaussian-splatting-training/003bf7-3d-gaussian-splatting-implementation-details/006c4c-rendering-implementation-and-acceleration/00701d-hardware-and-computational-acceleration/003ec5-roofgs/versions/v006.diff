@@ -1,0 +1,215 @@
+--- v005.md
++++ v006.md
+@@ -4,127 +4,79 @@
+ 
+ ## Overview
+-RoofGS is an end-to-end acceleration method for 3D Gaussian Splatting (3DGS) that optimizes the rendering pipeline by aligning software strategies with hardware bottlenecks identified via the Roofline model [S1, unofficial]. It solves the problem of uncoordinated optimization by applying memory-centric reductions to bandwidth-limited front-end stages and compute-centric instruction-level parallelism (ILP) to compute-bound rasterization stages [S1, unofficial]. It sets itself apart from generic optimization by explicitly using the Roofline "knee" to dictate whether a stage should prioritize memory traffic reduction or arithmetic throughput [S1, unofficial].
++RoofGS is an end-to-end acceleration method for 3D Gaussian Splatting (3DGS) that optimizes the rendering pipeline based on stage-specific hardware bottlenecks identified via the Roofline model [S1, unofficial]. It addresses the uncoordinated optimization problem where different stages are constrained by different resources: bandwidth-limited front-end stages prioritize reducing global memory traffic, while compute-intensive rasterization stages prioritize lower instruction cost and increased instruction-level parallelism (ILP) [S1, unofficial]. It sets itself apart from generic optimization by explicitly mapping memory-centric strategies (compression, fusion) to bandwidth-bound phases and compute-centric strategies (ILP, fast math) to arithmetic-bound phases [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A set of 3D Gaussians $\mathcal{G}$, each defined by center $\mathbf{t}$, covariance $\mathbf{\Sigma}$, opacity $o$, and spherical harmonic (SH) coefficients $\mathbf{c}_{SH}$ [S1, unofficial]. Camera parameters (view and projection matrices) [G].
+-*   **Output:** Rasterized 2D image pixels [S1, unofficial].
++*   **Input:** 3D Gaussian primitives defined by mean $\mu$, covariance $\Sigma$ (derived from scale $s$ and rotation $q$), opacity $\alpha$, and spherical harmonic (SH) coefficients for color/radiance.
++*   **Output:** Rendered 2D image with alpha-blended colors.
+ 
+ **Data Structures:**
+-*   **Gaussian Attributes:** Compressed to reduce memory footprint. For third-degree SHs ($D_{SH}=3$), the baseline requires 192 bytes per Gaussian (48 coefficients $\times$ 4 bytes) [S1, unofficial]. RoofGS uses low-bit quantization with a single shared scale for all SH coefficients [S1, unofficial].
+-*   **Depth Keys:** Compressed dynamic keys for sorting [S1, unofficial].
+-*   **Tile Data:** Intermediate buffers for front-end fusion [S1, unofficial].
++*   **Gaussian Attributes:** Stored in a compact format. For third-degree SHs ($D_{SH}=3$), the baseline requires 48 coefficients per RGB channel (192 bytes in single precision) [S1, unofficial]. RoofGS uses low-bit quantization with a single shared scale for all SH coefficients to reduce this footprint [S1, unofficial].
++*   **Depth Keys:** Used for sorting. RoofGS employs dynamic depth-key compression to reduce the size of keys passed to the radix sort [S1, unofficial].
+ 
+-**Numbered Steps:**
+-1.  **Front-End Fusion (Memory-Bound Optimization):**
+-    *   **Compact Attribute Storage:** Quantize SH coefficients to reduce global memory traffic. Instead of storing full-precision coefficients, store quantized values with a shared scale factor [S1, unofficial].
+-    *   **Dynamic Depth-Key Compression:** Compress the depth keys used for sorting to reduce memory bandwidth usage during the projection and sorting phase [S1, unofficial].
+-    *   **Cross-Stage Kernel Fusion:** Fuse the projection, sorting, and attribute fetching kernels to avoid writing intermediate data to global memory [S1, unofficial]. This reduces the dominant global memory traffic in bandwidth-bound stages [S1, unofficial].
+-2.  **Rasterization Reorganization (Compute-Bound Optimization):**
+-    *   **Dual-Pixel ILP:** Reformulate the per-pixel Gaussian evaluation to increase instruction-level parallelism inside the blending loop [S1, unofficial].
+-    *   **Fast Exponential Evaluation:** Optimize the computation of the Gaussian power and opacity to reduce arithmetic overhead [S1, unofficial].
++**Method Steps:**
++The pipeline is divided into two optimization phases:
++
++1.  **Memory-Bound Optimization (Front-End):**
++    *   **Compact Attribute Storage:** Quantize SH coefficients using a single shared scale to reduce memory bandwidth demand during attribute streaming [S1, unofficial].
++    *   **Dynamic Depth-Key Compression:** Compress the depth keys used for sorting primitives to reduce traffic during the sorting stage [S1, unofficial].
++    *   **Cross-Stage Kernel Fusion:** Fuse adjacent kernels in the front-end pipeline to minimize intermediate global memory reads/writes [S1, unofficial].
++
++2.  **Compute-Bound Optimization (Rasterization):**
++    *   **Dual-Pixel ILP:** Reformulate the per-pixel Gaussian evaluation to increase instruction-level parallelism within the blending loop [S1, unofficial].
++    *   **Fast Exponential Evaluation:** Optimize the computation of the Gaussian power and exponential function [S1, unofficial].
+ 
+ **Formulas:**
+-The Gaussian power $p(x, y)$ for a pixel at $(x, y)$ relative to a Gaussian center $(u, v)$ is computed as [S1, unofficial]:
+-$$p(x, y) = -\frac{1}{2} \left( a(x - u)^2 + b(x - u)(y - v) + c(y - v)^2 \right)$$
+-where $a, b, c$ are derived from the projected 2D covariance matrix, and $(u, v)$ are the center coordinates [S1, unofficial]. (Corrected from source typo $(x-w)^2$).
+-The unclamped opacity contribution is then computed as [S1, unofficial]:
+-$$\tilde{\alpha}(x, y) = o \exp(p(x, y))$$
++For each Gaussian-pixel pair, the baseline rasterizer evaluates the Gaussian power $p(x, y)$ as the exponent term:
++$$
++p(x, y) = -\frac{1}{2} \left( a(x - w)^2 + b(x - u)(y - v) + c(y - v)^2 \right)
++$$
++where $(x, y)$ is the target pixel coordinate, $(u, v)$ is the projected 2D Gaussian center, and $a, b, c, w$ are derived from the projected covariance matrix [S1, unofficial].
++
++The unclamped opacity contribution $\tilde{\alpha}(x, y)$ is then:
++$$
++\tilde{\alpha}(x, y) = o \exp(p(x, y))
++$$
+ where $o$ is the base opacity [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def roofgs_render(gaussians, camera, resolution):
+-    # 1. Front-End: Memory-Bound Optimization
+-    projected = []
+-    for g in gaussians:
+-        center_2d, cov_2d = project_2d(g.center, g.cov, camera)
+-        depth = center_2d.z
+-        sh_quant, scale = quantize_sh(g.sh_coeffs)
+-        projected.append({'center': center_2d, 'cov': cov_2d, 'depth': depth,
+-                          'opacity': g.opacity, 'sh_quant': sh_quant, 'scale': scale})
+-
+-    # Compressed radix-sort keys & cross-stage kernel fusion
+-    sorted_gaussians = sort_front_to_back(projected, key='depth')
+-
+-    # 2. Rasterization: Compute-Bound Optimization
+-    image = zeros_like(resolution)
+-    for tile in generate_tiles(resolution):
+-        tile_gaussians = get_tile_gaussians(sorted_gaussians, tile)
+-        for y, x in tile.pixels:
+-            color = [0.0, 0.0, 0.0]
+-            transmittance = 1.0
+-            for g in tile_gaussians:
+-                dx = x - g.center.x
+-                dy = y - g.center.y
+-                a, b, c = compute_covariance_terms(g.cov)
+-                p = -0.5 * (a * dx**2 + b * dx * dy + c * dy**2)
+-                alpha_g = g.opacity * fast_exp(p)
+-                color = add_color(color, scale_color(reconstruct_color(g.sh_quant, g.scale, x, y), alpha_g * transmittance))
+-                transmittance *= (1.0 - alpha_g)
+-                if transmittance < 1e-4:
+-                    break
+-            image[tile.y][tile.x] = color
++def roofgs_render(gaussians, image_width, image_height):
++    # Phase 1: Memory-Bound Optimization
++    # 1.1 Compact Attribute Storage
++    # Quantize SH coefficients with a single shared scale
++    compressed_attributes = quantize_sh_coefficients(gaussians.sh_coeffs, shared_scale=True)
++    
++    # 1.2 Dynamic Depth-Key Compression
++    # Compress depth keys for sorting
++    compressed_depth_keys = compress_depth_keys(gaussians.depth)
++    
++    # 1.3 Cross-Stage Kernel Fusion
++    # Fuse projection and sorting stages to reduce memory traffic
++    sorted_gaussians = fused_projection_sort(compressed_attributes, compressed_depth_keys)
++    
++    # Phase 2: Compute-Bound Optimization
++    # 2.1 Rasterization Reorganization for Dual-Pixel ILP
++    # Process pixels in pairs or blocks to increase ILP
++    # 2.2 Fast Exponential Evaluation
++    # Use optimized exp() for Gaussian power
++    
++    image = zeros((image_height, image_width, 3))
++    
++    for pixel in pixels:
++        # Evaluate Gaussian power p(x,y)
++        # p(x, y) = -0.5 * (a*(x-w)^2 + b*(x-u)*(y-v) + c*(y-v)^2)
++        p = evaluate_gaussian_power(pixel, gaussian)
++        
++        # Compute opacity
++        # alpha = o * exp(p)
++        alpha = gaussian.opacity * fast_exp(p)
++        
++        # Blend into image
++        image = alpha_blend(image, pixel, alpha, gaussian.color)
++        
+     return image
+-
+-def project_2d(center_3d, cov_3d, camera):
+-    view_mat = camera.view_matrix
+-    proj_mat = camera.projection_matrix
+-    center_2d = (proj_mat @ view_mat @ center_3d)[:2]
+-    cov_2d = compute_2d_covariance(cov_3d, view_mat, proj_mat, center_3d)
+-    return center_2d, cov_2d
+-
+-def quantize_sh(coeffs, bits=8):
+-    scale = max(abs(coeffs))
+-    quantized = [round(c / scale * (2**bits - 1)) for c in coeffs]
+-    return quantized, scale
+-
+-def sort_front_to_back(data, key):
+-    return sorted(data, key=lambda x: x[key])
+-
+-def get_tile_gaussians(sorted_gaussians, tile):
+-    return [g for g in sorted_gaussians if tile.contains(g.center)]
+-
+-def zeros_like(resolution):
+-    return [[0.0, 0.0, 0.0] for _ in range(resolution[1])]
+-
+-def generate_tiles(resolution, tile_size=16):
+-    tiles = []
+-    for y in range(0, resolution[1], tile_size):
+-        for x in range(0, resolution[0], tile_size):
+-            tiles.append(Tile(x, y, tile_size))
+-    return tiles
+-
+-def compute_covariance_terms(cov_2d):
+-    return cov_2d[0][0], cov_2d[0][1], cov_2d[1][1]
+-
+-def fast_exp(x):
+-    return math.exp(x) # Hardware-specific approximation [G]
+-
+-def reconstruct_color(sh_quant, scale, x, y):
+-    # Standard SH evaluation from quantized coefficients [G]
+-    return scale * evaluate_sh_basis(sh_quant, x, y)
+-
+-def add_color(c1, c2):
+-    return [c1[i] + c2[i] for i in range(3)]
+-
+-def scale_color(c, s):
+-    return [c[i] * s for i in range(3)]
+-
+-class Tile:
+-    def __init__(self, x, y, size):
+-        self.x, self.y, self.size = x, y, size
+-        self.pixels = [(y2, x2) for y2 in range(y, y+size) for x2 in range(x, x+size)]
+-    def contains(self, center):
+-        return self.x <= center.x < self.x + self.size and self.y <= center.y < self.y + self.size
+ ```
+-
+-**Parameters:**
+-*   **SH Degree ($D_{SH}$):** Typically 3, requiring 48 coefficients per Gaussian [S1, unofficial].
+-*   **Quantization Scale:** Single shared scale for all SH coefficients [S1, unofficial].
+-
+-**Edge Cases and Pitfalls:**
+-*   **Precision Limits:** Quantization reduces SH coefficient precision, which may affect high-frequency appearance details [S1, unofficial].
+-*   **Depth Precision:** Dynamic depth-key compression requires sufficient bit-depth to maintain correct front-to-back sorting order [S1, unofficial].
++*Note: The specific implementation of `quantize_sh_coefficients`, `compress_depth_keys`, `fused_projection_sort`, and `fast_exp` relies on hardware-specific intrinsics or library calls not detailed in the source text [S1, unofficial]. The core logic follows the Roofline-guided separation of memory and compute optimizations.*
+ 
+ ## Subtopics
+@@ -134,15 +86,14 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources. [S1, unofficial]
+-*   **Memory Complexity:** Reduced due to low-bit Gaussian-attribute compression and dynamic depth-key compression [S1, unofficial].
+-*   **Measured Performance:** Not given in the sources. [S1, unofficial]
+-*   **Scaling:** Not given in the sources. [S1, unofficial]
+-*   **Strengths:** Reduces dominant global memory traffic in bandwidth-bound stages and increases ILP in compute-bound stages [S1, unofficial].
+-*   **Limitations:** Relies on accurate Roofline characterization; quantization may affect visual quality [S1, unofficial].
+-*   **When to use:** When rendering 3DGS on hardware where memory bandwidth and compute throughput are distinct bottlenecks [S1, unofficial].
+-*   **When not to use:** When hardware bottlenecks are not aligned with the Roofline model's assumptions [S1, unofficial].
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Reduced compared to baseline 3DGS due to low-bit attribute compression and dynamic depth-key compression [S1, unofficial].
++*   **Measured Performance:** Not given in the sources.
++*   **Strengths:** Addresses both memory bandwidth and compute throughput bottlenecks simultaneously. Reduces global memory traffic in front-end stages and increases ILP in rasterization [S1, unofficial].
++*   **Limitations:** Requires hardware-aware optimization (Roofline modeling). Quantization may introduce visual artifacts if not carefully calibrated [S1, unofficial].
++*   **When to use:** When rendering 3DGS at high resolution or with many primitives where memory bandwidth or compute throughput is the bottleneck [S1, unofficial].
++*   **When not to use:** For small-scale scenes where overhead of optimization might outweigh benefits, or on hardware where Roofline characteristics differ significantly from the target deployment [S1, unofficial].
+ 
+ ## Background
+-RoofGS was introduced in the paper "RoofGS: Roofline-Guided End-to-End Acceleration of 3D Gaussian Splatting" [S1, unofficial]. It builds on prior roofline analyses [13, 43, 44] which showed that the rasterization stage of 3DGS is compute-bound [S1, unofficial]. The method organizes the rendering pipeline according to a stage-specific optimization principle: bandwidth-limited stages prioritize reductions in global memory traffic, whereas compute-intensive stages prioritize lower instruction cost and increased instruction-level parallelism (ILP) [S1, unofficial].
++RoofGS was introduced in the paper "RoofGS: Roofline-Guided End-to-End Acceleration of 3D Gaussian Splatting" [S1, unofficial]. It builds on prior roofline analyses [13, 43, 44] which identified the rasterization stage of 3DGS as compute-bound [S1, unofficial]. The method extends these insights by applying a holistic, stage-specific optimization strategy across the entire rendering pipeline, rather than focusing solely on the rasterizer [S1, unofficial].
+ 
+ ## Sources

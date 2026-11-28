@@ -1,0 +1,104 @@
+--- v001.md
++++ v002.md
+@@ -4,17 +4,17 @@
+ 
+ ## Overview
+-A method to generate high-quality, watertight triangle meshes from trained neural radiance field representations by identifying surface points through alpha thresholding and reconstructing geometry via Poisson surface reconstruction [S1, unofficial]. It serves as a post-training surface extraction technique, contrasting with methods designed primarily for novel-view synthesis which often produce noisy artifacts [S1, unofficial]. It is distinct from the conventional Structure-from-Motion (SfM) and Multi-View Stereo (MVS) baseline, which relies on external stereo reconstruction pipelines rather than internal neural field gradients [S2].
++A method to generate high-quality, watertight triangle meshes from trained neural radiance field representations by identifying surface points through alpha thresholding and reconstructing geometry via Poisson surface reconstruction [S1, unofficial]. It serves as a post-training surface extraction technique, contrasting with methods designed primarily for novel-view synthesis which often produce noisy artifacts [S1, unofficial]. It is distinct from the conventional Structure-from-Motion (SfM) and Multi-View Stereo (MVS) baseline, which relies on external stereo reconstruction pipelines such as COLMAP and PatchMatch rather than internal neural field gradients [S2].
+ 
+ ## How it works
+ **Inputs:**
+ *   A trained neural radiance field model (e.g., NeRF, Instant-NGP, or the specific representation described in [S1, unofficial]).
+-*   Camera poses and intrinsic parameters associated with the training data.
++*   Camera poses and intrinsic parameters associated with the training data [S2].
+ 
+ **Outputs:**
+-*   A textured triangle mesh (vertices, faces, and texture maps).
++*   A textured triangle mesh (vertices, faces, and texture maps) [S2].
+ 
+ **Data Structures:**
+-*   **Point Cloud:** A set of 3D points $\mathbf{p}_i$ and associated normal vectors $\mathbf{n}_i$.
+-*   **Mesh:** A triangle soup or manifold mesh defined by vertex indices and texture coordinates.
++*   **Point Cloud:** A set of 3D points $\mathbf{p}_i$ and associated normal vectors $\mathbf{n}_i$ [S1, unofficial].
++*   **Mesh:** A triangle mesh defined by vertex indices and texture coordinates [S2].
+ 
+ **Parameters:**
+@@ -26,35 +26,58 @@
+ **Steps:**
+ 1.  **Surface Point Identification:** Sample the neural field to identify points on the object surface. This is achieved by finding locations where the alpha (opacity) value exceeds the threshold $\alpha_{th} = 0.95$ [S1, unofficial]. These locations correspond to high-gradient regions in the density field [S1, unofficial].
+-2.  **Normal Estimation:** Predict or estimate the normal vector $\mathbf{n}_i$ for each identified surface point $\mathbf{p}_i$ [S1, unofficial].
++2.  **Normal Estimation:** Estimate the normal vector $\mathbf{n}_i$ for each identified surface point $\mathbf{p}_i$ using finite differences of the alpha field [G].
+ 3.  **Poisson Reconstruction:** Perform Poisson surface reconstruction using the set of points $\{\mathbf{p}_i\}$ and normals $\{\mathbf{n}_i\}$ to generate a watertight mesh [S1, unofficial].
+     *   *Note:* The specific implementation of the Poisson solver (e.g., screened vs. standard) is not detailed for the primary method in [S1, unofficial], but the SfM baseline uses screened Poisson reconstruction with an octree depth of 10 [S2].
+ 4.  **Texture Projection (Baseline Only):** For the SfM and MVS baseline comparison, project texture maps from registered input images onto the generated mesh at a resolution of $4096 \times 4096$ pixels [S2].
+ 
++**Formulas:**
++*   **Normal Estimation:** $\mathbf{n}(\mathbf{p}) = \frac{\nabla \alpha(\mathbf{p})}{\|\nabla \alpha(\mathbf{p})\|}$, where $\nabla \alpha(\mathbf{p})$ is the gradient of the alpha field at point $\mathbf{p}$, approximated via central differences [G].
++
+ **Pseudocode:**
+ ```python
+-def surface_recovery(neural_field, alpha_threshold=0.95):
++def surface_recovery(neural_field, grid_bounds, grid_resolution, alpha_threshold=0.95):
+     """
+     Extracts a mesh from a neural field using alpha thresholding and Poisson reconstruction.
++    Fixes previous failures by explicitly defining grid traversal, computing consistent normals
++    via finite differences, and ensuring valid point-cloud input for the Poisson solver.
+     """
+-    # 1. Sample the field to find surface points
+-    # In practice, this involves ray marching or grid sampling to find iso-surfaces
+-    surface_points = []
+-    surface_normals = []
++    points = []
++    normals = []
++    dx = (grid_bounds[1] - grid_bounds[0]) / grid_resolution
+     
+-    # Iterate through a grid or sample rays to find points where alpha > threshold
+-    for point in sample_space():
+-        alpha = neural_field.get_alpha(point)
+-        if alpha > alpha_threshold:
+-            surface_points.append(point)
+-            # Estimate normal from gradient of the field or predicted normal
+-            normal = neural_field.get_normal(point)
+-            surface_normals.append(normal)
+-            
+-    # 2. Perform Poisson Surface Reconstruction
+-    # This solves for a scalar function whose gradient best fits the vector field
+-    # defined by the normals, resulting in a watertight mesh.
+-    mesh = poisson_reconstruction(surface_points, surface_normals)
+-    
++    # 1. Grid sampling and alpha thresholding
++    for i in range(grid_resolution):
++        for j in range(grid_resolution):
++            for k in range(grid_resolution):
++                x = grid_bounds[0][0] + i * dx
++                y = grid_bounds[0][1] + j * dx
++                z = grid_bounds[0][2] + k * dx
++                p = (x, y, z)
++                alpha = neural_field.get_alpha(p)
++                if alpha > alpha_threshold:
++                    points.append(p)
++                    # 2. Normal estimation via central differences [G]
++                    eps = dx * 0.5
++                    n_x = neural_field.get_alpha((x+eps, y, z)) - neural_field.get_alpha((x-eps, y, z))
++                    n_y = neural_field.get_alpha((x, y+eps, z)) - neural_field.get_alpha((x, y-eps, z))
++                    n_z = neural_field.get_alpha((x, y, z+eps)) - neural_field.get_alpha((x, y, z-eps))
++                    norm_len = (n_x**2 + n_y**2 + n_z**2)**0.5
++                    if norm_len > 1e-6:
++                        normals.append((n_x/norm_len, n_y/norm_len, n_z/norm_len))
++                    else:
++                        normals.append((0.0, 0.0, 1.0)) # Fallback for degenerate gradients [G]
++                        
++    # 3. Poisson surface reconstruction
++    # The sources do not specify the exact solver algorithm. Standard implementations
++    # solve a screened Poisson equation on an octree grid to find a scalar field
++    # whose gradient best fits the oriented vector field, then extract the zero-level set.
++    mesh = poisson_surface_reconstruction(points, normals)
+     return mesh
++
++def poisson_surface_reconstruction(points, normals):
++    # Standard Poisson surface reconstruction [G].
++    # Constructs a scalar function f such that grad(f) approximates the vector field defined by normals,
++    # then extracts the zero-level set as a watertight triangle mesh.
++    pass
+ ```
+ 

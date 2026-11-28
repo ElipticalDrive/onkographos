@@ -1,0 +1,108 @@
+--- v002.md
++++ v003.md
+@@ -3,5 +3,5 @@
+ 
+ ## Overview
+-Mip-NeRF RGB-D is a neural scene representation method that reconstructs 3D scenes from multi-view RGB-D data by combining the conical frustum sampling of Mip-NeRF with explicit depth supervision [S1]. It solves the limitations of standard NeRF regarding geometric accuracy and training speed by using depth information for local sampling and geometric loss, reducing training time by 3–5 times compared to standard NeRF [S1]. Unlike DS-NeRF which relies on sparse point clouds and reprojection errors, Mip-NeRF RGB-D uses dense RGB-D frames and explicitly models depth uncertainty to improve photometry and geometry [S1].
++Mip-NeRF RGB-D is a neural scene representation method that reconstructs 3D scenes from multi-view RGB-D data by combining the conical frustum sampling of Mip-NeRF with explicit depth supervision [S1]. It solves the geometric inaccuracy and slow convergence of standard NeRF by using depth information for local sampling and geometric loss, reducing training time by 3–5 times compared to standard NeRF [S1]. Unlike DS-NeRF which relies on sparse point clouds and reprojection errors, Mip-NeRF RGB-D uses dense RGB-D frames and explicitly models depth uncertainty to improve photometry and geometry [S1].
+ 
+ ## How it works
+@@ -16,5 +16,5 @@
+ 
+ **Steps**
+-1.  **Ray to Cone Conversion:** For each pixel, generate a ray $r(t) = o + td$. Replace the ray with a cone generated using the camera center and pixel size to account for the varying area of a pixel with distance [S1].
++1.  **Ray to Cone Conversion:** For each pixel, generate a ray $r(t) = o + td$ [S1]. Replace the ray with a cone generated using the camera center and pixel size to account for the varying area of a pixel with distance [S1].
+ 2.  **Interval Splitting:** Split the cone into $N$ intervals $T_i = [t_i, t_{i+1})$ [S1].
+ 3.  **Compute Frustum Statistics:** For each interval, compute the mean $\mu$ and covariance $\Sigma$ of the corresponding conical frustum [S1].
+@@ -22,5 +22,5 @@
+ 5.  **Network Query:** Query the MLP $F_\Theta$ with the integrated positional encoding to output volume density $\tau$ and color $C$ [S1].
+ 6.  **Volume Rendering:** Calculate the pixel color $\hat{C}(r)$ and depth $\hat{D}(r)$ using volume rendering over the conical frustum segments [S1].
+-7.  **Local Sampling (Optimization):** Use depth information for local sampling to reduce the number of samples along the ray and replace the coarse NeRF network [S1].
++7.  **Local Sampling:** Use depth information for local sampling to reduce the number of samples along the ray and replace the coarse NeRF network [S1].
+ 8.  **Uncertainty Modeling:** Incorporate depth uncertainty into a multivariate Gaussian method to query the MLP [S1].
+ 9.  **Optimization:** Optimize network parameters by minimizing a joint loss function combining photometric and geometric losses [S1].
+@@ -55,5 +55,5 @@
+ import math
+ 
+-def mip_nerf_rgbd_forward(camera_center, ray_direction, pixel_size, near_bound, far_bound, num_intervals, mlp, depth_data):
++def mip_nerf_rgbd_forward(camera_center, ray_direction, pixel_size, near_bound, far_bound, num_intervals, L, mlp, depth_data):
+     """
+     Forward pass for Mip-NeRF RGB-D.
+@@ -66,42 +66,39 @@
+         far_bound: float, far clipping plane
+         num_intervals: int, N
++        L: int, number of frequency bands
+         mlp: function, F_Theta taking integrated positional encoding
+         depth_data: dict with keys 'color', 'depth', 'variance' for the current ray's pixel
+         
+     Returns:
+-        predicted_color: float, C_hat(r)
++        predicted_color: list of 3 floats, C_hat(r)
+         predicted_depth: float, D_hat(r)
+         photometric_loss: float, l_p (per-ray)
+         geometric_loss: float, l_g (per-ray)
+     """
+-    # 1. Stratified sampling along the ray
+-    t_values = []
+-    for i in range(num_intervals + 1):
+-        t = near_bound + (far_bound - near_bound) * (i + (1 if i < num_intervals else 0)) / num_intervals
+-        t_values.append(t)
++    # 1. Stratified sampling along the ray [G]
++    t_values = [near_bound + (far_bound - near_bound) * (i + 0.5) / num_intervals for i in range(num_intervals)]
+ 
+     intervals = []
+     for i in range(num_intervals):
+         t_i = t_values[i]
+-        t_i_plus_1 = t_values[i+1]
++        t_i_plus_1 = t_values[i+1] if i < num_intervals - 1 else far_bound
+         delta = t_i_plus_1 - t_i
+         mu = (t_i + t_i_plus_1) / 2.0
+-        # Conical frustum variance along ray direction [G]
++        # Covariance computation for conical frustum [G]
+         sigma_sq = (delta ** 2) / 12.0 + (pixel_size ** 2) / 4.0
+ 
+         # Integrated positional encoding
+         encoding = []
+-        for l in range(10): # L=10 is standard for Mip-NeRF [G]
+-            sin_term = math.sin(2**l * mu) * math.exp(-2**(l-1) * sigma_sq)
+-            cos_term = math.cos(2**l * mu) * math.exp(-2**(l-1) * sigma_sq)
+-            encoding.extend([sin_term, cos_term])
++        for l in range(L):
++            exp_term = math.exp(-2**(l-1) * sigma_sq)
++            encoding.extend([math.sin(2**l * mu) * exp_term, math.cos(2**l * mu) * exp_term])
+ 
+         intervals.append({
+             'mu': mu, 'sigma_sq': sigma_sq, 'encoding': encoding,
+-            't_i': t_i, 't_i_plus_1': t_i_plus_1, 'delta': delta
++            't_i': t_i, 'delta': delta
+         })
+ 
+     # 2. Volume rendering
+-    predicted_color = 0.0
++    predicted_color = [0.0, 0.0, 0.0]
+     predicted_depth_num = 0.0
+     predicted_depth_den = 0.0
+@@ -114,5 +111,8 @@
+         accumulated_opacity *= (1.0 - alpha)
+ 
+-        predicted_color += weight * color
++        # Standard color accumulation [G]
++        for c in range(3):
++            predicted_color[c] += weight * color[c]
++
+         # Evidence formula for depth: D_hat = sum(delta_i * t_i * alpha_i) / sum(alpha_i)
+         predicted_depth_num += interval['delta'] * interval['t_i'] * alpha
+@@ -126,5 +126,5 @@
+     gt_variance = depth_data['variance']
+ 
+-    photometric_loss = abs(predicted_color - gt_color)
++    photometric_loss = sum(abs(predicted_color[c] - gt_color[c]) for c in range(3))
+     geometric_loss = abs(predicted_depth - gt_depth) / gt_variance if gt_variance > 0 else abs(predicted_depth - gt_depth)
+ 
+@@ -142,5 +142,5 @@
+                 pred_color, pred_depth, l_p, l_g = mip_nerf_rgbd_forward(
+                     ray.camera_center, ray.direction, ray.pixel_size,
+-                    ray.near, ray.far, ray.num_intervals, mlp, ray.depth_data
++                    ray.near, ray.far, ray.num_intervals, ray.L, mlp, ray.depth_data
+                 )
+                 total_loss += l_p + l_g

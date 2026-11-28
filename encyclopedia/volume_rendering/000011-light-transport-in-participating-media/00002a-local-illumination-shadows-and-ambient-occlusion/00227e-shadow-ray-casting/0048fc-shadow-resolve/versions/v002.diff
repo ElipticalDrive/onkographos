@@ -1,0 +1,264 @@
+--- v001.md
++++ v002.md
+@@ -3,77 +3,203 @@
+ 
+ ## Overview
+-Shadow Resolve aggregates discrete shadow ray casting results into a continuous visibility value and penumbra width for spatial denoising [S1, unofficial]. It differs from sibling methods by operating as a post-processing or finalization step that converts binary hit/miss data from multiple samples into soft shadow metrics, rather than performing the ray traversal itself [S1, unofficial].
++Shadow Resolve aggregates discrete shadow ray casting results into a continuous visibility value and an estimated penumbra width for each pixel [S1, unofficial]. It solves the problem of converting hard, per-sample occlusion hits from [Shadow Ray Casting](2796-shadow-ray-casting.md) into soft shadows suitable for spatial denoising [S1, unofficial]. Unlike sibling methods that compute visibility per-sample or use lookup tables, Shadow Resolve performs a post-processing reduction step that combines multiple samples into a single visibility scalar and a geometric penumbra metric [S1, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** `gShadowResults`, a `StructuredBuffer<TraceResult>` at register `t6` [S1, unofficial]. Each `TraceResult` contains `hit` (uint) and `distance` (float) [S1, unofficial].
+-*   **Output:** `gShadowVisibility`, an `RWStructuredBuffer<float>` at register `u2` [S1, unofficial]. `gShadowPenumbraMeters`, an `RWStructuredBuffer<float>` at register `u3` [S1, unofficial].
+-*   **Constants:** `cbuffer ShadowResolveConstants` at register `b1` containing `uint gShadowPixelCount` and three padding uints [S1, unofficial].
+-
+-**Data Structures:**
+-*   `TraceResult`: Contains `hit` (uint, 1 if occluded, 0 otherwise) and `distance` (float, distance to blocker) [S1, unofficial].
+-*   `kMaximumShadowSamples`: Constant value 16 [S1, unofficial].
+-
+-**Steps:**
+-1.  Initialize `gShadowPenumbraMeters[pixelIndex] = 0.0F` [S1, unofficial].
+-2.  Check `gShadowMode`. If `kShadowOff`, set `gShadowVisibility[pixelIndex] = 1.0F` and return [S1, unofficial].
+-3.  If `gShadowMode` is `kShadowHard` or `kShadowContact`:
+-    *   Compute `baseIndex = pixelIndex * kMaximumShadowSamples` [S1, unofficial].
+-    *   Fetch `result = gShadowResults[baseIndex].hit` [S1, unofficial].
+-    *   Set `gShadowVisibility[pixelIndex] = VisibilityFromOcclusion(float(result))` [S1, unofficial].
++### Inputs and Outputs
++**Inputs:**
++*   `gShadowResults`: A `StructuredBuffer<TraceResult>` at register `t6` containing the raw results of shadow ray casts [S1, unofficial].
++    *   Layout: Array of `TraceResult` structs. Each `TraceResult` contains:
++        *   `hit`: `uint` (1 if occluded, 0 if clear).
++        *   `distance`: `float` (distance to the occluder along the ray).
++    *   Stride: `pixelIndex * kMaximumShadowSamples` to `pixelIndex * kMaximumShadowSamples + kMaximumShadowSamples - 1`.
++*   `gShadowMode`: `uint` constant indicating the shadowing mode [S1, unofficial].
++    *   `kShadowOff`: No shadows.
++    *   `kShadowHard`: Hard shadows.
++    *   `kShadowContact`: Contact shadows (treated similarly to hard in this implementation).
++    *   `kShadowHybrid`: Soft shadows with a contact shadow sample.
++*   `gShadowSamples`: `uint` constant specifying the number of soft samples [S1, unofficial].
++*   `gShadowStrength`: `float` constant controlling the intensity of the shadow [S1, unofficial].
++*   `gShadowSoftnessRadians`: `float` constant defining the angular size of the light source for penumbra calculation [S1, unofficial].
++*   `VoxelUnitsToMeters`: A conversion factor from voxel units to meters [S1, unofficial].
++
++**Outputs:**
++*   `gShadowVisibility`: An `RWStructuredBuffer<float>` at register `u2` storing the final visibility value per pixel [S1, unofficial].
++*   `gShadowPenumbraMeters`: An `RWStructuredBuffer<float>` at register `u3` storing the estimated penumbra width in meters per pixel [S1, unofficial].
++
++**Constants:**
++*   `kMaximumShadowSamples`: `uint`, value 16 [S1, unofficial].
++*   `cbuffer ShadowResolveConstants` at register `b1` containing `uint gShadowPixelCount` and three padding uints [S1, unofficial].
++
++### Data Structures
++The input buffer `gShadowResults` is indexed by `baseIndex = pixelIndex * kMaximumShadowSamples`. The buffer layout is a flat array where each pixel's samples are contiguous.
++
++### Steps
++1.  **Initialization:** Set `gShadowPenumbraMeters[pixelIndex] = 0.0F` [S1, unofficial].
++2.  **Mode Check (Off):** If `gShadowMode == kShadowOff`, set `gShadowVisibility[pixelIndex] = 1.0F` and return [S1, unofficial].
++3.  **Mode Check (Hard/Contact):** If `gShadowMode == kShadowHard` or `gShadowMode == kShadowContact`:
++    *   Fetch the first sample: `result = gShadowResults[baseIndex]` [S1, unofficial].
++    *   Compute visibility: `gShadowVisibility[pixelIndex] = VisibilityFromOcclusion(float(result.hit))` [S1, unofficial].
+     *   Return [S1, unofficial].
+-4.  For soft/hybrid modes:
+-    *   Set `softOffset = 1` if `kShadowHybrid`, else `0` [S1, unofficial].
+-    *   Compute `softSamples = min(max(gShadowSamples, 1u), kMaximumShadowSamples - softOffset)` [S1, unofficial].
++4.  **Soft/Hybrid Setup:**
++    *   Determine `softOffset`: `1` if `gShadowMode == kShadowHybrid`, else `0` [S1, unofficial].
++    *   Calculate `softSamples`: `min(max(gShadowSamples, 1u), kMaximumShadowSamples - softOffset)` [S1, unofficial].
+     *   Initialize `occluded = 0u` and `blockerDistance = 0.0F` [S1, unofficial].
+-    *   Initialize `softOcclusion = 0.0F` [G] (implied by usage in step 5).
+-5.  Loop `sample` from `0` to `softSamples - 1`:
++    *   Initialize `softOcclusion = 0.0F` [G] (implicit in the accumulation logic below).
++5.  **Sample Loop:** Loop `sample` from `0` to `softSamples - 1`:
+     *   Fetch `result = gShadowResults[baseIndex + softOffset + sample]` [S1, unofficial].
+     *   Increment `occluded` by `result.hit` [S1, unofficial].
+     *   If `result.hit != 0u`, add `result.distance` to `blockerDistance` [S1, unofficial].
+-6.  If `gShadowMode == kShadowHybrid`:
+-    *   Fetch `contactResult = gShadowResults[baseIndex].hit` [S1, unofficial].
+-    *   Update `softOcclusion = max(softOcclusion, float(contactResult))` [S1, unofficial].
+-7.  Compute `softOcclusion = occluded / softSamples` [S1, unofficial].
+-8.  Compute `gShadowVisibility[pixelIndex] = VisibilityFromOcclusion(softOcclusion)` [S1, unofficial].
+-9.  If `occluded > 0`:
+-    *   Compute `penumbraMeters = 2.0 * tan(gShadowSoftnessRadians) * VoxelUnitsToMeters(blockerDistance / occluded)` [S1, unofficial].
+-    *   Set `gShadowPenumbraMeters[pixelIndex] = penumbraMeters` [S1, unofficial].
+-
+-**Formulas:**
+-*   Soft Occlusion:
++6.  **Hybrid Contact Shadow:** If `gShadowMode == kShadowHybrid`:
++    *   Fetch `contactResult = gShadowResults[baseIndex]` [S1, unofficial].
++    *   Update `softOcclusion = max(softOcclusion, float(contactResult.hit))` [S1, unofficial].
++7.  **Final Visibility Calculation:**
++    *   Compute `softOcclusion` ratio: `softOcclusion = float(occluded) / float(softSamples)` [S1, unofficial].
++    *   Compute `gShadowVisibility[pixelIndex] = VisibilityFromOcclusion(softOcclusion)` [S1, unofficial].
++8.  **Penumbra Calculation:**
++    *   If `occluded > 0`:
++        *   Compute average blocker distance: `avgBlockerDistance = blockerDistance / float(occluded)` [S1, unofficial].
++        *   Compute `gShadowPenumbraMeters[pixelIndex] = 2.0F * tan(gShadowSoftnessRadians) * VoxelUnitsToMeters(avgBlockerDistance)` [S1, unofficial].
++
++### Formulas
++*   **Soft Occlusion Ratio:**
+     $$ softOcclusion = \frac{occluded}{softSamples} $$
+-    where `occluded` is the count of hit samples and `softSamples` is the number of soft samples processed [S1, unofficial].
+-
+-*   Penumbra Width:
++    Where `occluded` is the count of hit samples and `softSamples` is the number of soft samples processed [S1, unofficial].
++
++*   **Penumbra Width (Meters):**
+     $$ penumbraMeters = 2.0 \times \tan(gShadowSoftnessRadians) \times VoxelUnitsToMeters\left(\frac{blockerDistance}{occluded}\right) $$
+-    Calculated only if `occluded > 0` [S1, unofficial]. `blockerDistance` is the sum of hit distances, `occluded` is the count of hits [S1, unofficial].
+-
+-*   Visibility from Occlusion:
++    Calculated only if `occluded > 0` [S1, unofficial].
++
++*   **Visibility from Occlusion:**
+     $$ VisibilityFromOcclusion(occlusion) = \text{saturate}(1.0 - \text{saturate}(gShadowStrength) \times \text{saturate}(occlusion)) $$
+-    [S1, unofficial].
+-
+-**Parameters:**
++    Where `saturate(x)` clamps `x` to `[0.0, 1.0]` [S1, unofficial].
++
++### Parameters
+ *   `kMaximumShadowSamples`: 16 [S1, unofficial].
+-*   `gShadowSamples`: Number of soft samples per pixel [S1, unofficial].
+-*   `gShadowSoftnessRadians`: Softness angle in radians [S1, unofficial].
+-*   `gShadowStrength`: Shadow intensity factor [S1, unofficial].
+-*   `VoxelUnitsToMeters`: Conversion factor from voxel units to meters [S1, unofficial].
+-
+-**Edge Cases and Pitfalls:**
+-*   Division by zero: `blockerDistance / occluded` is guarded by `if (occluded > 0)` [S1, unofficial].
+-*   `softSamples` calculation ensures at least 1 sample is used if `gShadowSamples` is 0, but clamped by `kMaximumShadowSamples` [S1, unofficial].
+-*   Hybrid mode requires careful ordering of contact shadow sample vs soft samples to ensure `softOcclusion` correctly incorporates the hard contact shadow [S1, unofficial].
++*   `gShadowSamples`: User-defined, capped by `kMaximumShadowSamples - softOffset` [S1, unofficial].
++*   `gShadowStrength`: User-defined float [S1, unofficial].
++*   `gShadowSoftnessRadians`: User-defined float [S1, unofficial].
++
++### Edge Cases and Pitfalls
++*   **Division by Zero:** The penumbra calculation divides by `occluded`. The algorithm explicitly checks `if (occluded > 0)` before computing penumbra [S1, unofficial].
++*   **Hybrid Mode Indexing:** In `kShadowHybrid` mode, the contact shadow sample is at `baseIndex`, while soft samples start at `baseIndex + 1`. The `softOffset` variable handles this offset correctly [S1, unofficial].
++*   **Sample Count Capping:** `softSamples` is capped at `kMaximumShadowSamples - softOffset` to prevent buffer overruns when `gShadowSamples` exceeds the maximum [S1, unofficial].
++
++### Pseudocode
++```python
++def shadow_resolve(pixel_index, g_shadow_results, g_shadow_mode, g_shadow_samples,
++                   g_shadow_strength, g_shadow_softness_radians, voxel_units_to_meters):
++    """
++    Resolves shadow ray results into visibility and penumbra.
++    
++    Args:
++        pixel_index (int): The current pixel index.
++        g_shadow_results (list): List of TraceResult dicts with 'hit' (uint) and 'distance' (float).
++        g_shadow_mode (int): Shadow mode (kShadowOff, kShadowHard, kShadowContact, kShadowHybrid).
++        g_shadow_samples (int): Number of soft samples requested.
++        g_shadow_strength (float): Shadow intensity.
++        g_shadow_softness_radians (float): Light angular size.
++        voxel_units_to_meters (float): Conversion factor.
++        
++    Returns:
++        tuple: (visibility, penumbra_meters)
++    """
++    k_maximum_shadow_samples = 16
++    k_shadow_off = 0
++    k_shadow_hard = 1
++    k_shadow_contact = 2
++    k_shadow_hybrid = 3
++    
++    base_index = pixel_index * k_maximum_shadow_samples
++    
++    # Step 1: Initialize output
++    penumbra_meters = 0.0
++    
++    # Step 2: Check for Off mode
++    if g_shadow_mode == k_shadow_off:
++        return 1.0, penumbra_meters
++    
++    # Step 3: Check for Hard/Contact mode
++    if g_shadow_mode in (k_shadow_hard, k_shadow_contact):
++        result = g_shadow_results[base_index]
++        visibility = visibility_from_occlusion(float(result['hit']), g_shadow_strength)
++        return visibility, penumbra_meters
++    
++    # Step 4: Soft/Hybrid setup
++    soft_offset = 1 if g_shadow_mode == k_shadow_hybrid else 0
++    soft_samples = min(max(g_shadow_samples, 1), k_maximum_shadow_samples - soft_offset)
++    
++    occluded = 0
++    blocker_distance = 0.0
++    soft_occlusion = 0.0
++    
++    # Step 5: Loop over soft samples
++    for sample in range(soft_samples):
++        result = g_shadow_results[base_index + soft_offset + sample]
++        occluded += result['hit']
++        if result['hit'] != 0:
++            blocker_distance += result['distance']
++            
++    # Step 6: Hybrid contact shadow
++    if g_shadow_mode == k_shadow_hybrid:
++        contact_result = g_shadow_results[base_index]
++        soft_occlusion = max(soft_occlusion, float(contact_result['hit']))
++        
++    # Step 7: Compute final visibility
++    soft_occlusion_ratio = float(occluded) / float(soft_samples)
++    visibility = visibility_from_occlusion(soft_occlusion_ratio, g_shadow_strength)
++    
++    # Step 8: Compute penumbra
++    if occluded > 0:
++        avg_blocker_distance = blocker_distance / float(occluded)
++        penumbra_meters = 2.0 * math.tan(g_shadow_softness_radians) * voxel_units_to_meters * avg_blocker_distance
++        
++    return visibility, penumbra_meters
++
++def visibility_from_occlusion(occlusion, strength):
++    """
++    Computes visibility from occlusion ratio.
++    """
++    # saturate function
++    occlusion = max(0.0, min(1.0, occlusion))
++    strength = max(0.0, min(1.0, strength))
++    
++    return max(0.0, min(1.0, 1.0 - strength * occlusion))
++```
++
++## Subtopics
++
++### Ambient Occlusion via Shadow Rays
++Computes indirect illumination using hemisphere sampling. Chooses this when global illumination approximation is needed. [Link](878-ambient-occlusion-via-shadow-rays.md)
++
++### Direct Illumination with Shadow Rays
++Computes direct light contribution. Chooses this for primary lighting calculations. [Link](2011-direct-illumination-with-shadow-rays.md)
++
++### Lookup Table Shadow Rendering
++Uses precomputed tables for shadow visibility. Chooses this for performance-critical applications with limited shadow variations. [Link](3588-lookup-table-shadow-rendering.md)
++
++### Recursive Ray Tracing
++Handles multiple bounces of light. Chooses this for full global illumination. [Link](5600-recursive-ray-tracing.md)
++
++### Soft Shadows via Area Lights
++Computes soft shadows using area light sampling. Chooses this for physically accurate soft shadows without post-processing. [Link](7320-soft-shadows-via-area-lights.md)
++
++### Bounded Directional Shadow Ray Generation
++Generates shadow rays within bounds. Chooses this for directional lights with specific spatial constraints. [Link](12387-bounded-directional-shadow-ray-generation.md)
++
++### Shadow Volume Atmospheric Scattering
++Integrates shadow volumes with atmospheric effects. Chooses this for large-scale atmospheric rendering. [Link](13668-shadow-volume-atmospheric-scattering.md)
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** O(N) where N is the number of shadow samples per pixel. The loop runs `softSamples` times.
+-*   **Memory Complexity:** O(1) per pixel for the resolve step, assuming input buffers are already allocated.
+-*   **Strengths:** Provides continuous visibility and penumbra data suitable for spatial denoising [S1, unofficial]. Supports hard, soft, and hybrid shadow modes [S1, unofficial].
+-*   **Limitations:** Relies on pre-cast shadow rays; does not perform ray traversal itself [S1, unofficial]. Precision depends on the accuracy of `TraceResult` distances [S1, unofficial].
+-*   **When to use:** When soft shadows are required and spatial denoising is planned [S1, unofficial].
+-*   **When not to use:** When hard shadows are sufficient and performance is critical, as hard mode skips the soft sample loop [S1, unofficial].
++*   **Time Complexity:** $O(N)$ where $N$ is the number of shadow samples per pixel. The reduction is a simple linear pass over the samples [S1, unofficial].
++*   **Memory Complexity:** $O(1)$ per pixel for the reduction buffers (`gShadowVisibility`, `gShadowPenumbraMeters`) [S1, unofficial].
++*   **Measured Performance:** Not given in the sources.
++*   **Scaling:** Scales linearly with the number of shadow samples. Performance is limited by memory bandwidth for reading `gShadowResults` [S1, unofficial].
++*   **Strengths:** Simple to implement, efficient reduction, provides penumbra data for denoising [S1, unofficial].
++*   **Limitations:** Relies on pre-cast shadow rays, does not compute shadows itself [S1, unofficial].
++*   **When to Use:** When shadow rays have already been cast and a soft visibility value is needed for shading or denoising [S1, unofficial].
++*   **When Not to Use:** When real-time shadow ray casting is required or when penumbra data is not needed [S1, unofficial].
+ 
+ ## Background
+-Shadow Resolve is part of the destructible voxel engine implementation by HiroSakuraba [S1, unofficial]. It is designed to work with the Shadow Ray Casting family of methods, specifically aggregating results from multiple shadow rays to produce soft shadows [S1, unofficial].
++Shadow Resolve is part of the destructible voxel engine developed by HiroSakuraba [S1, unofficial]. It is designed to work with the engine's voxel-based shadow casting system, providing a bridge between raw ray cast results and the final shading pipeline [S1, unofficial].
+ 
+ ## Sources

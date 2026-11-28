@@ -1,0 +1,143 @@
+# Strivec
+
+Also called: Sparse Tri-Vector Radiance Fields
+
+## Overview
+Strivec is a neural scene representation that models a 3D radiance field using sparsely distributed, compactly factorized local tensor feature grids [S1]. It solves the inefficiency of global tensor representations by exploiting scene sparsity directly, avoiding the modeling of empty space, while maintaining local smoothness and coherence through tensor factorization [S1]. Unlike its parent [TensoRF](3026-tensorf.md), which uses a global tensor with vector-matrix decomposition, Strivec employs a cloud of local tensors decomposed via Canonical Polyadic (CP) decomposition into triple vectors, enabling high-quality reconstruction with significantly fewer parameters [S1].
+
+## How it works
+**Inputs:** A set of calibrated images; coarse scene geometry (pre-acquired via fast RGB$\sigma$ volume reconstruction like DVGO or multi-view stereo like Point-NeRF) [S1].
+**Outputs:** A continuous radiance field defined by volume density $\sigma$ and view-dependent color $c$ at any 3D location [S1].
+
+**Data Structures:**
+1.  **Tensor Cloud ($\mathcal{T}$):** A set of $N$ local tri-vector tensors $\mathcal{T} = \{\tau_n \mid n = 1, \dots, N\}$ [S1].
+2.  **Local Tensor ($\tau$):** Each tensor $\tau$ is associated with a center position $\mathbf{p}$ and covers a local cuboid space $\omega$ with edge length $l$ [S1].
+3.  **Tensor Components:** Each local tensor $\tau$ is factorized into $R$ rank-1 components using CP decomposition [S1].
+    *   **Density Tensor ($\mathcal{G}^\sigma$):** A 3D tensor of shape $I \times J \times K$ representing the density grid [S1].
+    *   **Appearance Tensor ($\mathcal{G}^c$):** A 4D tensor of shape $I \times J \times K \times P$ representing the appearance grid, where $P$ is the number of appearance channels (lower dimension than spatial modes) [S1].
+4.  **Tri-Vector Factors:** For a tensor of dimension $M$, the CP decomposition yields vectors $\mathbf{v}_r^0, \dots, \mathbf{v}_r^M$ for each rank $r$ [S1].
+
+**Parameters:**
+*   $N$: Total number of local tensors.
+*   $M$: Number of nearest tensors selected to cover an arbitrary location $\chi$ [S1].
+*   $R$: Number of rank-1 components (CP rank) in the decomposition [S1].
+*   $l$: Edge length of the local cuboid space $\omega$ [S1].
+*   $\psi$: A small Multi-Layer Perceptron (MLP) used to regress color [S1].
+
+**Algorithm:**
+
+1.  **Pre-acquisition:** Obtain coarse scene geometry using a fast method (e.g., DVGO or Point-NeRF) [S1].
+2.  **Distribution:** Distribute local tensors $\tau_n$ around the actual scene surface based on the coarse geometry, defining the radiance field domain $\Omega = \bigcup_{n=1}^N \omega_n$ [S1].
+3.  **Query:** For a query point $\chi \in \Omega$:
+    a. Identify the set of $M$ nearest tensors $\{\tau_{n_1}, \dots, \tau_{n_M}\}$ that cover or are nearest to $\chi$ [S1].
+    b. For each selected tensor $\tau$, extract density features $\mathcal{G}^\sigma(\chi)$ using the CP-decomposed tri-vectors [S1].
+    c. Aggregate the extracted density features from the $M$ tensors [S1].
+4.  **Regression:**
+    a. Compute volume density $\sigma_\chi$ by aggregating density features: $\sigma_\chi = A_\sigma(\{\mathcal{G}^\sigma(\chi)\})$ [S1].
+    b. Compute view-dependent color $c_\chi$ by passing the aggregated density features and viewing direction $\mathbf{d}$ through the MLP $\psi$: $c_\chi = \psi(A_\sigma(\{\mathcal{G}^\sigma(\chi)\}), \mathbf{d})$ [S1].
+
+**CP Decomposition Formula:**
+Each local tensor $\tau \in \mathbb{R}^{I_1 \times I_2 \times \dots \times I_M}$ is factorized as [S1]:
+$$ \tau = \sum_{r=1}^R \lambda_r \mathbf{v}_r^0 \otimes \mathbf{v}_r^1 \otimes \dots \otimes \mathbf{v}_r^M $$
+where $\otimes$ denotes the outer product, and the weighting factor $\lambda_r$ is absorbed into the vectors $\mathbf{v}_r^k$ [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def strivec_query(chi, d, tensor_cloud, M, psi_mlp):
+    """
+    Query the Strivec radiance field at location chi.
+    
+    Args:
+        chi: 3D coordinate (x, y, z)
+        d: viewing direction vector
+        tensor_cloud: List of N local tensors. Each tensor is a dict with keys:
+            'p': center position (3,)
+            'l': edge length (float)
+            'v_sigma': Density tri-vectors, list of 3 arrays of shape (dim, R)
+            'R': CP rank
+        M: Number of nearest tensors to select
+        psi_mlp: MLP function taking (aggregated_density, direction) -> color
+        
+    Returns:
+        sigma: Volume density
+        c: View-dependent color
+    """
+    if M <= 0 or len(tensor_cloud) == 0:
+        return 0.0, np.zeros_like(d)
+
+    # 1. Select M nearest tensors
+    centers = np.array([tau['p'] for tau in tensor_cloud])
+    distances = np.linalg.norm(centers - chi, axis=1)
+    nearest_indices = np.argsort(distances)[:M]
+    selected_tensors = [tensor_cloud[i] for i in nearest_indices]
+
+    # 2. Extract and aggregate density features
+    density_values = []
+    for tau in selected_tensors:
+        v0, v1, v2 = tau['v_sigma']
+        # Map global chi to local [0, 1] coordinates within the cuboid
+        local_coords = (chi - (tau['p'] - tau['l'] / 2.0)) / tau['l']
+        local_coords = np.clip(local_coords, 0.0, 1.0)
+        
+        # Evaluate CP tensor at local_coords
+        val = evaluate_cp_tensor(local_coords, v0, v1, v2)
+        density_values.append(val)
+
+    # Aggregate density features (A_sigma)
+    agg_density = np.mean(density_values, axis=0)
+
+    # 3. Regress properties
+    sigma = agg_density
+    color = psi_mlp(agg_density, d)
+
+    return sigma, color
+
+def evaluate_cp_tensor(coords, v0, v1, v2):
+    """
+    Evaluate a CP-decomposed tensor at normalized coordinates [0, 1].
+    """
+    R = v0.shape[1]
+    total = 0.0
+    for r in range(R):
+        val0 = interpolate_1d(v0[:, r], coords[0])
+        val1 = interpolate_1d(v1[:, r], coords[1])
+        val2 = interpolate_1d(v2[:, r], coords[2])
+        total += val0 * val1 * val2
+    return total
+
+def interpolate_1d(vector, coord):
+    """
+    Linear interpolation of a 1D vector at a normalized coordinate [0, 1].
+    """
+    size = len(vector)
+    idx = coord * (size - 1)
+    i = int(np.floor(idx))
+    j = int(np.ceil(idx))
+    i = np.clip(i, 0, size - 1)
+    j = np.clip(j, 0, size - 1)
+    w = idx - i
+    return (1.0 - w) * vector[i] + w * vector[j]
+```
+
+**Edge Cases and Pitfalls:**
+*   **Empty Space:** If $\chi$ is not covered by any tensor, the nearest neighbor selection handles distances gracefully [G]. The sources note that tensors are distributed around the actual scene surface to avoid empty space [S1].
+*   **Precision:** CP decomposition involves sums of outer products; numerical stability should be considered when $R$ is large, though Strivec uses compact factors [S1, G].
+*   **Boundary Conditions:** Interpolation at the boundaries of the local cuboid $\omega$ must be handled correctly to avoid discontinuities between adjacent tensors [G].
+
+## Operating characteristics
+*   **Time Complexity:** Query time depends on $M$ (number of nearest tensors) and $R$ (CP rank) [G]. For each query, $M$ tensors are evaluated, each requiring $O(R \cdot \text{dim})$ operations for interpolation and summation [G].
+*   **Memory Complexity:** Memory usage is proportional to $N \cdot R \cdot (\text{spatial dims} + \text{appearance dims})$ [G]. Since $N$ is sparse and $R$ is small due to local compactness, memory usage is significantly lower than global tensor methods [S1].
+*   **Performance:** Strivec achieves state-of-the-art rendering quality on synthetic and real datasets, outperforming TensoRF and Instant-NGP while using significantly fewer model parameters [S1].
+*   **Strengths:** Efficient scene modeling, compact representation, exploitation of sparsity and local coherence [S1].
+*   **Limitations:** Requires pre-acquisition of coarse geometry, which adds an initial processing step [S1].
+
+## Background
+Strivec was proposed by Quankai Gao, Qiangeng Xu, Hao Su, Ulrich Neumann, and Zexiang Xu from USC, UC San Diego, and Adobe Research [S1]. It was published in ICCV 2023 [S1]. The method builds on the tensor decomposition principles of TensoRF [S1] but adapts them to a sparse, local setting. It draws inspiration from both global tensor representations (TensoRF, Instant-NGP) and local representations (Plenoxels, Point-NeRF), aiming to combine the best of both worlds [S1].
+
+## Sources
+[S1] Strivec: Sparse Tri-Vector Radiance Fields, https://doi.org/10.1109/iccv51070.2023.01611, fetched 2026-10-26

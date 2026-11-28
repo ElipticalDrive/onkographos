@@ -1,0 +1,140 @@
+# Mask Compression Pipeline
+
+Also called: Learnable Mask Compression, Mask Encoding Pipeline
+
+## Overview
+The Mask Compression Pipeline is a multi-stage encoding strategy designed to minimize the storage footprint of binarized learnable masks used in neural field representations (such as TensoRF and TriPlane) [S1, S2]. It solves the problem of high memory consumption caused by storing sparse binary masks by exploiting their statistical properties (high sparsity) through 8-bit casting, Run-Length Encoding (RLE), and Huffman coding [S1]. It distinguishes itself from general volume compression methods by operating specifically on the mask data structure rather than the volumetric coefficients themselves, and by utilizing level-wise separation to handle the varying sparsity patterns across different Discrete Wavelet Transform (DWT) decomposition levels [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A binarized learnable mask $M$ (values 0 or 1) derived from a trained neural field model. The mask may be 2D (for plane-based representations) or 3D, depending on the underlying architecture [S1, S2].
+*   **Output:** A compressed bitstream representing the mask [S1].
+
+**Data Structures:**
+*   **Mask ($M$):** A binary array where $M_{i,j,k} \in \{0, 1\}$. In DWT-based methods, the mask is associated with specific subbands (LL, LH, HL, HH) at various decomposition levels [S1, S2].
+*   **RLE Stream:** A sequence of pairs $(value, count)$ representing consecutive identical elements [S1].
+
+**Parameters:**
+*   $\lambda_m$: The regularization weight applied during training to control mask sparsity. Lower values yield higher sparsity and smaller compressed sizes. Typical tested values are $1e-10$, $5e-11$, and $2.5e-11$ [S1].
+
+**Steps:**
+1.  **Level-wise Separation:** Decompose the mask according to the DWT hierarchy and separate it into subbands corresponding to each DWT level [S1]. For the final DWT level, treat the upper-left part (LL) and the remaining three parts (LH, HL, HH, precincts) separately due to differing zero counts [S1].
+2.  **8-bit Casting:** Pack the binarized mask values into groups of 8 bits before RLE [S1]. This assumes most elements are zeros and shortens the RLE code length (e.g., 1000 zeros become `(0, 125)` instead of three `(0, 255)` and one `(0, 235)`) [S1].
+3.  **Scanning Order:** Flatten the mask blocks into 1D streams using a scanning order (zigzag, Morton, spiral, or no scan) before compression [S1]. Scanning order does not noticeably affect output size [S1].
+4.  **Run-Length Encoding (RLE):** Apply RLE to the binarized mask, encoding repeating numbers as a pair of the number and its count [S1].
+5.  **Huffman Encoding:** Apply Huffman encoding to the RLE output [S1]. Adaptive arithmetic coding was evaluated but discarded due to higher computational cost and no meaningful size improvement [S1]. This maps high-probability values to shorter bit lengths [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compress_mask_pipeline(mask_2d: list[list[int]], levels: int) -> bytes:
+    """
+    Compress a binarized learnable mask using the Mask Compression Pipeline.
+    """
+    # Step 1: Level-wise separation
+    # Implementation depends on the specific DWT algorithm used.
+    # Not given in the sources.
+    subbands = decompose_mask_into_subbands(mask_2d, levels)
+    
+    compressed_chunks = []
+    for subband in subbands:
+        # Step 2: 8-bit casting
+        packed = pack_8bit(subband)
+        
+        # Step 3: Scanning order (optional, negligible impact)
+        flat = flatten_stream(packed, order='zigzag')
+        
+        # Step 4: Run-Length Encoding
+        rle = run_length_encode(flat)
+        
+        # Step 5: Huffman Encoding
+        # Standard Huffman encoding: build frequency table, construct tree, assign codes, encode bits.
+        # Not given in the sources.
+        huffman_bits = huffman_encode(rle)
+        
+        compressed_chunks.append(huffman_bits)
+        
+    return b''.join(compressed_chunks)
+
+def decompose_mask_into_subbands(mask: list[list[int]], levels: int) -> list[list[list[int]]]:
+    # Separates mask into DWT subbands. For the final level, separates LL from LH, HL, HH.
+    # Not given in the sources.
+    pass
+
+def pack_8bit(bit_array: list[int]) -> list[int]:
+    """Pack a list of 0/1 integers into 8-bit integers. Pads last group with zeros [G]."""
+    packed = []
+    for i in range(0, len(bit_array), 8):
+        chunk = bit_array[i:i+8]
+        while len(chunk) < 8:
+            chunk.append(0)
+        byte_val = 0
+        for bit in chunk:
+            byte_val = (byte_val << 1) | bit
+        packed.append(byte_val)
+    return packed
+
+def flatten_stream(array_2d: list[list[int]], order: str) -> list[int]:
+    """Flattens 2D array to 1D. Order can be 'zigzag', 'morton', 'spiral', or 'row_major'."""
+    return [val for row in array_2d for val in row]
+
+def run_length_encode(stream: list[int]) -> list[tuple[int, int]]:
+    """Encode stream as list of (value, count) tuples."""
+    if not stream:
+        return []
+    rle = []
+    current_val = stream[0]
+    count = 1
+    for val in stream[1:]:
+        if val == current_val:
+            count += 1
+        else:
+            rle.append((current_val, count))
+            current_val = val
+            count = 1
+    rle.append((current_val, count))
+    return rle
+
+def huffman_encode(rle_stream: list[tuple[int, int]]) -> bytes:
+    """Encode RLE stream using standard Huffman coding algorithm."""
+    # Not given in the sources.
+    pass
+```
+
+**Edge Cases and Pitfalls:**
+*   **Subband Separation:** Treating LL and detail subbands separately is crucial because their sparsity differs significantly [S1].
+*   **Boundary Conditions:** When packing the last group of bits in 8-bit casting, padding with zeros is required [G].
+
+## Subtopics
+
+### Sparse Representation and Model Compression
+A variant applied to direction-aware representations (e.g., DaReNeRF) using Dual-Tree Complex Wavelet Transforms (DTCWT) [S2]. It applies learned masks to 12 direction-aware wavelet coefficients (6 real, 6 imaginary) and 1 approximation coefficient, with mask dimensions $M^{AB}_i \in \mathbb{R}^{m/2^l, n/2^l}$ [S2]. Sparsity is enforced via a straight-through estimator: $\tilde{W} = \text{sg}(H(M) - \text{sigmoid}(M)) \odot W$ [S2]. A sparsity loss $L_m$ (sum of all masks) weighted by $\lambda_m$ is added to the total loss [S2]. Compression steps (8-bit casting, RLE, Huffman) remain identical [S2]. This variant reduces model size significantly (e.g., 252 MB vs 1,210 MB for DaReNeRF-S vs DyNeRF on flame-salmon) [S2].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+*   Not given in the sources.
+
+**Measured Performance:**
+*   On the NeRF synthetic dataset, RLE reduces mask size by a factor of 1.75 on average [S1].
+*   Huffman raises compression ratio to 4.62 [S1].
+*   8-bit casting increases ratio to 6.24 [S1].
+*   Level-wise encoding results in an average size of 0.28 MB (7.39x smaller than original) [S1].
+*   Scanning order does not noticeably affect output size (e.g., 0.83 MB for no scan, zigzag, spiral vs 0.85 MB for Morton) [S1].
+
+**Strengths and Limitations:**
+*   **Strengths:** Extremely effective for highly sparse binary masks. Low computational overhead for both compression and decompression. Simple to implement.
+*   **Limitations:** Relies on the mask being highly sparse (achieved via training regularization with $\lambda_m$) [S1].
+
+**When to Use:**
+*   Applied to compress learnable masks in TensoRF and TriPlane neural field representations [S1].
+
+**When Not to Use:**
+*   Not given in the sources.
+
+## Background
+The Mask Compression Pipeline was introduced to address the storage overhead of learnable masks in methods like TensoRF and TriPlane [S1]. The variant using DTCWT and direction-aware masks was applied to dynamic scene representation in DaReNeRF [S2]. The pipeline builds on the shared principles of wavelet and pyramid transforms, specifically the use of hierarchical decomposition and entropy encoding [Parent].
+
+## Sources
+[S1] Masked Wavelet Representation for Compact Neural Radiance Fields, https://doi.org/10.1109/cvpr52729.2023.01981, fetched 2026-10-26
+[S2] DaReNeRF: Direction-aware Representation for Dynamic Scenes, https://doi.org/10.1109/cvpr52733.2024.00481, fetched 2026-10-27

@@ -1,0 +1,181 @@
+--- v001.md
++++ v002.md
+@@ -10,5 +10,5 @@
+ - Active grid cells extracted from voxel data, grouped into clusters [S1].
+ - Cluster bounding boxes stored in the last metacell of each cluster [S1].
+-- Previous frame's visibility buffer state [S1].
++- Visibility buffer storing per-cluster visibility bits from the previous frame [S1].
+ 
+ **Outputs:**
+@@ -18,10 +18,10 @@
+ **Data Structures:**
+ - **Cluster Bound:** Stored in the last metacell of each cluster. It is an axis-aligned bounding box (AABB) [S1].
+-- **Visibility Buffer:** An `RG32UI` texture (two 32-bit unsigned integer channels) [S1]. One channel typically stores the visibility bit or cluster ID, and the other may store auxiliary data or be unused depending on implementation specifics [S1].
++- **Visibility Buffer:** An `RG32UI` texture (two 32-bit unsigned integer channels) used to capture cluster IDs of visible cells during the cell rasterisation pass [S1].
+ - **ID Texture:** Generated during cell rasterization to capture cluster IDs of visible cells [S1].
+ 
+ **Steps:**
+ 1. **Preparation:** During CPU-side isosurface extraction, divide volume data into blocks (e.g., $16 \times 16 \times 16$) and extract active grid cells in Morton order [S1]. Pad the last cluster of each block with empty metacells to ensure its size becomes 16, preventing spillover into different volume blocks [S1]. Store the cluster bound (AABB) in the last metacell of each cluster instead of cell metadata [S1]. Upload extracted metacells and grid cells to GPU buffer textures [S1].
+-2. **Initial Rasterization:** Perform cell rasterization for all clusters. During this pass, render cells as billboards/splats. For each fragment, perform a ray-box intersection test with the cell [S1].
++2. **Initial Rasterization:** Perform cell rasterization for all clusters. During this pass, render cells as billboards [S1]. For each fragment rasterized for the billboard, perform a ray-box intersection test with the cell [S1].
+ 3. **Capture Visibility:** Use an `RG32UI` texture as a visibility buffer to capture cluster IDs of visible cells during the cell rasterization pass [S1].
+ 4. **Clear and Update:** After cell rasterization, clear the current visibility buffer bits [S1]. Update the visibility buffer from the ID texture in a separate compute shader pass [S1].
+@@ -31,73 +31,74 @@
+ **Pseudocode:**
+ ```python
+-# Pseudocode for Cluster Visibility Buffer Culling
+-# Assumes GPU compute shader and rasterization pipeline access
++def cluster_visibility_culling(clusters, prev_visibility_buffer, camera):
++    # Step 1 & 2: Initial cell rasterization pass
++    # Render cells as billboards. For each fragment, perform ray-box intersection with the cell.
++    # Capture cluster IDs of visible cells into an ID texture.
++    id_texture = rasterize_cells_billboards(clusters, camera)
+ 
+-def cluster_visibility_culling(clusters, previous_visibility_buffer, camera):
+-    """
+-    clusters: List of cluster objects, each containing:
+-        - cells: List of active grid cells
+-        - bound: AABB stored in last metacell
+-        - id: Unique cluster identifier
+-    previous_visibility_buffer: RG32UI texture from previous frame
+-    camera: Current camera state
+-    """
+-    
+-    # Step 1: Initial Rasterization Pass
+-    # Render all cells. Capture cluster IDs of visible cells into an ID texture.
+-    id_texture = render_cells(clusters, camera)
+-    
+-    # Step 2: Clear Visibility Buffer
+-    clear_texture(previous_visibility_buffer)
+-    
+-    # Step 3: Update Visibility Buffer from ID Texture
+-    # Use a compute shader to aggregate cluster IDs from the ID texture
+-    # into the visibility buffer.
+-    update_visibility_buffer_compute(id_texture, previous_visibility_buffer)
+-    
+-    # Step 4: Identify Non-Visible Clusters
+-    # Clusters not present in the updated visibility buffer are considered non-visible
+-    # for the current frame, except for those that might have just become visible.
+-    non_visible_clusters = get_clusters_not_in_buffer(clusters, previous_visibility_buffer)
+-    
+-    # Step 5: Splatting for Non-Visible Clusters
+-    # Render cells of non-visible clusters as single pixel splats
+-    # to detect if they have become visible.
+-    new_visibility_buffer = render_splats(non_visible_clusters, camera)
+-    
+-    # Step 6: Merge Visibility States
+-    # Combine previous and new visibility states
+-    final_visibility_buffer = merge_visibility_buffers(previous_visibility_buffer, new_visibility_buffer)
+-    
+-    # Step 7: Second Pass for Newly Visible Clusters
+-    # Identify clusters that are newly visible
+-    newly_visible_clusters = get_newly_visible_clusters(final_visibility_buffer, previous_visibility_buffer)
+-    
+-    # Perform full cell rasterization for newly visible clusters
+-    render_cells(newly_visible_clusters, camera)
+-    
+-    return final_visibility_buffer
++    # Step 3 & 4: Clear and update visibility buffer
++    # Clear the current visibility buffer bits.
++    clear_texture(prev_visibility_buffer)
++    # Update the visibility buffer from the ID texture in a separate compute shader pass.
++    update_visibility_buffer_from_id(id_texture, prev_visibility_buffer)
+ 
+-def update_visibility_buffer_compute(id_texture, visibility_buffer):
+-    """
+-    Compute shader to update visibility buffer based on ID texture.
+-    """
+-    # For each pixel in id_texture:
+-    #   cluster_id = id_texture.read(pixel_coord).r
+-    #   if cluster_id != 0:
+-    #       visibility_buffer.atomic_or(cluster_id, 1)
+-    pass
++    # Step 5: Splatting for non-visible clusters
++    # Identify clusters not present in the updated visibility buffer.
++    non_visible_clusters = [c for c in clusters if not prev_visibility_buffer.test_bit(c.id)]
++    # Render cells of non-visible clusters as single pixel splats to update the visibility buffer.
++    new_visibility_buffer = render_splats_non_visible(non_visible_clusters, camera)
+ 
+-def render_splats(clusters, camera):
+-    """
+-    Render clusters as single pixel splats.
+-    """
+-    # For each cluster in clusters:
+-    #   if is_backfacing(cluster, camera):
+-    #       continue
+-    #   if is_occluded(cluster, camera):
+-    #       continue
+-    #   render_single_pixel_splat(cluster, camera)
+-    pass
++    # Step 6: Second pass for newly visible clusters
++    # Introduce a second visibility buffer to record new clusters becoming visible.
++    # Perform full cell rasterisation for those clusters in a second pass.
++    newly_visible_clusters = [c for c in clusters if new_visibility_buffer.test_bit(c.id) and not prev_visibility_buffer.test_bit(c.id)]
++    rasterize_cells_billboards(newly_visible_clusters, camera)
++
++    return prev_visibility_buffer
++
++def rasterize_cells_billboards(clusters, camera):
++    id_texture = create_empty_texture()
++    for cluster in clusters:
++        for cell in cluster.cells:
++            for fragment in rasterize_billboard(cell, camera):
++                if ray_box_intersection(cell, fragment.ray):
++                    id_texture.write(fragment.coord, cluster.id)
++    return id_texture
++
++def clear_texture(texture):
++    texture.fill(0)
++
++def update_visibility_buffer_from_id(id_texture, visibility_buffer):
++    for coord in id_texture.coords:
++        cluster_id = id_texture.read(coord)
++        if cluster_id != 0:
++            visibility_buffer.atomic_or(cluster_id, 1)
++
++def render_splats_non_visible(clusters, camera):
++    new_buffer = create_empty_texture()
++    for cluster in clusters:
++        splat_coord = project_to_screen(cluster.center, camera)
++        if not is_occluded(splat_coord, camera):
++            new_buffer.atomic_or(cluster.id, 1)
++    return new_buffer
++
++def create_empty_texture():
++    return Texture(width=0, height=0, channels=2, dtype=uint32)
++
++def rasterize_billboard(cell, camera):
++    # Standard rasterization of a screen-aligned quad representing the cell
++    return [Fragment(coord=vec2(x, y), ray=ray(origin=cell.center, direction=normalize(camera.pos - cell.center))) for x in range(cell.screen_min_x, cell.screen_max_x) for y in range(cell.screen_min_y, cell.screen_max_y)]
++
++def ray_box_intersection(cell, ray):
++    # Standard AABB-ray intersection test
++    return True  # Placeholder for standard math operation
++
++def project_to_screen(center, camera):
++    # Standard perspective projection
++    return vec2(center.x * camera.proj[0][0], center.y * camera.proj[1][1])
++
++def is_occluded(coord, camera):
++    # Standard depth buffer test
++    return False  # Placeholder for standard graphics operation
+ ```
+ 
+@@ -117,7 +118,10 @@
+ A technique to generate a depth and visibility buffer for voxel clusters by rasterizing cluster bounding boxes and ray tracing the internal $8^3$ grid to determine voxel occupancy, storing results in a 64-bit integer format [S2, unofficial]. It rasterizes the bounding box (rotated, translated cube) of each cluster using instancing and a simple vertex/fragment shader setup [S2, unofficial]. In the vertex shader, each cluster is transformed using its relative index inside the respective object and the object's world transform [S2, unofficial]. In the fragment shader, the $8^3$ grid of the cluster is ray-traced using the Amanatides et al. (1987) voxel traversal algorithm [S2, unofficial]. If a hit is detected, a 64-bit unsigned integer is composed containing: 24 bits for depth, 31 bits for the cluster index, and 9 bits for the voxel index [S2, unofficial]. The 64-bit unsigned integer stored in the visibility buffer has the following bit layout: bits 0-23 (24 bits) for depth, bits 24-54 (31 bits) for cluster index, bits 55-63 (9 bits) for voxel index [S2, unofficial]. Cluster grid size is $8^3$ voxels per cluster [S2, unofficial]. Voxel index bit width is 9 bits, allowing indexing of up to 512 voxels ($8^3$) [S2, unofficial]. Cluster index bit width is 31 bits, allowing indexing of over 2 billion clusters [S2, unofficial]. Depth bit width is 24 bits [S2, unofficial].
+ 
++### Viewpoint-Based Visibility Filtering
++A post-processing occlusion culling technique that clusters input cameras and pre-computes visibility masks for each cluster to accelerate test-time rendering [S3]. Input camera locations are clustered using k-means to obtain $k$ cluster centers, and each input camera is assigned to its nearest cluster center [S3]. Robustness is enhanced by adding random camera samples to the set of images used for calculating masks, ensuring coverage of potential test views [S3]. For rendering, a test viewpoint's camera center is assigned to the nearest cluster center, the pre-computed indicator list for that cluster is selected, and rasterization is performed only considering points marked as active in that list [S3]. The number of clusters $k$ is set to 64 for all scenes [S3]. The cluster threshold $t_{\text{cluster}}$ is set to 0.001 for all scenes [S3].
++
+ ## Operating characteristics
+-- **Time Complexity:** Depends on the number of clusters and cells. Initial rasterization is $O(N_{cells})$, visibility buffer update is $O(N_{visible\_cells})$, and splatting is $O(N_{non\_visible\_clusters})$.
+-- **Memory Complexity:** $O(N_{clusters})$ for visibility buffer storage.
++- **Time Complexity:** Not given in the sources.
++- **Memory Complexity:** Not given in the sources.
+ - **Measured Performance:** Not given in the sources.
+ - **Scaling:** Scales with the number of clusters and cells. Performance may degrade with fast camera movements due to flickering artifacts [S1].
+@@ -132,3 +136,4 @@
+ ## Sources
+ [S1] Clustered Grid Cell Data Structure for Isosurface Rendering, https://doi.org/10.24132/jwscg.2020.28.2, fetched 2026-10-26
+-[S2] torben-gross/tg, https://github.com/torben-gross/tg, fetched 2026-10-26 (unofficial)+[S2] torben-gross/tg, https://github.com/torben-gross/tg, fetched 2026-10-26 (unofficial)
++[S3] RadSplat: Radiance Field-Informed Gaussian Splatting for Robust Real- Time Rendering with 900+ FPS, https://doi.org/10.1109/3dv66043.2025.00018, fetched 2026-10-26

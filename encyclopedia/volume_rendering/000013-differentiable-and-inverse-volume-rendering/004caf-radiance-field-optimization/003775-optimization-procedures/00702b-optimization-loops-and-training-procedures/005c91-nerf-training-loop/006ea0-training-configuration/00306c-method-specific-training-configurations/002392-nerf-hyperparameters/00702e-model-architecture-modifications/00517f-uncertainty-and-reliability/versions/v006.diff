@@ -1,0 +1,159 @@
+--- v005.md
++++ v006.md
+@@ -3,143 +3,30 @@
+ 
+ ## Overview
+-This family extends NeRF architectures to quantify prediction confidence, addressing artifacts, redundancy, and geometry collapse in sparse or unstructured data [S1]. It differs from standard NeRF by modeling outputs as distributions (Gaussian) rather than deterministic points, and from sibling uncertainty methods by specific integrations like conformal prediction or semantic consistency constraints [S1].
++Uncertainty and Reliability methods extend NeRF architectures to quantify the confidence of their predictions, addressing artifacts, redundancy, and geometric inaccuracies inherent in standard deterministic rendering. Unlike standard NeRF which outputs fixed values, these methods model aleatoric (data) and epistemic (model) uncertainty, enabling the filtering of poorly rendered views, weighting of training samples based on information gain, and the generation of conformal prediction intervals for reliable geometry assessment.
+ 
+ ## Shared principles
++The baseline NeRF architecture [Parent](3065-nerf-hyperparameters.md) defines a continuous volumetric scene representation $F_\Theta: (\mathbf{x}, \mathbf{d}) \rightarrow (\sigma, \mathbf{c})$, where $\mathbf{x} \in \mathbb{R}^3$ is the spatial position, $\mathbf{d} \in \mathbb{R}^3$ is the viewing direction, $\sigma$ is the volume density, and $\mathbf{c} \in \mathbb{R}^3$ is the view-dependent color [G]. The rendering process integrates these outputs along rays using standard volume rendering equations [G].
++
++Most modifications in this family retain the core volume rendering equation but alter one or more of the following components:
++1.  **Input Space:** Augmenting $\mathbf{x}$ and $\mathbf{d}$ with additional signals such as latent codes $\mathbf{z}$, time $t$, illumination embeddings $\mathbf{z}_l$, or external feature vectors $\mathbf{f}$ from vision models [S1].
++2.  **Network Topology:** Replacing the monolithic MLP with specialized branches (e.g., separate density and color networks), modular experts, or hybrid structures combining MLPs with convolutional or transformer backbones [S1].
++3.  **Output Space:** Extending the output tuple $(\sigma, \mathbf{c})$ to include additional fields such as surface normals $\mathbf{n}$, semantic logits $\mathbf{s}$, uncertainty variance $\nu$, or blend weights $\Delta w$ [S1].
++4.  **Representation Basis:** Substituting the coordinate-based implicit function with explicit structures like voxel grids, hash tables, Gaussian primitives, or planar surfaces, which change how features are stored and interpolated [S1].
+ 
+ ## Subtopics
+ 
+ ### [Uncertainty-aware NeRF](12968-uncertainty-aware-nerf.md)
+-Renders RGB-D images with explicit uncertainty estimates for color and depth. It models rendered pixel values as Gaussian distributions and uses squared weights for variance aggregation, correcting the theoretical grounding of prior methods like NeRF-W.
++Uncertainty-aware NeRF (U-NeRF) separately predicts uncertainties for rendered color and depth images to reveal data reliability at the pixel level, addressing artifacts and redundancy in synthetic data for Scene Coordinate Regression (SCR). It renders pixel color and depth as Gaussian distributions, providing mean and variance estimates for uncertainty-aware visual localization. Unlike standard NeRF which outputs deterministic values, U-NeRF models the aleatoric uncertainty of the scene representation, allowing for the filtering of poorly rendered views and the weighting of training samples based on information gain.
+ 
+ ### [UA-PlantNeRF Architecture](13768-ua-plantnerf-architecture.md)
+-Reconstructs volumetric radiance fields and uncertainty from sparse plant video. It jointly predicts density, color, and aleatoric uncertainty via a dual-head architecture, estimates epistemic uncertainty via Monte Carlo Dropout, and uses CLIP-based semantic consistency to prevent geometry collapse.
++UA-PlantNeRF is a unified framework for reconstructing volumetric radiance fields from sparse, unstructured video footage of plants, addressing degraded geometry and the absence of calibrated uncertainty estimates. It distinguishes itself from standard NeRF variants by jointly predicting density, color, and decomposed uncertainty (aleatoric and epistemic) via a dual-head architecture with Monte Carlo Dropout, enabling conformal prediction intervals for reliable geometry assessment.
+ 
+ ### Error Correction and Scene Conditioning
+-- **Definition**: The use of an error correction network and conditioning on a scene NeRF to prevent the canonical NeRF from hallucinating clothing dynamics or background colors [S1].
+-- **Pitfall**: Training only the human NeRF in isolation leads to worse performance because the human NeRF model may encode background pixels into its radiance fields due to segmentation errors [S1]. Without error correction or scene conditioning, the canonical NeRF creates fogs around the human to hallucinate the clothing dynamics or the background colors [S1].
++- **Definition:** The use of an error correction network and conditioning on a scene NeRF to prevent the canonical NeRF from hallucinating clothing dynamics or background colors [S1].
++- **Pitfall:** Training only the human NeRF in isolation leads to worse performance because the human NeRF model may encode background pixels into its radiance fields due to segmentation errors [S1]. Without error correction or scene conditioning, the canonical NeRF creates fogs around the human to hallucinate clothing dynamics or background colors [S1].
+ 
+ ## Background
+-Originating from NeuMan [S1], this approach addresses artifacts in human radiance fields from single videos. It was developed to handle segmentation errors and background leakage in dynamic scenes [S1].
++The concept of modeling uncertainty in neural radiance fields emerged to address the limitations of deterministic implicit representations, particularly in sparse-view or noisy data regimes. U-NeRF introduced the formulation of rendering color and depth as Gaussian distributions to handle Scene Coordinate Regression tasks [S1]. UA-PlantNeRF extended this to biological structures, combining aleatoric uncertainty estimation with epistemic uncertainty via Monte Carlo Dropout to provide conformal prediction guarantees for plant phenotyping [S1]. NeuMan introduced error correction and scene conditioning to mitigate hallucinations in human radiance fields [S1].
+ 
+ ## Sources
+-[S1] NeuMan: Neural Human Radiance Field from a Single Video, https://doi.org/10.1007/978-3-031-19824-3_24, fetched 2026-10-29
+-
+-```python
+-import torch
+-import torch.nn as nn
+-
+-def softplus(x):
+-    return torch.nn.functional.softplus(x)
+-
+-def volume_rendering_weights(tau, delta):
+-    """
+-    Computes transmittance T and weights w for volume rendering.
+-    tau: [N] volume density at each sample
+-    delta: [N] bin width for each sample
+-    Returns:
+-        T: [N] transmittance arriving at each sample
+-        w: [N] weight for each sample
+-    """
+-    # T_i = exp(-sum_{j=1}^{i-1} tau_j * delta_j)
+-    # For i=0, sum is empty -> T_0 = 1.0
+-    cum_tau_delta = torch.cumsum(tau * delta, dim=0)
+-    T = torch.cat([torch.ones_like(tau[:1]), torch.exp(-cum_tau_delta[:-1])])
+-    alpha = 1.0 - torch.exp(-tau * delta)
+-    w = T * alpha
+-    return T, w
+-
+-def compute_color_uncertainty(c_mean, c_var, w):
+-    """
+-    Computes rendered color mean and variance.
+-    c_mean: [N, 3] mean color at each sample
+-    c_var: [N] variance at each sample
+-    w: [N] volume rendering weights
+-    Returns:
+-        C_hat: [3] rendered color mean
+-        sigma_C_sq: [1] rendered color variance
+-    """
+-    C_hat = torch.sum(w.unsqueeze(-1) * c_mean, dim=0)
+-    sigma_C_sq = torch.sum(w**2 * c_var)
+-    return C_hat, sigma_C_sq
+-
+-def compute_depth_uncertainty(t, w):
+-    """
+-    Computes rendered depth mean and variance.
+-    t: [N] depth (distance) at each sample
+-    w: [N] volume rendering weights
+-    Returns:
+-        z_hat: [1] rendered depth mean
+-        sigma_z_sq: [1] rendered depth variance
+-    """
+-    z_hat = torch.sum(w * t)
+-    sigma_z_sq = torch.sum(w * (t - z_hat)**2)
+-    return z_hat, sigma_z_sq
+-
+-def nll_loss(mean, var, target):
+-    """
+-    Computes Negative Log-Likelihood loss for Gaussian distribution.
+-    Matches source formula: ||target - mean||^2 / (2*var) + log(sqrt(var))
+-    """
+-    diff_sq = torch.sum((target - mean)**2)
+-    loss = diff_sq / (2.0 * var) + 0.5 * torch.log(var)
+-    return loss
+-
+-def train_step(mlp, rays, targets, delta, zeta, lambda_depth):
+-    """
+-    Single training step for U-NeRF.
+-    mlp: The MLP model
+-    rays: List of rays, each containing (origin, direction, t_samples)
+-    targets: Dict with 'color' [N_rays, 3] and 'depth' [N_rays, 1]
+-    delta: [N] bin widths for t_samples
+-    zeta: Hyperparameter for color loss weighting
+-    lambda_depth: Weight for depth loss
+-    """
+-    mlp.train()
+-    
+-    total_color_loss = 0.0
+-    total_depth_loss = 0.0
+-    
+-    for ray_idx, (origin, direction, t_samples) in enumerate(rays):
+-        # 1. Compute sample positions
+-        positions = origin + direction.unsqueeze(0) * t_samples.unsqueeze(-1) # [N, 3]
+-        
+-        # 2. MLP Forward Pass
+-        tau, c_mean, c_var_pre = mlp(positions, direction) # Shapes: [N], [N, 3], [N]
+-        
+-        # 3. Activate Variance
+-        c_var = softplus(c_var_pre)
+-        
+-        # 4. Compute Weights
+-        T, w = volume_rendering_weights(tau, delta)
+-        
+-        # 5. Render Color
+-        C_hat, sigma_C_sq = compute_color_uncertainty(c_mean, c_var, w)
+-        
+-        # 6. Render Depth
+-        z_hat, sigma_z_sq = compute_depth_uncertainty(t_samples, w)
+-        
+-        # 7. Compute Losses
+-        target_color = targets['color'][ray_idx]
+-        target_depth = targets['depth'][ray_idx]
+-        
+-        # Color NLL component
+-        L_color_nll = nll_loss(C_hat, sigma_C_sq, target_color)
+-        
+-        # Apply Zeta-NLL weighting with stop-gradient
+-        sigma_C = torch.sqrt(sigma_C_sq)
+-        sigma_C_sg = sigma_C.detach()
+-        weight_factor = sigma_C_sg ** (-2 * zeta)
+-        L_color = weight_factor * L_color_nll
+-        
+-        # Depth NLL
+-        L_depth = nll_loss(z_hat, sigma_z_sq, target_depth)
+-        
+-        total_color_loss += L_color
+-        total_depth_loss += L_depth
+-        
+-    # Backpropagation
+-    loss = total_color_loss + lambda_depth * total_depth_loss
+-    loss.backward()
+-    
+-    return loss.item()
+-```+[S1] NeuMan: Neural Human Radiance Field from a Single Video, https://doi.org/10.1007/978-3-031-19824-3_24, fetched 2026-10-29

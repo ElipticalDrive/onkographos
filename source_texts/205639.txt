@@ -1,0 +1,275 @@
+Orillusion is a pure Web3D rendering engine which is fully developed based on the WebGPU standard. - feat(pick): MeshBVH triangle BVH for CPU raycasts by Codeboy-cn · Pull Request #509 · Orillusion/orillusion
+
+feat(pick): MeshBVH triangle BVH for CPU raycasts by Codeboy-cn · Pull Request #509 · Orillusion/orillusion · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Codeboy-cn
+commented
+Oct 8, 2026
+Copy link
+Copy Markdown
+Collaborator
+core/tree/bvh/MeshBVH: flat typed-array BVH per GeometryBase (WeakMap cache), mean/median centroid split, allocation-free near-first traversal with best-t pruning, Möller–Trumbore, backface culling, maxT, face normal, raycastBruteForce reference; 320k tris build in ~140 ms, ~13 µs/ray vs ~4.4 ms brute force (×300)
+MeshColliderShape.rayPick: uses the BVH, returns the NEAREST hit instead of the first triangle in index order, world-space distance/point under scale, barycentric-interpolated vertex normal (face normal fallback), backfaceCulling
+BoundingBox.intersectsRay and BoundingSphere.updateBound no longer throw 'Method not implemented'; setFromCenterAndSize keeps min/max/extents in sync
+samples/pick/Sample_MeshBVHPick: 320k-tri sphere + torus + scaled boxes, hover marker with normal indicator, BVH stats and BVH-vs-brute benchmark
+test/system/MeshBVH.test: 7 cases (build stats, 500 random rays == brute force, closest/culling/inside/maxT, cube, world-space collider pick, bounds, ≥5× speedup)
+JingwenBai
+and others
+added 12 commits
+October 8, 2026 08:21
+feat(pick): MeshBVH triangle BVH for CPU raycasts; closest-hit MeshCo…
+…
+107d586
+```
+…lliderShape; implement BoundingBox.intersectsRay / BoundingSphere.updateBound
+
+- core/tree/bvh/MeshBVH: flat typed-array BVH per GeometryBase (WeakMap cache),
+  mean/median centroid split, allocation-free near-first traversal with
+  best-t pruning, Möller–Trumbore, backface culling, maxT, face normal,
+  raycastBruteForce reference; 320k tris build in ~140 ms, ~13 µs/ray vs
+  ~4.4 ms brute force (×300)
+- MeshColliderShape.rayPick: uses the BVH, returns the NEAREST hit instead of
+  the first triangle in index order, world-space distance/point under scale,
+  barycentric-interpolated vertex normal (face normal fallback), backfaceCulling
+- BoundingBox.intersectsRay and BoundingSphere.updateBound no longer throw
+  'Method not implemented'; setFromCenterAndSize keeps min/max/extents in sync
+- samples/pick/Sample_MeshBVHPick: 320k-tri sphere + torus + scaled boxes,
+  hover marker with normal indicator, BVH stats and BVH-vs-brute benchmark
+- test/system/MeshBVH.test: 7 cases (build stats, 500 random rays == brute
+  force, closest/culling/inside/maxT, cube, world-space collider pick, bounds,
+  ≥5× speedup)
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+```
+fix(pick): world-space collider hits, inverse-transpose normals, scre…
+…
+44220b2
+```
+…en ray canvas offset
+
+- ColliderShape.rayPick results are now world space for every shape:
+  Box/Sphere used to return a local-space point and distance, so PickFire
+  sorted them against MeshColliderShape's world distances and could pick
+  the wrong object under scale. The local point is kept in HitInfo.localPoint.
+- SphereColliderShape measured distance to a stale shared scratch vector
+  instead of its own hit point, and returned the shared Vector3.HELP_3;
+  it now solves the quadratic itself (exit point when the ray starts inside,
+  like Box) and returns an outward normal.
+- BoxColliderShape returns the hit face normal.
+- MeshColliderShape transformed normals with the model matrix; use the
+  inverse transpose (ColliderShape.transformNormal) so normals stay
+  perpendicular under non-uniform scale. Results are fresh objects.
+- RotationControlComponents' ring-radius test now reads localPoint.
+- CameraUtil.UnProjection subtracted the canvas offset from coordinates that
+  InputSystem had already made canvas-relative, so screenPointToRay was off
+  whenever the canvas was not at the page origin.
+- test/system/RayPick.test: 5 cases, all failing before this change.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+feat(bvh): all-hits / any-hit / tree-less queries, sub-geometries, co…
+…
+b38e1b8
+```
+…mpose_bin, auto refit
+
+MeshBVH
+- Queries take an options object { cull: 'none'|'back'|'front'|boolean,
+  near, far } and return a fresh hit (or write into an optional target)
+  instead of one static object shared by every tree.
+- raycastAll(): every crossing, sorted by distance.
+- intersectsRay(): real any-hit early-out instead of a closest-hit query.
+- Static raycastGeometry() / raycastGeometryAll(): the same queries without
+  building a tree, so a brute-force fallback no longer requires one.
+- Hits report frontFace and subGeometryIndex; only LOD 0 index ranges of
+  each SubGeometry are indexed (previously every index, including other
+  LODs). getSubGeometryIndex().
+- Positions/attributes are read through getAttributeView(), which also
+  understands the interleaved `all` buffer of compose_bin (prefab)
+  geometry; the BVH used to throw "no position attribute" on those.
+- build() forces a (re)build with a given leaf size; get() ignored
+  maxLeafTris once cached.
+- refit(): recompute node bounds after moving vertices in place.
+- get() follows the new GeometryBase.version: a position re-upload refits,
+  replaced vertex/index arrays rebuild.
+- Traversal stack is sized from the tree depth; the fixed 128-entry stack
+  overflowed on deep trees and the traversal then spun forever.
+- Doc: splits are at the centroid-bounds midpoint, not the mean.
+
+GeometryBase.version / GeometryVertexBuffer.positionVersion: change
+counter bumped by setIndices/setVertexs/setAttribute and position uploads.
+GeometryVertexBuffer.composeBinLayout getter.
+
+test/system/MeshBVH.test: 12 cases (adds cull/near/far, raycastAll,
+tree-less parity, true non-indexed geometry, compose_bin, sub-geometry/LOD
+ranges, version refit/rebuild, depth > 128).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+feat(pick): Raycaster — CPU ray picking against mesh triangles (Orill…
+…
+888d3f9
+```
+…usion#501)
+
+New src/io/raycast:
+- Raycaster (three.js-style): setFromCamera (canvas pixels),
+  setFromCameraNDC, set(origin, dir); intersectObject / intersectObjects
+  (recursive, sorted by distance), intersectFirst (closest hit with
+  best-distance pruning across meshes). Works on any MeshRenderer, no
+  ColliderComponent needed. Options: near/far, layerMask (against
+  visibleLayer), filter(renderer), side ('material' follows each sub-mesh
+  material's cullMode; 'front'/'back'/'double'), firstHitOnly, useBVH
+  ('auto' uses a tree if one was built and otherwise scans triangles,
+  'always', 'never'). Skips disabled objects/renderers, disabled materials
+  and non-triangle-list topologies per sub-mesh; renderers batched by an
+  InstanceDrawComponent stay pickable.
+- RaycastHit: distance, point, localPoint, normal (interpolated, world,
+  inverse transpose), faceNormal, faceIndex, barycentric, frontFace, uv,
+  uv1, subGeometryIndex, object3D, renderer. Fresh objects per hit.
+- MeshRaycast: the shared world-space geometry query; handles mirrored
+  transforms (winding flips, as the rasterizer sees it).
+
+MeshColliderShape now runs on MeshRaycast; HitInfo gains optional
+faceNormal / faceIndex / barycentric / uv / uv1 / subGeometryIndex /
+frontFace. New useBVH and maxDistance options.
+
+MeshBVH.raycastAll reports a crossing through a shared edge/vertex once.
+CameraUtil.UnProjectionNDC.
+
+test/system/Raycaster.test: 8 cases.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+feat(pick): PickFire event data with face/uv/all hits, collider filte…
+…
+e17aba7
+```
+…rs, auto mesh collider geometry
+
+- PickFire `bound` mode: event `data` now also carries localPos, faceNormal,
+  faceIndex, barycentric, uv, uv1, subGeometryIndex, frontFace (mesh
+  colliders) and `hits` — every collider hit, nearest first. The objects
+  are created per pick, so a later pick no longer rewrites data handed out
+  earlier (pickResult type extended accordingly).
+- PickFire.layerMask (against the collider's visibleLayer) and
+  PickFire.filter(collider) to exclude colliders from picking.
+- ColliderComponent: a MeshColliderShape with no `mesh` picks the geometry
+  of the MeshRenderer on the same object.
+- RayPick.test: PickFire end-to-end case (nearest of a scaled box and a
+  mesh sphere, hit data, all hits, data stability, filter, layerMask).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+feat(samples): MeshBVH pick sample shows face/uv/all hits and a scene…
+…
+60bac27
+```
+…-wide Raycaster
+
+- Hover (PickFire bound mode): face index, uv, sub-mesh and how many
+  colliders the ray crosses, from the extended event data.
+- Click: Raycaster over the whole scene, listing every hit (object, face,
+  distance, back-face flag); GUI switches for useBVH / side / firstHitOnly.
+- Mesh colliders no longer set `shape.mesh` (taken from the MeshRenderer);
+  the big sphere's tree is prebuilt with MeshBVH.build.
+- RayPick.test: the rotation gizmo picks each ring by its own axis under a
+  scaled container (fails if the ring test reads the world-space point).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+feat(pick): pick skinned and morph-target meshes as drawn (CPU deform…
+…
+0fe3287
+```
+…ation)
+
+The GPU deforms these meshes in the vertex shader, so ray picks against
+the static geometry hit the bind pose (for skinned glTF the skinning
+matrix replaces the node transform, so hits could be off entirely).
+
+- MeshDeformer replays the shader on the CPU: morph targets first
+  (position * baseInfluence + Σ w_i * a_morphPositions_i, via vIndex),
+  then skinning — each bone's world matrix read from the same global
+  matrix slot the shader reads (Matrix4.dynamicGlobalMatrixRef), times the
+  skin's inverse bind matrix, blended by joints0/weights0 (+joints1/
+  weights1). Works for SkinnedMeshRenderer2 + AnimatorComponent (glTF) and
+  SkinnedMeshRenderer + SkeletonAnimationComponent (prefab). Output is a
+  CPU-only geometry (no GPU buffers), cached per renderer and recomputed
+  only when bone matrices or morph weights change; queries use a refit BVH.
+- MeshRaycast.intersectRenderer: renderer-aware query used by Raycaster
+  and MeshColliderShape. Raycaster.deformation / MeshColliderShape
+  .deformation: 'cpu' (default) | 'bindPose' | 'skip'. ColliderComponent
+  fills MeshColliderShape.renderer so PickFire follows animation too.
+- AnimatorComponent.jointMatrixIndexTable (CPU copy of the GPU table);
+  MorphTargetData.influences / morphTargetCount / baseInfluence.
+- MeshBVH.getAttributeView: 4-wide joints/weights, 1-wide vIndex, 3-wide
+  morph attributes.
+- test/system/SkinnedRaycast: CPU hits vs the GPU pixel picker's G-buffer
+  position on an animated Soldier (10/10 within 0.3 on a ~36-unit model;
+  bind pose 0/10) and the lion's blend shapes (9/9); morph math for
+  relative/absolute targets, modes and caching; mesh collider.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+feat(samples): Sample_SkinnedMeshPick — picking animated soldiers and…
+…
+65e0d7c
+```
+… a blend-shape lion
+
+Picks every frame under the mouse: red marker on the surface as drawn
+(CPU deformation), yellow along the normal, blue where a bind-pose pick
+would land. GUI: pause/clip, lion blend-shape sliders, deformation mode,
+hit info and pick time.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+chore: update comment
+f9d55d7
+test(pick): load the skinned and morph test models from the CDN
+…
+26fbcd8
+```
+CI checks out without the public/ assets submodule, so Soldier.glb and
+lion.glb were missing there and both glTF tests failed to parse.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+test(pick): build the skinned and morph test meshes in code
+…
+49a5f2b
+```
+Replace the CDN-loaded Soldier.glb and lion.glb with a procedural
+two-bone skinned strip and a morph-target bump grid, so the test needs
+no network and runs in about half the time. Sample triangle centroids
+spread over the whole mesh instead of vertices, keeping GPU picks off
+silhouette edges.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+ci: raise the Electron test timeout to 10 minutes
+…
+0c85c68
+```
+The suite already takes about 4 minutes on GitHub runners, so the
+5-minute limit fails any branch that adds a few test files.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

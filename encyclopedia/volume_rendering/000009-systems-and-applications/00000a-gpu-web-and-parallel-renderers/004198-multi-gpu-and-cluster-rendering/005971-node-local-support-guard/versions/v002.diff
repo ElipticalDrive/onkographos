@@ -1,0 +1,171 @@
+--- v001.md
++++ v002.md
+@@ -4,28 +4,39 @@
+ 
+ ## Overview
+-The node-local support guard is a per-primitive parameter clamping mechanism applied before rendering to prevent out-of-range values (caused by bit-flips) from exploding a primitive's spatial extent and contaminating other nodes or ranks in a distributed renderer [S1, unofficial]. It sets itself apart from Error-Correcting Codes (ECC) by operating on the semantic range of parameters rather than memory words, catching errors that survive or bypass ECC, including those introduced after correction in registers or caches [S1, unofficial]. Unlike full duplication, it achieves the same elimination of catastrophic upsets with no memory overhead [S1, unofficial].
++The Node-Local Support Guard is a per-primitive clamping mechanism applied to rendering parameters to prevent out-of-range values—typically caused by bit-flips or silent data corruption—from exploding a primitive's spatial extent and contaminating other nodes or ranks in a distributed renderer [S1, unofficial]. It sets itself apart from Error-Correcting Codes (ECC) by operating on the semantic range of parameters rather than memory words, thereby catching errors that survive or bypass ECC, including those introduced after correction in registers or caches [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A set of 3D Gaussian primitives, each defined by a parameter vector. The vector includes position, rotation, scale, opacity, and spherical harmonic (SH) coefficients. The total parameter count is 59 components per primitive [S1, unofficial].
+-*   **Output:** A clamped parameter vector where out-of-range values are restricted to the "trained support box" bounds, ensuring the primitive's spatial extent remains within expected limits [S1, unofficial].
++*   **Input:** A set of primitives (e.g., 3D Gaussians) with parameters including scale, opacity, and spherical harmonic coefficients, along with a pre-computed "support box" defining the valid range for each parameter component.
++*   **Output:** Clamped parameters ready for rendering, ensuring no primitive exceeds its node-local spatial bounds.
+ 
+ **Data Structures:**
+-*   **Primitive Parameter Vector:** 59 components per primitive.
+-    *   Position: 3 floats.
+-    *   Rotation: 4 floats (quaternion).
+-    *   Scale: 3 floats.
+-    *   Opacity: 1 float.
+-    *   Spherical Harmonics: 45 floats (higher-order coefficients) [S1, unofficial].
+-*   **Support Box:** A pre-computed bounding box for each clamped component, derived from the converged model's statistics. It defines the minimum and maximum valid values for scale and opacity fields [S1, unofficial].
++*   **Support Box:** A bounding box defined per parameter component over the converged model. It specifies the minimum and maximum valid values for scale, opacity, and relevant spherical harmonic coefficients [S1, unofficial].
++*   **Primitive Parameters:** Stored in memory. For a standard 3D Gaussian, this includes position, rotation, scale (3 components), opacity (1 component), and spherical harmonics (up to 59 components for degree 4) [S1, unofficial].
+ 
+ **Steps:**
+-1.  **Initialization:** Compute the support box for each component over the converged model. This box represents the valid semantic range for each parameter [S1, unofficial].
+-2.  **Per-Node Execution:** On each GPU node (rank), independently apply the guard to its local replica of the primitives before rendering its assigned tile [S1, unofficial].
+-3.  **Clamping:** For each primitive, iterate through the parameter components.
+-    *   Skip the 45 higher-order spherical harmonic coefficients, as they are inert to catastrophic spatial extent changes [S1, unofficial].
+-    *   Clamp the remaining 14 components (scale and opacity fields) to the values defined in the support box [S1, unofficial].
+-4.  **Rendering:** Render the clamped primitives. The guard adds no synchronization point and no cross-node traffic [S1, unofficial].
+-5.  **Detection:** Count the number of clamps performed. If the clamp rate rises significantly, surface this as a silent-data-corruption signal to the host, triggering parity alerts or structural reboots [S1, unofficial].
++1.  **Pre-computation:** Compute the support box for each parameter component based on the trained model's distribution. This box defines the hard limits for clamping [S1, unofficial].
++2.  **Per-Node Execution:** On each GPU/node in a distributed system, the guard is applied independently before rendering the node's assigned tile or region [S1, unofficial].
++3.  **Clamping:** For each primitive, check its parameter values against the support box.
++    *   If a value (e.g., scale or opacity) exceeds the box limits, clamp it to the nearest boundary [S1, unofficial].
++    *   The guard specifically targets fields that carry "catastrophic mass," primarily scale and opacity, though it can be applied to other parameters [S1, unofficial].
++4.  **Rendering:** Render the clamped primitives. Because the guard is applied locally, an out-of-range primitive is contained within the node that owns it and cannot be broadcast into the global composite [S1, unofficial].
++5.  **Detection (Optional):** Count clamp events. A rising rate of clamps can serve as a signal for silent data corruption, triggering parity alerts or reboots [S1, unofficial].
++
++**Formulas:**
++*   **Clamping:** For a parameter $p$ and its support box bounds $[min_p, max_p]$:
++    $$ p_{clamped} = \max(min_p, \min(max_p, p)) $$
++*   **Catastrophe Probability:** The probability that a frame is catastrophic after $k$ independent upsets is modeled as:
++    $$ P_{catastrophe} = 1 - (1 - p_c)^k $$
++    where $p_c$ is the per-upset catastrophe probability (measured at 0.634% in the source) [S1, unofficial].
++
++**Parameters:**
++*   **Support Box Bounds:** Derived from the trained model. The largest trained log scale sets the bound [S1, unofficial].
++*   **Frequency:** The guard can run every frame or as a periodic scrub. Running it every frame adds a cost of ~76 µs to ~0.1 ms per frame, depending on primitive count and hardware [S1, unofficial].
++
++**Edge Cases and Pitfalls:**
++*   **Aggressive Optimization:** If the model training deliberately grows very large primitives (e.g., to cover a background), the support box widens, admitting a larger guarded footprint and weakening primitive-locality assumptions [S1, unofficial].
++*   **Residual Errors:** The guard does not protect against a bit-flip that lands within the support box but is still incorrect for that specific primitive. This residual risk is bounded by Lemma 1 in the source [S1, unofficial].
++*   **Inert Coefficients:** The guard skips higher-order spherical harmonic coefficients (45 of 59 components) as they are inert to catastrophic extent changes, touching only a quarter of the parameter memory [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -36,67 +47,66 @@
+     
+     Args:
+-        primitives: List of primitive objects. Each primitive has attributes:
+-            - scale: list of 3 floats
++        primitives: List of primitive objects, each with attributes:
++            - scale: array of 3 floats
+             - opacity: float
+-            - sh_coeffs: list of 45 floats (skipped)
+-        support_box: Dictionary mapping component names to (min, max) tuples.
+-                     Keys: 'scale_0', 'scale_1', 'scale_2', 'opacity'
++            - sh_coeffs: array of up to 59 floats (optional, skipped by guard)
++        support_box: Dictionary mapping parameter names to [min, max] bounds.
++                     Example: {'scale': [min_scale, max_scale], 'opacity': [min_op, max_op]}
+     
+     Returns:
+-        None (modifies primitives in place)
++        List of clamped primitives.
+     """
+-    for primitive in primitives:
++    clamped_primitives = []
++    
++    # Extract bounds for efficiency
++    scale_min = support_box['scale'][0]
++    scale_max = support_box['scale'][1]
++    opacity_min = support_box['opacity'][0]
++    opacity_max = support_box['opacity'][1]
++    
++    for prim in primitives:
++        # Create a copy to avoid modifying original data if needed
++        new_prim = copy(prim)
++        
+         # Clamp scale components
+         for i in range(3):
+-            key = f'scale_{i}'
+-            min_val, max_val = support_box[key]
+-            primitive.scale[i] = max(min_val, min(primitive.scale[i], max_val))
++            new_prim.scale[i] = clamp(new_prim.scale[i], scale_min, scale_max)
++            
++        # Clamp opacity
++        new_prim.opacity = clamp(new_prim.opacity, opacity_min, opacity_max)
+         
+-        # Clamp opacity
+-        key = 'opacity'
+-        min_val, max_val = support_box[key]
+-        primitive.opacity = max(min_val, min(primitive.opacity, max_val))
++        # Note: Spherical harmonic coefficients are skipped as per source
++        # They are not clamped by the guard to save memory bandwidth
+         
+-        # Spherical harmonic coefficients (45 components) are skipped
+-        # as they do not affect spatial extent catastrophically [S1, unofficial]
++        clamped_primitives.append(new_prim)
++        
++    return clamped_primitives
+ 
+-def render_node_region(primitives, support_box, tile_bounds):
+-    """
+-    Renders a node's region after applying the guard.
+-    """
+-    # Step 1: Apply guard independently on each GPU's replica [S1, unofficial]
+-    apply_node_local_support_guard(primitives, support_box)
+-    
+-    # Step 2: Render tile
+-    # ... (standard rendering logic for the tile) ...
+-    pass
++def clamp(value, min_val, max_val):
++    """Helper function to clamp a value to a range."""
++    if value < min_val:
++        return min_val
++    elif value > max_val:
++        return max_val
++    else:
++        return value
+ ```
+-
+-**Parameters:**
+-*   **Support Box Bounds:** Derived from the trained model. The largest trained log scale sets the bound [S1, unofficial].
+-*   **Scrub Frequency:** The guard need not run every frame. Deployed as a periodic scrub, its per-frame cost amortizes toward zero [S1, unofficial].
+-
+-**Edge Cases and Pitfalls:**
+-*   **Aggressive Optimization:** If the model is optimized to include very large primitives (e.g., a single splat for a background), the support box widens, admitting a larger guarded footprint and weakening primitive-locality assumptions [S1, unofficial].
+-*   **Residual Errors:** The guard does not protect against a bit-flip that lands within the support box but is still incorrect for that specific primitive [S1, unofficial].
+-*   **Silent Masking:** The guard must not silently mask a degrading device. Clamp events should be counted and surfaced as errors [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### Selective Clamp
+-A mitigation technique that clamps only the scale and opacity fields to prevent catastrophic upsets, relying on the fact that these fields carry almost all of the catastrophic mass [S1, unofficial]. It is cheaper than the full support guard, with a cost of 1× memory and <0.1 ms/frame, and is nearly as effective [S1, unofficial].
++A mitigation technique that clamps only the scale and opacity fields to prevent catastrophic upsets, relying on the fact that these fields carry almost all of the catastrophic mass [S1, unofficial]. It is cheaper than the full support guard, with a cost of 1× memory and <0.1 ms/frame, and nearly as effective in reducing catastrophe rates [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The guard cost grows close to linearly with the primitive count, as it is a bounded pass over the parameters [S1, unofficial].
+-*   **Memory Complexity:** No additional memory overhead for the guard itself, as it operates on existing parameters [S1, unofficial].
+-*   **Measured Performance:** On a system with 66 million primitives, the guard cost is 9.66 ms per frame, which is 18.3% of the render time [S1, unofficial]. The guard sustains an effective parameter-read bandwidth of 763 GB/s [S1, unofficial].
+-*   **Scaling:** In a 2-GPU system, a single scale-sign upset contaminates both GPUs without the guard, but the node-local guard confines the corruption to 1 node [S1, unofficial]. On a 4-GPU system, the guard similarly confines the upset to 1 node [S1, unofficial].
+-*   **Strengths:** Eliminates catastrophic upsets with no memory overhead; complements ECC by catching errors in registers/caches; low per-frame cost [S1, unofficial].
+-*   **Limitations:** Does not protect against errors within the support box; effectiveness weakens with very large primitives [S1, unofficial].
+-*   **When to Use:** In distributed multi-GPU rendering environments where bit-flips can cause catastrophic spatial extent explosions and cross-node contamination [S1, unofficial].
+-*   **When Not to Use:** When memory overhead is strictly zero and no periodic scrubbing is acceptable, or when the model contains intentionally large primitives that exceed the support box bounds [S1, unofficial].
++*   **Time Complexity:** The guard cost grows close to linearly with the primitive count, as it performs a bounded pass over the parameters [S1, unofficial].
++*   **Memory Complexity:** 1× memory overhead for storing the support box bounds (negligible compared to primitive data) [S1, unofficial].
++*   **Measured Performance:** On a system with 66 million primitives, the guard cost was 9.66 ms per frame (18.3% of render time) when running every frame. When deployed as a periodic scrub, the per-frame cost amortizes toward zero [S1, unofficial].
++*   **Effectiveness:** Reduces the mean scale-sign footprint from 0.0880% (unguarded) to 0.0035% (guarded) and eliminates catastrophic upsets (0.000% catastrophe rate) [S1, unofficial].
++*   **Strengths:** No cross-node traffic or synchronization overhead; complements ECC by catching semantic errors; low per-frame cost if used periodically [S1, unofficial].
++*   **Limitations:** Does not protect against bit-flips that remain within the support box; effectiveness weakens if model optimization creates very large primitives [S1, unofficial].
++*   **When to Use:** In distributed or multi-GPU rendering systems where silent data corruption (e.g., from radiation or hardware faults) can cause catastrophic visual artifacts and load imbalance. Particularly useful when ECC is insufficient or too costly [S1, unofficial].
+ 
+ ## Background
+-The node-local support guard was introduced in the context of 3D Gaussian Splatting rendering reliability under single-event upsets [S1, unofficial]. It addresses the problem of silent data corruption in high-performance computing environments, particularly in space or high-radiation settings where bit-flips are more common [S1, unofficial]. The method is complementary to ECC and full duplication, offering a middle ground in terms of cost and effectiveness [S1, unofficial].
++The Node-Local Support Guard was introduced in research on the reliability of 3D Gaussian Splatting rendering under single-event upsets (SEUs) [S1, unofficial]. It addresses the problem of "contamination," where a bit-flip in one primitive's parameters causes it to explode in size, affecting multiple nodes in a distributed renderer and causing load imbalance [S1, unofficial]. The method was validated on real hardware, including 2-GPU and 4-GPU systems, demonstrating its ability to confine corruption to a single node [S1, unofficial].
+ 
+ ## Sources

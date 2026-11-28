@@ -1,0 +1,2598 @@
+C++20 / OpenGL 4.1 voxel engine, built as a systems-performance project: cross-chunk greedy meshing at 5.3x fewer triangles under a CI regression gate, 12-byte packed vertices (GPU mesh 127 -> 10.9 MB), 9-worker off-thread chunk streaming, TSan-clean lock-free MPMC queue benchmarked then deliberately not shipped. - The world is four-dimensional, and its cross-sections mesh by DanielWLiu07 · Pull Request #69 · DanielWLiu07/voxel-engine
+
+The world is four-dimensional, and its cross-sections mesh by DanielWLiu07 · Pull Request #69 · DanielWLiu07/voxel-engine · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+DanielWLiu07
+commented
+Sep 5, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Blocks are drawn as the polygon their 4D cell presents to the slice, not
+as cubes. --slice-prisms, or P at runtime.
+The engine already had a 4D world and a rotatable cut; what it did not
+have was a renderer that drew the cut's actual geometry. It does now, and
+building it turned up a result worth more than the feature.
+Greedy meshing works on a tilted cut
+The mesher's own design notes said it could not: "neighbouring cells
+present their own polygons at their own angles." True of the polygons,
+false of the conclusion.
+```
+preimage of a convex set under a linear map is convex
+to_4d is linear
+a lattice box is convex
+-----------------------------------------------------
+so a BOX of cells presents ONE convex polygon, any angle
+```
+The sweep just has to run over (i, k) of the 4D lattice instead of
+(x, z) of the chunk. At an untilted cut the lattice IS the voxel grid,
+so it reduces to the existing greedy pass.
+cut
+before
+after
+flat
+2.47x greedy
+1.41x
+one plane
+3.45x
+1.96x
+both planes
+4.97x
+3.05x
+hard tilt
+4.98x
+3.58x
+What else is in here
+4D structures. A boulder is a 4-ball, so the slice cuts a sphere
+whose radius is sqrt(r^2 - d^2) along w: travel and it swells, peaks and
+vanishes. A monolith is a 4-box. Defined in 4D and evaluated per column,
+so both meshers get them for free.
+--capture-walk, the clip where only the camera moves.
+Trees that grow on the lattice, so a tilted world is not a bald one.
+Cross-chunk wall culling for the prism path.
+Facing-first rebuild order: a rotation invalidates the whole window,
+so the queue is never short and the only question is what comes off it
+first. The visible half now catches up 24-33% sooner for identical work.
+Defects fixed, several of them mine
+At theta = phi = w = 0 - the slice the engine STARTS in - closed
+clipping made cells l = -1 and l = 0 both claim the full square.
+Every column of the world, drawn twice.
+--validate at a tilt flagged 610 backwards-facing triangles on a
+world that looked correct and passed 39 unit checks. An edge shorter
+than the vertex quantisation step had both ends land on the same byte,
+rotating its direction 78 degrees.
+The shadow-cascade refresh was staggered by a frame counter that
+includes settle frames, so the byte-stable capture guarantee was
+failing intermittently in every multi-frame mode, GIFs included.
+A dirty re-mesh mark was discarded when a job was already in flight -
+but that job captured its neighbours before the neighbour landed.
+The boundary re-mesh passed a partial slice stamp, zeroing phi,
+z_shift and x_shift, so prism chunks were re-tiled with a
+hyperplane their blocks never came from.
+--verify-4d had a gate measuring worker throughput, not the
+engine: the same binary gave 0.97 / 0.97 / 0.43 at load average 34.
+The frame-scaling table in the README had rotted two features deep -
+triangles at radius 12 were 167,200 when the engine has produced
+145,418 since cross-chunk culling, and RSS 188 MB when block light took
+it to 289.
+Numbers
+Nothing the 3D engine publishes moves. --validate still reports
+bad_triangles=0 gpu_mesh_mb=10.99; BENCH_SUMMARY still reads
+greedy=5.33 world_mesh_mb=10.91.
+Cross-section mode at radius 12: 19.10 MB flat, 44.54 MB with both planes
+turned, against the cube path's 10.99 MB.
+Verification
+Audit is 16 steps, all green. New gates: the 4D properties under
+--slice-prisms, GPU validation at a compound tilt (which is what caught
+the 610 triangles - the default cut is flat, where that whole class of
+defect is unreachable), the tiling reducing to exactly 256 cells per chunk
+at a flat cut, capture byte-stability, and PRISM_SUMMARY held to the
+same byte-identical bar as BENCH_SUMMARY.
+prism_tests fuzzes 60 random cuts x chunks. ASan/UBSan now reach the
+clipper, which was the one path in the repo writing geometry at computed
+indices into fixed-size arrays and had never been under a sanitizer.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_016gxuMhpeabJ6AeHwdqz8ko
+DanielWLiu07
+added 28 commits
+September 5, 2026 19:38
+feat(world): 4D gradient noise, and the answer to whether 4D is viable
+…
+290fab7
+```
+Phase 0 of taking this engine to four dimensions. Not the engine work:
+the question that decides whether the engine work is worth starting,
+answered in a day rather than discovered in week four.
+
+You cannot draw four dimensions, so a 4D world reaches a 3D renderer by
+slicing - render the hyperplane at the player's w, and moving along w
+swaps which slice you see. That only means anything if adjacent slices
+are related. If w and w+1 are unrelated worlds then the fourth dimension
+is a seed change with extra steps, and no amount of engine work fixes it.
+
+docs/4d.md has the three renders. One step along w keeps the world: same
+ocean, same island chain, same mountain mass, with coastlines redrawn and
+lakes opened and closed. Eight steps is somewhere else entirely, and it
+got there continuously rather than by jumping. That is what a spatial
+axis is supposed to do.
+
+Getting there needed two things.
+
+4D noise, because FastNoiseLite exposes GetNoise(x,y) and GetNoise(x,y,z)
+and nothing else - it is the one part of a 4D terrain generator that
+cannot be reused. src/world/noise4d.cpp is 4D gradient noise: 16
+hypercube corners, 32 gradients, quintic fade, quadrilinear
+interpolation. Perlin rather than simplex deliberately, because 4D
+simplex needs coordinate ranking across five vertices and is much harder
+to convince yourself is right, while Perlin in 4D is the 3D algorithm
+with twice the corners and has an exact property to test against.
+
+And a slice harness, src/bench/slice4d.cpp, which found two things:
+
+  The fourth axis needs its own scale. Treating w like x and z changed
+  4.6% of columns by at most one block - the world was frozen along w.
+  Not a bug: the continent field's noise cell is 250 units wide, and a
+  player who can walk 250 units along x cannot walk 250 along w. Swept
+  the scale (1 -> 4.6% of columns, 5 -> 51%, 25 -> 77%, 60 -> 85%) and
+  took 6. The max column jump stays in single digits at every scale,
+  which is the row that matters: the field is continuous along w
+  regardless, so this is a choice about feel, not correctness.
+
+  The 3D height formula does not transfer. kSeaLevel + n*28 + 14 put
+  every column between y=31 and y=46 - no water anywhere - because this
+  fbm normalizes by the amplitude sum and FastNoiseLite's does not, so
+  the composite measures p1..p99 of -0.17..0.21 instead of filling
+  [-1,1]. Refitted to the measured distribution. Worth recording as the
+  shape of what the rest of the 4D work looks like: the algorithms port,
+  the constants do not.
+
+32 checks in tests/test_noise4d.cpp, pinning properties rather than
+outputs: exactly zero at integer lattice points, pure and seed-stable,
+in range and using it, C1 and C2 across cell boundaries, isotropic, and
+sliceable.
+
+Fifteen faults injected, all fifteen caught. Three fail at compile time:
+a gradient table with a zero, duplicated, or over-long row moves the
+field's standard deviation by 1.6%, which is too small to gate on
+without a brittle bound, so grad4_table_is_well_formed() asserts the
+structure instead. Two needed a second round:
+
+  Dropping w from the gradient dot survived every value, range and
+  continuity check - the hash still varies with w and the interpolation
+  still runs along it, so the field still responds to w and merely
+  degrades to value noise on that axis. Isotropy catches it: the
+  fastest/slowest axis ratio is 1.004-1.015 correct, 1.58-1.60 broken.
+
+  Perlin's original cubic fade passed everything, because it is C1 - it
+  is only the curvature that jumps. The C2 check separates them: 1.13-1.28
+  against 11.3-12.1.
+
+Nothing in the engine is 4D yet and nothing existing changed. --validate
+still reports gpu_mesh_mb=10.99 and check_invariance.py still passes;
+this commit is additive.
+```
+feat(world): 4D terrain generation, and what the fourth dimension costs
+…
+4dd6cd8
+```
+Turns the previous commit's noise into a terrain generator, and answers
+the question that decides whether a 4D engine is buildable: what does
+moving along w actually cost?
+
+TerrainGen4D is the 3D generator's structure with w threaded through
+every sample - domain-warped fBm for height, two intersecting
+iso-surfaces for caves, altitude bands for surface material. The
+frequencies port unchanged, because a frequency is about feature size in
+world units and that does not depend on how many axes there are. The
+amplitudes did not, for the reason docs/4d.md records.
+
+29 checks in tests/test_terrain_gen4d.cpp. The two that matter are the
+ones that decide whether w is a dimension at all: a slice has to be an
+ordinary usable world, and adjacent slices have to be related. Both
+failures are silent - a w that does nothing gives a perfectly correct
+world with no fourth dimension in it, and a w that does too much gives
+one that teleports.
+
+Then the cost. A step along w swaps the whole visible slice, so every
+mesh is invalid. src/bench/wcost.cpp measures the full rebuild and, more
+usefully, how much of it is avoidable. Radius 6, 169 chunks,
+single-threaded on an M4: 198 ms per step (gen 95 + mesh 103). Change
+fractions, stable across radii 4-8 and three seeds:
+
+    chunk   (today's mesher)       100%    198 ms   1.00x
+    section (renderer's unit)    19-24%    117 ms   1.70x
+    column  (theoretical floor)  92-95%    191 ms   1.03x
+
+Chunk-granular incremental re-meshing is worth exactly nothing. That was
+one of three optimisations this work set out to try, and it is dead:
+every chunk in the window changes on every step, so there is nothing to
+skip. Column granularity sounds finer and is worse than sections.
+
+Both have one cause, and it is the finding: the fourth dimension mostly
+moves the surface. A 32-block section deep underground is solid rock at
+every w and one high above the terrain is empty at every w, so only the
+few straddling the surface change. A column spans all 256 blocks, so
+almost every column has something moving somewhere.
+
+So a 4D engine should mesh at section granularity, not chunk
+granularity. Today's mesher builds a chunk-wide mesh and buckets it into
+sections afterwards, which makes that a redesign rather than a tuning
+knob - but now a redesign with a number attached.
+
+Nine faults injected. Seven caught. Two are documented as not catchable
+rather than papered over, both for the same reason - this generator
+composes several noise fields, so breaking one is masked by the others:
+
+  One field losing its seed offset. continents_ carries 0.65 of the
+  height and still differs everywhere, so pinning hills_ to a fixed seed
+  changes nothing measurable. The test that matters still holds: the
+  seed being dropped entirely is caught.
+
+  One of the two cave fields losing w. Caves are an intersection, so
+  freezing one still leaves passages opening and closing. Measured over
+  five seeds the cave-motion ratio is 1.63-2.10 correct and 1.26-1.75
+  broken; the ranges overlap, so any bound would be flaky. Both fields
+  losing w - which would freeze the underground while the surface
+  morphed - is caught.
+
+Still additive: --validate reports gpu_mesh_mb=10.99, check_invariance
+byte-identical, all five test suites green.
+```
+test(world): pin how far the 4D world stays resolved, and that it nev…
+…
+a319762
+```
+…er returns NaN
+
+Coordinates are floats, so past about 1e7 world units two nearby
+positions round to the same float and the noise returns one value for
+both. The terrain does not error when that happens - it goes flat, which
+is the quietest failure a world advertising no bounds could have.
+
+Measured over 2000 samples half a unit apart: fully resolved from 1e2 to
+1e6, 998/2000 distinct at 1e7, and 1/2000 at 1e8. So the usable range is
+about a million world units, 62,500 chunks from the origin, and it is
+now written down rather than left to be found later.
+
+The test is known to be real rather than decorative because pushing its
+magnitude list to 1e8 fails it. A single-axis truncation does not fail
+it, and that is correct: real precision loss hits all four coordinates at
+once, which is the case measured above.
+
+Also pinned: nothing returns NaN or infinity at any magnitude or sign,
+verified by injection. That one matters because a NaN would pass straight
+through the height clamp - NaN compares false against both bounds - and
+land in chunk contents.
+
+Not specific to 4D: the 3D generator's FastNoiseLite coordinates are
+float by default too, so the ceiling is shared.
+```
+fix(world): four defects from an adversarial 4D review, including a r…
+…
+e08e554
+```
+…eversed conclusion
+
+The 4D Perlin math itself came back clean - the review validated sample()
+against an independently written reference using the opposite corner
+collapse order, 1.6M points, worst difference 7.2e-07. The defects were
+all in the numbers around it.
+
+1. The w-scale table was measured against constants that no longer
+   existed, and the conclusion it supported was backwards.
+
+   The original measurement was real: with w treated like x and z, a step
+   changed 4.6% of columns by at most one block, so kWScale was set to 6.
+   Then the height amplitude was refitted from 28 to 126 and the table was
+   never re-measured. Both the header and docs/4d.md carried numbers
+   describing a generator that had been replaced underneath them.
+
+   Re-measured against shipped constants at one unit per slice:
+
+       scale    columns changed    max jump
+         1          51.2%              4
+         6          88.1%             18
+        60          96.3%             46
+
+   Scale 1 was never frozen once the amplitude was right. The scaling was
+   compensating for the amplitude, not for anything about the fourth
+   dimension: the amplitude is 4.5x larger, and 4.5 x 1 block is the
+   4-block jump scale 1 produces. kWScale is 1 now - the fourth axis is
+   scaled exactly like the other three.
+
+   Two smaller errors went with it. The old table's rows were not
+   mutually comparable (the first row was measured at 0.35 units per
+   slice, the rest at 1.0). And "the max jump stays in single digits at
+   every scale, so the field is continuous along w regardless" was false
+   in its own table, where scale 60 read 11.
+
+   Root cause was duplication: slice4d.cpp carried its own kWScale,
+   height formula and amplitude. A harness that measures a copy of the
+   thing measures nothing. It calls world::TerrainGen4D now, so its
+   SLICE4D line prints the table's top row by construction.
+
+2. The documented command did not produce the committed images.
+
+   slice4d defaulted to 0.35 units per slice, so w_01.png was w=0.35 and
+   w_08.png was w=2.80 while the captions said one step and eight, and
+   `./build/slice4d` produced different files than the ones committed.
+   The default is one unit per slice, so the file name is the w value and
+   the documented command reproduces all three byte for byte.
+
+3. The [-1, 1] range was not a bound.
+
+   The normalizer was fitted to a raw peak of 1.2244 found over 20M
+   samples and 8 seeds. A 200M sweep across 200 seeds finds 1.2572 and
+   produces a normalized sample at 1.018. The test had simply not met a
+   violating sample - exactly the "coin flip on the next sample rather
+   than a bound" the constant's own comment warned against.
+
+   0.75 now, not the 0.7954 that would exactly fit the wider sweep:
+   widening a sweep can only push the observed maximum up, so a constant
+   fitted to the last maximum is guaranteed to be wrong eventually.
+   noise4d_range sweeps 200M across 200 seeds. The height amplitude moved
+   115 -> 126 to follow, since it is a function of the noise's scale.
+
+4. The resolution test counted run lengths, not distinct values.
+
+   `if (v != prev) ++distinct` counts consecutive differences, so a field
+   alternating between two values forever would have scored perfectly. It
+   also understated the real loss: 998 of 2000 at 1e7 where the true
+   figure is 595, so the doc said "half the detail gone" when 70% was
+   gone. Counted with a set now, bound at 95%, and extending the test to
+   1e7 fails it.
+
+Also: docs/4d.md said "32 checks" where the suite runs 36 - rot
+introduced by the same commit that wrote the surrounding prose.
+
+The cost model survives all of it: chunk 1.00x, section 1.70x, still
+stable across radii 4-8 and three seeds. Column moved 0.94 -> 0.63 with
+the kWScale change and is still worse than section.
+
+audit.sh all-pass, sanitizers clean, invariance byte-identical,
+gpu_mesh_mb=10.99 unchanged.
+```
+fix(world): constants copied across a change of noise, and a comment …
+…
+e8ef37d
+```
+…that
+
+overstated what its test covered
+
+Findings 4b through 8 of the 4D review. The constants one is the
+substantive defect; the rest are claims that were not true.
+
+Two distribution-dependent constants were copied from the 3D generator
+without refitting, and neither had a test that could see it.
+
+  kCaveIsoWidth was 0.05, taken from a generator whose cave fields are
+  OpenSimplex2 rather than Perlin. The comment beside it called them "the
+  same construction" - true of the construction, false of the
+  distribution. OpenSimplex2 at this frequency has stddev 0.435 against
+  this noise's 0.219, so |n| < 0.05 caught 17.8% of cells here against
+  7.9% there: more than twice the carving, reading as a cavier world
+  rather than as a bug.
+
+  The desert threshold temp > 0.35 failed the other way, firing on 3.6%
+  of columns against 13.3%, making deserts about 3.7x rarer.
+
+Both are matched by QUANTILE now rather than by scaling with the ratio of
+standard deviations. That was the first attempt and it was not good
+enough - Perlin is not Gaussian, so the stddev ratio gave 0.24 for the
+desert threshold where the value with the same tail mass is 0.2114.
+Shipped: 0.022 and 0.21.
+
+The observable desert fraction still differs (~5% of land against ~14%)
+and that part is a height-distribution difference, not a threshold one:
+this generator has no lake pass, so the amplitude is wide enough that
+terrain reaches below sea level on its own, leaving 42% of columns in the
+band where a desert can appear against the 3D generator's 77%. 13.3% of
+42% is the 5% measured, so the threshold is doing its job.
+
+One test was actively covering for this: deleting the desert biome
+outright passed all 29 checks, because sand_seen > 0 was satisfied by
+shoreline sand. Sand above the beach band is asserted now, bounded from
+both sides, and the sweep widened from radius 4 to 6 - the temperature
+field's ~166-unit features meant a radius-4 window could contain no
+desert at all, so the check would have been asserting against a sample
+that could not hold what it looked for.
+
+Also fixed, all of them claims rather than code:
+
+  noise4d.cpp quoted a raw peak of 1.25719 as something noise4d_range
+  reports. It does not - that came from a scratch sweep with a different
+  seed family. This repo's rule is never to quote a figure whose input is
+  not in the repo, and it was broken inside the fix for an instance of
+  it. The bench now sweeps both seed families and the comment quotes its
+  output verbatim: raw peak 1.2254, normalized 0.9190.
+
+  The lattice-zero identity's stated mechanism was wrong. It is not that
+  all sixteen corner dots vanish - only corner 0 has a zero distance
+  vector. fade(0) = 0 zeroes every lerp weight, so the interpolation
+  selects corner 0 alone. That means the identity covers the FADE
+  ENDPOINTS and nothing else: zeroing a gradient row passes it, and so
+  does a hash returning a constant. Both verified by injection. The
+  comment claimed all three and was right about one.
+
+  The resolution test drew 500 samples per magnitude while the doc and
+  its own comment said 2000. Now 2000, as claimed.
+
+Cost model re-measured after the constant changes and unmoved where it
+matters: chunk 1.00x, section 1.70x. Slices regenerated.
+
+audit-adjacent checks all green: validate gpu_mesh_mb=10.99, invariance
+byte-identical, sanitizers clean, 5 ctest suites.
+```
+fix(bench): wcost meshed against air, and four comments claimed more …
+…
+3ff107a
+```
+…than they had
+
+The last of the 4D review. All low severity, none of it moving the
+conclusion, and the reason to do it anyway is that every one of these is
+a sentence someone could later quote.
+
+wcost passed {} for NeighborPlanes, so every chunk was meshed as if
+surrounded by air - the pre-cross-chunk-culling configuration this repo
+abandoned, and the abandonment of which is why its headline memory figure
+exists. It reported 108,254 quads at radius 6 where the shipped path
+produces 71,408. Mesh time was barely affected and the 1.70x was
+unchanged, but a quad count from a configuration nothing ships is exactly
+the number that gets quoted later and is wrong when it is. The slice is
+generated in full first, then meshed with real neighbours; chunks at the
+window edge still get nullptr, which is honest - outside the window the
+neighbour genuinely is unknown.
+
+wcost also split the mean step using the FIRST slice's gen/mesh ratio,
+and slice 0 is measurably cold: 103/118 against the steps' 94/103. The
+per-step figures were already being computed and thrown away. About 2 ms
+of skew, now gone.
+
+Re-measured with both fixed: 183 ms per step, section 1.69x, stable
+across radii 4-8 and three seeds. The conclusion was robust to all of it,
+which is worth knowing rather than assuming.
+
+Four comments corrected:
+
+  terrain_gen4d said "y is held at 0 throughout". It is the noise's z
+  that is pinned - world z goes into the noise's second argument. Nothing
+  depends on it, since the field is isotropic, but a reader should not
+  have to discover the labels are shuffled.
+
+  The continuity test said gradient noise "moves by a few thousandths"
+  over its step. Measured worst is 0.026 - 26 of them - so the 0.05 bound
+  is about 2x clear, not the wide margin the C1 and C2 checks have. The
+  bound is fine; the prose oversold it.
+
+  docs/4d.md said FastNoiseLite's coordinates are "float by default".
+  GetNoise is templated on FNfloat; it is terrain_gen.cpp's
+  static_cast<float> call sites that pin it. Right conclusion, wrong
+  reason.
+
+  The NaN test claimed "any magnitude or sign". It means any magnitude
+  the test reaches: the real hard limit is the int32 cast of floor(x),
+  undefined above 2^31 ~ 2.1e9. That is 2000x past the documented ~1e6
+  usable range, so it is documented rather than guarded - a branch in the
+  hot path defending a coordinate no world reaches would cost more than
+  it protects. The test is also close to structural, which is now said
+  rather than implied.
+
+validate gpu_mesh_mb=10.99, invariance byte-identical, sanitizers clean,
+5 ctest suites.
+```
+test(world): pin the field's sign, and write down what the reference …
+…
+affe918
+```
+…check cannot see
+
+The 4D review's last contribution was an analysis of the limits of its
+own strongest result, and it found a real hole.
+
+sample() was validated against an independently written reference that
+collapses the corners w->z->y->x rather than x->y->z->w, agreeing to
+7.2e-07 over 1.6M points. Multilinear interpolation is order-independent
+only if the bit-to-offset mapping is right, so that pins the corner bit
+assignment, the sixteen distance vectors, the weight-to-stage mapping and
+the nesting arithmetic. That is the part most likely to be subtly wrong,
+and it is right.
+
+It is also all it proves. Everything the reference shares is invisible to
+it, and one shared thing was load-bearing:
+
+Taking the distance vector as (corner - sample) instead of
+(sample - corner) is an ordinary transcription slip, and since the dot
+product is linear in it, the result is exactly a negated field. Injected,
+ALL 67 checks across both 4D test files pass - a negated Perlin field is
+still zero-mean, isotropic, C1, C2, in range, and zero at lattice points.
+It is valid noise. The reference shared the convention, so the
+differential check was blind to it as well.
+
+Closed with a known-answer test. Deliberately a golden test in a file
+that otherwise pins relationships, because a sign convention has no
+relational anchor - the same reason test_crc_known_answer exists in
+test_world.cpp. Four points and two seeds, values verified identical at
+-O0 and -O2. Re-injecting the reversal now fails with
+"expected 0.328125, got -0.328125".
+
+Also recorded, in the code and in docs/4d.md:
+
+  The gradient table's static_assert does far more than it appears to.
+  There are exactly 32 permutations of (0, +/-1, +/-1, +/-1), and the
+  assert demands 32 distinct rows each with three non-zero components in
+  {-1,0,1} - thirty-two distinct vectors meeting that description are
+  necessarily the complete set. The table is pinned entirely, with only
+  row order free, and order does not matter. A retyped reference table
+  would have agreed with itself and proved nothing.
+
+  The normalizer was open by construction: the reference was handed the
+  same constant. That is exactly what turned out to be broken, and an
+  independent 200M sweep was what found it. The oracle covers algebra,
+  not calibration.
+
+  Gradient selection uniformity was verified once (164M lattice corners,
+  four seeds, 0.194% spread, chi-square 28.1 on 31 dof against a p=0.001
+  critical value of 61.1) and is NOT guarded. An attempt at a regression
+  test was removed rather than tuned: the index is not observable through
+  the public surface, and a histogram of output values is a poor proxy
+  because the field is bell-shaped, so buckets at the extremes are
+  legitimately empty. Fitting the bucketing to the field's own
+  distribution would have made it pass for a reason unrelated to its
+  claim, which is the failure this whole round of work has been about.
+
+41 checks in test_noise4d.cpp. validate gpu_mesh_mb=10.99, invariance
+byte-identical, sanitizers clean.
+```
+merge: bring the test-depth work into the 4D branch
+…
+b9caf7b
+```
+Both sides added test targets to the same block of CMakeLists.txt, so the
+resolution keeps both: noise4d/terrain4d from this branch and cli_options
+from main. Six suites now.
+```
+feat(world): the engine is four-dimensional, behind a flag
+…
+68b43ed
+```
+--4d generates the world from TerrainGen4D at a slice w, and , and .
+step along it. The 3D engine is untouched and remains the default: with
+no slice source set every path behaves exactly as it did, --validate
+still reports gpu_mesh_mb=10.99, and check_invariance is byte-identical.
+
+The design is the one docs/4d.md scoped. A 4D world reaches a 3D
+renderer by slicing, so the mesher, the culler, the lighting and the
+renderer never learn there is a fourth axis - they only ever see the
+slice at the player's w. That keeps this a change to generation and
+streaming rather than to everything, and it is why the whole thing is
+one branch in the worker job plus a re-request path.
+
+  World::set_slice_source(gen, w)  points the world at the 4D generator
+  World::step_slice(delta, ...)    moves to an adjacent slice
+
+A step re-requests every resident chunk, because the cost model measured
+100% of them changing per step - there is nothing to skip. Chunks are
+deliberately NOT cleared first, so the previous slice keeps drawing until
+its replacement lands and the world morphs rather than blinking through
+emptiness. The slice generator and w are captured by value into each job,
+like the mesher kind already was: the player can step while jobs are in
+flight, and a worker reading the member would generate a chunk for a
+slice nobody asked for.
+
+Measured at radius 6, 169 chunks: 51 ms per slice step across 9 workers.
+Consistent with the 183 ms single-threaded figure wcost reports.
+
+--verify-4d is the headless check, in audit.sh. Three claims: a step must
+CHANGE the world, stepping back must return it to exactly what it was
+(the determinism the design rests on - a slice is a pure function of seed
+and w), and the GPU meshes must be valid at every stop, since a slice
+change re-meshes every chunk in the window. Plus a rapid-step phase, six
+steps with no settle between, for the case a player creates by holding
+the key.
+
+Two faults injected and caught: step_slice not moving w, and the worker
+ignoring w and always generating slice 0. Both report changed=0 FAILED.
+
+One thing NOT claimed: I added a generation bump and two queue clears to
+step_slice and described them as what makes a slice step safe. They are
+not. Removing both leaves --verify-4d passing, rapid-step phase included,
+because request_terrain_chunk already stamps every request and
+drain_finished already discards any result whose stamp is not the newest
+for its coord - machinery that predates this work. The additions are
+defence in depth and the comments now say so.
+
+Edits do not survive a slice change: the stash is keyed by (x, z) alone,
+so an edit made at w=0 would reappear at w=5 in a place that means
+something else. Cleared on step, and noted rather than left to be found.
+
+audit.sh all 10 pass, six ctest suites, README flag check clean.
+```
+feat(world): four dimensions by default for play, three for measurement
+…
+7064307
+```
+Launching the engine with no flags now puts you in a four-dimensional
+world. --3d gives the old one back.
+
+The split is between PLAY and MEASUREMENT, and it is deliberate rather
+than timid. A world is a pure function of (seed, w), so a 4D world at
+w=0 is not the world the 3D generator makes - different height
+amplitude, no lake pass, no trees. Defaulting the benches to it would
+silently move every published figure in the README: gpu_mesh_mb, the
+greedy ratio the CI gate pins at 4.5x, and the byte-identical
+BENCH_SUMMARY the invariance check compares. Those numbers describe the
+3D engine and have to keep describing it.
+
+So --bench, --bench-frame, --validate, --bench-edit, --bench-io,
+--save/--load, the captures and the verify modes all stay 3D unless --4d
+is passed. What a player walks around in is four-dimensional; what the
+repo measures and gates is what it always measured. Asking for a 4D
+bench is one flag away.
+
+The default is decided after the parse loop rather than at the flag,
+because it depends on which other modes were requested and those can
+appear in any order.
+
+Confirmed unmoved: --validate still reports gpu_mesh_mb=10.99,
+check_invariance is byte-identical across runs, audit.sh passes all ten
+steps including the 4D slice check.
+
+Also lowered the interactive spawn to y=64 when 4D is on. The 4D world
+runs roughly y=12..56 against the 3D generator's 30..45-plus-lakes, so
+the 3D spawn height dropped the player into empty sky.
+```
+fix(world): w is a coordinate you travel along, not a menu of worlds
+…
+6a55b57
+```
+The previous version was wrong about what a fourth dimension is, and it
+was wrong in the way that matters: pressing a key jumped to the next
+integer slice, so w was a selector. You teleported between discrete
+worlds instead of moving through one. It did not read as four-dimensional
+because it was not - it was a level swap with a nice transition.
+
+Three changes make it an axis.
+
+w is a float. TerrainGen4D::height_at and fill_chunk take a continuous w
+rather than an integer slice index. An integer w makes the fourth axis a
+menu by construction; nothing downstream can recover from that.
+
+Travel is held, not pressed. `,` and `.` use key_down, so holding one
+slides the player through w the way holding W slides them through z, and
+the terrain morphs continuously while held. Shift sprints, so the fourth
+axis handles like the other three.
+
+Rebuilding is decoupled from moving. Travel is continuous; re-meshing is
+not affordable per frame, since moving along w changes 100% of the chunks
+in the window. So the world is rebuilt only once the player has drifted
+kSliceRemeshStep (0.12) from the w the geometry was built at, and the HUD
+shows both numbers - the lag between them is the design, not a defect.
+
+Speeds are bounded by the worker pool rather than by feel. A rebuild
+re-requests every chunk in the window (625 at radius 12) and the pool
+sustains ~2,200 chunks/sec, so a rebuild costs ~0.28 s there; at a 0.12
+threshold that allows about 0.43 units/sec before the world stops keeping
+up. Walk is 0.4. Sprint is 1.2 and does outrun the pool at radius 12,
+which is the honest trade rather than a bug: hold shift and the terrain
+lags behind you.
+
+Rebuilds now go nearest-to-the-player first. In scan order the world
+changed from one corner outward, which reads as a glitch; nearest-first
+morphs what you are looking at immediately and lets the far edge catch up
+over the following frames. Ties break on (z, x) so the order stays
+deterministic.
+
+One world unit of w changes about half the columns, so walking crosses a
+visibly different world every two and a half seconds - a pace for
+exploring an axis rather than flicking through it.
+
+Unmoved: --validate reports gpu_mesh_mb=10.99, six ctest suites pass,
+--verify-4d still shows changed=1 returned=1 with clean meshes at every
+stop.
+```
+fix(world): throttle w rebuilds, and fix the race that hid it
+…
+5bcdd6c
+```
+Two bugs, found by the terrain not visibly moving.
+
+The visible one: holding the travel key changed 19% of columns by at most
+ONE BLOCK per second. Technically continuous, visually nothing - which is
+what "nothing is happening" meant.
+
+The cause was reasoning about half the problem. Travel speed and field
+scale multiply to give the felt rate, and only one of them is free. A
+rebuild re-requests every chunk in the window, so travel speed sets the
+rebuild rate and the pool caps it near 0.43 units/sec. kWScale costs
+nothing: it changes how different each rebuild looks, not how many there
+are. Having bounded the speed correctly, I never checked what the product
+looked like. Measured:
+
+    kWScale   per rebuild (0.12w)   per second walking (0.4w)
+       1       5.3%,  jump 1         19.4%,  jump 1
+       4      23.7%,  jump 1         62.0%,  jump 3
+       6      35.3%,  jump 2         73.9%,  jump 5
+      10      52.6%,  jump 3         83.5%,  jump 7
+
+kWScale is 6. A second of travel reshapes 74% of the landscape while a
+single rebuild moves nothing more than two blocks, so it flows rather
+than steps. This is where the constant started, and neither change to it
+was wrong about what it measured: the sweep that lowered it to 1 was
+right that the field moves 51% per WORLD UNIT, and I missed that the
+player only covers 0.4 of one per second.
+
+The second bug: holding the key submitted a whole window of jobs every
+time the player crossed the threshold, about three times a second, while
+the previous window was still in the pool. Old jobs are not cancellable,
+so they ran to completion and were discarded on arrival for a stale
+stamp. The pool saturated with work whose results were thrown away, and
+the faster you travelled the less the world updated. resample_slice now
+declines while a rebuild is draining, so the rate self-limits to what the
+pool sustains; the player keeps full speed and the geometry lags by one
+rebuild, which the HUD shows.
+
+That throttle broke --verify-4d, correctly - the check assumed one
+move_w always rebuilds, which is no longer true. It drives the throttle
+now, the way the render loop does.
+
+Fixing that exposed a race in the check's own settle(): its guard was an
+ITERATION count, not a timeout. With nothing to drain the loop body is a
+few microseconds, so it burned 100,000 iterations in milliseconds and
+returned while workers were still busy, hashing a half-rebuilt world.
+Whether it passed depended on unrelated work happening first - adding a
+debug print made it pass, which is how it was found. Bounded by a
+deadline now, and yielding, since the drain is main-thread work waiting
+on nine workers and spinning steals the core they need. 5/5 clean.
+
+audit.sh all ten, six ctest suites, gpu_mesh_mb=10.99 unchanged.
+```
+fix(game,world): unstick the player when terrain rebuilds under them,…
+…
+297e2fa
+```
+… and
+
+decouple rebuild cadence from speed
+
+Two problems that only exist because the world can now change while the
+player stands still.
+
+The player could be entombed. Collision only prevents MOVING into solid:
+move_axis binary-searches to the nearest blocking voxel and refuses. It
+has no way out of being already inside one, so every direction is
+blocked and the player is stuck permanently. In the 3D engine that state
+is unreachable - terrain only changes where the player edits it, and they
+are outside it when they do. Travelling along w regenerates the world
+around a stationary player, and it can regenerate solid.
+
+Player::update now lifts them to the nearest free space above before
+anything else. Upward and one block at a time, so they surface rather
+than being flung somewhere arbitrary, and capped at 96 blocks - deeper
+than the height range allows - after which they are left where they are
+rather than teleported somewhere invented.
+
+Sprinting made the world update LESS. A fixed rebuild threshold made
+speed and rebuild rate proportional, so sprinting asked for three times
+the rebuilds walking did and outran the pool; the throttle then declined
+most of them. Faster travel, less updating - the opposite of what the
+control should do.
+
+The threshold is derived from speed now, so the CADENCE is constant and
+the step size grows:
+
+    speed    step (w)   rebuilds/s   change per rebuild
+    walk       0.12        3.33       35% of columns, max jump 2
+    sprint     0.36        3.33       70% of columns, max jump 4
+
+Same load on the pool at either speed, and sprinting looks like moving
+faster - more change per rebuild - rather than like stuttering. Clamped
+at both ends so a near-zero speed cannot rebuild every frame and a large
+one cannot jump the world somewhere unrecognisable.
+
+audit.sh all ten, six ctest suites, gpu_mesh_mb=10.99, invariance
+byte-identical, --verify-4d clean 3/3.
+```
+docs: the 4D notes described a constant the engine stopped using
+…
+9259995
+```
+kWScale went 1 -> 6 when the terrain turned out to be invisible at
+walking pace, and docs/4d.md still said 1 and still quoted the scale-1
+sweep. Same rot this file has now documented three times, committed by
+the same person who documented it.
+
+Corrected, and the entry rewritten around what the round trip actually
+taught. Each of the three answers was a correct measurement of the wrong
+quantity: the original 4.6%-frozen sweep measured a generator whose
+amplitude was later refitted; the correction measured the field per world
+unit, which was right and was not what decides visibility; and only the
+third measured what a player covers per second, which is the question the
+engine was asking. A measurement of a component can be exactly right and
+still not answer it.
+
+The slice captions were stale in the same way. At scale 6, one world unit
+moves 88% of columns by up to 18 blocks, so "one step keeps the world" is
+no longer true of the committed images. They are one unit apart, which is
+about two and a half seconds of holding the key - not a frame and not a
+rebuild. The captions say so, and say what a single rebuild looks like
+instead (35% of columns, max jump 2), since that is the granularity the
+player sees.
+
+The remaining-work section rewritten too: it still said nothing in the
+engine was 4D, which stopped being true several commits ago. What is
+actually left is measurement paths staying 3D on purpose, edits not
+surviving travel, no trees, and section-granular re-meshing being the one
+measured win still on the table.
+
+audit.sh all ten, README flag check clean.
+```
+perf(world): let the throttle set the w rebuild cadence, not a constant
+…
+41f7720
+```
+kSliceRebuildPeriod was 0.3 s, chosen as what the pool sustains at radius
+12. That made it the binding constraint at every radius, so a small draw
+distance - where a rebuild costs 0.04 s rather than 0.28 - still updated
+three times a second and travelled just as steppily as a large one.
+
+It is 0.05 s now, deliberately shorter than any radius can sustain,
+because it was never the rate limiter: resample_slice is. That declines
+while a rebuild is draining, so the real cadence is whatever the pool
+manages.
+
+The two compose because a rebuild always targets the player's CURRENT w
+rather than the next increment - however long the throttle makes it wait,
+the rebuild it eventually runs catches all the way up. So the engine now
+tunes itself to the draw distance: about twenty updates a second at
+radius 4, where the terrain genuinely flows, and about three at radius 12
+with correspondingly larger steps. Neither needs its own constant.
+
+audit.sh all ten, gpu_mesh_mb=10.99, --verify-4d clean 3/3.
+```
+test(main): --verify-4d now covers the path the player actually uses
+…
+28a35bf
+```
+Everything --verify-4d checked was one big jump: move a whole unit along
+w, settle, hash. The thing a player does - hold the key and travel - was
+covered by nothing, and that is the path where the interesting failures
+are, because it is the only one where the throttle, the per-frame drain
+budget and the rebuild threshold all interact.
+
+The new phase drives the interactive path exactly as the render loop
+does: move_w once per frame with a frame's dt, then the same
+drain_finished(8) / flush_pending_remeshes(4) budgets, for 120 frames.
+It asserts that two seconds of walking moves the player and brings the
+geometry with them, allowing a lag of up to one rebuild.
+
+Measured, and it demonstrates the cadence self-tuning to draw distance
+that the previous commit claimed without testing:
+
+    radius 4    10 rebuilds   0.80 travelled   0.74 tracked
+    radius 6     6 rebuilds   0.80 travelled   0.77 tracked
+    radius 10    3 rebuilds   0.80 travelled   0.77 tracked
+
+Writing it found two things, and neither was where I was looking.
+
+The first was in the test. It ran all 120 iterations in microseconds
+while claiming a 1/60 dt, so the worker pool never got wall-clock time to
+finish a rebuild: in-flight sat at a full window forever and the check
+reported the geometry frozen at 0.02 of 0.80 units. That is
+indistinguishable from the engine bug it was meant to find, and it cost a
+round of tuning the wrong constant. It paces frames now, and the comment
+says why that is load-bearing rather than cosmetic.
+
+The second was that the tuning I did on the strength of that bad reading
+was not just unnecessary but harmful. I had loosened the rebuild throttle
+from "no jobs in flight" to "below an eighth of the window", on the
+theory that stray boundary re-meshes were holding the world still. With
+correct pacing the strict version measures BETTER - 0.76 of 0.80 tracked
+against 0.69 - because letting a rebuild start while the previous is
+draining just makes the two compete for the pool. Reverted, and the
+comment now records the comparison rather than a fix that fixed nothing.
+
+audit.sh all ten, six ctest suites, gpu_mesh_mb=10.99, invariance
+byte-identical.
+```
+fix(core): the window never took keyboard focus, so nothing responded
+…
+6f2e1a4
+```
+Launched from a terminal on macOS the window appeared, rendered, and
+updated its HUD - and every keypress went to whatever was frontmost
+instead. Confirmed by asking the system which process was frontmost while
+the engine was visibly running: Google Chrome.
+
+That is indistinguishable from a broken input path, and it is why several
+rounds of tuning the w travel constants changed nothing observable. The
+travel itself was working the whole time; --verify-4d passed throughout
+because it drives move_w directly and never touches a key.
+
+GLFW_FOCUS_ON_SHOW plus an explicit glfwFocusWindow after creation, both
+guarded to visible windows so a headless bench or capture can never steal
+focus from whatever the user is actually doing.
+
+Also fixed a bug in --verify-4d's own bookkeeping, found while checking
+this: the held-key phase deliberately leaves the player elsewhere along
+w, and the ok condition still asserted slice_w == w0 from before that
+phase ran. Every real property passed and the check reported FAILED
+anyway. The position check is captured before the phase that invalidates
+it. 3/3 clean now.
+
+The lesson is about where I looked. Given "nothing is happening" I
+diagnosed downward - constants, throttle, cadence, my own harness - and
+found three genuine bugs on the way down, none of which were this one.
+The question I never asked was whether the application could receive
+input at all, and one call to the window system would have answered it in
+seconds.
+
+audit.sh all ten, six ctest suites, gpu_mesh_mb=10.99, invariance
+byte-identical.
+```
+fix(main): capture the cursor, and launch the 4D world facing somethi…
+…
+8dcb319
+```
+…ng legible
+
+Three problems, none of them in the 4D machinery, all of them making it
+impossible to see that the 4D machinery worked.
+
+Movement was switched off at launch. update_movement is gated on the
+cursor being captured and Input::attach starts it released, so a fresh
+window ignored WASD entirely until the player happened to press Tab -
+with nothing on screen saying so. Interactive runs capture immediately
+now, and the controls banner leads with it, since the absence of a
+capture is invisible.
+
+The launch vantage was a wall of snow. The camera's long-standing
+(0, 80, 80) suits the 3D world; the 4D world runs lower, so that position
+sits hard against a mountain face that fills the frame with no horizon
+and no landmark. Terrain morphing along w was therefore nearly
+unreadable: the feature was working and invisible, which is worse than
+broken. The 4D launch is (0, 64, 0), looking out over coastline, islands
+and peaks - a view with enough structure that a change registers. The 3D
+default is untouched.
+
+--trace-input added, and it is what found all of this. It logs every key
+the engine actually receives plus the camera position and w. "Nothing
+happens" is ambiguous between the engine ignoring input and the engine
+never being sent any, and those need opposite fixes; this splits them.
+It reported 834 W keydowns against a completely static position, which
+pointed straight at the gate rather than at anything I had been tuning.
+
+One correction to the tool while using it: it traced
+player.feet_position(), and in fly mode - the default - update_movement
+drives the camera and never touches the player body. So it showed a
+frozen position while the view moved fine, and cost a round of hunting a
+movement bug that did not exist. It traces the camera in fly mode now.
+
+audit.sh all ten, six ctest suites, --verify-4d clean, gpu_mesh_mb=10.99,
+invariance byte-identical.
+```
+feat(world): build across the fourth dimension - edits belong to a slice
+…
+0412be2
+```
+Until now travelling along w wiped every edit. That made w a sightseeing
+axis: you could look at other slices, and nothing you did on one
+survived leaving it. Building across the fourth dimension is most of what
+makes a 4D world a place rather than a view of one.
+
+The edit stash is keyed by (chunk, slice) rather than by chunk alone. An
+edit belongs to the integer w it was made at, so it does not match the
+lookup at any other one - and travelling back brings it back. The
+alternative, which the old comment described as the honest option, was to
+drop them, because a stash keyed on (x, z) alone would have resurfaced a
+hole dug into a hillside at w=0 as a hole in mid-air at w=5, where the
+terrain around it means something else.
+
+Two changes make it work. resample_slice no longer clears the stash; it
+writes every edited chunk into it under the OUTGOING slice first, because
+travelling does not evict - it regenerates in place, so an edit would
+otherwise be overwritten having never been recorded. And the rebuild's
+request loop checks the stash for the DESTINATION slice before falling
+back to fresh terrain, the same priority update_streaming already
+applies.
+
+In the 3D engine w is pinned at 0, so every key is (chunk, 0) and the
+behaviour is exactly what it was. --verify-edit-persistence confirms it:
+stashed=1 restored=1 survived=1, unchanged.
+
+--verify-4d covers the new property in both directions, which is the part
+worth having: an edit must survive travelling three slices away and
+returning, AND must be absent while away. Checking only the first would
+pass an implementation that made edits global, which is the failure the
+slice key exists to prevent.
+
+Fault-injected both halves. Collapsing every slice to one stash key, and
+skipping the stash lookup on rebuild, each report edit_survives_w=0
+FAILED.
+
+audit.sh all ten, six ctest suites, sanitizers clean, gpu_mesh_mb=10.99,
+invariance byte-identical.
+```
+fix(main): stop claiming a focus fix that does not work, and add scri…
+…
+8a2c55f
+```
+…pts/play.sh
+
+A window without keyboard focus renders perfectly and ignores every key.
+That is indistinguishable from a dead engine, and it is what made the
+last several rounds of this so hard to diagnose - the 4D machinery was
+measurably working the whole time and none of it could be reached.
+
+Two things, and the first is a removal.
+
+The re-assert-focus-for-five-frames loop added last commit is gone. It did
+not work: macOS will not activate a non-bundled process started without a
+foreground session, whatever the window asks for. Measured both ways.
+Keeping a fix that fixes nothing is worse than the bug, because the next
+person to meet the symptom will believe it was handled. The request at
+window creation stays, since that is enough for a normal launch.
+
+scripts/play.sh launches the engine and asks the window system to raise
+it, waiting for the render loop to actually be running first - the process
+exists in milliseconds and then spends seconds building the chunk grid, so
+an earlier request appeared to work and lost focus again as startup
+finished.
+
+And it checks whether that succeeded rather than assuming. From a
+foreground terminal the engine focuses itself and none of this is needed;
+from a fully backgrounded chain the same osascript that works when typed
+by hand does nothing, so the script says so and tells you to click the
+window. Being unable to fix it is not a reason to be quiet about it.
+
+audit.sh all ten, six ctest suites, gpu_mesh_mb=10.99, --verify-4d clean
+including edit_survives_w.
+```
+fix(input): the 4th axis is E and Q, and the engine now says so
+…
+20dac92
+```
+An input trace answered the question that several rounds of tuning could
+not: the player flew around for a full minute pressing W, A, Space and
+Shift, position moving correctly the whole time, and w never left 0.000.
+Comma and period - the keys that make the world four-dimensional - were
+never pressed once.
+
+The feature worked. It was unreachable.
+
+Two causes, both mine.
+
+The bindings were wrong. `.` and `,` are punctuation keys across the
+keyboard from the hand on WASD, which is an absurd place to put a
+movement axis. E and Q sit under fingers that are already there, which is
+the convention for a fourth direction. `.` and `,` still work as aliases
+so anything documenting them keeps working.
+
+And nothing said what to expect. The old startup line mentioned the keys
+in passing and said nothing about what they do - so a player who did find
+them might reasonably have concluded the world was static. The banner now
+states the one fact that makes the whole thing legible: WASD moves you
+through space and does NOT change the world, and only travelling along w
+does. It also says what to look for - coastlines moving, hills rising -
+and that holding the opposite key returns the world exactly.
+
+This is the last in a run of bugs that all had the same shape: window
+focus, cursor capture, camera vantage, and now key binding. Every one was
+above the layer I built, every one made the working feature beneath it
+invisible, and every one looked exactly like the feature being broken.
+Testing the 4D machinery harder could never have found any of them.
+
+audit.sh all ten, six ctest suites, gpu_mesh_mb=10.99, --verify-4d clean
+including edit_survives_w.
+```
+feat(world): the 4D world has forests, and both generators share one …
+…
+b1a7a40
+```
+…set of stamps
+
+The 4D world was barren while the 3D one had forests, which was the most
+visible difference between them and made 4D look like a lesser world
+rather than a different one.
+
+The stamps moved to world/tree_stamps.h rather than being copied. That
+choice is the whole point of this commit: this project has already been
+bitten twice by constants duplicated across the two generators and then
+changed in one - the w-scale table was measured against a copy in
+slice4d.cpp that had drifted, and the cave iso width and desert threshold
+were carried over from the 3D generator without refitting for a different
+noise distribution. A third copy, of trunk heights and canopy shapes,
+would have been a third opportunity for exactly that. Sharing removes the
+opportunity instead of relying on remembering.
+
+Verified behaviour-preserving for the 3D generator: gpu_mesh_mb=10.99
+unchanged and check_invariance byte-identical after the extraction, which
+is what says the move was a move and not a rewrite.
+
+The 4D tree pass differs from the 3D one in one place, and it is the
+place that makes trees four-dimensional. The per-column random draw stays
+a 2D hash, so a given column always rolls the same number, but the
+density it is compared against comes from the 4D biome field. Travelling
+along w therefore moves a density surface under a fixed set of draws, and
+forests thicken and thin in coherent patches rather than flickering
+column by column.
+
+Four checks: trees exist, every trunk stands on solid ground, the forest
+changes between slices, and distant slices still have trees.
+
+Fault injection found one test bug and one honest gap.
+
+The bug was mine and I have now made it twice. The trunk check looked
+only at h+1, so a stamp planted at h+3 was not counted as floating - it
+was not counted at all. Identical to the mistake in the 3D tree test,
+fixed the same way: find the trunk, then assert where it starts.
+
+The gap: freezing the biome's w argument does not fail anything.
+Tree count changes between slices regardless, because the terrain under
+it does. Measured trees-per-eligible-column over five slices - 0.0147 to
+0.0177 with the 4D biome, 0.0143 to 0.0162 frozen - which overlap, and no
+bound separates them that would not also break on ordinary retuning. The
+cause is that the biome only shifts density from 0.012 to about 0.017, so
+the fixed hash draw dominates; that is inherited from the 3D generator.
+Written down rather than fixed by inflating the coefficient, which would
+be tuning the world to suit a test.
+
+audit.sh all ten, six ctest suites, sanitizers clean, gpu_mesh_mb=10.99,
+invariance byte-identical.
+```
+feat(world): travel along w is continuous - the world is streamed, no…
+…
+f4d68d0
+```
+…t rebuilt
+
+Travelling used to move the world in discrete full-window waves: cross a
+threshold, rebuild all 625 chunks, wait, repeat about three times a
+second. The terrain pulsed rather than flowed, which is the difference
+between a fourth dimension and a slideshow of slices.
+
+Every chunk now records the w its voxels were generated at, and
+stream_slice re-requests whichever chunks have drifted furthest from the
+player, nearest to the camera first, on a per-frame budget. There is no
+global rebuild and no global staleness - the world is a field the workers
+continuously pull toward the player's w, and the budget is what keeps
+that inside a frame.
+
+Measured over two seconds of simulated held key, at the render loop's own
+budgets: 118 update batches across 120 frames, against 6 before. The
+world updates essentially every frame.
+
+Three things had to be fixed to get an honest reading, and two of them
+were in the check rather than the engine.
+
+The held-key phase was still driving move_w - the whole-window rebuild
+the interactive path no longer uses - so it was passing on a code path
+the player never touches. It calls advance_w and stream_slice now, which
+is exactly what the render loop does.
+
+It also drained a flat 16 chunks a frame while requesting 24, so its
+queue grew for the whole run and the world could never catch up. That is
+a property of the test, and it made a large radius look broken. It copies
+the render loop's adaptive budget now.
+
+The remaining one was real: uploads, not generation, are the bottleneck
+when the whole window is converging on a new w. Nine workers produce
+chunks far faster than 16 a frame reach the GPU. The loop drains 48 while
+a backlog exists, which is well under a millisecond of frame time and
+only happens while the player is actually travelling.
+
+The gate measures the NEAR field, not the global worst. At radius 12 the
+most-stale chunk is nearly two hundred blocks out behind fog, and judging
+by it failed the check while the visible world was entirely current -
+that number says more about window size than about what the player sees.
+near_meshed_w() is what the HUD shows too.
+
+Result: 0.78 of 0.80 units tracked at radius 4, 8 and 12 alike. The world
+you are looking at stays current whatever the draw distance.
+
+audit.sh all ten, six ctest suites, sanitizers clean, gpu_mesh_mb=10.99,
+invariance byte-identical.
+```
+feat(main): --auto-w travels by itself, so the 4th dimension can be w…
+…
+1df62c2
+```
+…atched
+
+"It does not look 4D" and "the keys are not reaching the engine" produce
+exactly the same picture, and separating them by asking someone to hold a
+key at the right moment does not work - three attempts to catch a
+keypress in a trace caught Caps Lock and Cmd and nothing else.
+
+--auto-w removes the question. The player travels along w forever with no
+input, reversing every 12 units so the same landscape keeps morphing back
+and forth rather than drifting away. If the world changes on screen, the
+fourth dimension works and any remaining problem is input; if it does
+not, it is not input.
+
+It also settled the question immediately, and against my own
+instrumentation rather than the engine. The trace read
+wrld.meshed_w() - the most-stale chunk ANYWHERE - so at radius 8 it
+reported "geometry 0.000" while the visible world was tracking within
+0.02, because the worst chunk sits past the fog. That is the third time
+this trace has reported the engine broken when the instrument was wrong.
+It reads near_meshed_w() now, the same figure the HUD and the gate use.
+
+With that fixed the reading is unambiguous: w 2.940, near geometry 2.920,
+no input. The world follows.
+
+six ctest suites, gpu_mesh_mb=10.99.
+```
+feat(world): rotate the 3D slice through 4D - the control that was mi…
+…
+60e2fef
+```
+…ssing
+
+"4D Miner aint like this" was right, and reading how 4D Miner actually
+works found the architectural gap rather than a tuning problem.
+
+From its wiki: the player rotates their 3D slice of the world with the
+scroll wheel, and "the blocks will seem to change their shape. In reality,
+the game's 4D blocks never change their shape, but different slices of
+the 4D world can contain unique cross sections of 4D blocks."
+
+This engine only ever TRANSLATED along w. Every slice was the hyperplane
+w = constant, always axis-aligned to the 4D lattice, so every block met
+the cut square-on and stayed a whole cube. Travelling swapped one
+perfectly ordinary 3D world for another. That is why it looked "all
+cubic": the cut was never tilted, so no cross-section was ever revealed.
+
+The slice is now an orientation as well as an offset. TerrainGen4D::Slice
+carries {w, theta}, and to_4d rotates in the (z, w) plane: at theta = 0
+the slice is the familiar w = constant hyperplane; at pi/2 the slice's own
+z axis IS the fourth dimension, so walking forward walks through w.
+Everything between is a genuine mixture, and the whole convention lives in
+one function so nothing else has to know it.
+
+Bound to the scroll wheel, which is where 4D Miner puts it and which suits
+a continuous one-dimensional control with no natural key. GLFW delivers
+scroll by callback, so Input grew an accumulator drained once per frame.
+
+Rotation is far stronger than translation, and the geometry says why: a
+tilted hyperplane diverges from the original linearly with distance, so
+the far edge of the window is displaced much more than the near. Measured
+over a 192-block square against a flat slice:
+
+    0.002 rad   27% of columns change, max jump  2
+    0.010 rad   66%                          9
+    0.050 rad   88%                         20
+
+against 34% and max jump 2 for a whole rebuild-threshold of w. The first
+scroll step I chose was 0.05 - one notch rebuilt seven eighths of the
+visible world, which reads as the scene being replaced rather than
+reshaped. It is 0.003, about a fifth of a degree, which sounds absurdly
+fine and is not.
+
+Chunk staleness accounts for both axes, with the rotation weighted by a
+32-block lever arm, or a rotation would appear to do nothing until the
+angle grew large.
+
+Six checks pin it, including the two that separate rotation from
+translation: a quarter turn changes more than a large w offset, and a
+tilt is reversible rather than a mutation. Fault-injected by making
+to_4d ignore theta; four checks fail.
+
+--slice-tilt R for captures. audit.sh all ten, six ctest suites,
+sanitizers clean, gpu_mesh_mb=10.99, invariance byte-identical.
+```
+test(4d): cover slice rotation in --verify-4d, and fix the check that…
+…
+8a2b74d
+```
+… did not
+
+The rotation shipped with six generator-level checks and nothing at the
+engine level, which left the half more likely to fail silently uncovered:
+the generator proves a tilted slice samples a different heightfield, and
+says nothing about whether World notices theta changed.
+
+Three claims, matching what travelling along w already asserts - a
+rotation must change the world, must be exactly reversible, and the
+meshes must be valid at the tilted stop - plus one the w axis has no
+analogue of.
+
+The first version of this phase was wrong, and only fault injection said
+so. It drove the rotation through resample_slice and PASSED with the
+per-chunk tilt staleness deleted, because resample_slice rebuilds the
+whole window unconditionally: the world changed regardless of what the
+staleness test concluded. It was re-proving the generator test through a
+more expensive path. It now drives stream_slice, which is where the
+scroll wheel actually goes.
+
+The second problem was the tilt size. 0.25 rad is far past every
+threshold, so it also passed with the staleness lever arm cut from 32 to
+1 - verified by injecting exactly that. A single scroll notch is the case
+the lever arm exists for: 0.003 rad is below kSliceStepMin on its own and
+would rebuild nothing ever, and 0.003 x 32 = 0.096 responds to the first
+notch. That is the difference between a scroll wheel that works and one
+that seems dead until you spin it far enough, and it is now a check.
+
+Three injected faults, three distinct failures:
+
+    rotate_slice made a no-op        tilt_changed=0
+    staleness ignores theta          tilt_changed=0
+    lever arm 32 -> 1                notch=0
+
+VERIFY4D grew tilt_changed, tilt_returned and notch. audit.sh all eleven,
+six ctest suites, 333 fuzz checks, gpu_mesh_mb=10.99, invariance
+byte-identical across runs.
+```
+docs(4d): the rotation, and three claims that stopped being true
+…
+a7bbd93
+```
+Adds the section the engine was missing an explanation for: why a
+w = constant slice makes everything look cubic no matter how far you
+travel, what 4D Miner does instead, and the (z, w) rotation that fixes
+it. Carries the measured tilt table and the reason 0.003 rad per notch
+is the right size rather than the 0.05 first tried.
+
+Three statements in "what this does not do yet" had gone stale, which is
+worse than never having written them:
+
+  - the travel keys are E and Q, not , and .
+  - edits DO survive travel along w now; the stash is keyed by slice,
+    and --verify-4d reports edit_survives_w=1
+  - there ARE trees; the stamps moved to tree_stamps.h and both
+    generators share them
+
+Test counts corrected too: both 4D suites are 41 checks, not 36 and 31.
+```
+docs: put the fourth dimension on the README, with the tilt measured
+…
+9ee9ffb
+```
+The 4D engine was undiscoverable from the README - no section, no link,
+not even a mention in the controls table. The whole feature existed only
+in docs/4d.md, which nothing pointed at.
+
+Adds a section built around the thing that is hard to convey in prose: a
+triptych at one camera, one seed, one w, where the only difference
+between the three frames is the ANGLE of the cut. The lake and headland
+stay recognisable while the snow field advances and the forest belt
+retreats, which is the distinction the design rests on - a related place
+seen from a different angle, not a reseeded one.
+
+The numbers behind it come from a new `slice4d --tilt`, so the table is
+reproducible rather than asserted:
+
+    rotate 0.003 rad (one scroll notch)   63.8% of columns   max 10 blocks
+    rotate 0.03  rad (centre image)       90.8%                     34
+    rotate 0.08  rad (right image)        94.6%                     44
+    translate w by a full rebuild step    36.3%                      2
+
+A fifth of a degree of rotation moves the terrain five times further than
+the largest step translation ever takes between rebuilds. Reported
+against theta = 0 rather than row to row, because the question is how far
+a tilt takes you from where you started.
+
+scripts/capture_tilt.sh regenerates the images. Its pose is steeper and
+its sun higher than the README's other stills, deliberately: these exist
+to be compared, so the terrain has to be legible rather than
+atmospheric. At the usual 0.76 sun and radius 8 the distance fog sat on
+top of the geometry and all three frames were the same wash of pink.
+
+check_readme_flags.py now checks flags against every binary the README
+gives a command line for, not just the engine. Scoping it to voxel_engine
+made `slice4d --tilt` look like a documentation error, and a guard that
+cries wolf is one people learn to skip. That needed slice4d to answer
+--help, which it now does. The old argument form still works: a file path
+is read as its parent directory rather than silently becoming
+./build/voxel_engine/voxel_engine.
+
+audit.sh all eleven, six ctest suites, gpu_mesh_mb=10.99, invariance
+byte-identical.
+```
+DanielWLiu07
+changed the title
+feat(world): 4D gradient noise, and the answer to whether 4D is viable
+feat: a fourth spatial dimension you can move through, and rotate
+Sep 6, 2026
+fix(world): a header used std::cos with no <cmath>, and CI caught it …
+…
+c4583e0
+```
+…on Linux
+
+terrain_gen4d.h got std::cos and std::sin when the slice rotation landed
+and never got the include. It built clean on macOS, where libc++ supplies
+<cmath> transitively through another header, and failed the Linux job:
+
+    terrain_gen4d.h:64:30: error: 'cos' is not a member of 'std'
+
+Sweeping the rest of the headers for the same shape found three more
+relying on a transitive <cstddef> for std::size_t, and world.h leaning on
+<queue> for std::vector. None of those break today; all four are one
+standard-library reshuffle from doing so, on a codebase whose CLAUDE.md
+says it stays portable to Linux and Windows.
+
+Turned into a gate, and the first version of the gate was the wrong one.
+Compiling every header standalone is the obvious check and it does NOT
+catch this: standalone compilation still runs under the local standard
+library, so on macOS the header compiles alone for exactly the reason the
+bug survived. Deleting the include again and rerunning it reported
+success - the guard would have shipped looking like protection while
+detecting nothing on the machine this is developed on.
+
+check_headers.py checks the dependency textually instead: a header that
+names std::cos must include <cmath>. That works under any standard
+library, which is the whole point, and the trade is that it does not parse
+C++ - so comments and string literals are stripped first, or this project's
+prose would flag itself. The symbol table is deliberately conservative;
+a missing entry costs far less than a false positive on a guard people
+then learn to skip.
+
+Fault-injected both ways: removing <cmath> from terrain_gen4d.h and
+<vector> from world.h each produce a named failure. Runs in CI and as
+audit.sh's twelfth check.
+```
+DanielWLiu07
+and others
+added 19 commits
+September 7, 2026 11:19
+feat(cli): --slice-prisms, so the 4D world can be looked at rather th…
+…
+66befbd
+```
+…an described
+
+Wires the prism mesher into the streaming path, and the world now renders
+as the cross-section of a 4D lattice. Turn both planes and the terraces
+stop being squares.
+
+Three mesh sites had to move together, because the mesh encoding rides in
+u_model and one uniform serves the whole terrain pass - a cube mesh drawn
+with the prism model matrix draws crushed into a sixteenth of its chunk.
+So every mesh built while prisms are on comes from the prism path:
+
+  - streaming builds cells FIRST and rasterises the voxel grid from them.
+    That ordering is what keeps what the player collides with equal to
+    what they can see; voxels first and cells derived would put the two a
+    rounding apart at every tilt.
+  - a chunk restored from disk IS the authority on its own contents, so
+    its tiling reads columns back out of it instead of regenerating them.
+  - an edit re-tiles from the edited chunk, which costs a few milliseconds
+    against the cube path's fraction of one. That is the price of the edit
+    landing on the shape the player is actually looking at.
+
+Light and AO are baked the way the cube mesher bakes them, sampled from
+the cell OUTSIDE the face. The first render without this was pure white -
+a hardcoded full-bright light level reads as a blown-out world, not as a
+missing feature, which is exactly the kind of bug a screenshot catches and
+a test does not.
+
+AO is per face and derived from the tiling, not from a 3x3 voxel stencil.
+The voxel formula asks which of eight cells around a corner are solid; a
+cell here has three to six neighbours and no corners in common with a
+grid, so there is nothing for it to index. Counting how many of a cell's
+own neighbours are solid at the face's height is the same statement in the
+tiling's terms and darkens a pit, a crevice and a cave mouth in the same
+places.
+
+--validate learned that a prism mesh is not a voxel mesh. "Every face is
+backed by a solid voxel on the correct side" assumes faces lie on integer
+planes and that what is behind one is a voxel, and neither is true of a
+cross-section. It now asks the two questions that ARE true of it and that
+a bug would break: every vertex inside the addressable footprint, and
+every triangle winding the way its normal points. Reported under the same
+name, on the bytes the GPU holds:
+
+    --slice-prisms --validate   chunks=625 bad_triangles=0 gpu_mesh_mb=39.77
+    (3D, unchanged)             chunks=625 bad_triangles=0 gpu_mesh_mb=10.99
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_016gxuMhpeabJ6AeHwdqz8ko
+```
+feat(world): trees that grow on the 4D lattice, so a tilted world is …
+…
+d1e4b72
+```
+…not a bald one
+
+The prism path had no trees. That is not a missing decoration - it was the
+one feature of the generator that could not simply be reused, and it is
+worth saying why: a tree is the only thing here that spills SIDEWAYS. A
+cube-path tree spreads across voxel columns. In a tilted world there are
+no voxel columns to spread across, so a tree has to be told which space it
+is spilling in.
+
+The stamps are now templates on their sink, and the sink is the difference:
+Chunk for the cube path, a set of 4D lattice cells at a fixed w for the
+prism path. Nothing else about them changes, so both worlds keep growing
+identical trees and the heights the tests pin (bush 1, oak 5, conifer 7)
+stay pinned for both.
+
+Fixed w is the load-bearing part. A tree spreads in (i, k) and never in l,
+which makes it one 4D object occupying one slab of the fourth dimension,
+exactly as a placed block does - turn the cut and it is cut through rather
+than deleted. Letting the stamp cross w instead smears every tree through
+the fourth dimension, and the rotation-invariance check catches it.
+
+Planting pushes from every cell that can REACH this chunk, not only from
+the ones inside it. That fixes an artifact the cube path has: a canopy is
+five cells across and the cube generator has no way to reach across a
+chunk boundary, so a cube world has a tree-free band two blocks wide
+around every chunk. Considering the dilated set is affordable because the
+density rule cannot exceed 0.037, so one hash rejects about 96% of
+candidates before a column is generated for them.
+
+It is also not optional at a tilt: restricting sources to the chunk's own
+cells leaves a tilted chunk with NO trees at all, because the rotation
+shifts which lattice cells the footprint owns. That is what the fault
+injection showed.
+
+Cost, 5x5 chunks, seed 1337, against the greedy cube mesher:
+
+    flat        2.47x quads   2.6 ms/chunk   (was 2.25x without trees)
+    zw only     3.52x quads   3.1 ms/chunk
+    both        5.12x quads   4.5 ms/chunk
+    hard tilt   5.15x quads   4.8 ms/chunk
+
+Five more checks: every cube-world tree block exists in the prism world at
+a flat cut (containment, not equality - the prism world grows the boundary
+band the cube world drops), and a tilted cut passes through trees in more
+than one slab of w. Validated by smearing the stamp across w and by
+dropping the dilation.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_016gxuMhpeabJ6AeHwdqz8ko
+```
+perf(world): cull a chunk's outer prism walls against the chunk next …
+…
+4415ebf
+```
+…door
+
+Interior walls were already 98.4% hidden by the cell across them, which
+made a chunk's OUTER walls about 80% of the wall geometry that actually
+shipped - every one of them emitted, buried in the next chunk's rock,
+where no camera will ever reach.
+
+The neighbour is held as a voxel layer, not as cells, so this is a grid
+answer to a lattice question and it is deliberately biased: a wall is
+hidden only if EVERY voxel its segment spans is solid. One air voxel
+anywhere along it keeps the wall. Hiding on ANY solid voxel would open a
+gap wherever a segment straddles the edge of the neighbour's rock, and
+that is the failure this repo refuses by policy - guessing solid culls a
+face that might be visible, guessing air costs a quad nobody sees. An
+absent neighbour is treated as air for the same reason.
+
+The residual is a cell narrower than a voxel falling between two solid
+voxels and losing a wall it needed; the artifact would be a gap thinner
+than a block, the same order as the rasterisation error physics already
+carries.
+
+Measured, 3x3 chunks, seed 1337:
+
+    flat   walls 6888 -> 4876  (-29%),  whole mesh -14%
+    both   walls 11228 -> 8465 (-25%),  whole mesh -9%
+
+Caps are 63% of a compound-tilted mesh and cannot be merged at all -
+neighbouring cells present their own polygons at their own angles, so no
+two are coplanar-and-adjacent. That is not a missing optimisation, it is
+what a tilted cut of a lattice is.
+
+In the engine: --slice-prisms --validate goes 39.77 -> 36.90 MB (less than
+the 14% above because the window's outermost ring has no neighbours to
+cull against). The 3D path is untouched at 10.99.
+
+Four checks. The first fault injection went through TWO tests that could
+not see it: a uniform neighbour plane cannot distinguish "all voxels
+solid" from "any voxel solid", and neither can a count of walls near an
+air column, because walls lying wholly inside it survive either rule. What
+separates them is a count of walls that STRADDLE the column, measured
+against the all-solid plane as a baseline.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_016gxuMhpeabJ6AeHwdqz8ko
+```
+feat(input): P switches between cubes and cross-sections while you ar…
+…
+6032acc
+```
+…e looking at the hillside
+
+The difference between a cube and a hexagonal pillar is a thing to toggle
+back and forth on one piece of terrain, not a thing to compare across two
+launches. Making that possible needed the mesh encoding to stop being a
+property of the world.
+
+Two changes, and the first one is free:
+
+The cube mesher now writes texture coordinates in the same 1/64-block unit
+the prism mesher does. A run length is a whole number of blocks and needs
+no fraction, but carrying two encodings means the shader needs a uniform
+to tell them apart, and that uniform has to be right for every mesh in the
+draw call - which is what stopped the two meshers coexisting. One unit
+costs nothing (a 256-block run is 16384, well inside the u16). The
+resulting render is not merely equivalent, it is identical: the 3D
+capture's PNG hashes to c4dcaaa6 before and after, because 64 is a power
+of two and the shader's multiply is exact.
+
+Position scale moved from World to ChunkSlot. A window part-way through a
+switch now draws both kinds correctly instead of crushing whichever half
+has not caught up.
+
+--validate in prism mode now checks the SWITCH, not only the state,
+because a half-switched window is a transient and no screenshot catches a
+transient. It flips the mesher, drains part of the way, and validates the
+world that exists while both encodings are resident:
+
+    [validate] mid-switch: 8 cube + 617 prism meshes resident, 0 flagged
+
+The counts are printed and gated, not incidental. A check that only ever
+runs where the thing it guards is absent is not a check, and this repo has
+been caught by that four times - so a run that never produces a mixed
+window fails rather than passing quietly. The drain runs to a CONDITION
+rather than for a fixed number of rounds, so the gate does not depend on
+how fast the workers happen to be.
+
+Validated by dropping the per-chunk scale: 625 cube + 0 prism resident and
+1,586,950 triangles flagged, which is both halves of the check firing.
+
+The 3D path is untouched: --validate 10.99 MB, BENCH_SUMMARY greedy=5.33
+world_mesh_mb=10.91, eight suites green.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_016gxuMhpeabJ6AeHwdqz8ko
+```
+fix(verify): the 4D travel gate was measuring worker throughput, not …
+…
+80d254c
+```
+…the engine
+
+--verify-4d failed the audit with every reported property reading 1 and
+zero bad triangles, which is its own finding: the failing condition had no
+field in the output. Two of the three inputs to `ok` were never printed.
+
+The one that failed was held_ok, and inside it a fraction:
+`held_geometry > held_travelled * 0.5`, meaning "while the travel key is
+held, the world keeps up to within half the distance walked". That is not
+a claim about the engine. It is a claim about how many chunks nine threads
+can rebuild in two seconds of WALL CLOCK, and the same binary produced
+0.97, 0.97 and 0.43 on three consecutive runs at load average 34. The
+audit was failing on what else the machine was doing.
+
+Replaced with what is actually invariant: geometry follows w while the key
+is held (rebuilds happen, and the near field moves at all), and once the
+travel stops the world converges - no chunk left stale. Convergence is
+defined the way `converges` already defines it after a rotation, as
+slice_lag().stale == 0, and not as near_meshed_w equalling slice_w:
+streaming only re-requests a chunk once its own w has drifted past
+kSliceRemeshStep, so a settled world legitimately holds geometry up to one
+rebuild step behind. Demanding equality fails the design, not a defect,
+and it did - held_settled read 0 on two runs in three until this was
+fixed.
+
+The drain is local rather than settle_slice(), because settle_slice sets
+the shared settle_timed_out flag that tilt_ok has already been computed
+from and that the `settled` field reports; calling it from here rewrote
+the verdict of a check that had already run.
+
+The keep-up fraction is still measured and printed - how far the world
+lags while you walk is worth knowing - as held_keepup, with held_settled
+and held_stale beside it. It is a timing figure and it is now reported as
+one instead of gated as though it were a ratio of counts.
+
+Three runs after: keepup 0.95 / 0.88 / 0.77, held_settled=1 and
+held_stale=0 every time, verdict ok every time. Validated by making
+stream_slice refuse every rebuild - the bug this check exists to catch:
+held_rebuilds=0, held_geometry=0.00, held_stale=625, FAILED.
+
+Two other things landed in the same change and are named here rather than
+left to be discovered in the diff:
+
+  - `hyperslice --mesh` reports what a chunk costs meshed as prisms
+    against the greedy cube mesher on the same terrain, so the figures in
+    the commits above stop living in a scratch program. Ratios of counts
+    first, timings second, because only the first kind reproduces on
+    another machine. It also corrects those figures: the earlier ones
+    compared the prism path's WHOLE cost (tiling, columns, mesh) against
+    the greedy MESH alone. Against the cube path's whole cost the prism
+    path is 2.64 vs 2.94 ms flat and 4.88 vs 2.55 ms at a hard tilt.
+
+  - the HUD says which way blocks are being drawn, and how many cells the
+    tiling produced per voxel column. That line exists because at a
+    single-plane tilt the two modes are IDENTICAL - a cut turned in one
+    plane presents four-sided cells at every angle - so without it a
+    player has no way to tell the feature is on.
+
+AUDIT: all checks passed.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_016gxuMhpeabJ6AeHwdqz8ko
+```
+test(audit): gate the cross-section path, not just the cube one
+…
+ac25946
+```
+The prism path had 39 unit checks and a --validate mode and neither ran in
+the audit, which meant the whole feature could regress without a single
+red line locally or in CI.
+
+Two steps added:
+
+  - the same 21 4D properties again with --slice-prisms. Not a duplicate
+    run: it is a different mesher, a different vertex encoding, and a
+    different order of operations (cells first, voxel grid rasterised from
+    them), so nothing that holds for one is implied for the other.
+    tilt_returned is a byte-identity check and is the one that would
+    notice the tiling failing to reproduce itself.
+
+  - hyperslice --mesh, gated on the flat cut tiling into exactly 256 cells
+    per chunk. A ratio of counts, not a timing: an untilted 4D cut IS the
+    voxel grid, so 256 is a property of the geometry and reproduces
+    anywhere. Anything else means the tiling and the voxel grid have come
+    apart.
+
+Both fault-injected. Raising the minimum cell area to half a block breaks
+the prism verify step (exit 1) and leaves the tiling step passing, which
+is the right split: dropping thin cells changes nothing at a flat cut,
+where every cell is a whole square.
+
+AUDIT: all checks passed, twelve steps.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_016gxuMhpeabJ6AeHwdqz8ko
+```
+docs: what the cross-section renderer does, and the two decisions tha…
+…
+761e16f
+```
+…t were not obvious
+
+README gets a matched pair - same terrain, same cut, same pose, cubes
+against cross-sections - because the difference is a thing to look at
+rather than a thing to describe, and the cost table straight out of
+hyperslice --mesh so no figure here lives in a scratch program.
+
+docs/4d.md gets the design: why the mesher inverts the question, why
+vertical runs merge exactly and horizontal ones cannot merge at all, and
+the two choices that a reader would otherwise assume were arbitrary.
+
+  - a cell is sampled at its LOW CORNER and not its centre, because that
+    is what makes an untilted 4D cut reproduce the cube world block for
+    block. The centre-sampling version failed the flat-cut equality check
+    on its first run, which is why the check exists and why the audit
+    gates it as "flat -> 256 cells per chunk".
+
+  - ownership of a boundary is decided on the half-open cell at the
+    polygon's centroid. Clipping must be closed or adjacent cells stop
+    sharing their edge, but a closed clip cannot break the tie at
+    theta = phi = 0 with w = 0, where the cut lies exactly ON the lattice
+    plane and both neighbouring cells claim the full square. That is the
+    orientation the engine starts in, so the degenerate case is the
+    default one.
+
+Also recorded under "what this does not do yet": prism AO is per face and
+cannot gradate across a single face the way the cube path's corner
+sampling does.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_016gxuMhpeabJ6AeHwdqz8ko
+```
+test(ci): hold the 4D tiling to the same reproducibility bar as the rest
+…
+039f779
+```
+The prism path had unit tests and a local audit step and nothing in CI,
+and no check anywhere that its output is a property of the engine rather
+than of the machine.
+
+hyperslice --mesh now ends with PRISM_SUMMARY: cells per chunk and quads
+per cut, and nothing else. The millisecond columns above it are
+deliberately excluded, because those are the one part of that table that
+moves with what else the machine is doing - which is the same distinction
+check_invariance was written to enforce for BENCH_SUMMARY, applied to the
+same author's newer numbers.
+
+check_invariance.py runs it three times and requires the line
+byte-identical, then names the fields that moved if it is not. It skips
+rather than fails when hyperslice is not built, so a partial build does
+not turn into a red line about invariance.
+
+CI gains the 21 4D properties again under --slice-prisms. Not a duplicate
+of the step above it: different mesher, different vertex encoding,
+different order of operations.
+
+The first fault injection did not fire, and the reason is worth keeping:
+it made the tree pass skip a lattice row on alternate runs, and at 1.2%
+planting density over a 3x3 chunk window that row plants no trees at all,
+so the output never moved. A check is only as good as the fault that
+reaches it. The second - making the minimum cell area time-dependent -
+produced four different PRISM_SUMMARY lines in four runs, with the flat
+row correctly unmoved, because at a flat cut every cell is a whole square
+and no threshold in that range touches it.
+
+Also confirmed in prism mode: --verify-edit-persistence passes all three
+legs (survived, survives_disk, wipe_clean), so placing and breaking blocks
+works on the cross-section path including across eviction and reload.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_016gxuMhpeabJ6AeHwdqz8ko
+```
+test(sanitizers): the clipper writes at computed indices and ASan had…
+…
+cf47acf
+```
+… never seen it
+
+prism_tests and hyperslice_tests are ctest tests, and they were sitting in
+the VOXEL_BUILD_BENCH block because that is where the hyperslice binary
+they grew up beside lives. run_sanitizers.sh configures with
+-DVOXEL_BUILD_BENCH=OFF, so those two targets did not exist in the ASan
+build - which meant the one path in this repo that writes geometry at
+computed indices into fixed-size arrays was the one path ASan never saw.
+
+Sutherland-Hodgman fills a polygon of up to eight vertices in place while
+reading the same array, the fan triangulator indexes back into it, and
+both are bounded by arithmetic rather than by a container. That is exactly
+what ASan is for.
+
+Moved both into the tests block where they belong and added them, plus
+terrain4d_tests, to the sanitizer run. Clean:
+
+    prism_tests       39 checks, 0 failures
+    hyperslice_tests  23 checks, 0 failures
+    terrain4d_tests  107 checks, 0 failures
+    All sanitizer runs clean (TSan + ASan + UBSan).
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_016gxuMhpeabJ6AeHwdqz8ko
+```
+fix(world): a wall thinner than the vertex grid was facing the wrong way
+…
+5d7ef1e
+```
+Found by running --validate at a compound tilt, which nothing had done:
+610 triangles flagged BACKWARDS on a world that looked fine and that every
+unit test passed. The winding test checked one cut and one chunk, and the
+defect needed a particular pair of angles AND a particular chunk.
+
+The cause is the quantisation the packed vertex needs. An edge running
+almost along +x, 4 cm long across, had both ends land on the same x byte -
+so the direction the GPU sees is the one-step z displacement left over,
+rotated 78 degrees from the true edge. The stored normal describes the
+true edge; the triangle faces somewhere else; backface culling turns it
+into a hole. Nothing upstream could see it, because every part of the
+mesher was reasoning about a polygon the GPU never receives.
+
+Fixed by snapping the polygon to the addressable grid ONCE, in the cell,
+right after the tiling - so the polygon in hand IS the polygon uploaded.
+Normals, winding, uv lengths and cap areas then all come from the same
+coordinates and cannot disagree. Sub-step edges do not become
+badly-facing slivers; they cease to exist, which is the correct answer
+for a face 6 cm wide, and the corner merge is applied to the neighbour
+list too so the surviving edge keeps its neighbour.
+
+It cannot open a crack: two cells name a shared corner with the same
+float, and the same float snaps the same way, so a corner that survives
+survives on both sides and one that collapses collapses on both. The
+neighbour probe deliberately still runs on the exact polygon - it steps a
+hair past an edge midpoint to ask which cell is over there, and a snapped
+midpoint can be 3 cm off, enough to land in the wrong cell.
+
+The tiling got slightly cheaper as a fallout, since merged corners are
+fewer walls and smaller fans: both planes 76,402 -> 74,112 quads, hard
+tilt 88,029 -> 85,109, flat unchanged at 37,511 because no edge there is
+sub-step.
+
+Measured, radius 12, M4:
+
+                            GPU mesh   frame    fps   triangles
+    cubes (3D engine)       10.99 MB   4.69ms   213     145,418
+    cross-sections, flat    37.35 MB   5.96ms   168     529,090
+    cross-sections, tilted  77.82 MB   7.46ms   134   1,079,646
+
+7.6x the triangles and 1.6x the frame at a compound tilt, still 8x inside
+a 60 Hz budget. README and docs/4d.md updated to those figures.
+
+The winding test now sweeps five cuts across four chunks, with (-9, +12)
+in the list by name because that is where the failure actually was.
+Validated by removing the snap: it fires.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_016gxuMhpeabJ6AeHwdqz8ko
+```
+test: validate the cross-section mesh at a tilt, which is where it ca…
+…
+7af7e95
+```
+…n be wrong
+
+--validate on its own runs the default cut, and the default cut is flat.
+At a flat cut every cell is a whole square and every edge a whole block,
+so the vertex quantisation cannot round an edge into a different
+direction - the entire class of defect fixed in the previous commit is
+unreachable there. That is why 610 backwards-facing triangles survived a
+green audit, a green CI run and 39 passing unit checks.
+
+Both the audit and CI now run --validate with both planes turned. Same
+binary, same mode, one flag pair different, and it is the flag pair that
+makes the geometry hard.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_016gxuMhpeabJ6AeHwdqz8ko
+```
+test(world): fuzz the tiling across random cuts and chunks
+…
+68604c0
+```
+Every property in prism_tests was checked at hand-picked angles, and a
+hand-picked angle is exactly what missed the backwards-facing wall: it
+needed a particular pair of angles AND a particular chunk, and no amount
+of adding one more slice to a list finds that reliably.
+
+Sixty pseudo-random cuts - w, both rotation planes, both shifts - across
+random chunk coordinates, asserting the three things that must hold at
+every orientation: the prisms tile the chunk, every corner is
+addressable, and every triangle winds the way its normal points. Fixed
+seed, so a failure is reproducible from the line it prints.
+
+The area tolerance is a tenth of a block rather than a rounding, and that
+is a consequence of the snap rather than slack: corners now sit on the
+grid the vertices live on, so a tiled patch is exact to that grid and not
+to a float. A tenth of a block over a 256-block patch still catches a
+whole missing cell, which is what it is for.
+
+Validated by both faults: removing the snap fires the winding check (in
+the fuzz and in the hand-picked sweep), and dropping one cell in ninety-
+seven fires seven checks across four tests including the fuzz's tiling.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_016gxuMhpeabJ6AeHwdqz8ko
+```
+docs(media): regenerate the block comparison after the winding fix
+…
+cf0384a
+```
+The pair was captured before sub-step edges stopped being emitted, so the
+command in the caption no longer reproduced the image byte for byte. This
+repo treats a still as an artifact with the same rules as a benchmark -
+the caption carries the command that regenerates it - so the image has to
+follow the code.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_016gxuMhpeabJ6AeHwdqz8ko
+```
+fix(4d): the startup banner said walking never changes the world, and…
+…
+62b3d91
+```
+… at a tilt that is false
+
+Checked 4D Miner's documented behaviour rather than going from memory,
+and two things came back.
+
+The first corrects a comment I wrote: hyperslice.h attributed "hexagonal
+pillar" to the 4D Miner wiki. The wiki says "uniquely-shaped slices of 4D
+blocks" and names no shape, so the attribution is withdrawn. The result
+was never resting on it - it falls out of the algebra six lines above -
+but an unsourced attribution in a repo that gates its own numbers is the
+wrong kind of sentence to leave lying around.
+
+The second is a real behavioural claim, and it confirms the geometry: the
+wiki describes rotation in the ZW plane (mouse wheel, or vertical mouse
+with M held) and the XW plane (horizontal mouse with M held), and in no
+other. y is never mixed with w. That is not a simplification on this
+engine's part - it is exactly what makes a cell's cross-section a PRISM
+rather than a general polytope, and therefore what makes vertical runs of
+blocks merge exactly. The premise the whole mesher rests on is the
+control set.
+
+And it exposed a false statement in the engine's own startup banner:
+"WASD moves you through space and does NOT change the world." True on a
+flat cut. False on a tilted one, where the slice's z axis leans into w
+and every block walked carries you along the fourth axis:
+
+    cut (zw, xw)   player-w per block   blocks per 4D cell
+    flat                        0            never
+    0.15, 0                 0.025              6.7
+    0.45, 0.45              0.089              2.3
+    0.90, 0.70              0.275              1.3
+
+At a 0.45 tilt, walking one chunk carries you 1.4 units along w - further
+than three and a half seconds of holding the travel key. That is why the
+tilt is the control that makes the world feel four-dimensional, and the
+banner now says so.
+
+Pinned as a test rather than left as prose: on a flat cut, walking the
+whole chunk in both directions must never leave the starting w cell; on a
+tilted one it must leave within a few blocks. Bounded from ABOVE on
+purpose - "eventually" would pass on a cut so nearly flat that nothing the
+player does reads as 4D. Validated by flattening the z-into-w term in the
+slice basis: six checks fire.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_016gxuMhpeabJ6AeHwdqz8ko
+```
+fix(world): three streaming defects, found by asking a capture to rep…
+…
+2f50f1a
+```
+…eat itself
+
+Built --capture-walk to answer "does walking move me through 4D" - it
+holds the cut and moves the camera, a ping-pong so frames 0 and 2 sit at
+the same pose. Two frames at the same pose, same cut, same hour, with the
+world converged, must be byte-identical. They were on two runs in three.
+
+That is the repo's byte-stable capture guarantee failing intermittently,
+in every multi-frame mode, and verify_occlusion.sh could not see it -
+that compares ONE frame across two runs, and the defect lives across
+frames of one run.
+
+Three separate causes, each fault-injected:
+
+1. SHADOW CASCADES were staggered by frame_index, which counts settle
+   frames and per-frame convergence waits. Both are wall-clock dependent,
+   so a captured PNG's shadows depended on how long streaming happened to
+   take, and cascades 1 and 2 could hold depth rendered from an older
+   camera position. A scripted camera now refreshes all three every
+   frame; it already waits seconds per frame, so 3 passes instead of 1.75
+   costs it nothing. --bench-frame is deliberately excluded - it is
+   timing the engine and must not be given a schedule the engine never
+   runs. Caught 3 runs in 3.
+
+2. A DIRTY MARK WAS DISCARDED when a job for that coord was already in
+   flight, on the reasoning that the job would mesh it correctly. That
+   job captured its boundary planes at SUBMIT time, which can predate the
+   neighbour's arrival - so the job landed short and nothing revisited
+   it. Closed at the landing site instead, where the answer is known:
+   if more neighbours are resident than the mesh was built against,
+   queue a re-mesh. Measured directly rather than argued: a new
+   chunks_meshed_short() counter reads 1 on one run in three without it
+   and 0 with it, after the world reports converged. Caught 3 runs in 6,
+   which is the race's own rate and is said out loud in the script.
+
+3. THE BOUNDARY RE-MESH PASSED A PARTIAL SLICE STAMP - {w, theta}, with
+   phi, z_shift and x_shift defaulting to zero - and the slot is
+   re-stamped from what is passed. In prism mode that stamp is also the
+   CUT the tiling is rebuilt from, so a re-mesh tiled the chunk with a
+   hyperplane its blocks never came from: 22,935,216 -> 22,995,216 bytes
+   of resident mesh at the same frame, the larger being correct.
+
+   The first version of this commit message claimed the partial stamp
+   made chunks permanently stale and cost redundant work. Neither is
+   true and both are now measured: the next stream_slice re-requests with
+   the full slice so the world still converges, and six-frame walk
+   captures timed 3.6/2.6 s against 2.9/2.7 s, which is noise.
+
+And a fourth, found while separating the three: a prism boundary re-mesh
+read its columns back out of the voxel grid while a fresh stream generated
+them, so whether a chunk took a re-mesh changed its geometry - decided by
+worker timing. Re-meshes of ordinary terrain now go back to the generator;
+only a player-edited or disk-restored chunk, which the generator cannot
+reproduce, reads itself back. New test measures why the two are not
+interchangeable: same chunk, both sources, different columns and different
+quad counts.
+
+scripts/verify_capture_stable.sh gates all of it and is in the audit -
+fifteen steps, all green. The engine's own figures are untouched:
+--validate 10.99 MB, BENCH_SUMMARY greedy=5.33 world_mesh_mb=10.91.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_016gxuMhpeabJ6AeHwdqz8ko
+```
+feat(capture): --capture-walk, the clip where only the camera moves
+…
+11a024d
+```
+The complement of --capture-tilt. There the world turns and the viewer
+holds still; here the viewer walks and the cut is held completely still,
+which is the only way to show that walking a tilted cut is travel along w
+rather than assert it.
+
+A ping-pong, like the tilt sweep and for the same reason - a straight
+walk's last frame does not meet its first - and walking out and back also
+demonstrates the return: the world you walk back into is the one you
+left, byte for byte.
+
+CLIP_WALK_TILT=0 produces the control, where the same walk changes
+nothing about the world at all. That pairing is the whole argument:
+identical camera path, one flag apart, and only one of them reworks the
+terrain.
+
+The mode is also what found the three streaming defects in the previous
+commit, because it is the first capture that returns to a pose it has
+already rendered.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_016gxuMhpeabJ6AeHwdqz8ko
+```
+fix(4d): walking does not morph the world, and I said it did
+…
+55d8d2c
+```
+Asked directly why the world only morphs on the scroll wheel and not
+while walking. It does not, it cannot, and both the engine's startup
+banner and a caption I wrote implied otherwise.
+
+The geometry is settled: a slice is a fixed hyperplane and walking moves
+you WITHIN it, so terrain already in view stays exactly as it is and
+terrain coming into view is ordinary new terrain. This engine makes it
+structural rather than incidental - slice_drift takes a chunk and a
+slice and no player position, so walking cannot mark a single chunk stale
+and therefore cannot rebuild anything.
+
+4D Miner is the same. Its wiki: "the world itself doesn't change when you
+walk around - your 3D hyperplane slice stays the same ... the illusion of
+change occurs when you rotate your slice."
+
+What I had written was true and misleading, which is the worse failure.
+On a tilted cut your w coordinate DOES change as you walk - one 4D cell
+every 2.3 blocks at 0.45 rad, and that is measured and tested. But it has
+no visual consequence, because the axis it moves you along is the one you
+are already standing in. The banner drew a contrast between flat and
+tilted walking that a player cannot see, and the slice_walk.gif caption
+said the terrain "reworks as you go". It does not; it slides past.
+
+Recaptioned as what it actually is: the CONTROL for the rotation clip,
+here to be unimpressive.
+
+--warp-walk, which exists to give the warping anyway, had the same gap
+the scroll wheel had before XW: it fed hypot(dx, dz) into ZW alone, and a
+cut turned in one plane presents four-sided cells at every angle. So no
+amount of warp-walking could make a block anything but a box - precisely
+the thing the flag exists to show. It now splits the movement: forward
+and back lean the cut in ZW, strafing leans it in XW. Signed rather than
+by distance, so walking back unwinds it; the old magnitude turned the
+world further whichever way you moved, with no way to undo an accidental
+warp except to scroll it out by hand.
+
+Sixteen audit steps green, --validate 10.99 MB, BENCH_SUMMARY unchanged.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_016gxuMhpeabJ6AeHwdqz8ko
+```
+perf(world): greedy meshing does work on a tilted cut - it has to run…
+…
+e886537
+```
+… in lattice space
+
+This mesher's own comments said horizontal faces could not be merged:
+"neighbouring cells present their own polygons at their own angles, so no
+two cap faces are coplanar-and-adjacent in the way the greedy mesher
+needs." That is true of the polygons and false of the conclusion, and it
+cost a third of the geometry.
+
+The preimage of a convex set under a linear map is convex. to_4d is
+linear. A lattice box is convex. So a BOX of cells presents ONE convex
+polygon to the slice - at any angle, however many cells it spans - which
+fan-triangulates exactly like a single cell's and is still bounded by the
+same six half-planes. Greedy meshing applies unchanged; it just has to
+sweep its mask over (i, k) of the 4D lattice instead of (x, z) of the
+chunk, where the faces are not axis-aligned and a rectangle sweep has
+nothing to grip.
+
+At a flat cut the lattice IS the voxel grid, so this reduces to the cube
+mesher's greedy pass exactly.
+
+    cut            before    after
+    flat           2.47x     1.60x  greedy quad count
+    ZW only        3.45x     2.19x
+    both planes    4.97x     3.32x
+    hard tilt      4.98x     3.87x
+
+In the engine at radius 12: 37.35 -> 22.25 MB flat, 77.82 -> 48.65 MB
+with both planes turned; frame 5.96 -> 5.28 and 7.46 -> 6.53 ms. The mode
+now costs 4.7x the triangles at a compound tilt rather than 7.6x, and
+sits 2.6x inside a 60 Hz budget.
+
+Writing box_polygon exposed a latent overflow in the kernel:
+SlicePolygon::kMaxVerts was 8, which is the bound for the six lattice
+half-planes alone. Clipping to the patch square adds four more, so ten is
+the real ceiling, and the clipper TRUNCATES SILENTLY when it runs out -
+it would have handed back a polygon that is simply the wrong shape. It
+held for single cells because a unit cell can only reach one corner of a
+16-wide patch, and it stops holding the moment a merged box spans enough
+of the patch to touch two edges.
+
+Block id, light and AO are all in the merge key rather than averaged, so
+a merged face is exactly what the unmerged faces were. The cube mesher
+can merge across differing light because it samples per corner and lets
+the gradient interpolate; one flat polygon with one value cannot, so it
+does not.
+
+Eight checks. The area oracle is the one that matters and it is
+independent of the mesher - walk the tiling and the columns, sum the cap
+area that ought to exist, compare against the area of the quads that came
+out. Validated by emitting the first cell's polygon instead of the box's
+(three area failures) and by disabling both extension passes (both
+reduction checks fire, which is the guard against a merge that quietly
+does nothing).
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_016gxuMhpeabJ6AeHwdqz8ko
+```
+perf(world): merge walls in lattice space too, 4.97x -> 3.05x
+…
+285a9cd
+```
+The cap merge left vertical faces as 72% of a flat-cut mesh. They merge by
+the same argument, with one extra step: a merged wall's footprint is the
+EDGE of the merged box that lies on the lattice face it sits on, so
+box_polygon does the geometry and no line clipping is needed.
+
+    cut            before   caps only   + walls
+    flat           2.47x      1.60x      1.41x   greedy quad count
+    ZW only        3.45x      2.19x      1.95x
+    both planes    4.97x      3.32x      3.05x
+    hard tilt      4.98x      3.87x      3.59x
+
+Engine at radius 12: 19.05 MB flat and 44.38 MB with both planes turned,
+against 37.35 and 77.82 before any merging. 4.3x the cube path's triangles
+at a compound tilt, 1.4x the frame, 2.6x inside a 60 Hz budget.
+
+Two things this found about my own first attempt:
+
+The face a wall lies on was being recovered from the edge GEOMETRY, by
+testing both endpoints against each lattice plane. That silently did
+almost nothing at a tilt: the polygon has been snapped to the vertex grid
+by then, which moves a plane equation by up to half a quantisation step -
+thirty times the tolerance the test used. Flat cuts snap exactly, so it
+worked there and only there, and the numbers looked like a win. Taken
+from the NEIGHBOUR instead, which is exact: the cell across an edge
+differs by one on exactly one axis, and that names the face outright.
+
+And an intermediate version reported 0.75x the greedy quad count at a
+flat cut, which was not a triumph - it was walls going missing, caught by
+the closed-surface check.
+
+The fallback for a merged box with no edge on its own face is unreachable
+(every member contributed an edge on that face inside the patch, and the
+box contains every member), and instrumenting it confirmed zero firings
+across the whole suite including the sixty-case fuzz. It is now an assert
+in debug and the safe direction in release.
+
+It does NOT reach parity with greedy at a flat cut, and that is in the
+header rather than rounded off: a merged wall spans one uniform y range,
+so two cells with different exposed heights never share a quad, where the
+cube mesher's sweep splits them and merges the overlap. Closing it needs
+a 3D box decomposition; this is the 2D sweep.
+
+Six checks including an area oracle for walls derived from the tiling
+rather than from the mesher. Validated by taking y out of both the merge
+key and its hash - the first attempt at that fault changed nothing
+because the hash still separated the buckets, which is its own lesson
+about fault injection.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_016gxuMhpeabJ6AeHwdqz8ko
+```
+DanielWLiu07
+force-pushed
+the
+4d-noise-phase0
+branch
+from
+1ac22da to
+285a9cd
+Compare
+September 7, 2026 21:13
+DanielWLiu07
+and others
+added 6 commits
+September 7, 2026 17:15
+docs: lead with the fourth dimension, and give it a resume bullet
+…
+9141650
+```
+The README opened with "a desktop voxel engine" and put the 4D work 90
+lines down, behind three sky screenshots. That is the wrong order for the
+one thing in this repo nobody else's voxel engine has, and it was the
+strategic problem identified months ago - "everybody has a voxel engine" -
+left unaddressed in the file where it matters most.
+
+It now opens with the rotation clip (camera locked, only the cut moving),
+the cubes-versus-cross-sections pair, and the result that came out of
+building it: greedy meshing works on a tilted cut, in lattice space,
+4.97x -> 3.05x. The audited-numbers pitch follows rather than leads,
+because it is the second-most interesting thing here and used to be the
+first.
+
+Resume bullet 3 is the 4D work, written the way the others are: what was
+built, the finding, the measured ratio, and how it is gated. It leads with
+the finding rather than the feature, because "extended a voxel engine to
+4D" is a description and "the optimisation everyone says does not apply
+there does, and here is the proof and the ratio" is an argument.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_016gxuMhpeabJ6AeHwdqz8ko
+```
+docs(media): blink the two block modes against each other
+…
+963e815
+```
+A side-by-side pair asks the reader to find the difference. A blink shows
+it: same world, same cut, same camera, only the block shape changing, so
+every corner that moves is a corner a cube was getting wrong.
+
+Two frames at one second each, built from the two stills the README
+already carried, so it costs one command and no new capture.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_016gxuMhpeabJ6AeHwdqz8ko
+```
+feat(world): rock formations that are genuinely four-dimensional
+…
+d0f37b2
+```
+The world read empty. Structures fix that, and they are defined in 4D
+rather than placed in the slice, which makes them the clearest
+demonstration in the engine that the fourth axis is real:
+
+  - a boulder is a 4-BALL, so the slice cuts a sphere out of it whose
+    radius is sqrt(r^2 - d^2) along w. Travel and it swells, peaks, and
+    vanishes. This is Mashpoe's growing-and-shrinking sun, applied to the
+    ground.
+  - a monolith is a 4-BOX, so rotating the cut turns its footprint from a
+    rectangle into a hexagon exactly as one block's does, at eight times
+    the size - the hyperslice kernel's own result, standing in the world
+    where it can be walked around.
+
+They live inside fill_column, addressed by a 4D point, which is why they
+work identically on the cube path and the cross-section path without
+either mesher knowing structures exist. A tree could not be done this way:
+a tree spreads sideways across cells at one w, so it needs a set of
+columns; a 4D formation is a question each column can answer alone.
+
+Density was tuned by MEASURING, after reasoning about it went wrong twice.
+40 units and 30% treated the grid as 3D when sites are spaced in x4, z4
+AND w4 - measured, one formation per 150x150 blocks, invisible. The
+corrected formula predicted one per 55x55 at 24 units; measured, it was
+one per 120x120, because the shoreline rule rejects sites the formula
+knows nothing about. Settled at 18 units and 45%: structure blocks cover
+0.74% of the ground at w=0 and 1.4% a few slabs along.
+
+Two guards came out of failures rather than foresight. Structures broke
+the generator's "every waterline column is sand-topped" invariant, twice -
+the second time only after the density rose enough to make an overhang
+likely - so the shoreline test is now per COLUMN, not per site. And the
+call sat below the caves-disabled early return, which would have made
+--no-caves silently remove every formation.
+
+The boulder test needed FIVE attempts, and the four failures are the
+interesting part - every one passed with an extruded-sphere fault
+injected:
+
+    "rises and falls"     anything with finite extent does that
+    "many distinct sizes" terrain under a fixed footprint varies with w
+    "one contiguous run"  two monoliths with overlapping extents make one
+    "unimodal taper"      a buried block writes no difference, so even a
+                          column count moves with the terrain
+
+Every one of those measured the WORLD. The fix was a seam, not a better
+criterion: structure_footprint answers the geometric question with no
+terrain in it, and the shapes separate immediately. The site placement
+now lives in one templated helper shared by the stamping pass and the
+predicate, so the two cannot describe different worlds.
+
+Audit green, 3D figures untouched (greedy=5.33, --validate 10.99 MB).
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_016gxuMhpeabJ6AeHwdqz8ko
+```
+docs: show the 4D structures
+…
+6859b82
+```
+A boulder that swells and vanishes as you travel is the easiest thing in
+the engine to understand without any geometry, so it belongs above the
+fold rather than in the design doc.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_016gxuMhpeabJ6AeHwdqz8ko
+```
+docs: re-measure every figure after structures, and fix a scaling tab…
+…
+81c5240
+```
+…le that had rotted
+
+Structures changed the world, so every 4D figure in the README was
+measured against terrain that no longer exists. The ratios barely moved -
+formations are sparse - but the absolute counts did, and a table of
+absolute counts nobody re-ran is exactly the failure this repo audits for.
+
+Re-measuring turned up a worse one. The frame-scaling table had been
+sitting there describing an engine that stopped existing two features ago:
+
+    triangles at radius 12   167,200 -> 145,418   cross-chunk culling
+    peak RSS at radius 12    188 MB  -> 289 MB    block light
+
+Both changes were landed, measured, and written up at the time - and
+neither was carried into this table, so the README has been quoting a
+frame rate against a triangle count the engine has not produced for
+weeks. The prose above it repeated the same stale 229 fps / 188 MB /
+40-million-voxel line.
+
+Every row re-measured in one pass, with the load average it was taken at
+stated, and the counts separated from the timings in the caption - the
+counts reproduce anywhere, the milliseconds and the RSS do not.
+
+Resume bullets updated to match: 4.8 ms and 3.5x inside budget at radius
+16 with zero frames over, and 3,300 chunks/sec at 5.8-6.3x parallel
+efficiency rather than 2,200 at 6.3-8.5x.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_016gxuMhpeabJ6AeHwdqz8ko
+```
+perf(world): rebuild what the player is looking at first, and stop co…
+…
+683c3e3
+```
+…mputing a cave field that cannot matter
+
+"It feels clunky, not smooth" - so I measured it instead of guessing, and
+--bench-4d says exactly why:
+
+    motion        mean ms   issued/frame     behind     settle ms
+    scroll 15/s      2.24    12.4 / 24     289 / 289        1511
+
+behind = 289/289. While the wheel is turning, the ENTIRE window is stale,
+permanently, and takes up to 1.8 s to catch up once it stops. The load log
+says where the time goes: terrain generation 4.15 ms/chunk against 1.12
+for the mesh - 79% of a rebuild is regenerating noise.
+
+Two changes, both measured.
+
+FACING FIRST. The rebuild queue was ordered by distance from the player,
+which rebuilds a chunk three behind them before one five ahead - work the
+frame cannot show. A rotation invalidates the whole window at once, so the
+queue is never short and the only question is what comes off it first.
+Ordered by facing, then distance. A hemisphere rather than the frustum on
+purpose: the frustum starves everything a turn of the head is about to
+reveal.
+
+--bench-4d gained an `ahead ms` column, the time until the half of the
+window the camera faces goes clean, because that is the number a player
+feels - the world behind them can stay stale another second and nobody can
+tell. A/B, ordering on and off:
+
+    motion         ahead ms          settle ms
+    translate      2051 -> 1382      unchanged
+    scroll 15/s    2109 -> 1545      unchanged
+    scroll 60/s    1839 -> 1403      unchanged
+
+The visible world catches up 24-33% sooner for identical total work.
+Without the change ahead_ms equalled settle_ms to within 1%, which is the
+proof there was no prioritisation happening at all.
+
+CAVE SHORT-CIRCUIT. A cave needs BOTH iso-surfaces within kCaveIsoWidth,
+and the first rejects ~90% of cells, but the second was evaluated
+unconditionally. Exactly equivalent to reorder; 11% off terrain
+generation, 1.866 ms/chunk against 2.097.
+
+That measurement needed its own method. Sequential runs gave 2.994, 2.102
+and 1.917 ms for code that differed in one branch - a 56% spread between
+two runs of the SAME binary. Building both variants and interleaving them
+gave three significant figures of agreement across six rounds. On a loaded
+machine, alternate the binaries; do not trust consecutive timings.
+
+This does not make it as smooth as 4D Miner and is not claimed to. The
+structural fix is not to regenerate at all: 4D block data cached per chunk
+would turn a slice change from a noise evaluation into a memory walk. That
+is a storage redesign, not a knob.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_016gxuMhpeabJ6AeHwdqz8ko
+```
+DanielWLiu07
+changed the title
+feat: a fourth spatial dimension you can move through, and rotate
+The world is four-dimensional, and its cross-sections mesh
+Sep 8, 2026
+DanielWLiu07
+and others
+added 2 commits
+September 8, 2026 01:00
+fix(build): close if(APPLE), and the 4D tests stop being macOS-only
+…
+c990826
+```
+The endif() that closes the if(APPLE) adding Cocoa to voxel_tests sat
+forty lines too far down, so add_executable(prism_tests) and
+add_executable(hyperslice_tests) were inside the Apple branch. The two
+binaries that cover the entire 4D cross-section kernel did not exist on
+Linux.
+
+The visible symptom was the sanitizer job, which names prism_tests
+explicitly and failed with `ninja: error: unknown target 'prism_tests'`.
+The real symptom was the ubuntu build+bench job, which did not fail at
+all: it ran
+
+    100% tests passed, 0 tests failed out of 6
+
+against a suite two tests short, and went green. ctest cannot notice a
+test that was never registered - it runs what is in CTestTestfile.cmake,
+and these were not in it. A green run on a suite whose size depends on
+the platform is not evidence about the platform where it is smaller.
+
+So scripts/check_test_targets.py writes the suite down as a set and both
+CI jobs compare the registered tests against it, in both directions:
+missing fails, and an unlisted new test fails too, because a list that
+maintains itself is not a claim about coverage. Validated by putting the
+bug back - registering the two tests only when NOT APPLE - where the
+guard names both missing tests and ctest alone reports "Total Tests: 6"
+without complaint.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_016gxuMhpeabJ6AeHwdqz8ko
+```
+fix(4d): a collapsed cell has no centroid, so stop averaging its corners
+…
+4337568
+```
+UBSan, on the first CI run that could see this code:
+
+    prism_mesh.cpp:41: runtime error: -nan is outside the range of
+    representable values of type 'int'
+      #0 centroid_voxel(SlicePolygon const&, int&, int&)
+      #1 build_prism_chunk_from_blocks(...)
+
+tile_footprint snaps every corner to the grid the packed vertex can
+address and drops the edges that collapse; a cell left with fewer than
+three corners keeps its lattice identity but has count == 0, because it
+can no longer put a pixel on the screen. build_prism_chunk_from_blocks
+then re-derived each cell's voxel column by averaging its corners, and
+for those cells averaged zero of them: 0/0, then a cast of NaN to int.
+
+The correct answer was already in the cell. tile_footprint fills
+cell.vx/vz from the polygon BEFORE the snap, so a cell whose corners
+have since merged away still knows which voxel column it came from -
+identical to the recomputed value for every cell that survived, and the
+only defined value for the ones that did not. Use it.
+
+Four cells per chunk at theta=phi=0.45, and none of them draw: the emit
+loop skips count < 3. Every published figure is unchanged, checked -
+BENCH_SUMMARY and PRISM_SUMMARY are byte-identical across the fix, and
+--validate still reports bad_triangles=0 gpu_mesh_mb=10.99.
+
+centroid_voxel now asserts on an empty polygon rather than returning a
+voxel no reasoning supports. Validated by putting the old call site
+back: the assert fires by name instead of the failure being silent.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_016gxuMhpeabJ6AeHwdqz8ko
+```
+Hide details
+View details
+DanielWLiu07
+merged commit 64b1ed5
+into
+main
+Sep 8, 2026
+3 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

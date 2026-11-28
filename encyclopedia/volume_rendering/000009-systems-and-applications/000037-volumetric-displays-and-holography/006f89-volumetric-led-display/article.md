@@ -1,0 +1,87 @@
+# Volumetric LED Display
+
+Also called: 3D Volume LED Display, Aoshow 3D Volumetric LED Display, Suspended LED volumetric display, Voxel Array: LED Matrix
+
+## Overview
+A Volumetric LED Display creates 3D images floating in physical space by arranging individually addressable LEDs in a 3D volume [S1, S3, unofficial]. Unlike flat screens that offer a fixed frontal perspective, this method allows viewing from all angles by utilizing suspended, independently controllable LED strings [S3, unofficial]. It trades visual fidelity for multi-angle access, as the opaque nature of LEDs introduces occlusion and cross-illumination issues [S1, S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** 3D animation data (voxel positions and color values).
+*   **Output:** Illuminated LEDs forming a 3D image in physical space.
+
+**Data Structures:**
+The hardware consists of modules mounted on the ceiling. Each module suspends a set of LED strings.
+*   **Module:** Contains $N_{strings}$ LED strings.
+*   **LED String:** A linear array of LEDs.
+*   **LED:** An individually addressable light source.
+*   **Voxel Grid:** The logical 3D coordinate system $(x, y, z)$ mapped to physical LED positions.
+
+**Layout and Parameters:**
+*   **Spacing:** LEDs are spaced at a fixed interval $d$ in all directions (x, y, z). A prototype uses $d = 5$ cm [S3, unofficial].
+*   **String Length:** Maximum string length $L_{max} = 10$ meters [S3, unofficial].
+*   **String Count:** A module may contain up to 100 LED strings [S3, unofficial].
+*   **Resolution:** A prototype achieved an $8 \times 8 \times 8$ grid, totaling 512 voxels [S2, unofficial].
+
+**Numbered Steps:**
+1.  **Mapping:** System software maps the 3D animation data to the specific spatial positions of each LED in the physical array [S3, unofficial].
+2.  **Transmission:** Color data is transmitted to the hardware controller via Art-Net or HDMI protocols [S3, unofficial].
+3.  **Illumination:** LEDs illuminate at their mapped positions to form the 3D image [S3, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_volumetric_led(voxel_data, led_grid):
+    """
+    Renders 3D voxel data to a physical LED grid.
+    
+    Args:
+        voxel_data: List of tuples (x, y, z, r, g, b) representing active voxels.
+        led_grid: 3D array or hash map representing the physical LED positions.
+                  Keys are (x, y, z) coordinates.
+                  Values are LED objects with methods: set_color(r, g, b), turn_off().
+    
+    Returns:
+        None. Updates the state of the LEDs.
+    """
+    # Step 1: Initialize all LEDs to off state
+    for led in led_grid.values():
+        led.turn_off()
+
+    # Step 2: Map voxel data to LED positions
+    for (x, y, z, r, g, b) in voxel_data:
+        # Check if a physical LED exists at this position
+        if (x, y, z) in led_grid:
+            led = led_grid[(x, y, z)]
+            # Step 3: Illuminate the LED
+            led.set_color(r, g, b)
+        else:
+            # Voxel position has no corresponding LED; data is ignored
+            pass
+
+    # Note: Transmission via Art-Net or HDMI is handled by the hardware driver
+    # outside of this logical rendering step.
+```
+
+**Edge Cases and Pitfalls:**
+*   **Voxel Occlusion:** Because LEDs are opaque, LEDs in the foreground block the view of LEDs in the background from certain angles [S2, unofficial].
+*   **Cross Illumination:** Light from one LED may scatter and illuminate neighboring LEDs or the surrounding space, reducing contrast and color accuracy [S2, unofficial].
+*   **Resolution Limits:** High-resolution systems are challenging to implement due to manufacturing constraints and the physical size of LEDs [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Rendering time is proportional to the number of active voxels $N_v$ and the number of LEDs $N_l$. Mapping is $O(N_v)$ if using a hash map, or $O(1)$ per voxel if using a direct array lookup. Transmission time depends on the protocol (Art-Net/HDMI) and bandwidth.
+*   **Memory Complexity:** Storage for the LED grid is $O(N_l)$.
+*   **Measured Performance:** A prototype achieved $8 \times 8 \times 8$ (512 voxels) with 5 cm spacing [S2, S3, unofficial].
+*   **Strengths:** True 3D viewing from all angles; no special glasses required; physically tangible imagery.
+*   **Limitations:** Low visual fidelity compared to flat displays; limited resolution due to LED size and spacing; occlusion and cross-talk artifacts; large physical footprint for high resolution.
+*   **When to use:** Art installations, advertising, and demonstrations where multi-angle viewing is more important than high resolution.
+*   **When not to use:** Applications requiring high-resolution, high-contrast imagery or detailed close-up viewing.
+
+## Background
+The concept of using 3D matrices of LEDs for volumetric display has been explored by various research groups. An $8 \times 8 \times 8$ voxel prototype was developed by Wyatt at MIT [S2, unofficial]. Commercial implementations include the LEDPulse Dragon displays [S1, unofficial] and the Aoshow 3D Volumetric LED Display, which uses suspended LED strings mounted on ceiling modules [S3, unofficial].
+
+## Sources
+[S1] Volumetric Displays | Survey of Alternative Displays, https://blair-neal.gitbook.io/survey-of-alternative-displays/alternative-displays/volumetric, fetched 2026-10-27 (unofficial)
+[S2] Three-dimensional display technologies, https://pmc.ncbi.nlm.nih.gov/articles/PMC4269274, fetched 2026-10-29 (unofficial)
+[S3] 这款 3D 体积式 LED 显示屏如何让图像悬浮在半空中_哔哩哔哩_bilibili, https://www.bilibili.com/zh-Hans/video/BV13thU6TEET/, fetched 2026-10-30 (unofficial)

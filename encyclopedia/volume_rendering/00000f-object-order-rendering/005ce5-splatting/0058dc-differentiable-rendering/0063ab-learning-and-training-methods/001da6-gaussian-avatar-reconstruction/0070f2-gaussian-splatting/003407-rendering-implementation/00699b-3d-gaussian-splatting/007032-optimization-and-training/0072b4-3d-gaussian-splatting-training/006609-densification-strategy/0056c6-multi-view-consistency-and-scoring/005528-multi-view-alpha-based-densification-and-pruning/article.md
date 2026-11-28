@@ -1,0 +1,272 @@
+# Multi-view Alpha-based Densification and Pruning
+
+Also called: Multi-view Alphabased Densification and Pruning strategy, Multi-view Consistency-Guided Densification, Stratified Camera Sampling, Stratified Multi-view Alpha-Error Accumulation
+
+## Overview
+Multi-view Alpha-based Densification and Pruning is a training optimization strategy for 3D Gaussian Splatting that replaces single-view gradient-based criteria with multi-view consistency metrics to constrain Gaussian count and prevent overfitting [S1]. Unlike standard 3DGS which relies on positional gradients from a single view—prone to excessive primitive production and redundancy—this method leverages alpha-weighted error accumulation across multiple sampled viewpoints to accurately identify regions requiring densification and primitives eligible for pruning [S1]. It builds on [Multi-view Consistency and Scoring](15793-multi-view-consistency-and-scoring.md) by operationalizing consistency checks into specific clone, split, and prune masks [S1].
+
+## How it works
+
+### Inputs and Outputs
+**Inputs:**
+*   Set of 3D Gaussian primitives $\mathcal{G} = \{g_1, \dots, g_N\}$, where each $g_k$ has mean $\mu_k$, covariance $\Sigma_k$, opacity $o_k$, and spherical harmonic coefficients $\mathbf{c}_k$ [S1].
+*   Training camera set $\mathcal{C}$ with positions $t_i$ and viewing directions $v_i$ [S2, unofficial].
+*   Ground truth images $C_{gt}$ [S1].
+*   Hyperparameters:
+    *   $\tau^+$: Loss threshold for poor reconstruction (default: 0.1) [S1].
+    *   $\tau^-$: Loss threshold for well-reconstructed regions (default: 0.01) [S1].
+    *   $Q_\tau^+$: Quantile for densification importance (default: 0.6) [S1].
+    *   $Q_\tau^-$: Quantile for pruning (default: 0.1) [S1].
+    *   $N_{cam}$: Number of cameras to sample (default: 6) [S1].
+    *   $\lambda$: Weight controlling the balance between L1 and DSSIM loss components [S1].
+    *   $o_{min}$: Opacity threshold for eliminating Gaussian points [S2, unofficial].
+
+**Outputs:**
+*   Updated set of Gaussian primitives $\mathcal{G}'$ after cloning, splitting, and pruning operations [S1].
+*   Binary masks $\mathcal{M}_{clone}$ and $\mathcal{M}_{split}$ identifying Gaussians to modify [S1].
+*   Pruning mask $\mathcal{M}_{prune}$ identifying Gaussians to remove [S2, unofficial].
+
+### Data Structures
+*   **Metric Map ($M$):** A binary map $M \in \{0, 1\}^{H \times W}$ per view, where $H, W$ are image dimensions [S1].
+    *   $M_{u,v}^{+, c} = 1$ if pixel $(u,v)$ in view $c$ has high error [S1].
+    *   $M_{u,v}^{-, c} = 1$ if pixel $(u,v)$ in view $c$ has low error [S1].
+*   **Importance/Pruning Scores ($S^+, S^-$):** Arrays of size $N$ (number of Gaussians) [S1].
+    *   $S_i^+$: Accumulated alpha-weighted error for Gaussian $i$ [S1].
+    *   $S_i^-$: Accumulated loss-weighted alpha for Gaussian $i$ [S1].
+*   **Base Masks ($\mathcal{M}_{clone}^{base}, \mathcal{M}_{split}^{base}$):** Binary masks derived from standard positional gradient thresholds $\|\nabla_{\mu_i} \mathcal{L}\|_2 > \tau_{grad}$ [S1].
+
+### Step-by-Step Method
+
+1.  **Stratified Camera Sampling:**
+    To ensure comprehensive geometric coverage and alleviate view redundancy, partition the training camera set $\mathcal{C}$ into angular bins defined with respect to the scene center $x^*$ [S1]. Estimate $x^*$ by solving the linear least-squares system $\sum_{i=1}^{N_{cam}} P_i x^* = \sum_{i=1}^{N_{cam}} P_i t_i$, where $P_i = I - v_i v_i^T$ is the projection matrix onto the subspace orthogonal to the $i$-th ray [S2, unofficial]. Transform camera positions $r_i = t_i - x^*$ into spherical coordinates $(\theta, \phi, \rho)$ where $\theta = \text{arctan2}(r_y, r_x)$, $\phi = \arcsin(r_z/\|r_i\|)$, and $\rho = \|r_i\|$ [S2, unofficial]. Discretize angular space into $M_\theta$ azimuth and $M_\phi$ elevation bins, group cameras by bin indices, and uniformly sample one representative from each non-empty bin [S2, unofficial]. Shuffle and truncate selected candidates to a computational budget $K$, yielding a camera subset $\mathcal{C}_{sample}$ with $|\mathcal{C}_{sample}| = N_{cam}$ [S2, unofficial].
+
+2.  **Render and Compute Loss:**
+    For each camera $c \in \mathcal{C}_{sample}$, render the current Gaussian primitives to obtain image $C^c$ [S2, unofficial]. Compute the pixel-wise photometric loss $\mathcal{L}_{u,v}^c$ using the hybrid objective [S1]:
+    $$
+    \mathcal{L} = (1 - \lambda) \mathcal{L}_1(C, C_{gt}) + \lambda \mathcal{L}_{DSSIM}(C, C_{gt})
+    $$
+    where $\mathcal{L}_1$ is the L1 distance and $\mathcal{L}_{DSSIM}$ is the difference in Structural Similarity [S1].
+
+3.  **Generate Metric Maps:**
+    For each view $c$, create binary metric maps $M^{c,+}$ and $M^{c,-}$ to flag regions of poor and high-quality reconstruction, respectively [S1]:
+    $$
+    M_{u,v}^{c,+} = \mathbb{I}(\mathcal{L}_{u,v}^c > \tau^+)
+    $$
+    $$
+    M_{u,v}^{c,-} = \mathbb{I}(\mathcal{L}_{u,v}^c < \tau^-)
+    $$
+    where $\mathbb{I}(\cdot)$ is the indicator function [S1]. Pixels with $M_{u,v}^{c,+}=1$ are marked as needing densification; pixels with $M_{u,v}^{c,-}=1$ are marked as well-reconstructed (candidates for pruning) [S1].
+
+4.  **Compute Multi-view Alpha-Weighted Scores:**
+    Map the 2D image-space errors back to 3D Gaussian primitives [S1]. For each Gaussian $i$, compute the importance score $S_i^+$ and pruning score $S_i^-$ by summing contributions across all sampled views $c=0 \dots N_{cam}-1$ and all flagged pixels $\Omega^c$ [S1]:
+    $$
+    S_i^+ = \sum_{c=0}^{N_{cam}-1} \sum_{(u,v) \in \Omega^c_{+}} \alpha_i^c \cdot M_{u,v}^{c,+}
+    $$
+    $$
+    S_i^- = \sum_{c=0}^{N_{cam}-1} \sum_{(u,v) \in \Omega^c_{-}} \mathcal{L}_{u,v}^c \cdot \alpha_i^c \cdot M_{u,v}^{c,-}
+    $$
+    Here, $\alpha_i^c$ is the alpha value of Gaussian $i$ projected onto the image plane for view $c$, calculated as [S1]:
+    $$
+    \alpha_i^c = o_i \exp\left(-\frac{1}{2} \Delta x_i^T \Sigma_i^{-1} \Delta x_i\right)
+    $$
+    where $o_i$ is the base opacity, $\Delta x_i$ is the 2D offset from the Gaussian center to the pixel, and $\Sigma_i$ is the projected 2D covariance matrix [S1]. $\Omega^c_{+}$ denotes pixels flagged by $M^{c,+}$ and $\Omega^c_{-}$ denotes pixels flagged by $M^{c,-}$ [S1].
+
+5.  **Determine Final Densification Masks:**
+    Intersect the base gradient-based masks with the importance quantile filter to ensure multi-view consistency [S1]. A Gaussian is selected for cloning or splitting only if it meets the base gradient threshold AND its importance score $S_i^+$ exceeds the quantile $Q_\tau^+$ of the distribution of all $S^+$ scores [S1]:
+    $$
+    \mathcal{M}_{clone} = \mathcal{M}_{clone}^{base} \land (S^+ > Q_\tau^+(S^+))
+    $$
+    $$
+    \mathcal{M}_{split} = \mathcal{M}_{split}^{base} \land (S^+ > Q_\tau^+(S^+))
+    $$
+    where $Q_\tau^+(S^+)$ is the value at the $Q_\tau^+$ quantile of the importance scores [S1].
+
+6.  **Determine Pruning Mask:**
+    Identify Gaussians for pruning based on the pruning score $S_i^-$ and the quantile $Q_\tau^-$ [S1]. A Gaussian is pruned if its opacity $o_i$ falls below $o_{min}$ AND its pruning score $S_i^-$ exceeds the quantile $Q_\tau^-$ of the distribution of all $S^-$ scores [S2, unofficial]:
+    $$
+    \mathcal{M}_{prune} = (o_i < o_{min}) \land (S^- > Q_\tau^-(S^-))
+    $$
+    A larger $S^-$ indicates the Gaussian impacts more low-error pixel regions, effectively flagging it as an artifact or redundant point [S2, unofficial].
+
+7.  **Execute Operations:**
+    *   **Clone:** For each $i$ where $\mathcal{M}_{clone}[i]$ is true, create a copy of $g_i$ [S1].
+    *   **Split:** For each $i$ where $\mathcal{M}_{split}[i]$ is true, replace $g_i$ with children sampled from $\mathcal{N}(\mu_i, \Sigma_i)$ [Parent].
+    *   **Prune:** Remove Gaussians identified in $\mathcal{M}_{prune}$ [Parent].
+    *   **Compaction:** Re-index the Gaussian array to maintain contiguous memory access [Parent].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def multi_view_alpha_densification_pruning(Gaussians, Cameras, GT_Images, 
+                                           tau_plus=0.1, tau_minus=0.01, 
+                                           q_tau_plus=0.6, q_tau_minus=0.1, 
+                                           n_cam=6, lambda_dssim=0.2, o_min=0.01):
+    """
+    Performs multi-view alpha-based densification and pruning.
+    
+    Args:
+        Gaussians: List of Gaussian objects with attributes:
+                   - mu: position (3,)
+                   - cov: covariance matrix (3,3)
+                   - alpha: opacity (scalar)
+                   - sh: spherical harmonic coefficients
+                   - grad_norm: accumulated positional gradient norm (scalar)
+        Cameras: List of camera objects with projection/rendering capabilities.
+        GT_Images: Ground truth images corresponding to Cameras.
+        tau_plus: Threshold for poor reconstruction (high loss).
+        tau_minus: Threshold for well-reconstructed (low loss).
+        q_tau_plus: Quantile for importance-based densification.
+        q_tau_minus: Quantile for pruning.
+        n_cam: Number of cameras to sample.
+        lambda_dssim: Weight for DSSIM loss.
+        o_min: Opacity threshold for pruning.
+        
+    Returns:
+        Updated Gaussians list.
+    """
+    
+    # 1. Stratified Camera Sampling
+    # Estimate scene center via least squares, convert to spherical coords,
+    # bin angular space, sample one per non-empty bin, shuffle/truncate to n_cam.
+    sampled_cameras = stratified_sample_cameras(Cameras, n_cam)
+    
+    # Initialize scores
+    importance_scores = [0.0] * len(Gaussians)
+    pruning_scores = [0.0] * len(Gaussians)
+    
+    # 2. Render and Compute Loss for Sampled Views
+    for cam in sampled_cameras:
+        # Render current Gaussians to get image C
+        C = render(Gaussians, cam)
+        
+        # Compute Photometric Loss L = (1-lambda)*L1 + lambda*L_DSSIM
+        loss_map = compute_photometric_loss(C, GT_Images[cam.id], lambda_dssim)
+        
+        # 3. Generate Metric Maps
+        # M_plus: 1 where loss > tau_plus (poor reconstruction)
+        # M_minus: 1 where loss < tau_minus (well reconstructed)
+        mask_plus = (loss_map > tau_plus).astype(float)
+        mask_minus = (loss_map < tau_minus).astype(float)
+        
+        # 4. Compute Multi-view Alpha-Weighted Scores
+        # Project Gaussians to 2D for this camera to get alpha contributions
+        projected_gaussians = project_to_2d(Gaussians, cam)
+        
+        for i, g_proj in enumerate(projected_gaussians):
+            # Get alpha for this Gaussian at all pixels
+            alpha_map = g_proj.alpha_map 
+            
+            # Importance Score: Sum alpha * M_plus over all pixels
+            importance_scores[i] += sum(alpha_map * mask_plus)
+            
+            # Pruning Score: Sum loss * alpha * M_minus over all pixels
+            pruning_scores[i] += sum(loss_map * alpha_map * mask_minus)
+            
+    # 5. Determine Final Densification Masks
+    # Base masks from standard 3DGS gradient threshold
+    grad_threshold = get_gradient_threshold()
+    base_clone_mask = [g.grad_norm > grad_threshold for g in Gaussians]
+    base_split_mask = [g.grad_norm > grad_threshold for g in Gaussians]
+    
+    # Compute quantiles
+    q_val_plus = compute_quantile(importance_scores, q_tau_plus)
+    
+    # Final masks: Base AND Importance > Quantile
+    final_clone_mask = [base_clone_mask[i] and (importance_scores[i] > q_val_plus) 
+                        for i in range(len(Gaussians))]
+    final_split_mask = [base_split_mask[i] and (importance_scores[i] > q_val_plus) 
+                        for i in range(len(Gaussians))]
+    
+    # 6. Determine Pruning Mask
+    # Prune if opacity < o_min AND pruning score > quantile
+    q_val_minus = compute_quantile(pruning_scores, q_tau_minus)
+    prune_mask = [(Gaussians[i].alpha < o_min) and (pruning_scores[i] > q_val_minus) 
+                  for i in range(len(Gaussians))]
+    
+    # 7. Execute Operations
+    final_gaussians = []
+    for i, g in enumerate(Gaussians):
+        is_clone = final_clone_mask[i]
+        is_split = final_split_mask[i]
+        is_prune = prune_mask[i]
+        
+        if is_prune:
+            continue # Remove
+        elif is_split:
+            children = split_gaussian(g, n_children=2)
+            final_gaussians.extend(children)
+        elif is_clone:
+            clone = copy_gaussian(g)
+            final_gaussians.append(g) # Keep original
+            final_gaussians.append(clone) # Add clone
+        else:
+            final_gaussians.append(g)
+            
+    return final_gaussians
+
+def compute_photometric_loss(C, C_gt, lambda_dssim):
+    l1_loss = sum(abs(C - C_gt), axis=-1) # Per pixel L1
+    dssim_loss = 1.0 - compute_dssim(C, C_gt) # Per pixel DSSIM difference
+    return (1 - lambda_dssim) * l1_loss + lambda_dssim * dssim_loss
+
+def compute_dssim(C1, C2):
+    # Standard DSSIM implementation
+    return sum(sum(C1 * C2)) / (sum(C1**2) * sum(C2**2)) # Placeholder for standard SSIM kernel
+
+def project_to_2d(Gaussians, cam):
+    # Projects 3D Gaussians to 2D image plane
+    # Returns list of objects with alpha_map (HxW)
+    pass
+
+def split_gaussian(g, n_children=2):
+    # Sample n_children from N(g.mu, g.cov)
+    # Reduce scale by factor 5/4 * 1/sqrt(n_children)
+    # Copy SH and alpha
+    pass
+
+def copy_gaussian(g):
+    # Deep copy of Gaussian
+    pass
+
+def stratified_sample_cameras(Cameras, n_cam):
+    # Estimate scene center x* via least squares
+    # Transform to spherical coords, bin, sample, shuffle, truncate
+    pass
+
+def get_gradient_threshold():
+    # Returns standard 3DGS gradient threshold
+    pass
+
+def compute_quantile(scores, q):
+    # Returns the value at quantile q
+    sorted_scores = sorted(scores)
+    idx = int(q * len(sorted_scores))
+    return sorted_scores[min(idx, len(sorted_scores)-1)]
+```
+
+### Edge Cases and Pitfalls
+*   **Overfitting to Single View:** Standard single-view gradient-based densification is prone to producing excessive Gaussians and overfitting to a specific view [S1]. This method mitigates this by requiring multi-view consistency [S1].
+*   **Excessive Gaussian Count:** Relying solely on single-view gradients results in excessive and redundant Gaussian densification, increasing memory usage and storage cost while reducing FPS [S1]. Multi-view pruning significantly reduces total Gaussian count [S1].
+*   **Quantile Sensitivity:** Larger values of $Q_\tau^+$ hinder densification, potentially underfitting complex geometry [S1]. Smaller values of $Q_\tau^-$ result in more aggressive pruning, which may harm rendering performance if too aggressive [S1].
+*   **Camera Sampling:** Increasing views from 2 to 6 yields significant PSNR improvement and reduces Gaussian count [S1]. The default $N_{cam}=6$ provides a superior trade-off between rendering performance and training burden [S1].
+
+## Operating characteristics
+
+*   **Time Complexity:** The method adds overhead for rendering $N_{cam}$ views and computing metric maps and scores [S1]. Rendering $N_{cam}$ views per densification step increases training time per iteration compared to single-view gradient checks, but the reduced Gaussian count leads to faster rendering during inference and potentially fewer total iterations due to better convergence [S1].
+*   **Memory Complexity:** Significantly reduces memory usage and storage cost compared to single-view methods by limiting the total number of Gaussians [S1].
+*   **Performance:** On RTX 4090, Flux-GS with this strategy achieves competitive visual quality with substantially fewer parameters and faster training times compared to standard 3DGS [S1]. It enables real-time mobile rendering by maintaining a compact representation [S1].
+*   **Strengths:** Ensures multi-view structure consistency, accurately prunes redundant primitives, and avoids overfitting [S1].
+*   **Limitations:** Requires rendering multiple views during training, which increases per-iteration compute cost [S1]. Performance is sensitive to the choice of quantiles and loss thresholds [S1].
+
+## Background
+
+*   **Origin:** Proposed by Du et al. in "Monte Carlo Energy Aggregation for Mobile 3D Gaussian Splatting" (Flux-GS) [S1].
+*   **Context:** Developed to address the inefficiency of standard 3DGS densification, which lacks multi-view structure consistency and produces excessive primitives [S1].
+*   **Application:** Designed for real-time mobile rendering, offering a robust and scalable solution for high-fidelity 3D scene representation on everyday hardware [S1].
+
+## Sources
+
+[S1] Monte Carlo Energy Aggregation for Mobile 3D Gaussian Splatting, https://doi.org/10.1007/978-3-032-37167-6_17, fetched 2026-10-29
+[S2] Mobile-4DGS: Unified Static-Dynamic Real-time Mobile Gaussian Splatting, https://arxiv.org/abs/2610.05289, fetched 2026-10-29 (unofficial)

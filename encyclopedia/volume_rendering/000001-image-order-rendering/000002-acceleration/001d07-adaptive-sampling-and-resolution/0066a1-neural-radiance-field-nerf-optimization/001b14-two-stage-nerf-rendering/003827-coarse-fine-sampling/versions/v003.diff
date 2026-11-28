@@ -1,0 +1,198 @@
+--- v002.md
++++ v003.md
+@@ -12,19 +12,12 @@
+ 
+ **Data Structures:**
+-- **Samples:** Points $\mathbf{p}_i$ and depths $t_i$ along each ray.
++- **Samples:** Points $\mathbf{p}_i$ and depths $t_i$ along each ray [S2, S3, unofficial].
+ - **Model Outputs:** Color $\mathbf{c}_i \in \mathbb{R}^3$ and density $\sigma_i \in \mathbb{R}$ for each sample point [S2, S3, unofficial].
+ - **Weights:** Transmittance $T_i$ and weight $w_i$ for volume rendering integration [S2, S3, unofficial].
+ 
+-**Parameters:**
+-- $N_c$: Number of coarse samples per ray. Default: 64 [S1, S2, S3, unofficial].
+-- $N_f$: Number of fine samples per ray. Default: 128 [S1, S2, S3, unofficial]. If $N_f=0$, the fine model is not used [S1, unofficial].
+-- `chunk`: Batch size for model inference to manage memory. Default: 1024 or $1024 \times 32$ depending on implementation [S2, S3, unofficial].
+-- `perturb`: Random noise addition to sample positions during training. Default: 1.0 (on) [S3, unofficial].
+-- `use_disp`/`lindisp`: Boolean flag for disparity-based depth sampling instead of uniform depth sampling. Default: False [S1, unofficial].
+-
+-**Steps:**
++**Numbered Steps:**
+ 
+ 1. **Coarse Sampling:**
+-   Generate $N_c$ stratified samples along the ray interval $[t_{near}, t_{far}]$. If `lindisp` is true, sample linearly in disparity ($1/t$) [S2, S3, unofficial].
++   Generate $N_c$ stratified samples along the ray interval $[t_{near}, t_{far}]$ [S2, S3, unofficial].
+    $$ t_i = t_{near} + \frac{i + u}{N_c} (t_{far} - t_{near}) $$
+    where $u \sim \mathcal{U}(0,1)$ if `perturb` is true, else $u = 0$ [S2, S3, unofficial].
+@@ -53,4 +46,5 @@
+    Compute the cumulative distribution function (CDF) from $w_i$:
+    $$ C_i = \sum_{j=1}^{i} w_j $$
++   [G].
+    Sample $N_f$ uniform random values $u_k \sim \mathcal{U}(0,1)$ [S2, unofficial].
+    For each $u_k$, find the interval $[C_{i-1}, C_i]$ containing $u_k$ and interpolate the depth $t$ within that interval [G].
+@@ -86,4 +80,16 @@
+    Attach the coarse RGB $\mathbf{C}_c(\mathbf{r})$ to the fine render output for use in auxiliary loss functions (e.g., MSE between coarse and fine RGB) [S2, unofficial].
+ 
++**Parameters:**
++- $N_c$: Number of coarse samples per ray. Default: 64 [S1, S2, S3, unofficial].
++- $N_f$: Number of fine samples per ray. Default: 128 [S1, S2, S3, unofficial]. If $N_f=0$, the fine model is not used [S1, unofficial].
++- `chunk`: Batch size for model inference to manage memory. Default: 1024 or $1024 \times 32$ depending on implementation [S2, S3, unofficial].
++- `perturb`: Random noise addition to sample positions during training. Default: 1.0 (on) [S3, unofficial].
++- `use_disp`/`lindisp`: Boolean flag for disparity-based depth sampling instead of uniform depth sampling. Default: False [S1, unofficial].
++
++**Edge Cases and Pitfalls:**
++- **Zero Density:** If all coarse densities are zero, importance sampling fails. Add a small epsilon to weights before computing CDF [S2, S3, unofficial].
++- **Memory Limits:** Large batches or high $N_c, N_f$ can cause OOM. Use chunked evaluation for model forward passes [S2, S3, unofficial].
++- **Disparity Sampling:** For forward-facing scenes, `lindisp` improves depth resolution near the camera [G]. The flag enables disparity-based depth sampling instead of uniform depth sampling [S1, unofficial].
++
+ **Pseudocode:**
+ 
+@@ -93,5 +99,4 @@
+ def stratified_sample(near, far, n_samples, perturb=True):
+     """Generate stratified samples along a ray."""
+-    # Uniform grid points
+     t_vals = torch.linspace(near, far, n_samples)
+     if perturb:
+@@ -104,7 +109,4 @@
+ def sample_hierarchical(z_vals_coarse, weights_coarse, n_samples_fine, perturb=True):
+     """Importance sample fine points based on coarse weights."""
+-    # weights_coarse shape: (N_rays, N_c)
+-    # z_vals_coarse shape: (N_rays, N_c)
+-    
+     eps = 1e-5
+     weights_coarse = weights_coarse + eps
+@@ -112,12 +114,9 @@
+     cdf = cdf / cdf[:, -1:]  # Normalize to [0, 1]
+     
+-    # Sample uniform random values
+     u = torch.rand(weights_coarse.shape[0], n_samples_fine)
+     
+-    # Find indices where u falls in the CDF
+     indices = torch.searchsorted(cdf, u, side='right')
+     indices = torch.clamp(indices, 0, weights_coarse.shape[1] - 1)
+     
+-    # Get lower and upper bounds for interpolation
+     lower_idx = torch.clamp(indices - 1, 0, weights_coarse.shape[1] - 1)
+     
+@@ -127,10 +126,8 @@
+     c_high = torch.gather(cdf, 1, indices)
+     
+-    # Interpolate depth
+     t_vals = z_low + (z_high - z_low) * (u - c_low) / (c_high - c_low + eps)
+     
+     if perturb:
+-        # Add uniform noise within the interval
+-        t_vals = t_vals + torch.rand_like(t_vals) * (z_high - z_low) / n_samples_fine
++        t_vals = t_vals + torch.rand_like(t_vals) * (z_high - z_low)
+         
+     return t_vals
+@@ -138,36 +135,21 @@
+ def volume_render(rgb, sigma, t_vals, white_bg=False):
+     """Standard volume rendering."""
+-    # rgb: (N_rays, N_samples, 3)
+-    # sigma: (N_rays, N_samples, 1)
+-    # t_vals: (N_rays, N_samples)
+-    
+-    # Compute deltas between adjacent samples
+     deltas = t_vals[:, 1:] - t_vals[:, :-1]
+-    # Handle last delta (assume infinite distance)
+     delta_inf = torch.ones_like(deltas[:, :1]) * 1e10
+     deltas = torch.cat([deltas, delta_inf], dim=-1)
+     
+-    # Compute alpha
+     eps = 1e-5
+     sigma = torch.clamp(sigma, min=eps)
+     alpha = 1.0 - torch.exp(-sigma * deltas)
+     
+-    # Compute transmittance
+-    T = torch.cumprod(1.0 - alpha + eps, dim=-1)
++    T = torch.cumprod(1.0 - alpha, dim=-1)
+     T = torch.cat([torch.ones_like(T[:, :1]), T[:, :-1]], dim=-1)
+     
+-    # Compute weights
+     weights = alpha * T
+     
+-    # Render RGB
+     rgb_map = torch.sum(weights * rgb, dim=-2)
+-    
+-    # Render Depth
+     depth_map = torch.sum(weights * t_vals, dim=-1)
+-    
+-    # Render Accumulation
+     acc_map = torch.sum(weights, dim=-1)
+     
+-    # Background blending
+     if white_bg:
+         rgb_map = rgb_map + (1.0 - acc_map[:, None]) * 1.0
+@@ -182,19 +164,20 @@
+ def render_rays(model, ray_o, ray_d, near, far, N_c, N_f, perturb=True, white_bg=False, chunk=1024*32):
+     """Two-stage rendering pipeline."""
+-    # Coarse Pass
+     z_vals_coarse = stratified_sample(near, far, N_c, perturb)
+     pts_coarse = ray_o.unsqueeze(1) + ray_d.unsqueeze(1) * z_vals_coarse.unsqueeze(-1)
+     
+-    # Evaluate coarse model in chunks
+-    rgb_c, sigma_c = model.forward_coarse(pts_coarse, chunk=chunk)
+-    
+-    # Render coarse
++    rgb_c_list, sigma_c_list = [], []
++    for i in range(0, pts_coarse.shape[0], chunk):
++        rgb_c_chunk, sigma_c_chunk = model.forward_coarse(pts_coarse[i:i+chunk])
++        rgb_c_list.append(rgb_c_chunk)
++        sigma_c_list.append(sigma_c_chunk)
++    rgb_c = torch.cat(rgb_c_list, dim=0)
++    sigma_c = torch.cat(sigma_c_list, dim=0)
++    
+     render_c = volume_render(rgb_c, sigma_c, z_vals_coarse, white_bg)
+     
+-    # Fine Pass
+     if N_f > 0:
+         z_vals_fine = sample_hierarchical(z_vals_coarse, render_c["weights"].detach(), N_f, perturb)
+         
+-        # Merge and sort
+         z_vals_all = torch.cat([z_vals_coarse, z_vals_fine], dim=-1)
+         z_vals_all, _ = torch.sort(z_vals_all, dim=-1)
+@@ -202,11 +185,14 @@
+         pts_fine = ray_o.unsqueeze(1) + ray_d.unsqueeze(1) * z_vals_all.unsqueeze(-1)
+         
+-        # Evaluate fine model in chunks
+-        rgb_f, sigma_f = model.forward_fine(pts_fine, chunk=chunk)
+-        
+-        # Render fine
++        rgb_f_list, sigma_f_list = [], []
++        for i in range(0, pts_fine.shape[0], chunk):
++            rgb_f_chunk, sigma_f_chunk = model.forward_fine(pts_fine[i:i+chunk])
++            rgb_f_list.append(rgb_f_chunk)
++            sigma_f_list.append(sigma_f_chunk)
++        rgb_f = torch.cat(rgb_f_list, dim=0)
++        sigma_f = torch.cat(sigma_f_list, dim=0)
++        
+         render_f = volume_render(rgb_f, sigma_f, z_vals_all, white_bg)
+         
+-        # Attach coarse RGB for auxiliary loss
+         render_f["rgb_coarse"] = render_c["rgb_map"]
+         
+@@ -215,17 +201,4 @@
+         return render_c
+ ```
+-
+-**Edge Cases and Pitfalls:**
+-- **Zero Density:** If all coarse densities are zero, importance sampling fails. Add a small epsilon to weights before computing CDF [S2, S3, unofficial].
+-- **Memory Limits:** Large batches or high $N_c, N_f$ can cause OOM. Use chunked evaluation for model forward passes [S2, S3, unofficial].
+-- **Disparity Sampling:** For forward-facing scenes, `lindisp` improves depth resolution near the camera. For general scenes, uniform sampling is preferred [S1, S3, unofficial].
+-
+-## Subtopics
+-
+-### Combined Sampling (Occupancy Grid + Proposal Network)
+-A method that uses an occupancy grid to quickly identify empty space and a proposal network to sample high-density regions, often used in conjunction with or as an alternative to coarse-fine sampling for further acceleration. [Link](1626-combined-sampling-occupancy-grid-proposal-network.md)
+-
+-### VF-NeRF Rendering Pipeline
+-A pipeline that integrates view-dependent features and potentially different sampling strategies, often optimizing for specific view-dependent effects or performance characteristics distinct from standard coarse-fine sampling. [Link](3302-vf-nerf-rendering-pipeline.md)
+ 
+ ## Operating characteristics
+@@ -236,5 +209,5 @@
+ 
+ ## Background
+-Coarse-Fine Sampling was introduced in the original NeRF paper by Mildenhall et al. (2020) as a key technique for efficient volume rendering [S1, S2, S3, unofficial]. It has since become a standard component in many NeRF implementations and variants [S2, S3, unofficial]. The method builds on the idea of importance sampling in computer graphics, adapting it to the context of neural volumetric rendering [S2, S3, unofficial].
++The method is implemented in standard NeRF training pipelines [S1, S2, S3, unofficial]. It builds on the idea of importance sampling in computer graphics, adapting it to the context of neural volumetric rendering [S2, S3, unofficial].
+ 
+ ## Sources

@@ -1,0 +1,81 @@
+# Image Grid Sampling
+## Overview
+Image Grid Sampling generates a flattened grid of 2D coordinates spanning $[-1, 1]$ on each axis, matching the layout of a flattened image for neural field training [S1, unofficial]. It differs from its sibling [3D Coordinate Grid Generation](2333-3d-coordinate-grid-generation.md) by restricting output to two dimensions, and from [True World-Space MPR Sampling](21391-true-world-space-mpr-sampling.md) by operating in normalized image space rather than world space [S1, unofficial].
+## How it works
+**Inputs:** `shape` (tuple of integers $(H, W)$ representing height and width), `device` (compute device).
+**Outputs:** `coordinates` (tensor of shape $(H, W, 2)$ containing normalized coordinates), `indices` (tensor of shape $(H, W, 2)$ containing integer indices).
+
+1.  Create integer indices for each dimension:
+    $$ \text{indices} = [\text{torch.arange}(L, \text{device}=\text{device}) \text{ for } L \text{ in } \text{shape}] $$
+2.  Stack meshgrid of integer indices with 'ij' indexing:
+    $$ \text{stacked\_indices} = \text{torch.stack}(\text{torch.meshgrid}(*\text{indices}, \text{indexing}="ij"), \text{dim}=-1) $$
+3.  Compute normalized coordinates by adding 0.5 and dividing by length:
+    $$ \text{coords} = [(\text{idx} + 0.5) / L \text{ for } \text{idx}, L \text{ in } \text{zip}(\text{indices}, \text{shape})] $$
+4.  Reverse the coordinates list to match xy ordering:
+    $$ \text{coords} = \text{coords}[::-1] $$
+5.  Stack meshgrid of normalized coordinates with 'xy' indexing:
+    $$ \text{coordinates} = \text{torch.stack}(\text{torch.meshgrid}(*\text{coords}, \text{indexing}="xy"), \text{dim}=-1) $$
+6.  Return `coordinates` and `indices`.
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+
+def image_grid_sampling(shape, device):
+    """
+    Generates a flattened grid of 2D coordinates spanning [-1, 1] on each axis.
+    
+    Args:
+        shape (tuple): (height, width) of the grid.
+        device: torch device.
+        
+    Returns:
+        coordinates: Tensor of shape (H, W, 2) with normalized coordinates.
+        indices: Tensor of shape (H, W, 2) with integer indices.
+    """
+    # Step 1: Create integer indices for each dimension
+    indices = [torch.arange(L, device=device) for L in shape]
+    
+    # Step 2: Stack meshgrid of integer indices with 'ij' indexing
+    stacked_indices = torch.stack(torch.meshgrid(*indices, indexing="ij"), dim=-1)
+    
+    # Step 3: Compute normalized coordinates by adding 0.5 and dividing by length
+    coords = [(idx + 0.5) / L for idx, L in zip(indices, shape)]
+    
+    # Step 4: Reverse the coordinates list to match xy ordering
+    coords = coords[::-1]
+    
+    # Step 5: Stack meshgrid of normalized coordinates with 'xy' indexing
+    coordinates = torch.stack(torch.meshgrid(*coords, indexing="xy"), dim=-1)
+    
+    # Step 6: Return normalized coordinates and integer indices
+    return coordinates, stacked_indices
+```
+
+**Parameters:**
+- `shape`: Tuple of integers $(H, W)$. Typical values depend on image resolution (e.g., $(512, 512)$).
+- `device`: Compute device (e.g., `cuda:0`).
+
+**Edge cases and pitfalls:**
+- The normalization formula $(idx + 0.5) / L$ maps indices to the range $[0.5/L, 1 - 0.5/L]$. This does not strictly span $[-1, 1]$ unless further scaled and shifted. The source notes describe this specific normalization [S1, unofficial]. Implementers should verify if downstream modules expect $[-1, 1]$ or $[0, 1]$ and apply additional scaling if necessary [G].
+- The reversal in Step 4 ensures the final coordinate tensor aligns with standard image 'xy' ordering (width, height) rather than 'ij' ordering (height, width) [S1, unofficial].
+
+## Subtopics
+
+### [True World-Space MPR Sampling](21391-true-world-space-mpr-sampling.md)
+Generates a 2D image of intensities by sampling a 3D volume along a user-defined 2D plane in world space. It solves the problem of extracting arbitrary orthogonal or oblique slices (axial, coronal, sagittal, or custom) from a volumetric dataset without requiring pre-computed slice data, by iterating over pixel grid coordinates, converting them to world space, transforming to voxel space, and interpolating the volume value. It differs from standard image grid sampling by explicitly defining the sampling plane via world-space origin and direction vectors, ensuring geometric accuracy relative to the patient or world coordinate system rather than the voxel grid axes.
+
+## Operating characteristics
+**Time complexity:** $O(H \times W)$, where $H$ and $W$ are the height and width of the grid.
+**Memory complexity:** $O(H \times W \times D)$, where $D=2$ is the dimensionality of the coordinates.
+**Strengths:** Efficient generation of coordinate grids for neural field training using PyTorch's native meshgrid operations [S1, unofficial].
+**Limitations:** Limited to 2D grids; does not handle 3D volumetric sampling directly [S1, unofficial].
+**When to use:** When generating input coordinates for 2D neural fields or image-based rendering tasks [S1, unofficial].
+**When not to use:** For 3D volumetric sampling or world-space aligned slice extraction [S1, unofficial].
+
+## Background
+Originated in the context of neural rendering and splatting frameworks, specifically within the NoPoSplat project [S1, unofficial]. It is used to generate coordinate grids for training neural fields on image data [S1, unofficial].
+
+## Sources
+[S1] cvg/NoPoSplat, https://github.com/cvg/NoPoSplat, fetched 2026-10-27 (unofficial)

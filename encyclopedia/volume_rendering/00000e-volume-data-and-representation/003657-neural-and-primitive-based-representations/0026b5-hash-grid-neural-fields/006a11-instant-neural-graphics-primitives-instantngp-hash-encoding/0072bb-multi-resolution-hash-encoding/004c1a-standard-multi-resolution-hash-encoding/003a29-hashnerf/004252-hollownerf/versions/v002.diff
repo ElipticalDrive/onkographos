@@ -1,0 +1,216 @@
+--- v001.md
++++ v002.md
+@@ -1,5 +1,4 @@
+ # HollowNeRF
+ 
+-Also called: HollowNeRF: Pruning Hashgrid-Based NeRFs with Trainable Collision Mitigation
+ 
+ ## Overview
+@@ -13,21 +12,18 @@
+ **Data Structures:**
+ 1.  **Multi-level Hash Grid ($H$):** The standard feature hash grid from Instant-NGP, storing dense feature vectors [S1].
+-2.  **Trainable 3D Saliency Grid ($G$):** A coarse 3D tensor of resolution $T \times T \times T$. It stores trainable scalar values representing the saliency of features near each grid voxel [S1]. $T$ is typically much smaller than the resolution of the dense feature grid [S1].
++2.  **Trainable 3D Saliency Grid ($G$):** A coarse 3D tensor of resolution $T \times T \times T$ [S1]. It stores trainable scalar values representing the saliency of features near each grid voxel [S1]. $T$ is typically much smaller than the resolution of the dense feature grid [S1].
+ 3.  **MLP:** A shallow neural network (fully connected layers) that decodes features into density and color [S1].
+ 
+ **Numbered Steps:**
+ 1.  **Feature Fetch:** Given input coordinate $x$, fetch the corresponding feature vector $f$ from the multi-level hash grid $H$, following the Instant-NGP method [S1].
+-2.  **Saliency Prediction:**
+-    *   Determine the 8 voxels in the saliency grid $G$ surrounding $x$.
+-    *   Perform trilinear interpolation on the values of these 8 voxels to obtain a smoothed saliency distribution value $p_{raw}$ [S1].
+-    *   Apply a sigmoid function to $p_{raw}$ to predict the saliency weight $p$:
+-        $$ p = \sigma_{sigmoid}(p_{raw}) $$
+-        where $p \in [0, 1]$ [S1].
++2.  **Saliency Prediction:** Determine the 8 voxels in the saliency grid $G$ surrounding $x$ [S1]. Perform trilinear interpolation on the values of these 8 voxels to obtain a smoothed saliency distribution value $p_{\text{raw}}$ [S1]. Apply a sigmoid function to $p_{\text{raw}}$ to predict the saliency weight $p$:
++    $$ p = \sigma_{\text{sigmoid}}(p_{\text{raw}}) $$
++    where $p \in [0, 1]$ [S1].
+ 3.  **Feature Scaling:** Scale the fetched feature $f$ by the saliency weight $p$ to get the weighted feature $v$:
+     $$ v = p \cdot f $$
+     This suppresses features in regions where $p \approx 0$ (empty or invisible regions) [S1].
+-4.  **Zero-Skipping Gate:** Feed the weighted feature $v$ into the MLP. The MLP is designed or gated such that if $v = 0$, the output density $\sigma = 0$. This ensures that pruned regions do not contribute to the volume rendering integral [S1].
+-5.  **Rendering and Loss:** Use the predicted density $\sigma$ and color to perform volume rendering. Compare the rendered image to the ground truth to obtain a loss $L$ [S1].
+-6.  **ADMM Pruning:** During training, use an Alternating Direction Method of Multipliers (ADMM) pruner to sparsify the saliency value distribution. The ADMM pruner enforces a sparsity constraint on the saliency grid $G$ when optimizing the loss $L$, explicitly pruning saliency weights of empty/invisible regions to exactly 0 [S1, S2].
++4.  **Zero-Skipping Gate:** Feed the weighted feature $v$ into the MLP [S1]. The MLP is designed or gated such that if $v = 0$, the output density $\sigma = 0$ [S1]. This ensures that pruned regions do not contribute to the volume rendering integral [S1].
++5.  **Rendering and Loss:** Use the predicted density $\sigma$ and color to perform volume rendering [S1]. Compare the rendered image to the ground truth to obtain a loss $L$ [S1].
++6.  **ADMM Pruning:** During training, use an Alternating Direction Method of Multipliers (ADMM) pruner to sparsify the saliency value distribution [S1]. The ADMM pruner enforces a sparsity constraint on the saliency grid $G$ when optimizing the loss $L$, explicitly driving the saliency weights to 0 [S1].
+ 
+ **Pseudocode:**
+@@ -38,58 +34,40 @@
+ 
+ class HollowNeRF:
+-    def __init__(self, hash_grid, saliency_resolution_T, mlp):
++    def __init__(self, saliency_resolution_T, mlp):
+         """
+-        hash_grid: Instant-NGP style hash grid structure
+         saliency_resolution_T: int, resolution T of the 3D saliency grid G
+-        mlp: nn.Module, the decoder network
++        mlp: nn.Module, the decoder network taking feature vector v
+         """
+-        self.hash_grid = hash_grid
+         self.T = saliency_resolution_T
+         self.mlp = mlp
+         
+         # Initialize trainable 3D saliency grid G
+-        # Shape: (1, T, T, T) or similar tensor format
+-        self.G = nn.Parameter(torch.zeros(1, T, T, T))
++        self.G = nn.Parameter(torch.zeros(1, 1, T, T, T))
+         
+-        # ADMM variables for sparsity constraint
+-        # Z is the auxiliary variable for the L0 norm approximation or hard thresholding
+-        self.Z = nn.Parameter(torch.zeros(1, T, T, T))
+-        self.Y = nn.Parameter(torch.zeros(1, T, T, T)) # Lagrange multiplier
+-        self.lambda_param = 1.0 # Sparsity penalty weight
++        # ADMM auxiliary variables for sparsity constraint
++        self.Z = nn.Parameter(torch.zeros(1, 1, T, T, T))
++        self.Y = nn.Parameter(torch.zeros(1, 1, T, T, T))
++        self.lambda_param = 1.0  # Sparsity penalty weight
+ 
+     def get_saliency_weight(self, x):
+         """
+-        x: Tensor of shape (N, 3), coordinates
++        x: Tensor of shape (N, 3), coordinates in [0, 1]^3
+         Returns: Tensor of shape (N, 1), saliency weights p
+         """
+-        # Normalize x to [0, 1] range if necessary, assuming G covers [0,1]^3
+-        # Scale x to grid coordinates [0, T-1]
++        # Scale coordinates to grid indices [0, T-1]
+         x_grid = x * (self.T - 1)
+         
++        # Normalize to [-1, 1] for standard 3D interpolation
++        x_norm = (x_grid / (self.T - 1)) * 2 - 1
++        x_norm = x_norm.unsqueeze(0).unsqueeze(0).unsqueeze(0)  # (1, 1, 1, N, 3)
++        
+         # Trilinear interpolation of G at x_grid
+-        # G is (1, T, T, T). We need to sample at x_grid.
+-        # Using grid_sample or manual interpolation.
+-        # Assuming x_grid is normalized to [-1, 1] for grid_sample or similar.
+-        # Here we assume a helper for trilinear interpolation on tensor G.
++        G_expanded = self.G  # (1, 1, T, T, T)
++        p_raw_sampled = F.grid_sample(G_expanded, x_norm, mode='trilinear', align_corners=True)
++        p_raw = p_raw_sampled.squeeze()  # (N,)
+         
+-        # Reshape for interpolation: (1, 1, T, T, T) -> (1, T, T, T)
+-        # Standard grid_sample expects (N, C, H, W) or (N, C, D, H, W)
+-        # Let's assume a standard 3D interpolation function exists or implement it.
+-        
+-        # Normalize to [-1, 1] for grid_sample
+-        x_norm = (x_grid / (self.T - 1)) * 2 - 1
+-        x_norm = x_norm.unsqueeze(0).unsqueeze(0).unsqueeze(0) # (1, 1, 1, N, 3)
+-        
+-        # G shape: (1, 1, T, T, T) for grid_sample (N, C, D, H, W)
+-        G_expanded = self.G.unsqueeze(0) # (1, 1, T, T, T)
+-        
+-        # Sample
+-        # grid_sample output shape: (1, 1, 1, N)
+-        p_raw_sampled = F.grid_sample(G_expanded, x_norm, mode='trilinear', align_corners=True)
+-        p_raw = p_raw_sampled.squeeze() # (N,)
+-        
+-        # Sigmoid
++        # Sigmoid activation
+         p = torch.sigmoid(p_raw)
+-        return p.unsqueeze(-1) # (N, 1)
++        return p.unsqueeze(-1)  # (N, 1)
+ 
+     def forward(self, x):
+@@ -98,52 +76,35 @@
+         Returns: density (N, 1), color (N, 3)
+         """
+-        # 1. Fetch feature from hash grid
+-        f = self.hash_grid(x) # (N, D)
++        # 1. Fetch feature from hash grid H following Instant-NGP [S1]
++        # (Implementation of multi-level hash grid lookup is external to this module)
++        f = self.hash_grid_lookup(x)  # (N, D)
+         
+         # 2. Predict saliency weight
+-        p = self.get_saliency_weight(x) # (N, 1)
++        p = self.get_saliency_weight(x)  # (N, 1)
+         
+         # 3. Scale feature
+-        v = p * f # (N, D)
++        v = p * f  # (N, D)
+         
+-        # 4. Zero-skipping gate: if v is zero, force sigma to zero
+-        # The MLP itself might handle this if initialized correctly, 
+-        # or we explicitly mask.
+-        # Assuming MLP decodes v to (sigma, color)
+-        out = self.mlp(v)
++        # 4. Decode via MLP
++        out = self.mlp(v)  # (N, 1 + C)
+         sigma = out[..., 0:1]
+         color = out[..., 1:]
+         
+-        # Explicit zero-skipping gate as described
+-        # If p is 0, v is 0. If v is 0, sigma should be 0.
+-        # We can enforce this by masking sigma where p is close to 0
+-        # However, the source says "ensure v=0 maps to sigma=0", 
+-        # which is often a property of the MLP initialization or activation.
+-        # We implement the gate explicitly for safety.
+-        mask = (p > 1e-6).float()
++        # 5. Zero-skipping gate: ensure v=0 maps to sigma=0
++        mask = (torch.abs(v) > 1e-6).float()
+         sigma = sigma * mask
+         
+         return sigma, color
+ 
+-    def admm_step(self, lr_admm=0.01):
++    def admm_step(self):
+         """
+-        Perform one step of ADMM to sparsify G.
+-        Minimize ||G - Z||^2 + lambda * ||Z||_0 (approximated)
+-        Subject to G = Z.
++        Perform one ADMM iteration to enforce sparsity on G.
++        Minimizes ||G - Z||^2 + lambda * ||Z||_0 subject to G = Z.
+         """
+-        # Update Z: Soft thresholding or hard thresholding for sparsity
+-        # Z = shrink(G + Y, lambda)
+-        # For L0, hard thresholding is used: Z_ij = G_ij + Y_ij if |G_ij + Y_ij| > lambda, else 0
+-        # Or simpler: Z = 0 if |G| < threshold, else G.
+-        # The source mentions "sparsify saliency value distribution... enforcing sparsity constraint".
+-        # Standard ADMM for L0:
++        # 1. Update Z (proximal operator for L0 sparsity)
++        Z_update = self.G + self.Y
++        self.Z.data = torch.where(torch.abs(Z_update) > self.lambda_param, Z_update, torch.zeros_like(Z_update))
+         
+-        # 1. Update Z
+-        Z_update = self.G + self.Y
+-        # Hard thresholding for sparsity
+-        threshold = self.lambda_param
+-        self.Z.data = torch.where(torch.abs(Z_update) > threshold, Z_update, torch.zeros_like(Z_update))
+-        
+-        # 2. Update G (minimize ||G - Z + Y||^2) -> G = Z - Y
++        # 2. Update G (quadratic subproblem)
+         self.G.data = self.Z - self.Y
+         
+@@ -153,12 +114,9 @@
+     def train_step(self, x, y_gt, optimizer, admm_optimizer):
+         sigma, color = self.forward(x)
+-        # Volume rendering logic would go here to produce image
+-        # loss = L(image, y_gt)
+-        # Placeholder for loss calculation
+-        loss = 0.0 
+-        
+-        optimizer.zero_grad()
+-        loss.backward()
+-        optimizer.step()
++        # Volume rendering and loss computation L(image, y_gt) are external to the feature decoding pipeline [S1].
++        # loss = compute_loss(render(sigma, color, rays), y_gt)
++        # optimizer.zero_grad()
++        # loss.backward()
++        # optimizer.step()
+         
+         # ADMM step to prune saliency grid
+@@ -172,11 +130,11 @@
+ **Edge Cases and Pitfalls:**
+ *   **Reflective Surfaces:** HollowNeRF encounters difficulties in handling objects with reflective surfaces, which are rendered inadequately [S2].
+-*   **Precision:** The zero-skipping gate relies on $p$ reaching exactly 0 or sufficiently close to 0 to ensure $\sigma=0$. The ADMM pruner is used to explicitly drive these weights to 0 [S1].
++*   **Precision:** The zero-skipping gate relies on $p$ reaching exactly 0 or sufficiently close to 0 to ensure $\sigma=0$. The ADMM pruner explicitly drives the saliency weights to 0 to satisfy this condition [S1].
+ 
+ ## Operating characteristics
+ *   **Parameter Count:** HollowNeRF uses 31% of the parameters of Instant-NGP while delivering comparable rendering quality [S1].
+ *   **Accuracy:** It can achieve up to 1dB PSNR accuracy gain using only 56% of the parameters compared to Instant-NGP [S1].
+-*   **Strengths:** Automatically sparsifies the feature grid during training without requiring prior knowledge of object shape. Reduces parameter count significantly while maintaining or improving rendering quality [S1, S2].
+-*   **Limitations:** Struggles with reflective surfaces [S2]. The ADMM pruning adds complexity to the training loop [S1].
++*   **Strengths:** Automatically sparsifies the feature grid during training without requiring prior knowledge of object shape [S1]. Reduces parameter count significantly while maintaining or improving rendering quality [S1, S2].
++*   **Limitations:** Struggles with reflective surfaces [S2].
+ 
+ ## Background

@@ -1,0 +1,227 @@
+--- v001.md
++++ v002.md
+@@ -8,8 +8,10 @@
+ ## How it works
+ **Inputs:**
+-- Reference images $I_k$ ($k=1 \dots M$).
+-- Camera intrinsics $K_k$ and extrinsics $E_k$ (world-to-camera) for each reference view.
++- Reference images $I_k$ ($k=1 \dots M$) [S1].
++- Camera intrinsics $K_k$ and extrinsics $E_k$ (world-to-camera) for each reference view [S1].
+ - A hybrid representation model (e.g., TriDF) parameterized by density fields $\sigma$ and features $f_m$ [S1].
+ - A set of 3D points $P = \{p_i\}$ derived from SfM and PatchMatch Stereo [S1].
++- Combine or select points for optimization [S1].
++- For each point $p_i$, compute its average color $c_i$ across all $M$ views where it is visible [S1].
+ 
+ **Outputs:**
+@@ -54,5 +56,5 @@
+ 
+ 3. **Error and Weight Calculation:**
+-   - For each point $p_i$, compute its average color $c_i$ across all $M$ views where it is visible. Let $c_{ij}$ be the color of point $i$ projected on view $j$, and $p_i$ be the color of the point cloud itself (likely referring to the rendered color or feature-based color at that location) [S1].
++   - For each point $p_i$, compute its average color $c_i$ across all $M$ views where it is visible. Let $c_{ij}$ be the color of point $i$ projected on view $j$, and $p_i$ be the color of the point cloud itself [S1].
+    - Compute the color difference metric $S(c_a, c_b)$:
+      $$
+@@ -92,139 +94,96 @@
+ 
+ ```python
++import math
++
++def l1_norm(a, b):
++    return sum(abs(x - y) for x, y in zip(a, b))
++
++def color_dist(c1, c2):
++    return (1.0 / 3.0) * l1_norm(c1, c2)
++
++def sample_color(image, u, v):
++    h, w, _ = image.shape
++    u_int = max(0, min(w - 1, int(round(u))))
++    v_int = max(0, min(h - 1, int(round(v))))
++    return image[v_int, u_int]
++
++def is_in_bounds(u, v, image_shape):
++    h, w, _ = image_shape
++    return 0 <= u < w and 0 <= v < h
++
+ def compute_depth_guided_loss(model, points_3d, camera_params, reference_images, iteration):
+     """
+     Computes the depth-guided loss for early training stages.
+-    
+-    Args:
+-        model: The neural network model (e.g., TriDF) with density/feature fields.
+-        points_3d: List of 3D points (N_s points) in world coordinates.
+-        camera_params: Dict containing intrinsics K and extrinsics E for each reference view.
+-        reference_images: List of reference images I_k.
+-        iteration: Current training iteration number.
+-        
+-    Returns:
+-        depth_loss: Scalar tensor for L_depth.
++    model: Neural network providing render_depth(u, v) and render_color(p) [G].
++    points_3d: List of 3D points [X, Y, Z, 1] in world coordinates.
++    camera_params: List of dicts with 'K' (3x3) and 'E' (4x4) for each view.
++    reference_images: List of HxWx3 RGB arrays.
++    iteration: Current training iteration number.
++    Returns: Scalar depth loss L_depth.
+     """
+-    # Only apply depth guidance in early stages
+     if iteration >= 10000:
+         return 0.0
+ 
+-    lambda_depth = 0.001
+-    lambda_smooth = 0.0
+-    N_s = 64  # Number of key points sampled
+-    
+-    # Sample points if necessary, or use provided points
+-    # In the source, points are generated via COLMAP/PatchMatch beforehand.
+-    # Here we assume points_3d contains the dense cloud points to evaluate.
+-    
++    N_s = 64
+     total_weighted_error = 0.0
+     count = 0
+-    
++
+     for p_i in points_3d[:N_s]:
+-        # 1. Project point to all views
+-        errors = []
+         colors_across_views = []
+-        
++        Zc = 0.0
++
+         for k in range(len(reference_images)):
+             K = camera_params['K'][k]
+             E = camera_params['E'][k]
+-            
++
+             # Transform to camera coordinates
+-            # p_i is [Xw, Yw, Zw, 1]
+-            p_cam = E @ p_i
++            p_cam = [sum(E[r][c] * p_i[c] for c in range(4)) for r in range(4)]
+             Xc, Yc, Zc = p_cam[0], p_cam[1], p_cam[2]
+-            
++
+             # Project to image plane
+-            uv_homogeneous = K @ [Xc, Yc, Zc]
+-            u = uv_homogeneous[0] / uv_homogeneous[2]
+-            v = uv_homogeneous[1] / uv_homogeneous[2]
+-            
+-            # Check if projection is within image bounds
++            uv_hom = [sum(K[r][c] * (Xc if c < 3 else 1) for c in range(3)) for r in range(3)]
++            u = uv_hom[0] / uv_hom[2]
++            v = uv_hom[1] / uv_hom[2]
++
+             if not is_in_bounds(u, v, reference_images[k].shape):
+                 continue
+-                
+-            # 2. Render predicted depth at this location
+-            # The model samples along the ray through (u,v)
+-            # d_hat is the expected depth from volume rendering
+-            d_hat = model.render_depth(u, v, K, E)
+-            
+-            # 3. Get color information for error calculation
+-            # c_ik: color of point i projected on view k
+-            # This requires sampling the reference image or rendered color
++
++            # Render predicted depth at this location
++            d_hat = model.render_depth(u, v)
++
++            # Sample color from reference image
+             c_ik = sample_color(reference_images[k], u, v)
+             colors_across_views.append(c_ik)
+-            
+-            # Store for later error calculation
+-            # Note: The formula for e_ik requires average color c_i and point color p_i
+-            # We defer the final error calculation until we have all views or approximate it.
+-            # However, the source formula computes e_ik using sum over M.
+-            # We will store projections to compute the mean later.
+-            
+-        # 4. Compute Multiview Consistency Error
++
+         if len(colors_across_views) < 2:
+             continue
+-            
+-        # Calculate average color c_i across visible views
+-        c_i = mean(colors_across_views)
+-        
+-        # Calculate p_i (color of the point cloud itself)
+-        # Source says "p_i is the color of the point cloud". 
+-        # In context, this likely refers to the color rendered by the model at the point's depth
+-        # or the color from the reference image at the projected location.
+-        # Given "S(c_ik, c_i)" and "S(c_ik, p_i)", p_i acts as a reference color for the point.
+-        # We assume p_i is the color rendered by the model at the 3D point's location.
++
++        # Average color across visible views
++        M_vis = len(colors_across_views)
++        c_i = [sum(c[j] for c in colors_across_views) / M_vis for j in range(3)]
++
++        # Color of the point cloud itself (rendered or reference) [G]
+         p_i_color = model.render_color(p_i)
+-        
+-        # Compute S(c_a, c_b) = 1/3 ||c_a - c_b||_1
+-        def color_dist(c1, c2):
+-            return (1/3) * np.sum(np.abs(c1 - c2))
+-            
+-        sum_s = 0.0
+-        M_visible = len(colors_across_views)
+-        
+-        for c_ik in colors_across_views:
+-            sum_s += color_dist(c_ik, c_i)
+-            
+-        # Add the term S(c_ik, p_i). The source formula sums S(c_ij, c_i) for j=1..M
+-        # and adds S(c_ik, p_i). This implies one specific view k is used for the second term?
+-        # Or is it averaged? The formula: (1/(M-1) sum_{j=1}^M S(c_ij, c_i) + S(c_ik, p_i))^{1/2}
+-        # This notation is slightly ambiguous. It likely means:
+-        # e_ik = sqrt( (1/(M-1)) * sum_{j!=k} S(c_ij, c_i) + S(c_ik, p_i) )
+-        # Or it uses the current view k for the second term.
+-        # Let's assume the standard interpretation: compare current view to mean, and current view to point color.
+-        
+-        # Re-reading source: "e_ik = ( 1/(M-1) sum_{j=1}^M S(c_ij, c_i) + S(c_ik, p_i) )^{1/2}"
+-        # This sums over ALL M for the first part, then adds the specific k term.
+-        # This seems to double count or weight the current view heavily.
+-        # We implement exactly as written.
+-        
+-        term1 = (1/(M_visible - 1)) * sum_s if M_visible > 1 else 0
+-        term2 = color_dist(colors_across_views[0], p_i_color) # Using first visible view as 'k' for demonstration
+-        
+-        e_ik = np.sqrt(term1 + term2)
+-        
+-        # 5. Compute Weight
+-        alpha_ki = 1 - e_ik
+-        w_ki = np.clip(alpha_ki, 0, 1)
+-        
+-        # 6. Depth Loss Contribution
+-        # d_i is the depth of the 3D point cloud point (Zc in camera coords or world depth?)
+-        # Source: "d_i denote ... depth of point clouds". Usually Zc in camera space or distance from camera.
+-        # The rendered depth d_hat is also along the ray.
+-        d_i = Zc 
+-        
+-        weighted_sq_err = w_ki * (d_hat - d_i)**2
+-        total_weighted_error += weighted_sq_err
++
++        # Compute error e_ik exactly as specified in source
++        sum_s = sum(color_dist(c_ik, c_i) for c_ik in colors_across_views)
++        # Source: (1/(M-1) * sum_{j=1}^M S(c_ij, c_i) + S(c_ik, p_i))^{1/2}
++        term1 = sum_s / (M_vis - 1) if M_vis > 1 else 0.0
++        term2 = color_dist(colors_across_views[0], p_i_color)
++        e_ik = math.sqrt(term1 + term2)
++
++        # Weight
++        alpha_ki = 1.0 - e_ik
++        w_ki = max(0.0, min(1.0, alpha_ki))
++
++        # Depth loss contribution (d_i is camera-space depth Zc)
++        d_i = Zc
++        total_weighted_error += w_ki * (d_hat - d_i) ** 2
+         count += 1
+-        
++
+     if count == 0:
+         return 0.0
+-        
+-    depth_loss = np.sqrt(total_weighted_error / count)
+-    
+-    # Return the loss scaled by lambda if needed, or just the term
+-    # The total loss combines L_color, L_depth, L_smooth.
+-    # This function returns L_depth.
+-    return depth_loss
++
++    return math.sqrt(total_weighted_error / count)
+ ```
+ 

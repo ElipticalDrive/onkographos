@@ -1,0 +1,616 @@
+Experimental port: loads real Unturned map content from your Steam install and renders it in Godot 4 (.NET/C#). Unofficial, ships no game assets. - Stop the ground paying for splat layers it never paints by jlucaso1 · Pull Request #184 · jlucaso1/unturned-godot
+
+Stop the ground paying for splat layers it never paints by jlucaso1 · Pull Request #184 · jlucaso1/unturned-godot · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+jlucaso1
+commented
+Aug 5, 2026
+•
+edited by coderabbitai
+Bot
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+The terrain is the one thing that fills the whole screen, and its shader was sampling ten anisotropically-filtered textures at every pixel of it: eight splat layers plus two control maps, every layer multiplied by its weight and summed. Most of those samples were multiplied by zero.
+PEI's own splatmaps say by how much:
+Layers a tile names
+8
+Layers a tile paints, on average
+3.4 — three of the sixteen paint exactly one
+Splat texels giving all their weight to ONE layer
+87%
+Splat texels using at most two
+99% (mean 1.14)
+So four or five of the eight were sampled across a whole tile only to be scaled by a weight that is zero everywhere on it — and even among the layers a tile does paint, one sample in the blend is the common case and eight is nobody's.
+What changed
+The shader is generated per painted-layer count instead of written out for eight.
+Per tile. A tile binds only the layers its new SplatmapTile.ActiveLayerMask() reports. A tile painting four or fewer therefore carries one control texture rather than two — a sample saved and half the control VRAM, on twelve of PEI's sixteen tiles.
+Per pixel. Each remaining sample sits behind its own weight (if (weight > 0.0)), so the layers this pixel does not paint are not fetched at all.
+render_mode specular_disabled. SPECULAR is 0, which makes f0 zero and with it the entire Schlick-GGX lobe, so the render mode drops ALU that was multiplying out to nothing. It is what the flat fallback material has always done.
+Roughly ten fetches per ground pixel down to two or three.
+Not one pixel moves — and that was checked, not argued
+PEI rendered terrain-only (water/foliage/objects switched off, so nothing animated is in frame) is bit-for-bit reproducible between runs — two captures of the same build differ on 0 of 5,988,600 channel samples. That makes it a real oracle rather than an eyeball test, and it caught two mistakes in the first draft of this change:
+textureGrad cost the anisotropic taps. Hoisting dFdx/dFdy out of the branch and sampling with explicit gradients is the spec-tidy way to sample inside a conditional, and it came back visibly blurrier — deltas to 110/255, layer texture detail washed out while the splat boundaries stayed crisp. The sample keeps its implicit LOD instead, which is well-defined here for the reason the spec's warning is about the opposite case: uv is computed in uniform control flow, so every lane of the quad, helper lanes included, holds the value the derivative is taken from.
+SPECULAR = 0.0 is not redundant with specular_disabled. The render mode guards direct light alone; the sky's indirect specular reads f0 regardless, and leaving SPECULAR at its 0.5 default gave f0 = 0.04 and lit the ground measurably brighter everywhere — deltas to 17/255 across the whole surface.
+With both corrected the capture is identical to the unmodified render: 0 of 5,988,600 channel samples differ.
+Measuring it
+terrain.splat.unpainted.enabled prices the per-pixel half in a running frame:
+```
+r.vsync.enabled 0
+perf
+terrain.splat.unpainted.enabled 1     # sample the layers a pixel gives no weight to
+perf
+```
+The image is identical with it on, so the difference between the two frames is the fetches and nothing else. The per-tile half is not switchable — it is decided when the material is built.
+Tests
+SplatmapTile.ActiveLayerMask against a painted tile, an empty one, and the early exit when all eight are painted.
+The material a textured tile ends up wearing: which layers it binds, that a tile painting three needs one control texture and not two, that each painted layer's weight lands in the channel that multiplies its own texture, and that unfilled channels read zero so they add nothing to the blend or to the total.
+The generated shader's shape — one branch per painted layer guarded by that layer's own weight, a total that still sums every one of them, no textureGrad, and SPECULAR still written.
+The console binding, including telling "no terrain loaded" apart from "terrain wearing the flat-colour fallback", which has no splat layers to skip.
+2474 unit tests, 11 terrain runtime tests and 17 console runtime tests pass, and the 13 structural metrics still match PEI.json.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_01Et4zwpQq6cdazFjwtur6dP
+Generated by Claude Code
+Summary by CodeRabbit
+New Features
+Added clipboard support for copying console output and pasting multiline commands.
+Added the copy console command.
+Added terrain controls for sampling unpainted layers.
+Improved terrain splat rendering to use only painted layers.
+Bug Fixes
+Multiline pasted commands now execute sequentially, with comments and quoted text handled correctly.
+Documentation
+Updated the console command reference with clipboard behavior and terrain controls.
+claude
+added 2 commits
+August 5, 2026 23:02
+Stop the ground paying for splat layers it never paints
+…
+119397a
+```
+The terrain is the one thing that fills the whole screen, and its shader was
+sampling ten anisotropically-filtered textures at every pixel of it: eight
+splat layers plus two control maps, every layer multiplied by its weight and
+summed. Most of those samples were multiplied by zero.
+
+PEI's own splatmaps say by how much. Per tile, an average of 3.4 of the eight
+layers are painted at all — three tiles paint exactly one — so four or five
+of the eight were sampled across the whole tile only to be scaled by a weight
+that is zero everywhere on it. Per pixel it is starker still: 87% of PEI's
+splat texels give all their weight to a single layer and 99% to at most two,
+so even among the layers a tile does paint, one sample in the blend is the
+common case and eight is nobody's.
+
+So the shader is now generated per painted-layer count instead of written out
+for eight. A tile binds only the layers its ActiveLayerMask reports, which
+also means a tile painting four or fewer carries ONE control texture rather
+than two — a sample saved and half the control VRAM, on twelve of PEI's
+sixteen tiles. Each remaining sample then sits behind its own weight: the
+gradients are taken once in uniform control flow and the samples use
+textureGrad, so anisotropic filtering is exactly what it was inside the
+branch, which an implicit-LOD texture() there would not have been.
+
+Not one pixel moves. Skipping `sample * 0.0` drops a term that contributes
++0.0, and `total` still sums every weight, so the normalized average is
+bit-identical to the eight-way form. `specular_disabled` comes along for the
+same reason: SPECULAR was already 0, which makes f0 and therefore the entire
+Schlick-GGX lobe zero, so the render mode removes ALU that was multiplying
+out to nothing — and it is what the flat fallback material has always done.
+
+`terrain.splat.unpainted.enabled` prices the per-pixel half of it in a
+running frame. The image is identical with it on, so the difference between
+the two frames is the fetches and nothing else.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Et4zwpQq6cdazFjwtur6dP
+```
+Keep the sampling and the specular the ground already had
+…
+4030b02
+```
+A capture proved both halves of the last commit's "not one pixel moves"
+wrong, in two independent ways. PEI rendered terrain-only — water, foliage
+and objects switched off, so nothing animated is in frame — is bit-for-bit
+reproducible between runs, which makes it a real oracle rather than an
+eyeball test. Against it the new shader differed on 89% of its samples.
+
+textureGrad was the larger half, at deltas up to 110/255: the whole ground
+came back visibly blurrier, its layer texture detail washed out while the
+splat boundaries stayed crisp — a mip and anisotropy difference, not a
+blending one. Explicit gradients drop out of the anisotropic path on at
+least one driver, so the sample inside the branch keeps its implicit LOD
+instead. That is well-defined here for the reason the spec's warning is
+about the opposite case: `uv` is computed in uniform control flow, so every
+lane of the quad, helper lanes included, holds the value the derivative is
+taken from.
+
+The smaller half, deltas to 17/255 spread over the whole surface, was
+dropping `SPECULAR = 0.0` as redundant once `specular_disabled` was set. It
+is not. The render mode guards direct light alone; the sky's indirect
+specular reads f0 regardless, and leaving SPECULAR at its 0.5 default gave
+f0 = 0.04 and lit the ground measurably brighter everywhere. Written back,
+with the reason next to it.
+
+With both corrected the terrain-only capture is identical to the unmodified
+render: 0 of 5,988,600 channel samples differ.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Et4zwpQq6cdazFjwtur6dP
+```
+coderabbitai
+Bot
+commented
+Aug 5, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Warning
+Review limit reached
+@jlucaso1, you've reached your PR review limit, so we couldn't start this review.
+Next review available in: 45 minutes
+You've used all free OSS reviews for now. Wait for the free limit to reset to keep reviewing this public repository.
+How can I continue?
+After more reviews become available, a review can be triggered using the @coderabbitai review command as a PR comment. Alternatively, push new commits to this PR.
+To avoid repeated limits, reduce automatic review volume by pausing incremental auto-reviews earlier, using label-based review opt-in, excluding WIP or generated PR titles, or requesting reviews manually when the PR is ready. If your team needs uninterrupted high-volume reviews, an organization admin can enable usage-based reviews.
+How do review limits work?
+CodeRabbit enforces per-developer PR review limits for each organization. Most developers receive the normal plan review availability.
+For paid Pro and Pro+ PR reviews, CodeRabbit uses adaptive limits for sustained high-volume activity. When a developer's recent PR review activity reaches the 95th percentile or higher among CodeRabbit users, additional reviews become available more gradually as earlier reviews age out of the rolling window.
+Please refer docs for additional details.
+Review details
+⚙️ Run configuration
+Configuration used: Organization UI
+Review profile: ASSERTIVE
+Plan: Pro Plus
+Run ID: 4e2de351-e46a-446c-8fd6-5477a1893fb3
+📥 Commits
+Reviewing files that changed from the base of the PR and between 866cfc9 and 2149a58.
+📒 Files selected for processing (6)
+README.md
+core/Console/ConsoleCommandLine.cs
+src/Console/ConsoleOverlay.cs
+tests/Console/ConsoleCommandLineTests.cs
+tests/Runtime/ConsoleTests.cs
+tests/Runtime/TerrainBuilderTests.cs
+📝 Walkthrough
+Walkthrough
+The change adds multiline console parsing, clipboard copy and paste support, and the copy command. Terrain splat rendering now detects active layers, generates compact shaders and control textures, and exposes unpainted-layer sampling through a console setting.
+Changes
+Console commands and clipboard
+Layer / File(s)
+Summary
+Multiline command parsing
+core/Console/ConsoleCommandLine.cs, tests/Console/ConsoleCommandLineTests.cs
+Newlines separate statements. Comments remain line-scoped. Unterminated quotes stop at line boundaries. Multiline input can be flattened to semicolon syntax.
+Console clipboard operations
+src/Console/ConsoleOverlay.cs, src/Console/RenderConsole.cs, tests/Runtime/ConsoleTests.cs, README.md
+The overlay copies output and handles multiline paste. Keyboard shortcuts preserve prompt behavior when appropriate. The copy command reports clipboard results.
+Terrain splat rendering
+Layer / File(s)
+Summary
+Active splat-layer detection
+core/Data/SplatmapTile.cs, src/World/TerrainBuilder.cs, tests/TerrainTests.cs
+Tiles detect non-zero painted layers and pass the layer indices through tile construction.
+Generated splat materials
+src/World/TerrainBuilder.cs, tests/Runtime/TerrainBuilderTests.cs
+Generated shaders bind active layers, pack mapped control channels, normalize weights, support unpainted sampling, and disable specular output.
+Runtime splat controls
+src/Console/RenderConsole.cs, tests/Runtime/ConsoleTests.cs, README.md
+The terrain setting updates sample_unpainted on splat materials and reports fallback or unavailable terrain cases.
+Estimated code review effort: 4 (Complex) | ~45 minutes
+Sequence Diagram(s)
+```
+sequenceDiagram
+  participant User
+  participant ConsoleOverlay
+  participant ConsoleCommandLine
+  participant Clipboard
+  User->>ConsoleOverlay: paste multiline commands
+  ConsoleOverlay->>Clipboard: read clipboard
+  Clipboard-->>ConsoleOverlay: multiline text
+  ConsoleOverlay->>ConsoleCommandLine: Flatten(text)
+  ConsoleCommandLine-->>ConsoleOverlay: flattened command line
+```
+Loading
+```
+sequenceDiagram
+  participant RenderConsole
+  participant TerrainBuilder
+  participant TileMesh
+  participant SplatMaterial
+  RenderConsole->>TerrainBuilder: build terrain tile
+  TerrainBuilder->>TileMesh: store active painted layers
+  TileMesh->>SplatMaterial: create compact splat material
+  RenderConsole->>SplatMaterial: set sample_unpainted
+```
+Loading
+Suggested reviewers: claude
+Poem
+A rabbit taps commands in a row,
+While splat layers bloom below.
+Clipboard hops from screen to hand,
+Shaders paint the waiting land.
+Eight small layers, neatly spun—
+Console magic, carrots won!
+🚥 Pre-merge checks | ✅ 4 | ❌ 1
+❌ Failed checks (1 warning)
+Check name
+Status
+Explanation
+Resolution
+Docstring Coverage
+⚠️ Warning
+Docstring coverage is 63.41% which is insufficient. The required threshold is 80.00%.
+Write docstrings for the functions missing them to satisfy the coverage threshold.
+✅ Passed checks (4 passed)
+Check name
+Status
+Explanation
+Description Check
+✅ Passed
+Check skipped - CodeRabbit’s high-level summary is enabled.
+Title check
+✅ Passed
+The title clearly summarizes the main change: avoiding terrain splat-layer work for layers that a tile does not paint.
+Linked Issues check
+✅ Passed
+Check skipped because no linked issues were found for this pull request.
+Out of Scope Changes check
+✅ Passed
+Check skipped because no linked issues were found for this pull request.
+✨ Finishing Touches 💡 1
+📝 Generate docstrings 💡
+Create stacked PR
+Commit on current branch
+🧪 Generate unit tests (beta)
+Create PR with unit tests
+Commit unit tests in branch claude/terrain-performance-optimization-t5d6xg
+Thanks for using CodeRabbit! It's free for OSS, and your support helps us grow. If you like it, consider giving us a shout-out.
+❤️ Share
+X
+Mastodon
+Reddit
+LinkedIn
+Comment @coderabbitai help to get the list of available commands.
+chatgpt-codex-connector
+Bot
+reviewed
+Aug 5, 2026
+View reviewed changes
+chatgpt-codex-connector
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+💡 Codex Review
+Here are some automated review suggestions for this pull request.
+Reviewed commit: 4030b020b8
+ℹ️ About Codex in GitHub
+Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you
+Open a pull request for review
+Mark a draft as ready
+Comment "@codex review".
+If Codex has suggestions, it will comment; otherwise it will react with 👍.
+Codex can also answer questions or update the PR. Try commenting "@codex address that feedback".
+Comment thread
+src/World/TerrainBuilder.cs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+claude
+added 2 commits
+August 5, 2026 23:30
+Let a recipe travel by clipboard, in both directions
+…
+56973cc
+```
+Two halves of the same thing, both reported from a real measuring session.
+
+Ctrl+C over the scrollback did nothing. The label has SelectionEnabled and
+the selection works, but its FocusMode is None — deliberately, so that typing
+always reaches the prompt — and RichTextLabel's own copy shortcut only fires
+when it is focused. The key was reaching the LineEdit, which copied its own
+empty selection. The overlay takes the keystroke now, and only when there IS
+something selected in the log: with nothing selected it lets it fall through,
+because then the selection the person means is the one in the input box.
+
+`copy` puts the whole scrollback on the clipboard as plain text, which is
+what a bug report wants and what dragging a selection across a few hundred
+scrolling lines cannot practically produce. Both paths ask the display server
+for a clipboard first, since Godot only warns when there is none and a copy
+that quietly did not happen is worse than one that says so.
+
+Pasting was the other half. A recipe is written one command per line — in a
+note, in an issue, in this repo's own docs — and the prompt is a LineEdit,
+which drops the newlines. Four commands arrived as
+
+    terrain.enabled 0perfterrain.enabled 1perf
+
+one word, no such name. The console's grammar already runs several statements
+from one line, so that is what a pasted block becomes: a newline separates
+statements exactly as `;` does, `//` now ends its own LINE rather than
+everything pasted under it, and a quote left open ends there too instead of
+swallowing the commands below. Flatten() joins them back into the one line
+the prompt can hold, and the round trip keeps a quoted `;` whole.
+
+A single-line clipboard is left alone — the LineEdit's own paste already
+handles the selection, the caret and the undo stack, and there is nothing
+about it to fix.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Et4zwpQq6cdazFjwtur6dP
+```
+Say what the three captures actually showed about the branched sample
+…
+866cfc9
+```
+The comment explaining why the sample inside the branch keeps its implicit
+LOD gave the wrong reason. It blamed anisotropic filtering dropping out of
+the explicit-gradient path, which a third capture disproves: textureGrad with
+NO branch renders at a maximum delta of 5/255 against the unmodified terrain,
+the size of coarse-against-fine derivative rounding and nothing like the
+110/255 the branched version came back with.
+
+So the gradients were never the problem. Hoisting them past a branch is: a
+compiler may sink a dFdx whose only use is inside the conditional back into
+it, and taken there it is taken under divergent flow. The implicit form has
+no such value to sink, and `uv` is computed before the branch, so every lane
+of the quad holds what the derivative is taken from.
+
+All three measurements are now in the comment, because the conclusion is only
+worth as much as the row that separates the two explanations.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Et4zwpQq6cdazFjwtur6dP
+```
+coderabbitai
+Bot
+reviewed
+Aug 5, 2026
+View reviewed changes
+coderabbitai
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Actionable comments posted: 5
+🤖 Prompt for all review comments with AI agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+Inline comments:
+In `@core/Console/ConsoleCommandLine.cs`:
+- Line 74: Update ConsoleCommandLine.Flatten so flattening statements from Split
+preserves quote-reset behavior: when a statement ends with an unmatched quote
+due to a newline boundary, close or otherwise encode that boundary before
+joining with “; ” so a later Split executes the following statement. Add a
+regression test covering Split/Flatten with the multiline input `echo
+"open\nperf`.
+
+In `@README.md`:
+- Around line 174-178: Update the README section describing pasting a command
+block to state that PasteBlock only inserts the flattened commands into the
+prompt; instruct users to press Enter afterward to execute them, without
+implying that pasting submits or runs the commands automatically.
+
+In `@tests/Runtime/ConsoleTests.cs`:
+- Around line 225-230: Update ASingleLineClipboardIsLeftToTheLineEdit to save
+the existing clipboard contents, set it to a known single-line value such as
+“perf” before calling PasteBlock(), and restore the original clipboard in
+cleanup so the test remains isolated.
+
+In `@tests/Runtime/TerrainBuilderTests.cs`:
+- Around line 149-192: Add a material test alongside
+ATileBindsOnlyTheLayersItPaints and
+TheControlTextureCarriesEachPaintedLayersWeightInItsOwnSlot that paints five
+layers, including a nonconsecutive layer in slot 4. Verify layer4 binds the
+expected texture, control1 exists with slot 4’s weight in its red channel and
+unused channels zero, and control2 remains unbound.
+- Around line 213-231: Extend the terrain shader tests with a sweep covering
+every painted count from 1 through SplatmapTile.LAYERS, using
+TerrainBuilder.SplatShaderCode for each value. For each generated shader, verify
+exactly one sampler per painted layer, the expected control texture count,
+absence of the next sampler/control, and that the float total expression
+contains exactly painted terms. Keep the existing painted-count-specific
+assertions unchanged.
+```
+🪄 Autofix
+Fix all unresolved CodeRabbit comments on this PR:
+Push a commit to this branch (recommended)
+Create a new PR with the fixes
+ℹ️ Review info
+⚙️ Run configuration
+Configuration used: Organization UI
+Review profile: ASSERTIVE
+Plan: Pro Plus
+Run ID: bbd2003b-dc61-4d03-ae53-08d824678314
+📥 Commits
+Reviewing files that changed from the base of the PR and between 35d8886 and 866cfc9.
+📒 Files selected for processing (10)
+README.md
+core/Console/ConsoleCommandLine.cs
+core/Data/SplatmapTile.cs
+src/Console/ConsoleOverlay.cs
+src/Console/RenderConsole.cs
+src/World/TerrainBuilder.cs
+tests/Console/ConsoleCommandLineTests.cs
+tests/Runtime/ConsoleTests.cs
+tests/Runtime/TerrainBuilderTests.cs
+tests/TerrainTests.cs
+Comment thread
+core/Console/ConsoleCommandLine.cs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+README.md
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+tests/Runtime/ConsoleTests.cs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+tests/Runtime/TerrainBuilderTests.cs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+tests/Runtime/TerrainBuilderTests.cs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+chatgpt-codex-connector
+Bot
+reviewed
+Aug 5, 2026
+View reviewed changes
+chatgpt-codex-connector
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+💡 Codex Review
+Here are some automated review suggestions for this pull request.
+Reviewed commit: 866cfc95e0
+ℹ️ About Codex in GitHub
+Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you
+Open a pull request for review
+Mark a draft as ready
+Comment "@codex review".
+If Codex has suggestions, it will comment; otherwise it will react with 👍.
+Codex can also answer questions or update the PR. Try commenting "@codex address that feedback".
+Comment thread
+core/Console/ConsoleCommandLine.cs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/Console/ConsoleOverlay.cs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Close what the line break closed, and paste over the selection
+…
+2149a58
+```
+Two defects in yesterday's clipboard work, both found in review, both real.
+
+Flatten undid the rule it exists to serve. A line break ends a quote and a
+`;` does not, so joining `echo "open` and `perf` gave `echo "open; perf` —
+separator inside the quote, second command swallowed, which is precisely the
+"one stray quote must not reach the commands below it" the newline rule was
+added for. The quote is closed on the way now. That costs nothing: Words
+already reads an unterminated quote as running to the end of its statement,
+so `echo "open` and `echo "open"` were always the same two words.
+
+InsertTextAtCaret does not replace the selection. The LineEdit's own paste
+deletes it first and this path does not go through paste_text, so pasting a
+recipe over a selected command kept both and ran the two welded together.
+The insert is split out of PasteBlock to do it — and split for a second
+reason: a headless session has no clipboard, so PasteBlock refuses at its
+first guard and everything past it was unreachable from the suite. Now the
+part worth testing is reachable, and the test fails without the fix.
+
+Also from review, and all of it fair:
+
+  * The README said pasting runs the commands. It fills the prompt; Enter
+    runs them, and being able to read them back first is the point.
+  * The single-line paste test asserted against whatever the clipboard
+    happened to hold. It sets one now, and puts it back.
+  * The material tests all painted three layers, so nothing covered the
+    boundary where a fifth layer needs a SECOND control texture and slot 4's
+    weight has to land in its red channel. A five-layer tile covers it, with
+    layer 6 in slot 4 so an index cannot pass for the other.
+  * The shader generator was pinned at one count out of eight. A sweep over
+    1..8 checks the sampler list, the control count and that `total` still
+    sums exactly as many terms as there are painted layers.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Et4zwpQq6cdazFjwtur6dP
+```
+Hide details
+View details
+jlucaso1
+merged commit 01ee6ee
+into
+main
+Aug 6, 2026
+11 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+jlucaso1
+deleted the
+claude/terrain-performance-optimization-t5d6xg
+branch
+August 6, 2026 00:01
+jlucaso1
+pushed a commit
+that referenced
+this pull request
+Aug 6, 2026
+Merge main: keep its splat pruning, keep the shadow knobs
+…
+6818abb
+```
+#184 landed the same idea on main and went further: it prunes per tile AND
+skips per pixel, and it keeps SPECULAR = 0.0 while adding
+`specular_disabled` — which is exactly the fix for the brightening this
+branch measured and backed out of. Its terrain work supersedes this
+branch's, so the merge takes main's side wholesale for TerrainBuilder,
+SplatmapTile and their tests.
+
+What is left here is what main does not have: the two renderer-global
+shadow measurement knobs, `r.shadow.directional` and `r.shadow.filter`.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011NGcws4bFrUHRXVHe6dBfK
+```
+This was referenced Aug 6, 2026
+Stop writing a shadow map four times finer than the display
+#185
+Merged
+Say whether the frame is waiting on the GPU, and price the last two shadow levers
+#186
+Merged
+coderabbitai
+Bot
+mentioned this pull request
+Aug 6, 2026
+Shader fixes: a preprocessor pass nobody needs, and an f0 nobody meant to keep
+#187
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

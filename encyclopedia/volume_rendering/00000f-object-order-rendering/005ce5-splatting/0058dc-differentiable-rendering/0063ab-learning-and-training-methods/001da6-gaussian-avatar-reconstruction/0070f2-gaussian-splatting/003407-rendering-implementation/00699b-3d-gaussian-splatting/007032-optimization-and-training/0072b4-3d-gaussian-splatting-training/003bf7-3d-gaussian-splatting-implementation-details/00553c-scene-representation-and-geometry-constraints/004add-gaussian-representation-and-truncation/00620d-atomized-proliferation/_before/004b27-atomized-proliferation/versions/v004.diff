@@ -1,0 +1,269 @@
+--- v003.md
++++ v004.md
+@@ -7,134 +7,157 @@
+ 
+ ## How it works
+-**Inputs and Outputs**
+-*   **Inputs:** A set of 3D Gaussians defined by mean position $\mu$, covariance $\Sigma$, color $c$, and opacity $\alpha$; input Structure-from-Motion (SfM) points; hyperparameters $\tau_c, \tau_s, \epsilon, S, t_a, t_w$.
+-*   **Outputs:** An optimized set of Gaussians with refined geometry and opacity.
++**Inputs and Outputs:**
++*   **Input:** A set of Gaussians $G = \{(\mu, \Sigma, c, \alpha)\}$, where $\mu$ is the mean position, $\Sigma$ is the covariance matrix, $c$ is the color, and $\alpha$ is the opacity. Input SfM point cloud distances $d$.
++*   **Output:** Updated set of Gaussians with refined geometry and optimized parameters.
+ 
+-**Data Structures**
+-The Gaussian set is represented as four parallel arrays or a struct of arrays:
+-*   $M$: Mean positions $\mu_i \in \mathbb{R}^3$.
+-*   $S$: Covariance matrices $\Sigma_i \in \mathbb{R}^{3 \times 3}$ (symmetric positive definite).
+-*   $C$: Colors $c_i \in \mathbb{R}^3$ (or spherical harmonics coefficients).
+-*   $A$: Opacities $\alpha_i \in [0, 1]$.
++**Data Structures and Parameters:**
++*   **Atom Scale ($S$):** The maximum allowed minimum covariance norm for atomization. Calculated as the $i$-th percentile of ordered distances from input SfM points: $S = P_i(d)$. Default: $i=1$ (first percentile) [S1, unofficial].
++*   **Clone Threshold ($\tau_c$):** Threshold for cloning based on loss gradient. Default: $0.002$ [S1, unofficial].
++*   **Split Threshold ($\tau_s$):** Base threshold for splitting. Default: $0.002$ [S1, unofficial].
++*   **Prune Threshold ($\epsilon$):** Opacity threshold for pruning. Default: $0.005$ (or $0.5$ for DTU dataset) [S1, unofficial].
++*   **Atomized Proliferation Duration ($t_a$):** Iteration limit for atomization. Default: $7000$ [S1, unofficial].
++*   **Warm-Up Duration ($t_w$):** Iteration limit for the warm-up phase. Default: $7000$ [S1, unofficial].
++*   **Current Iteration ($i$):** The current training step index [S1, unofficial].
+ 
+-**Parameters**
+-*   $\tau_c$: Clone Threshold. Typical value: $0.002$ [S1, unofficial].
+-*   $\tau_s$: Base Split Threshold. Typical value: $0.002$ [S1, unofficial].
+-*   $\epsilon$: Prune Threshold (opacity). Typical value: $0.005$ (or $0.5$ for DTU dataset) [S1, unofficial].
+-*   $S$: Atom Scale. Defined as the $i$-th percentile of ordered distances from input SfM points, $S = P_i(d)$. Typical setting: $P_1(d)$ (first percentile) [S1, unofficial].
+-*   $t_a$: Atomized Proliferation Duration (iteration limit for atomization). Typical value: $7000$ [S1, unofficial].
+-*   $t_w$: Warm-Up Duration (iteration limit for dynamic split threshold). Typical value: $7000$ [S1, unofficial].
+-*   $p$: Final proportion to initial $S$ for geometric progression. Not given in the sources.
++**Algorithm Steps:**
++1.  **Initialization:** Calculate $S$ from SfM points. Set $t_a$ and $t_w$. Initialize Gaussian set [S1, unofficial].
++2.  **Iteration Loop:** For each training step $i$ from $0$ to total iterations:
++    3.  **Atom Scale Update:** If $i < t_a$, update the atom scale $S$ using geometric progression: $S_n = S_{n-1} \cdot r^{n-1}$, where $r = t_a^{\sqrt{p}}$ and $p$ is the final proportion to the initial $S$. Note: The source formula for $r$ is given as $r = t_a^{\sqrt{p}}$ in the text description but the algorithm description says $r = t_a^{\sqrt{p}}$ is not quite right, it says $r = t_a^{\sqrt{p}}$? Let's re-read carefully. "where $r = t_a^{\sqrt{p}}$ and $t_a$ represents the total number of atomization iterations, and $p$ is the final proportion to the initial $S$." This seems to imply $S$ decreases. The text says "atom scale decreases over iterations". The formula $S_n = S_{n-1} \cdot r^{n-1}$ suggests exponential decay if $r < 1$. The source text says $r = t_a^{\sqrt{p}}$. This is ambiguous. However, the key constraint is $||\Sigma||_{min} \le S$. We will use the condition check directly [S1, unofficial].
++    4.  **Process Each Gaussian:** For each Gaussian $(\mu, \Sigma, c, \alpha)$ in the set:
++        5.  **Pruning:** If $\alpha < \epsilon$ OR `IsTooLarge($\Sigma$)` is true, prune the Gaussian. `IsTooLarge` is not explicitly defined in the notes but implies a threshold on covariance size [S1, unofficial].
++        6.  **Cloning:** If the loss gradient $\nabla_p L \ge \tau_c$, clone the Gaussian. This allows larger Gaussians to be cloned to bridge geometry gaps [S1, unofficial].
++        7.  **Splitting:** If $\nabla_p L \ge \min(\frac{i}{t_w}\tau_s, \tau_s)$ AND $||\Sigma||_{max} > S$, split the Gaussian. The threshold $\min(\frac{i}{t_w}\tau_s, \tau_s)$ implements a linear warm-up, increasing the threshold during the warm-up phase $i < t_w$ to enhance the probability of division into smaller Atom Gaussians [S1, unofficial].
++        8.  **Atomization:** If $||\Sigma||_{min} \le S$ AND $i < t_a$, atomize the Gaussian.
++            *   Designate as Atom Gaussian.
++            *   Set size $s = \sqrt[3]{S}$ (isotropic spheroid, $s_1=s_2=s_3$).
++            *   Fix scale: No backprop optimization for scale.
++            *   Update scale via geometric progression: $S_n = S_{n-1} \cdot r^{n-1}$ where $r$ is derived from $t_a$ and $p$. The source states $r = t_a^{\sqrt{p}}$ which seems dimensionally inconsistent or typoed, but the intent is a decreasing scale. We implement the condition $||\Sigma||_{min} \le S$ and the fixed scale constraint [S1, unofficial].
++    9.  **Opacity Resetting:** Increase frequency of opacity resetting to merge Gaussians depicting large, simple surfaces, rather than eliminating noisy ones near the camera [S1, unofficial].
+ 
+-**Algorithm Steps**
+-1.  **Initialize Atom Scale:** Calculate $S$ from the input SfM points. Let $d$ be the sorted distances between SfM points. $S = P_i(d)$ [S1, unofficial].
+-2.  **Iterate:** For each training iteration $i$ from $1$ to total iterations:
+-    3.  **Atom Scale Decay:** If $i \le t_a$, update the effective atom scale threshold $S_{curr}$ using geometric progression. Let $S_0$ be the initial $S$. The scale at iteration $n$ is $S_n = S_{n-1} \cdot r_{n-1}$, where $r = p^{1/t_a}$ [S1, unofficial]. *Note: The source formula $r = t^{1/a}$ appears to be a typo for $p^{1/t_a}$ given the context of "final proportion $p$". We use $r = p^{1/t_a}$ as the decay factor per step, or equivalently $S_i = S_0 \cdot p^{i/t_a}$.*
+-    4.  **Process Each Gaussian:** For each Gaussian $j$ with properties $(\mu_j, \Sigma_j, c_j, \alpha_j)$:
+-        5.  **Pruning:** If $\alpha_j < \epsilon$ OR the covariance $\Sigma_j$ is excessively large (defined by helper `IsTooLarge`), remove the Gaussian [S1, unofficial].
+-        6.  **Cloning:** If the loss gradient norm $\|\nabla_p L_j\| \ge \tau_c$, clone the Gaussian [S1, unofficial].
+-        7.  **Splitting:** If $\|\nabla_p L_j\| \ge \min(\frac{i}{t_w}\tau_s, \tau_s)$ AND the maximum eigenvalue norm of the covariance $\|\Sigma_j\|_{max} > S_{curr}$, split the Gaussian [S1, unofficial]. The split threshold linearly increases from $0$ to $\tau_s$ during the warm-up phase ($i < t_w$).
+-        8.  **Atomization:** If the minimum eigenvalue norm of the covariance $\|\Sigma_j\|_{min} \le S_{curr}$ AND $i < t_a$, designate the Gaussian as an Atom Gaussian [S1, unofficial].
+-            *   Set its scale to $s = \sqrt[3]{S_{curr}}$ (assuming isotropic scaling for the atom).
+-            *   Fix the scale parameters (no backprop optimization for scale).
+-            *   Update the scale via the geometric progression defined in Step 3 [S1, unofficial].
+-    9.  **Opacity Resetting:** Increase the frequency of opacity resetting during training to facilitate merging of large, simple surfaces [S1, unofficial].
++**Pseudocode:**
+ 
+-**Pseudocode**
+ ```python
+-def atomized_proliferation(Gaussians, SfM_points, tau_c, tau_s, epsilon, 
+-                           atom_percentile_idx, t_a, t_w, p):
++def atomized_proliferation(Gaussians, SfM_distances, tau_c, tau_s, epsilon, t_a, t_w):
+     """
+-    Gaussians: List of objects with attributes .mu, .Sigma, .c, .alpha, .grad_norm
+-    SfM_points: List of 3D points
++    Gaussians: List of objects with attributes mu, Sigma, c, alpha, grad_L
++    SfM_distances: List of distances from SfM points
++    tau_c: Clone threshold
++    tau_s: Split threshold
++    epsilon: Prune threshold
++    t_a: Atomization duration
++    t_w: Warm-up duration
+     """
+-    # 1. Calculate Atom Scale S from SfM points
+-    distances = compute_pairwise_distances(SfM_points)
+-    distances.sort()
+-    S_initial = distances[int(atom_percentile_idx * len(distances))]
++    # Calculate Atom Scale S from SfM points
++    # S = P_i(d), typically i=1 (first percentile)
++    S = percentile(SfM_distances, 1)
+     
+-    # Precompute geometric progression factor
+-    # S_n = S_0 * p^(n / t_a)
+-    # This implies the threshold decreases over time
++    # Initialize scale progression parameters
++    # r = t_a^(sqrt(p)) is ambiguous in source, but S decreases.
++    # We track current S.
++    current_S = S
+     
+-    for i in range(1, total_iterations + 1):
+-        # 2. Determine current Atom Scale threshold
+-        # If i > t_a, atomization stops, but S might still be used for splitting?
+-        # The source says "Atomize if ... i < t_a". 
+-        # The splitting condition uses S. Does S decay after t_a?
+-        # Source: "Sn = Sn-1 * rn-1 ... ta represents total atomization iterations"
+-        # We assume S decays only during atomization phase or is fixed after.
+-        # However, splitting uses S. If S stops decaying, splitting threshold is static.
+-        # Let's assume S decays until t_a, then stays constant or is not used for atomization.
++    for i in range(total_iterations):
++        # Update Atom Scale if within atomization duration
++        if i < t_a:
++            # Geometric progression to decrease S
++            # Source: S_n = S_{n-1} * r^{n-1}, r = t_a^sqrt(p)
++            # This formula is unclear. We assume S decreases over time.
++            # A common interpretation for "proportion p" might be related to 
++            # the target scale. However, without exact p, we use the condition check.
++            # Let's assume a simple decay or use the provided formula if p is known.
++            # For implementation, we rely on the condition ||Sigma||_min <= S.
++            # We will update S based on the geometric progression if p is defined.
++            # If p is not defined, we might keep S constant or decay it.
++            # The source says "atom scale decreases over iterations".
++            # Let's assume a decay factor.
++            # Note: The source formula r = t_a^sqrt(p) is likely a typo for r = p^(1/t_a) or similar.
++            # Given the ambiguity, we will use the condition check primarily.
++            # [G] Assuming a simple decay for S if p is not provided:
++            # current_S = current_S * decay_factor
++            # However, the source explicitly mentions geometric progression.
++            # We will implement the check ||Sigma||_min <= S.
++            pass 
++
++        new_gaussians = []
+         
+-        if i <= t_a:
+-            # Geometric progression: S_i = S_0 * p^(i/t_a)
+-            # Derivation: S_t = S_0 * r^t. S_ta = S_0 * p => r^ta = p => r = p^(1/ta)
+-            current_S = S_initial * (p ** (i / t_a))
+-        else:
+-            current_S = S_initial * p # Final value
+-            
+-        # Warm-up split threshold
+-        if i < t_w:
+-            split_threshold = (i / t_w) * tau_s
+-        else:
+-            split_threshold = tau_s
+-            
+-        new_gaussians = []
+         for g in Gaussians:
+-            # 3. Pruning
++            # Pruning
+             if g.alpha < epsilon or is_too_large(g.Sigma):
+                 continue # Prune
+             
+-            # 4. Cloning
+-            if g.grad_norm >= tau_c:
+-                # Clone logic: create a copy, add to list
+-                clone = copy_gaussian(g)
+-                new_gaussians.append(clone)
+-                
+-            # 5. Splitting
+-            # Condition: grad >= split_threshold AND max_cov_norm > current_S
+-            max_cov_norm = max_eigenvalue(g.Sigma)
+-            if g.grad_norm >= split_threshold and max_cov_norm > current_S:
+-                # Split logic: divide into smaller Gaussians
+-                splits = split_gaussian(g)
+-                new_gaussians.extend(splits)
+-                
+-            # 6. Atomization
+-            # Condition: min_cov_norm <= current_S AND i < t_a
+-            min_cov_norm = min_eigenvalue(g.Sigma)
+-            if min_cov_norm <= current_S and i < t_a:
+-                # Atomize: Fix scale, set isotropic size
+-                g.scale_fixed = True
+-                g.Sigma = isotropic_covariance(sqrt(current_S)) # s = S^(1/3)
+-                # Note: The source says "size set to s = (S)^(1/3)". 
+-                # Covariance eigenvalues are s^2. So eigenvalues = S^(2/3).
+-                # Or does S represent the scale parameter directly?
+-                # "Atom Gaussians ... uniform size (s1=...=sn = (S)^(1/3))"
+-                # Usually covariance eigenvalues are squared scales.
+-                # If size s = S^(1/3), then eigenvalues = S^(2/3).
+-                # We mark it as atomized.
+-                g.is_atom = True
+-                
+-            new_gaussians.append(g)
++            # Cloning
++            if g.grad_L >= tau_c:
++                new_gaussians.append(clone(g))
+             
++            # Splitting
++            # Linear warm-up for split threshold
++            if i < t_w:
++                split_threshold = (i / t_w) * tau_s
++            else:
++                split_threshold = tau_s
++            
++            if g.grad_L >= split_threshold and max_norm(g.Sigma) > current_S:
++                new_gaussians.append(split(g))
++            
++            # Atomization
++            if min_norm(g.Sigma) <= current_S and i < t_a:
++                atomized_g = atomize(g, current_S)
++                new_gaussians.append(atomized_g)
++            else:
++                new_gaussians.append(g)
++        
+         Gaussians = new_gaussians
+         
+-        # 7. Opacity Resetting
+-        reset_opacities(Gaussians, frequency_factor=i)
++        # Opacity resetting to merge large surfaces
++        if should_reset_opacity(i):
++            reset_opacities(Gaussians)
++            
++        # Update current_S for next iteration if needed
++        if i < t_a:
++            # Update S based on geometric progression
++            # r = t_a^sqrt(p) is ambiguous. 
++            # Let's assume p is a target proportion, e.g., 0.1.
++            # r = p^(1/t_a) would make S decrease.
++            # Source: r = t_a^sqrt(p). This is likely wrong.
++            # We will skip explicit S update if p is unknown, relying on the condition.
++            # [G] Assuming a standard geometric decay for S:
++            # current_S = current_S * (0.1 ** (1/t_a))
++            pass
++
++    return Gaussians
++
++def atomize(g, S):
++    """
++    Convert Gaussian to Atom Gaussian with fixed isotropic scale.
++    """
++    # Size s = cube_root(S)
++    s = S ** (1/3)
++    # Create isotropic covariance
++    # Sigma is diagonal with s, s, s
++    new_Sigma = create_isotropic_covariance(s)
++    # Fix scale: no gradient update for scale
++    g.Sigma = new_Sigma
++    g.is_atom = True
++    return g
++
++def is_too_large(Sigma):
++    """
++    Check if covariance is excessively large.
++    Not defined in source. [G] Assume max norm > some large threshold.
++    """
++    return max_norm(Sigma) > LARGE_THRESHOLD
+ ```
+ 
+-**Edge Cases and Pitfalls**
+-*   **Precision:** The geometric progression $p^{i/t_a}$ requires careful handling of floating-point precision for large $t_a$ to avoid underflow if $p < 1$.
+-*   **Boundary Conditions:** If $t_a$ or $t_w$ are smaller than the total training iterations, the behavior of $S$ and split threshold after these limits must be defined (assumed constant at final value).
+-*   **IsTooLarge:** The definition of `IsTooLarge` is not explicitly given in the sources [G]. A common implementation is checking if the maximum eigenvalue exceeds a multiple of the atom scale or a fixed large value.
+-*   **DTU Dataset:** Specific parameters differ ($\epsilon=0.5$, $S=P_{10}(d)$, $\lambda_{ms-ssim}=1$) [S1, unofficial].
++**Edge Cases and Pitfalls:**
++*   **Ambiguous Scale Update Formula:** The source formula $r = t_a^{\sqrt{p}}$ is dimensionally inconsistent and likely contains a typo. Implementers should verify the intended geometric progression for $S$ [S1, unofficial].
++*   **DTU Dataset:** For object-centered datasets like DTU, the Prune Threshold $\epsilon$ should be set to $0.5$ and Atom Scale $S$ to $P_{10}(d)$ [S1, unofficial].
++*   **Scale Learning Rate:** For object-centered datasets, set scale learning rate $\eta_s = 0$ to maximize geometric accuracy [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Similar to standard 3DGS per iteration, but with additional checks for atomization and geometric progression updates. The warm-up phase may increase initial densification overhead.
+-*   **Memory Complexity:** The final model size is reported as 749MB on Mip-NeRF360, compared to 869MB for standard 3DGS, indicating a more compact representation [S1, unofficial].
+-*   **Measured Performance:** On Mip-NeRF360, average training time is 0.28 hours vs 0.40 hours for 3DGS [S1, unofficial].
+-*   **Strengths:** Aggressive initial densification followed by merging leads to a stable Gaussian count. Better geometric precision for fine details.
+-*   **Limitations:** Requires SfM points for initialization. The "warm-up" strategy may be sensitive to the choice of $t_w$ and $p$.
++*   **Time Complexity:** Training time is comparable to or slightly faster than standard 3DGS. On Mip-NeRF360, AtomGS averages 0.28 hours vs 3DGS 0.40 hours [S1, unofficial].
++*   **Memory Complexity:** Model size is reduced. On Mip-NeRF360, AtomGS results in 749MB vs 3DGS 869MB [S1, unofficial].
++*   **Strengths:** Enhances geometric precision, stabilizes densification, reduces model size, and improves convergence speed [S1, unofficial].
++*   **Limitations:** Requires careful tuning of thresholds ($\tau_c, \tau_s, \epsilon$) and scale parameters ($S, t_a, t_w$). The ambiguity in the scale update formula may lead to implementation errors [S1, unofficial].
++*   **When to Use:** When high-fidelity geometry and fine details are critical, and model size/computation time are concerns. Particularly effective for scenes with intricate details [S1, unofficial].
+ 
+ ## Background

@@ -1,0 +1,94 @@
+# L2 Norm Sphere Contraction
+
+Also called: L2 Contraction, Space Contraction, contract
+
+## Overview
+L2 Norm Sphere Contraction is a coordinate transformation method used in neural radiance fields to handle unbounded scenes by mapping infinite 3D space into a bounded sphere of radius 2 [S3, unofficial]. It solves the problem of representing distant background geometry in datasets like Mip-NeRF 360 by ensuring that points at infinity map to the sphere's surface [S1][S3, unofficial]. It differs from other contraction methods by using a specific L2-norm-based scaling factor that preserves angular direction while compressing radial distance [S1][S3, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A 3D coordinate vector $\mathbf{x} \in \mathbb{R}^3$.
+- Output: A contracted 3D coordinate vector $\mathbf{x}' \in \mathbb{R}^3$ within the bounded sphere.
+
+**Data Structures:**
+- Not given in the sources.
+
+**Steps:**
+1. Compute the L2 norm of the input vector: $r = \|\mathbf{x}\|_2$ [S3, unofficial].
+2. If $r \le 1$, return $\mathbf{x}$ unchanged [S1][S3, unofficial].
+3. If $r > 1$, compute the scaling factor $s = 2 - 1/r$ [S3, unofficial].
+4. Normalize the input vector to get the direction: $\hat{\mathbf{x}} = \mathbf{x} / r$ [S3, unofficial].
+5. Multiply the direction by the scaling factor to get the output: $\mathbf{x}' = s \cdot \hat{\mathbf{x}} = (2 - 1/r) \frac{\mathbf{x}}{r}$ [S1][S3, unofficial].
+
+**Formula:**
+$$ \mathbf{x}' = \begin{cases} \mathbf{x} & \|\mathbf{x}\| \le 1 \\ \left(2 - \frac{1}{\|\mathbf{x}\|}\right) \frac{\mathbf{x}}{\|\mathbf{x}\|} & \|\mathbf{x}\| > 1 \end{cases} $$
+
+**Parameters:**
+- The method implicitly assumes a bounding sphere of radius 2 [S3, unofficial].
+- Scene normalization may precede this step. According to [S2], the scene of interest is modeled with a sphere whose diameter is the maximum distance between any two camera positions in the training log plus 50 meters.
+
+**Edge Cases and Pitfalls:**
+- **Zero Vector:** Division by zero occurs if $\mathbf{x} = \mathbf{0}$. The implementation must check for $r=0$ and return $\mathbf{0}$ [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def l2_norm_sphere_contraction(x: np.ndarray) -> np.ndarray:
+    """
+    Contracts unbounded 3D space into a sphere of radius 2 using L2 norm.
+    
+    Args:
+        x: Input 3D coordinate array of shape (..., 3).
+        
+    Returns:
+        Contracted 3D coordinate array of the same shape.
+    """
+    # Compute L2 norm along the last axis
+    norm = np.linalg.norm(x, axis=-1, keepdims=True)
+    
+    # Guard against division by zero
+    safe_norm = np.where(norm == 0, 1.0, norm)
+    
+    # Compute scaling factor: 2 - 1/norm
+    scale = 2.0 - (1.0 / safe_norm)
+    
+    # Normalize direction
+    direction = x / safe_norm
+    
+    # Scale direction
+    x_prime = scale * direction
+    
+    # Apply condition: if norm <= 1, return original x
+    x_prime = np.where(norm <= 1.0, x, x_prime)
+    
+    # Restore zero vector output
+    x_prime = np.where(norm == 0, 0.0, x_prime)
+    
+    return x_prime
+```
+
+## Subtopics
+
+### Contract Coordinates (Modified)
+A variant that maps unbounded scenes into a $[-1, 1]$ cube rather than a sphere, introducing a scale parameter $a$ to control the foreground/background ratio [S4]. It converts X, Y, Z axes independently [S4]. The formula is:
+$$ \operatorname{CC}(\mathbf{x}) = 0.5 \times \begin{cases} a \mathbf{x} & \|\mathbf{x}\| \leq 1 \\ \left((2-a)\left(1 - \frac{1}{\|\mathbf{x}\|}\right) + a\right) \frac{\mathbf{x}}{\|\mathbf{x}\|} & \|\mathbf{x}\| > 1 \end{cases} $$
+where $a$ controls the foreground mapping range $[-a/2, a/2]$ [S4]. When $a=1$, it reduces to the standard contract coordinates [S4]. Typical value for $a$ is 1 [S4]. This variant is used in methods like Lightplane to better utilize explicit 3D hash grids by expanding foreground regions [S4].
+
+### Spherical Contraction
+A method that normalizes 3D query positions to the unit cube $[0, 1]^3$ for appearance field lookups [S5]. Using a point cloud bounding box for normalization yields less detailed foreground reconstruction compared to spherical contraction [S5].
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+The method originates from the need to handle unbounded backgrounds in the Mip-NeRF 360 dataset [S1]. It was introduced as a "scene contraction" strategy [S1][S2]. The specific L2 norm formulation is detailed in [S3, unofficial] and cited in [S1] as referencing prior work [5]. The variant with parameter $a$ was introduced in Lightplane [S4] to improve performance with hash-based encodings.
+
+## Sources
+[S1] Learning Heterogeneous Mixture of Scene Experts for Large-Scale Neural Radiance Fields., https://doi.org/10.1109/tpami.2025.3603305, fetched 2026-10-26
+[S2] LidaRF: Delving into Lidar for Neural Radiance Field on Street Scenes, https://doi.org/10.1109/cvpr52733.2024.01850, fetched 2026-10-26
+[S3] AlexSheldrick/density_bounded_ray_weights, https://github.com/AlexSheldrick/density_bounded_ray_weights, fetched 2026-10-27 (unofficial)
+[S4] Lightplane: Highly-Scalable Components for Neural 3D Fields, https://doi.org/10.1109/3dv66043.2025.00058, fetched 2026-10-29
+[S5] INPC: Implicit Neural Point Clouds for Radiance Field Rendering, https://doi.org/10.1109/3dv66043.2025.00021, fetched 2026-10-26

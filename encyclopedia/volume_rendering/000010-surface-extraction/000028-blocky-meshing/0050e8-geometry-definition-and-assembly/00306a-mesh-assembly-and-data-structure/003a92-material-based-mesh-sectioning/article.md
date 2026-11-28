@@ -1,0 +1,80 @@
+# Material-Based Mesh Sectioning
+
+Also called: GenerateTriangles, Mesh Splitting by Material
+
+## Overview
+Material-Based Mesh Sectioning splits a decoded mesh into separate arrays of triangles based on the material ID associated with each triangle's vertices [S1, unofficial]. It organizes geometry by material type to facilitate subsequent rendering passes [G].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A decoded mesh object containing vertex positions, indices, and per-vertex material IDs [S1, unofficial].
+*   **Output:** An array of mesh sections, where each section corresponds to a unique material ID and contains an array of triangles [S1, unofficial].
+
+**Data Structures**
+*   **Mesh Section:** A structure containing an array of triangles [S1, unofficial]. The parent array is dynamically resized based on the maximum material ID encountered [S1, unofficial].
+*   **Triangle:** Defined by three vertices. Each vertex includes a position and inherits the material ID from the source mesh's vertex data [S1, unofficial].
+
+**Steps**
+1.  **Decode:** Retrieve the decoded mesh using `GetDecodedMesh` [S1, unofficial].
+2.  **Sanity Check:** If the number of indices in the mesh is less than 3, return an empty mesh sections array [S1, unofficial].
+3.  **Initialize Sections:** Create an empty array to hold mesh sections [G].
+4.  **Iterate Triangles:** Loop through the mesh indices in steps of 3 [S1, unofficial]. For each triplet of indices $(i, i+1, i+2)$:
+    a.  **Retrieve Vertices:** Get the three vertices corresponding to the current indices [S1, unofficial].
+    b.  **Adjust Position:** Add the mesh's global offset to each vertex's position [S1, unofficial].
+    c.  **Determine Material ID:** Start with the material ID of Vertex 0 [S1, unofficial]. If Vertex 1 and Vertex 2 have the same material ID, use that ID instead [S1, unofficial].
+    d.  **Ensure Section Existence:** If the determined `materialID` is greater than or equal to the current number of sections, resize the sections array to `materialID + 1`, initializing new elements with zeroed/empty values [S1, unofficial].
+    e.  **Add Triangle:** Append the current triangle to the section at index `materialID` [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def material_based_mesh_sectioning(decoded_mesh):
+    mesh = decoded_mesh
+    if len(mesh.indices) < 3:
+        return []
+    sections = []
+    for i in range(0, len(mesh.indices), 3):
+        idx0, idx1, idx2 = mesh.indices[i], mesh.indices[i+1], mesh.indices[i+2]
+        v0 = mesh.vertices[idx0]
+        v1 = mesh.vertices[idx1]
+        v2 = mesh.vertices[idx2]
+        v0.pos += mesh.offset
+        v1.pos += mesh.offset
+        v2.pos += mesh.offset
+        mat_id = v0.material_id
+        if v1.material_id == v2.material_id:
+            mat_id = v1.material_id
+        if mat_id >= len(sections):
+            sections.extend([[] for _ in range(mat_id - len(sections) + 1)])
+        sections[mat_id].append((v0, v1, v2))
+    return sections
+```
+
+**Parameters**
+*   Not given in the sources [S1, unofficial].
+
+**Edge Cases and Pitfalls**
+*   **Degenerate Input:** If the mesh has fewer than 3 indices, the function returns an empty array [S1, unofficial].
+*   **Material ID Assignment Rule:** If Vertex 1 and Vertex 2 share a material ID, it overrides Vertex 0's ID for the triangle [S1, unofficial].
+*   **Sparse Material IDs:** The sections array resizes to `materialID + 1`, leaving empty slots for unused IDs [S1, unofficial].
+
+## Subtopics
+
+### [Material ID Assignment & Caching](13805-material-id-assignment-caching.md)
+Maps block material IDs to unique terrain material IDs to enable mesh merging, creating materials on demand and caching results to avoid redundant GPU allocations. It differs from sibling methods by handling material reference disambiguation and caching rather than geometric mesh assembly.
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$, where $N$ is the number of triangles, as each triangle is processed exactly once [G].
+*   **Memory Complexity:** $O(N + M)$, where $N$ is the number of triangles and $M$ is the maximum material ID encountered, due to the array resizing behavior [G].
+*   **Measured Performance:** Not given in the sources [S1, unofficial].
+*   **Scaling:** Performance scales linearly with triangle count; memory scales with triangle count and maximum material ID [G].
+*   **Strengths and Limitations:** Not given in the sources [S1, unofficial].
+*   **When to Use:** Not given in the sources [S1, unofficial].
+*   **When Not to Use:** Not given in the sources [S1, unofficial].
+
+## Background
+The method originates from the VoxelGenerator project by Jay2645 [S1, unofficial].
+
+## Sources
+[S1] Jay2645/VoxelGenerator, https://github.com/Jay2645/VoxelGenerator, fetched 2026-10-27 (unofficial)

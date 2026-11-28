@@ -1,0 +1,240 @@
+# Neural Prefiltering for Correlation-Aware Levels of Detail
+
+Also called: Neural Prefiltering, Neural Prefiltering for Correlation-Aware LoD, ROVER
+
+## Overview
+Neural Prefiltering is a method for physically-based rendering that decomposes global light transport into a learned intra-voxel visibility function and a learned average intra-voxel throughput, enabling multi-scale rendering without light leaks [S1]. It sets itself apart from previous prefiltering techniques by retaining visibility correlations in the distribution of prefiltered geometry, aggregating only local intra-regional visibility, whereas alternatives like Hybrid LoD suffer from blurring and undesired brightening at lower resolutions [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D asset (geometry and materials) and a camera ray.
+*   **Output:** The final pixel color (throughput and radiance).
+
+**Data Structures:**
+1.  **Sparse Voxel Grid:** Stores binary occupancy for voxels across multiple Levels of Detail (LoD).
+    *   LoD 0 resolution: $512^3$ voxels.
+    *   Subsequent LoDs form a geometrically decreasing sequence stopping at $8^3$ voxels.
+    *   Storage includes LoD 0-6.
+2.  **Appearance Network:** A dense Multi-Layer Perceptron (MLP).
+    *   Architecture: 4 hidden layers, 128 neurons each, ReLU activation, no output activation.
+    *   Input: Outgoing direction $\omega_o$, incident direction $\omega_i$, voxel center $\mathbf{c}$.
+    *   Output: Average intra-voxel throughput $\varphi_{\mathcal{V}}(\omega_o, \omega_i)$.
+3.  **Visibility Network:** A dense MLP.
+    *   Architecture: 4 hidden layers, 128 neurons each, ReLU activation, sigmoid output activation.
+    *   Input: Two boundary vertices $\mathbf{p}_o, \mathbf{p}_i$.
+    *   Output: Probability of mutual visibility $V_{\mathcal{M}}(\mathbf{p}_o, \mathbf{p}_i)$.
+4.  **Recurrent Composite Encoding:** A single multiresolution hash grid encoding used for both $\mathbf{p}_o$ and $\mathbf{p}_i$ in the visibility network to halve trainable parameters.
+    *   Hash table size $S = 2^{19}$ (default), $S = 2^{21}$ (for stochastic thresholding comparison).
+    *   Number of levels matches the number of LoDs.
+    *   Base resolution matches the lowest resolution processed.
+    *   Per-level scaling: 2.
+    *   Learned features per level: 2, 4, or 8 (e.g., 8 for Oak Tree visibility, 4 for Oak Tree appearance, 4 for Bare Tree visibility/appearance).
+5.  **Directional Encoding:** Spherical harmonics coefficients up to degree 8 for directions.
+
+**Formulas:**
+The generalized voxel path space measurement contribution is:
+$$T_{\omega_i, \mathbf{p}_i \rightarrow \mathbf{p}_o, \omega_o}(\tilde{\mathbf{v}}) = f(\omega_o, \mathbf{p}_o, -\omega_o) \prod_{j=1}^{n+1} G(\mathbf{v}_{j-1}, \mathbf{v}_j) f(\omega_{j-1}, \mathbf{v}_j, -\omega_j)$$
+where $G$ is the geometric term, $f$ is the reflectance distribution function, $\mathbf{v}_{n+1} = \mathbf{p}_i$, $\mathbf{v}_0 = \mathbf{p}_o \in \partial\mathcal{V}$, and null-scattering distributions at boundaries are delta functions marginalizing endpoint positions and directions [S1].
+
+The average throughput is calculated as:
+$$\varphi_{\mathcal{V}}(\omega_o, \omega_i) := \frac{\iint_{\partial\mathcal{V}} T_{\mathcal{V}}(\mathbf{p}_o, \omega_o; \mathbf{p}_i, \omega_i) |\omega_o \cdot \mathbf{n}_o| |\omega_i \cdot \mathbf{n}_i| dA(\mathbf{p}_i, \mathbf{p}_o)}{\int_{\partial\mathcal{V}} (1 - V_{\mathcal{M}}(\mathbf{p}_o, \mathcal{R}_{\partial\mathcal{V}}(\mathbf{p}_o, -\omega_o))) |\omega_o \cdot \mathbf{n}_o| dA(\mathbf{p}_o)}$$
+where $\mathcal{R}_{\partial\mathcal{V}}(\mathbf{p}_o, \omega_o)$ finds the next boundary point along a ray from $\mathbf{p}_o$ in direction $-\omega_o$ [S1].
+
+The final throughput under far-field assumption is:
+$$T(\tilde{\mathbf{x}}) = \prod_{j=1}^{l-2} \left( \varphi_{\mathcal{V}_j}(\omega_{j-1}, -\omega_j) (1 - V_{\mathcal{M}}(\mathbf{p}_j, \mathbf{p}_{j+1})) + f(\omega_{j-1}, \mathbf{p}_j, -\omega_j) |\omega_j \cdot \mathbf{n}_j| V_{\mathcal{M}}(\mathbf{p}_j, \mathbf{p}_{j+1}) \right) \Big|_{c_j=0}$$
+with integral $I_j = \int_{\mathcal{X}} W(\tilde{\mathbf{x}}) T(\tilde{\mathbf{x}}) L(\tilde{\mathbf{x}}) d\mu'(\tilde{\mathbf{x}})$ [S1].
+
+**Parameters:**
+*   **Training Loss:** Noise-to-noise relative $L_2$ loss [S1].
+*   **Training Time:** 10–20 minutes per network per asset; under one hour total on a single GPU [S1].
+*   **Rendering Resolution:** Highest resolution rendered at 512 x 512 pixels [S1].
+
+**Steps:**
+1.  **Preprocessing (Training):**
+    1.  Voxelize the scene into a sparse grid with LoDs from $512^3$ down to $8^3$.
+    2.  For each voxel and LoD, generate Monte Carlo samples of the intra-voxel throughput using a path tracer to estimate Eq. (3) [S1].
+    3.  Train the Appearance Network to predict $\varphi_{\mathcal{V}}(\omega_o, \omega_i)$ using the noise-to-noise relative $L_2$ loss [S1].
+    4.  Train the Visibility Network to predict $V_{\mathcal{M}}(\mathbf{p}_o, \mathbf{p}_i)$ using the recurrent composite encoding [S1].
+    5.  Compute optimal classification thresholds for the visibility classifier to address hash collisions and control light leaks [S1].
+2.  **Rendering (Inference):**
+    1.  For each camera ray, query the sparse voxel grid for the next non-empty voxel $\mathcal{V}$ [S1].
+    2.  Obtain entry point $\mathbf{p}_i$ and exit point $\mathbf{p}_o$ [S1].
+    3.  Query the Visibility Network for $V_{\mathcal{M}}(\mathbf{p}_o, \mathbf{p}_i)$ [S1].
+    4.  If occluded (based on thresholded visibility):
+        a. Sample direction $\omega_i$.
+        b. Query the Appearance Network for $\varphi_{\mathcal{V}}(\omega_o, \omega_i)$.
+        c. Update throughput [S1].
+    5.  Otherwise (if visible):
+        a. Continue grid traversal to the next voxel [S1].
+    6.  Recursively trace the ray from $\mathbf{p}_o$ until it escapes the scene or hits a light source [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def spherical_harmonic_encode(direction, degree=8):
+    """
+    Encodes a direction vector using spherical harmonics up to degree 8.
+    Returns a list of coefficients.
+    """
+    # Implementation of SH encoding up to degree 8
+    # Returns a fixed-size vector based on degree 8 (49 coefficients)
+    pass
+
+def hash_grid_encode(position, levels, base_res, scale, features_per_level, hash_table_size):
+    """
+    Encodes a 3D position using a multiresolution hash grid.
+    """
+    encoded_features = []
+    for level in range(levels):
+        current_res = base_res * (scale ** level)
+        # Quantize position to grid
+        grid_pos = [math.floor(p * current_res) for p in position]
+        # Hash the grid position to get an index
+        index = hash(tuple(grid_pos)) % hash_table_size
+        # Retrieve features from the learned table
+        features = get_hash_table_features(index, features_per_level)
+        encoded_features.extend(features)
+    return encoded_features
+
+def appearance_network_forward(omega_o, omega_i, voxel_center, hash_table_size, features_per_level):
+    """
+    Forward pass of the Appearance Network.
+    """
+    # Encode directions
+    sh_o = spherical_harmonic_encode(omega_o)
+    sh_i = spherical_harmonic_encode(omega_i)
+    
+    # Encode voxel center
+    # Note: The number of levels and base res are determined by the voxel's LoD
+    # This is handled by the caller passing the appropriate grid config
+    center_enc = hash_grid_encode(voxel_center, levels=7, base_res=8, scale=2, features_per_level=features_per_level, hash_table_size=hash_table_size)
+    
+    # Concatenate inputs
+    input_vector = sh_o + sh_i + center_enc
+    
+    # MLP Forward Pass
+    # 4 hidden layers, 128 neurons, ReLU
+    x = input_vector
+    for _ in range(4):
+        x = relu(linear(x, 128))
+    
+    # No output activation
+    return x
+
+def visibility_network_forward(p_o, p_i, hash_table_size, features_per_level):
+    """
+    Forward pass of the Visibility Network using Recurrent Composite Encoding.
+    """
+    # Encode both points using the SAME hash grid
+    # The grid config is determined by the voxel's LoD
+    enc_o = hash_grid_encode(p_o, levels=7, base_res=8, scale=2, features_per_level=features_per_level, hash_table_size=hash_table_size)
+    enc_i = hash_grid_encode(p_i, levels=7, base_res=8, scale=2, features_per_level=features_per_level, hash_table_size=hash_table_size)
+    
+    # Concatenate inputs
+    input_vector = enc_o + enc_i
+    
+    # MLP Forward Pass
+    # 4 hidden layers, 128 neurons, ReLU
+    x = input_vector
+    for _ in range(4):
+        x = relu(linear(x, 128))
+    
+    # Sigmoid output activation
+    return sigmoid(x)
+
+def render_ray(ray, voxel_grid, appearance_hash_table, visibility_hash_table, optimal_thresholds):
+    """
+    Renders a single ray using the Neural Prefiltering pipeline.
+    """
+    throughput = 1.0
+    current_ray = ray
+    
+    while True:
+        # 1. Query sparse voxel grid for next non-empty voxel V
+        voxel = voxel_grid.query(current_ray)
+        if voxel is None:
+            # Ray escaped the scene
+            break
+            
+        # 2. Obtain entry/exit points p_i, p_o
+        p_i, p_o = voxel.intersect(current_ray)
+        
+        # 3. Query visibility network
+        # Determine LoD from voxel level
+        loD_level = voxel.level
+        # Get features per level for visibility network for this asset
+        vis_features = get_vis_features_for_loD(loD_level)
+        
+        v_prob = visibility_network_forward(p_o, p_i, hash_table_size=2**19, features_per_level=vis_features)
+        
+        # Apply optimal threshold to determine visibility
+        threshold = optimal_thresholds[voxel.id]
+        is_visible = v_prob > threshold
+        
+        if not is_visible:
+            # 4. If occluded, sample direction omega_i
+            # In practice, this might involve sampling from the appearance distribution
+            # For simplicity, we assume a sample direction is provided or sampled
+            omega_i = sample_direction() 
+            
+            # 5. Query appearance network
+            # Get features per level for appearance network
+            app_features = get_app_features_for_loD(loD_level)
+            
+            phi = appearance_network_forward(current_ray.direction, omega_i, voxel.center, hash_table_size=2**19, features_per_level=app_features)
+            
+            # Update throughput
+            throughput *= phi
+            
+            # Continue traversal from p_o? 
+            # The paper says "If occluded... update throughput. Otherwise, continue grid traversal."
+            # This implies we skip the voxel's internal geometry and treat it as a prefiltered volume.
+            # We need to advance the ray past the voxel.
+            current_ray.origin = p_o
+            # The ray continues, but the throughput is modified.
+            # The next iteration will query the next voxel.
+        else:
+            # 6. Otherwise, continue grid traversal
+            current_ray.origin = p_o
+            
+        # 7. Recursively trace ray from p_o until escape or light hit
+        # This is handled by the loop continuing to the next voxel.
+        # If the next voxel is empty, we might need to trace to a light source.
+        # The paper mentions "Recursively trace ray from p_o until escape or light hit."
+        # This part is ambiguous in the loop structure. 
+        # Usually, if the voxel is transparent (visible), we just move to the next voxel.
+        # If the voxel is opaque (occluded), we apply the prefiltered throughput and move on.
+        # The "light hit" part suggests that if we exit the voxel grid, we trace to lights.
+        
+        # Check if we are still within the voxel grid bounds
+        if not voxel_grid.contains(p_o):
+            break
+            
+    return throughput
+```
+
+**Edge Cases and Pitfalls:**
+*   **Hash Collisions:** Hash collisions in the multiresolution hash grid encoding can introduce undesired artifacts. Addressed by applying optimized classification thresholds to the visibility classifier [S1].
+*   **Thin Structures:** Thin hair-like structures (e.g., PANDANUS leaves) lead to high-frequency appearance changes, causing difficulty in robustly learning visibility and appearance such that overall transported energy is fully conserved. Accuracy may fluctuate across training reruns [S1].
+*   **High-Frequency Appearance:** Sharp glossy highlights may not be fully captured by spherical harmonics-based directional encodings. Requires directional adaptations of all-frequency encodings (e.g., optimized hash grid, tri-planar, or octahedral maps) [S1].
+*   **Stochastic Thresholding:** Stochastic visibility thresholding is susceptible to light leaks in general scenes. Fully correlation-preserving thresholds are more robust [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Training time is under one hour on a single GPU [S1].
+*   **Memory Complexity:** Achieves 70–95% compression ratios. Up to 96% space savings for the most complex assets [S1]. For the Oak Tree, the method stores 60.36MB (22.64MB voxel grid + 37.72MB networks) compared to Hybrid LoD's 82.94MB [S1].
+*   **Performance:** Achieves interactive to real-time framerates, depending on the level of detail [S1].
+*   **Quality:** Achieves around 25% quality improvements over previous work [S1].
+*   **Strengths:** Retains visibility correlations, avoids light leaks, high compression rates, fast training, no assumptions on geometry/materials [S1].
+*   **Limitations:** Difficulty with thin hair-like structures and sharp glossy highlights, potential energy conservation issues in complex scenes [S1].
+
+## Background
+*   **Origin:** The method was introduced by Philippe Weier, Tobias Zirr, Anton Kaplanyan, Ling-Qi Yan, and Philipp Slusallek in 2023 [S1].
+*   **Paper:** "Neural Prefiltering for Correlation-Aware Levels of Detail," ACM Trans. Graph. 42, 4, Article 1 (August 2023) [S1].
+*   **History:** It builds on advances in neural representations and prefiltering techniques, addressing the limitations of previous methods like Hybrid LoD and Deep Appearance Prefiltering [S1].
+*   **Usage:** Source code is publicly available at https://github.com/WeiPhil/neural_lod [S1].
+
+## Sources
+[S1] Neural Prefiltering for Correlation-Aware Levels of Detail, https://zenodo.org/records/8420313, fetched 2026-10-26

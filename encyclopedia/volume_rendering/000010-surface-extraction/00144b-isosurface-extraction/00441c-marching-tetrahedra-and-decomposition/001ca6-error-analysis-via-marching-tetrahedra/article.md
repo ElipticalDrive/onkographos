@@ -1,0 +1,144 @@
+# Error Analysis via Marching Tetrahedra
+
+Also called: Isosurface Error Evaluation
+
+## Overview
+Error Analysis via Marching Tetrahedra is a method for evaluating the geometric and topological approximation error introduced when two child tetrahedra in a multiresolution hierarchy are fused into their parent tetrahedron [S1]. It solves the problem of determining whether a coarser representation of the volume data preserves the isosurface geometry within a user-defined tolerance [S1]. Unlike sibling methods that may focus on pure geometric distance or view-dependent projection, this method specifically ties the error metric to the topological consistency of the isosurface extraction process itself, ensuring that fusion does not alter the connectivity of the surface [S1].
+
+## How it works
+The method operates on a tetrahedral mesh derived from a regular grid volume [S1]. It assumes that the density (scalar value) at any point within a tetrahedron is evaluated via trilinear interpolation of the vertex densities [S1]. The core mechanism compares the isosurface configuration of the two fine-grained child tetrahedra against the configuration of the single coarse parent tetrahedron [S1].
+
+### Inputs and Outputs
+*   **Inputs**:
+    *   Two child tetrahedra ($T_1, T_2$) sharing a common face [S1].
+    *   Scalar density values at all vertices of $T_1$ and $T_2$ [S1].
+    *   The isovalue threshold ($\theta$) defining the isosurface [S1].
+    *   A maximum allowable error threshold ($\epsilon_{max}$) [S1].
+*   **Outputs**:
+    *   A boolean indicating whether fusion is permitted [S1].
+    *   The calculated approximation error (physical distance) [S1].
+
+### Data Structures
+The method requires access to the scalar values at the vertices of the tetrahedra [S1]. Let the vertices of the two child tetrahedra be defined by their scalar densities $v_i$ [S1]. The "dividing point" refers to the point on the internal edge $L$ used for subdivision [S1]. Based on the source description, the analysis focuses on a specific edge $L$ and its dividing point [S1].
+
+Let:
+*   $L$ be an edge shared by the two tetrahedra or an internal edge involved in the subdivision [S1].
+*   $p_{div}$ be the dividing point on edge $L$ [S1].
+*   $v_{end1}, v_{end2}$ be the endpoints of edge $L$ [S1].
+*   $d(v)$ be the density value at vertex $v$ [S1].
+*   $\theta$ be the isovalue [S1].
+
+Exact memory layouts, field sizes, and bit packing are Not given in the sources.
+
+### Steps
+1.  **Sign Assignment**: Assign a sign to each relevant vertex. A vertex $v$ has a positive sign if $d(v) > \theta$, and negative otherwise ($d(v) \le \theta$) [S1].
+2.  **Topological Check**: Check the signs of the endpoints of edge $L$ ($v_{end1}, v_{end2}$) and the dividing point $p_{div}$ [S1].
+    *   If $sign(v_{end1}) == sign(v_{end2})$ AND $sign(p_{div}) \neq sign(v_{end1})$, the isosurface topology changes upon fusion (specifically corresponding to Cases a2, b2, c3 in the source figures) [S1].
+    *   In this case, return an error value $> \epsilon_{max}$ (effectively forbidding fusion) [S1].
+3.  **Geometric Error Calculation**: For all other cases, calculate the geometric error by analyzing four segments connecting the dividing point $p_{div}$ to the four vertices of the tetrahedra involved in the local configuration [S1].
+    *   For each segment, identify the two endpoints [S1].
+    *   Calculate the position of the isosurface intersection (iso-point) using the **dividing point density** ($d(p_{div})$) for the fine mesh representation [S1].
+    *   Calculate the position of the isosurface intersection using the **average density** of the segment endpoints ($\bar{d} = (d(v_{start}) + d(v_{end}))/2$) for the coarse/parent representation approximation [S1].
+    *   If the endpoints of the segment have different signs under *either* density assumption, calculate the physical distance between the two resulting iso-points [S1].
+    *   If the endpoints have the same sign under both assumptions, the distance is zero [S1].
+4.  **Error Aggregation**: The approximation error for the fusion is the maximum of all distance values calculated across the four segments [S1].
+5.  **Decision**: If the calculated error $\le \epsilon_{max}$, fusion is allowed [S1]. Otherwise, it is forbidden [S1].
+
+### Formulas
+*   **Sign Function**: $sign(d) = \begin{cases} 1 & \text{if } d > \theta \\ -1 & \text{otherwise} \end{cases}$ [S1]
+*   **Fine Mesh Iso-point Parameter**: $t_{fine} = \frac{\theta - d(p_{div})}{d(v) - d(p_{div})}$ [S1]
+*   **Coarse Mesh Iso-point Parameter**: $t_{coarse} = \frac{\theta - \bar{d}}{d(v) - \bar{d}}$, where $\bar{d} = \frac{d(p_{div}) + d(v)}{2}$ [S1]
+*   **Physical Distance**: $E = |t_{fine} - t_{coarse}| \cdot \| \vec{v} - \vec{p}_{div} \|$ [S1]
+*   **Approximation Error**: $E_{max} = \max_{i=1..4} (E_i)$ [S1]
+
+### Parameters
+*   **Error Metric**: Physical distance between iso-points. Projected (viewpoint-dependent) distance is an alternative but was found less efficient in experiments [S1].
+*   **Typical Values**: For the Box dataset ($129^3$), an error threshold of 4.0 resulted in 93.04% fusion [S1]. For the CT Head dataset ($129^3$), an error of 4.0 resulted in 94.35% fusion [S1].
+
+### Edge Cases and Pitfalls
+*   **Topological Changes**: The most critical pitfall is the topological change case (Cases a2, b2, c3) [S1]. If the endpoints of edge $L$ have the same sign and the dividing point has the opposite sign, the isosurface topology changes [S1]. The method must return a large error value to forbid fusion [S1].
+*   **Precision**: The method relies on the assumption that the finest resolution tetrahedral mesh is the most accurate representation of the data [S1].
+*   **Coordinate Dependency**: While the error logic is density-based, the final error value is a physical distance, requiring vertex coordinates [S1].
+*   **Degenerate Input**: If segment endpoints have identical densities, the interpolation denominator becomes zero [G]. The method treats this as a zero-distance case or clamps $t$ to 0.0, as no isosurface crossing occurs under identical density assumptions [G].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def evaluate_marching_tetrahedra_error(
+    coord_dp: tuple[float, float, float],
+    density_dp: float,
+    coord_vertices: list[tuple[float, float, float]],
+    density_vertices: list[float],
+    isovalue: float
+) -> float:
+    """
+    Calculates the maximum physical distance between iso-points for fusing two tetrahedra.
+    
+    Args:
+        coord_dp: 3D coordinates of the dividing point on edge L.
+        density_dp: Density at the dividing point (fine mesh).
+        coord_vertices: List of 3D coordinates for the 4 tetrahedron vertices.
+        density_vertices: List of densities at the 4 tetrahedron vertices.
+        isovalue: The threshold for isosurface extraction.
+        
+    Returns:
+        The maximum approximation error. Returns infinity if topology changes.
+    """
+    # Step 1 & 2: Sign Assignment and Topological Check
+    sign_dp = 1 if density_dp > isovalue else -1
+    sign_v1 = 1 if density_vertices[0] > isovalue else -1
+    sign_v2 = 1 if density_vertices[1] > isovalue else -1
+    
+    # Check endpoints of edge L (assumed to be the first two vertices in the local config)
+    if sign_v1 == sign_v2 and sign_v1 != sign_dp:
+        return float('inf')  # Forbid fusion
+
+    max_error = 0.0
+
+    # Step 3: Geometric Error Calculation over 4 segments
+    for coord_v, density_v in zip(coord_vertices, density_vertices):
+        sign_v = 1 if density_v > isovalue else -1
+        avg_density = (density_dp + density_v) / 2.0
+        sign_avg = 1 if avg_density > isovalue else -1
+
+        # If endpoints have the same sign under either assumption, distance is zero
+        if sign_dp == sign_v or sign_avg == sign_v:
+            continue
+
+        # Calculate interpolation parameters
+        denom_fine = density_v - density_dp
+        t_fine = (isovalue - density_dp) / denom_fine if denom_fine != 0 else 0.0
+
+        denom_coarse = density_v - avg_density
+        t_coarse = (isovalue - avg_density) / denom_coarse if denom_coarse != 0 else 0.0
+
+        # Physical distance = |t_fine - t_coarse| * segment_length
+        dx = coord_v[0] - coord_dp[0]
+        dy = coord_v[1] - coord_dp[1]
+        dz = coord_v[2] - coord_dp[2]
+        segment_length = (dx**2 + dy**2 + dz**2)**0.5
+        
+        current_error = abs(t_fine - t_coarse) * segment_length
+        if current_error > max_error:
+            max_error = current_error
+
+    return max_error
+```
+
+## Operating characteristics
+*   **Time Complexity**: The subdivision time is constant and independent of data values (e.g., 90 seconds for $129^3$ resolution) [S1]. The fusion time varies depending on data complexity and the number of error evaluations required (e.g., 19 seconds for Box, 55 seconds for CT Head at $129^3$) [S1].
+*   **Memory Complexity**: Not given in the sources.
+*   **Measured Performance**:
+    *   **Box ($129^3$)**: Initial mesh has 1,646,568 tetrahedra and 182,376 triangles (error=0) [S1]. With error=4.0, it reduces to 114,556 tetrahedra and 51,490 triangles (93.04% fusion) [S1].
+    *   **CT Head ($129^3$)**: Initial mesh has 5,390,896 tetrahedra and 255,256 triangles (error=0) [S1]. With error=4.0, it reduces to 304,468 tetrahedra and 89,300 triangles (94.35% fusion) [S1].
+*   **Strengths**: Efficient physical distance calculation; ensures topological consistency; allows smooth changes along boundaries of different levels-of-detail [S1].
+*   **Limitations**: Fusion time depends on data complexity; requires fine-resolution mesh as a baseline for accuracy [S1].
+*   **When to use**: When visualizing regular volume data with isosurfaces and a multiresolution tetrahedral framework is used, and topological correctness is critical [S1].
+*   **When not**: When view-dependent rendering is the primary concern (use projected distance instead) or when topological changes are acceptable [S1].
+
+## Background
+The method was introduced in the paper "Multiresolution tetrahedral framework for visualizing regular volume data" [S1]. It is part of a framework that uses a tetrahedral subdivision of regular volume data [S1]. The method builds on the Marching Tetrahedra algorithm [ZCT95] to evaluate the error introduced by simplifying the mesh [S1]. It was implemented in C with OpenGL and tested on an SGI Power Challenge – R10000 CPU with Infinite Reality graphics [S1].
+
+## Sources
+[S1] Multiresolution tetrahedral framework for visualizing regular volume data, https://doi.org/10.5555/266989.267040, fetched 2026-10-30

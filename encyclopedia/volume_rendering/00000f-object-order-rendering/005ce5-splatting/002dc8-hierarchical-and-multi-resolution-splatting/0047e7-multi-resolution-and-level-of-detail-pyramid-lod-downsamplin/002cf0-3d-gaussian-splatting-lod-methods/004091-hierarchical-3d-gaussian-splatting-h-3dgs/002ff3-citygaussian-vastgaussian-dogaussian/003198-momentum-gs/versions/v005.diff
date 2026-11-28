@@ -1,0 +1,95 @@
+--- v004.md
++++ v005.md
+@@ -1,60 +1,59 @@
+ # Momentum-GS
+ 
+-Also called: Momentum Gaussian Splatting
++Also called: Momentum Self-Distillation for 3DGS, Block-wise Momentum-GS
+ 
+ ## Overview
+-Momentum-GS is a block-wise training method for large-scale 3D Gaussian Splatting that leverages momentum self-distillation to improve convergence quality and spatial consistency across scene partitions [S1, S2, unofficial]. It differs from standard block-wise training (e.g., CityGaussian) by introducing a momentum-updated teacher Gaussian decoder that provides global self-distillation guidance to each block, decoupling the number of blocks from the GPU count and restoring cross-block spatial consistency [S2, unofficial].
++Momentum-GS is a block-wise training method for large-scale 3D Gaussian Splatting (3DGS) that uses a momentum-updated teacher model to provide global self-distillation guidance to individual scene blocks [S1, S2, unofficial]. It solves the geometric inaccuracies and "floaters" caused by independent block training in methods like CityGaussian by restoring cross-block spatial consistency without requiring complex alignment or a static coarse prior [S1, S2, unofficial]. Unlike CityGaussian, which relies on spatial contraction and a fixed global prior, Momentum-GS dynamically updates the teacher via exponential moving average (EMA) of student parameters, decoupling the number of training blocks from the available GPU count [S2, unofficial].
+ 
+ ## How it works
+-Momentum-GS addresses the fragmentation and inconsistency issues in large-scale scene reconstruction by training individual scene blocks while maintaining a global view of the scene through a teacher-student framework [S1, S2, unofficial].
+-
+ **Inputs and Outputs:**
+-*   **Inputs:** Large-scale scene data (3D Gaussians, camera poses, images), partitioned into spatial blocks.
+-*   **Outputs:** Optimized 3D Gaussian parameters (position, covariance, opacity, spherical harmonics coefficients) for the entire scene, with improved global consistency.
++*   **Input:** A large-scale scene dataset (images, poses) partitioned into $N$ spatial blocks. Each block has local training cameras and a subset of 3D Gaussians.
++*   **Output:** A unified set of 3D Gaussians with consistent geometry and appearance across block boundaries.
+ 
+ **Data Structures:**
+-*   **Student Model:** The set of 3D Gaussians currently being optimized for a specific block.
+-*   **Teacher Model:** An exponential moving average (EMA) of the student model's parameters, representing a smoothed global prior [S1, S2, unofficial].
+-*   **Block Weights:** A scalar value for each block, adjusted based on reconstruction accuracy [S2, unofficial].
++*   **Student Model ($\theta_s$):** The set of parameters for the 3D Gaussians in the current block being trained (means, covariances, opacities, spherical harmonics coefficients).
++*   **Teacher Model ($\theta_t$):** An exponential moving average (EMA) of the student parameters from previous iterations or blocks.
++*   **Block Weight ($w_b$):** A scalar value adjusting the loss contribution of each block based on reconstruction accuracy.
+ 
+ **Algorithm Steps:**
+-1.  **Scene Partitioning:** Divide the large scene into spatial blocks. The number of blocks is not strictly tied to the number of available GPUs, allowing for flexible scaling [S2, unofficial].
+-2.  **Initialization:** Initialize the student model for each block. Initialize the teacher model as an EMA of the initial student parameters [S1, S2, unofficial].
+-3.  **Training Loop (Per Block):**
+-    a.  **Forward Pass:** Render the current block using the student model's Gaussians.
+-    b.  **Loss Calculation:** Compute the reconstruction loss between the rendered image and the ground truth image for the cameras viewing this block [S2, unofficial].
+-    c.  **Distillation Guidance:** Use the teacher model to provide global self-distillation guidance. This involves comparing the student's output or parameters against the teacher's smoothed representation to enforce consistency [S1, S2, unofficial].
+-    d.  **Optimization:** Update the student model's parameters using the combined loss (reconstruction + distillation) [S1, S2, unofficial].
+-4.  **Teacher Update:** After each optimization step or epoch, update the teacher model's parameters using an exponential moving average of the student's parameters:
+-    $$ \theta_{teacher} \leftarrow \alpha \theta_{teacher} + (1 - \alpha) \theta_{student} $$
++1.  **Initialization:** Initialize the student parameters $\theta_s$ for the current block. Initialize the teacher parameters $\theta_t$ as a copy of $\theta_s$ or from a global prior [S2, unofficial].
++2.  **Forward Pass (Student):** Render the current block using $\theta_s$ to generate images for the local training cameras. Compute the reconstruction loss $\mathcal{L}_{rec}$ (e.g., L1 + SSIM) between rendered and ground-truth images [S2, unofficial].
++3.  **Forward Pass (Teacher):** Render the same views using the teacher parameters $\theta_t$. Compute the distillation loss $\mathcal{L}_{dist}$ between the student's output and the teacher's output. This loss guides the student to maintain global consistency [S1, S2, unofficial].
++4.  **Total Loss:** Combine losses:
++    $$ \mathcal{L}_{total} = \mathcal{L}_{rec} + \lambda \mathcal{L}_{dist} $$
++    where $\lambda$ is a weighting factor for the distillation term [S2, unofficial].
++5.  **Optimization:** Update $\theta_s$ using gradient descent on $\mathcal{L}_{total}$ [S2, unofficial].
++6.  **Teacher Update (Momentum):** Update the teacher parameters using EMA:
++    $$ \theta_t \leftarrow \alpha \theta_t + (1 - \alpha) \theta_s $$
+     where $\alpha$ is the momentum coefficient (typically close to 1, e.g., 0.999) [S1, S2, unofficial].
+-5.  **Block Weighting:** Adjust the weight of each block based on its reconstruction accuracy. Blocks with higher accuracy may contribute more to the global consistency or require less distillation pressure [S2, unofficial].
+-6.  **Iteration:** Repeat steps 3-5 for all blocks until convergence.
++7.  **Block Weighting:** Adjust the block's contribution to the global optimization based on its reconstruction accuracy. Blocks with higher accuracy may be weighted differently to balance training [S2, unofficial].
++8.  **Iteration:** Repeat steps 2-7 for a fixed number of epochs or until convergence. Process other blocks in parallel or sequentially, updating the global teacher model as needed [S2, unofficial].
+ 
+ **Parameters:**
+-*   **Momentum Coefficient ($\alpha$):** Controls the speed of the teacher model's adaptation. Not given in the sources.
+-*   **Block Size:** Determines the spatial extent of each training block. Not given in the sources.
++*   $\alpha$ (momentum coefficient): Not given in the sources. [G] Typical values for EMA in similar contexts are 0.999.
++*   $\lambda$ (distillation weight): Not given in the sources. [G] Typical values are small, e.g., 0.1-1.0.
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** Maintaining the EMA of parameters requires careful handling of floating-point precision, especially for large scenes with many Gaussians [S1, S2, unofficial].
+-*   **Boundaries:** Ensuring smooth transitions between blocks is critical. The distillation guidance helps, but boundary artifacts may still occur if blocks are not properly overlapped or if the teacher model is not sufficiently global [S2, unofficial].
+-*   **Degenerate Input:** If a block has very few visible cameras or Gaussians, the reconstruction loss may be unstable, affecting the block weighting and distillation guidance [S2, unofficial].
++*   **Precision:** EMA updates can suffer from numerical instability if $\alpha$ is too close to 1 or if parameters vary widely in scale. [G] Use stable EMA implementations.
++*   **Boundaries:** Block boundaries may still exhibit artifacts if the teacher model does not adequately capture global context. [S2, unofficial]
++*   **Degenerate Input:** If a block has very few training views, the reconstruction loss may be unreliable, making the distillation loss dominant. [S2, unofficial]
+ 
+ ## Subtopics
+ 
+ ### Distributed Learning for Large-Scale Scenes
+-Reconstructing large-scale scenes following a distributed learning approach, where training is parallelized across multiple nodes or GPUs [S3]. This variant focuses on scaling the training process itself, whereas Momentum-GS focuses on the consistency of the learned representation across distributed blocks.
++Momentum-GS is part of a broader trend towards distributed learning for large-scale 3DGS reconstruction [S3]. This approach involves dividing the scene into multiple cells or blocks and training them in parallel or sequentially, often with mechanisms to ensure consistency across boundaries [S3]. Momentum-GS specifically addresses this by using a momentum-updated teacher to provide global guidance, unlike other distributed methods that may rely on static priors or complex alignment [S1, S2, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time and Memory Complexity:** The method introduces additional memory overhead for storing the teacher model's parameters (EMA of student) [S1, S2, unofficial]. The time complexity is similar to standard block-wise training but includes the cost of updating the teacher model and computing distillation loss [S1, S2, unofficial].
++*   **Time Complexity:** Training time is reduced compared to training the entire scene at once, as blocks can be processed in parallel or with fewer resources per block. However, the teacher update step adds overhead. [S2, unofficial]
++*   **Memory Complexity:** Memory usage per GPU is reduced as only one block's Gaussians are actively optimized at a time. The teacher model requires storage for the full scene's Gaussians. [S2, unofficial]
+ *   **Measured Performance:** Reports ~18.7% LPIPS improvement over CityGaussian with far fewer blocks [S2, unofficial].
+-*   **Scaling:** Decouples block count from GPU count, allowing for flexible scaling of training resources [S2, unofficial].
+-*   **Strengths:** Improves convergence quality, restores cross-block spatial consistency, reduces the number of blocks needed for high-quality reconstruction [S1, S2, unofficial].
+-*   **Limitations:** Requires careful tuning of the momentum coefficient and block weighting [S2, unofficial]. May introduce additional computational overhead due to the teacher model [S1, S2, unofficial].
+-*   **When to Use:** Large-scale scene reconstruction where spatial consistency across blocks is critical, and standard block-wise training leads to fragmentation or poor convergence [S1, S2, unofficial].
+-*   **When Not to Use:** Small-scale scenes where global consistency is less of an issue, or when computational resources are extremely limited [S2, unofficial].
++*   **Scaling:** Decouples block count from GPU count, allowing flexible scaling. [S2, unofficial]
++*   **Strengths:** Restores cross-block spatial consistency, reduces floaters, improves convergence quality. [S1, S2, unofficial]
++*   **Limitations:** Requires careful tuning of distillation weight and momentum coefficient. [S2, unofficial]
++*   **When to Use:** Large-scale scenes where CityGaussian-like methods produce geometric inaccuracies. [S2, unofficial]
++*   **When Not to Use:** Small scenes where global training is feasible and faster. [S2, unofficial]
+ 
+ ## Background
+-Momentum-GS was introduced as a 2026 SOTA update, marking a significant advancement in large-scale 3D Gaussian Splatting training [S2, unofficial]. It builds on the concept of momentum self-distillation, originally applied in other contexts, to address the specific challenges of large-scene reconstruction [S1, unofficial]. The method was developed to overcome the limitations of existing block-wise training methods like CityGaussian, which often suffer from cross-block inconsistencies and require a large number of blocks for high-quality results [S2, unofficial].
++Momentum-GS was introduced as a 2026 SOTA update for large-scale 3DGS training [S2, unofficial]. It builds on the concept of momentum self-distillation, where a teacher model (EMA of parameters) guides the student's optimization [S1, unofficial]. This method addresses the limitations of independent block training, such as those in CityGaussian, by providing global guidance without static priors [S1, S2, unofficial].
+ 
+ ## Sources

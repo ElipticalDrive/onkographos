@@ -1,0 +1,133 @@
+# Entropy-based Seeding
+
+Also called: Information-Theoretic Streamline Seeding, Shannon Entropy Seeding
+
+## Overview
+Entropy-based Seeding is a method for selecting streamline seed locations in 3D vector fields by using Shannon’s entropy to measure local information content [S1]. It places seeds proportionally to entropy values to quantitatively capture critical flow features, such as turbulent cores, ensuring important regions are densely sampled [S1].
+
+## How it works
+**Inputs:** A 3D vector field $V$ [S1].
+**Outputs:** A set of streamlines traced from the placed seeds [S1].
+
+**Data Structures:**
+*   **Entropy Volume:** A 3D scalar grid of the same resolution as the input vector field, storing $H(x)$ for each voxel [S1].
+*   **Seed List:** A collection of 3D coordinates $(x, y, z)$ where streamlines originate [S1].
+
+**Parameters:**
+*   **Number of bins ($n$):** The number of partitions for vector quantization [S1]. The sources do not specify a default value but refer to suggestions by Xu et al. [XLS10] [S1].
+*   **Neighborhood size:** The spatial extent around each voxel used to compute local entropy [S1]. The sources do not specify a default value but refer to suggestions by Xu et al. [XLS10] [S1].
+*   **Integration method:** Fourth-order Runge-Kutta [S1].
+
+**Steps:**
+
+1.  **Calculate Local Entropy Field:** For each voxel in the vector field, compute the local Shannon entropy $H(x)$ based on the distribution of vectors in its neighborhood [S1]. The entropy of a discrete random variable $X$ is defined as [S1]:
+    $$ H(x) = - \sum_{x_i \in X} p(x_i) \log_2 p(x_i) $$
+    Where $p(x_i)$ is the probability mass function for bin $x_i$ [S1]. This probability is approximated by creating a histogram of vectors in the local neighborhood using vector quantization [Leo06]:
+    $$ p(x_i) = \frac{C(x_i)}{\sum_{j=1}^{n} C(x_j)} $$
+    Here, $C(x_i)$ is the number of vectors falling into bin $x_i$, and $n$ is the total number of bins [S1].
+
+2.  **Determine Seed Probabilities:** Set the probability of seeding at each voxel to be proportional to its scalar value in the computed entropy volume [S1].
+
+3.  **Place Seeds:** Place a sufficient number of seeds in the field based on the probability associated with each voxel to cover as many important areas as possible [S1].
+
+4.  **Trace Streamlines:** Trace streamlines from the placed seeds using fourth-order Runge-Kutta integration [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import random
+
+def entropy_based_seeding(vector_field, num_bins, neighborhood_size):
+    """
+    vector_field: 3D list of vectors (Vx, Vy, Vz)
+    num_bins: integer, number of bins for vector quantization
+    neighborhood_size: tuple (dx, dy, dz), spatial size for local calculation
+    """
+    # Step 1: Calculate Entropy Field
+    nx, ny, nz = len(vector_field), len(vector_field[0]), len(vector_field[0][0])
+    entropy_volume = [[[0.0] * nz for _ in range(ny)] for _ in range(nx)]
+    
+    # [G] Leopardi's vector quantization partitions vectors into bins.
+    # The sources do not specify the exact binning routine [S1].
+    
+    for x in range(nx):
+        for y in range(ny):
+            for z in range(nz):
+                local_vectors = []
+                for dx in range(-neighborhood_size[0], neighborhood_size[0] + 1):
+                    for dy in range(-neighborhood_size[1], neighborhood_size[1] + 1):
+                        for dz in range(-neighborhood_size[2], neighborhood_size[2] + 1):
+                            vx, vy, vz = x + dx, y + dy, z + dz
+                            if 0 <= vx < nx and 0 <= vy < ny and 0 <= vz < nz:
+                                local_vectors.append(vector_field[vx][vy][vz])
+                
+                if len(local_vectors) == 0:
+                    entropy_volume[x][y][z] = 0.0
+                    continue
+                    
+                bin_counts = [0] * num_bins
+                for v in local_vectors:
+                    # [G] Map vector v to a bin index using vector quantization [Leo06]
+                    # The sources do not specify the exact quantization algorithm [S1].
+                    pass 
+                    
+                total_vectors = sum(bin_counts)
+                probabilities = [0.0] * num_bins
+                for i in range(num_bins):
+                    if total_vectors > 0:
+                        probabilities[i] = bin_counts[i] / total_vectors
+                    
+                entropy = 0.0
+                for p in probabilities:
+                    if p > 0:
+                        entropy -= p * math.log2(p)
+                        
+                entropy_volume[x][y][z] = entropy
+                
+    # Step 2 & 3: Place Seeds
+    seeds = []
+    total_entropy = sum(entropy_volume[x][y][z] for x in range(nx) for y in range(ny) for z in range(nz))
+    
+    # [G] The exact number of seeds is not given in the sources [S1].
+    # A common implementation defines a target seed count N_seeds.
+    N_seeds = 1000 
+    
+    for x in range(nx):
+        for y in range(ny):
+            for z in range(nz):
+                p_seed = entropy_volume[x][y][z] / total_entropy if total_entropy > 0 else 0.0
+                if random.random() < p_seed * N_seeds:
+                    seeds.append((x, y, z))
+                    
+    # Step 4: Trace Streamlines
+    streamlines = []
+    for seed in seeds:
+        # [G] Fourth-order Runge-Kutta integration is used to trace streamlines [S1]
+        # The sources do not specify the exact integration routine [S1].
+        line = []
+        streamlines.append(line)
+        
+    return streamlines
+```
+
+**Edge Cases and Pitfalls:**
+*   **Zero Vectors:** If a neighborhood contains no vectors, entropy is undefined or zero [G]. The pseudocode handles this by setting entropy to 0.0 [S1].
+*   **Bin Count Selection:** The choice of $n$ (number of bins) significantly impacts the entropy value [G]. The sources defer to Xu et al. [XLS10] for specific suggestions [S1].
+*   **Neighborhood Size:** The spatial extent of the neighborhood affects the smoothness and locality of the entropy field [G]. The sources defer to Xu et al. [XLS10] for specific suggestions [S1].
+
+## Operating characteristics
+*   **Complexity:** Not given in the sources.
+*   **Performance:** Not given in the sources.
+*   **Strengths:** Quantitatively captures critical flow features; emphasizes important regions with high entropy (e.g., turbulent cores) [S1].
+*   **Limitations:** The number of streamlines generated in the first step can be large, necessitating a subsequent clustering step [S1].
+
+## Background
+*   **Origin:** Proposed by C.-K. Chen, S. Yan, H. Yu, N. Max & K.-L. Ma in "An Illustrative Visualization Framework for 3D Vector Fields" [S1].
+*   **History:** The method builds upon the concept of Shannon’s entropy in information theory [S1] and uses vector quantization techniques proposed by Leopardi [Leo06]. It relies on parameter suggestions from Xu et al. [XLS10] [S1].
+*   **Usage:** Used as the first step in an illustrative visualization framework, followed by streamline clustering to simplify the large number of generated streamlines [S1].
+
+## Sources
+[S1] An Illustrative Visualization Framework for 3D Vector Fields, http://vis.cs.ucdavis.edu/papers/pg2011paper.pdf, fetched 2026-10-29

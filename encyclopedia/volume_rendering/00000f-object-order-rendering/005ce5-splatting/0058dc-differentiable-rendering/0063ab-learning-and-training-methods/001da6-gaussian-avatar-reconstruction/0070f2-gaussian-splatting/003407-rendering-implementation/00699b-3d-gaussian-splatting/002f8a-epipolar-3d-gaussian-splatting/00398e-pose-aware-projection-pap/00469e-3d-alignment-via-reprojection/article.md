@@ -1,0 +1,144 @@
+# 3D Alignment via Reprojection
+
+Also called: Feature Reprojection Alignment
+
+## Overview
+3D Alignment via Reprojection is a technique in differentiable volume rendering that aligns features from neighboring training views with a novel rendered view by compensating for pose and geometry discrepancies [S1]. It solves the problem of leveraging relevant multi-view contextual information when camera orientations and positions differ significantly [S1]. Unlike its parent [Pose-Aware Projection (PAP)](8527-pose-aware-projection-pap.md), which aggregates features based on camera distance to resolve ambiguous assignments, this method explicitly reprojects 3D coordinates into the novel view using the pinhole camera model and validates them via depth-based visibility testing [S1]. It differs from sibling [Geometry Aware Feature Extraction](10791-geometry-aware-feature-extraction.md) by relying on explicit geometric reprojection rather than implicit geometric awareness [S1].
+
+## How it works
+**Inputs:**
+- Novel view image $I_k$ and its camera pose $C_k$ and intrinsic matrix $K_k$ [S1].
+- Set of $n$ neighboring training images $\{H_i\}_{i=1}^n$ with poses $C_i$ and intrinsics $K_i$ [S1].
+- NeRF depth map $z_i$ for the novel view, used for visibility checking [S1].
+- Leniency threshold $l$ (typical value: 0.25) [S1].
+
+**Outputs:**
+- Reprojected feature map $H^f_{i \rightarrow k}$ aligned with the novel view coordinates [S1].
+
+**Data Structures:**
+- Image features $I^f_k$ and $H^f_i$: Dense tensors of spatial dimensions matching the input images, with a channel depth of 64 [S1].
+- 3D coordinates $\bm{x}_k$: Represented as homogeneous vectors $[\bm{x}_k, 1]$ where $\bm{x}_k = (x_k, y_k, z_k)$, with $(x_k, y_k)$ being pixel coordinates and $z_k$ the depth [S1].
+
+**Steps:**
+
+1.  **Feature Extraction:** Extract 64-dimensional image features from the novel view $I_k$ and each neighboring image $H_i$ using separate small convolutional encoder blocks [S1]:
+    $$
+    I^f_k = \text{conv}_I(I_k)
+    $$
+    $$
+    \{H^f_i\}_{i=1}^n = \text{conv}_H(\{H_i\}_{i=1}^n)
+    $$
+
+2.  **Coordinate Reprojection:** For each pixel in the novel view with 3D coordinate $\bm{x}_k = (x_k, y_k, z_k)$, reproject the coordinate into the neighboring camera view $i$ using the pinhole camera model [S1]:
+    $$
+    \bm{x}_{k \rightarrow i} = K_i C_i C_k^{-1} K_k^{-1} [\bm{x}_k, 1]
+    $$
+    Here, $\bm{x}_{k \rightarrow i} = (x_{k \rightarrow i}, y_{k \rightarrow i}, z_{k \rightarrow i}, 1)$ is the resulting homogeneous coordinate in camera $i$'s space [S1]. $K_i$ is the intrinsic matrix of camera $i$, and $C_i$ is the pose matrix of camera $i$ [S1].
+
+3.  **Visibility Testing:** Calculate a visibility score $vis_i$ to ensure geometric consistency by comparing the reprojected depth $z_{k \rightarrow i}$ with the NeRF-computed depth $z_i$ [S1]:
+    $$
+    vis_i = \mathcal{H}\left(1 - \frac{z_{k \rightarrow i}}{z_i} + l\right)
+    $$
+    Where $\mathcal{H}$ is the Heaviside function and $l$ is the leniency threshold (0.25) [S1].
+
+4.  **Feature Copying:** Form the reprojected feature map by copying values from the neighbor's feature map $H^f_i$ at the projected coordinates $\bm{x}_{k \rightarrow i}$ to the original coordinates $\bm{x}_k$, weighted by the visibility score [S1]:
+    $$
+    H^f_{i \rightarrow k} \langle \phi(\bm{x}_k) \rangle = vis_i \times H^f_i \langle \phi(\bm{x}_{k \rightarrow i}) \rangle
+    $$
+    Where $\phi(\bm{x}_k) = (x_k/z_k, y_k/z_k)$ represents the 2D normalized coordinates, and $\langle \rangle$ denotes 2D coordinate indexing (sampling) [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class ConvBlock(nn.Module):
+    def __init__(self, in_ch, out_ch=64):
+        super().__init__()
+        self.conv = nn.Conv2d(in_ch, out_ch, kernel_size=3, padding=1)
+    def forward(self, x):
+        return F.relu(self.conv(x))
+
+def reproject_features(novel_img, neighbor_imgs, novel_pose, neighbor_poses,
+                       novel_K, neighbor_Ks, nerf_depth, l=0.25):
+    """
+    Aligns neighbor features to the novel view via 3D reprojection.
+    
+    Args:
+        novel_img: Tensor (B, 3, H, W)
+        neighbor_imgs: List of Tensors [(B, 3, H, W)]
+        novel_pose: Tensor (4, 4) Camera pose matrix C_k
+        neighbor_poses: List of Tensors [(4, 4)] Camera pose matrices C_i
+        novel_K: Tensor (3, 3) Intrinsic matrix K_k
+        neighbor_Ks: List of Tensors [(3, 3)] Intrinsic matrices K_i
+        nerf_depth: Tensor (B, 1, H, W) Depth map z_i from NeRF for novel view
+        leniency_threshold: Float l
+        
+    Returns:
+        reprojected_features: Tensor (B, 64, H, W) Aligned features
+    """
+    conv_I = ConvBlock(3)
+    conv_H = ConvBlock(3)
+    
+    novel_feat = conv_I(novel_img)
+    neighbor_feats = [conv_H(img) for img in neighbor_imgs]
+    
+    B, _, H, W = novel_feat.shape
+    u, v = torch.meshgrid(torch.arange(W), torch.arange(H), indexing='xy')
+    u = u.float().to(novel_img.device).unsqueeze(0).unsqueeze(0)
+    v = v.float().to(novel_img.device).unsqueeze(0).unsqueeze(0)
+    z = nerf_depth
+    
+    # Homogeneous coordinate [x_k, 1] as defined in source
+    X_k_hom = torch.cat([u, v, z, torch.ones_like(z)], dim=1)
+    
+    total_feat = torch.zeros_like(novel_feat)
+    
+    for feat_i, pose_i, K_i in zip(neighbor_feats, neighbor_poses, neighbor_Ks):
+        # Reprojection: x_{k->i} = K_i C_i C_k^{-1} K_k^{-1} [x_k, 1]
+        X_k_flat = X_k_hom.permute(0, 1, 3, 2).contiguous().view(B, 4, -1)
+        X_ray = torch.matmul(torch.inverse(novel_K), X_k_flat)
+        X_world = torch.matmul(torch.inverse(novel_pose), torch.cat([X_ray, torch.ones(B, 1, X_ray.shape[2]).to(novel_img.device)], dim=1))
+        X_cam_i = torch.matmul(pose_i, X_world)
+        X_proj = torch.matmul(K_i, X_cam_i[:3, :, :])
+        
+        X_proj = X_proj.view(B, 3, H, W)
+        x_proj, y_proj, z_proj = X_proj[:, 0], X_proj[:, 1], X_proj[:, 2]
+        
+        # Visibility test
+        vis = (1.0 - z_proj / (z + 1e-6) + l) > 0.0
+        vis = vis.float()
+        
+        # Feature sampling at phi(x_{k->i}) = (x_proj/z_proj, y_proj/z_proj)
+        # Normalize to [-1, 1] for grid_sample
+        x_norm = (x_proj / (K_i[0, 0] * W) * 2 - 1)
+        y_norm = (y_proj / (K_i[1, 1] * H) * 2 - 1)
+        grid = torch.stack([x_norm, y_norm], dim=-1)
+        
+        sampled = F.grid_sample(feat_i, grid, align_corners=False)
+        total_feat += vis * sampled
+        
+    return total_feat
+```
+
+**Edge Cases and Pitfalls:**
+- **Geometric Inconsistency:** Errors in camera pose estimation (e.g., from COLMAP) or NeRF geometry lead to imperfect correspondences [S1].
+- **Depth Ambiguity:** The visibility test relies on the accuracy of the NeRF depth map [S1].
+- **Out-of-Bounds:** Reprojected coordinates may fall outside the neighbor image boundaries [S1].
+
+## Operating characteristics
+- **Time Complexity:** Linear with respect to the number of pixels and the number of neighbors $n$ [S1].
+- **Memory Complexity:** Linear with respect to the number of pixels and neighbors, as features for all neighbors are processed [S1].
+- **Performance:** Evaluated on LLFF, 360v2, and DTU datasets [S1]. Uses 5 neighbors for LLFF/360v2 and 2 for DTU [S1].
+- **Strengths:** Leverages relevant information from neighbors despite pose differences [S1].
+- **Limitations:** Dependent on the accuracy of camera poses and NeRF geometry [S1].
+
+## Background
+Originated in RoGUENeRF: A Robust Geometry-Consistent Universal Enhancer for NeRF [S1]. It is used to enhance NeRF renderings by aligning features from neighboring training views [S1].
+
+## Sources
+[S1] RoGUENeRF: A Robust Geometry-Consistent Universal Enhancer for NeRF, https://doi.org/10.1007/978-3-031-73254-6_4, fetched 2026-10-29

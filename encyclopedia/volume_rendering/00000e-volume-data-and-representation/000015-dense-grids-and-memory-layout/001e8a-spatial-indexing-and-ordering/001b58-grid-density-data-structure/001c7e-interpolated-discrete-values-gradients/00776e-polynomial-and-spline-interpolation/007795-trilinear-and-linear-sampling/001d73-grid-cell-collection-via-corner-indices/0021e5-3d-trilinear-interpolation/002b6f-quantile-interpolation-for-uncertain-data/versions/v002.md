@@ -1,0 +1,196 @@
+# Quantile Interpolation for Uncertain Data
+
+Also called: Analytic Quantile Interpolation, Quantile Interpolation of Histograms in 1D
+
+## Overview
+Quantile Interpolation is a method for interpolating nonparametric probability distributions (PDFs) represented as histograms or Kernel Density Estimates (KDEs) within a volume rendering pipeline [S1]. It solves the problem of efficiently computing the uncertainty distribution at arbitrary 3D positions during Direct Volume Rendering (DVR), where traditional convolution-based nonparametric approaches suffer from exponential time complexity [S1]. Unlike its siblings, it preserves the modality of probability distributions and provides a closed-form solution with linear time complexity relative to the number of quantiles, making it feasible for real-time DVR reconstruction [S1]. It builds on [3D Trilinear Interpolation](2613-3d-trilinear-interpolation.md) by extending the spatial interpolation logic to the statistical moments (quantile widths) of the data [S1].
+
+## How it works
+**Inputs:**
+- A 3D grid of size $L \times M \times N$ [S1].
+- At each grid vertex $v_i$, a nonparametric PDF $pdf_{X_i}(x)$ estimated from noise samples (via histograms or KDE) [S1].
+- A user-defined quantile value $qval$ (e.g., 0.5 for median, 0.001 for 1000 quantiles) [S1].
+
+**Outputs:**
+- For a viewing ray sample at position $\mathbf{p}$ inside a grid cell, the interpolated PDF $pdf_X(x)$ represented as a tuple of quantile densities $\{Pr(Q_1), \dots, Pr(Q_q)\}$ [S1].
+- The expected color and opacity for DVR, computed by integrating the interpolated PDF against a transfer function [S1].
+
+**Data Structures:**
+- **Quantile Representation:** At each grid vertex $v_i$, the PDF is partitioned into $q$ quantiles [S1]. The representation is stored as a tuple of probability densities:
+  $$ \{Pr(Q_{i1}), Pr(Q_{i2}), \dots, Pr(Q_{iq})\} $$
+  where $Pr(Q_{ij})$ is the probability density of the $j$-th quantile [S1].
+- **Memory Layout:** The grid stores $q+1$ boundary values per vertex to define the quantiles, resulting in a memory footprint of $L \times M \times N \times (q+1)$ [S1]. The densities $Pr(Q_{ij})$ are derived from these boundaries [S1].
+
+**Preprocessing (Offline/Setup):**
+1. For each grid vertex $v_i$, estimate the continuous PDF $pdf_{X_i}(x)$ from noise samples using histograms or KDE [S1].
+2. Partition $pdf_{X_i}(x)$ into $q$ quantiles based on $qval$ [S1]. The $j$-th quantile $Q_{ij}$ has a width $w_{ij}$ such that the cumulative probability up to that point is $j \cdot qval$ [S1].
+3. Compute the quantile density for each $j \in \{1, \dots, q\}$:
+   $$ Pr(Q_{ij}) = \frac{qval}{w_{ij}} $$
+   This creates the tuple $\{Pr(Q_{i1}), \dots, Pr(Q_{iq})\}$ for storage [S1].
+4. Precompute the mean intensity $m_{ij}$ for each quantile $Q_{ij}$ at every vertex [S1].
+
+**Runtime (Fragment Shader / Ray Marching):**
+For a sample point $\mathbf{p}$ inside a grid cell defined by vertices $v_1, \dots, v_8$:
+
+1. **Lookup:** Retrieve the quantile density tuples $\{Pr(Q_{i1}), \dots, Pr(Q_{iq})\}$ and mean intensities $\{m_{i1}, \dots, m_{iq}\}$ for all 8 neighboring vertices $v_i$ [S1]. Let $Pr_i$ denote the density $Pr(Q_{ij})$ for the $j$-th quantile at vertex $i$ [S1].
+2. **Interpolation:** Compute the density $Pr(Q_j)$ for the $j$-th quantile of the interpolated random variable $X$ using the closed-form 3D formula [S1]:
+   $$ Pr(Q_j) = \frac{Pr_1 Pr_2 Pr_3 Pr_4 Pr_5 Pr_6 Pr_7 Pr_8}{t_1 t_2 t_3 t_4 t_5 t_6 t_7} $$
+   where the intermediate terms $t_k$ are computed as follows, using spatial distance parameters $\alpha, \beta, \gamma \in [0,1]$ corresponding to the position of $\mathbf{p}$ within the cell:
+   $$
+   \begin{aligned}
+   t_1 &= \alpha Pr_1 + (1-\alpha)Pr_2 \\
+   t_2 &= \alpha Pr_3 + (1-\alpha)Pr_4 \\
+   t_3 &= \alpha Pr_5 + (1-\alpha)Pr_6 \\
+   t_4 &= \alpha Pr_7 + (1-\alpha)Pr_8 \\
+   t_5 &= \beta \frac{Pr_1 Pr_2}{t_1} + (1-\beta)\frac{Pr_3 Pr_4}{t_2} \\
+   t_6 &= \beta \frac{Pr_5 Pr_6}{t_3} + (1-\beta)\frac{Pr_7 Pr_8}{t_4} \\
+   t_7 &= \gamma \frac{Pr_1 Pr_2 Pr_3 Pr_4}{t_1 t_2 t_5} + (1-\gamma)\frac{Pr_5 Pr_6 Pr_7 Pr_8}{t_3 t_4 t_6}
+   \end{aligned}
+   $$
+   [S1]
+   This formula is equivalent to linearly interpolating the quantile widths $w_j$ and then computing $Pr(Q_j) = qval / w_j$ [S1].
+3. **Integration:** Compute the expected color and opacity by integrating the interpolated PDF against the Transfer Function (TF) [S1]. The piecewise constant representation allows for specific integration schemes (e.g., Quantile Range or Quantile Mean) [S1]:
+   $$ E(\text{TF}(X)) = \int \text{TF}(x) pdf_X(x) dx $$
+   [S1]
+
+**Pseudocode:**
+```python
+def interpolate_quantile_density(Pr_vertices, alpha, beta, gamma):
+    """Computes the interpolated probability density for a single quantile index j.
+    Pr_vertices: list of 8 floats, Pr_i = Pr(Q_ij) for i in 1..8
+    Returns: Pr(Q_j) for the interpolated point.
+    """
+    Pr1, Pr2, Pr3, Pr4, Pr5, Pr6, Pr7, Pr8 = Pr_vertices
+    
+    # Step 1: Interpolate along x-axis (alpha)
+    t1 = alpha * Pr1 + (1 - alpha) * Pr2
+    t2 = alpha * Pr3 + (1 - alpha) * Pr4
+    t3 = alpha * Pr5 + (1 - alpha) * Pr6
+    t4 = alpha * Pr7 + (1 - alpha) * Pr8
+    
+    # Step 2: Interpolate along y-axis (beta)
+    term_12 = (Pr1 * Pr2) / t1
+    term_34 = (Pr3 * Pr4) / t2
+    term_56 = (Pr5 * Pr6) / t3
+    term_78 = (Pr7 * Pr8) / t4
+    
+    t5 = beta * term_12 + (1 - beta) * term_34
+    t6 = beta * term_56 + (1 - beta) * term_78
+    
+    # Step 3: Interpolate along z-axis (gamma)
+    face_1234_num = Pr1 * Pr2 * Pr3 * Pr4
+    face_1234_den = t1 * t2 * t5
+    
+    face_5678_num = Pr5 * Pr6 * Pr7 * Pr8
+    face_5678_den = t3 * t4 * t6
+    
+    t7 = gamma * (face_1234_num / face_1234_den) + (1 - gamma) * (face_5678_num / face_5678_den)
+    
+    # Final result per Eq. 2
+    numerator = Pr1 * Pr2 * Pr3 * Pr4 * Pr5 * Pr6 * Pr7 * Pr8
+    denominator = t1 * t2 * t3 * t4 * t5 * t6 * t7
+    
+    return numerator / denominator
+
+def ray_march_quantile_volume(ray_origin, ray_direction, step_size, grid_quantiles, grid_means, grid_size, qval, tf_sample):
+    """
+    grid_quantiles: L x M x N array, each element is a list of q densities.
+    grid_means: L x M x N array, each element is a list of q mean intensities.
+    tf_sample(intensity) -> (color_rgb, opacity_float)
+    """
+    color = [0.0, 0.0, 0.0]
+    opacity = 0.0
+    t = 0.0
+    
+    # Standard front-to-back volume rendering accumulation
+    while t < 1.0:
+        p = ray_origin + ray_direction * t
+        # Determine containing cell and fractional coordinates (alpha, beta, gamma)
+        cell_min = [0.0, 0.0, 0.0] # Assuming unit grid for simplicity; scale by grid_size if needed
+        cell_size = 1.0 / grid_size
+        alpha = (p[0] - cell_min[0]) / cell_size
+        beta = (p[1] - cell_min[1]) / cell_size
+        gamma = (p[2] - cell_min[2]) / cell_size
+        
+        # Clamp to [0, 1] to handle boundaries
+        alpha = max(0.0, min(1.0, alpha))
+        beta = max(0.0, min(1.0, beta))
+        gamma = max(0.0, min(1.0, gamma))
+        
+        # Quantile Mean Integration
+        # Compute normalization constant p = sum(qval * w_k) = qval * sum(w_k)
+        # Since w_k = qval / Pr(Q_k), p = qval^2 * sum(1/Pr(Q_k))
+        # However, the source defines Pr(x=m_j) = (qval * w_j) / sum(qval * w_k)
+        # which simplifies to w_j / sum(w_k).
+        sum_widths = 0.0
+        weighted_color = [0.0, 0.0, 0.0]
+        
+        for j in range(len(grid_quantiles[0][0][0])):
+            # Extract densities for j-th quantile from 8 vertices
+            Pr_vertices = [
+                grid_quantiles[0][0][0][j], grid_quantiles[0][0][1][j],
+                grid_quantiles[0][1][0][j], grid_quantiles[0][1][1][j],
+                grid_quantiles[1][0][0][j], grid_quantiles[1][0][1][j],
+                grid_quantiles[1][1][0][j], grid_quantiles[1][1][1][j]
+            ]
+            
+            Pr_j = interpolate_quantile_density(Pr_vertices, alpha, beta, gamma)
+            w_j = qval / Pr_j
+            sum_widths += w_j
+            
+            # Get mean intensity for this quantile at interpolated point
+            m_j = interpolate_quantile_density([grid_means[0][0][0][j], grid_means[0][0][1][j],
+                                                grid_means[0][1][0][j], grid_means[0][1][1][j],
+                                                grid_means[1][0][0][j], grid_means[1][0][1][j],
+                                                grid_means[1][1][0][j], grid_means[1][1][1][j]], alpha, beta, gamma)
+            
+            # Sample Transfer Function
+            c_j, o_j = tf_sample(m_j)
+            
+            # Weight by discrete probability Pr(x=m_j) = w_j / sum_widths
+            prob = w_j / sum_widths
+            weighted_color[0] += c_j[0] * prob
+            weighted_color[1] += c_j[1] * prob
+            weighted_color[2] += c_j[2] * prob
+            
+        # Accumulate into ray
+        color[0] += weighted_color[0] * o_j * (1.0 - opacity)
+        color[1] += weighted_color[1] * o_j * (1.0 - opacity)
+        color[2] += weighted_color[2] * o_j * (1.0 - opacity)
+        opacity += o_j * (1.0 - opacity)
+        
+        if opacity >= 0.99:
+            break
+        t += step_size
+        
+    return color, opacity
+
+**Edge Cases and Pitfalls:**
+- **Approximation Error:** As the number of quantiles $q$ approaches infinity, the PDF converges to a closed-form continuous distribution [S1]. Finite $q$ is an approximation [S1].
+- **KDE Fluctuations:** If the number of noise samples used to estimate the initial PDFs is small, the resulting KDE may be poor [S1]. This leads to significant fluctuations in the interpolated PDF results, especially for a high number of quantiles [S1].
+- **Zero Densities:** If any $Pr_i$ is zero, the intermediate terms $t_k$ and the final result must be handled carefully to avoid division by zero or undefined behavior, though the source formula assumes non-degenerate distributions [S1].
+
+## Subtopics
+
+### Quantile Mean Integration
+An integration scheme for DVR where the mean intensity of each quantile is integrated with the Transfer Function (TF) [S1]. It calculates the mean intensity $m_j$ for each quantile $Q_j$, computes the discrete probability $\Pr(x = m_j)$ for each mean intensity, samples the TF at each mean intensity $m_j$ and weights by the discrete probability, then sums [S1]. The expected fragment color is computed as $E(\text{TF}(X)) = \sum_{j=1}^{q} \text{TF}(x = m_j) \Pr(x = m_j)$, where $\Pr(x = m_j) = \frac{p_j}{p}$, $p_j = qval \cdot w_j$, and $p = \sum_{k=1}^q qval \cdot w_k$ is the normalization constant [S1].
+
+## Operating characteristics
+- **Time Complexity:** Linear with respect to the number of quantiles $q$ [S1]. The arithmetic operations in Eq. 2 are applied quantile-wise, making the computational cost proportional to $q$ [S1]. This is a significant improvement over convolution-based nonparametric approaches which have exponential time complexity [S1].
+- **Memory Complexity:** $L \times M \times N \times (q+1)$, where $L, M, N$ are the grid dimensions [S1]. The memory requirement increases linearly with $q$ due to the storage of $q+1$ boundaries per vertex [S1].
+- **Strengths:**
+  - Preserves the modality of probability distributions at cell vertices [S1].
+  - Provides a closed-form solution, avoiding iterative sampling or expensive convolutions [S1].
+  - Feasible for DVR reconstruction on high-performance hardware due to linear complexity [S1].
+- **Limitations:**
+  - Accuracy depends on the quality of the initial KDE/histogram estimation [S1].
+  - High $q$ increases memory usage and computational load linearly [S1].
+  - Poor KDE from reduced sample sizes can cause significant fluctuations in results [S1].
+- **When to use:** When uncertainty is modeled nonparametrically and real-time or efficient DVR is required, and the data supports sufficient sampling for KDE estimation [S1].
+- **When not to use:** When the noise samples are too sparse for reliable KDE, or when exponential time complexity is acceptable for higher fidelity nonparametric interpolation [S1].
+
+## Background
+The use of quantile interpolation in uncertainty visualization was first advocated by Hollister and Pang [S1]. The method was originally proposed for 1D interpolation of histograms by Read [49] [S1]. Hollister and Pang extended this to a closed-form bilinear interpolation of histograms/nonparametric distributions on a 2D grid [S1]. The 3D extension, as described in the primary source, applies the same logic to 3D grid cells, enabling efficient Direct Volume Rendering of uncertain data [S1]. The technique is an example of order statistics, where quantiles are ranked based on the Cumulative Distribution Function (CDF) [S1].
+
+## Sources
+[S1] Direct Volume Rendering with Nonparametric Models of Uncertainty, https://doi.org/10.1109/tvcg.2020.3030394, fetched 2026-10-26

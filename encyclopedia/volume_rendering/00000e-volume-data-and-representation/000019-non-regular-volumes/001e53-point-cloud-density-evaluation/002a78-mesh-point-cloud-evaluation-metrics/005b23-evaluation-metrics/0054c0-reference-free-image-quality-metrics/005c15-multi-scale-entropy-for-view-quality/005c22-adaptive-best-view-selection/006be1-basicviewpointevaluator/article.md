@@ -1,0 +1,177 @@
+# BasicViewpointEvaluator
+
+Also called: Next Best View (NBV) Evaluator
+
+## Overview
+BasicViewpointEvaluator is a reference-free metric evaluator that scores candidate viewpoints for volume reconstruction by counting occupied and unknown voxels visible from each pose [S1, unofficial]. It differs from sibling methods by using a simple linear combination of voxel counts rather than entropy-based information gain, making it computationally lightweight but less sensitive to geometric uncertainty [S1, unofficial]. It serves as the core scoring engine for [Adaptive Best View Selection](17096-adaptive-best-view-selection.md).
+
+## How it works
+**Inputs:**
+- Point cloud with intensity (`PointCloudXYZI`): $N$ points, where intensity $I < 0$ is empty, $I > 0$ is occupied, and $I \approx 0$ is unknown [S1, unofficial].
+- Candidate viewpoints: A set of $M$ poses generated via spherical coordinate sampling [S1, unofficial].
+- Voxel filter: An optional interface to restrict evaluation to specific regions (e.g., bounding box or sphere) [S1, unofficial].
+- Parameters:
+  - $w_u$: Unknown weight parameter [S1, unofficial].
+  - $w_o$: Occupied weight parameter [S1, unofficial].
+  - $m\_voxel\_resolution$: Voxel grid resolution [S1, unofficial].
+  - $m\_sensor\_range\_max$: Maximum sensor range [S1, unofficial].
+  - $m\_sphere\_radius$: Radius for viewpoint generation [S1, unofficial].
+  - $m\_vertical\_res, m\_horizontal\_res$: Image resolution [S1, unofficial].
+  - $m\_hhfov, m\_hvfov$: Half-field of view in radians [S1, unofficial].
+  - Sampling ranges: `MinMaxStep` objects for latitude, longitude, and Z-rotation [S1, unofficial].
+
+**Outputs:**
+- A list of candidate viewpoints, each associated with a score $W$ and voxel statistics (occupied count $O$, unknown count $U$) [S1, unofficial].
+
+**Data Structures:**
+1.  **Candidate Viewpoint Record**:
+    -   `viewpoint`: `Eigen::Affine3f` (4x4 transformation matrix) [S1, unofficial].
+    -   `occupied`: `int` (count of occupied voxels) [S1, unofficial].
+    -   `unknown`: `int` (count of unknown voxels) [S1, unofficial].
+    -   Memory alignment: `EIGEN_MAKE_ALIGNED_OPERATOR_NEW` [S1, unofficial].
+2.  **Sampling Range**:
+    -   `min`: `double` [S1, unofficial].
+    -   `max`: `double` [S1, unofficial].
+    -   `step`: `double` [S1, unofficial].
+3.  **Voxel Filter Interface**:
+    -   Method: `Evaluate(cloud, pidx, viewpoint)` returns `bool` [S1, unofficial].
+    -   Implementations: `TBBoxVoxelFilter` (checks bounds), `TSphereVoxelFilter` (checks distance from center) [S1, unofficial].
+
+**Algorithm:**
+1.  **Initialization**: Reset state flags (`m_sensor_poses_computed`, `m_pose_weights_computed`, `m_ordered_pose_indices_computed`) to `false` if inputs (cloud, POI, poses, filter) change [S1, unofficial].
+2.  **Candidate Generation**: Generate $M$ candidate viewpoints using spherical coordinate sampling within the specified `MinMaxStep` ranges for latitude, longitude, and Z-rotation, centered at the sphere radius [S1, unofficial].
+3.  **Evaluation Loop**: For each candidate viewpoint $V_i$:
+    a.  Initialize counters $O_i = 0$, $U_i = 0$ [S1, unofficial].
+    b.  For each voxel $v$ in the point cloud (or voxelized representation):
+        i.  If a voxel filter is active, call `Evaluate(cloud, v.index, V_i)`. If `false`, skip [S1, unofficial].
+        ii. Determine voxel state based on intensity $I_v$:
+            -   If $I_v > 0$, increment $O_i$ [S1, unofficial].
+            -   If $I_v \approx 0$, increment $U_i$ [S1, unofficial].
+            -   If $I_v < 0$, ignore (empty space) [S1, unofficial].
+    c.  Compute score $W_i = w_u \cdot U_i + w_o \cdot O_i$ [S1, unofficial].
+    d.  Store $(V_i, O_i, U_i, W_i)$ in the candidate list [S1, unofficial].
+4.  **Termination**: If a `TerminationCondition` adapter is provided and `isTerminated()` returns `true`, exit early [S1, unofficial].
+5.  **Output**: Return the list of candidates with their scores [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+class BasicViewpointEvaluator:
+    def __init__(self, w_u, w_o, voxel_resolution, sensor_range_max, sphere_radius,
+                 vertical_res, horizontal_res, hhfov, hvfov, lat_range, lon_range, z_range):
+        self.w_u = w_u
+        self.w_o = w_o
+        self.voxel_resolution = voxel_resolution
+        self.sensor_range_max = sensor_range_max
+        self.sphere_radius = sphere_radius
+        self.vertical_res = vertical_res
+        self.horizontal_res = horizontal_res
+        self.hhfov = hhfov
+        self.hvfov = hvfov
+        self.lat_range = lat_range  # MinMaxStep
+        self.lon_range = lon_range  # MinMaxStep
+        self.z_range = z_range      # MinMaxStep
+        self.voxel_filter = None
+        self.candidates = []
+        self.flags = {
+            'poses_computed': False,
+            'weights_computed': False,
+            'ordered_computed': False
+        }
+
+    def set_voxel_filter(self, filter_obj):
+        self.voxel_filter = filter_obj
+
+    def generate_candidates(self):
+        """Generate viewpoints using spherical coordinate sampling."""
+        candidates = []
+        for lat in range(self.lat_range.min, self.lat_range.max, self.lat_range.step):
+            for lon in range(self.lon_range.min, self.lon_range.max, self.lon_range.step):
+                for z_rot in range(self.z_range.min, self.z_range.max, self.z_range.step):
+                    # Convert spherical to Cartesian for position
+                    x = self.sphere_radius * sin(lat) * cos(lon)
+                    y = self.sphere_radius * sin(lat) * sin(lon)
+                    z = self.sphere_radius * cos(lat)
+                    # Create transformation matrix (simplified)
+                    pose = Eigen.Affine3f()
+                    pose.translation = Vector3f(x, y, z)
+                    # Apply Z-rotation
+                    pose.rotate(AxisAnglef(Vector3f(0, 0, 1), z_rot))
+                    candidates.append(pose)
+        return candidates
+
+    def evaluate_candidate(self, cloud, pose):
+        """Evaluate a single viewpoint."""
+        occupied = 0
+        unknown = 0
+        for i, point in enumerate(cloud):
+            # Apply voxel filter if present
+            if self.voxel_filter and not self.voxel_filter.evaluate(cloud, i, pose):
+                continue
+            
+            intensity = point.intensity
+            if intensity > 0:
+                occupied += 1
+            elif abs(intensity) < 1e-6:  # Approximate zero
+                unknown += 1
+            # intensity < 0 is empty, ignore
+        
+        score = self.w_u * unknown + self.w_o * occupied
+        return {
+            'viewpoint': pose,
+            'occupied': occupied,
+            'unknown': unknown,
+            'score': score
+        }
+
+    def compute_scores(self, cloud, termination_condition=None):
+        """Main evaluation loop."""
+        if self.flags['poses_computed']:
+            return self.candidates
+        
+        candidates = self.generate_candidates()
+        self.candidates = []
+        
+        for pose in candidates:
+            if termination_condition and termination_condition.is_terminated():
+                break
+            
+            result = self.evaluate_candidate(cloud, pose)
+            self.candidates.append(result)
+        
+        self.flags['poses_computed'] = True
+        self.flags['weights_computed'] = True
+        return self.candidates
+```
+
+**Edge Cases and Pitfalls:**
+-   **Intensity Precision**: The threshold for "unknown" ($I \approx 0$) is not explicitly defined in the sources. Implementers must choose a small epsilon (e.g., $10^{-6}$) [S1, unofficial].
+-   **Filtering**: If no voxel filter is set, all voxels are evaluated, which may be computationally expensive for large clouds [S1, unofficial].
+-   **Termination**: The `TerminationCondition` adapter is optional. If not provided, the loop runs for all candidates [S1, unofficial].
+
+## Subtopics
+
+### [Adaptive Best View Search](17455-adaptive-best-view-search.md)
+Uses iterative refinement to find the best view, unlike the brute-force candidate evaluation here.
+
+### [Viewpoint Entropy for Volumes](19451-viewpoint-entropy-for-volumes.md)
+Uses entropy metrics for scoring, providing more nuanced information gain estimates than simple voxel counts.
+
+### [SA-Points (Self-Augmented Pre-filtering)](20845-sa-points-self-augmented-pre-filtering.md)
+Pre-filters points to improve evaluation speed, a step not included in the basic evaluator.
+
+## Operating characteristics
+-   **Time Complexity**: $O(M \cdot N)$, where $M$ is the number of candidate viewpoints and $N$ is the number of voxels/points [S1, unofficial].
+-   **Memory Complexity**: $O(M)$ to store candidate scores [S1, unofficial].
+-   **Performance**: Not given in the sources.
+-   **Strengths**: Simple, fast, and easy to implement [S1, unofficial].
+-   **Limitations**: Does not account for geometric uncertainty or information gain beyond voxel occupancy [S1, unofficial].
+-   **When to Use**: When computational resources are limited and a rough estimate of visibility is sufficient [S1, unofficial].
+-   **When Not to Use**: When high-precision information gain metrics are required [S1, unofficial].
+
+## Background
+The BasicViewpointEvaluator was developed as part of the `basic_next_best_view` ROS package by R. Monica [S1, unofficial]. It is designed for robotic exploration tasks where rapid viewpoint selection is critical [S1, unofficial].
+
+## Sources
+[S1] RMonica/basic_next_best_view, https://github.com/RMonica/basic_next_best_view, fetched 2026-10-24 (unofficial)

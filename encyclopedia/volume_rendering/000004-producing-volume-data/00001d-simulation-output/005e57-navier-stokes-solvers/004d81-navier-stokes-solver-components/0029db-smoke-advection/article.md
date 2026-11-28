@@ -1,0 +1,96 @@
+# Smoke Advection
+Also called: Tracking additional quantities like density and temperature, MacCormack routine for smoke
+
+## Overview
+Smoke advection tracks scalar fields (density, temperature, color) transported by the fluid velocity field to visualize fluid motion, as the velocity field alone lacks visual detail [S1, unofficial]. It solves the passive scalar transport equation $\frac{\partial \phi}{\partial t} = -(\mathbf{u} \cdot \nabla) \phi$ using the same MacCormack advection routine applied to the velocity field [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: Velocity field $\mathbf{u}$, previous scalar field $\phi^n$, time step $dt$, grid dimensions.
+- Output: Updated scalar field $\phi^{n+1}$.
+
+**Data Structures:**
+- For each additional quantity $\phi$ (density, temperature, color), allocate a texture or grid with the same dimensions as the velocity grid [S1, unofficial].
+
+**Steps:**
+1. **Source Injection:** Inject a 3D Gaussian "splat" into a color or density texture each frame to provide a source of smoke [S1, unofficial].
+2. **Advection:** Advect the scalar field $\phi$ using the MacCormack scheme driven by the velocity field $\mathbf{u}$ [S1, unofficial]. The evolution is governed by $\frac{\partial \phi}{\partial t} = -(\mathbf{u} \cdot \nabla) \phi$ [S1, unofficial].
+3. **Buoyancy (Optional):** If temperature $T$ is tracked, compute a buoyant force to influence velocity dynamics, causing hot smoke to rise and cool smoke to fall [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def advect_smoke(phi, u, dt, grid_shape):
+    """
+    Advect scalar field phi using the MacCormack finite-difference scheme.
+    phi: 3D list of scalar values (density/temperature/color)
+    u: 3D list of velocity vectors (u_x, u_y, u_z)
+    dt: time step
+    grid_shape: (nx, ny, nz)
+    """
+    nx, ny, nz = grid_shape
+    dx, dy, dz = 1.0, 1.0, 1.0  # Assume unit grid spacing
+
+    # Predictor step: forward differencing
+    phi_pred = [[[phi[i][j][k] for k in range(nz)] for j in range(ny)] for i in range(nx)]
+    for i in range(nx):
+        for j in range(ny):
+            for k in range(nz):
+                dphi_dx = (phi[i + 1 if i + 1 < nx else i][j][k] - phi[i][j][k]) / dx
+                dphi_dy = (phi[i][j + 1 if j + 1 < ny else j][k] - phi[i][j][k]) / dy
+                dphi_dz = (phi[i][j][k + 1 if k + 1 < nz else k] - phi[i][j][k]) / dz
+                phi_pred[i][j][k] -= dt * (u[i][j][k][0] * dphi_dx + u[i][j][k][1] * dphi_dy + u[i][j][k][2] * dphi_dz)
+
+    # Corrector step: backward differencing
+    phi_new = [[[phi[i][j][k] for k in range(nz)] for j in range(ny)] for i in range(nx)]
+    for i in range(nx):
+        for j in range(ny):
+            for k in range(nz):
+                dphi_dx = (phi_pred[i][j][k] - phi_pred[i - 1 if i - 1 >= 0 else i][j][k]) / dx
+                dphi_dy = (phi_pred[i][j][k] - phi_pred[i][j - 1 if j - 1 >= 0 else j][k]) / dy
+                dphi_dz = (phi_pred[i][j][k] - phi_pred[i][j][k - 1 if k - 1 >= 0 else k]) / dz
+                phi_new[i][j][k] = 0.5 * (phi[i][j][k] + phi_pred[i][j][k] - dt * (u[i][j][k][0] * dphi_dx + u[i][j][k][1] * dphi_dy + u[i][j][k][2] * dphi_dz))
+
+    return phi_new
+```
+
+**Parameters:**
+- $dt$: Time step.
+- Grid spacing ($dx, dy, dz$): Assumed unit spacing in the pseudocode; scale derivatives accordingly in practice.
+
+**Edge Cases and Pitfalls:**
+- Color values have no physical significance but create attractive swirling patterns when advected [S1, unofficial].
+- Temperature values influence fluid dynamics via buoyant force, requiring coupling with the velocity solver [S1, unofficial].
+
+## Subtopics
+
+### [MacCormack Advection Scheme](4952-maccormack-advection-scheme.md)
+The MacCormack advection scheme is a higher-order numerical method used to advect scalar fields (such as smoke density or temperature) and vector fields (velocity) in fluid simulations. It achieves second-order accuracy in both time and space by combining a forward differencing predictor step with a backward differencing corrector step, alternating directions to avoid bias.
+
+### Parallel Navier-Stokes Solver (MacCormack Method)
+An explicit, two-step, three-time level scheme used to solve unsteady compressible Navier-Stokes equations, chosen for ease of parallelization and implementation [S2, unofficial].
+- **Steps:**
+  1. Predictor step: Calculate a temporary 'predicted' value using forward differencing [S2, unofficial].
+  2. Corrector step: Determine the final 'corrected' value using backward differencing [S2, unofficial].
+  3. Alternate forward and backward differencing between predictor and corrector steps to avoid bias and achieve second-order accuracy [S2, unofficial].
+  4. Subdivide the data domain into blocks; at each time level, exchange solution values at the outermost boundary layers of each block between nearest neighbors after each predictor and corrector step [S2, unofficial].
+  5. Application programmer writes a 'Prepare Data' routine to calculate flow properties to be visualized and store them in the appropriate format for rendering [S2, unofficial].
+
+### [Realtime Smoke Volume (Ex1604)](13477-realtime-smoke-volume-ex1604.md)
+A hybrid rendering technique that combines low-resolution velocity projection with high-resolution density advection to visualize smoke in real-time. It projects velocity on a coarse grid to maintain stability and mass conservation, advects a finer density field using the same MacCormack routine as velocity, and finally ray marches the density in a volume pixel shader.
+
+## Operating characteristics
+- **Time Complexity:** Second-order accurate in both time and space [S2, unofficial].
+- **Memory Complexity:** Requires an additional texture or grid with the same dimensions as the velocity grid for each scalar quantity $\phi$ [S1, unofficial].
+- **Strengths:** Easier to parallelize and implement than more sophisticated CFD codes [S2, unofficial].
+- **Limitations:** Explicit scheme requires a time step satisfying stability constraints (CFL condition) [G].
+
+## Background
+- **Origin:** Fedkiw et al. 2001 [S1, unofficial].
+- **History:** Used in real-time simulation and rendering of 3D fluids [S1, unofficial]. Also applied in parallel CFD simulations on architectures like the Intel Paragon [S2, unofficial].
+- **Usage:** Visualizing smoke, density, and temperature in fluid simulations [S1, unofficial].
+
+## Sources
+[S1] PDF Real-Time Simulation and Rendering of 3D Fluids, https://wo1fsea.github.io/files/About_NavMesh/P5_GPU_Gems_3_Real-Time_Simulation_and_Rendering_of_3D_Fluids.pdf, fetched 2026-10-27 (unofficial)
+[S2] DTIC ADA302573: Runtime Volume Visualization for Parallel CFD., https://archive.org/details/DTIC_ADA302573, fetched 2026-10-26 (unofficial)

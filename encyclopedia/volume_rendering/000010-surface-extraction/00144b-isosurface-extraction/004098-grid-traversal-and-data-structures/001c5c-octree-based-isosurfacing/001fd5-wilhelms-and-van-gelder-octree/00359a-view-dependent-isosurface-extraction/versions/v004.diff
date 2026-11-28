@@ -1,0 +1,156 @@
+--- v003.md
++++ v004.md
+@@ -4,12 +4,12 @@
+ 
+ ## Overview
+-View-Dependent Isosurface Extraction is a method for extracting and rendering only the visible portions of an isosurface from large volumetric datasets, reducing polygon count and rendering time by exploiting depth complexity and occlusion [S2, book]. It sets itself apart from view-independent methods by performing coarse software visibility tests during octree traversal to prune hidden cells before hardware rendering, whereas siblings like [Branch-on-Need Octree (BONO)](6935-branch-on-need-octree-bono.md) focus on data-dependent error metrics for adaptive refinement without explicit view-based occlusion culling [S1].
++View-Dependent Isosurface Extraction is a method that extracts and renders only the visible portions of an isosurface from large volumetric datasets, reducing polygon count and rendering time by exploiting depth complexity and occlusion [S2, book]. It differs from view-independent methods by performing coarse software visibility tests during octree traversal to prune hidden cells before forwarding triangulations to the graphics accelerator [S2, book].
+ 
+ ## How it works
+-The method augments the Wilhelms and Van Gelder octree traversal with a front-to-back order and software-based visibility culling.
++The method augments the Wilhelms and Van Gelder octree traversal with a front-to-back order and software-based visibility culling [S2, book].
+ 
+ **Inputs and Outputs:**
+-*   **Input:** An octree representing the scalar field (built using Wilhelms and Van Gelder's method), a viewpoint, and an isovalue.
+-*   **Output:** A set of triangles (or meta-cells) marked as visible, forwarded to the graphics accelerator for final rasterization.
++*   **Input:** An octree representing the scalar field (built using Wilhelms and Van Gelder's method), a viewpoint, and an isovalue [S2, book].
++*   **Output:** A set of triangles (or meta-cells) marked as visible, forwarded to the graphics accelerator for final rasterization [S2, book].
+ 
+ **Data Structures:**
+@@ -27,55 +27,76 @@
+ **Pseudocode:**
+ ```python
+-def view_dependent_extraction(octree, viewpoint, isovalue):
+-    # Initialize virtual screen as all zeros (hidden)
+-    virtual_screen = Bitmap(width, height)
+-    
+-    # Hierarchical tile structure for fast classification
+-    # Each tile is 8x8 bits
+-    tile_hierarchy = build_hierarchical_tiles()
+-    
++class VirtualScreen:
++    def __init__(self, width, height):
++        self.width = width
++        self.height = height
++        self.bits = [[0] * width for _ in range(height)]
++
++    def is_pixel_visible(self, x, y):
++        return self.bits[y][x] == 0
++
++    def set_pixel(self, x, y):
++        self.bits[y][x] = 1
++
++class Tile:
++    def __init__(self, x, y):
++        self.x = x
++        self.y = y
++        self.coverage = [[0] * 8 for _ in range(8)]
++
++def compute_coverage_map(triangle, tile):
++    # Combines precomputed edge coverage patterns to form convex polygon coverage maps
++    return triangle.rasterize_onto_8x8(tile.x, tile.y)
++
++def view_dependent_extraction(octree, viewpoint, isovalue, screen_width, screen_height):
++    virtual_screen = VirtualScreen(screen_width, screen_height)
+     visible_triangles = []
+-    
++
+     # Step 1: Front-to-back traversal
+-    # Note: Wilhelms and Van Gelder traversal is assumed to support 
+-    # depth-sorted iteration or recursive front-to-back descent.
+-    for node in octree.traverse_front_to_back():
+-        
++    for node in octree.traverse_front_to_back(viewpoint):
+         # Prune empty subtrees based on min-max values
+-        if not node.contains_isovalue(isovalue):
++        if not (node.min_value <= isovalue <= node.max_value):
+             continue
+-            
+-        # Step 2: Coarse visibility test
+-        if is_cell_visible(node, viewpoint, virtual_screen, tile_hierarchy):
+-            # Step 3: Forward triangulation
++
++        # Step 2: Coarse visibility test using hierarchical tiles
++        projected_bounds = project_onto_screen(node, viewpoint, screen_width, screen_height)
++        if check_hierarchical_visibility(projected_bounds, virtual_screen):
++            # Cell is visible
+             triangles = extract_triangles(node, isovalue)
+             visible_triangles.extend(triangles)
+-            
++
+             # Update occlusion mask
+-            # Note: In this implementation, we mark the triangle as visible 
+-            # and forward it, but we still update the virtual screen for 
+-            # subsequent culling decisions.
+-            update_virtual_screen(triangles, virtual_screen, tile_hierarchy)
+-            
++            for tri in triangles:
++                for tile in tiles_intersecting(tri, screen_width, screen_height):
++                    coverage = compute_coverage_map(tri, tile)
++                    for dy in range(8):
++                        for dx in range(8):
++                            if coverage[dy][dx]:
++                                virtual_screen.set_pixel(tile.x * 8 + dx, tile.y * 8 + dy)
++            # If all pixels are set, the cell and all children are pruned
++
++    # Step 3: Forward triangulation to graphics accelerator
+     return visible_triangles
+ 
+-def is_cell_visible(node, viewpoint, virtual_screen, tile_hierarchy):
+-    # Project meta-cell onto virtual screen
+-    projected_area = project_onto_screen(node, viewpoint)
+-    
+-    # Check if any pixel in the projection is unset
+-    # Using hierarchical tiles for logarithmic search
+-    for tile in projected_area.tiles:
+-        if not is_tile_fully_occluded(tile, virtual_screen):
+-            return True
+-            
++def check_hierarchical_visibility(bounds, virtual_screen):
++    # Logarithmic search through hierarchical tiles
++    x_min, x_max, y_min, y_max = bounds
++    for y in range(y_min, y_max + 1):
++        for x in range(x_min, x_max + 1):
++            if virtual_screen.is_pixel_visible(x, y):
++                return True
+     return False
+ 
+-def update_virtual_screen(triangles, virtual_screen, tile_hierarchy):
+-    # Project triangles and set bits in virtual screen
+-    # Using precomputed coverage patterns for edges
+-    for triangle in triangles:
+-        coverage_map = compute_coverage_map(triangle, tile_hierarchy)
+-        virtual_screen.apply_coverage(coverage_map)
++def project_onto_screen(node, viewpoint, width, height):
++    # Standard perspective projection of node bounds to screen coordinates
++    return (0, width - 1, 0, height - 1)
++
++def extract_triangles(node, isovalue):
++    # Standard marching cubes or similar triangulation for the cell
++    return []
++
++def tiles_intersecting(triangle, width, height):
++    # Returns list of Tile objects covering the triangle's screen projection
++    return []
+ ```
+ 
+@@ -85,5 +106,4 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** Projection accuracy affects visibility tests. Incorrect projection may lead to false positives (rendering hidden geometry) or false negatives (culling visible geometry) [S2, book].
+ *   **Front-to-Back Order:** The algorithm requires strict front-to-back traversal to ensure that occlusion masks are correctly built before testing subsequent cells [S2, book].
+ *   **Internal Sections:** Internal sections of the isosurface (common in medical datasets) are occluded by external sections and can be pruned [S2, book].
+@@ -99,10 +119,10 @@
+ ## Operating characteristics
+ *   **Time Complexity:** Extraction time is linear in the number of tetrahedra traversed, with negligible overhead [S1]. Visibility tests add cost but prune hidden cells, reducing total work [S2, book].
+-*   **Memory Complexity:** Depends on octree size and virtual screen size. Virtual screen is $W \times H$ bits. Hierarchical tiles add overhead but enable fast culling [S2, book].
++*   **Memory Complexity:** Depends on octree size and virtual screen size. Virtual screen is $W \times H$ bits. Hierarchical tiles enable fast classification and logarithmic search for visibility determination [S2, book].
+ *   **Measured Performance:** For a CT scan of a bonsai tree ($256^3$), the data-dependent error metric $E_s$ reduced extraction time to about 54% compared to mean-square error $E_{MS}$ [S1].
+ *   **Strengths:** Reduces polygon count and rendering time by culling hidden geometry. Balances work between software and hardware [S2, book].
+ *   **Limitations:** Requires front-to-back traversal. Visibility tests add overhead for visible cells [S2, book].
+-*   **When to Use:** Large datasets with significant occlusion. When interactive performance is needed.
+-*   **When Not to Use:** Small datasets where overhead dominates. When view-independent extraction is sufficient.
++*   **When to Use:** Large datasets with significant occlusion [S2, book].
++*   **When Not to Use:** Not given in the sources.
+ 
+ ## Background

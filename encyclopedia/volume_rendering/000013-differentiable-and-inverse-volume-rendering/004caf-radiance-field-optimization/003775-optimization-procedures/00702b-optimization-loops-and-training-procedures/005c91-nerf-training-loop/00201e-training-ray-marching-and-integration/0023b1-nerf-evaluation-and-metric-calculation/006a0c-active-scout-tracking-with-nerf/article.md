@@ -1,0 +1,181 @@
+# Active Scout Tracking with NeRF
+
+Also called: Active Scout, GTmap+MAP, GTmap+MI, NeRF+MI, NeRF:2k+MI, NeRF:4k+MI, offlineNeRF+MI
+
+## Overview
+Active Scout Tracking with NeRF is a multi-target tracking method for pursuit-evasion games in highly occluded urban environments, where a quadrotor scout tracks dynamic targets on the ground using Neural Radiance Fields (NeRFs) built online from RGB and depth images [S1]. It solves the problem of selecting the next best view for a scout to maximize information gain about target locations and unknown parts of the city [S1]. Unlike [Standard Metric Computation](3079-nerf-evaluation-and-metric-calculation.md) which evaluates static performance, this method actively drives the scout's trajectory by maximizing mutual information between future observations and past observations, conditioned on the future scout location [S1]. It differs from [MIMO Objective](10931-mimo-objective.md) by focusing on single-scout active perception rather than multi-agent coordination, and from [Novel View Selection Policy](12895-novel-view-selection-policy.md) by explicitly integrating NeRF-based scene representation with Bayes filter target tracking [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** RGB and depth images ($320 \times 320$ pixels) from the scout's camera (Field of View: 90 degrees); current NeRF representation of the scene; Bayes filters representing target location hypotheses; graph of the urban environment (e.g., from OpenStreetMap data).
+*   **Outputs:** Next best waypoint (pose) for the quadrotor; updated NeRF representation; updated Bayes filters.
+
+**Data Structures:**
+1.  **NeRF Representation ($\xi$):** A multi-layer perceptron (MLP) mapping 3D coordinates and viewing directions to color and density. Since NeRFs are not probabilistic, an ensemble of NeRFs is built from bootstrapped data to calculate variance over color and depth [S1].
+2.  **Bayes Filter:** Maintains a history of detected target locations. One extra unassigned filter is always maintained to promote exploration. When a new target is found, the extra filter is assigned to it, and a new filter with a uniform prior is created [S1].
+3.  **Target History ($y_{detect}$):** A list of graph nodes (particles) seen by the scout. Used by active targets to select unseen nodes [S1].
+
+**Parameters:**
+*   Camera FOV: 90 degrees [S1].
+*   Image Resolution: $320 \times 320$ [S1].
+*   NeRF Training Iterations: 4,000 per planning step (default), 2,000 for `NeRF:2k` variant [S1].
+*   Planning Steps: 40 [S1].
+*   Control Steps per Planning Step: 30 [S1].
+*   Target History Reset Interval: Every 10 planning steps [S1].
+
+**Algorithm Steps:**
+
+1.  **Initialization:**
+    *   Scout starts at origin.
+    *   Increases altitude to maximum (150m for Philadelphia, 100m for NYC) [S1].
+    *   Performs a $2\pi$ yaw rotation scan with random pitch perturbations, collecting 30 images (1 per step) [S1].
+    *   Train the initial NeRF for 4,000 iterations [S1].
+
+2.  **Planning Loop (for $k = 1$ to 40):**
+    *   **A. NeRF Update:** After reaching the previous waypoint, retrain the NeRF for the specified number of iterations (e.g., 4,000) using new observations [S1].
+    *   **B. Next Best View Selection:**
+        *   Sample future scout poses $x_{future}$ from the distribution $\phi \equiv p(x_{future} | y_{past})$ [S1].
+        *   For each candidate pose, synthesize future observations $y_{future}$ using the NeRF ensemble [S1].
+        *   Calculate Mutual Information (MI) between future detections $y_{future,detect}$ and past detections $y_{past}$:
+            $$ I = \sum_{i=1}^{P} I(y_{future,detect}^{(i)}; y_{past}) $$
+            where $P$ is the number of targets [S1].
+        *   Select the pose $u_{future}$ that maximizes this MI:
+            $$ u_{future} \in \text{argmax}_{\theta} \mathbb{E}_{\theta} [y_{future,detect}; y_{past} | x_{future}] $$
+            where $\theta \equiv p(x_{future} | y_{past})$ [S1].
+    *   **C. Trajectory Execution:**
+        *   Compute a dynamically feasible quadrotor trajectory to the selected waypoint [S1].
+        *   Execute 30 control steps to reach the waypoint [S1].
+    *   **D. Observation and Update:**
+        *   Capture new RGB and depth images $y_t$ at the new location [S1].
+        *   Update the Bayes filter for each target using the new observations [S1].
+        *   Update the NeRF with the new observations [S1].
+    *   **E. Target History Reset:**
+        *   If $k$ is a multiple of 10, reset the buffer of observed particles $y_{detect}$ [S1]. This forces active targets to return to old nodes, ensuring the scout revisits previously seen locations [S1].
+
+3.  **Active Target Policy (Simulation Only):**
+    *   Targets maintain a history of graph nodes seen by the scout ($y_{detect}$) [S1].
+    *   Each iteration, an active target randomly selects a graph node from the list of unseen particles and moves there via Dijkstra's path [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def active_scout_tracking():
+    # Initialization
+    scout_pos = (0, 0, 0)
+    max_altitude = 150.0  # Example for Philadelphia
+    scout_pos.z = max_altitude
+    
+    # Collect initialization images
+    init_images = []
+    for i in range(30):
+        yaw = 2 * pi * (i / 30)
+        pitch = random_perturbation()
+        image = capture_rgb_depth(scout_pos, yaw, pitch)
+        init_images.append(image)
+        
+    # Train initial NeRF
+    nerf = train_nerf(init_images, iterations=4000)
+    
+    # Initialize Bayes Filters
+    # One extra unassigned filter is always maintained
+    bayes_filters = [create_uniform_prior_filter()]
+    target_history = [] # List of seen graph nodes
+    
+    # Planning Loop
+    for planning_step in range(40):
+        # 1. Retrain NeRF with new data
+        nerf = train_nerf(nerf, new_observations, iterations=4000)
+        
+        # 2. Select Next Best View
+        best_pose = None
+        max_mi = -infinity
+        
+        # Sample future poses from prior distribution phi
+        candidate_poses = sample_poses(phi, num_samples=100)
+        
+        for pose in candidate_poses:
+            # Synthesize future observations using NeRF ensemble
+            future_obs = synthesize_observations(nerf, pose)
+            
+            # Calculate Mutual Information over all targets
+            total_mi = 0
+            for target_idx in range(num_targets):
+                # I(y_future; y_past) = H(y_past) - H(y_past | y_future)
+                # Approximated via variance in NeRF ensemble and Bayes filter
+                mi = calculate_mutual_information(
+                    future_obs.detections[target_idx],
+                    bayes_filters[target_idx].history
+                )
+                total_mi += mi
+            
+            if total_mi > max_mi:
+                max_mi = total_mi
+                best_pose = pose
+        
+        # 3. Execute Trajectory
+        trajectory = compute_quadrotor_trajectory(scout_pos, best_pose)
+        for control_step in range(30):
+            execute_control_step(trajectory, control_step)
+            # Capture new observation
+            new_obs = capture_rgb_depth(scout_pos)
+            new_observations.append(new_obs)
+            
+        # 4. Update Bayes Filters
+        for target_idx in range(num_targets):
+            update_bayes_filter(bayes_filters[target_idx], new_obs)
+            
+        # 5. Check for new targets
+        if new_target_detected(new_obs):
+            # Assign extra filter to new target
+            assigned_filter = bayes_filters.pop() # Remove unassigned
+            bayes_filters.append(assigned_filter)
+            # Create new unassigned filter with uniform prior
+            bayes_filters.append(create_uniform_prior_filter())
+            
+        # 6. Reset Target History periodically
+        if planning_step % 10 == 0:
+            target_history = []
+            
+        scout_pos = best_pose
+```
+
+**Formulas:**
+*   **Mutual Information:** $I(y; x) = \iint dy dx p(x, y) \log \frac{p(x, y)}{p(x)p(y)} = H(y) - H(y|x)$, where $H$ is Shannon entropy [S1].
+*   **Total MI over Targets:** $I = \sum_{i=1}^{P} I(y_{future,detect}^{(i)}; y_{past})$ [S1].
+*   **MAP Policy (Baseline):** $u_{future} \in \text{argmax}_{\theta} \mathbb{E}_{\theta} [y_{future,detect}; y_{past} | x_{future}]$, where $\theta \equiv p(x_{future} | y_{past})$ [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Non-Probabilistic NeRFs:** NeRFs do not inherently provide uncertainty. An ensemble from bootstrapped data is required to calculate variance for MI computation [S1].
+*   **Motion Model Uncertainty:** RMSE may increase for some targets if the simplistic dynamics model used in the Bayes filter introduces uncertainty, even if the target is stationary [S1].
+*   **Unbounded Altitude:** If the scout can fly to unbounded heights, it can observe the entire map from a single point, trivializing the tracking problem. Altitude is bounded (150m/100m) to ensure meaningful active perception [S1].
+*   **Target Hiding:** Active targets use Dijkstra's path to move to unseen graph nodes, actively hiding behind occlusions. The history reset mechanism is crucial to force the scout to revisit these areas [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Each planning step involves retraining the NeRF (4,000 iterations) and sampling future poses to calculate MI. The number of control steps per planning step is fixed at 30 [S1].
+*   **Memory Complexity:** Depends on the NeRF size (MLP weights) and the number of Bayes filters. The ensemble of NeRFs increases memory usage [S1].
+*   **Measured Performance:**
+    *   **Stationary Targets:** Can explore and locate 20 stationary targets within 300 steps in a simulator [S1]. `GTmap+MAP` is quickest, but `MI` policies are more thorough [S1].
+    *   **Dynamic Targets (Philadelphia, 4 targets, Seed 88):**
+        *   `GTmap+MI`: Mean RMSE 124.671 ± 20.088 m [S1].
+        *   `NeRF:4k+MI`: Mean RMSE 133.818 ± 24.080 m [S1].
+        *   `NeRF:2k+MI`: Mean RMSE 153.711 ± 29.144 m [S1].
+        *   `OfflineNeRF+MI`: Mean RMSE 117.800 ± 21.931 m [S1].
+    *   **Dynamic Targets (NYC StuyTown, 4 targets):**
+        *   `GTmap+MAP`: Mean RMSE 163.216 ± 18.319 m [S1].
+        *   `GTmap+MI`: Mean RMSE 137.121 ± 12.754 m [S1].
+        *   `NeRF:4k+MI`: Mean RMSE 145.057 ± 34.356 m [S1].
+        *   `OfflineNeRF+MI`: Mean RMSE 167.537 ± 24.989 m [S1].
+*   **Scaling:** More training steps generally lead to better performance, but `NeRF:2k` is slower to converge than `NeRF:4k` [S1].
+*   **Strengths:** Maintains a worst-case tracking error of 200m for dynamic targets, whereas a greedy baseline can have an error as large as 600m [S1]. Does not need to know the number of targets a priori [S1].
+*   **Limitations:** Slower than a greedy baseline for stationary targets [S1]. Performance depends on the quality of the NeRF representation, which improves over time [S1].
+
+## Background
+*   **Origin:** The method was introduced by Christopher D. Hsu, Pratik Chaudhari, and others from the Department of Electrical & Systems Engineering and General Robotics, Automation, Sensing and Perception (GRASP) Laboratory at the University of Pennsylvania, and DEVCOM Army Research Laboratory [S1].
+*   **Paper:** "Active Scout: Multi-Target Tracking Using Neural Radiance Fields in Dense Urban Environments" (2024) [S1].
+*   **History:** The work builds on the concept of using NeRFs for online scene representation and applying active perception strategies (mutual information) for robot navigation and tracking [S1].
+*   **Usage:** Evaluated in a custom-built simulator using OpenStreetMap data of Philadelphia and New York City [S1].
+
+## Sources
+[S1] Active Scout: Multi-Target Tracking Using Neural Radiance Fields in Dense Urban Environments, https://doi.org/10.1109/iros58592.2024.10802565, fetched 2026-10-26

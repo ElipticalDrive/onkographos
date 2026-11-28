@@ -1,0 +1,125 @@
+--- v001.md
++++ v002.md
+@@ -7,5 +7,5 @@
+ 
+ ## How it works
+-The method determines which splats to download in each time slot to maximize utility while respecting bandwidth limits and layer precedence constraints.
++The method determines which splats to download in each time slot to maximize utility while respecting bandwidth limits and layer precedence constraints [S1].
+ 
+ **Inputs and Outputs:**
+@@ -18,9 +18,9 @@
+     *   $T$: Set of time slots.
+ *   **Outputs:**
+-    *   Binary decision variables $x_{jl}[t]$ indicating if layer $l$ of object $j$ is downloaded at time $t$.
++    *   Binary decision variables $x_{jl}[t]$ indicating if layer $l$ of object $j$ is downloaded at time $t$ [S1].
+ 
+ **Data Structures:**
+-*   $x_{jl}[t]$: Binary variable, 1 if layer $l$ of object $j$ is downloaded in time slot $t$, 0 otherwise.
+-*   $y_{jl}[t]$: Helper variable, 1 if layer $l$ of object $j$ has been downloaded before time slot $t$, 0 otherwise.
++*   $x_{jl}[t]$: Binary variable, 1 if layer $l$ of object $j$ is downloaded in time slot $t$, 0 otherwise [S1].
++*   $y_{jl}[t]$: Helper variable, 1 if layer $l$ of object $j$ has been downloaded before time slot $t$, 0 otherwise [S1].
+ 
+ **Formulas:**
+@@ -42,8 +42,12 @@
+ 3.  **Precedence Constraint:** Layer $l$ can only be downloaded if the preceding layer $l-1$ has been downloaded in a previous time slot [S1]:
+     $$
+-    x_{jl}[t] \le \sum_{t' < t} x_{jl}[t'] \quad \forall j, l, t
++    x_{jl}[t] \le y_{j,l-1}[t] \quad \forall j, l, t
+     $$
+-    *Note: The source text presents this as $x_{jl}[t] \le y_{j,l-1}[t]$ where $y$ tracks previous downloads, but explicitly states "layer $l$ can only be downloaded if the preceding layer $l-1$ has previously been downloaded" [S1]. The constraint (7) in the source is written as $x_{jl}[t] \le y_{j,l-1}[t]$? No, source says $x_{jl}[t] \le \sum_{t'<t} x_{jl}[t']$? Let's re-read carefully. Source says: "Constraint (7) states that layer $l$ can only be downloaded if the preceding layer $l-1$ has previously been downloaded." The formula given is $x_{jl}[t] \le y_{j,l-1}[t]$? No, the formula block shows $x_{jl}[t] \le \sum_{t'<t} x_{jl}[t']$? Actually, the OCR text for (7) is garbled: `x jl [t] ≤ y j,l −1 [t]`. However, the text description says "preceding layer l-1". Wait, looking at the formula block: `x jl [t] ≤ y j,l −1 [t]` is likely a typo in the OCR or source for `y j,l-1`? Or is it `y j,l`? The text says "preceding layer l-1". Let's look at constraint (6): `y jl [t] = sum_{t'<t} x jl [t']`. This tracks if layer l has been downloaded. If the precedence is on layers, it should be `x jl [t] <= y j,l-1 [t]`? No, `y` is defined for `jl`. So `y j,l-1` would be the helper for layer l-1. The source text says: "Constraint (7) states that layer $l$ can only be downloaded if the preceding layer $l-1$ has previously been downloaded." The formula provided in the source snippet is `x jl [t] ≤ y j,l −1 [t]`. This implies $y$ is indexed by object and layer. So $y_{j,l-1}[t]$ is 1 if layer $l-1$ of object $j$ has been downloaded before $t$. This matches the text description [S1].
+-4.  **Binary Constraints:**
++    where $y_{j,l-1}[t]$ is 1 if layer $l-1$ of object $j$ has been downloaded before $t$ [S1].
++4.  **Helper Variable Definition:** Tracks previously downloaded splats [S1]:
++    $$
++    y_{jl}[t] = \sum_{t' < t} x_{jl}[t'] \quad \forall j, l, t
++    $$
++5.  **Binary Constraints:**
+     $$
+     x_{jl}[t], y_{jl}[t] \in \{0, 1\} \quad \forall j, t
+@@ -59,29 +63,22 @@
+ **Pseudocode:**
+ ```python
+-def solve_single_slot(objects, layers, utilities, costs, bandwidth):
++def solve_single_slot(objects, layers, utilities, costs, bandwidth, downloaded_history):
+     """
+-    Solves the scheduling problem for a single time slot using DP.
++    Solves the scheduling problem for a single time slot using dynamic programming.
+     objects: list of object IDs
+-    layers: dict mapping object_id -> list of layer IDs
++    layers: dict mapping object_id -> list of layer IDs (sorted ascending)
+     utilities: dict mapping (obj_id, layer_id) -> utility value
+     costs: dict mapping (obj_id, layer_id) -> cost size
+     bandwidth: int, available bandwidth for this slot
++    downloaded_history: dict mapping (obj_id, layer_id) -> bool, tracks prior downloads
+     
+-    Returns: set of (obj_id, layer_id) to download
++    Returns: dict mapping (obj_id, layer_id) -> bool for selected splats
+     """
+-    # This is a Multiple Choice Knapsack Problem variant.
+-    # Each object-layer combination is an item.
+-    # However, precedence constraints (layer l requires l-1) 
+-    # must be handled. In a single slot, if l-1 was not downloaded 
+-    # in previous slots, l cannot be downloaded.
+-    # Assuming y_jl[t] is 0 if l-1 not downloaded previously,
+-    # then x_jl[t] must be 0.
+-    
+-    # Filter out items that violate precedence based on previous state
++    # Filter valid items based on precedence: layer l can be picked only if l-1 is already downloaded
+     valid_items = []
+     for obj in objects:
+         for layer in layers[obj]:
+-            # Check if previous layer is available/downloaded
+-            if layer == 0 or is_layer_downloaded(obj, layer - 1):
++            prev_layer = layer - 1
++            if layer == 0 or downloaded_history.get((obj, prev_layer), False):
+                 valid_items.append({
+                     'obj': obj,
+@@ -91,35 +88,24 @@
+                 })
+     
+-    # Solve MCKP using DP
+-    # dp[w] = max utility with weight w
++    n = len(valid_items)
++    # dp[w] = max utility with capacity w
+     dp = [0] * (bandwidth + 1)
+-    # To reconstruct solution, store choices
+-    choice = [[None] * (bandwidth + 1) for _ in range(len(valid_items))]
++    # Track which items are selected for each capacity to reconstruct solution
++    selected_items = [[False] * n for _ in range(bandwidth + 1)]
+     
+-    for i, item in enumerate(valid_items):
++    for i in range(n):
++        item = valid_items[i]
+         for w in range(bandwidth, item['weight'] - 1, -1):
+             if dp[w - item['weight']] + item['value'] > dp[w]:
+                 dp[w] = dp[w - item['weight']] + item['value']
+-                choice[i][w] = item
+-            else:
+-                choice[i][w] = choice[i-1][w] if i > 0 else None
+-                
++                selected_items[w] = selected_items[w - item['weight']][:]
++                selected_items[w][i] = True
++    
+     # Reconstruct solution
+-    selected = []
+-    w = bandwidth
+-    for i in range(len(valid_items) - 1, -1, -1):
+-        if choice[i][w] == valid_items[i]:
+-            selected.append((valid_items[i]['obj'], valid_items[i]['layer']))
+-            w -= valid_items[i]['weight']
+-            
++    selected = {}
++    for i, is_selected in enumerate(selected_items[bandwidth]):
++        if is_selected:
++            selected[(valid_items[i]['obj'], valid_items[i]['layer'])] = True
+     return selected
+-
+-def is_layer_downloaded(obj, layer):
+-    """
+-    [G] Placeholder for checking if previous layer was downloaded in prior slots.
+-    In the full algorithm, this state is maintained across time slots.
+-    """
+-    # Implementation detail: Check global download history
+-    pass
+ ```
+ 

@@ -1,0 +1,189 @@
+--- v002.md
++++ v003.md
+@@ -4,105 +4,123 @@
+ 
+ ## Overview
+-Translucent categorical is a volume rendering method for categorical label data that applies surface-based lighting (diffuse shading) to make labels appear as solid, opaque surfaces, distinct from the default flat translucent rendering [S2, unofficial]. It shares the improved ray traversal logic of `iso_categorical`—which eliminates sawtooth edges at grazing angles—but differs in shading by treating the label volume as a binary surface for normal estimation rather than using the label values directly for color [S1, S2, unofficial].
++Translucent categorical is a volume rendering method for categorical label data that applies surface-based diffuse lighting to make labels appear as solid surfaces, distinct from the default flat translucent rendering [S2, unofficial]. It shares the improved ray traversal logic of [iso_categorical](4049-iso-categorical.md)—which fixes cut surfaces and depth ordering across scales—but differs in shading by treating the label volume as a binary surface for normal estimation rather than using label values directly for color [S1, unofficial][S2, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: A 3D integer label map (texture) where background is typically 0, and a lighting configuration (light position, color).
+-- Output: A rendered image with shaded, opaque-looking label surfaces.
++- Input: A 3D integer label map stored as a floating-point texture in the range $[0, 1]$, a lighting configuration (light position and color), and rendering parameters [S2, unofficial].
++- Output: A rendered image with shaded, opaque-looking label surfaces [S2, unofficial].
+ 
+ **Data Structures:**
+-- The label data is sent to the renderer as a floating-point texture in the range [0, 1], where integer labels are normalized [S2, unofficial].
+-- A uniform `u_threshold` defines the background level (iso level) [S2, unofficial].
+-- A uniform `u_equality_threshold` (default 0.0001) is used for float comparisons [S2, unofficial].
++- The label data is normalized to a float texture in $[0, 1]$ [S2, unofficial].
++- `u_threshold`: A uniform setting the background level (iso level), defaulting to $0$ [S2, unofficial].
++- `u_equality_threshold`: A uniform with a pre-defined value of $0.0001$, used for float equality checks [S2, unofficial].
+ 
+ **Steps:**
+-1. **Ray Traversal:** Cast a ray through the volume. Use the same traversal logic as `iso_categorical` to find the first hit voxel, ensuring the ray is shortened by a tiny margin at both ends to prevent rounding errors from reading neighboring voxels when a plane starts exactly on a voxel boundary [S1, unofficial].
+-2. **Surface Detection:** Treat the image as a binary image by checking if the sampled value `val` differs from the background value. The background value is determined by `u_threshold` [S2, unofficial].
+-   - If `u_threshold` is 0 (default assumption), check `val > 0` [S2, unofficial].
+-   - For non-zero backgrounds, use a tolerance check: `if abs(val - background_value) < u_equality_threshold`, the point is considered background [S2, unofficial].
+-3. **Normal Estimation:** Calculate the surface normal by computing the gradient of the binary image (where foreground is 1 and background is 0) at the hit point [S2, unofficial].
+-   - *Pitfall:* Gradient calculation on binary images is difficult and results in poor normal estimation for small protruding blocks (e.g., a single voxel sticking out) [S2, unofficial].
++1. **Ray Traversal:** Cast a ray through the volume using the shared traversal logic of `iso_categorical`. The ray is shortened by a tiny margin at both ends to prevent rounding errors from reading neighboring voxels when a plane starts exactly on a voxel boundary [S1, unofficial].
++2. **Surface Detection:** Treat the image as a binary image by checking if the sampled value `val` differs from the background level. If `u_threshold` is $0$, check `val > 0`. For non-zero backgrounds, use a tolerance check: `abs(val - background_value) < u_equality_threshold` [S2, unofficial].
++3. **Normal Estimation:** Calculate the surface normal by computing the gradient of the binary image (foreground $1$, background $0$) at the hit point [S2, unofficial]. Gradient calculation on binary images is difficult and results in poor normal estimation for small protruding blocks [S2, unofficial].
+ 4. **Shading (Diffuse):** Compute diffuse illumination based on the dot product of the estimated normal and the light direction [S2, unofficial].
+    - *Hack for Protrusions:* To correct dim diffusive lighting on edges caused by bad normal estimation, a hack detects voxels that protrude into the background. This involves checking neighboring axes: if a neighbor is darker (background) relative to the current value, increment a counter `n_dark_axes`. If `n_dark_axes` indicates a protrusion, adjust the illumination [S2, unofficial].
+-5. **Shading (Specular):** Specular illumination is **excluded** because bad normal estimation leads to large sections of surfaces having the same normal, causing them to become overly reflective "big reflectors" [S2, unofficial].
+-6. **Color Mapping:** The label value is mapped to a color using a colormap. Since the texture is float-based, interpolated values result in weird colors, so interpolation is generally avoided or difficult to implement correctly [S2, unofficial].
++5. **Shading (Specular):** Specular illumination is excluded because bad normal estimation leads to large sections of surfaces having the same normal, causing them to become overly reflective "big reflectors" [S2, unofficial].
++6. **Color Mapping:** The label value is mapped to a color using a colormap. Since the texture is float-based, interpolated values result in weird colors, making interpolated versions difficult to implement correctly [S2, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def render_translucent_categorical(label_texture, light_dir, u_threshold=0.0, u_equality_threshold=0.0001):
+-    # 1. Ray traversal finds hit voxel at coordinate (x, y, z)
+-    #    Returns hit_value and hit_normal (estimated from binary gradient)
+-    hit_value, hit_normal = ray_cast_and_get_normal(label_texture, u_threshold, u_equality_threshold)
+-    
+-    if hit_value is None:
+-        return background_color
++def render_translucent_categorical(ray_origin, ray_direction, label_texture, texture_shape, colormap, light_dir, u_threshold=0.0, u_equality_threshold=0.0001):
++    margin = 1e-6
++    step_size = 0.8
++    t = margin
++    hit_found = False
++    hit_pos = None
++    hit_val = None
+ 
+-    # 2. Surface detection is implicit in ray_cast_and_get_normal
+-    #    It checks if abs(hit_value - u_threshold) >= u_equality_threshold
++    # 1. Ray Traversal (shared with iso_categorical)
++    while t <= 1.0 - margin:
++        pos = [ray_origin[i] + t * ray_direction[i] for i in range(3)]
++        x, y, z = int(pos[0]), int(pos[1]), int(pos[2])
++        if 0 <= x < texture_shape[0] and 0 <= y < texture_shape[1] and 0 <= z < texture_shape[2]:
++            val = label_texture[x, y, z]
++            # 2. Surface Detection
++            if abs(val - u_threshold) >= u_equality_threshold:
++                hit_found = True
++                hit_pos = pos
++                hit_val = val
++                break
++        t += step_size
+ 
+-    # 3. Normal estimation hack for protrusions
+-    #    Check neighbors to see if current voxel protrudes into background
++    if not hit_found:
++        return [0.0, 0.0, 0.0, 0.0]
++
++    # 3. Normal Estimation (gradient on binary image)
++    grad = [0.0, 0.0, 0.0]
++    for axis in range(3):
++        pos_p = hit_pos.copy()
++        pos_p[axis] += 1.0
++        pos_m = hit_pos.copy()
++        pos_m[axis] -= 1.0
++        px, py, pz = max(0, min(texture_shape[0]-1, int(pos_p[0]))), max(0, min(texture_shape[1]-1, int(pos_p[1]))), max(0, min(texture_shape[2]-1, int(pos_p[2])))
++        mx, my, mz = max(0, min(texture_shape[0]-1, int(pos_m[0]))), max(0, min(texture_shape[1]-1, int(pos_m[1]))), max(0, min(texture_shape[2]-1, int(pos_m[2])))
++        grad[axis] = label_texture[px, py, pz] - label_texture[mx, my, mz]
++
++    norm_len = (grad[0]**2 + grad[1]**2 + grad[2]**2)**0.5
++    if norm_len > 0:
++        grad = [g / norm_len for g in grad]
++    else:
++        grad = [0.0, 0.0, 1.0]
++
++    # 4. Shading (Diffuse) & Protrusion Hack
+     n_dark_axes = 0
+-    for axis in [0, 1, 2]:
+-        neighbor_val = get_neighbor_value(label_texture, hit_pos, axis, direction=-1)
+-        if neighbor_val < u_threshold: # Assuming background is lower
++    for axis in range(3):
++        neighbor_pos = hit_pos.copy()
++        neighbor_pos[axis] -= 1.0
++        nx, ny, nz = max(0, min(texture_shape[0]-1, int(neighbor_pos[0]))), max(0, min(texture_shape[1]-1, int(neighbor_pos[1]))), max(0, min(texture_shape[2]-1, int(neighbor_pos[2])))
++        if label_texture[nx, ny, nz] < u_threshold:
+             n_dark_axes += 1
+-            
+-    # Adjust normal or illumination based on protrusion detection
+-    # Specific adjustment logic from [S2, unofficial] is a "hack" to fix dim edges
++
+     if n_dark_axes > 0:
+-        hit_normal = correct_normal_for_protrusion(hit_normal, n_dark_axes)
++        grad = [g + 1.0 for g in grad]
++        norm_len = (grad[0]**2 + grad[1]**2 + grad[2]**2)**0.5
++        if norm_len > 0:
++            grad = [g / norm_len for g in grad]
+ 
+-    # 4. Diffuse shading
+-    #    N is hit_normal, L is normalized light_dir
+-    diffuse_factor = max(0, dot(normalize(hit_normal), normalize(light_dir)))
+-    
++    light_len = (light_dir[0]**2 + light_dir[1]**2 + light_dir[2]**2)**0.5
++    light_dir_n = [l / light_len for l in light_dir]
++    diffuse = max(0.0, grad[0]*light_dir_n[0] + grad[1]*light_dir_n[1] + grad[2]*light_dir_n[2])
++    ambient = 0.2
++
+     # 5. Specular is excluded [S2, unofficial]
+-    specular_factor = 0.0
++    specular = 0.0
+ 
+-    # 6. Color mapping
+-    #    Map hit_value (integer label) to RGB via colormap
+-    color = colormap[hit_value]
+-    
+-    # 7. Final color
+-    #    Assume ambient light is 0 or included in diffuse
+-    final_color = color * (diffuse_factor + ambient)
+-    
+-    return final_color
++    # 6. Color Mapping
++    label_idx = int(hit_val)
++    color = colormap[label_idx]
+ 
+-def get_neighbor_value(texture, pos, axis, direction):
+-    # Helper to get neighbor value, handling boundaries
+-    new_pos = pos.copy()
+-    new_pos[axis] += direction
+-    if is_out_of_bounds(new_pos):
+-        return u_threshold # Background
+-    return texture[new_pos]
++    return [color[0] * (diffuse + ambient), color[1] * (diffuse + ambient), color[2] * (diffuse + ambient), 1.0]
+ ```
+ 
+ **Parameters:**
+-- `u_threshold`: Background level (iso level). Default 0 [S2, unofficial].
+-- `u_equality_threshold`: Tolerance for float comparison. Default 0.0001 [S2, unofficial].
++- `u_threshold`: Background level (iso level). Default $0$ [S2, unofficial].
++- `u_equality_threshold`: Tolerance for float comparison. Default $0.0001$ [S2, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+ - **Non-zero background:** Requires tolerance-based comparison `abs(val - background_value) < tolerance` [S2, unofficial].
+-- **Interpolation:** Casting integer labels to float texture [0,1] and interpolating results in weird colors, making interpolated versions difficult [S2, unofficial].
++- **Interpolation:** Casting integer labels to float texture $[0,1]$ and interpolating results in weird colors, making interpolated versions difficult [S2, unofficial].
+ - **Small protrusions:** Bad normal estimation causes dim diffusive lighting on small protruding blocks [S2, unofficial].
+ 
+ ## Subtopics
+ 
+-### Segmentation Overlay Rendering
+-Converts a 3D integer label map into a translucent RGBA overlay volume for compositing over the primary slice [S3, unofficial]. It initializes an RGBA array of shape (X, Y, Z, 4) with dtype uint8, iterates over unique labels > 0, creates a boolean mask for each label, assigns RGB from a label color map scaled to 0-255, and assigns alpha from opacity (0.55) scaled to 0-255 [S3, unofficial]. The RGBA array is flattened in Fortran order, converted to a VTK unsigned char array, and attached to `vtkImageData` [S3, unofficial].
++### [Segmentation Overlay Rendering](15607-segmentation-overlay-rendering.md)
++Segmentation Overlay Rendering converts a 3D integer label map into a translucent RGBA volume to composite discrete semantic information over primary anatomical data. Unlike its parent [translucent_categorical](6031-translucent-categorical.md), which shades the first-hit voxel based on categorical properties during ray traversal, this method pre-computes a static overlay volume that is blended in post-compositing or as a secondary pass, allowing the underlying intensity or volume rendering to remain visible through the label boundaries.
+ 
+ ## Operating characteristics
+-- **Performance:** Similar to `iso_categorical`, with frame time increases ranging from 1.1x to 1.8x depending on scene density and view angle [S1, unofficial].
+-- **Scaling:** The new traversal cost does not depend on step size, unlike the old method which grew with 1/step [S1, unofficial]. Compared to a fine-step old method (step 0.4), this method is as fast or faster (0.66x to 1.0x) [S1, unofficial].
+-- **Strengths:** Eliminates sawtooth edges at grazing angles; provides surface-like appearance with shading [S1, S2, unofficial].
++- **Performance:** Frame time increases range from $1.1\times$ to $1.8\times$ depending on scene density and view angle [S1, unofficial].
++- **Scaling:** The new traversal cost does not depend on step size, unlike the old method which grew with $1/\text{step}$ [S1, unofficial]. Compared to a fine-step old method (step $0.4$), this method is as fast or faster ($0.66\times$ to $1.0\times$) [S1, unofficial]. Dense labels, where rays stop almost immediately, render in under $1$ ms either way [S1, unofficial].
++- **Strengths:** Fixes cut surfaces and depth ordering across scales; provides surface-like appearance with diffuse shading [S1, unofficial][S2, unofficial].
+ - **Limitations:** Poor normal estimation on binary gradients leads to lighting artifacts on small features; specular highlights are excluded due to these artifacts; interpolation is problematic [S2, unofficial].
+ 
+ ## Background
+-This method was introduced in a PR to add isosurface rendering to the Labels layer in 3D, aiming to make labels look more like real surfaces using lighting [S2, unofficial]. It was developed as part of the napari project [S2, unofficial]. The traversal improvements were later refined in a separate PR to fix sawtooth edges and depth issues in `iso_categorical`, which translucent categorical shares [S1, unofficial].
++This method was introduced in a pull request to add isosurface rendering to the Labels layer in 3D, aiming to make labels look more like real surfaces using lighting [S2, unofficial]. It was developed as part of the napari project [S2, unofficial]. The traversal improvements were later refined in a separate pull request to fix cut surfaces and depth ordering issues in `iso_categorical`, which translucent categorical shares [S1, unofficial].
+ 
+ ## Sources
+ [S1] Fix sawtooth edges and depth of iso_categorical labels rendering, https://github.com/napari/napari/pull/9674, fetched 2026-10-25 (unofficial)
+-[S2] Add isosurface rendering to Labels, https://github.com/napari/napari/pull/3006, fetched 2026-10-26 (unofficial)
+-[S3] caitlin-leonard/medviewer, https://github.com/caitlin-leonard/medviewer, fetched 2026-10-27 (unofficial)+[S2] Add isosurface rendering to Labels, https://github.com/napari/napari/pull/3006, fetched 2026-10-26 (unofficial)

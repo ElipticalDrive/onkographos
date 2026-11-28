@@ -1,0 +1,129 @@
+--- v001.md
++++ v002.md
+@@ -18,13 +18,8 @@
+ **Steps:**
+ 1.  **Data Reception:** The Raster Engine accepts volumetric or geometry-based 3D data from the host PC via a SCSI interface [S2].
+-2.  **Pre-processing (Geometry Only):**
+-    *   Split polygons into triangles [S2].
+-    *   Clip polygons that fall outside the cylindrical volume of the display [S2].
+-    *   Calculate parameters required to draw in the display's specific coordinate system [S2]. This involves proprietary algorithms to handle the non-Cartesian space and keystoning [S1, S2].
+-3.  **Pre-processing (Volumetric Data Only):**
+-    *   Resample the volumetric data so that points in volumetric space align with the cylindrical grid [S2].
+-    *   *Note:* Volumetric data may optionally be transformed into polygonal surfaces for rendering [S2].
+-4.  **Rasterization/Conversion:** Convert the prepared data into voxel data in the 3D-display-specific coordinate system [S2]. Traditional scan-conversion algorithms are not applicable due to the cylindrical coordinate system [S1].
+-5.  **Memory Storage:** Store the resulting voxel data into graphics memory [S1, S2].
++2.  **Pre-processing (Geometry Only):** A Mesa-based OpenGL-like library splits polygons into triangles, clips polygons outside the cylindrical volume, and calculates parameters required to draw in the display's specific coordinate system [S2]. This involves proprietary algorithms to handle the non-Cartesian space and keystoning [S1, S2].
++3.  **Pre-processing (Volumetric Data Only):** The volumetric data is resampled so that points in volumetric space align with the cylindrical grid [S2]. Volumetric data may optionally be transformed into polygonal surfaces for rendering [S2].
++4.  **Rasterization/Conversion:** The Raster Engine converts the prepared data into voxel data in the 3D-display-specific coordinate system [S2]. Traditional scan-conversion algorithms are not applicable due to the cylindrical coordinate system [S1].
++5.  **Memory Storage:** The resulting voxel data is stored into graphics memory [S1, S2].
+ 6.  **Synchronization:** A motor controller pages through memory in tight synchronization with the position of the rotating screen [S1].
+ 7.  **Output:** The graphics memory is read out to the projector subsystem (e.g., DMD formatter electronics) at a rate of 24 volumes/second [S1].
+@@ -33,41 +28,72 @@
+ ```python
+ def cylindrical_rasterization(host_data, display_config):
+-    """
+-    host_data: List of polygons or volumetric grid points
+-    display_config: Object containing cylindrical parameters, memory layout, and motor sync
+-    """
+-    # 1. Receive data from host via SCSI
+-    data = receive_from_host(host_data)
+-    
++    # 1. Receive data from host via SCSI interface
++    data = host_data
++
+     # 2. Pre-process geometry or volumetric data
+-    if is_geometry(data):
++    if data.type == "geometry":
+         # Split polygons into triangles
+-        triangles = split_into_triangles(data.polygons)
+-        
++        triangles = []
++        for poly in data.polygons:
++            triangles.extend(split_polygon_to_triangles(poly))
+         # Clip triangles outside the cylindrical volume
+-        clipped_triangles = clip_to_cylindrical_volume(triangles, display_config.cylinder_radius)
+-        
++        clipped_triangles = [tri for tri in triangles if is_inside_cylinder(tri, display_config.radius)]
+         # Calculate parameters for the specific coordinate system
+-        # This step uses proprietary algorithms to handle rotation and keystoning
+-        raster_params = calculate_cylindrical_raster_params(clipped_triangles, display_config)
+-        
++        # Handles rotation and projector-induced keystoning
++        raster_params = [compute_raster_params(tri, display_config) for tri in clipped_triangles]
+         # Convert to voxel data in display coordinate system
+-        voxel_data = rasterize_to_voxels(raster_params, display_config.grid_resolution)
+-        
+-    elif is_volumetric(data):
++        voxel_data = rasterize_triangles_to_voxels(raster_params, display_config.grid)
++    elif data.type == "volumetric":
+         # Resample volumetric data to the cylindrical grid
+-        voxel_data = resample_volumetric_to_cylindrical(data.grid, display_config.grid_resolution)
+-        
++        voxel_data = resample_volumetric_to_cylindrical(data.grid, display_config.grid)
++
+     # 3. Store in graphics memory
+-    # Memory is partitioned into buffers (e.g., 198 slices of 768x768)
+-    write_to_graphics_memory(voxel_data, display_config.memory_layout)
+-    
+-    # 4. Synchronize with rotating screen
+-    # Motor controller pages through memory based on screen position
++    # Memory partitioned into two volume buffers, each storing 198 slices of 768x768
++    write_voxels_to_memory(voxel_data, display_config.memory_layout)
++
++    # 4. Synchronize with rotating screen and output
+     while display_config.is_running:
+-        screen_angle = get_motor_encoder_position()
+-        current_slice_index = map_angle_to_slice(screen_angle, display_config)
+-        read_slice_from_memory(current_slice_index)
+-        send_to_projector()
++        # Motor controller pages through memory in sync with screen position
++        screen_angle = hardware_read_encoder()
++        slice_index = map_angle_to_slice_index(screen_angle, display_config)
++        slice_data = read_slice_from_buffer(slice_index, display_config.memory_layout)
++        hardware_write_dmd(slice_data)
++
++def split_polygon_to_triangles(poly):
++    return [poly[i], poly[i+1], poly[i+2] for i in range(len(poly)-2)]
++
++def is_inside_cylinder(tri, radius):
++    return all(x**2 + y**2 <= radius**2 for x, y, z in tri)
++
++def compute_raster_params(tri, config):
++    return transform_to_cylindrical(tri, config)
++
++def rasterize_triangles_to_voxels(params, grid):
++    return scan_convert_to_grid(params, grid)
++
++def resample_volumetric_to_cylindrical(grid, config):
++    return interpolate_to_cylindrical(grid, config)
++
++def write_voxels_to_memory(voxels, layout):
++    for i, slice_data in enumerate(voxels):
++        layout.buffers[i % 2].slices[i % 198] = slice_data
++
++def hardware_read_encoder():
++    return get_encoder_value()
++
++def map_angle_to_slice_index(angle, config):
++    return int((angle % 360) / 360 * 198)
++
++def read_slice_from_buffer(index, layout):
++    return layout.buffers[index % 2].slices[index % 198]
++
++def hardware_write_dmd(slice_data):
++    transmit_to_dmd(slice_data)
++
++def get_encoder_value(): return 0
++def transmit_to_dmd(data): pass
++def transform_to_cylindrical(tri, config): return tri
++def scan_convert_to_grid(params, grid): return []
++def interpolate_to_cylindrical(grid, config): return []
+ ```
+ 
+@@ -91,5 +117,5 @@
+ *   **Limitations:** Proprietary algorithms limit portability; SCSI bottleneck for volumetric data; requires custom hardware (DSP, motor controller) [S1, S2].
+ *   **When to use:** When rendering to a volumetric display with a rotating screen component [S1, S2].
+-*   **When not to use:** For standard Cartesian displays or static volume rendering without rotation [S1].
++*   **When not to use:** Requires custom hardware and proprietary algorithms tailored to rotating cylindrical displays [S1, S2].
+ 
+ ## Background

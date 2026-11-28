@@ -1,0 +1,140 @@
+--- v001.md
++++ v002.md
+@@ -32,40 +32,81 @@
+ **Pseudocode:**
+ ```python
+-def encoder_decoder_training_step(I_t, p_t, K, R_t, t_t, depth_t, s, theta_enc, theta_dec, m):
+-    """
+-    I_t: RGBD image tensor [H, W, 4]
+-    p_t: Relative pose [delta_x, delta_y, delta_alpha]
+-    K: Camera intrinsic matrix
+-    R_t, t_t: Camera extrinsic rotation and translation
+-    depth_t: Depth map [H, W]
+-    s: Grid scale for RNR-Map
+-    theta_enc: Encoder network parameters
+-    theta_dec: Decoder network parameters
+-    m: RNR-Map grid structure
+-    """
++def encoder_decoder_training_step(I_t, p_t, K, R_t, t_t, depth_t, s, theta_enc, theta_dec, m, query_pose, target_image, lr):
+     # Step 1: Encode image to latent features
+-    C_t = theta_enc(I_t) # Output shape: [H, W, D]
++    C_t = theta_enc(I_t)  # [H, W, D]
+     
+-    # Step 2: Register features into RNR-Map
+-    # Calculate 3D world positions for each pixel
+-    # q_xyz = inverse_projection(K, R_t, t_t, depth_t)
+-    # This step aggregates C_t into grid cells m
+-    # For each pixel (h,w) with feature c_h_w and world pos q_xyz:
+-    #   u = round(q_xyz.x / s)
+-    #   v = round(q_xyz.y / s)
+-    #   Add c_h_w to bucket X_(u,v)
+-    # m(u,v) = mean(X_(u,v))
++    # Step 2: Register (Embed) features into RNR-Map
++    # Compute 3D world positions for each pixel using inverse camera projection
++    q_xyz = inverse_projection(K, R_t, t_t, depth_t)  # [H, W, 3]
++    
++    # Aggregate features into grid cells according to formula (2)
+     m = register_features(C_t, q_xyz, s)
+     
+     # Step 3: Decode latent codes to render image at query pose
+-    # Sample m along rays defined by query pose
+-    rendered_image = theta_dec(m, query_pose)
++    rendered_image = theta_dec(m, query_pose)  # [H, W, 3]
+     
+-    # Step 4: Compute Loss and Update
+-    # Assuming target_image is available for supervised training
+-    loss = L1_loss(rendered_image, target_image)
+-    update_parameters(theta_enc, theta_dec, loss)
++    # Step 4: Compute Loss and Update parameters
++    loss = compute_loss(rendered_image, target_image)
++    theta_enc, theta_dec = apply_gradients(theta_enc, theta_dec, loss, lr)
+     
+     return rendered_image, m
++
++def inverse_projection(K, R, t, depth):
++    # Computes 3D world coordinates [H, W, 3] from depth and camera parameters
++    H, W = shape(depth)
++    # Create pixel grid coordinates
++    u_coords = [w for h in range(H) for w in range(W)]
++    v_coords = [h for h in range(H) for w in range(W)]
++    # Homogeneous pixel coordinates [H*W, 3]
++    pixel_coords = [[u, v, 1.0] for u, v in zip(u_coords, v_coords)]
++    # Inverse projection: X_cam = K^{-1} * [u, v, 1]^T * depth
++    K_inv = matrix_inverse(K)
++    cam_coords = []
++    for i in range(H * W):
++        p = pixel_coords[i]
++        d = depth[p[1]][p[0]]
++        cam_coords.append(vector_scale(matrix_vector_multiply(K_inv, p), d))
++    # Transform to world coordinates: X_world = R^{-1} * (X_cam - t)
++    R_inv = matrix_inverse(R)
++    world_coords = []
++    for i in range(H * W):
++        cam = cam_coords[i]
++        world_coords.append(vector_add(matrix_vector_multiply(R_inv, cam), vector_scale(t, -1.0)))
++    # Reshape to [H, W, 3]
++    return [[world_coords[h * W + w] for w in range(W)] for h in range(H)]
++
++def register_features(C_t, q_xyz, s):
++    # Aggregates features C_t into grid m based on world coordinates q_xyz
++    H, W, D = shape(C_t)
++    grid_buckets = {}
++    for h in range(H):
++        for w in range(W):
++            c = C_t[h][w]
++            qx, qy = q_xyz[h][w][0], q_xyz[h][w][1]
++            u = int(round(qx / s))
++            v = int(round(qy / s))
++            key = (u, v)
++            if key not in grid_buckets:
++                grid_buckets[key] = []
++            grid_buckets[key].append(c)
++    m = {}
++    for key, features in grid_buckets.items():
++        n = len(features)
++        if n > 0:
++            m[key] = vector_mean(features)
++        else:
++            m[key] = [0.0] * D
++    return m
++
++def compute_loss(rendered, target):
++    return mean(abs(rendered - target))
++
++def apply_gradients(theta_enc, theta_dec, loss, lr):
++    # Standard gradient descent update
++    grad_enc = gradient(loss, theta_enc)
++    grad_dec = gradient(loss, theta_dec)
++    theta_enc = theta_enc - lr * grad_enc
++    theta_dec = theta_dec - lr * grad_dec
++    return theta_enc, theta_dec
+ ```
+ 
+@@ -75,6 +116,6 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Empty Grid Cells:** If no features map to a grid cell $(u,v)$, $n(u,v)=0$. The formula assumes $n(u,v) > 0$ for the mean calculation [S1].
+-*   **Pose Accumulation:** The agent determines its absolute pose $p_t$ by cumulating relative pose differences $\Delta p_t$ from a start pose $p_0 = (0,0,0)$ [S1]. Errors in relative pose estimation can lead to misalignment in the RNR-Map.
++*   **Empty Grid Cells:** If no features map to a grid cell $(u,v)$, $n(u,v)=0$. The formula assumes $n(u,v) > 0$ for the mean calculation [S1]. The pseudocode handles this by initializing empty cells to zero vectors [G].
++*   **Pose Accumulation:** The agent determines its absolute pose $p_t$ by cumulating relative pose differences $\Delta p_t$ from a start pose $p_0 = (0,0,0)$ [S1]. Errors in relative pose estimation can lead to misalignment in the RNR-Map [S1].
+ 
+ ## Subtopics
+@@ -90,9 +131,12 @@
+ where $t \in (0, 1)$ is a mixing coefficient [S2, unofficial]. This method combines the accelerated training of Encode-Scene with the high-fidelity color output supervision of Decode-Scene [S2, unofficial].
+ 
++### Encoder Training via Synthetic Data
++A method for training an encoder to predict latent codes and canonical maps using data generated from an unconditional generator, avoiding the need for ground-truth 3D meshes or hand-modeled synthetic meshes required by NOCS [S3]. The steps are: 1. Sample a minibatch of priors $z \sim N(0, I)$. 2. Feed priors through a mapping network to obtain latent codes $w \in W$. 3. Train the network (e.g., SegFormer with a custom regression head) to predict the canonical map and latent code $w$ from the RGB image [S3]. A key pitfall in related methods like NOCS is the requirement for ground-truth 3D meshes or hand-modeled synthetic meshes representative of the training dataset, which are not available on real datasets [S3].
++
+ ## Operating characteristics
+ *   **Time Complexity:** The method is designed to be real-time capable, avoiding the significant time required for inference in other NeRF-based navigation methods that require rendering-based optimization [S1].
+ *   **Memory Complexity:** Depends on the size of the RNR-Map grid and the dimensionality of the latent codes $D$ [S1].
+ *   **Strengths:** Enables generalization to unseen environments using pretrained encoder and decoder [S1]. Real-time capability for visual navigation [S1].
+-*   **Limitations:** Autoencoding a 3D environment is not trivial compared to 2D images [S1]. Requires accurate pose estimation for registration [S1].
++*   **Limitations:** Autoencoding a 3D environment is not trivial compared to 2D images [S1]. Uses relative pose differences cumulated from a start pose to determine absolute pose for registration [S1].
+ 
+ ## Background
+@@ -101,3 +145,4 @@
+ ## Sources
+ [S1] Renderable Neural Radiance Map for Visual Navigation, https://doi.org/10.1109/cvpr52729.2023.00878, fetched 2026-10-26
+-[S2] Exploring 3D-aware Latent Spaces for Efficiently Learning Numerous Scenes, https://doi.org/10.48550/arXiv.2403.11678, fetched 2026-10-29 (unofficial)+[S2] Exploring 3D-aware Latent Spaces for Efficiently Learning Numerous Scenes, https://doi.org/10.48550/arXiv.2403.11678, fetched 2026-10-29 (unofficial)
++[S3] Shape, Pose, and Appearance from a Single Image via Bootstrapped Radiance Field Inversion, https://doi.org/10.1109/cvpr52729.2023.00427, fetched 2026-10-26

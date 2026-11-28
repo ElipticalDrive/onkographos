@@ -1,0 +1,125 @@
+--- v001.md
++++ v002.md
+@@ -4,89 +4,54 @@
+ 
+ ## Overview
+-AnySplat is a pose-free, feed-forward network that reconstructs a 3D Gaussian Splatting (3DGS) scene from uncalibrated image collections without requiring camera pose annotations [S1, unofficial]. It differs from sibling methods like [InstantSplat](6136-instantsplat.md) and [pixelSplat](6464-pixelsplat.md) by jointly predicting 3D Gaussian primitives and per-image intrinsics/extrinsics in a single forward pass, enabling zero-shot evaluation on casual dense or sparse multi-view captures [S1, unofficial].
++AnySplat is a pose-free, feed-forward network that reconstructs 3D Gaussian Splatting (3DGS) scenes from uncalibrated image collections without requiring camera pose annotations [S1, unofficial]. It differs from sibling methods like [InstantSplat](6136-instantsplat.md) and [pixelSplat](6464-pixelsplat.md) by handling arbitrary multi-view inputs (dense or sparse) in a single forward pass, yielding both scene primitives and per-image intrinsics/extrinsics simultaneously [S1, unofficial]. This enables zero-shot evaluation on casual captures where pose data is unavailable, matching the quality of pose-aware baselines while maintaining real-time rendering latency [S1, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-- **Input:** A set of $N$ uncalibrated images $\{I_i\}_{i=1}^N$ with no associated camera poses or intrinsics.
+-- **Output:** A set of 3D Gaussian primitives $\mathcal{G} = \{G_j\}_{j=1}^M$ and per-image camera parameters (intrinsics $K_i$ and extrinsics $R_i, t_i$) for each input image $i$.
++**Inputs:** A set of $N$ uncalibrated images $\{I_1, \dots, I_N\}$ with unknown intrinsics and extrinsics.
++**Outputs:** A set of 3D Gaussian primitives $\mathcal{G} = \{g_i\}$, where each $g_i$ is defined by position $\mu_i$, covariance $\Sigma_i$, opacity $\alpha_i$, and spherical harmonics coefficients $\mathbf{c}_i$; plus estimated camera parameters for each input image.
+ 
+ **Data Structures:**
+-The 3D Gaussian primitives follow the standard 3DGS layout [S1, unofficial]:
+-- Position $\mu_j \in \mathbb{R}^3$
+-- Covariance $\Sigma_j \in \mathbb{R}^{3 \times 3}$ (parameterized as rotation $R_j \in SO(3)$ and scale $s_j \in \mathbb{R}^3$)
+-- Opacity $\alpha_j \in [0, 1]$
+-- Spherical Harmonics coefficients $c_{j, l}$ for color/diffuse appearance.
++The network outputs a tensor of Gaussian parameters. The exact layout depends on the specific implementation of the feed-forward backbone (e.g., CNN or Transformer), but typically involves a dense or sparse voxel/grid representation that is decoded into individual Gaussians. The covariance $\Sigma_i$ is usually parameterized via a rotation matrix $\mathbf{R}_i$ and a scaling vector $\mathbf{s}_i$ such that $\Sigma_i = \mathbf{R}_i \mathbf{S}_i \mathbf{S}_i^T \mathbf{R}_i^T$, where $\mathbf{S}_i = \text{diag}(\mathbf{s}_i)$ [G].
+ 
+ **Steps:**
+-1. **Geometry Prior Extraction:** Extract sparse geometric priors from the input images using a pre-trained geometry network (e.g., MASt3R or VGGT) to establish initial correspondences and depth estimates [S1, unofficial].
+-2. **Feed-Forward Network:** Pass the image collection through a shared encoder-decoder network. The network outputs:
+-   - Gaussian parameters $\mathcal{G}$ in a global coordinate frame.
+-   - Per-image camera parameters $\{K_i, R_i, t_i\}_{i=1}^N$.
+-3. **Differentiable Rendering:** Render the predicted Gaussians using the predicted camera parameters to generate synthetic views for each input image. The rendering process is differentiable with respect to $\mathcal{G}$ and camera parameters [S1, 6136-instantsplat.md, 6464-pixelsplat.md, unofficial].
+-4. **Loss Computation:** Compute the loss between rendered views and input images. The loss typically combines photometric reconstruction error ($\mathcal{L}_{L1}$ or $\mathcal{L}_{MSE}$) with perceptual metrics ($\mathcal{L}_{MS-SSIM}$ or $\mathcal{L}_{LPIPS}$) [6136-instantsplat.md][6464-pixelsplat.md].
+-5. **Optimization:** Update the network weights via backpropagation. Since the method is feed-forward, the network weights are trained once on a dataset of image collections with ground-truth poses (or pseudo-labels from geometry priors) [S1, unofficial].
+-
+-**Pseudocode:**
+-```python
+-def anysplat_forward(images):
+-    # images: list of N images
+-    # Step 1: Extract geometry priors (e.g., sparse depth/points)
+-    # This step uses a pre-trained model like MASt3R/VGGT
+-    geometry_priors = extract_geometry_priors(images)
+-    
+-    # Step 2: Feed-forward network
+-    # The network takes images and optionally geometry priors as input
+-    # Outputs: Gaussians G, and per-image poses K, R, t
+-    G, K_list, R_list, t_list = network(images, geometry_priors)
+-    
+-    # Step 3: Render for each image
+-    rendered_images = []
+-    for i in range(len(images)):
+-        # Render using Gaussians G and camera i's parameters
+-        rendered = render_gaussians(G, K_list[i], R_list[i], t_list[i])
+-        rendered_images.append(rendered)
+-        
+-    return G, K_list, R_list, t_list, rendered_images
+-
+-def train_any_splat(dataset):
+-    # dataset: list of (images, ground_truth_poses_or_pseudo_labels)
+-    for images, labels in dataset:
+-        G, K_list, R_list, t_list, rendered = anysplat_forward(images)
+-        
+-        # Compute loss
+-        loss = 0
+-        for i in range(len(images)):
+-            # Photometric loss
+-            loss += L1_loss(rendered[i], images[i])
+-            # Perceptual loss
+-            loss += MS_SSIM_loss(rendered[i], images[i])
+-            
+-        # Backpropagate to update network weights
+-        loss.backward()
+-        optimizer.step()
+-```
++1. **Feature Extraction:** Extract multi-scale features from each input image using a shared encoder backbone (e.g., ResNet or ViT) [S1, unofficial].
++2. **Geometric Prior Integration:** Utilize geometry priors (such as those from MASt3R or VGGT) to establish sparse correspondences or depth estimates, which guide the initial placement of Gaussians [S1, unofficial].
++3. **Joint Prediction:** A single forward pass through the network predicts the Gaussian parameters ($\mu, \Sigma, \alpha, \mathbf{c}$) and the camera poses (intrinsics $K$, extrinsics $R, t$) for all $N$ images simultaneously [S1, unofficial].
++4. **Differentiable Rendering:** Render the predicted Gaussians into each input view using standard differentiable rasterization [S1, 6136-instantsplat.md, 6464-pixelsplat.md, unofficial].
++5. **Loss Computation:** Compute the loss between rendered and input images. The loss typically combines photometric error ($\mathcal{L}_{L1}$ or $\mathcal{L}_{MSE}$) and perceptual metrics ($\mathcal{L}_{MS-SSIM}$ or $\mathcal{L}_{LPIPS}$) [6136-instantsplat.md][6464-pixelsplat.md].
++6. **Optimization:** Update network weights to minimize the loss. Since poses are predicted, no external pose optimization is required [S1, unofficial].
+ 
+ **Parameters:**
+-- **Network Architecture:** Not specified in sources. Typically involves a transformer or CNN-based encoder-decoder [S1, unofficial].
+-- **Loss Weights:** Not specified in sources. Typical values for $\mathcal{L}_{L1}$ and $\mathcal{L}_{MS-SSIM}$ weights are not given [S1, unofficial].
++- Number of Gaussians: Not given in the sources.
++- Training time: Seconds [S1, unofficial].
+ 
+-**Edge Cases and Pitfalls:**
+-- **Precision:** The accuracy of geometry priors (MASt3R/VGGT) directly impacts the quality of the initial Gaussian placement and pose estimation [S1, unofficial].
+-- **Boundaries:** The method assumes the input images cover the scene adequately. Sparse views may lead to ambiguities in pose and geometry [S1, unofficial].
++**Edge Cases:**
++- **Degenerate Input:** If images have insufficient overlap, geometric priors may fail to establish correspondences, leading to poor pose estimation [S1, unofficial].
++- **Precision:** The accuracy of predicted intrinsics/extrinsics directly impacts rendering quality; errors accumulate in the covariance calculation [G].
+ 
+ ## Subtopics
+ 
+ ### [FreeSplat](15163-freesplat.md)
+-A feed-forward framework that reconstructs geometrically consistent global 3D Gaussian Splatting from long sparse image sequences to support free-view synthesis across wide view ranges, eliminating redundancy in overlapping regions.
++A feed-forward framework for long, sparse sequences using adaptive cost volumes and Pixel-aligned Triplet Fusion. It handles wide baselines better than [pixelSplat](52-pixelsplat.md) and [MVSplat](53-mvsplat.md) by using pure CNN backbones.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Training time is not explicitly given, but inference is a single forward pass, enabling real-time rendering latency [S1, unofficial].
+-- **Memory Complexity:** Depends on the number of Gaussians $M$. A vanilla 3DGS scene averages 1–2 M Gaussians and 200–800 MB on disk [S1, unofficial].
+-- **Performance:** Matches pose-aware baselines and surpasses prior pose-free methods (NoPoSplat-class) in zero-shot evaluations [S1, unofficial].
+-- **Strengths:** No pose annotations required; works with casual dense or sparse multi-view captures; real-time rendering [S1, unofficial].
+-- **Limitations:** Relies on the quality of geometry priors; performance may degrade with very sparse or ambiguous views [S1, unofficial].
++**Time and Memory Complexity:**
++- Training: Seconds for casual captures [S1, unofficial].
++- Rendering: Real-time latency [S1, unofficial].
++- Memory: A vanilla 3DGS scene averages 1–2 M Gaussians and 200–800 MB on disk; compression is critical for mobile/web/streaming [S1, unofficial].
++
++**Strengths and Limitations:**
++- **Strengths:** No pose annotations required; scales to dense or sparse multi-view captures; matches pose-aware baselines in quality [S1, unofficial].
++- **Limitations:** Performance depends on the quality of geometry priors (MASt3R/VGGT); may struggle with very sparse views compared to methods with explicit pose optimization [S1, unofficial].
++
++**When to Use:**
++- Use when camera poses are unknown or unavailable.
++- Use for casual, unstructured image collections.
++
++**When Not to Use:**
++- Use [Joint Pose Optimization](6888-joint-pose-optimization.md) if high-precision poses are available and can be optimized.
++- Use [Loss Scheduling for Candidate Head](13095-loss-scheduling-for-candidate-head.md) if specific candidate head strategies are needed for pose refinement.
+ 
+ ## Background
+-AnySplat was introduced as a pose-free feed-forward network for 3D Gaussian Splatting [S1, unofficial]. It builds on the principles of differentiable rendering and feed-forward reconstruction methods like [InstantSplat](6136-instantsplat.md) and [pixelSplat](6464-pixelsplat.md) [S1, 6136-instantsplat.md, 6464-pixelsplat.md, unofficial]. The method aims to simplify the reconstruction pipeline by eliminating the need for camera pose estimation as a separate step [S1, unofficial].
++AnySplat was introduced as a pose-free feed-forward network that yields 3D Gaussian primitives plus per-image intrinsics and extrinsics in a single pass [S1, unofficial]. It addresses the limitation of prior feed-forward methods (like [pixelSplat](52-pixelsplat.md) and MVSplat) which were limited to narrow-range interpolation or required pose inputs [S1, unofficial]. It builds on the principles of differentiable rendering and loss functions combining photometric and perceptual metrics [6136-instantsplat.md][6464-pixelsplat.md].
+ 
+ ## Sources

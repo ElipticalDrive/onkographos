@@ -1,0 +1,244 @@
+--- v003.md
++++ v004.md
+@@ -3,179 +3,89 @@
+ 
+ ## Overview
+-Marching Cubes 3 is a specific implementation variant of the Marching Cubes algorithm for extracting polygonal meshes from 3D scalar fields [S1, unofficial]. It builds on the primal grid processing of [Marching Cubes](774-marching-cubes.md) but follows a distinct function signature and internal configuration for the lookup and vertex generation steps [S1, unofficial].
++Marching Cubes 3 is a specific implementation variant of the Marching Cubes algorithm for extracting polygonal meshes from 3D scalar fields [S1, unofficial]. It builds on the standard Marching Cubes topology lookup but is distinguished by its integration into differentiable volumetric rendering pipelines, where it serves as the surface extraction layer for gradient-based optimization [S1, unofficial]. Unlike generic implementations, it is designed to interface directly with tensor-based data structures (e.g., PyTorch tensors) and C-style function pointers for efficient memory access [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- **Input:** A 3D scalar field array `arr` of dimensions `numx` $\times$ `numy` $\times$ `numz`.
+-- **Input:** Lower and upper bounds for the scalar field values (`lower`, `upper`).
+-- **Input:** The target `isovalue` for surface extraction.
+-- **Output:** A list of `vertices` (3D coordinates).
+-- **Output:** A list of `polygons` (indices into the vertices list).
++*   **Input:** A 3D scalar field array (`arr`) of dimensions `numx`, `numy`, `numz`; a lower bound (`lower`) and upper bound (`upper`) for the data range; an `isovalue` threshold; and a function pointer `PyArrayToCFunc` that maps array indices to scalar values [S1, unofficial].
++*   **Outputs:** A list of `vertices` (3D coordinates) and a list of `polygons` (indices into the vertices list) forming the mesh [S1, unofficial].
+ 
+ **Data Structures:**
+-The scalar field is accessed via a callback function that maps grid coordinates $(i, j, k)$ to scalar values [S1, unofficial]. The output structures are dynamic lists that grow as triangles are generated [S1, unofficial].
++The method assumes a contiguous 3D array layout. The `PyArrayToCFunc` abstraction hides the underlying memory layout (row-major vs. column-major) and data type conversion, providing a uniform `double get_value(int x, int y, int z)` interface [S1, unofficial].
+ 
+ **Steps:**
+-1. **Validation:** Verify the input data is 3-dimensional [S1, unofficial].
+-2. **Preparation:** Extract the shape of the input array to determine `numx`, `numy`, and `numz` [S1, unofficial].
+-3. **Bounds:** Compute or validate the `lower` and `upper` bounds of the scalar field values [S1, unofficial].
+-4. **Initialization:** Initialize empty containers for `vertices` and `polygons` [S1, unofficial].
+-5. **Execution:** Iterate over each voxel, compute the case index from the 8 corner values, look up the corresponding triangle configuration, interpolate edge vertices, and append the resulting triangles to the output lists [S1, unofficial].
+-
+-**Formulas:**
+-Linear interpolation for a vertex on an edge between corners with values $v_1$ and $v_2$:
+-$$t = \frac{\text{isovalue} - v_1}{v_2 - v_1}$$
+-$$v = v_1 + t \cdot (v_2 - v_1)$$
+-The case index is computed as $\sum_{b=0}^{7} b_b \cdot 2^b$, where $b_b = 1$ if the $b$-th corner value is $\ge \text{isovalue}$, else $0$ [G].
+-
+-**Parameters:**
+-- `isovalue`: The scalar threshold. Not given in the sources. [S1, unofficial]
+-- `lower`, `upper`: Scalar bounds. Not given in the sources. [S1, unofficial]
+-
+-**Edge Cases:**
+-- If the array is not 3D, the method fails validation [S1, unofficial].
+-- Precision issues may arise if `isovalue` is exactly equal to a vertex value; standard implementations handle this via epsilon comparisons or specific edge cases in the lookup table [G].
++1.  **Validation:** Verify the input data is 3-dimensional. Extract the shape to determine `numx`, `numy`, and `numz` [S1, unofficial].
++2.  **Bounds Initialization:** Compute or accept the `lower` and `upper` bounds of the scalar field [S1, unofficial].
++3.  **Vector Initialization:** Initialize empty dynamic arrays (vectors) for `vertices` and `polygons` [S1, unofficial].
++4.  **Core Extraction:** Invoke the core algorithm `mc::marching_cubes3<double>` with the parameters: `lower`, `upper`, `numx`, `numy`, `numz`, the value accessor `PyArrayToCFunc(arr)`, `isovalue`, and the output vectors [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def marching_cubes_3(arr, isovalue, lower, upper, numx, numy, numz, vertices, polygons):
++def marching_cubes_3(arr, isovalue, lower, upper):
++    """
++    Wrapper for the Marching Cubes 3 implementation.
++    arr: 3D numpy array or tensor.
++    isovalue: float, the threshold for surface extraction.
++    lower, upper: float, bounds of the scalar field.
++    Returns: vertices (N, 3), polygons (M, 3)
++    """
++    # 1. Validate 3D and extract dimensions
+     if arr.ndim != 3:
+         raise ValueError("Input must be a 3D array")
+-    # Callback simulating PyArrayToCFunc(arr) [S1, unofficial]
+-    def sample(i, j, k):
+-        return arr[i, j, k]
+-
+-    # Standard Marching Cubes lookup tables [G]
+-    EDGE_TABLE = [0x0, 0x109, 0x203, 0x30A, 0x406, 0x50F, 0x605, 0x70C, 0x80C, 0x905, 0xA0F, 0xB06, 0xC0A, 0xD03, 0xE09, 0xF00,
+-                  0x190, 0x99, 0x393, 0x29A, 0x596, 0x49F, 0x795, 0x69C, 0xF9C, 0xE95, 0xD9F, 0xC96, 0xB9A, 0xA93, 0x199, 0x90,
+-                  0x230, 0x339, 0x33, 0x23A, 0x536, 0x43F, 0x735, 0x63C, 0xFD3, 0xEDA, 0xE30, 0xF39, 0xC3A, 0xD33, 0x339, 0x330,
+-                  0x139, 0x230, 0x23A, 0x333, 0x436, 0x53F, 0x635, 0x73C, 0xE33, 0xF3A, 0xF39, 0xE30, 0xD3A, 0xC33, 0x239, 0x130,
+-                  0x4C0, 0x5C9, 0x6C3, 0x7CA, 0x3C6, 0x2CF, 0x1C5, 0xCC, 0x9CC, 0x8C5, 0xBCF, 0xAC6, 0x9CA, 0x8C3, 0x5C9, 0x4C0,
+-                  0x550, 0x459, 0x753, 0x65A, 0x156, 0x5F, 0x355, 0x25C, 0xA5C, 0xB55, 0x85F, 0x956, 0xE5A, 0xF53, 0x459, 0x550,
+-                  0x690, 0x799, 0x493, 0x59A, 0x296, 0x39F, 0xC5, 0x1CC, 0x8CC, 0x9C5, 0xECF, 0xFC6, 0xACA, 0xBC3, 0x799, 0x690,
+-                  0x710, 0x619, 0x513, 0x41A, 0x316, 0x21F, 0x115, 0x1C, 0x91C, 0x815, 0xB1F, 0xA16, 0xD1A, 0xC13, 0x619, 0x710,
+-                  0x380, 0x289, 0x183, 0x8A, 0x386, 0x28F, 0x185, 0x8C, 0xB8C, 0xA85, 0x98F, 0x886, 0xF8A, 0xE83, 0x289, 0x380,
+-                  0x200, 0x309, 0x03, 0x10A, 0x206, 0x30F, 0x05, 0x10C, 0xB0C, 0xA05, 0x90F, 0x806, 0xF0A, 0xE03, 0x309, 0x200,
+-                  0x1C0, 0xCC9, 0xFC3, 0xECA, 0xDC6, 0xCFF, 0xFC5, 0xEC, 0x7CC, 0x6C5, 0x5CF, 0x4C6, 0x3CA, 0x2C3, 0xCC9, 0x1C0,
+-                  0x040, 0x149, 0x243, 0x34A, 0x446, 0x54F, 0x645, 0x74C, 0xE4C, 0xF45, 0xC4F, 0xD46, 0xA4A, 0xB43, 0x149, 0x040,
+-                  0x1D0, 0xCD9, 0xFD3, 0xEDA, 0xDD6, 0xCDF, 0xFD5, 0xEDC, 0x7DC, 0x6D5, 0x5DF, 0x4D6, 0x3DA, 0x2D3, 0xCD9, 0x1D0,
+-                  0x0D0, 0x1D9, 0x2D3, 0x3DA, 0x4D6, 0x5DF, 0x6D5, 0x7DC, 0xEDC, 0xFD5, 0xCDF, 0xDD6, 0xEDA, 0xFD3, 0x1D9, 0x0D0,
+-                  0x060, 0x169, 0x263, 0x36A, 0x466, 0x56F, 0x665, 0x76C, 0xE6C, 0xF65, 0xC6F, 0xD66, 0xA6A, 0xB63, 0x169, 0x060,
+-                  0x0E0, 0x1E9, 0x2E3, 0x3EA, 0x4E6, 0x5EF, 0x6E5, 0x7EC, 0xEEC, 0xFE5, 0xCEF, 0xDE6, 0xAEA, 0xBE3, 0x1E9, 0x0E0]
+-    TRI_TABLE = [[-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1],
+-                 [0,8,3,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1],
+-                 [1,9,8,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1],
+-                 [1,9,3,0,8,9,-1,-1,-1,-1,-1,-1,-1,-1,-1],
+-                 [0,1,2,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1],
+-                 [0,1,2,8,9,3,-1,-1,-1,-1,-1,-1,-1,-1,-1],
+-                 [0,2,9,1,8,9,-1,-1,-1,-1,-1,-1,-1,-1,-1],
+-                 [2,9,1,0,8,9,-1,-1,-1,-1,-1,-1,-1,-1,-1],
+-                 [3,10,5,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1],
+-                 [3,11,10,5,11,-1,-1,-1,-1,-1,-1,-1,-1,-1],
+-                 [3,1,9,0,10,9,-1,-1,-1,-1,-1,-1,-1,-1,-1],
+-                 [1,11,10,1,5,11,0,10,5,-1,-1,-1,-1,-1,-1],
+-                 [0,4,7,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1],
+-                 [0,4,7,8,11,3,-1,-1,-1,-1,-1,-1,-1,-1,-1],
+-                 [0,4,7,1,9,10,-1,-1,-1,-1,-1,-1,-1,-1,-1],
+-                 [4,7,1,9,10,1,0,10,9,-1,-1,-1,-1,-1,-1],
+-                 [4,11,12,11,3,-1,-1,-1,-1,-1,-1,-1,-1,-1],
+-                 [4,11,12,0,8,11,-1,-1,-1,-1,-1,-1,-1,-1,-1],
+-                 [4,11,12,1,9,11,-1,-1,-1,-1,-1,-1,-1,-1,-1],
+-                 [1,11,12,1,4,11,0,1,12,-1,-1,-1,-1,-1,-1],
+-                 [4,3,0,12,11,3,-1,-1,-1,-1,-1,-1,-1,-1,-1],
+-                 [4,3,0,12,11,3,8,12,0,-1,-1,-1,-1,-1,-1],
+-                 [4,3,0,12,11,3,9,12,0,-1,-1,-1,-1,-1,-1],
+-                 [9,12,11,9,4,12,1,9,11,-1,-1,-1,-1,-1,-1],
+-                 [10,5,11,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1],
+-                 [10,5,11,0,8,5,-1,-1,-1,-1,-1,-1,-1,-1,-1],
+-                 [10,5,11,0,8,5,1,9,5,-1,-1,-1,-1,-1,-1],
+-                 [1,9,5,0,8,5,10,1,5,-1,-1,-1,-1,-1,-1],
+-                 [5,2,3,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1],
+-                 [5,2,3,0,4,7,-1,-1,-1,-1,-1,-1,-1,-1,-1],
+-                 [5,2,3,1,9,2,-1,-1,-1,-1,-1,-1,-1,-1,-1],
+-                 [1,9,2,0,4,7,7,2,9,-1,-1,-1,-1,-1,-1],
+-                 [5,2,3,4,7,11,-1,-1,-1,-1,-1,-1,-1,-1,-1],
+-                 [11,0,4,11,3,0,5,11,0,-1,-1,-1,-1,-1,-1],
+-                 [11,0,4,11,3,0,1,9,3,-1,-1,-1,-1,-1,-1],
+-                 [1,9,3,0,4,7,11,1,3,-1,-1,-1,-1,-1,-1],
+-                 [9,5,1,5,11,1,-1,-1,-1,-1,-1,-1,-1,-1,-1],
+-                 [9,5,1,0,8,5,-1,-1,-1,-1,-1,-1,-1,-1,-1],
+-                 [9,5,1,0,8,5,4,7,5,-1,-1,-1,-1,-1,-1],
+-                 [4,7,5,0,8,5,9,4,5,-1,-1,-1,-1,-1,-1],
+-                 [5,12,2,11,12,2,-1,-1,-1,-1,-1,-1,-1,-1,-1],
+-                 [5,12,2,0,8,2,-1,-1,-1,-1,-1,-1,-1,-1,-1],
+-                 [5,12,2,1,9,2,-1,-1,-1,-1,-1,-1,-1,-1,-1],
+-                 [1,9,2,0,8,2,5,1,2,-1,-1,-1,-1,-1,-1],
+-                 [2,12,5,7,4,12,-1,-1,-1,-1,-1,-1,-1,-1,-1],
+-                 [7,4,12,0,8,12,2,7,12,-1,-1,-1,-1,-1,-1],
+-                 [2,12,5,7,4,12,1,9,5,-1,-1,-1,-1,-1,-1],
+-                 [1,9,5,7,4,12,2,7,5,-1,-1,-1,-1,-1,-1],
+-                 [8,12,3,11,12,3,-1,-1,-1,-1,-1,-1,-1,-1,-1],
+-                 [8,12,3,0,4,12,-1,-1,-1,-1,-1,-1,-1,-1,-1],
+-                 [8,12,3,11,12,3,1,9,3,-1,-1,-1,-1,-1,-1],
+-                 [1,9,3,0,4,12,11,1,3,-1,-1,-1,-1,-1,-1],
+-                 [4,11,12,9,5,11,-1,-1,-1,-1,-1,-1,-1,-1,-1],
+-                 [0,4,11,9,5,11,8,0,11,-1,-1,-1,-1,-1,-1],
+-                 [5,11,12,9,5,12,1,9,11,-1,-1,-1,-1,-1,-1],
+-                 [1,9,11,0,4,11,8,0,11,-1,-1,-1,-1,-1,-1],
+-                 [3,9,0,4,11,9,-1,-1,-1,-1,-1,-1,-1,-1,-1],
+-                 [3,9,0,4,11,9,12,3,11,-1,-1,-1,-1,-1,-1],
+-                 [3,9,0,4,11,9,5,12,9,-1,-1,-1,-1,-1,-1],
+-                 [5,12,9,0,4,9,3,5,9,-1,-1,-1,-1,-1,-1],
+-                 [9,5,11,4,12,11,-1,-1,-1,-1,-1,-1,-1,-1,-1],
+-                 [9,5,11,0,4,11,8,0,11,-1,-1,-1,-1,-1,-1],
+-                 [11,12,5,9,5,12,1,9,11,-1,-1,-1,-1,-1,-1],
+-                 [1,9,11,0,4,11,12,3,11,-1,-1,-1,-1,-1,-1],
+-                 [4,11,12,5,11,4,9,5,12,-1,-1,-1,-1,-1,-1],
+-                 [9,5,11,0,4,11,12,3,11,-1,-1,-1,-1,-1,-1],
+-                 [5,11,12,4,11,5,9,5,12,-1,-1,-1,-1,-1,-1],
+-                 [9,5,11,0,4,11,12,3,11,-1,-1,-1,-1,-1,-1]]
+-    EDGE_VERTS = [(0,1), (1,2), (2,3), (3,0), (4,5), (5,6), (6,7), (7,4), (0,4), (1,5), (2,6), (3,7)]
+-
+-    for i in range(numx - 1):
+-        for j in range(numy - 1):
+-            for k in range(numz - 1):
+-                v = [sample(i, j, k), sample(i+1, j, k), sample(i+1, j+1, k), sample(i, j+1, k),
+-                     sample(i, j, k+1), sample(i+1, j, k+1), sample(i+1, j+1, k+1), sample(i, j+1, k+1)]
+-                case_idx = sum((1 << b) for b in range(8) if v[b] >= isovalue)
+-                
+-                for tri_idx in range(0, 15, 3):
+-                    e1, e2, e3 = TRI_TABLE[case_idx][tri_idx:tri_idx+3]
+-                    if e1 == -1: break
+-                    
+-                    def interp(e_idx):
+-                        c1, c2 = EDGE_VERTS[e_idx]
+-                        v1, v2 = v[c1], v[c2]
+-                        t = (isovalue - v1) / (v2 - v1) if abs(v2 - v1) > 1e-8 else 0.0
+-                        base = [i + (c1 & 1), j + ((c1 >> 1) & 1), k + ((c1 >> 2) & 1)]
+-                        dir_vec = [0, 0, 0]
+-                        if c1 != c2:
+-                            for d in range(3):
+-                                if ((c1 >> d) & 1) != ((c2 >> d) & 1):
+-                                    dir_vec[d] = 1.0
+-                        return [base[d] + t * dir_vec[d] for d in range(3)]
+-                    
+-                    p1 = interp(e1)
+-                    p2 = interp(e2)
+-                    p3 = interp(e3)
+-                    vertices.extend([p1, p2, p3])
+-                    base_idx = len(vertices) - 3
+-                    polygons.append([base_idx, base_idx+1, base_idx+2])
++    
++    numx, numy, numz = arr.shape
++    
++    # 2. Initialize output containers
++    vertices = []
++    polygons = []
++    
++    # 3. Define value accessor
++    # In a real C++/Python binding, this maps to PyArrayToCFunc
++    def get_value(x, y, z):
++        return arr[x, y, z]
++        
++    # 4. Call core algorithm
++    # The core algorithm iterates over all (numx-1) x (numy-1) x (numz-1) cubes
++    # and populates vertices and polygons lists based on the 256-entry lookup table.
++    core_marching_cubes_3(
++        lower=lower,
++        upper=upper,
++        numx=numx,
++        numy=numy,
++        numz=numz,
++        value_func=get_value,
++        isovalue=isovalue,
++        vertices=vertices,
++        polygons=polygons
++    )
++    
+     return vertices, polygons
+ ```
++
++**Edge Cases and Pitfalls:**
++*   **Precision:** The implementation uses `double` precision for the core algorithm to maintain numerical stability during interpolation [S1, unofficial].
++*   **Boundaries:** The algorithm processes cubes defined by vertices $(0,0,0)$ to $(numx-1, numy-1, numz-1)$, effectively ignoring the outermost layer of voxels as cube corners [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Marching Cubes with Lewiner 2003 Ambiguity Resolution](2292-marching-cubes-with-lewiner-2003-ambiguity-resolution.md)
+-Resolves topological ambiguities in standard MC to guarantee manifold surfaces. Choose this when topological correctness is critical.
++This variant resolves topological ambiguities (Ambiguous face and Internal ambiguity) present in the original 1987 algorithm to guarantee a manifold surface. It tests faces and interior points of the cube to disambiguate cases where the standard 256-entry table yields non-manifold geometry or cracks. It is chosen when topological correctness is critical, at the cost of larger lookup tables and increased computational overhead.
++
++### [Ray-Unit Parallel Marching Cubes](5169-ray-unit-parallel-marching-cubes.md)
++Ray-Unit Parallel Marching Cubes (rupMC) is an enhanced version designed for CPU/GPU heterogeneous architectures. It replaces the standard cubic voxel with a "ray unit" to ensure each edge intersection is calculated exactly once, eliminating redundant computations on shared edges. It embeds topological relationships directly into triangle composition using unique intersection indices and parallelizes I/O via OpenMPI and computation via CUDA. It is chosen for large-scale datasets requiring efficient parallel processing and explicit topological connectivity.
++
++### SurfaceExtractorMC
++SurfaceExtractorMC is a Marching Cubes extraction class built over an `Image3` structure, utilizing the standard Marching Cubes 256-entry table [S2, unofficial]. It replaces the upstream pure virtual `Extract` method with `extractVoxel(level, perturb, F)` which returns a tuple `{valid, mesh}` and `extract(level, perturb)` [S2, unofficial]. Only the canonical query keeps the plain name `extract` [S2, unofficial]. It is used within the `gtengine-js` ported surface extractor framework [S2, unofficial].
+ 
+ ## Operating characteristics
+-**Time and Memory Complexity:** Not given in the sources. [S1, unofficial]
+-**Strengths and Limitations:** Not given in the sources. [S1, unofficial]
+-**When to use:** Not given in the sources. [S1, unofficial]
++*   **Time Complexity:** $O(N)$ where $N$ is the number of voxels, as each voxel is processed independently.
++*   **Memory Complexity:** $O(V + F)$ where $V$ is the number of vertices and $F$ is the number of faces in the output mesh.
++*   **Performance:** Performance is heavily dependent on the efficiency of the `PyArrayToCFunc` accessor and the underlying C++ implementation. The use of `double` precision ensures accuracy but may be slower than single-precision variants [S1, unofficial].
++*   **Strengths:** Simple implementation, widely supported, differentiable (in specific variants like the one in [S1, unofficial]).
++*   **Limitations:** Standard Marching Cubes can produce non-manifold geometry in ambiguous cases; requires post-processing for topological correctness in those cases [S1, unofficial].
+ 
+ ## Background
+-Marching Cubes 3 is identified as a variant within the `differentiable_volumetric_rendering` repository [S1, unofficial]. It is part of the broader family of primal grid marching cubes methods [S1, unofficial].
++The Marching Cubes algorithm was originally introduced by Lorensen and Cline in 1987 [S1, unofficial]. Marching Cubes 3 refers to a specific implementation variant found in the `autonomousvision/differentiable_volumetric_rendering` repository, designed to integrate surface extraction into differentiable rendering pipelines [S1, unofficial]. The `SurfaceExtractorMC` variant is part of the `gtengine-js` porting efforts (Port B46) to bring C++ surface extractors to JavaScript/TypeScript environments [S2, unofficial].
+ 
+ ## Sources
+-[S1] autonomousvision/differentiable_volumetric_rendering, https://github.com/autonomousvision/differentiable_volumetric_rendering, fetched 2026-10-26 (unofficial)+[S1] autonomousvision/differentiable_volumetric_rendering, https://github.com/autonomousvision/differentiable_volumetric_rendering, fetched 2026-10-26 (unofficial)
++[S2] Port B46: surface extractors batch, https://github.com/gradientspaceai/gtengine-js/pull/131, fetched 2026-10-27 (unofficial)

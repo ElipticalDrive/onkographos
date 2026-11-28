@@ -1,0 +1,135 @@
+--- v003.md
++++ v004.md
+@@ -8,6 +8,6 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A volume dataset, a 3D transfer function defined as a separable product of a 2D function (data value, gradient magnitude) and a 1D function (second derivative), and a normal map for shading.
+-*   **Output:** A 2D image with color and alpha values computed via the transfer function and shading model.
++*   **Input:** A volume dataset, a 3D transfer function defined as a separable product of a 2D function (data value, gradient magnitude) and a 1D function (second derivative), and a normal map for shading [S1, S2][S3, unofficial].
++*   **Output:** A 2D image with color and alpha values computed via the transfer function and shading model [S1, S2].
+ 
+ **Data Structures and Layout:**
+@@ -33,71 +33,56 @@
+ **Pseudocode:**
+ ```python
+-# Pseudocode for the GeForce3 Volume Rendering Pipeline fragment shader logic
+-# Assumes hardware handles multi-texturing unit 0-3 and register combiners
++# GeForce3 Volume Rendering Pipeline Fragment Shader Logic
++# Texture units are bound to: NORMAL_TEXTURE, VG_DEPENDENT_TEXTURE, H_DEPENDENT_TEXTURE
+ 
+-def fragment_shader(v, g, h, normal_n):
+-    """
+-    v: scalar data value
+-    g: gradient magnitude
+-    h: second derivative
+-    normal_n: 3D normal vector (normalized)
+-    """
++def fragment_shader(v, g, h, normal_n, light_directions):
++    # 1. Quantize normal for shading lookup
++    n = normal_n / norm(normal_n)
++    # [G] 16-bit quantization: first 8 bits -> R, second 8 bits -> G
++    r = int(clamp(n.x, 0.0, 1.0) * 255)
++    g_ch = int(clamp(n.y, 0.0, 1.0) * 255)
++    normal_uv = (r / 255.0, g_ch / 255.0)
+     
+-    # Step 1: Quantize and encode normal for shading texture lookup
+-    # 16-bit quantization: 8 bits for first component, 8 bits for second
+-    # [G] Assuming standard normalization to [0, 1] before quantization
+-    n_quantized = quantize_16bit(normal_n)
+-    normal_tex_coord = encode_normal_to_2d(n_quantized)
++    # 2. Sample Normal Texture
++    shading_coeffs = hardware_texture_fetch(NORMAL_TEXTURE, normal_uv)
+     
+-    # Step 2: Sample Shading Normal Texture
+-    # [G] Lighting calculation depends on the specific shading model (e.g., Phong)
+-    # implemented via Register Combiners or pixel texture method
+-    shading_coefficients = sample_texture(NORMAL_TEXTURE, normal_tex_coord)
+-    color_shaded = compute_shading(shading_coefficients, light_directions)
++    # 3. Compute shading via Register Combiners or pixel texture method
++    # [G] Standard lighting composition from quantized normal coefficients
++    shaded_color = compute_shading(shading_coeffs, light_directions)
+     
+-    # Step 3: Sample 2D Transfer Function (Value & Gradient)
+-    vg_tex_coord = encode_vg(v, g)
+-    vg_result = sample_texture(VG_DEPENDENT_TEXTURE, vg_tex_coord)
+-    color_vg = vg_result.color
+-    alpha_vg = vg_result.alpha
++    # 4. Sample 2D Transfer Function (Value & Gradient)
++    vg_uv = (v / v_max, g / g_max)
++    vg_sample = hardware_texture_fetch(VG_DEPENDENT_TEXTURE, vg_uv)
++    color_vg = vg_sample.rgb
++    alpha_vg = vg_sample.a
+     
+-    # Step 4: Sample 1D Transfer Function (Second Derivative)
+-    h_tex_coord = encode_h(h)
+-    h_result = sample_texture(H_DEPENDENT_TEXTURE, h_tex_coord)
+-    alpha_h = h_result.alpha
++    # 5. Sample 1D Transfer Function (Second Derivative)
++    # [G] 8-bit resolution along the second derivative axis
++    h_uv = (h / h_max, 0.5)
++    h_sample = hardware_texture_fetch(H_DEPENDENT_TEXTURE, h_uv)
++    alpha_h = h_sample.a
+     
+-    # Step 5: Compose Transfer Function
+-    # Alpha is multiplied (required)
++    # 6. Compose Transfer Function
++    # Multiply VG&H Alpha (required)
+     final_alpha = alpha_vg * alpha_h
+-    
+-    # Color is typically not blended along the second derivative axis
+-    # [G] If color blending is required, it would be: final_color = color_vg * h_result.color
+-    # But sources state Blend VG&H Color stage is usually not executed
++    # Blend VG&H Color (usually skipped)
+     final_color = color_vg
+     
+-    # Step 6: Apply Shading
+-    # [G] Register combiners may blend the transfer function color with shading
+-    # The exact register combiner program is hardware-specific, but logically:
+-    final_color = apply_shading(final_color, color_shaded)
++    # 7. Apply Shading
++    final_color = apply_shading(final_color, shaded_color)
+     
+     return final_color, final_alpha
+ 
+-def quantize_16bit(normal):
+-    # Encode normal into 16-bit scheme
+-    # First 8 bits as Red, second 8 bits as Green
+-    # [G] Implementation detail for encoding 3D normal into 2D texture coordinates
+-    pass
++def hardware_texture_fetch(texture_unit, uv):
++    # [G] Simulates hardware nearest-neighbor texture fetch
++    return {"rgb": (0.5, 0.5, 0.5), "a": 1.0}
+ 
+-def encode_vg(v, g):
+-    # Map v and g to 2D texture coordinates
+-    pass
++def compute_shading(coeffs, light_dirs):
++    # [G] Standard lighting model composition
++    return coeffs["rgb"] * light_dirs[0]
+ 
+-def encode_h(h):
+-    # Map h to 1D texture coordinate (x-axis of 2D texture)
+-    pass
+-
+-def encode_normal_to_2d(n_quantized):
+-    # Map 16-bit quantized normal to 2D texture coordinates
+-    pass
++def apply_shading(tf_color, shaded_color):
++    # [G] Register combiner multiplication of TF output and shading
++    return tf_color * shaded_color
+ ```
+ 
+@@ -111,5 +96,5 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
++*   **Time Complexity:** Not given in the sources [S1, S2].
+ *   **Memory Complexity:** Eliminates the need for a scratch buffer, reducing memory overhead compared to previous hardware methods [S1, S2].
+ *   **Measured Performance:** Significantly improves rendering performance by avoiding expensive copy operations required by the SGI Octane2 method [S1, S2].
+@@ -121,5 +106,5 @@
+ 
+ ## Background
+-The NVIDIA GeForce3 Volume Rendering Pipeline was introduced in the context of interactive volume rendering using multi-dimensional transfer functions. It was developed to address the performance limitations of earlier hardware implementations, specifically the SGI Octane2 method which relied on scratch buffers and expensive copy operations [S1, S2]. The method leverages the NVIDIA Register Combiner extension and the GeForce3's support for per-fragment dependent texture reads and 4-way multi-texturing [S1, S2]. It was presented in papers by Kindlmann et al. around 2001 [S1, S2][S3, unofficial].
++The NVIDIA GeForce3 Volume Rendering Pipeline was introduced in the context of interactive volume rendering using multi-dimensional transfer functions [S1, S2][S3, unofficial]. It was developed to address the performance limitations of earlier hardware implementations, specifically the SGI Octane2 method which relied on scratch buffers and expensive copy operations [S1, S2]. The method leverages the NVIDIA Register Combiner extension and the GeForce3's support for per-fragment dependent texture reads and 4-way multi-texturing [S1, S2]. It was presented in papers by Kindlmann et al. around 2001 [S1, S2][S3, unofficial].
+ 
+ ## Sources

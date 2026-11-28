@@ -1,0 +1,104 @@
+# HG-Draine Blend Mie Approximation
+Also called: Fog Phase Function, HG+Draine
+
+## Overview
+The HG-Draine Blend Mie Approximation is a parametric phase function model designed to approximate Mie scattering for water droplets in fog and clouds [S1, unofficial]. It solves the problem of accurately simulating light transport in participating media without the computational cost of rigorous Lorenz-Mie theory or the lack of analytic sampling in previous approximations like Cornette-Shanks [S1, unofficial]. It sets itself apart by providing a fully analytic evaluation and importance sampling method, fitting 95% of the energy of the forward Mie scattering lobe using a linear combination of a Henyey-Greenstein (HG) phase function and a Draine phase function [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: Mean droplet diameter $d$ in micrometers ($\mu m$). The model is fitted for $5 < d < 50$ [S1, unofficial].
+- Output: The phase function value $\phi_{\text{fog}}(\theta)$ for a given scattering angle $\theta$, and a sampled outgoing direction cosine $\mu = \cos\theta$ [S1, unofficial].
+
+**Data Structures:**
+No persistent data structures are required; parameters are computed on the fly from $d$ [G].
+
+**Numbered Steps:**
+1. Compute the four blend parameters $g_{HG}$, $g_D$, $\alpha$, and $w_D$ from the input diameter $d$ using the empirical mappings.
+2. Evaluate the phase function by computing the weighted sum of the HG and Draine components, or sample a direction by drawing a uniform random variate $u \in [0, 1]$ [G].
+3. If $u < w_D$, sample from the Draine phase function $\phi_{\alpha, g_{D}}$; otherwise, sample from the Henyey-Greenstein phase function $\phi_{0, g_{HG}}$ [G].
+4. Sampling from the HG component uses standard inverse CDF methods [Parent]. Sampling from the Draine component requires solving a quartic equation derived from its CDF [S1, unofficial]. The source notes: "Upon a substitution of $u = (1 + g^2 - g^2)/(2g)$ to remove the square root, solving for random variate $\mu$ is then the solution of a quartic equation" [S1, unofficial]. Note that $(1+g^2-g^2)$ simplifies to $1$, making the substitution constant; this is likely a typo in the source text, and the exact quartic coefficients are provided only in the supplemental material [S1, unofficial].
+
+**Formulas:**
+The combined phase function is defined as [S1, unofficial]:
+$$ \phi_{\text{fog}}(\theta) = (1 - w_{\text{D}}) \cdot \phi_{0, g_{HG}}(\theta) + w_{\text{D}} \cdot \phi_{\alpha, g_{D}}(\theta) $$
+
+Where $\phi_{0, g_{HG}}$ is the standard Henyey-Greenstein phase function [S1, unofficial]:
+$$ \phi_{0, g_{HG}}(\theta) = \frac{1}{4\pi} \frac{1-g_{HG}^2}{(1+g_{HG}^2-2g_{HG}\cos\theta)^{3/2}} $$
+
+And $\phi_{\alpha, g_{D}}$ is the Draine phase function [S1, unofficial]:
+$$ \phi_{\alpha, g_{D}}(\theta) = \frac{1}{4\pi} \frac{1-g_{D}^2}{(1+g_{D}^2-2g_{D}\cos\theta)^{3/2}} \frac{1+\alpha\cos^2\theta}{1+\alpha(1+2g_{D}^2)/3} $$
+
+The parameters are mapped from the diameter $d$ using the following empirical fits [S1, unofficial]:
+$$ g_{HG}(d) = e^{-\frac{0.0990567}{d-1.67154}} $$
+$$ g_D(d) = e^{-\frac{2.20679}{d+3.91029} - 0.428934} $$
+$$ \alpha(d) = e^{3.62489 - \frac{8.29288}{d+5.52825}} $$
+$$ w_D(d) = e^{-\frac{0.599085}{d-0.641583} - 0.665888} $$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import random
+
+def compute_params(d):
+    """Computes the four parameters for the HG-Draine blend from diameter d."""
+    g_HG = math.exp(-0.0990567 / (d - 1.67154))
+    g_D = math.exp(-2.20679 / (d + 3.91029) - 0.428934)
+    alpha = math.exp(3.62489 - 8.29288 / (d + 5.52825))
+    w_D = math.exp(-0.599085 / (d - 0.641583) - 0.665888)
+    return g_HG, g_D, alpha, w_D
+
+def sample_hg(g):
+    """Standard inverse CDF sampling for Henyey-Greenstein phase function."""
+    if abs(g) < 1e-6:
+        return 2.0 * random.random() - 1.0
+    u = random.random()
+    return (1.0 + g * g - (1.0 - g * g) / (1.0 - g + 2.0 * g * u)) / (2.0 * g)
+
+def sample_draine(g, alpha):
+    # The sources do not provide the quartic equation coefficients or the exact substitution.
+    # A complete implementation would derive the CDF F(mu), set F(mu) = u, and solve for mu.
+    raise NotImplementedError("Quartic solver coefficients not provided in source text [S1, unofficial]")
+
+def sample_blend(d):
+    """Samples a scattering direction cosine from the HG-Draine blend."""
+    g_HG, g_D, alpha, w_D = compute_params(d)
+    u = random.random()
+    if u < w_D:
+        return sample_draine(g_D, alpha)
+    return sample_hg(g_HG)
+
+def evaluate_blend(d, theta):
+    """Evaluates the phase function value for a given scattering angle theta."""
+    g_HG, g_D, alpha, w_D = compute_params(d)
+    ct = math.cos(theta)
+    hg_val = (1.0 - g_HG**2) / ((1.0 + g_HG**2 - 2.0 * g_HG * ct) ** 1.5)
+    d_base = 1.0 + g_D**2 - 2.0 * g_D * ct
+    d_val = ((1.0 - g_D**2) / (d_base ** 1.5)) * ((1.0 + alpha * ct**2) / (1.0 + alpha * (1.0 + 2.0 * g_D**2) / 3.0))
+    return (1.0 - w_D) * hg_val + w_D * d_val
+```
+
+**Edge Cases and Pitfalls:**
+- The model fails to produce weak back-scattering peaks such as fogbow and glory features [S1, unofficial]. These are noted as not observable in most scenes, so this is an acceptable trade-off for performance [S1, unofficial].
+- The parameter mappings are fitted for $5 < d < 50$ $\mu m$ [S1, unofficial]. Using $d$ outside this range may produce invalid parameters (e.g., division by zero in $w_D$ if $d \approx 0.641583$) [S1, unofficial].
+
+## Subtopics
+
+### [Geometrical Optics Approximation (GOA)](10022-geometrical-optics-approximation-goa.md)
+Geometrical Optics Approximation (GOA) is a method for calculating light scattering by spherical particles by superposing classical diffraction, geometrical reflection, and transmission effects. It is used when the particle size is large relative to the wavelength of light, providing a computationally efficient alternative to rigorous Lorenz-Mie theory. Unlike Lorenz-Mie theory, whose complexity scales linearly with the size parameter, GOA maintains a runtime independent of the particle radius, making it suitable for large particles ($r \ge 2 \mu m$) where high accuracy is still required.
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ per evaluation and sampling step due to closed-form expressions [G].
+- **Memory Complexity:** $O(1)$ with no lookup tables or precomputed data structures required [G].
+- **Measured Performance:** The model is designed for real-time applications, providing fully analytic evaluation and sampling, which is essential for real-time path tracing [S1, unofficial]. It outperforms previous work like Cornette-Shanks and Draine in terms of fitting accuracy for the forward lobe while maintaining analytic tractability [S1, unofficial].
+- **Strengths:** Fully analytic, importance sampling available, accurate fit for forward Mie scattering (95% of energy), single parameter input ($d$) [S1, unofficial].
+- **Limitations:** Does not model back-scattering features (fogbow, glory). Accuracy depends on the empirical fits for $d$ [S1, unofficial].
+- **When to use:** Real-time rendering of fog and clouds where Mie scattering approximation is needed and back-scattering features are not critical [S1, unofficial].
+- **When not to use:** Scientific visualization requiring accurate back-scattering peaks or rigorous Mie theory [S1, unofficial].
+
+## Background
+The HG-Draine Blend Mie Approximation was presented at SIGGRAPH '23 Talks by NVIDIA researchers [S1, unofficial]. It was developed to address the limitations of existing analytic phase functions like Cornette-Shanks and Draine, which lack analytic importance sampling and have significant errors when approximating Mie scattering [S1, unofficial]. The model combines the Henyey-Greenstein phase function with the Draine phase function, fitting the parameters to water droplet diameters to approximate Mie scattering for fog and clouds [S1, unofficial].
+
+## Sources
+[S1] PDF An Approximate Mie Scattering Function for Fog and Cloud Rendering - NVIDIA, https://research.nvidia.com/labs/rtr/approximate-mie/publications/approximate-mie.pdf, fetched 2026-10-27 (unofficial)

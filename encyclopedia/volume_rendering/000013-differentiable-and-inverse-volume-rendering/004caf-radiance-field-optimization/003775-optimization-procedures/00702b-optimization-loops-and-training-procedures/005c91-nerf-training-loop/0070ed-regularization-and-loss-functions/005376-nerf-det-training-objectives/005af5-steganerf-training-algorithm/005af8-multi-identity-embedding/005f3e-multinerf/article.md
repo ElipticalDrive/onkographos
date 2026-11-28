@@ -1,0 +1,250 @@
+# MultiNeRF
+
+Also called: MultiNeRF-Noised
+
+## Overview
+MultiNeRF is a 3D watermarking method that embeds multiple uniquely keyed watermarks within images rendered by a single Neural Radiance Field (NeRF) model, specifically extending the TensoRF architecture [S1]. It solves the problem of scalable, robust digital watermarking in 3D scenes by allowing distinct messages to be identified by unique integer IDs at rendering time, without requiring model retraining for each new watermark [S1]. Unlike prior approaches that embed only a single watermark, MultiNeRF accommodates multiple distinct messages as an additional model input, maintaining high visual quality by isolating watermark features in a dedicated grid rather than entangling them with scene appearance [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** 3D position $x$, view direction $d$, and a watermark integer ID $I(n)$ corresponding to a distinct message $M(n)$.
+*   **Outputs:** Rendered image color $C$ and decoded message $m'_n$ (during training).
+
+**Data Structures:**
+The model extends TensoRF's decomposition into three explicit 3D grids [S1]:
+1.  **Geometry Grid ($A_\sigma$):** Stores density features. Layout: $R^{I \times J \times K}$.
+2.  **Appearance Grid ($A_c$):** Stores appearance features. Layout: $R^{I \times J \times K \times P}$.
+3.  **Watermark Grid ($A_w$):** Stores watermark-specific features. Layout: $R^{I \times J \times K \times C_w}$, where $C_w$ is the number of watermark feature channels. The spatial resolution ($I \times J \times K$) is identical to the geometry and appearance grids [S1].
+
+**Parameters:**
+*   **Embedding Dimension:** The learnable embedding layer maps integer IDs to a 16-dimensional message vector $e_n$ [S1].
+*   **Grid Resolution:** $I \times J \times K$ for all three grids [S1].
+
+**Numbered Steps:**
+
+1.  **Input Embedding:** Map the integer ID $I(n)$ to a 16-dimensional message vector $e_n$ using a learnable small Multi-Layer Perceptron (MLP) $Emb()$ [S1]:
+    $$e_n = Emb(I(n))$$
+    [S1]
+
+2.  **Modulation Parameter Generation:** Pass the embedding $e_n$ through a learnable linear layer $Mod()$ to output scale $\gamma_n$ and shift $\beta_n$ parameters [S1]:
+    $$[\gamma_n, \beta_n] = Mod(e_n)$$
+    [S1]
+
+3.  **Feature Sampling:** Sample the watermark features $w(x)$ from the watermark grid $A_w$ at position $x$. In TensoRF, this is typically a tensor decomposition, but functionally $w(x)$ represents the feature vector retrieved from $A_w$ at $x$ [S1]:
+    $$w(x) = A_w(x)$$
+    [S1]
+
+4.  **Feature Modulation:** Apply the Hadamard product to scale and shift the sampled watermark features $w(x)$ to produce modulated features $w'(x)$ specific to ID $I(n)$ [S1]:
+    $$w'(x) = \gamma_n \odot w(x) + \beta_n$$
+    where $\odot$ is the element-wise (Hadamard) product [S1].
+
+5.  **Color Decoding:** Pass the appearance grid features $G_c(x)$ (sampled from $A_c$), the modulated watermark features $w'(x)$, and the view direction $d$ to the color decoding function $S$ (an MLP) to compute the final watermark color $\tilde{c}(x)$ [S1]:
+    $$\tilde{c}(x) = S(G_c(x), w'(x), d)$$
+    [S1]
+
+6.  **Volume Rendering:** Perform differentiable volume rendering using the computed density $\sigma$ (from $A_\sigma$) and color $\tilde{c}(x)$ along rays. For a ray passing through the scene, sampling $Q$ points $x_q$, the final pixel color $C$ is computed as [S1]:
+    $$C = \sum_{q=1}^{Q} \tau_q (1 - \exp(-\sigma_q \Delta_q)) \tilde{c}_q$$
+    where $\sigma_q$ and $\tilde{c}_q$ are the density and color of the sampled point $x_q$, $\Delta_q$ is the step size along the ray, and $\tau_q$ is the transmittance [S1]:
+    $$\tau_q = \exp \left( -\sum_{p=1}^{q-1} \sigma_p \Delta_p \right)$$
+    [S1]
+
+7.  **Training Augmentation (Differentiable):** To promote robustness, apply differentiable noise sources and image augmentations to the fully rendered image $\tilde{I}$ before passing it to the watermark decoder. The set of augmentations $\mathcal{A}$ includes brightness, contrast, color jiggle, Gaussian blur, Gaussian noise, hue, posterize, RGB shift, saturation, median blur, box blur, motion blur, sharpness, and differentiable JPEG compression [S1]. A random pair of augmentations is applied [S1]:
+    $$\hat{I} = \mathcal{A}(\tilde{I})$$
+    [S1]
+
+8.  **Watermark Extraction (Training Phase 1):**
+    *   Freeze the watermark decoder $D$.
+    *   Generate a random watermark ID $I(n)$ with ground truth message $m_n$.
+    *   Render full-resolution image $I$.
+    *   Apply a level 2 Discrete Wavelet Transform (DWT) decomposition to $I$.
+    *   Use the LL2 sub-band (denoted $I_{LL2}$) as it retains the majority of energy and broad structural features [S1].
+    *   Pass $I_{LL2}$ to decoder $D$ to obtain decoded message $m'_n$.
+    *   Calculate Binary Cross-Entropy (BCE) loss between $m_n$ and $m'_n$ [S1]:
+        $$L_{secret} = BCE(m_n, m'_n)$$
+        [S1]
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class MultiNeRF:
+    def __init__(self, grid_res, appearance_channels, watermark_channels):
+        """
+        Initialize MultiNeRF extending TensoRF.
+        :param grid_res: Tuple (I, J, K) for grid dimensions.
+        :param appearance_channels: P, number of appearance feature channels.
+        :param watermark_channels: C_w, number of watermark feature channels.
+        """
+        super().__init__()
+        # TensoRF Grids
+        self.A_sigma = nn.Parameter(torch.randn(grid_res)) # Geometry grid
+        self.A_c = nn.Parameter(torch.randn(grid_res + (appearance_channels,))) # Appearance grid
+        self.A_w = nn.Parameter(torch.randn(grid_res + (watermark_channels,))) # Watermark grid
+        
+        # Embedding Layer: Maps ID to 16-dim vector
+        self.emb_dim = 16
+        self.Emb = nn.Sequential(
+            nn.Linear(1, 32),
+            nn.ReLU(),
+            nn.Linear(32, self.emb_dim)
+        )
+        
+        # Modulation Layer: Linear layer to produce scale and shift
+        self.Mod = nn.Linear(self.emb_dim, 2 * watermark_channels)
+        
+        # Color Decoder MLP (S)
+        # Input: Appearance features + Modulated Watermark features + View direction
+        # Note: TensoRF's S MLP structure is simplified here for clarity
+        self.S = nn.Sequential(
+            nn.Linear(appearance_channels + watermark_channels + 3, 128),
+            nn.ReLU(),
+            nn.Linear(128, 3) # Output RGB
+        )
+        
+        # Watermark Decoder D
+        self.Decoder = nn.Sequential(
+            nn.Conv2d(3, 64, 3, padding=1),
+            nn.ReLU(),
+            nn.Flatten(),
+            nn.Linear(64 * grid_res[0] * grid_res[1], 256),
+            nn.ReLU(),
+            nn.Linear(256, 1) # Output probability for binary message
+        )
+
+    def sample_grid(self, grid, coords):
+        """
+        Sample from a 3D grid using trilinear interpolation.
+        :param grid: Tensor of shape (I, J, K, ...) or (I, J, K)
+        :param coords: Tensor of shape (..., 3) with values in [0, 1]
+        :return: Sampled features
+        """
+        # Normalize coords to [-1, 1] for grid_sample
+        coords_norm = 2.0 * coords - 1.0
+        # Add batch and channel dims if necessary for grid_sample
+        # Assuming grid is (I, J, K, C) or (I, J, K)
+        if grid.dim() == 4:
+            # grid_sample expects (N, C, H, W) for 2D or (N, C, D, H, W) for 3D
+            # Here we assume a simplified sampling or use torch.nn.functional.grid_sample
+            # For 3D, we might need to permute or use a specific 3D interpolation function
+            # This is a placeholder for the actual tensor decomposition sampling logic of TensoRF
+            pass 
+        # [G] In a real implementation, this would use the specific tensor decomposition 
+        # reconstruction logic of TensoRF (e.g., CP or VM decomposition) to retrieve 
+        # features at continuous coordinates. Here we assume a direct grid lookup 
+        # for conceptual clarity, but TensoRF uses factorized grids.
+        # For the purpose of this article, we assume `sample_grid` returns the 
+        # feature vector at `coords` from the grid.
+        return F.grid_sample(grid.unsqueeze(0).unsqueeze(0), coords_norm.unsqueeze(0).unsqueeze(0), mode='bilinear', align_corners=True).squeeze()
+
+    def forward(self, x, d, id_n):
+        """
+        Render a pixel with watermark embedding.
+        :param x: 3D position (..., 3)
+        :param d: View direction (..., 3)
+        :param id_n: Integer ID for watermark
+        :return: Rendered color, modulated features (for debugging/training)
+        """
+        # 1. Input Embedding
+        # id_n is an integer, convert to tensor
+        id_tensor = torch.tensor([id_n], dtype=torch.float32).view(1, 1)
+        e_n = self.Emb(id_tensor) # (1, 16)
+        
+        # 2. Modulation Parameters
+        gamma_beta = self.Mod(e_n) # (1, 2 * C_w)
+        gamma_n = gamma_beta[:, :self.A_w.shape[-1]] # (1, C_w)
+        beta_n = gamma_beta[:, self.A_w.shape[-1]:] # (1, C_w)
+        
+        # 3. Feature Sampling
+        # Sample from grids at position x
+        # Note: In TensoRF, x is used to index into the factorized grids.
+        # Here we simulate the feature retrieval.
+        w_x = self.sample_grid(self.A_w, x) # (..., C_w)
+        G_c_x = self.sample_grid(self.A_c, x) # (..., P)
+        
+        # 4. Feature Modulation
+        # w'(x) = gamma_n * w(x) + beta_n
+        # Broadcasting gamma_n and beta_n to match w_x dimensions
+        w_prime_x = gamma_n * w_x + beta_n
+        
+        # 5. Color Decoding
+        # Concatenate appearance, modulated watermark, and view direction
+        # d needs to be broadcasted or sampled if it varies per ray
+        # Assuming d is aligned with x for a single ray
+        input_features = torch.cat([G_c_x, w_prime_x, d], dim=-1)
+        c_tilde = self.S(input_features) # (..., 3)
+        
+        # 6. Volume Rendering (Simplified for single point)
+        # In full rendering, this integrates along the ray.
+        # Here we return the color contribution for the point.
+        sigma = self.sample_grid(self.A_sigma, x) # (..., 1)
+        # Transmittance and integration would happen in a ray marching loop
+        # For this function, we return the color and features for extraction
+        return c_tilde, w_prime_x
+
+    def train_step(self, x, d, id_n, ground_truth_message):
+        """
+        Perform one training step.
+        """
+        # Render image (simplified to single pixel for logic)
+        color, _ = self.forward(x, d, id_n)
+        
+        # 7. Augmentation
+        # Apply random augmentations to the rendered image
+        # [G] Implementing full differentiable augmentations requires specific libraries.
+        # We assume a function `apply_augmentations` that returns the augmented image.
+        augmented_image = apply_augmentations(color)
+        
+        # 8. Watermark Extraction
+        # Apply DWT level 2 and take LL2 sub-band
+        # [G] DWT implementation is assumed.
+        ll2_band = get_ll2_subband(augmented_image)
+        
+        # Decode message
+        decoded_message = self.Decoder(ll2_band)
+        
+        # Calculate BCE loss
+        loss = F.binary_cross_entropy(decoded_message, ground_truth_message)
+        
+        return loss
+
+def apply_augmentations(image):
+    """
+    Apply differentiable augmentations.
+    """
+    # [G] This is a placeholder for the specific augmentation pipeline.
+    # It should include brightness, contrast, blur, noise, JPEG, etc.
+    return image
+
+def get_ll2_subband(image):
+    """
+    Apply level 2 DWT and return LL2 sub-band.
+    """
+    # [G] This is a placeholder for the DWT implementation.
+    return image
+```
+
+**Edge Cases and Pitfalls:**
+*   **Entanglement:** Directly embedding the watermark into the existing appearance grid $G_c$ risks entangling watermark features with scene color, potentially degrading both capacity and quality. This is why a dedicated grid $G_w$ is used [S1].
+*   **Precision:** The use of differentiable augmentations and DWT requires careful handling of numerical precision to ensure the gradient flow remains stable during training [S1].
+*   **Boundary Conditions:** The grid sampling must handle coordinates outside the valid range $[0, 1]$ appropriately, typically by clamping or using periodic boundary conditions depending on the TensoRF implementation [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Training time is increased due to the additional grid $A_w$, the modulation network, and the differentiable augmentation pipeline. Rendering time is slightly increased due to the additional feature sampling and modulation operations [S1].
+*   **Memory Complexity:** Memory usage increases by the size of the watermark grid $A_w$, which has the same spatial resolution as the geometry and appearance grids [S1].
+*   **Measured Performance:** MultiNeRF maintains high visual quality while embedding multiple watermarks [S1]. It is robust against various image attacks due to the differentiable augmentation layer [S1].
+*   **Scaling:** The method scales to multiple watermarks by simply adding more IDs, as the modulation mechanism allows for independent activation of watermark features [S1].
+*   **Strengths:** High capacity for multiple watermarks, no need for model retraining for new watermarks, robustness to image attacks [S1].
+*   **Limitations:** Requires training with a dedicated watermark grid and decoder, which adds complexity to the training pipeline [S1].
+*   **When to use:** When multiple distinct watermarks need to be embedded in a single NeRF model for different users or contexts [S1].
+*   **When not to use:** When only a single watermark is needed, or when computational resources are severely limited [S1].
+
+## Background
+MultiNeRF was introduced in the paper "MultiNeRF: Multiple Watermark Embedding for Neural Radiance Fields" [S1]. It builds on the TensoRF architecture, which decomposes a scene into geometry and appearance grids [S1]. The method was developed to address the limitations of prior single-watermark embedding approaches, which were vulnerable to entanglement and lacked scalability [S1]. The use of FiLM-based modulation allows for conditional activation of watermarks based on input identifiers [S1].
+
+## Sources
+[S1] MultiNeRF: Multiple Watermark Embedding for Neural Radiance Fields, https://doi.org/10.1109/iccvw69036.2025.00163, fetched 2026-10-26

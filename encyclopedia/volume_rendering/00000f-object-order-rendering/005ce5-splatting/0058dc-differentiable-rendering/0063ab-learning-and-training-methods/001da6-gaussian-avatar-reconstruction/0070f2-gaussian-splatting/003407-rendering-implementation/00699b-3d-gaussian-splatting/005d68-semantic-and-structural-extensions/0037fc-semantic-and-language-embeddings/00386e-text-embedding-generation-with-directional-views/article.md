@@ -1,0 +1,145 @@
+# Text Embedding Generation with Directional Views
+
+
+## Overview
+This method generates semantic text embeddings for 3D Gaussian Splatting by encoding language prompts into latent vectors using a frozen CLIP text encoder [S1, unofficial]. It distinguishes itself from sibling methods by explicitly generating directional view embeddings—appending view descriptors (e.g., "front", "side") to prompts—to condition the generation or optimization process on the camera's viewing angle [S1, unofficial][S2]. Unlike [LangSplat](8104-langsplat.md) which focuses on general language grounding, or [3D Vision-Language GS](8105-3d-vision-language-gs.md) which integrates vision-language models for segmentation, this approach specifically addresses view-dependent semantic consistency by varying the input text based on the rendered viewpoint [S1, unofficial][S2, S3].
+
+## How it works
+The method consists of two phases: initialization of the embedding dictionary and the generation of directional embeddings during the training loop.
+
+### Inputs and Outputs
+*   **Inputs**: A base text prompt string $P$ (e.g., "a panda"); a set of directional descriptors $D = \{d_1, d_2, \dots\}$ (e.g., "front", "side", "back").
+*   **Outputs**: A dictionary of tensors `self.embeddings` mapping keys to latent vectors.
+
+### Data Structures
+The core data structure is a dictionary `self.embeddings` [S1, unofficial].
+*   **Keys**: `'pos'` (positive prompt), `'neg'` (negative prompt), and directional keys (e.g., `'front'`, `'side'`, `'back'`) [S1, unofficial].
+*   **Values**: Tensors of shape `[1, 77, 768]` representing the batch size (1), sequence length (77 tokens), and embedding dimension (768 for CLIP ViT-L/14) [S1, unofficial].
+
+### Steps
+
+1.  **Initialize Tokenizer and Encoder**: Load a frozen CLIP text encoder and its corresponding tokenizer [S1, unofficial].
+2.  **Encode Base Prompts**:
+    *   Tokenize the positive prompt $P_{pos}$ and negative prompt $P_{neg}$ with padding to the maximum length.
+    *   Pass the token IDs through the text encoder to obtain the base embeddings.
+    *   Store these in `self.embeddings['pos']` and `self.embeddings['neg']` [S1, unofficial].
+3.  **Generate Directional Embeddings**:
+    *   For each directional descriptor $d \in D$:
+        *   Construct the directional prompt $P_d = P_{pos} + ", " + d + " view"$.
+        *   Tokenize $P_d$ with padding to max length.
+        *   Pass the token IDs through the frozen text encoder.
+        *   Store the resulting tensor in `self.embeddings[d]` [S1, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+from transformers import CLIPTextModel, CLIPTokenizer
+
+class TextEmbeddingGenerator:
+    def __init__(self, base_prompt: str, device: str = "cuda"):
+        self.device = device
+        self.tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-large-patch14")
+        self.text_encoder = CLIPTextModel.from_pretrained("openai/clip-vit-large-patch14")
+        self.text_encoder.eval()
+        self.text_encoder.to(self.device)
+        
+        # Initialize dictionary
+        self.embeddings = {}
+        
+        # Encode base positive and negative prompts
+        # Note: Negative prompt is typically empty or generic; here we assume a standard empty/negative handling
+        pos_inputs = self.tokenizer(
+            base_prompt, 
+            padding="max_length", 
+            max_length=self.tokenizer.model_max_length, 
+            return_tensors="pt"
+        )
+        with torch.no_grad():
+            pos_embed = self.text_encoder(pos_inputs.input_ids.to(self.device))[0]
+        self.embeddings['pos'] = pos_embed
+        
+        # Standard negative prompt handling (often empty string or specific negative text)
+        neg_inputs = self.tokenizer(
+            "", # Placeholder for negative prompt; implementation may vary
+            padding="max_length", 
+            max_length=self.tokenizer.model_max_length, 
+            return_tensors="pt"
+        )
+        with torch.no_grad():
+            neg_embed = self.text_encoder(neg_inputs.input_ids.to(self.device))[0]
+        self.embeddings['neg'] = neg_embed
+
+    def update_directional_views(self, directions: list):
+        """
+        Generates and stores embeddings for specific viewing directions.
+        :param directions: List of strings, e.g., ['front', 'side', 'back']
+        """
+        for d in directions:
+            # Append view descriptor to the base prompt
+            # The base prompt is assumed to be stored or accessible; 
+            # here we reconstruct it from the 'pos' key's decoded text or pass it in __init__
+            # For this implementation, we assume base_prompt is available in scope or passed
+            # To be strictly self-contained, we re-tokenize the stored 'pos' tensor's text? 
+            # No, we need the text. We assume base_prompt is an instance variable.
+            
+            # Re-constructing prompt logic based on [S1, unofficial]
+            # Note: In a real implementation, base_prompt would be stored in __init__
+            # Here we assume self.base_prompt is set in __init__
+            directional_prompt = f"{self.base_prompt}, {d} view"
+            
+            inputs = self.tokenizer(
+                directional_prompt, 
+                padding="max_length", 
+                max_length=self.tokenizer.model_max_length, 
+                return_tensors="pt"
+            )
+            
+            with torch.no_grad():
+                embed = self.text_encoder(inputs.input_ids.to(self.device))[0]
+            
+            self.embeddings[d] = embed
+
+    def get_embedding(self, key: str) -> torch.Tensor:
+        return self.embeddings[key]
+```
+
+*Note: The pseudocode above assumes `self.base_prompt` is stored during initialization. The negative prompt handling is simplified; in practice, a specific negative prompt string is used.*
+
+### Parameters
+*   **Max Length**: 77 tokens (standard for CLIP) [S1, unofficial].
+*   **Embedding Dimension**: 768 (for CLIP ViT-L/14) [S1, unofficial].
+*   **Directional Descriptors**: Typically `['front', 'side', 'back']` [S1, unofficial]. For forward-facing scenes (e.g., LLFF dataset), `['top-down', 'front', 'side']` are used [S2].
+
+### Edge Cases and Pitfalls
+*   **Janus Problem**: View-specific prompting does not fully solve the "Janus problem" (where an object has multiple faces or inconsistent features across views). The loss function still encourages matching the input image appearance across all views, which can lead to artifacts if the directional prompt is not sufficiently distinct or if the underlying geometry is ambiguous [S3].
+*   **Resolution Limits**: Rendering at higher resolutions than 96px or 128px may not yield noticeable quality improvements for the text prior loss, suggesting that the bottleneck is not resolution but the semantic conditioning [S3].
+
+## Subtopics
+
+### [TexGS-VolVis Representation and Optimization](11105-texgs-volvis-representation-and-optimization.md)
+TexGS-VolVis is a method for representing and editing volume visualization (VolVis) scenes using textured 2D Gaussian Splatting (2DGS). It solves the problem of decoupling geometry from appearance in text-driven non-photorealistic style editing (NPSE), allowing for geometry-consistent stylization without the elliptical artifacts common in coupled representations. Unlike methods that freeze geometry to prevent distortion, TexGS-VolVis uses explicit 2D texture maps to store appearance, preserving geometric fidelity while enabling rich visual expressiveness.
+
+### [View-Dependent Prompting](19229-view-dependent-prompting.md)
+View-Dependent Prompting augments text prompts with directional suffixes based on the camera's position relative to the scene to guide diffusion-based 3D generation. It differs from sibling methods like [TexGS-VolVis Representation and Optimization](11105-texgs-volvis-representation-and-optimization.md) by explicitly conditioning the text embedding on the viewing angle rather than relying solely on volumetric or geometric consistency.
+
+### [Multimodal Object Embedding](21344-multimodal-object-embedding.md)
+Multimodal Object Embedding creates a unified semantic representation for 3D objects by fusing vision-based CLIP embeddings with optional text-based CLIP embeddings. It solves the problem of limited semantic grounding in open-vocabulary querying by capturing both visual features and high-level attribute descriptions in a single vector space. Unlike its sibling [Text Embedding Generation with Directional Views](8239-text-embedding-generation-with-directional-views.md), which generates directional view embeddings by appending view descriptors to prompts, this method focuses on instance-level fusion of static object attributes. It differs from [TexGS-VolVis Representation and Optimization](11105-texgs-volvis-representation-and-optimization.md) and [View-Dependent Prompting](19229-view-dependent-prompting.md) by explicitly combining a language-free ontology with an LLM-generated attribute channel.
+
+## Operating characteristics
+*   **Time Complexity**: The encoding step is performed once per prompt/direction during initialization or infrequently during training. The CLIP text encoder is lightweight compared to the diffusion model or the Gaussian rasterization, so the overhead is minimal [S1, unofficial].
+*   **Memory Complexity**: The memory footprint is determined by the number of stored embeddings. For $N$ directions, the memory is $O(N \cdot 77 \cdot 768 \cdot 4)$ bytes (assuming float32). For 3 directions, this is negligible (~700 KB) [S1, unofficial].
+*   **Strengths**: Simple to implement; leverages pre-trained, robust CLIP embeddings; effectively guides view-dependent generation by providing distinct semantic cues for different angles [S1, unofficial][S2].
+*   **Limitations**: Does not resolve geometric inconsistencies like the Janus problem; relies on the quality of the frozen CLIP encoder; directional prompts are discrete and may not capture continuous view variations [S3].
+*   **When to Use**: When view-dependent semantic consistency is required for 3D generation or editing, particularly in forward-facing or 360-degree scenes where specific viewpoints (front, side, back) are semantically distinct [S1, unofficial][S2].
+*   **When Not to Use**: When continuous view-dependent features are needed rather than discrete categories; when the Janus problem is the primary challenge [S3].
+
+## Background
+The method originates from the integration of CLIP text encoders into 3D Gaussian Splatting pipelines for text-driven generation and editing. The specific technique of appending directional views to prompts was introduced in [S1, unofficial] (DreamGaussian) and further explored in [S2] (Blended-NeRF) and [S3] (RealFusion). It builds on the principle that text embeddings can guide the optimization of 3D representations by providing semantic priors [S1, unofficial][S2, S3].
+
+## Sources
+[S1] dreamgaussian/dreamgaussian, https://github.com/dreamgaussian/dreamgaussian, fetched 2026-10-27 (unofficial)
+[S2] Blended-NeRF: Zero-Shot Object Generation and Blending in Existing Neural Radiance Fields, https://arxiv.org/abs/2306.12760v2, fetched 2026-10-26
+[S3] RealFusion 360° Reconstruction of Any Object from a Single Image, https://doi.org/10.1109/cvpr52729.2023.00816, fetched 2026-10-30

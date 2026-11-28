@@ -1,0 +1,105 @@
+# Smooth Terrain Grid
+
+
+## Overview
+Smooth Terrain Grid is a smoothing technique for voxel terrain that replaces flat voxel faces with interpolated planes by computing corner heights from neighboring voxel values [S1, unofficial]. It generates a terrain grid with smoothed heights using interpolation between random sample points [S2, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Inputs:** A 2D grid of voxel height or volume values.
+*   **Outputs:** A terrain grid storing computed vertex heights and mesh geometry.
+
+**Data Structures**
+*   **Voxel Grid:** A 2D array storing height or volume values for each voxel cell.
+*   **Vertex Grid:** A 2D array storing the computed height $Y$ for each grid corner $(x, z)$.
+
+**Algorithm**
+Two distinct algorithmic approaches are documented in the sources: a deterministic corner-averaging method and a stochastic interpolation method.
+
+1. **Deterministic Corner Averaging:** For each voxel corner, sum the height or volume values of the four adjacent voxels surrounding that corner, then divide the sum by four to compute the final corner height [S1, unofficial]. Use the computed corner heights to tilt the terrain geometry, then apply the center voxel value to elevate or lower the surface, creating non-flat shapes [S1, unofficial].
+2. **Stochastic Interpolation with Interval:** Validate the `interval` parameter; if `interval` $\le 0$ or odd, set `interval` = 2 [S2, unofficial]. Generate sample vertices at indices where `(iZ % interval == 0 && iX % interval == 0) || (iZ % interval == interval/2 && iX % interval == interval/2)` [S2, unofficial]. Assign a random height to each sample vertex [S2, unofficial]. Generate in-between vertices by averaging heights of existing neighbors (Left, Right, Up, Down) [S2, unofficial]. For same-parity vertices (both even or both odd), split quad with diagonal from top-left to bottom-right [S2, unofficial]. For opposite-parity vertices, split quad with diagonal from top-right to bottom-left [S2, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import random
+
+def compute_corner_heights(voxel_grid, width, height):
+    """Method 1: Deterministic corner averaging [S1, unofficial]"""
+    corner_grid = [[0.0] * (width + 1) for _ in range(height + 1)]
+    for z in range(height + 1):
+        for x in range(width + 1):
+            h1 = voxel_grid[x-1][z-1] if x > 0 and z > 0 else 0.0
+            h2 = voxel_grid[x][z-1] if z > 0 else 0.0
+            h3 = voxel_grid[x-1][z] if x > 0 else 0.0
+            h4 = voxel_grid[x][z]
+            corner_grid[z][x] = (h1 + h2 + h3 + h4) / 4.0
+    return corner_grid
+
+def generate_stochastic_grid(grid_width, grid_height, interval):
+    """Method 2: Stochastic interpolation with interval [S2, unofficial]"""
+    if interval <= 0 or interval % 2 != 0:
+        interval = 2
+    vertex_grid = [[None] * grid_width for _ in range(grid_height)]
+    
+    # Generate sample vertices
+    for z in range(grid_height):
+        for x in range(grid_width):
+            if (z % interval == 0 and x % interval == 0) or \
+               (z % interval == interval // 2 and x % interval == interval // 2):
+                vertex_grid[z][x] = random.random()
+                
+    # Interpolate in-between vertices
+    for z in range(grid_height):
+        for x in range(grid_width):
+            if vertex_grid[z][x] is None:
+                neighbors = []
+                if x > 0 and vertex_grid[z][x-1] is not None: neighbors.append(vertex_grid[z][x-1])
+                if x < grid_width - 1 and vertex_grid[z][x+1] is not None: neighbors.append(vertex_grid[z][x+1])
+                if z > 0 and vertex_grid[z-1][x] is not None: neighbors.append(vertex_grid[z-1][x])
+                if z < grid_height - 1 and vertex_grid[z+1][x] is not None: neighbors.append(vertex_grid[z+1][x])
+                vertex_grid[z][x] = sum(neighbors) / len(neighbors) if neighbors else 0.0
+                
+    return vertex_grid, interval
+
+def split_quads(vertex_grid, interval):
+    """Quad splitting logic [S2, unofficial]"""
+    triangles = []
+    for z in range(len(vertex_grid) - 1):
+        for x in range(len(vertex_grid[0]) - 1):
+            # Determine parity based on interval grid alignment
+            p1 = (z % interval == 0 and x % interval == 0) or (z % interval == interval//2 and x % interval == interval//2)
+            p2 = (z % interval == 0 and (x+1) % interval == 0) or (z % interval == interval//2 and (x+1) % interval == interval//2)
+            p3 = ((z+1) % interval == 0 and x % interval == 0) or ((z+1) % interval == interval//2 and x % interval == interval//2)
+            p4 = ((z+1) % interval == 0 and (x+1) % interval == 0) or ((z+1) % interval == interval//2 and (x+1) % interval == interval//2)
+            
+            same_parity = (p1 == p2 == p3 == p4)
+            if same_parity:
+                # Top-left to bottom-right diagonal
+                triangles.append(((z, x), (z, x+1), (z+1, x+1)))
+                triangles.append(((z, x), (z+1, x+1), (z+1, x)))
+            else:
+                # Top-right to bottom-left diagonal
+                triangles.append(((z, x), (z, x+1), (z+1, x)))
+                triangles.append(((z, x+1), (z+1, x+1), (z+1, x)))
+    return triangles
+```
+
+**Parameters**
+*   **interval:** Spacing between random sample points; must be even and positive [S2, unofficial].
+
+**Edge Cases and Pitfalls**
+*   **Boundary Conditions:** Corners on the grid boundary lack four surrounding voxels for Method 1, and sample points near boundaries may lack neighbors for averaging in Method 2. These require clamping, mirroring, or edge-specific handling [G].
+*   **Precision:** Floating-point precision may cause artifacts in large terrains, and integer heights may limit smoothness [G].
+*   **Degenerate Input:** Empty or uniform height grids may result in flat or invalid meshes if not handled [G].
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+The deterministic corner-averaging approach was discussed in the context of voxel DDA raymarching [S1, unofficial]. The stochastic interpolation approach with interval-based sampling was implemented in the "bad-minecraft" project [S2, unofficial].
+
+## Sources
+[S1] Smooth terrain with voxel DDA raymarching, https://www.youtube.com/watch?v=CxoC0E7inUg, fetched 2026-10-25 (unofficial)
+[S2] mayakeele/bad-minecraft, https://github.com/mayakeele/bad-minecraft, fetched 2026-10-27 (unofficial)

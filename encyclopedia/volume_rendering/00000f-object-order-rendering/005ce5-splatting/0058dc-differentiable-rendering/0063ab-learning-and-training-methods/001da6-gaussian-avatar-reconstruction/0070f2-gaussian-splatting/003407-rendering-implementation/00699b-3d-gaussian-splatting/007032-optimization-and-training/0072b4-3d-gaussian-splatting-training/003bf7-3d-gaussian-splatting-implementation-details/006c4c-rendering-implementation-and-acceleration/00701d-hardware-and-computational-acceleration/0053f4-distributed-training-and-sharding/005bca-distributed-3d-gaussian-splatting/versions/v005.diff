@@ -1,0 +1,204 @@
+--- v004.md
++++ v005.md
+@@ -4,128 +4,97 @@
+ 
+ ## Overview
+-Distributed 3D Gaussian Splatting is a multi-GPU extension of the 3D Gaussian Splatting (3D-GS) pipeline designed for scientific visualization [S1]. It solves the problem of single-GPU memory capacity limits, enabling the scalable processing of large-scale scientific datasets that exceed the memory of a single accelerator (e.g., >11.2M Gaussians on an NVIDIA A100) [S1]. Unlike standard 3D-GS which operates on a single device, this method distributes the global point cloud and Gaussian parameters across multiple GPUs, allowing for the training and rendering of high-resolution scenes that are otherwise infeasible [S1]. It builds on [3D Gaussian Splatting](15108-3d-gaussian-splatting.md) and adapts the distributed training design from [Grendel](19770-grendel.md) [S1].
++Distributed 3D Gaussian Splatting is a multi-GPU extension of the 3D Gaussian Splatting (3D-GS) pipeline designed for scientific visualization [S1]. It solves the problem of single-GPU memory limitations by distributing the optimization of large-scale Gaussian primitives across multiple GPUs, enabling the reconstruction of datasets exceeding the capacity of a single accelerator [S1]. Unlike single-GPU methods, it scales training throughput and supports high-resolution rendering of complex scientific isosurfaces by leveraging a distributed training backend adapted from Grendel-GS [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Scientific volume data (e.g., VTK, HDF5), target image resolution (e.g., 512x512 to 2048x2048), number of GPUs $N_{GPU}$, number of synthetic camera views $N_{views}$ [S1].
+-*   **Output:** Optimized set of 3D Gaussian primitives (mean $\mu$, covariance $\Sigma$, opacity $\alpha$, spherical harmonics coefficients for color) distributed across $N_{GPU}$ devices, and rendered images [S1].
++*   **Input:** Scientific volume data (e.g., VTK, HDF5), number of GPUs $M$, image resolution $R \times R$ (e.g., 2048x2048), number of synthetic camera views $V$ (typically 448 for scientific data [S1]).
++*   **Output:** Optimized set of 3D Gaussians $\mathcal{G}$ and rendered images matching the synthetic views.
+ 
+ **Data Structures:**
+-The global state consists of a point cloud and associated Gaussian parameters. This global state is sharded across $N_{GPU}$ workers.
+-*   **Global Point Cloud:** A set of $N$ points extracted from the isosurface.
+-*   **Gaussian Parameters:** For each point $i$, parameters include mean $\mu_i \in \mathbb{R}^3$, scale $s_i \in \mathbb{R}^3$, rotation $q_i \in \mathbb{R}^4$ (quaternion), opacity $\alpha_i \in \mathbb{R}$, and color coefficients [S1, Parent].
+-*   **Sharding:** The global set of $N$ Gaussians is partitioned into $N_{GPU}$ shards. Each GPU $k$ holds a subset of indices $\mathcal{I}_k$ such that $\bigcup_k \mathcal{I}_k = \{0, \dots, N-1\}$ and $\mathcal{I}_k \cap \mathcal{I}_j = \emptyset$ for $k \neq j$ [S1].
+-*   **Training Data:** The set of $N_{views}$ synthetic camera views is distributed across workers. Typically, each worker processes a subset of the views or the views are replicated depending on the specific communication pattern, but gradients must be synchronized globally [S1].
++The global set of $N$ Gaussians $\mathcal{G}$ is partitioned into shards $\mathcal{G}^{(m)}$ for each GPU $m \in \{0, \dots, M-1\}$ [S1]. Each GPU $m$ stores:
++1.  Local shard $\mathcal{G}^{(m)}$ containing positions, covariances, opacities, and spherical harmonics coefficients.
++2.  Corresponding optimizer states (e.g., Adam moments) for the parameters in $\mathcal{G}^{(m)}$ [S1].
++3.  Training data subset (camera poses and target images) distributed across workers [S1].
+ 
+-**Algorithm Steps:**
+-
+-1.  **Initialization:**
+-    *   Extract an isosurface point cloud directly from the scientific volume data using a tool like ParaView [S1].
+-    *   Initialize Gaussian primitives at these points. The covariance $\Sigma$ is derived from scale $s$ and rotation $q$ as $\Sigma = R S S^\top R^\top$, where $R$ is the rotation matrix from $q$ and $S$ is the diagonal scale matrix [Parent].
+-    *   Distribute the global point cloud and Gaussian parameters to the $N_{GPU}$ workers. Each worker $k$ initializes its local shard $\mathcal{G}_k$ [S1].
+-
+-2.  **Camera Setup:**
+-    *   Generate $N_{views}$ synthetic camera views in a structured orbit around the scene [S1].
+-    *   Typical value: $N_{views} = 448$ (increased from 250 used in prior work [4]) to support data complexity [S1].
+-
+-3.  **Distributed Training Loop:**
+-    *   For each training iteration:
+-        a.  **Data Distribution:** Assign a batch of target images (from the $N_{views}$ set) to each GPU worker. The distribution strategy ensures that the union of processed views covers the necessary angular coverage for reconstruction [S1].
+-        b.  **Local Forward Pass:** Each worker $k$ renders its assigned views using its local shard $\mathcal{G}_k$ and the global camera parameters.
+-            *   Project 3D Gaussians to 2D screen space using the affine approximation of the projective transformation [Parent].
+-            *   Compute the Gaussian density $P(x|\mu, \Sigma) = \exp\left(-\frac{1}{2}(x - \mu)^\top \Sigma^{-1} (x - \mu)\right)$ [Parent].
+-            *   Perform alpha blending to produce the rendered image $I_{rendered}$ [Parent].
+-        c.  **Loss Computation:** Compute the loss $\mathcal{L}$ between $I_{rendered}$ and the ground truth image $I_{ground\_truth}$ for the assigned views. Common losses include L1 loss and D-SSIM [S1, implied by standard 3D-GS].
+-        d.  **Gradient Synchronization:**
+-            *   Compute local gradients $\nabla \mathcal{L}_k$ with respect to the local Gaussian parameters [S1].
+-            *   Perform a **fused all-reduce** operation across all $N_{GPU}$ workers to synchronize the gradients for the global parameters. This ensures that the update to each Gaussian primitive incorporates information from all views processed by any GPU [S1].
+-        e.  **Parameter Update:** Update the Gaussian parameters using an optimizer (e.g., Adam) based on the synchronized gradients [S1].
++**Steps:**
++1.  **Initialization:** Extract isosurface point clouds directly from scientific volume data using external tools (e.g., ParaView) to serve as initializations for Gaussian primitives, bypassing image-based reconstruction [S1].
++2.  **Distribution:** Distribute the global point cloud and Gaussian parameters such that each GPU holds a shard of the data [S1]. Distribute the training data (camera views) across workers [S1].
++3.  **Forward Pass (Rendering):**
++    *   Each GPU projects its local shard $\mathcal{G}^{(m)}$ to screen space for the assigned camera views [S1].
++    *   Perform sparse all-to-all communication to route projected Gaussians to the GPUs owning the tiles they cover .
++    *   Each GPU composites only the pixels for its owned tiles using the received Gaussians .
++4.  **Loss Computation:** Compute the loss (e.g., L1 + D-SSIM) between the rendered images and the target synthetic views [S1].
++5.  **Backward Pass & Synchronization:**
++    *   Compute gradients locally for the assigned pixels .
++    *   Synchronize gradients via a fused all-reduce scheme during training to aggregate gradients for global parameters [S1]. Alternatively, sparse all-to-all communication can be used to aggregate gradients for specific Gaussians .
++6.  **Update:** Update the local shards using the aggregated gradients [S1].
+ 
+ **Pseudocode:**
++```python
++# Distributed 3D Gaussian Splatting Training Step
++# Assumes M GPUs, each with rank m
++# Global Gaussian set G is sharded: G[m] is local shard
++# Training data D is distributed: D[m] is local subset of (camera, target_image)
+ 
+-```python
+-# Distributed 3D Gaussian Splatting Training
+-# Inputs: volume_data, num_gpus, num_views=448, resolution=(2048, 2048)
+-# Global variables are sharded across num_gpus workers
+-
+-def distributed_training(volume_data, num_gpus):
+-    # 1. Initialization
+-    # Extract isosurface point cloud using external tool (e.g., ParaView)
+-    point_cloud = extract_isosurface(volume_data)
++def train_step(rank, num_gpus, G_shards, optimizer_states, D_local):
++    # 1. Local Forward Pass
++    # Project local Gaussians to screen space
++    local_splats = project_splats(G_shards[rank], D_local.cameras)
+     
+-    # Initialize Gaussian parameters for all points
+-    # mu: mean, s: scale, q: rotation, alpha: opacity, sh: spherical harmonics
+-    global_gaussians = initialize_gaussians(point_cloud)
++    # 2. Communication: Route Gaussians to tile owners
++    # Determine which tiles each GPU owns (e.g., based on image partitioning)
++    # Send local_splats to other GPUs if they cover tiles owned by others
++    # Receive splats from other GPUs that cover this GPU's tiles
++    all_splats = all_to_all_communication(local_splats, tile_ownership_map)
+     
+-    # Shard the global data across GPUs
+-    # Each GPU k gets a subset of indices
+-    shards = shard_data(global_gaussians, num_gpus)
++    # 3. Local Rendering and Loss
++    # Composite only the pixels for owned tiles
++    rendered_images = composite_splats(all_splats, D_local.cameras, tile_ownership_map)
+     
+-    # Generate synthetic camera views
+-    cameras = generate_orbit_cameras(num_views)
++    # Compute loss against target images
++    loss = compute_loss(rendered_images, D_local.target_images)
+     
+-    # 2. Training Loop
+-    for iteration in range(max_iterations):
+-        # Distribute training data (views) to workers
+-        # Strategy: Round-robin or random subset assignment
+-        local_views = assign_views(cameras, num_gpus)
+-        
+-        # Collect gradients from all GPUs
+-        global_gradients = None
+-        
+-        for gpu_id in range(num_gpus):
+-            # Local forward pass
+-            local_gaussians = shards[gpu_id]
+-            rendered_images = []
+-            
+-            for cam in local_views[gpu_id]:
+-                # Project Gaussians to 2D
+-                projected = project_gaussians(local_gaussians, cam)
+-                # Render via alpha blending
+-                img = render_splats(projected, cam.resolution)
+-                rendered_images.append(img)
+-            
+-            # Compute loss against ground truth
+-            losses = compute_loss(rendered_images, local_views[gpu_id].ground_truth)
+-            total_loss = sum(losses)
+-            
+-            # Compute local gradients
+-            local_grads = compute_gradients(total_loss, local_gaussians)
+-            
+-            # Synchronize gradients using fused all-reduce
+-            # This aggregates gradients for the global parameter set
+-            if global_gradients is None:
+-                global_gradients = sync_gradients(local_grads, num_gpus)
+-            else:
+-                global_gradients = sync_gradients_add(global_gradients, local_grads, num_gpus)
+-        
+-        # Update global parameters using synchronized gradients
+-        update_gaussians(global_gaussians, global_gradients)
+-        
+-        # Reshard if necessary (e.g., if Gaussians are split/merged)
+-        shards = reshard_data(global_gaussians, num_gpus)
+-
+-    return global_gaussians
++    # 4. Backward Pass
++    # Compute local gradients
++    local_grads = compute_gradients(loss, G_shards[rank])
++    
++    # 5. Synchronization
++    # Aggregate gradients using fused all-reduce
++    global_grads = fused_all_reduce(local_grads, num_gpus)
++    
++    # 6. Update
++    # Update local optimizer states and Gaussian parameters
++    G_shards[rank], optimizer_states[rank] = optimizer_step(
++        G_shards[rank], 
++        optimizer_states[rank], 
++        global_grads
++    )
++    
++    return loss
+ ```
+ 
++**Parameters:**
++*   **Number of synthetic camera views ($V$):** Increased from 250 (prior work [4]) to 448 to better support data complexity [S1].
++*   **Image Resolution ($R$):** Benchmarked at 512x512, 1024x1024, and 2048x2048 [S1].
++*   **Number of GPUs ($M$):** Typically 4 in reported experiments [S1].
++
+ **Edge Cases and Pitfalls:**
+-*   **Memory Limits:** A single NVIDIA A100 GPU supports up to approximately 11.2M Gaussians. Datasets larger than this (e.g., Miranda with ~18M Gaussians) fail on a single GPU due to memory exhaustion [S1].
+-*   **Precision:** High-resolution rendering (2048x2048) increases memory bandwidth requirements. Ensure sufficient VRAM per GPU for the shard size plus gradient buffers [S1].
+-*   **Synchronization Overhead:** The fused all-reduce scheme must be efficient to avoid becoming the bottleneck. Network bandwidth between GPUs (e.g., NVLink) is critical [S1].
++*   **Memory Limits:** A single NVIDIA A100 GPU supports up to approximately 11.2M Gaussians [S1]. Datasets larger than this (e.g., Miranda with ~18M Gaussians) are infeasible on a single GPU and require multi-GPU training [S1].
++*   **Communication Overhead:** Sparse all-to-all communication must be optimized to avoid bottlenecks when Gaussians cover many tiles .
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Training time scales sub-linearly with the number of GPUs due to communication overhead. For the Kingsnake dataset (4M Gaussians) at 2048x2048 resolution, training time reduced from 48.00 minutes (1 GPU) to 8.50 minutes (4 GPUs), a 5.6x speedup [S1].
+-*   **Memory Complexity:** Memory usage per GPU is $O(N / N_{GPU})$, where $N$ is the total number of Gaussians. This allows $N$ to exceed single-GPU capacity [S1].
+-*   **Measured Performance:**
+-    *   **Kingsnake (4M Gaussians, 110.3 MB):** 4 GPUs, 2048x2048: PSNR 29.32, SSIM 0.97, LPIPS 0.03 [S1].
+-    *   **Miranda (18M Gaussians, 491 MB):** 4 GPUs, 2048x2048: PSNR 36.37, SSIM 0.99, LPIPS 0.011 [S1].
+-*   **Strengths:** Enables training of large-scale scientific datasets that exceed single-GPU memory; improves training throughput.
+-*   **Limitations:** Requires multi-GPU hardware and infrastructure (e.g., HPC node with NVLink); communication overhead limits perfect linear scaling.
+-*   **When to use:** When the number of Gaussian primitives exceeds the VRAM of a single GPU (e.g., >11M on A100) or when high-resolution rendering of large scenes is required [S1].
+-*   **When not to use:** For small scenes that fit comfortably on a single GPU, where the overhead of distributed training is unnecessary.
++*   **Time Complexity:** Training time decreases significantly with more GPUs. For the Kingsnake dataset (4M Gaussians) at 2048x2048 resolution, training time drops from 48.00 minutes (1 GPU) to 8.50 minutes (4 GPUs), a 5.6x speedup [S1].
++*   **Memory Complexity:** Scales linearly with the number of GPUs, allowing datasets exceeding single-GPU memory (e.g., 18M Gaussians on 4 A100s) [S1].
++*   **Performance:** On a Polaris HPC node with four NVIDIA A100 GPUs [S1]:
++    *   Kingsnake (4M Gaussians, 2048x2048, 4 GPUs): PSNR 29.32, SSIM 0.97, LPIPS 0.03 [S1].
++    *   Miranda (18M Gaussians, 2048x2048, 4 GPUs): PSNR 36.37, SSIM 0.99, LPIPS 0.011 [S1].
++*   **Strengths:** Enables high-fidelity reconstruction of large-scale scientific data that exceeds single-GPU capacity; improves training throughput [S1].
++*   **Limitations:** Requires distributed infrastructure; communication overhead may limit scaling efficiency for smaller datasets [S1].
++*   **When to Use:** For scientific visualization datasets with >11.2M Gaussians or when high-resolution (2048x2048) training on large scenes is required [S1].
++*   **When Not to Use:** For small datasets fitting within single-GPU memory, where the overhead of distributed communication may not be justified [S1].
+ 
+ ## Background
+-*   **Origin:** The method was presented in 2025 by Mateevitsi, Papka, Petruzza, and Sizzi from the University of Illinois Chicago, Argonne National Laboratory, and Utah State University [S1].
+-*   **History:** It builds on prior work by Sewell et al. [4] which demonstrated high-fidelity isosurface reconstruction using Gaussian primitives from scientific data. It adapts the distributed training design from Grendel-GS [6] to the 3D-GS pipeline [S1].
++*   **Origin:** Developed by researchers from the University of Illinois Chicago, Argonne National Laboratory, and Utah State University [S1].
++*   **History:** Presented in 2025 at the IEEE International Conference on e-Science [S1]. It builds on prior work by Sewell et al. [4] for isosurface reconstruction and adapts the distributed training design from Grendel-GS [6] [S1].
+ *   **Usage:** Designed for HPC-based scientific workflows, enabling real-time post hoc and in situ visualization of complex simulations [S1].
+ 

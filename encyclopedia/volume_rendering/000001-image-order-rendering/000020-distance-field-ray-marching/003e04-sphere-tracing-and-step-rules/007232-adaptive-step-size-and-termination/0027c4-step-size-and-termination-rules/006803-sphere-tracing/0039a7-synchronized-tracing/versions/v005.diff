@@ -1,0 +1,160 @@
+--- v004.md
++++ v005.md
+@@ -18,5 +18,5 @@
+ **Parameters:**
+ *   **Lipschitz Bound:** For approximate signed distance fields, the Lipschitz bound should be close to 1 [S1, unofficial].
+-*   **Tile Size:** Not given in the sources.
++*   **Tile Dimensions:** Not given in the sources.
+ *   **Subfrustum Size:** Not given in the sources.
+ 
+@@ -30,47 +30,76 @@
+ **Pseudocode:**
+ ```python
+-def synchronized_tracing(blobtree, screen_width, screen_height, tile_size):
+-    # Initialize low-resolution A-buffer for each tile
+-    a_buffers = [[None] * (screen_width // tile_size) for _ in range(screen_height // tile_size)]
+-    
+-    # For each tile in the screen
+-    for ty in range(screen_height // tile_size):
+-        for tx in range(screen_width // tile_size):
+-            tile_bbox = [tx * tile_size, ty * tile_size, (tx + 1) * tile_size, (ty + 1) * tile_size]
+-            
+-            # Step 1: Compute tight bounding volume for all primitives
+-            # Using compact, smooth CSG operators extended from standard bounded operators
+-            # [S1, unofficial] Sources do not specify exact CSG operator formulas
+-            tight_bounding_volume = compute_csg_bounding_volume(blobtree)
+-            
+-            # Step 2: Populate A-buffer with primitives of interest
++def synchronized_tracing(blobtree, screen_width, screen_height, tile_w, tile_h):
++    # Step 1: Compute tight augmented bounding volume for all primitives
++    # Using compact, smooth CSG operators extended from standard bounded operators [S1, unofficial]
++    global_bbox = compute_global_bounding_volume(blobtree)
++
++    # Step 2: Tile-based processing and A-buffer population
++    # Divide screen into tiles and store primitives of interest per tile [S1, unofficial][S2, abstract only, unofficial]
++    cols = (screen_width + tile_w - 1) // tile_w
++    rows = (screen_height + tile_h - 1) // tile_h
++    a_buffers = [[[] for _ in range(cols)] for _ in range(rows)]
++
++    for r in range(rows):
++        for c in range(cols):
++            t_min_x, t_min_y = c * tile_w, r * tile_h
++            t_max_x, t_max_y = min((c + 1) * tile_w, screen_width), min((r + 1) * tile_h, screen_height)
++            tile_bbox = (t_min_x, t_min_y, t_max_x, t_max_y)
++
+             primitives_of_interest = []
+-            for primitive in blobtree.primitives:
+-                if intersects(primitive, tight_bounding_volume) and intersects(primitive, tile_bbox):
+-                    primitives_of_interest.append(primitive)
+-            a_buffers[ty][tx] = primitives_of_interest
+-            
++            for prim in blobtree.primitives:
++                if bbox_overlap(prim.bbox, global_bbox) and bbox_overlap(prim.bbox, tile_bbox):
++                    primitives_of_interest.append(prim)
++            a_buffers[r][c] = primitives_of_interest
++
++    # Step 3, 4, 5: Ray processing per tile (subfrustum/workgroup)
++    for r in range(rows):
++        for c in range(cols):
++            primitives = a_buffers[r][c]
++
+             # Step 3: Synchronize threads within the subfrustum using the A-buffer
+-            # [G] Standard GPU barrier synchronization for workgroup coherence
++            # [G] Standard GPU workgroup barrier to ensure coherent field evaluation
+             synchronize_threads()
+-            
+-            # Step 4: Sparse bottom-up tree traversal to prune the blobtree
+-            pruned_blobtree = sparse_bottom_up_traversal(blobtree, primitives_of_interest)
+-            
++
++            # Step 4: Sparse bottom-up tree traversal to prune the blobtree on-the-fly
++            # [S1, unofficial] Decorrelates field evaluation complexity from full blobtree size
++            pruned_tree = sparse_bottom_up_traversal(blobtree, primitives)
++
+             # Step 5: Execute ray processing using sphere tracing
+-            render_tile(tile_bbox, pruned_blobtree)
++            # [S1, unofficial][S2, abstract only, unofficial]
++            for y in range(r * tile_h, min((r + 1) * tile_h, screen_height)):
++                for x in range(c * tile_w, min((c + 1) * tile_w, screen_width)):
++                    origin = (float(x), float(y), -5.0)
++                    direction = (0.0, 0.0, 1.0)
++                    t = 0.0
++                    max_steps = 1000
++                    eps = 1e-4
++                    for _ in range(max_steps):
++                        p = (origin[0] + t * direction[0],
++                             origin[1] + t * direction[1],
++                             origin[2] + t * direction[2])
++                        dist = pruned_tree.sdf(p)
++                        if dist < eps:
++                            break
++                        t += max(eps, dist)
+ 
+-def compute_csg_bounding_volume(blobtree):
+-    # [S1, unofficial] Compact, smooth CSG operators extended from standard bounded operators
+-    # [G] Standard bounding volume computation for implicit primitives
+-    return blobtree.compute_global_bounding_box()
++def compute_global_bounding_volume(blobtree):
++    # [G] Standard AABB computation over all leaf primitives
++    min_x = min(p.bbox[0] for p in blobtree.primitives)
++    min_y = min(p.bbox[1] for p in blobtree.primitives)
++    min_z = min(p.bbox[2] for p in blobtree.primitives)
++    max_x = max(p.bbox[3] for p in blobtree.primitives)
++    max_y = max(p.bbox[4] for p in blobtree.primitives)
++    max_z = max(p.bbox[5] for p in blobtree.primitives)
++    return (min_x, min_y, min_z, max_x, max_y, max_z)
+ 
+-def intersects(primitive, bbox):
++def bbox_overlap(a, b):
+     # [G] Standard axis-aligned bounding box intersection test
+-    return primitive.min_x <= bbox[2] and primitive.max_x >= bbox[0] and \
+-           primitive.min_y <= bbox[3] and primitive.max_y >= bbox[1]
++    return a[0] <= b[3] and a[3] >= b[0] and \
++           a[1] <= b[4] and a[4] >= b[1] and \
++           a[2] <= b[5] and a[5] >= b[2]
+ 
+ def synchronize_threads():
+-    # [G] GPU thread barrier (e.g., __syncthreads() in CUDA)
++    # [G] GPU thread barrier synchronization
+     pass
+ 
+@@ -78,23 +107,7 @@
+     # [S1, unofficial] Prunes the blobtree on-the-fly to decorrelate complexity
+     # [G] Standard tree traversal filtering out nodes outside the primitive set
+-    return blobtree.filter(primitives)
+-
+-def render_tile(tile_bbox, pruned_blobtree):
+-    # Standard sphere tracing algorithm [Parent]
+-    # [G] Implementation details for ray generation and SDF evaluation
+-    for y in range(int(tile_bbox[1]), int(tile_bbox[3])):
+-        for x in range(int(tile_bbox[0]), int(tile_bbox[2])):
+-            origin = [float(x), float(y), -5.0]
+-            direction = [0.0, 0.0, 1.0]
+-            t = 0.0
+-            max_steps = 1000
+-            eps = 1e-4
+-            for _ in range(max_steps):
+-                p = [origin[i] + t * direction[i] for i in range(3)]
+-                dist = pruned_blobtree.sdf(p)
+-                if dist < eps:
+-                    return (x, y, t)
+-                t += max(eps, dist)
+-    return None
++    pruned = Blobtree()
++    pruned.primitives = primitives
++    return pruned
+ ```
+ 
+@@ -105,6 +118,4 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** Not given in the sources.
+ *   **Measured Performance:** The pipeline scales well to surfaces consisting of thousands of primitives [S1, unofficial][S2, abstract only, unofficial].
+ *   **Strengths:**
+@@ -116,5 +127,4 @@
+     *   Performance scaling beyond thousands of primitives is not specified [S1, unofficial][S2, abstract only, unofficial].
+ *   **When to Use:** Interactive modeling scenarios involving implicit surfaces represented by blobtrees with thousands of primitives [S1, unofficial][S2, abstract only, unofficial].
+-*   **When Not to Use:** Not given in the sources.
+ 
+ ## Background

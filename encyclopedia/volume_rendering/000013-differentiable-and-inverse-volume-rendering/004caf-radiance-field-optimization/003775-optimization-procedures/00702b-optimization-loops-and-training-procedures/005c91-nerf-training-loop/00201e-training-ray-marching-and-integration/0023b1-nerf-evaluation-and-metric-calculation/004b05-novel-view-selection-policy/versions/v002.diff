@@ -1,0 +1,131 @@
+--- v001.md
++++ v002.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-This policy selects the most informative synthetic views for active learning in neural radiance fields by quantifying information gain through uncertainty metrics [S1, S2]. It distinguishes itself from heuristic baselines (Random, FVS) by using epistemic uncertainty as a proxy for information gain, consistently outperforming them in reconstruction quality [S2]. It builds on [NeRF Evaluation and Metric Calculation](3079-nerf-evaluation-and-metric-calculation.md) by providing the mechanism to choose *which* new views to render and evaluate next.
++This policy selects the most informative synthetic views for active learning in neural radiance fields by quantifying information gain through uncertainty metrics [S1, S2]. It distinguishes itself from heuristic baselines (Random, FVS) by using epistemic uncertainty as a proxy for information gain, consistently outperforming them in reconstruction quality [S2]. It builds on [NeRF Evaluation and Metric Calculation](3079-nerf-evaluation-and-metric-calculation.md) by providing the mechanism to choose *which* new views to render and evaluate next [G].
+ 
+ ## How it works
+@@ -12,5 +12,5 @@
+ *   Pre-trained U-NeRF model (provides RGB, Depth, and associated color/depth uncertainties) [S1].
+ *   Pre-trained E-SCRNet model (trained on real data $S_{real}$, provides epistemic uncertainty and scene coordinate maps) [S1].
+-*   Hyperparameters: $z_{min}$ (minimum valid depth), $k$ (number of views to select), sampling rate $r$ (for resolution control) [S1, S2].
++*   Hyperparameters: $z_{min}$ (minimum valid depth threshold for pruning) [S1], $k$ (number of top views to select) [S1], and sampling rate $r$ (controls evaluation resolution) [S2].
+ 
+ **Outputs:**
+@@ -18,5 +18,5 @@
+ 
+ **Data Structures:**
+-*   Rendered Image: Contains RGB tensor, Depth tensor, Color Uncertainty tensor, Depth Uncertainty tensor [S1].
++*   Rendered Image: Contains RGB tensor, Depth tensor, Color Uncertainty tensor, and Depth Uncertainty tensor [S1].
+ *   Epistemic Uncertainty Map: Per-pixel scalar map indicating model confidence [S1].
+ 
+@@ -29,11 +29,11 @@
+     *   Color uncertainty is large (indicates noisy texture) [S1].
+ 3.  **Compute Epistemic Uncertainty:** For each remaining image in $S_{new}$, apply the pre-trained E-SCRNet to generate an epistemic uncertainty map and a scene coordinate map [S1].
+-4.  **Filter Unreliable Pixels:** Use the color and depth uncertainties from U-NeRF to mask out unreliable pixels in the epistemic uncertainty map. Pixels with uncertainties exceeding predefined thresholds are ignored [S1].
+-5.  **Calculate View Score:** Compute the mean epistemic uncertainty of the remaining valid pixels for each image. This mean value serves as the novel view score [S1].
++4.  **Filter Unreliable Pixels:** Use the color and depth uncertainties from U-NeRF to mask out unreliable pixels in the epistemic uncertainty map, ignoring pixels with uncertainties beyond predefined thresholds [S1].
++5.  **Calculate View Score:** Compute the mean epistemic uncertainty of the remaining valid pixels for each image, using this mean value as the novel view score [S1].
+ 6.  **Select Top-K Views:** Select the top-$k$ images with the highest mean epistemic uncertainty scores to form the final novel view set $S_{high}$ [S1].
+ 
+ **Evaluation Optimization (Sampling Rate):**
+-To reduce computational cost during candidate evaluation, the new perceptions can be evaluated at a lower resolution controlled by a sampling rate $r$ [S2].
+-*   $r=1$: Full resolution evaluation.
++To reduce computational cost during candidate evaluation, new perceptions can be evaluated at a lower resolution controlled by a sampling rate $r$ [S2].
++*   $r=1$: Full resolution evaluation [S2].
+ *   $r>1$: Downsampled evaluation. Performance remains competitive at $r=5$ but degrades gradually when $r>10$ [S2].
+ 
+@@ -41,5 +41,5 @@
+ 
+ ```python
+-def select_novel_views(u_nerf, e_scrnet, z_min, k, r):
++def select_novel_views(u_nerf, e_scrnet, z_min, k, r, depth_unc_threshold, color_unc_threshold):
+     """
+     Selects top-k novel views based on epistemic uncertainty.
+@@ -51,4 +51,6 @@
+         k: Number of views to select.
+         r: Sampling rate for evaluation resolution (1 for full).
++        depth_unc_threshold: Predefined threshold for depth uncertainty [G].
++        color_unc_threshold: Predefined threshold for color uncertainty [G].
+         
+     Returns:
+@@ -56,26 +58,15 @@
+     """
+     # Step 1: Generate initial candidates
+-    # Render RGB-D with uncertainties from various viewpoints
+     S_new = u_nerf.render_all_viewpoints() 
+-    
+     S_pruned = []
+     
+     # Step 2: Prune based on rendering quality
+     for view in S_new:
+-        depth = view.depth
+-        depth_unc = view.depth_uncertainty
+-        color_unc = view.color_uncertainty
+-        
+-        # Check if view is too close
+-        if depth.min() < z_min:
++        if view.depth.min() < z_min:
+             continue
+-            
+-        # Check for large uncertainties (heuristic thresholds needed)
+-        # Note: Exact threshold values are not given in sources [S1]
+-        if depth_unc.mean() > DEPTH_UNC_THRESHOLD:
++        if view.depth_uncertainty.mean() > depth_unc_threshold:
+             continue
+-        if color_unc.mean() > COLOR_UNC_THRESHOLD:
++        if view.color_uncertainty.mean() > color_unc_threshold:
+             continue
+-            
+         S_pruned.append(view)
+         
+@@ -84,23 +75,23 @@
+     # Step 3-5: Compute score for each pruned view
+     for view in S_pruned:
+-        # Apply E-SCRNet to get epistemic uncertainty map
+         # Evaluate at lower resolution if r > 1
+-        epistemic_map = e_scrnet.predict(view.image_downsampled(r))
++        img_down = view.image_downsampled(r)
++        depth_unc_down = view.depth_uncertainty_downsampled(r)
++        color_unc_down = view.color_uncertainty_downsampled(r)
+         
+-        # Filter unreliable pixels using U-NeRF uncertainties
+-        # Mask pixels where uncertainty is too high
+-        valid_mask = (view.depth_uncertainty_downsampled(r) < DEPTH_UNC_THRESHOLD) & \
+-                     (view.color_uncertainty_downsampled(r) < COLOR_UNC_THRESHOLD)
++        # Step 3: Compute epistemic uncertainty map
++        epistemic_map = e_scrnet.predict(img_down)
+         
+-        # Calculate mean epistemic uncertainty on valid pixels
++        # Step 4: Filter unreliable pixels
++        valid_mask = (depth_unc_down < depth_unc_threshold) & (color_unc_down < color_unc_threshold)
++        
++        # Step 5: Calculate view score
+         if valid_mask.sum() > 0:
+             score = epistemic_map[valid_mask].mean()
+         else:
+-            score = 0.0 # Fallback if no valid pixels
+-            
++            score = 0.0
+         scores.append((view, score))
+         
+     # Step 6: Select top-k
+-    # Sort by score descending
+     scores.sort(key=lambda x: x[1], reverse=True)
+     S_high = [item[0] for item in scores[:k]]
+@@ -112,10 +103,10 @@
+ 
+ ### Candidate Evaluation and Acquisition Function Comparison
+-This variant investigates the impact of the acquisition function used for view selection. It compares the proposed uncertainty-based module against heuristic approaches: Random selection and FVS (likely a specific heuristic baseline mentioned in the source) [S2]. The uncertainty-based method (ActiveNeRF Full) consistently outperforms these heuristics in PSNR, SSIM, and LPIPS metrics [S2].
++This variant investigates the impact of the acquisition function used for view selection [S2]. It compares the proposed uncertainty-based module against heuristic approaches: Random selection and FVS [S2]. The uncertainty-based method (ActiveNeRF Full) consistently outperforms these heuristics in PSNR, SSIM, and LPIPS metrics [S2].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Evaluation time depends on the sampling rate $r$. Full resolution ($r=1$) takes 2.20 hours for the ablation setting. Lowering $r$ reduces time slightly (e.g., 2.12h at $r=5$) but degrades quality at high $r$ [S2].
++*   **Time Complexity:** Evaluation time depends on the sampling rate $r$ [S2]. Full resolution ($r=1$) takes 2.20 hours for the ablation setting [S2]. Lowering $r$ reduces time slightly (e.g., 2.12h at $r=5$) but degrades quality at high $r$ [S2].
+ *   **Performance:** In Setting I (20 total observations: 4 initial + 4 extra at 40K, 80K, 120K, 160K iterations), ActiveNeRF Full achieves PSNR 26.24, SSIM 0.856, LPIPS 0.124 [S2].
+-*   **Comparison:** ActiveNeRF Full outperforms ActiveNeRF+FVS (PSNR 26.05) and ActiveNeRF+Random (PSNR 24.77) [S2].
++*   **Comparison:** ActiveNeRF Full outperforms ActiveNeRF+FVS (PSNR 26.05, SSIM 0.852, LPIPS 0.146) and ActiveNeRF+Random (PSNR 24.77, SSIM 0.801, LPIPS 0.188) [S2].
+ *   **Strengths:** Reduces computational cost via sampling rate $r$ while maintaining competitive quality at $r=5$ [S2]. Effectively identifies informative views without introducing much computational cost compared to full retraining [S1].
+ *   **Limitations:** Quality degrades when sampling rate $r > 10$ [S2]. Requires pre-trained E-SCRNet and U-NeRF [S1].

@@ -1,0 +1,155 @@
+# 3D Voxel Line Traversal (Accumulating Error)
+
+Also called: Wivlaro's algorithm, visitAll
+
+## Overview
+This algorithm visits every voxel cell intersected by a line segment between two arbitrary 3D points, solving the problem where standard Bresenham-like methods skip cells due to their discrete, axis-aligned step logic. It differs from [3D Bresenham Voxel Traversal](3951-3d-bresenham-voxel-traversal.md) by using an accumulating error term scaled by the product of axis deltas to ensure no intersected voxel is missed, particularly for lines with shallow angles relative to the grid axes.
+
+## How it works
+**Inputs:**
+- Start point coordinates $(gx_0, gy_0, gz_0)$ (floats).
+- End point coordinates $(gx_1, gy_1, gz_1)$ (floats).
+- A visitor callback function `visitor(gx, gy, gz)` invoked for each visited voxel.
+
+**Outputs:**
+- Sequential calls to `visitor` for all integer voxel coordinates $(gx, gy, gz)$ intersected by the segment.
+
+**Data Structures:**
+- Integer variables: $gx, gy, gz$ (current voxel), $gx_0idx, gy_0idx, gz_0idx$ (start voxel), $gx_1idx, gy_1idx, gz_1idx$ (end voxel).
+- Direction integers: $sx, sy, sz \in \{-1, 0, 1\}$.
+- Normalized deltas: $vx, vy, vz$ (floats, non-zero).
+- Scaling factors: $vxvy, vxvz, vyvz$ (floats).
+- Error accumulators: $errx, erry, errz$ (floats).
+- Error deltas: $derrx, derry, derrz$ (floats).
+
+**Steps:**
+1. Compute integer voxel indices for start and end points:
+   $$gx_0idx = \lfloor gx_0 \rfloor, \quad gy_0idx = \lfloor gy_0 \rfloor, \quad gz_0idx = \lfloor gz_0 \rfloor$$
+   $$gx_1idx = \lfloor gx_1 \rfloor, \quad gy_1idx = \lfloor gy_1 \rfloor, \quad gz_1idx = \lfloor gz_1 \rfloor$$
+2. Determine step directions for each axis:
+   $$sx = \begin{cases} 1 & \text{if } gx_1idx > gx_0idx \\ -1 & \text{if } gx_1idx < gx_0idx \\ 0 & \text{otherwise} \end{cases}$$
+   $$sy = \begin{cases} 1 & \text{if } gy_1idx > gy_0idx \\ -1 & \text{if } gy_1idx < gy_0idx \\ 0 & \text{otherwise} \end{cases}$$
+   $$sz = \begin{cases} 1 & \text{if } gz_1idx > gz_0idx \\ -1 & \text{if } gz_1idx < gz_0idx \\ 0 & \text{otherwise} \end{cases}$$
+3. Initialize current voxel position:
+   $$gx = gx_0idx, \quad gy = gy_0idx, \quad gz = gz_0idx$$
+4. Calculate next plane coordinates to cross:
+   $$gxp = gx_0idx + (1 \text{ if } gx_1idx > gx_0idx \text{ else } 0)$$
+   $$gyp = gy_0idx + (1 \text{ if } gy_1idx > gy_0idx \text{ else } 0)$$
+   $$gzp = gz_0idx + (1 \text{ if } gz_1idx > gz_0idx \text{ else } 0)$$
+5. Calculate axis deltas for normalization, ensuring non-zero values to avoid division by zero or zero-scaling issues:
+   $$vx = \begin{cases} gx_1 - gx_0 & \text{if } gx_1 \neq gx_0 \\ 1 & \text{otherwise} \end{cases}$$
+   $$vy = \begin{cases} gy_1 - gy_0 & \text{if } gy_1 \neq gy_0 \\ 1 & \text{otherwise} \end{cases}$$
+   $$vz = \begin{cases} gz_1 - gz_0 & \text{if } gz_1 \neq gz_0 \\ 1 & \text{otherwise} \end{cases}$$
+6. Calculate scaling factors for error accumulation:
+   $$vxvy = vx \cdot vy, \quad vxvz = vx \cdot vz, \quad vyvz = vy \cdot vz$$
+7. Initialize error accumulators scaled by the product of the other two axis deltas:
+   $$errx = (gxp - gx_0) \cdot vyvz$$
+   $$erry = (gyp - gy_0) \cdot vxvz$$
+   $$errz = (gzp - gz_0) \cdot vxvy$$
+8. Calculate error deltas for each step:
+   $$derrx = sx \cdot vyvz$$
+   $$derry = sy \cdot vxvz$$
+   $$derrz = sz \cdot vxvy$$
+9. Loop:
+   a. Call `visitor(gx, gy, gz)`.
+   b. If $gx = gx_1idx$ AND $gy = gy_1idx$ AND $gz = gz_1idx$, break loop.
+   c. Determine next voxel to visit by comparing absolute error values:
+      $$xr = |errx|, \quad yr = |erry|, \quad zr = |errz|$$
+   d. If $sx \neq 0$ AND ($sy = 0$ OR $xr < yr$) AND ($sz = 0$ OR $xr < zr$):
+      $$gx \leftarrow gx + sx$$
+      $$errx \leftarrow errx + derrx$$
+   e. Else if $sy \neq 0$ AND ($sz = 0$ OR $yr < zr$):
+      $$gy \leftarrow gy + sy$$
+      $$erry \leftarrow erry + derry$$
+   f. Else if $sz \neq 0$:
+      $$gz \leftarrow gz + sz$$
+      $$errz \leftarrow errz + derrz$$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def visit_all(gx0, gy0, gz0, gx1, gy1, gz1, visitor):
+    # Step 1: Integer indices
+    gx0idx = floor(gx0)
+    gy0idx = floor(gy0)
+    gz0idx = floor(gz0)
+    gx1idx = floor(gx1)
+    gy1idx = floor(gy1)
+    gz1idx = floor(gz1)
+
+    # Step 2: Directions
+    sx = 1 if gx1idx > gx0idx else (-1 if gx1idx < gx0idx else 0)
+    sy = 1 if gy1idx > gy0idx else (-1 if gy1idx < gy0idx else 0)
+    sz = 1 if gz1idx > gz0idx else (-1 if gz1idx < gz0idx else 0)
+
+    # Step 3: Current position
+    gx = gx0idx
+    gy = gy0idx
+    gz = gz0idx
+
+    # Step 4: Next planes
+    gxp = gx0idx + (1 if gx1idx > gx0idx else 0)
+    gyp = gy0idx + (1 if gy1idx > gy0idx else 0)
+    gzp = gz0idx + (1 if gz1idx > gz0idx else 0)
+
+    # Step 5: Normalized deltas
+    vx = gx1 - gx0 if gx1 != gx0 else 1.0
+    vy = gy1 - gy0 if gy1 != gy0 else 1.0
+    vz = gz1 - gz0 if gz1 != gz0 else 1.0
+
+    # Step 6: Scaling factors
+    vxvy = vx * vy
+    vxvz = vx * vz
+    vyvz = vy * vz
+
+    # Step 7: Error accumulators
+    errx = (gxp - gx0) * vyvz
+    erry = (gyp - gy0) * vxvz
+    errz = (gzp - gz0) * vxvy
+
+    # Step 8: Error deltas
+    derrx = sx * vyvz
+    derry = sy * vxvz
+    derrz = sz * vxvy
+
+    # Step 9: Loop
+    while True:
+        visitor(gx, gy, gz)
+        if gx == gx1idx and gy == gy1idx and gz == gz1idx:
+            break
+
+        xr = abs(errx)
+        yr = abs(erry)
+        zr = abs(errz)
+
+        if sx != 0 and (sy == 0 or xr < yr) and (sz == 0 or xr < zr):
+            gx += sx
+            errx += derrx
+        elif sy != 0 and (sz == 0 or yr < zr):
+            gy += sy
+            erry += derry
+        elif sz != 0:
+            gz += sz
+            errz += derrz
+```
+
+**Parameters:**
+- Typical values: None specific; works for any float coordinates.
+- Edge cases:
+  - **Parallel to axis:** If an axis delta is zero, the corresponding error term scaling uses 1 instead of 0 to avoid division by zero or zero-scaling issues, and the step direction is 0 [S1, unofficial].
+  - **Tie-breaking:** The algorithm uses strict inequality (<) for error comparison. If errors are equal, the order of if/else-if blocks determines priority (x, then y, then z) [S1, unofficial].
+
+## Operating characteristics
+- **Time complexity:** Linear in the number of voxels visited, which is proportional to the length of the line segment plus the grid dimensions in the worst case.
+- **Memory complexity:** Constant $O(1)$ auxiliary space.
+- **Strengths:** Guarantees 26-connectivity (visits all intersected voxels), unlike Bresenham which may skip cells. Simple to implement with basic arithmetic.
+- **Limitations:** Uses floating-point arithmetic for error accumulation, which may introduce precision errors for very long lines or large coordinate values. Tie-breaking is deterministic but biased by axis order.
+- **When to use:** When complete voxel coverage of a line is required, such as in ray casting for volume rendering or collision detection.
+- **When not to use:** When performance is critical and approximate connectivity is acceptable, or when integer-only arithmetic is required (consider [Integer Bresenham Voxelization with 6-Connectivity](10219-integer-bresenham-voxelization-with-6-connectivity.md) for 6-connected paths).
+
+## Background
+The algorithm was proposed by Wivlaro on Stack Overflow in 2013 as a solution to visiting all cells in a 3D voxel space between two points, addressing the limitations of standard Bresenham algorithms which skip cells [S1, unofficial]. It is not a peer-reviewed academic method but a practical solution widely cited in graphics programming communities.
+
+## Sources
+[S1] Walk a line between two points in a 3D voxel space visiting all cells, https://stackoverflow.com/questions/16505905/walk-a-line-between-two-points-in-a-3d-voxel-space-visiting-all-cells, fetched 2026-10-24 (unofficial)

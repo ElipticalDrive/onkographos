@@ -1,0 +1,131 @@
+For developers, who are building real-time data-driven applications, Redis is the preferred, fastest, and most feature-rich cache, data structure server, and document and vector query engine. - feat(stream): prototype opt-in block Zstd compression by jruaux · Pull Request #1 · jruaux/redis
+
+feat(stream): prototype opt-in block Zstd compression by jruaux · Pull Request #1 · jruaux/redis · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+jruaux
+commented
+Nov 3, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Retained Redis Streams can spend substantial memory on repeated record content. This experimental server-side implementation adds XCFGSET <key> COMPRESSION ZSTD to compress sealed listpacks while keeping the active append block raw. Ordinary stream commands return the original field/value bytes, field order, repeated fields and IDs.
+Measured result: ~702-byte synthetic logs used 3.7× less stream memory, while retained-append throughput fell from 678k to 171k XADD/s. Small-page read throughput fell from 163k to 48k requests/s. This prototype offers substantial memory savings at a substantial CPU and latency cost.
+See the prototype README for the concept, configuration, and results, and the detailed benchmark report for methodology and reproduction commands.
+The current direction is plain block Zstd, not dictionaries. The earlier dictionary implementation, checks and benchmark results remain in this branch for historical comparison; its persistence guarantees differ from plain mode and are documented separately.
+Storage and behavior
+Compress whole sealed listpacks with Zstd level 3 and checksums; at most one block is attempted per append. Unconfigured streams keep the existing storage path.
+Bound each codec input/output to 64 KiB; larger units stay raw. Fall back to raw when framing and allocator size would eliminate the saving.
+Validate frame encoding, content length, checksum and decoded listpack structure. Reads use iterator-owned decode scratch; mutations materialize affected blocks.
+Plain-mode policy survives RDB, DUMP/RESTORE, incremental and rewritten AOF, and replication. RDB stores ordinary listpacks plus policy and recompresses eligible blocks on load.
+Expose compression metadata and codec scratch high-water marks in XINFO STREAM.
+Measured tradeoffs
+The sustained experiment used six synthetic workloads, upstream vs prototype OFF vs plain Zstd, 10,000 retained entries, four clients with pipeline depth 8, five 5-second phases repeated twice, and a 256 MiB server limit. The 180 phase measurements took about 16 minutes. These are synthetic results, not production capacity estimates.
+All arrows show upstream → Zstd; k means thousand operations per second.
+Workload
+Compression
+CPU/XADD, µs
+XADD/s
+Reads/s, 10 entries
+Reads/s, large page
+~258 B logs
+4.1×
+1.37 → 2.78
+725k → 360k
+181k → 78k
+2.9k → 1.6k
+~702 B logs
+3.7×
+1.47 → 5.85
+678k → 171k
+163k → 48k
+2.2k → 700
+Native fields
+3.0×
+1.83 → 2.11
+545k → 473k
+122k → 65k
+1.5k → 1.3k
+~8 KiB repetitive
+29.8×
+4.94 → 20.96
+202k → 48k
+30k → 14k
+2.5k → 1.2k
+Already compressed
+1.0×
+2.11 → 4.58
+459k → 217k
+132k → 123k
+1.8k → 1.7k
+Mixed schemas
+2.8×
+1.42 → 4.58
+701k → 218k
+178k → 58k
+2.8k → 980
+Reads alternate XRANGE and XREAD; rates count requests. Large pages contain 1,000 entries, except ~8 KiB records (119) and already-compressed values (901).
+For ~702-byte logs, small-page mixed XRANGE/XREAD throughput fell from about 163k to 48k requests/s; COUNT 1000 scans fell from about 2.2k to 700 requests/s. Consumer-group correctness is checked, but sustained delivery/ACK performance was not measured. The large-record corpus is particularly repetitive and its factor is optimistic.
+The current implementation trades substantial CPU and read latency for memory. Context reuse, lower levels, and avoiding unnecessary trim decoding are hypotheses for improvement, not measured gains. Dictionaries did not provide a compelling general advantage in these experiments.
+Validation
+Fresh local checks before publishing:
+Zstd-enabled build with -Werror and REDIS_TEST.
+All 19 codec/lifecycle C tests.
+Tcl suites: unit/type/stream-compression, unit/type/stream, unit/type/stream-cgroups, unit/moduleapi/stream.
+Both Python harnesses in --check-only mode, covering policy persistence, replication, AOF formats and dictionary lifecycle regressions.
+Generated command table consistency and git diff --check.
+Separate read-only review of the full intended code/test/tool/report diff: no verified blocking findings; stale report wording corrected.
+The sustained benchmarks were not rerun for PR publication. Their pinned baseline is 68d9a2df09ec7d4a5c03abe7c1424ad26e896b5d; this branch retains that source base.
+Prototype limitations
+Private experimental RDB object type 37; no upstream allocation or format-version agreement. Older and non-Zstd builds reject this type. Mixed-version replication/AOF is unsupported.
+Dictionary mode retains historical blocks safely in memory, but RDB reload does not preserve its policy. See STREAM-COMPRESSION.md; STREAM-PLAIN-ZSTD.md is authoritative for current plain mode.
+Codec contexts are created per block; decoding includes deep listpack validation; trimming can decode blocks unnecessarily. Work executes on the main thread.
+Corrupt internal envelopes fail-stop explicitly; recoverable command errors are not implemented.
+No active-defrag, eviction/lazyfree stress, cluster migration, failover or partial-resynchronization stress validation. A complete non-Zstd build was not run locally.
+No real customer dataset study, production sizing claim, or default-on recommendation.
+This draft is intentionally opened inside the fork for prototype review, not as an upstream feature submission.
+jruaux
+added 7 commits
+November 3, 2026 18:24
+feat(stream): prototype opt-in block Zstd compression
+…
+78dd252
+```
+Compress sealed listpacks while keeping the append block raw. Preserve plain-Zstd policy through persistence and replication, and add focused correctness checks and bounded benchmark reports. Retain earlier dictionary experiments for comparison.
+```
+docs(stream): explain compression design and benchmark results
+…
+21924ed
+```
+Add a prototype README linked from the repository entry point, covering block storage, configuration, producer and consumer overhead, persistence, and measured limitations.
+```
+docs(stream): round benchmark throughput for readability
+15f254b
+docs(stream): make throughput results visible in a separate table
+585f6d3
+docs(stream): include throughput in the main results table
+aa6d655
+docs(stream): combine producer and consumer results in one table
+e95a7b9
+docs(stream): rename memory factor column to compression
+c2865a5
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

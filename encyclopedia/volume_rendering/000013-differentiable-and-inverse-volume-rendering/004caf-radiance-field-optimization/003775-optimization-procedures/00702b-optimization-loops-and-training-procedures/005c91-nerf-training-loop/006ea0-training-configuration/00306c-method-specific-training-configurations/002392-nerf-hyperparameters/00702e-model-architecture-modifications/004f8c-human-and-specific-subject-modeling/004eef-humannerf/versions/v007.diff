@@ -1,0 +1,165 @@
+--- v006.md
++++ v007.md
+@@ -4,89 +4,98 @@
+ 
+ ## Overview
+-HumanNeRF is a neural representation for high-fidelity free-view synthesis of dynamic humans that generalizes to unseen subjects and camera settings using sparse RGB inputs, avoiding per-scene training through aggregated pixel-alignment features and a pose-embedded non-rigid deformation field [S2]. It differs from per-scene methods like [LISA](12036-lisa.md) by learning a generalized field from a dataset, and from other generalizable methods like [Unified Volumetric Avatar (UVA)](13784-unified-volumetric-avatar-uva.md) by explicitly combining image-based rendering features with a neural radiance field via a novel appearance blending scheme to preserve high-frequency texture details [S2].
++HumanNeRF is a generalizable neural radiance field method for high-fidelity free-view synthesis of dynamic humans from sparse multi-view inputs, designed to generalize to unseen subjects and camera settings without per-scene training [S2]. It distinguishes itself from prior generalizable methods by combining aggregated pixel-alignment features with a pose-embedded non-rigid deformation field and a neural appearance blending scheme, addressing the blur artifacts and geometric discontinuities common in implicit texture representations [S2]. Unlike per-scene methods that require hours of optimization per subject, HumanNeRF provides reasonable results immediately and achieves state-of-the-art quality with only ~1 hour of fine-tuning [S2].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** $K$ synchronized videos of a performer captured at different viewpoints (preferably 360°) with $T$ frames, denoted as $I = \{I_{k,t}\}$. Each image $I_k \in \mathbb{R}^{H \times W \times 4}$ includes the RGB channels and a mask as the last channel [S2].
+-*   **Output:** Free-viewpoint video synthesis for arbitrary camera poses and unseen identities [S2].
++*   **Input:** $K$ synchronized videos of a performer captured at different viewpoints (preferably 360°) with $T$ frames, denoted as $I = \{I_{k,t}\}$, where $k \in \{1, \dots, K\}$ and $t \in \{1, \dots, T\}$. Each image $I_k$ has dimensions $H \times W \times 4$, with the last channel being a mask [S2].
++*   **Output:** Synthesized RGB images and volume density for novel viewpoints and time steps [S2].
+ 
+-**Data Structures and Network Architectures:**
+-The method consists of four main neural components:
++**Data Structures:**
++1.  **SMPL Model:** A parametric human body model with 24 joints is used to estimate a basis rigid deformation [S2].
++2.  **Feature Maps:** 2D feature maps $f_k \in \mathbb{R}^{H \times W \times C}$ extracted from input images [S2].
++3.  **Deformation Field:** An MLP $\mathbf{MLP}_d$ that outputs displacement vectors [S2].
++4.  **Neural Radiance Field (NeRF):** An MLP $\Phi$ that outputs volume density $\sigma$ and color $\mathbf{c}$ in canonical space [S2].
++5.  **Appearance Blending Field:** An MLP $\mathbf{MLP}_A$ that outputs blending weights [S2].
+ 
+-1.  **Feature Extractor Network $U$:** A U-Net architecture with 8 layers using ConvBnReLU2D (CRB2D) blocks (kernel $k=3$, stride $s=1$, dilation $d=1$) [S2].
+-    *   Layers: Down0-Down3, Up1-Up3.
+-    *   Channel mappings: $4/32, 32/64, 64/128, 128/256, 256/256, 256/128, 128/64, 64/32$ [S2].
+-    *   Output: 2D feature map $f_k \in \mathbb{R}^{H \times W \times C}$ [S2].
++**Network Architectures:**
++*   **Feature Extractor ($U$):** A U-Net with 8 layers of ConvBnReLU2D (CRB2D). Kernel $k=3$, stride $s=1$, dilation $d=1$.
++    *   Down0: 4/32
++    *   Down1: 32/64
++    *   Down2: 64/128
++    *   Down3: 128/256
++    *   Up1: 256/256
++    *   Up2: 256/128
++    *   Up3: 128/64
++    *   Up4 (implied by structure, listed as Up3 in source but channels suggest final output): 64/32 [S2].
++*   **Feature Blending Network ($\mathbf{MLP}_B$):**
++    *   PE0: 6/54, 3/27 (Positional Encoding for view direction and angle)
++    *   LR0: 54+27+32*6/256
++    *   LR1-4: 256/256
++    *   LR5: 256/128
++    *   LR6: 128/6 [S2].
++*   **Deformation Network ($\mathbf{MLP}_d$):**
++    *   PE0: 24/216 (Positional Encoding for distances)
++    *   LR0: 216+72+32/256
++    *   LR1-4: 256/256
++    *   LR5: 128/3 [S2].
++*   **Generalizable Dynamic NeRF ($\Phi$):**
++    *   PE0: 3/63 (Positional Encoding for position)
++    *   LR0: 63/256
++    *   LR1-4: 256/256
++    *   LR5: 27+256/256
++    *   LR6: 256/256
++    *   Density $\sigma$: 256/1
++    *   PE1: 3/27 (Positional Encoding for view direction)
++    *   LR7: 256+27+32/256
++    *   LR8: 256/128
++    *   Color $\mathbf{c}$: 128/3 [S2].
++*   **Appearance Blending Network ($\mathbf{MLP}_A$):**
++    *   LR0: (32+3)*2/256
++    *   LR1-5: 256/256
++    *   LR6: 256/128
++    *   Blending weights $\mathbf{W}$: 128/3 [S2].
+ 
+-2.  **Feature Blending Network $MLP_B$:** Estimates blending weights for aggregating features from $K$ views.
+-    *   Layers: PE0, LR0-LR6.
+-    *   PE0 channels: $6/54, 3/27$.
+-    *   LR0: $54+27+32*6/256$.
+-    *   LR1-4: $256/256$.
+-    *   LR5: $256/128$.
+-    *   LR6: $128/6$.
+-    *   Input: View direction $\vec{v}$, angle $\theta$, PE0, features $f$ [S2].
++**Numbered Steps:**
+ 
+-3.  **Deformation Network $MLP_d$:** Learns non-rigid displacements based on SMPL skeleton distances and directions.
+-    *   Layers: PE0, LR0-LR5.
+-    *   PE0 channels: $24/216$.
+-    *   LR0: $216+72+32/256$.
+-    *   LR1-4: $256/256$.
+-    *   LR5: $128/3$.
+-    *   Input: $R_d$ (distances to 24 SMPL joints), PE0, $R_v$ (directions to 24 SMPL joints), $F$ (blended feature) [S2].
++1.  **Feature Extraction:** For each input image $I^k$, extract a 2D feature map $f^k$ using the U-Net network $U$:
++    $$ f^k = U(I^k) $$
++    [S2]
+ 
+-4.  **Generalizable Dynamic Neural Radiance Field $\Phi$:** Regresses density and color in canonical space.
+-    *   Layers: PE0, LR0-LR8, Density $\sigma$, PE1, LR7, LR8, Color $c$.
+-    *   PE0: $3/63$. LR0: $63/256$. LR1-4: $256/256$. LR5: $27+256/256$. LR6: $256/256$.
+-    *   Density $\sigma$: $256/1$.
+-    *   PE1: $3/27$. LR7: $256+27+32/256$. LR8: $256/128$.
+-    *   Color $c$: $128/3$.
+-    *   Input: Position $x$, view direction $d$, PE0, LR2, PE0, LR2, PE1, $F$, LR7, LR8 [S2].
++2.  **Aggregated Pixel Alignment Feature:** For a 3D spatial point $p \in \mathbb{R}^3$, project it into view $k$ at $q^k \in \mathbb{R}^2$ and fetch the feature vector $f^k_{q}$. Compute the aggregated feature $F_p$ as a weighted summation:
++    $$ F_p = \sum_{k=1}^{K} w^k_q f^k_q $$
++    where the blending weights $w^k_q$ are estimated by $\mathbf{MLP}_B$:
++    $$ w^k_q = \mathbf{MLP}_B(\vec{v}, \theta^k_q, f^k_q) $$
++    Here, $\vec{v}$ is the viewing direction, and $\theta^k_q$ is the angle of the viewing direction relative to the query ray of the source view [S2].
+ 
+-5.  **Appearance Blending Network $MLP_A$:** Refines texture by aggregating colors from neighboring views.
+-    *   Layers: LR0-LR6, Blending weights $W$.
+-    *   LR0: $(32+3)*2/256$. LR1-5: $256/256$. LR6: $256/128$.
+-    *   $W$: $128/3$.
+-    *   Input: $f_{r,0}^r, f_{l,0}^l$ (two adjacent image features and occlusion maps) [S2].
++3.  **Deformation to Canonical Space:** Estimate the rigid deformation using the SMPL model $\mathcal{M}$ with skinning weights $w^s$. Compute the distances $R_d \in \mathbb{R}^{24}$ and directions $R_v \in \mathbb{R}^{72}$ between the sample point $p$ and the 24 joints of the SMPL skeleton. The non-rigid displacement is predicted by $\mathbf{MLP}_d$. The point $p$ is deformed to canonical space $p'$:
++    $$ p' = \mathcal{S}(p, \mathcal{M}, w^s) + \mathbf{MLP}_d(R_d, R_v, F_p) $$
++    [S2]
+ 
+-**Algorithm Steps:**
++4.  **NeRF Rendering:** Feed the canonical position $p'$, viewing direction $\vec{v}$, and aggregated feature $F_p$ into the generalizable dynamic neural radiance field $\Phi$ to regress volume density $\sigma$ and RGB radiance $\mathbf{c}$ [S2].
+ 
+-1.  **Feature Extraction:** For each input image $I^k$, extract local appearance features using the U-Net network $U$:
+-    $$f^k = U(I^k) \quad [S2]$$
+-
+-2.  **Aggregated Pixel Alignment Feature:** For a spatial query point $p \in \mathbb{R}^3$, project it into view $k$ at $q_k \in \mathbb{R}^2$ and fetch the feature vector $f_{q}^k$. Aggregate features from $K$ views using blending weights $w_q^k$:
+-    $$F_p = \sum_{k=1}^{K} w_q^k f_{q}^k \quad [S2]$$
+-    The weights are estimated by $MLP_B$:
+-    $$w_q^k = MLP_B(\vec{v}, \theta_q^k, f_q^k) \quad [S2]$$
+-    where $\vec{v}$ is the viewing direction and $\theta_q^k$ is the angle of the viewing direction relative to the query ray of the source view [S2].
+-
+-3.  **Deformation to Canonical Space:** Use the SMPL parametric model $\mathcal{M}$ with skinning weights $w^s$ to estimate a rigid deformation. Compute $R_d \in \mathbb{R}^{24}$ and $R_v \in \mathbb{R}^{72}$ representing distances and directions between $p$ and the 24 SMPL joints. Apply the non-rigid deformation network $MLP_d$ to learn subtle displacements:
+-    $$p' = \mathcal{S}(p, \mathcal{M}, w^s) + MLP_d(R_d, R_v, F_p) \quad [S2]$$
+-    where $p'$ is the point in canonical space [S2].
+-
+-4.  **Radiance Field Evaluation:** Feed $p'$, view direction $d$, and the aggregated feature $F$ into the neural radiance field $\Phi$ to regress volume density $\sigma$ and RGB radiance $c$ [S2].
+-
+-5.  **Appearance Blending (Optional Fine-tuning):** To refine high-frequency details and reduce artifacts, use the appearance blending network $MLP_A$ to aggregate colors from neighboring views $f_{r,0}^r$ and $f_{l,0}^l$, producing blending weights $W$ [S2].
++5.  **Neural Appearance Blending (Optional Fine-tuning/Refinement):** To refine texture details and address artifacts, aggregate colors from neighboring views. Input two adjacent image features and occlusion maps ($f_{r,0}^r, f_{l,0}^l$) into $\mathbf{MLP}_A$ to obtain blending weights $\mathbf{W}$, which are used to blend the synthesized colors [S2].
+ 
+ **Parameters:**
+-*   SMPL skeleton joints: 24 joints [S2].
+-*   Fine-tuning duration: 300 frames for a specific performer [S2].
++*   **SMPL Joints:** 24 joints [S2].
++*   **Fine-tuning Duration:** 300 frames for a specific performer [S2].
++*   **CRB2D Layer:** ConvBnReLU2D with kernel size 3, stride 1, dilation 1 [S2].
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Multi-person/Interaction:** The method relies on a regressed parametric human model, limiting it to single-person setups. It fails on multi-person or human-object interactions [S2].
+-*   **Lighting Variation:** No explicit lighting model is used. Significant brightness or color changes between views cause severe artifacts. Switching nearest views during appearance blending causes jumping artifacts, especially with high brightness variance [S2].
++**Pitfalls:**
++*   **Multi-person/Interaction:** The method relies on a regressed parametric human model, limiting it to single-person setups and failing on multi-person or human-object interactions [S2].
++*   **Lighting Variation:** No explicit lighting model; significant brightness or color changes between views cause severe artifacts. Switching nearest views during appearance blending causes jumping artifacts, especially with high brightness variance [S2].
+ *   **Generalization Limits:** Capability is limited because human dataset distributions only cover a small portion of human dynamics and appearances [S2].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The method is significantly more efficient than per-scene methods. On the 'batman' video (300 frames), full training takes 1.2 hours, compared to Neural Body (6.7h), Neural Volumes (8.4h), and ST-NeRF (9.5h) [S2].
++*   **Time Complexity:** The generalizable NeRF module provides immediate results without per-scene training. Fine-tuning for a specific performer takes approximately 1 hour for 300 frames [S2].
+ *   **Memory Complexity:** Not given in the sources.
+-*   **Performance:** On six input views, the method achieves PSNR = 32.59, SSIM = 0.9817, and LPIPS = 0.0304 [S2].
+-*   **Strengths:** Efficient generalization to unseen identities without per-scene training; high-fidelity texture via neural appearance blending; handles large pose deformations [S2].
+-*   **Limitations:** Requires consistent lighting across views; limited to single-person subjects; generalization is bounded by the diversity of the training dataset [S2].
++*   **Measured Performance:** On six input views, the method achieves PSNR = 32.59, SSIM = 0.9817, and LPIPS = 0.0304 [S2].
++*   **Scaling:** Performance degrades as the number of input views decreases; average error increases rapidly with fewer cameras [S2].
++*   **Strengths:** Efficient generalization to unseen identities and poses; significantly less fine-tuning time than per-scene methods (Neural Body 6.7h, Neural Volumes 8.4h, ST-NeRF 9.5h) [S2].
++*   **Limitations:** Limited to single-person setups; sensitive to lighting variations; generalization is bounded by the diversity of training data [S2].
+ *   **When to use:** Dynamic human rendering from sparse multi-view inputs, specifically targeting unseen identities and poses with efficient generalization [S2].
+-*   **When not to use:** Multi-person scenes, scenes with drastic lighting changes, or when high-fidelity geometry is required without texture blending [S2].
++*   **When not to use:** Multi-person scenarios, human-object interactions, or scenes with significant lighting variations across views [S2].
+ 
+ ## Background
+-HumanNeRF was introduced by Zhang et al. in 2021/2022 [S2]. It builds on the concept of generalizable neural radiance fields, drawing inspiration from IBRNet's ability to assist NeRF by avoiding per-scene training [S2]. The method addresses the limitations of previous approaches that either required dense multi-view inputs and costly training or suffered from blur artifacts and geometric discontinuities when generalizing to unseen identities [S2].
++HumanNeRF was introduced by Zhang et al. in 2021/2022 [S2]. It builds on the principles of Neural Radiance Fields (NeRF) [S1, unofficial] and generalizable image-based rendering methods like IBRNet [S2]. The method addresses the limitations of previous neural human representations that required dense multi-view inputs and costly per-scene training, which restricted them to static models or specific subjects [S2]. It was developed to enable high-fidelity free-view synthesis of dynamic humans from sparse inputs, leveraging aggregated pixel-alignment features and pose-embedded non-rigid deformation fields [S2].
+ 
+ ## Sources

@@ -1,0 +1,189 @@
+# Training Ray Masking and Caching
+
+Also called: Mask-Cached Ray Sampling, Training Ray Sampling with Mask Cache
+
+## Overview
+Training Ray Masking and Caching filters the set of candidate training rays to exclude those that do not intersect the scene's coarse geometry, thereby reducing computational load during the training loop [S2, S3, unofficial]. It differs from sibling methods like [Pixel Batching](3134-pixel-batching.md) by pre-filtering rays based on geometric occupancy rather than just spatial locality, and from [Semantic Ray Sampling](3896-semantic-ray-sampling.md) by relying on geometric masks rather than semantic labels. This method is chosen when the scene has significant background or empty space that would otherwise waste training iterations on irrelevant rays [S3, unofficial].
+
+## How it works
+The method generates rays for all pixels in the training images, tests them against a coarse geometry model to determine intersection, and stores only the valid rays in contiguous buffers.
+
+**Inputs:**
+- `rgb_tr_ori`: List of training RGB images.
+- `poses`: List of camera pose matrices ($c2w$).
+- `K`: Camera intrinsic matrix.
+- `H, W`: Image height and width.
+- `render_kwargs`: Dictionary of arguments passed to the geometry intersection function.
+- `cfg.data`: Configuration parameters including `inverse_y`, `flip_x`, `flip_y`.
+- `DEVICE`: Target device (e.g., CUDA).
+
+**Outputs:**
+- `rgb_tr`: Tensor of shape $[N_{valid}, 3]$ containing RGB values for valid rays.
+- `rays_o_tr`: Tensor of shape $[N_{valid}, 3]$ containing ray origins.
+- `rays_d_tr`: Tensor of shape $[N_{valid}, 3]$ containing ray directions.
+- `viewdirs_tr`: Tensor of shape $[N_{valid}, 3]$ containing view directions.
+- `imsz`: List of integers, where `imsz[i]` is the number of valid rays from image `i`.
+- `batch_index_sampler`: A generator function that yields indices for sampling batches from the valid rays.
+
+**Data Structures:**
+- `mask`: Boolean tensor of shape $[H, W]$ indicating which pixels hit the geometry.
+- `rgb_tr`, `rays_o_tr`, `rays_d_tr`, `viewdirs_tr`: Pre-allocated float tensors of shape $[N, 3]$, where $N$ is the total number of pixels across all images. These are trimmed at the end.
+
+**Steps:**
+1. Calculate the total number of pixels $N$ across all training images:
+   $$ N = \sum_{i} (\text{height}_i \times \text{width}_i) $$
+2. Initialize flattened output tensors `rgb_tr`, `rays_o_tr`, `rays_d_tr`, `viewdirs_tr` with shape $[N, 3]$ on the target device. Initialize an empty list `imsz` for image sizes and an integer `top = 0` for the current write index.
+3. For each training image $i$ with pose $c2w$, image $img$, and dimensions $(H, W)$:
+   a. Compute full ray origins `rays_o`, directions `rays_d`, and view directions `viewdirs` using `get_rays_of_a_view(H, W, K, c2w, ndc, inverse_y, flip_x, flip_y)`.
+   b. Initialize a boolean mask tensor `mask` of shape $[H, W]$ on the target device.
+   c. Iterate over the height of the image in chunks of size `CHUNK` (typically 64). For each chunk $j$:
+      i. Extract `rays_o_chunk = rays_o[j:j+CHUNK]` and `rays_d_chunk = rays_d[j:j+CHUNK]`.
+      ii. Compute the hit mask for the chunk: `mask[j:j+CHUNK] = model.hit_coarse_geo(rays_o_chunk, rays_d_chunk, **render_kwargs)`.
+   d. Count the number of valid rays $n = \text{mask.sum()}$.
+   e. If $n > 0$, copy the data for valid rays into the global buffers starting at `top`:
+      $$ \text{rgb\_tr}[top:top+n] = img[\text{mask}] $$
+      $$ \text{rays\_o\_tr}[top:top+n] = \text{rays\_o}[\text{mask}].\text{to}(DEVICE) $$
+      $$ \text{rays\_d\_tr}[top:top+n] = \text{rays\_d}[\text{mask}].\text{to}(DEVICE) $$
+      $$ \text{viewdirs\_tr}[top:top+n] = \text{viewdirs}[\text{mask}].\text{to}(DEVICE) $$
+   f. Append $n$ to `imsz` and update `top += n`.
+4. Trim the output tensors to the actual number of valid pixels:
+   $$ \text{rgb\_tr} = \text{rgb\_tr}[:top] $$
+   $$ \text{rays\_o\_tr} = \text{rays\_o\_tr}[:top] $$
+   $$ \text{rays\_d\_tr} = \text{rays\_d\_tr}[:top] $$
+   $$ \text{viewdirs\_tr} = \text{viewdirs\_tr}[:top] $$
+5. Create a batch index sampler. This is typically a generator that yields random indices from $0$ to $top-1$ [S2, unofficial].
+6. Print the ratio of kept rays to total rays: $top / N$ [S2, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def get_training_rays_in_maskcache_sampling(rgb_tr_ori, poses, K, H, W, render_kwargs, model, DEVICE, cfg_data):
+    """
+    Generates training rays filtered by coarse geometry intersection.
+    """
+    # Step 1: Calculate total pixels N
+    N = 0
+    for img in rgb_tr_ori:
+        N += img.shape[0] * img.shape[1]
+    
+    # Step 2: Initialize buffers
+    rgb_tr = torch.zeros((N, 3), device=DEVICE)
+    rays_o_tr = torch.zeros((N, 3), device=DEVICE)
+    rays_d_tr = torch.zeros((N, 3), device=DEVICE)
+    viewdirs_tr = torch.zeros((N, 3), device=DEVICE)
+    imsz = []
+    top = 0
+    
+    CHUNK = 64
+    
+    # Step 3: Process each image
+    for i, (img, c2w) in enumerate(zip(rgb_tr_ori, poses)):
+        # 3a: Generate full rays
+        rays_o, rays_d, viewdirs = get_rays_of_a_view(
+            H, W, K, c2w, 
+            ndc=cfg_data.ndc, 
+            inverse_y=cfg_data.inverse_y, 
+            flip_x=cfg_data.flip_x, 
+            flip_y=cfg_data.flip_y
+        )
+        
+        # 3b: Initialize mask
+        mask = torch.zeros((H, W), dtype=torch.bool, device=DEVICE)
+        
+        # 3c: Compute hit mask in chunks
+        for j in range(0, H, CHUNK):
+            end_j = min(j + CHUNK, H)
+            rays_o_chunk = rays_o[j:end_j, :]
+            rays_d_chunk = rays_d[j:end_j, :]
+            
+            # Call geometry intersection
+            # Note: hit_coarse_geo typically returns a boolean tensor or requires .to(DEVICE)
+            hit = model.hit_coarse_geo(
+                rays_o=rays_o_chunk, 
+                rays_d=rays_d_chunk, 
+                **render_kwargs
+            )
+            
+            # Update mask
+            # Assuming hit is boolean or convertible to boolean
+            mask[j:end_j, :] = hit.to(DEVICE)
+            
+        # 3d: Count valid rays
+        n = mask.sum().item()
+        
+        # 3e: Copy valid rays
+        if n > 0:
+            rgb_tr[top:top+n].copy_(img[mask])
+            rays_o_tr[top:top+n].copy_(rays_o[mask].to(DEVICE))
+            rays_d_tr[top:top+n].copy_(rays_d[mask].to(DEVICE))
+            viewdirs_tr[top:top+n].copy_(viewdirs[mask].to(DEVICE))
+            
+            # 3f: Update indices
+            imsz.append(n)
+            top += n
+            
+    # Step 4: Trim buffers
+    rgb_tr = rgb_tr[:top]
+    rays_o_tr = rays_o_tr[:top]
+    rays_d_tr = rays_d_tr[:top]
+    viewdirs_tr = viewdirs_tr[:top]
+    
+    # Step 5: Create batch sampler
+    # Using a simple random index generator as per common practice in these repos
+    def batch_index_sampler():
+        while True:
+            yield torch.randint(0, top, (1,)).item()
+            
+    # Step 6: Print ratio
+    print(f"Kept rays ratio: {top / N}")
+    
+    return rgb_tr, rays_o_tr, rays_d_tr, viewdirs_tr, imsz, batch_index_sampler
+```
+
+**Parameters:**
+- `CHUNK`: Integer, typically 64. Controls the chunk size for geometry intersection queries to manage memory [S1, S2, unofficial].
+- `render_kwargs`: Dictionary passed to `model.hit_coarse_geo`. Contains necessary rendering parameters [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- If `top` is 0 (no rays hit geometry), the buffers are empty. The batch sampler must handle this or the training loop must skip the step [G].
+- Precision issues in `hit_coarse_geo` may cause rays grazing the geometry boundary to be inconsistently classified.
+- The method assumes the coarse geometry is static or updated infrequently. If the geometry changes significantly between ray generation steps, the mask becomes stale [S2, unofficial].
+
+## Subtopics
+
+### [Pixel Batching](3134-pixel-batching.md)
+Samples rays based on spatial proximity within an image, useful for preserving local coherence. Choose when local texture details are critical.
+
+### [Semantic Ray Sampling](3896-semantic-ray-sampling.md)
+Filters rays based on semantic class labels. Choose when specific object categories need higher sampling density.
+
+### [Training Ray Shuffling](5446-training-ray-shuffling.md)
+Randomizes the order of rays to prevent overfitting to specific spatial patterns. Choose when training stability is an issue.
+
+### [Training Ray Sub-sampling](13130-training-ray-sub-sampling.md)
+Reduces the number of rays per image. Choose when computational budget is extremely limited.
+
+### [Memory-Saving Ray Sampling](13419-memory-saving-ray-sampling.md)
+Optimizes memory usage by not storing all rays in RAM. Choose when scene size exceeds available memory.
+
+### [Texture-Space Sampling](16007-texture-space-sampling.md)
+Samples rays based on texture space coordinates. Choose when working with texture-mapped scenes.
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$ to generate and filter rays, where $N$ is the total number of pixels. The geometry intersection step dominates, taking $O(N \cdot C)$ where $C$ is the cost of `hit_coarse_geo` per ray chunk.
+- **Memory Complexity:** $O(N_{valid})$ for the output buffers. Pre-allocation uses $O(N)$ but is trimmed.
+- **Performance:** Reduces training time by skipping background rays. The speedup depends on the ratio of valid rays to total rays [S2, S3, unofficial].
+- **Strengths:** Significant reduction in unnecessary computation for scenes with large backgrounds.
+- **Limitations:** Requires a pre-computed or fast coarse geometry model. Ineffective if most rays hit the geometry.
+- **When to use:** Scenes with significant empty space or background.
+- **When not to use:** Scenes where the geometry is unknown or too complex to compute quickly.
+
+## Background
+This method originates from the DirectVoxGO and related NeRF optimization frameworks, which use coarse geometry to guide ray sampling [S2, S3, unofficial]. It is part of the training loop setup in differentiable volume rendering pipelines, specifically within the NeRF Training Loop configuration [S2, unofficial].
+
+## Sources
+[S1] sjtuytc/UnboundedNeRFPytorch, https://github.com/sjtuytc/UnboundedNeRFPytorch, fetched 2026-10-26 (unofficial)
+[S2] sunset1995/DirectVoxGO, https://github.com/sunset1995/DirectVoxGO, fetched 2026-10-26 (unofficial)
+[S3] Jumpat/SegmentAnythingin3D, https://github.com/Jumpat/SegmentAnythingin3D, fetched 2026-10-26 (unofficial)

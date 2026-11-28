@@ -1,0 +1,345 @@
+--- v001.md
++++ v002.md
+@@ -44,5 +44,5 @@
+     *   Apply a single linear layer to match the dimensionality of the positional encoding with the hidden dimensions of the MLP [S1].
+     *   Aggregate the output with the intermediate feature maps by a simple per-channel mean pooling [S1].
+-2.  **Appearance Decoding:** Feed $\phi_S$ and $\phi_A$ into Appearance Decoder $\Psi_A$ to produce appearance network $\xi$ [S1].
++2.  **Appearance Decoding:** Feed $\phi_A$ and $\phi_S$ into Appearance Decoder $\Psi_A$ to produce appearance network $\xi$ [S1].
+     *   $\xi := \Psi_A(\phi_A, \phi_S)$ [S1].
+     *   $\xi: O \times S^2 \rightarrow \mathbb{R}^3$ outputs RGB color for point $x \in O$ and viewing direction $d \in S^2$ [S1].
+@@ -89,5 +89,5 @@
+ 
+ **Explicit Meshing (Post-processing)**
+-1.  Render depth and color from multiple views using AutoRF, with cameras facing the object center [S1].
++1.  Render depth and color from multiple views using AutoRF. Position cameras facing the object center [S1].
+ 2.  Apply TSDF-fusion on the resulting pairs of depth and color images to create a 3D mesh [S1].
+ 
+@@ -98,4 +98,34 @@
+ import torch.nn as nn
+ import torch.nn.functional as F
++
++def positional_encoding(x, num_frequencies=6):
++    """Standard NeRF positional encoding [G]."""
++    scales = torch.tensor([2**i for i in range(num_frequencies)], device=x.device)
++    scaled_x = x * scales
++    return torch.cat([torch.sin(scaled_x), torch.cos(scaled_x)], dim=-1)
++
++def compute_occupancy_mask(instance_mask, semantic_map, bg_classes):
++    """Compute occupancy mask Y: +1 foreground, -1 background, 0 unknown [S1]."""
++    y = torch.zeros_like(instance_mask, dtype=torch.float32)
++    y[instance_mask > 0] = 1.0
++    y[(semantic_map in bg_classes) & (instance_mask == 0)] = -1.0
++    return y
++
++def generate_object_centric_rays(h, w, intrinsics, bbox_3d):
++    """Generate rays in NOCS from camera rays remapped by bounding box [S1]."""
++    # NOCS is a unit cube [-0.5, 0.5]^3.
++    # Unproject pixel coordinates to the cube boundaries.
++    u = torch.arange(w).float()
++    v = torch.arange(h).float()
++    uv = torch.stack(torch.meshgrid(u, v, indexing='ij'), dim=-1)
++    # Standard pinhole unprojection adapted to NOCS
++    fx, fy = intrinsics[0,0], intrinsics[1,1]
++    cx, cy = intrinsics[0,2], intrinsics[1,2]
++    z = torch.ones_like(uv[..., 0])
++    x = (uv[..., 0] - cx) / fx
++    y = (uv[..., 1] - cy) / fy
++    origins = torch.stack([x, y, z], dim=-1)
++    directions = F.normalize(origins, dim=-1)
++    return origins, directions
+ 
+ class AutoRF:
+@@ -107,141 +137,98 @@
+         self.optimizer = None
+ 
+-    def preprocess(self, image, bbox_3d, mask):
+-        """
+-        Preprocesses the input image and generates auxiliary data.
+-        image: H x W x 3 RGB image
+-        bbox_3d: 3D bounding box in camera space
+-        mask: Instance mask
+-        Returns: masked_image, occupancy_mask, object_centric_camera
+-        """
+-        # Rescale image to max 320px preserving aspect ratio
+-        masked_image = crop_and_rescale(image, bbox_3d, mask)
+-        
+-        # Compute occupancy mask Y
+-        # +1: foreground, -1: background, 0: unknown
+-        occupancy_mask = compute_occupancy_mask(mask, semantic_segmentation(image))
+-        
+-        # Compute object-centric camera gamma from bbox_3d
+-        object_centric_camera = create_object_centric_camera(bbox_3d)
+-        
+-        return masked_image, occupancy_mask, object_centric_camera
++    def preprocess(self, image, bbox_3d, mask, semantic_map, intrinsics):
++        h, w = image.shape[1], image.shape[2]
++        scale = min(320 / h, 320 / w)
++        new_h, new_w = int(h * scale), int(w * scale)
++        masked_image = F.interpolate(image.unsqueeze(0), size=(new_h, new_w), mode='bilinear', align_corners=False).squeeze(0)
++        occupancy_mask = compute_occupancy_mask(mask, semantic_map, bg_classes={0, 1})
++        ray_origins, ray_directions = generate_object_centric_rays(new_h, new_w, intrinsics, bbox_3d)
++        return masked_image, occupancy_mask, ray_origins, ray_directions
+ 
+     def encode(self, image):
+-        """
+-        Encodes image into shape and appearance codes.
+-        """
+-        phi_S, phi_A = self.encoder(image)
+-        return phi_S, phi_A
++        return self.encoder(image)
+ 
+     def decode(self, phi_S, phi_A, points_3d, directions):
+-        """
+-        Decodes codes into density and color.
+-        points_3d: N x 3 points in NOCS
+-        directions: N x 3 viewing directions
+-        """
+         sigma = self.shape_decoder(phi_S, points_3d)
+         color = self.color_decoder(phi_S, phi_A, points_3d, directions)
+         return sigma, color
+ 
+-    def render(self, sigma, color, ray_start, ray_end, num_samples=64):
+-        """
+-        Renders color along rays using volume rendering.
+-        """
+-        # Sample points along ray
+-        t_vals = torch.linspace(ray_start, ray_end, num_samples)
+-        points = ray_origin + t_vals.unsqueeze(-1) * ray_direction
+-        
+-        # Compute density and color at sampled points
+-        # (Assuming sigma and color are pre-computed or computed on the fly)
+-        
+-        # Compute accumulated transmittance
+-        # alpha_t = exp(-integral(sigma))
+-        # dot_alpha_t = derivative of alpha_t
+-        # C = integral(dot_alpha_t * color)
+-        
+-        # Standard volume rendering implementation
+-        weights = compute_weights(sigma, t_vals)
++    def render_volume(self, sigma, color, ray_origins, ray_directions, num_samples=64):
++        """Volume rendering along rays intersecting the unit cube O [S1]."""
++        # Ray-cube intersection for unit cube [-0.5, 0.5]^3
++        inv_dir = 1.0 / ray_directions
++        t_min = (-0.5 - ray_origins) * inv_dir
++        t_max = (0.5 - ray_origins) * inv_dir
++        t_enter = torch.max(torch.min(t_min[:, :, 0], torch.min(t_min[:, :, 1], t_min[:, :, 2])),
++                            torch.min(torch.min(t_max[:, :, 0], t_max[:, :, 1]), t_max[:, :, 2]))
++        t_exit = torch.min(torch.max(t_min[:, :, 0], torch.max(t_min[:, :, 1], t_min[:, :, 2])),
++                           torch.max(torch.max(t_max[:, :, 0], t_max[:, :, 1]), t_max[:, :, 2]))
++        t_enter = torch.clamp(t_enter, min=0.0)
++        t_exit = torch.clamp(t_exit, min=0.0)
++        
++        t_vals = torch.linspace(t_enter, t_exit, num_samples)
++        deltas = t_vals[1:] - t_vals[:-1]
++        deltas = torch.cat([deltas, torch.tensor([1e10], device=sigma.device)], dim=-1)
++        
++        exp_neg_sigma_delta = torch.exp(-sigma * deltas)
++        transmittance = torch.cumprod(exp_neg_sigma_delta, dim=-2)
++        transmittance_shifted = torch.cat([torch.ones_like(transmittance[:, :1]), transmittance[:, :-1]], dim=-2)
++        weights = transmittance_shifted * (1.0 - exp_neg_sigma_delta)
++        
+         color_rendered = torch.sum(weights.unsqueeze(-1) * color, dim=-2)
+-        return color_rendered
+-
+-    def compute_loss(self, rendered_color, target_image, occupancy_mask, sigma, ray_intersections):
+-        """
+-        Computes photometric and occupancy losses.
+-        """
+-        # Photometric Loss
+-        foreground_mask = occupancy_mask == 1
++        final_alpha = transmittance_shifted[:, -1]
++        return color_rendered, final_alpha
++
++    def compute_loss(self, rendered_color, target_image, occupancy_mask, final_alpha):
++        foreground_mask = occupancy_mask == 1.0
+         l_rgb = torch.mean((rendered_color[foreground_mask] - target_image[foreground_mask])**2)
+         
+-        # Occupancy Loss
+-        # alpha is the accumulated transmittance at the end of the ray segment
+-        alpha = compute_accumulated_transmittance(sigma, ray_intersections)
+-        
+-        occ_mask = occupancy_mask != 0
+-        # Formula: -1/|W| * sum [ Y/2 * log(0.5 - alpha) + 0.5 * log(0.5 + alpha) ]
+-        # Note: This formula assumes alpha is normalized or shifted appropriately for the log domain
+-        # The source formula is: Y_u/2 * log(1/2 - alpha) + 1/2 * log(1/2 + alpha)
+-        # This implies a specific mapping of alpha to probability space.
+-        
+-        l_occ = 0.0
+-        if torch.any(occ_mask):
+-            y = occupancy_mask[occ_mask]
+-            alpha_val = alpha[occ_mask]
+-            # Guard against log(0) or negative arguments if necessary
+-            term1 = (y / 2.0) * torch.log(torch.clamp(0.5 - alpha_val, min=1e-6))
+-            term2 = 0.5 * torch.log(torch.clamp(0.5 + alpha_val, min=1e-6))
+-            l_occ = -torch.mean(term1 + term2)
+-            
+-        total_loss = l_rgb + self.lambda_occ * l_occ
+-        return total_loss
+-
+-    def train_step(self, image, bbox_3d, mask):
+-        masked_image, occupancy_mask, camera = self.preprocess(image, bbox_3d, mask)
+-        
++        occ_mask = occupancy_mask != 0.0
++        y = occupancy_mask[occ_mask]
++        alpha = final_alpha[occ_mask]
++        alpha_clamped = torch.clamp(alpha, min=1e-6, max=1-1e-6)
++        term1 = (y / 2.0) * torch.log(torch.clamp(0.5 - alpha_clamped, min=1e-6))
++        term2 = 0.5 * torch.log(torch.clamp(0.5 + alpha_clamped, min=1e-6))
++        l_occ = -torch.mean(term1 + term2)
++        
++        return l_rgb + self.lambda_occ * l_occ
++
++    def train_step(self, image, bbox_3d, mask, semantic_map, intrinsics):
++        masked_image, occupancy_mask, ray_origins, ray_directions = self.preprocess(image, bbox_3d, mask, semantic_map, intrinsics)
+         phi_S, phi_A = self.encode(masked_image)
+         
+-        # Sample rays
+-        rays = sample_rays(camera, num_rays=1024)
+-        
+-        # Render
+-        sigma, color = self.decode(phi_S, phi_A, rays.points, rays.directions)
+-        rendered_color = self.render(sigma, color, rays.start, rays.end)
+-        
+-        # Loss
+-        loss = self.compute_loss(rendered_color, masked_image, occupancy_mask, sigma, rays)
+-        
++        num_rays = 1024
++        idx = torch.randperm(ray_origins.shape[0] * ray_origins.shape[1])[:num_rays]
++        ray_origins = ray_origins.view(-1, 3)[idx]
++        ray_directions = ray_directions.view(-1, 3)[idx]
++        target_image = masked_image.view(-1, 3)[idx]
++        occ_mask_sample = occupancy_mask.view(-1)[idx]
++        
++        sigma, color = self.decode(phi_S, phi_A, ray_origins, ray_directions)
++        rendered_color, final_alpha = self.render_volume(sigma, color, ray_origins, ray_directions)
++        
++        loss = self.compute_loss(rendered_color, target_image, occ_mask_sample, final_alpha)
+         loss.backward()
+         self.optimizer.step()
+         self.optimizer.zero_grad()
+-        
+         return loss
+ 
+-    def test_time_optimize(self, image, bbox_3d, mask, iterations=32):
+-        """
+-        Optimizes phi_S, phi_A, and bbox_3d pose at test time.
+-        """
+-        masked_image, occupancy_mask, camera = self.preprocess(image, bbox_3d, mask)
+-        
+-        phi_S = self.encode_shape(masked_image)
+-        phi_A = self.encode_appearance(masked_image)
+-        
+-        # Initialize optimizer for codes and bbox pose
++    def test_time_optimize(self, image, bbox_3d, mask, semantic_map, intrinsics, iterations=32):
++        masked_image, occupancy_mask, ray_origins, ray_directions = self.preprocess(image, bbox_3d, mask, semantic_map, intrinsics)
++        phi_S, phi_A = self.encode(masked_image)
++        
+         optimizer = torch.optim.Adam([
+             {'params': phi_S, 'lr': 0.05},
+             {'params': phi_A, 'lr': 0.02},
+-            {'params': bbox_3d.pose, 'lr': 0.02} # Size fixed
++            {'params': bbox_3d.pose, 'lr': 0.02}
+         ])
+         
+-        for i in range(iterations):
+-            # Re-encode if necessary or use cached codes
+-            # Re-render with updated codes and bbox
+-            rays = sample_rays(camera, num_rays=1024) # Or full image
+-            sigma, color = self.decode(phi_S, phi_A, rays.points, rays.directions)
+-            rendered_color = self.render(sigma, color, rays.start, rays.end)
+-            
+-            loss = self.compute_loss(rendered_color, masked_image, occupancy_mask, sigma, rays)
++        for _ in range(iterations):
++            sigma, color = self.decode(phi_S, phi_A, ray_origins, ray_directions)
++            rendered_color, final_alpha = self.render_volume(sigma, color, ray_origins, ray_directions)
++            loss = self.compute_loss(rendered_color, masked_image, occupancy_mask, final_alpha)
+             loss.backward()
+             optimizer.step()
+             optimizer.zero_grad()
+-            
+         return phi_S, phi_A, bbox_3d
+ 
+@@ -249,15 +236,18 @@
+     def __init__(self):
+         super().__init__()
+-        # ResNet34 backbone with InstanceNorm
+-        self.backbone = ResNet34InstanceNorm()
+-        # Shared first 4 layers
+-        # Replicated next 2 layers for heads
+-        self.shape_head = ShapeHead()
+-        self.appearance_head = AppearanceHead()
++        self.backbone = nn.Sequential(
++            nn.Conv2d(3, 64, 7, stride=2, padding=3, bias=False),
++            nn.InstanceNorm2d(64),
++            nn.ReLU(inplace=True),
++            nn.MaxPool2d(3, stride=2, padding=1),
++            # ... first 4 layers shared ...
++        )
++        self.shape_head = nn.AdaptiveMaxPool2d(1)
++        self.appearance_head = nn.AdaptiveMaxPool2d(1)
+         
+     def forward(self, x):
+         features = self.backbone(x)
+-        phi_S = self.shape_head(features)
+-        phi_A = self.appearance_head(features)
++        phi_S = self.shape_head(features).squeeze(-1).squeeze(-1)
++        phi_A = self.appearance_head(features).squeeze(-1).squeeze(-1)
+         return phi_S, phi_A
+ 
+@@ -265,32 +255,39 @@
+     def __init__(self):
+         super().__init__()
+-        # 5 ResNet blocks, hidden dim 128
+         self.blocks = nn.ModuleList([ResNetBlock(128) for _ in range(5)])
+-        self.linear = nn.Linear(128, 128) # Match pos enc dim
++        self.linear = nn.Linear(128, 128)
+         
+     def forward(self, phi_S, points):
+-        # Positional encoding of points
+-        pos_enc = positional_encoding(points, num_frequencies=6)
+-        
+-        # Linear layer to match dims
++        pos_enc = positional_encoding(points)
+         pos_enc_proj = self.linear(pos_enc)
+-        
+-        # Aggregate with intermediate features via mean pooling
+-        # ... implementation details ...
+-        sigma = ...
+-        return sigma
++        h = phi_S.unsqueeze(1) + pos_enc_proj
++        for block in self.blocks:
++            h = block(h)
++        return h.mean(dim=-2)
+ 
+ class ColorDecoder(nn.Module):
+     def __init__(self):
+         super().__init__()
+-        # 5 ResNet blocks, hidden dim 128
+         self.blocks = nn.ModuleList([ResNetBlock(128) for _ in range(5)])
+         
+     def forward(self, phi_S, phi_A, points, directions):
+-        # ... similar to shape decoder ...
+-        # On 3rd layer, pass shape encoder output
+-        # On final 2 layers, pass view direction
+-        color = ...
+-        return color
++        pos_enc = positional_encoding(points)
++        h = phi_A.unsqueeze(1) + pos_enc
++        for i, block in enumerate(self.blocks):
++            h = block(h)
++            if i == 2:
++                h = h + phi_S.unsqueeze(1)
++            if i >= 3:
++                h = h + directions.unsqueeze(1)
++        return h.mean(dim=-2)
++
++class ResNetBlock(nn.Module):
++    def __init__(self, dim):
++        super().__init__()
++        self.fc1 = nn.Linear(dim, dim)
++        self.relu = nn.ReLU(inplace=True)
++        self.fc2 = nn.Linear(dim, dim)
++    def forward(self, x):
++        return self.relu(self.fc2(self.relu(self.fc1(x))) + x)
+ ```
+ 

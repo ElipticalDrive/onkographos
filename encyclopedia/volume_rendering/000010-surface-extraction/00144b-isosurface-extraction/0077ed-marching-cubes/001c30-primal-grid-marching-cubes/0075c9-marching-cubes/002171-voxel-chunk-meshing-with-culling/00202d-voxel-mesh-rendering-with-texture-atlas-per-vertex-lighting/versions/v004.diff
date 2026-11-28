@@ -1,0 +1,255 @@
+--- v003.md
++++ v004.md
+@@ -4,49 +4,75 @@
+ 
+ ## Overview
+-This method renders voxel chunks as triangle meshes using a horizontal texture atlas for block faces, applying per-vertex ambient occlusion (AO) and smooth light in the fragment shader with directional lighting [S1, unofficial]. It differs from [Naive Voxel Meshing](2376-naive-voxel-meshing.md) by using a shared atlas to reduce texture bind calls, and from [GPU Marching Cubes (Face-based)](3674-gpu-marching-cubes-face-based.md) by relying on axis-aligned quads rather than isosurfaces [S1, unofficial].
++This method renders voxel chunks as triangle meshes by mapping block faces to a horizontal texture atlas and applying per-vertex lighting in the fragment shader. It builds on [Voxel Chunk Meshing with Culling](2523-voxel-chunk-meshing-with-culling.md) to generate geometry, then optimizes rendering by batching materials into a single atlas and computing lighting values (ambient occlusion and smooth light) at the vertex level. Unlike [Naive Voxel Meshing](2376-naive-voxel-meshing.md) which may use separate textures or per-face lighting, this approach reduces texture bind calls and supports complex block shapes (slabs, stairs) via specific UV offsets.
+ 
+ ## How it works
+-**Inputs and Outputs**
+-- **Input**: A voxel chunk, a set of 16×16 tile images for block faces, and camera matrices [S1, unofficial].
+-- **Output**: A rendered image containing opaque, two-sided, and transparent geometry [S1, unofficial].
+ 
+-**Data Structures**
+-The vertex structure contains the following fields [S1, unofficial]:
+-- `pos`: `Vec4<f32>` (position in world space, w=1.0).
+-- `uv`: `Vec2<f32>` (local UV coordinates within the tile, typically 0.0 to 1.0).
+-- `normal`: `Vec3<f32>` (face normal).
+-- `ao`: `f32` (ambient occlusion, normalized).
+-- `smooth_light`: `f32` (smooth lighting value, normalized).
+-- `block`: `MyBlock` (enum identifying the block type).
+-- `atlas_offset`: `f32` (U-offset in the atlas strip, representing the tile index).
+-- `two_sided`: `bool` (flag for backface culling behavior).
++### Inputs and Outputs
++*   **Input**: A voxel chunk containing blocks with defined shapes (e.g., `WholeBlock`, `Slab`, `Stair`, `Ramp`, `Facade`) and culling modes (`Opaque`, `TransparentMerged`, `TransparentUnmerged`, `Empty`) [S1, unofficial].
++*   **Input**: A set of 16x16 tile images for each block type [S1, unofficial].
++*   **Output**: A vertex buffer containing positions, UVs, normals, lighting attributes, and block metadata [S1, unofficial].
++*   **Output**: A 2D texture atlas (Buffer2d) containing all block face tiles concatenated horizontally [S1, unofficial].
+ 
+-The interpolated vertex shader output (`VsOut`) passed to the fragment shader includes [S1, unofficial]:
+-- `uv`: `Vec2<f32>`
+-- `normal`: `Vec3<f32>`
+-- `atlas_u_offset`: `f32`
+-- `ao`: `f32`
+-- `smooth_light`: `f32`
++### Data Structures
+ 
+-**Texture Atlas Layout**
+-The atlas is a `Buffer2d` (2D texture) constructed by concatenating 16×16 tile images horizontally [S1, unofficial].
+-- **Width**: `tiles.len() * 16`
+-- **Height**: `16`
+-- Each block type and face direction maps to a specific U-offset (0.0 to 14.0 representing the tile index) [S1, unofficial]. Cactus blocks use different offsets for top/bottom faces versus side faces [S1, unofficial].
++**Texture Atlas**
++*   **Layout**: A 2D buffer of width `tiles.len() * 16` and height `16`.
++*   **Content**: 16x16 pixel tiles concatenated horizontally. Each tile corresponds to a specific block face orientation [S1, unofficial].
+ 
+-**Numbered Steps**
+-1. **Build Texture Atlas**: Load individual 16×16 tile images and concatenate them into a single horizontal strip [S1, unofficial].
+-2. **Generate Mesh**: For each visible face in the chunk (processed via [Voxel Chunk Meshing with Culling](2523-voxel-chunk-meshing-with-culling.md)):
+-   a. Determine the block type and face orientation [S1, unofficial].
+-   b. Calculate the `atlas_offset` based on block type and face direction [S1, unofficial].
+-   c. Determine if the geometry is `two_sided` (diagonal faces or facades) [S1, unofficial].
+-   d. Compute vertex attributes: position, UV, normal, AO (raw value divided by 3.0), smooth light (raw value divided by 15.0), block type, atlas offset, and two-sided flag [S1, unofficial].
+-   e. Use anisotropy-corrected indices to ensure proper interpolation of AO across shared vertices [S1, unofficial].
+-3. **Render Opaque Geometry**: Draw non-two-sided vertices with backface culling enabled [S1, unofficial].
+-4. **Render Two-Sided Geometry**: Draw two-sided vertices (cross-shaped billboards, facades) without backface culling [S1, unofficial].
+-5. **Render Transparent Geometry**: Draw transparent blocks with appropriate blending [S1, unofficial].
++**Vertex Structure**
++Each vertex in the output mesh contains the following fields [S1, unofficial]:
++*   `pos`: `Vec4<f32>` (x, y, z, 1.0)
++*   `uv`: `Vec2<f32>` (local texture coordinates within the 16x16 tile)
++*   `normal`: `Vec3<f32>` (face normal)
++*   `ao`: `f32` (ambient occlusion, normalized)
++*   `smooth_light`: `f32` (smooth light value, normalized)
++*   `block`: `MyBlock` (enum identifying the block type)
++*   `atlas_offset`: `f32` (U-offset in the atlas strip, representing the tile index)
++*   `two_sided`: `bool` (flag for backface culling behavior)
+ 
+-**Formulas**
+-The lighting calculation in the fragment shader is [S1, unofficial]:
++**Interpolated Output (VsOut)**
++Attributes passed to the fragment shader [S1, unofficial]:
++*   `uv`: `Vec2<f32>`
++*   `normal`: `Vec3<f32>`
++*   `atlas_u_offset`: `f32`
++*   `ao`: `f32`
++*   `smooth_light`: `f32`
++
++### Steps
++
++1.  **Build Texture Atlas**:
++    *   Load all 16x16 tile images for the block types.
++    *   Concatenate them horizontally into a `Buffer2d` of width `N * 16` and height `16`, where `N` is the number of unique block faces/tiles [S1, unofficial].
++
++2.  **Map Block Types to Atlas Offsets**:
++    *   For each block type and face orientation, calculate a U-offset (`atlas_offset`) in the range `[0.0, 14.0]` representing the tile index.
++    *   Note: Some blocks (e.g., Cactus) use different offsets for top/bottom faces versus side faces [S1, unofficial].
++
++3.  **Generate Mesh Geometry**:
++    *   Iterate through the voxel chunk (as defined in [Voxel Chunk Meshing with Culling](2523-voxel-chunk-meshing-with-culling.md)) to identify exposed faces.
++    *   For each exposed face (quad):
++        *   Determine the block type and shape (e.g., `WholeBlock`, `Stair`, `Ramp`).
++        *   Calculate the `atlas_offset` based on block type and face orientation.
++        *   Determine if the geometry is `two_sided`. This is true if the face is diagonal (e.g., stair/ramp slopes) or if the shape is a `Facade` [S1, unofficial].
++        *   Compute vertex attributes for the four corners of the quad:
++            *   `pos`: World position of the vertex.
++            *   `uv`: Local UV coordinates (0.0 to 1.0) within the 16x16 tile.
++            *   `normal`: Face normal. For diagonal faces (stairs/ramps), use the slope normal [S1, unofficial].
++            *   `ao`: Ambient occlusion value from the quad data, divided by 3.0.
++            *   `smooth_light`: Smooth light value from the quad data, divided by 15.0.
++            *   `block`: The block type enum.
++            *   `atlas_offset`: The pre-calculated U-offset.
++            *   `two_sided`: The boolean flag determined earlier.
++        *   Use anisotropy-corrected indices to ensure proper interpolation of AO and lighting across the quad [S1, unofficial].
++
++4.  **Render Pipeline**:
++    *   **Opaque Geometry**: Render first with backface culling enabled. Exclude `two_sided` vertices.
++    *   **Two-Sided Geometry**: Render next without backface culling. Include `two_sided` vertices (cross-shaped billboards, facades, diagonal slopes) [S1, unofficial].
++    *   **Transparent Geometry**: Render last (if applicable) [S1, unofficial].
++
++### Formulas
++
++**Lighting Calculation**
++The final color shade is computed in the fragment shader using the interpolated vertex attributes [S1, unofficial]:
+ 
+ $$
+@@ -55,108 +81,45 @@
+ 
+ Where:
+-- $ambient = 0.35$ [S1, unofficial]
+-- $\mathbf{l} = \text{normalize}(0.4, 0.7, 0.5)$ [S1, unofficial]
+-- $\mathbf{n}$ is the vertex normal [S1, unofficial]
+-- $ao \in [0, 1]$ is the interpolated ambient occlusion value [S1, unofficial]
+-- $smooth\_light \in [0, 1]$ is the interpolated smooth light value [S1, unofficial]
++*   $ambient = 0.35$
++*   $\mathbf{l} = \text{normalize}(0.4, 0.7, 0.5)$ (directional light vector)
++*   $\mathbf{n}$ is the interpolated vertex normal
++*   $ao \in [0, 1]$ is the interpolated ambient occlusion
++*   $smooth\_light \in [0, 1]$ is the interpolated smooth light value
+ 
+-**Parameters**
+-- `ambient`: 0.35 [S1, unofficial]
+-- `light_dir`: (0.4, 0.7, 0.5) [S1, unofficial]
+-- `smooth_light_weight`: 0.6 [S1, unofficial]
+-- `tile_size`: 16 [S1, unofficial]
++**Atlas UV Lookup**
++To handle wrapping and clamping in the fragment shader [S1, unofficial]:
++*   The U-coordinate is remapped using `rem_euclid(1.0)` to handle wrapping.
++*   The U-coordinate is clamped to `min(atlas_size[0] - 1)` to prevent out-of-bounds access.
+ 
+-**Edge Cases and Pitfalls**
+-- **Atlas UV Wrapping**: Use `rem_euclid(1.0)` to handle UV wrapping and clamp to `atlas_size[0] - 1` to prevent out-of-bounds texture fetches [S1, unofficial].
+-- **Alpha Blending**: Use a threshold of 0.01 to skip blending for near-zero alpha values, preventing visual artifacts [S1, unofficial].
+-- **AO Interpolation**: Ensure indices are anisotropy-corrected to avoid incorrect AO values at shared vertices between faces with different orientations [S1, unofficial].
++**Alpha Blending**
++*   A threshold of `0.01` is used to skip blending for near-zero alpha values, preventing artifacts [S1, unofficial].
+ 
+-**Pseudocode**
+-```python
+-def render_voxel_chunk(chunk, tile_images, mvp):
+-    # 1. Build Texture Atlas
+-    num_tiles = len(tile_images)
+-    atlas_width = num_tiles * 16
+-    atlas_height = 16
+-    atlas = [[0.0] * atlas_width for _ in range(atlas_height)]
+-    for i, tile in enumerate(tile_images):
+-        for y in range(16):
+-            for x in range(16):
+-                atlas[y][i * 16 + x] = tile[y][x]
++### Parameters
+ 
+-    # 2. Generate Vertices
+-    vertices = []
+-    for quad in chunk.visible_quads:
+-        lit_block = quad.block
+-        two_sided = quad.is_diagonal or quad.shape == "FACADE"
+-        atlas_off = quad.block.u_offset(quad.face)
++*   `ambient`: 0.35 (base illumination factor) [S1, unofficial]
++*   `light_dir`: (0.4, 0.7, 0.5) (normalized directional light vector) [S1, unofficial]
++*   `smooth_light_weight`: 0.6 (multiplier for smooth light contribution) [S1, unofficial]
++*   `tile_size`: 16 (width and height of each block face texture in the atlas) [S1, unofficial]
+ 
+-        indices = quad.anisotropy_corrected_indices()
+-        for idx in indices:
+-            vertices.append({
+-                "pos": [quad.positions[idx].x, quad.positions[idx].y, quad.positions[idx].z, 1.0],
+-                "uv": quad.uvs[idx],
+-                "normal": quad.normal,
+-                "ao": quad.ao[idx] / 3.0,
+-                "smooth_light": quad.light[idx] / 15.0,
+-                "block": lit_block,
+-                "atlas_offset": atlas_off,
+-                "two_sided": two_sided
+-            })
++### Edge Cases and Pitfalls
+ 
+-    # 3. Render Opaque Geometry
+-    opaque = [v for v in vertices if not v["two_sided"] and v["block"].is_opaque]
+-    # Standard MVP transformation, backface culling, and triangle rasterization [G]
+-    rasterize(opaque, atlas, mvp, cull_mode="BACK")
+-
+-    # 4. Render Two-Sided Geometry
+-    two_sided = [v for v in vertices if v["two_sided"]]
+-    # Standard MVP transformation, no culling, and triangle rasterization [G]
+-    rasterize(two_sided, atlas, mvp, cull_mode="NONE")
+-
+-    # 5. Render Transparent Geometry
+-    transparent = [v for v in vertices if v["block"].is_transparent]
+-    # Standard MVP transformation, no culling, alpha blending, and rasterization [G]
+-    rasterize(transparent, atlas, mvp, cull_mode="NONE", blend=True)
+-
+-def fragment_shader(uv, normal, atlas_u_offset, ao, smooth_light, atlas, num_tiles):
+-    atlas_width = len(atlas[0])
+-    atlas_height = len(atlas)
+-
+-    tile_u = atlas_u_offset * 16.0
+-    atlas_uv_x = (uv[0] + tile_u) / atlas_width
+-    atlas_uv_y = uv[1] / atlas_height
+-
+-    # Clamp to valid width to prevent out-of-bounds fetches [S1, unofficial]
+-    atlas_uv_x = min(atlas_uv_x, (atlas_width - 1) / atlas_width)
+-
+-    color = sample_atlas(atlas, atlas_uv_x, atlas_uv_y)
+-
+-    ambient = 0.35
+-    light_dir = normalize([0.4, 0.7, 0.5])
+-    smooth_light_weight = 0.6
+-
+-    diffuse = max(0.0, dot(normal, light_dir))
+-    shade = (ambient + (1.0 - ambient) * diffuse) * ao + smooth_light * smooth_light_weight
+-
+-    # Skip blending for near-zero alpha to prevent artifacts [S1, unofficial]
+-    if color[3] < 0.01:
+-        return [c * shade for c in color]
+-    return [c * shade for c in color]
+-
+-def sample_atlas(atlas, u, v):
+-    # Standard point sample from 2D texture array [G]
+-    width = len(atlas[0])
+-    height = len(atlas)
+-    u_idx = int(u * width) % width
+-    v_idx = int(v * height) % height
+-    return atlas[v_idx][u_idx]
+-```
++*   **Diagonal Faces**: Stairs and ramps require specific slope normals and two-sided rendering to avoid visual artifacts. The normal is calculated as the normalized sum of the slope face normal and the front face normal, scaled by $1/\sqrt{2}$ [S1, unofficial].
++*   **Atlas Wrapping**: UV lookups must handle edge cases where the U-coordinate wraps around the atlas width. Using `rem_euclid` and clamping ensures correct sampling [S1, unofficial].
++*   **AO Interpolation**: Standard vertex indices may cause incorrect AO interpolation across quads. Anisotropy-corrected indices must be used to ensure smooth lighting transitions [S1, unofficial].
++*   **Transparent Blocks**: Blocks with `CullMode::TransparentMerged` (e.g., glass) only cull faces between identical block types. Blocks with `CullMode::TransparentUnmerged` (e.g., leaves) always render faces, even between identical blocks [S1, unofficial].
+ 
+ ## Operating characteristics
+ 
++*   **Time Complexity**: Linear with respect to the number of exposed faces in the chunk. Atlas construction is constant relative to chunk size but depends on the number of unique block types.
++*   **Memory Complexity**: Linear with respect to the number of vertices in the mesh. The atlas size is constant relative to chunk size but depends on the number of unique block textures.
++*   **Performance**: High performance due to reduced texture bind calls (single atlas) and efficient vertex lighting. Suitable for real-time rendering of large voxel worlds.
++*   **Strengths**: Efficient batching, support for complex block shapes, smooth lighting via per-vertex AO.
++*   **Limitations**: Limited to 16x16 tile resolution per block face. Atlas size grows with the number of unique block types. Two-sided rendering increases draw calls or requires separate pipelines.
++
+ ## Background
+-Origin: Implemented in the `finnbear/voxmesh` repository for real-time voxel rendering [S1, unofficial]. It builds upon [Voxel Chunk Meshing with Culling](2523-voxel-chunk-meshing-with-culling.md) for geometry generation and extends it with texture atlas mapping and per-vertex lighting [S1, unofficial].
++
++This method is derived from the `voxmesh` project by finnbear, which implements a voxel mesh renderer with texture atlases and per-vertex lighting [S1, unofficial]. It is commonly used in voxel-based games and simulations where performance and visual quality are balanced through efficient mesh generation and lighting techniques.
+ 
+ ## Sources
++
+ [S1] finnbear/voxmesh, https://github.com/finnbear/voxmesh, fetched 2026-10-26 (unofficial)

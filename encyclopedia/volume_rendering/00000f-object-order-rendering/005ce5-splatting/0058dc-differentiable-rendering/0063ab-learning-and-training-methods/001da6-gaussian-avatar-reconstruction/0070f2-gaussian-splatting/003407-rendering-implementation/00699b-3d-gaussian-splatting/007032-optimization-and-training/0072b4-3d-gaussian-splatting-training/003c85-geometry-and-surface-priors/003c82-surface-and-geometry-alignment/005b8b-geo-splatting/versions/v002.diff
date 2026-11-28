@@ -1,0 +1,164 @@
+--- v001.md
++++ v002.md
+@@ -3,29 +3,37 @@
+ 
+ ## Overview
+-Geo-Splatting is a physically-based inverse rendering method that augments 3D Gaussian Splatting (3DGS) with explicit geometric priors to improve normal estimation and light transport modeling [S2]. It solves the problem of noisy material decomposition and flawed relighting inherent in existing 3DGS-based methods that rely on approximated Gaussian normals [S2]. Unlike siblings that use implicit constraints or low-frequency spherical Gaussians, Geo-Splatting differentiably constructs surface-aligned Gaussian points from an optimizable explicit mesh, leveraging well-defined mesh normals and opaque surfaces for accurate self-occlusion and reflective surface handling [S2].
++Geo-Splatting is a physically-based inverse rendering method that augments 3D Gaussian Splatting (3DGS) with explicit geometric guidance to improve normal estimation and light transport modeling [S2]. It addresses the inaccuracies in material decomposition and relighting caused by the approximated normals and semi-transparent nature of standard Gaussian points [S2]. Unlike sibling methods like SuGaR which rely on implicit geometric constraints or approximated normals, Geo-Splatting differentiably constructs surface-aligned Gaussian points from an optimizable explicit mesh, leveraging well-defined mesh normals and an opaque mesh surface for accurate light transport [S2].
+ 
+ ## How it works
+-**Inputs:** Multi-view input images, initial learnable isovalue grids.
+-**Outputs:** Decomposed material properties (Albedo, Roughness, Normal), environment light probe, and relit images.
++**Inputs:** Multi-view images, camera poses.
++**Outputs:** Optimized 3D Gaussian parameters (centers, covariances, colors, opacities), explicit triangular mesh, material properties (albedo, roughness, normal), and environment light.
+ 
+ **Data Structures:**
+-1.  **Learnable Isovalue Grids:** A 3D scalar field optimized during training.
+-2.  **Triangular Mesh:** Extracted from isovalue grids using FlexiCubes [S2].
+-3.  **3D Gaussian Points:** Structured points generated on the mesh surface. Each Gaussian $i$ is defined by:
+-    *   Center position $\mu_i$
+-    *   Scaling matrix $S_i$
+-    *   Rotation matrix $R_i$
+-    *   Material features (Albedo, Roughness, Normal)
+-    *   Opacity $\alpha_i$
+-4.  **BVH (Bounding Volume Hierarchy):** Acceleration structure built on the triangular mesh for ray tracing [S2].
++1.  **Learnable Isovalue Grid:** A 3D scalar field representing the implicit surface distance function.
++2.  **Triangular Mesh:** Extracted from the isovalue grid using FlexiCubes [S2].
++3.  **3D Gaussian Points:** Structured points generated on the mesh surface. Each Gaussian $i$ is defined by center $\mathbf{c}_i$, covariance $\mathbf{\Sigma}_i$ (decomposed into scale $\mathbf{S}_i$ and rotation $\mathbf{R}_i$), opacity $\alpha_i$, and spherical harmonic coefficients for color/view-dependent appearance [S2].
++4.  **BVH (Bounding Volume Hierarchy):** Acceleration structure built on the explicit mesh for ray tracing [S2].
+ 
+ **Steps:**
+ 
+-1.  **Mesh Extraction:** Extract an intermediate triangular mesh from the learnable isovalue grids using FlexiCubes [S2]. This provides an explicit, optimizable geometry proxy.
+-2.  **Gaussian Generation:** Use the Mesh-to-Gaussian adaptor (MGadapter) to generate 3DGS points on the mesh surface in a differentiable manner [S2]. This ensures Gaussians are grounded on the mesh geometry and inherit its normals.
+-3.  **Light Transport Evaluation:** Perform BVH-accelerated ray tracing on the extracted mesh to evaluate light transport [S2]. This step accounts for self-occlusion and inter-reflection, which split-sum approximations lack [S2].
+-4.  **PBR Color Computation:** Compute per-Gaussian physically-based rendering (PBR) colors by evaluating the rendering equation [S2]. Monte Carlo sampling is used to handle reflective surfaces, avoiding the low-frequency limitations of Spherical Gaussians [S2].
+-5.  **Rasterization:** Composite the shaded Gaussian points into final images using the standard 3DGS rasterization algorithm [S2].
+-6.  **Optimization:** End-to-end optimization of geometry guidance and material properties. A normal consistency loss is added between the Gaussian normals and a monocular depth estimator to guide the inverse rendering process [S1, unofficial].
++1.  **Geometry Extraction:**
++    Extract an intermediate triangular mesh from the learnable isovalue grids using FlexiCubes [S2]. This provides an explicit, differentiable geometric prior.
++
++2.  **Gaussian Generation (MGadapter):**
++    Use the Mesh-to-Gaussian adaptor (MGadapter) to generate 3DGS points on the mesh surface in a differentiable manner [S2]. This ensures that Gaussian centers lie on the mesh surface and their orientations align with the mesh normals. This step differentiably constructs structured Gaussian points grounded on the mesh geometry [S2].
++
++3.  **Light Transport Evaluation:**
++    Perform BVH-accelerated ray tracing on the extracted mesh to evaluate light transport [S2]. This step accounts for self-occlusion and inter-reflection, which split-sum approximations lack [S2]. Monte Carlo sampling is used to evaluate the rendering equation [19] on the explicit mesh proxy [S2].
++
++4.  **PBR Color Computation:**
++    Compute per-Gaussian physically-based rendering (PBR) colors by evaluating the rendering equation [19] using the light transport results and material properties (albedo, roughness, normal) [S2].
++
++5.  **Rendering:**
++    Composite the shaded Gaussian points into final images using the standard 3DGS rasterization algorithm [S2].
++
++6.  **Optimization:**
++    Optimize the Gaussian parameters, mesh, and material properties end-to-end by minimizing the total loss:
++    $$ \mathcal{L}_{total} = \mathcal{L}_{rgb} + \lambda_{geo} \mathcal{L}_{geo} + \lambda_{norm} \mathcal{L}_{norm} $$
++    where $\mathcal{L}_{rgb}$ is the photometric loss, $\mathcal{L}_{geo}$ is the geometric consistency loss, and $\mathcal{L}_{norm}$ is the normal consistency loss [S1, unofficial]. The weights $\lambda_{geo}$ and $\lambda_{norm}$ balance photometric fidelity against geometric accuracy [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -33,72 +41,54 @@
+ ```python
+ # Initialization
+-isovalue_grids = initialize_learnable_grids()
+-mesh = None
+-gaussians = None
+-bvh = None
++mesh = FlexiCubes.extract(isovalue_grid)
++gaussians = MGadapter.generate(mesh) # Differentiable construction
++bvh = BVH.build(mesh)
+ 
+-def forward_pass(multi_view_images, light_probe):
+-    global mesh, gaussians, bvh
++# Optimization Loop
++for step in range(num_steps):
++    # 1. Render Image
++    # Ray trace on mesh for light transport
++    light_transport = BVH.trace(bvh, rays)
+     
+-    # Step 1: Extract Mesh from Isosurface
+-    # FlexiCubes extracts triangular mesh from scalar field
+-    mesh = flexicubes_extract(isovalue_grids)
++    # Compute PBR colors for each Gaussian
++    for g in gaussians:
++        g.color = PBR.evaluate(g.material, light_transport, g.normal)
++        
++    # Composite using 3DGS rasterizer
++    rendered_image = Rasterizer.render(gaussians)
+     
+-    # Step 2: Generate Gaussians from Mesh
+-    # MGadapter differentiably constructs Gaussians on mesh surface
+-    gaussians = mgadapter_generate(mesh)
++    # 2. Compute Losses
++    loss_rgb = MSE(rendered_image, target_image)
++    loss_geo = GeometricLoss(gaussians.center, mesh)
++    loss_norm = NormalLoss(gaussians.normal, mesh.normal)
+     
+-    # Step 3: Build BVH for Ray Tracing
+-    bvh = build_bvh(mesh.triangles)
++    total_loss = loss_rgb + lambda_geo * loss_geo + lambda_norm * loss_norm
+     
+-    # Step 4: Render for each view
+-    rendered_images = []
+-    for view in multi_view_images:
+-        # Ray tracing on mesh for light transport
+-        # Evaluates self-occlusion and inter-reflection
+-        light_transport = ray_trace_mesh(bvh, view.camera, light_probe)
+-        
+-        # Compute PBR colors for each Gaussian
+-        # Uses Monte Carlo sampling for reflective surfaces
+-        gaussian_colors = compute_pbr_colors(gaussians, light_transport, view.camera)
+-        
+-        # Composite using 3DGS rasterization
+-        image = rasterize_gaussians(gaussians, gaussian_colors, view.camera)
+-        rendered_images.append(image)
+-        
+-    return rendered_images
+-
+-def compute_loss(rendered_images, ground_truth_images, monocular_depth):
+-    # Image reconstruction loss
+-    img_loss = mse(rendered_images, ground_truth_images)
+-    
+-    # Normal consistency loss between Gaussian normals and monocular depth estimator
+-    # Guides inverse rendering with explicit geometric priors [S1, unofficial]
+-    normal_loss = normal_consistency(gaussians.normals, monocular_depth)
+-    
+-    return img_loss + normal_loss
++    # 3. Backpropagate
++    total_loss.backward()
++    optimizer.step()
+ ```
+ 
+ **Parameters:**
+-*   **FlexiCubes:** Used for isosurface extraction [S2].
+-*   **MGadapter:** Differentiable module for mesh-to-Gaussian conversion [S2].
+-*   **Monte Carlo Samples:** Number of samples for PBR evaluation (Not given in the sources).
++*   $\lambda_{geo}, \lambda_{norm}$: Hyperparameters for loss weighting [S1, unofficial]. Values not given in the sources.
++*   FlexiCubes: Used for isosurface extraction [S2].
++*   MGadapter: Differentiable module for mesh-to-Gaussian conversion [S2].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Normal Inaccuracy:** Existing methods suffer from inaccurate normal estimation due to approximated normals and semi-transparent Gaussians, leading to noisy material decomposition [S2]. Geo-Splatting mitigates this by using explicit mesh normals [S2].
+-*   **Self-Occlusion:** Split-sum approximations lack self-occlusion modeling, causing inaccuracies under strong shadow effects [S2]. Geo-Splatting uses ray tracing on the mesh proxy to handle this [S2].
+-*   **Reflective Surfaces:** Spherical Gaussian methods struggle with reflective cases due to low-frequency nature [S2]. Geo-Splatting uses Monte Carlo sampling with ray tracing to handle reflections [S2].
++*   Existing 3DGS-based inverse methods suffer from inaccuracies in normal estimation due to approximated normals and semi-transparent Gaussian points, leading to noisy material decomposition and flawed relighting [S2]. Geo-Splatting mitigates this by using explicit mesh normals [S2].
++*   Split-sum approximation lacks self-occlusion modeling, leading to inaccurate decomposition under strong shadow effects [S2]. Geo-Splatting uses ray tracing to handle this [S2].
++*   Spherical Gaussian (SG) methods struggle with reflective cases due to low-frequency nature [S2]. Geo-Splatting uses Monte Carlo sampling with ray tracing on an explicit mesh proxy to handle reflective surfaces [S2].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Training time is 9 minutes, compared to 56 minutes for R3DG and 13 minutes for GS-IR [S2]. This efficiency is attributed to the use of BVH-accelerated ray tracing on the explicit mesh proxy rather than direct ray tracing on 3D Gaussians [S2].
++*   **Time Complexity:** Training time is 9 minutes on the reported dataset, compared to 56 minutes for R3DG and 13 minutes for GS-IR [S2]. This efficiency is attributed to the use of BVH-accelerated ray tracing on the explicit mesh proxy rather than direct ray tracing on 3D Gaussians [S2].
+ *   **Memory Complexity:** Not given in the sources.
+ *   **Performance:** Relighting PSNR of 29.5dB, compared to 26.6dB for R3DG and 20.4dB for GS-IR [S2].
+ *   **Strengths:** Superior decomposition and relighting quality; excellent training efficiency; accurate light transport modeling via explicit mesh normals and ray tracing; handles self-occlusion and reflective surfaces [S2].
+-*   **Limitations:** Requires the additional step of mesh extraction and MGadapter integration; relies on the quality of the isovalue grid optimization [S2].
+-*   **When to use:** Physically-based inverse rendering where accurate material decomposition and relighting are critical, especially in scenes with strong shadows or reflective surfaces [S2].
+-*   **When not to use:** When training time is extremely constrained and high-fidelity relighting is not required; when the scene geometry is highly complex and difficult to represent with a single explicit mesh [S2].
++*   **Limitations:** Requires explicit mesh extraction and BVH construction; relies on the quality of the initial isovalue grid and FlexiCubes extraction [S2].
++*   **When to use:** When high-fidelity material decomposition and relighting are required, especially in scenes with strong shadows or reflective surfaces [S2].
++*   **When not to use:** When computational resources for BVH construction and ray tracing are limited, or when simple photometric reconstruction without physical accuracy is sufficient [S2].
+ 
+ ## Background
+-Geo-Splatting was proposed by Wenzheng Chen and Guanbin Li from Sun Yat-sen University and Peking University [S2]. It was published in ICCV 2025 [S2]. The method addresses limitations in previous 3DGS-based inverse rendering approaches like R3DG and GS-IR, which rely on implicit geometric constraints and approximated normals [S2]. It builds on the 3DGS rasterization framework [S1, unofficial] and integrates isosurface techniques [41] and ray tracing [S2].
++Geo-Splatting was proposed by Wenzheng Chen, Guanbin Li, et al. from Sun Yat-sen University and Peking University [S2]. It was published in ICCV 2025 [S2]. The work addresses limitations in existing 3DGS-based inverse rendering methods like R3DG and GS-IR, which rely on approximated normals and split-sum approximations [S2]. It builds on prior works in isosurface extraction [41] and physically-based rendering [19] [S2].
+ 
+ ## Sources

@@ -1,0 +1,194 @@
+--- v002.md
++++ v003.md
+@@ -16,17 +16,17 @@
+ *   **Current Position Buffers**: Two CPU-side arrays of type `GLuint*`, `currentPosBuffer` and `currentPosBufferOut`, each of size `arraySize` (initially $N$) [S1, unofficial]. `currentPosBufferOut` is initialized with sequential integers: `currentPosBufferOut[i] = i` for $0 \le i < \text{arraySize}$ [S1, unofficial]. These buffers track the compacted position of valid clusters during the merge process [S1, unofficial].
+ *   **GPU Buffers (SSBOs)**:
+-    *   `cinBuffer`: Read cluster data for the current iteration.
+-    *   `coutBuffer`: Write cluster data for the next iteration (double-buffered with `cinBuffer`).
+-    *   `inCurrentPosition`: Read position data for the current iteration.
+-    *   `outCurrentPosition`: Write position data for the next iteration (double-buffered with `inCurrentPosition`).
+-    *   `neighborIndex`: Stores the index of the nearest neighbor for each cluster.
+-    *   `prefixScan`: Temporary buffer for the parallel prefix scan.
+-    *   `validCluster`: Flag indicating if a cluster remains valid.
+-    *   `mergedCluster`: Buffer storing details of merged clusters.
+-    *   `numNodesCount`: Buffer to store the count of remaining nodes.
+-    *   `arraySizeCount`: Buffer to store the updated `arraySize`.
++    *   `cinBuffer`: Read cluster data for the current iteration [S1, unofficial].
++    *   `coutBuffer`: Write cluster data for the next iteration (double-buffered with `cinBuffer`) [S1, unofficial].
++    *   `inCurrentPosition`: Read position data for the current iteration [S1, unofficial].
++    *   `outCurrentPosition`: Write position data for the next iteration (double-buffered with `inCurrentPosition`) [S1, unofficial].
++    *   `neighborIndex`: Stores the index of the nearest neighbor for each cluster [S1, unofficial].
++    *   `prefixScan`: Temporary buffer for the parallel prefix scan [S1, unofficial].
++    *   `validCluster`: Flag indicating if a cluster remains valid [S1, unofficial].
++    *   `mergedCluster`: Buffer storing details of merged clusters [S1, unofficial].
++    *   `numNodesCount`: Buffer to store the count of remaining nodes [S1, unofficial].
++    *   `arraySizeCount`: Buffer to store the updated `arraySize` [S1, unofficial].
+     *   `_clusterSSBO`: Final BVH storage, sized for $N \times 2 - 1$ clusters [S1, unofficial].
+     *   `_tempClusterSSBO`: Temporary cluster storage, sized for `arraySize` [S1, unofficial].
+-    *   `sortedFaces`: Sorted triangle indices (output of Morton sort).
++    *   `sortedFaces`: Sorted triangle indices (output of Morton sort) [S1, unofficial].
+     *   `gpuData->_tempClusterSSBO`: Temporary cluster data [S1, unofficial].
+ 
+@@ -81,32 +81,16 @@
+ ```python
+ def gpu_bvh_cluster_merging(triangles):
+-    """
+-    Constructs a BVH on the GPU using cluster merging.
+-    triangles: List of triangle objects with geometry.
+-    Returns: BVH clusters as a list of BVHCluster objects.
+-    """
+     N = len(triangles)
+     array_size = N
+-    
+     # Phase 1: Morton Code Sort (Radix Sort)
+-    # Sorts triangle indices by Morton code using a 30-bit radix sort (10 bits per coordinate) [S1, unofficial].
+-    morton_codes = compute_morton_codes(triangles) # [G] Generates 3D Morton codes for triangle centroids
++    morton_codes = [compute_morton(t) for t in triangles] # [G] Standard 3D Morton encoding
+     indices = list(range(N))
+     num_bits = 30
+-    
+     for current_bits in range(num_bits):
+-        # 1. Bit Mask: Split indices into pBits (bit=1) and nBits (bit=0) [S1, unofficial].
+-        p_bits_indices = [i for i in indices if (morton_codes[i] >> current_bits) & 1]
+-        n_bits_indices = [i for i in indices if not ((morton_codes[i] >> current_bits) & 1)]
+-        
+-        # 2. Reduce: Prefix scan on nBits to count zeros [S1, unofficial].
+-        n_count = len(n_bits_indices)
+-        
+-        # 3. Reset: Set last position to zero [S1, unofficial].
+-        # 4. Down Sweep: Compute positions for zeros [S1, unofficial].
+-        # 5. Reallocate: Reorder indices based on positions [S1, unofficial].
++        p_bits = [i for i in indices if (morton_codes[i] >> current_bits) & 1]
++        n_bits = [i for i in indices if not ((morton_codes[i] >> current_bits) & 1)]
++        n_count = len(n_bits)
+         new_indices = [None] * N
+-        n_idx = 0
+-        p_idx = 0
++        n_idx, p_idx = 0, 0
+         for idx in indices:
+             if (morton_codes[idx] >> current_bits) & 1:
+@@ -119,17 +103,12 @@
+ 
+     # Phase 2: Build Initial Clusters
+-    # Execute buildClusterShader with buffers { staticData._groupTopologySSBO, sortedFaces, staticData->_clusterSSBO, gpuData->_tempClusterSSBO } [S1, unofficial].
+-    # Sets uniform arraySize. Executes with numGroups groups.
+-    clusters = build_initial_clusters(triangles, indices) # [G] Groups sorted triangles into leaf clusters
+-    
++    clusters = build_initial_clusters(indices) # [G] Groups sorted triangles into leaf clusters
++    array_size = len(clusters)
++
+     # Phase 3: Iterative Merging
+-    # Buffers setup
+     cin_buffer = clusters
+     cout_buffer = [None] * (2 * N)
+-    in_pos = list(range(N))
+-    out_pos = [None] * (2 * N)
+-    for i in range(array_size):
+-        out_pos[i] = i
+-        
++    in_pos = list(range(array_size))
++    out_pos = list(range(array_size))
+     neighbor_index = [0] * array_size
+     prefix_scan = [0] * (2 * N)
+@@ -137,53 +116,54 @@
+     merged_cluster = [None] * (2 * N)
+     thread_count = []
+-    
++
+     while array_size > 1:
+-        # Buffer Swapping
+         cin_buffer, cout_buffer = cout_buffer, cin_buffer
+         in_pos, out_pos = out_pos, in_pos
+-        
+-        # Group Size Calculation
+-        num_groups = get_num_groups(array_size) # [G] ceil(array_size / 256)
+-        start_threads = ceil(array_size / 2.0)
+-        num_exec = ceil(log2(array_size))
+-        num_groups2_log = get_num_groups(start_threads)
+-        
+-        # Neighbor Finding
+-        radius = 1.0 # [G] Search radius for nearest neighbor clusters
+-        find_neighbor(cin_buffer, neighbor_index, array_size, radius) # [G] Finds nearest neighbor for each cluster
+-        
+-        # Cluster Merging
+-        cluster_merging(cin_buffer, neighbor_index, valid_cluster, merged_cluster, 
+-                        prefix_scan, in_pos, num_groups) # [G] Merges clusters based on neighbors
+-        
+-        # Prefix Scan - Reduce Phase
++
++        num_groups = (array_size + 255) // 256 # [G] Standard compute shader group size
++        start_threads = (array_size + 1) // 2
++        num_exec = (array_size - 1).bit_length() if array_size > 1 else 0 # ceil(log2)
++        num_groups2_log = (start_threads + 255) // 256
++
++        # GPU shader call: findNeighborShader (not given in the sources)
++        find_neighbor(cin_buffer, neighbor_index, array_size)
++
++        # GPU shader call: clusterMergingShader (not given in the sources)
++        cluster_merging(cin_buffer, neighbor_index, valid_cluster, merged_cluster, prefix_scan, in_pos)
++
+         iteration = 0
+         while iteration < num_exec:
+             num_threads = thread_count[-1] if thread_count else array_size
+-            reduce_shader(prefix_scan, iteration, num_threads, num_groups2_log) # [G] Parallel reduction
+-            thread_count.append(ceil(num_threads / 2.0))
++            # GPU shader call: reduceShader (not given in the sources)
++            reduce_shader(prefix_scan, iteration, num_threads, num_groups2_log)
++            thread_count.append((num_threads + 1) // 2)
+             iteration += 1
+-            
+-        # Prefix Scan - Reset Last Position
+-        reset_position_shader(prefix_scan, 1) # [G] Sets last element to 0
+-        
+-        # Prefix Scan - Down Sweep Phase
++
++        # GPU shader call: resetPositionShader (not given in the sources)
++        prefix_scan[-1] = 0
++
+         iteration = len(thread_count) - 2
+         while iteration >= 0 and iteration < num_exec:
+             num_threads = thread_count[iteration]
+-            down_sweep_shader(prefix_scan, iteration, num_threads, num_groups2_log) # [G] Parallel prefix scan
++            # GPU shader call: downSweepShader (not given in the sources)
++            down_sweep_shader(prefix_scan, iteration, num_threads, num_groups2_log)
+             iteration -= 1
+-            
+-        # Reallocation
+-        realloc_clusters(cin_buffer, cout_buffer, valid_cluster, prefix_scan, 
+-                         in_pos, out_pos, array_size) # [G] Compacts valid clusters
+-        
+-        # Update Cluster Size
+-        new_array_size = end_loop_comp(prefix_scan, valid_cluster, array_size) # [G] Counts valid clusters
+-        array_size = new_array_size
+-        
+-    # Final Readback
+-    final_bvh = read_back(cin_buffer, N) # [G] Copies result to CPU
+-    return final_bvh
++
++        # GPU shader call: reallocClustersShader (not given in the sources)
++        realloc_clusters(cin_buffer, cout_buffer, valid_cluster, prefix_scan, in_pos, out_pos, array_size)
++
++        # GPU shader call: endLoopCompShader (not given in the sources)
++        array_size = end_loop_comp(prefix_scan, valid_cluster, array_size)
++
++    return cin_buffer[:array_size] # [G] Not given in the sources.
++
++def compute_morton(t): pass
++def build_initial_clusters(indices): pass
++def find_neighbor(cin, neighbor_idx, size): pass
++def cluster_merging(cin, neighbor_idx, valid, merged, prefix, pos): pass
++def reduce_shader(prefix, iter, threads, groups): pass
++def down_sweep_shader(prefix, iter, threads, groups): pass
++def realloc_clusters(cin, cout, valid, prefix, in_pos, out_pos, size): pass
++def end_loop_comp(prefix, valid, size): pass
+ ```
+ 
+@@ -194,6 +174,6 @@
+ ### Edge Cases and Pitfalls
+ *   **Precision:** The use of `double` for AABB calculations (`dAABBCC`, `dvec3`) suggests high precision is required for bounding volume operations [S1, unofficial].
+-*   **Boundary Conditions:** The loop condition `arraySize > 1` ensures the process stops at a single root. The prefix scan reset step is critical for correctness in the down-sweep phase [S1, unofficial].
+-*   **Degenerate Input:** If `arraySize` is 0 or 1, the loop does not execute, and the final readback handles the base case. The source does not specify behavior for empty inputs beyond the loop condition [S1, unofficial].
++*   **Boundary Conditions:** The loop condition `arraySize > 1` ensures the process stops at a single root [S1, unofficial]. The prefix scan reset step is critical for correctness in the down-sweep phase [S1, unofficial].
++*   **Degenerate Input:** If `arraySize` is 0 or 1, the loop does not execute, and the final readback handles the base case [S1, unofficial]. The source does not specify behavior for empty inputs beyond the loop condition [S1, unofficial].
+ 
+ ## Operating characteristics

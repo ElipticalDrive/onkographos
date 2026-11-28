@@ -1,0 +1,90 @@
+# PlenOctree Fine-tuning
+
+Also called: Accelerated NeRF Training
+
+## Overview
+A process to train a converted PlenOctree on original training images to accelerate rendering, as it no longer involves neural networks [S1, unofficial]. It builds on the PlenOctree representation, which converts a trained NeRF into a hierarchical grid of spherical harmonics [S1, unofficial]. This approach accelerates NeRF-based rendering by 5 orders of magnitude without loss in image quality [S1, unofficial].
+
+## How it works
+**Inputs:** A converted PlenOctree, original training images with camera poses [G].
+**Outputs:** An optimized PlenOctree with refined leaf parameters [G].
+
+**Data Structures:**
+Each leaf node stores spherical harmonics (SH) coefficients for color and a density value [G]. Exact field layouts, sizes, and bit packing are not given in the sources [G]. The octree structure remains static during optimization; only leaf values are updated [G].
+
+**Steps:**
+1. **Initialize:** Stop NeRF training early and convert the model into a PlenOctree [S1, unofficial].
+2. **Sample Rays:** For each training image, cast rays through each pixel [G].
+3. **Volume Rendering:** Traverse the octree for each ray. At each intersected leaf node, evaluate the SH color and density. Compute accumulated color and transmittance using volume rendering integration [G].
+4. **Compute Loss:** Compare rendered pixel color with ground truth training image pixel. Calculate loss (typically Mean Squared Error) [G].
+5. **Backpropagate:** Compute gradients of the loss with respect to leaf node parameters using automatic differentiation [G].
+6. **Update:** Update leaf node parameters using gradient descent [G].
+7. **Iterate:** Repeat steps 2–6 until convergence or a fixed number of epochs [G].
+
+**Formulas:**
+The volume rendering equation for a ray $\mathbf{r}$ is:
+$$ C(\mathbf{r}) = \sum_{i=1}^N T_i \alpha_i c_i $$
+where $T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right)$ is the accumulated transmittance, $\alpha_i = 1 - \exp(-\sigma_i \delta_i)$ is the opacity, $\sigma_i$ is the density, $\delta_i$ is the segment length, and $c_i$ is the color from SH evaluation [G].
+
+**Parameters:**
+* Learning rate: Not given in the sources [G].
+* Optimizer: Not specified in the sources [G].
+* Epochs: Not given in the sources [G].
+
+**Edge Cases and Pitfalls:**
+Precision, boundaries, and degenerate input handling: Not given in the sources [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def train_plenoctree(plenoctree, training_data, epochs, learning_rate, num_samples):
+    EPSILON = 1e-4
+    for epoch in range(epochs):
+        for image, pose in training_data:
+            for pixel in image:
+                ray_origin = pose.camera_center
+                ray_direction = pose.unproject(pixel.uv)
+                accumulated_color = [0.0, 0.0, 0.0]
+                accumulated_transmittance = 1.0
+                t_near = pose.near_plane
+                t_far = pose.far_plane
+                delta = (t_far - t_near) / num_samples
+                
+                while t_near < t_far and accumulated_transmittance > EPSILON:
+                    leaf = plenoctree.query(t_near)
+                    if leaf is not None:
+                        color = leaf.evaluate_sh(ray_direction)
+                        density = leaf.evaluate_density()
+                        alpha = 1.0 - math.exp(-density * delta)
+                        for c in range(3):
+                            accumulated_color[c] += accumulated_transmittance * alpha * color[c]
+                        accumulated_transmittance *= (1.0 - alpha)
+                    t_near += delta
+                
+                loss = sum((accumulated_color[c] - pixel.rgb[c]) ** 2 for c in range(3)) / 3.0
+                gradients = compute_gradients(loss, plenoctree.parameters)
+                for param in plenoctree.parameters:
+                    param -= learning_rate * gradients[param]
+```
+
+## Subtopics
+
+### EfficientNeRF
+EfficientNeRF is an improvement on PlenOctree that uses spherical harmonics and caches the trained scene in a tree, with specific optimizations for training speed [S2]. It uses a momentum density voxel grid to store predicted density via exponential weighted average updates, discarding zero-density points during coarse sampling [S2]. During fine sampling, it employs a pivot system where pivot points are defined as points $x_i$ for which $T_i \alpha_i > \epsilon$, where $\epsilon$ is a predefined threshold, and $T_i$ and $\alpha_i$ are transmittance and alpha values [S2]. Only points near pivot points are considered during fine sampling [S2]. This speeds up training time by a factor of 8 over baseline NeRF and results in rendering speeds comparable to FastNeRF and exceeding baseline NeRF by thousands-fold [S2].
+
+## Operating characteristics
+* **Time Complexity:** Training is significantly faster than full NeRF optimization because it avoids neural network forward/backward passes during the fine-tuning phase, relying instead on direct SH evaluation and volume rendering [S1, unofficial].
+* **Memory Complexity:** Depends on the PlenOctree resolution and SH order [G]. The momentum density voxel grid in EfficientNeRF reduces sampling cost [S2].
+* **Measured Performance:** Accelerates NeRF-based rendering by 5 orders of magnitude without loss in image quality [S1, unofficial]. EfficientNeRF variant speeds up training by a factor of 8 over baseline NeRF and achieves rendering speeds thousands-fold faster than baseline NeRF [S2].
+* **Strengths:** High rendering speed, good image quality, practical for real-time applications [S1, unofficial].
+* **Limitations:** Requires a pre-converted PlenOctree; quality depends on the initial conversion [S1, unofficial].
+
+## Background
+PlenOctree Fine-tuning was introduced in the paper "PlenOctrees For Real-time Rendering of Neural Radiance Fields (NeRFs)" [S1, unofficial]. It builds on the PlenOctree representation, which converts a trained NeRF into a hierarchical grid of spherical harmonics [S1, unofficial]. The method addresses the need for faster training and rendering of NeRFs by decoupling the heavy neural network training from the final optimization phase [S1, unofficial]. EfficientNeRF [S2] further refined this approach with momentum density grids and pivot systems.
+
+## Sources
+[S1] PlenOctrees For Real-time Rendering of Neural Radiance Fields (NeRFs), http://alexyu.net/plenoctrees/, fetched 2026-10-28 (unofficial)
+[S2] Neural Radiance Fields in 3D Vision: A Comprehensive Review, https://doi.org/10.26599/cvm.2026.9450535, fetched 2026-10-28

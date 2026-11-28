@@ -1,0 +1,669 @@
+c++ - Ray Tracing GLSL - Sphere stretching when position is moved - Stack Overflow
+The 2025 Developer Survey results are in. Explore insights into technology and tools, careers, community and more.
+View results.
+Collectives™ on Stack Overflow
+Find centralized, trusted content and collaborate around the technologies you use most.
+Learn more about Collectives
+Teams
+Q&A for work
+Connect and share knowledge within a single location that is structured and easy to search.
+Learn more about Teams
+Ray Tracing GLSL - Sphere stretching when position is moved
+Ask Question
+Asked
+10 years, 9 months ago
+Modified
+8 years, 5 months ago
+Viewed
+963 times
+4
+Me and a friend are building a Ray Tracer but we have run into problems as you can see in the pickture.
+When we render the sphere with the position of vec3(0,0,0) then it renders it as a circle but otherwise it stretches.
+What are we doing wrong?
+I thought it would be best to paste all our code so here it is. I hope I commented it well.
+```
+//
+1| // RayTracer.glsl ~ A Raytracer that's being executed as Compute Shader
+2| // Date: 11-09-2014
+3| // Inspired by: Stanislaw Eppinger ~ https://github.com/StanEpp/OpenGL_Raytracing
+4| // Authors: Christian Veenman, Tom van Dijkhuizen
+5| // Type: Entry point
+6| //
+7| 
+8| // Using at least 4.3 to ensure Compute Shader support.
+9| #version 430 core
+10| 
+11| // Declaring the local workgroup size.
+12| layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+13| 
+14| 
+15| //---------------------------
+16| // Libraries
+17| //---------------------------
+18| //
+19| // Math.glsl ~ A Library with Mathematical functions
+20| // Date: 11-09-2014
+21| // Authors: Christian Veenman, Tom van Dijkhuizen
+22| // Type: Library
+23| //
+24| 
+25| // Solves a equation with the ABC formula.
+26| bool SolveQuadratic(float a, float b, float c, out float x0, out float x1)
+27| {
+28|     // Calculate the Discriminant.
+29|     float D = b * b - 4 * a * c;
+30|     
+31|     // No solution exists if D is smaller then 0.
+32|     if(D < 0)
+33|     {
+34|         return false;
+35|     }
+36| 
+37|     // If D == 0 only 1 solution exists.
+38|     if (D == 0)
+39|     {
+40|         x0 = -0.5 * b / a;
+41|         x1 = -0.5 * b / a;
+42|     }
+43| 
+44|     // If D is higher then 1, two solutions exist.
+45|     else 
+46|     {
+47|         float q;
+48|         if(b > 0)
+49|             q = -0.5 * (b + sqrt(D));
+50|         else
+51|             q = -0.5 * (b - sqrt(D));
+52|         
+53|         x0 = q / a;
+54|         x1 = c / q;
+55|     }
+56| 
+57|     return true;
+58| }
+59| //
+60| // Screen.glsl ~ Represents the current screen with the width and height. 
+61| // Date: 11-09-2014
+62| // Authors: Christian Veenman, Tom van Dijkhuizen
+63| // Type: Library
+64| //
+65| 
+66| struct Screen
+67| {
+68|     uint width;     // Width of the Screen
+69|     uint height;    // Height of the Screen
+70| };
+71| //
+72| // Camera.glsl ~ Represents a Camera and it's corresponding functions
+73| // Date: 11-09-2014
+74| // Authors: Christian Veenman, Tom van Dijkhuizen
+75| // Type: Library
+76| //
+77| 
+78| struct Camera
+79| {
+80|     mat4x4 C2W;     // Camera to World matrix
+81|     float FOVx;     // The horizontal Field of View in radians. Tan(DegreesX / 2 * 180 * PI)
+82|     float FOVy;     // The vertical Field of View in radians. Tan(DegreesY / 2 * 180 * PI)
+83| };
+84| 
+85| //
+86| // Ray.glsl ~ Describes a Ray structure which is used to track the light.
+87| // Date: 11-09-2014
+88| // Authors: Christian Veenman, Tom van Dijkhuizen
+89| // Type: Library
+90| //
+91| 
+92| // Forward references
+93| struct Camera;
+94| struct Screen;
+95| 
+96| struct Ray
+97| {
+98|     vec3 origin;
+99|     vec3 direction;
+100| };
+101| 
+102| Ray GetPrimaryRay(in uint x, in uint y, in Camera camera, in Screen screen)
+103| {
+104|    Ray primary;
+105| 
+106|    float halfWidth = float(screen.width) / 2.0f;
+107|    float halfHeight = float(screen.height) / 2.0f;
+108|    float aspectRatio = screen.width / screen.height;
+109| 
+110|    float Mappedx = camera.FOVx * ((float(x) - halfWidth + 0.5f) / halfWidth);
+111|    float Mappedy = camera.FOVy * ((halfHeight - float(y) - 0.5f) / halfHeight);
+112| 
+113|    primary.direction = normalize(Mappedx * camera.C2W[0].xyz + Mappedy * camera.C2W[1].xyz + -1 * camera.C2W[2].xyz);
+114|    primary.origin = camera.C2W[3].xyz;
+115|    return primary;
+116| };
+117| //
+118| // Sphere.glsl ~ Describing Sphere and it's corresponding methods.
+119| // Date: 11-09-2014
+120| // Authors: Christian Veenman, Tom van Dijkhuizen
+121| // Type: Library
+122| //
+123| 
+124| #define ERROR_MARGIN 0.01f
+125| 
+126| struct Sphere
+127| {
+128|    vec3 position;
+129|    float radius;
+130| };
+131| 
+132| 
+133| bool IntersectSphere(in Sphere sphere, in Ray ray, out float projection)
+134| {
+135|    // Create a vector from the Ray origin to the center of the Sphere.
+136|     vec3 RS = sphere.position - ray.origin;
+137| 
+138|    // Calculate the Radius Squared for performance reasons.
+139|    float Rsquared = sphere.radius * sphere.radius;
+140| 
+141|    // Project the center of the Sphere on Ray.
+142|    float ProjCR = dot(RS, ray.direction);
+143| 
+144|    // Calculate the length from the center to the projection.
+145|    float Dsquared = dot(RS,RS) - ProjCR * ProjCR;
+146| 
+147|    // If the length from the center to the projection is bigger then the radius, the ray misses.
+148|     if (Dsquared > Rsquared)
+149|        return false;
+150|    
+151|    // Calculate the distance from the projCR to the point on the square.
+152|    float ProjInt = sqrt(Rsquared - Dsquared);
+153|     float x0 = ProjCR - ProjInt;
+154|     float x1 = ProjCR + ProjInt;
+155| 
+156|    if(x0 < ERROR_MARGIN)
+157|    {
+158|        if(x1 < ERROR_MARGIN)
+159|            return false;
+160|        else
+161|        {
+162|            projection = x1;
+163|            return true;
+164|        }
+165|    }
+166|    projection = x0;
+167|    return true;
+168| }
+169| 
+170| 
+171| //
+172| // Material.glsl ~ Represents a material.
+173| // Date: 11-09-2014
+174| // Authors: Christian Veenman, Tom van Dijkhuizen
+175| // Type: Library
+176| //
+177| 
+178| struct Material
+179| {
+180|    vec3 color;         // Value's between 0 and 1.0f
+181|    float opacity;
+182| };
+183| //
+184| // Light.glsl ~ Describing a Light structure and the associated reflections.
+185| // Date: 11-09-2014
+186| // Authors: Christian Veenman, Tom van Dijkhuizen
+187| // Type: Library
+188| // Knowledge: Most of the information is from the following paper: http://graphics.stanford.edu/courses/cs148-10-summer/docs/2006--degreve--reflection_refraction.pdf
+189| //
+190| 
+191| struct Light
+192| {
+193|    vec3 position;
+194|    vec3 color;         // Value's between 0 and 255 
+195|    float intensity;
+196| };
+197| 
+198| // RI_1: The Refractive index of the material the ray is coming from.
+199| // RI_2: The Refractive index of the material the ray is entering.
+200| // I: The normalized incoming ray.
+201| // N: The normalized normal of the surface.
+202| 
+203| vec3 GetReflection(vec3 I, vec3 N)
+204| {
+205|    return I - 2 * dot(I,N) * N;
+206| }
+207| 
+208| vec3 Refract(vec3 I, vec3 N, float RI_1, float RI_2)
+209| {
+210|    float X = (RI_1/RI_2);
+211|    float SinTSquared = X * X * (1 - dot(I,N)*dot(I,N));
+212|    if(SinTSquared <= 1)
+213|        return (RI_1/RI_2 * I) + (RI_1/RI_2 * dot(I,N) - sqrt(1 - SinTSquared)) * N;
+214|    else
+215|        return vec3(0,0,0);
+216| }
+217| 
+218| // Calculates how much light is reflected at a specific angle related to the normal vector.
+219| float Fresnel_Unpolarised(vec3 I, vec3 N, float RI_1, float RI_2)
+220| {
+221|    float X = RI_1 / RI_2;
+222|    float CosI = -dot(N, I);
+223|    float SinT2 = X * X * (1.0 - CosI * CosI);
+224| 
+225|    // If the Critical Angle is reached no light is refracted.
+226|    if(SinT2 > 1.0)
+227|        return 1.0;
+228| 
+229|    float CosT = sqrt(1.0 - SinT2);
+230|    float Rorthogonal = (RI_1 * CosI - RI_2 * CosT) / (RI_1 * CosI + RI_2 * CosT);
+231|    float Rparallel = (RI_2 * CosI - RI_1 * CosT) / (RI_2 * CosI + RI_1 * CosT);
+232|    return (Rorthogonal * Rorthogonal + Rparallel * Rparallel) / 2;
+233| }
+234| 
+235| float Fresnel_SPolarised(vec3 I, vec3 N, float RI_1, float RI_2)
+236| {
+237|    return 0;
+238| }
+239| 
+240| float Fresnel_PPolarised(vec3 I, vec3 N, float RI_1, float RI_2)
+241| {
+242|    return 0;
+243| }
+244| 
+245| float Schlick(vec3 I, vec3 N, float RI_1, float RI_2)
+246| {
+247|    return 0;
+248| }
+249| //
+250| // Stack.glsl ~ Contains a Stack and StackEntry structure for holding multiple rays to be evaluated.
+251| // Date: 11-09-2014
+252| // Authors: Christian Veenman, Tom van Dijkhuizen
+253| // Type: Library
+254| //
+255| 
+256| #define MAX_STACK_SIZE 64
+257| 
+258| struct StackEntry
+259| {
+260|    uint depth;
+261|    float fraction;
+262|    Ray ray;
+263| };
+264| 
+265| struct Stack
+266| {
+267|    int current;
+268|    StackEntry entries[MAX_STACK_SIZE];
+269| };
+270| 
+271| // Pushes an element on the stack.
+272| void Push(inout Stack stack, in StackEntry entry)
+273| {
+274|    stack.entries[stack.current] = entry;
+275|    stack.current = stack.current + 1;
+276| }
+277| 
+278| // Pops an element from the stack.
+279| StackEntry Pop(inout Stack stack)
+280| {
+281|    stack.current = stack.current - 1;
+282|    return stack.entries[stack.current];
+283| }
+284| 
+285| // Checks if the stack is empty
+286| bool isEmpty(inout Stack stack)
+287| {
+288|    if(stack.current == 0)
+289|        return true;
+290|    else
+291|        return false;
+292| }
+293| 
+294| 
+295| //---------------------------
+296| // Defines
+297| //---------------------------
+298| #define FARPLANE 100000f
+299| 
+300| 
+301| //---------------------------
+302| // Uniforms and Buffers
+303| //---------------------------
+304| //uniform Camera camera;
+305| //uniform Screen screen;
+306| //uniform uint maxreflections;
+307| 
+308| layout(std430, binding = 1) buffer PixelBuffer
+309| {
+310|    uint pixels[];
+311| };
+312| 
+313| 
+314| //---------------------------
+315| // Test Data
+316| //---------------------------
+317| Sphere spheres[1];
+318| Light lights[1];
+319| Screen screen;
+320| Camera camera;
+321| Stack stack;
+322| uint maxdepth;
+323| 
+324| 
+325| //---------------------------
+326| // Utility / Main functions
+327| //---------------------------
+328| uint PackColor(in uvec4 color)
+329| {
+330|    uint value = (color.a << 24);           // Alpha
+331|    value = value + (color.r << 16);        // Red
+332|    value = value + (color.g << 8);         // Green
+333|    value = value + (color.b);              // Blue
+334|     return value;
+335| }
+336| 
+337| void InitTest()
+338| {
+339|    maxdepth = 3;
+340|    lights[0] = Light(vec3(0, 0, 3), vec3(255, 255, 255), 50);
+341| 
+342|    spheres[0].position = vec3(0,3,-20);
+343|    spheres[0].radius = 20;
+344| 
+345|    camera.C2W = mat4x4(vec4(1,0,0,0), vec4(0,1,0,0), vec4(0,0,1,0), vec4(0,0,0,1));
+346|    camera.FOVx = 90;
+347|    camera.FOVy = 90;
+348| 
+349|    screen.width = 1280;
+350|    screen.height = 1024;
+351| }
+352| 
+353| // Routine for Intersection of all objects in the scene.
+354| bool Intersect(in Ray ray, out vec3 P, out vec3 N, out int ID)
+355| {
+356|    //-------------------------------------------------------------
+357|    // #1: For every object find the closest intersection,
+358|    // TODO: For now only spheres.
+359|    //-------------------------------------------------------------
+360|    
+361|    float closestProjection = FARPLANE;
+362|    ID = -1;
+363|    for(int i = 0; i < spheres.length(); i++)
+364|    {
+365|        float projection = 0;
+366|        if(IntersectSphere(spheres[i], ray, projection))
+367|            if(projection < closestProjection)
+368|            {
+369|                closestProjection = projection;
+370|                ID = i;
+371|            }
+372|    }
+373|    
+374|    // No intersection is found.
+375|    if(ID == -1)
+376|        return false;
+377|    else
+378|    {
+379|        // Calculate the point of intersection.
+380|        P = ray.origin + closestProjection * ray.direction;
+381| 
+382|        // Calculate the normal of the intersection point.
+383|        N = normalize(P - spheres[ID].position);
+384|        return true;
+385|    }
+386| }
+387| 
+388| vec3 CastShadowRay(in vec3 P, in Light light)
+389| {
+390|    vec3 P2L = light.position - P;
+391|    float Length = length(P2L);
+392|    Ray shadowRay = Ray(P, normalize(P2L));
+393| 
+394|    // Check if the light ray is obstructed.
+395|    vec3 Point;
+396|    vec3 Normal;
+397|    int ID;
+398|    if(Intersect(shadowRay, Point, Normal, ID))
+399|        return vec3(0, 0, 0);
+400|    else
+401|    {
+402|        // Calculate the amount of light (Light decreased per 1/(distance^2))
+403|        return light.color * light.intensity * 1/(Length*Length);
+404|    }
+405| }
+406| 
+407| // Returns the Direct Lighting at a given point
+408| vec3 DirectLighting(in vec3 P)
+409| {
+410|    vec3 color = vec3(0,0,0);
+411|    for(uint i = 0; i < lights.length(); i++)
+412|        color += CastShadowRay(P, lights[i]);
+413| 
+414|    return color;
+415| }
+416| 
+417| // The Main Ray Tracing Routine.
+418| void main()
+419| {
+420|    //----------------------
+421|    // Ray Tracer Algoritm
+422|    //----------------------
+423|    InitTest();
+424|    
+425|    // #0: Set some global variables.
+426|    vec3 color = vec3(0, 0, 0);
+427|    uint x = gl_GlobalInvocationID.x;
+428|    uint y = gl_GlobalInvocationID.y;
+429| 
+430| 
+431|    // #1: Construct Primary Ray and push it on the stack.
+432|    Ray primary = GetPrimaryRay(x, y, camera, screen);
+433|    Push(stack, StackEntry(0, 1.0f, primary));
+434| 
+435|    // #2: While the stack is not empty, keep popping rays from the stack which need to be evaluated.
+436|    while(!isEmpty(stack))
+437|    {
+438|        // #3: Pop a ray and cast it into the scene.
+439|        StackEntry entry = Pop(stack);
+440|        vec3 P;                 // The Point of Intersection.
+441|        vec3 N;                 // The (normalized) Normal of Intersection.
+442|        int ID;                 // The ID of the Intersected Object.
+443| 
+444|        // #4: Check if the ray intersects with an object in the scene.
+445|        if(Intersect(primary, P, N, ID))
+446|        {
+447|            // #5: Check if new rays result from this ray.
+448|            if(entry.depth < maxdepth)
+449|            {
+450|                // #6: Calculate Reflection ray. TODO Calculate fraction
+451|                //vec3 reflection = reflect(entry.ray.direction, N);
+452|                //Push(stack, StackEntry(entry.depth + 1, entry.fraction /2, Ray(P, reflection)));
+453| 
+454|                // #7: TODO: Calculate Refraction ray.
+455|            }
+456| 
+457|            // #8: Calculate the direct lighting from incoming light sources.
+458|            // Direct Lighting is disabled for now.
+459|            color += entry.fraction * 255;
+460|        }
+461|    }
+462| 
+463|    if(color.r > 255 && color.r > color.b && color.r > color.g)
+464|    {
+465|        color /= color.r;
+466|        color *= 255;
+467|    }
+468|    else if(color.b > 255 && color.b > color.r && color.b > color.g)
+469|    {
+470|        color /= color.b;
+471|        color *= 255;
+472|    }
+473|    else if(color.g > 255)
+474|    {
+475|        color /= color.g;
+476|        color *= 255;
+477|    }
+478| 
+479|    uint RGBA = PackColor(uvec4(color.r, color.g, color.b, 255));
+480|    pixels[(screen.height - y - 1)*screen.width + x] = RGBA;
+481| }
+```
+EDITS:
+When we move the camera 5 backwards as requested by Freddy(such that it's on 0,0,5) we get the following result:
+When we use the following testdata as requested by Basic:
+lights[0] = Light(vec3(0, 5, 20), vec3(255, 255, 255), 50);
+spheres[0].position = vec3(0,0,0);
+spheres[0].radius = 20;
+camera.C2W = mat4x4(vec4(1,0,0,0), vec4(0,1,0,0), vec4(0,0,1,0), vec4(0,5,20,1));
+we get:
+c++
+opengl
+geometry
+glsl
+raytracing
+Share
+Improve this question
+Follow
+edited Mar 7, 2015 at 17:59
+user1118321
+26.5k44 gold badges5858 silver badges8989 bronze badges
+asked Nov 5, 2014 at 11:27
+user896326user896326
+8
+Forgot to add the pickture! I will now!
+– user896326
+Commented
+Nov 5, 2014 at 11:28
+1
+Is the shape rendered always either a perfect circle or the distortion shown above? Or does the distortion increase as the sphere moves away from the origin?
+– Basic
+Commented
+Nov 5, 2014 at 14:32
+2
+curious, what happens if you move the camera back 5 units on the z-axis? Does your problem disapear?
+– Freddy
+Commented
+Nov 5, 2014 at 14:32
+3
+Thanks for adding the line numbers! Now nobody has a chance to simply test out your code!
+– vallentin
+Commented
+Nov 6, 2014 at 3:02
+Based purely on the image, it looks like the distance being used in the hit/miss is the squared distance from the origin, not the center of the sphere (think of the middle of a fish-eye lens). Since a sphere at the origin would show no distortion, it's not until you move it that the error is apparent. I'd look somewhere around float Dsquared = dot(RS,RS) - ProjCR * ProjCR;. Conversely, try keeping the sphere at the origin and pointing the camera off-centre. Do you have the same issue?
+– Basic
+Commented
+Nov 6, 2014 at 17:31
+|
+Show 3 more comments
+1 Answer
+1
+Sorted by:
+Reset to default
+Highest score (default)
+Trending (recent votes count more)
+Date modified (newest first)
+Date created (oldest first)
+2
+I have done some work with ray tracing on CUDA and in my solutions I use the following code for pin hole camera primary rays generation:
+```
+routine void emitpinh(float2 wh, float2 pd, float *_hb, int offset = 0)
+{
+    float4 vmt[4] = { GetViewMatrixCol0(), GetViewMatrixCol1(), GetViewMatrixCol2(), GetViewMatrixCol3() };
+
+    float4 u = make_float4(vmt[1].x, vmt[1].y, vmt[1].z, 0.0f);
+    float4 d = make_float4(vmt[2].x, vmt[2].y, vmt[2].z, 0.0f) / tanf(deg2rad(GetFovY() * 0.5f));
+    float4 r = make_float4(cross(make_float3(d.x, d.y, d.z), make_float3(u.x, u.y, u.z)), 0.0f);
+    float4 o = make_float4(vmt[3].x, vmt[3].y, vmt[3].z, -1.0f);
+    uint3 p = GetGlobalThreadIdx();
+
+    float3 whas = make_float3(blockDim.x * gridDim.x, blockDim.y * gridDim.y, 0.0f);
+    whas.z = wh.y / wh.x;
+
+    u = normalize(u);
+    r = normalize(r);
+
+    float2 uv = make_float2(p.x / whas.x, p.y / whas.y) - 0.5f;
+    uv.y *= whas.z;
+    uv += pd;
+
+    float4 i = r * uv.x + u * uv.y + o + d;
+    d = i - o;
+    d.w = 0.0f;
+
+    d = normalize(d);
+    if (offset > 0)
+    {
+        _emitOffset(d, o, offset);
+    }
+    else
+    {
+        _emit(d, o);
+    }
+}
+```
+_emit and _emitOffset put the vectors into proper places in GPU memory for further processing so they are unimportant here.
+For more info about my CUDA code I put here please go to CIRT SourceForge page.
+I hope it helps.
+Share
+Improve this answer
+Follow
+answered Feb 15, 2017 at 10:34
+Dorota KadłubowskaDorota Kadłubowska
+67511 gold badge88 silver badges2626 bronze badges
+Add a comment
+|
+The Overflow Blog
+A new worst coder has entered the chat: vibe coding without code knowledge
+Python: Come for the language, stay for the community
+Featured on Meta
+Will you help build our new visual identity?
+Upcoming initiatives on Stack Overflow and across the Stack Exchange network...
+Policy: Generative AI (e.g., ChatGPT) is banned
+Further Experimentation with Comment Reputation Requirements
+Updated design for the new live activity panel experiment
+Related
+4
+Ray Tracing: Sphere distortion due to Camera Movement
+2
+C++ Raytracer with opengl display skew in specific resolution
+2
+raytracing: why is my sphere rendered as an oval?
+19
+What is causing the artifacts in my raytracer?
+2
+Ray Tracing with GLSL
+0
+qt openGL - sphere gets disformed
+0
+Ray Tracer not rendering sphere properly
+3
+glTranslatef stretches my sphere, how can I translate sphere without stretching it?
+4
+GLSL Sphere - ray intersection geometric solution
+0
+How do I align the raytraced spheres from my fragment shader with GL_POINTS?
+Hot Network Questions
+Why are there silver strips around the voltage regulator on an Ethernet 2 shield?
+Finding parameters of function given its zeros and extrema
+Is Sheetrock the appropriate material for ceiling repair?
+Does the norm decreases, along the limit on compactly embedded Banach subspace?
+How much disk space is occupied by a filesystem's metadata?
+How to handle an infected beer brewed to use up old malt and post-infection sanitization
+On SQL 2022, DECLARE statement causes evaluation of database availability
+Improving readability of proofs
+What type of connector is this 15-pin with two rows in parallel?
+How to refer to the output of a command as an argument in the next command in Bash shell?
+Sci-fi movie: alien woman changes form every night to a different sexy women
+What is the meaning of "negative thrust" in a grossly-overexpanded engine?
+Problem with getting a current context inside a modal operator
+How to put a tikz image and an algorithm besides each other?
+What do you call a gift mug not really suitable for coffee?
+Good way to represent connectivity between nodes of tree (outside of tree hierarchy)?
+What was this romcom with Larry Miller and Elizabeth Perkins? He asks for a goodnight f*ck, she replies "Goodnight, f*ck!"
+Loops in tikz with extra counter
+Suggesting separate submission of part of a paper to a different journal
+The use of the word "precisely" in mathematical statements
+What applications does a vacuum-generating substance have other than making near-vacuum airships?
+What prompted a nobleman in Capernaum to ask Jesus to heal his son?
+In Excel how do I lookup and array from an array
+Finding the current of the leftmost voltage source using mesh analysis
+more hot questions
+Question feed
+default

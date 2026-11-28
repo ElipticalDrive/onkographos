@@ -1,0 +1,96 @@
+# Voxel Chunk Deserialization
+
+Also called: Chunk Deserialization, Chunk Serialization
+
+## Overview
+Voxel Chunk Deserialization is the process of reconstructing a voxel chunk's internal state from a binary stream or file, validating its integrity, and mapping compressed identifiers to concrete block data [S1, S2, unofficial]. It serves as the counterpart to serialization, enabling persistence and network transmission of volumetric data [S1, S2, unofficial]. Unlike raw memory copying, this method handles structural validation (magic numbers) and semantic mapping (root IDs to block patterns) [S1, unofficial].
+
+## How it works
+**Inputs:** A binary stream or file containing the serialized chunk data.
+**Outputs:** A fully reconstructed `VoxChunk` object (or equivalent structure) containing voxel data, position, and root ID.
+
+**Data Structures:**
+1.  **`VoxChunk`**: The target object.
+    *   Fields: `position` (3D vector), `chunk_size` (3D vector), `max_depth` (integer), `root_id` (integer), `block_id` (integer or reference).
+    *   Voxel Data: A contiguous array of `char` (or equivalent byte type) with size $N = \text{Chunk::chunk\_size.x} \times \text{Chunk::chunk\_size.y} \times \text{Chunk::chunk\_size.z}$ [S2, unofficial].
+2.  **`patterns`**: A hash map mapping `root_id` to `block_id` and associated metadata for non-leaf nodes [S1, unofficial].
+3.  **`leaf_patterns`**: A hash map mapping `root_id` to `block_id` for leaf nodes [S1, unofficial].
+
+**Steps:**
+1.  **Validate Magic Number**: Read the first few bytes of the stream and compare against the expected "VTC" magic bytes. If they do not match, abort deserialization [S1, unofficial].
+2.  **Read Position**: Read three 32-bit signed integers ($x, y, z$) from the stream in Big-Endian byte order. These represent the chunk's 3D position in the world grid [S1, unofficial].
+3.  **Initialize Chunk**: Create a new `VoxChunk` instance. Initialize its `position` with the read values, and set `chunk_size` and `max_depth` to their default or stored configuration values [S1, unofficial].
+4.  **Decode Root ID**: Read the next value from the stream as the `root_id` [S1, unofficial].
+5.  **Map Block ID**:
+    *   Look up the `root_id` in the `patterns` map. If found, retrieve the corresponding `block_id` [S1, unofficial].
+    *   If not found in `patterns`, look up in `leaf_patterns`. If found, retrieve the corresponding `block_id` [S1, unofficial].
+    *   Assign the retrieved `block_id` to the chunk [S1, unofficial].
+6.  **Reconstruct Voxel Data**: The sources indicate that the data layout is a contiguous array of `char` [S2, unofficial]. However, the specific byte-level decoding of this array (e.g., raw bytes vs. further compression) is not detailed in the provided notes. The chunk is assumed to be populated with this data [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def deserialize_chunk(stream, patterns, leaf_patterns):
+    # Step 1: Validate Magic Number
+    magic = stream.read_bytes(3)
+    if magic != b'VTC':
+        raise ValueError("Invalid magic number")
+
+    # Step 2: Read Position (BigEndian i32)
+    x = stream.read_int32(endian='big')
+    y = stream.read_int32(endian='big')
+    z = stream.read_int32(endian='big')
+    position = (x, y, z)
+
+    # Step 3: Initialize Chunk
+    # chunk_size and max_depth are assumed to be known constants or read from a header not detailed in sources
+    chunk_size = (8, 8, 8) # Example default, not given in sources
+    max_depth = 4          # Example default, not given in sources
+    chunk = VoxChunk(position=position, chunk_size=chunk_size, max_depth=max_depth)
+
+    # Step 4: Decode Root ID
+    root_id = stream.read_int32() # Endianness not specified for root_id, assuming native or consistent with stream
+
+    # Step 5: Map Block ID
+    block_id = None
+    if root_id in patterns:
+        block_id = patterns[root_id].block_id
+    elif root_id in leaf_patterns:
+        block_id = leaf_patterns[root_id].block_id
+    else:
+        raise KeyError(f"Root ID {root_id} not found in patterns")
+
+    chunk.root_id = root_id
+    chunk.block_id = block_id
+
+    # Step 6: Reconstruct Voxel Data
+    # The data is a contiguous array of char of size chunk_size.x * chunk_size.y * chunk_size.z
+    voxel_count = chunk_size[0] * chunk_size[1] * chunk_size[2]
+    voxel_data = stream.read_bytes(voxel_count)
+    chunk.voxel_data = voxel_data # Stored as contiguous array
+
+    return chunk
+```
+
+**Parameters:**
+*   `patterns`: Hash map mapping root IDs to block IDs and other data [S1, unofficial].
+*   `leaf_patterns`: Hash map mapping root IDs to block IDs for leaf nodes [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Endianness**: Position is explicitly Big-Endian [S1, unofficial]. The endianness of the `root_id` and voxel data is not specified, which may cause corruption if the sender and receiver differ [S1, S2, unofficial].
+*   **Missing Patterns**: If a `root_id` is not found in either `patterns` or `leaf_patterns`, deserialization fails [S1, unofficial].
+*   **Data Size**: The voxel data size is strictly determined by the chunk dimensions [S2, unofficial]. Mismatched chunk sizes between serialization and deserialization will cause buffer overflows or underflows.
+
+## Operating characteristics
+*   **Time Complexity**: Linear with respect to the chunk size for reading voxel data $O(N)$, plus hash map lookup time $O(1)$ average for root ID mapping [S1, S2, unofficial].
+*   **Memory Complexity**: $O(N)$ for the voxel data array, where $N$ is the number of voxels in the chunk [S2, unofficial].
+*   **Strengths**: Simple binary format; explicit validation ensures data integrity [S1, unofficial].
+*   **Limitations**: No compression details provided in the deserialization step itself; relies on external pattern maps [S1, unofficial].
+
+## Background
+This method is derived from implementations in voxel engine projects such as `voxelis` and `Voxel_Game` [S1, S2, unofficial]. It reflects a common pattern in voxel-based games where chunks are persisted to disk or transmitted over a network using a compact binary format [S1, S2, unofficial].
+
+## Sources
+[S1] WildPixelGames/voxelis, https://github.com/WildPixelGames/voxelis, fetched 2026-10-26 (unofficial)
+[S2] StormCreeper/Voxel_Game, https://github.com/StormCreeper/Voxel_Game, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,271 @@
+3D Gaussian Splat Editor. Contribute to playcanvas/supersplat development by creating an account on GitHub.
+
+New Features: Five extra render modes to inspect your Gaussian Splats by Yang-SyZng · Pull Request #1092 · playcanvas/supersplat · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Yang-SyZng
+commented
+Nov 4, 2026
+Copy link
+Copy Markdown
+Five extra render channels for depth, normals, alpha, curvature & edge
+Background
+Hello, SuperSplat developers,
+Over the past two years, I have been researching 3DGS algorithms. I have regularly used SuperSplat to inspect scenes, whether to check convergence during training or review details before export. It has become one of the tools I feel most comfortable using. As I approach the end of my master's degree, I would like to bring together some of the changes I have made to SuperSplat as a contribution to the community.
+This first PR introduces a fairly substantial change: five new diagnostic render channels, depth / normals / alpha / curvature / edge.
+SuperSplat's current editing workflow focuses primarily on color, opacity, selections, and sorting, making it easy to assess a scene visually. When working with Gaussian point clouds, however, color alone can make some issues difficult to spot, for example:
+Is depth continuous, and are near and far surfaces ordered correctly?
+Are surface normals stable? Do they incorrectly bridge the foreground and background?
+Does opacity accumulate as expected? Are nearly transparent Gaussians contributing to depth writes?
+Is curvature concentrated on real structures, or does it mostly come from noise?
+Do edges correspond to real contours, rather than overexposure or color gradients?
+These five channels are intended to help investigate those questions by visualizing geometry and compositing information that would otherwise remain hidden. The current diagnostic view can also be exported as an image or video using a what-you-see-is-what-you-get (WYSIWYG) workflow, making it easier to inspect data, compare parameters, and reproduce issues.
+Changes
+This PR adds the following features for everyday viewing and export.
+New features
+A unified render mode selector: The Overlays panel gains a Render mode dropdown with Normal, Depth, Normals, Alpha, Curvature, Edge, and Overdraw options, with an immediate preview when switching modes.
+Live depth controls: Two algorithms (alpha-weighted mean and alpha quantile/median), three display ranges (Auto, Scene bounds, and Fixed), and three filtering parameters (Min pixel contribution, Min accumulated opacity, and Cumulative opacity threshold).
+WYSIWYG export: Image/video export defaults to the current viewport mode; the viewport and export share depth parameters; depth PNG export supports 16-bit output; video export locks the valid range from the first frame; the camera is frozen and the timeline paused during export.
+Raw depth package: A ZIP containing depth.f32, coverage.f32, valid-mask.png, depth.png, and metadata.json, suitable for scripted accuracy evaluation or comparisons of reconstruction results.
+Clean diagnostic views: The normals, alpha, curvature, and edge channels ignore locked colors, selection colors, rings, and outlines; overdraw counts only splats; resetting restores Normal mode.
+Export safeguards and state restoration: Export dimensions are limited by the device's maximum texture size; tile lists grow automatically when capacity is insufficient, with an error shown if the budget is exceeded; layer, overlay, and camera state are restored after export.
+Performance optimizations
+Shared tile processing: Replace per-pixel scanning within 32×32 tiles with 8×8 tile processing, allowing 64 pixels to share decoded data;
+Prefix-sum allocation: Use parallel prefix sums for tile lists instead of single-threaded linear allocation;
+Shared-memory sorting: Prefer sorting tiles within a workgroup, with a fallback to global sorting for exceptionally dense tiles;
+Normals smoothing prepass: Replace repeated per-pixel 5×5 filtering with a single prepass;
+Skip unnecessary statistics: Skip the automatic histogram for normals and fixed display ranges;
+Export wait fix: Fix an issue where depth export could wait indefinitely for matching versions while the performance panel kept rendering continuously.
+Screenshots
+A comparison of channels in the same scene (RGB / Depth / Normals / Curvature / Edge / Alpha):
+Basic demo
+_10mb.mp4
+The demo shows switching between the five channels in the Overlays panel, adjusting depth parameters, and opening image/video export to confirm that the default export mode matches the current viewport.
+How the five channels work
+1. Depth
+The depth channel does not read the camera's hardware depth buffer. Instead, it performs alpha-weighted depth rasterization of the currently visible Gaussians: the screen is divided into 8×8 tiles, each with a list of Gaussians sorted by camera-space Z. Each Gaussian is added to the candidate lists of the tiles covered by its projected ellipse, then accumulated from front to back during the resolve stage. The resulting depth includes only the Gaussians that are actually visible, without being affected by selection state, locked colors, or editing overlays.
+Two depth algorithms
+Alpha-weighted mean (Mean)
+Accumulate depth × alpha × transmittance over the sorted list, then divide by total coverage. Gaussians closer to the camera and with higher opacity receive greater weight, producing smoother results suited to inspecting continuous surfaces and overall depth relationships.
+Alpha quantile / median (Median)
+Accumulate coverage from front to back and use the depth at which accumulated opacity first reaches the threshold. Compared with the weighted mean, the result is closer to the frontmost visible surface and is more robust to a small number of semitransparent foreground Gaussians. This is useful for inspecting thin structures, vegetation, hair, and other details that averaging can obscure.
+The normals and curvature channels always use Mean to avoid additional discontinuities at contours introduced by Median.
+Three display ranges
+Automatic (Auto)
+Build a depth histogram from all valid pixels in the current frame and use the 2%–98% quantiles as the display range. This automatically excludes a small number of unusually near or far outliers and is useful for quickly inspecting unfamiliar scenes. Video export locks the valid range from the first frame to avoid flickering caused by per-frame renormalization.
+Scene bounds
+Use the center and radius of the scene's bounding sphere to calculate center ± radius along the camera's viewing direction, then clamp the result to the camera's near/far range. This range depends on the scene's bounding sphere and the camera's position and orientation, rather than the image content, making it useful for comparing viewpoints and parameters within the same scene.
+Fixed
+Manually specify Display near / Display far. This is useful when the target depth interval is known, such as focusing only on the foreground at 0.5–3.0 meters, or when a strictly consistent display range is needed across frames.
+Three adjustable parameters
+Min pixel contribution (default 0.02)
+Skip a Gaussian's contribution to a pixel if its effective alpha is below this value. This filters out nearly invisible contributions at the edges and reduces depth contamination from semitransparent, fog-like Gaussians.
+Min accumulated opacity (default 0.05)
+Treat a pixel as invalid (transparent) if its accumulated coverage is below this value. This excludes pixels with only sparse, very weak Gaussian contributions, avoiding unstable depth noise in the background.
+Cumulative opacity threshold (default 0.5)
+Applies only to Median: use the current depth once accumulated coverage reaches this fraction. Increasing it requires more accumulated coverage and tends to select surfaces farther back; decreasing it makes the result more likely to stop at surfaces closer to the camera.
+The Overlays panel also has a shared Min Gaussian opacity (default 0.2) parameter: before rasterization, it filters entire Gaussians by their own alpha. The depth, normals, and curvature channels all use this parameter. Combined with the pixel-level parameters above, it allows nearly transparent Gaussians to be excluded before applying finer filtering.
+The implementation uses a general-purpose, multi-stage compute shader: count → prefix → init → scatter → sort → resolve → histogram → range → smooth. Tile lists grow as needed, with an error shown if the budget is exceeded.
+```
+flowchart LR
+    A["count → prefix → init → scatter → sort → resolve"] --> B{"Mean / Median"}
+    B --> C[Depth texture]
+    C --> D["Display / Normals / Curvature / Export"]
+```
+Loading
+A few implementation details:
+prefix rounds each tile's count up to a power of 2; sort falls back to global sorting when a list exceeds 1024 entries;
+stats is read back asynchronously to the CPU; if capacity is insufficient, the lists are expanded and the process runs again on the next frame;
+The Auto display range uses the histogram + range stages to calculate the 2%–98% quantiles; smooth is used only for normals/curvature.
+2. Normals
+The normals channel reconstructs the screen-space surface from depth, rather than directly using each Gaussian's orientation. A Gaussian's orientation describes its ellipsoidal shape and does not necessarily correspond to the normal of the underlying surface. Back-projecting depth reconstructs the visible surface, whose derivatives then provide geometric normals for the surface visible from the current viewpoint.
+Implementation steps
+Sample the center depth
+Read the current pixel's camera-space Z and validity flag from the depth texture; output black immediately for invalid pixels.
+Back-project into world space
+Convert pixel coordinates to NDC, use depth to construct clip-space coordinates, and recover the world-space position through the inverse view-projection transform. normalProjectionParams.z distinguishes perspective and orthographic projection: w = 1 for orthographic projection and w = depth for perspective projection.
+Sample screen-space neighbors
+Sample ±3 pixels above, below, left, and right of the center to obtain the world-space positions and depths of four neighbors. Clamp sampling at the boundaries.
+Check depth continuity
+One-sided neighbors: treat a neighbor as belonging to a different surface if the depth difference exceeds max(|depth| * 0.1, 0.05);
+Central differences: apply a stricter condition, falling back to one-sided differences if the depth difference exceeds max(|depth| * 0.02, 1e-4);
+Discard invalid pixels and neighbors that cross foreground/background boundaries to prevent normals from bridging surfaces.
+Choose the difference method
+Use central differences when both left/right or up/down neighbors satisfy the continuity conditions. Otherwise, use a one-sided difference on the side closer to the center, keeping normals stable at occlusion boundaries without incorporating background depth.
+Compute the normals with a cross product
+The world-space tangent vectors are dx = right - left and dy = up - down, giving the normal normalize(cross(dx, dy)). Degeneracy is checked using a scale-dependent condition: |cross|² > |dx|² · |dy|² · 1e-12. This avoids a fixed epsilon incorrectly rejecting valid samples in small scenes or at high resolutions.
+Visualize
+Output normal * 0.5 + 0.5, mapping [-1, 1] to [0, 1] for direct RGB display.
+The normals channel always uses Mean depth with a single 5×5 depth-aware smoothing prepass, weighted by depth differences to avoid blending across layers. This reduces high-frequency noise from projection and depth quantization. Median can introduce discontinuities at contours, so it is not used to compute normals.
+```
+flowchart LR
+    A["Depth texture<br/>(5×5 smoothing)"] --> B[Unproject to world space]
+    B --> C["Sample ±3px neighbors"]
+    C --> D{"Depth continuous?"}
+    D -->|Yes| E[Central difference]
+    D -->|No| F[One-sided difference]
+    E --> G["Normalize cross(dx, dy)"]
+    F --> G
+    G --> H["normal * 0.5 + 0.5"]
+```
+Loading
+3. Alpha
+The alpha channel shows accumulated coverage from the current viewpoint, indicating how much of each pixel is covered by Gaussians.
+Implementation:
+Each Gaussian computes alpha = normExp(radius) × opacity in the fragment stage and clamps the result to [0, 1];
+Output (0, 0, 0, alpha) and accumulate coverage using premultiplied alpha blending, A = 1 - Π(1 - αᵢ);
+The diagnostic branch skips editing overlays such as selection colors, rings, and locked colors, outputting the data's opacity directly;
+Finally, map the accumulated alpha directly to grayscale: 0 is fully transparent and 1 is fully opaque.
+Here, grayscale represents coverage: mid-gray means the pixel has approximately 50% coverage, rather than 50% color brightness. This channel is useful for checking whether transparent regions are actually transparent, whether Gaussians are too dense, and whether selection/editing operations have unexpectedly changed coverage.
+```
+flowchart LR
+    A["Per Gaussian<br/>alpha = normExp(radius) × opacity"] --> B["Premultiplied blend<br/>A = 1 - Π(1 - α)"]
+    B --> C[Accumulated coverage]
+    C --> D["Grayscale output"]
+```
+Loading
+4. Curvature
+Curvature is derived from world-space normal derivatives and indicates how much the currently visible surface bends. It is not the signed mean curvature or Gaussian curvature of a mesh.
+Implementation:
+Reuse the same surfaceAt() as the normals channel, sampling the center and neighbors at ±2 pixels above/below and left/right;
+Filter neighbors by depth continuity: treat a neighbor as belonging to a different surface if its depth difference from the center exceeds max(|depth| * 0.02, 1e-4);
+If neither the left/right nor the up/down neighbor pair is valid, output black immediately rather than forcing derivative calculations at contours or holes;
+Construct a local surface metric from position differences dx / dy and normal differences dnx / dny, then contract with the inverse metric to obtain curvature that does not depend on the pixel grid being orthogonal;
+Subtract a small angular threshold of 0.005 rad to filter projection and depth quantization noise, then apply gain and sqrt compression;
+Display intensity using a blue → cyan → green → yellow → red heatmap, with adjustable curvature gain (default 0.5, range 0.1–10).
+The curvature channel helps inspect structural edges, noise, and normal stability: flat regions are nearly black, curved surfaces and sharp bends show heatmap colors, and pure noise typically appears as scattered high-frequency speckles.
+```
+flowchart LR
+    A["surfaceAt sampling<br/>center + ±2px"] --> B{"Depth continuous?"}
+    B -->|No| C[Discard]
+    B -->|Yes| D["Position / normal differences<br/>dx, dy, dnx, dny"]
+    D --> E["Contract with inverse surface metric"]
+    E --> F["Curvature → heat color"]
+```
+Loading
+5. Edge
+The edge channel uses Sobel filtering across all three RGB channels to show edges in the color image itself.
+Implementation:
+Apply a 3×3 Sobel filter to the rendered color target;
+Compute gradients in the x/y directions, then combine the per-channel gradient magnitudes: sqrt(dot(gx, gx) + dot(gy, gy));
+Clamp sampling at image boundaries to avoid artificial borders around the image;
+Multiply the result by gain, clamp to [0, 1], and display it in grayscale (default gain 1, range 0.1–10).
+Unlike a conventional Sobel post-process, switching to the edge channel disables selection colors, locked colors, outlines, and rings, and forces all Gaussians to be shown. This minimizes the influence of editor overlays so the result reflects edges in the color image itself.
+```
+flowchart LR
+    A[Color target] --> B["3×3 RGB Sobel"]
+    B --> C["Combine x / y gradients"]
+    C --> D["× gain → grayscale"]
+```
+Loading
+Scene demo
+_10mb.mp4
+The demo shows all five channels using real scene data, compares results with different depth algorithms/thresholds, and demonstrates image and video export.
+Performance
+The full three-platform test methodology, platform configurations, raw data, result tables, and scaling tests are covered in a separate document:
+performance.md
+Results at a glance: optimized depth / normals / curvature frame times are approximately 14–16 ms on Windows, 24–26 ms on Linux, and 26–28 ms on macOS. See the performance document for detailed measurements.
+Validation steps
+Automated checks
+```
+npm install
+npm run fmt
+npm run lint
+npm run lint:locales
+npm test
+npm run build
+```
+Expected result: formatting checks, lint, locale synchronization checks, unit tests (39 passed), and the build all pass.
+Manual validation
+Run npm run develop and open http://localhost:3000/?load=/point_cloud.ply (or any test scene).
+Open the Overlays panel and confirm that the Render mode dropdown lists: Normal, Depth, Normals, Alpha, Curvature, Edge, and Overdraw, in that order.
+Switch through each mode and confirm:
+Depth: near/far relationships are correct, and changing mean/median, the three filtering parameters, or the three display ranges changes the result;
+Normals: surfaces are continuous, with no patches of color bridging the foreground and background at occlusion boundaries;
+Alpha: opaque regions are nearly white and transparent regions nearly black;
+Curvature: flat regions are nearly black, while structural edges and curved surfaces show heatmap colors;
+Edge: only color edges are highlighted; selection outlines and rings are excluded;
+Overdraw: the heatmap counts only splat fill, excluding the grid/gizmo.
+Adjust parameters in depth mode, then open image export:
+Confirm that the default mode is Depth and that parameters match the viewport;
+Export a PNG and confirm that it is 16-bit grayscale;
+Enable Export raw depth package and confirm that the ZIP contains depth.f32, coverage.f32, valid-mask.png, depth.png, and metadata.json;
+Confirm that the camera matrices, near/far values, and display range in the metadata match the actual view.
+Open video export in depth mode:
+Confirm that the default mode is Depth;
+Export a camera animation and confirm that the depth range remains stable throughout, with no per-frame flickering.
+Switch the render mode to Depth, click Restore defaults in the Overlays panel, and confirm that the mode returns to Normal.
+Export an image/video in color mode and confirm that the export does not unexpectedly use the current viewport's diagnostic mode.
+Related issues
+Related foundation: #1046 Add an overdraw heat-map view to the Overlays panel
+This PR expands the existing Overdraw toggle into a unified Render mode selector and adds five channels on that foundation.
+Note: There is currently no upstream issue specifically tracking the five depth/normals/alpha/curvature/edge channels. The overall approach can be discussed in this PR first; if the maintainers would prefer smaller contributions, the channels could be submitted as separate PRs later.
+Remaining work
+The viewer app does not yet render diagnostic channels
+HTML / ZIP exports from File → Export → Viewer app currently support only normal color rendering. The five diagnostic channels depend on the editor runtime's depth textures, compute rasterizer, and diagnostic shaders, which have not yet been ported to the viewer runtime. The exported viewer therefore does not yet support depth, normals, alpha, curvature, edge, or overdraw.
+Other follow-up work
+I will organize the remaining changes and submit them in a future PR.
+Main changes
+Module
+Changes
+src/render-mode.ts
+Render mode types and validation
+src/depth-renderer.ts
+Depth renderer: tile lists, capacity management, range statistics, and error messages
+src/shaders/depth-render-shader.ts
+count/prefix/init/scatter/sort/resolve/histogram/range/smooth compute stages
+src/shaders/diagnostic-shaders.ts
+Depth display, normals, curvature, and edge fragment shaders
+src/camera.ts
+New diagnostic render passes, depth display range, and camera freezing during export
+src/scene.ts
+Per-frame switches for diagnostic modes and capture mode overrides
+src/projected-splat-renderer.ts
+Alpha/Edge/Overdraw shading branches, locked tint, minPixelSize, and sorting bypass
+src/render.ts
+Image/video export, depth PNG/ZIP, camera metadata, and video range locking
+src/ui/depth-controls.ts
+Shared depth parameter UI for the viewport and export
+src/ui/overlays-panel.ts
+Render mode selector, minimum opacity, and reset behavior
+src/ui/image-settings-dialog.ts / video-settings-dialog.ts
+Export mode, depth parameters, and WYSIWYG defaults
+src/zip-writer.ts / src/png-writer.ts
+Raw depth ZIP and 16-bit grayscale PNG
+src/shaders/blit-shader.ts / data-processor / underlay.ts
+Alpha/Overdraw display mapping
+static/locales/*.json
+Mode and parameter labels in 9 locale files (en + 8 translations)
+Add five extra render channels
+…
+29bc01c
+```
+Add depth, normals, alpha, curvature and edge views alongside the existing
+overdraw diagnostic, with image/video export, a tiled compute depth
+rasteriser, shared depth settings and WYSIWYG export defaults.
+```
+vercel
+Bot
+commented
+Nov 4, 2026
+Copy link
+Copy Markdown
+@Yang-SyZng is attempting to deploy a commit to the playcanvas Team on Vercel.
+A member of the Team first needs to authorize it.
+This branch has not been deployed
+No deployments
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

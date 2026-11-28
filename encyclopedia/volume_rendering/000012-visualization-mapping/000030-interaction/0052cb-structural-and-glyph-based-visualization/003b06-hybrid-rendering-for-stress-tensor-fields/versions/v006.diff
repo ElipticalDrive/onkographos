@@ -1,0 +1,159 @@
+--- v005.md
++++ v006.md
+@@ -23,8 +23,8 @@
+ 
+ ### Steps
+-1.  **Mask Generation:** The user selects features in a diagram view. The system maps these selections to the 3D dataset, updating the mask volume $M(\mathbf{x})$ [S1, book]. Optionally, shear stress is mapped to transparency for the context view, where low shear stress yields low transparency and high shear stress yields nearly opaque points, effectively filtering out nearly isotropic tensors from the context view [S1, book].
++1.  **Mask Generation:** The user selects features in a diagram view [S1, book]. The system maps these selections to the 3D dataset, updating the mask volume $M(\mathbf{x})$ [S1, book].
+ 2.  **Focus Rendering (Geometry):** Selected features are mapped to geometrical tensor representations [S1, book].
+-    *   **Tensorlines:** Seeds are randomly placed inside voxels where $M(\mathbf{x}) = 1$. Lines are integrated starting at each seed using a fourth-order Runge-Kutta scheme. Integration stops when the line enters an isotropic region [S1, book].
+-    *   **Tensor Glyphs:** Ellipsoids are drawn in focus regions. The local tensor is mapped to a positive-definite metric using an antisymmetric mapping to distinguish between positive and negative eigenvalues [S1, book]:
++    *   **Tensorlines:** Seeds are randomly placed inside voxels where $M(\mathbf{x}) = 1$ [S1, book]. Lines are integrated starting at each seed using a fourth-order Runge-Kutta scheme [S1, book]. Integration stops when the line enters an isotropic region [S1, book].
++    *   **Tensor Glyphs:** Ellipsoids are drawn in focus regions [S1, book]. The local tensor is mapped to a positive-definite metric using an antisymmetric mapping to distinguish between positive and negative eigenvalues [S1, book]:
+         $$ f(\sigma_i, c, \alpha) = \exp(\alpha \arctan(c \cdot \sigma_i)) $$
+         where $\sigma_i$ are the eigenvalues of the tensor [S1, book]. Glyphs are scaled using the global scale parameter [S1, book].
+@@ -48,5 +48,6 @@
+         for y in range(H):
+             for x in range(W):
+-                if matches_selections(tensor_field[z][y][x], user_selections):
++                # [G] Inverts diagram view projection to tensor eigenvalue space
++                if check_selection_criteria(tensor_field[z][y][x], user_selections):
+                     M[z][y][x] = True
+                     
+@@ -55,9 +56,21 @@
+     
+     # Render Tensorlines
+-    seeds = generate_random_seeds_in_mask(tensor_field, M)
++    seeds = []
++    for z in range(D):
++        for y in range(H):
++            for x in range(W):
++                if M[z][y][x]:
++                    seeds.append([z + 0.5, y + 0.5, x + 0.5])
+     for seed in seeds:
+-        line = integrate_tensorline_rk4(tensor_field, seed)
+-        if not is_isotropic(line.end_point):
+-            render_line_to_depth_buffer(line, cam_depth)
++        p = seed[:]
++        dt = 0.1
++        for _ in range(10):
++            k1 = get_principal_direction(tensor_field, p)
++            k2 = get_principal_direction(tensor_field, [p[i] + 0.5*dt*k1[i] for i in range(3)])
++            k3 = get_principal_direction(tensor_field, [p[i] + 0.5*dt*k2[i] for i in range(3)])
++            k4 = get_principal_direction(tensor_field, [p[i] + dt*k3[i] for i in range(3)])
++            p = [p[i] + (dt/6.0)*(k1[i] + 2*k2[i] + 2*k3[i] + k4[i]) for i in range(3)]
++        if not is_isotropic(p):
++            update_depth_buffer_line(p, cam_depth)
+             
+     # Render Glyphs
+@@ -66,6 +79,6 @@
+             for x in range(W):
+                 if M[z][y][x]:
+-                    glyph = create_ellipsoid_glyph(tensor_field[z][y][x])
+-                    render_glyph_to_depth_buffer(glyph, cam_depth)
++                    glyph_verts = build_ellipsoid_glyph(tensor_field[z][y][x])
++                    update_depth_buffer_glyph(glyph_verts, cam_depth)
+                     
+     # Step 3: Context Rendering (Volume)
+@@ -73,18 +86,20 @@
+     for y in range(H):
+         for x in range(W):
+-            ray = cast_ray_through_pixel(x, y)
+-            t = ray.start
++            ray_origin = [0.0, 0.0, 0.0]
++            ray_dir = [0.0, 0.0, 1.0]
++            t = 0.0
+             alpha_accum = 0.0
+             color = [0.0, 0.0, 0.0]
+-            while t < ray.end:
+-                if cam_depth[y][x] > 0 and cam_depth[y][x] < t:
++            while t < 10.0:
++                # Stop ray traversal if geometry depth is closer than current ray position
++                if cam_depth[y][x] > 0.0 and cam_depth[y][x] <= t:
+                     break
+-                voxel = sample_tensor_field(tensor_field, ray.origin, ray.direction, t)
+-                scalar_val = scalar_invariant_func(voxel)
++                voxel = interpolate_tensor(tensor_field, ray_origin, ray_dir, t)
++                scalar_val = scalar_invariant_func(voxel.tensor)
+                 opacity = 0.1 if M[voxel.z][voxel.y][voxel.x] else 0.5
+                 rgb = map_scalar_to_color(scalar_val)
+                 alpha_accum += (1.0 - alpha_accum) * opacity
+                 color = [color[i] + rgb[i] * opacity * (1.0 - alpha_accum) for i in range(3)]
+-                t += ray.step_size
++                t += 0.1
+                 if alpha_accum >= 0.99:
+                     break
+@@ -92,45 +107,31 @@
+     return color_buffer
+ 
+-def matches_selections(tensor, selections):
++def check_selection_criteria(tensor, selections):
+     # [G] Inverts diagram view projection to tensor eigenvalue space
+-    return True  # Placeholder for domain-specific selection logic
++    return True
+ 
+-def generate_random_seeds_in_mask(tensor_field, M):
+-    seeds = []
+-    D, H, W = len(tensor_field), len(tensor_field[0]), len(tensor_field[0][0])
+-    for z in range(D):
+-        for y in range(H):
+-            for x in range(W):
+-                if M[z][y][x]:
+-                    seeds.append([z, y, x])
+-    return seeds
++def get_principal_direction(tensor_field, p):
++    # [G] Computes eigenvector corresponding to largest eigenvalue at p
++    return [0.0, 0.0, 1.0]
+ 
+-def integrate_tensorline_rk4(tensor_field, seed):
+-    # [G] Standard 4th-order Runge-Kutta integration along tensor principal direction
+-    return type('Line', (), {'end_point': seed})()
+-
+-def is_isotropic(point):
+-    # [G] Checks if eigenvalues are equal (shear stress near zero)
++def is_isotropic(p):
++    # [G] Checks if eigenvalues at p are equal (shear stress near zero)
+     return False
+ 
+-def render_line_to_depth_buffer(line, cam_depth):
+-    # [G] Projects line endpoints to camera space and updates cam_depth
++def update_depth_buffer_line(end_point, cam_depth):
++    # [G] Projects line endpoint to camera space and updates cam_depth[y][x]
+     pass
+ 
+-def create_ellipsoid_glyph(tensor):
++def build_ellipsoid_glyph(tensor):
+     # [G] Computes eigenvalues/vectors, applies antisymmetric mapping, builds ellipsoid mesh
+-    return type('Glyph', (), {'vertices': [], 'indices': []})()
++    return []
+ 
+-def render_glyph_to_depth_buffer(glyph, cam_depth):
++def update_depth_buffer_glyph(verts, cam_depth):
+     # [G] Rasterizes glyph vertices to camera space and updates cam_depth
+     pass
+ 
+-def cast_ray_through_pixel(x, y):
+-    # [G] Constructs ray origin and direction for pixel (x,y)
+-    return type('Ray', (), {'start': 0.0, 'end': 10.0, 'origin': [0,0,0], 'direction': [0,0,1], 'step_size': 0.1})()
+-
+-def sample_tensor_field(tensor_field, origin, direction, t):
++def interpolate_tensor(tensor_field, origin, direction, t):
+     # [G] Interpolates tensor at origin + t*direction
+-    return tensor_field[0][0][0]
++    return type('Voxel', (), {'tensor': tensor_field[0][0][0], 'z': 0, 'y': 0, 'x': 0})()
+ 
+ def map_scalar_to_color(scalar_val):
+@@ -140,10 +141,10 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** Not given in the sources.
++*   **Time Complexity:** Not given in the sources [S1, book].
++*   **Memory Complexity:** Not given in the sources [S1, book].
+ *   **Strengths:** Provides clear separation of focus and context, allowing detailed analysis of specific stress features without losing the global spatial context provided by the volume rendering [S1, book].
+ *   **Limitations:** The quality of the focus representation depends on the density of seeds (for tensorlines) or the resolution of the glyph placement [S1, book].
+ *   **When to use:** When analyzing stress tensor fields where both global distribution (context) and local tensor orientation/magnitude (focus) are critical, and when users need to interactively select regions based on tensor properties [S1, book].
+-*   **When not to use:** Not given in the sources.
++*   **When not to use:** Not given in the sources [S1, book].
+ 
+ ## Background

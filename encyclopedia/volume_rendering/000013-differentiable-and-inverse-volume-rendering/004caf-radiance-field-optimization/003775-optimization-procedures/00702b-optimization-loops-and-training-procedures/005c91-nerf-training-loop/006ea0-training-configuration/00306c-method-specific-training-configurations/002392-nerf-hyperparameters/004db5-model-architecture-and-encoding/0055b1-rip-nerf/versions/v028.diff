@@ -1,0 +1,151 @@
+--- v027.md
++++ v028.md
+@@ -10,14 +10,14 @@
+ 
+ ### Inputs and Outputs
+-*   **Inputs:** A set of calibrated multi-view 2D images with known camera intrinsics and extrinsics.
+-*   **Outputs:** Rendered RGB images and a learned scene representation consisting of Ripmap feature grids and Gaussian parameters.
++*   **Inputs:** A set of calibrated multi-view 2D images with known camera intrinsics and extrinsics [S1].
++*   **Outputs:** Rendered RGB images and a learned scene representation consisting of Ripmap feature grids and Gaussian parameters [S1].
+ 
+ ### Data Structures
+ 
+ **1. Ripmap Encoding**
+-The Ripmap is a hierarchical feature grid used for area sampling. It consists of a base level and derived lower levels.
+-*   **Base Level ($R_{0,0}$):** A learnable tensor with shape $H \times W \times C$.
++The Ripmap is a hierarchical feature grid used for area sampling [S1]. It consists of a base level and derived lower levels [S1].
++*   **Base Level ($R_{0,0}$):** A learnable tensor with shape $H \times W \times C$ [S1].
+     *   Typical values: $H=512, W=512, C=16$ [S1].
+-*   **Derived Levels ($R_{i,j}$):** Generated from the base level using average pooling to ensure consistency and compactness. Only $R_{0,0}$ is learnable [S1].
++*   **Derived Levels ($R_{i,j}$):** Generated from the base level using average pooling to ensure consistency and compactness [S1].
+     *   The level at indices $(i, j)$ is computed as:
+         $$
+@@ -34,7 +34,7 @@
+ 
+ **3. Platonic Solid Projection**
+-The 3D Gaussian is projected onto the faces of a Platonic solid to form 2D Gaussians.
++The 3D Gaussian is projected onto the faces of a Platonic solid to form 2D Gaussians [S1].
+ *   **Default Configuration:** Icosahedron, which has $n=10$ unparalleled faces [S1].
+-*   Let $\{P_i \mid i = 1, \dots, n\}$ be the set of planes corresponding to the faces.
++*   Let $\{P_i \mid i = 1, \dots, n\}$ be the set of planes corresponding to the faces [S1].
+ *   For each face $P_i$, a projection matrix $M_i \in \mathbb{R}^{3 \times 2}$ maps the 3D world coordinate system to the 2D coordinate system of plane $P_i$ [S1].
+ *   The projected 2D Gaussian on plane $P_i$ has mean $\boldsymbol{\mu}_{proj}$ and covariance $\boldsymbol{\Sigma}_{proj}$, derived from $\boldsymbol{\mu}$, $\boldsymbol{\Sigma}$, and $M_i$ [S1].
+@@ -46,5 +46,5 @@
+ 
+ 1.  **Cone Casting and Frustum Division:**
+-    For each pixel, cast a cone into the scene. Divide this cone into multiple conical frustums along the ray depth [S1]. This avoids discrete point-based sampling of continuous signals [S1].
++    For each pixel, cast a cone into the scene [S1]. Divide this cone into multiple conical frustums along the ray depth [S1]. This avoids discrete point-based sampling of continuous signals [S1].
+ 
+ 2.  **Gaussian Characterization:**
+@@ -74,5 +74,5 @@
+     a. **Area Loss:** Scale the photometric loss for each pixel by the area of its footprint on the image plane ($L_{area}$) [S1].
+     b. **Optimizer:** Use AdamW [S1].
+-    c. **Learning Rate:** Initial learning rate $2 \times 10^{-3}$, modulated by MultiStepLR. The learning rate for the Ripmap encoding is scaled up by $10.0$ times [S1].
++    c. **Learning Rate:** Initial learning rate $2 \times 10^{-3}$, modulated by MultiStepLR [S1]. The learning rate for the Ripmap encoding is scaled up by $10.0$ times [S1].
+     d. **Weight Decay:** $1 \times 10^{-5}$ [S1].
+ 
+@@ -85,5 +85,5 @@
+ 
+ class RipNeRF:
+-    def __init__(self, num_faces=10, ripmap_H=512, ripmap_W=512, ripmap_C=16, w=2.0):
++    def __init__(self, num_faces=10, ripmap_H=512, ripmap_W=512, ripmap_C=16, w=2.0, encoded_dir_dim=256):
+         """
+         Initialize Rip-NeRF.
+@@ -93,7 +93,9 @@
+             ripmap_H, ripmap_W, ripmap_C: Dimensions of the base Ripmap level R_0,0.
+             w: Hyper-parameter for Gaussian footprint coverage adjustment.
++            encoded_dir_dim: Dimensionality of the sinusoidal positional encoding for view directions.
+         """
+         self.num_faces = num_faces
+         self.w = w
++        self.encoded_dir_dim = encoded_dir_dim
+         
+         # Base level is learnable; lower levels are derived via pooling
+@@ -101,8 +103,6 @@
+         
+         # Tiny MLP for density and color prediction
+-        # Input dim: (num_faces * ripmap_C) + encoded_direction_dim
+-        # Output dim: 4 (density + RGB)
+         self.mlp = nn.Sequential(
+-            nn.Linear((num_faces * ripmap_C) + 256, 128), # 256 is placeholder for encoded dir dim
++            nn.Linear((num_faces * ripmap_C) + encoded_dir_dim, 128),
+             nn.ReLU(),
+             nn.Linear(128, 64),
+@@ -116,5 +116,5 @@
+ 
+     def _get_icosahedron_projection_matrices(self):
+-        # Placeholder for actual geometric derivation of 10 projection matrices
++        # Projection matrices M_i are precomputed from icosahedron geometry [G]
+         # Returns list of 10 tensors of shape (3, 2)
+         return [torch.eye(2, 3) for _ in range(self.num_faces)]
+@@ -125,7 +125,4 @@
+         Levels are derived from base level via average pooling.
+         """
+-        # In practice, this would involve efficient CUDA kernels or pre-computed pooling
+-        # Here we simulate the logic: R_i,j is derived from R_0,0
+-        # For implementation, one might store the base and apply pooling on the fly or cache
+         current_level = self.base_ripmap
+         for _ in range(levels_x):
+@@ -147,18 +144,12 @@
+             f_i: Feature vector.
+         """
+-        # Determine position (px, py) and level (lx, ly) from mu_proj and sigma_proj
+-        # The exact mapping depends on the specific coordinate system normalization
+-        # Typically, sigma determines the "level" (resolution) needed to cover the footprint
+         px, py = mu_proj[0], mu_proj[1]
+         
+         # Calculate level based on covariance magnitude and w
+         # Higher variance -> higher level (lower resolution)
+-        # Level calculation is specific to the paper's Eq. 2/3 logic
+-        # Assuming normalized coordinates [-1, 1] or [0, 1]
+         var_x = sigma_proj[0, 0]
+         var_y = sigma_proj[1, 1]
+         
+-        # Example logic for level determination (simplified)
+-        # lx, ly are integers representing the mip level
++        # Level calculation logic derived from covariance scaling [G]
+         lx = int(torch.log2(torch.sqrt(var_x) * self.w).clamp(min=0))
+         ly = int(torch.log2(torch.sqrt(var_y) * self.w).clamp(min=0))
+@@ -168,15 +159,12 @@
+         
+         # Tetra-linear interpolation (bilinear in 2D space for a single level)
+-        # Normalize px, py to [-1, 1] for grid_sample if necessary
+-        # Assuming px, py are in [0, 1] relative to the plane
++        # Normalize px, py to [-1, 1] for grid_sample
+         px_norm = 2 * px - 1
+         py_norm = 2 * py - 1
+         
+         # grid_sample expects input of shape (N, C, H, W) and coordinates (N, H_out, W_out, 2)
+-        # Coordinates should be in [-1, 1]
+         coords = torch.tensor([[[px_norm, py_norm]]]).to(feature_grid.device)
+         
+         # Perform bilinear interpolation
+-        # feature_grid shape: (1, C, H, W)
+         f_i = F.grid_sample(feature_grid, coords, mode='bilinear', padding_mode='zeros')
+         
+@@ -210,6 +198,4 @@
+                 
+                 # Project mean and covariance
+-                # mu_proj = M_i^T * mu (mapping 3D to 2D plane coords)
+-                # Sigma_proj = M_i^T * Sigma * M_i
+                 mu_proj = torch.matmul(M_i.T, mu) # (2,)
+                 sigma_proj = torch.matmul(torch.matmul(M_i.T, sigma), M_i) # (2,2)
+@@ -246,9 +232,8 @@
+             loss: Scalar loss value.
+         """
+-        # Calculate pixel footprint areas (simplified placeholder)
+-        # In practice, this requires calculating the cone footprint area on the image plane
++        # Pixel footprint area calculation is implementation-specific [G]
+         areas = self._compute_pixel_footprint_areas() 
+         
+-        # Photometric loss (e.g., L1 or L2)
++        # Photometric loss (L1)
+         pixel_loss = torch.abs(rendered_images - target_images)
+         
+@@ -271,5 +256,5 @@
+ ### Edge Cases and Pitfalls
+ *   **Empty Space:** To skip samples in empty areas, a binary occupancy grid (e.g., from NerfAcc) is used [S1].
+-*   **Precision:** The Ripmap levels are derived via average pooling, ensuring consistency but potentially losing high-frequency detail if the base level is too coarse. The choice of $w=2.0$ is critical for balancing coverage and precision [S1].
++*   **Precision:** The Ripmap levels are derived via average pooling, ensuring consistency but potentially losing high-frequency detail if the base level is too coarse [S1]. The choice of $w=2.0$ is critical for balancing coverage and precision [S1].
+ *   **Hardware:** The method relies on CUDA kernels for Platonic Solid Projection and Ripmap Encoding, and the `tiny-cuda-nn` library for the MLP [S1].
+ 

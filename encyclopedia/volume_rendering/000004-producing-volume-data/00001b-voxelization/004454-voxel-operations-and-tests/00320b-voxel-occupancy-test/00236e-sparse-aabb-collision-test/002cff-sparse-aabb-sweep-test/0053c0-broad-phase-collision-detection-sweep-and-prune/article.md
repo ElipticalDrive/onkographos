@@ -1,0 +1,107 @@
+# Broad-phase Collision Detection (Sweep and Prune)
+
+Also called: GPU Broad-phase collision system, Sweep and Prune
+
+## Overview
+A broad-phase collision detection algorithm that sorts projected extents of objects' bounding boxes on cartesian axes to determine overlaps [S1, unofficial]. It differs from narrow-phase methods by identifying potential collisions without precise geometric intersection tests, serving as a filter to reduce the complexity of the subsequent narrow-phase stage [S1, unofficial].
+
+## How it works
+**Inputs:** A set of objects, each represented by an Axis-Aligned Bounding Box (AABB) [S1, unofficial].
+**Outputs:** A list of object pairs whose AABBs overlap in all three dimensions (x, y, and z) [S1, unofficial].
+
+**Data Structures:**
+1. **AABB List:** Each object $i$ has an AABB defined by minimum and maximum coordinates $(min_x, min_y, min_z)$ and $(max_x, max_y, max_z)$ [S1, unofficial].
+2. **Record List:** A flat list of records generated from the AABBs [S1, unofficial]. Each AABB contributes two records. A record contains:
+    * `coordinate`: The float value of the min or max extent.
+    * `object_id`: The integer index of the object.
+    * `type_bit`: A boolean or integer flag (0 for min, 1 for max) indicating if the coordinate is the minimum or maximum bound [S1, unofficial].
+
+**Algorithm Steps:**
+
+1. **Compute AABBs:** Calculate the AABB for each object using parallel reduction to find the global minimum and maximum coordinates of the input mesh vertices [S1, unofficial].
+2. **Generate Records:** Create the record list. For each object $i$ with bounds $[min, max]$, add two records: `(min_x, i, min_bit)` and `(max_x, i, max_bit)` [S1, unofficial]. Repeat for y and z dimensions in separate passes or interleaved lists [S1, unofficial].
+3. **Sort:** Sort the record list based on the `coordinate` field in ascending order [S1, unofficial].
+4. **Scan for Overlaps (X-axis):** Iterate through the sorted list to identify "out-of-order" indices [S1, unofficial]. An out-of-order condition occurs when a record with `type_bit == min` for object $A$ is followed by a record with `type_bit == min` for object $B$ (where $A \neq B$) before the `max` record for object $A$ is encountered [S1, unofficial]. Specifically, if the current record is a `min` for object $A$, and the previous record was a `min` for object $B$, then objects $A$ and $B$ overlap in the x-projection [S1, unofficial]. Use the `type_bit` to ensure each pair is detected only once (e.g., only process when the current record is a `min` and the previous was a `min` of a different object) [S1, unofficial].
+5. **Filter by Axis:** Generate a new list of object pairs that overlap in the x-dimension [S1, unofficial]. Repeat steps 2-4 for the y-dimension, using the list of pairs from the x-step as the input candidates [S1, unofficial]. Repeat steps 2-4 for the z-dimension, using the list of pairs from the y-step as the input candidates [S1, unofficial].
+6. **Return:** The final list of object pairs that overlap in all three dimensions is returned for narrow-phase collision detection on the CPU [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def broad_phase_sweep_and_prune(objects):
+    """
+    objects: List of objects, each having an AABB with min and max vectors.
+    Returns: List of pairs (i, j) of overlapping object indices.
+    """
+    candidates = list(range(len(objects)))
+    surviving_pairs = []
+
+    for axis in ['x', 'y', 'z']:
+        records = []
+        for idx in candidates:
+            if axis == 'x':
+                mn, mx = objects[idx].aabb.min.x, objects[idx].aabb.max.x
+            elif axis == 'y':
+                mn, mx = objects[idx].aabb.min.y, objects[idx].aabb.max.y
+            else:
+                mn, mx = objects[idx].aabb.min.z, objects[idx].aabb.max.z
+            records.append((mn, idx, 0))  # 0 for min
+            records.append((mx, idx, 1))  # 1 for max
+
+        records.sort(key=lambda r: r[0])
+
+        # Parallel scan for out-of-order indices [S1, unofficial]
+        current_pairs = set()
+        prev_obj = -1
+        prev_is_min = False
+        for coord, obj_idx, is_min in records:
+            if is_min:
+                if prev_is_min and prev_obj != obj_idx:
+                    # Use min/max bit logic to detect each collision once [S1, unofficial]
+                    current_pairs.add((min(prev_obj, obj_idx), max(prev_obj, obj_idx)))
+                prev_obj = obj_idx
+                prev_is_min = True
+            else:
+                prev_is_min = False
+
+        if axis == 'x':
+            surviving_pairs = list(current_pairs)
+        else:
+            # Filter candidates to only those in previous overlaps [S1, unofficial]
+            surviving_pairs = list(current_pairs.intersection(set(surviving_pairs)))
+
+    return surviving_pairs
+```
+
+**Parameters:**
+* Sorting Algorithm: Radix sort is preferred for GPU implementation [S1, unofficial].
+* Data Size: Performance scales with the number of objects; GPU becomes more efficient with increasing data size [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+* **Precision:** Floating-point precision in coordinate comparisons can lead to missed overlaps or false positives [G]. Use epsilon comparisons if necessary.
+* **Degenerate AABBs:** Objects with zero volume (min == max) should be handled carefully to avoid empty intervals [G]. Treat as a single point or exclude.
+* **Sorting Cost:** Sorting accounts for approximately 70% of the overall performance [S1, unofficial]. Requires careful implementation to handle out-of-order indices correctly [S1, unofficial].
+
+## Operating characteristics
+* **Time Complexity:** Not given in the sources.
+* **Memory Complexity:** Not given in the sources.
+* **Measured Performance:** On an NVIDIA Quadro FX 5600, the GPU implementation showed a 1.5x to 2.0x speedup compared to a highly optimized CPU implementation using an AMD Opteron 275 processor with 6 GB memory [S1, unofficial].
+* **Scaling:** The GPU approach becomes more efficient with increasing data size [S1, unofficial].
+* **Strengths:** Efficient for dynamic scenes with many objects; leverages GPU parallelism for sorting [S1, unofficial].
+* **Limitations:** Sorting is the bottleneck (70% of performance) [S1, unofficial].
+
+## Background
+The sweep and prune strategy is a proven broad-phase algorithm [S1, unofficial]. The specific GPU implementation described was developed by Linh et al. and published in *Computer Graphics Forum* (2009) [S1, unofficial]. It was designed to accelerate collision detection by embedding an optimized GPU-based radix sorting system as the core algorithm [S1, unofficial].
+
+## Subtopics
+
+### Narrow-phase Collision Detection
+Determines precise intersection points and normals for the pairs identified by the broad phase. Choose when exact collision response is needed [G]. See [Narrow-phase Collision Detection](5414-narrow-phase-collision-detection.md).
+
+### Spatial Partitioning (Grid/Tree)
+Alternative broad-phase methods using spatial structures [G]. See [Spatial Partitioning](5412-spatial-partitioning.md).
+
+## Sources
+[S1] Fast 4-way parallel radix sorting on GPUs, https://www.sci.utah.edu/~csilva/papers/cgf.pdf, fetched 2026-10-29 (unofficial)

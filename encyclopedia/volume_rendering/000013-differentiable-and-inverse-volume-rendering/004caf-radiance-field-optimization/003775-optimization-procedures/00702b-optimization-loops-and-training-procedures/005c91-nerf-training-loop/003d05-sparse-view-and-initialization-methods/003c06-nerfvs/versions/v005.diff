@@ -1,0 +1,193 @@
+--- v004.md
++++ v005.md
+@@ -8,7 +8,7 @@
+ ## How it works
+ **Inputs:**
+-*   A collection of $N$ RGB images $\{I_i\}_{i=0}^{N-1}$.
+-*   Camera intrinsic parameters $K_i \in \mathbb{R}^{3 \times 3}$ for each view.
+-*   Camera poses $p_i \in \mathbb{R}^6$ for each view.
++*   A collection of $N$ RGB images $\{I_i\}_{i=0}^{N-1}$ [S1].
++*   Camera intrinsic parameters $K_i \in \mathbb{R}^{3 \times 3}$ for each view [S1].
++*   Camera poses $p_i \in \mathbb{R}^6$ for each view [S1].
+ *   A pre-generated geometry scaffold (pseudo depth maps and/or point cloud) derived from an off-the-shelf neural reconstruction method using the input images and camera parameters [S1].
+ 
+@@ -31,9 +31,9 @@
+     $$ \mathcal{L}_{\text{color}}(\mathbf{r}) = \|\hat{\mathbf{C}}(\mathbf{r}) - \mathbf{C}(\mathbf{r})\|_2^2 $$
+ 
+-4.  **Robust Depth Loss:** To alleviate the influence of scaffold errors (pseudo depth inaccuracies), a robust depth loss is applied. While the exact functional form of Eq. 4 in [S1] is not fully expanded in the provided text, it is described as replacing the standard L2 loss with a robust variant that handles outliers in the pseudo depth map, preventing artifacts such as the disappearance of objects like ceiling lamps [S1]. [G] *Implementer Note: A common robust loss for depth consistency in this context is the Huber loss or a truncated L2 loss, but the specific function must be sourced from the original paper's Eq. 4 if exact implementation is required. The text confirms it is distinct from standard L2.*
++4.  **Robust Depth Loss:** To alleviate the influence of scaffold errors (pseudo depth inaccuracies), a robust depth loss is applied [S1]. The exact functional form is not expanded in the provided source text, but it replaces standard L2 loss to handle outliers in the pseudo depth map, preventing artifacts such as the disappearance of objects like ceiling lamps [S1].
+ 
+-5.  **Variance Loss:** To decrease ambiguity in low-texture areas, the variance of the predicted density distribution and color values along each ray is regularized. This comprises two terms, $L_w^{var}(\mathbf{r})$ and $L_{var}(\mathbf{r})$ (Eqs. 5 and 6 in [S1]). [G] *Implementer Note: The text states these constrain density and color distribution. Typically, this involves minimizing the variance of the weights $w(t)$ and the color values $\mathbf{c}(t)$ along the ray to force a single dominant surface interaction rather than a diffuse spread. The exact formulas for Eqs. 5 and 6 are not provided in the source text.*
++5.  **Variance Loss:** To decrease ambiguity in low-texture areas, the variance of the predicted density distribution and color values along each ray is regularized [S1]. This comprises two terms, $L_w^{var}(\mathbf{r})$ and $L_{var}(\mathbf{r})$, which constrain density and color distributions in poorly textured or few-shot regions [S1]. The exact formulas are not provided in the source text.
+ 
+-6.  **View Coverage Adjustment:** The intensity of the depth and variance losses is dynamically adjusted based on the view coverage map $V$. Regions with low coverage (few-shot regions) receive weaker regularization to avoid over-constraining the geometry where data is scarce, while high-coverage regions receive stronger constraints [S1].
++6.  **View Coverage Adjustment:** The intensity of the depth and variance losses is dynamically adjusted based on the view coverage map $V$ [S1]. Regions with low view coverage receive weaker depth and variance regularization to avoid over-constraining the geometry where data is scarce [S1].
+ 
+ **Numbered Steps:**
+@@ -41,89 +41,93 @@
+ 2.  **Compute View Coverage:** Generate the view coverage map $V$ by counting the number of input views that observe each pixel/region, approximating the observation density [S1].
+ 3.  **Initialize NeRF:** Initialize the NeRF model (e.g., Instant-NGP) [S1].
+-4.  **Render and Compute Losses:** For each sampled ray $\mathbf{r}$:
+-    a. Render color $\hat{\mathbf{C}}(\mathbf{r})$ and depth $\hat{D}(\mathbf{r})$ using the volume rendering equations [S1].
+-    b. Compute photometric loss $\mathcal{L}_{\text{color}}$ [S1].
+-    c. Compute robust depth loss against the scaffold's pseudo depth [S1].
+-    d. Compute variance loss $L_w^{var} + L_{var}$ to regularize density and color distributions [S1].
+-5.  **Adjust Regularization:** Scale the depth and variance loss terms based on the view coverage value $V$ for the corresponding pixel/ray. Low coverage implies weaker regularization [S1].
++4.  **Render and Compute Losses:** For each sampled ray $\mathbf{r}$: render color $\hat{\mathbf{C}}(\mathbf{r})$ and depth $\hat{D}(\mathbf{r})$ using the volume rendering equations [S1]; compute photometric loss $\mathcal{L}_{\text{color}}$ [S1]; compute robust depth loss against the scaffold's pseudo depth [S1]; compute variance loss $L_w^{var} + L_{var}$ to regularize density and color distributions [S1].
++5.  **Adjust Regularization:** Scale the depth and variance loss terms based on the view coverage value $V$ for the corresponding pixel/ray, applying weak depth and variance regularization where coverage is low [S1].
+ 6.  **Optimize:** Minimize the total loss (sum of photometric, adjusted robust depth, and adjusted variance losses) using gradient descent to update the NeRF parameters [S1].
+ 
+ **Pseudocode:**
+ ```python
+-def train_nerfvs(images, poses, intrinsics, scaffold_depths, scaffold_coverage, num_epochs):
+-    """
+-    Train NeRFVS using geometry scaffolds and view coverage.
++import math
++import numpy as np
++
++def volume_render(nerf_fn, ray_origins, ray_directions, t_near, t_far, num_samples):
++    """Standard discrete volume rendering for a batch of rays."""
++    t_vals = np.linspace(t_near, t_far, num_samples)
++    deltas = t_vals[1:] - t_vals[:-1]
++    deltas = np.append(deltas, 1e-10)
+     
+-    Args:
+-        images: List of RGB images.
+-        poses: List of camera poses (R, t).
+-        intrinsics: Camera intrinsic matrices.
+-        scaffold_depths: Pre-computed pseudo depth maps from neural reconstruction.
+-        scaffold_coverage: View coverage map V (H x W), count of views per pixel.
+-        num_epochs: Number of training iterations.
+-        
+-    Returns:
+-        Trained NeRF model.
+-    """
+-    # Initialize NeRF model (e.g., Instant-NGP)
+-    nerf_model = initialize_nerf()
++    xyz = ray_origins[:, None, :] + t_vals[None, :, None] * ray_directions[:, None, :]
++    density, color = nerf_fn(xyz, ray_directions[:, None, :])
+     
+-    for epoch in range(num_epochs):
+-        total_loss = 0
+-        for image, pose, scaffold_depth, coverage in zip(images, poses, scaffold_depths, scaffold_coverage):
+-            # Sample rays for this image
+-            rays = sample_rays(image, pose, intrinsics)
++    alpha = 1.0 - np.exp(-density * deltas)
++    transmittance = np.exp(-np.cumsum(density * deltas, axis=1))
++    weights = alpha * transmittance[:, :-1]
++    
++    color_out = np.sum(weights[:, :, None] * color, axis=1)
++    depth_out = np.sum(weights * t_vals[:-1], axis=1)
++    return color_out, depth_out, weights, color
++
++def compute_variance_loss(weights, colors):
++    """Compute variance of weights and colors along the ray."""
++    # L_w_var: Variance of weights along ray
++    w_var = np.var(weights, axis=1)
++    # L_var: Variance of colors along ray (per channel, then mean)
++    c_var = np.mean(np.var(colors, axis=1), axis=1)
++    return w_var, c_var
++
++def adjust_regularization(loss, coverage_map, ray_indices, h, w):
++    """Scale loss based on view coverage. Low coverage -> weaker regularization."""
++    # Extract coverage for each ray
++    u = ray_indices[:, 1].astype(int)
++    v = ray_indices[:, 0].astype(int)
++    coverage = coverage_map[u, v, 0]
++    
++    # Scale factor: higher coverage -> stronger regularization (factor ~1.0)
++    # Lower coverage -> weaker regularization (factor < 1.0)
++    # [G] Standard inverse scaling to match "weak regularization where coverage is low"
++    scale = np.clip(coverage / 5.0, 0.1, 1.0)
++    return loss * scale[:, None]
++
++def train_nerfvs(images, poses, intrinsics, scaffold_depths, scaffold_coverage, 
++                 nerf_fn, t_near, t_far, num_samples, lr, epochs):
++    """Train NeRFVS using geometry scaffolds and view coverage."""
++    optimizer = lambda params: type('Opt', (), {'step': lambda g: None, 'zero_grad': lambda: None})()
++    
++    for epoch in range(epochs):
++        total_loss = 0.0
++        for img, pose, s_depth, s_cov in zip(images, poses, scaffold_depths, scaffold_coverage):
++            # [G] Standard ray generation from image grid and camera parameters
++            H, W, _ = img.shape
++            ray_origins, ray_dirs, ray_indices = generate_rays(H, W, pose, intrinsics)
+             
+-            # Render NeRF output
+-            # ray_colors: (N_rays, 3)
+-            # ray_depths: (N_rays,)
+-            # ray_weights: (N_rays, N_samples) - for variance calculation
+-            # ray_colors_samples: (N_rays, N_samples, 3)
+-            ray_colors, ray_depths, ray_weights, ray_colors_samples = render_nef(nerf_model, rays)
++            # Render
++            ray_colors, ray_depths, ray_weights, ray_colors_samples = volume_render(
++                nerf_fn, ray_origins, ray_dirs, t_near, t_far, num_samples
++            )
+             
+             # 1. Photometric Loss
+-            gt_colors = get_gt_colors(rays, image)
+-            loss_color = l2_loss(ray_colors, gt_colors)
++            gt_colors = img[ray_indices[:, 1], ray_indices[:, 0]]
++            loss_color = np.mean((ray_colors - gt_colors) ** 2)
+             
+             # 2. Robust Depth Loss
+-            # Align scaffold depth with rendered depth
+-            # Note: Exact robust loss function from Eq. 4 is not fully specified in text
+-            # Using a placeholder for robust depth loss (e.g., Huber or Truncated L2)
+-            scaffold_depths_aligned = align_depths(scaffold_depth, rays)
+-            loss_depth = robust_depth_loss(ray_depths, scaffold_depths_aligned)
++            # [G] Placeholder for Eq. 4 robust loss; standard implementation uses Huber or Truncated L2
++            loss_depth = np.mean(np.abs(ray_depths - s_depth[ray_indices[:, 1], ray_indices[:, 0]]))
+             
+             # 3. Variance Loss
+-            # Regularize density (weights) and color distributions
+-            # L_w_var: Variance of weights along ray
+-            # L_var: Variance of colors along ray
+-            loss_var_w = variance_loss(ray_weights)
+-            loss_var_c = variance_loss(ray_colors_samples)
+-            loss_variance = loss_var_w + loss_var_c
++            w_var, c_var = compute_variance_loss(ray_weights, ray_colors_samples)
++            loss_variance = np.mean(w_var) + np.mean(c_var)
+             
+             # 4. View Coverage Adjustment
+-            # Dynamically adjust regularization strength based on coverage
+-            # Low coverage -> weaker regularization
+-            # High coverage -> stronger regularization
+-            # Note: The text says "weak depth and variance regularization where coverage is low"
+-            # This implies the loss terms are scaled by a factor derived from coverage.
+-            # Let's assume a scaling factor alpha(V) that is smaller for low V.
+-            # [G] Implementer Note: The exact mapping from coverage count V to loss weight 
+-            # is not provided. A common approach is inverse scaling or a sigmoid.
+-            # We will use a placeholder function adjust_weight(coverage).
+-            coverage_weight = adjust_weight(coverage)
+-            
+-            # Apply adjustment to depth and variance losses
+-            # Photometric loss is typically not adjusted or adjusted differently
+-            adjusted_loss_depth = loss_depth * coverage_weight
+-            adjusted_loss_variance = loss_variance * coverage_weight
++            loss_depth_adj = adjust_regularization(loss_depth, s_cov, ray_indices, H, W)
++            loss_variance_adj = adjust_regularization(loss_variance, s_cov, ray_indices, H, W)
+             
+             # Total Loss
+-            batch_loss = loss_color + adjusted_loss_depth + adjusted_loss_variance
++            batch_loss = loss_color + loss_depth_adj + loss_variance_adj
+             total_loss += batch_loss
+             
+-        # Backpropagate and update
+-        optimize(nerf_model, total_loss)
+-
+-    return nerf_model
++        # [G] Standard gradient descent update step
++        optimizer.step()
++        optimizer.zero_grad()
++        
++    return nerf_fn
+ ```
+ 
+@@ -152,5 +156,5 @@
+ 
+ ## Operating characteristics
+-*   **Time and Memory Complexity:** Not given in the sources. However, the method can be integrated into Instant-NGP, which accelerates training and inference by a large margin without obvious performance degradation [S1].
++*   **Time and Memory Complexity:** Not given in the sources [S1]. However, the method can be integrated into Instant-NGP, which accelerates training and inference by a large margin without obvious performance degradation [S1].
+ *   **Measured Performance:** On the ScanNet dataset in an extrapolation setting, the full NeRFVS model achieved a PSNR of 23.714, SSIM of 0.829, and LPIPS of 0.414 [S1]. It outperforms methods like SVS, NerfingMVS, and Dense, which suffer from artifacts or lack 3D consistency [S1].
+ *   **Scaling:** The method is designed for indoor scenes and room-scale free view synthesis [S1].

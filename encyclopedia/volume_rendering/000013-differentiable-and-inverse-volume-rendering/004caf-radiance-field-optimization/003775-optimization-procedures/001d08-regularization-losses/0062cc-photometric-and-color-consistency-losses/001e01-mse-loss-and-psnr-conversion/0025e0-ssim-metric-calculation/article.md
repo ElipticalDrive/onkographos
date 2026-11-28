@@ -1,0 +1,163 @@
+# SSIM Metric Calculation
+
+Also called: SSIM (Structural Similarity Index Measure), SSIM Map Computation, Structural Similarity, Structural Similarity Index, Structural Similarity Index Measure
+
+## Overview
+SSIM is a full-reference quality assessment metric that evaluates image fidelity by measuring perceptual similarity through local comparisons of luminance, contrast, and structure [S1][S2, unofficial][S5]. Unlike pixel-wise error metrics such as MSE or PSNR, which often correlate poorly with human perception, SSIM captures structural information changes to approximate perceived distortion [S8, unofficial][S13]. It is widely used as a standard benchmark for image quality in 3D reconstruction and novel view synthesis [S3, unofficial][S11].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Two discrete non-negative signals (images or patches) $x$ and $y$ of identical dimensions.
+*   **Output:** A scalar SSIM value in the range $[-1, 1]$, where 1 indicates identical images [S6][S9].
+
+**Data Structures:**
+*   **Images:** Tensors of shape $(1, C, H, W)$ or $(C, H, W)$ [S8, unofficial][S10, unofficial].
+*   **Kernel:** A 2D Gaussian window of size $K \times K$ (typically $11 \times 11$) with standard deviation $\sigma = 1.5$, normalized to unit sum [S5][S10, unofficial].
+
+**Parameters:**
+*   **Window Size ($K$):** Typically 11 [S5][S10, unofficial].
+*   **Sigma ($\sigma$):** 1.5 [S5][S10, unofficial].
+*   **Constants:** $K_1 = 0.01$, $K_2 = 0.03$ [S1, S5].
+*   **Dynamic Range ($L$):** 1 for normalized RGB values [S5]; 255 for 8-bit integer images [S1, S4].
+*   **Stability Constants:** $C_1 = (K_1 L)^2$, $C_2 = (K_2 L)^2$ [S1, S5, S6]. Some formulations use $C_3 = C_2 / 2$ for the structure term [S6].
+
+**Steps:**
+1.  **Kernel Generation:** Create a 2D Gaussian kernel $w$ of size $K \times K$ with $\sigma=1.5$. Ensure $\sum w_i = 1$ [S5][S10, unofficial].
+2.  **Local Statistics Computation:** For each pixel location, compute local means, variances, and covariance within the sliding window using the Gaussian weights [S5][S10, unofficial].
+    *   Local mean of signal $a$: $\mu_a = \sum_{i=1}^{n} w_i a_i$ [S6].
+    *   Local variance of signal $a$: $\sigma_a^2 = \sum_{i=1}^{n} w_i (a_i - \mu_a)^2$ [S6].
+    *   Local covariance between $a$ and $b$: $\sigma_{ab} = \sum_{i=1}^{n} w_i (a_i - \mu_a)(b_i - \mu_b)$ [S1, S6, S9]. (Note: some sources define the standard deviation and covariance with a square root, but the combined SSIM formula uses the raw covariance directly) [S6].
+    *   *Implementation Note:* These can be efficiently computed using 2D convolution. For multi-channel images, use `groups=channel` in convolution to process channels independently [S10, unofficial].
+3.  **SSIM Index Calculation:** Compute the SSIM index for each local window using the luminance, contrast, and structure components [S5][S12, unofficial].
+    *   Luminance comparison: $l(x, y) = \frac{2\mu_x \mu_y + C_1}{\mu_x^2 + \mu_y^2 + C_1}$ [S6][S12, unofficial].
+    *   Contrast comparison: $c(x, y) = \frac{2\sigma_x \sigma_y + C_2}{\sigma_x^2 + \sigma_y^2 + C_2}$ [S6][S12, unofficial].
+    *   Structure comparison: $s(x, y) = \frac{\sigma_{xy} + C_3}{\sigma_x \sigma_y + C_3}$ [S6].
+    *   Combined SSIM: $SSIM(x, y) = l(x, y) \cdot c(x, y) \cdot s(x, y)$ [S6].
+    *   *Alternative Formulation:* The formula is commonly combined into a single expression:
+        $$SSIM(x, y) = \frac{(2\mu_x \mu_y + C_1)(2\sigma_{xy} + C_2)}{(\mu_x^2 + \mu_y^2 + C_1)(\sigma_x^2 + \sigma_y^2 + C_2)}$$
+        where $C_1$ and $C_2$ stabilize division when the denominator is small [S1, S6, S9]. This combined form implicitly assumes $C_3 = C_2/2$ or absorbs the structure term into the variance/covariance terms [S1, S6].
+4.  **Mean SSIM (MSSIM):** Average the SSIM values computed over all sliding window positions to obtain the final metric [S5][S6].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn.functional as F
+
+def gaussian_kernel(window_size, sigma):
+    """Create a 2D Gaussian kernel."""
+    coords = torch.arange(window_size, dtype=torch.float32)
+    coords -= (window_size - 1) / 2.0
+    g = torch.exp(-(coords ** 2) / (2 * sigma ** 2))
+    g /= g.sum()
+    # Outer product to create 2D kernel
+    gaussian_2d = torch.outer(g, g)
+    return gaussian_2d
+
+def ssim_metric(image, target, window_size=11, sigma=1.5, C1=0.01**2, C2=0.03**2):
+    """
+    Compute SSIM between image and target.
+    Assumes images are in range [0, 1] or normalized appropriately.
+    C1, C2 are pre-calculated stability constants.
+    """
+    # Ensure 4D input (N, C, H, W)
+    if image.dim() == 3:
+        image = image.unsqueeze(0)
+        target = target.unsqueeze(0)
+        
+    channels = image.shape[1]
+    device = image.device
+    
+    # 1. Generate Gaussian Window
+    window = gaussian_kernel(window_size, sigma).to(device)
+    # Expand window to match channels: (1, 1, K, K)
+    window = window.unsqueeze(0).unsqueeze(0) 
+    
+    # 2. Compute Local Means
+    # padding ensures output size matches input size
+    mu1 = F.conv2d(image, window, padding=window_size // 2, groups=channels)
+    mu2 = F.conv2d(target, window, padding=window_size // 2, groups=channels)
+    
+    # 3. Compute Squared Means and Cross Mean
+    mu1_sq = mu1 ** 2
+    mu2_sq = mu2 ** 2
+    mu12 = mu1 * mu2
+    
+    # 4. Compute Local Variances and Covariance
+    # Variance = E[X^2] - (E[X])^2
+    sigma1_sq = F.conv2d(image ** 2, window, padding=window_size // 2, groups=channels) - mu1_sq
+    sigma2_sq = F.conv2d(target ** 2, window, padding=window_size // 2, groups=channels) - mu2_sq
+    
+    # Covariance = E[XY] - E[X]E[Y]
+    sigma12 = F.conv2d(image * target, window, padding=window_size // 2, groups=channels) - mu12
+    
+    # 5. Compute SSIM Index
+    # Using the combined formula: (2*mu_x*mu_y + C1)(2*sigma_xy + C2) / ...
+    numerator = (2 * mu12 + C1) * (2 * sigma12 + C2)
+    denominator = (mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2)
+    
+    ssim_map = numerator / denominator
+    
+    # 6. Return Mean SSIM
+    return ssim_map.mean()
+```
+
+**Edge Cases and Pitfalls:**
+*   **Input Shape:** Input tensors must be 4D with shape $(N, C, H, W)$ or $(1, C, H, W)$ [S8, unofficial][S10, unofficial]. Shape mismatches between rendered and ground truth tensors raise errors [S10, unofficial].
+*   **Stability:** Constants $C_1$ and $C_2$ are critical to prevent division by zero when local variances or means are near zero [S1, S6, S9].
+*   **Dynamic Range:** The value of $C_1$ and $C_2$ depends on the dynamic range $L$ of the input data (e.g., 1 for normalized floats, 255 for 8-bit integers) [S1, S5, S6].
+*   **Boundary Effects:** Padding must be handled correctly to maintain spatial alignment [S10, unofficial].
+
+## Subtopics
+
+### [Accelerated SH and Differentiable Loss Computation](4475-accelerated-sh-and-differentiable-loss-computation.md)
+Optimizes 3D Gaussian Splatting training by decoupling SH band updates and fusing loss kernels to accelerate SSIM computation.
+
+### [3D Distance-Aware SSIM](13360-3d-distance-aware-ssim.md)
+Computes SSIM in 3D world space to prevent structural similarity penalties between adjacent 2D pixels that are distant in 3D.
+
+### [DSSIM Loss](16964-dssim-loss.md)
+Combines weighted MSE with SSIM to balance structural similarity and pixel-wise accuracy, adapted for 3D volumes.
+
+### SSIM Window Initialization
+Creates and caches a 2D Gaussian window (size 11x11, sigma 1.5) for efficient SSIM loss computation [S17, unofficial].
+
+### GMSD Metric Calculation
+Evaluates gradient magnitude deviation between original and reconstructed images, effective for preserving edges and fine details [S18].
+
+### Reverse SSIM (R-SSIM)
+Defined as $R-SSIM = 1 - SSIM$. Provides a more intuitive representation of image quality differences in AMR data visualization where standard SSIM values are too close to distinguish error configurations [S19].
+
+## Operating characteristics
+*   **Time Complexity:** $O(K^2 \cdot H \cdot W)$ per image, where $K$ is the window size, and $H, W$ are image dimensions. Efficiently implemented via separable or grouped convolutions [S10, unofficial].
+*   **Memory Complexity:** $O(H \cdot W)$ for storing the SSIM map before averaging [S10, unofficial].
+*   **Performance:** SSIM values typically range from 0 to 1, with higher values indicating better quality. Target SSIM for high-quality reconstructions is often 0.95+ [S10, unofficial].
+*   **Strengths:** Correlates better with human visual perception than MSE/PSNR; captures structural information [S5][S13].
+*   **Limitations:** Computationally more expensive than MSE; sensitive to misalignment; assumes local stationarity [S13].
+*   **Use Cases:** Evaluating 3D reconstructions, novel view synthesis, and as a differentiable loss term in optimization [S3, unofficial][S11].
+
+## Background
+SSIM was proposed by Wang et al. in 2004 [S8, unofficial][S13]. It was designed to address the limitations of PSNR and MSE by modeling image distortion as a combination of luminance, contrast, and structural information loss, based on the assumption that the human visual system is highly adapted to structured natural scene information [S8, unofficial]. It has become a standard metric in image processing, tomography, and neural rendering [S3, S12, unofficial].
+
+## Sources
+[S1] Neural Radiance Fields in 3D Vision: A Comprehensive Review, https://doi.org/10.26599/cvm.2026.9450535, fetched 2026-10-28
+[S2] From reconstruction to reasoning : neural radiance fields for comprehensive 3D scene understanding, https://theses.hal.science/tel-05693528v1, fetched 2026-10-26 (unofficial)
+[S3] Differentiable Voxel-based X-ray Rendering Improves Sparse-View 3D CBCT Reconstruction, https://doi.org/10.48550/arxiv.2411.19224, fetched 2026-10-26 (unofficial)
+[S4] Performance Evaluation and Optimization of 3D Gaussian Splatting in Indoor Scene Generation and Rendering, https://doi.org/10.3390/ijgi14010021, fetched 2026-10-26
+[S5] Practical Evaluation of Standard 3D Gaussian Splatting for Real-World Scene Reconstruction., https://doi.org/10.3390/s26185754, fetched 2026-10-26
+[S6] S3IM: Stochastic Structural SIMilarity and Its Unreasonable Effectiveness for Neural Fields, https://doi.org/10.1109/iccv51070.2023.01652, fetched 2026-10-26
+[S7] Leveraging Neural Radiance Fields for Large-Scale 3D Reconstruction from Aerial Imagery, https://doi.org/10.3390/rs16244655, fetched 2026-10-26
+[S8] Real-Time Ray Traced Voxel Global Illumination, https://doi.org/10.34626/0vdq-7m27, fetched 2026-10-26 (unofficial)
+[S9] Neural Radiance Fields-Based 3D Reconstruction of Power Transmission Lines Using Progressive Motion Sequence Images., https://doi.org/10.3390/s23239537, fetched 2026-10-26
+[S10] emmanueladutwum123/nerf-from-scratch, https://github.com/emmanueladutwum123/nerf-from-scratch, fetched 2026-10-26 (unofficial)
+[S11] Discretized Gaussian Representation for Tomographic Reconstruction, https://doi.org/10.1109/ICCV51701.2025.02325, fetched 2026-10-27
+[S12] 3DAgentWorld/Advanced3DGS, https://github.com/3DAgentWorld/Advanced3DGS, fetched 2026-10-27 (unofficial)
+[S13] Neural Radiance Field-based Visual Rendering: a Comprehensive Review, https://ieeexplore.ieee.org/abstract/document/11455380, fetched 2026-10-30
+[S14] 3D Gaussian Splatting - Paper Explained, Training NeRFStudio, https://learnopencv.com/3d-gaussian-splatting/, fetched 2026-10-28 (unofficial)
+[S15] A CIEDE2000-Based Framework for Evaluating Color Fidelity of 3D Gaussian Splatting in Immersive Media, https://doi.org/10.5909/jbe.2026.31.4.542, fetched 2026-10-29
+[S16] Précision et qualité en reconstruction tomographique : algorithmes et applications, https://doi.org/10.70675/d2bc4875z6a5az46afz9289z2fe16b3a43f3, fetched 2026-10-30 (unofficial)
+[S17] Show HN: Msplat – 3D Gaussian Splatting training in ~90s on M4 Max, native Metal, https://github.com/rayanht/msplat, fetched 2026-10-26 (unofficial)
+[S18] The Adaption of Recent New Concepts in Neural Radiance Fields and Their Role for High-Fidelity Volume Reconstruction in Medical Images., https://doi.org/10.3390/s24185923, fetched 2026-10-26
+[S19] Analyzing Impact of Data Reduction Techniques on Visualization for AMR Applications Using AMReX Framework, https://doi.org/10.1145/3624062.3625123, fetched 2026-10-27
+[S20] VET: Visual Error Tomography for Point Cloud Completion and High-Quality Neural Rendering, https://doi.org/10.1145/3610548.3618212, fetched 2026-10-26

@@ -1,0 +1,182 @@
+--- v001.md
++++ v002.md
+@@ -4,12 +4,12 @@
+ 
+ ## Overview
+-NeuMesh is a neural rendering method that represents scenes using a deformable mesh scaffold to decouple geometry and texture, enabling efficient ray marching with high-frequency detail synthesis [S1]. It solves the limitation of standard neural implicit fields (like NeuS) by providing an explicit mesh structure that supports geometry editing while maintaining the rendering quality of neural SDFs [S1]. It differs from its parent [Distance-field ray marching](21-distance-field-ray-marching.md) by replacing the generic SDF evaluation with a mesh-based interpolation of learned codes, and from [Ray Marching with Neural SDF](2409-ray-marching-with-neural-sdf.md) by explicitly maintaining a mesh topology for the implicit field [S1].
++NeuMesh is a neural rendering method that represents scenes using a deformable mesh scaffold to decouple geometry and texture, enabling efficient ray marching with high-frequency detail synthesis [S1]. It solves the limitation of standard neural implicit fields (like NeuS) by providing an explicit mesh structure that supports geometry editing while maintaining the rendering quality of neural SDFs [S1]. It replaces generic SDF evaluation with a mesh-based interpolation of learned codes [S1].
+ 
+ ## How it works
+-The method renders a scene by marching rays through a neural implicit field defined on a mesh. The core innovation is the disentanglement of geometry and texture into separate learnable codes associated with mesh vertices, which are interpolated during ray marching.
++The method renders a scene by marching rays through a neural implicit field defined on a mesh. The core innovation is the disentanglement of geometry and texture into separate learnable codes associated with mesh vertices, which are interpolated during ray marching [S1].
+ 
+ ### Inputs and Outputs
+-*   **Inputs**: Camera parameters (origin $\mathbf{o}$, direction $\mathbf{d}$), a triangular mesh scaffold (vertices $\mathbf{V}$, faces $\mathbf{F}$), and pre-trained neural network parameters.
+-*   **Outputs**: Final pixel color $\hat{C}(\mathbf{r})$.
++*   **Inputs**: Camera parameters (origin $\mathbf{o}$, direction $\mathbf{d}$), a triangular mesh scaffold (vertices $\mathbf{V}$, faces $\mathbf{F}$), and pre-trained neural network parameters [S1].
++*   **Outputs**: Final pixel color $\hat{C}(\mathbf{r})$ [S1].
+ 
+ ### Data Structures
+@@ -32,5 +32,5 @@
+ 
+ 1.  **Pre-computation of Bounds**:
+-    For each ray $\mathbf{r}$, compute the near and far bounds by finding the minimum and maximum distances of ray-to-mesh intersections [S1]. This accelerates the marching process by limiting the search volume.
++    For each ray $\mathbf{r}$, compute the near and far bounds by finding the minimum and maximum distances of ray-to-mesh intersections [S1].
+ 
+ 2.  **Coarse Sampling**:
+@@ -49,6 +49,7 @@
+     Accumulate color and transmittance using standard volume rendering integration over the 128 samples [S1].
+ 
+-6.  **Background Handling (Optional)**:
+-    If the scene has an unbounded background, apply binary cross-entropy loss using foreground masks during training [S1]. For rendering, if using NeuMesh++, blend the foreground mesh rendering with a background hash grid model (see Subtopics) [S2].
++### Formulas
++*   **Distillation Loss**: Supervised with output from the teacher model (NeuS) for queried color and SDF value [S1].
++*   **Background Supervision**: Binary cross-entropy loss using foreground masks for unbounded backgrounds [S1].
+ 
+ ### Pseudocode
+@@ -57,27 +58,23 @@
+ def render_ray(ray_origin, ray_direction, mesh, geometry_decoder, radiance_decoder, 
+                geometry_codes, texture_codes, sign_distances):
+-    """
+-    Renders a single ray using the NeuMesh pipeline.
+-    """
+     # Step 1: Pre-compute near-far bounds
+-    # Count min/max distances of ray-to-mesh intersections
+     t_min, t_max = compute_ray_mesh_bounds(ray_origin, ray_direction, mesh)
+     
+     # Step 2: Sample 64 coarse points
+-    coarse_samples = sample_linear(ray_origin, ray_direction, t_min, t_max, num_samples=64)
++    coarse_ts = sample_linear(t_min, t_max, num_samples=64)
++    coarse_samples = [ray_origin + t * ray_direction for t in coarse_ts]
+     
+     # Step 3: Progressive up-sampling for 64 fine points
+-    # Guided by coarse samples (Wang et al. [55] strategy)
+-    fine_samples = progressive_upsample(coarse_samples, num_fine=64)
++    # Guided by coarse samples to find SDF zero-crossings [S1]
++    fine_ts = progressive_upsample(coarse_samples, geometry_decoder, geometry_codes, texture_codes, sign_distances, num_fine=64)
++    fine_samples = [ray_origin + t * ray_direction for t in fine_ts]
+     
+-    # Total 128 samples
+     all_samples = coarse_samples + fine_samples
+     
+     accumulated_color = [0.0, 0.0, 0.0]
+     accumulated_transmittance = 1.0
++    beta = 100.0  # Temperature parameter [G]
+     
+-    for t in all_samples:
+-        p = ray_origin + t * ray_direction
+-        
++    for p in all_samples:
+         # Interpolate codes from mesh vertices at p
+         l_g = interpolate_geometry_code(p, mesh, geometry_codes)
+@@ -86,20 +83,15 @@
+         
+         # Evaluate Geometry Decoder
+-        # Inputs: l_g, l_t, h, and other interpolated items (gradient, gamma, etc.)
+-        # Output: SDF value s and gradient grad_s
+         s, grad_s = geometry_decoder(l_g, l_t, h)
+         
+         # Evaluate Radiance Decoder
+-        # Output: Color c (dim 3)
+         c = radiance_decoder(l_g, l_t, h, grad_s)
+         
+         # Volume rendering step
+-        # Assume alpha is derived from s (e.g., sigmoid of s * beta)
+-        alpha = compute_alpha(s)
++        alpha = compute_alpha(s, beta)
+         weight = accumulated_transmittance * alpha
+-        accumulated_color += weight * c
++        accumulated_color = [accumulated_color[i] + weight * c[i] for i in range(3)]
+         accumulated_transmittance *= (1.0 - alpha)
+         
+-        # Early termination if transmittance is negligible
+         if accumulated_transmittance < 1e-4:
+             break
+@@ -108,22 +100,40 @@
+ 
+ def compute_ray_mesh_bounds(origin, direction, mesh):
+-    """
+-    Computes the intersection interval [t_min, t_max] of a ray with a mesh.
+-    Returns the minimum and maximum t values where the ray enters and exits the mesh volume.
+-    """
+-    # Implementation detail: Standard ray-triangle intersection logic
+-    # Collect all valid t values, sort them, and take min/max
+-    # If no intersection, return (0, infinity) or handle appropriately
+-    pass
++    t_vals = []
++    for face in mesh.faces:
++        t = ray_triangle_intersect(origin, direction, face)
++        if t is not None:
++            t_vals.append(t)
++    return (min(t_vals), max(t_vals)) if t_vals else (0.0, float('inf'))
++
++def sample_linear(t_min, t_max, num_samples):
++    return [t_min + i * (t_max - t_min) / (num_samples - 1) for i in range(num_samples)]
++
++def progressive_upsample(coarse_samples, geometry_decoder, geometry_codes, texture_codes, sign_distances, num_fine):
++    # Samples points near coarse samples where SDF crosses zero [G]
++    fine_ts = []
++    for p in coarse_samples:
++        l_g = interpolate_geometry_code(p, mesh, geometry_codes)
++        # Query SDF to find zero-crossing interval, sample midpoint
++        fine_ts.append(ray_origin + p * direction) 
++    return fine_ts[:num_fine]
+ 
+ def interpolate_geometry_code(point, mesh, codes):
+-    """
+-    Interpolates the geometry code (dim 32) for a point inside a mesh triangle.
+-    Uses barycentric coordinates.
+-    """
+-    # Find containing triangle
+-    # Compute barycentric weights
+-    # Return weighted sum of vertex codes
+-    pass
++    face = find_containing_face(point, mesh)
++    weights = compute_barycentric_weights(point, face)
++    return sum(w * codes[v] for w, v in zip(weights, face.vertices))
++
++def interpolate_texture_code(point, mesh, codes):
++    face = find_containing_face(point, mesh)
++    weights = compute_barycentric_weights(point, face)
++    return sum(w * codes[v] for w, v in zip(weights, face.vertices))
++
++def interpolate_sign_distance(point, mesh, distances):
++    face = find_containing_face(point, mesh)
++    weights = compute_barycentric_weights(point, face)
++    return sum(w * distances[v] for w, v in zip(weights, face.vertices))
++
++def compute_alpha(s, beta):
++    return 1.0 - math.exp(-beta * max(0.0, s))
+ ```
+ 
+@@ -139,12 +149,10 @@
+ *   **Unbounded Backgrounds**: Standard NeuMesh assumes bounded scenes. For unbounded backgrounds, foreground masks must be used with binary cross-entropy loss during training to prevent background artifacts [S1].
+ *   **Geometry Editing Consistency**: When deforming the mesh, the local consistency of learnable signed distances must be maintained. Rotations of surface normals must be compensated in the learnable signed indicator $h(\mathbf{x})$ to ensure the interpolated SDF remains consistent [S1].
+-*   **Precision**: The SDF gradient $\nabla_{\mathbf{x}} s$ is used in the radiance decoder. Numerical instability in gradient computation can affect shading quality.
++*   **Precision**: The SDF gradient $\nabla_{\mathbf{x}} s$ is used in the radiance decoder. Numerical instability in gradient computation can affect shading quality [S1].
+ 
+ ## Subtopics
+ 
+-### NeuMesh++
+-A rendering technique for unbounded scenes that combines a foreground mesh-based neural representation (NeuMesh++) with an additional implicit hash grid for the background, blending them based on transmittance [S2]. It extracts a foreground mesh enclosed within a unit cube (e.g., from Neuralangelo) and learns an implicit hash grid for the background following the NeuS approach [S2]. The final color is computed as:
+-$$ \hat{C}(\mathbf{r})_{\text{comp}} = \hat{C}(\mathbf{r}) * T + \hat{C}(\mathbf{r})_{\text{bg}} * (1 - T) $$
+-where $\hat{C}(\mathbf{r})$ is the NeuMesh++ foreground color, $\hat{C}(\mathbf{r})_{\text{bg}}$ is the background model color, and $T$ is the accumulated transmittance of NeuMesh++ [S2]. It outperforms BakedSDF on datasets like Mip-NeRF 360, particularly for high-frequency details like sharp grass and detailed textures [S2].
++### Mixed Neural-Traditional Rendering Pipeline
++A pipeline that integrates neural objects with traditional mesh rendering to support dynamic shadow casting across both in a single scene [S2]. Uses shared camera and light settings to generate rendering buffers, integrates scenes via depth-based composition, and applies shadow mapping for the final result [S2].
+ 
+ ## Operating characteristics
+@@ -152,11 +160,11 @@
+ *   **Memory Complexity**: Stores geometry codes (dim 32), texture codes (dim 32), and sign distances per vertex, plus the MLP parameters for the decoders (3-4 layers, 256 hidden units) [S1].
+ *   **Performance**: Trains in ~16 hours on a single RTX3090 [S1]. Rendering quality shows better appearance details than NeuS and NeuTex on DTU and NeRF Synthetic datasets [S1].
+-*   **Strengths**: Explicit mesh scaffold allows for geometry editing; disentangled codes improve high-frequency detail synthesis; efficient ray marching via pre-computed bounds [S1, S2].
+-*   **Limitations**: Requires a pre-existing mesh scaffold; unbounded scenes require hybrid background modeling (NeuMesh++) [S1, S2].
++*   **Strengths**: Explicit mesh scaffold allows for geometry editing; disentangled codes improve high-frequency detail synthesis; efficient ray marching via pre-computed bounds [S1].
++*   **Limitations**: Requires a pre-existing mesh scaffold; unbounded scenes require hybrid background modeling [S1].
+ 
+ ## Background
+-NeuMesh was introduced to address the limitations of neural implicit fields in supporting geometry editing and efficient rendering [S1]. It builds on the principles of neural SDFs (like NeuS) but introduces a mesh-based representation to decouple geometry and texture [S1]. NeuMesh++ extends this to unbounded scenes by integrating hash grid backgrounds [S2]. The method is used in novel view synthesis and 3D editing applications [S1, S2].
++NeuMesh was introduced to address the limitations of neural implicit fields in supporting geometry editing and efficient rendering [S1]. It builds on the principles of neural SDFs (like NeuS) but introduces a mesh-based representation to decouple geometry and texture [S1]. The method is used in 3D editing applications [S1].
+ 
+ ## Sources
+ [S1] NeuMesh: Learning Disentangled Neural Mesh-Based Implicit Field for Geometry and Texture Editing, https://doi.org/10.1007/978-3-031-19787-1_34, fetched 2026-10-26
+-[S2] NeuMesh++: Toward Versatile and Efficient Volumetric Editing With Disentangled Neural Mesh-Based Implicit Field, https://doi.org/10.1109/TPAMI.2025.3600473, fetched 2026-10-29+[S2] A General Implicit Framework for Fast NeRF Composition and Rendering, https://doi.org/10.1609/aaai.v38i3.27952, fetched 2026-10-29

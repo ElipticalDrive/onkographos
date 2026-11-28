@@ -1,0 +1,169 @@
+# Progressive Patch Scaling
+## Overview
+Progressive Patch Scaling is a training strategy for 3D GAN discriminators that operates on image patches of varying scales rather than full-resolution images to promote diversity and stability during training from limited 2D observations [S1]. Unlike methods that apply super-resolution modules, it directly discriminates RGB patches while progressively reducing the patch scale over the first 100 epochs [S1].
+
+## How it works
+**Inputs and Outputs**
+*   **Inputs:** Generator $\mathbf{G}$, Discriminator $\mathbf{D}$, camera poses $\tau$, latent codes $\mathbf{z}$, and a time-varying scale schedule [S1].
+*   **Outputs:** Discriminator scores for real and generated patches [S1].
+
+**Data Structures**
+*   **Patch Scale $s$:** A scalar value sampled from a uniform distribution; implementation-wise, this scalar is repeated to match the patch resolution if used as a conditioning feature [S1].
+*   **Patch $\rho$:** A spatial region of the image defined by the scale $s$; the sampled patch is a function of the sampled scale [S1].
+*   **Image Resolution:** Input images have resolution $H' \times H'$ (e.g., $512 \times 512$) [S1].
+*   **Fixed Patch Size:** The discriminator processes patches of fixed size $H \times H$ (e.g., $64 \times 64$) [S1].
+
+**Parameters**
+*   **Learning Rate:** $2 \times 10^{-3}$, used with the ADAM optimizer [S1].
+*   **Samples per Ray:** 96 samples are used per ray during volume rendering [S1].
+*   **Batch Size:** 1,000 samples per epoch [S1].
+*   **Scale Range Initialization:** At epoch $t=0$, $s_{min}(0) = 0.6$ and $s_{max}(0) = 0.8$ [S1].
+*   **Scale Range Finalization:** At epoch $t=100$, $s_{min}(100) = 0.25$ and $s_{max}(100) = 0.55$ [S1].
+*   **Rotation Augmentation:** Gradually introduced up to $15^\circ$ for later training epochs where patch scale $s$ decreases [S1].
+
+**Formulas**
+The final training objective combines adversarial loss, R1 gradient penalty, and discriminator reconstruction loss [S1]:
+
+$$
+\mathcal{E}(\mathbf{G}, \mathbf{D}, \mathcal{T}) = \mathbb{E}_{\mathbf{z},\tau \sim \mathcal{T},s,\rho} [f(\mathbf{D}(\mathbf{G}(\boldsymbol{\Gamma}_\rho, \mathbf{z}))) ] + \mathbb{E}_{I,s,\rho} [f(-\mathbf{D}(\rho, s)) + \lambda_1 |\nabla_\rho \mathbf{D}(\rho, s)|^2 ] + \lambda_2 \mathcal{E}_R(\mathbf{D})
+$$
+
+Where:
+*   $f(a) = -\log(1 + \exp(-a))$ is the adversarial loss function [S1].
+*   $\lambda_1$ and $\lambda_2$ are balancing parameters for the R1 gradient penalty and reconstruction loss, respectively [S1].
+*   $\boldsymbol{\Gamma}_\rho$ represents the volume rendering of the patch region [S1].
+*   $\rho$ is the sampled patch, which is a function of the sampled scale $s$ [S1].
+
+**Numbered Steps**
+1.  **Initialize Scale Schedule:** Define the linear interpolation of $s_{min}(t)$ and $s_{max}(t)$ over the first 100 epochs, then fix them for the remainder of training [S1].
+    *   $s_{min}(t) = 0.6 + (0.25 - 0.6) \times \frac{t}{100}$
+    *   $s_{max}(t) = 0.8 + (0.55 - 0.8) \times \frac{t}{100}$
+2.  **Sample Scale:** For each image instance in a batch, independently sample a scale factor $s$ from the time-varying uniform distribution:
+    $$ s \sim U(s_{min}(t), s_{max}(t)) $$
+    where $t$ is the current epoch index [S1].
+3.  **Apply Augmentation:** Apply data augmentation, including rotational augmentation. Start without rotational augmentation and gradually increase it up to $15^\circ$ in later epochs where $s$ is smaller [S1].
+4.  **Extract Patches:** Extract patches $\rho$ from the input images $I$ and generated images based on the sampled scale $s$. When $s=1$, the $64 \times 64$ patch covers the entire image; implementation-wise, the scale value $s$ is simply repeated to match the patch resolution [S1].
+5.  **Compute Loss:** Calculate the objective $\mathcal{E}$ using the formula above. The generator produces patches $\mathbf{G}(\boldsymbol{\Gamma}_\rho, \mathbf{z})$, and the discriminator evaluates both real patches $\rho$ and generated patches [S1].
+6.  **Optimize:** Minimize the objective using the ADAM optimizer with a learning rate of $2 \times 10^{-3}$ [S1].
+7.  **Fix Scale:** After epoch 100, stop updating $s_{min}$ and $s_{max}$ and keep them constant for the remainder of the training [S1].
+
+**Pseudocode**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import random
+
+def progressive_patch_scaling_training(generator, discriminator, dataloader, num_epochs=400):
+    # Parameters from [S1]
+    lr = 2e-3
+    batch_size = 1000
+    H = 64
+    max_rotation_angle = 15.0
+    s_min_init, s_max_init = 0.6, 0.8
+    s_min_final, s_max_final = 0.25, 0.55
+    schedule_epochs = 100
+    
+    # ADAM optimizer state [G]
+    m_w, v_w = {}, {}
+    beta1, beta2, eps = 0.9, 0.999, 1e-8
+
+    for t in range(num_epochs):
+        # 1. Scale schedule interpolation
+        if t <= schedule_epochs:
+            progress = t / schedule_epochs
+            s_min_t = s_min_init + (s_min_final - s_min_init) * progress
+            s_max_t = s_max_init + (s_max_final - s_max_init) * progress
+        else:
+            s_min_t, s_max_t = s_min_final, s_max_final
+
+        # 2. Rotation augmentation strength
+        current_max_angle = max_rotation_angle * (t / schedule_epochs) if t <= schedule_epochs else max_rotation_angle
+
+        for images, poses in dataloader:
+            # 3. Sample scales per instance
+            scales = [random.uniform(s_min_t, s_max_t) for _ in range(batch_size)]
+            real_patches, generated_patches = [], []
+
+            for i in range(batch_size):
+                img, pose, s = images[i], poses[i], scales[i]
+                
+                # 4. Augmentation
+                angle = random.uniform(-current_max_angle, current_max_angle)
+                img_aug = apply_rotation_2d(img, angle)
+                pose_aug = apply_rotation_to_pose(pose, angle)
+                
+                # 5. Patch extraction
+                # When s=1, 64x64 covers entire image. Region size scales inversely with s.
+                region_size = int(H / s)
+                patch_real = extract_and_resize(img_aug, region_size, H)
+                
+                # 6. Generate patch
+                z = sample_latent_vector()
+                gen_img = generator.render_volume(pose_aug, z, samples_per_ray=96)
+                patch_gen = extract_and_resize(gen_img, region_size, H)
+                
+                real_patches.append(patch_real)
+                generated_patches.append(patch_gen)
+
+            # 7. Loss computation
+            gen_scores = discriminator.forward(generated_patches, scales)
+            adv_gen = -mean(math.log(1 + math.exp(-gen_scores)))
+            
+            real_scores = discriminator.forward(real_patches, scales)
+            adv_real = -mean(math.log(1 + math.exp(real_scores)))
+            
+            # R1 gradient penalty
+            real_scores.requires_grad = True
+            grad = compute_gradient(real_scores, real_patches)
+            r1_penalty = mean(norm(grad) ** 2)
+            
+            recon_loss = compute_reconstruction_loss(discriminator)
+            lambda_1, lambda_2 = 10.0, 1.0  # [G] typical balancing parameters
+            total_loss = adv_gen + adv_real + lambda_1 * r1_penalty + lambda_2 * recon_loss
+            
+            # 8. ADAM update step [G]
+            update_adam_step(discriminator.parameters(), total_loss, m_w, v_w, beta1, beta2, eps, lr)
+            update_adam_step(generator.parameters(), total_loss, m_w, v_w, beta1, beta2, eps, lr)
+
+    return generator, discriminator
+
+def apply_rotation_2d(image, angle_deg):
+    # Standard 2D image rotation implementation
+    ...
+
+def extract_and_resize(image, crop_size, target_size):
+    # Crop crop_size x crop_size region, resize to target_size x target_size
+    ...
+
+def update_adam_step(params, loss, m, v, b1, b2, e, lr):
+    # Standard ADAM parameter update rule
+    ...
+```
+
+**Edge Cases and Pitfalls**
+*   **Super-resolution:** The method does not apply a super-resolution module on the rendered values; it directly outputs RGB color images or patches [S1].
+*   **Degenerate Input:** The method assumes valid 2D observations [S1].
+
+## Subtopics
+
+### Progressive GAN Discriminator
+A convolutional discriminator that grows progressively in resolution to stabilize training and allow larger batch sizes at lower resolutions. It provides the architectural foundation upon which Progressive Patch Scaling operates. [Progressive GAN Discriminator](10312-progressive-gan-discriminator.md)
+
+### GAN-based Volume Rendering
+Uses GANs to generate 3D scenes from 2D images. Progressive Patch Scaling is a specific training procedure within this framework to improve discriminator stability. [GAN-based Volume Rendering](10311-gan-based-volume-rendering.md)
+
+## Operating characteristics
+*   **Time Complexity:** Training typically exhibits the best KID score around 300 to 400 epochs [S1]. The progressive reduction of patch scale over the first 100 epochs adds computational overhead due to dynamic patch extraction and augmentation [S1].
+*   **Memory Complexity:** The fixed patch size ($64 \times 64$) keeps memory usage constant regardless of the input image resolution ($512 \times 512$) [S1].
+*   **Measured Performance:** Tested on Replica and Matterport3D datasets. The method achieves realistic 3D scene variations and view-consistent representations [S1].
+*   **Strengths:** Promotes diversity and stability in 3D GAN training by forcing the discriminator to learn from multi-scale features [S1].
+*   **Limitations:** Does not apply super-resolution, which may limit the sharpness of generated details compared to methods that explicitly upsample [S1].
+*   **When to Use:** Suitable for 3D GAN training from limited 2D observations where stability and diversity are critical [S1].
+
+## Background
+Progressive Patch Scaling was introduced in the SinGRAF paper (2023) by [S1]. It is designed to address the challenges of training 3D GANs from a limited set of 2D observations. The method builds on the concept of progressive training in GANs, adapting it to the patch-based discrimination of 3D rendered views. It is used in the context of learning a 3D Generative Radiance Field for a single scene, specifically for indoor scenes from the Replica and Matterport3D datasets [S1].
+
+## Sources
+[S1] SinGRAF: Learning a 3D Generative Radiance Field for a Single Scene, https://doi.org/10.1109/cvpr52729.2023.00822, fetched 2026-10-29

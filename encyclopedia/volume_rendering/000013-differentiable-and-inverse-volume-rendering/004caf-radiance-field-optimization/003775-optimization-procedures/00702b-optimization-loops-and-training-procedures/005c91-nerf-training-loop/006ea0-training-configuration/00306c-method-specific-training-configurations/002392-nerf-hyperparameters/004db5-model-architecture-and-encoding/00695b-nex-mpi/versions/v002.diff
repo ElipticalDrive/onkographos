@@ -1,0 +1,151 @@
+--- v001.md
++++ v002.md
+@@ -1,5 +1,5 @@
+ # NeX-MPI
+ 
+-Also called: NeX, NeX MPI with Neural Basis Expansion, Neural Basis Expansion MPI
++Also called: NeX, NeX MPI with Neural Basis Expansion, Neural Basis Expansion MPI, Neural Basis Expansion for MPI
+ 
+ ## Overview
+@@ -8,49 +8,71 @@
+ ## How it works
+ **Inputs and Outputs**
+-*   **Inputs:** A set of calibrated, undistorted input images $I_i$ with known camera intrinsics and extrinsics.
++*   **Inputs:** A set of calibrated, undistorted input images $I_i$ with known camera intrinsics and extrinsics [S2].
+ *   **Outputs:** A cached 3D MPI grid (alphas and view-dependent colors) that can be rendered in real-time via OpenGL/WebGL [S1, unofficial][S2].
+ 
+ **Data Structures**
+-The scene is represented as a 3D MPI grid with $D$ layers (planes). Each layer $d \in \{1, \dots, D\}$ has:
+-1.  **Alpha ($\alpha$):** Per-pixel transparency, predicted by MLP $F_\theta$.
+-2.  **Color Coefficients ($K$):** View-dependent color parameters. To reduce memory, every $M$ consecutive planes share the same set of coefficients $\{K_0, \dots, K_N\}$, but have distinct alphas [S2].
++The scene is represented as a 3D MPI grid with $D$ layers (planes) [S1, unofficial]. Each layer $d \in \{1, \dots, D\}$ contains an alpha image $\alpha_d \in \mathbb{R}^{H \times W \times 1}$ and a color image $c_d \in \mathbb{R}^{H \times W \times 3}$, ordered from back to front [S2].
++*   **Alpha ($\alpha$):** Per-pixel transparency, predicted by MLP $F_\theta$ [S2].
++*   **Color Coefficients ($K$):** View-dependent color parameters. To reduce memory, every $M$ consecutive planes share the same set of coefficients $\{K_0, \dots, K_N\}$, but have distinct alphas [S2].
+     *   $K_0$: Base color, stored explicitly as a learnable parameter tensor (not predicted by MLP) [S2].
+     *   $K_n$ ($n=1 \dots N$): Reflectance parameters for basis functions, predicted by MLP $F_\theta$ [S2].
+ 
+-**Networks**
+-Two MLPs are used:
+-1.  **$F_\theta$ (Spatial):** Maps pixel coordinates $x=(x,y,d)$ to $\alpha$ and $K_1 \dots K_N$.
+-    *   **Encoding:** Positional encoding [S1, unofficial]. Input $x,y$ encoded to 20 dims each; depth $d$ to 16 dims. Total input dim: 56 [S2].
+-    *   **Architecture:** 6 fully-connected layers, 384 hidden nodes, LeakyReLU activations [S2].
+-    *   **Output:** $\alpha$ uses Sigmoid; $K_n$ use Tanh [S2].
+-2.  **$G_\phi$ (Directional):** Maps normalized viewing direction $v$ to global basis function values $H_1 \dots H_N$.
+-    *   **Encoding:** Positional encoding. Input $v_x, v_y$ encoded to 6 dims each. Total input dim: 12 [S2].
+-    *   **Architecture:** 3 fully-connected layers, 64 hidden nodes, LeakyReLU activations [S2].
+-    *   **Output:** 8 dimensions of $H$ (number of basis functions $N=8$) [S2].
+-
+ **Formulas**
+ The color $C_p(v)$ for pixel $p$ at viewing direction $v$ is:
+-$$ C_p(v) = K_{0p} + \sum_{n=1}^{N} K_{np} H_n(v) $$
+-where $K_{0p}$ is the explicit base color, $K_{np} \in \mathbb{R}^3$ are coefficients from $F_\theta$, and $H_n(v)$ are basis function values from $G_\phi$ [S2].
++$$ C_p(v) = k_{0p} + \sum_{n=1}^{N} k_{np} H_n(v) $$
++where $k_{0p}$ is the explicit base color, $k_{np} \in \mathbb{R}^3$ are coefficients from $F_\theta$, and $H_n(v)$ are basis function values from $G_\phi$ [S2].
+ 
+-The rendering equation for an MPI layer $i$ with alpha $A_i$ and color $C_i$ is standard alpha blending [S2]:
+-$$ \hat{I}_i = O(W_i(A), W_i(C)) $$
+-where $O$ denotes the differentiable MPI rendering operator [S2].
++The differentiable MPI rendering operator $O$ composites the warped planes:
++$$ O(A, C) = \sum_{d=1}^{D} c_d T_d(A), \quad T_d(A) = \alpha_d \prod_{i=d+1}^{D} (1 - \alpha_i) $$
++where $A = \{\alpha_1, \dots, \alpha_D\}$, $C = \{c_1, \dots, c_D\}$, and $c_d$ is the view-dependent color for plane $d$ [S2].
+ 
+-**Training Algorithm**
+-1.  Initialize parameters $\theta, \phi, K_0$. Pre-compute pixel coordinates $X$ [S2].
+-2.  Loop for `maxIter` epochs:
+-    a. Sample a training image $I_i$ [S2].
+-    b. Compute viewing direction $V_i$ for each pixel:
+-       $$ V_i = \frac{X - \text{center of projection of } I_i}{\|X - \text{center of projection of } I_i\|} $$
+-       [S2]
+-    c. Compute coefficients: $(A, \tilde{K}) = F_\theta(X)$, where $\tilde{K} = [K_1, \dots, K_N]$ [S2].
+-    d. Compute basis functions: $\tilde{H} = G_\phi(V_i)$ [S2].
+-    e. Compute view-dependent color: $C = K_0 + \tilde{K} \cdot \tilde{H}$ [S2].
+-    f. Render predicted image: $\hat{I}_i = O(W_i(A), W_i(C))$ [S2].
+-    g. Compute loss:
+-       $$ L = L_{rec}(\hat{I}_i, I_i) + \gamma \cdot TV(K_0) $$
+-       where $L_{rec}$ is the reconstruction loss (Eq. 6 in [S2]) and $TV$ is Total Variation regularization on $K_0$ [S2].
+-    h. Update $\theta, \phi, K_0$ using Adam optimizer [S2].
++**Numbered Steps**
++1. Initialize parameters $\theta, \phi, K_0$ and pre-compute pixel coordinates $X$ [S2].
++2. Sample a training image $I_i$ [S2].
++3. Compute viewing direction $V_i$ for each pixel: $V_i = (X - \text{center of projection of } I_i) / \|X - \text{center of projection of } I_i\|$ [S2].
++4. Compute coefficients: $(A, \tilde{K}) = F_\theta(X)$, where $\tilde{K} = [K_1, \dots, K_N]$ [S2].
++5. Compute basis functions: $\tilde{H} = G_\phi(V_i)$ [S2].
++6. Compute view-dependent color: $C = K_0 + \tilde{K} \cdot \tilde{H}$ [S2].
++7. Render predicted image: $\hat{I}_i = O(W_i(A), W_i(C))$ [S2].
++8. Compute loss: $L = L_{rec}(\hat{I}_i, I_i) + \gamma \cdot TV(K_0)$ [S2].
++9. Update $\theta, \phi, K_0$ using Adam optimizer [S2].
++
++**Pseudocode**
++```python
++def train_nex_mpi(images, intrinsics, max_iter=4000):
++    # Initialize parameters
++    theta, phi = init_mlp_params()
++    K0 = init_explicit_base_color()
++    X = precompute_pixel_coordinates()
++    
++    for iteration in range(max_iter):
++        # Sample image
++        I_i = sample_image(images)
++        
++        # Compute viewing directions
++        V_i = (X - center_of_projection(I_i)) / norm(X - center_of_projection(I_i))
++        
++        # Predict alphas and coefficients
++        A, K_tilde = F_theta(X)  # K_tilde = [K_1, ..., K_N]
++        
++        # Predict basis functions
++        H_tilde = G_phi(V_i)
++        
++        # Compute view-dependent color
++        C = K0 + K_tilde * H_tilde  # Broadcasting over pixels and planes
++        
++        # Render predicted image
++        I_hat_i = composite_operator(warp(A, I_i), warp(C, I_i))
++        
++        # Compute loss
++        L_rec = ||I_hat_i - I_i||_2 + omega * ||grad(I_hat_i) - grad(I_i)||_1
++        L_tv = total_variation(K0)
++        L = L_rec + gamma * L_tv
++        
++        # Update parameters
++        theta, phi, K0 = adam_update(theta, phi, K0, L)
++        
++    return A, K0, K_tilde
++```
+ 
+ **Parameters**
+@@ -58,10 +80,10 @@
+ *   **Coefficient Sharing ($M$):** 12 planes share one set of $\{K_0, \dots, K_N\}$ [S2].
+ *   **Basis Functions ($N$):** 8 [S2].
+-*   **Loss Weights:** $\omega = 0.05$ (gradient loss weight in $L_{rec}$), $\gamma = 0.03$ (TV weight) [S2].
++*   **Loss Weights:** $\omega = 0.05$ (gradient loss weight), $\gamma = 0.03$ (TV weight) [S2].
+ *   **Optimizer:** Adam. Learning rate: 0.01 for $K_0$, 0.001 for $\theta, \phi$. Decay factor 0.1 every 1,333 epochs [S2].
+ *   **Sampling:** 8,000 pixels sampled per iteration [S2].
+ *   **Epochs:** 4,000 [S2].
+ 
+-**Pitfalls**
++**Edge Cases and Pitfalls**
+ *   Standard MPIs fail on non-Lambertian surfaces due to brightness constancy violation [S2].
+ *   MLPs predicting coefficients ($K_n$) lack high-frequency detail, resulting in blurry images [S2]. Explicitly storing $K_0$ mitigates this [S2].
+@@ -70,11 +92,16 @@
+ 
+ ## Operating characteristics
+-*   **Speed:** Real-time rendering (>300 FPS on RTX 2080Ti via WebGL) [S2]. Training takes ~18 hours on a single NVIDIA V100 for 17 images [S2].
+-*   **Efficiency:** 0.16 MFLOPs/pixel for rendering, compared to NeRF's 226 MFLOPs/pixel [S2].
+-*   **Quality:** Outperforms NeRF, LLFF, and SRN on Real Forward-Facing and Shiny datasets in PSNR, SSIM, and LPIPS [S2].
+-*   **Limitations:** May exhibit boundary distortions; relies on pre-computed cache for real-time speed [S2].
++*   **Time Complexity:** Training scales linearly with epochs (4,000) and sampled pixels (8,000 per iteration) [S2]. Rendering is $O(D \cdot H \cdot W)$ per frame due to fixed MPI compositing [S2].
++*   **Memory Complexity:** $O(D \cdot H \cdot W)$ for alphas, plus $O((D/M) \cdot H \cdot W \cdot (N+1) \cdot 3)$ for shared coefficients and $O(N)$ for basis functions [S2].
++*   **Measured Performance:** On a scene with 17 input photos at 1008×756 resolution, training takes ~18 hours on a single NVIDIA V100 with batch size 1 [S2]. Rendering achieves >300 FPS on an NVIDIA RTX 2080Ti via WebGL [S2].
++*   **Efficiency:** Rendering requires 0.16 MFLOPs/pixel, compared to NeRF's 226 MFLOPs/pixel [S2].
++*   **Quality:** Outperforms NeRF, LLFF, and SRN on the Real Forward-Facing dataset, and outperforms NeRF on the Shiny dataset, across PSNR, SSIM, and LPIPS metrics [S2].
++*   **Strengths:** Real-time view-dependent rendering, handles non-Lambertian surfaces, sharp details via explicit $K_0$ [S2].
++*   **Limitations:** Boundary distortions near image edges, requires pre-computed cache for real-time speed, limited to forward-facing captures (~12+ images) [S2].
++*   **When to use:** Forward-facing novel view synthesis requiring real-time rendering and accurate view-dependent effects (reflections, refractions) [S2].
++*   **When not to use:** Scenes requiring full 360° omnidirectional modeling, non-forward-facing captures, or scenes where boundary artifacts are unacceptable [S2].
+ 
+ ## Background
+-NeX-MPI was introduced in "NeX: Real-time View Synthesis with Neural Basis Expansion" (CVPR 2021) [S2]. It builds on the MPI framework [S1, unofficial] to address the lack of view-dependent modeling in traditional MPIs, which struggle with reflections and refractions [S2]. It leverages the "deep prior" concept, using MLPs to regularize MPI parameters, similar to techniques used in image synthesis [S2].
++NeX-MPI was introduced in "NeX: Real-time View Synthesis with Neural Basis Expansion" (CVPR 2021) by Wizadwongsa, Phongthawee, Suwajanakorn, and Yenphraphai [S2]. It builds on the MPI framework [S1, unofficial] to address the lack of view-dependent modeling in traditional MPIs, which struggle with reflections and refractions [S2]. It leverages the deep prior concept, using MLPs to regularize MPI parameters and prevent overfitting [S2]. The method is implemented in OpenGL/WebGL fragment shaders and evaluated on the Real Forward-Facing and Shiny datasets [S2].
+ 
+ ## Sources

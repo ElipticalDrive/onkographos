@@ -1,0 +1,121 @@
+# 2D Gaussian Splatting
+
+Also called: 2D-GS, 2DGS Scene Representation, 2D Gaussian Splatting for Geometrically Accurate Radiance Fields
+
+## Overview
+2D Gaussian Splatting (2DGS) is a surface reconstruction technique that replaces the volumetric 3D Gaussian primitives of [3D Gaussian Splatting](6068-3d-gaussian-splatting.md) with oriented 2D planar disks (surfels) to improve spatial localization and recover high-resolution normal maps [S1, S4][S9, unofficial]. It solves the conflict between volumetric radiance representation and thin surfaces, addressing the lack of native surface normals and multi-view depth inconsistency inherent in 3D Gaussians [S4][S11, unofficial]. Unlike 3DGS, which evaluates Gaussian values at the intersection between a pixel ray and a 3D blob leading to inconsistent depth, 2DGS utilizes explicit ray-splat intersection resulting in perspective-correct splatting and view-consistent geometry [S4, S5].
+
+## How it works
+**Inputs and Outputs:**
+- **Inputs:** A set of calibrated images with known camera poses.
+- **Outputs:** A scene representation consisting of a set of 2D Gaussian primitives, and rendered images (color, depth, normal maps).
+
+**Data Structures:**
+Each 2D Gaussian primitive $i$ is characterized by the following learnable parameters:
+- **Center:** $\mathbf{p}_k \in \mathbb{R}^3$, the 3D position in world space.
+- **Orientation:** Two principal tangential vectors $\mathbf{t}_u, \mathbf{t}_v \in \mathbb{R}^3$. The primitive normal is defined as $\mathbf{t}_w = \mathbf{t}_u \times \mathbf{t}_v$. These form a rotation matrix $\mathbf{R} = [\mathbf{t}_u, \mathbf{t}_v, \mathbf{t}_w]$.
+- **Scale:** A scaling vector $\mathbf{S} = (s_u, s_v) \in \mathbb{R}^2$ controlling the variances along the tangent directions.
+- **Opacity:** $\alpha \in \mathbb{R}^1$, a scalar learnable opacity parameter.
+- **Appearance:** View-dependent color $c$, parameterized using Spherical Harmonics (SH) coefficients, identical to [3D Gaussian Splatting](6068-3d-gaussian-splatting.md).
+
+The geometry is encoded in a $4 \times 4$ homogeneous transformation matrix $\mathbf{H}$:
+$$
+\mathbf{H} = \begin{bmatrix} \mathbf{R}\mathbf{S} & \mathbf{p}_k \\ \mathbf{0} & 1 \end{bmatrix} = \begin{bmatrix} s_u \mathbf{t}_u & s_v \mathbf{t}_v & \mathbf{0} & \mathbf{p}_k \\ 0 & 0 & 0 & 1 \end{bmatrix}
+$$
+Note that the third column of $\mathbf{R}\mathbf{S}$ is zero, reflecting the zero thickness of the 2D Gaussian [S4].
+
+**Rendering Steps:**
+
+1.  **Bounding Box and Sorting:**
+    Compute a screen-space bounding box for each 2D Gaussian primitive. Sort the primitives based on the depth of their centers $\mathbf{p}_k$ and organize them into tiles based on their bounding boxes, following the rasterization strategy of [3D Gaussian Splatting](6068-3d-gaussian-splatting.md) [S4].
+
+2.  **Ray-Splat Intersection:**
+    For each pixel $\mathbf{x} = (x, y)$ in the image, parameterize the ray in projective space as the intersection of two orthogonal planes:
+    - The $x$-plane: $\mathbf{h}_x = (-1, 0, 0, x)^T$
+    - The $y$-plane: $\mathbf{h}_y = (0, -1, 0, y)^T$
+    
+    Transform these planes into the local $uv$-coordinate system of the 2D Gaussian primitive. Let $\mathbf{W}$ be the $4 \times 4$ world-to-screen transformation matrix. The transformation matrix from world to local coordinates is $\mathbf{M} = (\mathbf{W}\mathbf{H})^{-1}$. Transforming homogeneous plane parameters uses the inverse transpose $\mathbf{M}^{-T} = (\mathbf{W}\mathbf{H})^T$, eliminating explicit matrix inversion [S4]:
+    $$
+    \mathbf{h}_u = (\mathbf{W}\mathbf{H})^T \mathbf{h}_x, \quad \mathbf{h}_v = (\mathbf{W}\mathbf{H})^T \mathbf{h}_y
+    $$
+    
+    Points on the 2D Gaussian plane are represented as $(u, v, 1, 1)^T$. The intersection point $\mathbf{u}(\mathbf{x}) = (u, v)$ satisfies $\mathbf{h}_u \cdot (u, v, 1, 1)^T = 0$ and $\mathbf{h}_v \cdot (u, v, 1, 1)^T = 0$. The closed-form solution is [S4]:
+    $$
+    u(\mathbf{x}) = \frac{\mathbf{h}_u^2 \mathbf{h}_v^4 - \mathbf{h}_u^4 \mathbf{h}_v^2}{\mathbf{h}_u^1 \mathbf{h}_v^2 - \mathbf{h}_u^2 \mathbf{h}_v^1}, \quad v(\mathbf{x}) = \frac{\mathbf{h}_u^4 \mathbf{h}_v^1 - \mathbf{h}_u^1 \mathbf{h}_v^4}{\mathbf{h}_u^1 \mathbf{h}_v^2 - \mathbf{h}_u^2 \mathbf{h}_v^1}
+    $$
+    where $\mathbf{h}_u^i, \mathbf{h}_v^i$ are the $i$-th components of the 4D plane vectors. Note that $\mathbf{h}_u^3$ and $\mathbf{h}_v^3$ are always zero [S4].
+
+3.  **Gaussian Evaluation and Degeneracy Handling:**
+    Calculate the depth $z$ of the intersection point using the homogeneous transformation: $\mathbf{x} = \mathbf{W}\mathbf{H}(u, v, 1, 1)^T$.
+    Evaluate the 2D Gaussian value at the local coordinates:
+    $$
+    \mathcal{G}(\mathbf{u}) = \exp\left(-\frac{u^2 + v^2}{2}\right)
+    $$
+    
+    **Pitfall (Degeneracy):** When a 2D Gaussian is viewed from a slanted angle, it degenerates to a line in screen space and may be missed during rasterization. To stabilize optimization, apply an object-space low-pass filter [S4]:
+    $$
+    \hat{\mathcal{G}}(\mathbf{x}) = \max \left\{ \mathcal{G}(\mathbf{u}(\mathbf{x})), \mathcal{G}\left(\frac{\mathbf{x} - \mathbf{c}}{\sigma}\right) \right\}
+    $$
+    where $\mathbf{c}$ is the projection of the center $\mathbf{p}_k$ onto the screen, and $\sigma = \sqrt{2}/2$ is a fixed radius [S4].
+
+4.  **Alpha Compositing:**
+    Render the color $c(\mathbf{x})$ by accumulating contributions from front to back:
+    $$
+    c(\mathbf{x}) = \sum_{i=1}^{N} c_i \alpha_i \hat{G}_i(\mathbf{u}_i(\mathbf{x})) \prod_{j=1}^{i-1} (1 - \alpha_j \hat{G}_j(\mathbf{u}_j(\mathbf{x})))
+    $$
+    The process terminates when accumulated opacity reaches saturation [S4]. The adjusted opacity for the $i$-th splat is $\alpha'_i = \alpha_i G(\mathbf{x})$ [S2, unofficial].
+
+**Training Losses:**
+To enhance geometry reconstruction, 2DGS introduces two regularization terms [S4]:
+
+1.  **Depth Distortion Loss:** Concentrates primitives along the ray to mitigate the volume rendering limitation where distances between Gaussians are ignored. It minimizes the weighted distance between intersection depths:
+    $$
+    \mathcal{L}_d = \sum_{i,j} \omega_i \omega_j |z_i - z_j|
+    $$
+    where $\omega_i = \alpha_i \hat{G}_i(\mathbf{u}_i(\mathbf{x})) \prod_{j=1}^{i-1} (1 - \alpha_j \hat{G}_j(\mathbf{u}_j(\mathbf{x})))$ is the blending weight of the $i$-th intersection, and $z_i$ is its depth [S4].
+
+2.  **Normal Consistency Loss:** Aligns the splat normals with the gradients of the rendered depth map. The actual surface is considered at the median intersection point $\mathbf{p}_m$ where accumulated opacity reaches 0.5. The loss is:
+    $$
+    \mathcal{L}_n = \sum_i \omega_i (1 - \mathbf{n}_i^T \mathbf{N})
+    $$
+    where $\mathbf{n}_i$ is the normal of the splat oriented towards the camera, and $\mathbf{N}$ is the normal estimated from the depth map gradient [S4].
+
+## Subtopics
+
+### [Flattened Gaussian Ellipsoid Rendering](1667-flattened-gaussian-ellipsoid-rendering.md)
+Approximates 2D Gaussian ellipses by flattening 3D Gaussians within a differentiable volume rendering framework, enforcing near-zero determinant covariance.
+
+### [3D Surface Splatting](4524-3d-surface-splatting.md)
+A differentiable surface splatting renderer for physically-based inverse rendering that handles multiple surface layers per pixel through depth-interval merging.
+
+### [Spatially Varying Gaussian Splatting (SVGS)](8729-spatially-varying-gaussian-splatting-svgs.md)
+Enhances representational power by defining color and opacity as spatially varying functions of the intersection point on 2D Gaussian surfels.
+
+### [Learning View-Dependent Splatting Kernels](9548-learning-view-dependent-splatting-kernels.md)
+Learns view-dependent 2D splatting kernels as an implicit representation, improving reconstruction quality for novel 3D view synthesis.
+
+### [4D Scale-adaptive Filter](9868-4d-scale-adaptive-filter.md)
+A filtering technique for 4D Gaussian Splatting that prevents distortion of Gaussian anisotropy during dynamic scene reconstruction.
+
+## Operating characteristics
+- **Time Complexity:** Rendering complexity is similar to [3D Gaussian Splatting](6068-3d-gaussian-splatting.md), dominated by sorting and tile-based rasterization. The ray-splat intersection calculation adds a constant overhead per pixel per splat but avoids the affine approximation errors of 3DGS.
+- **Memory Complexity:** Each primitive stores $\mathbf{p}_k$ (3), $\mathbf{t}_u, \mathbf{t}_v$ (6, though constrained to orthonormality), $s_u, s_v$ (2), $\alpha$ (1), and SH coefficients. This is comparable to 3DGS, which stores $\mathbf{p}_k$ (3), rotation (4 via quaternion), scale (3), $\alpha$ (1), and SH. The zero-thickness nature may allow for denser packing on surfaces.
+- **Performance:** Achieves state-of-the-art geometry reconstruction and novel view synthesis (NVS) results with competitive appearance quality and real-time rendering speeds [S4].
+- **Strengths:** Perspective-correct splatting, accurate surface normals, better handling of thin surfaces and sharp edges, and noise-free geometry reconstruction [S4, S5][S11, unofficial].
+- **Limitations:** Requires careful handling of degenerate cases (slanted views) via low-pass filtering. May struggle with highly volumetric or translucent scenes where 3D blobs are more appropriate than surfaces [S4].
+
+## Background
+2D Gaussian Splatting was introduced by Huang et al. in 2024 at SIGGRAPH [S4]. It addresses the limitations of 3D Gaussian Splatting, which, while excellent for novel view synthesis, struggles with accurate surface reconstruction due to the multi-view inconsistent nature of 3D Gaussians and the lack of native surface normals [S4]. By collapsing the 3D volume into 2D oriented planar Gaussian disks, 2DGS provides view-consistent geometry and enables direct surface regularization. It differs from prior works like SuGaR, which approximates 2D Gaussians with 3D Gaussians, by directly employing 2D Gaussians for a simpler and more geometrically accurate solution [S4].
+
+## Sources
+[S1] From Volume Rendering to 3D Gaussian Splatting: Theory and Applications, https://doi.org/10.1109/sibgrapi67909.2025.11223276, fetched 2026-10-26
+[S2] SparSplat: Fast Multi-View Reconstruction with Generalizable 2D Gaussian Splatting, https://doi.org/10.48550/arXiv.2505.02175, fetched 2026-10-26 (unofficial)
+[S3] Recent advances in 3D Gaussian splatting, https://doi.org/10.1007/s41095-024-0436-y, fetched 2026-10-26
+[S4] 2D Gaussian Splatting for Geometrically Accurate Radiance Fields, https://doi.org/10.1145/3641519.3657428, fetched 2026-10-27
+[S5] Recent Advances and Trends in Learning‐Based 3D Representations, https://doi.org/10.1111/cgf.70530, fetched 2026-10-26
+[S6] When Gaussian Meets Surfel: Ultra-fast High-fidelity Radiance Field Rendering, https://doi.org/10.1145/3730925, fetched 2026-10-26
+[S7] Neural Rendering — Technologies & Tricks, https://www.chengjianglong.com/ml/3D-Neural_Rendering_SOTA_Updated.html, fetched 2026-10-27 (unofficial)
+[S8] Gaussian Splatting — All Variants Cheat Sheet, https://www.chengjianglong.com/ml/3D-Gaussian_Splatting_SOTA_Updated.html, fetched 2026-10-27 (unofficial)
+[S9] From Volume Rendering to 3D Gaussian Splatting, https://www.visgraf.impa.br/Data/RefBib/PS_PDF/tutorial-sib2025/tutorial-sib2025.pdf, fetched 2026-10-28 (unofficial)
+[S10] GAINS: Gaussian-Based Inverse Rendering from Sparse Multi-view Captures, https://doi.org/10.1007/978-3-032-37602-2_18, fetched 2026-10-29
+[S11] Gaussian Splats Part 2: From Photos to a Trained Model, https://alphapixeldev.com/gaussian-splats-part-2-creating-gaussian-splats/, fetched 2026-10-29 (unofficial)

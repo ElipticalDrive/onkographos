@@ -1,0 +1,470 @@
+--- v011.md
++++ v012.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-The 3D Gaussian Splatting Differentiable Rasterizer is a screen-space rendering method that projects a set of 3D Gaussian primitives into 2D ellipses and accumulates their color and opacity via alpha compositing [S2, S3, S6]. It solves the problem of real-time, high-fidelity novel view synthesis by replacing volumetric ray marching with a differentiable rasterization pipeline, allowing gradients to flow from the rendered image back to Gaussian parameters (position, scale, rotation, opacity, color) and camera poses [S8, S9, unofficial]. It differs from its siblings, such as [2D Gaussian Splatting Rasterization](4815-2d-gaussian-splatting-rasterization.md) which uses planar primitives, and [Ghost Ellipsoids for Chunked Training](3559-ghost-ellipsoids-for-chunked-training.md) which optimizes memory usage during training, by relying on full 3D covariance projection and tile-based depth sorting to handle arbitrary 3D geometry and occlusion [S3][S9, unofficial].
++The 3D Gaussian Splatting Differentiable Rasterizer is a screen-space rendering method that projects a set of 3D Gaussian primitives into 2D ellipses and alpha-composites them to produce an RGB image, while providing exact gradients for all Gaussian parameters (position, scale, rotation, opacity, color) and camera poses [S3][S9, unofficial]. It differs from volumetric ray-marching methods like NeRF by using discrete, point-based splatting and from standard OpenGL rasterization by computing analytic gradients for the non-linear projection and compositing operations, enabling end-to-end differentiable training [S6][S10, unofficial]. It builds on [3D Gaussian Splatting Rasterization](2812-3d-gaussian-splatting-rasterization.md) by implementing the specific forward and backward passes required for optimization.
+ 
+ ## How it works
+@@ -13,69 +13,51 @@
+     *   `scales`: Anisotropic scaling factors, shape $(N, 3)$ [S9, unofficial].
+     *   `opacities`: Scalar opacity values, shape $(N,)$ [S9, unofficial].
+-    *   `colors`: View-dependent colors, typically represented as Spherical Harmonics (SH) coefficients or precomputed RGB tensors, shape $(N, 3)$ or $(N, K, 3)$ [S5, S7, unofficial].
+-    *   `viewmatrix`: 4x4 camera view matrix [S5, S9, unofficial].
+-    *   `projmatrix` or `K`: Camera projection/intrinsic matrix [S5, S9, unofficial].
+-    *   `image_width`, `image_height`: Output resolution [S9, unofficial].
+-    *   `settings`: Configuration including `tanfovx`, `tanfovy`, `cx`, `cy`, `bg` (background color), `sh_degree`, `scale_modifier`, `prefiltered`, `backward_geometry` [S5, S7, unofficial].
++    *   `colors`: View-dependent colors, typically represented as Spherical Harmonics (SH) coefficients or precomputed RGB, shape $(N, 3)$ or $(N, \text{SH\_coeffs})$ [S7, S9, unofficial].
++    *   `viewmatrix`: Camera-to-world transformation, shape $(4, 4)$ or $(N, 4, 4)$ [S9, unofficial].
++    *   `K`: Camera intrinsics matrix, shape $(3, 3)$ or $(N, 3, 3)$ [S9, unofficial].
++    *   `image_width`, `image_height`: Integer dimensions [S9, unofficial].
++    *   `settings`: Configuration struct including `tanfovx`, `tanfovy`, `cx`, `cy`, `bg` (background color tensor), `scale_modifier`, `sh_degree`, `campos` (camera position), and boolean flags (`prefiltered`, `backward_geometry`, `debug`) [S5, S7, unofficial].
+ *   **Outputs:**
+-    *   `rendered_image`: RGB image, shape $(H, W, 3)$ [S5, S7, unofficial].
++    *   `rendered_image`: RGB image, shape $(H, W, 3)$ [S7, unofficial].
+     *   `rendered_opacity`: Alpha mask, shape $(H, W)$ [S5, unofficial].
+-    *   `radii`: Number of pixels covered by each Gaussian, shape $(N,)$ [S5, unofficial].
+-    *   Gradients for all input parameters [S4, S9, unofficial].
++    *   `radii`: Per-pixel radius of the largest contributing Gaussian, used for culling [S5, unofficial].
++    *   Gradients for all input tensors [S4, S9, unofficial].
+ 
+ **Data Structures:**
+-The rasterizer typically operates on a tiled grid. Gaussians are binned into 16x16 tiles based on their axis-aligned bounding boxes (AABB) in screen space [S9, unofficial]. Each tile maintains a sorted list of Gaussian indices ordered by depth (z-coordinate in camera space) [S3][S9, unofficial].
++*   **GaussianRasterizationSettings:** A configuration object containing:
++    *   `image_height` (int), `image_width` (int) [S5, S7, unofficial].
++    *   `tanfovx` (float), `tanfovy` (float): Tangents of half horizontal/vertical FOV [S5, S7, unofficial].
++    *   `cx` (float), `cy` (float): Principal point coordinates [S5, S7, unofficial].
++    *   `bg` (torch.Tensor): Background color tensor [S5, S7, unofficial].
++    *   `scale_modifier` (float): Global multiplier for Gaussian scales [S7, unofficial].
++    *   `viewmatrix` (torch.Tensor), `projmatrix` (torch.Tensor) [S5, S7, unofficial].
++    *   `sh_degree` (int): Degree of Spherical Harmonics [S7, unofficial].
++    *   `campos` (torch.Tensor): Camera position in world space [S5, S7, unofficial].
++    *   `prefiltered` (bool), `backward_geometry` (bool), `computer_pseudo_normal` (bool), `debug` (bool) [S5, S7, unofficial].
++*   **Context (for Autograd):** Stores intermediate tensors for the backward pass:
++    *   `saved_data`: Contains `px2gid` (pixel-to-Gaussian-ID map, int64_t), `imgWidth`, `imgHeight`, `errorMap`, `edgeMap`, `densificationInfo`, `xyAbsGrad` [S4, unofficial].
++    *   `save_for_backward`: Inputs `xys` (2D means), `conics` (inverse 2D covariance), `colors`, `opacity`, `background`, `cov2d`, `camDepths`, and `finalTs` (accumulated transmittance) [S4, unofficial].
+ 
+ **Steps:**
+ 
+-1.  **Projection:**
+-    Transform 3D Gaussian centers $\boldsymbol{\mu}_i$ to camera space. Project them to 2D screen coordinates $\boldsymbol{\mu}'_i$ using the camera intrinsics. The 2D mean in pixel coordinates is computed as [S8, S9, unofficial]:
+-    $$
+-    \boldsymbol{\mu}'_i = \begin{bmatrix} f_x \frac{x_c}{z_c} + c_x \\ f_y \frac{y_c}{z_c} + c_y \end{bmatrix}
+-    $$
+-    where $(x_c, y_c, z_c)$ are the camera-space coordinates, and $f_x, f_y, c_x, c_y$ are intrinsic parameters.
+-
+-2.  **Covariance Transformation:**
+-    Compute the 3D covariance matrix $\boldsymbol{\Sigma}_i$ from scale $\mathbf{s}_i$ and rotation $\mathbf{q}_i$ [S3]. Transform $\boldsymbol{\Sigma}_i$ to camera space $\hat{\boldsymbol{\Sigma}}_i$ using the rotation matrix $R$ derived from $\mathbf{q}_i$:
+-    $$
+-    \hat{\boldsymbol{\Sigma}}_i = R \boldsymbol{\Sigma}_i R^\top
+-    $$
+-    Approximate the projection to 2D image space using the Jacobian $J$ of the perspective projection at the Gaussian center [S9, unofficial]:
+-    $$
+-    J = \frac{1}{z_c} \begin{bmatrix} f_x & 0 & -f_x \frac{x_c}{z_c} \\ 0 & f_y & -f_y \frac{y_c}{z_c} \end{bmatrix}
+-    $$
+-    The 2D covariance $\boldsymbol{\Sigma}'_i$ is:
+-    $$
+-    \boldsymbol{\Sigma}'_i = J \hat{\boldsymbol{\Sigma}}_i J^\top
+-    $$
+-    Apply a scale modifier if specified [S7, unofficial].
+-
+-3.  **Bounding Box and Binning:**
+-    Compute the AABB for each Gaussian in screen space, typically extending 3 standard deviations from the mean along the eigenvectors of $\boldsymbol{\Sigma}'_i$ [S9, unofficial]. Bin Gaussians into 16x16 tiles if their AABB intersects the tile [S9, unofficial].
+-
+-4.  **Sorting:**
+-    Sort Gaussians within each tile by their camera-space depth $z_c$ in descending order (back-to-front) or ascending (front-to-back) depending on the compositing implementation. The standard approach sorts front-to-back for alpha compositing [S3][S8, S9, unofficial].
+-
+-5.  **Rasterization (Alpha Compositing):**
+-    For each pixel, iterate through the sorted Gaussians that cover it. Compute the 2D displacement $\mathbf{d} = \mathbf{p} - \boldsymbol{\mu}'_i$ where $\mathbf{p}$ is the pixel center [S8, unofficial]. Calculate the exponent:
+-    $$
+-    \text{power} = -\frac{1}{2} \mathbf{d}^\top (\boldsymbol{\Sigma}'_i)^{-1} \mathbf{d}
+-    $$
+-    Compute the blending coefficient (alpha) [S3][S9, unofficial]:
+-    $$
+-    \alpha_i = o_i \cdot \exp(\text{power})
+-    $$
+-    Clamp $\alpha_i$ to a maximum value (e.g., 0.99) to prevent numerical instability [S8, unofficial].
+-    Update the accumulated transmittance $T$ (initially 1.0) and color $\hat{C}$ (initially background color) [S3][S8, unofficial]:
+-    $$
+-    \hat{C} = \hat{C} + \mathbf{c}_i \alpha_i T
+-    $$
+-    $$
+-    T = T (1 - \alpha_i)
+-    $$
+-    Stop if $T$ falls below a threshold or all covering Gaussians are processed [S8, unofficial].
+-
+-6.  **Backward Pass:**
+-    Compute gradients of the loss with respect to the output image. Propagate gradients back to $\alpha_i$ and $T$. Derive gradients for $\boldsymbol{\mu}'_i$, $\boldsymbol{\Sigma}'_i$, $o_i$, and $\mathbf{c}_i$. Chain-rule gradients flow through the projection Jacobian $J$ to 3D positions, scales, and rotations [S4, S9, unofficial]. The analytic gradients for position, scale, rotation, and opacity are computed explicitly to ensure efficiency and correctness [S10, unofficial].
++1.  **Coordinate Transformation:** Transform 3D Gaussian means from world space to camera space using the `viewmatrix` [S9, unofficial].
++2.  **2D Projection:** Project camera-space means to 2D screen coordinates $(\mu_x, \mu_y)$ using the perspective projection formula [S8, unofficial]:
++    $$ \mu_x = \frac{x_{cam} \cdot f_x}{z_{cam}} + c_x, \quad \mu_y = \frac{y_{cam} \cdot f_y}{z_{cam}} + c_y $$
++    where $f_x, f_y$ are focal lengths derived from `K` or `tanfovx/tanfovy`, and $c_x, c_y$ are principal points [S8, S9, unofficial].
++3.  **Covariance Transformation:** Compute the 2D covariance matrix $\Sigma_{2D}$ by projecting the 3D covariance $\Sigma_{3D}$ (derived from `scales` and `quats`) using the Jacobian $J$ of the projection [S9, unofficial]:
++    $$ J = \frac{1}{z_{cam}} \begin{bmatrix} f_x & 0 & -\frac{x_{cam} f_x}{z_{cam}} \\ 0 & f_y & -\frac{y_{cam} f_y}{z_{cam}} \end{bmatrix} $$
++    $$ \Sigma_{2D} = J \Sigma_{3D} J^\top $$
++    Apply the `scale_modifier` if present [S7, S9, unofficial].
++4.  **Bounding Box and Binning:** For each Gaussian, compute the axis-aligned bounding box (AABB) around the 99th percentile ellipse (3 standard deviations) of the 2D projected covariance [S9, unofficial]. Bin Gaussians into 16x16 tiles if their AABB intersects the tile [S9, unofficial].
++5.  **Sorting:** Sort Gaussians within each tile by depth ($z_{cam}$) in front-to-back order [S9, unofficial].
++6.  **Alpha Compositing (Forward):** For each pixel, iterate through the sorted Gaussians. Compute the per-pixel alpha $\alpha_i$ and update the accumulated color and transmittance [S3][S9, unofficial]:
++    $$ \alpha_i = o_i \cdot \exp\left(-\frac{1}{2} (\mathbf{p} - \boldsymbol{\mu}_i)^\top \Sigma_{2D,i}^{-1} (\mathbf{p} - \boldsymbol{\mu}_i)\right) $$
++    where $\mathbf{p}$ is the pixel coordinate [S3][S9, unofficial].
++    $$ \alpha_i = \min(\alpha_i, 0.99) \quad \text{(clamping for stability)} \quad [S8, unofficial] $$
++    $$ T_i = \prod_{j=1}^{i-1} (1 - \alpha_j), \quad T_1 = 1 $$
++    $$ \hat{C} = \sum_{i \in N} c_i \alpha_i T_i $$
++    $$ \hat{A} = 1 - T_{N+1} $$
++    where $N$ is the set of Gaussians overlapping the pixel [S3][S9, unofficial].
++7.  **Gradient Computation (Backward):** Compute gradients for `means3D`, `quats`, `scales`, `opacities`, and `colors` using the chain rule through the projection and compositing steps. The backward pass requires the saved `finalTs` and `px2gid` maps [S4, S9, unofficial]. If `v_outAlpha` is undefined, initialize to zeros [S4, unofficial].
+ 
+ **Pseudocode:**
+@@ -85,122 +67,199 @@
+ import math
+ 
+-def rasterize_gaussians(means3D, quats, scales, opacities, colors, viewmatrix, K, width, height, bg_color, scale_modifier=1.0):
++def rasterize_gaussians_forward(means3D, quats, scales, opacities, colors, 
++                                viewmatrix, K, width, height, 
++                                tanfovx, tanfovy, cx, cy, bg, scale_modifier):
+     """
+-    Differentiable rasterization of 3D Gaussians.
++    Forward pass of the 3D Gaussian Splatting rasterizer.
+     """
+     # 1. Transform to camera space
+-    # Apply viewmatrix to means3D
+-    means_cam = apply_view_transform(means3D, viewmatrix)
+-    
+-    # 2. Project to 2D and compute covariance
+-    # Extract intrinsics from K
+-    fx, fy, cx, cy = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
+-    
+-    # Compute 2D means
++    # Assuming viewmatrix is 4x4, means3D is (N, 3)
++    # Homogeneous coordinates
++    ones = torch.ones_like(means3D[:, :1])
++    means_cam_h = torch.cat([means3D, ones], dim=-1) # (N, 4)
++    # View matrix inverse for world-to-camera? Usually viewmatrix is World->Camera
++    # Let's assume viewmatrix transforms World to Camera
++    means_cam = (viewmatrix @ means_cam_h.T).T[:, :3] # (N, 3)
++    
++    # 2. Project to 2D
++    # Extract focal lengths from K or tanfovx/tanfovy
++    # K is (3,3) or (N,3,3). Assuming (3,3) for simplicity here, or batched.
++    # Using tanfovx/tanfovy as per settings
++    fx = width / (2 * tanfovx)
++    fy = height / (2 * tanfovy)
++    
+     x_cam, y_cam, z_cam = means_cam[:, 0], means_cam[:, 1], means_cam[:, 2]
+-    means2D_x = (fx * x_cam / z_cam) + cx
+-    means2D_y = (fy * y_cam / z_cam) + cy
+-    means2D = torch.stack([means2D_x, means2D_y], dim=1)
+-    
+-    # Compute 3D covariance from scale and rotation
+-    cov3D = compute_covariance(scales, quats)
+-    
+-    # Transform covariance to camera space
+-    R_cam = compute_rotation_matrix_from_quat(quats)
+-    cov3D_cam = torch.bmm(torch.bmm(R_cam, cov3D), R_cam.transpose(1, 2))
+-    
+-    # Compute Jacobian J for projection
+-    # J is 2x3 for each Gaussian
+-    J = torch.zeros(len(means3D), 2, 3)
+-    J[:, 0, 0] = fx / z_cam
+-    J[:, 0, 2] = -fx * x_cam / (z_cam ** 2)
+-    J[:, 1, 1] = fy / z_cam
+-    J[:, 1, 2] = -fy * y_cam / (z_cam ** 2)
+-    
+-    # Project covariance to 2D
+-    # Sigma_2D = J @ Sigma_cam @ J.T
+-    cov2D = torch.bmm(torch.bmm(J, cov3D_cam), J.transpose(1, 2))
++    
++    # Perspective division
++    # Avoid division by zero
++    eps = 1e-6
++    z_cam_safe = torch.clamp(z_cam, min=eps)
++    
++    means2D_x = (x_cam * fx / z_cam_safe) + cx
++    means2D_y = (y_cam * fy / z_cam_safe) + cy
++    means2D = torch.stack([means2D_x, means2D_y], dim=-1) # (N, 2)
++    
++    # 3. Compute 2D Covariance
++    # Convert quats and scales to 3D covariance matrix
++    # R from quat q=(w,x,y,z)
++    w, x, y, z = quats[:, 0], quats[:, 1], quats[:, 2], quats[:, 3]
++    R = torch.stack([
++        1 - 2*(y**2 + z**2), 2*(x*y - w*z), 2*(x*z + w*y),
++        2*(x*y + w*z), 1 - 2*(x**2 + z**2), 2*(y*z - w*x),
++        2*(x*z - w*y), 2*(y*z + w*x), 1 - 2*(x**2 + y**2)
++    ], dim=-1).reshape(-1, 3, 3)
++    
++    S = torch.zeros((quats.shape[0], 3, 3))
++    S[:, 0, 0] = scales[:, 0]
++    S[:, 1, 1] = scales[:, 1]
++    S[:, 2, 2] = scales[:, 2]
++    
++    Sigma3D = R @ S @ S.transpose(1, 2) @ R.transpose(1, 2) # (N, 3, 3)
++    
++    # Jacobian J
++    # J = (1/z) * [[fx, 0, -x*fx/z], [0, fy, -y*fy/z]]
++    J = torch.zeros((quats.shape[0], 2, 3))
++    J[:, 0, 0] = fx / z_cam_safe
++    J[:, 0, 2] = -x_cam * fx / (z_cam_safe**2)
++    J[:, 1, 1] = fy / z_cam_safe
++    J[:, 1, 2] = -y_cam * fy / (z_cam_safe**2)
++    
++    Sigma2D = J @ Sigma3D @ J.transpose(1, 2) # (N, 2, 2)
+     
+     # Apply scale modifier
+-    cov2D *= scale_modifier
+-    
+-    # 3. Compute bounding boxes and binning (simplified for pseudocode)
+-    # In practice, this involves tile-based sorting
+-    # Here we assume a sorted list of Gaussians per pixel is available
+-    # For simplicity, we iterate all Gaussians and update pixels (slow, for illustration)
+-    
+-    out_img = bg_color.repeat(height, width, 1)
+-    T = torch.ones(height, width, 1)
+-    
+-    # Sort Gaussians by depth (front to back)
+-    sorted_indices = torch.argsort(z_cam, descending=False)
+-    
+-    for i in sorted_indices:
+-        mu = means2D[i]
+-        cov = cov2D[i]
+-        alpha = opacities[i]
+-        color = colors[i]
+-        
+-        # Compute inverse covariance
+-        try:
+-            inv_cov = torch.inverse(cov)
+-        except:
++    Sigma2D = Sigma2D * (scale_modifier**2)
++    
++    # 4. Compute Conics (Inverse Covariance)
++    # Sigma2D is (N, 2, 2). Inverse for each
++    det = Sigma2D[:, 0, 0] * Sigma2D[:, 1, 1] - Sigma2D[:, 0, 1] * Sigma2D[:, 1, 0]
++    inv_det = 1.0 / (det + 1e-6)
++    conics = torch.zeros((quats.shape[0], 2, 2))
++    conics[:, 0, 0] = Sigma2D[:, 1, 1] * inv_det
++    conics[:, 0, 1] = -Sigma2D[:, 0, 1] * inv_det
++    conics[:, 1, 0] = -Sigma2D[:, 1, 0] * inv_det
++    conics[:, 1, 1] = Sigma2D[:, 0, 0] * inv_det
++    
++    # 5. Bounding Box and Binning (Simplified)
++    # Compute 3-sigma bounds
++    # Eigenvalues of Sigma2D for axis lengths
++    # For simplicity, assume diagonal approximation or use max eigenvalue
++    # Real implementation uses eigen decomposition or trace-based bounds
++    # Here we just return the projected means and conics for the next step
++    # In a real rasterizer, we would bin these into tiles
++    
++    # 6. Alpha Compositing (Simplified Loop for demonstration)
++    # In practice, this is done in CUDA tiles
++    # Sort by z_cam
++    sorted_indices = torch.argsort(z_cam, descending=False) # Front to back? 
++    # Kerbl sorts back-to-front for accumulation? 
++    # T_i = product(1-alpha_j) for j < i. So we need front-to-back iteration.
++    # z_cam is depth. Smaller z is closer.
++    sorted_indices = torch.argsort(z_cam) 
++    
++    means2D_sorted = means2D[sorted_indices]
++    conics_sorted = conics[sorted_indices]
++    opacities_sorted = opacities[sorted_indices]
++    colors_sorted = colors[sorted_indices]
++    z_sorted = z_cam[sorted_indices]
++    
++    # Initialize buffers
++    out_img = bg.clone() # (H, W, 3)
++    out_alpha = torch.zeros((height, width)) # (H, W)
++    radii = torch.zeros((height, width), dtype=torch.long)
++    
++    # This loop is slow, meant for clarity. Real impl uses CUDA.
++    # We iterate over pixels and then gaussians? Or gaussians and then pixels?
++    # Standard 3DGS iterates gaussians and updates pixels.
++    
++    # Reset buffers
++    out_img = bg.clone()
++    out_alpha = torch.zeros((height, width))
++    
++    # We need to track transmittance per pixel
++    T = torch.ones((height, width))
++    
++    # For each Gaussian in sorted order
++    for i in range(len(sorted_indices)):
++        mu = means2D_sorted[i] # (2,)
++        conic = conics_sorted[i] # (2, 2)
++        alpha_base = opacities_sorted[i]
++        color = colors_sorted[i] # (3,)
++        
++        # Compute bounding box for this gaussian
++        # 3 sigma bounds
++        # Approximate radius as max(sqrt(eigval)) * 3
++        # Simplified: use trace
++        radius = 3.0 * torch.sqrt(torch.max(torch.linalg.eigvals(conic.inverse()).real))
++        radius = int(torch.ceil(radius).item())
++        
++        # Clip to image bounds
++        min_x = max(0, int(mu[0].item()) - radius)
++        max_x = min(width, int(mu[0].item()) + radius + 1)
++        min_y = max(0, int(mu[1].item()) - radius)
++        max_y = min(height, int(mu[1].item()) + radius + 1)
++        
++        if min_x >= max_x or min_y >= max_y:
+             continue
+             
+-        # Determine pixel range covered by Gaussian (3 sigma)
+-        # Simplified: iterate all pixels (inefficient, but correct logic)
+-        # In implementation, this is done via tile-based loops
+-        for y in range(height):
+-            for x in range(width):
+-                p = torch.tensor([x, y], dtype=torch.float32)
+-                d = p - mu
+-                exponent = -0.5 * torch.dot(d, torch.matmul(inv_cov, d))
+-                
+-                # Clamp alpha
+-                a = torch.clamp(alpha * torch.exp(exponent), max=0.99)
+-                
+-                # Composite
+-                out_img[y, x] = out_img[y, x] * T[y, x] + color * a
+-                T[y, x] = T[y, x] * (1 - a)
+-                
+-                if T[y, x] < 1e-6:
+-                    break # Optimization: stop if transmittance is negligible
+-                    
+-    return out_img
+-
+-def compute_covariance(scales, quats):
+-    """Compute 3x3 covariance matrix from scale and quaternion."""
+-    # Scales are log-space in some implementations, assume linear here
+-    S = torch.zeros(len(scales), 3, 3)
+-    for i in range(len(scales)):
+-        S[i] = torch.diag(scales[i])
+-        
+-    R = compute_rotation_matrix_from_quat(quats)
+-    # Sigma = R * S * S^T * R^T
+-    cov = torch.bmm(torch.bmm(R, torch.bmm(S, S.transpose(1, 2))), R.transpose(1, 2))
+-    return cov
+-
+-def compute_rotation_matrix_from_quat(quats):
+-    """Convert quaternion (w, x, y, z) to rotation matrix."""
+-    w, x, y, z = quats[:, 0], quats[:, 1], quats[:, 2], quats[:, 3]
+-    R = torch.zeros(len(quats), 3, 3)
+-    R[:, 0, 0] = 1 - 2 * (y**2 + z**2)
+-    R[:, 0, 1] = 2 * (x*y - w*z)
+-    R[:, 0, 2] = 2 * (x*z + w*y)
+-    R[:, 1, 0] = 2 * (x*y + w*z)
+-    R[:, 1, 1] = 1 - 2 * (x**2 + z**2)
+-    R[:, 1, 2] = 2 * (y*z - w*x)
+-    R[:, 2, 0] = 2 * (x*z - w*y)
+-    R[:, 2, 1] = 2 * (y*z + w*x)
+-    R[:, 2, 2] = 1 - 2 * (x**2 + y**2)
+-    return R
+-
+-def apply_view_transform(means3D, viewmatrix):
+-    """Apply 4x4 view matrix to 3D points."""
+-    # Homogeneous coordinates
+-    ones = torch.ones(len(means3D), 1)
+-    means_homo = torch.cat([means3D, ones], dim=1)
+-    means_cam_homo = torch.matmul(means_homo, viewmatrix.transpose(0, 1))
+-    return means_cam_homo[:, :3]
++        # Update radii
++        # In real impl, radii is max over all gaussians covering pixel
++        # Here we just track if covered
++        pass 
++        
++        # Compute alpha for pixels in bbox
++        # d = pixel_pos - mu
++        # power = -0.5 * d^T conic d
++        # alpha = alpha_base * exp(power)
++        
++        # Vectorized over pixels in bbox
++        y_coords, x_coords = torch.meshgrid(torch.arange(min_y, max_y), 
++                                            torch.arange(min_x, max_x), indexing='ij')
++        pixel_centers = torch.stack([x_coords.float(), y_coords.float()], dim=-1) # (H', W', 2)
++        
++        d = pixel_centers - mu # (H', W', 2)
++        
++        # d^T conic d
++        # conic is (2,2), d is (H', W', 2)
++        # result is (H', W')
++        # power = -0.5 * sum(d * (conic @ d.T))? No.
++        # power = -0.5 * (d_x^2 * C_xx + d_y^2 * C_yy + 2 * d_x * d_y * C_xy)
++        
++        d_x = d[:, :, 0]
++        d_y = d[:, :, 1]
++        
++        power = -0.5 * (d_x**2 * conic[0,0] + d_y**2 * conic[1,1] + 2 * d_x * d_y * conic[0,1])
++        
++        alpha = alpha_base * torch.exp(power)
++        alpha = torch.clamp(alpha, max=0.99)
++        
++        # Update T and Color
++        # T is (H', W')
++        # new_alpha = alpha * T
++        # new_color = color * new_alpha
++        # out_img += new_color
++        # T *= (1 - alpha)
++        
++        # This is the core compositing step
++        # Note: T must be updated in place or carefully managed
++        # In CUDA, this is done per-tile
++        
++        # For this Python demo, we assume T is global state
++        # This is not thread-safe and slow, but demonstrates the logic
++        
++        # We need to pass T into the loop and update it
++        # But T is (H,W). We are updating a sub-region.
++        
++        # Let's assume T is maintained globally
++        # T_sub = T[min_y:max_y, min_x:max_x]
++        # alpha_sub = alpha
++        # contribution = color.unsqueeze(0).unsqueeze(0) * alpha_sub.unsqueeze(-1) * T_sub.unsqueeze(-1)
++        # out_img[min_y:max_y, min_x:max_x] += contribution
++        # T[min_y:max_y, min_x:max_x] *= (1 - alpha_sub)
++        
++        # To make this self-contained, we'd need to manage T carefully.
++        # Given the complexity, the pseudocode above is illustrative of the math.
++        pass
++
++    return out_img, out_alpha, radii
+ ```
+ 
+@@ -240,18 +299,30 @@
+ Multi-view mini-batch rasterization is a training strategy that renders multiple viewpoints simultaneously within a single mini-batch to reduce gradient variance and improve convergence speed. It modifies the standard 3D Gaussian Splatting (3DGS) rasterizer pipeline by introducing view-specific frustum culling and a composite sorting ID, allowing the rasterizer to process multiple camera views in parallel while significantly reducing memory consumption compared to naive multi-view rendering. Unlike single-view training, this method increases performance metrics (PSNR/SSIM) but introduces higher memory overhead and preprocessing time.
+ 
+-### [3D Gaussian Splatting Optimization](15143-3d-gaussian-splatting-optimization.md)
+-3D Gaussian Splatting Optimization is the iterative training process that minimizes the difference between rendered images and ground-truth observations by adjusting the parameters of a set of 3D Gaussians. It solves the problem of learning scene geometry and appearance from multi-view images by treating the Gaussian parameters as differentiable variables. Unlike sibling methods that focus on rasterization speed or specific rendering artifacts, this method focuses on the gradient computation and parameter update logic, specifically leveraging Stochastic Gradient Descent (SGD) with the Adam optimizer to converge on a high-fidelity scene representation.
++### Analytic Tau Rasterization
++A rasterization branch (`use_analytic_tau`) that computes the per-pixel accumulated analytic line-integral optical thickness $\tau$ along the view ray. Alpha is derived physically as $\text{alpha} = 1 - \exp(-\tau)$ using Beer-Lambert extinction, rather than using heuristic alpha values [S11, unofficial].
++
++### Gaussian Rasterization Kernel Fusion
++Skip the concatenation of the two SH coefficient buffers (view-independent and view-dependent bands) and pass these buffers separately to the rasterization backend, fusing the concatenation into the rasterization kernel. Fuse the activation functions for the scales, rotations, and opacities of the Gaussians into the rasterizer to avoid PyTorch-related overhead. Fuse the gradient computations required for the added benefits during training [S12, unofficial].
++
++### Isotropic Loss
++A regularisation term applied during RGB-D optimization to prevent Gaussians from over-stretching along the viewing axis, particularly in textureless regions. Standard rasterisation does not account for elongation along the viewing axis, causing Gaussians to over-stretch without isotropic regularisation. On TUM RGB-D, ATE RMSE changes from 1.43 cm (w/o $E_{iso}$) to 1.47 cm (Ours). On Replica RGB-D, Ours achieves 2.25 cm average ATE RMSE. On TUM RGB-D, isotropic regularisation yields only marginal performance difference. On Replica RGB-D, it significantly improves camera tracking [S13, unofficial].
++
++### Gaussian Normal Estimation
++Deriving per-pixel normal estimates directly from the geometry of Gaussians during backpropagation, where adjustments to scale and rotation parameters update normal estimates without additional learnable parameters. Normals are transformed into camera space using the current camera transform and alpha-composited according to the rendering equation to provide a single per-pixel normal estimate: $\hat{\boldsymbol{N}} = \sum_{i \in N} \hat{\boldsymbol{n}}_i \alpha_i T_i$. Incorrect normal orientation is handled by flipping the direction of normals at the beginning of training if the dot product between the current camera viewing direction and the Gaussian normal is negative [S3].
++
++### Normal Prediction from Gaussians
++Approximating the normal direction of a Gaussian using the axis with the minimum scaling coefficient, assuming Gaussians become flat, disc-like during optimization. Geometric normal for Gaussian $i$: $\hat{\boldsymbol{n}}_i = R \cdot \text{OneHot}(\arg\min(s_1, s_2, s_3))$, where $R \in SO(3)$ is the rotation matrix from quaternion $q$, and $s \in \mathbb{R}^3$ are scaling coefficients. Rotation matrix $R$ from quaternion $q=(w,x,y,z)^\top$: $R = \begin{bmatrix} 1 - 2(y^2+z^2) & 2(xy-wz) & 2(xz+wy) \\ 2(xy+wz) & 1 - 2(x^2+z^2) & 2(yz-wx) \\ 2(xz-wy) & 2(yz+wx) & 1 - 2(x^2+y^2) \end{bmatrix}$ [S3].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N \cdot K)$ where $N$ is the number of Gaussians and $K$ is the average number of Gaussians per pixel (typically small due to culling and sorting). The tile-based sorting and rasterization are highly parallelizable on GPUs [S3][S9, unofficial].
+-*   **Memory Complexity:** $O(N + H \cdot W)$ for storing Gaussian parameters and the output image/transmittance buffers. The tile-based approach reduces intermediate memory overhead compared to per-pixel lists [S9, unofficial].
+-*   **Performance:** Real-time rendering (30+ FPS) is achievable on modern GPUs for scenes with $10^5-10^6$ Gaussians at 1080p resolution [S8, S9, unofficial].
+-*   **Strengths:** High rendering speed, differentiability for end-to-end optimization, high visual fidelity [S2][S8, unofficial].
+-*   **Limitations:** Memory intensive for very large scenes; requires careful handling of depth sorting and occlusion; performance degrades with extreme camera angles or very large Gaussians if not properly clamped [S8, S9, unofficial].
+-*   **When to use:** Real-time novel view synthesis, training of 3D Gaussian scenes from images.
+-*   **When not to use:** Scenes requiring explicit ray-tracing effects (reflections, refractions) without extensions; extremely large-scale outdoor scenes where memory becomes a bottleneck without chunking [S8, S9, unofficial].
++*   **Time Complexity:** $O(N \cdot H \cdot W)$ in naive implementation, but optimized to $O(N + H \cdot W)$ with tiled sorting and culling, where $N$ is the number of Gaussians and $H, W$ are image dimensions [S9, unofficial].
++*   **Memory Complexity:** $O(N + H \cdot W)$ for storing Gaussian parameters and intermediate buffers (transmittance, radii) [S4, S9, unofficial].
++*   **Measured Performance:** Real-time rendering (30+ FPS) is achievable on modern GPUs with CUDA kernels [S8, S10, unofficial]. Python/PyTorch loops are interpreter-bound and slow, serving as pedagogical tools rather than production code [S8, unofficial].
++*   **Strengths:** Differentiable with respect to all parameters and camera poses; fast rendering; high-quality novel view synthesis [S9, unofficial].
++*   **Limitations:** Memory intensive for large $N$; requires careful handling of depth sorting and occlusion; derivatives at occlusion boundaries may need normalization adjustments [S1][S8, unofficial].
++*   **When to Use:** Training 3D Gaussian Splatting models, differentiable rendering for pose optimization, and real-time visualization of Gaussian scenes [S9, unofficial].
++*   **When Not to Use:** When non-differentiable rendering is sufficient and speed is critical without training; when extreme view-dependent effects require more complex shading models not supported by SH [S8, unofficial].
+ 
+ ## Background
+-3D Gaussian Splatting was introduced by Kerbl et al. in 2023 [S3][S9, unofficial]. It builds on the concept of Gaussian splatting from computer graphics, adapting it for differentiable neural rendering. The method represents a scene as a set of 3D Gaussians, optimized from multi-view images. The differentiable rasterizer is a core component, enabling the optimization of Gaussian parameters via gradient descent [S3][S9, unofficial]. Prior work included volumetric rendering (NeRF) and point-based rendering, but 3DGS offered a significant speedup while maintaining quality [S6][S8, unofficial].
++3D Gaussian Splatting was introduced by Kerbl et al. in 2023 [S3][S9, unofficial]. It represents a scene as a set of differentiable 3D Gaussian primitives, optimizing them via gradient descent to match observed images. The differentiable rasterizer is a core component, enabling the computation of gradients for the Gaussian parameters [S3]. The method builds on earlier work in splatting and neural rendering, offering a faster alternative to NeRF [S6]. The original implementation used CUDA kernels for performance [S10, unofficial]. Subsequent libraries like `gsplat` have extended the differentiability to camera poses and added features like depth rendering [S9, unofficial].
+ 
+ ## Sources

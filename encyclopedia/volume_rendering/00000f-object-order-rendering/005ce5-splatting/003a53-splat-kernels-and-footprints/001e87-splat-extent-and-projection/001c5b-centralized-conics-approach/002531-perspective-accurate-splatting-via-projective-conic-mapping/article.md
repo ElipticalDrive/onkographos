@@ -1,0 +1,164 @@
+# Perspective Accurate Splatting via Projective Conic Mapping
+
+Also called: Affine Approximation of Projective Conics, Homogeneous Coordinate Splatting, Perspective Accurate Splatting, Perspective Correct Splatting, Projective Conic Splatting, SPH Perspective Rendering Fix
+
+## Overview
+This method computes perspective-correct splat shapes for point-based rendering by approximating the projective mapping of Gaussian reconstruction kernels from their local tangent planes to image space using affine mappings derived from conic isocontours [S2, unofficial]. Unlike previous EWA splatting methods that used affine approximations exact only at the kernel center, this approach ensures accuracy at the kernel cutoff boundary, preventing holes and artifacts under extreme perspective projections [S2, unofficial]. It builds on the [Centralized Conics Approach](1243-centralized-conics-approach.md) by providing the specific mechanism for deriving the correct variance matrix in screen space [S2, unofficial].
+
+## How it works
+**Inputs:**
+- A set of point samples $p_k$ with associated colors $f_k$ and local tangent frames defined by tangent vectors $\mathbf{t}_u, \mathbf{t}_v$ [S2, unofficial].
+- A Gaussian reconstruction kernel $g$ with a user-specified cutoff value $F_g$ (typically $1 < F_g < 2$) [S2, unofficial].
+- Camera projection parameters [S2, unofficial].
+
+**Outputs:**
+- Screen-space splat accumulation (color and weight) for each pixel [S2, unofficial].
+
+**Data Structures:**
+- **Tangent Frame Matrix ($\mathbf{M}_k$):** A $3 \times 3$ matrix mapping local 2D coordinates $(u, v)$ to 3D world space, defined as $\mathbf{M}_k = \begin{bmatrix} \mathbf{t}_u \\ \mathbf{t}_v \\ \mathbf{p}_k \end{bmatrix}$ [S2, unofficial]. Points $\mathbf{p}$ on the tangent plane are expressed as $\mathbf{p} = (u, v, 1) \mathbf{M}_k$ [S2, unofficial].
+- **Conic Matrix ($Q_h$):** A $3 \times 3$ symmetric matrix representing the implicit form of a conic $\phi(x, y) = Ax^2 + 2Bxy + Cy^2 + 2Dx + 2Ey - F = 0$ in homogeneous coordinates: $Q_h = \begin{bmatrix} A & B & D \\ B & C & E \\ D & E & -F \end{bmatrix}$ [S2, unofficial]. The equation is $\mathbf{x} Q_h \mathbf{x}^T = 0$ where $\mathbf{x} = [x, y, 1]$ [S2, unofficial].
+- **Variance Matrix ($R_k$):** The $2 \times 2$ covariance matrix of the Gaussian kernel in the local tangent frame [S2, unofficial].
+- **Mapped Variance Matrix ($Q'''$):** The $2 \times 2$ variance matrix of the reconstruction kernel in image space, derived from the projective mapping [S2, unofficial].
+
+**Steps:**
+
+1.  **Define Local Kernel Isocontour:** The Gaussian kernel is truncated at an isocontour defined by $F_g$ [S2, unofficial]. In the local tangent frame, this isocontour is a central conic expressed in homogeneous coordinates:
+    $$ \begin{bmatrix} u & v & 1 \end{bmatrix} \begin{bmatrix} \mathbf{R}_k & 0 \\ 0 & -F_g^2 \end{bmatrix} \begin{bmatrix} u \\ v \\ 1 \end{bmatrix} = 0 $$
+    Let $Q_{local}$ be the $3 \times 3$ matrix $\begin{bmatrix} \mathbf{R}_k & 0 \\ 0 & -F_g^2 \end{bmatrix}$ [S2, unofficial].
+
+2.  **Compute Projective Mapping:** Determine the mapping from the local tangent plane to the image plane by inverting the tangent frame matrix $\mathbf{M}_k^{-1}$ and applying the camera projection [S2, unofficial].
+
+3.  **Derive Mapped Conic ($Q'''$):** Apply the projective transformation to the local conic $Q_{local}$ to obtain the conic in image space [S2, unofficial]. The resulting matrix $Q'''$ represents the variance matrix of the reconstruction kernel in screen space [S2, unofficial].
+
+4.  **Check Numerical Stability:** Invert $\mathbf{M}_k$ to compute the mapping [S2, unofficial]. Check the condition number of $\mathbf{M}_k$ [S2, unofficial]. If the condition number exceeds a threshold (indicating the splat is degenerating into a line segment), discard the splat [S2, unofficial].
+
+5.  **Validate Conic Type:** Determine if the mapped conic is an ellipse [S2, unofficial]. Calculate the discriminant $\Delta = AC - B^2$ from the upper-left $2 \times 2$ submatrix of the mapped conic matrix [S2, unofficial]. If $\Delta \le 0$ (parabola or hyperbola), discard the splat [S2, unofficial].
+
+6.  **Compute Screen-Space Variance:** The effective variance matrix for the splat in screen space is $Q''' + H$, where $H$ is the resampling filter matrix [S2, unofficial]. The inverse $(Q''' + H)^{-1}$ is passed to the fragment shader [S2, unofficial].
+
+7.  **Rasterize Splat:** Compute the bounding box of the projected conic to determine the OpenGL point size or fragment shader execution region [S2, unofficial]. For each pixel $\mathbf{x}$ in the bounding box, evaluate the ellipse equation:
+    $$ r^2 = \mathbf{x} (Q''' + H)^{-1} \mathbf{x}^T $$
+    If $r^2 < 1$, the pixel is inside the splat [S2, unofficial]. Accumulate color weighted by the Gaussian value and accumulate weight [S2, unofficial].
+
+8.  **Normalize:** In a final pass, divide accumulated color by accumulated weight to normalize [S2, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def perspective_accurate_splatting(points, camera_matrix, Fg=1.5, cond_threshold=1e6):
+    """
+    Render points using perspective accurate splatting via projective conic mapping.
+    """
+    image_height, image_width = 1024, 1024
+    color_accum = np.zeros((image_height, image_width, 3))
+    weight_accum = np.zeros((image_height, image_width))
+
+    for pt in points:
+        pk = np.array(pt['p'])
+        tu = np.array(pt['tu'])
+        tv = np.array(pt['tv'])
+        color = np.array(pt['color'])
+
+        # 1. Construct Tangent Frame Matrix Mk
+        Mk = np.vstack([tu, tv, pk])
+
+        # 2. Check Condition Number of Mk
+        if np.linalg.cond(Mk) > cond_threshold:
+            continue
+
+        # 3. Invert Mk
+        try:
+            Mk_inv = np.linalg.inv(Mk)
+        except np.linalg.LinAlgError:
+            continue
+
+        # 4. Define Local Conic Matrix Q_local
+        Rk = np.eye(2) # Assumed isotropic variance for simplicity
+        Q_local = np.zeros((3, 3))
+        Q_local[:2, :2] = Rk
+        Q_local[2, 2] = -Fg**2
+
+        # 5. Compute Homography from tangent plane to image plane
+        # H_proj maps homogeneous (u,v,1) to homogeneous (x,y,1) in screen space
+        H_proj = np.zeros((3, 3))
+        for i in range(3):
+            for j in range(3):
+                H_proj[i, j] = camera_matrix[i, j] * Mk_inv[j, 0] + camera_matrix[i, j+1] * Mk_inv[j, 1] + camera_matrix[i, j+2] * Mk_inv[j, 2]
+        H_proj /= H_proj[2, 2]
+
+        # 6. Project Conic to Image Space
+        Q_image = H_proj.T @ Q_local @ H_proj
+        Q_prime = Q_image[:2, :2]
+
+        # 7. Check if Conic is Ellipse
+        A, B, C = Q_prime[0, 0], Q_prime[0, 1], Q_prime[1, 1]
+        Delta = A * C - B**2
+        if Delta <= 0:
+            continue
+
+        # 8. Compute Resampling Filter Variance
+        H_filter = np.eye(2) # Identity resampling filter [G]
+        Variance = Q_prime + H_filter
+
+        # 9. Invert Variance for Fragment Shader
+        try:
+            Variance_inv = np.linalg.inv(Variance)
+        except np.linalg.LinAlgError:
+            continue
+
+        # 10. Compute Bounding Box
+        eigenvalues, _ = np.linalg.eigh(Variance_inv)
+        a = 1.0 / np.sqrt(eigenvalues[0])
+        b = 1.0 / np.sqrt(eigenvalues[1])
+        width, height = 2 * a, 2 * b
+        cx, cy = Q_image[0, 2] / Q_image[2, 2], Q_image[1, 2] / Q_image[2, 2]
+        y_min, y_max = int(cy - height), int(cy + height)
+        x_min, x_max = int(cx - width), int(cx + width)
+
+        # 11. Rasterize
+        for y in range(max(0, y_min), min(image_height, y_max)):
+            for x in range(max(0, x_min), min(image_width, x_max)):
+                offset = np.array([x - cx, y - cy])
+                r_sq = offset @ Variance_inv @ offset
+                if r_sq < 1.0:
+                    weight = np.exp(-0.5 * r_sq)
+                    color_accum[y, x] += color * weight
+                    weight_accum[y, x] += weight
+
+    # Pass 3: Normalization
+    for y in range(image_height):
+        for x in range(image_width):
+            if weight_accum[y, x] > 1e-6:
+                color_accum[y, x] /= weight_accum[y, x]
+
+    return color_accum
+```
+
+**Edge Cases and Pitfalls:**
+- **Ill-conditioned Mapping:** If the splat degenerates into a line segment, $\mathbf{M}_k$ becomes ill-conditioned [S2, unofficial]. Check the condition number and discard if too high [S2, unofficial].
+- **Non-Elliptical Conics:** Projective mapping can result in hyperbolas or parabolas [S2, unofficial]. Check the discriminant $\Delta$ and discard if $\Delta \le 0$ [S2, unofficial].
+- **Precision:** Perspective geometry should be computed in double precision to improve accuracy [S1].
+- **SPH Specifics:** For SPH particles, the kernel is evaluated at the impact parameter (perpendicular to the ray) rather than the offset in the particle plane [S1]. Pixels are placed at the depth of the slicing plane, not the particle depth [S1].
+
+## Subtopics
+
+### [Stretch-invariant polar capped color map](14337-stretch-invariant-polar-capped-color-map.md)
+A texture mapping technique for point cloud color data that maintains uniform sample density across the unit sphere, addressing distortion and sampling efficiency issues in color atlases. It complements the geometric accuracy of this splatting method by ensuring high-quality attribute rendering.
+
+## Operating characteristics
+- **Time Complexity:** Dominated by the vertex shader computation for each point (matrix inversions, conic mapping) and the fragment shader evaluation for each pixel in the bounding box [S2, unofficial]. The bounding box size depends on the perspective distortion and kernel cutoff [S2, unofficial].
+- **Memory Complexity:** Linear in the number of points and pixels covered by splats [S2, unofficial]. Requires storage for depth buffer, color buffer, and weight buffer [S2, unofficial].
+- **Performance:** Implemented on modern GPUs using vertex and fragment programs [S2, unofficial]. The three-pass approach (depth, accumulation, normalization) is efficient [S2, unofficial]. The method avoids holes and artifacts, improving visual quality at the cost of slightly more complex vertex shader computations compared to affine approximations [S2, unofficial].
+- **Strengths:** Perspective-correct splat shapes, no holes under extreme perspective, high image quality with anisotropic filtering [S2, unofficial].
+- **Limitations:** More complex than affine methods, requires careful handling of degenerate cases and numerical stability [S2, unofficial].
+
+## Background
+This method was introduced by Jussi Räsanen, Mario Botsch, Carsten Dachsbacher, and Mark Pauly [S2, unofficial]. It addresses the limitations of previous EWA splatting methods by Heckbert and Zwicker, which used affine approximations exact only at the kernel center [S2, unofficial]. The method was implemented in a point rendering algorithm using GPU vertex and fragment programs [S2, unofficial]. It is also referenced in the context of SPH particle rendering fixes in the pynbody library [S1].
+
+## Sources
+[S1] Opt-in exact AMR rendering, new pynbody.imaging package, and SPH perspective fixes, https://github.com/pynbody/pynbody/pull/1048, fetched 2026-10-26
+[S2] Perspective Accurate Splatting, http://infoscience.epfl.ch/record/149345, fetched 2026-10-26 (unofficial)

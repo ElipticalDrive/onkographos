@@ -1,0 +1,1554 @@
+Neural Rays for Occlusion-aware Image-based Rendering
+Yuan Liu1 Sida Peng2 Lingjie Liu3 Qianqian Wang4 Peng Wang1
+Christian Theobalt3 Xiaowei Zhou2 Wenping Wang5
+1
+The University of Hong Kong 2 Zhejiang University 3 Max Planck Institute for Informatics
+4
+Cornell University 5 Texas A&M University
+Abstract
+We present a new neural representation, called Neural
+Ray (NeuRay), for the novel view synthesis task. Recent
+works construct radiance fields from image features of input views to render novel view images, which enables the
+generalization to new scenes. However, due to occlusions,
+a 3D point may be invisible to some input views. On such a
+3D point, these generalization methods will include inconsistent image features from invisible views, which interfere
+with the radiance field construction. To solve this problem,
+we predict the visibility of 3D points to input views within
+our NeuRay representation. This visibility enables the radiance field construction to focus on visible image features,
+which significantly improves its rendering quality. Meanwhile, a novel consistency loss is proposed to refine the visibility in NeuRay when finetuning on a specific scene. Experiments demonstrate that our approach achieves stateof-the-art performance on the novel view synthesis task
+when generalizing to unseen scenes and outperforms perscene optimization methods after finetuning. Project page:
+https://liuyuan-pal.github.io/NeuRay/
+1. Introduction
+Novel View Synthesis (NVS) is an important problem in
+computer graphics and computer vision. Given a set of input images with known camera poses, the goal of NVS is to
+synthesize images of the scene from arbitrary virtual camera
+poses. Recently, neural rendering methods have achieved
+impressive improvements on the NVS problem compared
+to earlier image-based rendering methods [15, 20, 32]. Neural Radiance Field (NeRF) [33] shows that photo-realistic
+images of novel views can be synthesized by volume rendering on a 5D radiance field encoded in a neural network
+which maps a position and a direction to a density and a
+color. However, these methods cannot generalize to unseen
+scenes as they learn scene-specific networks, which usually
+take hours or days for a single scene.
+Recent works [5, 57, 58, 65] propose NeRF-like neural
+Input view
+(a) Consistency
+Test view
+Surface
+(b) Inconsistency
+(c) Inconsistency
+Figure 1. (a) Without occlusions, local image features are consistent on the surface point. (b) Local image features are inconsistent
+on a surface point due to occlusions. (c) Local image features
+are inconsistent on a non-surface point. Generalization methods
+will correctly assign a large density to the surface point in (a) due
+to the feature consistency. However, when features are not very
+consistent in (b) and (c), it is relatively hard for these methods to
+correctly determine the density.
+rendering frameworks that can generalize to unseen scenes.
+Given a set of input views, they construct a radiance field
+on-the-fly by extracting local image features on these views
+and matching multi-view features to predict colors and density on 3D points. This is similar to traditional stereo matching methods [49, 62] that check the multi-view feature consistency to find a surface point, as shown in Fig. 1 (a). However, when features are not consistent on a point, it is relatively hard for these methods to correctly determine whether
+such inconsistency is caused by occlusions as shown in
+Fig. 1 (b) or this point is a non-surface point as shown in
+Fig. 1 (c), leading to rendering artifacts.
+To address this problem, we introduce a new neural representation called Neural Rays (NeuRay) in this paper. NeuRay consists of pixel-aligned feature vectors on every input
+view. On a camera ray emitting from a pixel on the input
+view, the associated NeuRay feature vector on this pixel is
+able to predict visibility to determine whether a 3D point
+at a specific depth is visible or not. With such visibility,
+we can easily distinguish the occlusion-caused feature inconsistency from the non-surface-caused feature inconsistency in Fig. 1, which leads to more accurate radiance field
+construction and thus better rendering quality on difficult
+scenes with severe self-occlusions.
+A key challenge is how to estimate the visibility in an
+unseen scene. This is a chicken-and-egg problem because
+the estimation of visibility requires knowing the surface locations while the estimated visibility is intended for better surface estimation in the radiance field construction.
+To break this cycle, we propose to apply well-engineered
+multi-view stereo (MVS) algorithms, like cost volume construction [62] or patch-matching [49], to reconstruct the
+scene geometry and then extract the pixel-aligned feature
+vectors of NeuRay from the reconstructed geometry. In the
+end, NeuRay will be used in the computation of the visibility to improve the radiance field construction.
+Another problem is how to parameterize such visibility
+in NeuRay. A direct way is to predict the densities along the
+camera ray from the view to the 3D point and then accumulate these densities to compute the transmittance as the visibility like NeRF [33]. However, computing visibility with
+this strategy is computationally impractical because given
+N input views and a 3D point, we should accumulate the
+density along all N camera rays from every input view to
+this 3D point, which means we need to sample K points on
+every camera ray and evaluate the density on all N × K
+sample points. To reduce the computation complexity, we
+directly parameterize the visibility with a Cumulative Distribution Function (CDF) in NeuRay, which avoids density
+accumulation along rays and only requires N network forward passes to compute the visibility of all N input views.
+NeuRay not only help the radiance field construction on
+unseen scenes but also be able to refine itself by finetuning on a specific scene with a novel consistency loss. Since
+both the NeuRay representation and the constructed radiance field depict the scene geometry, we propose a loss to
+enforce the consistency between the surface locations from
+the NeuRay representation and those from the constructed
+radiance field. This loss enables NeuRay to memorize the
+scene geometry predicted by the radiance field. At the same
+time, the memorized scene geometry in NeuRay will in turn
+improve the radiance field construction by providing better
+occlusion inference.
+We conducted extensive experiments on the NeRF synthetic dataset [33], the DTU dataset [19] and the LLFF
+dataset [32] to demonstrate the effectiveness of NeuRay.
+The results show that 1) without scene-specific optimization, our method already produces satisfactory rendering
+results that outperforms other generalization methods by
+a large margin; 2) finetuning NeuRay produces much superior results than finetuning other generalization models
+and achieve even better rendering quality than NeRF [33].
+Moreover, we can speed up rendering with the help of
+NeuRay by caching features on input views and predicting
+coarse surface locations, which costs ∼3 seconds to render
+an image of size 800 × 600.
+2. Related works
+2.1. Image-based rendering
+Many works [3, 11, 15, 16, 20, 23, 24, 43] have focused on
+blending input images with geometry proxies to synthesize
+novel views. Conventional light field-based methods [7, 11]
+reconstruct a 4D plenoptic function from densely sampled
+views, which achieve photo-realistic rendering results but
+typically have a limited renderable range. To extend the
+renderable range, some works [3, 39] seek the help of 3D
+proxy geometry from multi-view stereo (MVS) methods
+[49]. With the development of deep learning techniques,
+some methods [6, 15, 20, 43, 44, 56, 61] introduce convolutional neural networks (CNNs) to replace hand-crafted components of the image-based rendering (IBR). One common
+challenge for the IBR methods is the sensitivity to the quality of estimated depth maps [6]. Our method also belongs
+to the category of image-based rendering and also uses cost
+volumes or estimated depth from MVS methods. However,
+our method can be trained from scratch without the help
+of external MVS algorithms and also can be finetuned on a
+scene to remedy reconstruction errors of MVS.
+2.2. Neural scene representation
+Recently, instead of estimating an external 3D proxy geometries, some methods have attempted to construct explicit trainable 3D representations from input images with
+differentiable renderers, such as voxels [30, 50], textured
+meshes [12, 27, 28, 55], and point clouds [1, 23, 45, 60].
+Then, novel view can be synthesized from the constructed
+3D representations. To further improve the rendering resolution, some methods [21, 25, 29, 33, 36, 38, 51] resort to
+pure neural fields encoded by neural networks to represent
+3D scenes. Our method represents a scene by a ray-based
+representation for the NVS task. PIFu [46] and its followups [14, 17, 47] also use ray-based representations to reconstruct human shapes. NeRF [33] renders photo-realistic images by volume rendering on a radiance field. Many following works [9, 25, 26, 31, 35, 37, 41, 52, 59, 64] have attempted to improve NeRF in various aspects. Among these,
+NeRV [52] also uses a visibility prediction for efficient relighting. In comparison, visibility in our method is used in
+efficiently constructing a radiance field on-the-fly.
+Generalization volume rendering. NeRF usually takes
+a long time to train on each new scene. To address this, recent works [4, 5, 40, 42, 57, 58, 65] introduce generalizable
+rendering methods which construct a radiance field on-thefly. Also, some works speed up NeRF-training by metalearning [2, 54] or voxel [34, 53, 63]. Our method also bases
+on constructing radiance field on-the-fly to generalize to unseen scenes. The difference is that our method uses a raybased representation for occlusion inference which greatly
+improves the rendering quality.
+where αi is the alpha value in the depth range (zi , zi+1 ). In
+order to render a novel image using Eq. (1) and Eq. (2), we
+construct a radiance field to compute αi and ci .
+3.2. Occlusion-aware radiance field construction
+Test ray
+Input ray
+Sample point
+Radiance field construction on-the-fly. In contrast to
+NeRF [33] which learns a scene-specific neural radiance
+field, generalization rendering methods [5, 57, 58, 65] construct a radiance field on-the-fly by aggregating local features. Given a 3D point pi ∈ R3 as shown in Fig. 2, these
+methods first extract features on input views by a CNN and
+then aggregate features of input views on this point by
+\bm {f}_i = \mathcal {M} (\{\bm {f}_{i,j}|j=1,...,N\}), \label {eq:agg}
+Figure 2. Constructing a radiance field on-the-fly from input views
+to synthesize the test view image by volume rendering. We first
+sample points on the test ray, then aggregate local features of input
+views to determine the alpha values and colors of sample points,
+and finally accumulating colors by volume rendering to compute
+the output color. Our method constructs NeuRay on input views to
+predict the visibility to sample points so that it allows occlusionaware feature aggregation on these sample points.
+3. Method
+Given N input views of a scene with known camera
+poses, our goal is to render images on arbitrary novel test
+views. Before introducing NeuRay, we first review the volume rendering on a radiance field [33].
+3.1. Volume rendering
+In our method, images of test views are synthesized by
+volume rendering as shown in Fig. 2. Assuming a camera
+ray emitting from the test view, called a test ray, is parameterized by p(z) = o+zr, z ∈ R+ , where o is the start point
+at the camera center, and r is the unit direction vector of the
+ray. First, we sample Kt points {pi ≡ p(zi )|i = 1, ..., Kt }
+with the increasing values zi along the ray. Then, the color
+for the associated pixel of this camera ray is computed by
+(3)
+where fi,j is the local image feature of the sample point
+pi projected on the j-th input view, M is a network which
+aggregates the features from different views to produce a
+feature fi . Then, the alpha value αi and color ci for this
+point pi will be decoded from the aggregated feature fi by
+other networks [5,57,58,65]. We provide more details about
+this in the appendix.
+Occlusion-aware construction. The proposed method
+also constructs a radiance field on-the-fly as previous methods. Additionally, we predict a visibility term vi,j illustrating the j-th input view is visible or not to this 3D point pi
+for the occlusion-aware feature aggregation
+\bm {f}_i = \mathcal {M} (\{\bm {f}_{i,j},v_{i,j}|j=1,...,N\}). \label {eq:aggvis}
+(4)
+In this case, the aggregation network M is able to focus on
+visible views in the aggregated feature fi and reduces the
+interference from invisible views. In the following, we will
+introduce our NeuRay for the computation of visibility vi,j .
+3.3. NeuRay representation
+where c ∈ R3 is the rendered color for the pixel, ci ∈ R3
+is the color of the sample point pi , and hi ∈ R the hitting
+probability that the ray is not occluded by any depth up to
+the depth zi and hits a surface in the range (zi , zi+1 ). Thus,
+the hitting probability hi can be computed by
+Given a camera ray emitting from a input view, called an
+input ray, NeuRay is able to predict the visibility function
+v(z) indicating a point at depth z is visible or not for this
+input ray as shown in Fig. 3. On every input view, NeuRay
+is represented by a visibility feature map G ∈ RH×W ×C .
+Denoting g ∈ RC as a corresponding feature vector for the
+given input ray on G, we will compute the visibility v(z) of
+this input ray from g. Obviously, a valid visibility function
+v(z) should be non-increasing on z and 0 ≤ v(z) ≤ 1. In
+the following, we discuss how to parameterize the visibility function v(z) from g. Then, we will introduce how to
+compute G in Sec. 3.4 and Sec. 3.5.
+Visibility from occlusion probability. We represent
+the visibility function with a Cumulative Density Function
+(CDF) t(z) by v(z) = 1 − t(z) as shown in Fig. 3, which is
+parameterized as a mixture of logistics distributions
+h_{i}=\prod _{k=1}^{i-1} (1-\alpha _k)\alpha _i, \label {eq:prod}
+t(z;\{\mu _i,\sigma _i,w_i\})=\sum _i^{N_{l}} w_i S((z-\mu _i)/\sigma _i), \label {eq:occlusion}
+\bm {c}=\sum _{i=1}^{K_t} \bm {c}_{i} h_{i}, \label {eq:vr}
+(1)
+(2)
+(5)
+Visibility
+feature vector 𝐠
+MLP
+Input view
+Decoder
+𝑧
+Hitting probability density
+𝜇1
+𝜇2
+𝜎1
+Visibility
+feature map 𝐆
+𝜎2
+Visibility
+𝑣(𝑧)
+𝑧
+Depth
+Figure 3. Visibility computation in NeuRay. NeuRay consists of a
+visibility feature map G on every input view. Every feature vector
+g on G can be decoded to a mixture of logistics distributions by an
+MLP. The distribution illustrates the visibility function v(z) of the
+input ray emitting from the location of g, which is the area under
+the curve after the depth z.
+where we mix Nl logistics distributions, µi is the mean of
+i-th logistics distribution,
+P σi the standard deviation, wi the
+mixing weight with i wi = 1, S(·) a sigmoid function.
+All parameters [µi , σi , wi ] = F(g) are decoded from the
+feature g by an MLP F. As a CDF, t(z) is non-decreasing,
+so that 1 − t(z) forms a valid visibility function.
+t(z) actually corresponds to an occlusion probability that
+the input ray is occluded before a depth z and we call
+the corresponding probability density function (PDF) hitting probability density. The visibility v(z) is actually the
+area under the PDF curve after z. In general, a ray will
+only hit one surface so one logistics distribution will be
+enough. However, using a mixture of logistics distributions improves performance when the ray hits on semitransparent surfaces or edges of surfaces.
+Discussion. Alternatively, we may parameterize visibility with a NeRF [33]-like density. However, computing visibility with this strategy is too computationally intensive. In this formulation, we directly decode a density
+d(z) = ϕ(z; g) from g using a MLP ϕ. To compute the
+visibility v(z), we need to first sample Kr depth {zk } with
+zk < z, compute their densities d(zk ) and the corresponding alpha values αk = 1 − exp(−ReLU(dk )), and finally
+QKr
+get visibility v(z) = k=1
+(1 − αk ). Though the formulation is a valid visibility function, it is computationally impractical because it requires Kr times evaluation of ϕ to
+compute the visibility of a input view to a point.
+3.4. Generalize with NeuRay
+When rendering in unseen scenes, we extract the visibility feature maps G from a cost volume construction [62]
+or a patch-match stereo [49]. In the cost volume construction on every input view, we use its Ns neighboring input
+views to construct a cost volume of size H × W × D [62].
+Then, a CNN is applied on the cost volume to produce the
+visibility feature map G ∈ RH×W ×C for this input view.
+Alternatively, we can also directly extract feature maps G
+from depth maps estimated by patch-match stereo [49], in
+which the estimated depth map of size H × W is processed
+by a CNN to produce the visibility feature map G.
+Pipeline. The whole pipeline of rendering with NeuRay
+in an unseen scene is shown in Fig. 4. On all input views,
+cost volumes or depth maps are estimated by MVS algorithms [49, 62], which are processed by a CNN to produce
+visibility feature maps G. Then, for 3D sample points on
+test rays, we compute the visibility vi,j of input views to
+these points (Sec. 3.3) and aggregate the local features fi,j
+along with vi,j to compute the alpha values and colors on
+these points (Sec. 3.2). Finally, the alpha values and colors
+are accumulated along the test rays by volume rendering to
+synthesize the test images (Sec. 3.1).
+Loss. The whole rendering framework can be pretrained
+on training scenes and then directly applied on unseen
+scenes for rendering. To pretrain the rendering framework,
+we randomly select a view in a training scene as the test
+view and use other views as input views to render the selected test view with a render loss
+\ell _{render}=\sum \|\bm {c} - \bm {c}_{gt}\|^2, \label {eq:render_loss}
+(6)
+where c is computed by Eq. 1, cgt is the ground-truth color.
+3.5. Finetune with NeuRay
+As done in previous works [5, 57, 58, 65], the proposed
+rendering framework can be further finetuned on a specific
+scene to achieve better rendering quality on this scene. In
+the given scene, we randomly select an input view as a
+pseudo test view and use the other input views to render the
+pseudo test view for training. Additionally, we add trainable
+parameters of NeuRay and a consistency loss in finetuning.
+Trainable parameters of NeuRay. Fig. 5 shows the detailed structure of the CNN in Fig. 4. On every input view,
+an intermediate feature map G′ ∈ RH×W ×C between the
+constructed cost volume (or the estimated depth map) and
+the visibility feature map G is treated as trainable parameters of NeuRay for this input view. We call the convolution layers before the G′ as an initialization network and
+the convolution layers between G′ and G as a visibility encoder. Parameters G′ are not trained from scratch but initialized by the initialization network using the constructed
+cost volume or the estimated depth map. Then, the initialization network is discarded while G′ along with other network parameters are optimized in finetuning.
+Discussion. Alternatively, we may directly make G as
+trainable parameters of NeuRay and discard both the initialization network and the visibility encoder. However, we
+find that making G′ trainable and applying the visibility encoder on the trainable G′ improve the visibility prediction.
+Because the convolution layers in the visibility encoder associate feature vectors of nearby pixels on G′ and these
+nearby pixels usually have similar visibility.
+Cost volumes or
+Depth maps
+Visibility
+feature maps 𝐆
+Input views
+Visibility 𝑣𝑖,𝑗
+2. Visibility
+Computation
+1. CNN
+…
+Local features 𝐟𝒊,𝒋
+3. Occlusionaware
+Radiance Field
+Construction
+Novel view
+image
+Colors 𝐜𝑖
+4. Volume
+rendering
+Alpha
+values 𝛼𝑖
+Output
+color 𝐜
+Figure 4. Pipeline of rendering with NeuRay. 1. On input views, cost volumes or depth maps are estimated, which are used in predicting
+visibility feature maps by a CNN (Sec. 3.4). 2. Visibility feature maps are used in the computation of the visibility of input views to 3D
+points (Sec. 3.3). 3. For 3D points, we aggregate local features from input views along with the visibility to compute alpha values and
+colors on these points (Sec. 3.2). 4. Volume rendering is applied to accumulate alpha values and colors to synthesize images (Sec. 3.1).
+Discarded in finetuning
+Image
+encoder
+Input view
+Image
+features
+Concatenate
+MVS
+algorithms
+Trainable parameters in finetuning
+Initialization
+network
+Cost volume or
+depth maps
+Raw visibility
+features 𝑮′
+Visibility
+encoder
+Visibility
+features 𝑮
+3.6. Speeding up rendering with NeuRay
+Image features from neighboring source views
+Figure 5. When finetuning on a scene, we treat the intermediate feature map G′ as trainable parameters of NeuRay, which is
+initialized by the initialization network. Then, the initialization
+network will be discarded in finetuning.
+Consistency loss. Besides the rendering loss, we additionally use a consistency loss in finetuning. Since both
+the constructed radiance field and the visibility of NeuRay
+depict the scene geometry, we can enforce the consistency
+between them in finetuning. Specifically, in finetuning, we
+sample points pi ≡ p(zi ) on a pseudo test ray and compute
+the hitting probability hi on the sample points from the constructed radiance field. Meanwhile, the pseudo test view is
+also an input view, on which there is a NeuRay representation to decode a distribution t(z) for this pseudo test ray.
+Based on t(z), we compute a new hitting probability h̃i on
+every sample point pi by
+\tilde {h}_i = t(z_{i+1}) - t(z_i), \label {eq:hit_input}
+the NeuRay representation, which brings better occlusion
+inference and significantly improves the rendering quality.
+This actually enables a memorization mechanism as illustrated in the appendix.
+(7)
+On a test ray, most sample points pi have nearly zero
+hitting probabilities hi and thus do not affect the output
+color. However, most computations are wasted on feature
+aggregation on these empty points. In the following, we
+show that a coarse hitting probability ĥi on a test ray can be
+directly computed from NeuRay using little computation.
+Then, only very few fine points are sampled around points
+with large ĥi for feature aggregation.
+To compute the hitting probability ĥi defined on the test
+ray, we first define the alpha value α̃ in depth range (z0 , z1 )
+on an input ray by
+\tilde {\alpha }(z_0,z_1)=\frac {t(z_1)-t(z_0)}{1-t(z_0)}. \label {eq:alpha_input}
+(9)
+Then, we compute the ĥi on a sample point pi by
+\hat {\alpha }_{i}=\frac {\sum _{j}\tilde {\alpha }_{i,j}(z_{i,j},z_{i,j}+l_i) v_{i,j}}{\sum _{j} v_{i,j}}, \label {eq:que_exist}
+(10)
+\hat {h}_{i}=\prod _{k=1}^{i-1} (1-\hat {\alpha }_k)\hat {\alpha }_i,
+(11)
+where zi is the depth of the point. Thus, we can enforce the
+consistency between h̃i and hi to construct a loss
+\ell _{consist}=\frac {1}{K_t}\sum _{i=1}^{K_t} CE(\tilde {h}_i,h_i),
+(8)
+where CE is the cross entropy loss.
+Discussion. Similar to previous generalization methods [5, 57, 58, 65], finetuning on a specific scene refines our
+network parameters for better feature aggregation and thus
+better radiance field construction on the scene. Meanwhile,
+further adding the trainable parameters of NeuRay and the
+consistency loss enables our rendering framework to refine
+where zi,j is the depth of the point on j-th input view,
+li = zi+1 − zi is the distance between the point pi and
+its subsequent point pi+1 on the test ray. Computation of ĥ
+is very fast because it only involves a simple combination of
+t(z) on input views. We discuss the rationale behind the design of α̃, α̂ and ĥ and their connections to NeRF [33]-style
+density in the appendix.
+Method
+Synthetic Object NeRF
+PSNR↑ SSIM↑ LPIPS↓
+Real Object DTU
+PSNR↑ SSIM↑ LPIPS↓
+Real Forward-facing LLFF
+PSNR↑ SSIM↑ LPIPS↓
+Generalization
+PixelNeRF [65]
+MVSNeRF [4]
+IBRNet [58]
+Ours
+22.65
+25.15
+26.73
+28.29
+0.808
+0.853
+0.908
+0.927
+0.202
+0.159
+0.101
+0.080
+19.40
+23.83
+25.76
+26.47
+0.463
+0.723
+0.861
+0.875
+0.447
+0.286
+0.173
+0.158
+18.66
+21.18
+25.17
+25.35
+0.588
+0.691
+0.813
+0.818
+0.463
+0.301
+0.200
+0.198
+Finetuning
+MVSNeRF [4]
+NeRF [33]
+IBRNet [58]
+Ours
+27.21
+31.01
+30.05
+32.35
+0.888
+0.947
+0.935
+0.960
+0.162
+0.081
+0.066
+0.048
+25.41
+28.11
+29.17
+29.79
+0.767
+0.860
+0.908
+0.928
+0.275
+0.207
+0.128
+0.107
+23.54
+26.74
+26.87
+27.06
+0.733
+0.840
+0.848
+0.850
+0.317
+0.178
+0.175
+0.172
+Settings
+Table 1. Quantitative comparison with baseline methods.
+4. Experiment
+4.1. Experimental Protocols
+4.1.1
+Datasets
+We use two kinds of evaluation datasets, the object dataset
+and the forward-facing dataset. The results are evaluated by
+PSNR, SSIM [18] and LPIPS [66] as the metrics.
+Object dataset. The object dataset includes the NeRF
+synthetic dataset [36] and the DTU dataset [19]. The NeRF
+synthetic dataset has 8 objects, each of which contains 100
+images as input views and the other 200 images as test
+views. For the DTU dataset, we select 4 objects (birds,
+tools, bricks and snowman) as test objects. On each test
+object, we leave out 1/8 images as test views and the rest
+images as input views.
+Forward-facing dataset. The forward-facing dataset is
+the LLFF dataset [32] with 8 scenes. Each scene contains
+20 to 62 images. We follow the same train-test set split
+for each scene as previous methods [33, 58], which uses
+1/8 images as test views. As done in [59], all images are
+undistorted by COLMAP [48]. The evaluation resolution
+are 1008×756 for the LLFF dataset, 800×800 for the NeRF
+synthetic dataset and 800×600 for the DTU dataset. The
+test images in two object datasets all use black backgrounds.
+Training dataset. In order to train the generalization
+model, we use three kinds of datasets: (1) the synthetic
+Google Scanned Object dataset [10], which contains 1023
+objects with 250 rendered images on each object; (2) three
+forward-facing training datasets [8, 32, 67] and (3) the rest
+training objects from the DTU dataset.
+4.1.2
+Implementation details
+To render a test view, we do not use all input views but
+Nw = 8 neighboring input views, called working views.
+D = 64 planes are used in the cost volume while we use
+COLMAP [49] for patch-match stereo. Nl = 2 logistics
+distributions are mixed in t(z). We use the coarse-to-fine
+sampling strategy as done in [33, 58] with 64 sample points
+in both stages. Coarse and fine models share the same im-
+age encoder, visibility encoder and initialization network,
+but they use different decoder F and aggregation networks.
+The aggregation networks follows similar design as [58] but
+with additional visibility as inputs, which blends input colors and applies a transformer along test rays. All experiments are conducted on a 2080 Ti GPU. Details and architectures can be found in the appendix.
+4.2. Comparison with baselines
+Experiment settings. We compare with IBRNet [58],
+PixelNeRF [65], MVSNeRF [4] and NeRF [33] in the generalization setting and the finetuning setting. In the generalization setting, all generalization methods including our
+method are pretrained on the same training scenes and
+tested on unseen test scenes. In the finetuning setting, all
+generalization methods including ours are further finetuned
+on the input views of each test scene while NeRF [33] is
+trained-from-scratch.
+The quantitative results are shown in Table. 1 and the
+qualitative results are shown in Fig. 6. Table 1 shows that
+our method generalizes well to unseen scenes and outperforms all other generalization models. After scene-specific
+finetuning, our method clearly outperforms all baselines
+on two object datasets but achieves similar performance
+as IBRNet [58] on the LLFF dataset [32]. The reason is
+that the LLFF dataset contains very dense forward-facing
+input views so that every 3D point is visible to a large number of input views. In this case, even one or two views
+are occluded, there are still enough visible views to provide feature consistency for IBRNet [58] to render correctly. In comparison, in the Synthetic NeRF dataset, images are sparsely captured around the object in 360◦ , which
+brings more severe feature inconsistency to reduce the performance of IBRNet [58]. In contrast, our rendering is
+occlusion-aware so that our model performs much better on
+the NeRF synthetic dataset. Furthermore, we show that our
+method outperforms IBRNet by a large margin with sparse
+working views on the LLFF dataset in the appendix.
+By comparing MVSNeRF [4] with our method in Fig. 6,
+we notice that finetuning MVSNeRF [4] leads to noisy arti-
+Image
+GT
+MVSNeRF
+Generalization
+IBRNet
+NeuRay
+MVSNeRF
+Finetuning
+IBRNet
+NeuRay
+Figure 6. Qualitative results of different methods. Please refer to the appendix for more results.
+NeuRay-Ft
+NeRF [33]
+Figure 7. Our method renders details more clearly than NeRF [33].
+GT
+Single
+Mixture
+ID
+Description
+Setting
+Lego
+Fern
+1
+2
+3
+4
+IBRNet
+Only aggregation
+Aggregation with depth features
+Aggregation with init-NeuRay
+Gen
+Gen
+Gen
+Gen
+25.64
+25.61
+26.45
+28.41
+24.16
+22.25
+22.43
+24.02
+5
+6
+7
+8
+9
+mixture logistics Nl = 2
+mixture logistics Nl = 2
+single logistics Nl = 1
+Only aggregation
+NeuRay without ℓconsist
+Ft
+Sc
+Sc
+Sc
+Sc
+32.97
+33.07
+33.05
+29.61
+31.46
+25.93
+25.89
+25.58
+24.40
+25.24
+Table 2. Ablation studies. PSNRs on the “Lego” from the NeRF
+synthetic dataset and the “Fern” from the LLFF dataset are reported. “Gen” means the generalization setting, “Ft” means finetuning on the scene and “Sc” means training from scratch.
+Figure 8. Comparison between the mixture logistics distribution
+Nl = 2 and the single logistics distribution Nl = 1 as the occlusion probability. Mixture logistics distribution improves the results
+on the edges with abrupt depth changes (red rectangle).
+facts when the test view is far from the input view on which
+the cost volume is built. By comparing NeRF [32] with our
+method in Fig. 7, we find that NeRF needs more optimization steps to recover subtle details like surfaces of the bricks
+and textures on the Lego while it is relatively more easy for
+our method to render these details by blending colors of input views, which is the reason that our method can achieve
+better rendering quality than NeRF.
+4.3. Ablation studies
+How effective is the visibility from init-NeuRay? To
+validate this, in Table 2, we test the IBRNet [58] (ID 1),
+the model with only image feature aggregation (ID 2), the
+model aggregating images features with estimated depth
+from COLMAP [49] (ID 3) and the model aggregating image features with visibility of NeuRay initialized by cost
+volumes (ID 4). Since our image encoder is shallower than
+IBRNet, the performance with only image feature aggregation is worse than IBRNet. Simply adding estimated depth
+only brings slight improvement while using visibility of initialized NeuRay significantly improves the quality.
+Can NeuRay be trained from scratch? To show NeuRay can be constructed on a scene from scratch without initialization from cost volumes, we follow exactly the same
+process as finetuning to train our method but the raw visibility feature maps G′ and parameters of all networks are
+randomly initialized. Results in Table 2 (ID 5 and 6) show
+that training our method from scratch is also able to achieve
+similar results as finetuning the initialized pretrain model.
+Single or mixture logistics distributions? As discussed
+in Sec. 3.3, the choice of t(z) can be a single logistics distribution or a mixture of logistics distributions. We compare
+these two choices in Table 2 (ID 6 and 7) and show quali-
+35
+GT
+NeRF [33]
+MVSNeRF [4]
+IBRNet [58]
+NeuRay-Ft
+PSNR
+31
+27
+NeuRay-Ft
+IBRNet-Ft
+MVSNeRF-Ft
+19
+NeuRay-Sc
+NeRF
+15
+0 2 4 6 8 10 12 14 16 18 20
+steps (*10k)
+23
+Figure 9. (Left) Curves of PSNR of different models with different training steps. PSNR is computed on a validation set of the “Lego”.
+(Right) Qualitative results of models with 10k training steps. Due to the limitation of GPU memory, the batch size for IBRNet [58] and our
+method is 512 while the batch size for MVSNeRF [4] and NeRF [33] is 1024.
+Method
+ĥ
+Kt,1
+Kt,2
+PSNR
+Time(s)
+IBRNet
+NeRF
+NeuRay
+NeuRay
+NeuRay
+✗
+✗
+✗
+✓
+✓
+64
+128
+64
+64
+32
+64
+128
+64
+8
+4
+34.00
+33.65
+35.33
+34.57
+33.73
+31.46
+31.51
+30.03
+3.95
+2.57
+Table 3. Rendering time and PSNR of the “birds” from the DTU
+dataset. Kt,1 and Kt,2 are numbers of points used in coarse and
+fine sampling respectively, ĥ means using the probability ĥ to conduct coarse sampling, “Time” means the time cost on rendering
+one 800×600 images on a 2080Ti GPU.
+Method
+Train Step
+Train Time
+PSNR
+NeRF [33]
+MVSNeRF [4]-Ft
+IBRNet [58]-Ft
+NeuRay-Ft
+200k
+10k
+5k
+5k
+∼9.5h
+∼28min
+∼41min
+∼32min
+30.27
+23.77
+28.38
+30.63
+Table 4. PSNR and training steps/time on NeRF synthetic dataset.
+tative comparison in Fig. 8, which demonstrates that using
+a mixture of logistics distributions improves the rendering
+quality in regions with abrupt depth changes.
+How effective is NeuRay in per-scene optimization?
+In Table 2, we compare three models, the full model (ID 6),
+the model with only image feature aggregation (ID 8) and
+the model with NeuRay but without ℓconsist (ID 9). The
+results show that adding a NeuRay as a backend in perscene optimization already brings improvements and further adding ℓconsist enables memorization of geometry thus
+greatly improves the rendering quality.
+4.4. Analysis
+Speed up rendering with NeuRay. As discussed in
+Sec. 3.6, we can efficiently estimate a coarse ĥ from the
+NeuRay to perform the coarse sampling and only sample
+few fine points based on the coarse sampling. To validate
+this, we conduct an experiment on the “birds” from the DTU
+dataset [19]. As shown in Table 3, only 4 or 8 subsequent
+sample points are enough for our method to achieve high-
+quality renderings, which speeds up the rendering 10 times
+from 30s to ∼3s. Further speeding up by baking out a mesh
+or occupancy voxels from alpha values ê is possible, which
+we leave for future works.
+Convergence speed. To show how the rendering quality of different models improves in the scene-specific optimization process, we train different models on the “Lego”
+and plot the curves of PSNR on a small validation set in
+Fig. 9 (left). The curves show that finetuning our method
+produces consistently better rendering results than training
+all baseline methods with the same training steps. In Fig. 9
+(right), we show the qualitative results on 10k training steps.
+With only 10k training steps, NeRF [33] and MVSNeRF [4]
+are still far from convergence thus produce blurred images,
+IBRNet [58] produces artifacts on regions with occlusions
+while our method already produces high-quality renderings.
+Only finetune few steps with NeuRay. Table 4 reports
+PSNR and time of different models with only few finetuning steps on the NeRF synthetic dataset. Note that finetuning both IBRNet [58] and our method requires image
+feature extraction which costs more time on one training
+step than neural fields MVSNeRF [4] and NeRF [33]. Since
+our image encoder is shallower than IBRNet, finetuning our
+method is slightly faster. The results show that our method
+is able to be finetuned limited time (32min) to achieve similar quality as NeRF [33] with long training time (9.5h),
+which is significantly better than the other generalization
+methods with similar finetuning time.
+5. Conclusion
+In this paper, we proposed a novel neural representation
+NeuRay for the novel view synthesis task. NeuRay represents a scene by occlusion probabilities defined on input
+rays and is able to efficiently estimate the visibility from
+arbitrary 3D points to input views. With the help of NeuRay, we are able to consider the visibility when constructing
+radiance fields by multi-view feature aggregation. Experiments on the DTU dataset, the NeRF synthetic dataset and
+the LLFF dataset demonstrate that our method can render
+high-quality images without any training on the scene or
+with only few finetuning steps on the scene.
+References
+[1] Kara-Ali Aliev, Artem Sevastopolsky, Maria Kolos, Dmitry
+Ulyanov, and Victor Lempitsky. Neural point-based graphics. In ECCV, 2020. 2
+[2] Alexander W. Bergman, Petr Kellnhofer, and Gordon Wetzstein. Fast training of neural lumigraph representations using meta learning. In NeurIPS, 2021. 2
+[3] Gaurav Chaurasia, Sylvain Duchene, Olga SorkineHornung, and George Drettakis. Depth synthesis and local warps for plausible image-based navigation. ACM TOG,
+2013. 2
+[4] Anpei Chen, Zexiang Xu, Fuqiang Zhao, Xiaoshuai Zhang,
+Fanbo Xiang, Jingyi Yu, and Hao Su. MVSNeRF: fast generalizable radiance field reconstruction from multi-view stereo.
+In ICCV, 2021. 2, 6, 8
+[5] Julian Chibane, Aayush Bansal, Verica Lazova, and Gerard
+Pons-Moll. Stereo radiance fields (SRF): Learning view synthesis for sparse views of novel scenes. In CVPR, 2021. 1,
+2, 3, 4, 5, 12
+[6] Inchang Choi, Orazio Gallo, Alejandro Troccoli, Min H
+Kim, and Jan Kautz. Extreme view synthesis. In ICCV,
+2019. 2
+[7] Abe Davis, Marc Levoy, and Fredo Durand. Unstructured
+light fields. In Eurographics, 2012. 2
+[8] John Flynn, Michael Broxton, Paul Debevec, Matthew DuVall, Graham Fyffe, Ryan Overbeck, Noah Snavely, and
+Richard Tucker. Deepview: View synthesis with learned gradient descent. In CVPR, 2019. 6
+[9] Stephan J Garbin, Marek Kowalski, Matthew Johnson, Jamie
+Shotton, and Julien Valentin. FastNeRF: High-fidelity neural
+rendering at 200fps. In ICCV, 2021. 2
+[10] Research Google. Google scanned objects. https://
+app.ignitionrobotics.org/GoogleResearch/
+fuel / collections / GoogleScannedObjects,
+2021. 6
+[11] Steven J Gortler, Radek Grzeszczuk, Richard Szeliski, and
+Michael F Cohen. The lumigraph. In SIGGRAPH, 1996. 2
+[12] Marc Habermann, Lingjie Liu, Weipeng Xu, Michael Zollhoefer, Gerard Pons-Moll, and Christian Theobalt. Real-time
+deep dynamic characters. ACM TOG, 2021. 2
+[13] Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun.
+Deep residual learning for image recognition. In CVPR,
+2016. 12
+[14] Tong He, John Collomosse, Hailin Jin, and Stefano Soatto.
+Geo-PIFu: Geometry and pixel aligned implicit functions
+for single-view human reconstruction.
+arXiv preprint
+arXiv:2006.08072, 2020. 2
+[15] Peter Hedman, Julien Philip, True Price, Jan-Michael Frahm,
+George Drettakis, and Gabriel Brostow. Deep blending for
+free-viewpoint image-based rendering. ACM TOG, 2018. 1,
+2
+[16] Peter Hedman, Tobias Ritschel, George Drettakis, and
+Gabriel Brostow. Scalable inside-out image-based rendering. ACM TOG, 2016. 2
+[17] Yang Hong, Juyong Zhang, Boyi Jiang, Yudong Guo, Ligang Liu, and Hujun Bao. StereoPIFu: Depth aware clothed
+human digitization via stereo vision. In CVPR, 2021. 2
+[18] Alain Hore and Djemel Ziou. Image quality metrics: Psnr
+vs. ssim. In CVPR, 2010. 6
+[19] Rasmus Jensen, Anders Dahl, George Vogiatzis, Engil Tola,
+and Henrik Aanæs. Large scale multi-view stereopsis evaluation. In CVPR, 2014. 2, 6, 8
+[20] Nima Khademi Kalantari, Ting-Chun Wang, and Ravi Ramamoorthi. Learning-based view synthesis for light field
+cameras. ACM TOG, 2016. 1, 2
+[21] Petr Kellnhofer, Lars Jebe, Andrew Jones, Ryan Spicer, Kari
+Pulli, and Gordon Wetzstein. Neural lumigraph rendering.
+In CVPR, 2021. 2
+[22] Diederik P Kingma and Jimmy Ba. Adam: A method for
+stochastic optimization. arXiv preprint arXiv:1412.6980,
+2014. 12
+[23] Georgios Kopanas, Julien Philip, Thomas Leimkühler, and
+George Drettakis. Point-based neural rendering with perview optimization. Computer Graphics Forum, 40(4):29–43,
+2021. 2
+[24] Marc Levoy and Pat Hanrahan. Light field rendering. In Proceedings of the 23rd annual conference on Computer graphics and interactive techniques, pages 31–42, 1996. 2
+[25] Lingjie Liu, Jiatao Gu, Kyaw Zaw Lin, Tat-Seng Chua, and
+Christian Theobalt. Neural sparse voxel fields. In NeurIPS,
+2020. 2
+[26] Lingjie Liu, Marc Habermann, Viktor Rudnev, Kripasindhu
+Sarkar, Jiatao Gu, and Christian Theobalt. Neural actor:
+Neural free-view synthesis of human actors with pose control. In SIGGRAPH Asia, 2021. 2
+[27] Lingjie Liu, Weipeng Xu, Marc Habermann, Michael
+Zollhöfer, Florian Bernard, Hyeongwoo Kim, Wenping
+Wang, and Christian Theobalt. Neural human video rendering by learning dynamic textures and rendering-to-video
+translation. IEEE TVCG, 2020. 2
+[28] Lingjie Liu, Weipeng Xu, Michael Zollhoefer, Hyeongwoo
+Kim, Florian Bernard, Marc Habermann, Wenping Wang,
+and Christian Theobalt. Neural rendering and reenactment
+of human actor videos. ACM TOG, 2019. 2
+[29] Shaohui Liu, Yinda Zhang, Songyou Peng, Boxin Shi, Marc
+Pollefeys, and Zhaopeng Cui. Dist: Rendering deep implicit
+signed distance function with differentiable sphere tracing.
+In CVPR, 2020. 2
+[30] Stephen Lombardi, Tomas Simon, Jason Saragih, Gabriel
+Schwartz, Andreas Lehrmann, and Yaser Sheikh. Neural
+Volumes: Learning dynamic renderable volumes from images. In SIGGRAPH, 2019. 2
+[31] Ricardo Martin-Brualla, Noha Radwan, Mehdi Sajjadi,
+Jonathan T. Barron, Alexey Dosovitskiy, and Daniel Duckworth. NeRF in the wild: Neural radiance fields for unconstrained photo collections. In CVPR, 2021. 2
+[32] Ben Mildenhall, Pratul P Srinivasan, Rodrigo Ortiz-Cayon,
+Nima Khademi Kalantari, Ravi Ramamoorthi, Ren Ng, and
+Abhishek Kar. Local light field fusion: Practical view synthesis with prescriptive sampling guidelines. ACM TOG,
+2019. 1, 2, 6, 7
+[33] Ben Mildenhall, Pratul P Srinivasan, Matthew Tancik,
+Jonathan T Barron, Ravi Ramamoorthi, and Ren Ng. NeRF:
+Representing scenes as neural radiance fields for view synthesis. In ECCV, 2020. 1, 2, 3, 4, 5, 6, 7, 8, 11, 13, 14,
+16
+[34] Thomas Müller, Alex Evans, Christoph Schied, and Alexander Keller. Instant neural graphics primitives with a multiresolution hash encoding. arXiv preprint arXiv:2201.05989,
+2022. 2
+[35] Michael Niemeyer and Andreas Geiger. GIRAFFE: Representing scenes as compositional generative neural feature
+fields. In CVPR, 2021. 2
+[36] Michael Niemeyer, Lars Mescheder, Michael Oechsle, and
+Andreas Geiger. Differentiable volumetric rendering: Learning implicit 3d representations without 3d supervision. In
+CVPR, 2020. 2, 6
+[37] Sida Peng, Junting Dong, Qianqian Wang, Shangzhan
+Zhang, Qing Shuai, Hujun Bao, and Xiaowei Zhou. Animatable neural radiance fields for human body modeling. In
+ICCV, 2021. 2
+[38] Sida Peng, Yuanqing Zhang, Yinghao Xu, Qianqian Wang,
+Qing Shuai, Hujun Bao, and Xiaowei Zhou. Neural Body:
+Implicit neural representations with structured latent codes
+for novel view synthesis of dynamic humans. In CVPR,
+2021. 2
+[39] Eric Penner and Li Zhang. Soft 3d reconstruction for view
+synthesis. ACM TOG, 2017. 2
+[40] Amit Raj, Michael Zollhoefer, Tomas Simon, Jason Saragih,
+Shunsuke Saito, James Hays, and Stephen Lombardi. PVA:
+Pixel-aligned volumetric avatars. In CVPR, 2021. 2
+[41] Christian Reiser, Songyou Peng, Yiyi Liao, and Andreas
+Geiger. KiloNeRF: Speeding up neural radiance fields with
+thousands of tiny mlps. In ICCV, 2021. 2
+[42] Konstantinos Rematas, Ricardo Martin-Brualla, and Vittorio
+Ferrari. ShaRF: Shape-conditioned radiance fields from a
+single view. In ICML, 2021. 2
+[43] Gernot Riegler and Vladlen Koltun. Free view synthesis. In
+ECCV, 2020. 2
+[44] Gernot Riegler and Vladlen Koltun. Stable view synthesis.
+In CVPR, 2021. 2
+[45] Darius Rückert, Linus Franke, and Marc Stamminger. Adop:
+Approximate differentiable one-pixel point rendering. arXiv
+preprint arXiv:2110.06635, 2021. 2
+[46] Shunsuke Saito, Zeng Huang, Ryota Natsume, Shigeo Morishima, Angjoo Kanazawa, and Hao Li. PIFu: Pixel-aligned
+implicit function for high-resolution clothed human digitization. In ICCV, 2019. 2
+[47] Shunsuke Saito, Tomas Simon, Jason Saragih, and Hanbyul
+Joo. PIFuHD: Multi-level pixel-aligned implicit function for
+high-resolution 3d human digitization. In CVPR, 2020. 2
+[48] Johannes Lutz Schönberger and Jan-Michael Frahm.
+Structure-from-motion revisited. In CVPR, 2016. 6
+[49] Johannes Lutz Schönberger, Enliang Zheng, Marc Pollefeys,
+and Jan-Michael Frahm. Pixelwise view selection for unstructured multi-view stereo. In ECCV, 2016. 1, 2, 4, 6, 7,
+13, 14
+[50] Vincent Sitzmann, Justus Thies, Felix Heide, Matthias
+Nießner, Gordon Wetzstein, and Michael Zollhofer. DeepVoxels: Learning persistent 3d feature embeddings. In
+CVPR, 2019. 2
+[51] Vincent Sitzmann, Michael Zollhöfer, and Gordon Wetzstein. Scene representation networks: Continuous 3dstructure-aware neural scene representations. In NeurIPS,
+2019. 2
+[52] Pratul P Srinivasan, Boyang Deng, Xiuming Zhang,
+Matthew Tancik, Ben Mildenhall, and Jonathan T Barron.
+NeRV: Neural reflectance and visibility fields for relighting
+and view synthesis. In CVPR, 2021. 2
+[53] Cheng Sun, Min Sun, and Hwann-Tzong Chen. Direct voxel
+grid optimization: Super-fast convergence for radiance fields
+reconstruction. arXiv preprint arXiv:2111.11215, 2021. 2
+[54] Matthew Tancik, Ben Mildenhall, Terrance Wang, Divi
+Schmidt, Pratul P Srinivasan, Jonathan T Barron, and Ren
+Ng. Learned initializations for optimizing coordinate-based
+neural representations. In CVPR, 2021. 2
+[55] Justus Thies, Michael Zollhöfer, and Matthias Nießner. Deferred neural rendering: Image synthesis using neural textures. ACM TOG, 2019. 2
+[56] Justus Thies, Michael Zollhöfer, Christian Theobalt, Marc
+Stamminger, and Matthias Nießner. IGNOR: image-guided
+neural object rendering. In ICLR, 2020. 2
+[57] Alex Trevithick and Bo Yang. GRF: Learning a general radiance field for 3D scene representation and rendering. In
+ICCV, 2021. 1, 2, 3, 4, 5, 12
+[58] Qianqian Wang, Zhicheng Wang, Kyle Genova, Pratul Srinivasan, Howard Zhou, Jonathan T. Barron, Ricardo MartinBrualla, Noah Snavely, and Thomas Funkhouser. IBRNet:
+Learning multi-view image-based rendering. In CVPR, 2021.
+1, 2, 3, 4, 5, 6, 7, 8, 12, 13, 14
+[59] Suttisak Wizadwongsa, Pakkapon Phongthawee, Jiraphon
+Yenphraphai, and Supasorn Suwajanakorn. NeX: Real-time
+view synthesis with neural basis expansion. In CVPR, 2021.
+2, 6, 15
+[60] Minye Wu, Yuehao Wang, Qiang Hu, and Jingyi Yu. Multiview neural human rendering. In CVPR, 2020. 2
+[61] Zexiang Xu, Sai Bi, Kalyan Sunkavalli, Sunil Hadap, Hao
+Su, and Ravi Ramamoorthi. Deep view synthesis from sparse
+photometric images. ACM TOG, 2019. 2
+[62] Yao Yao, Zixin Luo, Shiwei Li, Tian Fang, and Long
+Quan. MVSNet: Depth inference for unstructured multiview stereo. In ECCV, 2018. 1, 2, 4, 12, 13
+[63] Alex Yu, Sara Fridovich-Keil, Matthew Tancik, Qinhong
+Chen, Benjamin Recht, and Angjoo Kanazawa. Plenoxels: Radiance fields without neural networks. arXiv preprint
+arXiv:2112.05131, 2021. 2
+[64] Alex Yu, Ruilong Li, Matthew Tancik, Hao Li, Ren Ng, and
+Angjoo Kanazawa. PlenOctrees for real-time rendering of
+neural radiance fields. In ICCV, 2021. 2, 15
+[65] Alex Yu, Vickie Ye, Matthew Tancik, and Angjoo Kanazawa.
+PixelNeRF: Neural radiance fields from one or few images.
+In CVPR, 2021. 1, 2, 3, 4, 5, 6, 12
+[66] Richard Zhang, Phillip Isola, Alexei A Efros, Eli Shechtman,
+and Oliver Wang. The unreasonable effectiveness of deep
+features as a perceptual metric. In CVPR, 2018. 6
+[67] Tinghui Zhou, Richard Tucker, John Flynn, Graham Fyffe,
+and Noah Snavely. Stereo magnification: Learning view synthesis using multiplane images. In SIGGRAPH, 2018. 6
+Appendices
+Density 𝑑𝑖
+Occlusion prob 𝑡𝑖
+A.1. Comparison between NeRF [33] and NeuRay
+Alpha value 𝛼𝑖
+In this section, we will compare NeRF [33] with NeuRay
+on parameterizing different probabilities on a ray. Let us
+first review NeRF’s definitions of different probabilities.
+NeRF’s parameterization. Given a ray p(z) = o +
+zr with {pi ≡ p(zi )|i = 1, ..., N ; zi < zi+1 ; zi ∈ R+ }
+sample points on the ray, NeRF computes the densities of
+these points by di = F(pi ), where F is an MLP. Then, the
+alpha values on these points are computed by αi = 1 −
+exp(−ReLU(di )li ), where li = zi+1 − zi . In this case, the
+visibility from the ray origin o to the point pi is
+v_i=\prod _{j=1}^{i-1} (1-\alpha _j).
+Visibility 𝑣𝑖
+Visibility 𝑣𝑖
+Hitting prob ℎ𝑖
+(a) From Density
+Hitting prob ℎ෨ 𝑖
+Hitting prob ℎ෠ 𝑖
+Alpha value 𝛼ො𝑖
+On test ray
+On input ray
+(b) From Occlusion Prob
+Alpha value 𝛼෤𝑖
+Figure 10. Comparison between the density in NeRF and the occlusion probability in NeuRay. (a) In NeRF, the network decodes
+the density to compute the alpha values, the hitting probability and
+the visibility. (b) In NeuRay, the network decodes the parameters
+of occlusion probability, which enables efficient computation of
+the visibility and the hitting probability. Then, we derive the corresponding alpha values from the hitting probability and visibility.
+(A.1)
+The hitting probability, which means the ray is not occluded by any depth up to zi and hits a surface in the range
+(zi , zi+1 ), is
+h_i=v_i \alpha _i \label {eq:hit}
+(A.2)
+This process is summarized by Fig. 10 (a), where all probabilities are based on the density di .
+NeuRay’s parameterization. In comparison, all probabilities in NeuRay are based on the occlusion probability
+t(z). Given an input ray, we also sample points {pi ≡
+p(zi )|i = 1, ..., N ; zi < zi+1 ; zi ∈ R+ }. Based on t(z),
+we compute the hitting probability h̃i (Eq. (7) in the main
+paper) and the visibility vi
+\tilde {h}_i = t(z_{i+1})-t(z_i),
+(A.3)
+v_i \equiv v(z_{i})= 1-t(z_i).
+(A.4)
+We use h̃ here to indicate it was defined on an input ray.
+Then, noticing the relationship between the visibility, the
+hitting probability and the alpha value in Eq.(A.2), we can
+compute the alpha value α̃i on pi from h̃i and vi by α̃i =
+h̃i /vi = (t(zi+1 ) − t(zi ))/(1 − t(zi )), which is the Eq. (9)
+in the main paper. α̃ also means it is defined on an input
+ray. This process is summarized by Fig. 10 (b), which is
+inverse to the density definition in NeRF.
+Motivation of designing the hitting probability ĥ as
+the form in Sec. 3.6. Our motivation is explained as follows. When we need to compute the hitting probability on
+the sample points pi of a test ray, we need to derive the alpha values α̂i onQthese points and compute the hitting probi−1
+ability by ĥi = j=1 (1 − α̂j )α̂i . Note we use α̂ to indicate
+that it is defined on the test ray and to distinguish it from the
+alpha value α̃ defined on input rays and the alpha value α
+computed from the constructed radiance field. To compute
+α̂i , we choose to use the weighted sum of alpha values α̃
+from all input rays with their visibility as weights
+\hat {\alpha }_{i}=\frac {\sum _{j}\tilde {\alpha }_{i,j} v_{i,j}}{\sum _{j} v_{i,j}}.
+(A.5)
+This is the Eq. (10) in the main paper. By considering the
+visibility, only visible input rays can affect the alpha values
+α̂ of the point. Finally,
+the alpha value α̂i is used in the
+Qi−1
+computation of ĥi = j=1 (1 − α̂j )α̂i .
+A.2. Discussion about visibility from density
+In the main paper, we have discussed that parameterizing the visibility with volume density is computationally
+impractical, because it requires Kr times forward pass of
+the network F to compute visibility from one input view
+to one 3D point. For example, given only 1 test ray and
+8 neighboring input views, we sample 128 points on this
+test ray. Then, to compute the visibility from every input
+view to every sample point, we need to consider 8×128 input rays. If we further sample 32 points on every input ray
+to accumulate volume density for visibility computation. It
+will require 8×128×32 times evaluations of the network F.
+Such computation complexity is not affordable for training
+on a single 2080 Ti GPU to achieve reasonable results.
+A.3. Memorization interpretation in finetuning
+ℓconsist enables the NeuRay representation to memorize
+the predicted surfaces from the constructed radiance field in
+finetuning. An example is shown in Fig. 11.
+1. In one training step as shown in Fig. 11 (a), NeuRay
+chooses view A as the pseudo test view and aggregates
+features from neighboring input views B, C and D to predict hi of the test ray on the test view A.
+2. Applying the consistency loss ℓconsist forces the visibility feature g of the test ray of A to produce h̃i consistent
+with hi . This can be interpreted that the hi is memorized
+Working view
+Test view
+D
+B
+C
+Surface
+Input ray
+Test ray
+D
+B
+memorized
+C
+A
+A
+(a)
+(b)
+Figure 11. (a) During finetuning, when rendering the pseudo test
+view A using view B, C, and D, the predicted hitting probabilities
+and the corresponding visibility will be memorized on view A. (b)
+Afterwards, the memorized visibility on view A will be used for
+occlusion inference in rendering the pseudo test view D.
+in g, which also means the memorization of visibility,
+because both are computed from t(z).
+3. In subsequent another training step which uses view A,
+B and C to render the pseudo test view D in Fig. 11 (b),
+NeuRay already knows that the green point is invisible
+to A by checking the memorized visibility on A. Hence,
+NeuRay is able to predict an accurate hi for view D.
+4. The predicted hi on the test ray of view D is also memorized on D and helps the prediction of hitting probabilities of other views in the subsequent training steps.
+By memorizing the scene geometry in hi , NeuRay is
+able to refine its scene representation to provide better occlusion inference during finetuning. In contrast, existing
+methods [5,57, 58, 65] can only adjust their network parameters to improve their feature aggregation during finetuning,
+which are still oblivious to occlusions in the scene.
+A.4. Training details and architecture
+Architecture. In the cost volume construction, Ns = 3
+neighboring input views are used as source views and the
+height and width of the cost volume are 1/4 of the height
+and width of the original image. The cost volume is constructed by a MVSNet [62] pretrained on the DTU training
+set. When training our renderer, we fixed the weight of this
+MVSNet due to GPU memory limitation but it is possible
+to train this part for better performance. The architecture
+is illustrated in Fig. 18 and Fig. 19. The image encoder is a
+ResNet [13] with 13 residual blocks which outputs a feature
+map with 32 channels. All convolution layers use ReLU as
+activation function and all batch normalization layers are
+replaced by instance normalization layers. Compared to
+IBRNet [58], our image encoder is more lightweight with
+less intermediate channel number and less residual blocks.
+The distribution decoder F contains 5 sub-networks, each
+of which consists of 3 fully-connected layers. These subnetworks are in charge of the prediction of µ1 , µ2 , σ1 ,
+σ2 and mixing weight w0 respectively (w1 = 1 − w0 ).
+All fully-connected layers in F use ReLU as the activation
+function except for the final layer which use SoftPlus or Sigmoid as the activation function.
+The architecture of feature aggregation networks follows
+design of IBRNet [58], which is illustrated in Fig. 19. Based
+on the aggregated feature, the alpha value αi is computed by
+\alpha _i = \mathcal {A} ({\bm {f}}_i),
+(A.6)
+where A is an alpha network. The color ci is computed by
+\bm {c}_i = \mathcal {B} ({\bm {f}}_i,\{\bm {f}_{i,j};\bm {r}_{i,j} - \bm {r};\bm {c}_{i,j};v_{i,j}\}),
+(A.7)
+where B is a color blending network, ri,j is the view direction from j-th input view to the point pi , and ci,j is the
+color of this point projected on the input view. The alpha
+network A will learn to assign a large alpha value αi to pi
+when local image features {fi,j } of all visible input views
+are consistent. Meanwhile, the color blending network B
+will learn to use the color ci,j from visible views to produce the color ci on pi .
+Depth loss. In pretraining the generalization model on
+training scenes, we also force the mean µ1 of the first logistics distribution to be similar to the input depth by a depth
+loss ℓdepth
+\ell _{depth}=\sum \|\mu _1 - z_{in}\|^2,
+(A.8)
+where the depth zin is computed from the cost volume or
+the input estimated depth maps.
+Training details. We use Adam [22] as the optimizer
+with the default setting (β1 = 0.999,β2 = 0.9). On every
+training step, 512 rays are randomly sampled. The initial
+learning rate for the generalization model is 2e-4 which decays to its half on every 100k steps. We train the generalization model with 400k steps on the training set, which
+takes about 3 days on a single 2080Ti GPU. In the finetuning setting, the learning rate is initially set to 1e-4 and it also
+decays to its half after 100k training steps. Finetuning 200k
+steps on a NeRF synthetic dataset with resolution 800×800
+cost 20 hours but finetuning 200k steps on low resolution
+images with 400×400 can be faster, which costs 8 hours.
+A.5. More comparison with baselines
+Sparse working views on the LLFF dataset. As discussed in the main paper, the reason that our method and
+IBRNet [58] perform very similar on the LLFF dataset is
+that the LLFF dataset contains very dense forward-facing
+views, which alleviates the feature inconsistency caused by
+occlusions. To demonstrate that, we decrease the number of working view Nw to render the novel images. We
+show the qualitative results with 2 working views in Fig. 12
+and the PSNR on the LLFF dataset with different number of workings views in Table 7. The results show that
+out method consistently outperforms IBRNet and the performance gap enlarges with the decrease of working view
+IBRNet [58]
+NeuRay
+GT
+IBRNet [58]
+NeuRay
+GT
+Figure 12. Qualitative results using only 2 neighboring working views to render the test view.
+GT
+NeRF [33]
+NeuRay
+Dataset
+Metrics
+Cost volume
+Depth maps
+NeRF Syn.
+PSNR
+SSIM
+LPIPS
+28.29
+0.927
+0.080
+28.92
+0.920
+0.096
+DTU
+PSNR
+SSIM
+LPIPS
+26.47
+0.875
+0.158
+28.30
+0.907
+0.130
+LLFF
+PSNR
+SSIM
+LPIPS
+25.35
+0.818
+0.198
+25.85
+0.832
+0.190
+Table 5. Results in the generalization setting using NeuRay initialized by estimated depth maps [49] or constructed cost volumes [62]
+PSNR
+Figure 13. Qualitative comparison with NeRF [33].
+number. The reason is that with the decrease of working
+views, every 3D point is visible to input views so that the
+feature inconsistency caused by occlusions becomes more
+severe. Hence, because feature aggregation of IBRNet is
+not very robust to feature inconsistency, its performance degenerates. In contrast, with the constructed NeuRay, our
+method is occlusion-aware and thus performs better with
+sparse views. Meanwhile, we also find that undistortion by
+COLMAP [49] is not perfect and noticeable distortions still
+remain in the LLFF dataset, which makes the scene-specific
+Nw = 8
+Nw = 12
+Nw = 16
+32.97
+33.20
+33.60
+Table 6. PSNR on the Lego from the NeRF synthetic dataset with
+different working view numbers Nw .
+Method
+Nw = 8
+Nw = 4
+Nw = 2
+IBRNet [58]
+NeuRay
+26.87
+27.06
+25.41
+26.43
+21.72
+24.86
+Table 7. PSNR on the LLFF dataset with Nw = 2, 4, 8 working
+views. The performance of IBRNet [58] drops with the decrease
+of working views while NeuRay still performs well with only 2
+working views. All models are already finetuned on the scene for
+200k steps.
+Setting
+Method
+N = 100
+N = 75
+N = 50
+Gen
+NeuRay
+IBRNet
+28.41
+25.64
+28.06
+25.16
+26.31
+23.68
+Ft
+NeuRay
+IBRNet
+32.97
+30.37
+32.71
+28.57
+31.40
+25.68
+Table 8. PSNR on the Lego with different input view numbers. With the decrease of view number, the performance decreases but NeuRay consistently outperforms IBRNet with different view numbers. “Gen” means the generalization setting while
+“Ft” means finetuning on the scene.
+N = 100
+N = 75
+N = 50
+optimization of all methods struggles to improve.
+More qualitative comparison with NeRF. In Fig. 13,
+we show more comparison with NeRF [33], in which our
+method can recover details more clearly than NeRF with
+the same training steps on the given scene.
+A.6. Initialize from estimated depth maps
+Besides initialization from the cost volumes, NeuRay
+could also be initialized from estimated depth maps by
+patch match stereo in COLMAP [49]. In Table 5, we show
+that initialization from estimated depth maps also produces
+good rendering results. Especially on the DTU dataset,
+COLMAP produces more accurate reconstruction than cost
+volumes so that the rendering quality is better.
+A.7. View consistency with more working views
+Figure 14. Qualitative results in the generalization setting with
+different input view numbers. Row 1 shows the results of IBRNet [58] and Row 2 shows the results of NeuRay.
+Initial
+Finetuned
+Can more working views improve the rendering quality? We observe that simply using more working views on
+our trained model does not lead to obvious improvements,
+because the model is finetuned with 8 working views. However, finetuning our model with more working views indeed
+improves the rendering quality. We finetune our model with
+different numbers of working views 8, 12, 16 on the Lego
+from the NeRF synthetic dataset. The results are shown in
+Table 6. We can see that training with more working views
+improves the results. The reason is that adding more working views in training means using more views for the feature aggregation to reconstruct the scene geometry, which
+enforces the view consistency and improves the accuracy of
+estimated surfaces.
+A.8. Results with sparse input views
+To investigate how the performance degenerates as the
+decrease of the number of input views, we reduce the input views of the Lego of the NeRF synthetic dataset from
+100 to 75 and 50 by the farthest point sampling on camera
+locations. The PSNR is reported in Table 8 and qualitative results are shown in Fig. 14. The performance degrades
+reasonably as the input views become sparser but is consistently better than IBRNet.
+A.9. Estimation of depth maps
+Figure 15. Depth maps computed on the input views. Left are produced by initialized NeuRay and Right are produced by finetuned
+NeuRay.
+We can decode a depth map from NeuRay on a input
+view. Along every input ray, we evenly sample points and
+use the depth of the sample point with the largest h̃i as the
+depth of this input ray. In Fig. 15, we show the depth maps
+from the initialized and the finetuned NeuRay representation. The results show that initialized NeuRay already produces a reasonable depth maps and optimizing NeuRay representation is able to enforce the consistency between views
+and rectify erroneous depth values. In light of this, finetuning NeuRay may also be regarded as a process of depth fusion or a consistency check for MVS algorithm, which takes
+Generalization
+Description
+PSNR
+Default NeuRay
+Add ℓconsist
+Nl = 3
+28.41
+28.46
+28.44
+Finetuning
+Description
+Default NeuRay
+Optimize vis./net. only
+Nl = 3
+Finetune G
+Method
+Fern
+Lego
+NeuRay-DR
+NeuRay-RF
+25.27
+25.93
+29.93
+32.97
+PSNR
+32.97
+32.25/31.90
+33.00
+32.43
+Table 10. PSNR of Direct Rendering (DR) of NeuRay and rendering from the constructed radiance field (RF) with NeuRay.
+Table 9. Additional ablation studies on the Lego from the NeRF
+Synthetic dataset, reported in PSNR.
+coarse depth maps as input and outputs refined consistent
+depth maps. However, unlike commonly-used consistency
+check which simply discards erroneous depth, optimizing
+NeuRay is able to correct these erroneous depth.
+A.10. Additional ablation studies
+We have conducted additional ablation studies on some
+of our network designs in Table 9.
+1) Adding ℓconsist in the generalization training. ℓconsist
+is designed in scene-specific finetuning to memorize the geometry. Adding the loss in cross-scene generalization training produces similar results as the model without the loss.
+2) Optimize G′ only or network parameters only. Either
+leads to inferior results because only optimizing G′ will disable refinement of feature aggregation while only optimizing networks will disable refinement of scene geometry in
+finetuning.
+3) Number of mixed distributions Nl . Nl limits the maximum number of semi-transparent surfaces to be represented
+on an input ray. However, we find that increasing Nl from 2
+to 3 does not bring significant improvements because there
+are few semi-transparent surfaces in most cases.
+4) Finetune G instead of G′ . Finetuning G′ with visibility encoder produces better results than finetuning G (+0.5
+PSNR). The reason is that the convolution layers in the visibility encoder associate nearby feature vectors of trainable
+G′ and these nearby pixels usually have similar visibility.
+A.11. Direct rendering from NeuRay
+Can we render a novel view image from the NeuRay
+representation without constructing a radiance field?
+Yes, we can render an image directly from NeuRay,
+which is called the direct rendering of NeuRay. Given a test
+ray o + zr with sample points {pi }, we will compute the
+P
+output color for this ray by ĉ = i ĉi ĥi . In Sec. A.1, we
+already show how to compute ĥ. The only remaining problem is how to compute the color ĉi of each sample point
+directly from NeuRay. To achieve this, we adopt a traditional Spherical Harmonics Fitting here.
+We use a set of spherical harmonic functions as basis
+functions to fit a color function R : S2 → R3 on every point. Specifically, we solve the following linear least
+(a)
+(b)
+Figure 16. Comparison between the direct rendering of NeuRay
+(a) and the rendering of the constructed radiance field (b). Direct
+rendering of NeuRay produces meaningful results but artifacts occur on the edges. Note the direct rendering is not supervised.
+squares problem
+\mathop {min}_{\bm {\theta }_i} \sum _j \tilde {h}_{i,j}(z_{i,j},z_{i,j}+l_i) \|R(\bm {r}_{i,j};\bm {\theta }_i) - \bm {c}_{i,j}\|^2+\bm {\theta }^\intercal _i\bm {\Lambda }\bm {\theta }_i, \label {eq:shf}
+(A.9)
+where h̃i,j is the hitting probability of point pi on the input
+ray emitted from the j-th input view, R the color function,
+θi the coefficients of spherical harmonic basis functions on
+this point, ri,j and ci,j are the viewing direction and color
+of the input ray emitted from the j-th view, respectively,
+θi⊺ Λθi a regularization term, and Λ a predefined diagonal
+matrix. This linear least squares problem has a closed-form
+solution. After finding the solution θi to Eq.(A.9), the color
+ci is computed by
+\bm {c}_i=R(\bm {r};\bm {\theta }_i).
+(A.10)
+Note that in Eq. (A.9), the color difference is weighted by
+hitting probabilities so that occluded input rays will not interfere the output colors. Meanwhile, since we fit a function
+R on the sphere, NeuRay is able to represent anisotropic
+colors (or radiance) at a point. NeX [59] and PlencOctree [64], also use spherical harmonics functions as basis
+functions to represent colors. In implementation, we use
+spherical harmonics up to 3 degree and thus θ ∈ R16 and
+the diagonal elements of the regularization matrix Λ are
+(0, 0.001, 0.005, 0.01) for degree 0 to 3.
+Quality of direct rendering. To show the direct rendering of NeuRay can also produce reasonable renderings,
+we conduct experiments on the Lego and the Fern using
+NeuRay
+NeRF [33]
+Figure 17. As an image-based rendering method, NeuRay is unable to correctly render the region that is not visible to all working
+views, even though such regions are visible on other images. In
+comparison, as a global scene representation, NeRF [33] can correctly render these regions.
+the finetuned models. The qualitative results are shown in
+Fig. 16 and the quantitative results are shown in Table 10.
+The results demonstrate that though the direct rendering of
+NeuRay is not supervised by any rendering loss, it is still
+able to produce images with correct structures and details.
+Further supervising the direct rendering with a rendering
+loss may improve its rendering quality.
+A.12. Limitations
+As an image-based rendering method, our method needs
+to select a set of working views to render a novel view image. Hence, NeuRay is unable to render pixels that are
+invisible to all working views, though these pixels may
+be visible in other input views. We show an example in
+Fig. 17, in which the region is invisible to all working views.
+Meanwhile, our method is based on feature matching of input views to reconstruct the scene geometry. Such feature
+matching may struggle to find correct surfaces in textureless regions or cluttered complex regions like the Ficus. In
+this case, our method may not be able to keep the view consistency and correctly render, leading to rendering artifacts.
+Including more input views and working views or improving the feature matching may alleviate this problem. Another limitation is that speeding up rendering with NeuRay
+requires an accurate estimation of the surface locations so
+that such speeding up is only applicable to the finetuned
+model with accurate visibility. In the generalization setting,
+the predicted visibility is not accurate enough to maintain
+the rendering quality with very few sample points.
+Initialization Network
+Visibility Encoder
+H/4*W/4*64
+Depth regression
+Cost Volume
+H/4*W/4*32
+Image feature
+H/4*W/4*1
+H/4*W/4*64
+H/4*W/4*96
+Conv3x3(32)
+Conv3x3(32)
+Conv3x3(32)
+H/4*W/4*32
+H/4*W/4*32
+H/4*W/4*32
+ResBlock(32)
+ResBlock(32)
+ResBlock(32)
+H/4*W/4*32
+H/4*W/4*32
+H/4*W/4*32
+Conv1x1(32)
+Conv1x1(32)
+Image Encoder
+H/4*W/4*32
+Visibility Feature
+Conv1x1(32)
+H/4*W/4*32
+Image feature
+H/4*W/4*96
+H/4*W/4*32
+Conv3x3(32)
+Refined Visibility Feature
+H/4*W/4*32
+ResUNet
+ResBlock(32)
+Decoder
+Refined Visibility
+Feature Vector
+H/4*W/4*32
+Conv1x1(32)
+FC-ReLU(32)*2
+FC-ReLU(32)*2
+H/4*W/4*32
+FC-SoftPlus(32,1)
+Visibility Feature
+FC-Sigmoid(32,1)
+*4
+Mean/Var
+Mixing Weight
+Figure 18. Architecture details of networks used in NeuRay.
+Visibility
+N*K*1
+Visibility
+features
+N*K*32
+View
+directions
+Image
+features
+N*K*3
+MLP(1,32,32)
+N*K*32
+N*K*32
+MLP(3,32,32)
+N*K*32
+MLP(32,32,1)
+N*K*1
+C
+N*K*32
+N*K*192
+N*K*32
+N*K*3
+C
+MLP
+(32,32,32)
+N*K*32
+N*1*32
+Mean
+N*1*32
+N*1*32
+N*1*32
+Var
+Mean
+Var
+View
+directions
+Network ℳ
+Element-wise product
+MLP
+(32,32,1)
+MLP
+(192,64,32)
+N*K*3
+Colors
+Element-wise plus
+N*1*32
+Var
+Mean
+MLP
+(64,32,16)
+N*16
+Transformer
+N*16
+MLP(16,1)
+Output
+color
+Network 𝓑
+N*K*32
+N*1*32
+MLP
+(35,16,8,1)
+Softmax
+N*K*1
+Blending
+weights
+N*3
+C Concatenation
+sigmoid
+N*K*1
+N*1
+Network 𝓐
+Alpha
+value
+Figure 19. Architecture details of feature aggregation networks (M, A, B). N is the number of sample points on a test ray and K is the
+number of working views.

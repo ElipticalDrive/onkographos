@@ -1,0 +1,229 @@
+--- v003.md
++++ v004.md
+@@ -8,5 +8,5 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Multi-view images of an object.
++*   **Input:** Multi-view images of an object [S1].
+ *   **Output:** A hybrid asset consisting of a triangular mesh, texture maps, and a sparse volume (voxels) with associated density and color data, optimized for real-time rendering [S1].
+ 
+@@ -24,5 +24,5 @@
+ 
+ 1.  **Contiguous Stage (Joint Optimization):**
+-    Initialize implicit neural representations for the SDF $f_{sdf}$ and density $\sigma_{vol}$. Jointly optimize these fields using volume rendering from multi-view images [S1]. The hybrid density is computed as $\sigma_{hyb} = \sigma_{surf} + \sigma_{vol}$, where $\sigma_{surf}$ is derived from the SDF via the sigmoid mapping [S1]. The hybrid opacity is $\alpha_{hyb} = 1 - (1 - \alpha_{surf})(1 - \alpha_{vol})$ [S1].
++    Initialize implicit neural representations for the SDF $f_{sdf}$ and density $\sigma_{vol}$ [S1]. Jointly optimize these fields using volume rendering from multi-view images [S1]. The hybrid density is computed as $\sigma_{hyb} = \sigma_{surf} + \sigma_{vol}$, where $\sigma_{surf}$ is derived from the SDF via the sigmoid mapping [S1]. The hybrid opacity is $\alpha_{hyb} = 1 - (1 - \alpha_{surf})(1 - \alpha_{vol})$ [S1].
+ 
+ 2.  **Discretization Stage (Quantization):**
+@@ -34,5 +34,5 @@
+ **Formulas and Definitions:**
+ 
+-*   **Sigmoid Mapping:** Maps signed distance $x$ to opacity.
++*   **Sigmoid Mapping:** Maps signed distance $x$ to opacity [S1].
+     $$ \Phi_s(x) = (1 + e^{-sx})^{-1} $$
+     where $s$ is a scene-wise learnable parameter [S1].
+@@ -51,19 +51,14 @@
+ 
+ *   **Loss Functions:**
+-    *   **Eikonal Loss:** Regularizes the SDF gradient magnitude.
++    *   **Eikonal Loss:** Regularizes the SDF gradient magnitude [S1].
+         $$ L_{eik} = \sum_i (\|\nabla f_{sdf}(\mathbf{x}(t_i))\| - 1)^2 $$
+-        [S1]
+-    *   **Mask Loss:** Binary cross entropy between estimated opacity $\hat{M} = \sum_i \omega_i$ and ground truth mask $M$.
++    *   **Mask Loss:** Binary cross entropy between estimated opacity $\hat{M} = \sum_i \omega_i$ and ground truth mask $M$ [S1].
+         $$ L_{mask} = \text{BCE}(\hat{M}, M) $$
+-        [S1]
+-    *   **Normal Smoothness Loss:** Encourages predicted normal $\hat{\mathbf{n}}$ to align with analytic normal $\mathbf{n}$.
++    *   **Normal Smoothness Loss:** Encourages predicted normal $\hat{\mathbf{n}}$ to align with analytic normal $\mathbf{n}$ [S1].
+         $$ L_{norm} = 1 - \hat{\mathbf{n}} \cdot \mathbf{n} $$
+-        [S1]
+-    *   **Photometric Loss:** Applies to both hybrid and surface-only renders to prioritize surface usage.
++    *   **Photometric Loss:** Applies to both hybrid and surface-only renders to prioritize surface usage [S1].
+         $$ L_{pm} = \sum_i \left( \|\hat{\mathbf{C}}_i^{hyb} - \mathbf{C}_i\|^2 + \|\hat{\mathbf{C}}_i^{surf} - \mathbf{C}_i\|^2 \right) $$
+-        [S1]
+-    *   **Sparsity Loss:** Penalizes volume density to encourage sparsity.
++    *   **Sparsity Loss:** Penalizes volume density to encourage sparsity [S1].
+         $$ L_{sp} = \sum_i |1 - \exp(-\lambda \sigma_i)| $$
+-        [S1]
+ 
+ **Parameters:**
+@@ -111,5 +106,4 @@
+ def generate_rays(camera_params):
+     """Generate camera rays from intrinsic/extrinsic parameters [G]."""
+-    # Returns list of (origin, direction) tuples for each pixel.
+     pass
+ 
+@@ -117,5 +111,5 @@
+     """Uniformly sample points along a ray between near and far planes [G]."""
+     t_vals = [near + i * (far - near) / num_samples for i in range(num_samples)]
+-    return [(ray_o[i] + t * ray_d[i], ray_d) for i in range(3) for t in t_vals]
++    return [tuple(ray_o[i] + t * ray_d[i] for i in range(3)) for t in t_vals]
+ 
+ def composite(colors, alphas):
+@@ -137,11 +131,5 @@
+ def compute_attenuation(theta, m):
+     """Compute Fresnel attenuation factor. Modeled by an MLP or LUT in practice [G]."""
+-    # Simplified Schlick approximation for demonstration
+     return (1.0 - m) * (1.0 - math.cos(theta))**5 + m
+-
+-def get_basis_colors_for_direction(omega_r, basis_colors):
+-    """Interpolate or query basis colors for a given direction [G]."""
+-    # In implementation, this queries a learned LUT or MLP.
+-    return basis_colors  # Placeholder for direction-dependent lookup
+ 
+ def render_color(x, omega_o, sdf_net, density_net, 
+@@ -153,5 +141,5 @@
+     
+     alpha_surf = sigmoid(d, s_param)
+-    alpha_vol = 1.0 - math.exp(-sigma_vol * 0.01) # step_size approximated
++    alpha_vol = 1.0 - math.exp(-sigma_vol * 0.01)
+     
+     alpha_hyb = 1.0 - (1.0 - alpha_surf) * (1.0 - alpha_vol)
+@@ -168,8 +156,7 @@
+     w = weights_net(x)
+     
+-    c_s_basis = get_basis_colors_for_direction(omega_r, basis_colors)
+-    c_s = [sum(w[i] * c_s_basis[i][j] for i in range(len(w))) for j in range(3)]
+-    
+-    theta = math.acos(max(min(dot_product([1,0,0], n), 1.0), -1.0)) # Simplified angle
++    c_s = [sum(w[i] * basis_colors[i][j] for i in range(len(w))) for j in range(3)]
++    
++    theta = math.acos(max(min(dot_product(n, omega_o), 1.0), -1.0))
+     A = compute_attenuation(theta, m)
+     
+@@ -183,20 +170,19 @@
+     """Training step for VMesh."""
+     total_loss = 0.0
+-    
+     for img, mask, cam in zip(images, masks, camera_params):
+         rays = generate_rays(cam)
+-        points = []
++        all_points = []
+         for ray_o, ray_d in rays:
+-            points.extend(sample_points(ray_o, ray_d, 64, 0.1, 10.0))
++            all_points.extend(sample_points(ray_o, ray_d, 64, 0.1, 10.0))
+             
+-        d_vals = [sdf_net(p) for p in points]
+-        sigma_vol_vals = [density_net(p) for p in points]
++        d_vals = [sdf_net(p) for p in all_points]
++        sigma_vol_vals = [density_net(p) for p in all_points]
+         
+         alphas = []
+-        for i in range(len(points) - 1):
++        for i in range(len(all_points) - 1):
+             alphas.append(compute_opacity_from_sdf(d_vals[i], d_vals[i+1], s_param))
+             
+         c_hyb_list, c_surf_list, alpha_hyb_list, alpha_surf_list = [], [], [], []
+-        for p in points:
++        for p in all_points:
+             c_h, a_h, a_s = render_color(p, [0,0,1], sdf_net, density_net, 
+                                          color_nets, basis_params, s_param)
+@@ -214,5 +200,5 @@
+         L_mask = bce(M_hat, mask)
+         
+-        L_eik = sum((norm(compute_gradient(sdf_net, p)) - 1)**2 for p in points)
++        L_eik = sum((norm(compute_gradient(sdf_net, p)) - 1)**2 for p in all_points)
+         
+         L_sp = sum(abs(1 - math.exp(-lambda_param * sigma_vol_vals[i])) for i in range(len(sigma_vol_vals)))
+@@ -234,77 +220,77 @@
+ 
+ ### VoISDF Volume Rendering and Adaptive Sampling
+-A sibling method focusing on adaptive sampling for volume rendering. VMesh differs by explicitly discretizing into mesh and sparse volume for real-time efficiency [S1].
++A sibling method focusing on adaptive sampling for volume rendering [G]. VMesh differs by explicitly discretizing into mesh and sparse volume for real-time efficiency [S1].
+ 
+ ### Gaussian Head Avatar (GHA)
+-A sibling method using Gaussians for head avatars. VMesh uses mesh and sparse volume, offering better editability and integration with standard graphics pipelines compared to Gaussian splatting [S1].
++A sibling method using Gaussians for head avatars [G]. VMesh uses mesh and sparse volume, offering better editability and integration with standard graphics pipelines compared to Gaussian splatting [S1].
+ 
+ ### MAtCha
+-A sibling method for multi-view stereo. VMesh extends this by incorporating neural rendering and hybrid representation for view synthesis [S1].
++A sibling method for multi-view stereo [G]. VMesh extends this by incorporating neural rendering and hybrid representation for view synthesis [S1].
+ 
+ ### Explicit Neural Feature Volume
+-A sibling method using feature grids. VMesh uses a sparse volume for density and a mesh for geometry, differing in the explicit geometric representation [S1].
++A sibling method using feature grids [G]. VMesh uses a sparse volume for density and a mesh for geometry, differing in the explicit geometric representation [S1].
+ 
+ ### Joint Learning with Shared MLPs
+-A sibling method. VMesh jointly optimizes SDF and density fields within a hybrid signed distance-density framework [S1].
++A sibling method [G]. VMesh jointly optimizes SDF and density fields within a hybrid signed distance-density framework [S1].
+ 
+ ### Per-Primitive Color Representations
+-A sibling method. VMesh uses RefBasis for view-dependent color, leveraging learned basis functions for specular modeling [S1].
++A sibling method [G]. VMesh uses RefBasis for view-dependent color, leveraging learned basis functions for specular modeling [S1].
+ 
+ ### 2D Feature Fusion
+-A sibling method. VMesh operates in 3D space with a hybrid representation, whereas 2D Feature Fusion operates on 2D feature maps [S1].
++A sibling method [G]. VMesh operates in 3D space with a hybrid representation, whereas 2D Feature Fusion operates on 2D feature maps [S1].
+ 
+ ### Structure-aware primitive learning
+-A sibling method. VMesh's sparse volume captures subtle structures, similar to structure-aware primitives, but uses a hybrid mesh-volume approach [S1].
++A sibling method [G]. VMesh's sparse volume captures subtle structures, similar to structure-aware primitives, but uses a hybrid mesh-volume approach [S1].
+ 
+ ### Splat the Net
+-A sibling method using splatting. VMesh uses ray-marching for the volume and rasterization for the mesh, differing in rendering technique [S1].
++A sibling method using splatting [G]. VMesh uses ray-marching for the volume and rasterization for the mesh, differing in rendering technique [S1].
+ 
+ ### Neural Primitive Splatting
+-A sibling method. VMesh avoids splatting for the primary geometry, using mesh rasterization instead [S1].
++A sibling method [G]. VMesh avoids splatting for the primary geometry, using mesh rasterization instead [S1].
+ 
+ ### K-planes
+-A sibling method using planar factors. VMesh uses implicit neural fields and sparse volumes, differing in the factorization approach [S1].
++A sibling method using planar factors [G]. VMesh uses implicit neural fields and sparse volumes, differing in the factorization approach [S1].
+ 
+ ### Neural Geometric Level of Detail
+-A sibling method for LOD. VMesh's hybrid representation allows for efficient rendering at various scales, but does not explicitly implement LOD in the same way [S1].
++A sibling method for LOD [G]. VMesh's hybrid representation allows for efficient rendering at various scales, but does not explicitly implement LOD in the same way [S1].
+ 
+ ### MLP Neural Fields
+-A sibling method. VMesh replaces the pure MLP field with a hybrid mesh-volume representation for efficiency [S1].
++A sibling method [G]. VMesh replaces the pure MLP field with a hybrid mesh-volume representation for efficiency [S1].
+ 
+ ### Hash Grid Neural Fields
+-A sibling method. VMesh uses sparse volumes instead of hash grids for the volumetric part [S1].
++A sibling method [G]. VMesh uses sparse volumes instead of hash grids for the volumetric part [S1].
+ 
+ ### VEG
+-A sibling method. VMesh differs in its hybrid representation and texture modeling [S1].
++A sibling method [G]. VMesh differs in its hybrid representation and texture modeling [S1].
+ 
+ ### Forplane
+-A sibling method. VMesh differs in its use of mesh and sparse volume [S1].
++A sibling method [G]. VMesh differs in its use of mesh and sparse volume [S1].
+ 
+ ### Feature Grid as Radiance Field
+-A sibling method. VMesh uses feature grids for color but combines them with mesh geometry [S1].
++A sibling method [G]. VMesh uses feature grids for color but combines them with mesh geometry [S1].
+ 
+ ### Atlas-Net
+-A sibling method. VMesh differs in its representation and rendering pipeline [S1].
++A sibling method [G]. VMesh differs in its representation and rendering pipeline [S1].
+ 
+ ### Dynamic MLP Maps
+-A sibling method. VMesh is static in its representation, though it can be extended [S1].
++A sibling method [G]. VMesh is static in its representation, though it can be extended [S1].
+ 
+ ### Neural Voxel Fields
+-A sibling method. VMesh uses sparse volumes, which are a form of voxel fields, but combines them with mesh [S1].
++A sibling method [G]. VMesh uses sparse volumes, which are a form of voxel fields, but combines them with mesh [S1].
+ 
+ ### Viewshed Fields (VF) Learning
+-A sibling method. VMesh differs in its hybrid approach [S1].
++A sibling method [G]. VMesh differs in its hybrid approach [S1].
+ 
+ ### Primitive-bound feature embedding
+-A sibling method. VMesh uses RefBasis for view-dependent color modeling [S1].
++A sibling method [G]. VMesh uses RefBasis for view-dependent color modeling [S1].
+ 
+ ### Masked Wavelet Representation
+-A sibling method. VMesh differs in its representation and rendering [S1].
++A sibling method [G]. VMesh differs in its representation and rendering [S1].
+ 
+ ### Marching Neurons
+-A sibling method. VMesh uses marching cubes-like extraction from SDF, similar to Marching Neurons, but adds volume rendering [S1].
++A sibling method [G]. VMesh uses marching cubes-like extraction from SDF, similar to Marching Neurons, but adds volume rendering [S1].
+ 
+ ### Neural Network 3D Object Representation
+-A sibling method. VMesh is a specific instance of this, focusing on hybrid mesh-volume [S1].
++A sibling method [G]. VMesh is a specific instance of this, focusing on hybrid mesh-volume [S1].
+ 
+ ## Operating characteristics

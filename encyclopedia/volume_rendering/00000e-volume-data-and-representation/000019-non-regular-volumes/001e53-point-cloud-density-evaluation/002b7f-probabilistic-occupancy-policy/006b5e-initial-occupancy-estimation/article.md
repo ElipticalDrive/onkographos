@@ -1,0 +1,154 @@
+# Initial Occupancy Estimation
+
+Also called: Point Cloud Density Occupancy, SfM-based Occupancy Thresholding
+
+## Overview
+Initial Occupancy Estimation converts sparse Structure-from-Motion (SfM) point clouds into a discrete voxel grid occupancy map to serve as a geometric prior for subsequent volume rendering or Gaussian Splatting optimization. It solves the problem of initializing scene representation in regions where dense depth or multi-view stereo data is unavailable or noisy. It sets itself apart from its siblings by relying on simple density thresholds of raw SfM points rather than learned priors or complex probabilistic aggregation, providing a fast, deterministic baseline for scene bounds [S1].
+
+## How it works
+**Inputs:**
+- A set of 3D points $P = \{p_1, \dots, p_N\}$ from an SfM reconstruction.
+- Scene bounds (global maximum bounds) defining the spatial extent of the volume.
+- A target voxel grid resolution or cell size.
+- Scene type classification (indoor or outdoor).
+
+**Outputs:**
+- A binary occupancy grid $V$, where each voxel $v$ is marked as OCCUPIED or FREE.
+- An upsampled occupancy grid $V_{up}$ (if upsampling is applied).
+
+**Data Structures:**
+- **Voxel Grid:** A 3D array or hash map mapping integer coordinates $(i, j, k)$ to a boolean occupancy status. The grid dimensions are determined by the scene bounds and voxel size.
+- **Point Cloud:** List of 3D coordinates.
+
+**Parameters:**
+- $N_{outdoor}$: Minimum SfM points per voxel for outdoor scenes. Default: 2 [S1].
+- $N_{indoor}$: Minimum SfM points per voxel for indoor scenes. Default: 5 [S1].
+- $N_{upsample}$: Factor for N-fold upsampling. Not given in the sources.
+- $R_{dilate}$: Radius for 3D dilation operation. Default: 2 [S1].
+
+**Steps:**
+1. **Discretization:** Map the continuous scene bounds to a discrete voxel grid. For each SfM point $p \in P$, compute its voxel index $(i, j, k)$ based on its 3D coordinates and the grid resolution.
+2. **Density Counting:** For each voxel $v$, count the number of SfM points $c_v$ that map to it.
+3. **Thresholding:** Mark voxel $v$ as OCCUPIED if $c_v \ge N_{type}$, where $N_{type}$ is $N_{outdoor}$ for outdoor scenes or $N_{indoor}$ for indoor scenes. Otherwise, mark as FREE [S1].
+4. **Upsampling (Optional):** Apply N-fold upsampling to the occupied voxels to refine the geometric representation. This typically involves subdividing each occupied voxel into $N^3$ sub-voxels and marking them based on the parent's occupancy or re-evaluating point density in the finer grid. Not given in the sources for exact implementation details.
+5. **Observed Region Calculation (Variant):**
+   - Map SfM points (SA-Points) to their nearest voxels to define the observed surface region [S1].
+   - Apply a 3D dilation operation to the occupied voxels with radius $R_{dilate}=2$ to account for triangulation errors and improve spatial robustness [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def initial_occupancy_estimation(points, scene_bounds, voxel_size, scene_type, dilate_radius=2):
+    """
+    points: list of (x, y, z) tuples
+    scene_bounds: (min_x, min_y, min_z, max_x, max_y, max_z)
+    voxel_size: float, size of one voxel edge
+    scene_type: 'indoor' or 'outdoor'
+    """
+    # 1. Discretization
+    min_x, min_y, min_z, max_x, max_y, max_z = scene_bounds
+    dim_x = int((max_x - min_x) / voxel_size)
+    dim_y = int((max_y - min_y) / voxel_size)
+    dim_z = int((max_z - min_z) / voxel_size)
+    
+    # Initialize occupancy grid
+    # Using a 3D array for simplicity; hash map is also valid
+    grid = [[[False for _ in range(dim_z)] for _ in range(dim_y)] for _ in range(dim_x)]
+    
+    # Count points per voxel
+    for p in points:
+        x, y, z = p
+        # Check if point is within bounds
+        if not (min_x <= x < max_x and min_y <= y < max_y and min_z <= z < max_z):
+            continue
+        
+        # Compute voxel indices
+        ix = int((x - min_x) / voxel_size)
+        iy = int((y - min_y) / voxel_size)
+        iz = int((z - min_z) / voxel_size)
+        
+        # Guard against boundary errors
+        ix = max(0, min(ix, dim_x - 1))
+        iy = max(0, min(iy, dim_y - 1))
+        iz = max(0, min(iz, dim_z - 1))
+        
+        grid[ix][iy][iz] = True
+
+    # 2. Thresholding
+    if scene_type == 'outdoor':
+        # Note: The source implies counting, but the grid above is boolean.
+        # To implement the threshold correctly, we need counts.
+        pass # See corrected logic below
+
+    # Corrected Logic with Counts
+    counts = [[[0 for _ in range(dim_z)] for _ in range(dim_y)] for _ in range(dim_x)]
+    for p in points:
+        x, y, z = p
+        if not (min_x <= x < max_x and min_y <= y < max_y and min_z <= z < max_z):
+            continue
+        ix = int((x - min_x) / voxel_size)
+        iy = int((y - min_y) / voxel_size)
+        iz = int((z - min_z) / voxel_size)
+        ix = max(0, min(ix, dim_x - 1))
+        iy = max(0, min(iy, dim_y - 1))
+        iz = max(0, min(iz, dim_z - 1))
+        counts[ix][iy][iz] += 1
+
+    threshold = 2 if scene_type == 'outdoor' else 5
+    for ix in range(dim_x):
+        for iy in range(dim_y):
+            for iz in range(dim_z):
+                if counts[ix][iy][iz] >= threshold:
+                    grid[ix][iy][iz] = True
+                else:
+                    grid[ix][iy][iz] = False
+
+    # 3. Observed Region Calculation (Dilation Variant)
+    # Apply 3D dilation with radius 2
+    dilated_grid = [[[False for _ in range(dim_z)] for _ in range(dim_y)] for _ in range(dim_x)]
+    for ix in range(dim_x):
+        for iy in range(dim_y):
+            for iz in range(dim_z):
+                if grid[ix][iy][iz]:
+                    # Mark neighbors within radius
+                    for dx in range(-dilate_radius, dilate_radius + 1):
+                        for dy in range(-dilate_radius, dilate_radius + 1):
+                            for dz in range(-dilate_radius, dilate_radius + 1):
+                                nx, ny, nz = ix + dx, iy + dy, iz + dz
+                                if 0 <= nx < dim_x and 0 <= ny < dim_y and 0 <= nz < dim_z:
+                                    dilated_grid[nx][ny][nz] = True
+    return dilated_grid
+```
+
+**Edge Cases and Pitfalls:**
+- **Boundary Precision:** Floating-point to integer conversion for voxel indices must handle edge cases where points lie exactly on grid boundaries. Using `int()` truncation may cause points on the upper bound to be excluded if not handled carefully.
+- **Sparse Regions:** In very sparse outdoor scenes, the threshold of 2 may still result in fragmented occupancy.
+- **Upsampling:** The exact method of N-fold upsampling is not specified. A naive approach (copying occupancy to all sub-voxels) may introduce artifacts; re-evaluating density in the finer grid is safer [S1].
+
+## Subtopics
+
+### [Patch-based Probability Volume Histogram (PVH) Inference](21142-patch-based-probability-volume-histogram-pvh-inference.md)
+Patch-based Probability Volume Histogram (PVH) Inference is a method to compute the overall likelihood of occupancy for a given voxel by aggregating probabilities from multiple camera views using a sigmoid function, creating a Probability Volume Histogram (PVH) for a volume. It sets itself apart from sibling methods by processing the volume as a series of densely sampled 3D patches through a Convolutional Neural Network (CNN) to refine occupancy estimates, particularly when input data is sparse or noisy. This approach builds on [Initial Occupancy Estimation](20837-initial-occupancy-estimation.md) by enhancing the initial probabilistic estimates with learned spatial priors.
+
+### Observed Region Calculation
+This variant focuses on defining the observed surface region by mapping SA-Points to their nearest voxels. It applies a 3D dilation operation to the occupied voxels with a radius of 2 to account for possible triangulation errors and improve spatial robustness [S1].
+
+### Numerical Intersection Metric Approximation
+This variant approximates the normal-wise offset $\delta_{ij}$ between elliptic occupancy regions via boundary sampling and interpolation to avoid analytical complexity [S2]. It maps $\Omega_i$ to a unit disk in local coordinates $Z=0$: $\Omega'_i = \{ (X, Y, Z) \mid X^2 + Y^2 \le 1, Z = 0 \}$. It uniformly samples points on the boundary of $\Omega_j$ using its ellipse parameterization in terms of $r_{j,1}, r_{j,2}$. It evaluates $X(x), Y(x), Z(x)$ for each sample and keeps only those satisfying $X(x)^2 + Y(x)^2 \le 1$ (projection inside unit disk). It samples points on the unit circle $X^2 + Y^2 = 1$, restricts them to the region covered by $\Omega'_j$'s projection, and obtains their $Z$-values by interpolation from nearby samples. The offset is calculated as $\delta_{ij} = \inf \{ |Z(x)| \mid X(x)^2 + Y(x)^2 \le 1, x \in \Omega_j \}$ where $X(x) = \frac{\langle x - p_i, r_1 \rangle}{a_i}$, $Y(x) = \frac{\langle x - p_i, r_2 \rangle}{b_i}$, and $Z(x) = \langle x - p_i, n_i \rangle$. The numerical estimate is $\hat{\delta}_{ij} = \min_k |Z_k|$ where $\{|Z_k|\}$ are the collected candidate heights [S2].
+
+## Operating characteristics
+- **Time Complexity:** $O(N \cdot V)$ where $N$ is the number of SfM points and $V$ is the number of voxels, assuming a hash map or direct indexing. With dilation, it becomes $O(V \cdot R^3)$ where $R$ is the dilation radius.
+- **Memory Complexity:** $O(V)$ for the voxel grid.
+- **Performance:** Fast and deterministic. Suitable for real-time initialization.
+- **Strengths:** Simple to implement, robust to moderate noise, provides a clear geometric prior.
+- **Limitations:** Sensitive to SfM point density and distribution. May produce fragmented occupancy in sparse regions. Does not account for visibility or occlusion.
+- **When to use:** When a quick, geometry-based initialization is needed for Gaussian Splatting or volume rendering, especially when SfM points are available.
+- **When not to use:** When high precision is required in sparse regions or when SfM data is unreliable.
+
+## Background
+Initial Occupancy Estimation is a foundational step in modern 3D Gaussian Splatting frameworks that utilize sparse SfM data. It was introduced in the context of SA-ResGS (Self-augmented Residual 3D Gaussian Splatting) for Next Best View Selection [S1]. The method leverages the geometric information from SfM to initialize the voxel grid, which is then used for view selection and occupancy estimation. The concept of using density thresholds for occupancy is common in volumetric reconstruction, but the specific parameters (2 for outdoor, 5 for indoor) and the integration with Gaussian Splatting are novel contributions of the SA-ResGS framework [S1]. The numerical intersection metric approximation variant is described in the context of Proxy-Free Gaussian Splats Deformation [S2], highlighting the importance of efficient intersection calculations in large-scale scenes.
+
+## Sources
+[S1] SA-ResGS: Self-augmented Residual 3D Gaussian Splatting for Next Best View Selection, https://doi.org/10.1007/978-3-032-37013-6_17, fetched 2026-10-29
+[S2] Proxy-Free Gaussian Splats Deformation with Splat-Based Surface Estimation, https://doi.org/10.1109/3DV69130.2026.00155, fetched 2026-10-30

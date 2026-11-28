@@ -1,0 +1,226 @@
+--- v005.md
++++ v006.md
+@@ -4,120 +4,128 @@
+ 
+ ## Overview
+-This method manages the capacity of 3D Gaussian splats by dynamically adjusting the resolution of their associated texture maps (texel size) and the number of active primitives based on rendering error [S1]. It solves the problem of balancing appearance quality against memory and computational cost by ensuring that high-error regions receive more resources (more texels or more primitives) while low-error regions are simplified [S1]. It differs from sibling methods like [Adaptive Density Control](9188-adaptive-density-control.md) by explicitly linking texture resolution to primitive splitting and by using a quantile-based error threshold to drive these decisions, rather than relying solely on gradient magnitudes or opacity thresholds [S1].
++This method adapts the resolution of per-primitive texture maps and manages the population of 3D Gaussian primitives based on quantile error thresholds, running periodically during training to balance model capacity and appearance quality [S1]. It differs from sibling methods like [Score-based Densification](4705-score-based-densification.md) by explicitly coupling the geometric density of primitives with the local texture resolution, allowing the model to automatically adjust the ratio of primitives to texels based on scene complexity [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Current set of 3D Gaussian primitives $\mathcal{G}$, current iteration number $iter$, texture resolution threshold $\tau_{tr}$, downscale threshold $\tau_{ds}$, texture size per primitive parameter $t_{2pr}$, and texture variance parameter $\lambda_{texture}$ [S1].
+-*   **Output:** Updated set of primitives $\mathcal{G}'$ (with potentially split primitives) and updated texture maps for each primitive (with potentially upscaled or downscaled resolutions) [S1].
++*   **Input:** The current set of 3D Gaussian primitives $\mathcal{G}$, their associated texture grids, the current optimization iteration $iter$, and hyperparameters $\tau_{tr}$, $\tau_{ds}$, $\lambda_{texture}$, and $t_{2pr}$.
++*   **Output:** Modified set $\mathcal{G}$ (with split primitives), updated texture grid resolutions (upscaled or downscaled), and updated parameters.
+ 
+ **Data Structures:**
+-*   **Primitive:** Contains 3D position, covariance, opacity, spherical harmonics coefficients, and a reference to a texture grid [S1].
+-*   **Texture Grid:** A 2D array of values representing the texture map for a primitive. The dimensions are defined by $t_{2pr}$, the texture size per primitive [S1].
+-*   **Error Buffer:** Stores the rendering error $E_i$ for each primitive $i$ [S1].
++*   **Primitive:** Contains mean position, covariance, opacity, spherical harmonics coefficients, and a reference to its texture grid.
++*   **Texture Grid:** A 2D array of color/feature values. The resolution is defined by $t_{2pr}$, the number of texels along the smallest axis of the primitive's bounding box in texture space.
+ 
+ **Parameters:**
+-*   $\tau_{tr}$: Texture resolution threshold. Controls the aggressiveness of primitive splitting. Starts at 64 and is progressively reduced to 32 within the first 7,000 iterations [S1].
+-*   $\tau_{ds}$: Downscale threshold. Controls how easily a texture map is downscaled. A higher value makes downscaling easier, leading to simpler appearance and fewer texels [S1].
+-*   $\lambda_{texture}$: Controls the variance of the texture maps. Higher values lead to smoother results. A low $\lambda_{texture}$ results in fewer texels per primitive [S1].
+-*   $t_{2pr}$: Texture size per primitive (in texels). Initialized at 500 iterations to the closest power of two such that the smallest axis is 8 texels wide [S1].
+-*   Quantile: The top 90% of errors are considered for splitting and upscaling [S1].
++*   $\tau_{tr}$: Texture resolution threshold. Controls splitting aggressiveness. Starts at 64, progressively reduced to 32 within the first 7000 iterations [S1].
++*   $\tau_{ds}$: Downscale threshold. Controls downscaling ease. Higher values make downscaling easier, leading to simpler appearances [S1].
++*   $\lambda_{texture}$: Variance control for texture maps. Higher values yield smoother results; lower values result in fewer texels per primitive [S1].
++*   $t_{2pr}$: Texture size per primitive (in texels). Initialized at iteration 500 to the closest power of two such that the smallest axis is 8 texels wide [S1].
++*   Quantile: Top 90% of errors are considered for splitting/upscaling [S1].
+ 
+ **Steps:**
+-1.  **Periodicity Check:** If $iter \pmod{250} \neq 0$, terminate. The routine runs every 250 iterations until 25,000 iterations [S1].
+-2.  **Error Computation:** For each primitive $i$, compute the rendering error $E_i$ [S1].
+-3.  **Quantile Determination:** Determine the error threshold $E_{90}$ corresponding to the 90th percentile of all computed errors $E_i$ [S1].
+-4.  **Primitive Splitting:** For each primitive $i$:
+-    *   If the current texture resolution is greater than $\tau_{tr}$ AND $E_i \ge E_{90}$, split the primitive along its overflowing axes [S1].
+-5.  **Texel Upscaling:** For each primitive $i$:
+-    *   If $t_{2pr} > 1$ AND $E_i \ge E_{90}$, decrease the texel size (upscale the texture resolution) [S1].
+-6.  **Texel Downscaling:** For each primitive $i$:
+-    *   Else if the current error metric $E_d < \tau_{ds}$, increase the texel size (downscale the texture resolution) [S1].
+-    *   Note: The sources use an `else if` structure in the pseudocode, implying downscaling is considered if the upscaling condition is not met, or potentially as a separate branch depending on implementation details not fully specified. The source pseudocode shows: `if ... then ... end if ... then ... end else if ... then ... end`. This suggests downscaling is checked if the upscaling condition ($t_{2pr} > 1$ and high error) is false [S1].
++1.  **Initialization:** At iteration 500, initialize texture grids with zero values. Set $t_{2pr}$ for each primitive to the closest power of two such that the smallest axis is 8 texels wide [S1].
++2.  **Periodic Execution:** Every 250 iterations, up to iteration 25,000, execute the following routine [S1]:
++    1.  Iterate over all primitives $g_k \in \mathcal{G}$.
++    2.  Compute the error $E_k$ for the primitive [S1].
++    3.  Determine if $E_k$ is in the top 90% of all computed errors [S1].
++    4.  **Splitting:** If the current texture resolution exceeds $\tau_{tr}$ AND $E_k$ is in the top 90%:
++        *   Split the primitive along overflowing axes [S1].
++    5.  **Upscaling:** If $t_{2pr} > 1$ AND $E_k$ is in the top 90%:
++        *   Decrease texel size (Upscale) by increasing the resolution of the texture grid [S1].
++    6.  **Downscaling:** Else if the downscale metric $E_d < \tau_{ds}$:
++        *   Increase texel size (Downscale) by decreasing the resolution of the texture grid [S1].
+ 
+ **Pseudocode:**
+ ```python
+-def texel_size_adaptation_and_primitive_management(primitives, iteration, tau_tr, tau_ds, t2pr, lambda_texture):
+-    """
+-    Adapts texture resolution and primitive count based on error quantiles.
+-    
+-    Args:
+-        primitives: List of primitive objects, each with attributes:
+-            - error: Current rendering error E_i
+-            - texture_resolution: Current resolution of the texture map
+-            - t2pr: Current texture size per primitive
+-            - split(): Method to split the primitive along overflowing axes
+-            - upscale_texture(): Method to decrease texel size (increase resolution)
+-            - downscale_texture(): Method to increase texel size (decrease resolution)
+-        iteration: Current training iteration number
+-        tau_tr: Texture resolution threshold for splitting
+-        tau_ds: Downscale threshold for texture reduction
+-        t2pr: Texture size per primitive parameter
+-        lambda_texture: Texture variance control parameter
++def texel_size_adaptation_and_primitive_management(primitives, iteration, tau_tr, tau_ds, t2pr_init):
++    # Initialization phase
++    if iteration == 500:
++        for p in primitives:
++            p.texture_grid = zeros_like(p.texture_grid) # Initialize with 0
++            # Set t2pr to closest power of two where smallest axis is 8 texels
++            p.t2pr = compute_closest_power_of_two_for_min_axis_8(p)
++        return
++
++    # Periodic execution phase
++    if iteration % 250 == 0 and iteration <= 25000:
++        # Compute errors for all primitives
++        errors = []
++        for p in primitives:
++            errors.append(compute_error(p))
+         
+-    Returns:
+-        Updated list of primitives
+-    """
+-    # Run every 250 iterations until 25,000 iterations
+-    if iteration % 250 != 0 or iteration > 25000:
+-        return primitives
+-    
+-    # Compute errors for all primitives
+-    errors = [p.error for p in primitives]
+-    
+-    # Determine the 90th percentile error threshold
+-    # Note: Sorting errors to find the 90th percentile
++        # Determine threshold for top 90%
++        error_threshold = get_quantile_threshold(errors, quantile=0.90)
++        
++        # Update tau_tr if within first 7000 iterations
++        current_tau_tr = tau_tr
++        if iteration <= 7000:
++            # Progressive reduction from 64 to 32
++            current_tau_tr = 64 - (64 - 32) * (iteration / 7000)
++        
++        for i, p in enumerate(primitives):
++            E_k = errors[i]
++            
++            # Splitting condition
++            if p.texture_resolution > current_tau_tr and E_k >= error_threshold:
++                split_primitive_along_overflowing_axes(p)
++            
++            # Upscaling condition
++            if p.t2pr > 1 and E_k >= error_threshold:
++                # Decrease texel size (Upscale)
++                # Implementation note: Use interpolation with scale factor 2
++                p.texture_grid = interpolate(p.texture_grid, scale_factor=2)
++                p.t2pr = p.t2pr * 2
++            
++            # Downscaling condition
++            # Note: The source pseudocode uses 'else if', implying downscaling 
++            # only happens if upscaling did not occur in this step for this primitive.
++            elif compute_downscale_metric(p) < tau_ds:
++                # Increase texel size (Downscale)
++                # Implementation note: Use interpolation with scale factor 0.5
++                p.texture_grid = interpolate(p.texture_grid, scale_factor=0.5)
++                p.t2pr = p.t2pr // 2
++
++def compute_closest_power_of_two_for_min_axis_8(primitive):
++    # Logic to determine initial t2pr based on primitive geometry
++    # Returns integer power of 2
++    pass
++
++def compute_error(primitive):
++    # Returns scalar error metric E_i
++    pass
++
++def get_quantile_threshold(errors, quantile):
++    # Returns the value below which 'quantile' fraction of errors fall
++    # e.g., top 90% means errors >= threshold
+     sorted_errors = sorted(errors)
+-    n = len(sorted_errors)
+-    # Index for 90th percentile (top 10% means index >= 0.9 * n)
+-    # "Top 90% of errors" usually means the highest 10% of values.
+-    # If a value is in the top 10%, it is >= the 90th percentile.
+-    percentile_index = int(0.9 * n)
+-    if percentile_index >= n:
+-        percentile_index = n - 1
+-    error_threshold = sorted_errors[percentile_index]
+-    
+-    updated_primitives = []
+-    
+-    for p in primitives:
+-        # Primitive Splitting
+-        # Condition: texture resolution > tau_tr AND error in top 90%
+-        if p.texture_resolution > tau_tr and p.error >= error_threshold:
+-            p.split()
+-            # Splitting may create new primitives, but the routine iterates over the original set
+-            # or the updated set. The source says "iterate over all primitives".
+-            # Assuming the split happens in-place or the primitive is replaced.
+-            # For simplicity, we assume p is updated.
+-        
+-        # Texel Upscaling
+-        # Condition: t2pr > 1 AND error in top 90%
+-        if p.t2pr > 1 and p.error >= error_threshold:
+-            p.upscale_texture()
+-        # Else if Downscaling
+-        # Condition: Ed < tau_ds
+-        # The source pseudocode uses 'else if', implying this is checked if upscaling didn't happen
+-        # or as a separate condition. The source text says "Else if Ed < tau_ds".
+-        # We follow the source pseudocode structure.
+-        elif p.error < tau_ds: # Assuming Ed is p.error or a derived metric
+-            p.downscale_texture()
+-            
+-        updated_primitives.append(p)
+-        
+-    return updated_primitives
++    index = int(len(sorted_errors) * (1 - quantile))
++    return sorted_errors[index]
++
++def split_primitive_along_overflowing_axes(primitive):
++    # Replace primitive with children sampled from parent distribution
++    pass
++
++def compute_downscale_metric(primitive):
++    # Returns metric E_d used for downscaling decision
++    pass
++
++def interpolate(grid, scale_factor):
++    # PyTorch-like interpolation
++    pass
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Hyperparameter Interdependence:** Changing $\tau_{tr}$ to encourage more primitives can lead to fewer texels per primitive because each primitive represents a more localized, simpler part of the scene [S1].
+-*   **Initialization:** Texture grids are initialized with 0 on every channel and start optimizing after 500 iterations [S1]. At 500 iterations, $t_{2pr}$ is set to the closest power of two such that the smallest axis is 8 texels wide [S1].
+-*   **Implementation Detail:** Upscaling and downscaling are implemented using PyTorch's `interpolate` function with a scale factor of 2 [S1].
++*   **Hyperparameter Interdependence:** Changing $\tau_{tr}$ to encourage more primitives can indirectly lead to fewer texels per primitive, as each primitive represents a more localized, simpler part of the scene [S1].
++*   **Memory Management:** Upscaling texture grids increases memory usage. The method relies on periodic execution to prevent out-of-memory errors during early training [S1].
++*   **Initialization:** Texture grids must be initialized to zero and optimization must start after 500 iterations to avoid early overfitting and memory issues [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The routine runs every 250 iterations. The complexity per run is $O(N)$ where $N$ is the number of primitives, as it iterates over all primitives to compute errors and apply updates [S1].
+-*   **Memory Complexity:** Memory usage is determined by the number of primitives and the total number of texels. For example, on the 'drjohnson' scene, the method uses 293K points and 20.8M texels, resulting in 79.7M parameters and 318MB memory [S1]. On the 'bonsai' scene, it uses 291K points and 9.0M texels, resulting in 44.1M parameters and 176MB memory [S1].
+-*   **Performance:** On the 'drjohnson' scene, the method achieves 77 FPS [S1]. On the 'bonsai' scene, it achieves 35 FPS [S1].
+-*   **Strengths:** Automatically adjusts the allocation of model capacity between primitives and texels, converging to good results with different ratios of primitive and texel budgets [S1].
+-*   **Limitations:** The effectiveness depends on the choice of hyperparameters ($\tau_{tr}$, $\tau_{ds}$, $\lambda_{texture}$) [S1].
++*   **Time Complexity:** The routine runs every 250 iterations. The cost is proportional to the number of primitives $N$ and the cost of error computation and interpolation. Interpolation is typically $O(T)$ where $T$ is the number of texels.
++*   **Memory Complexity:** Memory usage scales with the total number of texels. Default configurations use approximately 20-100M texels for scenes with 150-300K points [S1].
++*   **Performance:** On the 'drjohnson' scene (DeepBlending dataset), the default configuration uses 293K points, 20.8M texels, 79.7M parameters, achieving 77 FPS and 318MB memory [S1]. On the 'bonsai' scene (Tanks&Temples dataset), it uses 291K points, 9.0M texels, 44.1M parameters, achieving 35 FPS and 176MB memory [S1].
++*   **Strengths:** Automatically adjusts the ratio of primitives to texels, robust to different hyperparameter settings, and converges to good results across various scene complexities [S1].
++*   **Limitations:** Requires careful tuning of $\tau_{tr}$ and $\tau_{ds}$ to balance detail and performance. The indirect effects of hyperparameters can make prediction of final model size difficult [S1].
+ 
+ ## Background
+-This method was introduced by Panagiotis Papantonakis, Georgios Kopanas, Frédo Durand, and George Drettakis in their work on "Content-Aware Texturing for Gaussian Splatting" [S1]. It is part of a broader effort to improve the efficiency and quality of Gaussian Splatting by managing texture resources [S1].
++This method was introduced by Panagiotis Papantonakis, Georgios Kopanas, Frédo Durand, and George Drettakis in their work on "Content-Aware Texturing for Gaussian Splatting" [S1]. It addresses the need for efficient representation of high-frequency details in novel view synthesis by decoupling geometric density from texture resolution and allowing both to adapt based on rendering error [S1].
+ 
+ ## Sources

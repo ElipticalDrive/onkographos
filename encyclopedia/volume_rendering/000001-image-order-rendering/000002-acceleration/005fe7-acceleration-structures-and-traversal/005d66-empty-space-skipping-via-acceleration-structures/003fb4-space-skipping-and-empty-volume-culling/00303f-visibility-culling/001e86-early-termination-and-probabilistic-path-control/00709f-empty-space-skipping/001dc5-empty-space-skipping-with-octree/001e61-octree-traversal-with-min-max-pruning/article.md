@@ -1,0 +1,190 @@
+# Octree Traversal with Min/Max Pruning
+
+Also called: Knoll et al. Min/Max Tree, Min-Max Octree Traversal, Min-Max Octree for Transparent Region Skipping, Min-Max Tree for Transparent Region Skipping, Min/Max Tree Space Skipping, Min/Max Tree Traversal, Octree Max/Min, Octree-based empty space skipping
+
+## Overview
+Octree Traversal with Min/Max Pruning is an acceleration technique for volume rendering that uses a hierarchical data structure storing the minimum and maximum scalar values of voxel regions to prune transparent space and determine precise ray entry points [S1][S3, unofficial]. It is specifically designed for unclassified volumes where the opacity transfer function or classification parameters change frequently, avoiding the expensive preprocessing required by pre-classified rendering methods [S1, S4]. Unlike block-based entry point determination, it operates at a finer resolution than block granularity, significantly reducing the number of rays intersecting transparent regions [S3, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A scalar volume dataset $V$, a ray $R(t) = O + tD$ defined by origin $O$ and direction $D$, a target isovalue $I$, and a transfer function $TF(s)$ mapping scalar $s$ to color/opacity.
+*   **Output:** A boolean hit status and the intersection point $t$ for the isosurface, or null if the ray passes through transparent/empty space.
+
+**Data Structures**
+The method uses a single structure serving as both data container and acceleration tree [S4]. The structure is an octree where each node stores metadata for its children.
+
+*   **Node Layout:**
+    *   `child_mins[8]`: Array of 8 floats, storing the minimum scalar value present in each of the 8 child octants.
+    *   `child_maxs[8]`: Array of 8 floats, storing the maximum scalar value present in each of the 8 child octants.
+    *   `child_offset`: Integer. If negative (typically -1), the node is a leaf. If non-negative, it points to the first child in a contiguous memory block (or hash table entry) [S6, unofficial].
+    *   *Implicit State:* During traversal, the algorithm maintains `child` (current child index 0-7) and `child_cell` (3D integer coordinates of the current cell within the octree level) [S6, unofficial].
+
+*   **Leaf Layout:**
+    *   Leaves store the actual scalar values for the voxels in the cell.
+    *   At the maximum octree depth, leaves may represent "cap geometry" rather than volumetric data, requiring specific traversal logic [S6, unofficial].
+
+**Algorithm Steps**
+The traversal is performed in front-to-back visibility order [S1].
+
+1.  **Initialization:**
+    *   Start at the root node.
+    *   Initialize ray parameters: `tenter` (entry time into current node) and `texit` (exit time from current node).
+    *   Initialize `child_cell` to the root coordinates.
+
+2.  **Node Traversal Loop:**
+    *   While `tenter < texit`:
+        *   **Calculate Child Intersections:** Determine the intersection times of the ray with the mid-planes of the 8 child octants. Sort these intersections to process children in front-to-back order [S6, unofficial].
+        *   **Iterate Valid Children:** For each child intersection time `tcenter` (sorted):
+            *   Calculate `child_texit = min(tcenter, texit)`.
+            *   **Min/Max Pruning Check:** Check if the isovalue $I$ lies within the scalar range of the current child `c`:
+                $$ I \ge \text{node.child\_mins}[c] \quad \text{OR} \quad I \le \text{node.child\_maxs}[c] $$
+                *   If **False**: The child does not contain the isovalue. Skip this child.
+                *   If **True**: Proceed to traverse the child.
+            *   **Child Traversal:**
+                *   If `node.child_offset == -1` (Leaf):
+                    *   Traverse the scalar leaf data. If the isosurface is found, return `true`.
+                *   Else if `depth == octdata.max_depth` (Cap Geometry):
+                    *   Traverse the cap geometry. If hit, return `true`.
+                *   Else (Internal Node):
+                    *   Recursively call the traversal function with updated bounds: `tenter` becomes `child_tenter`, `texit` becomes `child_texit`.
+                    *   If recursive call returns `true`, return `true`.
+            *   **Update Bounds:**
+                *   If `child_texit == texit`, the ray has exited the volume or current bounding region without hitting anything relevant. Return `false`.
+                *   Update `child_tenter = child_texit` for the next iteration.
+            *   **Update Child Index:**
+                *   Determine the axis bit from the current axis index using an axis table (e.g., `{4, 2, 1}` for X, Y, Z) [S6, unofficial].
+                *   If the current `child` index has the axis bit set:
+                    *   Clear the bit in `child` and the corresponding bit in `child_cell`.
+                *   Else:
+                    *   Set the bit in `child` and the corresponding bit in `child_cell`.
+
+3.  **Termination:**
+    *   If the loop completes without a hit, return `false`.
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def traverse_min_max_octree(ray, node, depth, max_depth, isovalue, tenter, texit):
+    """
+    Recursively traverse an octree using min/max pruning.
+    ray: Ray object with origin O and direction D.
+    node: Current octree node.
+    depth: Current depth in the octree.
+    max_depth: Maximum depth of the octree.
+    isovalue: Target scalar value for isosurface.
+    tenter: Entry time of ray into current node.
+    texit: Exit time of ray from current node.
+    """
+    # Initialize child state for root traversal if needed, 
+    # but typically child index and cell are maintained in the loop context.
+    # For this self-contained function, we assume 'child' and 'child_cell' 
+    # are passed or maintained in a wrapper. Here we iterate children.
+    
+    # Note: The source [S6, unofficial] uses a specific iterative loop over axis intersections.
+    # We replicate that logic.
+    
+    child = 0  # Current child index being processed
+    child_cell = Vec3i(0, 0, 0) # Current cell coordinates
+    
+    # Calculate sorted axis intersections for the current node's children
+    # This determines the order in which we visit children (front-to-back)
+    axis_isects = calculate_sorted_axis_intersections(ray, node, tenter, texit)
+    
+    child_tenter = tenter
+    
+    for i in range(len(axis_isects)):
+        axis_idx = axis_isects[i]
+        tcenter = ray.intersect_plane(axis_idx) # Time of intersection with child boundary
+        
+        if tcenter >= texit:
+            break
+            
+        child_texit = min(tcenter, texit)
+        
+        # Determine which child index corresponds to this axis intersection step
+        # In the source, 'child' is updated iteratively. 
+        # We need to identify the child index 'c' for the current slab.
+        # The source logic implies 'child' tracks the current child being evaluated.
+        # We assume 'child' is updated at the end of the loop.
+        # For the first iteration, child is 0.
+        
+        c = child
+        
+        # Min/Max Pruning
+        if isovalue >= node.child_mins[c] or isovalue <= node.child_maxs[c]:
+            # Child contains isovalue, traverse it
+            if node.child_offset == -1:
+                # Leaf node
+                if traverse_scalar_leaf(ray, node, isovalue, child_tenter, child_texit):
+                    return True
+            elif depth == max_depth:
+                # Cap geometry at max depth
+                if traverse_cap(ray, node, isovalue, child_tenter, child_texit):
+                    return True
+            else:
+                # Internal node
+                if traverse_min_max_octree(ray, node.children[c], depth + 1, max_depth, isovalue, child_tenter, child_texit):
+                    return True
+        
+        # Check if we have exited the current bounding region
+        if child_texit == texit:
+            return False
+            
+        # Update tenter for next child
+        child_tenter = child_texit
+        
+        # Update child index and cell coordinates for next iteration
+        axis_bit = axis_table[axis_idx] # e.g., 4 for X, 2 for Y, 1 for Z
+        child_bit = 1 << axis_idx # Or specific bit mapping
+        
+        if child & axis_bit:
+            child &= ~axis_bit
+            child_cell[axis_idx] &= ~child_bit
+        else:
+            child |= axis_bit
+            child_cell[axis_idx] |= child_bit
+            
+    return False
+```
+
+**Parameters**
+*   `isovalue`: The scalar threshold for the isosurface.
+*   `octdata.max_depth`: The maximum depth of the octree structure [S6, unofficial].
+*   `Transfer Function`: The RGB$\alpha$ map used for classification. Changes to this require recomputing local majorants from stored min/max ranges [S6, unofficial].
+
+**Edge Cases and Pitfalls**
+*   **Noise Thresholds:** If the isolevel is lower than the noise threshold, Octree Max/Min is less affected by low-level noise than Integral Octree because it checks if the max value is below the threshold [S2].
+*   **Hole Generation:** Octree Max/Min must loop through all voxels at the edges of an empty branch to avoid generating holes in the rendered surface [S2].
+*   **Max Depth Handling:** At the maximum octree depth, the algorithm does not traverse further into children but instead calls `traverse_cap`, implying leaf nodes at max depth represent cap geometry rather than volumetric data [S6, unofficial].
+*   **Precision:** Floating-point precision in ray-slab intersection calculations can lead to gaps or overlaps if not handled carefully [G].
+
+## Subtopics
+
+### Min-Max Hierarchy with Branch-on-Need Octree
+A technique to reduce the visited set of cells in marching cubes by embedding a min-max hierarchy in a branch-on-need octree to trivially ignore empty regions of a volume [S7, unofficial]. It enables interactive rendering of data up to $512^3$ resolution [S7, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ in the worst case where $N$ is the number of voxels, but typically much faster due to pruning. The complexity depends on the sparsity of the volume and the transfer function.
+*   **Memory Complexity:** The octree structure stores min/max values for each node. For a volume of size $V$, the memory overhead is proportional to the number of nodes in the octree. Compressed volumes can occupy 10-30% of the original size [S3, unofficial].
+*   **Performance:** Supports up to 90% reduction in sample computations for sparse data [S3, unofficial].
+*   **Strengths:**
+    *   Allows interactive changes to the transfer function without rebuilding the entire acceleration structure, as min/max ranges are stored and used to recompute majorants [S1][S6, unofficial].
+    *   Efficient memory order (cache hits) regardless of viewpoint [S1].
+    *   Suitable for large, time-variant data [S4].
+*   **Limitations:**
+    *   Requires preprocessing to build the octree and compute min/max values [S4].
+    *   At max depth, handling cap geometry adds complexity [S6, unofficial].
+    *   Less effective for highly dense volumes where most nodes contain the isovalue.
+
+## Background
+The method was introduced by Knoll et al. in 2006 [S1][S4]. It was developed to address the difficulty of interactive rendering of large volumes, particularly where GPU memory limits and video bus bandwidth restrict real-time rendering of time-variant data [S4]. The technique embeds the acceleration tree and scalar data in a single structure, employing optimized octree hash schemes to achieve competitive frame rates on multicore architectures [S4]. It is a seminal implementation of min-max octrees for isosurface extraction and direct rendering [S3, unofficial].
+
+## Sources
+[S1] A new object-order ray-casting algorithm, https://doi.org/10.5555/602099.602130, fetched 2026-10-26
+[S2] A Comparative Study about Data Structures Used for Efficient Management of Voxelised Full-Waveform Airborne LiDAR Data during 3D Polygonal Model Creation, https://doi.org/10.3390/rs13040559, fetched 2026-10-26
+[S3] volume rendering, https://grokipedia.com/page/Volume_rendering, fetched 2026-10-26 (unofficial)
+[S4] Interactive Isosurface Ray Tracing of Large Octree Volumes, https://www.sci.utah.edu/~wald/Publications/2006/OctIso/octiso.pdf, fetched 2026-10-27
+[S5] PDF Interactive Isosurface Ray Tracing of Large Octree Volumes, https://www.sci.utah.edu/~knolla/octiso-rt06.pdf, fetched 2026-10-28
+[S6] Interactive Isosurface Ray Tracing of Large Octree Volumes, https://www.researchgate.net/publication/261082346_Interactive_Isosurface_Ray_Tracing_of_Large_Octree_Volumes, fetched 2026-10-29 (unofficial)
+[S7] RAY TRACING IMPLICIT SURFACES FOR INTERACTIVE ..., https://www.sci.utah.edu/~knolla/thesis.pdf, fetched 2026-10-29 (unofficial)

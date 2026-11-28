@@ -1,0 +1,38 @@
+# Sparse Voxel Storage and Management
+
+
+## Overview
+Sparse Voxel Storage and Management addresses the inefficiency of storing and rendering volumetric data where the majority of the space is empty or uniform [G]. This family explicitly manages the data layout and hierarchy of voxel primitives to optimize traversal and rendering, rather than relying on brute-force iteration or simple geometric instancing of all occupied cells [G].
+
+## Shared principles
+This family shares the fundamental mechanism of converting scalar field data into geometric primitives that are submitted to the graphics pipeline, as detailed in [Voxels rasterized as geometry](27-voxels-rasterized-as-geometry.md) [G].
+
+## Subtopics
+
+### [Intensity-based Sparse Voxel Storage](1775-intensity-based-sparse-voxel-storage.md)
+A memory-compression technique that eliminates redundant intensity data by leveraging spatial coherence. It sorts voxels by intensity and uses a histogram to map intensity values to buffer offsets, reducing per-voxel storage from 8 bytes to 6 bytes (or fewer) by transmitting intensity as a shader constant for contiguous spans. Choose this when memory bandwidth is the bottleneck and intensity values exhibit strong spatial clustering. It differs from [SVO LOD Management](2990-svo-lod-management.md) by focusing on attribute compression rather than hierarchical geometry, and from [Sparse Voxel Rasterization](3032-sparse-voxel-rasterization.md) by not necessarily using an octree structure for rendering optimization.
+
+### [SVO LOD Management](2990-svo-lod-management.md)
+A technique for managing the Level of Detail (LOD) of Sparse Voxel Octrees (SVOs) by pre-generating and caching voxelized geometry at multiple octree depths. It separates asset preparation from rendering, allowing the system to switch between pre-computed Vertex Buffer Objects (VBOs) based on camera distance. Choose this for static or slowly changing scenes where dynamic voxelization is too expensive. It differs from real-time SVO ray-tracing by relying on rasterization of static geometry caches rather than per-frame ray traversal.
+
+### [Sparse Voxel Rasterization](3032-sparse-voxel-rasterization.md)
+A real-time volumetric rendering technique that rasterizes explicit sparse voxels arranged in an octree layout, avoiding the overhead of neural MLPs or overlapped splatting. It solves the scalability and fidelity trade-off in neural radiance fields by using a sorting-based rasterizer that projects voxel corners to image space and performs alpha composition with early termination. Choose this for high-fidelity novel-view synthesis or mesh reconstruction where ray-casting is too slow. It differs from [Intensity-based Sparse Voxel Storage](1775-intensity-based-sparse-voxel-storage.md) by using rasterization and sparse voxels for the entire scene, including unbounded backgrounds, achieving higher frame rates.
+
+### [Voxel Chunk Management](13837-voxel-chunk-management.md)
+Organizes sparse voxel data into fixed-size cubic blocks (chunks) to enable efficient memory allocation, neighbor traversal, and incremental mesh generation. It solves the problem of managing large, sparse 3D grids by isolating updates to local regions, ensuring that changes to voxel properties trigger only necessary remeshing of affected chunk boundaries. Choose this when dynamic updates to large voxel worlds are frequent and boundary consistency is required. It differs from SVO-based approaches by maintaining a flat, fixed-resolution block structure rather than a hierarchical tree.
+
+### VoxelSet
+#### definition
+- A sparse storage structure for voxels that stores only positions and values in tensors, supporting dynamic appending but not arbitrary point queries [S1, unofficial].
+#### step
+- Query (__getitem__): Raises RuntimeError with message 'Cannot get arbitrary points on a voxel set' [S1, unofficial].
+- Update (__setitem__): Append pts (viewed as -1 x self.positions.shape[-1]) to self.positions using torch.cat. Append value to self.values using torch.cat [S1, unofficial].
+- Get Known (get_known_pos_and_values): Return self.positions and self.values [S1, unofficial].
+#### layout
+- Stores two tensors: self.positions (N x 3) and self.values (N) [S1, unofficial].
+
+## Background
+Not given in the sources.
+
+## Sources
+[S1] GitHub - UM-ARM-Lab/pytorch_volumetric: Volumetric structures such as ..., https://github.com/UM-ARM-Lab/pytorch_volumetric, fetched 2026-10-30 (unofficial)

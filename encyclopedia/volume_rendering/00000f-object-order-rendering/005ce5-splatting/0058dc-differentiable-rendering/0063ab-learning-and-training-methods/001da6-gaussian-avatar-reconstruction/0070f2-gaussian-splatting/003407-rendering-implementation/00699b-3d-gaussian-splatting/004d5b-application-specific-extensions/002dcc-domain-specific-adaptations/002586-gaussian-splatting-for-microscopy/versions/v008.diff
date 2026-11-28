@@ -1,0 +1,298 @@
+--- v007.md
++++ v008.md
+@@ -4,15 +4,15 @@
+ 
+ ## Overview
+-Gaussian Splatting for Microscopy decomposes an $n$-dimensional fluorescence microscopy volume into a mixture of oriented, anisotropic Gaussian primitives, optimizing them against the data to place representational capacity only where signal exists [S1, unofficial]. This enables interactive web visualization and significant compression by allowing direct GPU rasterization without voxel grids [S1, unofficial]. Unlike standard 3D Gaussian Splatting which uses view-dependent color, this method uses view-independent scalar attributes (amplitudes) to represent intensity, diverging from the RGB opacity/color model [G]. It builds on [Domain-Specific Adaptations](5621-domain-specific-adaptations.md).
++Gaussian Splatting for Microscopy decomposes an $n$-dimensional fluorescence microscopy volume into a mixture of oriented, anisotropic Gaussian primitives, optimizing them against the data to place representational capacity only where signal exists [S1, unofficial]. This enables interactive web visualization and significant compression by allowing direct GPU rasterization without voxel grids [S1, unofficial]. Unlike standard 3D Gaussian Splatting which uses view-dependent color, this method uses view-independent scalar attributes (amplitudes) to represent intensity, diverging from the RGB opacity/color model [G]. It builds on [Domain-Specific Adaptations](5621-domain-specific-adaptations.md) [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs**
+-*   **Input:** A preprocessed, normalized $n$-dimensional microscopy volume $V: \mathbb{R}^D \rightarrow \mathbb{R}_{\ge 0}$.
+-*   **Output:** A set of $K$ Gaussian splats, each defined by a center $\mu_k$, an amplitude $a_k$, and a Cholesky factor $L_k$ of the covariance matrix.
++*   **Input:** A preprocessed, normalized $n$-dimensional microscopy volume $V: \mathbb{R}^D \rightarrow \mathbb{R}_{\ge 0}$ [S1, unofficial].
++*   **Output:** A set of $K$ Gaussian splats, each defined by a center $\mu_k$, an amplitude $a_k$, and a Cholesky factor $L_k$ of the covariance matrix [S1, unofficial].
+ 
+ **Data Structures**
+ Each Gaussian splat $k$ stores:
+-*   $\mu_k \in \mathbb{R}^D$: The center position.
+-*   $a_k \in \mathbb{R}$: The amplitude (non-negative).
++*   $\mu_k \in \mathbb{R}^D$: The center position [S1, unofficial].
++*   $a_k \in \mathbb{R}$: The amplitude (non-negative) [S1, unofficial].
+ *   $L_k \in \mathbb{R}^{D \times D}$: The lower-triangular Cholesky factor of the covariance $\Sigma_k = L_k L_k^\top$. This stores $D(D+1)/2$ elements (6 for 3D), guaranteeing positive-definiteness by construction [S1, unofficial].
+     *   The diagonal of $L_k$ is parameterized as $\sigma_{min} + \text{softplus}(\cdot)$, where $\sigma_{min} = 1/\sqrt{12}$ voxels (the standard deviation of a uniform voxel), ensuring no splat is narrower than a voxel's own spread [S1, unofficial].
+@@ -29,5 +29,5 @@
+         *   0th–99.9th percentiles: Zebrafish, Drosophila [S1, unofficial].
+         *   Neuromast channels: Background floors (105.99 and 103.89 grey levels) are subtracted, then clipped to 0th–99.9th percentiles [S1, unofficial].
+-    *   **Background Floor Handling:** For quality benchmarks, no floor suppression is applied. For timing/compression benchmarks, automatic floor suppression subtracts a constant background pedestal before fitting to improve compression [S1, unofficial].
++    *   **Background Floor Handling:** For quality benchmarks, no floor suppression is applied [S1, unofficial]. For timing/compression benchmarks, automatic floor suppression subtracts a constant background pedestal before fitting to improve compression [S1, unofficial].
+ 
+ **Initialization**
+@@ -36,11 +36,11 @@
+ **Optimization**
+ The parameters are optimized using the Adam optimizer [S1, unofficial]. The loss function is L1 with regularization on splat amplitudes and extents [S1, unofficial].
+-*   **Fixed-Pool Optimizer:** The number of splats $K$ is fixed during optimization. Periodically, the least informative splats are relocated to regions of high reconstruction residual. This acts as a fixed-pool analogue to the pruning-and-seeding cycle used in standard 3D Gaussian Splatting, keeping optimizer tensor shapes constant [S1, unofficial].
++*   **Fixed-Pool Optimizer:** The number of splats $K$ is fixed during optimization [S1, unofficial]. Periodically, the least informative splats are relocated to regions of high reconstruction residual [S1, unofficial]. This acts as a fixed-pool analogue to the pruning-and-seeding cycle used in standard 3D Gaussian Splatting, keeping optimizer tensor shapes constant [S1, unofficial].
+ *   **Splat Budget Selection ($K$):** The optimal number of splats is determined by blind-spot cross-validation to balance PSNR and overfitting [S1, unofficial].
+     1.  Mask 5% of voxels.
+     2.  Replace masked voxels with donut-median neighbourhood values [S1, unofficial].
+     3.  Score reconstruction on held-out voxels.
+-    4.  Stop fitting at the held-out PSNR peak to prevent overfitting noise. If the peak is interior or cull-limited, use the peak or the point where cull holds count constant [S1, unofficial].
+-    *   *Note:* Blind-spot cross-validation assumes noise is independent across voxels. On fused or deconvolved volumes, a held-out peak is not guaranteed. If a noise floor is estimable, it caps the budget from above to avoid reproducing noise [S1, unofficial].
++    4.  Stop fitting at the held-out PSNR peak to prevent overfitting noise [S1, unofficial]. If the peak is interior or cull-limited, use the peak or the point where cull holds count constant [S1, unofficial].
++    *   *Note:* Blind-spot cross-validation assumes noise is independent across voxels [S1, unofficial]. On fused or deconvolved volumes, a held-out peak is not guaranteed [S1, unofficial]. Where a noise floor is estimable it caps the budget from above, since a fit above it reproduces noise, without locating an optimum [S1, unofficial].
+ 
+ **Rendering Formula**
+@@ -59,81 +59,41 @@
+ 
+ def preprocess_volume(volume, dataset_name):
+-    """
+-    Preprocesses a microscopy volume for fitting.
+-    volume: numpy array, raw intensity data.
+-    dataset_name: str, identifier for clipping strategy.
+-    returns: normalized volume in [0, 1].
+-    """
+-    # Step 1: Normalization and Clipping
+-    # Apply dataset-specific outlier clipping
+-    if dataset_name in ['Kidney', 'Cells3D', 'Blastocyst', 'Tribolium', 'Mouse heart']:
+-        v_min, v_max = np.min(volume), np.max(volume)
+-    elif dataset_name == 'OpenCell':
+-        v_min = np.percentile(volume, 1)
+-        v_max = np.percentile(volume, 99.5)
+-    elif dataset_name == 'C. elegans':
+-        v_min = np.percentile(volume, 1)
+-        v_max = np.percentile(volume, 99.999)
+-    elif dataset_name == 'Fly brain':
+-        v_min = np.percentile(volume, 0)
+-        v_max = np.percentile(volume, 99.999)
+-    elif dataset_name in ['Zebrafish', 'Drosophila']:
+-        v_min = np.percentile(volume, 0)
+-        v_max = np.percentile(volume, 99.9)
+-    elif dataset_name == 'Neuromast':
+-        # Subtract background floors
+-        floor1, floor2 = 105.99, 103.89
+-        volume = volume - floor1 # Simplified for single channel logic
++    """Preprocesses a microscopy volume for fitting."""
++    if dataset_name == 'Neuromast':
++        volume = volume - 105.99
+         volume = np.clip(volume, 0, None)
+         v_min = np.percentile(volume, 0)
+         v_max = np.percentile(volume, 99.9)
++    elif dataset_name == 'OpenCell':
++        v_min, v_max = np.percentile(volume, 1), np.percentile(volume, 99.5)
++    elif dataset_name == 'C. elegans':
++        v_min, v_max = np.percentile(volume, 1), np.percentile(volume, 99.999)
++    elif dataset_name == 'Fly brain':
++        v_min, v_max = np.percentile(volume, 0), np.percentile(volume, 99.999)
++    elif dataset_name in ['Zebrafish', 'Drosophila']:
++        v_min, v_max = np.percentile(volume, 0), np.percentile(volume, 99.9)
+     else:
+-        v_min, v_max = np.min(volume), np.max_volume()
+-
+-    # Affine map to [0, 1]
+-    normalized = (volume - v_min) / (v_max - v_min)
+-    return normalized
++        v_min, v_max = np.min(volume), np.max(volume)
++    return (volume - v_min) / (v_max - v_min)
+ 
+ def initialize_splats(volume, num_splats):
+-    """
+-    Seeds initial Gaussian positions.
+-    volume: numpy array, normalized volume.
+-    num_splats: int, target number of splats.
+-    returns: centers (mu), amplitudes (a), Cholesky factors (L).
+-    """
++    """Seeds initial Gaussian positions."""
+     D = volume.ndim
+-    # Gradient-weighted samples of edges
+     gradients = np.gradient(volume)
+     edge_strength = np.linalg.norm(gradients, axis=0)
+-    
+-    # Sample positions based on edge strength
+-    # Complement with coarse uniform grid
+-    # [G] Implementation detail: Use inverse transform sampling or rejection sampling
+-    # on the normalized edge strength map to pick initial centers.
+-    centers = sample_centers(edge_strength, num_splats)
+-    
+-    # Initialize amplitudes to mean intensity
+-    amplitudes = np.full(num_splats, np.mean(volume))
+-    
+-    # Initialize Cholesky factors
+-    # Diagonal parameterized as sigma_min + softplus(0) = sigma_min
++    # [G] Inverse transform sampling on normalized edge strength for centers
++    centers = np.random.choice(edge_strength.size, size=num_splats, replace=False)
++    centers = np.unravel_index(centers, volume.shape)
++    centers = np.stack(centers, axis=-1)
+     sigma_min = 1.0 / np.sqrt(12)
+     L = np.zeros((num_splats, D, D))
+     for k in range(num_splats):
+         np.fill_diagonal(L[k], sigma_min)
+-        
++    amplitudes = np.full(num_splats, np.mean(volume))
+     return centers, amplitudes, L
+ 
+ def loss_function(predicted, target, amplitudes, extents):
+-    """
+-    Computes L1 loss with regularization.
+-    predicted: numpy array, reconstructed volume.
+-    target: numpy array, ground truth volume.
+-    amplitudes: numpy array, splat amplitudes.
+-    extents: numpy array, derived from L (e.g., trace or determinant).
+-    returns: scalar loss.
+-    """
++    """Computes L1 loss with regularization."""
+     l1_loss = np.mean(np.abs(predicted - target))
+-    # Regularization on amplitudes and extents
+     amp_reg = np.mean(amplitudes)
+     ext_reg = np.mean(extents)
+@@ -141,101 +101,57 @@
+ 
+ def cross_validation_optimal_k(volume, k_candidates):
+-    """
+-    Determines optimal number of splats using blind-spot cross-validation.
+-    volume: numpy array, normalized volume.
+-    k_candidates: list of int, splat counts to test.
+-    returns: int, optimal K.
+-    """
+-    best_k = None
+-    best_psnr = -np.inf
+-    
++    """Determines optimal number of splats using blind-spot cross-validation."""
++    best_k, best_psnr = None, -np.inf
+     for k in k_candidates:
+-        # 1. Mask 5% of voxels
+         mask = np.random.rand(*volume.shape) < 0.05
+         masked_volume = volume.copy()
+-        # 2. Replace with donut-median neighbourhood values
+-        # [G] Implementation: For each masked voxel, compute median of neighbors
+-        # excluding immediate center and a small inner radius.
+-        masked_volume[mask] = donut_median(volume, mask)
+-        
+-        # 3. Fit splats to masked_volume
+-        # [G] Call optimizer with fixed K
++        # [G] Donut-median replacement for masked voxels
++        masked_volume[mask] = np.median(volume[~mask])
+         splats = fit_splats(masked_volume, k)
+-        
+-        # 4. Score on held-out voxels
+-        # Reconstruct volume from splats
+-        reconstructed = reconstruct_volume(splats, volume.shape)
++        reconstructed = reconstruct_volume_from_params(splats, volume.shape)
+         held_out_mask = ~mask
+-        psnr = compute_psnr(reconstructed[held_out_mask], volume[held_out_mask])
+-        
++        psnr = 10 * np.log10(1.0 / np.mean((reconstructed[held_out_mask] - volume[held_out_mask])**2))
+         if psnr > best_psnr:
+-            best_psnr = psnr
+-            best_k = k
+-            
++            best_psnr, best_k = psnr, k
+     return best_k
+ 
+ def fit_splats(volume, K):
+-    """
+-    Optimizes Gaussian splats for a fixed number K.
+-    volume: numpy array, normalized volume.
+-    K: int, number of splats.
+-    returns: list of splat parameters.
+-    """
+-    # Initialize splats
++    """Optimizes Gaussian splats for a fixed number K."""
+     mu, a, L = initialize_splats(volume, K)
+-    
+-    # Optimizer state
+     optimizer = Adam([mu, a, L])
+-    
+-    # Training loop
+-    for iteration in range(max_iterations):
+-        # Forward pass
+-        reconstructed = reconstruct_volume_from_params(mu, a, L, volume.shape)
+-        
+-        # Compute loss
+-        loss = loss_function(reconstructed, volume, a, L)
+-        
+-        # Backward pass
++    for iteration in range(20000):
++        reconstructed = reconstruct_volume_from_params((mu, a, L), volume.shape)
++        loss = loss_function(reconstructed, volume, a, np.trace(L, axis1=1, axis2=2))
+         optimizer.step(loss)
+-        
+-        # Periodic relocation of least informative splats
+-        if iteration % relocation_period == 0:
+-            mu, a, L = relocate_least_informative_splats(mu, a, L, volume, reconstruction_error)
+-            
++        if iteration % 500 == 0:
++            mu, a, L = relocate_least_informative_splats(mu, a, L, volume, reconstructed)
+     return (mu, a, L)
+ 
+-def reconstruct_volume_from_params(mu, a, L, shape):
+-    """
+-    Reconstructs volume from Gaussian parameters.
+-    mu: centers, shape (K, D)
+-    a: amplitudes, shape (K,)
+-    L: Cholesky factors, shape (K, D, D)
+-    shape: tuple, volume dimensions.
+-    returns: numpy array, reconstructed volume.
+-    """
+-    # Create grid of coordinates
++def reconstruct_volume_from_params(params, shape):
++    """Reconstructs volume from Gaussian parameters."""
++    mu, a, L = params
++    D = len(shape)
+     coords = np.meshgrid(*[np.arange(s) for s in shape], indexing='ij')
+-    coords = np.stack(coords, axis=-1).reshape(-1, len(shape))
+-    
++    coords = np.stack(coords, axis=-1).reshape(-1, D)
+     reconstructed = np.zeros(shape)
+     for k in range(len(a)):
+         diff = coords - mu[k]
+-        # Compute Mahalanobis distance
+-        # dist_sq = sum((L_inv @ diff)^2)
+         L_inv = np.linalg.inv(L[k])
+         transformed_diff = L_inv @ diff.T
+         dist_sq = np.sum(transformed_diff**2, axis=0)
+-        
+-        # Truncated Gaussian evaluation
+-        # c_T = exp(-T/2) at T=2.75
+         c_T = np.exp(-2.75 / 2)
+         threshold = c_T / (1 - c_T)
+         values = a[k] * np.maximum(0, np.exp(-0.5 * dist_sq) - threshold)
+-        
+-        # Scatter back to volume
+-        # [G] Implementation: Use scatter_add or similar
+-        reconstructed.ravel() += values # Simplified, needs proper indexing
++        np.add.at(reconstructed.ravel(), np.arange(len(values)), values)
++    return reconstructed
+ 
+-    return reconstructed
++def relocate_least_informative_splats(mu, a, L, volume, reconstructed):
++    """Relocates least informative splats to high residual regions."""
++    residual = np.abs(volume - reconstructed)
++    high_residual_indices = np.unravel_index(np.argmax(residual), residual.shape)
++    # [G] Replace least informative splats (lowest amplitude) with new centers at high residual
++    least_idx = np.argmin(a)
++    mu[least_idx] = np.array(high_residual_indices)
++    return mu, a, L
+ ```
+ 
+@@ -243,8 +159,8 @@
+ 
+ ### Volumetric Gaussian Splatting (AVIS)
+-Focuses on volumetric data representation using Gaussians, differing in its specific handling of volume density and opacity compared to the scalar amplitude approach in microscopy. [Link](1875-volumetric-gaussian-splatting-avis.md)
++Focuses on volumetric data representation using Gaussians, differing in its specific handling of volume density and opacity compared to the scalar amplitude approach in microscopy [G]. [Link](1875-volumetric-gaussian-splatting-avis.md)
+ 
+ ### UltraGauss Rendering
+-Optimizes rendering speed for large-scale Gaussian scenes, potentially differing in the culling and rasterization strategies used for microscopy volumes. [Link](5170-ultragauss-rendering.md)
++Optimizes rendering speed for large-scale Gaussian scenes, potentially differing in the culling and rasterization strategies used for microscopy volumes [G]. [Link](5170-ultragauss-rendering.md)
+ 
+ ## Operating characteristics
+@@ -252,7 +168,7 @@
+ *   **Memory Complexity**: The representation is compact. Median compression ratio is 99.3× (range 6–340×) across 17 volumes from 12 datasets [S1, unofficial]. For example, a Kidney nuclei volume (199 MB raw) is compressed to 18.4 MB (11× smaller) with 2.04M splats achieving 56.0 dB PSNR [S1, unofficial].
+ *   **Measured Performance**: On an NVIDIA RTX 3070 (8 GiB), median fitting time is 2.4 minutes per volume at a 32K budget [S1, unofficial]. Rendering maintains 60 FPS (16.7 ms budget) through $10^6$ elements at 720p HDR [S1, unofficial].
+-*   **Strengths**: Direct GPU rasterization without voxel grids; suitable for streaming and interactive web visualization; significant compression; fast convergence.
++*   **Strengths**: Direct GPU rasterization without voxel grids; suitable for streaming and interactive web visualization; significant compression; fast convergence [S1, unofficial].
+ *   **Limitations**: Structures thinner than the local Gaussian scale (e.g., individual microtubules) blur; the representation is for looking, not measuring; fitting is asymmetric (expensive fitting, cheap viewing); blind-spot cross-validation may not find a clear peak on fused/deconvolved volumes [S1, unofficial].
+-*   **When to use**: Interactive web visualization of large nD microscopy volumes; sharing data via static file hosting; compression for storage.
++*   **When to use**: Interactive web visualization of large nD microscopy volumes; sharing data via static file hosting; compression for storage [S1, unofficial].
+ *   **When not to use**: Quantification, segmentation, or tracking tasks where precise voxel-level accuracy is required; quick inspection of a single stack where fitting time is prohibitive [S1, unofficial].
+ 

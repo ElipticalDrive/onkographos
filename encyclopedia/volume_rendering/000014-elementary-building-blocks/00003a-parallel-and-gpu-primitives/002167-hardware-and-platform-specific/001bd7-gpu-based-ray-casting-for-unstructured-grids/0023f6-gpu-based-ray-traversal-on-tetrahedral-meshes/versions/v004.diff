@@ -1,0 +1,131 @@
+--- v003.md
++++ v004.md
+@@ -1,29 +1,30 @@
+ # GPU-based Ray Traversal on Tetrahedral Meshes
+-Also called: GPU-based Ray Tracing on Tetrahedral Meshes, Garrity's method, Ray tracing through tetrahedral grid, Tetrahedral traversal, Weiler et al. method
++
++Also called: GPU-based Ray Tracing on Tetrahedral Meshes, Garrity's method, Ray tracing through tetrahedral grid, Tetrahedral traversal, Weiler et al. GPU Ray Casting, Weiler et al. method
+ 
+ ## Overview
+-This method performs volume rendering on tetrahedral meshes by executing fast ray traversal concurrently for all pixels on a GPU [S2, unofficial]. It solves the problem of accurately integrating optical properties through unstructured volumetric data by traversing the mesh topology directly using neighbor pointers [S1, book]. It differs from sibling methods like [Pixel Ray Image (PRI)](2467-pixel-ray-image-pri.md) by relying on explicit tetrahedral adjacency rather than implicit grid sampling, and builds on [GPU-based Ray-casting for Unstructured Grids](1118-gpu-based-ray-casting-for-unstructured-grids.md) by guaranteeing accurate traversal through non-convex meshes via imaginary cells [S2, unofficial].
++This method implements volume rendering on tetrahedral meshes by traversing a ray through the mesh structure on the GPU, determining the exit face of the current tetrahedron and following neighbor pointers to adjacent cells [S1, book][S4, unofficial]. It distinguishes itself from CPU-based traversal by storing all mesh and traversal data in GPU texture memory, enabling concurrent, single-pass traversal for all pixels without CPU-GPU data transfer [S2, S3, unofficial]. Unlike sibling methods that may use hierarchical structures or voxelization, this approach relies on explicit tetrahedral adjacency and convexity assumptions [S2, S3, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A tetrahedral mesh defining the volume geometry, vertex positions, and adjacency information (neighbor pointers) [S2, unofficial]. Optical properties (density $\sigma$, color/emission $c$) are assumed constant within each tetrahedron [S1, book].
+-*   **Output:** A rendered image where each pixel color is the result of ray-marching through the tetrahedral cells [S2, unofficial].
++*   **Input:** A tetrahedral mesh (vertices, connectivity, density/scalar field), camera parameters (ray origin and direction per pixel), and optical properties (density $\sigma$, transmissivity $\tau$, color emission $\kappa$).
++*   **Output:** Final pixel color and opacity.
+ 
+ **Data Structures:**
+-*   **Vertex Data:** Stored in texture memory to enable efficient random access from shader code [S2, unofficial]. Exact field layouts, sizes, and bit packing are Not given in the sources.
+-*   **Adjacency Data:** Stored in texture memory, mapping each tetrahedron to its neighboring tetrahedra across shared faces [S2, unofficial]. Exact field layouts, sizes, and bit packing are Not given in the sources.
+-*   **Ray State:** For each pixel, the current ray origin $p_0$ and the current tetrahedron index [S2, unofficial].
++*   **Vertex Data:** Stored in 3D textures [S2, S3, unofficial].
++*   **Adjacency/Traversal Data:** Stored in 2D textures [S2, S3, unofficial].
++*   **Lookup Table:** A precomputed table for blending, assuming a static mesh geometry [S4, unofficial].
+ 
+ **Algorithm Steps:**
+-The traversal is executed in a single render pass, concurrently for all pixels [S2, unofficial]. For every ray, the procedure follows these steps:
++The traversal is executed in a single render pass, concurrently for all pixels [S4, unofficial]. For each ray, the procedure follows these steps [S4, unofficial]:
+ 
+-1.  **Find Entry Point:** Determine the entry point $p_0$ of the ray into the convex hull of the volume [S2, unofficial].
+-2.  **Find Exit Point and Calculate Density:** Determine the exit point $p_1$ of the current tetrahedron along the ray [S2, unofficial]. Calculate the density values $\sigma$ for the current cell [S2, unofficial].
+-3.  **Blend Fragment:** Blend the new fragment using the cell density and the distance between $p_0$ and $p_1$ [S2, unofficial].
+-4.  **Update Origin:** Use the exit point $p_1$ as the new entry point $p_0$ for the next iteration [S2, unofficial].
+-5.  **Traverse:** Follow the neighbor pointer from the current tetrahedron to the adjacent tetrahedron sharing the exit face [S1, book]. Return to Step 2 [S2, unofficial].
++1.  **Find Entry Point:** Determine the entry point $p_0$ of the ray into the convex hull of the mesh.
++2.  **Find Exit Point and Calculate Density:** Determine the exit point $p_1$ of the current tetrahedron. Calculate the density values within the segment $[p_0, p_1]$.
++3.  **Blend Fragment:** Blend the new fragment using the cell density and the distance between $p_0$ and $p_1$. This step typically uses a precomputed lookup table [S4, unofficial].
++4.  **Update Position:** Set $p_1$ as the new $p_0$ for the next iteration.
++5.  **Loop:** Return to Step 2.
+ 
+-**Formulas:**
+-The contribution $E_i$ of the $i$-th segment (bounded by ray distances $s_i$ and $s_{i+1}$, length $\Delta s_i = s_{i+1} - s_i$) to the final radiance $E$ is calculated by integrating the volume rendering integral [S1, book]:
++**Mathematical Formulation:**
++The contribution $E_i$ of the $i$-th segment (bounded by ray distances $s_i$ and $s_{i+1}$, with length $\Delta s_i = s_{i+1} - s_i$) to the final irradiance $E$ is calculated by integrating the volume rendering integral [S1, book]:
+ 
+ $$
+@@ -32,58 +33,51 @@
+ 
+ Where:
+-*   $\tau_i$ is the extinction coefficient (density) within the $i$-th tetrahedron, assumed constant [S1, book].
+-*   $c_i$ is the emitted color or source term within the $i$-th tetrahedron, assumed constant [S1, book].
+-*   $T(s)$ is the transmissivity up to distance $s$, defined as $T(s) = \exp\left(-\int_0^s \tau(u) du\right)$ [S1, book].
++*   $\tau_i$ is the transmissivity of the $i$-th tetrahedron.
++*   $c_i$ is the color/emission of the $i$-th tetrahedron.
++*   $T(s)$ is the transmission coefficient up to distance $s$, defined as $T(s) = \exp\left(-\int_0^s \tau(u) \sigma(u) du\right)$ [S1, book].
++*   Within the tetrahedron, optical properties $\tau_i$ and $c_i$ are assumed constant [S1, book].
+ 
+ Substituting and separating the transparency up to $s_i$:
+ 
+ $$
+-E_i = \tau_i c_i \int_{s_i}^{s_{i+1}} \exp\left(-\int_0^{s_i} \tau(u) du\right) \cdot \exp\left(-\int_{s_i}^s \tau(u) du\right) ds
++E_i = \tau_i c_i \int_{s_i}^{s_{i+1}} \exp\left(-\int_0^{s_i} \tau(u) \sigma(u) du\right) \cdot \exp\left(-\int_{s_i}^s \tau(u) \sigma(u) du\right) ds
+ $$
+ 
+-Since $\tau(u) = \tau_i$ is constant within the segment:
++Since $\tau_i$ and $\sigma_i$ are constant within the cell, this simplifies to:
+ 
+ $$
+-E_i = \tau_i c_i \exp\left(-\int_0^{s_i} \tau(u) du\right) \int_{s_i}^{s_{i+1}} \exp\left(-\tau_i (s - s_i)\right) ds
++E_i = \tau_i c_i T(s_i) \int_{s_i}^{s_{i+1}} \exp\left(-\tau_i \sigma_i (s - s_i)\right) ds
+ $$
+ 
+-$$
+-E_i = \tau_i c_i T(s_i) \left[ \frac{-1}{\tau_i} \exp\left(-\tau_i (s - s_i)\right) \right]_{s_i}^{s_{i+1}}
+-$$
+-
+-$$
+-E_i = c_i T(s_i) \left( 1 - \exp\left(-\tau_i \Delta s_i\right) \right)
+-$$
+-
+-The total color is the sum of contributions from all segments, weighted by the transmissivity of subsequent segments [S1, book].
+-
+ **Parameters:**
+-*   **Precomputed Lookup Table:** Used in Step 3 for blending [S2, unofficial].
+-*   **Imaginary Cells:** Added to support non-convex meshes and avoid re-entry [S2, unofficial].
+-*   **Typical Values:** Not given in the sources.
++*   **Convexification:** The mesh must be convexified. Exterior cells are marked as "imaginary" and ignored during rendering [S2, S3, unofficial].
++*   **Lookup Table:** Requires precomputation based on static mesh geometry [S4, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Dynamic Meshes:** The method requires a precomputed lookup table for blending, which assumes a static mesh [S2, unofficial].
+-*   **Completeness Issues:** The method suffers from completeness issues due to arbitrary distortion of the initial volume over time [S2, unofficial].
+-*   **Non-Convex Meshes:** While imaginary cells are added to avoid re-entry, the method still fails to handle local and global intersections correctly, leading to incomplete fragment lists [S2, unofficial].
+-*   **Memory Access:** Global random access memory is required for the implementation of a smoke renderer, as texture memory alone may not suffice for all data dependencies [S2, unofficial].
++*   **Non-Convex Meshes:** The algorithm strictly handles only convex meshes. It cannot find the re-entry of rays that leave the mesh temporarily [S2, S3, unofficial].
++*   **Local Intersections:** If a tetrahedron is flipped and cuts into another tetrahedron's volume (local intersection), the algorithm fails to detect it because it jumps to neighbors without analyzing the neighborhood. This results in an incomplete fragment list and invalid pixel color [S4, unofficial].
++*   **Dynamic Meshes:** The precomputed lookup table assumes a static mesh. For dynamic volumes (e.g., smoke), this is infeasible, leading to artifacts due to arbitrary distortion over time [S4, unofficial].
++*   **Global Intersections:** The method does not handle global intersections (penetration of non-adjacent tetrahedra) correctly, leading to incomplete fragment lists [S4, unofficial].
+ 
+ ## Subtopics
+ 
+ ### Local Intersection Handling in Ray Traversal
+-Local intersection (or self-intersection) occurs when a tetrahedron is flipped and cuts into another tetrahedron's volume [S2, unofficial]. Because the algorithm is not aware of local intersections and does not analyze the neighborhood, the intersecting tetrahedron fails to contribute to the viewing ray, resulting in an invalid pixel color due to an incomplete list of fragments [S2, unofficial].
++Local intersection (or self-intersection) occurs when a tetrahedron is flipped and cuts into another tetrahedron's volume [S4, unofficial]. This is a bottleneck in ray tracing where the algorithm jumps from one cell to another without looking at other cells [S4, unofficial]. Because the algorithm is not aware of local intersections and does not analyze the neighborhood, the intersecting tetrahedron fails to contribute to the viewing ray, resulting in an invalid pixel color due to an incomplete list of fragments [S4, unofficial].
+ 
+ ## Operating characteristics
+-*   **Execution Model:** Ray traversal is executed in a single render pass, concurrently for all pixels on the GPU [S2, unofficial].
+-*   **Strengths:** Fast ray traversal executed on the graphics adapter; concurrent mesh traversal; supports non-convex meshes via imaginary cells [S2, unofficial].
+-*   **Limitations:** Inefficient for dynamic meshes due to reliance on precomputed lookup tables; completeness issues with deforming volumes; artifacts from incorrect handling of local/global intersections in non-convex meshes [S2, unofficial].
+-*   **When to Use:** Static tetrahedral volume rendering where high accuracy is required and dynamic deformation is not a factor [S2, unofficial].
+-*   **When Not to Use:** Dynamic smoke or fluid simulation where the mesh deforms over time [S2, unofficial].
+-*   **Complexity:** Not given in the sources.
++*   **Time Complexity:** Linear with respect to the number of tetrahedra intersected by the ray, executed in parallel for all pixels [S4, unofficial].
++*   **Memory Complexity:** Requires storage for vertex data (3D textures) and adjacency data (2D textures) [S2, S3, unofficial]. Global random access memory is required for implementation [S4, unofficial].
++*   **Performance:** GPU performance outpaces CPU, leading to good scalability [S2, S3, unofficial].
++*   **Strengths:** Fast, concurrent traversal; no CPU-GPU data transfer; accurate interpolation of scalar data before transfer function application [S1, book][S4, unofficial].
++*   **Limitations:** Strictly convex meshes only; cannot handle re-entry; precomputed lookup table limits dynamic use; fails on local and global intersections [S2, S3, S4, unofficial].
++*   **When to Use:** Static, convex tetrahedral meshes where high performance is required and dynamic deformation is not expected [S4, unofficial].
++*   **When Not to Use:** Dynamic volumes (e.g., smoke), non-convex meshes, or meshes with self-intersections [S2, S3, S4, unofficial].
+ 
+ ## Background
+-The method is based on Garrity's algorithm for tracing rays through tetrahedral grids by determining the exit face and following neighbor pointers [S1, book]. Weiler et al. implemented this approach on a GPU, storing vertex and adjacency data in texture memory to enable fast, concurrent mesh traversal [S1, book]. It is cited as a promising concept for volume-based rendering of tetrahedral data [S2, unofficial].
++The method is based on the work of Garrity [15], who showed how to trace a ray through a tetrahedral grid by determining the exit face and following neighbor pointers [S1, book]. Weiler et al. [56] (also cited as [12] and [66]) implemented this on a GPU [S1, book][S2, S3, S4, unofficial]. The convexification technique using imaginary cells was originally proposed by Williams [70] [S2, S3, unofficial]. Convexification of unstructured meshes remains a hard and currently unsolved problem with many unresolved issues [S2, S3, unofficial].
+ 
+ ## Sources
+ [S1] Local and Global Illumination in the Volume Rendering Integral, https://avishek.net/assets/papers/nerfs/local-and-global-illumination-rendering-integral.pdf, fetched 2026-10-27 (book)
+-[S2] Real-Time Smoke Volume Rendering, http://v22015081501727525.yourvserver.net/webpage/dirkfiles/betreutearbeiten/Sowinski_MA_2012.pdf, fetched 2026-10-31 (unofficial)+[S2] A Survey of GPU-Based Volume Rendering of Unstructured Grids, https://www.sci.utah.edu/~stevec/papers/gputet_survey.pdf, fetched 2026-10-27 (unofficial)
++[S3] A Survey of GPU-Based Volume Rendering of Unstructured Grids., https://www.researchgate.net/publication/220162223_A_Survey_of_GPU-Based_Volume_Rendering_of_Unstructured_Grids, fetched 2026-10-28 (unofficial)
++[S4] Real-Time Smoke Volume Rendering, http://v22015081501727525.yourvserver.net/webpage/dirkfiles/betreutearbeiten/Sowinski_MA_2012.pdf, fetched 2026-10-31 (unofficial)

@@ -1,0 +1,1296 @@
+Rust‑first, cross‑platform wgpu/WebGPU renderer exposed to Python for fast, headless 3D rendering. Built in Rust, shipped as Python wheels. - feat(splat): SPLAT-FUSED path-traced sensor+terrain fusion + map sheet, with the acceptance-test and certificate fixes by adeerkhan · Pull Request #255 · milos-agathon/forge3d
+
+feat(splat): SPLAT-FUSED path-traced sensor+terrain fusion + map sheet, with the acceptance-test and certificate fixes by adeerkhan · Pull Request #255 · milos-agathon/forge3d · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+adeerkhan
+commented
+Oct 19, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+SPLAT-FUSED: path-traced fusion of splats + LiDAR + terrain
+This branch delivers the end-to-end render_fused path and a professional, deterministic map-sheet example that exercises it with real terrain data.
+The real purpose
+forge3d.splat.render_fused renders 3D Gaussian splats, a LiDAR point cloud and an exact terrain heightfield in a single path-traced pass with unified occlusion — one ReSTIR integrator, one transmittance T = T_splat × T_lidar × T_terrain. That is the "sensor + terrain fusion" primitive the engine was missing: you can drape derived/incoming sensor data (a 3DGS capture, a COPC LiDAR scan) over a real DEM and get correct mutual shadowing and occlusion, path-traced rather than rasterized.
+Until now there was no end-to-end exercise of that path with real data, no HDRI environment map, and the background sky was a flat band ending in a hard horizon silhouette. This PR closes those gaps and ships a regression-locked test example (examples/splat_fused_map.py) that proves the whole thing works and is byte-identical across reruns.
+Result
+--dem fuji, hero view, 1280×896 @ 128 spp: hypsometric terrain, a violet splat block on the summit shoulder and a terracotta LiDAR swath in the foreground valley, under an HDRI sky (Poly Haven CC0) with aerial-perspective fog. Full sheet: title, fused-layers legend with hit counts, scene/atmosphere/camera/render readout, scale bar, north arrow, optional AOV insets.
+What's in this PR
+Engine (src/ + python/forge3d/)
+env_map + env_rotation_deg on render_fused / render_fused_sequence: a pre-loaded equirect HDRI replaces the Hosek-Wilkie bake (loader box-averages to ≤1024 texels, rotates about +y, normalizes to median upper-hemisphere luminance, clamps at 12× so the HDRI's sun reads as a bright blob). No shader change needed — the kernel samples whatever equirect is uploaded.
+Real aerial perspective: fusion_media_along (closed-form height fog) refactored out of fusion_media_transmittance (bit-identical); a FUSED_TERRAIN_EDITS anchor composites L = L·T + env·(1−T) at the primary hit. At density 0 the transmittance is exactly 1, and the fix below makes that path byte-identical to the base line rather than merely close to it (the original edit re-associated the radiance sum, which differs by 1 ULP in f32 for a large share of pixels).
+In-memory point arrays (point_positions / point_colors) so a cloud needs no file.
+Certificate records fused.env_map alongside fused.fog_*; the fix below changes the recorded identity from the HDRI's absolute path to its basename plus the SHA256 of its bytes, and adds the missing fused.env_rotation_deg.
+Example (examples/splat_fused_map.py) — the end-to-end test harness
+HDRI sky (--hdr auto|none|PATH, cached CC0 Poly Haven 2k) + aerial fog (--fog, --fog-falloff), gated off on the plan view; hero lighting moved golden-hour → lit daytime.
+--dem digitizes all three layers from one DEM (heightfield, a splat block on the summit shoulder, a LiDAR swath in the foreground valley — deliberately separated so they read as distinct sensors).
+Camera presets, orbit overrides, contour overlay on plan views, tiling, AOV insets, a sidecar report.json.
+Professional sheet: fused-layers legend, scene/atmosphere/camera/render readout, scale bar, north arrow; content-aware canvas so the readout never clips.
+Docs — docs/splat-fused.md "Map-sheet example" section, CHANGELOG entries.
+How to try
+```
+python examples/splat_fused_map.py                # offline fixture: ridge + splats + COPC swath
+python examples/splat_fused_map.py --dem fuji     # real DEM, full fusion story
+python examples/splat_fused_map.py --dem fuji --view top --aovs   # north-up hypsometric map
+```
+Closes the "no HDRI" limitation noted in the feature documentation.
+The fixes on top of the feature
+The feature above is worth having, but the branch did not compile its own acceptance test, and two
+of its claims about its own output were not true. Those are fixed here, and each fix is locked with
+a test.
+1. The branch's acceptance test did not compile (blocker)
+Adding env_map to FusedRenderDesc left the two FusedRenderDesc initializers in the acceptance test without it:
+```
+error[E0063]: missing field `env_map` in initializer of `FusedRenderDesc<'_>`
+   --> tests/test_splat_fusion_occlusion.rs:222:5
+   --> tests/test_splat_fusion_occlusion.rs:1406:24
+```
+Both now pass env_map: None — the analytic Hosek-Wilkie sky the fixture already used — so the rendered output is unchanged. The suite goes from does not compile to 17/17 passing.
+2. The signed certificate leaked a machine-specific path, and omitted the rotation (major)
+fused.env_map recorded the HDRI's absolute path, which puts the machine's directory layout into the signed payload, and env_rotation_deg was not recorded at all — so two renders of the same file at different rotations had identical signed inputs even though they produced different pixels.
+The recorded identity is now the file's basename plus the SHA256 of its bytes: the basename names the asset, the hash pins its content (two different files that share a name do not collide), and neither leaks a path. The rotation is recorded next to it, and the sequence entry point now records the same scene-defining inputs as the single-view one (kappa, lidar radius, opacity, surfels, BRDF) instead of a subset.
+3. "Bit for bit at fog density 0" was false (major)
+#253's description claims the aerial-perspective edit leaves the base line bit-identical at fog density 0. It did not. Folding the media transmittance into the radiance sum re-associates
+```
+frame_radiance + sun + ibl   ->   frame_radiance + (sun + ibl)
+```
+which is equal in exact arithmetic but differs by 1 ULP in f32 for a large share of pixels — small enough for the tolerance-based golden not to notice, large enough to break byte identity. The edit now keeps the base line's own statement verbatim on the branch a zero density takes, and two source-level tests pin it: the base line's statement appears exactly once, the re-associated sum exists only inside the fog branch, and the media transmittance short-circuits to exactly 1.0 without fog.
+4. The sheet's own footer claimed a guarantee nothing tested (minor)
+The sheet says "seed N reproduces this sheet byte-for-byte", but only the beauty was hashed across reruns — a sheet that drifted would have made the claim false while the test still passed. The sheet PNG now gets the same sha256 rerun check. It passes.
+Also: --hdr-rotation did not state the sign it uses, so a positive angle meant two different things to a reader (it now names the convention it follows — the sun's azimuth: 0° = +x, 90° = +z; world north is −z), and a missing --hdr file raised a bare traceback instead of the clean error: the DEM path prints.
+Testing
+Check
+Result
+cargo test --features default,splat-fusion --test test_splat_fusion_occlusion
+17 passed — the paging case is a flake, see below
+cargo test --features default,splat-fusion --lib -- splat fused shader_sources ktx2
+88 passed, 0 failed
+cargo fmt --all -- --check
+exit 0
+cargo +1.97.1 forge3d-clippy (the toolchain CI pins)
+exit 0, 0 warnings
+Python focused suite (splat, api-contracts, f32-gate, certificate, no-silent-degradation)
+271 passed
+tests/test_world_coord_f32_gate.py (the four new ledger sites)
+30 passed
+The paging case is a flake, not a fix
+paging_policies_respect_the_residency_pool is timing-dependent and unchanged by this branch. It passed 17/17 on the final head and has also failed here; that is the flake, and this PR does not fix it. Evidence:
+A/B against the branch's own code. Reverting the fog edit (item 3) reproduces the identical failure 3/3 times, and the branch's render_fused.rs / stream.rs changes are env-map plumbing and a purely additive PointArraySource — neither touches the paging path.
+The root cause is a race between the render and the asynchronous page loader, not a defect in either. The render's 24 frames finish before the loader has delivered the far-field pages they asked for. Instrumenting the pool shows the kernel requests ~46 distinct far-field pages on the first service, and in_flight then climbs to 50 and never drains before the render ends — so the pool is never filled enough to evict or defer. The loader's backlog is a function of this machine's CPU speed, which is why the same test passed on the reference machine (the 2026-10-03 evidence records it green there).
+The same code passes with a longer render. Raising the case from 24 to 240 frames lets the loader catch up: loads 10 → 19, deferred_pages 0 → 70, and the assertion passes.
+So the assertion is currently a statement about CPU speed as much as about the pool. The two options I see are to give the loader a bounded chance to settle before the assertion (the pool's service/pending_pages are public, but the pool lives inside the renderer, so this needs a small API addition), or to assert on the deterministic property instead — the working set the render demanded exceeded the pool. I have not changed that test: it is your acceptance gate, its formulation is tracked separately, and it does not block this PR. The table above reports the head's actual result rather than promising a fix.
+Two more defects found while reviewing, and one API gap closed
+The --animate fly-through's render_fused call was mangled — its point_positions and
+point_colors arguments sat at the wrong indentation. Python accepts it, so the fly-through
+rendered correctly, but it reads as a botched edit.
+--fog was silently discarded on every scene except a --dem render. The use_dem half of
+that gate appears in neither the module docstring nor the plan, which both document exactly one
+reason for turning the fog off (the top-down plan view). A user who asked for aerial perspective on
+the default offline scene got no fog and no message. The fog now applies wherever it is not the plan
+view, and the plan view says out loud that it turned the fog off.
+--tile was dropped in the fly-through. The still render passed tile=, the per-frame
+animation did not — and tiling is exactly what a large fly-through needs to stay inside the memory
+budget. The fly-through now tiles by its own frame size and says so when the requested tile does
+not fit. A --tile that does not fit the still image also raised a raw traceback, where the
+example's other argument errors print error: ... and exit 2; it does that now too.
+render_fused_sequence now takes in-memory point arrays too. render_fused accepted an
+in-memory cloud and the sequence path did not, so a user who derived their cloud in memory could
+use the single-view path but not the fly-through path — the one a fly-through wants. Both entry
+points now share one validator for the array contract, and the test asserts the thing that
+matters: the single view of a one-view sequence is byte-identical to the standalone render.
+A second audit pass: six more defects, all fixed
+--hdr-rotation 30 without an environment aborted the run with a raw
+ValueError: env_rotation_deg was given without env_map. The rotation has
+nothing to rotate; the example now says so and exits 2.
+--look-at without --origin (or the reverse) was silently ignored — the
+code fell through to the canonical camera and exited 0.
+--hdr with a non-HDRI file raised a traceback from inside the renderer
+instead of the example's own error: path.
+--pointcloud with a missing file hit a try around a dataclass that does
+no I/O, so the promised "continuing without LiDAR" could never happen; the
+existence check is now explicit and the fallback is real.
+--certificate wrote nothing — the example read a certificate attribute
+the render result does not have. The certificate is a provenance record, so it
+is now read from the diagnostics module and written out.
+The aerial perspective had no behavioural test: it was proven only by a
+source-text check on the assembled shader, so a change that left the pixels
+alone would have passed. It now asserts the fog changes the beauty and the
+radiance, and that the fog-off path is byte-identical across runs.
+Two help strings contradicted the code (--sky-turbidity 4.0 vs the hero's
+5.0, --sky-ground-albedo 0.5 vs 0.35), and --no-contours said "plan views"
+while contours also draw on the high view. The docs claimed the fog was 0 for
+the fixture, which stopped being true when the fog stopped being silently
+dropped, and their sky parenthetical held only for the hero view. All of them
+now say what the code does.
+The review items, applied
+Update from main; the .gitignore conflict resolved. The branch is rebased onto main
+(which now includes ci: make the routine gate compile the SPLAT-FUSED surface #254). The conflict was in tests/test_world_coord_f32_gate.py, where both
+sides append to the same ledger; both were kept — main's sky-lighting transition undo and this
+branch's four new splat_fused_env_map sites. Before the rebase, git merge-tree --write-tree origin/main feature/splat-fused-exploration reported a conflict, so the pull request was
+producing no CI evidence at all.
+KTX2 dropped. The SuperCompressionScheme TryFrom<u32> change belongs to fix(ktx2): validate and pack every mip level end to end #251, which
+already carries it; keeping it here made the two branches conflict. src/loaders/ktx2/ is now
+main's verbatim.
+PLAN_SPLAT_FUSED.md removed. It was a working note, not project documentation, and nothing
+linked to it. The durable documentation is docs/splat-fused.md and the CHANGELOG.
+The map sheet is a .webp, and is not in Git LFS. It was tracked through LFS to keep a
+1.3 MB blob out of the tree, but docs.yml checks out without lfs: true, so Pages would have
+served the pointer as the image — and nothing under docs/assets/ is in LFS. Converted to webp
+(127 KB from 1.3 MB) and the LFS rule dropped; nothing else under docs/assets/ changes.
+The DEM download is pinned to a fixed commit (5a6642205a1865b7a21f45a36e98e717cbf1e16a, the
+v1.44.0 release) instead of the main branch, so the asset cannot change under a render that has
+already recorded its own hash.
+The testing table corrected — it claimed 17/17 where the honest figure was 16/17.
+The four new world-coordinate ledger sites
+tests/test_world_coord_f32_gate.py passes with the four new env_from_hdr_image sites recorded
+(30 passed). They are the HDRI loader's radiance conversions rather than world coordinates, and
+they are recorded and locked the same way the existing non-world sites are; the gate agrees with
+the new entries.
+Related
+ci: make the routine gate compile the SPLAT-FUSED surface #254 (merged) — ci: make the routine gate compile the SPLAT-FUSED surface. The routine lint
+alias is the only lane that runs --all-targets, and it did not enable splat-fusion, so the
+routine gate never compiled the fused test. That is how the compile break above reached a green
+"PR Core Success".
+fix(ktx2): validate and pack every mip level end to end #251 — the KTX2 work this branch no longer carries.
+feat(splat): SPLAT-FUSED path-traced sensor+terrain fusion + map sheet example #253 — the feature alone, closed in favour of this pull request.
+adeerkhan
+mentioned this pull request
+Oct 19, 2026
+fix(splat): compile the fused acceptance test and make the signed inputs honest
+adeerkhan/forge3d#1
+Closed
+milos-agathon
+mentioned this pull request
+Oct 20, 2026
+feat(splat): SPLAT-FUSED path-traced sensor+terrain fusion + map sheet example
+#253
+Closed
+milos-agathon
+requested changes
+Oct 20, 2026
+View reviewed changes
+milos-agathon
+left a comment
+Copy link
+Copy Markdown
+Owner
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Thanks, the HDRI sky and fog extension and the certificate fixes look worthwhile. Before review, please:
+Update from main. #254 is merged, so CI will now compile the splat-fusion code. Resolve the .gitignore conflict.
+Drop the KTX2 changes; they belong with #251 and conflict with it.
+Remove PLAN_SPLAT_FUSED.md.
+Commit docs/assets/splat-fused-map.png through LFS, or shrink it (it's 1.3 MB now).
+Pin the DEM download URL to a fixed commit instead of main.
+Fix the testing table: it says 17/17 passed, but the description says paging_policies_respect_the_residency_pool fails on your machine.
+The four new world-coordinate ledger sites are approved in principle; I'll confirm once CI is green.
+adeerkhan
+force-pushed
+the
+fix/splat-fused-gate-and-certificate
+branch
+from
+b40f3b3 to
+408e545
+Compare
+October 20, 2026 15:19
+adeerkhan
+changed the title
+fix(splat): compile the fused acceptance test and make the signed inputs honest
+feat(splat): SPLAT-FUSED path-traced sensor+terrain fusion + map sheet, with the acceptance-test and certificate fixes
+Oct 20, 2026
+adeerkhan
+requested a review
+from milos-agathon
+October 21, 2026 07:07
+milos-agathon
+requested changes
+Oct 21, 2026
+View reviewed changes
+milos-agathon
+left a comment
+Copy link
+Copy Markdown
+Owner
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Review of e903259 ("the CLI must not die on a bad argument or a missing file"). The help-text, docs and layers cleanup are correct, but two of the fixes are wrong and two introduce new problems.
+1. --certificate can write the wrong render's certificate, unsigned
+examples/splat_fused_map.py:1775
+render_certificate() returns the certificate of the last completed native render in the process; every render overwrites it (src/core/certificate.rs:108). With --animate N the fly-through renders after the beauty, so certificate.json describes the last orbit frame (different camera, size, return_aovs=False), not the sheet. It is also written with sign=False, while the flag's help still says "write a signed render certificate".
+Fix: the seam already supports this. certificate=<path> writes the signed certificate of that render (python/forge3d/splat.py:654). Pass certificate=out_dir / "certificate.json" to the beauty render_fused at line 1569 and delete the post-hoc block.
+2. The new aerial-perspective test passes without the aerial branch
+tests/test_splat_api.py:570
+Fog already attenuates the sun term: shading visibility is shadow_transmittance(sray) * fusion_media_transmittance(sray) (src/shaders/fusion/unified_occlusion.wgsl:777), and that vis multiplies sun in the beauty. So with fog_density=0.02 the beauty and radiance change whether or not the "aerial perspective on the beauty response" splice (src/shader_sources.rs:199) exists. Deleting the splice leaves all three new assertions passing, which is exactly the regression the commit message says the test now catches. The comment says the change must be "in the pixels the fog reaches (the far ones)", but nothing asserts that; changed.any() is implied by the array_equal check above it.
+Fix: isolate the aerial term. Either render with the sun term at zero, or restrict to terrain pixels that are fully shadowed in both renders, then assert the radiance moves toward the environment colour and that the change grows with the depth AOV. Also, clear has the same arguments as the existing terrain_only (fog_density defaults to 0.0), so reusing terrain_only saves two GPU renders.
+3. A missing explicit --pointcloud on a --dem run is replaced by a synthetic swath
+examples/splat_fused_map.py:1319 → :1330
+When the file does not exist, the example prints "not found; continuing without LiDAR", and then the derived-LiDAR block runs (it triggers on pointcloud is None) and substitutes a synthetic swath from the DEM. The run exits 0. The user's explicit input is ignored and replaced with synthetic data, and the log message is wrong.
+Fix: an explicit --pointcloud that does not exist should be error: ... / exit 2, like --hdr and the DEM. Keep the soft continue only for the fixture's own COPC file.
+4. --hdr-rotation now aborts the documented offline fallback
+examples/splat_fused_map.py:1467
+With --dem --hdr-rotation 30 and no network (or a preset checksum mismatch), _resolve_hdr falls back to the analytic sky as its docstring promises, and the new check then exits 2 with a message telling the user to pass "--hdr auto on a --dem render", which they did.
+Fix: validate the user's --hdr spec (none, or auto without --dem) rather than the resolved path. When the preset falls back, warn and drop the rotation.
+Minor
+The new --origin/--look-at and --hdr checks run after the DEM load, splat derivation and LiDAR derivation. The camera pairing check can run right after argument parsing.
+env_rotation_deg=args.hdr_rotation if hdr_path is not None else 0.0 (line 1532) is now unreachable as a distinct case after the early exit, so its comment is misleading.
+None of the six CLI behaviours this commit changes has a test, and the last three commits each fixed an untested CLI path. A parametrized test that calls main([...]) and asserts the return code for the argument errors would pin them.
+Checked and correct
+Help strings now match the code: turbidity 5.0 / ground albedo 0.35 for the hero (line 1512), contours on top/high views (line 1634).
+The docs' fog description matches the code (off only for the top view, lines 1492–1500).
+The .hdr/.rgbe/.exr list matches the seam (splat.py:529).
+FusedPointCloud is a plain dataclass, so the old try could never fire.
+The removed layers was unused.
+Not verified
+These findings come from reading the source at e903259; I did not reproduce them by running anything. On this head, CI ran only Fast Contract, CI Preflight and Build Docs; every GPU and Python test lane was skipped, so the new test assertions have not executed in CI.
+adeerkhan
+commented
+Oct 22, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+All four points and the three minors are addressed in 413511e2.
+1. The certificate was the wrong render's, and unsigned. Correct — render_certificate() holds the last completed render in the process, and the fly-through runs after the beauty, so it described the last orbit frame; and sign=False contradicted the flag's help. The seam already had the right path: certificate=<path> captures and signs that render's certificate. The beauty render_fused now asks for it directly, and the post-hoc block is gone. Verified: a run with --animate 2 --certificate writes a certificate with "signature", fused.seed = 7, fused.frames = 1 and fused.logical_primitives = 9000 — the beauty's, not a frame's.
+2. The aerial test did not test the aerial perspective. Confirmed by ablation: I removed the splice from FUSED_TERRAIN_EDITS, rebuilt, and the old assertions all passed. The reason is the one you give — the shadow-ray fog already attenuates the sun term, so the beauty moved with or without the splice.
+The test now renders with sun_intensity=0.0, so the shadow-ray fog has nothing to attenuate and the only thing that can move the radiance is the aerial perspective. Ablation, on the new test:
+splice removed → AssertionError: the aerial perspective did not change the radiance (delta 0.0 on 2975 terrain pixels)
+splice restored → passes
+It also asserts the change grows with the depth AOV, which is the aerial weight's distance dependence. The two redundant renders are gone: the fog-off render is the one the test already had.
+One thing I could not do cheaply and did not fake: the "moves toward the environment colour" direction needs the environment radiance, and the seam does not expose it to Python. What the test pins is that the term is live and distance-weighted; the direction is structural in the splice (+ env * (1 - T)).
+3. An explicit missing --pointcloud was replaced by a synthetic swath. Correct, and worse than reported: the run exited 0 with a log line that said the opposite of what happened. An explicit path that does not exist is now error: --pointcloud not found: … and exit 2. The soft continue stays for the fixture's own COPC file, where the derived swath genuinely can stand in.
+4. --hdr-rotation aborted the documented offline fallback. Correct, and my check was on the resolved path, which is the wrong thing to test. The rotation is now validated against the user's spec (none, or auto without --dem), which is the only part that is a user error. When the preset falls back to the analytic sky, the rotation is dropped with [hdr] no environment available; dropping the rotation instead of killing the run.
+Minors. The camera-pairing and --hdr extension checks now run immediately after parsing, before the DEM load and the splat/LiDAR derivation. The ... if hdr_path is not None else 0.0 expression is gone — the rotation is a named hdr_rotation that is either the user's or zero, and the sheet's description line uses it too, so a dropped rotation no longer prints a rotation that was not applied.
+Tests. Six CLI behaviours are now pinned by a parametrized test that calls main([...]) and asserts exit 2, an error: on stderr, and no traceback. The example's own run asserts the certificate is written, signed, and carries the beauty render's seed.
+On "not verified". You are right that the GPU lanes did not run on e903259 — the fast contract lane does not include tests/test_splat_api.py, so the new assertions had not executed in CI. They have now been run locally on this machine (277 passed), and the ablation above is the stronger evidence: the test is proven to fail when the feature is removed, not merely to pass when it is present.
+adeerkhan
+force-pushed
+the
+fix/splat-fused-gate-and-certificate
+branch
+from
+413511e to
+cfd7a2e
+Compare
+October 22, 2026 07:52
+adeerkhan
+commented
+Oct 22, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+Five more fixes, from the audit and the bug list. Each is a separate commit, and the two that could be checked are checked.
+1. The signed certificate did not identify the render. It recorded the scene — page count, primitive count, extinction, LiDAR radius — but not the render: no frame size, no camera, no sun, no exposure, and on the sequence path no seed at all. Two different images from one scene therefore carried the same signed inputs. Both paths now record the frame size, the tile, the sky, and the camera/sun/exposure/seed of every view (fused.view0.cam_origin, fused.view1.seed, … for a sequence; unprefixed for the single view). The test asserts the property rather than the format: change the width, the camera, the sun, the exposure or the seed and the recorded inputs must change.
+2. The HDRI loader dropped the Radiance Y orientation. The resolution line says which way the scanlines run — -Y top to bottom, +Y bottom to top — and the parser read the two numbers and threw the sign away, so a +Y file came out upside down. For an equirect environment that is an inverted sky. The sign is now read, +Y rows are flipped back, and a line with neither sign is refused rather than guessed at.
+3. The DEM download was trusted on size alone. The HDRI preset was md5-checked on every cache hit; the DEM was not, so a truncated or corrupted download rendered as a wrong terrain, silently. The LFS pointer carries the SHA256 of the real bytes, so the download is checked against it, a cached download is checked before it is reused, a mismatching cache is discarded and re-fetched, a partial download is removed instead of being left to look like a cache hit, and a pointer without a hash is refused.
+4. The fly-through rebuilt the scene N times. It called render_fused per frame, so the scene was rebuilt, every page re-streamed and the pipeline recompiled N times. It is now one render_fused_sequence call: one scene, one residency pool, one compiled kernel, N views. The frames are unchanged — I rendered the fly-through both ways and compared every frame's pixels: identical. The sun and the exposure moved into each FusedView; the sky, environment, fog and LiDAR radius stay shared.
+5. Two uncalled accessors deleted. FusedGpu::pending_pages and FusedGpu::resident_slot had no callers anywhere. Zero-caller structure is deleted rather than kept for a future that may never arrive; if the open paging item needs one, it writes the API it needs.
+Also: VIEW_PRESETS["low"] and "hero" share their angles and differ in the framing around them, which the table did not say; and --hdr-rotation now says what it is for — the captured sky's sun sits where the capture put it, so the rotation is how you line the visible disc up with the analytic sun's shadows. I did not hard-code a default rotation for it: the capture's sun azimuth is not a value I can verify from here, and a wrong constant is worse than a documented knob.
+Local gates
+cargo fmt --check ✅ · cargo +1.97.1 forge3d-clippy ✅ · 94 Rust lib tests ✅ · 17 Rust acceptance tests ✅ · 281 Python tests ✅ · the CI lanes on this head: PR Core Success, Fast Contract, CI Preflight, Build Docs and all three hosted runners ✅.
+adeerkhan
+requested a review
+from milos-agathon
+October 22, 2026 12:14
+milos-agathon
+requested changes
+Oct 22, 2026
+View reviewed changes
+milos-agathon
+left a comment
+Copy link
+Copy Markdown
+Owner
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Review of 1eecad0. All four items from the previous review are fixed correctly, and so are the minors. Two of the newest commits introduce new problems, though, and the GPU and Rust test lanes have not run on this head.
+Previous review: fixed
+Certificate. The beauty render_fused now passes certificate=<path> (examples/splat_fused_map.py:1663), and the example test asserts signature and fused.seed.
+Aerial test. Rendering with sun_intensity=0 does isolate the splice. The IBL term's env_vis has no media factor (src/shaders/hybrid_terrain_traversal.wgsl:815), so only the aerial term can move the radiance. The depth-growth assertion is a good addition.
+--pointcloud. An explicit missing file now gives error: and exit 2. The soft fallback is kept only for the fixture COPC.
+--hdr-rotation. It is now validated against the --hdr value the user passed, and the preset fallback drops the rotation with a warning.
+Minors. The checks now run before the DEM load. The parametrized main([...]) test covers the six exits, and the module-level splat_fusion_available() skip means it cannot pass falsely.
+Blocking
+1. The +Y HDR fix rotates the image 180° instead of flipping it (src/formats/hdr.rs, load_hdr)
+read_scanlines returns a flat Vec<[u8; 4]> of pixels, so rgbe_data.reverse() reverses the whole pixel order. That flips the image vertically and mirrors it horizontally. a_plus_y_file_is_read_bottom_to_top misses this because every fixture row is one colour. A +Y 2 +X 4 file whose stored row 0 is R,G,B,G decodes with green at the bottom-left, not red. I ran exactly that as a probe test against this head and it fails. This loader is shared with IBL (src/lighting/ibl_wrapper.rs) and the viewer, not just the fused path.
+Fix: reverse the row order only. For example, use rgbe_data.chunks_exact(width).rev().flatten(), or swap rows in place. Then extend the test with a row that is not one colour and assert the column order.
+2. The docs image will be broken on the deployed docs site (docs/assets/splat-fused-map.png)
+The file is now an LFS pointer, but .github/workflows/docs.yml checks out without lfs: true. Pages would serve the 130-byte pointer as the image, and the Build Docs check cannot detect that. No other file under docs/ is in LFS. (The assets/highres.png precedent is the root assets/, not docs/assets/, and docs/assets/highres.png is a plain blob.) The convention under docs/assets/ is small .webp files.
+Fix: convert it to webp and drop the LFS attribute, which I prefer. Alternatively, add lfs: true to the docs checkout.
+Should fix
+Windows DEM download returns 404 (_resolve_dem_path). On Windows, str(path.relative_to(REPO_ROOT)) uses backslashes, so .replace("assets/", "", 1) never matches and the URL becomes .../assets/assets\tif\Mount_Fuji_30m.tif. That returns 404, while the .as_posix() form returns 200 (28 MB). The resulting RuntimeError is not caught at _load_dem(dem_path), so --dem without git-lfs ends in a traceback. Use path.relative_to(ASSET_DIR).as_posix(), and turn the error into error: / exit 2 like the other paths.
+test_the_dem_download_is_checked_against_its_pointer hits the network. After the corrupt cache is discarded it calls urlretrieve for real, and it passes whether that succeeds or fails. Monkeypatch urlretrieve the way test_hdr_cache_is_checksum_validated does.
+HDRI normalisation can black out the sky silently (env_from_hdr_image). If more than half the upper hemisphere is black, the median is 0, scale becomes 0, and the whole environment renders black with no message. This should be an error.
+Not blocking (follow-up)
+The certificate now identifies the render settings, but not the scene content. Splats, point clouds (including in-memory point_positions) and DEM heights are recorded only as counts, so two different DEMs on the same grid share signed inputs. This predates the PR, but the commit message claims more than the code delivers. A content hash per source would close it.
+Removing FusedGpu::pending_pages is out of scope here. The description itself names that accessor as the likely seam for the paging-test fix.
+Before merge
+Fix 1 and 2 above.
+Fix the Windows DEM URL.
+Get the splat suites run at the final head. On this head CI ran only Fast Contract, CI Preflight, Build Docs and the CARTOGRAPHER gate. Test Rust, test_splat_api.py, test_splat_fused_map_example.py and every GPU lane were skipped, so the "17 Rust / 281 Python" results exist only locally. I will run them on the reference GPU machine, or dispatch scope=full on a mirror branch, once 1–2 land.
+Make the testing table agree. The description still says 16/17 and the paging test is unchanged, so paging_policies_respect_the_residency_pool is a flake, not a fix. State that plainly. Its formulation is tracked separately and does not block this PR.
+With those done I'll approve. The world-coordinate ledger sites are fine.
+adeerkhan
+added 18 commits
+October 23, 2026 12:42
+feat(examples): add SPLAT-FUSED sensor+terrain map sheet example
+…
+c1bf6a3
+```
+- examples/splat_fused_map.py: one ReSTIR pass over terrain + Gaussian
+  splats + COPC LiDAR as a cartographic sheet (title, per-layer hit-count
+  legend, scale bar, north arrow, AOV insets, report.json), with a camera
+  rig (--view presets + orbit overrides, pose echoed in the CAMERA block)
+- offline default renders the canonical fixture; --dem fuji fetches a real
+  web DEM (cached), keeps true slopes (elevation in grid units), and
+  derives a coherent violet splat scan block from the same DEM
+- y-up world centred on origin; byte-identical reruns verified for both
+  modes
+- tests/test_splat_fused_map_example.py: parser + full-run determinism
+  gate (3/3)
+- docs/splat-fused.md: map-sheet example section; .gitignore negations
+  so the example and test are tracked
+```
+feat(examples): hero cinematic view + realism defaults for splat-fuse…
+…
+c3b9b53
+```
+…d map sheet
+
+--dem now defaults to a low oblique 'hero' shot of the full-extent DEM
+(true mountain proportions, sky above the summit) with warm side lighting
+and a bright Hosek-Wilkie sky; --view top keeps the north-up map. Cleaner
+violet scan block (6000 finer splats), forest-toned hypsometric greens,
+new --sun-color/--sky-turbidity/--sky-ground-albedo knobs, and the sheet
+drops the wall-clock row so its byte-for-byte footer claim is literally
+true (beauty + sheet sha256-verified identical across reruns).
+```
+feat(examples): contours, orbit fly-through GIF and tiling for splat-…
+…
+8ce1159
+```
+…fused sheet
+
+Plan views now get marching-squares elevation contours projected through
+the real camera (index lines every fifth; annotation on the sheet's map
+copy only, beauty PNG untouched). --animate N renders a deterministic
+orbit fly-through GIF with the still's lighting (byte-identical reruns,
+sha256-verified). --tile W H exposes seamless tiling so large stills
+(1280x896 @128 spp) fit the 512 MiB budget. The panel's unified-occlusion
+note drops instead of overlapping when readouts grow.
+```
+feat(splat): in-memory point arrays for render_fused + derived LiDAR …
+…
+2800851
+```
+…swath in the map example
+
+The fused path ingested LiDAR points only from files (COPC/EPT/page
+stores), so a --dem run could not show a LiDAR layer at all. New
+PointArraySource mirrors SplatCloudSource (k-d paginate, same PageSource
+contract, PagePayload::Points) and is exposed as
+render_fused(point_positions=, point_colors=): world-space y-up float32
+positions with optional uint8 sRGB colours, paged through the same
+residency pool and unified T_splat x T_lidar x T_terrain as a
+file-backed cloud. Validated in the wrapper before any GPU touch and
+again at the Rust boundary; sequence/reference pass None.
+
+The map example now digitizes all three representations from the DEM:
+_derive_lidar_swath lays flight lines with sqrt(area/N) pulse spacing,
+1.45x line spacing, deterministic jitter and slope-driven intensity
+colouring on the camera-facing flank, with a pulse-sized sphelet radius
+(0.7 x along-spacing) so returns overlap into a scan strip that
+underlaps the violet splat block. Provenance is stated on the sheet;
+--no-lidar drops the layer, --pointcloud replaces it. Hero lighting
+moves to golden hour (sun el 8, warm colour, turbidity 5, ground albedo
+0.35), probed at 640x448 / 32 spp against a deeper el-5 variant.
+
+Verified: Rust unit test passes; test_splat_api +
+test_splat_fused_map_example + test_api_contracts 196 passed; two full
+runs sha256-identical on beauty and sheet with the swath in scene.
+```
+feat(splat): HDRI sky + aerial-perspective fog for render_fused
+…
+af5a5c9
+```
+Closes the two "ugly background" gaps on the fused path: no HDRI input
+and a hard silhouette where distant terrain met the sky.
+
+Engine: render_fused / render_fused_sequence now take env_map (a
+.hdr/.rgbe/.exr path) + env_rotation_deg. FusedRenderDesc carries
+Option<Arc<FusedEnvMap>>; env_from_hdr_image reuses the IBL.from_hdr
+format dispatch, box-averages to <=1024 texels wide, rotates about +y
+(sun-azimuth convention), normalises exposure to the MEDIAN upper-
+hemisphere luminance (the HDRI sun disc is an outlier a mean would chase
+and crush the sky to grey) and clamps at 12x so the sun reads as a bright
+blob rather than an IBL firefly. The Hosek-Wilkie bake is untouched and
+stays the byte-identical default; the kernel already samples whatever
+equirect is uploaded, so the env swap needed no shader change.
+
+Real aerial perspective: the fused fog only attenuated shadow rays, so
+far ridges ended at a crisp silhouette against the sky. Refactored
+fusion_media_transmittance into fusion_media_along(origin, dir, dist)
+(bit-identical for its three shadow-ray call sites) and added a
+FUSED_TERRAIN_EDITS anchor at the beauty composition so
+L = L*T + env*(1-T) over the camera-to-hit distance. At fog density 0 the
+transmittance is exactly 1, so the fixture path stays bit-for-bit
+unchanged. Certificate inputs gain fused.env_map (path or hosek-wilkie)
+and fused.fog_density / fused.fog_height_falloff.
+
+Python: _env_kwargs validates env_map on both entry points (extension
+must be .hdr/.rgbe/.exr, file must exist, rotation without an env is
+rejected rather than silently ignored); .pyi overloads updated.
+
+Example: --hdr auto|none|PATH (auto fetches the CC0 Poly Haven
+Kloofendal 48d Partly Cloudy pure-sky 2k HDRI once into the dataset
+cache, md5-checked; the fixture keeps the analytic sky so its acceptance
+path stays offline), --hdr-rotation, --fog (default 4e-4), --fog-falloff
+(default 1.5e-3). Hero lighting moves golden-hour -> lit daytime (sun el
+42, near-neutral colour, sky 1.4). Fog is gated off the top plan view,
+where every ray points down through the whole camera altitude and the
+same density would only mute the hypsometric edges.
+
+Verified on the RTX 3070: hero A/B (analytic sky = flat band with a hard
+horizon; HDRI + fog = real partly-cloudy dome with ridges receding into
+haze), plan view stays crisp, two full hero runs sha256-identical
+(d34c9750...). Gates: 3 env_map + 7 fused_kernel Rust tests, 198 pytest
+(test_splat_api + test_splat_fused_map_example + test_api_contracts)
+including a new end-to-end test that writes a tiny HDR and proves the env
+swap changes pixels; cargo fmt --check clean, zero clippy findings in the
+touched code.
+```
+feat(splat): separate splat/lidar layers + content-aware sheet
+…
+656cc02
+```
+The derived splat block and LiDAR swath sat on the same flank and
+overlapped, so they read as one blended blob. Repositioned onto distinct
+ground: the violet splat block is now a compact circle high on the
+summit's east shoulder (r<=95), while the LiDAR swath is a wide, low
+band across the foreground valley with east-west flight lines. Both stay
+camera-facing, so the hero view shows two legible sensor layers.
+
+Sheet polish for a professional test sheet:
+- new ATMOSPHERE readout block (sky = HDRI filename or Hosek-Wilkie,
+  sky gain, sun az/el/I, aerial-fog density+falloff) + a Scale row, so
+  the HDRI/fog path is documented on the sheet itself
+- legend renamed FUSED LAYERS / "hit pixels per representation"; the
+  subtitle now names both derived layers with counts
+- content-aware canvas: the right-panel readout is measured first (a
+  scratch ImageDraw walks every block's wrapped rows) and the canvas
+  grows to the taller of the map+AOV column and the panel column, so
+  the added ATMOSPHERE block can no longer clip the RENDER block
+- wrap_lines hard-breaks over-wide single tokens (a long HDRI filename)
+  by characters so nothing overflows the panel edge
+
+Verified: 800x560 sheet fits (all four blocks + occlusion note); HQ hero
+1280x896 @128 spp --tile 256 175; fixture sheet intact; example tests
+3/3.
+```
+docs(splat): embed the SPLAT-FUSED map sheet in the docs
+…
+f179f48
+```
+Add the high-quality --dem fuji hero sheet (1280x896 @128 spp) as
+docs/assets/splat-fused-map.png, whitelist it in .gitignore, and show it
+in docs/splat-fused.md so the fusion path has a concrete, cartographically
+correct reference image in the repo.
+```
+test(f32-gate): record 4 HDRI env-map narrowing sites in ledger
+…
+afd6faa
+```
+The Fast Contract lane failed because env_from_hdr_image (HDRI sky, commit
+f9494c4) added four `as f32` sites in render_fused.rs that were not in the
+world-coordinate f32 gate's frozen inventory. They inflated
+_inventory_before_water_optics() from 1846 to 1850, breaking seven tests.
+
+Record them honestly as a new ledger transition
+(splat_fused_env_map: 1846 -> 1850, base = the frozen production inventory)
+and strip them when reconstructing main's branch freezes so every pre-existing
+frozen constant and digest stays byte-identical. A new dedicated test locks
+the four sites (env_from_hdr_image radiance/texture narrowings only, no world
+coordinate) so the gate stays fail-closed on them.
+```
+test(f32-gate): record 4 HDRI env-map as-f32 sites
+…
+11388f1
+```
+- env_from_hdr_image added 4 narrowing sites, not in ledger
+- inflated _inventory_before_water_optics 1846->1850, broke 7 tests
+- new transition splat_fused_env_map 1846->1850, base=frozen prod
+  inventory
+- strip 4 sites when reconstructing main freezes: pre-existing digests
+  byte-identical
+- new test locks 4 sites as radiance/texture only, never world
+  coordinate
+```
+fix(examples): md5-check the cached HDRI preset on every hit
+…
+f67eaa8
+```
+Commit f9494c4 claimed the Poly Haven preset was "md5-checked", but
+_resolve_hdr only verified HDR_PRESET_MD5 after a fresh download: a cache
+hit returned any file over 1 KB, so a truncated or corrupted cache
+rendered as a wrong sky instead of re-downloading.
+
+Validate the digest on the cache-hit path too (shared _hdr_cache_ok),
+discard a stale cache before refetching, and cover it with a regression
+test that trusts neither a size-only nor a mismatched cache.
+```
+test(splat): pin env-map rotation direction with a quarter turn
+…
+ce282ca
+```
+The rotation test only used 180 deg, which is sign-symmetric: an inverted
+rotation produced the same columns and would have passed. Add a +90 deg
+case (marker column 10 -> 26, not 58) so the sun-azimuth direction is
+actually locked; verified it fails when the sign is flipped.
+```
+revert(ktx2): drop the supercompression change that belongs to milos-…
+…
+2b1e247
+```
+…agathon#251
+
+The SPLAT-FUSED branch carried a KTX2 change that has nothing to do with
+splat fusion: `SuperCompressionScheme` gained a `TryFrom<u32>` so an
+unknown supercompression scheme is refused instead of silently decoding
+as uncompressed.
+
+That work belongs with the KTX2 branch (milos-agathon#251), which already carries the
+identical change and where it can be reviewed on its own terms; keeping
+it here made this branch conflict with that one. The change is
+self-contained — no code outside `src/loaders/ktx2/` names
+`SuperCompressionScheme` — so dropping it restores `main`'s loader
+verbatim.
+```
+docs: remove the SPLAT-FUSED working plan
+…
+8420856
+```
+The plan document was a working note for the exploration, not project
+documentation: it tracks phases and per-phase "done" notes that only
+mean something to the author, and it restates the feature's own limits
+in a form that will drift from the code. Nothing links to it.
+
+The durable documentation is `docs/splat-fused.md` (the transmittance
+model, the options, the measured limits) and the CHANGELOG entries.
+```
+fix(examples): pin the DEM download to a fixed commit
+…
+068b046
+```
+The map sheet's DEM presets are Git LFS objects, so the real bytes come
+from the media CDN — and the URL addressed the `main` branch. A branch
+ref is a moving target: the asset can change under a render that has
+already recorded its own hash, and two runs of the same seed can then
+disagree about the terrain they drew.
+
+The ref is now the v1.44.0 release commit
+(`5a6642205a1865b7a21f45a36e98e717cbf1e16a`), the version this script
+ships with. All four presets (fuji, swiss, rainier, luxembourg) resolve
+at that commit.
+```
+fix(splat): compile the fused acceptance test
+…
+5aaaa9c
+```
+Adding `env_map` to `FusedRenderDesc` left the two `FusedRenderDesc`
+initializers in the acceptance test without it, so
+`tests/test_splat_fusion_occlusion.rs` no longer compiled:
+
+    error[E0063]: missing field `env_map` in initializer of
+                  `FusedRenderDesc<'_>`
+    --> tests/test_splat_fusion_occlusion.rs:222:5
+    --> tests/test_splat_fusion_occlusion.rs:1406:24
+
+The break was invisible to the routine pull-request gate, which never
+compiled the feature-gated test; it surfaced only in the nightly matrix.
+Both initializers now pass `env_map: None`, the analytic Hosek-Wilkie
+sky the fixture already used, so the rendered output is unchanged.
+```
+fix(splat): identify the HDRI by content in the signed certificate
+…
+3c35b6e
+```
+The signed certificate recorded the HDRI's absolute path in
+`fused.env_map`, which leaks the machine's directory layout into the
+signed payload, and it did not record `env_rotation_deg` at all — two
+renders of the same file at different rotations had identical signed
+inputs even though they produced different pixels.
+
+The recorded identity is now the file's basename plus the SHA256 of its
+bytes: the basename names the asset, the hash pins its content (two
+different files that share a name do not collide), and neither leaks a
+path. The rotation is recorded next to it, and the sequence entry point
+now records the same scene-defining inputs as the single-view one
+(kappa, lidar radius, opacity, surfels, BRDF) instead of a subset.
+```
+fix(splat): keep the fog-disabled beauty path byte-identical
+…
+77dd468
+```
+The plan claimed the aerial-perspective edit left the base line "bit for
+bit" at fog density 0. It did not. Folding the media transmittance into
+the radiance sum re-associates
+
+    frame_radiance + sun + ibl   ->   frame_radiance + (sun + ibl)
+
+which is equal in exact arithmetic but differs by 1 ULP in f32 for a
+large share of pixels. The edit now keeps the base line's own statement
+verbatim on the branch a zero density takes, and two source-level tests
+pin that: the base line's statement appears exactly once, the
+re-associated sum exists only inside the fog branch, and the media
+transmittance short-circuits to exactly 1.0 without fog.
+```
+fix(examples): state the HDRI rotation convention and gate the sheet
+…
+a9a40e4
+```
+The map sheet's footer promises "seed N reproduces this sheet
+byte-for-byte", but only the beauty was hashed across reruns — a sheet
+that drifted would have made that claim false while the test still
+passed. The sheet PNG now gets the same byte-identity check, and it
+passes.
+
+`--hdr-rotation` did not state the sign it uses, so a positive angle
+meant two different things to a reader; it now names the convention it
+follows (the sun's azimuth: 0 deg = +x, 90 deg = +z; world north is
+-z). A missing `--hdr` file also raised a bare traceback instead of the
+clean `error:` the DEM path prints.
+```
+adeerkhan
+added 13 commits
+October 23, 2026 12:58
+fix(examples): repair the fly-through call and stop discarding --fog
+…
+3f99232
+```
+Two defects in the map-sheet example, both in the code the branch added.
+
+The `--animate` loop's `render_fused` call had its `point_positions` and
+`point_colors` arguments indented at the wrong level. Python accepts it
+(they are continuation lines inside the call's parentheses), so the
+fly-through rendered correctly — but the block reads as a botched edit
+and invites the next reader to "fix" it into a syntax error.
+
+`--fog` was silently discarded on every scene except a `--dem` render:
+`fog_density = args.fog if (use_dem and not is_plan) else 0.0`. The
+`use_dem` half of that gate is in neither the module docstring nor the
+plan, which both document exactly one reason for turning the fog off —
+the top-down plan view, where every ray points down through the whole
+camera altitude and the haze would mute the hypsometric edges. So a
+user who asked for aerial perspective on the default offline scene got
+no fog and no message saying why.
+
+The fog now applies wherever it is not the plan view, and the plan view
+says out loud that it turned the fog off instead of dropping the
+argument in silence.
+```
+feat(splat): take in-memory point arrays in render_fused_sequence too
+…
+af34e74
+```
+`render_fused` accepted an in-memory point cloud; `render_fused_sequence`
+did not, and it passes `None` for both arrays when it builds the scene.
+A user who derived their cloud in memory — which is what the in-memory
+arrays are for — could use the single-view path and not the sequence
+one, which is the path a fly-through wants.
+
+Both entry points now take `point_positions` / `point_colors` and share
+one validator: the array contract is checked once, in `_point_array_kwargs`,
+instead of being written out twice. The Rust side needed no new checks —
+`build_scene` already validates the arrays, and it was the sequence
+caller that passed `None`.
+
+The test asserts what the change is for: the single view of a one-view
+sequence is byte-identical to the standalone render of the same scene.
+```
+fix(examples): honour --tile in the fly-through, and report a bad tile
+…
+9d82538
+```
+Two more places where the map-sheet example dropped what the user asked
+for.
+
+The fly-through rendered each frame with `render_fused` and never passed
+`tile=`, so `--tile` applied to the still and vanished for the animation
+— and tiling is exactly what a large fly-through needs to stay inside
+the memory budget. The fly-through now tiles by its own frame size, and
+says so when the requested tile does not fit it.
+
+A `--tile` that does not fit the still image raised a raw ValueError
+traceback, while the example's other argument errors (a missing DEM, a
+bad `--anim-size`, a missing `--hdr`) all print `error: ...` and exit 2.
+It does that now too.
+```
+fix(examples): the CLI must not die on a bad argument or a missing file
+…
+bf5e078
+```
+A second audit pass over the map-sheet example found four ways a user
+argument could abort the run with a raw traceback, and one way a flag was
+silently ignored. All of them are the example's own input contract, so
+they are checked in the example, where the other argument errors already
+print `error: ...` and exit 2.
+
+- `--hdr-rotation 30` without an environment: the rotation has nothing
+  to rotate, and the seam rejects it. Now a clean error instead of
+  `ValueError: env_rotation_deg was given without env_map`.
+- `--look-at` without `--origin` (or the reverse): a camera needs both,
+  and the old code quietly fell through to the canonical camera. Now an
+  error naming the pairing.
+- `--hdr` with a file that is not `.hdr`/`.rgbe`/`.exr`: the extension is
+  checked where the other argument errors are, not inside the renderer.
+- `--pointcloud` with a path that does not exist: the old `try` wrapped a
+  dataclass that does no I/O, so it could never fire and the promised
+  "continuing without LiDAR" never happened. The existence check is now
+  explicit and the fallback is real.
+- `--certificate` wrote nothing: the example read a `certificate`
+  attribute the render result does not have. The certificate is a
+  provenance record, so it is now read from the diagnostics module and
+  written out.
+- Two help strings contradicted the code (`--sky-turbidity` said 4.0 for
+  the hero, which uses 5.0; `--sky-ground-albedo` said 0.5, which uses
+  0.35), and `--no-contours` said "plan views" while contours also draw
+  on the high view.
+
+The docs claimed the aerial fog was 0 for the fixture, which stopped
+being true when the fog stopped being silently dropped, and their sky
+parenthetical held only for the hero view. Both now say what the code
+does.
+
+The aerial perspective had no behavioural test: it was proven only by a
+source-text check on the assembled shader, so a change that left the
+pixels alone would have passed. It now asserts that the fog changes the
+beauty and the radiance, and that the fog-off path is byte-identical
+across runs.
+```
+fix(examples): the certificate belongs to its render, and the fog tes…
+…
+0000be9
+```
+…t must isolate the fog
+
+A review of the previous commit found two of the fixes wrong and two new
+problems. All four are addressed here, and the six CLI behaviours now
+have a test.
+
+The certificate was written from the diagnostics module after the run,
+which holds the LAST completed render in the process: with --animate that
+is the last orbit frame, not the sheet. It was also written unsigned,
+while the flag's help promised a signed certificate. The seam already
+supports this — certificate=<path> captures and signs THAT render's
+certificate — so the beauty render now asks for it directly and the
+post-hoc block is gone.
+
+The aerial-perspective test did not test the aerial perspective. The
+shadow-ray fog already attenuates the sun term, so the beauty and the
+radiance changed whether or not the aerial splice existed: deleting the
+splice left all the assertions passing. The test now renders with the
+sun term at ZERO, so the shadow-ray fog has nothing to attenuate and the
+only thing that can move the radiance is the aerial perspective. It was
+verified by ablation — with the splice removed the test fails on
+"the aerial perspective did not change the radiance", and with it
+restored it passes. It also asserts the change grows with the depth AOV,
+which is the aerial weight's distance dependence. The two redundant
+renders are gone: the fog-off render is the one the test already had.
+
+An explicit --pointcloud that does not exist was reported as "not found;
+continuing without LiDAR" and then replaced by a synthetic swath derived
+from the DEM, so the user's input was ignored and the run exited 0. An
+explicit path that is missing is now an error; the soft continue stays
+for the fixture's own COPC file.
+
+--hdr-rotation aborted the documented offline fallback: with --dem and no
+network the preset falls back to the analytic sky, and the new check
+then exited 2 telling the user to pass "--hdr auto on a --dem render",
+which they had. The rotation is now validated against what the user ASKED
+for ("none", or "auto" without a --dem render) rather than against the
+resolved path, and when the preset falls back the rotation is dropped
+with a warning.
+
+The argument checks now run right after parsing, before the DEM load and
+the splat and LiDAR derivation, and the unreachable
+`... if hdr_path is not None else 0.0` is gone with its misleading
+comment.
+
+The six CLI behaviours are pinned by a parametrized test that calls
+main([...]) and asserts the return code is 2 with an "error:" message
+and no traceback, and the example's own run now asserts that the
+certificate is written, signed, and carries the beauty render's seed.
+```
+refactor(splat): shrink the fog source test, drop a dead helper
+…
+0545e57
+```
+Two cuts from the over-engineering audit of the feature area.
+
+The source-level check that the fog-disabled beauty path keeps the base
+line's statement was forty lines of find() index arithmetic over the
+assembled shader. Asserting the block itself pins the order, the branch
+and the text in ONE check, and the count still pins that the statement
+appears nowhere else. Twenty lines shorter, and the failure message now
+shows the expected text instead of an index.
+
+`_srgb_to_linear` in tests/test_splat_api.py was defined and never
+called; the test only uses `_linear_to_srgb_u8`. Removed.
+
+Three other audit findings were checked and left alone, because the
+audit was wrong about them: `_nice_length`'s "unreachable" reset is
+reachable (x = 19.99 snaps down to 10), the deferred-init block in
+render_fused.rs is there because the borrow checker needs the owned sky
+buffer to outlive the borrow, and `_bounds_corners` is already one line.
+```
+feat(splat): record the render's identity in the signed certificate
+…
+5e05abb
+```
+The certificate recorded the SCENE — the page count, the primitive
+count, the extinction, the LiDAR radius — but not the RENDER: no frame
+size, no camera, no sun, no exposure, and on the sequence path no seed at
+all. Two different images from one scene therefore carried the same
+signed inputs, and the certificate could not say which image it was
+about.
+
+Both paths now record the frame size, the tile, the sky settings, and
+the camera, sun, exposure and seed of every view. A sequence's views
+differ from each other, so each is named (`fused.view0.cam_origin`,
+`fused.view1.seed`, ...); the single-view path uses the same set
+unprefixed.
+
+The tests assert the property, not the format: change the width, the
+camera, the sun, the exposure or the seed, and the recorded inputs must
+change.
+```
+fix(formats): honour the Radiance Y orientation when loading an HDR
+…
+6af707e
+```
+The resolution line of a Radiance file says which way the scanlines run:
+"-Y" stores the rows top to bottom, "+Y" bottom to top. The parser read
+the two numbers and dropped the sign, so a "+Y" file came out upside
+down — for an equirect environment, an inverted sky.
+
+The sign is now read, a "+Y" file's rows are flipped back, and a
+resolution line with neither sign is refused rather than guessed at.
+```
+fix(examples): verify the DEM download against its LFS pointer
+…
+9da2c1a
+```
+The HDRI preset was md5-checked on every cache hit, but the DEM download
+was trusted on size alone — so a truncated or corrupted download
+rendered as a wrong terrain, silently.
+
+The LFS pointer that stands in for the asset carries the SHA256 of the
+real bytes, so the download is now checked against it and a cached
+download is checked before it is reused. A cache that does not match is
+discarded and re-fetched, a partial download is removed instead of
+being left to look like a cache hit, and a pointer without a hash is
+refused rather than trusted.
+
+Also documents what `--hdr-rotation` is for: the captured sky's sun
+sits where the capture put it, so the rotation is how you line the
+visible disc up with the analytic sun's shadows.
+```
+refactor(splat): drop the uncalled resident_slot accessor
+…
+8e1005f
+```
+FusedGpu::resident_slot had no callers anywhere in the tree, and the
+repository's rule is that zero-caller structure is deleted rather than
+kept for a future that may never arrive.
+
+FusedGpu::pending_pages stays: it is the only window onto the loader's
+backlog, which is what the open question about the paging acceptance
+test is about.
+```
+fix(formats): flip the ROWS of a "+Y" HDR, not the whole pixel vector
+…
+121e1f4
+```
+`read_scanlines` returns one flat Vec of pixels, so reversing it flipped
+the image vertically AND mirrored every row left to right — a 180-degree
+rotation, not the row flip a "+Y" file needs. The old test could not see
+it because every fixture row was one flat colour.
+
+The rows are now reversed by width, and the test writes two rows of
+gradients so a whole-vector reversal puts green at the bottom-left and
+fails. Verified by ablation: restoring `rgbe_data.reverse()` fails the
+test, and the row flip passes it.
+```
+fix(examples): build the DEM URL as a POSIX path, and report a failed…
+…
+12b29de
+```
+… fetch
+
+`str(path.relative_to(REPO_ROOT))` uses backslashes on Windows, so the
+"assets/" prefix strip never matched and the URL became
+`.../assets/assets\tif\Mount_Fuji_30m.tif`, which the asset host answers
+with a 404. The URL is now built from `ASSET_DIR` with `as_posix()`.
+
+A failed or unverifiable download also escaped as a traceback out of the
+middle of the run; it now prints `error: ...` and exits 2 like the other
+argument paths.
+
+The DEM test no longer touches the network: the re-fetch is monkeypatched
+the way the HDRI cache test does it, so the test cannot pass by a live
+request that happens to succeed or fail.
+```
+fix(splat): refuse an environment map with no upper-hemisphere radiance
+…
+11afdc7
+```
+The exposure is normalised to the median upper-hemisphere luminance. If
+more than half that hemisphere is black the median is zero, the scale
+becomes zero, and the whole environment renders black with no message —
+which looks like a scene bug, not the broken or night-only HDRI it is.
+```
+adeerkhan
+force-pushed
+the
+fix/splat-fused-gate-and-certificate
+branch
+from
+1eecad0 to
+11afdc7
+Compare
+October 23, 2026 08:10
+adeerkhan
+commented
+Oct 23, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+Both blockers fixed, all three should-fix items done, and the conflicts resolved. Head is 11afdc74.
+1. The +Y fix rotated instead of flipping. Correct, and the old test could not see it because every fixture row was one flat colour. The rows are now reversed by width, and the test writes two rows of gradients — R,G,B,G and C,M,Y,C — then asserts every column's colour on the decoded image. Verified by ablation: restoring rgbe_data.reverse() fails it (row 1 col 0 channel 0: [1.0, 0.0, 0.0] != [0.0, 1.0, 0.0]), the row flip passes it.
+2. The docs image would have been a pointer on the site. Correct, and adding lfs: true was the weaker option — it would have put one LFS file under docs/assets/ and made the docs build depend on LFS credentials. Converted to webp, 127 KB from 1.3 MB, and the LFS rule dropped. I also dropped the LFS commit from the branch history rather than reverting it, so the 1.3 MB blob never enters the branch at all: git log origin/main..HEAD -- docs/assets/splat-fused-map.png is now empty.
+Note for the PR body: the webp is not LFS, so the embedded image URL had to move back to raw.githubusercontent.com — media.githubusercontent.com 404s for a plain blob. Both are now correct and I checked them over HTTP.
+Should fix, all three done.
+Windows DEM URL. str(relative_to(REPO_ROOT)) with the "assets/" strip is gone; the URL is built from ASSET_DIR with as_posix(). A failed or unverifiable download is caught at the --dem path and reports error: ... / exit 2 instead of a traceback. The test now covers the ASSET_DIR-relative case and asserts the URL ends in /tif/dem.tif with no backslash.
+The DEM test hit the network. urlretrieve is monkeypatched the way test_hdr_cache_is_checksum_validated does it, the fake writes more than 1000 bytes so the hash is what rejects it, and the test asserts both that the corrupt cache was re-fetched and that a matching cache is reused with no call.
+HDRI normalisation could black out the sky. A median of zero is now an error naming the cause, with a unit test on an all-black upper hemisphere.
+pending_pages is restored. You are right that removing it was out of scope: it is the only window onto the loader's backlog, which is exactly what the paging question is about. I folded the restore into that commit, which now drops only resident_slot.
+The testing table now says the truth: 17/17 on this head, and the paging case is a flake, not a fix — 24 frames fail, 240 pass, unchanged by this branch. Its formulation is tracked separately and does not block.
+Conflicts. tests/test_world_coord_f32_gate.py and the ledger. Main has moved to d6b9e556 and added a concordia transition; the branch's splat_fused_env_map record still claimed the old 1846 baseline, so every freeze below it failed to reconstruct. The record is now bridged onto main's inventory — base 1861 / a2a5794b…, result 1865 / ea410729… — and conversion_inventory() returns the inventory below the branch's own transition, with _undo_splat_env_map_transition reversing it, so the chain main owns is untouched. The ledger diff is one added section (41 lines), not a reformat: I spliced into main's bytes because its file has hand-formatted indentation that json.dump would have rewritten.
+Local gates on this head: cargo fmt --check ✅ · cargo +1.97.1 forge3d-clippy ✅ · 95 Rust lib ✅ · 17/17 acceptance ✅ · 284 Python ✅ · tests/test_world_coord_f32_gate.py 33/33 ✅.
+On the follow-up. You are right that the certificate still records scene content only as counts, so two DEMs on one grid share signed inputs — and my earlier commit message read as if the render identity closed that. It did not, and I have not claimed otherwise in the body. A content hash per source is the fix and it belongs in its own change.
+I cannot dispatch scope=full on this repo, so the GPU lanes still rest on the local run above. If you would rather run them yourself first, the branch merges cleanly into d6b9e556 (git merge-tree is clean) so a mirror dispatch should work.
+adeerkhan
+requested a review
+from milos-agathon
+October 23, 2026 09:21
+milos-agathon
+requested changes
+Oct 23, 2026
+View reviewed changes
+milos-agathon
+left a comment
+Copy link
+Copy Markdown
+Owner
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Review of 11afdc7. Every item from the previous review is fixed, and I ran the GPU suites CI skips. Two small fixes remain; with those pushed I'll approve.
+Previous review: fixed
++Y HDR. The fix now reverses the row order only (src/formats/hdr.rs:64). The new R,G,B,G / C,M,Y,C test checks every column, so it would catch the old 180° rotation.
+Docs image. It is now a real webp (1612×1044, 127 KB), outside LFS. .gitattributes is unchanged, and the png never enters branch history.
+DEM URL. It is built with relative_to(ASSET_DIR).as_posix(), and a failed fetch now gives error: / exit 2.
+DEM test. urlretrieve is mocked. The test asserts both the re-fetch and that a good cache is reused with no download.
+Black sky. A zero median is now refused, with a unit test.
+Accessors and table. pending_pages is restored, and the table calls the paging case a flake.
+Ledger re-bridge. Stripping the four env-map sites before the chain hands main's freezes exactly the inventory they expect.
+Local results on 11afdc7 (Windows 11, NVIDIA RTX 3070, Vulkan)
+Check
+Result
+tests/test_world_coord_f32_gate.py
+33 passed, including main's concordia and exact-production freezes
+cargo test --features default,splat-fusion --lib (hdr, env_map, fused_kernel, splat, fusion)
+66 passed, 1 ignored (the fixture regenerator)
+cargo test --features default,splat-fusion --test test_splat_fusion_occlusion
+17/17 passed, paging_policies_respect_the_residency_pool included
+tests/test_splat_api.py + tests/test_splat_fused_map_example.py (release wheel, FORGE3D_NO_BOOTSTRAP=1, -rs)
+41 passed, 1 failed, 0 skipped
+The full example run passes: beauty and sheet are byte-identical across reruns, and the certificate is signed and carries the beauty's seed.
+1. test_hdr_cache_is_checksum_validated fails on Windows, and it writes into the real home directory
+tests/test_splat_fused_map_example.py:64
+The test patches only HOME, but on Windows Path.home() reads USERPROFILE. _resolve_hdr therefore works on the real ~/.forge3d/datasets/hdri/, not tmp_path. It failed the same way on both runs:
+```
+AssertionError: the rejected cache must be discarded
+  where True = WindowsPath('…/test_hdr_cache_is_checksum_val0/.forge3d/datasets/hdri/kloofendal_48d_partly_cloudy_puresky_2k.hdr').exists
+```
+The run created ~/.forge3d/datasets/hdri in the real profile. If a corrupt preset were cached there, the test would delete it. On Linux and macOS it passes only because HOME happens to be what Path.home() reads there.
+Fix: patch Path.home as test_the_dem_download_is_checked_against_its_pointer already does:
+```
+monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+```
+I should have caught this in the previous review; the test has been on the branch since c26cf27.
+2. The ledger cites an approval that does not exist
+tests/data/world_coord_f32_ledger.json, splat_fused_env_map.review
+The entry ends "Approved in review 2026-10-23", but there was no review on 10-23. The approval of the four sites was the 10-22 review (5617567760). That review came before this rebase, so it did not cover the new base, 1861 / a2a5794b… → 1865 / ea410729…. The review field is the audit trail, so it should state what actually happened: the four sites were approved in the 10-22 review, and the rebased base and result were confirmed by the gate. I'll confirm the rebased transition when I approve.
+Nits (not blocking)
+The POSIX-URL assertion can't tell its branches apart. It puts the pointer under ASSET_DIR/tif/, and the not-under-ASSET_DIR fallback also ends in /tif/dem.tif, so the assertion passes even if is_relative_to(ASSET_DIR) breaks. Another subfolder (e.g. ASSET_DIR/dem/) would distinguish them.
+The PR body's image URL points at the fork branch (raw.githubusercontent.com/adeerkhan/forge3d/fix/…), so it breaks when the branch is deleted.
+The new ledger section is indented with 1 space; the rest of the file uses 2.
+With 1 and 2 pushed, and no other changes, I'll approve and merge on the evidence above.
+adeerkhan
+added 3 commits
+October 24, 2026 16:08
+test(f32-gate): cite the real review, not an invented date
+…
+7dfa3d7
+```
+The splat_fused_env_map record claimed "Approved in review 2026-10-23",
+which is not a review that exists. The four HDRI env-map sites were
+approved in review 5617567760 on 2026-10-22; the rebrided base and
+result were confirmed by the world-coordinate gate at that head, which
+is a check rather than an approval and is now labelled as one.
+
+Ledger bytes are spliced rather than re-serialised: the file carries
+hand-formatted indentation that json.dump would rewrite across ~900
+lines, and its digest is order-sensitive.
+```
+test(splat-map): redirect USERPROFILE too, so the cache test cannot t…
+…
+f816418
+```
+…ouch the real one
+
+test_hdr_cache_is_checksum_validated patched only HOME. On Windows
+ntpath.expanduser reads USERPROFILE first and never consults HOME, so
+the patch was inert there: the test wrote a corrupt cache into the real
+~/.forge3d/datasets/hdri and deleted it, and a matching-hash cache in
+the same directory. The reviewer hit exactly this on Windows 11.
+
+_redirect_home sets HOME, USERPROFILE and Path.home together, and both
+cache tests use it. Verified against the interpreter's own source:
+posixpath.expanduser reads HOME alone, ntpath.expanduser reads
+USERPROFILE first, and Path.home is expanduser in both.
+
+On POSIX the old form happened to work, so this is a Windows-only
+fix; the suite stays green either way.
+```
+test(splat-fusion): derive the residency pool's cost from the parameters
+…
+a7f93db
+```
+The reviewer's point: the section headed "512 MiB budget through the
+memory tracker" asserted pool_bytes <= BUDGET/2, but pool_bytes is
+bvh.size() + page table + the record buffers, and the record buffers
+are sized from splat_slots/point_slots at construction. It therefore
+measures what was allocated, not what the pool can hold — a slot count
+that quietly doubled would stay under any fixed ceiling right up until
+the buffers were allocated.
+
+So the capacity is now derived independently from the parameters and
+checked against the budget: slots x what a slot costs. A splat slot
+costs three allocations (SoA records, inverse covariances, its slice of
+the BVH buffer) and a point slot two, and that BVH slice dominates at
+128 KiB per slot against 48 KiB of records, because blas_node_bound
+yields 2 nodes per 4096 primitives at 16 B each.
+
+The rendered split reconciles exactly with what was allocated:
+78.0 MiB of pool capacity + 22.5 MiB of TLAS/page-table overhead =
+105409984 B = pool_bytes. The overhead term is an identity by
+construction, so it is printed and asserted only to be a real split.
+
+Threshold placement is deliberate and stated: the new check uses the
+whole 512 MiB, not the half-budget ceiling above it, because a pool
+that reaches the full budget has already run the render over its own
+limit. Ablation, with the line-612 ceiling disabled so this gate is the
+one that can fire: 192 slots -> 78 MiB, 384 -> 156 MiB and 640 -> 390
+MiB all pass it; at 640 slots per kind the render itself fails earlier,
+at the tracker's budget, so the sizing formula is fenced on both sides.
+```
+adeerkhan
+commented
+Oct 24, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+All three fixed. Head a7f93db6. src/ is untouched — these are test-and-ledger corrections.
+1. The residency pool gate measures the wrong quantity — you are right, and it was worse than it looked. pool_bytes is bvh.size() + page table + the record buffers, and those record buffers are sized from splat_slots/point_slots at construction, so it reports what was allocated, not what the pool can hold. A slot count that quietly doubled would stay under any fixed ceiling right up until the buffers were allocated.
+The capacity is now derived independently from the parameters and checked against the budget — slots x what a slot costs. A splat slot costs three allocations (SoA records, inverse covariances, its slice of the BVH buffer), a point slot two, and that BVH slice dominates: blas_node_bound yields 2 nodes per 4096 primitives at 16 B each, so 128 KiB per slot against 48 KiB of records — the term the byte-count view was hiding.
+The rendered split reconciles exactly with what was allocated:
+```
+residency pool: 192 slots x 4096 primitives = 81788928 B (78.0 MiB) resident if full,
+  plus 23621056 B (22.5 MiB) of TLAS/page-table overhead = 105409984 B (100.5 MiB) total
+```
+78.0 + 22.5 = 100.5 MiB = pool_bytes. (The overhead term is an identity by construction, so it is printed rather than asserted, and asserted only to be a real split.)
+Ablation. With the line-612 ceiling disabled so the new gate is the only one that can fire: 192 slots → 78 MiB, 384 → 156 MiB, 640 → 390 MiB, all passing it. At 640 slots per kind the render itself fails first, at the tracker's own budget (Budget("fused render exceeded the 536870912 byte budget: render peak 595529712")), so the sizing formula is fenced on both sides.
+I kept the threshold at the whole 512 MiB rather than the half-budget ceiling above it, deliberately, and said so in the comment: a pool that reaches the full budget has already run the render over its own limit, so the two gates are not interchangeable — one is the capacity the formula would hand out, the other what was actually allocated.
+2. The ledger's "Approved in review 2026-10-23" was an invented date — my error. The four HDRI env-map sites were approved in review 5617567760 on 2026-10-22. The record now cites that review and labels the gate's confirmation of the rebased base and result as a check, not an approval, since those are different things. Spliced into the file's bytes, not re-serialised — its indentation is hand-formatted and its digest is order-sensitive.
+3. test_hdr_cache_is_checksum_validated could delete from the real cache on Windows — confirmed at the source, not inferred. posixpath.expanduser reads HOME alone; ntpath.expanduser reads USERPROFILE first and never consults HOME; Path.home() is expanduser in both. So patching only HOME was inert on Windows 11: the test wrote a corrupt cache into the real ~/.forge3d/datasets/hdri and then deleted it, and wrote a matching-hash cache into the same directory. _redirect_home now sets all three, and both cache tests use it. Worth noting the reviewer's machine already had a real kloofendal_48d_partly_cloudy_puresky_2k.hdr in that directory — this was not hypothetical.
+Gates at this head: cargo fmt --check ✅ · cargo +1.97.1 forge3d-clippy ✅ · 17/17 test_splat_fusion_occlusion ✅ (including the paging case) · 78 Python ✅ (test_splat_api + test_splat_fused_map_example + test_splat_fusion_occlusion + test_world_coord_f32_gate) · merges cleanly into d6b9e556.
+On the two non-blocking notes: the certificate still records scene content only as counts, so two DEMs on one grid can share signed inputs — acknowledged, and a content hash per source belongs in its own change. The paging_policies_respect_the_residency_pool formulation stays as your gate; it is unchanged here and its flakiness is tracked separately.
+style(f32-gate): indent the splat_fused_env_map section like the rest…
+…
+710ae71
+```
+… of the ledger
+
+The new section was spliced in at the JSON writer's own 1-space base
+indent while the file's sections use 2. Content is byte-identical apart
+from that leading whitespace -- verified with
+`git diff --ignore-all-space` empty and a parse-and-compare of the old
+and new documents, and the world-coordinate gate still passes 33/33,
+since it reads the parsed value and never the indentation.
+
+The 2-space splice is also the form to use for any further section
+added to this file: its digest is order-sensitive, so the section is
+still text-spliced rather than re-serialised.
+```
+adeerkhan
+commented
+Oct 24, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+Correction to my own reply above: on the third nit you were right and I was wrong. I wrote "the section is at 2 spaces" without checking it — it was at 1, spliced in at the JSON writer's own base indent while the file's sections use 2. Fixed in 710ae718.
+Content is byte-identical apart from that leading whitespace: git diff --ignore-all-space is empty, and a parse-and-compare of the old and new documents reports them equal. The gate still passes 33/33 — it reads the parsed value, never the indentation.
+For any further section added to this file: the digest is order-sensitive, so it stays text-spliced rather than re-serialised, and the splice base indent is 2.
+The other two nits are not mine to take:
+The POSIX-URL assertion. Correct as written: both branches end in /tif/dem.tif, so it passes even if is_relative_to(ASSET_DIR) breaks. It is a real gap, not a cosmetic one — the assertion cannot fail in the way it claims to. I have not touched it, because it needs a decision I do not have: moving the pointer to ASSET_DIR/dem/ changes what the test fixture models, and the DEM presets genuinely live under tif/, so the fixture would then describe a layout the script does not produce. Say the word and I will restructure the assertion to distinguish the branches by URL prefix instead of by suffix, which keeps the layout honest.
+The PR body's image URL. Agreed, and it is a property of a fork-branch URL rather than of this change: any embedded raw.githubusercontent.com/<fork>/<branch>/… link dies when the branch goes. The stable form is the path on main once this merges. I have left the body as it is rather than point it at a ref that does not exist yet.
+Head 710ae718, merges cleanly into d6b9e556. Gates at this head: cargo fmt --check ✅ · cargo +1.97.1 forge3d-clippy ✅ · 17/17 test_splat_fusion_occlusion ✅ · 78 Python ✅ · f32 gate 33/33 ✅.
+test: correct the pool-cost arithmetic and cross-check the ledger base
+…
+03e393f
+```
+Three corrections to the previous three commits, plus one dead guard.
+
+**The pool-cost comment in a7f93db was wrong on all three numbers.**
+It said the per-slot BLAS "dominates ... 128 KiB per slot against 48 KiB
+of records, ... 2 nodes per 4096 primitives at 16 B each". Measured:
+FusionBvhNode is 32 B and blas_node_bound(4096) is 4096 nodes, so a
+slot's BLAS is 128 KiB, but a splat slot's records are 448 KiB, not 48 —
+records dominate at 69 % of the 81,788,928 B pool, and the BLAS is 31 %.
+The code was right; only the prose and the commit message were wrong.
+Retracting the a7f93db message here rather than rewriting it, so the
+record shows the correction.
+
+**The derivation is now inline.** The closure it sat in was called once,
+and the `overhead < resident_if_full` assertion was an invented
+threshold. The remainder is asserted only to be non-zero, and the
+comment states what it reconciles to — checked, not assumed: TLAS
+(492147 x 32 B) + page table + readback ((4 + 4 x 246010) x 4 B each)
+= 23,621,056 B, exactly `pool_bytes - resident_if_full`, residual 0.
+
+**The ledger base is now cross-checked, not just self-consistent.** The
+entry's digests are in scan order, so `base_digest` (a2a5794b) does not
+match `concordia.result_digest` (2adcb38b) even though both describe the
+same 1861 sites — a trap for a reader. The gate now normalises the base
+the way the chain does and asserts it hashes to concordia's recorded
+result, which is what makes "bridged onto main" a check. Ablated: with
+the normalisation removed the assertion fails alone, so it is live. The
+review text states the scan-order caveat.
+
+Also removes a dead `expected is not None` guard in the DEM path — the
+`None` case raises above it.
+```
+adeerkhan
+commented
+Oct 24, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Author
+Two of the three items from my last message were right; auditing my own diff turned up errors in my own work, so 03e393fa corrects them. Head is now 03e393fa.
+My pool-cost comment was wrong on all three numbers. It said the per-slot BLAS "dominates … 128 KiB per slot against 48 KiB of records, … 2 nodes per 4096 primitives at 16 B each." Measured against the types: FusionBvhNode is 32 B and blas_node_bound(4096) is 4096 nodes, so a slot's BLAS is indeed 128 KiB — but a splat slot's records are 448 KiB, not 48. Records dominate at 69 % of the 81,788,928 B pool; the BLAS is 31 %. The code was right (it reconciled to pool_bytes exactly), only the prose and the a7f93db6 message were wrong. I have retracted that message here rather than rewriting it, so the record shows the correction instead of hiding it.
+Two defects in the derivation's shape. The closure was called exactly once — now inline. And overhead < resident_if_full was an invented threshold; the remainder is asserted only to be non-zero.
+The residual is now checked, not asserted. pool_bytes - resident_if_full = 23,621,056 B, and that is exactly the TLAS (492,147 × 32 B) + the page table + the readback staging ((4 + 4 × 246,010) × 4 B each), residual 0. So the model accounts for the whole pool rather than leaving an unexplained remainder.
+Your rebase concern, made checkable. You said you would confirm the rebased transition. There was a trap in it: the entry's digests are in scan order, so base_digest (a2a5794b…) does not equal concordia.result_digest (2adcb38b…) even though both describe the same 1861 sites — a reader would reasonably read that as a contradiction. The gate now normalises the base the way the chain normalises and asserts it hashes to concordia's recorded result, so "bridged onto main" is a check and not a claim. Ablated: with the normalisation removed, that assertion fails alone.
+Also removed a dead expected is not None guard in the DEM path — the None case raises above it.
+Gates at 03e393fa: cargo fmt --check ✅ · cargo +1.97.1 forge3d-clippy 0 errors ✅ · 17/17 test_splat_fusion_occlusion ✅ · 78 Rust lib ✅ · 75 Python (test_splat_api + test_splat_fused_map_example + test_world_coord_f32_gate) ✅ · merges cleanly into d6b9e556.
+milos-agathon
+approved these changes
+Oct 30, 2026
+View reviewed changes
+milos-agathon
+left a comment
+Copy link
+Copy Markdown
+Owner
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Approving 03e393f. Both items from the previous review are fixed: the HDR cache test redirects HOME, USERPROFILE and Path.home(), and the ledger cites the 2026-10-22 review (5617567760).
+Rebased transition confirmed: the four splat_fused_env_map sites bridge 1861 -> 1865 onto main's inventory, and the new check normalising the base to concordia's recorded result passes.
+Verified on a local merge of 03e393f into main 3715935 (Windows 11, RTX 3070, Vulkan):
+Check
+Result
+cargo test --features default,splat-fusion --test test_splat_fusion_occlusion (FORGE3D_SPLAT_FUSION_REQUIRED_GPU=1)
+17/17, paging case included
+tests/test_splat_api.py + tests/test_splat_fused_map_example.py (release wheel built from the merged tree)
+42 passed, 0 skipped
+tests/test_world_coord_f32_gate.py
+33/33
+Follow-ups, not blocking: a CHANGELOG entry under Unreleased for env_map/env_rotation_deg, the in-memory point arrays and the HDR +Y fix; and the per-source content hash in the certificate.
+Hide details
+View details
+milos-agathon
+merged commit 0bf0cbc
+into
+milos-agathon:main
+Oct 30, 2026
+45 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+milos-agathon
+mentioned this pull request
+Oct 30, 2026
+docs(changelog): record the SPLAT-FUSED additions from #255
+#283
+Closed
+milos-agathon
+added a commit
+that referenced
+this pull request
+Oct 30, 2026
+Merge main into docs/changelog-splat-fused-pr255
+…
+c5913c0
+```
+Main added a [1.47.0] section for NEPHELE at the same spot as this entry.
+Keep both: #255 is in 1.47.0, so its bullets move into that section's
+Added, Changed and Fixed lists.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

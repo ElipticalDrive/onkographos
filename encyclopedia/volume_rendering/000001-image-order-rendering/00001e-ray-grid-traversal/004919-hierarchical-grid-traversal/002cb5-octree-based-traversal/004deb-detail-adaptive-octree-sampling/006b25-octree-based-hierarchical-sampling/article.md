@@ -1,0 +1,105 @@
+# Octree-based Hierarchical Sampling
+
+Also called: Octree-based hierarchical sampling optimization, octree-based importance sampling
+
+## Overview
+Octree-based Hierarchical Sampling is a technique that uses an octree to determine sampling densities for volumetric data, achieving importance sampling through different sampling densities within the intersection spaces of leaf nodes and training data blocks [S1]. It sets itself apart from uniform sampling by allocating sample points proportionally to the geometric overlap between the data block and the octree leaves, and from static hierarchical sampling by dynamically adapting to the data structure's local granularity [S1].
+
+## How it works
+**Inputs:**
+1.  A training data block (volumetric data) defined by its position and size [S1].
+2.  An octree structure where leaf nodes correspond to indivisible cuboid subblocks [S1].
+
+**Outputs:**
+1.  A set of sample points distributed across the training data block, with density varying by location [S1].
+
+**Data Structures:**
+*   **Octree:** A hierarchical tree structure where each node has a position and size, and leaf nodes are indivisible cuboid subblocks [S1].
+*   **Training Data Block:** Defined by its position and size [S1].
+
+**Steps:**
+1.  **Generate Octree:** Construct an octree where leaf nodes correspond to indivisible cuboid subblocks [S1].
+2.  **Compute Leaf Volume ($S_{leaf}$):** Calculate the volume of each leaf node based on the size of its corresponding indivisible cuboid subblock [S1].
+3.  **Compute Intersection Volume ($S_{int}$):** Calculate the volume of the intersection space between each leaf node and the training data block using their respective positions and sizes [S1].
+4.  **Calculate Sample Count ($M$):** For each intersection space, compute the number of sample points to allocate using the formula $M = \lceil m \frac{S_{int}}{S_{leaf}} \rceil$ [S1]. Here, $M$ is the number of sample points for that intersection space, $S_{int}$ is the volume of the intersection space, $S_{leaf}$ is the volume of the corresponding leaf node, $m$ is a scaling factor for the sample count, and $\lceil \cdot \rceil$ denotes the ceiling function [S1].
+5.  **Perform Random Sampling:** Execute random sampling within each intersection space in turn, using the calculated count $M$ [S1].
+6.  **Hierarchical Execution:** Since leaf nodes corresponding to different intersection spaces may have different depths in the octree, the sampling process on the training data block is hierarchical [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import random
+
+def octree_hierarchical_sampling(octree_leaves, training_block_min, training_block_max, m):
+    """
+    Performs octree-based hierarchical sampling on a training data block.
+    
+    Args:
+        octree_leaves: List of tuples (leaf_min, leaf_max) representing leaf nodes.
+        training_block_min: Tuple of 3 floats for the training block's minimum coordinates.
+        training_block_max: Tuple of 3 floats for the training block's maximum coordinates.
+        m: Scaling factor for the number of samples.
+        
+    Returns:
+        samples: List of sample points (tuples of 3 floats).
+    """
+    samples = []
+    
+    for leaf_min, leaf_max in octree_leaves:
+        # Step 2: Compute S_leaf (volume of leaf node)
+        s_leaf = (leaf_max[0] - leaf_min[0]) * (leaf_max[1] - leaf_min[1]) * (leaf_max[2] - leaf_min[2])
+        if s_leaf == 0:
+            continue
+            
+        # Compute intersection bounds
+        inter_min = tuple(max(leaf_min[i], training_block_min[i]) for i in range(3))
+        inter_max = tuple(min(leaf_max[i], training_block_max[i]) for i in range(3))
+        
+        # Check for valid intersection
+        if any(inter_min[i] >= inter_max[i] for i in range(3)):
+            continue
+            
+        # Step 3: Compute S_int (volume of intersection space)
+        s_int = (inter_max[0] - inter_min[0]) * (inter_max[1] - inter_min[1]) * (inter_max[2] - inter_min[2])
+        
+        # Step 4: Calculate sample count M using Equation 7
+        m_samples = math.ceil(m * s_int / s_leaf)
+        
+        # Step 5: Perform random sampling in the intersection space
+        for _ in range(m_samples):
+            point = tuple(random.uniform(inter_min[i], inter_max[i]) for i in range(3))
+            samples.append(point)
+            
+    return samples
+```
+
+**Parameters:**
+*   $m$: A scaling factor for the sample count [S1].
+*   Octree Granularity: Determines the size of leaf nodes ($S_{leaf}$) [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Zero Intersection:** If a leaf node does not intersect the training data block, $S_{int} = 0$, and no samples are generated for that leaf [S1].
+*   **Precision:** The use of the ceiling function $\lceil \cdot \rceil$ ensures at least one sample is allocated if $m \cdot S_{int} > 0$, preventing zero samples for small intersections [S1].
+*   **Dynamic Failure:** The importance sampling effectiveness degrades as training weights update, requiring octree reconstruction [S1].
+
+## Subtopics
+
+### [Multi-stage Training Strategy](20860-multi-stage-training-strategy.md)
+A training procedure that reconstructs the octree at the end of each stage to address the failure of importance sampling as model weights update. It sets itself apart by dynamically adapting the sampling distribution to the current model's error landscape, ensuring subsequent stages continue to benefit from importance sampling rather than converging prematurely on an outdated distribution.
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** Not given in the sources.
+*   **Strengths:** Achieves importance sampling by varying sampling densities within intersection spaces, potentially improving efficiency in regions of interest [S1].
+*   **Limitations:** The importance sampling distribution becomes outdated as training proceeds and weights update, necessitating a multi-stage strategy with octree reconstruction [S1].
+*   **When to Use:** When volumetric data has irregular structures or varying importance, and a hierarchical representation (octree) is available or can be constructed [S1].
+*   **When Not to Use:** When the training pipeline cannot accommodate periodic octree reconstruction due to weight updates [G].
+
+## Background
+The method was introduced in the context of volumetric super-resolution of scientific data [S1]. It addresses the challenge of efficiently sampling irregular volumetric data by leveraging the hierarchical structure of an octree to allocate sample points based on geometric overlap [S1]. The technique is part of a broader approach that includes a multi-stage training strategy to handle the dynamic nature of deep learning optimization [S1].
+
+## Sources
+[S1] Octree-based hierarchical sampling optimization for the volumetric super-resolution of scientific data, https://doi.org/10.1016/j.jcp.2024.112804, fetched 2026-10-26

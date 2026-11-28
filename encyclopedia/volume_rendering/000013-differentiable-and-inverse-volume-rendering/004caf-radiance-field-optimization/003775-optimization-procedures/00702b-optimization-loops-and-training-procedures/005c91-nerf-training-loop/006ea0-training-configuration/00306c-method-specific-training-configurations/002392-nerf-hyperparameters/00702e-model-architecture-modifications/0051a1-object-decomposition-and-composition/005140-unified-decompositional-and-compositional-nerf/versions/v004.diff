@@ -1,0 +1,661 @@
+--- v003.md
++++ v004.md
+@@ -4,78 +4,96 @@
+ 
+ ## Overview
+-Unified Decompositional and Compositional NeRF (UDC-NeRF) is a two-stage framework that jointly learns object-level and scene-level implicit representations to enable both novel view synthesis and instance-level scene editing [S1]. Unlike sibling methods such as [DM-NeRF](13525-dm-nerf.md) or [Detail-based Segmentation](15935-detail-based-segmentation.md) which may treat decomposition and composition as separate or loosely coupled tasks, UDC-NeRF unites them in a single pipeline where a coarse global field guides the sampling for a fine-grained decomposed field, which is then re-composed using differentiable one-hot activation weights [S1].
++Unified Decompositional and Compositional NeRF (UDC-NeRF) is a framework for joint scene decomposition and composition that learns both object-level and scene-level implicit representations to enable simultaneous novel view synthesis and object editing [S1]. Unlike methods that treat global synthesis and local editing as separate tasks, UDC-NeRF unites them in a single pipeline where a coarse global field guides sampling for a fine-grained stage that decomposes the scene into distinct object and background components [S1].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Inputs:** A set of $N$ multi-view posed images $\{x_i\}_{i=1}^N$ and their corresponding instance semantic masks $\{s_{ij}\}_{i=1, j=1}^{N, K+1}$ for a static scene, where $K$ is the number of object instances and the background is treated as instance index 1 [S1].
+-*   **Outputs:** A composited radiance field $(c_{comp}, \sigma_{comp})$ for novel view synthesis, and individual object/background radiance fields $(c^k_{object}, \sigma^k_{object})$ for editing [S1].
+-
+-**Data Structures:**
++### Inputs and Outputs
++**Inputs:**
++*   A set of $N$ multi-view posed images $\{x_i \mid i \in [1, N]\}$ [S1].
++*   Corresponding instance semantic masks $\{s_{ij} \mid i \in [1, N], j \in [1, K+1]\}$ for a static real-world scene, where $K$ is the number of object instances and the background is treated as an additional instance (index 1) [S1].
++
++**Outputs:**
++*   A composited scene radiance field for novel view synthesis [S1].
++*   Disentangled local radiance fields for individual objects and the background for scene editing [S1].
++
++### Data Structures and Layout
++The network architecture consists of the following components [S1]:
+ 1.  **Shared Backbone:** A 4-layer Multi-Layer Perceptron (MLP) [S1].
+-    *   Input: 3D point coordinate $p=(x,y,z)$ and view direction $d$.
+-    *   Output: Generic implicit scene feature vector $f$ with dimension 256 [S1].
+-    *   Positional Encoding: 10 levels for coordinates, 4 levels for ray directions [S1].
+-2.  **Guidance Head:** Several MLPs following the backbone [S1].
+-    *   Output: Global RGB color $c_{guidance}$ and volume density $\sigma_{guidance}$ [S1].
+-3.  **Object/Background Heads:** Separate 3-layer MLPs [S1].
+-    *   Input: Feature vector $f$ concatenated with learnable object codes (one per instance $k \in [1, K+1]$) [S1].
+-    *   Output: RGB color $c^k_{object}$ and volume density $\sigma^k_{object}$ for instance $k$ [S1].
+-4.  **Learnable Object Codes:** A set of vectors, one for each of the $K$ objects and the background [S1].
+-
+-**Numbered Steps:**
+-
+-1.  **Coarse Stage (Global Guidance):**
+-    *   Sample points along camera rays.
+-    *   Pass points and directions through the Shared Backbone and Guidance Head to predict $c_{guidance}$ and $\sigma_{guidance}$ [S1].
+-    *   Use the distribution of $\sigma_{guidance}$ to guide point sampling for the fine stage (coarse-to-fine sampling) [S1].
+-
+-2.  **Fine Stage (Decomposition):**
+-    *   Sample points along rays using the guidance from Step 1 [S1].
+-    *   Pass points and directions through the Shared Backbone to get feature $f$ [S1].
+-    *   For each instance $k \in [1, K+1]$:
+-        *   Concatenate $f$ with the learnable code for instance $k$.
+-        *   Pass through the specific Object/Background Head (separate heads for background and objects) to predict $c^k_{object}$ and $\sigma^k_{object}$ [S1].
+-
+-3.  **One-Hot Activation (Composition Weights):**
+-    *   To determine which instance dominates at each point, compute soft probabilities $p_i$ using Gumbel-Softmax on the predicted densities [S1]:
+-        $$ p_i = \frac{\exp((\sigma^i_{object} + g_i)/\tau)}{\sum_j \exp((\sigma^j_{object} + g_j)/\tau)} $$
+-        where $g_i$ are i.i.d. samples from Gumbel(0,1) and temperature $\tau = 0.1$ [S1].
+-    *   Compute one-hot composition weights $M_{obj}$ using a stop-gradient operation to allow backpropagation through the soft probabilities $P$ (where $P$ is the vector of $p_i$) [S1]:
+-        $$ M_{obj} = f_h(\arg\max[g_i + \log \sigma^i_{object}]) - f_{sp}(P) + P $$
+-        where $f_h$ is the one-hot function and $f_{sp}$ is the stop-gradient operator [S1].
+-
++    *   **Input:** Sampled 3D point coordinate $p=(x,y,z)$ and view direction $d$ [S1].
++    *   **Encoding:** Positional encoding is applied: 10 levels for coordinates and 4 levels for ray directions [S1].
++    *   **Output:** Generic implicit scene feature vector $f$ with dimension 256 [S1].
++2.  **Learnable Codes:** A set of learnable vectors, one for each of the $K+1$ instances (background + $K$ objects) [S1].
++3.  **Guidance Head:** Several MLPs following the backbone in the coarse stage [S1].
++    *   **Output:** Global RGB color $c_{guidance}$ and volume density $\sigma_{guidance}$ [S1].
++4.  **Fine-Stage Heads:** Separate MLP heads for the background and objects [S1].
++    *   **Input:** Generic feature $f$ concatenated with the specific learnable code for instance $i$ [S1].
++    *   **Output:** Instance-specific RGB color $c^i_{object}$ and volume density $\sigma^i_{object}$ [S1].
++
++### Algorithm Steps
++
++#### 1. Coarse Stage: Global Guidance
++The coarse stage learns a global scene radiance field to guide point sampling for the fine stage [S1].
++1.  Sample points along camera rays.
++2.  Pass point coordinates $p$ and directions $d$ through the Shared Backbone to get feature $f$ [S1].
++3.  Pass $f$ through the Guidance Head MLPs to predict global color $c_{guidance}$ and density $\sigma_{guidance}$ [S1].
++4.  Use the distribution of $\sigma_{guidance}$ to perform coarse-to-fine point sampling for the fine stage [S1].
++
++#### 2. Fine Stage: Decomposition
++The fine stage learns $K+1$ local radiance fields [S1].
++1.  For each sampled point $p$ and direction $d$, compute generic feature $f$ using the Shared Backbone [S1].
++2.  For each instance $i \in [1, K+1]$:
++    *   Concatenate $f$ with the learnable code for instance $i$ [S1].
++    *   Pass through the corresponding head (Background Head for $i=1$, Object Head for $i>1$) to predict $c^i_{object}$ and $\sigma^i_{object}$ [S1].
++3.  **3D One-Hot Density Regularization:**
++    *   Compute binary occupancy mask $M_c$ for points where foreground objects dominate:
++        $$ M_c = [\arg\max([\sigma^1_{object}, \sigma^2_{object}, ..., \sigma^{K+1}_{object}]) > 1] $$
++        Note: The index in the source notation $[\arg\max(...) > 1]$ refers to the condition that the maximum density belongs to an object instance (indices $2 \dots K+1$) rather than the background (index 1). The regularization targets the background branch [S1].
++    *   Apply regularization loss to constrain the background density $\sigma^1_{object}$ in these regions:
++        $$ L_{one-hot} = M_c \|\sigma^1_{object} - \sigma_0\|^2_2 $$
++        where $\sigma_0 = -0.01$ [S1].
++    *   *Note:* ReLU is applied to $\sigma$ during rendering to ensure positivity; negative raw predictions do not contribute to rendering [S1].
++
++#### 3. Fine Stage: Composition
++The scene is composed by selecting the dominant object/background branch for each point using Gumbel-Softmax [S1].
++1.  **Soft Probability Calculation:**
++    Compute soft probability $p_i$ for the $i$-th object branch:
++    $$ p_i = \frac{\exp((\sigma^i_{object} + g_i)/\tau)}{\sum_j \exp((\sigma^j_{object} + g_j)/\tau)} $$
++    where $g_i$ are i.i.d. samples from Gumbel(0,1) and temperature $\tau = 0.1$ [S1].
++2.  **One-Hot Activation Weights:**
++    Compute composition weights $M_{obj}$ to allow gradient backpropagation through the selection:
++    $$ M_{obj} = f_h(\arg\max[g_i + \log \sigma^i_{object}]) - f_{sp}(P) + P $$
++    where $f_h(\cdot)$ is a one-hot function, $f_{sp}$ is a stop-gradient operation, and $P$ is the matrix of soft probabilities $p_i$ [S1].
++3.  **Composited Radiance Field:**
++    Combine the instance fields using weights $M_{obj}$:
++    $$ (c_{comp}, \sigma_{comp}) = \sum_{i=1}^{K+1} M_{obj}^i \cdot (c^i_{object}, \sigma^i_{object}) $$
++    [S1].
+ 4.  **Residual Composition:**
+-    *   Compute the composited radiance field $(c_{comp}, \sigma_{comp})$ by weighting the individual instance fields with $M_{obj}$ [S1].
+-    *   Combine $(c_{comp}, \sigma_{comp})$ with the residual radiance field $(c_{guidance}, \sigma_{guidance})$ from the coarse stage using point-wise average pooling on color and density [S1].
+-    *   Render the final image from this combined field [S1].
+-
+-**Formulas and Losses:**
+-
+-*   **Binary Occupancy Mask:** Determines if foreground objects occupy a point [S1]:
+-    $$ M_c = [\arg\max([\sigma^1_{object}, \sigma^2_{object}, ..., \sigma^{K+1}_{object}]) > 1] $$
+-    Note: The source uses index 1 for background in the regularization context, but the argmax compares all $K+1$ instances [S1].
+-
+-*   **3D One-Hot Density Regularization:** Constrains the background field (index 1) in regions occupied by foreground objects [S1]:
+-    $$ L_{one-hot} = M_c \|\sigma^1_{object} - \sigma_0\|^2_2 $$
+-    where $\sigma_0 = -0.01$ [S1]. ReLU is applied to $\sigma$ during rendering to ensure positivity [S1].
+-
+-*   **2D In-painting Pseudo Supervision:** Handles occluded background regions using a pre-trained Lama model [S1]:
+-    $$ L_{color pseudo} = M^1_b(r) \|\hat{C}^1_{object}(r) - C^1_{pseudo}(r)\|^2_2 $$
+-    where $M^1_b(r)$ is a 2D spatial weight map (value 0.05 for uncertain background regions) and $C^1_{pseudo}$ is the inpainted color [S1].
+-
+-*   **Intermediate Local Object Rendering:** Renders color and opacity for each instance $k$ [S1]:
+-    $$ \hat{C}^k_{object}(r) = \sum_{i=1}^N T^k_i (1 - \exp(-\sigma^k_{object} \delta_i)) c^k_{object} $$
+-    $$ \hat{O}^k_{object}(r) = \sum_{i=1}^N T^k_i (1 - \exp(-\sigma^k_{object} \delta_i)) $$
+-    where $T^k_i = \exp(-\sum_{j=1}^{i-1} \sigma^k_{object} \delta_j)$ is the transmittance, $N$ is the number of sampled points, and $\delta_i$ is the distance between adjacent points [S1].
+-
+-*   **Object Loss:** Enforces color and opacity consistency using semantic masks [S1]:
+-    $$ L_{object} = \sum_{k=1}^{K+1} M_o(r)^k \|\hat{C}^k_{object}(r) - C(r)\|^2_2 + \lambda_b M_b(r)^1 \|\hat{O}^1_{object}(r) - M_o(r)^1\|^2_2 $$
+-    where $M_o(r)^k$ and $M_b(r)^1$ are 2D spatial weight maps derived from semantic masks [S1].
+-
+-*   **Overall Optimization Loss:**
+-    $$ L_{overall} = L_{comp} + \lambda_1 L_{object} + \lambda_2 L_{color pseudo} + \lambda_3 L_{one-hot} $$
+-    where $\lambda_1, \lambda_2, \lambda_3$ are balancing weights [S1].
+-
+-**Pseudocode:**
++    Combine the composited radiance field with the residual prediction from the coarse stage using point-wise average pooling on color and density:
++    $$ c_{final} = \text{AvgPool}(c_{comp}, c_{guidance}) $$
++    $$ \sigma_{final} = \text{AvgPool}(\sigma_{comp}, \sigma_{guidance}) $$
++    [S1].
++
++#### 4. Loss Functions
++The overall optimization loss is:
++$$ L_{overall} = L_{comp} + \lambda_1 L_{object} + \lambda_2 L_{color\_pseudo} + \lambda_3 L_{one-hot} $$
++where $\lambda_1, \lambda_2, \lambda_3$ are balancing weights [S1].
++
++*   **Object Loss ($L_{object}$):** Combines color consistency and opacity consistency using semantic masks [S1].
++    *   Render intermediate local object color and opacity for ray $r$:
++        $$ \hat{C}^k_{object}(r) = \sum_{i=1}^N T^k_i (1 - \exp(-\sigma^k_{object} \delta_i)) c^k_{object} $$
++        $$ \hat{O}^k_{object}(r) = \sum_{i=1}^N T^k_i (1 - \exp(-\sigma^k_{object} \delta_i)) $$
++        where $T^k_i = \exp(-\sum_{j=1}^{i-1} \sigma^k_{object} \delta_j)$ is the transmittance, $N$ is the number of sampled points, and $\delta_i$ is the distance between adjacent points [S1].
++    *   Compute loss:
++        $$ L_{object} = \sum_{k=1}^{K+1} M_o(r)^k \|\hat{C}^k_{object}(r) - C(r)\|^2_2 + \lambda_b M_b(r)^1 \|\hat{O}^1_{object}(r) - M_o(r)^1\|^2_2 $$
++        where $M_o(r)^k$ and $M_b(r)^1$ are 2D spatial weight maps derived from semantic masks [S1].
++
++*   **2D In-Painting Pseudo Supervision ($L_{color\_pseudo}$):** Handles occluded background regions using a pre-trained lama inpainting model [S1].
++    *   Fill uncertain 2D background regions with pseudo-color $C^1_{pseudo}(r)$ [S1].
++    *   Compute loss:
++        $$ L_{color\_pseudo} = M^1_b(r) \|\hat{C}^1_{object}(r) - C^1_{pseudo}(r)\|^2_2 $$
++        where $M^1_b(r)$ is a 2D spatial weight map with value 0.05 for uncertain background regions [S1].
++
++*   **Composition Loss ($L_{comp}$):** Applied to the final rendered pixels from the composited radiance field [S1].
++
++### Pseudocode
+ 
+ ```python
+@@ -90,206 +108,322 @@
+         
+         Args:
+-            num_objects (int): K, number of object instances. Background is index 1, objects 2..K+1.
+-            hidden_dim (int): Dimension of the shared backbone output.
+-            num_coarse_samples (int): Number of points sampled in the coarse stage.
+-            num_fine_samples (int): Number of points sampled in the fine stage.
++            num_objects (int): K, number of object instances. Background is index 1, objects are 2..K+1.
++            hidden_dim (int): Dimension of the generic feature vector f.
++            num_coarse_samples (int): N_coarse, number of points for coarse stage.
++            num_fine_samples (int): N_fine, number of points for fine stage.
+         """
+         self.K = num_objects
+         self.num_instances = num_objects + 1  # K objects + 1 background
+-        
+-        # Positional Encoding parameters
+-        self.freq_coords = 10
+-        self.freq_dirs = 4
++        self.hidden_dim = hidden_dim
+         
+         # Shared Backbone: 4-layer MLP
+         self.backbone = nn.Sequential(
+-            nn.Linear(6 + 6 * self.freq_coords + 6 * self.freq_dirs, hidden_dim),
+-            nn.ReLU(),
+-            nn.Linear(hidden_dim, hidden_dim),
+-            nn.ReLU(),
+-            nn.Linear(hidden_dim, hidden_dim),
+-            nn.ReLU(),
+-            nn.Linear(hidden_dim, hidden_dim)
++            nn.Linear(6 + 6, 256), # 3 for pos, 3 for dir (simplified encoding)
++            nn.ReLU(),
++            nn.Linear(256, 256),
++            nn.ReLU(),
++            nn.Linear(256, 256),
++            nn.ReLU(),
++            nn.Linear(256, hidden_dim)
+         )
+         
+-        # Guidance Head: Predicts global scene properties for sampling
++        # Guidance Head: Predicts global c_guidance and sigma_guidance
+         self.guidance_head = nn.Sequential(
+-            nn.Linear(hidden_dim, hidden_dim),
+-            nn.ReLU(),
+-            nn.Linear(hidden_dim, hidden_dim),
+-            nn.ReLU(),
+-            nn.Linear(hidden_dim, 4) # 3 for color, 1 for density
++            nn.Linear(hidden_dim, 128),
++            nn.ReLU(),
++            nn.Linear(128, 128),
++            nn.ReLU(),
++            nn.Linear(128, 4) # 3 for color, 1 for density
+         )
+         
+-        # Learnable Object Codes
+-        self.object_codes = nn.Parameter(torch.randn(self.num_instances, hidden_dim))
+-        
+-        # Separate Heads for Background (index 0 in code, but conceptually 1) and Objects
+-        # Note: Source says separate background head and object head. 
+-        # We implement a generic head that takes the code as input.
+-        self.heads = nn.ModuleList([
++        # Learnable Codes for each instance (background + K objects)
++        self.instance_codes = nn.Parameter(torch.randn(self.num_instances, hidden_dim))
++        
++        # Fine Stage Heads
++        # Separate heads for background (index 0) and objects (indices 1..K)
++        # Note: Source uses index 1 for background, 2..K+1 for objects. 
++        # Here we map internal index 0->Background, 1..K->Objects.
++        self.bg_head = nn.Sequential(
++            nn.Linear(hidden_dim + hidden_dim, 128), # f + code
++            nn.ReLU(),
++            nn.Linear(128, 128),
++            nn.ReLU(),
++            nn.Linear(128, 4) # 3 for color, 1 for density
++        )
++        
++        self.obj_heads = nn.ModuleList([
+             nn.Sequential(
+-                nn.Linear(hidden_dim * 2, hidden_dim), # Concat feature + code
++                nn.Linear(hidden_dim + hidden_dim, 128),
+                 nn.ReLU(),
+-                nn.Linear(hidden_dim, hidden_dim),
++                nn.Linear(128, 128),
+                 nn.ReLU(),
+-                nn.Linear(hidden_dim, 4) # 3 for color, 1 for density
+-            ) for _ in range(self.num_instances)
++                nn.Linear(128, 4)
++            ) for _ in range(num_objects)
+         ])
+         
+-        # Hyperparameters
++        self.num_coarse = num_coarse_samples
++        self.num_fine = num_fine_samples
+         self.tau = 0.1
+         self.sigma_0 = -0.01
+-        self.lambda_1 = 1.0 # Placeholder for L_object weight
+-        self.lambda_2 = 1.0 # Placeholder for L_color_pseudo weight
+-        self.lambda_3 = 1.0 # Placeholder for L_one_hot weight
+-        
+-    def positional_encoding(self, x, num_freq_bands, use_identity=True):
+-        """Standard positional encoding."""
+-        f = [1.0]
+-        for i in range(1, num_freq_bands):
+-            f.append(2**i * x)
+-        return torch.cat(f, dim=-1)
+-
+-    def forward(self, rays_o, rays_d, semantic_masks=None, pseudo_colors=None):
++
++    def forward(self, ray_origins, ray_directions, semantic_masks, pseudo_colors=None):
+         """
+         Forward pass for training.
+         
+         Args:
+-            rays_o: Origin of rays [N_rays, 3]
+-            rays_d: Direction of rays [N_rays, 3]
+-            semantic_masks: Semantic masks for supervision [N_rays, N_instances]
+-            pseudo_colors: Pseudo colors from inpainting for background [N_rays, 3]
++            ray_origins: (B, 3)
++            ray_directions: (B, 3)
++            semantic_masks: (B, H, W, K+1) - Instance masks for the current view
++            pseudo_colors: (B, H, W, 3) - Pseudo colors for occluded background regions from lama
+             
+         Returns:
+-            rendered_color: Final rendered color [N_rays, 3]
+-            losses: Dictionary of loss components
+-        """
+-        N_rays = rays_o.shape[0]
+-        
+-        # 1. Coarse Stage
+-        # Sample points along rays (simplified uniform sampling for demonstration)
+-        # In practice, this uses the guidance field distribution
+-        t_coarse = torch.linspace(0, 1, self.num_coarse_samples).to(rays_o.device)
+-        # Expand for rays
+-        t_coarse = t_coarse.unsqueeze(0).expand(N_rays, -1)
+-        points_coarse = rays_o.unsqueeze(1) + rays_d.unsqueeze(1) * t_coarse.unsqueeze(2)
+-        
+-        # Encode inputs
+-        # Assuming standard NeRF PE for coords and dirs
+-        # For brevity, assuming helper functions exist or inputs are already encoded
+-        # In a real implementation, encode points_coarse and rays_d
+-        
+-        # Predict guidance color and density
+-        # Guidance Head takes backbone output
+-        # Backbone input: encoded points + encoded dirs
+-        # Let's assume we have encoded features for simplicity in this pseudocode structure
+-        # Real implementation requires full PE pipeline
+-        
+-        # Placeholder for guidance prediction logic
+-        # sigma_guidance, c_guidance = self.guidance_head(backbone_output)
+-        
+-        # 2. Fine Stage Sampling
+-        # Use sigma_guidance to sample points (importance sampling)
+-        # For this pseudocode, we assume we have sampled points points_fine
+-        # and their corresponding t values t_fine
+-        
+-        # Encode fine points
+-        # points_fine, dirs_encoded = encode(points_fine, rays_d)
+-        
+-        # Get generic feature from backbone
+-        # f = self.backbone(points_fine) # Shape: [N_rays, N_samples, hidden_dim]
+-        
+-        # 3. Instance-specific Prediction
+-        # Expand object codes to match batch and samples
+-        # codes = self.object_codes # [N_instances, hidden_dim]
+-        
+-        # Predict color and density for each instance
+-        # c_objects, sigma_objects = [], []
+-        # for i in range(self.num_instances):
+-        #     input_to_head = torch.cat([f, codes[i].unsqueeze(0).unsqueeze(0).expand_as(f)], dim=-1)
+-        #     out = self.heads[i](input_to_head)
+-        #     c_objects.append(out[..., :3])
+-        #     sigma_objects.append(out[..., 3:])
+-        
+-        # 4. One-Hot Activation
+-        # Compute soft probabilities using Gumbel-Softmax
+-        # g = torch.distributions.gumbel.Gumbel(0, 1).sample(sigma_objects[0].shape).to(rays_o.device)
+-        # logits = torch.stack(sigma_objects, dim=-1) # [N_rays, N_samples, N_instances]
+-        # g = torch.stack([g for _ in range(self.num_instances)], dim=-1)
+-        # probs = torch.softmax((logits + g) / self.tau, dim=-1)
+-        
+-        # Compute one-hot weights M_obj
+-        # argmax_indices = torch.argmax(g + torch.log(torch.clamp(logits, min=1e-6)), dim=-1)
+-        # M_obj = F.one_hot(argmax_indices, num_classes=self.num_instances).float()
+-        # Stop gradient on probs for the residual connection
+-        # M_obj = M_obj - probs.detach() + probs
+-        
+-        # 5. Composition
+-        # Weighted sum of instance fields
+-        # c_objects_stacked = torch.stack(c_objects, dim=-1)
+-        # sigma_objects_stacked = torch.stack(sigma_objects, dim=-1)
+-        
+-        # c_comp = torch.sum(c_objects_stacked * M_obj.unsqueeze(-1), dim=-1)
+-        # sigma_comp = torch.sum(sigma_objects_stacked * M_obj, dim=-1)
+-        
+-        # 6. Residual Composition
+-        # Combine with guidance field
+-        # c_final = (c_comp + c_guidance) / 2
+-        # sigma_final = (sigma_comp + sigma_guidance) / 2
+-        
+-        # 7. Volume Rendering
+-        # Render final image from c_final, sigma_final
+-        # rendered_color = volume_render(c_final, sigma_final, t_fine)
+-        
+-        # 8. Loss Calculation
+-        # losses = self.compute_losses(rendered_color, c_final, sigma_final, semantic_masks, pseudo_colors)
+-        
+-        # Return rendered_color and losses
++            loss: scalar
++        """
++        B = ray_origins.shape[0]
++        device = ray_origins.device
++        
++        # 1. Coarse Stage Sampling
++        # Generate coarse points along rays
++        t_coarse = torch.linspace(0, 1, self.num_coarse, device=device).unsqueeze(0).unsqueeze(0) # (1, 1, N_coarse)
++        # Expand to batch and rays (assuming single ray per pixel for simplicity, or batched rays)
++        # In practice, rays are (B, H, W, 3). Here we assume flattened rays or batched processing.
++        # Let's assume rays are processed as (B, N_rays, 3).
++        
++        # For this pseudocode, we assume ray_origins and directions are (B, N_rays, 3)
++        # and we sample points for each ray.
++        
++        # Coarse points
++        t_c = torch.linspace(0, 1, self.num_coarse, device=device).view(1, 1, -1)
++        points_coarse = ray_origins.unsqueeze(2) + ray_directions.unsqueeze(2) * t_c
++        
++        # Get features
++        # Positional encoding omitted for brevity, assume inputs are encoded
++        f_coarse = self.backbone(points_coarse.view(-1, 6)) # (B*N*R, 256)
++        f_coarse = f_coarse.view(B, -1, self.hidden_dim) # (B, N_rays, 256)
++        
++        # Guidance Head
++        guidance_out = self.guidance_head(f_coarse) # (B, N_rays, 4)
++        c_guidance = guidance_out[..., :3]
++        sigma_guidance = guidance_out[..., 3:]
++        
++        # Use sigma_guidance for importance sampling (simplified: uniform fine sampling guided by coarse density)
++        # In practice, use stratified sampling based on sigma_guidance
++        t_f = torch.linspace(0, 1, self.num_fine, device=device).view(1, 1, -1)
++        points_fine = ray_origins.unsqueeze(2) + ray_directions.unsqueeze(2) * t_f
++        
++        # 2. Fine Stage Decomposition
++        f_fine = self.backbone(points_fine.view(-1, 6))
++        f_fine = f_fine.view(B, -1, self.hidden_dim) # (B, N_rays, 256)
++        
++        # Predict for all instances
++        # Background (index 0 in code, index 1 in source)
++        code_bg = self.instance_codes[0].unsqueeze(0).unsqueeze(0) # (1, 1, 256)
++        input_bg = torch.cat([f_fine, code_bg], dim=-1)
++        out_bg = self.bg_head(input_bg)
++        c_bg = out_bg[..., :3]
++        sigma_bg = out_bg[..., 3:]
++        
++        # Objects (indices 1..K in code, 2..K+1 in source)
++        c_objs = []
++        sigma_objs = []
++        for k in range(self.K):
++            code_obj = self.instance_codes[k+1].unsqueeze(0).unsqueeze(0)
++            input_obj = torch.cat([f_fine, code_obj], dim=-1)
++            out_obj = self.obj_heads[k](input_obj)
++            c_objs.append(out_obj[..., :3])
++            sigma_objs.append(out_obj[..., 3:])
++            
++        c_objs = torch.stack(c_objs, dim=1) # (B, K, N_rays, 4)
++        sigma_objs = torch.stack(sigma_objs, dim=1) # (B, K, N_rays, 4)
++        
++        # Stack all instances: [Background, Obj1, ..., ObjK]
++        c_all = torch.cat([c_bg, c_objs], dim=1) # (B, K+1, N_rays, 4)
++        sigma_all = torch.cat([sigma_bg, sigma_objs], dim=1) # (B, K+1, N_rays, 4)
++        
++        # 3. Loss Calculation
++        
++        # A. 3D One-Hot Density Regularization
++        # M_c = [argmax(sigma_all) > 1] -> argmax index >= 1 (since 0 is bg)
++        # argmax returns index. If index > 0, it's an object.
++        max_indices = torch.argmax(sigma_all, dim=1) # (B, N_rays)
++        M_c = (max_indices > 0).float() # (B, N_rays)
++        
++        # L_one_hot = M_c * ||sigma_bg - sigma_0||^2
++        # sigma_bg is sigma_all[:, 0]
++        L_one_hot = M_c * (sigma_all[:, 0, :, 0] - self.sigma_0)**2 # Sum over rays later
++        L_one_hot = L_one_hot.mean()
++        
++        # B. Gumbel-Softmax Activation for Composition
++        # p_i = exp((sigma_i + g_i)/tau) / sum(exp((sigma_j + g_j)/tau))
++        # Add Gumbel noise
++        g = torch.distributions.gumbel.Gumbel(0, 1)
++        noise = g.sample(sigma_all.shape).to(device)
++        
++        # Softmax over instance dimension (dim=1)
++        # sigma_all is (B, K+1, N_rays, 4). We apply Gumbel-Softmax on the density (last dim)
++        # Actually, the activation is per point. 
++        # p_i for a point is based on sigma_i at that point.
++        
++        # Reshape for softmax
++        sigma_flat = sigma_all.view(-1, self.num_instances, 1) # (B*N_rays, K+1, 1)
++        noise_flat = noise.view(-1, self.num_instances, 1)
++        
++        logits = (sigma_flat + noise_flat) / self.tau
++        P = F.softmax(logits, dim=1) # (B*N_rays, K+1, 1)
++        
++        # One-hot weights M_obj
++        # M_obj = fh(argmax[log sigma + g]) - sp(P) + P
++        # argmax[log sigma + g] is equivalent to argmax[log sigma + g]
++        # Since sigma can be negative, use log(sigma + eps) or just sigma as per source?
++        # Source says: argmax[g_i + log sigma^i_object]. 
++        # Note: sigma is raw prediction, can be negative. log of negative is undefined.
++        # However, source says "ReLU is applied to sigma during rendering". 
++        # For activation, we use raw sigma? 
++        # Source Eq 6: argmax[g_i + log sigma^i_object]. 
++        # If sigma is negative, log is invalid. 
++        # Implementation note: Usually sigma is clamped or exp is used. 
++        # Given the source explicitly writes log sigma, we assume sigma > 0 or use a small epsilon.
++        # Or perhaps the source implies using the raw density values directly in the Gumbel-Softmax numerator?
++        # Eq 5 uses sigma directly in exp. Eq 6 uses log sigma. 
++        # Let's follow Eq 6 strictly, assuming sigma > 0 or adding epsilon.
++        
++        sigma_eps = sigma_all + 1e-6
++        log_sigma = torch.log(sigma_eps)
++        g_log = noise # g_i samples
++        selection_logits = log_sigma + g_log
++        
++        # One-hot selection
++        one_hot_indices = torch.argmax(selection_logits, dim=1) # (B, N_rays)
++        one_hot_mask = F.one_hot(one_hot_indices, num_classes=self.num_instances).float() # (B, N_rays, K+1)
++        
++        # Stop gradient on P
++        P_stop = P.detach()
++        
++        # M_obj = one_hot - P_stop + P
++        # Reshape for broadcasting
++        one_hot_mask = one_hot_mask.view(B, -1, self.num_instances, 1)
++        P_stop = P_stop.view(B, -1, self.num_instances, 1)
++        P_val = P.view(B, -1, self.num_instances, 1)
++        
++        M_obj = one_hot_mask - P_stop + P_val # (B, N_rays, K+1, 1)
++        
++        # C. Composited Radiance Field
++        # c_comp = sum(M_obj * c_all)
++        # sigma_comp = sum(M_obj * sigma_all)
++        # c_all shape: (B, K+1, N_rays, 4) -> (B, N_rays, K+1, 4)
++        c_all_t = c_all.permute(0, 2, 1, 3)
++        sigma_all_t = sigma_all.permute(0, 2, 1, 3)
++        
++        c_comp = torch.sum(M_obj * c_all_t, dim=2) # (B, N_rays, 4)
++        sigma_comp = torch.sum(M_obj * sigma_all_t, dim=2) # (B, N_rays, 4)
++        
++        # D. Residual Composition
++        # c_final = AvgPool(c_comp, c_guidance)
++        # sigma_final = AvgPool(sigma_comp, sigma_guidance)
++        # This implies averaging the fine and coarse predictions at the sampled points?
++        # Or averaging the final rendered values?
++        # Source: "point-wise average pooling operation applied on the color and density"
++        # This likely means averaging the fine and coarse predictions for the same spatial locations if they align,
++        # or simply averaging the two rendered results.
++        # Given the coarse stage guides sampling, the points are different.
++        # However, for loss calculation, we render the final field.
++        
++        # Render c_final and sigma_final
++        # Standard NeRF rendering
++        # For simplicity, we render c_comp and sigma_comp as the final output for loss,
++        # as the residual composition is a post-processing step for the final image.
++        # The loss L_comp is applied to the final rendered pixels.
++        
++        # Render function (simplified)
++        c_render, sigma_render = self.render_volume(c_comp, sigma_comp, points_fine, t_f)
++        
++        # L_comp: Color loss against ground truth image
++        # Assuming gt_image is available
++        # L_comp = ||c_render - gt_image||^2
++        
++        # L_object: Color and Opacity consistency
++        # Render each object individually
++        L_object = 0
++        for k in range(self.num_instances):
++            c_k = c_all_t[:, :, k, :3]
++            sigma_k = sigma_all_t[:, :, k, 3:]
++            c_obj_render, sigma_obj_render = self.render_volume(c_k, sigma_k, points_fine, t_f)
++            
++            # Semantic mask for instance k
++            # M_o(r)^k is 2D spatial weight map
++            # Assuming semantic_masks is (B, H, W, K+1)
++            # We need to map ray indices to pixel indices.
++            # This requires knowing the ray-to-pixel mapping.
++            # For pseudocode, we assume we have access to the mask for the current ray.
++            
++            # L_object = sum_k M_o^k ||c_obj_render - gt||^2 + lambda_b M_b^1 ||sigma_obj_render - M_o^1||^2
++            # This part requires pixel-wise alignment which is complex in abstract pseudocode.
++            pass 
++            
++        # L_color_pseudo
++        # L_color_pseudo = M_b^1 ||c_bg_render - pseudo_color||^2
+         pass
+ 
+-    def compute_losses(self, rendered_color, c_final, sigma_final, semantic_masks, pseudo_colors):
+-        """
+-        Compute the total loss.
+-        """
+-        # L_comp: Color loss between rendered and ground truth
+-        # L_comp = F.mse_loss(rendered_color, gt_color)
+-        
+-        # L_object: Color and opacity consistency
+-        # Requires rendering intermediate object fields
+-        # L_object = ...
+-        
+-        # L_color_pseudo: In-painting supervision for background
+-        # Requires identifying background pixels and comparing with pseudo colors
+-        # L_color_pseudo = ...
+-        
+-        # L_one_hot: Density regularization
+-        # Requires computing occupancy mask M_c
+-        # L_one_hot = ...
+-        
+-        # L_overall = L_comp + lambda1 * L_object + lambda2 * L_color_pseudo + lambda3 * L_one_hot
+-        
+-        return {}
++    def render_volume(self, c, sigma, points, t):
++        """
++        Standard volume rendering.
++        """
++        # c: (B, N_rays, 4)
++        # sigma: (B, N_rays, 4)
++        # points: (B, N_rays, N_samples, 3)
++        # t: (B, N_rays, N_samples)
++        
++        N_samples = points.shape[2]
++        
++        # Compute deltas
++        deltas = t[:, :, 1:] - t[:, :, :-1]
++        deltas = torch.cat([deltas, torch.ones_like(deltas[:, :, :1])], dim=2)
++        
++        # Transmittance
++        # alpha = 1 - exp(-sigma * delta)
++        # T = exp(-sum(alpha))
++        
++        sigma_clamped = F.relu(sigma) # Ensure positivity for rendering
++        alpha = 1.0 - torch.exp(-sigma_clamped * deltas.unsqueeze(-1))
++        
++        # Transmittance
++        T = torch.cumprod(torch.cat([torch.ones_like(alpha[:, :, :1, :]), 1.0 - alpha], dim=2), dim=2)[:, :, :-1, :]
++        
++        # Weight
++        weights = alpha * T
++        
++        # Composite
++        c_render = torch.sum(weights * c.unsqueeze(2), dim=2)
++        sigma_render = torch.sum(weights * sigma_clamped.unsqueeze(2), dim=2)
++        
++        return c_render, sigma_render
+ ```
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Gradient Backpropagation with Argmax:** The $\arg\max$ operation is non-differentiable. This is addressed by using the Gumbel-Softmax function on volume density as a continuous approximation, combined with a stop-gradient operation on the soft probabilities to allow gradients to flow through the one-hot mask [S1].
+-*   **Occluded Background Regions:** Regions occluded by objects in all training views are ambiguous. This is handled by using a pre-trained Lama in-painting model to provide pseudo-color supervision for these uncertain 2D background regions [S1].
+-*   **In-painting Ambiguity:** 2D in-painting may introduce ambiguity in regions seen in other views, but this is suppressed by strong multi-view consistency supervision [S1].
+-*   **Density Positivity:** Volume density $\sigma$ must be non-negative for rendering. ReLU is applied to $\sigma$ during the rendering process [S1].
++### Parameters
++*   $N$: Number of multi-view images [S1].
++*   $K$: Number of object instances [S1].
++*   $\tau$: Temperature for Gumbel-Softmax, set to 0.1 [S1].
++*   $\sigma_0$: Regularization target for background density, set to -0.01 [S1].
++*   $\lambda_1, \lambda_2, \lambda_3$: Balancing weights for $L_{object}, L_{color\_pseudo}, L_{one-hot}$ [S1].
++*   Positional Encoding: 10 levels for coordinates, 4 levels for directions [S1].
++
++### Edge Cases and Pitfalls
++*   **Generation Ambiguity:** Regions occluded by objects and unseen in all training views cause ambiguity in background modeling [S1].
++*   **Inpainting Ambiguity:** 2D inpainting may introduce ambiguity for regions seen in other views, but this is suppressed by strong multi-view consistency supervision [S1].
++*   **Gradient Backpropagation:** The $\arg\max$ operation is non-differentiable. This is addressed by using Gumbel-Softmax on volume density as a continuous approximation [S1].
++*   **Negative Density:** Raw volume density predictions can be negative. ReLU is applied during rendering to ensure positivity, allowing $\sigma_0$ to be set to a non-positive value like -0.01 [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The method involves two stages (coarse and fine) and multiple MLP passes per instance ($K+1$). The fine stage requires computing Gumbel-Softmax and one-hot weights for all instances, adding overhead compared to single-field NeRF.
+-*   **Memory Complexity:** Requires storing learnable codes for $K+1$ instances and separate MLP heads for each instance (or a shared head with code conditioning). The source does not specify exact memory usage in MB/GB.
+-*   **Measured Performance:** On the ToyDesk2 scene, the full model achieved an SSIM of 0.8126 and LPIPS of 0.4488. Ablations show that removing 3D One-hot Density Regularization drops SSIM to 0.8116, removing Gumbel-Softmax Activation drops it to 0.7217, and removing 2D In-painting pseudo Supervision drops it to 0.8127 (SSIM) and increases LPIPS to 0.4516. Removing Residual Radiance Composition drops SSIM to 0.8003 [S1].
+-*   **Strengths:** Enables joint novel view synthesis and object editing in a unified pipeline. The one-hot regularization and in-painting supervision improve rendering and editing quality, especially for occluded regions [S1].
+-*   **Limitations:** Relies on semantic masks for supervision. The method assumes a static scene. The two-stage process adds complexity compared to single-stage NeRF [S1].
+-*   **When to use:** When both high-quality novel view synthesis and instance-level editing (removal, addition, transformation) are required for a static scene with known object instances [S1].
+-*   **When not to use:** For dynamic scenes, or when semantic masks are not available [S1].
++*   **Time and Memory Complexity:** The method uses a two-stage framework. The coarse stage adds overhead for guidance sampling, but the fine stage uses a shared backbone, reducing redundancy compared to separate networks [S1]. Memory usage increases with the number of objects $K$ due to learnable codes and separate heads [S1].
++*   **Measured Performance:** On the ToyDesk2 scene, the full model achieved an SSIM of 0.8126 and LPIPS of 0.4488, outperforming ablations (e.g., w/o Gumbel-Softmax: SSIM 0.7217, LPIPS 0.5452) [S1].
++*   **Strengths:** Enables joint novel view synthesis and object editing in a unified pipeline; models interactions between global and local representations; handles occluded background regions effectively [S1].
++*   **Limitations:** Requires instance semantic masks for training; relies on a pre-trained inpainting model for pseudo supervision [S1].
++*   **When to use:** When both high-quality novel view synthesis and object-level editing (removal, addition, manipulation) are required [S1].
++*   **When not to use:** When only global scene synthesis is needed without editing, or when semantic masks are unavailable [S1].
+ 
+ ## Background
+ *   **Origin:** Proposed in "Learning Unified Decompositional and Compositional NeRF for Editable Novel View Synthesis" (2023) [S1].
+-*   **History:** Builds upon ObjectNeRF [S1], which learns separate networks for global scene and local object branches without modeling interactions. UDC-NeRF unites decomposition and composition to model interactions and correlations between these tasks [S1].
+-*   **Usage:** Used for joint scene decomposition and composition to effectively learn object-level and scene-level implicit representations for effective scene modeling, allowing object editing and novel view synthesis in a unified pipeline [S1].
++*   **History:** Builds upon ObjectNeRF [37] and ObjectSDF [35], which learn separate networks for global and local representations. UDC-NeRF unites these tasks to model interactions and correlations [S1].
++*   **Usage:** Used for editable novel view synthesis in real-world scenes [S1].
+ 
+ ## Sources

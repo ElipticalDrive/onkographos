@@ -1,0 +1,193 @@
+--- v001.md
++++ v002.md
+@@ -4,13 +4,13 @@
+ 
+ ## Overview
+-Shared-memory parallel raycasting on CPUs is a volume rendering technique that distributes the computational load of ray casting and integration across multiple threads within a single process using a shared-memory programming model [S1, unofficial]. It solves the performance bottleneck of sequential raycasting by decomposing the output image into spatially disjoint work blocks, allowing multiple cores to render pixels concurrently [S1, unofficial]. It is distinguished from GPU-based parallel raycasting by its use of explicit thread management (e.g., POSIX threads) and dynamic work queues to handle load imbalance, rather than relying on hardware-level SIMT execution [S1, unofficial].
++Shared-memory parallel raycasting on CPUs distributes the computational load of ray casting and integration across multiple threads within a single process using a shared-memory programming model [S1, unofficial]. It solves the performance bottleneck of sequential volume rendering by decomposing the output image into spatially disjoint work blocks, allowing multiple cores to render pixels concurrently [S1, unofficial]. It is distinguished from GPU-based parallel raycasting by its use of explicit thread management (e.g., POSIX threads) and dynamic work queues to handle load imbalance, rather than relying on hardware-level SIMT execution [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A 3D scalar/vector volume dataset, camera parameters (view matrix, projection matrix), and a user-specified number of rendering threads.
+-*   **Output:** A 2D final image buffer containing the composited color and opacity for each pixel.
++*   **Input:** A 3D scalar/vector volume dataset, camera parameters (view matrix, projection matrix), and a user-specified number of rendering threads [S1, unofficial].
++*   **Output:** A 2D final image buffer containing the composited color and opacity for each pixel [S1, unofficial].
+ 
+ **Data Structures:**
+-1.  **Shared-Memory Data Structure:** A global memory region visible to all threads. It stores precomputed values common to all rendering tasks, such as the inverse of the model-view matrix [S1, unofficial].
++1.  **Shared-Memory Data Structure:** A global memory region visible to all threads that stores precomputed values common to all rendering tasks, such as the inverse of the model-view matrix [S1, unofficial].
+ 2.  **Work Queue:** A thread-safe queue containing work assignments (blocks of pixels) to be processed by slave threads [S1, unofficial].
+ 3.  **Final Image Buffer:** A shared memory buffer where threads write the final pixel color and opacity [S1, unofficial].
+@@ -32,60 +32,69 @@
+ *   **Ray Casting:** For each pixel $(u, v)$ in a work block, a ray is generated. The volume is sampled along the ray. The color $C$ and opacity $\alpha$ are integrated using standard volume rendering integration (Levoy’s formulation) [S1, unofficial]:
+     $$ C = \sum_{i=0}^{n-1} c_i \alpha_i \prod_{j=0}^{i-1} (1 - \alpha_j) $$
++    $$ \alpha = 1 - \prod_{i=0}^{n-1} (1 - \alpha_i) $$
+     Where $c_i$ and $\alpha_i$ are the color and opacity at sample $i$, and $n$ is the number of samples along the ray [S1, unofficial].
+ 
+ **Parameters:**
+-*   **Work Block Tessellation:** The user specifies the size of the work blocks. Examples include $4 \times 4$, $8 \times 8$, $512 \times 1$, or $1 \times 512$ pixels [S1, unofficial].
++*   **Work Block Tessellation:** The user specifies an arbitrary tessellation of the output image forming the basis for work assignments, such as blocks of size $4 \times 4$, $8 \times 8$, $512 \times 1$, or $1 \times 512$ pixels [S1, unofficial].
+ *   **Thread Count:** User-specified number of rendering threads, typically matching the number of available CPU cores [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Load Imbalance:** Static work assignment (round-robin) can suffer from load imbalance if the volume data or camera view causes some rays to require significantly more computation (e.g., due to empty space skipping or complex transfer functions) than others [S1, unofficial].
+-*   **Memory Contention:** If not managed carefully, concurrent writes to the final image buffer or shared data structures can cause cache thrashing or race conditions [S1, unofficial].
+-*   **Precision:** Standard floating-point precision is used for ray marching and integration [S1, unofficial].
++*   **Load Imbalance:** Static work assignment (round-robin) can suffer from load imbalance if the volume data or camera view causes some rays to require significantly more computation than others, making dynamic assignment preferable [S1, unofficial].
++*   **Memory Contention:** Concurrent writes to the final image buffer or shared data structures can cause cache thrashing or race conditions if not managed carefully [S1, unofficial].
++*   **Block Synchronization:** Forcing all threads to process blocks in lock-step via shared barriers can induce better memory utilization by having multiple worker threads access nearby regions of the source data [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
++import math
+ import threading
+ import queue
+-import math
+ 
+ # Global shared state
+-shared_data = {}  # Stores inverse model-view matrix, etc.
++shared_data = {}
+ work_queue = queue.Queue()
+ final_image_buffer = None
+-barrier = threading.Barrier()
+ stop_event = threading.Event()
+ 
+ def compute_shared_data():
+     """Master thread computes common values."""
+-    # Example: Compute inverse model-view matrix
+-    shared_data['inv_mv_matrix'] = compute_inverse_model_view_matrix()
++    shared_data['inv_mv_matrix'] = [[1.0]*4 for _ in range(4)]
+ 
+-def generate_work_blocks(image_width, image_height, block_size):
+-    """Master thread generates work assignments."""
+-    blocks = []
+-    for y in range(0, image_height, block_size):
+-        for x in range(0, image_width, block_size):
+-            blocks.append((x, y, min(x + block_size, image_width), min(y + block_size, image_height)))
+-    return blocks
++def generate_ray(u, v, inv_mv_matrix):
++    """Generates ray origin and direction from camera through pixel (u, v)."""
++    return [0.0, 0.0, 0.0], [0.0, 0.0, -1.0]
+ 
+-def raycast_pixel(u, v, inv_mv_matrix, volume_data):
+-    """Cast a single ray and integrate color/opacity."""
+-    # Generate ray from camera through pixel (u, v)
++def compute_ray_length(origin, direction, volume_bounds):
++    """Computes distance from origin to volume exit or far plane."""
++    return 100.0
++
++def trilinear_sample(volume_data, pos):
++    """Returns density/value at position using trilinear interpolation."""
++    return 0.5
++
++def apply_transfer_function(value):
++    """Maps density to color [r,g,b] and opacity alpha."""
++    return [0.5, 0.5, 0.5], 0.1
++
++def raycast_pixel(u, v, inv_mv_matrix, volume_data, volume_bounds, step_size):
++    """Cast a single ray and integrate color/opacity using Levoy's formulation."""
+     ray_origin, ray_direction = generate_ray(u, v, inv_mv_matrix)
++    ray_length = compute_ray_length(ray_origin, ray_direction, volume_bounds)
+     
+     color = [0.0, 0.0, 0.0]
+     alpha = 0.0
++    t = 0.0
+     
+-    # March along ray
+-    t = 0.0
+-    while t < ray_length and alpha < 1.0:
+-        sample = trilinear_sample(volume_data, ray_origin + ray_direction * t)
++    while t < ray_length:
++        pos = [ray_origin[i] + ray_direction[i] * t for i in range(3)]
++        sample = trilinear_sample(volume_data, pos)
+         c, a = apply_transfer_function(sample)
+         
+-        # Volume rendering integration
+-        weight = a * math.exp(-alpha)
+-        color = color + c * weight
++        # Front-to-back compositing
++        weight = a * (1.0 - alpha)
++        color = [color[i] + c[i] * weight for i in range(3)]
+         alpha = alpha + a * (1.0 - alpha)
+         
++        if alpha >= 1.0:
++            break
+         t += step_size
+         
+@@ -96,5 +105,4 @@
+     while not stop_event.is_set():
+         try:
+-            # Request work block from queue
+             block = work_queue.get(timeout=1.0)
+         except queue.Empty:
+@@ -103,31 +111,26 @@
+         x_min, y_min, x_max, y_max = block
+         
+-        # Process all pixels in the block
+         for y in range(y_min, y_max):
+             for x in range(x_min, x_max):
+-                color, alpha = raycast_pixel(x, y, shared_data['inv_mv_matrix'], volume_data)
++                color, alpha = raycast_pixel(x, y, shared_data['inv_mv_matrix'], volume_data, volume_bounds, step_size)
+                 final_image_buffer[y][x] = (color, alpha)
+                 
+-        # Optional: Block synchronization barrier
+-        # barrier.wait()
+-        
+         work_queue.task_done()
+ 
+-def master_thread_render(image_width, image_height, num_threads, block_size):
++def master_thread_render(image_width, image_height, num_threads, block_size, volume_data, volume_bounds, step_size):
+     """Master thread manages rendering."""
+     global final_image_buffer
+     final_image_buffer = [[None for _ in range(image_width)] for _ in range(image_height)]
+     
+-    # 1. Precompute shared data
+     compute_shared_data()
+     
+-    # 2. Generate work blocks
+-    blocks = generate_work_blocks(image_width, image_height, block_size)
+-    
+-    # 3. Populate work queue
++    blocks = []
++    for y in range(0, image_height, block_size):
++        for x in range(0, image_width, block_size):
++            blocks.append((x, y, min(x + block_size, image_width), min(y + block_size, image_height)))
++            
+     for block in blocks:
+         work_queue.put(block)
+         
+-    # 4. Launch slave threads
+     threads = []
+     for i in range(num_threads):
+@@ -136,5 +139,4 @@
+         threads.append(t)
+         
+-    # 5. Wait for completion
+     work_queue.join()
+     stop_event.set()
+@@ -152,17 +154,17 @@
+ *   **Intel/Nehalem (8 threads/buffer):** 1 buffer, size $512 \times 512 \times 512$ [S1, unofficial].
+ *   **AMD/MagnyCours (6 threads/buffer):** 4 buffers, size $256 \times 256 \times 512$ [S1, unofficial].
+-*   **AMD/MagnyCours (24 threads/buffer):** 1 buffer, size $512 \times 512 \times 512$ [S1, unofficial] [S1, unofficial].
++*   **AMD/MagnyCours (24 threads/buffer):** 1 buffer, size $512 \times 512 \times 512$ [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N \cdot M \cdot L)$, where $N$ is the number of pixels, $M$ is the number of rays per pixel (if multi-sampling), and $L$ is the number of samples per ray. Parallelization reduces wall-clock time by a factor approaching the number of threads, subject to overhead and load imbalance [S1, unofficial].
+-*   **Memory Complexity:** $O(V + I)$, where $V$ is the size of the volume data and $I$ is the size of the image buffer. In hybrid parallelism, memory usage scales with the number of disjoint buffers [S1, unofficial].
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
+ *   **Measured Performance:** Dynamic work assignment performs better than static assignment due to reduced load imbalance [S1, unofficial]. Performance scales with the number of cores but is limited by memory bandwidth and cache contention [S1, unofficial].
+-*   **Strengths:** Flexible work distribution, good load balancing with dynamic queues, easy to implement on standard multi-core CPUs [S1, unofficial].
+-*   **Limitations:** Overhead of thread management and synchronization; static assignment suffers from load imbalance [S1, unofficial].
+-*   **When to Use:** When rendering on multi-core CPUs where load balance is unpredictable or when GPU resources are unavailable [S1, unofficial].
+-*   **When Not to Use:** When extreme scalability on many-core architectures is required (use GPU raycasting) or when memory bandwidth is the primary bottleneck and static assignment with block synchronization might offer better cache locality [S1, unofficial].
++*   **Strengths:** Flexible work distribution, effective load balancing with dynamic queues, straightforward implementation on multi-core CPUs [S1, unofficial].
++*   **Limitations:** Thread management and synchronization overhead; static assignment suffers from load imbalance [S1, unofficial].
++*   **When to Use:** Multi-core CPU rendering where dynamic load balancing is required [S1, unofficial].
++*   **When Not to Use:** Extreme many-core scalability scenarios, which are better suited for GPU raycasting [S1, unofficial].
+ 
+ ## Background
+-The method is based on Levoy’s formulation of volume rendering [S1, unofficial]. It was implemented using POSIX threads as the shared-memory programming model [S1, unofficial]. The approach was explored in the context of multi-core and many-core shared-memory parallel raycasting volume rendering optimization and tuning [S1, unofficial]. The hybrid parallelism approach for concurrency testing was adapted from distributed-memory parallel implementations [S1, unofficial].
++The method is based on Levoy’s formulation of volume rendering [S1, unofficial]. It was implemented using POSIX threads as the shared-memory programming model [S1, unofficial]. The approach was explored in the context of multi-core and many-core shared-memory parallel raycasting volume rendering optimization and tuning [S1, unofficial]. The hybrid parallelism approach was previously implemented for large-scale distributed-memory tests [S1, unofficial].
+ 
+ ## Sources

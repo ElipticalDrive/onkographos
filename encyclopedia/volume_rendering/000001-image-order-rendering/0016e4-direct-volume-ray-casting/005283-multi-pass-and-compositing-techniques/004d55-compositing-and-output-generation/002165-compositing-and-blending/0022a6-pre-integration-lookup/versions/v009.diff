@@ -1,0 +1,83 @@
+--- v008.md
++++ v009.md
+@@ -4,16 +4,16 @@
+ 
+ ## Overview
+-Pre-integration lookup is a technique in direct volume ray casting that replaces the iterative accumulation of color and opacity within a volume slab with a single texture fetch from a pre-computed table [S1, unofficial][S2]. It solves the problem of shading and color inaccuracies caused by linear interpolation of scalar values across a slab, which violates the non-linear optical properties of light attenuation [S1, unofficial]. It sets itself apart from standard ray casting by moving the integration step from the rendering loop to an offline or on-the-fly pre-computation phase, and from [Simplified Pre-integration](6186-simplified-pre-integration.md) by accounting for color attenuation within the slab rather than neglecting it [S1, unofficial][S2].
++Pre-integration lookup is a technique in direct volume ray casting that replaces iterative per-sample accumulation within a volume slab with a single texture fetch from a pre-computed table [S1, unofficial][S2]. It provides optical properties for volume slices assuming linear data evolution within the slab [S1, unofficial]. It sets itself apart from standard ray casting by moving the integration step to a pre-computation phase, and from [Simplified Pre-integration](6186-simplified-pre-integration.md) by accounting for color attenuation within the slab rather than neglecting it [S1, unofficial][S2].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+ *   **Input:** A volume dataset, a transfer function mapping scalar values to color and opacity, and ray samples $(s_f, s_m, s_b)$ representing the scalar values at the front, middle, and back of a slab (or entry/exit densities and slab thickness) [S1, unofficial][S2].
+-*   **Output:** The accumulated color and opacity contribution of the slab, which is then composited with other slabs [S2].
++*   **Output:** The pre-integrated color $C_{slab}$ and opacity $\alpha_{slab}$ contribution of the slab, which is then composited with other slabs [S2].
+ 
+ **Data Structures:**
+ *   **Pre-integration Lookup Table:** A texture (2D or 3D) storing pre-calculated optical properties [S1, unofficial][S3].
+     *   **3D Table Layout:** Dimensions $256 \times 256 \times 256$ for 8-bit scalar domains. The axes correspond to front sample value ($s_f$), middle sample value ($s_m$), and back sample value ($s_b$) [S2].
+-    *   **2D Table Layout:** Dimensions dependent on entry/exit densities and slab thickness. The axes typically correspond to entry density, exit density, and slab thickness (mapped to 2D via indexing or specific encoding) [S1, unofficial][S3].
+-    *   **Stored Values:** Color ($C$) and Opacity ($\alpha$) resulting from the integration of the transfer function over the slab [S1, unofficial].
++    *   **2D Table Layout:** Dimensions dependent on entry density, exit density, and slab thickness. The axes typically correspond to these three parameters [S1, unofficial][S3].
++    *   **Stored Values:** Color ($C$) and Opacity ($\alpha$) resulting from the pre-calculated optical properties for the slab [S1, unofficial].
+ 
+ **Steps:**
+@@ -21,5 +21,5 @@
+     *   For a 3D table, render a quadrilateral parallel to the projection plane 256 times, filling the viewport [S2].
+     *   In the fragment shader, map screen coordinates to front ($s_f$) and middle ($s_m$) sample values, while the back sample ($s_b$) is provided as a uniform variable [S2].
+-    *   Compute the optical properties by integrating the transfer function over the slab defined by $s_f, s_m, s_b$ [S1, unofficial].
++    *   Compute the optical properties for the slab defined by $s_f, s_m, s_b$ using the pre-calculated functions [S1, unofficial][S2].
+     *   Store the result in the 3D texture at coordinate $(s_f, s_m, s_b)$ [S2].
+     *   *Note:* 2D tables are preferred on hardware with faster 2D texturing capabilities, as 3D texturing can be slower [S3].
+@@ -48,26 +48,18 @@
+ **Pseudocode:**
+ ```python
+-def pre_integration_lookup(volume_data, transfer_function, ray_samples):
++def pre_integration_lookup(ray_samples, background_color, lookup_table):
+     """
+     Renders a ray using pre-integration lookup tables.
+-    volume_data: 3D array of scalar values.
+-    transfer_function: function mapping scalar -> (color, opacity).
+     ray_samples: list of (s_f, s_m, s_b) tuples for each slab along the ray.
++    background_color: vec3 for the scene background.
++    lookup_table: 3D texture or array supporting coordinate-based fetch.
+     """
+-    # Pre-computed lookup table (simulated as a function for clarity)
+-    # In practice, this is a 3D texture fetch
+-    def lookup_table(s_f, s_m, s_b):
+-        # Fetch pre-computed (C_slab, alpha_slab) from 3D texture
+-        # Coordinates are indices into the 256^3 table
+-        return pre_integrated_table[s_f][s_m][s_b]
+-
+     C_acc = vec3(0.0)
+     alpha_acc = 0.0
+     
+     for s_f, s_m, s_b in ray_samples:
+-        # Fetch pre-integrated slab properties
+-        C_slab, alpha_slab = lookup_table(s_f, s_m, s_b)
++        # Standard hardware texture fetch operation
++        C_slab, alpha_slab = texture_fetch(lookup_table, (s_f, s_m, s_b))
+         
+-        # Standard front-to-back compositing
+         transmittance = 1.0 - alpha_acc
+         C_acc = C_acc + transmittance * alpha_slab * C_slab
+@@ -78,5 +70,7 @@
+             break
+             
+-    return C_acc
++    # Composite over background as per standard optical model [G]
++    final_color = C_acc + (1.0 - alpha_acc) * background_color
++    return final_color, alpha_acc
+ ```
+ 
+@@ -116,9 +110,9 @@
+ *   **Strengths:** Reduces aliasing artifacts from under-sampling; improves shading accuracy; suitable for interactive rendering when combined with tiling [S3][S4, unofficial].
+ *   **Limitations:** High memory usage for 3D tables; 2D tables may introduce artifacts if not carefully designed; assumes linear data evolution within slabs [S1, unofficial][S3].
+-*   **When to Use:** When shading accuracy is critical and hardware supports fast texture lookups; for interactive medical imaging [S1, S4, unofficial].
++*   **When to Use:** When fast texture lookups are available and interactive medical image reconstruction is required [S1, S4, unofficial].
+ *   **When Not to Use:** When memory is constrained and 3D tables are too large; when non-linear data variation within slabs is significant [S1, unofficial].
+ 
+ ## Background
+-Pre-integration lookup was introduced to address the inaccuracies of linear interpolation in volume rendering [S1, unofficial]. It is based on the principle that optical properties can be pre-calculated for volume slices assuming linear data evolution [S1, unofficial]. The method has been implemented on GPU hardware [S1, S4, unofficial]. Variants include 2D and 3D lookup tables, with 2D often preferred for performance on certain hardware [S3]. It has been applied to medical image reconstruction and interactive visualization systems [S1, S4, unofficial].
++Pre-integration lookup was introduced to address the inaccuracies of linear interpolation in volume rendering [S1, unofficial]. It is based on the principle that optical properties can be pre-calculated for volume slices assuming linear data evolution [S1, unofficial]. The method has been implemented on GPU hardware [S1, unofficial]. Variants include 2D and 3D lookup tables, with 2D often preferred for performance on certain hardware [S3]. It has been applied to medical image reconstruction [S4, unofficial] and implemented on GPU hardware [S1, unofficial].
+ 
+ ## Sources

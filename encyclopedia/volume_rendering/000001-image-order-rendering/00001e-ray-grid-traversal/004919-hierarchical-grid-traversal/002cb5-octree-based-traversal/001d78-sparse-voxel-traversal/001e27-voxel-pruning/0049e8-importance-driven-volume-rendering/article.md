@@ -1,0 +1,136 @@
+# Importance-Driven Volume Rendering
+
+Also called: Importance-Driven Feature Enhancement, Importance-Driven Volume Visualization
+
+## Overview
+Importance-Driven Volume Rendering (IDVR) is a technique that assigns an importance value to volumetric features to dynamically adjust their visual sparseness (opacity/density) based on viewpoint-dependent occlusion, ensuring important features remain visible while less important ones are suppressed [S2, unofficial][S3, unofficial]. It solves the problem of volume object occlusion by cutting or suppressing transparency of less important parts if they are in front of more important objects, allowing users to view hidden but important objects regardless of view direction [S5, unofficial]. Unlike traditional techniques that classify features independently from the viewpoint using constant optical properties, IDVR uses multiple levels of sparseness with smooth transitions that vary continuously within a single feature depending on viewpoint and occlusion [S2, unofficial][S6, unofficial]. It differs from standard DVR because standard DVR combines color/opacity values regardless of importance, meaning high-importance hidden objects cannot be visualized entirely [S5, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Volumetric data where each voxel contains at least two scalar values: density distribution (for classification) and importance hierarchy [S5, unofficial]. In cluster-based variants, voxels are grouped into clusters, and each cluster has an assigned importance $I \in [0, 1]$ [S7][S8, unofficial].
+*   **Output:** A final image where objects with high importance are rendered densely (opaque) and objects occluding them are rendered sparsely (transparent), while non-occluding parts of less important objects remain dense [S2, unofficial][S3, unofficial].
+
+**Data Structures:**
+*   **Voxel:** Contains density, color, opacity, and an `importance` value [S5, unofficial].
+*   **Footprint:** The projection of a specific volume object to the image plane, used as base data for correct cut-out during IDVR compositing [S5, unofficial].
+*   **Levels of Sparseness:** Various representations of an object from most dense to most sparse, modulating opacity or display density based on occlusion [S2, unofficial].
+
+**Steps:**
+
+1.  **Classification and Importance Assignment:**
+    *   Classify voxels into clusters based on scalar values ($v$), gradient magnitudes ($g$), and second derivative magnitudes ($s$) [S7].
+    *   Assign an importance value $I$ to each cluster or object. $I$ is a positive scalar constant for the whole object, describing visibility priority [S2, unofficial]. In interactive implementations, $I$ is assigned by the user, typically ranging from 0 (invisible) to 1 (fully opaque relative to base opacity) [S7]. Typical values might be 0.1 for context and 0.7 for focus objects [S2, unofficial].
+    *   Calculate the **footprint** for each volume object. This is the projection of the object onto the image plane [S5, unofficial].
+    *   Interpolate importance values to sample points using Nearest Neighbor interpolation based on the nearest voxel neighborhood and the calculated footprint [S5, unofficial].
+
+2.  **Importance Compositing (Sparseness Selection):**
+    *   Traverse the volume to estimate levels of sparseness for each object part [S2, unofficial].
+    *   Evaluate occlusion according to viewpoint settings. If an object occludes more important structures, it is displayed more sparsely; if no occlusion occurs, it is rendered densely [S2, unofficial].
+    *   Select the appropriate level of sparseness for each sample point based on the importance of the current object and the importance of objects in front of it [S2, unofficial].
+
+3.  **Ray Casting and Compositing:**
+    *   Perform volume ray-casting using front-to-back compositing [S7].
+    *   Modify the opacity of the current sample point $t_i$ by incorporating the cluster importance $I$:
+        $$ t_i = t_i \times I $$
+        where $t_i$ is the original opacity of the voxel and $I$ is the importance of the cluster [S7].
+    *   Composite radiance $L_i$ and accumulated opacity $A_i$ using the standard front-to-back equations:
+        $$ L_i = L_{i-1} + q_i \times (1 - A_{i-1}) $$
+        $$ A_i = A_{i-1} + (1 - A_{i-1}) \times t_i $$
+        where $q_i$ is the source term (color contribution) and $t_i$ is the modified opacity [S7].
+    *   Apply specific compositing schemes such as **Maximum Importance Projection (MImP)** or **Average Importance Compositing** to determine the final appearance [S3, unofficial]. MImP clips unimportant parts by assigning the lowest sparseness (densest) to the max importance object and highest sparseness (sparsest) to others [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def importance_driven_volume_rendering(volume, camera_params, importance_map):
+    """
+    volume: 3D array of voxels with attributes (color, base_opacity, position)
+    camera_params: Object containing width, height, and ray generation methods
+    importance_map: 3D array or cluster map assigning importance I to each voxel/cluster
+    Returns: 2D image array
+    """
+    width, height = camera_params.width, camera_params.height
+    image = [[0.0] * width for _ in range(height)]
+    footprints = calculate_footprints(volume, importance_map, camera_params)
+    
+    for y in range(height):
+        for x in range(width):
+            ray_origin, ray_direction = camera_params.get_ray(x, y)
+            accumulated_radiance = 0.0
+            accumulated_opacity = 0.0
+            
+            # Importance compositing evaluates occlusion to assign sparseness levels [S2, unofficial]
+            # This step is typically a pre-pass or integrated logic [G]
+            
+            for t in range(0, volume.depth, volume.step):
+                voxel = volume.get_at(ray_origin, ray_direction, t)
+                base_color = voxel.color
+                base_opacity = voxel.base_opacity
+                importance = importance_map.get_importance(voxel)
+                
+                modulated_opacity = base_opacity * importance
+                
+                if accumulated_opacity >= 1.0:
+                    break
+                    
+                contribution = modulated_opacity * (1.0 - accumulated_opacity)
+                accumulated_radiance += base_color * contribution
+                accumulated_opacity += contribution
+                
+            image[y][x] = accumulated_radiance
+    return image
+
+def calculate_footprints(volume, importance_map, camera_params):
+    """
+    Calculates the projection of each distinct volume object to the image plane.
+    Returns a map of object_id -> 2D boolean mask.
+    """
+    footprints = {}
+    for obj_id in importance_map.get_object_ids():
+        mask = [[False] * camera_params.width for _ in range(camera_params.height)]
+        for voxel in volume:
+            if importance_map.get_object_id(voxel) == obj_id:
+                proj_x, proj_y = camera_params.project(voxel.position)
+                if 0 <= proj_x < camera_params.width and 0 <= proj_y < camera_params.height:
+                    mask[proj_y][proj_x] = True
+        footprints[obj_id] = mask
+    return footprints
+```
+
+**Parameters:**
+*   **Importance ($I$):** Dimension assigned to features describing their interest/priority. Range $[0, 1]$. 0 makes the cluster invisible, 1 makes it fully opaque (relative to its base opacity) [S7]. Typical values: 0.1 for context, 0.7 for focus [S2, unofficial].
+*   **Levels of Sparseness:** Various representations of an object from most dense to most sparse. These can be discrete levels or continuous modulations [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **MImP Artifacts:** Using a cylindrical projection geometry in Maximum Importance Projection (MImP) can cause visual artifacts where spatial relationships between focus and context objects are not clearly shown, specifically making the focus object appear in front of the context object incorrectly [S3, unofficial]. This is corrected by using a conical projection geometry with different slope factors to define the countersink geometry [S3, unofficial].
+*   **Occlusion Evaluation:** Determining which object occludes which requires accurate depth information and footprint calculation. Incorrect footprint calculation leads to incorrect sparseness assignment [S5, unofficial].
+
+## Subtopics
+
+### [Screen-Door Transparency with Importance Compositing](8197-screen-door-transparency-with-importance-compositing.md)
+Connects feature importance to spatial sampling density using screen-door transparency. It solves the problem of occluding important features by less important ones by dynamically adjusting sampling density and opacity based on feature importance and occlusion relationships, rather than using a fixed global transfer function. Unlike Maximum Importance Projection (MImP), which renders only the feature with the highest importance along the ray, this method composites multiple features to preserve context while suppressing occluding less important structures.
+
+### [Maximum Importance Projection (MImP)](8308-maximum-importance-projection-mimp.md)
+An importance-based compositing method that clips unimportant parts of volume data based on assigned importance values. It assigns the lowest sparseness value (densest representation) to the object with the maximum importance along a ray, while all other objects receive the highest sparseness value, effectively rendering them either densely or not at all. Unlike more complex importance-based methods that allow reduced opacity representations for less important objects, MImP is simpler to implement but offers less control over sparseness selection.
+
+## Operating characteristics
+*   **Time Complexity:** The addition of the Importance Compositing step increases rendering time. It requires traversing the volume to evaluate occlusion and assign sparseness levels, which is an additional pass or integrated logic within the ray-casting loop [S2, unofficial].
+*   **Memory Complexity:** Requires storing importance values for each voxel or cluster, and potentially footprint data for each object [S5, unofficial].
+*   **Strengths:** Automatically removes unwanted occlusions and maximizes information content. Allows users to view hidden but important objects regardless of view direction. Provides a generalization of cut-away views [S2, unofficial][S3, unofficial].
+*   **Limitations:** Requires pre-defined importance values, which may need user interaction or complex automatic clustering [S4, unofficial]. MImP can introduce spatial relationship artifacts if not implemented with conical projection [S3, unofficial].
+*   **When to use:** When visualizing complex volumetric data where certain structures are critical but often occluded by less important surrounding tissue (e.g., medical imaging, scientific visualization) [S2, unofficial][S4, unofficial].
+
+## Background
+Importance-Driven Volume Rendering was introduced by Ivan Viola, Armin Kanitsar, and Eduard Gröller in 2004 at the 15th IEEE Visualization Conference (VIS 2004) [S3, unofficial]. It was developed to address the limitations of traditional Direct Volume Rendering (DVR), where high-importance hidden objects cannot be visualized entirely due to occlusion by less important objects [S5, unofficial]. The technique extends the raycasting pipeline by integrating importance compositing, which evaluates occlusion and assigns levels of sparseness [S2, unofficial][S3, unofficial]. It is often embedded into DVR and combined with standard rendering methods like LMIP, Contour, Tone, or Direct volume rendering using Phong illumination model [S5, unofficial].
+
+## Sources
+[S1] Enhanced perception in volume visualization, https://doi.org/10.5821/dissertation-2117-94929, fetched 2026-10-26 (unofficial)
+[S2] Illustrative Visualization for Medicine and Science, https://doi.org/10.2312/egt.20061068, fetched 2026-10-26 (unofficial)
+[S3] (PDF) Importance-Driven Volume Rendering, https://www.researchgate.net/publication/220943935_Importance-Driven_Volume_Rendering, fetched 2026-11-03 (unofficial)
+[S4] Importance-Driven Volume Rendering, https://www.cg.tuwien.ac.at/research/publications/2004/Viola-2004-ImpX/Viola-2004-ImpX-paper.pdf, fetched 2026-10-29 (unofficial)
+[S5] Implementation of Importance-Driven Volume Rendering, https://www.cg.tuwien.ac.at/research/publications/2005/Thurner-2005-IVR/Thurner-2005-IVR-paper.pdf, fetched 2026-10-29 (unofficial)
+[S6] PDF Importance-Driven Volume Rendering, https://www.cg.tuwien.ac.at/research/vis/adapt/2004_idvr/idvr.pdf, fetched 2026-10-29 (unofficial)
+[S7] PDF Importance-driven Volume Rendering and Gradient Peeling, https://pdfs.semanticscholar.org/34d4/f3dcb8ccc5b5c19638d61475ea927c136244.pdf, fetched 2026-10-29
+[S8] SCITEPRESS - SCIENCE AND TECHNOLOGY PUBLICATIONS, https://www.scitepress.org/PublishedPapers/2011/33680/, fetched 2026-10-30 (unofficial)

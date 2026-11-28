@@ -1,0 +1,125 @@
+# 3DGS Parameter Tuning and Sensitivity Analysis
+
+Also called: 3DGS Hyperparameter Optimization
+
+## Overview
+This method defines a systematic procedure for selecting optimal hyperparameters for 3D Gaussian Splatting (3DGS) training to maximize rendering quality metrics (PSNR, SSIM, LPIPS) while maintaining reasonable training times. It differs from standard 3DGS [3DGS Parameter Tuning and Sensitivity Analysis](16894-3dgs-parameter-tuning-and-sensitivity-analysis.md) by explicitly quantifying the sensitivity of key parameters—Resolution, density control ($p$), gradient threshold ($\tau$), and scaling learning rate ($Scaling\_lr$)—to determine which parameters require fine-tuning and which can remain at default values. Unlike [SA-Points Generation](20877-sa-points-generation.md), which focuses on initial point cloud generation, this method operates during the optimization phase to refine the densification and adaptation dynamics.
+
+## How it works
+**Inputs:**
+- A 3DGS training configuration including the base algorithm parameters.
+- A dataset (e.g., self-collected indoor scenes or standard benchmarks).
+- A set of candidate values for the four key parameters: Resolution, $p$, $\tau$, and $Scaling\_lr$.
+
+**Outputs:**
+- A ranked list of parameters by sensitivity.
+- The optimal value for each parameter.
+- The final tuned configuration.
+
+**Data Structures:**
+The method does not introduce new persistent data structures but evaluates the existing 3DGS state (Gaussian primitives, opacities, scales, rotations, positions) under different hyperparameter settings. The key variables evaluated are:
+- $p$: Density control hyperparameter (float).
+- $\tau$: Gradient threshold for spatial position adaptation (float).
+- $Scaling\_lr$: Learning rate for Gaussian scales (float).
+- $Res$: Rendered image resolution (integer, e.g., 0.8k).
+
+**Numbered Steps:**
+
+1. **Baseline Establishment:** Run the standard 3DGS algorithm with default or baseline parameters on the target dataset. Record the baseline metrics: PSNR, SSIM, and LPIPS. Record the training time. [S1]
+
+2. **Parameter Selection:** Identify the four parameters to tune:
+   - Resolution ($Res$)
+   - Density control hyperparameter ($p$)
+   - Gradient threshold ($\tau$)
+   - Scaling learning rate ($Scaling\_lr$) [S1]
+
+3. **Sensitivity Ranking Procedure:**
+   For each parameter $X \in \{Res, p, \tau, Scaling\_lr\}$:
+   a. Substitute the optimal value of $X$ (determined via grid search or ablation as described in step 4) into the algorithm, keeping other parameters at their baseline or previously optimized values.
+   b. Run the training/evaluation.
+   c. Compute the delta ($\Delta$) for each metric:
+      $$ \Delta_{Metric} = Metric_{tuned} - Metric_{baseline} $$
+   d. Rank parameters by the magnitude of their impact on the metrics. [S1]
+
+4. **Optimal Value Determination (Ablation Study):**
+   Test specific candidate values for each parameter and select the one that yields the best combined metrics (prioritizing PSNR/SSIM/LPIPS trade-offs) without excessive time cost.
+   - **Resolution ($Res$):** Test values: 0.3k, 0.5k, 0.8k, 1.2k, 1.5k, 1.6k, 2k. Select the value that maximizes quality. [S1]
+   - **Density Control ($p$):** Test values: 0.0005, 0.001, 0.002, 0.01, 0.1. Select the value that minimizes LPIPS and maximizes PSNR/SSIM. [S1]
+   - **Gradient Threshold ($\tau$):** Test values: 0.0001, 0.0002, 0.0003, 0.0004. Select the value that minimizes LPIPS and maximizes PSNR/SSIM. [S1]
+   - **Scaling Learning Rate ($Scaling\_lr$):** Test values: 0.004, 0.005, 0.006, 0.008. Select the value that yields the best metrics. [S1]
+
+5. **Final Configuration Assembly:** Combine the optimal values identified in Step 4. [S1]
+
+**Formulas and Definitions:**
+
+- **Cloning/Cropping Condition:** The parameter $p$ governs the density level. The condition for cloning or cropping a Gaussian kernel is based on its maximum scaling in a certain direction.
+  - If $\max(\text{scale}) > \text{threshold}(p)$, the kernel is **cropped**.
+  - Otherwise, the kernel is **cloned** to increase density.
+  - Note: The exact mathematical threshold function is not explicitly defined in the source, but $p$ acts as the controlling hyperparameter for this condition. [S1]
+
+- **Gradient Threshold ($\tau$):** Used to control gradient-based adaptation during training. It filters or weights the average magnitude of spatial position gradients. [S1]
+
+**Parameters with Typical/Optimal Values:**
+
+| Parameter | Symbol | Tested Values | Optimal Value | Impact Description |
+| :--- | :--- | :--- | :--- | :--- |
+| Resolution | $Res$ | 0.3k, 0.5k, 0.8k, 1.2k, 1.5k, 1.6k, 2k | 0.8k | Highest impact on all metrics. [S1] |
+| Density Control | $p$ | 0.0005, 0.001, 0.002, 0.01, 0.1 | 0.001 | Second highest impact. [S1] |
+| Gradient Threshold | $\tau$ | 0.0001, 0.0002, 0.0003, 0.0004 | 0.0003 | Significant impact. [S1] |
+| Scaling LR | $Scaling\_lr$ | 0.004, 0.005, 0.006, 0.008 | 0.005 | Lowest impact (0 delta). [S1] |
+
+**Edge Cases and Pitfalls:**
+- **Precision:** The source notes that visual differences for $\tau$ are not significant, but quantitative differences (LPIPS/PSNR) are. Implementers should rely on quantitative metrics rather than visual inspection for $\tau$. [S1]
+- **Training Time:** Higher resolutions and certain $p$ values may increase training time. The optimal $p=0.001$ was chosen partly because time cost was comparable to other values while metrics were best. [S1]
+- **Metric Trade-offs:** Resolution increases SSIM and PSNR but decreases LPIPS (LPIPS is a distance metric, so lower is better). The ranking considers the direction of improvement for each metric. [S1]
+
+## Subtopics
+
+### [Tuning-Free Model-Size Control for 3D Gaussian Splatting](18917-tuning-free-model-size-control-for-3d-gaussian-splatting.md)
+This method controls the final number of 3D Gaussian primitives to a user-specified budget $B$ without per-scene hyperparameter tuning, using a Lagrangian relaxation of the population constraint and a dual ascent controller. It differs from standard 3DGS [3DGS Parameter Tuning and Sensitivity Analysis](16894-3dgs-parameter-tuning-and-sensitivity-analysis.md) by replacing fixed sparsity penalties with a dynamic budget constraint that guarantees an exact primitive count across all scenes, and from [PSCD-GS](18934-pscd-gs.md) by employing a closed-loop controller rather than static pruning criteria.
+
+### [PSCD-GS](18934-pscd-gs.md)
+PSCD-GS is a densification strategy for 3D Gaussian Splatting that replaces hard semantic labels with continuous memberships in four roles (perception-dominant, structure-dominant, co-dominant, and low-response) to guide candidate selection, clone/split decisions, and split placement. It integrates image-space perceptual responses with multi-view structural evidence, allowing primitives to respond to both types of evidence simultaneously rather than forcing a binary choice. Unlike sibling methods that rely solely on gradients or reconstruction errors, PSCD-GS uses a role-aware framework to coordinate densification based on the complementary characteristics of the scene.
+
+### [Normal-Guided Gaussian Splitting](20683-normal-guided-gaussian-splitting.md)
+Normal-Guided Gaussian Splitting is a densification strategy for 3D Gaussian Splatting that determines the initial 3D position of a newly split child Gaussian by projecting a randomly sampled candidate onto the tangent plane of the parent Gaussian, weighted by the local image gradient. It solves the problem of noisy or misplaced Gaussian splats in weakly textured regions where standard random splitting lacks visual constraints. Unlike methods relying on true-scaled depth priors from Structure-from-Motion (SfM), this approach avoids errors from unreliable SfM points or scale inconsistencies across frames.
+
+### Alpha Scheduling
+A scheduling parameter ($\alpha$) that improves quality in distractor suppression experiments. It is used in methods like SpotLessSplats to manage transient distractor suppression. [S2]
+
+### Regularizer Weight
+The regularizer weight ($\lambda$) in distractor suppression methods (e.g., SpotLessSplats) seems to have little effect on the results. [S2]
+
+## Operating characteristics
+**Time and Memory Complexity:**
+- The sensitivity analysis itself requires multiple training runs (one per parameter setting), significantly increasing the total computational cost of finding the optimal configuration.
+- The final tuned configuration (e.g., $Res=0.8k, p=0.001, \tau=0.0003$) has a training time comparable to the baseline (e.g., 10 minutes for 7000 iterations on a 66-photo dataset). [S1]
+
+**Measured Performance:**
+- On a self-collected dataset (66 photos, 7000 iterations):
+  - PSNR increased by 4.3% (22.708 → 23.694).
+  - SSIM increased by 0.2% (0.796 → 0.798).
+  - LPIPS remained unchanged at 0.36.
+  - Training time remained constant at 10 minutes. [S1]
+
+**Scaling:**
+- Resolution has the greatest impact on performance. Increasing resolution from 0.3k to 0.8k yields significant gains (PSNR +0.942, SSIM +0.01, LPIPS -0.005). Further increases (1.2k, 1.5k, 2k) were tested but 0.8k was optimal for the specific indoor scene study, likely balancing quality and time. [S1]
+
+**Strengths and Limitations:**
+- **Strengths:** Provides a data-driven, quantitative approach to tuning. Identifies that some parameters (like $Scaling\_lr$) are insensitive, allowing for simplification. Improves sharpness and structural preservation (e.g., ceilings and corners). [S1]
+- **Limitations:** The sensitivity ranking is specific to the dataset and scene type (indoor). The method does not provide a closed-form solution for optimal parameters but relies on empirical ablation. [S1]
+
+**When to Use:**
+- Use when rendering quality (PSNR/SSIM) is critical and the scene characteristics (e.g., indoor, textured) are known.
+- Use when computational resources allow for multiple training runs for hyperparameter search.
+
+**When Not to Use:**
+- Use when real-time training or single-run efficiency is required.
+- Use when the scene is highly dynamic or contains significant distractors, where methods like SpotLessSplats [S2] might be more appropriate.
+
+## Background
+The method originates from a study on the performance evaluation and optimization of 3D Gaussian Splatting in indoor scene generation and rendering [S1]. The study was published in *ISPRS International Journal of Geo-Information* in 2025. It addresses the lack of standardized hyperparameter tuning guidelines for 3DGS, particularly for specific domains like indoor scenes. The sensitivity analysis was conducted to determine which parameters most significantly affect rendering quality, enabling more efficient and effective training configurations. [S1]
+
+## Sources
+[S1] Performance Evaluation and Optimization of 3D Gaussian Splatting in Indoor Scene Generation and Rendering, https://doi.org/10.3390/ijgi14010021, fetched 2026-10-26
+[S2] SpotLessSplats: Ignoring Distractors in 3D Gaussian Splatting, https://doi.org/10.1145/3727143, fetched 2026-10-27

@@ -1,0 +1,102 @@
+--- v003.md
++++ v004.md
+@@ -2,9 +2,9 @@
+ Also called: Advanced partitioning mode
+ ## Overview
+-Voxelize Point Cloud (Advanced Mode) is a voxelization method that maps a 3D point cloud to a regular grid using a user-defined cell length parameter [S1, unofficial]. Unlike the Existing Image Geometry path, which rejects zero spacing with error -45983, Advanced Mode allows zero spacing, resulting in a silent failure where all points are skipped [S1, unofficial].
++Voxelize Point Cloud (Advanced Mode) maps a 3D point cloud to a regular grid using a user-defined cell length parameter [S1, unofficial]. Unlike the Existing Image Geometry path which rejects zero spacing with error -45983, this mode allows zero spacing, resulting in a silent failure where all points are skipped [S1, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-*   Point cloud geometry (e.g., `VertexGeom`) [S1, unofficial].
++*   Point cloud geometry (e.g., `VertexGeom` or `TriangleGeom`) [S1, unofficial].
+ *   Cell length parameter $s$ [S1, unofficial].
+ *   Grid origin $o$ [S1, unofficial].
+@@ -17,14 +17,24 @@
+ **Data Structures:**
+ *   The output is an image geometry with dimensions $D_x, D_y, D_z$ [S1, unofficial].
+-*   The mask is a 1D array of tuples with shape $\{D_z, D_y, D_x\}$ [S1, unofficial].
++*   The mask is stored as a 1D array of tuples with shape $\{D_z, D_y, D_x\}$ [S1, unofficial].
++
++**Formula:**
++The mapping from point coordinates to voxel indices follows the parent principle:
++$$ v_i = \lfloor (p_i - o_i) / s \rfloor $$
++where $p_i$ is the point coordinate, $o_i$ is the grid origin, and $s$ is the cell length along axis $i$ [S1, unofficial].
+ 
+ **Steps:**
+-1.  **Validate Input:** Check if the cell length $s$ is negative. `DataCheckCellLength` only rejects negative values [S1, unofficial].
+-2.  **Calculate Spacing:** Set spacing $s_{calc} = s$. If $s = 0$, $s_{calc} = 0$ [S1, unofficial].
+-3.  **Compute Inverse Spacing:** Calculate $s_{inv} = 1.0 / s_{calc}$. If $s_{calc} = 0$, $s_{inv}$ becomes $\infty$ or `NaN` [S1, unofficial].
+-4.  **Map Points to Voxels:** For each point $p = (p_x, p_y, p_z)$, calculate voxel coordinates $v_i = (p_i - o_i) \times s_{inv}$. If $s_{calc} = 0$, $v_i$ becomes $\infty$ or `NaN` [S1, unofficial].
+-5.  **Index and Clamp:** Convert $v_i$ to integer indices $(v_x, v_y, v_z)$ and clamp to grid bounds $[0, D_i-1]$. If $v_i$ is $\infty$ or `NaN`, the point is skipped [G].
+-6.  **Set Mask:** Set the corresponding voxel in the output mask to 1 (or relevant data) [G].
+-7.  **Finalize:** If all points were skipped (e.g., due to $s=0$), the output mask is all zeros. A warning is issued, but the filter completes successfully [S1, unofficial].
++1. **Validate Input:** Check if the cell length $s$ is negative; `DataCheckCellLength` only rejects negative values [S1, unofficial].
++2. **Calculate Spacing:** Set spacing $s_{calc} = s$ [S1, unofficial].
++3. **Compute Inverse Spacing:** Calculate $s_{inv} = 1.0 / s_{calc}$ [S1, unofficial].
++4. **Map Points to Voxels:** For each point $p = (p_x, p_y, p_z)$, calculate voxel coordinates $v_i = (p_i - o_i) \times s_{inv}$ [S1, unofficial].
++5. **Index and Clamp:** Convert $v_i$ to integer indices $(v_x, v_y, v_z)$ and clamp to grid bounds $[0, D_i-1]$ [S1, unofficial].
++6. **Set Mask:** Set the corresponding voxel in the output mask to 1 (or relevant data) [G].
++7. **Finalize:** If all points were skipped (e.g., due to $s=0$), the output mask is all zeros [S1, unofficial].
++
++**Pitfalls and Edge Cases:**
++*   **Zero Spacing:** If $s=0$, the division $1.0/0$ results in infinity/NaN, causing all points to be skipped [S1, unofficial].
++*   **Negative Spacing:** Rejected by `DataCheckCellLength` [S1, unofficial].
++*   **Implementation Pitfalls:** A sign error on the origin subtraction, a swapped $x_{inv}/y_{inv}$, or a units mistake can lead to incorrect voxel mapping [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -42,5 +52,4 @@
+     Returns:
+         mask: 3D boolean array of shape (Dx, Dy, Dz).
+-        warning: String warning message if cell_length is 0.
+     """
+     if cell_length < 0:
+@@ -50,33 +59,27 @@
+     inv_spacing = 1.0 / spacing if spacing != 0 else float('inf')
+     
+-    if spacing == 0:
+-        warning = "Spacing is zero. All points will be skipped."
+-    else:
+-        warning = None
+-    
++    # Initialize mask with shape (Dx, Dy, Dz)
+     mask = [[[False for _ in range(dimensions[2])] for _ in range(dimensions[1])] for _ in range(dimensions[0])]
+     
+     for p in points:
+-        vx = int(math.floor((p[0] - origin[0]) * inv_spacing))
+-        vy = int(math.floor((p[1] - origin[1]) * inv_spacing))
+-        vz = int(math.floor((p[2] - origin[2]) * inv_spacing))
++        # Calculate raw voxel coordinates
++        vx_raw = (p[0] - origin[0]) * inv_spacing
++        vy_raw = (p[1] - origin[1]) * inv_spacing
++        vz_raw = (p[2] - origin[2]) * inv_spacing
+         
+-        if math.isinf(vx) or math.isnan(vx) or \
+-           math.isinf(vy) or math.isnan(vy) or \
+-           math.isinf(vz) or math.isnan(vz):
++        # Skip points that map to infinity or NaN (e.g., when spacing is 0)
++        if math.isinf(vx_raw) or math.isnan(vx_raw) or \
++           math.isinf(vy_raw) or math.isnan(vy_raw) or \
++           math.isinf(vz_raw) or math.isnan(vz_raw):
+             continue
+-            
+-        vx = max(0, min(vx, dimensions[0] - 1))
+-        vy = max(0, min(vy, dimensions[1] - 1))
+-        vz = max(0, min(vz, dimensions[2] - 1))
++        
++        # Convert to integer indices and clamp to grid bounds
++        vx = max(0, min(int(math.floor(vx_raw)), dimensions[0] - 1))
++        vy = max(0, min(int(math.floor(vy_raw)), dimensions[1] - 1))
++        vz = max(0, min(int(math.floor(vz_raw)), dimensions[2] - 1))
+         
+         mask[vx][vy][vz] = True
+-    return mask, warning
++    return mask
+ ```
+-
+-**Pitfalls:**
+-*   **Zero Spacing:** If $s=0$, the division $1.0/0$ results in infinity/NaN, causing all points to be skipped. The filter produces an all-zero mask and only a warning, unlike the Existing Partition Grid path which errors out [S1, unofficial].
+-*   **Negative Spacing:** Rejected by `DataCheckCellLength` [S1, unofficial].
+-*   **Origin/Spacing Mismatch:** A sign error on origin subtraction, a swapped inverse spacing component, or a units mistake can lead to incorrect voxel mapping [S1, unofficial].
+ 
+ ## Subtopics

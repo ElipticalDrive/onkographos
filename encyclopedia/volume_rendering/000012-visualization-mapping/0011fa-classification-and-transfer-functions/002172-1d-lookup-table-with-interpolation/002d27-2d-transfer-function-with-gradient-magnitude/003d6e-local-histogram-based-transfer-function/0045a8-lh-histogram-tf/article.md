@@ -1,0 +1,138 @@
+# LH Histogram TF
+
+Also called: LH Space TF Specification, LH TF, Lower-Higher Histogram TF
+
+## Overview
+LH Histogram TF is a 2D transfer function specification method that maps each voxel to a pair of scalar values $(L, H)$ representing the homogeneous material intensities on either side of the local gradient boundary [S2, unofficial]. It addresses the difficulty of selecting boundaries in standard gradient-magnitude histograms by explicitly encoding the material composition of edges, performing better regarding noise, bias, and partial volume effects [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A volumetric dataset $V$ with scalar values [S2, unofficial].
+- Output: A 2D histogram where each voxel is plotted at coordinates $(L, H)$ [S2, unofficial].
+
+**Data Structures:**
+- The LH space is a 2D coordinate system with axes $L$ (Lower intensity) and $H$ (Higher intensity) [S2, unofficial].
+- Each voxel $v$ is represented by a point $(L_v, H_v)$ [S2, unofficial].
+
+**Steps:**
+1. For each voxel $v$ in the volume:
+   a. Compute the gradient vector $\nabla v$ at $v$ [G].
+   b. Follow the gradient direction in the positive sense (along $\nabla v$) until a homogeneous region is found [S2, unofficial].
+   c. Follow the gradient direction in the negative sense (along $-\nabla v$) until a homogeneous region is found [S2, unofficial].
+   d. A region is considered homogeneous if the scalar value is approximately constant [S2, unofficial].
+2. Plot the voxel at $(L_v, H_v)$ in the 2D histogram [S2, unofficial].
+
+**Formulas:**
+- $L_v = \text{Value}(\text{HomogeneousRegion}(-\nabla v))$ [S2, unofficial].
+- $H_v = \text{Value}(\text{HomogeneousRegion}(\nabla v))$ [S2, unofficial].
+
+**Parameters:**
+- "Approximately constant": Not given in the sources. [G] Implementation typically requires a threshold for variance or a maximum distance to search for homogeneity.
+
+**Edge Cases and Pitfalls:**
+- If the gradient direction does not lead to a distinct homogeneous region within a reasonable distance, the values may be undefined or default to the voxel's own intensity [G].
+- Biasing in MRI data can cause nonuniformities in intensity values, leading to false material borders in the histogram [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_lh_histogram(volume, voxel_spacing=(1.0, 1.0, 1.0), homogeneity_threshold=0.05, max_search_steps=10):
+    """
+    Computes the LH histogram for a volume.
+    volume: 3D list of lists of lists of scalar values.
+    Returns: 2D list of lists of integers representing histogram bins.
+    """
+    import math
+
+    # Compute gradients using central differences [G]
+    dims = (len(volume), len(volume[0]), len(volume[0][0]))
+    gx = [[[0.0]*dims[2] for _ in range(dims[1])] for _ in range(dims[0])]
+    gy = [[[0.0]*dims[2] for _ in range(dims[1])] for _ in range(dims[0])]
+    gz = [[[0.0]*dims[2] for _ in range(dims[1])] for _ in range(dims[0])]
+
+    for z in range(dims[0]):
+        for y in range(dims[1]):
+            for x in range(dims[2]):
+                if x > 0 and x < dims[2]-1: gx[z][y][x] = (volume[z][y][x+1] - volume[z][y][x-1]) / (2.0 * voxel_spacing[2])
+                if y > 0 and y < dims[1]-1: gy[z][y][x] = (volume[z][y+1][x] - volume[z][y-1][x]) / (2.0 * voxel_spacing[1])
+                if z > 0 and z < dims[0]-1: gz[z][y][x] = (volume[z+1][y][x] - volume[z-1][y][x]) / (2.0 * voxel_spacing[0])
+
+    # Determine histogram binning based on volume intensity range [G]
+    vmin = min(min(min(row) for row in vol) for vol in volume)
+    vmax = max(max(max(row) for row in vol) for vol in volume)
+    num_bins = 256
+    range_val = vmax - vmin if vmax != vmin else 1.0
+
+    hist = [[0] * num_bins for _ in range(num_bins)]
+
+    for z in range(dims[0]):
+        for y in range(dims[1]):
+            for x in range(dims[2]):
+                grad = (gx[z][y][x], gy[z][y][x], gz[z][y][x])
+                grad_norm = math.sqrt(grad[0]**2 + grad[1]**2 + grad[2]**2)
+
+                if grad_norm < 1e-8:
+                    l_val, h_val = volume[z][y][x], volume[z][y][x]
+                else:
+                    dir_vec = (grad[0]/grad_norm, grad[1]/grad_norm, grad[2]/grad_norm)
+                    h_val = _search_homogeneous_region(volume, z, y, x, dir_vec, homogeneity_threshold, max_search_steps)
+                    l_val = _search_homogeneous_region(volume, z, y, x, (-dir_vec[0], -dir_vec[1], -dir_vec[2]), homogeneity_threshold, max_search_steps)
+
+                if l_val > h_val:
+                    l_val, h_val = h_val, l_val
+
+                bin_l = int((l_val - vmin) / range_val * (num_bins - 1))
+                bin_h = int((h_val - vmin) / range_val * (num_bins - 1))
+                bin_l = max(0, min(bin_l, num_bins - 1))
+                bin_h = max(0, min(bin_h, num_bins - 1))
+                hist[bin_l][bin_h] += 1
+
+    return hist
+
+def _search_homogeneous_region(volume, start_z, start_y, start_x, direction, threshold, max_steps):
+    """
+    Follows direction from start voxel to find a homogeneous region.
+    Returns the scalar value of the homogeneous region found.
+    """
+    dz, dy, dx = direction
+    current_z, current_y, current_x = float(start_z), float(start_y), float(start_x)
+    base_val = volume[start_z][start_y][start_x]
+    dims = (len(volume), len(volume[0]), len(volume[0][0]))
+
+    for _ in range(max_steps):
+        current_z += dz
+        current_y += dy
+        current_x += dx
+        current_z = max(0.0, min(float(dims[0]-1), current_z))
+        current_y = max(0.0, min(float(dims[1]-1), current_y))
+        current_x = max(0.0, min(float(dims[2]-1), current_x))
+
+        val = volume[int(current_z)][int(current_y)][int(current_x)]
+        if abs(val - base_val) / (abs(base_val) + 1e-8) < threshold:
+            return val
+
+    return base_val
+```
+
+## Subtopics
+
+### Local Histogram-based Transfer Function
+The parent method using local histograms to discern tissues [G]. LH TF is a specific 2D space within this family [G]. [Link](9491-local-histogram-based-transfer-function.md)
+
+### 2D Transfer Function with Gradient Magnitude
+The sibling method using gradient magnitude as the second axis [G]. LH TF replaces magnitude with the specific material intensities $L$ and $H$, offering clearer edge representation [G]. [Link](9490-2d-transfer-function-with-gradient-magnitude.md)
+
+## Operating characteristics
+- **Time Complexity**: Not given in the sources. [G] Standard analysis estimates $O(N)$ where $N$ is the number of voxels, assuming constant time for finding homogeneous regions. In practice, finding homogeneous regions may require searching, increasing complexity [G].
+- **Memory Complexity**: Not given in the sources. [G] Requires $O(N)$ for storing the volume and gradient data. The histogram size depends on the quantization of $L$ and $H$ [G].
+- **Strengths**: Better performance in terms of noise, bias, and partial volume effects compared to standard 2D histograms [S1, unofficial]. Edges and homogeneous regions are clearly distinguished (diagonal vs. off-diagonal) [S2, unofficial].
+- **Limitations**: Requires defining "homogeneous region," which is not explicitly defined in the sources [G]. Sensitive to intensity biasing in MRI data [S1, unofficial].
+- **When to use**: Medical volume rendering where clear distinction of material boundaries is critical, especially in the presence of noise or partial volume effects [S1, unofficial]. Used in Voreen and OsiriX [S1, unofficial].
+
+## Background
+LH Histogram TF was proposed by Šereda et al. [SER 2006c] as cited in [S2, unofficial]. It is used in medical volume rendering programs including Voreen and OsiriX [S1, unofficial]. The method addresses the limitations of scalar-only and gradient-magnitude histograms by explicitly encoding the materials forming boundaries [S1, S2, unofficial].
+
+## Sources
+[S1] Context-Preserving Volume Image Exploration Using A 3D Painting Metaphor, https://doi.org/10.32920/ryerson.14646888, fetched 2026-10-26 (unofficial)
+[S2] Especificação de funções de transferência unidimensionais e multidimensionais para visualização volumétrica direta, http://hdl.handle.net/10183/12077, fetched 2026-10-30 (unofficial)

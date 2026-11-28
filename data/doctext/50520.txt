@@ -1,0 +1,1867 @@
+# Overview
+This is a CUDA implementation of Dual Contouring.
+It is for the final project
+of CS 217(GPU Architecture and Programming),
+University of California, Riverside in Fall 2015.
+
+In December 2015 I make this project public.
+And it will be graded.
+
+I will continue to work on this project to
+fix the numerical stability issues,
+implement the 3D version,
+and implement the adaptive dual contouring.
+
+### src/cudc2/cudc2.h
+```
+#ifndef CUDC2_H
+#define CUDC2_H
+
+enum FunctionType {
+    FT_UNIT_SPHERE = 0,
+    FT_HEART,
+    cFunctionTypeCount
+};
+
+/**
+  \brief Dual contour a 2D function.
+
+  @param xs the starting x coordinates.
+  @param xt the ending x coordinates.
+  @param ys the starting y coordinates.
+  @param yt the ending y coordinates.
+
+  @param[out] p the generated mesh vertices stored as array of float2.
+  @param pcap the capacity of the vertices.
+  @param[out] pcnt the actual count of generated vertices.
+
+  @param[out] edges the generated edges stored as array int2.
+  @param ecap the capacity of the edges.
+  @param[out] ecnt the actual count of generated edges.
+*/
+bool DualContour2(
+    FunctionType ft,
+    float xs, float xt,
+    float ys, float yt, int n,
+    float* p, int pcap, int* pcnt,
+    int* edges, int ecap, int* ecnt);
+    
+#endif
+```
+
+### src/cudc2/kcudc2.cu
+```
+#include "cudc2.h"
+using namespace std;
+
+#define TILE_WIDTH 32
+#define TILE_HEIGHT 32
+#define BLOCK_SIZE (TILE_WIDTH * TILE_HEIGHT)
+
+template <FunctionType FT>
+__device__ float Sample2(float x, float y);
+
+template <>
+__device__ float Sample2<FT_UNIT_SPHERE>(float x, float y) {
+    return x * x + y * y - 1.0f;
+}
+
+template <>
+__device__ float Sample2<FT_HEART>(float x, float y) {
+    const float x2 = x * x;
+    const float y2 = y * y;
+    const float t = x2 + y2 - 1.0f;
+    return t * t * t - x2 * y2 * y;
+}
+
+template <FunctionType FT>
+__device__ void SampleGradient2(float x, float y, float* dx, float* dy) {
+    const float dh = 1e-5f;
+    const float rev2dh = 0.5f / dh;
+
+    const float a = (Sample2<FT>(x + dh, y) - Sample2<FT>(x - dh, y)) * rev2dh;
+    const float b = (Sample2<FT>(x, y + dh) - Sample2<FT>(x, y - dh)) * rev2dh;
+    const float l = sqrt(a * a + b * b);
+
+    *dx = a / l;
+    *dy = b / l;
+}
+
+__device__ bool IsIntersected(float a, float b) {
+    return a < 0 && b >= 0 || a >= 0 && b < 0;
+}
+
+template <FunctionType FT>
+__device__ void SolveIntersection2(
+    float xlow, float ylow,
+    float xhigh, float yhigh,
+    float* x, float* y) {
+    const float EPS = 1e-6f;
+
+    float mx = (xlow + xhigh) * 0.5f;
+    float my = (ylow + yhigh) * 0.5f;
+    float v = Sample2<FT>(mx, my);
+
+    while (fabs(v) >= EPS) {
+        if (v > 0) {
+            xhigh = mx;
+            yhigh = my;
+        }
+        else {
+            xlow = mx;
+            ylow = my;
+        }
+        mx = (xlow + xhigh) * 0.5f;
+        my = (ylow + yhigh) * 0.5f;
+        v = Sample2<FT>(mx, my);
+    }
+    *x = mx;
+    *y = my;
+}
+
+__device__ void SVD2(
+    const float* M,
+    float* U,
+    float* S,
+    float* VT) {
+    const float e = 0.5f * (M[0] + M[3]);
+    const float f = 0.5f * (M[0] - M[3]);
+    const float g = 0.5f * (M[1] + M[2]);
+    const float h = 0.5f * (M[1] - M[2]);
+
+    // one half of w1 + w2
+    const float hw1pw2 = sqrt(e * e + h * h);
+    const float hw1mw2 = sqrt(f * f + g * g);
+
+    const float atangf = g == 0.0f && f == 0.0f ? 0.0f : atan2(g, f);
+    const float atanhe = h == 0.0f && e == 0.0f ? 0.0f : atan2(h, e);
+    
+    S[0] = hw1pw2 + hw1mw2;
+    S[1] = hw1pw2 - hw1mw2;
+
+    const float b = (atanhe - atangf) * 0.5f;
+    const float r = (atanhe + atangf) * 0.5f;
+
+    const float cb = cos(b);
+    const float sb = sin(b);
+    const float cr = cos(r);
+    const float sr = sin(r);
+
+    U[0] = cb;
+    U[1] = sb;
+    U[2] = -sb;
+    U[3] = cb;
+
+    VT[0] = cr;
+    VT[1] = sr;
+    VT[2] = -sr;
+    VT[3] = cr;
+}
+
+__device__ void PseudoInverse2(
+    const float* M,
+    float* pinv) {
+    const float EPS = 1e-1f;
+
+    float U[4], S[2], VT[4];
+    SVD2(M, U, S, VT);
+
+    S[0] = abs(S[0]) < EPS ? 0.0f : 1.0f / S[0];
+    S[1] = abs(S[1]) < EPS ? 0.0f : 1.0f / S[1];
+
+    const float v0 = S[0] * VT[0];
+    const float v1 = S[1] * VT[2];
+    const float v2 = S[0] * VT[1];
+    const float v3 = S[1] * VT[3];
+
+    pinv[0] = v0 * U[0] + v1 * U[1];
+    pinv[1] = v0 * U[2] + v1 * U[3];
+    pinv[2] = v2 * U[0] + v3 * U[1];
+    pinv[3] = v2 * U[2] + v3 * U[3];
+}
+
+template <FunctionType FT>
+__global__ void KDualContour2(
+    float xs, float xt, int xn,
+    float ys, float yt, int yn,
+    float* p, int pcap, int* pcnt,
+    int* ibuffer, int tileY) {
+    const float xstep = (xt - xs) / (xn - 1);
+    const float ystep = (yt - ys) / (yn - 1);
+
+    const int tx = blockIdx.x * TILE_WIDTH + threadIdx.x;
+    const int ty = threadIdx.y;
+    const int ti = threadIdx.y * TILE_WIDTH + threadIdx.x;
+    const bool active = tx < (xn - 1) && ty < (yn - 1);
+
+    const float x0 = xs + tx * xstep;
+    const float x1 = x0 + xstep;
+    const float y0 = ys + ty * ystep;
+    const float y1 = y0 + ystep;
+
+    const float s0 = Sample2<FT>(x0, y0);
+    const float s1 = Sample2<FT>(x1, y0);
+    const float s2 = Sample2<FT>(x0, y1);
+    const float s3 = Sample2<FT>(x1, y1);
+
+    int intersections = IsIntersected(s0, s1) +
+        IsIntersected(s0, s2) +
+        IsIntersected(s2, s3) +
+        IsIntersected(s1, s3);
+
+    int pred = active && intersections >= 2;
+    const int total = __syncthreads_count(pred);
+
+    __shared__ int base;
+
+    if (threadIdx.x == 0 && threadIdx.y == 0) {
+        base = atomicAdd(pcnt, total);
+    }
+
+    __shared__ int s[BLOCK_SIZE];
+    s[ti] = pred;
+
+    __syncthreads();
+
+    // Reduction step.
+    for (int stride = 1; stride <= BLOCK_SIZE / 2; stride *= 2) {
+        int index = (ti + 1) * stride * 2 - 1;
+        if (index < BLOCK_SIZE)
+            s[index] += s[index - stride];
+
+        __syncthreads();
+    }
+
+    // Post scan step.
+    for (int stride = BLOCK_SIZE / 4; stride > 0; stride /= 2) {
+        int index = (ti + 1) * stride * 2 - 1;
+        if (index + stride < BLOCK_SIZE)
+            s[index + stride] += s[index];
+
+        __syncthreads();
+    }
+
+    // Compute the index of generated vertex.
+    const int pi = base + s[ti] - 1;
+
+    // Initialize the index buffer.
+    const int which = tileY % 2;
+    const int ibufferstride = (xn - 1) * TILE_HEIGHT;
+    const int bi = which * ibufferstride + ty * (xn - 1) + tx;
+    if (active)
+        ibuffer[bi] = -1;
+
+    // Generate the vertex.
+    if (pred) {
+        int k = 0;
+        float cx = 0.0f, cy = 0.0f;
+        float A[8]= {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+        float b[4];
+
+        if (IsIntersected(s0, s1)) {
+            const bool n = s0 < s1;
+            const float xlow = n ? x0 : x1;
+            const float xhigh = n ? x1 : x0;
+            float x, y;
+            SolveIntersection2<FT>(xlow, y0, xhigh, y0, &x, &y);
+            float dx, dy;
+            SampleGradient2<FT>(x, y, &dx, &dy);
+
+            A[2 * k] = dx;
+            A[2 * k + 1] = dy;
+
+            cx += x;
+            cy += y;
+
+            b[k] = dx * x + dy * y;
+
+            ++k;
+        }
+
+        if (IsIntersected(s0, s2)) {
+            const bool n = s0 < s2;
+            const float ylow = n ? y0 : y1;
+            const float yhigh = n ? y1 : y0;
+            float x, y;
+            SolveIntersection2<FT>(x0, ylow, x0, yhigh, &x, &y);
+            float dx, dy;
+            SampleGradient2<FT>(x, y, &dx, &dy);
+
+            A[2 * k] = dx;
+            A[2 * k + 1] = dy;
+
+            cx += x;
+            cy += y;
+
+            b[k] = dx * x + dy * y;
+
+            ++k;
+        }
+
+        if (IsIntersected(s2, s3)) {
+            const bool n = s2 < s3;
+            const float xlow = n ? x0 : x1;
+            const float xhigh = n ? x1 : x0;
+            float x, y;
+            SolveIntersection2<FT>(xlow, y1, xhigh, y1, &x, &y);
+            float dx, dy;
+            SampleGradient2<FT>(x, y, &dx, &dy);
+
+            A[2 * k] = dx;
+            A[2 * k + 1] = dy;
+
+            cx += x;
+            cy += y;
+
+            b[k] = dx * x + dy * y;
+
+            ++k;
+        }
+
+        if (IsIntersected(s1, s3)) {
+            const bool n = s1 < s3;
+            const float ylow = n ? y0 : y1;
+            const float yhigh = n ? y1 : y0;
+            float x, y;
+            SolveIntersection2<FT>(x1, ylow, x1, yhigh, &x, &y);
+            float dx, dy;
+            SampleGradient2<FT>(x, y, &dx, &dy);
+
+            A[2 * k] = dx;
+            A[2 * k + 1] = dy;
+
+            cx += x;
+            cy += y;
+
+            b[k] = dx * x + dy * y;
+
+            ++k;
+        }
+
+        // 7 floats for QEF equation.
+        float f[7];
+
+        // Compute ATA.
+        f[0] = A[0] * A[0] + A[2] * A[2] + A[4] * A[4] + A[6] * A[6];
+        f[1] = A[0] * A[1] + A[2] * A[3] + A[4] * A[5] + A[6] * A[7];
+        f[2] = A[1] * A[1] + A[3] * A[3] + A[5] * A[5] + A[7] * A[7];
+
+        // Compute ATb.
+        f[3] = A[0] * b[0] + A[2] * b[1] + A[4] * b[2] + A[6] * b[3];
+        f[4] = A[1] * b[0] + A[3] * b[1] + A[5] * b[2] + A[7] * b[3];
+
+        // Compute mass point.
+        f[5] = cx / k;
+        f[6] = cy / k;
+
+        // Solve QEF.
+        float pinv[4];
+        float ATA[4] = {f[0], f[1], f[1], f[2]};
+        PseudoInverse2(ATA, pinv);
+        const float ATAg[2] = {
+            ATA[0] * f[5] + ATA[1] * f[6],
+            ATA[2] * f[5] + ATA[3] * f[6]
+        };
+        const float d[2] = {
+            f[3] - ATAg[0],
+            f[4] - ATAg[1]
+        };
+        const float c[2] = {
+            pinv[0] * d[0] + pinv[1] * d[1],
+            pinv[2] * d[0] + pinv[3] * d[1]
+        };
+        const float px = c[0] + f[5];
+        const float py = c[1] + f[6];
+
+        p[2 * pi] = px;
+        p[2 * pi + 1] = py;
+
+        ibuffer[bi] = pi;
+    }
+}
+
+__global__ void KBuildTopology(
+    const int* ibuffer, int tileY,
+    int xn, int yn,
+    int* edges, int ecap, int* ecnt) {
+    const int which = tileY % 2;
+    const int ibufferstride = (xn - 1) * TILE_HEIGHT;
+    const int* ib = ibuffer + which * ibufferstride;
+    const int* prev = ibuffer + (1 - which) * ibufferstride;
+
+    const int tx = blockIdx.x * TILE_WIDTH + threadIdx.x;
+    const int ty = threadIdx.y;
+    const int ti = threadIdx.y * TILE_WIDTH + threadIdx.x;
+    const bool active = tx < (xn - 1) && ty < (yn - 1);
+
+    const int self = active ? ib[ty * (xn - 1) + tx] : -1;
+    const int left = tx == 0 ? -1 : ib[ty * (xn - 1) + tx - 1];
+    const int down = (active && !(tileY == 0 && ty == 0)) ?
+        (ty == 0 ? prev[(TILE_HEIGHT - 1) * (xn - 1) + tx] :
+        ib[(ty - 1) * (xn - 1) + tx]) : -1;
+
+    int count = 0;
+    if (self != -1) {
+        if (left != -1)
+            ++count;
+        if (down != -1)
+            ++count;
+    }
+
+    const int total1 = __syncthreads_count(count == 1);
+    const int total2 = __syncthreads_count(count == 2);
+    const int total = total1 + total2 * 2;
+
+    __shared__ int base;
+
+    if (threadIdx.x == 0 && threadIdx.y == 0) {
+        base = atomicAdd(ecnt, total);
+    }
+
+    __shared__ int s[BLOCK_SIZE];
+    s[ti] = count;
+
+    __syncthreads();
+
+    // Reduction step.
+    for (int stride = 1; stride <= BLOCK_SIZE / 2; stride *= 2) {
+        int index = (ti + 1) * stride * 2 - 1;
+        if (index < BLOCK_SIZE)
+            s[index] += s[index - stride];
+
+        __syncthreads();
+    }
+
+    // Post scan step.
+    for (int stride = BLOCK_SIZE / 4; stride > 0; stride /= 2) {
+        int index = (ti + 1) * stride * 2 - 1;
+        if (index + stride < BLOCK_SIZE)
+            s[index + stride] += s[index];
+
+        __syncthreads();
+    }
+
+    const int ei = base + s[ti] - count;
+
+    if (count != 0 && active) {
+        const int node = left != -1 ? left : down;
+        edges[2 * ei] = self;
+        edges[2 * ei + 1] = node;
+        --count;
+    }
+    if (count != 0 && active) {
+        edges[2 * (ei + 1)] = self;
+        edges[2 * (ei + 1) + 1] = down;
+    }
+}
+
+#define PROCESS(FT)\
+    for (int tileY = 0; tileY < tiles; ++tileY) {\
+        int yn = TILE_HEIGHT + 1;\
+        if (tileY == tiles - 1)\
+            yn = r + 1;\
+        \
+        KDualContour2<FT><<<gridDim, blockDim>>>(\
+            xs, xt, n,\
+            ys + tilestep * tileY,\
+            ys + tilestep * tileY + ystep * (yn - 1),\
+            yn,\
+            pd, pcap, pcntd,\
+            ibufferd, tileY);\
+        \
+        cudaDeviceSynchronize();\
+        \
+        KBuildTopology<<<gridDim, blockDim>>>(\
+            ibufferd,\
+            tileY,\
+            n, yn,\
+            edgesd, ecap, ecntd);\
+        \
+        cudaDeviceSynchronize();\
+    }
+
+bool DualContour2(
+    FunctionType ft,
+    float xs, float xt,
+    float ys, float yt, int n,
+    float* p, int pcap, int* pcnt,
+    int* edges, int ecap, int* ecnt) {
+    int blocks = (n - 1) / TILE_WIDTH;
+    if ((n - 1) % TILE_WIDTH != 0)
+        ++blocks;
+
+    int tiles = (n - 1) / TILE_HEIGHT;
+    int r = (n - 1) % TILE_HEIGHT;
+    if (r != 0)
+        ++tiles;
+
+    const float ystep = (yt - ys) / (n - 1);
+    const float tilestep = ystep * TILE_HEIGHT;
+
+    dim3 blockDim(TILE_WIDTH, TILE_HEIGHT);
+    dim3 gridDim(blocks, 1);
+
+    // Allocate device memory.
+    float* pd = nullptr;
+    cudaMalloc(&pd, sizeof(float) * 2 * pcap);
+    int* pcntd = nullptr;
+    cudaMalloc(&pcntd, sizeof(int));
+    cudaMemset(pcntd, 0, sizeof(int));
+    
+    int* edgesd = nullptr;
+    cudaMalloc(&edgesd, sizeof(int) * 2 * ecap);
+    int* ecntd = nullptr;
+    cudaMalloc(&ecntd, sizeof(int));
+    cudaMemset(ecntd, 0, sizeof(int));
+
+    // Allocate double index buffer.
+    const int ibuffersize = sizeof(int) * (n - 1) * TILE_HEIGHT * 2;
+    int* ibufferd = nullptr;
+    cudaMalloc(&ibufferd, ibuffersize);
+    cudaMemset(ibufferd, -1, ibuffersize);
+
+    // Launch computation grid tile by tile.
+    if (ft == FT_UNIT_SPHERE) {
+#if 0
+        for (int tileY = 0; tileY < tiles; ++tileY) {
+            int yn = TILE_HEIGHT + 1;
+            if (tileY == tiles - 1)
+                yn = r + 1;
+
+            KDualContour2<FT_UNIT_SPHERE><<<gridDim, blockDim>>>(
+                xs, xt, n,
+                ys + tilestep * tileY,
+                ys + tilestep * tileY + ystep * (yn - 1),
+                yn,
+                pd, pcap, pcntd,
+                ibufferd, tileY);
+
+            cudaDeviceSynchronize();
+
+            KBuildTopology<<<gridDim, blockDim>>>(
+                ibufferd,
+                tileY,
+                n, yn,
+                edgesd, ecap, ecntd);
+
+            cudaDeviceSynchronize();
+        }
+#endif
+        PROCESS(FT_UNIT_SPHERE);
+    }
+    else if (ft == FT_HEART) {
+        PROCESS(FT_HEART);
+    }
+
+    // Fetch device data.
+    cudaMemcpy(pcnt, pcntd, sizeof(int),
+        cudaMemcpyDeviceToHost);
+    cudaMemcpy(p, pd, sizeof(float) * 2 * pcap,
+        cudaMemcpyDeviceToHost);
+    
+    cudaMemcpy(ecnt, ecntd, sizeof(int),
+        cudaMemcpyDeviceToHost);
+    cudaMemcpy(edges, edgesd, sizeof(int) * 2 * ecap,
+        cudaMemcpyDeviceToHost);
+
+    cudaDeviceSynchronize();
+
+    // Release resources.
+    cudaFree(ibufferd);
+    cudaFree(ecntd);
+    cudaFree(edgesd);
+    cudaFree(pcntd);
+    cudaFree(pd);
+
+    return true;
+}
+```
+
+### src/dc2/dc2-internal.h
+```
+#ifndef DC2_INTERNAL_H
+#define DC2_INTERNAL_H
+
+#include "dc2.h"
+
+/**
+  \brief Sample the 2D mesh grid.
+
+  @param[in] xs starting x coordinates.
+  @param[in] xt ending x coordinates.
+  @param[in] ys starting y coordinates.
+  @param[in] yt ending y coordinates.
+  @param[out] s sampled values.
+  @param n number of mesh grid vertices.
+*/
+template <FunctionType>
+void Sample2(
+    float xs, float xt,
+    float ys, float yt,
+    float* s, int n);
+
+/**
+  \brief Sample the 2D mesh grid on the given coordinates with offsets.
+
+  @param[in] x x coordinates.
+  @param[in] y y coordinates.
+  @param dx offset of x coordinates.
+  @param dy offset of y coordinates.
+  @param[out] s sampled values.
+  @param n number of mesh grid vertices.
+*/
+template <FunctionType>
+void Sample2(
+    const float* x,
+    const float* y,
+    float dx,
+    float dy,
+    float* s,
+    int n);
+
+/**
+  \brief Sample the 2D mesh grid for the gradients.
+
+  @param[in] x x coordinates.
+  @param[in] y y coordinates.
+  @param[out] ds0 sampled gradient along the x direction.
+  @param[out] ds1 sampled gradient along the y direction.
+  @param n number of mesh grid vertices.
+*/
+template <FunctionType>
+void SampleGradient2(
+    const float* x, const float* y,
+    float* ds0, float* ds1,
+    int n);
+
+/**
+  \brief Collect the intersection edges for each grid cell.
+
+  @param x0s starting x coordinates of the first row of cells.
+  @param x0t ending x coordinates of the first row of cells.
+  @param y0s starting y coordinates of the first row of cells.
+  @param y0t ending y coordinates of the first row of cells.
+  @param x1s starting x coordinates of the second row of cells.
+  @param x1t ending x coordinates of the second row of cells.
+  @param y1s starting y coordinates of the second row of cells.
+  @param y1t ending y coordinates of the second row of cells.
+  @param v0 sampled values of the first row of cells.
+  @param v1 sampled values of the second row of cells.
+  @param n number of mesh grid vertices.
+  @param[out] xlow x coordinates of vertices who has negative sampled values.
+  @param[out] ylow y coordinates of vertices who has negative sampled values.
+  @param[out] xhigh x coordinates of vertices
+              who has non-negative sampled values.
+  @param[out] yhigh y coordinates of vertices
+              who has non-negative sampled values.
+  @param[out] ens a bit field indicating how many edges are intersected
+              in a grid cell.
+  @param[out] en total number of intersected edges.
+*/
+void CollectIntersectionEdges2(
+    float x0s, float x0t,
+    float y0s, float y0t,
+    float x1s, float x1t,
+    float y1s, float y1t,
+    const float* v0, const float* v1, int n,
+    float* xlow, float* ylow,
+    float* xhigh, float* yhigh,
+    int* ens,
+    int* en);
+
+/**
+  \brief Solve for the intersection points.
+
+  @param[in] xlow x coordinates of vertices who has negative sampled values.
+  @param[in] ylow y coordinates of vertices who has negative sampled values.
+  @param[in] xhigh x coordinates of vertices
+              who has non-negative sampled values.
+  @param[in] yhigh y coordinates of vertices
+              who has non-negative sampled values.
+  @param[out] x x coordinates of the intersection points.
+  @param[out] y y coordinates of the intersection points.
+  @param n total number of intersected edges.
+*/
+template <FunctionType>
+void SolveIntersection2(
+    const float* xlow, const float* ylow,
+    const float* xhigh, const float* yhigh,
+    float* x,
+    float* y,
+    int n);
+
+/**
+  \brief Construct QEF using two rows intersection points.
+
+  @param[in] ix0 x coordinates of the intersection points of the first row.
+  @param[in] iy0 y coordinates of the intersection points of the first row.
+  @param[in] ix1 x coordinates of the intersection points of the second row.
+  @param[in] iy1 y coordinates of the intersection points of the second row.
+  @param[in] nx0 gradient along the x direction of the first row.
+  @param[in] ny0 gradient along the y direction of the first row.
+  @param[in] nx1 gradient along the x direction of the second row.
+  @param[in] ny1 gradient along the y direction of the second row.
+  @param[in] ens0 a bit field indicating how many edges are intersected
+             in a grid cell of the first row.
+  @param[in] ens1 a bit field indicating how many edges are intersected
+             in a grid cell of the second row.
+  @param n number of cells in a row.
+  @param[out] f an array of QEF coefficients.
+              Each QEF has 7 coefficients.
+              It should have a capacity of 7 * (n - 1).
+  @param[out] h an array of QEF indices for each cell.
+              A -1 indicates no QEF for current cell.
+  @param[out] m total number of QEFs.
+*/
+void ConstructQEF2(
+    const float* ix0, const float* iy0,
+    const float* ix1, const float* iy1,
+    const float* nx0, const float* ny0,
+    const float* nx1, const float* ny1,
+    const int* ens0, const int* ens1, int n,
+    float* f, int* h, int* m);
+
+/**
+  \brief Solve the QEFs for the mesh vertices.
+
+  @param[in] f an array of QEF coefficients.
+             Each QEF has 7 coefficients.
+  @param[out] p the solution array. Each element is a 2D vertex.
+  @param n total number of QEFs.
+*/
+void SolveQEF2(const float* f, float* p, int n);
+
+#endif
+```
+
+### src/dc2/dc2.cpp
+```
+#include "dc2.h"
+#include "dc2-internal.h"
+#include "pinv.h"
+#include <cassert>
+#include <cmath>
+#include <cstdlib>
+#include <cstring>
+using namespace std;
+
+template <>
+void Sample2<FT_UNIT_SPHERE>(
+    float xs, float xt,
+    float ys, float yt,
+    float* s, int n) {
+    const float xstep = (xt - xs) / (n - 1);
+    const float ystep = (yt - ys) / (n - 1);
+    for (int i = 0; i < n; ++i) {
+        const float x = xs + i * xstep;
+        const float y = ys + i * ystep;
+        s[i] = x * x + y * y - 1.0f;
+    }
+}
+
+template <>
+void Sample2<FT_UNIT_SPHERE>(
+    const float* x,
+    const float* y,
+    float dx,
+    float dy,
+    float* s,
+    int n) {
+    for (int i = 0; i < n; ++i) {
+        const float xi = x[i] + dx;
+        const float yi = y[i] + dy;
+        s[i] = xi * xi + yi * yi - 1.0f;
+    }
+}
+
+template <>
+void Sample2<FT_HEART>(
+    float xs, float xt,
+    float ys, float yt,
+    float* s, int n) {
+    const float xstep = (xt - xs) / (n - 1);
+    const float ystep = (yt - ys) / (n - 1);
+    for (int i = 0; i < n; ++i) {
+        const float x = xs + i * xstep;
+        const float y = ys + i * ystep;
+        const float x2 = x * x;
+        const float y2 = y * y;
+        const float t = x2 + y2 - 1.0f;
+        s[i] = t * t * t - x2 * y2 * y;
+    }
+}
+
+template <>
+void Sample2<FT_HEART>(
+    const float* x,
+    const float* y,
+    float dx,
+    float dy,
+    float* s,
+    int n) {
+    for (int i = 0; i < n; ++i) {
+        const float xi = x[i] + dx;
+        const float yi = y[i] + dy;
+        const float x2 = xi * xi;
+        const float y2 = yi * yi;
+        const float t = x2 + y2 - 1.0f;
+        s[i] = t * t * t - x2 * y2 * yi;
+    }
+}
+
+template <FunctionType FT>
+void SampleGradient2(
+    const float* x, const float* y,
+    float* ds0, float* ds1,
+    int n) {
+    const float dh = 1e-5f;
+    const float rev2dh = 0.5f / dh;
+
+    int n4 = n / 4;
+    int m = n4 << 2;
+    int rn = n - m;
+
+    float xreg[4], yreg[4];
+    float sreg0[4], sreg1[4];
+    float lreg[4];
+    for (int i = 0; i < m; i += 4) {
+        xreg[0] = x[i];
+        xreg[1] = x[i + 1];
+        xreg[2] = x[i + 2];
+        xreg[3] = x[i + 3];
+
+        yreg[0] = y[i];
+        yreg[1] = y[i + 1];
+        yreg[2] = y[i + 2];
+        yreg[3] = y[i + 3];
+
+        // Compute df/dx.
+        Sample2<FT>(xreg, yreg, dh, 0.0f, sreg1, 4);
+        Sample2<FT>(xreg, yreg, -dh, 0.0f, sreg0, 4);
+        ds0[i] = (sreg1[0] - sreg0[0]) * rev2dh;
+        ds0[i + 1] = (sreg1[1] - sreg0[1]) * rev2dh;
+        ds0[i + 2] = (sreg1[2] - sreg0[2]) * rev2dh;
+        ds0[i + 3] = (sreg1[3] - sreg0[3]) * rev2dh;
+
+        // Compute df/dy.
+        Sample2<FT>(xreg, yreg, 0.0f, dh, sreg1, 4);
+        Sample2<FT>(xreg, yreg, 0.0f, -dh, sreg0, 4);
+        ds1[i] = (sreg1[0] - sreg0[0]) * rev2dh;
+        ds1[i + 1] = (sreg1[1] - sreg0[1]) * rev2dh;
+        ds1[i + 2] = (sreg1[2] - sreg0[2]) * rev2dh;
+        ds1[i + 3] = (sreg1[3] - sreg0[3]) * rev2dh;
+
+        // Normalize the gradient vector.
+        lreg[0] = sqrt(ds0[i] * ds0[i] + ds1[i] * ds1[i]);
+        lreg[1] = sqrt(ds0[i + 1] * ds0[i + 1] + ds1[i + 1] * ds1[i + 1]);
+        lreg[2] = sqrt(ds0[i + 2] * ds0[i + 2] + ds1[i + 2] * ds1[i + 2]);
+        lreg[3] = sqrt(ds0[i + 3] * ds0[i + 3] + ds1[i + 3] * ds1[i + 3]);
+
+        ds0[i] /= lreg[0]; ds1[i] /= lreg[0];
+        ds0[i + 1] /= lreg[1]; ds1[i + 1] /= lreg[1];
+        ds0[i + 2] /= lreg[2]; ds1[i + 2] /= lreg[2];
+        ds0[i + 3] /= lreg[3]; ds1[i + 3] /= lreg[3];
+    }
+
+    // Handle the boundary case.
+    xreg[0] = 0 < rn ? x[m] : 0.0f;
+    xreg[1] = 1 < rn ? x[m + 1] : 0.0f;
+    xreg[2] = 2 < rn ? x[m + 2] : 0.0f;
+    xreg[3] = 0.0f;
+
+    yreg[0] = 0 < rn ? y[m] : 0.0f;
+    yreg[1] = 1 < rn ? y[m + 1] : 0.0f;
+    yreg[2] = 2 < rn ? y[m + 2] : 0.0f;
+    yreg[3] = 0.0f;
+
+    // Compute df/dx.
+    Sample2<FT>(xreg, yreg, dh, 0.0f, sreg1, 4);
+    Sample2<FT>(xreg, yreg, -dh, 0.0f, sreg0, 4);
+    if (0 < rn)
+        ds0[m] = (sreg1[0] - sreg0[0]) * rev2dh;
+    if (1 < rn)
+        ds0[m + 1] = (sreg1[1] - sreg0[1]) * rev2dh;
+    if (2 < rn)
+        ds0[m + 2] = (sreg1[2] - sreg0[2]) * rev2dh;
+
+    // Compute df/dy.
+    Sample2<FT>(xreg, yreg, 0.0f, dh, sreg1, 4);
+    Sample2<FT>(xreg, yreg, 0.0f, -dh, sreg0, 4);
+    if (0 < rn)
+        ds1[m] = (sreg1[0] - sreg0[0]) * rev2dh;
+    if (1 < rn)
+        ds1[m + 1] = (sreg1[1] - sreg0[1]) * rev2dh;
+    if (2 < rn)
+        ds1[m + 2] = (sreg1[2] - sreg0[2]) * rev2dh;
+
+    // Normalize the gradient vector.
+    lreg[0] = sqrt(ds0[m] * ds0[m] + ds1[m] * ds1[m]);
+    lreg[1] = sqrt(ds0[m + 1] * ds0[m + 1] + ds1[m + 1] * ds1[m + 1]);
+    lreg[2] = sqrt(ds0[m + 2] * ds0[m + 2] + ds1[m + 2] * ds1[m + 2]);
+    lreg[3] = sqrt(ds0[m + 3] * ds0[m + 3] + ds1[m + 3] * ds1[m + 3]);
+
+    if (0 < rn)
+        ds0[m] /= lreg[0]; ds1[m] /= lreg[0];
+    if (1 < rn)
+        ds0[m + 1] /= lreg[1]; ds1[m + 1] /= lreg[1];
+    if (2 < rn)
+        ds0[m + 2] /= lreg[2]; ds1[m + 2] /= lreg[2];
+}
+
+void CollectIntersectionEdges2(
+    float x0s, float x0t,
+    float y0s, float y0t,
+    float x1s, float x1t,
+    float y1s, float y1t,
+    const float* v0, const float* v1, int n,
+    float* xlow, float* ylow,
+    float* xhigh, float* yhigh,
+    int* ens,
+    int* en) {
+
+    const float xstep = (x0t - x0s) / (n - 1);
+    const float ystep = (y0t - y0s) / (n - 1);
+
+    int top = 0;
+    for (int i = 0; i < n - 1; ++i) {
+        int count = 0;
+        int which = 0;
+
+        const float x0i = x0s + i * xstep;
+        const float x0i1 = x0s + (i + 1) * xstep;
+        const float y0i = y0s + i * ystep;
+        const float y0i1 = y0s + (i + 1) * ystep;
+        const float x1i = x1s + i * xstep;
+        const float y1i = y1s + i * ystep;
+
+        if (v0[i] < 0.0f && v0[i + 1] >= 0.0f ||
+            v0[i] >= 0.0f && v0[i + 1] < 0.0f) {
+            const bool flag = v0[i] < 0.0f;
+            xlow[top] = flag ? x0i : x0i1;
+            ylow[top] = flag ? y0i : y0i1;
+            xhigh[top] = flag ? x0i1 : x0i;
+            yhigh[top] = flag ? y0i1 : y0i;
+            which = 0;
+            ++count;
+            ++top;
+        }
+
+        if (v0[i] < 0.0f && v1[i] >= 0.0f ||
+            v0[i] >= 0.0f && v1[i] < 0.0f) {
+            const bool flag = v0[i] < 0.0f;
+            xlow[top] = flag ? x0i : x1i;
+            ylow[top] = flag ? y0i : y1i;
+            xhigh[top] = flag ? x1i : x0i;
+            yhigh[top] = flag ? y1i : y0i;
+            which = 1;
+            ++count;
+            ++top;
+        }
+
+        ens[i] = 0;
+        if (count == 2)
+            ens[i] = 3; // 11b
+        else if (count == 1)
+            ens[i] = 1 << which;
+    }
+    *en = top;
+}
+
+template <FunctionType FT>
+void SolveIntersection2(
+    const float* xlow, const float* ylow,
+    const float* xhigh, const float* yhigh,
+    float* x,
+    float* y,
+    int n) {
+    const float eps = 1e-6f;
+
+    int n4 = n / 4;
+    int m = n4 << 2;
+    int rn = n - m;
+
+    float xlreg[4], xhreg[4];
+    float ylreg[4], yhreg[4];
+    float cxreg[4], cyreg[4];
+    float vreg[4];
+    int cmp[4];
+    for (int i = 0; i < m; i += 4) {
+        xlreg[0] = xlow[i];
+        xlreg[1] = xlow[i + 1];
+        xlreg[2] = xlow[i + 2];
+        xlreg[3] = xlow[i + 3];
+
+        xhreg[0] = xhigh[i];
+        xhreg[1] = xhigh[i + 1];
+        xhreg[2] = xhigh[i + 2];
+        xhreg[3] = xhigh[i + 3];
+
+        ylreg[0] = ylow[i];
+        ylreg[1] = ylow[i + 1];
+        ylreg[2] = ylow[i + 2];
+        ylreg[3] = ylow[i + 3];
+
+        yhreg[0] = yhigh[i];
+        yhreg[1] = yhigh[i + 1];
+        yhreg[2] = yhigh[i + 2];
+        yhreg[3] = yhigh[i + 3];
+
+        cxreg[0] = (xlreg[0] + xhreg[0]) * 0.5f;
+        cxreg[1] = (xlreg[1] + xhreg[1]) * 0.5f;
+        cxreg[2] = (xlreg[2] + xhreg[2]) * 0.5f;
+        cxreg[3] = (xlreg[3] + xhreg[3]) * 0.5f;
+
+        cyreg[0] = (ylreg[0] + yhreg[0]) * 0.5f;
+        cyreg[1] = (ylreg[1] + yhreg[1]) * 0.5f;
+        cyreg[2] = (ylreg[2] + yhreg[2]) * 0.5f;
+        cyreg[3] = (ylreg[3] + yhreg[3]) * 0.5f;
+
+        Sample2<FT>(cxreg, cyreg, 0.0f, 0.0f, vreg, 4);
+
+        while (
+            abs(vreg[0]) >= eps ||
+            abs(vreg[1]) >= eps ||
+            abs(vreg[2]) >= eps ||
+            abs(vreg[3]) >= eps) {
+            cmp[0] = vreg[0] > 0.0f;
+            cmp[1] = vreg[1] > 0.0f;
+            cmp[2] = vreg[2] > 0.0f;
+            cmp[3] = vreg[3] > 0.0f;
+
+            if (cmp[0]) {
+                xhreg[0] = cxreg[0];
+                yhreg[0] = cyreg[0];
+            }
+            else {
+                xlreg[0] = cxreg[0];
+                ylreg[0] = cyreg[0];
+            }
+
+            if (cmp[1]) {
+                xhreg[1] = cxreg[1];
+                yhreg[1] = cyreg[1];
+            }
+            else {
+                xlreg[1] = cxreg[1];
+                ylreg[1] = cyreg[1];
+            }
+
+            if (cmp[2]) {
+                xhreg[2] = cxreg[2];
+                yhreg[2] = cyreg[2];
+            }
+            else {
+                xlreg[2] = cxreg[2];
+                ylreg[2] = cyreg[2];
+            }
+
+            if (cmp[3]) {
+                xhreg[3] = cxreg[3];
+                yhreg[3] = cyreg[3];
+            }
+            else {
+                xlreg[3] = cxreg[3];
+                ylreg[3] = cyreg[3];
+            }
+
+            cxreg[0] = (xlreg[0] + xhreg[0]) * 0.5f;
+            cxreg[1] = (xlreg[1] + xhreg[1]) * 0.5f;
+            cxreg[2] = (xlreg[2] + xhreg[2]) * 0.5f;
+            cxreg[3] = (xlreg[3] + xhreg[3]) * 0.5f;
+
+            cyreg[0] = (ylreg[0] + yhreg[0]) * 0.5f;
+            cyreg[1] = (ylreg[1] + yhreg[1]) * 0.5f;
+            cyreg[2] = (ylreg[2] + yhreg[2]) * 0.5f;
+            cyreg[3] = (ylreg[3] + yhreg[3]) * 0.5f;
+
+            Sample2<FT>(cxreg, cyreg, 0.0f, 0.0f, vreg, 4);
+        } // End of binary search.
+
+        x[i] = cxreg[0];
+        x[i + 1] = cxreg[1];
+        x[i + 2] = cxreg[2];
+        x[i + 3] = cxreg[3];
+
+        y[i] = cyreg[0];
+        y[i + 1] = cyreg[1];
+        y[i + 2] = cyreg[2];
+        y[i + 3] = cyreg[3];
+    } // End of 4x cases.
+
+    // Handle the boundary cases.
+    xlreg[0] = 0 < rn ? xlow[m] : 0.0f;
+    xlreg[1] = 1 < rn ? xlow[m + 1] : 0.0f;
+    xlreg[2] = 2 < rn ? xlow[m + 2] : 0.0f;
+    xlreg[3] = 0.0f;
+
+    xhreg[0] = 0 < rn ? xhigh[m] : 0.0f;
+    xhreg[1] = 1 < rn ? xhigh[m + 1] : 0.0f;
+    xhreg[2] = 2 < rn ? xhigh[m + 2] : 0.0f;
+    xhreg[3] = 0.0f;
+
+    ylreg[0] = 0 < rn ? ylow[m] : 0.0f;
+    ylreg[1] = 1 < rn ? ylow[m + 1] : 0.0f;
+    ylreg[2] = 2 < rn ? ylow[m + 2] : 0.0f;
+    ylreg[3] = 0.0f;
+
+    yhreg[0] = 0 < rn ? yhigh[m] : 0.0f;
+    yhreg[1] = 1 < rn ? yhigh[m + 1] : 0.0f;
+    yhreg[2] = 2 < rn ? yhigh[m + 2] : 0.0f;
+    yhreg[3] = 0.0f;
+
+    cxreg[0] = (xlreg[0] + xhreg[0]) * 0.5f;
+    cxreg[1] = (xlreg[1] + xhreg[1]) * 0.5f;
+    cxreg[2] = (xlreg[2] + xhreg[2]) * 0.5f;
+    cxreg[3] = (xlreg[3] + xhreg[3]) * 0.5f;
+
+    cyreg[0] = (ylreg[0] + yhreg[0]) * 0.5f;
+    cyreg[1] = (ylreg[1] + yhreg[1]) * 0.5f;
+    cyreg[2] = (ylreg[2] + yhreg[2]) * 0.5f;
+    cyreg[3] = (ylreg[3] + yhreg[3]) * 0.5f;
+
+    Sample2<FT>(cxreg, cyreg, 0.0f, 0.0f, vreg, 4);
+
+    while (
+        0 < rn && abs(vreg[0]) >= eps ||
+        1 < rn && abs(vreg[1]) >= eps ||
+        2 < rn && abs(vreg[2]) >= eps) {
+        cmp[0] = vreg[0] > 0.0f;
+        cmp[1] = vreg[1] > 0.0f;
+        cmp[2] = vreg[2] > 0.0f;
+        cmp[3] = vreg[3] > 0.0f;
+
+        if (cmp[0]) {
+            xhreg[0] = cxreg[0];
+            yhreg[0] = cyreg[0];
+        }
+        else {
+            xlreg[0] = cxreg[0];
+            ylreg[0] = cyreg[0];
+        }
+
+        if (cmp[1]) {
+            xhreg[1] = cxreg[1];
+            yhreg[1] = cyreg[1];
+        }
+        else {
+            xlreg[1] = cxreg[1];
+            ylreg[1] = cyreg[1];
+        }
+
+        if (cmp[2]) {
+            xhreg[2] = cxreg[2];
+            yhreg[2] = cyreg[2];
+        }
+        else {
+            xlreg[2] = cxreg[2];
+            ylreg[2] = cyreg[2];
+        }
+
+        cxreg[0] = (xlreg[0] + xhreg[0]) * 0.5f;
+        cxreg[1] = (xlreg[1] + xhreg[1]) * 0.5f;
+        cxreg[2] = (xlreg[2] + xhreg[2]) * 0.5f;
+        cxreg[3] = (xlreg[3] + xhreg[3]) * 0.5f;
+
+        cyreg[0] = (ylreg[0] + yhreg[0]) * 0.5f;
+        cyreg[1] = (ylreg[1] + yhreg[1]) * 0.5f;
+        cyreg[2] = (ylreg[2] + yhreg[2]) * 0.5f;
+        cyreg[3] = (ylreg[3] + yhreg[3]) * 0.5f;
+
+        Sample2<FT>(cxreg, cyreg, 0.0f, 0.0f, vreg, 4);
+    } // End of binary search.
+
+    if (0 < rn)
+        x[m] = cxreg[0];
+    if (1 < rn)
+        x[m + 1] = cxreg[1];
+    if (2 < rn)
+        x[m + 2] = cxreg[2];
+
+    if (0 < rn)
+        y[m] = cyreg[0];
+    if (1 < rn)
+        y[m + 1] = cyreg[1];
+    if (2 < rn)
+        y[m + 2] = cyreg[2];
+}
+
+void ConstructQEF2(
+    const float* ix0, const float* iy0,
+    const float* ix1, const float* iy1,
+    const float* nx0, const float* ny0,
+    const float* nx1, const float* ny1,
+    const int* ens0, const int* ens1, int n,
+    float* f, int* h, int* m) {
+    int count_total[] = {0, 1, 1, 2};
+    int count_horizontal[] = {0, 1, 0, 1};
+    int count_vertical[] = {0, 0, 1, 1};
+
+    *m = 0;
+    int start0 = 0, start1 = 0;
+    for (int i = 0; i < n - 1; ++i) {
+        int c0 = count_total[ens0[i]];
+        int c1 = count_horizontal[ens1[i]];
+        int c2 = count_total[ens1[i]];
+        int c3 = count_vertical[ens0[i + 1]];
+        int c4 = count_horizontal[ens0[i + 1]];
+
+        if (c0 + c1 + c3 < 2){
+            h[i] = -1;
+            start0 += c0;
+            start1 += c2;
+            continue;
+        }
+
+        h[i] = *m;
+
+        float A[8];
+        float b[4];
+        memset(A, 0, sizeof(A));
+        memset(b, 0, sizeof(b));
+
+        float gx = 0.0f;
+        float gy = 0.0f;
+
+        for (int j = 0; j < c0; ++j) {
+            const float nx = nx0[start0 + j];
+            const float ny = ny0[start0 + j];
+            const float ix = ix0[start0 + j];
+            const float iy = iy0[start0 + j];
+            A[j * 2] = nx;
+            A[j * 2 + 1] = ny;
+            b[j] = nx * ix + ny * iy;
+            gx += ix / (c0 + c1 + c3);
+            gy += iy / (c0 + c1 + c3);
+        }
+
+        for (int j = 0; j < c1; ++j) {
+            const float nx = nx1[start1 + j];
+            const float ny = ny1[start1 + j];
+            const float ix = ix1[start1 + j];
+            const float iy = iy1[start1 + j];
+            A[(c0 + j) * 2] = nx;
+            A[(c0 + j) * 2 + 1] = ny;
+            b[c0 + j] = nx * ix + ny * iy;
+            gx += ix / (c0 + c1 + c3);
+            gy += iy / (c0 + c1 + c3);
+        }
+
+        for (int j = 0; j < c3; ++j) {
+            const float nx = nx0[start0 + c0 + c4 + j];
+            const float ny = ny0[start0 + c0 + c4 + j];
+            const float ix = ix0[start0 + c0 + c4 + j];
+            const float iy = iy0[start0 + c0 + c4 + j];
+            A[(c0 + c1 + j) * 2] = nx;
+            A[(c0 + c1 + j) * 2 + 1] = ny;
+            b[c0 + c1 + j] = nx * ix + ny * iy;
+            gx += ix / (c0 + c1 + c3);
+            gy += iy / (c0 + c1 + c3);
+        }
+
+        // Compute ATA and ATb.
+        const float f0 = A[0] * A[0] + A[2] * A[2] + A[4] * A[4] + A[6] * A[6];
+        const float f1 = A[0] * A[1] + A[2] * A[3] + A[4] * A[5] + A[6] * A[7];
+        const float f2 = A[1] * A[1] + A[3] * A[3] + A[5] * A[5] + A[7] * A[7];
+
+        const float f3 = A[0] * b[0] + A[2] * b[1] + A[4] * b[2] + A[6] * b[3];
+        const float f4 = A[1] * b[0] + A[3] * b[1] + A[5] * b[2] + A[7] * b[3];
+
+        float data[] = {
+            f0, f1, f2, f3, f4, gx, gy
+        };
+
+        memcpy(f + *m * 7, data, sizeof(data));
+        *m += 1;
+
+        start0 += c0;
+        start1 += c2;
+    }
+}
+
+void SolveQEF2(const float* f, float* p, int n) {
+    const float* s = f;
+    float* q = p;
+    for (int i = 0; i < n; ++i, s += 7, q += 2) {
+        const float ATA[4] = {s[0], s[1], s[1], s[2]};
+        float pinv[4];
+        PseudoInverse2(ATA, pinv);
+        const float ATAg[2] = {
+            ATA[0] * s[5] + ATA[1] * s[6],
+            ATA[2] * s[5] + ATA[3] * s[6]
+        };
+        const float d[2] = {
+            s[3] - ATAg[0],
+            s[4] - ATAg[1]
+        };
+        const float c[2] = {
+            pinv[0] * d[0] + pinv[1] * d[1],
+            pinv[2] * d[0] + pinv[3] * d[1]
+        };
+        q[0] = c[0] + s[5];
+        q[1] = c[1] + s[6];
+    }
+}
+
+inline int NEXTS(int r) {
+    return (r + 1) % 3;
+}
+inline int NNEXTS(int r) {
+    return (r + 2) % 3;
+}
+inline int NEXTR(int r) {
+    return (r + 1) % 2;
+}
+inline int CURR(int r) {
+    return r % 2;
+}
+
+template <FunctionType FT>
+bool GenericDualContour2(
+    float xs, float xt,
+    float ys, float yt, int n,
+    float* p, int pcap, int* pcnt,
+    int* edges, int ecap, int* ecnt) {
+    int nsamples = n + 1;
+    int ncells = n;
+    const float xstep = (xt - xs) / (n - 1);
+    const float ystep = (yt - ys) / (n - 1);
+
+    // Allocate 3 rows of samples.
+    float* const S = (float*)malloc(sizeof(float) * nsamples * 3);
+    float* const s[3] = {
+        S,
+        S + nsamples,
+        S + nsamples * 2
+    };
+
+    // Initialize two rows of samples.
+    Sample2<FT>(
+        xs, xt + xstep,
+        ys, ys,
+        s[0], nsamples);
+    Sample2<FT>(
+        xs, xt + xstep,
+        ys + ystep, ys + ystep,
+        s[1], nsamples);
+
+    // Allocate arrays for xlow, ylow, xhigh, yhigh.
+    // One cell contains 2 intersected edges at most.
+    float* const E = (float*)malloc(sizeof(float) * ncells * 2 * 4);
+    float* const xlow = E;
+    float* const ylow = E + ncells * 2;
+    float* const xhigh = ylow + ncells * 2;
+    float* const yhigh = xhigh + ncells * 2;
+
+    // Allocate 4 arrays for ix0, ix1, iy0, iy1.
+    // One cell contains 2 intersections at most.
+    float* const I = (float*)malloc(sizeof(float) * ncells * 2 * 4);
+    float* const ix[2] = {
+        I,
+        I + ncells * 2 * 2
+    };
+    float* const iy[2] = {
+        I + ncells * 2,
+        I + ncells * 2 * 3
+    };
+
+    // Allocate 4 arrays for nx0, nx1, ny0, ny1.
+    // One cell contains 2 intersections at most.
+    float* const N = (float*)malloc(sizeof(float) * ncells * 2 * 4);
+    float* const nx[2] = {
+        N,
+        N + ncells * 2 * 2
+    };
+    float* const ny[2] = {
+        N + ncells * 2,
+        N + ncells * 2 * 3
+    };
+
+    // Allocate arrays for 2 rows of intersected edges count.
+    int* const ENS = (int*)malloc(sizeof(int) * ncells * 2);
+    int* const ens[2] = {
+        ENS,
+        ENS + ncells
+    };
+    int en[2];
+
+    // Allocate arrays for 2 rows of index of generated mesh vertices.
+    int* const H = (int*)malloc(sizeof(int) * ncells * 2);
+    int* const h[2] = {
+        H,
+        H + ncells
+    };
+
+    // Allocate arrays for generated mesh vertices.
+    float* const V = (float*)malloc(sizeof(float) * 2 * ncells);
+
+    // Allocate buffers for QEF coefficients.
+    const int cap = 4 * ncells;
+    float* const QEF = (float*)malloc(sizeof(float) * 7 * cap);
+
+    // Initialize the first row of intersections.
+    CollectIntersectionEdges2(
+        xs, xt + xstep, ys, ys,
+        xs, xt + xstep, ys + ystep, ys + ystep,
+        s[0], s[1], nsamples,
+        xlow, ylow, xhigh, yhigh,
+        ens[0], &en[0]);
+
+    SolveIntersection2<FT>(
+        xlow, ylow,
+        xhigh, yhigh,
+        ix[0], iy[0], en[0]);
+
+    SampleGradient2<FT>(
+        ix[0], iy[0],
+        nx[0], ny[0],
+        en[0]);
+
+    float prevy = ys + ystep;
+    float y = prevy + ystep;
+    // Last count of generated vertices.
+    int last = 0;
+    *pcnt = 0;
+    *ecnt = 0;
+    for (int l = 0; l < n - 1; ++l, prevy = y, y += ystep) {
+        Sample2<FT>(
+            xs, xt + xstep,
+            y, y,
+            s[NNEXTS(l)], nsamples);
+
+        CollectIntersectionEdges2(
+            xs, xt + xstep, prevy, prevy,
+            xs, xt + xstep, y, y,
+            s[NEXTS(l)], s[NNEXTS(l)], nsamples,
+            xlow, ylow, xhigh, yhigh,
+            ens[NEXTR(l)], &en[NEXTR(l)]);
+
+        SolveIntersection2<FT>(
+            xlow, ylow,
+            xhigh, yhigh,
+            ix[NEXTR(l)], iy[NEXTR(l)], en[NEXTR(l)]);
+
+        SampleGradient2<FT>(
+            ix[NEXTR(l)], iy[NEXTR(l)],
+            nx[NEXTR(l)], ny[NEXTR(l)],
+            en[NEXTR(l)]);
+
+        int nQEF;
+        ConstructQEF2(
+            ix[CURR(l)], iy[CURR(l)],
+            ix[NEXTR(l)], iy[NEXTR(l)],
+            nx[CURR(l)], ny[CURR(l)],
+            nx[NEXTR(l)], ny[NEXTR(l)],
+            ens[CURR(l)], ens[NEXTR(l)],
+            ncells,
+            QEF, h[NEXTR(l)], &nQEF);
+
+        if (*pcnt + nQEF > pcap)
+            return false;
+        SolveQEF2(QEF, p + 2 * (*pcnt), nQEF);
+        *pcnt += nQEF;
+
+        // Generate horizontal edges.
+        int base1 = *pcnt - nQEF;
+        int* const h1 = h[NEXTR(l)];
+        for (int c = 1; c < ncells - 1; ++c) {
+            if (h1[c] != -1 && h1[c - 1] != -1) {
+                if (*ecnt + 1 > ecap)
+                    return false;
+                edges[*ecnt * 2] = base1 + h1[c];
+                edges[*ecnt * 2 + 1] = base1 + h1[c - 1];
+                *ecnt += 1;
+            }
+        }
+
+        // Generate vertical edges.
+        int base0 = base1 - last;
+        int* const h0 = h[CURR(l)];
+        if (l != 0) {
+            for (int c = 0; c < ncells - 1; ++c) {
+                if (h1[c] != -1 && h0[c] != -1) {
+                    if (*ecnt + 1 > ecap)
+                        return false;
+                    edges[*ecnt * 2] = base1 + h1[c];
+                    edges[*ecnt * 2 + 1] = base0 + h0[c];
+                    *ecnt += 1;
+                }
+            }
+        }
+
+        last = nQEF;
+    }
+
+    free(S);
+    free(I);
+    free(N);
+    free(E);
+    free(ENS);
+    free(H);
+    free(V);
+    free(QEF);
+    return true;
+}
+
+bool DualContour2(
+    FunctionType ft,
+    float xs, float xt,
+    float ys, float yt, int n,
+    float* p, int pcap, int* pcnt,
+    int* edges, int ecap, int* ecnt) {
+    switch(ft) {
+        case FT_UNIT_SPHERE:
+            return GenericDualContour2<FT_UNIT_SPHERE>(
+                xs, xt, ys, yt, n, p, pcap, pcnt, edges, ecap, ecnt);
+
+        case FT_HEART:
+            return GenericDualContour2<FT_HEART>(
+                xs, xt, ys, yt, n, p, pcap, pcnt, edges, ecap, ecnt);
+            
+        default:
+            assert(false);
+            return false;
+    }
+}
+```
+
+### src/dc2/dc2.h
+```
+#ifndef DC2_H
+#define DC2_H
+
+enum FunctionType {
+    FT_UNIT_SPHERE = 0,
+    FT_HEART,
+    cFunctionTypeCount
+};
+
+/**
+  \brief Dual contour a 2D function.
+
+  @param xs the starting x coordinates.
+  @param xt the ending x coordinates.
+  @param ys the starting y coordinates.
+  @param yt the ending y coordinates.
+
+  @param[out] p the generated mesh vertices stored as array of float2.
+  @param pcap the capacity of the vertices.
+  @param[out] pcnt the actual count of generated vertices.
+
+  @param[out] edges the generated edges stored as array int2.
+  @param ecap the capacity of the edges.
+  @param[out] ecnt the actual count of generated edges.
+*/
+bool DualContour2(
+    FunctionType ft,
+    float xs, float xt,
+    float ys, float yt, int n,
+    float* p, int pcap, int* pcnt,
+    int* edges, int ecap, int* ecnt);
+
+#endif
+```
+
+### src/pinv-py/numerical_svd.py
+```
+from numpy import matrix, array, diag, float64
+from math import sqrt
+
+def svd2(M):
+    E = (M[0, 0] + M[1, 1]) * 0.5
+    F = (M[0, 0] - M[1, 1]) * 0.5
+    G = (M[0, 1] + M[1, 0]) * 0.5
+    H = (M[0, 1] - M[1, 0]) * 0.5
+
+    # one half of w1 + w2
+    hw1pw2 = sqrt(E * E + H * H)
+    # one half of w1 - w2
+    hw1mw2 = sqrt(F * F + G * G)
+
+    # cos(y - b)
+    cymb = F / hw1mw2
+    # cos(y + b)
+    cypb = E / hw1pw2
+
+    cc = sqrt((1 + cymb) * (1 + cypb))
+    ss = sqrt((1 - cymb) * (1 - cypb))
+    cs = sqrt((1 + cymb) * (1 - cypb))
+    sc = sqrt((1 - cymb) * (1 + cypb))
+
+    cb = (cc - ss) * 0.5
+    sb = (sc + cs) * 0.5
+
+    u = matrix([[cb, -sb], [sb, cb]], dtype=float64)
+    d = array([hw1pw2 + hw1mw2, hw1pw2 - hw1mw2], dtype=float64)
+    vT = matrix(diag(1.0 / d)).dot(u.T).dot(M)
+
+    return u, d, vT
+
+def pinv2(M):
+    EPS = 1e-12
+    u, s, vT = svd2(M)
+
+    print(s)
+    for k in range(s.size):
+        if abs(s[k]) < EPS:
+            s[k] = 0.0
+        else:
+            s[k] = 1.0 / s[k]
+
+    return vT.T.dot(matrix(diag(s))).dot(u.T)
+```
+
+### src/pinv/pinv.cpp
+```
+#include "pinv.h"
+#include <cmath>
+using namespace std;
+
+bool SVD2(
+    const float* M,
+    float* U,
+    float* S,
+    float* VT) {
+    const float e = 0.5f * (M[0] + M[3]);
+    const float f = 0.5f * (M[0] - M[3]);
+    const float g = 0.5f * (M[1] + M[2]);
+    const float h = 0.5f * (M[1] - M[2]);
+
+    // one half of w1 + w2
+    const float hw1pw2 = sqrt(e * e + h * h);
+    const float hw1mw2 = sqrt(f * f + g * g);
+
+    const float atangf = g == 0.0f && f == 0.0f ? 0.0f : atan2(g, f);
+    const float atanhe = h == 0.0f && e == 0.0f ? 0.0f : atan2(h, e);
+    
+    S[0] = hw1pw2 + hw1mw2;
+    S[1] = hw1pw2 - hw1mw2;
+
+    const float b = (atanhe - atangf) * 0.5f;
+    const float r = (atanhe + atangf) * 0.5f;
+
+    const float cb = cos(b);
+    const float sb = sin(b);
+    const float cr = cos(r);
+    const float sr = sin(r);
+
+    U[0] = cb;
+    U[1] = sb;
+    U[2] = -sb;
+    U[3] = cb;
+
+    VT[0] = cr;
+    VT[1] = sr;
+    VT[2] = -sr;
+    VT[3] = cr;
+
+    return true;
+}
+
+bool PseudoInverse2(
+    const float* M,
+    float* pinv) {
+    const float EPS = 1e-1f;
+
+    float U[4], S[2], VT[4];
+    SVD2(M, U, S, VT);
+
+    S[0] = abs(S[0]) < EPS ? 0.0f : 1.0f / S[0];
+    S[1] = abs(S[1]) < EPS ? 0.0f : 1.0f / S[1];
+
+    const float v0 = S[0] * VT[0];
+    const float v1 = S[1] * VT[2];
+    const float v2 = S[0] * VT[1];
+    const float v3 = S[1] * VT[3];
+
+    pinv[0] = v0 * U[0] + v1 * U[1];
+    pinv[1] = v0 * U[2] + v1 * U[3];
+    pinv[2] = v2 * U[0] + v3 * U[1];
+    pinv[3] = v2 * U[2] + v3 * U[3];
+
+    return true;
+}
+```
+
+### src/pinv/pinv.h
+```
+#ifndef PINV_H
+#define PINV_H
+
+bool SVD2(
+    const float* M,
+    float* U,
+    float* S,
+    float* VT);
+
+bool PseudoInverse2(
+    const float* M,
+    float* pinv);
+
+#endif
+```
+
+### utilities/blender-addons/addons/visualizer2d.py
+```
+bl_info = {
+    "name": "2D Mesh Visualizer",
+    "description": "Visualize 2D mesh data",
+    "author": "TheBusyTypist",
+    "location": "View3D > Add > Mesh",
+    "category": "Add Mesh"
+}
+
+import bpy
+import bmesh
+
+class Visualizer2D(bpy.types.Operator):
+    """Visualize 2D mesh data"""
+    bl_idname = "object.contour_2d"
+    bl_label = "Visualize 2D mesh data"
+    bl_options = {"REGISTER", "UNDO"}
+
+    Source = bpy.props.StringProperty(
+        name="File path",
+        subtype="FILE_PATH")
+
+    def execute(self, context):
+        if self.Source != "":
+            with open(self.Source, "r") as file:
+                lines = file.readlines()
+                vcnt, ecnt = map(int, lines[0].split())
+
+                vertices = []
+                for i in range(vcnt):
+                    x, y = map(float, lines[i + 1].split())
+                    vertices.append((x, y, 0.0))
+
+                edges = []
+                for i in range(ecnt):
+                    a, b = map(int, lines[1 + vcnt + i].split())
+                    edges.append((a, b))
+
+                mesh = bpy.data.meshes.new("Mesh")
+                mesh.from_pydata(vertices, edges, [])
+                obj = bpy.data.objects.new("MeshObj", mesh)
+                context.scene.objects.link(obj)
+        
+        return {"FINISHED"}
+
+def register():
+    bpy.utils.register_class(Visualizer2D)
+
+def unregister():
+    bpy.utils.unregister_class(Visualizer2D)
+
+if __name__ == "__main__":
+    register()
+```
+
+### src/cudc2/demos/cudc2-plain/main.cpp
+```
+#include <cudc2.h>
+#include <cassert>
+#include <cstdio>
+#include <cstring>
+using namespace std;
+
+int main(int argc, char* argv[]) {
+    const int pcap = 1024;
+    const int ecap = 1024;
+
+    float start, end;
+    int ticks;
+    FunctionType ft;
+    assert(argc == 5);
+
+    if (strncmp(argv[1], "UNIT_SPHERE", 11) == 0)
+        ft = FT_UNIT_SPHERE;
+    else if (strncmp(argv[1], "HEART", 5) == 0)
+        ft = FT_HEART;
+    else
+        assert(false);
+
+    sscanf(argv[2], "%f", &start);
+    sscanf(argv[3], "%f", &end);
+    sscanf(argv[4], "%d", &ticks);
+
+    float p[pcap * 2];
+    int edges[ecap * 2];
+
+    int pcnt, ecnt;
+
+    bool r = DualContour2(ft,
+        start, end,
+        start, end,
+        ticks,
+        p, pcap, &pcnt,
+        edges, ecap, &ecnt);
+    assert(r);
+
+    printf("%d %d\n", pcnt, ecnt);
+
+    for (int i = 0; i < pcnt; ++i) {
+        printf("%f %f\n", p[i * 2], p[2 * i + 1]);
+    }
+
+    for (int i = 0; i < ecnt; ++i) {
+        printf("%d %d\n", edges[i * 2], edges[i * 2 + 1]);
+    }
+
+    return 0;
+}
+```
+
+### src/dc2/demos/dc2-plain/main.cpp
+```
+#include <dc2.h>
+#include <cassert>
+#include <cstdio>
+#include <cstring>
+using namespace std;
+
+int main(int argc, char* argv[]) {
+    const int pcap = 1024;
+    const int ecap = 1024;
+
+    float start, end;
+    int ticks;
+    FunctionType ft;
+    assert(argc == 5);
+
+    if (strncmp(argv[1], "UNIT_SPHERE", 11) == 0)
+        ft = FT_UNIT_SPHERE;
+    else if (strncmp(argv[1], "HEART", 5) == 0)
+        ft = FT_HEART;
+    else
+        assert(false); 
+
+    sscanf(argv[2], "%f", &start);
+    sscanf(argv[3], "%f", &end);
+    sscanf(argv[4], "%d", &ticks);
+
+    float p[pcap * 2];
+    int edges[ecap * 2];
+
+    int pcnt, ecnt;
+
+    bool r = DualContour2(ft,
+        start, end,
+        start, end,
+        ticks,
+        p, pcap, &pcnt,
+        edges, ecap, &ecnt);
+    assert(r);
+
+    printf("%d %d\n", pcnt, ecnt);
+
+    for (int i = 0; i < pcnt; ++i) {
+        printf("%f %f\n", p[i * 2], p[2 * i + 1]);
+    }
+
+    for (int i = 0; i < ecnt; ++i) {
+        printf("%d %d\n", edges[i * 2], edges[i * 2 + 1]);
+    }
+
+    return 0;
+}
+```

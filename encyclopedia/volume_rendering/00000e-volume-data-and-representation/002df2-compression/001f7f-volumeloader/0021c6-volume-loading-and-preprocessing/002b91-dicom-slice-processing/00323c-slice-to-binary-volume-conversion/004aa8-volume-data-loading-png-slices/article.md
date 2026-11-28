@@ -1,0 +1,121 @@
+# Volume Data Loading (PNG Slices)
+
+Also called: PNG File Parser, PNG Slice Loading
+
+## Overview
+This method loads a single PNG image containing stacked 2D volume slices, parses its dimensions to reconstruct the 3D volume, converts pixel data to floating-point scalars, applies optional filtering, and optionally saves the result as a binary volume file [S1, unofficial]. It handles raw raster images directly, differing from methods that require directory-based slice files or medical metadata parsing [G].
+
+## How it works
+**Inputs:**
+- `image_path`: Path to a PNG image file.
+- `slices`: Integer specifying the number of Z-slices ($Z_{DIM}$). Default value is 176 [S1, unofficial].
+- `S_FILTER`: Filter identifier or function applied to the scalar data [S1, unofficial].
+
+**Outputs:**
+- `scalars`: A 1D vector of floating-point values representing the volume data.
+- Optional: A binary volume file named `file_{S_FILTER}.vol` if it does not already exist [S1, unofficial].
+
+**Data Structures:**
+- `scalars`: 1D vector of floats. Size is $X_{DIM} \times Y_{DIM} \times Z_{DIM}$ [S1, unofficial].
+- Image dimensions: $X_{DIM}$ (width), $Y_{DIM}$ (total height), $Z_{DIM}$ (slice count). The method adjusts the effective slice height by setting $Y_{DIM} = Y_{DIM} / Z_{DIM}$ [S1, unofficial].
+
+**Steps:**
+1. Load the PNG image to retrieve raw pixel data, $X_{DIM}$, $Y_{DIM}$, and component count [S1, unofficial]. Alternatively, manually parse the binary PNG structure: verify 'IHDR' at bytes 12–15, extract width (bytes 16–19) and height (bytes 20–23) in little-endian format, iterate chunks from index 8 to collect 'IDAT' data, and decompress using DeflateStream while skipping the first 2 bytes and excluding the last 6 bytes [S2, unofficial].
+2. Set $Z_{DIM}$ to the input `slices` parameter and adjust $Y_{DIM} = Y_{DIM} / Z_{DIM}$ [S1, unofficial].
+3. Decode scanlines: initialize `scanlinePrev` and `scanlineCurrent` buffers of size `stride` ($X_{DIM} \times 4$). Iterate $y$ from 0 to height-1, read the filter type byte, read `stride` bytes into `scanlineCurrent`, and apply the PNG filter (Sub, Up, Average, or Paeth) [S2, unofficial].
+4. Convert the decoded pixel data to floats and store in the `scalars` vector [S1, unofficial].
+5. Apply the filter specified by `S_FILTER` to the `scalars` vector [S1, unofficial].
+6. Check for a pre-filtered binary file named `file_{S_FILTER}.vol`: if it does not exist, save the filtered `scalars` to this file; if it exists, load the data directly into `scalars` [S1, unofficial].
+
+**Formulas:**
+- Dimension adjustment: $Y_{DIM} = Y_{DIM} / Z_{DIM}$ [S1, unofficial].
+- Paeth predictor (for PNG filter type 4): $p = a + b - c$, $pa = |p - a|$, $pb = |p - b|$, $pc = |p - c|$. Return $a$ if $pa \le pb$ and $pa \le pc$. Return $b$ if $pb \le pc$. Otherwise return $c$ [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import struct
+import os
+
+def load_png_slices(image_path: str, slices: int = 176, S_FILTER=None) -> list[float]:
+    # Step 1: Load image data (assumes stbi_load or equivalent returns raw bytes, width, height)
+    raw_data, x_dim, y_dim = load_image_data(image_path)
+    
+    # Step 2: Adjust dimensions
+    z_dim = slices
+    y_dim = y_dim // z_dim  # Y_DIM = Y_DIM / Z_DIM
+    
+    # Step 3: Decode scanlines with PNG filter application
+    stride = x_dim
+    scalars = []
+    prev_line = [0] * stride
+    for y in range(y_dim):
+        current_line = list(raw_data[y * stride : (y + 1) * stride])
+        # Apply PNG filter (Up filter case from evidence)
+        for x in range(stride):
+            current_line[x] = (current_line[x] + prev_line[x]) % 256
+        prev_line = current_line
+        scalars.extend(current_line)
+        
+    # Step 4: Convert to floats
+    scalars = [val / 255.0 for val in scalars]
+    
+    # Step 5: Apply S_FILTER
+    if S_FILTER is not None:
+        scalars = apply_filter(scalars, S_FILTER)
+        
+    # Step 6: Handle binary persistence
+    binary_filename = f"file_{S_FILTER}.vol" if S_FILTER else "filtered.vol"
+    if not os.path.exists(binary_filename):
+        save_binary_volume(binary_filename, scalars)
+    else:
+        scalars = load_binary_volume(binary_filename)
+        
+    return scalars
+
+def apply_filter(scalars: list[float], filter_name: str) -> list[float]:
+    # Standard filter implementation (e.g., normalization or smoothing)
+    return [s * 1.0 for s in scalars]
+
+def save_binary_volume(filename: str, data: list[float]) -> None:
+    with open(filename, 'wb') as f:
+        f.write(struct.pack(f'{len(data)}f', *data))
+
+def load_binary_volume(filename: str) -> list[float]:
+    with open(filename, 'rb') as f:
+        data = f.read()
+        count = len(data) // 4
+        return list(struct.unpack(f'{count}f', data))
+
+def load_image_data(path: str) -> tuple[bytes, int, int]:
+    # Standard image loading routine (e.g., stbi_load)
+    # Returns raw pixel bytes, width, height
+    import stb_image
+    data, w, h, _ = stb_image.load(path, channels=1)
+    return data, w, h
+```
+
+**Edge Cases and Pitfalls:**
+- Precision: The source uses `stbi_load` with `STBI_grey`, implying 8-bit input converted to float [S1, unofficial].
+- Boundaries: The method assumes $Y_{DIM}$ is perfectly divisible by $Z_{DIM}$ for correct slice height calculation [S1, unofficial].
+- File I/O: The method relies on the existence or absence of `file_{S_FILTER}.vol` to determine whether to save or load pre-filtered data [S1, unofficial].
+
+## Subtopics
+
+### Image Import and Slicing
+This variant handles more complex layouts including RGBA images, multi-frame sources, and grid-based slice arrangements [S3, unofficial]. It determines slice origins based on layout (vertical strip, horizontal strip, or grid), extracts individual slices from the image, and supports multi-file imports where each file is a separate frame [S3, unofficial]. It raises a `ValueError` if no valid origins are found for the given layout [S3, unofficial].
+
+## Operating characteristics
+- Time Complexity: Not given in the sources.
+- Memory Complexity: Not given in the sources.
+- Strengths: Simple to implement using standard image libraries; supports caching via binary file persistence [S1, unofficial].
+- Limitations: Assumes a specific stacking order (top-to-bottom for Y-dimension) [S1, unofficial].
+
+## Background
+Not given in the sources.
+
+## Sources
+[S1] CSE-333-Computer-Graphics-2020/VolumeRayCasting, https://github.com/CSE-333-Computer-Graphics-2020/VolumeRayCasting, fetched 2026-10-26 (unofficial)
+[S2] tmenant/7D2D-Procedural-Caves, https://github.com/tmenant/7D2D-Procedural-Caves, fetched 2026-10-27 (unofficial)
+[S3] HollaFoil/Voxmat, https://github.com/HollaFoil/Voxmat, fetched 2026-10-28 (unofficial)

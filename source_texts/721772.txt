@@ -1,0 +1,117 @@
+Embree is Intel's Apache 2.0 ray tracing kernel library for renderers. Here is how it dispatches across CPUs, what SYCL adds, and what the fork implies.
+
+Embree: high performance ray tracing kernels | Hysen Labs
+At a glance
+What is it?
+Apache 2.0 C++ kernels from Intel for triangle, curve and point intersection, with runtime dispatch across SSE, AVX2 and AVX-512, plus SYCL for Intel GPUs.
+Who is it for?
+Embree is worth adopting when you have a production renderer and ray tracing performance is the bottleneck, because replacing a hand written BVH with it is a bounded change against a stable C API, and because the same source can drive CPUs and Intel GPUs through SYCL. It is the wrong choice for a prototype, for a non Intel GPU, or on Windows on ARM, which the README calls experimental.
+Can I use it commercially?
+Yes. Apache-2.0 is a permissive licence: you can use, modify and sell software built on it, as long as you keep its copyright and licence notices.
+Is it still maintained?
+Yes. The repository last received commits 1 day ago.
+What is it written in?
+Mainly C++, according to GitHub's language statistics.
+Answers come from the project's GitHub data, last synced on November 3, 2026, and from our analysis. They are not legal advice.
+From daily snapshots
+Star history
+RenderKit/embree2,775 ★ · +12
+2.8k2.8k2.8k2.8kOct 7Oct 14Oct 21Oct 27Nov 3
+Star history
+Repository2026-10-072026-11-03
+RenderKit/embree2.8k2.8k
+12 Stars in the last 27 days, measured from the daily GitHub snapshot. Compare with other projects
+Editorial analysis
+Written with AI assistance from the project's public sources and checked automatically. Last updated October 7, 2026. 6 min read
+Kernels, not a renderer, with a deliberate incoherent ray bias
+Embree is a library of ray tracing kernels. It does not render anything, shade nothing and produce no image. What it does is answer two questions very fast for you: which geometry does this ray hit, and is anything in the way. Everything around that, camera, materials, sampling, tone mapping, is your renderer's job.
+The README is unusually specific about what the kernels are tuned for. It says the library is optimised toward production rendering by focusing on incoherent ray performance, high quality acceleration structure construction, a rich feature set, accurate primitive intersection and low memory consumption. Incoherent rays are the rays that hit scattered geometry in scattered order, which is exactly what path tracing and Monte Carlo sampling produce, and it is the workload where a naive acceleration structure falls apart. Coherent workloads, meaning primary visibility rays and hard shadow rays, are supported too, and dynamic scenes are handled through two-level spatial index construction.
+So the positioning is not general purpose ray tracing. It is the part of a renderer that pays the real cost, aimed at people building photo-realistic production software and willing to call into C++ to get it.
+Primitives from quads and Catmull-Clark surfaces to Bézier curves
+The primitive coverage is what makes Embree more than a triangle intersector. It handles triangles, plus quads and grids for lower memory consumption, and Catmull-Clark subdivision surfaces.
+Curves are covered by type rather than by a single implementation: flat curves for distant views, round curves for closeups, and normal oriented curves, each supported with different basis functions including linear, Bézier, B-spline, Hermite and Catmull Rom. Splitting a curve library by viewing distance is a real memory optimisation, since a distant curve needs far less geometric detail than one you are close to.
+On top of that there are point-like primitives, namely ray oriented discs, normal oriented discs and spheres; user defined geometries with a procedural intersection function; multi-level instancing; filter callbacks invoked for any hit; motion blur including multi-segment motion blur, deformation blur and quaternion motion blur; and ray masking. Multi-level instancing plus deformation blur is the combination that matters most for production scenes, because it is how a renderer keeps a large instanced set animated without rebuilding acceleration structure from scratch every frame.
+Instancing depth also has a performance meaning on GPU. The 4.4.0 notes call out gains for the two level instancing case under RTC_MAX_INSTANCE_LEVEL_COUNT 2, and 4.3.3 mentions the one level case, so the instance hierarchy depth is a tuning parameter rather than a free choice.
+Runtime dispatch across SSE, AVX2 and AVX-512
+The kernels ship in several instruction set flavours and Embree picks between them at runtime, which is what lets one binary run on an old Xeon and a current one. The README names SSE, AVX2 and AVX-512, and describes the approach as runtime code selection between those kernels.
+The floor is stated plainly: Embree requires at least an x86 CPU with support for SSE2, or an Apple M1. That is a low bar on x86 and a hard one on anything else. ARM CPUs are supported on Linux and macOS, and the README calls ARM support for Windows experimental, which is the kind of wording that means it builds but nobody depends on it.
+Compilers are equally plural. The code compiles with the Intel Compiler, the Intel oneAPI DPC++ compiler, GCC, Clang and the Microsoft compiler, with tested versions in the compiling section. The one hard rule is that GPU use requires the oneAPI DPC++ compiler.
+If you want to write kernels rather than call them, there is an ISPC interface to the core algorithms, which lets you write a renderer that vectorises automatically across those same instruction sets. The `kernels/` directory in the tree is where that code lives.
+SYCL extends the same kernels to Intel Xe GPUs
+GPU support comes through SYCL, the Khronos open standard, and it is narrower than the CPU story. Embree supports Intel GPUs on the Xe HPG microarchitecture, which covers Intel Arc, under Linux and Windows, and on Xe HPC, which covers the Data Center GPU Flex and Max series, under Linux. No other GPU vendor is mentioned.
+The pitch is a single source renderer that runs efficiently on both CPUs and GPUs, avoiding two implementations that drift apart. The hardware ray tracing capability comes from those Xe parts.
+The 4.4.0 release changed how that works in a way that will break code. Embree no longer uses SYCL shared memory internally on systems without host unified memory, meaning discrete GPUs, so transfers are now triggered by specific API calls such as `rtcCommitScene` and `rtcCommitBuffer`. Objects of type `RTCScene` are no longer accessible on a SYCL device, and ray queries there must go through `RTCTraversable` objects using `rtcTraversableIntersect` and `rtcTraversableOccluded`. There is also a new way to hand geometry to Embree from explicit host and SYCL device memory through the calls with a `HostDevice` suffix, including `rtcSetSharedGeometryBufferHostDevice` and `rtcNewBufferHostDevice`.
+The same release dropped its RDRAND probe during ISA detection, which had caused problems on some older AMD CPUs. That is a small fix with a large reach, since AMD x86 parts are a common host for this library even though Embree's GPU story is Intel only.
+Unpacking a pre-built archive on each platform
+There are pre-built archives for all three desktop platforms and no package manager recipe in the README. On Linux it is a tarball, unpacked and followed by sourcing the environment script:
+bashCopy
+```
+    tar xzf embree-4.4.1.x86_64.linux.tar.gz
+    source embree-4.4.1.x86_64.linux/embree-vars.sh
+```
+The same idea applies to macOS with `embree-vars.sh` for bash or `embree-vars.csh` for the C shell. On Windows you unpack `embree-4.4.1.x64.windows.zip` and add the `lib` folder to your `PATH` by hand.
+If you ship a renderer, the README tells you which library form to use. On macOS the shipped library is named in the form `@rpath/libembree.4.dylib`, with a similar name for the bundled TBB, so your application can use a relative runpath. On Linux the recommendation is a relative `RPATH` such as `$ORIGIN/../lib`, pointing at where Embree and TBB live. Relative rather than absolute paths are the difference between a relocatable build and one that breaks when a user moves the folder.
+Applications consume Embree through CMake. You add `FIND_PACKAGE(embree 4 REQUIRED)` to your `CMakeLists.txt` and point `embree_DIR` at the folder holding `embree_config.cmake`, plus `TBB_DIR` if your TBB install is not global.
+This copy sits under RenderKit while the README still credits Intel
+This repository is RenderKit/embree, and that is worth stating early because it differs from what the README says. The README header reads Intel Corporation, describes the library as developed at Intel, points bug reports at the GitHub issue tracker for the upstream embree project, gives an Intel support email address, and links its pre-built download URLs to the upstream embree releases. The release notes in this tree, meanwhile, link their changelog to a compare URL under RenderKit, and the tree also contains a SECURITY.md and a scripts directory.
+Both sets of facts hold at once. What you are looking at is a fork of the Intel project that has kept the upstream README largely intact, including its download links. For a reader evaluating whether to adopt it, that has two practical consequences. Download links in the README take you to the upstream project's release assets rather than to anything published by RenderKit, so the archive you unpack is the upstream build. And the version reported in the README, 4.4.1, is the upstream version; this tree's most recent release is v4.4.1 published on 2026-04-02, whose notes mention enabling support for Intel Core Ultra series 3 integrated GPUs, enabling AVX512 with MSVC, fixing uninitialised variables and out-of-bounds accesses, fixing a rare hang in `rtcNewDevice` under single thread mode, and raising the minimum CMake version to 3.10.
+Before depending on a specific build, work out which tree your pipeline is fetching and whether anything has been changed relative to upstream. The comparison is the question to ask, not the version number.
+Editorial conclusion
+Embree is worth adopting when you have a production renderer and ray tracing performance is the bottleneck, because replacing a hand written BVH with it is a bounded change against a stable C API, and because the same source can drive CPUs and Intel GPUs through SYCL. It is the wrong choice for a prototype, for a non Intel GPU, or on Windows on ARM, which the README calls experimental. The practical first step is to unpack a pre-built archive, point your linker at its `lib` directory, and keep the upstream embree repository in view: this copy sits under RenderKit and its release notes cite a RenderKit compare URL, while the README text still credits Intel and links downloads to the upstream embree releases. That split matters, so check which tree your package manager is actually pulling before you depend on a release number.
+Frequently asked questions
+Does Embree support GPUs or CPUs only?
+Both, through SYCL. On the CPU side it supports x86 under Linux, macOS and Windows, and ARM under Linux and macOS, dispatching at runtime between SSE, AVX2 and AVX-512 kernels. GPU support is limited to Intel parts on the Xe HPG and Xe HPC microarchitectures, and using it requires the Intel oneAPI DPC++ compiler.
+What is the minimum CPU needed to run Embree?
+An x86 CPU with SSE2 support, or an Apple M1. The library ships separately optimised kernels for SSE, AVX2 and AVX-512 and selects between them at runtime, so the same binary covers a range of x86 machines. ARM on Windows is described in the README as experimental.
+How do I link my renderer against Embree?
+Unpack the pre-built archive for your platform, source the provided embree-vars.sh or embree-vars.csh on Linux and macOS, and on Windows add the archive's lib folder to your PATH. From CMake, call FIND_PACKAGE with a required version of 4 and set embree_DIR to the folder containing embree_config.cmake. For a shipped application the README recommends a relative RPATH such as $ORIGIN/../lib.
+What changed in Embree 4.4 regarding SYCL devices?
+Two changes matter. RTCScene objects are no longer accessible on a SYCL device, so ray queries there must use RTCTraversable objects with rtcTraversableIntersect and rtcTraversableOccluded. Embree also stopped using SYCL shared memory internally on systems without host unified memory, so transfers now happen at specific API calls such as rtcCommitScene and rtcCommitBuffer.
+Official sources
+Issues
+License: Apache-2.0
+README
+Releases
+RenderKit/embree on GitHub
+Add this badge to your README
+If you maintain this project, the badge below links readers to this analysis and shows its maintenance status from the daily GitHub snapshot. Paste the markdown into your README; add ?metric=license or ?metric=stars to the image URL for a different field.
+markdownCopy
+```
+[![Hysen Labs](https://hysenlabs.com/badge/renderkit-embree.svg)](https://hysenlabs.com/projects/renderkit-embree)
+```
+Star history chart for your README
+markdownCopy
+```
+[![Star history](https://hysenlabs.com/chart/renderkit-embree.svg)](https://hysenlabs.com/projects/renderkit-embree)
+```
+Was this useful?
+❤️🔥💡
+Keep exploring
+Concepts
+What is a Permissive license?
+AI tools
+GumloopVisual AI pipeline builder where users connect nodes to create multi-step automations powered by large language models.
+AiderOpen-source command-line AI coding assistant that pairs with a local git repository and edits files directly from the terminal.
+LindyAI agent builder that lets non-technical users create agents to handle email triage, scheduling and repetitive business tasks.
+Alternatives lists
+Open-source alternatives to Braintrust: 4 LLM evaluation and prompt operations tools compared
+Use cases
+AI tools to automate repetitive tasks
+Free browser tools
+OpenAI token counterCount the tokens in a prompt exactly as OpenAI's tokenizer does, and see where each token starts and ends.
+Multi-agent crew designerDescribe a goal and get a crewAI design: agents with roles, tasks with concrete outputs, tools, hand-offs and the YAML to run it.
+From the AI course
+Module 03: Building apps on the API
+Writing an agent loop by handModule 05: Agents
+Topic hubs
+LLM apps
+Similar projects
+contour-terminal/contourModern C++ Terminal Emulator3,069 stars · C++
+AcademySoftwareFoundation/MaterialXMaterialX is an open standard for the exchange of rich material and look-development content across applications and renderers.2,296 stars · C++
+facebook/CacheLibPluggable in-process caching engine to build and scale high performance services1,609 stars · C++
+ac3ss0r/obfusheader.hObfusheader.h is a portable header file for C++14 compile-time obfuscation.1,068 stars · C++
+NVIDIA-ISAAC-ROS/isaac_ros_nvbloxNVIDIA-accelerated 3D scene reconstruction and Nav2 local costmap provider using nvblox763 stars · C++
+awslabs/palace3D finite element solver for computational electromagnetics599 stars · C++
+nmslib/nmslibNon-Metric Space Library (NMSLIB): An efficient similarity search library and a toolkit for evaluation of k-NN methods for generic non-metric spaces.3,590 stars · C++
+CopernicaMarketingSoftware/PHP-CPPLibrary to build PHP extensions with C++1,450 stars · C++
+MrDrElliot/LuminaEngineAdvanced Open Source C++ Game Engine with multi-threaded Vulkan rendering.556 stars · C++

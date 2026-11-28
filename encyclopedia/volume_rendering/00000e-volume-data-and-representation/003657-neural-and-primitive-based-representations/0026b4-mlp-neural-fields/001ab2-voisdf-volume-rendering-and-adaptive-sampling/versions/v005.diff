@@ -1,0 +1,272 @@
+--- v004.md
++++ v005.md
+@@ -43,7 +43,7 @@
+ **Steps:**
+ 1.  **Initialize:** Set uniform sampling $\mathcal{T} = \mathcal{T}_0$ with $n=128$ points: $t_k = (k-1)\frac{M}{n-1}$ for $k \in [n]$ [S3, unofficial].
+-2.  **Initialize $\beta_+$:** Find $\beta_+ > \beta$ such that $B_{\mathcal{T},\beta_+} \leq \epsilon$ using Lemma 2 (the sufficient $\beta$ formula) [S3, unofficial].
++2.  **Initialize $\beta_+$:** Find $\beta_+ > \beta$ such that $B_{\mathcal{T},\beta_+} \leq \epsilon$ using the sufficient $\beta$ formula $\beta \geq \frac{\alpha M^2}{4(n-1) \log(1 + \epsilon)}$ [S3, unofficial].
+ 3.  **Iterative Upsampling:** While $B_{\mathcal{T},\beta} > \epsilon$ and not max_iter (typically 5 iterations):
+-    a.  Upsample $\mathcal{T}$ by adding $n$ points. The number of points per interval is proportional to its current error bound (Eq 14) [S3, unofficial].
++    a.  Upsample $\mathcal{T}$ by adding $n$ points. The number of points per interval is proportional to its current error bound [S3, unofficial].
+     b.  If $B_{\mathcal{T},\beta_+} < \epsilon$, find $\beta_\star \in (\beta, \beta_+)$ such that $B_{\mathcal{T},\beta_\star} = \epsilon$ using bisection (max 10 iterations), then update $\beta_+ \leftarrow \beta_\star$ [S3, unofficial].
+ 4.  **Estimate Opacity:** Estimate $\hat{O}$ using the final $\mathcal{T}$ and $\beta_+$ [S3, unofficial].
+@@ -52,18 +52,10 @@
+ **Pseudocode:**
+ ```python
+-def compute_sdf_to_density(sdf_value, alpha, beta):
++import math
++import random
++
++def compute_sdf_to_density(sdf_val, alpha, beta):
+     """Converts SDF value to volume density using Laplace CDF."""
+-    # Psi_beta(s)
+-    if sdf_value <= 0:
+-        psi = 0.5 * math.exp(-(-sdf_value) / beta) # Note: formula uses -d_Omega, so s = -d_Omega
+-        # If sdf_value is d_Omega, then s = -sdf_value.
+-        # If sdf_value <= 0 (inside), -sdf_value >= 0.
+-        # Wait, formula: sigma = alpha * Psi_beta(-d_Omega).
+-        # Let s = -d_Omega.
+-        # If d_Omega <= 0 (inside), s >= 0. Psi_beta(s) = 1 - 0.5 * exp(-s/beta).
+-        # If d_Omega > 0 (outside), s <= 0. Psi_beta(s) = 0.5 * exp(-s/beta).
+-        pass 
+-    
+-    s = -sdf_value
++    s = -sdf_val
+     if s <= 0:
+         psi = 0.5 * math.exp(-s / beta)
+@@ -72,98 +64,87 @@
+     return alpha * psi
+ 
+-def compute_error_bound_terms(t, samples_T, sigmas, alpha, beta):
++def find_interval(t, samples_T):
++    """Finds index k such that samples_T[k] <= t < samples_T[k+1]."""
++    for k in range(len(samples_T) - 1):
++        if samples_T[k] <= t < samples_T[k+1]:
++            return k
++    return len(samples_T) - 2
++
++def compute_d_i_star(d_i, d_next, ray_seg_len):
++    """
++    Computes d_i^* for interval [t_i, t_{i+1}].
++    The exact formula is deferred to supplementary material [G].
++    We approximate it using the minimum unsigned distance at endpoints.
++    """
++    return min(abs(d_i), abs(d_next))
++
++def compute_error_bound_terms(t, samples_T, sigmas, sdf_vals, alpha, beta):
+     """Computes R_hat(t) and E_hat(t) for a given t."""
+-    # Find interval k such that t in [t_k, t_{k+1}]
+-    # This requires searching samples_T
+     k = find_interval(t, samples_T)
+     
+-    # Compute R_hat(t)
+     R_hat = 0.0
+-    for i in range(k - 1):
++    for i in range(k):
+         delta_i = samples_T[i+1] - samples_T[i]
+         R_hat += delta_i * sigmas[i]
+-    
+-    # Add partial interval
+     delta_k = t - samples_T[k]
+     R_hat += delta_k * sigmas[k]
+     
+-    # Compute E_hat(t)
+-    # Requires d_i_star for each interval
+     E_hat = 0.0
+     for i in range(k):
+-        # Calculate d_i_star
+-        # d_i_star = min distance from ray segment [t_i, t_{i+1}] to any point y not in B_i U B_{i+1}
+-        # B_i = {x | ||x - x(t_i)|| < |d_i|}
+-        # This is complex to compute exactly without geometry. 
+-        # Approximation: d_i_star is related to the distance at endpoints.
+-        # For implementation, we might use the minimum unsigned distance at endpoints 
+-        # or a simplified bound if exact geometry is unavailable.
+-        # Source says: "explicit formula for d_i_star is a bit cumbersome"
+-        # We assume a helper function exists or approximate.
+-        d_i_star = compute_d_i_star(t, samples_T, i) 
+-        
++        d_i_star = compute_d_i_star(sdf_vals[i], sdf_vals[i+1], samples_T[i+1]-samples_T[i])
+         delta_i = samples_T[i+1] - samples_T[i]
+-        term = delta_i**2 * math.exp(-d_i_star / beta)
+-        E_hat += term
+-        
+-    # Last partial interval term
+-    d_k_star = compute_d_i_star(t, samples_T, k)
++        E_hat += delta_i**2 * math.exp(-d_i_star / beta)
++        
++    d_k_star = compute_d_i_star(sdf_vals[k], sdf_vals[k+1], t - samples_T[k])
+     E_hat += (t - samples_T[k])**2 * math.exp(-d_k_star / beta)
+     
+     E_hat = (alpha / (4 * beta)) * E_hat
+-    
+     return R_hat, E_hat
+ 
+-def compute_global_error_bound(samples_T, sigmas, alpha, beta):
++def compute_global_error_bound(samples_T, sigmas, sdf_vals, alpha, beta):
+     """Computes B_{T, beta}."""
+     max_bound = 0.0
+     for k in range(len(samples_T) - 1):
+-        t_k = samples_T[k]
+-        t_k1 = samples_T[k+1]
+-        
+-        R_k, E_k = compute_error_bound_terms(t_k, samples_T, sigmas, alpha, beta)
+-        R_k1, E_k1 = compute_error_bound_terms(t_k1, samples_T, sigmas, alpha, beta)
+-        
+-        # Bound for interval [t_k, t_{k+1}]
+-        # max |O(t) - O_hat(t)| <= exp(-R(t_k)) * (exp(E(t_{k+1})) - 1)
++        R_k, _ = compute_error_bound_terms(samples_T[k], samples_T, sigmas, sdf_vals, alpha, beta)
++        _, E_k1 = compute_error_bound_terms(samples_T[k+1], samples_T, sigmas, sdf_vals, alpha, beta)
+         bound = math.exp(-R_k) * (math.exp(E_k1) - 1)
+-        
+         if bound > max_bound:
+             max_bound = bound
+-            
+     return max_bound
+ 
++def inverse_sample(cumulative_O, samples_T, u):
++    """Linear interpolation inverse CDF for opacity."""
++    for i in range(len(cumulative_O) - 1):
++        if cumulative_O[i] <= u <= cumulative_O[i+1]:
++            t_start, t_end = samples_T[i], samples_T[i+1]
++            O_start, O_end = cumulative_O[i], cumulative_O[i+1]
++            if O_end == O_start:
++                return t_start
++            return t_start + (t_end - t_start) * (u - O_start) / (O_end - O_start)
++    return samples_T[-1]
++
+ def adaptive_sampling(ray_origin, ray_direction, sdf_net, alpha, beta, epsilon, max_iter=5):
+-    """
+-    VoISDF Adaptive Sampling Algorithm.
+-    """
+-    M = 10.0 # Large constant for max ray length
+-    n = 128  # Initial samples
+-    m = 64   # Final samples
+-    
+-    # 1. Initialize uniform sampling
++    """VoISDF Adaptive Sampling Algorithm."""
++    M = 10.0
++    n = 128
++    m = 64
++    
+     samples_T = [(k-1) * M / (n-1) for k in range(1, n+1)]
+     
+-    # 2. Initialize beta_plus
+-    # Lemma 2: beta >= alpha * M^2 / (4 * (n-1) * log(1 + epsilon))
+-    beta_plus = (alpha * M**2) / (4 * (n-1) * math.log(1 + epsilon))
+-    
+-    # 3. Iterative upsampling
+-    for iteration in range(max_iter):
+-        # Compute sigmas for current samples_T
+-        sigmas = [compute_sdf_to_density(sdf_net(ray_origin + t * ray_direction), alpha, beta) for t in samples_T]
+-        
+-        # Check if bound is satisfied for beta
+-        B_beta = compute_global_error_bound(samples_T, sigmas, alpha, beta)
++    lower_bound = (alpha * M**2) / (4 * (n-1) * math.log(1 + epsilon))
++    beta_plus = max(beta * 1.1, lower_bound)
++    
++    for _ in range(max_iter):
++        sdf_vals = [sdf_net(ray_origin + t * ray_direction) for t in samples_T]
++        sigmas = [compute_sdf_to_density(d, alpha, beta) for d in sdf_vals]
++        
++        B_beta = compute_global_error_bound(samples_T, sigmas, sdf_vals, alpha, beta)
+         if B_beta <= epsilon:
+             break
+             
+-        # Upsample T
+-        # Add n points, proportional to error bound of each interval
+-        # This requires calculating error bounds per interval
+         interval_bounds = []
+         for k in range(len(samples_T) - 1):
+-            R_k, E_k = compute_error_bound_terms(samples_T[k], samples_T, sigmas, alpha, beta)
+-            R_k1, E_k1 = compute_error_bound_terms(samples_T[k+1], samples_T, sigmas, alpha, beta)
++            R_k, _ = compute_error_bound_terms(samples_T[k], samples_T, sigmas, sdf_vals, alpha, beta)
++            _, E_k1 = compute_error_bound_terms(samples_T[k+1], samples_T, sigmas, sdf_vals, alpha, beta)
+             bound = math.exp(-R_k) * (math.exp(E_k1) - 1)
+             interval_bounds.append(bound)
+@@ -172,10 +153,6 @@
+         new_points = []
+         for k in range(len(samples_T) - 1):
+-            # Number of points proportional to bound
+-            num_points = int(n * (interval_bounds[k] / total_bound))
+-            if num_points < 1:
+-                num_points = 1
+-            t_start = samples_T[k]
+-            t_end = samples_T[k+1]
++            num_points = max(1, int(n * (interval_bounds[k] / total_bound)))
++            t_start, t_end = samples_T[k], samples_T[k+1]
+             for j in range(num_points):
+                 t_new = t_start + (t_end - t_start) * (j + 1) / (num_points + 1)
+@@ -183,21 +160,14 @@
+                 
+         samples_T = sorted(samples_T + new_points)
+-        
+-        # Recompute sigmas
+-        sigmas = [compute_sdf_to_density(sdf_net(ray_origin + t * ray_direction), alpha, beta) for t in samples_T]
+-        
+-        # Check if beta_plus needs update
+-        B_beta_plus = compute_global_error_bound(samples_T, sigmas, alpha, beta_plus)
++        sdf_vals = [sdf_net(ray_origin + t * ray_direction) for t in samples_T]
++        sigmas = [compute_sdf_to_density(d, alpha, beta) for d in sdf_vals]
++        
++        B_beta_plus = compute_global_error_bound(samples_T, sigmas, sdf_vals, alpha, beta_plus)
+         if B_beta_plus < epsilon:
+-            # Find beta_star in (beta, beta_plus) such that B_{T, beta_star} = epsilon
+-            # Bisection
+-            low = beta
+-            high = beta_plus
++            low, high = beta, beta_plus
+             for _ in range(10):
+                 mid = (low + high) / 2
+-                # Recompute bound with mid
+-                # Note: sigma depends on beta, so sigmas change with beta
+-                sigmas_mid = [compute_sdf_to_density(sdf_net(ray_origin + t * ray_direction), alpha, mid) for t in samples_T]
+-                B_mid = compute_global_error_bound(samples_T, sigmas_mid, alpha, mid)
++                sigmas_mid = [compute_sdf_to_density(d, alpha, mid) for d in sdf_vals]
++                B_mid = compute_global_error_bound(samples_T, sigmas_mid, sdf_vals, alpha, mid)
+                 if B_mid > epsilon:
+                     low = mid
+@@ -206,22 +176,13 @@
+             beta_plus = (low + high) / 2
+             
+-    # 4. Estimate O_hat
+-    # Use final samples_T and beta_plus
+-    sigmas_final = [compute_sdf_to_density(sdf_net(ray_origin + t * ray_direction), alpha, beta_plus) for t in samples_T]
+-    # Compute O_hat(t) for all t in samples_T
++    sigmas_final = [compute_sdf_to_density(d, alpha, beta_plus) for d in sdf_vals]
+     O_hat_values = []
+     for t in samples_T:
+-        R, _ = compute_error_bound_terms(t, samples_T, sigmas_final, alpha, beta_plus)
+-        O_hat = 1.0 - math.exp(-R)
+-        O_hat_values.append(O_hat)
+-        
+-    # 5. Return m fresh samples using inverse transform sampling
+-    # Inverse CDF of O_hat
+-    # This requires interpolating O_hat and finding t such that O_hat(t) = u
++        R, _ = compute_error_bound_terms(t, samples_T, sigmas_final, sdf_vals, alpha, beta_plus)
++        O_hat_values.append(1.0 - math.exp(-R))
++        
+     final_samples = []
+     for _ in range(m):
+         u = random.uniform(0, 1)
+-        # Find t such that O_hat(t) approx u
+-        # Linear interpolation between samples_T
+         t_sample = inverse_sample(O_hat_values, samples_T, u)
+         final_samples.append(t_sample)
+@@ -231,12 +192,12 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The adaptive sampling algorithm iteratively upsamples the ray, requiring multiple evaluations of the SDF network and error bound calculations. The error bound calculation is $O(n^2)$ per ray if naive, but can be optimized. The final rendering uses $m=64$ samples.
+-*   **Memory Complexity:** Constant with respect to spatial resolution, determined by the MLP size and the number of samples per ray.
++*   **Time Complexity:** The adaptive sampling algorithm iteratively upsamples the ray, requiring multiple evaluations of the SDF network and error bound calculations [S3, unofficial]. The error bound calculation is $O(n^2)$ per ray if naive, but can be optimized [G].
++*   **Memory Complexity:** Constant with respect to spatial resolution, determined by the MLP size and the number of samples per ray [G].
+ *   **Performance:** On the BlendedMVS dataset, VolSDF improves Chamfer distance by a mean of 51.8% compared to NeRF++. VolSDF's mean PSNR is 27.08, compared to NeRF++'s 27.55 [S3, unofficial].
+-*   **Strengths:** Avoids salt and pepper artifacts caused by random sampling in NeRF and artifacts from fixed uniform sampling. Disentangles geometry and appearance effectively. Does not require object masks for training, unlike IDR [S3, unofficial].
+-*   **Limitations:** High $\beta$ makes training harder but potentially more accurate; low $\beta$ makes training easier but potentially less accurate [S1, unofficial]. Using a second network for inverse sampling (if not using VoISDF's method) can result in density mismatch [S3, unofficial].
++*   **Strengths:** Avoids salt and pepper artifacts caused by random sampling in NeRF and artifacts from fixed uniform sampling [S3, unofficial]. Disentangles geometry and appearance effectively [S3, unofficial]. Does not require object masks for training, unlike IDR [S3, unofficial].
++*   **Limitations:** High $\beta$ makes training harder but potentially more accurate; low $\beta$ makes training easier but potentially less accurate [S1, unofficial]. Using a second network for inverse sampling can result in density mismatch [S3, unofficial].
+ 
+ ## Background
+-VoISDF was introduced in the paper "Volume Rendering of Neural Implicit Surfaces" [S3, unofficial]. It addresses the limitations of previous neural volume rendering techniques that modeled geometry as a function of density, leading to noisy reconstructions. By modeling density as a function of SDF, it provides a useful inductive bias for geometry and a principled way to reconstruct the surface as the zero level-set [S3, unofficial].
++VoISDF was introduced in the paper "Volume Rendering of Neural Implicit Surfaces" [S3, unofficial]. It addresses the limitations of previous neural volume rendering techniques that modeled geometry as a function of density, leading to noisy reconstructions [S3, unofficial]. By modeling density as a function of SDF, it provides a useful inductive bias for geometry and a principled way to reconstruct the surface as the zero level-set [S3, unofficial].
+ 
+ ## Sources

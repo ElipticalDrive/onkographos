@@ -1,0 +1,178 @@
+--- v001.md
++++ v002.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Triplane Feature Synthesis is a method for generating expressive 3D features by representing a scene as three orthogonal 2D feature planes (xy, xz, yz) conditioned on a latent code [S1, S2]. It differs from standard triplanar decoders by employing extra synthesis blocks for disentanglement, allowing plane-specific kernels to attend to features in each separate plane [S1]. This approach builds on [Diffusion Model Training for Triplane Features](18292-diffusion-model-training-for-triplane-features.md) by providing the generative backbone that produces the initial 3D-aware feature representation.
++Triplane Feature Synthesis generates expressive 3D features by representing a scene as three orthogonal 2D feature planes (xy, xz, yz) conditioned on a latent code [S1, S2]. It differs from standard triplanar decoders by employing extra synthesis blocks for disentanglement, allowing plane-specific kernels to attend to features in each separate plane [S1].
+ 
+ ## How it works
+@@ -19,18 +19,16 @@
+ *   **Initial Triplane $T'$**: Output of the StyleGAN2 generator layers, before disentanglement blocks [S1].
+ *   **Feature Planes**: Three orthogonal 2D planes corresponding to xy, xz, and yz coordinate projections [S2]. Each plane is queried at 3D coordinates via bilinear sampling [S2].
+-*   **MLP**: A "tiny MLP" (triplanar decoder) that takes summed features as input to output final representation values (e.g., radiance field density and color, or SDF/geometry features) [S1, S2].
++*   **MLP**: A "tiny MLP" (triplanar decoder) that takes combined features as input to output final representation values (e.g., radiance field density and color, or SDF/geometry features) [S1, S2].
+ 
+ **Steps:**
+ 1.  **Latent Mapping**: Sample a prior vector $z$ from a standard normal distribution $\mathcal{N}(0, I)$ [S2]. Pass $z$ through a mapping network to produce the latent code $w$ in the W space [S2].
+-2.  **Initial Synthesis**: Feed $w$ into a StyleGAN2 generator to produce an output feature map [S2]. This output is the initial triplane $T'$ [S1].
+-3.  **Disentanglement (Optional but Recommended)**: For each orthogonal plane $ij \in \{xy, xz, yz\}$, apply a `SynthesisBlock` to the features $f'_{ij}$ of $T'$ to generate expressive features $f_{ij}$ [S1]:
++2.  **Initial Synthesis**: Feed $w$ into a StyleGAN2 generator to produce an output feature map [S2]. This output forms the initial triplane $T'$ [S1].
++3.  **Splitting**: Split the output feature map into three orthogonal planes corresponding to xy, xz, and yz coordinate projections [S2].
++4.  **Disentanglement**: For each orthogonal plane $ij \in \{xy, xz, yz\}$, apply a `SynthesisBlock` to the features $f'_{ij}$ of $T'$ to generate expressive features $f_{ij}$ [S1]:
+     $$f_{ij} = \text{SynthesisBlock}(f'_{ij})$$
+-    This design allows disentanglement between intermediate triplane features, as plane-specific kernels can attend to features in each separate plane [S1].
+-4.  **Feature Query**: To get features $T_x$ for a point $x$:
+-    *   Project $x$ to each of the three axis-aligned planes [S1, S2].
+-    *   Query each plane at the specific 2D coordinates using bilinear sampling [S2].
+-    *   Take the Hadamard product of the three resultant vectors [S1].
+-    *   *Note*: Some implementations sum the sampled features from the three planes element-wise before feeding them into the decoder [S2]. The sources describe both Hadamard product [S1] and summation [S2]. The Hadamard product is explicitly linked to the EG3D-style backbone in [S1], while [S2] describes the summation in the context of the unconditional generator pre-training.
+-5.  **Decoding**: Pass the combined features (summed or Hadamard product) into the triplanar decoder MLP to output the final representation [S1, S2].
++    This design allows disentanglement between the intermediate triplane features, as plane-specific kernels can attend to the features in each separate plane [S1].
++5.  **Feature Query**: To get features $T_x$ for a point $x$: Project $x$ to each of the three axis-aligned planes to obtain 2D coordinates [S1, S2]. Query each plane at these specific coordinates using bilinear sampling [S2].
++6.  **Feature Combination**: Combine the three sampled feature vectors. Source [S1] specifies taking the Hadamard product of the three resultant vectors, while Source [S2] specifies summing them element-wise [S1, S2].
++7.  **Decoding**: Pass the combined features into the triplanar decoder MLP to output the final representation [S1, S2].
+ 
+ **Parameters:**
+@@ -43,5 +41,5 @@
+ import numpy as np
+ 
+-def triplane_synthesis(z, generator, decoder, use_hadamard=True):
++def triplane_synthesis(z, T_prime, decoder, use_hadamard=True):
+     """
+     Synthesize triplane features and query them for a point.
+@@ -49,5 +47,5 @@
+     Args:
+         z: Noise vector from N(0, I).
+-        generator: StyleGAN2 generator with mapping network.
++        T_prime: Initial triplane feature map from StyleGAN2 generator.
+         decoder: Triplanar decoder MLP.
+         use_hadamard: If True, use Hadamard product for feature combination [S1].
+@@ -56,86 +54,78 @@
+         final_features: Output of the decoder.
+     """
+-    # Step 1: Latent Mapping
+-    w = generator.mapping_network(z)
++    # Step 3: Disentanglement
++    # Split T_prime into three orthogonal planes: xy, xz, yz
++    # Assuming T_prime shape is (3, C, H, W)
++    f_xy_prime, f_xz_prime, f_yz_prime = T_prime[0], T_prime[1], T_prime[2]
+     
+-    # Step 2: Initial Synthesis
+-    # Output is a feature map split into three orthogonal planes
+-    T_prime = generator.stylegan2_layers(w)
++    # Apply SynthesisBlock to each plane for disentanglement [S1]
++    # Sources do not specify the internal operations of the SynthesisBlock [S1]
++    f_xy = f_xy_prime
++    f_xz = f_xz_prime
++    f_yz = f_yz_prime
+     
+-    # Step 3: Disentanglement (Extra Synthesis Blocks)
+-    # T_prime is split into f_xy, f_xz, f_yz
+-    f_xy_prime, f_xz_prime, f_yz_prime = split_planes(T_prime)
+-    
+-    # Apply SynthesisBlock for each plane
+-    f_xy = synthesis_block(f_xy_prime)
+-    f_xz = synthesis_block(f_xz_prime)
+-    f_yz = synthesis_block(f_yz_prime)
+-    
+-    # Step 4: Feature Query (Example for a single point x)
+-    # Note: In practice, this is done for all points in a volume or along rays
+-    x = np.array([0.0, 0.0, 0.0]) # Example point
++    # Step 4: Feature Query for point x
++    x = np.array([0.0, 0.0, 0.0]) # 3D point coordinate [S1, S2]
+     
+     # Project x to 2D coordinates for each plane
+-    # xy plane: (x, y), xz plane: (x, z), yz plane: (y, z)
+     coord_xy = (x[0], x[1])
+     coord_xz = (x[0], x[2])
+     coord_yz = (x[1], x[2])
+     
+-    # Bilinear sampling
++    # Bilinear sampling at projected coordinates [S2]
+     feat_xy = bilinear_sample(f_xy, coord_xy)
+     feat_xz = bilinear_sample(f_xz, coord_xz)
+     feat_yz = bilinear_sample(f_yz, coord_yz)
+     
+-    # Combine features
++    # Combine features: sources specify either Hadamard product [S1] or summation [S2]
+     if use_hadamard:
+-        # Hadamard product of the three resultant vectors [S1]
+         combined_features = feat_xy * feat_xz * feat_yz
+     else:
+-        # Sum the sampled features element-wise [S2]
+         combined_features = feat_xy + feat_xz + feat_yz
+         
+     # Step 5: Decoding
+     final_features = decoder(combined_features)
+-    
+     return final_features
+ 
+-def split_planes(T_prime):
+-    """Split the output feature map into three orthogonal planes."""
+-    # Implementation depends on the specific tensor layout of T_prime
+-    # Assuming T_prime is a tensor of shape (3, C, H, W)
+-    return T_prime[0], T_prime[1], T_prime[2]
+-
+-def synthesis_block(f):
+-    """Apply extra synthesis block for disentanglement."""
+-    # This block allows plane-specific kernels to attend to features
+-    # in each separate plane [S1].
+-    # Implementation details are specific to the StyleGAN2 architecture.
+-    return f # Placeholder for actual block logic
+-
+ def bilinear_sample(plane, coord):
+-    """Bilinear sampling of a 2D plane at a specific coordinate."""
+-    # Implementation of bilinear interpolation
+-    pass
++    # Bilinear interpolation of a 2D feature plane at a specific coordinate [S2]
++    # plane: 2D tensor of shape (C, H, W)
++    # coord: tuple (u, v) normalized to [0, 1]
++    u, v = coord
++    h, w = plane.shape[1], plane.shape[2]
++    u_idx = u * (w - 1)
++    v_idx = v * (h - 1)
++    u0, u1 = int(np.floor(u_idx)), int(np.ceil(u_idx))
++    v0, v1 = int(np.floor(v_idx)), int(np.ceil(v_idx))
++    u0, u1 = np.clip(u0, 0, w-1), np.clip(u1, 0, w-1)
++    v0, v1 = np.clip(v0, 0, h-1), np.clip(v1, 0, h-1)
++    w_u = u_idx - u0
++    w_v = v_idx - v0
++    val00 = plane[:, v0, u0]
++    val01 = plane[:, v0, u1]
++    val10 = plane[:, v1, u0]
++    val11 = plane[:, v1, u1]
++    top = val00 * (1 - w_u) + val01 * w_u
++    bottom = val10 * (1 - w_u) + val11 * w_u
++    return top * (1 - w_v) + bottom * w_v
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision**: Bilinear sampling requires careful handling of coordinate boundaries to avoid out-of-bounds access [S2].
+-*   **Degenerate Input**: The method assumes a valid 3D point $x$ [S1, S2].
+-*   **Feature Combination**: Sources disagree on whether to use Hadamard product [S1] or summation [S2] for combining features from the three planes. The Hadamard product is associated with the EG3D-style backbone [S1], while summation is described in the unconditional generator pre-training [S2]. Implementers should choose based on the specific variant being implemented.
++*   **Feature Combination**: Sources disagree on whether to use Hadamard product [S1] or summation [S2] for combining features from the three planes. The Hadamard product is associated with the EG3D-style backbone [S1], while summation is described in the unconditional generator pre-training [S2].
++*   **Coordinate Normalization**: Bilinear sampling requires normalizing 3D coordinates to the 2D plane dimensions to avoid out-of-bounds access [G].
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: Not given in the sources.
+-*   **Memory Complexity**: Not given in the sources.
+-*   **Measured Performance**: Not given in the sources.
+-*   **Scaling**: Not given in the sources.
++*   **Time Complexity**: Not given in the sources. [G]
++*   **Memory Complexity**: Not given in the sources. [G]
++*   **Measured Performance**: Not given in the sources. [G]
++*   **Scaling**: Not given in the sources. [G]
+ *   **Strengths**: Allows disentanglement between intermediate triplane features, enabling plane-specific kernels to attend to features in each separate plane [S1]. It is a 3D-aware unconditional generator [S2].
+-*   **Limitations**: Not given in the sources.
++*   **Limitations**: Not given in the sources. [G]
+ *   **When to use**: When a 3D-aware generative model is needed that can be conditioned on a latent code [S1, S2].
+-*   **When not**: When view-independent features are sufficient and disentanglement is not required [S1].
++*   **When not**: Not given in the sources. [G]
+ 
+ ## Background
+ *   **Origin**: The method is based on EG3D [5] and StyleGAN2 [29] [S2]. It was introduced in the context of high-fidelity geometry in 3D GANs [S1] and single-image 3D reconstruction [S2].
+ *   **History**: The approach builds on previous work in 3D GANs and radiance field inversion [S1, S2].
+-*   **Usage**: Used in 3D GANs for rendering every pixel for high-fidelity geometry [S1] and for shape, pose, and appearance estimation from a single image [S2].
+ 
+ ## Sources

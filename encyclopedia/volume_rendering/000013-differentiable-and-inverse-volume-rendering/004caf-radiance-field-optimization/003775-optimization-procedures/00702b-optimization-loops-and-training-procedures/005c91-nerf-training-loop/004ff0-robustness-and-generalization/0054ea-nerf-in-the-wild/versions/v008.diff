@@ -1,0 +1,115 @@
+--- v007.md
++++ v008.md
+@@ -12,15 +12,15 @@
+ 
+ **Data Structures:**
+-1.  **Static MLP ($MLP_{\theta_1}$):** Takes $\mathbf{x}$ and positional encoding $\gamma(\mathbf{x})$. Outputs static density $\sigma(\mathbf{x})$ and intermediate features $\mathbf{z}(\mathbf{x})$ [S1].
++1.  **Static MLP ($MLP_{\theta_1}$):** Takes $\mathbf{x}$ and positional encoding $\gamma(\mathbf{x})$ [S1].
+ 2.  **Appearance Embedding ($\mathbf{l}_i^{(a)}$):** A learnable vector of length $n^{(a)}$ for each image $i$ [S1].
+-3.  **Color MLP ($MLP_{\theta_2}$):** Takes $\mathbf{z}(\mathbf{x})$, viewing direction $\mathbf{d}$ (encoded), and $\mathbf{l}_i^{(a)}$. Outputs static color $\mathbf{c}_i(\mathbf{x}, \mathbf{d})$ [S1].
+-4.  **Transient MLP ($MLP_{\theta_3}$):** Takes $\mathbf{x}$, $\mathbf{d}$, and a transient embedding $\mathbf{l}_i^{(\tau)}$ (length $n^{(\tau)}$). Outputs transient density $\sigma_i^{(\tau)}(\mathbf{x})$ and transient color $\mathbf{c}_i^{(\tau)}(\mathbf{x}, \mathbf{d})$ [S1].
+-5.  **Uncertainty MLP ($MLP_{\theta_4}$):** Takes $\mathbf{x}$ and $\mathbf{d}$. Outputs variance $\beta_i(\mathbf{x})^2$ [S1].
++3.  **Color MLP ($MLP_{\theta_2}$):** Takes $\mathbf{z}(\mathbf{x})$, viewing direction $\mathbf{d}$ (encoded), and $\mathbf{l}_i^{(a)}$ [S1].
++4.  **Transient MLP ($MLP_{\theta_3}$):** Takes $\mathbf{x}$, $\mathbf{d}$, and a transient embedding $\mathbf{l}_i^{(\tau)}$ (length $n^{(\tau)}$) [S1].
++5.  **Uncertainty MLP ($MLP_{\theta_4}$):** Takes $\mathbf{x}$ and $\mathbf{d}$ [S1].
+ 
+ **Numbered Steps:**
+ 
+ 1.  **Initialization:** Initialize MLPs with random weights and embeddings to small random values [G].
+-2.  **Sampling:** For each training image $I_i$, sample rays $\mathbf{r}$. Sample $K$ points $\{t_k\}_{k=1}^K$ along each ray using stratified sampling or importance sampling based on a coarse model [S1].
+-3.  **Static Query:** For each point $t_k$, query $MLP_{\theta_1}$ to get $\sigma(t_k)$ and $\mathbf{z}(t_k)$. Note: $\sigma(t_k)$ is shared across all images [S1, S2].
++2.  **Sampling:** For each training image $I_i$, sample rays $\mathbf{r}$ [G]. Sample $K$ points $\{t_k\}_{k=1}^K$ along each ray using stratified sampling or importance sampling based on a coarse model [S1].
++3.  **Static Query:** For each point $t_k$, query $MLP_{\theta_1}$ to get $\sigma(t_k)$ and $\mathbf{z}(t_k)$ [S1].
+ 4.  **Static Color Query:** Query $MLP_{\theta_2}$ with $\mathbf{z}(t_k)$, $\mathbf{d}$, and $\mathbf{l}_i^{(a)}$ to get static color $\mathbf{c}_i(t_k)$ [S1].
+ 5.  **Transient Query:** Query $MLP_{\theta_3}$ with $t_k$, $\mathbf{d}$, and $\mathbf{l}_i^{(\tau)}$ to get transient density $\sigma_i^{(\tau)}(t_k)$ and transient color $\mathbf{c}_i^{(\tau)}(t_k)$ [S1].
+@@ -57,5 +57,6 @@
+ 
+ def softplus(x, beta_min):
+-    return np.log1p(np.exp(x)) + beta_min
++    # Shifted softplus to ensure minimum variance [S1]
++    return np.where(x > 20, x, np.log1p(np.exp(x))) + beta_min
+ 
+ def positional_encoding(x, num_freqs):
+@@ -65,5 +66,5 @@
+     return np.concatenate([np.sin(shaped), np.cos(shaped)], axis=-1)
+ 
+-def sample_rays(image_index, num_rays):
++def sample_rays(image_index, num_rays, K):
+     # Standard ray casting from camera pose and image grid [G]
+     # Returns x: (num_rays, K, 3), d: (num_rays, 3), C_i: (num_rays, 3)
+@@ -74,26 +75,27 @@
+                K, delta):
+     # 1. Static Query
+-    sigma, z = mlp_static(x) # sigma: (K,), z: (K, feature_dim)
++    sigma, z = mlp_static(x) # sigma: (B, K), z: (B, K, D)
+     
+     # 2. Static Color Query
+-    c_static = mlp_color(z, d, l_a) # (K, 3)
++    c_static = mlp_color(z, d, l_a) # (B, K, 3)
+     
+     # 3. Transient Query
+-    sigma_tau, c_tau = mlp_transient(x, d, l_tau) # sigma_tau: (K,), c_tau: (K, 3)
++    sigma_tau, c_tau = mlp_transient(x, d, l_tau) # sigma_tau: (B, K), c_tau: (B, K, 3)
+     
+     # 4. Uncertainty Query
+-    beta_sq = softplus(mlp_uncertainty(x, d), beta_min) # (K,)
++    beta_sq = softplus(mlp_uncertainty(x, d), beta_min) # (B, K)
+     
+     # 5. Alpha Compositing
+     sigma_total = sigma + sigma_tau
+-    cum_sum = np.cumsum(sigma_total * delta)
+-    T = np.exp(-np.concatenate([[0], cum_sum[:-1]]))
++    cum_sum = np.cumsum(sigma_total * delta, axis=1)
++    # Transmittance at start of each segment [S1]
++    T = np.exp(-np.concatenate([np.zeros((x.shape[0], 1)), cum_sum[:, :-1]], axis=1))
+     alpha = T * (1 - np.exp(-sigma * delta))
+     alpha_tau = T * (1 - np.exp(-sigma_tau * delta))
+-    c_hat = np.sum(alpha[:, None] * c_static + alpha_tau[:, None] * c_tau, axis=0)
++    c_hat = np.sum(alpha[:, :, None] * c_static + alpha_tau[:, :, None] * c_tau, axis=1) # (B, 3)
+     
+     # 6. Loss Calculation (matches S1 Eq. 13)
+-    # Variance is per-ray; we average the per-sample predictions [G]
+-    beta_ray_sq = np.mean(beta_sq)
++    # Variance is per-ray; we average per-sample predictions per ray [G]
++    beta_ray_sq = np.mean(beta_sq, axis=1) # (B,)
+     return c_hat, beta_ray_sq, sigma_tau
+ 
+@@ -106,5 +108,5 @@
+         
+         for i in batch_indices:
+-            x, d, C_i = sample_rays(i, batch_size)
++            x, d, C_i = sample_rays(i, batch_size, K)
+             emb_a = l_a[i]
+             emb_tau = l_tau[i]
+@@ -117,9 +119,9 @@
+             
+             # S1 Eq. 13: L_i(r) = ||C - C_hat||^2 / (2*beta^2) + log(beta^2)/2 + (lambda_u / 2K) * sum(sigma_tau)
+-            likelihood = np.sum((C_i - c_hat)**2) / (2 * beta_ray_sq) + np.log(beta_ray_sq) / 2
+-            reg = (lambda_u / (2 * K)) * np.sum(sigma_tau)
+-            total_loss += likelihood + reg
++            likelihood = np.sum((C_i - c_hat)**2, axis=-1) / (2 * beta_ray_sq) + np.log(beta_ray_sq) / 2
++            reg = (lambda_u / (2 * K)) * np.sum(sigma_tau, axis=1)
++            total_loss += np.mean(likelihood + reg)
+             
+-            # S1 Eq. 14: Add coarse loss term (omitted for brevity) [S1]
++            # S1 Eq. 14: Add coarse loss term: 0.5 * ||C_i - C_hat_c||^2 [S1]
+             
+         # Standard Adam optimizer step on [mlp_static, mlp_color, mlp_transient, mlp_uncertainty, l_a, l_tau] [G]
+@@ -131,13 +133,13 @@
+     l_a_test = optimize_embedding(test_image, mlp_static, mlp_color, beta_min)
+     
+-    x, d, _ = sample_rays(test_image, 1000)
++    x, d, _ = sample_rays(test_image, 1000, K)
+     sigma, z = mlp_static(x)
+     c_static = mlp_color(z, d, l_a_test)
+     
+     # Render only static components (omit transient and uncertainty) [S1]
+-    cum_sum = np.cumsum(sigma * delta)
+-    T = np.exp(-np.concatenate([[0], cum_sum[:-1]]))
++    cum_sum = np.cumsum(sigma * delta, axis=1)
++    T = np.exp(-np.concatenate([np.zeros((x.shape[0], 1)), cum_sum[:, :-1]], axis=1))
+     alpha = T * (1 - np.exp(-sigma * delta))
+-    c_hat = np.sum(alpha[:, None] * c_static, axis=0)
++    c_hat = np.sum(alpha[:, :, None] * c_static, axis=1)
+     
+     return c_hat

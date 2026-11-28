@@ -1,0 +1,256 @@
+# Error-Guided Gaussian Reallocation
+
+Also called: EGR
+
+## Overview
+Error-Guided Gaussian Reallocation (EGR) is a training-stage module that redistributes a fixed budget of Gaussian primitives toward regions with persistent coarse-scale reconstruction errors, without increasing the total number of Gaussians [S1]. It refines post-densification Gaussian allocation by moving low-contribution (LC) Gaussians to high-error (HE) regions within a fixed Gaussian set, using contribution- and error-aware selection [S1]. Unlike densification methods that increase the primitive count, EGR preserves the total Gaussian count $N$ by relocating existing primitives, serving as a stabilization strategy that redirects allocation toward persistent coarse-scale errors [S1].
+
+## How it works
+EGR operates after the densification phase is complete, when the Gaussian count is fixed [S1]. It identifies Gaussians that contribute little to rendering or have low gradients (LC candidates) and relocates them to positions occupied by Gaussians that are associated with high reconstruction error (HE candidates) [S1]. The process involves computing statistics, selecting pairs, relocating parameters, and resetting optimizer states [S1].
+
+### Inputs and Outputs
+*   **Inputs:** The current set of $N$ Gaussians $\{G_i\}_{i=1}^N$, their parameters (position $\mu_i$, scale $S_i$, rotation $R_i$, opacity $\alpha_i$, SH coefficients $c_i$, ACO offsets $\Delta_i$), the current optimizer states, and the set of training views $V$ [S1].
+*   **Outputs:** The modified set of Gaussians $\{G_i\}_{i=1}^N$ with updated positions, scales, colors, and opacities for the relocated pairs, and reset optimizer states for those pairs [S1].
+
+### Data Structures
+Each Gaussian $G_i$ contains:
+*   $\mu_i \in \mathbb{R}^3$: Position [G].
+*   $S_i \in \mathbb{R}^3$: Scale [G].
+*   $R_i \in \mathbb{R}^{3 \times 3}$ or quaternion: Orientation [G].
+*   $\alpha_i \in [0, 1]$: Opacity [G].
+*   $c_i$: Spherical Harmonics coefficients [S1].
+*   $\Delta_i$: ACO (Adaptive-Scale Color Offset) offsets [S1].
+
+### Step-by-Step Method
+
+1.  **Compute Contribution and Error Statistics:**
+    For each Gaussian $i$, compute metrics using all training views [S1].
+    
+    *   **Normalized Blending Weight:** For each view $v$, compute the relative contribution $\tilde{w}_i(v)$:
+        $$ \tilde{w}_i(v) = \frac{w_i(v)}{\sum_{i'} w_{i'}(v) + \epsilon} $$
+        where $w_i(v)$ is the blending weight of Gaussian $i$ in view $v$, $i'$ indexes projected Gaussians in view $v$, and $\epsilon$ is a small positive constant [S1].
+        
+    *   **Mean and Max Contribution:** Compute the mean contribution $C_i^{mean}$ and maximum contribution $C_i^{max}$ over all views $V$:
+        $$ C_i^{mean} = \frac{1}{|V|} \sum_{v \in V} \tilde{w}_i(v) $$
+        $$ C_i^{max} = \max_{v \in V} \tilde{w}_i(v) $$
+        where $|V|$ is the number of views [S1].
+
+    *   **Normalized Gradient Magnitude:** Compute the $L_2$ reconstruction loss for view $v$:
+        $$ L_2(v) = \frac{1}{3H_v W_v} \sum_{h,w,\ell} (\hat{I}_{h,w,\ell}(v) - I_{h,w,\ell}(v))^2 $$
+        where $H_v, W_v$ are image height and width, $\hat{I}$ is rendered color, $I$ is ground truth, and $\ell$ indexes RGB channels [S1].
+        Compute the normalized gradient magnitude $G_i^{mean}$:
+        $$ G_i^{mean} = \frac{1}{|V|} \sum_{v \in V} \frac{\|\nabla_{\theta_i} L_2(v)\|}{\sum_{i'} \|\nabla_{\theta_{i'}} L_2(v)\| + \epsilon} $$
+        where $\nabla_{\theta_i} L_2(v)$ is the parameter gradient of Gaussian $i$ from this loss [S1].
+
+    *   **High-Error Metric ($C_i^{HE}$):** Combine reconstruction error with normalized contribution [S1]. The source defines $C_i^{HE}$ as an error-weighted contribution metric [S1].
+
+2.  **Robust Z-Score Normalization:**
+    The measures $C_i^{mean}$, $C_i^{max}$, and $G_i^{mean}$ have different numerical ranges [S1]. Apply robust z-score normalization to reduce sensitivity to extreme values [S1]:
+    $$ z(x) = \frac{x - \text{median}(x)}{\text{median}(|x - \text{median}(x)|) + \epsilon} $$
+    where $\text{median}(x)$ is the median of measure $x$ over all $N$ Gaussians [S1].
+
+3.  **Score Computation:**
+    *   **LC Score ($s_i^{LC}$):** Assign a high score to Gaussians with low normalized mean contribution, max contribution, and gradient magnitude:
+        $$ s_i^{LC} = \exp(-z(C_i^{mean}) - z(C_i^{max}) - z(G_i^{mean})) $$
+        [S1]
+    *   **HE Score ($s_i^{HE}$):** Assign a high score to Gaussians with large error-weighted contribution using a percentile score based on rank:
+        $$ s_i^{HE} = \frac{1}{N-1} \sum_{j=1}^N \mathbb{1}[C_j^{HE} < C_i^{HE}] $$
+        where $\mathbb{1}[\cdot]$ is the indicator function and $N$ is the number of Gaussians [S1].
+
+4.  **Select Pairs:**
+    *   Select the top $M_{eff}^{LC}$ Gaussians with the highest $s_i^{LC}$ scores as LC candidates [S1].
+    *   Select the top $M_{eff}^{HE}$ Gaussians with the highest $s_i^{HE}$ scores as HE candidates [S1].
+    *   The number of relocated pairs $M$ is determined by the smaller effective sample size:
+        $$ M_{eff}^q = \frac{1}{\sum_{j=1}^N (p_j^q)^2} $$
+        $$ M = \min(M_{eff}^{LC}, M_{eff}^{HE}) $$
+        where $p_j^q$ are the normalized probabilities derived from the scores for distribution $q \in \{LC, HE\}$ [S1]. Round $M$ down to the nearest integer [S1].
+    *   Pair the $M$ LC Gaussians with the $M$ HE Gaussians [S1].
+
+5.  **Relocation and Parameter Copying:**
+    For each of the $M$ selected pairs $(G_{LC}, G_{HE})$:
+    *   Relocate $G_{LC}$ to the position of $G_{HE}$: $\mu_{LC} \leftarrow \mu_{HE}$ [S1].
+    *   Copy the scale, orientation, and base color (DC SH coefficient) from $G_{HE}$ to $G_{LC}$ [S1].
+    *   Reset the higher-order SH coefficients of $G_{LC}$ to zero [S1].
+    *   Reset the ACO offsets of $G_{LC}$ to zero [S1].
+    *   Clear the optimizer state of $G_{LC}$ [S1].
+
+6.  **Opacity Rescaling:**
+    After relocation, the paired Gaussians share the same location [S1]. Rescale their opacities to preserve the original transmittance according to the opacity split of 3DGS-MCMC [21] [S1]. Let $\alpha_{LC}$ and $\alpha_{HE}$ be the original opacities [S1]. The new opacities $\alpha'_{LC}$ and $\alpha'_{HE}$ are computed such that the combined transmittance remains consistent with the pre-relocation state [S1].
+
+7.  **Resume Optimization:**
+    Resume standard gradient-based optimization immediately after relocation [S1]. The paired Gaussians retain separate parameters and are independently optimized during subsequent training, allowing their appearance parameters to become distinct [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def error_guided_reallocation(gaussians, views, optimizer, iteration, config):
+    """
+    Performs Error-Guided Gaussian Reallocation.
+    
+    Args:
+        gaussians: List of Gaussian objects with attributes:
+                   mu (pos), scale, rot, alpha, sh_coeffs, aco_offset, optimizer_state
+        views: List of training view objects (camera poses, ground truth images)
+        optimizer: Optimizer object with reset_state(gaussian) method
+        iteration: Current training iteration
+        config: Configuration dict with keys:
+                epsilon (float), reallocation_interval (int), 
+                window_start (int), window_end (int), num_rounds (int)
+    
+    Returns:
+        Modified gaussians list
+    """
+    # Check if reallocation should run
+    if iteration < config['window_start'] or iteration > config['window_end']:
+        return gaussians
+    if (iteration - config['window_start']) % config['reallocation_interval'] != 0:
+        return gaussians
+    
+    # Determine round index to limit total rounds
+    round_idx = (iteration - config['window_start']) // config['reallocation_interval']
+    if round_idx >= config['num_rounds']:
+        return gaussians
+
+    N = len(gaussians)
+    epsilon = config['epsilon']
+    
+    # Step 1: Compute Statistics
+    C_mean = np.zeros(N)
+    C_max = np.zeros(N)
+    G_mean = np.zeros(N)
+    C_HE = np.zeros(N)
+    
+    for i, g in enumerate(gaussians):
+        w_sum_view = []
+        grad_sum_view = []
+        max_w = 0.0
+        sum_w = 0.0
+        
+        for v in views:
+            # Standard 3DGS forward rasterization computes blending weight w_i(v) [G]
+            w_i_v = 0.0 # Placeholder for standard splatting weight computation
+            w_sum_view.append(w_i_v)
+            
+            # Standard backward pass computes L2 loss and gradient norm [G]
+            loss = 0.0 # Placeholder for standard L2 loss computation
+            grad_norm = 0.0 # Placeholder for standard gradient norm computation
+            grad_sum_view.append(grad_norm)
+            
+            if w_i_v > max_w:
+                max_w = w_i_v
+            sum_w += w_i_v
+            
+        # Normalize weights
+        normalized_ws = [w / (sum_w + epsilon) for w in w_sum_view]
+        C_mean[i] = np.mean(normalized_ws)
+        C_max[i] = max_w
+        
+        # Normalize gradients
+        normalized_grads = [g_n / (sum(grad_sum_view) + epsilon) for g_n in grad_sum_view]
+        G_mean[i] = np.mean(normalized_grads)
+        
+        # Compute error-weighted contribution metric combining reconstruction error and normalized contribution [G]
+        C_HE[i] = loss * C_mean[i] 
+
+    # Step 2: Robust Z-Score Normalization
+    def robust_z_score(values):
+        median_val = np.median(values)
+        mad = np.median(np.abs(values - median_val))
+        return (values - median_val) / (mad + epsilon)
+
+    z_C_mean = robust_z_score(C_mean)
+    z_C_max = robust_z_score(C_max)
+    z_G_mean = robust_z_score(G_mean)
+    
+    # Step 3: Score Computation
+    # LC Score: High score for low values
+    s_LC = np.exp(-z_C_mean - z_C_max - z_G_mean)
+    
+    # HE Score: Percentile rank
+    # s_i_HE = (1 / (N-1)) * sum(1[C_j_HE < C_i_HE])
+    s_HE = np.zeros(N)
+    for i in range(N):
+        count = np.sum(C_HE < C_HE[i])
+        s_HE[i] = count / (N - 1) if N > 1 else 0.0
+        
+    # Step 4: Select Pairs
+    # Compute effective sample sizes
+    # p_j^q are normalized probabilities from scores
+    p_LC = s_LC / (np.sum(s_LC) + epsilon)
+    p_HE = s_HE / (np.sum(s_HE) + epsilon)
+    
+    M_eff_LC = 1.0 / np.sum(p_LC**2)
+    M_eff_HE = 1.0 / np.sum(p_HE**2)
+    
+    M = min(int(M_eff_LC), int(M_eff_HE))
+    
+    # Get indices of top M LC and HE candidates
+    idx_LC = np.argsort(s_LC)[-M:]
+    idx_HE = np.argsort(s_HE)[-M:]
+    
+    # Pair them
+    pairs = list(zip(idx_LC, idx_HE))
+    
+    # Step 5 & 6: Relocation and Opacity Rescaling
+    for idx_lc, idx_he in pairs:
+        g_lc = gaussians[idx_lc]
+        g_he = gaussians[idx_he]
+        
+        # Relocate LC to HE position
+        g_lc.mu = g_he.mu.copy()
+        
+        # Copy scale, orientation, base color (DC SH)
+        g_lc.scale = g_he.scale.copy()
+        g_lc.rot = g_he.rot.copy()
+        g_lc.sh_coeffs[0] = g_he.sh_coeffs[0].copy()
+        
+        # Reset higher-order SH and ACO
+        g_lc.sh_coeffs[1:] = 0.0
+        g_lc.aco_offset = 0.0
+        
+        # Clear optimizer state
+        optimizer.reset_state(g_lc)
+        
+        # Opacity Rescaling (3DGS-MCMC split) [G]
+        # Preserve original transmittance: T_old = (1-alpha_lc)*(1-alpha_he)
+        # New opacities alpha'_lc, alpha'_he such that (1-alpha'_lc)*(1-alpha'_he) = T_old
+        T_old = (1 - g_lc.alpha) * (1 - g_he.alpha)
+        alpha_new = 1 - np.sqrt(T_old)
+        g_lc.alpha = alpha_new
+        g_he.alpha = alpha_new
+
+    return gaussians
+```
+
+### Parameters
+*   **Fixed primitive budget:** The total number of Gaussians $N$ remains constant during reallocation [S1].
+*   **Reallocation interval:** 1000 iterations [S1].
+*   **Reallocation window:** Iterations 16,000 to 25,000 [S1].
+*   **Number of reallocation rounds:** 10 [S1].
+*   **Epsilon:** Small positive constant for numerical stability (value not specified, typically $10^{-8}$) [S1].
+
+### Edge Cases and Pitfalls
+*   **Degenerate Input:** EGR must not run if densification is still active. It is explicitly disabled during densification (iterations 500-15,000) and only runs after the Gaussian count is fixed [S1].
+*   **Precision:** Robust z-score normalization is used to reduce sensitivity to extreme values in contribution and gradient metrics [S1].
+*   **Boundary Conditions:** If $N=1$, the HE score calculation involves division by zero; however, EGR operates on a set of Gaussians where $N$ is large [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources [S1].
+*   **Memory Complexity:** Not given in the sources [S1].
+*   **Measured Performance:** Experiments on MS-GS with three real-scene benchmarks demonstrate improved multi-scale rendering quality, particularly at coarse scales [S1].
+*   **Strengths:** It redirects primitive allocation toward persistent coarse-scale errors without increasing the primitive count [S1]. It uses adaptive relocation count, parameter reset, and continued optimization as a stabilization strategy, avoiding explicit rollback or separate re-correction modules [S1].
+*   **Limitations:** It is only applicable after densification is complete. It relies on accurate computation of gradients and blending weights, which can be computationally expensive [S1].
+*   **When to use:** Use when coarse-scale rendering quality is poor and densification has already stabilized the Gaussian count [S1]. Use when a fixed budget of primitives is required [S1].
+*   **When not to use:** Do not use during the densification phase (iterations 500-15,000) [S1].
+
+## Background
+*   **Origin:** EGR was introduced in the paper "Adaptive-Scale Color Offset and Error-Guided Gaussian Reallocation for Multi-Scale 3D Gaussian Splatting" (Mathematics 2026, 14, 2713) [S1].
+*   **History:** It is part of the ACO-EGR framework, which jointly addresses scale-dependent color mismatch (via ACO) and primitive-allocation imbalance (via EGR) [S1].
+*   **Usage:** It is integrated into multi-scale 3D Gaussian Splatting (MS-GS) backbones to improve rendering quality at coarse scales [S1].
+
+## Sources
+[S1] Adaptive-Scale Color Offset and Error-Guided Gaussian Reallocation for Multi-Scale 3D Gaussian Splatting, https://doi.org/10.3390/math14152713, fetched 2026-11-01

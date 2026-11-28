@@ -1,0 +1,253 @@
+--- v001.md
++++ v002.md
+@@ -1,157 +1,125 @@
+ # Staged Training
+ 
+-Also called: Staged Pose-NeRF Refinement, Two-stage Training
++Also called: Staged Pose-NeRF Refinement
+ 
+ ## Overview
+-Staged Training is a training protocol for neural radiance fields that decouples coarse geometry initialization and pose estimation from fine-detail refinement to reduce GPU memory consumption and improve rendering sharpness. Unlike single-stage approaches that optimize all parameters simultaneously, this method separates the process into distinct phases: an initial stage to establish a valid, memory-efficient structural representation and register camera poses, followed by a second stage to refine high-frequency details using frozen poses and a pre-trained coarse network. This separation prevents the "blurry surface" artifacts common in joint pose-NeRF optimization by ensuring the fine network learns geometry from accurate, registered viewpoints.
++Staged Training is a two-phase optimization protocol for joint camera pose and neural radiance field (NeRF) reconstruction from sparse, noisy initial poses. It solves the problem of local minima in simultaneous pose and network optimization by decoupling the refinement of camera extrinsics from the high-fidelity learning of scene geometry. It differs from joint training approaches by freezing poses after an initial coarse registration, which prevents the fine network from learning blurry surfaces due to pose exploration [S1].
+ 
+ ## How it works
+-The method operates on a tetrahedral mesh representation of the scene, utilizing a hierarchical subdivision structure. It consists of two sequential stages.
++**Inputs and Outputs:**
++*   **Inputs:** A set of $N$ images $\{I_i\}$, initial camera poses $\{P_i\}$ (rotation $R_i$, translation $t_i$) with potential noise, and a coarse NeRF network $F_{\theta_c}$ and fine NeRF network $F_{\theta_f}$.
++*   **Outputs:** Refined camera poses $\{\hat{P}_i\}$ and optimized radiance fields $F_{\theta_c}, F_{\theta_f}$.
+ 
+-### Inputs and Outputs
+-**Inputs:**
+-*   A set of $N$ images with associated initial camera poses $P_i$ and intrinsics $K$.
+-*   A bounding box defining the scene volume (typically normalized to a unit cube).
+-*   Hyperparameters: Grid spacing for initialization ($\delta$), total subdivision levels ($L$), optimizer settings (Adam $\beta_1, \beta_2, \epsilon$), learning rate ($\eta$), and schedule type.
++**Data Structures:**
++*   **Camera Pose:** $P_i = [R_i | t_i]$, where $R_i \in \mathbb{R}^{3 \times 3}$ is a rotation matrix and $t_i \in \mathbb{R}^3$ is a translation vector.
++*   **NeRF Network:** $F_{\theta}(x, d) \to (\sigma, c)$, mapping 3D position $x$ and viewing direction $d$ to density $\sigma$ and color $c$.
+ 
+-**Outputs:**
+-*   A refined tetrahedral mesh with subdivided elements.
+-*   Optimized camera poses $P'_i$.
+-*   Trained neural fields: a coarse network $F_{\theta_c}$ and a fine network $F_{\theta_f}$.
++**Numbered Steps:**
+ 
+-### Data Structures
+-The core data structure is a tetrahedral mesh.
+-1.  **Vertices:** A list of 3D coordinates.
+-2.  **Tetrahedra:** A list of indices referencing 4 vertices per tetrahedron.
+-3.  **Occupancy Mask:** A boolean array or bitset indicating which tetrahedra are retained. Only tetrahedra intersecting the scene geometry are kept, significantly reducing the number of elements compared to a full grid.
+-4.  **Neural Fields:** Two Multi-Layer Perceptrons (MLPs), $F_{\theta_c}$ and $F_{\theta_f}$, mapping spatial coordinates (barycentric or Cartesian) and viewing directions to color and density.
++1.  **Stage 1: Pose Refinement with Coarse Network**
++    *   Initialize the coarse network $F_{\theta_c}$ with random weights or a simple initialization.
++    *   Keep the fine network $F_{\theta_f}$ untrained or frozen with random weights.
++    *   Optimize the parameters of $F_{\theta_c}$ ($\theta_c$) and the camera poses $P_i$ simultaneously by minimizing the photometric loss $\mathcal{L}_{photo}$ between rendered and input images.
++    *   This stage aligns the camera poses to the coarse geometry learned by $F_{\theta_c}$.
+ 
+-### Numbered Steps
++2.  **Stage 2: Joint Refinement with Frozen Poses**
++    *   Freeze the camera poses $P_i$ to the estimates obtained from Stage 1.
++    *   Optimize the parameters of both the coarse network $F_{\theta_c}$ ($\theta_c$) and the fine network $F_{\theta_f}$ ($\theta_f$) simultaneously.
++    *   The fine network learns high-frequency details and sharp geometry, benefiting from the now-registered poses and the pre-trained coarse network which provides a stable low-frequency baseline.
+ 
+-**Stage 1: Coarse Initialization and Pose Refinement**
+-1.  **Mesh Generation:** Generate an initial tetrahedral mesh filling the unit cube using the QuarTet algorithm [S1].
+-    *   Input: Unit cube.
+-    *   Parameter: Grid spacing $\delta = 0.02$ [S1].
+-    *   Result: A mesh with 17,933 vertices and 92,234 tetrahedra [S1].
+-2.  **Occupancy Culling:** Determine which tetrahedra are occupied. Use an occupancy mesh (similar to Instant-NGP's occupancy grid) to filter out empty space [S1]. Retain only tetrahedra that contribute to the scene volume. This creates a "coarse tetrahedral mesh" that roughly envelops the object [S1].
+-3.  **Coarse Network Training:** Train the coarse network $F_{\theta_c}$ on the retained tetrahedra.
+-4.  **Pose Refinement:** Simultaneously optimize the camera poses $P_i$ alongside $F_{\theta_c}$ [S2]. This joint optimization aligns the coarse geometry with the input images.
+-5.  **End State:** Obtain a coarse mesh and registered poses. Memory usage is minimized by the occupancy culling [S1].
++**Formulas:**
++*   Photometric Loss: $\mathcal{L}_{photo} = \sum_{i} \| I_i - \hat{I}_i \|^2$, where $\hat{I}_i$ is the rendered image for pose $P_i$.
++*   Total Loss in Stage 1: $\mathcal{L}_{total}^{(1)} = \mathcal{L}_{photo} + \lambda_{reg} \mathcal{L}_{reg}(\theta_c)$, where $\mathcal{L}_{reg}$ is a regularization term on network weights [G].
++*   Total Loss in Stage 2: $\mathcal{L}_{total}^{(2)} = \mathcal{L}_{photo} + \lambda_{reg} (\mathcal{L}_{reg}(\theta_c) + \mathcal{L}_{reg}(\theta_f))$ [G].
+ 
+-**Stage 2: Fine Refinement**
+-1.  **Freeze Poses:** Fix the camera poses $P'_i$ obtained from Stage 1 [S2].
+-2.  **Subdivision:** Increase the subdivision levels of the tetrahedral mesh from the current level up to the total levels $L$ (e.g., $L=6$) [S1]. This elevates the resolution of the representation.
+-3.  **Joint Fine Training:** Train both the coarse network $F_{\theta_c}$ (to maintain global structure) and the fine network $F_{\theta_f}$ (to capture high-frequency details) [S2].
+-4.  **Focused Optimization:** The refinement focuses computational resources on areas requiring detailed representation, building upon the stable structure from Stage 1 [S1].
++**Parameters:**
++*   Learning rates for $\theta_c$, $\theta_f$, and $P_i$ are typically decayed over time [G].
++*   Regularization weight $\lambda_{reg}$ is not given in the sources.
+ 
+-### Pseudocode
++**Edge Cases and Pitfalls:**
++*   **Initial Pose Quality:** If initial poses are too noisy, Stage 1 may fail to converge to a useful alignment. The sources note performance on DTU with 15% initial additive Gaussian noise [S1].
++*   **Local Minima:** Joint training of poses and both networks (without staging) can lead to blurry surfaces because the fine network explores the pose space while learning geometry [S1].
++
++**Pseudocode:**
+ 
+ ```python
+-def staged_training(images, initial_poses, intrinsics, config):
++def staged_training(images, initial_poses, coarse_network, fine_network, num_epochs_stage1, num_epochs_stage2):
+     """
+-    config:
+-        grid_spacing: float (e.g., 0.02)
+-        total_levels: int (e.g., 6)
+-        optimizer_params: dict (beta1, beta2, eps, lr)
++    Performs staged training for NeRF with pose refinement.
++    
++    Args:
++        images: List of input images.
++        initial_poses: List of initial camera poses (R, t).
++        coarse_network: Neural network F_theta_c.
++        fine_network: Neural network F_theta_f.
++        num_epochs_stage1: Number of epochs for Stage 1.
++        num_epochs_stage2: Number of epochs for Stage 2.
++        
++    Returns:
++        refined_poses: List of optimized camera poses.
++        coarse_network: Optimized coarse network.
++        fine_network: Optimized fine network.
+     """
++    # Initialize networks
++    theta_c = coarse_network.parameters()
++    theta_f = fine_network.parameters()
+     
+-    # --- Stage 1 ---
++    # Initialize poses as trainable variables
++    poses = [torch.tensor(p, requires_grad=True) for p in initial_poses]
+     
+-    # 1. Generate initial mesh using QuarTet
+-    # QuarTet converts surface geometry (or unit cube) to tetrahedra
+-    mesh = quartet_init(unit_cube=True, grid_spacing=config.grid_spacing)
+-    # Result: ~17,933 vertices, ~92,234 tetrahedra for spacing 0.02
++    # Stage 1: Refine poses and coarse network
++    optimizer_stage1 = torch.optim.Adam([theta_c] + poses, lr=1e-3)
+     
+-    # 2. Cull empty tetrahedra using occupancy mesh
+-    # Similar to Instant-NGP occupancy grid logic
+-    occupied_indices = compute_occupancy(mesh, images, initial_poses, intrinsics)
+-    mesh = mesh.filter(occupied_indices)
++    for epoch in range(num_epochs_stage1):
++        optimizer_stage1.zero_grad()
++        loss = 0.0
++        for i, image in enumerate(images):
++            # Render image using coarse network and current pose
++            rendered_image = render_coarse(coarse_network, poses[i])
++            # Compute photometric loss
++            loss += torch.mean((rendered_image - image) ** 2)
++        
++        loss.backward()
++        optimizer_stage1.step()
++        
++    # Stage 2: Freeze poses, train both networks
++    # Freeze poses
++    for p in poses:
++        p.requires_grad = False
++        
++    optimizer_stage2 = torch.optim.Adam([theta_c, theta_f], lr=1e-4)
+     
+-    # 3. Initialize coarse network
+-    theta_c = initialize_mlp()
+-    
+-    # 4. Joint optimization of poses and coarse network
+-    poses = initial_poses
+-    optimizer = Adam(params=[theta_c, poses], **config.optimizer_params)
+-    
+-    for step in range(stage1_steps):
+-        # Sample rays through the coarse mesh
+-        rays = sample_rays(images, poses, intrinsics, mesh)
++    for epoch in range(num_epochs_stage2):
++        optimizer_stage2.zero_grad()
++        loss = 0.0
++        for i, image in enumerate(images):
++            # Render image using coarse and fine networks and frozen pose
++            rendered_image = render_fine(coarse_network, fine_network, poses[i])
++            # Compute photometric loss
++            loss += torch.mean((rendered_image - image) ** 2)
++            
++        loss.backward()
++        optimizer_stage2.step()
+         
+-        # Render using coarse network
+-        colors, densities = render_coarse(mesh, theta_c, rays)
+-        
+-        # Compute loss against ground truth images
+-        loss = compute_loss(colors, images[rays.image_indices])
+-        
+-        # Backpropagate to update poses and theta_c
+-        optimizer.zero_grad()
+-        loss.backward()
+-        optimizer.step()
+-        
+-    # End of Stage 1: poses are registered, mesh is coarse but occupied
+-    
+-    # --- Stage 2 ---
+-    
+-    # 1. Freeze poses
+-    poses.requires_grad = False
+-    
+-    # 2. Subdivide mesh to total_levels
+-    # Increase subdivision hierarchy
+-    mesh = subdivide_mesh(mesh, target_levels=config.total_levels)
+-    
+-    # 3. Initialize fine network
+-    theta_f = initialize_mlp()
+-    
+-    # 4. Joint optimization of coarse and fine networks (poses frozen)
+-    optimizer = Adam(params=[theta_c, theta_f], **config.optimizer_params)
+-    
+-    for step in range(stage2_steps):
+-        # Sample rays through the refined mesh
+-        rays = sample_rays(images, poses, intrinsics, mesh)
+-        
+-        # Render using coarse and fine networks
+-        # Typically: color = coarse_color + fine_color or similar composition
+-        colors_coarse, densities_coarse = render_coarse(mesh, theta_c, rays)
+-        colors_fine, densities_fine = render_fine(mesh, theta_f, rays)
+-        colors = compose(colors_coarse, colors_fine)
+-        
+-        # Compute loss
+-        loss = compute_loss(colors, images[rays.image_indices])
+-        
+-        # Backpropagate to update theta_c and theta_f only
+-        optimizer.zero_grad()
+-        loss.backward()
+-        optimizer.step()
+-        
+-    return mesh, poses, theta_c, theta_f
++    return poses, coarse_network, fine_network
+ ```
+ 
+-### Parameters and Typical Values
+-*   **Grid Spacing ($\delta$):** 0.02 for QuarTet initialization [S1].
+-*   **Total Subdivision Levels ($L$):** 6 for all scenes [S1].
+-*   **Optimizer:** Adam [S1, S2].
+-    *   $\beta_1 = 0.9$
+-    *   $\beta_2 = 0.999$
+-    *   $\epsilon = 10^{-15}$ [S1]
+-*   **Learning Rate:** $1 \times 10^{-2}$ [S1].
+-*   **Scheduler:** Cosine annealing [S1].
++## Subtopics
+ 
+-### Edge Cases and Pitfalls
+-*   **Initial Pose Noise:** If initial poses are noisy, Stage 1 is critical for registration. SPARF notes that without staged training (jointly training poses with both coarse and fine MLPs), the scene often exhibits blurry surfaces due to the exploration of the pose space [S2].
+-*   **Memory Overflow:** Single-stage training on high-resolution meshes can exceed GPU memory. Staged training mitigates this by culling empty tetrahedra in Stage 1 and refining only occupied regions in Stage 2 [S1].
+-*   **Degenerate Tetrahedra:** The QuarTet algorithm and subsequent subdivision must maintain valid mesh topology. Degenerate elements can cause rendering artifacts or NaN gradients.
++### [Two-stage Training for Deformable NeRF](21743-two-stage-training-for-deformable-nerf.md)
++A training protocol for deformable neural radiance fields that reduces GPU memory consumption and accelerates convergence by decoupling the initialization of the tetrahedral mesh from the high-resolution refinement.
+ 
+ ## Operating characteristics
+-*   **Memory Efficiency:** Significantly lower than single-stage training. On the Synthetic NeRF dataset, Stage 1 uses 5.34 GB and Stage 2 uses 2.70 GB, whereas single-stage training uses 9.79 GB [S1].
+-*   **Performance:** Improves rendering quality. On the Tanks and Temples dataset, staged training achieves PSNR 29.09, SSIM 0.903, and LPIPS 0.124, compared to single-stage PSNR 28.01, SSIM 0.887, and LPIPS 0.155 [S1].
+-*   **Robustness to Noise:** On the DTU dataset with 3 views and 15% initial additive Gaussian noise, staged training achieves PSNR 17.58 (18.62 masked), SSIM 0.71 (0.82 masked), LPIPS 0.26 (0.13 masked), and DE 1.81 [S2].
+-*   **Strengths:** Reduces GPU memory footprint; prevents blurry surfaces by decoupling pose registration from fine-detail learning; allows focused optimization of complex geometries.
+-*   **Limitations:** Requires two distinct training phases, potentially increasing total wall-clock time if not parallelized; relies on the quality of the initial mesh generation (QuarTet) and occupancy estimation.
++*   **Time Complexity:** Two sequential optimization phases. Stage 1 is generally faster as it only optimizes poses and a coarse network. Stage 2 optimizes two networks but with frozen poses, which can be more stable.
++*   **Memory Complexity:** Similar to standard NeRF training, but avoids the memory overhead of storing gradients for poses during the fine network training phase in Stage 2.
++*   **Measured Performance:** On the DTU dataset with 3 views and 15% initial additive Gaussian noise, Staged Training achieves a PSNR of 17.58 (18.62 masked), SSIM of 0.71 (0.82 masked), LPIPS of 0.26 (0.13 masked), and Depth Error (DE) of 1.81 [S1].
++*   **Strengths:** Prevents blurry surfaces by decoupling pose and geometry optimization. Improves PSNR and SSIM compared to joint training of poses with both coarse and fine MLPs [S1].
++*   **Limitations:** Requires careful tuning of the transition between stages. Performance depends heavily on the quality of the initial poses.
++*   **When to use:** When initial camera poses are sparse and noisy, and joint optimization leads to poor geometry.
++*   **When not to use:** When high-quality initial poses are available, or when computational resources are extremely limited for two-stage optimization.
+ 
+ ## Background
+-Staged Training was introduced in the context of deformable neural radiance fields using recursively subdivided tetrahedra (Tetra-NeRF) [S1] and independently applied in SPARF (Neural Radiance Fields from Sparse and Noisy Poses) [S2]. In Tetra-NeRF, it was proposed to reduce GPU memory usage and enhance training speed by separating mesh initialization from refinement [S1]. In SPARF, it was used to handle sparse and noisy initial poses, where refining poses while training a coarse network first prevents the blurring associated with joint pose-NeRF optimization [S2]. The method builds on occupancy-based culling techniques popularized by Instant-NGP [S1] and tetrahedral rendering pipelines [S1].
++Staged Training was introduced in the context of "SPARF: Neural Radiance Fields from Sparse and Noisy Poses" [S1]. It addresses the challenges of reconstructing NeRFs from sparse and noisy camera poses, where traditional joint optimization methods struggle with local minima and blurry reconstructions. The method builds on the idea of coarse-to-fine optimization but explicitly stages the pose refinement process.
+ 
+ ## Sources
+-[S1] Deformable NeRF using Recursively Subdivided Tetrahedra, https://doi.org/10.1145/3664647.3681019, fetched 2026-10-26
+-[S2] SPARF: Neural Radiance Fields from Sparse and Noisy Poses, https://doi.org/10.1109/cvpr52729.2023.00408, fetched 2026-10-26+[S1] SPARF: Neural Radiance Fields from Sparse and Noisy Poses, https://doi.org/10.1109/cvpr52729.2023.00408, fetched 2026-10-26

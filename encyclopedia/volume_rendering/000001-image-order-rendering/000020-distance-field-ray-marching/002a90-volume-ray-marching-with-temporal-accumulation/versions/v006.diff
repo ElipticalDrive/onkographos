@@ -1,0 +1,470 @@
+--- v005.md
++++ v006.md
+@@ -4,284 +4,240 @@
+ 
+ ## Overview
+-Volume Ray Marching with Temporal Accumulation is a real-time volume rendering technique that marches rays through a 3D density field to accumulate color and opacity, enhanced by temporal accumulation (history) to reduce noise and stabilize the image over frames [S1, unofficial]. It distinguishes itself from standard ray marching by integrating a history buffer to blend current frame results with previous frames, allowing for higher effective sampling rates and reduced flickering in dynamic scenes [S1, unofficial].
++Volume Ray Marching with Temporal Accumulation is a real-time rendering technique that discretizes view rays through a 3D density field to compute color and opacity, enhanced by blending the current frame's result with a history texture to reduce noise and stabilize the image over time [S1, unofficial]. It distinguishes itself from standard ray marching by incorporating temporal feedback, allowing for higher visual fidelity with fewer spatial samples, and from SDF-based methods by relying on explicit density textures rather than analytic distance functions [S1, unofficial].
+ 
+ ## How it works
+-The method operates in a fragment shader, utilizing a set of textures and uniforms to manage the rendering state and accumulation history.
+-
+-### Inputs and Outputs
+-**Inputs:**
+-*   `m_colorTexture`: Output texture for the current frame's color (GL_RGBA8).
+-*   `m_depthTexture`: Output depth buffer (GL_DEPTH_COMPONENT24).
+-*   `m_sceneDepthTexture`: Input depth buffer of the scene geometry (GL_DEPTH_COMPONENT24).
+-*   `m_historyTexture`: Input texture storing the accumulated color from previous frames (GL_RGBA8).
+-*   `densityTexture`: Input 3D texture (or 2D slice) containing density values.
+-*   `temperatureTexture`, `fireTexture`: Input textures for fire/smoke simulation data.
+-*   `cameraPosition`: Camera origin in world space.
+-*   `inverseViewProjection`: Inverse of the view-projection matrix.
+-*   Uniforms: `stepSize`, `maximumSteps`, `densityScale`, `absorption`, `emissionStrength`, `lightDirection`, `lightIntensity`, `fieldMode`, `temporalEnabled`, `historyWeight`, `frameIndex`, `jitterEnabled`, `selfShadowingEnabled`.
+-
+-**Outputs:**
+-*   `m_colorTexture`: Final accumulated color.
+-*   `m_depthTexture`: Depth of the volume surface (if applicable) or far plane.
+-
+-### Data Structures
+-*   **Textures**: All textures use `GL_LINEAR` filtering for color/history and `GL_NEAREST` for depth. Wrap mode is `GL_CLAMP_TO_EDGE`.
+-*   **History Texture**: Initialized to zero at the start of the application. Blended with the current frame based on `historyWeight`.
+-
+-### Parameters
+-*   `gridSpacing`: float, default 0.5F. Spacing for debug visualization.
+-*   `densityScale`: float. Multiplier for density values during light transmittance.
+-*   `stepSize`: float. Distance advanced per ray march step.
+-*   `maximumSteps`: int. Maximum number of ray march steps per ray.
+-*   `frameIndex`: int. Current frame number, used for jitter randomization.
+-*   `jitterEnabled`: bool. Adds random offset to starting distance.
+-*   `adaptiveSteppingEnabled`: bool. Uniform present, usage logic not explicitly shown in core snippet.
+-*   `fieldMode`: int. Rendering mode: 0 (Smoke/Fire), 1 (Simple Smoke), 2/3 (Abstract/Color-coded).
+-*   `lightDirection`: vec3. Light source direction.
+-*   `lightIntensity`: float. Light intensity multiplier.
+-*   `absorption`: float. Absorption coefficient for Beer-Lambert law.
+-*   `emissionStrength`: float. Emitted light multiplier.
+-*   `selfShadowingEnabled`: bool. Enables shadow ray marching.
+-*   `temporalEnabled`: bool. Enables temporal accumulation.
+-*   `historyWeight`: float. Weight for previous frame's color in blending.
+-
+-### Algorithm Steps
+-
+-1.  **Initialization**:
+-    *   Allocate and clear `m_historyTexture` to zero.
+-    *   Set texture filtering and wrap modes as specified.
+-
+-2.  **Ray Definition**:
+-    *   Convert texture coordinate `textureCoordinate` (range [0, 1]) to clip space:
+-        $$ \text{clipPosition} = \text{textureCoordinate} \times 2.0 - 1.0 $$
+-    *   Unproject the far plane point using the inverse view-projection matrix:
+-        $$ \text{farWorld} = \frac{\text{inverseViewProjection} \times \text{clipPosition}}{\text{farWorld}.w} $$
+-    *   Calculate ray direction:
+-        $$ \mathbf{d} = \text{normalize}(\text{farWorld} - \text{cameraPosition}) $$
+-
+-3.  **Box Intersection**:
+-    *   Intersect ray with unit cube $[-1, 1]^3$:
+-        $$ \mathbf{invD} = 1.0 / \mathbf{d} $$
+-        $$ \mathbf{first} = (-1.0 - \text{cameraPosition}) \times \mathbf{invD} $$
+-        $$ \mathbf{second} = (1.0 - \text{cameraPosition}) \times \mathbf{invD} $$
+-        $$ t_{min} = \max(\min(\mathbf{first}), \min(\mathbf{second})) $$
+-        $$ t_{max} = \min(\max(\mathbf{first}), \max(\mathbf{second})) $$
+-        $$ \text{intersection} = [t_{min}, t_{max}] $$
+-    *   Initialize `distanceAlongRay` to $\max(t_{min}, 0.0)$.
+-
+-4.  **Scene Geometry Clipping**:
+-    *   Sample `m_sceneDepthTexture` at `textureCoordinate` to get `sceneDepth`.
+-    *   If `sceneDepth < 1.0`:
+-        *   Unproject scene point to world space.
+-        *   Calculate `sceneDistance` along `rayDirection`.
+-        *   Update `intersection.y = min(intersection.y, sceneDistance)`.
+-
+-5.  **Discard Check**:
+-    *   If `intersection.y <= distanceAlongRay`, discard the fragment (ray does not intersect volume within scene bounds).
+-
+-6.  **Jitter Application**:
+-    *   If `jitterEnabled`:
+-        $$ \text{jitter} = \text{random}(gl\_FragCoord.xy, \text{frameIndex}) \times \text{stepSize} $$
+-        $$ \text{distanceAlongRay} += \text{jitter} $$
+-    *   The `random` function is defined as:
+-        $$ \mathbf{v} = \text{fract}(\text{vec3}(\text{coordinate}.xyx) \times 0.1031) $$
+-        $$ \mathbf{v} += \text{dot}(\mathbf{v}, \mathbf{v}.yzx + 33.33 + \text{float}(\text{frameIndex}) \times 0.01) $$
+-        $$ \text{return } \text{fract}((\mathbf{v}.x + \mathbf{v}.y) \times \mathbf{v}.z) $$
+-
+-7.  **Accumulation Initialization**:
+-    *   Set `accumulated = vec4(0.0)`.
+-
+-8.  **Ray Marching Loop**:
+-    *   Loop `index` from 0 to 767 (or `maximumSteps`).
++**Inputs and Outputs**
++*   **Inputs:** Camera position and inverse view-projection matrix; 3D density texture (GL_RGBA8); optional temperature/fire textures; scene depth texture (GL_DEPTH_COMPONENT24); history texture (GL_RGBA8); uniforms for step size, maximum steps, jitter, and lighting parameters.
++*   **Outputs:** Final color buffer (GL_RGBA8).
++
++**Data Structures**
++*   `m_colorTexture`: GL_RGBA8, GL_LINEAR filtering, GL_CLAMP_TO_EDGE wrap.
++*   `m_depthTexture`: GL_DEPTH_COMPONENT24, GL_NEAREST filtering, GL_CLAMP_TO_EDGE wrap.
++*   `m_sceneDepthTexture`: GL_DEPTH_COMPONENT24, GL_NEAREST filtering, GL_CLAMP_TO_EDGE wrap.
++*   `m_historyTexture`: GL_RGBA8, GL_LINEAR filtering, GL_CLAMP_TO_EDGE wrap. Cleared to zero at initialization [S1, unofficial].
++
++**Parameters**
++*   `gridSpacing`: float, default 0.5F [S1, unofficial].
++*   `densityScale`: float, multiplier for density in light transmittance [S1, unofficial].
++*   `stepSize`: float, distance advanced per ray march step [S1, unofficial].
++*   `maximumSteps`: int, max steps per ray (e.g., 767) [S1, unofficial].
++*   `frameIndex`: int, current frame number for jitter [S1, unofficial].
++*   `jitterEnabled`: bool, enables random offset [S1, unofficial].
++*   `adaptiveSteppingEnabled`: bool, uniform present but usage not shown in core snippet [S1, unofficial].
++*   `fieldMode`: int, selects rendering mode (0: Smoke/Fire, 1: Simple Smoke, 2/3: Abstract/Color-coded) [S1, unofficial].
++*   `lightDirection`: vec3, light source direction [S1, unofficial].
++*   `lightIntensity`: float, light intensity multiplier [S1, unofficial].
++*   `absorption`: float, absorption coefficient for Beer-Lambert law [S1, unofficial].
++*   `emissionStrength`: float, multiplier for emitted light [S1, unofficial].
++*   `selfShadowingEnabled`: bool, enables shadow ray marching [S1, unofficial].
++*   `temporalEnabled`: bool, enables temporal blending [S1, unofficial].
++*   `historyWeight`: float, weight for previous frame's color [S1, unofficial].
++
++**Algorithm Steps**
++
++1.  **Initialize Textures:** Allocate `m_colorTexture`, `m_depthTexture`, `m_sceneDepthTexture`, and `m_historyTexture` with specified formats and filtering. Clear `m_historyTexture` to zero [S1, unofficial].
++2.  **Compute Ray Origin and Direction:**
++    *   Convert texture coordinate `textureCoordinate` to clip space: `clipPosition = textureCoordinate * 2.0 - 1.0`.
++    *   Unproject far plane point: `farWorld = inverseViewProjection * clipPosition`. Normalize to get `rayDirection = normalize(farWorld - cameraPosition)` [S1, unofficial].
++3.  **Intersect Ray with Unit Cube:**
++    *   Compute `inverseDirection = 1.0 / rayDirection`.
++    *   Compute `first = (-1.0 - cameraPosition) * inverseDirection` and `second = (1.0 - cameraPosition) * inverseDirection`.
++    *   Compute `minimum = min(first, second)` and `maximum = max(first, second)`.
++    *   Return `intersection = vec2(max(minimum.x, minimum.y, minimum.z), min(maximum.x, maximum.y, maximum.z))` [S1, unofficial].
++    *   Set `distanceAlongRay = max(intersection.x, 0.0)` [S1, unofficial].
++4.  **Clip Ray Against Scene Geometry:**
++    *   Sample `sceneDepthTexture` at `textureCoordinate` to get `sceneDepth`.
++    *   If `sceneDepth < 1.0`, unproject the scene point to world space, calculate `sceneDistance` along `rayDirection`, and update `intersection.y = min(intersection.y, sceneDistance)` [S1, unofficial].
++5.  **Discard if No Intersection:** If `intersection.y <= distanceAlongRay`, discard the fragment [S1, unofficial].
++6.  **Apply Jitter:** If `jitterEnabled`, add a random offset to `distanceAlongRay`: `distanceAlongRay += random(gl_FragCoord.xy, frameIndex) * stepSize` [S1, unofficial].
++7.  **Initialize Accumulation:** Set `accumulated = vec4(0.0)` [S1, unofficial].
++8.  **Ray Marching Loop:**
++    *   Loop `index` from 0 to `maximumSteps` (e.g., 767).
+     *   Break if `index >= maximumSteps` or `distanceAlongRay >= intersection.y`.
+-    *   Calculate position:
+-        $$ \mathbf{p} = \text{cameraPosition} + \mathbf{d} \times \text{distanceAlongRay} $$
+-    *   Sample density:
+-        $$ \text{fieldValue} = \text{texture}(\text{densityTexture}, \mathbf{p} \times 0.5 + 0.5).r $$
+-        $$ \text{density} = \text{fieldValue} $$
+-    *   **Volume Entry Detection**:
+-        *   If `!foundVolume` and `density > 0.01`:
+-            $$ \text{representativePosition} = \mathbf{p} $$
+-            $$ \text{foundVolume} = \text{true} $$
+-
+-9.  **Color Computation**:
+-    *   Based on `fieldMode`:
+-        *   **Mode 0 (Smoke/Fire)**:
+-            *   Sample `temperatureTexture` and `fireTexture`.
+-            *   Compute `lightTransmittance` (see Self-Shadowing).
+-            *   Ambient light: $\mathbf{c}_{ambient} = \text{vec3}(0.12, 0.15, 0.20)$.
+-            *   Direct light: $\mathbf{c}_{direct} = \text{vec3}(1.0, 0.88, 0.72) \times \text{lightIntensity} \times \text{transmittance}$.
+-            *   Mix smoke color based on `position.y`.
+-            *   Compute `flameColor` from temperature.
+-            *   Emitted light: $\mathbf{c}_{emitted} = \text{flameColor} \times \text{fire} \times \text{emissionStrength}$.
+-        *   **Mode 1 (Simple Smoke)**:
+-            $$ \text{smokeColor} = \text{mix}(\text{vec3}(0.3, 0.04, 0.01), \text{vec3}(1.0, 0.65, 0.08), \text{fieldValue}) $$
+-        *   **Mode 2/3 (Abstract)**:
+-            $$ \text{density} = |\text{fieldValue} - 0.5| \times 2.0 $$
+-            $$ \text{smokeColor} = \begin{cases} \text{red} & \text{if } \text{fieldValue} \ge 0.5 \\ \text{blue} & \text{otherwise} \end{cases} $$
+-
+-10. **Accumulation and Blending**:
+-    *   Compute alpha for current step:
+-        $$ \alpha = 1.0 - \exp(-\text{density} \times \text{stepSize}) $$
+-    *   Compute color contribution:
+-        $$ \mathbf{c}_{step} = \text{smokeColor} \times \alpha $$
+-    *   Update accumulated color and opacity:
+-        $$ \mathbf{c}_{accumulated} += \mathbf{c}_{step} \times (1.0 - \mathbf{c}_{accumulated}.a) $$
+-        $$ \mathbf{c}_{accumulated}.a += \alpha \times (1.0 - \mathbf{c}_{accumulated}.a) $$
+-    *   *Note: The provided source code snippet ends before this blending loop, but the presence of `accumulated` and `temporalEnabled` implies this standard volume rendering accumulation is required.*
+-
+-11. **Temporal Accumulation**:
+-    *   If `temporalEnabled`:
+-        $$ \mathbf{c}_{final} = \text{mix}(\mathbf{c}_{accumulated}, \text{texture}(\text{m\_historyTexture}, \text{textureCoordinate}), \text{historyWeight}) $$
+-    *   Else:
+-        $$ \mathbf{c}_{final} = \mathbf{c}_{accumulated} $$
+-
+-12. **Self-Shadowing (Optional)**:
+-    *   If `selfShadowingEnabled`:
+-        *   March 20 steps in direction $-\text{normalize}(\text{lightDirection} + \text{vec3}(0.0001))$.
+-        *   Step size: 0.08.
+-        *   Accumulate optical depth:
+-            $$ \text{opticalDepth} += \text{texture}(\text{densityTexture}, \mathbf{p} \times 0.5 + 0.5).r \times 0.08 $$
+-        *   Break if position abs > 1.0.
+-        *   Return transmittance:
+-            $$ \text{transmittance} = \exp(-\text{opticalDepth} \times \text{absorption} \times \text{densityScale} \times 3.0) $$
+-
+-### Pseudocode
++    *   Calculate `position = cameraPosition + rayDirection * distanceAlongRay`.
++    *   Sample `densityTexture` at `position * 0.5 + 0.5`. Get `fieldValue = texture.r` [S1, unofficial].
++    *   Set `density = fieldValue`.
++    *   **Detect Volume Entry:** If `!foundVolume` and `density > 0.01`, set `representativePosition = position` and `foundVolume = true` [S1, unofficial].
++    *   **Compute Color:**
++        *   If `fieldMode == 0`: Sample temperature and fire textures. Compute `lightTransmittance`. Compute ambient light `vec3(0.12, 0.15, 0.20)` and direct light `vec3(1.0, 0.88, 0.72) * lightIntensity * transmittance`. Mix smoke color based on `position.y`. Compute `flameColor` from temperature. `emittedLight = flameColor * fire * emissionStrength`.
++        *   If `fieldMode == 1`: `smokeColor = mix(vec3(0.3, 0.04, 0.01), vec3(1.0, 0.65, 0.08), fieldValue)`.
++        *   If `fieldMode == 2` or `3`: `density = abs(fieldValue - 0.5) * 2.0`. `smokeColor` is red if `fieldValue >= 0.5` else blue [S1, unofficial].
++    *   **Accumulate Color and Opacity:**
++        *   Calculate `alpha = 1.0 - exp(-density * stepSize)`.
++        *   Calculate `color = smokeColor * alpha`.
++        *   Update `accumulated`:
++            ```python
++            accumulated.rgb += color.rgb * (1.0 - accumulated.a)
++            accumulated.a += alpha * (1.0 - accumulated.a)
++            ```
++        *   [G] Standard alpha blending is implied by the presence of `accumulated` and `temporalEnabled`, though the source snippet ends before this explicit loop. The formula above is the standard implementation for this accumulation pattern.
++    *   **Light Transmittance (Self-Shadowing):** If `selfShadowingEnabled`, march 20 steps in direction `-normalize(lightDirection + vec3(0.0001))` with step size 0.08. Accumulate `opticalDepth = texture(densityTexture, position * 0.5 + 0.5).r * shadowStep`. Break if `abs(position) > 1.0`. Return `exp(-opticalDepth * absorption * densityScale * 3.0)` [S1, unofficial].
++9.  **Temporal Accumulation:** If `temporalEnabled`, blend the current frame's `accumulated` result with `m_historyTexture` using `historyWeight`: `finalColor = mix(accumulated, historyColor, historyWeight)` [S1, unofficial].
++
++**Pseudocode**
+ 
+ ```python
+ def volume_ray_marching_with_temporal_accumulation(
+-    texture_coordinate,
+     camera_position,
+     inverse_view_projection,
++    texture_coordinate,
++    density_texture,
+     scene_depth_texture,
+-    density_texture,
+-    temperature_texture,
+-    fire_texture,
+     history_texture,
+-    uniforms
++    step_size,
++    maximum_steps,
++    frame_index,
++    jitter_enabled,
++    field_mode,
++    light_direction,
++    light_intensity,
++    absorption,
++    emission_strength,
++    self_shadowing_enabled,
++    temporal_enabled,
++    history_weight,
++    density_scale
+ ):
+-    # 1. Ray Definition
++    # 1. Compute Ray Origin and Direction
+     clip_position = texture_coordinate * 2.0 - 1.0
+     far_point = inverse_view_projection * vec4(clip_position, 1.0)
+-    far_world = far_point.xyz / far_point.w
++    far_world = vec3(far_point) / far_point.w
+     ray_direction = normalize(far_world - camera_position)
+     
+-    # 2. Box Intersection
+-    inv_direction = 1.0 / ray_direction
+-    first = (-1.0 - camera_position) * inv_direction
+-    second = (1.0 - camera_position) * inv_direction
++    # 2. Intersect Ray with Unit Cube [-1, 1]
++    inverse_direction = 1.0 / ray_direction
++    first = (vec3(-1.0) - camera_position) * inverse_direction
++    second = (vec3(1.0) - camera_position) * inverse_direction
+     minimum = min(first, second)
+     maximum = max(first, second)
+-    t_min = max(minimum.x, minimum.y, minimum.z)
+-    t_max = min(maximum.x, maximum.y, maximum.z)
+-    intersection = vec2(t_min, t_max)
+-    distance_along_ray = max(t_min, 0.0)
+-    
+-    # 3. Scene Geometry Clipping
+-    scene_depth = scene_depth_texture.sample(texture_coordinate).r
++    intersection = vec2(max(minimum.x, minimum.y, minimum.z), min(maximum.x, maximum.y, maximum.z))
++    distance_along_ray = max(intersection.x, 0.0)
++    
++    # 3. Clip Ray Against Scene Geometry
++    scene_depth = texture(scene_depth_texture, texture_coordinate).r
+     if scene_depth < 1.0:
+-        scene_far_point = inverse_view_projection * vec4(
+-            texture_coordinate * 2.0 - 1.0, scene_depth, 1.0
+-        )
+-        scene_world = scene_far_point.xyz / scene_far_point.w
+-        scene_distance = dot(scene_world - camera_position, ray_direction)
++        scene_point_clip = vec4(texture_coordinate * 2.0 - 1.0, scene_depth, 1.0)
++        scene_point_world = vec3(inverse_view_projection * scene_point_clip) / (inverse_view_projection * scene_point_clip).w
++        scene_distance = dot(scene_point_world - camera_position, ray_direction)
+         intersection.y = min(intersection.y, scene_distance)
+         
+-    # 4. Discard Check
++    # 4. Discard if No Intersection
+     if intersection.y <= distance_along_ray:
+-        return vec4(0.0)
+-        
+-    # 5. Jitter
+-    if uniforms.jitter_enabled:
+-        jitter = random_jitter(texture_coordinate, uniforms.frame_index) * uniforms.step_size
+-        distance_along_ray += jitter
+-        
+-    # 6. Accumulation Init
+-    accumulated = vec4(0.0)
++        return vec4(0.0, 0.0, 0.0, 0.0)
++        
++    # 5. Apply Jitter
++    if jitter_enabled:
++        jitter = random(gl_FragCoord.xy, frame_index)
++        distance_along_ray += jitter * step_size
++        
++    # 6. Initialize Accumulation
++    accumulated = vec4(0.0, 0.0, 0.0, 0.0)
+     found_volume = False
+     
+     # 7. Ray Marching Loop
+-    for index in range(768):
+-        if index >= uniforms.maximum_steps or distance_along_ray >= intersection.y:
++    for index in range(maximum_steps):
++        if distance_along_ray >= intersection.y:
+             break
+             
+         position = camera_position + ray_direction * distance_along_ray
+-        field_value = density_texture.sample(position * 0.5 + 0.5).r
++        
++        # Sample Density
++        density_tex_coord = position * 0.5 + 0.5
++        field_value = texture(density_texture, density_tex_coord).r
+         density = field_value
+         
+-        # Volume Entry Detection
++        # Detect Volume Entry
+         if not found_volume and density > 0.01:
+             representative_position = position
+             found_volume = True
+             
+-        # Color Computation
+-        if uniforms.field_mode == 0:
+-            temp = temperature_texture.sample(position * 0.5 + 0.5).r
+-            fire_val = fire_texture.sample(position * 0.5 + 0.5).r
+-            transmittance = compute_self_shadowing(position, uniforms)
++        # Compute Color based on Field Mode
++        if field_mode == 0:
++            # Smoke/Fire with lighting
++            temperature = texture(temperature_texture, density_tex_coord).r
++            fire = texture(fire_texture, density_tex_coord).r
++            light_transmittance = compute_light_transmittance(position, light_direction, absorption, density_scale, self_shadowing_enabled)
+             ambient = vec3(0.12, 0.15, 0.20)
+-            direct = vec3(1.0, 0.88, 0.72) * uniforms.light_intensity * transmittance
+-            smoke_color = mix(vec3(0.1, 0.1, 0.1), vec3(0.5, 0.5, 0.5), position.y)
+-            flame_color = temp * vec3(1.0, 0.5, 0.1)
+-            emitted_light = flame_color * fire_val * uniforms.emission_strength
+-            color = (ambient + direct) * smoke_color + emitted_light
+-        elif uniforms.field_mode == 1:
++            direct_light = vec3(1.0, 0.88, 0.72) * light_intensity * light_transmittance
++            smoke_color = mix(vec3(0.1, 0.1, 0.1), vec3(0.8, 0.8, 0.8), position.y)
++            flame_color = mix(vec3(1.0, 0.5, 0.0), vec3(1.0, 1.0, 1.0), temperature)
++            emitted_light = flame_color * fire * emission_strength
++            color = (ambient + direct_light) * smoke_color + emitted_light
++        elif field_mode == 1:
++            # Simple Smoke
+             smoke_color = mix(vec3(0.3, 0.04, 0.01), vec3(1.0, 0.65, 0.08), field_value)
+             color = smoke_color
+-        else:
++        elif field_mode in [2, 3]:
++            # Abstract/Color-coded
+             density = abs(field_value - 0.5) * 2.0
+             smoke_color = vec3(1.0, 0.0, 0.0) if field_value >= 0.5 else vec3(0.0, 0.0, 1.0)
+             color = smoke_color
++        else:
++            color = vec3(0.0)
+             
+-        # Accumulation
+-        alpha = 1.0 - exp(-density * uniforms.step_size)
+-        accumulated += color * alpha * (1.0 - accumulated.a)
++        # Accumulate Color and Opacity
++        alpha = 1.0 - exp(-density * step_size)
++        accumulated.rgb += color * alpha * (1.0 - accumulated.a)
+         accumulated.a += alpha * (1.0 - accumulated.a)
+         
+-        distance_along_ray += uniforms.step_size
++        distance_along_ray += step_size
+         
+     # 8. Temporal Accumulation
+-    if uniforms.temporal_enabled:
+-        history_color = history_texture.sample(texture_coordinate)
+-        final_color = mix(accumulated, history_color, uniforms.history_weight)
++    if temporal_enabled:
++        history_color = texture(history_texture, texture_coordinate).rgb
++        final_color = mix(accumulated.rgb, history_color, history_weight)
++        final_alpha = accumulated.a
+     else:
+-        final_color = accumulated
+-        
+-    return final_color
+-
+-def random_jitter(coordinate, frame_index):
+-    value = fract(vec3(coordinate.xyx) * 0.1031)
++        final_color = accumulated.rgb
++        final_alpha = accumulated.a
++        
++    return vec4(final_color, final_alpha)
++
++def compute_light_transmittance(position, light_direction, absorption, density_scale, self_shadowing_enabled):
++    if not self_shadowing_enabled:
++        return 1.0
++        
++    shadow_direction = -normalize(light_direction + vec3(0.0001))
++    optical_depth = 0.0
++    shadow_step = 0.08
++    
++    for _ in range(20):
++        shadow_pos = position + shadow_direction * shadow_step
++        if abs(shadow_pos) > 1.0:
++            break
++        density = texture(density_texture, shadow_pos * 0.5 + 0.5).r
++        optical_depth += density * shadow_step
++        
++    return exp(-optical_depth * absorption * density_scale * 3.0)
++
++def random(coord, frame_index):
++    value = fract(vec3(coord.x, coord.y, coord.x) * 0.1031)
+     value += dot(value, value.yzx + 33.33 + float(frame_index) * 0.01)
+     return fract((value.x + value.y) * value.z)
+-
+-def compute_self_shadowing(position, uniforms):
+-    if not uniforms.self_shadowing_enabled:
+-        return 1.0
+-    light_dir = normalize(uniforms.light_direction + vec3(0.0001))
+-    optical_depth = 0.0
+-    for i in range(20):
+-        step_pos = position - light_dir * (i * 0.08)
+-        if abs(step_pos) > 1.0:
+-            break
+-        optical_depth += density_texture.sample(step_pos * 0.5 + 0.5).r * 0.08
+-    return exp(-optical_depth * uniforms.absorption * uniforms.density_scale * 3.0)
+ ```
+ 
+-### Edge Cases and Pitfalls
+-*   **Division by Zero**: The `intersectBox` function uses `1.0 / rayDirection`. If `rayDirection` is zero, this results in infinity/NaN. The code relies on the caller to provide valid normalized directions [S1, unofficial].
+-*   **Light Direction Normalization**: A small epsilon (0.0001) is added to the light direction before normalization to prevent issues if the light direction is exactly zero [S1, unofficial].
+-*   **Density Texture Coordinate Mapping**: The density texture is sampled at `position * 0.5 + 0.5`, mapping the world space `[-1, 1]` box to texture space `[0, 1]` [S1, unofficial].
++## Subtopics
++
++### Ray Marching with Single Scattering
++Computes only the first scattering event, faster but less accurate for dense media. Choose when performance is critical and media is thin. [Link](2057-ray-marching-with-single-scattering.md)
++
++### SDF Cloud Rendering
++Uses Signed Distance Fields for cloud geometry, often with raymarching for shading. Choose when procedural, smooth cloud shapes are needed without volumetric data. [Link](2064-sdf-cloud-rendering.md)
++
++### Atmospheric Ray Marching
++Specialized for large-scale atmospheric effects, often using layered models. Choose for sky and horizon effects rather than localized volumes. [Link](4874-atmospheric-ray-marching.md)
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: $O(N \times M)$, where $N$ is the number of pixels and $M$ is the maximum number of ray march steps per pixel. The temporal accumulation adds a constant time cost for blending with the history texture.
+-*   **Memory Complexity**: $O(W \times H)$ for the color, depth, and history textures, where $W$ and $H$ are the screen dimensions. The density texture size depends on the resolution of the volume data.
+-*   **Performance**: Performance is heavily dependent on the `maximumSteps` and `stepSize`. Smaller step sizes increase accuracy but also increase the number of steps required to traverse the volume. Temporal accumulation allows for lower per-frame sampling rates while maintaining visual quality, effectively reducing the computational load per frame for a given level of noise.
+-*   **Strengths**: Reduces noise and flickering in dynamic scenes. Simple to implement. Works well with real-time simulation data.
+-*   **Limitations**: Can suffer from ghosting if the `historyWeight` is too high or if there are sudden large movements. Requires a history texture, increasing memory usage. Not suitable for static scenes where temporal accumulation provides no benefit.
+-*   **When to Use**: Real-time volume rendering of dynamic fluids, smoke, or fire where noise reduction is critical and performance is a concern.
+-*   **When Not to Use**: Static scenes, scenes with very high-frequency detail that requires high per-frame sampling, or when ghosting artifacts are unacceptable.
++*   **Time Complexity:** $O(N \cdot M)$, where $N$ is the number of pixels and $M$ is the maximum number of ray steps (e.g., 767). Self-shadowing adds a constant factor (20 steps) per sample if enabled.
++*   **Memory Complexity:** $O(R^3)$ for the 3D density texture, where $R$ is the resolution, plus $O(W \cdot H)$ for the history and color buffers.
++*   **Measured Performance:** The implementation targets real-time performance, with frame times reported in milliseconds (e.g., average render time < 16ms for 60 FPS) [S1, unofficial].
++*   **Scaling:** Performance scales linearly with resolution and maximum steps. Temporal accumulation allows for lower spatial sampling rates, effectively trading temporal stability for spatial detail.
++*   **Strengths:** Reduces noise through temporal accumulation; supports complex lighting (self-shadowing, emission); flexible field modes.
++*   **Limitations:** Requires a history texture and temporal blending logic; potential for ghosting if motion is not properly accounted for (not detailed in sources); division by zero risk if ray direction is zero [S1, unofficial].
++*   **When to Use:** Real-time fluid effects, smoke, fire, and atmospheric volumes where noise reduction is beneficial and temporal coherence is acceptable.
++*   **When Not to Use:** Static scenes where temporal accumulation provides no benefit; scenes with high-frequency motion where ghosting is unacceptable; hardware without sufficient texture memory for large 3D volumes.
+ 
+ ## Background
+-This method is derived from the HZL Fluid Effects Studio, a real-time fluid simulation and rendering application [S1, unofficial]. It combines standard volume ray marching techniques with temporal accumulation to achieve stable, high-quality visuals in real-time. The technique is particularly relevant for interactive applications where noise from sparse sampling can be distracting.
++This method is derived from the HZL Fluid Effects Studio, an open-source project demonstrating real-time fluid simulation and rendering [S1, unofficial]. It builds on the principles of volumetric ray marching and temporal anti-aliasing/accumulation techniques common in modern real-time rendering pipelines.
+ 
+ ## Sources

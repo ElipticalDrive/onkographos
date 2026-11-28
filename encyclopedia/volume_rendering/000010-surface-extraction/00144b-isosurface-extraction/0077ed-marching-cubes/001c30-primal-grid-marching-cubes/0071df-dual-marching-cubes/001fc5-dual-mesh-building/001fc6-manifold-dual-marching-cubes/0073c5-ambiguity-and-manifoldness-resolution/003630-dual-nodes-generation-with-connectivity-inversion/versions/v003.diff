@@ -1,0 +1,237 @@
+--- v002.md
++++ v003.md
+@@ -4,161 +4,104 @@
+ 
+ ## Overview
+-This method resolves non-manifold edge configurations in Manifold Dual Marching Cubes (MDMC) by generating two dual nodes instead of one for cells sharing ambiguous faces, thereby recovering topological tunnels [S1]. It differs from standard Dual Marching Cubes (DMC) by analyzing the connectivity of both interior (blue) and exterior (white) vertex components to determine node placement, whereas standard DMC relies solely on interior components [S1].
++This method resolves non-manifold edge artifacts and topological tunnel loss in Manifold Dual Marching Cubes (MDMC) by generating two dual nodes instead of one for cells sharing ambiguous faces. It solves the problem where standard DMC LUT application, which relies solely on internal (blue) vertex connectivity, creates single dual nodes that result in non-manifold edges when adjacent cells share an ambiguous configuration [S1]. Unlike siblings that focus on geometric self-intersection elimination or neural smoothness, this method addresses topological correctness in adaptive octree structures by leveraging external (white) vertex connectivity [S1].
+ 
+ ## How it works
+ **Inputs:**
+-- A voxel grid or octree cell $c$ with 8 vertices [S1].
+-- Scalar field values at vertices to determine inside/outside status relative to isosurface $\partial V$ [S1].
+-- The Manifold Dual Marching Cubes (MDMC) lookup table configuration for the cell [S1].
++- A grid of octree cells.
++- Scalar field values at grid vertices.
++- Isosurface threshold $T$.
++- Manifold Dual Marching Cubes (MDMC) lookup table configuration [S1].
+ 
+ **Outputs:**
+-- A set of dual nodes (surface points) within cell $c$ and its adjacent cells $A_c$ [S1].
+-- Connectivity information linking these nodes to form manifold triangles [G].
++- A manifold triangular mesh representing the isosurface $\partial V$.
++- Dual nodes positioned within cells, including cases where two nodes are generated per cell.
+ 
+ **Data Structures:**
+-- **Cell Graph:** A graph $G=(V, E)$ where $V$ contains the 8 vertices of the cell and $E$ contains the 12 edges connecting them [S1].
++- **Cell Graph:** Each cell is represented as a graph $G=(V, E)$ with 8 vertices $V$ and 12 edges $E$.
+ - **Vertex Status:** Each vertex $v \in V$ is classified as:
+-  - **Blue:** Inside $\partial V$ (scalar value indicates interior) [S1].
+-  - **White:** Outside $\partial V$ (scalar value indicates exterior) [S1].
++  - **Blue:** Inside the isosurface ($scalar(v) > T$).
++  - **White:** Outside the isosurface ($scalar(v) < T$) [S1].
+ - **Connected Components:** Sets of vertices connected by edges where both endpoints share the same status (Blue-Blue or White-White) [S1].
+ 
+ **Steps:**
+-1. **Graph Construction:** Represent the current cell $c$ as a graph with 8 vertices and 12 edges [S1].
+-2. **Vertex Classification:** Classify each of the 8 vertices as Blue (inside) or White (outside) based on the scalar field threshold [S1].
+-3. **Component Identification:**
+-   - Identify all **Blue Connected Components (BCCs)**: maximal sets of blue vertices connected by blue-blue edges [S1].
+-   - Identify all **White Connected Components (WCCs)**: maximal sets of white vertices connected by white-white edges [S1].
+-4. **Ambiguity Check:** Determine if the cell configuration corresponds to an ambiguous face case identified by the MDMC LUT [S1].
+-5. **Node Generation Logic:**
+-   - **Standard Case:** If the cell has a single Blue Connected Component and no ambiguous faces, generate one dual node per BCC using standard DMC rules [S1].
+-   - **Ambiguous Case:** If the cell has a single Blue Connected Component but contains one or more ambiguous faces:
+-     a. Enumerate the set of adjacent cells $A_c$ that share these ambiguous faces [S1].
++1. **Graph Construction:** For each cell $c$, construct the graph with 8 vertices and 12 edges. Classify each vertex as Blue or White based on the scalar field and threshold $T$ [S1].
++2. **Component Identification:**
++   - Identify **Blue Connected Components** (BCCs): Sets of Blue vertices connected by Blue-Blue edges.
++   - Identify **White Connected Components** (WCCs): Sets of White vertices connected by White-White edges [S1].
++3. **Ambiguous Face Detection:** Identify faces shared between adjacent cells that correspond to ambiguous configurations in the MDMC LUT (specifically cases 2B and 3B) [Parent, S1].
++4. **Resolution for Single Blue Component:**
++   - If cell $c$ has exactly one Blue Connected Component and contains one or more ambiguous faces:
++     a. Enumerate the set of adjacent cells $A_c$ that share these ambiguous faces and also possess a single Blue Connected Component [S1].
+      b. For each cell in $A_c$, extract its White Connected Components [S1].
+-     c. Verify that the existence of an ambiguous face implies at least two White Connected Components in the local topology [S1].
+-     d. Use the White Connected Components to generate dual nodes in cell $c$ and all adjacent cells in $A_c$. This results in the creation of **two** dual nodes instead of one [S1].
+-6. **Tunnel Recovery:** The generation of two nodes at ambiguous interfaces ensures that tunnels in $\partial V$ are preserved and non-manifold edges are eliminated [S1].
++     c. The existence of an ambiguous face implies at least two White Connected Components exist in the local neighborhood [S1].
++     d. Generate **two dual nodes** in cell $c$ and all cells in $A_c$, using the White Connected Components to determine their placement. This "connectivity inversion" recovers topological tunnels and ensures manifold connectivity [S1].
++5. **Standard DMC Handling:** For cells not meeting the criteria in Step 4, apply the standard DMC LUT based on Blue Connected Components [S1].
+ 
+ **Pseudocode:**
+ ```python
+-def generate_dual_nodes(cell, scalar_field, mcmc_lut, adjacent_cells):
+-    """
+-    Generates dual nodes for a single cell using connectivity inversion.
+-    
+-    Args:
+-        cell: Object containing 8 vertex indices and 12 edge definitions.
+-        scalar_field: Array of scalar values at vertex positions.
+-        mcmc_lut: Lookup table from Manifold Dual Marching Cubes.
+-        adjacent_cells: List of cell objects sharing faces with `cell`.
+-        
+-    Returns:
+-        List of dual node positions and connectivity data.
+-    """
+-    # 1. Get vertex values and classify
+-    vertex_values = [scalar_field[v] for v in cell.vertices]
+-    # Assume threshold is 0.0; inside if value > 0.0 [G]
+-    is_inside = [v > 0.0 for v in vertex_values]
+-    
+-    # 2. Build adjacency graph for the cell
+-    edges = cell.edges # List of (v1_idx, v2_idx)
+-    
+-    # 3. Find Connected Components
+-    blue_components = find_connected_components(is_inside, edges, target_status=True)
+-    white_components = find_connected_components(is_inside, edges, target_status=False)
+-    
+-    # 4. Check for ambiguous configuration via MDMC LUT
+-    config_index = 0
+-    for i, inside in enumerate(is_inside):
+-        if inside:
+-            config_index |= (1 << i)
+-    is_ambiguous = mcmc_lut.is_ambiguous(config_index)
+-    
+-    dual_nodes = []
+-    
+-    if is_ambiguous and len(blue_components) == 1:
+-        # Ambiguous case with single blue component requires connectivity inversion
+-        # Process adjacent cells sharing the ambiguous face
+-        for adj_c in adjacent_cells:
+-            adj_values = [scalar_field[v] for v in adj_c.vertices]
+-            adj_inside = [v > 0.0 for v in adj_values]
+-            adj_white = find_connected_components(adj_inside, adj_c.edges, target_status=False)
+-            
+-            # Existence of ambiguous face implies at least two white connected components [S1]
+-            if len(adj_white) >= 2:
+-                # Generate dual nodes based on the separation of white components [S1]
+-                # Geometric placement uses the centroid of each white component [G]
+-                node1 = compute_centroid(adj_white[0], adj_c.vertices)
+-                node2 = compute_centroid(adj_white[1], adj_c.vertices)
+-                dual_nodes.append(node1)
+-                dual_nodes.append(node2)
+-            else:
+-                # Fallback to standard single node if topology does not split [G]
+-                node = compute_centroid(blue_components[0], cell.vertices)
+-                dual_nodes.append(node)
++def generate_dual_nodes(cell, scalar_field, threshold):
++    # 1. Classify vertices
++    vertices = cell.get_vertices()
++    vertex_status = {}
++    for v in vertices:
++        if scalar_field[v] > threshold:
++            vertex_status[v] = 'BLUE'
++        else:
++            vertex_status[v] = 'WHITE'
++
++    # 2. Build adjacency graph for components
++    edges = cell.get_edges()
++    blue_components = find_connected_components(vertices, edges, 'BLUE')
++    white_components = find_connected_components(vertices, edges, 'WHITE')
++
++    # 3. Check for ambiguous face context
++    # Note: Ambiguous face detection is typically done in a neighbor-pass
++    # Here we assume 'has_ambiguous_face' is determined by MDMC LUT lookup
++    if cell.has_ambiguous_face() and len(blue_components) == 1:
++        # Connectivity Inversion Strategy
++        # Generate two dual nodes based on white components
++        # The exact geometric placement of the two nodes is derived from
++        # the separation of white components, effectively inverting the
++        # connectivity logic used for single-node generation.
++        return generate_two_dual_nodes(cell, white_components)
+     else:
+-        # Standard DMC behavior: one node per blue component [S1]
+-        for comp in blue_components:
+-            node = compute_centroid(comp, cell.vertices)
+-            dual_nodes.append(node)
+-            
+-    return dual_nodes
++        # Standard DMC Strategy
++        return generate_one_dual_node(cell, blue_components)
+ 
+-def find_connected_components(is_inside, edges, target_status):
+-    """
+-    Finds connected components of vertices that satisfy target_status.
+-    """
+-    n = len(is_inside)
+-    visited = [False] * n
++def find_connected_components(vertices, edges, status):
+     components = []
+-    
+-    adj = [[] for _ in range(n)]
+-    for v1, v2 in edges:
+-        if is_inside[v1] == target_status and is_inside[v2] == target_status:
+-            adj[v1].append(v2)
+-            adj[v2].append(v1)
+-            
+-    for i in range(n):
+-        if not visited[i] and is_inside[i] == target_status:
+-            comp = []
+-            stack = [i]
+-            visited[i] = True
++    visited = set()
++    for v in vertices:
++        if vertex_status[v] == status and v not in visited:
++            component = []
++            stack = [v]
+             while stack:
+-                u = stack.pop()
+-                comp.append(u)
+-                for v in adj[u]:
+-                    if not visited[v]:
+-                        visited[v] = True
+-                        stack.append(v)
+-            components.append(comp)
+-            
++                curr = stack.pop()
++                if curr in visited:
++                    continue
++                visited.add(curr)
++                component.append(curr)
++                # Find neighbors connected by edges of same status
++                for neighbor in get_neighbors(curr, edges, status):
++                    if neighbor not in visited:
++                        stack.append(neighbor)
++            components.append(component)
+     return components
+-
+-def compute_centroid(vertex_indices, cell_vertices):
+-    """
+-    Computes the geometric centroid of the given vertices.
+-    """
+-    coords = [cell_vertices[i] for i in vertex_indices]
+-    centroid = sum(coords) / len(coords)
+-    return centroid
+ ```
+ 
+-**Parameters:**
+-- **Threshold:** The scalar value separating inside/outside. Not given in the sources.
+-- **$\lambda$ (Curvature Parameter):** Used in the broader adaptive extraction context to determine refinement. Typical value: 0.9 [S1].
+-- **Max Octree Depth:** Limits the resolution of the adaptive grid. Typical value: 7 [S1].
+-
+ **Edge Cases and Pitfalls:**
+-- **Non-Manifold Edges:** Standard DMC LUT may create non-manifold edges if it only considers blue connected components in cells sharing an ambiguous face [S1]. This method specifically addresses this by inverting to white components [S1].
+-- **Degenerate Triangles:** Standard DMC2 can produce more degenerated triangles and struggle with sharp edges compared to this method [S1].
+-- **Multiple Ambiguous Faces:** If a cell has multiple ambiguous faces (e.g., three), the logic must ensure that the white component analysis correctly separates all relevant surface portions [S1].
++- **Non-Manifold Edges:** Standard DMC LUT generates non-manifold edges in cells sharing an ambiguous face because it only considers blue connected components, potentially creating a single dual node where two are needed [S1].
++- **Tunnel Loss:** Without connectivity inversion, topological tunnels in the isosurface $\partial V$ may be lost [S1].
++- **Multiple Blue Components:** If a cell has more than one Blue Connected Component, the standard DMC logic may apply differently (e.g., case c in Fig. 10), requiring separate handling not covered by the single-component inversion rule [S1].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Linear with respect to the number of cells, with a constant factor increase due to the additional graph traversal for white components in ambiguous cases [G].
+-- **Memory Complexity:** Requires storing the graph structure for each cell and the connected components [G].
+-- **Performance:** On the 'Block' dataset (512x512x128 voxels, $\lambda=0.9$, max depth 7), this method produced 46,888 triangles, compared to 54,888 triangles for DMC2 [S1].
+-- **Strengths:** Recovers tunnels, eliminates non-manifold edges, produces fewer triangles, and captures sharp edges better than DMC2 [S1].
+-- **Limitations:** Requires analysis of adjacent cells for full connectivity resolution in some ambiguous configurations [S1].
++- **Complexity:** The method adds a graph traversal step (connected components) per cell, which is constant time relative to the fixed 8-vertex/12-edge cell structure.
++- **Performance:** On the 'Block' dataset (512x512x128 voxels, $\lambda=0.9$, max depth 7), the algorithm produced 46,888 triangles compared to 54,888 triangles for DMC2 [S1].
++- **Quality:** DMC2 exhibited problems capturing sharp edges and produced more degenerated triangles. The proposed method improves triangle quality and reduces count by resolving topological ambiguities [S1].
++- **Strengths:** Guarantees manifold connectivity in the presence of ambiguous faces; recovers topological tunnels; reduces degenerate geometry.
++- **Limitations:** Requires analysis of adjacent cells to identify shared ambiguous faces; relies on the correctness of the MDMC LUT configuration [S1].
+ 
+ ## Background
+-This method was developed as part of an adaptive surface extraction algorithm from anisotropic volumetric data using generalized octrees [S1]. It addresses specific topological failures in Dual Marching Cubes when handling ambiguous face configurations, which are common in complex volumetric data [S1].
++The method originates from the work on adaptive surface extraction from anisotropic volumetric data using generalized octrees [S1]. It addresses specific limitations of the Dual Marching Cubes (DMC) approach, particularly the DMC2 variant, which failed to maintain manifoldness and topological fidelity in complex scenes with ambiguous configurations [S1]. The technique was developed to improve the general quality of triangles and ensure correct topology in adaptive octree-based contouring [S1].
+ 
+ ## Sources

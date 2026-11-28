@@ -1,0 +1,131 @@
+--- v005.md
++++ v006.md
+@@ -4,13 +4,13 @@
+ 
+ ## Overview
+-This method extracts a triangular mesh from a BVH (Bounding Volume Hierarchy) structure by computing an Unsigned Distance Field (UDF) on a regular grid, converting it to a Signed Distance Field (SDF) via flood fill, and applying Marching Cubes [S1, unofficial]. It differs from Dual Contouring [778-dual-contouring.md] by avoiding complex optimization and vertex positioning; instead, it relies on a standard isosurface extractor on a dense grid, making it simpler but potentially less efficient for high-resolution outputs.
++This method extracts a triangular mesh from a BVH (Bounding Volume Hierarchy) structure by computing an Unsigned Distance Field (UDF) on a regular grid, converting it to a Signed Distance Field (SDF) via flood fill, and applying Marching Cubes [S1, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- A BVH structure supporting unsigned distance queries.
+-- An integer `resolution` defining the grid dimensions ($N \times N \times N$).
++- A BVH structure supporting unsigned distance queries [S1, unofficial].
++- An integer `resolution` defining the grid dimensions ($N \times N \times N$) [S1, unofficial].
+ 
+ **Outputs:**
+-- A `trimesh.Trimesh` object containing vertices, faces, and normals.
++- A mesh object containing vertices, faces, and normals [S1, unofficial].
+ 
+ **Data Structures:**
+@@ -22,5 +22,5 @@
+ 
+ 1.  **Grid Initialization:**
+-    Define the spatial range $[-0.5, 0.5]$ for X, Y, and Z axes. Split this range into chunks of size $N=32$ for processing efficiency, though the final grid resolution is determined by the input `resolution` parameter [S1, unofficial]. Create a meshgrid from the coordinate ranges and flatten it to form a points tensor of shape $(num\_points, 3)$, where $num\_points = N^3$ [S1, unofficial].
++    Define the spatial range $[-0.5, 0.5]$ for X, Y, and Z axes. Split this range into chunks of size $32$ for processing efficiency, though the final grid resolution is determined by the input `resolution` parameter. Create a meshgrid from the coordinate ranges and flatten it to form a points tensor of shape $(num\_points, 3)$, where $num\_points = N^3$ [S1, unofficial].
+ 
+ 2.  **UDF Query:**
+@@ -32,5 +32,5 @@
+     Convert `occ` to a tensor and perform a flood fill operation starting from the corner voxel $(0, 0, 0)$ to identify connected components [S1, unofficial].
+     - Identify the `empty_label` corresponding to the background (the label at `floodfill_mask[0, 0, 0]`) [S1, unofficial].
+-    - Create an `empty_mask` where `floodfill_mask == empty_label`.
++    - Create an `empty_mask` where `floodfill_mask == empty_label` [S1, unofficial].
+     - Create the final `occ_mask` as the inverse of the empty mask:
+       $$ occ\_mask = \neg empty\_mask $$
+@@ -57,6 +57,4 @@
+ import numpy as np
+ import torch
+-# Assuming cubvh, marching_cubes, and trimesh are available in the environment
+-# as per the source implementation context [S1, unofficial]
+ 
+ def extract_mesh_from_bvh(bvh, resolution):
+@@ -65,7 +63,4 @@
+     
+     # Define coordinate ranges [-0.5, 0.5]
+-    # Note: The source splits into chunks of N=32 for processing, 
+-    # but the final grid is resolution x resolution x resolution.
+-    # We assume a helper to generate meshgrid points for the full resolution.
+     xs = np.linspace(-0.5, 0.5, resolution)
+     ys = np.linspace(-0.5, 0.5, resolution)
+@@ -75,21 +70,14 @@
+     
+     # 2. Query BVH for unsigned distance
+-    # BVH.unsigned_distance returns (distances, u, v, w) or similar
+-    # We only need distances here.
+-    sub_udf, _, _ = bvh.unsigned_distance(points, return_uvw=False)
+-    
+-    # Reshape and store in udf
++    # [G] Query BVH for unsigned distance to surface for each point
++    sub_udf = query_bvh_unsigned_distance(bvh, points)
+     udf = sub_udf.reshape(resolution, resolution, resolution)
+     
+     # 3. Determine occupancy
+-    # Threshold: 2 / resolution
+     occ = udf < (2.0 / resolution)
+-    
+-    # Convert to torch tensor for CUDA flood fill
+     occ_tensor = torch.from_numpy(occ).cuda()
+     
+-    # Perform flood fill
+-    # cubvh.floodfill expects a boolean mask or similar input
+-    floodfill_mask = cubvh.floodfill(occ_tensor)
++    # [G] Standard flood fill algorithm to label connected components
++    floodfill_mask = flood_fill(occ_tensor)
+     
+     # Identify empty label from corner [0,0,0]
+@@ -102,23 +90,18 @@
+     # 4. Convert UDF to SDF
+     sdf = udf.copy()
+-    # Invert sign for occupied regions
+-    # Note: occ_mask is boolean, need to align with numpy indexing
+-    # floodfill_mask is CUDA tensor, convert back to numpy boolean mask
+     occ_mask_np = ~empty_mask.cpu().numpy()
+     sdf[occ_mask_np] *= -1
+     
+     # 5. Apply Marching Cubes
+-    # spacing is 1/resolution
+     spacing = (1.0/resolution, 1.0/resolution, 1.0/resolution)
+-    verts, faces, normals, values = marching_cubes(sdf, 0, spacing=spacing)
++    # [G] Standard Marching Cubes algorithm on the 3D grid with isovalue 0 and given spacing
++    verts, faces, normals, values = marching_cubes_standard(sdf, 0, spacing=spacing)
+     
+     # 6. Adjust vertex coordinates
+-    # Formula from source: verts = verts - 0.5 + (0.5/(resolution-1))
+-    # Then: verts = verts * (resolution/(resolution-1))
+     verts = verts - 0.5 + (0.5 / (resolution - 1))
+     verts = verts * (resolution / (resolution - 1))
+     
+-    # Create trimesh
+-    mesh = trimesh.Trimesh(verts, faces)
++    # [G] Standard mesh object construction
++    mesh = create_mesh(verts, faces)
+     
+     return mesh
+@@ -129,18 +112,17 @@
+ 
+ **Edge Cases and Pitfalls:**
+-- **Flood Fill Background:** The background (empty) label is determined by the voxel at $(0, 0, 0)$. If the object touches the boundary or the coordinate system is shifted, this assumption may fail [S1, unofficial].
+-- **Occupancy Threshold:** The threshold $2/resolution$ is critical. Voxels with UDF less than this value are considered inside. This is a very tight threshold, effectively treating only the immediate surface vicinity as occupied [S1, unofficial].
+-- **Precision:** The UDF is stored in `float32`. For very high resolutions, precision loss in distance queries may affect the accuracy of the SDF conversion [S1, unofficial].
++- **Flood Fill Background:** The background (empty) label is determined by the voxel at $(0, 0, 0)$ [S1, unofficial].
++- **Occupancy Threshold:** The threshold $2/resolution$ is critical. Voxels with UDF less than this value are considered inside [S1, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Dominated by the BVH distance query for $N^3$ points and the flood fill operation. Marching Cubes is $O(N^3)$ but typically fast.
+-- **Memory Complexity:** $O(N^3)$ for the UDF, SDF, and mask arrays.
+-- **Strengths:** Simple to implement; leverages robust BVH distance queries; avoids the complexity of dual contouring optimization.
+-- **Limitations:** Dense grid sampling is memory-intensive for high resolutions; the fixed occupancy threshold may not adapt well to varying surface densities; quality depends on Marching Cubes artifacts.
+-- **When to use:** When a quick, robust mesh extraction from a BVH is needed without fine-tuning optimization parameters.
+-- **When not to use:** When high-resolution meshes are required with limited memory, or when surface normals need to be precisely preserved (Dual Contouring [778-dual-contouring.md] is better suited).
++- **Time Complexity:** Not given in the sources.
++- **Memory Complexity:** Not given in the sources.
++- **Strengths:** Not given in the sources.
++- **Limitations:** Not given in the sources.
++- **When to use:** Not given in the sources.
++- **When not to use:** Not given in the sources.
+ 
+ ## Background
+-This method is part of the DCx (Dual Contouring over Expanded Cubes) project, specifically utilizing a UDF-based approach combined with Marching Cubes for mesh extraction [S1, unofficial]. It serves as an alternative to the primary Dual Contouring implementation within the same codebase, offering a simpler pipeline at the cost of potential quality and efficiency trade-offs.
++This method originates from the DCx repository, utilizing a UDF-based approach combined with Marching Cubes for mesh extraction [S1, unofficial].
+ 
+ ## Sources

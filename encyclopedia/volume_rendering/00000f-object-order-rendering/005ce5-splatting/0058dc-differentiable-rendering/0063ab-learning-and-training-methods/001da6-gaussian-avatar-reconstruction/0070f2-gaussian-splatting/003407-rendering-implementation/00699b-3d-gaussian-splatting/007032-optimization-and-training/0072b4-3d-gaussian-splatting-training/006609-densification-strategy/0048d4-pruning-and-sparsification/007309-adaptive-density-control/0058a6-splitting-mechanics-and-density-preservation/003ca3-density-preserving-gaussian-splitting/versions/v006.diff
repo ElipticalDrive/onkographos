@@ -1,0 +1,236 @@
+--- v005.md
++++ v006.md
+@@ -4,127 +4,149 @@
+ 
+ ## Overview
+-Density-preserving Gaussian splitting is a densification strategy that modifies the parameters of split Gaussian children so that their combined density approximates the density of the parent Gaussian. It solves the problem of loss function perturbations and Gaussian cluster formation caused by naive splitting or cloning operations [S1]. Unlike standard 3D Gaussian Splatting (3DGS) which uses opacity reset and cloning, this method discards cloning entirely and relies solely on splitting with learned or fixed adaptation functions for size and opacity [S1].
++Density-preserving Gaussian splitting is a refinement of the standard 3D Gaussian Splatting densification strategy that modifies the parameters of child Gaussians to match the integrated density of the parent Gaussian [S1]. It solves the problem of loss function perturbations and Gaussian cluster formation caused by naive splitting or cloning operations [S1]. Unlike standard 3DGS which resets opacity and uses cloning, this method discards cloning entirely and relies solely on splitting with an adaptation function that accounts for opacity variations [S1].
+ 
+ ## How it works
++The method replaces one parent Gaussian $g_{mother}$ with two child Gaussians $g_{child,1}$ and $g_{child,2}$. The process ensures the sum of the children's densities approximates the parent's density, preventing artifacts during optimization [S1].
++
+ **Inputs:**
+-- Parent Gaussian $g_{mother}$ with position $\mu_{mother}$, scale $\sigma_{mother}$ (diagonal covariance in local space), and opacity $o_{mother}$.
+-- Splitting constant $\alpha$.
++*   Parent Gaussian $g_{mother}$ with mean $\mu_{mother}$, scale $\sigma_{mother}$ (vector of 3 principal axes), opacity $o_{mother}$, rotation $R_{mother}$, and spherical harmonic coefficients $C_{mother}$.
++*   Splitting constant $\alpha$ (typically 0.3) [S1].
+ 
+ **Outputs:**
+-- Two child Gaussians $g_{child,1}$ and $g_{child,2}$ with updated positions, scales, and opacities.
++*   Two child Gaussians $g_{child,1}$ and $g_{child,2}$ with updated means, scales, opacities, and inherited rotation/SH coefficients.
+ 
+ **Data Structures:**
+-- Gaussian parameters are stored as:
+-  - Position: $\mu \in \mathbb{R}^3$
+-  - Scale: $\sigma \in \mathbb{R}^3$ (representing the standard deviation along the three principal axes)
+-  - Opacity: $o \in [0, 1]$
++*   Gaussian parameters are stored as:
++    *   $\mu \in \mathbb{R}^3$: Mean position.
++    *   $\sigma \in \mathbb{R}^3$: Scale along principal axes (positive values).
++    *   $o \in [0, 1]$: Opacity.
++    *   $R \in SO(3)$: Rotation matrix (or quaternion).
++    *   $C$: Spherical Harmonic coefficients.
+ 
+ **Steps:**
+-1. **Identify Longest Axis:** Determine the principal axis with the largest scale value. Let $\sigma_{max}$ be the scale along this axis, and let $\mathbf{u}$ be the corresponding unit vector in the local coordinate system of the parent Gaussian.
+-2. **Shift Means:** Calculate the shift magnitude $\Delta = \alpha \sigma_{max}$. The means of the two child Gaussians are shifted along the longest principal axis:
+-   $$ \mu_{child,1} = \mu_{mother} + \Delta \mathbf{u} $$
+-   $$ \mu_{child,2} = \mu_{mother} - \Delta \mathbf{u} $$
+-   The other two axes' means remain unchanged.
+-3. **Adapt Size and Opacity:** Compute the new scale $\sigma_{child}$ and opacity $o_{child}$ for both children using the adaptation function:
+-   $$ (\sigma_{child}, o_{child}) = \text{SplitAdaptation}(\sigma_{mother}, o_{mother}) $$
+-   This function ensures the resulting density of the sum of the two children is close to the density of the mother Gaussian [S1]. The adaptation can be learned offline [S1].
+-4. **Copy Remaining Parameters:** Copy rotation and color attributes from the parent to both children.
+ 
+-**Parameters:**
+-- $\alpha$: Constant controlling the mean shift magnitude. Typical value: $0.3$ [S1].
++1.  **Identify Splitting Axis:**
++    Find the index $k$ corresponding to the largest scale value in $\sigma_{mother}$:
++    $$ k = \arg\max_i (\sigma_{mother}[i]) $$
++    Let $\sigma_{max} = \sigma_{mother}[k]$ be the scale along this axis.
+ 
+-**Pitfalls:**
+-- Naive splitting causes perturbations in the loss function [S1].
+-- Cloning operations are discarded to prevent Gaussian clusters [S1].
+-- Opacity variations must be accounted for during splitting adaptation, unlike some prior methods [S1].
++2.  **Determine Direction Vector:**
++    Let $\mathbf{u}$ be the unit vector corresponding to the $k$-th principal axis in the parent's local coordinate system. In the global coordinate system, this direction is given by the $k$-th column of the rotation matrix $R_{mother}$:
++    $$ \mathbf{u}_{global} = R_{mother}[:, k] $$
++
++3.  **Compute Mean Shift:**
++    Calculate the shift magnitude $\Delta$:
++    $$ \Delta = \alpha \cdot \sigma_{max} $$
++    Compute the new means for the two children:
++    $$ \mu_{child,1} = \mu_{mother} + \Delta \cdot \mathbf{u}_{global} $$
++    $$ \mu_{child,2} = \mu_{mother} - \Delta \cdot \mathbf{u}_{global} $$
++    The means along the other two axes remain unchanged relative to the parent's center.
++
++4.  **Adapt Scales and Opacity:**
++    Compute the new scales $\sigma_{child}$ and opacity $o_{child}$ for both children using the adaptation function:
++    $$ (\sigma_{child}, o_{child}) = \text{SplitAdaptation}(\sigma_{mother}, o_{mother}) $$
++    This function adjusts the sizes and opacity such that the resulting density of the sum of the two children is close to the density of the mother Gaussian [S1]. The adaptation explicitly takes into account opacity variations, unlike some prior methods [S1].
++
++5.  **Inherit Other Parameters:**
++    Copy the rotation matrix and spherical harmonic coefficients from the parent to both children:
++    $$ R_{child,1} = R_{child,2} = R_{mother} $$
++    $$ C_{child,1} = C_{child,2} = C_{mother} $$
+ 
+ **Pseudocode:**
++
+ ```python
+ def density_preserving_split(g_mother, alpha=0.3):
+     """
+-    Perform density-preserving splitting on a parent Gaussian.
++    Splits a parent Gaussian into two children with preserved density.
+     
+     Args:
+-        g_mother: Dictionary with keys 'mu' (3,), 'sigma' (3,), 'opacity' (float)
+-        alpha: Float, shift magnitude constant (default 0.3)
++        g_mother: Dict containing 'mu' (3,), 'sigma' (3,), 'opacity' (float), 
++                  'rotation' (3x3), 'sh_coeffs' (array).
++        alpha: Constant controlling mean shift magnitude.
+         
+     Returns:
+-        List of two child Gaussian dictionaries
++        List of two child Gaussian dicts.
+     """
+-    mu_mother = g_mother['mu']
+-    sigma_mother = g_mother['sigma']
+-    o_mother = g_mother['opacity']
++    mu_m = g_mother['mu']
++    sigma_m = g_mother['sigma']
++    o_m = g_mother['opacity']
++    R_m = g_mother['rotation']
++    C_m = g_mother['sh_coeffs']
+     
+-    # Step 1: Identify longest axis
+-    axis_idx = np.argmax(sigma_mother)
+-    sigma_max = sigma_mother[axis_idx]
++    # 1. Find axis with largest scale
++    k = np.argmax(sigma_m)
++    sigma_max = sigma_m[k]
+     
+-    # Create local basis vectors (assuming identity for simplicity in local space)
+-    # In practice, rotate back to world space if sigma is in local space
+-    # For this pseudocode, we assume sigma is already aligned with world axes or 
+-    # we are working in the local frame where the longest axis is one of the canonical axes.
+-    # If sigma is in local space, we need to rotate the shift vector.
+-    # Assuming g_mother includes 'R' (rotation matrix) to transform local to world.
+-    R = g_mother.get('R', np.eye(3))
++    # 2. Get global direction vector for the principal axis
++    # R_m columns are the principal axes in global coordinates
++    u_global = R_m[:, k]
+     
+-    # Unit vector along the longest axis in local space
+-    u_local = np.zeros(3)
+-    u_local[axis_idx] = 1.0
++    # 3. Compute new means
++    delta = alpha * sigma_max
++    mu_c1 = mu_m + delta * u_global
++    mu_c2 = mu_m - delta * u_global
+     
+-    # Transform to world space
+-    u_world = R @ u_local
++    # 4. Adapt scales and opacity
++    # SplitAdaptation is a function that returns (sigma_child, opacity_child)
++    # ensuring density preservation. The exact formula is not specified 
++    # in the source but is described as an offline-learnable function 
++    # or approximation that accounts for opacity variations [S1].
++    sigma_c, o_c = split_adaptation(sigma_m, o_m)
+     
+-    # Step 2: Shift means
+-    delta = alpha * sigma_max
+-    mu_child1 = mu_mother + delta * u_world
+-    mu_child2 = mu_mother - delta * u_world
++    # 5. Construct children
++    child1 = {
++        'mu': mu_c1,
++        'sigma': sigma_c,
++        'opacity': o_c,
++        'rotation': R_m.copy(),
++        'sh_coeffs': C_m.copy()
++    }
+     
+-    # Step 3: Adapt size and opacity
+-    # SplitAdaptation is a function that takes (sigma_mother, o_mother) and returns (sigma_child, o_child)
+-    # The exact formula is not provided in the source, but it is learned offline.
+-    # We assume a placeholder function that implements the density preservation logic.
+-    sigma_child, o_child = split_adaptation(sigma_mother, o_mother)
+-    
+-    # Step 4: Construct children
+-    child1 = {
+-        'mu': mu_child1,
+-        'sigma': sigma_child,
+-        'opacity': o_child,
+-        'R': R,
+-        'color': g_mother['color']
+-    }
+     child2 = {
+-        'mu': mu_child2,
+-        'sigma': sigma_child,
+-        'opacity': o_child,
+-        'R': R,
+-        'color': g_mother['color']
++        'mu': mu_c2,
++        'sigma': sigma_c,
++        'opacity': o_c,
++        'rotation': R_m.copy(),
++        'sh_coeffs': C_m.copy()
+     }
+     
+     return [child1, child2]
+ 
+-def split_adaptation(sigma_mother, o_mother):
++def split_adaptation(sigma_mother, opacity_mother):
+     """
+-    Placeholder for the learned SplitAdaptation function.
+-    In the actual implementation, this would be a neural network or a lookup table
+-    trained to preserve density.
++    Computes child scale and opacity to preserve density.
++    Note: The exact implementation details of SplitAdaptation are not 
++    provided in the source [S1], only that it accounts for opacity 
++    variations and can be learned offline.
+     """
+-    # Not given in the sources. The source states:
+-    # "This adaptation can be learned offline so that (σchild, ochild) = SplitAdaptation(σmother, omother)."
+-    # We return dummy values to satisfy the interface.
+-    # A typical heuristic might involve scaling sigma and adjusting opacity,
+-    # but the exact method is not specified.
+-    return sigma_mother, o_mother
++    # Placeholder for the specific adaptation logic.
++    # In standard 3GS variants, this might involve dividing opacity by sqrt(2)
++    # and scaling covariance, but BOGausS emphasizes opacity-aware adaptation [S1].
++    # Since the exact formula is not given, we return the parent values 
++    # as a minimal valid implementation, though this does not preserve density 
++    # perfectly without the specific adaptation function [S1].
++    # [G] In practice, this function would be defined by the specific 
++    # BOGausS implementation or learned offline.
++    return sigma_mother, opacity_mother
+ ```
+ 
++**Parameters:**
++*   $\alpha$: Constant controlling the separation distance. Typical value: 0.3 [S1].
++
++**Edge Cases and Pitfalls:**
++*   **Loss Perturbations:** Naive splitting causes perturbations in the loss function. This method mitigates this by ensuring density preservation [S1].
++*   **Cluster Formation:** The method prevents the formation of Gaussian clusters, which is a known issue in original splitting operations [S1].
++*   **Cloning Discard:** This method discards cloning operations entirely to limit perturbations and prevent clusters [S1].
++
+ ## Operating characteristics
+-- **Time Complexity:** Splitting is $O(1)$ per Gaussian, but requires evaluating the adaptation function. If the adaptation is a learned model, inference time depends on the model size.
+-- **Memory Complexity:** Increases by one Gaussian per split operation. Pruning removes Gaussians with low opacity, mitigating memory growth [S1].
+-- **Strengths:** Prevents loss function perturbations and Gaussian clusters [S1]. Replaces opacity reset with a more principled density-preserving approach [S1].
+-- **Limitations:** Requires offline learning or careful tuning of the adaptation function [S1]. Discards cloning, which may limit flexibility in some scenarios [S1].
+-- **When to use:** When training 3D Gaussian Splatting models and experiencing instability or cluster formation due to densification [S1].
++*   **Time Complexity:** Similar to standard splitting, $O(1)$ per split operation, plus the cost of the `SplitAdaptation` function.
++*   **Memory Complexity:** $O(1)$ additional memory per split.
++*   **Strengths:** Prevents loss perturbations and Gaussian cluster formation [S1]. Accounts for opacity variations during splitting, unlike some prior methods [S1].
++*   **Limitations:** Requires an adaptation function (potentially learned offline) which may not be available in all implementations [S1]. Discards cloning, which might reduce flexibility in some scenarios [S1].
++*   **When to use:** When using BOGausS or similar variants that prioritize stability and density preservation over the original 3GS densification strategy [S1].
++*   **When not to use:** When using standard 3GS with opacity reset and cloning [S1].
+ 
+ ## Background
+-Originated in BOGausS (Better Optimized Gaussian Splatting) [S1]. The method addresses issues identified in earlier works [5, 9] regarding loss perturbations during splitting. It builds on ideas from [16] and contrasts with [17] by incorporating opacity variations. The method replaces the opacity reset mechanism used in standard 3DGS [S1].
++Density-preserving Gaussian splitting was proposed in the BOGausS paper [S1]. It addresses issues identified in earlier works [5, 9] regarding loss perturbations during splitting [S1]. The method is inspired by [16] and differs from [17] by accounting for opacity variations [S1]. It replaces the opacity reset mechanism used in standard 3GS with a pruning strategy based on opacity thresholds [S1].
+ 
+ ## Sources

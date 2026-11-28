@@ -1,0 +1,129 @@
+# S-NeRF Loss Balance Weights
+
+Also called: S-NeRF λ1 and λ2 weights
+
+## Overview
+S-NeRF Loss Balance Weights are fixed user-defined hyperparameters ($\lambda_1, \lambda_2$) that scale the depth and edge-aware smoothness components of the composite loss function in S-NeRF, balancing geometric supervision against the primary RGB reconstruction loss [S1, unofficial]. They operate within a loss structure that explicitly incorporates depth and smoothness constraints, distinguishing S-NeRF from standard NeRF which relies primarily on RGB photometric loss [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Training rays $\mathcal{R}$, ground truth RGB images $I$, predicted RGB images $\hat{I}$, ground truth depth/disparity $D$, predicted depth/disparity $\hat{D}$, image gradients $|\partial I|$, confidence metrics $\tilde{C}$, and balance weights $\lambda_1, \lambda_2$ [S1, unofficial].
+*   **Outputs:** Total loss scalar $L_{total}$ for gradient descent [S1, unofficial].
+
+**Data Structures:**
+*   $\lambda_1$: Scalar float, balance weight for depth loss [S1, unofficial].
+*   $\lambda_2$: Scalar float, balance weight for smoothness loss [S1, unofficial].
+*   $L_{color}$: Scalar float, RGB photometric loss [S1, unofficial].
+*   $L_{depth}$: Scalar float, confidence-conditioned depth loss [S1, unofficial].
+*   $L_{smooth}$: Scalar float, edge-aware smoothness loss [S1, unofficial].
+
+**Formulas:**
+The total loss is a linear combination of three terms [S1, unofficial]:
+$$ L_{total} = L_{color} + \lambda_1 L_{depth} + \lambda_2 L_{smooth} $$
+
+1.  **RGB Loss ($L_{color}$):** Sum of squared errors over all training rays [S1, unofficial]:
+    $$ L_{color} = \sum_{r \in \mathcal{R}} \| I(r) - \hat{I}(r) \|^2 $$
+
+2.  **Depth Loss ($L_{depth}$):** Sum of absolute differences between ground truth and predicted depth/disparity, normalized by a factor of 6 [S1, unofficial]:
+    $$ L_{depth} = \sum_{r \in \mathcal{R}} \frac{|D - \hat{D}|}{6} $$
+    *Note: For background street scenes, $D$ represents disparity (inverse depth) to focus on close objects; for foreground vehicles, $D$ represents depth [S1, unofficial].*
+
+3.  **Smoothness Loss ($L_{smooth}$):** Edge-aware constraint penalizing large depth variances relative to image gradients, weighted by confidence $\tilde{C}$ [S1, unofficial]:
+    $$ L_{smooth} = \sum_{r \in \mathcal{R}} \frac{\tilde{C} \cdot |D - \hat{D}|}{|\partial_x \hat{D}| \exp^{-|\partial_x I|} + |\partial_y \hat{D}| \exp^{-|\partial_y I|}} $$
+    *Note: $\partial_x$ and $\partial_y$ denote spatial derivatives [S1, unofficial].*
+
+**Parameters and Typical Values:**
+$\lambda_1$ and $\lambda_2$ are user-defined constants [S1, unofficial]. Reasonable ranges depend on the scene type [S1, unofficial]:
+*   **Street Background Views:** $\lambda_1 \in [0.1, 0.4]$, $\lambda_2 \in (0.005, 0.02)$ [S1, unofficial]. Typical values: $\lambda_1 = 0.2$, $\lambda_2 = 0.01$ [S1, unofficial].
+*   **Foreground Vehicles:** $\lambda_1 \in [0.5, 2]$, $\lambda_2 \in (0.075, 0.015)$ [S1, unofficial]. Typical values: $\lambda_1 = 1$, $\lambda_2 = 0.15$ [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_snerf_loss(I_gt, I_pred, D_gt, D_pred, I_image, C_smooth_conf, lambda1, lambda2):
+    """
+    Computes the total S-NeRF loss.
+    
+    Args:
+        I_gt: Ground truth RGB image tensor (H, W, 3).
+        I_pred: Predicted RGB image tensor (H, W, 3).
+        D_gt: Ground truth depth (vehicles) or disparity (background) tensor (H, W).
+        D_pred: Predicted depth/disparity tensor (H, W).
+        I_image: Original RGB image tensor for gradient computation (H, W, 3).
+        C_smooth_conf: Confidence metric tensor for smoothness loss (H, W).
+        lambda1: Balance weight for depth loss.
+        lambda2: Balance weight for smoothness loss.
+        
+    Returns:
+        Total loss scalar.
+    """
+    # 1. RGB Loss (L_color)
+    l_color = torch.sum((I_gt - I_pred) ** 2)
+    
+    # 2. Depth Loss (L_depth)
+    depth_diff = torch.abs(D_gt - D_pred)
+    l_depth = torch.sum(depth_diff) / 6.0
+    
+    # 3. Smoothness Loss (L_smooth)
+    # Compute image gradients |∂I| on grayscale to match source notation
+    I_gray = torch.mean(I_image, dim=-1)
+    I_x = torch.abs(I_gray[:, 1:, :] - I_gray[:, :-1, :])
+    I_y = torch.abs(I_gray[:, :, 1:] - I_gray[:, :, :-1])
+    
+    # Compute predicted depth/disparity gradients |∂D̂|
+    D_x = torch.abs(D_pred[:, 1:, :] - D_pred[:, :-1, :])
+    D_y = torch.abs(D_pred[:, :, 1:] - D_pred[:, :, :-1])
+    
+    # Denominator: |∂x D̂| exp^−|∂x I| + |∂y D̂| exp^−|∂y I|
+    denom = D_x * torch.exp(-I_x) + D_y * torch.exp(-I_y)
+    denom = torch.clamp(denom, min=1e-8)
+    
+    # Numerator: C̃ · |D − D̂|
+    # Crop depth_diff and confidence to match gradient dimensions (H-1, W-1)
+    depth_diff_crop = depth_diff[:, 1:, :]
+    conf_crop = C_smooth_conf[:, 1:, :]
+    smoothness_num = conf_crop * depth_diff_crop
+    
+    l_smooth = torch.sum(smoothness_num / denom)
+    
+    # 4. Total Loss
+    l_total = l_color + lambda1 * l_depth + lambda2 * l_smooth
+    
+    return l_total
+```
+
+**Edge Cases and Pitfalls:**
+*   **Sensitivity:** The method is robust to parameter variation; varying $\lambda_1$ or $\lambda_2$ outside reasonable ranges reduces PSNR and SSIM by only 0.2–1% on background novel view rendering [S1, unofficial].
+*   **Disparity vs Depth:** For background scenes, $D$ must be disparity (inverse depth) to focus on close objects; for vehicles, it is depth [S1, unofficial]. Using the wrong interpretation breaks the loss semantics.
+*   **Confidence Metrics:** The confidence $\tilde{C}$ is derived from geometry and reprojection measurements for background, and RGB/SSIM for foreground [Parent]. Incorrect confidence calculation leads to incorrect weighting.
+
+## Subtopics
+
+### S-NeRF Loss Functions
+The composite loss function consists of RGB loss, confidence-conditioned depth loss, and edge-aware smoothness constraints, defining the structure within which $\lambda_1$ and $\lambda_2$ operate [S1, unofficial]. The total loss is $L_{total} = L_{color} + \lambda_1 L_{depth} + \lambda_2 L_{smooth}$ [S1, unofficial]. The smoothness loss penalizes large depth variances according to image gradients: $L_{smooth} = \sum (\tilde{C} \cdot |D - \hat{D}|) / (|\partial_x \hat{D}| \exp^{-|\partial_x I|} + |\partial_y \hat{D}| \exp^{-|\partial_y I|})$ [S1, unofficial]. Typical values are $\lambda_1=1, \lambda_2=0.15$ for vehicles and $\lambda_1=0.2, \lambda_2=0.01$ for background [S1, unofficial].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+Not given in the sources.
+
+**Measured Performance:**
+*   **Training Duration:** Ablation experiments are trained for 30k iterations [S1, unofficial].
+*   **Robustness:** The method is robust to parameter variation. Deviating from optimal $\lambda_1, \lambda_2$ ranges results in only minor performance drops (0.2–1% PSNR/SSIM reduction) on background novel view rendering [S1, unofficial].
+*   **Scene Specificity:** Optimal weights differ significantly between static background (low $\lambda$) and dynamic foreground (high $\lambda$), requiring scene-specific tuning or separate training pipelines [S1, unofficial].
+
+**Strengths and Limitations:**
+*   **Strengths:** Improves geometric consistency and depth accuracy, especially for foreground objects where standard NeRF fails due to lack of structure [S1, unofficial]. Robust to hyperparameter tuning [S1, unofficial].
+*   **Limitations:** Requires ground truth depth/disparity for supervision [S1, unofficial]. Performance degrades if confidence metrics are inaccurate [G]. Not suitable for scenes without reliable depth cues or where disparity/depth interpretation is ambiguous [G].
+
+**When to Use:**
+Use when geometric accuracy is critical (e.g., autonomous driving scenarios) and ground truth depth is available [S1, unofficial]. Use separate weights for background and foreground if training jointly [S1, unofficial].
+
+**When Not to Use:**
+Avoid if depth supervision is unavailable or unreliable [G]. Avoid if computational resources are extremely limited and standard NeRF suffices [G].
+
+## Background
+S-NeRF was introduced in 2023 by the authors of "S-NeRF: Neural Radiance Fields for Street Views" [S1, unofficial]. It extends NeRF to handle large-scale street scenes with dynamic foreground vehicles [S1, unofficial]. The loss balance weights $\lambda_1$ and $\lambda_2$ were introduced to incorporate depth and smoothness constraints, addressing the limitations of NeRF in reconstructing dynamic objects and ensuring geometric consistency in autonomous driving datasets like nuScenes and Waymo [S1, unofficial].
+
+## Sources
+[S1] S-NeRF: Neural Radiance Fields for Street Views, https://doi.org/10.48550/arxiv.2303.00749, fetched 2026-10-29 (unofficial)

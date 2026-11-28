@@ -1,0 +1,145 @@
+# Implicit Surface Field Function Evaluation
+
+Also called: Field Function Evaluation, SDF Query, Isosurface Density Evaluation
+
+## Overview
+Implicit Surface Field Function Evaluation computes the signed distance (or density) value $d = f(\mathbf{p})$ for a 3D point $\mathbf{p}$ relative to a target surface [S3, unofficial]. It solves the problem of determining whether a point lies inside, outside, or on the boundary of a geometric primitive or voxelized field, which is the fundamental query required for ray marching, mesh extraction, and differentiable rendering [S2, S3, unofficial]. It differs from sibling methods like [Batched SDF Inference](2329-batched-sdf-inference.md) by focusing on the mathematical evaluation of a single or small set of points rather than large-scale batched inference, and from [SDF Validity Check with Relaxation](2399-sdf-validity-check-with-relaxation.md) by providing the raw metric value rather than a binary validity classification [S2, S3, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A query point $\mathbf{p} = (x, y, z)$ in world space.
+*   **Input:** The implicit surface definition (analytical formula or voxel grid).
+*   **Input:** A transformation matrix $T$ representing the surface's placement in world space [S3, unofficial].
+*   **Output:** The scalar field value $d = f(\mathbf{p})$. By convention, $d < 0$ indicates the point is inside the volume, $d > 0$ indicates outside, and $d = 0$ indicates the point is on the contour [S3, unofficial].
+*   **Optional Output:** The gradient $\nabla f(\mathbf{p})$ for normal computation [S2, unofficial].
+
+**Data Structures:**
+1.  **Analytical Primitive:** Stores parameters (e.g., radius $R$ for a sphere) and the bounding box [S3, unofficial].
+2.  **Voxel Grid:** A 3D tensor (e.g., `mi.TensorXf` with shape `(res, res, res, 1)`) storing pre-computed distance values [S2, unofficial].
+3.  **Interpolation Mode:** A string parameter `utils.SDF_MODE` selecting between `'linear'` or `'cubic'` interpolation for grid-based evaluation [S2, unofficial].
+
+**Steps:**
+
+1.  **Validation:** If the SDF is loaded from a named registry, validate the name. If invalid, raise an error (e.g., `std::runtime_error("unknown SDF '...'")`) [S1, unofficial].
+2.  **Transformation Inversion:** If the surface has a transformation $T$, compute the inverse transformation $T^{-1}$ [S3, unofficial]. Transform the query point $\mathbf{p}$ to the surface's local coordinate system: $\mathbf{p}_{local} = T^{-1} \mathbf{p}$ [S3, unofficial]. If no transformation is applied, $T^{-1}$ is the identity, and $\mathbf{p}_{local} = \mathbf{p}$ [S3, unofficial].
+3.  **Field Evaluation:**
+    *   **Analytical:** Evaluate the closed-form function $f(\mathbf{p}_{local})$. For a sphere of radius $R$, $f(x,y,z) = x^2 + y^2 + z^2 - R^2$ [S3, unofficial].
+    *   **Voxel Grid:** Query the grid at $\mathbf{p}_{local}$.
+        *   If `utils.SDF_MODE` is `'linear'`, perform trilinear interpolation [S2, unofficial].
+        *   If `utils.SDF_MODE` is `'cubic'`, perform tricubic interpolation [S2, unofficial].
+4.  **Batch Processing (Optional):** For performance, evaluate the function for a sequence of points starting at $(x_0, y_0, z_0)$ along the $+z$ axis with step size $dz$ for `num_points` iterations [S3, unofficial].
+
+**Formulas:**
+*   **Sphere:** $f(x,y,z) = x^2 + y^2 + z^2 - R^2$ [S3, unofficial].
+*   **Gradient (Linear Mode):** Computed via central finite differences with step size $\epsilon = 10^{-5}$ [S2, unofficial]:
+    $$ \nabla f(\mathbf{p}) \approx \left[ \frac{f(\mathbf{p} + \epsilon \hat{x}) - f(\mathbf{p} - \epsilon \hat{x})}{2\epsilon}, \frac{f(\mathbf{p} + \epsilon \hat{y}) - f(\mathbf{p} - \epsilon \hat{y})}{2\epsilon}, \frac{f(\mathbf{p} + \epsilon \hat{z}) - f(\mathbf{p} - \epsilon \hat{z})}{2\epsilon} \right] $$
+*   **Gradient (Cubic Mode):** Extracted directly from the interpolation kernel's derivative output [S2, unofficial].
+*   **Directional Derivative:** $D_{\mathbf{d}} f = \nabla f \cdot \frac{\mathbf{d}}{\|\mathbf{d}\|}$ [S2, unofficial].
+
+**Parameters:**
+*   `utils.SDF_MODE`: `'linear'` or `'cubic'`. Cubic is smoother and theoretically more robust but slower [S2, unofficial].
+*   `epsilon`: Finite difference step size, default $10^{-5}$ [S2, unofficial].
+*   `dz`: Delta step size along the $+z$ axis for batch evaluation [S3, unofficial].
+*   `num_points`: Number of points in a batch [S3, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def evaluate_sdf_analytical_sphere(p_local: np.ndarray, radius: float) -> float:
+    """
+    Evaluates the SDF for a sphere centered at origin.
+    p_local: (3,) array [x, y, z] in local coordinates.
+    radius: float, radius of the sphere.
+    Returns: float, signed distance.
+    """
+    x, y, z = p_local
+    return np.sqrt(x**2 + y**2 + z**2) - radius
+
+def evaluate_sdf_voxel(p_local: np.ndarray, grid: np.ndarray, mode: str, epsilon: float = 1e-5) -> float:
+    """
+    Evaluates SDF from a 3D voxel grid.
+    p_local: (3,) array [x, y, z] in local coordinates.
+    grid: (res, res, res) numpy array of SDF values.
+    mode: 'linear' or 'cubic'.
+    epsilon: step size for finite differences if mode is 'linear'.
+    Returns: float, signed distance.
+    """
+    # Note: Actual interpolation requires clamping or boundary handling.
+    # This pseudocode assumes a helper `interpolate` exists.
+    if mode == 'linear':
+        return interpolate_linear(grid, p_local)
+    elif mode == 'cubic':
+        return interpolate_cubic(grid, p_local)
+    else:
+        raise ValueError(f"Unknown SDF mode: {mode}")
+
+def compute_gradient_voxel(p_local: np.ndarray, grid: np.ndarray, mode: str, epsilon: float = 1e-5) -> np.ndarray:
+    """
+    Computes the gradient of the SDF at p_local.
+    """
+    if mode == 'linear':
+        # Central finite differences
+        grad = np.zeros(3)
+        for i in range(3):
+            p_plus = p_local.copy()
+            p_minus = p_local.copy()
+            p_plus[i] += epsilon
+            p_minus[i] -= epsilon
+            grad[i] = (evaluate_sdf_voxel(p_plus, grid, mode) - evaluate_sdf_voxel(p_minus, grid, mode)) / (2 * epsilon)
+        return grad
+    elif mode == 'cubic':
+        # Return gradient from cubic interpolation kernel
+        return interpolate_cubic_gradient(grid, p_local)
+    else:
+        raise ValueError(f"Unknown SDF mode: {mode}")
+
+def query_sdf(p_world: np.ndarray, transformation_matrix: np.ndarray, sdf_source: dict) -> float:
+    """
+    Main entry point for SDF evaluation.
+    p_world: (3,) array, query point in world space.
+    transformation_matrix: (4,4) or (3,3) matrix T.
+    sdf_source: dict containing 'type' ('sphere' or 'voxel'), 'params', and 'grid'.
+    Returns: float, signed distance.
+    """
+    # Step 2: Transform to local space
+    # Assuming homogeneous coordinates if 4x4, otherwise 3x3
+    if transformation_matrix.shape == (4, 4):
+        p_homogeneous = np.append(p_world, 1.0)
+        p_local_homogeneous = np.linalg.inv(transformation_matrix) @ p_homogeneous
+        p_local = p_local_homogeneous[:3]
+    else:
+        p_local = np.linalg.inv(transformation_matrix) @ p_world
+
+    # Step 3: Evaluate
+    if sdf_source['type'] == 'sphere':
+        return evaluate_sdf_analytical_sphere(p_local, sdf_source['radius'])
+    elif sdf_source['type'] == 'voxel':
+        return evaluate_sdf_voxel(p_local, sdf_source['grid'], sdf_source['mode'])
+    else:
+        raise ValueError("Unknown SDF source type")
+```
+
+## Subtopics
+
+### Blended ESDF Z-Buffer Extraction
+A memory-efficient method to extract boundaries between multiple materials by storing the blended Extended Signed Distance Function (ESDF) in a Z-buffer [S4]. It differs from standard SDF evaluation by handling multi-material boundaries simultaneously using a Z-buffer approach rather than evaluating a single scalar field [S4]. It is chosen when extracting non-manifold meshes from time-varying segmented volumes, such as modeling a human heart [S4]. The algorithm stores the blended ESDF of one material in a Z-buffer, successively processes other materials, and updates the Z-buffer at each pixel where the current entry is greater than the current ESDF, simultaneously storing the material index in a frame buffer [S4]. The material index at pixel $(x,y)$ is determined by $m(x, y) = \arg \min_m \{s_m(x, y)\}$, where $s_m$ is the ESDF for material $m$ [S4].
+
+## Operating characteristics
+*   **Time Complexity:** $O(1)$ for analytical primitives (e.g., sphere) [S3, unofficial]. $O(1)$ for voxel grid evaluation assuming constant-time interpolation, but dependent on grid resolution and interpolation order (cubic is slower than linear) [S2, unofficial].
+*   **Memory Complexity:** $O(1)$ for analytical primitives. $O(N^3)$ for voxel grids, where $N$ is the resolution [S2, unofficial].
+*   **Performance:** Cubic interpolation provides smoother geometry and is theoretically more robust but is significantly slower than linear interpolation [S2, unofficial].
+*   **Strengths:** Compact representation for precise surfaces; supports transformations via inverse mapping [S3, unofficial].
+*   **Limitations:** Analytical bounding box computation can be difficult for complex field functions [S3, unofficial]. Voxel grids suffer from discretization artifacts and high memory usage for high resolution [S2, unofficial].
+
+## Background
+Implicit surfaces were introduced as a compact and precise way to describe volumes in 3D space, avoiding the need for explicit polygon lists [S3, unofficial]. The concept of evaluating a field function $d = f(x,y,z)$ where $d$ represents density or distance is foundational to computer graphics [S3, unofficial]. The specific implementation details regarding voxel grid interpolation modes (`linear` vs `cubic`) and finite difference gradient computation are documented in recent differentiable rendering pipelines for SDFs [S2, unofficial]. The batched evaluation along the $+z$ axis for performance optimization is described in early implicit surface implementation guides [S3, unofficial].
+
+## Sources
+[S1] hbaktash/subgrid-marching, https://github.com/hbaktash/subgrid-marching, fetched 2026-10-27 (unofficial)
+[S2] zichenwang01/relaxed-boundary, https://github.com/zichenwang01/relaxed-boundary, fetched 2026-10-27 (unofficial)
+[S3] http://www.oocities.org/tzukkers/isosurf/isosurfaces.html, http://www.oocities.org/tzukkers/isosurf/isosurfaces.html, fetched 2026-10-30 (unofficial)
+[S4] Non-manifold Mesh Extraction from Time-varying Segmented Volumes used for Modeling a Human Heart, https://doi.org/10.2312/vissym/eurovis05/199-206, fetched 2026-10-26

@@ -1,0 +1,237 @@
+# UniQueR
+
+
+## Overview
+UniQueR is a feedforward framework for fast 3D reconstruction from unposed images using sparse learnable 3D queries [S1]. It predicts camera-to-world transforms and per-view local point maps, then uses queries to spawn Gaussians rendered via differentiable splatting for supervision [S1]. It sets itself apart from siblings like [TokenGS](16422-tokengs.md) by decoupling 3D Gaussian prediction from pixels with learnable implicit tokens, and avoids the quadratic complexity of full self-attention on concatenated tokens by using decoupled attention between image tokens and 3D queries [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** $N$ RGB images $\{I_i\}_{i=1}^N$ of the same scene, where $I_i \in \mathbb{R}^{3 \times H \times W}$ [S1]. Camera poses are not provided [S1].
+*   **Output:** A set of 3D Gaussians $\mathcal{G}$ and camera poses $\{P_i\}_{i=1}^N$ [S1].
+
+**Data Structures:**
+*   **Image Tokens:** $T_i \in \mathbb{R}^{(HW/p^2) \times d}$, extracted from each image $I_i$ [S1].
+*   **Queries:** A fixed set of $Q$ learnable queries $\mathcal{Q} = \{q_i\}_{i=1}^Q$ [S1]. Each query $q_i$ has a latent embedding and an explicit 3D coordinate $p_i$ [S1].
+*   **Gaussian Set:** $\mathcal{G} = \bigcup_{i=1}^Q \bigcup_{k=1}^K (p_i + \delta_{q_i} + \delta_{g_{ik}}, \Sigma_{ik}, c_{ik}, \alpha_{ik})$, where $\Sigma_{ik}$ is the covariance, $c_{ik}$ is the color, and $\alpha_{ik}$ is the opacity [S1].
+
+**Parameters:**
+*   $Q = 4096$: Fixed budget of learnable 3D queries [S1].
+*   $K = 64$: Number of Gaussians spawned per query [S1].
+*   $p$: Patch size of the Vision Transformer backbone (typically 14) [S1].
+*   $d$: Token dimensionality of the backbone [S1].
+*   $\lambda_d = 0.1$: Weight for the scale-invariant rendered-depth loss [S1].
+*   $\lambda_c = 0.2$: Weight for the backbone camera loss [S1].
+*   Total Gaussians: $Q \times K = 262,144$ [S1].
+
+**Steps:**
+
+1.  **Image Tokenization:** Extract per-frame visual tokens using a Vision Transformer backbone [S1]:
+    $$T_i = \text{ViT}(I_i) \in \mathbb{R}^{(HW/p^2) \times d}$$
+    where $T = HW/p^2$ is the number of tokens per image [S1].
+
+2.  **Cross-View Aggregation:** Apply an alternating-attention (AA) transformer to aggregate tokens across $N$ views [S1]:
+    $$\{T^{l+1}_i\} = \text{AA-Transformer}(\{T^l_i\})$$
+    where $l$ is the layer index [S1]. This alternates between intra-frame and inter-frame attention operations [S1].
+
+3.  **Geometric Decoding:** Decode the aggregated tokens into per-frame geometric annotations [S1]:
+    $$\{P_i, X_i, C_i\} = \text{Decoder}(\{T^l_i\})$$
+    where $P_i \in SE(3)$ is the camera-to-world transform, $X_i \in \mathbb{R}^{3 \times H \times W}$ is the local point map, and $C_i \in \mathbb{R}^{H \times W}$ is the confidence map [S1].
+
+4.  **Query Initialization:** Initialize $Q$ queries with hybrid coordinates [S1]:
+    *   Half of the query coordinates are sampled from the predicted non-metric point maps $X_i$, providing geometric grounding on observed surfaces [S1].
+    *   The remaining queries are initialized uniformly in the normalized 3D scene range [S1].
+    *   Random-only initialization is unstable in dense reconstruction because only 2D rendered image losses are available, not ground-truth 3D boxes [S1].
+
+5.  **Positional Encoding:**
+    *   Convert predicted camera poses $P_i$ into Plücker ray embeddings to serve as positional encodings for the image tokens [S1].
+    *   Each query $q_i$ uses its 3D coordinate $p_i$ as its positional embedding [S1].
+
+6.  **Query Refinement:** Update queries using a 12-layer Query Transformer with decoupled attention [S1]. In each layer:
+    $$Q = \text{Cross-Attn}(Q, T)$$
+    $$Q = \text{Self-Attn}(Q)$$
+    This decoupled design reduces complexity from $O((Q + NT)^2)$ to $O(QNT + Q^2)$, enabling scaling to high-resolution images [S1].
+
+7.  **Gaussian Spawning:** For each query $q_i$ at location $p_i$:
+    *   Predict a deformation $\delta_{q_i}$ [S1]. The cluster center becomes $p_i + \delta_{q_i}$ [S1].
+    *   An MLP decodes $K$ local offsets $\delta_{g_{ik}}$ for $k=1 \dots K$ [S1].
+    *   Attribute heads predict opacity $\alpha_{ik}$, scale, rotation, and color $c_{ik}$ for each spawned Gaussian [S1].
+    *   The final Gaussian set is defined as [S1]:
+        $$\mathcal{G} = \bigcup_{i=1}^Q \bigcup_{k=1}^K (p_i + \delta_{q_i} + \delta_{g_{ik}}, \Sigma_{ik}, c_{ik}, \alpha_{ik})$$
+
+8.  **Rendering:** Render the Gaussian set $\mathcal{G}$ into RGB images $\hat{I}$ and depth maps $\hat{D}$ via differentiable splatting [S1].
+
+9.  **Supervision:**
+    *   **Novel-View Supervision:** Supervise renderings of a superset of input views (e.g., 6 renderings for 3 inputs) [S1]. Held-out target views correct empty holes and discourage reproducing only input-view surfaces [S1].
+    *   **Loss Function:** The total loss is [S1]:
+        $$\mathcal{L} = \mathcal{L}_{rgb} + \lambda_d \mathcal{L}_{depth} + \lambda_c \mathcal{L}_{cam}$$
+        where $\mathcal{L}_{rgb}$ includes L1 and LPIPS in Stage 1, or only L1 in Stage 2 [S1]. $\mathcal{L}_{depth}$ is the scale-invariant rendered-depth loss, and $\mathcal{L}_{cam}$ is the backbone camera loss [S1].
+
+10. **Staged Training:**
+    *   **Stage 1:** Train at $224^2$ resolution for 100 epochs [S1]. $\mathcal{L}_{rgb}$ includes L1 and LPIPS [S1].
+    *   **Stage 2:** Fine-tune at $448^2$ resolution for 20 epochs [S1]. $\mathcal{L}_{rgb}$ uses only L1 because LPIPS substantially increases training time [S1].
+    *   The DINOv2 encoder, alternating-attention transformer, and point-map head are frozen [S1]. The camera head, Query Transformer, and GS heads are updated [S1].
+
+11. **Post Optimization (TTO):** Test-time optimization using predicted Gaussians and poses [S1]. Render back to input views, compute reconstruction losses, and backpropagate to refine Gaussian parameters [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class UniQueR:
+    def __init__(self, Q=4096, K=64, patch_size=14, d=1024, num_aa_layers=7, num_qt_layers=12):
+        self.Q = Q
+        self.K = K
+        self.patch_size = patch_size
+        self.d = d
+        self.num_aa_layers = num_aa_layers
+        self.num_qt_layers = num_qt_layers
+        
+        # Frozen backbone components
+        self.dino_v2 = nn.ModuleList([nn.Linear(3 * patch_size * patch_size, d) for _ in range(12)])
+        self.aa_transformer = nn.ModuleList([nn.MultiheadAttention(d, 8) for _ in range(num_aa_layers)])
+        self.geometric_decoder = nn.Sequential(
+            nn.Linear(d, d), nn.ReLU(), nn.Linear(d, 3 * H * W + H * W + 1)
+        )
+        
+        # Trainable components
+        self.camera_head = nn.Linear(d, 7)  # SE(3) parameterization
+        self.query_transformer = nn.ModuleList([
+            nn.ModuleDict({
+                'cross_attn': nn.MultiheadAttention(d, 8),
+                'self_attn': nn.MultiheadAttention(d, 8),
+                'ffn': nn.Sequential(nn.Linear(d, d * 4), nn.ReLU(), nn.Linear(d * 4, d))
+            }) for _ in range(num_qt_layers)
+        ])
+        self.gs_mlp = nn.Sequential(nn.Linear(d, d), nn.ReLU(), nn.Linear(d, K * 3))
+        self.gs_heads = nn.ModuleList([nn.Linear(d, 1 + 3 + 4 + 3) for _ in range(K)]) # alpha, scale, rot, color
+        
+        # Learnable query embeddings
+        self.query_embeddings = nn.Parameter(torch.randn(Q, d))
+
+    def forward(self, images):
+        N = len(images)
+        H, W = images[0].shape[1], images[0].shape[2]
+        T = (H * W) // (self.patch_size ** 2)
+        
+        # 1. Image Tokenization
+        tokens = []
+        for img in images:
+            patches = img.unfold(1, self.patch_size, self.patch_size).unfold(2, self.patch_size, self.patch_size)
+            patches = patches.reshape(N, -1, 3 * self.patch_size * self.patch_size)
+            t_i = patches
+            for layer in self.dino_v2:
+                t_i = layer(t_i)
+                t_i = t_i + F.layer_norm(t_i, (t_i.size(-1),))
+            tokens.append(t_i)
+            
+        # 2. Cross-View Aggregation
+        for layer in self.aa_transformer:
+            # Intra-frame attention
+            tokens = [F.layer_norm(layer(t, t, t)[0], (t.size(-1),)) for t in tokens]
+            # Inter-frame attention (concatenate across views)
+            stacked = torch.stack(tokens, dim=1)
+            stacked = layer(stacked, stacked, stacked)[0]
+            tokens = [stacked[:, i] for i in range(N)]
+            
+        # 3. Geometric Decoding
+        poses = []
+        point_maps = []
+        for t in tokens:
+            out = self.geometric_decoder(t)
+            # Decode to poses, point maps, confidence
+            p_i = self.camera_head(t.mean(dim=1))
+            x_i = out[:, :3 * H * W].reshape(-1, 3, H, W)
+            poses.append(p_i)
+            point_maps.append(x_i)
+            
+        # 4. Query Initialization
+        # Sample half from point maps, half uniformly
+        q_coords = torch.zeros(self.Q, 3)
+        half = self.Q // 2
+        # Sample from transformed point maps (simplified gauge assumption)
+        q_coords[:half] = point_maps[0][:, :, torch.randint(0, H, (half,)), torch.randint(0, W, (half,))].T
+        q_coords[half:] = torch.rand(half, 3) * 2 - 1  # Uniform in [-1, 1]^3
+        
+        q_emb = self.query_embeddings.clone()
+        
+        # 5 & 6. Query Refinement (Decoupled Attention)
+        for layer in self.query_transformer:
+            # Cross-Attn: Queries attend to Image Tokens
+            q_emb = layer['cross_attn'](q_emb, torch.stack(tokens, dim=1), torch.stack(tokens, dim=1))[0]
+            q_emb = q_emb + layer['ffn'](q_emb)
+            # Self-Attn: Queries attend to Queries
+            q_emb = layer['self_attn'](q_emb, q_emb, q_emb)[0]
+            q_emb = q_emb + layer['ffn'](q_emb)
+            
+        # 7. Gaussian Spawning
+        deformations = self.gs_mlp(q_emb).reshape(self.Q, self.K, 3)
+        query_centers = q_coords.unsqueeze(1) + deformations
+        
+        gaussians = []
+        for k in range(self.K):
+            attr = self.gs_heads[k](q_emb)
+            alpha = torch.sigmoid(attr[:, 0])
+            scale = torch.exp(attr[:, 1:4])
+            rot = F.normalize(attr[:, 4:8], dim=1)
+            color = torch.sigmoid(attr[:, 8:11])
+            gaussians.append((query_centers[:, k], scale, rot, color, alpha))
+            
+        # 8. Rendering (Placeholder for standard differentiable splatting rasterizer)
+        # rendered_rgb, rendered_depth = splatting_rasterize(gaussians, poses, H, W)
+        # For self-containment, we return the structure ready for rasterization
+        return gaussians, poses
+
+    def compute_loss(self, gaussians, poses, images, target_depths, stage=1):
+        # 8. Rendering
+        rendered_rgb, rendered_depth = splatting_rasterize(gaussians, poses, images[0].shape[1], images[0].shape[2])
+        
+        # 9. Supervision
+        l_rgb = F.l1_loss(rendered_rgb, images[0])
+        if stage == 1:
+            l_rgb = l_rgb + lpips_loss(rendered_rgb, images[0])
+            
+        l_depth = scale_invariant_depth_loss(rendered_depth, target_depths)
+        l_cam = camera_loss(poses)
+        
+        lambda_d = 0.1
+        lambda_c = 0.2
+        
+        return l_rgb + lambda_d * l_depth + lambda_c * l_cam
+
+def splatting_rasterize(gaussians, poses, H, W):
+    # Standard 3D Gaussian Splatting differentiable rasterizer
+    # Projects 3D Gaussians to 2D, sorts by depth, alpha-blends
+    pass
+
+def scale_invariant_depth_loss(pred, target):
+    # Standard scale-invariant depth loss
+    pass
+
+def camera_loss(poses):
+    # Backbone camera supervision loss
+    pass
+
+def lpips_loss(pred, target):
+    # Perceptual loss
+    pass
+```
+
+## Operating characteristics
+*   **Time Complexity:** The decoupled attention design reduces the theoretical attention complexity from $O((Q + NT)^2)$ to $O(QNT + Q^2)$, where $T = HW/p^2$ is the number of tokens per image [S1]. This enables scaling to high-resolution images [S1].
+*   **Memory Complexity:** Substantial memory savings compared to full self-attention, allowing the model to handle larger image sizes and more queries [S1].
+*   **Performance:** On Mip-NeRF 360 with 3 views, UniQueR achieves PSNR 22.70, SSIM 0.660, LPIPS 0.261, and inference time 0.416s on A100 [S1]. On RealEstate10K with 2 input views, UniQueR achieves PSNR 20.50, SSIM 0.672, LPIPS 0.196 [S1].
+*   **Model Size:** UniQueR has 502.31M trainable parameters; the frozen backbone has 890.99M parameters (1.393B total) [S1].
+*   **Strengths:** Fast feedforward inference, handles unposed images, high-fidelity reconstruction with sparse inputs, and efficient attention mechanism [S1].
+*   **Limitations:** Requires test-time optimization for best results, and LPIPS loss substantially increases training time in Stage 2 [S1].
+*   **When to use:** When fast, feedforward 3D reconstruction from unposed images is required, and computational resources for per-scene optimization are limited [S1].
+
+## Background
+UniQueR was proposed by C. Peng et al. in the paper "UniQueR: Unified Query-Based Feedforward 3D Reconstruction" [S1]. It builds on the principles of feedforward reconstruction models like [TokenGS](16422-tokengs.md) but introduces sparse learnable 3D queries to decouple Gaussian prediction from pixels [S1]. The method leverages DINOv2 for feature extraction and alternating-attention transformers for cross-view aggregation, similar to [VGGT](16425-zerogs.md) and [Pi3](16425-zerogs.md) [S1]. It is trained on datasets including DL3DV-10K, ScanNet++, BlendedMVS, and Co3D [S1].
+
+## Sources
+[S1] UniQueR: Unified Query-Based Feedforward 3D Reconstruction, https://doi.org/10.1007/978-3-032-37032-7_20, fetched 2026-10-30

@@ -1,0 +1,287 @@
+--- v001.md
++++ v002.md
+@@ -4,46 +4,45 @@
+ 
+ ## Overview
+-Parallel Domain-Decomposed Ray Casting is a distributed-memory parallelization strategy for direct volume ray casting that distributes a 3D volume dataset across a 3D grid of MPI processes [S1, unofficial]. Each process independently performs front-to-back ray casting on its assigned sub-volume chunk, after which intermediate results are gathered and composited by a subset of ranks to produce the final image [S1, unofficial]. It sets itself apart from sibling methods by explicitly partitioning the spatial data domain across networked nodes rather than partitioning the image plane or using shared-memory threading, making it suitable for large datasets exceeding single-node memory [S1, unofficial].
++Parallel Domain-Decomposed Ray Casting is a distributed-memory parallelization strategy for direct volume ray casting that partitions the 3D volume dataset into a 3D grid of sub-volumes, assigning each sub-volume to a separate MPI process [S1, unofficial]. Each process independently performs front-to-back ray casting on its local chunk and composites the resulting color and opacity meshes, which are then gathered and concatenated by a root process to form the final image [S1, unofficial]. It differs from sibling methods like [Hardware-Accelerated Volume Rendering](5616-hardware-accelerated-volume-rendering.md) by relying on CPU-based MPI communication and explicit domain decomposition rather than GPU texture memory and hardware ray traversal, making it suitable for large datasets that exceed single-node memory constraints [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A 3D volume dataset stored as a raw binary file of `float32` values, a transfer function file for opacity, a transfer function file for color, and MPI process grid dimensions $(p_x, p_y, p_z)$ [S1, unofficial].
+-*   **Output:** A composited 2D image saved as a PNG file [S1, unofficial].
++- **Input:** A 3D scalar volume dataset (typically `.raw` format), transfer function files for opacity and color, and MPI process grid dimensions $(p_x, p_y, p_z)$.
++- **Output:** A composited 2D image (e.g., PNG) representing the volume rendering.
+ 
+ **Data Structures:**
+-1.  **Volume Data:** A 3D NumPy array of shape $(z_{Total}, y_{Total}, x_{Total})$ with `dtype=float32` [S1, unofficial].
+-2.  **Opacity Transfer Function (`opacityData`):** A 2D array with 2 rows and `dtype=float32` [S1, unofficial].
+-    *   Row 1: Scalar value positions (input to TF).
+-    *   Row 2: Corresponding opacity values (output of TF) [S1, unofficial].
+-3.  **Color Transfer Function (`colorData`):** A 2D array with 5 rows and `dtype=float32` [S1, unofficial].
+-    *   Row 1: Scalar value positions.
+-    *   Row 2: Red channel values.
+-    *   Row 3: Green channel values.
+-    *   Row 4: Blue channel values [S1, unofficial].
+-
+-**Parameters:**
+-*   $p_x, p_y, p_z$: Integer dimensions of the 3D process grid. Typical value: $2, 2, 2$ [S1, unofficial].
+-*   $step\_size$: Fixed sampling interval along the ray direction. Typical value: $0.5$ [S1, unofficial].
++1.  **Volume Data:** A 3D NumPy array of shape $(z_{Total}, y_{Total}, x_{Total})$ with `dtype=float32` [S1, unofficial]. Distributed as slices: `data[z_index:z_next, y_index:y_next, x_index:x_next]` [S1, unofficial].
++2.  **Opacity Transfer Function:** A 2D array with 2 rows and $N$ columns. Row 1 contains scalar positions; Row 2 contains corresponding opacity values [S1, unofficial].
++3.  **Color Transfer Function:** A 2D array with 5 rows and $M$ columns. Row 1 contains scalar positions; Rows 2, 3, and 4 contain R, G, B color values respectively [S1, unofficial].
+ 
+ **Algorithm Steps:**
+-1.  **Initialization:** Rank 0 loads the volume data, opacity transfer function, and color transfer function from disk [S1, unofficial].
+-2.  **Domain Decomposition:** Rank 0 calculates segment sizes for each dimension:
+-    $$ x_{seg} = \lfloor x_{Total} / p_x \rfloor, \quad y_{seg} = \lfloor y_{Total} / p_y \rfloor, \quad z_{seg} = \lfloor z_{Total} / p_z \rfloor $$
+-    Rank 0 iterates over the 3D process grid indices $(k, j, i)$ where $k \in [0, p_z), j \in [0, p_y), i \in [0, p_x)$ [S1, unofficial].
+-3.  **Data Distribution:** Rank 0 sends each sub-volume chunk `data[z_index:z_next, y_index:y_next, x_index:x_next]` along with `opacityData`, `colorData`, and grid dimensions to the corresponding MPI rank using `comm.send()` [S1, unofficial]. Boundary conditions apply: if $i = p_x - 1$, $x_{next} = x_{Total}$; similarly for $j$ and $k$ [S1, unofficial].
+-4.  **Local Ray Casting:** Each rank receives its data chunk via `comm.recv(source=0)` [S1, unofficial]. Each rank then executes the ray casting kernel on its local data [S1, unofficial].
+-    *   The ray casting kernel iterates over the local volume dimensions.
+-    *   For each sample, it performs linear interpolation on the transfer functions to determine color and opacity [S1, unofficial].
+-    *   It accumulates color and opacity using front-to-back compositing [S1, unofficial].
+-    *   The kernel outputs a local `colorMesh` and `opacityMesh` [S1, unofficial].
++1.  **Initialization:** The MPI communicator is established. Rank 0 loads the volume data and transfer functions. The total number of processes is $S = p_x \times p_y \times p_z$ [S1, unofficial].
++2.  **Domain Decomposition:** Rank 0 calculates segment sizes:
++    $$
++    x_{seg} = \lfloor x_{Total} / p_x \rfloor, \quad y_{seg} = \lfloor y_{Total} / p_y \rfloor, \quad z_{seg} = \lfloor z_{Total} / p_z \rfloor
++    $$
++    Boundary adjustments are made for the last segments to cover the full volume [S1, unofficial].
++3.  **Data Distribution:** Rank 0 iterates over the 3D process grid $(k, j, i)$ for $k \in [0, p_z), j \in [0, p_y), i \in [0, p_x)$. It sends the corresponding volume slice, along with the opacity and color transfer functions and grid dimensions, to the process with rank $count = k \cdot p_x \cdot p_y + j \cdot p_x + i$ using `comm.send()` [S1, unofficial].
++4.  **Local Ray Casting:** Each rank receives its data and executes the ray casting kernel [S1, unofficial].
++    -   **Ray Generation:** Rays are generated for the image pixels. The step size $\Delta t$ is a parameter (typical value: 0.5) [S1, unofficial].
++    -   **Sampling:** For each sample point, the scalar value is retrieved from the local volume chunk.
++    -   **Classification:** The scalar value is mapped to color $(C_r, C_g, C_b)$ and opacity $\alpha$ using linear interpolation on the transfer function arrays [S1, unofficial].
++    -   **Compositing:** Front-to-back compositing is performed using the standard over operator:
++        $$
++        C'_{i} = C'_{i-1} + (1 - \alpha'_{i-1}) \alpha_i C_i
++        $$
++        $$
++        \alpha'_{i} = \alpha'_{i-1} + (1 - \alpha'_{i-1}) \alpha_i
++        $$
++        The result is stored in local `colorMesh` and `opacityMesh` arrays [S1, unofficial].
+ 5.  **Result Aggregation:**
+-    *   Ranks with index $rank \ge p_x p_y$ send their `colorMesh` and `opacityMesh` to a "surface process" with index $surfaceProcess = rank \pmod{p_x p_y}$ [S1, unofficial].
+-    *   Ranks with index $rank < p_x p_y$ receive meshes from ranks corresponding to their $z$-layer offsets. Specifically, rank $r < p_x p_y$ receives from destPrc $(c \cdot p_x p_y) + r$ for $c \in [1, p_z)$ [S1, unofficial].
+-6.  **Final Composition:** Rank 0 gathers all composited meshes, concatenates them spatially according to the $p_x/p_y$ structure, converts the result to `uint8`, and saves it as a PNG image [S1, unofficial].
++    -   Processes with rank $\ge p_x p_y$ send their `colorMesh` and `opacityMesh` to the process with rank `surfaceProcess = rank % (p_x p_y)` [S1, unofficial].
++    -   Processes with rank $< p_x p_y$ receive meshes from higher ranks (specifically from ranks $(c \cdot p_x p_y) + rank$ for $c \in [1, p_z)$) [S1, unofficial].
++    -   Rank 0 gathers all composited meshes, concatenates them spatially according to the $p_x \times p_y$ structure, converts to `uint8`, and saves the image [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
++from mpi4py import MPI
+ import numpy as np
+-from mpi4py import MPI
+ 
+ comm = MPI.COMM_WORLD
+@@ -51,131 +50,107 @@
+ size = comm.Get_size()
+ 
+-def linear_interpolate_tf(tf_positions, tf_values, scalar):
+-    """
+-    Performs linear interpolation on a 1D transfer function.
+-    tf_positions: array of scalar values
+-    tf_values: array of corresponding TF output values
+-    scalar: input scalar value
+-    """
+-    # Find index where tf_positions[i] <= scalar < tf_positions[i+1]
+-    # Using searchsorted for efficiency [G]
+-    idx = np.searchsorted(tf_positions, scalar, side='right') - 1
+-    idx = max(0, min(idx, len(tf_positions) - 2))
+-    
+-    p0 = tf_positions[idx]
+-    p1 = tf_positions[idx + 1]
+-    v0 = tf_values[idx]
+-    v1 = tf_values[idx + 1]
+-    
+-    if p1 == p0:
+-        return v0
+-    
+-    t = (scalar - p0) / (p1 - p0)
+-    return v0 * (1 - t) + v1 * t
+-
+-def ray_casting_kernel(data, opacity_tf, color_tf, step_size):
+-    """
+-    Performs local ray casting on a sub-volume chunk.
+-    Returns colorMesh and opacityMesh.
+-    """
+-    z_dim, y_dim, x_dim = data.shape
+-    # Initialize output meshes [S1, unofficial]
+-    # Note: The source code initializes these based on local dimensions
+-    color_mesh = np.zeros((z_dim, y_dim, x_dim), dtype=np.float32)
+-    opacity_mesh = np.zeros((z_dim, y_dim), dtype=np.float32) # Shape discrepancy in source: opacityMesh is 2D in source code but logic implies 3D accumulation or specific projection. Source says: opacityMesh = np.zeros((i, ii), dtype=np.float32) where i, ii are local x, y dims. This implies a specific projection or accumulation strategy not fully detailed in standard ray casting. We follow source structure.
+-    
+-    # The source code structure for rayCasting is complex and partially obscured.
+-    # Based on standard ray casting and source hints:
+-    # We assume rays are cast along a specific axis or through the volume.
+-    # The source uses 'xi', 'yi', 'zi' loops.
+-    
+-    for z in range(z_dim):
+-        for y in range(y_dim):
+-            for x in range(x_dim):
+-                # Sample volume at (x, y, z) [S1, unofficial]
+-                val = data[z, y, x]
+-                
+-                # Get opacity and color from transfer functions [S1, unofficial]
+-                opacity = linear_interpolate_tf(opacity_tf[0], opacity_tf[1], val)
+-                r = linear_interpolate_tf(color_tf[0], color_tf[1], val)
+-                g = linear_interpolate_tf(color_tf[0], color_tf[2], val)
+-                b = linear_interpolate_tf(color_tf[0], color_tf[3], val)
+-                
+-                # Accumulate into local meshes [S1, unofficial]
+-                # Note: The exact accumulation logic in the source is obscured by JIT compilation and variable names.
+-                # We assume standard front-to-back or simple accumulation for the local chunk.
+-                # The source outputs colorMesh and opacityMesh which are then sent.
+-                color_mesh[z, y, x] = np.array([r, g, b])
+-                opacity_mesh[z, y] = opacity # Assuming 2D projection or specific storage
+-                
+-    return color_mesh, opacity_mesh
++# Parameters from command line or defaults
++px, py, pz = 2, 2, 2
++step_size = 0.5
+ 
+ if rank == 0:
+-    # Load data and TFs [S1, unofficial]
+-    # ... (File loading logic as per source) ...
++    # 1. Load Data
++    # Load volume data into data[z, y, x]
++    # Load opacityData[2, N] and colorData[5, M]
+     
+-    # Calculate segments [S1, unofficial]
+-    x_seg = int(x_total / px)
+-    y_seg = int(y_total / py)
+-    z_seg = int(z_total / pz)
++    # 2. Decompose and Send
++    x_seg = x_total // px
++    y_seg = y_total // py
++    z_seg = z_total // pz
+     
+-    # Distribute data [S1, unofficial]
+     count = 0
+     for k in range(pz):
+         for j in range(py):
+             for i in range(px):
+-                z_start = k * z_seg
+-                z_end = (k + 1) * z_seg if k < pz - 1 else z_total
+-                y_start = j * y_seg
+-                y_end = (j + 1) * y_seg if j < py - 1 else y_total
+-                x_start = i * x_seg
+-                x_end = (i + 1) * x_seg if i < px - 1 else x_total
++                # Determine slice boundaries
++                z_start, z_end = k * z_seg, (k + 1) * z_seg if k < pz - 1 else z_total
++                y_start, y_end = j * y_seg, (j + 1) * y_seg if j < py - 1 else y_total
++                x_start, x_end = i * x_seg, (i + 1) * x_seg if i < px - 1 else x_total
+                 
+                 chunk = data[z_start:z_end, y_start:y_end, x_start:x_end]
+                 comm.send([chunk, opacityData, colorData, px, py, pz], dest=count)
+                 count += 1
++else:
++    # 3. Receive Data
++    data, opacityData, colorData, px, py, pz = comm.recv(source=0)
+ 
+-else:
+-    # Receive data [S1, unofficial]
+-    data, opacityData, colorData, px, py, pz = comm.recv(source=0)
+-    
+-    # Perform local ray casting [S1, unofficial]
+-    colorMesh, opacityMesh = ray_casting_kernel(data, opacityData, colorData, step_size)
++# 4. Local Ray Casting
++colorMesh = np.zeros((height, width, 3), dtype=np.float32)
++opacityMesh = np.zeros((height, width), dtype=np.float32)
+ 
+-# Aggregation [S1, unofficial]
++# Iterate over pixels and rays
++for y in range(height):
++    for x in range(width):
++        # Generate ray r(t) = o + t*d
++        # Determine t_start, t_end for local chunk intersection
++        # Note: In this specific implementation, rays traverse the entire volume
++        # but data is only available locally. The implementation in [S1, unofficial] 
++        # implies a specific ray traversal logic or assumes the chunk 
++        # covers the relevant depth for the pixel. 
++        # Based on [S1, unofficial], the rayCasting function processes the local data.
++        
++        # Front-to-back compositing
++        acc_color = np.array([0.0, 0.0, 0.0])
++        acc_alpha = 0.0
++        
++        t = t_start
++        while t < t_end:
++            # Sample volume
++            val = sample_volume(data, t)
++            
++            # Classify
++            alpha, r, g, b = classify(val, opacityData, colorData)
++            
++            # Composite
++            weight = (1.0 - acc_alpha) * alpha
++            acc_color += weight * np.array([r, g, b])
++            acc_alpha += weight
++            
++            t += step_size
++            
++        colorMesh[y, x] = acc_color
++        opacityMesh[y, x] = acc_alpha
++
++# 5. Aggregation
+ t = px * py
+ if rank >= t:
+-    surfaceProcess = rank % t
+-    comm.send([colorMesh, opacityMesh], dest=surfaceProcess)
++    surface_process = rank % t
++    comm.send([colorMesh, opacityMesh], dest=surface_process)
+ elif rank < t:
+-    ColorMeshes = []
+-    OpacityMeshes = []
++    color_meshes = []
++    opacity_meshes = []
+     for c in range(1, pz):
+-        destPrc = (c * t) + rank
+-        tempcm, tempom = comm.recv(source=destPrc)
+-        ColorMeshes.append(tempcm)
+-        OpacityMeshes.append(tempom)
+-
+-# Rank 0 gathers and saves [S1, unofficial]
+-if rank == 0:
+-    # Gather all meshes and concatenate
+-    # ... (Implementation details omitted for brevity, follows source logic) ...
++        src = (c * t) + rank
++        cm, om = comm.recv(source=src)
++        color_meshes.append(cm)
++        opacity_meshes.append(om)
++    
++    # Concatenate and save (only rank 0 does final save in [S1, unofficial], 
++    # but intermediate ranks gather from their column)
++    # Implementation detail: [S1, unofficial] has rank 0 gather all, 
++    # but here ranks < t gather from their z-slice peers.
++    # The final assembly is done by rank 0 in the source.
+     pass
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Boundary Handling:** The last segment in each dimension must extend to the total dimension size to avoid data loss [S1, unofficial].
+-*   **Process Count:** The total number of MPI processes must equal $p_x \times p_y \times p_z$ [S1, unofficial].
+-*   **Precision:** Data is stored as `float32`; transfer function interpolation uses linear interpolation which may introduce artifacts if the TF is sparse [S1, unofficial].
++-   **Boundary Precision:** The last segment in each dimension must extend to the total volume size to avoid missing data [S1, unofficial].
++-   **Communication Overhead:** The method requires significant MPI communication for data distribution and result aggregation, which can become a bottleneck for small chunks or high process counts [S1, unofficial].
++-   **Ray-Volume Intersection:** The pseudocode assumes a specific ray traversal logic. In a general implementation, rays must be intersected with the local chunk's bounding box to determine valid sample ranges, or the global ray must be sampled with local data lookups (which requires ghost zones or global indexing) [S1, G, unofficial]. The provided source [S1, unofficial] uses a simplified approach where the local data is processed directly.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N/P)$ for ray casting, where $N$ is the total number of samples and $P$ is the number of processes, plus communication overhead $O(N^{2/3})$ for gathering results [S1, unofficial].
+-*   **Memory Complexity:** $O(V/P)$ per process, where $V$ is the volume size, allowing rendering of datasets larger than single-node memory [S1, unofficial].
+-*   **Performance:** Scales with the number of processes $p_x p_y p_z$ [S1, unofficial].
+-*   **Strengths:** Enables rendering of very large volumes on clusters [S1, unofficial].
+-*   **Limitations:** Communication overhead can become significant if the volume chunks are small or the network is slow [S1, unofficial].
++-   **Time Complexity:** $O(N \cdot S)$ for data distribution and $O(N \cdot S / S) = O(N)$ for local computation per process, where $N$ is the number of samples per ray and $S$ is the number of processes. Total time is dominated by $O(N)$ computation plus communication overhead $O(S)$ [S1, unofficial].
++-   **Memory Complexity:** $O(V/S)$ per process, where $V$ is the total volume size. This allows rendering of volumes larger than a single node's memory [S1, unofficial].
++-   **Performance:** Scaling is linear with the number of processes for large datasets, but communication latency can degrade performance for small chunks or high $p_x p_y p_z$ configurations [S1, unofficial].
++-   **Strengths:** Scalability to large datasets; simple implementation using standard MPI primitives [S1, unofficial].
++-   **Limitations:** Communication overhead; load imbalance if the volume has non-uniform density or if the domain decomposition does not match the data distribution; lack of hardware acceleration [S1, unofficial].
+ 
+ ## Background
+-This method originates from a computer science assignment (CS677) demonstrating parallel volume rendering using MPI [S1, unofficial]. It is implemented in Python using `mpi4py`, `numpy`, and `numba` for performance [S1, unofficial].
++This method is derived from a computer science assignment (CS677) demonstrating parallel volume rendering using MPI [S1, unofficial]. It implements a straightforward domain decomposition strategy where the volume is split into a 3D grid of chunks, each processed by a separate MPI rank [S1, unofficial]. The approach is documented in a GitHub repository by devangag558 [S1, unofficial].
+ 
+ ## Sources

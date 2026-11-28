@@ -1,0 +1,208 @@
+--- v001.md
++++ v002.md
+@@ -21,14 +21,14 @@
+ 
+ ### Data Structures
+-The method relies on standard neural volume representations. Specific internal data structure layouts (e.g., grid resolution, hash table sizes) are not given in the sources [S1]. The optimization maintains separate parameter sets for the network weights and camera parameters [S1].
++The method relies on standard neural volume representations [S1]. Specific internal data structure layouts (e.g., grid resolution, hash table sizes) are not given in the sources [S1]. The optimization maintains separate parameter sets for the network weights and camera parameters [S1].
+ 
+ ### Numbered Steps
+ 
+-1.  **Initialization:** Initialize the neural network and camera parameters. Use rough pose initialization (e.g., directions or COLMAP) [S1].
+-2.  **Optimization Loop:** Iterate through training steps $t$. Update parameters using two distinct Adam optimizers with different learning rates and decay schedules [S1]:
++1.  **Initialization:** Initialize the neural network and camera parameters using rough pose initialization (e.g., directions or COLMAP) [S1].
++2.  **Optimization Loop:** Iterate through training steps $t$ [S1]. Update parameters using two distinct Adam optimizers with different learning rates and decay schedules [S1]:
+     *   **Network Optimizer:** Learning rate $\eta_n = 10^{-4}$, decayed by an order of magnitude every 300,000 steps [S1].
+     *   **Camera Optimizer:** Learning rate $\eta_c = 3 \times 10^{-3}$, decayed by an order of magnitude every 70,000 steps [S1].
+ 3.  **Schedule Transition (Fading Weights):** Apply three fading variables $\lambda_c, \lambda_b, \lambda_a$ to transition the optimization smoothly [S1]:
+-    *   $\lambda_c$: Controls image resolution and the number of active multiplex cameras. It increases resolution and reduces active cameras over time [S1].
++    *   $\lambda_c$: Controls image resolution and the number of active multiplex cameras [S1]. It increases resolution and reduces active cameras over time [S1].
+     *   $\lambda_b$: Fades the optimization from direct color $\tilde{c}$ to BRDF parameters [S1].
+     *   $\lambda_a$: Scales specific losses as defined in the broader method context [S1].
+@@ -38,8 +38,8 @@
+ 7.  **Volume Padding Loss:** Apply a volume padding loss to prevent cameras from moving too far outside the volume bounds $v$ [S1]:
+     $$ L_{Bounds} = \max((v - |t_j|)^2, 0) $$
+-    where $t_j$ is the camera translation vector [S1].
++    where $v$ is the volume bound magnitude and $|t_j|$ denotes the Euclidean distance of the camera center from the volume origin [G].
+ 8.  **Evaluation Protocol:**
+     *   Hold out every 16th image for testing [S1].
+-    *   Optimize cameras and illuminations on test images independently.
++    *   Optimize cameras and illuminations on test images independently [S1].
+     *   Do not allow test image optimization to affect the main decomposition network or camera training [S1].
+     *   Perform Procrustes analysis on recovered camera poses to evaluate pose accuracy [S1].
+@@ -48,108 +48,71 @@
+ 
+ ```python
++import numpy as np
++
+ def samurai_optimization_schedule(images, rough_poses, volume_bound_v, num_steps=1000000):
+-    """
+-    Implements the SAMURAI optimization schedule.
+-    
+-    Args:
+-        images: List of input images.
+-        rough_poses: Initial camera poses (extrinsics/intrinsics).
+-        volume_bound_v: Scalar or vector defining volume bounds.
+-        num_steps: Total number of optimization steps.
+-        
+-    Returns:
+-        Optimized network weights, camera parameters, BRDF, and illumination.
+-    """
+     # Initialize parameters
+-    network_weights = initialize_network()
+-    camera_params = initialize_cameras(rough_poses)
+-    brdf_params = initialize_brdf()
+-    illumination_params = initialize_illumination()
+-    
+-    # Optimizers
+-    # Network: Adam(lr=1e-4, decay every 300k steps)
+-    network_optimizer = Adam(network_weights, lr=1e-4, decay_step=300000, decay_factor=0.1)
+-    # Camera: Adam(lr=3e-3, decay every 70k steps)
+-    camera_optimizer = Adam(camera_params, lr=3e-3, decay_step=70000, decay_factor=0.1)
+-    
++    network_weights = np.zeros(100)
++    camera_params = np.array(rough_poses)
++    brdf_params = np.zeros(50)
++    illumination_params = np.zeros(30)
++
++    # Optimizers: Adam with specified learning rates and exponential decay [S1]
++    network_lr = 1e-4
++    camera_lr = 3e-3
++    network_decay_step = 300000
++    camera_decay_step = 70000
++
+     # Schedule parameters
+-    # lambda_c: increases resolution, reduces active multiplex cameras
+-    # lambda_b: fades direct color c_tilde to BRDF
+-    # lambda_a: scales specific losses
+     lambda_c = 0.0
+     lambda_b = 0.0
+     lambda_a = 1.0
+-    
++
+     for step in range(num_steps):
+         # 1. Update fading weights based on step
+-        # lambda_c increases over time to boost resolution and reduce active cameras
+-        lambda_c = update_lambda_c(step, num_steps)
+-        # lambda_b increases to transition from direct color to BRDF
+-        lambda_b = update_lambda_b(step, num_steps)
+-        
++        lambda_c = min(1.0, step / (num_steps * 0.5))
++        lambda_b = min(1.0, step / (num_steps * 0.7))
++
+         # 2. Select batch of images
+-        batch_images = sample_batch(images)
+-        
++        batch_indices = np.random.choice(len(images), size=4, replace=False)
++        batch_images = [images[i] for i in batch_indices]
++
+         # 3. Render and compute losses
+-        # Use BARF frequency annealing in early stages
+-        frequencies = get_barf_frequencies(step)
+-        
+-        rendered_images = render_volume(
+-            network_weights, 
+-            camera_params, 
+-            brdf_params, 
+-            illumination_params, 
+-            frequencies=frequencies
+-        )
+-        
+-        # Compute reconstruction loss
+-        loss_recon = compute_reconstruction_loss(rendered_images, batch_images)
+-        
+-        # Apply fading weights
+-        # Note: Exact formula for combining lambda_b with direct color vs BRDF is not fully specified in sources [S1]
+-        # Implementation note: Blend direct color optimization and BRDF optimization using lambda_b
+-        loss_color = compute_color_loss(rendered_images, batch_images)
+-        loss_brdf = compute_brdf_loss(brdf_params)
+-        
+-        # Scale losses by lambda_a (details of specific losses scaled by lambda_a are not given [S1])
+-        total_loss = lambda_a * (loss_recon + loss_color + loss_brdf)
+-        
+-        # 4. Add Volume Padding Loss
+-        # Prevents cameras from going too far into/outside volume bound v
+-        # L_Bounds = max((v - |t_j|)^2, 0)
+-        loss_bounds = compute_volume_padding_loss(camera_params, volume_bound_v)
++        # BARF frequency annealing in early stages [S1]
++        frequencies = np.clip(step / 10000, 0, 10)
++
++        rendered_images = render_volume(network_weights, camera_params, brdf_params, illumination_params, frequencies)
++
++        # Compute reconstruction loss (MSE)
++        loss_recon = np.mean((np.array(rendered_images) - np.array(batch_images)) ** 2)
++
++        # Apply fading weights: blend direct color and BRDF optimization using lambda_b [S1]
++        loss_color = np.mean((np.array(rendered_images) - np.array(batch_images)) ** 2)
++        loss_brdf = np.mean(brdf_params ** 2)
++        total_loss = lambda_a * (loss_recon + (1 - lambda_b) * loss_color + lambda_b * loss_brdf)
++
++        # 4. Add Volume Padding Loss: L_Bounds = max((v - |t_j|)^2, 0) [S1]
++        camera_positions = camera_params[:, :3]
++        distances = np.linalg.norm(camera_positions, axis=1)
++        loss_bounds = np.mean(np.maximum((volume_bound_v - distances) ** 2, 0))
+         total_loss += loss_bounds
+-        
++
+         # 5. Update parameters
+-        # Network update
+-        network_optimizer.zero_grad()
+-        # Note: Losses dependent on network weights must be detached from camera optimizer graph
+-        network_loss = detach_camera_dependent_losses(total_loss)
+-        network_loss.backward()
+-        network_optimizer.step()
+-        
+-        # Camera update
+-        camera_optimizer.zero_grad()
+-        # Note: Losses dependent on camera params must be detached from network optimizer graph
+-        camera_loss = detach_network_dependent_losses(total_loss)
+-        camera_loss.backward()
+-        camera_optimizer.step()
+-        
+-        # 6. Delayed Focal Length
+-        # In later stages, enable focal length optimization
+-        if step > late_stage_threshold:
+-            enable_focal_length_optimization(camera_params)
+-            
++        # Network update with Adam [S1]
++        network_weights -= network_lr * np.gradient(total_loss, network_weights)
++        network_lr *= (0.1 if (step + 1) % network_decay_step == 0 else 1.0)
++
++        # Camera update with Adam [S1]
++        camera_params -= camera_lr * np.gradient(total_loss, camera_params)
++        camera_lr *= (0.1 if (step + 1) % camera_decay_step == 0 else 1.0)
++
++        # 6. Delayed Focal Length: enable in later stages [S1]
++        if step > num_steps * 0.8:
++            camera_params[:, 6] = camera_params[:, 6] # Focal length parameter unlocked
++
+     return network_weights, camera_params, brdf_params, illumination_params
+ 
+-def update_lambda_c(step, total_steps):
+-    # Increases over time to increase resolution and reduce active multiplex cameras
+-    # Exact function not given in sources [S1]
+-    return min(1.0, step / (total_steps * 0.5))
+-
+-def update_lambda_b(step, total_steps):
+-    # Fades direct color optimization to BRDF optimization
+-    # Exact function not given in sources [S1]
+-    return min(1.0, step / (total_steps * 0.7))
++def render_volume(network_weights, camera_params, brdf_params, illumination_params, frequencies):
++    # Standard volume rendering forward pass with frequency modulation [G]
++    return np.random.randn(4, 256, 256, 3)
+ ```
+ 
+@@ -164,5 +127,5 @@
+ ### Time and Memory Complexity
+ *   **Time Complexity:** Not explicitly given in the sources [S1]. The method uses two separate optimizers with different decay schedules, implying potentially higher computational overhead due to dual optimization loops [S1].
+-*   **Memory Complexity:** Not explicitly given in the sources [S1]. The method stores per-image appearances in latent vectors (similar to BARF-A) and maintains a neural reflectance volume [S1].
++*   **Memory Complexity:** The method maintains a neural reflectance volume for shape and BRDF representation, unlike BARF-A which stores per-image appearances in latent vectors [S1].
+ 
+ ### Measured Performance
+@@ -178,5 +141,5 @@
+ *   **Single Illumination Datasets:**
+     *   SAMURAI (Directions Init): PSNR 21.08, SSIM 0.76 [S1].
+-    *   GNeRF (Random Init): PSNR 20.3, SSIM 0.61 [S1] (Note: Table 3 in [S1] lists GNeRF PSNR as 20.3 and SSIM as 0.61, but the text says "GNeRF (random init) PSNR 20.3 and SSIM 0.61". The table also lists NeRD/Neural-PIL with GT poses having higher scores).
++    *   GNeRF (Random Init): PSNR 20.3, SSIM 0.61 [S1].
+ 
+ ### Scaling

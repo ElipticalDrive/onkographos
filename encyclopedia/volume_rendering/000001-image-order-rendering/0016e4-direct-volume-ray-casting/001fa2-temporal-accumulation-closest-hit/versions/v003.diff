@@ -1,0 +1,125 @@
+--- v002.md
++++ v003.md
+@@ -1,5 +1,3 @@
+ # Temporal Accumulation (Closest Hit)
+-
+-
+ ## Overview
+ Temporal Accumulation (Closest Hit) stabilizes stochastic or noisy volume rendering results by blending the current frame with a history buffer [S3, S4, unofficial]. It uses depth-based reprojection to map previous frame samples to the current view, reducing flicker and increasing effective resolution [S4, unofficial]. Conflict resolution strategies vary by implementation: some use a "closest hit" mechanism that selects the sample with the smaller depth value (closer to the camera) to prevent ghosting from disoccluded geometry [S3, S5, unofficial], while others clamp the history sample to the current frame's neighborhood bounds to handle disocclusion and lighting changes [S4, unofficial]. It builds on [Direct volume ray casting](19-direct-volume-ray-casting.md) by adding a post-processing or integrated accumulation pass that requires camera and depth information for reprojection [S4, unofficial].
+@@ -53,5 +51,5 @@
+     *   Retrieve depth from current frame $d_{curr}$ and history $d_{hist}$ (stored in the alpha channel or a separate depth texture) [S3, S5, unofficial].
+     *   If both are valid ($>0$):
+-        *   If $d_{curr} < d_{hist}$, select current frame.
++        *   If $d_{curr} < d_{hist}$, select current frame. [S3, S5, unofficial]
+         *   Else, select history frame [S3, S5, unofficial].
+     *   If only one is valid, select that one [S3, S5, unofficial].
+@@ -66,18 +64,17 @@
+ ### Pseudocode
+ ```python
+-def temporal_accumulation_closest_hit(current_color, current_depth, history_color, history_depth, 
++def temporal_accumulation_closest_hit(uv, current_color, current_depth, history_color, history_depth, 
+                                       inv_view_proj, prev_view_proj, cam_pos, u_blend, u_history_valid, 
+-                                      frame_number, screen_width, screen_height):
++                                      u_inv_frame_number, screen_width, screen_height):
+     """
+     Performs temporal accumulation with closest hit selection and reprojection.
+     """
+-    if not u_history_valid:
++    if u_history_valid == 0:
+         return current_color
+ 
+     # 1. Reprojection
+-    ndc_x = current_color.x * 2.0 - 1.0
+-    ndc_y = current_color.y * 2.0 - 1.0
+-    p_near = inv_view_proj * vec4(ndc_x, ndc_y, -1.0, 1.0)
+-    p_far = inv_view_proj * vec4(ndc_x, ndc_y, 1.0, 1.0)
++    ndc = uv * 2.0 - 1.0
++    p_near = inv_view_proj * vec4(ndc, -1.0, 1.0)
++    p_far = inv_view_proj * vec4(ndc, 1.0, 1.0)
+     ray_dir = normalize(p_far.xyz / p_far.w - p_near.xyz / p_near.w)
+     
+@@ -94,13 +91,28 @@
+         return current_color
+         
+-    # 2. History Fetch & Clamping
+-    hist_color = history_color # Sampled at prev_uv
+-    # Compute 3x3 neighborhood min/max of current frame
++    # 2. History Fetch
++    hist_color = sample_texture(history_color, prev_uv)
++    hist_depth = sample_texture(history_depth, prev_uv).r
++    
++    # 3. Closest Hit Selection
++    if current_depth > 0.0 and hist_depth > 0.0:
++        if current_depth < hist_depth:
++            selected_color = current_color.rgb
++        else:
++            selected_color = hist_color.rgb
++    elif current_depth > 0.0:
++        selected_color = current_color.rgb
++    elif hist_depth > 0.0:
++        selected_color = hist_color.rgb
++    else:
++        return current_color
++        
++    # 4. Clamping to neighborhood bounds
++    texel = vec2(1.0 / screen_width, 1.0 / screen_height)
+     lo = current_color
+     hi = current_color
+-    # Standard neighborhood sampling loop (sources provide explicit loop structure)
+     for dy in range(-1, 2):
+         for dx in range(-1, 2):
+-            neighbor = sample_neighbors(current_color, dx, dy) # Standard neighborhood sampling
++            neighbor = sample_texture(current_color, uv + vec2(dx, dy) * texel)
+             lo = min(lo, neighbor)
+             hi = max(hi, neighbor)
+@@ -108,18 +120,5 @@
+     hist_color = clamp(hist_color, lo - pad, hi + pad)
+     
+-    # 3. Closest Hit Selection
+-    if current_depth > 0.0 and history_depth > 0.0:
+-        if current_depth < history_depth:
+-            selected_color = current_color.rgb
+-        else:
+-            selected_color = hist_color.rgb
+-    elif current_depth > 0.0:
+-        selected_color = current_color.rgb
+-    elif history_depth > 0.0:
+-        selected_color = hist_color.rgb
+-    else:
+-        return current_color
+-        
+-    # 4. Blending
++    # 5. Blending
+     out_color = mix(selected_color, current_color.rgb, u_blend)
+     return vec4(out_color, 1.0)
+@@ -133,22 +132,22 @@
+ 
+ ### Edge Cases and Pitfalls
+-*   **Disocclusion:** When an object moves, the history buffer contains data from the old position. Reprojection maps this to the new position, causing ghosting. Clamping the history sample to the current frame's neighborhood bounds mitigates this [S4, unofficial].
+-*   **No Hit Pixels:** Pixels with no volume hit (depth <= 0) cause large parallax errors during reprojection. These are handled by substituting a far distance (e.g., 200000.0) or skipping reprojection [S4, unofficial].
+-*   **History Overflow:** If `frame_count` overflows or `N_HISTORY_ACC` is 0, layer indexing fails. Ensure `N_HISTORY_ACC > 0` and handle wrapping correctly via modulo arithmetic [S1, unofficial].
+-*   **Scene Changes:** Camera or object transformations invalidate the history. The buffer should be cleared or reset when such changes are detected [S2, unofficial].
++*   **Disocclusion:** When an object moves, the history buffer contains data from the old position. Reprojection maps this to the new position, causing ghosting. [S4, unofficial] Clamping the history sample to the current frame's neighborhood bounds mitigates this [S4, unofficial].
++*   **No Hit Pixels:** Pixels with no volume hit (depth <= 0) cause large parallax errors during reprojection. [S4, unofficial] These are handled by substituting a far distance (e.g., 200000.0) or skipping reprojection [S4, unofficial].
++*   **History Overflow:** If `frame_count` overflows or `N_HISTORY_ACC` is 0, layer indexing fails. [S1, unofficial] Ensure `N_HISTORY_ACC > 0` and handle wrapping correctly via modulo arithmetic [S1, unofficial].
++*   **Scene Changes:** Camera or object transformations invalidate the history. [S2, unofficial] The buffer should be cleared or reset when such changes are detected [S2, unofficial].
+ 
+ ## Subtopics
+ 
+ ### Closest Hit Texture Initialization
+-A fragment shader pass that initializes the closest hit texture to a value indicating no hit (e.g., `vec4(-1)`). This is used to reset the accumulation buffer when the scene changes or at the start of rendering [S3, unofficial].
++A fragment shader pass that initializes the closest hit texture to a value indicating no hit (e.g., `vec4(-1)`). [S3, unofficial] This is used to reset the accumulation buffer when the scene changes or at the start of rendering [S3, unofficial].
+ 
+ ### Accumulation Integration
+-A rendering pass that blends an accumulated buffer with a new frame using a mixing factor. It selects the closest depth/position between the current frame's result and the accumulated history to maintain a stable isosurface view. If both have valid depth (`w > 0`), it selects the one with smaller `w` (closer to camera) [S5, unofficial].
++A rendering pass that blends an accumulated buffer with a new frame using a mixing factor. [S5, unofficial] It selects the closest depth/position between the current frame's result and the accumulated history to maintain a stable isosurface view. [S5, unofficial] If both have valid depth (`w > 0`), it selects the one with smaller `w` (closer to camera) [S5, unofficial].
+ 
+ ### Running Average Integration
+-A technique to compute a running average of frames using the inverse frame number. The accumulator is updated as `acc + (frame - acc) * uInvFrameNumber`, where `uInvFrameNumber` is the inverse of the current frame number [S5, unofficial].
++A technique to compute a running average of frames using the inverse frame number. [S5, unofficial] The accumulator is updated as `acc + (frame - acc) * uInvFrameNumber`, where `uInvFrameNumber` is the inverse of the current frame number [S5, unofficial].
+ 
+ ### Temporal Layer Averaging
+-A fragment shader pass that averages color values across multiple layers of a 2D texture array. It loops through all layers, sums the values, and divides by the number of layers. This is used for temporal accumulation or history blending in rendering pipelines [S1, unofficial].
++A fragment shader pass that averages color values across multiple layers of a 2D texture array. [S1, unofficial] It loops through all layers, sums the values, and divides by the number of layers. [S1, unofficial] This is used for temporal accumulation or history blending in rendering pipelines [S1, unofficial].
+ 
+ ## Operating characteristics

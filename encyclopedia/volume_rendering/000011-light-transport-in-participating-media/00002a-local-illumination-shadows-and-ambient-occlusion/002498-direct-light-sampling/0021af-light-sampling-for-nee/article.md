@@ -1,0 +1,92 @@
+# Light Sampling for NEE
+
+Also called: sampleDirectionToLight
+
+## Overview
+Light Sampling for NEE computes direct illumination by explicitly sampling a light source and a point on its surface from a path vertex, returning the direction, probability density, and emitted radiance [S1, unofficial]. It differs from [Direct Illumination Sampling with Mesh Intersection](4450-direct-illumination-sampling-with-mesh-intersection.md) by sampling emitter geometry directly rather than intersecting scene meshes [G]. It differs from [Light Ray Sampling](4885-light-ray-sampling.md) by casting rays from the light towards the vertex rather than from the vertex towards the light [G].
+
+## How it works
+**Inputs:**
+- `pos`: 3D position of the path vertex.
+- `sampler`: Random number generator.
+- `scene`: Scene containing light sources.
+
+**Outputs:**
+- `light_surf`: Sampled point on the light surface (position, normal `ns`, radiance).
+- `pdf`: Probability density of the sampled direction.
+- `Le`: Emitted radiance from the light towards the vertex.
+
+**Data Structures:**
+- `Light`: Represents a light source.
+  - `samplePoint(sampler, pdf)`: Returns a point on the light surface and its area PDF [S1, unofficial].
+  - `Le(point, direction)`: Returns emitted radiance [S1, unofficial].
+  - `importance`: Scalar estimating contribution (used in variants) [S2, unofficial].
+
+**Steps:**
+1. **Select Light Source:** Choose a light and its selection probability $p_{light}$ [S1, unofficial].
+2. **Sample Light Surface:** Sample a point on the light and its area PDF $p_{surf}$ [S1, unofficial].
+3. **Calculate Direction:** Compute vector from vertex to light [S1, unofficial].
+4. **Calculate Distance:** Compute distance [S1, unofficial].
+5. **Calculate Cosine:** Compute cosine between light normal and direction to vertex [S1, unofficial].
+6. **Calculate Directional PDF:** Combine selection probability, area PDF, and geometric term [S1, unofficial].
+7. **Return Radiance:** Get radiance towards vertex [S1, unofficial].
+
+**Formulas:**
+$$ \vec{d} = \text{normalize}(\text{light\_surf.position} - \text{pos}) $$
+$$ d = \|\text{light\_surf.position} - \text{pos}\| $$
+$$ \cos\theta = |\text{dot}(-\vec{d}, \text{light\_surf.ns})| $$
+$$ p(\vec{d}) = p_{light} \cdot \frac{d^2}{\cos\theta} \cdot p_{surf} $$
+$$ L_e = \text{light.Le}(\text{light\_surf}, -\vec{d}) $$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def sample_direction_to_light(pos, sampler, scene):
+    # Step 1: Select light source and probability
+    light, p_light = scene.sample_light(sampler)
+    # Step 2: Sample point on light surface and area PDF
+    light_surf, p_surf = light.sample_point(sampler)
+    # Step 3: Direction from vertex to light
+    dir_vec = normalize(light_surf.position - pos)
+    # Step 4: Distance
+    dist = length(light_surf.position - pos)
+    # Step 5: Cosine of angle between light normal and direction to vertex
+    cos_theta = abs(dot(-dir_vec, light_surf.ns))
+    # Step 6: Directional PDF (area PDF converted to solid angle PDF)
+    pdf = p_light * (dist**2 / cos_theta * p_surf)
+    # Step 7: Emitted radiance towards vertex
+    Le = light.Le(light_surf, -dir_vec)
+    return Le, pdf, dir_vec, dist
+```
+
+**Parameters:**
+- `p_light`: Probability of selecting the light source [S1, unofficial].
+- `p_surf`: PDF of the sampled point relative to the light's surface area [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Zero Cosine:** If $\cos\theta \approx 0$, the geometric term $d^2/\cos\theta$ becomes unstable [G]. Clamp $\cos\theta$ to a small epsilon or skip the sample [G].
+- **Zero Distance:** If the vertex lies on the light surface, $d \approx 0$ causes division by zero or numerical noise [G]. Offset the vertex slightly along the normal or handle as a boundary case [G].
+- **PDF Mismatch:** The directional PDF formula assumes the area PDF $p_{surf}$ is defined per unit area; ensure consistency with the light's sampling distribution [G].
+
+## Subtopics
+
+### Importance-Weighted Light Sampling with MIS
+Selects per-vertex lights proportional to each light's estimated contribution (`Light::importance`) plus a 15% uniform floor [S2, unofficial]. The same probability mass function (PMF) is reused for Multiple Importance Sampling (MIS) when a BSDF ray hits an emitter [S2, unofficial]. The scene maps hit shapes to light indices to enable O(1) emitter PDF calculation via `Light::pdfLiHit`, eliminating dynamic casts over all lights [S2, unofficial]. The uniform floor weight is fixed at 15% of the total probability mass [S2, unofficial].
+
+### Importance Sampling of Multiple Light Sources
+Attempts to use importance sampling to choose which light source to sample (e.g., sun vs. sky) to reduce noise [S3, unofficial]. In practice, this approach increased visual noise because the darker sky was rarely sampled but carried a very high weight when sampled, producing bright blue pixels amidst unaffected ones [S3, unofficial]. The effect was tested with 16 and 64 samples per light [S3, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ per sample when light selection and PDF calculation are direct [S2, unofficial]. Without shape-to-light mapping, selection scales with the number of lights [S2, unofficial].
+- **Memory Complexity:** Not given in the sources.
+- **Strengths:** Directly samples emitters to compute direct illumination, improving estimator stability for direct light paths [S1, unofficial].
+- **Limitations:** Poorly calibrated importance weights can increase variance, as seen when sampling dark lights with high weights [S3, unofficial].
+
+## Background
+Described in volumetric path tracing implementations that sample lights and surfaces to compute direct illumination [S1, unofficial]. Variants addressing light selection strategies and importance weighting have been documented in rendering engine development and academic projects [S2, unofficial][S3, unofficial].
+
+## Sources
+[S1] GitHub - yumcyaWiz/volpt: Volumetric path tracer written in C++, https://github.com/yumcyaWiz/volpt, fetched 2026-10-27 (unofficial)
+[S2] Add volumetric rendering, advanced materials, and imager effects, https://github.com/MihrimatriX/photon-engine/pull/3, fetched 2026-10-28 (unofficial)
+[S3] CS348b Final Project - Rendering Underwater Scenes, http://www.graphics.stanford.edu/courses/cs348b-competition/cs348b-04/underwater/index.html, fetched 2026-10-30 (unofficial)

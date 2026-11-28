@@ -1,0 +1,357 @@
+--- v003.md
++++ v004.md
+@@ -4,181 +4,199 @@
+ 
+ ## Overview
+-Neural Radiosity is a method that represents the outgoing radiance field of a scene as a neural network and optimizes its parameters by minimizing the residual of the rendering equation [S1, unofficial][S3, unofficial]. It solves the problem of computing global illumination by treating the rendering equation as a fixed-point problem where the network output is the solution [S3, unofficial]. Unlike differentiable rendering methods that compute gradients via backpropagation through a rasterizer or path tracer, Neural Radiosity directly optimizes the radiance function itself, making it independent of specific camera viewpoints during training [S1, unofficial]. It is distinguished from its sibling [Differentiable Neural Radiosity](7410-differentiable-neural-radiosity.md) by the latter's use of a separate network to cache differential radiance, whereas Neural Radiosity uses a single network for the radiance field itself [S1, unofficial].
++Neural Radiosity is an inverse rendering technique that solves the rendering equation by representing the outgoing radiance field as a neural network and optimizing its parameters to minimize the residual between the left-hand side (LHS) and right-hand side (RHS) of the equation [S1, unofficial][S3, unofficial]. Unlike [Volumetric Inverse Rendering with Differentiable Path Tracing](1523-volumetric-inverse-rendering-with-differentiable-path-tracin.md), which relies on differentiable path tracing to compute gradients, Neural Radiosity treats the rendering equation as a self-supervised loss function, allowing for direct optimization of scene properties without explicit light transport simulation per step [S1, unofficial][S3, unofficial]. It differs from [NeRV (Neural Reflectance and Visibility Fields)](10246-nerv-neural-reflectance-and-visibility-fields.md) by optimizing the radiance residual directly rather than learning separate reflectance and visibility fields [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Scene geometry (represented as a set of surfaces/meshes), material properties (BRDF $f$, emission $E$), and initial network parameters $\theta$.
+-*   **Output:** A neural network $L_\theta(x, \omega_o)$ that approximates the outgoing radiance at any point $x$ on the scene surface in direction $\omega_o$ [S3, unofficial].
++*   **Inputs:** Scene geometry (meshes), material properties (BRDF parameters, diffuse/specular reflectance), and initial network parameters $\theta$.
++*   **Outputs:** A trained neural network $L_\theta(x, \omega_o)$ representing the outgoing radiance field.
+ 
+ **Data Structures:**
+-*   **Neural Network:** A Multi-Layer Perceptron (MLP) with parameters $\theta$. The standard implementation uses 6 fully-connected layers with 512 neurons per hidden layer [S3, unofficial].
+-*   **Inputs to Network:** Surface location $x$, outgoing direction $\omega_o$, surface normal, diffuse reflectance, and specular reflectance [S3, unofficial].
+-*   **Feature Grids:** Multi-resolution learnable feature vectors stored in sparse grids (e.g., hash grids) to encode high-frequency spatial details [S3, unofficial]. These are queried based on $x$ and concatenated with the network inputs.
+-
+-**Formulas:**
+-The rendering equation is defined as:
+-$$
+-L(x, \omega_o) = E(x, \omega_o) + \int_{H^2} f(x, \omega_i, \omega_o) L(x'(x, \omega_i), -\omega_i) (\mathbf{n} \cdot \omega_i) d\omega_i
+-$$
+-where $x'(x, \omega_i)$ is the closest surface intersection of the ray originating at $x$ in direction $\omega_i$, $H^2$ is the hemisphere of incoming directions, and $\mathbf{n}$ is the surface normal [S1, unofficial][S3, unofficial].
+-
+-The residual $r_\theta(x, \omega_o)$ is the difference between the left-hand side (LHS) and right-hand side (RHS) of the rendering equation when $L$ is replaced by the network prediction $L_\theta$:
+-$$
+-r_\theta(x, \omega_o) = L_\theta(x, \omega_o) - E(x, \omega_o) - \int_{H^2} f(x, \omega_i, \omega_o) L_\theta(x'(x, \omega_i), -\omega_i) (\mathbf{n} \cdot \omega_i) d\omega_i
+-$$
+-Note: In the gradient computation for inverse rendering, partial derivatives with respect to scene parameters $p$ are included [S3, unofficial]:
+-$$
+-r_\theta(x, \omega_o) = \partial_p L_\theta(x, \omega_o) - \partial_p E(x, \omega_o) - \int_{H^2} f(x, \omega_i, \omega_o) \partial_p L_\theta(x'(x, \omega_i), -\omega_i) (\mathbf{n} \cdot \omega_i) d\omega_i - \int_{H^2} \partial_p f(x, \omega_i, \omega_o) L_\theta(x'(x, \omega_i), -\omega_i) (\mathbf{n} \cdot \omega_i) d\omega_i
+-$$
+-
+-The loss function is the squared $L_2$ norm of the residual integrated over all scene surfaces $M$ and hemispheres $H^2$:
+-$$
+-\mathcal{L}(\theta) = \int_M \int_{H^2} r_\theta(x, \omega_o)^2 d\omega_o dx
+-$$
+-This is estimated via Monte Carlo integration using $N$ samples $(x_j, \omega_{o,j})$ drawn from a distribution with density $p(x, \omega_o)$:
+-$$
+-\mathcal{L}(\theta) \approx \frac{1}{N} \sum_{j=1}^N \frac{r_\theta(x_j, \omega_{o,j})^2}{p(x_j, \omega_{o,j})}
+-$$
+-
+-The gradient of the loss with respect to network parameters $\theta$ is:
+-$$
+-\nabla_\theta \mathcal{L}(\theta) \approx \frac{1}{N} \sum_{j=1}^N \frac{2 r_\theta(x_j, \omega_{o,j}) \nabla_\theta r_\theta(x_j, \omega_{o,j})}{p(x_j, \omega_{o,j})}
+-$$
+-where $\nabla_\theta r_\theta$ is computed by differentiating the residual expression. The incident integral in the residual is estimated using $M$ samples of incident directions $\omega_{i,j,k}$:
+-$$
+-\int_{H^2} \dots d\omega_i \approx \frac{1}{M} \sum_{k=1}^M \frac{f(x_j, \omega_{i,j,k}, \omega_{o,j}) \partial_p L_\theta(x'(x_j, \omega_{i,j,k}), -\omega_{i,j,k}) (\mathbf{n} \cdot \omega_{i,j,k})}{p(\omega_{i,j,k})}
+-$$
+-The gradient of the residual term involving the integral is approximated similarly [S3, unofficial]:
+-$$
+-\nabla_\theta r_\theta(x_j, \omega_{o,j}) \approx \nabla_\theta (\partial_p L_\theta(x_j, \omega_{o,j})) - \frac{1}{M} \sum_{k=1}^M \frac{f(x_j, \omega_{i,j,k}, \omega_{o,j}) \nabla_\theta (\partial_p L_\theta(x'(x_j, \omega_{i,j,k}), -\omega_{i,j,k})) (\mathbf{n} \cdot \omega_{i,j,k})}{p(\omega_{i,j,k})}
+-$$
+-
+-**Parameters:**
+-*   **Network:** MLP, 6 layers, 512 hidden units [S3, unofficial].
+-*   **Sampling:** $x$ sampled uniformly on scene surfaces; $\omega_o$ sampled uniformly on the unit hemisphere (or sphere for two-sided BSDFs) [S3, unofficial].
+-*   **Incident Samples:** $M$ incident directions sampled uniformly over a hemisphere, often importance sampled from emitter and BSDF distributions [S3, unofficial].
+-*   **Optimization:** Stochastic Gradient Descent (SGD) or Adam [S3, unofficial].
++*   **Neural Network:** A Multi-Layer Perceptron (MLP) with 6 fully-connected layers and 512 neurons per hidden layer [S3, unofficial].
++*   **Network Inputs:**
++    *   Surface location $x$.
++    *   Outgoing direction $\omega_o$.
++    *   Surface normal at $x$.
++    *   Diffuse and specular reflectance at $x$.
++    *   Multi-resolution learnable feature vectors from sparse grids (optional, for high-frequency details) [S3, unofficial].
++*   **Sampling Buffers:**
++    *   Location samples $\{x_j\}_{j=1}^N$ uniformly distributed on scene surfaces.
++    *   Outgoing direction samples $\{\omega_{o,j}\}_{j=1}^N$ uniformly distributed on the unit hemisphere (or sphere for two-sided BSDFs) [S3, unofficial].
++    *   Incident direction samples $\{\omega_{i,j,k}\}_{k=1}^M$ uniformly distributed on the hemisphere for each $(x_j, \omega_{o,j})$ [S1, unofficial][S3, unofficial].
++
++**Algorithm Steps:**
++1.  **Initialize:** Set network parameters $\theta$ and learning rate $\eta$ [S1, unofficial].
++2.  **Sample:** For each optimization step, sample $N$ location vectors $\{x_j\}$ uniformly on all scene surfaces and $N$ outgoing directions $\{\omega_{o,j}\}$ uniformly over the hemisphere [S1, unofficial][S3, unofficial].
++3.  **Sample Incident Directions:** For each pair $(x_j, \omega_{o,j})$, sample $M$ incident directions $\{\omega_{i,j,k}\}_{k=1}^M$ uniformly over the hemisphere [S1, unofficial].
++4.  **Compute Residual:** Calculate the residual $r_\theta(x_j, \omega_{o,j})$ for each sample. The residual is the difference between the LHS and RHS of the rendering equation [S1, unofficial][S3, unofficial]:
++    $$
++    r_\theta(x, \omega_o) = L_\theta(x, \omega_o) - E(x, \omega_o) - \int_{H^2} f_r(x, \omega_i, \omega_o) L_\theta(x'(x, \omega_i), -\omega_i) (n \cdot \omega_i) d\omega_i
++    $$
++    where:
++    *   $L_\theta(x, \omega_o)$ is the network's predicted outgoing radiance.
++    *   $E(x, \omega_o)$ is the emitted radiance.
++    *   $f_r(x, \omega_i, \omega_o)$ is the BRDF.
++    *   $x'(x, \omega_i)$ is the closest surface intersection of the ray originating at $x$ with direction $\omega_i$.
++    *   $n$ is the surface normal.
++    *   The integral is estimated via Monte Carlo integration using the $M$ incident samples [S1, unofficial][S3, unofficial].
++5.  **Compute Loss:** Estimate the loss $\mathcal{L}(\theta)$ as the mean squared norm of the residual over all samples [S3, unofficial]:
++    $$
++    \mathcal{L}(\theta) \approx \frac{1}{N} \sum_{j=1}^{N} \frac{r_\theta(x_j, \omega_{o,j})^2}{p(x_j, \omega_{o,j})}
++    $$
++    where $p(x_j, \omega_{o,j})$ is the sampling density [S3, unofficial].
++6.  **Compute Gradient:** Calculate the gradient $\nabla_\theta \mathcal{L}(\theta)$ using automatic differentiation [S3, unofficial]. The gradient of the residual is:
++    $$
++    \nabla_\theta r_\theta(x, \omega_o) = \nabla_\theta (\partial_p L_\theta(x, \omega_o)) - \int_{H^2} f_r(x, \omega_i, \omega_o) \nabla_\theta (\partial_p L_\theta(x'(x, \omega_i), -\omega_i)) d\omega_i
++    $$
++    where $\partial_p$ denotes the derivative with respect to scene parameters $p$ (if applicable) [S3, unofficial]. The gradient of the loss is then:
++    $$
++    \nabla_\theta \mathcal{L}(\theta) \approx \frac{1}{N} \sum_{j=1}^{N} \frac{2 r_\theta(x_j, \omega_{o,j}) \nabla_\theta r_\theta(x_j, \omega_{o,j})}{p(x_j, \omega_{o,j})}
++    $$
++    [S3, unofficial]. Note: The baseline estimator includes the term $\nabla_\theta \langle R_\theta \rangle$, which pulls the RHS towards the LHS [S2, unofficial].
++7.  **Update:** Update parameters $\theta$ using a gradient-based optimizer (e.g., Adam) [S1, unofficial][S3, unofficial].
++8.  **Repeat:** Steps 2-7 until convergence [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-# Neural Radiosity Training Loop
+-# Inputs: scene geometry, materials, initial network parameters theta, learning rate eta
+-# Outputs: optimized network parameters theta
+-
+-def neural_radiosity(scene, materials, theta, eta, num_samples_N, num_incident_M):
+-    # Initialize network parameters theta
+-    # Note: In practice, use an optimizer like Adam
+-    
+-    while not converged:
++import torch
++import torch.nn as nn
++import numpy as np
++
++class NeuralRadiosity:
++    def __init__(self, scene_meshes, brdf_params, network_config):
++        """
++        Initialize the Neural Radiosity optimizer.
++        
++        Args:
++            scene_meshes: List of mesh objects providing surface geometry.
++            brdf_params: Dictionary of material properties (diffuse, specular, etc.).
++            network_config: Configuration for the MLP (layers, neurons, inputs).
++        """
++        self.scene_meshes = scene_meshes
++        self.brdf_params = brdf_params
++        self.network = MLP(network_config)
++        self.optimizer = torch.optim.Adam(self.network.parameters(), lr=1e-3)
++        
++    def sample_surface_points(self, N):
++        """Sample N points uniformly on all scene surfaces."""
++        # Implementation detail: Uniform sampling on triangle meshes
++        # Returns: locations (N, 3), normals (N, 3), uvs (N, 2)
++        pass
++
++    def sample_hemisphere(self, N, M):
++        """Sample N outgoing directions and M incident directions per point."""
++        # Outgoing: Uniform on hemisphere
++        # Incident: Uniform on hemisphere
++        # Returns: outgoing_dirs (N, 3), incident_dirs (N, M, 3)
++        pass
++
++    def compute_residual(self, x, omega_o, omega_i_samples):
++        """
++        Compute the residual r_theta(x, omega_o).
++        
++        Args:
++            x: Surface location (N, 3).
++            omega_o: Outgoing direction (N, 3).
++            omega_i_samples: Incident direction samples (N, M, 3).
++            
++        Returns:
++            residual: Residual value (N,).
++        """
++        # LHS: Predicted outgoing radiance
++        lhs = self.network(x, omega_o)
++        
++        # RHS: Emitted radiance + Reflected radiance
++        # Emitted radiance E(x, omega_o)
++        emitted = self.get_emitted_radiance(x, omega_o)
++        
++        # Reflected radiance: Integral of BRDF * Incident Radiance
++        # Incident radiance is approximated by L_theta at intersection points
++        reflected = torch.zeros_like(lhs)
++        for i in range(omega_i_samples.shape[1]):
++            omega_i = omega_i_samples[:, i, :]
++            # Trace ray from x in direction omega_i to find intersection x'
++            x_prime, normal_prime = self.trace_ray(x, omega_i)
++            
++            # Evaluate BRDF at x
++            f_r = self.evaluate_brdf(x, omega_i, omega_o)
++            
++            # Evaluate L_theta at x' with incoming direction -omega_i
++            # Note: L_theta expects outgoing direction, so we query with -omega_i
++            incident_radiance = self.network(x_prime, -omega_i)
++            
++            # Monte Carlo estimate of the integral
++            # Integral approx: (1/M) * sum( f_r * L_theta(x', -omega_i) )
++            reflected += f_r * incident_radiance
++            
++        reflected /= omega_i_samples.shape[1]
++        
++        # Residual = LHS - RHS
++        residual = lhs - emitted - reflected
++        return residual
++
++    def train_step(self, N=1000, M=32):
++        """Perform one training step."""
++        self.optimizer.zero_grad()
++        
+         # 1. Sample locations and outgoing directions
+-        # Sample x_j uniformly on all scene surfaces
+-        # Sample omega_o_j uniformly on unit hemisphere (or sphere for two-sided)
+-        samples = []
+-        for j in range(num_samples_N):
+-            x_j = sample_surface_uniform(scene)
+-            omega_o_j = sample_hemisphere_uniform(x_j.normal)
+-            
+-            # 2. Sample incident directions for the RHS integral
+-            # Sample omega_i_j_k uniformly over hemisphere, potentially importance sampled
+-            incident_samples = []
+-            for k in range(num_incident_M):
+-                omega_i_j_k = sample_incident_direction(scene, materials, x_j, omega_o_j)
+-                incident_samples.append(omega_i_j_k)
+-            
+-            samples.append((x_j, omega_o_j, incident_samples))
+-        
+-        # 3. Compute Loss and Gradient
+-        total_loss = 0.0
+-        total_grad = 0.0
+-        
+-        for (x_j, omega_o_j, incident_samples) in samples:
+-            # Evaluate L_theta(x_j, omega_o_j)
+-            L_theta = network_forward(theta, x_j, omega_o_j, materials.get_features(x_j))
+-            
+-            # Evaluate E(x_j, omega_o_j) and its gradient if needed
+-            E_val = materials.get_emission(x_j, omega_o_j)
+-            dE_dtheta = 0.0 # Emission is usually constant w.r.t network params
+-            
+-            # Evaluate RHS Integral: sum over incident directions
+-            rhs_integral = 0.0
+-            rhs_grad_integral = 0.0
+-            
+-            for omega_i in incident_samples:
+-                # Ray trace to find intersection x'
+-                x_prime = scene.ray_intersect(x_j, omega_i)
+-                
+-                # Evaluate L_theta at the hit point for the incoming direction
+-                # Note: The incoming direction to the hit point is -omega_i
+-                L_theta_prime = network_forward(theta, x_prime, -omega_i, materials.get_features(x_prime))
+-                
+-                # Get BRDF f(x_j, omega_i, omega_o_j)
+-                f_val = materials.get_brdf(x_j, omega_i, omega_o_j)
+-                
+-                # Compute weight: f * L_theta_prime * (n . omega_i) / p(omega_i)
+-                # p(omega_i) is the PDF of the sampling distribution
+-                pdf = get_sampling_pdf(omega_i)
+-                weight = (f_val * L_theta_prime * dot(x_j.normal, omega_i)) / pdf
+-                
+-                rhs_integral += weight
+-                
+-                # Compute gradient of the RHS term w.r.t theta
+-                # This requires backpropagating through L_theta_prime
+-                # d/dtheta (f * L_theta_prime) = f * dL_theta_prime/dtheta
+-                dL_prime_dtheta = network_backward(theta, x_prime, -omega_i, materials.get_features(x_prime))
+-                rhs_grad_integral += (f_val * dL_prime_dtheta * dot(x_j.normal, omega_i)) / pdf
+-            
+-            # Compute Residual r_theta
+-            # r_theta = L_theta - E - RHS_integral
+-            # For inverse rendering, include partial derivatives w.r.t scene params p
+-            # Here we assume standard radiosity optimization where p are not scene params but network params theta
+-            # So dE/dtheta = 0, df/dtheta = 0
+-            residual = L_theta - E_val - rhs_integral
+-            
+-            # Compute Gradient of Residual w.r.t theta
+-            # dr/dtheta = dL_theta/dtheta - d(E)/dtheta - d(RHS)/dtheta
+-            dL_dtheta = network_backward(theta, x_j, omega_o_j, materials.get_features(x_j))
+-            dRHS_dtheta = rhs_grad_integral
+-            
+-            grad_residual = dL_dtheta - dRHS_dtheta
+-            
+-            # Gradient of Loss: dL/dtheta = 2 * r_theta * dr/dtheta / N / p(x, omega_o)
+-            # Assuming uniform sampling, p(x, omega_o) is constant and absorbed into eta or normalized by N
+-            # Loss contribution
+-            loss_contribution = residual ** 2
+-            total_loss += loss_contribution
+-            
+-            # Gradient contribution
+-            grad_contribution = 2.0 * residual * grad_residual
+-            total_grad += grad_contribution
+-        
+-        # Update parameters
+-        # theta = theta - eta * (total_grad / N)
+-        update_parameters(theta, total_grad / num_samples_N, eta)
+-        
+-        # Check convergence based on loss change or max iterations
++        x, normals = self.sample_surface_points(N)
++        omega_o = self.sample_hemisphere(N, M)[0] # (N, 3)
++        
++        # 2. Sample incident directions
++        omega_i_samples = self.sample_hemisphere(N, M)[1] # (N, M, 3)
++        
++        # 3. Compute residual
++        residual = self.compute_residual(x, omega_o, omega_i_samples)
++        
++        # 4. Compute loss (Mean Squared Error)
++        loss = torch.mean(residual ** 2)
++        
++        # 5. Backpropagate and update
++        loss.backward()
++        self.optimizer.step()
++        
++        return loss.item()
++
++    def get_emitted_radiance(self, x, omega_o):
++        """Return emitted radiance at x in direction omega_o."""
++        # Implementation depends on scene light sources
++        pass
++
++    def evaluate_brdf(self, x, omega_i, omega_o):
++        """Evaluate BRDF f_r(x, omega_i, omega_o)."""
++        # Implementation depends on material model
++        pass
++
++    def trace_ray(self, origin, direction):
++        """Trace a ray from origin in direction direction. Return intersection point and normal."""
++        # Implementation depends on scene geometry
++        pass
+ ```
++
++**Parameters:**
++*   **Network Architecture:** MLP with 6 fully-connected layers, 512 neurons per hidden layer [S3, unofficial].
++*   **Sampling:** $N$ surface samples, $M$ incident direction samples per surface sample. Typical values for $M$ are not explicitly given, but [S3, unofficial] mentions using 8 spp for LHS and 2048 for RHS in related experiments, implying high sample counts for stability.
++*   **Optimizer:** Adam [S1, unofficial][S3, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+ *   **Bias and Variance:** The baseline gradient estimator is biased and has high variance due to the stochasticity of Monte Carlo integration in the RHS and its noisy derivatives [S2, unofficial]. This leads to slow training and occasionally darkened renders [S2, unofficial].
+-*   **Correlation Bias:** Using the same Monte Carlo samples for both factors in the gradient estimation (e.g., in the product $r_\theta \nabla_\theta r_\theta$) leads to $E(ab) \neq E(a)E(b)$, causing bias [S3, unofficial].
++*   **Correlation Bias:** Using the same Monte Carlo samples for both factors in the gradient estimation leads to $E(ab) \neq E(a)E(b)$, a known issue with generic AD in inverse rendering [S3, unofficial].
+ *   **Memory Intensity:** Storing the full computation graph of Monte Carlo rendering algorithms is memory intensive, making it prohibitive for complex scenes [S3, unofficial].
+-*   **Outdated Gradients:** Keeping $\partial_p L_\theta$ and $L_\phi$ outdated can introduce bias, though experiments show convergence improvements compared to previous methods [S3, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Differentiable Neural Radiosity](7410-differentiable-neural-radiosity.md)
+-A variant that uses a neural network to represent the *differential* radiance field, enabling view-independent gradient computation with constant time and memory complexity relative to path length. It avoids the quadratic time complexity of Radiative Backpropagation and the memory overhead of storing per-bounce data.
++A variant that pre-trains a neural network to cache the differential radiance distribution, enabling view-independent gradient computation with constant time and memory complexity relative to path length. It avoids the quadratic time complexity of Radiative Backpropagation and the memory overhead of Path Replay Backpropagation.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The training time depends on the number of samples $N$ and the number of incident samples $M$ per sample. Each iteration requires $N \times M$ ray intersections and network evaluations.
+-*   **Memory Complexity:** Memory usage is dominated by the storage of the neural network parameters and the feature grids. The computation graph size can be large if automatic differentiation is used for the entire Monte Carlo process, leading to high memory intensity [S3, unofficial].
+-*   **Performance:** The method suffers from slow convergence and high variance in gradient estimates [S2, unofficial]. It is generally slower than semi-gradient methods which ignore the partial derivatives of the RHS [S2, unofficial].
+-*   **Strengths:** It provides a global solution to the rendering equation, modeling global illumination effects directly. It is viewpoint-independent during training [S1, unofficial].
+-*   **Limitations:** High variance and bias in gradients lead to slow training and potential artifacts (darkened renders) [S2, unofficial]. Memory intensive for complex scenes [S3, unofficial].
+-*   **When to use:** When a global, viewpoint-independent radiance field is required and computational resources allow for slow convergence.
+-*   **When not to use:** When fast training or low memory usage is critical; consider semi-gradient methods or differentiable path tracing instead.
++*   **Time Complexity:** The method requires tracing rays for each sample to compute the RHS integral, leading to a time complexity proportional to $N \times M$ per optimization step, where $N$ is the number of surface samples and $M$ is the number of incident direction samples [S1, unofficial][S3, unofficial].
++*   **Memory Complexity:** Memory usage is dominated by the storage of the neural network parameters and the computation graph for automatic differentiation, which can be prohibitive for complex scenes [S3, unofficial].
++*   **Performance:** The baseline method suffers from slow convergence and potential darkening of renders due to biased and high-variance gradients [S2, unofficial].
++*   **Strengths:** Lightweight neural networks can model global radiance fields effectively [S1, unofficial]. It does not require explicit light transport simulation per step [S1, unofficial].
++*   **Limitations:** High variance and bias in gradients can hinder convergence [S2, unofficial]. Memory intensive for complex scenes [S3, unofficial].
++*   **When to Use:** Suitable for scenes where global illumination effects are important and computational resources allow for high sample counts [S1, unofficial].
++*   **When Not to Use:** Not suitable for real-time applications or very complex scenes due to memory and time constraints [S3, unofficial].
+ 
+ ## Background
+-Neural Radiosity was introduced by Hadadan et al. in 2021 [S1, unofficial][S3, unofficial]. It is based on the idea of using a neural network to solve the rendering equation by minimizing the residual [S3, unofficial]. The method leverages the radiometric prior to optimize network parameters and model the global radiance field with lightweight neural networks and trainable spatial feature grids [S1, unofficial]. It has been implemented in Mitsuba2 with Python bindings [S3, unofficial].
++Neural Radiosity was introduced by Hadadan et al. in 2021 [S1, unofficial][S3, unofficial]. It addresses the complexity of solving the rendering equation by leveraging neural networks to predict outgoing radiance [S1, unofficial]. The method has been implemented in Mitsuba2 with Python bindings, utilizing its differentiable megakernel for automatic differentiation [S3, unofficial].
+ 
+ ## Sources

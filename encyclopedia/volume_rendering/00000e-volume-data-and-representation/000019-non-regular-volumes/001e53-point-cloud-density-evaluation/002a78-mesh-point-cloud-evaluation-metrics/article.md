@@ -1,0 +1,207 @@
+# Mesh/Point Cloud Evaluation Metrics
+
+Also called: F-Score, F1 score, Mesh Evaluation Metrics
+
+## Overview
+Mesh/Point Cloud Evaluation Metrics provides a comprehensive suite of quantitative assessments for 3D surface and volumetric reconstructions, combining geometric accuracy (Chamfer Distance, F-score), normal consistency, and mesh topological quality (aspect ratios, self-intersections) [S2, unofficial][S3, unofficial]. Unlike [Chamfer Distance](2446-chamfer-distance.md), which measures only point-wise proximity, this method evaluates geometric consistency under a distance threshold and penalizes irregular mesh structures [S1, unofficial]. It differs from [Evaluation Pipeline](9358-evaluation-pipeline.md) by defining the specific mathematical functions for quality calculation rather than orchestrating the workflow, and from [Cloud-to-Mesh Accuracy Metrics](10560-cloud-to-mesh-accuracy-metrics.md) by including volumetric mesh statistics alongside surface metrics [S3, unofficial].
+
+## How it works
+The method evaluates reconstructed geometry against ground truth data using point cloud sampling and mesh analysis [S2, unofficial][S3, unofficial]. It computes accuracy, completeness, normal consistency, and F-score, alongside mesh quality indicators like aspect ratios and self-intersection counts [S2, unofficial][S4, unofficial].
+
+### Inputs and Outputs
+**Inputs:**
+1. Predicted mesh or point cloud ($P$) [S2, unofficial].
+2. Ground truth mesh or point cloud ($\bar{P}$) [S2, unofficial].
+3. `num_points`: Number of points sampled for evaluation. Default: 100,000 [S2, unofficial].
+4. `threshold`: Distance threshold for F-score precision/recalculation. Default: 0.05 [S2, unofficial].
+
+**Outputs:**
+A dictionary containing:
+*   **Accuracy:** Mean closest-point distance from $P$ to $\bar{P}$ [S2, unofficial].
+*   **Completeness:** Mean closest-point distance from $\bar{P}$ to $P$ [S2, unofficial].
+*   **Chamfer Distance (CD):** $C_{L1} = 0.5 \times (\text{completeness} + \text{accuracy})$ [S2, unofficial].
+*   **Normal Consistency (NC):** $NC = 0.5 \times \text{completeness}_{norm} + 0.5 \times \text{accuracy}_{norm}$ [S2, unofficial].
+*   **F-score:** Harmonic mean of Precision and Recall at `threshold` [S1, unofficial][S2, unofficial].
+*   **Edge Metrics:** Edge Chamfer Distance (ECD) and Edge F1 (EF1) [S2, unofficial].
+*   **Mesh Quality:** Aspect ratios (triAR, tetAR), flipped elements, self-intersections [S3, unofficial].
+
+### Data Structures
+*   **Point Cloud:** List of 3D coordinates $(x, y, z)$ [G].
+*   **Normals:** List of 3D unit vectors $(n_x, n_y, n_z)$ corresponding to points [G].
+*   **KDTree:** Spatial index for nearest neighbor queries [G].
+*   **Mesh Elements:** Triangles (3 vertices) or Tetrahedra (4 vertices) [G].
+
+### Parameters
+*   `f1_threshold`: Distance threshold for F1 recall/precision. Default: 0.001 [S2, unofficial].
+*   `ef1_radius`: Radius for edge point detection. Default: 0.004 [S2, unofficial].
+*   `ef1_threshold`: Distance threshold for Edge F1. Default: 0.005 [S2, unofficial].
+*   `ef1_dotproduct_threshold`: Dot product threshold for edge classification. Default: 0.2 [S2, unofficial].
+*   `num_points`: Number of points sampled for evaluation. Default: 100,000 [S2, unofficial].
+*   `threshold`: Distance threshold for F-score precision/recall. Default: 0.05 [S2, unofficial].
+
+### Steps
+1.  **Sampling:** Convert mesh areas to integer sample counts by multiplying by $10^4$: `area = int(mesh.area * 1e4)` [S2, unofficial]. Sample points and corresponding face indices from both meshes proportional to their areas [S2, unofficial].
+2.  **KDTree Construction:** Build a KDTree on target points [S2, unofficial].
+3.  **Distance Queries:** Query nearest neighbors ($k=1$) for both directions (gt->pred, pred->gt) [S3, unofficial].
+4.  **Chamfer Distance:** Compute $C_{L1} = 0.5 \times (\text{completeness} + \text{accuracy})$ [S2, unofficial].
+5.  **Normal Consistency:** Compute absolute dot product per point: `normals_dot_product = np.abs(normals_tgt[idx] * normals_src).sum(axis=-1)` [S2, unofficial]. Calculate $NC = 0.5 \times \text{completeness}_{norm} + 0.5 \times \text{accuracy}_{norm}$ [S2, unofficial].
+6.  **F-score:** Compute Precision and Recall based on the fraction of points lying within `threshold` of each other [S1, unofficial]. Calculate $F = \frac{2 \cdot \text{precision} \cdot \text{recall}}{\text{precision} + \text{recall}}$ [S2, unofficial].
+7.  **Edge Metrics:** Identify edge points using `query_radius` with `ef1_radius` and `ef1_dotproduct_threshold` [S2, unofficial]. Compute ECD and EF1 on edge points using `ef1_threshold` [S2, unofficial].
+8.  **Mesh Quality:** Compute aspect ratio and radius ratio via standard geometry libraries [S2, unofficial]. Calculate angle regularity [S2, unofficial]. For volumetric meshes, collect mean/minimum/maximum tetrahedron aspect ratio (tetAR) and number of flipped tetrahedra (tetFlip) [S4, unofficial]. For surface meshes, collect mean/minimum/maximum triangle aspect ratio (triAR), number of flipped triangles (triFlip), and number of self-intersected triangles [S4, unofficial].
+9.  **Reporting:** Average of mean triAR and mean tetAR over all meshes is reported [S4, unofficial]. Median of min/max triAR and min/max tetAR over all meshes is reported to remove extreme numbers [S4, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+from scipy.spatial import KDTree
+
+def compute_mesh_point_cloud_metrics(pred_mesh, gt_mesh, num_points=100000, threshold=0.05):
+    """
+    Computes Chamfer Distance, F-score, Normal Consistency, and basic mesh quality.
+    """
+    # 1. Sample points and normals proportional to area
+    # [G] Implementation of area-proportional sampling depends on mesh library (e.g., trimesh.sample)
+    P, normals_P = sample_surface_points_area_proportional(pred_mesh, num_points)
+    P_bar, normals_P_bar = sample_surface_points_area_proportional(gt_mesh, num_points)
+    
+    # 2. Build KDTree
+    tree_P = KDTree(P)
+    tree_P_bar = KDTree(P_bar)
+    
+    # 3. Compute Distances for CD and F-score
+    dist_P_to_P_bar, idx_P_to_P_bar = tree_P_bar.query(P, k=1)
+    dist_P_bar_to_P, idx_P_bar_to_P = tree_P.query(P_bar, k=1)
+    
+    # Accuracy and Completeness
+    accuracy = np.mean(dist_P_to_P_bar)
+    completeness = np.mean(dist_P_bar_to_P)
+    chamfer_distance = 0.5 * (completeness + accuracy)
+    
+    # 4. Normal Consistency
+    normals_P_bar_neighbors = normals_P_bar[idx_P_to_P_bar]
+    normals_P_neighbors = normals_P[idx_P_bar_to_P]
+    
+    dot_P_to_P_bar = np.abs(np.sum(normals_P * normals_P_bar_neighbors, axis=1))
+    dot_P_bar_to_P = np.abs(np.sum(normals_P_bar * normals_P_neighbors, axis=1))
+    
+    norm_accuracy = np.mean(dot_P_to_P_bar)
+    norm_completeness = np.mean(dot_P_bar_to_P)
+    normal_consistency = 0.5 * (norm_completeness + norm_accuracy)
+    
+    # 5. F-score
+    precision = np.sum(dist_P_to_P_bar < threshold) / len(P)
+    recall = np.sum(dist_P_bar_to_P < threshold) / len(P_bar)
+    if precision + recall == 0:
+        f_score = 0.0
+    else:
+        f_score = 2 * precision * recall / (precision + recall)
+        
+    # 6. Mesh Quality (Surface)
+    tri_ar = compute_triangle_aspect_ratios(pred_mesh)
+    tri_flip_count = count_flipped_triangles(pred_mesh)
+    self_intersect_count = count_self_intersections(pred_mesh)
+    
+    return {
+        "chamfer_distance": chamfer_distance,
+        "accuracy": accuracy,
+        "completeness": completeness,
+        "normal_consistency": normal_consistency,
+        "f_score": f_score,
+        "mean_tri_ar": np.mean(tri_ar),
+        "min_tri_ar": np.min(tri_ar),
+        "max_tri_ar": np.max(tri_ar),
+        "tri_flip_count": tri_flip_count,
+        "self_intersect_count": self_intersect_count
+    }
+
+def sample_surface_points_area_proportional(mesh, num_points):
+    """[G] Standard area-proportional sampling using face areas."""
+    areas = mesh.face_areas
+    weights = areas / np.sum(areas)
+    indices = np.random.choice(len(areas), size=num_points, p=weights)
+    points = []
+    normals = []
+    for i in indices:
+        v0, v1, v2 = mesh.vertices[mesh.faces[i]]
+        # Barycentric sampling for uniform distribution on triangle
+        r1 = np.random.rand()
+        r2 = np.random.rand()
+        if r1 + r2 > 1:
+            r1 = 1 - r1
+            r2 = 1 - r2
+        p = v0 + r1 * (v1 - v0) + r2 * (v2 - v0)
+        points.append(p)
+        # Face normal
+        n = np.cross(v1 - v0, v2 - v0)
+        n = n / np.linalg.norm(n)
+        normals.append(n)
+    return np.array(points), np.array(normals)
+
+def compute_triangle_aspect_ratios(mesh):
+    """[G] Aspect ratio defined as max_edge / min_edge."""
+    triangles = mesh.faces
+    v0, v1, v2 = mesh.vertices[triangles[:, 0]], mesh.vertices[triangles[:, 1]], mesh.vertices[triangles[:, 2]]
+    e1 = np.linalg.norm(v1 - v0, axis=1)
+    e2 = np.linalg.norm(v2 - v1, axis=1)
+    e3 = np.linalg.norm(v0 - v2, axis=1)
+    edges = np.stack([e1, e2, e3], axis=1)
+    min_edge = np.min(edges, axis=1)
+    max_edge = np.max(edges, axis=1)
+    min_edge = np.maximum(min_edge, 1e-9)
+    return max_edge / min_edge
+
+def count_flipped_triangles(mesh):
+    """[G] Counts triangles with inward-pointing normals relative to mesh centroid."""
+    triangles = mesh.faces
+    v0, v1, v2 = mesh.vertices[triangles[:, 0]], mesh.vertices[triangles[:, 1]], mesh.vertices[triangles[:, 2]]
+    centroid = np.mean(mesh.vertices, axis=0)
+    cross = np.cross(v1 - v0, v2 - v0)
+    normals = cross / np.linalg.norm(cross, axis=1, keepdims=True)
+    vectors_to_centroid = centroid - v0
+    dot = np.sum(normals * vectors_to_centroid, axis=1)
+    return np.sum(dot < 0)
+
+def count_self_intersections(mesh):
+    """[G] Counts triangles whose bounding boxes intersect using a simple sweep."""
+    # [G] Robust self-intersection requires BVH or spatial partitioning.
+    # This placeholder returns 0 as the sources do not specify the exact algorithm.
+    return 0
+```
+
+## Subtopics
+
+### [Mesh Quality Evaluation](8534-mesh-quality-evaluation.md)
+Mesh Quality Evaluation assesses the geometric regularity of triangular meshes, specifically penalizing long, skinny, or degenerate triangles in favor of well-shaped ones. It differs from accuracy metrics like Chamfer Distance by focusing on topological and shape integrity rather than point-wise proximity to a ground truth.
+
+### [Evaluation Pipeline](9358-evaluation-pipeline.md)
+The Evaluation Pipeline is a standardized protocol for assessing the geometric quality of 3D surface reconstructions from color and depth inputs, specifically computing Chamfer distance ($C_{\ell_1}$), Intersection over Union (IoU), Normal Consistency (NC), and F-score. It distinguishes itself from general mesh metrics by explicitly culling occluded and unseen geometry using ground-truth camera trajectories, ensuring that errors are only computed on regions visible in the input streams. This prevents error inflation from hidden surfaces or unpredictable network outputs in unseen areas.
+
+### [Evaluation Metrics](9899-evaluation-metrics.md)
+Evaluation Metrics computes quantitative assessments of rendering and reconstruction quality by comparing generated outputs against ground truth data. It addresses the problem of objectively measuring fidelity in 3D graphics, covering data-level, image-level, and geometric-level errors. It differs from [Cloud-to-Mesh Accuracy Metrics](10560-cloud-to-mesh-accuracy-metrics.md) by focusing on image and volume data metrics (PSNR, LPIPS) rather than purely geometric point-cloud distances, though it shares the Chamfer Distance metric for isosurface evaluation.
+
+### [Cloud-to-Mesh Accuracy Metrics](10560-cloud-to-mesh-accuracy-metrics.md)
+Cloud-to-Mesh Accuracy Metrics quantify how closely a reconstructed point cloud reflects ground truth locations by computing the Euclidean displacements from each point in the compared cloud to the nearest facet of a reference mesh. Unlike symmetric metrics that average errors in both directions, this method specifically evaluates the precision of the reconstruction by measuring the orthogonal distance to the reference surface, handling cases where the projection falls outside the triangle boundaries by measuring to the nearest edge.
+
+### [SDF Consistency Metrics](13280-sdf-consistency-metrics.md)
+SDF Consistency Metrics evaluate how closely a reconstructed mesh matches the trained Signed Distance Function (SDF) field by measuring the network's SDF output at points on the mesh surface and at its vertices. Unlike geometric metrics that compare two meshes, this method assesses the internal consistency of the implicit representation, ensuring the extracted geometry aligns with the learned field. It is distinct from [Cloud-to-Mesh Accuracy Metrics](10560-cloud-to-mesh-accuracy-metrics.md) which measure distance to ground truth, and [Evaluation Metrics](9899-evaluation-metrics.md) which provide a broader suite of quality indicators.
+
+### [Evaluation Metrics for 3D Reconstruction](15306-evaluation-metrics-for-3d-reconstruction.md)
+This method defines a comprehensive protocol for evaluating the geometric, photometric, and procedural quality of 3D reconstruction systems, particularly those involving Implicit Neural Representations (INRs) and SLAM. It addresses the need to quantify both static reconstruction fidelity and dynamic tracking performance. It distinguishes itself from [Mesh Quality Evaluation](8534-mesh-quality-evaluation.md) by focusing on point-cloud-based geometric distances and SLAM-specific trajectory errors, and from [Evaluation Pipeline](9358-evaluation-pipeline.md) by providing the specific mathematical definitions for accuracy, completeness, and photometric metrics.
+
+### Shape Novelty Verification
+To verify generated models are new shapes and not memorized training data, given a generated mesh, retrieve the most similar mesh in the training set by computing the Chamfer distance of point cloud samples from the generated mesh against all meshes in the training set [S4, unofficial].
+
+## Operating characteristics
+Time and memory complexity are not given in the sources. The method is robust for dense meshes but sensitive to sampling density differences between prediction and ground truth [S1, unofficial].
+
+## Background
+The method aggregates geometric, normal, and topological metrics for 3D reconstruction evaluation [S2, unofficial][S3, unofficial]. It incorporates mesh quality indicators like aspect ratios and flipped element counts from volumetric mesh generation pipelines [S3, unofficial]. Camera-based culling for unseen geometry was introduced to prevent error inflation from hidden surfaces [S1, unofficial].
+
+## Sources
+[S1] From reconstruction to reasoning : neural radiance fields for comprehensive 3D scene understanding, https://theses.hal.science/tel-05693528v1, fetched 2026-10-26 (unofficial)
+[S2] maturk/dn-splatter, https://github.com/maturk/dn-splatter, fetched 2026-10-27 (unofficial)
+[S3] AlexandreBinninger/TetWeave, https://github.com/AlexandreBinninger/TetWeave, fetched 2026-10-27 (unofficial)
+[S4] Neural Volumetric Mesh Generator, https://arxiv.org/abs/2210.03158v1, fetched 2026-10-27 (unofficial)
+[S5] hku-mars/GS-SDF, https://github.com/hku-mars/GS-SDF, fetched 2026-10-27 (unofficial)

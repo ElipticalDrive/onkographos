@@ -1,0 +1,84 @@
+# Grayscale Luminance Alpha Mapping
+
+Also called: Alpha Channel Adjustment via Grayscale Conversion, NTSC luminance alpha mapping
+
+## Overview
+Grayscale Luminance Alpha Mapping is a technique for generating a transparency mask (alpha channel) from RGB color data by computing the luminance of each voxel. It solves the problem of distinguishing object voxels from background voxels in volume rendering when the background is black and the object has varied colors, ensuring background voxels become fully transparent while preserving object visibility. It differs from sibling methods like [Alpha Computation with Alpha Mask](10549-alpha-computation-with-alpha-mask.md) which use a separate binary mask, and [Alpha-to-Extinction Conversion](13044-alpha-to-extinction-conversion.md) which maps existing alpha values to extinction coefficients, by deriving alpha directly from the intensity of the color channels using a fixed weighted sum.
+
+## How it works
+**Inputs and Outputs:**
+- Input: An RGBA volume stack where the RGB channels contain the object color data and the background is black (0,0,0). The existing alpha channel is typically ignored or replaced.
+- Output: A new RGBA volume stack where the alpha channel is replaced by the computed grayscale luminance values.
+
+**Data Structures:**
+- The input is treated as a 3D array of voxels, each with four components: $R, G, B, \alpha_{old}$.
+- The output is a 3D array of voxels with components $R, G, B, \alpha_{new}$.
+- Values are typically 8-bit unsigned integers (0–255) or normalized floats (0.0–1.0). The formula applies to the numeric values regardless of bit depth, provided they are scaled appropriately.
+
+**Steps:**
+1. For each voxel in the volume, retrieve the Red ($R$), Green ($G$), and Blue ($B$) channel values.
+2. Compute the luminance value $\alpha_{new}$ using the NTSC luminance weighting equation:
+   $$ \alpha_{new} = 0.3 R + 0.59 G + 0.11 B $$
+   where $R, G, B$ are the normalized or scaled intensity values of the respective channels.
+3. Replace the existing alpha channel $\alpha_{old}$ with $\alpha_{new}$.
+4. Retain the original $R, G, B$ values for the color channels.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def grayscale_luminance_alpha_mapping(volume_rgba):
+    """
+    volume_rgba: 3D array of shape (D, H, W, 4) with dtype float32 or uint8.
+    Returns: 3D array of shape (D, H, W, 4) with updated alpha channel.
+    """
+    # Assume input is normalized to [0.0, 1.0] for calculation.
+    # If uint8, divide by 255.0 before calculation, then multiply back if needed.
+    
+    # Extract RGB channels
+    R = volume_rgba[:, :, :, 0]
+    G = volume_rgba[:, :, :, 1]
+    B = volume_rgba[:, :, :, 2]
+    
+    # Compute luminance alpha
+    # Using standard NTSC weights
+    alpha_new = 0.3 * R + 0.59 * G + 0.11 * B
+    
+    # Clip to valid range [0.0, 1.0] to handle any precision issues
+    alpha_new = clip(alpha_new, 0.0, 1.0)
+    
+    # Construct output volume
+    output = volume_rgba.copy()
+    output[:, :, :, 3] = alpha_new
+    
+    return output
+```
+
+**Parameters:**
+- Weights: $0.3$ for Red, $0.59$ for Green, $0.11$ for Blue. These are the standard NTSC luminance coefficients [S1].
+- Bit depth: Typically 8-bit unsigned integer (0–255) for storage, but calculations should be performed in higher precision to avoid quantization artifacts [S1].
+
+**Edge Cases and Pitfalls:**
+- **Black Background:** If the background in the RGB channels is black (0,0,0), the computed alpha will be 0, resulting in near-total transparency for background voxels. This is the intended behavior for separating object from background after color inversion [S1].
+- **Color Inversion:** If color inversion was performed on the RGB channels, the background becomes black, making this method effective for creating a clean transparency mask [S1].
+- **Precision:** When converting between bit depths (e.g., 8-bit to float and back), ensure proper scaling to preserve the linear relationship between color intensity and alpha [S1].
+
+## Subtopics
+
+### Alpha-to-Grayscale Intensity Mapping
+Visualizes the alpha channel as grayscale intensity. It maps the alpha value to an RGB grayscale color using a linear interpolation between black and white, saturated to the range [0,1]. The formula is `returnValue.rgb = lerp(float3(0.0,0.0,0.0), float3(1.0,1.0,1.0), saturate(returnValue.a/_CurveParams.x))` [S2, unofficial]. This is used for visualization/debugging rather than transparency generation.
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$ where $N$ is the number of voxels, as it requires a single pass over the volume data with constant-time arithmetic per voxel.
+- **Memory Complexity:** $O(N)$ for the input and output volume stacks. No additional large data structures are required.
+- **Strengths:** Simple to implement; effectively separates black-background objects from transparent backgrounds; leverages standard colorimetric weights.
+- **Limitations:** Assumes the background is black and the object has non-zero luminance; does not account for perceptual uniformity or specific material properties; sensitive to the initial color space and bit depth of the input data.
+- **When to use:** When importing colored image sequences or RGB volumes where the background is black and a simple transparency mask is needed.
+- **When not to use:** When the background is not black, or when alpha should be based on material properties rather than color intensity.
+
+## Background
+This method was described in the context of volume rendering using Amira software, where it was necessary to adjust the alpha channel of a colored image sequence to ensure only object voxels were visible. The technique uses the standard NTSC luminance formula for grayscale conversion, which is also used by tools like Photoshop [S1]. It was implemented using Amira's CastField and ChannelWorks tools to replace the default fully opaque alpha channel with the computed luminance channel [S1].
+
+## Sources
+[S1] Showing their true colors: a practical approach to volume rendering ..., https://pmc.ncbi.nlm.nih.gov/articles/PMC2876090/, fetched 2026-10-27
+[S2] dario-zubovic/metaballs, https://github.com/dario-zubovic/metaballs, fetched 2026-10-26 (unofficial)

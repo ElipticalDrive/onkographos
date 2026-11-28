@@ -1,0 +1,143 @@
+# Interpolated Pre-Integrated Lighting
+
+Also called: Lighting method for pre-integrated volume rendering
+
+## Overview
+Interpolated Pre-Integrated Lighting is a technique for achieving high-quality, discontinuity-free lighting in pre-integrated volume rendering by approximating the lighting integral through linear interpolation between front and back sample planes [S1]. Unlike standard pre-integrated rendering which applies lighting to a single representative sample, this method eliminates lighting artifacts at transparent boundaries and allows an unlimited number of possibly transparent isosurfaces without ordering problems [S1]. It sets itself apart from [Incremental Subrange Integration](23821-incremental-subrange-integration.md) by focusing on the spatial interpolation of lighting contributions across a sampling slab rather than optimizing the accumulation of the volume rendering integral itself.
+
+## How it works
+### Inputs and Outputs
+**Inputs:**
+*   A volume dataset with a defined transfer function mapping scalar values to color $(r, g, b)$ and opacity $\alpha$.
+*   A sampling scheme defining front sample index $i$ and back sample index $j$ for each ray segment (slab).
+*   Normals $N_i$ and $N_j$ at the front and back sampling points, either looked up from a gradient field or computed.
+*   Lighting parameters (light position, view direction, material properties).
+
+**Outputs:**
+*   Final pixel color $C_{output}$ and opacity $\alpha_{output}$.
+
+### Data Structures
+The method relies on two 2D RGBA lookup tables indexed by the pair of sample indices $(i, j)$, where $i$ and $j$ represent the scalar values or indices of the front and back samples of a slab. The tables pack five pieces of information into four components across two textures:
+
+1.  **Front Lookup Table:**
+    *   $(r, g, b)$: Diffusely-lit, front-weighted color integral.
+    *   $\alpha$: Full pre-integrated opacity (unweighted).
+2.  **Back Lookup Table:**
+    *   $(r, g, b)$: Diffusely-lit, back-weighted color integral.
+    *   $\alpha$: Specularly-lit, back-weighted color intensity.
+
+The front-weighted specular color is not stored directly but is derived during rendering by subtracting the back-weighted specular intensity (from the Back Table's $\alpha$) from the full pre-integrated opacity (from the Front Table's $\alpha$). This relies on the constraint that the sum of front-weighted and back-weighted integrals equals the unweighted integral [S1].
+
+### Lookup Table Construction
+The tables are pre-computed with $O(n^2)$ complexity, where $n$ is the number of discrete sample values [S1].
+
+1.  **Unweighted Integrals:** Compute the standard pre-integrated color and opacity for all pairs $(i, j)$:
+    $$ C_{i \rightarrow j}^1 = \sum_{k=i}^{j} A_k C_k $$
+    $$ \alpha_{i \rightarrow j} = \sum_{k=i}^{j} A_k $$
+    Where $A_k$ is the opacity and $C_k$ is the color at index $k$.
+
+2.  **Globally Ramped Integrals:** Compute the integral weighted by the index $k$:
+    $$ C_{i \rightarrow j}^G = \sum_{k=i}^{j} k A_k C_k $$
+
+3.  **Weighted Color Calculation:** Derive the front-weighted color $C_{i \rightarrow j}^W$ (which corresponds to the contribution weighted toward the front sample $i$) using the formula:
+    $$ C_{i \rightarrow j}^W = \frac{C_{i \rightarrow j}^G - i C_{i \rightarrow j}^1}{j - i} $$
+    This operation removes the dependence on $i$ from each term and scales the result by the slab thickness $(j-i)$ [S1].
+
+4.  **Table Population:**
+    *   **Diffuse Tables:** Compute $C_{i \rightarrow j}^W$ using the transfer function's color $C_k$. Store front-weighted diffuse in Front Table RGB and back-weighted diffuse in Back Table RGB.
+    *   **Specular Tables:** Compute $C_{i \rightarrow j}^W$ using white color $(1, 1, 1)$ for $C_k$. Store back-weighted specular intensity in Back Table $\alpha$.
+    *   **Opacity:** Store $\alpha_{i \rightarrow j}$ in Front Table $\alpha$.
+
+### Rendering Algorithm
+For each ray and sampling slab defined by front sample $i$ and back sample $j$:
+
+1.  **Retrieve Indices:** Identify the scalar values or indices $i$ and $j$ at the front and back of the current slab.
+2.  **Lookup Pre-integrated Data:**
+    *   Read Front Table at $(i, j)$ to get $C_{diffuse, front}^{RGB}$ and $\alpha_{full}$.
+    *   Read Back Table at $(i, j)$ to get $C_{diffuse, back}^{RGB}$ and $I_{specular, back}$.
+3.  **Compute Specular Components:**
+    *   Calculate front-weighted specular intensity: $I_{specular, front} = \alpha_{full} - I_{specular, back}$.
+    *   Note: The specular color is assumed to be white (1,1,1) in the integration, so the intensity values can be used directly as scalar multipliers for the specular lighting model.
+4.  **Compute Lighting Contributions:**
+    *   Compute diffuse lighting contribution for front sample: $L_{diffuse, i} = \text{DiffuseLight}(N_i, \text{material})$.
+    *   Compute specular lighting contribution for front sample: $L_{specular, i} = \text{SpecularLight}(N_i, \text{material})$.
+    *   Compute diffuse lighting contribution for back sample: $L_{diffuse, j} = \text{DiffuseLight}(N_j, \text{material})$.
+    *   Compute specular lighting contribution for back sample: $L_{specular, j} = \text{SpecularLight}(N_j, \text{material})$.
+5.  **Apply Weights:**
+    *   Front-weighted lit color: $C_i = C_{diffuse, front}^{RGB} \cdot L_{diffuse, i} + \mathbf{1} \cdot I_{specular, front} \cdot L_{specular, i}$.
+    *   Back-weighted lit color: $C_j = C_{diffuse, back}^{RGB} \cdot L_{diffuse, j} + \mathbf{1} \cdot I_{specular, back} \cdot L_{specular, j}$.
+    *   *Note: The source describes multiplying the table values by the lighting contribution. The table values represent the integrated color/opacity. The lighting model is applied to these integrated values.*
+6.  **Composite:**
+    *   $C_{output} = C_i + C_j$.
+    *   $\alpha_{output} = \alpha_{full}$.
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_slab(i, j, Ni, Nj, light_pos, view_dir, material):
+    """
+    Renders a single slab between sample indices i and j.
+    i, j: Scalar values or indices of front and back samples.
+    Ni, Nj: Normals at front and back samples.
+    """
+    
+    # 1. Lookup pre-integrated data from 2D RGBA tables
+    # Front Table: RGB = Front Diffuse Color, Alpha = Full Opacity
+    front_data = lookup_table_front[i, j]
+    C_diff_front = front_data.rgb
+    alpha_full = front_data.a
+    
+    # Back Table: RGB = Back Diffuse Color, Alpha = Back Specular Intensity
+    back_data = lookup_table_back[i, j]
+    C_diff_back = back_data.rgb
+    I_spec_back = back_data.a
+    
+    # 2. Derive Front Specular Intensity
+    # Constraint: Front Specular + Back Specular = Full Opacity (assuming white specular integration)
+    I_spec_front = alpha_full - I_spec_back
+    
+    # 3. Compute Lighting Models
+    # Standard Blinn-Phong or similar
+    L_diff_i = compute_diffuse(Ni, light_pos, material)
+    L_spec_i = compute_specular(Ni, light_pos, view_dir, material)
+    
+    L_diff_j = compute_diffuse(Nj, light_pos, material)
+    L_spec_j = compute_specular(Nj, light_pos, view_dir, material)
+    
+    # 4. Apply Lighting to Pre-integrated Colors
+    # The table values are colors (RGB). Lighting is applied as a multiplier.
+    # Specular is an intensity added to the color.
+    
+    # Front contribution: Diffuse color * Diffuse light + Specular intensity * Specular light
+    C_i = C_diff_front * L_diff_i + vec3(I_spec_front) * L_spec_i
+    
+    # Back contribution: Diffuse color * Diffuse light + Specular intensity * Specular light
+    C_j = C_diff_back * L_diff_j + vec3(I_spec_back) * L_spec_j
+    
+    # 5. Output
+    C_output = C_i + C_j
+    alpha_output = alpha_full
+    
+    return C_output, alpha_output
+```
+
+### Parameters and Edge Cases
+*   **Table Size:** Larger tables reduce interpolation error when sample values fall between discrete entries. The source provides performance data for tables up to $n=2048$ [S1].
+*   **Degenerate Input ($i=j$):** If the front and back samples are identical, the denominator $(j-i)$ in the weighted color formula becomes zero. This case represents a zero-thickness slab and should result in zero color contribution and zero opacity, or be handled as a single-sample case. The source notes that $i > j$ cases exist but does not detail the handling, implying standard ray casting order ($i < j$) is maintained.
+*   **Rapid Normal Changes:** If normals change rapidly or are poorly defined (e.g., at sharp boundaries between homogeneous materials), the method may introduce minor lighting artifacts compared to special-case isosurface rendering [S1].
+
+## Operating characteristics
+*   **Complexity:** The lookup table generation has $O(n^2)$ complexity, a significant improvement over the $O(n^3)$ brute-force method [S1].
+*   **Performance:** The rendering algorithm is slower than traditional pre-integrated rendering because it requires computing two lighting values per slab and an extra texture read (fill-rate dependent) [S1].
+    *   *Skull Dataset (256³, 512² window):* 4.4 fps with computation masking, 2.2 fps without (vs 5.0/2.6 fps for single-sample).
+    *   *Vortex Dataset (128³, 512² window):* 8.1 fps with masking, 5.4 fps without (vs 10.5/8.1 fps for single-sample) [S1].
+*   **Strengths:** Eliminates lighting discontinuities at transparent boundaries; supports unlimited transparent isosurfaces; high-quality lighting effects comparable to isosurface rendering for smooth surfaces.
+*   **Limitations:** Fill-rate dependent; slightly slower than standard pre-integration; potential artifacts at sharp material boundaries with rapidly changing normals [S1].
+
+## Background
+The method was introduced by [S1] as a solution to the lighting problem in pre-integrated volume rendering. Standard pre-integration computes lighting for a single sample, leading to artifacts. This method approximates the lighting integral by interpolating between front and back samples, analogous to Gouraud shading but applied to pre-integrated volumes. It builds on the concept of pre-integrated volume rendering [MHC90, EKE01] and complements techniques like Incremental Subrange Integration for efficient table generation.
+
+## Sources
+[S1] High-Quality Lighting and Efficient Pre-Integration for Volume Rendering, https://www.cs.ucdavis.edu/~ma/papers/vissym04a.pdf, fetched 2026-10-29

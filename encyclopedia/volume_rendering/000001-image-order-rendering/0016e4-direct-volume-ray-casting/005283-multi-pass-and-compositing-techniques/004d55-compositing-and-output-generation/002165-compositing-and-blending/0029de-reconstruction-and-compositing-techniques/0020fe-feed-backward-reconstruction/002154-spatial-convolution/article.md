@@ -1,0 +1,87 @@
+# Spatial Convolution
+
+Also called: Continuous Signal Reconstruction by Convolution, Direct Spatial Convolution, Discrete Convolution, Kernel Convolution, Spatial Domain Convolution
+
+## Overview
+Spatial convolution is a neighborhood-based reconstruction method that calculates each output sample by computing a weighted average of neighboring input samples using a filter kernel [S1, S2, S3, unofficial]. It solves the problem of reconstructing a continuous signal from discrete samples in the spatial domain, serving as the primary compositing step in direct volume ray casting when small kernels are used [S1, unofficial]. Unlike frequency-domain methods (FFT), it is preferred for discrete kernels of limited extent because direct spatial summation is less compute-intensive than transforming to and from the frequency domain [S1, unofficial]. It differs from [Area-based Pixel Kernel](14355-area-based-pixel-kernel.md) by centering the kernel at the output sample and summing contributions from input samples, rather than distributing contributions from input samples to output pixels [S1, unofficial].
+
+## How it works
+**Inputs:**
+- Discrete input signal $f$ (e.g., volume samples $f(i,j,k)$ or image pixels $\mathbf{L}(\mathbf{x})$).
+- Reconstruction kernel $h$ (or $\mathbf{K}$), defined over a support region.
+
+**Outputs:**
+- Reconstructed continuous or discrete signal $g$ (or $(\mathbf{L} * \mathbf{K})$).
+
+**Data Structures:**
+- **Input Signal:** Array of values indexed by integer coordinates. In 3D volume rendering, typically stored as a 3D grid or texture.
+- **Kernel:** Array of floating-point weights. For a kernel of support $N$, the array size is $N \times N \times N$ (or $N \times N$ for 2D).
+- **Output Signal:** Array of values with the same dimensions as the input (for discrete output) or a continuous function representation.
+
+**Steps:**
+1. **Kernel Normalization:** If the kernel is derived from a continuous function (e.g., Gaussian), sum all kernel values $S = \sum_{\mathbf{x}'} K(\mathbf{x}')$. Multiply every element of the kernel by $1/S$ to ensure energy conservation ($\sum K(\mathbf{x}) = 1$) [S2, unofficial].
+2. **Iterate Output Positions:** For each output position $\mathbf{x}$ (or $(x,y,z)$):
+3. **Initialize Sum:** Set accumulator $g(\mathbf{x}) = 0$.
+4. **Iterate Kernel Support:** For each offset $\mathbf{x}'$ within the kernel's support:
+   - Calculate the corresponding input sample position $\mathbf{x}_{in} = \mathbf{x} - \mathbf{x}'$ (or $\mathbf{x} + \mathbf{x}'$ depending on kernel definition convention; standard convolution uses $h(\mathbf{x}-\mathbf{x}')$) [S1, S2, unofficial].
+   - **Boundary Check:** If $\mathbf{x}_{in}$ is outside the input domain, handle boundary conditions (e.g., clamp, wrap, or zero-pad) [G].
+   - **Sample Input:** Retrieve input value $f(\mathbf{x}_{in})$. If $\mathbf{x}_{in}$ is not an integer coordinate, apply an interpolation method (e.g., trilinear) or treat as zero if outside support [G].
+   - **Weight and Accumulate:** $g(\mathbf{x}) \leftarrow g(\mathbf{x}) + f(\mathbf{x}_{in}) \cdot K(\mathbf{x}')$.
+5. **Store Output:** Assign $g(\mathbf{x})$ to the output buffer.
+
+**Formulas:**
+The continuous convolution integral in 1D is [S1, unofficial]:
+$$g(t) = \int_{-\infty}^{\infty} f(u)h(t-u) du$$
+
+In 2D [S1, unofficial]:
+$$g(x, y) = \int_{-\infty}^{\infty} \int_{-\infty}^{\infty} f(u, v) h(x - u, y - v) du dv$$
+
+In 3D [S1, unofficial]:
+$$g(x, y, z) = \int_{-\infty}^{\infty} \int_{-\infty}^{\infty} \int_{-\infty}^{\infty} f(u, v, w) h(x - u, y - v, z - w) du dv dw$$
+
+For discrete signals, represented as $v(x) = \sum_i v[i]\delta(x - i)$, the convolution sum is [S1, S3, unofficial]:
+$$g(x, y, z) = \sum_{i=-\infty}^{\infty} \sum_{j=-\infty}^{\infty} \sum_{k=-\infty}^{\infty} f(i, j, k) h(x - i, y - j, z - k)$$
+
+In 2D discrete notation [S2, unofficial]:
+$$(\mathbf{L} * \mathbf{K})(\mathbf{x}) = \sum_{\mathbf{x}'} \mathbf{L}(\mathbf{x}') \mathbf{K}(\mathbf{x}' - \mathbf{x})$$
+
+**Parameters:**
+- **Kernel Support:** The range of positions for which $h(x)$ is nonzero. Typical small kernels are $3 \times 3 \times 3$ or $5 \times 5 \times 5$. Large supports (e.g., $10 \times 10 \times 10$) incur performance penalties [S3, unofficial].
+- **Kernel Type:**
+  - **Trilinear:** De facto norm, poor aliasing [S3, unofficial].
+  - **BC Splines (Mitchell-Netravali):** Two-parameter cubic family. Catmull-Rom at $(B,C)=(0, 0.5)$; Uniform cubic B-spline at $(B,C)=(1, 0)$ [S3, unofficial].
+  - **Windowed Sinc:** Close to ideal frequency response but large support [S3, unofficial].
+
+**Pitfalls:**
+- **Normalization Error:** Sampling a normalized continuous function (like Gaussian) at discrete points breaks normalization, violating energy conservation. Explicit normalization is required [S2, unofficial].
+- **Memory Latency:** Large kernel supports cause non-local memory accesses, leading to cache misses and performance degradation [S3, unofficial].
+- **Aliasing:** Simple linear interpolation suffers from poor aliasing characteristics [S3, unofficial].
+
+## Subtopics
+
+### [Spatially Varying Kernel Filtering](9633-spatially-varying-kernel-filtering.md)
+Spatially Varying Kernel Filtering is a technique where the reconstruction kernel or weighting function differs for each pixel, rather than being stationary as in standard convolution. It solves the problem of applying spatially dependent blurring or smoothing (e.g., varying Point Spread Functions) which cannot be solved using standard convolution algorithms or FFT. Unlike [Separable Convolution](14593-separable-convolution.md), which optimizes a single stationary kernel, this method requires per-pixel kernel evaluation.
+
+### [Separable Convolution](14593-separable-convolution.md)
+Separable convolution is a method to accelerate hologram computation by exploiting the linear separability of the lens phase function $f_z$ into independent horizontal and vertical components. It solves the performance bottleneck of point-wise integration in direct volume ray casting for holographic displays by reducing the computational complexity of the spatial convolution operation. It is distinguished from FFT-based convolution by its reliance on spatial separability rather than frequency-domain transformation, making it faster for smaller sub-hologram sizes but inapplicable when the phase function is not separable.
+
+### DDA Convolution
+DDA Convolution is a specific application of spatial convolution used for Line Integral Convolution (LIC) of vector fields. For each output pixel position, a filter kernel is defined along the vector direction (tangential to the flow) for a fixed distance $L$ in both positive and negative directions. Input texture pixels falling within this kernel are sampled, summed, and normalized by the kernel length $2L$ to produce the output pixel value [S4]. While often implemented as a box filter, arbitrary filter shapes can be used [S4].
+
+## Operating characteristics
+- **Time Complexity:** $O(N \cdot K^d)$, where $N$ is the number of output samples, $K$ is the kernel support size, and $d$ is the dimensionality (2 or 3).
+- **Memory Complexity:** $O(N + K^d)$ for input/output buffers and kernel storage.
+- **Performance:** Preferred over FFT for small kernels because the overhead of forward and inverse transforms exceeds the cost of direct spatial summation [S1, unofficial]. Large kernels ($10 \times 10 \times 10$) suffer from memory access latency [S3, unofficial].
+- **Strengths:** Simple implementation; intuitive spatial interpretation; efficient for small, localized kernels; supports non-stationary kernels (with variants).
+- **Limitations:** Poor aliasing with simple kernels (e.g., trilinear); large kernels are slow; normalization must be handled manually for sampled continuous kernels.
+- **When to Use:** Direct volume ray casting with small reconstruction kernels (e.g., B-splines, windowed sinc); real-time rendering where FFT overhead is prohibitive.
+- **When Not to Use:** Large kernel sizes where FFT is faster; scenarios requiring exact frequency-domain multiplication.
+
+## Background
+Originating from signal processing theory (Oppenheim 75), spatial convolution is applied in volume rendering to reconstruct continuous signals from discrete voxel samples [S1, unofficial]. In computer graphics, it is used for image filtering and reconstruction, with B-splines and windowed sinc kernels being common choices to balance smoothing and aliasing [S3, unofficial]. The method is central to feed-backward reconstruction techniques in volume rendering [S1, unofficial]. DDA Convolution was introduced for visualizing vector fields via Line Integral Convolution [S4].
+
+## Sources
+[S1] A Parallel, Feed-Forward Volume Rendering Algorithm, https://www.cs.unc.edu/techreports/91-029.pdf, fetched 2026-10-27 (unofficial)
+[S2] PDF Real-Time Light Transport in Analytically Integrable Participating Media, https://cgg.mff.cuni.cz/~tomas/publications/pub-thesis-real-time-scattering/thesis.pdf, fetched 2026-10-29 (unofficial)
+[S3] Visualization and Analysis of Diffusion Tensor Fields Abstract, http://people.cs.uchicago.edu/~glk/pubs/pdf/Kindlmann-VisualizationAndAnalysisOfDiffusionTensorFields-PhD-2004.pdf, fetched 2026-10-30 (unofficial)
+[S4] Imaging vector fields using Line Integral Convolution, https://digital.library.unt.edu/ark:/67531/metadc1399414/?q=vector field volume rendering, fetched 2026-10-28

@@ -1,0 +1,162 @@
+--- v006.md
++++ v007.md
+@@ -32,6 +32,6 @@
+ 4.  **Index Texture Generation:** Create the Index Texture and Offset/Scale Texture for the current frame based on the active bricks in the LRU cache [S1, S3, unofficial].
+ 5.  **Slab Processing (Front-to-Back):** For each slab:
+-    a.  **Decoding:** Decode active bricks using the Index Texture. Decompression kernels handle transformations to write data into the proper position of the Decode Buffer. Handle transient situations with bricks at different LODs by expanding data to the rendering resolution using data duplication [S1, S3, unofficial].
+-    b.  **Deblocking (Filtering):** Perform deblocking as a filtering stage before final rendering. The Filter Buffer is populated from the Decode Buffer. The filter needs access to neighbors in 3 directions. Decoding, deblocking, and rendering are interleaved: deblocking has access to one slice of fully decoded neighboring blocks, and rendering has access to two slices of fully deblocked voxels along the viewing direction [S1, S3, unofficial].
++    a.  **Decoding:** Decode active bricks using the Index Texture [S1, unofficial]. Decompression kernels handle transformations to write data into the proper position of the Decode Buffer [S1, unofficial]. Handle transient situations with bricks at different LODs by expanding data to the rendering resolution using data duplication [S1, S3, unofficial].
++    b.  **Deblocking (Filtering):** Perform deblocking as a filtering stage before final rendering [S1, unofficial]. The Filter Buffer is populated from the Decode Buffer [S1, unofficial]. The filter needs access to neighbors in 3 directions [S1, unofficial]. Decoding, deblocking, and rendering are interleaved: deblocking has access to one slice of fully decoded neighboring blocks, and rendering has access to two slices of fully deblocked voxels along the viewing direction [S1, S3, unofficial].
+     c.  **Rendering:** Perform accelerated raycasting traversal using the Index Texture for empty space skipping and hardware trilinear interpolation on the Filter Buffer for sampling and gradient computation [S1, S3, unofficial].
+     d.  **Accumulation:** Accumulate results into the output frame buffer in front-to-back order [S1, S3, unofficial].
+@@ -48,7 +48,7 @@
+     active_bricks = []
+     for brick in volume_octree:
+-        if is_visible(brick, camera, transfer_function, lod_threshold):
++        if brick.lod <= lod_threshold and brick.intersects_frustum(camera) and brick.intersects_transfer_function(transfer_function):
+             if brick not in gpu_lru_cache:
+-                upload_to_gpu(brick)
++                gpu_lru_cache[brick.id] = brick.compressed_data
+             gpu_lru_cache.touch(brick)
+             active_bricks.append(brick)
+@@ -57,98 +57,46 @@
+ 
+     # 3. Slab Subdivision
+-    slabs = create_slabs(active_bricks, camera.view_direction)
++    slabs = axis_aligned_slabs(active_bricks, camera.view_direction)
+ 
+     # 4. Texture Generation
+-    index_texture = create_index_texture(active_bricks, gpu_lru_cache)
+-    offset_scale_texture = create_offset_scale_texture(active_bricks)
++    index_texture = texture_map({brick.id: gpu_lru_cache[brick.id].index for brick in active_bricks})
++    offset_scale_texture = texture_map({brick.id: (brick.offset, brick.scale) for brick in active_bricks})
+ 
+     # 5. Slab Processing
+     frame_buffer = zeros(output_resolution)
+     for slab in slabs:
+-        decode_buffer = decode_slab(slab, index_texture, offset_scale_texture, gpu_lru_cache)
+-        weights_texture = compute_bezier_weights(decode_buffer)
+-        filter_buffer = apply_bezier_filter(decode_buffer, weights_texture)
+-        slab_image = raycast_slab(slab, filter_buffer, index_texture, camera, transfer_function)
+-        frame_buffer = accumulate_front_to_back(frame_buffer, slab_image)
+-        discard_slab_data(slab)
++        decode_buffer = empty_like(slab)
++        for brick in slab.bricks:
++            data = gpu_lru_cache[brick.id].decompress()
++            decode_buffer[brick.position] = transform_to_output(data, offset_scale_texture[brick.id])
++        
++        # Compute Bézier weights (exact formula not given in sources [G])
++        weights_texture = texture_map({v: standard_rational_bezier_coefficient(v) for v in decode_buffer})
++        
++        # Apply Bézier filter
++        filter_buffer = empty_like(decode_buffer)
++        b_i = decode_buffer.block_size
++        for block in decode_buffer.blocks:
++            shared_mem = allocate_shared_memory(2 * b_i)
++            val_i, val_i1 = fetch_neighbors(block, b_i)
++            w_i, w_i1 = fetch_weights(weights_texture, block, b_i)
++            shared_mem.store(val_i, val_i1, w_i, w_i1)
++            f_x = apply_1d_filter(shared_mem, 'X') # Exact formula not given in sources [G]
++            f_y = apply_1d_filter(shared_mem, 'Y')
++            f_z = apply_1d_filter(shared_mem, 'Z')
++            filter_buffer[block.center] = (f_x + f_y + f_z) / 3.0
++            
++        # Raycast slab
++        slab_image = zeros(output_resolution)
++        for ray in generate_rays(camera, output_resolution):
++            if not index_texture.intersects(ray):
++                sample = standard_trilinear_sample(filter_buffer, ray.origin, ray.direction)
++                grad = standard_central_difference_gradient(filter_buffer, sample)
++                slab_image[ray.screen_pos] = standard_transfer_function_evaluation(sample, grad, transfer_function)
++        frame_buffer = standard_front_to_back_composite(frame_buffer, slab_image)
++        
++        for brick in slab.bricks:
++            del gpu_lru_cache[brick.id]
+     return frame_buffer
+-
+-def compute_bezier_weights(decode_buffer):
+-    weights = []
+-    for v in decode_buffer:
+-        # Standard rational Bézier weight computation based on local gradient
+-        weights.append(rational_bezier_weight(v))
+-    return texture(weights)
+-
+-def apply_bezier_filter(decode_buffer, weights_texture):
+-    filter_buffer = empty_like(decode_buffer)
+-    b_i = decode_buffer.block_size
+-    for block in decode_buffer.blocks:
+-        shared_mem = allocate_shared_memory(2 * b_i)
+-        val_i, val_i1 = fetch_neighbors(block, b_i)
+-        w_i, w_i1 = fetch_weights(weights_texture, block, b_i)
+-        shared_mem.store(val_i, val_i1, w_i, w_i1)
+-        f_x = apply_1d_filter(shared_mem, 'X')
+-        f_y = apply_1d_filter(shared_mem, 'Y')
+-        f_z = apply_1d_filter(shared_mem, 'Z')
+-        filter_buffer[block.center] = (f_x + f_y + f_z) / 3.0
+-    return filter_buffer
+-
+-def raycast_slab(slab, filter_buffer, index_texture, camera, transfer_function):
+-    image = zeros(output_resolution)
+-    for ray in generate_rays(camera, output_resolution):
+-        if not skip_empty_space(ray, index_texture):
+-            sample = hardware_trilinear_interpolate(filter_buffer, ray.origin, ray.direction)
+-            grad = compute_gradient(filter_buffer, sample)
+-            image[ray.screen_pos] = apply_transfer_function(sample, grad, transfer_function)
+-    return image
+-
+-# Standard helper definitions
+-def is_visible(brick, camera, transfer_function, lod_threshold):
+-    return brick.lod <= lod_threshold and brick.intersects_frustum(camera) and brick.intersects_transfer_function(transfer_function)
+-
+-def upload_to_gpu(brick):
+-    gpu_lru_cache[brick.id] = brick.compressed_data
+-
+-def create_slabs(active_bricks, view_direction):
+-    return axis_aligned_slabs(active_bricks, view_direction)
+-
+-def create_index_texture(active_bricks, cache):
+-    return texture_map({brick.id: cache[brick.id].index for brick in active_bricks})
+-
+-def create_offset_scale_texture(active_bricks):
+-    return texture_map({brick.id: (brick.offset, brick.scale) for brick in active_bricks})
+-
+-def decode_slab(slab, index_texture, offset_scale_texture, cache):
+-    buffer = empty_like(slab)
+-    for brick in slab.bricks:
+-        data = cache[brick.id].decompress()
+-        buffer[brick.position] = transform_to_output(data, offset_scale_texture[brick.id])
+-    return buffer
+-
+-def discard_slab_data(slab):
+-    for brick in slab.bricks:
+-        del gpu_lru_cache[brick.id]
+-
+-def rational_bezier_weight(v):
+-    return standard_rational_bezier_coefficient(v)
+-
+-def apply_1d_filter(shared_mem, axis):
+-    return standard_1d_bezier_filter(shared_mem, axis)
+-
+-def skip_empty_space(ray, index_texture):
+-    return not index_texture.intersects(ray)
+-
+-def hardware_trilinear_interpolate(buffer, origin, direction):
+-    return standard_trilinear_sample(buffer, origin, direction)
+-
+-def compute_gradient(buffer, sample):
+-    return standard_central_difference_gradient(buffer, sample)
+-
+-def apply_transfer_function(sample, gradient, tf):
+-    return standard_transfer_function_evaluation(sample, gradient, tf)
+-
+-def accumulate_front_to_back(frame, slab_img):
+-    return standard_front_to_back_composite(frame, slab_img)
+ ```
+ 
+@@ -174,5 +122,5 @@
+ ## Operating characteristics
+ *   **Time Complexity:** Real-time performance is achieved on standard graphics PCs for massive datasets (e.g., $512^4$ turbulence simulation, 256GB compressed to <2GB) [S1, S3, unofficial]. The complexity is dominated by the adaptive loading, decoding, and filtering passes per slab [S1, S3, unofficial].
+-*   **Memory Complexity:** Memory usage is bounded by the GPU memory capacity. The architecture manages this by keeping data compressed in an LRU cache and processing the volume in slabs [S1, S3, unofficial].
++*   **Memory Complexity:** Memory usage is bounded by the GPU memory capacity [S1, unofficial]. The architecture manages this by keeping data compressed in an LRU cache and processing the volume in slabs [S1, S3, unofficial].
+ *   **Strengths:** High-quality shading with deblocking; supports multiple pluggable compression methods; does not require modification of the encoding method; handles massive datasets exceeding GPU memory via slabs; exploits spatial coherence and GPU memory bandwidth [S1, S3, unofficial].
+ *   **Limitations:** Originally proposed as a single resolution system, which limits the size of the volume dataset if not extended to multi-resolution settings [S2]. Requires careful management of slab boundaries and transient LODs [S1, S3, unofficial].

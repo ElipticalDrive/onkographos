@@ -1,0 +1,48 @@
+# Ashida and Badla Octree Contouring
+Also called: Ashida and Badla's method
+
+## Overview
+Ashida and Badla Octree Contouring is an isosurface extraction method that operates directly on adaptive octrees, avoiding the need for a uniform grid or dual hexahedral mesh. It identifies cycles of contour faces intersecting each octree cell and generates one vertex per cycle. Unlike [Wilhelms and Van Gelder Octree](2107-wilhelms-and-van-gelder-octree.md) which may require complex crack-fixing, this method aims for manifold output through cycle identification, though it is computationally expensive and prone to non-manifold artifacts between neighboring cells.
+
+## How it works
+**Inputs:** An octree structure representing the scalar field; an isovalue $v$.
+**Outputs:** A polygonal mesh (vertices and faces) representing the isosurface.
+
+**Data Structures:**
+*   **Octree Node:** Contains scalar values at its corners (or interpolated values), a flag indicating if it is a leaf, and a list of intersecting contour faces.
+*   **Contour Face:** A polygon (typically a quad or triangle) representing the intersection of the isosurface with an octree cell. Defined by its vertices and connectivity.
+*   **Cycle:** A closed loop of connected contour faces.
+
+**Steps:**
+1.  **Traverse Octree:** Iterate through all leaf nodes of the octree.
+2.  **Identify Intersections:** For each leaf cell, determine if the isosurface intersects the cell. If so, compute the contour faces (polygons) where the scalar field crosses the isovalue. This typically involves linear interpolation along cell edges.
+3.  **Build Face Adjacency:** Construct a graph where nodes are contour faces and edges represent shared vertices or edges between faces in adjacent cells.
+4.  **Cycle Identification:** For each leaf cell, identify cycles of contour faces. A cycle is a closed path of faces that are topologically connected. This step involves traversing the face adjacency graph to find closed loops.
+5.  **Vertex Creation:** Create one mesh vertex for each identified cycle. The position of the vertex is typically the centroid or a weighted average of the vertices of the faces in the cycle.
+6.  **Face Generation:** Generate mesh faces by connecting the cycle vertices. The connectivity is derived from the adjacency of the cycles.
+7.  **Boundary Handling:** Handle boundary conditions and ensure consistent connectivity across cell boundaries.
+
+**Parameters:**
+*   **Isovalue:** The scalar value at which the surface is extracted.
+*   **Interpolation Method:** Linear interpolation is standard for edge intersections.
+
+**Edge Cases and Pitfalls:**
+*   **Non-manifold Edges:** Despite the claim of manifold output, non-manifold edges can appear between neighboring cells if cycle identification is not perfectly consistent across cell boundaries [S1, unofficial].
+*   **Performance:** Cycle identification is a time-consuming process, especially for complex contours [S1, unofficial].
+*   **Degenerate Cases:** Cells with no intersection or tangent contact with the isosurface must be handled to avoid empty cycles or degenerate faces.
+
+## Subtopics
+
+## Operating characteristics
+*   **Time Complexity:** High due to the cycle identification step, which involves graph traversal and connectivity analysis across the octree.
+*   **Memory Complexity:** Proportional to the number of octree leaves and the complexity of the contours.
+*   **Strengths:** Adaptive resolution allows for efficient representation of complex surfaces; direct octree processing avoids grid conversion overhead.
+*   **Limitations:** Potential for non-manifold artifacts; high computational cost for cycle identification; not guaranteed to be manifold without additional constraints.
+*   **When to Use:** Suitable for scenes with highly adaptive features where uniform grid methods are inefficient, and computational resources allow for expensive cycle identification.
+*   **When Not to Use:** When strict manifold guarantees are required without post-processing, or when real-time performance is critical.
+
+## Background
+The method was proposed by Ashida and Badla as an alternative to contour simplification techniques used in Dual Contouring. It aims to extract contours directly from octrees, leveraging the adaptive nature of the octree structure. The method is discussed in the context of manifold dual contouring and compared with other adaptive isosurface extraction techniques [S1, unofficial].
+
+## Sources
+[S1] Manifold Dual Contouring, https://people.engr.tamu.edu/schaefer/research/dualsimp_tvcg.pdf, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,169 @@
+--- v001.md
++++ v002.md
+@@ -8,5 +8,5 @@
+ **Inputs and Outputs:**
+ *   **Inputs:** Ray origins and directions, background sparse grid data (`grid.background_data`), background grid links (`grid.background_links`), optional gradient output (`grad_output`), and optimization parameters (`opt.stop_thresh`, `sparsity_loss`) [S1, unofficial].
+-*   **Outputs:** Rendered RGB color and confidence/confidence map for the background contribution; gradients for background density/color (`grad_background_out`) and mask/visibility (`mask_background_out`) if in backward mode [S1, unofficial].
++*   **Outputs:** Rendered RGB color and transmittance for the background contribution; gradients for background density/color (`grad_background_out`) and mask/visibility (`mask_background_out`) if in backward mode [S1, unofficial].
+ 
+ **Data Structures:**
+@@ -18,34 +18,16 @@
+ **Algorithm Steps:**
+ 
+-1.  **Ray Initialization and Bounds:**
+-    For each ray, determine the spatial bounds of the intersection with the background grid using `ray_find_bounds_bg` [S1, unofficial].
+-
+-2.  **Transmittance Check (Skip Condition):**
+-    If the logarithmic transmittance `log_transmit` is less than `-25.0`, skip the ray entirely to save computation, assuming negligible contribution [S1, unofficial].
+-    $$ \text{if } \log\_transmit < -25.0 \text{, return} $$
+-
+-3.  **Forward Pass (`render_background_forward`):**
+-    Iterate through ray samples within the background bounds.
+-    *   **Accumulation:** Accumulate color and transmittance. The color contribution is computed as:
+-        $$ total\_color += \max(color, 0.0) \times weight $$
+-        Where `weight` is the transmission factor for the current step [S1, unofficial]. Note: The source snippet mentions `grad_output[i]` in the accumulation formula, but clarifies this likely refers to a weight/transmission factor in this specific context or is a variable name reuse; standard volume rendering uses `weight * color` [S1, unofficial].
+-    *   **Transmittance Update:** Update `log_transmit` based on density and step size.
+-    *   **Termination:** If the transmittance drops below a threshold, terminate the ray:
+-        $$ \text{if } \exp(\log\_transmit) < opt.stop\_thresh \text{, break} $$
+-    *   **Sparsity Regularization (Optional):** If `sparsity_loss > 0.0`, add a regularization term to the density gradient `curr_grad_sigma`. Two variants are mentioned:
+-        *   Cauchy version (from SNeRG):
+-            $$ curr\_grad\_sigma += sparsity\_loss \times \frac{4 \times \sigma}{1 + 2 \times (\sigma \times \sigma)} $$
+-        *   Alphs version (from PlenOctrees):
+-            $$ curr\_grad\_sigma += sparsity\_loss \times \exp(-pcnt) \times ray.world\_step $$
+-        [S1, unofficial]
+-
++1.  **Ray Initialization and Bounds:** For each ray, determine the spatial bounds of the intersection with the background grid using `ray_find_bounds_bg` [S1, unofficial].
++2.  **Transmittance Check (Skip Condition):** If the logarithmic transmittance `log_transmit` is less than `-25.0`, skip the ray entirely to save computation, assuming negligible contribution [S1, unofficial].
++3.  **Forward Pass (`render_background_forward`):** Iterate through ray samples within the background bounds [S1, unofficial].
++    *   **Accumulation:** Accumulate color and transmittance. The color contribution is computed as `total_color += fmaxf(color, 0.0) * weight` [S1, unofficial]. Note: The source snippet uses `grad_output[i]` in the accumulation formula, but clarifies this likely refers to a weight/transmission factor in this specific context or is a variable name reuse; standard volume rendering uses `weight * color` [S1, unofficial].
++    *   **Transmittance Update:** Update `log_transmit` based on density and step size [S1, unofficial].
++    *   **Termination:** If the transmittance drops below a threshold, terminate the ray: `if exp(log_transmit) < opt.stop_thresh, break` [S1, unofficial].
++    *   **Sparsity Regularization (Optional):** If `sparsity_loss > 0.0`, add a regularization term to the density gradient `curr_grad_sigma` [S1, unofficial]. Two variants are mentioned:
++        *   Cauchy version (from SNeRG): `curr_grad_sigma += sparsity_loss * (4 * sigma / (1 + 2 * (sigma * sigma)))` [S1, unofficial].
++        *   Alphs version (from PlenOctrees): `curr_grad_sigma += sparsity_loss * exp(-pcnt) * ray.world_step` [S1, unofficial].
+ 4.  **Gradient Computation (Backward Pass):**
+-    *   **Sigma Gradient:** Compute the gradient for density (`curr_grad_sigma`) using the chain rule involving accumulated color, transmittance, and step size:
+-        $$ curr\_grad\_sigma = ray.world\_step \times (invr\_last - invr\_mid) \times (total\_color \times \exp(\log\_transmit) - accum) $$
+-        Where `invr_last` and `invr_mid` are inverse ray positions, and `accum` is the accumulated transmittance/color term [S1, unofficial].
+-    *   **Gradient Normalization (if `grad_out_is_rgb`):** If the gradient output is RGB, normalize the residual:
+-        $$ norm\_factor = \frac{2.0}{3 \times N_{rays}} $$
+-        $$ grad\_out[i] = resid \times norm\_factor $$
+-        Otherwise, copy `grad_output` directly [S1, unofficial].
++    *   **Sigma Gradient:** Compute the gradient for density (`curr_grad_sigma`) using the chain rule involving accumulated color, transmittance, and step size: `curr_grad_sigma = ray.world_step * (invr_last - invr_mid) * (total_color * exp(log_transmit) - accum)` [S1, unofficial]. Where `invr_last` and `invr_mid` are inverse ray positions, and `accum` is the accumulated transmittance/color term [S1, unofficial].
++    *   **Gradient Normalization (if `grad_out_is_rgb`):** If the gradient output is RGB, normalize the residual: `norm_factor = 2.0 / (3 * N_rays)` and `grad_out[i] = resid * norm_factor` [S1, unofficial]. Otherwise, copy `grad_output` directly [S1, unofficial].
+     *   **Propagate Gradients:** Update `PackedGridOutputGrads` using `trilerp_backward_bg_one`. This function updates `grad_background_out` and optionally `mask_background_out` based on `curr_grad_sigma` (or `curr_grad_color` for color gradients) [S1, unofficial].
+ 
+@@ -55,72 +37,40 @@
+ 
+ **Pseudocode:**
+-
+ ```python
+ import math
+ 
+ def render_background_forward(ray, grid, opt):
+-    """
+-    Forward pass for background volume rendering.
+-    ray: object with .origin, .direction, .world_step, .find_bounds()
+-    grid: object with .background_links, .background_data
+-    opt: object with .stop_thresh, .sparsity_loss
+-    """
+-    # 1. Find bounds
+-    bounds = ray.find_bounds_bg(grid)
++    """Forward pass for background volume rendering."""
++    bounds = ray_find_bounds_bg(ray, grid)
+     if bounds is None:
+-        return 0.0, 0.0  # No intersection
++        return 0.0, 0.0
+ 
+-    # 2. Initialize accumulation
+     total_color = 0.0
+-    log_transmit = 0.0  # log(1.0) = 0
++    log_transmit = 0.0
+     accum = 0.0
+     curr_grad_sigma = 0.0
+ 
+-    # 3. Ray march
+-    # Note: Simplified marching loop; actual implementation depends on grid traversal
+     for sample in ray.march(bounds):
+-        # Sample density and color from background grid
+         sigma, color = grid.sample_background(sample.position)
+-        
+-        # Clamp color
+         color = max(color, 0.0)
+         
+-        # Compute weight (transmission factor)
+-        # weight = exp(-sigma * step) * current_transmittance
+-        # In log space: log_weight = -sigma * step + log_transmit
+         step = ray.world_step
+-        log_weight = -sigma * step + log_transmit
+-        weight = math.exp(log_weight)
++        weight = math.exp(-sigma * step + log_transmit)
++        total_color += color * weight
++        log_transmit += -sigma * step
+         
+-        # Accumulate color
+-        total_color += color * weight
+-        
+-        # Update transmittance
+-        log_transmit = log_weight
+-        
+-        # Termination check
+         if math.exp(log_transmit) < opt.stop_thresh:
+             break
+             
+-        # Sparsity regularization (if needed, usually for backward pass)
+         if opt.sparsity_loss > 0.0:
+-            # Cauchy version
+             curr_grad_sigma += opt.sparsity_loss * (4.0 * sigma / (1.0 + 2.0 * (sigma * sigma)))
+-            # Or Alphs version:
+-            # curr_grad_sigma += opt.sparsity_loss * math.exp(-pcnt) * step
+ 
+-    return total_color, math.exp(log_transmit)
++    return total_color, math.exp(log_transmit), curr_grad_sigma
+ 
+ def render_background_backward(ray, grid, grad_output, opt, grad_out_is_rgb=False):
+-    """
+-    Backward pass for background volume rendering.
+-    """
+-    # 1. Skip rays with very low transmittance
+-    # Assume log_transmit is computed or passed in; if not, compute forward first
+-    # For efficiency, this check is often done in the kernel launch or early in forward
++    """Backward pass for background volume rendering."""
+     if ray.log_transmit < -25.0:
+         return PackedGridOutputGrads()
+ 
+-    # 2. Normalize gradient if RGB
+     if grad_out_is_rgb:
+         N_rays = len(ray.origins)
+@@ -128,18 +78,15 @@
+         grad_output = grad_output * norm_factor
+ 
+-    # 3. Compute gradients
+-    # This requires the forward pass values (total_color, log_transmit, accum, etc.)
+-    # Assuming these are available from the forward pass or recomputed
+-    # curr_grad_sigma formula from source:
+-    # curr_grad_sigma = ray.world_step * (invr_last - invr_mid) * (total_color * exp(log_transmit) - accum)
++    curr_grad_sigma = ray.world_step * (ray.invr_last - ray.invr_mid) * (ray.total_color * math.exp(ray.log_transmit) - ray.accum)
+     
+-    # Note: invr_last and invr_mid are inverse ray positions at the last and mid steps
+-    # This is a simplified representation; actual implementation needs precise ray state tracking
+-    
+-    # 4. Propagate gradients to grid
+     grads = PackedGridOutputGrads()
+     trilerp_backward_bg_one(grid, ray, curr_grad_sigma, grad_output, grads)
+-    
+     return grads
++
++def trilerp_backward_bg_one(grid, ray, grad_sigma, grad_color, grads):
++    """Standard trilinear interpolation backward pass for sparse grid gradient scatter [G]."""
++    # Interpolates gradients back to grid vertices/centers
++    # Updates grads.grad_background_out and optionally grads.mask_background_out
++    pass
+ 
+ class PackedGridOutputGrads:
+@@ -160,5 +107,4 @@
+ *   **Limitations:** Requires separate grid management; sparsity regularization parameters need tuning; low transmittance ray skipping may lose detail [S1, unofficial].
+ *   **When to Use:** When rendering scenes with significant distant or unbounded background elements that benefit from sparse representation [S1, unofficial].
+-*   **When Not to Use:** For tightly bounded scenes where background is negligible or fully contained in the foreground grid [S1, unofficial].
+ 
+ ## Background

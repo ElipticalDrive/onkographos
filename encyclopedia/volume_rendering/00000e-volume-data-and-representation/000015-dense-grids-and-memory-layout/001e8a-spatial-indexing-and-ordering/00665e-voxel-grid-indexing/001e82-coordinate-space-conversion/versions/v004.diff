@@ -1,0 +1,255 @@
+--- v003.md
++++ v004.md
+@@ -1,9 +1,9 @@
+ # Coordinate Space Conversion
+ 
+-Also called: Voxel Coordinate Conversion, Voxel Coordinate Mapping, Voxel Space Mapping, Voxel/Block/World coordinate conversions
++Also called: Voxel Coordinate Conversion, Voxel Coordinate Mapping, Voxel Space Mapping, Voxel/Block/World coordinate conversions, VoxelGridBase::getCell, VoxelGridBase::getCellId
+ 
+ ## Overview
+ 
+-Coordinate Space Conversion defines the deterministic arithmetic for mapping between continuous world coordinates, continuous voxel coordinates, discrete integer voxel indices, and block indices in a sparse voxel grid. It solves the problem of accurately locating which voxel contains a given point and converting that voxel back to world space, ensuring consistency across host (CPU), device (GPU), and shader (GLSL) execution paths. It differs from [Voxel Grid Initialization](2168-voxel-grid-initialization.md) by performing the per-point arithmetic rather than static bounding box setup, and from [World to UVW Normalization](2229-world-to-uvw-normalization.md) by operating in physical units and integer indices rather than normalized [0, 1] texture coordinates.
++Coordinate Space Conversion defines the deterministic arithmetic for mapping between continuous world coordinates, continuous voxel coordinates, discrete integer voxel indices, and block indices in a sparse voxel grid [S5, unofficial]. It solves the problem of accurately locating which voxel contains a given point and converting that voxel back to world space, ensuring consistency across host (CPU), device (GPU), and shader (GLSL) execution paths [S5, unofficial]. It differs from [Voxel Grid Initialization](2168-voxel-grid-initialization.md) by performing the per-point arithmetic rather than static bounding box setup [S1, unofficial], and from [World to UVW Normalization](2229-world-to-uvw-normalization.md) by operating in physical units and integer indices rather than normalized [0, 1] texture coordinates [S3, unofficial].
+ 
+ ## How it works
+@@ -12,13 +12,13 @@
+ 
+ *   **Inputs**:
+-    *   `world_pos`: A 3D floating-point vector $(x, y, z)$ in world units (e.g., meters).
+-    *   `voxel_size`: The physical size of a single voxel (scalar).
+-    *   `block_size`: The number of voxels along one axis of a block (scalar).
+-    *   `bounds`: Optional axis-aligned bounding box $[lb, ub]$ defining the valid grid extent.
+-    *   `dims`: The dimensions of the grid $[dim_x, dim_y, dim_z]$ in voxels.
++    *   `world_pos`: A 3D floating-point vector $(x, y, z)$ in world units [S5, unofficial].
++    *   `voxel_size`: The physical size of a single voxel in meters [S5, unofficial].
++    *   `block_size`: The number of voxels along one axis of a block [S5, unofficial].
++    *   `bounds`: Optional axis-aligned bounding box $[lb, ub]$ defining the valid grid extent [S4, unofficial].
++    *   `dims`: The dimensions of the grid $[dim_x, dim_y, dim_z]$ in voxels [S4, unofficial].
+ *   **Outputs**:
+-    *   `voxel_idx`: A 3D integer vector $(i, j, k)$ representing the discrete voxel index.
+-    *   `block_idx`: A 3D integer vector representing the block index.
+-    *   `world_center`: The world-space center coordinate of a specified voxel.
++    *   `voxel_idx`: A 3D integer vector $(i, j, k)$ representing the discrete voxel index [S4, unofficial].
++    *   `block_idx`: A 3D integer vector representing the block index [S5, unofficial].
++    *   `world_center`: The world-space center coordinate of a specified voxel [S5, unofficial].
+ 
+ ### Data Structures
+@@ -26,18 +26,18 @@
+ The method relies on the following parameters, typically stored in a `VoxelGridParams` structure:
+ 
+-*   `voxel_size` (float): Physical size of one voxel.
+-*   `block_size` (int): Number of voxels per block dimension.
+-*   `lb` (Vec3f): Lower bound of the grid in world space.
+-*   `ub` (Vec3f): Upper bound of the grid in world space.
+-*   `size` (Vec3i): Grid dimensions in voxels.
+-*   `scale` (Vec3f): Precomputed scaling factor, typically $scale = \frac{ub - lb}{size}$ or similar inverse mapping factor depending on the specific implementation variant [S2, S5, unofficial].
++*   `voxel_size` (float): Physical size of one voxel [S5, unofficial].
++*   `block_size` (int): Number of voxels per block dimension [S5, unofficial].
++*   `lb` (Vec3f): Lower bound of the grid in world space [S2, unofficial].
++*   `ub` (Vec3f): Upper bound of the grid in world space [S2, unofficial].
++*   `size` (Vec3i): Grid dimensions in voxels [S2, unofficial].
++*   `scale_` (Vec3f): Precomputed scaling factor, calculated as `bound_ / size_` [S2, unofficial].
+ 
+ ### Steps and Formulas
+ 
+-The conversion pipeline consists of three main transformations: World to Continuous Voxel, Continuous Voxel to Discrete Integer Voxel, and Integer Voxel to Block.
++The conversion pipeline consists of three main transformations: World to Continuous Voxel, Continuous Voxel to Discrete Integer Voxel, and Integer Voxel to Block [S5, unofficial].
+ 
+ #### 1. World to Continuous Voxel Coordinate
+ 
+-Convert the world position to a continuous coordinate in voxel space.
++Convert the world position to a continuous coordinate in voxel space [S5, unofficial].
+ 
+ $$
+@@ -48,12 +48,12 @@
+ 
+ $$
+-v = \frac{world\_pos - lb}{voxel\_size}
++posUV = \frac{world\_pos - lb}{box.sizes()}, \quad v = dims \times posUV
+ $$
+ 
+-Where $v = (v_x, v_y, v_z)$ [S5, unofficial].
++[S4, unofficial].
+ 
+ #### 2. Continuous Voxel to Discrete Integer Voxel
+ 
+-Map the continuous coordinate $v$ to the integer index $i$ of the voxel containing it. This step requires careful handling of rounding to ensure consistency across different hardware floating-point modes.
++Map the continuous coordinate $v$ to the integer index $i$ of the voxel containing it [S4, unofficial]. This step requires careful handling of rounding to ensure consistency across different hardware floating-point modes [S5, unofficial].
+ 
+ **Standard Floor Method (for containment):**
+@@ -73,47 +73,25 @@
+ 
+ **Nearest Neighbor Rounding (for center approximation):**
+-If the goal is to find the nearest voxel center (e.g., for sampling), use **round-half-to-even** (ties to even). Standard functions like `std::rint` or `std::nearbyint` are **unsafe** because they respect the dynamic floating-point rounding mode (`fesetround`), which may differ between CPU and GPU/GLSL paths [S5, unofficial].
++If the goal is to find the nearest voxel center (e.g., for sampling), use **round-half-to-even** (ties to even) [S5, unofficial]. Standard functions like `std::rint` or `std::nearbyint` are **unsafe** because they respect the dynamic floating-point rounding mode (`fesetround`), which may differ between CPU and GPU/GLSL paths [S5, unofficial].
+ 
+ Instead, derive ties-to-even from `std::floor`:
+ 
+-1.  Compute lower integer: $lower = \lfloor v_a \rfloor$
+-2.  Compute fractional part: $frac = v_a - lower$
++1.  Compute lower integer: $lower = \lfloor v_a \rfloor$ [S5, unofficial].
++2.  Compute fractional part: $frac = v_a - lower$ [S5, unofficial].
+ 3.  Apply logic:
+-    *   If $frac < 0.5$, return $lower$.
+-    *   If $frac > 0.5$, return $lower + 1$.
+-    *   If $frac = 0.5$, return $lower$ if $\text{fmod}(lower, 2.0) = 0.0$, else $lower + 1$.
+-
+-Pseudocode for nearest voxel:
+-
+-```python
+-def round_half_to_even(v: float) -> int:
+-    lower = floor(v)
+-    frac = v - lower
+-    if frac < 0.5:
+-        return lower
+-    elif frac > 0.5:
+-        return lower + 1
+-    else: # frac == 0.5
+-        if fmod(lower, 2.0) == 0.0:
+-            return lower
+-        else:
+-            return lower + 1
+-
+-def world_to_nearest_voxel(world_pos: Vec3, voxel_size: float) -> Vec3i:
+-    # Continuous voxel coordinate
+-    v = world_pos / voxel_size
+-    return Vec3i(round_half_to_even(v.x), round_half_to_even(v.y), round_half_to_even(v.z))
+-```
++    *   If $frac < 0.5$, return $lower$ [S5, unofficial].
++    *   If $frac > 0.5$, return $lower + 1$ [S5, unofficial].
++    *   If $frac = 0.5$, return $lower$ if $\text{fmod}(lower, 2.0) = 0.0$, else $lower + 1$ [S5, unofficial].
+ 
+ **Clamping:**
+-If the grid has a defined bounding box, clamp the resulting integer index $i$ to the valid range $[0, dims[axis] - 1]$ (or $[0, dims[axis] - 2]$ if the upper bound is exclusive or handled differently by the specific storage layout) [S4, unofficial].
++If the grid has a defined bounding box, clamp the resulting integer index $i$ to the valid range $[0, dims[axis] - 2]$ to handle boundary pixels exactly at the edge [S4, unofficial].
+ 
+ #### 3. Discrete Integer Voxel to Block Index
+ 
+-Convert the integer voxel index to a block index. This requires **flooring toward negative infinity**, not truncation toward zero, because C++ integer division truncates toward zero [S5, unofficial].
++Convert the integer voxel index to a block index [S5, unofficial]. This requires **flooring toward negative infinity**, not truncation toward zero, because C++ integer division truncates toward zero [S5, unofficial].
+ 
+ **Algorithm:**
+-1.  If any component of the voxel index is negative, bias it by `block_size - 1` before division.
+-2.  Perform integer division by `block_size`.
++1.  If any component of the voxel index is negative, bias it by `block_size - 1` before division [S5, unofficial].
++2.  Perform integer division by `block_size` [S5, unofficial].
+ 
+ $$
+@@ -121,20 +99,7 @@
+ $$
+ 
+-Implementation detail:
+-
+-```python
+-def voxel_to_block(voxel: Vec3i, block_size: int) -> Vec3i:
+-    result = Vec3i()
+-    for axis in [0, 1, 2]:
+-        v = voxel[axis]
+-        if v < 0:
+-            v -= block_size - 1
+-        result[axis] = v // block_size
+-    return result
+-```
+-
+ #### 4. Discrete Integer Voxel to World Center
+ 
+-Convert an integer voxel index back to the world-space center of that voxel.
++Convert an integer voxel index back to the world-space center of that voxel [S5, unofficial].
+ 
+ $$
+@@ -142,24 +107,63 @@
+ $$
+ 
+-Or, if using a lower bound $lb$:
++This assumes the center of voxel $[0,0,0]$ is at floating-point coordinate $[0.5, 0.5, 0.5]$ in continuous voxel space [S3, unofficial].
+ 
+-$$
+-world\_center = lb + (voxel\_idx + 0.5) \times voxel\_size
+-$$
++### Pseudocode
+ 
+-This assumes the center of voxel $[0,0,0]$ is at floating-point coordinate $[0.5, 0.5, 0.5]$ in continuous voxel space [S3, unofficial].
++```python
++import math
++
++def round_half_to_even(x: float) -> int:
++    lower = math.floor(x)
++    frac = x - lower
++    if frac < 0.5:
++        return lower
++    elif frac > 0.5:
++        return lower + 1
++    else:
++        if math.fmod(lower, 2.0) == 0.0:
++            return lower
++        else:
++            return lower + 1
++
++def world_to_voxel(world_pos, voxel_size, dims, bounds=None):
++    if bounds is not None:
++        pos_uv = [(world_pos[i] - bounds[i]) / (bounds[i+3] - bounds[i]) for i in range(3)]
++        voxel_idx = [math.floor(dims[i] * pos_uv[i]) for i in range(3)]
++    else:
++        voxel_idx = [math.floor(world_pos[i] / voxel_size) for i in range(3)]
++    for i in range(3):
++        voxel_idx[i] = max(0, min(voxel_idx[i], dims[i] - 2))
++    return voxel_idx
++
++def world_to_nearest_voxel(world_pos, voxel_size):
++    v = [world_pos[i] / voxel_size for i in range(3)]
++    return [round_half_to_even(v[i]) for i in range(3)]
++
++def voxel_to_block(voxel_idx, block_size):
++    block_idx = []
++    for i in range(3):
++        v = voxel_idx[i]
++        if v < 0:
++            v -= block_size - 1
++        block_idx.append(v // block_size)
++    return block_idx
++
++def voxel_to_world_center(voxel_idx, voxel_size):
++    return [(voxel_idx[i] + 0.5) * voxel_size for i in range(3)]
++```
+ 
+ ### Parameters
+ 
+-*   `voxel_size`: Physical size of a single voxel in meters. Typical values depend on the scene scale (e.g., 0.01m for detailed indoor, 1.0m for large outdoor) [S5, unofficial].
+-*   `block_size`: Number of voxels per block dimension. Common powers of 2 (e.g., 8, 16) are used for efficient bit-shifting in sparse implementations [S5, unofficial].
+-*   `trunc_dist`: TSDF truncation distance in meters. Used to compute the allocation band half-width in blocks: $blocks = \max(1, \lceil \frac{trunc\_dist}{block\_size \times voxel\_size} \rceil)$ [S5, unofficial].
++*   `voxel_size`: Physical size of a single voxel in meters [S5, unofficial].
++*   `block_size`: Number of voxels per block dimension [S5, unofficial].
++*   `trunc_dist`: TSDF truncation distance in meters [S5, unofficial]. Used to compute the allocation band half-width in blocks: $blocks = \max(1, \lceil \frac{trunc\_dist}{block\_size \times voxel\_size} \rceil)$ [S5, unofficial].
+ 
+ ### Edge Cases and Pitfalls
+ 
+-1.  **Rounding Mode Mismatch**: Using `std::rint` or hardware-native rounding instructions can cause discrepancies between CPU and GPU/GLSL code if the floating-point rounding mode is changed on the host. Always use the `floor`-based tie-to-even implementation [S5, unofficial].
+-2.  **Negative Index Division**: C++ `/` operator truncates toward zero. For negative voxel coordinates (e.g., voxel -1), integer division by block size (e.g., 8) yields 0, which is incorrect (voxel -1 belongs to block -1). The bias step (`v -= block_size - 1`) is mandatory for negative indices [S5, unofficial].
+-3.  **Boundary Clamping**: Points outside the defined grid bounds must be clamped to the nearest valid voxel index to prevent out-of-bounds memory access. The valid range is typically $[0, dims - 1]$ [S4, unofficial].
+-4.  **Center vs. Corner Convention**: Ensure consistency between the coordinate system used for indexing (lower corner) and the sampling point (center). The center is always offset by $0.5$ voxels from the integer index [S3, unofficial].
++1.  **Rounding Mode Mismatch**: Using `std::rint` or hardware-native rounding instructions can cause discrepancies between CPU and GPU/GLSL code if the floating-point rounding mode is changed on the host [S5, unofficial]. Always use the `floor`-based tie-to-even implementation [S5, unofficial].
++2.  **Negative Index Division**: C++ `/` operator truncates toward zero [S5, unofficial]. For negative voxel coordinates (e.g., voxel -1), integer division by block size (e.g., 8) yields 0, which is incorrect (voxel -1 belongs to block -1) [S5, unofficial]. The bias step (`v -= block_size - 1`) is mandatory for negative indices [S5, unofficial].
++3.  **Boundary Clamping**: Points outside the defined grid bounds must be clamped to the nearest valid voxel index to prevent out-of-bounds memory access [S4, unofficial]. The valid range is $[0, dims[axis] - 2]$ [S4, unofficial].
++4.  **Center vs. Corner Convention**: Ensure consistency between the coordinate system used for indexing (lower corner) and the sampling point (center) [S3, unofficial]. The center is always offset by $0.5$ voxels from the integer index [S3, unofficial].
+ 
+ ## Subtopics
+@@ -173,13 +177,13 @@
+ ## Operating characteristics
+ 
+-*   **Time Complexity**: $O(1)$ per coordinate conversion. The operations involve a constant number of floating-point multiplications, divisions, and integer arithmetic operations.
+-*   **Memory Complexity**: $O(1)$ auxiliary memory. Only a few scalar variables are needed per conversion.
+-*   **Strengths**: Deterministic and consistent across different execution environments (CPU/GPU/Shader) when the tie-to-even rounding is implemented correctly. Efficient for sparse voxel grids where block indexing is required.
+-*   **Limitations**: Requires careful handling of negative coordinates and floating-point rounding modes. Performance is not a bottleneck compared to memory access or ray marching, but incorrect implementation leads to subtle visual artifacts or crashes.
+-*   **When to use**: Whenever mapping between world space and voxel space is required, such as during ray traversal, TSDF fusion, or sparse grid traversal.
++*   **Time Complexity**: $O(1)$ per coordinate conversion [G]. The operations involve a constant number of floating-point multiplications, divisions, and integer arithmetic operations.
++*   **Memory Complexity**: $O(1)$ auxiliary memory [G]. Only a few scalar variables are needed per conversion.
++*   **Strengths**: Deterministic and consistent across different execution environments (CPU/GPU/Shader) when the tie-to-even rounding is implemented correctly [S5, unofficial]. Efficient for sparse voxel grids where block indexing is required [S5, unofficial].
++*   **Limitations**: Requires careful handling of negative coordinates and floating-point rounding modes [S5, unofficial]. Performance is not a bottleneck compared to memory access or ray marching, but incorrect implementation leads to subtle visual artifacts or crashes [S5, unofficial].
++*   **When to use**: Whenever mapping between world space and voxel space is required, such as during ray traversal, TSDF fusion, or sparse grid traversal [S5, unofficial].
+ 
+ ## Background
+ 
+-The concept of coordinate space conversion in voxel grids is fundamental to production volume rendering. It is discussed in the context of defining local, voxel, and world spaces in "Production Volume Rendering" [S3, unofficial], where the center of voxel $[0,0,0]$ is defined at $[0.5, 0.5, 0.5]$ in floating-point coordinates. The specific implementation details for sparse voxel grids, including block indexing and rounding consistency, are detailed in the `volumetric_kit_grid` repository [S5, unofficial]. The general principle of mapping continuous to discrete coordinates is also covered in "What Are The Coordinates Of A Pixel?" by Paul S. Heckbert [S3, unofficial].
++The concept of coordinate space conversion in voxel grids is fundamental to production volume rendering [S3, unofficial]. It is discussed in the context of defining local, voxel, and world spaces in "Production Volume Rendering" [S3, unofficial], where the center of voxel $[0,0,0]$ is defined at $[0.5, 0.5, 0.5]$ in floating-point coordinates [S3, unofficial]. The specific implementation details for sparse voxel grids, including block indexing and rounding consistency, are detailed in the `volumetric_kit_grid` repository [S5, unofficial]. The general principle of mapping continuous to discrete coordinates is also covered in "What Are The Coordinates Of A Pixel?" by Paul S. Heckbert [S3, unofficial].
+ 
+ ## Sources

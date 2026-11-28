@@ -1,0 +1,155 @@
+--- v002.md
++++ v003.md
+@@ -18,10 +18,10 @@
+ **Data Structures:**
+ - `scalars`: 1D vector of floats. Size is $X_{DIM} \times Y_{DIM} \times Z_{DIM}$ [S1, unofficial].
+-- Image dimensions: $X_{DIM}$ (width), $Y_{DIM}$ (total height), $Z_{DIM}$ (slice count). The method adjusts the effective slice height by setting $Y_{DIM} = Y_{DIM} / Z_{DIM}$ [S1, unofficial].
++- Image dimensions: $X_{DIM}$ (width), $Y_{DIM}$ (total height), $Z_{DIM}$ (slice count) [S1, unofficial]. The method adjusts the effective slice height by setting $Y_{DIM} = Y_{DIM} / Z_{DIM}$ [S1, unofficial].
+ 
+ **Steps:**
+ 1. Load the PNG image to retrieve raw pixel data, $X_{DIM}$, $Y_{DIM}$, and component count [S1, unofficial]. Alternatively, manually parse the binary PNG structure: verify 'IHDR' at bytes 12–15, extract width (bytes 16–19) and height (bytes 20–23) in little-endian format, iterate chunks from index 8 to collect 'IDAT' data, and decompress using DeflateStream while skipping the first 2 bytes and excluding the last 6 bytes [S2, unofficial].
+ 2. Set $Z_{DIM}$ to the input `slices` parameter and adjust $Y_{DIM} = Y_{DIM} / Z_{DIM}$ [S1, unofficial].
+-3. Decode scanlines: initialize `scanlinePrev` and `scanlineCurrent` buffers of size `stride` ($X_{DIM} \times 4$). Iterate $y$ from 0 to height-1, read the filter type byte, read `stride` bytes into `scanlineCurrent`, and apply the PNG filter (Sub, Up, Average, or Paeth) [S2, unofficial].
++3. Decode scanlines: initialize `scanlinePrev` and `scanlineCurrent` buffers of size `stride` ($X_{DIM} \times 4$) [S2, unofficial]. Iterate $y$ from 0 to height-1, read the filter type byte, read `stride` bytes into `scanlineCurrent`, and apply the PNG filter (Sub, Up, Average, or Paeth) [S2, unofficial].
+ 4. Convert the decoded pixel data to floats and store in the `scalars` vector [S1, unofficial].
+ 5. Apply the filter specified by `S_FILTER` to the `scalars` vector [S1, unofficial].
+@@ -30,5 +30,5 @@
+ **Formulas:**
+ - Dimension adjustment: $Y_{DIM} = Y_{DIM} / Z_{DIM}$ [S1, unofficial].
+-- Paeth predictor (for PNG filter type 4): $p = a + b - c$, $pa = |p - a|$, $pb = |p - b|$, $pc = |p - c|$. Return $a$ if $pa \le pb$ and $pa \le pc$. Return $b$ if $pb \le pc$. Otherwise return $c$ [S2, unofficial].
++- Paeth predictor (for PNG filter type 4): $p = a + b - c$, $pa = |p - a|$, $pb = |p - b|$, $pc = |p - c|$ [S2, unofficial]. Return $a$ if $pa \le pb$ and $pa \le pc$ [S2, unofficial]. Return $b$ if $pb \le pc$ [S2, unofficial]. Otherwise return $c$ [S2, unofficial].
+ 
+ **Pseudocode:**
+@@ -36,33 +36,58 @@
+ import struct
+ import os
++import zlib
+ 
+ def load_png_slices(image_path: str, slices: int = 176, S_FILTER=None) -> list[float]:
+-    # Step 1: Load image data (assumes stbi_load or equivalent returns raw bytes, width, height)
+-    raw_data, x_dim, y_dim = load_image_data(image_path)
++    # Step 1: Load image data [S1, unofficial]
++    raw_bytes, width, height = parse_png_manual(image_path)
+     
+-    # Step 2: Adjust dimensions
++    # Step 2: Adjust dimensions [S1, unofficial]
+     z_dim = slices
+-    y_dim = y_dim // z_dim  # Y_DIM = Y_DIM / Z_DIM
++    y_dim = height // z_dim
+     
+-    # Step 3: Decode scanlines with PNG filter application
+-    stride = x_dim
++    # Step 3: Decode scanlines with PNG filter application [S2, unofficial]
++    stride = width * 4
+     scalars = []
+-    prev_line = [0] * stride
+-    for y in range(y_dim):
+-        current_line = list(raw_data[y * stride : (y + 1) * stride])
+-        # Apply PNG filter (Up filter case from evidence)
++    scanline_prev = [0] * stride
++    scanline_current = [0] * stride
++    
++    for y in range(height):
++        filter_type = raw_bytes[y * (stride + 1)]
++        scanline_current = list(raw_bytes[(y * (stride + 1)) + 1 : (y * (stride + 1)) + 1 + stride])
++        
+         for x in range(stride):
+-            current_line[x] = (current_line[x] + prev_line[x]) % 256
+-        prev_line = current_line
+-        scalars.extend(current_line)
++            if x >= 4:
++                if filter_type == 1:  # Sub
++                    scanline_current[x] = (scanline_current[x] + scanline_current[x - 4]) % 256
++                elif filter_type == 2:  # Up
++                    scanline_current[x] = (scanline_current[x] + scanline_prev[x]) % 256
++                elif filter_type == 3:  # Average
++                    scanline_current[x] = (scanline_current[x] + (scanline_current[x - 4] + scanline_prev[x]) // 2) % 256
++                elif filter_type == 4:  # Paeth
++                    a = scanline_current[x - 4]
++                    b = scanline_prev[x]
++                    c = scanline_prev[x - 4]
++                    p = a + b - c
++                    pa = abs(p - a)
++                    pb = abs(p - b)
++                    pc = abs(p - c)
++                    if pa <= pb and pa <= pc:
++                        predictor = a
++                    elif pb <= pc:
++                        predictor = b
++                    else:
++                        predictor = c
++                    scanline_current[x] = (scanline_current[x] + predictor) % 256
++        scanline_prev = scanline_current
++        scalars.extend(scanline_current)
+         
+-    # Step 4: Convert to floats
++    # Step 4: Convert to floats [S1, unofficial]
+     scalars = [val / 255.0 for val in scalars]
+     
+-    # Step 5: Apply S_FILTER
++    # Step 5: Apply S_FILTER [S1, unofficial]
+     if S_FILTER is not None:
+         scalars = apply_filter(scalars, S_FILTER)
+         
+-    # Step 6: Handle binary persistence
++    # Step 6: Handle binary persistence [S1, unofficial]
+     binary_filename = f"file_{S_FILTER}.vol" if S_FILTER else "filtered.vol"
+     if not os.path.exists(binary_filename):
+@@ -73,7 +98,28 @@
+     return scalars
+ 
++def parse_png_manual(path: str) -> tuple[bytes, int, int]:
++    with open(path, 'rb') as f:
++        data = f.read()
++        assert data[12:16] == b'IHDR'
++        width = struct.unpack('<I', data[16:20])[0]
++        height = struct.unpack('<I', data[20:24])[0]
++        
++        compressed_data = b''
++        idx = 8
++        while idx < len(data):
++            chunk_len = struct.unpack('<I', data[idx:idx+4])[0]
++            chunk_type = data[idx+4:idx+8]
++            if chunk_type == b'IDAT':
++                compressed_data += data[idx+8:idx+8+chunk_len]
++            elif chunk_type == b'IEND':
++                break
++            idx += 4 + 4 + chunk_len + 4
++            
++        raw_data = zlib.decompress(compressed_data, -15)[2:-6]
++        return raw_data, width, height
++
+ def apply_filter(scalars: list[float], filter_name: str) -> list[float]:
+-    # Standard filter implementation (e.g., normalization or smoothing)
+-    return [s * 1.0 for s in scalars]
++    # Standard filter implementation for S_FILTER [G]
++    return scalars
+ 
+ def save_binary_volume(filename: str, data: list[float]) -> None:
+@@ -86,11 +132,4 @@
+         count = len(data) // 4
+         return list(struct.unpack(f'{count}f', data))
+-
+-def load_image_data(path: str) -> tuple[bytes, int, int]:
+-    # Standard image loading routine (e.g., stbi_load)
+-    # Returns raw pixel bytes, width, height
+-    import stb_image
+-    data, w, h, _ = stb_image.load(path, channels=1)
+-    return data, w, h
+ ```
+ 
+@@ -99,4 +138,5 @@
+ - Boundaries: The method assumes $Y_{DIM}$ is perfectly divisible by $Z_{DIM}$ for correct slice height calculation [S1, unofficial].
+ - File I/O: The method relies on the existence or absence of `file_{S_FILTER}.vol` to determine whether to save or load pre-filtered data [S1, unofficial].
++- PNG Decompression: The DeflateStream skips the first 2 bytes and excludes the last 6 bytes of the zlib stream [S2, unofficial].
+ 
+ ## Subtopics
+@@ -106,6 +146,6 @@
+ 
+ ## Operating characteristics
+-- Time Complexity: Not given in the sources.
+-- Memory Complexity: Not given in the sources.
++- Time Complexity: Not given in the sources [S1, unofficial].
++- Memory Complexity: Not given in the sources [S1, unofficial].
+ - Strengths: Simple to implement using standard image libraries; supports caching via binary file persistence [S1, unofficial].
+ - Limitations: Assumes a specific stacking order (top-to-bottom for Y-dimension) [S1, unofficial].

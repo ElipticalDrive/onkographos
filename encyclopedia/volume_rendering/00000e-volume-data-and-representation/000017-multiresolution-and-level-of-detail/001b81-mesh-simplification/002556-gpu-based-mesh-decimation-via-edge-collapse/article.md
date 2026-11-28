@@ -1,0 +1,227 @@
+# GPU-based Mesh Decimation via Edge Collapse
+
+Also called: Mesh Decimation, QECD, QEM Decimation, Quadric Edge Collapse Decimation
+
+## Overview
+GPU-based Mesh Decimation via Edge Collapse reduces the polygon count of a triangular mesh while preserving sharp geometric features using Quadric Error Metrics (QEM) [S3, unofficial]. It solves the problem of excessive face counts in high-resolution meshes, which hinder rendering and texturing efficiency [S2]. Unlike CPU-based greedy decimation that iterates until convergence, this method uses a limited number of parallel iterations (typically 2) combined with Thrust utilities for sorting and scanning, trading absolute optimality for significant speedups on GPU hardware [S3, unofficial]. It builds on [Mesh Simplification](1032-mesh-simplification.md) by implementing the QEM edge collapse specifically for GPU architectures [S3, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** `vertices` (Float tensor, shape `[V, 3]`), `faces` (Integer tensor, shape `[F, 3]`), `target_vertex_count` (Integer) [S3, unofficial].
+- **Output:** `new_vertices` (Float tensor, shape `[V', 3]`), `new_faces` (Integer tensor, shape `[F', 3]`) [S3, unofficial].
+
+**Data Structures:**
+- **Tri:** Struct with fields `v0`, `v1`, `v2` (int). Represents a triangle. Invalid faces are marked by setting `v0 = -1` [S3, unofficial].
+- **Edge:** Struct with fields `v0`, `v1` (int). Enforces canonical ordering `v0 < v1` [S3, unofficial].
+- **Quadricf:** Struct with 10 float fields: `a00`, `a01`, `a02`, `a11`, `a12`, `a22`, `b0`, `b1`, `b2`, `c`. Represents the symmetric 4x4 quadric matrix $Q$ in compact form [S3, unofficial].
+- **vertex_to_face_map:** Flat array of face indices in CSR format [S3, unofficial].
+- **vertex_to_face_offsets:** Array of size `num_vertices + 1`, storing start indices for each vertex's face list in `vertex_to_face_map` [S3, unofficial].
+
+**Numbered Steps:**
+1. **Initialization:** Transfer `vertices` and `faces` to GPU device vectors (`d_vertices`, `d_faces`). Initialize `num_vertices` and `num_faces` [S3, unofficial].
+2. **Iteration Loop:** Repeat up to `MAX_ITERATIONS` times, while `num_vertices > target_vertex_count` and `num_faces > 0` [S3, unofficial]:
+    1. **Adjacency Build (Host):** Copy `d_faces` to host. Build `vertex_to_face_map` and `vertex_to_face_offsets` by iterating over all valid faces (where `v0 != -1`). Transfer these structures back to device (`d_v_to_f_map`, `d_v_to_f_offsets`) [S3, unofficial].
+    2. **Vertex Quadrics (Device):** Zero-initialize `d_vertex_quadrics` (size `num_vertices`). Launch `kernel_calculate_vertex_quadrics` with grid size `(num_faces + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK` and `THREADS_PER_BLOCK` (256) [S3, unofficial]. For each face $f$ with vertices $v_0, v_1, v_2$:
+        - Compute normal $n = (v_1 - v_0) \times (v_2 - v_0)$ [S3, unofficial].
+        - Compute area $A = 0.5 \|n\|$. If $A \le 10^{-8}$, skip [S3, unofficial].
+        - Normalize $n$. Compute distance $d = -n \cdot v_0$ [S3, unofficial].
+        - Construct local quadric $q$ (unweighted):
+          $$
+          \begin{aligned}
+          q_{a00} &= n_x^2, & q_{a01} &= n_x n_y, & q_{a02} &= n_x n_z \\
+          q_{a11} &= n_y^2, & q_{a12} &= n_y n_z, & q_{a22} &= n_z^2 \\
+          q_{b0} &= n_x d, & q_{b1} &= n_y d, & q_{b2} &= n_z d \\
+          q_c &= d^2
+          \end{aligned}
+          $$
+        - Weight by area: $q_{ij} \leftarrow q_{ij} \times A$ [S3, unofficial].
+        - Atomically add $q$ to `d_vertex_quadrics[v0]`, `d_vertex_quadrics[v1]`, `d_vertex_quadrics[v2]` [S3, unofficial].
+    3. **Edge Extraction (Device):** Launch `kernel_extract_face_edges`. For each face, generate 3 edges as normalized pairs `{min(v_i, v_j), max(v_i, v_j)}` into `d_all_edges` [S3, unofficial].
+    4. **Edge Sorting and Uniquing (Device):** Sort `d_all_edges`. Use `thrust::unique` to identify unique edges into `d_unique_edges` [S3, unofficial].
+    5. **Boundary Detection (Device):** Use `thrust::reduce_by_key` on `d_all_edges` with constant iterator `1` to count occurrences of each unique edge. If count == 1, mark as boundary in `d_is_boundary` [S3, unofficial].
+    6. **Cost Calculation (Device):** Launch `kernel_calculate_edge_costs`. For each unique edge $e$ with vertices $v_0, v_1$:
+        - Sum quadrics: $Q = Q_{v0} + Q_{v1}$ [S3, unofficial].
+        - Extract $3 \times 3$ matrix $Q_{3x3}$ from $Q$'s `a` coefficients and vector $b$ from `b` coefficients [S3, unofficial].
+        - Compute determinant $det = q_{a00}(q_{a11}q_{a22} - q_{a12}^2) - q_{a01}(q_{a01}q_{a22} - q_{a12}q_{a02}) + q_{a02}(q_{a01}q_{a12} - q_{a11}q_{a02})$ [S3, unofficial].
+        - Compute collapse position $pos$:
+          - If $|det| > 10^{-8}$, solve $Q_{3x3} pos = -b$ using Cramer's rule or inverse [S3, unofficial].
+          - Else, fallback to midpoint $pos = (v_0 + v_1) / 2$ [S3, unofficial].
+        - **Stability Check:** Let $mid = (v_0 + v_1)/2$ and $edge\_len^2 = \|v_1 - v_0\|^2$. If $\|pos - mid\|^2 > edge\_len^2$, clamp $pos = mid$ [S3, unofficial].
+        - **Validity Check:** Iterate over one-ring faces of $v_0$ and $v_1$ (excluding the collapsed edge's faces). Simulate collapse by replacing $v_0, v_1$ with $pos$ [S3, unofficial].
+          - If any resulting face has area squared $< 10^{-11}$, mark `causes_degeneracy = true` [S3, unofficial].
+          - If any resulting face normal flips (dot product with old normal $< 0$), mark `causes_flip = true` [S3, unofficial].
+        - **Cost Computation:**
+          $$
+          cost = pos^T Q pos + 2 b^T pos + c
+          $$
+          Expanded:
+          $$
+          \begin{aligned}
+          cost &= q_{a00}pos_x^2 + 2q_{a01}pos_x pos_y + 2q_{a02}pos_x pos_z + q_{a11}pos_y^2 + 2q_{a12}pos_y pos_z + q_{a22}pos_z^2 \\
+          &+ 2q_{b0}pos_x + 2q_{b1}pos_y + 2q_{b2}pos_z + q_c
+          \end{aligned}
+          $$
+          - If boundary, add $1000.0 \times edge\_len^2$ [S3, unofficial].
+          - If `causes_flip` or `causes_degeneracy`, add $1000.0 \times edge\_len^2$ and set $pos = mid$ [S3, unofficial].
+    7. **Selection (Host):** Sort edges by cost. Iterate through sorted edges. Select an edge for collapse if neither $v_0$ nor $v_1$ has been used in a previous collapse in this iteration. Store selected collapses `{v_to_remove, v_to_keep}` and `new_positions` [S3, unofficial].
+    8. **Remap Table (Device):** Initialize `remap_table` where `remap_table[v_to_remove] = v_to_keep` for selected collapses, else `remap_table[i] = i`. Launch `kernel_resolve_remap_table` to perform path compression (find ultimate destination for each vertex) [S3, unofficial].
+    9. **Face Update (Device):** Launch `kernel_update_faces`. For each face, remap indices using `remap_table`. If any two vertices become equal, mark face as invalid `{-1, -1, -1}` [S3, unofficial].
+    10. **Vertex Position Update (Device):** Launch `kernel_update_vertex_positions`. For each collapse, write the new position to the destination vertex `remap_table[v_to_remove]` [S3, unofficial].
+    11. **Compaction (Device):**
+        - Copy valid faces (`v0 != -1`) to `d_valid_faces`. Update `num_faces` [S3, unofficial].
+        - If `num_faces == 0`, terminate [S3, unofficial].
+        - Mark active vertices using `MarkActiveVertices` functor on `d_valid_faces` [S3, unofficial].
+        - Compute new compact indices via `exclusive_scan` on active flags [S3, unofficial].
+        - Compact vertices and faces into new contiguous buffers. Update `num_vertices` [S3, unofficial].
+
+**Parameters:**
+- `MAX_ITERATIONS`: Integer, typically 2 [S3, unofficial].
+- `THREADS_PER_BLOCK`: Integer, typically 256 [S3, unofficial].
+- `Boundary penalty multiplier`: Float, 1000.0 [S3, unofficial].
+- `Degeneracy threshold`: Float, $10^{-11}$ for one-ring area check [S3, unofficial].
+- `Singular matrix threshold`: Float, $10^{-8}$ for determinant check [S3, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Singular quadric matrix:** If determinant is near zero, collapse position falls back to midpoint [S3, unofficial].
+- **Numerical instability:** If new position is too far from midpoint (distance squared > edge length squared), clamp to midpoint to prevent spikes [S3, unofficial].
+- **Topological validity:** Edge collapse is rejected (cost increased by 1000x edge length squared) if it causes normal flip or degeneracy in the one-ring neighborhood of either endpoint [S3, unofficial].
+- **Boundary preservation:** Boundary edges incur a heavy penalty (1000x edge length squared) to discourage collapse [S3, unofficial].
+- **Output vertex count:** The actual number of vertices in the output may be slightly different from `target_vertex_count` depending on the mesh topology [S3, unofficial].
+- **Input requirements:** Input tensors must be contiguous in memory for direct pointer casting [S3, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def decimate_mesh(vertices, faces, target_vertex_count):
+    num_vertices = len(vertices)
+    num_faces = len(faces)
+    if num_vertices <= target_vertex_count:
+        return vertices, faces
+
+    d_vertices = copy_to_device(vertices)
+    d_faces = copy_to_device(faces)
+    
+    MAX_ITERATIONS = 2
+    THREADS_PER_BLOCK = 256
+    
+    for _ in range(MAX_ITERATIONS):
+        if num_vertices <= target_vertex_count or num_faces == 0:
+            break
+            
+        # 1. Adjacency Build (Host)
+        h_faces = copy_to_host(d_faces)
+        valid_faces = [f for f in h_faces if f.v0 != -1]
+        num_faces = len(valid_faces)
+        if num_faces == 0:
+            num_vertices = 0
+            break
+            
+        v_to_f_map, v_to_f_offsets = build_adjacency(valid_faces, num_vertices)
+        d_v_to_f_map = copy_to_device(v_to_f_map)
+        d_v_to_f_offsets = copy_to_device(v_to_f_offsets)
+        
+        # 2. Vertex Quadrics (Device)
+        d_vertex_quadrics = zero_init(num_vertices, Quadricf)
+        grid_size = (num_faces + THREADS_PER_BLOCK - 1) // THREADS_PER_BLOCK
+        kernel_calculate_vertex_quadrics(d_vertices, valid_faces, num_faces, d_vertex_quadrics, THREADS_PER_BLOCK)
+        
+        # 3. Edge Extraction (Device)
+        d_all_edges = extract_edges(valid_faces, num_faces)
+        
+        # 4. Edge Sorting and Uniquing (Device)
+        sort(d_all_edges)
+        d_unique_edges = unique(d_all_edges)
+        num_unique_edges = len(d_unique_edges)
+        
+        # 5. Boundary Detection (Device)
+        d_edge_counts = reduce_by_key(d_all_edges, constant(1))
+        d_is_boundary = (d_edge_counts == 1)
+        
+        # 6. Cost Calculation (Device)
+        d_edge_costs = zero_init(num_unique_edges, float)
+        d_collapse_pos = zero_init(num_unique_edges, V3f)
+        kernel_calculate_edge_costs(d_unique_edges, num_unique_edges, d_vertices, d_vertex_quadrics, 
+                                    d_is_boundary, valid_faces, d_v_to_f_map, d_v_to_f_offsets,
+                                    d_edge_costs, d_collapse_pos, THREADS_PER_BLOCK)
+        
+        # 7. Selection (Host)
+        h_sorted_indices = sort_indices(d_edge_costs)
+        h_unique_edges = copy_to_host(d_unique_edges)
+        h_collapse_pos = copy_to_host(d_collapse_pos)
+        
+        vertex_used = [False] * num_vertices
+        collapses = []
+        new_positions_batch = []
+        collapse_v0_indices_batch = []
+        
+        num_collapses_this_iteration = min(num_vertices - target_vertex_count, num_unique_edges)
+        if num_collapses_this_iteration < 0:
+            num_collapses_this_iteration = 0
+            
+        for i in range(num_collapses_this_iteration):
+            orig_idx = h_sorted_indices[i]
+            e = h_unique_edges[orig_idx]
+            if not vertex_used[e.v0] and not vertex_used[e.v1]:
+                vertex_used[e.v0] = True
+                vertex_used[e.v1] = True
+                collapses.append((e.v1, e.v0))
+                new_positions_batch.append(h_collapse_pos[orig_idx])
+                collapse_v0_indices_batch.append(e.v0)
+        
+        if not collapses:
+            break
+            
+        # 8. Remap Table (Device)
+        remap_table = list(range(num_vertices))
+        for v_remove, v_keep in collapses:
+            remap_table[v_remove] = v_keep
+        d_remap_table = copy_to_device(remap_table)
+        kernel_resolve_remap_table(d_remap_table, num_vertices, THREADS_PER_BLOCK)
+        
+        # 9. Face Update (Device)
+        kernel_update_faces(valid_faces, num_faces, d_remap_table, THREADS_PER_BLOCK)
+        
+        # 10. Compaction (Device)
+        d_valid_faces = copy_if(valid_faces, lambda f: f.v0 != -1)
+        num_faces = len(d_valid_faces)
+        if num_faces == 0:
+            num_vertices = 0
+            break
+            
+        d_active = zero_init(num_vertices, int)
+        for_each(d_valid_faces, MarkActiveVertices(d_active))
+        d_new_indices = exclusive_scan(d_active)
+        
+        d_new_positions = copy_to_device(new_positions_batch)
+        d_collapse_v0_indices = copy_to_device(collapse_v0_indices_batch)
+        kernel_update_vertex_positions(d_vertices, d_remap_table, d_new_positions, d_collapse_v0_indices, len(collapses), THREADS_PER_BLOCK)
+        
+        d_vertices, d_faces, num_vertices, num_faces = compact_mesh(d_vertices, d_valid_faces, d_active, d_new_indices)
+
+    return copy_to_device(vertices), copy_to_device(faces)
+```
+
+## Subtopics
+
+### [Quadric Error Metric Tetrahedral Simplification](8981-quadric-error-metric-tetrahedral-simplification.md)
+Extends QEM to tetrahedral meshes for volumetric data, adding positional correction for stability.
+
+### [Rapid Decimation for Direct Volume Rendering](15015-rapid-decimation-for-direct-volume-rendering.md)
+Uses data-value heuristics on hex/tet grids for volume rendering, rather than geometric QEM on triangles.
+
+## Operating characteristics
+- **Time Complexity:** Dominated by sorting edges ($O(E \log E)$) and adjacency building ($O(F)$) per iteration. With `MAX_ITERATIONS=2`, it trades absolute optimality for significant speedups on GPU hardware [S3, unofficial].
+- **Memory Complexity:** Requires storage for vertices, faces, quadrics ($O(V)$), edges ($O(F)$), and adjacency structures ($O(F)$) [S3, unofficial].
+- **Performance:** Optimized for GPU memory bandwidth and parallelism using Thrust and CUDA kernels [S3, unofficial]. Typical usage targets 10,000 vertices, but performance scales with mesh size [S3, unofficial].
+- **Strengths:** Fast, preserves sharp features via QEM, handles boundary preservation and topological validity checks on-device [S3, unofficial].
+- **Limitations:** The actual vertex count may differ slightly from the target due to topology constraints [S3, unofficial]. Limited iterations (2) may not reach the exact target count for complex meshes [S3, unofficial]. Input tensors must be contiguous [S3, unofficial].
+
+## Background
+The method is based on Quadric Edge Collapse Decimation (QECD), originally proposed by Garland and Heckbert [S2]. It was implemented on GPU using Thrust and CUDA kernels [S3, unofficial]. It is used as a postprocessing step in the AnalyticMesh package to simplify meshes generated by analytic marching for efficient rendering and texturing [S2].
+
+## Sources
+[S1] ashawkey/stable-dreamfusion, https://github.com/ashawkey/stable-dreamfusion, fetched 2026-10-26 (unofficial)
+[S2] Learning and Meshing From Deep Implicit Surface Networks Using an Efficient Implementation of Analytic Marching, https://doi.org/10.1109/tpami.2021.3135007, fetched 2026-10-26
+[S3] hwanhuh/spcumc, https://github.com/hwanhuh/spcumc, fetched 2026-10-27 (unofficial)
+[S4] Level-of-Detail Independent Voxel-Based Surface ..., https://studenttheses.uu.nl/items/a8b8233a-d142-43f1-8f6d-c0b0fe43a767, fetched 2026-10-27 (unofficial)

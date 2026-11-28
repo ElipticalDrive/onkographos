@@ -1,0 +1,219 @@
+--- v004.md
++++ v005.md
+@@ -8,104 +8,99 @@
+ ## How it works
+ **Inputs and Outputs**
+-- **Input**: Base 2D or 3D coordinate `p` (or `uv`), time `t` (optional, for animation), and warp strength parameter `WARP_STRENGTH`.
+-- **Output**: A scalar noise value `f` and, optionally, normal vectors for lighting.
++- **Input**: Base 2D or 3D coordinate `p` (or `uv`), time `t` (optional, for animation), warp strength `WARP_STRENGTH`, and finite difference step `eps` [S2].
++- **Output**: Scalar noise value `f` and optional normal vectors for lighting [S2].
+ 
+ **Data Structures**
+-- Coordinates are represented as 2D vectors (`vec2`) or 3D vectors (`vec3`) [S2].
+-- Noise functions `fbm` return a scalar in `[0, 1]` or `[-1, 1]` depending on implementation; the examples below assume a range that is normalized to `[0, 1]` via `0.5 + 0.5 * noise` [S2].
++- Coordinates are represented as 2D or 3D vectors [S2].
++- Noise functions return scalars or vectors; examples normalize to `[0, 1]` via `0.5 + 0.5 * noise` [S2].
+ 
+ **Steps**
+-1. **Compute Primary Warp Field**: Calculate a displacement vector `q` using a base FBM function on the input coordinates.
+-   $$ q = \text{fbm}(p \cdot 0.5) $$
+-   [S2]
+-
+-2. **Compute Secondary Warp Field**: Calculate a second displacement vector `r` using FBM on coordinates offset by `q` scaled by `WARP_STRENGTH`.
+-   $$ r = \text{fbm}(p + \text{WARP\_STRENGTH} \cdot q + \text{offset}) $$
+-   [S2]
+-   *Note: An `offset` vector (e.g., `vec2(1.7, 9.2)`) is often added to prevent symmetry artifacts [S2].*
+-
+-3. **Compute Final Noise Value**: Sample the FBM function again using coordinates warped by `r`.
+-   $$ f = 0.5 + 0.5 \cdot \text{fbm}(p + \text{WARP\_STRENGTH} \cdot r) $$
+-   [S2]
+-
+-4. **Modulate Output**: Mix the final noise value `f` with a cubic function of `f`, weighted by the magnitude of the secondary warp `r`.
+-   $$ f_{\text{final}} = \text{mix}(f, f^3 \cdot 3.5, f \cdot \|r\|) $$
+-   [S2]
+-   *Note: In some variants, the weight uses `f \cdot |n.x|` where `n` is a component of the warp field [S2].*
+-
+-5. **Compute Normals (Optional)**: Approximate derivatives using finite differences with epsilon `eps` to compute normals for lighting.
+-   $$ n_x = \text{fbm}(p + \text{eps} \cdot \hat{x} + \text{WARP\_STRENGTH} \cdot r(p + \text{eps} \cdot \hat{x})) $$
+-   $$ n_y = \text{fbm}(p + \text{eps} \cdot \hat{y} + \text{WARP\_STRENGTH} \cdot r(p + \text{eps} \cdot \hat{y})) $$
+-   $$ \text{normal} = \text{normalize}(n_x - f, \epsilon, n_y - f) $$
+-   [S2]
++1. **Compute Primary Warp Field**: Calculate a displacement vector `q` using a vector-valued FBM on input coordinates modulated by time: `q = fbm2(p + t * 0.1)` [S2].
++2. **Compute Secondary Warp Field**: Calculate a second displacement vector `r` using FBM on coordinates offset by `q` scaled by `WARP_STRENGTH` and an asymmetry offset: `r = fbm2(p + WARP_STRENGTH * q + vec2(1.7, 9.2))` [S2].
++3. **Compute Final Noise Value**: Sample the FBM function again using coordinates warped by `r`: `f = 0.5 + 0.5 * fbm(p + WARP_STRENGTH * r)` [S2].
++4. **Modulate Output**: Mix the final noise value `f` with a cubic function of `f`, weighted by the magnitude of the secondary warp `r`: `f = mix(f, f^3 * 3.5, f * ||r||)` [S2].
++5. **Compute Normals (Optional)**: Approximate derivatives using finite differences with `eps` to compute normals for lighting. Sample `f` at `p + eps_x` and `p + eps_y` while recomputing `r` at those positions, then construct `normal = normalize(vec3(f_x - f, eps.x, f_y - f))` [S2].
+ 
+ **Pseudocode**
+ ```python
++import math
++
++def hash2d(p):
++    # Simple stable hash for procedural noise [G]
++    x, y = p
++    x = math.sin(x * 127.1 + y * 311.7) * 43758.5453
++    y = math.sin(x * 269.5 + y * 183.3) * 43758.5453
++    return (math.fmod(x, 1.0), math.fmod(y, 1.0))
++
++def noise2d(p):
++    # Bilinear interpolation of hash values [G]
++    ix, iy = math.floor(p[0]), math.floor(p[1])
++    fx, fy = p[0] - ix, p[1] - iy
++    fx, fy = fx * fx * (3.0 - 2.0 * fx), fy * fy * (3.0 - 2.0 * fy)
++    h00 = hash2d((ix, iy))
++    h10 = hash2d((ix + 1, iy))
++    h01 = hash2d((ix, iy + 1))
++    h11 = hash2d((ix + 1, iy + 1))
++    nx0 = h00[0] * (1.0 - fx) + h10[0] * fx
++    nx1 = h01[0] * (1.0 - fx) + h11[0] * fx
++    return nx0 * (1.0 - fy) + nx1 * fy
++
++def fbm(p, octaves=3, lacunarity=2.0, gain=0.5):
++    # Multi-octave noise summation per standard definition [G]
++    value = 0.0
++    amplitude = 1.0
++    frequency = 1.0
++    for _ in range(octaves):
++        value += amplitude * noise2d((p[0] * frequency, p[1] * frequency))
++        amplitude *= gain
++        frequency *= lacunarity
++    return value
++
++def fbm2(p, octaves=3, lacunarity=2.0, gain=0.5):
++    # Returns a 2D vector by summing two orthogonal FBM fields [S2]
++    x = fbm(p, octaves, lacunarity, gain)
++    y = fbm((p[0] + 1.0, p[1] + 1.0), octaves, lacunarity, gain)
++    return (x, y)
++
+ def domain_warped_fbm(p, time=0.0, warp_strength=0.5, eps=1e-4):
+-    """
+-    Computes domain warped FBM.
+-    p: vec2 or vec3 coordinate
+-    time: float for animation
+-    warp_strength: float scaling the warp displacement
+-    eps: float for finite difference normal calculation
+-    """
+     # Step 1: Primary warp field q
+-    # fbm2 returns a vector of same dimension as input
+-    q = fbm2(p * 0.5 + vec2(time * 0.1, 0.0))
++    q = fbm2((p[0] + time * 0.1, p[1]))
++
++    # Step 2: Secondary warp field r
++    offset = (1.7, 9.2)
++    r = fbm2((p[0] + warp_strength * q[0] + offset[0],
++              p[1] + warp_strength * q[1] + offset[1]))
++
++    # Step 3: Final noise value f
++    f = 0.5 + 0.5 * fbm((p[0] + warp_strength * r[0],
++                         p[1] + warp_strength * r[1]))
++
++    # Step 4: Modulate output
++    weight = f * math.sqrt(r[0]**2 + r[1]**2)
++    f_final = f * (1.0 - weight) + (f**3 * 3.5) * weight
++
++    # Step 5: Compute normals via finite differences
++    eps_x = (eps, 0.0)
++    eps_y = (0.0, eps)
+     
+-    # Step 2: Secondary warp field r
+-    # Offset vector to break symmetry
+-    offset = vec2(1.7, 9.2)
+-    r = fbm2(p + warp_strength * q + offset)
++    # Recompute q and r at perturbed positions to match evidence [S2]
++    q_x = fbm2((p[0] + eps_x[0] + time * 0.1, p[1] + eps_x[1]))
++    q_y = fbm2((p[0] + eps_y[0] + time * 0.1, p[1] + eps_y[1]))
+     
+-    # Step 3: Final noise value f
+-    f = 0.5 + 0.5 * fbm(p + warp_strength * r)
+-    
+-    # Step 4: Modulate f
+-    # Mix f with f^3 * 3.5 weighted by f * length(r)
+-    weight = f * length(r)
+-    f_final = mix(f, f * f * f * 3.5, weight)
+-    
+-    # Step 5: Compute normals (optional, for lighting)
+-    # Calculate perturbed noise values for x and y derivatives
+-    eps_x = vec2(eps, 0.0)
+-    eps_y = vec2(0.0, eps)
+-    
+-    # Recompute r for perturbed positions to maintain consistency
+-    r_x = fbm2(p + eps_x + warp_strength * q + offset)
+-    r_y = fbm2(p + eps_y + warp_strength * q + offset)
+-    
+-    f_x = 0.5 + 0.5 * fbm(p + eps_x + warp_strength * r_x)
+-    f_y = 0.5 + 0.5 * fbm(p + eps_y + warp_strength * r_y)
+-    
+-    # Normal vector approximation
+-    normal = normalize(vec3(f_x - f, eps, f_y - f))
+-    
++    r_x = fbm2((p[0] + eps_x[0] + warp_strength * q_x[0] + offset[0],
++                p[1] + eps_x[1] + warp_strength * q_x[1] + offset[1]))
++    r_y = fbm2((p[0] + eps_y[0] + warp_strength * q_y[0] + offset[0],
++                p[1] + eps_y[1] + warp_strength * q_y[1] + offset[1]))
++                
++    f_x = 0.5 + 0.5 * fbm((p[0] + eps_x[0] + warp_strength * r_x[0],
++                           p[1] + eps_x[1] + warp_strength * r_x[1]))
++    f_y = 0.5 + 0.5 * fbm((p[0] + eps_y[0] + warp_strength * r_y[0],
++                           p[1] + eps_y[1] + warp_strength * r_y[1]))
++                           
++    normal = (f_x - f, eps, f_y - f)
++    norm_len = math.sqrt(normal[0]**2 + normal[1]**2 + normal[2]**2)
++    normal = (normal[0] / norm_len, normal[1] / norm_len, normal[2] / norm_len)
++
+     return f_final, normal
+-
+-def fbm2(p):
+-    """
+-    Placeholder for 2D FBM function.
+-    Returns a vec2.
+-    """
+-    # Implementation depends on underlying noise generator (e.g., Simplex, Perlin)
+-    # Typically sums multiple octaves
+-    return vec2(fbm_scalar(p), fbm_scalar(p + vec2(1.0)))
+-
+-def fbm_scalar(p):
+-    """
+-    Placeholder for scalar FBM function.
+-    Returns a float in [0, 1].
+-    """
+-    # Implementation depends on underlying noise generator
+-    return 0.5 + 0.5 * noise(p)
+-
+-def noise(p):
+-    """
+-    Placeholder for base noise function (e.g., Simplex, Perlin).
+-    Returns a float in [-1, 1].
+-    """
+-    # Implementation depends on underlying noise generator
+-    return 0.0
+ ```
+ 
+@@ -115,7 +110,7 @@
+ 
+ **Edge Cases and Pitfalls**
+-- **Precision**: Domain warping can cause coordinate values to grow large, potentially leading to precision issues in the underlying noise function. Using `fbm2` (returning vectors) helps maintain structure [S2].
+-- **Symmetry**: Without an offset vector in the secondary warp, patterns may exhibit unwanted symmetry. An offset like `vec2(1.7, 9.2)` is recommended [S2].
+-- **Performance**: Computing normals requires additional noise evaluations, increasing computational cost.
++- **Precision**: Domain warping can cause coordinate values to grow large, potentially leading to precision issues in the underlying noise function [G].
++- **Symmetry**: Without an asymmetry offset (e.g., `vec2(1.7, 9.2)`) in the secondary warp, patterns may exhibit unwanted repetition artifacts [S2].
++- **Performance**: Computing normals requires additional FBM evaluations, increasing computational cost per sample [S2].
+ 
+ ## Subtopics
+@@ -128,12 +123,12 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity**: O(1) per sample, but with a higher constant factor due to multiple noise evaluations (typically 3-4 FBM calls per sample) [S2].
+-- **Memory Complexity**: O(1) as it is a procedural function.
+-- **Performance**: On a NoiseTexture2D sprite, applying domain warp reduces maximum error from 143/255 to 1-3/255 compared to a baseline, while keeping the whole-frame mean error stable at 0.72/255 [S1, unofficial].
++- **Time Complexity**: O(1) per sample, but with a higher constant factor due to multiple FBM evaluations (typically 3–4 calls per sample) [S2].
++- **Memory Complexity**: O(1) as it is a fully procedural function [G].
++- **Performance**: On a NoiseTexture2D sprite, applying domain warp reduces maximum pixel error from 143/255 to 1–3/255 compared to a baseline, while keeping the whole-frame mean error stable at 0.72/255 [S1, unofficial].
+ - **Strengths**: Produces highly organic, fluid-like patterns suitable for clouds, smoke, and lava [S2].
+-- **Limitations**: Computationally more expensive than standard FBM. Can introduce artifacts if warp strength is too high.
++- **Limitations**: Computationally more expensive than standard FBM; excessive warp strength causes visual tearing and coordinate overflow [G].
+ 
+ ## Background
+-Domain Warping was popularized by Inigo Quilez in his shader tutorials [S2]. It is implemented in libraries like FastNoiseLite, where it is exposed as a domain warp feature in `NoiseTexture2D` and `NoiseTexture3D` [S1, unofficial]. The technique is used in real-time rendering for procedural textures and effects.
++The technique is implemented in the FastNoiseLite library and exposed as a domain warp feature in `NoiseTexture2D` and `NoiseTexture3D` [S1, unofficial]. It is widely used in real-time rendering for procedural textures and atmospheric effects [G].
+ 
+ ## Sources

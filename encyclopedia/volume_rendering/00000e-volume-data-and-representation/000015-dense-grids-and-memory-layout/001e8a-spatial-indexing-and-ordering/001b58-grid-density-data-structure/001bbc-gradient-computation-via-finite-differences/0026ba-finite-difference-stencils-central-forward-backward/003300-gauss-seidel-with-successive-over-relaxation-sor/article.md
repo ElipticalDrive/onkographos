@@ -1,0 +1,137 @@
+# Gauss-Seidel with Successive Over-Relaxation (SOR)
+Also called: Gauss-Seidel SOR, Gauss-Seidel with Successive Over-Relaxation (SOR) for 3D Heat Conduction, Iterative Laplace Solver
+
+## Overview
+Gauss-Seidel with Successive Over-Relaxation (SOR) is an iterative numerical method used to solve the steady-state heat equation (Laplace equation $\nabla^2 T = 0$) on a 3D uniform grid [S1, unofficial]. It updates grid points using the most recently computed neighbor values (Gauss-Seidel) and accelerates convergence by applying an over-relaxation factor $\omega$ to the update step [S1, unofficial]. Unlike standard Jacobi iteration which uses values from the previous iteration only, SOR utilizes updated values immediately, reducing the number of iterations required to reach convergence [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** 3D grid dimensions $(n_x, n_y, n_z)$, physical domain size $L$, boundary temperatures $T_{hot}$ and $T_{cold}$, SOR relaxation parameter $\omega$, convergence tolerance $\epsilon$, and maximum iteration count $N_{max}$ [S1, unofficial].
+- **Output:** 3D scalar field $T$ representing the steady-state temperature distribution [S1, unofficial].
+
+**Data Structures:**
+- **Temperature Field:** A 3D array of shape $(n_x, n_y, n_z)$ with floating-point precision. Indices $(i, j, k)$ correspond to grid points in the x, y, and z directions respectively [S1, unofficial].
+
+**Algorithm Steps:**
+1. **Initialization:** Initialize the temperature field $T$ with a linear profile between the hot and cold boundaries to reduce iteration count. For $k \in [0, n_z-1]$:
+   $$ T[i, j, k] = T_{hot} + (T_{cold} - T_{hot}) \frac{k}{n_z - 1} $$
+   [S1, unofficial]
+
+2. **Boundary Conditions:** Apply Dirichlet and Neumann boundary conditions:
+   - **Dirichlet (Fixed Temperature):** Set bottom face ($k=0$) to $T_{hot}$ and top face ($k=n_z-1$) to $T_{cold}$ [S1, unofficial].
+   - **Neumann (Adiabatic/Zero Gradient):** Set side walls ($i=0, i=n_x-1, j=0, j=n_y-1$) by copying values from adjacent interior cells. For example, $T[0, j, k] = T[1, j, k]$ and $T[n_x-1, j, k] = T[n_x-2, j, k]$ [S1, unofficial].
+
+3. **Iteration Loop:** Repeat for $iter = 1$ to $N_{max}$:
+   a. Initialize `max_residual` to 0.0.
+   b. Loop over interior points $i \in [1, n_x-2]$, $j \in [1, n_y-2]$, $k \in [1, n_z-2]$:
+      i. Calculate the sum of the six immediate neighbors:
+         $$ S = T[i+1, j, k] + T[i-1, j, k] + T[i, j+1, k] + T[i, j-1, k] + T[i, j, k+1] + T[i, j, k-1] $$
+         [S1, unofficial]
+      ii. Calculate the tentative new value based on the Laplace equation average:
+          $$ T_{new} = \frac{S}{6} $$
+          [S1, unofficial]
+      iii. Calculate the residual for convergence tracking:
+           $$ r = |T_{new} - T[i, j, k]| $$
+           Update `max_residual` = $\max(\text{max\_residual}, r)$ [S1, unofficial].
+      iv. Apply the SOR update formula:
+          $$ T[i, j, k] = (1 - \omega) T[i, j, k] + \omega T_{new} $$
+          [S1, unofficial]
+   c. Re-apply boundary conditions to ensure Dirichlet values remain fixed and Neumann conditions are maintained [S1, unofficial].
+   d. Check convergence: If `max_residual` $< \epsilon$, terminate and return the current iteration count [S1, unofficial].
+
+4. **Termination:** If $N_{max}$ is reached without convergence, return the current field and iteration count [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def solve_sor(nx, ny, nz, t_hot, t_cold, omega, tolerance, max_iterations):
+    # Initialize temperature field with linear profile
+    T = [[[0.0] * nz for _ in range(ny)] for _ in range(nx)]
+    for k in range(nz):
+        z_ratio = k / (nz - 1)
+        for i in range(nx):
+            for j in range(ny):
+                T[i][j][k] = t_hot + (t_cold - t_hot) * z_ratio
+
+    def apply_boundary_conditions():
+        # Dirichlet: Bottom (k=0) and Top (k=nz-1)
+        for i in range(nx):
+            for j in range(ny):
+                T[i][j][0] = t_hot
+                T[i][j][nz-1] = t_cold
+        # Neumann: Side walls (copy from interior)
+        for j in range(ny):
+            for k in range(nz):
+                T[0][j][k] = T[1][j][k]
+                T[nx-1][j][k] = T[nx-2][j][k]
+        for i in range(nx):
+            for k in range(nz):
+                T[i][0][k] = T[i][1][k]
+                T[i][ny-1][k] = T[i][ny-2][k]
+
+    apply_boundary_conditions()
+
+    for iteration in range(1, max_iterations + 1):
+        max_residual = 0.0
+        # Update interior points
+        for i in range(1, nx - 1):
+            for j in range(1, ny - 1):
+                for k in range(1, nz - 1):
+                    # Sum of six neighbors
+                    neighbor_sum = (
+                        T[i+1][j][k] + T[i-1][j][k] +
+                        T[i][j+1][k] + T[i][j-1][k] +
+                        T[i][j][k+1] + T[i][j][k-1]
+                    )
+                    # Tentative new value
+                    t_new = neighbor_sum / 6.0
+                    # Residual
+                    residual = abs(t_new - T[i][j][k])
+                    if residual > max_residual:
+                        max_residual = residual
+                    # SOR Update
+                    T[i][j][k] = (1 - omega) * T[i][j][k] + omega * t_new
+        
+        # Re-apply boundary conditions
+        apply_boundary_conditions()
+        
+        # Check convergence
+        if max_residual < tolerance:
+            return iteration, T
+            
+    return max_iterations, T
+```
+
+**Parameters:**
+- $\omega$ (omega): SOR relaxation parameter. Typical value is 1.5. The valid range for over-relaxation is $1 < \omega < 2$. Optimal values are typically between 1.5 and 1.9 [S1, unofficial].
+- $\epsilon$ (tolerance): Convergence criterion based on the maximum equation residual. Typical value is $10^{-5}$ [S1, unofficial].
+- $N_{max}$ (max_iterations): Maximum number of iterations allowed. Typical value is 5000 [S1, unofficial].
+
+**Pitfalls:**
+- Boundary conditions must be reapplied after every iteration to maintain fixed Dirichlet values and zero-gradient Neumann conditions [S1, unofficial].
+- Using a uniform initial guess increases the number of iterations required for convergence compared to a linear initial guess [S1, unofficial].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+- **Time Complexity:** Not given in the sources. The method updates each interior grid point once per iteration, and total time depends on the number of iterations required for convergence, which is reduced by SOR compared to Jacobi iteration [S1, unofficial].
+- **Memory Complexity:** Not given in the sources. The method requires storing the 3D temperature field [S1, unofficial].
+
+**Measured Performance:**
+- Specific performance metrics (e.g., seconds per iteration) are not provided in the sources [S1, unofficial]. The method is noted to be faster than Jacobi iteration due to the use of latest available values and over-relaxation [S1, unofficial].
+
+**Strengths and Limitations:**
+- **Strengths:** Faster convergence than Jacobi iteration; simple to implement; effective for solving the Laplace equation on regular grids [S1, unofficial].
+- **Limitations:** Convergence speed depends heavily on the choice of $\omega$ [S1, unofficial].
+
+**When to Use:**
+- Use when solving the steady-state heat equation (Laplace equation) on a 3D uniform grid where rapid convergence is desired and the grid size is moderate [S1, unofficial].
+
+**When Not to Use:**
+- Not given in the sources.
+
+## Background
+The method originates from numerical analysis techniques for solving partial differential equations, specifically the steady-state heat equation [S1, unofficial]. It combines the Gauss-Seidel iterative method with Successive Over-Relaxation (SOR) to accelerate convergence [S1, unofficial]. The implementation described is based on a Python example using VTK for volume rendering visualization, demonstrating the application of SOR to generate a 3D temperature field for rendering [S1, unofficial].
+
+## Sources
+[S1] Vtk-Examples/src/02_advanced_shapes/volume_rendering.py at main ..., https://github.com/djeada/VTK-Examples/blob/main/src/02_advanced_shapes/volume_rendering.py, fetched 2026-10-29 (unofficial)

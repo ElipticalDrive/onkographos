@@ -1,0 +1,168 @@
+# Depth-Guided Sequential Editing
+
+Also called: ViCA-NeRF, ViCA-NeRF Sequential Editing, View-Consistency-Aware 3D Editing of Neural Radiance Fields, View-Consistency-Aware NeRF
+
+## Overview
+Depth-Guided Sequential Editing (ViCA-NeRF) is a two-stage method for editing Neural Radiance Fields (NeRFs) using text instructions, which ensures multi-view consistency by sequentially editing key 2D views and propagating those edits to the rest of the scene via geometric projection and learned regularization [S1]. It differs from [Instruct-NeRF2NeRF](12265-instruct-nerf2nerf.md) by explicitly enforcing consistency through depth-guided pixel projection and latent code alignment, avoiding the need to integrate a diffusion model into the NeRF training loop, resulting in editing speeds approximately 3 times faster [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A pre-trained NeRF model (specifically `nerfacto` from NeRFStudio [S1]), a set of input views (images, camera poses, and coarse depth maps rendered from the source NeRF), and a text editing instruction [S1].
+*   **Outputs:** A refined NeRF model representing the edited 3D scene, and a corresponding set of edited 2D images [S1].
+
+**Data Structures:**
+*   **View Data:** Each view $i$ consists of an RGB image $I_i$, a coarse depth map $D_i$, a camera intrinsic matrix $K_i$, and a camera pose $\xi_i$ [S1].
+*   **Key View Sequence:** An ordered list of view indices selected for sequential editing [S1].
+*   **Modified Mask:** A binary mask per view tracking which pixels have already been overwritten by previous projections to prevent overwriting [S1].
+
+**Parameters:**
+*   $\phi$: Maximum desired modified ratio for key view selection, set to $\phi = 0.3$ [S1].
+*   $lr_{thresh}$: Reprojection error threshold for valid correspondences, set to $5$ pixels [S1].
+*   $T_{warmup}$: Warm-up iterations for the diffusion model; $10$ for face-centric scenes, $30$ for outdoor scenes [S1].
+*   $T_{fine}$: Fine-tuning iterations for the NeRF; $10,000$ for general scenes, $\approx 5,000$ for small scenes [S1].
+*   $T_{train}$: Initial training iterations for the source NeRF; $30,000$ [S1].
+
+**Steps:**
+1.  **Source NeRF Training:** Train a pre-trained NeRF (e.g., `nerfacto`) on the original unedited data for $T_{train} = 30,000$ iterations [S1].
+2.  **Depth Extraction:** Render coarse depth maps $D_i$ for all input views $i$ from the trained source NeRF [S1].
+3.  **Key View Selection:** Select a sequence of key views starting from a random view [S1].
+4.  **Sequential Editing and Projection:** Iterate through the selected key views in order [S1].
+    *   **Edit Key View:** Apply Instruct-Pix2Pix to the current key view $j$ using the text prompt to generate an edited image $I'_j$ [S1]. A warm-up procedure is applied: run the diffusion process for $T_{warmup}$ iterations to shift the main distribution of 2D edits [S1].
+    *   **Geometric Projection:** Project the edited pixels from $I'_j$ to all other views $i$ (including non-key views and subsequent key views) using the depth maps and camera poses [S1]. Calculate 3D points for view $i$: $p_i = P^{-1}(D_i, K_i, \xi_i)$ [S1]. Reproject $p_i$ to view $j$ to find corresponding pixel coordinates [S1]. Calculate reprojection error $lr$. If $lr < lr_{thresh}$ ($5$px), the correspondence is valid [S1]. Copy the pixel value from $I'_j$ to the corresponding location in view $i$, but **only** if that pixel has not yet been modified (checked via the Modified Mask) [S1]. This creates a "mixup" dataset where edits are mixed but not overwritten [S1].
+5.  **Blending Refinement (Learned Regularization):** The projected mixup images may contain noise due to depth inaccuracies [S1]. Run the diffusion process (Instruct-Pix2Pix) multiple times on each mixup image [S1]. Average the resulting latent codes from these runs [S1]. Decode the averaged latent code into a single final image [S1]. This corrects noisy depth correspondences and stabilizes the edit, accepting slight image smoothness [S1].
+6.  **NeRF Fine-Tuning:** Train the source NeRF on the fully refined, view-consistent edited dataset for $T_{fine}$ iterations ($10,000$ for general, $5,000$ for small scenes) [S1].
+7.  **Optional Post-Refinement:** Re-render images from the fine-tuned NeRF [S1]. Apply the blending refinement model (Step 5) again to further improve consistency [S1]. Skip this step for large-scale outdoor scenes (e.g., 'campsite', 'farm') as high complexity prevents further consistency improvement [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import random
+
+def depth_guided_sequential_editing(source_neurf, views, text_prompt):
+    # Step 1: Train source NeRF on original data for 30,000 iterations [S1]
+    # source_neurf.train(views, iterations=30000)
+
+    # Step 2: Extract coarse depth maps for all input views [S1]
+    depth_maps = {v.id: source_neurf.render_depth(v) for v in views}
+
+    # Step 3: Select a sequence of key views starting from a random view [S1]
+    random_start = random.randint(0, len(views) - 1)
+    key_view_ids = [views[i].id for i in range(random_start, len(views))] + \
+                   [views[i].id for i in range(random_start)]
+
+    # Initialize storage for edited images and modification masks
+    edited_images = {v.id: v.image.copy() for v in views}
+    modified_masks = {v.id: [[False] * v.width for _ in range(v.height)] for v in views}
+
+    for key_vid in key_view_ids:
+        # Step 4: Edit Key View with warm-up to shift 2D edit distribution [S1]
+        warmup_iters = 30 if is_outdoor_scene(key_vid) else 10
+        edited_key_img = ip2pix_edit(edited_images[key_vid], text_prompt, warmup_iters=warmup_iters)
+
+        # Step 4: Geometric Projection to all other views [S1]
+        for target_vid in [v.id for v in views if v.id != key_vid]:
+            D_target = depth_maps[target_vid]
+            K_target = views_by_id[target_vid].intrinsics
+            xi_target = views_by_id[target_vid].pose
+            K_key = views_by_id[key_vid].intrinsics
+            xi_key = views_by_id[key_vid].pose
+
+            for y in range(D_target.height):
+                for x in range(D_target.width):
+                    if not modified_masks[target_vid][y][x]:
+                        # Unproject target pixel to 3D point
+                        z = D_target[y][x]
+                        x_cam = (x - K_target[0][2]) * z / K_target[0][0]
+                        y_cam = (y - K_target[1][2]) * z / K_target[1][1]
+                        p = transform_point([x_cam, y_cam, z], xi_target)
+
+                        # Reproject 3D point to key view
+                        p_cam = transform_point(p, inverse_pose(xi_key))
+                        u_k = p_cam[0] * K_key[0][0] / p_cam[2] + K_key[0][2]
+                        v_k = p_cam[1] * K_key[1][1] / p_cam[2] + K_key[1][2]
+                        lr = math.sqrt((u_k - x)**2 + (v_k - y)**2)
+
+                        if lr < 5.0: # Correspondence matching valid threshold [S1]
+                            if 0 <= u_k < edited_key_img.width and 0 <= v_k < edited_key_img.height:
+                                edited_images[target_vid][y][x] = edited_key_img[v_k][u_k]
+                                modified_masks[target_vid][y][x] = True
+
+        # Blending refinement for the edited key view [S1]
+        edited_images[key_vid] = blend_refine(edited_key_img, text_prompt)
+
+    # Step 5: Blending Refinement for all views to correct noisy depth correspondences [S1]
+    refined_images = {}
+    for vid, img in edited_images.items():
+        refined_images[vid] = blend_refine(img, text_prompt)
+
+    # Step 6: Train NeRF on fully refined dataset for 10,000 iterations (5,000 for small scenes) [S1]
+    dataset = build_dataset(refined_images, views)
+    source_neurf.fine_tune(dataset, iterations=10000)
+
+    # Step 7: Optional Post-Refinement [S1]
+    if not is_large_outdoor_scene():
+        re_rendered = source_neurf.render_all()
+        final_refined = blend_refine_all(re_rendered, text_prompt)
+        source_neurf.fine_tune(final_refined, iterations=10000)
+
+    return source_neurf
+
+# Standard helper operations [G]
+def transform_point(p, pose):
+    return pose.R @ p + pose.t
+
+def inverse_pose(pose):
+    return Pose(R=pose.R.T, t=-pose.R.T @ pose.t)
+
+def is_outdoor_scene(view_id):
+    # [G] Scene classification logic not specified in sources.
+    return False
+
+def views_by_id:
+    # [G] Dictionary mapping view IDs to view objects.
+    pass
+
+def build_dataset(images, views):
+    # [G] Standard dataset construction.
+    pass
+
+def is_large_outdoor_scene():
+    # [G] Scene classification logic not specified in sources.
+    return False
+
+def ip2pix_edit(image, prompt, warmup_iters):
+    # [G] Calls Instruct-Pix2Pix with warm-up steps.
+    pass
+
+def blend_refine(image, prompt):
+    # [G] Runs diffusion multiple times, averages latent codes, decodes final image.
+    pass
+
+def blend_refine_all(images, prompt):
+    # [G] Applies blend_refine to all images.
+    pass
+```
+
+**Pitfalls:**
+*   Depth estimation from NeRF is often noisy, yielding incorrect pixel correspondences during projection [S1].
+*   Inability to perform large spatial changes (e.g., manipulating existing objects or adding/removing large objects) due to inherited Instruct-Pix2Pix limitations [S1].
+*   Blurry results caused by high-frequency information loss (texture on face, beard, hair) when the mixup image passes through the diffusion model, which attempts to reduce introduced noise [S1].
+
+## Operating characteristics
+*   **Time Complexity:** The method is significantly faster than joint training approaches, achieving approximately 3 times faster editing speed compared to [Instruct-NeRF2NeRF](12265-instruct-nerf2nerf.md) [S1].
+*   **Memory Complexity:** Requires storing depth maps for all views and the modified masks [S1]. The blending refinement step requires multiple passes through the diffusion model's latent space, increasing VRAM usage during the refinement stage [S1].
+*   **Performance:** Evaluated on scenes ranging from faces to outdoor environments, providing higher levels of consistency and detail compared to the state of the art [S1].
+*   **Strengths:** Explicitly enforces multi-view consistency via geometric projection and latent code alignment [S1]. Offers improved controllability (by editing key views) and efficiency (less GPU time) [S1].
+*   **Limitations:** Inherits limitations from Instruct-Pix2Pix: inability to perform large spatial changes (e.g., adding/removing large objects) and difficulty with highly detailed instructions involving interactions between parts [S1]. Blurry results due to high-frequency information loss (texture on face, beard, hair) when the mixup image passes through the diffusion model, which attempts to reduce noise introduced during projection [S1]. Post-refinement is ineffective for large-scale outdoor scenes due to high complexity [S1].
+*   **When to use:** Suitable for 3D scene editing and AR applications where multi-view consistency is critical and computational efficiency is desired [S1]. Best for scenes where the user can define key views that capture the desired edit [S1].
+*   **When not to use:** Avoid for large-scale outdoor scenes if post-refinement is expected to improve results [S1]. Avoid if large spatial manipulations (adding/removing objects) are required [S1].
+
+## Background
+*   **Origin:** ViCA-NeRF was introduced as the first view-consistency-aware method for 3D editing with text instructions [S1].
+*   **History:** It builds upon the limitations of [Instruct-NeRF2NeRF](12265-instruct-nerf2nerf.md), which suffers from convergence problems and slower speeds due to iterative diffusion model updates during NeRF training [S1]. ViCA-NeRF decouples the editing from the training loop by using geometric and learned regularization in a pre-processing stage [S1].
+*   **Usage:** Evaluated on various scenes and text prompts, ranging from faces to outdoor scenes [S1]. Code is available at https://dongjiahua.github.io/VICA-NeRF [S1].
+
+## Sources
+[S1] ViCA-NeRF: View-Consistency-Aware 3D Editing of Neural Radiance Fields, https://arxiv.org/abs/2402.00864v1, fetched 2026-10-26

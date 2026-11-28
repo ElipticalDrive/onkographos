@@ -1,0 +1,133 @@
+# Attention-based Multi-Position Density Prediction
+
+Also called: Ray position information fusion module
+
+## Overview
+This method predicts volume density $\sigma$ for samples along a ray by modeling the correlations between spatial positions using attention mechanisms [S1]. It addresses the limitation of independent density prediction by allowing samples to attend to each other, thereby capturing global and contextual information for enhanced accuracy [S1]. It operates on a sequence of samples along a single ray using multi-head self-attention [S1].
+
+## How it works
+**Inputs:**
+- A sequence of $M$ density feature vectors $\{f_{\sigma, j}\}_{j=1}^M$, where each $f_{\sigma, j}$ corresponds to the $j$-th sample along a ray [S1].
+- The spatial positions of the $M$ samples [S1].
+
+**Outputs:**
+- The final density value $\sigma$ for each sample [S1].
+
+**Data Structures:**
+- Not given in the sources.
+
+**Steps:**
+1. **Positional Encoding:** Apply positional encoding to the density feature sequence $\{f_{\sigma, j}\}_{j=1}^M$ [S1].
+2. **Multi-Head Self-Attention:** Apply a multi-head self-attention mechanism to the encoded density feature sequence to consider correlations and significance of each sample relative to others [S1].
+3. **Density Prediction:** Predict the final density value $\sigma$ for each sample [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def attention_based_multi_position_density_prediction(density_features, positions):
+    """
+    Predicts density for a sequence of samples along a ray using self-attention.
+    Args:
+        density_features: Tensor of shape (M, C), density features for M samples.
+        positions: Tensor of shape (M, 3), 3D coordinates of M samples.
+    Returns:
+        densities: Tensor of shape (M,), predicted density values.
+    """
+    M, C = density_features.shape
+    
+    # Step 1: Positional Encoding
+    pos_enc = positional_encoding(positions, num_freqs=6)
+    encoded_features = concat(density_features, pos_enc, dim=-1)
+    
+    # Step 2: Multi-Head Self-Attention
+    d_k = encoded_features.shape[-1] // 4
+    Q = linear(encoded_features, d_k)
+    K = linear(encoded_features, d_k)
+    V = linear(encoded_features, d_k)
+    scores = matmul(Q, transpose(K)) / sqrt(d_k)
+    weights = softmax(scores, dim=-1)
+    attended_features = matmul(weights, V)
+    attended_features = linear(concat_heads(attended_features), encoded_features.shape[-1])
+    
+    # Step 3: Density Prediction
+    densities = linear(attended_features, 1)
+    return squeeze(densities, dim=-1)
+
+def positional_encoding(positions, num_freqs=6):
+    """Standard positional encoding [G]."""
+    freq_bands = 2.0 ** linspace(0, num_freqs - 1, num_freqs)
+    scaled_pos = positions.unsqueeze(-1) * freq_bands
+    return concat(sin(scaled_pos), cos(scaled_pos), dim=-1)
+
+def linear(x, out_dim):
+    """Standard linear projection [G]."""
+    return matmul(x, weight)
+
+def concat(a, b, dim=-1):
+    return concatenate_along_dimension(a, b, dim)
+
+def concat_heads(x):
+    return reshape(x, (x.shape[0], -1))
+
+def matmul(a, b):
+    return matrix_multiply(a, b)
+
+def transpose(x):
+    return swap_axes(x, -2, -1)
+
+def softmax(x, dim=-1):
+    return normalize_exponentials(x, dim)
+
+def squeeze(x, dim=-1):
+    return remove_dimension(x, dim)
+```
+
+**Parameters:**
+- Number of samples $M$: Not specified in the sources.
+- Positional encoding frequency: Not specified in the sources.
+- Number of attention heads: Not specified in the sources.
+
+**Edge Cases and Pitfalls:**
+- Precision: Standard floating-point precision applies.
+- Boundaries: The attention mechanism handles the sequence boundaries naturally.
+- Degenerate input: If $M=1$, self-attention reduces to a simple projection [G].
+
+## Subtopics
+
+### [Feature Fusion](11834-feature-fusion.md)
+Feature Fusion combines multi-view 2D features into a single representation for 3D points or novel views, addressing the problem of integrating spatially aligned information from multiple projections. It sets itself apart from concatenation-based fusion by using max-pooling, which provides a flexible architecture capable of handling any number of input neighbors and generally outperforms concatenation in robustness and memory efficiency.
+
+### Multi-View Feature Density Estimation
+A method to model volume density by extracting pixel-aligned features from reference images, projecting spatial points to these images, and processing the aggregated features through a density MLP [S2].
+Steps:
+1. Extract pixel-aligned features $F_k$ from each reference image $I_k$ using a pre-trained encoder $\Phi_{encoder}$ [S2].
+2. Project spatial point $x$ onto reference image $k$ using intrinsic matrix $K_k$ and extrinsic matrix $E_k$: $\pi_k(x) = K_k E_k x$ [S2].
+3. Obtain feature vector $f_k$ by bilinear interpolation from $F_k$ at projected position $\pi_k(x)$ [S2].
+4. Concatenate feature vectors $f_k$ from all $M$ views to form $f_{ref}$ [S2].
+5. Process positional encoding $\gamma(x)$ and $f_{ref}$ through Density MLP ($\Phi_{density}$) to output density $\sigma$ and density features $f_m$ [S2].
+Parameters:
+- Number of reference images: $M$ [S2].
+- Intrinsic matrix $K_k$: $3 \times 3$ [S2].
+- Extrinsic matrix $E_k$: $3 \times 4$ [S2].
+- Positional encoding: $\gamma(x)$ [S2].
+- Density MLP width: 512 [S2].
+- Density MLP depth: 8 [S2].
+- Density MLP Implementation: CUTLASS architecture [S2].
+- Frequency of positional encoding: 6 [S2].
+- Reference image feature map dimension: 64 [S2].
+- Encoder: Pre-trained CNN [S2].
+
+## Operating characteristics
+- Time complexity: Not explicitly given in the sources.
+- Memory complexity: Not explicitly given in the sources.
+- Performance: The integration of global and contextual key information enhances the accuracy of density prediction [S1].
+- Strengths: Captures correlations and significance of each sample relative to others [S1].
+- Limitations: Requires processing the entire sequence of samples along a ray [S1].
+
+## Background
+The method is introduced in [S1] as an attention-based multi-position information fusion module for predicting density along rays. It is part of a broader effort to improve density prediction accuracy by leveraging attention mechanisms to model spatial dependencies along rays [S1].
+
+## Sources
+[S1] Rugularizing generalizable neural radiance field with limited-view images, https://link.springer.com/article/10.1007/s40747-024-01696-6, fetched 2026-10-29
+[S2] TriDF: Triplane-Accelerated Density Fields for Few-Shot Remote Sensing Novel View Synthesis, https://doi.org/10.1109/tgrs.2025.3643432, fetched 2026-10-30

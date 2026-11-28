@@ -1,0 +1,45 @@
+# Signed Distance Function (SDF) Representations
+
+Also called: SDF-based Neural Fields, Truncated SDF NeRF, Signed Ray Distance Function (SRDF)
+
+## Overview
+Signed Distance Function (SDF) Representations replace the implicit volume density field of standard NeRFs with a continuous scalar field representing the distance to the nearest surface, providing a more explicit and geometrically accurate formulation [S1]. This approach addresses the geometric inaccuracy and surface holes typical of density-based NeRFs by leveraging the zero-level set of the SDF to define geometry [S1]. Unlike standard density fields that model opacity as a volumetric property, SDFs model the scene as a boundary, enabling precise mesh extraction and improved surface reconstruction [S1].
+
+## Shared principles
+The core mechanism involves predicting a continuous scalar field $s: \mathbb{R}^3 \rightarrow \mathbb{R}$ instead of a density $\sigma(\mathbf{x})$ [S1]. For any 3D point $\mathbf{x} \in \mathbb{R}^3$, the function value $s(\mathbf{x})$ represents the distance to the closest surface, with the sign conventionally negative inside the object and positive outside [S1]. The surface is defined as the zero-level set $\{\mathbf{x} \mid s(\mathbf{x}) = 0\}$ [S1].
+
+To enable volumetric rendering, the predicted SDF value $s(\mathbf{x})$ is converted into a density $\sigma(\mathbf{x})$ [S1]. The specific conversion function is not detailed in the provided sources [G]. The surface normal $\mathbf{n}$ is derived from the SDF gradient $\nabla s(\mathbf{x})$ [Parent].
+
+## Subtopics
+
+### [ProbeSDF](11363-probesdf.md)
+ProbeSDF is a neural surface reconstruction method that decouples spatial and angular light field components using two volumetric grids of different resolutions to achieve real-time rendering and accelerated training. It addresses the computational bottleneck of standard SDF-based neural fields by replacing the core appearance MLP with a lightweight model that uses spherical harmonic light field probes for angular variation and planar factorized features for spatial texture. Unlike Plenoxels or 3D Gaussian Splatting which require significantly more parameters per voxel (27 and 48 respectively), ProbeSDF uses as few as four parameters per voxel while maintaining high expressiveness.
+
+### [SDF-based Neural Fields](12947-sdf-based-neural-fields.md)
+SDF-based Neural Fields replace the implicit density field of standard NeRFs with a Signed Distance Function (SDF) to provide a more explicit and smooth formulation of surfaces. This approach addresses the geometric inaccuracy and surface holes typical of density-based NeRFs by leveraging the zero-level set of the SDF to define geometry. Builds on [Signed Distance Function (SDF) Representations](12495-signed-distance-function-sdf-representations.md).
+
+### [Generalizable Implicit Reconstruction with SRDF](14760-generalizable-implicit-reconstruction-with-srdf.md)
+VolRecon is a generalizable implicit reconstruction method that predicts a Signed Ray Distance Function (SRDF) to reconstruct scenes with fine details and minimal noise from multi-view images. It distinguishes itself from sibling methods like [SparseNeuS](12947-sdf-based-neural-fields.md) by combining local projection features aggregated via a view transformer with global shape priors from a coarse feature volume, processed by a ray transformer to resolve surface ambiguity. Unlike standard SDF approaches that define distance in any direction, SRDF constrains the distance measurement to the specific ray direction, enabling more robust surface localization along the viewing ray.
+
+### [SDF-based Neural Volume Rendering with PBR](15009-sdf-based-neural-volume-rendering-with-pbr.md)
+This method integrates Signed Distance Function (SDF) representations for geometry with Physically Based Rendering (PBR) material models to achieve smoother geometric structures and accurate specular reflections, overcoming the coarse detail and foggy artifacts typical of standard NeRF. Unlike sibling methods such as [ProbeSDF](11363-probesdf.md) or [SDF-based Neural Fields](12947-sdf-based-neural-fields.md) which may focus primarily on geometry or general neural fields, this approach specifically decouples geometry (via SDF) from material appearance (via PBR), providing interpretable parameters for reflection and diffuse components. It builds on [Signed Distance Function (SDF) Representations](12495-signed-distance-function-sdf-representations.md) by converting the SDF into a density field for volumetric integration while using the SDF gradient for surface normals required by the PBR model.
+
+### [RS-Recon](15321-rs-recon.md)
+RS-Recon is a neural scene reconstruction method that replaces the standard Signed Distance Function (SDF) with a Signed Ray Distance Function (SRDF) to model volume density, specifically addressing noise and inaccuracies in multi-object indoor scenes. Unlike SDF-based methods which consider surface points across the entire scene and may exhibit fluctuations leading to local minimum values, SRDF measures the shortest distance to the surface along a specific camera ray, eliminating the influence of surrounding surfaces not located on that ray.
+
+#### Truncated SDF NeRF
+**Definition:** A method that replaces the density MLP with a truncated SDF MLP and computes pixel color as a weighted sum of sampled colors [S1].
+**Step:** Reconstruct the triangular mesh of the scene by using Marching Cubes [208] on the truncated SDF MLP [S1].
+**Formula:**
+$$ C(r) = \frac{\sum_{i=1}^{N} w_i c_i}{\sum_{i=1}^{N} w_i} $$
+where $c_i$ is the sampled color and $w_i$ is the weight [S1].
+$$ w_i = \Phi\left(\frac{D_i}{t_r}\right) \cdot \Phi\left(-\frac{D_i}{t_r}\right) $$
+where $D_i$ is the SDF value, $t_r$ is the truncation distance, and $\Phi$ is the sigmoid function. The truncation distance cuts off any SDF value too far from individual surfaces [S1].
+**Parameter:** Per-frame appearance latent code from NeRF-W [88] is used to account for white-balance and exposure changes [S1].
+**Pitfall:** Multiple ray-surface intersections are handled by assigning a weight of zero to subsequent truncation regions so they do not contribute to the pixel color [S1].
+
+## Background
+The use of SDFs in neural rendering emerged as a concurrent improvement to standard NeRF architectures, aiming to solve the ambiguity of density-based representations. Azinovic et al. introduced the truncated SDF approach in April 2021, replacing the density MLP with a truncated SDF MLP to enable clean mesh reconstruction via Marching Cubes [S1]. In June 2022, SparseNeuS improved upon NeuS by focusing on sparse-view SDF reconstruction using a geometry encoding volume with learnable image features as a hybrid representation method [S1]. These developments shifted the focus from implicit volume density to explicit surface boundaries, allowing for better geometric fidelity and direct mesh extraction.
+
+## Sources
+[S1] Neural Radiance Fields in 3D Vision: A Comprehensive Review, https://doi.org/10.26599/cvm.2026.9450535, fetched 2026-10-28

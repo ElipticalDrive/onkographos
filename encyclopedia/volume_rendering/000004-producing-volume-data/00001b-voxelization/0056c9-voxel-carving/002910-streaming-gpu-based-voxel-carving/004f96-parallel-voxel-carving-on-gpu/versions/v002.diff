@@ -1,0 +1,410 @@
+--- v001.md
++++ v002.md
+@@ -1,223 +1,218 @@
+ # Parallel Voxel Carving on GPU
+ 
+-Also called: Parallel Voxel Carving
++Also called: Parallel GPU Voxel Carving
+ 
+ ## Overview
+-Parallel Voxel Carving on GPU is a method for reconstructing 3D geometry from multi-view images by executing voxel-by-voxel visibility tests in parallel on a graphics processor [S1, unofficial]. It solves the problem of efficiently generating an explicit, surface-oriented volume representation for large-scale scenes, such as urban environments, by leveraging the GPU's massive parallelism to process independent voxel columns simultaneously [S1, unofficial]. It differs from its parent method, Streaming GPU-based Voxel Carving, by explicitly defining the thread-to-voxel mapping strategy (y-axis columns) and the specific data layout (8-byte quantized planes) required for high-throughput parallel execution, while building on the streaming and load-balancing principles established in [Streaming GPU-based Voxel Carving](4436-streaming-gpu-based-voxel-carving.md).
++Parallel Voxel Carving on GPU is a method for reconstructing explicit 3D volumes from multi-view depth maps by executing voxel-by-voxel carving operations in parallel on a graphics processing unit [S1, unofficial]. It solves the problem of efficiently generating surface-aligned voxel data for large-scale scenes (e.g., urban environments) while minimizing GPU memory usage through a compact 8-byte data structure [S1, unofficial]. It differs from its parent method, Streaming GPU-based Voxel Carving, by explicitly detailing the parallel thread assignment strategy (y-axis columns) and the specific quantization of plane parameters, whereas the parent focuses on the broader streaming architecture and load balancing [S1, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Inputs:** A set of calibrated input views (images and depth maps), camera projection matrices, and a 3D bounding volume defined by the x-z plane extent and y-axis height.
+-*   **Outputs:** A set of "surface" voxels, each containing a quantized plane representation (normal and distance) and an averaged color. Non-surface voxels are discarded.
+-
+-**Data Structures:**
+-The core data structure for a surface voxel is an 8-byte block [S1, unofficial]:
+-1.  **Plane Quantities (4 bytes):** Four signed 1-byte values representing the plane equation $Ax + By + Cz + D = 0$.
+-    *   $A, B, C$: Normal vector components.
+-    *   $D$: Normalized distance. Defined as the ratio of the signed distance between the plane and the voxel center to the half-diagonal of the voxel cube [S1, unofficial].
+-    *   Range: $-127$ to $+127$.
+-    *   Value $-128$: Indicates no intersection with the voxel; the voxel/plane is removed [S1, unofficial].
+-2.  **Color (4 bytes):** One byte per RGBA component.
+-    *   The Alpha component stores the voxel visibility mode: 'uncarved', 'carved', or 'surface' [S1, unofficial].
+-
+-**Algorithm Steps:**
+-1.  **Initialization:** Tag all voxels in the volume as 'uncarved' [S1, unofficial].
+-2.  **Thread Assignment:** Assign one GPU thread to each column of voxels along the y-axis. This balances workload because urban scenes are typically flat on the x-z plane [S1, unofficial]. For a $256^3$ volume, $256^2$ threads are launched, with each thread processing 256 voxels [S1, unofficial].
++**Inputs and Outputs**
++*   **Inputs:** A set of $N$ input views, each consisting of a depth map and a color image. The volume is partitioned into kernels of size $V \times V \times V$ (typically $256^3$ voxels) to fit within GPU memory [S1, unofficial].
++*   **Outputs:** A list of surface voxels. Each surface voxel stores 8 bytes: 4 bytes for plane parameters (quantized normal and distance) and 4 bytes for averaged color (RGBA) [S1, unofficial].
++
++**Data Structures**
++*   **Voxel Tag:** A single byte or integer per voxel indicating visibility mode:
++    *   `0`: "uncarved" (initial state)
++    *   `1`: "carved" (determined to be outside the object)
++    *   `2`: "surface" (determined to be on the object boundary)
++*   **Surface Voxel Layout (8 bytes):**
++    *   Bytes 0-3: Plane quantities $(A, B, C, D)$, each quantized to a signed 1-byte integer.
++        *   $A, B, C$: Normal vector components.
++        *   $D$: Normalized distance, defined as the ratio of the signed distance between the plane and the voxel center to the half-diagonal of the voxel cube.
++        *   Range: $-127$ to $+127$.
++        *   Value $-128$: Indicates no intersection; the voxel is removed [S1, unofficial].
++    *   Bytes 4-7: Color $(R, G, B, A)$.
++        *   $R, G, B$: Averaged color components.
++        *   $A$: Alpha component, used to store the voxel mode (e.g., mapping "surface" to a specific alpha value) [S1, unofficial].
++
++**Algorithm Steps**
++1.  **Initialization:** Tag all voxels in the current volume kernel as "uncarved" [S1, unofficial].
++2.  **Thread Assignment:** Launch $V^2$ threads (e.g., $256^2$ threads for a $256^3$ volume). Each thread is assigned a column of voxels along the y-axis. This balances workload because urban scenes are typically flat on the x-z plane [S1, unofficial].
+ 3.  **Carving Loop:** For each voxel in the assigned y-axis column:
+-    a.  Iterate through all input views.
+-    b.  Project the voxel center onto the image plane of the current view to determine the corresponding pixel coordinates.
+-    c.  Retrieve the depth value $d_{depth}$ from the depth map at those coordinates.
+-    d.  Calculate the Euclidean distance $d_{voxel}$ from the voxel center to the camera position.
+-    e.  **Visibility Test:**
+-        *   If $d_{voxel} < d_{depth}$: The voxel is in front of the observed surface. Mark it as 'carved' and stop processing this voxel for subsequent views [S1, unofficial].
+-        *   If $d_{voxel} > d_{depth}$: The voxel is behind the observed surface. Preserve the current tag [S1, unofficial].
+-    f.  **Termination:** If a voxel is marked 'carved', it is no longer examined by later camera projections [S1, unofficial].
+-4.  **Surface Tagging:** After checking all views, any voxel still tagged 'uncarved' is checked against the depth maps. If the voxel is within a specified threshold distance of a depth map value, it is tagged as 'surface' [S1, unofficial].
+-5.  **Color and Normal Computation:** For each 'surface' voxel:
+-    a.  **Color:** For each view where the voxel is visible, bilinearly interpolate the color from the neighboring pixels in the image onto which the voxel is projected. Average these colors using weights based on the angle between the surface normal and the viewing direction (following Debevec et al. [6]) [S1, unofficial].
+-    b.  **Normal/Distance:** If multiple planes intersect the voxel cube, compute the final normal and distance as weighted averages of the intersecting planes, similar to signed distance and weight functions described in [3] [S1, unofficial].
+-    c.  **Quantization:** Quantize the resulting $A, B, C, D$ values to signed 1-byte integers in the range $[-127, 127]$. Set invalid values to $-128$ [S1, unofficial].
+-6.  **Point-Based Rendering Adjustment (Optional):** If the output is intended for point-based rendering (e.g., QSplat), shift the center of each surface voxel to the nearest point on its weighted average plane [S1, unofficial].
+-
+-**Pseudocode:**
++    a.  If the voxel is already tagged "carved", skip to the next voxel [S1, unofficial].
++    b.  Iterate through all input views $i = 0 \dots N-1$:
++        i.  Project the voxel center onto the image plane of view $i$ to find the corresponding pixel coordinates.
++        ii. Retrieve the depth value $d_{view}$ from the depth map at these coordinates.
++        iii. Calculate the Euclidean distance $d_{voxel}$ from the voxel center to the camera position of view $i$.
++        iv. If $d_{voxel} < d_{view}$, mark the voxel as "carved" and break the view loop (the voxel is occluded or outside) [S1, unofficial].
++        v.  If $d_{voxel} > d_{view}$, the voxel is preserved in this view; continue to the next view [S1, unofficial].
++4.  **Surface Tagging:** After checking all views, if the voxel is still "uncarved":
++    a.  Check if the voxel is within a specified threshold distance of the depth map in any view.
++    b.  If yes, tag the voxel as "surface" [S1, unofficial].
++5.  **Color and Plane Computation (for Surface Voxels):**
++    a.  **Color:** For each view where the voxel is visible, bilinearly interpolate the color from the neighboring pixels in the color image. Average these interpolated colors using weights based on the angle between the surface normal and the viewing direction (as per Debevec et al. [6]) [S1, unofficial].
++    b.  **Plane:** If multiple planes intersect the voxel cube, compute the normal $(A, B, C)$ and distance $D$ as weighted averages of the intersecting planes, similar to signed distance and weight functions [3] (Note: Source [3] is not provided in the citation list, so the exact formula is not given) [S1, unofficial].
++    c.  **Quantization:** Quantize $A, B, C, D$ to signed 1-byte integers in the range $[-127, 127]$. Set to $-128$ if no intersection [S1, unofficial].
++    d.  Store the quantized plane and averaged color in the 8-byte structure [S1, unofficial].
++6.  **Post-Processing (Optional):** For point-based rendering (e.g., QSplat), shift the center of each surface voxel to the nearest point on its weighted average plane [S1, unofficial].
++
++**Pseudocode**
+ ```python
+-# Constants
+-MAX_BYTE = 127
+-INVALID_BYTE = -128
+-THRESHOLD = 0.0 # Distance threshold for surface tagging
+-
+-# Data Structures
+-class Voxel:
+-    mode: int # 0: uncarved, 1: carved, 2: surface
+-    A: int
+-    B: int
+-    C: int
+-    D: int
+-    R: int
+-    G: int
+-    B: int
+-    Alpha: int # Reused for mode in storage, but logically separate in process
+-
+-def quantize(value, min_val, max_val):
+-    # Map float to signed 1-byte int
+-    # Clamp to [-127, 127]
+-    if value < -1.0: return INVALID_BYTE
+-    if value > 1.0: return INVALID_BYTE
+-    return int(round(value * MAX_BYTE))
+-
+-def parallel_voxel_carving(volume_dims, cameras, depth_maps):
+-    # volume_dims: (Vx, Vy, Vz)
+-    # cameras: list of camera objects with projection and depth_map
+-    # depth_maps: list of 2D arrays corresponding to cameras
+-    
+-    # Initialize volume
+-    # Note: In GPU implementation, this is done via kernel launch or texture initialization
+-    volume = [[[[Voxel(mode=0, A=0, B=0, C=0, D=0, R=0, G=0, B=0, Alpha=0) 
+-                 for z in range(volume_dims[2])] 
+-                for y in range(volume_dims[1])] 
+-               for x in range(volume_dims[0])] 
+-              for _ in range(1)] # Simplified structure for logic
+-
+-    # Thread function: Each thread handles a fixed (x, z) column
+-    def thread_func(x, z):
+-        for y in range(volume_dims[1]):
+-            voxel = volume[0][x][y][z]
++def parallel_voxel_carving(volume_size, views, threshold):
++    # volume_size: V (e.g., 256)
++    # views: list of view objects with camera_pos, depth_map, color_map, project()
++    # threshold: distance threshold for surface tagging
++    
++    V = volume_size
++    num_threads = V * V
++    # Each thread handles a y-column. 
++    # Thread index t maps to (x, z) coordinates.
++    # y is iterated within the thread.
++    
++    # Initialize voxel tags
++    # voxel_tags[x][y][z] = 0 (uncarved)
++    voxel_tags = [[[0 for _ in range(V)] for _ in range(V)] for _ in range(V)]
++    
++    # Surface voxel storage
++    surface_voxels = []
++
++    def thread_work(x, z):
++        # Iterate over y-axis
++        for y in range(V):
++            voxel_pos = (x, y, z)
++            
++            # Skip if already carved
++            if voxel_tags[x][y][z] == 1:
++                continue
++            
++            is_carved = False
+             
+             # Loop over all views
+-            for i, camera in enumerate(cameras):
+-                if voxel.mode == 1: # Already carved
+-                    break
+-                
++            for view in views:
+                 # Project voxel to image plane
+-                # Assuming camera has a method to project world point to image coords
+-                u, v = camera.project(voxel.center)
++                u, v = view.project(voxel_pos)
+                 
+                 # Check bounds
+-                if not camera.is_in_bounds(u, v):
++                if not view.in_bounds(u, v):
+                     continue
+                 
+                 # Get depth from depth map
+-                d_depth = depth_maps[i][v][u]
+-                
+-                # Calculate distance from camera to voxel
+-                d_voxel = camera.distance_to(voxel.center)
+-                
+-                if d_voxel < d_depth:
+-                    voxel.mode = 1 # Carved
+-                # Else: preserved (remains uncarved or surface candidate)
+-            
+-            # After all views, check for surface
+-            if voxel.mode == 0:
++                depth_val = view.depth_map[u][v]
++                
++                # Get distance from camera
++                dist_to_cam = view.camera_pos.distance(voxel_pos)
++                
++                # Carving logic
++                if dist_to_cam < depth_val:
++                    voxel_tags[x][y][z] = 1 # Carved
++                    is_carved = True
++                    break # No need to check other views
++                # If dist_to_cam > depth_val, preserve and check next view
++            
++            # If not carved, check for surface
++            if not is_carved and voxel_tags[x][y][z] == 0:
++                # Check threshold proximity to depth map in any view
+                 is_surface = False
+-                for i, camera in enumerate(cameras):
+-                    u, v = camera.project(voxel.center)
+-                    if camera.is_in_bounds(u, v):
+-                        d_depth = depth_maps[i][v][u]
+-                        d_voxel = camera.distance_to(voxel.center)
+-                        if abs(d_voxel - d_depth) <= THRESHOLD:
++                for view in views:
++                    u, v = view.project(voxel_pos)
++                    if view.in_bounds(u, v):
++                        depth_val = view.depth_map[u][v]
++                        dist_to_cam = view.camera_pos.distance(voxel_pos)
++                        # Note: Source says "close to a depth map within a threshold"
++                        # This implies checking if the voxel is near the surface defined by depth
++                        # A common interpretation is checking if dist_to_cam is close to depth_val
++                        if abs(dist_to_cam - depth_val) <= threshold:
+                             is_surface = True
+                             break
+                 
+                 if is_surface:
+-                    voxel.mode = 2 # Surface
+-                    # Compute color and normal
+-                    compute_surface_properties(voxel, cameras, depth_maps)
+-
+-    # Launch threads
+-    # For 256^3 volume, launch 256^2 threads
+-    # Each thread calls thread_func(x, z) for its assigned x, z
+-    for x in range(volume_dims[0]):
+-        for z in range(volume_dims[2]):
+-            thread_func(x, z)
+-
+-def compute_surface_properties(voxel, cameras, depth_maps):
+-    # Compute weighted average normal and distance
+-    total_weight = 0.0
+-    avg_A = 0.0
+-    avg_B = 0.0
+-    avg_C = 0.0
+-    avg_D = 0.0
+-    weighted_color_sum = [0.0, 0.0, 0.0, 0.0]
+-    
+-    for i, camera in enumerate(cameras):
+-        u, v = camera.project(voxel.center)
+-        if not camera.is_in_bounds(u, v):
+-            continue
+-            
+-        d_depth = depth_maps[i][v][u]
+-        d_voxel = camera.distance_to(voxel.center)
+-        
+-        # Check if close to surface
+-        if abs(d_voxel - d_depth) <= THRESHOLD:
+-            # Get surface normal from depth map gradient or camera ray
+-            # Simplified: use camera ray direction as normal approximation for weighting
+-            # Or compute from local depth variation
+-            normal = camera.get_normal_at(u, v)
+-            dist = d_voxel # Signed distance relative to voxel center
+-            
+-            # Weight based on angle between normal and viewing direction
+-            view_dir = camera.get_view_direction_at(u, v)
+-            weight = max(0.0, dot(normal, view_dir)) # Debevec et al. weighting
+-            
+-            # Plane parameters from camera view
+-            # A, B, C from normal, D from distance ratio
+-            # D is ratio of signed distance to half-diagonal
+-            half_diag = voxel.half_diagonal_length
+-            D_val = dist / half_diag
+-            
+-            avg_A += normal.x * weight
+-            avg_B += normal.y * weight
+-            avg_C += normal.z * weight
+-            avg_D += D_val * weight
+-            total_weight += weight
+-            
+-            # Color interpolation
+-            color = camera.interpolate_color(u, v)
+-            weighted_color_sum[0] += color.R * weight
+-            weighted_color_sum[1] += color.G * weight
+-            weighted_color_sum[2] += color.B * weight
+-            weighted_color_sum[3] += color.A * weight
+-            
+-    if total_weight > 0:
+-        voxel.A = quantize(avg_A / total_weight, -1.0, 1.0)
+-        voxel.B = quantize(avg_B / total_weight, -1.0, 1.0)
+-        voxel.C = quantize(avg_C / total_weight, -1.0, 1.0)
+-        voxel.D = quantize(avg_D / total_weight, -1.0, 1.0)
+-        
+-        voxel.R = int(weighted_color_sum[0] / total_weight)
+-        voxel.G = int(weighted_color_sum[1] / total_weight)
+-        voxel.B = int(weighted_color_sum[2] / total_weight)
+-        voxel.Alpha = 255 # Surface is opaque
+-        
+-        # Adjust center for point rendering if needed
+-        # shift_center_to_plane(voxel)
++                    voxel_tags[x][y][z] = 2 # Surface
++                    
++                    # Compute color and plane
++                    avg_color = compute_averaged_color(voxel_pos, views)
++                    plane_params = compute_weighted_plane(voxel_pos, views)
++                    
++                    # Quantize plane params
++                    A, B, C, D = quantize_plane(plane_params)
++                    
++                    # Store 8 bytes
++                    surface_voxels.append({
++                        'pos': voxel_pos,
++                        'A': A, 'B': B, 'C': C, 'D': D,
++                        'R': avg_color[0], 'G': avg_color[1], 
++                        'B': avg_color[2], 'A': 2 # Mode indicator
++                    })
++
++    # Launch threads (conceptual)
++    for x in range(V):
++        for z in range(V):
++            thread_work(x, z)
++            
++    return surface_voxels
++
++def compute_averaged_color(voxel_pos, views):
++    # Bilinear interpolation from each view
++    colors = []
++    for view in views:
++        u, v = view.project(voxel_pos)
++        if view.in_bounds(u, v):
++            color = view.color_map.bilinear_interpolate(u, v)
++            # Weight by angle between surface normal and viewing direction
++            # Note: Surface normal is not known yet, so this is an iterative or 
++            # simplified approximation in practice, or uses view direction as proxy
++            # Source cites Debevec et al. [6]
++            colors.append(color)
++    
++    if not colors:
++        return (0, 0, 0, 0)
++    
++    # Average colors
++    avg_r = sum(c[0] for c in colors) / len(colors)
++    avg_g = sum(c[1] for c in colors) / len(colors)
++    avg_b = sum(c[2] for c in colors) / len(colors)
++    return (avg_r, avg_g, avg_b, 255)
++
++def compute_weighted_plane(voxel_pos, views):
++    # Weighted average of normals and distances
++    # Source references [3] for signed distance and weight functions
++    # Not given in sources: exact formula
++    return (0, 0, 0, 0) # Placeholder as per rules
++
++def quantize_plane(plane):
++    A, B, C, D = plane
++    # Quantize to signed 1-byte, range -127 to 127
++    # If no intersection, return -128
++    # Note: Source does not specify the scaling factor for quantization
++    # assuming plane values are already normalized or scaled appropriately
++    def q(val):
++        if val is None: return -128
++        # Example quantization logic (not specified in source)
++        # Source says: "ratio of the signed distance... to the half-diagonal"
++        # and "quantized into signed 1-byte values"
++        # We assume the input plane values are in the range [-1, 1] or similar
++        # and need to be scaled to [-127, 127]
++        scaled = int(val * 127)
++        return max(-127, min(127, scaled))
++    
++    return (q(A), q(B), q(C), q(D))
+ ```
+ 
+-**Parameters:**
++**Parameters**
+ *   **Volume Size per Kernel:** Approximately $256^3$ voxels, limited by GPU memory [S1, unofficial].
+-*   **Thread Count:** $256^2$ threads for a $256^3$ volume [S1, unofficial].
+-*   **Threshold:** Distance threshold for tagging 'surface' voxels. Not given in the sources.
+-
+-**Edge Cases and Pitfalls:**
+-*   **Precision:** Quantization to 1-byte signed integers limits normal and distance precision. Values outside $[-127, 127]$ are clamped or marked invalid ($-128$) [S1, unofficial].
+-*   **Boundaries:** Voxels projected outside the image bounds of a view are ignored for that view [S1, unofficial].
+-*   **Degenerate Input:** If depth maps are missing or noisy, the visibility test may fail, leading to incorrect carving or failure to tag surface voxels [S1, unofficial].
++*   **Thread Count:** $256^2$ threads for a $256^3$ volume, where each thread carves 256 voxels independently [S1, unofficial].
++*   **Distance D Definition:** Ratio of the signed distance between the plane and the voxel center to the half-diagonal of the voxel cube [S1, unofficial].
++*   **Threshold:** Distance threshold for tagging a voxel as "surface" (Not given in the sources).
++
++**Edge Cases and Pitfalls**
++*   **Precision:** Quantization of plane parameters to 1-byte integers may introduce precision errors. Values of $-128$ indicate no intersection and must be handled to avoid rendering artifacts [S1, unofficial].
++*   **Boundaries:** Projection of voxels outside the image plane must be checked to avoid out-of-bounds memory access [S1, unofficial].
++*   **Degenerate Input:** If a voxel is not close to any depth map within the threshold, it remains "uncarved" and is effectively discarded (not stored as surface) [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Scalable Reconstruction Scheme](14018-scalable-reconstruction-scheme.md)
+-A scheme to reconstruct large-scale urban scenes by exploiting streaming computation and GPU-accelerated parallel computation, partitioning the volume into sub-volumes. It addresses the memory limitation of the single kernel by dividing the scene, whereas Parallel Voxel Carving on GPU focuses on the parallel execution within a single volume block.
++A method for reconstructing large-scale urban scenes by partitioning the global volume into fixed-size sub-volumes that fit within GPU memory, processing them sequentially via streaming, and aggregating surface voxels on the CPU. It differs from monolithic GPU voxel carving by overcoming VRAM limits through a stream-processing architecture, enabling the reconstruction of volumes significantly larger than the available video memory.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear with respect to the number of voxels and the number of views ($O(V \cdot N)$), where $V$ is the number of voxels and $N$ is the number of views. Parallelization reduces wall-clock time by a factor proportional to the number of threads, up to GPU saturation.
+-*   **Memory Complexity:** $O(V)$ for the volume data structure. Each voxel stores 8 bytes. For a $256^3$ volume, this is $256^3 \times 8$ bytes $\approx 128$ MB [S1, unofficial].
+-*   **Measured Performance:** The method is designed for GPU memory limits, handling $\approx 256^3$ voxels per kernel [S1, unofficial]. Performance drops rapidly as resolution increases beyond this limit without the scalable scheme.
+-*   **Strengths:** High parallelism, efficient memory usage (8 bytes/voxel), suitable for flat scenes (urban).
+-*   **Limitations:** Limited by GPU memory per kernel ($256^3$), requires careful load balancing (y-axis carving), quantization artifacts.
+-*   **When to Use:** Large-scale urban scene reconstruction where memory is constrained but parallel throughput is needed.
+-*   **When Not to Use:** Scenes with high vertical complexity (where y-axis load balancing fails) or when sub-voxel precision is required beyond 1-byte quantization.
++*   **Time Complexity:** $O(V^3 \cdot N)$, where $V$ is the volume dimension and $N$ is the number of views. Each voxel is processed once per view in the worst case [S1, unofficial].
++*   **Memory Complexity:** $O(V^3)$ for voxel tags during carving, and $O(S)$ for output surface voxels, where $S$ is the number of surface voxels. Each surface voxel uses 8 bytes [S1, unofficial].
++*   **Measured Performance:** A single reconstruction kernel handles approximately $256^3$ voxels. Performance drops rapidly as resolution increases beyond this limit due to memory constraints [S1, unofficial].
++*   **Strengths:** High parallelism suitable for GPU; compact 8-byte data structure reduces memory bandwidth; effective for flat urban scenes due to y-axis column assignment [S1, unofficial].
++*   **Limitations:** Limited by GPU memory size ($256^3$ voxels per kernel); requires streaming for larger scenes; precision loss due to 1-byte quantization [S1, unofficial].
++*   **When to Use:** Large-scale urban scene reconstruction where memory is a constraint and scenes are relatively flat [S1, unofficial].
++*   **When Not to Use:** Scenes with high vertical complexity where y-axis column assignment does not balance workload; scenes requiring high-precision plane parameters [S1, unofficial].
+ 
+ ## Background
+-Parallel Voxel Carving on GPU was introduced in the paper "GPU-based Scalable Volumetric Reconstruction for Multi-view Stereo" [S1, unofficial]. It builds upon the principles of voxel carving and leverages the parallel architecture of GPUs to accelerate the visibility testing process. The method is particularly suited for urban scenes due to the flatness of the x-z plane, which allows for effective workload distribution among threads.
++Parallel Voxel Carving on GPU was introduced in the paper "GPU-based Scalable Volumetric Reconstruction for Multi-view Stereo" [S1, unofficial]. It builds on the concept of voxel carving, transforming it into a parallel GPU algorithm to handle large-scale urban scenes. The method leverages the GPU's parallel architecture to process voxel columns independently, optimizing for the flat nature of urban environments [S1, unofficial].
+ 
+ ## Sources

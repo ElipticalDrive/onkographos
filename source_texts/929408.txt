@@ -1,0 +1,148 @@
+CUDA: OpenGL interop OpenGL is a cross-platform, open-source graphics API that provides a set of functions for rendering 2D and 3D graphics. It is widely used in computer graphics for tasks such as …
+
+CUDA: OpenGL interop. OpenGL is a cross-platform, open-source… | by Rustam | MediumMediumCUDA: OpenGL interop. OpenGL is a cross-platform, open-source… | by Rustam | Medium
+Sitemap
+Open in app
+Sign up
+Sign in
+Medium Logo
+Get app
+Write
+Search
+Sign up
+Sign in
+Cuda
+Opengl
+Rendering
+CUDA: OpenGL interop
+Rustam
+Follow
+6 min read
+·
+Feb 22, 2024
+75
+Listen
+Share
+OpenGL is a cross-platform, open-source graphics API that provides a set of functions for rendering 2D and 3D graphics. It is widely used in computer graphics for tasks such as rendering images, animations, and interactive applications, especially in the fields of video games, simulations, and scientific visualization.
+Nvidia CUDA (Compute Unified Device Architecture) is a parallel computing platform and application programming interface (API) model created by NVIDIA.
+CUDA-OpenGL interop is a feature that allows seamless communication between CUDA and OpenGL. It can be used for any tasks (e.g. physics simulation, image processing, etc), followed by rendering. Or for algorithms visualization.
+Press enter or click to view image in full size
+CUDA-Opengl interop
+Basic concepts
+In this section I will show basic concepts of using OpenGL interop on an image processing example.
+There are different options to map an image to CUDA:
+1. Using a TextureObject
+A TextureObject provides direct access to OpenGL Texture. Also efficent 2D access inside CUDA Kernel using a template method text2D<T>(texture, x, y). It also eliminates the need for copying from PBO to TextureObject on Rendering step. But you need to perform device2device copy from CUDA array to Texture2d.
+Press enter or click to view image in full size
+CUDA + Texture2d
+An example of creating TextureObject for OpenGL’s Texture2D:
+```
+// map a texture to CUDA array// cudaTextureObj - registered pointer to OpenGL texture or RB objectcudaArray *cudaArray;cudaGraphicsMapResources(1, &cudaTexturePtr, 0);cudaGraphicsSubResourceGetMappedArray(    &cudaArray, cudaTexturePtr, 0, 0);// create a cudaTextureObjectcudaResourceDesc texRes;memset(&texRes, 0, sizeof(cudaResourceDesc));texRes.resType = cudaResourceTypeArray;texRes.res.array.array = cudaArray;cudaTextureDesc texDescr;memset(&texDescr, 0, sizeof(cudaTextureDesc));texDescr.normalizedCoords = false;texDescr.filterMode = cudaFilterModePoint;texDescr.addressMode[0] = cudaAddressModeWrap;texDescr.readMode = cudaReadModeElementType;cudaTextureObject_t texObject;cudaCreateTextureObject(&texObject, &texRes, &texDescr, NULL);// CUDA kernel:...uchar4 p = tex2D<uchar4>(texObject, x, y);...
+```
+This object provides read-only access to a Texture. So, if you want to change it, you need to create another buffer, do some changes and perform a device2device copy back to cudaArray like here:
+```
+// imagePrt - is an ptr, that stores a processed data cudaMemcpy2DToArray(cudaArray, 0, 0, imagePrt,                    sizeof(cudaTexturePtr[0]) * width,                     sizeof(cudaTexturePtr[0]) * width, height,                    cudaMemcpyDeviceToDevice);
+```
+You can transer data from cudaArray to a pointer:
+```
+// from cudaArray to a 1D raw pointer:uchar4* data;cudaMemcpy2DFromArray(data, sizeof(data[0]) * width,   cudaArray, 0, 0,   sizeof(data[0]) * width, height, cudaMemcpyDeviceToDevice);// CUDA kernel:...data[x + w * y] = // change values;...
+```
+Almost the same pipeline for RBO from a CUDA perspective.
+2. Using a pointer to a PBO
+Press enter or click to view image in full size
+CUDA + PBO
+In this case, you can just map as a pointer and get direct access to the PBO:
+```
+cudaGraphicsMapResources(1, &cudaTexPtr, 0));cudaGraphicsResourceGetMappedPointer(    (void **)&mappedPtr, &numBytes, cudaTexPtr);...// launch kernel and use pointerToPbo toprocess a texture data  ...cudaGraphicsUnmapResources(1, &mappedPtr, 0);
+```
+There is no need to copy the data back to the PBO. But you need to unpack the modified PBO into Texture2D.
+Unpacking — OpenGL’s fast pixel data transfer to and from a graphics card through Direct Memory Access (DMA) without involing CPU.
+```
+glBindTexture(GL_TEXTURE_2D, texture);glBindBuffer(GL_PIXEL_UNPACK_BUFFER, pbo);glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height,     GL_RGB, GL_UNSIGNED_BYTE, 0);glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);// draw
+```
+VBO
+It is also possible to change the VBO. From a CUDA perspective, this is similar to using PBO with cudaGraphicsResourceGetMappedPointer and no data transfer is required. But the OpenGL part is very different.
+Pipeline
+In this section I will explain each step of the OpenGL interop pipeline
+Create an OpenGL context: Before using, you need to create an OpenGL context using your favourite library, like GLFW, GLUT, SFML, VTK, etc. It could me a bit tricky if you use libraries like SFML. In this case you need to get a pointer to the OpenGL resource, allocated by a library.
+```
+// SFMLsf::Texture texture;if (!texture.loadFromFile("/image.png"))    return EXIT_FAILURE;sf::Sprite image(texture);image.setPosition(sf::Vector2f(screen.size) / 2.f);image.setOrigin(sf::Vector2f(texture.getSize()) / 2.f);// get a pointer to Texture2D object via CUDAauto textureHandle = texture.getNativeHandle();//----// Pure OpenGL handler to Texture2DGLuint textureHandle;glGenTextures(1, &textureHandle);glBindTexture(GL_TEXTURE_2D, textureHandle);glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA,        GL_UNSIGNED_BYTE, NULL);
+```
+Initialize CUDA using the Runtime API. This involves selecting the GPU device, creating a CUDA context, and setting up any necessary configurations, writing a kernel for data processing, etc.
+Register OpenGL buffers (e.g., PBO, VBO, texture objects) using interop methods to establish a connection between the OpenGL and CUDA contexts. It must be called only once per resource.
+cudaGraphicsGLRegisterBuffer — register OpenGL buffer object, like a VBO, PBO
+Get Rustam’s stories in your inbox
+Join Medium for free to get updates from this writer.
+Subscribe
+Subscribe
+Remember me for faster sign in
+cudaGraphicsGLRegisterImage — registers an Texture2d or RenderBuffer object
+```
+// register an image from prev. stepstruct cudaGraphicsResource *cudaTexPtr;cudaGraphicsGLRegisterImage(&cudaTexPtr, textureHandle,     GL_TEXTURE_2D, flag);
+```
+Map OpenGL resources. Once a resource is registered, it should be mapped to CUDA pointers to allow CUDA kernels to access and manipulate data stored in OpenGL buffers:
+```
+cudaGraphicsMapResources(1, &cudaTexPtr, 0);cudaArray_t* mappedArray;cudaGraphicsSubResourceGetMappedArray(mappedArray, cudaTexPtr, 0, 0);
+```
+cudaGraphicsMapResources —maps a graphics resource for access by CUDA and it may be accessed by CUDA until it is unmapped. OpenGL shouldn’t use mapped resource until it is unmapped.
+Limitation: you cannot map 1 resource twice, until it’s unmapped. But you can map 2 or more different resources and use them in your computations:
+```
+// Bad:cudaGraphicsMapResources(1, &cudaTexPtr, 0);cudaGraphicsMapResources(1, &cudaTexPtr, 0);// Good:cudaGraphicsMapResources(1, &cudaTexPtr, 0);cudaGraphicsMapResources(1, &cudaTexPtr2, 0);
+```
+After mapping, one need to get a mapped pointer:
+cudaGraphicsResourceGetMappedPointer — get a pointer to the OpenGL mapped resource using cudaGraphicsGLRegisterBuffer. Useful, if you need to access to a buffer, like PBO, VBO, i.e. when structure is not a 2d array.
+cudaGraphicsSubResourceGetMappedArray — get a pointer to the mapped array that got via cudaGraphicsGLRegisterImage.
+Perform computation on OpenGL-registered buffers, that can be accessed my mappedArray object. As said above, if you want to change a texture, you can create a cudaTextureObject, and get access to a 2D texture using tex2D<T>(tex, x, y)
+Send changes back to an OpenGL buffer:
+For resources, mapped via cudaGraphicsResourceGetMappedPointer , this step can be skipped. For mapped array, one need to copy back to a OpenGL buffer. For example, using cudaMemcpy2DToArray.
+Unmap an OpenGL buffer: After completing CUDA computations, don’t forget to unmap the OpenGL resources:
+cudaGraphicsUnmapResource(count, ptr, streamID) ensures that the resources are properly synchronized between CUDA and OpenGL contexts. And used to make sure that OpenGL can resume control over the resource.
+Render results using OpenGL: the results computed by CUDA can be directly visualized using OpenGL. This involves setting up shaders, textures, and other OpenGL rendering techniques to display the computed data.
+In the pipeline above, there were no operations in CPU, except data preparations step.
+Press enter or click to view image in full size
+P.S.: If you use objects like PBO, VBO, device2device copy step must be performed by OpenGL on a DRAW step.
+Examples
+Edge Detection + merging 2 OpenGL textures using CUDA:
+RGB to Grayscale
+Apply a Sobel kernel
+Merge with another image
+Press enter or click to view image in full size
+Edge detected in left image merged with another image on the right
+CUDA Spring + OpenGL VBO:
+In this example I used CUDA kernel for collision detection and spring calculations and a mapped pointer to a VBO
+3d spheres connected by springs
+QuadTree
+Example of a QuatTree visualization using cudaArray:
+Git
+This repository doesn’t include the examples mentioned above, as I’ve simplified it to make the project easier to understand.
+https://github.com/fatlipp/CUinteropGL
+Conclusion
+Thanks for reading, feel free to comment with corrections or ideas. And don’t forget to clap (up to 50) if you like this article :)
+References
+https://www.opengl.org
+CUDA Runtime API :: CUDA Toolkit Documentation
+1. Difference between the driver and runtime APIs
+docs.nvidia.com
+OpenGL Pixel Buffer Object (PBO)
+OpenGL Pixel Buffer object (FBO) to store pixel data. It is used for faster pixel data transfer from/to GPU.
+www.songho.ca
+Cuda
+Opengl
+Rendering
+Follow
+Written by Rustam
+20 followers
+·10 following
+My interests are C++, ML and CUDA. github: https://github.com/fatlipp
+Follow
+Help
+Status
+About
+Careers
+Press
+Blog
+Store
+Privacy
+Rules
+Terms
+Text to speech

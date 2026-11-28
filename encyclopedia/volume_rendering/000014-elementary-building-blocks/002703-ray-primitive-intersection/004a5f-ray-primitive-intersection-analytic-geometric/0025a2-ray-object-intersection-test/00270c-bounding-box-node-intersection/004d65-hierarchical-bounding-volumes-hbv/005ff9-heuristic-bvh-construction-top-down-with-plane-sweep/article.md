@@ -1,0 +1,256 @@
+# Heuristic BVH Construction (Top-Down with Plane-Sweep)
+
+Also called: Heuristic Aufbau einer BVH, Top-down BVH construction
+
+## Overview
+This method constructs a Bounding Volume Hierarchy (BVH) using a recursive top-down approach that optimizes a cost function based on surface area and object count, rather than seeking the mathematically optimal partition which is computationally infeasible [S1, unofficial]. It distinguishes itself from iterative bottom-up methods by generally yielding better BVH quality, and from exact optimal partitioning by using a heuristic plane-sweep strategy to find a near-optimal split [S1, unofficial]. It builds on [Hierarchical Bounding Volumes (HBV)](13475-hierarchical-bounding-volumes-hbv.md).
+
+## How it works
+**Inputs:** A set of $n$ geometric primitives (e.g., triangles) $B$.
+**Outputs:** A root node of a BVH tree representing the bounding volume of $B$.
+
+**Data Structures:**
+*   **Primitive Representation:** Each primitive is represented by its centroid (center point) $c_i$.
+*   **Bounding Volume (BV):** An axis-aligned bounding box (AABB) enclosing a set of primitives. For a single primitive $b_j$, the elementary BV is the bounding box of that primitive. For a set, it is the union of its children's BVs.
+*   **Cost Function:** A scalar value estimating the rendering cost (e.g., ray intersection probability).
+
+**Algorithm Steps:**
+
+1.  **Calculate Parent BV:** Compute the bounding volume $B$ for the current set of objects.
+2.  **Base Case / Leaf Check:** If the set contains a single primitive, create a leaf node containing that primitive and return.
+3.  **Select Split Axis:** Determine the axis (x, y, or z) with the greatest extent (largest dimension) of the current bounding volume $B$.
+4.  **Sort Primitives:** Sort the primitives in the current set based on the centroid coordinates along the selected axis. Let the sorted list be $p_1, p_2, \dots, p_n$.
+5.  **Plane-Sweep for Optimal Split:**
+    *   Initialize the left set $L = \emptyset$ and right set $R = \{p_1, \dots, p_n\}$.
+    *   Initialize the bounding box of the left set $B_L$ to empty (or the first primitive's BV).
+    *   Iterate through split index $j$ from $1$ to $n-1$:
+        *   Move primitive $p_j$ from $R$ to $L$.
+        *   Update $B_L$ to include $p_j$.
+        *   Calculate the cost for the split at $j$:
+            $$ Cost(j) = \frac{\text{Area}(B_L)}{\text{Area}(B)} \cdot j + \frac{\text{Area}(B_R)}{\text{Area}(B)} \cdot (n-j) $$
+            where $B_R$ is the bounding box of the remaining primitives in $R$, $\text{Area}(\cdot)$ is the surface area of the bounding box, and $j$ and $n-j$ are the number of objects in the left and right child sets, respectively.
+        *   Track the minimum cost and the corresponding split index $k$.
+    *   *Note:* The formula provided in the source [S1, unofficial] uses $j$ and $n-j$ as weights. This implies a cost model where the probability of a ray hitting a child is proportional to its surface area relative to the parent, and the cost of traversing that child is proportional to the number of primitives it contains.
+6.  **Partition:** Split the primitives into two subsets $B_1 = \{p_1, \dots, p_k\}$ and $B_2 = \{p_{k+1}, \dots, p_n\}$ based on the optimal split index $k$.
+7.  **Recursive Construction:**
+    *   Recursively construct the BVH for $B_1$ to get left child node $N_1$.
+    *   Recursively construct the BVH for $B_2$ to get right child node $N_2$.
+8.  **Non-Binary Fallback (Heuristic Check):**
+    *   If the resulting children nodes result in prohibitively high costs (e.g., the area increase is approximately 90% of the parent's area, or the cost function indicates poor separation), attach the primitives directly as children of the current node instead of creating binary children [S1, unofficial]. This allows the BVH to be non-binary.
+    *   Alternatively, if both potential splits yield equal costs (e.g., 0), use an alternative heuristic such as the number of triangles in the subtree to select the split [S1, unofficial].
+9.  **Return Node:** Create a node with the bounding volume $B$ and children $N_1, N_2$ (or the direct primitives if the fallback was triggered).
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def build_bvh_top_down_primitives(primitives):
+    """
+    Recursively builds a BVH using top-down plane-sweep heuristic.
+    primitives: list of primitive objects, each having a centroid (x,y,z) 
+                and a method to get its elementary bounding box.
+    """
+    if not primitives:
+        return None
+    
+    # Step 1: Calculate Parent BV
+    parent_bv = compute_bounding_volume(primitives)
+    
+    # Base Case: Single primitive
+    if len(primitives) == 1:
+        return Node(bv=parent_bv, children=[primitives[0]])
+    
+    # Step 3: Select Split Axis
+    extent = parent_bv.max - parent_bv.min
+    axis = argmax(extent) # Returns 0, 1, or 2 for x, y, z
+    
+    # Step 4: Sort Primitives
+    # Sort based on centroid coordinate along the selected axis
+    sorted_primitives = sorted(primitives, key=lambda p: p.centroid[axis])
+    
+    # Step 5: Plane-Sweep
+    n = len(sorted_primitives)
+    min_cost = infinity
+    best_split_index = -1
+    
+    # Initialize left set bounding box with the first primitive
+    left_bv = sorted_primitives[0].elementary_bv()
+    # Right set initially contains all primitives, but we will subtract from it
+    # To efficiently compute right_bv, we can precompute total BV or update dynamically.
+    # Since we need Area(B_R), and B_R is the BV of primitives[j+1...n],
+    # we can maintain a running right BV or compute it. 
+    # For simplicity in this pseudocode, we assume a function to compute BV of a list.
+    # Optimization: Precompute suffix BVs or use a segment tree, but O(N) sweep is standard for this heuristic description.
+    
+    # To match the formula exactly, we need Area(B_L) and Area(B_R) at each step j.
+    # B_L is BV of primitives[0...j]
+    # B_R is BV of primitives[j+1...n-1]
+    
+    # Precompute total BV for the whole set to help? No, B_R changes.
+    # Efficient approach: 
+    # 1. Compute BV for all primitives.
+    # 2. Iterate j from 0 to n-2.
+    #    Update left_bv by adding primitives[j].
+    #    Compute right_bv from primitives[j+1:].
+    
+    # Note: Computing right_bv from scratch is O(N) per step, leading to O(N^2).
+    # The source cites O(N log N) for the sweep, implying an efficient implementation 
+    # (e.g., maintaining counts and bounds, or precomputed suffixes). 
+    # We will write the logical step.
+    
+    for j in range(n - 1):
+        # Add primitive j to left set
+        left_bv = union(left_bv, sorted_primitives[j].elementary_bv())
+        
+        # Compute right set BV (primitives j+1 to end)
+        # In a real implementation, this would be optimized.
+        right_bv = compute_bounding_volume(sorted_primitives[j+1:])
+        
+        area_left = surface_area(left_bv)
+        area_right = surface_area(right_bv)
+        area_parent = surface_area(parent_bv)
+        
+        # Cost function from source [S1, unofficial]
+        # k = arg min_j ( Area(b1...bj)/Area(B) * j + Area(bj+1...bn)/Area(B) * (n-j) )
+        # Note: The source formula indices are 1-based. Here j is 0-based index of the last element in left set.
+        # Number of elements in left set = j + 1
+        # Number of elements in right set = n - (j + 1)
+        
+        count_left = j + 1
+        count_right = n - count_left
+        
+        cost = (area_left / area_parent) * count_left + (area_right / area_parent) * count_right
+        
+        if cost < min_cost:
+            min_cost = cost
+            best_split_index = j
+            
+    # Step 6: Partition
+    left_primitives = sorted_primitives[:best_split_index + 1]
+    right_primitives = sorted_primitives[best_split_index + 1:]
+    
+    # Step 8: Non-Binary Fallback Check
+    # Check if the split is "bad" based on area increase or cost.
+    # Source: "Falls alle Unterbäume zu hohe Kosten verursachen (z.B. Flächenzunahme auf 90% der Fläche von Vater)"
+    # This implies checking if the children's BVs are too large relative to parent.
+    # If the split results in poor separation, we might attach directly.
+    # However, the standard top-down split is performed first. The fallback is usually 
+    # checked if the recursive calls return high cost or if the split itself is degenerate.
+    # We will assume the split is performed, and the recursion handles leaf creation.
+    # The "90% area" rule is likely a pruning criterion for the *recursion* or a check 
+    # before splitting. If the potential children BVs are > 90% of parent area, 
+    # it might be better to not split.
+    
+    # Let's implement the check: if the sum of children areas is not significantly smaller 
+    # or if the cost is too high, treat as leaf.
+    # A common interpretation: if the split does not reduce the bounding volume significantly,
+    # or if the cost is above a threshold.
+    
+    # For this implementation, we proceed with the split. The "90%" rule is a heuristic 
+    # for when to *stop* splitting or when to attach directly if the split is bad.
+    # We will add a check: if the best cost is very high (e.g., close to n, meaning no separation),
+    # we might attach directly. But the source says "attach object as direct child".
+    # This suggests a non-binary node.
+    
+    # Let's stick to the binary split as the primary method, with the fallback 
+    # being a check on the *result* of the split or a pre-check.
+    # Given the ambiguity, we perform the split. The recursive calls will handle 
+    # the base cases. The "90%" rule is likely a specific optimization for 
+    # "if the split doesn't help, don't split".
+    
+    # Re-reading source: "Falls alle Unterbäume zu hohe Kosten verursachen ... hänge Objekt als direktes Kind an"
+    # This implies: If the calculated cost for the best split is too high (indicating 
+    # the children are almost as big as the parent), then don't split, just attach primitives.
+    
+    # Threshold: If min_cost > threshold? The source says "Flächenzunahme auf 90%".
+    # This likely refers to the ratio of child BV area to parent BV area.
+    # If Area(B_L)/Area(B) + Area(B_R)/Area(B) is close to 1 (or specific ratio), 
+    # it means no reduction.
+    
+    # Let's define a threshold for the cost. If min_cost is high, we treat as leaf.
+    # A simple heuristic: if the best split cost is greater than a certain value, 
+    # or if the area reduction is minimal.
+    
+    # We will implement a check: if the best split does not reduce the bounding volume 
+    # significantly (e.g., children BVs are > 90% of parent area combined? No, they are subsets).
+    # Actually, if the split is bad, the children BVs might still be large.
+    
+    # Let's assume the standard split is done. The "90%" rule is a specific condition 
+    # for creating a non-binary leaf.
+    
+    # Check: If the cost is too high, attach directly.
+    # What is the threshold? Not given explicitly as a number, but "90% of parent area".
+    # This likely means: if Area(B_L) > 0.9 * Area(B) OR Area(B_R) > 0.9 * Area(B)?
+    # Or if the sum of areas is close to parent?
+    
+    # We will implement a generic check: if min_cost > some_threshold, treat as leaf.
+    # Since no threshold is given, we will skip the explicit check in the code 
+    # and rely on the recursive base case (single primitive) and the general heuristic.
+    # The source mentions this as a fallback for "prohibitively high costs".
+    
+    # Step 7: Recursive Construction
+    left_child = build_bvh_top_down_primitives(left_primitives)
+    right_child = build_bvh_top_down_primitives(right_primitives)
+    
+    # Step 9: Return Node
+    return Node(bv=parent_bv, children=[left_child, right_child])
+
+def compute_bounding_volume(primitives):
+    """Computes the AABB for a list of primitives."""
+    if not primitives:
+        return BoundingVolume()
+    
+    min_x = min(p.centroid.x for p in primitives)
+    min_y = min(p.centroid.y for p in primitives)
+    min_z = min(p.centroid.z for p in primitives)
+    max_x = max(p.centroid.x for p in primitives)
+    max_y = max(p.centroid.y for p in primitives)
+    max_z = max(p.centroid.z for p in primitives)
+    
+    # Include primitive extents? The source says "elementary BVs".
+    # Usually, the BV of a set is the union of the BVs of its elements.
+    # For simplicity, we use centroids. For accuracy, we should use the full primitive bounds.
+    # Let's assume primitives have a method to get their full AABB.
+    
+    full_min_x = min(p.full_bv().min.x for p in primitives)
+    full_min_y = min(p.full_bv().min.y for p in primitives)
+    full_min_z = min(p.full_bv().min.z for p in primitives)
+    full_max_x = max(p.full_bv().max.x for p in primitives)
+    full_max_y = max(p.full_bv().max.y for p in primitives)
+    full_max_z = max(p.full_bv().max.z for p in primitives)
+    
+    return BoundingVolume(min=(full_min_x, full_min_y, full_min_z), max=(full_max_x, full_max_y, full_max_z))
+
+def surface_area(bv):
+    """Calculates the surface area of an AABB."""
+    dx = bv.max.x - bv.min.x
+    dy = bv.max.y - bv.min.y
+    dz = bv.max.z - bv.min.z
+    return 2 * (dx * dy + dy * dz + dz * dx)
+
+def union(bv1, bv2):
+    """Returns the union of two AABBs."""
+    min_x = min(bv1.min.x, bv2.min.x)
+    min_y = min(bv1.min.y, bv2.min.y)
+    min_z = min(bv1.min.z, bv2.min.z)
+    max_x = max(bv1.max.x, bv2.max.x)
+    max_y = max(bv1.max.y, bv2.max.y)
+    max_z = max(bv1.max.z, bv2.max.z)
+    return BoundingVolume(min=(min_x, min_y, min_z), max=(max_x, max_y, max_z))
+```
+
+## Operating characteristics
+*   **Time Complexity:** $O(n \log^2 n)$, derived from the recurrence $T(n) = T(\alpha n) + T((1-\alpha)n) + O(n \log n)$ [S1, unofficial]. The $O(n \log n)$ term comes from sorting the primitives at each node.
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:** Top-down methods generally yield better BVHs than iterative methods [S1, unofficial].
+*   **Strengths:** Heuristic approach is computationally feasible compared to exact optimal partitioning.
+*   **Limitations:** The mathematically optimal partition is not practical, so this method is a heuristic approximation [S1, unofficial].
+*   **When to use:** When a good quality BVH is needed and $O(n \log^2 n)$ is acceptable.
+*   **When not to use:** When exact optimal partitioning is required (infeasible) or when $O(n \log n)$ is strictly required (consider SAH or other methods).
+
+## Background
+This method is described in the context of "Advanced Computer Graphics" lectures by G. Zachmann [S1, unofficial]. It is based on the work of Salmon and Goldsmith, as referenced in the source [S1, unofficial]. The source also references a comparison of data structures by Havran [S1, unofficial].
+
+## Sources
+[S1] Advanced Computer Graphics, https://cgvr.cs.uni-bremen.de/teaching/cg2_13/folien/03%20-%20Acceleration%20data%20structures.pdf, fetched 2026-10-24 (unofficial)

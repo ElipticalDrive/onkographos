@@ -1,0 +1,102 @@
+# Group of Stacks (gstack)
+Also called: Gstack
+
+## Overview
+A gstack represents a rectangular region of vertical stacks in a voxel grid where all stacks share an identical sequence of attribute values (intervals) [S1, unofficial]. It groups spatially adjacent stacks with identical attribute sequences to compress redundant attribute information [S1, unofficial]. Unlike standard spatial decompositions that subdivide based on height variations, gstacks store geometry as a set of non-intersecting heightfields, allowing separate compression of the height data [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A rectangular region of stacks $S$ defined by coordinates $[x_{min}, y_{min}, x_{max}, y_{max}]$ in the $xy$-plane, where every stack $S_{x,y}$ in this region has the same number of intervals $n$ and the same sequence of attribute values $a_1, a_2, \dots, a_n$ [S1, unofficial].
+*   **Output:** A gstack structure $G$ encoding this region [S1, unofficial].
+
+**Data Structures:**
+A gstack is encoded as a sequence of $n$ intervals $i_1, i_2, \dots, i_n$ [S1, unofficial]. Each interval $i_k$ is a tuple:
+$$ i_k = \langle a_k, H_k \rangle $$
+Where:
+*   $a_k$: The attribute value common to all stacks in the region for the $k$-th interval [S1, unofficial].
+*   $H_k$: A heightfield (2D array) with dimensions $(x_{max} - x_{min} + 1) \times (y_{max} - y_{min} + 1)$ [S1, unofficial].
+
+**Layout and Mapping:**
+The heightfield $H_k$ stores the geometric height of the $k$-th interval for each stack in the region [S1, unofficial]. The height $h_{x,y}$ of a specific stack $S_{x,y}$ is mapped to the heightfield coordinate relative to the region's minimum:
+$$ H_k[x - x_{min}, y - y_{min}] = h_{x,y}^{(k)} $$
+where $h_{x,y}^{(k)}$ is the height of the $k$-th interval in stack $S_{x,y}$ [S1, unofficial].
+
+**Constraints:**
+The intervals are consistently ordered for all stacks in the region [S1, unofficial]. Consequently, the heightfields never intersect [S1, unofficial]. For any coordinate $(i, j)$ within the heightfield dimensions, and for any $k$ such that $1 \le k < n$:
+$$ H_k[i, j] < H_{k+1}[i, j] $$
+This strict ordering ensures that the intervals are vertically stacked without overlap [S1, unofficial].
+
+**Algorithm: Interval Propagation (for merging gstacks):**
+When combining gstacks (e.g., during QuadStack construction), an algorithm finds a common mapping to maximize terminal intervals [S1, unofficial].
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def interval_propagation(intervals1, intervals2):
+    """Finds a matching sequence of interval attribute values for two gstacks."""
+    if not intervals1 or not intervals2:
+        return [], []
+
+    best_res1, best_res2 = [], []
+    max_terminals = -1
+
+    for s in range(len(intervals1)):
+        for t in range(len(intervals2)):
+            i1_s = intervals1[s]
+            i2_t = intervals2[t]
+
+            if i1_s.attr == i2_t.attr:
+                res1 = [i1_s]
+                res2 = [i2_t]
+
+                if s > 0 and t > 0:
+                    pred1 = Interval(attr='*', heightfield=intervals1[0].heightfield)
+                    pred2 = Interval(attr='*', heightfield=intervals2[0].heightfield)
+                    res1.insert(0, pred1)
+                    res2.insert(0, pred2)
+
+                rem1 = intervals1[s+1:]
+                rem2 = intervals2[t:]
+                sub1, sub2 = interval_propagation(rem1, rem2)
+                current_res1 = res1 + sub1
+                current_res2 = res2 + sub2
+
+                term_count = sum(1 for i in current_res1 if i.attr != '*') + \
+                             sum(1 for i in current_res2 if i.attr != '*')
+
+                if term_count > max_terminals:
+                    max_terminals = term_count
+                    best_res1, best_res2 = current_res1, current_res2
+
+    return best_res1, best_res2
+
+class Interval:
+    def __init__(self, attr, heightfield):
+        self.attr = attr
+        self.heightfield = heightfield
+```
+The theoretical complexity of this algorithm is $O((m!)^4)$ for four stacks with $m$ intervals, but it performs much better in practice with heuristics [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Non-square Quadrants:** In hierarchical constructions (like QuadStack), gstack regions are not guaranteed to be square or powers of two [S1, unofficial]. Heightfield dimensions must be calculated exactly as $(x_{max} - x_{min} + 1) \times (y_{max} - y_{min} + 1)$ [S1, unofficial].
+*   **Wildcard Intervals:** When intervals are propagated up or down a hierarchy, gaps are represented by wildcard intervals [S1, unofficial]. The heightfield of a wildcard interval $H_w$ must correctly map to quadrants of descendant or ancestor heightfields [S1, unofficial]. If $i_w$ represents intervals $i_k \dots i_{k+j}$ in a descendant, $H_w$ combines the heightfields of the top intervals of all sets in descendants grouped by $i_w$ [S1, unofficial].
+
+## Subtopics
+
+### Wildcard Interval (*-interval)
+A special type of interval used in internal nodes of the QuadStack to represent gaps between terminal intervals [S1, unofficial]. It corresponds to intervals stored elsewhere (descendant or ancestor nodes) [S1, unofficial]. Defined as $i_w = \langle *, H_w \rangle$, it has an associated heightfield $H_w$ [S1, unofficial]. If $i_w$ represents intervals $i_k, i_{k+1}, \dots, i_{k+j}$ in a descendant, $H_w$ combines the heightfields of the top intervals of all sets of intervals in descendant nodes grouped by $i_w$ [S1, unofficial]. If $i_w$ refers to a group of intervals in an ancestor, $H_w$ corresponds to a quadrant of the ancestor's heightfield $H_{k+j}$, since the ancestor covers a larger part of the xy plane [S1, unofficial].
+
+### Interval Propagation Algorithm
+A brute-force algorithm to find a common mapping for two gstacks that maximizes the number of terminal intervals [S1, unofficial]. It tests every possible pair of intervals from both gstacks for attribute matches [S1, unofficial]. If a match is found, the intervals are added to the result, and the function recurses on the remaining intervals [S1, unofficial]. If the matched intervals are not at the start, predecessor intervals are grouped into two wildcard intervals associated with the heightfields of the top intervals [S1, unofficial]. The solution with the highest number of terminal intervals is returned [S1, unofficial]. The theoretical complexity is $O((m!)^4)$ for four stacks with $m$ intervals, but it performs much better in practice with heuristics [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** The core gstack encoding is linear in the number of intervals $n$ and the region area [S1, unofficial]. The Interval Propagation algorithm has a theoretical complexity of $O((m!)^4)$ for four stacks with $m$ intervals, but performs much better in practice with heuristics [S1, unofficial].
+*   **Memory Complexity:** Space-efficient for attribute information [S1, unofficial]. The size is proportional to $n \times (\text{size}(a) + \text{size}(H))$, where $\text{size}(H)$ is the area of the heightfield [S1, unofficial]. Geometry is stored as non-intersecting heightfields, which can be further compressed using any existing heightfield encoding method [S1, unofficial].
+*   **Strengths:** Compresses redundant attribute data across spatially adjacent stacks with identical sequences [S1, unofficial]. Allows separate compression of geometry [S1, unofficial]. Integrates flexibly with hierarchical structures via wildcard intervals [S1, unofficial].
+*   **Limitations:** Requires identical attribute sequences for all stacks in the region [S1, unofficial]. Merging gstacks can be computationally expensive without heuristics [S1, unofficial]. Not suitable for regions with high attribute variation [S1, unofficial].
+
+## Background
+The gstack was introduced as part of the QuadStack representation, an efficient method for the direct rendering of layered datasets [S1, unofficial]. It builds on the Stack-Based Representation (SBR) by adding spatial grouping [S1, unofficial]. The concept was proposed in the paper "QuadStack: An Efficient Representation and Direct Rendering of Layered Datasets" by Graciano et al. (2021) [S1, unofficial].
+
+## Sources
+[S1] QuadStack: An Efficient Representation and Direct Rendering of Layered Datasets | DCGI, https://dcgi.fel.cvut.cz/publications/2021/graciano-tvcg-quadstack/, fetched 2026-10-29 (unofficial)

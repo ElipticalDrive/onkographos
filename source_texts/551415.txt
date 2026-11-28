@@ -1,0 +1,667 @@
+Large collection of number systems providing custom arithmetic for mixed-precision algorithm development and optimization for AI, Machine Learning, Computer Vision, Signal Processing, CAE, EDA, control, optimization, estimation, and approximation. - feat(zfpblock): full constexpr promotion of ZFP transform codec by Ravenwater · Pull Request #830 · stillwater-sc/universal
+
+feat(zfpblock): full constexpr promotion of ZFP transform codec by Ravenwater · Pull Request #830 · stillwater-sc/universal · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Ravenwater
+commented
+May 13, 2026
+•
+edited by coderabbitai
+Bot
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Summary
+Completes the codec-layer constexpr work deferred by PR #814 (parent issue #745). After this PR, zfpblock::compress() / decompress() are callable in constant-evaluated contexts — enabling compile-time generation of compressed coefficient tables for DSP / ML pipelines, the original motivation for issue #815.
+Approach
+The codec uses four constexpr-incompatible stdlib calls:
+Stdlib call
+Used in
+Replacement on constexpr branch
+__builtin_ctzll / _BitScanForward64
+zfp_ctzll
+C++20 std::countr_zero (constexpr)
+std::frexp
+fwd_cast
+New cx_frexp_exp<Real>(v) -- bit-cast IEEE 754 extraction
+std::ldexp
+fwd_cast, inv_cast
+New cx_ldexp<Real>(x, exp) -- power-of-2 mul loop
+std::memset
+fwd_cast, decode_bitplanes
+Explicit zero loops
+All non-stdlib calls are guarded by std::is_constant_evaluated() so the runtime path keeps the fast stdlib intrinsics; the constexpr branch substitutes the pure replacements. Both branches produce bit-identical output (verified by byte-identical api.cpp test output between gcc and clang, before and after).
+The decode_block previously used const_cast<uint8_t*>(buffer) to forward a const buffer to zfp_bitstream, which is forbidden in constant evaluation when the storage was originally const-qualified (the case here, since decompress() const makes _buffer const). Replaced by adding a reader-mode constructor to zfp_bitstream that stores a const uint8_t* directly.
+Changes
+`include/sw/universal/number/zfpblock/zfp_codec.hpp` -- the codec. All functions annotated constexpr; new cx_ldexp / cx_frexp_exp helpers (parameterized on Real in {float, double}); zfp_bitstream rewritten with reader/writer constructor pair.
+`include/sw/universal/number/zfpblock/zfpblock_impl.hpp` -- compress / decompress and the four mode convenience wrappers marked constexpr.
+`static/block/zfpblock/api/constexpr.cpp` -- added static_assert-based constexpr roundtrip tests: all-zero block (zero-flag fast path), power-of-two block (full pipeline through cx_frexp_exp + cx_ldexp + lifting + bit-plane), and negabinary identity at int32 and int64.
+Test Results
+Target
+gcc build
+gcc test
+clang build
+clang test
+zfpblock_api
+OK
+PASS (137 bits, byte-identical)
+OK
+PASS (byte-identical)
+zfpblock_constexpr
+OK
+PASS (all static_asserts pass)
+OK
+PASS
+zfpblock_bitplane
+OK
+PASS
+OK
+PASS
+zfpblock_lifting
+OK
+PASS
+OK
+PASS
+zfpblock_negabinary
+OK
+PASS
+OK
+PASS
+zfpblock_roundtrip_1d
+OK
+PASS
+OK
+PASS
+zfpblock_roundtrip_2d
+OK
+PASS
+OK
+PASS
+zfpblock_roundtrip_3d
+OK
+PASS
+OK
+PASS
+zfpblock_fixed_rate
+OK
+PASS
+OK
+PASS
+zfpblock_array_api
+OK
+PASS
+OK
+PASS
+zfpblock_array_cache
+OK
+PASS
+OK
+PASS
+zfpblock_array_copy_move
+OK
+PASS
+OK
+PASS
+zfpblock_array_roundtrip
+OK
+PASS
+OK
+PASS
+The zfpblock_api test's [01 f1 1c c5 61 01 ...] compressed byte sequence is identical across gcc and clang and matches the pre-change output, confirming no functional drift.
+Test plan
+Fast CI passes (gcc + clang CI_LITE)
+CodeRabbit / sanitizer feedback addressed
+Promote to ready: gh pr ready
+Full CI tier passes
+Merge
+Resolves #815
+Generated with Claude Code
+Summary by CodeRabbit
+New Features
+ZFP block compression/decompression and its public modes are now usable at compile time, improving compile-time compatibility across the encode/decode pipeline.
+Tests
+Added compile-time tests that validate end-to-end compress/decompress roundtrips and value-preservation scenarios.
+Chores
+CI workflow updated to recognize the zfpblock scope in commit/PR verification.
+feat(zfpblock): full constexpr promotion of ZFP transform codec
+…
+b121699
+```
+Completes the codec-layer constexpr work deferred by PR #814 (parent
+issue #745). After this PR, zfpblock::compress() / decompress() are
+callable in constant-evaluated contexts -- enabling compile-time
+generation of compressed coefficient tables for DSP / ML pipelines.
+
+Codec changes (include/sw/universal/number/zfpblock/zfp_codec.hpp):
+
+* zfp_ctzll: replaced __builtin_ctzll / _BitScanForward64 with
+  C++20 std::countr_zero (constexpr).
+* zfp_bitstream: added a const-buffer reader constructor that
+  eliminates the const_cast<uint8_t*>(buffer) in decode_block --
+  forbidden in constant evaluation when the storage originated as
+  const-qualified. Reader and writer modes share the same class;
+  read ops use the const pointer, write ops use the mutable one.
+* fwd_cast / inv_cast: added std::is_constant_evaluated() dispatch.
+  Runtime path keeps std::frexp / std::ldexp / std::memset. The
+  constexpr branch uses two new templated helpers:
+    - cx_ldexp<Real>(x, exp): power-of-2 multiplication loop,
+      bit-identical to std::ldexp within the codec's exponent range.
+    - cx_frexp_exp<Real>(v): returns the exponent std::frexp would
+      write, via sw::bit_cast extraction of the IEEE 754 fields.
+      Handles both normal and subnormal binary32 / binary64.
+* decode_bitplanes: replaced std::memset(ublock, 0, ...) with an
+  explicit zero loop on the constexpr branch.
+* All remaining helpers (int2uint / uint2int, fwd_lift / inv_lift,
+  fwd_xform / inv_xform, encode_bitplanes / decode_bitplanes,
+  encode_block / decode_block) annotated constexpr -- mechanical.
+* Local arrays inside encode_block / decode_block now value-init
+  (Int iblock[N]{}) so they read constexpr-safe before the codec
+  fully writes them.
+
+Container changes (zfpblock_impl.hpp):
+
+* compress / decompress and the four mode convenience wrappers
+  marked constexpr. Updated the deferral comment that previously
+  pointed at this issue.
+
+Test additions (static/block/zfpblock/api/constexpr.cpp):
+
+* All-zero block constexpr roundtrip: encoder hits the zero-flag
+  fast path; decoder restores zeros. Exercises bitstream write_bit /
+  read_bit and the constexpr-branch memset replacement.
+* Power-of-two block constexpr roundtrip: full pipeline
+  (fwd_cast + cx_frexp_exp + cx_ldexp + lifting + bitplane) at
+  compile time, with a tolerance-based static_assert on the
+  decompressed values.
+* Negabinary identity static_asserts at both int32 and int64.
+
+Verified on gcc and clang: all 13 zfpblock targets pass; the api.cpp
+test's compressed byte sequence ([01 f1 1c c5 61 01 ...]) is
+byte-identical between compilers and between this change and main.
+
+Resolves #815
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+```
+coderabbitai
+Bot
+commented
+May 13, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+No actionable comments were generated in the recent review. 🎉
+ℹ️ Recent review info
+⚙️ Run configuration
+Configuration used: Path: .coderabbit.yaml
+Review profile: CHILL
+Plan: Pro
+Run ID: edadeb7b-578b-4979-9463-90a034c7903f
+📥 Commits
+Reviewing files that changed from the base of the PR and between 7cfa187 and 5c280a2.
+📒 Files selected for processing (1)
+include/sw/universal/number/zfpblock/zfp_codec.hpp
+🚧 Files skipped from review as they are similar to previous changes (1)
+include/sw/universal/number/zfpblock/zfp_codec.hpp
+📝 Walkthrough
+Walkthrough
+This PR completes constexpr promotion of the ZFP single-block codec by introducing portable constexpr replacements for non-constexpr intrinsics, refactoring the bitstream class to support constant-evaluated construction, and marking the full transform pipeline and public API as constexpr with conditional runtime/compile-time dispatch.
+Changes
+ZFP codec full constexpr promotion
+Layer / File(s)
+Summary
+Low-level constexpr primitives and bit utilities
+include/sw/universal/number/zfpblock/zfp_codec.hpp
+Added portable constexpr trailing-zero counting (zfp_ctzll), IEEE-754 bit-extraction helpers (cx_frexp_exp, cx_ldexp), and updated includes and module documentation to support constant-evaluated codec operations.
+Bitstream class constexpr refactoring
+include/sw/universal/number/zfpblock/zfp_codec.hpp
+Refactored zfp_bitstream to support constexpr-friendly reader/writer modes with separate _read_buffer and _write_buffer pointers; made constructors, read_bits, write_bits, and utility methods (read_bit, write_bit, rewind, flush, bytes_used) constexpr.
+Negabinary conversions and transform infrastructure
+include/sw/universal/number/zfpblock/zfp_codec.hpp
+Marked int2uint, uint2int, fwd_lift, inv_lift, fwd_xform, inv_xform, and zfp_perm accessor constexpr; these pure bit-operation and arithmetic transforms form the codec foundation.
+Float-to-integer block-float casts with conditional dispatch
+include/sw/universal/number/zfpblock/zfp_codec.hpp
+Made fwd_cast and inv_cast constexpr by adding std::is_constant_evaluated() branching: constexpr paths use cx_frexp_exp/cx_ldexp bit-cast patterns; runtime keeps std::frexp/std::ldexp; replaced std::memset with explicit loops.
+Bitplane encoding, block orchestrators, and intermediate initialization
+include/sw/universal/number/zfpblock/zfp_codec.hpp
+Made encode_bitplanes and decode_bitplanes constexpr with conditional zero-initialization; promoted encode_block and decode_block to constexpr entry points; value-initialized intermediate arrays; switched decode to reader-mode bitstream construction to avoid const_cast.
+zfpblock public API constexpr promotion
+include/sw/universal/number/zfpblock/zfpblock_impl.hpp
+Made zfpblock::compress, zfpblock::decompress, and convenience methods (compress_fixed_rate, compress_fixed_precision, compress_fixed_accuracy, compress_reversible) constexpr with compile-time-safe dispatch documentation.
+Constexpr roundtrip verification and codec tests
+static/block/zfpblock/api/constexpr.cpp
+Added compile-time roundtrip tests for zfpblock<float,1> including zero preservation, power-of-two validation with relative error tolerance, nonzero compressed bit counts, and constexpr negabinary identity assertions for 32-bit and 64-bit types.
+Estimated code review effort
+🎯 4 (Complex) | ⏱️ ~60 minutes
+Possibly related issues
+feat(zfpblock): full constexpr support across all operators #745: Umbrella issue tracking broader zfpblock constexpr support; this PR directly addresses codec layer promotion within that umbrella.
+feat(zfpblock): full constexpr promotion of zfparray multi-block container #816: Dependent issue that calls zfp_codec::encode_block/decode_block per-block through zfparray_impl.hpp; the codec constexpr changes are prerequisites for array-level constexpr compression.
+Suggested labels
+enhancement
+"🐰
+I hopped through bits and exponent trees,
+Turned frexp into const-eval ease,
+Bitstreams read from frozen bytes,
+Encode at build-time — what delights!
+A tiny hop for code, a leap for compile-time cheese."
+🚥 Pre-merge checks | ✅ 4 | ❌ 1
+❌ Failed checks (1 warning)
+Check name
+Status
+Explanation
+Resolution
+Docstring Coverage
+⚠️ Warning
+Docstring coverage is 50.00% which is insufficient. The required threshold is 80.00%.
+Write docstrings for the functions missing them to satisfy the coverage threshold.
+✅ Passed checks (4 passed)
+Check name
+Status
+Explanation
+Description Check
+✅ Passed
+Check skipped - CodeRabbit’s high-level summary is enabled.
+Title check
+✅ Passed
+The PR title accurately and concisely summarizes the primary change: making the ZFP transform codec fully constexpr-promoted, which is the main objective.
+Linked Issues check
+✅ Passed
+The PR comprehensively implements all coding objectives from issue #815: constexpr promotion of zfp_bitstream, negabinary helpers, block-float casts with constexpr replacements for stdlib intrinsics, lifting/reordering transforms, bitplane encoding/decoding, block pipeline, and ctzll; includes constexpr roundtrip tests verifying correctness.
+Out of Scope Changes check
+✅ Passed
+All changes are within scope: codec header updates, implementation tweaks, constexpr test additions, and workflow configuration for zfpblock scope are all directly tied to the constexpr promotion objective of issue #815.
+✏️ Tip: You can configure your own custom pre-merge checks in the settings.
+✨ Finishing Touches
+📝 Generate docstrings
+Create stacked PR
+Commit on current branch
+🧪 Generate unit tests (beta)
+Create PR with unit tests
+Commit unit tests in branch feat/issue-815-zfp-codec-constexpr
+Comment @coderabbitai help to get the list of available commands and usage tips.
+coderabbitai
+Bot
+reviewed
+May 13, 2026
+View reviewed changes
+coderabbitai
+Bot
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Caution
+Some comments are outside the diff and can’t be posted inline due to platform limitations.
+⚠️ Outside diff range comments (1)
+include/sw/universal/number/zfpblock/zfp_codec.hpp (1)
+204-221: ⚠️ Potential issue | 🟡 Minor | ⚡ Quick win
+Reader-mode writes still advance stream state
+Line 204-Line 221: write_bits() is documented as a no-op in reader mode, but it still advances _buffer_bits and _byte_pos. An accidental write_* on a reader stream can desync subsequent reads.
+Suggested fix
+```
+ constexpr void write_bits(uint64_t value, unsigned n) {
+   _bits += n;
++  if (_write_buffer == nullptr) {
++    return; // keep reader-mode writes as true no-op except bit count
++  }
+   while (n > 0) {
+     unsigned space = 8 - _buffer_bits;
+     unsigned chunk = (n < space) ? n : space;
+     uint8_t mask = static_cast<uint8_t>((1u << chunk) - 1);
+-    if (_write_buffer != nullptr && _byte_pos < _max_bytes) {
++    if (_byte_pos < _max_bytes) {
+       if (_buffer_bits == 0) _write_buffer[_byte_pos] = 0;
+       _write_buffer[_byte_pos] |= static_cast<uint8_t>((value & mask) << _buffer_bits);
+     }
+```
+🤖 Prompt for AI Agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+In `@include/sw/universal/number/zfpblock/zfp_codec.hpp` around lines 204 - 221,
+write_bits currently updates stream state (_bits, _buffer_bits, _byte_pos) even
+in reader mode; make it a true no-op by returning immediately when in reader
+mode (e.g., when _write_buffer == nullptr) so no state (including _bits) is
+modified; update the beginning of write_bits(uint64_t value, unsigned n) in
+zfp_codec.hpp to check reader-mode and return before modifying
+_bits/_buffer_bits/_byte_pos.
+```
+🤖 Prompt for all review comments with AI agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+Outside diff comments:
+In `@include/sw/universal/number/zfpblock/zfp_codec.hpp`:
+- Around line 204-221: write_bits currently updates stream state (_bits,
+_buffer_bits, _byte_pos) even in reader mode; make it a true no-op by returning
+immediately when in reader mode (e.g., when _write_buffer == nullptr) so no
+state (including _bits) is modified; update the beginning of write_bits(uint64_t
+value, unsigned n) in zfp_codec.hpp to check reader-mode and return before
+modifying _bits/_buffer_bits/_byte_pos.
+```
+ℹ️ Review info
+⚙️ Run configuration
+Configuration used: Path: .coderabbit.yaml
+Review profile: CHILL
+Plan: Pro
+Run ID: df898a81-e929-4027-8f50-5fecc5ab428a
+📥 Commits
+Reviewing files that changed from the base of the PR and between a7864d1 and b121699.
+📒 Files selected for processing (3)
+include/sw/universal/number/zfpblock/zfp_codec.hpp
+include/sw/universal/number/zfpblock/zfpblock_impl.hpp
+static/block/zfpblock/api/constexpr.cpp
+fix(zfpblock): make zfp_bitstream::write_bits a true no-op in reader …
+…
+a377c4a
+```
+…mode
+
+CodeRabbit caught: write_bits() previously advanced _bits, _buffer_bits,
+and _byte_pos in reader mode -- the actual memory write was guarded but
+the state was not. An accidental write_*() call on a reader stream would
+desync subsequent read_*() calls.
+
+Early-return when _write_buffer == nullptr so no state (including _bits,
+which is shared by total_bits()) is modified.  Also simplifies the inner
+loop by removing the now-redundant _write_buffer != nullptr guard around
+the memory write.
+
+Verified: all 8 rebuilt zfpblock targets pass on gcc and clang;
+zfpblock_constexpr roundtrip continues to pass at compile time.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+```
+coderabbitai
+Bot
+reviewed
+May 13, 2026
+View reviewed changes
+coderabbitai
+Bot
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Actionable comments posted: 1
+🤖 Prompt for all review comments with AI agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+Inline comments:
+In `@include/sw/universal/number/zfpblock/zfp_codec.hpp`:
+- Line 378: The comment "TN (a]er for sub-band decomposition" is garbled; update
+the comment near the TN mention in zfp_codec.hpp to a clear term—replace "(a]er"
+with "(filter)" so it reads "TN (filter) for sub-band decomposition" to clarify
+intent around the TN symbol used in the sub-band decomposition logic.
+```
+🪄 Autofix (Beta)
+Fix all unresolved CodeRabbit comments on this PR:
+Push a commit to this branch (recommended)
+Create a new PR with the fixes
+ℹ️ Review info
+⚙️ Run configuration
+Configuration used: Path: .coderabbit.yaml
+Review profile: CHILL
+Plan: Pro
+Run ID: 002ad02a-05a8-4f6b-a809-bf1caf2c048b
+📥 Commits
+Reviewing files that changed from the base of the PR and between b121699 and a377c4a.
+📒 Files selected for processing (1)
+include/sw/universal/number/zfpblock/zfp_codec.hpp
+Comment thread
+include/sw/universal/number/zfpblock/zfp_codec.hpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+ci: register zfpblock as an allowed conventional-commits scope
+…
+7cfa187
+```
+zfpblock has been a registered number system since the initial codec
+landed, but its scope was never added to the conventional-commits
+allowlist alongside mxblock and nvblock.  This caused the PR title
+linter to reject the legitimate feat(zfpblock): / fix(zfpblock):
+prefixes used by this PR and would have rejected any future ones.
+
+Adds zfpblock to the scopes list (alphabetically positioned after
+nvblock to mirror the existing block-format grouping).
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+```
+Ravenwater
+self-assigned this
+May 13, 2026
+Ravenwater
+added
+the
+enhancement
+label
+May 13, 2026
+Ravenwater
+added this to Universal Number Library
+May 13, 2026
+Ravenwater
+moved this to In progress
+in Universal Number Library
+May 13, 2026
+Ravenwater
+added this to the
+V4 milestone
+May 13, 2026
+Ravenwater
+marked this pull request as ready for review
+May 13, 2026 12:42
+docs(zfpblock): fix garbled "TN (a]er" comment in fwd_lift
+…
+5c280a2
+```
+CodeRabbit caught a corrupted comment in fwd_lift -- "TN (a]er for
+sub-band decomposition" -- that was inherited unchanged from the
+pre-PR file.  The bracket sequence "(a]er" is clearly a paste/encoding
+corruption of "(filter)"; restored per the suggested fix.  Comment-only;
+no behavior change.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+```
+coveralls
+commented
+May 13, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Coverage Report for CI Build 25800419180
+Warning
+No base build found for commit a7864d1 on main.
+Coverage changes can't be calculated without a base build.
+If a base build is processing, this comment will update automatically when it completes.
+Coverage: 83.892%
+Details
+Patch coverage: 35 uncovered changes across 1 file (50 of 85 lines covered, 58.82%).
+Uncovered Changes
+File
+Changed
+Covered
+%
+include/sw/universal/number/zfpblock/zfp_codec.hpp
+81
+46
+56.79%
+Coverage Regressions
+Requires a base build to compare against. How to fix this →
+Coverage Stats
+Relevant Lines:
+54712
+Covered Lines:
+45899
+Line Coverage:
+83.89%
+Coverage Strength:
+6469095.49 hits per line
+💛 - Coveralls
+Hide details
+View details
+Ravenwater
+merged commit bfcd463
+into
+main
+May 13, 2026
+33 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+github-project-automation
+Bot
+moved this from In progress
+to Done
+in Universal Number Library
+May 13, 2026
+Ravenwater
+deleted the
+feat/issue-815-zfp-codec-constexpr
+branch
+May 13, 2026 15:21
+Ravenwater
+mentioned this pull request
+May 13, 2026
+feat(zfpblock): full constexpr promotion of zfparray multi-block container
+#831
+Merged
+5 tasks done
+Ravenwater
+added a commit
+that referenced
+this pull request
+May 13, 2026
+feat(zfpblock): full constexpr promotion of zfparray multi-block cont…
+…
+b7a7e67
+```
+…ainer (#831)
+
+Completes the array layer constexpr work tracked under issue #745.
+Building on the codec promotion in PR #830 (#815), zfparray<Real, Dim>
+is now usable in constant-evaluated contexts -- enabling compile-time
+generation of compressed scientific-data tables.
+
+Container changes (zfparray_impl.hpp):
+
+* All member functions annotated constexpr.  No std::is_constant_evaluated
+  branching is required: every helper the container calls (encode_block,
+  decode_block, zfp_bitstream, ...) is already constexpr after #815.
+* _store (the std::vector<uint8_t> compressed buffer) is now mutable.
+  This eliminates every const_cast<zfparray*>(this) in the const lazy-
+  cache-load methods (operator(), decompress, clear_cache, load_block).
+  The cache is an internal implementation detail; const methods are
+  entitled to flush it.  flush() and write_back_cache() become const
+  members.  Strictly safer and a const-correctness improvement.
+* In-class initializers for _n, _rate, _cache, _cached_block, _dirty
+  let the default constructor default to `= default` and drop the
+  std::memset(_cache, 0, sizeof(_cache)) call that previously needed
+  it.  All other constructors drop their memsets too.
+* std::memset / std::memcpy replaced with element-wise loops throughout
+  (cache copy, store copy, padded-block init).  Mechanical and reads
+  identically at runtime; constexpr-safe.
+
+Test additions (static/block/zfpblock/array/array_constexpr.cpp, NEW):
+
+* Default-construct accessors: size, num_blocks, compressed_bytes,
+  compression_ratio all constexpr-deterministic at zero state.
+* Sized-rate construction: zfparray(8, 16.0) sets up 2 blocks of 4
+  with 8 bytes per block -- verified via static_assert.
+* Construct-from-source roundtrip: zfparray(8, 32.0, src) + decompress
+  recovers powers of two within 2^-20 relative tolerance.  Exercises
+  the full per-block codec at compile time through the container.
+* set / flush / get roundtrip: write through the cache, flush, read
+  back through the (clean) cache.
+* Cross-block access: set in block 0, set in block 1 (forces eviction),
+  set in block 0 again (forces re-load).  Verifies load_block /
+  write_back_cache / flush at constant evaluation.
+
+Test target naming: chose array_constexpr.cpp to match the existing
+array_* prefix convention (collides with api/constexpr.cpp otherwise --
+compile_all derives target name from the source basename).
+
+Verified on gcc and clang: all 6 zfpblock array + constexpr targets
+pass; no regressions in the runtime array tests.
+
+Resolves #816
+
+Co-authored-by: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+```
+This was referenced May 13, 2026
+feat(zfpblock): full constexpr support across all operators
+#745
+Closed
+Epic: constexpr support across Universal number systems
+#723
+Closed
+Ravenwater
+added a commit
+that referenced
+this pull request
+May 13, 2026
+docs: wrapup 2026-05-13 -- zfpblock constexpr completion + Epic #723 …
+…
+28ed445
+```
+…closed
+
+CHANGELOG entry plus full session doc for the two PRs that closed the
+constexpr Epic:
+
+- PR #830 (#815) -- ZFP transform codec constexpr promotion: cx_ldexp /
+  cx_frexp_exp / std::countr_zero / std::is_constant_evaluated() dispatch /
+  zfp_bitstream reader-mode constructor.  Bit-identical compressed output
+  preserved across both compilers and the change.
+- PR #831 (#816) -- zfparray multi-block container constexpr promotion:
+  mutable _store eliminates every const_cast, in-class member initializers,
+  loop replacements for memset/memcpy.  New array_constexpr.cpp test.
+
+With #745 (zfpblock umbrella) closed, all 32 sub-issues of Epic #723
+(constexpr across Universal number systems) are closed.  Universal now
+delivers the "plug-in" promise: any expression in any fixed-size number
+type is constexpr-evaluable.
+
+Also documents the LNS Phase F filing (#829) -- research/spec only,
+captures the Vouzis/Collange/Arnold cotransformation requirements for a
+future high-accuracy LNS add/sub algorithm.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+enhancement
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,167 @@
+# Spherical Coordinate Ray-Casting Volume Rendering
+
+Also called: EME Volumetric Data Visualization, Globe Ray-Casting
+
+## Overview
+Spherical Coordinate Ray-Casting Volume Rendering is a method for visualizing 3D volumetric data defined on a non-regular spherical grid, specifically designed for Electromagnetic Environment (EME) data on virtual globes [S1]. It solves the problem of rendering irregular spherical data by projecting rays through a bounding box defined in spherical coordinates, converting ray positions to spherical coordinates in the fragment shader to sample the texture, and compositing the results using front-to-back blending [S1]. It differs from standard direct volume ray casting by handling the non-homogeneous nature of spherical coordinates through explicit Cartesian-to-spherical transformation and back-face depth buffering to determine ray termination points [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** 3D volumetric data (e.g., EME power density) defined on a spherical grid bounded by minimum longitude/latitude/altitude $(lon_0, lat_0, alt_0)$ and maximum longitude/latitude/altitude $(lon_1, lat_1, alt_1)$ [S1].
+*   **Input:** Earth radius $R$ [S1].
+*   **Input:** A proxy mesh representing the volumetric data bounding box [S1].
+*   **Output:** A 2D image with composited color and alpha values [S1].
+
+**Data Structures:**
+1.  **Volumetric Texture:** A 3D texture storing the scalar field values (e.g., EME density). The texture coordinates $(u, v, s)$ map linearly to the spherical bounds $(lat, lon, R)$ [S1].
+2.  **Back-Faces Texture:** A floating-point texture storing the Cartesian coordinates of the ray termination points (where the ray exits the bounding box) [S1].
+3.  **Front-Faces Texture (Implicit):** The ray start points are derived from the current fragment position on the front face of the bounding box [S1].
+
+**Parameters:**
+*   $R$: Earth radius [S1].
+*   $n$: Number of sampling segments along the ray [S1].
+*   $\theta$: Half the maximum angular extent of the bounding box, calculated as $\theta = \max(lat_1 - lat_0, lon_1 - lon_0) / 2$ [S1].
+
+**Steps:**
+
+1.  **Calculate Bounding Box Extents:**
+    Determine the maximal altitude of the bounding box. The total altitude span is defined by $alt_1 + alt$, where $alt$ is derived from the geometry of the spherical cap [S1]:
+    $$ alt_1 + alt = \frac{R + alt_1}{\cos(\theta)} $$
+    where $\theta = \frac{\max(lat_1 - lat_0, lon_1 - lon_0)}{2}$ [S1].
+
+2.  **Prepare Bounding Box Mesh:**
+    Define the eight vertices of the volumetric data bounding box in spherical coordinates $(R, \alpha, \beta)$ corresponding to the min/max lat/lon/alt bounds [S1]. Transform these eight vertices from spherical coordinates to Cartesian coordinates $(x, y, z)$ using the following conversion [S1]:
+    $$
+    \begin{cases}
+    x = R \cos(\alpha) \cos(\beta) \\
+    y = R \cos(\alpha) \sin(\beta) \\
+    z = R \sin(\alpha)
+    \end{cases}
+    $$
+    Assign these Cartesian coordinates as color values (RGB) to the respective vertices of the proxy mesh [S1].
+
+3.  **Render Back-Faces for Ray Termination:**
+    Render the back faces of the bounding box mesh to a floating-point texture. The color value stored at each fragment corresponds to the Cartesian coordinates of the ray termination point [S1].
+
+4.  **Render Front-Faces for Ray Start:**
+    Render the front faces of the bounding box mesh. The fragment position in world space serves as the ray start point [S1].
+
+5.  **Ray Casting and Sampling (Fragment Shader):**
+    For each pixel, retrieve the ray start position $vecStart$ (current fragment position) and the ray termination position $vecTermin$ (sampled from the back-faces texture) [S1]. Calculate the ray direction [S1]:
+    $$ vecRayDir = vecStart - vecTermin $$
+    Iterate $i$ from 0 to $n$ segments along the ray [S1]. For each segment:
+    a.  Calculate the sample position in Cartesian coordinates along the ray [S1].
+    b.  Transform the Cartesian sample position $(x, y, z)$ back to spherical coordinates $(R, \alpha, \beta)$ [S1]:
+        $$
+        \begin{cases}
+        R = \sqrt{x^2 + y^2 + z^2} \\
+        \alpha = \arcsin\left(\frac{z}{R}\right) \\
+        \beta = \arctan\left(\frac{y}{x}\right)
+        \end{cases}
+        $$
+    c.  Interpolate the volumetric texture coordinates $(u, v, s)$ from the spherical coordinates $(\alpha, \beta, R)$ using the bounding box limits [S1]:
+        $$
+        \begin{cases}
+        u = \frac{\alpha - lat_0}{lat_1 - lat_0} \\
+        v = \frac{\beta - lon_0}{lon_1 - lon_0} \\
+        s = \frac{R - alt_0}{alt_1 - alt_0}
+        \end{cases}
+        $$
+    d.  Check if $(u, v, s)$ are within the valid range $[0, 1]$. If outside, skip sampling (empty-space skipping) [S1].
+    e.  Sample the volumetric texture at $(u, v, s)$ to get the density value $EMEdensity$ [S1].
+    f.  Map the density to color and alpha using a transfer function: $color = mapcolor(EMEdensity)$ [S1].
+    g.  Composite the color using front-to-back blending [S1]:
+        $$
+        \begin{aligned}
+        new\_RGB &= color.rgb \cdot color.a + fragColor.rgb \cdot (1 - color.a) \\
+        new\_Alpha &= color.a + fragColor.a \cdot (1 - color.a)
+        \end{aligned}
+        $$
+        Update $fragColor$ with the new values [S1].
+
+6.  **Output:**
+    Return the final composited $fragColor$ [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Vertex Shader (for bounding box mesh)
+# Input: Spherical coordinates (R, alpha, beta) of vertex
+# Output: Cartesian coordinates as color
+vec3 spherical_to_cartesian(float R, float alpha, float beta):
+    x = R * cos(alpha) * cos(beta)
+    y = R * cos(alpha) * sin(beta)
+    z = R * sin(alpha)
+    return vec3(x, y, z)
+
+# Fragment Shader
+void main():
+    # 1. Get Ray Start and Termination
+    vec3 vecStart = gl_FragCoord.xyz; # Or world position of front face fragment
+    vec3 vecTermin = texture(back_faces_texture, gl_FragCoord.xy).rgb;
+    
+    # 2. Calculate Ray Direction
+    vec3 vecRayDir = vecStart - vecTermin;
+    
+    # 3. Initialize Accumulators
+    vec4 fragColor = vec4(0.0, 0.0, 0.0, 0.0);
+    
+    # 4. Ray Marching
+    for i from 0 to n_segments:
+        # Calculate current sample position along the ray
+        # Note: The exact interpolation of 'samplepos' depends on segment distribution
+        # Assuming linear interpolation between start and termin
+        float t = float(i) / float(n_segments);
+        vec3 samplepos = mix(vecStart, vecTermin, t);
+        
+        # Transform Cartesian to Spherical
+        float R = length(samplepos);
+        float alpha = asin(samplepos.z / R);
+        float beta = atan(samplepos.y / samplepos.x);
+        
+        # Interpolate Texture Coordinates
+        float u = (alpha - lat0) / (lat1 - lat0);
+        float v = (beta - lon0) / (lon1 - lon0);
+        float s = (R - alt0) / (alt1 - alt0);
+        
+        # Empty-space skipping / Clipping
+        if u < 0.0 or u > 1.0 or v < 0.0 or v > 1.0 or s < 0.0 or s > 1.0:
+            continue;
+            
+        # Sample Density
+        float EMEdensity = texture(volumetric_texture, vec3(u, v, s)).r;
+        
+        # Transfer Function
+        vec4 color = mapcolor(EMEdensity);
+        
+        # Front-to-Back Blending
+        fragColor.rgb = color.rgb * color.a + fragColor.rgb * (1.0 - color.a);
+        fragColor.a = color.a + fragColor.a * (1.0 - color.a);
+        
+        # Optional: Early ray termination if alpha is opaque
+        if fragColor.a >= 1.0:
+            break;
+            
+    gl_FragColor = fragColor;
+```
+
+**Edge Cases and Pitfalls:**
+*   **Invalid Texture Coordinates:** If the calculated texture coordinates $(u, v, s)$ fall outside the $[0, 1]$ range, the sample is skipped to avoid out-of-bounds access and to optimize performance via empty-space skipping [S1].
+*   **Non-Regular Grid:** The method is specifically required because the EME data is not on a regular Cartesian grid, making standard texture coordinate assignment to bounding box vertices impossible without transformation [S1].
+*   **Spherical Coordinate Singularities:** The use of $\arcsin$ and $\arctan$ requires careful handling of edge cases (e.g., $R=0$ or $x=0$), though the sources do not specify the exact guard conditions used [S1].
+
+## Operating characteristics
+*   **Performance:** The GPU-based implementation achieves an average frame rate of 25 fps at a resolution of $1024 \times 768$ on a GeForce 8600 GT [S1].
+*   **Speedup:** The GPU implementation improves computing performance by approximately 30 times compared to CPU-based methods [S1].
+*   **Scalability:** The method supports interactive real-time rendering and allows for dynamic visualization of EME coverage affected by irregular terrain [S1].
+*   **Limitations:** The method is tailored for spherical coordinate data (EME on a globe) and relies on a bounding box proxy mesh. It may not be directly applicable to arbitrary Cartesian volumetric data without modification [S1].
+
+## Background
+*   **Origin:** The method was proposed in the paper "GPU-Based Volume Rendering for 3D Electromagnetic Environment on Virtual Globe" [S1].
+*   **Context:** It addresses the limitation of existing 3D radio device computing and visualization methods, which could not directly visualize 3D EME volumetric data on a globe due to the non-regular nature of the spherical grid [S1].
+*   **Application:** It is used for visualizing electromagnetic environment (EME) data, allowing users to interactively adjust radio parameters and view coverage changes, providing decision support for wireless system design [S1].
+
+## Sources
+[S1] GPU-Based Volume Rendering for 3D Electromagnetic Environment on Virtual Globe, https://doi.org/10.5815/ijigsp.2010.01.07, fetched 2026-10-26

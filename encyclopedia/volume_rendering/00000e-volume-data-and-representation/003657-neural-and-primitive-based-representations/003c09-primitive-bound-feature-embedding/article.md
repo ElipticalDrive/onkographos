@@ -1,0 +1,87 @@
+# Primitive-bound feature embedding
+
+Also called: Feature embedding on virtual scaffold
+
+## Overview
+Primitive-bound feature embedding anchors latent feature vectors to a local virtual scaffold that encapsulates each geometric primitive, rather than relying on a global static grid [S1]. This approach solves the scalability and editing limitations of globally anchored representations by allowing features to move with primitives during motion, deformation, or deletion [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of primitives (e.g., anisotropic 3D Gaussians) defined in world space, each with a transformation matrix and covariance [S1].
+*   **Output:** A feature vector $\mathbf{f} \in \mathbb{R}^{N_f}$ for any query point $\mathbf{p}^*$ located on a primitive [S1].
+
+**Data Structures:**
+For each primitive $i$, the method defines a local virtual scaffold [S1]:
+1.  **Canonical Space:** The primitive is transformed into its canonical (whitened) space where its support is spherical [S1].
+2.  **Bounding Tetrahedron:** A regular tetrahedron is defined to bound the unit sphere in canonical space [S1].
+3.  **Vertex Features:** Four feature vectors $\mathbf{f}_j \in \mathbb{R}^{N_f}$ are assigned to the four vertices $j \in \{0, 1, 2, 3\}$ of this tetrahedron [S1]. These features are stored locally with the primitive [S1].
+
+**Steps:**
+1.  **Whitening:** Transform the query point $\mathbf{x}$ from world space to the primitive's canonical space $\mathbf{x}_{can}$ using the primitive's whitening transformation (inverse of the square root of the covariance matrix) [S1].
+2.  **Ray Intersection & Max Response:** For a ray intersecting the primitive, determine the point $\mathbf{p}^*$ along the ray that corresponds to the maximum Gaussian response (density) [S1]. This point lies within the bounded support of the primitive [S1].
+3.  **Barycentric Interpolation:** Compute the barycentric coordinates $(\lambda_0, \lambda_1, \lambda_2, \lambda_3)$ of $\mathbf{p}^*$ relative to the vertices of the bounding tetrahedron in canonical space [S1].
+4.  **Feature Retrieval:** Interpolate the vertex features to obtain the final feature vector $\mathbf{f}$ at $\mathbf{p}^*$:
+    $$ \mathbf{f} = \sum_{j=0}^{3} \lambda_j \mathbf{f}_j $$
+    where $\sum \lambda_j = 1$ and $\lambda_j \ge 0$ for points inside the tetrahedron [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def get_feature(primitive, ray_origin, ray_direction):
+    # 1. Find point p* with max Gaussian response along ray
+    # Sources do not specify the exact ray-Gaussian peak finding algorithm [G].
+    # Standard approach minimizes the quadratic form (x-mu)^T Sigma^{-1} (x-mu) along the ray.
+    v = ray_origin - primitive.mean
+    d = ray_direction
+    A = primitive.covariance_inv
+    denom = d @ (A @ d)
+    t_star = 0.0 if abs(denom) < 1e-9 else - (d @ (A @ v)) / denom
+    p_star = ray_origin + t_star * d
+
+    # 2. Transform p* to canonical space
+    p_canonical = primitive.whitening_matrix @ (p_star - primitive.mean)
+
+    # 3. Compute barycentric coordinates in the bounding tetrahedron
+    # Sources do not specify the exact barycentric coordinate computation [G].
+    # Standard approach solves the linear system [v0-v3, v1-v3, v2-v3] * [lambda0, lambda1, lambda2]^T = p_canonical - v3
+    # with lambda3 = 1 - lambda0 - lambda1 - lambda2.
+    v0, v1, v2, v3 = primitive.tetrahedron_vertices
+    # Solve for lambdas using standard linear algebra [G]
+    lambdas = standard_barycentric_solve(p_canonical, v0, v1, v2, v3)
+
+    # 4. Interpolate features
+    feature = [0.0] * primitive.N_f
+    for j in range(4):
+        for k in range(primitive.N_f):
+            feature[k] += lambdas[j] * primitive.vertex_features[j][k]
+
+    return feature
+
+def standard_barycentric_solve(p, v0, v1, v2, v3):
+    # Standard 3x3 linear system solver for tetrahedron barycentric coordinates [G]
+    # Implementation uses Gaussian elimination or Cramer's rule on the 3x3 matrix
+    # formed by the tetrahedron edge vectors.
+    pass
+```
+
+**Edge Cases:**
+*   **Point Outside Tetrahedron:** If $\mathbf{p}^*$ falls outside the bounding tetrahedron (though it is inside the sphere), barycentric coordinates may be negative [S1]. The method assumes $\mathbf{p}^*$ is within the support where interpolation is valid [S1].
+*   **Degenerate Primitives:** If a primitive collapses (zero volume), the whitening transformation is undefined [G]. A minimum variance threshold should be applied to the covariance matrix before whitening [G].
+
+## Subtopics
+
+### [Neural Harmonic Textures](9123-neural-harmonic-textures.md)
+Extends this embedding by applying periodic activations to the interpolated features before decoding, enabling harmonic decomposition and real-time performance. Choose when high-frequency detail and real-time rendering are required.
+
+## Operating characteristics
+*   **Memory:** Memory usage scales linearly with the number of primitives, not with scene resolution [G]. Each primitive stores $4 \times N_f$ features [G].
+*   **Performance:** Feature lookup is $O(1)$ per primitive per ray sample, involving a matrix-vector multiplication for whitening and a small linear interpolation [G].
+*   **Strengths:** Supports dynamic editing (motion, deformation, deletion) without global data structure updates [S1]. Scalable to large scenes [S1].
+*   **Limitations:** Requires defining a local scaffold for each primitive [S1]. Interpolation accuracy depends on the tetrahedron's fit to the sphere [G].
+
+## Background
+Originated in the context of primitive-based neural reconstruction to address the limitations of globally defined regular grids [S1]. The method exploits the Lagrangian nature of primitives to anchor features locally, moving with the primitives to support dynamic scene editing [S1]. It bridges the gap between primitive-based and neural-field-based reconstruction by providing a continuous feature field defined per primitive [S1].
+
+## Sources
+[S1] Neural Harmonic Textures for High-Quality Primitive Based Neural Reconstruction, https://doi.org/10.1007/978-3-032-37032-7_18, fetched 2026-10-26

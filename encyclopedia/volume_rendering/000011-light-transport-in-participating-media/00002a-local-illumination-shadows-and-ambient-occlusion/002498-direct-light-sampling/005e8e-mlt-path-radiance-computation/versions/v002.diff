@@ -1,0 +1,248 @@
+--- v001.md
++++ v002.md
+@@ -4,109 +4,70 @@
+ 
+ ## Overview
+-Computes the radiance contribution of a generated camera path and, optionally, a light path in a participating medium by estimating direct lighting at each vertex and connecting vertices between the two paths. It differs from its sibling [Direct Light Sampling](3337-direct-light-sampling.md) by operating on entire path segments (camera and light) rather than single light rays, and from [Light Sampling for NEE](2616-light-sampling-for-nee.md) by supporting bidirectional connections between camera and light path vertices to handle complex light transport in media.
++Computes radiance for a camera path using direct lighting estimation at each vertex [S1, unofficial]. Computes radiance for a bidirectional path (camera and light paths) including connections between vertices [S1, unofficial]. Generates camera and light paths and computes their combined radiance, choosing between path tracing and bidirectional path tracing based on the bidirectional flag [S1, unofficial].
+ 
+ ## How it works
+-The method generates a camera path and, if bidirectional mode is enabled, a light path. It then computes the radiance by summing emitted light, direct lighting estimates at each vertex, and direct connections between camera and light path vertices. The implementation distinguishes between path tracing (camera path only) and bidirectional path tracing (camera and light paths).
+-
+ ### Inputs and Outputs
+ **Inputs:**
+-- `scene`: The scene geometry and medium properties.
+-- `camera`: Camera object providing ray generation.
+-- `cameraPath`: Array of camera path vertices.
+-- `cameraLength`: Number of vertices in the camera path.
+-- `lightPath` (optional): Array of light path vertices.
+-- `lightLength` (optional): Number of vertices in the light path.
+-- `arena`: Memory arena for temporary allocations.
+-- `rng`: Random number generator.
+-- `time`: Time of the frame.
+-- `lightDistribution`: Distribution for sampling lights.
+-- `escapedRay`: Ray that escaped the scene without hitting geometry.
+-- `escapedAlpha`: Alpha of the escaped ray.
+-- `bidirectional`: Boolean flag to enable bidirectional path tracing.
++- `scene`: The scene geometry and medium properties [S1, unofficial].
++- `camera`: Camera object providing ray generation [S1, unofficial].
++- `cameraPath`: Array of camera path vertices [S1, unofficial].
++- `cameraLength`: Number of vertices in the camera path [S1, unofficial].
++- `lightPath` (optional): Array of light path vertices [S1, unofficial].
++- `lightLength` (optional): Number of vertices in the light path [S1, unofficial].
++- `arena`: Memory arena for temporary allocations [S1, unofficial].
++- `rng`: Random number generator [S1, unofficial].
++- `time`: Time of the frame [S1, unofficial].
++- `lightDistribution`: Distribution for sampling lights [S1, unofficial].
++- `escapedRay`: Ray that escaped the scene without hitting geometry [S1, unofficial].
++- `escapedAlpha`: Alpha of the escaped ray [S1, unofficial].
++- `bidirectional`: Boolean flag to enable bidirectional path tracing [S1, unofficial].
++- `sample`: Sample structure containing `lightNum` and `cameraSample` [S1, unofficial].
++- `directLighting`: Flag or pointer controlling direct lighting evaluation [S1, unofficial].
++- `nPixelSamples`: Number of pixel samples for differential scaling [S1, unofficial].
+ 
+ **Outputs:**
+-- `L`: Computed radiance value.
++- `L`: Computed radiance value [S1, unofficial].
+ 
+ ### Data Structures
+-- **Vertex**: Represents a point on a path. Fields include:
+-  - `alpha`: Transmittance/weight up to this vertex.
+-  - `isect`: Intersection data.
+-  - `wPrev`: Incoming direction.
+-  - `specularBounce`: Boolean indicating if the previous bounce was specular.
+-  - `nSpecularComponents`: Number of specular components in the BSDF.
+-  - `bsdf`: Bidirectional Scattering Distribution Function.
+-  - `p`: Position.
+-  - `n`: Normal.
+-- **nSpecularVertices**: Array of integers, size `cameraPathLength + lightPathLength + 2`. Stores the cumulative count of specular vertices up to each index.
++- **Vertex**: Represents a point on a path [S1, unofficial]. Fields include:
++  - `alpha`: Transmittance/weight up to this vertex [S1, unofficial].
++  - `isect`: Intersection data [S1, unofficial].
++  - `wPrev`: Incoming direction [S1, unofficial].
++  - `specularBounce`: Boolean indicating if the previous bounce was specular [S1, unofficial].
++  - `nSpecularComponents`: Number of specular components in the BSDF [S1, unofficial].
++  - `bsdf`: Bidirectional Scattering Distribution Function [S1, unofficial].
++  - `p`: Position [S1, unofficial].
++  - `n`: Normal [S1, unofficial].
++- **nSpecularVertices**: Array of integers, size `cameraPathLength + lightPathLength + 2` [S1, unofficial]. Stores the cumulative count of specular vertices up to each index [S1, unofficial].
+ 
+ ### Steps
+-1. **Initialization**:
+-   - Initialize `L = 0`.
+-   - Initialize `previousSpecular = true`, `allSpecular = true`.
+-   - Calculate `nVerts = cameraPathLength + lightLength + 2`.
+-   - Allocate `nSpecularVertices` array of size `nVerts`, initialized to 0.
+-   - Loop `i` from 0 to `cameraPathLength - 1` and `j` from 0 to `lightLength - 1`:
+-     - If `cameraPath[i].specularBounce` or `lightPath[j].specularBounce`, increment `nSpecularVertices[i + j + 2]`.
+-
+-2. **Camera Path Processing**:
+-   - Loop `i` from 0 to `cameraPathLength - 1`:
+-     - Get vertex `vc = cameraPath[i]`, position `pc = vc.p`, normal `nc = vc.n`.
+-     - **Emitted Light**: If `previousSpecular` and (`directLighting == NULL` or `!allSpecular`), add emitted light:
+-       $$ L += vc.alpha \cdot L_e(vc.w_{prev}) $$
+-       where $L_e$ is the emitted radiance from the intersection.
+-     - **Direct Lighting**: If `directLighting == NULL` or `!allSpecular`:
+-       - Sample light: `lightNum = lightDistribution->SampleDiscrete(ls.lightNum, &lightPdf)`.
+-       - Call `EstimateDirect` with `BxDFType(BSDF_ALL & ~BSDF_SPECULAR)`.
+-       - Compute direct lighting:
+-         $$ L_d = vc.alpha \cdot \frac{\text{EstimateDirect}(\dots)}{\text{lightPdf}} $$
+-       - Add to `L`:
+-         $$ L += \frac{L_d}{i + 1 - nSpecularVertices[i+1]} $$
+-     - **Update Specular Flags**:
+-       - `previousSpecular = vc.specularBounce`
+-       - `allSpecular &= previousSpecular`
+-
+-3. **Bidirectional Connections (if bidirectional)**:
+-   - Loop `i` from 0 to `cameraPathLength - 1`:
+-     - Get `vc, pc, nc`.
+-     - If `!vc.specularBounce`:
+-       - Loop `j` from 0 to `lightLength - 1`:
+-         - Get `vl = lightPath[j]`, `pl = vl.p`, `nl = vl.n`.
+-         - If `!vl.specularBounce`:
+-           - Compute connection direction: $w = \text{Normalize}(pl - pc)$.
+-           - Compute BSDF values:
+-             $$ f_c = v_c.bsdf.f(v_c.w_{prev}, w) \cdot (1 + v_c.nSpecularComponents) $$
+-             $$ f_l = v_l.bsdf.f(-w, v_l.w_{prev}) \cdot (1 + v_l.nSpecularComponents) $$
+-           - If $f_c$ or $f_l$ is black, continue.
+-           - Create test ray $r(pc, pl - pc, 10^{-3}, 0.999, time)$.
+-           - If `!scene->IntersectP(r)`:
+-             - Compute path weight:
+-               $$ pathWt = \frac{1}{i + j + 2 - nSpecularVertices[i+j+2]} $$
+-             - Compute geometry term:
+-               $$ G = \frac{|\cos \theta_c| \cdot |\cos \theta_l|}{\|pl - pc\|^2} $$
+-               where $\cos \theta_c = \text{AbsDot}(nc, w)$ and $\cos \theta_l = \text{AbsDot}(nl, w)$.
+-             - Add to `L`:
+-               $$ L += (vc.alpha \cdot f_c \cdot G \cdot f_l \cdot vl.alpha) \cdot pathWt $$
+-
+-4. **Escaped Ray Contribution**:
+-   - If `escapedRay` exists (`!eAlpha.IsBlack()`) and `previousSpecular` and (`directLighting == NULL` or `!allSpecular`):
+-     - Loop over lights:
+-       $$ L += eAlpha \cdot scene->lights[i]->L_e(eRay) $$
+-
+-5. **Path Generation (if bidirectional)**:
+-   - Generate camera ray: `camera->GenerateRayDifferential(sample.cameraSample, &cameraRay)`.
+-   - Scale differentials: `cameraRay.ScaleDifferentials(1.0 / sqrt(nPixelSamples))`.
+-   - Generate camera path: `GeneratePath(cameraRay, cameraWt, scene, arena, sample.cameraPathSamples, cameraPath, &escapedRay, &escapedAlpha)`.
+-   - If `!bidirectional`, return `Lpath(scene, cameraPath, cameraLength, arena, sample.lightingSamples, rng, sample.cameraSample.time, lightDistribution, escapedRay, escapedAlpha)`.
+-   - If `bidirectional`:
+-     - Sample light: `lightNum = lightDistribution->SampleDiscrete(sample.lightNumSample, &lightPdf)`.
+-     - Get light.
+-     - Sample light ray: `light->Sample_L(..., &lightRay, &Nl, &lightRayPdf)`.
+-     - Compute light weight: `lightWt *= AbsDot(Normalize(Nl), lightRay.d) / (lightPdf * lightRayPdf)`.
+-     - Generate light path: `lightLength = GeneratePath(RayDifferential(lightRay), lightWt, scene, arena, sample.lightPathSamples, lightPath, NULL, NULL)`.
+-     - Return `Lbidir(scene, cameraPath, cameraLength, lightPath, lightLength, arena, sample.lightingSamples, rng, sample.cameraSample.time, lightDistribution, escapedRay, escapedAlpha)`.
++1. **Initialization**: Initialize `L = 0` [S1, unofficial]. Initialize `previousSpecular = true`, `allSpecular = true` [S1, unofficial]. Calculate `nVerts = cameraPathLength + lightPathLength + 2` [S1, unofficial]. Allocate `nSpecularVertices` array of size `nVerts`, initialized to `0` [S1, unofficial]. Loop `i` over camera path and `j` over light path: if `cameraPath[i].specularBounce` or `lightPath[j].specularBounce`, increment `nSpecularVertices[i + j + 2]` [S1, unofficial].
++2. **Camera Path Processing**: Loop `i` over camera path vertices [S1, unofficial]. Get `vc`, `pc`, `nc` [S1, unofficial]. If `previousSpecular` and (`directLighting == NULL` or `!allSpecular`), add emitted light: `L += vc.alpha * vc.isect.Le(vc.wPrev)` [S1, unofficial]. If `directLighting == NULL` or `!allSpecular`, compute direct lighting `Ld` [S1, unofficial]. Sample light: `lightNum = lightDistribution->SampleDiscrete(ls.lightNum, &lightPdf)` [S1, unofficial]. Call `EstimateDirect` with `BxDFType(BSDF_ALL & ~BSDF_SPECULAR)` [S1, unofficial]. Compute `Ld = vc.alpha * EstimateDirect(...) / lightPdf` [S1, unofficial]. Update specular flags: `previousSpecular = vc.specularBounce; allSpecular &= previousSpecular` [S1, unofficial]. Add `Ld` to `L` divided by specular correction: `L += Ld / (i + 1 - nSpecularVertices[i+1])` [S1, unofficial].
++3. **Bidirectional Connections (if bidirectional)**: If `!vc.specularBounce`, loop `j` over light path vertices [S1, unofficial]. Get `vl`, `pl`, `nl` [S1, unofficial]. If `!vl.specularBounce`, compute connection [S1, unofficial]. `w = Normalize(pl - pc)` [S1, unofficial]. `fc = vc.bsdf->f(vc.wPrev, w) * (1 + vc.nSpecularComponents)` [S1, unofficial]. `fl = vl.bsdf->f(-w, vl.wPrev) * (1 + vl.nSpecularComponents)` [S1, unofficial]. If `fc` or `fl` is black, continue [S1, unofficial]. Create test ray `r(pc, pl - pc, 1e-3f, .999f, time)` [S1, unofficial]. If `!scene->IntersectP(r)`, compute path weight: `pathWt = 1.f / (i + j + 2 - nSpecularVertices[i+j+2])` [S1, unofficial]. Compute `G = AbsDot(nc, w) * AbsDot(nl, w) / DistanceSquared(pl, pc)` [S1, unofficial]. Add to `L`: `L += (vc.alpha * fc * G * fl * vl.alpha) * pathWt` [S1, unofficial].
++4. **Escaped Ray Contribution**: After loops, if escaped ray exists (`!eAlpha.IsBlack() && previousSpecular && (directLighting == NULL || !allSpecular)`), add escaped contribution [S1, unofficial]. Loop over lights, `L += eAlpha * scene->lights[i]->Le(eRay)` [S1, unofficial].
++5. **Path Generation (if bidirectional)**: Generate camera ray: `camera->GenerateRayDifferential(sample.cameraSample, &cameraRay)` [S1, unofficial]. Scale differentials: `cameraRay.ScaleDifferentials(1.f / sqrtf(nPixelSamples))` [S1, unofficial]. Generate camera path: `GeneratePath(cameraRay, cameraWt, scene, arena, sample.cameraPathSamples, cameraPath, &escapedRay, &escapedAlpha)` [S1, unofficial]. Get `cameraLength` [S1, unofficial]. If `!bidirectional`, return `Lpath(scene, cameraPath, cameraLength, arena, sample.lightingSamples, rng, sample.cameraSample.time, lightDistribution, escapedRay, escapedAlpha)` [S1, unofficial]. If `bidirectional`, sample light: `lightNum = lightDistribution->SampleDiscrete(sample.lightNumSample, &lightPdf)` [S1, unofficial]. Get light [S1, unofficial]. Sample light ray: `light->Sample_L(..., &lightRay, &Nl, &lightRayPdf)` [S1, unofficial]. Compute light weight: `lightWt *= AbsDot(Normalize(Nl), lightRay.d) / (lightPdf * lightRayPdf)` [S1, unofficial]. Generate light path: `lightLength = GeneratePath(RayDifferential(lightRay), lightWt, scene, arena, sample.lightPathSamples, lightPath, NULL, NULL)` [S1, unofficial]. Return `Lbidir(scene, cameraPath, cameraLength, lightPath, lightLength, arena, sample.lightingSamples, rng, sample.cameraSample.time, lightDistribution, escapedRay, escapedAlpha)` [S1, unofficial].
+ 
+ ### Pseudocode
+ ```python
+-def MLT_Path_Radiance_Computation(scene, camera, cameraPath, cameraLength, lightPath, lightLength, arena, rng, time, lightDistribution, escapedRay, escapedAlpha, bidirectional):
++import math
++
++def normalize(v):
++    return [c / math.sqrt(sum(c*c for c in v)) for c in v]
++
++def abs_dot(a, b):
++    return abs(sum(a[i]*b[i] for i in range(3)))
++
++def distance_squared(a, b):
++    return sum((a[i]-b[i])**2 for i in range(3))
++
++class Ray:
++    def __init__(self, origin, direction, mint, maxt, time):
++        self.origin = origin
++        self.direction = direction
++        self.mint = mint
++        self.maxt = maxt
++        self.time = time
++
++def MLT_Path_Radiance_Computation(scene, camera, cameraPath, cameraLength, lightPath, lightLength, arena, rng, time, lightDistribution, escapedRay, escapedAlpha, bidirectional, sample, directLighting, nPixelSamples):
+     L = 0.0
+     previousSpecular = True
+@@ -134,9 +95,8 @@
+         # Direct lighting
+         if directLighting is None or not allSpecular:
+-            lightNum, lightPdf = lightDistribution.SampleDiscrete(ls.lightNum)
+-            light = scene.lights[lightNum]
+-            # EstimateDirect is a helper function that samples the light and computes direct illumination
+-            # It returns the direct lighting contribution
+-            Ld = vc.alpha * EstimateDirect(vc, light, lightPdf) / lightPdf
++            lightNum, lightPdf = lightDistribution.sample_discrete(sample.lightNum)
++            # EstimateDirect implementation not provided in sources [S1, unofficial]
++            # It samples the light and computes direct illumination contribution based on BSDF and geometry
++            Ld = vc.alpha * estimate_direct(vc, lightNum, lightPdf) / lightPdf
+             # Specular correction
+             correction = i + 1 - nSpecularVertices[i+1]
+@@ -159,7 +119,7 @@
+                     nl = vl.n
+                     if not vl.specularBounce:
+-                        w = Normalize(pl - pc)
++                        w = normalize([pl[k] - pc[k] for k in range(3)])
+                         fc = vc.bsdf.f(vc.wPrev, w) * (1 + vc.nSpecularComponents)
+-                        fl = vl.bsdf.f(-w, vl.wPrev) * (1 + vl.nSpecularComponents)
++                        fl = vl.bsdf.f([-w[k] for k in range(3)], vl.wPrev) * (1 + vl.nSpecularComponents)
+                         
+                         if fc.is_black() or fl.is_black():
+@@ -167,22 +127,19 @@
+                             
+                         # Shadow ray
+-                        r = Ray(pc, pl - pc, 1e-3, 0.999, time)
+-                        if not scene.IntersectP(r):
++                        r = Ray(pc, [pl[k] - pc[k] for k in range(3)], 1e-3, 0.999, time)
++                        if not scene.intersect_p(r):
+                             pathWt = 1.0 / (i + j + 2 - nSpecularVertices[i+j+2])
+-                            G = AbsDot(nc, w) * AbsDot(nl, w) / DistanceSquared(pl, pc)
++                            G = abs_dot(nc, w) * abs_dot(nl, w) / distance_squared(pl, pc)
+                             L += (vc.alpha * fc * G * fl * vl.alpha) * pathWt
+                             
+     # Escaped ray contribution
+-    if not escapedAlpha.IsBlack() and previousSpecular and (directLighting is None or not allSpecular):
+-        for i in range(scene.num_lights):
+-            L += escapedAlpha * scene.lights[i].Le(escapedRay)
++    if not escapedAlpha.is_black() and previousSpecular and (directLighting is None or not allSpecular):
++        for k in range(scene.num_lights):
++            L += escapedAlpha * scene.lights[k].Le(escapedRay)
+             
+     return L
+ 
+-def EstimateDirect(vc, light, lightPdf):
+-    # This is a placeholder for the actual EstimateDirect implementation
+-    # which involves sampling the light and computing the direct illumination
+-    # contribution based on the BSDF and geometry.
+-    # It returns the direct lighting contribution.
++def estimate_direct(vc, lightNum, lightPdf):
++    # EstimateDirect implementation not provided in sources [S1, unofficial]
+     pass
+ ```
+@@ -194,7 +151,7 @@
+ 
+ ### Edge Cases and Pitfalls
+-- **Specular Vertices**: The specular correction factor `i + 1 - nSpecularVertices[i+1]` must be positive. If it is zero or negative, the division should be skipped or handled to avoid division by zero.
+-- **Shadow Rays**: The test ray for connections must be created with appropriate `mint` and `maxt` values to avoid self-intersections and to ensure it reaches the target vertex.
+-- **Black BSDF Values**: If $f_c$ or $f_l$ is black, the connection should be skipped to avoid adding zero or invalid contributions.
++- **Specular Vertices**: The specular correction factor `i + 1 - nSpecularVertices[i+1]` must be positive [S1, unofficial]. If it is zero or negative, the division should be skipped or handled to avoid division by zero [S1, unofficial].
++- **Shadow Rays**: The test ray for connections must be created with appropriate `mint` and `maxt` values to avoid self-intersections and to ensure it reaches the target vertex [S1, unofficial].
++- **Black BSDF Values**: If $f_c$ or $f_l$ is black, the connection should be skipped to avoid adding zero or invalid contributions [S1, unofficial].
+ 
+ ## Subtopics
+@@ -211,11 +168,11 @@
+ - **Measured Performance**: Not given in the sources.
+ - **Scaling**: Not given in the sources.
+-- **Strengths**: Handles complex light transport in participating media by combining path tracing and bidirectional path tracing.
+-- **Limitations**: Computationally expensive due to the need to generate and process both camera and light paths.
+-- **When to Use**: Complex scenes with participating media where bidirectional connections are beneficial.
+-- **When Not to Use**: Simple scenes or when computational resources are limited.
++- **Strengths**: Handles complex light transport in participating media by combining path tracing and bidirectional path tracing [S1, unofficial].
++- **Limitations**: Computationally expensive due to the need to generate and process both camera and light paths [S1, unofficial].
++- **When to Use**: Complex scenes with participating media where bidirectional connections are beneficial [S1, unofficial].
++- **When Not to Use**: Simple scenes or when computational resources are limited [S1, unofficial].
+ 
+ ## Background
+-The method is part of the MLT (Metropolis Light Transport) framework for rendering participating media. It was introduced in the pbrt-photon-beams repository, an unofficial extension of the pbrt renderer. The method builds on [Direct Light Sampling](3337-direct-light-sampling.md) by extending it to handle path segments and bidirectional connections.
++The method is part of the MLT (Metropolis Light Transport) framework for rendering participating media [S1, unofficial]. It was introduced in the pbrt-photon-beams repository, an unofficial extension of the pbrt renderer [S1, unofficial]. The method builds on [Direct Light Sampling](3337-direct-light-sampling.md) by extending it to handle path segments and bidirectional connections [S1, unofficial].
+ 
+ ## Sources

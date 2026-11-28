@@ -1,0 +1,157 @@
+# Mesh Texture Optimization via SDS
+Also called: Latent-NeRF Texture Generation, Latent-Paint
+
+## Overview
+This method generates novel textures for a fixed 3D mesh geometry by optimizing a latent texture image in UV space using Score Distillation Sampling (SDS) gradients, without modifying the mesh vertices or faces [S1]. It differs from NeRF optimization [NeRF Training Loop](52-name.md) by operating on explicit geometric primitives rather than implicit volumetric fields, and from direct image optimization [Iterative Optimization with Learnable Parameters for Diffusion-Guided Radiance Fields](8945-iterative-optimization-with-learnable-parameters-for-diffusi.md) by enforcing 3D geometric consistency through differentiable mesh rendering [S1].
+
+## How it works
+**Inputs:**
+- A text prompt string.
+- A fixed 3D mesh defined by vertices $V \in \mathbb{R}^{N_v \times 3}$, faces $F \in \mathbb{R}^{N_f \times 3}$, and UV coordinates $U \in \mathbb{R}^{N_v \times 2}$ [S1].
+- A frozen Stable Diffusion model (accessed via `sds` object) [S2, unofficial].
+- A differentiable mesh renderer [S1].
+
+**Outputs:**
+- Optimized latent texture image $T \in \mathbb{R}^{H \times W \times 4}$ [S1].
+- Decoded high-quality RGB texture image [S1].
+
+**Data Structures:**
+- `Latent Texture Image`: A tensor of size $H \times W \times 4$ representing pseudo-color channels in UV space. Default $H=W=128$ [S1].
+- `Meshes`: A geometric structure containing vertices, faces, and UV mappings [S1].
+- `FoVPerspectiveCameras`: Camera object for rendering [S2, unofficial].
+
+**Parameters:**
+- Total iterations: 2000 [S2, unofficial].
+- Learning rate: $5 \times 10^{-4}$ [S2, unofficial].
+- Weight decay: 0 [S2, unofficial].
+- Warmup steps: 100 [S2, unofficial].
+- Image resolution: 512 $\times$ 512 [S2, unofficial].
+- Camera distance: 3 [S2, unofficial].
+- Camera elevation range: Uniform $[5^\circ, 85^\circ]$ [S2, unofficial].
+- Camera azimuth range: Uniform $[0^\circ, 360^\circ]$ [S2, unofficial].
+- Latent clamp range: $[-1, 1]$ [S2, unofficial].
+
+**Steps:**
+1. Compute UV parameterization for the input mesh using XAtlas if not provided [S1].
+2. Create text embeddings from the prompt using `prepare_embeddings(sds, prompt, neg_prompt, view_dependent=False)`, yielding conditional (`embeddings["default"]`) and unconditional (`embeddings["uncond"]`) embeddings [S2, unofficial].
+3. Initialize the latent texture image $T$ of size $H \times W \times 4$ with random values [S1].
+4. Setup a differentiable renderer configured to output a $64 \times 64 \times 4$ feature map pseudo-colored by $T$ [S1].
+5. Create an AdamW optimizer for $T$ with learning rate $5 \times 10^{-4}$ and weight decay 0, using a cosine schedule with 100-step warmup [S2, unofficial].
+6. Training Loop (2000 iterations):
+   - Randomly sample camera pose: distance 3, elevation $\sim \text{Uniform}(5, 85)$, azimuth $\sim \text{Uniform}(0, 360)$ [S2, unofficial].
+   - Render the mesh with the current camera and $T$ to obtain rendered image $I_{\text{rend}}$ of shape $(N, C, H, W)$ [S2, unofficial].
+   - Encode the rendered image using `sds.encode_imgs(I_rend)` to obtain latents $z$ [S2, unofficial].
+   - Compute SDS loss: $\mathcal{L} = \text{sds.sds\_loss}(z, \text{embeddings["default"]}, \text{embeddings["uncond"]})$ [S2, unofficial].
+   - Backpropagate $\mathcal{L}$ through the differentiable renderer to optimize $T$ [S1].
+   - Step the optimizer and scheduler [S2, unofficial].
+   - Clamp latents to $[-1, 1]$ using `latents.data = latents.data.clip(-1, 1)` [S2, unofficial].
+7. Decode the final latent texture image $T$ using Stable Diffusion's decoder $D$ once to obtain a high-quality RGB texture [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import numpy as np
+from torch.optim import AdamW
+from torch.optim.lr_scheduler import CosineAnnealingLR
+
+def mesh_texture_optimization(sds, prompt, vertices, faces, uv_coords, uv_faces, 
+                              device, total_iter=2000, H=128, W=128):
+    # Step 1: Prepare embeddings
+    embeddings = sds.prepare_embeddings(prompt, neg_prompt="", view_dependent=False)
+    
+    # Step 2: Initialize latent texture in UV space
+    T = torch.randn(H, W, 4, requires_grad=True, device=device)
+    
+    # Step 3: Setup optimizer
+    optimizer = AdamW([T], lr=5e-4, weight_decay=0)
+    scheduler = CosineAnnealingLR(optimizer, T_max=total_iter, eta_min=0)
+    # Warmup wrapper (standard implementation)
+    warmup_scheduler = LinearWarmupScheduler(optimizer, warmup_steps=100, base_scheduler=scheduler)
+    
+    for i in range(total_iter):
+        optimizer.zero_grad()
+        
+        # Camera Sampling
+        elevation = torch.tensor([np.random.uniform(5, 85)], device=device)
+        azimuth = torch.tensor([np.random.uniform(0, 360)], device=device)
+        cameras = FoVPerspectiveCameras(
+            device=device,
+            elevation=elevation,
+            azimuth=azimuth,
+            R=torch.eye(3).unsqueeze(0).to(device),
+            fov=60
+        )
+        
+        # Rendering: differentiable rasterization using UV texture T
+        # Returns image of shape (N, C, H, W)
+        rend_img = render_mesh_with_uv(vertices, faces, uv_coords, uv_faces, 
+                                       T, cameras, image_size=512, device=device)
+        
+        # Encoding
+        latents = sds.encode_imgs(rend_img)
+        
+        # Loss Computation
+        loss = sds.sds_loss(latents, embeddings["default"], embeddings["uncond"])
+        
+        # Backpropagation
+        loss.backward()
+        
+        # Optimization Step
+        optimizer.step()
+        warmup_scheduler.step()
+        
+        # Clamping
+        latents.data = latents.data.clip(-1, 1)
+        
+    return T
+
+def render_mesh_with_uv(vertices, faces, uv_coords, uv_faces, texture, cameras, image_size, device):
+    """
+    Differentiable rasterizer that maps texture T to mesh faces via UV coordinates.
+    Returns RGB(A) image of shape (N, C, H, W).
+    """
+    # Standard differentiable rasterization pipeline (e.g., PyTorch3D)
+    # 1. Rasterize faces to screen space
+    # 2. Barycentric interpolation of UV coordinates per pixel
+    # 3. Sample texture T at interpolated UVs
+    # 4. Return pseudo-colored feature map
+    pass
+
+class LinearWarmupScheduler:
+    def __init__(self, optimizer, warmup_steps, base_scheduler):
+        self.optimizer = optimizer
+        self.warmup_steps = warmup_steps
+        self.base_scheduler = base_scheduler
+        self.step_count = 0
+        
+    def step(self):
+        self.step_count += 1
+        if self.step_count <= self.warmup_steps:
+            for group in self.optimizer.param_groups:
+                group['lr'] = self.step_count / self.warmup_steps * self.base_scheduler.get_last_lr()[0]
+        else:
+            self.base_scheduler.step()
+```
+
+**Pitfalls and Edge Cases:**
+- Stable Diffusion may fail to generate back views of objects (e.g., squirrel faces), leading to artifacts in generated textures from certain viewpoints [S1].
+- UV maps are preferred over per-face latent attributes because they decouple texture granularity from geometric resolution and are easier to use with downstream tools like MeshLab and Blender [S1].
+- Precision issues may arise when interpolating UV coordinates near texture boundaries; standard differentiable rasterizers handle this via bilinear sampling [G].
+
+## Operating characteristics
+- **Time Complexity**: Linear with respect to the number of iterations (2000) and the cost of differentiable rendering plus diffusion encoding per iteration [S2, unofficial].
+- **Memory Complexity**: Proportional to the latent texture resolution ($128 \times 128 \times 4$) and the batch size (typically 1) [S1][S2, unofficial].
+- **Performance**: Reported Mean PSNR of 27.717 and Mean SSIM of 0.926 on the evaluation set [S2, unofficial].
+- **Strengths**: Produces textured 3D meshes directly from text prompts while preserving the input geometry [S1]. UV parameterization ensures texture resolution is independent of mesh topology [S1].
+- **Limitations**: Geometry is fixed and cannot be modified [S1]. May produce viewpoint-dependent artifacts due to the 2D diffusion prior [S1].
+- **When to use**: When a textured mesh is required from a text prompt and the base geometry is known or fixed [S1][S2, unofficial].
+- **When not to use**: When geometry modification or deformation is required [S1].
+
+## Background
+This method was introduced as "Latent-Paint" in the Latent-NeRF paper (CVPR 2023) [S1]. It extends the concept of Score Distillation Sampling (SDS) [Diffusion-Based Guidance for Radiance Field Optimization](8117-diffusion-based-guidance-for-radiance-field-optimization.md) from implicit radiance fields to explicit mesh vertex and UV textures [S1]. The approach is commonly applied to shapes from datasets like ModelNet40, often relying on XAtlas for automatic UV parameterization when not provided [S1].
+
+## Sources
+[S1] Latent-NeRF for Shape-Guided Generation of 3D Shapes and Textures, https://doi.org/10.1109/cvpr52729.2023.01218, fetched 2026-10-26
+[S2] ShashwatChawla/Diffusion-guided-3D-Representations, https://github.com/ShashwatChawla/Diffusion-guided-3D-Representations, fetched 2026-10-27 (unofficial)

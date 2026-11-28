@@ -1,0 +1,268 @@
+--- v002.md
++++ v003.md
+@@ -78,7 +78,4 @@
+ import math
+ 
+-def euclidean_norm_sq(vec1, vec2):
+-    return sum((a - b) ** 2 for a, b in zip(vec1, vec2))
+-
+ def arq_compress(anchor_features, positions, teacher_scales, teacher_offsets, 
+                  codebooks, hash_grid, lambda_depth, K_dist, K_prob, 
+@@ -86,20 +83,4 @@
+     """
+     Compress anchor features using ARQ with Context-Guided Recovery.
+-    
+-    Args:
+-        anchor_features: List of teacher features f_Tea_i for each anchor i.
+-        positions: List of anchor positions x_i.
+-        teacher_scales: List of teacher scaling vectors s_Tea_i.
+-        teacher_offsets: List of teacher offset matrices O_Tea_i.
+-        codebooks: List of codebooks C^(l) for l in {1, 2, 3}.
+-        hash_grid: Decoded spatial hash grid H.
+-        lambda_depth: Parameter controlling rate penalty for additional RVQ stage.
+-        K_dist: Number of closest codewords to consider in beam search.
+-        K_prob: Number of highest probability codewords to consider in beam search.
+-        lambda_f_RD, lambda_O, lambda_S: Weights for proxy distortion.
+-        epsilon: Small constant for numerical stability.
+-        
+-    Returns:
+-        compressed_data: Dictionary containing depth symbols, indices, and context info.
+     """
+     compressed_data = {}
+@@ -116,16 +97,16 @@
+         for l in range(1, 4): # Stages 1, 2, 3
+             C_l = codebooks[l-1]
+-            # Find nearest neighbor
+-            distances = [euclidean_norm_sq(C_l[k], r) for k in range(len(C_l))]
++            distances = [sum((a - b) ** 2 for a, b in zip(C_l[k], r)) for k in range(len(C_l))]
+             nn_idx = distances.index(min(distances))
+             nn_indices.append(nn_idx)
+             
+-        # Step 2: Context Interpolation [G]
+-        h_i = interpolate_from_hash_grid(x_i, hash_grid)
+-        
+-        # Step 3-4: Context Refiner Input Construction & Feature Recovery [G]
++        # Step 2: Context Interpolation
++        # h_i = Interp(x_i, H) [G]
++        h_i = [0.0] * 64  # Placeholder for hash grid interpolation [G]
++        
++        # Step 3-4: Context Refiner Input Construction & Feature Recovery
+         # u_i = [m^(1)q^(1), m^(2)q^(2), m^(3)q^(3), h_i, e(d_i)]
+-        # This is used to recover features and adapt offsets/scales.
+-        # For the purpose of depth selection, we need to evaluate candidates.
++        # Context Refiner recovers f_hat^Stu from u_i [G]
++        # Attribute Adapter refines offsets and scales [G]
+         
+         # Step 5-8: Depth Selection and Index Search
+@@ -135,19 +116,14 @@
+         best_rate = 0
+         
+-        # Candidate depths to evaluate
+         depths_to_evaluate = [1, 2, 3]
+         
+         for d in depths_to_evaluate:
+             # Fixed-Depth Index Search (Beam Search)
+-            # For simplicity, we assume we find the best indices for this depth
+-            # In reality, this is a beam search over stages 1..d
+             current_indices = find_best_indices_beam_search(
+                 f_Tea, codebooks[:d], h_i, lambda_depth, K_dist, K_prob, epsilon
+             )
+             
+-            # Construct masked codewords
+             masks = [1 if l <= d else 0 for l in range(1, 4)]
+             
+-            # Get codewords
+             codewords = []
+             for l in range(1, d+1):
+@@ -155,5 +131,4 @@
+                 codewords.append(codebooks[l-1][idx])
+             
+-            # Pad with zeros for inactive stages to form u_i
+             full_codewords = []
+             for l in range(1, 4):
+@@ -163,8 +138,5 @@
+                     full_codewords.append([0.0] * len(codewords[0]))
+                     
+-            # Context Refiner Input
+-            # u_i = [m^(1)q^(1), m^(2)q^(2), m^(3)q^(3), h_i, e(d)]
+-            # e(d) is depth embedding. Assume it's a vector.
+-            e_d = get_depth_embedding(d)
++            e_d = [0.0] * 8  # Placeholder for depth embedding [G]
+             u_i = []
+             for l in range(3):
+@@ -173,53 +145,34 @@
+             u_i.extend(e_d)
+             
+-            # Recover features and adapt offsets/scales [G]
+-            f_hat, O_hat, s_hat = context_refiner_and_adapter(u_i, s_Tea, O_Tea)
+-            
+-            # Compute Proxy Distortion
+-            # E^O
+-            s_pos_Tea = s_Tea[:3] # First 3 dims
+-            # Replicate s_pos_Tea K times
+-            s_pos_rep = [s_pos_Tea for _ in range(O_Tea.shape[0])]
+-            offset_diff = [[O_hat[j][k] - O_Tea[j][k] for k in range(3)] for j in range(O_Tea.shape[0])]
+-            offset_error = sum(abs(offset_diff[j][k] * (s_pos_rep[j][k] + epsilon)) for j in range(O_Tea.shape[0]) for k in range(3)) / (3 * O_Tea.shape[0])
+-            
+-            # E^S
++            f_hat, O_hat, s_hat = [0.0]*len(u_i), [[0.0]*3 for _ in range(len(O_Tea))], [0.0]*6  # Placeholder for Context Refiner & Adapter [G]
++            
++            s_pos_Tea = s_Tea[:3]
++            s_pos_rep = [s_pos_Tea for _ in range(len(O_Tea))]
++            offset_diff = [[O_hat[j][k] - O_Tea[j][k] for k in range(3)] for j in range(len(O_Tea))]
++            offset_error = sum(abs(offset_diff[j][k] * (s_pos_rep[j][k] + epsilon)) for j in range(len(O_Tea)) for k in range(3)) / (3 * len(O_Tea))
++            
+             scale_error = sum(abs(math.log(s_hat[k] + epsilon) - math.log(s_Tea[k] + epsilon)) for k in range(6)) / 6
+-            
+-            # E^f (Assume feature error is computed similarly)
+-            # f_hat is the recovered feature
+             feature_error = sum(abs(f_hat[k] - f_Tea[k]) for k in range(len(f_hat)))
+             
+             proxy_dist = lambda_f_RD * feature_error + lambda_O * offset_error + lambda_S * scale_error
+             
+-            # Compute Rate
+-            # R_i = -log2(p_d(d|h,x)) - sum(-log2(p_l(z|h,e(d),z_<l)))
+-            # Assume probabilities are available from entropy model
+-            p_d = get_depth_probability(d, h_i, x_i)
++            p_d = 0.5  # Placeholder for depth probability [G]
+             rate_depth = -math.log2(p_d)
+             
+             rate_indices = 0
+             for l in range(1, d+1):
+-                p_l = get_index_probability(l, current_indices[l-1], h_i, e_d, current_indices[:l-1])
++                p_l = 0.5  # Placeholder for index probability [G]
+                 rate_indices -= math.log2(p_l)
+                 
+             total_rate = rate_depth + rate_indices
+             
+-            # Depth Selection Cost
+-            # Delta J = -w * Delta D + lambda_depth * Delta R
+-            # We compare depth d with depth d-1
+             if d > 1:
+-                # Get previous best for d-1
+-                prev_indices = best_indices # Assuming best_indices stores indices for best_depth
+                 prev_proxy_dist = best_proxy_dist
+                 prev_rate = best_rate
+                 
+-                # Delta D
+                 delta_D = prev_proxy_dist - proxy_dist
+-                # Delta R
+                 delta_R = total_rate - prev_rate
+                 
+-                # Weight w_i (Assume it's a constant or derived from importance)
+-                w_i = 1.0 # Placeholder
++                w_i = 1.0  # Placeholder for importance weight [G]
+                 delta_J = -w_i * delta_D + lambda_depth * delta_R
+                 
+@@ -230,5 +183,4 @@
+                     best_rate = total_rate
+             else:
+-                # For depth 1, just set as initial best
+                 best_depth = d
+                 best_indices = current_indices
+@@ -236,10 +188,9 @@
+                 best_rate = total_rate
+                 
+-        # Store results
+         compressed_data[i] = {
+             'depth': best_depth,
+             'indices': best_indices,
+             'context': h_i,
+-            'adapted_offsets': O_hat, # From the best depth evaluation
++            'adapted_offsets': O_hat,
+             'adapted_scales': s_hat
+         }
+@@ -251,11 +202,4 @@
+     Perform stage-wise beam search to find best indices for a given depth.
+     """
+-    # This is a simplified placeholder. In reality, beam search maintains a set of paths.
+-    # For depth d, we need d indices.
+-    # We assume the beam search returns the best single path for simplicity in this pseudocode.
+-    # In the actual method, beam search prunes at each stage.
+-    
+-    # Initialize beam with start node
+-    # Beam: list of (current_residual, indices_so_far, current_rate, current_distortion)
+     beam = [(f_Tea.copy(), [], 0.0, 0.0)]
+     
+@@ -265,15 +209,10 @@
+         
+         for residual, indices, rate, dist in beam:
+-            # Find candidates
+-            # K_dist closest by Euclidean distance
+-            distances = [euclidean_norm_sq(C_l[k], residual) for k in range(len(C_l))]
++            distances = [sum((a - b) ** 2 for a, b in zip(C_l[k], residual)) for k in range(len(C_l))]
+             closest_indices = sorted(range(len(distances)), key=lambda k: distances[k])[:K_dist]
+             
+-            # K_prob highest probability
+-            # Assume we have a function to get probabilities
+-            probs = get_index_probabilities(l, h_i, indices, C_l)
++            probs = [0.5] * len(C_l)  # Placeholder for index probabilities [G]
+             prob_indices = sorted(range(len(probs)), key=lambda k: probs[k], reverse=True)[:K_prob]
+             
+-            # Union of candidates
+             candidate_indices = sorted(list(set(closest_indices + prob_indices)))
+             
+@@ -283,53 +222,17 @@
+                 new_indices = indices + [idx]
+                 
+-                # Update rate
+-                p_l = get_index_probability(l, idx, h_i, indices, C_l)
++                p_l = 0.5  # Placeholder for index probability [G]
+                 new_rate = rate - math.log2(p_l)
+                 
+-                # Update distortion (proxy)
+-                # This is complex as it requires full reconstruction and adaptation
+-                # For beam search, we might use a simpler proxy or the full one if fast enough
+-                # Here we assume a simple Euclidean distance proxy for beam search
+                 new_dist = math.sqrt(sum(x**2 for x in new_residual))
+                 
+                 new_beam.append((new_residual, new_indices, new_rate, new_dist))
+         
+-        # Prune beam to top K candidates
+-        # Sort by a combination of rate and distortion
+-        # Assume we keep top K_beam candidates
+-        K_beam = 10 # Example beam width
+-        new_beam.sort(key=lambda x: x[2] + x[3]) # Simple sort
++        K_beam = 10
++        new_beam.sort(key=lambda x: x[2] + x[3])
+         beam = new_beam[:K_beam]
+         
+-    # Return best path
+     best = min(beam, key=lambda x: x[2] + x[3])
+     return best[1]
+-
+-def interpolate_from_hash_grid(pos, grid):
+-    """Interpolate spatial context from hash grid [G]."""
+-    return [0.0] * 64 # Placeholder dimension
+-
+-def get_depth_embedding(d):
+-    """Return depth embedding vector [G]."""
+-    return [0.0] * 8 # Placeholder dimension
+-
+-def context_refiner_and_adapter(u_i, s_Tea, O_Tea):
+-    """Recover feature and adapt offsets/scales from context [G]."""
+-    f_hat = [0.0] * len(u_i)
+-    O_hat = [[0.0]*3 for _ in range(len(O_Tea))]
+-    s_hat = [0.0]*6
+-    return f_hat, O_hat, s_hat
+-
+-def get_depth_probability(d, h_i, x_i):
+-    """Return probability of depth symbol [G]."""
+-    return 0.5
+-
+-def get_index_probability(l, idx, h_i, e_d, prev_indices):
+-    """Return probability of index at stage l [G]."""
+-    return 0.5
+-
+-def get_index_probabilities(l, h_i, prev_indices, C_l):
+-    """Return probabilities for all codewords at stage l [G]."""
+-    return [0.5] * len(C_l)
+ ```
+ 
+@@ -365,5 +268,5 @@
+ 
+ ## Background
+-Adaptive Residual Vector Quantization (ARQ) with Context-Guided Recovery was introduced in the paper "3D Gaussian Splatting Data Compression via Adaptive Residual Quantization and Error Compensation" [S1, unofficial]. It is designed to compress the high-dimensional anchor features of a pretrained anchor-based 3DGS representation. The method combines residual vector quantization with adaptive depth selection, context-guided feature recovery, and attribute adaptation to achieve high compression ratios while maintaining visual quality [S1, unofficial].
++Adaptive Residual Vector Quantization (ARQ) with Context-Guided Recovery was introduced in the paper "3D Gaussian Splatting Data Compression via Adaptive Residual Quantization and Error Compensation" [S1, unofficial]. It is designed to compress the high-dimensional anchor features of a pretrained anchor-based 3DGS representation [S1, unofficial]. The method combines residual vector quantization with adaptive depth selection, context-guided feature recovery, and attribute adaptation to achieve high compression ratios while maintaining visual quality [S1, unofficial].
+ 
+ ## Sources

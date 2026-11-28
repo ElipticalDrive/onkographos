@@ -1,0 +1,191 @@
+# Stochastic Evolutive TF Design
+
+Also called: Genetic Algorithm TF Design, Genetic Algorithm for TF Design, He et al. Genetic Algorithms, Stochastic Evolutive Transfer Function Design
+
+## Overview
+Stochastic Evolutive TF Design is an interactive, genetic algorithm-based method for generating one-dimensional transfer functions (TFs) for volume rendering [S1][S2, unofficial]. It solves the problem of manual TF specification by allowing users to evolve a population of TFs through selection, crossover, and mutation, guided by visual feedback in the form of thumbnails [S1][S2, unofficial]. It differs from gradient-based inverse rendering methods by relying on user-driven selection rather than differentiable loss minimization, and from purely algorithmic TF generation by incorporating explicit genetic operators that manipulate the TF structure directly [S1][S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A volume dataset, an initial population of TFs, and user selections of preferred TFs from rendered thumbnails [S1][S2, unofficial].
+*   **Output:** An evolved TF that reveals desired structures in the volume [S1][S2, unofficial].
+
+**Data Structures:**
+The method supports two encoding schemes for the TF chromosome:
+1.  **Lookup Table (LUT) Encoding:** The TF lookup table itself is the chromosome, where the entries are the genes [S1][S2, unofficial]. This encoding allows easy combination with other 1D TF design methods [S1][S2, unofficial].
+2.  **Control Point Encoding:** The TF is represented as an ordered sequence of control points defined by a scalar value, color, and opacity [S2, unofficial]. The TF used for rendering is obtained by interpolating between these control points [S2, unofficial].
+
+*Note: The following steps describe the LUT-based implementation detailed in [S1][S2, unofficial], as it provides specific operator definitions.*
+
+**Numbered Steps:**
+1.  **Initialization:** Generate an initial population of TFs with random attribute values, ordered by scalar value [S2, unofficial]. For each TF, render a thumbnail visualization [S2, unofficial].
+2.  **Selection:** The user inspects the thumbnails and selects the best ones to serve as parents for a new population [S1][S2, unofficial]. The selected TFs are preserved in the selection pool for the next iteration [S1][S2, unofficial].
+3.  **Reproduction:** Parent TFs produce descendants by mutation, crossover, or both, in a random way [S1][S2, unofficial].
+    *   **Crossover:** Randomly select two parent TFs [S1][S2, unofficial]. Randomly determine two cutting points [S1][S2, unofficial]. Combine the interval between the two points of one TF with the two outer intervals (defined by the same two points) of the other TF [S1][S2, unofficial].
+    *   **Mutation:** Apply one or more of the following operators to a TF [S1][S2, unofficial]:
+        *   M1 (Triangular): Define an opacity value for the center of the mutation region and apply linear interpolation between the central opacity value and the opacity values at each border of the mutation [S1][S2, unofficial].
+        *   M2 (Random): Randomly set the opacities for the voxel values around the mutation center [S1][S2, unofficial].
+        *   M3 (Rectangular): Randomly set the center and range of the mutation, as well as the colors and opacities, between limited intervals [S1][S2, unofficial].
+        *   M4 (Global Scale): Apply a random global scale to all opacity values [S1][S2, unofficial].
+4.  **Iteration:** Obtain a new set of TFs and thumbnails, preserving only the parents in the selection pool for the next iteration [S1][S2, unofficial]. By selecting and deselecting thumbnails of the new set, the user defines the parents of the next TF population [S1][S2, unofficial]. If thumbnail quality is insufficient, the image can be inspected at a second level of interaction showing high-resolution rendering [S1][S2, unofficial]. Repeat until the user is satisfied [S1][S2, unofficial].
+
+**Formulas:**
+*   **Interpolation (Control Point Variant):** For a scalar value $v \in [v_i, v_{i+1}]$, the TF value is obtained by linear interpolation between adjacent control points $(v_i, c_i, o_i)$ and $(v_{i+1}, c_{i+1}, o_{i+1})$ [S2, unofficial].
+*   **Rendering:** Thumbnails are rendered using Engel's pre-integrated volume rendering method to handle high-frequency features introduced by genetic operators [S1][S2, unofficial].
+
+**Parameters:**
+*   Population size: Not given in the sources.
+*   Mutation rate: Not given in the sources.
+*   Crossover rate: Not given in the sources.
+*   LUT size ($N$): Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **High-Frequency Artifacts:** Genetic operators produce high-frequency features in the TF domain, which might cause artifacts in the resulting images [S1][S2, unofficial]. This is mitigated by using Engel's pre-integrated volume rendering method, which handles high frequencies well [S1][S2, unofficial].
+*   **Low-Resolution Evaluation:** Thumbnail quality may be insufficient for proper evaluation [S1][S2, unofficial]. The method provides a second level of interaction for high-resolution inspection of specific TFs [S1][S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import random
+
+class TransferFunction:
+    def __init__(self, num_bins):
+        self.num_bins = num_bins
+        self.colors = [[random.random(), random.random(), random.random()] for _ in range(num_bins)]
+        self.opacities = [random.random() for _ in range(num_bins)]
+
+    def crossover(self, other):
+        """
+        Crossover operator: randomly takes two TFs and cuts them at two points.
+        The interval between the two points of one TF is combined with the two outer intervals
+        of the other TF.
+        """
+        c1 = random.randint(0, self.num_bins - 2)
+        c2 = random.randint(c1 + 1, self.num_bins - 1)
+        
+        child1 = TransferFunction(self.num_bins)
+        child1.colors = self.colors[:c1] + other.colors[c1:c2+1] + self.colors[c2+1:]
+        child1.opacities = self.opacities[:c1] + other.opacities[c1:c2+1] + self.opacities[c2+1:]
+        
+        child2 = TransferFunction(self.num_bins)
+        child2.colors = other.colors[:c1] + self.colors[c1:c2+1] + other.colors[c2+1:]
+        child2.opacities = other.opacities[:c1] + self.opacities[c1:c2+1] + other.opacities[c2+1:]
+        
+        return child1, child2
+
+    def mutate_triangular(self):
+        """
+        M1: Triangular mutation. Define an opacity value for the center of the mutation region
+        and apply linear interpolation between the central opacity value and the opacity values
+        at each border of the mutation.
+        """
+        m1 = random.randint(0, self.num_bins - 2)
+        m2 = random.randint(m1 + 1, self.num_bins - 1)
+        mc = random.randint(m1, m2)
+        o_center = random.random()
+        
+        for i in range(m1, mc + 1):
+            t = (i - m1) / (mc - m1) if mc != m1 else 0.0
+            self.opacities[i] = self.opacities[m1] * (1 - t) + o_center * t
+            
+        for i in range(mc, m2 + 1):
+            t = (i - mc) / (m2 - mc) if m2 != mc else 0.0
+            self.opacities[i] = o_center * (1 - t) + self.opacities[m2] * t
+
+    def mutate_random(self):
+        """
+        M2: Random mutation. Randomly set the opacities for the voxel values around the mutation center.
+        """
+        mc = random.randint(0, self.num_bins - 1)
+        range_size = random.randint(1, self.num_bins // 2)
+        start = max(0, mc - range_size)
+        end = min(self.num_bins - 1, mc + range_size)
+        
+        for i in range(start, end + 1):
+            self.opacities[i] = random.random()
+
+    def mutate_rectangular(self):
+        """
+        M3: Rectangular mutation. Randomly set the center and range of the mutation,
+        as well as the colors and opacities, between limited intervals.
+        """
+        center = random.randint(0, self.num_bins - 1)
+        range_size = random.randint(1, self.num_bins // 2)
+        start = max(0, center - range_size)
+        end = min(self.num_bins - 1, center + range_size)
+        
+        for i in range(start, end + 1):
+            self.opacities[i] = random.random()
+            self.colors[i] = [random.random(), random.random(), random.random()]
+
+    def mutate_global_scale(self):
+        """
+        M4: Global Scale. Apply a random global scale to all opacity values.
+        """
+        scale = random.uniform(0.0, 2.0)
+        for i in range(self.num_bins):
+            self.opacities[i] = min(1.0, max(0.0, self.opacities[i] * scale))
+
+def render_thumbnail(tf, volume_data):
+    # Standard volume rendering of volume_data using tf to produce a thumbnail image
+    pass
+
+def select_parents_interactively(thumbnails):
+    # User-driven selection: returns a list of TFs corresponding to user-selected thumbnails
+    pass
+
+def evolve_tf(volume_data, initial_population, num_generations):
+    """
+    Main evolution loop.
+    """
+    population = initial_population
+    
+    for gen in range(num_generations):
+        thumbnails = [render_thumbnail(tf, volume_data) for tf in population]
+        selected_parents = select_parents_interactively(thumbnails)
+        
+        new_population = []
+        while len(new_population) < len(population):
+            if random.random() < 0.8:
+                p1, p2 = random.sample(selected_parents, 2)
+                c1, c2 = p1.crossover(p2)
+                new_population.extend([c1, c2])
+            
+            if len(new_population) < len(population):
+                parent = random.choice(selected_parents)
+                child = TransferFunction(parent.num_bins)
+                child.colors = parent.colors.copy()
+                child.opacities = parent.opacities.copy()
+                
+                mutation_type = random.choice(['triangular', 'random', 'rectangular', 'global_scale'])
+                if mutation_type == 'triangular':
+                    child.mutate_triangular()
+                elif mutation_type == 'random':
+                    child.mutate_random()
+                elif mutation_type == 'rectangular':
+                    child.mutate_rectangular()
+                elif mutation_type == 'global_scale':
+                    child.mutate_global_scale()
+                
+                new_population.append(child)
+        
+        population = new_population
+    
+    return population
+```
+
+## Operating characteristics
+*   **Time Complexity:** Proportional to the number of generations multiplied by the population size and the thumbnail rendering time [S1][S2, unofficial].
+*   **Memory Complexity:** Proportional to the population size multiplied by the TF size (LUT or control points) [S1][S2, unofficial].
+*   **Strengths:** Intuitive user interface; allows exploration of diverse TFs; handles high-frequency TF features via pre-integrated rendering [S1][S2, unofficial].
+*   **Limitations:** Requires user interaction; not fully automated; performance depends on rendering speed [S1][S2, unofficial].
+*   **When to use:** When the user has a vague idea of the desired visualization and wants to explore the space of possible TFs [S1][S2, unofficial].
+*   **When not to use:** When a fully automated, gradient-based optimization is required, or when real-time feedback is critical and rendering is slow [S1][S2, unofficial].
+
+## Background
+The method is based on the work of He et al. [HE 96], who proposed a genetic algorithm-based technique for specifying 1D TFs directed at images [S2, unofficial]. The implementation described in [S1][S2, unofficial] is a more flexible version that uses the TF lookup table itself as the chromosome, allowing combination with other 1D TF design methods [S1][S2, unofficial]. The method was developed to provide a more intuitive domain for TF specification, where the distance to the edge is mapped to optical attributes [S2, unofficial].
+
+## Sources
+[S1] Volume visualization and exploration through flexible transfer function design, https://doi.org/10.1016/j.cag.2008.04.004, fetched 2026-10-27
+[S2] Especificação de funções de transferência unidimensionais e multidimensionais para visualização volumétrica direta, http://hdl.handle.net/10183/12077, fetched 2026-10-30 (unofficial)

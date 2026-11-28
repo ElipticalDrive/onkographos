@@ -1,0 +1,101 @@
+# Color-Geometry Dependency Assumption
+
+Also called: Photometric Consistency Optimization for Shape, Shape-from-Shading
+
+## Overview
+The Color-Geometry Dependency Assumption assumes that surface texture correlates with geometry and normals, using shading cues to refine 3D reconstruction [S1, unofficial]. It alleviates texture-induced artifacts by enforcing multi-view consistency during the joint training of geometry and color fields with sufficient input views [S1, unofficial]. The assumption is based on shape-from-shading principles, which generally improve surface reconstruction but can produce relief-like artifacts when surface texture is not correlated with the underlying geometry [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:** Inputs are camera poses, 2D anchor images, a geometry field, and a color field [S1, unofficial][S2]. Outputs are refined geometry and color fields consistent with observed shading [S1, unofficial].
+
+**Data Structures:** The geometry field stores implicit surfaces (e.g., SDF) or voxel grids [S1, unofficial]. The color field decomposes into albedo $\mathbf{a}$ and shading $\mathbf{s}$ components [S2].
+
+**Steps:**
+1. Jointly optimize the geometry and color fields using multi-view input images [S1, unofficial].
+2. Compute surface normals from the geometry field [G].
+3. Estimate shading at sample points using the normals and a lighting model [G].
+4. Composite rendered colors and compute photometric loss against ground truth images [S1, unofficial].
+5. Apply color regularization to the shading field to reduce artifacts while preserving color fidelity [S2].
+
+**Formulas:**
+- Normal derivation: $\mathbf{n} = \nabla \phi(\mathbf{x}) / \|\nabla \phi(\mathbf{x})\|$ [G].
+- Color composition: $\mathbf{c} = \mathbf{a} \odot \mathbf{s}$ [S2].
+- Shading regularization: A penalty term applied to the shading field (Eq. 7 in source) [S2]. Formula not given in the sources.
+
+**Parameters:**
+- Lighting direction and intensity: Assumed or estimated [G].
+- Regularization weight: Controls the strength of the shading field penalty [S2].
+
+**Edge Cases and Pitfalls:**
+- Texture-geometry decoupling: Relief-like artifacts appear when texture is not correlated with geometry [S1, unofficial].
+- Radiance field assumptions: Can cause geometric errors such as concave or protruding blocks; explicit light transport avoids this [S3].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_color_geometry_loss(geometry_field, albedo_field, shading_field, camera, gt_image):
+    # 1. Sample points along rays using the geometry field
+    points, weights = sample_points_along_rays(geometry_field, camera)
+    
+    # 2. Compute normals as the normalized gradient of the geometry field [G]
+    normals = normalize_gradient(geometry_field, points)
+    
+    # 3. Estimate shading using a diffuse lighting model [G]
+    light_direction = normalize([0.0, 0.0, 1.0])
+    shading_values = clamp(dot(normals, light_direction), 0.0, 1.0)
+    
+    # 4. Retrieve albedo and compute composite color
+    albedo_values = albedo_field.query(points)
+    colors = albedo_values * shading_values
+    
+    # 5. Composite along rays
+    rendered_color = sum(colors * weights, axis=0)
+    
+    # 6. Compute photometric loss
+    photometric_loss = mean((rendered_color - gt_image) ** 2)
+    
+    # 7. Apply color regularization to the shading field [S2]
+    regularization_term = smoothness_penalty(shading_values)
+    
+    return photometric_loss + regularization_term
+
+# Standard helper definitions
+def sample_points_along_rays(geometry_field, camera):
+    # Volumetric ray marching returning sample points and accumulated weights
+    points = []
+    weights = []
+    # Standard marching logic: step along ray, query field, compute transmittance
+    return points, weights
+
+def normalize_gradient(geometry_field, points):
+    # Compute gradient via finite differences and normalize
+    grad = compute_gradient(geometry_field, points)
+    return grad / (norm(grad) + 1e-8)
+
+def smoothness_penalty(shading_values):
+    # Compute Laplacian or gradient magnitude penalty
+    return mean(abs(compute_gradient(shading_values)))
+```
+
+## Subtopics
+
+### Color Regularization
+A regularization technique applied to the shading field to produce cleaner reconstructions with fewer artifacts while maintaining color [S2]. It does not degrade reconstruction quality (metrics remain essentially unchanged) but qualitatively improves the shading field [S2]. On synthetic scenes, it yields a Shading PSNR of 22.876 compared to 22.957 without it, indicating negligible metric change but qualitative improvement [S2].
+
+### Geometry Disambiguation via Light Transport
+Uses explicit light transport calculations instead of radiance field assumptions to resolve geometric ambiguities during reconstruction [S3]. Steps: 1. Compute explicit light transport. 2. Use transport results to guide geometry reconstruction, avoiding radiance field assumptions [S3]. Pitfall: Radiance field assumptions lead to geometric errors such as concave or protruding blocks in competing methods [S3]. On the Stanford-ORB dataset, it achieves a Chamfer Distance of $0.173 \times 10^{-3}$, outperforming GFSGS (SH) at $0.361 \times 10^{-3}$, GFSGS (Latent) at $0.273 \times 10^{-3}$, and PGSR at $0.314 \times 10^{-3}$ [S3].
+
+## Operating characteristics
+- **Strengths:** Enhances surface detail and geometric accuracy by leveraging shading cues [S1, unofficial]. Reduces artifacts in the shading field when combined with color regularization [S2].
+- **Limitations:** Prone to artifacts when texture and geometry are not correlated (e.g., textureless surfaces with painted patterns) [S1, unofficial]. Radiance field assumptions cause geometric errors like concave or protruding blocks [S3].
+- **Performance:** Training time increases slightly due to additional shading computation and regularization terms (e.g., DVGO + NeuS w/ smoothness increased from 12min to 15min in one study) [S1, unofficial]. Geometry quality improves significantly over baselines on standardized datasets [S3].
+- **When to use:** Apply when sufficient multi-view input is available and surface texture correlates with geometry [S1, unofficial]. Avoid when texture is decorrelated from geometry or when explicit lighting control is required [S3].
+
+## Background
+The assumption is rooted in the shape-from-shading technique, which has been proven effective in surface reconstruction [S1, unofficial]. It builds on earlier neural surface reconstruction methods like NeuS (Yariv et al., 2020, 2021) and others (Oechsle et al., 2021) that implicitly or explicitly use shading information [S1, unofficial]. The method has been extended to explicit light transport calculations to disambiguate geometry and avoid radiance field assumptions [S3]. It is applied in neural radiance field optimization and neural surface reconstruction to improve geometric fidelity [S1, unofficial][S2][S3].
+
+## Sources
+[S1] Voxurf: Voxel-based Efficient and Accurate Neural Surface Reconstruction, https://doi.org/10.48550/arxiv.2208.12697, fetched 2026-10-26 (unofficial)
+[S2] Intrinsic decomposition and editing of 3D Gaussian splats, https://doi.org/10.1145/3804495, fetched 2026-10-27
+[S3] Differentiable Light Transport with Gaussian Surfels via Adapted Radiosity for Efficient Relighting and Geometry Reconstruction, https://doi.org/10.1145/3763305, fetched 2026-10-27

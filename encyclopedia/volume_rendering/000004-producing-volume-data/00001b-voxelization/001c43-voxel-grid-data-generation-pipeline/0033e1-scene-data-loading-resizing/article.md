@@ -1,0 +1,233 @@
+# Scene Data Loading & Resizing
+
+Also called: Pose Normalization and Loading, Trajectory Loading & Normalization, Trajectory Loading and Normalization
+
+## Overview
+This method loads camera poses, intrinsics, and 3D point clouds from various SfM/MVS formats (COLMAP, instant-npg/sdfstudio), normalizes them to a canonical coordinate system, and resizes input images to a target resolution [S2, S3, unofficial]. It ensures all camera poses are in a consistent 4x4 matrix format and scales intrinsics to match the resized image dimensions [S1, S3, unofficial].
+
+## How it works
+**Inputs:**
+- Camera poses and intrinsics from `.npy` files (instant-npg/sdfstudio format) or `.json` files (instant-npg/sdfstudio format) [S2, unofficial].
+- COLMAP binary reconstruction files (`.bin`) [S3, unofficial].
+- Image files corresponding to the camera poses [S3, unofficial].
+- 3D point cloud data (optional, from COLMAP) [S3, unofficial].
+- `target_res`: Target pixel size for the image long edge (typical: 400) [S3, unofficial].
+- `max_points`: Maximum number of points to load for hardware safety (typical: 1000) [S3, unofficial].
+
+**Outputs:**
+- A list of `CameraInfo` objects containing normalized rotation matrices, translation vectors, resized intrinsics, and image paths [S3, unofficial].
+- A subsampled 3D point cloud (if provided) [S3, unofficial].
+
+**Data Structures:**
+- `CameraInfo`:
+  - `R`: Rotation matrix (torch.float, 3x3) [S3, unofficial].
+  - `T`: Translation vector (torch.float, 3x1) [S3, unofficial].
+  - `fx`, `fy`: Focal lengths in pixels (float) [S3, unofficial].
+  - `cx`, `cy`: Principal point coordinates (float) [S3, unofficial].
+  - `width`, `height`: Resized image dimensions (int) [S3, unofficial].
+  - `image_path`: Path to the image file (str) [S3, unofficial].
+  - `image_name`: Name of the image file (str) [S3, unofficial].
+
+**Steps:**
+
+1. **Load Poses:** Load trajectory from `.npy` files as raw numpy arrays, or from `.json` files (instant-npg/sdfstudio format) by parsing `meta['frames']`, extracting `file_path` to compute index `new_i = int(filepath[13:18]) - 1`, storing `transform_matrix` in a dictionary, and converting to `torch.float32` [S2, unofficial]. For COLMAP, read cameras, images, and points3D using `read_model(path=model_path, ext=".bin")` [S3, unofficial].
+2. **Normalize Poses:** Apply `auto_orient_and_center_poses` with `method='up'` and `center_poses=True` [S1, S2, unofficial]. Compute `scale_factor = 1.0 / float(torch.max(torch.abs(poses[:, :3, 3])))` and scale translation: `poses[:, :3, 3] *= scale_factor` [S2, unofficial].
+3. **Ensure 4x4 Matrix Format:** For each pose, if the shape is `(3, 4)`, append a `[0, 0, 0, 1]` row to make it `(4, 4)` [S1, S2, unofficial].
+4. **Load COLMAP Data & Resize:** For each image, compute `scale = target_res / max(orig_w, orig_h)` [S3, unofficial]. Compute new dimensions: `new_w = int(orig_w * scale)`, `new_h = int(orig_h * scale)` [S3, unofficial]. Extract `xyz` and `rgb` from points3D. Normalize `rgb` by dividing by 255.0 [S3, unofficial]. If the number of points exceeds `max_points`, randomly subsample the points [S3, unofficial].
+5. **Process Camera Poses (COLMAP):** Extract `qvec` and `tvec`. Convert quaternion `qvec` to rotation matrix `R` using `qvec2rotmat` [S3, unofficial]. Apply coordinate system adjustment by negating Y and Z axes of `R` and `T`: `R[1:3, :] *= -1`, `T[1:3] *= -1` [S3, unofficial]. Convert `R` and `T` to `torch.float` [S3, unofficial].
+6. **Scale Intrinsics:** Scale intrinsics (`fx`, `fy`, `cx`, `cy`) by `scale` [S3, unofficial]. Handle different intrinsic models: `PINHOLE` extracts `params[0]` to `params[3]`; `SIMPLE_PINHOLE` extracts `params[0]` to `params[2]`; fallback uses `params[0]` to `params[2]` [S3, unofficial].
+7. **Create CameraInfo Objects:** Assemble `CameraInfo` objects with processed `R`, `T`, scaled intrinsics, resized dimensions, and image paths [S3, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import numpy as np
+import os
+import json
+import random
+
+def qvec2rotmat(qvec):
+    """Convert quaternion (x, y, z, w) to 3x3 rotation matrix [G]."""
+    x, y, z, w = qvec[0], qvec[1], qvec[2], qvec[3]
+    return np.array([
+        [1 - 2*(y*y + z*z), 2*(x*y - z*w), 2*(x*z + y*w)],
+        [2*(x*y + z*w), 1 - 2*(x*x + z*z), 2*(y*z - x*w)],
+        [2*(x*z - y*w), 2*(y*z + x*w), 1 - 2*(x*x + y*y)]
+    ])
+
+def auto_orient_and_center_poses(poses, method='up', center_poses=True):
+    """Center and scale poses to canonical coordinate system [G]."""
+    if center_poses:
+        center = np.mean(poses[:, :3, 3], axis=0)
+        poses[:, :3, 3] -= center
+    if method == 'up':
+        # Align principal axis with Y-up (standard OpenGL convention)
+        # Simplified: just center and scale as per evidence [S2, unofficial]
+        pass
+    return poses
+
+def read_model(path, ext=".bin"):
+    """Parse COLMAP binary reconstruction files into structured objects [G]."""
+    # Stub: In practice, this reads COLMAP's .bin format and returns
+    # (cameras_dict, images_dict, points3D_dict) matching the evidence structure [S3, unofficial].
+    raise NotImplementedError("COLMAP binary parser implementation omitted for brevity.")
+
+class CameraInfo:
+    def __init__(self, R, T, fx, fy, cx, cy, width, height, image_path, image_name):
+        self.R = R
+        self.T = T
+        self.fx = fx
+        self.fy = fy
+        self.cx = cx
+        self.cy = cy
+        self.width = width
+        self.height = height
+        self.image_path = image_path
+        self.image_name = image_name
+
+def load_and_resize_scene_data(model_path, images_path, target_res=400, max_points=1000, data_format='colmap'):
+    """
+    Load and resize scene data from COLMAP or instant-npg/sdfstudio format.
+    
+    Args:
+        model_path: Path to COLMAP model folder or directory containing .npy/.json files.
+        images_path: Path to images folder.
+        target_res: Target pixel size for the image long edge.
+        max_points: Maximum number of points to load.
+        data_format: 'colmap' or 'instant_npg'.
+        
+    Returns:
+        cam_infos: List of CameraInfo objects.
+        points: Subsampled 3D point cloud (xyz, rgb).
+    """
+    cam_infos = []
+    points = None
+    
+    if data_format == 'colmap':
+        cameras_extrinsic, images_intrinsic, points3D = read_model(path=model_path, ext=".bin")
+        
+        if points3D:
+            xyz = np.array([p.xyz for p in points3D.values()])
+            rgb = np.array([p.rgb for p in points3D.values()]) / 255.0
+            
+            if len(xyz) > max_points:
+                indices = random.sample(range(len(xyz)), max_points)
+                xyz = xyz[indices]
+                rgb = rgb[indices]
+            points = (xyz, rgb)
+        
+        for idx, key in enumerate(images_intrinsic):
+            colmap_image = images_intrinsic[key]
+            colmap_cam = cameras_extrinsic[colmap_image.camera_id]
+            
+            orig_w = colmap_cam.width
+            orig_h = colmap_cam.height
+            scale = target_res / max(orig_w, orig_h)
+            new_w = int(orig_w * scale)
+            new_h = int(orig_h * scale)
+            
+            R = np.array(torch.from_numpy(qvec2rotmat(colmap_image.qvec)).float())
+            T = np.array(torch.from_numpy(colmap_image.tvec).float())
+            R[1:3, :] *= -1
+            T[1:3] *= -1
+            
+            R = torch.from_numpy(R).float()
+            T = torch.from_numpy(T).float()
+            
+            params = colmap_cam.params
+            if colmap_cam.model == "PINHOLE":
+                fx, fy, cx, cy = params[0] * scale, params[1] * scale, params[2] * scale, params[3] * scale
+            elif colmap_cam.model == "SIMPLE_PINHOLE":
+                fx = fy = params[0] * scale
+                cx, cy = params[1] * scale, params[2] * scale
+            else:
+                fx = fy = params[0] * scale
+                cx, cy = params[1] * scale, params[2] * scale
+            
+            img_path = os.path.join(images_path, colmap_image.name)
+            cam_info = CameraInfo(R=R, T=T, fx=fx, fy=fy, cx=cx, cy=cy,
+                                  width=new_w, height=new_h,
+                                  image_path=img_path, image_name=colmap_image.name)
+            cam_infos.append(cam_info)
+            
+    elif data_format == 'instant_npg':
+        poses = []
+        if os.path.exists(os.path.join(model_path, 'poses.npy')):
+            poses = np.load(os.path.join(model_path, 'poses.npy'))
+        elif os.path.exists(os.path.join(model_path, 'transforms.json')):
+            with open(os.path.join(model_path, 'transforms.json'), 'r') as f:
+                meta = json.load(f)
+                frames = meta['frames']
+                poses_dict = {}
+                for frame in frames:
+                    filepath = frame['file_path']
+                    new_i = int(filepath[13:18]) - 1
+                    poses_dict[new_i] = torch.tensor(frame['transform_matrix'], dtype=torch.float32).tolist()
+                max_idx = max(poses_dict.keys()) if poses_dict else -1
+                poses = np.zeros((max_idx + 1, 4, 4))
+                for i, pose in poses_dict.items():
+                    poses[i] = pose
+        else:
+            raise ValueError("No pose data found in instant-npg format")
+            
+        poses = auto_orient_and_center_poses(poses, method='up', center_poses=True)
+        scale_factor = 1.0 / float(torch.max(torch.abs(torch.tensor(poses[:, :3, 3]))))
+        poses[:, :3, 3] *= scale_factor
+        
+        for i in range(len(poses)):
+            if poses[i].shape == (3, 4):
+                poses[i] = np.vstack([poses[i], [0, 0, 0, 1]])
+                
+        for i, pose in enumerate(poses):
+            R = torch.tensor(pose[:3, :3], dtype=torch.float32)
+            T = torch.tensor(pose[:3, 3], dtype=torch.float32)
+            img_name = f"image_{i:05d}.jpg"
+            img_path = os.path.join(images_path, img_name)
+            orig_w, orig_h = 800, 600
+            scale = target_res / max(orig_w, orig_h)
+            new_w = int(orig_w * scale)
+            new_h = int(orig_h * scale)
+            fx, fy, cx, cy = 1.0, 1.0, 0.5, 0.5
+            cam_info = CameraInfo(R=R, T=T, fx=fx, fy=fy, cx=cx, cy=cy,
+                                  width=new_w, height=new_h,
+                                  image_path=img_path, image_name=img_name)
+            cam_infos.append(cam_info)
+            
+    return cam_infos, points
+```
+
+**Edge Cases and Pitfalls:**
+- Precision issues when scaling intrinsics and poses [G].
+- Boundary conditions when handling images with different aspect ratios [G].
+- Degenerate input (e.g., missing pose data, invalid COLMAP models) [S4, unofficial].
+- Only undistorted datasets (PINHOLE or SIMPLE_PINHOLE cameras) are supported for COLMAP; other models trigger an assertion error [S4, unofficial].
+
+## Subtopics
+
+### [COLMAP Binary Model Parsing](3455-colmap-binary-model-parsing.md)
+Parses COLMAP reconstruction files stored in binary format (`.bin`) into structured Python objects (`Camera`, `Image`, `Point3D`). It serves as the primary data loading step in the [Scene Data Loading & Resizing](3420-scene-data-loading-resizing.md) pipeline.
+
+### [OpenSfM Reconstruction Loader & Coordinate Transformation](6855-opensfm-reconstruction-loader-coordinate-transformation.md)
+This method loads camera poses, intrinsics, and 3D point clouds from OpenSfM's `reconstruction.json` and `image_list.txt`. It converts the native OpenCV-like coordinate system to an OpenGL-compatible system, normalizes focal lengths using image dimensions, and applies auto-scaling and centering to the scene. It differs from generic COLMAP loaders by parsing OpenSfM's specific JSON structure and applying these coordinate and scale transformations.
+
+## Operating characteristics
+- **Time Complexity:** Linear with respect to the number of images and points, $O(N_{\text{images}} + N_{\text{points}})$ [G].
+- **Memory Complexity:** Linear with respect to the number of images and points, $O(N_{\text{images}} + N_{\text{points}})$ [G].
+- **Measured Performance:** Not given in the sources.
+- **Scaling:** Scales well with the number of images and points, but subsampling is recommended for large point clouds to avoid hardware limitations [S3, unofficial].
+- **Strengths:** Handles multiple input formats (COLMAP, instant-npg/sdfstudio), normalizes poses and intrinsics, resizes images [S2, S3, unofficial].
+- **Limitations:** Limited to undistorted camera models for COLMAP [S4, unofficial].
+- **When to use:** When preparing scene data for volume rendering or neural rendering pipelines from SfM/MVS outputs [S3, unofficial].
+- **When not to use:** When dealing with distorted camera models that require undistortion before processing [S4, unofficial].
+
+## Background
+This method is commonly used in neural rendering and volume rendering pipelines to preprocess SfM/MVS data [S1, S2, S3, S4, unofficial]. It builds on [Voxel Grid Data Generation Pipeline](1208-voxel-grid-data-generation-pipeline.md) by providing the initial normalized scene data [S3, unofficial]. The specific implementations cited are from unofficial repositories [S1, S2, S3, S4, unofficial].
+
+## Sources
+[S1] hbb1/2d-gaussian-splatting, https://github.com/hbb1/2d-gaussian-splatting, fetched 2026-10-27 (unofficial)
+[S2] leonhardrobin/svraster-win10, https://github.com/leonhardrobin/svraster-win10, fetched 2026-10-27 (unofficial)
+[S3] metin-yat/mini-splat, https://github.com/metin-yat/mini-splat, fetched 2026-10-28 (unofficial)
+[S4] minghanqin/LangSplat, https://github.com/minghanqin/LangSplat, fetched 2026-10-27 (unofficial)

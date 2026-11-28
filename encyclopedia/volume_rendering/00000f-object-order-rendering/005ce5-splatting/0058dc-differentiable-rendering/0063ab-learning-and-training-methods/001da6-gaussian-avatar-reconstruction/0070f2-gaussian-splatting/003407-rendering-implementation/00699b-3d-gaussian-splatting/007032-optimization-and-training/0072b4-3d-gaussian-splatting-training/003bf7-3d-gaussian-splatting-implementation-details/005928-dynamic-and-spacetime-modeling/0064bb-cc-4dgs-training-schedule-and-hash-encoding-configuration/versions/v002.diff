@@ -1,0 +1,308 @@
+--- v001.md
++++ v002.md
+@@ -4,145 +4,190 @@
+ 
+ ## Overview
+-CC-4DGS is a training and encoding configuration for dynamic Gaussian splatting that replaces learnable XOR-based hash tables with modulation-based universal hash functions, dense hash encoding, and lightweight neural decoders, combined with a three-stage optimization schedule and dynamic-score gating [S1]. It sets itself apart from siblings like [Swift4D](12925-desplat.md) by eliminating large vertex embedding tables in favor of parameterized hash functions and neural decoders, thereby reducing storage overhead while maintaining real-time rendering speeds through feature caching and dynamic separation [S1].
++CC-4DGS is a training and encoding configuration for dynamic Gaussian splatting that replaces learnable XOR-based hash tables with modulation-based universal hash functions, dense hash encoding, and lightweight neural decoders, combined with a three-stage optimization schedule and dynamic-score gating [S1]. It sets itself apart from siblings like [SpacetimeGaussians](15898-spacetimegaussians-training-pipeline.md) and [Swift4D](16313-spacetime-gaussian-feature-splatting.md) by eliminating large vertex embedding tables to drastically reduce storage, achieving ~30 MB model sizes with minimal quality loss while maintaining real-time rendering speeds [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Multi-view video sequences (e.g., N3DV or Technicolor Light Field data), initial COLMAP point cloud, camera parameters, and hyperparameters for hash encoding and optimization.
+-*   **Outputs:** Optimized Gaussian parameters (position, scale, rotation, opacity, SH coefficients), deformation field parameters, and dynamic scores for each Gaussian.
++*   **Inputs:** Multi-view video sequences (e.g., N3DV or Technicolor datasets), initial COLMAP point cloud, time $t$.
++*   **Outputs:** Optimized Gaussian parameters (position, rotation, scale, opacity, color), deformation field parameters, dynamic scores $d$, and compressed feature representations.
+ 
+ **Data Structures:**
+-*   **Multi-resolution Grids:** A set of 4 or 5 hash grids [S1]. The exact number is restricted by GPU memory constraints [S1].
+-*   **Hash Function Parameters:**
+-    *   `m`: Bucket size, an integer parameter for the hash function [S1].
+-    *   `P`: Prime number, an integer parameter used alongside `m` [S1].
+-*   **Neural Decoders:** Lightweight neural networks, one per grid level, mapping hash-encoded integers to continuous features [S1].
+-*   **Gaussian Attributes:** Standard 3DGS attributes plus a learned scalar dynamic score `d` per Gaussian [S1].
++1.  **Multi-resolution Hash Grids:** A set of $L$ grids (typically $L=4$ or $5$). Unlike standard 3DGS which uses XOR-based hash tables storing learnable embeddings, CC-4DGS stores no such learnable hash tables [S1].
++2.  **Hash Function Parameters:**
++    *   Bucket size $m$: An integer parameter determining the hash table width. Must be sufficiently large to limit collisions [S1].
++    *   Prime $P$: An integer parameter used alongside $m$ in the hash function [S1].
++3.  **Lightweight Neural Decoders:** One decoder per grid level. These map hash-encoded integers to continuous feature vectors [S1].
++4.  **Per-Gaussian Dynamic Score:** A scalar value $d$ learned for each Gaussian to indicate its motion activity [S1].
++5.  **Threshold $\zeta$:** A scalar threshold for $d$. Deformation is applied only if $d > \zeta$ [S1].
+ 
+-**Hash Encoding Configuration:**
+-Unlike conventional approaches that store learnable vertex embeddings in large XOR-based hash tables, CC-4DGS employs modulation-based universal hash functions with dense hash encoding [S1]. The hash function maps spatial coordinates to integer indices using parameters `m` and `P` [S1]. These indices are passed to lightweight neural decoders at each grid level to produce continuous features [S1]. The bucket size `m` must be sufficiently large to limit hash collisions; preliminary tests indicate that smaller `m` values noticeably degrade PSNR [S1]. The prime `P` is used in conjunction with `m` to further limit collisions [S1].
++**Algorithm Steps:**
++The training follows a strict three-stage schedule [S1]:
+ 
+-**Dynamic Score Gating:**
+-Each Gaussian is assigned a learned dynamic score `d` [S1]. A scalar threshold `ζ` is defined [S1]. Deformation is applied only to Gaussians where `d > ζ` [S1]. This gating mechanism avoids unnecessary computation in static regions, improving training and rendering efficiency [S1].
++1.  **Stage 1: Coarse Initialization (5K iterations)**
++    *   Establish the initial canonical point cloud using COLMAP.
++    *   Optimize base Gaussian parameters (position, rotation, scale, opacity, color) without deformation.
++    *   This stage stabilizes the static geometry [S1].
+ 
+-**Optimization Schedule:**
+-The training follows a three-stage schedule [S1]:
+-1.  **Stage 1 (Coarse Initialization):** Run 5,000 iterations to establish the initial canonical point cloud and base Gaussian parameters [S1].
+-2.  **Stage 2 (Dynamic Score Fitting):** Run 3,000 iterations to fit the per-Gaussian dynamic score `d` [S1].
+-3.  **Stage 3 (Main Optimization):** Run 20,000 iterations to jointly optimize the deformation field and the Gaussian set [S1].
+-The total iteration count is 28,000 per N3DV scene [S1].
++2.  **Stage 2: Dynamic Score Fitting (3K iterations)**
++    *   Optimize the per-Gaussian dynamic score $d$ for each Gaussian.
++    *   The deformation field is not yet fully optimized; the focus is on identifying which Gaussians are dynamic [S1].
++
++3.  **Stage 3: Main Optimization (20K iterations)**
++    *   Jointly optimize the deformation field and the full Gaussian set (positions, rotations, scales, etc.).
++    *   Total iterations per scene: 28K (5K + 3K + 20K) [S1].
++    *   **Dynamic Score Gating:** During rendering and optimization, deformation is applied only to Gaussians where the learned dynamic score $d$ exceeds the threshold $\zeta$. If $d \le \zeta$, the Gaussian is treated as static, avoiding unnecessary deformation computation [S1].
++
++**Hash Encoding and Feature Retrieval:**
++Instead of storing learnable embeddings in XOR-based hash tables, CC-4DGS uses modulation-based universal hash functions with dense hash encoding [S1].
++1.  For a given spatial coordinate $\mathbf{x}$ and time $t$, compute the hash index for each grid level $l$:
++    $$ h_l = (\text{hash}(\mathbf{x}, t) + \text{offset}_l) \mod m $$
++    Where $\text{hash}$ is a universal hash function, $m$ is the bucket size, and $\text{offset}_l$ is a level-specific offset [S1].
++2.  The hash index $h_l$ is passed to the lightweight neural decoder for level $l$.
++3.  The decoder outputs a continuous feature vector $\mathbf{f}_l$ [S1].
++4.  Features from all $L$ levels are aggregated (e.g., summed or concatenated) to form the final feature representation for the deformation field or color [S1].
++
++**Parameters:**
++*   **Bucket size $m$:** Must be sufficiently large. Preliminary tests showed that smaller $m$ values noticeably degrade PSNR [S1]. Exact value not specified in sources, but "sufficiently large" is required [S1].
++*   **Prime $P$:** Used in the hash function to limit collisions [S1]. Exact value not specified [S1].
++*   **Number of grids:** Restricted to 4 or 5 due to GPU memory constraints [S1].
++*   **Threshold $\zeta$:** Scalar threshold for dynamic score $d$. Value not specified in sources [S1].
+ 
+ **Pseudocode:**
+ ```python
+-# CC-4DGS Training Configuration and Hash Encoding
++# CC-4DGS Training and Rendering Configuration
+ 
+ # Hyperparameters
+-NUM_GRIDS = 4  # Restricted to 4 or 5 due to GPU memory constraints [S1]
+-BUCKET_SIZE_M = 1000000  # Example value; must be sufficiently large to limit collisions [S1]
+-PRIME_P = 1000003  # Example prime value [S1]
+-THETA_ZETA = 0.5  # Threshold for dynamic score [S1]
+-ITERATIONS_STAGE1 = 5000
+-ITERATIONS_STAGE2 = 3000
+-ITERATIONS_STAGE3 = 2000
++NUM_GRIDS = 5  # Restricted to 4 or 5 due to GPU memory [S1]
++BUCKET_SIZE = m  # Must be sufficiently large to limit collisions [S1]
++PRIME_P = P  # Used in hash function [S1]
++THRESHOLD_ZETA = zeta  # Dynamic score threshold [S1]
++STAGE1_ITERS = 5000  # Coarse initialization [S1]
++STAGE2_ITERS = 3000  # Dynamic score fitting [S1]
++STAGE3_ITERS = 20000  # Main optimization [S1]
+ 
+-# Hash Function Definition
+-def universal_hash(x, y, z, m, P):
++# Data Structures
++# hash_grids: List of NUM_GRIDS lightweight neural decoders
++# gaussians: List of Gaussian objects with attributes:
++#   - pos: (x, y, z)
++#   - rot: quaternion
++#   - scale: (sx, sy, sz)
++#   - opacity: scalar
++#   - color: features
++#   - dynamic_score: scalar d
++# deformation_field: Neural network taking (pos, time, features) -> offset
++
++def hash_function(x, t, level_idx, m, P):
+     """
+     Modulation-based universal hash function.
+-    Maps 3D coordinates to an integer index.
+-    Uses bucket size m and prime P to limit collisions.
++    Returns an integer hash index.
+     """
+-    # Implementation detail: Standard universal hashing often involves
+-    # modular arithmetic with a prime. The exact formula is not provided
+-    # in the sources, but it uses m and P [S1].
+-    # Placeholder for the specific modulation-based formula.
+-    # A common form might be: ((a*x + b*y + c*z) % P) % m
+-    # where a, b, c are random coefficients.
+-    # [G] Assuming a standard linear congruential generator style hash
+-    # for implementation purposes, as the exact "modulation-based"
+-    # formula is not explicitly defined in the text.
+-    a, b, c = random_coefficients()
+-    index = ((a * x + b * y + c * z) % P) % m
+-    return index
++    # Implementation detail: Uses dense hash encoding with prime P and bucket size m [S1]
++    # Exact hash formula not provided in sources, but uses universal hash properties [S1]
++    # Placeholder for specific universal hash implementation
++    hash_val = (hash(x, t) + level_idx) % m
++    return hash_val
+ 
+-# Neural Decoder Definition
+-class LightweightDecoder(torch.nn.Module):
+-    def __init__(self, input_dim, output_dim):
+-        super().__init__()
+-        # Lightweight network to map hash indices to continuous features
+-        # [S1]
+-        self.network = torch.nn.Sequential(
+-            torch.nn.Linear(input_dim, 64),
+-            torch.nn.ReLU(),
+-            torch.nn.Linear(64, output_dim)
+-        )
++def get_feature(hash_index, decoder):
++    """
++    Maps hash-encoded integer to continuous feature via lightweight neural decoder [S1].
++    """
++    return decoder(hash_index)
+ 
+-    def forward(self, hash_index):
+-        # Embed hash index to a vector, then pass through network
+-        # [S1]
+-        # Note: hash_index is an integer. It must be embedded.
+-        # [G] Assuming a simple embedding layer or one-hot encoding
+-        # followed by linear projection, as "lightweight neural decoder"
+-        # is vague.
+-        embedded = self.embedding(hash_index)
+-        return self.network(embedded)
++def train_stage1(gaussians, images, time_frames):
++    """
++    Stage 1: Coarse initialization (5K iterations) [S1].
++    Establish initial canonical point cloud and base Gaussian parameters.
++    """
++    for i in range(STAGE1_ITERS):
++        # Optimize base Gaussian parameters (pos, rot, scale, opacity, color)
++        # No deformation applied yet
++        loss = compute_rendering_loss(gaussians, images, time_frames)
++        optimize(gaussians, loss)
+ 
+-# Training Loop
+-def train_cc_4dgs(scene_data, initial_gaussians):
+-    # Initialize Gaussians with COLMAP prior [S1]
+-    gaussians = initial_gaussians
++def train_stage2(gaussians, images, time_frames):
++    """
++    Stage 2: Dynamic score fitting (3K iterations) [S1].
++    Fit the per-Gaussian dynamic score d.
++    """
++    for i in range(STAGE2_ITERS):
++        # Optimize dynamic_score d for each Gaussian
++        # Deformation field parameters are fixed or lightly updated
++        loss = compute_rendering_loss(gaussians, images, time_frames)
++        optimize(gaussians.dynamic_score, loss)
++
++def train_stage3(gaussians, images, time_frames):
++    """
++    Stage 3: Main optimization (20K iterations) [S1].
++    Jointly optimize deformation field and Gaussian set.
++    """
++    for i in range(STAGE3_ITERS):
++        for gaussian in gaussians:
++            # Dynamic score gating: only apply deformation if d > zeta [S1]
++            if gaussian.dynamic_score > THRESHOLD_ZETA:
++                # Get features from hash grids
++                features = []
++                for l in range(NUM_GRIDS):
++                    h = hash_function(gaussian.pos, time, l, BUCKET_SIZE, PRIME_P)
++                    f = get_feature(h, hash_grids[l])
++                    features.append(f)
++                # Aggregate features (e.g., sum)
++                aggregated_feature = sum(features)
++                # Compute deformation offset
++                offset = deformation_field(gaussian.pos, time, aggregated_feature)
++                # Apply offset to Gaussian parameters
++                gaussian.pos += offset.dx
++                gaussian.rot += offset.dr
++                gaussian.scale += offset.ds
++            else:
++                # Static Gaussian: no deformation
++                pass
++        
++        loss = compute_rendering_loss(gaussians, images, time_frames)
++        optimize(gaussians, deformation_field, loss)
++
++def render(gaussians, camera, time):
++    """
++    Render using differentiable rasterization [S1].
++    Apply dynamic score gating during rendering as well.
++    """
++    projected_gaussians = []
++    for gaussian in gaussians:
++        if gaussian.dynamic_score > THRESHOLD_ZETA:
++            # Apply deformation
++            features = []
++            for l in range(NUM_GRIDS):
++                h = hash_function(gaussian.pos, time, l, BUCKET_SIZE, PRIME_P)
++                f = get_feature(h, hash_grids[l])
++                features.append(f)
++            aggregated_feature = sum(features)
++            offset = deformation_field(gaussian.pos, time, aggregated_feature)
++            # Update Gaussian for rendering
++            render_pos = gaussian.pos + offset.dx
++            render_rot = gaussian.rot + offset.dr
++            render_scale = gaussian.scale + offset.ds
++        else:
++            render_pos = gaussian.pos
++            render_rot = gaussian.rot
++            render_scale = gaussian.scale
++        
++        # Project to 2D using covariance transformation [S1]
++        projected = project_gaussian(render_pos, render_rot, render_scale, camera)
++        projected_gaussians.append(projected)
+     
+-    # Initialize Deformation Field and Decoders
+-    # One decoder per grid level [S1]
+-    decoders = [LightweightDecoder(input_dim, output_dim) for _ in range(NUM_GRIDS)]
+-    
+-    # Initialize Dynamic Scores
+-    dynamic_scores = torch.zeros(len(gaussians))
+-    
+-    # Stage 1: Coarse Initialization
+-    for i in range(ITERATIONS_STAGE1):
+-        # Render and compute loss
+-        # Optimize base Gaussian parameters (position, scale, rotation, opacity, SH)
+-        # [S1]
+-        pass
+-        
+-    # Stage 2: Dynamic Score Fitting
+-    for i in range(ITERATIONS_STAGE2):
+-        # Render and compute loss
+-        # Optimize dynamic scores d for each Gaussian
+-        # [S1]
+-        pass
+-        
+-    # Stage 3: Main Optimization
+-    for i in range(ITERATIONS_STAGE3):
+-        # Render and compute loss
+-        # For each Gaussian:
+-        #   if dynamic_score > THETA_ZETA:
+-        #       apply deformation field
+-        #   else:
+-        #       skip deformation
+-        # [S1]
+-        # Jointly optimize deformation field and Gaussian set
+-        # [S1]
+-        pass
+-        
+-    return gaussians, decoders, dynamic_scores
++    # Alpha blending [S1]
++    image = alpha_blend(projected_gaussians)
++    return image
+ ```
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Hash Collisions:** Using a bucket size `m` that is too small leads to noticeable PSNR degradation [S1].
+-*   **Memory Constraints:** The number of multi-resolution grids is limited to 4 or 5 due to GPU memory limits [S1].
+-*   **Static Regions:** Failing to use the dynamic score threshold `ζ` results in unnecessary computation in static areas [S1].
+-
+ ## Operating characteristics
+-*   **Time Complexity:** The method achieves real-time rendering speeds. On the Technicolor dataset, it reaches 64.7 FPS (CDF) and 64.6 FPS (CDF+CCA) on a single NVIDIA RTX 4090 GPU [S1].
+-*   **Memory Complexity:** Storage is significantly reduced. The CDF component alone reduces model size to a few tens of megabytes [S1]. The full CDF+CCA system achieves approximately 30 MB storage on N3DV and 32 MB on Technicolor [S1].
+-*   **Performance:**
+-    *   **N3DV Dataset:** PSNR in the low 32 dB range, SSIM approximately 0.94 [S1].
+-    *   **Technicolor Dataset:** CDF configuration achieves PSNR 33.29 dB, SSIM 0.912, 64.7 FPS [S1]. CDF+CCA achieves PSNR 33.30 dB, SSIM 0.912, 64.6 FPS, ~32 MB storage [S1].
+-*   **Strengths:** Superior trade-off among storage efficiency, reconstruction quality, and rendering speed compared to baselines like Swift4D and 4DGS [S1]. Feature caching and dynamic separation maintain real-time performance despite the use of neural decoders [S1].
+-*   **Limitations:** The number of grid levels is constrained by GPU memory [S1]. The method requires careful tuning of the hash bucket size `m` to avoid PSNR degradation [S1].
++*   **Storage:** Significantly reduced compared to hash-table-based methods. The CDF component alone reduces model size to a few tens of megabytes. Combined with CCA, total storage is ~30 MB (N3DV) or ~32 MB (Technicolor) [S1]. This is smaller than the lightweight baseline 4DGS [S1].
++*   **Rendering Speed:** Maintains real-time performance. On Technicolor dataset, achieves 64.7 FPS (CDF) and 64.6 FPS (CDF+CCA) on a single NVIDIA RTX 4090 [S1]. Slightly slower than Swift4D's 64.7 FPS due to decoder computation, but comparable [S1].
++*   **Reconstruction Quality:**
++    *   N3DV: PSNR in the low 32 dB range, SSIM ~0.94 [S1].
++    *   Technicolor: PSNR 33.29 dB (CDF), 33.30 dB (CDF+CCA); SSIM 0.912 [S1].
++*   **Complexity:** The use of lightweight neural decoders adds computational overhead compared to direct table lookups, but the dynamic-score gating reduces the number of Gaussians requiring deformation computation [S1].
++*   **Limitations:** The bucket size $m$ and prime $P$ must be carefully chosen; smaller $m$ noticeably degrades PSNR [S1]. The number of grids is limited to 4-5 due to GPU memory constraints [S1].
+ 
+ ## Background
+-CC-4DGS was introduced in the paper "CC-4DGS: Computational Deformation and Point-Cloud Compression for Storage-Efficient Dynamic Gaussian Splatting" [S1]. It builds on prior work such as 4DGS and Swift4D, aiming to address the high storage costs associated with dynamic Gaussian splatting methods that rely on large hash tables [S1]. The method is evaluated on the Neural 3D Video (N3DV) dataset and the Technicolor Light Field dataset [S1].
++CC-4DGS was introduced in the paper "CC-4DGS: Computational Deformation and Point-Cloud Compression for Storage-Efficient Dynamic Gaussian Splatting" [S1]. It addresses the high storage costs of dynamic Gaussian splatting methods that rely on large learnable hash tables (e.g., Swift4D) [S1]. The method builds on the 3D Gaussian Splatting representation [S1] and incorporates ideas from Swift4D, such as the dynamic-score strategy [S1]. It was evaluated on the N3DV and Technicolor Light Field datasets [S1].
+ 
+ ## Sources

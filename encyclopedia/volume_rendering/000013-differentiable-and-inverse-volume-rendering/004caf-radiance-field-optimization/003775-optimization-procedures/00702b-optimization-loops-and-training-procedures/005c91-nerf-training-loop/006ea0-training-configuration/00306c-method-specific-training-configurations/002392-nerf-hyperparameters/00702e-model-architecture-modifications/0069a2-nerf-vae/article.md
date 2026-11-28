@@ -1,0 +1,101 @@
+# NeRF-VAE
+
+Also called: Variational Autoencoder for NeRF
+
+## Overview
+NeRF-VAE is a generative neural radiance field model that learns a distribution over 3D scenes, enabling generalization to out-of-distribution scenes without per-scene optimization [S1]. Unlike standard NeRF, which requires training a separate network for each specific scene, NeRF-VAE embeds the scene representation into a single latent code sampled from a learned prior, allowing for zero-shot novel view synthesis of new scenes [S2, unofficial]. It distinguishes itself from other generative NeRF variants by using iterative amortized inference to recover the latent code from input views, rather than relying on explicit geometric templates or external GAN generators [S1][S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** A set of $N$ input images $\{I_i\}_{i=1}^N$ with corresponding camera poses $\{P_i\}_{i=1}^N$.
+- **Output:** A continuous radiance field function $F_\Theta$ parameterized by weights $\Theta$, conditioned on a latent code $\mathbf{z}$. The function maps a 3D position $\mathbf{x}$ and viewing direction $\mathbf{d}$ to volume density $\sigma$ and color $\mathbf{c}$.
+
+**Data Structures:**
+1.  **Latent Code ($\mathbf{z}$):** A vector in $\mathbb{R}^D$ representing the global scene structure and appearance.
+2.  **Encoder ($E_\phi$):** A ResNet-based convolutional neural network that maps input images to the parameters of the approximate posterior distribution $q_\phi(\mathbf{z} | \{I_i\})$.
+3.  **Scene Function ($F_\Theta$):** An attention-based neural network (replacing the standard MLP) that takes $\mathbf{x}$, $\mathbf{d}$, and $\mathbf{z}$ as inputs.
+
+**Algorithm Steps:**
+1.  **Encoding:** Given input views, the ResNet encoder $E_\phi$ processes the images to produce the mean $\mu$ and variance $\sigma^2$ of the approximate posterior distribution $q_\phi(\mathbf{z} | \{I_i\}) = \mathcal{N}(\mu, \sigma^2 I)$.
+2.  **Latent Sampling:** Sample a latent code $\mathbf{z}$ from the approximate posterior using the reparameterization trick: $\mathbf{z} = \mu + \epsilon \odot \sigma$, where $\epsilon \sim \mathcal{N}(0, I)$ [G].
+3.  **Iterative Amortized Inference:** To refine the latent code, the model iteratively updates $\mathbf{z}$ by conditioning on the rendered images and the input views, minimizing the reconstruction loss and KL divergence [S1].
+4.  **Rendering:** For a target ray, query the scene function $F_\Theta(\mathbf{x}, \mathbf{d}, \mathbf{z})$ to get $\sigma$ and $\mathbf{c}$.
+5.  **Volume Rendering:** Compute the pixel color $C(r)$ for ray $r$ using standard volume rendering integration:
+    $$ C(r) = \int_{t_n}^{t_f} T(t) \mathbf{c}(r(t)) \alpha(r(t)) dt $$
+    where $\alpha(t) = 1 - \exp(-\sigma(t) \delta t)$ and $T(t) = \exp(-\int_{t_n}^t \sigma(s) ds)$.
+6.  **Loss Function:** The total loss $\mathcal{L}$ is the sum of the reconstruction loss $\mathcal{L}_{rec}$ (e.g., MSE between rendered and input images) and the KL divergence term $\mathcal{L}_{KL}$:
+    $$ \mathcal{L} = \mathcal{L}_{rec} + \beta \mathcal{L}_{KL}(q_\phi(\mathbf{z} | \{I_i\}) || p(\mathbf{z})) $$
+    where $p(\mathbf{z}) = \mathcal{N}(0, I)$ is the prior [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def nerf_vae_train(input_images, camera_poses, encoder, scene_fn, num_iterations):
+    # Initialize encoder parameters phi and scene function parameters Theta
+    # Initialize latent prior p(z) = N(0, I)
+    
+    for iteration in range(num_iterations):
+        # 1. Encode input views to get approximate posterior parameters
+        mu, log_var = encoder(input_images)
+        sigma = exp(0.5 * log_var)
+        
+        # 2. Sample latent code z
+        epsilon = random_normal(mu.shape)
+        z = mu + epsilon * sigma
+        
+        # 3. Render images using z
+        rendered_images = []
+        for i, (img, pose) in enumerate(zip(input_images, camera_poses)):
+            # Generate rays from pose
+            rays = generate_rays(pose)
+            # Query scene function with z
+            sigma_vals, color_vals = scene_fn(rays, z)
+            # Volume render
+            rendered_img = volume_render(rays, sigma_vals, color_vals)
+            rendered_images.append(rendered_img)
+            
+        # 4. Compute losses
+        rec_loss = mean_squared_error(input_images, rendered_images)
+        kl_loss = -0.5 * sum(1 + log_var - mu**2 - exp(log_var))
+        total_loss = rec_loss + beta * kl_loss
+        
+        # 5. Backpropagate and update encoder and scene function
+        update_parameters(encoder, scene_fn, total_loss)
+        
+    return encoder, scene_fn
+```
+
+**Parameters:**
+- $\beta$: Weight for the KL divergence term. Typical value: 1.0 [G].
+- $D$: Dimension of latent code $\mathbf{z}$. Not given in the sources.
+- $\beta$ in loss: Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+- **Low Expressivity:** With a large number of input views (>100), the fixed latent code may not capture sufficient detail, leading to lower fidelity than per-scene NeRF [S1].
+- **Inference Time:** Iterative amortized inference can be slow compared to direct encoding [S1].
+
+## Subtopics
+
+### [Conditional and Latent Representations](15989-conditional-and-latent-representations.md)
+General framework for conditioning NeRFs on latent codes.
+
+### [Uncertainty and Reliability](14487-uncertainty-and-reliability.md)
+Methods for estimating uncertainty in NeRF predictions.
+
+### [Sparse View and Few-Shot Optimization](14428-sparse-view-and-few-shot-optimization.md)
+Techniques for training NeRFs with limited input views.
+
+## Operating characteristics
+- **Time Complexity:** Training time is independent of the number of scenes but depends on the number of input views per scene. Inference (encoding) requires forward pass through ResNet and iterative updates. Rendering is similar to standard NeRF but with additional conditioning.
+- **Memory Complexity:** Stores one set of network weights for the entire dataset, plus the latent codes for each scene. Significantly less memory than storing separate NeRFs for each scene.
+- **Performance:** Outperforms baseline NeRF with few views (5-20) due to regularization from the generative prior. Underperforms baseline NeRF with many views (100+) due to lower scene expressivity [S1].
+- **Strengths:** Generalizes to new scenes; no per-scene training required; compact representation.
+- **Limitations:** Lower fidelity with many views; inference latency for latent recovery.
+
+## Background
+NeRF-VAE was proposed by Kosiorek et al. in January 2021 [S1]. It was one of the first methods to combine variational autoencoders with neural radiance fields to enable generative modeling of 3D scenes. The method was evaluated on standard GAN datasets such as Celeb-A, CARLA, and Cats [S1].
+
+## Sources
+[S1] Neural Radiance Fields in 3D Vision: A Comprehensive Review, https://doi.org/10.26599/cvm.2026.9450535, fetched 2026-10-28
+[S2] Advances in Neural Rendering, https://doi.org/10.48550/arxiv.2111.05849, fetched 2026-10-26 (unofficial)

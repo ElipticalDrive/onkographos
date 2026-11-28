@@ -1,0 +1,148 @@
+--- v001.md
++++ v002.md
+@@ -18,12 +18,12 @@
+ **Numbered Steps:**
+ 1.  **Downsample:** Downsample the rendered image $I_{ir}$ by a factor of 32 to obtain an image of resolution $\frac{H}{32} \times \frac{W}{32} \times 3$ [S1]. This prevents the network from learning high-frequency details and reduces computation/memory [S1].
+-2.  **Concatenate Embedding:** Concatenate the appearance embedding $\ell_i$ (length $m$) to every pixel of the downsampled image. This creates the input feature map $D_i$ with shape $\frac{H}{32} \times \frac{W}{32} \times (3 + m)$ [S1].
+-3.  **Initial Convolution:** Pass $D_i$ through a $3 \times 3$ convolutional layer to increase the channel depth to 256. The output shape is $\frac{H}{32} \times \frac{W}{32} \times 256$ [S1].
+-4.  **Upsampling Blocks:** Process the feature map through 4 upsampling blocks. Each block consists of:
+-    *   A $4 \times$ pixel shuffle layer (increasing resolution by $2 \times$ in each dimension, halving channels).
++2.  **Concatenate Embedding:** Concatenate the appearance embedding $\ell_i$ (length $m$) to every pixel of the downsampled image [S1]. This creates the input feature map $D_i$ with shape $\frac{H}{32} \times \frac{W}{32} \times (3 + m)$ [S1].
++3.  **Initial Convolution:** Pass $D_i$ through a $3 \times 3$ convolutional layer to increase the channel depth to 256 [S1]. The output shape is $\frac{H}{32} \times \frac{W}{32} \times 256$ [S1].
++4.  **Upsampling Blocks:** Process the feature map through 4 upsampling blocks [S1]. Each block consists of:
++    *   A $4 \times$ pixel shuffle layer (increasing resolution by $2 \times$ in each dimension, reducing channels by a factor of 4).
+     *   A $3 \times 3$ convolutional layer.
+     *   A ReLU activation [S1].
+-    *   After 4 blocks, the resolution becomes $H \times W$ and the channel depth becomes 16 [S1].
+-5.  **Bilinear Interpolation:** Upsample the feature map to $H \times W$ via bilinear interpolation if not already at full resolution (the pixel shuffle blocks double resolution 4 times, $32 \to 16 \to 8 \to 4 \to 2 \to 1$ relative to the downsampled input, effectively restoring full resolution $H \times W$) [S1]. *Note: The source states "After that, a bilinear interpolation layer upsamples the feature map to H x W", implying the pixel shuffle blocks may not fully restore resolution or an explicit interpolation step is added for smoothness. The source explicitly lists "Bilinear Interpolation" as a distinct step after the 4 blocks yielding $H \times W \times 16$* [S1].
++    *   Each block doubles the feature map resolution and halves its channel depth [S1]. After 4 blocks, the resolution becomes $H \times W$ and the channel depth becomes 16 [S1].
++5.  **Bilinear Interpolation:** Upsample the feature map to $H \times W$ via bilinear interpolation [S1]. The pixel shuffle blocks restore resolution to $H/2 \times W/2$; the bilinear layer completes the upscaling to full resolution [S1].
+ 6.  **Final Convolution:** Apply two $3 \times 3$ convolutional layers with a ReLU activation between them to produce the transformation map $M_i$ of shape $H \times W \times 3$ [S1].
+ 7.  **Transformation:** Apply the pixel-wise transformation $T$ using $M_i$ to the original rendered image $I_{ir}$ to get $I_{ia}$ [S1].
+@@ -68,5 +68,5 @@
+         
+         # Step 4: 4 Upsampling Blocks
+-        # Each block: PixelShuffle(2) -> Conv2d(256->128) -> ReLU
++        # Each block: PixelShuffle(2) -> Conv2d(in/4, in/2, 3, padding=1) -> ReLU
+         # Block 1: 256 -> 128
+         # Block 2: 128 -> 64
+@@ -76,25 +76,24 @@
+             nn.Sequential(
+                 nn.PixelShuffle(2),
+-                nn.Conv2d(256, 128, kernel_size=3, padding=1),
++                nn.Conv2d(64, 128, kernel_size=3, padding=1),
+                 nn.ReLU()
+             ),
+             nn.Sequential(
+                 nn.PixelShuffle(2),
+-                nn.Conv2d(128, 64, kernel_size=3, padding=1),
++                nn.Conv2d(32, 64, kernel_size=3, padding=1),
+                 nn.ReLU()
+             ),
+             nn.Sequential(
+                 nn.PixelShuffle(2),
+-                nn.Conv2d(64, 32, kernel_size=3, padding=1),
++                nn.Conv2d(16, 32, kernel_size=3, padding=1),
+                 nn.ReLU()
+             ),
+             nn.Sequential(
+                 nn.PixelShuffle(2),
+-                nn.Conv2d(32, 16, kernel_size=3, padding=1),
++                nn.Conv2d(8, 16, kernel_size=3, padding=1),
+                 nn.ReLU()
+             )
+         ])
+         
+-        # Step 5: Bilinear Interpolation is handled in forward pass
+         # Step 6: Final Convs
+         self.conv_final_1 = nn.Conv2d(16, 16, kernel_size=3, padding=1)
+@@ -112,23 +111,9 @@
+         
+         # Step 1: Downsample by 32
+-        # Using average pooling for downsampling
+         downsampled = F.avg_pool2d(rendered_image.permute(2, 0, 1).unsqueeze(0), kernel_size=32, stride=32)
+         downsampled = downsampled.squeeze(0).permute(1, 2, 0) # Shape: H/32, W/32, 3
+         
+         # Step 2: Concatenate appearance embedding
+-        # Repeat embedding to match spatial dimensions
+-        emb_repeated = appearance_embedding.unsqueeze(0).unsqueeze(0).repeat(1, 1, downsampled.shape[0], downsampled.shape[1])
+-        # downsampled is (H/32, W/32, 3), emb is (1, m, H/32, W/32)
+-        # Need to permute downsampled to (N, C, H, W) for concat if using standard conv, 
+-        # but here we concatenate along channel dim.
+-        # Let's keep it in (H, W, C) format for clarity, then permute for conv.
+-        
+-        # Concatenate along channel dim: (H/32, W/32, 3 + m)
+-        # Note: appearance_embedding is (m,). We need to broadcast it.
+-        # Create a tensor of shape (H/32, W/32, m) filled with embedding values
+-        emb_grid = torch.zeros(downsampled.shape[0], downsampled.shape[1], self.m, device=rendered_image.device)
+-        for i in range(self.m):
+-            emb_grid[:, :, i] = appearance_embedding[i]
+-            
++        emb_grid = appearance_embedding.repeat(downsampled.shape[0], downsampled.shape[1], 1)
+         D_i = torch.cat([downsampled, emb_grid], dim=-1) # Shape: H/32, W/32, 3+m
+         
+@@ -142,11 +127,7 @@
+         for block in self.upsample_blocks:
+             x = block(x)
+-        # After 4 blocks, x is Shape: 1, 16, H, W
++        # After 4 blocks, x is Shape: 1, 16, H/2, W/2
+             
+-        # Step 5: Bilinear Interpolation (already at H, W from pixel shuffle, but source specifies it)
+-        # If pixel shuffle didn't reach full H,W, we interpolate. 
+-        # 32 -> 16 -> 8 -> 4 -> 2 -> 1 (relative to downsampled). 
+-        # 4 blocks of 2x upscale = 16x. Downsampled is 1/32. 1/32 * 16 = 1/2. 
+-        # So we are at H/2, W/2. We need to interpolate to H, W.
++        # Step 5: Bilinear Interpolation
+         x = F.interpolate(x, size=(H, W), mode='bilinear', align_corners=False)
+         
+@@ -159,5 +140,4 @@
+         
+         # Step 7: Transformation
+-        # Simple pixel-wise multiplication
+         I_ia = rendered_image * M_i
+         
+@@ -168,29 +148,35 @@
+ 
+ ### WebGL Gaussian Splatting
+-A rendering implementation targeting web browsers, potentially using different optimization strategies for appearance due to hardware constraints. [Link](2084-webgl-gaussian-splatting.md)
++A rendering implementation targeting web browsers that adapts Gaussian splatting for browser-based hardware constraints [S1]. [Link](2084-webgl-gaussian-splatting.md)
+ 
+ ### Debug Splat Point Rendering
+-A visualization method for debugging individual splat points, lacking the appearance adjustment logic. [Link](2101-debug-splat-point-rendering.md)
++A visualization method for debugging individual splat points without appearance adjustment logic [S1]. [Link](2101-debug-splat-point-rendering.md)
+ 
+ ### Gaussian Splat Fragment Shader
+-The low-level shader implementation for rendering splats, which may be modified to incorporate the transformation map if not done in post-processing. [Link](3258-gaussian-splat-fragment-shader.md)
++The low-level shader implementation for rendering splats, which can be modified to incorporate the transformation map if integrated differently [S1]. [Link](3258-gaussian-splat-fragment-shader.md)
+ 
+ ### Gaussian Splat Shader Property Configuration
+-Configuration of shader properties, which might include passing the transformation map to the shader if integrated differently. [Link](3596-gaussian-splat-shader-property-configuration.md)
++Configuration of shader properties that may include passing the transformation map to the shader if integrated differently [S1]. [Link](3596-gaussian-splat-shader-property-configuration.md)
+ 
+ ### Animated 3D Gaussian Splatting (Splatv rendering)
+-A method for animating Gaussians, which may require separate appearance modeling for temporal consistency. [Link](7758-animated-3d-gaussian-splatting-splatv-rendering.md)
++A method for animating Gaussians that may require separate appearance modeling for temporal consistency [S1]. [Link](7758-animated-3d-gaussian-splatting-splatv-rendering.md)
++
++### Oriented Ellipse Splatting
++An alternative rendering primitive that projects Gaussians as oriented ellipses rather than axis-aligned quads [S1]. [Link](7934-oriented-ellipse-splatting.md)
++
++### Gaussian Splat Vertex Shader
++The vertex-level implementation for transforming 3D Gaussians to screen space, which may be adapted for appearance-aware rendering [S1]. [Link](10420-gaussian-splat-vertex-shader.md)
+ 
+ ### Gaussian Splat URP Render Pass
+-An implementation within Unity's Universal Render Pipeline, which might handle appearance adjustments differently. [Link](17074-gaussian-splat-urp-render-pass.md)
++An implementation within Unity's Universal Render Pipeline that handles Gaussian splatting and appearance adjustments within Unity's rendering architecture [S1]. [Link](17074-gaussian-splat-urp-render-pass.md)
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The CNN processing is lightweight. On the Sci-Art scene, adding decoupled AM increases training time from 1h25m to 1h33m, a less than 10% increase [S1].
++*   **Time Complexity:** The CNN processing is lightweight [S1]. On the Sci-Art scene, adding decoupled AM increases training time from 1h25m to 1h33m, a less than 10% increase [S1].
+ *   **Memory Complexity:** VRAM usage increases from 10.23G to 11.18G, a less than 10% increase [S1].
+ *   **Performance:** Improves quality metrics significantly: SSIM from 0.858 to 0.885, PSNR from 25.08 to 26.81, and LPIPS from 0.148 to 0.121 on the Sci-Art scene [S1].
+ *   **Strengths:** Prevents floaters caused by photometric inconsistencies; allows 3D Gaussians to learn consistent geometry; minimal impact on training time and memory; discards overhead at inference time for real-time rendering [S1].
+ *   **Limitations:** Requires additional training time and memory (though small); the CNN must be discarded after training; simple multiplication is sufficient, limiting the complexity of appearance adjustments that can be learned [S1].
+-*   **When to use:** When training views have significant appearance variations (e.g., lighting changes) that cause floaters in standard 3DGS.
+-*   **When not to use:** When real-time inference speed is critical and the overhead of the CNN cannot be avoided (though it is discarded, the training overhead remains); when appearance variations are minimal.
++*   **When to use:** When training views have significant appearance variations (e.g., lighting changes) that cause floaters in standard 3DGS [S1].
++*   **When not to use:** When real-time inference speed is critical and the overhead of the CNN cannot be avoided (though it is discarded, the training overhead remains); when appearance variations are minimal [S1].
+ 
+ ## Background

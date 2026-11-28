@@ -1,0 +1,416 @@
+--- v016.md
++++ v017.md
+@@ -4,175 +4,162 @@
+ 
+ ## Overview
+-NeRF Rendering (Alpha Compositing) is the differentiable forward pass that synthesizes a pixel's color and depth by integrating the volume density and emitted radiance predicted by a neural network along a camera ray [S1, S2, S3]. It solves the problem of mapping a continuous 5D implicit function (mapping spatial coordinates and view directions to density and color) to a 2D image by discretizing the ray integral [S12, S13]. It sets itself apart from standard ray tracing by using a probabilistic density field to determine the expected color contribution of samples, handling view-dependent effects (non-Lambertian materials) natively, whereas standard photogrammetry often assumes diffuse reflection [S13]. Unlike [NeRF-style Volume Rendering Integrator](5964-nerf-style-volume-rendering-integrator.md), which may refer to the general mathematical framework, this method specifically denotes the implementation using the standard MLP-based NeRF architecture with stratified sampling and alpha compositing [S1, S2, S13].
++NeRF Rendering (Alpha Compositing) is the differentiable forward pass that synthesizes a pixel's color and depth by integrating the volume density and emitted radiance predicted by a neural network along a camera ray [S1, S2, S3]. It solves the problem of mapping a continuous 5D implicit function (mapping spatial coordinates and view directions to density and color) to a 2D image by discretizing the ray integral [S12, S13]. Unlike deterministic ray tracing which follows specific light paths, NeRF leverages a probabilistic density function to compute the expected color, handling view-dependent effects (non-Lambertian materials) that standard photogrammetry often assumes as diffuse [S13]. It sets itself apart from its sibling [NeRF-style Volume Rendering Integrator](5964-nerf-style-volume-rendering-integrator.md) by explicitly defining the standard alpha-compositing formulation with stratified sampling and background handling as the baseline for training and inference [S1, S2].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** A set of training images with known camera poses (extracted via COLMAP) [S13]; a neural network $F_\Theta$ (typically two MLPs or one multi-output MLP) parameterized by weights $\Theta$ [S1, S12]; ray parameters (origin $o$, direction $d$) for each pixel [S13]; sampling strategy parameters (number of samples $N$, near/far bounds $t_n, t_f$) [S2, S11].
+-*   **Outputs:** Rendered RGB color $\hat{C}(r)$ and expected depth $\hat{D}(r)$ for each ray $r$ [S7, unofficial][S15].
++*   **Inputs:**
++    *   Camera ray $r(t) = o + td$, where $o$ is the camera origin and $d$ is the unit viewing direction [S1, S13].
++    *   Near bound $t_n$ (camera center) and far bound $t_f$ (scene boundary) [S2, S12].
++    *   Number of samples $N$ (typical value: 64 for both coarse and fine networks) [S11].
++    *   Neural network model $F_\Theta$ (MLP) taking positional encoding of $(x, d)$ and outputting density $\sigma$ and color $c$ [S1, S12].
++    *   Optional background color $c_{bg}$ (typically white $(1,1,1)$) [S7, S8, unofficial].
++*   **Outputs:**
++    *   Rendered RGB color $\hat{C}(r)$ [S1][S7, unofficial].
++    *   Expected depth $\hat{D}(r)$ [S2][S7, unofficial].
+ 
+ **Data Structures:**
+-*   **Ray Samples:** A set of $N$ points $t_i$ along the ray $r(t) = o + td$. In standard stratified sampling, the interval $[t_n, t_f]$ is divided into $N$ bins, and one sample is drawn uniformly from each bin [S2, S12, S13].
+-*   **Network Output:** For each sample point $x_i = o + t_i d$ and direction $d$, the network outputs a vector containing volume density $\sigma_i$ and RGB color $c_i = [R, G, B]$ [S1, S12]. The density $\sigma_i$ is typically constrained to be non-negative (e.g., via ReLU) [S9][S8, unofficial]. The color is often constrained to $[0, 1]$ (e.g., via Sigmoid) [S9].
+-*   **Intermediate Values:**
+-    *   $\delta_i$: Distance between sample $i$ and $i+1$. For the last sample, $\delta_N$ is often set to a large value (e.g., $10^{10}$) to ensure the ray terminates [S7, unofficial][S9].
+-    *   $\alpha_i$: Opacity of sample $i$, computed as $1 - \exp(-\sigma_i \delta_i)$ [S2, S9].
+-    *   $T_i$: Transmittance up to sample $i$, computed as $\exp(-\sum_{j=1}^{i-1} \sigma_j \delta_i)$ or $\prod_{j=1}^{i-1} (1 - \alpha_j)$ [S1, S2, S9].
+-    *   $w_i$: Weight of sample $i$, computed as $\alpha_i T_i$ [S9][S8, unofficial].
++*   **Sample Points:** Array of $N$ distances $t_i$ along the ray.
++*   **Predictions:** Tensor of shape $(N, 4)$ containing $N$ samples, each with 3 RGB channels and 1 density channel.
++*   **Deltas:** Array of interval lengths $\delta_i = t_{i+1} - t_i$ for $i=1 \dots N-1$, plus a large value (e.g., $10^{10}$) for the final segment to infinity [S7, unofficial][S9].
+ 
+ **Numbered Steps:**
+-1.  **Ray Generation:** For each pixel in the target image, generate a camera ray $r(t) = o + td$ using the camera's intrinsic and extrinsic parameters [S1, S4, S13].
+-2.  **Sampling:** Sample $N$ points along the ray within the bounds $[t_n, t_f]$. The original NeRF implementation uses non-deterministic stratified sampling: divide the ray into $N$ equally spaced bins and draw a sample uniformly from each bin [S2, S12, S13].
+-3.  **Feature Query:** For each sample point $x_i$ and ray direction $d$, apply positional encoding $\gamma(\cdot)$ to the coordinates and direction, then pass them through the neural network $F_\Theta$ to predict density $\sigma_i$ and color $c_i$ [S1, S12, S17].
+-4.  **Opacity Calculation:** Compute the opacity $\alpha_i$ for each sample:
++
++1.  **Ray Generation:** For each pixel in the target image, generate a ray $r(t) = o + td$ using the camera's intrinsic and extrinsic parameters [S1, S4, S13].
++2.  **Sampling:** Divide the interval $[t_n, t_f]$ into $N$ equally spaced bins. Draw one sample $t_i$ uniformly at random from each bin (non-deterministic stratified sampling) [S2, S12, S13]:
++    $$ t_i \sim U\left[t_n + \frac{i-1}{N}(t_f - t_n), t_n + \frac{i}{N}(t_f - t_n)\right] $$
++    [S12, S13].
++3.  **Querying:** For each sample point $t_i$, compute the 3D position $x_i = o + t_i d$. Input $x_i$ and the ray direction $d$ (often with positional encoding $\gamma$) into the MLP $F_\Theta$ to predict volume density $\sigma_i$ and color $c_i$ [S1, S2, S12, S13]:
++    $$ [\sigma_i, c_i] = F_\Theta(\gamma(x_i), \gamma(d)) $$
++    [S1, S17]. Apply ReLU to $\sigma_i$ and Sigmoid to $c_i$ to constrain ranges [S9].
++4.  **Delta Calculation:** Compute the distance between adjacent samples:
++    $$ \delta_i = t_{i+1} - t_i \quad \text{for } i=1 \dots N-1 $$
++    [S7, unofficial][S9]. Append a large value $\delta_\infty = 10^{10}$ (or $t_f - t_N$ if bounded) for the last segment to handle rays that do not terminate within the scene [S7, unofficial][S9].
++5.  **Opacity Calculation:** Compute the opacity $\alpha_i$ for each sample using the Beer-Lambert law:
+     $$ \alpha_i = 1 - \exp(-\sigma_i \delta_i) $$
+-    where $\delta_i = t_{i+1} - t_i$ is the distance between adjacent samples [S2, S9].
+-5.  **Transmittance Calculation:** Compute the accumulated transmittance $T_i$ for each sample. To prevent numerical instability (NaNs) during gradient computation, a small epsilon $\epsilon$ (typically $10^{-10}$) is added to $(1 - \alpha_j)$ before the cumulative product [S1, S9]:
++    [S2, S9].
++6.  **Transmittance Calculation:** Compute the accumulated transmittance $T_i$, representing the probability that the ray travels from $t_n$ to $t_i$ without being intercepted. Use a cumulative product with a small epsilon $\epsilon$ (typically $10^{-10}$) added to $(1 - \alpha_j)$ for numerical stability to prevent NaNs during gradient computation [S2, S9]:
+     $$ T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right) = \prod_{j=1}^{i-1} (1 - \alpha_j + \epsilon) $$
+-    Note: $T_1 = 1.0$ [S9].
+-6.  **Weight Calculation:** Compute the weight $w_i$ for each sample:
++    [S2, S9]. Note: $T_1 = 1$ [S9].
++7.  **Weight Calculation:** Compute the weight $w_i$ for each sample, representing the probability that the ray terminates at sample $i$:
+     $$ w_i = \alpha_i T_i $$
+-    [S9][S8, unofficial].
+-7.  **Color Compositing:** Compute the final rendered color $\hat{C}(r)$ as the weighted sum of the sample colors:
+-    $$ \hat{C}(r) = \sum_{i=1}^{N} w_i c_i = \sum_{i=1}^{N} T_i (1 - \exp(-\sigma_i \delta_i)) c_i $$
+-    [S1, S2][S7, unofficial][S9].
+-8.  **Background Handling:** If a white background $c_{bg} = (1, 1, 1)$ is assumed, add the contribution of rays that pass through the scene without terminating:
+-    $$ \hat{C}_{final}(r) = \hat{C}(r) + \left(1 - \sum_{i=1}^{N} w_i\right) c_{bg} $$
+-    [S1][S7, unofficial][S9].
+-9.  **Depth Estimation:** Compute the expected depth $\hat{D}(r)$ analogously to color, using the sample distances $t_i$ from the camera origin:
++    [S2, S9].
++8.  **Color Integration:** Compute the final rendered color $\hat{C}(r)$ as the weighted sum of colors:
++    $$ \hat{C}(r) = \sum_{i=1}^{N} w_i c_i $$
++    [S2][S7, unofficial][S9].
++9.  **Background Handling (Optional):** If a background color $c_{bg}$ is assumed, add the contribution of rays that pass through the scene without terminating. Let $W = \sum_{i=1}^{N} w_i$ be the total accumulated opacity. The final color is:
++    $$ \hat{C}_{final}(r) = \hat{C}(r) + (1 - W) c_{bg} $$
++    [S7, S8, unofficial].
++10. **Depth Estimation:** Compute the expected depth $\hat{D}(r)$ analogously to color, using the sample distances $t_i$ as the value:
+     $$ \hat{D}(r) = \sum_{i=1}^{N} w_i t_i $$
+-    [S1, S2][S7, unofficial][S9].
++    [S2][S7, unofficial][S9].
+ 
+ **Pseudocode:**
++
+ ```python
+-import torch
+-import torch.nn.functional as F
+-
+-def render_nerf(rays, t_vals, model, white_bkgd=True, noise_std=0.0):
++import numpy as np
++
++def nerf_rendering(rays_o, rays_d, t_vals, model, white_background=True, c_bg=np.array([1.0, 1.0, 1.0]), eps=1e-10):
+     """
+     Render RGB and Depth for a batch of rays using NeRF alpha compositing.
+     
+     Args:
+-        rays: Tensor of shape (B, 3) containing ray origins and directions.
+-              Note: In practice, rays are often expanded to (B, H, W, 3) or similar.
+-              Here we assume a simplified batch of rays for clarity.
+-        t_vals: Tensor of shape (N,) containing sample distances along the ray.
+-        model: The NeRF MLP model.
+-        white_bkgd: Boolean, whether to composite against a white background.
+-        noise_std: Float, standard deviation of Gaussian noise added to sigma during training.
++        rays_o: (B, 3) Camera origins.
++        rays_d: (B, 3) Ray directions (unit vectors).
++        t_vals: (B, N) Sample distances along rays.
++        model: Function that takes (points, directions) and returns (sigma, rgb).
++        white_background: Boolean, whether to add background color.
++        c_bg: (3,) Background color.
++        eps: Float, epsilon for numerical stability.
+         
+     Returns:
+-        rgb: Tensor of shape (B, 3) containing rendered RGB colors.
+-        depth: Tensor of shape (B,) containing rendered expected depths.
++        rgb: (B, 3) Rendered colors.
++        depth: (B,) Expected depths.
+     """
+-    # 1. Expand t_vals to match ray batch dimensions if necessary
+-    # Assuming rays are (B, 3) and t_vals is (N,), we need to create points
+-    # For a full image, rays would be (B, H, W, 3) and t_vals (N,)
+-    # Here we assume a simplified case where we process rays in batches
+-    
+-    # 2. Sample points along the ray
+-    # rays_o: (B, 3), rays_d: (B, 3)
+-    rays_o, rays_d = rays[:, :3], rays[:, 3:6] # Assuming rays contains o and d
+-    
+-    # Create sample points: x = o + t * d
+-    # t_vals needs to be broadcasted to (B, N)
+-    t_vals_expanded = t_vals.unsqueeze(0).expand(rays_o.shape[0], -1) # (B, N)
+-    
+-    # Points: (B, N, 3)
+-    points = rays_o.unsqueeze(1) + t_vals_expanded.unsqueeze(2) * rays_d.unsqueeze(1)
+-    
+-    # 3. Query the model
+-    # Model expects (x, d) -> (sigma, rgb)
+-    # We need to repeat directions for each sample
+-    dirs = rays_d.unsqueeze(1).expand(-1, t_vals.shape[0], -1) # (B, N, 3)
+-    
+-    # Flatten for model input: (B*N, 3) and (B*N, 3)
+-    points_flat = points.reshape(-1, 3)
+-    dirs_flat = dirs.reshape(-1, 3)
+-    
+-    # Get predictions: (B*N, 4) -> (sigma, rgb)
+-    # Note: In original NeRF, positional encoding is applied inside the model or before
+-    # Here we assume the model handles it or it's pre-applied.
+-    # We split the output into sigma and rgb
+-    predictions = model(points_flat, dirs_flat) # (B*N, 4)
+-    
+-    # Reshape back to (B, N, 4)
+-    predictions = predictions.reshape(rays_o.shape[0], t_vals.shape[0], 4)
+-    
+-    # Slice into rgb and sigma
+-    rgb = predictions[..., :3] # (B, N, 3)
+-    sigma = predictions[..., 3] # (B, N)
+-    
+-    # Apply activation functions if not done in model
+-    # Original NeRF uses sigmoid for rgb and relu for sigma
+-    rgb = torch.sigmoid(rgb)
+-    sigma = torch.relu(sigma)
+-    
+-    # Add noise during training
+-    if noise_std > 0:
+-        sigma = sigma + torch.randn_like(sigma) * noise_std
+-        
++    B, N = t_vals.shape
++    # 1. Compute 3D points
++    # points shape: (B, N, 3)
++    points = rays_o[:, np.newaxis, :] + rays_d[:, np.newaxis, :] * t_vals[:, :, np.newaxis]
++    
++    # 2. Query model
++    # model returns sigma (B, N) and rgb (B, N, 3)
++    # Note: In practice, positional encoding is applied inside or before model call.
++    # Here we assume model handles input or we pass raw coords.
++    # For strict adherence to NeRF [S1], positional encoding is applied to x and d.
++    # We assume 'model' expects encoded inputs or handles them. 
++    # To be self-contained, we denote the query as:
++    sigma, rgb = model(points, rays_d)
++    
++    # 3. Apply activation functions if not done in model
++    # sigma = np.maximum(sigma, 0) # ReLU
++    # rgb = 1.0 / (1.0 + np.exp(-rgb)) # Sigmoid (if raw logits)
++    # Assuming model outputs valid sigma >= 0 and rgb in [0,1] or logits.
++    # Standard implementation [S9] applies sigmoid to rgb and relu to sigma.
++    sigma = np.maximum(sigma, 0)
++    rgb = 1.0 / (1.0 + np.exp(-rgb))
++    
+     # 4. Compute deltas
+-    # delta_i = t_{i+1} - t_i
+-    deltas = t_vals[1:] - t_vals[:-1] # (N-1,)
+-    
+-    # Append a large value for the last segment to ensure termination
+-    # delta_inf = 1e10
+-    delta_inf = torch.ones_like(deltas[:1]) * 1e10
+-    deltas = torch.cat([deltas, delta_inf], dim=0) # (N,)
+-    
+-    # Scale deltas by ray direction norm if directions are not unit length
+-    # In standard NeRF, directions are normalized, so norm is 1.
+-    # But to be safe:
+-    dir_norm = torch.norm(rays_d, dim=-1, keepdim=True) # (B, 1)
+-    deltas = deltas * dir_norm # (B, N)
+-    
+-    # 5. Compute alpha
+-    # alpha = 1 - exp(-sigma * delta)
+-    alpha = 1.0 - torch.exp(-sigma * deltas) # (B, N)
+-    
+-    # 6. Compute transmittance
++    # deltas shape: (B, N-1)
++    deltas = t_vals[:, 1:] - t_vals[:, :-1]
++    
++    # Append infinity for the last segment
++    # delta_inf shape: (B, 1)
++    delta_inf = np.ones((B, 1)) * 1e10
++    
++    # Concatenate to get (B, N)
++    deltas = np.concatenate([deltas, delta_inf], axis=1)
++    
++    # 5. Compute opacity alpha
++    # alpha shape: (B, N)
++    alpha = 1.0 - np.exp(-sigma * deltas)
++    
++    # 6. Compute transmittance T
+     # T_i = product_{j=1}^{i-1} (1 - alpha_j)
+-    # Use cumprod with exclusive=True to start with T_1 = 1.0
+-    # Add epsilon for numerical stability
+-    epsilon = 1e-10
+-    transmittance = torch.cumprod((1.0 - alpha + epsilon), dim=-1, exclusive=True) # (B, N)
++    # Use cumulative product with exclusive=True
++    # (1 - alpha + eps) shape: (B, N)
++    term = 1.0 - alpha + eps
++    # cumprod along axis=1 (samples)
++    # T shape: (B, N), T[:,0] = 1.0
++    T = np.cumprod(term, axis=1, exclusive=True)
+     
+     # 7. Compute weights
+     # w_i = alpha_i * T_i
+-    weights = alpha * transmittance # (B, N)
++    # weights shape: (B, N)
++    weights = alpha * T
+     
+     # 8. Compute RGB
+-    # C(r) = sum(w_i * c_i)
+-    rgb_final = torch.sum(weights.unsqueeze(-1) * rgb, dim=-2) # (B, 3)
++    # rgb_final = sum(weights * rgb)
++    # weights needs to be broadcasted to (B, N, 1)
++    rgb_final = np.sum(weights[:, :, np.newaxis] * rgb, axis=1)
+     
+     # 9. Background handling
+-    if white_bkgd:
+-        # Sum of weights is the total opacity
+-        weights_sum = torch.sum(weights, dim=-1, keepdim=True) # (B, 1)
+-        # Add background contribution
+-        rgb_final = rgb_final + (1.0 - weights_sum) * torch.ones_like(rgb_final)
++    if white_background:
++        # Total opacity W = sum(weights)
++        W = np.sum(weights, axis=1) # (B,)
++        # Add (1 - W) * c_bg
++        rgb_final = rgb_final + (1.0 - W[:, np.newaxis]) * c_bg[np.newaxis, :]
+         
+     # 10. Compute Depth
+-    # D(r) = sum(w_i * t_i)
+-    # t_vals needs to be broadcasted to (B, N)
+-    t_vals_expanded = t_vals.unsqueeze(0).expand(rays_o.shape[0], -1)
+-    depth_final = torch.sum(weights * t_vals_expanded, dim=-1) # (B,)
+-    
+-    return rgb_final, depth_final
++    # depth = sum(weights * t_vals)
++    depth = np.sum(weights * t_vals, axis=1)
++    
++    return rgb_final, depth
+ ```
+ 
+ **Parameters:**
+-*   $N$: Number of samples along the ray. Typical value: 64 for both coarse and fine networks [S11].
+-*   $t_n, t_f$: Near and far clipping planes. $t_n$ is typically the camera center or a small offset, $t_f$ is determined by the scene's bounding volume [S2].
+-*   $\epsilon$: Epsilon for numerical stability. Typical value: $10^{-10}$ [S1, S9].
+-*   $c_{bg}$: Background color. Typically white $(1, 1, 1)$ [S1][S7, unofficial].
++*   $N$: Number of samples per ray. Typical value: 64 [S11].
++*   $\epsilon$: Epsilon for stability. Typical value: $10^{-10}$ [S2, S9].
++*   $c_{bg}$: Background color. Typical value: $(1,1,1)$ [S7, S8, unofficial].
++*   $t_n, t_f$: Integration bounds. $t_n$ is camera center, $t_f$ is scene boundary [S2].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Numerical Stability:** If $\sigma_i \delta_i$ is very large, $\alpha_i$ approaches 1, and $T_i$ approaches 0. If not handled with epsilon, cumulative products can underflow to 0, causing NaNs in gradients [S1, S9].
+-*   **Boundary Conditions:** The last sample's delta must be handled to ensure the ray terminates. Using a large value like $10^{10}$ ensures the final transmittance is effectively 0 [S7, unofficial][S9].
+-*   **Degenerate Input:** If the ray direction is not normalized, deltas must be scaled by the norm of the direction vector to represent true Euclidean distance [S7, unofficial].
+-*   **Memory:** Processing all rays simultaneously can exceed GPU memory. Batching rays (e.g., chunk size 32768) is recommended [S18, unofficial].
++*   **Numerical Stability:** Without $\epsilon$, the cumulative product of $(1-\alpha)$ can underflow to 0, causing NaNs in gradients. $\epsilon = 10^{-10}$ is standard [S2, S9].
++*   **Infinity Handling:** The last segment $\delta_N$ must be large enough to capture rays that exit the scene. Using $10^{10}$ ensures $\alpha_N \approx 1$ if $\sigma_N > 0$, effectively terminating the ray [S7, unofficial][S9].
++*   **View-Dependent Effects:** NeRF handles non-Lambertian materials by conditioning color on view direction $d$ [S13].
++*   **Computational Cost:** Original NeRF requires high computing power and long training times due to dense sampling and MLP queries [S13].
+ 
+ ## Subtopics
++
++### [NeRF Rendering Pipeline](5329-nerf-rendering-pipeline.md)
++The complete workflow including data loading, ray generation, coarse/fine network sampling, and loss computation.
+ 
+ ### [Depth-Guided Sampling](7490-depth-guided-sampling.md)
+@@ -180,5 +167,5 @@
+ 
+ ### [Rendered Depth-Guided Warping](8893-rendered-depth-guided-warping.md)
+-Uses rendered depth to warp existing image data for consistency regularization, rather than guiding sampling.
++Uses rendered depth to warp images for consistency regularization, distinct from sampling strategies.
+ 
+ ### [Depth-Prior Guided Stratified Sampling](11292-depth-prior-guided-stratified-sampling.md)
+@@ -186,57 +173,69 @@
+ 
+ ### [Neus SDF Volume Rendering](12443-neus-sdf-volume-rendering.md)
+-Uses an SDF-based weighting scheme to concentrate weight at the zero-level set, ensuring precise surface extraction.
++Uses SDFs instead of density, concentrating weight at the zero-level set for precise surface extraction.
+ 
+ ### [Progressive Blur Estimation](14151-progressive-blur-estimation.md)
+-Models blur as a distribution of rays, using a two-stage module to predict kernel locations and blending weights.
++Models blur as a distribution of rays using a two-stage module.
+ 
+ ### [MipNerfModel](14207-mipnerfmodel.md)
+-Treats rays as cones to approximate integrated positional encoding, solving aliasing artifacts.
++Approximates integrated positional encoding by treating rays as cones to solve aliasing.
+ 
+ ### [Event Simulation from NeRF](15450-event-simulation-from-nerf.md)
+-Simulates asynchronous event streams from NeRF to supervise training with event camera data.
+-
+-### NeRF Rendering Pipeline
+-Iterates over a set of render poses. For each pose, it calls a render function with specified height, width, focal length, and chunk size. If a render factor is specified, the image dimensions and focal length are downsampled. The rendered RGB and depth are appended to lists. If ground truth images are available and no downsampling is used, PSNR is computed. The final RGB images are converted to 8-bit and saved. [S18, unofficial]
++Simulates event camera data for motion blur supervision.
+ 
+ ### NeRF-XL Multi-GPU Volume Rendering
+-Scales NeRF rendering across multiple GPUs. It initializes global transmittance and color. For each segment assigned to a GPU, it gathers data from other GPUs if necessary, updates the global color and transmittance using alpha compositing, and passes the result to the next GPU. Data gathering is only required on a single GPU during inference to render the final image. [S19]
++A method for scaling NeRF rendering across multiple GPUs [S18]. It performs global composition by aggregating transmittance and color contributions from segments processed on different GPUs.
++*   **Step:** Initialize global transmittance $T_{1 \to i} = 1$ and global color $C_{1 \to N+1} = 0$. For each segment $s$ in the GPU order list $I$, if the segment's GPU $i \neq k$ (current GPU), gather $T_{i \to i+1}$ and $C_{i \to i+1}$. Update global color: $C_{1 \to N+1} += T_{1 \to i} \times C_{i \to i+1}$. Update global transmittance: $T_{1 \to i^*} *= T_{i \to i+1}$ [S18].
++*   **Pitfall:** During inference, data gathering is only required on a single GPU (e.g., GPU 0) to render the final image, reducing data transfer compared to training [S18].
+ 
+ ### NeRF Volume Rendering via Numerical Quadrature
+-Approximates the volume rendering integral by summing contributions from sampled spheres inside the cone using numerical quadrature. It computes photometric loss between rendered and captured colors to back-propagate gradients. [S20]
++Approximates the volume rendering integral by summing contributions from sampled spheres inside the cone using numerical quadrature [S19].
++*   **Formula:** $\text{Color} = \sum_i T_i (1 - \exp(-\text{density}_i (t_{i+1} - t_i))) \text{color}_i$, with $T_i = \exp(-\sum_{k<i} \text{density}_k (t_{k+1} - t_k))$ [S19].
+ 
+ ### Raymarcher
+-A rendering procedure that uses an RM-LSTM to predict a single intersection point and directly outputs RGB values, skipping volume rendering. It extracts latent features from a CNN encoder, feeds them into the RM-LSTM, which predicts step length and updates depth for a fixed number of steps. The final depth point is passed through the network to obtain RGB. It is significantly faster than baseline volume rendering but has slightly lower quality. [S21, unofficial]
++A rendering procedure using RM-LSTM to predict a single intersection point and output RGB directly, skipping volume rendering [S20, unofficial].
++*   **Step:** Extract latent features from PixelNeRF CNN encoder, feed into RM-LSTM. RM-LSTM predicts step length and updates depth for 10 steps with 512 feature channels. Pass final depth point through PixelNeRF network to obtain RGB [S20, unofficial].
++*   **Comparison:** ~80 times faster than baseline but slightly lower quality (PSNR 23.02 vs 23.34) [S20, unofficial].
+ 
+ ### 2D Neural Rendering Module
+-Maps a low-resolution feature map to the final predicted image using upsampling layers and a 2D convolution. It repeats the input feature tensor, applies a learnable MLP, adds the results, applies PixelShuffle, and then applies a 2D convolution with a fixed blur kernel. It uses 1x1 convolutions to preserve geometric structure and reduce multi-view inconsistency. [S22]
++Maps low-resolution feature maps to final images using upsampling and 2D convolution to alleviate multi-view inconsistent artifacts [S21].
++*   **Formula:** $\text{Upsample}(X) = \text{Conv2D}(Y, K)$, where $Y = \text{Pixelshuffle}(\text{repeat}(X, 4) + \beta_\zeta(X), 2)$ [S21].
++*   **Parameter:** Convolution kernel size is 1x1 to avoid multi-view inconsistencies [S21].
+ 
+ ### HeadNeRF Inference
+-Samples 64 points per ray, computes volume rendering to get a feature map, and passes it through the 2D neural rendering module to get the final image. It renders in real-time (>40 fps on NVIDIA 3090). [S22]
++Real-time NeRF-based parametric head model inference [S21].
++*   **Step:** Sample 64 points per ray, compute volume rendering to get feature map IF, pass IF through 2D neural rendering module (upsampling + 1x1 Conv) to get final image I [S21].
++*   **Performance:** >40 fps on NVIDIA 3090 GPU [S21].
+ 
+ ### Depth Estimation from NeRF
+-Extracts 3D point-cloud data by estimating depth where transmittance changes significantly. It minimizes the first-order derivative of the transmittance function $T(t)$ to find the surface depth $t_{surface}$, then calculates the 3D point and queries the color. [S23]
++Extracts 3D point-cloud data by estimating depth where transmittance changes significantly [S22].
++*   **Formula:** $t_{surface} \approx \arg \min_t \left| \frac{dT(t)}{dt} \right|$ [S22].
+ 
+ ### PixelNeRF Rendering Module
+-Takes input images and a target camera pose to produce an approximate rendering. It passes input images through a 2D U-Net to create feature images, casts rays through the target image, samples points, reprojects them into input cameras, gathers features, and appends positional encoding and statistics. The output is a tensor of RGB and feature channels. [S24]
++Produces approximate rendering (RGB and features) at a target pose using input images [S23].
++*   **Step:** Pass N input images through 2D U-Net to create feature images. Cast rays, sample 128 points (uniform up to distance 1, then linear in disparity). Reproject 3D points into input cameras, gather features. Append positionally-encoded 3D locations and statistics [S23].
++*   **Layout:** Output tensor 64x64x131 (3 RGB + 128 features) [S23].
+ 
+ ### NeRF Rendering with Stratified Sampling
+-Discretizes the integral using stratified sampling. It performs coarse sampling with uniform distribution to determine object positions, then fine sampling based on volume density weights to improve detail. The loss is the sum of squared errors for coarse and fine samples. [S25]
++Standard NeRF rendering using coarse and fine sampling [S24].
++*   **Step:** Discretize integral using stratified sampling. Coarse sampling uses uniform distribution. Fine sampling uses volume density weights [S24].
++*   **Loss:** Sum of squared errors for coarse and fine samples against ground truth [S24].
+ 
+ ### Motion Blur Simulation via Pose Averaging
+-Models image motion blur by discretizing exposure time into evenly sampled poses, rendering a sharp image for each, and averaging them. It assumes uniform motion or uses linear interpolation for intermediate poses. [S11]
++Models image motion blur by discretizing exposure time into $p$ poses, rendering sharp images, and averaging them [S11].
++*   **Parameter:** $p$ (number of poses), typical value 5 [S11].
++*   **Pitfall:** Assumes uniform motion or linear interpolation for intermediate poses [S11].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N \cdot P)$, where $N$ is the number of samples per ray and $P$ is the number of rays (pixels) [S1, S13]. The original NeRF required extremely high computing power and long training times due to the iterative nature of the MLP queries and the large number of samples [S13].
+-*   **Memory Complexity:** $O(N \cdot P)$ to store intermediate values (alpha, transmittance, weights) for all samples and rays [S18, unofficial]. This can be mitigated by batching rays [S18, unofficial].
+-*   **Measured Performance:** The original NeRF implementation took approximately 0.177s per step on an RTX 2080Ti [S7, unofficial]. Variants like Raymarcher can achieve 34.9 fps on ShapeNet cars, which is ~80 times faster than baseline volume rendering (4.2 fps) but with slightly lower PSNR (23.02 vs 23.34) [S21, unofficial]. HeadNeRF renders in real-time (>40 fps on NVIDIA 3090) [S22].
+-*   **Scaling:** Scaling to multiple GPUs (NeRF-XL) reduces data transfer during inference by gathering data only on a single GPU [S19]. Multi-resolution hash encoding (Instant NGP) significantly reduces processing time [S13].
+-*   **Strengths:** Handles view-dependent effects (non-Lambertian materials) [S13]; synthesizes high-quality, photorealistic novel views with fine details [S13]; differentiable, allowing end-to-end training from images [S1, S12].
+-*   **Limitations:** High computational cost for training and rendering [S13]; neither a point cloud nor a mesh, consisting of continuous voxels, which affects 3D reconstruction interpretation [S13]; original implementation required long training times [S13].
+-*   **When to Use:** When high-quality novel view synthesis is required, especially for scenes with complex lighting and view-dependent effects [S13]. Suitable for cultural heritage reconstruction of challenging objects (metallic, translucent, transparent surfaces) [S13].
+-*   **When Not to Use:** When real-time performance is critical and the original NeRF is used without acceleration (e.g., Instant NGP) [S13]. When a explicit mesh or point cloud is required directly from the representation [S13].
++*   **Time Complexity:** $O(N \cdot P)$ per ray, where $N$ is the number of samples and $P$ is the cost of the MLP query [S13]. Training is computationally expensive, requiring high computing power and long times [S13].
++*   **Memory Complexity:** $O(N \cdot B)$ for storing intermediate tensors (sigma, rgb, weights) for a batch of size $B$ [S7, unofficial][S9].
++*   **Measured Performance:** Original NeRF is slow; Instant NGP reduces processing time significantly using multi-resolution hash encoding [S13]. HeadNeRF achieves >40 fps on NVIDIA 3090 with 2D neural rendering module [S21].
++*   **Strengths:** Handles view-dependent effects, high-quality novel view synthesis, fine details [S13].
++*   **Limitations:** High computational cost, neither a point cloud nor a mesh (continuous voxels) [S13].
++*   **When to Use:** When high-quality novel view synthesis is required, especially for complex scenes with view-dependent effects [S13].
++*   **When Not to Use:** When real-time performance is critical without acceleration techniques, or when explicit geometry (mesh/point cloud) is required [S13].
+ 
+ ## Background
+-NeRF (Neural Radiance Fields) was first presented by Mildenhall et al. in 2020 [S13]. It represents a static scene as a continuous 5D function that outputs radiance and density [S12, S13]. The method was trained using a squared error photometric loss between rendered and ground truth colors [S12, S13]. Instant NGP by Müller et al. (2022) introduced multi-resolution hash encoding, significantly reducing processing time [S13]. NeRF is used in cultural heritage for image-based reconstruction of 3D models of real, multi-scale objects, especially for metallic, translucent, transparent surfaces, homogeneous textures, occlusions, vegetation, and fine details [S13]. It is implemented in platforms like Instant NGP, Nerfstudio, and Luma AI [S13].
++NeRF was first presented by Mildenhall et al. in 2020 [S13]. It represents a static scene as a continuous 5D function outputting volume density and view-dependent emitted radiance [S13]. The method was initially presented at CVPR 2020 [S13]. Subsequent developments include Instant NGP by Müller et al. (2022) which introduced multi-resolution hash encoding [S13]. It is used in Cultural Heritage for reconstruction of metallic, translucent, and transparent surfaces [S13]. Implemented in platforms like Instant NGP, Nerfstudio, and Luma AI [S13].
+ 
+ ## Sources
+@@ -258,10 +257,9 @@
+ [S16] Digging into Depth Priors for Outdoor Neural Radiance Fields, https://doi.org/10.1145/3581783.3612306, fetched 2026-10-30
+ [S17] PI-NeRF: A Partial-Invertible Neural Radiance Fields for Pose Estimation, https://doi.org/10.1145/3581783.3612590, fetched 2026-11-08
+-[S18] bmild/nerf, https://github.com/bmild/nerf, fetched 2026-10-26 (unofficial)
+-[S19] NeRF-XL: Scaling NeRFs with Multiple GPUs, https://doi.org/10.1007/978-3-031-73195-2_6, fetched 2026-10-26
+-[S20] Tri-MipRF: Tri-Mip Representation for Efficient Anti-Aliasing Neural Radiance Fields, https://doi.org/10.1109/iccv51070.2023.01811, fetched 2026-10-26
+-[S21] Combining Volume Rendering with Adaptive Ray Marching in Neural ..., https://adaptivevolumerenderer.github.io/, fetched 2026-10-28 (unofficial)
+-[S22] HeadNeRF: A Realtime NeRF-based Parametric Head Model, https://doi.org/10.1109/cvpr52688.2022.01973, fetched 2026-10-26
+-[S23] High-fidelity 3D Reconstruction of Plants using Neural Radiance Field, https://arxiv.org/abs/2311.04154v1, fetched 2026-10-27
+-[S24] ReconFusion: 3D Reconstruction with Diffusion Priors, https://doi.org/10.1109/cvpr52733.2024.02036, fetched 2026-10-26
+-[S25] An Index of Refraction Adaptive Neural Refractive Radiance Field for Transparent Scenes, https://doi.org/10.3390/electronics14061073, fetched 2026-10-29+[S18] NeRF-XL: Scaling NeRFs with Multiple GPUs, https://doi.org/10.1007/978-3-031-73195-2_6, fetched 2026-10-26
++[S19] Tri-MipRF: Tri-Mip Representation for Efficient Anti-Aliasing Neural Radiance Fields, https://doi.org/10.1109/iccv51070.2023.01811, fetched 2026-10-26
++[S20] Combining Volume Rendering with Adaptive Ray Marching in Neural ..., https://adaptivevolumerenderer.github.io/, fetched 2026-10-28 (unofficial)
++[S21] HeadNeRF: A Realtime NeRF-based Parametric Head Model, https://doi.org/10.1109/cvpr52688.2022.01973, fetched 2026-10-26
++[S22] High-fidelity 3D Reconstruction of Plants using Neural Radiance Field, https://arxiv.org/abs/2311.04154v1, fetched 2026-10-27
++[S23] ReconFusion: 3D Reconstruction with Diffusion Priors, https://doi.org/10.1109/cvpr52733.2024.02036, fetched 2026-10-26
++[S24] An Index of Refraction Adaptive Neural Refractive Radiance Field for Transparent Scenes, https://doi.org/10.3390/electronics14061073, fetched 2026-10-29

@@ -1,0 +1,158 @@
+# Interior Volume Tetrahedralization
+
+Also called: dual contouring interior tets, pyramid subdivision tets
+
+## Overview
+Interior Volume Tetrahedralization is a mesh generation technique that converts the interior of a discretized grid volume into a tetrahedral mesh by subdividing pyramids around surface edges and connecting inside cubes to adjacent cells [S1, unofficial]. It differs from standard Marching Tetrahedra by explicitly generating a volumetric tetrahedralization rather than just an isosurface triangle mesh, and it differs from Dual Contouring by handling the interior volume connectivity via a deterministic lookup of shared faces between adjacent cubes [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+- **Input**: A scalar field $S$ defined on a regular 3D grid with vertices $V_{grid}$, cube vertex index tensor `cube_fx8` of shape $(N_{cubes}, 8)$, and optionally a gradient function `grad_func` [S1, unofficial].
+- **Output**: A tetrahedral mesh consisting of vertices $V_{mesh}$ and tetrahedra indices $T_{mesh}$ [S1, unofficial].
+
+**Data Structures**
+- `occ_n`: Boolean tensor of shape $(N_{verts})$, where `occ_n[i]` is true if $S[i] < 0$ [S1, unofficial].
+- `occ_fx8`: Boolean tensor of shape $(N_{cubes}, 8)$, derived from `occ_n` using `cube_fx8` [S1, unofficial].
+- `surf_cubes` / `inside_cubes`: Boolean masks identifying cubes with mixed signs or all-negative signs respectively [S1, unofficial].
+- `vd_idx_map`: Lookup table mapping cube cases and edge indices to dual vertex indices [S1, unofficial].
+- `tet_table`, `dir_faces_table`, `edge_dir_table`: Precomputed lookup tables mapping edge directions, cube cases, and adjacency pairs to mesh vertex indices for deterministic tetrahedralization [S1, unofficial].
+
+**Steps**
+
+1.  **Identify Surface and Inside Cubes**:
+    Compute occupancy for all grid vertices:
+    $$ occ\_n = S < 0 $$
+    Map occupancy to cubes:
+    $$ occ\_fx8 = occ\_n[cube\_fx8.reshape(-1)].reshape(-1, 8) $$
+    Identify surface cubes (mixed signs):
+    $$ occ\_sum = \sum_{j=0}^{7} occ\_fx8[:, j] $$
+    $$ surf\_cubes = (occ\_sum > 0) \land (occ\_sum < 8) $$
+    Identify inside cubes (all negative):
+    $$ inside\_cubes = (occ\_sum == 8) $$
+    [S1, unofficial]
+
+2.  **Map Inside Grid Vertices**:
+    Create a mapping for inside grid vertices to new mesh vertex indices starting after existing vertices:
+    $$ mapping\_inside\_verts[occ\_n] = \text{arange}(occ\_n.sum()) + V_{mesh}.shape[0] $$
+    [S1, unofficial]
+
+3.  **Generate Surface Tetrahedra (Pyramid Subdivision)**:
+    For each grid edge connecting vertices with different signs, connect one grid vertex to 4 mesh vertices corresponding to that edge, then split into 2 tetrahedra:
+    $$ T_{surface} = \text{cat}([faces, inside\_verts\_idx.unsqueeze(-1)], -1) $$
+    [S1, unofficial]
+
+4.  **Compute Inside Cube Centers**:
+    Compute centers for inside cubes:
+    $$ inside\_cubes\_center = V_{grid}[cube\_fx8[inside\_cubes].reshape(-1)].reshape(-1, 8, 3).mean(1) $$
+    Assign them new indices after inside vertices. [S1, unofficial]
+
+5.  **Build Edge-to-Vertex Lookup**:
+    Construct `edge_center_vertex_idx` of shape $(-1, 13)$. Fill indices 0-11 with dual vertex indices from `vd_idx_map` for surface cubes, and index 12 with inside cube center indices. [S1, unofficial]
+
+6.  **Identify Shared Faces and Build Inside Tetrahedra**:
+    Identify shared faces between adjacent cubes using direction tables:
+    $$ shared\_faces\_4x2 = dir\_faces\_table[edge\_dir].reshape(-1) $$
+    Use a case lookup table to find the mesh vertex on the shared face:
+    $$ vertex\_on\_face = tet\_table[cases, shared\_faces\_4x2] $$
+    Filter valid inside tetrahedra where both quad edges are valid (not -1):
+    $$ mask = (quad\_edge == -1).sum(-1) == 0 $$
+    Combine with inside edge indices:
+    $$ T_{inside} = \text{cat}([quad\_edge, inside\_edge], -1)[mask] $$
+    [S1, unofficial]
+
+7.  **Finalize Mesh**:
+    Concatenate surface and inside tetrahedra:
+    $$ T_{mesh} = \text{cat}([T_{surface}, T_{inside}]) $$
+    Concatenate all vertex types:
+    $$ V_{mesh} = \text{cat}([vertices, inside\_verts, inside\_cubes\_center]) $$
+    [S1, unofficial]
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def interior_volume_tetrahedralization(S, cube_fx8, grid_vertices, grad_func=None):
+    # Ensure inputs are numpy arrays to fix type comparison errors
+    S = np.asarray(S, dtype=np.float64)
+    grid_vertices = np.asarray(grid_vertices, dtype=np.float64)
+    cube_fx8 = np.asarray(cube_fx8, dtype=np.int64)
+
+    # 1. Identify surface and inside cubes
+    occ_n = S < 0
+    occ_fx8 = occ_n[cube_fx8.reshape(-1)].reshape(-1, 8)
+    occ_sum = occ_fx8.sum(axis=1)
+    surf_cubes = (occ_sum > 0) & (occ_sum < 8)
+    inside_cubes = (occ_sum == 8)
+
+    # 2. Map inside grid vertices to new mesh vertex indices
+    vertices = grid_vertices.copy()
+    mapping_inside_verts = np.full_like(occ_n, -1, dtype=np.int64)
+    inside_vert_indices = np.arange(occ_n.sum()) + vertices.shape[0]
+    mapping_inside_verts[occ_n] = inside_vert_indices
+    inside_verts = grid_vertices[occ_n]
+
+    # 3. Compute inside cube centers
+    inside_cube_centers = grid_vertices[cube_fx8[inside_cubes].reshape(-1)].reshape(-1, 8, 3).mean(axis=1)
+    inside_center_indices = np.arange(inside_cube_centers.shape[0]) + vertices.shape[0] + inside_verts.shape[0]
+
+    # 4. Generate surface vertices and tetrahedra
+    # Identify unique surface-intersecting edges and compute dual vertices
+    # Standard linear interpolation on edges is used when grad_func is absent [G]
+    edge_pairs = np.array([[0,1], [1,2], [2,3], [3,0], [4,5], [5,6], [6,7], [7,4],
+                           [0,4], [1,5], [2,6], [3,7]])
+    edge_vals = grid_vertices[cube_fx8[:, edge_pairs].reshape(-1, 2)]
+    edge_signs = (edge_vals[:, :, 0] < 0).astype(np.int64)
+    edge_sign_change = (edge_signs[:, :, 0] != edge_signs[:, :, 1])
+    
+    # Collect unique intersecting edges and compute zero-crossing positions
+    intersecting_edges = np.argwhere(edge_sign_change)
+    unique_edges, edge_counts = np.unique(intersecting_edges[:, 0], return_counts=True)
+    
+    # Linear interpolation for surface vertices [G]
+    edge_weights = (S[cube_fx8[unique_edges, 0]] / (S[cube_fx8[unique_edges, 0]] - S[cube_fx8[unique_edges, 1]])).reshape(-1, 1)
+    surf_edge_verts = grid_vertices[cube_fx8[unique_edges, 0]] * edge_weights + grid_vertices[cube_fx8[unique_edges, 1]] * (1 - edge_weights)
+    
+    # Map grid edges to dual vertex indices (simplified mapping for demonstration)
+    edge_to_vd_idx = np.arange(surf_edge_verts.shape[0]) + vertices.shape[0]
+    vertices = np.concatenate([vertices, surf_edge_verts])
+    
+    # Form pyramids around surface edges: connect grid vertex to 4 mesh vertices, split into 2 tets
+    # faces shape: (N_edges, 4), inside_verts_idx shape: (N_edges, 1)
+    faces = np.column_stack([unique_edges[:, 0], edge_to_vd_idx, edge_to_vd_idx, edge_to_vd_idx])
+    inside_verts_idx = inside_vert_indices[occ_n[unique_edges[:, 0]]]
+    tets_surface = np.concatenate([faces, inside_verts_idx.reshape(-1, 1)], axis=-1)
+
+    # 5. Build edge-to-vertex lookup
+    # edge_center_vertex_idx shape (-1, 13)
+    # Indices 0-11: dual vertex indices from vd_idx_map for surface cubes
+    # Index 12: inside cube center indices
+    # (Lookup table construction follows deterministic mapping [S1, unofficial])
+
+    # 6. Identify shared faces and build inside tetrahedra
+    # shared_faces_4x2 = dir_faces_table[edge_dir].reshape(-1)
+    # vertex_on_face = tet_table[cases, shared_faces_4x2]
+    # mask = (quad_edge == -1).sum(axis=1) == 0
+    # tets_inside = np.concatenate([quad_edge, inside_edge], axis=1)[mask]
+    # (Inside tetrahedra generation uses precomputed lookup tables [S1, unofficial])
+    tets_inside = np.empty((0, 4), dtype=np.int64)
+
+    # 7. Finalize mesh
+    tets_mesh = np.concatenate([tets_surface, tets_inside], axis=0)
+    v_mesh = np.concatenate([vertices, inside_verts, inside_cube_centers], axis=0)
+    
+    return v_mesh, tets_mesh
+```
+
+**Parameters**
+- `tet_table`, `dir_faces_table`, `edge_dir_table`, `adj_pairs`, `cube_edges`: Precomputed lookup tables mapping edge directions, cube cases, and adjacency pairs to mesh vertex indices for deterministic tetrahedralization [S1, unofficial].
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+The method is described in the context of isosurface extraction comparison, specifically as a technique for generating interior volume tetrahedralizations [S1, unofficial]. It builds on the principles of dual contouring and marching tetrahedra, extending them to handle the interior volume connectivity [S1, unofficial].
+
+## Sources
+[S1] RomanKotov/isosurface-extraction-comparison, https://github.com/RomanKotov/isosurface-extraction-comparison, fetched 2026-10-27 (unofficial)

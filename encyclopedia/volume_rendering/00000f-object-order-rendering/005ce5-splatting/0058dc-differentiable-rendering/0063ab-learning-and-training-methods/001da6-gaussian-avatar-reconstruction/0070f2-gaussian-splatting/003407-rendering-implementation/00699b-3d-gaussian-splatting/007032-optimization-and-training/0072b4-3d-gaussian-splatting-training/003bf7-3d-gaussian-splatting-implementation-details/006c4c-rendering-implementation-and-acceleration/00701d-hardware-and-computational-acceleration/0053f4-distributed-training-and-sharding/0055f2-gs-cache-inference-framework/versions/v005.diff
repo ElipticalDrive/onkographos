@@ -1,0 +1,113 @@
+--- v004.md
++++ v005.md
+@@ -8,10 +8,10 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Camera pose (view/projection matrices), structured 3DGS model (anchors, MLP weights, anchor features), previous frame's cache state.
+-*   **Output:** Rendered image (binocular 2K), updated cache state.
++*   **Input:** Camera pose (view/projection matrices), structured 3DGS model (anchors, MLP weights, anchor features), previous frame's cache state [S1, unofficial].
++*   **Output:** Rendered image (binocular 2K), updated cache state [S1, unofficial].
+ 
+ **Data Structures:**
+-*   **Cache:** Stores decoded Gaussian parameters (position, covariance, opacity, SH coefficients) indexed by anchor ID. The layout is not explicitly defined in the sources, but it maps anchor indices to Gaussian parameters [S1, unofficial].
+-*   **Anchor Set ($X$):** The set of anchors required for decoding in the current frame.
++*   **Cache:** Stores decoded Gaussian parameters (position, covariance, opacity, SH coefficients) indexed by anchor ID. The exact memory layout is not given in the sources, but it maps anchor indices to Gaussian parameters [S1, unofficial].
++*   **Anchor Set ($X$):** The set of anchors required for decoding in the current frame [S1, unofficial].
+ *   **Newly Decoded Anchors ($X_k'$):** The subset of anchors from $X$ that were not found in the cache or required re-decoding from the previous $k$ frames [S1, unofficial].
+ 
+@@ -24,12 +24,6 @@
+     $$ \text{depth} = H\left(\frac{|X_k'|}{|X|}\right) $$
+     where $|X_k'|$ is the number of newly decoded anchors from the previous $k$ frames, and $|X|$ is the total anchor set for decoding in the current frame [S1, unofficial]. The function $H$ adjusts the depth of reuse and cached parameters according to the intensity of decoding calculations [S1, unofficial].
+-6.  **Anchor Decoding (Derivation Stage):**
+-    *   For anchors in the cache: Retrieve cached Gaussian parameters.
+-    *   For anchors not in the cache: Decode anchor features into neural Gaussian parameters using the MLP (weights $\theta$) [S1, unofficial].
+-    *   Update the cache with newly decoded parameters.
+-    *   Flush cache entries that have exceeded the dynamic reuse depth to prevent significant rendering errors due to viewpoint changes [S1, unofficial].
+-7.  **Gaussian Rasterization (Rasterization Stage):**
+-    *   Project the decoded 3D Gaussians to 2D.
+-    *   Perform alpha compositing to generate the final image. This stage is **not** accelerated by caching because slight perspective changes significantly affect occlusion, and caching here would degrade visual quality [S1, unofficial].
++6.  **Anchor Decoding (Derivation Stage):** For anchors in the cache, retrieve cached Gaussian parameters. For anchors not in the cache, decode anchor features into neural Gaussian parameters using the MLP (weights $\theta$). Update the cache with newly decoded parameters. Flush cache entries that have exceeded the dynamic reuse depth to prevent significant rendering errors due to viewpoint changes [S1, unofficial].
++7.  **Gaussian Rasterization (Rasterization Stage):** Project the decoded 3D Gaussians to 2D. Perform alpha compositing to generate the final image. This stage is **not** accelerated by caching because slight perspective changes significantly affect occlusion, and caching here would degrade visual quality [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -37,29 +31,26 @@
+ def gs_cache_render(camera_pose, model, prev_cache, k, H_func):
+     # 1. Binocular De-redundancy and Anchor Filtering
+-    unique_view_frustums = binocular_deredundancy(camera_pose)
+-    anchor_indices = compute_anchor_indices(unique_view_frustums, model)
+-    X = filter_anchors(anchor_indices, model) # Anchors needed for current frame
++    # Standard frustum culling to get unique view frustums for binocular rendering
++    unique_view_frustums = [camera_pose.left_frustum, camera_pose.right_frustum]
++    # Compute anchor indices from camera input and filter global set to X
++    anchor_indices = [a.id for a in model.anchors if frustum_contains(a, unique_view_frustums)]
++    X = set(anchor_indices)
+     
+     # 2. Index Mapping and Cache Lookup
+-    cache_indices = map_to_cache_indices(anchor_indices)
+-    cached_params = prev_cache.get(cache_indices)
++    # Translate anchor indices to cache indices
++    cache_indices = {aid: aid for aid in X} # Direct mapping assumed per source
++    cached_params = {aid: prev_cache.get(aid) for aid in X if prev_cache.has(aid)}
+     
+     # 3. Identify Newly Decoded Anchors (from previous k frames logic)
+-    # Note: X_k' is defined as newly decoded anchors from previous k frames.
+-    # In implementation, this likely tracks anchors that were decoded recently.
+-    # For the current frame's update rate calculation, we need the count of 
+-    # anchors that *will be* newly decoded or were recently decoded.
+-    # The source defines |X_k'| as "newly decoded anchors from the previous k frames".
+-    # We assume a tracking mechanism exists for this count.
+-    num_recently_decoded = get_recently_decoded_count(k) 
++    # Track anchors decoded in the last k frames to compute |X_k'|
++    # Implementation requires a sliding window counter maintained across frames
++    num_recently_decoded = prev_cache.recently_decoded_count(k)
+     
+     # 4. Dynamic Cache Depth Scheduling
+-    update_rate = num_recently_decoded / len(X)
++    update_rate = num_recently_decoded / len(X) if len(X) > 0 else 0.0
+     expected_reuse_depth = H_func(update_rate)
+     
+     # 5. Cache Scheduling and Decoding
+-    # Load MLP weights if not already loaded
+     mlp_weights = model.get_mlp_weights()
+-    
+     new_gaussians = {}
+     for anchor_id in X:
+@@ -68,11 +59,12 @@
+             gaussian = cached_params[anchor_id]
+         else:
+-            # Miss: Decode anchor features
++            # Miss: Decode anchor features using MLP
+             anchor_feature = model.get_anchor_feature(anchor_id)
+-            gaussian = anchor_decoder(anchor_feature, mlp_weights)
++            # MLP forward pass: gaussian = MLP(anchor_feature, mlp_weights)
++            gaussian = model.anchors[anchor_id].feature @ mlp_weights
+             new_gaussians[anchor_id] = gaussian
+             
+     # 6. Update Cache
+-    # Flush old entries based on expected_reuse_depth
++    # Flush old entries based on expected_reuse_depth to prevent appearance errors
+     prev_cache.flush(expected_reuse_depth)
+     # Insert new/updated entries
+@@ -80,8 +72,11 @@
+     
+     # 7. Rasterization (Uncached)
+-    # Project all Gaussians (cached + new)
+-    projected_gaussians = project_gaussians(gaussians, camera_pose)
+-    # Sort and Rasterize
+-    image = rasterize(projected_gaussians)
++    # Combine cached and newly decoded Gaussians
++    all_gaussians = {**cached_params, **new_gaussians}
++    # Project all Gaussians to 2D (standard perspective projection)
++    projected_gaussians = [project_2d(g, camera_pose) for g in all_gaussians.values()]
++    # Sort by depth and perform alpha compositing (standard rasterization)
++    projected_gaussians.sort(key=lambda g: g.depth)
++    image = alpha_composite(projected_gaussians)
+     
+     return image, prev_cache
+@@ -103,5 +98,5 @@
+ 
+ ## Background
+-GS-Cache was introduced in the paper "A GS-Cache Inference Framework for Large-Scale Gaussian Splatting Models" [S1, unofficial]. It addresses the challenges of real-time rendering of large-scale 3DGS models, particularly in VR applications where binocular 2K resolution is required. The framework was developed to overcome the bottleneck of the Gaussian Derivation Stage in structured Gaussian derivation methods, which becomes increasingly computationally intensive as scene scale and anchor feature parameters increase [S1, unofficial].
++GS-Cache was introduced in the paper "A GS-Cache Inference Framework for Large-Scale Gaussian Splatting Models" [S1, unofficial]. It addresses the challenges of real-time rendering of large-scale 3DGS models, particularly in VR applications where binocular 2K resolution is required [S1, unofficial]. The framework was developed to overcome the bottleneck of the Gaussian Derivation Stage in structured Gaussian derivation methods, which becomes increasingly computationally intensive as scene scale and anchor feature parameters increase [S1, unofficial].
+ 
+ ## Sources

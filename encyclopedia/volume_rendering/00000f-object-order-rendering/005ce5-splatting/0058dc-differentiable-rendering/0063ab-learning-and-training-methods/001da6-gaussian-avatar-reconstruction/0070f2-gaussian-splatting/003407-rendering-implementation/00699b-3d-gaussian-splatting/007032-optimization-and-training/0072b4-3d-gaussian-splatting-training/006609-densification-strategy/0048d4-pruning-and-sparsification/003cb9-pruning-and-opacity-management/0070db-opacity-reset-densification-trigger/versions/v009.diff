@@ -1,0 +1,193 @@
+--- v008.md
++++ v009.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Opacity Reset & Densification Trigger is the adaptive control mechanism in 3D Gaussian Splatting that manages the population of Gaussian primitives $\mathcal{G}$ during training. It solves the problem of static initialization by transitioning from a sparse set of Structure-from-Motion (SfM) points to a denser, scene-adaptive representation. It distinguishes itself from sibling methods by combining periodic opacity resetting with gradient-based densification (cloning/splitting) and pruning, rather than relying solely on static thresholds or post-processing [S2][S4, unofficial].
++Opacity Reset & Densification Trigger is the adaptive control mechanism in 3D Gaussian Splatting that manages the population of Gaussian primitives $\mathcal{G}$ during training [S4, unofficial]. It solves the problem of static initialization by transitioning from a sparse set of Structure-from-Motion (SfM) points to a denser, scene-adaptive representation [S2]. It distinguishes itself from sibling methods by combining periodic opacity resetting with gradient-based densification (cloning/splitting) and pruning, rather than relying solely on static thresholds or post-processing [S2][S4, unofficial].
+ 
+ ## How it works
+@@ -10,9 +10,9 @@
+ 
+ ### Inputs and Outputs
+-- **Input:** Current Gaussian set $\mathcal{G}$, accumulated image-plane gradients $\nabla_{\mathbf{x}}$, accumulated visibility counts or contribution weights, current training iteration $t$, and hyperparameters.
++- **Input:** Current Gaussian set $\mathcal{G}$, accumulated image-plane gradients $\nabla_{\mathbf{x}}$, accumulated visibility counts or contribution weights, current training iteration $t$, and hyperparameters [S4, unofficial].
+ - **Output:** Updated Gaussian set $\mathcal{G}'$ with modified counts, positions, opacities, and scales.
+ 
+ ### Data Structures
+-- **grad2d:** A tensor of shape $(N, 2)$ storing the running accumulation of image-plane gradient norms for each Gaussian.
++- **grad2d:** A tensor of shape $(N, 2)$ storing the running accumulation of image-plane gradient norms for each Gaussian [S4, unofficial].
+ - **count:** A tensor of shape $(N, 1)$ storing the running accumulation of visibility counts (how many times a Gaussian contributed to a pixel) [S4, unofficial].
+ - **state:** Flags indicating if refinement is paused (e.g., after reset) [S4, unofficial].
+@@ -22,5 +22,5 @@
+ - **densify_until_iter:** Iteration after which densification stops. Default: 15,000 [S4, unofficial].
+ - **densify_every:** Iteration interval for densification checks. Default: 100 [S2][S4, unofficial].
+-- **opacity_reset_interval:** Iteration interval for opacity resets. Default: 3000 [S4, S5, unofficial].
++- **opacity_reset_interval:** Iteration interval for opacity resets. Default: 3000 [S4, unofficial][S5, unofficial].
+ - **pause_refine_after_reset:** Steps to pause refinement after reset. Default: 0 [S4, unofficial].
+ - **pos_thresh:** Position gradient threshold for densification. Default: 0.0002 [S2].
+@@ -63,12 +63,7 @@
+ ### Pseudocode
+ ```python
++import torch
++
+ def densification_step(gaussians, grad2d, count, t, params):
+-    """
+-    gaussians: Object containing tensors means, scales, rotations, opacities, sh_coeffs
+-    grad2d: Tensor (N, 2) accumulated image-plane gradients
+-    count: Tensor (N, 1) accumulated visibility counts
+-    t: Current iteration
+-    params: Dictionary of hyperparameters
+-    """
+     N = gaussians.opacities.shape[0]
+     if N == 0:
+@@ -81,5 +76,4 @@
+     
+     should_reset = (t % reset_interval == 0)
+-    # White background specific trigger
+     if params.get('white_background', False) and t == densify_from_iter:
+         should_reset = True
+@@ -101,22 +95,15 @@
+     # 3. Compute average gradients
+     absgrad = params.get('absgrad', False)
+-    key = params.get('key_for_gradient', 'means2d')
+-    
+-    # Accumulate gradients in pre-backward step (external)
+-    # Here we normalize
+     if not absgrad:
+-        # Avoid division by zero
+         safe_count = torch.clamp(count, min=1)
+         avg_grad = grad2d / safe_count
+     else:
+-        avg_grad = grad2d # Use absolute accumulated gradients
++        avg_grad = grad2d
+ 
+     pos_thresh = params.get('pos_thresh', 0.0002)
+     grad_magnitude = torch.norm(avg_grad, dim=1)
+-    
+-    # 4. Identify candidates for densification
+     high_grad_mask = grad_magnitude > pos_thresh
+     
+-    # 5. Pruning
++    # 4. Pruning
+     prune_opa = params.get('prune_opa', 0.005)
+     prune_scale3d = params.get('prune_scale3d', 0.1)
+@@ -124,31 +111,18 @@
+     refine_stop_iter = params.get('refine_scale2d_stop_iter', 0)
+     
+-    prune_mask = torch.zeros(N, dtype=torch.bool)
+-    
+-    # Low opacity
+-    prune_mask |= (gaussians.opacities < prune_opa)
+-    
+-    # Large 3D scale
+-    # Note: scales are usually log-space, so compare exp(scale) or use raw scale if normalized
+-    # Assuming 'scales' are normalized 3D scales
+-    prune_mask |= (gaussians.scales > prune_scale3d)
+-    
+-    # Large 2D scale (if active)
++    prune_mask = (gaussians.opacities < prune_opa) | \
++                 (gaussians.scales > prune_scale3d)
+     if refine_stop_iter == 0 or t < refine_stop_iter:
+-        # 2D scale projection would be computed here
+-        # For pseudocode, assume 'scales_2d' is available
+         prune_mask |= (gaussians.scales_2d > prune_scale2d)
+         
+-    # Remove pruned Gaussians
+     keep_mask = ~prune_mask
+     gaussians.prune(keep_mask)
+     
+     # Re-index grad2d and count for remaining Gaussians
+-    # (Implementation detail: compact tensors)
+-    
+-    # 6. Densification (Clone/Split)
+-    # Re-evaluate high_grad_mask on remaining Gaussians
+-    # ... (re-calculate grad_magnitude on kept Gaussians)
+-    
++    grad2d = grad2d[keep_mask]
++    count = count[keep_mask]
++    high_grad_mask = high_grad_mask[keep_mask]
++    
++    # 5. Densification (Clone/Split)
+     grow_scale3d = params.get('grow_scale3d', 0.01)
+     grow_scale2d = params.get('grow_scale2d', 0.05)
+@@ -156,5 +130,4 @@
+     
+     new_gaussians = []
+-    
+     for i in range(len(gaussians)):
+         if not high_grad_mask[i]:
+@@ -166,18 +139,11 @@
+         
+         if is_small:
+-            # Clone
+             clone = g.clone()
+-            # Move clone in direction of gradient
+             grad_dir = avg_grad[i] / (torch.norm(avg_grad[i]) + 1e-8)
+-            clone.position += grad_dir * 0.01 # Small step
++            clone.position += grad_dir * 0.01
+             new_gaussians.append(clone)
+         elif is_large_2d:
+-            # Split
+-            # Replace with two new Gaussians
+-            # Scale divided by 1.6
+             new_scale = g.scale / split_scale_factor
+-            # Sample positions from original Gaussian PDF
+             pos1, pos2 = sample_from_gaussian_pdf(g.position, g.covariance, 2)
+-            
+             g1 = Gaussian(pos1, new_scale, g.rotation, g.opacity, g.sh_coeffs)
+             g2 = Gaussian(pos2, new_scale, g.rotation, g.opacity, g.sh_coeffs)
+@@ -187,12 +153,29 @@
+     gaussians.extend(new_gaussians)
+     
+-    # 7. Post-processing
++    # 6. Post-processing
+     update_normals(gaussians)
+ 
+ def reset_opacity(gaussians):
+-    """Reset opacities to a low value."""
+     gaussians.opacities.fill_(0.01)
+-    # Optionally reset non-diffuse SH coefficients to 0.001
+-    # gaussians.sh_coeffs[:, 1:] = 0.001
++
++def sample_from_gaussian_pdf(mean, covariance, num_samples):
++    samples = torch.distributions.MultivariateNormal(mean, covariance).rsample((num_samples,))
++    return samples[0], samples[1]
++
++class Gaussian:
++    def __init__(self, position, scale, rotation, opacity, sh_coeffs):
++        self.position = position
++        self.scale = scale
++        self.rotation = rotation
++        self.opacity = opacity
++        self.sh_coeffs = sh_coeffs
++    def clone(self):
++        return Gaussian(self.position.clone(), self.scale.clone(), self.rotation.clone(), self.opacity.clone(), self.sh_coeffs.clone())
++
++def update_normals(gaussians):
++    for g in gaussians:
++        cov = g.rotation @ torch.diag(g.scale**2) @ g.rotation.T
++        eigenvalues, eigenvectors = torch.linalg.eigh(cov)
++        g.normal = eigenvectors[:, 0]
+ ```
+ 
+@@ -201,5 +184,4 @@
+ - **Over-densification:** Using a threshold too low (e.g., 0.001 vs 0.002) on Mip-NeRF360 yields 4.90M Gaussians and lowers PSNR [S3, unofficial].
+ - **Under-densification:** Using a threshold too high (e.g., 0.004) yields 0.66M Gaussians and raises LPIPS [S3, unofficial].
+-- **Distractors:** Replacing Opacity Reset with other methods (like UBP) is ineffective for removing distractors [S1].
+ 
+ ## Subtopics
+@@ -230,5 +212,5 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Densification is performed every 100 iterations. The cost depends on the number of Gaussians $N$ and the number of candidates for cloning/splitting. Buffer compaction is $O(N)$.
++- **Time Complexity:** Densification is performed every 100 iterations. The cost depends on the number of Gaussians $N$ and the number of candidates for cloning/splitting. Buffer compaction is $O(N)$ [S2][S4, unofficial].
+ - **Memory Complexity:** Memory usage scales with the number of Gaussians. Pruning reduces memory, while densification increases it. The method keeps the total count manageable (e.g., ~1.79M on Mip-NeRF360 subsets) [S3, unofficial].
+ - **Performance:** On Mip-NeRF360 calibration subset (bicycle, bonsai, counter, garden), a threshold of 0.002 yields 1.79M Gaussians with best PSNR, SSIM, and GMSD [S3, unofficial].
+@@ -237,5 +219,5 @@
+ 
+ ## Background
+-The method was introduced in the original 3D Gaussian Splatting paper by Kerbl et al. (2023) [S2]. It builds on the idea of adaptive control of Gaussian primitives, allowing the model to start from sparse SfM points and densify as needed. The opacity reset mechanism was originally introduced in this work to prevent overfitting to noise or distractors [S1]. Subsequent works have refined the thresholds and added variations like occlusion-aware criteria [S3, unofficial] and opacity lobe modulation [S7, unofficial].
++The method was introduced in the original 3D Gaussian Splatting paper by Kerbl et al. (2023) [S2]. It builds on the idea of adaptive control of Gaussian primitives, allowing the model to start from sparse SfM points and densify as needed [S2]. Subsequent works have refined the thresholds and added variations like occlusion-aware criteria [S3, unofficial] and opacity lobe modulation [S7, unofficial].
+ 
+ ## Sources

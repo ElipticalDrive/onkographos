@@ -1,0 +1,195 @@
+# 3D Image Resize and Crop
+
+Also called: 3D Image Resize and Crop for Super-Resolution
+
+## Overview
+3D Image Resize and Crop is a preprocessing pipeline that standardizes volumetric data dimensions and resolution to prepare inputs for super-resolution or reconstruction algorithms [S1, unofficial]. It solves the problem of inconsistent input shapes and scales by cropping the depth axis to a central region, padding the spatial axes to a square, and resizing to a target resolution [S1, unofficial]. Unlike [Cubic Upsampling via Tiling](2342-cubic-upsampling-via-tiling.md), which focuses on high-fidelity reconstruction of missing high-frequency details, this method provides a deterministic, geometry-aware normalization step that ensures consistent spatial alignment and intensity scaling [S1, unofficial]. It differs from [Deep Learning-Based Super-Resolution](12769-deep-learning-based-super-resolution.md) by relying on explicit geometric transformations (crop, pad, resize) rather than learned feature mappings [S1, unofficial].
+
+## How it works
+The method processes a 3D volume (or a batch of 3D volumes) through a sequence of geometric and normalization steps [S1, unofficial]. The primary variant, `resize_and_crop`, prepares high-resolution (HR) and low-resolution (LR) pairs for training or inference [S1, unofficial].
+
+### Inputs and Outputs
+- **Input:** A 3D volume array `V` with shape `[D, H, W]` (or batched `[B, D, H, W]`) and a target size tuple `image_size = (crop_depth, target_H, target_W)` [S1, unofficial].
+- **Output:** A normalized tensor in format `[C, H_target, W_target, 1]` (or `[B, C, H_target, W_target, 1]`) [S1, unofficial]. If generating LR pairs, it returns both the HR and LR versions [S1, unofficial].
+
+### Data Structures
+- **Volume `V`:** Typically `float32` or `int16` (e.g., Hounsfield units) [S1, unofficial].
+- **Tensor:** PyTorch `Tensor` or NumPy array with dimensions `[B, C, H, W]` during processing, permuted to `[C, H, W, 1]` for output [S1, unofficial].
+
+### Steps
+1.  **Z-Dimension Crop:** Crop the depth axis (axis 0) to a central region defined by `image_size[0]/2` slices around the center index of the original depth dimension [S1, unofficial].
+2.  **X-Y Padding:** If the height ($H$) and width ($W$) dimensions are not equal, pad the smaller dimension with zeros to match the larger dimension, centering the original content [S1, unofficial].
+3.  **Conversion and Resizing:** Convert the padded volume to a tensor format `[B, C, H, W]` (assuming single channel $C=1$) [S1, unofficial]. Resize using bilinear interpolation to the target dimensions `image_size[1]` × `image_size[2]` [S1, unofficial].
+4.  **Normalization:** Divide the resized tensor by the global maximum value of the resized volume to normalize intensity to $[0, 1]$ [S1, unofficial].
+5.  **Permutation:** Permute dimensions from `[B, C, H, W]` to `[B, C, H, W, 1]` (or `[C, H, W, 1]` for single samples) for final output [S1, unofficial].
+
+### Generating Low-Resolution (LR) Pairs
+To create an LR version for super-resolution tasks, the method performs the same Z-crop and X-Y padding as the HR version [S1, unofficial]. It then converts to a tensor and resizes to a lower target size to create `image_lr` [S1, unofficial]. Both HR and LR images are normalized by dividing by their respective maximums and permuted to `[C, H, W, 1]` [S1, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn.functional as F
+import numpy as np
+
+def resize_and_crop(volume: np.ndarray, image_size: tuple, return_lr: bool = False) -> tuple:
+    """
+    Resize and crop a 3D volume for super-resolution preprocessing.
+    
+    Args:
+        volume: Input 3D array of shape (D, H, W) or (B, D, H, W).
+        image_size: Tuple (crop_depth, target_H, target_W). 
+        return_lr: If True, also return the low-resolution version.
+        
+    Returns:
+        HR tensor of shape (B, 1, H, W, 1) or (1, H, W, 1).
+        If return_lr is True, also returns LR tensor.
+    """
+    # Handle batch dimension
+    if volume.ndim == 3:
+        volume = np.expand_dims(volume, axis=0)
+        batched = False
+    else:
+        batched = True
+        
+    B, D, H, W = volume.shape
+    
+    # 1. Z-Dimension Crop
+    crop_radius = int(image_size[0] / 2)
+    center_z = D // 2
+    start_z = max(0, center_z - crop_radius)
+    end_z = min(D, center_z + crop_radius)
+    if end_z - start_z == 0:
+        start_z = 0
+        end_z = D
+    volume_cropped = volume[:, start_z:end_z, :, :]
+    
+    # 2. X-Y Padding
+    H_curr, W_curr = volume_cropped.shape[2], volume_cropped.shape[3]
+    if H_curr != W_curr:
+        max_dim = max(H_curr, W_curr)
+        pad_h = max_dim - H_curr
+        pad_w = max_dim - W_curr
+        pad_top = pad_h // 2
+        pad_bottom = pad_h - pad_top
+        pad_left = pad_w // 2
+        pad_right = pad_w - pad_left
+        volume_padded = np.pad(volume_cropped, 
+                               ((0, 0), (0, 0), (pad_top, pad_bottom), (pad_left, pad_right)), 
+                               mode='constant', constant_values=0)
+    else:
+        volume_padded = volume_cropped
+        
+    # 3. Convert to Tensor and Resize
+    tensor_vol = torch.from_numpy(volume_padded).float().unsqueeze(1)  # [B, 1, H, W]
+    target_h, target_w = image_size[1], image_size[2]
+    resized_vol = F.interpolate(tensor_vol, size=(target_h, target_w), mode='bilinear', align_corners=False)
+    
+    # 4. Normalization
+    max_val = resized_vol.max()
+    resized_vol_norm = resized_vol / max_val if max_val > 0 else resized_vol
+    
+    # 5. Permute to [C, H, W, 1] -> [B, 1, H, W, 1]
+    output_hr = resized_vol_norm.permute(0, 1, 2, 3, 4)
+    
+    if not return_lr:
+        return output_hr.squeeze(0) if not batched else output_hr
+        
+    # Generate LR version
+    resized_lr = F.interpolate(tensor_vol, size=(target_h // 2, target_w // 2), mode='bilinear', align_corners=False)
+    max_val_lr = resized_lr.max()
+    resized_lr_norm = resized_lr / max_val_lr if max_val_lr > 0 else resized_lr
+    output_lr = resized_lr_norm.permute(0, 1, 2, 3, 4)
+    
+    return output_hr.squeeze(0) if not batched else output_hr, output_lr.squeeze(0) if not batched else output_lr
+```
+
+### Parameters
+- `image_size`: Tuple `(crop_depth, target_H, target_W)` [S1, unofficial].
+- `spatial_lr_scale`: Float factor for LR resolution [S1, unofficial].
+
+### Edge Cases and Pitfalls
+- **Z-Crop Boundaries:** If the volume depth $D$ is smaller than `2 * crop_radius`, the start/end indices may exceed bounds. The code must clamp indices or handle thin volumes [S1, unofficial].
+- **Intensity Scaling:** Normalization by the global maximum assumes the maximum value is representative of the foreground. If the volume contains noise or outliers, this may compress the signal [S1, unofficial].
+- **Padding Artifacts:** Zero-padding introduces sharp boundaries at the edges of the volume, which may cause artifacts during interpolation or subsequent processing [S1, unofficial].
+
+## Subtopics
+
+### Slice-wise Nearest-Neighbor Resampling
+Slice-wise Nearest-Neighbor Resampling resizes 2D slices of a volume dataset using nearest-neighbor interpolation to correct non-uniform spacing or scaling issues in specific anatomical regions [S2, unofficial]. It is chosen when preserving sharp edges and discrete values (e.g., segmentation masks or specific CT ranges) is critical, avoiding the blurring effects of bilinear/trilinear interpolation [S2, unofficial]. It differs from the main `resize_and_crop` method by operating slice-by-slice with variable scaling factors and nearest-neighbor logic [S2, unofficial].
+
+**Steps:**
+1. Iterate through slices `j` in specific ranges (e.g., 0-209, 209-227, 227-249, 1106-1110, 1117-end) [S2, unofficial].
+2. For each slice, call `resizeMatrix` with target dimensions scaled by factors (1.9, 1.3, or 1.1) [S2, unofficial].
+3. Call `centreContent` to place the resized slice back into the original matrix bounds [S2, unofficial].
+
+**Formula:**
+Nearest-neighbor coordinate mapping:
+$$ \text{nearestX} = \lfloor x \cdot \frac{\text{width}}{\text{resizeW}} \rfloor $$
+$$ \text{nearestY} = \lfloor y \cdot \frac{\text{height}}{\text{resizeH}} \rfloor $$
+Output pixel at $(x, y)$ takes value from input at $(\text{nearestX}, \text{nearestY})$ [S2, unofficial].
+
+**Parameters:**
+- `resizeW`, `resizeH`: Target width and height for the resized slice. Typically calculated as `CT_x_axis / factor` and `CT_y_axis / factor` where factor is 1.9, 1.3, or 1.1 [S2, unofficial].
+
+### [Resized Slice Centering](12150-resized-slice-centering.md)
+Resized Slice Centering is a data preparation technique for volume rendering that places a resized 2D content matrix into the center of a larger container matrix, padding the unused regions with the Hounsfield unit value for air (-1024). It solves the problem of aligning variable-sized or resized anatomical data into a fixed-size voxel grid required by rendering engines, ensuring that the object remains spatially centered relative to the coordinate system. It differs from [Zero Padding for Aliasing Reduction](6382-zero-padding-for-aliasing-reduction.md) by using a specific physical constant (air HU) rather than zero, and from [Cosine Projection via Upsampling](13919-cosine-projection-via-upsampling.md) by operating in Cartesian image space rather than frequency or projection space.
+
+### Pre-image Enlargement
+Pre-image Enlargement is an enlargement technique for a pre-image (depth coordinate map) using zooming and pixel averaging to interpolate values while preserving originals [S3]. It is used to generate shaded surface views from depth maps by increasing resolution while maintaining the integrity of the original depth coordinates [S3]. It differs from standard interpolation by ensuring original pixel values remain unchanged after averaging [S3].
+
+**Steps:**
+1. Zoom the pre-image by a factor of two, replicating each pixel (depth coordinate) 4 times in a 2x2 pixel square [S3].
+2. Run a pixel averaging operator over the zoomed image. This replaces replicated depth values with interpolated values while original values remain unchanged [S3].
+3. Run any gradient operator (binary or other) over the enlarged pre-image to obtain a shaded surface view [S3].
+
+### Block-wise Reorient and Crop at Full Resolution
+Block-wise Reorient and Crop at Full Resolution reorients and crops a large 3D volume by processing it in fixed-size output blocks to manage memory usage, using a transform and crop box defined on a coarser level [S4, unofficial]. It reduces peak memory to ~12–15 GiB compared to full-resample approaches which peak at ~146 GiB [S4, unofficial]. It differs from single-pass resampling by processing 512³ output blocks independently, skipping blocks entirely outside the object, and requiring a 16-voxel overlap for B-spline interpolation to prevent block-edge artifacts [S4, unofficial].
+
+### Image Magnification (Zoom)
+Image Magnification (Zoom) is a filter that magnifies an image by interpolating pixel values to create a larger output image [S5, unofficial]. It is chosen when simple uniform scaling is required without complex geometric transforms [S5, unofficial]. It differs from block-wise methods by applying a single global magnification factor across all dimensions [S5, unofficial].
+
+**Steps:**
+1. Instantiate a magnification filter (e.g., `vtkImageMagnify`).
+2. Connect the source image output to the filter's input.
+3. Set the magnification factors for X, Y, and Z dimensions (e.g., 3, 3, 1).
+4. Enable interpolation.
+5. Execute the filter pipeline to generate the output.
+
+**Parameters:**
+- `MagnificationFactors`: The scaling factors for each dimension. Set to (3, 3, 1) for 3x zoom in X and Y [S5, unofficial].
+
+### Oblique Stack Resampling
+Oblique Stack Resampling resamples oblique MRI stacks into a patient-aligned LPS working grid to standardize geometry for segmentation and visualization [S6, unofficial]. It is chosen when dealing with non-uniform slice spacing or oblique acquisition geometries [S6, unofficial]. It differs from standard resampling by explicitly handling oblique stacks and retaining original geometry in projects while mapping label masks to the working grid [S6, unofficial].
+
+**Steps:**
+1. Use linear interpolation to resample the oblique stack into the target grid.
+
+**Parameters:**
+- Safety limit for source and resampled volumes: 160 million voxels [S6, unofficial].
+
+**Pitfalls:**
+- Original geometry is retained in projects, but label masks use the working grid [S6, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Not given in the sources.
+- **Performance:** Fast and deterministic for standard crop/resize operations [S1, unofficial]. Block-wise variants reduce peak memory to ~12–15 GiB compared to full-resample approaches peaking at ~146 GiB [S4, unofficial].
+- **Strengths:** Simple, robust, and easy to implement. Ensures consistent input dimensions for downstream processing [S1, unofficial].
+- **Limitations:** Does not recover high-frequency details. Zero-padding may introduce artifacts at boundaries [S1, unofficial]. Block edges may show artifacts if interpolation does not account for neighboring blocks [S4, unofficial].
+- **When to Use:** When preparing data for super-resolution or reconstruction algorithms that require fixed input sizes [S1, unofficial].
+- **When Not to Use:** When high-fidelity detail recovery is required without subsequent learning-based steps [S1, unofficial].
+
+## Background
+The method originates from preprocessing pipelines for deep learning-based volume rendering and super-resolution, specifically in the context of CT and MRI data [S1, unofficial]. It is commonly used in conjunction with Fourier-based volume rendering to standardize inputs before applying resampling filters [S1, unofficial]. The technique is documented in unofficial repositories such as `wskingdom/DGR` [S1, unofficial] and `joshcodd/volume-rendering` [S2, unofficial].
+
+## Sources
+[S1] wskingdom/DGR, https://github.com/wskingdom/DGR, fetched 2026-10-26 (unofficial)
+[S2] joshcodd/volume-rendering, https://github.com/joshcodd/volume-rendering, fetched 2026-10-26 (unofficial)
+[S3] Hardware Support for the Display and Manipulation of Binary Voxel Models, https://doi.org/10.2312/eggh/eggh88/103-117, fetched 2026-10-26
+[S4] Reorient + crop at full resolution: block-wise resampling, interpolation choice, output bit depth, https://github.com/muratmaga/omezarr-converter/issues/1, fetched 2026-10-27 (unofficial)
+[S5] researchxr/3DMR, https://github.com/researchxr/3DMR, fetched 2026-10-27 (unofficial)
+[S6] kadmielp/MRI3D, https://github.com/kadmielp/MRI3D, fetched 2026-10-26 (unofficial)

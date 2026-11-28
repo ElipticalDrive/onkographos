@@ -1,0 +1,583 @@
+A refreshingly simple data-driven game engine built in Rust - Implement irradiance volumes. by pcwalton · Pull Request #10268 · bevyengine/bevy
+
+Implement irradiance volumes. by pcwalton · Pull Request #10268 · bevyengine/bevy · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+pcwalton
+commented
+Oct 26, 2023
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Objective
+Bevy could benefit from irradiance volumes, also known as voxel global illumination or simply as light probes (though this term is not preferred, as multiple techniques can be called light probes).
+Irradiance volumes are a form of baked global illumination; they work by sampling the light at the centers of each voxel within a cuboid. At runtime, the voxels surrounding the fragment center are sampled and interpolated to produce indirect diffuse illumination.
+Solution
+This is divided into two sections. The first is copied and pasted from the irradiance volume module documentation and describes the technique. The second part consists of notes on the implementation.
+Overview
+An irradiance volume is a cuboid voxel region consisting of
+regularly-spaced precomputed samples of diffuse indirect light. They're
+ideal if you have a dynamic object such as a character that can move about
+static non-moving geometry such as a level in a game, and you want that
+dynamic object to be affected by the light bouncing off that static
+geometry.
+To use irradiance volumes, you need to precompute, or bake, the indirect
+light in your scene. Bevy doesn't currently come with a way to do this.
+Fortunately, Blender provides a baking tool as part of the Eevee
+renderer, and its irradiance volumes are compatible with those used by Bevy.
+The bevy-baked-gi project provides a tool, export-blender-gi, that can
+extract the baked irradiance volumes from the Blender .blend file and
+package them up into a .ktx2 texture for use by the engine. See the
+documentation in the bevy-baked-gi project for more details as to this
+workflow.
+Like all light probes in Bevy, irradiance volumes are 1×1×1 cubes that can
+be arbitrarily scaled, rotated, and positioned in a scene with the
+[bevy_transform::components::Transform] component. The 3D voxel grid will
+be stretched to fill the interior of the cube, and the illumination from the
+irradiance volume will apply to all fragments within that bounding region.
+Bevy's irradiance volumes are based on Valve's ambient cubes as used in
+Half-Life 2 (Mitchell 2006, slide 27). These encode a single color of
+light from the six 3D cardinal directions and blend the sides together
+according to the surface normal.
+The primary reason for choosing ambient cubes is to match Blender, so that
+its Eevee renderer can be used for baking. However, they also have some
+advantages over the common second-order spherical harmonics approach:
+ambient cubes don't suffer from ringing artifacts, they are smaller (6
+colors for ambient cubes as opposed to 9 for spherical harmonics), and
+evaluation is faster. A smaller basis allows for a denser grid of voxels
+with the same storage requirements.
+If you wish to use a tool other than export-blender-gi to produce the
+irradiance volumes, you'll need to pack the irradiance volumes in the
+following format. The irradiance volume of resolution (Rx, Ry, Rz) is
+expected to be a 3D texture of dimensions (Rx, 2Ry, 3Rz). The unnormalized
+texture coordinate (s, t, p) of the voxel at coordinate (x, y, z) with
+side S ∈ {-X, +X, -Y, +Y, -Z, +Z} is as follows:
+```
+s = x
+
+t = y + ⎰  0 if S ∈ {-X, -Y, -Z}
+        ⎱ Ry if S ∈ {+X, +Y, +Z}
+
+        ⎧   0 if S ∈ {-X, +X}
+p = z + ⎨  Rz if S ∈ {-Y, +Y}
+        ⎩ 2Rz if S ∈ {-Z, +Z}
+```
+Visually, in a left-handed coordinate system with Y up, viewed from the
+right, the 3D texture looks like a stacked series of voxel grids, one for
+each cube side, in this order:
++X
++Y
++Z
+-X
+-Y
+-Z
+A terminology note: Other engines may refer to irradiance volumes as voxel
+global illumination, VXGI, or simply as light probes. Sometimes light
+probe refers to what Bevy calls a reflection probe. In Bevy, light probe
+is a generic term that encompasses all cuboid bounding regions that capture
+indirect illumination, whether based on voxels or not.
+Note that, if binding arrays aren't supported (e.g. on WebGPU or WebGL 2),
+then only the closest irradiance volume to the view will be taken into
+account during rendering.
+Implementation notes
+This patch generalizes light probes so as to reuse as much code as possible between irradiance volumes and the existing reflection probes. This approach was chosen because both techniques share numerous similarities:
+Both irradiance volumes and reflection probes are cuboid bounding regions.
+Both are responsible for providing baked indirect light.
+Both techniques involve presenting a variable number of textures to the shader from which indirect light is sampled. (In the current implementation, this uses binding arrays.)
+Both irradiance volumes and reflection probes require gathering and sorting probes by distance on CPU.
+Both techniques require the GPU to search through a list of bounding regions.
+Both will eventually want to have falloff so that we can smoothly blend as objects enter and exit the probes' influence ranges. (This is not implemented yet to keep this patch relatively small and reviewable.)
+To do this, we generalize most of the methods in the reflection probes patch #11366 to be generic over a trait, LightProbeComponent. This trait is implemented by both EnvironmentMapLight (for reflection probes) and IrradianceVolume (for irradiance volumes). Using a trait will allow us to add more types of light probes in the future. In particular, I highly suspect we will want real-time reflection planes for mirrors in the future, which can be easily slotted into this framework.
+Changelog
+This section is optional. If this was a trivial fix, or has no externally-visible impact, you can delete this section.
+Added
+A new IrradianceVolume asset type is available for baked voxelized light probes. You can bake the global illumination using Blender or another tool of your choice and use it in Bevy to apply indirect illumination to dynamic objects.
+Implement irradiance volumes.
+…
+eed7a5e
+```
+This commit implements *irradiance volumes* in Bevy, also known as
+*voxel global illumination* or simply as light probes (though this term
+is not preferred, as multiple techniques can be called light probes).
+Irradiance volumes are a form of baked global illumination; they work by
+sampling the light at the centers of each voxel within a cuboid. At
+runtime, the voxels surrounding the fragment center are sampled and
+interpolated to produce indirect diffuse illumination.
+
+The particular technique is known as *ambient cubes*, popularized by
+[Valve SIGGRAPH 2006]. Ambient cubes work by recording a 1×1 cubemap at
+each voxel position. This was chosen over the perhaps-better-known
+method of spherical harmonics because Blender's Eevee renderer can be
+easily used to generate them via the tool in [`bevy-baked-gi`]. Also,
+ambient cubes require fewer table lookups than second-order spherical
+harmonics do and don't suffer from ringing artifacts.
+
+Irradiance volumes are treated as assets, and [`bincode`] is used to
+deserialize them from disk. You can generate the `bincode` files by
+passing the `--upstream` flag to the `export-blender-gi` tool in
+[`bevy-baked-gi`].
+
+**Important**: This commit doesn't provide the generic infrastructure
+used to look up the nearest light probe. That's part of the reflection
+probes pull request, bevyengine#10057. Therefore, this pull request requires
+hardwires the shader to support only one irradiance volume per scene.
+**This is a temporary limitation** and will be lifted once bevyengine#10057 lands.
+
+[Valve SIGGRAPH 2006]:
+https://advances.realtimerendering.com/s2006/Mitchell-ShadingInValvesSourceEngine.pdf
+
+[`bevy-baked-gi`]: https://github.com/pcwalton/bevy-baked-gi
+
+[`bincode`]: https://github.com/bincode-org/bincode
+```
+pcwalton
+commented
+Oct 26, 2023
+Copy link
+Copy Markdown
+Contributor
+Author
+This needs a bit of cleaning up and documentation, but it works and is pretty close.
+github-actions
+Bot
+commented
+Oct 26, 2023
+Copy link
+Copy Markdown
+Contributor
+The generated examples/README.md is out of sync with the example metadata in Cargo.toml or the example readme template. Please run cargo run -p build-templated-pages -- update examples to update it, and commit the file change.
+alice-i-cecile
+added
+C-Feature
+A new feature, making something new possible
+A-Rendering
+Drawing game state to the screen
+labels
+Oct 26, 2023
+alice-i-cecile
+added this to the
+0.13 milestone
+Oct 26, 2023
+Patrick Walton
+added 2 commits
+January 20, 2024 16:27
+Merge remote-tracking branch 'origin/main' into irradiance-volumes
+98bb888
+Merge remote-tracking branch 'origin/main' into irradiance-volumes
+cba53fb
+github-actions
+Bot
+commented
+Jan 21, 2024
+Copy link
+Copy Markdown
+Contributor
+The generated examples/README.md is out of sync with the example metadata in Cargo.toml or the example readme template. Please run cargo run -p build-templated-pages -- update examples to update it, and commit the file change.
+Patrick Walton
+added 2 commits
+January 22, 2024 00:40
+Large cleanups
+b44606b
+Merge remote-tracking branch 'origin/main' into irradiance-volumes
+fb06e35
+github-actions
+Bot
+commented
+Jan 22, 2024
+Copy link
+Copy Markdown
+Contributor
+The generated examples/README.md is out of sync with the example metadata in Cargo.toml or the example readme template. Please run cargo run -p build-templated-pages -- update examples to update it, and commit the file change.
+1 similar comment
+github-actions
+Bot
+commented
+Jan 22, 2024
+Copy link
+Copy Markdown
+Contributor
+The generated examples/README.md is out of sync with the example metadata in Cargo.toml or the example readme template. Please run cargo run -p build-templated-pages -- update examples to update it, and commit the file change.
+Patrick Walton
+added 2 commits
+January 22, 2024 19:48
+Switch to 3D textures
+2a2ad49
+Merge remote-tracking branch 'origin/main' into irradiance-volumes
+7c45a73
+github-actions
+Bot
+commented
+Jan 23, 2024
+Copy link
+Copy Markdown
+Contributor
+The generated examples/README.md is out of sync with the example metadata in Cargo.toml or the example readme template. Please run cargo run -p build-templated-pages -- update examples to update it, and commit the file change.
+Patrick Walton
+added 4 commits
+January 22, 2024 20:04
+Update for upstream changes
+a09e905
+Hook up irradiance volumes with the light probe infrastructure
+b52f2c3
+Merge remote-tracking branch 'origin/main' into irradiance-volumes
+1ba097e
+Add fallback when binding arrays aren't supported
+d5f03cc
+github-actions
+Bot
+commented
+Jan 24, 2024
+Copy link
+Copy Markdown
+Contributor
+The generated examples/README.md is out of sync with the example metadata in Cargo.toml or the example readme template. Please run cargo run -p build-templated-pages -- update examples to update it, and commit the file change.
+Use the same 1x1x1 unit cuboid for all light probes
+97b918c
+github-actions
+Bot
+commented
+Jan 24, 2024
+Copy link
+Copy Markdown
+Contributor
+The generated examples/README.md is out of sync with the example metadata in Cargo.toml or the example readme template. Please run cargo run -p build-templated-pages -- update examples to update it, and commit the file change.
+alice-i-cecile
+removed this from the
+0.13 milestone
+Jan 24, 2024
+JMS55
+added this to the
+0.13 milestone
+Jan 24, 2024
+JMS55
+commented
+Jan 24, 2024
+Copy link
+Copy Markdown
+Contributor
+Leaving this in the milestone for now, but we might have to end up cutting it depending on time constraints. @pcwalton if this is ready to go, make sure to take it out of draft.
+Patrick Walton
+added 3 commits
+January 24, 2024 14:51
+Search through light maps properly; fix up the example
+5c098dc
+Merge remote-tracking branch 'origin/main' into irradiance-volumes
+3cd80d1
+Improve the example a lot; make intensity work
+6f52710
+github-actions
+Bot
+commented
+Jan 25, 2024
+Copy link
+Copy Markdown
+Contributor
+The generated examples/README.md is out of sync with the example metadata in Cargo.toml or the example readme template. Please run cargo run -p build-templated-pages -- update examples to update it, and commit the file change.
+JMS55
+reviewed
+Feb 2, 2024
+View reviewed changes
+Comment thread
+assets/shaders/irradiance_volume_voxel_visualization.wgsl
+var<uniform> irradiance_volume_info: VoxelVisualizationIrradianceVolumeInfo;
+@fragment
+fn fragment(mesh: VertexOutput) -> @location(0) vec4<f32> {
+JMS55
+Feb 2, 2024
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Why do the cubes appear to be gray+shaded? I was thinking we would want to show essentially an "unlit" solid-color cube the color of the probe.
+pcwalton
+Feb 2, 2024
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+They are doing what you suggested, I'm fairly sure. I don't see any shading.
+I believe the gray comes from the grayish background color, which is roughly the same in Blender so the indirect light from it is captured in the probe. The sides of the cubes will be a mix of the gray from the background with the colors of the floor visible from that cube side. The relative mix of gray vs. floor color is based on how much that side of the cube can "see".
+JMS55
+Feb 2, 2024
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+So the irradiance volumes are sampling the clear color/background? Seems strange. ClearColor shouldn't be used for lighting. Only a Skybox if specified, but not the clear color itself.
+pcwalton
+Feb 2, 2024
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+In reality it's sampling the "world" in Blender which happens to be dark gray by default. Would you prefer that I change it to black? Or would you rather the world reflect the colors of the floor? (It can't be transparent because we don't have alpha here.)
+From a physical perspective it's kind of arbitrary what we pick since the concept of "empty space with no color" doesn't exist in the real world.
+JMS55
+Feb 2, 2024
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Yeah I think that would be better. Or drop in a skybox and use that.
+pcwalton
+Feb 2, 2024
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+OK, I added a skybox and re-baked the irradiance volume. It looks right to my eyes.
+Patrick Walton
+added 2 commits
+February 2, 2024 12:40
+Address review comment
+c6c3043
+Use a skybox in the irradiance volumes example
+211740d
+pcwalton
+commented
+Feb 2, 2024
+Copy link
+Copy Markdown
+Contributor
+Author
+Patrick Walton
+added 3 commits
+February 2, 2024 15:00
+Merge remote-tracking branch 'origin/main' into irradiance-volumes
+5ca61e7
+Merge remote-tracking branch 'origin/main' into irradiance-volumes
+108b931
+Merge remote-tracking branch 'origin/main' into irradiance-volumes
+27e4322
+pcwalton
+commented
+Feb 3, 2024
+Copy link
+Copy Markdown
+Contributor
+Author
+Don't merge yet. The CI failure is legit.
+Patrick Walton
+added 4 commits
+February 3, 2024 17:09
+Create a dummy light probes uniform buffer if there are no light probes
+…
+40c6e22
+```
+in the scene.
+
+Fixes the crash.
+```
+Merge remote-tracking branch 'origin/main' into irradiance-volumes
+7d213ba
+Remove RenderLightProbes, simplifying and fixing things.
+9391113
+Merge remote-tracking branch 'origin/main' into irradiance-volumes
+3405756
+atlv24
+approved these changes
+Feb 4, 2024
+View reviewed changes
+pcwalton
+commented
+Feb 4, 2024
+Copy link
+Copy Markdown
+Contributor
+Author
+This should be ready for review again.
+NthTensor
+reviewed
+Feb 5, 2024
+View reviewed changes
+Comment thread
+assets/shaders/irradiance_volume_voxel_visualization.wgsl
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+NthTensor
+reviewed
+Feb 5, 2024
+View reviewed changes
+Comment thread
+crates/bevy_pbr/src/light_probe/environment_map.rs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Address review comments
+3894285
+NthTensor
+approved these changes
+Feb 5, 2024
+View reviewed changes
+alice-i-cecile
+commented
+Feb 5, 2024
+Copy link
+Copy Markdown
+Member
+Merging tomorrow morning unless I hear otherwise from the rendering crew.
+alice-i-cecile
+added this pull request to the merge queue
+Feb 6, 2024
+Merged
+via the queue into
+bevyengine:main
+with commit 4c15dd0
+Feb 6, 2024
+re0312
+mentioned this pull request
+Feb 9, 2024
+Frame unstable in many_foxes example
+#11787
+Closed
+mockersf
+mentioned this pull request
+Feb 15, 2024
+WebGPU support broken: 'textureSample' must only be called from uniform control flow
+#11879
+Closed
+DGriffin91
+mentioned this pull request
+Feb 16, 2024
+WebGL2 support broken: index out of bounds
+#11885
+Closed
+alice-i-cecile
+added
+the
+M-Release-Note
+Work that should be called out in the blog due to impact
+label
+Jun 5, 2024
+beicause
+mentioned this pull request
+Aug 2, 2026
+Fix binding_arrays_are_usable check
+#25261
+Merged
+pull Bot
+pushed a commit
+to VitalyAnkh/bevy
+that referenced
+this pull request
+Aug 5, 2026
+Fix binding_arrays_are_usable check (bevyengine#25261)
+…
+0773de1
+```
+# Objective
+
+`binding_arrays_are_usable` checks unrelated
+`max_storage_textures_per_shader_stage` limit
+(bevyengine#10268), possibly because wgpu
+did not have relevant limits two years ago.
+
+## Solution
+
+Check `max_binding_array_elements_per_shader_stage` and
+`max_binding_array_sampler_elements_per_shader_stage`.
+
+## Testing
+
+None.
+```
+mirsella
+pushed a commit
+to mirsella/bevy
+that referenced
+this pull request
+Aug 16, 2026
+Fix binding_arrays_are_usable check (bevyengine#25261)
+…
+a1632f4
+```
+# Objective
+
+`binding_arrays_are_usable` checks unrelated
+`max_storage_textures_per_shader_stage` limit
+(bevyengine#10268), possibly because wgpu
+did not have relevant limits two years ago.
+
+## Solution
+
+Check `max_binding_array_elements_per_shader_stage` and
+`max_binding_array_sampler_elements_per_shader_stage`.
+
+## Testing
+
+None.
+```
+joelawm
+pushed a commit
+to joelawm/bevy
+that referenced
+this pull request
+Sep 8, 2026
+Fix binding_arrays_are_usable check (bevyengine#25261)
+…
+cfa9f04
+```
+# Objective
+
+`binding_arrays_are_usable` checks unrelated
+`max_storage_textures_per_shader_stage` limit
+(bevyengine#10268), possibly because wgpu
+did not have relevant limits two years ago.
+
+## Solution
+
+Check `max_binding_array_elements_per_shader_stage` and
+`max_binding_array_sampler_elements_per_shader_stage`.
+
+## Testing
+
+None.
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+A-Rendering
+Drawing game state to the screen
+C-Feature
+A new feature, making something new possible
+M-Release-Note
+Work that should be called out in the blog due to impact
+S-Ready-For-Final-Review
+This PR has been approved by the community. It's ready for a maintainer to consider merging it
+5 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

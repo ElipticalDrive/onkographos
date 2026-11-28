@@ -1,0 +1,112 @@
+Front-end. A fork of OHIF/Viewers with ODELIA-specific extensions and modes (AI routing UI, AI result viewing, labeling). - fix(cornerstone): load the active dynamic-volume phase first by Luab · Pull Request #143 · StratifAI-Research/odelia-viewer
+
+fix(cornerstone): load the active dynamic-volume phase first by Luab · Pull Request #143 · StratifAI-Research/odelia-viewer · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Luab
+commented
+Nov 6, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Collaborator
+Context
+Cornerstone 5.6.8 constructs dynamic-volume requests with the active phase first, then its inherited loadImages() reverses them before queueing. A three-phase WATER series therefore loads phases 3 → 2 → 1 while displaying phase 1, leaving the viewport black during most of the download.
+Upstream history for bookkeeping:
+Cornerstone3D PR #522 — fix dynamic-volume loading order added a compensating reversal so time points load first to last.
+Cornerstone3D PR #779 — progressive image loading/rendering removed that compensation during the progressive-loading changes, while the inherited reversal remained.
+Changes & Results
+Add a scoped dynamic-loader adapter at both registration sites. It compensates for the inherited reversal only during loadImages()'s synchronous queue construction, then restores getImageLoadRequests() in finally, before the load promise settles. The default queue follows Cornerstone's active-phase-first ordering, while direct callers—including MPR's nthLoader, interleaveCenterLoader, and interleaveTopToBottom—retain their original ordering. The adapter preserves the load promise, cancellation and disposal handlers; static-volume loading is unchanged.
+This change corrects phase ordering only. It does not prioritize the middle slice, change rendering, or reprioritize requests after a phase switch once loading has started. Remove the adapter when the upstream reversal is fixed; the regression test exercises the installed loader and request pool to catch that change.
+Production-build benchmark on the demo WATER series, three runs per build, timed from series selection:
+Metric
+Before
+After
+Median first render after selected slice is cached
+19.53 s
+4.90 s
+Selected slice's network request position
+214
+44
+Median full-volume completion
+21.94 s
+18.13 s
+All six runs loaded 258/258 frames without page or image-load errors, with identical final image pixels in the viewport interior. These are Chromium/SwiftShader measurements; the render metric is an event-based proxy, not a pixel-detected first-paint timestamp. This addresses delayed initial display, not a viewport that stays blank after loading completes.
+The NCI-dyn DEV series (5 phases × 31 frames) also changed from phase order 5 → 4 → 3 → 2 → 1 to 1 → 2 → 3 → 4 → 5. The selected slice moved from volume request 139 to 16. In one run per build and copy, the first selected-slice render improved from 9.46 s to 2.91 s for the original series and from 10.66 s to 2.15 s for the numbered copy. These timings start at volume-cache insertion, unlike the WATER timings above. All 155 frames loaded in each run; final viewport-interior pixels matched between builds.
+Testing
+The 20-test regression suite covers the upstream reversed queue, all three active phases, uneven groups, static ordering, loader lifecycle forwarding, and creation failures. It also checks direct request ordering, synchronous restoration on success and failure, load-promise identity/rejection, and the actual queues from all three custom strategies for every active phase. For the 258-frame MPR case, the active phase completes at request 200, preserving the original strategy behavior. The existing Jest CI run includes the Cornerstone project, so these tests appear in the normal test summary and coverage report.
+```
+pnpm exec jest --config extensions/cornerstone/jest.config.js \
+  --runTestsByPath extensions/cornerstone/src/utils/dynamicVolumeLoader.test.ts \
+  --ci --runInBand
+```
+For a browser check, open a multi-phase series with phase 1 selected. Confirm phase 1 requests precede the other phases, the image appears during loading, and every phase loads completely.
+Current validation at 1c1d1a8, in a fresh worktree with a frozen dependency install (Node 26.13.0, pnpm 11.5.2):
+All 7 Jest projects passed: 129 suites, 1,893 tests passed, 1 skipped.
+All 12 added regression cases failed against the previous adapter and pass with the scoped fix.
+TypeScript checks of the adapter/test, Prettier, and git diff --check passed.
+The unchanged MultipleSegmentationDataOverlays.spec.ts still times out waiting for needsRender locally. This failure predates the PR: the base commit's CI job failed at the same wait helper on both attempts. No browser-test changes are included.
+Original production-build validation in a clean clone of main at dc88a2be6, using a frozen dependency install:
+The combined existing CI command passed across all 7 projects: 129 suites, 1,881 tests passed, 1 skipped, including all 8 new regression tests.
+TypeScript check of the adapter and test passed.
+Prettier and git diff --check passed.
+PUBLIC_URL=/ pnpm build passed (existing circular-chunk and bundle-size warnings).
+Checklist
+PR title follows the semantic-release format.
+The workaround and its removal condition are documented in the adapter.
+Public documentation: no public API additions or removals.
+OS: Linux x86_64.
+Clean-clone validation: Node 24.15.0, pnpm 11.5.2.
+Browser benchmark: Chromium 156.0.8078.4, ANGLE/SwiftShader.
+Luab
+added 2 commits
+November 6, 2026 13:59
+fix(cornerstone): load the active dynamic-volume phase first
+892499f
+test(cornerstone): use the existing Jest CI run
+940e354
+Luab
+requested a review
+from a team
+as a code owner
+November 6, 2026 14:39
+mueller-franzes
+commented
+Nov 6, 2026
+Copy link
+Copy Markdown
+Collaborator
+Review
+Cornerstone 5.6.8 lists the shown phase first, then reverses the list before loading. So the shown phase loaded last. The fix works in ODELIA's normal layout.
+One problem: the fix also reverses the order for three other loaders, and those don't reverse it back.
+Field
+Content
+Category
+Correctness
+Location
+extensions/cornerstone/src/utils/dynamicVolumeLoader.ts:18-19
+Suggestion
+The fix changes getImageLoadRequests on the volume for good. Three load strategies also call it: nthLoader.ts:51, interleaveCenterLoader.ts:87 and interleaveTopToBottom.ts:86. The MPR layout uses nthLoader, and users can pick MPR in labeling mode. There, the shown phase now finishes loading last: on a 3-phase series, at request 258 of 258 insteadof 200. That's the same bug this PR fixes, moved to MPR. Fix: reverse the list only while loadImages runs. Add a test that getImageLoadRequests() keeps its original order.
+fix(cornerstone): preserve custom loading strategy order
+1c1d1a8
+This branch has not been deployed
+No deployments
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

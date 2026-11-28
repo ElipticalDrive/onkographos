@@ -1,0 +1,158 @@
+--- v005.md
++++ v006.md
+@@ -4,79 +4,68 @@
+ 
+ ## Overview
+-Intensity-based Sparse Voxel Storage is a method for representing volumetric data as a set of geometric primitives (voxels) optimized for rasterization by exploiting the redundancy of scalar field values. It solves the problem of high memory bandwidth and storage costs associated with storing intensity values for every voxel by grouping voxels with identical intensity levels into contiguous runs. Unlike sibling methods that manage spatial hierarchy or chunk structures, this approach sorts data by attribute value, using a histogram to map intensity levels to memory offsets, thereby reducing per-voxel storage from 8 bytes to 6 bytes by eliminating redundant intensity attributes [S1].
++Intensity-based Sparse Voxel Storage is a method for representing volumetric data as geometric primitives optimized for rasterization by exploiting scalar field value redundancy [S1]. It reduces memory bandwidth and storage costs by grouping voxels with identical intensity levels into contiguous runs, using a histogram to map intensity levels to memory offsets [S1]. Unlike [SVO LOD Management](2990-svo-lod-management.md), [Sparse Voxel Rasterization](3032-sparse-voxel-rasterization.md), [Voxel Chunk Management](13837-voxel-chunk-management.md), and [Voxel Dropout](15702-voxel-dropout.md) which manage spatial hierarchy or chunk structures, this approach sorts data by attribute value and eliminates redundant per-voxel intensity attributes [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A scalar volume dataset (intensity values) and a target rendering resolution.
+-*   **Output:** A vertex buffer containing voxel positions and a histogram structure mapping intensity levels to buffer offsets, ready for GPU rendering.
++*   **Input:** A scalar volume dataset containing intensity values [S1].
++*   **Output:** A vertex buffer containing voxel positions and a histogram structure mapping intensity levels to buffer offsets, ready for GPU rendering [S1].
+ 
+ **Data Structures:**
+-1.  **Voxel Buffer:** A continuous memory region (created via `ARB_vertex_buffer_object`) storing voxel coordinates. Voxels are sorted by intensity value.
+-    *   *Layout (Naive):* 8 bytes per voxel. Stores intensity (2 bytes/short) and x, y, z coordinates (2 bytes/short each).
+-    *   *Layout (Optimized):* 6 bytes per voxel. Stores only x, y, z coordinates (2 bytes/short each). Intensity is not stored per voxel.
+-2.  **Histogram:** An array of structures, one per unique intensity level.
+-    *   *Fields:* `begin_offset` (index in voxel buffer), `end_offset` (index in voxel buffer).
+-    *   *Purpose:* Acts as a run-length encoding, defining the span of voxels sharing a specific intensity.
++1.  **Voxel Buffer:** A continuous memory region created via the `ARB_vertex_buffer_object` extension [S1]. Voxels are stored in a continuous region sorted per intensity value [S1].
++    *   *Layout (Naive):* 8 bytes per voxel, storing intensity and x, y, z coordinates as 16-bit shorts [S1].
++    *   *Layout (Optimized):* 6 bytes per voxel, storing only x, y, z coordinates as 16-bit shorts [S1]. Intensity is not stored per voxel and is instead passed via a shader constant or texture coordinate [S1].
++    *   *Layout (4-byte alternative):* Coordinates are packed into 32 bits (e.g., 12 bits for X, 10 bits for Y, 10 bits for Z), supporting volumes up to $4096 \times 1024 \times 1024$ [S1]. This requires unpacking in the vertex program using bit shifts or emulation via multiplication by a fraction and the floor function [S1].
++2.  **Histogram:** An array of structures, one per unique intensity level [S1].
++    *   *Fields:* `begin_offset` (index in voxel buffer) and `end_offset` (index in voxel buffer) [S1].
++    *   *Purpose:* Acts as a run-length encoding, defining the span of voxels sharing a specific intensity [S1].
+ 
+ **Steps:**
+-1.  **Sort:** Sort all voxels in the volume by their intensity value.
+-2.  **Build Histogram:** Iterate through the sorted voxels. For each unique intensity value, record the starting and ending indices of the contiguous block of voxels in the buffer.
+-3.  **Pack Coordinates:** Store the x, y, z coordinates of each voxel into the buffer.
+-    *   *Optimization:* If 6 bytes per voxel are used, the intensity is removed from the vertex attributes.
+-    *   *Alternative (4 bytes):* For extreme memory constraints, coordinates can be packed into 32 bits (e.g., 12 bits for X, 10 bits for Y, 10 bits for Z), allowing support for volumes up to $4096 \times 1024 \times 1024$. This requires unpacking in the vertex program using bit shifts or emulation via multiplication and floor functions [S1].
+-4.  **Render:** For each intensity level $i$:
+-    *   Retrieve `begin_offset` and `end_offset` from the histogram.
+-    *   Set a shader constant or texture coordinate to the intensity value $I_i$.
+-    *   Invoke `glDrawArrays` (or equivalent) to render the span of voxels from `begin_offset` to `end_offset`.
++1.  **Sort:** Sort all voxels in the volume by their intensity value [S1].
++2.  **Build Histogram:** Iterate through the sorted voxels and record the starting and ending indices of each contiguous block of identical intensity in the buffer [S1].
++3.  **Pack Coordinates:** Store the x, y, z coordinates of each voxel into the buffer [S1]. If using 6-byte storage, the intensity is removed from the vertex attributes [S1]. If using 4-byte storage, coordinates are packed and unpacked in the vertex program [S1].
++4.  **Render:** For each intensity level, retrieve `begin_offset` and `end_offset` from the histogram, set a shader constant or texture coordinate to the intensity value, and invoke `glDrawArrays` once to render the span [S1].
+ 
+ **Pseudocode:**
+ ```python
+-def intensity_based_sparse_storage(volume_data, resolution):
++def build_intensity_storage(volume_data, resolution):
+     """
+     volume_data: 3D array of intensity values.
+     resolution: (X, Y, Z) dimensions.
+-    Returns: voxel_buffer (list of tuples), histogram (dict mapping intensity to (start, end))
++    Returns: voxel_buffer (list of (x, y, z) tuples), histogram (dict mapping intensity to (start, end))
+     """
+-    # 1. Flatten and collect voxels
++    # 1. Flatten and collect voxels as (intensity, x, y, z)
+     voxels = []
+     for z in range(resolution[2]):
+         for y in range(resolution[1]):
+             for x in range(resolution[0]):
+-                intensity = volume_data[z, y, x]
+-                # Store as (intensity, x, y, z)
+-                voxels.append((intensity, x, y, z))
++                voxels.append((volume_data[z, y, x], x, y, z))
+     
+     # 2. Sort by intensity
+     voxels.sort(key=lambda v: v[0])
+     
+-    # 3. Build histogram and optimized buffer
++    # 3. Build histogram and optimized coordinate buffer
+     histogram = {}
+     voxel_buffer = []
+-    
+     current_intensity = None
+-    start_index = 0
++    start_idx = 0
+     
+     for i, (intensity, x, y, z) in enumerate(voxels):
+         if intensity != current_intensity:
+-            # Finalize previous intensity span
+             if current_intensity is not None:
+-                histogram[current_intensity] = (start_index, i)
+-            
+-            # Start new span
++                histogram[current_intensity] = (start_idx, i)
+             current_intensity = intensity
+-            start_index = i
+-            
+-        # Store only coordinates for optimized 6-byte storage
++            start_idx = i
++        # Store only coordinates for 6-byte optimized storage
+         voxel_buffer.append((x, y, z))
+         
+     # Finalize last span
+     if current_intensity is not None:
+-        histogram[current_intensity] = (start_index, len(voxels))
++        histogram[current_intensity] = (start_idx, len(voxels))
+         
+     return voxel_buffer, histogram
+ 
+-def render_intensity_voxels(histogram, voxel_buffer, shader_constants):
++def render_intensity_voxels(histogram, voxel_buffer):
+     """
+-    Simulates the rendering loop.
++    Simulates the rendering loop per intensity span.
+     """
+     for intensity, (start, end) in histogram.items():
+@@ -87,17 +76,23 @@
+         count = end - start
+         
+-        # Draw the span
+-        # In real GL: glDrawArrays(GL_POINTS, start, count)
+-        render_span(voxel_buffer[start:end])
++        # Submit to pipeline (equivalent to glDrawArrays)
++        draw_primitives(primitive_type='POINTS', start_index=start, count=count)
++
++def draw_primitives(primitive_type, start_index, count):
++    """
++    Standard operation simulating a GPU draw call.
++    """
++    # In practice: glDrawArrays(primitive_type, start_index, count)
++    pass
+ ```
+ 
+ **Parameters:**
+-*   **Bit Depth:** Typically 16-bit shorts for coordinates. 12/10/10 bit packing is an alternative for 4-byte storage [S1].
+-*   **Intensity Resolution:** Determined by the number of unique values in the histogram.
++*   **Bit Depth:** Typically 16-bit shorts for coordinates, with 12/10/10 bit packing as an alternative for 4-byte storage [S1].
++*   **Intensity Resolution:** Determined by the number of unique values in the histogram [S1].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Redundancy:** Storing intensity with each voxel is redundant because the histogram acts as run-length-encoding. Omitting it saves 2 bytes per voxel [S1].
+-*   **Memory Limits:** While theoretically supporting volumes up to $65536^3$ with 6-byte storage, practical limits are lower due to available VRAM/RAM [S1].
+-*   **Bitwise Operations:** On GPUs lacking native bit shift/logical operators, coordinate unpacking from packed formats (e.g., 4-byte) must be emulated using multiplication by fractions and the floor function, which may impact performance [S1].
++*   **Redundancy:** Storing intensity with each voxel is redundant because the histogram acts as run-length-encoding, so omitting it saves 2 bytes per voxel [S1].
++*   **Memory Limits:** Theoretical volume support reaches $65536^3$ with 6-byte storage, but practical limits are lower due to hardware memory constraints [S1].
++*   **Bitwise Operations:** On GPUs lacking native bit shift/logical operators, coordinate unpacking from packed formats must be emulated using multiplication by fractions and the floor function, which may impact performance [S1].
+ 
+ ## Subtopics
+@@ -110,12 +105,12 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Sorting voxels by intensity is $O(N \log N)$ where $N$ is the number of voxels. Histogram construction is $O(N)$. Rendering time is proportional to the number of unique intensity levels (draw calls).
+-*   **Memory Complexity:** $O(N)$ for voxel storage. With 6-byte optimization, memory usage is reduced by 25% compared to the naive 8-byte representation [S1].
++*   **Time Complexity:** Sorting voxels by intensity is $O(N \log N)$ where $N$ is the number of voxels [G]. Histogram construction is $O(N)$ [G]. Rendering time scales linearly with the number of unique intensity levels due to draw call overhead [S1].
++*   **Memory Complexity:** $O(N)$ for voxel storage [G]. Optimized to 6 bytes per voxel, down from 8 bytes [S1].
+ *   **Performance:** Provides a major speedup for large volumes by reducing memory bandwidth requirements and leveraging GPU vertex buffers [S1].
+-*   **Strengths:** Simple implementation, efficient for data with many repeated intensity values (e.g., MIP rendering), reduces redundancy.
+-*   **Limitations:** Requires sorting, which can be costly for dynamic data. Limited by the number of unique intensity levels (draw call overhead). Practical volume size is limited by hardware memory, not theoretical address space [S1].
++*   **Strengths:** Simple implementation, efficient for data with many repeated intensity values, and reduces redundancy [S1].
++*   **Limitations:** Requires sorting, which is costly for dynamic data [G]. Limited by the number of unique intensity levels causing draw call overhead [S1]. Practical volume size is limited by hardware memory, not theoretical address space [S1].
+ 
+ ## Background
+-The method was described in the context of multiresolution MIP rendering of large volumetric data accelerated on graphics hardware [S1]. It leverages the `ARB_vertex_buffer_object` extension to cache data in high-performance graphics memory, enabling efficient data transfers for GL-drawing commands [S1]. The approach is particularly relevant for static or slowly changing volumetric data where intensity-based grouping is effective.
++The method was described in the context of multiresolution MIP rendering of large volumetric data accelerated on graphics hardware [S1]. It leverages the `ARB_vertex_buffer_object` extension to cache data in high-performance graphics memory, enabling efficient data transfers for GL-drawing commands [S1]. The approach is particularly relevant for static or slowly changing volumetric data where intensity-based grouping is effective [G].
+ 
+ ## Sources

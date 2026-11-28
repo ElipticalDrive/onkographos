@@ -1,0 +1,204 @@
+# CartoonVolumeStyle
+Also called: X3D CartoonVolumeStyle, flat-shaded volume stylization
+
+## Overview
+CartoonVolumeStyle is a non-photorealistic volume rendering technique that produces a cel-shaded appearance by mapping surface normal orientations to a discrete set of flat colors [S1, unofficial]. It solves the problem of visualizing volumetric structure without the smooth gradients of photorealistic rendering, instead using distinct color bands to emphasize shape and boundaries [S1, unofficial]. It differs from [BoundaryEnhancementVolumeStyle](52-boundary-enhancement-volume-style.md) by relying on normal-view angle quantization rather than gradient magnitude, and from [Stylization and Pattern Generation](7612-stylization-and-pattern-generation.md) by using a fixed HSV-based interpolation scheme for its color palette [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A volume dataset (scalar field) and its associated surface normals.
+*   **Output:** A 2D image where each pixel is assigned one of $N$ discrete colors based on the angle between the local surface normal and the view direction.
+
+**Data Structures:**
+*   **Surface Normals:** A 3D texture (`X3DTexture3DNode`) with at least 3 components (RGB representing X, Y, Z). Dimensions must match the source volume data [S1, unofficial].
+*   **Colors:** `SFColorRGBA` fields for `parallelColor` and `orthogonalColor`.
+*   **Parameters:** `colorSteps` (integer), `parallelColor`, `orthogonalColor`, `surfaceNormals`.
+
+**Parameters:**
+*   `parallelColor`: Default `(0, 0, 0, 1)`. Color for normals orthogonal to the viewer (surface plane parallel to view direction) [S1, unofficial].
+*   `orthogonalColor`: Default `(1, 1, 1, 1)`. Color for normals parallel to the viewer (surface plane orthogonal to view direction) [S1, unofficial].
+*   `colorSteps`: Default `4`, range $[1, 64]$. Number of distinct color bands [S1, unofficial].
+*   `surfaceNormals`: Default `NULL`. If missing, the implementation must interpolate, average, or algorithmically generate normals from the source data [S1, unofficial].
+
+**Algorithm:**
+1.  **Normal Retrieval:** For each voxel, retrieve the surface normal vector $\mathbf{n}$ from the `surfaceNormals` texture. If `surfaceNormals` is null, compute $\mathbf{n}$ from the gradient of the scalar field [S1, unofficial].
+2.  **Angle Calculation:** Calculate the angle $\theta$ between the surface normal $\mathbf{n}$ and the view direction vector $\mathbf{v}$ (pointing from the surface to the camera).
+    $$ \theta = \arccos(\mathbf{n} \cdot \mathbf{v}) $$
+    Note: $\mathbf{v}$ must be normalized. The dot product assumes $\mathbf{n}$ and $\mathbf{v}$ are unit vectors.
+3.  **Back-face Culling:** If $\theta > \pi/2$ (i.e., the dot product is negative, meaning the surface is back-facing), the voxel is not rendered. No color is calculated [S1, unofficial].
+4.  **Color Band Determination:**
+    *   If `colorSteps` == 1, the color is `orthogonalColor` for all visible surfaces [S1, unofficial].
+    *   If `colorSteps` > 1:
+        *   Divide the valid angle range $[0, \pi/2]$ into `colorSteps` equal intervals. The width of each interval is $\Delta \theta = \frac{\pi}{2 \cdot \text{colorSteps}}$.
+        *   The first interval $[0, \Delta \theta)$ uses `orthogonalColor`.
+        *   The last interval $[\frac{\pi}{2} - \Delta \theta, \frac{\pi}{2}]$ uses `parallelColor`.
+        *   For intermediate intervals $i$ (where $1 \le i < \text{colorSteps} - 1$), calculate the midpoint angle $\theta_i$:
+            $$ \theta_i = i \cdot \Delta \theta + \frac{\Delta \theta}{2} $$
+        *   Determine the interpolation factor $t$ for this midpoint relative to the full range $[0, \pi/2]$:
+            $$ t = \frac{\theta_i}{\pi/2} = \frac{2 \theta_i}{\pi} $$
+            Note: The specification states colors are interpolated between `parallelColor` and `orthogonalColor`. Based on the example where $\theta=0$ yields `orthogonalColor` (1,1,1,1) and $\theta=\pi/2$ yields `parallelColor` (0,0,0,1), $t=0$ corresponds to `orthogonalColor` and $t=1$ corresponds to `parallelColor`.
+5.  **Color Interpolation:**
+    *   Convert `parallelColor` and `orthogonalColor` to HSV.
+    *   Interpolate the Hue, Saturation, and Value components linearly using $t$.
+    *   Interpolate the Alpha component linearly using $t$.
+    *   Convert the resulting HSV back to RGB.
+    *   Assign this color to the voxel [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def cartoon_volume_style(volume_data, surface_normals, view_direction, 
+                         parallel_color, orthogonal_color, color_steps):
+    """
+    Renders a volume using the CartoonVolumeStyle method.
+    
+    Args:
+        volume_data: 3D array of scalar values (used only if surface_normals is None).
+        surface_normals: 3D array of vectors (Nx, Ny, Nz) matching volume dimensions.
+        view_direction: 3D vector (normalized) pointing from surface to camera.
+        parallel_color: Tuple (R, G, B, A) for back-facing/parallel normals.
+        orthogonal_color: Tuple (R, G, B, A) for front-facing/orthogonal normals.
+        color_steps: Integer number of color bands.
+        
+    Returns:
+        2D image array.
+    """
+    # 1. Handle missing normals [G]
+    if surface_normals is None:
+        # Implementation detail: Compute normals from volume_data gradient
+        # This is a placeholder for the algorithmic generation mentioned in [S1, unofficial]
+        surface_normals = compute_normals_from_volume(volume_data)
+        
+    # Precompute HSV for colors
+    p_hsv = rgb_to_hsv(parallel_color)
+    o_hsv = rgb_to_hsv(orthogonal_color)
+    
+    # 2. Determine color bands
+    if color_steps == 1:
+        final_color = orthogonal_color
+        # No interpolation needed
+        bands = []
+    else:
+        delta_theta = (math.pi / 2) / color_steps
+        bands = []
+        
+        # First band: orthogonalColor
+        bands.append({'range': (0, delta_theta), 'color': orthogonal_color})
+        
+        # Intermediate bands
+        for i in range(1, color_steps - 1):
+            mid_theta = i * delta_theta + delta_theta / 2
+            t = (2 * mid_theta) / math.pi
+            
+            # Interpolate HSV
+            h = lerp(p_hsv[0], o_hsv[0], t)
+            s = lerp(p_hsv[1], o_hsv[1], t)
+            v = lerp(p_hsv[2], o_hsv[2], t)
+            a = lerp(parallel_color[3], orthogonal_color[3], t)
+            
+            bands.append({'range': (i * delta_theta, (i + 1) * delta_theta), 
+                          'color': hsv_to_rgb((h, s, v, a))})
+                          
+        # Last band: parallelColor
+        bands.append({'range': ((color_steps - 1) * delta_theta, math.pi / 2), 
+                      'color': parallel_color})
+                      
+    # 3. Render
+    image = empty_image()
+    for each voxel in volume:
+        n = surface_normals[voxel]
+        # Normalize normal if not already [G]
+        n = normalize(n)
+        
+        # Calculate angle with view direction
+        # Note: view_direction is from surface to camera. 
+        # Dot product n . v gives cos(theta)
+        cos_theta = dot(n, view_direction)
+        
+        # Back-face culling
+        if cos_theta <= 0:
+            continue # No color calculated
+            
+        theta = acos(cos_theta)
+        
+        # Find band
+        color = orthogonal_color # Default fallback
+        for band in bands:
+            if band['range'][0] <= theta < band['range'][1]:
+                color = band['color']
+                break
+            # Handle edge case for last band inclusive upper bound
+            if theta == math.pi / 2:
+                color = parallel_color
+                break
+                
+        image[voxel] = color
+        
+    return image
+
+def lerp(a, b, t):
+    return a + t * (b - a)
+
+def rgb_to_hsv(color):
+    # Standard RGB to HSV conversion
+    r, g, b, a = color
+    max_c = max(r, g, b)
+    min_c = min(r, g, b)
+    diff = max_c - min_c
+    
+    if diff == 0:
+        h = 0
+    elif max_c == r:
+        h = 60 * (((g - b) / diff) % 6)
+    elif max_c == g:
+        h = 60 * (((b - r) / diff) + 2)
+    else:
+        h = 60 * (((r - g) / diff) + 4)
+        
+    s = 0 if max_c == 0 else diff / max_c
+    v = max_c
+    return (h, s, v, a)
+
+def hsv_to_rgb(hsv):
+    h, s, v, a = hsv
+    c = v * s
+    x = c * (1 - abs((h / 60) % 2 - 1))
+    m = v - c
+    
+    if 0 <= h < 60:
+        r, g, b = c, x, 0
+    elif 60 <= h < 120:
+        r, g, b = x, c, 0
+    elif 120 <= h < 180:
+        r, g, b = 0, c, x
+    elif 180 <= h < 240:
+        r, g, b = 0, x, c
+    elif 240 <= h < 300:
+        r, g, b = x, 0, c
+    else:
+        r, g, b = c, 0, x
+        
+    return (r + m, g + m, b + m, a)
+```
+
+**Edge Cases and Pitfalls:**
+*   **Back-facing surfaces:** Surfaces with $\theta > \pi/2$ are completely invisible. This can lead to holes in the volume visualization if the view direction changes significantly [S1, unofficial].
+*   **Normal Accuracy:** If `surfaceNormals` is not provided, the quality of the stylization depends entirely on the gradient estimation algorithm. Noisy data will result in noisy normal vectors and erratic color banding [S1, unofficial].
+*   **ColorSteps=1:** Results in a single-color rendering using `orthogonalColor`. No shading effect is visible [S1, unofficial].
+*   **HSV Interpolation:** Interpolating in HSV space can produce unexpected hues if the start and end colors have very different hues (e.g., red to blue might pass through purple). This is a known artifact of HSV interpolation [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ where $N$ is the number of voxels, assuming normal lookup is $O(1)$. If normals must be computed, it adds the cost of gradient calculation.
+*   **Memory Complexity:** $O(N)$ for storing the volume and normal textures.
+*   **Performance:** Generally fast as it avoids complex lighting calculations and ray marching integration for color. The primary cost is the normal lookup and color band lookup [S1, unofficial].
+*   **Strengths:** Produces a clear, stylized look that emphasizes shape and boundaries. Simple to implement.
+*   **Limitations:** Lacks depth cues provided by smooth shading. Back-face culling can obscure internal structures if not handled carefully. The discrete color bands can appear jagged if the resolution is low [S1, unofficial].
+*   **When to use:** When a non-photorealistic, illustrative style is desired, such as in educational visualizations or artistic representations of medical data.
+*   **When not to use:** When photorealism or subtle intensity variations are required.
+
+## Background
+CartoonVolumeStyle is defined in the X3D standard specification for volume rendering styles [S1, unofficial]. It was developed as part of the X3D amendment for medical image volume rendering, segmentation, and registration [S1, unofficial]. The style is part of the X3D Volume Rendering API, providing a standardized way to apply cel-shading effects to volumetric data.
+
+## Sources
+[S1] DTIC ADA469447: Development of an Amendment to X3D to Create a Standard Specification of Medical Image Volume Rendering, Segmentation, and Registration, https://archive.org/details/DTIC_ADA469447, fetched 2026-10-26 (unofficial)

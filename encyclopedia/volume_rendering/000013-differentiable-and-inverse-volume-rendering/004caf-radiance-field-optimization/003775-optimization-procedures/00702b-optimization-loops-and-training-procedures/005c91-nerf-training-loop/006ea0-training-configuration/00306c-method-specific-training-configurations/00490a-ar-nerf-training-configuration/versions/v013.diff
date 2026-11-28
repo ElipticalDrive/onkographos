@@ -1,0 +1,152 @@
+--- v012.md
++++ v013.md
+@@ -7,9 +7,9 @@
+ 
+ ## How it works
+-The method trains a generative model that maps a latent code to a radiance field, which is then rendered via volume rendering with aperture control. The training minimizes a combination of GAN loss, R1 regularization, and an identity regularizer to maintain consistency across viewpoints.
++The method trains a generative model that maps a latent code to a radiance field, which is then rendered via volume rendering with aperture control [S1]. The training minimizes a combination of GAN loss, R1 regularization, and an identity regularizer to maintain consistency across viewpoints [S1].
+ 
+ ### Inputs and Outputs
+-*   **Inputs:** A dataset of unposed natural images (e.g., flowers, birds, faces). A random latent code $z$ sampled from a standard normal distribution.
+-*   **Outputs:** Synthesized images with controllable defocus strength (aperture size $s$) and focus distance ($f$).
++*   **Inputs:** A dataset of unposed natural images (e.g., flowers, birds, faces) [S1]. A random latent code $z$ sampled from a standard normal distribution [G].
++*   **Outputs:** Synthesized images with controllable defocus strength (aperture size $s$) and focus distance ($f$) [S1].
+ 
+ ### Data Structures and Network Layouts
+@@ -51,6 +51,6 @@
+ 
+ 2.  **Ray Sampling and Rendering:**
+-    *   The synthesis network outputs density and color.
+-    *   Ray sampling involves querying the network at points along the ray.
++    *   The synthesis network outputs density and color [S1].
++    *   Ray sampling involves querying the network at points along the ray [S1].
+     *   The number of points per ray is increased to improve performance, facilitated by the reduced unit count (128) in the foreground network [S1].
+     *   Defocus parameters (aperture size $s$, focus distance $f$) are integrated into the rendering process to simulate camera optics [S1].
+@@ -68,21 +68,79 @@
+ ### Pseudocode
+ ```python
+-# AR-NeRF Training Loop Configuration
+-# Based on [S1]
+-
+-def train_arnerf(dataset, num_iterations=200000):
++import numpy as np
++import torch
++import torch.nn as nn
++import torch.optim as optim
++
++# Helper: Multi-Layer Perceptron
++class MLP(nn.Module):
++    def __init__(self, hidden_layers, units, activation):
++        super().__init__()
++        self.layers = nn.ModuleList([nn.Linear(units, units) for _ in range(hidden_layers)])
++        self.activation = activation
++
++    def forward(self, x):
++        for layer in self.layers:
++            x = layer(x)
++            if self.activation == 'LReLU':
++                x = torch.nn.functional.leaky_relu(x, negative_slope=0.2)
++        return x
++
++# Helper: Sample latent code
++def sample_from_normal_distribution(batch_size, latent_dim=256):
++    return torch.randn(batch_size, latent_dim)
++
++# Helper: AR-NeRF Rendering (simplified volume rendering)
++def render_arnerf(z, foreground_net, background_net, mapping_net, num_points=10):
++    z_mapped = mapping_net(z)
++    # Query networks along ray; returns density and color tensors
++    return foreground_net(z_mapped), background_net(z_mapped)
++
++# Helper: Non-saturating GAN loss
++def compute_gan_loss(real_images, generated_images, discriminator):
++    real_logits = discriminator(real_images)
++    fake_logits = discriminator(generated_images)
++    loss = torch.mean(torch.nn.functional.softplus(-fake_logits))
++    return loss
++
++# Helper: R1 Gradient Penalty
++def compute_r1_gradient_penalty(real_images, discriminator):
++    real_images.requires_grad_(True)
++    real_logits = discriminator(real_images)
++    gradients = torch.autograd.grad(outputs=real_logits.sum(), inputs=real_images, create_graph=True)[0]
++    penalty = torch.mean(torch.square(gradients))
++    return penalty
++
++# Helper: Identity Regularizer
++def compute_identity_loss(generated_images, mapping_net):
++    # Ensures consistency across viewpoints; formula not specified in sources [G]
++    return torch.mean(torch.square(generated_images))
++
++# Helper: Discriminator
++class Discriminator(nn.Module):
++    def __init__(self, with_coordconv):
++        super().__init__()
++        self.with_coordconv = with_coordconv
++        # CoordConv layers followed by residual blocks for FFHQ; removed for Flowers/CUB [S1]
++        self.conv = nn.Conv2d(3, 64, 4, stride=2, padding=1)
++        self.resnet = nn.Sequential(nn.Conv2d(64, 128, 3, padding=1), nn.ReLU())
++
++    def forward(self, x):
++        x = self.conv(x)
++        x = self.resnet(x)
++        return torch.mean(x, dim=(2, 3))
++
++def train_arnerf(dataset, num_iterations=200000, batch_size=32):
+     # 1. Initialize Networks
+-    mapping_net = MLP(hidden_layers=3, units=256, activation='LReLU', slope=0.2)
++    mapping_net = MLP(hidden_layers=3, units=256, activation='LReLU')
+     foreground_net = MLP(hidden_layers=8, units=128, activation='FiLM-SIREN')
+     background_net = MLP(hidden_layers=8, units=64, activation='FiLM-SIREN')
+     
+     # Discriminator setup depends on dataset
+-    if dataset == 'FFHQ':
+-        discriminator = Discriminator(with_coordconv=True)
+-    else: # Oxford Flowers, CUB-200-2011
+-        discriminator = Discriminator(with_coordconv=False)
++    discriminator = Discriminator(with_coordconv=True) # Default for FFHQ; set False for Flowers/CUB [S1]
+         
+     # 2. Initialize Optimizer
+-    optimizer = Adam(learning_rate=0.00006)
++    optimizer = optim.Adam(list(mapping_net.parameters()) + list(foreground_net.parameters()) + 
++                           list(background_net.parameters()) + list(discriminator.parameters()), lr=0.00006)
+     
+     # 3. Hyperparameters
+@@ -92,28 +150,16 @@
+     # 4. Training Loop
+     for iteration in range(num_iterations):
+-        # Sample batch of real images
+-        real_images = dataset.next_batch()
+-        
+-        # Sample latent codes
++        real_images = dataset.next_batch(batch_size)
++        
+         z = sample_from_normal_distribution(batch_size)
+         
+-        # Generate images via AR-NeRF rendering
+-        # Note: Defocus parameters s and f are controlled during rendering
+         generated_images = render_arnerf(z, foreground_net, background_net, mapping_net)
+         
+-        # Compute GAN Loss
+         gan_loss = compute_gan_loss(real_images, generated_images, discriminator)
+-        
+-        # Compute R1 Regularization
+         r1_loss = compute_r1_gradient_penalty(real_images, discriminator)
+-        
+-        # Compute Identity Regularization
+-        # Ensures consistency across viewpoints
+         id_loss = compute_identity_loss(generated_images, mapping_net)
+         
+-        # Total Loss
+         total_loss = gan_loss + (lambda_r1 * r1_loss) + (lambda_id * id_loss)
+         
+-        # Update weights
+         optimizer.zero_grad()
+         total_loss.backward()
+@@ -123,5 +169,5 @@
+ ### Edge Cases and Pitfalls
+ *   **CoordConv Usage:** Using CoordConv layers in the discriminator for non-aligned objects (flowers, birds) degrades performance [S1].
+-*   **Ray Density:** Processing time and memory increase with the number of rays. While 10 rays were found sufficient for comparable performance to stratified sampling with fewer rays, higher resolutions may require more points per ray [S1].
++*   **Ray Density:** Processing time and memory increase with the number of rays [S1]. While 10 rays were found sufficient for comparable performance to stratified sampling with fewer rays, higher resolutions may require more points per ray [S1].
+ *   **Unit Reduction:** Reducing synthesis network units from 256 to 128 is critical for allowing more points per ray, which improves performance [S1].
+ 

@@ -1,0 +1,208 @@
+--- v001.md
++++ v002.md
+@@ -1,122 +1,125 @@
+ # Instanced Rendering
+ 
+-Also called: Hardware Instancing, Instanced Rendering with Model Matrices
++Also called: DrawIndexedInstanced, Geometry Instancing, Hardware Instancing, Hardware Instancing in DirectX 11, Instanced Rendering for Voxels
+ 
+ ## Overview
+-Instanced rendering is a technique that draws multiple copies of a base geometry (such as a voxel cube) with different per-instance attributes (position, scale, rotation, color) using a single draw call [S1, S2, unofficial]. It solves the problem of high CPU overhead and state change costs associated with rendering thousands of static objects individually [S2, unofficial]. It sets itself apart from standard object-order rendering by batching geometry and attribute updates, and from indirect instancing by relying on explicit draw calls rather than compute-driven dispatch [S1, S2, unofficial].
++Instanced rendering draws multiple copies of a base geometry with different per-instance attributes using a single draw call [S2, unofficial]. It solves the high CPU overhead and state change costs associated with rendering thousands of static objects individually [S4, unofficial][S6, unofficial]. It sets itself apart from standard object-order rendering by batching geometry and attribute updates, and from indirect instancing by relying on explicit draw calls rather than compute-driven dispatch [S2, unofficial][S3, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- Base geometry: A single mesh (e.g., a voxel cube) defined by vertices and indices. For flat-shaded voxels, this typically involves duplicated vertices (e.g., 24 vertices and 36 indices for a cube) [S1, S2, unofficial].
+-- Instance Data Buffer: A GPU-accessible buffer (e.g., `StructuredBuffer`, `SSBO`, or VBO) storing per-instance parameters. Common data includes position (x, y, z), occupancy flags, scale, and color [S1, S2, unofficial].
+-- Instance Count: The number of instances to render.
++- Base geometry: A single mesh (e.g., a voxel cube) defined by vertices and indices. For flat-shaded voxels, this typically involves duplicated vertices (e.g., 24 vertices and 36 indices for a cube) [S3, unofficial][S5, unofficial].
++- Instance Data Buffer: A GPU-accessible buffer storing per-instance parameters such as position, scale, color, or transformation matrices [S3, unofficial][S4, unofficial][S5, unofficial].
++- Instance Count: The number of instances to render [S5, unofficial].
+ 
+ **Outputs:**
+-- Rendered scene with multiple instances of the base geometry transformed according to the instance data.
++- Rendered scene with multiple instances of the base geometry transformed according to the instance data [S3, unofficial][S6, unofficial].
+ 
+ **Data Structures:**
+-- **Instance Buffer:** A contiguous array of structures. Each structure corresponds to one instance. For transformation-based instancing, this often contains a 4x4 matrix or its constituent vectors.
+-- **Vertex Attribute Divisor:** A GPU state that determines how often the vertex shader advances to the next element of an instance attribute. For per-instance data, the divisor is set to 1 [S1, unofficial].
++- **Inner Buffer:** Contains the base geometry vertices [S3, unofficial].
++- **Outer Buffer:** Contains one vertex per instance with per-instance attributes [S3, unofficial].
++- **Vertex Attribute Divisor:** A GPU state that determines how often the vertex shader advances to the next element of an instance attribute. For per-instance data, the divisor is set to 1 [S3, unofficial][S5, unofficial].
+ 
+ **Steps:**
+-1. **Upload Base Geometry:** Upload the vertex and index data for the base geometry (e.g., the voxel cube) to the GPU once [S2, unofficial].
+-2. **Create Instance Buffer:** Populate a buffer with per-instance data. For each instance $i$, store the required attributes (e.g., model matrix $M_i$) [S2, unofficial].
+-3. **Setup Vertex Attributes:** Bind the Vertex Array Object (VAO). For each attribute corresponding to instance data (e.g., the 4 columns of a 4x4 matrix), set the divisor to 1 using `glVertexAttribDivisor` (or equivalent API call) [S1, unofficial]. This ensures the attribute changes once per instance, not once per vertex [S1, unofficial].
+-4. **Bind Buffers:** Bind the instance data buffer to the appropriate shader input location [S1, unofficial].
+-5. **Execute Instanced Draw Call:** Issue a draw call that specifies the instance count. Examples include `glDrawElementsInstanced`, `glDrawArraysInstanced`, or `Graphics.DrawMeshInstanced` [S1, S2, unofficial]. The GPU iterates through the instance buffer, applying the per-instance data to the base vertices during vertex shader execution [S1, S2, unofficial].
++1. Update the vertex shader signature to include instance fields, assigning them to slot 1 or higher [S1, unofficial].
++2. Bind the Vertex Array Object (VAO) for the base geometry [S5, unofficial].
++3. Provide an inner vertex buffer containing the base geometry vertices (e.g., 8 vertices for a cube) [S3, unofficial].
++4. Upload transformation matrices or per-instance attributes to an outer buffer [S4, unofficial][S6, unofficial].
++5. Bind the instance buffer to the shader slot matching the signature [S1, unofficial].
++6. Set the vertex attribute divisor to 1 for instance attributes so they advance once per instance [S3, unofficial][S5, unofficial].
++7. Call an instanced draw function (e.g., `glDrawElementsInstanced`, `DrawIndexedInstanced`) specifying primitive type, count, type, offset, and instance count [S2, unofficial][S5, unofficial].
++
++**Formula:**
++The internal behavior of instancing is equivalent to looping through instance counts and incrementing `gl_InstanceID`:
++$$
++\text{for } (int\ n = 0;\ n < \text{instancecount};\ n++) \{ \\
++\quad \text{glVertexAttrib1i(gl\_InstanceID, n);} \\
++\quad \text{glDrawElements(mode, count, type, indices);} \\
++\}
++$$
++[S2, unofficial]
+ 
+ **Pseudocode:**
+ ```python
+ def render_instanced_voxels(base_mesh, instance_data, instance_count):
+-    """
+-    Renders 'instance_count' copies of 'base_mesh' using 'instance_data'.
++    # Inputs: base_mesh (dict with 'vertices' list, 'indices' list), 
++    #         instance_data (list of per-instance structs), instance_count (int)
+     
+-    Args:
+-        base_mesh: Object containing vertex positions, normals, indices.
+-        instance_data: Array of structures, each containing per-instance attributes 
+-                       (e.g., model matrix columns, color).
+-        instance_count: Integer, number of instances to render.
+-    """
+-    # 1. Setup Base Geometry (Assumed already uploaded and bound to VAO)
+-    vao = create_vao(base_mesh.vertices, base_mesh.indices)
+-    bind_vao(vao)
++    # 1. Setup Base Geometry (Inner Buffer)
++    # Bind base vertices to attribute location 0. Divisor 0 means per-vertex.
++    bind_attribute(location=0, data=base_mesh['vertices'], stride=0, divisor=0)
+     
+-    # 2. Setup Instance Attributes
+-    # Assume instance_data is laid out as an array of structs, 
+-    # where each struct has fields like 'model_matrix_col0', 'model_matrix_col1', etc.
++    # 2. Setup Instance Attributes (Outer Buffer)
++    # Upload per-instance transformation matrices. 
++    # OpenGL splits 4x4 matrices into 4 vec4 columns for attribute arrays.
++    instance_buffer = pack_to_gpu_buffer(instance_data)
+     
+-    # Bind instance data buffer
+-    instance_buffer = create_buffer(instance_data)
+-    bind_buffer(instance_buffer, target=GL_ARRAY_BUFFER)
++    # Bind each matrix column to a separate attribute location.
++    # Divisor 1 means the attribute advances once per instance, not per vertex.
++    # stride=64 bytes (4 columns * 16 bytes/vec4)
++    bind_attribute(location=1, data=instance_buffer, stride=64, divisor=1, offset=0)
++    bind_attribute(location=2, data=instance_buffer, stride=64, divisor=1, offset=16)
++    bind_attribute(location=3, data=instance_buffer, stride=64, divisor=1, offset=32)
++    bind_attribute(location=4, data=instance_buffer, stride=64, divisor=1, offset=48)
+     
+-    # Set up vertex attributes for instance data
+-    # For a 4x4 matrix, we typically split it into 4 vec4 attributes
+-    # Attribute 0: Model Matrix Column 0
+-    # Attribute 1: Model Matrix Column 1
+-    # Attribute 2: Model Matrix Column 2
+-    # Attribute 3: Model Matrix Column 3
+-    
+-    for i in range(4):
+-        # Set pointer to the i-th column of the matrix in the instance buffer
+-        # Offset is i * sizeof(vec4)
+-        offset = i * 16 # Assuming 4 floats * 4 bytes per float
+-        stride = 64     # Assuming 4 columns * 16 bytes per column
+-        
+-        # Set the attribute location and divisor
+-        # Divisor = 1 means the attribute advances once per instance
+-        set_vertex_attrib_divisor(location=i, divisor=1)
+-        
+-        # Enable and configure the attribute
+-        enable_vertex_attrib(location=i)
+-        vertex_attrib_pointer(
+-            location=i,
+-            size=4,          # vec4
+-            type=GL_FLOAT,
+-            normalized=False,
+-            stride=stride,
+-            pointer=offset
+-        )
+-    
+-    # 3. Execute Draw Call
+-    # Draw 'base_mesh.index_count' indices, starting from 0, for 'instance_count' instances
++    # 3. Execute Instanced Draw Call
++    # The GPU iterates instance_count times. 
++    # Internally equivalent to: for n in range(instance_count): gl_InstanceID = n; draw_elements(...)
+     draw_elements_instanced(
+-        mode=GL_TRIANGLES,
+-        count=base_mesh.index_count,
+-        type=GL_UNSIGNED_INT,
+-        offset=0,
++        primitive_type=GL_TRIANGLES,
++        index_count=len(base_mesh['indices']),
++        index_type=GL_UNSIGNED_INT,
++        base_vertex=0,
+         instance_count=instance_count
+     )
++
++def pack_to_gpu_buffer(data):
++    # Converts Python list of instance structs into a contiguous byte array for GPU upload
++    return data
++
++def bind_attribute(location, data, stride, divisor, offset=0):
++    # Configures the vertex attribute pointer and sets the divisor state
++    # divisor=0: per-vertex, divisor=1: per-instance
++    pass
++
++def draw_elements_instanced(primitive_type, index_count, index_type, base_vertex, instance_count):
++    # Issues the hardware instancing draw command
++    pass
+ ```
+ 
+ **Parameters:**
+-- **Divisor:** Set to 1 for per-instance attributes [S1, unofficial].
+-- **Instance Count:** Equal to the number of valid instances in the buffer (e.g., filtered by frustum) [S1, unofficial].
++- **Divisor:** Set to 1 for per-instance attributes [S5, unofficial].
++- **Instance Count:** Equal to the number of valid instances in the buffer (e.g., filtered by frustum) [S5, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-- **Frustum Culling:** Not all instances may be visible. Filtering the instance buffer by frustum before drawing can significantly reduce performance overhead [S1, unofficial].
+-- **Matrix Multiplication:** Avoid performing matrix multiplications on the CPU for each instance if possible; upload pre-composed matrices or transform positions on the GPU [S2, unofficial].
+-- **State Changes:** Group instances by material/texture to minimize state changes [S2, unofficial].
++- **Matrix Alignment:** When feeding a matrix into the shader, ensure correct column or row major alignment to avoid transformation errors [S1, unofficial].
++- **Deprecated Features:** Using deprecated features like `gl_Vertex` and `gl_ModelViewProjectionMatrix` in modern OpenGL is bad practice [S2, unofficial].
++- **Uniform Limits:** Using uniforms to store per-instance data via `gl_InstanceID` is slower than using vertex attributes/VBOs and is limited by `MAX_VERTEX_UNIFORM_COMPONENTS` (typically 512-1024 floats), which is insufficient for tens of thousands of instances [S2, unofficial].
++- **Driver Dependency:** Performance benefit depends on the graphics driver [S4, unofficial].
+ 
+ ## Subtopics
+ 
+ ### GPU Instancing with MaterialPropertyBlock
+-A variant in Unity that allows different materials per instance. Method 1 (Lowest Efficiency) generates multiple prefabs with separate MaterialPropertyBlocks. Method 2 (Medium Efficiency) calls `DrawMesh` multiple times with different MaterialPropertyBlocks. Method 3 (Highest Efficiency) uses `DrawMeshInstanced` with an array of MaterialPropertyBlocks to set different materials per mesh instance [S3, unofficial]. Multi-pass rendering allows control over draw order but does not support instancing [S3, unofficial].
++A Unity variant that allows different materials per instance. Method 1 (Lowest Efficiency) generates multiple prefabs with separate MaterialPropertyBlocks. Method 2 (Medium Efficiency) calls `DrawMesh` multiple times with different MaterialPropertyBlocks. Method 3 (Highest Efficiency) uses `DrawMeshInstanced` with an array of MaterialPropertyBlocks to set different materials per mesh instance [S7, unofficial]. Multi-pass rendering allows control over draw order but does not support instancing [S7, unofficial].
+ 
+ ### Animation via Virtual Instancing
+-An animation technique that avoids rebuilding acceleration structures (AS) by updating transformation matrices or instance rotations in shaders [S4]. For proxy geometry transformation, transformation matrices inside µLAS are updated; rebuilding µLAS is fast and non-blocking. Mesostructures and nanostructures adjust automatically without AS updates because instances are instantiated virtually. For protein instance jittering, instance rotation is manipulated based on time to compute transformation matrices $M_2$, inducing animation at the nLAS level. This computation is done in rendering shaders, requiring no AS update or rebuild [S4].
++An animation technique that avoids rebuilding acceleration structures (AS) by updating transformation matrices or instance rotations in shaders [S8]. For proxy geometry transformation, transformation matrices inside µLAS are updated; rebuilding µLAS is fast and non-blocking [S8]. Mesostructures and nanostructures adjust automatically without AS updates because instances are instantiated virtually [S8]. For protein instance jittering, instance rotation is manipulated based on time to compute transformation matrices $M_2$, inducing animation at the nLAS level [S8]. This computation is done in rendering shaders, requiring no AS update or rebuild [S8].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Reduces CPU overhead from $O(N)$ draw calls to $O(1)$ draw call for $N$ instances [S1, S2, unofficial].
+-- **Memory Complexity:** Requires additional memory for the instance data buffer, proportional to the number of instances [S1, S2, unofficial].
+-- **Performance:** Significant performance gain for large voxel scenes with many static objects [S2, unofficial]. Performance depends on GPU driver and scene complexity [S2, unofficial].
+-- **Strengths:** Reduces repeated matrix multiplications, inverses, uniform uploads, and texture state changes per frame [S2, unofficial].
+-- **Limitations:** Less flexible for dynamic per-instance changes that require frequent buffer updates. Not suitable for highly dynamic scenes where instance data changes every frame without careful optimization [S2, unofficial].
++- **Time Complexity:** Reduces CPU overhead from $O(N)$ draw calls to $O(1)$ draw call for $N$ instances [S2, unofficial][S6, unofficial].
++- **Memory Complexity:** Requires additional memory for the instance data buffer, proportional to the number of instances [S3, unofficial].
++- **Performance:** Significant performance gain for large voxel scenes with many static objects [S4, unofficial][S6, unofficial]. Performance depends on GPU driver and scene complexity [S4, unofficial].
++- **Strengths:** Avoids repeated matrix multiplications, inverses, uniform uploads, and texture state changes per frame [S6, unofficial].
++- **Limitations:** Using a matrix for cube alignment incurs a GPU draw penalty rather than a CPU penalty [S1, unofficial]. Less flexible for highly dynamic scenes requiring frequent buffer updates [S2, unofficial].
+ 
+ ## Background
+-Instanced rendering originated as a technique to optimize the rendering of large numbers of static objects, such as terrain chunks, leaves, and trees [S1, unofficial]. It was developed to address the performance bottlenecks of traditional per-object rendering, where each object requires a separate draw call and state change [S2, unofficial]. The technique leverages GPU hardware capabilities to iterate over instance data efficiently [S1, S2, unofficial]. It is widely used in voxel engines and large-scale scene rendering [S1, S2, unofficial].
++Instanced rendering originated as a technique to optimize rendering of large numbers of static objects like terrain chunks, leaves, and trees [S5, unofficial]. It was developed to address performance bottlenecks of traditional per-object rendering where each object requires a separate draw call and state change [S2, unofficial][S6, unofficial]. The technique leverages GPU hardware capabilities to iterate over instance data efficiently [S1, unofficial][S2, unofficial]. It is widely used in voxel engines and large-scale scene rendering [S3, unofficial][S4, unofficial].
+ 
+ ## Sources
+-[S1] MProgramingUnityCsharp/VoxelCoreEngine, https://github.com/MProgramingUnityCsharp/VoxelCoreEngine, fetched 2026-10-27 (unofficial)
+-[S2] OpenGL How to render a voxel based world scene with many objects, https://www.stackoverflow.com/questions/31256095, fetched 2026-10-28 (unofficial)
+-[S3] ShuchangXu/VolumeCloud, https://github.com/ShuchangXu/VolumeCloud, fetched 2026-10-26 (unofficial)
+-[S4] Nanouniverse: Virtual Instancing of Structural Detail and Adaptive Shell Mapping., https://doi.org/10.1109/tvcg.2025.3618914, fetched 2026-10-26+[S1] Implement hardware instancing on Directx11, https://stackoverflow.com/questions/55765822/implement-hardware-instancing-on-directx11, fetched 2026-10-26 (unofficial)
++[S2] How to do instancing the right way in OpenGL., https://stackoverflow.com/questions/21539234/how-to-do-instancing-the-right-way-in-opengl, fetched 2026-10-26 (unofficial)
++[S3] How to create more vertexes from within a shader in OpenGL?, https://gamedev.stackexchange.com/questions/72442/how-to-create-more-vertexes-from-within-a-shader-in-opengl, fetched 2026-10-26 (unofficial)
++[S4] OpenGL How to render a voxel based world scene with many objects, https://stackoverflow.com/questions/31256095/opengl-how-to-render-a-voxel-based-world-scene-with-many-objects, fetched 2026-10-27 (unofficial)
++[S5] MProgramingUnityCsharp/VoxelCoreEngine, https://github.com/MProgramingUnityCsharp/VoxelCoreEngine, fetched 2026-10-27 (unofficial)
++[S6] OpenGL How to render a voxel based world scene with many objects, https://www.stackoverflow.com/questions/31256095, fetched 2026-10-28 (unofficial)
++[S7] ShuchangXu/VolumeCloud, https://github.com/ShuchangXu/VolumeCloud, fetched 2026-10-26 (unofficial)
++[S8] Nanouniverse: Virtual Instancing of Structural Detail and Adaptive Shell Mapping., https://doi.org/10.1109/tvcg.2025.3618914, fetched 2026-10-26

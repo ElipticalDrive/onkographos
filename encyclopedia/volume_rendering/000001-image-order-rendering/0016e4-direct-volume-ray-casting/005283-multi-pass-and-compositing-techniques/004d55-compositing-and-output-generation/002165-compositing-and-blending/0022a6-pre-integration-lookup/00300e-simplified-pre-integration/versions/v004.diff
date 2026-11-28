@@ -1,0 +1,157 @@
+--- v003.md
++++ v004.md
+@@ -8,19 +8,15 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A 3D scalar volume texture, a transfer function (TF) mapping scalar values to color and opacity, and the distance between sample points.
+-*   **Output:** A pre-integration lookup table (LUT) stored as a 3D texture (or 2D RGBA texture depending on implementation details) containing pre-computed color and opacity values.
++*   **Input:** A 3D scalar volume texture, a transfer function (TF) mapping scalar values to color and opacity, and the distance between sample points [S2, unofficial].
++*   **Output:** A pre-integration lookup table (LUT) containing pre-computed color and opacity values [S2, unofficial].
+ 
+ **Data Structures:**
+ *   **Volume Data:** Stored in GPU memory as a 3D texture with 8-bit precision per component [S1].
+ *   **Transfer Function:** Represented as a lookup table with 256 entries [S1].
+-*   **Pre-integration Table:**
+-    *   Full pre-integration typically uses a 3D texture accessed by scalar values $(s_1, s_2)$ and distance $d$ [S2, unofficial].
+-    *   Simplified pre-integration in the cited implementation stores results as 2D RGBA textures [S1]. The specific axis mapping for the 2D case is not explicitly defined in the sources, but the general pre-integration concept maps scalar values to x/y axes and distance to z [S2, unofficial].
++*   **Pre-integration Table:** Typically stored as a 3D texture accessed by scalar values $(s_1, s_2)$ on the x/y-axes and distance $d$ on the z-axis [S2, unofficial]. In the cited implementation, simplified pre-integration results are stored as 2D RGBA textures [S1].
+ 
+ **Method Steps:**
+ 1.  **Pre-computation:** For each pair of scalar values $(s_1, s_2)$ sampled at two different positions along a ray and the distance $d$ between them, compute the color and opacity contributions using the transfer function [S2, unofficial].
+-2.  **Simplified Integral Calculation:** Compute the integral approximation by neglecting the color attenuation term. In full pre-integration, the contribution of a segment is weighted by the accumulated opacity of previous segments. In simplified pre-integration, this attenuation is disregarded [S3, unofficial].
+-    *   Let $c(s)$ be the color and $\alpha(s)$ be the opacity from the TF for scalar value $s$.
+-    *   The simplified contribution for a segment of length $d$ between $s_1$ and $s_2$ is computed without the exponential decay factor $\exp(-\sum \alpha_i \Delta x)$ that appears in the standard volume rendering equation [S1][S3, unofficial].
++2.  **Simplified Integral Calculation:** Compute the integral approximation by neglecting the color attenuation term [S3, unofficial]. In full pre-integration, the contribution of a segment is weighted by the accumulated opacity of previous segments [G]. In simplified pre-integration, this attenuation is disregarded [S3, unofficial]. The standard volume rendering integral $C = \int c(s) \alpha(s) e^{-\int_0^s \alpha(t) dt} ds$ is approximated by removing the exponential decay factor [S1][S3, unofficial].
+ 3.  **Storage:** Store the resulting color and opacity values in the lookup table [S2, unofficial].
+ 4.  **Rasterization:** During rendering, access the pre-integration table using the scalar values sampled at the ray segment endpoints and the segment distance [S2, unofficial].
+@@ -28,87 +24,37 @@
+ 
+ **Pseudocode:**
+-The following pseudocode illustrates the pre-computation of the simplified pre-integration table. Note that the exact mathematical formula for the "simplified" integral is described as neglecting attenuation, which implies a linear accumulation or a specific approximation of the integral $\int c(s) \alpha(s) e^{-\int \alpha} ds$ where the exponential term is removed or approximated.
+-
+ ```python
+-def compute_simplified_pre_integration_table(volume, transfer_function, num_samples):
++def compute_simplified_pre_integration_table(s_min, s_max, d_max, num_s, num_d, transfer_function):
+     """
+     Pre-computes the simplified pre-integration lookup table.
++    Args:
++        s_min, s_max: Scalar value range.
++        d_max: Maximum segment distance.
++        num_s, num_d: Discretization steps for scalars and distance.
++        transfer_function: Callable mapping scalar -> (color, opacity).
++    Returns:
++        LUT: 3D list of (color, opacity) tuples.
++    """
++    # Initialize 3D LUT: LUT[s1_idx, d_idx, s2_idx]
++    LUT = [[[None for _ in range(num_d)] for _ in range(num_s)] for _ in range(num_s)]
+     
+-    Args:
+-        volume: 3D texture of scalar values.
+-        transfer_function: Function mapping scalar value -> (color, opacity).
+-        num_samples: Number of discrete steps for distance and scalar values.
+-        
+-    Returns:
+-        LUT: Pre-computed color and opacity values.
+-    """
+-    # Initialize LUT. Dimensions depend on implementation (2D RGBA or 3D).
+-    # Assuming 3D structure for generality: LUT[s1_idx, s2_idx, d_idx] = (color, opacity)
+-    LUT = empty_3d_texture()
+-    
+-    # Define ranges for scalar values and distance
+-    scalar_range = get_scalar_range(volume)
+-    distance_range = get_max_distance(volume)
+-    
+-    # Discretize ranges
+-    s_values = linspace(scalar_range.min, scalar_range.max, num_samples)
+-    d_values = linspace(0, distance_range.max, num_samples)
++    s_values = [s_min + i * (s_max - s_min) / (num_s - 1) for i in range(num_s)]
++    d_values = [i * d_max / (num_d - 1) for i in range(num_d)]
+     
+     for i, s1 in enumerate(s_values):
++        c1, a1 = transfer_function(s1)
+         for j, s2 in enumerate(s_values):
++            c2, a2 = transfer_function(s2)
+             for k, d in enumerate(d_values):
+-                # Get TF properties for the endpoints
+-                c1, a1 = transfer_function(s1)
+-                c2, a2 = transfer_function(s2)
+-                
+-                # Simplified Pre-integration Calculation
+-                # Full pre-integration would involve:
+-                # C = integral(c(s) * alpha(s) * exp(-integral(alpha(s) ds))) ds
+-                # Simplified pre-integration neglects the attenuation term exp(-...)
+-                # This is often approximated as a linear interpolation or simple average
+-                # weighted by the segment length, or specifically defined in [S1][S3, unofficial]
+-                # as neglecting color attenuation inside volume slabs.
+-                
+-                # Approximation: Linear interpolation of color and opacity
+-                # without the exponential opacity accumulation factor.
+-                # [G] Standard simplified pre-integration often uses:
+-                # Color = (c1 + c2) / 2 * (a1 + a2) / 2 * d
+-                # Or similar non-attenuated accumulation.
+-                # Since the exact formula is not provided, we note the neglect of attenuation.
+-                
+-                # Example implementation of "neglecting attenuation":
+-                # Accumulate color and opacity linearly without exponential decay.
+-                avg_color = (c1 + c2) / 2.0
+-                avg_opacity = (a1 + a2) / 2.0
+-                
+-                # Contribution is proportional to distance, but not attenuated by previous segments
++                # Simplified calculation: linear interpolation of color and opacity
++                # without the exponential attenuation term [G]
++                t = d / d_max if d_max > 0 else 0.0
++                avg_color = (c1 * (1 - t) + c2 * t)
++                avg_opacity = a1 * (1 - t) + a2 * t
++                # Accumulate linearly over distance without attenuation
+                 contribution_color = avg_color * avg_opacity * d
+                 contribution_opacity = avg_opacity * d
+-                
+-                # Store in LUT
+-                LUT[i, j, k] = (contribution_color, contribution_opacity)
+-                
++                LUT[i][k][j] = (contribution_color, contribution_opacity)
+     return LUT
+-
+-def render_with_simplified_pre_integration(volume, lut, ray_origin, ray_direction, ray_length):
+-    """
+-    Renders volume using simplified pre-integration LUT.
+-    """
+-    # Sample volume along ray
+-    # For each segment between sample points s1 and s2 with distance d:
+-    # 1. Get scalar values s1, s2
+-    # 2. Get distance d
+-    # 3. Lookup pre-computed (color, opacity) from LUT[s1, s2, d]
+-    # 4. Composite into final color
+-    
+-    # [G] Standard front-to-back compositing:
+-    # C_acc = 0, A_acc = 0
+-    # for each segment:
+-    #    (C_seg, A_seg) = LUT[s1, s2, d]
+-    #    C_acc += C_seg * (1 - A_acc)
+-    #    A_acc += A_seg * (1 - A_acc)
+-    # return C_acc
+-    
+-    pass
+ ```
+ 
+@@ -119,16 +65,16 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Discretization Artifacts:** The method assumes a linear progression of scalar values between slices, which can introduce discretization artifacts [S2, unofficial]. An adaptive sampling approach can mitigate this [S2, unofficial].
++*   **Discretization Artifacts:** The method assumes a linear progression of scalar values between slices, which can introduce discretization artifacts [S2, unofficial]. An adaptive sampling approach can mitigate this by adjusting the sampling rate based on volume and TF information [S2, unofficial].
+ *   **Color Deviation:** Neglecting attenuation results in a deviation in the calculation of the total color contribution at each pixel compared to the physically correct result [S3, unofficial].
+ *   **Performance vs. Quality:** While it guarantees superior performance, the visual quality is lower than full pre-integration [S3, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Faster than full pre-integration. The pre-computation is faster because it neglects the attenuation term [S1][S3, unofficial].
+-*   **Memory Complexity:** Stores pre-computed values in textures. The cited implementation uses 2D RGBA textures for the simplified case [S1], whereas full pre-integration may use 3D textures [S2, unofficial].
++*   **Time Complexity:** Faster than full pre-integration due to the omission of the attenuation term [S1][S3, unofficial].
++*   **Memory Complexity:** Stores pre-computed values in textures. The cited implementation uses 2D RGBA textures for the simplified case [S1], whereas full pre-integration typically uses 3D textures [S2, unofficial].
+ *   **Performance:** Guarantees superior performance, although of the same order of magnitude as efficient full pre-integration algorithms like Lum et al. [S3, unofficial].
+ *   **Strengths:** Enables real-time interaction when modifying multiple transfer functions simultaneously [S1].
+ *   **Limitations:** Introduces visual artifacts due to the neglect of color attenuation and linear scalar interpolation assumptions [S2, S3, unofficial].
+ *   **When to Use:** Interactive editing interfaces where multiple TFs are adjusted at once [S1].
+-*   **When Not to Use:** Final rendering or single-TF editing where higher visual fidelity is required (use full pre-integration instead) [S1].
++*   **When Not to Use:** Single-TF editing or final rendering where higher visual fidelity is required, as full pre-integration is applied in those contexts [S1].
+ 
+ ## Background

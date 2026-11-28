@@ -1,0 +1,73 @@
+# Sim(3) Alignment via Procrustes Analysis
+
+Also called: Pose Accuracy Measurement, Procrustes alignment, Sim(3) BARF
+
+## Overview
+Sim(3) Alignment via Procrustes Analysis computes a 3D similarity transformation (rotation, uniform scaling, and translation) to align estimated camera poses to ground truth poses by minimizing the sum of squared Euclidean distances between corresponding camera center locations [S1, unofficial]. It serves as the primary method for pose quality assessment and initialization in neural rendering pipelines, distinguishing itself from rigid-only alignment by accounting for scale discrepancies and from iterative methods by providing a closed-form solution [S1, unofficial]. Unlike [PCA Pose Alignment](7626-pca-pose-alignment.md), which aligns based on principal axes of pose distribution, this method relies on explicit point-to-point correspondence of camera centers [S1, unofficial].
+
+## How it works
+**Inputs:**
+- Set of estimated camera pose locations (centers) $C_{est} = \{c_1, c_2, \dots, c_N\} \subset \mathbb{R}^3$.
+- Set of ground truth camera pose locations (centers) $C_{gt} = \{p_1, p_2, \dots, p_N\} \subset \mathbb{R}^3$.
+- Correspondence is assumed to be established by index $i$ (i.e., $c_i$ corresponds to $p_i$) [S1, unofficial].
+
+**Outputs:**
+- A similarity transformation $T \in \text{Sim}(3)$ defined by a rotation matrix $R \in \mathbb{R}^{3 \times 3}$, a scale factor $s \in \mathbb{R}$, and a translation vector $t \in \mathbb{R}^3$.
+- The aligned estimated poses $C'_{est}$, where $c'_i = s R c_i + t$.
+
+**Data Structures:**
+- Two $N \times 3$ matrices, $X$ (estimated centers) and $Y$ (ground truth centers), where each row $i$ is a 3D coordinate vector.
+
+**Steps:**
+1. **Centroid Calculation:** Compute the centroids of both point sets.
+   $$ \mu_X = \frac{1}{N} \sum_{i=1}^N x_i, \quad \mu_Y = \frac{1}{N} \sum_{i=1}^N y_i $$
+2. **Centering:** Subtract centroids from the original points to obtain centered matrices $\tilde{X}$ and $\tilde{Y}$.
+   $$ \tilde{x}_i = x_i - \mu_X, \quad \tilde{y}_i = y_i - \mu_Y $$
+3. **Covariance Matrix:** Compute the $3 \times 3$ covariance matrix $H$.
+   $$ H = \tilde{X}^T \tilde{Y} $$
+4. **Singular Value Decomposition (SVD):** Perform SVD on $H$.
+   $$ H = U \Sigma V^T $$
+5. **Rotation Calculation:** Compute the rotation matrix $R$. To ensure a proper rotation (determinant +1) and handle reflection, check the determinant of $V U^T$.
+   $$ D = \text{diag}(1, 1, \det(V U^T)) $$
+   $$ R = V D U^T $$
+   [G] If $\det(R) = -1$, the transformation includes a reflection; in standard pose alignment, this is often corrected by flipping the sign of the smallest singular value's corresponding column in $V$ before computing $R$, though the source notes do not explicitly detail this correction step for Sim(3) [S1, unofficial].
+6. **Scale Calculation:** Compute the uniform scale factor $s$.
+   $$ s = \frac{\text{trace}(\Sigma D)}{\sum_{i=1}^N \|\tilde{x}_i\|^2} $$
+   [G] The denominator is the sum of squared norms of the centered estimated points.
+7. **Translation Calculation:** Compute the translation vector $t$.
+   $$ t = \mu_Y - s R \mu_X $$
+8. **Application:** Apply the transformation to all estimated points.
+   $$ c'_i = s R c_i + t $$
+
+**Parameters:**
+- No free tuning parameters; the solution is deterministic given the input points [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Degenerate Geometry:** Procrustes analysis is unreliable when all camera centers lie on a single line or if the translation vectors contain significant noise [S1, unofficial].
+- **Precision:** Numerical stability depends on the conditioning of the covariance matrix $H$ [G].
+
+## Subtopics
+
+### Sim(3) with Rotation Alignment
+A variant that adds a virtual point at coordinates $(0, 0, 1)$ in the camera coordinate system of each image, transforms it to the world coordinate using camera parameters, and incorporates camera rotation during the alignment process [S1, unofficial]. It is chosen to mitigate Procrustes analysis failures in degenerate cases (e.g., collinear cameras) [S1, unofficial]. However, it causes more translation errors compared to standard Sim(3) and reduces rotation errors ($\Delta R$) at the cost of harming translation accuracy ($\Delta T$) when pose accuracy is already high [S1, unofficial].
+
+### [Test-time Optimization with Sim(3) Initialization](8565-test-time-optimization-with-sim-3-initialization.md)
+A testing procedure where poses are first initialized using Sim(3) alignment via Procrustes analysis on camera pose locations, followed by additional test-time optimization to further adjust test poses for view synthesis. It sets itself apart by using a global rigid-similarity transformation derived from training data to bootstrap test poses, rather than relying on local neighbor proximity or unoptimized estimated poses.
+
+### [Pose Registration Metrics](12703-pose-registration-metrics.md)
+Metrics that quantify the alignment accuracy between estimated camera poses and ground-truth poses, serving as the evaluation standard for methods like Sim(3) Alignment via Procrustes Analysis. They solve the problem of measuring how well an estimated trajectory matches reality in terms of both orientation and position, providing scalar error values used to judge the success of the alignment.
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$ for centroid calculation and $O(1)$ for SVD on fixed $3 \times 3$ matrices, making it extremely fast for typical numbers of cameras $N$ [S1, unofficial].
+- **Memory Complexity:** $O(N)$ to store the point sets [S1, unofficial].
+- **Strengths:** Provides a closed-form, non-iterative solution; accounts for scale differences between estimated and ground truth trajectories; widely used for pose quality assessment in NeRF pipelines [S1, unofficial].
+- **Limitations:** Fails or becomes unreliable if camera centers are collinear or if translation noise is high [S1, unofficial]. Standard Sim(3) may cause fewer translation errors than Sim(3) with rotation when pose accuracy is high, but Sim(3) with rotation reduces rotation errors [S1, unofficial].
+- **When to use:** For evaluating pose accuracy or initializing test-time optimization in neural rendering [S1, unofficial].
+- **When not to use:** When camera trajectories are degenerate (collinear) or when high-fidelity rotation alignment is required despite translation error penalties (consider Sim(3) with rotation) [S1, unofficial].
+
+## Background
+The method originates from the application of Procrustes analysis to camera pose alignment in neural radiance fields. It was notably employed in BARF (Blending Attentive Refinement for Neural Radiance Fields) [20] and L2G-NeRF [6] for pose quality assessment alignment [S1, unofficial]. The approach was later critiqued and extended by CF-NeRF [41], which introduced the "Sim(3) with rotation" variant to address reliability issues in specific degenerate cases [S1, unofficial].
+
+## Sources
+[S1] CT-NeRF: Incremental Optimizing Neural Radiance Field and Poses with Complex Trajectory, https://doi.org/10.48550/arxiv.2404.13896, fetched 2026-10-26 (unofficial)
+[S2] DBARF: Deep Bundle-Adjusting Generalizable Neural Radiance Fields, https://doi.org/10.1109/cvpr52729.2023.00011, fetched 2026-10-29

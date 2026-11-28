@@ -1,0 +1,104 @@
+# Windowed Fourier Transform
+
+Also called: Gabor Transform
+
+## Overview
+The Windowed Fourier Transform (WFT), also known as the Gabor Transform, addresses the lack of spatial localization inherent in the standard Fourier Transform by introducing a spatially localized window function [S1, unofficial]. While the standard Fourier Transform provides a global measure of frequency content across the entire signal, making it difficult to identify the position of irregularities, the WFT uses a translated window to cover the whole signal, allowing for the localization of these irregularities [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A function $f(x)$ belonging to the space $L^2(\mathbb{R})$ [S1, unofficial].
+*   **Output:** A 2D function $Gf(u, \omega)$ representing the transform coefficients at spatial position $u$ and frequency $\omega$ [S1, unofficial].
+
+**Data Structures:**
+Not given in the sources.
+
+**Method:**
+The transform is defined by the integral:
+$$ Gf(u, \omega) = \int_{-\infty}^{\infty} f(x) g(x - u) e^{-i \omega x} dx $$
+**Symbol Definitions:**
+*   $f(x)$: The input signal or function [S1, unofficial].
+*   $g(x)$: The window function (kernel) [S1, unofficial].
+*   $u$: The spatial translation parameter, shifting the window along the spatial axis [S1, unofficial].
+*   $\omega$: The frequency parameter [S1, unofficial].
+*   $i$: The imaginary unit.
+
+**Steps:**
+1. Select a localized window function $g(x)$ [S1, unofficial].
+2. For each desired spatial position $u$ and frequency $\omega$:
+   a. Shift the window function to $g(x - u)$ [S1, unofficial].
+   b. Multiply the input signal $f(x)$ by the shifted window $g(x - u)$ [S1, unofficial].
+   c. Multiply the result by the complex exponential kernel $e^{-i \omega x}$ [S1, unofficial].
+   d. Integrate the product over the entire spatial domain $x \in (-\infty, \infty)$ [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def windowed_fourier_transform(f, g, u_values, omega_values, dx):
+    """
+    Computes the discrete Windowed Fourier Transform.
+    f: list of float, input signal samples f(x)
+    g: list of float, window function samples g(x) centered at 0
+    u_values: list of float, spatial translation positions u
+    omega_values: list of float, frequency values omega
+    dx: float, spatial step size
+    Returns: list of list of complex, Gf[i][j]
+    """
+    n = len(f)
+    Gf = [[0.0 + 0.0j for _ in range(len(omega_values))] for _ in range(len(u_values))]
+    for i, u in enumerate(u_values):
+        for j, omega in enumerate(omega_values):
+            integral = 0.0 + 0.0j
+            for k in range(n):
+                x = k * dx
+                # Evaluate g(x - u) via linear interpolation on the grid
+                # Sources do not specify discrete interpolation method; linear interpolation used here [G].
+                target_idx = k - u / dx
+                idx0 = int(math.floor(target_idx))
+                idx1 = idx0 + 1
+                frac = target_idx - idx0
+                g_val = 0.0
+                if 0 <= idx0 < len(g):
+                    g_val += g[idx0] * (1.0 - frac)
+                if 0 <= idx1 < len(g):
+                    g_val += g[idx1] * frac
+                phase = omega * x
+                exp_val = complex(math.cos(phase), -math.sin(phase))
+                integral += f[k] * g_val * exp_val * dx
+            Gf[i][j] = integral
+    return Gf
+```
+
+**Parameters:**
+*   **Window Function $g(x)$:** The choice of window affects the trade-off between spatial and frequency resolution [G]. In holographic applications, a Hann window is commonly used [S2].
+*   **Step sizes for $u$ and $\omega$:** Determine the resolution of the output transform [G]. Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Phase Inversion:** The STFT variant contains both amplitude and phase and is invertible, but its squared magnitude (the observable light field) does not contain phase information and is therefore not invertible [S2]. Holographic stereograms solve this ill-posed inversion problem [S2].
+*   **Boundary Effects:** Signals near domain boundaries may be truncated if the window extends beyond the signal support [G]. Zero-padding or periodic extension is typically used to mitigate this [G].
+
+## Subtopics
+
+### [Aperture Apodization](10803-aperture-apodization.md)
+Aperture Apodization suppresses side-lobe leakage and aperture diffraction artifacts caused by the sharp intensity edges of a rectangular synthetic aperture during numerical holographic reconstruction. It smoothly tapers the aperture edges to zero, reducing strong diffraction effects at the borders. The method is applied after selecting a sub-region of the hologram to define a specific viewpoint.
+
+### [Anisotropic Noise](16450-anisotropic-noise.md)
+Anisotropic noise is a procedural noise function that supports high-quality anisotropic filtering by tiling the frequency domain into oriented subbands. Unlike isotropic noise functions (such as Perlin noise) which force a trade-off between aliasing artifacts and loss of detail on tilted surfaces, anisotropic noise adapts its frequency content to non-uniform perspective distortions by blending pre-computed oriented bands. It sets itself apart from its sibling Aperture Apodization by explicitly modeling orientation in the frequency decomposition, allowing it to approximate any desired anisotropic frequency spectrum on a surface.
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Strengths:** Provides simultaneous spatial and frequency localization, allowing for the analysis of non-stationary signals where frequency content changes over space [G].
+*   **Limitations:** High computational cost compared to global Fourier methods. The choice of window function imposes a fixed resolution trade-off (Heisenberg uncertainty principle) [G].
+*   **When to use:** When the signal's frequency content varies with position and global Fourier analysis is insufficient [G].
+*   **When not to use:** When only global frequency statistics are needed or when computational resources are severely limited [G].
+
+## Background
+The Windowed Fourier Transform was introduced by Dennis Gabor [S1, unofficial]. Gabor defined this new decomposition using a spatial window $g(x)$ in the Fourier integral to localize the information provided by the Fourier transform, which previously covered the whole spatial domain and was not spatially localized [S1, unofficial]. The transform is translated along the spatial axis to cover the whole signal [S1, unofficial].
+
+## Sources
+[S1] Direct rendering of multiresolution decomposed volume data., https://doi.org/10.82465/4870, fetched 2026-10-26 (unofficial)
+[S2] Holographic near-eye displays based on overlap-add stereograms, https://doi.org/10.1145/3355089.3356517, fetched 2026-11-01

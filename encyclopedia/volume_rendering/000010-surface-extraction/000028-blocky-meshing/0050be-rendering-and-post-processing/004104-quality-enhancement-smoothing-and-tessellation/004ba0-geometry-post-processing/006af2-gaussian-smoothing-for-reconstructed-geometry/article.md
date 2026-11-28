@@ -1,0 +1,60 @@
+# Gaussian Smoothing for Reconstructed Geometry
+
+Also called: Post-processing geometry smoothing
+
+## Overview
+Gaussian smoothing for reconstructed geometry is a post-processing step applied to raw reconstructed geometry to mitigate roughness artifacts caused by inaccurate segmentation masks or noisy surface representations [S1]. It differs from geometric mesh refinement, which focuses on topological correction and tessellation density, by operating as a direct smoothing filter on the geometry's spatial attributes (position, depth, or normals) to reduce high-frequency noise without altering the underlying mesh connectivity or resolution [S1, 21382-geometric-mesh-refinement.md].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Raw reconstructed geometry, typically represented as a mesh, point cloud, or a set of surfels (surface elements) with associated depth and normal information.
+*   **Output:** Smoothed geometry with reduced roughness and discontinuities.
+
+**Data Structures:**
+The method operates on the geometric primitives of the reconstruction. For standard mesh smoothing, this involves vertex positions. For the 2D-GES variant, it involves surfel depth maps ($D_s$), normal maps ($N_s$), and a set of contributing surfels defined by depth $d_i$, normal $\mathbf{n}_i$, and opacity $\alpha_i$ [S2].
+
+**Steps:**
+1.  **Identify Noise Sources:** Recognize that roughness in the reconstructed geometry often stems from inaccurate segmentation masks or discrete sampling artifacts [S1].
+2.  **Apply Gaussian Filter:** Apply a Gaussian smoothing filter to the geometry. The specific implementation depends on the representation:
+    *   For general meshes/point clouds, this involves convolving vertex positions or attributes with a Gaussian kernel [S1].
+    *   For surfel-based representations (2D-GES), the smoothing is performed in screen space or parameter space using weighted sums of neighboring surfels [S2].
+3.  **Compute Smoothed Attributes (2D-GES Variant):**
+    *   For each pixel or sample location $\hat{\mathbf{x}}$, identify contributing surfels $i$ where the surfel depth $d_i$ is within a threshold $\epsilon$ of the current surfel depth $d_s(\hat{\mathbf{x}})$ [S2].
+    *   Compute the Gaussian-weighted depth component $D_G(\hat{\mathbf{x}})$ and normal component $N_G(\hat{\mathbf{x}})$ using the following formulas [S2]:
+        $$D_G(\hat{\mathbf{x}}) = \sum_{i=1}^N [\mathbb{1}(d_i < d_s(\hat{\mathbf{x}}) + \epsilon)] d_i \alpha_i(\hat{\mathbf{x}})$$
+        $$N_G(\hat{\mathbf{x}}) = \sum_{i=1}^N [\mathbb{1}(d_i < d_s(\hat{\mathbf{x}}) + \epsilon)] \mathbf{n}_i \alpha_i(\hat{\mathbf{x}})$$
+        where $\mathbb{1}(\cdot)$ is the indicator function, $\alpha_i$ is the opacity, and $N$ is the number of surfels [S2].
+    *   Combine the original and smoothed components using weights $W_s$ (original) and $W_G$ (smoothed) [S2]:
+        $$D_{smooth} = \frac{D_s W_s + D_G}{W_s + W_G}$$
+        $$N_{smooth} = \frac{N_s W_s + N_G}{W_s + W_G}$$
+4.  **Reconstruct Geometry:** Update the geometry using the smoothed attributes (depth and normals) [S2].
+
+**Parameters:**
+*   $\epsilon$: Threshold for surfel inclusion in the smoothing window. Not given in the sources.
+*   $W_s, W_G$: Weights for the original and smoothed components. Not given in the sources.
+*   Gaussian Kernel Width/Standard Deviation: Not given in the sources for the general case. For 2D-GES, the "Gaussian" aspect is implicit in the weighting $\alpha_i$ and the selection criterion, but the specific kernel parameters are not detailed [S2].
+
+**Edge Cases and Pitfalls:**
+*   **Boundary Artifacts:** Smoothing near object boundaries or silhouettes may cause blurring or bleeding if not handled with appropriate masking or boundary-aware kernels [G].
+*   **Over-smoothing:** Excessive smoothing can remove fine geometric details. The balance between $W_s$ and $W_G$ (in 2D-GES) or the kernel width must be tuned [S2].
+*   **Discontinuities:** In surfel-based methods, discontinuities at surfel intersection regions are the primary target; improper handling can lead to visible seams if the smoothing does not account for the planar nature of surfels [S2].
+
+## Subtopics
+
+### 2D-GES Geometry Smoothing
+A technique to smooth geometry discontinuities at surfel intersection regions using Gaussians, computing smoothed depth and normal maps [S2]. It is distinct from general mesh smoothing as it operates on 2D planar surfel representations in screen/parameter space, leveraging the opacity and depth of surfels to compute weighted averages [S2]. Choose this method when working with surfel-based radiance field representations (like 2D-GES) where surface discontinuities arise from the discrete nature of surfel placement [S2]. See [2D-GES](link-to-2d-ges-if-exists).
+
+## Operating characteristics
+*   **Time Complexity:** Depends on the number of primitives (vertices, points, or surfels) and the kernel size. For 2D-GES, it involves iterating over surfels for each sample, which can be $O(N \cdot M)$ where $N$ is surfels and $M$ is samples, unless optimized with spatial indexing [S2].
+*   **Memory Complexity:** Requires storage for the original geometry and the smoothed attributes. For 2D-GES, additional buffers for $D_G$ and $N_G$ are needed [S2].
+*   **Strengths:** Effectively reduces roughness and noise artifacts caused by segmentation inaccuracies [S1]. In 2D-GES, it specifically addresses discontinuities at surfel intersections [S2].
+*   **Limitations:** Can blur fine details if parameters are not carefully chosen. The 2D-GES variant is specific to surfel-based representations [S2].
+*   **When to Use:** When the reconstructed geometry exhibits visible roughness or noise, particularly in areas with inaccurate segmentation or discrete sampling artifacts [S1]. Use 2D-GES when working with surfel-based methods like 2D-GES [S2].
+*   **When Not to Use:** When preserving fine geometric details is critical and the noise level is low. Not suitable for topology correction (use Geometric Mesh Refinement instead) [21382-geometric-mesh-refinement.md].
+
+## Background
+The concept of applying Gaussian smoothing to reconstructed geometry was introduced as a post-processing step to address roughness in animatable neural radiance fields [S1]. The specific 2D-GES variant was developed to handle discontinuities in surfel-based rendering, integrating Gaussian smoothing with surfel representations to achieve high-fidelity rendering with reduced storage [S2].
+
+## Sources
+[S1] Animatable Neural Radiance Fields for Modeling Dynamic Human Bodies, https://doi.org/10.1109/iccv48922.2021.01405, fetched 2026-10-26
+[S2] When Gaussian Meets Surfel: Ultra-fast High-fidelity Radiance Field Rendering, https://doi.org/10.1145/3730925, fetched 2026-10-26

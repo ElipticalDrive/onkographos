@@ -1,0 +1,649 @@
+A Gamestream client for VR. Contribute to tB0nE/nightfall development by creating an account on GitHub.
+
+GLES projectionless mode, AI-3D Auto tiering, Apollo/Sunshine pairing fixes by tB0nE · Pull Request #23 · tB0nE/nightfall · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+tB0nE
+commented
+Aug 26, 2026
+Copy link
+Copy Markdown
+Owner
+Summary
+GLES-compatible projectionless composition-layer rendering path (controller rays, grab-bar, corner handles, background compositing) alongside the existing OpenXR pipeline.
+GPU-accelerated depth inference (MiDaS/YOLO26 GPU delegates) with a benchmarked, table-driven AI-3D Auto mode that picks model/tier/resolution-cap per resolution class and passthrough state.
+Fixes for real-world Apollo/Sunshine connection failures reported by users: pairing timeout (was capped at 120s, now waits indefinitely for PIN entry per protocol), a post-pairing TLS settle race, optional :port input support, and a host-selection bug where a server reachable via NAT port-forwarding through another host's IP could be mismatched against a different already-paired host.
+Various stability/UX fixes accumulated along the way (composition-layer crashes, invisible cursor/status-bar under GLES, stuck latency readout, blurry video).
+Test plan
+On-device (Quest 3) manual pairing/streaming test against Apollo (VM) and Sunshine (desktop) sharing the same NAT-forwarded IP on different ports - confirmed the correct host now streams.
+On-device verification of the pairing-timeout and TLS-settle-delay fixes against a real Apollo instance with live PIN entry.
+Full AI-3D Auto-mode table verification across all resolution/passthrough combos per the design plan (in progress).
+tB0nE
+added 29 commits
+August 21, 2026 14:49
+Add Linux support for all depth models
+73c52ee
+feat(android): add GLES streaming render path
+7e0ca91
+feat(android): add GLES GPU depth inference path
+a7409bf
+perf(android): prioritize XR rendering over GPU depth
+676db2b
+Port separate 3D AI/Backend/Quality controls to GLES branch
+…
+cfc7063
+```
+Ports the renderer-independent model/backend-separation architecture
+from the Vulkan GPU-depth branch (commit 6c662c3) onto
+android-gles-depth-inference, adapted for its already-existing
+scheduled 20Hz GPU inference worker instead of the older inline
+dispatch.
+
+- depth_bridge.cpp/.h: configure_depth()/get_depth_backend_capabilities()/
+  get_effective_depth_backend()/get_depth_backend_status(), alongside the
+  existing set_depth_model() (now a thin CPU-only wrapper).
+- DepthEstimator.java: configureDepth()/getBackendCapabilities()/
+  getEffectiveBackend()/getBackendStatus(), plus a permanent GPU->CPU
+  fallback (gpuPermanentlyUnavailable) wired into the scheduled GPU
+  worker's inference path instead of the old inline submitFrame() path.
+- New "3D Backend" UI control (Auto/CPU/GPU) alongside 3D AI and 3D
+  Quality. The pre-existing "MiDaS-256-GPU" model list entry (added
+  earlier on this branch) is kept for persisted-ID compatibility and
+  now behaves as a shorthand for "MiDaS-256 + Backend=GPU" rather than
+  a separate code path.
+- depth_estimator.gd's GPU boost now fires off the actual effective
+  backend (stream_backend.get_effective_depth_backend()) rather than
+  only recognizing the legacy explicit GPU model entry.
+
+Validated: addons/nightfall-stream Android GDExtension (depth_bridge.cpp/.h)
+builds clean via cmake+ninja. DepthEstimator.java/GodotApp.java reviewed
+by hand and brace/paren-balance checked; a full Gradle build to validate
+Java compilation is blocked in this environment by a missing local asset
+(android/src/main/assets/midas-v21-small-256-gpu.tflite, gitignored,
+not present on this machine) unrelated to this change - needs sourcing
+before on-device GPU testing can proceed.
+```
+Move depth model assets out of git into models/ (gitignored)
+…
+5f7d977
+```
+~115MB of .tflite depth-estimation model weights were committed
+directly to android/src/main/assets/ - move them to models/ (matching
+this repo's existing convention for large binary assets, see
+models/controllers/) and stop tracking them in git entirely
+(.gitignore's /models/*.tflite), replaced with models/README.md: a
+full manifest (every model build.sh needs, its size/purpose, and
+per-model acquisition/conversion instructions) plus the newly-located
+MiDaS-256-GPU fp16 model (copied in from moonlight-android-xr, was
+the one missing asset blocking a full build).
+
+build.sh now copies from models/ instead of android/src/main/assets/
+for both the Android APK (nightfallAssets/) and Linux binary
+(depth_models/) - it already fails loudly (set -euo pipefail) if a
+model referenced there is missing, so an incomplete models/ directory
+is caught at build time rather than shipping quietly.
+
+Also fixes a stale Android SDK path in this machine's Godot editor
+settings (pointed at an old Homebrew cask version that no longer
+exists after an upgrade) and installs the missing build-tools/
+platform-tools components, needed to actually validate this change
+via a real `./build.sh --debug` run (succeeded: 353MB debug APK,
+confirms both the models/ restructuring and the previous commit's
+DepthEstimator.java/GodotApp.java changes compile through Gradle).
+```
+Fix missing cursor composition layer under GLES
+…
+4c65a95
+```
+setup() had an early return for the gl_compatibility rendering method
+that skipped creating comp_cursor/left_comp_cursor_layer entirely -
+under GLES there was no click/hover cursor indicator at all. The
+cursor-update logic in main.gd's _update_cursor_layer() already had
+GLES-specific quad-sizing branches for these layers, meaning this
+code was written expecting them to exist and was simply unreachable.
+Nothing in the creation code is renderer-specific (plain SubViewport +
+TextureRect/ColorRect + shader), so there was no real reason to skip
+it - moved cursor-layer creation above the gl_compatibility split so
+both paths reach it, and guarded the shared bottom comp_kb creation
+to non-GLES only (GLES already creates its own comp_kb variant above)
+to avoid double-creating/leaking a second one.
+
+This is one piece of a larger gap: GLES projectionless mode also has
+no laser pointer or grab-bar visuals (both are plain 3D scene nodes,
+invisible under submit_projection_layer=false) - tracked separately,
+needs a composition-space replacement per the GLES migration plan's
+controller-indicator section.
+```
+Add composition-space controller ray indicators for projectionless mode
+…
+a4aeceb
+```
+Projectionless mode (submit_projection_layer=false) never renders the
+normal 3D scene, so the real "Laser" MeshInstance3D (a fixed-length
+CapsuleMesh under HandRayCast, main.tscn) is invisible whenever
+comp.in_use is true - alongside the missing cursor fixed in the
+previous commit, this meant no controller-pointing feedback at all
+under GLES projectionless mode.
+
+Adds comp_laser_right/left: OpenXRCompositionLayerQuad per controller,
+textured with the same fade gradient the real Laser mesh's material
+already uses (_make_laser_gradient()), oriented each frame in
+_update_laser_layers() so the quad's local Y axis follows the
+controller's aim direction (fixed 0.4m length, matching the real
+mesh - not stretched to the raycast hit distance) and its face
+normal points roughly toward the camera (billboards around the ray
+axis only, not a full billboard, so it doesn't tilt off the real
+aim direction). Only active in projectionless mode and while the
+controller is actively tracked (XRController3D.get_is_active());
+normal projection mode keeps using the real 3D mesh unchanged.
+
+Built, installed, and running on-device - basis/orientation math is
+worked through by hand but not yet visually confirmed on the headset.
+
+Grab bars (also invisible under projectionless mode, same root cause -
+plain 3D scene nodes) are a separate, larger piece: they're per-screen
+rather than per-controller and need their own composition quad plus
+the existing hover-color behavior (set_grab_bar_color()) - deliberately
+deferred until the cursor/laser fix here is confirmed working, rather
+than replicating the same untested basis-orientation pattern into a
+second new system before validating the first.
+```
+Fix GLES composition-layer crash on grab/resize + laser still-invisible
+…
+2dcbd75
+```
+Crash: dragging a grab bar or corner handle in projectionless mode
+under GLES reliably crashed with SIGSEGV in the GLES3 backend
+(texture_storage.cpp, "Condition t->is_render_target is true" /
+"Parameter from_tex is null" immediately before the fault). Debug
+logcat showed repeated CreateSwapChain calls at exactly
+comp_cursor_viewport's size (40x64) leading up to each crash -
+comp_cursor.visible was being toggled false/true every frame as the
+raycast target moved on/off a screen (much more frequent while
+dragging), and each toggle appears to tear down and recreate that
+composition layer's swapchain under the GLES backend specifically,
+racing with in-flight render commands. Fixed by never toggling
+`visible` false again after its first true (added _set_comp_quad_hidden()
+helper) - hiding shrinks quad_size to near-zero instead, a pure
+world-space parameter that doesn't touch the viewport's pixel size or
+its swapchain. Applied to comp_cursor and the new laser layers from
+the previous commit; left the per-screen stream-cursor TextureRect/
+ColorRect visibility toggles alone since those are plain Control
+children inside an already-visible viewport, not composition layers
+themselves, so unaffected by this.
+
+Laser still invisible: its viewport used UPDATE_ONCE (an unproven
+attempt to save render cost for genuinely static content) instead of
+UPDATE_ALWAYS like the working cursor viewport - suspected as the
+reason it never actually rendered anything. Switched to UPDATE_ALWAYS
+to match the proven-working pattern.
+
+Both built into a debug APK (not yet release) for faster iteration -
+debug_opengl flag gives more detailed GL-level error context, useful
+while still confirming these fixes. Not yet confirmed on-device.
+```
+Fix and polish composition-space laser indicator
+…
+59f8246
+```
+- Fixed the actual visibility bug: hiding shrinks quad_size to
+  near-zero (see the swapchain-crash fix in the previous commit), but
+  the show path never restored it - the laser started hidden at app
+  launch (before comp.in_use/is_xr_active are true), so it stayed
+  permanently shrunk. Restore the real quad_size every time it's shown.
+- Added main._make_comp_laser_texture(): a wider gradient (32x256, vs.
+  the shared 1px-wide _make_laser_gradient() the real 3D laser mesh
+  uses) with a capsule/stadium-shaped alpha mask - rounded end caps
+  matching the real Laser mesh's own CapsuleMesh shape, instead of a
+  hard rectangular cutoff. Kept as a separate function rather than
+  widening the shared one, so the real 3D laser's appearance (already
+  correct) is untouched.
+- flip_v on the TextureRect - confirmed on-device the gradient was
+  fading the wrong way (opaque far end instead of near the hand).
+- Halved LASER_QUAD_WIDTH (0.006 -> 0.003) and added
+  LASER_START_OFFSET (0.06m) so the beam starts a bit clear of the
+  hand/controller instead of right at the raycast origin.
+
+Confirmed working on-device (debug build). Diagnostic [LASERDBG]
+logging added while chasing the visibility bug removed now that it's
+root-caused.
+```
+Add composition-space grab-bar indicator for projectionless mode
+…
+b9cdd2a
+```
+Per-screen visual equivalent of the real grab_bar (a MeshInstance3D,
+invisible under projectionless mode for the same reason the cursor/
+laser were - plain 3D scene nodes never reach the compositor when
+submit_projection_layer=false). The real grab_bar's Area3D interaction
+is untouched and was already functional even while invisible - this
+only adds the missing visual.
+
+- VRScreen.comp_grab_bar/comp_grab_bar_viewport: created per-screen in
+  composition_layer_manager.gd's setup_screen(), alongside the
+  existing per-screen cylinder/viewport setup.
+- Uses a PanelContainer + StyleBoxFlat (matching the exact technique
+  the menu/keyboard's own "CompGrabBar" already use, see
+  vr_panel_base.gd's _setup_grab_bar()) rather than a hand-rolled
+  texture - a first attempt at a pixel-SDF pill shape looked wrong
+  (too rounded/chunky) since it reused the collision hitbox's size
+  (deliberately oversized for easy grabbing) as the visual thickness
+  instead of the real cylinder's actual thin diameter.
+- main._update_grab_bar_layers() (called from _process()) mirrors
+  grab_bar's own global position/rotation onto the composition quad
+  every frame, plus an extra 90-degree in-plane rotation to reconcile
+  the CylinderMesh's length-along-local-Y convention with the quad's
+  length-along-local-X convention (confirmed needed on-device).
+- Always visible once comp.in_use, never toggled off during normal
+  operation (matches the real grab_bar's own always-visible behavior
+  in projection mode) - avoids the every-frame visibility-toggle
+  pattern that caused the earlier cursor/laser swapchain crash.
+
+Confirmed working on-device (debug build): correct bar shape,
+orientation, and position, safe to grab/drag without crashing.
+```
+Add composition-space corner-handle indicators for projectionless mode
+…
+6e8258a
+```
+Same rationale as the grab bar - corner_handles are plain 3D scene
+nodes (MeshInstance3D with an L-bracket texture via
+VRScreen._make_corner_texture()), invisible under projectionless mode.
+Real interaction (Area3D collision) untouched.
+
+- VRScreen.comp_corner_layers/comp_corner_rects: parallel arrays
+  (indexed like corner_handles), created per-screen in
+  composition_layer_manager.gd's setup_screen().
+- Reuses VRScreen._make_corner_texture() directly - same L-bracket
+  generator the real handles use, not a reimplementation.
+- main._update_corner_layers() (called from _update_grab_bar_layers(),
+  per screen) mirrors each real corner_handles[i]'s already curve/
+  resize-aware global transform and size onto its composition quad
+  every frame - no curve math duplicated, VRScreen.
+  update_corner_positions() already computed the correct position.
+- xr_interaction.gd's _set_corner_color() (the existing hover/click
+  color function) now also mirrors alpha onto
+  comp_corner_rects[idx].modulate.a.
+
+Root-caused and fixed the real visibility bug along the way: the
+corner texture's default opacity (0.08, matching the real mesh) was
+being multiplied AGAIN by the dynamic hover/click alpha (0.05/0.15/0.4)
+via modulate.a, crushing the actually-rendered alpha down to ~0.03 at
+best - effectively invisible. This double-multiplication affects the
+real 3D mesh too, just apparently not enough to notice there. Fixed by
+baking full opacity into the composition texture, making modulate.a
+the sole meaningful alpha control. Confirmed working on-device: shape,
+curve-tracking during resize, and hover/click brightness all correct.
+```
+Polish grab-bar: hover/click color dynamics, position, hitbox sync
+…
+53d8c34
+```
+- _set_grab_bar_color() now mirrors its dynamic alpha (0.01/0.05/0.15/
+  0.3/0.4 depending on state) onto the composition-space grab bar's
+  StyleBoxFlat, matching the corner handles' same idle/hover/grabbed
+  dynamics instead of a fixed 0.35 alpha. Walks up from the passed
+  MeshInstance3D to find its owning VRScreen (grab_bar is a %-unique-
+  named node from a packed scene, not necessarily a direct child).
+- Moved the real grab_bar closer to the screen edge (halved
+  grab_bar_off) at the source in vr_screen.gd's
+  update_corner_positions(), not as a visual-only offset in the
+  composition layer. An earlier attempt only offset the composition
+  quad's visual position, leaving the real Area3D hitbox behind at the
+  old position - hard to find/grab where it visually appeared, and
+  looked off-center. Moving the real position keeps hitbox and visual
+  in sync by construction, and applies equally to normal projection
+  mode.
+
+Confirmed working on-device: correct color dynamics, closer position,
+hitbox now matches the visual.
+```
+Add environment-background equirect composition layer for projectionl…
+…
+dbc60b1
+```
+…ess mode
+
+Environment backgrounds (Ash/Snow/Data particle systems) were plain 3D
+scene nodes, invisible under projectionless mode's
+submit_projection_layer=false. Adds an OpenXRCompositionLayerEquirect fed
+by a dedicated 3D-enabled SubViewport (own_world_3d=true, isolated from
+the main scene so controllers/lasers don't bleed into the capture) that
+renders a standalone particle instance into a wide-FOV capture camera.
+```
+Wire up composite backgrounds, remove Starfield, collapse AI-3D menu …
+…
+819265f
+```
+…to two controls
+
+Backgrounds: hook the new equirect composition layer up to
+background_mode (create/free a standalone capture particle instance per
+selection, halve ash/snow/data playback speed since the close capture
+camera read them as much faster than in normal projection mode). Drop
+Starfield entirely (repeated visibility/color bugs never converged on a
+result worth keeping) - background list is now Ash/Snow/Data.
+
+AI-3D menu: collapse four controls (3D AI/3D Backend/3D Quality/3D Debug)
+down to two user-facing ones - "AI 3D" (Off/Auto/Fast/Fastest/Standard,
+absorbing on/off + the old quality tiers) and "AI Model" (GPU models
+listed first, then CPU - backend is now implied by the selected model
+instead of a separate toggle). Persisted save format and legacy-save
+migration updated accordingly; 3D Debug is untouched.
+```
+Fix invisible menu status bar under GLES: drop composition-layer work…
+…
+061e6b2
+```
+…around
+
+Root cause was a single stray property: _ui_status_label had
+clip_contents=true set directly on itself (a leaf Label with no children
+to clip), which the compatibility renderer apparently resolved into a
+degenerate clip rect that hid the text entirely - confirmed via on-device
+diagnostics showing correct visibility/alpha/rect/text at every layer,
+with no overlapping siblings. Removing it fixes the label outright.
+
+That means the "comp_status" workaround (a second, independent
+composition layer + SubViewport + Button-as-label added specifically for
+GLES) was solving the wrong problem, while introducing two real bugs of
+its own: it stayed visible when the main menu was hidden via any path
+that didn't go through _toggle_ui(), and its hardcoded quad/viewport size
+never tracked the real menu panel's size. Removed entirely - the status
+text is back to being a plain Label living inside the same panel/viewport
+as the rest of the menu, matching main's original design, so it inherits
+show/hide and resize for free.
+```
+Add on-device A/B flags to isolate GPU-depth-inference perf regression
+…
+c0e8f1e
+```
+Debug consts (DEBUG_COMP_BG_EQUIRECT/LASER/GRAB_BAR/CORNERS, main.gd) to
+toggle each of today's new composition-space additions independently,
+gating both the layer's visibility and its backing SubViewport's
+render_target_update_mode (UPDATE_ALWAYS viewports render every frame
+regardless of the layer's own visibility, so hiding alone doesn't stop
+the GPU cost).
+
+Confirmed via on-device testing this wasn't actually a regression from
+today's work - the ~13-15Hz MiDaS-256-GPU numbers were a debug-build
+artifact; the release build hits ~19.5-20.2Hz with all four flags on,
+matching the plan's validation target. Left in place (all enabled) as
+reusable diagnostic tooling rather than deleting.
+```
+Fix stuck 0ms latency reading under GLES: missing store in non-AHB de…
+…
+fe854b2
+```
+…code branch
+
+stream_connection.cpp's decode-output loop branches on AndroidHardwareBuffer
+import support. GLES never supports AHB import, so it always takes the
+!supports_ahb_import branch - which uploaded the frame and returned via
+`continue` without ever computing/storing last_frame_latency_us_, unlike
+the AHB/Vulkan branch further down which does. Result: get_last_frame_latency()
+returned 0 for the whole lifetime of any GLES session, showing as a
+permanently stuck "0ms" once the status bar itself became visible again.
+Added the same decode_done_us - submit_us computation to the GLES branch.
+
+Requires the native GDExtension rebuild (addons/nightfall-stream, see
+BUILD.md/project memory - build.sh does not recompile this automatically).
+```
+Fix soft/blurry GLES video: re-enable composite-viewport resize to st…
+…
+1c9b156
+```
+…ream resolution
+
+resize_stream_viewport() gated comp_viewport/_left/_right resizing behind
+`RenderingServer.get_current_rendering_method() != "gl_compatibility"`
+(added 2026-08-23 alongside the GLES streaming render path, no comment
+explaining why) - under GLES this left every screen's composite viewport
+stuck at setup_screen()'s 1920x1080 default regardless of the actually
+negotiated stream resolution, so anything above 1080p got silently
+downscaled into that fixed-size viewport and then upscaled again for
+display. Confirmed on-device: requesting 1440p/4K looked identical and
+soft, matching a classic downscale-then-upscale blur, not a filter setting.
+
+None of today's GLES swapchain-teardown crashes were caused by resizing a
+SubViewport (they were all about repeatedly toggling a composition
+layer's `.visible`), so there's no remaining reason to keep this
+GLES-specific - removed the gate, confirmed sharper output and no
+resize-related crash on-device.
+```
+Add GPU-accelerated MiDaS-192 model; generalize GPU inference machinery
+…
+d4c7bdb
+```
+Converted MiDaS-small's ONNX export to 192x192 input via the same
+onnx2tf -ofgd -kt input recipe that produced the existing MiDaS-256-GPU
+asset (Resize ops use relative scale factors, not hardcoded sizes, so the
+architecture is resolution-agnostic). Verified clean 73 CONV_2D/24
+DEPTHWISE_CONV_2D/5 RESIZE_BILINEAR op composition (matches the 256px
+model exactly) and non-degenerate real inference output before bundling.
+Confirmed on-device: GPU delegate loads and runs at ~15-17Hz/~60-65ms,
+no regression on the existing MiDaS-256-GPU model.
+
+DepthEstimator.java's GPU support was previously hardcoded end-to-end for
+one specific model (dedicated interpreter/buffers/lazy-load/inference
+function, magic model-index 6). Replaced with a generic GpuVariant
+registry keyed by CPU model index, so any MiDaS-small-family model can
+register a GPU counterpart without duplicating the delegate/scheduling
+machinery - extracted cpuInterpreterFor()/normalizeModelIndex()/
+runCpuInference() so switchActiveModel(), the GPU-load-failure fallback,
+and submitFrame()'s CPU dispatch all share one source of truth instead of
+three separate hardcoded chains.
+
+GDScript: added a "MiDaS-192-GPU" entry to settings_controller.gd's
+ai_3d_models list (GPU entries stay first); shifted state_manager.gd's
+legacy-save-migration index mapping to match the list's new size.
+```
+Add GPU-accelerated YOLO26-N-384 model to the GPU roster
+…
+076fd0a
+```
+Fresh export via Ultralytics' own ONNX export (model.export(format="onnx")),
+NOT a conversion of the deployed CPU model (which is NCHW) - run through
+the same onnx2tf GPU-friendly recipe as the MiDaS GPU exports. Verified
+NHWC/float32 I/O and a CNN-dominated op graph (86 CONV_2D, 78 LOGISTIC,
+only 4 BATCH_MATMUL/2 SOFTMAX from one small attention block) - a much
+better GPU-delegate op mix than Depth Anything V2's ViT backbone, which
+was investigated and found not GPU-delegate-viable (72 BATCH_MATMUL/12
+GELU/12 SOFTMAX) and not pursued further this round.
+
+Registered as a third GpuVariant alongside the two MiDaS ones, reusing
+the same NHWC fill path in runInferenceGpu() unmodified since this export
+happens to share that layout. On-device: the GPU delegate currently fails
+to load ("Failed to apply delegates", no specific node identified) -
+committing the wiring as-is since the conversion/registration is correct
+and the load failure is a separate, not-yet-diagnosed issue to revisit.
+```
+Remove YOLO26 (CPU+GPU) and DA-V2-GPU from the selectable AI-3D model…
+…
+005aef0
+```
+… list
+
+Tried and ruled out on real hardware:
+- YOLO26-N-384-GPU: converted cleanly (NHWC, CNN-dominated op graph,
+  confirmed non-degenerate output desktop-side) but the GPU delegate
+  fails to load on-device ("Failed to apply delegates", no specific node
+  identified) - never diagnosed further.
+- DA-V2-196-GPU: converted cleanly (fixed via onnx2tf's -kt input, the
+  same flag that already fixed this layout bug for the CPU DA-V2 models)
+  and the delegate DOES load and produce correct depth output - but only
+  at ~2.8Hz vs. MiDaS-GPU's ~15-20Hz. DA-V2's ViT backbone repeats its
+  transformer block 12 times, each with an unsupported-op region (GELU/
+  GATHER/BATCH_MATMUL) the GPU delegate can't claim, forcing 12 GPU<->CPU
+  handoffs per inference - that sync cost, not compute, is what's slow.
+  Not fixable via delegate backend config; would need real model surgery
+  to be worth revisiting.
+
+Dropped the CPU YOLO26-N lineup (256/320/360) alongside its GPU sibling
+rather than keeping it stranded without a GPU option worth the roster
+slot. ai_3d_models is now 6 entries: MiDaS-256/192 (CPU+GPU) and
+DA-V2-196/252 (CPU only). Follows the existing YOLO26-S precedent -
+build.sh stops bundling the retired assets, but DepthEstimator.java's
+loading code for them stays in place (harmless soft-fail) rather than
+being ripped out, and the model index -> label mapping history is kept
+in comments so neither GPU path gets re-attempted the same way without a
+new angle. Confirmed on-device: all 6 remaining models cycle cleanly with
+no crashes, APK dropped from 373MB to 245MB.
+```
+Shrink MiDaS-192-GPU asset from 64MB to 33MB via weight-only fp16 qua…
+…
+49d99de
+```
+…ntization
+
+The first bundled MiDaS-192-GPU export was plain all-float32 (64MB) -
+nearly 2x the reference 256px model (33MB) despite the smaller input,
+because that 256px asset is externally-sourced and already used TFLite's
+standard weight-only float16 quantization (fp16 CONV weights, float32
+I/O boundary). Applied the same technique directly via
+tf.lite.TFLiteConverter (target_spec.supported_types=[float16]) against
+the SavedModel onnx2tf's tf_converter backend produces - not the same as
+onnx2tf's own "_float16.tflite" output, which is a literal fp16 I/O
+export that fails to load (same root cause as the fp16-I/O bug already
+documented for the 256px model).
+
+Verified same float32 I/O + fp16-weight tensor pattern as the reference
+model and non-degenerate output before bundling. On-device: no speed or
+quality regression (still ~18-20Hz), APK down from 245MB to 213MB.
+```
+Remove DA-V2-196 from the selectable AI-3D model list
+…
+c0e4db7
+```
+Both DA-V2 resolutions are impractically slow on real streaming
+content with no viable GPU path, so only one is worth bundling as a
+curiosity/future-hardware placeholder - DA-V2-252 (higher quality)
+is kept, DA-V2-196 is dropped. Shrinks the APK from 213M to 189M.
+```
+Add projectionless controller position markers and runtime render-mod…
+…
+885df50
+```
+…el support
+
+Projectionless controller indicator: a small always-on composition-space
+dot at each controller's position, driven the inverse of the existing
+laser ray - hidden while actively pointing (the laser shows instead),
+faint while resting/put down so the controller can still be located.
+
+Runtime controller render models (OpenXRFbRenderModel/XR_FB_render_model),
+scoped to normal projection mode only per docs/gles-quest-projectionless-plan.md,
+behind DEBUG_RENDER_MODEL_CONTROLLERS (default off, untested on-device
+in that mode). Requires the xr/openxr/extensions/meta/render_model project
+setting and the meta_xr_features/render_model export option together -
+neither alone is enough to get the runtime to grant XR_FB_render_model.
+Left disabled in project.godot for now since it measurably doesn't affect
+GPU-delegate depth inference throughput either way and the feature isn't
+in active use.
+```
+Redesign AI-3D Auto mode as a benchmarked model+tier lookup table
+…
+c294e4f
+```
+Replaces _auto_quality_tier()'s passthrough-driven pixel-threshold logic
+(which picked the expensive Standard tier for the common passthrough-off
+case at 1440p/2K, exactly backwards from measured throughput) with a
+literal table keyed by resolution class x passthrough, built from an
+on-device GPU-inference benchmark matrix (MiDaS-192-GPU/MiDaS-256-GPU x
+Fast/Fastest/Standard x six resolution classes x passthrough on/off).
+
+- AI 3D speed collapses to Off/Auto/Fast/Standard - Fastest measured
+  near-identical to Fast at every benchmarked resolution, removed along
+  with its dedicated depth_estimator.gd throttling code.
+- Auto now picks both tier AND model (192 vs 256 GPU), plus a per-combo
+  resolution cap replacing the old flat MIDAS_FAST_MAX_PIXELS/
+  MIDAS_FASTEST_MAX_PIXELS constants - manual Fast selection gets the same
+  per-combo cap Auto would use, matching the cap's original behavior of
+  applying to any Fast-tier selection, not just Auto's own.
+- AI Model button greys out and shows the live auto-picked model while
+  Auto is active.
+- Old saves migrate via a new ai_3d_speed_v2 marker (index range shifted
+  0-4 -> 0-3).
+- Adds a live AI3D:XXms/XXHz status-bar readout (DepthEstimator.java's
+  telemetry exposed through depth_bridge/StreamBackend) so tier/resolution
+  combos can be validated on-device without pulling logcat.
+- Removes four temporary test resolutions added earlier this session for
+  the benchmark matrix, now superseded by this table.
+```
+Add PAD-ABXY controller mode alongside renamed PAD-HAND
+…
+0c45429
+```
+PAD-HAND (the original PAD mode) splits face buttons by hand - left is
+d-pad, right is A/B, swapped by head/tilt-alt. PAD-ABXY instead maps each
+hand's buttons directly to their real Xbox letter (left=X/Y, right=A/B),
+with alt turning that hand's pair into d-pad directions instead
+(b=left, a=right, y=up, x=down).
+
+Repurposes the CtrlType.KEYBOARD enum slot, which was always redirected
+to KBMOUSE on both cycle and load and never actually reachable - no
+renumbering needed elsewhere. Removes the fully-dead _send_keyboard_mode()
+scaffolding that slot pointed to. Adds is_gamepad_mode() so the laser-
+pointer-blocking and status-bar "D-PAD" indicator treat both PAD variants
+alike.
+```
+Fix Apollo/Sunshine connection issues: pairing timeout, IP:port, host…
+…
+8421dd2
+```
+…-ID ambiguity
+
+- Stage-1 pairing HTTP request now uses timeout_ms=0 instead of 120000: Apollo
+  (and Sunshine) deliberately long-poll this request until a human enters the
+  PIN, matching moonlight-android-xr's zero-read-timeout behavior for the
+  same stage.
+- Added a 1.5s settle delay after fresh pairing before establishing the
+  stream, working around a server-side TLS race where the just-registered
+  client cert isn't immediately accepted for mutual TLS.
+- Added optional ":port" support to the IP entry screens (numpad, saved-host
+  matching, Wake-on-LAN, pairing), defaulting to 47989 when omitted.
+- Fixed a host-selection bug surfaced by the above: a server reached via NAT
+  port-forwarding through another host's IP (e.g. a VM's game-streaming port
+  forwarded through its host machine's address) could share a bare IP with a
+  completely different, already-paired server. on_pair_completed() picked
+  the first host record matching that bare IP rather than the one just
+  paired. Now matches by server_unique_id (exposed via a new
+  get_last_paired_unique_id()), falling back to bare-IP matching only if
+  unavailable.
+- QOL: DEL button moved onto the Pair button's row; saved-host list now
+  shows IP alongside hostname.
+```
+Refresh AI-3D Auto model/cap on passthrough toggle
+…
+c3dcaea
+```
+AUTO_TABLE's tier/model/cap picks key off passthrough_enabled, but nothing
+previously refreshed the AI Model button label or re-committed the depth
+config/resolution cap when passthrough was toggled - the label could go
+stale and the server-side model/cap would silently stay stale too.
+```
+tB0nE
+merged commit caf352d
+into
+main
+Aug 26, 2026
+tB0nE
+deleted the
+gles-quest-projectionless
+branch
+October 5, 2026 09:42
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

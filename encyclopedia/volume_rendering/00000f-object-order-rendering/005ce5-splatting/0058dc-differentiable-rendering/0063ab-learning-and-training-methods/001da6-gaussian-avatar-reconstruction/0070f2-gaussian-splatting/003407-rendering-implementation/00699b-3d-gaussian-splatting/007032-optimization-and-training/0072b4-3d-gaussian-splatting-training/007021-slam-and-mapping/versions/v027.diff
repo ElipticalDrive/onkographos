@@ -1,0 +1,249 @@
+--- v026.md
++++ v027.md
+@@ -1,110 +1,172 @@
+ # SLAM and Mapping
+ 
++Also called: Gaussian SLAM, Neural SLAM, Active Mapping with 3DGS
+ 
+ ## Overview
+-SLAM and Mapping in the context of 3D Gaussian Splatting (3DGS) refers to the joint estimation of camera poses and the optimization of a 3D Gaussian scene representation from a sequence of images or RGB-D frames [G]. It solves the problem of reconstructing a consistent 3D model while tracking the camera trajectory in real-time or offline [G]. Unlike standard 3DGS training which assumes known camera poses, SLAM methods must handle pose uncertainty, often integrating geometric constraints, depth information, or neural field representations to maintain consistency [G]. This family distinguishes itself by coupling the differentiable rendering of Gaussians (or hybrid neural fields) with optimization loops that update both the scene geometry/appearance and the camera extrinsics simultaneously [G].
++SLAM and Mapping in the context of 3D Gaussian Splatting (3DGS) refers to the simultaneous estimation of camera poses and the construction of a 3D scene representation using Gaussian primitives or hybrid neural fields. It solves the problem of joint tracking and mapping in dynamic or unknown environments, where standard offline reconstruction is infeasible. Unlike offline methods that assume known poses, these methods optimize camera trajectories and scene geometry concurrently, often using sliding windows or multi-process architectures to maintain real-time performance. It sets itself apart from offline reconstruction by integrating pose optimization directly into the rendering loss, distinguishing it from [Base 3DGS Optimization](3761-3d-gaussian-splatting-training.md) which assumes fixed camera parameters.
+ 
+ ## How it works
+-Inputs: sequence of images or RGB-D frames, optional initial camera poses [G].
+-Outputs: optimized camera poses $T$, 3D Gaussian parameters $\mathcal{G}$ (position $\mathbf{p}$, covariance $\Sigma$, opacity $\alpha$, color $\mathbf{c}$, spherical harmonics coefficients) [G].
+-Data structures: Gaussian primitives stored in a flat array or spatial hash grid for acceleration [G].
+-Numbered steps:
+-1. Initialize scene representation and camera poses [G].
+-2. Render image $\hat{I}$ and depth $\hat{D}$ from current pose $T$ via differentiable rendering (alpha-compositing for Gaussians, volume rendering for neural fields) [G].
+-3. Compute loss $\mathcal{L}$ between rendered and ground-truth inputs (photometric $\mathcal{L}_{rgb}$, geometric $\mathcal{L}_{depth}$) [G].
+-4. Backpropagate gradients $\partial \mathcal{L}/\partial T$ and $\partial \mathcal{L}/\partial \mathcal{G}$ through the renderer [G].
+-5. Update $T$ and $\mathcal{G}$ using gradient descent (e.g., Adam) or bundle adjustment [G].
+-Edge cases and pitfalls: pose drift from accumulated errors, geometric inconsistency in textureless regions, and representation choice trade-offs between explicit Gaussians and implicit fields [G].
++The core challenge is balancing the computational cost of differentiable rendering with the need for frequent pose updates. Methods vary in their representation (explicit Gaussians vs. implicit fields) and optimization strategy (joint vs. decoupled).
++
++### Inputs and Outputs
++*   **Inputs:** RGB-D frames (or RGB only), initial camera poses (often from an odometry source or constant velocity assumption), and an initial scene representation (empty or sparse).
++*   **Outputs:** Optimized camera trajectory, dense 3D scene representation (Gaussians, SDF, or hybrid fields).
++
++### Data Structures
++*   **Gaussian Model:** Stores position $\mu$, covariance $\Sigma$ (or rotation $R$ and scale $S$), opacity $\alpha$, and spherical harmonics coefficients $C_{lm}$.
++*   **Optimization Window:** A sliding window of $N_{kf}$ keyframes and their associated poses, used to limit the scope of joint optimization and prevent catastrophic forgetting [S7].
++*   **Voxel/Octree Structure:** Used in implicit or hybrid methods (e.g., Vox-Fusion, HIGS) to manage sparse scene geometry and accelerate ray-sampling [S7][S10, unofficial].
++
++### Numbered Steps (General Joint Optimization Loop)
++1.  **Initialization:** Initialize the scene representation. For Gaussian methods, this may involve initializing Gaussians from a merged point cloud or sparse depth [S9, unofficial]. For implicit methods, initialize the neural network weights [S7].
++2.  **Pose Initialization:** Initialize the current frame's camera pose $T = (t, q)$, where $t$ is translation and $q$ is rotation quaternion. A common heuristic is constant camera velocity [S5].
++3.  **Ray Sampling:** For each frame in the optimization window, randomly sample $N_m$ rays [S7]. Transform these rays into the world coordinate system using the estimated frame poses.
++4.  **Rendering:** Render the scene along these rays to produce predicted color $\hat{C}$ and depth $\hat{D}$.
++    *   For 3DGS: Use alpha compositing over sorted Gaussians.
++    *   For Implicit: Sample points along rays and query the neural field for density and color.
++5.  **Loss Computation:** Calculate the tracking and mapping losses.
++    *   **Tracking Loss:** Compares rendered output to ground truth.
++    *   **Mapping Loss:** Includes photometric, geometric, and regularization terms.
++6.  **Backpropagation and Update:** Compute gradients with respect to both camera poses and scene parameters (Gaussian attributes or network weights). Update using an optimizer (e.g., Adam).
++7.  **Window Management:** Slide the optimization window forward, dropping old keyframes and adding new ones [S7].
++
++### Formulas
++**Tracking Loss (Lightness-Decoupled):**
++To handle lighting changes, some methods decouple lightness by converting images to LAB space and discarding the L channel [S5].
++$$ L_{tracking} = \lambda_{color} |\rho(\hat{C}) - \rho(C)| + \lambda_{depth} |\hat{D} - D| $$
++Where:
++*   $\rho$ is the operation converting RGB to LAB space.
++*   $C$ is the input image, $\hat{C}$ is the rendered image.
++*   $D$ is the input depth, $\hat{D}$ is the rendered depth.
++*   $\lambda_{color} = 0.5$, $\lambda_{depth} = 1.0$ [S5].
++
++**Active Mapping Information Gain:**
++For active exploration, the next-best-view is selected by maximizing Expected Information Gain (EIG) [S6]:
++$$ P_j^* = \arg \max_{P_j} \text{tr} \left( \sum_{x_{acq_i} \in P_j} H''[y_{i\_acq}|x_{acq_i}, w^*] \right) H''[w^*|D_{train}]^{-1} $$
++Where $H''$ denotes the Hessian matrix of the loss with respect to the parameters.
++
++### Parameters
++*   $N_{kf}$: Number of keyframes in the optimization window. Typical values depend on scene complexity; [S7] uses a sliding window approach.
++*   $N_m$: Number of rays sampled per frame. [S7] samples randomly within sparse voxels.
++*   $\lambda_{color}, \lambda_{depth}$: Weights for color and depth terms in tracking loss [S5].
++*   Search Radius: Used in landmark selection to ensure non-redundant coverage [S8].
++
++### Edge Cases and Pitfalls
++*   **Catastrophic Forgetting:** Online incremental learning can cause the model to forget previously observed geometry. Mitigated by using a sliding window of keyframes and jointly optimizing poses [S7].
++*   **Lighting Changes:** Photometric loss is sensitive to illumination. Decoupling lightness (LAB space) or using semantic/feature-based losses helps [S5].
++*   **Resource Contention:** Parallel tracking and mapping can suffer from shared resource access latency. Lock-free structures are recommended but complex to implement [S7].
++*   **Depth Ambiguity:** In textureless regions, depth estimation fails. Semantic priors or co-segmentation can improve alignment [S1].
++
++### Pseudocode: Joint Mapping and Pose Update (Vox-Fusion Style)
++```python
++def joint_mapping_and_pose_update(keyframes, current_frame, scene_model):
++    """
++    Fuses tracked RGB-D frames into the scene map by jointly optimizing
++    scene geometry and camera poses using a sliding window.
++    """
++    # 1. Form Optimization Window
++    # Randomly select N_kf keyframes from history, including current_frame
++    optimization_window = select_random_keyframes(keyframes, current_frame, N_kf)
++    
++    # 2. Initialize Poses
++    # Assume constant velocity for new frame if not provided
++    current_frame.pose = initialize_pose_constant_velocity(current_frame, optimization_window[-2].pose)
++    
++    # 3. Ray Sampling and Rendering
++    losses = []
++    for frame in optimization_window:
++        # Randomly sample N_m rays
++        rays = sample_rays(frame.width, frame.height, N_m)
++        
++        # Transform rays to world coordinates using estimated poses
++        world_rays = transform_rays_to_world(rays, frame.pose)
++        
++        # Sample points within sparse voxels and render
++        rendered_color, rendered_depth = render_scene(world_rays, scene_model)
++        
++        # Calculate Loss
++        # Example: L1 loss on color and depth
++        color_loss = l1_loss(rendered_color, frame.gt_color)
++        depth_loss = l1_loss(rendered_depth, frame.gt_depth)
++        
++        losses.append(color_loss + depth_loss)
++        
++    # 4. Backpropagation
++    total_loss = sum(losses)
++    gradients = compute_gradients(total_loss, scene_model.parameters, [f.pose for f in optimization_window])
++    
++    # 5. Update
++    scene_model.update(gradients.scene_params)
++    for frame in optimization_window:
++        frame.pose.update(gradients.pose_params[frame.id])
++        
++    return scene_model, optimization_window
++```
+ 
+ ## Subtopics
+ 
++### [CG-SLAM](9196-cg-slam.md)
++CG-SLAM integrates an uncertainty map derived from rendered depth into the training process. It addresses reconstruction quality issues in standard Gaussian Splatting SLAM by weighting optimization based on depth confidence. It sets itself apart from siblings like [CP-SLAM](11948-cp-slam.md) and [iMAP](11979-imap.md) by explicitly leveraging rendered depth uncertainty to guide the Gaussian optimization, leveraging the explicit geometry of 3DGS for flexible reprojection.
++
++### [CP-SLAM](11948-cp-slam.md)
++CP-SLAM is a neural point-based hybrid neural field SLAM system designed for multi-agent cooperative localization and mapping with loop closure. It distinguishes itself by introducing a keyframe-associated neural point representation inspired by PointNeRF, where each point maintains a learnable neural feature for scene encoding. This approach allows per-point features to be adjusted during pose graph optimization, integrating odometry, loop detection, sub-map fusion, and global refinement into a unified framework.
++
++### [iMAP](11979-imap.md)
++iMAP is the first NeRF-based dense online Simultaneous Localization and Mapping (SLAM) model, jointly optimizing camera pose and an implicit scene representation in the form of a Neural Radiance Field (NeRF). It solves the problem of simultaneous tracking and mapping by treating the scene geometry and appearance as a continuous function optimized via gradient descent. Unlike its siblings which may use explicit structures or hybrid representations, iMAP relies on a single Multilayer Perceptron (MLP) for the entire map. It sets itself apart by introducing an iterative two-step approach where a fast tracking step runs in parallel with a slower mapping step, allowing pose estimation to approach camera framerate.
++
++### [Semantic-aware mapping](12053-semantic-aware-mapping.md)
++Semantic-aware mapping integrates semantic information into the simultaneous localization and mapping (SLAM) process to guide the optimization of 3D scene representations, such as 3D Gaussians or Neural Radiance Fields (NeRFs). It solves the problem of geometric ambiguity and dynamic object interference by distilling 2D semantic labels to constrain 3D structure, enabling semantic-aware mapping. It distinguishes itself from sibling methods like [CG-SLAM](9196-cg-slam.md) and [Neural Implicit Representation](22462-neural-implicit-representation.md) by explicitly leveraging class-wise scene decomposition or semantic priors to distinguish static from dynamic elements or to guide Gaussian splitting, rather than relying solely on photometric or geometric constraints.
++
++### [RNR-Map Construction](16526-rnr-map-construction.md)
++RNR-Map Construction embeds visual information from an RGB-D image into a 2D grid map (RNR-Map) using a pretrained encoder and inverse camera projection. It differs from sibling methods like [iMAP](11979-imap.md) by operating directly on latent codes to bypass the computationally expensive differentiable rendering step required for alignment, enabling high-frequency mapping.
++
++### [Hierarchical Submap Alignment](21123-hierarchical-submap-alignment.md)
++Hierarchical Submap Alignment (HIGS) is a global alignment and fusion method that eliminates estimation drift in locally optimized submaps to achieve globally consistent neural fields. It sets itself apart from sibling methods like iMAP and RNR-Map Construction by using a hierarchical feature grid to progressively align submaps from coarse to fine levels, making it robust to severe initial misalignments where SDF-only methods fail.
++
++### [Neural Implicit Representation](22462-neural-implicit-representation.md)
++Neural Implicit Representation encodes a 3D scene as a continuous function, typically a Neural Radiance Field or Signed Distance Function, rather than a discrete voxel grid or point cloud. It solves the problem of joint camera pose estimation and dense 3D reconstruction by optimizing network weights and camera poses simultaneously using photometric and geometric constraints. It differs from explicit point-based siblings like Gaussian Splatting by modeling complex geometry and appearance continuously.
++
+ ### Combined ORB-SLAM + 3DGS
+-Combines an existing frame-based tracking system (ORB-SLAM) with 3DGS mapping [S2, unofficial]. ORB-SLAM recovers poses, and 3DGS is trained with poses and sensor depth of keyframes, equivalent to offline splatting [S2, unofficial]. On EuRoC Machine Hall (Stereo Depth), ATE RMSE (m): ORB-SLAM3 0.052, Ours 3.190 [S2, unofficial]. Point-SLAM fails on all sequences [S2, unofficial]. ORB-SLAM achieves best ATE, but combined approach shows no significant difference in rendering metrics compared to unified 3DGS SLAM [S2, unofficial]. Unified approach is preferred for exploring 3DGS throughout the entire algorithm [S2, unofficial].
+-
+-### CP-SLAM
+-A neural point-based hybrid neural field SLAM system enabling multi-agent cooperative localization and mapping with loop closure [S3]. Uses a keyframe-associated neural point representation inspired by PointNeRF, allowing per-point features to be adjusted during pose graph optimization [S3]. Employs a two-stage distributed-to-centralized training scheme: initial decoders are trained separately for each agent, then fused and fine-tuned jointly [S3]. Integrates odometry, loop detection, sub-map fusion, and global refinement into a unified framework [S3].
++Combines an existing frame-based tracking system (ORB-SLAM) with 3DGS mapping. ORB-SLAM recovers poses, and 3DGS is trained with poses and sensor depth of keyframes, equivalent to offline splatting. On EuRoC Machine Hall (Stereo Depth), ATE RMSE (m): ORB-SLAM3 0.052, Ours 3.190. Point-SLAM fails on all sequences. ORB-SLAM achieves best ATE, but combined approach shows no significant difference in rendering metrics compared to unified 3DGS SLAM. Unified approach is preferred for exploring 3DGS throughout the entire algorithm [S2, unofficial].
+ 
+ ### MNE-SLAM
+-The first fully distributed multi-agent neural SLAM framework enabling accurate collaborative mapping and robust camera tracking without centralized training or raw data exchange [S3]. Uses a triplane+MLP hybrid neural field representation as a mapping module [S3]. Introduces an intra-to-inter loop closure strategy to reduce pose drift and align submaps across agents through peer-to-peer feature sharing and global consistency loss [S3].
++The first fully distributed multi-agent neural SLAM framework enabling accurate collaborative mapping and robust camera tracking without centralized training or raw data exchange. Uses a triplane+MLP hybrid neural field representation as a mapping module. Introduces an intra-to-inter loop closure strategy to reduce pose drift and align submaps across agents through peer-to-peer feature sharing and global consistency loss [S3].
+ 
+ ### HERO-SLAM
+-A SLAM method employing a novel multiscale patch-based loss that aligns feature points, maps, and RGB-D pixels through warpings [S3]. Uses an INGP-like multiresolution hybrid feature grid+MLP representation for neural SDF learning [S3].
+-
+-### PIN-SLAM
+-A globally consistent SLAM system using a point-based implicit neural (PIN) representation [S3]. Replaces grid structures with neural feature points, offering spatial flexibility and elastic correction during loop closure [S3]. Mapping alternates with odometry. Mapping step is based on a hybrid neural SDF representation with explicit neural points and implicit MLP decoders [S3]. Odometry is performed correspondence-free via second-order scan-to-map optimization [S3]. A sliding window replay buffer ensures stable incremental updates [S3]. Loop closures trigger pose graph optimization and elastic deformation of neural points, enabling consistent large-scale mapping [S3].
++A SLAM method employing a novel multiscale patch-based loss that aligns feature points, maps, and RGB-D pixels through warpings. Uses an INGP-like multiresolution hybrid feature grid+MLP representation for neural SDF learning [S3].
+ 
+ ### Active 3D Reconstruction Algorithm
+-An active SLAM approach that plans camera trajectories to maximize information gain during reconstruction [S4, unofficial].
+-1. Initialization: Initialize 3D bounding box, uniformly sample goal-state candidates $S_g$ from view space, initialize DVGO coarse model $M(c)$ and agent state $s_0$, append initial image to database $\{I\}$ [S4, unofficial].
+-2. Global Policy: Select next-best-view $s^*_g$ from goal candidates $S_g$ using criterion: $s^*_g = \arg\min_{s_g \in S_g} (\lambda_{cp} l_{cp}(x_{s_g}) - \lambda_{ig} E_s(s_g))$, where $x_{s_g}$ is 3D location of $s_g$ [S4, unofficial].
+-3. Local Policy: Execute planning optimization to obtain optimized trajectory $S^*$ and local next-best view $s^*$ [S4, unofficial].
+-4. Action: Move agent to $s^*$ [S4, unofficial].
+-5. Observation: Obtain new image observation $I_t$ [S4, unofficial].
+-6. Update Database: Add new observation to database $\{I\}_{i=0}^{t+1}$ [S4, unofficial].
+-7. Mapping Optimization: Optimize DVGO model $M_t$ to $M_{t+1}$ by sampling pixels from database, including synchronizing entropy volume $V(E,c)$ [S4, unofficial].
+-8. Stop Check: Stop if (1) change in entropy volume is below threshold, or (2) maximum information gain of feasible goal candidates is below threshold [S4, unofficial].
+-9. Fine Stage: After exploration, initialize DVGO fine model $M(f)$ with trained coarse model $M_T(c)$ [S4, unofficial]. Perform stochastic training by sampling pixels from database $\{I\}_{i=0}^T$ for $N$ iterations, optimizing every $m$ iterations [S4, unofficial].
++Initialization: Initialize 3D bounding box, uniformly sample goal-state candidates $S_g$ from view space, initialize DVGO coarse model $M(c)$ and agent state $s_0$, append initial image to database $\{I\}$. Global Policy: Select next-best-view $s^*_g$ from goal candidates $S_g$ using criterion: $s^*_g = \arg\min_{s_g \in S_g} (\lambda_{cp} l_{cp}(x_{s_g}) - \lambda_{ig} E_s(s_g))$, where $x_{s_g}$ is 3D location of $s_g$. Local Policy: Execute planning optimization to obtain optimized trajectory $S^*$ and local next-best view $s^*$. Action: Move agent to $s^*$. Observation: Obtain new image observation $I_t$. Update Database: Add new observation to database $\{I\}_{i=0}^{t+1}$. Mapping Optimization: Optimize DVGO model $M_t$ to $M_{t+1}$ by sampling pixels from database, including synchronizing entropy volume $V(E,c)$. Stop Check: Stop if (1) change in entropy volume is below threshold, or (2) maximum information gain of feasible goal candidates is below threshold. Fine Stage: After exploration, initialize DVGO fine model $M(f)$ with trained coarse model $M_T(c)$. Perform stochastic training by sampling pixels from database $\{I\}_{i=0}^T$ for $N$ iterations, optimizing every $m$ iterations [S4, unofficial].
+ 
+ ### Lightness-Decoupled Camera Tracking
+-A camera tracking method that decouples lightness from the image to handle lighting changes, by converting images to LAB space and discarding the L (lightness) channel during comparison [S5].
+-1. Parameterize camera pose as $T = (t, q)$ with 3D translation $t$ and rotation quaternion $q$ [S5].
+-2. Initialize camera pose assuming constant camera velocity [S5].
+-3. Convert input image $C$ and rendered image $\hat{C}$ to LAB space using $\rho$ [S5].
+-4. Discard the L channel [S5].
+-5. Minimize $L_{tracking}$ using color (A/B channels) and depth differences [S5].
+-Formula: $L_{tracking} = \lambda_{color} |\rho(\hat{C}) - \rho(C)| + \lambda_{depth} |\hat{D} - D|$, where $\rho$ is the operation of converting the image from RGB to LAB space, $C$ is the input image, $\hat{C}$ is the rendered image, $D$ is the input depth, and $\hat{D}$ is the rendered depth [S5].
+-Parameters: $\lambda_{color} = 0.5$, weight for the color term in the tracking loss. $\lambda_{depth} = 1.0$, weight for the depth term in the tracking loss [S5].
++A camera tracking method that decouples lightness from the image to handle lighting changes, by converting images to LAB space and discarding the L (lightness) channel during comparison. 1. Parameterize camera pose as $T = (t, q)$ with 3D translation $t$ and rotation quaternion $q$. 2. Initialize camera pose assuming constant camera velocity. 3. Convert input image $C$ and rendered image $\hat{C}$ to LAB space using $\rho$. 4. Discard the L channel. 5. Minimize $L_{tracking}$ using color (A/B channels) and depth differences. Formula: $L_{tracking} = \lambda_{color} |\rho(\hat{C}) - \rho(C)| + \lambda_{depth} |\hat{D} - D|$, where $\rho$ is the operation of converting the image from RGB to LAB space, $C$ is the input image, $\hat{C}$ is the rendered image, $D$ is the input depth, and $\hat{D}$ is the rendered depth. Parameters: $\lambda_{color} = 0.5$, weight for the color term in the tracking loss. $\lambda_{depth} = 1.0$, weight for the depth term in the tracking loss [S5].
+ 
+ ### Active Mapping with 3D Gaussian Splatting
+-Extends passive mapping with active view selection to maximize information gain [S6].
+-Mechanism: Reconstruct environment using 3D Gaussians (e.g., via SplaTAM). Propose path candidates using frontier-based exploration [S6]. Sample cameras along the path concerning the mobility of the agent [S6]. Compute EIG for each path and choose the one with the highest EIG to continue exploration [S6].
+-Formula: $P_j = \arg \max_{P_j} \text{tr} \left( \sum_{x_{acq_i} \in P_j} H''[y_{i\_acq}|x_{acq_i}, w*] \right) H''[w*|D_{train}]^{-1}$ [S6].
++Reconstruct environment using 3D Gaussians (e.g., via SplaTAM). Propose path candidates using frontier-based exploration. Sample cameras along the path concerning the mobility of the agent. Compute EIG for each path and choose the one with the highest EIG to continue exploration. Formula: $P_j = \arg \max_{P_j} \text{tr} ( \sum_{x_{acq_i} \in P_j} H''[y_{i\_acq}|x_{acq_i}, w^*] ) H''[w^*|D_{train}]^{-1}$ [S6].
+ 
+ ### Joint Mapping and Pose Update
+-A mapping subroutine that fuses tracked RGB-D frames into the existing scene map by jointly optimizing scene geometry, camera poses, and feature embeddings using a sliding window of keyframes [S7].
+-1. Randomly select $N_{kf}$ keyframes for each frame to form an optimization window [S7].
+-2. For each frame in the optimization window, randomly sample $N_m$ rays and transform them into the world coordinate system with estimated frame poses [S7].
+-3. Sample points within sparse voxels, render pixels, and calculate loss functions using the method from Section 4.1 [S7].
+-Parameters: $N_{kf}$: Number of keyframes randomly selected for the optimization window. $N_m$: Number of rays randomly sampled for each frame in the optimization window [S7].
++A mapping subroutine that fuses tracked RGB-D frames into the existing scene map by jointly optimizing scene geometry, camera poses, and feature embeddings using a sliding window of keyframes. Randomly select $N_{kf}$ keyframes for each frame to form an optimization window. For each frame in the optimization window, randomly sample $N_m$ rays and transform them into the world coordinate system with estimated frame poses. Sample points within sparse voxels, render pixels, and calculate loss functions using the method from Section 4.1. Parameters: $N_{kf}$: Number of keyframes randomly selected for the optimization window. $N_m$: Number of rays randomly sampled for each frame in the optimization window [S7].
+ 
+ ### Salient 3D Landmark Selection
+-A greedy search algorithm to select N effective and non-redundant 3D landmarks from Gaussian primitives to maximize overall saliency score and ensure even scene coverage for visual localization [S8].
+-1. Initialize selected set S as empty. Select the primitive with the highest saliency score H(p) as the initial landmark and add to S [S8].
+-2. Search for the primitive with the highest saliency score that is located at a distance greater than the current search radius from any landmark already in S [S8].
+-3. If a suitable primitive is found, add it to S. If no suitable primitive is found, reduce the search radius and repeat the search [S8].
+-4. Continue the process until the size of the selected set S reaches the target number N, then stop [S8].
+-Parameters: N: The target number of selected 3D landmarks. tr: Distance error threshold parameter used in the Generalizability term calculation [S8].
++A greedy search algorithm to select N effective and non-redundant 3D landmarks from Gaussian primitives to maximize overall saliency score and ensure even scene coverage for visual localization. Initialize selected set S as empty. Select the primitive with the highest saliency score H(p) as the initial landmark and add to S. Search for the primitive with the highest saliency score that is located at a distance greater than the current search radius from any landmark already in S. If a suitable primitive is found, add it to S. If no suitable primitive is found, reduce the search radius and repeat the search. Continue the process until the size of the selected set S reaches the target number N, then stop. Parameters: N: The target number of selected 3D landmarks. tr: Distance error threshold parameter used in the Generalizability term calculation [S8].
+ 
+ ### Multi-process Tracking and Mapping Architecture
+-A parallel execution model that separates camera pose tracking and map optimization into independent processes to minimize resource contention [S7].
+-1. Create a local copy of shared resources (voxels, features, implicit decoder) for the tracking process each time the map is updated [S7].
+-2. Execute tracking and mapping concurrently, relying on the local copies to avoid locks [S7].
+-Pitfall: Shared resource access latency can degrade performance; lock-free structures are recommended but not implemented in this work [S7].
++A parallel execution model that separates camera pose tracking and map optimization into independent processes to minimize resource contention. Create a local copy of shared resources (voxels, features, implicit decoder) for the tracking process each time the map is updated. Execute tracking and mapping concurrently, relying on the local copies to avoid locks. Pitfall: Shared resource access latency can degrade performance; lock-free structures are recommended but not implemented in this work [S7].
+ 
+ ### Gaussian SLAM Map Refinement
+-A refinement procedure for a global Gaussian Splatting map using a merged point cloud and training keyframes, optimizing color, depth, and scaling regularization losses [S9, unofficial].
+-1. Initialize GaussianModel with SH degree 3, add points from the merged point cloud, and setup optimization parameters [S9, unofficial].
+-2. Iterate for max_iterations: retrieve next training frame, extract ground truth color/depth and render settings [S9, unofficial].
+-3. Render the Gaussian model using the render settings to get rendered color and depth [S9, unofficial].
+-4. Compute isotropic scaling regularization loss [S9, unofficial].
+-5. Create a depth mask for valid pixels (depth > 0) [S9, unofficial].
+-6. Compute color loss as weighted sum of L1 loss on valid pixels and SSIM loss on all pixels [S9, unofficial].
+-7. Compute depth loss as L1 loss between rendered and ground truth depth on valid pixels [S9, unofficial].
+-8. Sum losses and perform backward pass [S9, unofficial].
+-9. Every 500 iterations, prune points with opacity less than 0.005 [S9, unofficial].
+-10. Step the optimizer and zero gradients [S9, unofficial].
++A refinement procedure for a global Gaussian Splatting map using a merged point cloud and training keyframes, optimizing color, depth, and scaling regularization losses. Initialize GaussianModel with SH degree 3, add points from the merged point cloud, and setup optimization parameters. Iterate for max_iterations: retrieve next training frame, extract ground truth color/depth and render settings. Render the Gaussian model using the render settings to get rendered color and depth. Compute isotropic scaling regularization loss. Create a depth mask for valid pixels (depth > 0). Compute color loss as weighted sum of L1 loss on valid pixels and SSIM loss on all pixels. Compute depth loss as L1 loss between rendered and ground truth depth on valid pixels. Sum losses and perform backward pass. Every 500 iterations, prune points with opacity less than 0.005. Step the optimizer and zero gradients [S9, unofficial].
+ 
+ ### Local Submap Pose Optimization
+-1. Use color ICP as initial odometry [S10, unofficial].
+-2. Process a sliding window of 10 frames with a stride of 10 [S10, unofficial].
+-3. Disable pose regularization [S10, unofficial].
+-4. Introduce pose as an optimizable variable [S10, unofficial].
+-5. Use cost functions for SDF and CLIP [S10, unofficial].
+-6. Optimize jointly with SDF-only or SDF+CLIP supervision [S10, unofficial].
+-Numbers: ScanNet scene 0000: Color ICP + Mapping Tran err = 40.86cm, Rot err = 10.17deg, C-l1 = 15.04cm. Color ICP + SLAM(SDF) Tran err = 17.33cm, Rot err = 4.16deg, C-l1 = 11.77cm [S10, unofficial]. Color ICP + SLAM(SDF+CLIP) Tran err = 20.11cm, Rot err = 10.17deg, C-l1 = 11.72cm [S10, unofficial].
++Use color ICP as initial odometry. Process a sliding window of 10 frames with a stride of 10. Disable pose regularization in (26). Introduce pose as an optimizable variable. Use cost functions for SDF and CLIP from Section 4.1. Optimize jointly with SDF-only or SDF+CLIP supervision. ScanNet scene 0000: Color ICP + Mapping Tran err = 40.86cm, Rot err = 10.17deg, C-l1 = 15.04cm. Color ICP + SLAM(SDF) Tran err = 17.33cm, Rot err = 4.16deg, C-l1 = 11.77cm. Color ICP + SLAM(SDF+CLIP) Tran err = 20.11cm, Rot err = 10.17deg, C-l1 = 11.72cm [S10, unofficial].
+ 
+ ## Operating characteristics
++*   **Time Complexity:** Depends on the number of Gaussians/voxels and the size of the optimization window. Joint optimization is more expensive than offline reconstruction due to pose gradients. Multi-process architectures can improve throughput but add synchronization overhead [S7].
++*   **Memory Complexity:** Linear with respect to the number of Gaussians or voxel resolution. Implicit methods may have lower memory overhead for sparse scenes but require storing network weights [S7].
++*   **Performance:** Unified 3DGS SLAM methods offer better integration but may have higher ATE than classical SLAM (e.g., ORB-SLAM) [S2, unofficial]. Hybrid methods (e.g., GPS-SLAM) can improve high-frequency appearance [S3].
++*   **Strengths:** Real-time reconstruction, explicit geometry (for Gaussians), differentiable rendering for pose optimization.
++*   **Limitations:** Susceptible to drift without loop closure, sensitive to lighting changes, computationally intensive for large scenes.
+ 
+ ## Background
++SLAM with 3D Gaussian Splatting emerged as a natural extension of the original 3DGS paper, aiming to enable online reconstruction. Early works like SplaTAM and Gaussian Splatting SLAM demonstrated the feasibility of using Gaussians for tracking and mapping. Subsequent research introduced hybrid representations (combining Gaussians with NeRFs or SDFs) to improve robustness and detail [S2, unofficial][S3]. The field has evolved to include active mapping, multi-agent systems, and semantic-aware approaches [S1, S3, S6].
+ 
+ ## Sources

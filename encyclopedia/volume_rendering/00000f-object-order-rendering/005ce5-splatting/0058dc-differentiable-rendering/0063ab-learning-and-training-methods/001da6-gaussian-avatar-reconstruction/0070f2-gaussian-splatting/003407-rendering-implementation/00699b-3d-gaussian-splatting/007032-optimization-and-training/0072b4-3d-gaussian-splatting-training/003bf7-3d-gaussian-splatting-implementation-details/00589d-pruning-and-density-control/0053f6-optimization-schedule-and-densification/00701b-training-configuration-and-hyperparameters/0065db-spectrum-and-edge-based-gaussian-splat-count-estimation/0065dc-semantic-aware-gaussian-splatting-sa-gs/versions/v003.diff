@@ -1,0 +1,104 @@
+--- v002.md
++++ v003.md
+@@ -19,5 +19,5 @@
+ 1.  **Semantic and Geometric Property Extraction (Pre-training):**
+     *   Extract semantic masks $M$ for all input images using GroundingSAM [S1, unofficial].
+-    *   Classify pixels into $C$ semantic groups based on caption embeddings $E(c)$. For pixels where GroundingSAM fails, assign a default embedding [S1, unofficial].
++    *   Classify pixels into $C$ semantic groups based on caption embeddings $E(c)$ [S1, unofficial]. For pixels where GroundingSAM fails, assign a default embedding [S1, unofficial].
+     *   For each semantic group $j$, compute the edge count $e_{ij}$ for each image $i$ using Canny Edge detection [S1, unofficial].
+     *   Calculate the perplexity $P_j$ for group $j$ as the sum of edge counts across all images:
+@@ -25,13 +25,13 @@
+     *   Calculate the pixel count $p_j$ for group $j$ [S1, unofficial].
+     *   Determine expected aspect ratios $a_1$ and $a_2$ for Gaussians in group $j$ using:
+-        $$ \frac{1}{p_i} = k_1 \frac{a_1}{P_j} \quad \text{and} \quad \frac{1}{p_i} = k_2 \frac{a_2}{P_j} $$
++        $$ \frac{1}{p_j} = \frac{k_1 a_1}{P_j} \quad \text{and} \quad \frac{1}{p_j} = \frac{k_2 a_2}{P_j} $$
+         where $k_1=3, k_2=1$ are constants, and $a_1 = s_x/s_z, a_2 = s_y/s_z$ [S1, unofficial].
+ 
+ 2.  **Geometric Complexity Aware Training:**
+     *   Modify the CUDA rasterization kernel to dynamically extract the projected mean of each Gaussian during rasterization [S1, unofficial].
+-    *   Map projected pixels to semantic masks to assign expected shapes online. This avoids inconsistency from separate training [S1, unofficial].
++    *   Map projected pixels to semantic masks to assign expected shapes online [S1, unofficial]. This avoids inconsistency from separate training [S1, unofficial].
+     *   Compute the geometric complexity loss $L_{gc}$:
+         $$ L_{gc} = \sigma\left(\frac{k_1}{P_i} - a_1\right) + \sigma\left(\frac{k_2}{P_i} - a_2\right) $$
+-        where $\sigma$ is a weighting function (implementation details unspecified, likely a soft constraint or activation) [S1, unofficial].
++        where $\sigma$ is a weighting or activation function [S1, unofficial].
+     *   Combine with rendering losses:
+         $$ L_{total} = \lambda_{gc} L_{gc} + \lambda_{dssim} L_{dssim} + \lambda_{l1} L_{l1} $$
+@@ -41,5 +41,5 @@
+     *   Construct a multinomial distribution $P(i)$ based on Gaussian opacity $\alpha_i$:
+         $$ P(i) = \frac{\alpha_i}{\sum \alpha} $$
+-    *   Sample indices $i$ according to $P(i)$. High $\alpha_i$ Gaussians are sampled multiple times; low $\alpha_i$ Gaussians may be sampled zero or once [S1, unofficial].
++    *   Sample indices $i$ according to $P(i)$ [S1, unofficial]. High $\alpha_i$ Gaussians are sampled multiple times; low $\alpha_i$ Gaussians may be sampled zero or once [S1, unofficial].
+     *   For each sampled Gaussian $i$, draw points from its density function $\phi(x)$:
+         $$ \phi(x) = \alpha_i \exp\left(-\frac{1}{2}(x - \mu_i)^T \Sigma_i^{-1} (x - \mu_i)\right) $$
+@@ -71,15 +71,14 @@
+     
+     for iteration in range(max_iterations):
+-        # Modify CUDA kernel to get projected mean and semantic mask online
++        # Modified CUDA kernel extracts projected mean and assigns semantic mask online
+         projected_means, semantic_labels = rasterize_with_semantic_mask(gaussians, input_images)
+         
+         # Compute aspect ratios from perplexity
+-        # Note: p_i in formula refers to pixel count of the group the Gaussian falls into
+         aspect_ratios = {}
+         for group in semantic_groups:
+-            p_i = pixel_counts[group]
+-            P_i = perplexity[group]
+-            a1 = (p_i * k1) / P_i
+-            a2 = (p_i * k2) / P_i
++            p_j = pixel_counts[group]
++            P_j = perplexity[group]
++            a1 = P_j / (k1 * p_j)
++            a2 = P_j / (k2 * p_j)
+             aspect_ratios[group] = (a1, a2)
+             
+@@ -88,7 +87,7 @@
+         for g in semantic_groups:
+             a1, a2 = aspect_ratios[g]
+-            P_i = perplexity[g]
+-            # sigma function implementation not specified in source
+-            L_gc += sigma(k1/P_i - a1) + sigma(k2/P_i - a2)
++            P_j = perplexity[g]
++            # sigma function implementation not specified in source [S1, unofficial]
++            L_gc += sigma(k1/P_j - a1) + sigma(k2/P_j - a2)
+             
+         L_dssim = compute_dssim_loss(gaussians, input_images)
+@@ -110,5 +109,5 @@
+     probs = [a / total_alpha for a in alphas]
+     
+-    # Multinomial sampling
++    # Multinomial sampling based on alpha distribution
+     sampled_indices = multinomial_sample(probs, num_points)
+     
+@@ -121,4 +120,18 @@
+         
+     return points
++
++def multinomial_sample(probs, n):
++    # Standard CDF-based multinomial sampling
++    cdf = [sum(probs[:i+1]) for i in range(len(probs))]
++    indices = []
++    for _ in range(n):
++        r = random.random()
++        idx = bisect.bisect_right(cdf, r)
++        indices.append(idx)
++    return indices
++
++def sample_from_gaussian_density(mu, Sigma):
++    # Standard 3D normal distribution sampling
++    return numpy.random.multivariate_normal(mu, Sigma)
+ ```
+ 
+@@ -132,9 +145,9 @@
+ *   **Memory:** Reduces GPU memory consumption by pruning low-opacity splats and controlling the total number of Gaussians based on semantic complexity [S1, unofficial].
+ *   **Performance:** Improves geometric reconstruction quality, particularly in large-scale scenes, by aligning Gaussian shapes with semantic and geometric features [S1, unofficial].
+-*   **Strengths:** Effective for large-scale scenes; reduces over-reconstruction in low-frequency areas and under-reconstruction in high-frequency areas.
+-*   **Limitations:** Relies on the accuracy of GroundingSAM and Canny Edge detection; requires modification of the rasterization kernel.
++*   **Strengths:** Effective for large-scale scenes; reduces over-reconstruction in low-frequency areas and under-reconstruction in high-frequency areas [S1, unofficial].
++*   **Limitations:** Relies on the accuracy of GroundingSAM and Canny Edge detection; requires modification of the rasterization kernel [S1, unofficial].
+ 
+ ## Background
+-SA-GS was introduced in the paper "SA-GS: Semantic-Aware Gaussian Splatting for Large Scene Reconstruction with Geometry Constrain" [S1, unofficial]. It extends previous work like LangSplat and LeGaussian, which use large vision models for object-level semantics, by applying semantic and geometric data to large-scale scenes [S1, unofficial]. It addresses the issue of uniform Gaussian distribution by adapting shapes to local geometric complexity.
++SA-GS was introduced in the paper "SA-GS: Semantic-Aware Gaussian Splatting for Large Scene Reconstruction with Geometry Constrain" [S1, unofficial]. It extends previous work like LangSplat and LeGaussian, which use large vision models for object-level semantics, by applying semantic and geometric data to large-scale scenes [S1, unofficial]. It addresses the issue of uniform Gaussian distribution by adapting shapes to local geometric complexity [S1, unofficial].
+ 
+ ## Sources

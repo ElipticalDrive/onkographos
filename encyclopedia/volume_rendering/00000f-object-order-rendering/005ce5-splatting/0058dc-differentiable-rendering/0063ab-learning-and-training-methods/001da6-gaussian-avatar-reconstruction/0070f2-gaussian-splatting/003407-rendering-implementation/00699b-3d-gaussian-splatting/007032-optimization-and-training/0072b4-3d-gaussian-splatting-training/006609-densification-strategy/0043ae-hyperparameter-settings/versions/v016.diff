@@ -1,0 +1,178 @@
+--- v015.md
++++ v016.md
+@@ -4,19 +4,19 @@
+ 
+ ## Overview
+-Hyperparameter Settings define the numerical configuration for the optimizer, learning rates, and regularization terms used during the training of 3D Gaussian Splatting (3DGS) models. This method solves the problem of stable convergence and high-fidelity reconstruction by tuning the trade-off between fitting training data and maintaining geometric/photometric consistency. It differs from sibling methods like [Densification Strategy](6234-densification-strategy.md) (which manages primitive count) and [Pruning and Sparsification](12354-pruning-and-sparsification.md) (which removes primitives) by focusing on the gradient descent dynamics and loss weighting rather than structural topology changes.
++Hyperparameter Settings define the numerical configuration for the optimizer, learning rates, and regularization terms used during the training of 3D Gaussian Splatting (3DGS) models [S2, unofficial][S1]. This method solves the problem of stable convergence and high-fidelity reconstruction by tuning the trade-off between fitting training data and maintaining geometric/photometric consistency [G]. It differs from sibling methods like [Densification Strategy](6234-densification-strategy.md) (which manages primitive count) and [Pruning and Sparsification](12354-pruning-and-sparsification.md) (which removes primitives) by focusing on the gradient descent dynamics and loss weighting rather than structural topology changes [G].
+ 
+ ## How it works
+-The method configures the optimization loop by setting the optimizer type, learning rates for specific Gaussian attributes, and weights for auxiliary loss terms.
++The method configures the optimization loop by setting the optimizer type, learning rates for specific Gaussian attributes, and weights for auxiliary loss terms [S2, unofficial][S1].
+ 
+ **Inputs:**
+-*   Model parameters: Position $\mu$, Color SH coefficients $\mathbf{c}$, Scale $s$, Opacity $\alpha$, and potentially material parameters (Base Color, Metallic, Roughness) or dynamic parameters (MLP weights).
+-*   Ground truth images and camera poses.
++*   Model parameters: Position $\mu$, Color SH coefficients $\mathbf{c}$, Scale $s$, Opacity $\alpha$, and potentially material parameters (Base Color, Metallic, Roughness) or dynamic parameters (MLP weights) [S2, unofficial][S1].
++*   Ground truth images and camera poses [G].
+ 
+ **Outputs:**
+-*   Optimized Gaussian parameters.
++*   Optimized Gaussian parameters [G].
+ 
+ **Data Structures:**
+-*   **Optimizer State:** Adam optimizer state buffers (first and second moment estimates) for each parameter group.
+-*   **Learning Rate Schedule:** A mapping from parameter type to initial learning rate and decay schedule.
++*   **Optimizer State:** Adam optimizer state buffers (first and second moment estimates) for each parameter group [G].
++*   **Learning Rate Schedule:** A mapping from parameter type to initial learning rate and decay schedule [S2, unofficial][S1].
+ 
+ **Parameters and Typical Values:**
+@@ -59,19 +59,19 @@
+ **Pseudocode:**
+ ```python
+-def initialize_optimizer(params, config):
+-    """
+-    Initialize Adam optimizer with specific learning rates per parameter group.
+-    params: dict of parameter tensors (position, color_sh, scale, opacity, etc.)
+-    config: dict containing lr_schedule, beta1, beta2, epsilon
+-    """
+-    optimizer = Adam(
+-        params=params,
+-        lr=config['base_lr'], # Not explicitly given as single value, handled by groups
+-        betas=(config['beta1'], config['beta2']),
+-        eps=config['epsilon']
+-    )
+-    
+-    # Assign learning rates based on parameter type
+-    # Example for Phys3DGS/Standard 3DGS hybrid configuration
++def apply_hyperparameters(params, config):
++    """
++    Configure optimizer state and learning rates for 3DGS training.
++    params: dict mapping parameter names to tensors (numpy-like arrays).
++    config: dict containing optimizer settings, lr_schedule, and regularization weights.
++    """
++    # Initialize Adam state buffers (first and second moments) for each parameter
++    optimizer_state = {}
++    for name, tensor in params.items():
++        optimizer_state[name] = {
++            'm': zeros_like(tensor),  # First moment
++            'v': zeros_like(tensor)   # Second moment
++        }
++        
++    # Define learning rate mapping based on parameter type
+     lr_map = {
+         'position': 1.6e-4,
+@@ -87,31 +87,51 @@
+         'indirect_light_sh_deg0': 2.5e-4,
+         'indirect_light_sh_deg_gt0': 1.0e-3,
+-        'visibility_sh': 0.1
++        'visibility_sh': 0.1,
++        'mlp_weights': config.get('mlp_lr', 0.0008),
++        'reflectivity': 0.00016
+     }
+     
+-    # Group parameters for the optimizer
++    # Assign learning rates to parameter groups
+     param_groups = []
+     for name, tensor in params.items():
+-        lr = lr_map.get(name, 1.0e-3) # Default fallback if not specified
++        lr = lr_map.get(name, 1.0e-3)  # Default fallback
+         param_groups.append({'params': [tensor], 'lr': lr})
+         
+-    optimizer = Adam(param_groups, betas=(0.9, 0.999), eps=1e-15)
+-    return optimizer
+-
+-def compute_loss(loss_type, pred, gt, config):
+-    """
+-    Compute loss with specific weights.
+-    """
+-    if loss_type == 'photometric':
+-        # L1 or L2 loss
+-        return torch.mean(torch.abs(pred - gt))
+-    elif loss_type == 'smoothness':
+-        # Smoothness regularizer
+-        # lambda_smooth values: 0.06 (base color), 0.02 (roughness/metallic)
+-        return config['lambda_smooth'] * smoothness_term(pred)
+-    elif loss_type == 'other_reg':
+-        # Other regularizers (lambda_o, lambda_sc, lambda_sr)
+-        return 1.0 * other_regularization_term(pred)
+-    return 0.0
++    return optimizer_state, param_groups
++
++def compute_loss_and_update(pred, gt, params, gradients, optimizer_state, config, iteration):
++    """
++    Compute loss with regularization and perform a single Adam update step.
++    """
++    # Photometric loss (L1)
++    photometric_loss = mean(abs(pred - gt))
++    
++    # Regularization terms
++    smoothness_loss = config['lambda_smooth'] * mean(abs(gradients))
++    other_reg_loss = 1.0 * mean(abs(params))
++    
++    total_loss = photometric_loss + smoothness_loss + other_reg_loss
++    
++    # Backward pass would populate `gradients` dict
++    # Adam update step for each parameter
++    beta1, beta2, eps = 0.9, 0.999, 1e-15
++    for name, tensor in params.items():
++        grad = gradients[name]
++        state = optimizer_state[name]
++        lr = lr_map.get(name, 1.0e-3)
++        
++        # Exponential decay for MLP weights (ToRF)
++        if name == 'mlp_weights':
++            lr = 0.0008 * (0.999973 ** iteration)  # Decays to 1.6e-6 over 60k iters
++        
++        # Adam update
++        state['m'] = beta1 * state['m'] + (1 - beta1) * grad
++        state['v'] = beta2 * state['v'] + (1 - beta2) * grad ** 2
++        m_hat = state['m'] / (1 - beta1 ** (iteration + 1))
++        v_hat = state['v'] / (1 - beta2 ** (iteration + 1))
++        
++        tensor = tensor - lr * m_hat / (sqrt(v_hat) + eps)
++        
++    return total_loss
+ ```
+ 
+@@ -140,4 +160,16 @@
+ Addresses optimization challenges of large, sparse, unbounded scenes by dividing the environment into independent spatial chunks, each trained separately. It distinguishes itself from standard 3DGS by introducing a skybox for environmental consistency, modifying densification policies to handle sparse gradients, and applying monocular depth regularization for unobserved surfaces.
+ 
++### [Edge-guided Splitting Strategy](18680-edge-guided-splitting-strategy.md)
++Refines primitives by splitting large Gaussians located in high-frequency edge regions to capture fine details. It addresses the weakness of enlarged primitives, which lose high-frequency detail, particularly when used in conjunction with Random Dropout Regularization (RDR). Unlike standard splitting based solely on position gradient magnitude, it explicitly guides splitting toward geometric edges, making it distinct from sibling methods like [Blended Error Densification and Splitting](13892-blended-error-densification-and-splitting.md) which rely on rendering error[13892-blended-error-densification-and-splitting.md].
++
++### [Standard 3DGS Training Configuration](18796-standard-3dgs-training-configuration.md)
++Specifies the canonical hyperparameter settings for optimizing 3D Gaussian Splatting models, establishing the baseline for adaptive density control and gradient-based optimization. It differs from sibling methods like [Conditional 3DGS Optimization and Rendering](11459-conditional-3dgs-optimization-and-rendering.md) or [Blended Error Densification and Splitting](13892-blended-error-densification-and-splitting.md) by adhering strictly to the default parameters of the official implementation, specifically regarding densification frequency, gradient thresholds, and opacity management.
++
++### [BoundedGS Leaf Loss and Gradient Management](20147-boundedgs-leaf-loss-and-gradient-management.md)
++A training optimization that reduces memory overhead during high-resolution rendering by organizing Gaussians into spatial groups (leaves) and using compact gradient storage. It solves the problem of excessive memory consumption caused by maintaining full dense gradients for all Gaussians during the backward pass of large scenes. It differs from sibling methods by explicitly decoupling the gradient accumulation scope to leaf boundaries and using a global ID mapping to feed only necessary gradient rows into the Adam optimizer, while maintaining dense gradients for opacity to support global regularization.
++
++### [Consensus-Inheritance Extension](21245-consensus-inheritance-extension.md)
++A mechanism for maintaining correspondence between fixed consensus statistics and newly created Gaussian primitives during densification (splitting or cloning) in 3D Gaussian Splatting. It prevents the breaking of the fixed-consensus protocol by ensuring that new Gaussians inherit relevant prior information, thereby allowing consensus statistics to evolve with the Gaussian population while retaining contamination-resistant properties. It is distinct from sibling methods like [Conditional 3DGS Optimization and Rendering](11459-conditional-3dgs-optimization-and-rendering.md) and [Blended Error Densification and Splitting](13892-blended-error-densification-and-splitting.md) by explicitly managing the inheritance of consensus weights and periodic re-estimation thresholds rather than altering the densification criteria or loss functions directly.
++
+ ### GaMeS
+ A method simplifying mesh generation by utilizing an initial mesh or estimating it in a single-stage training process, introducing a pseudo-mesh of unconnected triangle faces with Gaussian components positioned on these faces to ensure proper alignment [S3]. It realizes deformation by modifying pseudo-mesh positions, with alterations automatically propagating to the Gaussian mesh, enabling real-time animation and scene editing [S3]. However, it exhibits artifacts when dealing with significant deformations in meshes with large faces, leading to inaccuracies [S3].
+@@ -145,4 +177,10 @@
+ ### View Selection for Optimization
+ Selects specific views for adaptation optimization to prevent overfitting to known training views and maintain novel-view performance [S4]. Steps: 1. Avoid using training views (+train) as they focus on known-view fitting. 2. Use test views for optimization. 3. Alternatively, use synthetic views sampled from the estimated camera trajectory (+syn.) [S4]. Typical number of synthetic views used: 50 [S4]. On the bicycle scene, PSNR with test views was Zoom-out 30.84, Zoom-in 24.23; with synthetic views: Zoom-out 29.72, Zoom-in 30.05 [S4].
++
++### Peripheral Model Initialization
++Creates a set of initial images from various views around the target volume and trains a peripheral model for 700 iterations using a MiniSplatting2-based approach [S5]. Renders training views at 512x512 pixels covering a 20° field of view [S5]. Number of initial views: 8, 12, 16, or 32. Samples per pixel (SPP): 4, 8, or 16. Normal quality preset: 12 views at 8 SPP. High quality preset: 16 views at 16 SPP [S5]. Using only 8 images or 4 SPP often misses important details. Using more than 16 views significantly delays the availability of the initial model with diminishing returns [S5]. Initial model generation takes under 300 ms; full reconstruction completes in about a second [S5]. Produces a higher-quality model faster than standard 3DGS with half the number of Gaussians, as opacity reset struggles to lower Gaussian counts [S5].
++
++### PUP (Pruning using Uncertainty/Second-order sensitivity)
++A pruning method that reduces the number of Gaussians ($N$) using a second-order sensitivity criterion based on the local reconstruction-loss change [S6]. Calculates the local Hessian block $H_j$ for each Gaussian's spatial parameters. Computes the sensitivity $\Delta L_j$. Removes Gaussians with low sensitivity (low $\Delta L_j$) before refinement [S6]. Formula: $\Delta L_j \approx \frac{1}{2} \delta\theta_j^T H_j \delta\theta_j$, where $\Delta L_j$ is the local reconstruction-loss change for Gaussian $j$, $\delta\theta_j$ is the perturbation of spatial Gaussian parameters $\theta_j$, and $H_j$ is the local Hessian block associated with the spatial parameters of Gaussian $j$ [S6]. On the shared baseline in Table 9, PUP removes approximately 90% of Gaussians and 90% of serialized bytes, changing PSNR from 25.01 to 25.42 dB [S6]. PUP primarily reduces $N$ (primitive count), whereas Compact3D primarily reduces $bg$ (storage per Gaussian) [S6].
+ 
+ ## Operating characteristics
+@@ -154,5 +192,5 @@
+ 
+ ## Background
+-The hyperparameter settings for 3D Gaussian Splatting were introduced alongside the original 3DGS paper [Kerbl et al.], establishing the baseline Adam optimizer configuration [S1][S2, unofficial]. Subsequent works have adapted these settings for specific domains: Phys3DGS introduced settings for physically-based inverse rendering [S2, unofficial], ToRF adapted them for time-of-flight and dynamic scenes [S1], and Mip-Splatting variants explored view selection strategies [S4]. The importance of regularization weights to prevent instability was highlighted in Phys3DGS [S2, unofficial].
++The hyperparameter settings for 3D Gaussian Splatting were introduced alongside the original 3DGS paper, establishing the baseline Adam optimizer configuration [S1][S2, unofficial]. Subsequent works have adapted these settings for specific domains: Phys3DGS introduced settings for physically-based inverse rendering [S2, unofficial], ToRF adapted them for time-of-flight and dynamic scenes [S1], and Mip-Splatting variants explored view selection strategies to prevent overfitting to known training views [S4]. The importance of regularization weights to prevent instability from erroneous Gaussians was highlighted in Phys3DGS [S2, unofficial].
+ 
+ ## Sources
+@@ -160,3 +198,5 @@
+ [S2] Phys3DGS: Physically-based 3D Gaussian Splatting for Inverse Rendering, https://doi.org/10.48550/arxiv.2409.10335, fetched 2026-10-26 (unofficial)
+ [S3] A survey on 3D editing based on NeRF and 3DGS, https://link.springer.com/article/10.1007/s11704-025-41176-9, fetched 2026-10-28
+-[S4] Mipmap-GS: Let Gaussians Deform with Scale-Specific Mipmap for Anti-Aliasing Rendering, https://doi.org/10.1109/3dv66043.2025.00091, fetched 2026-10-27+[S4] Mipmap-GS: Let Gaussians Deform with Scale-Specific Mipmap for Anti-Aliasing Rendering, https://doi.org/10.1109/3dv66043.2025.00091, fetched 2026-10-27
++[S5] Hybrid Foveated Path Tracing with Peripheral Gaussians for Immersive Anatomy, https://doi.org/10.1109/vr67842.2026.00078, fetched 2026-10-26
++[S6] Gaussian Splatting for real-time scene reconstruction: Methods, systems, and trade-offs, https://doi.org/10.1016/j.patcog.2026.115120, fetched 2026-10-26

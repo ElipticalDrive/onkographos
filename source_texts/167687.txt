@@ -1,0 +1,126 @@
+I am working on a project for a client and I am trying to replicate the 3D volume rendering done in the Unity Inspector so I can view changes to 3D volume data in real-time.
+Here is an example of what the final output should look like (with and without transparency):
+ https://i.sstatic.net/NtVbv.jpg 
+However, when I render this in real-time using a slightly modified version of the default Raymarching shader provided by Unity - my results are quite different.
+ https://i.sstatic.net/0K2YA.jpg 
+Here is the shader code being used to render the 3D texture: 
+  Shader "Unlit/3DVolumeShader"
+ {
+ Properties
+ {
+     _Alpha ("Alpha", float) = 0.8
+     _StepSize ("Step Size", float) = 0.01
+ }
+ SubShader
+ {
+     Tags { "Queue" = "Transparent" "RenderType" = "Transparent" }
+     Blend One OneMinusSrcAlpha
+     LOD 100
+
+     Pass
+     {
+         CGPROGRAM
+         #pragma vertex vert
+         #pragma fragment frag
+
+         #include "UnityCG.cginc"
+
+         #define TEX_WIDTH 512
+         #define TEX_HEIGHT 64
+         #define TEX_LENGTH 384
+
+         // Maximum amount of raymarching samples
+         #define MAX_STEP_COUNT 128
+
+         // Allowed floating point inaccuracy for hit detection
+         #define EPSILON 0.00001f
+
+         struct appdata
+         {
+             float4 vertex : POSITION;
+         };
+
+         struct v2f
+         {
+             float4 vertex : SV_POSITION;
+             float3 objectVertex : TEXCOORD0;
+             float3 vectorToSurface : TEXCOORD1;
+         };
+
+         float _Alpha;
+         float _StepSize;
+
+         StructuredBuffer<float4> DensityMap;
+         
+         v2f vert (appdata v)
+         {
+             v2f o;
+
+             // Vertex in object space this will be the starting point of raymarching
+             o.objectVertex = v.vertex;
+
+             // Convert vertex in object space to camera coordinates
+             o.vertex = UnityObjectToClipPos(v.vertex);
+
+             // Calculate vector from camera to vertex in world space
+             float3 worldVertex = mul(unity_ObjectToWorld, v.vertex).xyz;
+             o.vectorToSurface = worldVertex - _WorldSpaceCameraPos;
+
+             return o;
+         }
+
+         // This method blends colors based on their alpha transparency
+         // If color.a == 1 then no blending will occur
+         // Otherwise multiply the difference in the alpha's by the new color
+         float4 BlendColors(float4 color, float4 newColor)
+         {
+             color.rgb += (1.0 - color.a) * newColor.a * newColor.rgb;
+             color.a += (1.0 - color.a) * newColor.a;
+             return color;
+         }
+
+         fixed4 frag(v2f i) : SV_Target
+         {
+             // Start raymarching at the front surface of the object
+             float3 rayOrigin = i.objectVertex;
+
+             // Use vector from camera to object surface to get the ray direction
+             float3 rayDirection = mul(unity_WorldToObject, float4(normalize(i.vectorToSurface), 1));
+
+             float4 color = float4(0, 0, 0, 0);
+
+             float3 bounds = float3(TEX_WIDTH, TEX_LENGTH, TEX_HEIGHT);
+             float3 samplePosition = rayOrigin;
+
+             // Raymarch through object space
+             for (int i = 0; i < MAX_STEP_COUNT; i++)
+             {
+                 // Accumulate color only within unit cube bounds
+                 if(max(abs(samplePosition.x), max(abs(samplePosition.y), abs(samplePosition.z))) < 0.5f + EPSILON)
+                 {
+                     // Sample the color at the position in our density map. Add an offset for UV coordinate transformation.
+                     // float4 sampledColor = tex3D(_DensityMap, samplePosition + float3(0.5f, 0.5f, 0.5f));
+
+                     float3 textureCoord = (samplePosition + float3(0.5f, 0.5f, 0.5f)) * bounds;
+                     int index = int(textureCoord.x) + (int(textureCoord.y) * bounds.x) + (int(textureCoord.z) * bounds.x * bounds.y);
+
+                     float4 sampledColor = DensityMap[index];
+                     sampledColor.a *= _Alpha;
+
+                     // Blend the colors based on alpha transparency
+                     color = BlendColors(color, sampledColor);
+
+                     samplePosition += rayDirection * _StepSize;
+                 }
+             }
+
+             return color;
+         }
+         ENDCG
+     }
+ }
+ }
+ 
+ I am using raymarching to index into the 3D texture array, which is where I think this issue might be occurring. I'm wondering if I might have something wrong with the scaling/coordinate system that Unity uses.
+My texture size is 512x64x384 and I am rendering to a cube with scaling 1x0.1x0.75.
+Please let me know if there is any additional information required to solve this. 

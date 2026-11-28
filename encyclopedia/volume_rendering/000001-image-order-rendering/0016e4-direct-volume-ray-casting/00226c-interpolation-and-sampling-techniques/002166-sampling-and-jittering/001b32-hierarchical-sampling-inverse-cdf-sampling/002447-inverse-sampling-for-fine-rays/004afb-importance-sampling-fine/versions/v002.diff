@@ -1,0 +1,125 @@
+--- v001.md
++++ v002.md
+@@ -4,41 +4,40 @@
+ 
+ ## Overview
+-This method generates secondary sample positions along a ray by leveraging the probability distribution derived from a prior coarse rendering pass. It solves the problem of inefficient uniform sampling in regions of high radiance or opacity by concentrating samples where they contribute most to the final image. It differs from its parent, [Inverse Sampling for Fine Rays](3235-inverse-sampling-for-fine-rays.md), by explicitly defining the construction of the probability density function (PDF) and cumulative distribution function (CDF) from coarse weights, and the specific noise-injection step required to map discrete indices back to continuous depth space.
++This method generates secondary sample positions along a ray by leveraging the probability distribution derived from a prior coarse rendering pass [S1, unofficial]. It is used in hierarchical sampling strategies where coarse points are uniformly sampled and fine points are sampled based on the coarse probability estimation [S2, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- Coarse weights $w_i$ for $i \in \{0, \dots, N_{coarse}-1\}$, representing the contribution of each coarse sample to the ray's color/depth.
+-- Number of fine samples to generate, $K_f - K_{fd}$ (denoted as $N_{fine}$ in sources).
+-- Number of coarse samples, $N_{coarse}$.
+-- Ray depth bounds (near/far) or disparity bounds.
++- Coarse weights $w_i$ for $i \in \{0, \dots, N_{coarse}-1\}$ [S1, unofficial].
++- Number of fine samples to generate, $N_{fine}$ (denoted as $K_f - K_{fd}$ in sources) [S1, unofficial].
++- Number of coarse samples, $N_{coarse}$ [S2, unofficial].
++- Ray depth or disparity bounds [S1, unofficial].
+ 
+ **Outputs:**
+-- $N_{fine}$ sample positions (depths or disparities) along the ray.
++- $N_{fine}$ sample positions (depths or disparities) along the ray [S1, unofficial].
+ 
+ **Data Structures:**
+-- `weights`: Array of size $N_{coarse}$.
+-- `pdf`: Array of size $N_{coarse}$.
+-- `cdf`: Array of size $N_{coarse} + 1$.
+-- `u`: Array of size $N_{fine}$ containing uniform random numbers in $[0, 1)$.
+-- `indices`: Array of size $N_{fine}$ containing integer indices into the CDF.
+-- `z_steps`: Array of size $N_{fine}$ containing normalized positions in $[0, 1)$.
++- `weights`: Array of size $N_{coarse}$ [S1, unofficial].
++- `pdf`: Array of size $N_{coarse}$ [S1, unofficial].
++- `cdf`: Array of size $N_{coarse} + 1$ [S1, unofficial].
++- `u`: Array of size $B \times N_{fine}$ containing uniform random numbers in $[0, 1)$ [S1, unofficial].
++- `indices`: Array of size $B \times N_{fine}$ containing integer indices into the CDF [S1, unofficial].
++- `z_steps`: Array of size $B \times N_{fine}$ containing normalized positions in $[0, 1)$ [S1, unofficial].
+ 
+ **Steps:**
+ 
+-1.  **Regularize Weights:** Add a small epsilon $\epsilon = 10^{-5}$ to all coarse weights to prevent division by zero.
++1.  **Regularize Weights:** Add a small epsilon $\epsilon = 10^{-5}$ to all coarse weights to prevent division by zero [S1, unofficial].
+     $$ w'_i = w_i + \epsilon $$
+-2.  **Compute PDF:** Normalize the regularized weights along the ray dimension to form a probability distribution.
++2.  **Compute PDF:** Normalize the regularized weights along the ray dimension to form a probability distribution [S1, unofficial].
+     $$ \text{pdf}_i = \frac{w'_i}{\sum_{j=0}^{N_{coarse}-1} w'_j} $$
+-3.  **Compute CDF:** Compute the cumulative sum of the PDF. Prepend a zero to the CDF array to handle the first interval correctly, resulting in an array of size $N_{coarse} + 1$.
++3.  **Compute CDF:** Compute the cumulative sum of the PDF. Prepend a zero to the CDF array to handle the first interval [S1, unofficial].
+     $$ \text{cdf}_0 = 0 $$
+     $$ \text{cdf}_{i+1} = \text{cdf}_i + \text{pdf}_i \quad \text{for } i \in \{0, \dots, N_{coarse}-1\} $$
+-4.  **Generate Random Numbers:** Generate $N_{fine}$ uniform random numbers $u_k \in [0, 1)$ for $k \in \{0, \dots, N_{fine}-1\}$.
+-5.  **Find Indices:** Use binary search (`searchsorted`) to find the index $idx_k$ in the CDF such that $\text{cdf}_{idx_k} \le u_k < \text{cdf}_{idx_k+1}$.
+-6.  **Clamp Indices:** Ensure indices are valid, clamping to a minimum of 0.
++4.  **Generate Random Numbers:** Generate $B \times N_{fine}$ uniform random numbers $u_k \in [0, 1)$ [S1, unofficial].
++5.  **Find Indices:** Use binary search (`searchsorted`) to find the index $idx_k$ in the CDF corresponding to each $u_k$ [S1, unofficial].
++6.  **Clamp Indices:** Ensure indices are valid, clamping to a minimum of 0 [S1, unofficial].
+     $$ idx_k = \max(0, idx_k) $$
+-7.  **Compute Normalized Steps:** Add uniform noise to the index to break ties and map to a continuous normalized position $z_k \in [0, 1)$. The source specifies adding uniform noise to the index and dividing by $N_{coarse}$.
++7.  **Compute Normalized Steps:** Add uniform noise to the index and divide by $N_{coarse}$ to obtain a continuous normalized position $z_k \in [0, 1)$ [S1, unofficial].
+     $$ z_k = \frac{idx_k + \text{uniform}(0, 1)}{N_{coarse}} $$
+-    *Note: This step effectively interpolates within the bin defined by the coarse sample.*
+-8.  **Map to Depth/Disparity:** Map the normalized step $z_k$ to the actual depth or disparity space using the same transformation logic used in the coarse sampling stage (e.g., linear interpolation between near and far planes, or disparity-to-depth conversion).
++8.  **Map to Depth/Disparity:** Map the normalized step $z_k$ to the actual depth or disparity space using the same transformation logic used in the coarse sampling stage [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -76,19 +75,14 @@
+     
+     # 5. Find indices in CDF
+-    # searchsorted finds the index where u[i] should be inserted to maintain order
+-    # This corresponds to the lower bound index in the CDF
+     indices = np.searchsorted(cdf, u, side='left')
+     
+-    # 6. Clamp indices to minimum 0
+-    indices = np.maximum(indices, 0)
++    # 6. Clamp indices to valid range [0, n_coarse - 1]
++    indices = np.clip(indices, 0, n_coarse - 1)
+     
+     # 7. Compute normalized z_steps
+-    # Add uniform noise to the index and divide by n_coarse
+     noise = np.random.uniform(0, 1, size=n_fine)
+     z_steps = (indices + noise) / n_coarse
+     
+     # 8. Map z_steps to depth space
+-    # Assuming linear depth interpolation for this example
+-    # If disparity space is used, the mapping logic would differ
+     depths = near + z_steps * (far - near)
+     
+@@ -97,13 +91,13 @@
+ 
+ **Parameters:**
+-- $N_{coarse}$: Number of coarse samples. Typical value: 64 [S2, unofficial].
+-- $N_{fine}$: Number of fine samples. Typical value: 64 [S2, unofficial].
+-- $\epsilon$: Epsilon for weight regularization. Typical value: $10^{-5}$ [S1, unofficial].
++- $N_{coarse}$: Number of coarse samples. Value: 64 [S2, unofficial].
++- $N_{fine}$: Number of fine samples. Value: 64 [S2, unofficial].
++- $\epsilon$: Epsilon for weight regularization. Value: $10^{-5}$ [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+ - **Zero Weights:** If all coarse weights are zero, the PDF becomes undefined. The epsilon addition prevents this [S1, unofficial].
+-- **Index Out of Bounds:** `searchsorted` may return an index equal to the length of the CDF if $u_k$ is very close to 1. Clamping to the maximum valid index (or handling the last bin explicitly) is required. The source specifies clamping to minimum 0, but does not explicitly mention clamping to maximum. Standard implementation should clamp to $N_{coarse}-1$ or handle the last bin.
+-- **Precision:** Floating point precision in cumulative sum can lead to slight inaccuracies in CDF normalization.
+-- **Disparity vs Depth:** The mapping step (8) depends on whether the ray is parameterized by depth or disparity. The source states "using the same logic as coarse sampling," implying consistency with the coarse sampling method's parameterization [S1, unofficial].
++- **Index Out of Bounds:** `searchsorted` may return an index equal to the length of the CDF if $u_k$ is very close to 1. Clamping to the maximum valid index ($N_{coarse}-1$) is required to keep $z_k < 1$ [G].
++- **Precision:** Floating point precision in cumulative sum can lead to slight inaccuracies in CDF normalization [G].
++- **Disparity vs Depth:** The mapping step depends on whether the ray is parameterized by depth or disparity. The source states "using the same logic as coarse sampling," implying consistency with the coarse sampling method's parameterization [S1, unofficial].
+ 
+ ## Subtopics
+@@ -113,13 +107,11 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N_{coarse} + N_{fine})$ for computing PDF, CDF, and sampling. The `searchsorted` operation is $O(\log N_{coarse})$ per sample, leading to $O(N_{fine} \log N_{coarse})$ for the sampling step. Overall complexity is dominated by $O(N_{coarse} + N_{fine} \log N_{coarse})$.
+-- **Memory Complexity:** $O(N_{coarse})$ to store the CDF.
+-- **Strengths:** Reduces variance in regions of high radiance or opacity by concentrating samples where they matter. Improves convergence rate compared to uniform fine sampling.
+-- **Limitations:** Requires a prior coarse pass to generate weights. Adds computational overhead for computing PDF/CDF and sampling. Performance gain depends on the scene's complexity and the quality of the coarse estimate.
+-- **When to Use:** When computational budget allows for a two-pass approach (coarse then fine) and the scene has significant variation in radiance/opacity.
+-- **When Not to Use:** When memory is extremely constrained (due to CDF storage) or when the coarse estimate is poor (leading to poor fine sampling).
++- Time and memory complexity: Not given in the sources.
++- Measured performance: Not given in the sources.
++- Strengths and limitations: Not given in the sources.
++- When to use: Not given in the sources.
+ 
+ ## Background
+-This method is part of the hierarchical sampling strategy used in Neural Radiance Fields (NeRF) and related methods. It was introduced in the context of PixelNeRF [S1, unofficial] and VolRecon [S2, unofficial]. The approach builds on the idea that a coarse sampling pass can provide a rough estimate of the scene's structure, which can then be used to guide a more detailed fine sampling pass. This technique has become standard in many NeRF variants to improve rendering quality and efficiency.
++This method is part of the hierarchical sampling strategy used in volume rendering [S2, unofficial]. It samples fine positions along rays based on the probability distribution defined by coarse rendering weights using inverse transform sampling [S1, unofficial].
+ 
+ ## Sources

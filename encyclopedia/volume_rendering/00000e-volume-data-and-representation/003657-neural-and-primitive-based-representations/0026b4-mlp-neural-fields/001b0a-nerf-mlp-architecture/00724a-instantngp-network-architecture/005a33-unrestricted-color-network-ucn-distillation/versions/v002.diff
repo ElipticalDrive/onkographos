@@ -1,0 +1,97 @@
+--- v001.md
++++ v002.md
+@@ -8,5 +8,5 @@
+ ## How it works
+ **Inputs and Outputs**
+-- **Input:** A pre-trained PCN teacher model, a set of reference styles $S = \{S_1, \dots, S_{N_P}\}$, and randomly sampled camera views.
++- **Input:** A pre-trained PCN teacher model, a set of reference styles $S = \{S_1, \dots, S_{N_P}\}$, and randomly sampled camera views [S1].
+ - **Output:** A distilled UCN student model consisting of a hash-grid encoder $E_u$ and an unrestricted MLP, capable of outputting diffuse color $c_u(x)$ [S1].
+ 
+@@ -39,47 +39,48 @@
+ ```python
+ def ucn_distillation(pcn_teacher, reference_styles, camera_views):
+-    # Step 1: Extract average palette colors
+-    P_bar = extract_average_palette(reference_styles)
+-    
++    # Step 1: Extract average palette colors P_bar from reference styles
++    P_bar = [sum(style) / len(style) for style in reference_styles]
++
+     # Initialize UCN components
+     E_u = HashGridEncoder()
+     mlp_unrestricted = MLP()
+-    
++
+     # Step 2: Initialize E_u with volume-aligned loss
+-    for i in range(150):
+-        # Randomly sample rays from camera views
+-        rays = sample_rays(camera_views)
+-        
+-        # Get teacher features
++    for _ in range(150):
++        rays = sample_rays(camera_views, batch_size=4096)
+         features_p = pcn_teacher.get_encoder_features(rays)
+-        
+-        # Get student features
+         features_u = E_u(rays)
+-        
+-        # Compute L_VOLUME
+-        loss_volume = mean_squared_error(features_p, features_u)
+-        
++        loss_volume = sum((fp - fu)**2 for fp, fu in zip(features_p, features_u)) / len(features_p)
+         # Backpropagate to update E_u only
+-        update(E_u, loss_volume)
+-        
++        E_u.backward(loss_volume)
++
+     # Step 3: Optimize E_u and MLP with color loss
+-    for i in range(500):
+-        rays = sample_rays(camera_views)
+-        
+-        # Get teacher diffuse color with average palette
++    for _ in range(500):
++        rays = sample_rays(camera_views, batch_size=4096)
+         color_teacher = pcn_teacher.get_diffuse_color(rays, P_bar)
+-        
+-        # Get student color
+         color_student = mlp_unrestricted(E_u(rays))
+-        
+-        # Compute L_COLOR
+-        loss_color = mean_squared_error(color_teacher, color_student)
+-        
+-        # Backpropagate to update both E_u and MLP
+-        # Note: Deferred backpropagation used for GPU memory efficiency [S1]
+-        update(E_u, loss_color)
+-        update(mlp_unrestricted, loss_color)
+-        
++        loss_color = sum((ct - cs)**2 for ct, cs in zip(color_teacher, color_student)) / len(color_teacher)
++        # Deferred backpropagation for GPU memory efficiency [S1]
++        E_u.backward(loss_color)
++        mlp_unrestricted.backward(loss_color)
++
+     return UCN(E_u, mlp_unrestricted)
++
++# Self-contained helper definitions
++def sample_rays(camera_views, batch_size):
++    return [random.choice(camera_views).generate_rays() for _ in range(batch_size)]
++
++class HashGridEncoder:
++    def __init__(self): self.weights = {}
++    def __call__(self, rays): return [hash_grid_forward(ray, self.weights) for ray in rays]
++    def backward(self, loss): self.weights = gradient_update(self.weights, loss)
++
++class MLP:
++    def __init__(self): self.weights = {}
++    def __call__(self, features): return [mlp_forward(f, self.weights) for f in features]
++    def backward(self, loss): self.weights = gradient_update(self.weights, loss)
++
++class UCN:
++    def __init__(self, E_u, mlp): self.E_u = E_u; self.mlp = mlp
+ ```
+ 
+@@ -117,5 +118,5 @@
+ - **Limitations:** Sensitive to background colors due to scene transparency; requires careful handling of GPU memory [S1].
+ - **When to Use:** Suitable for NPSE tasks where preserving specular effects is critical [S1].
+-- **When Not to Use:** Not ideal for photorealistic stylization that requires discarding view-dependent color [S1].
++- **When Not to Use:** Not suitable when background color independence is required, as DVR transparency makes stylization results sensitive to background colors [S1].
+ 
+ ## Background

@@ -1,0 +1,89 @@
+# Isosurface Depth Sorting and Compositing
+
+Also called: Isosurface Compositing Order Correction
+
+## Overview
+Isosurface Depth Sorting and Compositing is a method for correctly rendering multiple isosurfaces detected along a single ray by sorting them by depth before compositing [S1, unofficial]. It solves the problem of incorrect visual occlusion when isosurfaces are detected in arbitrary order during ray traversal, ensuring that the closest surface occludes those behind it [S1, unofficial]. It differs from [Average Intensity Projection with IsoSurface Detection](1337-average-intensity-projection-with-isosurface-detection.md) by explicitly handling discrete surface occlusion rather than intensity blending, and from [Exact Projection First Contact](1897-exact-projection-first-contact.md) by supporting multiple visible surfaces per ray rather than only the first hit [S1, unofficial].
+
+## How it works
+**Inputs:** A ray defined by origin and direction; a volume dataset containing scalar values; isosurface threshold values for one or more materials (e.g., anatomy and dose); sample spacing along the ray.
+**Outputs:** A final pixel color and opacity representing the correctly ordered composite of all detected isosurfaces.
+
+**Data Structures:**
+*   `Surface`: A struct containing:
+    *   `depth`: Float, distance from ray origin to the intersection point.
+    *   `color`: Vector3, RGB color of the surface material.
+    *   `opacity`: Float, alpha value of the surface.
+    *   `id`: Integer, unique identifier for tracking detection order (optional, for debugging).
+*   `SurfaceList`: A dynamic list of `Surface` objects.
+
+**Steps:**
+1.  **Ray Traversal and Detection:** Cast the ray through the volume. For each slab or sample interval, check if the scalar values cross the isosurface threshold(s). If a crossing is detected, calculate the precise intersection depth $d$ using linear interpolation between sample points $v_1$ at $t_1$ and $v_2$ at $t_2$ with threshold $T$:
+    $$ t = t_1 + \frac{T - v_1}{v_2 - v_1} (t_2 - t_1) $$
+    $$ d = | \text{origin} + t \cdot \text{direction} | $$
+    Create a `Surface` object with this depth and material properties, and add it to `SurfaceList`.
+2.  **Sorting:** Sort `SurfaceList` in ascending order of `depth` [S1, unofficial]. This ensures the surface closest to the viewpoint is first.
+3.  **Compositing:** Iterate through the sorted `SurfaceList`. For each surface, apply front-to-back compositing:
+    $$ C_{out} = C_{in} + C_{surf} \cdot \alpha_{surf} \cdot (1 - \alpha_{in}) $$
+    $$ \alpha_{out} = \alpha_{in} + \alpha_{surf} \cdot (1 - \alpha_{in}) $$
+    where $C_{in}, \alpha_{in}$ are the accumulated color and opacity before the current surface, and $C_{surf}, \alpha_{surf}$ are the current surface's color and opacity.
+4.  **Final Output:** The resulting $C_{out}$ and $\alpha_{out}$ are written to the pixel buffer.
+
+**Parameters:**
+*   Isosurface thresholds: Specific to the data (e.g., Hounsfield units for CT, arbitrary units for dose). Not given in the sources.
+*   Sample spacing: Determined by volume resolution and ray length. Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Arbitrary Detection Order:** Surfaces may be detected in any order (e.g., <1,2,3>) depending on traversal direction or data layout. They must be sorted by depth before compositing (e.g., to <2,1,3> if 2 is closest) [S1, unofficial].
+*   **Multiple Surfaces Between Voxels:** If multiple surfaces lie between voxels, they must all be detected and sorted [S1, unofficial].
+*   **Precision:** Depth calculation must be precise to avoid sorting errors in dense volumes. Not given in the sources.
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def isosurface_depth_sorting_compositing(ray_origin, ray_direction, volume, thresholds):
+    surfaces = []
+    # Step 1: Detect isosurfaces
+    # Iterate through volume along ray, detecting crossings
+    # For each crossing, calculate depth and create Surface object
+    # Add to surfaces list
+    # [G] Implementation details for ray-volume traversal omitted; assume standard slab traversal
+    
+    # Step 2: Sort by depth
+    surfaces.sort(key=lambda s: s.depth)
+    
+    # Step 3: Composite in depth order
+    accumulated_color = [0.0, 0.0, 0.0]
+    accumulated_alpha = 0.0
+    
+    for surface in surfaces:
+        # Front-to-back compositing
+        weight = surface.opacity * (1.0 - accumulated_alpha)
+        accumulated_color = [
+            accumulated_color[i] + surface.color[i] * weight 
+            for i in range(3)
+        ]
+        accumulated_alpha += weight
+        
+    return accumulated_color, accumulated_alpha
+```
+
+## Subtopics
+
+### Multimodal Data Compositing
+A variant for merging anatomy and radiation dose volumes where dose isosurfaces are computed on-the-fly and composited with anatomy surfaces [S1, unofficial]. It is chosen when dynamic dose volumes require real-time gradient computation for shading [S1, unofficial]. The key distinction is the on-the-fly gradient calculation for dose, as precomputed gradients are unavailable [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(N \log N)$ per ray, where $N$ is the number of detected isosurfaces, due to sorting. Detection is $O(M)$ where $M$ is the number of samples.
+*   **Memory Complexity:** $O(N)$ per ray to store detected surfaces.
+*   **Measured Performance:** Rendering high-resolution images on Pixel-Planes 5 took several seconds, requiring adaptive-progressive refinement to balance quality and speed [S1, unofficial].
+*   **Strengths:** Correctly handles complex occlusion scenarios with multiple surfaces; supports multimodal data fusion.
+*   **Limitations:** Sorting overhead increases with the number of surfaces; on-the-fly gradient computation for dose is expensive [S1, unofficial].
+*   **When to Use:** When accurate occlusion of multiple isosurfaces is critical, especially in multimodal contexts like radiotherapy planning.
+*   **When Not to Use:** When performance is paramount and approximate occlusion is acceptable, or when only the first surface is needed.
+
+## Background
+Originated in the VISTA system for interactive multimodal volume visualization, specifically for radiotherapy planning (RTP) applications [S1, unofficial]. Developed at UNC in the mid-1990s (tech report 94-040) to handle the dynamic nature of dose volumes where precomputed gradients were unavailable [S1, unofficial]. It was incorporated into the system to ensure proper compositing of anatomy and dose isosurfaces, especially when multiple surfaces lay between voxels [S1, unofficial].
+
+## Sources
+[S1] Interactive Multimodal Volume Visualization for a ..., http://www.cs.unc.edu/techreports/94-040.pdf, fetched 2026-10-29 (unofficial)

@@ -1,0 +1,1281 @@
+# Gaussian Process Implicit Surfaces as Participating Media: Realization-Free Rendering from Level-Crossing Statistics
+
+[JACK CUI,](https://orcid.org/0009-0008-4763-2861) Dartmouth College, USA
+
+[KEHAN XU,](https://orcid.org/0009-0009-7860-3593) Dartmouth College, USA
+
+[EUGENE D'EON,](https://orcid.org/0000-0002-3761-2989) NVIDIA, Switzerland
+
+[WOJCIECH JAROSZ,](https://orcid.org/0000-0002-1652-0954) Dartmouth College, USA
+
+
+
+Fig. 1. From surfaces to media—and back. Using Kac–Rice level-crossing theory with a local-conditioning approximation, we derive anisotropic RTE parameters directly from pointwise GPIS statistics, enabling rendering without sampling explicit geometry realizations. This formulation spans participating media (left), porous-to-surface transitions (center), and hard surfaces (right); the insets follow each GPIS through its level-crossing statistics to the resulting RTE parameters (and back). Conversely, we characterize GPIS families corresponding to prescribed RTE parameters, lifting classical volumes to probabilistic surfaces.
+
+We present a theory of light scattering that connects Gaussian Process Implicit Surfaces (GPISes) and participating media in both directions. Applying the Kac–Rice level-crossing formula under a local-conditioning approximation yields a complete anisotropic radiative transfer equation (RTE) directly from pointwise GPIS statistics. A shared projected area couples extinction and scattering, ensuring geometric consistency between the GPIS and its volumetric representation. The framework spans rough surfaces, porous and non-height-field geometries, and participating media. From the same statistical structure, we derive full-sphere Beckmann and GGX normal distribution functions supporting in-plane and out-of-plane anisotropy. These families provably recover SGGX, Beckmann, and GGX as special cases and admit exact visible-normal importance sampling. We also derive analytic masking–shadowing functions and single-scattering surface models for specular microsurfaces, with extensions to multiple scattering. In the height-field limit, we prove that the local-conditioning approximation reduces to Smith's independence assumption. Our realization-free approach improves rendering efficiency over realization-based methods and can be implemented within a standard volume renderer. In the inverse direction, we characterize families
+
+of GPISes corresponding to compatible RTE parameters and develop practical lifts for heterogeneous density fields. Existing volumetric assets thereby become renderable as GPISes, while trained radiance-field reconstructions yield surface geometry and shading normals without mesh extraction and provide a density-based representation of geometric uncertainty.
+
+CCS Concepts: • Computing methodologies → Reflectance modeling.
+
+Additional Key Words and Phrases: Gaussian process implicit surfaces, stochastic processes, microfacet theory, microflake theory, light transport
+
+### 1 Introduction
+
+Gaussian Process Implicit Surfaces (GPISes) are a natural probabilistic representation for 3D geometry with uncertainty: each realization of a Gaussian process defines a possible surface through its zero-level set. Despite this appeal, rendering GPISes is expensive. State-of-the-art methods sample and ray trace explicit geometry realizations [Seyb et al. 2024; Xu et al. 2025], paying for both realization generation and intersection. Classical volumetric representations, governed by the radiative transfer equation (RTE) [Chandrasekhar 1960; Pharr et al. 2023], offer the opposite trade-off: fast, differentiable rendering with a rich algorithmic ecosystem, but no explicit
+
+Authors' Contact Information: [Jack Cui,](https://orcid.org/0009-0008-4763-2861) Dartmouth College, Hanover, USA, jack.cui.g r@dartmouth.edu; [Kehan Xu,](https://orcid.org/0009-0009-7860-3593) Dartmouth College, USA, kehan.xu.gr@dartmouth.edu; [Eugene d'Eon,](https://orcid.org/0000-0002-3761-2989) NVIDIA, Switzerland, edeon@nvidia.com; [Wojciech Jarosz,](https://orcid.org/0000-0002-1652-0954) Dartmouth College, Hanover, USA, wojciech.k.jarosz@dartmouth.edu.
+
+probabilistic surface model. The central question of this paper is whether—and how precisely—these two representations can be converted into one another.
+
+We derive a bidirectional conversion between GPISes and participating media (Fig. 1). The forward direction (GPIS  $\rightarrow$  RTE, Sec. 4) replaces realization-based rendering with closed-form extinction evaluation and importance-sampled scattering. This allows GPISes to benefit from established volume-rendering techniques, including next-event estimation and differentiable rendering. The inverse direction (RTE  $\rightarrow$  GPIS, Sec. 8) characterizes families of GPISes corresponding to compatible target RTE parameters. This gives volumetric representations a probabilistic surface interpretation.
+
+Exact GPIS transport depends on spatial correlations along the ray’s traversal history, whereas a classical RTE is memoryless and governed by local coefficients. We therefore adopt a local-conditioning approximation: rather than conditioning a surface encounter on the ray having remained in empty space up to the current point, we condition only on the current point being in empty space. The resulting transport model depends only on pointwise field and gradient statistics. The approximation preserves the exact initial crossing rate for rays conditioned only to start in empty space. Under stationarity, the approximation also preserves the mean chord length in the void. We quantify the approximation error against explicit GPIS realizations and show that, in the height-field limit, it reduces to Smith’s independence assumption [Smith 1967], recovering the corresponding shadowing function exactly.
+
+Our derivation is 3D-first: we begin with a general nonstationary GPIS and apply the Kac–Rice level-crossing formula [Kac 1943; Rice 1945] to its pointwise field and gradient statistics. This yields closed-form extinction and full-sphere normal distribution functions (NDFs), coupled through a common projected area that ensures consistency between attenuation and surface-normal statistics. The full-sphere support accommodates normals arising from overhangs and porous geometry beyond height fields. The centered case recovers SGGX exactly [Heitz et al. 2015], while the height-field limit recovers the Beckmann NDF.
+
+Our contributions, in the order developed in the paper, are:
+
+- • Forward conversion. An anisotropic RTE for general GPISes under local conditioning, with closed-form extinction (Sec. 4).
+- • Normal distributions and surface scattering. Full-sphere Beckmann and GGX NDF families supporting porous media, with analytic masking–shadowing functions and single-scattering surface models for specular microsurfaces, and extensions to multiple scattering (Secs. 4.5 and 4.8 and Sec. 5).
+- • Sampling and rendering. Exact gradient-space vNDF sampling for both families and a realization-free renderer achieving  $23\text{--}34\times$  lower equal-time estimator MSE than the realization-based baseline [Xu et al. 2025] (Secs. 6 and 9).
+- • Approximation analysis. A proof that local conditioning reduces to Smith’s assumption in the height-field limit, a qualitative correlation-to-chord accuracy diagnostic, and validation against explicit GPIS realizations (Sec. 7 and Appx. C.2).
+- • Inverse conversion. GPIS equivalence families for compatible RTE targets, with practical lifts of volumetric assets and radiance-field reconstructions (Secs. 8 and 9).
+
+## 2 Related work
+
+Rendering with stochastic geometry. Seyb et al. [2024] introduced ensemble-averaged light transport for GPISes and a renderer based on sampling realizations along ray segments. Their formulation connects microfacet surfaces and participating media through a common stochastic geometry representation. Xu et al. [2025] improved rendering efficiency using sparse-convolution noise and next-event estimation, while subsequent work further accelerates realization-based ray marching [Chen et al. 2026; Shi et al. 2026; Zhou et al. 2026]. These methods retain realization sampling and intersection, whereas our local-conditioning approximation enables realization-free rendering from pointwise GPIS statistics.
+
+Miller et al. [2024] established conditions under which stochastic opaque solids admit exponential volumetric transport, while noting that GPIS free-flight distributions are generally non-exponential. Our local-conditioning approximation discards ray history, yielding an exponential transport model governed by a classical RTE.
+
+Microfacet and microflake theory. Microfacet models [Beckmann and Spizzichino 1963; Cook and Torrance 1981; Walter et al. 2007] represent rough surfaces through an NDF and a masking–shadowing function. Seyb et al. [2024] connected height-field GPISes to Beckmann microfacets and demonstrated agreement empirically. We show analytically that, in the height-field limit, our full-sphere NDF reduces to Beckmann and local conditioning to Smith’s independence assumption [Smith 1967] (Appendices C.1 and C.2).
+
+Heitz [2014] analyzed the masking–shadowing function and derived the projected-area normalization of the visible NDF. Seyb et al. [2024] obtained a vNDF for general GPISes as an integral of their crossing density. Under local conditioning, we recover the same projected-area form in closed form, with the NDF and its normalization arising as moments of a single conditional gradient law.
+
+Jakob et al. [2010] extended the RTE to anisotropic microflake media, providing the framework our rendering equation directly instantiates. Heitz et al. [2015] proposed the SGGX microflake distribution. We show that a zero conditional mean gradient produces SGGX exactly and that the general GPIS NDF converges to it in the high-roughness limit, thereby giving SGGX a probabilistic derivation from GPIS statistics (Sec. 4.7).
+
+Heitz et al. [2016] extended the Smith microfacet model to multiple scattering through random walks in an inhomogeneous microflake medium. Dupuy et al. [2016] remapped this construction to an equivalent homogeneous half-space. We extend both formulations to BRDF-compatible GPISes with non-height-field geometry where one-sided interactions arise naturally from oriented GPIS boundary crossings (Sec. 6.3).
+
+Full-sphere NDFs were proposed to connect rough surfaces with semi-porous media beyond height-field geometry [Dupuy et al. 2016]. Subsequent work explored von Mises–Fisher NDFs [d’Eon and Weidlich 2024; d’Eon 2016], whose projected areas lack a known simple closed form, and developed null-scattering methods for general full-sphere NDFs [d’Eon 2023]. Our full-sphere Beckmann and GGX families provide closed-form one-sided projected areas and exact vNDF sampling (Sec. 5.4).
+
+Random surfaces and stochastic media. Kac–Rice theory describes level crossings of random fields [Azaïs and Wschebor 2009; Kac 1943; Rice 1945]. Related work connects chord-length distributions in random media to first-passage times of Gaussian processes [Roberts and Torquato 1999], while higher-order Rice expansions retain crossing history [Kapp and Brown 1994; Lindgren 2019]. The same localconditioning approximation we use has been applied to Gaussian height fields [Lumme et al. 1990] and level sets of 3D Gaussian fields [Peltoniemi 1993], with spatially uniform roughness statistics. We extend this construction to general GPISes (Sec. 4\).
+
+Learned scene representations. NeRF [Mildenhall et al. 2020] learns volumetric density and view-dependent radiance from images, while 3D Gaussian splatting [Kerbl et al. 2023] learns Gaussian primitives with opacity and appearance. Our inverse conversion allows learned density fields to be reused as probabilistic surface geometry. We demonstrate this on TensoRF [Chen et al. 2022] reconstructions, converting their density grids into renderable GPISes with surface geometry and shading normals, without mesh extraction or another reconstruction stage. The resulting representation also exposes geometric ambiguity encoded in the learned density.
+
+Concurrent work. Huang et al. [2026] also derive a realization-free GPIS rendering model by extending microfacet theory into a volume around a macro-surface. For their linear-ramp mean and stationary, axis-aligned squared-exponential kernel, the extinction coefficient, NDF, and vNDF coincide algebraically with ours. Our derivation handles general nonstationary GPISes and additionally provides exact vNDF sampling and an inverse conversion from RTE parameters to GPISes. We also derive analytic masking–shadowing and single-scattering surface models for specular microsurfaces with full-sphere Beckmann and GGX NDFs, and extend these models to multiple scattering (Sec. 10\). Genest and Coeurjolly [2026] independently apply the Kac–Rice formula to GPISes for uncertainty-aware geometry processing.
+
+### 3 Preliminaries and Notation
+
+We aim to estimate the ensemble-averaged radiance, the expectation of radiance over realizations of the GPIS [Seyb et al. 2024]. Rather than sampling those realizations explicitly [Seyb et al. 2024; Xu et al. 2025], we approximate their ensemble-averaged transport using a single anisotropic participating medium. This medium is specified by an extinction coefficient ��− and a phase function ��, both derived from the pointwise GPIS statistics developed below.
+
+Throughout the paper, we use bold lowercase letters to denote 3D vectors and bold uppercase letters for 3×3 matrices; plain lowercase letters denote scalars. A hat denotes a unit vector, aˆ ≔ a/∥a∥. We write ⟨a, b⟩ ≔ max(a · b, 0) for the dot product clamped to zero. Table 1 summarizes commonly used notation.
+
+### 3.1 The 3D Field and Gradient Statistics
+
+A GPIS is a continuous, generally non-stationary Gaussian field �� (x), x ∈ R 3 , fully characterized by its mean function ���� (x) = E[�� (x)] and covariance function ��(x, x ′ ) = Cov(�� (x), �� (x ′ )); by convention �� &gt; 0 indicates empty space, �� &lt; 0 solid mass, and �� = 0 the implicit surface boundary. By linearity of the derivative operator, the spatial
+
+Table 1. Commonly used notation.
+
+
+
+| a, $\hat{a}$ , A                      | Vector; unit vector; $3 \times 3$ matrix      |
+|---------------------------------------|-----------------------------------------------|
+| $\langle a, b \rangle$                | Clamped dot product                           |
+| $\phi, \Phi$                          | Standard normal PDF and CDF                   |
+| $\hat{\omega}, \hat{\omega}'$         | Ray directions before and after scattering    |
+| $\hat{\omega}_i, \hat{\omega}_o$      | Outward incident and outgoing BRDF directions |
+| $\hat{n}, \hat{h}$                    | Surface normal; half-vector                   |
+| $f$                                   | GPIS field                                    |
+| $\mu_f, \sigma_f$                     | Field mean and standard deviation             |
+| $\kappa$                              | Field covariance kernel                       |
+| $\tilde{\mu}_f, \tilde{\Phi}$         | Void level; void fraction                     |
+| $g, \tilde{g}$                        | Gradient; zero-conditioned gradient           |
+| $\mu_g, \Sigma_g$                     | Gradient mean and covariance                  |
+| $\sigma_{fg}$                         | Field-gradient cross-covariance               |
+| $\mu_{\tilde{g}}, \Sigma_{\tilde{g}}$ | Conditional gradient mean and covariance      |
+| $g, \tilde{g}$                        | Ray derivative; zero-conditioned derivative   |
+| $\mu_{\tilde{g}}, \sigma_{\tilde{g}}$ | Mean and standard deviation of $\tilde{g}$    |
+| $\lambda_-$                           | Down-crossings per unit ray length            |
+| $a_-, a_+$                            | Down-/up-crossing projected areas             |
+| $\chi_-, \chi_-^*$                    | Local and exact extinction                    |
+| $T_-, T_-^*$                          | Local and exact transmittance                 |
+| $p_{\text{free}}^-$                   | Free-flight PDF                               |
+| $L, L_{\text{bg}}$                    | Radiance; background radiance                 |
+| $D, D_{\omega}$                       | NDF; visible NDF                              |
+| $p, f_r$                              | Phase function; micro-BRDF                    |
+| $\alpha$                              | Roughness parameter                           |
+| $\Lambda, G_1, G_{12}$                | Smith auxiliary; masking-shadowing functions  |
+| $\ell$                                | Kernel correlation length                     |
+| $C_v, \eta$                           | Void-chord length; correlation-to-chord ratio |
+| $S, \rho$                             | SGGX shape matrix; medium density             |
+
+gradient g(x) ≔ ∇�� (x) is itself a Gaussian process, jointly Gaussian with �� (x) at every point, and the surface normal is the normalized gradient, nˆ = g(x)/∥g(x) ∥, which points toward increasing �� and hence into empty space.
+
+We write the ��-dimensional Gaussian PDF as
+
+$$\mathcal{N}(\mathbf{x}; \boldsymbol{\mu}, \Sigma) := (2\pi)^{-d/2} |\Sigma|^{-1/2} \exp\left(-\frac{1}{2}(\mathbf{x} - \boldsymbol{\mu})^T \Sigma^{-1} (\mathbf{x} - \boldsymbol{\mu})\right), \quad (1)$$
+
+and define�� (��) ≔ N (��; 0, 1) = 1 √ 2�� e −�� 2 /2 and Φ(��) ≔ ∫ �� −∞ �� (��) d�� as the PDF and CDF of the standard normal.
+
+The joint distribution of �� (x) and g(x) at any point x is the 4D Gaussian [Rasmussen and Williams 2006, Sec. 9.4, Eq. (9.1)]:
+
+
+$$\begin{bmatrix} f(\mathbf{x}) \\ g(\mathbf{x}) \end{bmatrix} \sim \mathcal{N} \left( \begin{bmatrix} \mu_f(\mathbf{x}) \\ \mu_g(\mathbf{x}) \end{bmatrix}, \begin{bmatrix} \sigma_f^2(\mathbf{x}) \\ \sigma_g(\mathbf{x}) \end{bmatrix} \right), \quad (2)$$
+
+with parameters derived from the mean and covariance functions:
+
+- ��g (x) ≔ ∇���� (x): mean of the gradient process g(x), equal to the gradient of the field mean by linearity of expectation.
+- �� 2 ��
+- (x) = ��(x, x): variance of the field value.
+- ��g (x) = ∇x∇ x ′��(x, x ′ ) x ′=x : 3 × 3 covariance matrix of g(x). For any stationary kernel ��(x, x ′ ) = �� (x − x ′ ) this reduces to ��g = −(∇∇T��) (0).
+
+- •  $\sigma_{fg}(\mathbf{x}) = \nabla_{\mathbf{x}'} \kappa(\mathbf{x}, \mathbf{x}') \Big|_{\mathbf{x}'=\mathbf{x}}$ : cross-covariance vector between  $f(\mathbf{x})$  and  $\mathbf{g}(\mathbf{x})$ .
+
+Surface intersections and scattering events occur on the zero set  $f(\mathbf{x}) = 0$ . We write  $\tilde{\mathbf{g}}(\mathbf{x}) := \mathbf{g}(\mathbf{x}) \mid f(\mathbf{x}) = 0$  for the gradient conditioned on a zero field value; the bar marks conditioning throughout, and statistics of  $\tilde{\mathbf{g}}$  carry the subscript  $\tilde{\mathbf{g}}$ , as in  $\mu_{\tilde{\mathbf{g}}}$  and  $\Sigma_{\tilde{\mathbf{g}}}$ . This conditions on the field value only—the distribution of gradients observed at a crossing carries an additional slope weight, which we consider in Sec. 4.5. By the standard Gaussian conditioning formula,  $\tilde{\mathbf{g}}(\mathbf{x})$  is a 3D Gaussian with:
+
+
+$$\mu_{\tilde{\mathbf{g}}}(\mathbf{x}) := \mu_{\mathbf{g}}(\mathbf{x}) - \frac{\sigma_{fg}(\mathbf{x})}{\sigma_f^2(\mathbf{x})} \mu_f(\mathbf{x}), \quad (3a)$$
+
+$$\Sigma_{\tilde{\mathbf{g}}}(\mathbf{x}) := \Sigma_{\mathbf{g}}(\mathbf{x}) - \frac{\sigma_{fg}(\mathbf{x}) \sigma_{fg}^T(\mathbf{x})}{\sigma_f^2(\mathbf{x})}. \quad (3b)$$
+
+Note that the cross-covariance is not an independent quantity: differentiating  $\sigma_f^2(\mathbf{x}) = \kappa(\mathbf{x}, \mathbf{x})$  and using the symmetry of  $\kappa$  gives
+
+$$\sigma_{fg}(\mathbf{x}) = \frac{1}{2} \nabla \sigma_f^2(\mathbf{x}) = \sigma_f(\mathbf{x}) \nabla \sigma_f(\mathbf{x}). \quad (4)$$
+
+Substituting Eqn. (4) into Eqn. (3) gives the conditional statistics directly in terms of the mean and variance fields:
+
+$$\mu_{\tilde{\mathbf{g}}} = \sigma_f \nabla \left( \frac{\mu_f}{\sigma_f} \right), \quad \Sigma_{\tilde{\mathbf{g}}} = \Sigma_{\mathbf{g}} - \nabla \sigma_f \nabla \sigma_f^T. \quad (5)$$
+
+For stationary kernels, the variance is constant, so  $\sigma_{fg} = 0$  and conditioning changes nothing:  $\mu_{\tilde{\mathbf{g}}} = \mu_{\mathbf{g}}$  and  $\Sigma_{\tilde{\mathbf{g}}} = \Sigma_{\mathbf{g}}$ .
+
+### 3.2 Ray Restriction
+
+We denote a ray with origin  $\mathbf{o}$  and unit direction  $\hat{\omega}$  as  $\mathbf{r}(t) = \mathbf{o} + t\hat{\omega}$ . Restricting the GPIS to it gives the 1D field process  $f(t) := f(\mathbf{r}(t))$  [Roberts and Torquato 1999; Seyb et al. 2024]. The scalar directional derivative along the ray,
+
+$$g(t) := \hat{\omega}^T \mathbf{g}(\mathbf{r}(t)) = \frac{\partial}{\partial t} f(t), \quad (6)$$
+
+is jointly Gaussian with  $f(t)$ . The pair  $(f(t), g(t))$  is characterized by five scalar statistics, obtained from the corresponding 3D quantities at  $\mathbf{r}(t)$ , the vector ones projected onto  $\hat{\omega}$ :
+
+- •  $\mu_f(t) = \mu_f(\mathbf{r}(t))$ : mean field value along the ray.
+- •  $\mu_g(t) = \hat{\omega}^T \mu_{\mathbf{g}}(\mathbf{r}(t))$ : mean of  $g(t)$ .
+- •  $\sigma_f^2(t) = \kappa_f(t, t) := \kappa(\mathbf{r}(t), \mathbf{r}(t))$ : variance of  $f(t)$ .
+- •  $\sigma_g^2(t) = \frac{\partial^2 \kappa_f(t, t')}{\partial t \partial t'} \Big|_{t'=t} = \hat{\omega}^T \Sigma_{\mathbf{g}}(\mathbf{r}(t)) \hat{\omega}$ : variance of  $g(t)$ .
+- •  $\sigma_{fg}(t) = \frac{\partial \kappa_f(t, t')}{\partial t'} \Big|_{t'=t} = \hat{\omega}^T \sigma_{fg}(\mathbf{r}(t))$ : covariance between  $f(t)$  and  $g(t)$ .
+
+Similarly, we write  $\tilde{g}(t) := g(t) \mid f(t) = 0$  for the directional derivative conditioned on a zero field value, a 1D Gaussian with
+
+mean  $\mu_{\tilde{g}}(t)$  and variance  $\sigma_{\tilde{g}}^2(t)$  given by projecting Eqn. (3):
+
+
+$$\mu_{\tilde{g}}(t) = \hat{\omega}^T \mu_{\tilde{\mathbf{g}}}(\mathbf{r}(t)) = \mu_g(t) - \frac{\sigma_{fg}(t)}{\sigma_f^2(t)} \mu_f(t), \quad (7a)$$
+
+$$\sigma_{\tilde{g}}^2(t) = \hat{\omega}^T \Sigma_{\tilde{\mathbf{g}}}(\mathbf{r}(t)) \hat{\omega} = \sigma_g^2(t) - \frac{\sigma_{fg}^2(t)}{\sigma_f^2(t)}. \quad (7b)$$
+
+A ray traveling through empty space meets a GPIS realization at a down-crossing: a point where  $f(t) = 0$  with  $g(t) < 0$ , equivalently where the normal faces the ray,  $\hat{\mathbf{n}} \cdot \hat{\omega} < 0$ . A minus subscript marks quantities tied to down-crossings and a plus subscript those tied to up-crossings. We assume GPIS realizations are smooth enough that surface normals are well defined and ray crossings are isolated.1
+
+### 3.3 Anisotropic RTE
+
+In an anisotropic participating medium [Jakob et al. 2010], the radiance arriving at a point  $\mathbf{o}$  along direction  $-\hat{\omega}$  is:
+
+
+$$L(\mathbf{o}, \hat{\omega}) = \int_0^\infty \underbrace{\chi_-(t) T_-(t)}_{p_{\text{free}}^-(t)} \left[ \int_{S^2} p(\hat{\omega} \rightarrow \hat{\omega}') L(\mathbf{r}(t), \hat{\omega}') d\hat{\omega}' \right] dt + T_-(\infty) L_{\text{bg}}(\hat{\omega}). \quad (8)$$
+
+Here,  $T_-(t)$  is the transmittance,  $\chi_-(t)$  is the extinction coefficient, and their product is the free-flight PDF  $p_{\text{free}}^-(t)$ . The direction after scattering is  $\hat{\omega}'$  and  $L_{\text{bg}}(\hat{\omega})$  is the background radiance. Each crossing is governed by a prescribed micro-BRDF, assumed to be deterministic (independent of the field fluctuations) though it may vary with position. If it absorbs, the phase function is subnormalized, integrating to the single-scattering albedo,  $\int_{S^2} p(\hat{\omega} \rightarrow \hat{\omega}') d\hat{\omega}' \leq 1$ .
+
+The RTE (8) is memoryless: radiance evolves through local coefficients alone. A GPIS is not—field values the ray has already observed are correlated with the geometry ahead. Any RTE representation therefore discards some of this information, and many distinct GPISes can induce the same local transport coefficients. We estimate them using a local-conditioning approximation (Sec. 4.2).
+
+
+
+### 4 From GPISes to Participating Media
+
+We now show how to represent a GPIS as an anisotropic participating medium. To do this, we need to know where a ray next encounters the surface and how it scatters there. Kac–Rice theory lets us answer both questions from the same pointwise field and gradient statistics. We begin with the exact probability of a surface encounter and then introduce the local approximation needed to obtain tractable transport coefficients.
+
+#### 4.1 Exact Transmittance and Extinction
+
+Let  $T_-^*(t)$  denote the exact ray transmittance: the probability that a ray beginning at  $\mathbf{o}$  in empty space and traveling in direction  $\hat{\omega}$ 
+
+
+
+1Formally, we assume the field has almost-surely continuously differentiable sample paths; the zeros of each ray-restricted process are simple ( $f(t) = 0$  implies  $g(t) \neq 0$ ); and the relevant joint field–derivative Gaussian distributions have nonsingular covariance. These are standard sufficient conditions for the Kac–Rice formulas used below [Azaïs and Wschebor 2009]. Without them, normals or crossing rates may be undefined and the crossing formulas need not apply.
+
+remains in empty space up to depth  $t$ :
+
+$$T_-^*(t) = \mathbb{P}(f(s) > 0 \ \forall s \in (0, t] \mid f(0) > 0), \quad (9)$$
+
+so that  $T_-^(0) = 1$ . Equivalently,  $T_-^(t)$  is called the survival function of the distance to the first surface intersection [Durbin 1985].
+
+The corresponding extinction rate  $\chi_-^(t)$  is the instantaneous rate of a first down-crossing, conditioned on the ray having remained in empty space up to depth  $t$ . Consequently,  $T_-^(t)$  satisfies the ODE:
+
+$$\frac{dT_-^(t)}{dt} = -\chi_-^(t) T_-^*(t), \quad \text{where} \quad (10)$$
+
+$$\chi_-^*(t) = \lim_{\Delta t \rightarrow 0} \frac{\mathbb{P}(\text{down-crossing in } [t, t+\Delta t] \mid f(s) > 0 \ \forall s \in [0, t])}{\Delta t}. \quad (11)$$
+
+A down-crossing is a transition from empty space to solid mass:  $f(t) = 0$  with  $g(t) < 0$ . Note that as defined above,  $\chi_-^*(t)$  is not just a function of the point at  $t$ , but of the entire history along the ray from 0 to  $t$ . Restricted to a height field, this setup reduces to the exact ODE from which classical rough-surface shadowing derivations begin [Beckmann 1965; Smith 1967; Wagner 1967].
+
+
+
+## 4.2 The Local-Conditioning Approximation
+
+Evaluating the exact extinction rate requires conditioning on the full path history which is analytically intractable in general. To obtain a local coefficient, we discard this history and condition only on the current point being in empty space. We call this the local-conditioning approximation (LCA):
+
+$$\begin{aligned} \chi_-^*(t) &\approx \chi_-(\mathbf{r}(t), \hat{\omega}) \\ &= \lim_{\Delta t \rightarrow 0} \frac{\mathbb{P}(\text{down-crossing in } [t, t+\Delta t] \mid f(t) > 0)}{\Delta t} \\ &= \lim_{\Delta t \rightarrow 0} \frac{\mathbb{P}(\text{down-crossing in } [t, t+\Delta t] \cap f(t) > 0)}{\Delta t} \\ &= \frac{\mathbb{P}(f(t) > 0)}{\mathbb{P}(f(t) > 0)} \cdot \frac{\lambda_-(\mathbf{r}(t), \hat{\omega})}{\Phi(\mu_f(t)/\sigma_f(t))}. \end{aligned} \quad (12)$$
+
+Here  $\lambda_-(\mathbf{r}(t), \hat{\omega})$  is the down-crossing density: the expected number of down-crossings per unit ray length. Dividing by  $\mathbb{P}(f(t) > 0) = \Phi(\mu_f(t)/\sigma_f(t))$  converts this ensemble rate into one conditioned only on the current point being in empty space. Throughout the remainder of the paper, we use  $\chi_-(\mathbf{r}(t), \hat{\omega})$  for the local extinction coefficient defined in Eqn. (12), while  $\chi_-^*(t)$  denotes the exact, history-dependent extinction rate.
+
+The same local approximation has been used for Gaussian height fields and level sets of 3D Gaussian fields with spatially uniform roughness statistics [Lumme et al. 1990; Peltoniemi 1993].
+
+
+
+## 4.3 Down-Crossing Density and One-Sided Projected Area
+
+The Kac–Rice formula [Kac 1943; Rice 1945] expresses the down-crossing density introduced in Eqn. (12) as an integral over directional derivative values:
+
+$$\lambda_-(\mathbf{r}(t), \hat{\omega}) = \int_{-\infty}^0 |v| p_{f(t), g(t)}(0, v) dv. \quad (13)$$
+
+Here,  $v$  denotes a possible value of the directional derivative at a zero crossing. Restricting the integral to  $v < 0$  selects down-crossings, while the factor  $|v|$  accounts for steeper crossings being encountered more frequently.
+
+Factoring the joint PDF into a marginal and conditional density,  $p_{f(t), g(t)}(0, v) = p_{f(t)}(0) p_{\bar{g}(t)}(v)$ , gives:
+
+
+$$\lambda_-(\mathbf{r}(t), \hat{\omega}) = p_{f(t)}(0) \int_{-\infty}^0 |v| p_{\bar{g}(t)}(v) dv, \quad \text{where} \quad (14)$$
+
+$$p_{f(t)}(0) = \frac{\phi(\mu_f(t)/\sigma_f(t))}{\sigma_f(t)}, \quad p_{\bar{g}(t)}(v) = \mathcal{N}(v; \mu_g(t), \sigma_g^2(t)) \quad (15)$$
+
+with the conditional derivative statistics given by Eqn. (7).
+
+The two factors in Eqn. (14) play distinct roles. The marginal density  $p_{f(t)}(0)$  measures how much field probability is concentrated near zero at the current point. The remaining integral is the expected magnitude of the descending directional derivatives at the zero set, measuring how strongly the surface faces the ray. We therefore call this quantity the one-sided projected area  $a_-(\mathbf{r}(t), \hat{\omega})$ . Its Gaussian integral evaluates in closed form:
+
+One-Sided Projected Area
+
+$$a_-(\mathbf{r}(t), \hat{\omega}) := \int_{-\infty}^0 |v| p_{\bar{g}(t)}(v) dv \quad (16a)$$
+
+
+$$= \sigma_{\bar{g}}(t) \phi\left(\frac{\mu_{\bar{g}}(t)}{\sigma_{\bar{g}}(t)}\right) - \mu_{\bar{g}}(t) \Phi\left(-\frac{\mu_{\bar{g}}(t)}{\sigma_{\bar{g}}(t)}\right). \quad (16b)$$
+
+Substituting this into Eqn. (14) yields:
+
+$$\lambda_-(\mathbf{r}(t), \hat{\omega}) = p_{f(t)}(0) a_-(\mathbf{r}(t), \hat{\omega}). \quad (17)$$
+
+In Sec. 4.5, we show that the same  $a_-$  is also the projected area of the NDF (23) and the normalization of the vNDF (24). Thus,  $a_-$  connects the local crossing rate derived here to the distribution of normals encountered at scattering events.
+
+Fig. 2 visualizes the factorization in Eqn. (17) for a 2D GPIS. Realizations of the zero set wiggle in a band around the mean surface, and the marginal density  $p_f(0)$  identifies this band. Weighting it by the one-sided projected area from Eqn. (16a) suppresses portions of the surface that do not face the ray, producing the directional down-crossing density  $\lambda_-$ . In more uncertain regions, both the band and the crossing density broaden.
+
+## 4.4 Extinction, Transmittance, and Free-Flight PDF
+
+Substituting Eqn. (17) into Eqn. (12) gives the closed-form extinction coefficient under the local-conditioning approximation:
+
+
+$$\chi_-(\mathbf{r}(t), \hat{\omega}) = \frac{\phi(\mu_f(t)/\sigma_f(t))}{\sigma_f(t) \Phi(\mu_f(t)/\sigma_f(t))} \cdot \frac{\text{occupancy}}{\text{directional proj. area}} \quad (18)$$
+
+The occupancy factor depends only on the field's marginal statistics at  $\mathbf{r}(t)$ : it is large near probable surfaces ( $\mu_f/\sigma_f$  near zero), small deep in empty space, and continues to grow inside the solid, as illustrated in the last two columns of Fig. 2. The projected-area factor  $a_-(\mathbf{r}(t), \hat{\omega})$  contains all dependence on  $\hat{\omega}$  through the conditional derivative statistics. It becomes direction-dependent whenever  $\bar{g}(\mathbf{r}(t))$  has a non-zero mean or anisotropic covariance, yielding the extinction of an anisotropic RTE [Jakob et al. 2010]. When  $\mu_{\bar{g}} = 0$  and  $\Sigma_{\bar{g}} \propto \mathbf{I}$ , the extinction is isotropic.
+
+
+
+
+
+Fig. 2. From a distribution over surfaces to closed-form transport coefficients. The mean surface is the bunny outline; ���� is constant in the top row and increases left to right in the bottom row. Realizations (purple) wiggle around the mean surface (dashed). The marginal density of a zero field value, ���� (0) \(14\), widens where the surface is uncertain. The down-crossing density ��− \(17\) weights it by the one-sided projected area along ��ˆ : only ray-facing surfaces contribute. Dividing each by Φ ���� /���� , the probability that the point lies in empty space, gives the occupancy factor of Eqn. \(18\) and the extinction coefficient ��−, which increases inside the solid. All density maps share one asinh color scale, linear through the surface band and compressive beyond.
+
+Replacing the exact rate �� ∗ − in Eqn. \(10\) with the local coefficient from Eqn. \(18\) and integrating gives
+
+$$T_-(t) = \exp\left(-\int_0^t \chi_-(s) \, ds\right) \quad (19)$$
+
+as the local approximation to �� ∗ − (��), the probability that the ray reaches depth �� without a down-crossing.
+
+Together, Eqns. \(18\) and \(19\) complete the collision-distance law of Eqn. \(8\): the free-flight density �� − free (��) = ��− (��) ��− (��) carries total mass 1 −��− (∞), and the remainder ��− (∞) is the probability that the ray escapes to the background.
+
+### 4.5 The Normal Distribution Function
+
+The collision-distance law in Eqns. \(18\) and \(19\) determines where a ray scatters. To determine how it scatters, we need the distribution of surface normals encountered at those down-crossings. For the remainder of this section, we fix x and omit it from the notation.
+
+From Eqn. \(3\), the gradient conditioned on a zero field value has density ��g¯ (g) ≔ N (g; ��g¯, ��g¯), where g ∈ R 3 is a possible gradient value. But this pointwise gradient distribution is not the distribution observed by a ray. Two effects reweight it:
+
+- Crossing-rate weighting: By Eqn. \(13\), a gradient g contributes crossings at a rate proportional to |g·��ˆ |, so steeper crossings are encountered more frequently per unit length.
+- Down-crossing selection: A ray traveling through empty space encounters the zero set only when g · ��ˆ &lt; 0.
+
+Together, these effects give the following unnormalized density for gradients encountered at down-crossings:
+
+
+
+| $p( \text{down-crossing along } \hat{\omega}) \propto \langle -\hat{\omega}, \mathbf{g} \rangle p_{\hat{\mathbf{g}}}(\mathbf{g})$ | (20) |
+|-----------------------------------------------------------------------------------------------------------------------------------|------|
+|-----------------------------------------------------------------------------------------------------------------------------------|------|
+
+Eqn. \(20\) describes a typical down-crossing. The gradient distribution at a first intersection would additionally condition on the absence of earlier crossings, information discarded by the localconditioning approximation.
+
+To obtain the distribution of normals, we write g = ��nˆ, where �� = ∥g∥ &gt; 0. Under this change of variables, the volume element becomes dg = �� 2 d�� dnˆ, while the crossing-rate weight becomes ⟨−��ˆ, g⟩ = �� ⟨−��ˆ, nˆ⟩. The spherical Jacobian and crossingrate weight therefore contribute the combined factor �� 3 ⟨−��ˆ, nˆ⟩. 2 Marginalizing over the gradient magnitude �� then gives the normal density up to normalization:
+
+$$p(\hat{\mathbf{n}} \mid \text{down-crossing along } \hat{\omega}) \propto \langle -\hat{\omega}, \hat{\mathbf{n}} \rangle \int_0^\infty p_{\hat{\mathbf{g}}}(r\hat{\mathbf{n}}) r^3 dr. \quad (21)$$
+
+The radial integral in Eqn. \(21\) collects contributions from gradients of all magnitudes aligned with nˆ. It characterizes the normal orientations independently of the ray direction ��ˆ , so we define it as the normal distribution function (NDF):3
+
+
+$$D(\hat{\mathbf{n}}) := \int_0^\infty p_{\hat{\mathbf{g}}}(\mathbf{r}\hat{\mathbf{n}}) r^3 d\mathbf{r}. \quad (22)$$
+
+2The projected normal (angular Gaussian) distribution has radial weight�� 2 ; the extra �� here comes from Kac–Rice crossing-rate weighting.
+
+3We use NDF in the microfacet and microflake sense of an oriented surface-area density, rather than a probability density.
+
+Although  $D$  need not integrate to one, it has a direct geometric meaning:  $p_f(0) D(\hat{n}) d\hat{n}$  is the expected zero-set area per unit volume whose oriented normal lies in  $d\hat{n}$ .4
+
+Integrating the unnormalized density in Eqn. (21) over all normal directions gives
+
+$$\begin{aligned} \int_{S^2} \langle -\hat{\omega}, \hat{n} \rangle D(\hat{n}) d\hat{n} &= \int_{\mathbb{R}^3} \langle -\hat{\omega}, \mathbf{g} \rangle p_{\bar{\mathbf{g}}}(\mathbf{g}) d\mathbf{g} \\ &= \int_{-\infty}^0 |v| p_{\bar{\mathbf{g}}}(v) dv = a_-(\hat{\omega}). \end{aligned} \quad (23)$$
+
+The final expression is precisely the one-sided projected area from Eqn. (16a), with the fixed position omitted. Thus, the same projected area that determines the local down-crossing rate in Eqn. (17) also normalizes the distribution of normals encountered by the ray.
+
+Dividing the unnormalized density in Eqn. (21) by  $a_-(\hat{\omega})$  thus gives the visible normal distribution function (vNDF):
+
+Visible Normal Distribution Function (vNDF)
+
+$$D_{\hat{\omega}}(\hat{n}) = \frac{\langle -\hat{\omega}, \hat{n} \rangle D(\hat{n})}{a_-(\hat{\omega})}. \quad (24)$$
+
+Eqn. (24) has the standard visible-normal form from microfacet and microflake theory: the NDF is weighted by a clamped cosine and normalized by its projected area [Heitz et al. 2015; Jakob et al. 2010]. In classical models, the NDF is a modeling input; here, both the NDF and its projected area are induced by the GPIS statistics.
+
+Evaluating the NDF. To evaluate  $D(\hat{n})$  in closed form, we substitute  $p_{\bar{\mathbf{g}}} = \mathcal{N}(\boldsymbol{\mu}_{\bar{\mathbf{g}}}, \Sigma_{\bar{\mathbf{g}}})$  into Eqn. (22) and expand the Gaussian exponent at  $\mathbf{g} = r\hat{n}$ :
+
+$$-\frac{1}{2}(r\hat{n} - \boldsymbol{\mu}_{\bar{\mathbf{g}}})^T \Sigma_{\bar{\mathbf{g}}}^{-1} (r\hat{n} - \boldsymbol{\mu}_{\bar{\mathbf{g}}}) = -\frac{1}{2}(A(\hat{n}) r^2 - 2B(\hat{n}) r + C), \quad (25)$$
+
+where we define three scalar quantities:
+
+$$A(\hat{n}) := \hat{n}^T \Sigma_{\bar{\mathbf{g}}}^{-1} \hat{n}, \quad B(\hat{n}) := \hat{n}^T \Sigma_{\bar{\mathbf{g}}}^{-1} \boldsymbol{\mu}_{\bar{\mathbf{g}}}, \quad C := \boldsymbol{\mu}_{\bar{\mathbf{g}}}^T \Sigma_{\bar{\mathbf{g}}}^{-1} \boldsymbol{\mu}_{\bar{\mathbf{g}}}. \quad (26)$$
+
+ $A(\hat{n}) > 0$  for all  $\hat{n}$  since  $\Sigma_{\bar{\mathbf{g}}}^{-1}$  is positive definite, and  $C$  is a constant independent of  $\hat{n}$ . With the shorthand  $b := B(\hat{n})/\sqrt{A(\hat{n})}$  (dependence on  $\hat{n}$  suppressed for brevity), the radial integral of Eqn. (22) evaluates analytically, as shown in Appx. A:
+
+Normal Distribution Function (NDF)
+
+$$D(\hat{n}) = \frac{e^{(b^2 - C)/2}}{2\pi |\Sigma_{\bar{\mathbf{g}}}|^{1/2} A^2} [(b^2 + 2) \phi(b) + b(b^2 + 3) \Phi(b)]. \quad (27)$$
+
+Figs. 3 and 4 illustrate how the correlation length and mean gradient shape the NDF, using mirrored-sphere renderings to show the full spherical distribution. We set  $\boldsymbol{\mu}_{\bar{\mathbf{g}}} = (0, 0, \mu_{\bar{\mathbf{g}},z})^T$  and  $\Sigma_{\bar{\mathbf{g}}} = (\alpha^2/2) \text{diag}(1, 1, \ell_z^{-2})$ . Here,  $\ell_z$  is the GP correlation length along  $z$ , with unit correlation lengths along  $x$  and  $y$ .
+
+At small  $\ell_z$ , the normals span the full sphere and the NDF approaches SGGX; as  $\ell_z$  increases, they concentrate around the mean-gradient direction and the NDF approaches Beckmann (Fig. 3). The mean gradient controls its asymmetry (Fig. 4): when  $\mu_{\bar{\mathbf{g}},z} = 0$ , the NDF is antipodally symmetric, while increasing  $\mu_{\bar{\mathbf{g}},z}$  biases the normals toward  $+z$ . Sec. 4.7 analyzes these limiting cases.
+
+
+
+
+
+Fig. 3. NDF as a function of the GP correlation length scale  $\ell_z$ , with fixed roughness  $\alpha = 2.0$  and mean gradient  $\partial\mu/\partial z = 1.0$ . At small  $\ell_z$  the distribution closely matches SGGX (far left); as  $\ell_z$  grows it converges to the Beckmann NDF (far right).
+
+
+
+Fig. 4. NDF as a function of the mean gradient magnitude  $\partial\mu/\partial z$  (columns), for two values of the GP correlation length scale  $\ell_z$  (rows), with fixed roughness  $\alpha = 2.0$ . At  $\partial\mu/\partial z = 0$  the distribution is symmetric (equivalent to SGGX); increasing  $\partial\mu/\partial z$  progressively breaks symmetry.
+
+
+
+
+
+Fig. 5. Analytic GPIS vNDF (right half of each panel) versus ray-marched reference (left half, 4096 spp) across four incident angles (columns;  $\theta = 90^\circ$  normal,  $\theta = 0^\circ$  grazing) and physical parameter settings (rows). Panels are normalised independently.
+
+Fig. 5 validates the analytic vNDF obtained from Eqns. (24) and (27) against Monte Carlo estimates from ray-marched GPIS realizations. Across both parameter configurations and all four incidence angles, the analytic result on the right half of each panel matches the ray-marched estimate on the left, including at grazing incidence.
+
+
+
+4Integrating over all directions gives the total expected zero-set area per unit volume.
+
+## 4.6 The Phase Function
+
+At a down-crossing, the surface normal follows the vNDF in Eqn. (24). For a given normal  $\hat{\mathbf{n}}$ , the micro-BRDF  $f_r(-\hat{\omega}, \hat{\omega}'; \hat{\mathbf{n}})$  determines scattering into direction  $\hat{\omega}'$ . Averaging over the vNDF then gives the standard microflake phase function [Jakob et al. 2010]
+
+$$p(\hat{\omega} \rightarrow \hat{\omega}') = \int_{S^2} f_r(-\hat{\omega}, \hat{\omega}'; \hat{\mathbf{n}}) \langle \hat{\omega}', \hat{\mathbf{n}} \rangle D_{\hat{\omega}}(\hat{\mathbf{n}}) d\hat{\mathbf{n}}. \quad (28)$$
+
+For a perfect mirror micro-BRDF, the delta function selects the half-vector  $\hat{\mathbf{h}} = (\hat{\omega}' - \hat{\omega})/\|\hat{\omega}' - \hat{\omega}\|$ . Applying the reflection Jacobian gives [Heitz et al. 2015; Jakob et al. 2010]:
+
+$$p(\hat{\omega} \rightarrow \hat{\omega}') = \frac{D_{\hat{\omega}}(\hat{\mathbf{h}})}{4|\hat{\omega} \cdot \hat{\mathbf{h}}|} = \frac{D(\hat{\mathbf{h}})}{4a_-(\hat{\omega})}. \quad (29)$$
+
+The phase function integrates to one over  $\hat{\omega}'$  for a nonabsorbing micro-BRDF and to less than one with absorption.
+
+
+
+## 4.7 Properties and Limits
+
+We examine the full-sphere support and asymmetry of the GPIS NDF, together with the reciprocity of the induced transport. We show that the centered case recovers SGGX exactly and how the one-sided construction encompasses both asymmetric and symmetric microflake transport. The next section (Sec. 5) develops surface models with full-sphere NDFs and recovers Beckmann–Smith scattering in the height-field limit.
+
+Full-sphere support. Unlike hemispherical NDFs in classical microflacet theory,  $D(\hat{\mathbf{n}})$  has support on the entire sphere, accommodating downward-pointing normals from overhangs and re-entrant geometry that height fields cannot represent.
+
+Asymmetry and one-sided projected areas. Unlike symmetric microflake NDFs such as SGGX, our NDF is generally asymmetric:  $D(\hat{\mathbf{n}}) \neq D(-\hat{\mathbf{n}})$ . We therefore define the complementary one-sided projected area  $a_+(\hat{\omega})$  over normals facing along  $\hat{\omega}$ . Equivalently,  $a_+(\hat{\omega}) = a_-(-\hat{\omega})$  is the down-crossing projected area for the reversed ray direction:
+
+
+$$a_+(\hat{\omega}) := \int_{S^2} \langle \hat{\omega}, \hat{\mathbf{n}} \rangle D(\hat{\mathbf{n}}) d\hat{\mathbf{n}} \quad (30a)$$
+
+$$= \sigma_{\bar{g}} \phi\left(\frac{\mu_{\bar{g}}}{\sigma_{\bar{g}}}\right) + \mu_{\bar{g}} \Phi\left(\frac{\mu_{\bar{g}}}{\sigma_{\bar{g}}}\right). \quad (30b)$$
+
+The vector first moment of the NDF is the conditional mean gradient: substituting  $\mathbf{g} = \mathbf{r}\hat{\mathbf{n}}$  in Eqn. (22) gives
+
+$$\int_{S^2} \hat{\mathbf{n}} D(\hat{\mathbf{n}}) d\hat{\mathbf{n}} = \mu_{\bar{g}}. \quad (31)$$
+
+Taking the dot product with  $\hat{\omega}$  gives:
+
+$$a_+(\hat{\omega}) - a_-(\hat{\omega}) = \mu_{\bar{g}} = \mu_{\bar{g}} \cdot \hat{\omega}. \quad (32)$$
+
+The difference between the two areas is exactly the projection of the conditional mean gradient onto the ray; it vanishes precisely when  $\mu_{\bar{g}} = 0$ .
+
+Reciprocity. Because  $a_-(\hat{\omega})$  depends on direction, simple phase function symmetry  $p(\hat{\omega} \rightarrow \hat{\omega}') = p(\hat{\omega}' \rightarrow \hat{\omega})$  does not hold in general, as discussed for one-sided height-field media by Dupuy et al. [2016]. For a reciprocal micro-BRDF, reciprocity instead relates each scattering event to its reverse, traversed in the opposite direction
+
+
+$$a_-(\hat{\omega}) p(\hat{\omega} \rightarrow \hat{\omega}') = a_-(-\hat{\omega}') p(-\hat{\omega}' \rightarrow -\hat{\omega}), \quad (33)$$
+
+which our mirror phase function (29) satisfies exactly: the reverse path shares the half-vector  $\hat{\mathbf{h}}$ , so both sides equal  $D(\hat{\mathbf{h}})/4$ .
+
+Centered case and high roughness limit: SGGX. When  $\mu_{\bar{g}} = 0$ , the scalars  $B(\hat{\mathbf{n}})$  and  $C$  from Eqn. (26) and the ratio  $b$  vanish. Substituting into Eqn. (27) with  $\phi(0) = 1/\sqrt{2\pi}$  gives:
+
+$$D(\hat{\mathbf{n}})|_{\mu_{\bar{g}}=0} = \frac{1}{\pi\sqrt{2\pi}|\Sigma_{\bar{g}}|^{1/2}(\hat{\mathbf{n}}^T\Sigma_{\bar{g}}^{-1}\hat{\mathbf{n}})^2}. \quad (34)$$
+
+This is exactly the SGGX NDF [Heitz et al. 2015]  $D_{\text{SGGX}}(\hat{\mathbf{n}}) = 1/(\pi|S|^{1/2}(\hat{\mathbf{n}}^TS^{-1}\hat{\mathbf{n}})^2)$  with  $S = \Sigma_{\bar{g}}/(2\pi)$ . The centered case is equally the high-roughness limit: holding  $\mu_{\bar{g}}$  fixed while the conditional gradient spread grows in all directions,  $C \rightarrow 0$  and the NDF converges to the SGGX form above. Furthermore,  $\mu_{\bar{g}} = 0$  and  $\sigma_{\bar{g}}^2 = \hat{\omega}^T\Sigma_{\bar{g}}\hat{\omega} = 2\pi\hat{\omega}^TS\hat{\omega}$ , so Eqns. (16) and (30) both recover the SGGX projected area exactly:  $a_-(\hat{\omega}) = a_+(\hat{\omega}) = \sigma_{\bar{g}}\phi(0) = \sqrt{\hat{\omega}^TS\hat{\omega}} =: a_{\text{SGGX}}(\hat{\omega})$ .
+
+Unifying symmetric and asymmetric microflake transport. One-sidedness follows from the down-crossing condition for rays in empty space, recovering the microflake interpretation of height-field models [Dupuy et al. 2016; Heitz et al. 2016]. This encounter rule applies to both asymmetric and symmetric NDFs. In the centered case  $\mu_{\bar{g}} = 0$ , opposite normal orientations have equal density and the NDF reduces to SGGX. With the same material law for opposite orientations, this recovers conventional two-sided microflake transport. Both regimes therefore follow from the same GPIS crossing statistics, without introducing separate one-sided and two-sided flake models.
+
+
+
+## 4.8 Heavy-Tailed Extension via Scale Mixtures
+
+The distribution of gradients of any GPIS will be Gaussian by definition. However, we can still obtain heavy-tailed NDF variants analogous to GGX by applying a scale mixture to the zero-conditioned gradient law [d'Eon 2023]: draw  $\tau \sim \text{Exp}(1)$  and replace  $\Sigma_{\bar{g}} \rightarrow \Sigma_{\bar{g}}/\tau$  in the conditional gradient density of Sec. 4.5, then marginalize over  $\tau$ . Substituting the resulting heavy-tailed gradient density into the Kac–Rice radial integral (22) and evaluating in closed form (Appx. D) gives the heavy-tailed NDF
+
+### Heavy-Tailed NDF
+
+$$D(\hat{\mathbf{n}})^{\text{GGX}} = \frac{2S - \mu}{2\pi|\Sigma_{\bar{g}}|^{1/2}A^{5/2}(S - \mu)^2}, \quad \mu := \frac{B}{A}, \quad S := \sqrt{\frac{C+2}{A}}, \quad (35)$$
+
+with  $A, B, C$  from Eqn. (26). The same mixture applied one dimension down to the ray-projected marginal (Appx. D) gives the one-sided projected area, with  $\alpha_{\text{eff}}^2 := 2\sigma_{\bar{g}}^2$ :
+
+
+
+### Heavy-Tailed One-Sided Projected Area
+
+
+$$a_-(\hat{\omega})^{\text{GGX}} = \frac{\sqrt{\mu_{\bar{g}}^2 + \alpha_{\text{eff}}^2} - \mu_{\bar{g}}}{2}, \quad (36)$$
+
+and  $a_+(\hat{\omega})^{\text{GGX}} = a_-(\hat{\omega})^{\text{GGX}} + \mu_g$ . In the height-field limit ( $\Sigma_{\tilde{g}} = \text{diag}(\epsilon_h, \epsilon_h, \epsilon_z), \epsilon_z \rightarrow 0$ ), the mixture commutes with the limit and exactly recovers the classical Trowbridge–Reitz/GGX NDF.
+
+
+
+## 5 Surface Scattering from GPISes
+
+Beyond volume rendering, we can also leverage our transport framework to construct novel surface scattering models.
+
+
+
+### 5.1 BRDF-Compatible GPISes
+
+We say a GPIS is BRDF-compatible if, within a local planar patch, its mean field is a linear ramp  $\mu_f(\mathbf{x}) = z$ , with  $\sigma_f$  and  $\Sigma_{\tilde{g}}$  constant. Here,  $z$  measures height above the mean surface. These conditions give  $\mu_{\tilde{g}} = \nabla \mu_f = \hat{z}$ , making the NDF spatially constant while the occupancy factor depends only on height. Integrating out lateral displacements yields a surface BRDF depending only on the incident and outgoing directions.
+
+This construction generalizes the classical height-field model. The covariance  $\Sigma_{\tilde{g}}$  may be full rank and contain off-diagonal terms, allowing gradient fluctuations along depth and correlations between depth and lateral components. The zero set can therefore exhibit overhangs and porous or re-entrant geometry.
+
+For the heavy-tailed extension of Sec. 4.8, we retain the same occupancy factor and use the corresponding NDF and projected area. Below,  $D$  and  $a_-$  refer to the selected family.
+
+
+
+### 5.2 The Single-Scattering GPIS BRDF
+
+Starting from the RTE (8), we derive the single-scattering BRDF of a BRDF-compatible GPIS with a perfect mirror micro-BRDF. The external directions  $\hat{\omega}_i, \hat{\omega}_o$  point into the upper hemisphere  $S_+^2$ , with  $\cos \theta_* = \hat{\omega}_* \cdot \hat{z} > 0$ . The NDF remains defined on the full sphere.
+
+Single scattering uses unscattered background radiance  $L^{(0)}(z, \hat{\omega}_i) = T_-(z \rightarrow \infty, \hat{\omega}_i) L_{\text{bg}}(\hat{\omega}_i)$ , where the transmittance is the shadow-ray escape probability;  $T_-(\infty \rightarrow z, -\hat{\omega}_o)$  denotes view-ray survival.
+
+Substituting  $L^{(0)}$  into Eqn. (8) with  $\hat{\omega} = -\hat{\omega}_o$  and  $dz = -\cos \theta_o dt$ , then exchanging integrals, gives
+
+$$L_o^{(1)} = \frac{1}{\cos \theta_o} \int_{S_+^2} \int_{-\infty}^{\infty} \chi_-(z, -\hat{\omega}_o) T_-(\infty \rightarrow z, -\hat{\omega}_o) \times p(-\hat{\omega}_o \rightarrow \hat{\omega}_i) T_-(z \rightarrow \infty, \hat{\omega}_i) dz L_{\text{bg}}(\hat{\omega}_i) d\hat{\omega}_i. \quad (37)$$
+
+Compare this with the surface rendering equation:
+
+$$L_o^{(1)} = \int_{S_+^2} f_r^{(1)}(\hat{\omega}_i, \hat{\omega}_o) L_{\text{bg}}(\hat{\omega}_i) \cos \theta_i d\hat{\omega}_i. \quad (38)$$
+
+We obtain the BRDF by matching the angular integrands of the two expressions.
+
+Writing the occupancy factor as  $\rho^{\text{Smith}}(z) := \phi(z/\sigma_f) / (\sigma_f \Phi(z/\sigma_f))$  and substituting this into Eqns. (18) and (29) gives
+
+$$\begin{aligned} \chi_-(z, -\hat{\omega}_o) p(-\hat{\omega}_o \rightarrow \hat{\omega}_i) &= \rho^{\text{Smith}}(z) \frac{a_-(-\hat{\omega}_o)}{4a_-(-\hat{\omega}_o)} \frac{D(\hat{\mathbf{h}})}{4a_-(-\hat{\omega}_o)} \\ &= \rho^{\text{Smith}}(z) \frac{D(\hat{\mathbf{h}})}{4}. \end{aligned} \quad (39)$$
+
+Set  $u = \Phi(z/\sigma_f)$ , the local probability of empty space, so that  $\rho^{\text{Smith}}(z) dz = du/u$ . Define Smith’s auxiliary function as  $\Lambda(\hat{\omega}_*) :=$ 
+
+ $a_-(\hat{\omega}_*)/\cos \theta_*$ . Appx. B gives its Gaussian and GGX forms and derives the view and shadow transmittances:
+
+$$T_-(\infty \rightarrow z, -\hat{\omega}_o) = u^{1+\Lambda(\hat{\omega}_o)}, \quad T_-(z \rightarrow \infty, \hat{\omega}_i) = u^{\Lambda(\hat{\omega}_i)}. \quad (40)$$
+
+The  $1/u$  from the occupancy factor cancels the extra power of  $u$  in the view transmittance. Treating the two escape events as conditionally independent at their shared crossing height, the remaining height integral gives the joint masking–shadowing factor:
+
+
+$$G_{12}(\hat{\omega}_i, \hat{\omega}_o) = \int_0^1 u^{\Lambda(\hat{\omega}_i)+\Lambda(\hat{\omega}_o)} du = \frac{1}{1 + \Lambda(\hat{\omega}_i) + \Lambda(\hat{\omega}_o)}. \quad (41)$$
+
+Combining this with  $D(\hat{\mathbf{h}})/4$  and the two cosine factors yields
+
+Single-Scattering GPIS BRDF
+
+
+$$f_r^{(1)}(\hat{\omega}_i, \hat{\omega}_o) = \frac{D(\hat{\mathbf{h}}) G_{12}(\hat{\omega}_i, \hat{\omega}_o)}{4 \cos \theta_i \cos \theta_o}. \quad (42)$$
+
+For fixed conditional gradient statistics,  $\sigma_f$  drops out of the height integral, so the BRDF is independent of transition thickness.
+
+Height-field limit: Beckmann–Smith. Taking  $\Sigma_{\tilde{g}} = \text{diag}(\epsilon_h, \epsilon_h, \epsilon_z)$  and letting  $\epsilon_z \rightarrow 0$  with  $\epsilon_h$  fixed, Eqn. (27) reduces to the Beckmann–NDF with roughness  $\alpha = \sqrt{2\epsilon_h}$  on the upper hemisphere (Appx. C.1):
+
+
+$$D(\hat{\mathbf{h}}) \xrightarrow{\epsilon_z \rightarrow 0} D_{\text{Beckmann}}(\hat{\mathbf{h}}) := \frac{e^{-\tan^2 \theta_i/\alpha^2}}{\pi \alpha^2 \cos^4 \theta_i}. \quad (43)$$
+
+The density vanishes on the lower hemisphere. The one-sided projected area furthermore recovers the Smith masking function (Appx. C.2):
+
+$$a_-(-\hat{\omega}_*) \xrightarrow{\epsilon_z \rightarrow 0} \frac{\cos \theta_*}{G_{\text{Smith}}^{-1}(\theta_*)}. \quad (44)$$
+
+Substituting these limits into Eqn. (24) gives the Beckmann–Smith visible NDF [Heitz 2014]. The GPIS transmittance also recovers Smith’s height-conditional masking function (Appx. C.3). Consequently, Eqn. (42) reduces to the classical Beckmann single-scattering BRDF with Smith’s joint masking–shadowing function, while extending to BRDF-compatible GPISes beyond height fields.
+
+### 5.3 Extending to Multiple Scattering
+
+Multiple scattering follows by tracing successive free flights and scattering events, with each normal sampled from the GPIS vNDF. The extinction factorization established above lets us extend the random walk of Heitz et al. [2016] to our full-sphere NDFs.
+
+To establish reciprocity of the resulting BRDF, we compare each path with its reverse. Reversing the ray direction at fixed height  $z$  gives  $\chi_-(z, -\hat{\omega}) - \chi_-(z, \hat{\omega}) = \rho^{\text{Smith}}(z)(\hat{\omega} \cdot \hat{z})$  by Eqn. (32). Using  $dz = (\hat{\omega} \cdot \hat{z}) dt$  and  $\rho^{\text{Smith}}(z) dz = du/u$  gives
+
+$$\frac{T_-(\mathbf{a} \rightarrow \mathbf{b})}{T_-(\mathbf{b} \rightarrow \mathbf{a})} = \exp \left[ \int_{z_a}^{z_b} \rho^{\text{Smith}}(z) dz \right] = \frac{u(z_b)}{u(z_a)}, \quad (45)$$
+
+where  $z_a$  and  $z_b$  are the endpoint heights. Along a complete path, the interior  $u$  factors cancel, and the endpoint factors agree on the common boundary. For a reciprocal micro-BRDF, Eqn. (33) then establishes BRDF reciprocity at every scattering order.
+
+The occupancy factor also simplifies sampling. Following Dupuy et al. [2016], we absorb it through a change of coordinates, obtaining an equivalent homogeneous half-space formulation. We develop this remapping and the resulting sampling procedure in Sec. 6.3.
+
+
+
+## 5.4 Full-Sphere Beckmann and GGX Families
+
+We call the Gaussian-gradient NDF of Eqn. (27) the full-sphere Beckmann family. Applying the exponential precision mixture of Sec. 4.8 yields the corresponding full-sphere GGX family. Both recover their classical counterparts in the height-field limit.
+
+Under the multiple-scattering walk above, these families yield energy-preserving, reciprocal BRDFs for a nonabsorbing, reciprocal micro-BRDF. They also support both in-plane and out-of-plane anisotropy. The latter is important for capturing the appearance of materials such as wood [Marschner et al. 2005].
+
+Previous work has explored full-sphere NDFs to avoid the increasingly spiky geometry of height-field models at high roughness and to connect rough surfaces with porous media [Dupuy et al. 2016]. These include models based on von Mises–Fisher distributions [d'Eon and Weidlich 2024; d'Eon 2016], whose projected areas have been represented using series expansions and approximations. Angular null scattering provides an unbiased sampling approach for general full-sphere NDFs [d'Eon 2023], but can be costly.
+
+Our families have closed-form projected areas (Eqns. (16b) and (36)) and exact vNDF samplers developed in the next section. Figs. 14 and 15 illustrate the resulting multiply scattered appearance at high roughness and with in-plane and out-of-plane anisotropy.
+
+
+
+## 6 Monte Carlo Rendering
+
+We render GPISes by Monte Carlo integration of the anisotropic RTE, using the transport coefficients derived in Sec. 4. This requires sampling free-flight distances and scattering directions, with the latter sampled through the vNDF and micro-BRDF.
+
+### 6.1 Free-Flight Sampling
+
+Homogeneous media. With spatially constant GP statistics, extinction is constant along each ray, so free-flight distances follow an exponential distribution with rate  $\chi_-$ .
+
+Heterogeneous media. When the GP statistics vary spatially,  $\chi_-$  varies along the ray and free-flight sampling uses standard techniques for participating media [Novák et al. 2018]: ray marching, whose bias is controlled by the step size, or null-collision (delta) tracking, which avoids that bias. Each candidate point requires one closed-form evaluation of Eqn. (18) from the local statistics  $(\mu_f, \sigma_f, \mu_{\text{g}}, \Sigma_{\text{g}})$ . Both the occupancy factor and the directional factor  $a_-(\mathbf{r}(t), \hat{\omega})$  are re-evaluated because they can vary spatially.
+
+Null-collision methods require a majorant valid over both position and ray direction. Although the occupancy factor is unbounded as  $\mu_f/\sigma_f \rightarrow -\infty$ , its growth is only asymptotically linear in  $-\mu_f/\sigma_f$  for fixed  $\sigma_f$ . On bounded rendering domains where  $\mu_f/\sigma_f$  has a finite minimum and  $\sigma_f$  is bounded away from zero, the occupancy factor remains bounded. Together with bounded conditional gradient statistics, this permits finite extinction majorants. We precompute per-cell majorants via dense spatio-directional sampling and store them in a coarse majorant grid. Tighter, direction-dependent majorants could reduce null-collision overhead.
+
+Transmittance estimates, needed for next-event estimation, can similarly use existing techniques.
+
+
+
+## 6.2 Sampling the Phase Function
+
+Following the standard microflake construction [Heitz et al. 2015; Jakob et al. 2010], we sample the phase function in Eqn. (28) by first drawing a normal  $\hat{\mathbf{n}}$  from the vNDF  $D_{\hat{\omega}}$ , then sampling  $\hat{\omega}'$  using the micro-BRDF  $f_r(-\hat{\omega}, \hat{\omega}'; \hat{\mathbf{n}})$ . For a perfect mirror micro-BRDF, reflection is deterministic given  $\hat{\mathbf{n}}$ , with unit sample weight.
+
+Gradient-space sampling. The vNDF is the distribution of the normalized gradient at a down-crossing (Sec. 4.5). We can therefore sample an unnormalized gradient  $\mathbf{g} \in \mathbb{R}^3$  from the Kac–Rice-weighted Gaussian
+
+
+$$q(\mathbf{g}) \propto \langle -\hat{\omega}, \mathbf{g} \rangle \mathcal{N}(\mathbf{g}; \boldsymbol{\mu}_{\hat{\mathbf{g}}}, \Sigma_{\hat{\mathbf{g}}}) \quad (46)$$
+
+and normalize it ( $\hat{\mathbf{n}} = \mathbf{g}/\|\mathbf{g}\|$ ) to exactly sample from  $D_{\hat{\omega}}$ .
+
+Factorization and algorithm. The crossing weight depends only on the gradient component along  $\hat{\omega}$ . We decompose  $\mathbf{g} = \bar{\mathbf{g}}\hat{\omega} + \mathbf{g}_{\perp}$ , where  $\bar{\mathbf{g}} = \mathbf{g} \cdot \hat{\omega}$  and  $\mathbf{g}_{\perp}$  lies in the plane perpendicular to  $\hat{\omega}$ . The scalar marginal is weighted by  $|\bar{\mathbf{g}}|$  and restricted to  $\bar{\mathbf{g}} < 0$ , while the conditional distribution of  $\mathbf{g}_{\perp}$  given  $\bar{\mathbf{g}}$  remains Gaussian. The crossing-weighted distribution therefore factorizes as
+
+$$q(\bar{\mathbf{g}}, \mathbf{g}_{\perp}) \propto \underbrace{|\bar{\mathbf{g}}| \mathcal{N}(\bar{\mathbf{g}}; \boldsymbol{\mu}_{\bar{\mathbf{g}}}, \sigma_{\bar{\mathbf{g}}}^2) \mathbf{1}[\bar{\mathbf{g}} < 0]}_{q_z(\bar{\mathbf{g}})} \cdot \underbrace{\mathcal{N}_2(\mathbf{g}_{\perp}; \bar{\boldsymbol{\mu}}_{\perp|z}, \Sigma_{\perp|z})}_{q_{\perp|z}(\mathbf{g}_{\perp})}. \quad (47)$$
+
+Here,  $\bar{\boldsymbol{\mu}}_{\perp|z}$  and  $\Sigma_{\perp|z}$  are the conditional mean and covariance of  $\mathbf{g}_{\perp}$  given  $\bar{\mathbf{g}}$ . Algorithm 1 first samples  $\bar{\mathbf{g}}$  from  $q_z$ , then draws  $\mathbf{g}_{\perp}$  from the conditional Gaussian  $q_{\perp|z}$  and normalizes the reconstructed gradient. The weighted 1D marginal  $q_z$  requires the dedicated sampler we develop next.
+
+
+
+---
+
+### Algorithm 1 SampleVNDF( $\hat{\omega}, \boldsymbol{\mu}_{\hat{\mathbf{g}}}, \Sigma_{\hat{\mathbf{g}}}, \xi_1, \xi_2, \xi_3$ )
+
+---
+
+1. 1:  $\boldsymbol{\mu}_{\bar{\mathbf{g}}} \leftarrow \hat{\omega}^{\text{T}} \boldsymbol{\mu}_{\hat{\mathbf{g}}}$ ;  $\sigma_{\bar{\mathbf{g}}} \leftarrow \sqrt{\hat{\omega}^{\text{T}} \Sigma_{\hat{\mathbf{g}}} \hat{\omega}}$
+2. 2:  $\bar{\mathbf{g}} \leftarrow \text{SampleProjectedDerivative}(\boldsymbol{\mu}_{\bar{\mathbf{g}}}, \sigma_{\bar{\mathbf{g}}}, \xi_1)$
+3. 3:  $\bar{\boldsymbol{\mu}}_{\perp|z}, \Sigma_{\perp|z} \leftarrow \text{Gaussian conditioning on } \bar{\mathbf{g}}$
+4. 4:  $\mathbf{g}_{\perp} \leftarrow \text{SampleGaussian2D}(\bar{\boldsymbol{\mu}}_{\perp|z}, \Sigma_{\perp|z}, \xi_2, \xi_3)$
+5. 5: return  $\hat{\mathbf{n}} \leftarrow (\bar{\mathbf{g}}\hat{\omega} + \mathbf{g}_{\perp}) / \|\bar{\mathbf{g}}\hat{\omega} + \mathbf{g}_{\perp}\|$
+
+---
+
+Sampling  $q_z$ . Setting  $u = -\bar{\mathbf{g}} > 0$ , the marginal  $q_z$  becomes  $q_u(u) \propto u \mathcal{N}(u; -\boldsymbol{\mu}_{\bar{\mathbf{g}}}, \sigma_{\bar{\mathbf{g}}}^2)$  for  $u > 0$  – a linearly-weighted truncated Gaussian. Its CDF  $F(U)$  is
+
+$$F(U) = \frac{G(U)}{a_-(\hat{\omega})}, \quad (48)$$
+
+$$G(U) = \sigma_{\bar{\mathbf{g}}} \left[ \phi\left(\frac{\boldsymbol{\mu}_{\bar{\mathbf{g}}}}{\sigma_{\bar{\mathbf{g}}}}\right) - \phi\left(\frac{U+\boldsymbol{\mu}_{\bar{\mathbf{g}}}}{\sigma_{\bar{\mathbf{g}}}}\right) \right] - \boldsymbol{\mu}_{\bar{\mathbf{g}}} \left[ \Phi\left(\frac{U+\boldsymbol{\mu}_{\bar{\mathbf{g}}}}{\sigma_{\bar{\mathbf{g}}}}\right) - \Phi\left(\frac{\boldsymbol{\mu}_{\bar{\mathbf{g}}}}{\sigma_{\bar{\mathbf{g}}}}\right) \right], \quad (49)$$
+
+where  $a_-(\hat{\omega})$  is the normalization already derived in Sec. 4.3. Although this CDF has no closed-form inverse, we can sample it in  $O(1)$  expected cost via the three-regime rejection sampler in Algorithm 2.
+
+The proposal adapts to whether the conditional gradient favors down-crossings or places them in the Gaussian tail.
+
+Algorithm 2 SampleProjectedDerivative( $\mu_{\bar{g}}, \sigma_{\bar{g}}, \xi$ )
+
+---
+
+```
+1:  $\mu^* \leftarrow -\mu_{\bar{g}}; \quad a \leftarrow \mu^* / \sigma_{\bar{g}}$ 
+2: if  $|a| < \varepsilon$  then  $\triangleright$  Case 1:  $\mu^* \approx 0$ —Rayleigh
+3:  $u \leftarrow \sigma_{\bar{g}} \sqrt{-2 \ln \xi}$ 
+4: else if  $a > 0$  then  $\triangleright$  Case 2:  $\mu^* > 0$ —Gaussian proposal
+5:  $\tau \leftarrow \sqrt{2}; \quad \lambda \leftarrow \frac{1}{2}; \quad r^* \leftarrow \frac{1}{2}(a + \sqrt{a^2 + 8}); \quad x^* \leftarrow r^* - a$ 
+6: repeat
+7:   Draw  $r \leftarrow a + \tau \mathcal{N}(0, 1) \quad \triangleright$   $\mathcal{N}(0, 1)$  via Box-Muller
+8:    $\text{accept} \leftarrow (r/r^) \exp\left(-\frac{\lambda}{2}((r - a)^2 - (x^)^2)\right)$ 
+9:   until  $r > 0$  and  $\mathcal{U}(0, 1) < \text{accept}$ 
+10:    $u \leftarrow \sigma_{\bar{g}} \cdot r$ 
+11: else if  $|a| \leq 1$  then  $\triangleright$  Case 3a:  $0 < b = |a| \leq 1$ —Rayleigh proposal
+12:   repeat
+13:     Draw  $r \leftarrow \sqrt{-2 \ln \mathcal{U}(0, 1)}$ 
+14:     until  $\mathcal{U}(0, 1) < \exp(-br)$ 
+15:      $u \leftarrow \sigma_{\bar{g}} \cdot r$ 
+16:   else  $\triangleright$  Case 3b:  $b = |a| > 1$ —Gamma(2, 1/b) proposal
+17:   repeat
+18:     Draw  $r \leftarrow -(\ln \mathcal{U}(0, 1) + \ln \mathcal{U}(0, 1))/b$ 
+19:     until  $\mathcal{U}(0, 1) < \exp(-r^2/2)$ 
+20:      $u \leftarrow \sigma_{\bar{g}} \cdot r$ 
+21:   end if
+22: return  $\bar{g} \leftarrow -u$
+```
+
+---
+
+Exact sampling for the heavy-tailed NDF. The same decomposition into ray-parallel and perpendicular components applies to the full-sphere GGX NDF in Eqn. (35). Remarkably, its crossing-weighted scalar marginal has a CDF that can be inverted in closed form by solving a quadratic (Appx. D.1). Conditioned on  $\bar{g}$ , the perpendicular distribution is heavy-tailed, and its sampling procedure reuses the Gaussian-conditioning parameters  $\bar{\mu}_{\perp |z}$  and  $\Sigma_{\perp |z}$ . Algorithm 3 combines these steps to sample the vNDF exactly using three uniform random variables and no rejection.
+
+Algorithm 3 SampleGGXVNDF( $\hat{\omega}, \mu_{\bar{g}}, \Sigma_{\bar{g}}, \xi_1, \xi_2, \xi_3$ )
+
+---
+
+```
+1:  $\mu_{\bar{g}} \leftarrow \hat{\omega}^\top \mu_{\bar{g}}; \quad \sigma_{\bar{g}}^2 \leftarrow \hat{\omega}^\top \Sigma_{\bar{g}} \hat{\omega}; \quad \alpha_{\text{eff}}^2 \leftarrow 2\sigma_{\bar{g}}^2$ 
+2:  $c \leftarrow -\mu_{\bar{g}}; \quad R \leftarrow \sqrt{c^2 + \alpha_{\text{eff}}^2}$ 
+3:  $h \leftarrow \xi_1(c + R) - R$ 
+4:  $s \leftarrow \sqrt{\max(0, R^2 - h^2)}$ 
+5:  $q \leftarrow \frac{\alpha_{\text{eff}} s + c h}{c s - \alpha_{\text{eff}} h}$ 
+6:  $\bar{g} \leftarrow -(c + q)$ 
+7:  $\bar{\mu}_{\perp |z}, \Sigma_{\perp |z} \leftarrow$  Gaussian conditioning on  $\bar{g}$ 
+8:  $\beta \leftarrow 1 + q^2 / (2\sigma_{\bar{g}}^2) \quad \triangleright$   $= 1 + (\bar{g} - \mu_{\bar{g}})^2 / (2\sigma_{\bar{g}}^2)$ 
+9:  $\rho \leftarrow \sqrt{2\beta[(1 - \xi_2)^{-2/3} - 1]}; \quad \varphi \leftarrow 2\pi\xi_3$ 
+10:  $L \leftarrow$  Cholesky( $\Sigma_{\perp |z}$ )
+11:  $g_{\perp} \leftarrow \bar{\mu}_{\perp |z} + L \rho (\cos \varphi, \sin \varphi)^\top$ 
+12: return  $\hat{n} \leftarrow (\bar{g}\hat{\omega} + g_{\perp}) / \|\bar{g}\hat{\omega} + g_{\perp}\|$
+```
+
+---
+
+Connection to prior work on GPIS rendering. The factorization in Eqn. (47) parallels the gradient decomposition used by Xu et al.
+
+
+
+Fig. 6. Validation of the exact vNDF importance samplers: Monte Carlo estimates from each sampler (left halves) match the corresponding closed-form vNDFs (right halves). Top: the sampler for the Gaussian gradient distribution (Algorithm 1, using Algorithm 2); the four incidence angles exercise all four proposal branches of Algorithm 2. Bottom: heavy-tailed sampler (Algorithm 3) against the heavy-tailed vNDF (35). All panels use  $(\alpha, \ell_z, \partial\mu/\partial z) = (1, 1, 2); \theta = 90^\circ$  is normal incidence and  $\theta = 0^\circ$  grazing.
+
+[2025] and Shi et al. [2026]. Their realization-based renderers obtain the directional derivative at an intersection by ray marching, then sample the perpendicular gradient components from a conditional Gaussian. Under the local-conditioning approximation, we instead draw  $\bar{g}$  directly from the weighted marginal  $q_z$ , then sample  $g_{\perp}$  from  $q_{\perp |z}$ . This requires no explicit realization, but replaces the first-hit statistics of ray marching with the typical-crossing law of Sec. 4.5.
+
+Huang et al. [2026] use a mixture of Beckmann-vNDF and uniform-hemisphere proposals to sample their vNDF. Our gradient-space factorization enables exact sampling of the GPIS vNDF.
+
+Sampler validation. Both samplers agree with their analytic vNDFs in Fig. 6. The asymmetric configuration and incidence sweep exercise all four proposal branches of Algorithm 2 and all sign regimes of the heavy-tailed CDF inversion.
+
+
+
+### 6.3 Multiple-Scattering Surface Walk
+
+We evaluate the single-scattering BRDF analytically using Eqn. (42) and importance sample it with the vNDF samplers of Sec. 6.2. For multiple scattering, the extinction factorization in Sec. 5.2 has the Smith microflake form used by Heitz et al. [2016], with  $a_-(\hat{\omega})$  now obtained from the broader class of BRDF-compatible GPISes.
+
+Following previous work [Dupuy et al. 2016; Lumme et al. 1990], we absorb the occupancy factor by remapping height to  $z_h := \log u = \log \Phi(z/\sigma_f)$ , where  $u$  is the empty-space probability coordinate introduced in Sec. 5.2. Since  $dz_h = du/u = \rho^{\text{Smith}}(z) dz$ , the remapping yields a homogeneous medium with direction-dependent extinction  $a_-(\hat{\omega})$ . The range  $z \in \mathbb{R}$  maps to  $z_h \in (-\infty, 0)$ , with  $z_h = 0$  corresponding to the escape boundary. The walk operates entirely in  $z_h$  without recovering physical height. Although  $\sigma_f$  controls the physical thickness of the transition region, it does not appear in the remapped walk.
+
+We apply the random walk of Heitz et al. [2016] in the remapped coordinates (Algorithm 4). For incident direction  $\hat{\omega}_i$ , the walk starts at  $z_{h,0} = 0$  with  $\hat{\omega}_1 = -\hat{\omega}_i$ . Each step samples an exponential free flight with rate  $a_-(\hat{\omega})$  for the current direction. If the flight reaches
+
+
+
+the escape boundary ��h = 0, we return the outgoing direction and accumulated throughput. Otherwise, we sample a vNDF normal, scatter according to the micro-BRDF, update the throughput, and repeat. Free-flight sampling accounts for masking and shadowing without an explicit height-conditional masking function.
+
+### Algorithm 4 SampleGPISBRDF(��ˆ�� , ��, ����)
+
+| 1: $\hat{\omega}_1 \leftarrow -\hat{\omega}_1; \quad z_{h,0} \leftarrow 0; \quad \text{weight} \leftarrow 1; \quad r \leftarrow 1$ |  |
+|------------------------------------------------------------------------------------------------------------------------------------|--|
+| 2: while true do                                                                                                     |  |
+| 3:     Draw $t_r \sim \text{Exp}(a_-(\hat{\omega}_r)) \quad \triangleright$ Homogeneous free flight                         |  |
+| 4: $z_{h,r} \leftarrow z_{h,r-1} + t_r(\hat{\omega}_r \cdot \hat{z})$                                                              |  |
+| 5: if $z_{h,r} \geq 0$ then                                                                                          |  |
+| 6: return $(\hat{\omega}_r, \text{weight}) \quad \triangleright$ Direction and weight                                |  |
+| 7: end if                                                                                                                   |  |
+| 8:     Draw $(\hat{\omega}_{r+1}, w_{r+1}) \leftarrow \text{SamplePhase}(\hat{\omega}_r, D, f_r)$                                  |  |
+| 9: $\text{weight} \leftarrow w_{r+1}$ weight; $r \leftarrow r + 1$                                                                 |  |
+| 10: end while                                                                                                               |  |
+
+Here, weight is the accumulated path throughput. SamplePhase samples a vNDF normal and the micro-BRDF, returning the scattered direction and the importance weight ����+1 for that collision, including absorption. A position-free evaluation of the GPIS BRDFs can reduce variance in some cases using the approach of Bitterli and d'Eon [2022]. The related formulation by Cui et al. [2023], however, assumes an NDF restricted to the hemisphere and a specular microsurface, so does not generally apply.
+
+### 7 Accuracy of the Local-Conditioning Approximation
+
+The local-conditioning approximation conditions on the current point being in empty space, but discards how earlier observations along the ray alter the field distribution ahead. Its accuracy therefore depends on how quickly this spatial memory fades relative to the distance between crossings.
+
+### 7.1 Memory Models
+
+Seyb et al. [2024] introduced a hierarchy of GPIS transport models that trade memory, and therefore computational cost, for accuracy. All sample a correlated field along the current ray segment, but differ in the information retained between segments: Global retains field values from all previous segments, Renewal retains only �� = 0 at the most recent collision, and Renewal+ additionally retains the gradient there.
+
+The LCA instead replaces field sampling along the ray with a local crossing rate conditioned only on the current point being in empty space. This discards conditioning on earlier observations both within and between ray segments, yielding local transport coefficients compatible with the classical RTE. Retaining such observations would require additional transport state, as in the GLBE [Bitterli et al. 2018; Larsen and Vasques 2011].
+
+Fig. 7 compares these memory models. Renewal can resample a surface whose solid side contains the outgoing ray, causing immediate re-intersections and visible darkening. Renewal+ uses the retained gradient to preserve the local surface orientation, while the LCA avoids this through its empty-space conditioning. The remaining differences are most visible in crevices, where correlations
+
+Fig. 7. The same scene rendered with different memory models. The full render (left) uses our approach. The models are visually similar overall, with the clearest differences appearing in concave regions where recent ray history contains useful information about nearby geometry.
+
+with nearby geometry matter. The next subsection quantifies when this discarded spatial memory affects accuracy.
+
+### 7.2 The Void Level and When Ray History Matters
+
+Void level. We begin with a dimensionless measure of how strongly the GPIS favors empty space at a point. We define the void level as the field mean measured in units of its standard deviation,
+
+
+$$\tilde{\mu}_f(\mathbf{x}) := \frac{\mu_f(\mathbf{x})}{\sigma_f(\mathbf{x})}, \quad (50)$$
+
+and the corresponding void fraction as
+
+| $\tilde{\Phi}(\mathbf{x}) := \Phi(\tilde{\mu}_f(\mathbf{x})) = \mathbb{P}(f(\mathbf{x}) > 0) .$ | (51) |
+|-------------------------------------------------------------------------------------------------|------|
+|-------------------------------------------------------------------------------------------------|------|
+
+At ��˜�� = 0, empty and solid space are equally likely. Increasing the void level makes the empty phase more probable, moving the GPIS toward a more dilute regime.
+
+Void chords and ray history. Along a ray, successive zero crossings mark alternating empty and solid intervals. We call a complete empty interval a void chord and denote its length by ��v. For a stationary GPIS, the relation between void fraction and chord length follows from simple length accounting: along a long ray, the total length in empty space is the number of void chords times their average length. Dividing by the ray length turns these quantities into the void fraction, down-crossing density, and mean chord length, respectively [Roberts and Torquato 1999, Sec. II]:
+
+$$\tilde{\Phi} = \lambda_- \mathbb{E}[C_V] \implies \mathbb{E}[C_V] = \frac{\tilde{\Phi}}{\lambda_-} = \frac{1}{\chi_-}, \quad (52)$$
+
+The final equality follows from the LCA definition ��− = ��−/Φ˜ in Eqn. \(12\). Under stationarity, the LCA extinction is constant along a ray, giving exponential free flights. The exact GPIS crossing rate, however, depends on the ray's survival history, so its free-flight distribution is generally non-exponential. Although the mean LCA free flight equals the mean length of complete void chords, it need not equal the mean remaining distance to a crossing from a point sampled in empty space.
+
+Whether this replacement is accurate depends on how the mean void-chord length compares with the distance over which the GP retains memory. Let ℓ denote the kernel correlation length, and define the dimensionless correlation-to-chord ratio
+
+$$\eta := \frac{\ell}{\mathbb{E}[C_V]} = \ell\chi_-. \quad (53)$$
+
+
+
+Fig. 8. Local-conditioning approximation (LCA) accuracy across void levels  $\tilde{\mu}_f$  for a homogeneous GPIS medium. Left: transmittance  $T_-(t \chi_-)$  from first-crossing Monte Carlo sampling (solid) against the analytic LCA prediction  $\exp(-t \chi_-)$  (dashed). Legend entries report the correlation-to-chord ratio  $\eta = \ell \chi_-$  from Eqn. (54). Right: a single realization (top) and the corresponding vNDF (bottom) for each void level. The cubical crops have an optical depth of 3 in each dimension. Each vNDF is split between the empirical ensemble estimate from ray marching (left) and the analytic LCA prediction (right).
+
+Equivalently,  $1/\eta = \mathbb{E}[C_v]/\ell$  is the mean void-chord length measured in correlation lengths. When  $\eta \ll 1$ , the mean void chord spans many correlation lengths. For rapidly decaying kernels such as SE, this separation of scales allows spatial memory to fade before the next crossing. When  $\eta$  is not small, the mean void-chord length is comparable to or shorter than the correlation length, and recent history may remain informative at the next crossing.
+
+Dependence on the void level. For a homogeneous, isotropic, stationary GPIS with an SE kernel, the ratio  $\eta$  depends only on the void level. In this setting,  $\mu_{\tilde{g}} = \mathbf{0}$ ,  $a_- = \sigma_{\tilde{g}}/\sqrt{2\pi}$ , and  $\sigma_{\tilde{g}} = \sigma_f/\ell$ . Substituting these quantities into Eqn. (18) gives
+
+$$\eta = \ell \chi_- = \frac{\phi(\tilde{\mu}_f)}{\sqrt{2\pi} \Phi(\tilde{\mu}_f)}. \quad (54)$$
+
+This ratio decreases monotonically with  $\tilde{\mu}_f$ . At  $\tilde{\mu}_f = 0$ ,  $\eta = 1/\pi$ , so the mean void chord spans  $\pi$  correlation lengths. At  $\tilde{\mu}_f = 1$  and 2, it spans approximately 8.7 and 45 correlation lengths, respectively, and the ratio vanishes as  $\tilde{\mu}_f \rightarrow \infty$ .
+
+This ratio provides a qualitative guide to LCA accuracy, but not an error bound: the exact free-flight distribution also depends on the full chord statistics and the shape of the covariance kernel.
+
+RTE-equivalent GPISes. Different GPISes can induce the same LCA medium; we call them RTE-equivalent. In the homogeneous, isotropic setting above, we construct such a family by varying  $\tilde{\mu}_f$  and setting  $\ell = \eta(\tilde{\mu}_f)/\chi_-$  for a fixed  $\chi_-$ , using Eqn. (54). This preserves the extinction and phase function while changing the GPIS correlation length, chord statistics, and dependence on ray history. We compare members of this family in Sec. 7.3 to test how LCA accuracy varies with  $\eta$ ; Sec. 8 develops the general construction.
+
+
+
+### 7.3 Validation Against Realization Ensembles
+
+Fig. 8 compares realization-based transmittance and first-crossing vNDFs with the LCA for homogeneous, RTE-equivalent GPISes. Across this family, increasing  $\tilde{\mu}_f$  produces finer, more dilute realizations, while the LCA extinction and phase function remain fixed.
+
+
+
+
+
+Fig. 9. Transmittance through heterogeneous GPISes constructed from the target extinction profile shown in red (right axis). Solid curves are ensemble averages over explicit GPIS realizations, while dashed curves are the corresponding full, direction-dependent LCA predictions. Each color denotes a void-level configuration reported in the legend. Both traversal directions are shown, beginning at  $T_- = 1$  on opposite sides. Solid and dashed curves nearly coincide at high void levels, while visible discrepancies remain at lower void levels.
+
+At the ray origin, the transmittances share the same initial slope because both condition only on the point being in empty space. Further along the ray, survival provides additional information that the LCA discards. The realization-based transmittances lie below the LCA prediction, with the largest discrepancy at  $\tilde{\mu}_f = -2$ , where  $\eta \approx 0.95$ . As the void level increases and  $\eta$  decreases, both the transmittance and first-crossing vNDF approach their LCA counterparts.
+
+Long-range decay. The nearly straight tails in the semilogarithmic plot of Fig. 8 are consistent with asymptotically exponential persistence decay for stationary SE fields [Feldheim et al. 2025, Theorem 1].
+
+Intuitively, a long empty ray must remain in the void phase across many weakly correlated regions, making such paths exponentially rare. The decay rate, or persistence exponent, depends on the full correlation structure of the field [Bray et al. 2013, Sec. 6.3], whereas the LCA rate  $\chi_-$  uses only local crossing statistics. An exponential tail therefore need not have the LCA decay rate, as illustrated by the faster decay of the realization-based transmittances.
+
+Fig. 9 extends the comparison to heterogeneous GPISes. For each global correlation length, we use the homogeneous relation in Eqn. (54) to convert a prescribed linear extinction ramp into a spatially varying void level. Within the ramp, the induced mean gradient changes the projected area, so the full LCA extinction depends on both the GPIS configuration and ray direction. Each realization-based transmittance is therefore compared with its own LCA prediction. At high void levels, the curves nearly coincide in both directions; discrepancies remain at lower void levels. These results suggest that the correlation-to-chord ratio remains a useful qualitative guide to LCA accuracy under spatial variation.
+
+More detailed Gaussian first-passage methods [Lindgren 2019; Roberts and Torquato 1999] and rough-surface shadowing models that account for spatial correlations [Kapp and Brown 1994] could better reproduce realization-based transmittance. Incorporating their history dependence into transport, however, would require additional state beyond the local coefficients of the classical RTE.
+
+
+
+## 8 From Participating Media to GPISes
+
+Sec. 4 derived the extinction and scattering laws induced by a given GPIS under the LCA. We now consider the inverse problem: given a target RTE medium, what GP mean  $\mu_f(\mathbf{x})$  and covariance  $\kappa(\mathbf{x}, \mathbf{x}')$  reproduce its local transport coefficients?
+
+### 8.1 The Inversion Problem and Equivalence Families
+
+Matching a target medium requires reproducing both its free-flight law, determined by  $\chi_-$ , and its scattering law, described by  $p$ . These transport coefficients do not uniquely determine the GP: different fields can describe the same GPIS, and geometrically different GPISes can induce the same LCA medium.
+
+Exact GPIS equivalence: amplitude scaling. Replacing  $f$  with  $\lambda f$  for any smooth field  $\lambda(\mathbf{x}) > 0$  is an exact symmetry of the GPIS: the zero set  $\{\lambda f = 0\} = \{f = 0\}$  is identical, and on it  $\nabla(\lambda f) = \lambda \nabla f$ , so the surface normals are unchanged too. The NDF  $D$  and the one-sided projected areas  $a_-$  and  $a_+$  each scale by  $\lambda$ , but this factor cancels in the combinations that define the RTE quantities. Thus,  $\chi_-$ ,  $p$ , and  $D_\omega$  remain exactly unchanged.
+
+Reparameterized extinction. Since  $\mu_f(\mathbf{x})$  and  $\sigma_f(\mathbf{x})$  can only enter RTE quantities through amplitude-invariant combinations, the void level of Eqn. (50) is the natural parameter. Written in terms of  $\tilde{\mu}_f$ , the extinction coefficient Eqn. (18) reads
+
+$$\chi_-(\mathbf{x}, \hat{\omega}) = \frac{\phi(\tilde{\mu}_f(\mathbf{x}))}{\sigma_f(\mathbf{x}) \Phi(\tilde{\mu}_f(\mathbf{x}))} \cdot a_-(\mathbf{x}, \hat{\omega}), \quad (55)$$
+
+where  $a_-$  is given by Eqn. (16b). The field amplitude cancels between the two factors, leaving extinction determined by the void level  $\tilde{\mu}_f$ 
+
+
+
+Fig. 10. RTE-equivalent SE and sinc kernels with matched variance and curvature  $c_\psi = -k''(0)$ . (a) Single realizations with different microstructure. (b) Ensemble-average renders and their difference scaled by  $10\times$  (red: SE brighter; blue: sinc brighter). (c) The identical LCA rendering for both kernels.
+
+and the normalized conditional gradient statistics  $\mu_{\tilde{g}}/\sigma_f$  and  $\Sigma_{\tilde{g}}/\sigma_f^2$  for a given ray direction.
+
+RTE-equivalent families. Field rescaling changes the GP but not the GPIS. Under the LCA, the RTE equivalence of Sec. 7.2 is a strictly weaker relation: GPISes with different geometry can induce the same medium. This arises in two ways. First, after fixing  $\sigma_f(\mathbf{x})$ , the LCA reads the GP only through the pointwise triple ( $\tilde{\mu}_f(\mathbf{x})$ ,  $\mu_{\tilde{g}}(\mathbf{x})$ ,  $\Sigma_{\tilde{g}}(\mathbf{x})$ ), so any change to the kernel's long-range correlation that preserves this triple leaves every RTE quantity unchanged while altering the underlying geometry. This gives kernel-shape equivalence families. Second, distinct triples can result in the same extinction and phase function, as in the void-level families of Eqn. (54). The inversion therefore returns an equivalence family rather than a single GPIS.
+
+Kernel-shape families. For a smooth stationary isotropic covariance  $\kappa(\mathbf{x}, \mathbf{x}') = \sigma_f^2 k(r)$ , where  $r = \|\mathbf{x} - \mathbf{x}'\|$  and  $k(0) = 1$ , the covariance identities of Sec. 3.1 give
+
+$$\Sigma_{\tilde{g}} = \Sigma_g = \sigma_f^2 c_\psi \mathbf{I}, \quad \text{where} \quad c_\psi := -k''(0). \quad (56)$$
+
+With the mean field and micro-BRDF fixed, the kernel influences the LCA RTE only through its one-point variance  $\sigma_f^2$  and its curvature at zero lag  $c_\psi$ . Kernels with dramatically different shapes therefore produce identical LCA medium parameters when these two quantities match.
+
+Fig. 10 demonstrates this equivalence with unit-variance SE and sinc kernels matched in  $c_\psi$ . Their realizations and ensemble-averaged renderings differ, while their LCA renderings are identical. We give the matching condition and realization procedure in the supplemental material.
+
+
+
+Fig. 11. Converting an existing volumetric asset to a GPIS using the inversion in Sec. 8.3. We compare the target RTE rendering (left), realization-based GPIS rendering using sparse convolution (center), and the corresponding LCA rendering (right).
+
+
+
+## 8.2 Homogeneous Media
+
+Isotropic media. For a homogeneous target with constant extinction  $\chi_-$  and isotropic scattering, we use a constant mean and a stationary isotropic SE kernel. These give  $\mu_{\tilde{g}} = \mathbf{0}$  and  $\Sigma_{\tilde{g}} \propto \mathbf{I}$ , yielding a uniform NDF and, with a perfect mirror micro-BRDF, a uniform phase function (29). The extinction match then reduces to
+
+$$\frac{\phi(\tilde{\mu}_f)}{\Phi(\tilde{\mu}_f)} = \sqrt{2\pi} \ell \chi_-. \quad (57)$$
+
+Since its left-hand side decreases strictly from  $+\infty$  to 0, choosing either  $\tilde{\mu}_f$  or  $\ell$  uniquely determines the other. The resulting GPIS has mean  $\mu_f = \tilde{\mu}_f \sigma_f$  and an isotropic SE covariance with correlation length  $\ell$ , for any  $\sigma_f > 0$ .
+
+SGGX media. A homogeneous SGGX target has density  $\rho > 0$  and a symmetric positive-definite shape matrix  $\mathbf{S}$ . As shown in Sec. 4.7,  $\mu_{\tilde{g}} = \mathbf{0}$  and  $\Sigma_{\tilde{g}} = 2\pi\mathbf{S}$  recover its NDF and projected area. Using the same micro-BRDF as the target then matches its phase function. Matching its extinction  $\chi_-(\hat{\omega}) = \rho a_-(\hat{\omega})$  using Eqn. (55) gives
+
+$$\sigma_f = \frac{\phi(\tilde{\mu}_f)}{\rho \Phi(\tilde{\mu}_f)}. \quad (58)$$
+
+Choosing either  $\tilde{\mu}_f$  or  $\sigma_f$  uniquely determines the other. The resulting GP has constant mean  $\mu_f = \sigma_f \tilde{\mu}_f$  and stationary anisotropic SE covariance.
+
+$$\kappa(\mathbf{x}, \mathbf{x}') = \sigma_f^2 \exp\left(-\frac{\pi}{\sigma_f^2} (\mathbf{x} - \mathbf{x}')^\top \mathbf{S} (\mathbf{x} - \mathbf{x}')\right). \quad (59)$$
+
+Because  $\Sigma_{\tilde{g}} = 2\pi\mathbf{S}$  is fixed, varying  $\sigma_f$  also changes the kernel's correlation lengths.
+
+
+
+## 8.3 Heterogeneous Media
+
+Isotropic targets. We invert a scalar extinction field  $\chi_-(\mathbf{x})$  through a spatially varying mean and a stationary isotropic SE covariance with fixed  $\sigma_f$  and  $\ell$ . At each point, we solve Eqn. (57) for  $\tilde{\mu}_f(\mathbf{x})$  and set  $\mu_f(\mathbf{x}) = \sigma_f \tilde{\mu}_f(\mathbf{x})$ . The extinction match becomes exact as  $\ell \rightarrow 0$ , but is approximate at finite correlation lengths because Eqn. (57) neglects the gradient of the void level. We use this conversion for the heterogeneous targets in our results, as illustrated in Fig. 11.
+
+Induced asymmetry. Spatial variation in the void level induces a nonzero conditional mean gradient, making the NDF asymmetric
+
+and introducing directional dependence into the extinction. Using  $\sigma_f = \ell \sigma_{\tilde{g}}$ , we can write  $\mu_{\tilde{g}} = \sigma_f \nabla \tilde{\mu}_f$  as
+
+
+$$\frac{\|\mu_{\tilde{g}}(\mathbf{x})\|}{\sigma_{\tilde{g}}} = \ell \|\nabla \tilde{\mu}_f(\mathbf{x})\|. \quad (60)$$
+
+When the void level changes little over one correlation length,  $\mu_{\tilde{g}}$  is small relative to the random gradient fluctuations. The NDF is then nearly isotropic, and the extinction closely matches the target.
+
+Exact asymmetric-NDF constructions. Although induced asymmetry is undesirable for isotropic targets, it can be used to match asymmetric target NDFs. This extends our inverse construction beyond classical symmetric microflake models such as SGGX.
+
+Consider a target from the GPIS family of Sec. 4.5, with spatially varying  $\mu_{\tilde{g}}(\mathbf{x})$  and constant  $\Sigma_{\tilde{g}}$ . We fix  $\sigma_f > 0$ , choose a stationary covariance matching  $\Sigma_{\tilde{g}}$ , and seek a void-level field satisfying
+
+$$\nabla \tilde{\mu}_f(\mathbf{x}) = \frac{\mu_{\tilde{g}}(\mathbf{x})}{\sigma_f}. \quad (61)$$
+
+This requires  $\mu_{\tilde{g}}/\sigma_f$  to be a gradient field, whose scalar potential determines  $\tilde{\mu}_f$  up to an additive constant. Setting  $\mu_f(\mathbf{x}) = \sigma_f \tilde{\mu}_f(\mathbf{x})$  then matches the target NDF exactly. Varying the additive constant yields a corresponding family of extinction fields through Eqn. (55). A prescribed extinction field can be matched simultaneously only if it belongs to this family.
+
+For a spatially constant asymmetric NDF ( $\mu_{\tilde{g}} = \mathbf{c} \neq \mathbf{0}$ ), the compatibility condition holds automatically and the required mean is linear:  $\mu_f(\mathbf{x}) = \mathbf{c} \cdot \mathbf{x} + c_0$ .
+
+Constant-void-level alternative. Alternatively, holding  $\tilde{\mu}_f$  constant gives  $\mu_{\tilde{g}} = \mathbf{0}$ , allowing pointwise matches to isotropic and SGGX targets through spatially varying covariance statistics. However, realizing these statistics with a globally valid nonstationary covariance is nontrivial. The probability of empty space is also uniform, and there is no distinct mean surface. We therefore do not use this construction in our results.
+
+## 8.4 Choosing Among a Family of GPISes
+
+For the isotropic constructions above, decreasing  $\ell$  at fixed target extinction raises  $\tilde{\mu}_f$  through Eqn. (57). This changes the underlying geometry while providing two benefits:
+
+1. (1) Improved LCA accuracy. The correlation-to-chord ratio  $\eta$  decreases (54), moving the GPIS toward the dilute regime validated in Sec. 7.3.
+2. (2) Reduced NDF asymmetry. For the heterogeneous conversion, the residual  $\ell \|\nabla \tilde{\mu}_f\|$  decreases (60), bringing the NDF and extinction closer to their isotropic targets.
+
+Fig. 12 compares three conversions of the same heterogeneous smoke medium using successively smaller global correlation lengths. The realizations change from dense, interlocking structures to finer, sparser grains. As the induced NDF asymmetry decreases, the LCA render approaches the target RTE render, with image MSE falling by roughly an order of magnitude across the sweep.
+
+We recommend choosing  $\ell$  so that both  $\ell \chi_-(\mathbf{x})$  and  $\ell \|\nabla \tilde{\mu}_f(\mathbf{x})\|$  are small in the regions of interest. Shorter correlation lengths improve approximation accuracy while producing finer, sparser geometry, so the final choice also depends on the desired geometric structure.
+
+
+
+Fig. 12. Choosing the void level for heterogeneous media. We convert the target RTE medium (left) using successively smaller global correlation lengths  $\ell$ , which raise the void level. Single GPIS realizations (top) change from dense, interlocking structures to finer, sparser grains. The corresponding LCA renderings (bottom) approach the target, with decreasing MSE. Per-pixel absolute luminance differences are shown on a shared scale, with brighter values indicating larger error. The increasingly dilute geometry also favors LCA accuracy (Sec. 7.3).
+
+
+
+## 9 Implementation and Results
+
+### 9.1 Implementation
+
+We extend the GPIS implementations of Seyb et al. [2024] and Xu et al. [2025], built on Tungsten [Bitterli 2018]. Our method uses standard volume rendering, with extinction and phase functions computed from pointwise GP statistics. All equal-time experiments used delta tracking and ran on an AMD Ryzen 9 5900XT CPU (16 cores, 32 threads).
+
+The supplemental material includes a browser-based GPIS explorer for normal distributions and scattering. It allows variation of GP parameters, comparing analytic and Monte Carlo results alongside Beckmann, SGGX, and GGX references, and inspecting the corresponding 3D single realizations.
+
+We used AI assistance in developing the supplemental GPIS explorer, testing our Tungsten code, and checking mathematical derivations. We developed the research ideas and methods and reviewed and verified all AI output.
+
+### 9.2 Forward Rendering
+
+Fig. 13 compares our method with sparse-convolution GPIS using renewal-half+ conditioning [Xu et al. 2025], with equal 15 min budgets per scene. This baseline substantially outperforms the function-space sampling of Seyb et al. [2024], which we therefore omit.
+
+DRAGON and STATUE use nonstationary squared-exponential kernels. For DISNEY CLOUD, we approximate the original Henyey–Greenstein phase function ( $g = 0.877$ ) by isotropic scattering using the first-order similarity relation [Zhao et al. 2014], scaling the target extinction by  $(1 - g)$ . We then convert this medium to GPIS parameters using the heterogeneous inversion of Sec. 8.3.
+
+The two methods use different conditioning approximations and therefore converge to slightly different images. We measure each method’s MSE against its own converged render, so the reported ratios measure estimator efficiency. Full-resolution renders are provided in the supplemental for comparing the two transport models.
+
+By avoiding realization synthesis and per-path conditioning, our method achieves  $23.5\text{--}34.8\times$  lower MSE across the three scenes at
+
+equal time. The STATUE scene also shows that the same medium can transition continuously between hard-surface and volumetric appearance within a single object.
+
+### 9.3 Surface Scattering
+
+Fig. 14 compares the geometry and multiply scattered appearance of height-field and full-sphere Beckmann models across increasing roughness. For this comparison, we instantiate the full-sphere family with  $\mu_{\tilde{g}} = \hat{z}$  and  $\Sigma_{\tilde{g}} = (\alpha^2/2)\mathbf{I}$ , providing an isotropic one-parameter slice analogous to classical Beckmann. The models behave similarly at low roughness but diverge as roughness increases: the height field develops increasingly sharp spikes, whereas the full-sphere model transitions toward porous geometry. At high roughness, the full-sphere model avoids the extreme darkening exhibited by its height-field counterpart.
+
+Whereas Fig. 14 uses an isotropic covariance, Fig. 15 demonstrates the broader family enabled by a full  $\Sigma_{\tilde{g}}$ , comparing isotropic scattering with in-plane and out-of-plane anisotropy.
+
+### 9.4 Inverting Radiance Fields
+
+From density grid to geometry and normals. Fig. 16 shows the geometry and shading normals recovered from a trained radiance field. We train TensoRF [Chen et al. 2022] on all 100 views of the LEGO scene and convert its density grid to GPIS parameters using the pointwise inversion of Sec. 8.3. The void level defines the mean surface, and the direction of  $\mu_{\tilde{g}}$  gives its shading normals. This yields a renderable asset without mesh extraction or further reconstruction.
+
+We also bake the field’s view-averaged color as diffuse albedo and render the asset under modified illumination. This relighting is approximate because the baked color retains shading from the training illumination. Recovering illumination-independent albedo would require an additional decomposition [Boss et al. 2021; Jin et al. 2023; Zhang et al. 2021].
+
+Rendering reconstruction uncertainty. In Fig. 17, we apply the same conversion to TensoRF reconstructions trained on increasing subsets of the 100 LEGO views. Regions with limited view coverage have a
+
+
+
+Fig. 13. Equal-time GPIS rendering on Dragon, Statue, and Disney Cloud. The left column shows 1024-spp renderings from the 1D sparse-convolution method of Xu et al. [2025] with renewal-half+ conditioning. The middle and right columns compare that method and ours, respectively, after 15 min per scene. Each method's MSE is measured against its own converged rendering. Annotations report sample counts and MSEs, with "speedup" denoting the MSE ratio relative to the sparse-convolution baseline for each image or marked region.
+
+
+
+Fig. 14. As roughness �� of a gold Beckmann BRDF increases (left to right) the corresponding microsurface of the heightfield becomes unreasonably spiky and the BRDF strongly saturates and darkens (top right). Our new spherical Beckmann NDF offers a close match for low roughness (left) but offers a stable high roughness limit (bottom right) by modeling porous materials, at negligible extra rendering cost.
+
+
+
+Fig. 15. Full-sphere GPIS BRDFs under varying Σ��¯ with visualizations of microsurface geometry (top) and multiply scattered appearance (bottom). The columns span isotropic scattering, in-plane anisotropy, and correlations between the lateral and depth gradient components, which tilt the anisotropy out of the mean surface plane.
+
+
+
+
+
+1 Fig. 16. A lifted radiance field is a renderable asset. We train TensoRF [Chen et al. 2022] on all 100 training views of the Lego scene and convert its density grid to GPIS parameters. (a) The mean surface, with the field's view-averaged color used as diffuse albedo. (b) The normal map of the mean surface. (c) The same asset under new illumination. Relighting is approximate because the baked color retains shading from the training illumination. No mesh extraction, second reconstruction stage, or additional inverse rendering is required.
+
+volumetric appearance after conversion. To visualize this ambiguity, we measure the total length along each camera ray over which ��˜�� (x) lies between −2 and +2. Starting from 20 views opposite the camera, adding five views facing the camera reduces this length at the front; ten more views around the ring reduce it along the flanks; and all 100 views reduce it nearly to zero.
+
+The conversion exposes ambiguity encoded in the reconstructed density, without providing calibrated uncertainty. It inherits the model's errors: a confidently incorrect reconstruction can still yield a small measured length.
+
+## 10 Discussion, Limitations, and Conclusion
+
+Comparison to Huang et al. [2026]. Our derivation begins with general GP statistics, whereas Huang et al. [2026] extend microfacet theory into a volume around a macro-surface. Their assumption that local field and gradient values are independent of those at the ray origin plays a similar role to our local-conditioning approximation. For their linear-ramp mean and stationary, axis-aligned SE kernel, the extinction coefficient, NDF, and vNDF coincide algebraically with ours; the phase functions also agree for the same conductor micro-BRDF.
+
+Our formulation handles nonstationary means and covariances, including the conditional-gradient corrections in Eqn. \(5\) and tilted anisotropy. We analytically establish the projected-area normalization \(23\) and NDF first-moment identity \(31\), and recover Beckmann in the height-field limit (Appx. C.1\). Our gradient-space construction samples the vNDF exactly (Alg. 1\), while their sampler uses a mixture of Beckmann-vNDF and uniform-hemisphere proposals. We further derive masking and shadowing for full-sphere Beckmann and GGX surface models (Sec. 5\) and construct the inverse map from RTE parameters to GPIS specifications (Sec. 8\).
+
+Memory and correlation. The main approximation in our construction is local conditioning: at each prospective collision, we condition on the current point being in the void and discard earlier ray observations. In homogeneous media, this yields exponential free flights, whereas those of the underlying GPIS are generally non-exponential. Our comparisons show larger discrepancies in concavities narrower
+
+
+
+1 Fig. 17. Converting radiance fields to GPISes visualizes reconstruction ambiguity. We train TensoRF [Chen et al. 2022] on growing subsets of the 100 Lego views and convert each density grid to GPIS parameters. Left to right: 20 views opposite the camera, five added facing the camera, ten added around the ring, and all 100. Ring insets show training-view azimuths; orange marks newly added views, and the camera icon marks the fixed render viewpoint. Top row: GPIS renderings, with ��˜�� &gt; +2 treated as vacuum to remove floaters. Bottom row: total ray length over which ��˜�� lies between −2 and +2, shown on a shared color scale. White indicates no density along the ray. Additional views reduce the measured length in the regions they constrain. This visualizes ambiguity in the reconstructed density, without providing calibrated uncertainty.
+
+than the correlation length. Agreement generally improves when the mean void chord is long relative to that length, so crossings are sparse on the scale of the correlation. Non-exponential transport [Bitterli et al. 2018; Jarabo et al. 2018; Larsen and Vasques 2011] and Gaussian first-passage models [Roberts and Torquato 1999] offer possible ways to restore part of this missing history.
+
+Scope of the inverse map. Our inverse map exactly matches pointwise LCA coefficients for homogeneous isotropic and SGGX media and compatible heterogeneous targets (Secs. 8.2 and 8.3\). Extinction and scattering must be jointly representable by our GPIS NDF families and chosen micro-BRDF, ensuring consistency between attenuation and the underlying surface-normal statistics. The heterogeneous conversion used in our results is approximate: spatial variation in ��˜�� induces NDF asymmetry and directional extinction \(60\). The supplemental construction approximately matches spatially varying covariance statistics when parameters vary slowly over a correlation length. Future work could develop nonstationary covariance kernels that exactly reproduce compatible spatially varying extinction and scattering under the LCA, without requiring parameters to vary slowly over a correlation length.
+
+Two-sided micro-BSDFs and Extensions. The natural micro-BSDF for a GPIS separating void from solid matter is an opaque surface model (mirror or Lambertian), but in principle any physically valid ���� may replace the mirror in Eqn. \(28\). In the dilute regime (Sec. 8\) where �� &lt; 0 regions are rare and small, such as water droplets suspended in air—a dielectric micro-BSDF or Lorenz–Mie micro-phase function could summarize the scattering (and negligible traversal) within each solid particle. If macroscopic transport within the �� &lt; 0
+
+regions is desired, a stateful extension is needed. Up-crossings events at which the field increases through zero (��(��) &gt; 0) —are governed by ��+(��ˆ ) \(30\). By the same local-conditioning argument as Sec. 4.3, conditioned on �� (��) &lt; 0, the up-crossing extinction coefficient is
+
+$$\chi_+(\mathbf{r}(t), \hat{\omega}) = \frac{\phi(\mu_f(t)/\sigma_f(t))}{\sigma_f(t) \Phi(-\mu_f(t)/\sigma_f(t))} \cdot a_+(\mathbf{r}(t), \hat{\omega}), \quad (62)$$
+
+parallel to Eqn. \(18\) but with P(�� (��) &lt; 0) in the denominator. Transmission toggles the medium phase; reflection preserves it. Subsequent free flights use ��− in the void and ��+ in the solid.
+
+Differentiable rendering and reconstruction. Our conversion provides a route to optimizing GPIS parameters using existing volumetric differentiable-rendering methods. The void level, gradient statistics, and micro-BSDF parameters encode a probabilistic surface, its local orientation and normal variation, and its material response. Jointly reconstructing these properties is one promising direction for future work.
+
+Conclusion. We connect GPISes and participating media through an anisotropic transport model with closed-form extinction and NDFs under the local-conditioning approximation. Our full-sphere Beckmann and GGX families support exact visible-normal sampling, analytic masking–shadowing, and single-scattering models for specular microsurfaces, with extensions to multiple scattering. The framework recovers SGGX in the centered case and Beckmann– Smith in the height-field limit. Our realization-free renderer achieves 23–34× lower equal-time estimator MSE than the realization-based
+
+baseline. The inverse map constructs GPISes from compatible volumetric assets and radiance-field reconstructions.
+
+
+
+## References
+
+Jean-Marc Azaïs and Mario Wschebor. 2009. Level Sets and Extrema of Random Processes and Fields. John Wiley & Sons, Hoboken, NJ. doi:10.1002/9780470434642.
+
+Petr Beckmann. 1965. "Shadowing of Random Rough Surfaces." IEEE Transactions on Antennas and Propagation, 13, 3. doi:10/c3g9cs.
+
+Petr Beckmann and André Spizzichino. 1963. The Scattering of Electromagnetic Waves from Rough Surfaces. Pergamon Press, NY.
+
+[SW] Benedikt Bitterli, Tungsten Renderer 2018. URL: .
+
+Benedikt Bitterli and Eugene d'Eon. 2022. "A Position-Free Path Integral for Homogeneous Slabs and Multiple Scattering on Smith Microfacets." Computer Graphics Forum (Proceedings of the Eurographics Symposium on Rendering), 41, 4. doi:10/k646.
+
+Benedikt Bitterli, Srinath Ravichandran, Thomas Müller, Magnus Wrenninge, Jan Novák, Steve Marschner, and Wojciech Jarosz. Nov. 2018. "A Radiative Transfer Framework for Non-Exponential Media." ACM Transactions on Graphics (Proceedings of SIGGRAPH Asia), 37, 6. (Nov. 2018), 225:1–225:17. doi:10/gfz2cm.
+
+Mark Boss, Raphael Braun, Varun Jampani, Jonathan T. Barron, Ce Liu, and Hendrik P.A. Lensch. Oct. 2021. "NeRD: Neural Reflectance Decomposition from Image Collections." In: IEEE/CVF International Conference on Computer Vision (ICCV). (Oct. 2021), 12664–12674. doi:10/grtgcw.
+
+Alan J Bray, Satya N Majumdar, and Grégory Schehr. June 2013. "Persistence and First-Passage Properties in Nonequilibrium Systems." Advances in Physics, 62, 3. (June 2013). doi:10/gfv7wc.
+
+Subrahmanyan Chandrasekhar. 1960. Radiative Transfer. Dover Books on Advanced Mathematics. Dover Publications, NY. ISBN: 0-486-60590-6.
+
+Anpei Chen, Zexiang Xu, Andreas Geiger, Jingyi Yu, and Hao Su. 2022. "TensoRF: Tensorial Radiance Fields." In: ECCV (Lecture Notes in Computer Science). Vol. 13692. Springer, 333–350. doi:10/gr8whc.
+
+Junjie Chen, Zhimin Fan, Ling-Qi Yan, Junqiu Zhu, Yanwen Guo, Kun Zhou, and Jie Guo. July 2026. "Bounding Stratified Bernoulli Impulses for Ray Marching Gaussian Process Implicit Surfaces." ACM Trans. Graph., 45, 4. Article 120. (July 2026), 15 pages. doi:10/rk86.
+
+Robert L. Cook and Kenneth E. Torrance. Aug. 1981. "A Reflectance Model for Computer Graphics." Computer Graphics (Proceedings of SIGGRAPH), 15, 3. (Aug. 1981), 307–316. doi:10/br5ps6.
+
+Yuang Cui, Gaole Pan, Jian Yang, Lei Zhang, Ling-Qi Yan, and Beibei Wang. Dec. 11, 2023. "Multiple-Bounce Smith Microfacet BRDFs Using the Invariance Principle." In: ACM SIGGRAPH Asia Conference Papers. Association for Computing Machinery, New York, NY, USA. (Dec. 11, 2023), 1–10. ISBN: 979-8-4007-0315-7. doi:10/gtb5zr.
+
+Eugene d'Eon. Aug. 2023. "Student-T and beyond: Practical Tools for Multiple-Scattering BSDFs with General NDFs." In: ACM SIGGRAPH Talks. ACM, New York, NY, USA. (Aug. 2023). doi:10/mr42.
+
+Eugene d'Eon and Andrea Weidlich. 2024. "VMF Diffuse: A Unified Rough Diffuse BRDF." Computer Graphics Forum (Proceedings of the Eurographics Symposium on Rendering), 43, 4. doi:10.1111/cgf.15149.
+
+Eugene d'Eon. 2016. The anisotropic cross-section for the spherical Gaussian medium. Tech. rep. .
+
+Jonathan Dupuy, Eric Heitz, and Eugene d'Eon. 2016. "Additional Progress towards the Unification of Microfacet and Microflake Theories." In: Proceedings of EGSR (Experimental Ideas & Implementations). Eurographics Association, 55–63. ISBN: 978-3-03868-019-2. doi:10/gfz72z.
+
+James Durbin. 1985. "The first-passage density of a continuous Gaussian process to a general boundary." Journal of Applied Probability, 22, 1, 99–122. .
+
+Naomi D. Feldheim, Ohad N. Feldheim, and Sumit Mukherjee. 2025. "Persistence and Ball Exponents for Gaussian Stationary Processes." Communications on Pure and Applied Mathematics, 78, 10, 1949–2000. doi:10/rngk.
+
+Baptiste Genest and David Coeurjolly. July 2026. "Uncertainty-aware geometry processing on Gaussian Process Implicit Surfaces." ACM Trans. Graph., 45, 4. Article 44. (July 2026), 14 pages. doi:10/rmzj.
+
+Eric Heitz. June 30, 2014. "Understanding the Masking-Shadowing Function in Microfacet-Based BRDFs." Journal of Computer Graphics Techniques (JCGT), 3, 2. (June 30, 2014), 48–107. .
+
+Eric Heitz, Jonathan Dupuy, Cyril Crassin, and Carsten Dachsbacher. July 2015. "The SGGX Microflake Distribution." ACM Transactions on Graphics (Proceedings of SIGGRAPH), 34, 4. (July 2015), 48:1–48:11. doi:10/f7m2n2.
+
+Eric Heitz, Johannes Hanika, Eugene d'Eon, and Carsten Dachsbacher. July 2016. "Multiple-Scattering Microfacet BSDFs with the Smith Model." ACM Transactions on Graphics (Proceedings of SIGGRAPH), 35, 4. (July 2016). doi:10/f89kkm.
+
+Minghao Huang, Yuang Cui, Beibei Wang, and Lingqi Yan. 2026. Macrofacet Theory for Gaussian Process Statistical Surfaces. (2026).  arXiv:2603.00280 [cs.GR].
+
+Wenzel Jakob, Adam Arbree, Jonathan T. Moon, Kavita Bala, and Steve Marschner. July 2010. "A Radiative Transfer Framework for Rendering Materials with Anisotropic Structure." ACM Transactions on Graphics (Proceedings of SIGGRAPH), 29, 4. (July 2010), 53:1–53:13. ISBN: 9781450302104. doi:10/ftr7st.
+
+Adrian Jarabo, Carlos Aliaga, and Diego Gutierrez. July 2018. "A Radiative Transfer Framework for Spatially-Correlated Materials." ACM Transactions on Graphics (Proceedings of SIGGRAPH), 37, 4. (July 2018), 83:1–83:13. doi:10/gd52qq.
+
+Haian Jin, Isabella Liu, Peijia Xu, Xiaoshuai Zhang, Songfang Han, Sai Bi, Xiaowei Zhou, Zexiang Xu, and Hao Su. 2023. "TensoRF: Tensorial Inverse Rendering." In: IEEE/CVF International Conference on Computer Vision and Pattern Recognition (CVPR), 165–174. Retrieved July 5, 2024 from [https://openaccess.thecvf.com/content/CVPR2023/html/Jin\\_TensoRF\\_Tensorial\\_Inverse\\_Rendering\\_CVPR\\_2023\\_paper.html](https://openaccess.thecvf.com/content/CVPR2023/html/Jin_TensoRF_Tensorial_Inverse_Rendering_CVPR_2023_paper.html).
+
+M. Kac. Apr. 1943. "On the Average Number of Real Roots of a Random Algebraic Equation." Bulletin of the American Mathematical Society, 49, 4. (Apr. 1943), 314–320.
+
+David Anthony Kapp and Gary S Brown. 1994. "Effect of correlation between shadowing and shadowed points in rough surface scattering." IEEE Transactions on Antennas and Propagation, 42, 8, 1154–1160. .
+
+Bernhard Kerbl, Georgios Kopanas, Thomas Leimkuehler, and George Drettakis. July 26, 2023. "3D Gaussian Splatting for Real-Time Radiance Field Rendering." ACM Transactions on Graphics (Proceedings of SIGGRAPH), 42, 4. (July 26, 2023), 139:1–139:14. doi:10/gskvgh.
+
+Edward W. Larsen and Richard Vasques. 2011. "A Generalized Linear Boltzmann Equation for Non-Classical Particle Transport." Journal of Quantitative Spectroscopy and Radiative Transfer, 112, 4, 619–631. doi:10/dfbvmn.
+
+Georg Lindgren. 2019. "Gaussian Integrals and Rice Series in Crossing Distributions—to Compute the Distribution of Maxima and Other Features of Gaussian Processes." Stat. Sci., 34, 1. JSTOR: 26771039. doi:10/gjc5d8.
+
+K. Lumme, J. I. Peltoniemi, and W. M. Irvine. 1990. "Diffuse reflection from a stochastically bounded, semi-infinite medium." Transport Theory and Statistical Physics, 19, 3–5, 317–332. .
+
+Stephen R. Marschner, Stephen H. Westin, Adam Arbree, and Jonathan T. Moon. July 2005. "Measuring and modeling the appearance of finished wood." ACM Trans. Graph., 24, 3. (July 2005), 727–734. doi:10.1145/1073204.1073254.
+
+Ben Mildenhall, Pratul P. Srinivasan, Matthew Tancik, Jonathan T. Barron, Ravi Ramamoorthi, and Ren Ng. 2020. "NeRF: Representing Scenes as Neural Radiance Fields for View Synthesis." In: European Conference on Computer Vision (ECCV). doi:10/gn9vj9.
+
+Bailey Miller, Hanyu Chen, Alice Lai, and Ioannis Gkioulekas. 2024. "Objects as Volumes: A Stochastic Geometry View of Opaque Solids." In: IEEE/CVF International Conference on Computer Vision and Pattern Recognition (CVPR), 87–97. doi:10/gt258p.
+
+Jan Novák, Iliyan Georgiev, Johannes Hanika, and Wojciech Jarosz. May 1, 2018. "Monte Carlo Methods for Volumetric Light Transport Simulation." Computer Graphics Forum (Proceedings of Eurographics State of the Art Reports), 37, 2. (May 1, 2018), 551–576. doi:10/gd2jqq.
+
+Jouni I Peltoniemi. 1993. "Radiative transfer in stochastically inhomogeneous media." Journal of Quantitative Spectroscopy and Radiative Transfer, 50, 6, 655–671. [https://doi.org/10.1016/0022-4073\(93\)90033-E](https://doi.org/10.1016/0022-4073(93)90033-E).
+
+Matt Pharr, Wenzel Jakob,
+
+Kehan Xu, Benedikt Bitterli, Eugene d'Eon, and Wojciech Jarosz. Dec. 4, 2025. "Practical Gaussian Process Implicit Surfaces with Sparse Convolutions." ACM Transactions on Graphics (Proceedings of SIGGRAPH Asia), 44, 6, (Dec. 4, 2025), 188:1–188:18. doi:10.1145/3763329.
+
+Xiuming Zhang, Pratul P. Srinivasan, Boyang Deng, Paul Debevec, William T. Freeman, and Jonathan T. Barron. Dec. 10, 2021. "NeRFactor: Neural Factorization of Shape and Reflectance under an Unknown Illumination." ACM Transactions on Graphics (Proceedings of SIGGRAPH Asia), 40, 6, (Dec. 10, 2021), 237:1–237:18. doi:10/gqkpvd.
+
+Shuang Zhao, Ravi Ramamoorthi, and Kavita Bala. July 2014. "High-Order Similarity Relations in Radiative Transfer." ACM Transactions on Graphics (Proceedings of SIGGRAPH), 33, 4, (July 2014), 104:1–104:12. doi:10/f6cz6p.
+
+Zhiqian Zhou, Dario Seyb, and Shuang Zhao. 2026. "Adaptive Ray Marching for Rendering Gaussian Process Implicit Surfaces." In: ACM SIGGRAPH Conference Papers Article 135. ACM, New York, NY, USA, 9 pages. doi:10/rk87.
+
+
+
+## A Derivation of the NDF Radial Integral
+
+Using the scalars  $A, B, C$  from Eqn. (26), with dependence on  $\hat{n}$  suppressed, the radial integral in Eqn. (22), before Gaussian normalization, is
+
+$$I(\hat{n}) = \int_0^\infty r^3 \exp\left[-\frac{1}{2} (Ar^2 - 2Br + C)\right] dr. \quad (63)$$
+
+Completing the square and substituting  $u = \sqrt{A}r - b$ , where  $b = B/\sqrt{A}$ , gives
+
+$$I(\hat{n}) = \frac{e^{(b^2-C)/2}}{A^2} \int_{-b}^\infty (u+b)^3 e^{-u^2/2} du. \quad (64)$$
+
+Expanding the cubic requires the following truncated Gaussian integrals. The last two follow by integration by parts using  $d(e^{-u^2/2}) = -ue^{-u^2/2} du$ :
+
+$$\begin{aligned} \int_{-b}^\infty e^{-u^2/2} du &= \sqrt{2\pi} \Phi(b), \\ \int_{-b}^\infty ue^{-u^2/2} du &= \sqrt{2\pi} \phi(b), \\ \int_{-b}^\infty u^2 e^{-u^2/2} du &= \sqrt{2\pi} [\Phi(b) - b\phi(b)], \\ \int_{-b}^\infty u^3 e^{-u^2/2} du &= \sqrt{2\pi} (b^2 + 2)\phi(b). \end{aligned}$$
+
+Substituting these moments and collecting terms gives
+
+$$\begin{aligned} \int_{-b}^\infty (u+b)^3 e^{-u^2/2} du &= \sqrt{2\pi} [(b^2 + 2)\phi(b) + b(b^2 + 3)\Phi(b)]. \end{aligned} \quad (65)$$
+
+Substituting into Eqn. (64) and restoring the Gaussian normalization  $(2\pi)^{-3/2} |\Sigma_{\hat{g}}|^{-1/2}$  from Eqn. (1) gives Eqn. (27).
+
+
+
+## B Masking and Shadowing for BRDF-Compatible GPISes
+
+We derive the marginal masking function  $G_1(\hat{\omega}_*)$  and the bistatic masking-shadowing function  $G_{12}(\hat{\omega}_i, \hat{\omega}_0)$  from directional transmittances for both the Gaussian and GGX families.
+
+One-sided projected areas. For a BRDF-compatible GPIS,  $\mu_{\hat{g}} = \hat{z}$ , and the precision mixture of Sec. 4.8 preserves this mean. Thus, along an outward direction  $\hat{\omega}_*$ ,  $\mu_{\hat{g}} = \hat{\omega}_* \cdot \hat{z} = \cos \theta_* > 0$ .
+
+Since  $dz/dt = \cos \theta_*$ , changing variables from ray length to height in the extinction integral divides the projected-area factor by  $\cos \theta_*$ .
+
+We therefore define Smith's auxiliary function as
+
+
+$$\Lambda(\hat{\omega}_*) := \frac{a_-(\hat{\omega}_*)}{\cos \theta_*}. \quad (66)$$
+
+As shown below, this is the exponent in the outgoing transmittance.
+
+Set  $\nu = \cos \theta_* / \sigma_{\hat{g}}$ . Substituting the Gaussian and heavy-tailed projected areas from Eqns. (16b) and (36) into Eqn. (66) gives
+
+$$\Lambda(\hat{\omega}_*) = \begin{cases} \frac{\phi(\nu)}{\nu} - \Phi(-\nu), & \text{Gaussian,} \\ \frac{\sqrt{1+2/\nu^2} - 1}{2}, & \text{GGX.} \end{cases} \quad (67)$$
+
+For GGX,  $\sigma_{\hat{g}}$  denotes the scale before mixing. In either case,
+
+
+$$a_-(\hat{\omega}_*) = \cos \theta_* \Lambda(\hat{\omega}_*). \quad (68)$$
+
+Since mixing preserves the mean gradient, the asymmetry identity (32) holds for both families. For the opposite direction, it gives
+
+$$\begin{aligned} a_-(-\hat{\omega}_*) &= a_-(\hat{\omega}_*) + \cos \theta_* \\ &= \cos \theta_* [1 + \Lambda(\hat{\omega}_*)]. \end{aligned} \quad (69)$$
+
+Directional transmittances. Set  $u = \Phi(z/\sigma_f)$ . As specified in Sec. 5.1, both families use the height-dependent occupancy factor of Eqn. (18) with their respective, spatially constant projected areas:
+
+$$\chi_-(z, \hat{\omega}) = \frac{\phi(z/\sigma_f)}{\sigma_f u} a_-(\hat{\omega}). \quad (70)$$
+
+For an outward ray  $\mathbf{r}(t)$  starting at height  $z$ , transmittance follows by integrating extinction over ray length:
+
+$$T_-(z \rightarrow \infty, \hat{\omega}_*) = \exp\left[-\int_0^\infty \chi_-(\mathbf{r}(t), \hat{\omega}_*) dt\right]. \quad (71)$$
+
+Changing variables using  $dz' = \cos \theta_* dt$  and  $u' = \Phi(z'/\sigma_f)$ , with  $du' = \phi(z'/\sigma_f) dz' / \sigma_f$ , the occupancy integral becomes
+
+$$\int_z^\infty \frac{\phi(z'/\sigma_f)}{\sigma_f \Phi(z'/\sigma_f)} dz' = \int_u^1 \frac{du'}{u'} = -\ln u. \quad (72)$$
+
+Substituting this result and using Eqn. (68) gives
+
+
+$$\begin{aligned} T_-(z \rightarrow \infty, \hat{\omega}_*) &= \exp\left[\frac{a_-(\hat{\omega}_*)}{\cos \theta_*} \ln u\right] \\ &= u^{\Lambda(\hat{\omega}_*)}. \end{aligned} \quad (73)$$
+
+For the incoming direction  $-\hat{\omega}_*$ ,  $dz' = -\cos \theta_* dt$  reverses the integration bounds. The same occupancy integral therefore gives
+
+$$T_-(\infty \rightarrow z, -\hat{\omega}_*) = u^{a_-(-\hat{\omega}_*)/\cos \theta_*} = u^{1+\Lambda(\hat{\omega}_*)}, \quad (74)$$
+
+using Eqn. (69).
+
+Marginal masking. The outgoing transmittance gives an escape probability that depends on both height and direction. To obtain a masking function that depends only on direction, we average this probability over all crossing heights. For a fixed direction, the Kac-Rice rate  $p_f(0)a_-(-\hat{\omega}_*)$  varies with height only through  $p_f(0)$ , so this density supplies the relative weights in the average. Using
+
+$$p_f(0) dz = \frac{\phi(z/\sigma_f)}{\sigma_f} dz = du, \quad (75)$$
+
+we obtain
+
+$$\begin{aligned} G_1(\hat{\omega}_*) &= \int_{-\infty}^{\infty} T_-(z \rightarrow \infty, \hat{\omega}_*) p_f(0) dz \\ &= \int_0^1 u^{\Lambda(\hat{\omega}_*)} du = \frac{1}{1 + \Lambda(\hat{\omega}_*)}. \end{aligned} \quad (76)$$
+
+Bistatic masking. Under the local-conditioning approximation, we model bistatic distant masking by treating the two escape paths as conditionally independent given their shared crossing height. This neglects directional visibility correlations between the paths. We average the product of their transmittances over crossing heights.
+
+$$\begin{aligned} G_{12}(\hat{\omega}_i, \hat{\omega}_o) &= \int_0^1 u^{\Lambda(\hat{\omega}_i)} u^{\Lambda(\hat{\omega}_o)} du \\ &= \frac{1}{1 + \Lambda(\hat{\omega}_i) + \Lambda(\hat{\omega}_o)}. \end{aligned} \quad (77)$$
+
+The shared height couples the two directions through this average, recovering Eqn. (41).
+
+Checks. The symmetry of  $G_{12}(\hat{\omega}_i, \hat{\omega}_o)$  under exchange of its arguments is consistent with BRDF reciprocity. As  $\Lambda(\hat{\omega}_o) \rightarrow 0$ , Eqn. (77) reduces to  $G_1(\hat{\omega}_i)$ , so an unobstructed outgoing direction introduces no additional shadowing.
+
+### C GPIS height-field limit
+
+We examine the height-field limit of the GPIS NDF, one-sided projected area, and transmittance. The NDF reduces to the Beckmann distribution, while the projected area and transmittance under local conditioning recover Smith's marginal and height-conditional masking functions, respectively.
+
+Height-field setup. Let  $f(x, y, z) = z - h(x, y)$ , where  $h$  is a stationary, zero-mean 2D GP with height variance  $\sigma_h^2$ , spatial covariance  $\kappa_h(\Delta x, \Delta y)$ , and slope variance  $\sigma_m^2 = -\kappa_h''(0)$ . The field mean is  $\mu_f = z$ , the field variance  $\sigma_f^2 = \sigma_h^2$  is constant, and stationarity forces the cross-covariance  $\sigma_{fg} = 0$ . The conditional gradient statistics therefore equal their unconditional counterparts:  $\mu_{\tilde{g}} = \nabla \mu_f = \hat{z}$  and  $\Sigma_{\tilde{g}} = \Sigma_g$ . We parameterize the gradient covariance as
+
+$$\Sigma_{\tilde{g}} = \text{diag}(\epsilon_h, \epsilon_h, \epsilon_z), \quad (78)$$
+
+where  $\epsilon_h = \sigma_m^2$  is the horizontal gradient variance and  $\epsilon_z \rightarrow 0$  in the height-field limit.
+
+
+
+#### C.1 Beckmann NDF
+
+We show that Eqn. (27) reduces to the Beckmann distribution: for  $\cos \theta > 0$  it converges to the Beckmann density of Eqn. (43), and for  $\cos \theta \leq 0$  it vanishes, recovering the one-sided support. We look at the upper hemisphere first.
+
+Asymptotic evaluation of the NDF scalars. In standard spherical coordinates  $\hat{n} = (\sin \theta \cos \phi, \sin \theta \sin \phi, \cos \theta)$ , and the quadratic-form scalars from Eqn. (26) become:
+
+$$A = \frac{\sin^2 \theta}{\epsilon_h} + \frac{\cos^2 \theta}{\epsilon_z}, \quad B = \frac{\cos \theta}{\epsilon_z}, \quad C = \frac{1}{\epsilon_z}. \quad (79)$$
+
+For  $\cos \theta > 0$  (upper hemisphere), substituting the scalars above gives
+
+$$\begin{aligned} b^2 - C &= \frac{B^2}{A} - C \\ &= \frac{1}{\epsilon_z} \left[ \frac{\epsilon_h \cos^2 \theta}{\epsilon_h \cos^2 \theta + \epsilon_z \sin^2 \theta} - 1 \right] \\ &= -\frac{\sin^2 \theta}{\epsilon_h \cos^2 \theta + \epsilon_z \sin^2 \theta} \xrightarrow{\epsilon_z \rightarrow 0} -\frac{\tan^2 \theta}{\epsilon_h}. \end{aligned} \quad (80)$$
+
+Combining the terms in brackets gives a numerator of  $-\epsilon_z \sin^2 \theta$ , whose  $\epsilon_z$  factor cancels the prefactor  $1/\epsilon_z$ . The exponential factor in Eqn. (27) therefore tends to  $e^{-\tan^2 \theta / (2\epsilon_h)}$ .
+
+Dominant term in the bracket. As  $\epsilon_z \rightarrow 0$ ,  $b = B/\sqrt{A} \approx 1/\sqrt{\epsilon_z} \rightarrow +\infty$  for  $\cos \theta > 0$ . In the bracket of Eqn. (27), the term  $b(b^2 + 3)\Phi(b) \rightarrow b^3$  dominates (since  $\Phi(b) \rightarrow 1$ ), while  $(b^2 + 2)\phi(b)$  decays exponentially.
+
+ $\epsilon_z$  cancellation. The leading factors in Eqn. (27) are  $|\Sigma_{\tilde{g}}|^{1/2} = \epsilon_h \sqrt{\epsilon_z}$ ,  $A^2 \approx \cos^4 \theta / \epsilon_z^2$ , and  $b^3 \approx \epsilon_z^{-3/2}$ . Their powers of  $\epsilon_z$  cancel on substitution, giving
+
+$$D(\hat{n}) \xrightarrow{\epsilon_z \rightarrow 0} \frac{e^{-\tan^2 \theta / (2\epsilon_h)}}{2\pi \epsilon_h \cos^4 \theta}. \quad (81)$$
+
+This is the Beckmann NDF (43) with roughness  $\alpha = \sqrt{2\epsilon_h}$ .
+
+Lower hemisphere. We show that the NDF vanishes for  $\cos \theta \leq 0$  by bounding it above by a quantity that tends to zero. For these directions,  $b \leq 0$ , so the CDF contribution  $b(b^2 + 3)\Phi(b)$  is nonpositive. Dropping this term from Eqn. (27) and combining the remaining Gaussian density with the exponential factor gives
+
+$$0 \leq D(\hat{n}) \leq \frac{(b^2 + 2) e^{-1/(2\epsilon_z)}}{(2\pi)^{3/2} |\Sigma_{\tilde{g}}|^{1/2} A^2}. \quad (82)$$
+
+The lower bound follows from the nonnegative integral defining  $D$  in Eqn. (22). The prefactor on the right grows at most as a power of  $1/\epsilon_z$ , while the exponential decays faster than any such power. Thus the upper bound tends to zero, forcing  $D(\hat{n}) \rightarrow 0$  for  $\cos \theta \leq 0$  and recovering the one-sided Beckmann support.  $\square$ 
+
+
+
+#### C.2 One-sided projected area and Smith masking
+
+We now show that our local-conditioning approximation reduces to Smith's local shadowing approximation in the height-field limit, and that the one-sided projected area recovers Smith's masking function from Gaussian slopes.
+
+For a height field,  $f > 0$  is equivalent to  $h < z$ . Thus Eqn. (12) replaces conditioning on the full ray history by conditioning on the surface lying below the current ray point, with normalization  $\mathbb{P}(h < z) = \Phi(z/\sigma_h)$ . This is Smith's local shadowing assumption [Smith 1967]. We obtain the corresponding projected-area result by specializing Appx. B.
+
+For an outward direction  $\hat{\omega}_*$ , substituting Eqn. (78) into Eqn. (7) gives  $\mu_{\tilde{g}} = \cos \theta_*$  and  $\sigma_{\tilde{g}}^2 = \epsilon_h \sin^2 \theta_* + \epsilon_z \cos^2 \theta_* \rightarrow \sigma_m^2 \sin^2 \theta_*$ . The standardized derivative therefore becomes  $v = \cot \theta_* / \sigma_m$  in the
+
+height-field limit. Using Eqns. (69) and (76), we obtain
+
+$$a_-(-\hat{\omega}_*) \xrightarrow{e_z \rightarrow 0} \cos \theta_* [1 + \Lambda(\nu)] = \frac{\cos \theta_*}{G_1^{\text{Smith}}(\theta_*)}, \quad (83)$$
+
+where  $G_1^{\text{Smith}}(\theta_*) = 1/[1 + \Lambda(\nu)]$  is the Smith masking function for Gaussian slopes.
+
+C.3 Transmittance and Smith height-conditional masking We now show that the GPIS transmittance under local conditioning exactly recovers Smith's height-conditional masking function in the height-field limit.
+
+Setting  $\sigma_f = \sigma_h$  in Eqn. (73), the empty-space probability coordinate becomes  $u = \Phi(z/\sigma_h)$ , the surface-height CDF. The outgoing escape probability therefore gives
+
+$$G_1(z, \hat{\omega}_*) = T_-(z \rightarrow \infty, \hat{\omega}_*) = [\Phi(z/\sigma_h)]^{\Lambda(\nu)}, \quad (84)$$
+
+which is Smith's height-conditional masking function [Heitz et al. 2016; Smith 1967]. Averaging over height as in Eqn. (76) recovers the marginal Smith shadowing function  $G_1^{\text{Smith}}(\theta_*) = 1/[1 + \Lambda(\nu)]$ . The same height-field substitution in Eqn. (77) recovers Smith's bistatic masking-shadowing function [Dupuy et al. 2016, Eq. 21].  $\square$ 
+
+
+
+## D Heavy-Tailed NDF, Projected Area, and Sampling
+
+This appendix derives Eqns. (35) and (36) of Sec. 4.8 for general  $(\mu_{\tilde{g}}, \Sigma_{\tilde{g}})$ .
+
+Gradient distribution. Applying the precision mixture  $\tau \sim \text{Exp}(1)$ ,  $g \mid \tau \sim \mathcal{N}(\mu_{\tilde{g}}, \Sigma_{\tilde{g}}/\tau)$ , and marginalizing over  $\tau$  using  $\int_0^\infty \tau^{3/2} e^{-\tau(1+Q/2)} d\tau = \Gamma(5/2)(1 + Q/2)^{-5/2}$ , with  $Q(g) := (g - \mu_{\tilde{g}})^T \Sigma_{\tilde{g}}^{-1} (g - \mu_{\tilde{g}})$  and  $\Gamma(5/2) = 3\sqrt{\pi}/4$ , gives
+
+$$p_{\tilde{g}}^{\text{GGX}}(g) = \frac{3\sqrt{\pi}}{4(2\pi)^{3/2}|\Sigma_{\tilde{g}}|^{1/2}} \left(1 + \frac{1}{2}Q(g)\right)^{-5/2}. \quad (85)$$
+
+NDF integral. Substituting  $g = r\hat{n}$  into Eqn. (85) and using  $Q(r\hat{n}) = A(\hat{n})r^2 - 2B(\hat{n})r + C$  from Eqn. (26), complete the square with  $\mu := B(\hat{n})/A(\hat{n}) = b/\sqrt{A}$ :
+
+$$1 + \frac{1}{2}Q(r\hat{n}) = \frac{A}{2}(r - \mu)^2 + k, \quad k := 1 + \frac{C - b^2}{2}. \quad (86)$$
+
+Writing  $\Delta := 2k/A$  and rescaling  $r = \mu + \sqrt{\Delta}t$  reduces the radial integral to the dimensionless form
+
+$$\int_{-\lambda}^\infty (\lambda + t)^3 (1 + t^2)^{-5/2} dt, \quad \lambda := \mu/\sqrt{\Delta}, \quad (87)$$
+
+which evaluates to  $(2R - \lambda)/(3(R - \lambda)^2)$  with  $R = \sqrt{1 + \lambda^2}$  (verified by differentiation, or by checking  $\lambda = 0$  against the elementary substitution  $w = 1 + t^2$ , which gives  $2/3$ , matching  $(2R - \lambda)/(3(R - \lambda)^2)$  at  $\lambda = 0$ ). Undoing the rescaling gives
+
+$$\int_0^\infty r^3 ((r - \mu)^2 + \Delta)^{-5/2} dr = \frac{2S - \mu}{3(S - \mu)^2}, \quad (88)$$
+
+$$S := \sqrt{\mu^2 + \Delta} = \sqrt{(C + 2)/A}. \quad (89)$$
+
+Substituting into Eqn. (85), whose prefactor contributes an additional factor of  $(A/2)^{-5/2}$ , gives us Eqn. (35) from the main text.  $\square$ 
+
+One-sided projected area. Linear projections of the mixture remain in the same family one dimension down:  $\tilde{g} \mid \tau \sim \mathcal{N}(\mu_{\tilde{g}}, \sigma_{\tilde{g}}^2/\tau)$ , so the same  $\Gamma(3/2, \cdot)$  integral used above, now with  $\Gamma(3/2) = \sqrt{\pi}/2$ , gives
+
+$$p_{\tilde{g}}^{\text{GGX}}(v) = \frac{\alpha_{\text{eff}}^2/2}{((v - \mu_{\tilde{g}})^2 + \alpha_{\text{eff}}^2)^{3/2}}, \quad \alpha_{\text{eff}}^2 := 2\sigma_{\tilde{g}}^2. \quad (90)$$
+
+Evaluating  $a_-(\hat{\omega})^{\text{GGX}} = \int_{-\infty}^0 |v| p_{\tilde{g}}^{\text{GGX}}(v) dv$  via the substitution  $s = v - \mu_{\tilde{g}}$  and the antiderivative  $\int s (s^2 + \alpha_{\text{eff}}^2)^{-3/2} ds = -(s^2 + \alpha_{\text{eff}}^2)^{-1/2}$  gives us Eqn. (36) from the main text.  $\square$ 
+
+
+
+## D.1 Exact vNDF Sampling
+
+Parallel component. Let  $u := -\tilde{g} > 0$  and  $c := -\mu_{\tilde{g}}$ , so the down-crossing-weighted marginal is  $q_z(u) \propto u r(u)^{-3}$ , where  $r(u) := \sqrt{(u - c)^2 + \alpha_{\text{eff}}^2}$ .
+
+Step 1: find an antiderivative. Split  $u = (u - c) + c$  and integrate each piece separately. With  $s := u - c$ , the first piece is an exact derivative,  $\int s (s^2 + \alpha_{\text{eff}}^2)^{-3/2} ds = -(s^2 + \alpha_{\text{eff}}^2)^{-1/2} = -1/r$ ; the second is the standard arctangent-free form  $\int (s^2 + \alpha_{\text{eff}}^2)^{-3/2} ds = s/(\alpha_{\text{eff}}^2 r)$ . Together,
+
+$$F(u) := -\frac{1}{r(u)} + \frac{c(u - c)}{\alpha_{\text{eff}}^2 r(u)} = \frac{c(u - c) - \alpha_{\text{eff}}^2}{\alpha_{\text{eff}}^2 r(u)} \quad (91)$$
+
+is an antiderivative of  $u r(u)^{-3}$ , hence proportional to the CDF of  $q_z$ .
+
+Step 2: evaluate the endpoints. At  $u = 0$ ,  $r(0) = \sqrt{c^2 + \alpha_{\text{eff}}^2} = R$ , giving  $F(0) = (-c^2 - \alpha_{\text{eff}}^2)/(\alpha_{\text{eff}}^2 R) = -R/\alpha_{\text{eff}}^2$ . As  $u \rightarrow \infty$ ,  $r(u) \sim u$ , giving  $F(u) \rightarrow c/\alpha_{\text{eff}}^2$ . So  $F$  increases monotonically (as any CDF must) from  $-R/\alpha_{\text{eff}}^2$  to  $c/\alpha_{\text{eff}}^2$  as  $u$  ranges over  $(0, \infty)$ .
+
+Step 3: rescale to a uniform draw. Define  $h := \alpha_{\text{eff}}^2 F(u)$ , so by Step 2,  $h$  ranges over exactly  $[-R, c]$  as  $u$  ranges over  $(0, \infty)$ —and since  $F$  is (up to the constant rescaling by  $\alpha_{\text{eff}}^2$ ) the CDF of  $q_z$ ,  $h$  is uniformly distributed on  $[-R, c]$  when  $u \sim q_z$ . Drawing  $\xi_1 \sim \text{Unif}(0, 1)$  and setting  $h = \xi_1(c + R) - R$  therefore produces a correctly-distributed  $h$ ; the sampling problem has reduced to inverting Step 1's formula for  $u$  given  $h$ .
+
+Step 4: invert for  $u$ . Writing  $q := u - c$  and squaring  $h r(u) = cq - \alpha_{\text{eff}}^2$  gives a quadratic in  $q$ ,
+
+$$(c^2 - h^2) q^2 - 2c\alpha_{\text{eff}}^2 q - \alpha_{\text{eff}}^2 (h^2 - \alpha_{\text{eff}}^2) = 0, \quad (92)$$
+
+whose discriminant simplifies to  $4\alpha_{\text{eff}}^2 h^2 (R^2 - h^2)$  using  $R^2 = c^2 + \alpha_{\text{eff}}^2$ . Of the two roots, the one consistent with  $r(u) > 0$  is
+
+$$q = \frac{c\alpha_{\text{eff}}^2 + \alpha_{\text{eff}} h\sqrt{R^2 - h^2}}{c^2 - h^2}. \quad (93)$$
+
+As a check, at  $h = -R$  (the lower endpoint, corresponding to  $u = 0$ ) this gives  $q = c\alpha_{\text{eff}}^2/(c^2 - R^2) = -c$ , i.e.  $u = 0$ , as required. For numerical evaluation, we use the equivalent form
+
+$$q = \alpha_{\text{eff}} \frac{\alpha_{\text{eff}} \sqrt{R^2 - h^2} + c h}{c\sqrt{R^2 - h^2} - \alpha_{\text{eff}}}, \quad (94)$$
+
+which is well defined at  $h = -c$  for  $c > 0$ . This is the form used in Algorithm 3.  $\square$ 
+
+Perpendicular component. Conditioned on  $\bar{g}$  and precision  $\tau$ , the perpendicular residual is  $\mathbf{g}_\perp \mid \bar{g}$ ,  $\tau \sim \mathcal{N}(\bar{\mu}_{\perp|z}, \Sigma_{\perp|z}/\tau)$ , with  $\bar{\mu}_{\perp|z}, \Sigma_{\perp|z}$  the same conditional mean and covariance computed by ordinary Gaussian conditioning on  $\bar{g}$  already used in Alg. 1. Marginalizing  $\tau \mid \bar{g} \sim \text{Gamma}(3/2, \beta)$ ,  $\beta = 1 + (\bar{g} - \mu_g)^2/(2\sigma_g^2)$ , gives a residual  $\boldsymbol{\eta} = \mathbf{g}_\perp - \bar{\mu}_{\perp|z}$  following the same power-law form as Eqn. (85) one
+
+dimension down:
+
+$$p(\boldsymbol{\eta}) \propto (1 + \boldsymbol{\eta}^\top \Sigma_{\perp|z}^{-1} \boldsymbol{\eta} / (2\beta))^{-5/2}. \quad (95)$$
+
+The linear change of variables  $\boldsymbol{\eta} = \mathbf{L}\boldsymbol{\eta}'$ , with  $\mathbf{L}$  a Cholesky factor of  $\Sigma_{\perp|z} = \mathbf{L}\mathbf{L}^\top$ , reduces this to an isotropic radial distribution, whose CDF inverts by the same substitution used for Eqn. (36) one dimension up, giving us the  $\rho, \varphi$  update and the  $\mathbf{L}, \mathbf{g}_\perp$  steps in Algorithm 3.
+
+□

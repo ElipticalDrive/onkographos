@@ -1,0 +1,129 @@
+--- v002.md
++++ v003.md
+@@ -4,10 +4,10 @@
+ 
+ ## Overview
+-This method replaces the continuous, coordinate-based Multi-Layer Perceptron (MLP) of NeRF with a discrete, learnable voxel grid to represent a static scene in a canonical time frame [S1]. It solves the problem of querying infinite 3D points in canonical space for forward warping, which is impractical with heavy MLPs [S1]. It differs from [Explicit Radiance Fields](806-explicit-radiance-fields.md) and [Direct Voxel Grid Optimization](4694-direct-voxel-grid-optimization.md) by structuring the canonical static scene as a discrete voxel grid paired with a lightweight MLP, specifically designed to support forward warping to other time steps [S1].
++This method replaces the continuous, coordinate-based Multi-Layer Perceptron (MLP) of NeRF with a discrete, learnable voxel grid to represent a static scene in a canonical time frame [S1]. It solves the problem of querying infinite 3D points in canonical space for forward warping, which is impractical with heavy MLPs [S1]. It differs from [Explicit Radiance Fields](806-explicit-radiance-fields.md) by explicitly separating density and color features into distinct grids optimized for canonical static representation, and from [Direct Voxel Grid Optimization](4694-direct-voxel-grid-optimization.md) by serving as a foundational static representation for dynamic scene warping rather than direct view synthesis optimization [S1].
+ 
+ ## How it works
+ **Inputs:**
+-*   3D coordinates $\mathbf{p}$ of points in the canonical space [S1].
+-*   Pre-defined voxel grid structure containing learnable parameters [S1].
++*   3D coordinates $\mathbf{p}_{Can}$ of points in the canonical space [S1].
++*   A pre-defined voxel grid structure containing $V\sigma_{Can}$ and $Vcf_{Can}$ [S1].
+ 
+ **Outputs:**
+@@ -15,58 +15,56 @@
+ 
+ **Data Structures:**
+-The canonical radiance field $\mathbf{R}_{\text{Can}}$ is defined as a tuple of two voxel grids:
++The canonical radiance field $\mathbf{R}_{Can}$ is defined as a tuple of two voxel grids:
+ $$
+-\mathbf{R}_{\text{Can}} = \{ V\sigma_{\text{Can}}, Vcf_{\text{Can}} \}
++\mathbf{R}_{Can} = \{ V\sigma_{Can}, Vcf_{Can} \}
+ $$
+-1.  $V\sigma_{\text{Can}}$: A 3D grid storing scalar density values [S1].
+-2.  $Vcf_{\text{Can}}$: A 3D grid storing color feature vectors [S1].
+-3.  $\mathbf{p}_{\text{Can}}$: The 3D coordinates of the voxel grid points in canonical space, embedded according to the NeRF positional encoding scheme [S1, G].
++1.  $V\sigma_{Can}$: A 3D grid storing scalar density values [S1].
++2.  $Vcf_{Can}$: A 3D grid storing color feature vectors [S1].
++3.  $\mathbf{p}_{Can}$: The 3D coordinates of the voxel grid points in canonical space, embedded according to the NeRF positional encoding scheme [S1].
+ 
+ **Method Steps:**
+-1.  **Grid Initialization:** Initialize the learnable voxel grids $V\sigma_{\text{Can}}$ and $Vcf_{\text{Can}}$ with learnable parameters (e.g., random or zero initialization) [G].
+-2.  **Coordinate Embedding:** For a query point $\mathbf{p}$, apply positional encoding to map the 3D coordinates to a higher-dimensional space [G].
+-3.  **Voxel Trilinear Interpolation:** Sample the values from $V\sigma_{\text{Can}}$ and $Vcf_{\text{Can}}$ at the query location $\mathbf{p}$ using trilinear interpolation to obtain base density $\sigma_{\text{base}}$ and base color features $\mathbf{c}_{f,\text{base}}$ [G].
+-4.  **Radiance Network Evaluation:** Pass the interpolated features through a lightweight MLP network $F_{\theta_1}$ [S1]. The network takes the embedded coordinates and interpolated color features as input to predict the final color $\mathbf{c}$, while density is typically taken directly from the interpolated grid values [S1, G].
++1.  **Coordinate Embedding:** For a query point $\mathbf{p}_{Can}$, apply positional encoding (as defined in NeRF [G]) to map the 3D coordinates to a higher-dimensional space [S1].
++2.  **Voxel Trilinear Interpolation:** Sample the values from $V\sigma_{Can}$ and $Vcf_{Can}$ at the query location $\mathbf{p}_{Can}$ using trilinear interpolation [G]. This yields the base density $\sigma_{base}$ and base color features $\mathbf{c}_{f,base}$ [G].
++3.  **Radiance Network Evaluation:** Pass the interpolated features through a lightweight MLP network $F_{\theta_1}$ [S1].
++    *   Input to $F_{\theta_1}$: The interpolated color features $\mathbf{c}_{f,base}$ [S1].
++    *   Output: The final color $\mathbf{c}$ [G].
++    *   *Note:* The source defines the relationship as $\mathbf{R}_{Can} = \RadNet (\mathbf{p}_{Can}, \mathbf{Rf}_{Can})$, implying the network takes the grid features and coordinates to produce the radiance field output [S1].
+ 
+ **Pseudocode:**
+ ```python
+-def positional_encoding(p, num_frequencies=10):
+-    """Standard NeRF positional encoding [G]."""
+-    scaled_p = [p * (2**i) for i in range(num_frequencies)]
+-    return [math.sin(x) for x in scaled_p] + [math.cos(x) for x in scaled_p]
++def trilinear_interpolate(grid, p):
++    # Standard 3D trilinear interpolation for grid at normalized coordinate p
++    ix, iy, iz = (p * (grid.shape[0]-1, grid.shape[1]-1, grid.shape[2]-1)).astype(int)
++    ix, iy, iz = np.clip([ix, iy, iz], 0, [grid.shape[0]-2, grid.shape[1]-2, grid.shape[2]-2])
++    fx, fy, fz = p * (grid.shape[0]-1, grid.shape[1]-1, grid.shape[2]-1) - [ix, iy, iz]
++    w000 = (1-fx)*(1-fy)*(1-fz)
++    w100 = fx*(1-fy)*(1-fz)
++    w010 = (1-fx)*fy*(1-fz)
++    w110 = fx*fy*(1-fz)
++    w001 = (1-fx)*(1-fy)*fz
++    w101 = fx*(1-fy)*fz
++    w011 = (1-fx)*fy*fz
++    w111 = fx*fy*fz
++    return (w000*grid[ix,iy,iz] + w100*grid[ix+1,iy,iz] + w010*grid[ix,iy+1,iz] + w110*grid[ix+1,iy+1,iz] +
++            w001*grid[ix,iy,iz+1] + w101*grid[ix+1,iy,iz+1] + w011*grid[ix,iy+1,iz+1] + w111*grid[ix+1,iy+1,iz+1])
+ 
+-def trilinear_interpolate(grid, p):
+-    """Standard trilinear interpolation [G]."""
+-    # Compute fractional coordinates and weights for 8 surrounding voxels
+-    # Return weighted sum of voxel values.
+-    pass
+-
+-def concatenate_vectors(a, b):
+-    """Standard vector concatenation [G]."""
+-    return a + b
++def positional_encoding(p, min_deg=0, max_deg=10, base=2):
++    # Standard NeRF positional encoding [G]
++    scales = np.array([base**i for i in range(min_deg, max_deg+1)])
++    scaled_p = np.outer(p, scales)
++    return np.concatenate([scaled_p, np.pi*scaled_p], axis=-1)
+ 
+ def query_canonical_field(p, V_sigma, V_cf, F_theta1):
+-    """
+-    Query the canonical radiance field for a point p.
+-    Args:
+-        p: 3D coordinate (x, y, z) in canonical space.
+-        V_sigma: 3D voxel grid of density values.
+-        V_cf: 3D voxel grid of color feature vectors.
+-        F_theta1: Lightweight MLP network.
+-    Returns:
+-        sigma: Density value.
+-        c: Color vector.
+-    """
+-    # 1. Embed coordinates
++    # 1. Coordinate embedding [G]
+     p_embedded = positional_encoding(p)
+-    # 2. Trilinear interpolation from voxel grids
++
++    # 2. Voxel sampling
+     sigma_base = trilinear_interpolate(V_sigma, p)
+     cf_base = trilinear_interpolate(V_cf, p)
+-    # 3. Concatenate features for MLP input
+-    # Source does not specify exact MLP input/output mapping; standard practice concatenates features and coordinates [G].
+-    mlp_input = concatenate_vectors(cf_base, p_embedded)
+-    # 4. Evaluate lightweight MLP to predict color
+-    c = F_theta1(mlp_input)
+-    # 5. Return interpolated density and predicted color
++
++    # 3. Radiance network evaluation [S1]
++    # F_theta1 decodes color features to color c
++    c = F_theta1(cf_base)
++
+     return sigma_base, c
+ ```
+@@ -77,11 +75,11 @@
+ 
+ **Edge Cases:**
+-*   Points outside the voxel grid bounds: Standard boundary handling (clamp, zero, or error) is required [G].
+-*   Precision: Trilinear interpolation is differentiable, allowing gradient propagation to the voxel values during optimization [G].
++*   Points outside the voxel grid bounds: Standard boundary handling (clamp, zero, or error) is required. Not given in the sources.
++*   Precision: Trilinear interpolation is differentiable, allowing gradient propagation to the voxel values [G].
+ 
+ ## Subtopics
+ 
+ ### [Neural Residual Radiance Fields (ReRF)](12544-neural-residual-radiance-fields-rerf.md)
+-ReRF extends the canonical field concept to dynamic scenes by modeling residuals between adjacent timestamps, avoiding the fragility of global canonical spaces for large motions. It differs from sibling methods by not relying on a global canonical space, making it robust to large motions or topology changes, and instead exploits feature similarities between adjacent timestamps. Choose this variant when handling dynamic scenes with significant motion or topology changes where global warping fails.
++ReRF extends the canonical field concept to dynamic scenes by modeling residuals between adjacent timestamps, avoiding the fragility of global canonical spaces for large motions.
+ 
+ ## Operating characteristics

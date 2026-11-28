@@ -1,0 +1,188 @@
+I'm experiencing strange artifacts in my implementation of the Amanatides, Woo algorithm for voxel ray tracing. I'd really appreciate any help, and…
+
+Artifacts in "Fast Voxel Traversal Algorithm" (Metal compute shader implementation) : r/GraphicsProgramming
+Skip to main content
+Go to GraphicsProgramming
+r/GraphicsProgramming
+r/GraphicsProgramming
+A subreddit for everything related to the design and implementation of graphics rendering code.
+Members
+Online
+•
+treemcgee42
+Artifacts in "Fast Voxel Traversal Algorithm" (Metal compute shader implementation)
+Question
+I'm experiencing strange artifacts in my implementation of the Amanatides, Woo algorithm for voxel ray tracing. I'd really appreciate any help, and feel free to let me know if sharing anything else would be helpful. I'm happy to share the full code as well.
+The artifacts appear to be radial and dependent on the camera position. Looking online I see somewhat similar artifacts appear due to floating point errors and z-fighting. However, I do not implement reflections at all-- I simply check if a voxel is hit and color it if it is. I've attempted to handle floating point precision errors in several locations but the effect remained, so I removed most of them in the snippet below to be more readable. Most interesting to me is how the sphere disappears at close range.
+My implementation is slightly different than ones I found online, particularly in how I calculate tMaxs, and I've included my reasoning in a comment.
+```
+// Parameters:
+// - `rayIntersectionTMin`: the time at which the ray (described by `rayOrigin + t * rayDirectionNormalized`) intersects the voxel volume.
+// - `rayIntersectionTMin`: the time at which the ray (described by `rayOrigin + t * rayDirectionNormalized`) exits the voxel volume.
+// - `boxMin`: the coordinates of the minimal corner of the voxel volume, in world space.
+// - `boxMax`: the coordinates of the maximal corner of the voxel volume, in world space.
+struct VoxelVolumeIntersectionResult
+amanatidesWooAlgorithm(float3 rayOrigin,
+                       float3 rayDirectionNormalized,
+                       float rayIntersectionTMin,
+                       float rayIntersectionTMax,
+                       float3 voxelSize,
+                       float3 boxMin,
+                       float3 boxMax,
+                       Grid3dView grid3dView,
+                       const device int* grid3dData) {
+    const float tMin = rayIntersectionTMin;
+    const float tMax = rayIntersectionTMax;
+    const float3 rayStart = rayOrigin + rayDirectionNormalized * tMin;
+    
+    // For the purposes of the algorithm, we consider a point to be inside a voxel if, componentwise, voxelMinCorner <= p < voxelMaxCorner.
+    
+    const float3 rayStartInVoxelSpace = rayStart - boxMin;
+    // In voxel units, in voxel space.
+    int3 currentIdx = int3(floor(rayStartInVoxelSpace / voxelSize));
+
+    int3 steps = int3(sign(rayDirectionNormalized));
+    float3 tDeltas = abs(voxelSize / rayDirectionNormalized);
+    
+    // tMaxs is, componentwise, the (total) time it will take for the ray to enter the next voxel.
+    // To compute tMax for a component:
+    // - If rayDirection is positive, then the next boundary is in the next voxel.
+    // - If rayDirection is negative, the the next boundary is at the start of the same voxel.
+    
+    // Multiply by voxelSize to get back to units of t.
+    float3 nextBoundaryInVoxelSpace = float3(currentIdx + int3(steps > int3(0))) * voxelSize;
+    float3 tMaxs = tMin + (nextBoundaryInVoxelSpace - rayStartInVoxelSpace) / rayDirectionNormalized;
+    
+    if (IS_ZERO(rayDirectionNormalized.x)) {
+        steps.x = 0;
+        tDeltas.x = tMax + 1;
+        tMaxs.x = tMax + 1;
+    }
+    if (IS_ZERO(rayDirectionNormalized.y)) {
+        steps.y = 0;
+        tDeltas.y = tMax + 1;
+        tMaxs.y = tMax + 1;
+    }
+    if (IS_ZERO(rayDirectionNormalized.z)) {
+        steps.z = 0;
+        tDeltas.z = tMax + 1;
+        tMaxs.z = tMax + 1;
+    }
+    
+    float distance = tMin;
+    while (currentIdx.x < (int)grid3dView.xExtent &&
+           currentIdx.x >= 0 &&
+           currentIdx.y < (int)grid3dView.yExtent &&
+           currentIdx.y >= 0 &&
+           currentIdx.z < (int)grid3dView.zExtent &&
+           currentIdx.z >= 0) {
+        if (hitVoxel(grid3dView, grid3dData,
+                     currentIdx.x, currentIdx.y, currentIdx.z)) {
+            return { true, distance };
+        }
+        
+        if (tMaxs.x < tMaxs.y) {
+            if (tMaxs.x < tMaxs.z) {
+                currentIdx.x += steps.x;
+                distance = tMaxs.x;
+                tMaxs.x += tDeltas.x;
+            } else {
+                currentIdx.z += steps.z;
+                distance = tMaxs.z;
+                tMaxs.z += tDeltas.z;
+            }
+        } else {
+            if (tMaxs.y < tMaxs.z) {
+                currentIdx.y += steps.y;
+                distance = tMaxs.y;
+                tMaxs.y += tDeltas.y;
+            } else {
+                currentIdx.z += steps.z;
+                distance = tMaxs.z;
+                tMaxs.z += tDeltas.z;
+            }
+        }
+    }
+    
+    return { false, 0.0 };
+}
+```
+Share
+Share
+Sort by:
+Best
+Open comment sort options
+Best
+Top
+New
+Controversial
+Old
+Q&A
+Botondar
+•
+I had a similar problem when I implemented Amanatides & Woo, and IIRC the issue was floating point precision in the ray entry/exit calculation. Basically the box intersection points were sometimes considered to be outside the bounding volume, so the marching loop never entered.
+I can't remember what my solution was exactly and I don't have the code anymore, but maybe you can just clamp the initial currentIdx between 0 and the voxel extent?
+Reply
+reply
+Share
+treemcgee42
+•
+Oh my gosh that fixed it, thank you!
+Reply
+reply
+Share
+vade
+•
+post a vid of the fix working :)
+Reply
+reply
+Share
+treemcgee42
+•
+I added a background and normal shading as well: https://youtu.be/tNpSy5kKYXY
+Reply
+reply
+Share
+More replies
+More replies
+More replies
+HeliosHyperion
+•
+•
+Edited
+Mostly been doing voxel DDA in glsl, but here are some thoughts:
+My first instinct would be that there could be an error in the initialization. That there is something potentially wrong with the logic with nextBoundaryInVoxelSpace or initial tMaxs, since that is the trickiest part.
+What is the reason for using IS_ZERO, idk what it does but I think you can just do == 0.
+Test to see if it works with voxelSize == 1. If it does, then there's something wrong with the scaling.
+The loop looks ok at first glance, just make sure you tie-break consistently. There are 3 cases in the loop: increment x, y or z. Also, should the distance be set before or after you increment tMaxs? I suggest to maybe rewrite to
+```
+if(sideDist.x <= sideDist.y && sideDist.x <= sideDist.z)
+   //Inc x
+else if(sideDist.y <= sideDist.z && sideDist.y <= sideDist.x)
+  // Inc y
+else
+  // Inc Z
+```
+Reply
+reply
+Share
+Ok-Sherbert-6569
+•
+Funny that I I literally done this last week in metal. I’ve done in a fragment shader to render my voxelised meshes. If you fancy it message me and I can send you my code and talk you through. Mine seems to be working without any issues
+Reply
+reply
+Share
+Top Posts
+Reddit
+reReddit: Top posts of June 22, 2024
+Reddit
+reReddit: Top posts of June 2024
+Reddit
+reReddit: Top posts of 2024
+Reddit Rules
+Privacy Policy
+User Agreement
+Accessibility
+Reddit, Inc. © 2025. All rights reserved.
+Expand Navigation
+Collapse Navigation

@@ -1,0 +1,145 @@
+--- v013.md
++++ v014.md
+@@ -1,59 +1,98 @@
+ # Pruning and Opacity Management
+ 
+-Also called: Opacity Management, Component Recycling
++    Also called: -
+ 
+-## Overview
+-Pruning and Opacity Management is a family of training-time strategies for 3D Gaussian Splatting that controls the population of primitives $\mathcal{G}$ to balance representation density against overfitting and computational cost. It solves the problem of unbounded Gaussian growth and the persistence of "floaters" or boundary artifacts by periodically evaluating metrics (opacity, gradient, scale) to remove redundant primitives or reinitialize them. It sets itself apart from sibling methods like [Significance-Aware Pruning](9676-significance-aware-pruning.md) and [Principled Uncertainty Pruning](9680-principled-uncertainty-pruning.md) by focusing on opacity thresholds, transmittance consistency during cloning, and fixed-schedule resets rather than adaptive uncertainty bounds or significance scores derived from view counts.
++    ## Overview
++    Pruning and Opacity Management is a family of training-time strategies for 3D Gaussian Splatting that controls the population of primitives $\mathcal{G}$ to balance representation density against overfitting and computational cost [G]. It solves the problem of unbounded Gaussian growth and the persistence of "floaters" or boundary artifacts by periodically evaluating metrics (opacity, gradient, scale) to remove redundant primitives or reinitialize them [G]. It sets itself apart from sibling methods like [Significance-Aware Pruning](9676-significance-aware-pruning.md) and [Principled Uncertainty Pruning](9680-principled-uncertainty-pruning.md) by focusing on opacity thresholds, transmittance consistency during cloning, and fixed-schedule resets rather than adaptive uncertainty bounds or significance scores derived from view counts [G].
+ 
+-## Shared principles
+-All pruning and sparsification strategies in this family operate on a set of 3D Gaussian primitives $\mathcal{G} = \{g_1, \dots, g_N\}$, where each $g_k$ is defined by a mean position $\mu_k \in \mathbb{R}^3$, a covariance matrix $\Sigma_k$ (parameterized by scale $s_k$ and rotation $q_k$), opacity $\alpha_k$, and spherical harmonic coefficients $\mathbf{c}_k$ .
++    ## Shared principles
++    All methods in this family operate on a set of 3D Gaussian primitives $\mathcal{G} = \{g_1, \dots, g_N\}$, where each $g_k$ is defined by a mean position $\mu_k \in \mathbb{R}^3$, a covariance matrix $\Sigma_k$ (parameterized by scale $s_k$ and rotation $q_k$), opacity $\alpha_k$, and spherical harmonic coefficients $\mathbf{c}_k$ [Parent].
++    The core mechanism involves periodic evaluation of a metric per Gaussian to determine if the current representation is insufficient or redundant in a specific region [Parent]. Common metrics include:
++    1. **Gradient Magnitude:** The accumulated 2D positional gradient $\tau_k = \frac{1}{N_{\text{views}}} \sum_{v} \| \frac{\partial L}{\partial \mu_v^k} \|_2$ [Parent]. High gradients indicate that the Gaussian's position is not adequately minimizing the loss, suggesting a need for refinement or replacement [Parent].
++    2. **Opacity:** Low opacity $\alpha_k < \alpha_{\min}$ indicates a primitive contributes negligibly to the rendered image and is a candidate for pruning [Parent].
++    3. **Scale:** Excessively large scales $max(s_k)$ relative to the scene extent $e_{scene}$ indicate coarse approximations that may blur details or occlude nearby geometry [Parent].
++    Densification operations are typically triggered every $N$ iterations (e.g., `refineEvery` = 100) to allow the optimizer to stabilize [Parent]. The primary operations are:
++    * **Splitting:** Replacing a parent Gaussian $g_k$ with $N_{children}$ children. The children's means $\mu_{child}$ are sampled from a normal distribution $\mathcal{N}(\mu_k, \Sigma_k)$ [Parent]. The scale is typically reduced, e.g., $s_{child} = s_k \cdot \frac{5}{4} \cdot \frac{1}{\sqrt{N_{children}}}$, to increase local density [Parent].
++    * **Cloning:** Creating an exact copy of $g_k$ (same $\mu, \Sigma, \alpha, \mathbf{c}$) to increase sampling frequency in high-error regions without changing the spatial footprint [Parent].
++    * **Pruning:** Removing Gaussians that fail to meet opacity or significance thresholds [Parent].
++    Buffer management is critical: pruned or split Gaussians require buffer compaction or flag-based marking to maintain contiguous memory access for rasterization [Parent].
+ 
+-The core mechanism involves periodic evaluation of a metric per Gaussian to determine if the current representation is insufficient or redundant in a specific region. Common metrics include:
+-1.  **Gradient Magnitude:** The accumulated 2D positional gradient $\tau_k = \frac{1}{N_{\text{views}}} \sum_{v} \| \frac{\partial L}{\partial \mu_v^k} \|_2$ . High gradients indicate that the Gaussian's position is not adequately minimizing the loss, suggesting a need for refinement or replacement.
+-2.  **Opacity:** Low opacity $\alpha_k < \alpha_{\min}$ indicates a primitive contributes negligibly to the rendered image and is a candidate for pruning [S1][S2].
+-3.  **Scale:** Excessively large scales $max(s_k)$ relative to the scene extent $e_{scene}$ indicate coarse approximations that may blur details or occlude nearby geometry .
++    ```python
++    def manage_pruning_and_opacity(gaussians, iteration, config):
++        """
++        Applies periodic pruning, splitting, and cloning based on shared metrics.
++        gaussians: List of Gaussian objects with attributes .mu, .Sigma, .alpha, .c, .scale
++        iteration: Current training step integer
++        config: Dictionary with thresholds and intervals
++        """
++        prune_opa = config.get('prune_opa', 0.005)
++        refine_every = config.get('refine_every', 100)
++        grow_grad2d = config.get('grow_grad2d', 0.0002)
++        grow_scale3d = config.get('grow_scale3d', 0.01)
++        grow_scale2d = config.get('grow_scale2d', 0.05)
++        prune_scale3d = config.get('prune_scale3d', 0.1)
++        prune_scale2d = config.get('prune_scale2d', 0.15)
++        
++        if iteration % refine_every != 0:
++            return gaussians
++            
++        new_gaussians = []
++        for g in gaussians:
++            # Pruning conditions
++            if g.alpha < prune_opa:
++                continue
++            if max(g.scale) > prune_scale3d or max(g.scale2d) > prune_scale2d:
++                continue
++                
++            # Densification conditions
++            avg_grad = g.grad2d_buffer / g.count_buffer
++            if avg_grad > grow_grad2d:
++                if max(g.scale) < grow_scale3d:
++                    # Clone
++                    clone = Gaussian.copy(g)
++                    new_gaussians.append(clone)
++                elif max(g.scale2d) > grow_scale2d:
++                    # Split
++                    for _ in range(2):
++                        child = Gaussian.copy(g)
++                        child.mu = np.random.multivariate_normal(g.mu, g.Sigma)
++                        child.scale = g.scale * (5/4) / np.sqrt(2)
++                        new_gaussians.append(child)
++                else:
++                    new_gaussians.append(g)
++            else:
++                new_gaussians.append(g)
++                
++        # Buffer compaction
++        return new_gaussians
++    ```
+ 
+-Densification operations are typically triggered every $N$ iterations (e.g., `refineEvery` = 100) to allow the optimizer to stabilize . The primary operations are:
+-*   **Splitting:** Replacing a parent Gaussian $g_k$ with $N_{children}$ children. The children's means $\mu_{child}$ are sampled from a normal distribution $\mathcal{N}(\mu_k, \Sigma_k)$ . The scale is typically reduced, e.g., $s_{child} = s_k \cdot \frac{5}{4} \cdot \frac{1}{\sqrt{N_{children}}}$, to increase local density .
+-*   **Cloning:** Creating an exact copy of $g_k$ (same $\mu, \Sigma, \alpha, \mathbf{c}$) to increase sampling frequency in high-error regions without changing the spatial footprint .
+-*   **Pruning:** Removing Gaussians that fail to meet opacity or significance thresholds [S1][S2].
++    ## Subtopics
++    ### [GES Optimization Strategy](4697-ges-optimization-strategy.md)
++    A training protocol for Generalized Exponential Splatting that controls shape density by selectively pruning splats based on shape attributes, eliminating the need for a variable density mechanism. It differs from standard 3DGS by optimizing a shape parameter $\beta$ alongside position, opacity, and covariance, using a frequency-modulated loss to enhance edge fidelity. Choose when high-frequency edge fidelity is prioritized over standard density control.
+ 
+-Buffer management is critical: pruned or split Gaussians require buffer compaction or flag-based marking to maintain contiguous memory access for rasterization [Parent].
++    ### [Temporal Sensitivity Pruning](6350-temporal-sensitivity-pruning.md)
++    A sparsification method for dynamic 3D Gaussian Splatting that removes low-impact primitives by aggregating gradient-based sensitivity scores across multiple training views and timesteps. It differs from standard opacity-based pruning by explicitly accounting for temporal consistency and deformation dynamics, ensuring stable, high-fidelity reconstructions over time are retained. Choose for dynamic scene reconstruction.
+ 
+-## Subtopics
++    ### [Opacity Split for Cloning](9694-opacity-split-for-cloning.md)
++    A method to initialize the opacity of cloned 3D Gaussian primitives to maintain transmittance consistency, preventing cloned children from having less impact than the parent alone. It solves the transmittance bias where standard cloning causes excessive background darkening. Choose when cloning operations are frequent.
+ 
+-### [GES Optimization Strategy](4697-ges-optimization-strategy.md)
+-The GES Optimization Strategy is a training protocol for Generalized Exponential Splatting (GES) that controls shape density by selectively pruning splats based on shape attributes, thereby eliminating the need for a variable density mechanism. It differs from standard 3D Gaussian Splatting by optimizing a specific shape parameter $\beta$ alongside position, opacity, and covariance, using a frequency-modulated loss to enhance edge fidelity.
++    ### [GRay Optimization Settings](10037-gray-optimization-settings.md)
++    Hyperparameter configurations for training 3D Gaussian Splatting using the GRay ray-tracing renderer. Unlike standard 3DGS, these settings explicitly disable opacity resets and size-based pruning, offering GRayLQ (high-speed) and GRayHQ (high-quality) presets. Choose for GRay-based training pipelines.
+ 
+-### [Temporal Sensitivity Pruning](6350-temporal-sensitivity-pruning.md)
+-Temporal Sensitivity Pruning (TSP) is a pruning method for dynamic 3D Gaussian Splatting that removes low-impact Gaussians by calculating a temporal sensitivity score approximating the second-order sensitivity to the L2 loss across all training views. It sets itself apart from its siblings, such as [Spatially Constrained Optimization](13691-spatially-constrained-optimization.md) which focuses on static spatial density, by explicitly aggregating gradient information over time to identify primitives that are redundant across the temporal sequence of a dynamic scene.
++    ### [Opacity Reset & Densification Trigger](10759-opacity-reset-densification-trigger.md)
++    The standard strategy for managing the Gaussian population during 3DGS training, balancing density against overfitting by periodically duplicating small high-gradient Gaussians, splitting large high-gradient Gaussians, pruning low-opacity Gaussians, and resetting opacities to prevent stagnation. It is distinguished by its reliance on a fixed iteration schedule and specific scalar thresholds rather than adaptive criteria. Choose for standard 3DGS training.
+ 
+-### [Opacity Split for Cloning](9694-opacity-split-for-cloning.md)
+-Opacity Split for Cloning is a method to initialize the opacity of cloned 3D Gaussian primitives to maintain transmittance consistency, preventing the cloned child from having less impact than the parent alone. It solves the problem where standard cloning in 3D Gaussian Splatting causes the parent and child to jointly attenuate the background transmittance more than the parent did alone, biasing the alpha blending process. It sets itself apart from sibling methods by focusing specifically on the algebraic decomposition of opacity $\alpha$ during the cloning step, rather than adjusting gradients or scales.
++    ### [Spatially Constrained Optimization](13691-spatially-constrained-optimization.md)
++    A post-processing constraint workflow applied to differentiable primitives to enforce full opacity rendering of target objects and clean up boundary artifacts. It solves the issue where opacity loss alone leaves low-opacity "ghost" primitives on boundaries by re-initializing transparent primitives rather than removing them, maintaining coverage in complex regions. Choose for boundary artifact reduction.
+ 
+-### [GRay Optimization Settings](10037-gray-optimization-settings.md)
+-GRay Optimization Settings define the hyperparameter configurations for training 3D Gaussian Splatting using the GRay ray-tracing renderer. Unlike standard 3DGS or 3DGRT, these settings explicitly disable opacity resets and size-based pruning. The method offers two distinct presets: **GRayLQ** for high-speed, low-quality training, and **GRayHQ** for high-quality, slower training.
++    #### Component Recycling (Scooping)
++    A training-time component management strategy that replaces vanilla 3DGS densification/pruning by resampling low-opacity components into high-opacity ones to maintain efficiency without unbounded growth [S1]. Every $n$ training iterations, it computes opacity values, constructs a Multinomial distribution from them, and samples high-probability components to replace low-opacity ones [S1]. The iteration interval $n$ is not specified in the sources [S1]. Recycling must not significantly alter the rendered image, as the operation is only valid when the change to the current state after recycling is minimal [S1].
+ 
+-### [Opacity Reset & Densification Trigger](10759-opacity-reset-densification-trigger.md)
+-Opacity Reset & Densification Trigger is the standard strategy for managing the population of 3D Gaussian primitives $\mathcal{G}$ during the training of 3D Gaussian Splatting. It solves the problem of balancing scene representation density against overfitting by periodically duplicating small Gaussians with high gradients, splitting large Gaussians with high gradients, pruning low-opacity Gaussians, and resetting opacities to prevent stagnation. It is distinguished from sibling methods by its reliance on a fixed iteration schedule and specific scalar thresholds for gradient magnitude and scale, rather than adaptive per-Gaussian thresholds or view-count-based criteria. It builds on [Pruning and Opacity Management](9314-pruning-and-opacity-management.md).
++    ## Background
++    The concept of managing Gaussian density through pruning and densification was introduced in the original 3D Gaussian Splatting paper [Parent]. The "Scooping" or recycling mechanism was proposed to address the unbounded growth of components in standard 3DGS [S1].
+ 
+-### [Spatially Constrained Optimization](13691-spatially-constrained-optimization.md)
+-Spatially Constrained Optimization is a post-processing constraint workflow applied to differentiable bitmap or Gaussian primitives to enforce full opacity rendering of target objects and clean up boundary artifacts. It solves the problem where applying an opacity loss alone forces primitives to render fully opaque but leaves low-opacity "ghost" primitives lingering on object boundaries, which degrade visual quality. It sets itself apart from standard pruning strategies by re-initializing transparent primitives rather than removing them, thereby maintaining primitive count and coverage in complex regions.
+-
+-#### Component Recycling (Scooping)
+-**Definition:** A training-time component management strategy that replaces vanilla 3DGS densification/pruning by resampling low-opacity components into high-opacity ones to maintain efficiency without unbounded growth [S1].
+-**Step:** Every $n$ training iterations: 1) Compute opacity values for all active components. 2) Construct a Multinomial distribution from these opacity values. 3) Sample components with relatively high probability to replace low-opacity ones [S1].
+-**Parameter:** $n$: iteration interval for recycling. Value not specified in this section; detailed recycling formulae are deferred to Sec. 5 [S1].
+-**Pitfall:** Recycling must not significantly alter the rendered image. The operation is only valid when the change to the current state (rendering result) after recycling is minimal [S1].
+-
+-#### Adaptive Pruning
+-**Definition:** A routine to reduce floaters and overfitting by removing triangles that explain small amounts of data within a single view [S2].
+-**Step:** During rasterization, calculate the maximum volume rendering blending weight $T \cdot o$ (transmittance times opacity) for each triangle across all training views. Prune triangles if their maximum weight is less than threshold $\tau_{prune}$. Additionally, prune triangles not rendered at least twice with more than one pixel of coverage [S2].
+-**Parameter:** $\tau_{prune}$: A user-defined threshold for the maximum volume rendering blending weight below which a triangle is pruned [S2].
+-
+-## Background
+-The concept of managing Gaussian density through pruning and densification was introduced in the original 3D Gaussian Splatting paper . Subsequent works have adapted these mechanisms for specific rendering primitives (e.g., triangles in [S2]) or optimization constraints (e.g., GRay [S1], GES [S1]). The "Scooping" or recycling mechanism was proposed to address the unbounded growth of components in standard 3DGS [S1].
+-
+-## Sources
+-[S1] 3D Student Splatting and Scooping, https://doi.org/10.1109/cvpr52734.2025.01960, fetched 2026-10-29
+-[S2] Triangle Splatting for Real-Time Radiance Field Rendering, https://doi.org/10.1109/3DV69130.2026.00123, fetched 2026-10-27+    ## Sources
++    [S1] 3D Student Splatting and Scooping, https://doi.org/10.1109/cvpr52734.2025.01960, fetched 2026-10-29
++     Triangle Splatting for Real-Time Radiance Field Rendering, https://doi.org/10.1109/3DV69130.2026.00123, fetched 2026-10-27
++    [Parent] Pruning and Sparsification, https://doi.org/10.1109/cvpr52734.2025.01960, fetched 2026-10-29

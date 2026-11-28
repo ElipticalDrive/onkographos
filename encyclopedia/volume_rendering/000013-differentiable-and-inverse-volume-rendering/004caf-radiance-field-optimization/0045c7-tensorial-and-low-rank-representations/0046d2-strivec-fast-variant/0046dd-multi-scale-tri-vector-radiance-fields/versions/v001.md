@@ -1,0 +1,47 @@
+# Multi-scale Tri-Vector Radiance Fields
+
+
+## Overview
+Multi-scale Tri-Vector Radiance Fields is a low-rank volume representation that extends the Strivec Fast Variant by employing a multi-scale tensor decomposition to improve rendering smoothness and quality [S1]. It differs from its parent method by combining multiple tensor resolutions to capture both coarse structures and fine details, outperforming single-scale counterparts with fewer parameters [S1].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A set of 2D images with known camera poses.
+- Output: A radiance field model capable of synthesizing novel views.
+
+**Data Structures:**
+The model consists of $S$ scales. For each scale $s \in \{1, \dots, S\}$, the radiance field is represented by a set of tri-vectors.
+- **Tensor Lengths:** Each scale $s$ has a specific tensor length $L_s$. The default configuration uses three scales with lengths $L_1 = 0.15$, $L_2 = 0.3$, and $L_3 = 0.6$ [S1].
+- **Components:** Each scale maintains $K$ appearance components. The default ablation setting uses $K=24$ components [S1].
+- **Tri-Vector Representation:** For each component $k$ and scale $s$, the density and color are factorized into three vectors: $\mathbf{u}_{s,k} \in \mathbb{R}^{L_s}$, $\mathbf{v}_{s,k} \in \mathbb{R}^{L_s}$, and $\mathbf{w}_{s,k} \in \mathbb{R}^{L_s}$, corresponding to spatial dimensions $x, y, z$. The density $\sigma$ and color $\mathbf{c}$ at position $\mathbf{p} = (x,y,z)$ are computed by summing contributions across scales and components.
+
+**Steps:**
+1. **Initialization:** Initialize tri-vectors for each scale $s$ and component $k$. The tensor lengths are fixed as $L_s \in \{0.15, 0.3, 0.6\}$ for $S=3$ scales [S1].
+2. **Evaluation:** For a query point $\mathbf{p}$, compute the density and color by interpolating the tri-vectors. The multi-scale approach aggregates information from all scales, providing smoother gradients than single-scale models [S1].
+3. **Optimization:** Minimize the photometric loss between rendered and input images. The multi-scale structure allows the model to capture high-frequency details more effectively than single-scale models with comparable parameter counts [S1].
+
+**Parameters:**
+- Number of scales $S=3$ [S1].
+- Tensor lengths: $0.15, 0.3, 0.6$ [S1].
+- Number of appearance components $K=24$ (default) [S1].
+
+**Edge Cases and Pitfalls:**
+- Adding more than 48 components yields marginal performance gains, as the model struggles to learn high-frequency details despite increased capacity [S1].
+- Single-scale models with more parameters may underperform the multi-scale model with fewer components due to lack of smoothness [S1].
+
+## Subtopics
+
+### [TensoRF Volume Representation](21649-tensorf-volume-representation.md)
+TensoRF represents a 3D radiance field by factorizing the volume into a sum of outer products between functions of one or more spatial dimensions, significantly reducing memory usage compared to dense voxel grids.
+
+## Operating characteristics
+- **Time and Memory Complexity:** The multi-scale structure reduces memory usage compared to dense voxel grids by factorizing the volume [S1]. The specific complexity depends on the tensor lengths and number of components.
+- **Measured Performance:** On the NeRF Synthetic dataset, the multi-scale model with 24 components outperforms single-scale models with more parameters [S1].
+- **Strengths:** Provides more smoothness and better rendering quality than single-scale counterparts [S1].
+- **Limitations:** The benefit of adding more components becomes marginal when the number reaches 48 [S1].
+
+## Background
+The method is part of the Strivec family, which uses sparse tri-vector radiance fields for efficient volume rendering [S1]. The multi-scale variant was introduced to address the limitations of single-scale representations, drawing inspiration from iNGP findings on multi-scale benefits [S1].
+
+## Sources
+[S1] Strivec: Sparse Tri-Vector Radiance Fields, https://doi.org/10.1109/iccv51070.2023.01611, fetched 2026-10-26

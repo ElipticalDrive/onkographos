@@ -1,0 +1,217 @@
+--- v001.md
++++ v002.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Voxel Raymarching with DDA and Bounding Box Culling is an image-order rendering technique for sparse, segmented voxel models. It solves the problem of efficiently rendering large voxel volumes by treating the model as a bounding box mesh where the fragment shader ignores the geometry and instead casts a ray from the eye through the pixel. The ray intersects the box analytically to find the entry point, then steps through the voxel grid using Digital Differential Analyzer (DDA) traversal until it finds a non-empty voxel or leaves the box [S1, unofficial]. It sets itself apart from sibling methods by explicitly decoupling the ray origin from the box surface intersection to avoid floating-point boundary errors, and by using a segment directory to manage sparse 3D texture arrays [S1, unofficial].
++Voxel Raymarching with DDA and Bounding Box Culling is an image-order rendering technique for sparse, segmented voxel models [S1, unofficial]. It solves the problem of efficiently rendering large voxel volumes by treating the model as a bounding-box mesh where the fragment shader ignores the geometry and instead casts a ray from the eye through the pixel [S1, unofficial]. The ray intersects the box analytically to find the entry point, then steps through the voxel grid using Digital Differential Analyzer (DDA) traversal until it finds a non-empty voxel or leaves the box [S1, unofficial]. It sets itself apart from sibling methods by explicitly decoupling the ray origin from the box surface intersection to avoid floating-point boundary errors, and by using a segment directory to manage sparse 3D texture arrays [S1, unofficial].
+ 
+ ## How it works
+@@ -45,7 +45,7 @@
+     *   Perform a ray-AABB slab test to find the entry point `t_entry` and exit point `t_exit` of the ray with the bounding box [S1, unofficial].
+     *   If the ray misses the box, discard the pixel.
+-    *   Start DDA traversal from the entry point. The traversal steps through voxels along the ray path.
+-    *   For each voxel visited, sample the corresponding 3D texture from the `segment_voxels` array using the segment directory to find the correct texture index.
+-    *   If a non-empty voxel (palette index > 0) is found, record the hit position, normal, and material ID. If the ray exits the box without finding a non-empty voxel, discard the pixel.
++    *   Start DDA traversal from the entry point. The traversal steps through voxels along the ray path [S1, unofficial].
++    *   For each voxel visited, sample the corresponding 3D texture from the `segment_voxels` array using the segment directory to find the correct texture index [S1, unofficial].
++    *   If a non-empty voxel (palette index > 0) is found, record the hit position, normal, and material ID. If the ray exits the box without finding a non-empty voxel, discard the pixel [S1, unofficial].
+ 
+ 3.  **Compute Lighting:**
+@@ -66,10 +66,8 @@
+ ### Pseudocode
+ ```python
+-# Fragment Shader Entry Point
+-fragment_shader(SCREEN_UV, EYE_OFFSET, INV_PROJECTION_MATRIX, INV_VIEW_MATRIX, 
+-                MODEL_MATRIX, INV_MODEL_MATRIX, PROJECTION_MATRIX, 
+-                box_center, box_size, segment_directory, segment_voxels, palette, 
+-                light_position):
+-    
++def fragment_shader(SCREEN_UV, EYE_OFFSET, INV_PROJECTION_MATRIX, INV_VIEW_MATRIX,
++                    MODEL_MATRIX, INV_MODEL_MATRIX, PROJECTION_MATRIX,
++                    box_center, box_size, segment_directory, segment_voxels, palette,
++                    light_position, active_segment_count):
+     # 1. Compute Per-Eye Ray Origin and Direction
+     camera_world = (INV_VIEW_MATRIX * vec4(EYE_OFFSET, 1.0)).xyz
+@@ -78,73 +76,67 @@
+     ray_dir_view = normalize(view_frag.xyz - EYE_OFFSET)
+     ray_world_dir = normalize((INV_VIEW_MATRIX * vec4(ray_dir_view, 0.0)).xyz)
+-    
++
+     camera_voxel = (INV_MODEL_MATRIX * vec4(camera_world, 1.0)).xyz + box_center
+     ray_dir = normalize((INV_MODEL_MATRIX * vec4(ray_world_dir, 0.0)).xyz)
+-    
++
+     box_min = box_center - box_size * 0.5
+     box_max = box_center + box_size * 0.5
+-    
++
+     # 2. March Through the Box
+-    t_entry, t_exit, normal, hit_pos, material_id = march_box(camera_voxel, ray_dir, box_min, box_max, segment_directory, segment_voxels)
+-    
++    t_entry, t_exit, normal, hit_pos, material_id = march_box(camera_voxel, ray_dir, box_min, box_max,
++                                                              segment_directory, segment_voxels, active_segment_count)
++
+     if material_id == 0:
+-        discard # Miss
+-    
++        discard
++
+     # 3. Compute Lighting
+     to_light = normalize(light_position - hit_pos)
+     lighting = max(dot(normal, to_light), 0.0) * 0.7 + 0.3
+-    
++
+     # 4. Output Albedo
+     albedo = get_material_color(material_id, palette) * lighting
+-    
++
+     # 5. Write Depth
+     hit_clip = PROJECTION_MATRIX * VIEW_MATRIX * MODEL_MATRIX * vec4(hit_pos - box_center, 1.0)
+     depth = hit_clip.z / hit_clip.w
+-    
++
+     return albedo, depth
+ 
+-# Helper: March Box using DDA
+-march_box(origin, ray_dir, box_min, box_max, segment_directory, segment_voxels):
+-    # Ray-AABB Slab Test
++def march_box(origin, ray_dir, box_min, box_max, segment_directory, segment_voxels, active_segment_count):
+     inv_ray_dir = 1.0 / ray_dir
+     t0 = (box_min - origin) * inv_ray_dir
+     t1 = (box_max - origin) * inv_ray_dir
+-    t_near = max(max(min(t0.x, t1.x), min(t0.y, t1.y)), min(t0.z, t1.z))
+-    t_far = min(min(max(t0.x, t1.x), max(t0.y, t1.y)), max(t0.z, t1.z))
+-    
++    t_near = max(min(t0.x, t1.x), min(t0.y, t1.y), min(t0.z, t1.z))
++    t_far = min(max(t0.x, t1.x), max(t0.y, t1.y), max(t0.z, t1.z))
++
+     if t_near > t_far or t_far < 0:
+-        return 0, 0, vec3(0), vec3(0), 0 # Miss
+-    
+-    # Start DDA at t_near
++        return 0, 0, vec3(0), vec3(0), 0
++
+     current_pos = origin + ray_dir * t_near
+     current_voxel = floor(current_pos)
+-    
+-    # DDA Step Calculation
+     step_x = sign(ray_dir.x)
+     step_y = sign(ray_dir.y)
+     step_z = sign(ray_dir.z)
+-    
+-    t_max_x = (box_min.x if step_x < 0 else box_max.x - current_voxel.x) / ray_dir.x
+-    t_max_y = (box_min.y if step_y < 0 else box_max.y - current_voxel.y) / ray_dir.y
+-    t_max_z = (box_min.z if step_z < 0 else box_max.z - current_voxel.z) / ray_dir.z
+-    
++
++    # Amanatides-Woo initialization
++    t_max_x = ((current_voxel.x + 1.0 if step_x > 0 else current_voxel.x) - origin.x) / ray_dir.x
++    t_max_y = ((current_voxel.y + 1.0 if step_y > 0 else current_voxel.y) - origin.y) / ray_dir.y
++    t_max_z = ((current_voxel.z + 1.0 if step_z > 0 else current_voxel.z) - origin.z) / ray_dir.z
++
+     t_delta_x = abs(1.0 / ray_dir.x)
+     t_delta_y = abs(1.0 / ray_dir.y)
+     t_delta_z = abs(1.0 / ray_dir.z)
+-    
++
+     while t_near <= t_far:
+-        # Sample voxel
+         segment_id = get_segment_id(current_voxel)
+-        texture_index = get_texture_index(segment_id, segment_directory)
+-        
++        texture_index = get_texture_index(segment_id, segment_directory, active_segment_count)
++
+         if texture_index != -1:
+             voxel_data = texelFetch(segment_voxels[texture_index], current_voxel % 128).r
+             if voxel_data > 0:
+-                # Hit found
+                 hit_pos = origin + ray_dir * t_near
+                 normal = compute_normal(current_voxel, hit_pos, ray_dir)
+                 return t_near, t_far, normal, hit_pos, voxel_data
+-        
+-        # Advance DDA
++
+         if t_max_x < t_max_y:
+             if t_max_x < t_max_z:
+@@ -165,34 +157,38 @@
+                 t_near += t_delta_z
+                 t_max_z += t_delta_z
+-                
+-        # Check bounds
++
+         if not inside_box(current_voxel, box_min, box_max):
+             break
+-            
+-    return 0, 0, vec3(0), vec3(0), 0 # Miss
+-
+-# Helper: Get Segment ID
+-get_segment_id(voxel):
++
++    return 0, 0, vec3(0), vec3(0), 0
++
++def get_segment_id(voxel):
+     # Voxel coordinates are Z-up (MagicaVoxel)
+-    # Segment grid coordinates are multiplied by 128
+     X = voxel.x >> 7
+-    Y = voxel.z >> 7 # Note: Z-up storage, Y-up world conversion handled in CPU
+-    Z = voxel.y >> 7
++    Y = voxel.y >> 7
++    Z = voxel.z >> 7
+     return (X << 18) | (Y << 9) | Z
+ 
+-# Helper: Get Texture Index from Directory
+-get_texture_index(segment_id, directory):
+-    # Directory is a 2D texture, segment_id maps to a specific texel
+-    # Return the texture slot stored in the directory
+-    pass # Implementation depends on directory layout
+-
+-# Helper: Compute Normal
+-compute_normal(voxel, hit_pos, ray_dir):
+-    # Approximate normal based on which face was entered
+-    pass # Implementation details not fully specified in sources [G]
+-
+-# Helper: Check if Voxel is Inside Box
+-inside_box(voxel, box_min, box_max):
+-    return all(voxel >= box_min) and all(voxel <= box_max)
++def get_texture_index(segment_id, segment_directory, active_segment_count):
++    # Search directory for matching segment grid coordinates
++    for i in range(active_segment_count):
++        entry = texelFetch(segment_directory, vec2(i, 0))
++        segX, segY, segZ = entry.xyz
++        if (segX << 18) | (segY << 9) | segZ == segment_id:
++            return int(entry.w)
++    return -1
++
++def compute_normal(voxel, hit_pos, ray_dir):
++    # Approximate normal based on which face was entered [G]
++    if ray_dir.x > 0: return vec3(-1, 0, 0)
++    if ray_dir.x < 0: return vec3(1, 0, 0)
++    if ray_dir.y > 0: return vec3(0, -1, 0)
++    if ray_dir.y < 0: return vec3(0, 1, 0)
++    if ray_dir.z > 0: return vec3(0, 0, -1)
++    return vec3(0, 0, 1)
++
++def inside_box(voxel, box_min, box_max):
++    return (voxel.x >= box_min.x and voxel.y >= box_min.y and voxel.z >= box_min.z and
++            voxel.x <= box_max.x and voxel.y <= box_max.y and voxel.z <= box_max.z)
+ ```
+ 
+@@ -210,10 +206,11 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear with respect to the number of voxels traversed along the ray. The DDA traversal is efficient for sparse volumes as it skips empty space.
+-*   **Memory Complexity:** Proportional to the number of active segments. Each segment is a 128³ R8 texture (2 MB). The directory texture is small.
+-*   **Strengths:** Efficient for sparse voxel models. Avoids floating-point boundary errors by using analytical ray-box intersection. Works well in VR due to correct depth writing.
+-*   **Limitations:** Requires precomputed inverse model matrix. Performance depends on the density of the voxel model.
+-*   **When to Use:** Sparse voxel models with large empty spaces. VR applications requiring correct depth for reprojection.
+-*   **When Not to Use:** Dense voxel models where ray traversal becomes expensive. Models with frequent dynamic changes requiring frequent bound updates.
++*   **Time Complexity:** Linear with respect to the number of voxels traversed along the ray. The DDA traversal is efficient for sparse volumes as it skips empty space [S1, unofficial].
++*   **Memory Complexity:** Proportional to the number of active segments. Each segment is a 128³ R8 texture (2 MB). The directory texture is small [S1, unofficial].
++*   **Measured Performance:** Not given in the sources.
++*   **Strengths:** Efficient for sparse voxel models. Avoids floating-point boundary errors by using analytical ray-box intersection. Works well in VR due to correct depth writing [S1, unofficial].
++*   **Limitations:** Requires precomputed inverse model matrix. Performance depends on the density of the voxel model [S1, unofficial].
++*   **When to Use:** Sparse voxel models with large empty spaces. VR applications requiring correct depth for reprojection [S1, unofficial].
++*   **When Not to Use:** Dense voxel models where ray traversal becomes expensive. Models with frequent dynamic changes requiring frequent bound updates [S1, unofficial].
+ 
+ ## Background

@@ -1,0 +1,288 @@
+--- v008.md
++++ v009.md
+@@ -1,8 +1,8 @@
+ # Parallel Marching Cubes
+ 
+-Also called: Marching Cubes with Slice Strategy, PBIG, Parallel Isosurface Generator, Piecewise Marching Cubes
++Also called: Parallel Isosurface Generator, PBIG, Marching Cubes with Slice Strategy, Piecewise Marching Cubes
+ 
+ ## Overview
+-Parallel Marching Cubes (Slice Strategy) is a method for extracting isosurfaces from volumetric datasets that exceed the capacity of a single machine's physical memory [S1, unofficial]. It solves the memory bottleneck by partitioning the 3D volume into slices along the $k$-direction, processing each slice with independent parallel processes or threads, and serializing the resulting geometry into a shared output file [S1, unofficial]. Unlike standard implementations that require the entire volume to reside in RAM, this approach only requires that at least two adjacent slices fit into memory at any given time [S1, unofficial]. It builds on [Marching Cubes Lookup and Configuration](2518-marching-cubes-lookup-and-configuration.md) for topology determination but diverges from [GPU Acceleration and Parallel Pipelines](4136-gpu-acceleration-and-parallel-pipelines.md) by relying on CPU-based process parallelism (fork/sproc/pthreads) and disk-based I/O serialization rather than GPU atomic counters or append buffers.
++Parallel Marching Cubes (Slice Strategy) is a CPU-based parallel algorithm designed to extract isosurfaces from volumetric datasets that exceed the capacity of a single machine's physical memory [S1, unofficial]. It solves the memory bottleneck of traditional Marching Cubes by decomposing the 3D volume into 2D slices along the k-direction, processing them concurrently using multiple processes or threads [S1, unofficial]. Unlike GPU-based parallel methods that rely on atomic counters or histogram pyramids for output buffering, this method uses a piecewise calculation approach where child processes write directly to a shared output file, coordinated by semaphores to prevent write collisions [S1, unofficial].
+ 
+ ## How it works
+@@ -10,105 +10,103 @@
+ ### Inputs and Outputs
+ **Inputs:**
+-1.  **Grid File:** A structured mesh (regular or irregular) in a variation of the unformatted PLOT3D format, containing coordinates $x, y, z$ [S1, unofficial].
+-2.  **Solution File:** A structured scalar field in PLOT3D format, containing scalar values $v(x,y,z)$ [S1, unofficial].
++1.  **Grid File:** A PLOT3D-format file defining the structured mesh coordinates $(x, y, z)$ [S1, unofficial].
++2.  **Solution File:** A PLOT3D-format file containing scalar fields $v(x,y,z)$, $F(x,y,z)$, etc. [S1, unofficial].
+ 3.  **Parameters:**
+-    *   `argv[1]`: Grid filename.
+-    *   `argv[2]`: Solution filename.
+-    *   `argv[3]`: Output Bop filename.
+-    *   `argv[4]`: Index into the solution file for the scalar defining the isosurface.
+-    *   `argv[5]`: Index into the solution file for the scalar mapped onto the surface for color.
+-    *   `argv[6]`: Floating-point isosurface value $S$ (typical value: 5.0) [S1, unofficial].
+-    *   `argv[7]`: Integer number of planes to step in the $k$-direction (typical value: 2 or 3) [S1, unofficial].
+-    *   `argv[8]`: Integer number of parallel processes to spawn [S1, unofficial].
++    *   `isosurface_value` ($S$): The scalar threshold for extraction [S1, unofficial].
++    *   `kstep`: The number of planes to step in the k-direction (controls slice thickness/overlap) [S1, unofficial]. Typical value: 2 or 3 [S1, unofficial].
++    *   `num_procs`: The number of parallel processes/threads to spawn [S1, unofficial].
++    *   `scalar_index`: Index into the solution file for the scalar defining the isosurface [S1, unofficial].
+ 
+ **Outputs:**
+-*   **Bop File:** A binary "Bag-O-Polygons" file containing a collection of three-sided polygons defining the isosurface $F(x,y,z) = S$ and a secondary scalar mapped to each vertex [S1, unofficial].
++*   **Bop File:** A binary "Bag-O-Polygons" file containing the extracted isosurface [S1, unofficial].
+ 
+ ### Data Structures
+-**Partition Structure (Parent Process):**
+-A C structure created by the parent process to distribute workload. It contains:
+-*   Start and end indices for the $k$-dimension slice assigned to each child.
+-*   File offsets for reading the grid and solution files corresponding to the assigned slice.
++**Bop Polygon Structure (`boply`):**
++Each polygon in the output is defined by a C structure containing:
++*   `num_vertices`: Integer specifying the number of vertices (typically 3 for triangles) [S1, unofficial].
++*   `vertices`: An array of vertex data. Each vertex consists of:
++    *   `x, y, z`: Floating-point coordinates [S1, unofficial].
++    *   `mapping_scalar`: Floating-point value mapped onto the surface (e.g., color or secondary field) [S1, unofficial].
+ 
+-**Bop Polygon Structure (`boply`):**
+-Each polygon written to the output file is defined by a structure containing:
+-*   `int num_vertices`: Number of vertices in the polygon (always 3 for triangles).
+-*   `float x, y, z`: Coordinates of each vertex.
+-*   `float scalar`: The mapped scalar value for each vertex [S1, unofficial].
++**Partitioning Structure:**
++The parent process creates a structure for each child process containing:
++*   The range of k-indices assigned to the child [S1, unofficial].
++*   File offsets for reading the grid and solution files corresponding to that slice [S1, unofficial].
+ 
+ ### Algorithm Steps
+-The execution follows a master-worker model using process parallelism.
++The algorithm operates in two phases: Partitioning and Execution.
+ 
+-1.  **Initialization (Parent):**
+-    *   Open the Grid and Solution files.
+-    *   Read headers to determine grid dimensions $N_i, N_j, N_k$ and verify there is exactly one grid [S1, unofficial].
+-    *   Call the partitioning routine to divide the $k$-dimension into $P$ chunks (where $P$ is `argv[8]`). Create the partition structure [S1, unofficial].
+-
+-2.  **Process Creation:**
+-    *   Spawn $P$ child processes using platform-specific mechanisms:
+-        *   `fork` on SGI/Sun (Copy-on-Write memory) [S1, unofficial].
+-        *   `sproc` on SGI (Shared memory address space) [S1, unofficial].
+-        *   `pthreads` on KSR1 [S1, unofficial].
+-    *   Pass the partition structure and command-line arguments to each child [S1, unofficial].
+-
+-3.  **Slice Processing (Child Process):**
+-    *   **Load Data:** Read the assigned slice of the grid and solution data into local memory. The slice includes the current $k$-plane and sufficient neighbors to form complete cubes (typically requiring data from $k$ and $k+1$ planes) [S1, unofficial].
+-    *   **Marching Cubes:** Iterate through every cube in the loaded slice:
+-        *   **Case Index:** Compute the 8-bit case index $C$ by comparing the scalar value $S$ at each of the 8 vertices against the isosurface value $S_{iso}$ (argv[6]). Set bit $b$ to 1 if $S_{vertex} \ge S_{iso}$, else 0 [S1, unofficial].
+-        *   **Lookup:** Use $C$ to index into the `triangleTable` from [Marching Cubes Lookup and Configuration](2518-marching-cubes-lookup-and-configuration.md). If $C=0$ or $C=255$, skip the cube [Parent Principles].
+-        *   **Interpolation:** For each edge indicated by the lookup table, calculate the exact intersection point using linear interpolation between the vertex values [S1, unofficial].
+-        *   **Generate Triangles:** Construct the list of triangles (3-sided polygons) for the cube.
+-    *   **Serialize Output:** Write the generated polygons to the Bop file. Since multiple children may write simultaneously, use semaphores to enforce mutual exclusion for file/network writes [S1, unofficial].
+-
+-4.  **Termination:**
+-    *   Children exit after writing their data. Children with smaller outputs may finish before those with larger outputs [S1, unofficial].
+-    *   The parent waits for all children to complete [S1, unofficial].
++1.  **Initialization:** The parent process opens the Grid and Solution files to read headers, determining the total dimensions $(N_i, N_j, N_k)$ and verifying there is one grid [S1, unofficial].
++2.  **Partitioning:** The parent divides the volume along the k-direction into `num_procs` slices. It calculates the k-index range for each child and stores this in a partitioning structure [S1, unofficial].
++3.  **Process Creation:** The parent spawns `num_procs` child processes. The mechanism depends on the platform:
++    *   `fork`: Standard UNIX copy-on-write (writes not visible to other processes) [S1, unofficial].
++    *   `sproc`: SGI-specific share group process (shared virtual address space) [S1, unofficial].
++    *   `pthreads`: Thread-based parallelism (used on KSR1) [S1, unofficial].
++4.  **Slice Processing (Child Process):**
++    a.  **Data Loading:** The child reads its assigned slice of the grid and solution data into memory. The method relies on the constraint that at least two slices fit into physical memory [S1, unofficial].
++    b.  **Marching Cubes Execution:** For each voxel cube in the slice:
++        i.  **Case Index Calculation:** Determine the 8-bit case index $C$. For each vertex $v_i$ ($i=0..7$) of the cube, if $V(v_i) \ge S$, set bit $i$ of $C$ to 1; otherwise 0 [S1, unofficial].
++        ii. **Early Exit:** If $C=0$ or $C=255$, the voxel is fully inside or outside the isosurface; skip to the next voxel [S1, unofficial].
++        iii. **Topology Lookup:** Retrieve the triangulation configuration from the `triangleTable` using $C$. This yields a list of edges to intersect [S1, unofficial].
++        iv. **Intersection Calculation:** For each active edge, calculate the intersection point $P$ via linear interpolation between the scalar values at the edge endpoints $A$ and $B$:
++            $$ P = A + \frac{S - V(A)}{V(B) - V(A)} (B - A) $$
++            where $V(A)$ and $V(B)$ are the scalar values at vertices A and B [S1, unofficial].
++        v.  **Polygon Assembly:** Collect the intersection points to form triangles (three-sided polygons) [S1, unofficial].
++    c.  **Output Serialization:** The child writes its generated polygons to the Bop file. To prevent simultaneous writes from multiple children causing data corruption, a semaphore enforces mutual exclusion, allowing only one child to write at a time [S1, unofficial].
++5.  **Completion:** Children exit after writing their data. The parent waits for all children to complete [S1, unofficial].
+ 
+ ### Pseudocode
+ 
+ ```python
+-# Parent Process Logic
+-def parent_process(grid_file, sol_file, bop_file, scalar_idx, map_idx, isovalue, k_step, num_procs):
+-    # 1. Read headers
+-    dims = read_p3d_headers(grid_file, sol_file)
+-    Ni, Nj, Nk = dims.i, dims.j, dims.k
++# Parent Process
++def parallel_marching_cubes_slice(grid_file, solution_file, output_file, isosurface_value, kstep, num_procs):
++    # 1. Read headers to get dimensions (Ni, Nj, Nk)
++    dims = read_p3d_headers(grid_file, solution_file)
+     
+-    # 2. Partition workload
+-    # Divide Nk into num_procs chunks. 
+-    # Each chunk defines a range of k-indices [k_start, k_end]
+-    partitions = create_partitions(Nk, num_procs)
+-    
++    # 2. Partition workload along k-direction
++    # Each child gets a range of k-indices
++    partitions = []
++    k_slice_height = dims.Nk // num_procs
++    for i in range(num_procs):
++        k_start = i * k_slice_height
++        k_end = (i + 1) * k_slice_height if i < num_procs - 1 else dims.Nk
++        partitions.append({
++            'k_start': k_start,
++            'k_end': k_end,
++            'file_offset': calculate_file_offset(dims, k_start)
++        })
++        
+     # 3. Spawn children
+     children = []
+-    for p in range(num_procs):
+-        child = spawn_child(partitions[p], grid_file, sol_file, bop_file, 
+-                            scalar_idx, map_idx, isovalue, k_step)
++    for i in range(num_procs):
++        child = spawn_process(child_func, grid_file, solution_file, output_file, 
++                              isosurface_value, partitions[i], i)
+         children.append(child)
+         
+     # 4. Wait for completion
+     for child in children:
+-        child.join()
++        child.wait()
+ 
+-# Child Process Logic
+-def child_process(partition, grid_file, sol_file, bop_file, scalar_idx, map_idx, isovalue, k_step):
+-    # 1. Load Slice
+-    # Read grid and scalar data for k-range [partition.k_start, partition.k_end + 1]
+-    # The +1 ensures we have the top face of the cubes in the last slice
+-    grid_data = read_slice(grid_file, partition.k_start, partition.k_end + 1)
+-    scalar_data = read_slice(sol_file, partition.k_start, partition.k_end + 1)
++# Child Process
++def child_func(grid_file, solution_file, output_file, isosurface_value, partition, proc_id):
++    # 1. Load slice data
++    # Only load the k-range specified in partition
++    grid_slice = read_p3d_slice(grid_file, partition['k_start'], partition['k_end'])
++    scalar_slice = read_p3d_slice(solution_file, partition['k_start'], partition['k_end'])
+     
+-    # 2. Process Cubes
++    # 2. Process voxels in the slice
+     polygons = []
+-    for k in range(partition.k_start, partition.k_end):
+-        for j in range(0, Nj - 1):
+-            for i in range(0, Ni - 1):
++    for k in range(partition['k_start'], partition['k_end']):
++        for j in range(dims.Nj):
++            for i in range(dims.Ni):
+                 # Get 8 vertices of the cube at (i, j, k)
+-                v = get_cube_vertices(grid_data, scalar_data, i, j, k)
++                vertices = get_cube_vertices(grid_slice, i, j, k)
++                scalars = get_cube_scalars(scalar_slice, i, j, k)
+                 
+-                # Compute case index
++                # Calculate Case Index
+                 case_index = 0
+-                for bit in range(8):
+-                    if v.scalar[bit] >= isovalue:
+-                        case_index |= (1 << bit)
++                for v_idx in range(8):
++                    if scalars[v_idx] >= isosurface_value:
++                        case_index |= (1 << v_idx)
+                 
+                 # Early exit for empty/full cubes
+@@ -117,57 +115,59 @@
+                 
+                 # Lookup topology
+-                triangles = lookup_triangles(case_index)
++                edges = triangle_table[case_index]
+                 
+-                # Generate geometry
+-                for tri in triangles:
+-                    poly = boply()
++                # Generate triangles
++                for edge_pair in edges:
++                    p1 = interpolate_intersection(vertices[edge_pair[0]], scalars[edge_pair[0]], isosurface_value)
++                    p2 = interpolate_intersection(vertices[edge_pair[1]], scalars[edge_pair[1]], isosurface_value)
++                    p3 = interpolate_intersection(vertices[edge_pair[2]], scalars[edge_pair[2]], isosurface_value)
++                    
++                    # Create polygon structure
++                    poly = BopPolygon()
+                     poly.num_vertices = 3
+-                    for vertex_idx in tri:
+-                        # Linear interpolation on the specific edge
+-                        p = interpolate_edge(v.grid, v.scalar, vertex_idx, isovalue)
+-                        poly.vertices.append(p)
+-                        poly.scalars.append(interpolate_scalar(v.scalar, vertex_idx, isovalue))
++                    poly.vertices = [p1, p2, p3]
+                     polygons.append(poly)
+     
+-    # 3. Write Output with Serialization
++    # 3. Write to Bop file with semaphore protection
+     acquire_semaphore()
+     try:
+-        write_bop_file(bop_file, polygons)
++        write_bop_file(output_file, polygons)
+     finally:
+         release_semaphore()
++
++def interpolate_intersection(vertex, scalar_val, isosurface_value):
++    # Linear interpolation along the edge
++    # Assumes vertex is one endpoint, and the other endpoint's data is available
++    # In the actual MC loop, this is done for pairs of vertices forming an edge
++    pass
+ ```
+ 
+ ### Edge Cases and Pitfalls
+-*   **Grid Orientation:** The grid must be oriented such that it can be sliced in the $k$-direction. If the data structure does not support efficient strided access along $k$, the method may fail or require preprocessing [S1, unofficial].
+-*   **Memory Constraints:** The method assumes at least two slices fit into physical memory. If the slice size exceeds available RAM, the process will fail [S1, unofficial].
+-*   **I/O Collisions:** Without semaphore-based mutual exclusion, simultaneous writes by multiple child processes to the Bop file will cause data corruption [S1, unofficial].
+-*   **Ambiguity:** Standard lookup tables are used. Cases 46, 47, 98, 99, 210, 213, 214, 215 remain ambiguous and may cause cracks if adjacent voxels resolve them inconsistently [Lookup Table and Ambiguity Handling].
++*   **Grid Orientation:** The grid must be oriented such that it can be sliced in the k-direction. If the data structure does not support this, the method fails or requires preprocessing [S1, unofficial].
++*   **Write Collisions:** Simultaneous writes by multiple child processes to the Bop format cause data corruption. This is handled by semaphores, but introduces serialization overhead [S1, unofficial].
++*   **Memory Constraint:** The method requires that at least two slices fit into physical memory. If slices are too large, the system will swap, negating performance gains [S1, unofficial].
+ 
+ ## Operating characteristics
+ 
+-**Time and Memory Complexity:**
+-*   **Memory:** $O(S \cdot N_i \cdot N_j)$, where $S$ is the slice thickness in $k$ (typically 2 or 3). This is significantly lower than the $O(N_i \cdot N_j \cdot N_k)$ required by non-parallel methods [S1, unofficial].
+-*   **Time:** $O(N_i \cdot N_j \cdot N_k / P)$ for computation, where $P$ is the number of processes. I/O time is serialized or partially parallelized depending on the Bop library implementation [S1, unofficial].
+-
+-**Measured Performance:**
+-*   On a dataset of ~2.2M grid values and ~11M scalar values, generating ~60,000 polygons:
+-    *   Sequential time: ~20 minutes [S1, unofficial].
+-    *   Parallel time (8 processors): ~90 seconds [S1, unofficial].
+-*   Tested on SUN4 (2 processors), SGI Challenge (8 processors), and KSR1 (8 processors) [S1, unofficial].
+-
+-**Strengths and Limitations:**
+-*   **Strengths:** Handles datasets larger than physical memory; machine-independent (runs on various UNIX architectures); flexible visualization via TCP/IP to Bop_View [S1, unofficial].
+-*   **Limitations:** Requires grid orientation compatible with $k$-slicing; I/O serialization can become a bottleneck if many processes generate large outputs simultaneously; relies on CPU process management (fork/sproc) which has higher overhead than GPU thread management [S1, unofficial].
++*   **Time Complexity:** $O(N)$ where $N$ is the total number of voxels, but with a constant factor reduced by parallelism. The serialization of output adds overhead proportional to the number of polygons and processes.
++*   **Memory Complexity:** $O(S)$ where $S$ is the size of a single slice (plus overhead for the partitioning structure). This is significantly lower than $O(V)$ where $V$ is the total volume size, allowing processing of datasets larger than RAM [S1, unofficial].
++*   **Measured Performance:** On a dataset of ~2.2M grid values and ~11M scalar values, wall-clock time was reduced from ~20 minutes (single process) to ~90 seconds using parallel execution on an 8-processor SGI Challenge or KSR1 machine [S1, unofficial].
++*   **Strengths:**
++    *   Handles datasets larger than physical memory [S1, unofficial].
++    *   Portable across UNIX platforms (SGI, Sun, KSR) using standard parallel primitives (`fork`, `sproc`, `pthreads`) [S1, unofficial].
++    *   Simple implementation logic compared to GPU atomic/histogram approaches [S1, unofficial].
++*   **Limitations:**
++    *   Output serialization via semaphores can become a bottleneck if the number of polygons is very high [S1, unofficial].
++    *   CPU-bound; does not leverage GPU parallelism [S1, unofficial].
++    *   Requires specific grid orientation (k-slicing) [S1, unofficial].
++*   **When to use:** When processing huge volumetric datasets on a multi-core CPU cluster where the data does not fit in RAM, and GPU acceleration is not available or suitable.
++*   **When not to use:** When the entire dataset fits in memory and interactive frame rates are required (GPU methods are faster); when the grid cannot be sliced in the k-direction.
+ 
+ ## Background
+ 
+-**Origin:**
+-The Parallel Isosurface Generator (PBIG) was developed by researchers at the Supercomputer Research Institute and Florida State University, documented in the report "Parallel Isosurface Generator for Huge Datasets" (DTIC ADA284030) [S1, unofficial].
+-
+-**History and Development:**
+-The method was designed to address the limitations of commercial and public domain visualization packages (such as SciAn) that assumed the entire volume fit in memory [S1, unofficial]. It leverages the PLOT3D format for input and the Bop format for output, integrating with the Bop_View visualization tool [S1, unofficial]. It was tested on computational data from CTH and HULL codes, as well as medical resonance data [S1, unofficial].
+-
+-**Usage:**
+-It is used in scientific visualization environments requiring interactive graphics for huge datasets, particularly in computational fluid dynamics and medical imaging, on UNIX-compatible workstations [S1, unofficial].
++*   **Origin:** The Parallel Isosurface Generator (PBIG) was developed by researchers at the Supercomputer Research Institute and Florida State University, documented in a 1994 report [S1, unofficial].
++*   **History:** It was designed to address the limitations of commercial and public domain visualization packages (like SciAn) that assumed the entire volume fit in memory [S1, unofficial]. It utilized existing PLOT3D file formats and Bop output libraries [S1, unofficial].
++*   **Applications:** Applied to computational fluid dynamics data from CTH and HULL codes, as well as medical resonance data [S1, unofficial].
++*   **Platforms:** Tested on SUN4, SGI Challenge, and KSR1 architectures [S1, unofficial].
+ 
+ ## Sources

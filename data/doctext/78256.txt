@@ -1,0 +1,2519 @@
+# VolumeSegmenter
+
+An end-to-end proof of concept for filtering large RAW volumes into compact, spatially mapped bricks, organizing them into selectable logical groups, and rendering them in WebGL2.
+
+## Results first
+
+The pipeline substantially reduced stored and GPU-resident voxel data in all five measured datasets. Rendering speed did not consistently improve: the grouped representation was slightly faster for Bonsai, but slower for Foot, Engine, and Kingsnake because sparse lookup and ray-marching overhead can outweigh memory savings.
+
+Measurements were collected on an Apple M4 with 16 GiB unified memory at 640 × 480, sample step 1, and three fixed camera views. Each view used five warmups and 20 asynchronous GPU timer queries. The table reports the median of the three per-view medians. Source and grouped modes ran sequentially with the same transfer function and display cutoff.
+
+| Dataset | Source MiB | Grouped files MiB | Storage reduction | Grouped GPU MiB | Source / grouped GPU ms | Image check |
+| --- | ---: | ---: | ---: | ---: | --- | --- |
+| Bonsai | 16.00 | 2.65 | 83.5% | 2.73 | 3.41 / 3.23 | 3/3 exact |
+| Foot | 16.00 | 4.08 | 74.5% | 4.14 | 3.55 / 3.99 | 3/3 exact |
+| Engine | 8.00 | 1.72 | 78.5% | 1.80 | 1.96 / 4.01 | 3/3 exact |
+| Kingsnake | 795.00 | 360.39 | 54.7% | 362.06 | 8.47 / 9.65 | 3/3 exact |
+| Woodbranch | 16,384.00 | 719.48 | 95.6% | 745.94 | skipped / 11.78 | MIP only |
+
+The exact image checks compare the source and grouped renderers after applying the same extraction cutoff. They prove that grouping, compact encoding, coordinate reconstruction, and rendering preserve every retained voxel for those views and settings. They do not prove that thresholded-out voxels were semantically unimportant.
+
+Woodbranch demonstrates the main use case: its 16 GiB source volume exceeded the experiment's 1 GiB monolithic allocation budget, while the grouped representation rendered with about 746 MiB of GPU texture data. The source allocation was skipped before execution, so this row is not a measured out-of-memory failure and has no source GPU time.
+
+![Bonsai source and grouped rendering](experiments/grouped-results/bonsai-comparison.png)
+
+Detailed measurements, raw GPU samples, transfer-function settings, environment data, and projection comparisons are in the [complete grouped-volume report](experiments/grouped-results/RESULTS.md).
+
+## What the pipeline does
+
+```mermaid
+flowchart TD
+    A[RAW + dimensions + type + spacing] --> B[Chunked input]
+    B --> C[Explicit intensity cutoff]
+    C --> D[Compact bricks + source coordinates]
+    D --> E[Median-intensity bands + 6-neighbor components]
+    E --> F[Selectable logical groups]
+    F --> G[Dense crop or occupancy-mask encoding]
+    G --> H[Values + masks + indices + metadata]
+    H --> I[Independent decode verification]
+    I --> J[Upload selected groups and release old textures]
+    J --> K[WebGL2 rendering + reference comparison + GPU timing]
+```
+
+1. **Read:** RAW slices or OME-Zarr chunks are processed in batches so the full input and a full label volume do not have to coexist in memory.
+2. **Filter:** The large-volume path applies an explicit intensity cutoff. This is the only lossy step.
+3. **Partition:** Each nonempty brick stores only its local range plus its coordinates in the source volume. Bricks are never expanded back to the full width, height, and depth.
+4. **Group:** Bricks are assigned to median-intensity bands and joined through six-neighbor adjacency. The nine largest components stay separate; smaller components are explicitly pooled by band. Every brick belongs to exactly one group.
+5. **Encode:** The exporter chooses the smaller of a dense crop and an occupancy-mask representation. Masks omit interior empty positions without quantizing or deleting additional retained voxels.
+6. **Verify:** Independent readers check hashes, coordinates, ownership, values, histograms, and three maximum-intensity projections.
+7. **Render:** Logical parent AABBs reference their member bricks. Selecting groups rebuilds resident textures and releases the previous selection. Demand paging, a cache, and level of detail are not implemented yet.
+
+Logical groups are spatial/intensity candidates, not validated tissue classes. Brick-graph connectivity also does not guarantee voxel-level connectivity. The original Skull experiment uses a separate SLIC-candidate path and remains as an algorithm baseline.
+
+## Run the included examples
+
+Run every command from the repository root:
+
+```bash
+cd /Users/jialinghuang/VolumeSegmenter
+
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements-lock.txt
+
+# Download, export, group, and verify Bonsai, Foot, and Engine.
+# Skip this command when the generated outputs already exist.
+python -m pipeline.prepare_examples
+
+# Start the server from the repository root so the UI can access experiment data.
+python -m http.server 8765 --bind 127.0.0.1
+```
+
+Open the [source/grouped-volume comparison](http://127.0.0.1:8765/web/compare_volumes.html?dataset=bonsai) or the [project home page](http://127.0.0.1:8765/).
+
+- Use the dataset menu to switch examples. A menu entry does not guarantee that its generated data exists locally.
+- Drag to rotate and scroll to zoom. The two interactive cameras stay synchronized.
+- Edit the shared transfer function to apply identical colors and opacity to both views.
+- Select logical groups to inspect their individual size, combined storage, and resident GPU data.
+- Live FPS describes both views running together. Use the standalone benchmark for isolated GPU timing.
+- Woodbranch can use a credited published image as a static appearance reference; it cannot be synchronized or used for pixel-level validation.
+- Stop the server with `Ctrl+C` in the terminal.
+
+Python 3.12 or newer is required. On Windows, activate the environment with `.venv\Scripts\activate`.
+
+Large downloads and generated volumes are excluded from Git. Reproduction instructions for Kingsnake and Woodbranch are in [docs/LARGE_VOLUMES.md](docs/LARGE_VOLUMES.md); the original Skull SLIC experiment is documented in [docs/SUPERVOLUMES.md](docs/SUPERVOLUMES.md).
+
+## Process your own RAW volume
+
+The workflow processes files offline and then loads the results in the browser. It does not upload RAW data through the web page. Determine the following values first because RAW files do not carry them:
+
+| Parameter | Requirement |
+| --- | --- |
+| Width, height, depth | Exact voxel dimensions |
+| Data type | `uint8` or little-endian `uint16` (`<u2`) |
+| Layout | X changes fastest, then Y, then Z |
+| Spacing | Physical X/Y/Z voxel spacing; use 1 only when proportions are unknown |
+| Byte size | Must equal width × height × depth × bytes per voxel |
+
+Example for a 256³ `uint8` volume:
+
+```bash
+source .venv/bin/activate
+
+python - <<'PY'
+from pipeline.large_volume import RawSource, export
+from pipeline.group_large_volume import group_volume
+
+source = RawSource(
+    path="data/my_volume.raw",
+    shape=(256, 256, 256),       # D, H, W
+    dtype="uint8",              # Use "<u2" for little-endian uint16.
+    spacing=(1, 1, 1),          # Z, Y, X
+    name="my_volume",
+)
+
+export(
+    source,
+    output="experiments/large-volumes/my_volume32",
+    cutoff=32,                   # Retain source values > 32.
+    save_original=True,          # Saves a full reference and uses more disk space.
+)
+
+group_volume(
+    directory="experiments/large-volumes/my_volume32",
+    output="experiments/large-volumes/my_volume-groups",
+    edges=[96, 160],             # Tune median-intensity bands for the dataset.
+)
+PY
+
+python -m pipeline.verify_large_volume experiments/large-volumes/my_volume32
+python -m pipeline.verify_large_groups \
+  experiments/large-volumes/my_volume-groups \
+  experiments/large-volumes/my_volume32
+```
+
+Cutoffs and intensity-band edges are dataset-specific exploratory parameters. Edges must be strictly increasing, unique, greater than the cutoff, and no greater than the data maximum. Use a new empty output directory for every export because the programs do not overwrite existing results.
+
+After starting the server, open:
+
+```text
+http://127.0.0.1:8765/web/large_volume.html?manifest=../experiments/large-volumes/my_volume-groups/metadata.json
+```
+
+The standalone viewer switches between the source and grouped representations, changes color presets, rotates the camera, and measures three fixed views. Custom datasets are not added automatically to the comparison-page menu. URL parameters such as `manifest`, `input`, and `base` resolve relative to the `web/` directory.
+
+## Repository map
+
+```text
+VolumeSegmenter/
+├── README.md                  Project overview, results, and usage
+├── index.html                 Static-server landing page
+├── requirements*.txt         Dependency ranges and locked versions
+├── pipeline/                  Python processing and experiment code
+├── web/                       HTML and JavaScript renderers
+├── data/                      Input RAW data and historical Skull bricks
+├── configs/                   Skull candidate and seed configurations
+├── tests/                     Numerical, coordinate, and storage checks
+├── docs/                      Method and reproduction guides
+└── experiments/               Measurements, plots, and generated outputs
+```
+
+### Processing code
+
+| File | Role |
+| --- | --- |
+| `pipeline/large_volume.py` | Chunked RAW/OME-Zarr reading, filtering, cropping, sample/page-table export, metadata, and reference MIPs |
+| `pipeline/group_large_volume.py` | Intensity/adjacency grouping, dense-or-mask encoding, per-group files and statistics |
+| `pipeline/verify_large_volume.py` | Export hashes, coordinates, payload ranges, histograms, and three MIPs |
+| `pipeline/verify_large_groups.py` | Independent group decoding, brick comparison, and unique ownership checks |
+| `pipeline/prepare_examples.py` | Downloads Bonsai, Foot, and Engine; checks SHA-512; exports, groups, and verifies them |
+| `pipeline/plot_grouped_projections.py` | Unfiltered/filtered/decoded MIP figures and loss statistics |
+| `pipeline/summarize_grouped_results.py` | Builds the summary table and report from storage and timing JSON |
+| `pipeline/supervolume.py` | Original Skull SLIC analysis, candidate graph, selection, sparse export, and reconstruction |
+| `pipeline/supervolume_study.py` | Runs the original logical-volume experiment and records comparisons |
+| `pipeline/extractVolume.py` | Earlier spatial partition, foreground selection, crop, and reconstruction baseline |
+| `pipeline/benchmark.py` | Source, crop, spatial partition, and decimation baselines |
+| `pipeline/foreground_study.py` | Foreground-cutoff and small-component filtering comparison |
+
+Run modules from the repository root with `python -m pipeline.<module>`.
+
+### Web interface
+
+| File | Role |
+| --- | --- |
+| `web/compare_volumes.html` / `compare_volumes.js` | Side-by-side synchronized views, shared transfer function, group selection, storage, and FPS |
+| `web/large_volume.html` / `large_viewer.js` | Integer textures, mask decoding, page-table empty-space skipping, allocation checks, GPU timing, and image comparison |
+| `web/sparse_volume.html` / `sparse_viewer.js` | Original Skull logical-group atlas renderer and embedded comparison view |
+| `web/region_inspector.html` / `region_inspector.js` | Slice inspection and seed selection for the SLIC path |
+| `web/webgl_volume_rendering.html` / `viewer.js` | Earlier spatial-partition and foreground-filter rendering benchmarks |
+
+### Result files
+
+- `*-storage.json`: dimensions, encoding, group statistics, sizes, hashes, and filter rules.
+- `*-rendering.json`: per-view GPU samples, transfer function, device information, and framebuffer differences.
+- `*-verification.json`: grouped reconstruction and unique ownership checks.
+- `*-provenance.json`: source URLs, checksums, and attribution.
+- `*-projection-loss.json` and `*-projections.png`: threshold loss and three-column MIP checks.
+- `summary.json` and `RESULTS.md`: machine-readable and human-readable summaries.
+
+Current measurements live in `experiments/grouped-results/`. Generated large-volume data lives under `experiments/large-volumes/` and is ignored by Git. Earlier result directories use different configurations and must not be mixed with the current benchmark.
+
+## Projection comparisons
+
+These figures are maximum-intensity projections, not DVR screenshots. The first-to-second column shows filtering loss; the second-to-third column checks the grouped export.
+
+![Bonsai projection comparison](experiments/grouped-results/bonsai-projections.png)
+
+![Foot projection comparison](experiments/grouped-results/foot-projections.png)
+
+![Engine projection comparison](experiments/grouped-results/engine-projections.png)
+
+![Kingsnake projection comparison](experiments/grouped-results/kingsnake-projections.png)
+
+![Woodbranch projection comparison](experiments/grouped-results/woodbranch-projections.png)
+
+## Development checks
+
+```bash
+python -m unittest discover -s tests -v
+python -m pipeline.plot_grouped_projections
+python -m pipeline.summarize_grouped_results
+```
+
+The final two commands require the corresponding local exports and saved browser benchmark JSON. They generate plots and summaries; they do not run the GPU benchmark automatically.
+
+### pipeline/__init__.py
+```
+"""Volume extraction, grouping, validation and experiment utilities. Run from the repository root."""
+```
+
+### pipeline/benchmark.py
+```
+"""Five controlled extraction experiments; timings exclude reconstruction/metrics."""
+import argparse
+import json
+import platform
+import sys
+from pathlib import Path
+import numpy as np
+import sklearn
+from pipeline.extractVolume import extract, read_volume, reconstruct
+
+
+def run(input_path, shape, output):
+    output = Path(output)
+    original = read_volume(input_path, shape)
+    rows = []
+    cutoff = None
+    for name, mode, factor in [('original', 'original', 1), ('crop', 'crop', 1),
+                                ('partition', 'partition', 1), ('lossy', 'partition', 2),
+                                ('decimated', 'crop', 2)]:
+        meta = extract(input_path, output / name, shape, mode=mode, downsample=factor, threshold=cutoff)
+        if name == 'crop':
+            cutoff = meta['parameters']['threshold']
+        restored, coverage = reconstruct(output / name)
+        reference = original if mode == 'original' else np.where(original > cutoff, original, 0)
+        delta = restored.astype(np.float32) - reference.astype(np.float32)
+        rows.append(dict(experiment=name, **{k: meta[k] for k in ['output_bytes', 'processing_seconds', 'retained_nonzero']},
+                         component_count=len(meta['components']),
+                         bounding_boxes_disjoint=all(
+                             any(a['origin_xyz'][axis] + a['extent_xyz'][axis] <= b['origin_xyz'][axis]
+                                 or b['origin_xyz'][axis] + b['extent_xyz'][axis] <= a['origin_xyz'][axis]
+                                 for axis in range(3))
+                             for i, a in enumerate(meta['components']) for b in meta['components'][i + 1:]),
+                         reduction_percent=100 * (1 - meta['output_bytes'] / original.nbytes),
+                         threshold=meta['parameters']['threshold'],
+                         mae_vs_retained=float(np.abs(delta).mean()),
+                         mae_vs_original=float(np.abs(restored.astype(np.float32) - original).mean()),
+                         retained_voxels_missing=int(np.count_nonzero((reference > 0) & (restored == 0))),
+                         introduced_nonzero_voxels=int(np.count_nonzero((reference == 0) & (restored > 0))),
+                         overlapping_nonzero_voxels=int(np.count_nonzero(coverage > 1))))
+    report = dict(input_file=Path(input_path).name, input_sha256=meta['input_sha256'], dimensions_xyz=shape,
+                  original_bytes=original.nbytes, environment=dict(python=sys.version, platform=platform.platform(),
+                  numpy=np.__version__, scikit_learn=sklearn.__version__),
+                  methodology='Single run per variant, sequential. Processing includes file IO, hashing and extraction; excludes reconstruction and metrics. MiB = 1048576 bytes. Not network compression. No peak RAM claim.', results=rows)
+    (output / 'report.json').write_text(json.dumps(report, indent=2) + '\n')
+    print(json.dumps(report, indent=2))
+
+
+if __name__ == '__main__':
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument('--input', default='data/skull_256x256x256_uint8.raw')
+    p.add_argument('--shape', type=int, nargs=3, default=[256, 256, 256])
+    p.add_argument('--output', default='experiments/spatial')
+    args = p.parse_args()
+    run(args.input, args.shape, args.output)
+```
+
+### pipeline/extractVolume.py
+```
+"""Reproducible uint8 volume extraction. Arrays are ZYX; metadata is XYZ.
+
+The default is tightly cropped, disjoint spatial partitioning, not anatomical segmentation. Every
+retained voxel is assigned once before optional, explicitly lossy decimation.
+"""
+import argparse
+import hashlib
+import json
+import time
+from pathlib import Path
+
+import numpy as np
+from scipy import ndimage as ndi
+from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
+from threadpoolctl import threadpool_limits
+
+
+def read_volume(path, shape_xyz):
+    if len(shape_xyz) != 3 or any(int(n) != n or n <= 0 for n in shape_xyz):
+        raise ValueError('Shape must contain three positive integers (X Y Z)')
+    expected = int(np.prod(shape_xyz))
+    if Path(path).stat().st_size != expected:
+        raise ValueError(f'Expected exactly {expected} bytes for uint8 {shape_xyz}')
+    return np.fromfile(path, dtype=np.uint8).reshape(tuple(reversed(shape_xyz)))
+
+
+def background_threshold(volume, seed=42):
+    """Fit two intensity populations on a bounded, seeded sample of nonzero data."""
+    values = volume[volume > 0]
+    if not values.size:
+        return 0.0
+    rng = np.random.default_rng(seed)
+    sample = values[rng.choice(values.size, min(10000, values.size), replace=False)]
+    if np.unique(sample).size < 2:
+        return 0.0  # Keep constant-valued foreground, including tiny fixtures.
+    model = KMeans(n_clusters=2, n_init=3, random_state=seed).fit(sample[:, None])
+    return round(float(model.cluster_centers_.min()), 6)
+
+
+def select_foreground(volume, threshold, cleanup='none', min_region_voxels=512):
+    """Explicit intensity/size heuristics, not a semantic definition of importance.
+
+    Connected filtering preserves all voxels of retained six-connected regions,
+    including thin branches. Opening removes thin features. Legacy reproduces
+    the original three-voxel border removal and background dilation for audit.
+    """
+    if cleanup not in ('none', 'connected', 'opening', 'legacy'):
+        raise ValueError('Unknown cleanup method')
+    if not isinstance(min_region_voxels, int) or min_region_voxels < 1:
+        raise ValueError('Minimum region size must be a positive integer')
+    mask = volume > threshold
+    threshold_count = int(mask.sum())
+    regions_before = regions_after = None
+    if cleanup == 'legacy':
+        margin = min(3, min(volume.shape) // 10)
+        if margin:
+            for axis in range(3):
+                edge = [slice(None)] * 3
+                edge[axis] = slice(0, margin)
+                mask[tuple(edge)] = False
+                edge[axis] = slice(-margin, None)
+                mask[tuple(edge)] = False
+        if min(volume.shape) > 10:
+            mask = ndi.binary_erosion(mask, structure=np.ones((3, 3, 3)))
+    elif cleanup in ('connected', 'opening'):
+        if cleanup == 'opening':
+            mask = ndi.binary_opening(mask, structure=np.ones((3, 3, 3)))
+        labels, regions_before = ndi.label(mask)  # Six-neighbor connectivity.
+        sizes = np.bincount(labels.ravel())
+        keep = sizes >= min_region_voxels
+        keep[0] = False
+        mask = keep[labels]
+        regions_after = int(keep.sum())
+    metrics = dict(threshold_nonzero=threshold_count, retained_nonzero=int(mask.sum()),
+                   cleanup_removed_voxels=threshold_count - int(mask.sum()),
+                   regions_before=regions_before, regions_after=regions_after,
+                   intensity_survival={})
+    for level in (60, 120):
+        reference = volume > level
+        count = int(reference.sum())
+        removed = int(np.count_nonzero(reference & ~mask))
+        metrics['intensity_survival'][str(level)] = dict(original_voxels=count,
+            removed_voxels=removed, retained_fraction=(count - removed) / count if count else None)
+    return mask, metrics
+
+
+def kmeans_partition(volume, components=8, seed=42, spatial_weight=0.5, batch_size=100000):
+    """Fit on a bounded sample; predict ALL foreground voxels in bounded batches."""
+    foreground = np.flatnonzero(volume)
+    labels = np.zeros(volume.size, dtype=np.uint8)
+    if not foreground.size:
+        return labels.reshape(volume.shape)
+
+    def features(indices):
+        z, y, x = np.unravel_index(indices, volume.shape)
+        return np.column_stack((x, y, z, volume.ravel()[indices])).astype(np.float32)
+
+    rng = np.random.default_rng(seed)
+    sample = rng.choice(foreground, min(30000, foreground.size), replace=False)
+    scaler = StandardScaler().fit(features(sample))
+    weights = np.array([spatial_weight] * 3 + [1 - spatial_weight], dtype=np.float32)
+    train = scaler.transform(features(sample)) * weights
+    count = min(components, len(np.unique(train, axis=0)))
+    model = KMeans(n_clusters=count, n_init=3, random_state=seed, max_iter=100).fit(train)
+    for start in range(0, foreground.size, batch_size):
+        indices = foreground[start:start + batch_size]
+        labels[indices] = model.predict(scaler.transform(features(indices)) * weights) + 1
+    return labels.reshape(volume.shape)
+
+
+def spatial_partition(volume, components=8):
+    """Greedy axis-aligned splits with tight child crops; boxes never overlap.
+
+    Try quarter/mid/three-quarter planes on each axis. Prefer the greatest
+    reduction in stored bounding-box voxels, breaking ties by smaller largest
+    child. This is a bounded heuristic, not a globally minimal partition.
+    """
+    def tight(lo, hi):
+        block = volume[tuple(slice(a, b) for a, b in zip(lo, hi))]
+        bounds = []
+        for axis in range(3):
+            occupied = np.flatnonzero(np.any(block, axis=tuple(i for i in range(3) if i != axis)))
+            if not occupied.size:
+                return None
+            bounds.append((occupied[0], occupied[-1] + 1))
+        return (lo + np.array([a for a, b in bounds]),
+                lo + np.array([b for a, b in bounds]))
+
+    def size(box):
+        return int(np.prod(box[1] - box[0]))
+
+    def surface(box):
+        z, y, x = box[1] - box[0]
+        return int(x * y + y * z + z * x)
+
+    root = tight(np.zeros(3, dtype=int), np.array(volume.shape))
+    if root is None:
+        return np.zeros(volume.shape, dtype=np.uint8)
+    leaves = [root]
+    while len(leaves) < components:
+        best = None
+        for index, box in enumerate(leaves):
+            lo, hi = box
+            for axis in range(3):
+                length = hi[axis] - lo[axis]
+                for offset in sorted(set(int(length * f) for f in (0.25, 0.5, 0.75))):
+                    if not 0 < offset < length:
+                        continue
+                    middle = lo[axis] + offset
+                    left_hi, right_lo = hi.copy(), lo.copy()
+                    left_hi[axis], right_lo[axis] = middle, middle
+                    left, right = tight(lo, left_hi), tight(right_lo, hi)
+                    if left is None or right is None:
+                        continue
+                    score = (size(box) - size(left) - size(right),
+                             size(box) - max(size(left), size(right)),
+                             -surface(left) - surface(right))
+                    if best is None or score > best[0]:
+                        best = (score, index, left, right)
+        if best is None:
+            break
+        _, index, left, right = best
+        leaves[index:index + 1] = [left, right]
+    labels = np.zeros(volume.shape, dtype=np.uint8)
+    for identifier, (lo, hi) in enumerate(leaves, 1):
+        region = tuple(slice(a, b) for a, b in zip(lo, hi))
+        labels[region] = np.where(volume[region] > 0, identifier, 0)
+    return labels
+
+
+@threadpool_limits.wrap(limits=1)
+def extract(input_path, output_dir, shape_xyz, *, mode='partition', threshold=None,
+            components=8, seed=42, spatial_weight=0.5, downsample=1, strategy="spatial",
+            cleanup="none", min_region_voxels=512):
+    if strategy not in ('spatial', 'kmeans'):
+        raise ValueError('Unknown partition strategy')
+    if mode == 'original' and cleanup != 'none':
+        raise ValueError('Original mode does not accept foreground cleanup')
+    if mode not in ('original', 'crop', 'partition'):
+        raise ValueError('Unknown mode')
+    if not 1 <= components <= 15 or not 0 <= spatial_weight <= 1 or downsample < 1 or int(downsample) != downsample:
+        raise ValueError('Require 1–15 components, weight in [0,1], integer downsample >= 1')
+    if threshold is not None and not 0 <= threshold <= 255:
+        raise ValueError('Threshold must be in [0,255]')
+    output = Path(output_dir)
+    output.mkdir(parents=True, exist_ok=True)
+    if list(output.glob('component_*.raw')) or (output / 'metadata.json').exists():
+        raise ValueError(f'Output already contains results: {output}; choose a new directory')
+    start = time.perf_counter()
+    original = read_volume(input_path, shape_xyz)
+    cutoff = 0.0 if mode == 'original' else (background_threshold(original, seed) if threshold is None else float(threshold))
+    mask, foreground_metrics = select_foreground(original, cutoff, cleanup, min_region_voxels)
+    retained = np.where(mask, original, 0).astype(np.uint8)
+    if mode == 'partition':
+        labels = (spatial_partition(retained, components) if strategy == 'spatial'
+                  else kmeans_partition(retained, components, seed, spatial_weight))
+    else:
+        labels = (retained > 0).astype(np.uint8)
+    ids = np.unique(labels[labels > 0]) if mode != 'original' else [1]
+    records = []
+    for identifier in ids:
+        if mode == 'original':
+            lo, hi = np.zeros(3, dtype=int), np.array(original.shape)
+            data = original.copy()
+        else:
+            coords = np.where(labels == identifier)
+            lo = np.array([c.min() for c in coords])
+            hi = np.array([c.max() + 1 for c in coords])
+            slices = tuple(slice(a, b) for a, b in zip(lo, hi))
+            data = np.where(labels[slices] == identifier, retained[slices], 0).astype(np.uint8)
+        data = data[::downsample, ::downsample, ::downsample].copy()
+        filename = f'component_{int(identifier)}.raw'
+        data.tofile(output / filename)
+        records.append(dict(file=filename, dimensions_xyz=list(map(int, data.shape[::-1])),
+                            origin_xyz=list(map(int, lo[::-1])), spacing_xyz=[downsample] * 3,
+                            extent_xyz=list(map(int, (hi - lo)[::-1])), bytes=data.nbytes,
+                            sha256=hashlib.sha256(data.tobytes()).hexdigest()))
+    metadata = dict(schema_version=2, dtype='uint8', array_order='ZYX', coordinate_order='XYZ',
+                    input_file=Path(input_path).name, input_sha256=hashlib.sha256(original.tobytes()).hexdigest(),
+                    dimensions_xyz=list(shape_xyz), original_bytes=original.nbytes,
+                    parameters=dict(mode=mode, threshold=cutoff, seed=seed, components=components,
+                                    spatial_weight=spatial_weight, downsample=downsample, strategy=strategy,
+                                    cleanup=cleanup, min_region_voxels=min_region_voxels),
+                    foreground_metrics=foreground_metrics,
+                    original_nonzero=int(np.count_nonzero(original)), retained_nonzero=int(np.count_nonzero(retained)),
+                    components=records, output_bytes=sum(c['bytes'] for c in records),
+                    processing_seconds=time.perf_counter() - start,
+                    reconstruction='nearest block expansion, clipped to original component extent')
+    (output / 'metadata.json').write_text(json.dumps(metadata, indent=2) + '\n')
+    return metadata
+
+
+def reconstruct(directory):
+    """Reference reconstruction in original voxel coordinates; max merges lossy overlaps."""
+    directory = Path(directory)
+    meta = json.loads((directory / 'metadata.json').read_text())
+    result = np.zeros(meta['dimensions_xyz'][::-1], dtype=np.uint8)
+    coverage = np.zeros(result.shape, dtype=np.uint8)
+    for comp in meta['components']:
+        block = read_volume(directory / comp['file'], comp['dimensions_xyz'])
+        for axis, spacing in enumerate(comp['spacing_xyz'][::-1]):
+            block = np.repeat(block, spacing, axis=axis)
+        extent = comp['extent_xyz'][::-1]
+        block = block[tuple(slice(0, n) for n in extent)]
+        origin = comp['origin_xyz'][::-1]
+        target = tuple(slice(a, a + n) for a, n in zip(origin, extent))
+        np.maximum(result[target], block, out=result[target])
+        coverage[target] += block > 0
+    return result, coverage
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--input', required=True)
+    parser.add_argument('--output', required=True)
+    parser.add_argument('--shape', type=int, nargs=3, required=True, metavar=('X', 'Y', 'Z'))
+    parser.add_argument('--mode', choices=['original', 'crop', 'partition'], default='partition')
+    parser.add_argument('--strategy', choices=['spatial', 'kmeans'], default='spatial')
+    parser.add_argument('--cleanup', choices=['none', 'connected', 'opening', 'legacy'], default='none')
+    parser.add_argument('--min-region-voxels', type=int, default=512)
+    parser.add_argument('--threshold', type=float)
+    parser.add_argument('--components', type=int, default=8)
+    parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--spatial-weight', type=float, default=0.5)
+    parser.add_argument('--downsample', type=int, default=1)
+    args = vars(parser.parse_args())
+    args['input_path'], args['output_dir'], args['shape_xyz'] = args.pop('input'), args.pop('output'), args.pop('shape')
+    print(json.dumps(extract(**args), indent=2))
+
+
+if __name__ == '__main__':
+    main()
+```
+
+### pipeline/foreground_study.py
+```
+"""Audit foreground selection separately from cropping and downsampling."""
+import argparse
+import json
+import platform
+import sys
+from pathlib import Path
+import numpy as np
+import scipy
+from pipeline.extractVolume import extract, read_volume, reconstruct, select_foreground
+
+
+def run(source, shape, output):
+    output = Path(output)
+    original = read_volume(source, shape)
+    # Same eight-block budget; all except the explicit decimated control use spacing=1.
+    variants = [
+        ('original', dict(mode='original')),
+        ('threshold', dict()),
+        ('legacy_cleanup', dict(cleanup='legacy')),
+        ('opening', dict(cleanup='opening')),
+        ('conservative', dict(threshold=30, cleanup='connected')),
+        ('focused', dict(threshold=60, cleanup='connected')),
+        ('aggressive', dict(threshold=90, cleanup='connected', min_region_voxels=128)),
+        ('focused_decimated', dict(threshold=60, cleanup='connected', downsample=2)),
+    ]
+    rows = []
+    for name, options in variants:
+        meta = extract(source, output / name, shape, **options)
+        if name != 'original' and options.get('downsample', 1) == 1:
+            extract(source, output / (name + '_monolith'), shape, **{**options, 'mode': 'crop'})
+        restored, coverage = reconstruct(output / name)
+        p = meta['parameters']
+        mask, _ = select_foreground(original, p['threshold'], p['cleanup'], p['min_region_voxels'])
+        selected = np.where(mask, original, 0).astype(np.uint8)
+        row = dict(name=name, parameters=p, output_bytes=meta['output_bytes'],
+                   reduction_percent=100*(1-meta['output_bytes']/original.nbytes),
+                   component_count=len(meta['components']), selection_metrics=meta['foreground_metrics'],
+                   reconstruction_matches_selected=bool(np.array_equal(restored, selected)),
+                   mae_vs_selected=float(np.abs(restored.astype(np.float32)-selected).mean()),
+                   overlapping_nonzero_voxels=int(np.count_nonzero(coverage > 1)),
+                   total_processing_seconds=meta['processing_seconds'])
+        rows.append(row)
+        print(name, round(row['output_bytes']/1048576, 3), 'MiB', flush=True)
+    report = dict(input_sha256=meta['input_sha256'], dimensions_xyz=shape, original_bytes=original.nbytes,
+                  environment=dict(python=sys.version, platform=platform.platform(), numpy=np.__version__, scipy=scipy.__version__),
+                  methodology='Same original voxel grid and at most eight disjoint cropped boxes. Selection losses and reconstruction losses are separate. Intensity survival is a proxy, not anatomical accuracy. Legacy cleanup audits border removal and erosion, not a reconstruction of the historical 5.85 MiB outputs whose per-component spacing was not recorded.',
+                  variants=rows)
+    (output/'report.json').write_text(json.dumps(report, indent=2)+'\n')
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--input', default='data/skull_256x256x256_uint8.raw')
+    parser.add_argument('--shape', nargs=3, type=int, default=[256,256,256])
+    parser.add_argument('--output', default='experiments/foreground')
+    args = parser.parse_args()
+    run(args.input, args.shape, args.output)
+```
+
+### pipeline/group_large_volume.py
+```
+"""Group compact bricks by median-intensity bands and six-neighbor connectivity.
+
+Bricks are owned exactly once. This is a bounded brick graph, not voxel SLIC.
+Small disconnected regions are explicitly pooled by band for manageable UI.
+"""
+import argparse
+import hashlib
+import json
+from pathlib import Path
+import numpy as np
+
+def group_volume(directory, output, edges, keep=9, masked=None):
+    root=Path(directory).resolve();out=Path(output).resolve()
+    if out.exists() and any(out.iterdir()):raise ValueError('Choose an empty directory')
+    out.mkdir(parents=True,exist_ok=True)
+    m=json.loads((root/'metadata.json').read_text());dtype=np.dtype(m['dtype'])
+    if keep<1 or edges!=sorted(set(edges)) or any(e<=m['cutoff'] or e>m['value_max'] for e in edges):raise ValueError('Require sorted distinct in-range band edges and keep >=1')
+    grid=tuple(m['grid_xyz'][::-1]);pages=np.fromfile(root/m['pages_file'],'<u4').reshape(-1,4)
+    source=np.memmap(root/m['density_file'],dtype=dtype,mode='r') if m['density_bytes'] else np.array([],dtype=dtype)
+    cells=np.flatnonzero(pages[:,0]);n=len(cells)
+    bands=np.empty(n,np.int32);counts=np.empty(n,np.int64);sizes=np.empty(n,np.int64)
+    medians=np.empty(n,np.float64)
+    for i,cell in enumerate(cells):
+        base,_,packed,_=map(int,pages[cell]);shape=[(packed>>s)&63 for s in (0,6,12)]
+        a=source[base-1:base-1+int(np.prod(shape))];values=a[a>m['cutoff']]
+        medians[i]=np.median(values);bands[i]=np.searchsorted(edges,medians[i],side='right')
+        counts[i]=values.size;sizes[i]=a.size
+    if masked is None:masked=bool((counts.sum()*dtype.itemsize+((sizes+31)//32).sum()*8)<m['density_bytes'])
+    parent=np.arange(n);rank=np.zeros(n,np.uint8)
+    def find(i):
+        while parent[i]!=i:parent[i]=parent[parent[i]];i=parent[i]
+        return i
+    def union(a,b):
+        a,b=find(a),find(b)
+        if a==b:return
+        if rank[a]<rank[b]:a,b=b,a
+        parent[b]=a
+        if rank[a]==rank[b]:rank[a]+=1
+    lookup=np.full(len(pages),-1,np.int32);lookup[cells]=np.arange(n)
+    zyx=np.column_stack(np.unravel_index(cells,grid))
+    for axis,stride in enumerate((grid[1]*grid[2],grid[2],1)):
+        valid=zyx[:,axis]>0
+        for i in np.flatnonzero(valid):
+            j=lookup[cells[i]-stride]
+            if j>=0 and bands[i]==bands[j]:union(i,j)
+    roots=np.array([find(i) for i in range(n)])
+    components={}
+    for i,r in enumerate(roots):components.setdefault(int(r),[]).append(i)
+    ordered=sorted(components.values(),key=lambda v:int(counts[v].sum()),reverse=True)
+    buckets=[(v,False) for v in ordered[:keep]]
+    for band in range(len(edges)+1):
+        v=[i for component in ordered[keep:] for i in component if bands[i]==band]
+        if v:buckets.append((v,True))
+    groups=[]
+    for gid,(indices,residual) in enumerate(buckets,1):
+        label=int(bands[indices[0]]);lo=m['cutoff']+1 if label==0 else edges[label-1]
+        hi=m['value_max'] if label==len(edges) else edges[label]-1
+        entries=[];offset=0;maskoffset=0;masks=[];h=hashlib.sha256();voxels=0
+        lower=np.array(m['dimensions_xyz']);upper=np.zeros(3,int)
+        with (out/f'group-{gid}.raw').open('wb') as f:
+            for i in indices:
+                cell=int(cells[i]);base,origin,shape,_=map(int,pages[cell]);a=source[base-1:base-1+sizes[i]]
+                if masked:
+                    valid=a>m['cutoff'];padded=np.zeros(((a.size+31)//32)*32,np.uint8);padded[:a.size]=valid
+                    bits=np.packbits(padded.reshape(-1,32),axis=1,bitorder='little').copy().view('<u4').reshape(-1)
+                    numbers=padded.reshape(-1,32).sum(axis=1,dtype=np.uint32)
+                    prefix=np.r_[np.uint32(0),np.cumsum(numbers[:-1],dtype=np.uint32)]+offset
+                    masks.append(np.column_stack((prefix,bits)).astype('<u4'))
+                    entries.append([cell,maskoffset+1,origin,shape]);maskoffset+=len(bits)
+                    a=a[valid]
+                else:entries.append([cell,offset+1,origin,shape])
+                raw=a.tobytes();f.write(raw);h.update(raw)
+                offset+=a.size;voxels+=int(counts[i])
+                xyz=zyx[i][::-1]*m['brick_xyz']+np.array([(origin>>s)&31 for s in (0,5,10)])
+                size=np.array([(shape>>s)&63 for s in (0,6,12)])
+                lower=np.minimum(lower,xyz);upper=np.maximum(upper,xyz+size)
+        entry_bytes=np.array(entries,dtype='<u4').tobytes();(out/f'group-{gid}-index.raw').write_bytes(entry_bytes)
+        maskbytes=b''.join(v.tobytes() for v in masks)
+        if masked:(out/f'group-{gid}-mask.raw').write_bytes(maskbytes)
+        groups.append(dict(mask_bytes=len(maskbytes),mask_file=f'group-{gid}-mask.raw',mask_sha256=hashlib.sha256(maskbytes).hexdigest(),id=gid,name=f'Median intensity {lo}–{hi} · '+('pooled residual components' if residual else f'connected component {gid}'),
+            band=label,median_range=[lo,hi],bricks=len(indices),selected_voxels=voxels,
+            components=len(set(roots[indices].tolist())),pooled=residual,
+            density_bytes=offset*dtype.itemsize,index_bytes=len(entry_bytes),
+            density_file=f'group-{gid}.raw',density_sha256=h.hexdigest(),
+            index_file=f'group-{gid}-index.raw',index_sha256=hashlib.sha256(entry_bytes).hexdigest(),
+            bounds_xyz=dict(lo=lower.tolist(),hi=upper.tolist())))
+    assert sum(g['density_bytes'] for g in groups)==(m['selected_voxels']*dtype.itemsize if masked else m['density_bytes'])
+    assert sum(g['selected_voxels'] for g in groups)==m['selected_voxels']
+    m.update(storage_encoding='masked32' if masked else 'dense-crops',pre_mask_density_bytes=m['density_bytes'],density_bytes=sum(g['density_bytes'] for g in groups),mask_bytes=sum(g['mask_bytes'] for g in groups),groups=groups,group_edges=edges,group_components=len(components),
+             grouping='Six-neighbor brick components with same selected-voxel median intensity band. Largest components separate; remainder explicitly pooled per band. Not anatomical labels or voxel SLIC.',
+             group_ownership='disjoint bricks; each payload stored once',group_index_bytes=sum(g['index_bytes'] for g in groups),
+             original_file=str((root/m['original_file']).resolve()) if m.get('original_file') else None)
+    # URLs resolve from the grouped manifest, not the HTTP root.
+    import os
+    if m['original_file']:m['original_file']=os.path.relpath(Path.cwd()/m['original_file'],out)
+    m['density_file']=os.path.relpath(root/'density.raw',out);m['pages_file']=os.path.relpath(root/'pages.raw',out)
+    (out/'metadata.json').write_text(json.dumps(m,separators=(',',':'))+'\n')
+    print(json.dumps({k:m[k] for k in ['name','bricks','density_bytes','group_components','group_index_bytes']}))
+    for g in groups:print(g['name'],g['density_bytes']/2**20,g['components'])
+    return m
+
+if __name__=='__main__':
+    p=argparse.ArgumentParser();p.add_argument('directory');p.add_argument('output');p.add_argument('--edges',type=int,nargs='+',required=True);p.add_argument('--keep',type=int,default=9)
+    p.add_argument('--masked',action='store_true');p.add_argument('--encoding',choices=['auto','dense','masked'],default='auto');a=p.parse_args();group_volume(a.directory,a.output,a.edges,a.keep,True if a.masked or a.encoding=='masked' else False if a.encoding=='dense' else None)
+```
+
+### pipeline/large_volume.py
+```
+"""Bounded-memory OME-Zarr v3 -> cropped bricks. Intensity baseline, NOT SLIC.
+
+Supports the public Open SciVis bytes+zstd, unsharded ZYX uint8/uint16
+arrays. Raw precision and full resolution are retained. Only values <= cutoff
+are discarded. Files are streamed; no full volume or full label array exists.
+"""
+import argparse
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
+import hashlib
+import itertools
+import json
+import resource
+from pathlib import Path
+import time
+import urllib.request
+import urllib.error
+
+import numpy as np
+import zstandard
+
+BASE = 'https://ome-zarr-scivis.s3.us-east-1.amazonaws.com/v0.5/96x2'
+
+
+def fetch(url):
+    for attempt in range(4):
+        try:
+            with urllib.request.urlopen(url, timeout=60) as response:
+                return response.read()
+        except (OSError, urllib.error.URLError) as error:
+            if isinstance(error, urllib.error.HTTPError) and error.code == 404: raise
+            if attempt == 3:
+                raise
+            time.sleep(1 + attempt)
+
+
+class Source:
+    def __init__(self, name, scale=0):
+        self.name, self.scale = name, scale
+        # The public 96x2 Kingsnake mirror has stale chunk metadata (96^3 payloads
+        # declared as 100x128x128). The alternative mirror also needs per-chunk
+        # validation; use the original RAW for the full-resolution Kingsnake run.
+        base = BASE.replace('/96x2','/64x2') if name == 'kingsnake' else BASE
+        self.base = f'{base}/{name}.ome.zarr'
+        self.root = json.loads(fetch(self.base+'/zarr.json'))
+        self.path = f'scale{scale}/{name}'
+        self.meta = self.root['consolidated_metadata']['metadata'][self.path]
+        m = self.meta
+        if m['data_type'] not in ('uint8', 'uint16') or [c['name'] for c in m['codecs']] != ['bytes', 'zstd']:
+            raise ValueError('Only unsharded uint8/16 bytes+zstd sources are supported')
+        if m['codecs'][0].get('configuration', {}).get('endian', 'little') != 'little':
+            raise ValueError('Require little endian')
+        self.dtype = np.dtype('u1' if m['data_type'] == 'uint8' else '<u2')
+        self.shape = tuple(m['shape'])
+        self.chunks = tuple(m['chunk_grid']['configuration']['chunk_shape'])
+        transforms = self.root['attributes']['ome']['multiscales'][0]['datasets'][scale]['coordinateTransformations']
+        self.spacing = next(t['scale'] for t in transforms if t['type'] == 'scale')
+        self.grid = tuple((n+c-1)//c for n,c in zip(self.shape,self.chunks))
+
+    def chunk(self, index):
+        url = self.base+'/'+self.path+'/c/'+'/'.join(map(str,index))
+        # Zarr specifies missing chunk keys as fill_value; only HTTP 404 qualifies.
+        try:
+            compressed = fetch(url)
+            raw = zstandard.ZstdDecompressor().decompress(compressed, max_output_size=int(np.prod(self.chunks))*self.dtype.itemsize)
+        except urllib.error.HTTPError as error:
+            if error.code != 404: raise
+            compressed = b''
+            raw = np.full(self.chunks, self.meta['fill_value'], dtype=self.dtype).tobytes()
+        if len(raw) != int(np.prod(self.chunks))*self.dtype.itemsize:
+            raise ValueError('Invalid decompressed chunk size')
+        array = np.frombuffer(raw, self.dtype).reshape(self.chunks)
+        origin = tuple(i*c for i,c in zip(index,self.chunks))
+        valid = tuple(slice(0,min(c,n-o)) for c,n,o in zip(self.chunks,self.shape,origin))
+        return origin, array[valid], len(compressed), hashlib.sha256(raw).hexdigest()
+
+    def blocks(self, workers=4):
+        # Bound futures/results to one batch; executor.map can retain the whole dataset.
+        indices = iter(itertools.product(*(range(n) for n in self.grid)))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            while batch := list(itertools.islice(indices, workers)):
+                yield from pool.map(self.chunk, batch)
+
+
+class RawSource:
+    """Sequential slab reads: no full input mmap or full-sized working arrays."""
+    def __init__(self,path,shape,dtype,spacing,name):
+        self.file=Path(path);self.name=name;self.scale=0;self.shape=tuple(shape);self.dtype=np.dtype(dtype)
+        self.spacing=list(spacing);self.chunks=(16,self.shape[1],self.shape[2]);self.grid=((self.shape[0]+15)//16,1,1)
+        if self.file.stat().st_size!=int(np.prod(shape))*self.dtype.itemsize:raise ValueError('RAW byte length mismatch')
+        self.base='http://klacansky.com/open-scivis-datasets/'+name+'/'
+        self.root=dict(raw_file=self.file.name,shape_zyx=shape,dtype=dtype,spacing_zyx=spacing,source_url=self.base)
+    def blocks(self,workers=1):
+        with self.file.open('rb') as f:
+            for z in range(0,self.shape[0],16):
+                shape=(min(16,self.shape[0]-z),*self.shape[1:]);raw=f.read(int(np.prod(shape))*self.dtype.itemsize)
+                yield (z,0,0),np.frombuffer(raw,self.dtype).reshape(shape),0,hashlib.sha256(raw).hexdigest()
+
+
+def crop_bricks(array, origin, brick, cutoff):
+    """Disjoint, globally aligned rectangular cells; partial boundary cells valid."""
+    if any(o % b for o,b in zip(origin,brick)):
+        raise ValueError('Source chunk origins must align with brick grid')
+    mask = array > cutoff
+    padded_shape = tuple(((n+b-1)//b)*b for n,b in zip(array.shape,brick))
+    padded = np.zeros(padded_shape, bool)
+    padded[tuple(slice(0,n) for n in array.shape)] = mask
+    nz,ny,nx = (n//b for n,b in zip(padded_shape,brick)); bz,by,bx = brick
+    occupied = padded.reshape(nz,bz,ny,by,nx,bx).any(axis=(1,3,5))
+    for iz,iy,ix in np.argwhere(occupied):
+        local = (int(iz)*bz,int(iy)*by,int(ix)*bx)
+        sl = tuple(slice(o,o+b) for o,b in zip(local,brick))
+        submask = mask[sl]
+        coords = np.where(submask)
+        lo = tuple(int(c.min()) for c in coords); hi = tuple(int(c.max())+1 for c in coords)
+        crop = tuple(slice(a,b) for a,b in zip(lo,hi))
+        data = np.where(submask[crop],array[sl][crop],0).astype(array.dtype)
+        cell = tuple((o+l)//b for o,l,b in zip(origin,local,brick))
+        yield cell, lo, data, int(submask.sum())
+
+
+def profile(source):
+    hist = np.zeros(65536 if source.dtype.itemsize == 2 else 256, np.int64)
+    for _,a,_,_ in source.blocks():
+        hist += np.bincount(a.ravel(),minlength=len(hist))
+    from skimage.filters import threshold_otsu
+    threshold = int(threshold_otsu(hist=(hist,np.arange(len(hist)))))
+    cdf = hist.cumsum()
+    return dict(shape_zyx=source.shape,dtype=str(source.dtype),scale=source.scale,
+                otsu=threshold, nonzero=int(hist[1:].sum()), voxels=int(hist.sum()),
+                quantiles={str(p):int(np.searchsorted(cdf,cdf[-1]*p)) for p in [.5,.9,.95,.98,.99,.995]},
+                histogram=hist.tolist())
+
+
+def export(source, output, cutoff, brick=None, workers=4, save_original=False):
+    start=time.perf_counter(); out=Path(output)
+    if out.exists() and any(out.iterdir()):raise ValueError('Choose an empty export directory')
+    out.mkdir(parents=True,exist_ok=True)
+    # Largest divisor <=16: Kingsnake source chunks are 100×128×128.
+    brick = tuple(brick or [max(b for b in range(4,17) if c%b==0) for c in source.chunks])
+    if any(b>32 or b<1 for b in brick) or not 0<=cutoff<np.iinfo(source.dtype).max:
+        raise ValueError('Invalid brick or cutoff')
+    grid=tuple((n+b-1)//b for n,b in zip(source.shape,brick))
+    pages=np.zeros((*grid,4),dtype='<u4')
+    hist=np.zeros(1<<(8*source.dtype.itemsize),np.int64)
+    offset=0; selected=0; bricks=0; compressed_bytes=0; full_brick_voxels=0
+    payload_hash=hashlib.sha256(); input_chunks_hash=hashlib.sha256()
+    bounds_lo=np.array(source.shape);bounds_hi=np.zeros(3,dtype=int)
+    mips=[np.zeros(tuple(n for j,n in enumerate(source.shape) if j!=axis),source.dtype) for axis in range(3)]
+    total=int(np.prod(source.grid))
+    original=(out/'original.raw').open('wb') if save_original else None
+    if original: original.truncate(int(np.prod(source.shape))*source.dtype.itemsize)
+    with (original if original else nullcontext()), (out/'density.raw').open('wb') as target:
+        for index,(origin,array,received,chunk_hash) in enumerate(source.blocks(workers)):
+            if original:
+                oz,oy,ox=origin; nz,ny,nx=array.shape; _,height,width=source.shape
+                for z in range(nz):
+                    for y in range(ny):
+                        original.seek(((oz+z)*height*width+(oy+y)*width+ox)*source.dtype.itemsize)
+                        original.write(array[z,y].tobytes())
+            compressed_bytes+=received; input_chunks_hash.update(bytes.fromhex(chunk_hash))
+            hist+=np.bincount(array.ravel(),minlength=len(hist))
+            for axis in range(3):
+                sl=tuple(slice(o,o+n) for j,(o,n) in enumerate(zip(origin,array.shape)) if j!=axis)
+                np.maximum(mips[axis][sl],array.max(axis=axis),out=mips[axis][sl])
+            for cell,lo,data,count in crop_bricks(array,origin,brick,cutoff):
+                if offset+data.size>=2**32:raise ValueError('Packed element address exceeds uint32')
+                # Packed metadata: base+1, local XYZ origin (5 bits/axis), XYZ size (6 bits/axis).
+                xyz=lo[::-1]; dims=data.shape[::-1]
+                pages[cell]=(offset+1,xyz[0]|xyz[1]<<5|xyz[2]<<10,dims[0]|dims[1]<<6|dims[2]<<12,0)
+                raw=data.tobytes();target.write(raw);payload_hash.update(raw)
+                p=np.array(cell)*brick+lo; bounds_lo=np.minimum(bounds_lo,p);bounds_hi=np.maximum(bounds_hi,p+data.shape)
+                offset+=data.size;selected+=count;bricks+=1;full_brick_voxels+=int(np.prod(brick))
+            if index%32==0 or index+1==total:
+                print(json.dumps(dict(chunks=index+1,total=total,selected_voxels=selected,packed_MiB=round(offset*source.dtype.itemsize/2**20,2),seconds=round(time.perf_counter()-start,1))),flush=True)
+    if original: original.close()
+    for axis,mip in enumerate(mips):
+        np.save(out/f'original-mip-{axis}.npy',mip)
+        np.save(out/f'threshold-mip-{axis}.npy',np.where(mip>cutoff,mip,0).astype(source.dtype))
+    pages.tofile(out/'pages.raw')
+    meta=dict(schema_version=4,format='compact-cropped-bricks',name=source.name,source_url=source.base,
+              source_scale=source.scale,original_file='original.raw' if save_original else None,dimensions_xyz=list(source.shape[::-1]),spacing_xyz=source.spacing[::-1],
+              dtype=source.dtype.name,bytes_per_voxel=source.dtype.itemsize,brick_xyz=list(brick[::-1]),grid_xyz=list(grid[::-1]),
+              cutoff=cutoff,value_max=int(np.flatnonzero(hist)[-1]),selected_voxels=selected,bricks=bricks,
+              density_file='density.raw',pages_file='pages.raw',density_bytes=offset*source.dtype.itemsize,page_bytes=pages.nbytes,
+              density_sha256=payload_hash.hexdigest(),pages_sha256=hashlib.sha256(pages.tobytes()).hexdigest(),
+              source_chunk_hash_chain=input_chunks_hash.hexdigest(),source_bytes=int(np.prod(source.shape))*source.dtype.itemsize,
+              transfer_bytes=compressed_bytes,fixed_brick_bytes=full_brick_voxels*source.dtype.itemsize,
+              bounds_xyz=dict(lo=bounds_lo[::-1].tolist() if selected else [0,0,0],hi=bounds_hi[::-1].tolist()),
+              method='Strict raw intensity > cutoff; no SLIC, component deletion, quantization or downsampling',
+              processing_seconds=time.perf_counter()-start,peak_rss_bytes=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
+              histogram=hist.tolist())
+    # macOS ru_maxrss is bytes; Linux is KiB.
+    import sys
+    if sys.platform!='darwin':meta['peak_rss_bytes']*=1024
+    (out/'metadata.json').write_text(json.dumps(meta,separators=(',',':'))+'\n')
+    (out/'source.json').write_text(json.dumps(source.root,indent=2)+'\n')
+    return meta
+
+
+if __name__=='__main__':
+    p=argparse.ArgumentParser();p.add_argument('action',choices=['profile','export']);p.add_argument('--name',required=True)
+    p.add_argument('--scale',type=int,default=0);p.add_argument('--output',required=True);p.add_argument('--cutoff',type=int);p.add_argument('--workers',type=int,default=4);p.add_argument('--save-original',action='store_true');p.add_argument('--raw',help='Verified Kingsnake RAW fallback')
+    a=p.parse_args()
+    if a.raw and (a.name!='kingsnake' or a.scale!=0):p.error('--raw currently describes the full Kingsnake dataset only')
+    source=RawSource(a.raw,(795,1024,1024),'uint8',(.0688,.03174,.03174),a.name) if a.raw else Source(a.name,a.scale)
+    if a.action=='profile':
+        result=profile(source);Path(a.output).parent.mkdir(parents=True,exist_ok=True);Path(a.output).write_text(json.dumps(result)+'\n');print({k:v for k,v in result.items() if k!='histogram'})
+    else:
+        if a.cutoff is None:p.error('--cutoff required')
+        result=export(source,a.output,a.cutoff,workers=a.workers,save_original=a.save_original);print({k:v for k,v in result.items() if k!='histogram'})
+```
+
+### pipeline/plot_grouped_projections.py
+```
+"""Render reproducible MIP references and quantify threshold-induced changes."""
+import json
+from pathlib import Path
+import numpy as np
+from PIL import Image,ImageDraw
+
+def build():
+    out=Path('experiments/grouped-results');out.mkdir(exist_ok=True)
+    for name,suffix,window in [('bonsai','32',255),('foot','32',255),('engine','32',255),('kingsnake','40',255),('woodbranch','5000',12000)]:
+        root=Path('experiments/large-volumes')/(name+suffix)
+        m=json.loads((root/'metadata.json').read_text())
+        sheet=Image.new('RGB',(990,1070),'#101820');draw=ImageDraw.Draw(sheet)
+        draw.text((12,10),f"{name} | full-resolution MIP (not DVR) | cutoff >{m['cutoff']} | display 0..{window}",fill='white')
+        for x,label in enumerate(['Original (no cutoff)','Original with selection cutoff','Decoded export (verified exact)']):
+            draw.text((12+x*330,38),label,fill='white')
+        loss=[]
+        for axis in range(3):
+            original=np.load(root/f'original-mip-{axis}.npy')
+            selected=np.load(root/f'threshold-mip-{axis}.npy')
+            decoded=np.load(root/f'export-mip-{axis}.npy')
+            loss.append(dict(axis=axis,pixels=original.size,changed_by_selection=int(np.count_nonzero(original!=selected)),
+                             target_vs_export_different_pixels=int(np.count_nonzero(selected!=decoded))))
+            for col,a in enumerate([original,selected,decoded]):
+                im=Image.fromarray((np.clip(a.astype(np.float32)/window,0,1)*255).astype(np.uint8))
+                im.thumbnail((318,310))
+                sheet.paste(im,(col*330+(330-im.width)//2,82+axis*330+(310-im.height)//2))
+            draw.text((12,65+axis*330),f'Axis {axis}',fill='#a8c9df')
+        sheet.save(out/(name+'-projections.png'))
+        (out/(name+'-projection-loss.json')).write_text(json.dumps(loss,indent=2)+'\n')
+if __name__=='__main__':build()
+```
+
+### pipeline/prepare_examples.py
+```
+"""Reproduce three public, checksum-verified reference/pipeline examples."""
+import argparse,hashlib,json
+from pathlib import Path
+import urllib.request
+from pipeline.large_volume import RawSource,export
+from pipeline.group_large_volume import group_volume
+from pipeline.verify_large_volume import verify
+from pipeline.verify_large_groups import verify_groups
+
+DATASETS={
+ 'bonsai':(256,'b34156a0ffc80ffaf84d069f3d05a40fdd999a35f05492829a2b0c13403a3147e73712b1d10c2cc34da66a59540a1632dae6adc96f3ebf3efa5d4d6c10598997','volvis.org; S. Roettger, VIS, University of Stuttgart'),
+ 'foot':(256,'56a73bd1f694a09809688f5b0bbf0dfff0ef3e853a34c60c4d51bef02dd96fbfe5191f47c7762bdf7caab6f9a22f1d0e830652779f87c70cc519f345221edd0e','volvis.org; Philips Research, Hamburg'),
+ 'engine':(128,'f17228483b1b5edb90146eac90ba979531629a2880d9e7a0493a98290da8af6ac2cf80f2c567a3d08695dc7dd854916c861dad8856b2d5721501954e913de13f','volvis.org; General Electric')}
+def prepare(name,base):
+ depth,sha,credit=DATASETS[name];base=Path(base);base.mkdir(parents=True,exist_ok=True)
+ raw=base/(name+'-original.raw')
+ url=f'http://klacansky.com/open-scivis-datasets/{name}/{name}_256x256x{depth}_uint8.raw'
+ if not raw.exists():
+  with urllib.request.urlopen(url,timeout=60) as response,raw.open('wb') as target:
+   while chunk:=response.read(1024*1024):target.write(chunk)
+ h=hashlib.sha512()
+ with raw.open('rb') as f:
+  while chunk:=f.read(1024*1024):h.update(chunk)
+ if h.hexdigest()!=sha:raise ValueError('Source SHA-512 mismatch: '+name)
+ source=RawSource(raw,(depth,256,256),'uint8',(1,1,1),name)
+ source.root.update(source_url=url,sha512=sha,credits=credit)
+ dense=base/(name+'32');grouped=base/(name+'-groups')
+ export(source,dense,32,save_original=True)
+ verify(dense)
+ group_volume(dense,grouped,[96,160],masked=None)
+ result=verify_groups(grouped,dense)
+ (grouped/'provenance.json').write_text(json.dumps(dict(source_url=url,catalog='http://klacansky.com/open-scivis-datasets/',sha512=sha,credits=credit,selection='Fixed intensity >32; exploratory foreground target, not semantic classification.'),indent=2)+'\n')
+ return result
+if __name__=='__main__':
+ p=argparse.ArgumentParser();p.add_argument('--names',nargs='+',choices=list(DATASETS),default=list(DATASETS));p.add_argument('--output',default='experiments/large-volumes')
+ a=p.parse_args()
+ for name in a.names:prepare(name,a.output)
+```
+
+### pipeline/summarize_grouped_results.py
+```
+"""Build the comparable size/timing table from saved experiment artifacts."""
+import json
+from pathlib import Path
+from statistics import median
+
+ROOT=Path('experiments/grouped-results')
+def build():
+    rows=[]
+    for name in ['bonsai','foot','engine','kingsnake','woodbranch']:
+        m=json.loads((ROOT/(name+'-storage.json')).read_text())
+        r=json.loads((ROOT/(name+'-rendering.json')).read_text())
+        original=[v['gpu_median_ms'] for v in r['runs'] if v['mode']=='original' and v['gpu_median_ms'] is not None]
+        compact=[v['gpu_median_ms'] for v in r['runs'] if v['mode']=='compact' and v['gpu_median_ms'] is not None]
+        if not compact:raise ValueError('Missing GPU measurements for '+name)
+        total=m['density_bytes']+m.get('mask_bytes',0)+m['group_index_bytes']
+        gpu=next(v['texture_bytes'] for v in r['runs'] if v['mode']=='compact')
+        checks=r['image_checks'];exact=bool(checks) and all(c['different_channels']==0 for c in checks)
+        rows.append(dict(dataset=name,source_bytes=m['source_bytes'],combined_storage_bytes=total,
+            gpu_texture_bytes=gpu,reduction_percent=100*(1-total/m['source_bytes']),
+            original_gpu_median_ms=median(original) if original else None,
+            combined_gpu_median_ms=median(compact),original_ms_by_view=original,combined_ms_by_view=compact,
+            framebuffer_exact=exact if checks else None,groups=len(m['groups']),
+            cutoff=m['cutoff'],selected_voxels=m['selected_voxels'],source_voxels=m['source_bytes']//m['bytes_per_voxel'],
+            encoding=m['storage_encoding'],window_max=r['window_max']))
+    (ROOT/'summary.json').write_text(json.dumps(rows,indent=2)+'\n')
+    table=['| Dataset | Original MiB | Combined files MiB | Reduction | GPU MiB | Original / combined GPU ms | Image checks |',
+           '| --- | ---: | ---: | ---: | ---: | --- | --- |']
+    for v in rows:
+        orig=f"{v['original_gpu_median_ms']:.2f}" if v['original_gpu_median_ms'] is not None else 'not run'
+        table.append(f"| {v['dataset']} | {v['source_bytes']/2**20:.2f} | {v['combined_storage_bytes']/2**20:.2f} | {v['reduction_percent']:.1f}% | {v['gpu_texture_bytes']/2**20:.2f} | {orig} / {v['combined_gpu_median_ms']:.2f} | "+('3/3 exact' if v['framebuffer_exact'] else 'MIP only; no full DVR reference')+' |')
+    text="""# Grouped-volume comparison
+
+Measured locally on Apple M4 / 16 GiB unified memory. This report supersedes the old threshold-7000 Woodbranch comparison for the new grouped viewer.
+
+All rows use full-resolution uint8/uint16 input, 16³ grid bricks, the same three fixed camera views, 640×480, step 1, nearest-neighbor sampling, and the shared color/opacity transfer function. Each mode/view has five warmups and 20 asynchronous GPU timer queries. The table is the median of the three per-view medians, not a screen-FPS estimate. Raw samples, windows, environment and per-view framebuffer differences are saved in the adjacent JSON files. Modes are sequential, not simultaneous. Upload, download, hashing and preprocessing are excluded from GPU timings.
+
+"""+'\n'.join(table)+"""
+
+## Selection and interpretation
+
+Bonsai (plant CT), Foot (human foot scan), and Engine (industrial CT) add three small, independently sourced examples (16, 16 and 8 MiB). These broaden content coverage; they are not additional large-memory stress tests. Their input SHA-512 hashes match the Open SciVis catalog. Credits and download URLs are in the provenance files.
+
+The three new examples use raw intensity >32, Kingsnake >40, Woodbranch >5000. These are explicit exploratory foreground rules, not anatomical or semantic ground truth. The color transfer function uses blue/orange/cream control points at 0/50/100% of the recorded display window, with extinction coefficients 0.0001/0.003/0.06. Original and combined representations use identical settings within each row.
+
+Exact image checks apply only to that display cutoff and those three cameras. They do not prove the removed data was irrelevant. Unfiltered-versus-thresholded projection differences are reported separately. Woodbranch retains 211,046,399 voxels (2.46%), versus 92,042,622 at the earlier >7000 cutoff. That is 2.29× as many retained samples, but substantial lower-intensity structure is still omitted.
+
+Woodbranch's 16 GiB monolithic texture is skipped before allocation by the 1 GiB experiment budget. There is no observed OOM or measured original GPU time for that row. Three full-resolution thresholded MIPs and every decoded grouped brick are verified instead. The online image in the viewer is only an external appearance reference.
+
+## Logical groups and memory
+
+Each brick is assigned to an intensity band using the median of its selected voxels. Six-neighbor bricks in the same band form components. The nine largest components remain separate; smaller components are explicitly pooled by band. Group names describe brick medians, not the exact range of every voxel within the group. This is a brick graph baseline, **not cross-chunk SLIC or tissue classification**. A connected brick graph does not guarantee voxel-level connectivity.
+
+Every brick belongs to exactly one group. Logical AABBs reference their members; no dense parent volume is allocated. The automatic encoder selects dense crops or 32-voxel occupancy masks according to smaller total value+mask bytes. Occupancy masks remove stored interior zeros without deleting additional selected voxels. Original precision and coordinates are retained.
+
+“Combined files” sums group sample payloads, masks and group indices; it excludes small JSON manifests and the optional retained source/baseline files on disk. GPU payload adds the resident dense page table, row/layer padding and dummy textures, but excludes browser/driver overhead. Thus the storage and GPU columns intentionally differ. All-group totals count each brick once.
+
+The UI displays each group's bytes and supports multiple selections. It releases old textures and rebuilds only selected groups. On Woodbranch, all groups use about 745.94 MiB, the largest connected group about 350.50 MiB, and no selected groups still retain the 32 MiB page table. This is selection-based residency, not demand streaming or a cache. Small groups may remain dominated by page-table overhead.
+
+## Reproduce
+
+See [the guide](../../docs/LARGE_VOLUMES.md). Run the exporter/grouping/verification commands, start the HTTP server, and use the standalone viewer's “Internal structure” color preset and benchmark button for each grouped manifest. Save the JSON reports here as `<dataset>-rendering.json`, then run `python -m pipeline.summarize_grouped_results`.
+
+The comparison page dataset selector exposes all five grouped datasets plus the existing Skull path. The original Skull SLIC experiment remains a separate algorithm baseline.
+"""
+    text += "\n## Visual checks\n\nThe interactive screenshot uses the surface preset for visibility; benchmark JSON records the internal-structure preset used for timing.\n\n![Reference and grouped viewer](bonsai-comparison.png)\n\n"
+    text += " · ".join(f"[{name} projection comparison]({name}-projections.png)" for name in ['bonsai','foot','engine','kingsnake','woodbranch']) + "\n"
+    (ROOT/'RESULTS.md').write_text(text)
+if __name__=='__main__':build()
+```
+
+### pipeline/supervolume.py
+```
+"""SLIC candidates -> constrained graph selection -> cropped sparse bricks.
+
+XYZ externally, ZYX arrays; uint8 scalar values, not calibrated tissue classes.
+The analysis cache is optional working data. Export contains selected data only.
+"""
+import argparse
+from collections import deque
+import hashlib
+import json
+from pathlib import Path
+import time
+
+import numpy as np
+from skimage.segmentation import slic
+from threadpoolctl import threadpool_limits
+from pipeline.extractVolume import read_volume
+
+
+def digest(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def fresh(path):
+    p = Path(path)
+    if p.exists() and any(p.iterdir()):
+        raise ValueError(f'Choose an empty output directory: {p}')
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def region_graph(volume, labels):
+    """Exact uint8 histograms and face-adjacent contact/contrast statistics."""
+    n = int(labels.max()) + 1
+    hist = np.zeros((n, 256), dtype=np.int64)
+    # Bound temporary indexing arrays instead of building an Nx256 one-hot array.
+    for z in range(volume.shape[0]):
+        key = labels[z].ravel().astype(np.int64) * 256 + volume[z].ravel()
+        hist += np.bincount(key, minlength=n*256).reshape(n, 256)
+    edges = {}
+    for axis in range(3):
+        a, b = [slice(None)]*3, [slice(None)]*3
+        a[axis], b[axis] = slice(None, -1), slice(1, None)
+        left, right = labels[tuple(a)], labels[tuple(b)]
+        different = left != right
+        lo, hi = np.minimum(left[different], right[different]), np.maximum(left[different], right[different])
+        key = lo.astype(np.int64)*n + hi
+        unique, inverse, counts = np.unique(key, return_inverse=True, return_counts=True)
+        delta = np.abs(volume[tuple(a)][different].astype(np.int16)-volume[tuple(b)][different])
+        sums = np.bincount(inverse, weights=delta, minlength=len(unique))
+        for k, count, total in zip(unique, counts, sums):
+            pair = (int(k//n), int(k % n))
+            c, s = edges.get(pair, (0, 0.0))
+            edges[pair] = (c+int(count), s+float(total))
+    return hist, [dict(a=a, b=b, contacts=c, mean_boundary_delta=s/c)
+                  for (a, b), (c, s) in sorted(edges.items())]
+
+
+@threadpool_limits.wrap(limits=1)
+def analyze(source, shape, output, region_size=16, compactness=0.08, spacing=(1, 1, 1)):
+    if not isinstance(region_size, int) or region_size < 2 or not np.isfinite(compactness) or compactness <= 0:
+        raise ValueError('Require region_size >=2 and finite compactness >0')
+    if len(spacing) != 3 or any(not np.isfinite(x) or x <= 0 for x in spacing):
+        raise ValueError('Spacing must contain three positive finite values')
+    volume = read_volume(source, shape)
+    out = fresh(output); start = time.perf_counter()
+    labels = slic(volume.astype(np.float32)/255, n_segments=max(1, round(volume.size/region_size**3)),
+                  compactness=compactness, sigma=0, spacing=spacing[::-1], channel_axis=None,
+                  convert2lab=False, enforce_connectivity=True, min_size_factor=0.1,
+                  max_size_factor=3, start_label=1).astype(np.uint32)
+    hist, edges = region_graph(volume, labels)
+    counts = hist.sum(axis=1)
+    cdf = hist.cumsum(axis=1)
+    regions = []
+    for i in range(1, len(hist)):
+        if not counts[i]:
+            continue
+        regions.append(dict(id=i, voxels=int(counts[i]), mean=float(hist[i]@np.arange(256)/counts[i]),
+                            p10=int(np.searchsorted(cdf[i], counts[i]*.1)),
+                            median=int(np.searchsorted(cdf[i], counts[i]*.5)),
+                            p90=int(np.searchsorted(cdf[i], counts[i]*.9)),
+                            histogram=hist[i].tolist()))
+    labels.astype('<u4').tofile(out/'labels.u32')
+    report = dict(schema_version=1, dimensions_xyz=list(shape), input_sha256=digest(volume.tobytes()),
+                  parameters=dict(method='3D SLIC', region_size=region_size, compactness=compactness,
+                                  spacing_xyz=list(spacing), smoothing=0, connectivity='face'),
+                  regions=regions, edges=edges, processing_seconds=time.perf_counter()-start)
+    (out/'analysis.json').write_text(json.dumps(report, separators=(',', ':'))+'\n')
+    return report
+
+
+def select_groups(volume, labels, analysis, config):
+    """Fixed target distributions prevent transitive intensity drift.
+
+    Seeded graph growth never enters an ineligible region. Histogram support and
+    boundary contrast operate at region level; final range clipping is explicit.
+    Groups own disjoint voxels: earlier config entries have priority on overlap.
+    """
+    groups = config.get('groups', [])
+    if not 1 <= len(groups) <= 255:
+        raise ValueError('Require 1–255 groups')
+    regions = analysis['regions']; n = int(labels.max())+1
+    h = np.zeros((n, 256), dtype=np.float64)
+    for r in regions:
+        h[r['id']] = r['histogram']
+    counts = h.sum(axis=1)
+    adjacency = [[] for _ in range(n)]
+    for e in analysis['edges']:
+        adjacency[e['a']].append((e['b'], e['mean_boundary_delta']))
+        adjacency[e['b']].append((e['a'], e['mean_boundary_delta']))
+    owner = np.zeros(volume.shape, dtype=np.uint8)
+    summaries = []
+    for gid, g in enumerate(groups, 1):
+        low, high = g['intensity_range']
+        fraction = g.get('min_fraction', .1)
+        boundary = g.get('max_boundary_delta', 255)
+        if not (0 <= low <= high <= 255 and int(low)==low and int(high)==high):
+            raise ValueError('Intensity ranges must be integer inclusive bounds in [0,255]')
+        if not 0 <= fraction <= 1 or not 0 <= boundary <= 255:
+            raise ValueError('Invalid support fraction or boundary contrast')
+        low, high = int(low), int(high)
+        support = h[:, low:high+1].sum(axis=1)
+        eligible = (counts > 0) & (support > 0) & (support >= fraction*counts)
+        seeds = set(g.get('region_ids', []))
+        for xyz in g.get('seeds_xyz', []):
+            if len(xyz)!=3 or any(int(x)!=x or x<0 or x>=s for x, s in zip(xyz, volume.shape[::-1])):
+                raise ValueError('Seed outside original XYZ volume')
+            seeds.add(int(labels[tuple(int(v) for v in xyz[::-1])]))
+        mode = g.get('mode', 'seeded')
+        if mode not in ('seeded', 'all_candidates'):
+            raise ValueError('mode must be seeded or all_candidates')
+        if mode == 'seeded' and not seeds:
+            raise ValueError('Seeded selection requires seeds_xyz or region_ids')
+        if any(not isinstance(i, int) or i<=0 or i>=n or not eligible[i] for i in seeds):
+            raise ValueError('Seed region fails the fixed target range/support rule')
+        distance = g.get('max_seed_histogram_distance')
+        if distance is not None:
+            if not seeds or not 0 <= distance <= 1:
+                raise ValueError('Histogram distance requires seeds and a value in [0,1]')
+            # Total variation distance to the fixed pooled SEED histogram.
+            reference = h[sorted(seeds)].sum(axis=0); reference /= reference.sum()
+            distributions = h / np.maximum(counts[:, None], 1)
+            eligible &= .5*np.abs(distributions-reference).sum(axis=1) <= distance
+            eligible[list(seeds)] = True
+        chosen = np.zeros(n, dtype=bool)
+        if mode == 'all_candidates':
+            chosen = eligible.copy()
+        else:
+            queue = deque(sorted(seeds)); chosen[list(seeds)] = True
+            while queue:
+                i = queue.popleft()
+                for j, delta in adjacency[i]:
+                    if eligible[j] and not chosen[j] and delta <= boundary:
+                        chosen[j] = True; queue.append(j)
+        mask = chosen[labels]
+        if g.get('clip_to_range', True):
+            mask &= (volume >= low) & (volume <= high)
+        # Zero intensity is the sparse background; zero-valued semantic labels are not exported.
+        mask &= volume > 0
+        overlap = int(np.count_nonzero(mask & (owner > 0)))
+        owner[mask & (owner == 0)] = gid
+        summaries.append(dict(id=gid, name=g.get('name', f'Group {gid}'), rule=g,
+                              eligible_regions=int(eligible.sum()), selected_region_ids=np.flatnonzero(chosen).tolist(),
+                              overlap_voxels_assigned_to_earlier_groups=overlap,
+                              selected_voxels=int(np.count_nonzero(owner == gid))))
+    return owner, summaries
+
+
+def tight(mask):
+    coords = np.where(mask)
+    if not coords[0].size:
+        return None
+    lo = [int(c.min()) for c in coords]; hi = [int(c.max())+1 for c in coords]
+    return lo, hi
+
+
+def build_tree(bricks, ids):
+    """Spatial BVH over leaf references. Internal nodes allocate NO voxel array."""
+    if not ids:
+        return None
+    lo = np.min([bricks[i]['origin_xyz'] for i in ids], axis=0)
+    hi = np.max([np.array(bricks[i]['origin_xyz'])+bricks[i]['dimensions_xyz'] for i in ids], axis=0)
+    node = dict(origin_xyz=lo.tolist(), extent_xyz=(hi-lo).tolist())
+    if len(ids) <= 8:
+        node['brick_ids'] = ids
+    else:
+        axis = int(np.argmax(hi-lo))
+        ids = sorted(ids, key=lambda i: bricks[i]['origin_xyz'][axis]+bricks[i]['dimensions_xyz'][axis]/2)
+        middle = len(ids)//2
+        node['children'] = [build_tree(bricks, ids[:middle]), build_tree(bricks, ids[middle:])]
+    return node
+
+
+def export_bricks(volume, owner, groups, output, brick_size=16, provenance=None):
+    if brick_size not in (8, 16, 32):
+        raise ValueError('brick_size must be 8,16,32')
+    if owner.shape != volume.shape or owner.dtype != np.uint8:
+        raise ValueError('Owner map must match volume as uint8')
+    out = fresh(output); records = []; offset = 0
+    with (out/'density.raw').open('wb') as density, (out/'owners.raw').open('wb') as owners:
+        for z in range(0, volume.shape[0], brick_size):
+            for y in range(0, volume.shape[1], brick_size):
+                for x in range(0, volume.shape[2], brick_size):
+                    cell = (slice(z,z+brick_size),slice(y,y+brick_size),slice(x,x+brick_size))
+                    bounds = tight(owner[cell]>0)
+                    if bounds is None:
+                        continue
+                    lo, hi = bounds; local = tuple(slice(a,b) for a,b in zip(lo,hi))
+                    labels = owner[cell][local].copy()
+                    values = np.where(labels, volume[cell][local], 0).astype(np.uint8)
+                    raw = values.tobytes(); density.write(raw); owners.write(labels.tobytes())
+                    origin = (np.array([z,y,x])+lo)[::-1].tolist()
+                    records.append(dict(id=len(records), cell_xyz=[x//brick_size,y//brick_size,z//brick_size],
+                                        origin_xyz=origin, dimensions_xyz=list(values.shape[::-1]),
+                                        offset=offset, bytes=len(raw), groups=np.unique(labels[labels>0]).tolist()))
+                    offset += len(raw)
+    for g in groups:
+        ids = [b['id'] for b in records if g['id'] in b['groups']]
+        g['tree'] = build_tree(records, ids)
+        bounds = tight(owner == g['id'])
+        g['aabb'] = None if bounds is None else dict(origin_xyz=bounds[0][::-1], extent_xyz=(np.array(bounds[1])-bounds[0])[::-1].tolist())
+    selected = np.where(owner, volume, 0).astype(np.uint8)
+    metrics = {}
+    for level in (0, 60, 120):
+        reference = volume > level
+        metrics[str(level)] = dict(original_voxels=int(reference.sum()),
+                                  removed_voxels=int(np.count_nonzero(reference & (owner==0))))
+    meta = dict(schema_version=3, format='cropped-grid-bricks', dimensions_xyz=list(volume.shape[::-1]),
+                dtype='uint8', brick_size=brick_size, density_file='density.raw', owners_file='owners.raw',
+                density_sha256=digest((out/'density.raw').read_bytes()),
+                owners_sha256=digest((out/'owners.raw').read_bytes()),
+                input_sha256=digest(volume.tobytes()), selected_sha256=digest(selected.tobytes()),
+                density_bytes=offset, owner_bytes=offset, selected_voxels=int(np.count_nonzero(owner)),
+                intensity_survival=metrics, bricks=records, groups=groups, provenance=provenance,
+                ownership='Config order wins overlapping selections; every stored voxel has one group',
+                rendering='Nearest original voxel grid; parent AABBs are metadata only')
+    (out/'metadata.json').write_text(json.dumps(meta, separators=(',', ':'))+'\n')
+    restored, owners = reconstruct_sparse(out)
+    if not np.array_equal(selected, restored) or not np.array_equal(owner, owners):
+        raise AssertionError('Sparse export reconstruction failed')
+    return meta
+
+
+def reconstruct_sparse(directory):
+    p=Path(directory); m=json.loads((p/'metadata.json').read_text())
+    result=np.zeros(m['dimensions_xyz'][::-1],dtype=np.uint8); owner=np.zeros_like(result)
+    data=np.fromfile(p/m['density_file'],dtype=np.uint8); labels=np.fromfile(p/m['owners_file'],dtype=np.uint8)
+    for b in m['bricks']:
+        o=b['origin_xyz'][::-1]; d=b['dimensions_xyz'][::-1]
+        region=tuple(slice(a,a+n) for a,n in zip(o,d)); start=b['offset']; end=start+b['bytes']
+        result[region]=data[start:end].reshape(d); owner[region]=labels[start:end].reshape(d)
+    return result,owner
+
+
+def extract_selected(source, cache, config_path, output, brick_size=16):
+    cache=Path(cache); report=json.loads((cache/'analysis.json').read_text())
+    volume=read_volume(source,report['dimensions_xyz'])
+    if digest(volume.tobytes()) != report['input_sha256']:
+        raise ValueError('Analysis cache belongs to a different input')
+    labels=np.fromfile(cache/'labels.u32',dtype='<u4').reshape(volume.shape)
+    config=json.loads(Path(config_path).read_text())
+    owner,groups=select_groups(volume,labels,report,config)
+    return export_bricks(volume,owner,groups,output,brick_size,
+                         dict(analysis_parameters=report['parameters'],selection=config))
+
+
+def main():
+    parser=argparse.ArgumentParser(description=__doc__); sub=parser.add_subparsers(dest='command',required=True)
+    a=sub.add_parser('analyze'); a.add_argument('--input',required=True); a.add_argument('--shape',nargs=3,type=int,required=True)
+    a.add_argument('--output',required=True); a.add_argument('--region-size',type=int,default=16)
+    a.add_argument('--compactness',type=float,default=.08); a.add_argument('--spacing',nargs=3,type=float,default=[1,1,1])
+    i=sub.add_parser('inspect'); i.add_argument('--analysis',required=True); i.add_argument('--xyz',nargs=3,type=int,required=True)
+    e=sub.add_parser('export'); e.add_argument('--input',required=True); e.add_argument('--analysis',required=True)
+    e.add_argument('--config',required=True); e.add_argument('--output',required=True); e.add_argument('--brick-size',type=int,default=16)
+    args=parser.parse_args()
+    if args.command=='analyze':
+        r=analyze(args.input,args.shape,args.output,args.region_size,args.compactness,args.spacing)
+        print(json.dumps(dict(regions=len(r['regions']),edges=len(r['edges']),seconds=r['processing_seconds'])))
+    elif args.command=='inspect':
+        cache=Path(args.analysis); a=json.loads((cache/'analysis.json').read_text())
+        if any(x<0 or x>=s for x,s in zip(args.xyz,a['dimensions_xyz'])):
+            raise ValueError('Coordinate outside volume')
+        labels=np.memmap(cache/'labels.u32',dtype='<u4',mode='r',shape=tuple(a['dimensions_xyz'][::-1]))
+        rid=int(labels[tuple(args.xyz[::-1])]); region=next(r for r in a['regions'] if r['id']==rid)
+        print(json.dumps(dict(xyz=args.xyz,region=region),indent=2))
+    else:
+        r=extract_selected(args.input,args.analysis,args.config,args.output,args.brick_size)
+        print(json.dumps(dict(bricks=len(r['bricks']),density_bytes=r['density_bytes'],owner_bytes=r['owner_bytes'],groups=[(g['name'],g['selected_voxels']) for g in r['groups']])))
+
+
+if __name__=='__main__':
+    main()
+```
+
+### pipeline/supervolume_study.py
+```
+"""Reproduce SLIC selection, brick-size accounting and selection sensitivity."""
+import argparse
+import copy
+import json
+from pathlib import Path
+import platform
+import time
+
+import numpy as np
+import skimage
+from pipeline.extractVolume import read_volume
+from pipeline.supervolume import analyze, select_groups, export_bricks, fresh
+
+
+def run(source, shape, config_path, output):
+    root=fresh(output)
+    analysis=analyze(source,shape,root/'analysis')
+    volume=read_volume(source,shape)
+    labels=np.fromfile(root/'analysis/labels.u32',dtype='<u4').reshape(volume.shape)
+    config=json.loads(Path(config_path).read_text())
+    start=time.perf_counter();owner,groups=select_groups(volume,labels,analysis,config)
+    selection_seconds=time.perf_counter()-start
+    rows=[]
+    for b in (8,16,32):
+        out=root/f'selected{b}';start=time.perf_counter()
+        m=export_bricks(volume,owner,copy.deepcopy(groups),out,b,dict(analysis_parameters=analysis['parameters'],selection=config))
+        rows.append(dict(brick_size=b,bricks=len(m['bricks']),density_bytes=m['density_bytes'],owner_bytes=m['owner_bytes'],
+                         metadata_bytes=(out/'metadata.json').stat().st_size,
+                         export_and_verify_seconds=time.perf_counter()-start,selected_sha256=m['selected_sha256'],
+                         intensity_survival=m['intensity_survival'],reconstruction_exact=True))
+    sweep=[]
+    for fraction in (0,.01,.05,.1,.2):
+        rule=dict(groups=[dict(mode='all_candidates',intensity_range=[61,255],min_fraction=fraction,clip_to_range=True)])
+        owners,stats=select_groups(volume,labels,analysis,rule)
+        sweep.append(dict(min_fraction=fraction,selected_regions=len(stats[0]['selected_region_ids']),selected_voxels=int(np.count_nonzero(owners)),
+                          removed_above60=int(np.count_nonzero((volume>60)&(owners==0))),removed_above120=int(np.count_nonzero((volume>120)&(owners==0)))))
+    report=dict(input_sha256=analysis['input_sha256'],shape_xyz=shape,environment=dict(python=platform.python_version(),numpy=np.__version__,skimage=skimage.__version__),
+                analysis_parameters=analysis['parameters'],regions=len(analysis['regions']),edges=len(analysis['edges']),
+                analyze_seconds=analysis['processing_seconds'],selection_seconds=selection_seconds,config=config,variants=rows,sensitivity=sweep)
+    (root/'report.json').write_text(json.dumps(report,indent=2)+'\n')
+    print(json.dumps(report,indent=2))
+
+
+if __name__=='__main__':
+    p=argparse.ArgumentParser(description=__doc__);p.add_argument('--input',default='data/skull_256x256x256_uint8.raw');p.add_argument('--shape',nargs=3,type=int,default=[256]*3)
+    p.add_argument('--config',default='configs/skull-candidates.json');p.add_argument('--output',required=True)
+    a=p.parse_args();run(a.input,a.shape,a.config,a.output)
+```
+
+### pipeline/verify_large_groups.py
+```
+"""Independently decode each group and compare every brick to the dense export."""
+import argparse,json
+from pathlib import Path
+import numpy as np
+from pipeline.verify_large_volume import file_hash
+
+def verify_groups(grouped, original):
+    path=Path(grouped);root=Path(original)
+    m=json.loads((path/'metadata.json').read_text());old=json.loads((root/'metadata.json').read_text())
+    dtype=np.dtype(m['dtype']);pages=np.fromfile(root/'pages.raw','<u4').reshape(-1,4)
+    source=np.memmap(root/'density.raw',dtype=dtype,mode='r')
+    seen=set();total=0
+    for g in m['groups']:
+        for kind in ['density','index']+(['mask'] if m['storage_encoding']=='masked32' else []):
+            assert file_hash(path/g[kind+'_file'])==g[kind+'_sha256']
+        values=np.memmap(path/g['density_file'],dtype=dtype,mode='r')
+        entries=np.fromfile(path/g['index_file'],'<u4').reshape(-1,4)
+        masks=np.fromfile(path/g['mask_file'],'<u4').reshape(-1,2) if m['storage_encoding']=='masked32' else None
+        count=0
+        for cell,base,origin,shape in entries:
+            cell=int(cell);base=int(base);shape=int(shape);assert cell not in seen;seen.add(cell)
+            assert int(origin)==int(pages[cell,1]) and shape==int(pages[cell,2])
+            n=int(np.prod([(shape>>s)&63 for s in [0,6,12]]))
+            expected=source[int(pages[cell,0])-1:int(pages[cell,0])-1+n]
+            if masks is None:actual=values[base-1:base-1+n]
+            else:
+                actual=np.zeros(n,dtype)
+                for i in range((n+31)//32):
+                    offset,bits=map(int,masks[base-1+i]);positions=[j for j in range(32) if bits&(1<<j)]
+                    assert all(i*32+j<n for j in positions)
+                    actual[np.array(positions,dtype=int)+i*32]=values[offset:offset+len(positions)]
+            np.testing.assert_array_equal(actual,expected);count+=int(np.count_nonzero(actual))
+        assert count==g['selected_voxels'];total+=count
+    assert seen==set(np.flatnonzero(pages[:,0]).tolist())
+    assert total==old['selected_voxels']
+    result=dict(dataset=m['name'],groups=len(m['groups']),bricks=len(seen),selected_voxels=total,
+        every_stored_voxel_exact=True,unique_brick_ownership=True,density_bytes=m['density_bytes'],
+        mask_bytes=m['mask_bytes'],index_bytes=m['group_index_bytes'],source_bytes=m['source_bytes'])
+    (path/'group-verification.json').write_text(json.dumps(result,indent=2)+'\n');print(result);return result
+if __name__=='__main__':
+    p=argparse.ArgumentParser();p.add_argument('grouped');p.add_argument('original');a=p.parse_args();verify_groups(a.grouped,a.original)
+```
+
+### pipeline/verify_large_volume.py
+```
+"""Independent bounded-volume verification of schema 4, including three exact MIPs."""
+import argparse
+import hashlib
+import json
+from pathlib import Path
+import numpy as np
+
+
+def file_hash(path):
+    h=hashlib.sha256()
+    with path.open('rb') as f:
+        while b:=f.read(8*1024*1024):h.update(b)
+    return h.hexdigest()
+
+
+def verify(path):
+    path=Path(path);m=json.loads((path/'metadata.json').read_text());dtype=np.dtype(m['dtype'])
+    for key in ['density','pages']:
+        if file_hash(path/m[key+'_file'])!=m[key+'_sha256']:raise AssertionError(key+' hash mismatch')
+    dims=m['dimensions_xyz'][::-1];brick=m['brick_xyz'][::-1]
+    pages=np.fromfile(path/'pages.raw','<u4').reshape(*m['grid_xyz'][::-1],4)
+    result_mips=[np.zeros(tuple(n for j,n in enumerate(dims) if j!=axis),dtype) for axis in range(3)]
+    hist=np.zeros(len(m['histogram']),np.int64);voxels=0;records=0;intervals=[]
+    original=np.memmap(path/m['original_file'],dtype=dtype,mode='r',shape=tuple(dims)) if m.get('original_file') else None
+    with (path/'density.raw').open('rb') as f:
+        for cell in np.argwhere(pages[...,0]):
+            base,origin,shape,_=map(int,pages[tuple(cell)])
+            lo=[(origin>>shift)&31 for shift in (10,5,0)];size=[(shape>>shift)&63 for shift in (12,6,0)]
+            p=[int(c)*b+l for c,b,l in zip(cell,brick,lo)];n=int(np.prod(size));offset=(base-1)*dtype.itemsize
+            assert all(0<s and l+s<=b and a+s<=d for l,s,b,a,d in zip(lo,size,brick,p,dims))
+            f.seek(offset);a=np.frombuffer(f.read(n*dtype.itemsize),dtype).reshape(size)
+            assert not np.any((a>0)&(a<=m['cutoff']))
+            if original is not None:
+                src=original[tuple(slice(o,o+n) for o,n in zip(p,size))]
+                np.testing.assert_array_equal(a,np.where(src>m['cutoff'],src,0))
+            intervals.append((base-1,base-1+n));hist+=np.bincount(a.ravel(),minlength=len(hist))
+            voxels+=int(np.count_nonzero(a));records+=1
+            for axis in range(3):
+                sl=tuple(slice(o,o+n) for j,(o,n) in enumerate(zip(p,size)) if j!=axis)
+                np.maximum(result_mips[axis][sl],a.max(axis=axis),out=result_mips[axis][sl])
+    cursor=0
+    for start,end in sorted(intervals):assert start==cursor;cursor=end
+    assert cursor*dtype.itemsize==m['density_bytes']
+    assert voxels==m['selected_voxels'] and records==m['bricks']
+    np.testing.assert_array_equal(hist[m['cutoff']+1:],np.array(m['histogram'])[m['cutoff']+1:])
+    checks=[]
+    for axis,a in enumerate(result_mips):
+        reference=np.load(path/f'threshold-mip-{axis}.npy')
+        different=int(np.count_nonzero(a!=reference));checks.append(dict(axis=axis,different_pixels=different,pixels=a.size));assert not different
+        np.save(path/f'export-mip-{axis}.npy',a)
+    result=dict(name=m['name'],source_scale=m['source_scale'],dtype=m['dtype'],selected_voxels=voxels,bricks=records,
+                exact_selected_intensity_histogram=True,stored_voxels_checked_against_raw=original is not None,
+                orthogonal_mip_checks=checks,limitations='MIP equality is not a DVR framebuffer comparison. Threshold preservation is not anatomical validation.')
+    (path/'verification.json').write_text(json.dumps(result,indent=2)+'\n');print(json.dumps(result))
+    return result
+
+if __name__=='__main__':
+    p=argparse.ArgumentParser();p.add_argument('directory');a=p.parse_args();verify(a.directory)
+```
+
+### web/compare_volumes.js
+```
+const $=id=>document.getElementById(id);
+const params=new URLSearchParams(location.search),dataset=params.get('dataset')||'skull',large=['kingsnake','woodbranch','bonsai','foot','engine'].includes(dataset),staticReference=large&&(dataset==='woodbranch'||(dataset==='kingsnake'&&params.get('reference')==='image'));
+$('dataset').value=dataset;
+$('dataset').onchange=()=>{location.href='compare_volumes.html?dataset='+$('dataset').value;};
+$('reference').onchange=()=>{location.href='compare_volumes.html?dataset='+dataset+'&reference='+$('reference').value;};
+
+const frames=[$('leftFrame'),$('rightFrame')],ready=[false,false];
+// Unit quaternions rotate the shared camera from view space to volume space.
+const multiply=(a,b)=>[
+ a[3]*b[0]+a[0]*b[3]+a[1]*b[2]-a[2]*b[1],
+ a[3]*b[1]-a[0]*b[2]+a[1]*b[3]+a[2]*b[0],
+ a[3]*b[2]+a[0]*b[1]-a[1]*b[0]+a[2]*b[3],
+ a[3]*b[3]-a[0]*b[0]-a[1]*b[1]-a[2]*b[2]];
+const normalized=q=>{const n=Math.hypot(...q);return q.map(v=>v/n);};
+const axisAngle=(axis,a)=>[...axis.map(v=>v*Math.sin(a/2)),Math.cos(a/2)];
+const initial=()=>axisAngle([1,0,0],dataset==='bonsai'?-Math.PI/2:Math.PI/2);
+let rotation=initial(),zoom=1.8,queued=false,drag=null;
+function matrix([x,y,z,w]){return [1-2*(y*y+z*z),2*(x*y+z*w),2*(x*z-y*w),2*(x*y-z*w),1-2*(x*x+z*z),2*(y*z+x*w),2*(x*z+y*w),2*(y*z-x*w),1-2*(x*x+y*y)];}
+function sync(){if(queued)return;queued=true;requestAnimationFrame(()=>{queued=false;const message={type:'volume-camera',rotation:matrix(rotation),zoom,live:$('live').checked,step:+$('step').value,cutoff:+$('cutoff').value,window:large?+$('window').value:undefined,transfer:large?transferSettings():undefined};frames.forEach((f,i)=>{if(ready[i])f.contentWindow.postMessage(message,location.origin);});});}
+function point(event,element){const r=element.getBoundingClientRect(),scale=Math.min(r.width,r.height);let x=(2*(event.clientX-r.left)-r.width)/scale,y=(r.height-2*(event.clientY-r.top))/scale;const d=x*x+y*y;
+ if(d<=1)return [x,y,Math.sqrt(1-d)];const s=1/Math.sqrt(d);return [x*s,y*s,0];}
+function between(a,b){const dot=Math.max(-1,Math.min(1,a.reduce((s,v,i)=>s+v*b[i],0)));let cross=[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]];
+ if(dot<-.999999){const ref=Math.abs(a[0])<.8?[1,0,0]:[0,1,0];cross=[a[1]*ref[2]-a[2]*ref[1],a[2]*ref[0]-a[0]*ref[2],a[0]*ref[1]-a[1]*ref[0]];return normalized([...cross,0]);}return normalized([...cross,1+dot]);}
+for(const element of [$('leftDrag'),$('rightDrag')]){
+ element.onpointerdown=e=>{if(e.button!==0)return;e.preventDefault();element.focus();element.setPointerCapture(e.pointerId);drag={id:e.pointerId,start:point(e,element),rotation:[...rotation],element};};
+ element.onpointermove=e=>{if(!drag||e.pointerId!==drag.id||element!==drag.element)return;const delta=between(drag.start,point(e,element));rotation=normalized(multiply(drag.rotation,[-delta[0],-delta[1],-delta[2],delta[3]]));sync();};
+ const finish=e=>{if(drag?.id===e.pointerId)drag=null;};element.onpointerup=finish;element.onpointercancel=finish;element.onlostpointercapture=finish;
+ element.addEventListener('wheel',e=>{e.preventDefault();const delta=e.deltaY*(e.deltaMode===1?16:e.deltaMode===2?element.clientHeight:1);zoom=Math.max(.8,Math.min(4,zoom*Math.exp(delta*.001)));sync();},{passive:false});
+ element.onkeydown=e=>{const direction={ArrowLeft:[0,-.08],ArrowRight:[0,.08],ArrowUp:[1,-.08],ArrowDown:[1,.08]}[e.key];if(direction){e.preventDefault();rotation=normalized(multiply(rotation,axisAngle(direction[0]?[1,0,0]:[0,1,0],direction[1])));sync();}else if(e.key==='+'||e.key==='-'){e.preventDefault();zoom=Math.max(.8,Math.min(4,zoom*(e.key==='+'?.9:1.1)));sync();}};
+}
+for(const id of ['step','cutoff','window'])$(id).oninput=()=>{$(id+'Value').textContent=$(id).value;sync();};
+$('live').onchange=()=>{for(const side of ['left','right']){if(side==='left'&&staticReference)continue;$(side+'FPS').textContent=$('live').checked?'Measuring FPS…':'FPS paused';}sync();};
+$('reset').onclick=()=>{rotation=initial();zoom=1.8;sync();};
+$('front').onclick=()=>{rotation=initial();sync();};
+$('side').onclick=()=>{rotation=multiply(axisAngle([0,1,0],Math.PI/2),initial());sync();};
+$('groups').onchange=()=>{const value=$('groups').value;frames[1].contentWindow.postMessage({type:'volume-selection',ids:value==='all'?groupIDs:[+value]},location.origin);};
+let groupIDs=[];
+window.addEventListener('message',e=>{
+ if(e.origin!==location.origin)return;const index=frames.findIndex(f=>f.contentWindow===e.source);if(index<0)return;
+ const m=e.data;if(m?.type==='volume-performance'){if($('live').checked)$(index?'rightFPS':'leftFPS').textContent=`${m.fps.toFixed(1)} FPS · GPU ${m.gpu_ms===null?'unavailable':m.gpu_ms.toFixed(2)+' ms'} · ${m.width}×${m.height}`;return;}if(m?.type==='volume-error'){setGroupBusy(false);$('status').textContent=m.message;$('status').classList.add('error');return;}
+ if(m?.type!=='volume-ready')return;ready[index]=true;
+ if(large&&index===1)updateGroups(m);
+ $(index?'rightMemory':'leftMemory').textContent=(m.payload_bytes/1048576).toFixed(2)+' MiB';
+ if(index===0)$('leftCaption').textContent=`${m.dimensions.join(' × ')} source voxels · display cutoff only controls visibility`;
+ else{
+  $('rightCaption').textContent=`${m.bricks.toLocaleString()} active bricks · ${m.selected_voxels.toLocaleString()} retained voxels`;
+  if(!large&&!groupIDs.length){groupIDs=m.groups.map(g=>g.id);for(const g of m.groups){const option=document.createElement('option');option.value=g.id;option.textContent=g.name;$('groups').append(option);}$('groups').disabled=false;}
+ }
+ if(ready.every(Boolean))$('status').textContent=staticReference?'The right view is interactive; the left is a static appearance reference with a different camera, cutoff, and transfer function':'Synchronized camera, zoom, display cutoff, and sample step';sync();
+});
+
+const manifest=large?'../experiments/large-volumes/'+(dataset+'-groups')+'/metadata.json':params.get('manifest')||'../experiments/supervolume/selected8/metadata.json';
+if(large){
+ $('transferPanel').hidden=false;$('groupPanel').hidden=false;$('groups').closest('label').hidden=true;$('referenceControl').hidden=false;$('windowControl').hidden=false;
+ const cutoff=dataset==='woodbranch'?5000:dataset==='kingsnake'?40:32,max=dataset==='woodbranch'?57147:255;
+ $('cutoff').max=max-1;$('cutoff').value=cutoff;$('cutoffValue').textContent=cutoff;
+ $('window').max=max;$('window').value=dataset==='woodbranch'?12000:max;$('windowValue').textContent=$('window').value;
+ document.querySelector('h1').textContent=dataset[0].toUpperCase()+dataset.slice(1)+' · reference / pipeline';
+ document.querySelector('.help').textContent='The right side preserves full resolution and source bit depth. Extraction uses values >40 for Kingsnake, >5000 for Woodbranch, and >32 for the other new examples. Lowering the display cutoff cannot restore discarded voxels. FPS depends on refresh rate and shared GPU load; texture usage is not total VRAM.';
+ document.querySelectorAll('.panel-head h2')[0].textContent=staticReference?'Published rendering reference':'Full source reference';
+ document.querySelectorAll('.panel-head p')[0].textContent=staticReference?'Kiln Gallery · '+(dataset==='kingsnake'?'MIP':'DVR')+' · static image':'Original resolution · no extraction filter';
+ $('reference').value=staticReference?'image':'original';if(!['kingsnake','woodbranch'].includes(dataset))$('referenceControl').hidden=true;
+ if(dataset==='woodbranch')$('reference').querySelector('[value="original"]').disabled=true;
+ if(staticReference){
+  ready[0]=true;frames[0].hidden=true;$('leftDrag').hidden=true;
+  $('referenceImage').hidden=false;$('referenceImage').src='https://kilnrender.com/gallery/'+dataset+'.webp';
+  $('referenceImage').onerror=()=>{$('leftCaption').textContent='The reference image failed to load; use the source link below.';};
+  $('leftMemory').textContent='Static image';$('leftFPS').textContent='FPS not applicable';
+  $('leftCaption').replaceChildren(document.createTextNode('Appearance reference, not pixel-level validation · '));
+  const link=document.createElement('a');link.href='https://kilnrender.com/gallery';link.textContent='Source: Kiln Gallery';link.target='_blank';link.rel='noopener';$('leftCaption').append(link);
+  document.querySelector('.badge').textContent='Right-side arcball';
+  document.querySelector('header p').textContent='Drag or scroll the right view · The left side is a published static reference';
+ }
+}
+for(let i=0;i<2;i++){
+ if(i===0&&staticReference)continue;
+ const url=new URL(large?'large_volume.html':'sparse_volume.html',location.href);url.searchParams.set('embed','1');url.searchParams.set('v','compare-5');url.searchParams.set('manifest',manifest);
+ if(!i){url.searchParams.set('original','1');if(params.has('input'))url.searchParams.set('input',params.get('input'));}
+ frames[i].src=url.href;
+}
+
+function transferSettings(){
+ const colors=['Low','Mid','High'].map(s=>{const v=$('color'+s).value;return [1,3,5].map(i=>parseInt(v.slice(i,i+2),16)/255);});
+ const opacity=['Low','Mid','High'].map(s=>Math.max(0,Math.min(1,Number($('alpha'+s).value)||0)));
+ return {colors,opacity};
+}
+for(const s of ['Low','Mid','High'])for(const prefix of ['color','alpha'])$(prefix+s).oninput=sync;
+$('tfPreset').onchange=()=>{const a=$('tfPreset').value==='surface'?[.002,.04,.15]:[.0001,.003,.06];['Low','Mid','High'].forEach((s,i)=>$('alpha'+s).value=a[i]);sync();};
+let groupTableBuilt=false;
+const mib=n=>n===0?'0 B':n<1048576?(n/1024).toFixed(2)+' KiB':(n/1048576).toFixed(2)+' MiB';
+const groupName=name=>name.replace(/^\u4e2d\u4f4d\u5f3a\u5ea6 (.+?) · \u8fde\u901a\u533a\u57df (\d+)$/,'Median intensity $1 · connected component $2').replace(/^\u4e2d\u4f4d\u5f3a\u5ea6 (.+?) · \u96f6\u6563\u533a\u57df\u5408\u96c6$/,'Median intensity $1 · pooled residual components');
+function setGroupBusy(value){for(const e of document.querySelectorAll('#groupPanel button,#groupRows input'))e.disabled=value;}
+function sendGroups(){const ids=[...document.querySelectorAll('#groupRows input:checked')].map(e=>+e.value);setGroupBusy(true);$('groupSelection').textContent='Rebuilding textures for the selected groups…';frames[1].contentWindow.postMessage({type:'volume-selection',ids},location.origin);}
+$('selectAll').onclick=()=>{document.querySelectorAll('#groupRows input').forEach(e=>e.checked=true);sendGroups();};
+$('selectNone').onclick=()=>{document.querySelectorAll('#groupRows input').forEach(e=>e.checked=false);sendGroups();};
+function updateGroups(m){
+ setGroupBusy(false);
+ if(!groupTableBuilt&&m.groups?.length){
+  for(const g of m.groups){
+   const tr=document.createElement('tr'),td=document.createElement('td'),box=document.createElement('input');
+   const name=groupName(g.name);box.type='checkbox';box.value=g.id;box.checked=true;box.setAttribute('aria-label',name);box.onchange=sendGroups;td.append(box);tr.append(td);
+   for(const text of [name+' ('+g.components+' connected '+(g.components===1?'region':'regions')+')',g.bricks.toLocaleString(),mib(g.selected_voxels*m.bytes_per_voxel),mib(g.density_bytes+(g.mask_bytes||0)+g.index_bytes)]){const cell=document.createElement('td');cell.textContent=text;tr.append(cell);}
+   $('groupRows').append(tr);
+  }groupTableBuilt=true;
+ }
+ const total=m.total_density_bytes+(m.total_mask_bytes||0)+(m.group_index_bytes||0);
+ $('groupTotals').textContent='Source '+mib(m.source_bytes)+' → all-group storage '+mib(total)+' ('+(100*(1-total/m.source_bytes)).toFixed(1)+'% smaller); voxel payload '+mib(m.total_density_bytes)+', masks '+mib(m.total_mask_bytes||0)+', group index '+mib(m.group_index_bytes||0);
+ $('groupSelection').textContent='Selected payload '+mib(m.selected_density_bytes+(m.selected_mask_bytes||0))+' · resident GPU data '+mib(m.payload_bytes)+' (includes '+mib(m.page_bytes)+' page table and texture alignment; excludes driver/browser overhead)';
+ if(m.selected_ids!==null)for(const box of document.querySelectorAll('#groupRows input'))box.checked=m.selected_ids.includes(+box.value);
+}
+```
+
+### web/large_viewer.js
+```
+const $=id=>document.getElementById(id),canvas=$('canvas'),gl=canvas.getContext('webgl2',{antialias:false,preserveDrawingBuffer:true});
+if(!gl)throw Error('WebGL2 is required');
+const params=new URLSearchParams(location.search),url=new URL(params.get('manifest')||'../experiments/large-volumes/kingsnake40/metadata.json',location.href);
+const embedded=params.has('embed');
+if(embedded){document.body.classList.add('embedded');}
+const ext=gl.getExtension('EXT_disjoint_timer_query_webgl2'),MiB=n=>(n/1048576).toFixed(2)+' MiB';
+const fragment=`#version 300 es
+precision highp float;precision highp int;precision highp usampler2DArray;precision highp usampler3D;
+uniform usampler2DArray packedData,maskData;uniform bool maskedStorage;uniform int maskWidth,maskHeight;uniform usampler3D pageTable,originalData;
+uniform ivec3 dims,brick;uniform mat3 cameraRotation;uniform bool sharedCamera;uniform int packedWidth,packedHeight,mode;uniform vec2 resolution,angles;
+uniform vec3 spacing,tfLow,tfMid,tfHigh,tfOpacity;uniform bool useTransfer;uniform float zoom,stepSize,cutoff,windowMax;
+out vec4 color;
+uint popcount(uint x){x=x-((x>>1u)&0x55555555u);x=(x&0x33333333u)+((x>>2u)&0x33333333u);x=(x+(x>>4u))&0x0f0f0f0fu;return (x*0x01010101u)>>24u;}
+vec3 rotate(vec3 p){if(sharedCamera)return cameraRotation*p;float a=angles.x,b=angles.y; p=vec3(p.x,cos(a)*p.y-sin(a)*p.z,sin(a)*p.y+cos(a)*p.z);return vec3(cos(b)*p.x+sin(b)*p.z,p.y,-sin(b)*p.x+cos(b)*p.z);}
+void main(){
+ vec2 uv=gl_FragCoord.xy/resolution*2.-1.;uv.x*=resolution.x/resolution.y;
+ vec3 size=vec3(dims)*spacing;float scale=max(size.x,max(size.y,size.z));
+ vec3 ro=(size*.5+rotate(vec3(0,0,-scale*zoom)))/spacing,rd=rotate(normalize(vec3(uv,1.5)))/spacing;
+ vec3 sd=vec3(rd.x<0.?-1.:1.,rd.y<0.?-1.:1.,rd.z<0.?-1.:1.)*max(abs(rd),vec3(1e-9));
+ vec3 a=-ro/sd,b=(vec3(dims)-ro)/sd,n=min(a,b),f=max(a,b);
+ float start=max(0.,max(n.x,max(n.y,n.z))),end=min(f.x,min(f.y,f.z)),sampleIndex=0.;
+ vec3 rgb=vec3(0);float remaining=1.;ivec3 cached=ivec3(-1);uvec4 record=uvec4(0);
+ for(int s=0;s<16384;s++){
+  float t=start+(sampleIndex+.5)*stepSize;if(t>=end||remaining<.005)break;
+  vec3 p=ro+rd*t;ivec3 v=ivec3(floor(p));float value=0.;
+  if(all(greaterThanEqual(v,ivec3(0)))&&all(lessThan(v,dims))){
+   if(mode==0)value=float(texelFetch(originalData,v,0).r);
+   else{
+    ivec3 cell=v/brick;
+    if(any(notEqual(cell,cached))){cached=cell;record=texelFetch(pageTable,cell,0);}
+    if(record.x==0u){
+     vec3 edge=vec3((cell+ivec3(step(vec3(0),rd)))*brick),exits=(edge-ro)/sd;
+     if(abs(rd.x)<1e-9)exits.x=1e30;if(abs(rd.y)<1e-9)exits.y=1e30;if(abs(rd.z)<1e-9)exits.z=1e30;
+     sampleIndex=max(sampleIndex+1.,ceil((min(exits.x,min(exits.y,exits.z))-start)/stepSize-.5));continue;
+    }
+    ivec3 origin=ivec3(record.y&31u,(record.y>>5u)&31u,(record.y>>10u)&31u);
+    ivec3 shape=ivec3(record.z&63u,(record.z>>6u)&63u,(record.z>>12u)&63u),q=v-cell*brick-origin;
+    if(all(greaterThanEqual(q,ivec3(0)))&&all(lessThan(q,shape))){
+     uint localIndex=uint((q.z*shape.y+q.y)*shape.x+q.x),index=record.x-1u+localIndex;
+     bool present=true;
+     if(maskedStorage){
+      uint mi=record.x-1u+localIndex/32u,bit=localIndex%32u;
+      uvec2 mask=texelFetch(maskData,ivec3(mi%uint(maskWidth),(mi/uint(maskWidth))%uint(maskHeight),mi/(uint(maskWidth)*uint(maskHeight))),0).rg;
+      present=(mask.y&(1u<<bit))!=0u;index=mask.x+popcount(mask.y&((1u<<bit)-1u));
+     }
+     if(present)value=float(texelFetch(packedData,ivec3(index%uint(packedWidth),(index/uint(packedWidth))%uint(packedHeight),index/(uint(packedWidth)*uint(packedHeight))),0).r);
+    }
+   }
+  }
+  if(value>cutoff){float d=clamp(value/windowMax,0.,1.);vec3 tint=mix(vec3(.22,.5,.7),vec3(1.,.9,.72),d);float extinction=d*.12;
+   if(useTransfer){float f=d<.5?d*2.:(d-.5)*2.;tint=d<.5?mix(tfLow,tfMid,f):mix(tfMid,tfHigh,f);extinction=d<.5?mix(tfOpacity.x,tfOpacity.y,f):mix(tfOpacity.y,tfOpacity.z,f);}
+   float alpha=1.-exp(-extinction*stepSize);rgb+=remaining*alpha*tint;remaining*=1.-alpha;}
+  sampleIndex+=1.;
+ }
+ color=vec4(pow(rgb+remaining*vec3(.025,.035,.05),vec3(1./2.2)),1.);
+}`;
+function compile(type,s){const shader=gl.createShader(type);gl.shaderSource(shader,s);gl.compileShader(shader);if(!gl.getShaderParameter(shader,gl.COMPILE_STATUS))throw Error(gl.getShaderInfoLog(shader));return shader;}
+const program=gl.createProgram();gl.attachShader(program,compile(gl.VERTEX_SHADER,'#version 300 es\nlayout(location=0) in vec2 p;void main(){gl_Position=vec4(p,0,1);}'));gl.attachShader(program,compile(gl.FRAGMENT_SHADER,fragment));gl.linkProgram(program);if(!gl.getProgramParameter(program,gl.LINK_STATUS))throw Error(gl.getProgramInfoLog(program));
+gl.useProgram(program);const vao=gl.createVertexArray();gl.bindVertexArray(vao);gl.bindBuffer(gl.ARRAY_BUFFER,gl.createBuffer());gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,3,-1,-1,3]),gl.STATIC_DRAW);gl.enableVertexAttribArray(0);gl.vertexAttribPointer(0,2,gl.FLOAT,false,0,0);
+const loc=n=>gl.getUniformLocation(program,n),frame=()=>new Promise(r=>requestAnimationFrame(r)),median=a=>{if(!a.length)return null;const s=[...a].sort((a,b)=>a-b);return(s[Math.floor((s.length-1)/2)]+s[Math.floor(s.length/2)])/2;};
+let camera=null,live=false,livePending=false,liveQuery=null,liveStart=performance.now(),liveFrames=0,liveSamples=[];
+let displayCutoff=0,transfer=null,selectedGroups=null,activeBricks=0,activeVoxels=0,selectedBytes=0;
+let maskTexture,maskWidth=1,maskHeight=1;
+let meta,packed,pages,original,packedWidth=1,packedHeight=1,payload=0,current='compact',busy=false,rx=Math.PI/2,ry=0,zoom=1.8,report=null;
+const budget=1024*1048576;
+$('fps').textContent='Rendering on demand; run the standalone benchmark to measure GPU time per frame';
+async function data(path){const r=await fetch(new URL(path,url));if(!r.ok)throw Error(`${r.status}: ${path}`);return r.arrayBuffer();}
+async function checked(path,sha){const a=await data(path);const actual=[...new Uint8Array(await crypto.subtle.digest('SHA-256',a))].map(b=>b.toString(16).padStart(2,'0')).join('');if(actual!==sha)throw Error('Data checksum failed');return a;}
+function texture(target,size,values,internal,format,type,unit){gl.activeTexture(gl.TEXTURE0+unit);const t=gl.createTexture();gl.bindTexture(target,t);gl.pixelStorei(gl.UNPACK_ALIGNMENT,1);if(target===gl.TEXTURE_2D)gl.texImage2D(target,0,internal,...size,0,format,type,values);else gl.texImage3D(target,0,internal,...size,0,format,type,values);for(const p of [gl.TEXTURE_MIN_FILTER,gl.TEXTURE_MAG_FILTER])gl.texParameteri(target,p,gl.NEAREST);for(const p of [gl.TEXTURE_WRAP_S,gl.TEXTURE_WRAP_T])gl.texParameteri(target,p,gl.CLAMP_TO_EDGE);if(target===gl.TEXTURE_3D)gl.texParameteri(target,gl.TEXTURE_WRAP_R,gl.CLAMP_TO_EDGE);if(gl.getError()!==gl.NO_ERROR){gl.deleteTexture(t);throw Error('GPU texture allocation failed');}return t;}
+function release(){for(const t of [packed,pages,original,maskTexture])if(t)gl.deleteTexture(t);packed=pages=original=maskTexture=null;}
+async function load(mode){
+ const source=meta;
+ if(mode==='original'){
+  if(source.dimensions_xyz.some(n=>n>gl.getParameter(gl.MAX_3D_TEXTURE_SIZE)))throw Error('The full volume exceeds MAX_3D_TEXTURE_SIZE');
+  if(source.source_bytes>budget)throw Error(`Full voxel data (${MiB(source.source_bytes)}) exceeds this experiment's 1024 MiB monolithic allocation budget (allocation was not attempted; this is not a measured OOM)`);
+  if(!source.original_file)throw Error('The full RAW was not saved; reference projections can still be generated brick by brick');
+ }
+ if(mode==='compact'&&meta.groups){
+  const bytes=meta.groups.filter(g=>selectedGroups===null||selectedGroups.includes(g.id)).reduce((n,g)=>n+g.density_bytes+(g.mask_bytes||0),0)+meta.page_bytes+131072;
+  if(bytes>budget)throw Error('The selected groups exceed the 1024 MiB budget; select fewer groups');
+ }
+ release();current=mode;$('status').textContent='Loading '+mode+'…';
+ const type=meta.bytes_per_voxel===2?gl.UNSIGNED_SHORT:gl.UNSIGNED_BYTE,internal=meta.bytes_per_voxel===2?gl.R16UI:gl.R8UI,ArrayType=meta.bytes_per_voxel===2?Uint16Array:Uint8Array;
+ if(mode==='compact'){
+  const chosen=meta.groups?.filter(g=>selectedGroups===null||selectedGroups.includes(g.id));
+  selectedBytes=chosen?chosen.reduce((n,g)=>n+g.density_bytes,0):meta.density_bytes;
+  activeBricks=chosen?chosen.reduce((n,g)=>n+g.bricks,0):meta.bricks;
+  activeVoxels=chosen?chosen.reduce((n,g)=>n+g.selected_voxels,0):meta.selected_voxels;
+  const max=gl.getParameter(gl.MAX_TEXTURE_SIZE),count=selectedBytes/meta.bytes_per_voxel;
+  packedWidth=Math.min(max,Math.max(1,count));const layers=Math.max(1,Math.ceil(count/(max*max)));const height=Math.max(1,Math.ceil(count/(packedWidth*layers)));packedHeight=height;
+  if(layers>gl.getParameter(gl.MAX_ARRAY_TEXTURE_LAYERS)||height*packedWidth*layers*meta.bytes_per_voxel+meta.page_bytes>budget)throw Error('The selected groups exceed the 1024 MiB budget; select fewer groups');
+  const padded=new ArrayType(packedWidth*height*layers);
+  const maskBytes=chosen?.reduce((n,g)=>n+(g.mask_bytes||0),0)||0,maskCount=maskBytes/8;
+  maskWidth=Math.min(max,Math.max(1,maskCount));const maskLayers=Math.max(1,Math.ceil(maskCount/(max*max)));
+  maskHeight=Math.max(1,Math.ceil(maskCount/(maskWidth*maskLayers)));
+  const maskValues=new Uint32Array(maskWidth*maskHeight*maskLayers*2);
+  if(padded.byteLength+maskValues.byteLength+meta.page_bytes>budget)throw Error('The selection exceeds the 1024 MiB budget after alignment overhead');
+  let table;
+  if(chosen){
+   table=new Uint32Array(meta.page_bytes/4);let offset=0,maskOffset=0;
+   for(const g of chosen){
+    const values=new ArrayType(await checked(g.density_file,g.density_sha256));
+    const entries=new Uint32Array(await checked(g.index_file,g.index_sha256));
+    padded.set(values,offset);
+    const masked=meta.storage_encoding==='masked32';
+    let records=null;
+    if(masked){records=new Uint32Array(await checked(g.mask_file,g.mask_sha256));for(let j=0;j<records.length;j+=2)records[j]+=offset;maskValues.set(records,maskOffset*2);}
+    for(let i=0;i<entries.length;i+=4){const cell=entries[i]*4;table[cell]=entries[i+1]+(masked?maskOffset:offset);table[cell+1]=entries[i+2];table[cell+2]=entries[i+3];}
+    offset+=values.length;if(records)maskOffset+=records.length/2;
+   }
+  }else{padded.set(new ArrayType(await checked(meta.density_file,meta.density_sha256)));table=new Uint32Array(await checked(meta.pages_file,meta.pages_sha256));}
+  maskTexture=texture(gl.TEXTURE_2D_ARRAY,[maskWidth,maskHeight,maskLayers],maskValues,gl.RG32UI,gl.RG_INTEGER,gl.UNSIGNED_INT,3);
+  packed=texture(gl.TEXTURE_2D_ARRAY,[packedWidth,height,layers],padded,internal,gl.RED_INTEGER,type,0);
+  pages=texture(gl.TEXTURE_3D,meta.grid_xyz,table,gl.RGBA32UI,gl.RGBA_INTEGER,gl.UNSIGNED_INT,1);
+  original=texture(gl.TEXTURE_3D,[1,1,1],new Uint8Array(1),gl.R8UI,gl.RED_INTEGER,gl.UNSIGNED_BYTE,2);
+  payload=padded.byteLength+maskValues.byteLength+table.byteLength+1;
+ }else{
+  const a=new ArrayType(await data(source.original_file));if(a.byteLength!==source.source_bytes)throw Error('Source byte size does not match the manifest');
+  original=texture(gl.TEXTURE_3D,source.dimensions_xyz,a,internal,gl.RED_INTEGER,type,2);
+  packed=texture(gl.TEXTURE_2D_ARRAY,[1,1,1],new Uint8Array(1),gl.R8UI,gl.RED_INTEGER,gl.UNSIGNED_BYTE,0);
+  pages=texture(gl.TEXTURE_3D,[1,1,1],new Uint32Array(4),gl.RGBA32UI,gl.RGBA_INTEGER,gl.UNSIGNED_INT,1);payload=a.byteLength+25;maskTexture=texture(gl.TEXTURE_2D_ARRAY,[1,1,1],new Uint32Array(2),gl.RG32UI,gl.RG_INTEGER,gl.UNSIGNED_INT,3);
+ }
+ $('memory').textContent=`${mode==='compact'?'Compact bricks':'Full source'} GPU texture: ${MiB(payload)}`;$('status').textContent='Loaded · Drag to rotate and scroll to zoom';$('mode').value=mode;draw();if(embedded)notifyReady();
+}
+function draw(fixed){
+ if(!packed||!pages||!original)return;
+ const [w,h]=fixed||[Math.round(canvas.clientWidth*Math.min(devicePixelRatio,2)),Math.round(canvas.clientHeight*Math.min(devicePixelRatio,2))];if(canvas.width!==w||canvas.height!==h){canvas.width=w;canvas.height=h;}gl.viewport(0,0,w,h);gl.useProgram(program);gl.bindVertexArray(vao);
+ for(const [i,t,target] of [[0,packed,gl.TEXTURE_2D_ARRAY],[1,pages,gl.TEXTURE_3D],[2,original,gl.TEXTURE_3D],[3,maskTexture,gl.TEXTURE_2D_ARRAY]]){gl.activeTexture(gl.TEXTURE0+i);gl.bindTexture(target,t);}
+ gl.uniform1i(loc('maskData'),3);gl.uniform1i(loc('maskWidth'),maskWidth);gl.uniform1i(loc('maskHeight'),maskHeight);gl.uniform1i(loc('maskedStorage'),meta.storage_encoding==='masked32');gl.uniform1i(loc('packedData'),0);gl.uniform1i(loc('pageTable'),1);gl.uniform1i(loc('originalData'),2);gl.uniform1i(loc('packedWidth'),packedWidth);gl.uniform1i(loc('packedHeight'),packedHeight);gl.uniform1i(loc('mode'),current==='original'?0:1);
+ gl.uniform1i(loc('useTransfer'),!!transfer);if(transfer){gl.uniform3fv(loc('tfLow'),transfer.colors[0]);gl.uniform3fv(loc('tfMid'),transfer.colors[1]);gl.uniform3fv(loc('tfHigh'),transfer.colors[2]);gl.uniform3fv(loc('tfOpacity'),transfer.opacity);}gl.uniform1i(loc('sharedCamera'),!!camera);if(camera)gl.uniformMatrix3fv(loc('cameraRotation'),false,camera);gl.uniform3iv(loc('dims'),meta.dimensions_xyz);gl.uniform3iv(loc('brick'),meta.brick_xyz);const minimum=Math.min(...meta.spacing_xyz);gl.uniform3fv(loc('spacing'),meta.spacing_xyz.map(s=>s/minimum));gl.uniform2f(loc('resolution'),w,h);gl.uniform2f(loc('angles'),rx,ry);gl.uniform1f(loc('zoom'),zoom);gl.uniform1f(loc('stepSize'),+$('step').value);gl.uniform1f(loc('cutoff'),displayCutoff);gl.uniform1f(loc('windowMax'),+$('window').value);gl.drawArrays(gl.TRIANGLES,0,3);
+}
+function pixels(){const a=new Uint8Array(canvas.width*canvas.height*4);gl.readPixels(0,0,canvas.width,canvas.height,gl.RGBA,gl.UNSIGNED_BYTE,a);return a;}
+async function timed(){const samples=[];for(let i=0;i<5;i++){await frame();draw([640,480]);}for(let i=0;i<20;i++){await frame();if(!ext){draw([640,480]);continue;}const q=gl.createQuery();try{gl.beginQuery(ext.TIME_ELAPSED_EXT,q);draw([640,480]);gl.endQuery(ext.TIME_ELAPSED_EXT);gl.flush();const deadline=performance.now()+5000;while(!gl.getQueryParameter(q,gl.QUERY_RESULT_AVAILABLE)){if(performance.now()>deadline)throw Error('GPU timing query timed out');await frame();}if(!gl.getParameter(ext.GPU_DISJOINT_EXT))samples.push(gl.getQueryParameter(q,gl.QUERY_RESULT)/1e6);}finally{gl.deleteQuery(q);}}
+ const ms=median(samples);return {mode:current,gpu_median_ms:ms,gpu_equivalent_fps:ms?1000/ms:null,gpu_samples_ms:samples,texture_bytes:payload};}
+async function benchmark(){
+ const old=[rx,ry,zoom,current],runs=[],checks=[];let skip=null;
+ const angles=[[Math.PI/2,0],[.6,.8],[-.35,1.9]];
+ try{
+  for(let i=0;i<angles.length;i++){
+   [rx,ry]=angles[i];zoom=1.8;let reference;
+   // Alternate order to reduce simple warm-up/order bias.
+   for(const mode of i%2?['compact','original']:['original','compact']){
+    try{await load(mode);}catch(e){if(mode==='original'){skip=e.message;continue;}throw e;}
+    $('status').textContent=`Test ${i+1}/3 · ${mode}`;draw([640,480]);const p=pixels();runs.push({camera:[rx,ry],...await timed()});
+    if(reference){let changed=0,max=0;for(let j=0;j<p.length;j++){const d=Math.abs(p[j]-reference[j]);if(d)changed++;max=Math.max(max,d);}checks.push({camera:[rx,ry],different_channels:changed,max_byte_error:max});}else reference=p;
+   }
+  }
+  report={transfer_function:transfer,storage_encoding:meta.storage_encoding||'dense-crops',dataset:meta.name,source_bytes:meta.source_bytes,cutoff:meta.cutoff,resolution:[640,480],step:+$('step').value,window_max:+$('window').value,source_scale:meta.source_scale,dtype:meta.dtype,original_skipped:skip,image_checks:checks,runs,environment:{user_agent:navigator.userAgent,renderer:gl.getParameter(gl.RENDERER),max_3d_texture_size:gl.getParameter(gl.MAX_3D_TEXTURE_SIZE),max_2d_texture_size:gl.getParameter(gl.MAX_TEXTURE_SIZE),original_budget_bytes:budget},method:'Sequential modes, 3 views, 5 warmups+20 asynchronous GPU queries per mode/view; payload excludes CPU/browser/driver. Full source and selected source share cutoff, transfer, spacing and sample lattice.'};
+  $('results').textContent=JSON.stringify(report,null,2);
+  $('summary').textContent=runs.map(r=>`${r.mode}: ${r.gpu_median_ms?.toFixed(2)??'N/A'} ms · ${MiB(r.texture_bytes)}`).join('\n')+(skip?'\nSource skipped: '+skip:`\nImage check: ${checks.filter(c=>c.different_channels===0).length}/${checks.length} exact matches`);$('download').disabled=false;
+ }finally{[rx,ry,zoom]=old;await load(old[3]);}
+}
+async function action(fn){if(busy)return;busy=true;for(const e of document.querySelectorAll('button,select,input'))e.disabled=true;try{await fn();}catch(e){$('status').textContent=e.message;console.error(e);if(embedded)parent.postMessage({type:'volume-error',message:e.message},location.origin);$('mode').value=current;}finally{busy=false;for(const e of document.querySelectorAll('button,select,input'))e.disabled=false;$('download').disabled=!report;}}
+$('transferMode').onchange=()=>{transfer=$('transferMode').value==='structure'?{colors:[[40/255,120/255,223/255],[236/255,140/255,53/255],[1,240/255,189/255]],opacity:[.0001,.003,.06]}:null;draw();};
+$('mode').onchange=()=>action(()=>load($('mode').value));$('benchmark').onclick=()=>action(benchmark);$('step').oninput=()=>{$('stepValue').textContent=$('step').value;draw();};$('window').oninput=()=>draw();$('reset').onclick=()=>{rx=Math.PI/2;ry=0;zoom=1.8;draw();};
+$('download').onclick=()=>{const a=document.createElement('a'),u=URL.createObjectURL(new Blob([JSON.stringify(report,null,2)],{type:'application/json'}));a.href=u;a.download=meta.name+'-rendering.json';a.click();setTimeout(()=>URL.revokeObjectURL(u),1000);};
+let drag=null;canvas.onpointerdown=e=>{if(busy)return;canvas.setPointerCapture(e.pointerId);drag=[e.clientX,e.clientY,rx,ry];};canvas.onpointermove=e=>{if(!drag||busy)return;rx=drag[2]+(e.clientY-drag[1])*.008;ry=drag[3]+(e.clientX-drag[0])*.008;draw();};canvas.onpointerup=canvas.onpointercancel=()=>drag=null;canvas.addEventListener('wheel',e=>{e.preventDefault();if(busy)return;zoom=Math.max(.8,Math.min(4,zoom*Math.exp(e.deltaY*.001)));draw();},{passive:false});
+window.addEventListener('resize',()=>{if(!busy)draw();});
+await action(async()=>{meta=JSON.parse(new TextDecoder().decode(await data(url.href)));displayCutoff=meta.cutoff;if(meta.schema_version!==4)throw Error('Compact schema 4 is required');$('title').textContent=meta.name+' · Full-resolution compact bricks';$('source').textContent=`Source ${meta.dimensions_xyz.join(' × ')} · ${meta.dtype} · ${MiB(meta.source_bytes)}; ${meta.bricks.toLocaleString()} nonempty bricks.`;$('method').textContent=`Source values ≤ ${meta.cutoff} were removed; ${(100*meta.selected_voxels/(meta.source_bytes/meta.bytes_per_voxel)).toFixed(2)}% of voxels were retained. Bit depth and resolution are unchanged.`;$('window').max=meta.value_max;$('window').value=meta.value_max;await load(params.has('original')?'original':'compact');
+
+});
+
+function liveTick(){
+ livePending=false;if(!live)return;
+ if(liveQuery&&gl.getQueryParameter(liveQuery,gl.QUERY_RESULT_AVAILABLE)){
+  if(!gl.getParameter(ext.GPU_DISJOINT_EXT))liveSamples.push(gl.getQueryParameter(liveQuery,gl.QUERY_RESULT)/1e6);
+  gl.deleteQuery(liveQuery);liveQuery=null;
+ }
+ if(!busy&&packed){
+  const query=ext&&!liveQuery?gl.createQuery():null;
+  if(query)gl.beginQuery(ext.TIME_ELAPSED_EXT,query);
+  draw();liveFrames++;
+  if(query){gl.endQuery(ext.TIME_ELAPSED_EXT);liveQuery=query;}
+ }
+ const now=performance.now();
+ if(now-liveStart>=1000){parent.postMessage({type:'volume-performance',fps:liveFrames*1000/(now-liveStart),gpu_ms:median(liveSamples),width:canvas.width,height:canvas.height},location.origin);liveStart=now;liveFrames=0;liveSamples=[];}
+ livePending=true;requestAnimationFrame(liveTick);
+}
+window.addEventListener('message',e=>{
+ if(!embedded||e.origin!==location.origin||e.source!==parent)return;
+ if(e.data?.type==='volume-selection'&&current==='compact'&&meta.groups){
+  if(busy){parent.postMessage({type:'volume-error',message:'Groups are still loading; please wait'},location.origin);return;}
+  const previous=selectedGroups;
+  selectedGroups=[...new Set(e.data.ids)].filter(id=>meta.groups.some(g=>g.id===id));
+  action(async()=>{try{await load('compact');}catch(error){selectedGroups=previous;await load('compact');throw error;}});return;
+ }
+ if(e.data?.type!=='volume-camera')return;
+ const m=e.data;if(!Array.isArray(m.rotation)||m.rotation.length!==9||!m.rotation.every(Number.isFinite))return;
+ camera=m.rotation;zoom=m.zoom;displayCutoff=m.cutoff;$('step').value=m.step;
+ if(Number.isFinite(m.window))$('window').value=m.window;if(m.transfer)transfer=m.transfer;
+ live=!!m.live;draw();
+ if(live&&!livePending){liveStart=performance.now();liveFrames=0;liveSamples=[];livePending=true;requestAnimationFrame(liveTick);}
+});
+
+function notifyReady(){
+ parent.postMessage({type:'volume-ready',payload_bytes:payload,dimensions:meta.dimensions_xyz,
+ bricks:current==='compact'?activeBricks:meta.bricks,selected_voxels:current==='compact'?activeVoxels:meta.selected_voxels,
+ groups:meta.groups||[],bytes_per_voxel:meta.bytes_per_voxel,source_bytes:meta.source_bytes,total_density_bytes:meta.density_bytes,
+ selected_density_bytes:current==='compact'?selectedBytes:meta.source_bytes,page_bytes:meta.page_bytes,total_mask_bytes:meta.mask_bytes||0,selected_mask_bytes:meta.groups?.filter(g=>selectedGroups===null||selectedGroups.includes(g.id)).reduce((n,g)=>n+(g.mask_bytes||0),0)||0,
+ group_index_bytes:meta.group_index_bytes||0,selected_ids:selectedGroups},location.origin);
+}
+```
+
+### web/region_inspector.js
+```
+const $=id=>document.getElementById(id),params=new URLSearchParams(location.search);
+const base=new URL(params.get('analysis')||'../experiments/supervolume/analysis/',location.href),source=new URL(params.get('input')||'../data/skull_256x256x256_uint8.raw',location.href);
+const seeds=new Set();let analysis,values,labels,regions,adjacency,chosen,dimensions,last=null;
+async function read(url){const r=await fetch(url);if(!r.ok)throw Error(`${r.status}: ${url}`);return r;}
+function rule(){const low=+$('low').value,high=+$('high').value,fraction=+$('fraction').value,boundary=+$('boundary').value;
+ if(!Number.isInteger(low)||!Number.isInteger(high)||low<0||low>high||high>255||fraction<0||fraction>1||boundary<0||boundary>255)throw Error('Check intensity, fraction and boundary ranges');
+ return {name:$('name').value||'Selected candidate',mode:$('mode').value,intensity_range:[low,high],min_fraction:fraction,max_boundary_delta:boundary,clip_to_range:$('clip').checked,region_ids:[...seeds].sort((a,b)=>a-b)};
+}
+function update(){try{
+ const g=rule(),[low,high]=g.intensity_range;const eligible=new Set();
+ for(const r of analysis.regions){let support=0;for(let i=low;i<=high;i++)support+=r.histogram[i];if(support>0&&support>=g.min_fraction*r.voxels)eligible.add(r.id);}
+ const rejected=[...seeds].filter(id=>!eligible.has(id));chosen=new Set();
+ if(g.mode==='all_candidates')chosen=eligible;
+ else{const queue=[...seeds].filter(id=>eligible.has(id));chosen=new Set(queue);for(let k=0;k<queue.length;k++)for(const e of adjacency.get(queue[k])||[]){if(eligible.has(e.id)&&!chosen.has(e.id)&&e.delta<=g.max_boundary_delta){chosen.add(e.id);queue.push(e.id);}}}
+ $('status').textContent=`${chosen.size} regions selected; ${seeds.size} seeds. ${rejected.length?'Some seeds fail the target rule: adjust the rule or clear them.':''}`;
+ $('download').disabled=rejected.length>0||(g.mode==='seeded'&&!seeds.size);
+ paint(g);$('command').textContent='python -m pipeline.supervolume export --input data/skull_256x256x256_uint8.raw --analysis experiments/supervolume/analysis --config selection.json --output experiments/supervolume/my-selection';
+ }catch(e){$('status').textContent=e.message;$('download').disabled=true;}}
+function paint(g){const [nx,ny]=dimensions,z=+$('slice').value,c=$('sliceCanvas'),ctx=c.getContext('2d');c.width=nx;c.height=ny;const image=ctx.createImageData(nx,ny),offset=z*nx*ny;
+ for(let y=0;y<ny;y++)for(let x=0;x<nx;x++){const j=y*nx+x,i=offset+j,v=values[i],label=labels[i],on=chosen.has(label)&&v>0&&(!g.clip_to_range||(v>=g.intensity_range[0]&&v<=g.intensity_range[1]));let r=v,green=v,b=v;
+  if(on){r=Math.round(v*.4);green=Math.max(v,170);b=Math.max(v,170);}if(seeds.has(label)){r=255;green=210;b=40;}
+  if((x&&labels[i-1]!==label)||(y&&labels[i-nx]!==label)){r=Math.round(r*.55);green=Math.round(green*.55);b=Math.round(b*.55);}
+  image.data.set([r,green,b,255],j*4);
+ }ctx.putImageData(image,0,0);
+ $('detail').textContent=`Z=${z}. ${last?`Last click XYZ=${last.xyz.join(', ')}; intensity=${last.value}; region=${last.id}\nMedian=${regions.get(last.id).median}; p10–p90=${regions.get(last.id).p10}–${regions.get(last.id).p90}; region voxels=${regions.get(last.id).voxels}`:'Click a structure to inspect its region and add a seed.'}`;
+}
+$('sliceCanvas').onclick=e=>{if(!labels)return;const box=e.currentTarget.getBoundingClientRect(),x=Math.min(dimensions[0]-1,Math.floor((e.clientX-box.left)/box.width*dimensions[0])),y=Math.min(dimensions[1]-1,Math.floor((e.clientY-box.top)/box.height*dimensions[1])),z=+$('slice').value;
+ const i=(z*dimensions[1]+y)*dimensions[0]+x;last={xyz:[x,y,z],id:labels[i],value:values[i]};seeds.add(last.id);update();};
+for(const id of ['slice','low','high','fraction','boundary','clip','mode'])$(id).oninput=()=>{if(analysis)update();};
+$('clear').onclick=()=>{seeds.clear();last=null;update();};
+$('download').onclick=()=>{const blob=new Blob([JSON.stringify({groups:[rule()]},null,2)],{type:'application/json'}),u=URL.createObjectURL(blob),a=document.createElement('a');a.href=u;a.download='selection.json';a.click();setTimeout(()=>URL.revokeObjectURL(u),1000);};
+try{
+ analysis=await(await read(new URL('analysis.json',base))).json();dimensions=analysis.dimensions_xyz;
+ values=new Uint8Array(await(await read(source)).arrayBuffer());const buffer=await(await read(new URL('labels.u32',base))).arrayBuffer();labels=new Uint32Array(buffer);
+ const expected=dimensions.reduce((a,b)=>a*b,1);if(values.length!==expected||labels.length!==expected)throw Error('Analysis/input size mismatch');
+ const hash=[...new Uint8Array(await crypto.subtle.digest('SHA-256',values))].map(b=>b.toString(16).padStart(2,'0')).join('');if(hash!==analysis.input_sha256)throw Error('Analysis belongs to a different input');
+ regions=new Map(analysis.regions.map(r=>[r.id,r]));adjacency=new Map();
+ for(const e of analysis.edges){if(!adjacency.has(e.a))adjacency.set(e.a,[]);if(!adjacency.has(e.b))adjacency.set(e.b,[]);adjacency.get(e.a).push({id:e.b,delta:e.mean_boundary_delta});adjacency.get(e.b).push({id:e.a,delta:e.mean_boundary_delta});}
+ $('slice').max=dimensions[2]-1;$('slice').value=Math.floor(dimensions[2]/2);update();
+}catch(e){$('status').textContent=e.message;console.error(e);}
+```
+
+### web/sparse_viewer.js
+```
+const $=id=>document.getElementById(id), canvas=$('canvas');
+const gl=canvas.getContext('webgl2',{antialias:false,preserveDrawingBuffer:true});
+if(!gl)throw Error('WebGL2 required');
+const params = new URLSearchParams(location.search);
+const embedded = params.get('embed') === '1', originalMode = params.get('original') === '1';
+if (embedded) { document.querySelector('aside').hidden = true; document.body.style.overflow = 'hidden'; }
+let sharedRotation = null;
+const ext=gl.getExtension('EXT_disjoint_timer_query_webgl2');
+const vs=`#version 300 es
+layout(location=0) in vec2 position;void main(){gl_Position=vec4(position,0,1);}`;
+const fs=`#version 300 es
+precision highp float;precision highp int;precision highp sampler3D;precision highp usampler3D;
+out vec4 color;uniform sampler3D atlas;uniform usampler3D pages;
+uniform ivec3 slots;uniform vec3 fullDims,clipMin,clipMax;
+uniform mat3 sharedRotation;uniform bool useSharedRotation;
+uniform vec2 resolution,angles;uniform float distanceScale,stepSize,cutoff;uniform int brickSize,sparseMode;
+vec3 rotate(vec3 p){if(useSharedRotation)return sharedRotation*p;float cx=cos(angles.x),sx=sin(angles.x),cy=cos(angles.y),sy=sin(angles.y);p=vec3(p.x,cx*p.y-sx*p.z,sx*p.y+cx*p.z);return vec3(cy*p.x+sy*p.z,p.y,-sy*p.x+cy*p.z);}
+void main(){
+ vec2 uv=gl_FragCoord.xy/resolution*2.-1.;uv.x*=resolution.x/resolution.y;
+ float scale=max(fullDims.x,max(fullDims.y,fullDims.z));
+ vec3 ro=fullDims*.5+rotate(vec3(0,0,-scale*distanceScale)),rd=rotate(normalize(vec3(uv,1.5)));
+ vec3 sd=vec3(rd.x<0.?-1.:1.,rd.y<0.?-1.:1.,rd.z<0.?-1.:1.)*max(abs(rd),vec3(1e-7));
+ vec3 a=-ro/sd,b=(fullDims-ro)/sd,n=min(a,b),f=max(a,b);
+ float start=max(0.,max(n.x,max(n.y,n.z))),end=min(f.x,min(f.y,f.z));
+ a=(clipMin-ro)/sd;b=(clipMax-ro)/sd;n=min(a,b);f=max(a,b);
+ float first=max(0.,max(n.x,max(n.y,n.z)));end=min(end,min(f.x,min(f.y,f.z)));
+ float sampleIndex=max(0.,ceil((first-start)/stepSize-.5));
+ vec3 rgb=vec3(0);float remaining=1.;ivec3 cachedCell=ivec3(-1),atlasOffset=ivec3(0);uint page=0u;
+ for(int s=0;s<8192;s++){
+  float t=start+(sampleIndex+.5)*stepSize;if(t>=end||remaining<.005)break;
+  vec3 p=ro+rd*t;ivec3 v=ivec3(floor(p));float d=0.;
+  if(all(greaterThanEqual(p,clipMin))&&all(lessThan(p,clipMax))){
+   if(sparseMode==0)d=texelFetch(atlas,v,0).r;
+   else{
+    ivec3 cell=v/brickSize;
+    if(any(notEqual(cell,cachedCell))){
+     cachedCell=cell;page=texelFetch(pages,cell,0).r;
+     int slot=int(page)-1;
+     atlasOffset=ivec3(slot%slots.x,(slot/slots.x)%slots.y,slot/(slots.x*slots.y))*brickSize-cell*brickSize;
+    }
+    if(page==0u){
+     vec3 edge=(vec3(cell)+step(vec3(0),rd))*float(brickSize);
+     vec3 exits=(edge-ro)/sd;
+     if(abs(rd.x)<1e-7)exits.x=1e30;if(abs(rd.y)<1e-7)exits.y=1e30;if(abs(rd.z)<1e-7)exits.z=1e30;
+     float leave=min(exits.x,min(exits.y,exits.z));
+     sampleIndex=max(sampleIndex+1.,ceil((leave-start)/stepSize-.5));continue;
+    }
+    d=texelFetch(atlas,atlasOffset+v,0).r;
+   }
+  }
+  if(d>cutoff){float alpha=1.-exp(-d*stepSize*.12);vec3 tint=mix(vec3(.22,.5,.7),vec3(1.,.9,.72),d);rgb+=remaining*alpha*tint;remaining*=1.-alpha;}
+  sampleIndex+=1.;
+ }
+ color=vec4(pow(rgb+remaining*vec3(.025,.035,.05),vec3(1./2.2)),1.);
+}`;
+function compile(type,source){const s=gl.createShader(type);gl.shaderSource(s,source);gl.compileShader(s);if(!gl.getShaderParameter(s,gl.COMPILE_STATUS))throw Error(gl.getShaderInfoLog(s));return s;}
+const program=gl.createProgram();gl.attachShader(program,compile(gl.VERTEX_SHADER,vs));gl.attachShader(program,compile(gl.FRAGMENT_SHADER,fs));gl.linkProgram(program);
+if(!gl.getProgramParameter(program,gl.LINK_STATUS))throw Error(gl.getProgramInfoLog(program));
+gl.useProgram(program);const vao=gl.createVertexArray();gl.bindVertexArray(vao);gl.bindBuffer(gl.ARRAY_BUFFER,gl.createBuffer());gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,3,-1,-1,3]),gl.STATIC_DRAW);gl.enableVertexAttribArray(0);gl.vertexAttribPointer(0,2,gl.FLOAT,false,0,0);
+const loc=name=>gl.getUniformLocation(program,name), median=a=>{const s=[...a].sort((a,b)=>a-b);return s.length?(s[Math.floor((s.length-1)/2)]+s[Math.floor(s.length/2)])/2:null;};
+const frame=()=>new Promise(r=>requestAnimationFrame(r));
+let meta,density,owners,texture,pageTexture,slots=[1,1,1],selected=new Set(),bounds,mode=1,payload=0,pageBytes=0,activeBricks=0,busy=false,report=null,fixed=null;
+const url=new URL(new URLSearchParams(location.search).get('manifest')||'../experiments/supervolume/selected/metadata.json',location.href);
+async function fetchData(path){const r=await fetch(new URL(path,url));if(!r.ok)throw Error(`${r.status}: ${path}`);return r;}
+function texture3D(data,dims,integer=false){
+ if(dims.some(n=>n>gl.getParameter(gl.MAX_3D_TEXTURE_SIZE)))throw Error('Texture exceeds device limits');
+ const t=gl.createTexture();gl.bindTexture(gl.TEXTURE_3D,t);gl.pixelStorei(gl.UNPACK_ALIGNMENT,1);
+ gl.texImage3D(gl.TEXTURE_3D,0,integer?gl.R32UI:gl.R8,...dims,0,integer?gl.RED_INTEGER:gl.RED,integer?gl.UNSIGNED_INT:gl.UNSIGNED_BYTE,data);
+ for(const k of [gl.TEXTURE_MIN_FILTER,gl.TEXTURE_MAG_FILTER])gl.texParameteri(gl.TEXTURE_3D,k,gl.NEAREST);
+ for(const k of [gl.TEXTURE_WRAP_S,gl.TEXTURE_WRAP_T,gl.TEXTURE_WRAP_R])gl.texParameteri(gl.TEXTURE_3D,k,gl.CLAMP_TO_EDGE);
+ if(gl.getError()!==gl.NO_ERROR){gl.deleteTexture(t);throw Error('Texture allocation failed');}return t;
+}
+function pack(ids,sparse=true){
+ const chosen=new Set(ids), b=meta.brick_size, dims=meta.dimensions_xyz, grid=dims.map(n=>Math.ceil(n/b));
+ const active=meta.bricks.filter(r=>r.groups.some(g=>chosen.has(g)));
+ const max=Math.floor(gl.getParameter(gl.MAX_3D_TEXTURE_SIZE)/b), n=active.length;
+ const side=Math.min(max,Math.max(1,Math.ceil(Math.cbrt(n))));slots=[side,side,Math.max(1,Math.ceil(n/(side*side)))];
+ if(slots[2]>max)throw Error('Selection exceeds atlas capacity');
+ const atlasDims=sparse?slots.map(n=>n*b):dims;
+ const data=new Uint8Array(atlasDims.reduce((a,b)=>a*b,1)),page=new Uint32Array(grid.reduce((a,b)=>a*b,1));
+ bounds={lo:[...dims],hi:[0,0,0]};activeBricks=n;
+ active.forEach((r,i)=>{
+  const [cx,cy,cz]=r.cell_xyz;page[(cz*grid[1]+cy)*grid[0]+cx]=i+1;
+  const slot=[i%slots[0],Math.floor(i/slots[0])%slots[1],Math.floor(i/(slots[0]*slots[1]))];
+  const [dx,dy,dz]=r.dimensions_xyz,[ox,oy,oz]=r.origin_xyz;
+  for(let z=0;z<dz;z++)for(let y=0;y<dy;y++)for(let x=0;x<dx;x++){
+   const src=r.offset+(z*dy+y)*dx+x;if(!chosen.has(owners[src])||!density[src])continue;
+   const p=[ox+x,oy+y,oz+z];for(let k=0;k<3;k++){bounds.lo[k]=Math.min(bounds.lo[k],p[k]);bounds.hi[k]=Math.max(bounds.hi[k],p[k]+1);}
+   const q=sparse?p.map((v,k)=>slot[k]*b+v-r.cell_xyz[k]*b):p;
+   data[(q[2]*atlasDims[1]+q[1])*atlasDims[0]+q[0]]=density[src];
+  }
+ });
+ if(!n)bounds={lo:[0,0,0],hi:[0,0,0]};
+ if(texture)gl.deleteTexture(texture);if(pageTexture)gl.deleteTexture(pageTexture);
+ texture=null;pageTexture=null;
+ gl.activeTexture(gl.TEXTURE0);texture=texture3D(data,atlasDims);
+ gl.activeTexture(gl.TEXTURE1);pageTexture=texture3D(sparse?page:new Uint32Array(1),sparse?grid:[1,1,1],true);
+ mode=sparse?1:0;payload=data.byteLength;pageBytes=sparse?page.byteLength:4;selected=chosen;
+ $('memory').textContent=`${n} bricks · ${(payload/1048576).toFixed(3)} MiB ${sparse?'atlas':'monolith'} + ${(pageBytes/1048576).toFixed(3)} MiB page table. CPU export buffers: ${((density.byteLength+owners.byteLength)/1048576).toFixed(3)} MiB.`;
+ draw();
+}
+function draw(){
+ if(!texture)return;
+ const dims=meta.dimensions_xyz;if(Math.ceil(Math.hypot(...dims)/+$('step').value)>8192)throw Error('Increase step: ray exceeds iteration limit');
+ const [w,h]=fixed||[Math.round(canvas.clientWidth*Math.min(devicePixelRatio,2)),Math.round(canvas.clientHeight*Math.min(devicePixelRatio,2))];
+ if(canvas.width!==w||canvas.height!==h){canvas.width=w;canvas.height=h;}
+ gl.viewport(0,0,w,h);gl.useProgram(program);gl.bindVertexArray(vao);
+ gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_3D,texture);gl.activeTexture(gl.TEXTURE1);gl.bindTexture(gl.TEXTURE_3D,pageTexture);
+ gl.uniform1i(loc('useSharedRotation'),sharedRotation ? 1 : 0);
+ if(sharedRotation)gl.uniformMatrix3fv(loc('sharedRotation'),false,sharedRotation);
+ gl.uniform1i(loc('atlas'),0);gl.uniform1i(loc('pages'),1);gl.uniform3iv(loc('slots'),slots);gl.uniform3fv(loc('fullDims'),dims);
+ gl.uniform3fv(loc('clipMin'),bounds.lo);gl.uniform3fv(loc('clipMax'),bounds.hi);gl.uniform2f(loc('resolution'),w,h);
+ gl.uniform2f(loc('angles'),+$('rx').value*Math.PI/180,+$('ry').value*Math.PI/180);
+ gl.uniform1f(loc('distanceScale'),+$('zoom').value);gl.uniform1f(loc('stepSize'),+$('step').value);gl.uniform1f(loc('cutoff'),+$('cutoff').value/255);
+ gl.uniform1i(loc('brickSize'),meta.brick_size);gl.uniform1i(loc('sparseMode'),mode);gl.drawArrays(gl.TRIANGLES,0,3);
+}
+function controls(){
+ $('groups').replaceChildren();
+ for(const g of meta.groups){const l=document.createElement('label'),c=document.createElement('input'),solo=document.createElement('button');c.type='checkbox';c.checked=selected.has(g.id);c.disabled=busy;
+ c.onchange=()=>action(async()=>{const ids=new Set(selected);c.checked?ids.add(g.id):ids.delete(g.id);pack([...ids]);controls();});solo.textContent='Only';solo.disabled=busy;solo.onclick=()=>action(async()=>{pack([g.id]);controls();});
+ l.append(c,document.createTextNode(` ${g.name} · ${g.selected_voxels.toLocaleString()} voxels`),solo);$('groups').append(l);}
+}
+async function action(fn){if(busy)return;busy=true;for(const e of document.querySelectorAll('input,button'))e.disabled=true;
+ try{await fn();}catch(e){$('status').textContent=e.message;console.error(e);if(embedded)parent.postMessage({type:'volume-error',message:e.message},location.origin);}finally{busy=false;for(const e of document.querySelectorAll('input,button'))e.disabled=false;$('download').disabled=!report;controls();}}
+function pixels(){const p=new Uint8Array(canvas.width*canvas.height*4);gl.readPixels(0,0,canvas.width,canvas.height,gl.RGBA,gl.UNSIGNED_BYTE,p);return p;}
+async function measure(){for(let i=0;i<5;i++){await frame();draw();}const gpu=[],wall=[];
+ for(let i=0;i<20;i++){await frame();const t=performance.now(),q=ext?gl.createQuery():null;
+ if(q)gl.beginQuery(ext.TIME_ELAPSED_EXT,q);draw();if(q)gl.endQuery(ext.TIME_ELAPSED_EXT);gl.finish();wall.push(performance.now()-t);
+ if(q){try{const deadline=performance.now()+5000;while(!gl.getQueryParameter(q,gl.QUERY_RESULT_AVAILABLE)){if(performance.now()>deadline)throw Error('GPU query timeout');await frame();}
+ if(!gl.getParameter(ext.GPU_DISJOINT_EXT))gpu.push(gl.getQueryParameter(q,gl.QUERY_RESULT)/1e6);}finally{gl.deleteQuery(q);}}}
+ return {gpu_samples_ms:gpu,gpu_median_ms:median(gpu),cpu_submit_finish_median_ms:median(wall),texture_bytes:payload,page_bytes:pageBytes,bricks:activeBricks};}
+async function compare(){
+ report=null;$('download').disabled=true;const all=meta.groups.map(g=>g.id),old=['rx','ry','zoom','step','cutoff'].map(id=>$(id).value),oldIDs=[...selected];
+ fixed=[1280,720];const runs=[],images=[];
+ const cases=[{name:'all',ids:all},...meta.groups.map(g=>({name:`group_${g.id}`,ids:[g.id]}))];
+ try{
+  [90,0,1.8,1,60].forEach((v,i)=>$( ['rx','ry','zoom','step','cutoff'][i]).value=v);
+  // Exact framebuffer checks at multiple orientations; no screenshot approximation.
+  for(const [rx,ry] of [[90,0],[35,45],[-20,110]])for(const c of cases){
+   $('rx').value=rx;$('ry').value=ry;pack(c.ids,false);const reference=pixels();pack(c.ids,true);const actual=pixels();let changed=0,max=0;
+   for(let i=0;i<actual.length;i++){const d=Math.abs(actual[i]-reference[i]);if(d)changed++;max=Math.max(max,d);}
+   images.push({case:c.name,camera:[rx,ry,1.8],different_channels:changed,max_byte_error:max});
+  }
+  $('rx').value=90;$('ry').value=0;let seed=42;
+  for(let round=1;round<=3;round++){
+   const tasks=cases.flatMap(c=>[{...c,sparse:true},{...c,sparse:false}]);
+   for(let i=tasks.length-1;i>0;i--){seed=(Math.imul(seed,1664525)+1013904223)>>>0;const j=seed%(i+1);[tasks[i],tasks[j]]=[tasks[j],tasks[i]];}
+   for(const c of tasks){$('status').textContent=`Round ${round}/3 · ${c.name} · ${c.sparse?'sparse':'monolith'}`;pack(c.ids,c.sparse);runs.push({case:c.name,sparse:c.sparse,round,...await measure()});}
+  }
+  const results=cases.flatMap(c=>[true,false].map(sparse=>{const group=runs.filter(r=>r.case===c.name&&r.sparse===sparse),samples=group.flatMap(r=>r.gpu_samples_ms);
+   return {case:c.name,sparse,gpu_median_ms:median(samples),round_medians_ms:group.map(r=>r.gpu_median_ms),valid_gpu_samples:samples.length,texture_bytes:group[0].texture_bytes,page_bytes:group[0].page_bytes};}));
+  report={schema_version:1,input_sha256:meta.input_sha256,selected_sha256:meta.selected_sha256,brick_size:meta.brick_size,
+   environment:{user_agent:navigator.userAgent,renderer:gl.getParameter(gl.RENDERER)},
+   methodology:'Same selected voxels, shader transfer and original sample lattice. Three shuffled rounds; five warmups plus 20 GPU queries. 1280x720, camera90/0/1.8, step1, cutoff60. Repacking/network/upload excluded. Payload excludes driver allocations. CPU export arrays retained. Three-angle framebuffer checks.',results,runs,image_checks:images};
+  $('report').textContent=JSON.stringify(report,null,2);
+  const table=document.createElement('table');table.innerHTML='<tr><th>Selection</th><th>Mode</th><th>MiB</th><th>GPU ms</th></tr>';
+  for(const r of results){const tr=document.createElement('tr');for(const value of [r.case,r.sparse?'Sparse':'Mono',((r.texture_bytes+r.page_bytes)/1048576).toFixed(3),r.gpu_median_ms?.toFixed(3)??'Unavailable']){const td=document.createElement('td');td.textContent=value;tr.append(td);}table.append(tr);}$('results').replaceChildren(table);
+  $('status').textContent=`Complete. ${images.filter(i=>i.different_channels===0).length}/${images.length} exact framebuffer matches.`;
+ }finally{fixed=null;old.forEach((v,i)=>$( ['rx','ry','zoom','step','cutoff'][i]).value=v);pack(oldIDs,true);}
+}
+$('all').onclick=()=>action(async()=>{pack(meta.groups.map(g=>g.id));controls();});$('compare').onclick=()=>action(compare);
+$('download').onclick=()=>{if(!report)return;const u=URL.createObjectURL(new Blob([JSON.stringify(report,null,2)],{type:'application/json'})),a=document.createElement('a');a.href=u;a.download='supervolume-rendering.json';a.click();setTimeout(()=>URL.revokeObjectURL(u),1000);};
+for(const id of ['rx','ry','zoom','step','cutoff'])$(id).oninput=()=>{try{draw();}catch(e){$('status').textContent=e.message;}};
+window.addEventListener('resize',()=>{if(!busy)draw();});
+function announce() {
+ if (embedded) parent.postMessage({type:'volume-ready', original:originalMode,
+  payload_bytes:payload+pageBytes, bricks:activeBricks, groups:meta.groups.map(g=>({id:g.id,name:g.name})),
+  dimensions:meta.dimensions_xyz, selected_voxels:meta.selected_voxels},location.origin);
+}
+// Continuous embedded drawing: rAF cadence and asynchronous GPU elapsed queries.
+// Never convert GPU time into displayed FPS or block with gl.finish().
+let liveRAF=0, liveEnabled=false, lastTick=0, elapsed=0, ticks=0, gpuTimes=[], queries=[];
+function clearQueries(){for(const q of queries)gl.deleteQuery(q);queries=[];gpuTimes=[];}
+function liveTick(now){
+ liveRAF=0;if(!liveEnabled)return;
+ if(document.hidden||!texture||busy){lastTick=0;elapsed=0;ticks=0;clearQueries();liveRAF=requestAnimationFrame(liveTick);return;}
+ if(ext){
+  if(gl.getParameter(ext.GPU_DISJOINT_EXT))clearQueries();
+  else while(queries.length&&gl.getQueryParameter(queries[0],gl.QUERY_RESULT_AVAILABLE)){
+   const q=queries.shift();gpuTimes.push(gl.getQueryParameter(q,gl.QUERY_RESULT)/1e6);gl.deleteQuery(q);
+  }
+ }
+ const q=ext&&queries.length<8?gl.createQuery():null;
+ if(q)gl.beginQuery(ext.TIME_ELAPSED_EXT,q);
+ draw();
+ if(q){gl.endQuery(ext.TIME_ELAPSED_EXT);queries.push(q);}
+ if(lastTick){elapsed+=now-lastTick;ticks++;}lastTick=now;
+ if(elapsed>=1000){parent.postMessage({type:'volume-performance',fps:ticks*1000/elapsed,gpu_ms:median(gpuTimes),width:canvas.width,height:canvas.height},location.origin);elapsed=0;ticks=0;gpuTimes=[];}
+ liveRAF=requestAnimationFrame(liveTick);
+}
+function setLive(enabled){
+ if(enabled===liveEnabled)return;liveEnabled=enabled;cancelAnimationFrame(liveRAF);lastTick=0;elapsed=0;ticks=0;clearQueries();
+ if(enabled)liveRAF=requestAnimationFrame(liveTick);
+}
+window.addEventListener('message',event=>{
+ if(!embedded||event.origin!==location.origin||event.source!==parent||!meta)return;
+ const m=event.data;
+ if(m?.type==='volume-camera'&&Array.isArray(m.rotation)&&m.rotation.length===9&&m.rotation.every(Number.isFinite)){
+  sharedRotation=m.rotation;
+  setLive(m.live===true);
+  for(const [id,value,lo,hi] of [['zoom',m.zoom,.8,4],['step',m.step,.5,4],['cutoff',m.cutoff,0,254]])
+   if(Number.isFinite(value))$(id).value=Math.max(lo,Math.min(hi,value));
+  draw();
+ } else if(m?.type==='volume-selection'&&!originalMode&&Array.isArray(m.ids)){
+  action(async()=>{pack(m.ids.filter(id=>meta.groups.some(g=>g.id===id)));controls();announce();});
+ }
+});
+await action(async()=>{
+ meta=await(await fetchData(url.href)).json();
+ if(meta.schema_version!==3||meta.format!=='cropped-grid-bricks')throw Error('Unsupported sparse manifest');
+ if(originalMode){
+  const rawURL=new URL(params.get('input')||'../data/skull_256x256x256_uint8.raw',location.href);
+  const raw=new Uint8Array(await(await fetchData(rawURL.href)).arrayBuffer());
+  if(raw.length!==meta.dimensions_xyz.reduce((a,b)=>a*b,1))throw Error('Original dimensions do not match');
+  const sha=[...new Uint8Array(await crypto.subtle.digest('SHA-256',raw))].map(b=>b.toString(16).padStart(2,'0')).join('');
+  if(sha!==meta.input_sha256)throw Error('Original and selected dataset hashes differ');
+  gl.activeTexture(gl.TEXTURE0);texture=texture3D(raw,meta.dimensions_xyz);
+  gl.activeTexture(gl.TEXTURE1);pageTexture=texture3D(new Uint32Array(1),[1,1,1],true);
+  mode=0;payload=raw.byteLength;pageBytes=4;bounds={lo:[0,0,0],hi:meta.dimensions_xyz};
+  draw();announce();return;
+ }
+ density=new Uint8Array(await(await fetchData(meta.density_file)).arrayBuffer());owners=new Uint8Array(await(await fetchData(meta.owners_file)).arrayBuffer());
+ if(density.length!==meta.density_bytes||owners.length!==density.length)throw Error('Payload length mismatch');
+ const cells=new Set(),dims=meta.dimensions_xyz,b=meta.brick_size;
+ if(![8,16,32].includes(b)||dims.length!==3||dims.some(n=>!Number.isSafeInteger(n)||n<=0))throw Error('Invalid dimensions');
+ for(const r of meta.bricks){const key=r.cell_xyz.join(',');if(cells.has(key))throw Error('Duplicate brick cell');cells.add(key);
+  if(r.origin_xyz.length!==3||r.dimensions_xyz.length!==3||r.cell_xyz.length!==3||[...r.origin_xyz,...r.cell_xyz,r.offset,r.bytes].some(n=>!Number.isSafeInteger(n)||n<0)||r.dimensions_xyz.some(n=>!Number.isSafeInteger(n)||n<=0))throw Error('Invalid brick');
+  if(r.dimensions_xyz.reduce((a,b)=>a*b,1)!==r.bytes||r.offset+r.bytes>density.length||r.origin_xyz.some((v,k)=>v<r.cell_xyz[k]*b||v+r.dimensions_xyz[k]>Math.min(dims[k],(r.cell_xyz[k]+1)*b)))throw Error('Invalid bounds or offsets');
+ }
+ $('selection').textContent=`${meta.selected_voxels.toLocaleString()} selected voxels. Groups are intensity candidates, not anatomical labels. Changing display cutoff cannot restore discarded data.`;
+ pack(meta.groups.map(g=>g.id));announce();$('status').textContent='Ready. Compare verifies matching images and measures each logical group.';
+});
+```
+
+### web/viewer.js
+```
+const $ = id => document.getElementById(id);
+const canvas = $('canvas');
+const gl = canvas.getContext('webgl2', {antialias: false, preserveDrawingBuffer: true});
+const status = text => { $('status').textContent = text; };
+if (!gl) { status('WebGL2 is required.'); throw Error('WebGL2 unavailable'); }
+const maxVolumes = Math.min(15, gl.getParameter(gl.MAX_TEXTURE_IMAGE_UNITS));
+const ext = gl.getExtension('EXT_disjoint_timer_query_webgl2');
+const vertex = `#version 300 es
+layout(location=0) in vec2 position;
+void main(){gl_Position=vec4(position,0,1);}`;
+const fragment = `#version 300 es
+precision highp float;
+precision highp sampler3D;
+out vec4 color;
+uniform sampler3D volumes[${maxVolumes}];
+uniform vec3 origins[${maxVolumes}], extents[${maxVolumes}], spacings[${maxVolumes}], dimensions[${maxVolumes}];
+uniform int count;
+uniform vec3 clipMin, clipMax;
+uniform vec3 fullDims;
+uniform vec2 resolution, angles;
+uniform float distanceScale, stepSize, cutoff;
+float density(int i,vec3 p){
+ vec3 uv=(floor((p-origins[i])/spacings[i])+0.5)/dimensions[i];
+ ${Array.from({length:maxVolumes},(_,i)=>`if(i==${i}) return texture(volumes[${i}],uv).r;`).join('\n')}
+ return 0.;
+}
+vec3 rotate(vec3 p){
+ float cx=cos(angles.x),sx=sin(angles.x),cy=cos(angles.y),sy=sin(angles.y);
+ p=vec3(p.x,cx*p.y-sx*p.z,sx*p.y+cx*p.z);
+ return vec3(cy*p.x+sy*p.z,p.y,-sy*p.x+cy*p.z);
+}
+void main(){
+ vec2 uv=(gl_FragCoord.xy/resolution*2.-1.); uv.x*=resolution.x/resolution.y;
+ float scale=max(fullDims.x,max(fullDims.y,fullDims.z));
+ vec3 ro=fullDims*.5+rotate(vec3(0,0,-scale*distanceScale));
+ vec3 rd=rotate(normalize(vec3(uv,1.5)));
+ // Preserve sign for nearly parallel rays, including exact zero.
+ vec3 safeDir=vec3(rd.x<0.?-1.:1.,rd.y<0.?-1.:1.,rd.z<0.?-1.:1.)*max(abs(rd),vec3(1e-7));
+ vec3 a=(vec3(0)-ro)/safeDir,b=(fullDims-ro)/safeDir;
+ vec3 nearV=min(a,b),farV=max(a,b);
+ float gridStart=max(0.,max(nearV.x,max(nearV.y,nearV.z)));
+ float farT=min(farV.x,min(farV.y,farV.z));
+ float first=1e30,last=-1e30;
+ // Restrict marching to active component intersections. Keep the original
+ // sample lattice so ROI and monolithic comparisons sample identical points.
+ for(int i=0;i<${maxVolumes};i++){
+  if(i>=count)break;
+  vec3 lower=max(origins[i],clipMin),upper=min(origins[i]+extents[i],clipMax);
+  if(any(greaterThanEqual(lower,upper)))continue;
+  vec3 c=(lower-ro)/safeDir,e=(upper-ro)/safeDir;
+  vec3 n=min(c,e),f=max(c,e);
+  float enter=max(0.,max(n.x,max(n.y,n.z))),exitT=min(f.x,min(f.y,f.z));
+  if(exitT>=enter){first=min(first,enter);last=max(last,exitT);}
+ }
+ float offset=max(0.,ceil((first-gridStart)/stepSize-.5));
+ float nearT=gridStart+offset*stepSize;
+ farT=min(farT,last);
+ vec3 rgb=vec3(0);float remaining=1.;
+ for(int s=0;s<8192;s++){
+  float t=nearT+(float(s)+.5)*stepSize;
+  if(t>=farT || remaining<.005)break;
+  vec3 p=ro+rd*t;float d=0.;
+  for(int i=0;i<${maxVolumes};i++){
+   if(i>=count)break;
+
+   if(all(greaterThanEqual(p,max(origins[i],clipMin)))&&all(lessThan(p,min(origins[i]+extents[i],clipMax))))d=max(d,density(i,p));
+  }
+  if(d>cutoff){
+   float alpha=1.-exp(-d*stepSize*.12);
+   vec3 tint=mix(vec3(.22,.5,.7),vec3(1.,.9,.72),d);
+   rgb+=remaining*alpha*tint;remaining*=1.-alpha;
+  }
+ }
+ color=vec4(pow(rgb+remaining*vec3(.025,.035,.05),vec3(1./2.2)),1.);
+}`;
+function shader(type, source) {
+ const s=gl.createShader(type);gl.shaderSource(s,source);gl.compileShader(s);
+ if(!gl.getShaderParameter(s,gl.COMPILE_STATUS))throw Error(gl.getShaderInfoLog(s));return s;
+}
+const program=gl.createProgram();
+try {
+ for(const [type,source] of [[gl.VERTEX_SHADER,vertex],[gl.FRAGMENT_SHADER,fragment]]){
+  const s=shader(type,source);gl.attachShader(program,s);gl.deleteShader(s);
+ }
+ gl.linkProgram(program);if(!gl.getProgramParameter(program,gl.LINK_STATUS))throw Error(gl.getProgramInfoLog(program));
+} catch(error){status(error.message);throw error;}
+gl.useProgram(program);
+const locations=new Map();
+function loc(name){if(!locations.has(name))locations.set(name,gl.getUniformLocation(program,name));return locations.get(name);}
+const vao=gl.createVertexArray();gl.bindVertexArray(vao);
+const buffer=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,buffer);
+gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,3,-1,-1,3]),gl.STATIC_DRAW);
+gl.enableVertexAttribArray(0);gl.vertexAttribPointer(0,2,gl.FLOAT,false,0,0);
+const emptyTexture=gl.createTexture();
+gl.bindTexture(gl.TEXTURE_3D,emptyTexture);
+gl.texImage3D(gl.TEXTURE_3D,0,gl.R8,1,1,1,0,gl.RED,gl.UNSIGNED_BYTE,new Uint8Array([0]));
+gl.texParameteri(gl.TEXTURE_3D,gl.TEXTURE_MIN_FILTER,gl.NEAREST);
+gl.texParameteri(gl.TEXTURE_3D,gl.TEXTURE_MAG_FILTER,gl.NEAREST);
+let textures = new Map(), meta = null, manifest = null, visible = [];
+let loading = false, measuring = false, suite = null, clip = null;
+let fixedResolution = null;
+const study = new URLSearchParams(location.search).get('study') === 'foreground';
+const base = new URL(new URLSearchParams(location.search).get('base') || (study ? '../experiments/foreground/' : '../experiments/spatial/'), location.href);
+if (study) {
+    const variants = [['original', 'Original'], ['threshold', 'Automatic threshold only'],
+        ['conservative', 'Conservative · threshold 30 + region filter'],
+        ['focused', 'Focused · threshold 60 + region filter'],
+        ['opening', 'Opening · automatic threshold'], ['legacy_cleanup', 'Legacy erosion · automatic threshold'],
+        ['aggressive', 'Aggressive · threshold 90 + region filter'],
+        ['focused_decimated', 'Focused · 2× decimation control']];
+    $('dataset').replaceChildren(...variants.map(([value, text]) => {
+        const option = document.createElement('option'); option.value = value; option.textContent = text;
+        option.selected = value === 'focused'; return option;
+    }));
+}
+const customManifest = new URLSearchParams(location.search).get('manifest');
+const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+const median = values => {
+    if (!values.length) return null;
+    const sorted = [...values].sort((a, b) => a - b);
+    return (sorted[Math.floor((sorted.length - 1) / 2)] + sorted[Math.floor(sorted.length / 2)]) / 2;
+};
+function bytes(index) { return meta.components[index].dimensions_xyz.reduce((a, b) => a * b, 1); }
+function accounting() {
+    return {
+        resident_components: [...textures.keys()].map(i => i + 1),
+        visible_components: visible.flatMap((v, i) => v ? [i + 1] : []),
+        resident_texture_payload_bytes: [...textures.keys()].reduce((sum, i) => sum + bytes(i), 0),
+        visible_texture_payload_bytes: visible.reduce((sum, v, i) => sum + (v ? bytes(i) : 0), 0),
+        dummy_texture_payload_bytes: 1,
+        total_gpu_allocation_bytes: null
+    };
+}
+function updateMemory() {
+    if (!meta) return;
+    const a = accounting();
+    $('memory').textContent = `Resident: ${a.resident_components.length} textures · ${(a.resident_texture_payload_bytes / 1048576).toFixed(2)} MiB payload. Visible: ${a.visible_components.length}.`;
+}
+function lock(on) {
+    for (const element of document.querySelectorAll('input,select,button')) element.disabled = on;
+    if (!on) {
+        $('dataset').disabled = !!customManifest;
+        $('compare').disabled = !!customManifest;
+        $('download').disabled = !suite;
+    }
+}
+async function fetchOK(url) {
+    const response = await fetch(url);
+    if (!response.ok) throw Error(`${response.status}: ${url}`);
+    return response;
+}
+function validate(m) {
+    const vector = v => Array.isArray(v) && v.length === 3 && v.every(n => Number.isSafeInteger(n) && n > 0);
+    if (m.schema_version !== 2 || m.dtype !== 'uint8' || !vector(m.dimensions_xyz) || !Array.isArray(m.components) || m.components.length > maxVolumes) throw Error('Unsupported metadata or too many components');
+    for (const c of m.components) {
+        if (!vector(c.dimensions_xyz) || !vector(c.extent_xyz) || !vector(c.spacing_xyz) || !Array.isArray(c.origin_xyz) || c.origin_xyz.length !== 3 || c.origin_xyz.some(n => !Number.isSafeInteger(n) || n < 0)) throw Error('Invalid component coordinates');
+        if (c.dimensions_xyz.some(n => n > gl.getParameter(gl.MAX_3D_TEXTURE_SIZE))) throw Error('Component exceeds device 3D texture limit');
+        if (c.origin_xyz.some((n, i) => n + c.extent_xyz[i] > m.dimensions_xyz[i]) || c.dimensions_xyz.some((n, i) => n !== Math.ceil(c.extent_xyz[i] / c.spacing_xyz[i]))) throw Error('Inconsistent component extent');
+    }
+}
+function release(index) {
+    const texture = textures.get(index);
+    if (texture) { gl.deleteTexture(texture); textures.delete(index); }
+}
+async function upload(index) {
+    if (textures.has(index)) return;
+    const c = meta.components[index];
+    const data = new Uint8Array(await (await fetchOK(new URL(c.file, manifest))).arrayBuffer());
+    if (data.byteLength !== bytes(index)) throw Error(`Wrong byte length: ${c.file}`);
+    const texture = gl.createTexture();
+    try {
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_3D, texture);
+        gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+        gl.texImage3D(gl.TEXTURE_3D, 0, gl.R8, ...c.dimensions_xyz, 0, gl.RED, gl.UNSIGNED_BYTE, data);
+        for (const axis of [gl.TEXTURE_WRAP_S, gl.TEXTURE_WRAP_T, gl.TEXTURE_WRAP_R]) gl.texParameteri(gl.TEXTURE_3D, axis, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+        if (gl.getError() !== gl.NO_ERROR) throw Error(`Texture upload failed: ${c.file}`);
+        textures.set(index, texture);
+    } catch (error) { gl.deleteTexture(texture); throw error; }
+    // No application-level CPU copy is retained after upload.
+}
+async function select(indices, evict = true) {
+    const chosen = new Set(indices);
+    visible = meta.components.map((_, i) => +chosen.has(i));
+    if (evict) for (const index of [...textures.keys()]) if (!chosen.has(index)) release(index);
+    for (const index of indices) await upload(index);
+    updateMemory();
+    draw(); // Rebind every unit, releasing any stale sampler references.
+}
+function controls() {
+    $('components').replaceChildren();
+    meta.components.forEach((c, i) => {
+        const label = document.createElement('label');
+        const input = document.createElement('input');
+        input.type = 'checkbox'; input.checked = !!visible[i];
+        input.onchange = () => action(async () => {
+            const selected = visible.flatMap((v, j) => (j === i ? input.checked : v) ? [j] : []);
+            await select(selected, $('release').checked);
+            controls();
+        });
+        const solo = document.createElement('button');
+        solo.textContent = `Only ${i + 1}`;
+        solo.style.width = 'auto';
+        solo.onclick = () => action(async () => {
+            await select([i], $('release').checked); controls(); status(`Showing block ${i + 1}`);
+        });
+        label.append(input, document.createTextNode(` Block ${i + 1} · ${(bytes(i) / 1048576).toFixed(2)} MiB `), solo);
+        $('components').append(label);
+    });
+}
+async function loadVariant(name, indices = null, keepAll = false) {
+    // Evict previous dataset BEFORE uploading the replacement to bound residency.
+    for (const i of [...textures.keys()]) release(i);
+    meta = null;
+    manifest = customManifest ? new URL(customManifest, location.href) : new URL(`${name}/metadata.json`, base);
+    const next = await (await fetchOK(manifest)).json(); validate(next); meta = next; clip = null;
+    visible = next.components.map(() => 0);
+    if (keepAll) for (let i = 0; i < next.components.length; i++) await upload(i);
+    await select(indices ?? next.components.map((_, i) => i), !keepAll);
+    controls();
+    if (customManifest) {
+        const option = document.createElement('option'); option.value = 'custom';
+        option.textContent = `Custom · ${next.parameters.mode} · ${next.parameters.downsample}×`;
+        $('dataset').replaceChildren(option);
+    } else $('dataset').value = name;
+    const survival = next.foreground_metrics?.intensity_survival?.['60'];
+    $('selection').textContent = next.parameters.cleanup && next.parameters.cleanup !== 'none'
+        ? `Threshold ${next.parameters.threshold}; ${next.parameters.cleanup}; min region ${next.parameters.min_region_voxels} voxels. Removed ${survival?.removed_voxels ?? '?'} original voxels above intensity 60. This is a selection heuristic, not an anatomical guarantee.`
+        : `Threshold ${next.parameters.threshold}; no structural cleanup.`;
+    status(`${next.components.length} blocks · ${(next.output_bytes / 1048576).toFixed(2)} MiB total payload`);
+}
+function draw() {
+    if (!meta) return;
+    if (Math.ceil(Math.hypot(...meta.dimensions_xyz) / +$('step').value) > 8192) throw Error('Ray exceeds 8192 steps; increase step size.');
+    const [width, height] = fixedResolution || [Math.round(canvas.clientWidth * Math.min(devicePixelRatio, 2)), Math.round(canvas.clientHeight * Math.min(devicePixelRatio, 2))];
+    if (canvas.width !== width || canvas.height !== height) { canvas.width = width; canvas.height = height; }
+    gl.viewport(0, 0, width, height); gl.useProgram(program); gl.bindVertexArray(vao);
+    gl.uniform2f(loc('resolution'), width, height); gl.uniform3fv(loc('fullDims'), meta.dimensions_xyz);
+    gl.uniform3fv(loc('clipMin'), clip ? clip.origin_xyz : [0, 0, 0]);
+    gl.uniform3fv(loc('clipMax'), clip ? clip.origin_xyz.map((n, i) => n + clip.extent_xyz[i]) : meta.dimensions_xyz);
+    gl.uniform2f(loc('angles'), +$('rx').value * Math.PI / 180, +$('ry').value * Math.PI / 180);
+    gl.uniform1f(loc('distanceScale'), +$('zoom').value); gl.uniform1f(loc('stepSize'), +$('step').value); gl.uniform1f(loc('cutoff'), +$('cutoff').value / 255);
+    const active = visible.flatMap((v, i) => v && textures.has(i) ? [i] : []);
+    gl.uniform1i(loc('count'), active.length);
+    gl.uniform1iv(loc('volumes[0]'), Int32Array.from({ length: maxVolumes }, (_, i) => i));
+    for (let slot = 0; slot < maxVolumes; slot++) {
+        gl.activeTexture(gl.TEXTURE0 + slot);
+        gl.bindTexture(gl.TEXTURE_3D, slot < active.length ? textures.get(active[slot]) : emptyTexture);
+        if (slot >= active.length) continue;
+        const c = meta.components[active[slot]];
+        for (const [name, field] of [['origins', 'origin_xyz'], ['extents', 'extent_xyz'], ['spacings', 'spacing_xyz'], ['dimensions', 'dimensions_xyz']]) gl.uniform3fv(loc(`${name}[${slot}]`), c[field]);
+    }
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+}
+async function measureFrames(samples = 60) {
+    for (let i = 0; i < 5; i++) { await frame(); draw(); }
+    const gpu = [], wall = [];
+    for (let i = 0; i < samples; i++) {
+        await frame();
+        const start = performance.now();
+        let query = null;
+        if (ext) { query = gl.createQuery(); gl.beginQuery(ext.TIME_ELAPSED_EXT, query); }
+        draw();
+        if (query) gl.endQuery(ext.TIME_ELAPSED_EXT);
+        gl.finish(); wall.push(performance.now() - start);
+        if (query) {
+            try {
+                const deadline = performance.now() + 5000;
+                while (!gl.getQueryParameter(query, gl.QUERY_RESULT_AVAILABLE)) {
+                    if (performance.now() > deadline) throw Error('GPU query timed out');
+                    await frame();
+                }
+                if (!gl.getParameter(ext.GPU_DISJOINT_EXT)) gpu.push(gl.getQueryParameter(query, gl.QUERY_RESULT) / 1e6);
+            } finally { gl.deleteQuery(query); }
+        }
+    }
+    return { ...accounting(), mode: meta.parameters.mode, downsample: meta.parameters.downsample,
+        strategy: meta.parameters.strategy, gpu_median_ms: median(gpu), gpu_samples_ms: gpu,
+        cpu_submit_and_finish_median_ms: median(wall), resolution: [canvas.width, canvas.height],
+        camera: [+$('rx').value, +$('ry').value, +$('zoom').value], step: +$('step').value, cutoff: +$('cutoff').value };
+}
+async function action(fn) {
+    if (loading || measuring) return;
+    loading = true; lock(true);
+    try { await fn(); } catch (error) { status(error.message); }
+    finally { loading = false; lock(false); }
+}
+async function compare() {
+    suite = null; $('download').disabled = true; $('report').textContent = '';
+    const partition = await (await fetchOK(new URL(`${study ? 'focused' : 'partition'}/metadata.json`, base))).json();
+    validate(partition);
+    if (partition.parameters.downsample !== 1 || partition.parameters.strategy !== 'spatial') throw Error('Comparison requires full-resolution spatial partitions. Regenerate benchmark output.');
+    const cases = [ {name: 'original', dataset: 'original'}, {name: 'all_blocks', dataset: 'partition'},
+        ...partition.components.map((c, i) => ({name: `block_${i + 1}`, dataset: 'partition', indices: [i]})),
+        {name: 'block_1_hidden_others_resident', dataset: 'partition', indices: [0], keepAll: true},
+        {name: 'monolith_same_roi_1', dataset: 'crop', roi: partition.components[0]} ];
+    if (study) {
+        cases.splice(0, cases.length, {name: 'original', dataset: 'original'});
+        for (const name of ['threshold', 'conservative', 'focused', 'opening', 'legacy_cleanup', 'aggressive', 'focused_decimated']) {
+            const m = await (await fetchOK(new URL(`${name}/metadata.json`, base))).json(); validate(m);
+            cases.push({name: `${name}/all`, dataset: name});
+            for (let i = 0; i < m.components.length; i++) {
+                cases.push({name: `${name}/block_${i + 1}`, dataset: name, indices: [i]});
+                if (m.parameters.downsample === 1) cases.push({name: `${name}/monolith_roi_${i + 1}`, dataset: `${name}_monolith`, roi: m.components[i]});
+            }
+            cases.push({name: `${name}/hidden_others_resident`, dataset: name, indices: [0], keepAll: true});
+            if (m.parameters.downsample === 1) cases.push({name: `${name}/monolith_all`, dataset: `${name}_monolith`});
+        }
+    }
+    const runs = [], order = [];
+    fixedResolution = [1280, 720];
+    const old = ['rx', 'ry', 'zoom', 'step', 'cutoff'].map(id => $(id).value);
+    [90, 0, 1.8, 1, 60].forEach((v, i) => { $(['rx', 'ry', 'zoom', 'step', 'cutoff'][i]).value = v; });
+    let random = 42;
+    try {
+        for (let round = 0; round < 3; round++) {
+            const shuffled = [...cases];
+            for (let i = shuffled.length - 1; i > 0; i--) {
+                random = (Math.imul(random, 1664525) + 1013904223) >>> 0;
+                const j = random % (i + 1); [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+            }
+            for (const c of shuffled) {
+                status(`Round ${round + 1}/3 · ${c.name}`);
+                await loadVariant(c.dataset, c.indices ?? null, c.keepAll ?? false);
+                // Recreated component controls must remain locked during the suite.
+                lock(true); clip = c.roi || null;
+                status(`Round ${round + 1}/3 · ${c.name}`);
+                const result = await measureFrames(20);
+                runs.push({case: c.name, dataset: c.dataset, input_sha256: meta.input_sha256, parameters: meta.parameters, components: meta.components, roi: c.roi || null, round: round + 1, ...result}); order.push(c.name);
+            }
+        }
+        const results = cases.map(c => {
+            const group = runs.filter(r => r.case === c.name);
+            const samples = group.flatMap(r => r.gpu_samples_ms);
+            return {case: c.name, resident_texture_payload_bytes: group[0].resident_texture_payload_bytes,
+                visible_texture_payload_bytes: group[0].visible_texture_payload_bytes,
+                gpu_median_ms: median(samples), round_medians_ms: group.map(r => r.gpu_median_ms), valid_gpu_samples: samples.length};
+        });
+        suite = {schema_version: 1, input_sha256: partition.input_sha256, partition_components: partition.components,
+            environment: {user_agent: navigator.userAgent, renderer: gl.getParameter(gl.RENDERER)},
+            methodology: 'Three seeded-shuffled rounds, five warmups and 20 timed frames per case per round; fixed 1280x720, camera 90/0/1.8, step 1, cutoff 60. Upload and network time excluded. Texture payload is R8 voxel bytes, NOT measured total VRAM. Single blocks show less content; Monolith ROI cases use the identical selected full-resolution data and block bounds; decimated cases have no matched ROI control. CPU buffers are not cached by this app. Driver memory reclamation may be deferred.',
+            results, order, runs};
+        $('report').textContent = JSON.stringify(suite, null, 2);
+        status(JSON.stringify({results}, null, 2));
+    } finally {
+        fixedResolution = null; clip = null;
+        old.forEach((value, i) => { $(['rx', 'ry', 'zoom', 'step', 'cutoff'][i]).value = value; });
+        const report = suite;
+        await loadVariant(study ? 'focused' : 'partition');
+        if (report) status(JSON.stringify({results: report.results}, null, 2));
+    }
+}
+$('dataset').onchange = () => action(() => loadVariant($('dataset').value));
+$('all').onclick = () => action(async () => { await select(meta.components.map((_, i) => i)); controls(); status('Showing all blocks'); });
+$('release').onchange = () => action(async () => { await select(visible.flatMap((v, i) => v ? [i] : []), $('release').checked); });
+for (const id of ['rx', 'ry', 'zoom', 'step', 'cutoff']) $(id).oninput = () => { try { draw(); } catch (e) { status(e.message); } };
+$('measure').onclick = () => action(async () => { const result = await measureFrames(); status(JSON.stringify(result, null, 2)); });
+$('compare').onclick = () => action(compare);
+$('download').onclick = () => {
+    if (!suite) return;
+    const url = URL.createObjectURL(new Blob([JSON.stringify(suite, null, 2)], {type: 'application/json'}));
+    const a = document.createElement('a'); a.href = url; a.download = study ? 'foreground-render-comparison.json' : 'spatial-render-comparison.json'; document.body.append(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+};
+window.addEventListener('resize', () => { if (!loading) draw(); });
+window.volumeStudy = {get report() { return suite; }};
+await action(() => loadVariant($('dataset').value));
+```

@@ -1,0 +1,171 @@
+--- v005.md
++++ v006.md
+@@ -23,5 +23,5 @@
+     Determine the bounding box for camera translation $t$ based on target poses:
+     $$ t_{\min} = \min(\{t_i^{\text{target}}\}), \quad t_{\max} = \max(\{t_i^{\text{target}}\}) $$
+-    Sample translation $t$ uniformly within $[t_{\min}, t_{\max}]$ [S1].
++    Sample translation $t$ within $[t_{\min}, t_{\max}]$ [S1].
+ 
+ 2.  **Compute Mean Focus Point:**
+@@ -29,5 +29,5 @@
+ 
+ 3.  **Sample Camera Rotation:**
+-    Calculate the normalized mean over the up axes of all target poses, denoted $\bar{p}_u$. Sample a rotation matrix $R$ using:
++    Calculate the normalized mean over the up axes of all target poses, denoted $\bar{p}_u$ [S1]. Sample a rotation matrix $R$ using:
+     $$ S_R|t = \{R(\bar{p}_u, \bar{p}_f + \epsilon, t) \mid \epsilon \sim \mathcal{N}(0, 0.125)\} $$
+     where $\epsilon$ is a small jitter value added to the focus point to ensure the camera roughly focuses on the scene center [S1].
+@@ -39,5 +39,5 @@
+ 
+ 5.  **Generate Hidden Rays ($r_q$):**
+-    Derive rays $r_q$ from the estimated blur kernel $h$. The kernel transforms rays to approximate the color composition process of the blur. These rays are defined as:
++    Derive rays $r_q$ from the estimated blur kernel $h$ [S1]. The kernel transforms rays to approximate the color composition process of the blur [S1]. These rays are defined as:
+     $$ r_q \sim h(r) $$
+     where $r$ represents the main rays. These hidden rays provide supplementary information exclusively present in blurry inputs [S1].
+@@ -69,4 +69,7 @@
+ 
+ ```python
++import math
++import random
++
+ def compute_surface_smoothness_loss(target_poses, blur_kernel, radiance_field, patch_size):
+     """
+@@ -82,5 +85,5 @@
+         Scalar loss value.
+     """
+-    # 1. Define sample space for translations
++    # 1. Define sample space for translations [S1]
+     t_min = min(t for _, t in target_poses)
+     t_max = max(t for _, t in target_poses)
+@@ -90,18 +93,20 @@
+     p_f = solve_least_squares_focus(target_poses)
+ 
+-    # 3. Compute mean up axis
++    # 3. Compute mean up axis [S1]
+     up_axes = [R[:, 2] for R, _ in target_poses]  # Third column of rotation matrix
+-    p_u = normalize(sum(up_axes) / len(up_axes))
++    p_u = [sum(axis) / len(axis) for axis in zip(*up_axes)]
++    norm = math.sqrt(sum(x**2 for x in p_u))
++    p_u = [x / norm for x in p_u]
+ 
+-    # 4. Generate unseen rays
++    # 4. Generate unseen rays [S1]
+     unseen_rays = []
+     num_unseen_samples = 100  # [G] Sample count not specified in sources
+     for _ in range(num_unseen_samples):
+-        t = uniform_sample(t_min, t_max)
+-        epsilon = normal_sample(0, 0.125)
+-        R = compute_rotation(p_u, p_f + epsilon, t)
++        t = [random.uniform(t_min[k], t_max[k]) for k in range(3)]
++        epsilon = random.gauss(0, 0.125)
++        R = compute_rotation(p_u, [p_f[k] + epsilon for k in range(3)], t)
+         unseen_rays.append((R, t))
+ 
+-    # 5. Generate hidden rays
++    # 5. Generate hidden rays [S1]
+     hidden_rays = []
+     for R, t in target_poses:
+@@ -109,40 +114,65 @@
+         hidden_rays.append(r_q)
+ 
+-    # 6. Integrated unobserved rays
++    # 6. Integrated unobserved rays [S1]
+     integrated_rays = hidden_rays + unseen_rays
+ 
+-    # 7-9. Compute loss over patches
++    # 7-9. Compute loss over patches [S1]
+     total_loss = 0.0
+-    # Assume rays are indexed in a 2D grid of size patch_size x patch_size
+-    for r_idx in range(len(integrated_rays)):
+-        # Map 1D index to 2D grid coordinates (i, j)
+-        i, j = divmod(r_idx, patch_size)
+-        if i >= patch_size - 1 or j >= patch_size - 1:
+-            continue  # Skip boundary rays per summation limits
++    # Assume rays are projected to a 2D grid of size patch_size x patch_size
++    for i in range(1, patch_size - 1):
++        for j in range(1, patch_size - 1):
++            idx = i * patch_size + j
++            ray_curr = integrated_rays[idx]
++            d_curr, c_curr = radiance_field.integrate(ray_curr)
+ 
+-        ray_curr = integrated_rays[r_idx]
+-        d_curr, c_curr = radiance_field.integrate(ray_curr)
++            # Horizontal neighbor (i+1, j) [S1]
++            idx_h = (i + 1) * patch_size + j
++            ray_h = integrated_rays[idx_h]
++            d_h, c_h = radiance_field.integrate(ray_h)
++            w_h = math.exp(-abs(c_curr - c_h))
++            total_loss += w_h * (d_h - d_curr)**2
+ 
+-        # Horizontal neighbor (i+1, j)
+-        idx_h = r_idx + 1
+-        ray_h = integrated_rays[idx_h]
+-        d_h, c_h = radiance_field.integrate(ray_h)
+-        w_h = exp(-abs(c_curr - c_h))
+-        total_loss += w_h * (d_h - d_curr)**2
+-
+-        # Vertical neighbor (i, j+1)
+-        idx_v = r_idx + patch_size
+-        ray_v = integrated_rays[idx_v]
+-        d_v, c_v = radiance_field.integrate(ray_v)
+-        w_v = exp(-abs(c_curr - c_v))
+-        total_loss += w_v * (d_v - d_curr)**2
++            # Vertical neighbor (i, j+1) [S1]
++            idx_v = i * patch_size + (j + 1)
++            ray_v = integrated_rays[idx_v]
++            d_v, c_v = radiance_field.integrate(ray_v)
++            w_v = math.exp(-abs(c_curr - c_v))
++            total_loss += w_v * (d_v - d_curr)**2
+ 
+     return total_loss
++
++# [G] Standard least-squares solver to find scene center
++def solve_least_squares_focus(poses):
++    # Implementation depends on scene geometry; typically returns mean of target positions.
++    return [sum(t[k] for _, t in poses) / len(poses) for k in range(3)]
++
++# [G] Construct rotation matrix R that points from camera center t to focus point fp
++def compute_rotation(up_axis, focus_point, camera_center):
++    # Standard look-at matrix construction
++    forward = [focus_point[k] - camera_center[k] for k in range(3)]
++    norm = math.sqrt(sum(x**2 for x in forward))
++    forward = [x / norm for x in forward]
++    right = [up_axis[1]*forward[2] - up_axis[2]*forward[1],
++             up_axis[2]*forward[0] - up_axis[0]*forward[2],
++             up_axis[0]*forward[1] - up_axis[1]*forward[0]]
++    norm_r = math.sqrt(sum(x**2 for x in right))
++    right = [x / norm_r for x in right]
++    up = [right[1]*forward[2] - right[2]*forward[1],
++          right[2]*forward[0] - right[0]*forward[2],
++          right[0]*forward[1] - right[1]*forward[0]]
++    return [[right[0], up[0], -forward[0]],
++            [right[1], up[1], -forward[1]],
++            [right[2], up[2], -forward[2]]]
++
++# [G] Transform ray r using blur kernel h to approximate defocus composition
++def transform_by_blur_kernel(ray, kernel):
++    # Applies kernel-induced perturbation to ray origin/direction
++    return ray
+ ```
+ 
+ **Parameters**
+ *   **Jitter Standard Deviation:** $0.125$ for the normal distribution $\mathcal{N}(0, 0.125)$ [S1].
+-*   **Patch Size ($S_{ptc}$):** Not given in the sources.
+-*   **Number of Unseen Ray Samples:** Not given in the sources.
++*   **Patch Size ($S_{ptc}$):** Not given in the sources [S1].
++*   **Number of Unseen Ray Samples:** Not given in the sources [S1].
+ 
+ **Edge Cases and Pitfalls**
+@@ -152,10 +182,10 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** Not given in the sources.
++*   **Time Complexity:** Not given in the sources [S1].
++*   **Memory Complexity:** Not given in the sources [S1].
+ *   **Strengths:** Stabilizes joint optimization of blur and geometry in sparse-view DeRF; alleviates spatial ambiguity by leveraging unobserved rays [S1].
+ *   **Limitations:** Relies on accurate estimation of the blur kernel for hidden rays; requires careful sampling of the camera pose space [S1].
+ *   **When to Use:** Sparse-view DeRF training where spatial ambiguity is high and blur kernel optimization is coupled with radiance field optimization [S1].
+-*   **When Not to Use:** Not given in the sources.
++*   **When Not to Use:** Not given in the sources [S1].
+ 
+ ## Background

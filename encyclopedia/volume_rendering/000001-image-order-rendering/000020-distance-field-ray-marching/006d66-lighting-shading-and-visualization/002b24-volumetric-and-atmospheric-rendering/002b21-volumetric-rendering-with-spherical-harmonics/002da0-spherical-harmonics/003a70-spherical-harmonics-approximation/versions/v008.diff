@@ -1,0 +1,214 @@
+--- v007.md
++++ v008.md
+@@ -4,141 +4,120 @@
+ 
+ ## Overview
+-Spherical Harmonics (SH) Approximation is a technique to represent a spherical function $f(\omega)$ as a linear combination of a finite subset of spherical harmonics basis functions [S1]. It solves the problem of efficiently computing integrals over the sphere, such as those found in rendering equations, by converting expensive numerical integration (e.g., Monte Carlo) into fast algebraic operations like dot products and matrix-vector multiplications [S1]. It differs from its parent, [Spherical Harmonics](5603-spherical-harmonics.md), by focusing on the practical application of this basis for approximation and convolution in rendering contexts, specifically enabling differentiable computation for inverse problems [S1].
++Spherical Harmonics (SH) Approximation is a technique to represent a spherical function $f(\omega)$ using a finite subset of the SH basis functions, enabling efficient and differentiable computation for inverse problems in volume rendering [S1]. It solves the problem of expensive Monte Carlo integration by projecting directional data (such as lighting, visibility, and in-scattering) into the SH domain, where integrals become simple dot products and convolutions become matrix-vector multiplications [S1]. Unlike its sibling [Spherical Harmonics Degree Selection](10564-spherical-harmonics-degree-selection.md), which determines the optimal bandwidth, this method focuses on the projection and reconstruction mechanics using a fixed bandwidth [S1].
+ 
+ ## How it works
+-**Inputs:** A spherical function $f(\omega)$ defined over the domain $\Omega$ (the unit sphere).
+-**Outputs:** A vector of coefficients $\mathbf{f} \in \mathbb{R}^n$ representing the approximation $\tilde{f}(\omega)$.
++**Inputs:** A spherical function $f(\omega)$ defined over the domain $\Omega$ (the unit sphere), and a maximum bandwidth $L$ (or number of bands $n$).
++**Outputs:** A vector of SH coefficients $\mathbf{f}$ of size $n = (L+1)^2$.
+ 
+ **Data Structures:**
+-*   **Coefficient Vector:** A 1D array of size $n = (L+1)^2$, where $L$ is the maximum degree (bandwidth). The index $i$ maps the degree $l$ and order $m$ using the linearization formula:
+-    $$ i = l^2 + l + m $$
+-    where $l \in \{0, \dots, L\}$ and $m \in \{-l, \dots, l\}$ [S1, Parent].
++The coefficients are stored in a 1D array $\mathbf{f}$ of length $n$. The linear index $i$ maps the degree $l$ and order $m$ via:
++$$ i = l^2 + l + m $$
++where $l \in \{0, \dots, L\}$ and $m \in \{-l, \dots, l\}$ [S1, Child 10564].
+ 
+ **Steps:**
++1.  **Projection:** Compute the SH coefficients $f_i$ by projecting the function $f(\omega)$ onto the basis functions $y_i(\omega)$:
++    $$ f_i = \int_{\Omega} f(\omega) y_i(\omega) d\omega $$
++    [S1]. In practice, for inverse problems, this integral is often precomputed or solved via numerical integration at initialization to ensure differentiability with respect to scene parameters [S1].
+ 
+-1.  **Projection:** Compute the SH coefficients $f_i$ by projecting the function $f(\omega)$ onto the basis functions $y_i(\omega)$ [S1]:
+-    $$ f_i = \int_{\Omega} f(\omega) y_i(\omega) d\omega $$
+-    In practice, this integral is often approximated via numerical integration or Monte Carlo sampling during initialization [S1]. For inverse problems, precomputing terms allows this to be differentiable [S1].
++2.  **Reconstruction:** Approximate the original signal $\tilde{f}(\omega)$ by summing the basis functions weighted by the coefficients:
++    $$ \tilde{f}(\omega) = \sum_{i=1}^{n} f_i y_i(\omega) $$
++    [S1]. The accuracy increases with $n$ [S1].
+ 
+-2.  **Reconstruction:** Evaluate the approximated signal $\tilde{f}(\omega)$ at any direction $\omega$ by summing the basis functions weighted by the coefficients [S1]:
+-    $$ \tilde{f}(\omega) = \sum_{i=1}^{n} f_i y_i(\omega) $$
++3.  **Integration via Dot Product:** The integral of the product of two approximated functions $\tilde{a}(\omega)$ and $\tilde{b}(\omega)$ is computed as the dot product of their coefficient vectors:
++    $$ \int_{\Omega} \tilde{a}(\omega)\tilde{b}(\omega)d\omega = \mathbf{a} \cdot \mathbf{b} $$
++    [S1].
+ 
+-3.  **Convolution (Product Projection):** To compute the SH projection of the product of two functions $\tilde{a}(\omega)$ and $\tilde{b}(\omega)$, use the precomputed transfer matrix $C_{ijk}$ [S1]:
++4.  **Convolution (Multiplication Projection):** The SH projection of the product of two functions, denoted $a * b$, is computed using a precomputed transfer matrix $C_{ijk}$:
+     $$ (a * b)_i = \sum_{j=1}^{n} \sum_{k=1}^{n} C_{ijk} a_j b_k $$
+-    where the transfer matrix elements are defined as [S1]:
+-    $$ C_{ijk} = \int_{\Omega} y_i(\omega) y_j(\omega) y_k(\omega) d\omega $$
+-    The matrix $C_{ijk}$ is constant for a given bandwidth and can be precomputed [S1].
+-
+-4.  **Integral of Product:** The integral of the product of two approximated functions is computed as the dot product of their coefficient vectors [S1]:
+-    $$ \int_{\Omega} \tilde{a}(\omega)\tilde{b}(\omega)d\omega = \mathbf{a} \cdot \mathbf{b} $$
++    where $C_{ijk} = \int_{\Omega} y_i(\omega)y_j(\omega)y_k(\omega)d\omega$ [S1].
+ 
+ **Parameters:**
+-*   **Bandwidth ($n$):** The number of coefficients. A bandwidth of $n=8$ is cited as providing good low-frequency approximations [S1]. Typical implementations use the lowest 3-5 levels to keep the representation compact [S3, unofficial].
++*   **Bandwidth $n$:** The number of bands used. A value of $n=8$ is cited as providing good low-frequency approximations for inverse problems [S1]. Typical implementations use the lowest 3-5 levels .
+ 
+ **Pseudocode:**
+ ```python
+-def project_sh(f_func, num_bands):
++def compute_sh_coefficients(function_f, basis_functions_y, domain_samples):
+     """
+-    Projects a spherical function f_func(w) into SH coefficients.
+-    f_func: callable taking a direction vector (3,) and returning a scalar.
+-    num_bands: integer L, the maximum degree.
+-    Returns: numpy array of size (L+1)^2.
++    Computes SH coefficients f_i by numerically integrating f(w) * y_i(w) over the sphere.
++    function_f: callable, returns f(w) for a direction w.
++    basis_functions_y: callable, returns y_i(w) for a direction w and index i.
++    domain_samples: list of (w, weight) tuples representing the discretized sphere.
+     """
+-    n = (num_bands + 1)**2
+-    coeffs = np.zeros(n)
+-    
+-    # In a real implementation, this integral is solved numerically.
+-    # For the purpose of this article, we assume a numerical integration routine exists.
+-    # We iterate through all l, m pairs to fill the linearized index i.
+-    for l in range(num_bands + 1):
+-        for m in range(-l, l + 1):
+-            i = l**2 + l + m
+-            # Compute integral of f(w) * Y_l^m(w) over the sphere
+-            # This step typically uses Monte Carlo or quadrature [S1]
+-            integral_value = numerical_integral_sphere(lambda w: f_func(w) * spherical_harmonic_basis(l, m, w))
+-            coeffs[i] = integral_value
+-            
+-    return coeffs
++    n = len(basis_functions_y) # Total number of coefficients
++    f = [0.0] * n
++    for w, weight in domain_samples:
++        val_f = function_f(w)
++        for i in range(n):
++            val_y = basis_functions_y(i, w)
++            f[i] += val_f * val_y * weight
++    return f
+ 
+-def reconstruct_sh(coeffs, direction):
++def reconstruct_sh_signal(coefficients_f, basis_functions_y, direction_w):
+     """
+-    Reconstructs the function value at a specific direction.
+-    coeffs: numpy array of SH coefficients.
+-    direction: numpy array (3,) representing the direction vector.
+-    Returns: scalar value.
++    Reconstructs the signal at a specific direction using SH coefficients.
++    coefficients_f: list of SH coefficients f_i.
++    basis_functions_y: callable, returns y_i(w).
++    direction_w: the direction vector w.
+     """
+-    num_bands = int(np.sqrt(len(coeffs))) - 1
+-    value = 0.0
+-    for l in range(num_bands + 1):
+-        for m in range(-l, l + 1):
+-            i = l**2 + l + m
+-            value += coeffs[i] * spherical_harmonic_basis(l, m, direction)
+-    return value
++    signal = 0.0
++    for i, coeff in enumerate(coefficients_f):
++        signal += coeff * basis_functions_y(i, direction_w)
++    return signal
+ 
+-def convolve_sh(a_coeffs, b_coeffs, transfer_matrix):
++def compute_convolution_coefficients(coefficients_a, coefficients_b, transfer_matrix_C):
+     """
+-    Computes the SH coefficients of the product of two functions.
+-    a_coeffs, b_coeffs: numpy arrays of SH coefficients.
+-    transfer_matrix: 3D numpy array C_ijk precomputed.
+-    Returns: numpy array of SH coefficients for the product.
++    Computes the SH coefficients of the product of two functions a and b.
++    coefficients_a: list of SH coefficients for a.
++    coefficients_b: list of SH coefficients for b.
++    transfer_matrix_C: 3D array C[i][j][k].
+     """
+-    n = len(a_coeffs)
+-    result = np.zeros(n)
++    n = len(coefficients_a)
++    result = [0.0] * n
+     for i in range(n):
+         sum_val = 0.0
+         for j in range(n):
+             for k in range(n):
+-                sum_val += transfer_matrix[i, j, k] * a_coeffs[j] * b_coeffs[k]
++                sum_val += transfer_matrix_C[i][j][k] * coefficients_a[j] * coefficients_b[k]
+         result[i] = sum_val
+     return result
+ 
+-def integral_of_product(a_coeffs, b_coeffs):
++def compute_integral_dot_product(coefficients_a, coefficients_b):
+     """
+-    Computes the integral of the product of two functions via dot product.
++    Computes the integral of the product of two SH approximated functions.
+     """
+-    return np.dot(a_coeffs, b_coeffs)
++    return sum(a * b for a, b in zip(coefficients_a, coefficients_b))
+ ```
+-
+-**Edge Cases and Pitfalls:**
+-*   **Ringing:** SH approximations containing higher frequencies become too large to be practical and exhibit 'ringing' artifacts (high-frequency noise) near sharp value changes, especially when many coefficients are used [S3, unofficial].
+-*   **Precision:** Computing the integral in Step 1 requires careful numerical integration to avoid errors, particularly for inverse problems where differentiability is required [S1].
+ 
+ ## Subtopics
+ 
++### [Spherical Harmonic Projection](11243-spherical-harmonic-projection.md)
++Spherical Harmonic Projection is the process of approximating an arbitrary spherical function $f(\omega)$ by computing the coefficients of its expansion in the SH basis [Child 11243]. It differs from the parent [Spherical Harmonics Approximation](8741-spherical-harmonics-approximation.md) by focusing specifically on the computational mechanics of deriving these coefficients via least-squares minimization and leveraging the basis's orthonormality for efficient GPU-based integration [Child 11243]. It is chosen when efficient representation of complex angular data (lighting, reflectance) is required for volume rendering [Child 11243].
++
+ ### Hemisphere Projection in SH Space
+-This variant reformulates the computation of the hemisphere projection $H(x)$ to be differentiable with respect to the normal vector $n(x)$ [S1]. Instead of direct integration, it uses a linear rotation function $\phi_{SH}$ [S1]:
++This variant reformulates the computation of the hemisphere visibility term $H(x)$ to be differentiable with respect to the surface normal $n(x)$ [S1]. Instead of direct integration, it uses a linear rotation function $\phi_{SH}$ to rotate a standard z-axis symmetric integral:
+ $$ H(x) = \phi_{SH}(n(x)) \int_{\Omega} \max(i_z \cdot \omega, 0)y(\omega)d\omega $$
+-where $i_z = (0, 0, 1)^T$ [S1]. The integral term is solved using numerical integration at initialization and does not need to be differentiable, as only the SH coefficients of the environment map are updated [S1]. This allows the visibility term to be computed analytically and efficiently [S1].
++where $i_z = (0, 0, 1)^T$ [S1]. The integral is solved using numerical integration at initialization and does not need to be differentiable, as only the SH coefficients of the environment map are updated [S1].
+ 
+ ### ZH-to-SH Projection via Minimization
+-This method approximates an SH vector $f$ as a sum of rotated Zernike Harmonic (ZH) basis functions by minimizing the L2 error metric $\psi = \|f - g\|$ [S2, unofficial]. It is used when rotating SH functions is difficult, as ZH functions are symmetric about the vertical axis [S2, unofficial].
+-1.  Calculate optimal SH coefficients $g^*$ for a single ZH function with fixed rotation $\hat{z}$ using:
+-    $$ g^*_l = \frac{4\pi}{2l + 1} \sum_{m=-l}^{l} Y_{lm}(\hat{z}) f_{lm} $$
+-    [S2, unofficial].
+-2.  Iterate through ZH levels from lowest to highest frequency [S2, unofficial].
+-3.  For each level, calculate several hundred rotations uniformly distributed on the hemisphere, solve for coefficients, and keep the rotation with the lowest error [S2, unofficial].
+-4.  Project the selected ZH function into the SH basis and subtract it from the target SH vector $f$, then repeat for the next level [S2, unofficial].
++This method approximates an SH vector $f$ as a sum of rotated Zonal Harmonic (ZH) basis functions by minimizing the L2 error $\psi = \|f - g\|$ [S2, unofficial]. It iterates through ZH levels from lowest to highest frequency [S2, unofficial]. For each level, it calculates several hundred rotations uniformly distributed on the hemisphere, solves for the optimal SH coefficients $g^*_l$ for each rotation, and keeps the rotation with the lowest error [S2, unofficial]. The optimal coefficients for a fixed rotation $\hat{z}$ are:
++$$ g^*_l = \frac{4\pi}{2l + 1} \sum_{m=-l}^{l} Y_{lm}(\hat{z}) f_{lm} $$
++[S2, unofficial]. The selected ZH function is projected into the SH basis and subtracted from the target vector before proceeding to the next level [S2, unofficial].
+ 
+ ### Zonal Harmonics (ZH) Approximation
+-Zonal Harmonics are a subset of spherical harmonics defined by $m=0$, consisting of functions symmetric about the vertical axis [S2, unofficial]. They are rotationally invariant around that axis, allowing easy rotation and projection into the SH basis [S2, unofficial].
+-*   **Definition:** A ZH function $g$ is a sum of the $n$ lowest-order ZH functions:
+-    $$ g = \sum_{l=1}^{n} g_l Y_{l0} $$
+-    [S2, unofficial].
+-*   **Rotation:** To rotate a ZH vector $g$ and project it into the SH basis, each coefficient $f_{lm}$ of the rotated SH function is calculated as:
+-    $$ f_{lm} = g^*_l Y_{lm}(\hat{z}_l) $$
+-    where $g^*_l = g_l \sqrt{\frac{2\pi}{2l + 1}}$ and $\hat{z}_l$ is the rotation axis for level $l$ [S2, unofficial].
+-*   **Pitfall:** Projecting an SH vector into the ZH basis is a hard problem, solved by finding the best $g$ to approximate $f$ by minimizing the L2 norm $\psi = \|f - g\|$ [S2, unofficial].
++Zonal Harmonics are a subset of SH defined by $m=0$, consisting of functions symmetric about the vertical axis [S2, unofficial]. A ZH function $g$ is a sum of the $n$ lowest-order ZH functions: $g = \sum_{l=1}^{n} g_l Y_{l0}$ [S2, unofficial]. To rotate a ZH vector $g$ and project it into the SH basis, each coefficient $f_{lm}$ is calculated as:
++$$ f_{lm} = g^*_l Y_{lm}(\hat{z}_l) $$
++where $g^*_l = g_l \sqrt{\frac{2\pi}{2l + 1}}$ and $\hat{z}_l$ is the rotation axis for level $l$ [S2, unofficial]. Projecting an SH vector into the ZH basis is a hard problem solved by minimizing the L2 norm $\psi = \|f - g\|$ [S2, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Projection requires numerical integration, which is expensive if done per-frame [S1]. However, once projected, convolution is $O(n^3)$ due to the transfer matrix, and reconstruction is $O(n)$ [S1]. The dot product for integrals is $O(n)$ [S1].
+-*   **Memory Complexity:** Requires storing $n = (L+1)^2$ coefficients per function and a transfer matrix of size $n^3$ for convolution [S1].
+-*   **Performance:** A bandwidth of $n=8$ is cited as providing good low-frequency approximations with manageable computational cost [S1].
+-*   **Strengths:** Enables efficient and differentiable computation for inverse problems, avoiding expensive Monte Carlo integration [S1]. Allows analytic computation of rendering terms like $B(x) = a(x) (L \cdot (V(x) * H(x)))$ [S1].
+-*   **Limitations:** Exhibits ringing artifacts for high-frequency signals [S3, unofficial]. Not suitable for sharp features without high bandwidth, which increases memory and compute costs [S3, unofficial].
+-*   **When to use:** When global illumination or in-scattering needs to be represented compactly and integrated efficiently, particularly in inverse problems or real-time rendering contexts where differentiability or speed is critical [S1].
+-*   **When not to use:** When high-frequency details are dominant and cannot be captured by low-bandwidth SH, or when the scene geometry changes dynamically in a way that requires frequent re-projection of complex functions [S3, unofficial].
++*   **Time Complexity:** Projection requires integration over the sphere, which is $O(n \cdot N_{samples})$ where $N_{samples}$ is the number of integration points [S1]. Convolution is $O(n^3)$ due to the triple summation in the transfer matrix [S1]. Reconstruction is $O(n)$ [S1].
++*   **Memory Complexity:** Storing coefficients is $O(n)$. The transfer matrix $C_{ijk}$ requires $O(n^3)$ space [S1].
++*   **Performance:** Using $n=8$ provides good low-frequency approximations with manageable computational cost [S1].
++*   **Strengths:** Enables differentiable computation for inverse problems; converts expensive integrals into dot products; allows real-time rendering of global illumination effects via PRT [S1][S2, unofficial].
++*   **Limitations:** Low-pass filtering nature limits high-frequency detail representation; requires precomputation of transfer matrices or integrals; rotation of general SH functions is complex, often requiring conversion to ZH or other bases [S1][S2, unofficial].
++*   **When to use:** When global illumination or in-scattering effects need to be represented compactly and differentially for optimization or real-time rendering [S1][S2, unofficial].
++*   **When not to use:** When high-frequency directional details are critical and cannot be captured by low-bandwidth SH [S1].
+ 
+ ## Background
+-Spherical Harmonics Approximation was introduced in the context of efficient and differentiable shadow computation for inverse problems [S1]. It builds on the mathematical properties of spherical harmonics to represent directional functions like radiance [Parent]. The method leverages precomputed transfer matrices and basis properties to replace expensive integrals with algebraic operations [S1]. Zonal Harmonics (ZH) approximation, a related technique, was developed to handle rotations more easily by exploiting the symmetry of $m=0$ harmonics [S2, unofficial].
++The method originates from the application of Spherical Harmonics to Precomputed Radiance Transfer (PRT) for real-time global illumination [S2, unofficial]. Sloan et al. introduced the use of SH for representing light transport and the rotation of Zonal Harmonics [S2, unofficial]. The specific application to differentiable shadow computation and inverse problems in volume rendering was detailed by [S1] in 2021. Zonal Harmonics were popularized by Sloan et al. (2005) for efficient rotation and projection [S2, unofficial].
+ 
+ ## Sources

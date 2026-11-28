@@ -1,0 +1,236 @@
+--- v005.md
++++ v006.md
+@@ -1,99 +1,166 @@
+ # Differentiable Mesh Refinement
+ 
+-Also called: Gradient-based mesh refinement
++Also called: Differentiable Surface Refinement, Gradient-based mesh refinement, Mesh refinement via differentiable rendering
+ 
+ ## Overview
+-Differentiable Mesh Refinement is a training strategy that adjusts the vertex positions and attributes (such as color) of a template mesh to better fit input observations, such as photographs or occupancy fields [S1, unofficial][S2]. It addresses the problem of geometric misalignment in pre-existing mesh structures by treating vertex coordinates as differentiable parameters [S1, unofficial][S2]. Unlike pose estimation, where each vertex influences many pixels, mesh optimization involves fewer pixels per vertex, making the method more sensitive to errors in image derivatives and requiring stable rendering techniques like multi-layer splatting [S1, unofficial].
++Differentiable Mesh Refinement is a technique that optimizes an explicit triangular mesh extracted from a voxel grid by adjusting vertex positions and performing adaptive subdivision or simplification based on rendering error and geometric smoothness [S2, unofficial]. It solves the problem of static mesh resolution by allowing the mesh topology and geometry to adapt to the visual complexity of the scene during training, thereby reducing wasted resolution in empty regions and improving surface quality [S2, unofficial]. Unlike sibling methods that rely solely on recursive geometric subdivision or fixed 3-root-2 patterns, this method uses differentiable rendering gradients to drive both vertex optimization and topology changes [S2, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-- **Input:** Initial mesh vertices $V_0$ (positions), camera parameters, and input images.
+-- **Output:** Optimized mesh vertices $V$ and associated attributes that minimize the difference between rendered and input observations [S1, unofficial].
++The method operates in two coupled phases: differentiable vertex optimization to improve surface fit, and adaptive topology modification (subdivision/simplification) based on error metrics.
+ 
+-**Data Structures:**
+-- **Vertices:** A PyTorch `Parameter` tensor of shape $(N, 3)$, where $N$ is the number of vertices. Initialized as `v = torch.nn.Parameter(v0.clone())` [S1, unofficial].
+-- **Faces:** A static tensor of shape $(M, 3)$ containing vertex indices for each triangle [S1, unofficial].
+-- **Optimizer:** RMSprop optimizer configured with learning rate $lr=10^{-5}$ [S1, unofficial].
++### Inputs and Outputs
++*   **Inputs**: Initial voxel grid density field, camera poses, input images.
++*   **Outputs**: Refined explicit triangular mesh with optimized vertex positions and attributes.
+ 
+-**Algorithm Steps:**
+-1. **Initialization:** Initialize vertices and optimizer [S1, unofficial].
+-2. **Iteration Loop:** Iterate through `self.refinement_step` steps [S1, unofficial].
+-3. **Face Sampling:** Subsample faces in batches of size `self.refine_max_faces` to manage memory [S1, unofficial]. For each batch:
+-    a. Sample points on the triangle surface using a Dirichlet distribution: $\epsilon \sim \text{Dirichlet}((0.5, 0.5, 0.5))$, then compute $p_{\text{face}} = \sum_{i=0}^{2} \epsilon_i v_i$ [S1, unofficial].
+-    b. Compute the geometric face normal: $v_1 = v_1 - v_0$, $v_2 = v_2 - v_1$, $n_{\text{geo}} = v_1 \times v_2$, normalized as $n_{\text{geo}} / (\|n_{\text{geo}}\| + 10^{-10})$ [S1, unofficial].
+-4. **Neural Field Query:** Query the neural network for scalar field values at $p_{\text{face}}$ using `torch.sigmoid(self.model.decode(p, c).logits)`, splitting large batches into chunks of 20,000 points to avoid memory limits [S1, unofficial].
+-5. **Target Normal Computation:** Compute the target normal via automatic differentiation: $n_{\text{target}} = -\nabla_p f(p)$, normalized [S1, unofficial].
+-6. **Loss Calculation:** Combine field value proximity to a threshold and normal alignment: $L_{\text{target}} = \text{mean}((f(p) - \text{threshold})^2)$, $L_{\text{normal}} = \text{mean}(\|n_{\text{geo}} - n_{\text{target}}\|^2)$, combined as $L = L_{\text{target}} + 0.01 \cdot L_{\text{normal}}$ [S1, unofficial].
+-7. **Optimization Step:** Backpropagate and update vertices: `loss.backward()` followed by `optimizer.step()` [S1, unofficial].
++### Data Structures
++*   **Mesh**: Defined by vertex positions $V \in \mathbb{R}^{N_v \times 3}$ and face indices $F \in \mathbb{Z}^{N_f \times 3}$.
++*   **Vertex Parameters**: Vertex positions are stored as trainable PyTorch parameters [S1, unofficial].
++*   **Error Metrics**: Per-face rendering error $E_{render}$ and normal angle $A_{normal}$ are tracked [S2, unofficial].
+ 
+-**Pseudocode:**
++### Steps
++1.  **Initialization**:
++    *   Extract an initial explicit mesh from the voxel grid density field using Marching Cubes [S2, unofficial].
++    *   Initialize vertex positions as trainable parameters: $v = \text{torch.nn.Parameter}(v_0.\text{clone}())$, where $v_0$ are the initial positions [S1, unofficial].
++    *   Initialize an optimizer (e.g., RMSprop) for vertex updates [S1, unofficial].
++
++2.  **Differentiable Rasterization and Optimization**:
++    *   Perform differentiable rasterization on the current mesh to obtain ray-surface intersections [S2, unofficial].
++    *   Query the voxel representation (or neural field) for appearance/depth at these intersection positions [S2, unofficial].
++    *   Compute the rendering loss between the rendered output and the input image [S2, unofficial].
++    *   Backpropagate the loss to update vertex offsets and appearance attributes [S2, unofficial].
++
++3.  **Error and Geometry Calculation**:
++    *   For each face, compute the rendering error $E_{render}$ [S2, unofficial].
++    *   Compute the geometric face normal $n_f$ for each face. Given vertices $v_0, v_1, v_2$:
++        $$ v_1 = v_1 - v_0 $$
++        $$ v_2 = v_2 - v_1 $$
++        $$ n_f = \frac{v_1 \times v_2}{\|v_1 \times v_2\| + \epsilon} $$
++        where $\epsilon$ is a small constant (e.g., $10^{-10}$) for numerical stability [S1, unofficial].
++    *   Compute the normal angle $A_{normal}$ between adjacent faces sharing an edge [S2, unofficial].
++
++4.  **Adaptive Subdivision and Simplification**:
++    *   Calculate thresholds using percentiles of the current error and angle distributions [S2, unofficial]:
++        $$ e_{sub} = \text{percentile}(E_{render}, 90) $$
++        $$ a_{sub} = \text{percentile}(A_{normal}, 95) $$
++        $$ e_{dec} = \text{percentile}(E_{render}, 50) $$
++        $$ a_{dec} = \text{percentile}(A_{normal}, 10) $$
++    *   **Subdivision**: For faces where $E_{render} > e_{sub}$ or $A_{normal} > a_{sub}$, perform mid-point subdivision to increase face density [S2, unofficial].
++    *   **Simplification**: For faces where $E_{render} < e_{dec}$ or $A_{normal} < a_{dec}$, perform face simplification (decimation) to reduce memory usage [S2, unofficial].
++
++5.  **Iterative Refinement**:
++    *   Repeat steps 2-4 for a specified number of refinement steps. To manage memory, faces are subsampled in batches during the refinement loop [S1, unofficial].
++
++### Pseudocode
+ ```python
+-v = torch.nn.Parameter(v0.clone())
+-optimizer = optim.RMSprop([v], lr=1e-5)
++import torch
++import numpy as np
+ 
+-for step in range(self.refinement_step):
+-    for face_batch in batch_faces(self.refine_max_faces):
+-        optimizer.zero_grad()  # [G] Standard practice to clear gradients before backward pass
+-        face_vertex = v[face_batch]  # [G] Retrieve vertices for the current batch
+-
+-        eps = np.random.dirichlet((0.5, 0.5, 0.5), size=face_batch.shape[0])
+-        face_point = (face_vertex * eps[:, :, None]).sum(dim=1)
+-
+-        face_v1 = face_vertex[:, 1, :] - face_vertex[:, 0, :]
+-        face_v2 = face_vertex[:, 2, :] - face_vertex[:, 1, :]
+-        face_normal = torch.cross(face_v1, face_v2)
+-        face_normal = face_normal / (face_normal.norm(dim=1, keepdim=True) + 1e-10)
+-
+-        # Query neural field; c represents context/condition parameters [G]
+-        face_value = torch.sigmoid(self.model.decode(face_point, c).logits)
+-
+-        normal_target = -autograd.grad([face_value.sum()], [face_point], create_graph=True)[0]
+-        normal_target = normal_target / (normal_target.norm(dim=1, keepdim=True) + 1e-10)
+-
+-        loss_target = (face_value - threshold).pow(2).mean()
+-        loss_normal = (face_normal - normal_target).pow(2).sum(dim=1).mean()
+-        loss = loss_target + 0.01 * loss_normal
+-
++def differentiable_mesh_refinement(v0, voxel_model, images, cameras, num_steps=10):
++    """
++    Refine a mesh extracted from a voxel grid using differentiable rendering.
++    
++    Args:
++        v0: Initial vertex positions from Marching Cubes.
++        voxel_model: Neural network or grid querying appearance/depth.
++        images: Target images for supervision.
++        cameras: Camera parameters for rasterization.
++        num_steps: Number of refinement iterations.
++        
++    Returns:
++        Refined vertex positions and mesh faces.
++    """
++    # Initialize trainable vertices
++    v = torch.nn.Parameter(v0.clone().float())
++    optimizer = torch.optim.RMSprop([v], lr=1e-5)
++    
++    # Initial mesh faces F are derived from v0 via Marching Cubes
++    F = get_faces_from_marching_cubes(v0)
++    
++    for step in range(num_steps):
++        optimizer.zero_grad()
++        
++        # 1. Differentiable Rasterization
++        # Render mesh with current vertices v and faces F
++        rendered_image, ray_intersections = differentiable_rasterize(v, F, cameras)
++        
++        # 2. Compute Loss
++        # Query voxel model for expected appearance at intersections if needed
++        # For simplicity, assume direct pixel-wise loss
++        loss = compute_rendering_loss(rendered_image, images)
++        
++        # 3. Backpropagate to update vertices
+         loss.backward()
+         optimizer.step()
++        
++        # 4. Update Mesh Topology based on Error Metrics
++        # Re-rasterize to get per-face metrics
++        _, intersections = differentiable_rasterize(v, F, cameras)
++        
++        # Compute per-face rendering error E_render
++        E_render = compute_per_face_error(intersections, images)
++        
++        # Compute per-face normal angle A_normal
++        normals = compute_face_normals(v, F)
++        A_normal = compute_adjacent_normal_angles(normals, F)
++        
++        # Determine thresholds
++        e_sub = np.percentile(E_render, 90)
++        a_sub = np.percentile(A_normal, 95)
++        e_dec = np.percentile(E_render, 50)
++        a_dec = np.percentile(A_normal, 10)
++        
++        # Subdivision
++        faces_to_subdivide = (E_render > e_sub) | (A_normal > a_sub)
++        if faces_to_subdivide.any():
++            v, F = mid_point_subdivision(v, F, faces_to_subdivide)
++            
++        # Simplification
++        faces_to_simplify = (E_render < e_dec) & (A_normal < a_dec)
++        if faces_to_simplify.any():
++            v, F = simplify_faces(v, F, faces_to_simplify)
++            
++    return v.detach(), F
+ ```
+ 
+-**Parameters:**
+-- Learning rate: $10^{-5}$ [S1, unofficial].
+-- Normal loss weight: $0.01$ [S1, unofficial].
+-- Batch size for faces: `self.refine_max_faces` [S1, unofficial].
+-- Chunk size for neural network query: $20,000$ points [S1, unofficial].
+-- Dirichlet concentration: $(0.5, 0.5, 0.5)$ [S1, unofficial].
++### Parameters
++*   **Learning Rate**: $10^{-5}$ for vertex optimization [S1, unofficial].
++*   **Percentiles**: 90th/50th for error, 95th/10th for normal angle [S2, unofficial].
++*   **Batch Size**: Faces are processed in batches to manage GPU memory [S1, unofficial].
+ 
+-**Edge Cases and Pitfalls:**
+-- **Numerical Stability:** Epsilon ($10^{-10}$) is added to normal normalization to prevent division by zero for degenerate faces [S1, unofficial].
+-- **Memory Constraints:** Large batches are split into chunks of 20,000 to avoid out-of-memory errors during neural network queries [S1, unofficial].
+-- **Derivative Sensitivity:** Fewer pixels per vertex increase sensitivity to image derivative errors, necessitating multi-layer splatting [S1, unofficial].
++### Edge Cases and Pitfalls
++*   **Precision**: Normal computation requires epsilon addition to avoid division by zero for degenerate faces [S1, unofficial].
++*   **Boundaries**: Subdivision and simplification must maintain mesh validity (no non-manifold edges) [S2, unofficial].
++*   **Degenerate Input**: Initial Marching Cubes output may contain noisy or rough surfaces, requiring robust differentiable rasterization [S2, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Mesh Refinement via Vertex Optimization](989-mesh-refinement-via-vertex-optimization.md)
+-Mesh Refinement via Vertex Optimization adjusts the positions and attributes (such as color) of a template mesh to better fit input observations, such as photographs or occupancy fields. It addresses the problem of geometric misalignment in pre-existing mesh structures by treating vertex coordinates as differentiable parameters. Unlike pose estimation, where each vertex influences many pixels, mesh optimization involves fewer pixels per vertex, making the method more sensitive to errors in image derivatives and requiring stable rendering techniques like multi-layer splatting.
++Mesh Refinement via Vertex Optimization adjusts the positions and attributes (such as color) of a template mesh to better fit input observations, such as photographs or occupancy fields. Unlike pose estimation, where each vertex influences many pixels, mesh optimization involves fewer pixels per vertex, making the method more sensitive to errors in image derivatives and requiring stable rendering techniques like multi-layer splatting.
+ 
+ ### SubdivNet
+-SubdivNet performs a remeshing step to create a regular, hierarchical structure using self-parametrization [S2]. It enforces subdivision sequence connectivity to guarantee that every face is surrounded by exactly three adjacent faces, effectively creating a uniform mesh pyramid analogous to a 2D image pyramid [S2]. Choose it when a regular, hierarchical mesh structure is required [S2].
++SubdivNet performs a remeshing step to create a regular, hierarchical structure using self-parametrization [S3]. It enforces subdivision sequence connectivity to guarantee that every face is surrounded by exactly three adjacent faces, effectively creating a uniform mesh pyramid analogous to a 2D image pyramid [S3]. It defines a highly flexible mesh convolution operator that supports variable kernel sizes, strides, and dilations, and implements pooling and upsampling as uniform 4-to-1 face merging and 1-to-4 face splitting operations [S3].
+ 
+ ### SOAR-based Adaptive Refinement
+-An adaptive refinement scheme for crack-free mesh generation [S3]. It stores object-space error terms and bounding spheres for each 'diamond' (two cousin patches sharing a hypotenuse) [S3]. Errors and spheres are inflated to ensure parent values are at least as large as children's, and cousins agree on single error/sphere values to refine together [S3]. Choose it when crack-free adaptive terrain or mesh generation is needed [S3].
++SOAR-based Adaptive Refinement is an adaptive refinement scheme for crack-free mesh generation [S4]. It stores object-space error terms and bounding spheres for each 'diamond' (two cousin patches sharing a hypotenuse) [S4]. Errors and spheres are inflated to ensure parent values are at least as large as children's, and cousins agree on single error/sphere values to refine together [S4]. This nesting is enforced for cousins as well [S4].
++
++### Quality-based Meshing
++Quality-based Meshing identifies regions where mesh and voxel representations have comparable quality by calculating a conversion error field, allowing selective meshing of density fields [S2, unofficial]. It allocates rendering errors to spatial positions: for voxels, based on sampling weights; for mesh, at ray-surface intersections [S2, unofficial]. It accumulates errors in grids to calculate average voxel error $E_{voxel}$ and mesh error $E_{mesh}$ [S2, unofficial]. It defines a background region for contraction-based scenes: central region $[-0.5, 0.5]$, outside is background [S2, unofficial]. The conversion error is $E_{convert} = E_{mesh} - E_{voxel}$, calculated in regions where neither error is zero [S2, unofficial]. Voxels with $E_{convert} > e_{remove}$ in the background are removed, where $e_{remove} = \text{percentile}(E_{convert}, p_{remove})$ and $p_{remove}$ is typically 0.9 [S2, unofficial].
+ 
+ ## Operating characteristics
+-**Time and memory complexity:** The method uses iterative optimization with RMSprop, so time complexity depends on the number of refinement steps and the batch size of faces and points [S1, unofficial]. Memory usage is managed by subsampling faces in batches (`self.refine_max_faces`) and splitting neural network queries into chunks of 20,000 points [S1, unofficial].
+-**Measured performance with its hardware, resolution and scene:** Not given in the sources [S1, unofficial].
+-**Scaling:** Not given in the sources [S1, unofficial].
+-**Strengths and limitations:** The method provides stability through multi-layer splatting, addressing the sensitivity of image derivatives in single-layer splatting [S1, unofficial]. However, it is sensitive to derivative errors because each vertex depends on fewer pixels [S1, unofficial].
+-**When to use it and when not:** Use when fitting a parametric surface to multi-view imagery where grid-based methods are unsuitable [S1, unofficial]. Not recommended when single-layer splatting is sufficient or when computational resources are extremely limited due to the iterative optimization process [S1, unofficial].
++*   **Time Complexity**: Depends on the number of refinement steps and the cost of differentiable rasterization per step. Subdivision increases the number of faces, potentially increasing subsequent rasterization costs.
++*   **Memory Complexity**: Increases with mesh refinement (subdivision) and decreases with simplification. The voxel grid storage is also required.
++*   **Measured Performance**: Not given in the sources.
++*   **Scaling**: Scales with the number of faces and vertices. Batch processing of faces helps manage memory on small GPUs [S1, unofficial].
++*   **Strengths**: Adapts resolution to visual complexity, reduces wasted resolution in empty regions, improves surface quality via differentiable optimization [S2, unofficial].
++*   **Limitations**: Requires differentiable rendering infrastructure, sensitive to initialization, may introduce topological complexity [S2, unofficial].
++*   **When to use**: When high-fidelity surface reconstruction is needed from volumetric data, and static mesh resolution is insufficient [S2, unofficial].
++*   **When not**: When real-time performance is critical and differentiable rendering overhead is prohibitive, or when the input data is too noisy for stable gradient-based optimization.
+ 
+ ## Background
+-**Origin (who, when, which paper):** The method is described in the repository `autonomousvision/differentiable_volumetric_rendering` [S1, unofficial].
+-**History and development:** Not given in the sources [S1, unofficial].
+-**Where it is used:** It is used in differentiable volumetric rendering for fitting parametric surfaces to multi-view imagery [S1, unofficial][S2].
++Differentiable Mesh Refinement builds on the concept of differentiable rendering applied to explicit meshes. It was developed to address the limitations of static voxel-to-mesh conversion, which often results in rough surfaces or inefficient resolution distribution [S2, unofficial]. The method draws inspiration from NeRF2Mesh, which uses differentiable rendering to optimize mesh appearance and geometry [S2, unofficial]. It is used in hybrid voxel-mesh representations for real-time view synthesis, where it helps bridge the quality gap between voxel and mesh representations [S2, unofficial].
+ 
+ ## Sources
+ [S1] autonomousvision/differentiable_volumetric_rendering, https://github.com/autonomousvision/differentiable_volumetric_rendering, fetched 2026-10-26 (unofficial)
+-[S2] Recent Advances and Trends in Learning‐Based 3D Representations, https://doi.org/10.1111/cgf.70530, fetched 2026-10-26
+-[S3] On-the-fly decompression and rendering of multiresolution terrain, https://doi.org/10.1145/1730804.1730815, fetched 2026-11-01+[S2] Voxel-Mesh Hybrid Representation for Real-Time View Synthesis, https://doi.org/10.48550/arxiv.2403.06505, fetched 2026-10-26 (unofficial)
++[S3] Recent Advances and Trends in Learning‐Based 3D Representations, https://doi.org/10.1111/cgf.70530, fetched 2026-10-26
++[S4] On-the-fly decompression and rendering of multiresolution terrain, https://doi.org/10.1145/1730804.1730815, fetched 2026-11-01

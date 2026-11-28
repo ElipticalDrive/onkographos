@@ -1,0 +1,92 @@
+--- v005.md
++++ v006.md
+@@ -1,42 +1,42 @@
+ # Volume Encoding Gaussians
+-
+ Also called: Transfer Function-Agnostic 3D Gaussians for Volume Rendering
+ 
+ ## Overview
+-Volume Encoding Gaussians adapts 3D Gaussian Splatting for volume data visualization by removing per-Gaussian color and opacity attributes, training only scalar values to enable interactive transfer function application post-training [S1, unofficial]. It differs from standard Gaussian Splatting Volume Rendering by decoupling the volumetric density representation from the visual appearance, allowing dynamic remapping of scalar fields to color and opacity without retraining [S1, unofficial].
++Volume Encoding Gaussians adapts 3D Gaussian Splatting for scientific volume data visualization by decoupling the geometric representation from the material appearance [S1, unofficial]. Unlike standard 3D Gaussian Splatting which renders view-dependent RGB colors and fixed opacity, this method trains only scalar density values per Gaussian, enabling interactive, transfer-function-agnostic rendering after the training phase [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:** A set of 3D Gaussians defined by position $\mathbf{p}$, covariance matrix $\Sigma$, and a learned scalar value $s$. Camera parameters (view matrix, projection).
+-**Outputs:** A rendered 2D image with color and alpha channels determined by a user-defined transfer function applied to the projected scalar values.
++**Inputs and Outputs:**
++*   **Input:** A set of $M$ 3D Gaussians $\mathcal{G} = \{G_i\}_{i=1}^M$ initialized from volume data or point clouds. Each Gaussian $G_i$ retains the standard geometric attributes: position $\mathbf{p}_i$, rotation $\mathbf{R}_i$, and scale $\mathbf{S}_i$ [G].
++*   **Output:** A rendered image where pixel intensity is determined by the accumulated scalar density of the splatted Gaussians, modulated by a user-defined transfer function [S1, unofficial].
+ 
+ **Data Structures:**
+-Each Gaussian primitive $i$ stores:
+-- $\mathbf{p}_i \in \mathbb{R}^3$: Position.
+-- $\Sigma_i \in \mathbb{R}^{3 \times 3}$: Covariance matrix (symmetric positive definite).
+-- $s_i \in \mathbb{R}$: Learned scalar value (density proxy).
+-- Note: Color $c_i$ and opacity $\alpha_i$ are **not** stored as trainable attributes [S1, unofficial].
++The Gaussian primitive $G_i$ stores:
++*   $\mathbf{p}_i \in \mathbb{R}^3$: Position.
++*   $\mathbf{R}_i \in \mathbb{R}^{3 \times 3}$: Rotation matrix.
++*   $\mathbf{S}_i \in \mathbb{R}^{3 \times 3}$: Scale matrix.
++*   $\alpha_i \in \mathbb{R}$: **Scalar density value** (replaces standard opacity $\alpha$ and color $\mathbf{c}$).
+ 
+-**Steps:**
+-1. **Initialization:** Initialize Gaussians from volume data (e.g., via sampling or optimization against target volume slices). Optimize $\mathbf{p}_i, \Sigma_i, s_i$ to minimize reconstruction error of the scalar field [S1, unofficial].
+-2. **Projection:** For each Gaussian, compute the 2D covariance $\Sigma_{2D}$ using the view matrix $W$ and perspective Jacobian $J$ as per standard Gaussian Splatting [G]:
+-   $$ \Sigma_c = J W \Sigma W^T J^T $$
+-   $$ \Sigma_{2D} = \Sigma_c[:2, :2] $$
+-3. **Rasterization:** Project Gaussians to screen space. For each pixel $\mathbf{u}$ covered by a Gaussian's bounding box, compute the 2D Gaussian value:
+-   $$ \mathcal{G}_i(\mathbf{u}) = \exp\left(-\frac{1}{2} (\mathbf{u} - \mathbf{p}_{2D,i})^T \Sigma_{2D,i}^{-1} (\mathbf{u} - \mathbf{p}_{2D,i})\right) $$
+-4. **Scalar Accumulation:** Accumulate the weighted scalar values for each pixel. Unlike standard alpha blending which accumulates color, this step accumulates a "density" or "scalar sum" $S_{pixel}$:
+-   $$ S_{pixel} = \sum_{i \in \text{sorted}} s_i \cdot \mathcal{G}_i(\mathbf{u}) \cdot \prod_{j < i} (1 - \mathcal{G}_j(\mathbf{u})) $$
+-   *Note: The exact compositing formula may vary based on whether opacity is derived from $s_i$ or fixed. The core innovation is that $s_i$ is the primary attribute.* [S1, unofficial]
+-5. **Transfer Function Application:** Apply a user-defined transfer function $TF(s)$ to the accumulated scalar value $S_{pixel}$ to determine final color $C$ and opacity $\alpha$:
+-   $$ C = TF_{color}(S_{pixel}) $$
+-   $$ \alpha = TF_{opacity}(S_{pixel}) $$
+-   This step is performed per-pixel after rasterization, enabling interactive adjustment [S1, unofficial].
++**Method Steps:**
++1.  **Initialization:** Initialize $M$ Gaussians with geometric parameters derived from the input volume data or point cloud. Set initial scalar density $\alpha_i$ based on local data intensity or uniform initialization [S1, unofficial].
++2.  **Training:** Optimize the geometric parameters ($\mathbf{p}_i, \mathbf{R}_i, \mathbf{S}_i$) and the scalar density $\alpha_i$ using a reconstruction loss (e.g., L1 or SSIM) against ground-truth volume slices or projections. Crucially, **no color or opacity attributes are trained**; only the scalar density $\alpha_i$ is optimized [S1, unofficial].
++3.  **Rendering:**
++    a. Project each 3D Gaussian $G_i$ to 2D screen space using the standard projection pipeline [G].
++    b. Compute the 2D covariance $\mathbf{\hat{\Sigma}}_i$ [G].
++    c. For each pixel covered by the projected Gaussian, evaluate the 2D Gaussian kernel value $g_i(\mathbf{x})$ using the scalar density $\alpha_i$ as the amplitude:
++       $$ g_i(\mathbf{x}) = \alpha_i \exp\left(-\frac{1}{2} (\mathbf{x} - \mathbf{\hat{p}}_i)^T \mathbf{\hat{\Sigma}}_i^{-1} (\mathbf{x} - \mathbf{\hat{p}}_i)\right) $$
++    d. Sort Gaussians by depth and perform alpha compositing using the scalar densities. The accumulated density $C$ at a pixel is:
++       $$ C = \sum_{i \in \mathcal{O}} g_i(\mathbf{x}) \prod_{j \in \mathcal{O}, j < i} (1 - g_j(\mathbf{x})) $$
++       where $\mathcal{O}$ is the sorted order of Gaussians [S1, unofficial].
++    e. Apply a user-defined transfer function $T(\cdot)$ to the accumulated density $C$ to produce the final color:
++       $$ \mathbf{Color} = T(C) $$
++    This step is performed post-training and is interactive [S1, unofficial].
+ 
+ **Parameters:**
+-- Transfer Function: User-defined, typically piecewise linear or exponential mappings from scalar range to [0,1] for color/alpha [S1, unofficial].
+-- Scalar Range: Normalized during training, typically [0, 1] or min/max of volume data [S1, unofficial].
++*   Number of Gaussians $M$: Determined by the input data resolution and complexity. Not given in the sources.
++*   Transfer Function $T$: User-defined, mapping scalar density to RGBA. Not given in the sources.
+ 
+-**Edge Cases:**
+-- Zero scalar values: Gaussians with $s_i \approx 0$ contribute negligible density and may be culled [S1, unofficial].
+-- Transfer function discontinuities: May cause aliasing artifacts; smoothing TFs is recommended [G].
++**Edge Cases and Pitfalls:**
++*   **Precision:** Scalar density values may require floating-point precision to avoid quantization artifacts during transfer function application [G].
++*   **Boundaries:** The method assumes the scalar density accurately represents the volume's internal structure; sparse regions may require denser Gaussian initialization [G].
+ 
+ ## Subtopics
+@@ -46,11 +46,13 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Rasterization is $O(N)$ per pixel where $N$ is the number of overlapping Gaussians, similar to standard Gaussian Splatting. Transfer function application is $O(1)$ per pixel.
+-- **Memory Complexity:** Reduced compared to standard Gaussian Splatting as color and opacity attributes are removed, storing only scalar values [S1, unofficial].
+-- **Strengths:** Enables interactive exploration of volume data via dynamic transfer functions without retraining [S1, unofficial].
+-- **Limitations:** Requires a separate training phase to learn scalar values; not suitable for direct color/texture rendering without modification [S1, unofficial].
++*   **Time Complexity:** Rendering time is dominated by the rasterization of $M$ Gaussians, similar to standard 3D Gaussian Splatting, $O(M)$ per pixel [G]. The transfer function application is $O(1)$ per pixel [G].
++*   **Memory Complexity:** Storage is $O(M)$ for geometric parameters plus $O(M)$ for scalar densities, significantly less than storing RGB and opacity per Gaussian [G].
++*   **Strengths:** Enables interactive exploration of volume data via transfer functions without retraining; efficient memory usage [S1, unofficial].
++*   **Limitations:** Limited to scalar volume data; cannot directly represent view-dependent effects or complex material properties without extension [G].
++*   **When to use:** Scientific visualization of scalar fields (e.g., medical imaging, fluid dynamics) where interactive transfer function adjustment is required [S1, unofficial].
++*   **When not to use:** When view-dependent appearance or complex lighting effects are primary requirements [G].
+ 
+ ## Background
+-Originated from the work "Transfer Function-Agnostic 3D Gaussians for Volume Rendering" [S1, unofficial]. It extends the 3D Gaussian Splatting framework [G] to handle volumetric scalar fields by decoupling geometry/density from appearance.
++Originating from the implementation "Volume Encoding Gaussians: Transfer Function-Agnostic 3D Gaussians for Volume Rendering" [S1, unofficial], this method extends the 3D Gaussian Splatting framework [G] to address the limitations of fixed-color rendering in volume visualization. It allows for post-training flexibility in material representation, a common requirement in scientific visualization [S1, unofficial].
+ 
+ ## Sources

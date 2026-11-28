@@ -1,0 +1,209 @@
+--- v004.md
++++ v005.md
+@@ -4,114 +4,124 @@
+ 
+ ## Overview
+-The Average Contribution Criterion is a densification strategy for 3D Gaussian Splatting that determines whether a Gaussian should be split or cloned based on its mean blending weight per view rather than a binary view count [S1, unofficial]. It solves the problem of occlusion bias inherent in the original 3D Gaussian Splatting criterion, where fully occluded views inflate the denominator and dilute the gradient signal, leading to inefficient densification [S1, unofficial]. Unlike sibling methods such as [Multi-View Density Control Criterion](5663-multi-view-density-control-criterion.md) or [Complexity-Aware Adaptive Density Control](16126-complexity-aware-adaptive-density-control.md), it is intrinsically self-limiting and does not require external guard rails like distance scaling, producing fewer Gaussians at matched quality [S1, unofficial].
++The Average Contribution Criterion is a densification strategy for 3D Gaussian Splatting that determines whether a Gaussian should be split or cloned based on its mean blending weight per view rather than a binary view count [S1, unofficial]. It solves the problem of occlusion bias inherent in the original 3D Gaussian Splatting criterion, where fully occluded views inflate the denominator and dilute the gradient signal, leading to inefficient densification [S1, unofficial]. It sets itself apart from siblings like [Multi-View Density Control Criterion](5663-multi-view-density-control-criterion.md) and [Complexity-Aware Adaptive Density Control](16126-complexity-aware-adaptive-density-control.md) by being intrinsically self-limiting without requiring external guard rails like distance scaling, and by weighting views by their actual contribution rather than treating all observed views equally [S1, unofficial].
+ 
+ ## How it works
+-The method operates within the Adaptive Density Control loop. For each Gaussian $G_i$, it computes a scalar score $\gamma_i^{\text{Ours}}$ by aggregating positional gradients across all views in which the Gaussian contributes, normalized by the mean blending weight per view [S1, unofficial].
++The method computes a scalar score $S(G)$ for each Gaussian $G$ (indexed as $i$) by aggregating positional gradients across all views where the Gaussian contributes, normalized by the mean blending weight in those views.
+ 
+-**Inputs and Outputs:**
+-*   **Input:** The set of training views $V$, the Gaussian $G_i$ with parameters (mean $\mu_i$, covariance $\Sigma_i$, opacity $\alpha_i$, color $c_i$), and the current training loss $L$.
+-*   **Output:** A scalar densification score $\gamma_i^{\text{Ours}}$. If $\gamma_i^{\text{Ours}} > \tau$, the Gaussian is marked for densification (split or clone).
++### Inputs and Outputs
++*   **Input:** For each Gaussian $i$, the set of views $v$ where it contributes to at least one pixel. For each such view, the per-pixel blending weights $w_{i,p}$ and the gradient of the training loss $\mathcal{L}$ with respect to the Gaussian's projected screen-space mean $\mu_i$.
++*   **Output:** A scalar densification score $\gamma_i^{\text{Ours}}$. If $\gamma_i^{\text{Ours}} > \tau$, the Gaussian is marked for splitting or cloning.
+ 
+-**Data Structures:**
+-*   **Per-View Gradient $g_{i,v}$:** A 2D vector $(g_{i,v,x}, g_{i,v,y})$ representing the gradient of the loss with respect to the projected screen-space mean $\mu_i$ in view $v$.
+-*   **Per-View Mean Blending Weight $\bar{w}_{i,v}$:** A scalar representing the average contribution of the Gaussian to view $v$.
+-*   **Threshold $\tau$:** A fixed hyperparameter. Default value is $0.002$ [S1, unofficial].
++### Data Structures
++*   **Per-Gaussian State:**
++    *   `sum_grad_norm`: Accumulator for $\sum_v \|g_{i,v}\|$.
++    *   `sum_mean_weight`: Accumulator for $\sum_v \bar{w}_{i,v}$.
++*   **Per-View State (temporary during accumulation):**
++    *   `view_grad`: Vector $g_{i,v}$ for the current view.
++    *   `pixel_weights`: List of $w_{i,p}$ for pixels $p$ where $w_{i,p} > 0$.
+ 
+-**Formulas:**
+-1.  **Per-Pixel Blending Weight:**
+-    $$w_{i,p} = \alpha_{i,p} T_{i,p}$$
+-    where $\alpha_{i,p}$ is the Gaussian's opacity at pixel $p$, and $T_{i,p}$ is the accumulated transmittance from preceding Gaussians [S1, unofficial].
++### Formulas
++The core score is defined as [S1, unofficial]:
+ 
+-2.  **Per-View Gradient:**
+-    $$g_{i,v} = \sum_{p \in P_{i,v}} w_{i,p} s_{i,p}$$
+-    where $P_{i,v}$ is the set of pixels in view $v$ where $w_{i,p} > 0$, and $s_{i,p}$ is a weight-independent vector combining the photometric residual, geometric steering direction, and local contrast [S1, unofficial].
++$$
++\gamma_i^{\text{Ours}} = \frac{1}{1 + \sum_v \bar{w}_{i,v}} \sum_v \|g_{i,v}\|
++$$
+ 
+-3.  **Per-View Mean Blending Weight:**
+-    $$\bar{w}_{i,v} = \frac{1}{N_{i,v}} \sum_{p \in P_{i,v}} w_{i,p}$$
+-    where $N_{i,v} = |P_{i,v}|$ is the number of pixels in view $v$ where the Gaussian contributes [S1, unofficial].
++Where:
++*   $g_{i,v}$ is the per-view gradient vector, computed as:
++    $$
++    g_{i,v} = \sum_p w_{i,p} s_{i,p}
++    $$
++    Here, $s_{i,p}$ is a weight-independent vector combining the photometric residual, geometric steering direction, and local contrast of the Gaussian's color against the background [S1, unofficial].
++*   $w_{i,p}$ is the blending weight for pixel $p$ in view $v$:
++    $$
++    w_{i,p} = \alpha_{i,p} T_{i,p}
++    $$
++    where $\alpha_{i,p}$ is the Gaussian's opacity and $T_{i,p}$ is the transmittance [S1, unofficial].
++*   $\bar{w}_{i,v}$ is the mean blending weight for Gaussian $i$ in view $v$:
++    $$
++    \bar{w}_{i,v} = \frac{1}{N_{i,v}} \sum_p w_{i,p}
++    $$
++    where $N_{i,v}$ is the number of pixels in view $v$ where Gaussian $i$ contributes ($w_{i,p} > 0$) [S1, unofficial].
+ 
+-4.  **Densification Score:**
+-    $$\gamma_i^{\text{Ours}} = \frac{1}{1 + \sum_{v \in V} \bar{w}_{i,v}} \sum_{v \in V} \|g_{i,v}\|$$
+-    The denominator includes a floor constant of $1$ to prevent unbounded scores for rarely observed Gaussians [S1, unofficial].
++### Parameters
++*   **Densification Threshold ($\tau$):** 0.002. This value is fixed across all experiments, calibrated once on the Mip-NeRF360 sweep subset (bicycle, bonsai, counter, garden) to optimize PSNR/SSIM/GMSD [S1, unofficial].
++*   **Denominator Floor:** 1. Added to the sum of mean blending weights to prevent unbounded scores for rarely observed Gaussians [S1, unofficial].
+ 
+-**Pseudocode:**
++### Pseudocode
++The following algorithm computes the score for a single Gaussian $i$ given the gradients and blending weights from all relevant views.
++
+ ```python
+-def compute_average_contribution_score(Gaussian_i, Views):
++def compute_average_contribution_score(gauss_i, views):
+     """
+-    Computes the densification score for a Gaussian using the Average Contribution Criterion.
++    Computes the Average Contribution Criterion score for Gaussian i.
+     
+     Args:
+-        Gaussian_i: The 3D Gaussian object containing parameters and methods to project to screen space.
+-        Views: A list of camera views (intrinsics, extrinsics, image data) for the current training step.
++        gauss_i: Object containing Gaussian properties (not directly used in score calc).
++        views: List of view indices v where gauss_i contributes to at least one pixel.
+         
+     Returns:
+-        gamma: The scalar densification score.
++        float: The densification score gamma_i_Ours.
+     """
+-    total_gradient_magnitude = 0.0
+-    sum_mean_blending_weights = 0.0
++    sum_grad_norm = 0.0
++    sum_mean_weight = 0.0
+     
+-    for view in Views:
+-        # 1. Project Gaussian to screen space for this view
+-        # This yields the projected mean mu_proj, covariance Sigma_proj, and opacity alpha_proj
+-        # for the pixels where the Gaussian has non-negligible support.
+-        # We identify the set of pixels P_i_v where w_i_p > 0.
+-        pixels, w_values = Gaussian_i.project_and_rasterize(view)
++    for v in views:
++        # 1. Compute per-view gradient g_{i,v}
++        # g_{i,v} is the sum of weight-independent vectors s_{i,p} scaled by blending weights w_{i,p}
++        # s_{i,p} is derived from photometric residual, geometric steering, and local contrast.
++        # w_{i,p} = alpha_{i,p} * T_{i,p}
+         
+-        if len(pixels) == 0:
+-            continue
++        view_gradient = Vector2(0.0, 0.0)
++        sum_weights = 0.0
++        pixel_count = 0
++        
++        # Iterate over all pixels p where Gaussian i contributes in view v
++        for p in gauss_i.contributing_pixels_in_view[v]:
++            w_ip = gauss_i.blending_weight(p, v) # alpha * T
++            s_ip = gauss_i.weight_independent_gradient_vector(p, v) # Derived from loss gradient and weights
+             
+-        N_i_v = len(pixels)
++            view_gradient += w_ip * s_ip
++            sum_weights += w_ip
++            pixel_count += 1
++            
++        # 2. Calculate mean blending weight w_bar_{i,v}
++        if pixel_count > 0:
++            w_bar = sum_weights / pixel_count
++        else:
++            w_bar = 0.0
++            
++        # 3. Accumulate norms and mean weights
++        sum_grad_norm += norm(view_gradient)
++        sum_mean_weight += w_bar
+         
+-        # 2. Compute per-pixel blending weights w_i_p = alpha_i_p * T_i_p
+-        # T_i_p is the accumulated transmittance from previous Gaussians in the depth-sorted list.
+-        # This requires access to the current depth buffer or transmittance buffer from the rasterizer.
+-        # [G] Implementation note: In a standard splatting rasterizer, T_i_p is computed during the 
+-        # forward pass. Here we assume w_values contains the final w_i_p = alpha_i_p * T_i_p.
++    # 4. Compute final score with denominator floor
++    # Denominator is 1 + sum of mean blending weights
++    denominator = 1.0 + sum_mean_weight
++    
++    if denominator == 0:
++        # Should not happen if views list is non-empty and floor is 1, 
++        # but guard against division by zero if views is empty.
++        return 0.0
+         
+-        # 3. Compute mean blending weight for this view
+-        mean_blending_weight = sum(w_values) / N_i_v
+-        sum_mean_blending_weights += mean_blending_weight
+-        
+-        # 4. Compute per-view gradient g_i_v
+-        # g_i_v is the gradient of the loss L with respect to the projected screen-space mean mu_i.
+-        # It factors into sum(w_i_p * s_i_p).
+-        # [G] Implementation note: This gradient is typically available from the backward pass of the 
+-        # rasterizer. It is a 2D vector (dx, dy) in screen space.
+-        gradient_vector = Gaussian_i.get_gradient_for_view(view)
+-        
+-        # 5. Accumulate gradient magnitude
+-        total_gradient_magnitude += magnitude(gradient_vector)
+-        
+-    # 6. Compute final score with floor constant 1
+-    gamma = total_gradient_magnitude / (1.0 + sum_mean_blending_weights)
++    score = sum_grad_norm / denominator
+     
+-    return gamma
++    return score
+ ```
+ 
+-**Parameters:**
+-*   **Densification Threshold $\tau$:** $0.002$. This value was calibrated on the Mip-NeRF360 sweep subset (bicycle, bonsai, counter, garden) and kept fixed for all experiments [S1, unofficial].
+-*   **Denominator Floor:** $1$. This constant ensures that rarely observed Gaussians do not receive unbounded scores, preventing training divergence [S1, unofficial].
+-
+-**Edge Cases and Pitfalls:**
+-*   **Divergence without Floor:** Without the denominator floor ($1$), Gaussians with $\sum_v \bar{w}_{i,v} \to 0$ (rarely observed) would receive unbounded scores, causing training to diverge [S1, unofficial].
+-*   **Occlusion Bias:** Unlike the original 3DGS criterion which weights every view equally regardless of visibility, this criterion weights views by their actual contribution, preventing occluded views from diluting the average [S1, unofficial].
+-*   **Comparison to PixelGS:** The raw pixel-count criterion (PixelGS without distance scaling) overdensifies to ~6.6M Gaussians and diverges on large Zip-NeRF scenes. PixelGS with distance scaling suppresses near-object detail because it relies on scene extent, which is unreliable on large scenes [S1, unofficial].
++### Edge Cases and Pitfalls
++*   **Denominator Floor:** Without the constant floor of 1 in the denominator, rarely observed Gaussians (where $\sum_v \bar{w}_{i,v} \to 0$) would receive unbounded scores, causing training divergence [S1, unofficial].
++*   **Occlusion Bias:** Unlike the original 3D Gaussian Splatting criterion which weights every view equally regardless of visibility, this criterion weights views by their actual contribution, preventing occluded views from diluting the average [S1, unofficial].
++*   **Threshold Sensitivity:** Over-densification (e.g., threshold 0.001) lowers PSNR, while under-densification (e.g., threshold 0.004) raises LPIPS [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The criterion requires a forward rasterization pass to compute blending weights and a backward pass to compute gradients for each Gaussian per view. This is comparable to the standard 3DGS densification cost but avoids the additional scene extent calculations required by distance scaling [S1, unofficial].
+-*   **Memory Complexity:** No additional memory structures are required beyond those used for standard gradient accumulation and blending weight storage [S1, unofficial].
+-*   **Measured Performance:**
+-    *   **Zip-NeRF (30k iterations):** 25.81 PSNR, 0.830 SSIM, 0.330 LPIPS, 0.106 GMSD, using 1.133 million Gaussians in 29.9 minutes [S1, unofficial].
+-    *   **Zip-NeRF (210k iterations):** 26.60 PSNR, 0.852 SSIM, 0.282 LPIPS, 0.087 GMSD, using 2.495 million Gaussians in 262.9 minutes [S1, unofficial].
+-    *   **Zip-NeRF (300k iterations):** Gaussian count stays bounded at 2.75M while continuing to improve in LPIPS and GMSD [S1, unofficial].
+-    *   **Deep Blending (Reset):** 29.90 PSNR, 0.902 SSIM, 0.231 LPIPS using 1.656M Gaussians [S1, unofficial].
+-    *   **Deep Blending (Decay):** 30.03 PSNR, 0.905 SSIM, 0.234 LPIPS using 0.894M Gaussians [S1, unofficial].
+-    *   **Calibration Subset (Mip-NeRF360):** At threshold 0.002, achieves PSNR 28.31, SSIM 0.875, LPIPS 0.160, GMSD 0.073, and Gaussian count 1.79M [S1, unofficial].
+-*   **Scaling:** The method is intrinsically self-limiting. On large Zip-NeRF scenes, it avoids the catastrophic overdensification seen in PixelGS (which crashes at ~16.8M Gaussians) and maintains a bounded count (~2.75M at 300k iterations) [S1, unofficial].
+-*   **Strengths:** Produces the fewest Gaussians (roughly 55–75% of other criteria's counts) at matched quality. It is occlusion-aware without explicit visibility tests and does not rely on unreliable scene extent metrics [S1, unofficial].
+-*   **Limitations:** Requires recalibration of the threshold due to the new scale. The criterion is sensitive to the choice of the floor constant, though a value of 1 is robust [S1, unofficial].
++*   **Time Complexity:** The score computation requires iterating over all pixels where the Gaussian contributes across all views. This is proportional to the total number of splats rendered for the Gaussian, which is typically small compared to the total pixel count.
++*   **Memory Complexity:** Requires storing per-view gradient accumulators and mean blending weights per Gaussian. No additional large data structures are needed.
++*   **Measured Performance:** On Zip-NeRF scenes with a 30k iteration schedule, the method achieves 25.81 PSNR, 0.830 SSIM, 0.330 LPIPS, and 0.106 GMSD using 1.133 million Gaussians in 29.9 minutes [S1, unofficial]. On a 210k iteration schedule, it achieves 26.60 PSNR, 0.852 SSIM, 0.282 LPIPS, and 0.087 GMSD using 2.495 million Gaussians in 262.9 minutes [S1, unofficial]. At 300k iterations, the Gaussian count stays bounded at 2.75M while continuing to improve in LPIPS and GMSD [S1, unofficial].
++*   **Strengths:** It is intrinsically self-limiting, producing the fewest Gaussians (roughly 55–75% of other criteria's counts) at matched quality [S1, unofficial]. It avoids the instability of raw pixel-count criteria (which can overdensify to >16.8M Gaussians and crash) and the suppression of detail by distance scaling [S1, unofficial].
++*   **Limitations:** It requires a one-time recalibration of the densification threshold (set to 0.002) due to the change in score scale [S1, unofficial].
+ 
+ ## Background
+-The Average Contribution Criterion was introduced in the paper "Counting Contributions, Not Views: Occlusion-Aware Densification for 3D Gaussian Splatting" [S1, unofficial]. It addresses limitations in the original 3D Gaussian Splatting densification strategy, which averages positional gradients across observed views without accounting for the visibility of those views [S1, unofficial]. The method was developed to improve efficiency and robustness on occlusion-heavy scenes, such as those in the Zip-NeRF dataset [S1, unofficial].
++The Average Contribution Criterion was introduced in the paper "Counting Contributions, Not Views: Occlusion-Aware Densification for 3D Gaussian Splatting" [S1, unofficial]. It addresses limitations in the original 3D Gaussian Splatting densification strategy, which averages positional gradients across observed views without accounting for the visibility of the Gaussian in those views. The method was developed to provide a more faithful measure of observation by using mean blending weights, which are independent of screen-space footprint and occlusion-aware.
+ 
+ ## Sources

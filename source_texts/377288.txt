@@ -1,0 +1,830 @@
+When using the render_data method, I noticed the following two issues when working with the attached minimal working example at bottom: The depth option appears to only return half of the expected depth. I need to set frame_count to 2, o...
+
+Understanding the depth returned by render_data · Issue #125 · owl-project/NVISII · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Understanding the depth returned by render_data #125
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Understanding the depth returned by render_data#125
+Copy link
+Labels
+bugSomething isn't workingSomething isn't working
+Description
+Neburski
+opened on Sep 7, 2021
+Issue body actions
+When using the render_data method, I noticed the following two issues when working with the attached minimal working example at bottom:
+The depth option appears to only return half of the expected depth.
+I need to set frame_count to 2, otherwise I received a "depth" of 0.
+Either I'm not understanding the 'depth' option properly or incorrectly configuring the ray tracer or could there be a bug?
+Short explanation of the minimal working example
+A plane is placed at a specific distance (2 m) from the camera.
+The scene is sampled with 1 ray / pixel where the ray is going through the center of the pixels.
+The render_data method has the options argument set to "depth".
+frame_count = 2 otherwise I have a depth of 0
+At the end of the script, it plots the depth and the primary ray lengths and as can be seen from those plots the resulting depth is 1 m instead of the expected 2 m.
+Details about my setup
+I compiled NVISII from scratch using the following:
+OS: windows 10
+IDE: Visual Studio 2019
+CUDA: 11.4
+Optix, SWIG, OWL, ...: used the version 'shipped' with NVISII.
+Compiled the X86-Release build.
+I'm more familiar with Linux systems, however, the NVIDIA GPU I have available is currently on a windows only system. I'm not able to build the Debug version to use Nsight (mostly due to swig requiring the python debugging library? Some pointers would be appreciated).
+Feel free to request more information.
+Minimal working example.
+```
+import os
+import nvisii
+import numpy as np
+import math
+import matplotlib.pyplot as plt
+plt.rcParams["figure.autolayout"] = True
+
+width = 500
+height = 500
+
+nvisii.initialize(headless=True, verbose=True, lazy_updates = True)
+
+camera = nvisii.entity.create(
+    name = "camera",
+    transform = nvisii.transform.create("camera"),
+    camera = nvisii.camera.create(
+        name = "camera",
+        aspect = float(width)/float(height)
+    )
+)
+
+# Place the camera at the origin looking in the positive z-direction.
+# y-axis is the up direction in the final 'iamge data'
+camera.get_transform().look_at(
+    at = (0,0,1),
+    up = (0,1,0),
+    eye = (0,0,0)
+)
+nvisii.set_camera_entity(camera)
+
+# Create a scene to use for exporting segmentations
+plane = nvisii.entity.create(
+    name="plane",
+    mesh = nvisii.mesh.create_plane("plane", size=(1, 1)),
+    transform = nvisii.transform.create("plane"),
+    material = nvisii.material.create("plane")
+)
+plane_distance = 2
+plane.get_material().set_roughness(1.0)
+plane.get_transform().set_position((0,0,plane_distance))
+plane.get_transform().set_scale((1,1,1))
+
+nvisii.set_dome_light_intensity(0)
+
+# We only use primary ray for the center of each pixel. This results in 1 ray /
+# pixel.
+nvisii.sample_pixel_area(
+    x_sample_interval = (.5, .5),
+    y_sample_interval = (.5, .5)
+)
+
+depth_array = nvisii.render_data(
+    width=int(width),
+    height=int(height),
+    start_frame=0,
+    frame_count=2, # When this is 1, we get all 0 ray lengths
+    bounce=int(0),
+    options="depth"
+)
+depth_array = np.array(depth_array).reshape(height,width,4)
+depth_array = np.flipud(depth_array)
+# save the segmentation image
+
+
+def convert_from_uvd(u, v, d,fx,fy,cx,cy):
+    x_over_z = (cx - u) / fx
+    y_over_z = (cy - v) / fy
+    z = d / np.sqrt(1. + x_over_z**2 + y_over_z**2)
+    x = x_over_z * z
+    y = y_over_z * z
+    return x, y, z
+
+xyz = []
+intrinsics = camera.get_camera().get_intrinsic_matrix(width,height)
+
+# Convert the depth / pixel to xyz coordinates
+for i in range(height):
+    for j in range(width):
+        x,y,z = convert_from_uvd(i,j, depth_array[i,j,0],
+            intrinsics[0][0], intrinsics[1][1], intrinsics[2][0],intrinsics[2][1])
+        xyz.append([x,y,z])
+
+pts = np.array(xyz).reshape(width, height, -1)
+ray_len = np.linalg.norm(pts, axis=-1)
+ray_len = np.where(ray_len>100, np.nan, ray_len)
+
+fig, axs = plt.subplots(1, 2)
+img = axs[0].imshow(pts[..., 2], cmap=plt.cm.viridis_r)
+axs[0].set_title(f"Depth: minimum = {np.min(pts[..., 2]):.2f} [m] v.s. {plane_distance=:.2f} [m]")
+fig.colorbar(img, ax=axs[0], label="Depth [m]")
+img = axs[1].imshow(ray_len, cmap=plt.cm.viridis_r)
+axs[1].set_title(f"Primary Ray Lengths: minimum = {np.min(ray_len):.2f} [m] v.s. {plane_distance=:.2f} [m]")
+fig.colorbar(img, ax=axs[1], label="Ray Length [m]")
+
+fig.canvas.manager.full_screen_toggle()
+for ax in axs.flatten():
+    ax.set_xlabel("X Pixel [#]")
+    ax.set_ylabel("Y Pixel [#]")
+plt.show(block = True)
+
+# let's clean up the GPU
+nvisii.deinitialize()
+```
+Activity
+natevm commented on Sep 10, 2021
+natevm
+on Sep 10, 2021
+Collaborator
+More actions
+Hey @Neburski, could you confirm that the raw depth value coming from render_data is 2 meters at the center pixel? At first glance, I believe this is an issue with how you are using the camera intrinsics matrix. Note that the depth returned by nvisii is the distance from the ray origin, which is 0,0,0 in your case. These values cannot be transformed using the intrinsics matrix, since these distances do not start from a near plane.
+Instead, I recommend using the "position" option to get XYZ coordinates in world space, rather than doing this transformation yourself from depth.
+Neburski commented on Sep 10, 2021
+Neburski
+on Sep 10, 2021
+ContributorAuthor
+More actions
+Hey @natevm,
+Thank you for your response. The depth as you described is also how I understood it and is what I'm currently after. As I'm still learning the NVISII code base and learning how to use Optix, I'm at bit at a loss as to why I'm only seeing half the depth I'm expecting. In any case, I hope we both can figure out where it's going wrong.
+First, my script is based on the NVISII example: 19_depth_map_to_point_cloud.py. I used this example to learn how to properly place objects in the scene.
+When I use the "position" option, I obtain the correct location of the plane at 2 m. That is good news! See the green boxes in the next figure which state the location of the plane when using the "position" option. The red boxes is when I use the "depth" option.
+However, I'm still confused why the depth option doesn't return the expected depth. My understanding is that it should return the ray length from the camera (ray origin) at (0, 0, 0) until intersection with the plane (closest hit), but I'm only getting half of what I'm expecting.
+The reason why I'm mostly interested in the "depth" option is that this allows me to obtain the ray length from origin to the closest hit. With the "position" option, I would still need to account for the location of the camera. This is easily checked by placing the camera 1 m backwards, i.e., eye = (0, 0, -1) and at = (0, 0, 0). For that situation, I would expect a depth of 3 m, but when using the "position" option, the "z" coordinate is at 2 m. See figure below:
+Also to clarify, the ray_len array which I calculate in my script has the same values as the depth_array[..., 0] array (aside floating point errors). The calculations with the intrinsics matrix do not seem to introduce the error.
+I am trying to find in the NVISII code where the "depth" is calculated and stored, i.e., where the payload.tHit is being saved. Do you have any pointers on how I can debug this where I 'step' through the process of a single ray?
+Also, why do I need to set the frame_count to 2? I'm primarily only interested in a single frame (for now).
+Finally my updated script to reproduce the figures I posted above (for the expected depth at 3 m).
+```
+import os
+import nvisii
+import numpy as np
+import math
+import matplotlib.pyplot as plt
+plt.rcParams["figure.autolayout"] = True
+
+width = 500
+height = 500
+
+nvisii.initialize(headless=True, verbose=True, lazy_updates = True)
+
+camera = nvisii.entity.create(
+    name = "camera",
+    transform = nvisii.transform.create("camera"),
+    camera = nvisii.camera.create(
+        name = "camera",
+        aspect = float(width)/float(height)
+    )
+)
+
+# Place the camera at the origin looking in the positive z-direction.
+# y-axis is the up direction in the final 'iamge data'
+camera.get_transform().look_at(
+    at = (0,0,0),
+    up = (0,1,0),
+    eye = (0,0,-1)
+)
+nvisii.set_camera_entity(camera)
+
+# Create a scene to use for exporting segmentations
+plane = nvisii.entity.create(
+    name="plane",
+    mesh = nvisii.mesh.create_plane("plane", size=(2, 2)),
+    transform = nvisii.transform.create("plane"),
+    material = nvisii.material.create("plane")
+)
+plane_distance = 2
+plane.get_material().set_roughness(1.0)
+plane.get_transform().set_position((0,0,plane_distance))
+plane.get_transform().set_scale((1,1,1))
+
+nvisii.set_dome_light_intensity(0)
+
+# We only use primary ray for the center of each pixel. This results in 1 ray /
+# pixel.
+nvisii.sample_pixel_area(
+    x_sample_interval = (.5, .5),
+    y_sample_interval = (.5, .5)
+)
+
+depth_array = nvisii.render_data(
+    width=int(width),
+    height=int(height),
+    start_frame=0,
+    frame_count=2, # When this is 1, we get all 0 ray lengths
+    bounce=int(0),
+    options="depth"
+)
+depth_array = np.array(depth_array).reshape(height,width,4)
+depth_array = np.flipud(depth_array)
+# save the segmentation image
+
+xyz_dat = nvisii.render_data(
+    width=int(width),
+    height=int(height),
+    start_frame=0,
+    frame_count=2, # When this is 1, we get all 0 ray lengths
+    bounce=int(0),
+    options="position"
+)
+xyz_dat = np.array(xyz_dat).reshape(height,width,4)
+xyz_dat = np.flipud(xyz_dat)
+# The following line calculates ray lenghts from the origin which in our case
+# is the distance between camera origin and plane intersection points.
+# The xyz_dat array appears to be working with homogeneous coordinates, thus we
+# should divide the XYZ coordinates by the forth coordinates to appropriately
+# scale the XYZ coordinates.
+xyz_depth = np.linalg.norm(xyz_dat[..., :3]/xyz_dat[..., 3, np.newaxis], axis=-1)
+
+
+def convert_from_uvd(u, v, d,fx,fy,cx,cy):
+    x_over_z = (cx - u) / fx
+    y_over_z = (cy - v) / fy
+    z = d / np.sqrt(1. + x_over_z**2 + y_over_z**2)
+    x = x_over_z * z
+    y = y_over_z * z
+    return x, y, z
+
+xyz = []
+intrinsics = camera.get_camera().get_intrinsic_matrix(width,height)
+
+# Convert the depth / pixel to xyz coordinates
+for i in range(height):
+    for j in range(width):
+        x,y,z = convert_from_uvd(i,j, depth_array[i,j,0],
+            intrinsics[0][0], intrinsics[1][1], intrinsics[2][0],intrinsics[2][1])
+        xyz.append([x,y,z])
+
+pts = np.array(xyz).reshape(width, height, -1)
+ray_len = np.linalg.norm(pts, axis=-1)
+ray_len = np.where(ray_len>100, np.nan, ray_len)
+
+fig, axs = plt.subplots(2, 2)
+
+img = axs[0, 0].imshow(pts[..., 2], cmap=plt.cm.viridis_r)
+axs[0, 0].set_title(f"Raw Depth: avg = {np.mean(depth_array[..., 0]):.2f} [m] v.s. {plane_distance=:.2f} [m]")
+fig.colorbar(img, ax=axs[0, 0], label="Raw Depth [m]")
+
+img = axs[0, 1].imshow(xyz_dat[..., 2], cmap=plt.cm.viridis_r)
+axs[0, 1].set_title(f"Raw Depth from XYZ: avg_z = {np.mean(xyz_dat[..., 2]):.2f} [m] v.s. {plane_distance=:.2f} [m]")
+fig.colorbar(img, ax=axs[0, 1], label="Raw Depth from XYZ [m]")
+
+img = axs[1, 0].imshow(xyz_depth, cmap=plt.cm.viridis_r)
+axs[1, 0].set_title(f"Primary Ray Lengths from XYZ: minimum = {np.min(xyz_depth):.2f} [m] v.s. {plane_distance=:.2f} [m]")
+fig.colorbar(img, ax=axs[1, 0], label="Ray Length from XYZ [m]")
+
+img = axs[1, 1].imshow(ray_len, cmap=plt.cm.viridis_r)
+axs[1, 1].set_title(f"Primary Ray Lengths: minimum = {np.min(ray_len):.2f} [m] v.s. {plane_distance=:.2f} [m]")
+fig.colorbar(img, ax=axs[1, 1], label="Ray Length [m]")
+
+fig.canvas.manager.full_screen_toggle()
+for ax in axs.flatten():
+    ax.set_xlabel("X Pixel [#]")
+    ax.set_ylabel("Y Pixel [#]")
+plt.show(block = True)
+
+# let's clean up the GPU
+nvisii.deinitialize()
+```
+Neburski commented on Sep 10, 2021
+Neburski
+on Sep 10, 2021
+ContributorAuthor
+More actions
+Apologies for the double post, I had a better look at the OPTIX_RAYGEN_PROGRAM(rayGen)() function in the path_tracer.cu file and it appears the the payload.tHit is being saved using the saveGeometricRenderData function, see at the bottom of the screenshot below.
+I only have a 'basic' understanding about how Optix works (I'm still learning), but when looking at all the OPTIX_CLOSEST_HIT_PROGRAM in the NVISII code base, payload.tHit = optixGetRayTmax() which seems to indicate that the saved depth is calculated by Optix. I don't find any code in NVISII, nor in owl::traceRay, which adjusts this value before it is being saved.
+In any case, looking at line 915 (see screenshot above), and considering that the "position" option for render_data will save hit_p as the xyz coordinates for the hit points (38 lines lower), hit_p = ray_origin + tHit * ray_dir. So, as a test, I also used the option "ray_direction" to obtain the ray direction and mimic the calculation of hit_p which still results in half the depth. I'm quite perplexed because I can't find any location that 'explains' this factor of 2.
+Neburski commented on Sep 10, 2021
+Neburski
+on Sep 10, 2021
+ContributorAuthor
+More actions
+Some more digging.
+So, my understanding is that the saved hit_p is not as I though in previous post:
+I'm assuming that in my case, it is going into the loadVertexMeshData because I have used mesh.create_plane to create the object. In that case, the hit_p which is being saved (using "position"), is not calculated using the t_hit directly. It is based on the barycentrics returned by optix, i.e., the line prd.barycentrics = optixGetTriangleBarycentrics(); in OPTIX_CLOSEST_HIT_PROGRAM(TriangleMesh)().
+Is it possible that Optix has a different internal representation for the geometry than I expect?
+Should the "depth" based on the optixGetRayTmax() need to be adjusted using the prd.localToWorld transformation before it will make sense 'to me'?
+natevm commented on Sep 10, 2021
+natevm
+on Sep 10, 2021
+Collaborator
+More actions
+The code there is computing a more accurate hit position. The hit distance given by OptiX is lower in precision, so by recomputing the hit position via barycentrics, that increases the accuracy of the origin for the next ray.
+It shouldn’t differ from the hit distance derived position, but I suppose it’s possible that there could be some race condition somehow where the OptiX geometry is out of sync with the latest object transform.
+i personally suspect your convert_from_uvd is making an incorrect assumption that you can transform the depth values by an intrinsic matrix. You cannot, because the depth values returned by nvisii do not reside in normalized device coordinates. I think you’ve copied over some logic from a rasterizer, but ray traced depths work differently.
+here’s a picture to illustrate the difference:
+the left shows what I believe you expect the depth values to be for your intrinsics matrix math, but the distances returned by nvisii are curved as shown on the right.
+natevm commented on Sep 10, 2021
+natevm
+on Sep 10, 2021
+Collaborator
+More actions
+natevm commented on Sep 10, 2021
+natevm
+on Sep 10, 2021
+Collaborator
+More actions
+With ray tracing, rays are traced in world space, and the rays are only guided by the inverse of the intrinsics matrix to determine field of view, but hit depths do not necessarily follow the near plane of this frustum anymore. With a rasterizer, hit depth is with respect from each triangle to each individual pixel on the near plane, while in a ray tracer there is no near plane, and instead it’s the distance from the hit object to the origin of the ray. The later definition is required to handle secondary rays, which are required for reflections / refractions, and do not follow an intrinsics matrix.
+Neburski commented on Sep 10, 2021
+Neburski
+on Sep 10, 2021
+ContributorAuthor
+More actions
+i personally suspect your convert_from_uvd is making an incorrect assumption that you can transform the depth values by an intrinsic matrix. You cannot, because the depth values returned by nvisii do not reside in normalized device coordinates. I think you’ve copied over some logic from a rasterizer, but ray traced depths work differently.
+Not really. The convert_from_uvd is from nvisii/examples/19_depth_map_to_point_cloud.py.
+This is a screenshot from the relevant parts of this example. I only copied those lines.
+The depths, I have been looking at are the ones in the depth_array which comes directly from render_data (they are essentially the tHit values from Optix) and the ones I calculated in ray_len (which used the convert_from_uvd). As a sanity check, I compared those two values and they are identical.
+I have no knowledge about how rasterizers work, I only know about ray tracers, although I'm certainly not saying I'm an expert ;-).
+The hit distance given by OptiX is lower in precision, so by recomputing the hit position via barycentrics, that increases the accuracy of the origin for the next ray.
+Ok, that explains why I'm seeing a gradient (the top left of the 2D plots I made) in the depth_array values which are being returned, but no gradient present in the plot for the Z components of the XYZ positions when using "position" in the render_data (top right 2D plot).
+A question about the 'Optix' flow:
+I'm assuming that the plane I created is a mesh. Am I correct in understanding that only the OPTIX_CLOSEST_HIT_PROGRAM(TriangleMesh) is called when an intersection is found, i.e., the OPTIX_INTERSECT_PROGRAM(VolumeIntersection) will not be called in this case? I'm asking because a special prd.tHit is calculated in the OPTIX_INTERSECT_PROGRAM(VolumeIntersection) and I don't immediately understand what is happening in that program.
+Finally, I would like to change the title of this ticket to "Understanding the depth returned by render_data" to ensure others do not think this is a bug (as I don't think there is). Are you fine with that?
+natevm commented on Sep 10, 2021
+natevm
+on Sep 10, 2021
+Last edited by natevm
+Collaborator
+More actions
+Hm, I didn’t realize that code was from our examples. @jontremblay wrote that I believe. I still do not think that code is correct though for the reasons I explained earlier. We should probably double-check the correctness of that example…
+Am I correct in understanding that only the
+OPTIX_CLOSEST_HIT_PROGRAM(TriangleMesh) is called when an intersection is found, i.e., the OPTIX_INTERSECT_PROGRAM(VolumeIntersection) will not be called in this case? I'm asking because a special prd.tHit is calculated in the OPTIX_INTERSECT_PROGRAM(VolumeIntersection) and I don't immediately understand what is happening in that program.
+The closest hit program called depends on the ray type, visibility flags, and instance ID. In this case, the volume closest hit program is only called for instances referencing that program in their hit record. So it won’t be called unless your object is a volume, as I don’t add a reference to that closest hit program for surface instances.
+Yes, feel free to rename the issue. :)
+natevm
+added
+bugSomething isn't workingSomething isn't working
+on Sep 10, 2021
+TontonTremblay commented on Sep 10, 2021
+TontonTremblay
+on Sep 10, 2021 via email
+Collaborator
+More actions
+I am out this weekend. I have an updated version somewhere from what I
+remember there was a big and forgot to push the changes. If you have a fix
+that might simplify the process. Sorry about that.
+…
+On Fri, Sep 10, 2021 at 13:38 Nathan V. Morrical ***@***.***> wrote:
+Hm, I didn’t realize that code was from our examples. @jontremblay
+<https://github.com/jontremblay> wrote that I believe. I still do not
+think that code is correct though for the reasons I explained earlier. We
+should probably fix that example…
+Am I correct in understanding that only the
+OPTIX_CLOSEST_HIT_PROGRAM(TriangleMesh) is called when an intersection is
+found, i.e., the OPTIX_INTERSECT_PROGRAM(VolumeIntersection) will not be
+called in this case? I'm asking because a special prd.tHit is calculated in
+the OPTIX_INTERSECT_PROGRAM(VolumeIntersection) and I don't immediately
+understand what is happening in that program.
+The closest hit program called depends on the ray type, visibility flags,
+and instance ID. In this case, the volume closest hit program is only
+called for instances referencing that program in their hit record. So it
+won’t be called unless your object is a volume, as I don’t add a reference
+to that closest hit program for surface instances.
+Yes, feel free to rename the issue. :)
+—
+You are receiving this because you are subscribed to this thread.
+Reply to this email directly, view it on GitHub
+<#125 (comment)>,
+or unsubscribe
+<https://github.com/notifications/unsubscribe-auth/ABK6JIHOWLP4ROGLSNPMXTDUBJUDHANCNFSM5DSDRKKA>
+.
+Triage notifications on the go with GitHub Mobile for iOS
+<https://apps.apple.com/app/apple-store/id1477376905?ct=notification-email&mt=8&pt=524675>
+or Android
+<https://play.google.com/store/apps/details?id=com.github.android&referrer=utm_campaign%3Dnotification-email%26utm_medium%3Demail%26utm_source%3Dgithub>.
+natevm commented on Sep 11, 2021
+natevm
+on Sep 11, 2021
+Collaborator
+More actions
+Oh, looking at your code again, I don’t believe the intrinsics matrix accounts for the extrinsics of the camera, which might account for this discrepancy. The extrinsics accounts for the transform objects rotation, scale and translation, while the intrinsics is just the projection matrix. So that -1 offset on your camera isn’t being accounted for I don’t believe.
+In computer graphics, we typically refer to the extrinsics as the view matrix, which is the inverse of the object’s transform matrix. You can get the transformation from world space to camera space using camera.get_transform().get_world_to_local_matrix().
+natevm commented on Sep 11, 2021
+natevm
+on Sep 11, 2021
+Collaborator
+More actions
+@jontremblay I missed this part. I suppose it’s not that convert_from_uvd function after all.
+The depths, I have been looking at are the ones in the depth_array which comes directly from render_data (they are essentially the tHit values from Optix) and the ones I calculated in ray_len (which used the convert_from_uvd). As a sanity check, I compared those two values and they are identical.
+natevm
+removed
+bugSomething isn't workingSomething isn't working
+on Sep 11, 2021
+Neburski commented on Sep 13, 2021
+Neburski
+on Sep 13, 2021
+ContributorAuthor
+More actions
+After some more testing there are some peculiar results. When doing two calls to render_data with different options, i.e., depth and position, the result depends on the order of these two calls. In addition, the values of start_frame and frame_count have an impact on the results as well, even though I did not configure any motion in the scene, the plane and camera are always at the same spot.
+Any ideas what is going on?
+Overview of changes
+First a short explanation of the changes in the script:
+The convert_from_uvd function is removed because it's confusing the investigation.
+The render_data is used with the "depth" and "position" options. Each option is done separately, i.e. there are two sequential render_data calls, there is no tear-down nor setup done in between the two render_data calls!
+Made an if ... elif switch where the order of the two render_data calls can be changed:
+Order 0: First do a render_data to obtain depth, then do a render_data to obtain XYZ positions
+Order 1: First do a render_data to obtain XYZ positions, then do a render_data to obtain depth
+Added options for the start_frame and the frame_count
+Results
+The results depend on the order of the two render_data calls. Additionally, changing the start_frame and the frame_count can change the results drastically.
+Order 0
+This case is as before when using start_frame=0 and frame_count=2:
+Depth returns half the expected value, i.e., 1 m.
+The XYZ positions are as expected, Z values are 2 m.
+When using start_frame=0 and frame_count=1, the result is:
+Depth is 0 m!
+XYZ positions are as expected, Z values are 2 m.
+When using start_frame=1 and frame_count=1:
+Depth is 0 m!
+XYZ positions are half the expected value, i.e. 1m.
+Order 1
+In this case we first trace for the XYZ positions, then we trace for the depth values.
+When start_frame=0 and frame_count=2:
+Depth is now as expected, i.e., 2 m.
+XYZ positions are half the expected value, i.e., Z-value is 2 m.
+When start_frame=1 and frame_count=1:
+Depth is half as expected, i.e., 1 m.
+XYZ positions are NaN!
+When start_frame=0 and frame_count=1:
+Depth is as expected, i.e., 2 m.
+XYZ positions are NaN!
+Script
+```
+import os
+import nvisii
+import numpy as np
+import math
+import matplotlib.pyplot as plt
+
+plt.rcParams["figure.figsize"] = 12, 9
+plt.rcParams["figure.dpi"] = 100
+plt.rcParams["figure.autolayout"] = True
+
+# Some quick cli arguments
+import argparse as ap
+
+parser = ap.ArgumentParser(description="Reference Script")
+parser.add_argument(
+    "--order", type=int, default=0, help="Select the order of the tracing"
+)
+parser.add_argument("--sf", type=int, default=0, help="The start frame")
+parser.add_argument("--nf", type=int, default=2, help="The frame count")
+args = parser.parse_args()
+order = args.order
+start_frame = args.sf
+num_frame = args.nf
+
+# Bail if invalid order selected
+assert order in range(2), "The selected order should be 0 or 1"
+
+width = 500
+height = 500
+
+nvisii.initialize(headless=True, verbose=True, lazy_updates=True)
+
+camera = nvisii.entity.create(
+    name="camera",
+    transform=nvisii.transform.create("camera"),
+    camera=nvisii.camera.create(name="camera", aspect=float(width) / float(height)),
+)
+
+# Place the camera at the origin looking in the positive z-direction.
+# y-axis is the up direction in the final 'iamge data'
+camera.get_transform().look_at(at=(0, 0, 1), up=(0, 1, 0), eye=(0, 0, 0))
+nvisii.set_camera_entity(camera)
+
+# Create a scene to use for exporting segmentations
+plane = nvisii.entity.create(
+    name="plane",
+    mesh=nvisii.mesh.create_plane("plane", size=(2, 2)),
+    transform=nvisii.transform.create("plane"),
+    material=nvisii.material.create("plane"),
+)
+plane_distance = 2
+plane.get_material().set_roughness(1.0)
+plane.get_transform().set_position((0, 0, plane_distance))
+plane.get_transform().set_scale((1, 1, 1))
+
+nvisii.set_dome_light_intensity(0)
+
+# We only use primary ray for the center of each pixel. This results in 1 ray /
+# pixel.
+nvisii.sample_pixel_area(x_sample_interval=(0.5, 0.5), y_sample_interval=(0.5, 0.5))
+
+if order == 0:
+    fSupTitle = f"Order: Depth $\\rightarrow$ XYZ, {start_frame=}, {num_frame=}"
+    depth_array = nvisii.render_data(
+        width=int(width),
+        height=int(height),
+        start_frame=start_frame,
+        frame_count=start_frame + num_frame,
+        bounce=int(0),
+        options="depth",
+    )
+    xyz_dat = nvisii.render_data(
+        width=int(width),
+        height=int(height),
+        start_frame=start_frame,
+        frame_count=start_frame + num_frame,
+        bounce=int(0),
+        options="position",
+    )
+elif order == 1:
+    fSupTitle = f"Order: XYZ $\\rightarrow$ Depth, {start_frame=}, {num_frame=}"
+    xyz_dat = nvisii.render_data(
+        width=int(width),
+        height=int(height),
+        start_frame=start_frame,
+        frame_count=start_frame + num_frame,
+        bounce=int(0),
+        options="position",
+    )
+
+    depth_array = nvisii.render_data(
+        width=int(width),
+        height=int(height),
+        start_frame=start_frame,
+        frame_count=start_frame + num_frame,
+        bounce=int(0),
+        options="depth",
+    )
+
+
+# Reshape the depth array. The depth_array has shape (heigth, width, 4). For
+# the last axis, the first 3 indices are the depth, but all axis contain the
+# same value. This is by design in NVISII, i.e., the frame buffer shape. Only
+# the first index is selected as the others are not needed.
+depth_array = np.array(depth_array).reshape(height, width, 4)[..., 0]
+depth_array = np.flipud(depth_array)
+
+# The array xyz_dat contains the coordinates of the ray intersections. This
+# also comes as a (heigth, width, 4). The xyz_dat array appears to be working
+# with homogeneous coordinates, thus we should divide the XYZ coordinates by
+# the forth coordinates to appropriately scale the XYZ coordinates.
+xyz_dat = np.array(xyz_dat).reshape(height, width, 4)
+xyz_dat = np.flipud(xyz_dat)
+xyz_dat = xyz_dat[..., :3] / xyz_dat[..., 3, np.newaxis]
+# Calculates the ray lenghts from the origin to the coordinate. In this case
+# this is the distance between camera location and the plane intersection
+# points.
+ray_len = np.linalg.norm(xyz_dat, axis=-1)
+
+fig, axs = plt.subplots(2, 2)
+fig.suptitle(fSupTitle)
+
+img = axs[0, 0].imshow(depth_array, cmap=plt.cm.viridis_r)
+axs[0, 0].set_title(
+    f"NVISII depth: min. = {np.min(depth_array):.2f} [m] v.s. {plane_distance=:.2f} [m]"
+)
+fig.colorbar(img, ax=axs[0, 0], label="Ray Length (NVISII Depth) [m]")
+
+img = axs[0, 1].imshow(ray_len, cmap=plt.cm.viridis_r)
+axs[0, 1].set_title(
+    f"NVISII XYZ: min. = {np.min(ray_len):.2f} [m] v.s. {plane_distance=:.2f} [m]"
+)
+fig.colorbar(img, ax=axs[0, 1], label="Ray Length (NVISII XYZ) [m]")
+
+# Keep this plot empty. Normally would contain the Z coordinate calculated from depth.
+axs[1, 0].remove()
+
+img = axs[1, 1].imshow(xyz_dat[..., 2], cmap=plt.cm.viridis_r)
+axs[1, 1].set_title(
+    f"Z-coordinate from XYZ: avg = {np.mean(xyz_dat[..., 2]):.2f} [m] v.s. {plane_distance=:.2f} [m]"
+)
+fig.colorbar(img, ax=axs[1, 1], label="Z-coordinate (NVISII XYZ) [m]")
+
+#fig.canvas.manager.full_screen_toggle()
+for ax in axs.flatten():
+    ax.set_xlabel("X Pixel [#]")
+    ax.set_ylabel("Y Pixel [#]")
+plt.show(block=True)
+
+# let's clean up the GPU
+nvisii.deinitialize()
+```
+Neburski
+changed the title [-]Incorrect depths when using render_data[/-] [+]Understanding the depth returned by render_data[/+] on Sep 13, 2021
+TontonTremblay commented on Sep 14, 2021
+TontonTremblay
+on Sep 14, 2021
+Collaborator
+More actions
+Ok so I looked at it with the help of Moustafa on some scenes we generated and the depth does not match the real distance of the ray. Should we tag this as a bug @natevm and say tell people to use position?
+natevm commented on Sep 14, 2021
+natevm
+on Sep 14, 2021
+Collaborator
+More actions
+According to the above results, the depth does indeed match the intended results. It’s just that those results seem to depend on the sample or function order… the later would be a bug, the former may or may not be a bug depending on how subsequent Python code manipulates the data.
+With antialiasing on, of course the per pixel results will change depending on frame start and frame count. But I wouldn’t expect such large differences. Swapping the order suggests to me that there is some sort of race condition happening. I’d be curious to see if these problems go away when using interactive mode instead of headless mode. @Neburski would you be able to test that?
+I’m still not convinced we have a handle on what the bug is @TontonTremblay. So I’m hesitant to conclude at the moment that it’s how depth is being calculated.
+manuelli commented on Sep 14, 2021
+manuelli
+on Sep 14, 2021
+More actions
+I have a set of utilities that extract depth images from nvisii and they seem to working as expected. In particular here is an example scene with a ground plane at zero. You can see the pointcloud visualized in a 3D visualizer in the attached image. In particular note that the ground-plane is exactly at zero as you would expect. The process I use to get depth images out of nvisii is to render a distance image and then convert distance image to a depth image using the camera intrinsics. This is done using the following code (note the functions are copied below).
+```
+intrinsics = visii.entity.get(
+camera_name).get_camera().get_intrinsic_matrix(width, height)
+intrinsics = mat_to_numpy(intrinsics)
+
+distance = render_utils.render_distance(width, height)
+depth = render_utils.depth_image_from_distance_image(
+distance, intrinsics)
+```
+The depth image also looks correct to me. The camera is looking at (0,0,0) and it's eye = (1,1,0). The origin of the world frame is on the ground plane below the rightmost box.
+Code snippet that contains the relevant functions used above.
+```
+def reshape_data_tuple(data, width, height):
+    """Reshapes a data tuple to OpenCV coordinates
+
+    """
+
+    # H x W x 4 array but (0,0) is bottom left corner
+    # need to flip it using PIL
+    data = np.array(data).reshape(height, width, 4)
+
+    # flip along first axis
+    # this is equivalent to PIL.FlIP_TOP_BOTTOM
+    data = np.flip(data, axis=0)
+
+    return data
+    
+def render_distance(width, height):
+  """Renders a distance image.
+  
+  - This is NOT A DEPTH IMAGE in the standard computer vision
+  conventions.
+  - Background pixels are assigned a distance of 0
+  
+  d = sqrt(X_c^2 + Y_c^2 + Z_c^2) in OpenCV convention
+  https://docs.opencv.org/3.4/d9/d0c/group__calib3d.html
+  It's the distance from camera origin to the point P.
+  
+  Args:
+      width: int, image width
+      height: int, image height
+  
+  Returns:
+      distance: numpy array H x W, dtype = np.float (meters)
+      Missing/background values are set to 0 distance
+  
+  """
+  
+  visii.sample_pixel_area(
+      x_sample_interval=(.5, .5),
+      y_sample_interval=(.5, .5))
+  
+  # tuple
+  # background/empty pixels get assigned the value
+  # -3.4028234663852886e+38
+  distance = visii.render_data(
+      width=int(width),
+      height=int(height),
+      start_frame=0,
+      frame_count=1,
+      bounce=int(0),
+      options="depth"
+  )
+  
+  # H x W x 4, dtype=fl
+  distance = reshape_data_tuple(distance, width, height)
+  
+  # H x W
+  distance = distance[..., 0]
+  
+  # render segmentation image to detect background pixels
+  # and set their distance values to 0
+  seg = render_segmentation(width, height)
+  distance[seg < 0] = 0
+  
+  return distance
+
+  
+def depth_image_from_distance_image(distance, intrinsics):
+  """Computes depth image from distance image.
+  
+  Background pixels have depth of 0
+  
+  Args:
+      distance: HxW float array (meters)
+      intrinsics: 3x3 float array
+  
+  Returns:
+      z: HxW float array (meters)
+  
+  """
+  fx = intrinsics[0, 0]
+  cx = intrinsics[0, 2]
+  fy = intrinsics[1, 1]
+  cy = intrinsics[1, 2]
+  
+  height, width = distance.shape
+  xlin = np.linspace(0, width - 1, width)
+  ylin = np.linspace(0, height - 1, height)
+  px, py = np.meshgrid(xlin, ylin)
+  
+  x_over_z = (px - cx) / fx
+  y_over_z = (py - cy) / fy
+  
+  z = distance / np.sqrt(1. + x_over_z**2 + y_over_z**2)
+  return z
+```
+manuelli commented on Sep 14, 2021
+manuelli
+on Sep 14, 2021
+More actions
+Rendering that same scene from a directly top-down view eye=(0,0,1) gives a uniform depth of 1.0 as expected on the ground plane.
+Neburski commented on Sep 14, 2021
+Neburski
+on Sep 14, 2021
+Last edited by Neburski
+ContributorAuthor
+More actions
+Rendering that same scene from a directly top-down view eye=(0,0,1) gives a uniform depth of 1.0 as expected on the ground plane.
+@manuelli Thank you for testing this perpendicular case. The previous one is difficult to validate if everything is at the correct distances. Your remark about depth v.s. distance (I'm aware of the difference), however, both are incorrect in my case.
+Can I ask some of you to try the script I placed in a previous post above. It is the full script which I have in a file called plane_depth.py and I use it as follows:
+```
+python -i plane_depth.py
+```
+If possible, could you also try the following option:
+```
+python -i plane_depth.py --order 1
+```
+Can you then report what the results are?
+natevm commented on Sep 14, 2021
+natevm
+on Sep 14, 2021
+Collaborator
+More actions
+@Neburski could you run that script with headless=False and see if you still get this issue? I suspect this is a race condition when headless mode is enabled.
+Neburski commented on Sep 14, 2021
+Neburski
+on Sep 14, 2021
+Last edited by Neburski
+ContributorAuthor
+More actions
+@Neburski could you run that script with headless=False and see if you still get this issue? I suspect this is a race condition when headless mode is enabled.
+@natevm When I set headless = False, I get the same results, however, when I also set lazy_updates = False, I get the results that I expect. So when both headless and lazy_updates are True, then the results are not as they should be.
+I would say there is a minor bug somewhere when those two options are True, do you agree?
+Also, swapping the order has no impact anymore as it should be.
+natevm commented on Sep 14, 2021
+natevm
+on Sep 14, 2021
+Collaborator
+More actions
+@Neburski could you run that script with headless=False and see if you still get this issue? I suspect this is a race condition when headless mode is enabled.
+@natevm When I set headless = False, I get the same results, however, when I also set lazy_updates = False, I get the results that I expect. So when both headless and lazy_updates are True, then the results are not as they should be.
+I would say there is a minor bug somewhere when those two options are True, do you agree?
+Also, swapping the order has no impact anymore as it should be.
+Aha, this is useful information. That confirms this is indeed a race condition when lazy updating is enabled. (I think headless mode always assumes lazy updating, which delays updating scene acceleration structures until a render call, at which point all updates are batched for improved performance)
+natevm
+added
+bugSomething isn't workingSomething isn't working
+on Sep 14, 2021
+manuelli commented on Sep 14, 2021
+manuelli
+on Sep 14, 2021
+Last edited by manuelli
+More actions
+For reference I rendered those scenes with headless=False and didn't explicitly specify lazy_updates which matches what we are seeing.
+natevm commented on Oct 27, 2021
+natevm
+on Oct 27, 2021
+Collaborator
+More actions
+For the moment, I'm going to change the behavior of "lazy_updates". In retrospect, lazy_updates was kinda a temporary measure to try to gain some perf. But I think a better mechanism is to just use the "enable_updates" and "disable_updates" functions instead to scope sections where many components are being generated.
+So I'm for now going to remove lazy_updates from the initialize function and then assume the "false" behavior there.
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+bugSomething isn't workingSomething isn't working
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

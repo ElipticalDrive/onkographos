@@ -1,0 +1,205 @@
+--- v016.md
++++ v017.md
+@@ -1,114 +1,125 @@
+ # Marching Cubes Job Scheduling
+ 
+-Also called: Parallel Marching Cubes Job Scheduling, Chunk-based Marching Cubes Job Scheduling
+ 
+ ## Overview
+-Marching Cubes Job Scheduling is a parallel processing strategy that decomposes a 3D volume into spatial chunks and assigns the extraction of each chunk to independent computational jobs (typically GPU compute shaders or CPU worker threads). It solves the scalability problem of extracting isosurfaces from large volumes by enabling concurrent processing, thereby reducing total extraction time. It differs from single-threaded approaches by managing data dependencies and output buffering through job handles and atomic counters, and from simple grid-based parallelism by operating on discrete, manageable chunks rather than a monolithic global grid.
++Marching Cubes Job Scheduling is a parallel execution model that decomposes isosurface extraction into discrete, asynchronous tasks (jobs) processed by a compute backend, typically a GPU. It solves the synchronization and memory management challenges inherent in parallel surface extraction by decoupling voxel processing from output buffer management. Unlike synchronous implementations that block the main thread, this method schedules work units that report their geometry generation needs via atomic counters or append buffers, allowing for efficient resource utilization on modern hardware. It builds on [GPU Acceleration and Parallel Pipelines](4136-gpu-acceleration-and-parallel-pipelines.md) by introducing explicit job structures and asynchronous scheduling primitives.
+ 
+ ## How it works
+-The method orchestrates the distribution of voxel data chunks to worker processes or threads, managing the synchronization of output buffers and the lifecycle of the extraction jobs.
++The method orchestrates the lifecycle of a marching cubes extraction task, from data validation to asynchronous execution and result retrieval. It relies on the precomputed data structures defined in [Marching Cubes Lookup and Configuration](2518-marching-cubes-lookup-and-configuration.md).
+ 
+ ### Inputs and Outputs
+-*   **Inputs**:
+-    *   `VoxelDataVolume<byte>`: The scalar field data for the chunk.
+-    *   `VoxelDataVolume<Color32>`: Optional color data for the chunk [S1, unofficial].
+-    *   `Isolevel`: The density threshold for surface extraction (default 0.5f) [S1, unofficial].
+-    *   `ChunkCoordinate`: The spatial index of the chunk being processed [S1, unofficial].
+-*   **Outputs**:
+-    *   `outputVertices`: A `NativeArray` of `MeshingVertexData` containing the extracted vertices.
+-    *   `outputTriangles`: A `NativeArray` of `ushort` containing the triangle indices.
+-    *   `vertexCountCounter`: An atomic counter tracking the number of vertices generated [S1, unofficial].
++*   **Inputs:**
++    *   `VoxelData`: A 3D volume of scalar values (e.g., `byte` or `float`).
++    *   `VoxelColors`: A 3D volume of color values (e.g., `Color32`), optional but supported in some implementations.
++    *   `Isolevel`: The scalar threshold $\tau$ for surface extraction.
++    *   `ChunkCoordinate`: The spatial index of the voxel chunk being processed.
++*   **Outputs:**
++    *   `OutputVertices`: A dynamic array of vertex structures containing position, normal, and color.
++    *   `OutputTriangles`: A dynamic array of triangle indices (typically `ushort`).
++    *   `JobHandle`: A synchronization primitive representing the pending completion of the job.
+ 
+ ### Data Structures
+-The core data structure is the `MarchingCubesJob` struct, which encapsulates all necessary state for a single chunk extraction [S1, unofficial].
++The core data structure is the `MarchingCubesJob` struct, which encapsulates all necessary state for the compute kernel.
+ 
+-**`MarchingCubesJob` Layout**:
+-*   `VoxelData`: `VoxelDataVolume<byte>` (Input scalar field) [S1, unofficial].
+-*   `VoxelColors`: `VoxelDataVolume<Color32>` (Input color field) [S1, unofficial].
+-*   `Isolevel`: `float` (Extraction threshold) [S1, unofficial].
+-*   `VertexCountCounter`: `NativeCounter` (Atomic output vertex counter) [S1, unofficial].
+-*   `OutputVertices`: `NativeArray<MeshingVertexData>` (Output vertex buffer) [S1, unofficial].
+-*   `OutputTriangles`: `NativeArray<ushort>` (Output triangle index buffer) [S1, unofficial].
++**`MarchingCubesJob` Layout:**
++*   `VoxelData`: Reference to the input scalar volume (`VoxelDataVolume<byte>`).
++*   `VoxelColors`: Reference to the input color volume (`VoxelDataVolume<Color32>`).
++*   `Isolevel`: The extraction threshold (`float`).
++*   `VertexCountCounter`: An atomic counter (`NativeCounter`) to track the number of generated vertices.
++*   `OutputVertices`: A pre-allocated buffer (`NativeArray<MeshingVertexData>`) for vertex data.
++*   `OutputTriangles`: A pre-allocated buffer (`NativeArray<ushort>`) for triangle indices.
+ 
+-### Steps
+-1.  **Chunk Retrieval**: Attempt to retrieve the `VoxelDataVolume` and `VoxelDataVolume<Color32>` for the specified `chunkCoordinate`. If either fails, return null [S1, unofficial].
+-2.  **Counter Allocation**: Allocate a `NativeCounter` (`vertexCountCounter`) using `Allocator.TempJob` to track the global vertex count across parallel jobs [S1, unofficial].
+-3.  **Buffer Sizing**:
+-    *   Calculate `voxelCount` as the product of the chunk dimensions ($W \times H \times D$) [S1, unofficial].
+-    *   Calculate `maxLength` as $15 \times \text{voxelCount}$, based on the maximum of 5 triangles per voxel and 3 vertices per triangle [S1, unofficial].
+-    *   Allocate `outputVertices` as `NativeArray<MeshingVertexData>` of size `maxLength` [S1, unofficial].
+-    *   Allocate `outputTriangles` as `NativeArray<ushort>` of size `maxLength` [S1, unofficial].
+-4.  **Job Initialization**: Initialize the `MarchingCubesJob` struct with the retrieved voxel data, colors, isovalue, counter, and output arrays [S1, unofficial].
+-5.  **Job Scheduling**: Schedule the `MarchingCubesJob` for execution. Wrap the resulting job handle and job data in a `JobHandleWithData<IMesherJob>` structure and return it to the caller [S1, unofficial].
++**`MeshingVertexData` Layout (Typical):**
++*   `Position`: `float3` (32-bit floats).
++*   `Normal`: `float3` (32-bit floats).
++*   `Color`: `float4` or `uint32` (depending on implementation).
++
++### Algorithm Steps
++1.  **Data Validation:** Attempt to retrieve the voxel data chunk and voxel color chunk for the specified `chunkCoordinate`. If either retrieval fails, the job returns null or an error state [S1, unofficial].
++2.  **Counter Allocation:** Allocate a `NativeCounter` (atomic counter) using temporary memory allocators. This counter will track the total number of vertices generated across all threads in the job [S1, unofficial].
++3.  **Buffer Sizing:**
++    *   Calculate `voxelCount` as the product of the chunk dimensions: $N_x \times N_y \times N_z$.
++    *   Calculate `maxLength` as $15 \times \text{voxelCount}$. This upper bound assumes the maximum number of triangles (5) per voxel, with 3 vertices per triangle [S1, unofficial].
++    *   Allocate `outputVertices` as a `NativeArray` of `MeshingVertexData` with size `maxLength`.
++    *   Allocate `outputTriangles` as a `NativeArray` of `ushort` with size `maxLength` [S1, unofficial].
++4.  **Job Initialization:** Initialize the `MarchingCubesJob` struct with the validated voxel data, color data, isovalue, vertex counter, and output buffers [S1, unofficial].
++5.  **Job Scheduling:** Schedule the `MarchingCubesJob` on the compute backend (e.g., GPU). The scheduler maps voxel coordinates to thread indices. Threads with $C=0$ or $C=255$ exit early. Other threads compute triangle indices and write to the output buffers using atomic operations or append buffers [S1, Parent, unofficial].
++6.  **Handle Return:** Wrap the job handle and job data in a generic interface (e.g., `JobHandleWithData<IMesherJob>`) and return it to the caller, allowing for asynchronous completion checks [S1, unofficial].
+ 
+ ### Pseudocode
+-The following pseudocode illustrates the scheduling logic for a single chunk, adapted from the Unity Job System implementation [S1, unofficial].
++```python
++# Pseudocode for the scheduling logic, based on [S1, unofficial]
+ 
+-```python
+-def schedule_chunk_extraction(chunk_coordinate, voxel_world):
+-    # Step 1: Retrieve chunk data
+-    voxel_data = voxel_world.get_voxel_data_chunk(chunk_coordinate)
+-    voxel_colors = voxel_world.get_voxel_color_chunk(chunk_coordinate)
++struct MarchingCubesJob:
++    VoxelData: VoxelDataVolume<byte>
++    VoxelColors: VoxelDataVolume<Color32>
++    Isolevel: float
++    VertexCountCounter: NativeCounter
++    OutputVertices: NativeArray<MeshingVertexData>
++    OutputTriangles: NativeArray<ushort>
++
++function CreateMesh(chunkCoordinate, voxelWorld):
++    # Step 1: Data Validation
++    voxelData = voxelWorld.GetVoxelDataChunk(chunkCoordinate)
++    if voxelData is null:
++        return null
+     
+-    if voxel_data is None or voxel_colors is None:
+-        return None
++    voxelColors = voxelWorld.GetVoxelColorsChunk(chunkCoordinate)
++    if voxelColors is null:
++        return null
+ 
+-    # Step 2: Allocate atomic counter
+-    vertex_count_counter = allocate_native_counter(allocator=Allocator.TempJob)
++    # Step 2: Counter Allocation
++    vertexCountCounter = AllocateNativeCounter(Allocator.TempJob)
+ 
+-    # Step 3: Calculate buffer sizes
+-    chunk_size = voxel_world.world_settings.chunk_size
+-    voxel_count = chunk_size.x * chunk_size.y * chunk_size.z
+-    max_length = 15 * voxel_count  # 5 triangles/voxel * 3 vertices/triangle
++    # Step 3: Buffer Sizing
++    chunkSize = voxelWorld.WorldSettings.ChunkSize
++    voxelCount = chunkSize.x * chunkSize.y * chunkSize.z
++    maxLength = 15 * voxelCount
+ 
+-    # Allocate output buffers
+-    output_vertices = allocate_native_array(MeshingVertexData, size=max_length, allocator=Allocator.TempJob)
+-    output_triangles = allocate_native_array(ushort, size=max_length, allocator=Allocator.TempJob)
++    # Step 4: Buffer Allocation
++    outputVertices = AllocateNativeArray<MeshingVertexData>(maxLength, Allocator.TempJob)
++    outputTriangles = AllocateNativeArray<ushort>(maxLength, Allocator.TempJob)
+ 
+-    # Step 4: Initialize job struct
+-    marching_cubes_job = MarchingCubesJob(
+-        VoxelData=voxel_data,
+-        VoxelColors=voxel_colors,
+-        Isolevel=0.5f,  # Default isovalue [S1, unofficial]
+-        VertexCountCounter=vertex_count_counter,
+-        OutputVertices=output_vertices,
+-        OutputTriangles=output_triangles
++    # Step 5: Job Initialization
++    job = MarchingCubesJob(
++        VoxelData=voxelData,
++        VoxelColors=voxelColors,
++        Isolevel=0.5f, # Default isovalue [S1, unofficial]
++        VertexCountCounter=vertexCountCounter,
++        OutputVertices=outputVertices,
++        OutputTriangles=outputTriangles
+     )
+ 
+-    # Step 5: Schedule job
+-    job_handle = marching_cubes_job.schedule()
+-    
+-    # Wrap handle and data for return
+-    return JobHandleWithData(IMesherJob, handle=job_handle, data=marching_cubes_job)
++    # Step 6: Job Scheduling
++    jobHandle = ScheduleJob(job)
++
++    # Step 7: Handle Return
++    return JobHandleWithData<IMesherJob>(jobHandle, job)
+ ```
+ 
+-### Parameters
+-*   `Isolevel`: The density threshold. Default value is 0.5f [S1, unofficial].
+-*   `maxLength`: The size of the output buffers. Calculated as $15 \times \text{voxelCount}$ [S1, unofficial].
+-
+ ### Edge Cases and Pitfalls
+-*   **Chunk Failure**: If voxel data for a chunk cannot be retrieved, the function returns null, potentially leaving gaps in the mesh if not handled by the caller [S1, unofficial].
+-*   **Buffer Overflow**: The buffer size is calculated based on the theoretical maximum (5 triangles per voxel). If the actual number of triangles exceeds this limit, memory corruption or truncation will occur. This is mitigated by the $15 \times \text{voxelCount}$ calculation, which assumes the worst-case scenario for Marching Cubes [S1, unofficial].
+-*   **Atomic Contention**: The `VertexCountCounter` is shared across parallel jobs. High contention on this counter can become a bottleneck in highly parallelized scenarios [S1, unofficial].
++*   **Buffer Overflow:** The `maxLength` calculation assumes a worst-case scenario where every voxel generates 5 triangles. If the volume is dense, this buffer may be insufficient. In practice, a two-pass approach (counting first, then allocating) is safer for production systems [Parent].
++*   **Atomic Contention:** Using atomic counters for vertex indexing can lead to contention on high-density volumes. A two-pass histogram or prefix sum approach reduces contention but increases latency [Parent].
++*   **Memory Leaks:** Temporary allocators (`Allocator.TempJob`) must be explicitly freed after the job completes to prevent memory leaks in long-running applications [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### Multi-Process Ground Truth Generation
+-A variant that orchestrates parallel processing of 3D models to generate ground truth data using multiple worker processes and a queue for synchronization. It distributes object names across processes based on an even distribution list, creates worker processes targeting a specific ground truth extraction function, and manages synchronization via a queue with a timeout mechanism. This approach is used for generating large-scale ground truth datasets for machine learning or validation [S2, unofficial].
++A variant that orchestrates parallel processing of 3D models to generate ground truth data using multiple worker processes and a queue for synchronization [S2, unofficial]. It distributes object names across worker processes based on an even distribution list, processes them via a target function (e.g., `get_gt_from_intersectionpn`), and aggregates results from a shared queue with timeout-based exit checks [S2, unofficial].
+ 
+ ### Tandem Algorithm with Dumping
+-A strategy that enhances the tandem algorithm by reducing the number of generated triangles through a dumping mechanism, specifically handling disconnected components to allow interactive exploration. It filters out small components based on geometric criteria (volume), reducing 18,111 components to 328 in tested scenarios. This method drastically reduces memory consumption and extraction time compared to brute-force approaches, making it suitable for large seismic datasets [S3].
++A strategy that enhances the tandem algorithm by reducing the number of generated triangles through a dumping mechanism, specifically handling disconnected components to allow interactive exploration [S3]. It filters disconnected components based on geometric criteria (e.g., volume), reducing 18,111 components to 328 in a large seismic dataset [S3]. This approach drastically reduces memory consumption and extraction time compared to brute-force methods, achieving 5 minutes of extraction on 56 processors for a 40 GB dataset, compared to over 3 hours for the sequential version [S3].
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: Linear with respect to the number of voxels, $O(N)$, where $N$ is the total number of voxels in the volume. Parallelization reduces the constant factor significantly.
+-*   **Memory Complexity**: Linear with respect to the number of voxels, $O(N)$, for storing the output buffers. The buffer size is fixed at $15 \times \text{voxelCount}$ per chunk [S1, unofficial].
+-*   **Measured Performance**: On a 1626x7028x2000 dataset (40 GB), the parallel tandem approach extracted surfaces in 5 minutes using 56 processors, compared to more than 3 hours for the sequential tandem algorithm [S3].
+-*   **Strengths**: High scalability with the number of processors; efficient handling of large datasets; modular design allowing for easy integration of different extraction algorithms (e.g., tandem, brute-force).
+-*   **Limitations**: Requires careful management of memory allocation and deallocation for job buffers; potential bottlenecks in atomic counter contention; complexity in handling edge cases where chunk data is unavailable.
+-*   **When to Use**: Large-scale volume rendering where extraction time is a critical bottleneck; scenarios requiring interactive exploration of simplified surfaces.
+-*   **When Not to Use**: Small volumes where the overhead of job scheduling outweighs the benefits; environments with limited memory for buffering large output arrays.
++*   **Time Complexity:** $O(N)$ where $N$ is the number of voxels in the chunk. The actual runtime depends on the density of the isosurface and the efficiency of the atomic operations or append buffers.
++*   **Memory Complexity:** $O(N)$ for the output buffers, with a constant factor of 15 vertices/triangles per voxel in the worst case.
++*   **Performance:** On a 1626x7028x2000 dataset, the parallel tandem approach (a variant of job scheduling) extracted surfaces in 5 minutes using 56 processors, compared to more than 3 hours for the sequential tandem algorithm [S3].
++*   **Strengths:** Asynchronous execution allows the main thread to continue other tasks. Atomic counters and append buffers handle variable output sizes without complex synchronization logic.
++*   **Limitations:** Atomic contention can become a bottleneck in highly dense volumes. The fixed buffer size allocation (if not using dynamic resizing) can lead to memory waste or overflow.
++*   **When to Use:** Ideal for real-time applications, large-scale datasets, and scenarios where the main thread must remain responsive.
++*   **When Not to Use:** For small volumes where the overhead of job scheduling outweighs the benefits, or when deterministic, synchronous execution is required.
+ 
+ ## Background
+-The concept of job scheduling for Marching Cubes emerged from the need to handle increasingly large 3D datasets in fields like geophysics and terrain generation. The specific implementation detailed in [S1, unofficial] is part of the Eldemarkki Marching Cubes Terrain project, which aims to provide a performant, chunk-based Marching Cubes implementation for real-time applications. The tandem algorithm with dumping, described in [S3], was developed for seismic data interpretation, highlighting the importance of parallel processing and component filtering for interactive exploration of large geological datasets.
++The concept of job scheduling for marching cubes emerged from the need to parallelize surface extraction on GPUs. Early implementations used immediate mode rendering, which was inefficient for large datasets [2463-cpu-immediate-mode-marching-cubes]. The introduction of compute shaders and parallel pipelines allowed for more flexible data structures and asynchronous execution [4136-gpu-acceleration-and-parallel-pipelines]. The specific implementation detailed in [S1, unofficial] is part of a voxel terrain engine, demonstrating the practical application of job scheduling in game development and real-time visualization. The tandem algorithm with dumping, described in [S3], represents an earlier approach to parallel extraction in geophysics, focusing on simplification and component-based dumping for large seismic datasets.
+ 
+ ## Sources

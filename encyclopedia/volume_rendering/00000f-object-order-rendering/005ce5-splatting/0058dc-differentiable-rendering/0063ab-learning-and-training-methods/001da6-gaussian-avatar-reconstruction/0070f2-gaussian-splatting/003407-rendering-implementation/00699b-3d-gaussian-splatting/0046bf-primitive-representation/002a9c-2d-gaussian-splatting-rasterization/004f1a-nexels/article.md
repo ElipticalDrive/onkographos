@@ -1,0 +1,204 @@
+# Nexels
+Also called: Neurally-Textured Surfels
+
+## Overview
+Nexels is a novel view synthesis method that decouples geometry and appearance to achieve a compact representation using a fixed number of primitives per pixel [S1]. It uses surfels with a generalized Gaussian kernel for geometry and a shared neural field (Instant-NGP) for view-dependent appearance, rendered via a two-pass process to handle sparse primitives efficiently [S1]. Unlike sibling methods that couple appearance to primitives or use slower neural field lookups, Nexels textures only the top-$K$ primitives per pixel, ensuring real-time performance while matching the perceptual quality of 3D Gaussian Splatting with significantly fewer primitives [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A set of $N$ surfels; camera parameters (origin $o$, direction $d$, focal length $f$); training images for optimization [S1].
+*   **Outputs:** A rendered image $I \in \mathbb{R}^{H \times W \times 3}$; optimized surfel parameters and neural field weights [S1].
+
+**Data Structures:**
+1.  **Surfel:** Defined by mean $\mu_i \in \mathbb{R}^3$, rotation $R_i \in SO^3$, scale $\sigma_i \in \mathbb{R}^2$, opacity $o_i \in \mathbb{R}$, and gamma parameter $\gamma_i \in \mathbb{R}^2$ [S1]. The surfel normal is derived from the rotation matrix [S1].
+2.  **Non-textured Appearance:** Per-primitive view-dependent radiance $c_i^\odot \in \mathbb{R}^3$ parameterized by spherical harmonics coefficients, where $S$ is the number of coefficients (typically $S=16$ for degree 3) [S1].
+3.  **Neural Field:** Instant-NGP architecture [S1].
+    *   **Hash-Grid:** $L$ levels. Each level $\ell$ has a hash-table $H_\ell$ with $T$ entries [S1]. Feature dimension is $F$. Total parameters: $L \times T \times F$ [S1].
+    *   **MLP:** $G$, with 2 hidden layers, width 64, no bias, ReLU activations. Output dimension 48 (for $S=16$ SH coefficients) [S1].
+4.  **Per-Pixel Buffer:** Size $K$. Contains primitive ID, weight, and depth [S1]. Total $3K$ 32-bit registers per pixel [S1]. Written into $H \times W \times K$ images $I$ (IDs), $D$ (depths), and $W$ (weights) [S1].
+
+**Parameters:**
+*   $K$: Hyperparameter limiting primitives textured per pixel. Typically $K=2$ [S1].
+*   $P$: Hyperparameter controlling max number of primitives [S1].
+*   $\gamma_i$: Gamma parameter controlling kernel shape. Constrained $\gamma \ge 1$ for $C^\infty$ continuity [S1].
+*   Loss weights: $\lambda_{alpha}=0.005, \lambda_{texture}=0.5, \lambda_{opacity}=0.01, \lambda_{grid}=0.01, \lambda_{D-SSIM}=0.2$ [S1].
+
+**Steps:**
+
+1.  **Initialization:** Sample point cloud from COLMAP [S1]. Use farthest point sampling to reduce to $0.5P$ points [S1]. Initialize scale based on distance to predecessors during sampling [S1].
+2.  **Preprocessing:** Sort surfels by the depth of their centers [S1].
+3.  **Collection Pass (First Rendering Pass):**
+    *   For each ray $r := o + td$, compute the intersection in primitive space $(u, v)$ differentiably from geometry parameters [S1].
+    *   Compute the alpha value using the generalized Gaussian kernel:
+        $$ \alpha_i := o_i \exp \left( - \frac{|u|^{2\gamma_{i,1}}}{2} \right) \exp \left( - \frac{|v|^{2\gamma_{i,2}}}{2} \right) $$
+        [S1]
+    *   Compute the blending weight $w_i := \alpha_i T_i$, where $T_i := \prod_{j=0}^{i-1} (1 - \alpha_j)$ [S1].
+    *   Maintain the per-pixel buffer of size $K$ [S1]. Update the buffer to store the running primitives with the highest weights [S1]. The buffer entries contain primitive ID, weight, and depth $t^*_i(r)$ [S1].
+    *   Compute the non-textured render $N_p$ for pixel $p$:
+        $$ N_p := \sum_{i=0}^{M-1} w_i c_i^\odot - \sum_{i \in I_p} w_i c_i^\odot $$
+        where $I_p$ is the set of textured primitives for pixel $p$ (the top $K$) [S1].
+    *   Write the final ID, depth, and weight buffers into images $I, D, W$ [S1].
+4.  **Texturing Pass (Second Rendering Pass):**
+    *   Compute world-space intersection positions $x \in \mathbb{R}^{H \times W \times K \times 3}$ from the depth buffer $D$ [S1].
+    *   For each textured primitive $j$ at pixel $p$, compute the filtered texture radiance $c_i^\oplus(r)$:
+        $$ c_i^\oplus(r) := G \left( \Delta_i(r) \cdot H(x_i^*(r)) \right) $$
+        where $x_i^*(r) := o + t^*_i(r) d$ is the world-space intersection [S1].
+    *   The hash-grid feature retrieval $H(x)$ is calculated as:
+        $$ H(x) := [H_{0,h_0}, \dots, H_{L-1,h_{L-1}}] \in \mathbb{R}^{L \times F} $$
+        where hash $h_\ell$ is calculated from $s_\ell \cdot x$ and indexed into grid level $\ell$ [S1].
+    *   The down-weighting factor $\Delta_{i,\ell}(r)$ for anti-aliasing is:
+        $$ \Delta_{i,\ell}(r) := 1 - \exp \left( - \frac{f^2}{2\pi s_\ell t^*_i(r)} \right) $$
+        where $f$ is focal length, $s_\ell$ is scale, and $t^*_i(r)$ is intersection depth [S1].
+    *   Compute the final texture $T \in \mathbb{R}^{H \times W \times K \times 3}$ where $T_{p,j} := c_{I_{p,j}}^\oplus(r)$ [S1].
+    *   Composite the textures with the non-textured render:
+        $$ I_p = N_p + \sum_{j=0}^{K-1} W_{p,j} T_{p,j} $$
+        [S1]
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import math
+
+def nexels_render(surfels, camera, K=2):
+    """
+    Render nexels using two-pass rasterization.
+    surfels: List of dicts with keys 'mu', 'R', 'sigma', 'o', 'gamma', 'c_odot', 'id'
+    camera: Dict with 'origin', 'direction', 'focal_length', 'image_size'
+    K: Number of textured primitives per pixel
+    """
+    H, W = camera['image_size']
+    o = camera['origin']
+    d = camera['direction']
+    f = camera['focal_length']
+    
+    # Buffers: I (ids), D (depths), W_buf (weights), N (non-textured color)
+    I = torch.full((H, W, K), -1, dtype=torch.int32)
+    D_buf = torch.zeros(H, W, K, dtype=torch.float32)
+    W_buf = torch.zeros(H, W, K, dtype=torch.float32)
+    N = torch.zeros(H, W, 3, dtype=torch.float32)
+    acc_alpha = torch.zeros(H, W, dtype=torch.float32)
+    
+    # Sort surfels by depth of centers
+    depths = torch.tensor([dot(s['mu'] - o, d) for s in surfels])
+    sorted_surfels = [s for _, s in sorted(zip(depths, surfels))]
+    
+    for surfel in sorted_surfels:
+        # Compute intersection in primitive space (u, v)
+        u, v = compute_primitive_space_intersection(surfel, o, d)
+        
+        # Compute alpha
+        gamma_u, gamma_v = surfel['gamma']
+        alpha = surfel['o'] * torch.exp(-torch.abs(u)**(2*gamma_u) / 2) * torch.exp(-torch.abs(v)**(2*gamma_v) / 2)
+        
+        T_i = 1.0 - acc_alpha
+        weight = alpha * T_i
+        
+        # Update per-pixel buffer to keep top K weights
+        update_pixel_buffer(I, D_buf, W_buf, weight, surfel['id'], dot(surfel['mu'] - o, d))
+        
+        # Accumulate non-textured color
+        N += weight.unsqueeze(-1) * surfel['c_odot']
+        
+        acc_alpha += alpha * T_i
+        
+    # Remove non-textured color of top-K primitives from N
+    for k in range(K):
+        valid = I[:, :, k] != -1
+        ids = I[valid]
+        weights = W_buf[valid, k]
+        colors = torch.stack([surfels_by_id[id]['c_odot'] for id in ids])
+        N[valid] -= weights.unsqueeze(-1) * colors
+        
+    # Texturing Pass
+    # Compute world-space positions from depth buffer
+    x_positions = o.unsqueeze(0).unsqueeze(0).unsqueeze(0) + D_buf.unsqueeze(-1) * d.unsqueeze(0).unsqueeze(0).unsqueeze(0)
+    
+    # Query neural field
+    T_textured = query_neural_field(x_positions, f, D_buf)
+    
+    # Composite
+    final_image = N + (W_buf.unsqueeze(-1) * T_textured).sum(dim=2)
+    return final_image
+
+def compute_primitive_space_intersection(surfel, o, d):
+    # Transform ray origin and direction to surfel's local frame
+    R_inv = surfel['R'].T
+    local_o = R_inv @ (o - surfel['mu'])
+    local_d = R_inv @ d
+    # Intersection parameter t in local frame
+    t_local = -local_o[2] / local_d[2]
+    u = local_o[0] + t_local * local_d[0]
+    v = local_o[1] + t_local * local_d[1]
+    return u, v
+
+def update_pixel_buffer(I, D_buf, W_buf, weight, surfel_id, depth):
+    # For each pixel, insert (weight, surfel_id, depth) into top-K list
+    for y in range(I.shape[0]):
+        for x in range(I.shape[1]):
+            pos = 0
+            while pos < K and W_buf[y, x, pos] > weight[y, x]:
+                pos += 1
+            if pos < K:
+                for j in range(K - 2, pos - 1, -1):
+                    I[y, x, j+1] = I[y, x, j]
+                    D_buf[y, x, j+1] = D_buf[y, x, j]
+                    W_buf[y, x, j+1] = W_buf[y, x, j]
+                I[y, x, pos] = surfel_id
+                D_buf[y, x, pos] = depth
+                W_buf[y, x, pos] = weight
+
+def query_neural_field(x_positions, f, D_buf):
+    # x_positions: H x W x K x 3
+    # Returns: H x W x K x 3 (radiance)
+    L = 16; F = 2; T = 2**20; s = [2**i for i in range(L)]
+    H_grid = torch.randn(L, T, F) # Placeholder for actual grid
+    G = torch.nn.Sequential(torch.nn.Linear(F*L, 64), torch.nn.ReLU(), torch.nn.Linear(64, 64), torch.nn.ReLU(), torch.nn.Linear(64, 48))
+    
+    radiance = torch.zeros_like(x_positions)
+    for k in range(K):
+        x = x_positions[:, :, k, :]
+        features = []
+        for l in range(L):
+            h = hash_function(s[l] * x) % T
+            feat = H_grid[l, h, :]
+            features.append(feat)
+        H_x = torch.cat(features, dim=-1) # L*F
+        out = G(H_x) # 48
+        t_star = D_buf[:, :, k]
+        delta = 1.0 - torch.exp(-f**2 / (2 * math.pi * s * t_star.unsqueeze(-1)))
+        out = out * delta
+        radiance[:, :, k, :] = out[:, :3]
+    return radiance
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Naive point sampling for differentiable rendering leads to inaccuracies in the fine levels of the hash-grid. The down-weighting factor $\Delta_{i,\ell}(r)$ is required to remove noticeable aliasing artifacts [S1].
+*   **Boundaries:** The generalized Gaussian kernel converges to a quad indicator as $\gamma \to \infty$, providing sharp boundaries [S1].
+*   **Degenerate Input:** Initialization uses farthest point sampling to ensure good coverage [S1].
+
+## Subtopics
+
+### Per-Primitive Texture Mapping for Reflective Gaussian Splatting
+Uses per-primitive textures for reflective scenes [S1]. [8629-per-primitive-texture-mapping-for-reflective-gaussian-splatt.md]
+
+### ToF Gaussian Rasterization Forward Pass
+Handles Time-of-Flight data in Gaussian rasterization [S1]. [9261-tof-gaussian-rasterization-forward-pass.md]
+
+### Vanilla 2D Gaussian Splatting Rendering
+Standard 2DGS without neural texturing [S1]. [12208-vanilla-2d-gaussian-splatting-rendering.md]
+
+## Operating characteristics
+*   **Time and Memory Complexity:** Nexels uses a fixed number of primitives per pixel ($K$), ensuring low compute [S1]. It uses 9.7x fewer primitives and 5.5x less memory than 3DGS on outdoor scenes, and 31x fewer primitives and 3.7x less memory on indoor scenes [S1].
+*   **Measured Performance:** Nexels renders twice as fast as existing textured primitives while improving visual quality [S1]. On outdoor scenes, it achieves 60 FPS with 400K primitives and LPIPS 0.216, compared to 3DGS's 93 FPS with 4.4M primitives and LPIPS 0.216 [S1].
+*   **Strengths and Limitations:** Decouples geometry and appearance, allowing for compact representation and sharp boundaries [S1]. Real-time rendering is achieved by limiting neural field queries to $K$ primitives per pixel [S1].
+*   **When to use:** When high-frequency appearance details are present and memory/compute efficiency is critical [S1].
+*   **When not to use:** When simpler geometry is sufficient and neural field overhead is undesirable [S1].
+
+## Background
+Nexels was introduced by Kiriakos N. Kutulakos, Andrea Tagliasacchi, David B. Lindell, et al. in December 2025 [S1]. It builds on 2D Gaussian Splatting [20] and Instant-NGP [36]. The method addresses the coupling of geometry and appearance in Gaussian splatting by using surfels for geometry and a neural field for appearance [S1].
+
+## Sources
+[S1] Nexels: Neurally-Textured Surfels for Real-Time Novel View Synthesis with Sparse Primitives, https://doi.org/10.1007/978-3-032-37531-5_9, fetched 2026-10-28

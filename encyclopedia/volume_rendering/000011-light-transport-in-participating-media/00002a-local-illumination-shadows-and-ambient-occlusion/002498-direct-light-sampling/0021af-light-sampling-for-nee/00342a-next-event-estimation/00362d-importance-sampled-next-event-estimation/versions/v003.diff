@@ -1,0 +1,125 @@
+--- v002.md
++++ v003.md
+@@ -7,6 +7,6 @@
+ 
+ ## How it works
+-**Inputs:** Scene geometry (implicit or explicit), light sources, pre-computed importance data (grid cells or proxy surfaces), and a surface point $p$ on the boundary.
+-**Outputs:** A sampled point on the light source and the corresponding radiance contribution.
++**Inputs:** Scene geometry (implicit or explicit), light sources, pre-computed importance data (grid cells or proxy surfaces), and a surface point $p$ on the boundary [S1, unofficial][S2][S3, unofficial].
++**Outputs:** A sampled point on the light source and the corresponding radiance contribution [S1, unofficial][S2][S3, unofficial].
+ 
+ **Data Structures:**
+@@ -20,7 +20,7 @@
+ 3. **Component Selection:** Pick one component between specular and diffuse via uniform sampling [S3, unofficial].
+ 4. **Specular Sampling:** Pick one convolved lobe from the set based on weights $w_j$, then sample the corresponding SGGX distribution [S3, unofficial].
+-5. **Diffuse Sampling:** Assume a fixed $\kappa$ during importance sampling because $\kappa_{ij}$ cannot be determined without $\omega_i$. Pick one convolved lobe with the fixed $\kappa$ and sample the corresponding SGGX distribution [S3, unofficial].
++5. **Diffuse Sampling:** Assume a fixed $\kappa$ during importance sampling because $\kappa_{ij}$ cannot be determined without $\omega_i$ [S3, unofficial]. Pick one convolved lobe with the fixed $\kappa$ and sample the corresponding SGGX distribution [S3, unofficial].
+ 6. **Light Path Completion (Grid Method):** Utilize the spatial importance information from the grid to sample the edge and complete the light path [S1, unofficial].
+-7. **Light Path Completion (Implicit Method):** Intersect the tangent plane $T_p B$ at point $p$ with the light source $L$. Sample points from the resulting intersection [S2].
++7. **Light Path Completion (Implicit Method):** Intersect the tangent plane $T_p B$ at point $p$ with the light source $L$ [S2]. Sample points from the resulting intersection [S2].
+ 8. **PDF Computation:** Compute the corresponding probability density function (PDF) for the selected sample [S3, unofficial].
+ 
+@@ -33,28 +33,46 @@
+     if component_type == 'specular':
+         # Step 4: Specular Sampling
+-        lobe_index = weighted_choice(precomputed_data.lobes, precomputed_data.weights)
+-        direction = sample_sggx(precomputed_data.lobes[lobe_index])
++        total_weight = sum(precomputed_data.lobes_weights)
++        r = random.uniform(0.0, total_weight)
++        cumulative = 0.0
++        for i, w in enumerate(precomputed_data.lobes_weights):
++            cumulative += w
++            if r <= cumulative:
++                lobe_index = i
++                break
++        else:
++            lobe_index = len(precomputed_data.lobes_weights) - 1
++        direction = precomputed_data.lobes[lobe_index].sample()
+         light_point = intersect_ray_with_light(surface_point_p, direction, light_source)
+-        pdf = compute_sggx_pdf(direction, precomputed_data.lobes[lobe_index])
++        pdf = precomputed_data.lobes[lobe_index].pdf(direction)
+         
+     elif component_type == 'diffuse':
+         # Step 5: Diffuse Sampling
+         fixed_kappa = 1.0  # [G] Standard default for fixed kappa assumption
+-        lobe_index = weighted_choice(precomputed_data.lobes, precomputed_data.weights, fixed_kappa)
+-        direction = sample_sggx(precomputed_data.lobes[lobe_index])
++        total_weight = sum(precomputed_data.lobes_weights)
++        r = random.uniform(0.0, total_weight)
++        cumulative = 0.0
++        for i, w in enumerate(precomputed_data.lobes_weights):
++            cumulative += w
++            if r <= cumulative:
++                lobe_index = i
++                break
++        else:
++            lobe_index = len(precomputed_data.lobes_weights) - 1
++        direction = precomputed_data.lobes[lobe_index].sample()
+         light_point = intersect_ray_with_light(surface_point_p, direction, light_source)
+-        pdf = compute_sggx_pdf(direction, precomputed_data.lobes[lobe_index])
++        pdf = precomputed_data.lobes[lobe_index].pdf(direction)
+         
+     else:
+         # Step 7: Light Path Completion (Implicit/Tangent Plane)
+-        tangent_plane = get_tangent_plane(surface_point_p)
+-        intersection_segment = intersect_plane_with_light(tangent_plane, light_source)
+-        
++        tangent_plane_normal = surface_point_p.normal
++        tangent_plane_point = surface_point_p.position
++        intersection_segment = intersect_plane_with_light(tangent_plane_point, tangent_plane_normal, light_source)
+         if light_source.is_environment_map():
+             # Use pre-computed 1D distribution conditioned on normal
+             direction = sample_from_precomputed_distribution(surface_point_p.normal, precomputed_data.env_map_dist)
+         else:
+-            direction = sample_from_segment(intersection_segment)
+-            
++            t = random.uniform(0.0, 1.0)
++            direction = intersection_segment.start + t * (intersection_segment.end - intersection_segment.start)
+         light_point = intersect_ray_with_light(surface_point_p, direction, light_source)
+         pdf = compute_pdf(direction, light_source, surface_point_p)
+@@ -63,39 +81,15 @@
+ 
+ # Helper definitions (standard operations)
+-def weighted_choice(items, weights, fixed_kappa=None):
+-    # Standard categorical sampling based on weights
+-    total = sum(weights)
+-    r = random.uniform(0.0, total)
+-    cumulative = 0.0
+-    for i, w in enumerate(weights):
+-        cumulative += w
+-        if r <= cumulative:
+-            return items[i]
+-    return items[-1]
++def intersect_ray_with_light(origin, direction, light):
++    # Cast ray from origin along direction to find intersection with light geometry
++    return light.cast_ray(origin, direction)
+ 
+-def sample_sggx(lobe):
+-    # Standard sampling from the SGGX microfacet distribution
+-    return lobe.sample()
+-
+-def compute_sggx_pdf(direction, lobe):
+-    # Standard PDF evaluation for SGGX
+-    return lobe.pdf(direction)
+-
+-def get_tangent_plane(point):
+-    # Plane passing through point with normal equal to surface normal
+-    return Plane(point, point.normal)
+-
+-def intersect_plane_with_light(plane, light):
+-    # Intersect plane with light geometry to get a segment or region
+-    return plane.intersect(light.geometry)
++def intersect_plane_with_light(point, normal, light):
++    # Intersect plane defined by point and normal with light geometry
++    return light.intersect_plane(point, normal)
+ 
+ def sample_from_precomputed_distribution(normal, dist):
+     # Sample from the pre-computed 1D distribution conditioned on normal
+     return dist.sample(normal)
+-
+-def sample_from_segment(segment):
+-    # Uniform sampling along the intersection segment
+-    t = random.uniform(0.0, 1.0)
+-    return segment.start + t * (segment.end - segment.start)
+ 
+ def compute_pdf(direction, light, point):

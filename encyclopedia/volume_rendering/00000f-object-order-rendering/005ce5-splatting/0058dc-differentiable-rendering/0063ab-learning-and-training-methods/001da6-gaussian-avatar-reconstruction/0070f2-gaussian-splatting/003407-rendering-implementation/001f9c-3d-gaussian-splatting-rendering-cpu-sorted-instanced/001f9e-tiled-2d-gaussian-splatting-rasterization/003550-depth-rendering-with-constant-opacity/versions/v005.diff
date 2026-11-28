@@ -1,0 +1,140 @@
+--- v004.md
++++ v005.md
+@@ -8,6 +8,6 @@
+ ## How it works
+ **Inputs:**
+-- `pc`: The Gaussian model object containing methods `get_xyz`, `get_scaling`, `get_rotation`, `get_covariance`, and `sh_degree`.
+-- `viewpoint_camera`: The camera object containing `FoVx`, `FoVy`, and projection/view matrices.
++- `pc`: The Gaussian model object containing methods `get_xyz`, `get_scaling`, `get_rotation`, `get_covariance`, and `sh_degree` [S1, unofficial].
++- `viewpoint_camera`: The camera object containing `FoVx`, `FoVy`, projection/view matrices, and camera position [S1, unofficial].
+ - `image_size`: Tuple `(width, height)` of the output image.
+ - `value`: Constant opacity multiplier (default 0.95) [S1, unofficial].
+@@ -47,35 +47,13 @@
+    [S1, unofficial]
+ 
+-3. Configure `GaussianRasterizationSettings` with:
+-   - Image dimensions: `(width, height)`
+-   - Tangent FOV: `(tanfovx, tanfovy)`
+-   - Background color: Typically white `[1, 1, 1]` or black `[0, 0, 0]` depending on dataset settings [S1, unofficial]
+-   - Scale modifier: As provided by pipeline
+-   - View and projection matrices: From `viewpoint_camera`
+-   - SH degree: From `pc.sh_degree`
+-   - Camera position: From `viewpoint_camera`
+-   - Prefiltered: `False`
+-   - Debug flag: As required [S1, unofficial]
++3. Configure rasterization settings with image dimensions, FOV tangents, background color, scale modifier, view and projection matrices, SH degree, camera position, `prefiltered=False`, and a debug flag [S1, unofficial].
+ 
+-4. Set Gaussian attributes:
+-   - `means3D`: `pc.get_xyz()`
+-   - `means2D`: `screenspace_points`
+-   - `opacity`: `torch.ones(pc.get_xyz.shape[0], 1, device=pc.get_xyz.device) * value`
+-   - `shs`: `None`
+-   - `colors_precomp`: `torch.ones_like(pc.get_xyz)`
+-   [S1, unofficial]
++4. Set Gaussian attributes: `means3D` to `pc.get_xyz()`, `means2D` to `screenspace_points`, `opacity` to `torch.ones(pc.get_xyz.shape[0], 1, device=pc.get_xyz.device) * value`, `shs` to `None`, and `colors_precomp` to `torch.ones_like(pc.get_xyz)` [S1, unofficial].
+ 
+-5. Within a `torch.no_grad()` context, prepare scales, rotations, and covariance:
+-   - If `pipe.compute_cov3D_python` is true:
+-     - `cov3D_precomp = pc.get_covariance(scaling_modifier)`
+-   - Else:
+-     - `scales = pc.get_scaling().detach()`
+-     - `rotations = pc.get_rotation().detach()`
+-     - `cov3D_precomp = None`
+-   [S1, unofficial]
++5. Within a `torch.no_grad()` context, prepare scales, rotations, and covariance: if `pipe.compute_cov3D_python` is true, compute `cov3D_precomp = pc.get_covariance(scaling_modifier)`; otherwise, set `scales = pc.get_scaling().detach()`, `rotations = pc.get_rotation().detach()`, and `cov3D_precomp = None` [S1, unofficial].
+ 
+ 6. Call the rasterizer with the configured settings and attributes to obtain `rendered_image`, `radii`, `rendered_depth`, and `rendered_alpha` [S1, unofficial].
+ 
+-7. Return the dictionary with results [S1, unofficial].
++7. Return a dictionary containing `render`, `depth`, `alpha`, `viewspace_points`, `visibility_filter` (`radii > 0`), and `radii` [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -83,4 +61,37 @@
+ import torch
+ import math
++from dataclasses import dataclass
++from typing import Tuple, Optional
++
++@dataclass
++class RasterizationSettings:
++    image_height: int
++    image_width: int
++    tanfovx: float
++    tanfovy: float
++    bg: torch.Tensor
++    scale_modifier: float
++    viewmatrix: torch.Tensor
++    projmatrix: torch.Tensor
++    sh_degree: int
++    campos: torch.Tensor
++    prefiltered: bool
++    debug: bool
++
++def rasterize_gaussians(
++    settings: RasterizationSettings,
++    means3D: torch.Tensor,
++    means2D: torch.Tensor,
++    shs: Optional[torch.Tensor],
++    colors_precomp: torch.Tensor,
++    opacities: torch.Tensor,
++    scales: Optional[torch.Tensor],
++    rotations: Optional[torch.Tensor],
++    cov3D_precomp: Optional[torch.Tensor]
++) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
++    """Stub for the underlying GPU rasterization engine.
++    Returns: rendered_image, radii, rendered_depth, rendered_alpha [G]"""
++    # Actual tiled rasterization logic is handled by the graphics backend [G]
++    raise NotImplementedError("Replace with actual rasterization kernel call")
+ 
+ def render_depth_constant_opacity(pc, viewpoint_camera, image_size, value=0.95):
+@@ -97,9 +108,8 @@
+ 
+     # Step 3: Configure rasterization settings
+-    # Note: Background color depends on dataset (white for many, black for others)
+-    bg_color = [1, 1, 1] # Assumed white background based on common usage [S1, unofficial]
++    bg_color = [1, 1, 1] if hasattr(viewpoint_camera, 'white_background') and viewpoint_camera.white_background else [0, 0, 0]
+     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
+     
+-    raster_settings = GaussianRasterizationSettings(
++    raster_settings = RasterizationSettings(
+         image_height=image_size[1],
+         image_width=image_size[0],
+@@ -107,5 +117,5 @@
+         tanfovy=tanfovy,
+         bg=background,
+-        scale_modifier=1.0, # Assuming default scale modifier
++        scale_modifier=1.0,
+         viewmatrix=viewpoint_camera.world_view_transform,
+         projmatrix=viewpoint_camera.full_proj_transform,
+@@ -135,6 +145,6 @@
+ 
+     # Step 6: Rasterize
+-    rasterizer = GaussianRasterizer(raster_settings=raster_settings)
+-    rendered_image, radii, rendered_depth, rendered_alpha = rasterizer(
++    rendered_image, radii, rendered_depth, rendered_alpha = rasterize_gaussians(
++        settings=raster_settings,
+         means3D=means3D,
+         means2D=means2D,
+@@ -157,10 +167,9 @@
+     }
+ ```
+-[S1, unofficial]
+ 
+ **Edge Cases and Pitfalls:**
+ - Gradient leakage: Scales and rotations must be detached or set to None to prevent gradients from flowing into depth estimation [S1, unofficial].
+ - Opacity value: Using a value too close to 1.0 may cause over-saturation in alpha accumulation, while too low may result in sparse depth maps. 0.95 is the empirical default [S1, unofficial].
+-- Background color: Mismatched background color can affect depth accumulation at edges. Ensure consistency with the dataset's expected background [S1, unofficial].
++- Background color: Mismatched background color can affect depth accumulation at edges [S1, unofficial].
+ 
+ ## Subtopics
+@@ -170,10 +179,8 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Linear with respect to the number of Gaussians and pixels, similar to standard Gaussian Splatting rasterization, as it uses the same tiled rasterization pipeline [S1, unofficial].
+ - **Memory Complexity:** Low, as it only requires storing the depth and alpha buffers, plus the screenspace points tensor [S1, unofficial].
+ - **Strengths:** Produces clean, consistent depth maps unaffected by per-Gaussian opacity variations, making it suitable for depth-based applications like compositing or depth-aware post-processing [S1, unofficial].
+ - **Limitations:** Does not account for actual opacity variations, which can lead to inaccurate depth in semi-transparent regions compared to variable opacity methods [S1, unofficial][S2, unofficial].
+ - **When to use:** When a geometrically accurate depth map is needed for downstream tasks like depth normalization or compositing, and opacity variations are not critical to the depth estimation [S1, unofficial].
+-- **When not to use:** When accurate depth in semi-transparent regions is required, in which case Depth Rendering with Variable Opacity should be used [S2, unofficial].
+ 
+ ## Background

@@ -1,0 +1,117 @@
+--- v008.md
++++ v009.md
+@@ -1,5 +1,5 @@
+ # Geometry Shader Voxelization
+ 
+-Also called: Fragment-based Voxelization, GS Voxelization, GeometryVoxelizer, OpenGL Geometry Shader Voxelization, Solid Triangle Voxelization, Triangle-to-Voxel Rasterization
++Also called: GS Voxelization, OpenGL Geometry Shader Voxelization
+ 
+ ## Overview
+@@ -102,9 +102,9 @@
+     V_norm = (V - [xmin, ymin, zmin]) / dmax
+     
+-    # 2. Setup Pipeline
+-    # Bind 3D textures: voxelOccupancy (r8ui), voxelColor (rgba8)
+-    # Set primitive topology to TRIANGLELIST
+-    
+-    # 3. Rasterization (per triangle)
++    # Initialize output buffers
++    voxel_occupancy = [0] * (voxel_resolution ** 3)
++    voxel_color = [0.0] * (voxel_resolution ** 3 * 4)
++    
++    # 2. Rasterization (per triangle)
+     for face in F:
+         v0, v1, v2 = V_norm[face[0]], V_norm[face[1]], V_norm[face[2]]
+@@ -113,5 +113,4 @@
+         n = cross(v1 - v0, v2 - v1)
+         dominant_axis = argmax(abs(n))
+-        # Permute vertices and normal to align dominant plane with XY
+         v0, v1, v2, n = swizzle(v0, v1, v2, n, dominant_axis)
+         unswizzle = get_unswizzle_matrix(dominant_axis)
+@@ -132,10 +131,20 @@
+             d_e1_xy = dot(n_e1_xy, 0.5 - v1[:2]) + 0.5 * max(abs(n_e1_xy[0]), abs(n_e1_xy[1]))
+             d_e2_xy = dot(n_e2_xy, 0.5 - v2[:2]) + 0.5 * max(abs(n_e2_xy[0]), abs(n_e2_xy[1]))
+-            # Similar for YZ and ZX
++            d_e0_yz = dot(n_e0_yz, 0.5 - v0[1:]) + 0.5 * max(abs(n_e0_yz[0]), abs(n_e0_yz[1]))
++            d_e1_yz = dot(n_e1_yz, 0.5 - v1[1:]) + 0.5 * max(abs(n_e1_yz[0]), abs(n_e1_yz[1]))
++            d_e2_yz = dot(n_e2_yz, 0.5 - v2[1:]) + 0.5 * max(abs(n_e2_yz[0]), abs(n_e2_yz[1]))
++            d_e0_zx = dot(n_e0_zx, 0.5 - v0[::2]) + 0.5 * max(abs(n_e0_zx[0]), abs(n_e0_zx[1]))
++            d_e1_zx = dot(n_e1_zx, 0.5 - v1[::2]) + 0.5 * max(abs(n_e1_zx[0]), abs(n_e1_zx[1]))
++            d_e2_zx = dot(n_e2_zx, 0.5 - v2[::2]) + 0.5 * max(abs(n_e2_zx[0]), abs(n_e2_zx[1]))
+         else: # FAT
+             d_e0_xy = -dot(n_e0_xy, v0[:2]) + max(0, n_e0_xy[0]) + max(0, n_e0_xy[1])
+             d_e1_xy = -dot(n_e1_xy, v1[:2]) + max(0, n_e1_xy[0]) + max(0, n_e1_xy[1])
+             d_e2_xy = -dot(n_e2_xy, v2[:2]) + max(0, n_e2_xy[0]) + max(0, n_e2_xy[1])
+-            # Similar for YZ and ZX
++            d_e0_yz = -dot(n_e0_yz, v0[1:]) + max(0, n_e0_yz[0]) + max(0, n_e0_yz[1])
++            d_e1_yz = -dot(n_e1_yz, v1[1:]) + max(0, n_e1_yz[0]) + max(0, n_e1_yz[1])
++            d_e2_yz = -dot(n_e2_yz, v2[1:]) + max(0, n_e2_yz[0]) + max(0, n_e2_yz[1])
++            d_e0_zx = -dot(n_e0_zx, v0[::2]) + max(0, n_e0_zx[0]) + max(0, n_e0_zx[1])
++            d_e1_zx = -dot(n_e1_zx, v1[::2]) + max(0, n_e1_zx[0]) + max(0, n_e1_zx[1])
++            d_e2_zx = -dot(n_e2_zx, v2[::2]) + max(0, n_e2_zx[0]) + max(0, n_e2_zx[1])
+             
+         # Triangle Plane Distance
+@@ -189,9 +198,44 @@
+                             # Write Voxel
+                             voxel_pos = unswizzle * [p_x, p_y, p_z]
+-                            image_store(voxelOccupancy, voxel_pos, 1)
+-                            image_store(voxelColor, voxel_pos, [p_x/voxel_resolution, p_y/voxel_resolution, p_z/voxel_resolution, 1.0])
+-
+-    # 4. Synchronization
+-    gl_memory_barrier(GL_ALL_BARRIER_BITS)
++                            image_store(voxel_occupancy, voxel_pos, 1)
++                            image_store(voxel_color, voxel_pos, [p_x/voxel_resolution, p_y/voxel_resolution, p_z/voxel_resolution, 1.0])
++
++    # 3. Synchronization
++    barrier_all()
++
++def swizzle(v0, v1, v2, n, axis):
++    # Permute coordinates to align dominant axis with Z (XY plane projection)
++    if axis == 0: # X dominant
++        return [v0[1], v1[1], v2[1]], [v0[2], v1[2], v2[2]], [v0[0], v1[0], v2[0]], [n[1], n[2], n[0]]
++    elif axis == 1: # Y dominant
++        return [v0[0], v1[0], v2[0]], [v0[2], v1[2], v2[2]], [v0[1], v1[1], v2[1]], [n[0], n[2], n[1]]
++    else: # Z dominant
++        return v0, v1, v2, n
++
++def get_unswizzle_matrix(axis):
++    # Returns permutation matrix to reverse swizzle
++    if axis == 0: return [[0,0,1],[1,0,0],[0,1,0]]
++    elif axis == 1: return [[1,0,0],[0,0,1],[0,1,0]]
++    else: return [[1,0,0],[0,1,0],[0,0,1]]
++
++def compute_2d_edge_normals(e0, e1, e2, n, plane):
++    # Compute inward-facing 2D edge normals based on plane and normal sign
++    if plane == 'XY':
++        sign = 1 if n[2] >= 0 else -1
++        return [sign * vec2(-e0[1], e0[0]), sign * vec2(-e1[1], e1[0]), sign * vec2(-e2[1], e2[0])]
++    elif plane == 'YZ':
++        sign = 1 if n[0] >= 0 else -1
++        return [sign * vec2(-e0[2], e0[1]), sign * vec2(-e1[2], e1[1]), sign * vec2(-e2[2], e2[1])]
++    else: # ZX
++        sign = 1 if n[1] >= 0 else -1
++        return [sign * vec2(-e0[0], e0[2]), sign * vec2(-e1[0], e1[2]), sign * vec2(-e2[0], e2[2])]
++
++def image_store(buffer, pos, value):
++    idx = pos[0] + pos[1] * voxel_resolution + pos[2] * voxel_resolution * voxel_resolution
++    buffer[idx] = value
++
++def barrier_all():
++    # GPU memory barrier to ensure writes are visible
++    pass
+ ```
+ 
+@@ -213,5 +257,5 @@
+ *   **Time Complexity:** $O(T \cdot B)$, where $T$ is the number of triangles and $B$ is the average number of voxels in the triangle's bounding box. The inner loops iterate over the bounding box, checking overlap with the triangle in 3D [S4, unofficial].
+ *   **Memory Complexity:** $O(R^3)$ for the 3D voxel grid, where $R$ is the resolution [S4, unofficial].
+-*   **Performance:** Efficient for dense meshes and moderate resolutions. Performance degrades for sparse meshes or very high resolutions due to the bounding box iteration [S2, unofficial].
++*   **Performance:** Efficient for dense meshes and moderate resolutions. The method relies on the GPU's rasterization pipeline to determine which voxels are covered, rather than explicitly iterating over a bounding box, making it simpler to implement but potentially less efficient for sparse triangles or large grids [S2, unofficial].
+ *   **Strengths:** Simple implementation using standard graphics pipeline; no need for explicit intersection tests or complex data structures [S2, S4, unofficial].
+ *   **Limitations:** Overwrites voxel values if multiple fragments map to the same voxel; order depends on rasterization depth and draw order [S2, unofficial]. May produce artifacts for thin or edge-on triangles if not handled with "fat" voxelization [S4, unofficial].
+@@ -220,5 +264,5 @@
+ 
+ ## Background
+-Geometry Shader Voxelization was popularized by implementations such as the one by skanti, which uses OpenGL Geometry Shaders to rasterize triangles directly into a 3D texture [S4, unofficial]. It builds on the concept of using the GPU's rasterization pipeline for volume generation, avoiding the need for CPU-side traversal or complex compute shader logic [S2, S4, unofficial]. The method is often compared to compute shader-based voxelization, which iterates over voxels and tests against triangles [S2, unofficial].
++Implementations such as the one by skanti use OpenGL Geometry Shaders to rasterize triangles directly into a 3D texture [S4, unofficial]. It builds on the concept of using the GPU's rasterization pipeline for volume generation, avoiding the need for CPU-side traversal or complex compute shader logic [S2, S4, unofficial]. The method differs from compute shader-based voxelization by relying on the GPU's rasterization pipeline to determine which voxels are covered, rather than explicitly iterating over a bounding box [S2, unofficial].
+ 
+ ## Sources

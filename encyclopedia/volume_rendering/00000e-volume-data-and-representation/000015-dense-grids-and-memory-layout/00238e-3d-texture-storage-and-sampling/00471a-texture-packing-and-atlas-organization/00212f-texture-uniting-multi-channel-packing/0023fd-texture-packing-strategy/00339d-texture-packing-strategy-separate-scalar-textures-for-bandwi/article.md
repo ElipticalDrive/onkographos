@@ -1,0 +1,116 @@
+# Texture Packing Strategy — Separate Scalar Textures for Bandwidth Optimization
+
+Also called: GPU Memory Management via Texture Mapping, Separate Scalar Textures
+
+## Overview
+This method reduces GPU memory consumption by mapping a single underlying volume dataset to multiple texture units, applying scalar multipliers to adjust lookup values for different physical properties (emission, absorption, reflection) [S2]. It avoids storing redundant copies of similar volume attributes by exploiting the fact that they often differ only by scalar factors [S2]. Host-to-GPU data transfer is minimized by copying volumes only when modified [S2].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** One or more logical volume datasets (e.g., emission, absorption, reflection) that are linearly related or share spatial structure [S2].
+*   **Output:** Rendered image using optimized texture lookups with scalar adjustments [S2].
+
+**Data Structures:**
+*   **Volume Storage:** A single dense 3D grid stored in GPU memory [S2].
+*   **Texture Units:** Multiple texture samplers bound to the same underlying data or derived views [S2].
+*   **Scalar Multipliers:** Three scalar values: $k_{em}$ (emission), $k_{ab}$ (absorption), and $k_{ref}$ (reflection) [S2].
+
+**Steps:**
+1.  **Volume Mapping:** Map the single logical volume to multiple texture units. For example, map the emission volume `volem` to texture unit `texem`, absorption `volab` to `texab`, and reflection `volref` to `texref` [S2].
+2.  **Scalar Setup:** Configure the renderer with scalar multipliers $k_{em}, k_{ab}, k_{ref}$ to adjust the values retrieved from the textures during shading calculations [S2].
+3.  **Gradient Computation (Optional):** To save additional GPU memory, compute gradients on the fly rather than storing them. This increases computational expense, particularly for movie sequences [S2]. If computed, the normal vector $\vec{n}$ is derived from the gradient $\nabla_{x,y,z}$ [S2].
+4.  **Data Transfer:** Copy illumination volumes and light sources to GPU memory only if they have been modified since the last rendering process. This minimizes host-to-GPU transactions [S2].
+5.  **Sampling:** Perform all texture lookups using trilinear interpolation [S2].
+6.  **Shading:** Retrieve values from the textures and multiply by the respective scalar multipliers. For reflection, use the normal vector $\vec{n}$ (computed or stored) to determine interaction with light sources [S2].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_scalar_textured_volume(ray_origin, ray_direction, volume_dims, volume_data, k_em, k_ab, k_ref, step_size=0.5):
+    # [G] Initialize color and opacity accumulators
+    color = [0.0, 0.0, 0.0, 0.0]
+    opacity = 0.0
+    t = 0.0
+    max_dist = max(volume_dims) * 2.0
+
+    while t < max_dist:
+        # [G] Compute current position along the ray
+        pos = [ray_origin[i] + t * ray_direction[i] for i in range(3)]
+
+        # [G] Boundary check
+        if not all(0.0 <= pos[i] < volume_dims[i] for i in range(3)):
+            break
+
+        # [G] Normalize to texture coordinates [0, 1]
+        tex = [pos[i] / volume_dims[i] for i in range(3)]
+
+        # [G] Trilinear interpolation of the underlying volume data
+        # The same logical volume is mapped to multiple texture units
+        val_em = trilinear_sample(volume_data, tex)
+        val_ab = trilinear_sample(volume_data, tex)
+        val_ref = trilinear_sample(volume_data, tex)
+
+        # Apply scalar multipliers to adjust lookup values
+        em = k_em * val_em
+        ab = k_ab * val_ab
+        ref = k_ref * val_ref
+
+        # [G] Front-to-back compositing
+        alpha = ab
+        weight = (1.0 - opacity) * alpha
+        color[0] += weight * em
+        color[1] += weight * ref
+        color[2] += weight * ab
+        color[3] = 1.0 - (1.0 - opacity) * (1.0 - alpha)
+        opacity = color[3]
+
+        if opacity >= 1.0:
+            break
+
+        t += step_size
+
+    return color
+
+def trilinear_sample(data, coords):
+    # [G] Standard trilinear interpolation implementation
+    # Assumes data is a 3D array and coords are in [0, 1]
+    idx = [c * (len(data) - 1) for c in coords]
+    x, y, z = [int(i) for i in idx]
+    # Clamp to valid indices
+    x = max(0, min(x, len(data) - 1))
+    y = max(0, min(y, len(data[0]) - 1))
+    z = max(0, min(z, len(data[0][0]) - 1))
+    return data[x][y][z]
+```
+
+**Parameters:**
+*   $k_{em}, k_{ab}, k_{ref}$: Scalar multipliers that adjust the lookup values for emission, absorption, and reflection respectively [S2].
+*   `compute_gradients_on_fly`: Boolean. Set to `True` to compute gradients on the fly and save GPU memory, at the cost of increased computational expense [S2].
+
+**Edge Cases and Pitfalls:**
+*   **Computational Cost:** Computing gradients on the fly is significantly more expensive, especially for video sequences [S2].
+*   **Data Consistency:** This method assumes the logical volumes are linearly related. If they are not, separate textures without scalar mapping are required [S2].
+*   **Modification Tracking:** Incorrectly tracking volume modifications can lead to stale data on the GPU or unnecessary bandwidth usage [S2].
+
+## Subtopics
+
+### Alpha-Dissociated Packing
+Separates alpha from RGB and packs non-intersecting RGB textures. Reduces memory to ~45% of original but requires complex mask generation and packing algorithms [S1]. Choose when geometry can be cleanly split by transparency.
+
+### Multi-Channel Packing
+Packs multiple attributes (e.g., RGB + Alpha) into a single texture unit. Simple to implement but may waste bandwidth if channels are sparse [Parent]. Choose for simple, dense data.
+
+## Operating characteristics
+*   **Memory Reduction:** Significant reduction in GPU memory usage by sharing underlying data across multiple logical volumes [S2].
+*   **Bandwidth:** Reduces host-to-GPU transfer volume by only copying modified data [S2].
+*   **Performance:** Trilinear interpolation is used for all lookups [S2]. On-the-fly gradient computation increases CPU/GPU computational load [S2].
+*   **Scaling:** Effective for high-resolution volumes where storing multiple copies of similar data is prohibitive [S2].
+*   **Limitations:** Requires that volume attributes are scalar multiples of each other. Not suitable for arbitrary, uncorrelated volume data [S2].
+
+## Background
+This technique is described in the context of GPU-enabled volume rendering for MATLAB, leveraging NVIDIA CUDA texture mapping capabilities [S2].
+
+## Sources
+[S1] Volumetric reconstruction and interactive rendering of trees from photographs, https://doi.org/10.1145/1015706.1015785, fetched 2026-10-26
+[S2] GPU-Enabled Volume Renderer for Use with MATLAB, https://doi.org/10.3390/digital4040049, fetched 2026-10-29

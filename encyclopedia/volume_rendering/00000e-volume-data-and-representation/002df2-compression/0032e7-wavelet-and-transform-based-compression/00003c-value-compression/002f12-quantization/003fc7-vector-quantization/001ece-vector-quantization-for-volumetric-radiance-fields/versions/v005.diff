@@ -1,0 +1,266 @@
+--- v004.md
++++ v005.md
+@@ -1,5 +1,5 @@
+ # Vector Quantization for Volumetric Radiance Fields
+ 
+-Also called: VQRF, Codebook Encoding, Codebook Lookup Decompression, VQ Decompression, Vector Quantization (VQ), Vector Quantization (VQ) Decompression, Vector Quantization (VQ) Random Access
++Also called: Codebook Encoding, Codebook Lookup Decompression, VQ Decompression, Vector Quantization (VQ), Vector Quantization (VQ) Decompression, Vector Quantization (VQ) Random Access
+ 
+ ## Overview
+@@ -8,15 +8,15 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A pre-trained volumetric radiance field model (e.g., DVGO, Plenoxels, TensoRF) consisting of a density grid and color feature voxels.
++*   **Input:** A pre-trained volumetric radiance field model (e.g., DVGO, Plenoxels, TensoRF) consisting of a density grid and color feature voxels [S1].
+ *   **Output:** A compressed representation comprising a codebook, voxel-to-codebook indices, a mask, quantized density/non-VQ features, and entropy-encoded data [S1].
+ 
+ **Data Structures:**
+ The final storage consists of six components [S1]:
+-1.  **2-bit mask:** Identifies pruned, VQ, or unaltered voxels.
+-2.  **Code vectors:** Stored in float16 (16 bits).
+-3.  **Mapping indexes:** $\log_2(K)$ bits per voxel, mapping voxels to codebook entries.
+-4.  **8-bit quantized density grid:** Full-precision floats cast to unsigned 8-bit integers.
+-5.  **8-bit quantized non-VQ voxels:** Full-precision floats cast to unsigned 8-bit integers.
+-6.  **Small network weights:** If applicable (e.g., for DVGO).
++1.  **2-bit mask:** Identifies pruned, VQ, or unaltered voxels [S1].
++2.  **Code vectors:** Stored in float16 (16 bits) [S1].
++3.  **Mapping indexes:** $\log_2(K)$ bits per voxel, mapping voxels to codebook entries [S1].
++4.  **8-bit quantized density grid:** Full-precision floats cast to unsigned 8-bit integers [S1].
++5.  **8-bit quantized non-VQ voxels:** Full-precision floats cast to unsigned 8-bit integers [S1].
++6.  **Small network weights:** If applicable (e.g., for DVGO) [S1].
+ 
+ **Parameters:**
+@@ -30,5 +30,5 @@
+ 
+ 1.  **Voxel Importance and Pruning:**
+-    Calculate importance scores $I_j$ for each voxel $v_j$. Determine the keeping threshold $\theta_k$ using the inverse cumulative distribution function $F^{-1}$ of importance scores:
++    Calculate importance scores $I_j$ for each voxel $v_j$ [S1]. Determine the keeping threshold $\theta_k$ using the inverse cumulative distribution function $F^{-1}$ of importance scores:
+     $$ \theta_k = Q(\beta_k) = F^{-1}(\beta_k) $$
+     Voxels with importance score $I_j > \theta_k$ are marked as non-VQ voxels and stored directly [S1].
+@@ -41,13 +41,13 @@
+ 3.  **Iterative Optimization:**
+     Perform iterative updates to refine the codebook:
+-    *   Randomly select a batch of voxels from the grid.
+-    *   Calculate Euclidean distance between selected voxels and each code vector to determine association.
++    *   Randomly select a batch of voxels from the grid [S1].
++    *   Calculate Euclidean distance between selected voxels and each code vector to determine association [S1].
+     *   Update code vectors using the moving average rule:
+         $$ \mathbf{b}_k := \lambda_d \mathbf{b}_k + (1 - \lambda_d) \sum_{\mathbf{v}_j \in \mathcal{R}(\mathbf{b}_k)} I_j \mathbf{u}_j $$
+-    *   **Code Expiration:** Track capacity $s_k = \sum I_j \mathbb{1}_{v_j \in \mathcal{R}(b_k)}$. Rank codes by capacity. Expire $J$ codes with the lowest capacity and reinitialize them with features of the top $J$ most important voxels in the batch [S1].
++    *   **Code Expiration:** Track capacity $s_k = \sum I_j \mathbb{1}_{v_j \in \mathcal{R}(b_k)}$ [S1]. Rank codes by capacity. Expire $J$ codes with the lowest capacity and reinitialize them with features of the top $J$ most important voxels in the batch [S1].
+ 
+ 4.  **Joint Finetuning:**
+-    *   Fix and save the voxel-to-codebook mapping.
+-    *   Tune four parts: code vectors, density grid, non-VQ voxels, and small network (if applicable).
++    *   Fix and save the voxel-to-codebook mapping [S1].
++    *   Tune four parts: code vectors, density grid, non-VQ voxels, and small network (if applicable) [S1].
+     *   Update code vectors by synchronizing weights across assigned voxels every $i$ iterations [S1].
+ 
+@@ -62,137 +62,90 @@
+     """
+     Compress a volumetric radiance field using Vector Quantization.
+-    
+-    Args:
+-        model: Object containing density_grid, color_features (N, C), and importance_scores (N).
+-        K: Codebook size.
+-        beta_k: Keep quantile for non-VQ voxels.
+-        lambda_d: Decay factor for code update.
+-        J: Number of expired codes per step.
+-        
+-    Returns:
+-        compressed_data: Dictionary containing mask, codebook, indices, quantized grids, etc.
++    model: object with .density_grid, .color_features (N, C), .importance_scores (N), .network_weights
+     """
+-    N = model.color_features.shape[0]
+-    C = model.color_features.shape[1]
++    N = len(model.color_features)
++    C = len(model.color_features[0])
+     
+     # 1. Determine Non-VQ Voxels
+-    # Calculate threshold based on importance score distribution
+-    # F_inv is the inverse CDF of importance scores
+-    theta_k = inverse_cdf(model.importance_scores, beta_k)
+-    
+-    # Identify voxels to keep unquantized
+-    non_vq_mask = model.importance_scores > theta_k
+-    non_vq_indices = np.where(non_vq_mask)[0]
+-    vq_indices = np.where(~non_vq_mask)[0]
++    # Sort importance scores to find the beta_k quantile threshold
++    sorted_scores = sorted(model.importance_scores)
++    theta_k = sorted_scores[int(beta_k * N)]
++    
++    non_vq_mask = [i for i in range(N) if model.importance_scores[i] > theta_k]
++    vq_indices = [i for i in range(N) if i not in non_vq_mask]
+     
+     # 2. Initialize Codebook
+-    # Initialize B with K random voxels from vq_indices or zeros
+-    B = initialize_codebook(vq_indices, model.color_features, K)
++    # Initialize B with K random voxels from vq_indices
++    B = [list(model.color_features[vq_indices[k % len(vq_indices)]]) for k in range(K)]
+     
+     # 3. Iterative Optimization
+-    num_iterations = 100 # As per source [S1]
+-    batch_size = 10000
+-    
+-    for step in range(num_iterations):
+-        # Randomly select batch of voxels from the grid (specifically VQ candidates)
+-        batch_voxels = random_sample(vq_indices, batch_size)
+-        batch_features = model.color_features[batch_voxels]
+-        batch_importance = model.importance_scores[batch_voxels]
++    for step in range(100):
++        batch_size = 10000
++        batch_voxels = [vq_indices[i % len(vq_indices)] for i in range(batch_size)]
++        batch_features = [model.color_features[v] for v in batch_voxels]
++        batch_importance = [model.importance_scores[v] for v in batch_voxels]
+         
+         # Calculate Euclidean distance to each code vector
+-        # dists shape: (batch_size, K)
+-        dists = compute_euclidean_distances(batch_features, B)
+-        
+-        # Determine association (nearest code)
+-        assignments = np.argmin(dists, axis=1)
++        dists = []
++        for feat in batch_features:
++            row = [sum((feat[c] - B[k][c])**2 for c in range(C)) for k in range(K)]
++            dists.append(row)
++            
++        assignments = [min(range(K), key=lambda k: dists[i][k]) for i in range(len(batch_features))]
+         
+         # Update code vectors using moving average
+-        # b_k := lambda_d * b_k + (1 - lambda_d) * sum(I_j * u_j) for assigned voxels
+         for k in range(K):
+-            assigned_mask = assignments == k
+-            if np.any(assigned_mask):
+-                assigned_features = batch_features[assigned_mask]
+-                assigned_importance = batch_importance[assigned_mask]
+-                weighted_sum = np.sum(assigned_importance[:, np.newaxis] * assigned_features, axis=0)
+-                B[k] = lambda_d * B[k] + (1 - lambda_d) * weighted_sum
+-        
++            assigned_feats = [batch_features[i] for i in range(len(batch_features)) if assignments[i] == k]
++            assigned_imp = [batch_importance[i] for i in range(len(batch_importance)) if assignments[i] == k]
++            if assigned_feats:
++                weighted_sum = [sum(imp * feat[c] for imp, feat in zip(assigned_imp, assigned_feats)) for c in range(C)]
++                B[k] = [lambda_d * B[k][c] + (1 - lambda_d) * weighted_sum[c] for c in range(C)]
++                
+         # Code Expiration
+-        # Track capacity s_k = sum(I_j * 1{v_j in R(b_k)})
+-        capacities = np.zeros(K)
+-        for k in range(K):
+-            assigned_mask = assignments == k
+-            if np.any(assigned_mask):
+-                capacities[k] = np.sum(batch_importance[assigned_mask])
+-        
+-        # Expire J codes with lowest capacity
+-        expired_indices = np.argsort(capacities)[:J]
+-        
+-        # Reinitialize expired codes with top J most important voxels in batch
+-        # Note: Source says "top J most important voxels in the batch", 
+-        # implying we pick from the current batch's most important ones.
+-        sorted_batch_importance = np.argsort(batch_importance)[::-1]
+-        top_J_indices = sorted_batch_importance[:J]
+-        
++        capacities = [0.0] * K
++        for i, k in enumerate(assignments):
++            capacities[k] += batch_importance[i]
++        expired_indices = sorted(range(K), key=lambda k: capacities[k])[:J]
++        sorted_batch_idx = sorted(range(len(batch_importance)), key=lambda i: batch_importance[i], reverse=True)[:J]
+         for idx, expired_k in enumerate(expired_indices):
+-            # Reinitialize with feature of a top important voxel
+-            # The source says "features of the top J most important voxels", 
+-            # mapping them to the expired slots.
+-            source_voxel_idx = top_J_indices[idx]
+-            B[expired_k] = batch_features[source_voxel_idx]
++            B[expired_k] = list(batch_features[sorted_batch_idx[idx]])
+ 
+     # 4. Final Assignment
+-    # Assign all VQ voxels to nearest codebook entry
+-    final_dists = compute_euclidean_distances(model.color_features[vq_indices], B)
+-    final_assignments = np.argmin(final_dists, axis=1)
+-    indices = np.zeros(N, dtype=np.int32)
+-    indices[vq_indices] = final_assignments
+-    
+-    # 5. Joint Finetuning (Simplified representation)
+-    # In practice, this involves backpropagation through the renderer
+-    # fixing the mapping, and updating B, density, non-VQ features.
+-    # Here we assume the codebook B is refined further via gradient descent
+-    # synchronized every i iterations.
+-    B = joint_finetune(model, B, indices, non_vq_indices, steps=10000)
+-
++    final_assignments = []
++    for v in vq_indices:
++        feat = model.color_features[v]
++        dists = [sum((feat[c] - B[k][c])**2 for c in range(C)) for k in range(K)]
++        final_assignments.append(min(range(K), key=lambda k: dists[k]))
++    indices = [0] * N
++    for idx, v in enumerate(vq_indices):
++        indices[v] = final_assignments[idx]
++        
++    # 5. Joint Finetuning
++    # The sources do not provide the exact gradient descent loop for joint finetuning.
++    # In practice, this step fixes the voxel-to-codebook mapping and tunes code vectors,
++    # density grid, non-VQ voxels, and small network weights via backpropagation,
++    # synchronizing weights across assigned voxels every i iterations.
++    
+     # 6. Post-Processing
+-    # Quantize density and non-VQ features to 8-bit
+-    quantized_density = quantize_8bit(model.density_grid)
+-    quantized_non_vq_features = quantize_8bit(model.color_features[non_vq_indices])
+-    
+-    # Create 2-bit mask
+-    # 0: Pruned, 1: VQ, 2: Non-VQ (example mapping)
+-    mask = create_2bit_mask(model, non_vq_indices)
+-    
+-    # Encode with LZ77
++    quantized_density = [int(min(255, max(0, round(v * 255.0)))) for v in model.density_grid]
++    quantized_non_vq_features = [[int(min(255, max(0, round(v * 255.0)))) for v in model.color_features[i]] for i in non_vq_mask]
++    
++    mask = [0] * N
++    for i in non_vq_mask: mask[i] = 2
++    for i in range(N):
++        if mask[i] == 0 and indices[i] != 0: mask[i] = 1
++        
+     compressed_data = {
+         'mask': mask,
+-        'codebook': B, # Float16
+-        'indices': indices, # Log2(K) bits
++        'codebook': B,
++        'indices': indices,
+         'quantized_density': quantized_density,
+         'quantized_non_vq_features': quantized_non_vq_features,
+-        'network_weights': model.network_weights # If applicable
++        'network_weights': model.network_weights
+     }
+     
+-    return entropy_encode(compressed_data)
+-
+-def compute_euclidean_distances(features, codebook):
+-    """
+-    Computes squared Euclidean distance between each feature vector and each code vector.
+-    features: (M, C)
+-    codebook: (K, C)
+-    Returns: (M, K)
+-    """
+-    # (M, 1, C) - (1, K, C) -> (M, K, C)
+-    diff = features[:, np.newaxis, :] - codebook[np.newaxis, :, :]
+-    return np.sum(diff ** 2, axis=2)
+-
+-def quantize_8bit(data):
+-    """
+-    Casts full-precision float to unsigned 8-bit integer.
+-    Assumes data is normalized or scaled appropriately before casting.
+-    """
+-    # Implementation detail: Scale to [0, 255] and cast to uint8
+-    # Exact scaling depends on the data range, assumed handled by source [S1]
+-    return np.clip(np.round(data * 255.0), 0, 255).astype(np.uint8)
++    # The sources do not provide the exact entropy encoding implementation.
++    # This step encodes all components with LZ77 and packs them together.
++    return compressed_data
+ ```
+ 
+@@ -215,5 +168,5 @@
+ 
+ ### Energy-based Thresholding for Vector Quantization
+-A technique to reduce the bitstream size of Vector Quantization (VQ) by discarding low-energy code vectors. It replaces vectors with energy below a threshold T with a predefined zero-energy vector Z, allowing entropy encoders to compress the stream more effectively [S7, unofficial]. It designs a codebook matrix M with n rows, ensuring one row Z (index z) has zero energy (all elements are zero) [S7, unofficial]. For each index i from the encoder, it calculates the squared magnitude $|M_i|^2$ of the code vector $M_i$. If $|M_i|^2 > T$, it transmits index i to the entropy encoder. If $|M_i|^2 \le T$, it replaces index i with z (the index of the zero-energy vector Z) before transmitting to the decoder [S7, unofficial]. The energy threshold T is individual for each pyramid layer, with larger threshold values assigned to lower pyramid levels to discard more coefficients [S7, unofficial]. Unlike standard VQ which transmits all indices, this method maps most indices to a single value (z), creating a sparse stream ideal for entropy coding (LZ/Huffman) [S7, unofficial].
++A technique to reduce the bitstream size of Vector Quantization (VQ) by discarding low-energy code vectors [S7, unofficial]. It replaces vectors with energy below a threshold T with a predefined zero-energy vector Z, allowing entropy encoders to compress the stream more effectively [S7, unofficial]. It designs a codebook matrix M with n rows, ensuring one row Z (index z) has zero energy (all elements are zero) [S7, unofficial]. For each index i from the encoder, it calculates the squared magnitude $|M_i|^2$ of the code vector $M_i$ [S7, unofficial]. If $|M_i|^2 > T$, it transmits index i to the entropy encoder [S7, unofficial]. If $|M_i|^2 \le T$, it replaces index i with z (the index of the zero-energy vector Z) before transmitting to the decoder [S7, unofficial]. The energy threshold T is individual for each pyramid layer, with larger threshold values assigned to lower pyramid levels to discard more coefficients [S7, unofficial]. Unlike standard VQ which transmits all indices, this method maps most indices to a single value (z), creating a sparse stream ideal for entropy coding (LZ/Huffman) [S7, unofficial].
+ 
+ ## Operating characteristics

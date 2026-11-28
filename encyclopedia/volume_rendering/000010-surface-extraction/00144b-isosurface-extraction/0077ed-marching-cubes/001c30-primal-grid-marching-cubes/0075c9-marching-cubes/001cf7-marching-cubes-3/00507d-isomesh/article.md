@@ -1,0 +1,150 @@
+# Isomesh
+
+Also called: isomesh=level, solid 3D isosurfaces
+
+## Overview
+Isomesh is a surface extraction technique that triangulates the level set of a 3D scalar field using the Marching Cubes algorithm and renders the result as a shaded, depth-tested mesh [S1, unofficial]. It solves the visual artifacts of volume rendering approaches, specifically the striping inherent in ray-marched iso-shells and the lack of depth testing in MIP/absorption methods that forces the body to occlude the field [S1, unofficial]. Unlike its siblings, it produces smooth, correctly occluded surfaces by generating the mesh on the CPU and relying on standard depth-tested rasterization for rendering, rather than per-pixel ray marching [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D scalar field observable $\sigma$ defined on a grid, and a scalar level value $L$ (the isovalue) [S1, unofficial].
+*   **Output:** A `GeometryBasics.Mesh` containing the triangulated isosurface [S1, unofficial]. If the field does not cross $L$ within the domain, the mesh is empty [S1, unofficial].
+
+**Data Structures:**
+*   **Field:** A 3D array of floating-point values [S1, unofficial]. The implementation asserts the dimension $d=3$; it is not applicable to 2D fields [S1, unofficial].
+*   **Mesh:** A `GeometryBasics.Mesh` object containing vertices and triangle indices [S1, unofficial]. The normals are oriented towards increasing field values [S1, unofficial].
+
+**Numbered Steps:**
+1.  **Validation:** Assert that the input field dimension $d=3$ [S1, unofficial].
+2.  **Extraction:** Execute the Marching Cubes algorithm on the CPU, running single-threaded over the plotted region of the field $\sigma$, to extract the isosurface at level $L$ [S1, unofficial]. This generates a `GeometryBasics.Mesh` [S1, unofficial].
+3.  **Plotting:** When the isomesh keyword is set to a level value, the field Observable is lifted to `isosurface_mesh(σ, isomesh)` and plotted by a new `plot_σ_obs!` method for meshes [S1, unofficial]. Rendering kwargs (e.g., `color`, `transparency`, `backlight`) are passed to `Makie.mesh!` [S1, unofficial].
+4.  **Rendering:** Render the mesh with depth testing enabled [S1, unofficial]. The normals point into the region of interest for fields like vorticity or $-\lambda_2$, and out of it for low pressure [S1, unofficial].
+
+**Formulas:**
+*   **Cell Configuration Index:** For each voxel cell with corner values $v_0, \dots, v_7$, the binary configuration index is $I = \sum_{k=0}^{7} s(v_k) \cdot 2^k$, where $s(v) = 1$ if $v \ge L$ and $0$ otherwise [G].
+*   **Edge Interpolation:** For an edge connecting corners $v_a$ and $v_b$ with spatial positions $p_a$ and $p_b$, the isosurface point $p$ is computed via linear interpolation: $p = p_a + \frac{L - v_a}{v_b - v_a} (p_b - p_a)$ [G].
+*   **Triangle Generation:** Triangles are formed by connecting the interpolated edge points according to the standard Marching Cubes lookup table for index $I$ [G].
+
+**Parameters:**
+*   `isomesh`: The level value $L$ for extraction [S1, unofficial].
+*   `backlight`: A lighting parameter for the mesh, defaulting to $1$ [S1, unofficial]. Setting `backlight=1` lights both sides of the mesh to remove dependence on normal sign [S1, unofficial]. Setting `backlight=0` causes surfaces with normals pointing away from the light to render dark [S1, unofficial].
+*   `transparency`: A boolean flag passed to `Makie.mesh!` [S1, unofficial]. When `true`, combined with a translucent colour, it allows the body to stay visible through the mesh [S1, unofficial].
+*   `enable_depth`: For isomesh, this is implicitly `true` because mesh plots are always depth-tested [S1, unofficial]. Passing `enable_depth=false` with isomesh errors in Makie with 'Invalid attribute enable_depth for plot type Mesh' [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Performance:** The Marching Cubes implementation runs single-threaded on the CPU [S1, unofficial]. Performance can be improved by cropping the domain with CIs to reduce the region processed [S1, unofficial].
+*   **Normal Orientation:** Marching cubes orients the normals towards increasing values [S1, unofficial]. For fields where the region of interest is below the level (e.g., low pressure), normals point outward [S1, unofficial]. Use `backlight=1` to ensure visibility regardless of orientation [S1, unofficial].
+*   **Depth Testing:** Unlike `:mip` and `:absorption` which default to `enable_depth=false` (drawing the body over the field), isomesh uses depth testing so the body is occluded by the field where appropriate [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def plot_isomesh(field_observable, level, backlight=1, transparency=False):
+    """
+    Extracts and renders an isosurface mesh for a 3D field.
+    Args:
+        field_observable: 3D scalar field array (nx, ny, nz).
+        level: Scalar isovalue.
+        backlight: Lighting mode (1 for both sides, 0 for front-side only).
+        transparency: Boolean for alpha blending.
+    """
+    # 1. Validation: Assert 3D dimension
+    if len(field_observable.shape) != 3:
+        raise ValueError("Isomesh requires a 3D field.")
+    
+    nx, ny, nz = field_observable.shape
+    cell_count = (nx - 1) * (ny - 1) * (nz - 1)
+    if cell_count == 0:
+        return
+    
+    # Standard Marching Cubes lookup tables (edge_table[config] -> list of edge indices)
+    # tri_table[config] -> list of triangle vertex indices (-1 terminates triangle)
+    # Defined per standard MC specification [G]
+    EDGE_TABLE = [...] # 256 entries mapping config to up to 12 edge indices
+    TRI_TABLE = [...]  # 256 entries mapping config to up to 5 triangles (vertex indices)
+    
+    vertices = []
+    triangles = []
+    
+    # 2. Extraction: Single-threaded CPU iteration over cells
+    for i in range(nx - 1):
+        for j in range(ny - 1):
+            for k in range(nz - 1):
+                # Extract 8 corner values and positions
+                corners = [
+                    field_observable[i, j, k], field_observable[i+1, j, k],
+                    field_observable[i+1, j+1, k], field_observable[i, j+1, k],
+                    field_observable[i, j, k+1], field_observable[i+1, j, k+1],
+                    field_observable[i+1, j+1, k+1], field_observable[i, j+1, k+1]
+                ]
+                positions = [
+                    (i, j, k), (i+1, j, k), (i+1, j+1, k), (i, j+1, k),
+                    (i, j, k+1), (i+1, j, k+1), (i+1, j+1, k+1), (i, j+1, k+1)
+                ]
+                
+                # Compute cell configuration index
+                config = 0
+                for m in range(8):
+                    if corners[m] >= level:
+                        config |= (1 << m)
+                
+                if config == 0:
+                    continue # Field does not cross level in this cell
+                
+                # Interpolate vertices on active edges
+                edge_indices = EDGE_TABLE[config]
+                edge_vertices = []
+                for e_idx in edge_indices:
+                    v0, v1 = e_idx // 2, (e_idx + 1) // 2
+                    # Handle edge wrapping for standard MC edge numbering
+                    edge_v0, edge_v1 = corners[v0], corners[v1]
+                    pos0, pos1 = positions[v0], positions[v1]
+                    if abs(edge_v1 - edge_v0) < 1e-9:
+                        interp_pos = pos0
+                    else:
+                        t = (level - edge_v0) / (edge_v1 - edge_v0)
+                        interp_pos = (pos0[0] + t*(pos1[0]-pos0[0]),
+                                      pos0[1] + t*(pos1[1]-pos0[1]),
+                                      pos0[2] + t*(pos1[2]-pos0[2]))
+                    edge_vertices.append(interp_pos)
+                
+                # Generate triangles
+                tri_indices = TRI_TABLE[config]
+                for idx in tri_indices:
+                    if idx == -1:
+                        break
+                    v0, v1, v2 = edge_vertices[idx], edge_vertices[idx+1], edge_vertices[idx+2]
+                    triangles.append((v0, v1, v2))
+    
+    # If field does not cross level, mesh is empty
+    if not triangles:
+        return
+    
+    # 3. Plotting: Lift to mesh and render
+    # Pass kwargs to Makie.mesh!
+    render_mesh(
+        vertices=vertices,
+        triangles=triangles,
+        backlight=backlight,
+        transparency=transparency,
+        enable_depth=True  # Implicitly true; cannot be set to False
+    )
+```
+
+## Operating characteristics
+*   **Time Complexity:** The Marching Cubes extraction is $O(N)$ with respect to the number of voxels in the plotted region, but runs single-threaded on the CPU [S1, unofficial].
+*   **Memory Complexity:** Requires storage for the field array and the resulting mesh (vertices and indices) [S1, unofficial].
+*   **Measured Performance:** On an RTX 4060 8 GB with 8 threads, on a $512 \times 192 \times 192$ domain:
+    *   Isomesh update time: 1.48s
+    *   Render time: 0.016s
+    *   Total per frame: 1.50s [S1, unofficial]
+    *   The Marching Cubes step adds 0.65s per frame for approximately 52k triangles, which is about 0.5s more than volume methods, while its draw time is the cheapest among all methods [S1, unofficial].
+*   **Strengths:** Produces smooth surfaces with correct depth testing, avoiding the striping of ray-marched iso volumes and the occlusion issues of MIP/absorption [S1, unofficial].
+*   **Limitations:** Slower extraction time due to single-threaded CPU execution [S1, unofficial]. Not applicable to 2D fields [S1, unofficial].
+
+## Background
+Isomesh was introduced as part of the `viz!` function in the WaterLily.jl ecosystem to provide a solid 3D isosurface visualization option [S1, unofficial]. It was developed to address the visual limitations of existing volume rendering methods in the library, specifically the striped appearance of `:iso` ray marching and the lack of depth testing in `:mip` and `:absorption` [S1, unofficial]. The implementation relies on the `Meshing` package for the Marching Cubes algorithm and `GeometryBasics` for the mesh structure [S1, unofficial].
+
+## Sources
+[S1] viz!: add isomesh keyword for solid 3D isosurfaces, https://github.com/WaterLily-jl/WaterLily.jl/pull/334, fetched 2026-10-28 (unofficial)

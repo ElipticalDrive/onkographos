@@ -1,0 +1,1649 @@
+Neural Light Field Estimation for Street Scenes
+with Differentiable Virtual Object Insertion
+arXiv:2208.09480v1 [cs.CV] 19 Aug 2022
+Zian Wang1,2,3 , Wenzheng Chen1,2,3 , David Acuna1,2,3 ,
+Jan Kautz1 , and Sanja Fidler1,2,3
+NVIDIA 2 University of Toronto 3 Vector Institute
+{zianw,wenzchen,dacunamarrer,jkautz,sfidler}@nvidia.com
+1
+Abstract. We consider the challenging problem of outdoor lighting
+estimation for the goal of photorealistic virtual object insertion into
+photographs. Existing works on outdoor lighting estimation typically
+simplify the scene lighting into an environment map which cannot capture
+the spatially-varying lighting effects in outdoor scenes. In this work,
+we propose a neural approach that estimates the 5D HDR light field
+from a single image, and a differentiable object insertion formulation
+that enables end-to-end training with image-based losses that encourage
+realism. Specifically, we design a hybrid lighting representation tailored
+to outdoor scenes, which contains an HDR sky dome that handles the
+extreme intensity of the sun, and a volumetric lighting representation
+that models the spatially-varying appearance of the surrounding scene.
+With the estimated lighting, our shadow-aware object insertion is fully
+differentiable, which enables adversarial training over the composited
+image to provide additional supervisory signal to the lighting prediction.
+We experimentally demonstrate that our hybrid lighting representation is
+more performant than existing outdoor lighting estimation methods. We
+further show the benefits of our AR object insertion in an autonomous
+driving application, where we obtain performance gains for a 3D object
+detector when trained on our augmented data.
+Keywords: Lighting Estimation, Image Editing, Augmented Reality
+1
+Introduction
+In this work, we address the task of outdoor lighting estimation from monocular
+imagery, specifically focusing on street scenes, as shown in Fig. 1. This is an
+important task, as it enables virtual object insertion that can cater to many
+downstream domains [8,28,18,35,10], such as virtually inserting newly planned
+buildings for architectural visualization, realistically rendering game characters
+into surroundings, or as a way to augment real datasets with objects that are
+otherwise hard to record in the real world, such as road debris and exotic animals,
+for the purpose of training more robust and performant computer vision models.
+Lighting estimation for AR applications needs to account for complex 5D
+light transport [1], i.e. a function of spatial location and viewing direction. With
+2
+Z. Wang et al.
+Fig. 1. We estimate lighting and perform virtual objects insertion in real street scenery.
+We insert cars and heavy vehicles (top), and composite rare but safety-critical scenarios
+with garbage, construction site, a dog, and debris (bottom). 3D assets provided courtesy
+of TurboSquid and their artists Hum3D, be fast, rabser, FirelightCGStudio, amaranthus
+and 3DTree_LLC.
+usually a limited field-of-view observed from input, the task of estimating the
+light field is challenging and ill-posed. An additional challenge encountered for
+outdoor scenes, in contrast to indoor scenes, is the extreme high dynamic range
+(HDR) of the sun, which is critical to estimate correctly in order to render cast
+shadows. Existing literature on lighting estimation usually tackles a simplified
+problem setting. [37,34] focus on spatially-varying effects but do not handle HDR
+intensities. In contrast, methods that focus on HDR and predict parametric
+sky [17,39] or utilize learned sky models [16] typically ignore the spatially-varying
+effects and lack high-frequency details. These limitations not only result in
+inaccurate lighting estimation but also hamper virtual object insertion effects.
+In this paper, we propose a unified approach that overcomes the previously
+mentioned limitations, estimating the HDR scene light field from a single image.
+Tailored to outdoor scenes, we estimate a hybrid lighting representation that
+comprises of two components: an HDR sky dome and a volumetric lighting
+representation for the surrounding scene. We employ a learned latent vector to
+represent the sky dome inspired by [16], which can be decoded into an HDR
+environment map that is designed to model the strong intensity of the sun.
+We adopt the volumetric spherical Gaussian representation [37] to represent
+the non-infinity surroundings such as road and buildings. The two components
+naturally combine with volume rendering and demonstrate superiority over prior
+works [16,37]. We further design a physics-based object insertion formulation that
+renders the inserted objects and their shadows cast on the scene. We utilize raytracing to capture the second-order lighting effects, which is fully differentiable
+with respect to the lighting parameters. We train our method with supervised and
+self-supervised losses, and show that adversarial training over the composited AR
+images provides complementary supervisory signal to improve lighting estimation.
+Our method outperforms prior work in the tasks of lighting estimation and
+photorealistic object insertion, which we show through numerical results and
+a user study. We further showcase our virtual object insertion through the
+Neural Light Field Estimation for Street Scenes
+3
+application of 3D object detection in autonomous driving. Our approach, which
+can render synthetic 3D objects into real imagery in a realistic way, provides
+useful data augmentation that leads to notable performance gains over the vanilla
+dataset, and a naive insertion method that does not account for lighting.
+2
+Related Work
+Lighting estimation aims to predict an HDR light field from image observations. Due to the ill-posed nature of the problem, prior works often tackle a
+simplified task and ignore spatially-varying effects, using lighting representations
+such as spherical lobes [3,24], light probes [21], sky parameters [16,17,39], and environment maps [12,31,38,32]. Recent works explored various representations for
+capturing spatially-varying lighting, including per-pixel spherical lobes [13,23,41],
+light source parameters [11], per-location environment map [33,43] and 3D volumetric lighting [34,37]. These works usually train with synthetic data due to the
+scarcity of available groundtruth HDR light field on real-world captures.
+Outdoor scenes require special attention for the extreme High Dynamic Range
+(HDR) lighting intensity, e.g. the sun’s intensity, which is several orders higher
+in magnitude than typical light sources found in indoor scenes. Prior works
+employed sky parameters [17,39], or learned sky models [16] with an encoderdecoder architecture for modeling HDR sky. However, these works typically only
+focus on modeling the sky, and ignore the high-frequency and spatially-varying
+effects, which are equally important to get right for AR applications. In this work,
+we propose a unified representation that can handle both HDR sky intensity as
+well as spatially varying effects in outdoor scenes to achieve better performance.
+Self-supervised lighting estimation methods apply differentiable rendering to provide gradient for lighting estimation [6,7,40,22,27]. Differentiable
+rasterization-based renderers [6,40,7] are typically limited to images of single objects and ignores the spatially-varying effects. Physically-based rendering (PBR)
+methods [22,27] require intensive memory and running time, and are thus limited
+to optimization tasks. Note that existing differentiable renderers [6,7,27] typically
+do not provide direct functionality for object insertion, which is an image editing
+task. We propose a novel differentiable object insertion formulation, providing
+valuable supervision signal for lighting estimation.
+Image manipulation. Related to ours is also work that aims to insert synthetic objects into images using alternative techniques, such as adversarial methods [25,20], or by perturbing real scenes using recent advances in neural rendering [28]. Alhaija et al . [2] assumes known lighting and propose to use AR as a
+data generation technique by inserting synthetic assets into real world scenes.
+Naive copy-paste object insertion has also been shown to boost downstream
+object recognition accuracy [35,10]. Neural Scene Graph [28] optimize neural
+implicit functions for each object in the scene. Despite realistic editing results,
+lighting effects are baked into the representation and thus swapping assets from
+one scene to another is not easily possible. GeoSim [8] reconstructs assets such
+as cars from real-world driving sequences, and inserts them into a given image
+4
+Z. Wang et al.
+SkyDecoder
+HDR Sky Dome
+Image
+Virtual Object
+3D CNN
+Depth
+Lighting
+Volume
+(a) Hybrid Lighting Joint Estimation
+Hybrid
+Lighting
+Differentiable
+Object Insertion
+Lighting
+Feature
+Real World Image
+Discriminator
+ResNet
+Sky
+Vector
+“Real”
+“Fake”
+Editing Result
+(b) Differentiable Object Insertion
+Fig. 2. Model overview. Our monocular lighting estimation model (a) predicts a
+hybrid lighting representation containing an HDR sky dome (top) representing sky and
+sun at infinity, and a lighting volume (bottom) representing the surrounding scene. The
+depth (a, left) for lighting volume prediction comes from off-the-shelf monocular depth
+estimator [14]. With the predicted lighting, our object insertion module (b) renders a
+3D asset into a given image and is fully differentiable w.r.t. lighting parameters, thus
+enabling end-to-end training with adversarial objective for photorealism.
+using a classical renderer followed by a shallow neural renderer that fixes errors
+such as unrealistic compositing effects. While achieving impressive results on car
+insertion, it remains difficult to apply on less frequent objects. In contrast, our
+method supports inserting 3D assets of various classes (Fig. 1).
+3
+Method
+We aim to estimate scene lighting so as to render synthetic 3D assets into images
+realistically. In what follows, we introduce the hybrid representation, which
+comprises an HDR sky dome and a volumetric scene lighting (Sec. 3.1), the
+hybrid lighting prediction model (Sec. 3.2, Fig. 2a), the differentiable object
+insertion module that renders a virtual object into an image (Sec. 3.3, Fig. 2b),
+and the training schema (Sec. 3.4).
+3.1
+Hybrid Lighting Representation
+Our goal is to model the 5D light field, which maps a spatial location x ∈ R3
+and light direction l ∈ S 2 into an HDR radiance value r ∈ R3+ . In contrast to
+indoor, outdoor scenes require simultaneously modeling the extreme HDR sky as
+well as the surrounding environment. The peak magnitude of the former (sun)
+can be several orders higher than the latter. To address this, we propose to use a
+hybrid lighting representation that separately models the sky at infinity and the
+surrounding scene. This decomposition allows us to capture both, the extreme
+intensity of the sky while preserving the spatially-varying effects of the scene.
+HDR sky representation. The sky dome typically contains a relatively
+simple structure, i.e. sun, sky, and possibly clouds, which affords a much lower
+dimensional representation than that of a typical environment map. Thus, instead
+of directly predicting a high resolution 2D environment map, we learn a feature
+space of the sky, and represent the sky dome with a sky feature vector f ∈ Rd ,
+Neural Light Field Estimation for Street Scenes
+5
+Sky
+Latent
+Peak
+Direction
+SkyEncoder
+LDR Panorama
+SkyDecoder
+Peak
+Intensity
+HDR Sky Dome
+Fig. 3. Sky modeling network takes as input an LDR panorama and produces an
+HDR sky with an encoder-decoder structure, where the network also learns to compress
+sky information into the intermediate vector representation f ∈ Rd . The sky vector
+consists of explicit feature of peak intensity and direction, and a latent feature vector.
+which can further be passed to a pretrained CNN decoder to decode into an HDR
+environment map, as shown in Fig. 2a (top). The sky feature space learning is
+described in Sec. 3.2, sky modeling part.
+Spatially-varying surrounding scene representation. The outdoor scenes
+generally consist of complex geometric structures resulting in location-dependent
+lighting effects like shadows and reflections, which cannot be simply modeled as
+an environment map. To address this, we use a volumetric spherical Gaussian
+(VSG) [37] to represent the nearby surrounding scene. VSG is a 8-channel
+volumetric tensor LVSG ∈ R8×X×Y ×Z , augmenting the RGBα volume with viewdependent spherical Gaussian lobes. Each voxel of VSG contains a spherical
+2
+Gaussian lobe G(l) = ce−(1−l·µ)/σ , where l is viewing direction and ξ = {c, µ, σ}
+are 7-dimensional parameters to model the exiting radiance of the corresponding
+3D location. Each voxel also has an alpha channel α ∈ [0, 1] to represent occupancy.
+The 5D light field can be queried with volume rendering which we detail below.
+Radiance query function. With our hybrid lighting representation utilizing
+both sky dome and volumetric lighting, the lighting intensity at any 3D point
+along any ray direction can be queried. To compute the radiance of a ray that
+starts inside the volume, we first shoot the ray through the lighting volume
+LVSG and finally hit the HDR sky dome Lenv . We adopt alpha compositing to
+combine the two lighting effects. Specifically, to compute the lighting intensity
+for the ray emitted from the location x ∈ R3 in the direction l ∈ S 2 , we select K
+equi-spaced locations along the ray and use nearest neighbor interpolation to get
+the voxel values {αk , ξk }K
+k=1 from LVSG . We then query the intensity of Lenv in
+the direction l, referred to as Lenv (l), via bilinear interpolation. The final HDR
+light intensity L(x, l) ∈ R3+ can be computed using volume rendering:
+L(x, l) =
+K
+X
+k=1
+
+τk−1 αk G(−l; ξk ) + τK Lenv (l)
+(1)
+Qk
+where τk = i=1 (1 − αi ) is the transmittance. This function will be used for
+rendering object insertion in Eq. 2 and shadows in Eq. 4.
+3.2
+Network Architecture
+In this section, we introduce the network architecture for the pre-trained sky
+model and lighting prediction.
+6
+Z. Wang et al.
+Sky modeling. To learn the sky feature space, we design a sky modeling network
+as shown in Fig. 3. Specifically, the encoder compresses the input LDR panorama
+into a feature vector, then the decoder decode it to the original HDR sky dome.
+Our sky feature vector f contains explicit HDR peak intensity fintensity ∈ R3 , peak
+direction fdir ∈ R3 , and a latent vector flatent ∈ Rd−6 encoding the content of the
+sky dome. This design allows us to control the lighting of the sun by controlling
+fdir and fintensity , which is convenient for applications that allow manual editing.
+We pre-train the sky encoder-decoder network on a set of outdoor HDR
+panoramas and keep it freezed. Once trained, we integrate the fixed decoder into
+the sky prediction branch (Fig. 2a top). The pre-trained sky modeling network,
+which maps an LDR panorama into HDR, will also be used to generate HDR
+pseudo labels for supervision (Sec. 3.4) due to the lack of HDR data.
+Hybrid lighting prediction. As shown in Fig. 2, we use a two-branch network
+to predict the sky dome and the lighting volume. We detail each branch below.
+HDR sky prediction branch. Given an input image, the sky branch directly
+predicts the sky feature vector f from the ResNet [15] backbone. The pre-trained
+fixed sky decoder then maps f to an HDR sky environment map.
+Lighting volume prediction branch. We adapt from a subnetwork of [37] for VSG
+prediction. Specifically, we first use an MLP [26] to map the lighting feature
+extracted by ResNet backbone into a feature volume, and then unproject the
+input image into a RGBα volume. We adopt a 3D UNet to fuse the two volumes
+and predict the VSG lighting representation. Since unprojection requires depth
+information, we adopt an off-the-shelf monocular depth estimator PackNet [14]
+to predict a dense depth map. Architecture details are included in the Appendix.
+3.3
+Differentiable Object Insertion
+We now study the task of realistic object insertion, which is key in AR and our
+main final objective. Given an estimated lighting representation L, our goal is to
+composite a virtual object with known geometry M and material Θ into a real
+image I with known depth D and camera intrinsics. To achieve realistic lighting
+effects in this process, not only the inserted object should be influenced by the
+scene lighting, but it should also affect the scene to create cast shadows.
+In our work, we aim to make this insertion module differentiable, including
+shadow rendering, such that it can afford gradient backpropagation from the
+losses defined on the composited image, back to our lighting parameters. Since
+groundtruth light field is not easily available for outdoor scenes, we argue that a
+plausible complementary supervision signal is to use the quality of object insertion
+as an objective. Thus, carefully designed adversarial training on the composite
+images can be a powerful approach to supervise lighting estimation. We also argue
+that even if groundtruth lighting information would be available, optimizing for
+the quality of object insertion end-to-end will likely lead to improved results.
+Foreground object appearance rendering. We render the virtual object
+with our predicted hybrid lighting representation L using a physically-based
+renderer. We adopt the Disney BRDF [4,19,7] for enhanced realism.
+Neural Light Field Estimation for Street Scenes
+7
+Specifically, we first shoot rays from the camera origin to the scene, where we
+apply ray-mesh intersection detection for the rays and the inserted object M.
+For each intersected ray, we create a G-buffer for the location of the intersection
+x, the surface normal n and the material properties θ. We bounce multiple rays
+at x and render with Monte-Carlo numerical integration:
+N
+Ix =
+1 X f (lk , v; θ)L(x, lk )(n · lk )+
+N
+p(lk )
+(2)
+k=1
+where L(·, ·) is the radiance query function as defined in Eq. 1, N and lk is
+the number and direction of sampled lighting, v is the viewing direction of the
+camera ray, and f is the Disney BRDF.
+Background shadow map rendering. The inserted object changes the light
+transport in the scene and affects the appearance of the background scene
+pixels, which typically causes shadows. We adopt ray tracing to generate faithful
+ratio shadow maps for the inserted object, inspired by classic ratio imaging
+techniques [29]. Specifically, for each scene pixel p, we compute its 3D location
+x from the depth map D. We first compute the lighting distribution before object
+Ns
+s
+insertion {L(xs , lk )}N
+k=1 , where {lk }k=1 are uniformly selected light directions
+on the upper hemisphere. After object insertion, the rays may potentially get
+occluded by the inserted objects, resulting in a post-insertion lighting distribution
+0
+0
+Ns
+s
+{L (xs , lk )}N
+k=1 . To compute {L (xs , lk )}k=1 , we perform ray-mesh query for all
+rays. If ray (xs , lk ) is occluded by the inserted object, we set the lighting intensity
+value to an ambient value Ia which we empirically set to 0.1, while the lighting
+intensities of unoccluded rays remain the same as the original radiance. We then
+define the shadow effects as the ratio of the pixel intensity values before (I) and
+0
+after (I ) object insertion,
+PNs
+0
+0
+Ip
+fscene (xs , lk , v; θ)L (xs , lk )(n · lk )+
+Sp =
+= Pk=1
+Ns
++
+Ip
+k=1 fscene (xs , lk , v; θ)L(xs , lk )(n · lk )
+(3)
+where the BRDF of the scene pixel fscene and normal direction n are unknown.
+As our object insertion and shadows occur on flat surfaces in typical street
+scenes we consider, we simplify it by assuming the normal direction is pointing
+upward, and assume the scene surface is Lambertian with constant diffuse albedo
+fscene (xs , lk , v) = fd . As a result, we can move the BRDF term outside the sum
+in Eq. 3 and cancel it out to obtain a simpler term:
+fd
+Sp =
+N
+Ps
+k=1
+N
+Ps
+fd
+0
+L (xs , lk )(n·lk )+
+k=1
+N
+Ps
+0
+L (xs , lk )(n·lk )+
+= k=1
+N
+Ps
+L(xs , lk )(n·lk )+
+L(xs , lk )(n·lk )+
+(4)
+k=1
+which can be computed with the estimated lighting L. Scene pixels after insertion
+0
+can then be computed by multiplying the ratio shadow map I = S I.
+8
+Z. Wang et al.
+Gradient propagation. We design the forward rendering process to be differentiable for both foreground object and background shadows, which allows us to
+back propagate gradients from image pixels to the lighting parameters.
+For each foreground pixel, the rendered appearance of the inserted object is
+0
+differentiable via Eq. 2. Gradients from background pixels I with respect to the
+0
+0
+∂I
+∂S
+lighting L, i.e. ∂I
+∂L , can be computed via ∂L = ∂L I, where the shadow ratio S
+in Eq. 4 is also differentiable wrt. lighting L. Intuitively, if we want the shadows
+around the object to be perceptually darker, this will encourage the occluded
+light directions to have stronger intensity.
+3.4
+Training
+We first pre-train the sky modeling network on a collection of outdoor HDR
+panoramas, and then keep it fixed in the following training process for our hybrid
+lighting prediction. The supervision for our hybrid lighting joint estimation
+module comes from two parts: (1) the direction supervision that learns lighting
+information from the training data, and (2) the adversarial supervision that
+applies on the final editing results and optimizes for realism.
+Sky Modeling Supervision. We train the sky modeling encoder-decoder
+network (Fig. 3) on a collection of outdoor HDR panoramas. For each HDR
+panorama IHDR , we compute its ground-truth peak intensity fintensity and direction fdir . We train the encoder-decoder with the LDR-HDR pair (ILDR , IHDR ),
+where the input LDR panorama ILDR is converted from the HDR panorama
+via gamma correction and intensity clipping. We supervise the network with a
+combination of three losses, including peak direction loss Ldir with L1 angular
+error, and peak intensity loss Lintensity and HDR reconstruction loss Lhdr using
+log-encoded L2 error defined as LogEncodedL2(x̂, x) = || log(1 + x̂) − log(1 + x)||22 .
+Supervision for Hybrid Lighting Prediction. To supervise lighting prediction, we use two complementary datasets: the self-driving dataset nuScenes [5],
+and the panoramic street view dataset HoliCity [42]. As both datasets are LDR,
+we predict HDR pseudo labels from the pre-trained modeling network (Fig. 3)
+by lifting HoliCity LDR panoramas into HDR. In what follows, we descibe the
+supervision for the sky prediction branch, the lighting volume prediction branch,
+and the loss signal to combine the two representation.
+HDR sky branch losses. We train our sky branch on HoliCity [42], which contains
+LDR panoramas Ipano with sky masks Msky and sun location fdir . To compute
+HDR pseudo labels, we feed the LDR panorama Ipano into the pre-trained sky
+network, and get the estimated sky peak intensity f̃intensity and latent code f̃latent
+as pseudo groundtruth to supervise our sky prediction branch. In a training step,
+we crop a perspective image Icrop from the panorama as input to our lighting
+estimation network, and predict the sky vector output (f̂intensity , f̂dir , f̂latent ) and
+the reconstructed HDR sky image Iˆpano . We use a combination of the log-encoded
+L2 loss for peak intensity (f̂intensity , f̃intensity ), L1 loss for latent code (f̂latent , f̃latent ),
+L1 angular loss for peak direction (f̂dir , fdir ), and L1 reconstruction loss between
+(Iˆpano Msky , Ipano Msky ) within the LDR sky region indicated by Msky .
+Neural Light Field Estimation for Street Scenes
+9
+Lighting volume branch loss. Recall that images in the datasets are inherently
+groundtruth of a subset of the light field captured by camera sensor rays, e.g.
+the videos captured by self-driving cars in nuScenes [5] and the panoramas in
+HoliCity [42]. Meanwhile, the predicted hybrid lighting representation supports
+radiance query along arbitrary rays as shown in Eq. 1. Thus, we can enforce the
+consistency of radiance between our predicted light field and captured image
+groundtruth, given known camera pose and intrinsics.
+Specifically, we sample images from nuScenes, and crop perspective images
+from HoliCity panoramas as input images. We then predict the corresponding
+lighting volume together with the sky dome, query the radiance of the camera
+rays, and enforce consistency with ground truth captured images using L2 loss.
+Following [37], we also render the alpha channel into a depth map and enforce
+consistency with groundtruth depth.
+Sky separation loss. Intuitively, the real world camera rays that directly reach the
+sky should also transmit through the lighting volume and hit the sky environment
+map. With the losses mentioned above, the model may still fall into the degenerate
+case where the lighting volume completely occludes the sky. To address this, we
+use the sky mask Msky information to supervise the sky transmittance τK in
+Eq. 1 with binary cross entropy loss.
+Training Lighting via Object Insertion. Our final goal is to realistically
+insert virtual objects into images. We formulate the object insertion process in an
+end-to-end fashion and use a discriminator to supervise the perceptual lighting
+effects on the image editing results.
+Specifically, we collect a set of high quality 3D car models from Turbosquid1 .
+Given an input image, we estimate scene lighting, randomly select a 3D asset,
+and insert it into the scene using our object insertion module to get Iˆedit . We use
+the map information available in nuScenes to place the car on a driveable surface.
+We also perform collision and occlusion checking with the depth map to avoid
+unrealistic object insertion due to erroneous placement. As shown in Fig. 2b, we
+use a discriminator to judge the quality of Iˆedit compared to real cars, and employ
+adversarial supervision to optimize for realism of insertion: Ladv = −D(Iˆedit ).
+Intuitively, a discriminator could easily detect erroneous shadow direction and
+intensity, and error in specular highlights. Through the adversarial supervision,
+the estimated lighting is encouraged to produce object insertion results similar
+to real world image samples. We refer to further analysis in the Appendix.
+4
+Experiments
+We extensively evaluate our method both qualitatively and quantitatively. We
+first provide experiment details (Sec. 4.1). We then compare lighting estimation,
+evaluate the quality of object insertion (Sec. 4.2) and perform ablation study
+(Sec. 4.3). Finally, we show that our AR data helps downstream self-driving
+perception tasks (Sec. 4.4).
+1
+www.turbosquid.com
+10
+Z. Wang et al.
+Median angular error ↓
+Method
+Hold-Geoffroy et al . [16]
+24.88◦
+Wang et al . [37]
+53.86◦
+Ours
+22.43◦
+Ours (w/o sky modeling)
+31.45◦
+Ours (w/o adv. supervision)
+24.16◦
+Table 1. Quantitative results of peak direction on HoliCity [42]. We outperform
+past work, and each component (sky modeling, adversarial supervision) helps.
+PSNR ↑ si-PSNR ↑
+Method
+Hold-Geoffroy et al . [16]
+9.33
+10.73
+Hold-Geoffroy et al . [16]*
+10.81
+14.20
+Wang et al . [37]
+14.06
+15.28
+Ours (w/o adv. supervision) 14.23
+15.31
+Ours
+14.49
+15.35
+Table 2. Quantitative results of LDR
+appearance on the nuScenes dataset [5]. *
+indicates constraining the evaluation on
+the upper hemisphere.
+4.1
+Experimental Details
+Lighting estimation. Our lighting representation combines a sky feature vector
+and a VSG lighting volume. We set the dimension of the sky vector to be 64 and
+decode it to a 64x256 HDR sky dome. Different from [37], we tailor the size
+of VSG lighting volume to be 256x256x64 (xyz) to accommodate 300x300x80
+(meters3 ) outdoor scenes. As outdoor scenes are larger in scale while visible scene
+surfaces are relatively dense in close-to-camera regions, we employ log projection
+to map the volume representation to a 3D scene location. Inference time of the
+lighting estimation network is 180ms per image, clocked on a TITAN V GPU.
+Object insertion. Our object insertion module relies on a differentiable rendering process of both foreground object and background shadows. During training,
+we sample 5000 rays for foreground objects. For background shadows, we render
+a 160x90 resolution shadow map and sample 450 rays per pixel to save memory
+and computation. After training, we do importance sampling for each pixel in
+foreground and can afford a high resolution shadow map for background to
+generate more realistic effects. During inference time, we also have the option to
+use commercial renderer such as Blender [9], which we detail in the Appendix.
+Datasets. We collected 724 outdoor HDR panoramas from online HDRI
+databases to train the sky encoder-decoder. We train the full model with
+nuScenes [5] and HoliCity [42]. For nuScenes, we use the official split containing
+700 scenes for training and 150 scenes for evaluation. For HoliCity dataset, we
+apply 90% v.s. 10% data split for training and evaluation.
+Multi-view extension. While we focus on monocular estimation, our model is
+extendable to multi-view input. It can consume multi-view images to predict more
+accurate lighting, as shown in Fig. 6. For the HDR sky prediction branch, we
+apply max pooling for fintensity , flatent , and average pooling to fdir after rotating
+fdir in different views to the canonical view. As for the volumetric lighting, since
+it is defined in the “world” coordinate space, we unproject and fuse multi-view
+images into a common lighting volume representation, akin to [30].
+4.2
+Evaluation of Lighting Estimation
+Baselines. We compare with current state-of-the-art lighting estimation methods
+[16,37]. Hold-Geoffroy et al . [16] estimates the HDR sky environment map from
+Neural Light Field Estimation for Street Scenes
+Approach
+Hold-Geoffroy et al . [16]
+Wang et al . [37]
+Ours
+11
+% Ours (w/o adv. sup.) is preferred ↓
+68.1 ± 5.4 %
+94.2 ± 2.0 %
+40.6 ± 10.2 %
+Table 3. Quantitative results of user study. Users compare baseline methods to
+an ablated version of our method (Ours w/o adv. supervision) in a pair-wise comparison.
+Each row reports the percentage of images that Ours w/o adv. supervision is preferred.
+Our method outperforms baselines, and adv. supervision improves performance.
+1
+2
+1
+2
+Input image
+Hold-Geoffroy et al . [16]
+Wang et al . [37]
+Ours
+Fig. 4. Qualitative comparison of lighting estimation. We insert a purely specular
+sphere into the image to visualize the lighting prediction, and display the environment
+maps on the bottom. Note the sun and environment map changes between locations.
+a single image. Wang et al . [37] predicts Volumetric Spherical Gaussian. We
+re-train or finetune these methods on the same data sources we used for our
+method to ensure a fair comparison.
+HDR evaluation of peak direction. We evaluate peak direction prediction
+on HoliCity dataset [42]. We report the median angular error between the
+predicted direction and GT in Tbl. 1. Wang et al . [37] predicts HDR component
+in a self-supervised manner and cannot learn strong peaks. We also outperform
+Hold-Geoffroy et al . [16], which separately predicts a sky dome and its azimuth.
+LDR evaluation of novel view reconstruction. Recall that any lighting representation, such as environment map and our hybrid lighting, aims to represent
+the complete or a subset of the light field, which can be rendered into images by
+querying the radiance function with specified camera rays. Prior work [34,37] proposed to use novel view radiance reconstruction PSNR as quantitative evaluation
+of the quality of lighting estimation, which we report on nuScenes dataset [5].
+As the nuScenes-captured images may have different exposure values, we
+report both PSNR and scale invariant PSNR (si-PSNR) in Tbl. 2. For the latter,
+we multiply the predicted novel view with a scaling factor that minimizes L2 error.
+Since Hold-Geoffroy et al . [16] only predicts lighting on the upper hemisphere, we
+12
+Z. Wang et al.
+Input image
+Hold-Geoffroy et al . [16]
+Wang et al . [37]
+Ours
+Fig. 5. Qualitative comparison of virtual object insertion. Our method produces
+realistic cast shadows and high-frequency “clear coat” effects.
+Input image
+Inside shadow
+Shadow boundary
+Outside shadow
+Fig. 6. Qualitative results of spatially-varying shadow effects. Our method can
+handle the spatial changes of shadow intensity around shadow boundary, not possible
+previously. (Results take six surrounding perspective views as input. )
+also constrain the evaluation on the upper hemisphere to make a fair comparison.
+Our method outperforms both baselines with a large margin, as [16] ignores
+spatially-varying effects and usually predicts a sky dome with little high-frequency
+details. Our method also outperforms Wang et al . [37] which cannot handle high
+HDR intensity of an outdoor scene.
+Human study. To quantitatively evaluate the quality of object insertion, we
+perform a human study with Amazon Mechanical Turk, where we show two
+augmented images, randomly permuted, produced by our method and by the
+baseline. We then ask users to compare the realism of the inserted object, e.g.
+the cast shadows and the reflections, and select the more realistic image. For
+each comparison, we invite 15 users to judge 23 examples. We adopt majority
+vote for the preference of each example, and run three times to report mean and
+standard deviation in Tbl. 3. The ablated version of Ours (w/o adv. supervision)
+outperforms baselines, indicating the hybrid lighting representation improves
+upon prior works. Comparing Ours and Ours (w/o adv. supervision), the results
+indicate including adversarial supervision leads to more visually realistic editing.
+Qualitative comparison. We first visualize the environment maps at different
+scene locations and insertion of a purely specular sphere in Fig. 4. Hold-Geoffroy
+et al . [16] only predicts one environment lighting and ignored spatially-varying
+effects. For inserted spheres around shadowed region, it still produces strong
+cast shadows. Also, the high-frequency details are not well preserved in the
+sky prediction. Wang et al . [37] can generate high-frequency details but fails to
+handle the extreme HDR intensity of the outdoor scene, and thus cannot generate
+Neural Light Field Estimation for Street Scenes
+Initial editing
+After optimization
+Initial editing
+13
+After optimization
+Fig. 7. Discriminator test-time optimization. Note the discriminator corrects the
+shadow direction (left), and removes erroneous specular highlight (right). The pixelated
+effect is due to low-resolution rendering during end-to-end training.
+realistic cast shadows. Our method is the only one that handles extreme HDR,
+angular details and spatially-varying lighting. We show virtual object insertion
+results in Fig. 5. Our lighting prediction preserves high-frequency details with
+HDR intensity, producing realistic highlights and clear coating effects, while prior
+method cannot generate such effects.
+Spatially-varying shadows. Benefiting from the accurate HDR sky and
+surrounding scene estimation, our method can produce spatially-varying shadow
+effects. As shown in Fig. 6, the car casts an intense shadow when outside the
+shadow of the building, while the shadow caused by the car is much weaker when
+the car is inside the shadow region. Especially, it also shows reasonably different
+shadow intensity around the shadow boundary. This challenging effect requires
+accurate prediction of direction, intensity and geometry of HDR lighting, and
+will not occur with an incapable lighting representation.
+4.3
+Ablation Study
+We verify the effectiveness of the sky decoder module and the adversarial supervision. In Tbl. 1, compared to the ablated version that directly predict sky dome
+as an environment map (denoted as “Ours w/o sky modeling”), the full model
+reduces the error by around 50%, which demonstrates the sky modeling network
+is important for achieving accurate sun position prediction in outdoor scenes.
+Adversarial supervision improves the performance on quantitative evaluation
+in Tbl. 1, 2, especially for peak direction estimation, which indicates that discriminating on the final image editing result is complementary to existing supervision
+and benefits lighting prediction. In the user study (Tbl. 3), adversarial supervision improves perceptual realism and receives a higher user preference. We also
+qualitatively visualize the behaviour of the discriminator in Fig. 7. To understand
+the “photorealism” implicitly perceived by the discriminator during the training
+process, we perform test-time optimization on the object insertion results to
+minimize the adversarial loss, and show the optimized results in Fig. 7. In the
+first example, the initial editing results fail to predict the correct sun location
+and produce wrong shadows. After test-time optimization, the shadow direction
+points to the bottom-left of the image and the shadow intensity also matches
+the visual cues from the rest of the scene. In the second example, the initial
+editing results contain an obviously erroneous highlight, and the discriminator
+detects the artifact and removes it. This agrees with the intuition that a neural
+14
+Z. Wang et al.
+Method
+mAP car bus trailer const.vehicle bicycle
+Real Data
+0.190 0.356 0.124 0.011
+0.016
+0.116
++ Aug No Light. 0.201 0.363 0.163 0.029
+0.021
+0.120
++ Aug Light.
+0.211 0.369 0.182 0.036
+0.020
+0.146
+Table 4. Performance of a SOTA 3D object detector [36] on nuScenes benchmark.
+mAP represents the mean for the 10 object categories. We report individual categories
+that saw a significant boost (full table in the Appendix).
+discriminator have the capacity to catch lighting effects such as cast shadows
+and incorrect specular highlights. Further details are included in the Appendix.
+4.4
+Downstream Perception Task
+We investigate the benefits of our object insertion as data augmentation for a
+downstream 3D object detection task on nuScenes. The goal of this task is to place
+a 3D bounding box for 10 different object categories. We first train a state-of-theart monocular 3D detector [36] on a 10% subset of real data from the nuScenes
+training set. This subset was chosen randomly across all scenes but in a way
+that the number of objects per category resembles the original nuScenes training
+set. We then augment the front-camera images of this subset with our method.
+Specifically, we collect a set of 3D models with categories of car and construction
+vehicles, and randomly insert one object per image. Our augmented dataset has
+approximately 15K augmented (new) images. We use the same training strategy
+and model hyperparameters as [36] but do not supervise attributes or velocity as
+these are not present for the augmented data. Quantitatively, in Tbl. 4 we can
+observe that the performance of the detector improves by 2% when comparing
+to real data. Moreover, we can also see that while naively adding objects leads
+to a 1% improvement, another 1% is a result of having better light estimation.
+Interestingly, we can also notice that the performance of the object detector also
+improves in different categories even though we do not directly augment those.
+5
+Discussion
+In this paper, we proposed a hybrid representation of lighting and a novel
+differentiable object insertion module that allows end-to-end optimization of AR
+objectives. In a variety of comparisons, we demonstrate the effectiveness of our
+approach in lighting estimation. Furthermore, we showcase performance gains on
+a 3D object detection task when training the detector on our augmented dataset.
+While our method presents an effective way of rendering 3D assets into images,
+some limitations remain for future work. Currently, the inserted virtual object
+pixels do not pass the same capturing process as the background scene, and the
+shadow rendering assumes Lambertian surface. Modeling of camera ISP, weather,
+and non-Lambertian scene materials can be interesting directions for future work.
+Neural Light Field Estimation for Street Scenes
+15
+References
+1. Adelson, E.H., Bergen, J.R.: The plenoptic function and the elements of early vision.
+In: Computational Models of Visual Processing. pp. 3–20. MIT Press (1991) 1
+2. Alhaija, H.A., Mustikovela, S.K., Mescheder, L., Geiger, A., Rother, C.: Augmented
+reality meets computer vision: Efficient data generation for urban driving scenes.
+International Journal of Computer Vision 126(9), 961–972 (2018) 3
+3. Boss, M., Jampani, V., Kim, K., Lensch, H., Kautz, J.: Two-shot spatially-varying
+brdf and shape estimation. In: Proceedings of the IEEE/CVF Conference on
+Computer Vision and Pattern Recognition. pp. 3982–3991 (2020) 3
+4. Burley, B., Studios, W.D.A.: Physically-based shading at disney. In: ACM SIGGRAPH. vol. 2012, pp. 1–7. vol. 2012 (2012) 6
+5. Caesar, H., Bankiti, V., Lang, A.H., Vora, S., Liong, V.E., Xu, Q., Krishnan, A.,
+Pan, Y., Baldan, G., Beijbom, O.: nuscenes: A multimodal dataset for autonomous
+driving. arXiv preprint arXiv:1903.11027 (2019) 8, 9, 10, 11
+6. Chen, W., Ling, H., Gao, J., Smith, E., Lehtinen, J., Jacobson, A., Fidler, S.:
+Learning to predict 3d objects with an interpolation-based differentiable renderer.
+In: NeurIPS (2019) 3
+7. Chen, W., Litalien, J., Gao, J., Wang, Z., Tsang, C.F., Khalis, S., Litany, O., Fidler,
+S.: DIB-R++: Learning to predict lighting and material with a hybrid differentiable
+renderer. In: Advances in Neural Information Processing Systems (NeurIPS) (2021)
+3, 6
+8. Chen, Y., Rong, F., Duggal, S., Wang, S., Yan, X., Manivasagam, S., Xue, S.,
+Yumer, E., Urtasun, R.: Geosim: Realistic video simulation via geometry-aware
+composition for self-driving. In: CVPR (2021) 1, 3
+9. Community, B.O.: Blender - a 3D modelling and rendering package. Blender Foundation, Stichting Blender Foundation, Amsterdam (2018), http://www.blender.org
+10
+10. Dwibedi, D., Misra, I., Hebert, M.: Cut, paste and learn: Surprisingly easy synthesis
+for instance detection. In: The IEEE International Conference on Computer Vision
+(ICCV) (Oct 2017) 1, 3
+11. Gardner, M.A., Hold-Geoffroy, Y., Sunkavalli, K., Gagné, C., Lalonde, J.F.: Deep
+parametric indoor lighting estimation. In: Proceedings of the IEEE International
+Conference on Computer Vision. pp. 7175–7183 (2019) 3
+12. Gardner, M.A., Sunkavalli, K., Yumer, E., Shen, X., Gambaretto, E., Gagné, C.,
+Lalonde, J.F.: Learning to predict indoor illumination from a single image. arXiv
+preprint arXiv:1704.00090 (2017) 3
+13. Garon, M., Sunkavalli, K., Hadap, S., Carr, N., Lalonde, J.F.: Fast spatially-varying
+indoor lighting estimation. In: Proceedings of the IEEE Conference on Computer
+Vision and Pattern Recognition. pp. 6908–6917 (2019) 3
+14. Guizilini, V., Ambrus, R., Pillai, S., Raventos, A., Gaidon, A.: 3d packing for
+self-supervised monocular depth estimation. In: IEEE Conference on Computer
+Vision and Pattern Recognition (CVPR) (2020) 4, 6
+15. He, K., Zhang, X., Ren, S., Sun, J.: Deep residual learning for image recognition.
+CoRR abs/1512.03385 (2015), http://arxiv.org/abs/1512.03385 6
+16. Hold-Geoffroy, Y., Athawale, A., Lalonde, J.F.: Deep sky modeling for single image
+outdoor lighting estimation. In: Proceedings of the IEEE/CVF Conference on
+Computer Vision and Pattern Recognition. pp. 6927–6935 (2019) 2, 3, 10, 11, 12
+17. Hold-Geoffroy, Y., Sunkavalli, K., Hadap, S., Gambaretto, E., Lalonde, J.F.: Deep
+outdoor illumination estimation. In: Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition. pp. 7312–7321 (2017) 2, 3
+16
+Z. Wang et al.
+18. Hong, S., Yan, X., Huang, T.E., Lee, H.: Learning hierarchical semantic image manipulation through structured representations. In: Advances in Neural Information
+Processing Systems. pp. 2713–2723 (2018) 1
+19. Karis, B., Games, E.: Real shading in unreal engine 4. Proc. Physically Based
+Shading Theory Practice 4(3) (2013) 6
+20. Kim, S.W., Philion, J., Torralba, A., Fidler, S.: DriveGAN: Towards a Controllable
+High-Quality Neural Simulation. In: IEEE Conference on Computer Vision and
+Pattern Recognition (CVPR) (2021) 3
+21. LeGendre, C., Ma, W.C., Fyffe, G., Flynn, J., Charbonnel, L., Busch, J., Debevec,
+P.: Deeplight: Learning illumination for unconstrained mobile mixed reality. In:
+Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition.
+pp. 5918–5928 (2019) 3
+22. Li, T.M., Aittala, M., Durand, F., Lehtinen, J.: Differentiable monte carlo ray
+tracing through edge sampling. ACM Trans. Graph. (Proc. SIGGRAPH Asia)
+37(6), 222:1–222:11 (2018) 3
+23. Li, Z., Shafiei, M., Ramamoorthi, R., Sunkavalli, K., Chandraker, M.: Inverse
+rendering for complex indoor scenes: Shape, spatially-varying lighting and svbrdf
+from a single image. In: Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition. pp. 2475–2484 (2020) 3
+24. Li, Z., Xu, Z., Ramamoorthi, R., Sunkavalli, K., Chandraker, M.: Learning to
+reconstruct shape and spatially-varying reflectance from a single image. ACM
+Transactions on Graphics (TOG) 37(6), 1–11 (2018) 3
+25. Ling, H., Acuna, D., Kreis, K., Kim, S.W., Fidler, S.: Variational amodal object
+completion. Advances in Neural Information Processing Systems (2020) 3
+26. Mescheder, L., Oechsle, M., Niemeyer, M., Nowozin, S., Geiger, A.: Occupancy
+networks: Learning 3d reconstruction in function space. In: Proceedings of the IEEE
+Conference on Computer Vision and Pattern Recognition. pp. 4460–4470 (2019) 6
+27. Nimier-David, M., Vicini, D., Zeltner, T., Jakob, W.: Mitsuba 2: A retargetable
+forward and inverse renderer. Transactions on Graphics (Proceedings of SIGGRAPH
+Asia) 38(6) (Dec 2019). https://doi.org/10.1145/3355089.3356498 3
+28. Ost, J., Mannan, F., Thuerey, N., Knodt, J., Heide, F.: Neural scene graphs for
+dynamic scenes. In: Proceedings of the IEEE/CVF Conference on Computer Vision
+and Pattern Recognition (CVPR). pp. 2856–2865 (June 2021) 1, 3
+29. Peers, P., Tamura, N., Matusik, W., Debevec, P.: Post-production facial performance
+relighting using reflectance transfer. ACM Transactions on Graphics (TOG) 26(3),
+52–es (2007) 7
+30. Philion, J., Fidler, S.: Lift, splat, shoot: Encoding images from arbitrary camera
+rigs by implicitly unprojecting to 3d. arXiv preprint arXiv:2008.05711 (2020) 10
+31. Sengupta, S., Gu, J., Kim, K., Liu, G., Jacobs, D.W., Kautz, J.: Neural inverse
+rendering of an indoor scene from a single image. In: International Conference on
+Computer Vision (ICCV) (2019) 3
+32. Somanath, G., Kurz, D.: Hdr environment map estimation for real-time augmented
+reality. In: Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition (2021) 3
+33. Song, S., Funkhouser, T.: Neural illumination: Lighting prediction for indoor
+environments. In: Proceedings of the IEEE Conference on Computer Vision and
+Pattern Recognition. pp. 6918–6926 (2019) 3
+34. Srinivasan, P.P., Mildenhall, B., Tancik, M., Barron, J.T., Tucker, R., Snavely,
+N.: Lighthouse: Predicting lighting volumes for spatially-coherent illumination.
+In: Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition. pp. 8080–8089 (2020) 2, 3, 11
+Neural Light Field Estimation for Street Scenes
+17
+35. Su, H., Qi, C.R., Li, Y., Guibas, L.J.: Render for cnn: Viewpoint estimation in
+images using cnns trained with rendered 3d model views. In: The IEEE International
+Conference on Computer Vision (ICCV) (December 2015) 1, 3
+36. Wang, T., Zhu, X., Pang, J., Lin, D.: Fcos3d: Fully convolutional one-stage monocular 3d object detection. arXiv preprint arXiv:2104.10956 (2021) 14
+37. Wang, Z., Philion, J., Fidler, S., Kautz, J.: Learning indoor inverse rendering
+with 3d spatially-varying lighting. In: Proceedings of International Conference on
+Computer Vision (ICCV) (2021) 2, 3, 5, 6, 9, 10, 11, 12
+38. Wei, X., Chen, G., Dong, Y., Lin, S., Tong, X.: Object-based illumination estimation
+with rendering-aware neural networks. arXiv preprint arXiv:2008.02514 (2020) 3
+39. Zhang, J., Sunkavalli, K., Hold-Geoffroy, Y., Hadap, S., Eisenman, J., Lalonde,
+J.F.: All-weather deep outdoor lighting estimation. In: Proceedings of the IEEE
+Conference on Computer Vision and Pattern Recognition. pp. 10158–10166 (2019)
+2, 3
+40. Zhang, Y., Chen, W., Ling, H., Gao, J., Zhang, Y., Torralba, A., Fidler, S.: Image
+gans meet differentiable rendering for inverse graphics and interpretable 3d neural
+rendering. In: International Conference on Learning Representations (2021) 3
+41. Zhao, Y., Guo, T.: Pointar: Efficient lighting estimation for mobile augmented
+reality. arXiv preprint arXiv:2004.00006 (2020) 3
+42. Zhou, Y., Huang, J., Dai, X., Luo, L., Chen, Z., Ma, Y.: HoliCity: A city-scale data
+platform for learning holistic 3D structures (2020), arXiv:2008.03286 [cs.CV] 8, 9,
+10, 11
+43. Zhu, Y., Zhang, Y., Li, S., Shi, B.: Spatially-varying outdoor lighting estimation
+from intrinsics. In: CVPR (2021) 3
+arXiv:2208.09480v1 [cs.CV] 19 Aug 2022
+Supplementary Material:
+Neural Light Field Estimation for Street Scenes
+with Differentiable Virtual Object Insertion
+Zian Wang1,2,3 , Wenzheng Chen1,2,3 , David Acuna1,2,3 ,
+Jan Kautz1 , and Sanja Fidler1,2,3
+NVIDIA 2 University of Toronto 3 Vector Institute
+{zianw,wenzchen,dacunamarrer,jkautz,sfidler}@nvidia.com
+1
+In the supplementary material, we include additional details and results of
+our approach. We provide technical details in Section 1. We show additional
+auxiliary results which further ablate and explain our method in Section 2. We
+discuss limitations and broader impact in Section 3.
+1
+Implementation Details
+1.1
+Sky Modeling Architecture
+The primary goal of the sky modeling neural network is to learn a low-dimensional
+feature space for the sky dome. The resulting network can also predict HDR
+information given input LDR panorama. The model architecture is illustrated in
+Figure A.
+A 2D CNN encoder takes as input an LDR panorama with a positional
+encoding, and predicts the sky vector f̂ in the feature space. As each pixel in the
+panorama corresponds to a direction through equi-rectangular projection, the
+positional encoding (R3×H×W ) encodes the directional information, where each
+pixel contains a unit vector indicating the direction of that pixel location. The
+decoder is a 2D UNet [15] decoding the sky vector into an HDR sky panorama.
+We carefully design its architecture to facilitate the reconstruction of the HDR
+sun peak. The input to the 2D UNet is a 7-channel panorama, including a 4channel peak encoding and a 3-channel positional encoding, as shown in Figure A.
+Specifically, we embed the peak direction f̂dir information into a 1-channel peak
+direction encoding R1×H×W with a spherical Gaussian lobe. For each pixel
+location corresponding to the direction u, we compute the peak direction encoding
+as:
+PeakDirEncoding(u) = e100(u·f̂dir −1) .
+(1)
+We encode the peak intensity into a 3-channel panorama by assigning the peak
+pixels to the predicted peak intensity f̂intensity ,
+(
+f̂intensity ,
+if PeakDirEncoding(u) ≥ 0.98
+PeakIntensityEncoding(u) =
+(2)
+0,
+Otherwise
+This results in 7-channel input to the 2D UNet by concatenating the 1-channel
+peak direction encoding, 3-channel peak intensity encoding, and the 3-channel
+2
+Z. Wang et al.
+Sky
+Latent
+LDR Panorama
+Alternate
+Pos. Enc.
+HDR Sky Dome
+Pos. & Peak Enc.
+Sky Decoder
+Sky Encoder
+Peak
+Direction
+GT Peak
+Direction
+Peak
+Intensity
+GT Peak
+Intensity
+Fig. A: Architecture of our sky modeling network. The encoder takes as input
+an additional positional encoding, concatenated with the input LDR panorama. We
+compute a panorama image encoding peak and positional information, and feed it into
+a 2D UNet [15] decoder. The sky latent code is fused in the latent space of the decoder.
+During training, we alternate between end-to-end training and teacher forcing.
+ResNet
+Sky
+Vector
+SkyDecoder
+HDR Sky Dome
+Image
+Lighting
+Feature
+Voxel
+Positional
+Encoding
+MLP
+3D UNet
+Up3D
+Up3D
+…
+Up3D
+Concat.
+Down3D
+Down3D
+Down3D
+3D
+Unprojection
+Depth
+Visible
+FoV
+Volume
+Lighting
+Volume
+Fig. B: Architecture of our hybrid lighting prediction network. For HDR sky
+dome prediction (top), we directly predict the sky feature vector from the ResNet
+backbone. For lighting volume prediction (bottom), inspired by [20], we unproject the
+2D input image into a 3D volume and process it with a 3D UNet. The global lighting
+feature is converted to a feature volume with an MLP and later fused into the 3D UNet.
+positional encoding used in the sky encoder. The sky latent code f̂latent is concatenated with the latent vector output by the 2D UNet to jointly decode the
+HDR sky dome.
+The sky encoder contains two separate 2D CNNs with one predicting the peak
+information and the other predicting the latent code, where each CNN contains
+5 downsampling conv-blocks with intermediate output channel dimensions of:
+(64, 128, 256, 256, 256). For the sky decoder, the 2D UNet contains 5 downsampling
+conv-blocks and 5 upsampling conv-blocks, connected with residual links [8]. The
+intermediate output channel dimensions are (64, 128, 256, 256, 256, 256, 128, 64, 32, 16).
+Each conv-block contains two 2D convolution layers followed by batch normalization and ReLU activation.
+Supplementary Material: Neural Light Field Estimation for Street Scenes
+1.2
+3
+Hybrid Lighting Prediction Architecture
+The 2D CNN backbone for the Hybrid Lighting Joint Prediction module (depicted
+in Figure B and main paper Figure 2(a)) is ResNet50 [8], with two separate
+branches predicting the sky feature vector and the scene lighting feature.
+For the sky prediction branch, the sky feature vector (R64 ) is then passed
+into the pre-trained sky decoder, with frozen weights, to decode the HDR sky
+dome (R3×64×256 ).
+We adapt the architecture used in [20] for the lighting volume prediction
+branch. To encode the visible field-of-view (FoV) information, we unproject the
+input image into the initial visible surface volume (R4×64×256×256 ) [20]. The
+scene lighting feature (R128 ) extracted with the ResNet backbone is passed
+into a coordinate MLP [16], and decoded into a global scene feature volume
+(R32×16×64×64 ). Here, the coordinate network [16] contains three residual MLP
+blocks and the hidden size is 64. We use 3D UNet [15] to process the visible surface
+volume (R4×64×256×256 ), which contains five downsampling and upsampling
+conv-blocks with residual connections [8], and each conv-block contains two 3D
+convolution layers. The global scene feature volume (R32×16×64×64 ) is fused into
+the 3D UNet after 2 downsampling conv-blocks. The intermediate output channels
+of each conv-block have dimensions of (12, 16, 32, 128, 256, 256, 128, 64, 32, 16).
+The final conv-layer produces the lighting volume prediction (R8×64×256×256 ).
+Pre-trained depth estimation. In this work, we rely on the existing state-ofthe-art off-the-shelf monocular depth estimator PackNet [7] to obtain the 2.5D
+geometry of the scene. We empirically find that the depth perception is robust
+with reasonable performance, and provide analysis on the influence of depth
+prediction error below.
+The predicted depth is first used in lighting volume prediction, where the scene
+pixel values are unprojected into 3D with the depth prediction. More accurate
+depth prediction informs more precise geometric information of the scene, and
+will improve the performance of lighting estimation, e.g. the quantitative metric
+in main paper Table 2.
+Then, during differentiable object insertion, we use depth to decide on the
+3D placement of the object we want to insert. Since the location of the inserted
+object is computed from the depth map, the scale error of the depth prediction
+leads to error in the size of the inserted objects. To address this, we use the
+projected sparse LiDAR points as ground-truth depth to rescale the estimated
+depth by minimizing the L2 error between them.
+When rendering shadows of the inserted object, we rely on the pre-computed
+depth to compute the 3D location of each scene pixel, which is needed to perform
+the ray-mesh queries. Thus, errors in the estimated depth may result in incorrect
+shadows. We empirically find that this error is usually negligible as we insert
+mostly on flat surfaces.
+Prior works that contain submodules with depth prediction [14,20] typically
+do not focus on improving depth perception, but simply use synthetic data with
+paired ground-truth to train the depth estimation branch, which may easily suffer
+4
+Z. Wang et al.
+(b) Composited result
+(a) Input image
+(c) Foreground object
+(d) Object mask
+(e) Scene shadow map
+Fig. C: Visualization of object insertion composition. Given an input image (a),
+we estimate our hybrid lighting representation. We render the foreground inserted object
+with standard deferred rendering [3] and obtain the rendering result (c) and object mask
+(d). We render the shadow cast by the inserted object into a ratio map (e) as described
+in main paper Section 3.3. The final editing result (b) is produced by compositing (c-e).
+from the domain gap. With a focus on lighting estimation and realistic object
+insertion, we believe that using the existing mature depth prediction models as a
+building block is a plausible design choice and does not decrease our technical
+contribution.
+1.3
+Differentiable Object Insertion
+We visualize the object insertion composition process in Figure C. We composite
+the input image I, foreground object Iobject , alpha mask M , scene shadow map
+Ishadow into the final editing result Iedit by
+Iedit = M
+Iobject + (1 − M )
+I
+Ishadow .
+(3)
+We include the implementation details below.
+Rendering details. For rendering the foreground object, we use the BRDF
+used by Unreal Engine 4, which is a simplified version of Disney BRDF [1,12].
+Specifically, we use the base color cbase ∈ R3 , metallic m ∈ [0, 1], roughness
+r ∈ [0, 1] and specular s ∈ [0, 1] to describe material properties of object surfaces.
+The BRDF is defined as
+f (l, v) =
+cdiffuse
+DF G
++
+,
+π
+4(n · l)(n · v)
+(4)
+Supplementary Material: Neural Light Field Estimation for Street Scenes
+5
+where
+(5)
+cdiffuse = (1 − m) cbase
+cspecular = (1 − m) 0.08s + m cbase
+2
+α
+π((n · h)2 (α2 − 1) + 1)2
+(n · l)(n · v)
+G=
+((n · l)(1 − k) + k)((n · v)(1 − k) + k)
+D=
+(6)
+(7)
+(8)
+F = cspecular + (1 − cspecular )2(−5.55473(v·h)−6.98316)(v·h)
+(9)
+α = r2 , k =
+(10)
+2
+l+v
+(r + 1)
+,h =
+.
+8
+||l + v||
+The rendered raw pixel values is HDR in linear RGB space. To convert to
+LDR sRGB images, we apply gamma correction (γ = 2.2), and do soft clipping
+following [20]
+(
+x
+if x ≤ τ
+ϕ(x) =
+(11)
+x−τ
+1 − (1 − τ )e− 1−τ if x > τ
+where we set τ = 0.95.
+During training, to save on the computational cost and GPU memory, we
+uniformly sample 5000 rays for object center alone, and render the foreground
+object on a 320x180 image canvas. For background shadows, we render a 160x90
+resolution shadow map. We sample 50 rays for each scene pixel, and aggregate
+the 8-neighbors of each pixel to obtain 450 rays in total. The average rendering
+time for foreground objects and background shadows are 0.2s and 2s respectively.
+The current efficiency bottleneck in the renderer is the ray-mesh query function,
+which is a CPU implementation using trimesh1 with the potential to further
+speedups. It consumes 12G GPU memory during training, including both the
+forward and the backward pass. During inference, we sample rays for each object
+pixel using per-pixel importance sampling following [3] to achieve high quality
+rendering, where we sample 1024 rays for the diffuse component and 256 rays for
+the specular component.
+Ray sampling scheme. A larger number of ray samples may lead to higher
+quality rendering, but usually limited by the affordable memory and computation,
+especially for a differentiable rendering module in end-to-end learning tasks. To
+improve the efficiency of ray sampling especially for the process of shadow
+rendering, we select equi-spaced rays for each pixel on the upper-hemisphere
+with Fibonacci lattice [6] to render the spatially-varying shadows. As shown in
+Figure D, the Fibonacci lattice ray selection strategy better utilizes the rays
+compared to naive uniform sampling.
+1
+trimsh.org
+6
+Z. Wang et al.
+(a) Uniform sampling
+(b) Fibonacci lattice ray selection (Ours)
+Fig. D: Visualization of ray directions. Instead of using naive uniform ray sampling
+(a), we select equi-spaced rays with Fibonacci lattice (b). This scheme better utilizes
+the rays and can ensure the sun light is properly sampled.
+Object insertion details. During training, we use the task of object insertion
+to provide additional supervision. Specifically, we differentiably insert a virtual
+object into the photograph and encourage the photorealism of the final image
+editing results. We adopt a relatively conservative scheme to avoid unrealistic
+editing results due to asset quality and object placement. For assets, we collect a
+set of 283 high quality 3D car models from Turbosquid2 . To place the cars into
+plausible locations, we use the dense depth map prediction [7], lidar semantic
+segmentation and 3D bounding box annotation in nuScenes [2]. The location
+candidates for insertion should satisfy the following conditions: (1) Semantics:
+belong to the semantic class “driveable surface”, (2) Distance: within the range
+of 10 to 40 meters, (3) Collision: candidate location is 1 meter away from the
+static background classes (such as “sidewalk”) and 3 meters away from dynamic
+classes (such as “vehicles”), and (4) Occlusion: the 3D bounding box corners of
+the inserted object do not get occluded by other objects. The car orientation
+is randomly set to the same or opposite direction as the ego camera, with a
+Gaussian random perturbation in the yaw angle (sigma value set to 3◦ ).
+Object insertion for data augmentation. For downstream tasks, we use
+object insertion as a data augmentation approach, to enhance the data with
+additional diversity. We use the 283 car CAD models and randomize the car paint
+with 60 diverse colors. For diversity, we also include 30 high quality construction
+vehicle CAD models that are rarely observed on the street. We remove the
+occlusion check mentioned above, and naively handle the occlusion by comparing
+the depth map of the scene and inserted object. For orientation, we increase the
+Gaussian perturbation with sigma value set to 15◦ .
+Rendering object insertion with commercial renderer. While we adopt
+our proposed custom differentiable object insertion module during training to
+provide valuable supervision signal, our rendering is fully physics-based with
+standard PBR material definition. Thus, our estimated lighting can also be
+made useable in commercial rendering engines such as the Cycles renderer in
+2
+www.turbosquid.com
+Supplementary Material: Neural Light Field Estimation for Street Scenes
+(a) Input image
+(b) Composited result
+(c) Render Location-Specific Env. Map
+Hybrid
+Lighting
+(d) Virtual Plane
+(e) Render object-only
+7
+(f) Render plane-only
+Radiance
+Query
+(g) Plane with object occlusion
+Fig. E: Rendering object insertion with Blender. Our lighting representation can
+be converted to the standard environment map to be compatible with commercial
+renderers (thus gaining the benefits of richer material support and speed of commercial
+renderers). Given the input image (a) and the 3D location shown in green to insert
+object, we first convert our hybrid lighting into a local environment map with volume
+rendering (c). We place a virtual plane under the inserted object (d), and render three
+images – Object-only (e), plane-only (f) and plane with object occlusion (g). The shadow
+map can be computed by the ratio of (f) and (g). The final editing result is shown in
+(b).
+Blender [5]. This allows us to utilize faster rendering as well as richer material
+support available in the commercial renderers.
+Commercial renderers usually only support standard environment map lighting and do not support spatially-varying lighting such as our hybrid lighting
+representation. In addition, the radiance-level API is not available for shadow
+rendering. We modify our object insertion pipeline to be compatible with Blender
+Cycles renderer in Figure E. Given the 3D location to insert the virtual object,
+we first render our lighting representation into a standard HDR environment map
+by doing radiance query at the specified 3D location (main paper Eq. 1), and load
+into Blender as lighting. To render cast shadows, we insert a virtual plane beneath
+the inserted object, and render three images: (1) render only inserted object
+Iobject , (2) render only virtual plane Iplane , (3) render the virtual plane but take
+into account of the inserted object when doing ray-tracing Ishadowed . The shadow
+map can be computed as Ishadow = Ishadowed
+Iplane , followed by the image composition
+in Figure C. Note that this maximally preserves scene-level spatially-varying
+effects, but still ignores the local geometry of object and virtual plane, and thus
+cannot render localized shadow effects as shown in main paper Figure 6.
+We show qualitative results from Blender in Figure N. In most cases, with the
+Cycles renderer at inference time, we can benefit from more bounces of ray-tracing
+and complex materials such as transparency and sub-surface scattering.
+8
+Z. Wang et al.
+1.4
+Training Details
+Sky modeling network. We use a multi-task loss to train the sky encoderdecoder network:
+skym
+Lskym = λdir Lskym
++ λintensity Lskym
+intensity + λhdr Lhdr
+dir
+(12)
+where the weights are all set to 1. During training, we introduce “teacher forcing”
+on HDR reconstruction loss Lhdr by alternating the input to sky decoder between
+(f̂dir , f̂intensity , f̂latent ) and (fdir , fintensity , f̂latent ). This is because the prediction of
+the peak direction f̂dir and peak intensity f̂intensity are usually inaccurate in the
+early stages of training. This also helps to efficiently disentangle the peak and
+the background (Figure I), encouraging the network to accurately reconstruct
+HDR peak when given groundtruth peak information fdir , fintensity . We use the
+Adam optimizer [13] and train for 4000 epochs, with the learning rate set to 1e-3
+and decaying by 0.3 every 1000 epochs.
+Lighting prediction network. We use a weighted sum of loss terms introduced
+in the main paper in Section 3.4, including the sky regression loss Lsky , radiance
+and depth reconstruction loss Lrecon , sky separation loss Ltransmit , and adversarial
+supervision Ladv . To address the ambiguity of depth rendering, we also follow [20]
+and use a regularization loss Lreg to encourage the alpha channel of the volume
+to be either 0 or 1. The final loss function
+Lhybrid = λsky Lsky + λrecon Lrecon + λreg Lreg + λtransmit Ltransmit + λadv Ladv (13)
+where we set λsky , λrecon , λtransmit to 1, λreg to 1e-4, and λadv to 3e-3. For the sky
+regression loss Lsky , we linearly fade out the L1 loss for latent code in the first
+50 epochs. For the adversarial supervision Ladv , the discriminator D is a 5-layer
+PatchGAN with spectral norm [11,18]. We use hinge loss for the discriminator
+LD = max(0, 1 − D(Ireal )) + max(0, 1 + D(Iˆedit )).
+(14)
+where we use the training set of real world images {Ireal } from nuScenes [2] and
+perspective image crops from HoliCity street views [22] as positive examples. We
+set the batch size to 1. The full model takes 20G GPU memory during training
+(8G for network inference and 12G for rendering). We first pre-train without Ladv
+for 50 epochs and then jointly train another 50 epochs. We train with the Adam
+optimizer [13] with learning rate of 3e-4, decaying by 0.3 every 30 epochs.
+1.5
+Experimental Settings
+Data processing. We train our model on nuScenes [2], HoliCity [22], and a set
+of 724 outdoor HDR panoramas collected from three data sources: HDRIHaven3 ,
+3
+polyhaven.com/hdris (License: CC0)
+Supplementary Material: Neural Light Field Estimation for Street Scenes
+9
+Fig. F: User Study Interface (AMT): We insert two cars, which are rendered with
+different lighting approaches, into the same background image, and ask a human
+participant to select the more realistic one. We conduct 3 comparisons, where we first
+compare our full model with the baseline lighting methods [20,9], then ablate against
+our method without adversarial supervision. We randomize their order in each HIT.
+DoschDesign4 and HDRMaps5 . For HDRI data, we use 90% and 10% for training
+and evaluation. During training, we apply random flipping and random azimuth
+shifting as data augmentation. For nuScenes, we use the official split containing
+700 scenes for training and 150 scenes for evaluation. For each key frame, we
+take the front camera as the input image and use the captured views at a novel
+viewpoint (1.5 seconds after the input frame) to supervise lighting. For HoliCity
+dataset, we follow [10] and detect the sun location as the centriod of largest
+connected region after thresholding with the 98-th percentile. For evaluation,
+we manually annotated the sun location for the test set. Considering that the
+peak direction is ambiguous for an almost uniform sky dome, we only use a
+subset of the HoliCity data with a strong peak to train and evaluate the peak
+direction prediction. Specifically, we pass the LDR panoramas to the pre-trained
+sky encoder and get the intensity prediction f̃intensity . Loss is only used when the
+peak intensity is greater than 10. This results in 1897 panoramas for training
+and 183 panoramas for evaluation.
+Human perception study details. In this section, we provide additional
+details of our user study. We perform the user study on Amazon Mechanical
+Turk (AMT) and visualize the interface in Figure F. In each HIT, we provide two
+images and ask the user to select the more realistic one. Among the two images,
+one is relighted by our approach and the other is either one of the baselines [20,9]
+4
+5
+doschdesign.com (License: doschdesign.com/information.php?p=2)
+hdrmaps.com (License: Royalty-Free)
+10
+Z. Wang et al.
+or the ablation setting (Ours w/o adversarial supervision). To avoid bias in order,
+we always randomize which of the methods is shown on the left vs right. We
+provide instructions as follows:
+An artificial intelligence agent is trying to insert a new car into an image in
+a natural way. It wants to make the car look like it was part of the scene after
+insertion. It made two trials, presented under trial 1 and trial 2. Please zoom in
+to inspect the two images, e.g. look at the shadows cast by the inserted car are
+pointing to the correct direction, and that the sun reflects on the car in the right
+way, and pick the more realistic trial image.
+We synthesize 23 insertion examples. For each example, we ask 15 users to
+judge the realism of the inserted object and adopt a majority vote to compute
+the final preference. In summary, it results in 3 comparisons × 23 examples ×
+15 selections × 3 repeat experiments = 3105 HITs. We provide results in Table
+3 in the main paper, demonstrating that users prefer our approach over the
+baselines [20,9], and adding adversarial supervision further improves the realism
+of object insertion.
+2
+Additional Results
+2.1
+Sky modeling
+The sky encoder-decoder takes as input an LDR sky panorama, and produces a
+low-dimensional vector representation of the sky f̂ and a reconstructed HDR sky
+dome. The qualitative results are shown in Figure I. Our model can accurately
+reconstruct HDR sky, especially the peaks with extreme intensity values. As
+the sky vector f̂ = (f̂intensity , f̂dir , f̂latent ) contains explicit peak information, it
+edit
+edit
+enables peak editing by feeding into edited sky vector (f̂intensity
+, f̂dir
+, f̂latent ). As
+the results shown, our sky decoder can efficiently disentangle the HDR peak
+from the background, and enables precise peak editing. The controllable property
+allows for potential post-editing of inaccurate predictions.
+We quantitatively ablate our architecture design and show the results in
+Table A. We evaluate by comparing the MSE of reconstructed HDR sky dome
+and the ground truth, and the median angular error between the reconstructed
+peak and the ground-truth peak direction. For the ablated version, “ours w/o
+encoding” removes the positional encoding and peak encoding concatenated to
+the Sky Encoder and Sky Decoder, and “ours w/o peak information” removes the
+peak direction and peak intensity and only relies on the latent code to reconstruct
+HDR sky. The quantitative results validated the effectiveness of our design choices
+to achieve the best performance. We also compare under the same experiment
+setting with the sky representation used in [9], where the HDR sky is represented
+with a latent vector and explicit azimuth of the sun. Our method outperforms
+[9], which shows the benefits from the explicit representation and supervision of
+peak direction and intensity.
+Supplementary Material: Neural Light Field Estimation for Street Scenes
+11
+Method
+HDR reconstruction MSE (×10−2 ) ↓ Peak direction median angular error ↓
+Latent code w/ explicit azimuth [9]
+10.56
+5.67◦
+Ours
+7.49
+3.38◦
+Ours (w/o encoding)
+8.31
+4.09◦
+Ours (w/o peak information)
+11.01
+7.93◦
+Table A: Quantitative results of sky modeling. We compare the HDR reconstruction MSE and the median angular error of the reconstructed peak direction.
+2.2
+Auxiliary Quantitative Evalutation of Lighting Estimation
+Prior works [21] that ignore spatially-varying effects may also enforce that a
+known rendered virtual scene Oscene (e.g. a sphere) appears consistent when
+using the predicted envenvironment map and groundtruth envenvironment map,
+i.e., ||Render(Lpred , Osphere ) − Render(Lgt , Osphere )||. Compared to the direct
+envenvironment map regression loss ||Lpred − Lgt ||, this is still regression but
+smartly weighted. This can be used as both training loss and evaluation metric,
+when prior works simplify the lighting to only one environment map.
+However, for spatially-varying lighting estimation which is the focus of our
+work, there is no groundtruth lighting provided for the specific 3D location of
+the inserted object, and thus we cannot directly utilize this as a training loss.
+Despite not a precise metric, we show the quantitative evaluation of this
+metric as an auxiliary result. Specifically, we take a cropped perspective image
+of groundtruth HDR panorama as input, and insert a diffuse or specular sphere
+with the estimated lighting. We report MSE between insertion results generated
+with predicted lighting and groundtruth HDR panorama, as shown in Table. B.
+Hold-Geoffroy et al . [9] ignores spatially-varying effects and usually cannot recover
+the high-frequency details, and thus lead to inferior performance on specular
+sphere insertion. Wang et al . [20] cannot reconstruct the HDR component well
+and especially suffers when inserting a diffuse sphere. Our method outperforms
+baselines with better quantitative performance.
+Rendering MSE (×10−3 ) ↓
+Hold-Geoffroy et al . [9]
+Wang et al . [20]
+Ours
+Diffuse Sphere
+2.30
+3.36
+1.79
+Specular Sphere
+4.44
+3.13
+2.41
+Table B: Rendering error of inserted objects. Note that this evaluation ignores
+spatially-varying effects.
+2.3
+Quantitative Ablation of Multi-view Input
+While we focus on monocular estimation, our model is extendable to multi-view
+input, such as the six surrounding perspective cameras in nuScenes sensor rig [17].
+For extremely challenging cases such as predicting precise shadow boundaries,
+12
+Z. Wang et al.
+multi-view input images can provide more field-of-view information and predict
+more accurate lighting, as shown in main paper Figure 6. We additionally provide
+quantitative result in Table C, following the experiment settings in main paper
+Table 1, 2. Although the six surrounding views still only cover a subset of the
+panorama, it can significantly improve upon monocular lighting prediction.
+Method
+Ours
+Ours (6 views)
+HoliCity [22] sun location
+Median angular error ↓
+22.43◦
+19.91◦
+nuScenes [2]
+PSNR ↑
+14.49
+17.96
+nuScenes [2]
+si-PSNR ↑
+15.35
+18.45
+Table C: Quantitative ablation study of multi-view input.
+2.4
+Analysis of the Adversarial Supervision
+The adversarial supervision (main paper Section 3.4, Training Lighting via Object
+Insertion) uses a discriminator to encourage the photorealism of the lighting-aware
+image editing results, where this signal is backpropagated to the predicted lighting
+through the Differentiable Object Insertion module (main paper Section 3.3).
+To understand the “photorealism” implicitly perceived by the discriminator
+during the training process, we perform test-time optimization on the object
+insertion results and visualize the optimization process (main paper Figure 7).
+Specifically, we take the network weights of the lighting prediction network Θ
+and the discriminator D in the middle of the training process (10-th epoch), and
+optimize the lighting prediction network weights Θ to minimize the discriminator
+loss Ladv = −D(Iˆedit ). Note that the discriminator and the pre-trained sky
+decoder are kept frozen.
+We use Adam optimizer [13] with learning rate 1e-4, and show the optimized
+results after 5 and 10 iterations in Figure O. We refer to the accompanied video
+for animated results.
+In high-level, the scene appearance (encoded by image pixel values) is an
+interaction between scene geometry, material and lighting, where this process
+can be approximated by the rendering equation. With known groundtruth image
+distribution implicitly learned with a discriminator, we utilize groundtruth material and geometry to supervise lighting prediction, by inserting artist-designed
+virtual objects into the scene images. This objective matches the end goal of our
+predicted lighting – the photorealism of image editing results. Both quantitative results and qualitative visualization indicate its value as a complementary
+supervision signal to existing datasets.
+2.5
+Improving Downstream Perception with Data Augmentation
+Qualitative results of data augmentation. We show the augmented data
+using our AR pipeline in Figure J, K, L, M. The 3D assets are provided courtesy
+Supplementary Material: Neural Light Field Estimation for Street Scenes
+13
+of TurboSquid and their artists Hum3D, be fast, rabser, FirelightCGStudio,
+amaranthus, 3DTree_LLC, 3dferomon and Pipon3D. Note that the 3D bounding
+box and orientation of the inserted objects are known and become free labels to
+train a 3D object detector.
+As shown in Figure J, our data augmentation inserts a diverse set of car
+assets into captured images from the nuScenes dataset [2] based on the estimated
+lighting. The data generation process is fully automatic. Our editing results can
+produce realistic lighting effects, such as cast shadows, which requires accurate
+HDR prediction, and “clear coat” reflection on the car body, which requires
+high-frequency lighting prediction and HDR highlights.
+While many existing image manipulation methods [4,17] have underlying
+assumptions about object categories, our method predicts physics-based scene
+lighting information, and thus is agnostic to the category of the virtual object
+to insert. This enables editing with object classes rarely observed in real world
+– a critical use case for data augmentation. Figure K shows insertion results of
+construction vehicles, where our method demonstrates consistent performance.
+In Figure L, we show results of occlusion handling. We adopt a simple strategy
+by comparing the depth of the inserted object (cached in G-buffer) with the
+scene depth map, and take the closer pixel to display.
+While we primarily focus on daytime outdoor scenes, our method can also
+predict reasonable results for night-time scenes, as shown in Figure M. Note that
+our model has no HDR data supervision for this domain, due to the scarcity of
+ground truth lighting for night time street scenes, and only relies on limited FoV
+LDR data and the adversarial supervision to learn.
+Quantitative results. We compare against the baseline that uses real-world
+data only, and a strong baseline that augments virtual objects with a fixed
+dome lighting. In Table D, we can observe that the performance of the detector
+improves by 2% comparing to the same detector when trained on real data
+alone. Moreover, we can also see that while naively adding objects leads to a
+1% improvement, another 1% is a result of having better light estimation. We
+believe that further improvements are possible with more sophisticated placement
+strategies as well as using more assets (both for each class, and more classes).
+Interestingly, notice that the performance of the object detector also improves
+in other object categories even though we do not directly augment those. We
+attribute this to various factors, including providing the detector with more
+challenging negatives for other classes, improving the detector’s confidence in
+classes that may get confused with construction vehicles (e.g. bus vs construction
+vehicles and trailer vs construction vehicles), as well as the way certain objects
+are annotated. For example, we notice that cranes and extremities of construction
+vehicles are only included in nuScenes annotations if they interfere with traffic
+(see Figure H), therefore what constitutes a 3D bounding box for that object
+category is not uniquely defined. We additionally notice that in nuScenes trucks
+used to hauling rocks or building materials are considered as truck rather than
+construction vehicles. These factors might also explain why we do not see a
+14
+Z. Wang et al.
+big improvement in the class of construction vehicles even though we directly
+augment it.
+Method
+mAP car truck bus trailer const.veh. pedestrian motorcycle bicycle traffic cone barrier
+Real Data
+0.190 0.356 0.112 0.124 0.011
+0.016
+0.327
+0.127
+0.116
+0.389
+0.317
++ Aug No Light 0.201 0.363 0.149 0.163 0.029
+0.021
+0.311
+0.146
+0.120
+0.394
+0.309
++ Aug Light
+0.211 0.369 0.146 0.182 0.036
+0.020
+0.317
+0.161
+0.146
+0.400
+0.332
+Table D: Performance of a SoTA 3D object detector on the nuScenes 3D object detection
+task. mAP represents the mean for the 10 object categories. We additionally report
+the average precision (AP) for all categories. Real Data corresponds to a subset of
+the nuScenes training set (10%). Performance of the detector improves by 2% when
+comparing to Real Data, and 1% is due to better lighting estimation.
+(a) Model Trained on Real Data
+(b) Model Trained on Real Data + Lighting Aug
+Fig. G: Downstream 3D Detection. (a) Results of a 3D object detector trained on
+Real Data. (b) Results of the same detector trained on Real Data + Aug Lighting. We
+obtain improved detections after training on data generated with our method.
+3
+Discussion
+Failure cases and future works. We show failure cases of our method in
+Figure P and describe below.
+In our current object insertion pipeline, the inserted object pixels will not
+pass exactly the same image capturing process as the background scene pixels,
+and thus cannot simulate the sun halo effects and blurry rain-drop effects. In
+addition, a better modeling of the camera image signal processor (ISP) pipeline,
+such as tone-mapping, could potentially lead to more realistic object insertion.
+We believe it is an interesting future work to learn camera sensor parameters,
+and handle the diverse weather such as rainy, snowy and foggy effects.
+With unknown scene material properties, our current shadow map rendering
+(main paper Eq. 4) assumes a Lambertian scene surface. This assumption enables
+measuring the residual effects caused by the inserted object with a ratio image.
+Although the Lambertian assumption is usually a good approximation and widely
+adopted in prior works [19,20], the shadow map quality will decrease when this
+Supplementary Material: Neural Light Field Estimation for Street Scenes
+15
+Fig. H: Example of nuScenes annotations of construction vehicles. Extremities
+of construction vehicles are only included in nuScenes annotations if they interfere with
+traffic. Therefore, 3D bounding boxes for that object category are not uniquely defined.
+assumption no longer holds. For example, the wet road surfaces in rainy days
+become quite specular and should reflect the appearance of the inserted object,
+as shown in the second column of Figure P. It is an interesting direction to jointly
+estimate scene material properties to address such complex effects. In the third
+column of Figure P, our editing results exhibit occlusion artifacts when the scene
+depth map is inaccurate. While predicting more accurate depth is out of the
+scope of our paper, we believe an additional geometry refinement adopted in
+prior works [4] could be beneficial to address this issue.
+Broader impact. Our paper focuses on a neural Augmented Reality (AR)
+pipeline for outdoor scenes, which first estimates the lighting information and
+insert virtual objects into the input image. We show that our carefully designed
+hybrid lighting representation handles both the spatially-varying effects and the
+extreme HDR intensity of outdoor scenes. The differentiable object insertion
+formulation with an adversarial discriminator serves as a valuable supervision
+signal, which for the first time enables lighting supervision by jointly leveraging
+ground truth material, geometry and real world images. We show the benefits of
+our AR approach on a downstream 3D object detector, indicating its potential
+as a valuable data augmentation technique for safety-critical applications such as
+autonomous driving.
+Our method falls into the category of works that enable image editing. While
+we believe that there are many positive implications, however – just like with the
+deep fake technology, we can also foresee nefarious use cases, such as rendering
+offensive content into photographs. Technology targeting detecting offensive
+content could help alleviate such use cases.
+16
+Z. Wang et al.
+Example 1
+Example 2
+Input LDR & GT HDR
+Reconstructed HDR sky
+Peak direction editing
+Input LDR & GT HDR
+Reconstructed HDR sky
+Peak direction editing
+Input LDR & GT HDR
+Reconstructed HDR sky
+Peak direction editing
+Fig. I: Qualitative results of the sky modeling network. We show two examples
+each row, and visualize with two exposure values to show LDR and HDR. Given an
+LDR sky panorama as input, our sky modeling network can reconstruct HDR peaks
+with extreme intensity values. We also provide peak editing results by changing the
+peak direction of the sky feature vector, where we change fdir but fix fintensity , flatent .
+As a result, we successfully generate HDR sky map with the same content but different
+sun directions. This allows for potential post-editing.
+Supplementary Material: Neural Light Field Estimation for Street Scenes
+17
+Fig. J: Qualitative results of automatic data augmentation on nuScenes
+dataset [2]. Each image contains one inserted virtual car rendered with our neural AR approach.
+18
+Z. Wang et al.
+Fig. K: Construction vehicle insertion results of automatic data augmentation on nuScenes dataset [2]. Our neural AR approach is agnostic to the category
+of 3D assets and can realistically insert virtual objects belonging to rare classes.
+Fig. L: Occlusion results of automatic data augmentation on nuScenes [2]. We
+naively handle occlusion by comparing the scene depth map and object Z buffer. Scene
+depth map is predicted with a pre-trained state-of-the-art monocular depth estimation
+model PackNet [7].
+Fig. M: Night time results of automatic data augmentation on the nuScenes
+dataset [2]. Our method can produce reasonable results without any HDR data
+supervision for the night time outdoor scenes.
+Supplementary Material: Neural Light Field Estimation for Street Scenes
+19
+Fig. N: Qualitative results of object insertion rendered by Blender. Our lighting representation can be rendered into location-specific environment map, which is
+compatible with commercial renderers. Integrated with powerful rendering engines,
+our method can leverage complex materials such as transparency and multi-bounce
+ray-tracing.
+Initial editing results
+5 iterations
+10 iterations
+Fig. O: Qualitative visualization of the test-time optimization. To understand
+the behaviour of the discriminator, we perform test-time optimization for the network
+parameters, where the only objective is to minimize the discriminator loss Ladv . On
+the first column, we display the 320x180 resolution image editing results, which are
+consumed by the discriminator. The second and the third column shows the image
+editing results after 5 and 10 iterations. Note how the discriminator corrects the shadow
+direction in the first row, and removes obvious erroneous highlight in the second row.
+(Best viewed zooming in. We refer to additional animated result in the accompanied
+video.)
+20
+Z. Wang et al.
+(a) Sensor effects
+(b) Non-Lambertian shadows
+(c) Occlusion
+Fig. P: Qualitative results – failure cases. (a) The virtually inserted object may
+not pass exactly the same environment and signal processing pipeline as the real-world
+captured scene pixels, e.g. the virtual object cannot reconstruct the halo effects of the
+sun and blurry regions caused by rain drops on the camera. (b) We assume a Lambertian
+scene surface when rendering the shadows, and thus the quality of editing results may
+decrease for wet specular road surfaces on rainy days. (c) Our occlusion handling relies
+on depth ordering, and may generate artifacts when the scene depth map prediction is
+inaccurate.
+Supplementary Material: Neural Light Field Estimation for Street Scenes
+21
+References
+1. Burley, B., Studios, W.D.A.: Physically-based shading at disney. In: ACM SIGGRAPH. vol. 2012, pp. 1–7. vol. 2012 (2012) 4
+2. Caesar, H., Bankiti, V., Lang, A.H., Vora, S., Liong, V.E., Xu, Q., Krishnan, A.,
+Pan, Y., Baldan, G., Beijbom, O.: nuscenes: A multimodal dataset for autonomous
+driving. arXiv preprint arXiv:1903.11027 (2019) 6, 8, 12, 13, 17, 18
+3. Chen, W., Litalien, J., Gao, J., Wang, Z., Tsang, C.F., Khalis, S., Litany, O., Fidler,
+S.: DIB-R++: Learning to predict lighting and material with a hybrid differentiable
+renderer. In: Advances in Neural Information Processing Systems (NeurIPS) (2021)
+4, 5
+4. Chen, Y., Rong, F., Duggal, S., Wang, S., Yan, X., Manivasagam, S., Xue, S.,
+Yumer, E., Urtasun, R.: Geosim: Realistic video simulation via geometry-aware
+composition for self-driving. In: CVPR (2021) 13, 15
+5. Community, B.O.: Blender - a 3D modelling and rendering package. Blender Foundation, Stichting Blender Foundation, Amsterdam (2018), http://www.blender.org
+7
+6. González, Á.: Measurement of areas on a sphere using fibonacci and latitude–
+longitude lattices. Mathematical Geosciences 42(1), 49–64 (2010) 5
+7. Guizilini, V., Ambrus, R., Pillai, S., Raventos, A., Gaidon, A.: 3d packing for
+self-supervised monocular depth estimation. In: IEEE Conference on Computer
+Vision and Pattern Recognition (CVPR) (2020) 3, 6, 18
+8. He, K., Zhang, X., Ren, S., Sun, J.: Deep residual learning for image recognition.
+CoRR abs/1512.03385 (2015), http://arxiv.org/abs/1512.03385 2, 3
+9. Hold-Geoffroy, Y., Athawale, A., Lalonde, J.F.: Deep sky modeling for single image
+outdoor lighting estimation. In: Proceedings of the IEEE/CVF Conference on
+Computer Vision and Pattern Recognition. pp. 6927–6935 (2019) 9, 10, 11
+10. Hold-Geoffroy, Y., Sunkavalli, K., Hadap, S., Gambaretto, E., Lalonde, J.F.: Deep
+outdoor illumination estimation. In: Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition. pp. 7312–7321 (2017) 9
+11. Isola, P., Zhu, J.Y., Zhou, T., Efros, A.A.: Image-to-image translation with conditional adversarial networks. CVPR (2017) 8
+12. Karis, B., Games, E.: Real shading in unreal engine 4. Proc. Physically Based
+Shading Theory Practice 4(3) (2013) 4
+13. Kingma, D.P., Ba, J.: Adam: A method for stochastic optimization (2017) 8, 12
+14. Li, Z., Shafiei, M., Ramamoorthi, R., Sunkavalli, K., Chandraker, M.: Inverse
+rendering for complex indoor scenes: Shape, spatially-varying lighting and svbrdf
+from a single image. In: Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition. pp. 2475–2484 (2020) 3
+15. Long, J., Shelhamer, E., Darrell, T.: Fully convolutional networks for semantic
+segmentation. In: Proceedings of the IEEE conference on computer vision and
+pattern recognition. pp. 3431–3440 (2015) 1, 2, 3
+16. Mescheder, L., Oechsle, M., Niemeyer, M., Nowozin, S., Geiger, A.: Occupancy
+networks: Learning 3d reconstruction in function space. In: Proceedings of the IEEE
+Conference on Computer Vision and Pattern Recognition. pp. 4460–4470 (2019) 3
+17. Ost, J., Mannan, F., Thuerey, N., Knodt, J., Heide, F.: Neural scene graphs for
+dynamic scenes. In: Proceedings of the IEEE/CVF Conference on Computer Vision
+and Pattern Recognition (CVPR). pp. 2856–2865 (June 2021) 11, 13
+18. Park, T., Liu, M.Y., Wang, T.C., Zhu, J.Y.: Semantic image synthesis with spatiallyadaptive normalization. In: Proceedings of the IEEE Conference on Computer Vision
+and Pattern Recognition (2019) 8
+22
+Z. Wang et al.
+19. Sengupta, S., Gu, J., Kim, K., Liu, G., Jacobs, D.W., Kautz, J.: Neural inverse
+rendering of an indoor scene from a single image. In: International Conference on
+Computer Vision (ICCV) (2019) 14
+20. Wang, Z., Philion, J., Fidler, S., Kautz, J.: Learning indoor inverse rendering
+with 3d spatially-varying lighting. In: Proceedings of International Conference on
+Computer Vision (ICCV) (2021) 2, 3, 5, 8, 9, 10, 11, 14
+21. Zhang, J., Sunkavalli, K., Hold-Geoffroy, Y., Hadap, S., Eisenman, J., Lalonde,
+J.F.: All-weather deep outdoor lighting estimation. In: Proceedings of the IEEE
+Conference on Computer Vision and Pattern Recognition. pp. 10158–10166 (2019)
+11
+22. Zhou, Y., Huang, J., Dai, X., Luo, L., Chen, Z., Ma, Y.: HoliCity: A city-scale data
+platform for learning holistic 3D structures (2020), arXiv:2008.03286 [cs.CV] 8, 12

@@ -1,0 +1,1189 @@
+A sparse octree gravitational N-body code that runs
+entirely on the GPU processor
+arXiv:1106.1900v2 [astro-ph.IM] 10 Apr 2012
+Jeroen Bédorfa,∗, Evghenii Gaburovb,a , Simon Portegies Zwarta
+a
+Leiden Observatory, Leiden University, P.O. Box 9513, 2300 RA Leiden, The
+Netherlands
+b
+Northwestern University, 2131 Tech Drive, Evanston 60208, IL, USA
+Abstract
+We present the implementation and performance of a new gravitational N body tree-code that is specifically designed for the graphics processing unit
+(GPU)1 . All parts of the tree-code algorithm are executed on the GPU.
+We present algorithms for parallel construction and traversing of sparse octrees. These algorithms are implemented in CUDA and tested on NVIDIA
+GPUs, but they are portable to OpenCL and can easily be used on manycore devices from other manufacturers. This portability is achieved by using
+general parallel-scan and sort methods. The gravitational tree-code outperforms tuned CPU code during the tree-construction and shows a performance
+improvement of more than a factor 20 overall, resulting in a processing rate
+of more than 2.8 million particles per second.
+Keywords:
+GPU, Parallel, Tree-code, N-body, Gravity, Hierarchical
+1. Introduction
+A common way to partition a three-dimensional domain is the use of
+octrees, which recursively subdivide space into eight octants. This structure
+is the three-dimensional extension of a binary tree, which recursively divides
+the one dimensional domain in halves. One can distinguish two types of
+∗
+Corresponding author
+Email address: bedorf@strw.leidenuniv.nl (Jeroen Bédorf)
+1
+The code is publicly available at:
+http://castle.strw.leidenuniv.nl/software.html
+Preprint submitted to Journal of Computational Physics
+November 26, 2024
+octrees, namely dense and sparse. In the former, all branches contain an
+equal number of children and the structure contains no empty branches. A
+sparse octree is an octree of which most of the nodes are empty (like a sparse
+matrix), and the structure is based on the underlying particle distribution.
+In this paper we will only focus on sparse octrees which are quite typical for
+non-homogenous particle distributions.
+Octrees are commonly used in applications that require distance or intersection based criteria. For example, the octree data-structure can be used
+for the range search method [1]. On a set of N particles a range search using
+an octree reduces the complexity of the search from O(N ) to O(log N ) per
+particle. The former, though computationally expensive, can easily be implemented in parallel for many particles. The later requires more communication
+and book keeping when developing a parallel method. Still for large number
+of particles (∼ N ≥ 105 ) hierarchical2 methods are more efficient than brute
+force methods. Currently parallel octree implementations are found in a wide
+range of problems, among which self gravity simulations, smoothed particle
+hydrodynamics, molecular dynamics, clump finding, ray tracing and voxel
+rendering; in addition to the octree data-structure these problems often require long computation times. For high resolution simulations (∼ N ≥ 105 )
+1 (Central Processing Unit) CPU is not sufficient. Therefore one has to use
+computer clusters or even supercomputers, both of which are expensive and
+scarce. An attractive alternative is a Graphics Processing Unit (GPU).
+Over the years GPUs have grown from game devices into more general
+purpose compute hardware. With the GPUs becoming less specialised, new
+programming languages like Brook [2], CUDA [3] and OpenCL [4] were introduced and allow the GPU to be used efficiently for non-graphics related
+problems. One has to use these special programming languages in order to
+be able to get the most performance out of a GPU. This can be realized
+by considering the enormous difference between todays CPU and GPU. The
+former has up to 8 cores which can execute two threads each, whereas a modern GPU exhibits hundreds of cores and can execute thousands of threads in
+parallel. The GPU can contain a large number of cores, because it has fewer
+resources allocated to control logic compared to a general purpose CPU.
+This limited control logic renders the GPU unsuitable for non-parallel problems, but makes it more than an order of magnitude faster than the CPU on
+2
+Tree data-structures are commonly referred to as hierarchical data-structures
+2
+massively parallel problems [3]. With the recent introduction of fast double
+precision floating point operations, L1 and L2 caches and ECC memory the
+GPU has become a major component in the High Performance Computing
+market. The number of dedicated GPU clusters is steadily increasing and
+the latest generation of supercomputers have nodes equipped with GPUs,
+and have established themselves in the upper regions of the top5003 .
+This wide spread of GPUs can also be seen in the acceptance of GPUs in
+computational astrophysics research. For algorithms with few data dependencies, such as direct N -body simulations, programming the GPU is relatively straightforward. Here various implementations are able to reach almost
+peak-performance [5, 6, 7] and with the introduction of N -body libraries the
+GPU has taken over the GRAPE (GRAvity PipE [8]) 4 as preferred computation device for stellar dynamics [9]. Although it is not a trivial task to
+efficiently utilise the computational power of GPUs, the success with direct
+N -body methods shows the potential of the GPU in practice. For algorithms
+with many data dependencies or limited parallelism it is much harder to make
+efficient use of parallel architectures. A good example of this are the gravitational tree-code algorithms which were introduced in 1986 [10] as a sequential
+algorithm and later extended to make efficient use of vector machines [11].
+Around this time the GRAPE hardware was introduced which made is possible to execute direct N -body simulations at the same speed as a simulation
+with a tree-code implementation, while the former scales as O(N 2 ) and the
+latter as O(N log N ). The hierarchical nature of the tree-code method makes
+it difficult to parallelise the algorithms, but it is possible to speed-up the computational most intensive part, namely the computation of gravitational interactions. The GRAPE hardware, although unsuitable for constructing and
+traversing the tree-structure, is able to efficiently compute the gravitational
+interactions. Therefore a method was developed to create lists of interacting particles on the host and then let the GRAPE solve the gravitational
+interactions [12, 13]. Recently this method has successfully been applied to
+GPUs [14, 15, 16]. With the GPU being able to efficiently calculate the force
+interactions, other parts like the tree-construction and tree-traverse become
+the bottleneck of the application. Moving the data intensive tree-traverse to
+3
+Top500 Supercomputing November 2010 list, http://www.top500.org
+The GRAPE is a plug-in board equipped with a processor that has the gravitational
+equations programmed in hardware.
+4
+3
+the GPU partially lifts this bottleneck [17, 18]. This method turns out to be
+effective for shared time-step integration algorithms, but is less effective for
+block time-step implementations. In a block time-step algorithm not all particles are updated at the same simulation time-step, but only when required.
+This results in a more accurate (less round-off errors, because the reduced
+number of interactions) and more efficient (less unnecessary time-steps) simulation. The number of particles being integrated per step can be a fraction
+of the total number of particles which significantly reduces the amount of
+parallelism. Also the percentage of time spent on solving gravitational interactions goes down and other parts of the algorithm (e.g. construction,
+traversal and time integration) become more important. This makes the hierarchical tree N -body codes less attractive, since CPU-GPU communication
+and tree-construction will become the major bottlenecks [7, 17]. One solution is to implement the tree-construction on the GPU as has been done for
+surface reconstruction [19] and the creation of bounding volume hierarchies
+[20, 21]. An other possibility is is to implement all parts of the algorithm
+on the GPU using atomic operations and particle insertions [22] here the
+authors, like us, execute all parts of the algorithm on the GPU. When we
+were in the final stages of finishing the paper we were able to test the implementation by Burtscher et al. [22]. It is difficult to compare the codes since
+they have different monopole expansions and multipole acceptance criteria
+(see Sections 3.2 and 3.3). However, even though our implementation has
+higher multipole moments (quadrupole versus monopole) and a more strict
+multipole acceptance criteria it is at least 4 times faster.
+In this work we devised algorithms to execute the tree-construction on the
+GPU instead of on the CPU as is customarily done. In addition we redesign
+the tree-traverse algorithms for effective execution on the GPU. The time
+integration of the particles is also executed on the GPU in order to remove
+the necessity of transferring data between the host and the GPU completely.
+This combination of algorithms is excellently suitable for shared and block
+time-step simulations. Although here implemented as part of a gravitational
+N -body code (called Bonsai, Section 3), the algorithms are applicable and
+extendable to related methods that use hierarchical data structures.
+2. Sparse octrees on GPUs
+The tree construction and the tree-traverse rely on scan algorithms, which
+can be efficiently implemented on GPUs. (Appendix A). Here we discuss
+4
+the main algorithms that can be found in all hierarchical methods. Starting
+with the construction of the tree-structure in Section 2.1, followed by the
+method to traverse the previously built tree-structure in Section 2.2. The
+methods that are more specific for a gravitational N -body tree-algorithm
+are presented in Section 3.
+2.1. Tree construction
+The common algorithm to construct an octree is based on sequential
+particle insertion [10] and is in this form not suitable for massively parallel
+processors. However, a substantial degree of parallelism can be obtained if
+the tree is constructed layer-by-layer5 from top to bottom. The construction
+of a single tree-level can be efficiently vectorised which is required if one uses
+massively parallel architectures.
+To vectorise the tree construction particles have to be mapped from a
+3-dimensional spatial representation to a linear array while preserving locality. This implies that particles that are nearby in 3D space also have to be
+nearby in the 1D representation. Space filling curves, which trace through
+the three dimensional space of the data enable such reordering of particles.
+The first use of space filling curves in a tree-code was presented by Warren and Salmon (1993) [23] to sort particles in a parallel tree-code for the
+efficient distribution of particles over multiple systems. This sorting also improves the cache-efficiency of the tree-traverse since most particles that are
+required during the interactions are stored locally, which improves caching
+and reduces communication. We adopt the Morton space filling curve (also
+known as Z-order) [24], because of the existence of a one-to-one map between N-dimensional coordinates and the corresponding 1D Morton-key. The
+Morton-keys give a 1D representation of the original ND coordinate space
+and are computed using bit-based operations (Appendix B). After the keys
+are calculated the particles are sorted in increasing key order to achieve a
+Z-ordered particle distribution in memory. The sorting is performed using
+the radix-sort algorithm (see for our implementation details Appendix A),
+which we selected because of its better performance compared to alternative
+sorting algorithms on the GPU [25, 26]. After sorting the particles have to
+be grouped into tree cells. In Fig. 1 (left panel), we schematically demon5
+A tree-structure is built-up from several layers (also called levels), with the top most
+level called the root, the bottom levels leaves and in between the nodes.
+5
+strate the procedure. For a given level, we mask the keys6 of non-flagged
+particles (non-black elements of the array in the figure), by assigning one
+particle per GPU thread. The thread fetches the precomputed key, applies
+a mask (based on the current tree level) and the result is the octree cell to
+which the particle should be assigned. Particles with identical masked keys
+are grouped together since they belong to the same cell. The grouping is
+implemented via the parallel compact algorithm (Appendix A). We allow
+multiple particles to be assigned to the same cell in order to reduce the size
+of the tree-structure. The maximum number of particles that is assigned to a
+cell is Nleaf , which we set to Nleaf = 16. Cells containing up-to Nleaf particles
+are marked as leaves, otherwise they are marked as nodes. If a particle is
+assigned to a leaf the particle is flagged as complete (black elements of the
+array in the figure). The masking and grouping procedure is repeated for
+every single level in serial until all particles are assigned to leaves or that
+the maximal depth of the tree is reached, whichever occurs first. When all
+particles are assigned to leaves all required tree cells have been created and
+are stored in a continuous array (right panel of Fig. 1).
+However, to complete the tree-construction, the parent cells need to be
+linked to their children. We use a separate function to connect the parent
+and child cells with each other (linking the tree). This function assigns a
+cell to a single thread which locates its parent and the first child if the cell
+is not a leaf (Fig. 2). This is achieved by a binary search of the appropriate
+Morton key in the array of tree-cells, which is already sorted in increasing
+key order during the construction phase. The thread increases the child
+counter of its parent cell and stores the index of the first child. To reduce
+memory, we use a single integer to store both the index to the first child
+and the number of children (most significant 3 bits). If the cell is a leaf, we
+store the index of the first particle instead of the index of the first child cell,
+together with the number of particles in the leaf. During these operations
+many threads concurrently write data to the same memory location. To
+prevent race conditions, we apply atomic read-modify-write instructions for
+modifying the data. At the end of this step, the octree is complete and can
+be used to compute gravitational attractions.
+6
+The masking is a bitwise operation that preserves the bits which are specified by the
+mask, for example masking “1011b” with “1100b” results in “1000b”.
+6
+Root level: mask= 000 000 000 000 000
+Level 1:
+mask= 111 000 000 000 000
+Level 2:
+mask= 111 111 000 000 000
+Level 3:
+mask= 111 111 111 000 000
+tree-cell array
+Figure 1: Schematic representation of particle grouping into a tree cell. (Left panel)
+The particles Morton keys are masked6 with the level mask. Next the particles with the
+same masked keys are grouped together into cells (indicated by a thick separator, such
+as in level 1). Cells with less than Nleaf particles are marked as leaves (green), and the
+corresponding particles are flagged (black boxes as in level 2 and 3) and not further used
+for the tree construction. The other cells are called nodes (blue) and their particles are
+used constructing the next levels. The tree construction is complete as soon as all particles
+are assigned to leafs, or when the maximal depth of the tree is reached. (Right panel) The
+resulting array containing the created tree cells.
+2.2. Tree traverse
+To take advantage of the massively parallel nature of GPUs we use breadth
+first, instead of the more common depth first, traversal. Both breadth first
+and depth first can be parallelised, but only the former can be efficiently
+vectorised. To further vectorise the calculation we do not traverse a single particle, but rather a group of particles. This approach is known as
+Barnes’ vectorisation of the tree-traverse [11]. The groups are based on the
+tree-cells to take advantage of the particle locality as created during the
+tree-construction. The number of particles in a group is ≤ Ncrit which is
+typically set to 64 and the total number of groups is Ngroups . The groups
+are associated with a GPU thread-block where the number of threads in a
+block is Nblock with Nblock >= Ncrit . Hereby we assume that thousands of
+such blocks are able to run in parallel. This assumption is valid for CUDAenabled GPUs, as well as on AMD Radeon GPUs via OpenCL. If the code is
+executed with shared time-steps, all particles are updated at the same time
+and subsequently all groups are marked as active, for block time-steps this
+number varies between 1 and Ngroups . Each thread block executes the same
+algorithm but on a different set of particles.
+7
+Empty cell
+Leaf cell
+Node cell
+Figure 2: Schematic illustration of the tree link process. Each cell of the tree, except the
+empty cells which are not stored, is assigned to a GPU thread. The thread locates the first
+child, if it exists, and the parent of the cell. The threads increment the child counter of
+the parent (indicated by the up arrows) and store the first child in the memory of the cell.
+This operation requires atomic read-modify-write operations because threads concurrently
+modify data at the same memory location.
+8
+Each thread in a block reads particle data that belongs to the corresponding group as well as group information which is required for the tree traverse.
+If the number of particles assigned to a group is smaller than Nblock by a factor of two or more, we use multiple threads (up to 4) per particle to further
+parallelise the calculations. As soon as the particle and group data is read
+by the threads we proceed with the tree-traverse.
+On the CPU the tree-traverse algorithm is generally implemented using
+recursion, but on the GPU this is not commonly supported and hard to
+parallelise. Therefore we use a stack based breadth first tree-traverse which
+allows parallelisation. Initially, cells from one of the topmost levels of the
+tree are stored in the current-level stack and the next-level stack is empty;
+in principle, this can be the root level, but since it consists of one cell, the
+root node, only one thread from Nblock will be active. Taking a deeper level
+prevents this and results in more parallelism. We loop over the cells in the
+current-level stack with increments of Nblock . Within the loop, the cells are
+distributed among the threads with no more than one cell per thread. A
+thread reads the cell’s properties and tests whether or not to traverse the
+tree further down from this cell; if so, and if the cell is a node the indexes of
+its children are added to the next-level stack. If however, the cell is a leaf, the
+indexes of constituent particles are stored in the particle-group interaction
+list. Should the traverse be terminated then the cell itself is added to cellgroup interaction list (Fig.3).
+The cell-group interaction list is evaluated when the size of the list exceeds
+Nblock . To achieve data parallelism each thread reads properties of an interacting cell into fast low-latency on-chip memory that can be shared between
+the threads, namely shared memory (CUDA) or local memory (OpenCL).
+Each thread then progresses over the data in the on-chip memory and accumulates partial interactions on its particle. At the end of this pass, the
+size of the interaction list is decreased by Nblock and a new pass is started
+until the size of the list falls below Nblock . The particle-group interaction
+list is evaluated in exactly the same way, except that particle data is read
+into shared memory instead of cell data. This is a standard data-sharing
+approach that has been used in a variety of N -body codes, e.g. Nyland et
+al. [27].
+The tree-traverse loop is repeated until all the cells from the current-level
+stack are processed. If the next-level stack is empty, the tree-traverse is
+complete, however if the next-level stack is non-empty its data is copied to
+the current-level stack. The next-level stack is cleaned and the current-level
+9
+a
+b
+c
+e
+f
+current stack
+bi
+bi+1
+bi+2
+bi+3
+bi+4
+next-level stack
+cell-group list:
+a,e,f
+particle-group list: ci,ci+1,ci+2,ci+3,ci+4
+Figure 3: Illustration of a single level tree-traverse. There are five cells in the current
+stack. Those cells which are marked with crosses terminate traverse, and therefore are
+added to the cell-group list for subsequent evaluation. Otherwise, if the cell is a node, its
+children are added to the next-level stack. Because children are contiguous in the tree-cell
+array, they are named as bi , bi + 1, . . ., bi + 4, where bi is the index of the first child of
+the node b. If the cell is a leaf, its particles are added to the particle-cell interaction list.
+Because particles in a leaf are also contiguous in memory, we only need to know the index
+of the first particle, ci , and the number of particles in a leaf, which is 5 here.
+10
+stack is processed. When the tree-traverse is complete either the cell-group,
+particle-group or both interaction lists may be non-empty. In such case the
+elements in these lists are distributed among the threads and evaluated in
+parallel. Finally if multiple threads per particle are used an extra reduction
+step combines the results of these threads to get the final interaction result.
+3. Gravitational Tree-code
+To demonstrate the feasibility and performance, we implement a version of the gravitational Barnes-Hut tree-code [10] which is solely based on
+the sparse octree methods presented in the previous sections. In contrast
+to other existing GPU codes [15, 17], our implementation runs entirely on
+GPUs. Apart from the previous described methods to construct and traverse
+the tree-structure we implement time integration (Section 3.1), time-step calculation and tree-cell properties computation on the GPU (Section 3.2). The
+cell opening method, which sets the accuracy and performance of the treetraverse, is described in Section 3.3.
+3.1. Time Integration
+To move particles forward in time we apply the leapfrog predictor-corrector
+scheme described by Hut et al. (1995) [28]. Here the position and velocity
+are predicted to the next simulation time using previously calculated accelerations. Then the new accelerations are computed (tree-traverse) and the
+velocities are corrected. This is done for all particles in parallel or on a subset
+>
+of particles in case of the block-time step regime. For a cluster of ∼
+105
+particles, the time required for one prediction-correction step is less than 1%
+of the total execution time and therefore negligible.
+3.2. Tree-cell properties
+Tree-cell properties are a summarized representation of the underlying
+particle distribution. The multipole moments are used to compute the forces
+between tree-cells and the particles that traverse the tree. In this implementation of the Barnes-Hut tree-code we use only monopole and quadrupole
+moments [29]. Multipole moments are computed from particle positions and
+need to be recomputed at each time-step; any slowdown in their computation
+may substantially influence the execution time. To parallelise this process
+we initially compute the multipole moments of each leaf in parallel. We subsequently traverse the tree from bottom to top. At each level the multipole
+11
+3
+2
+2
+1
+Figure 4: Illustration of the computation of the multipole moments. First the properties
+of the leaves are calculated (green circles). Then the properties of the nodes are calculated
+level-by-level from bottom to top. This is indicated by the numbers in the nodes, first we
+compute the properties of the node with number 1, followed by the nodes with number 2
+and finally the root node.
+moments of the nodes are computed in parallel using the moments of the cells
+one level below (Fig. 4). The number of GPU threads used per level is equal
+to the number of nodes at that level. These computations are performed in
+double precision since our tests indicated that the NVIDIA compiler aggressively optimises single precision arithmetic operations, which results in an
+error of at most 1% in the multipole moments. Double precision arithmetic
+solved this problem and since the functions are memory-bound7 the overhead
+is less than a factor 2. As final step the double precision values are converted
+back to single precision to be used during the tree-traverse.
+3.3. Cell opening criterion
+In a gravitational tree-code the multipole acceptance criterion (MAC)
+decides whether to use the multipole moments of a cell or to further traverse
+the tree. This influences the precision and execution time of the tree-code.
+7
+On GPUs we distinguish two kind of performance limitations, memory-bound and
+compute-bound. In the former the performance is limited by the memory speed and
+memory bandwidth, in the later the performance is limited by the computation speed.
+12
+The further the tree is traversed the more accurate the computed acceleration
+will be. However, traversing the tree further results in a higher execution time
+since the number of gravitational interactions increases. Therefore the choice
+of MAC is important, since it tries to determine, giving a set of parameters,
+when the distance between a particle and a tree cell is large enough that
+the resulting force approximation error is small enough to be negligible. The
+MAC used in this work is a combination of the method introduced by Barnes
+(1994) [30] and the method used for tree-traversal on vector machines [11].
+This gives the following acceptance criterion,
+d>
+l
++δ
+θ
+(1)
+where d is the smallest distance between a group and the center of mass of
+the cell, l is the size of the cell, θ is a dimensionless parameter that controls
+the accuracy and δ is the distance between the cell’s geometrical center and
+the center of mass. If d is larger than the right side of the equation the
+distance is large enough to use the multipole moment instead of traversing
+to the child cells.
+Fig. 5 gives an overview of this method. We also implemented the minimal distance MAC [31], which results in an acceleration error that is between
+10% and 50% smaller for the same θ than the MAC used here. The computation time, however, is almost a factor 3 higher since more cells are accepted
+(opened).
+The accuracy of the tree-traverse is controlled by the parameter θ. Larger
+values of θ causes fewer cells to be opened and consequently results in a
+shallower tree-traverse and a faster evaluation of the underlying simulation.
+Smaller values of θ have the exact opposite effect, but result in a more accurate integration. In the hypothetical case that all the tree cells are opened
+(θ → 0) the tree-code turns in an inefficient direct N -body code. In Section 4.1 we adopt θ = 0.5 and θ = 0.75 to show the dependence of the
+execution time on the opening angle. In Section 4.2 we vary θ between 0.2
+and 0.8 to show the dependence of the acceleration error on θ.
+4. Performance and Accuracy
+In this section we compare the performance of our implementation of
+the gravitational N -body code (Bonsai) with CPU implementations of comparable algorithms. Furthermore, we use a statistical test to compare the
+13
+cell
+center
+c.o.m.
+d
+d
+group
+i
+Figure 5: Schematic overview of the multipole acceptance criterion. We determine if the
+cell has to be opened (continue tree-traversal) for the whole group and therefore take the
+minimal distance d between the group and the center of mass of the node. The cell size
+and the distance between the center of mass and the geometrical center are indicated by
+l and δ respectively. The parameters are used in Eq. 1 to determine if the cell has to be
+opened.
+14
+Table 1: Used hardware. The Xeon is the CPU in the host system, the other five devices
+are GPUs.
+Hardware model
+Xeon E5620
+Architecture
+Gulftown
+# Cores
+4
+Core (Mhz)
+2400
+Memory (Mhz)
+1066
+Interface (bit)
+192
+Bandwidth (GBs)
+25.6
+Peak (GFLOPs)2
+76.8
+Memory size (GB)
+16
+8800 GTS512
+G92
+128
+1625
+1000
+256
+64
+624
+0.5
+C1060 GTX285 C2050 GTX480
+GT200 GT200 GF100 GF100
+240
+240
+448
+480
+1296
+1476
+1150
+1401
+800
+1243
+1550
+1848
+512
+512
+384
+384
+102
+159
+148
+177.4
+933
+1063
+1030
+1345
+4
+1
+2.5
+1.5
+1
+All calculations in this work are done in single precision arithmetic.
+The peak performance is calculated as follows:
+Gulftown:
+#Cores × Core speed × 8 (SSE flops/cycle)
+G92 & GT200: #Cores × Core speed × 3 (flops/cycle)
+GF100:
+#Cores × Core speed × 2 (flops/cycle)
+2
+accuracy of Bonsai with a direct summation code. As final test Bonsai is
+compared with a direct N -body code and a set of N -body tree-codes using
+a production type galaxy merger simulation.
+Even though there are quite a number of tree-code implementations each
+has its own specific details and it is therefore difficult to give a one-to-one
+comparison with other tree-codes. The implementations closest to this work
+are the parallel CPU tree-code of John Dubinski (1996) [32] (Partree) and
+the GPU accelerated tree-code Octgrav [17]. Other often used tree-codes
+either have a different MAC or lack quadrupole corrections. The default
+version of Octgrav has a different MAC than Bonsai, but for the galaxy
+merger simulation a version of Octgrav is used that employs the same method
+as Bonsai (Section 3.3). We use phiGRAPE [33] in combination with the
+Sapporo [9] direct N -body GPU library for the comparison with direct N body simulations. Although here used as standalone codes, most of them
+are part of the AMUSE framework[34], as will be a future version of Bonsai
+which would make the comparison trivial to execute.
+The hardware used to run the tests is presented in Table 1. For the CPU
+15
+calculations we used an Intel Xeon E5620 CPU which has 4 physical cores.
+For GPUs, we used 1 GPU with the G92 architecture (GeForce 8800GTS512),
+2 GPUs with the GT200 architecture (GeForce 285GTX and Tesla C1060),
+and 2 GPUs with the GF100 architecture (GTX480 and Tesla C2050). All
+these GPUs are produced by NVIDIA. The Tesla C2050 GPU is marketed as a
+professional High Performance Computing card and has the option to enable
+error-correcting code memory (ECC). With ECC enabled extra checks on the
+data are conducted to prevent the use of corrupted data in computations,
+but this has a measurable impact on the performance. Therefore, the tests
+on the C2050 are executed twice, once with and once without ECC enabled
+to measure the impact of ECC.
+All calculations are conducted in single precision arithmetic except for
+the computation of the monopole and quadrupole moments in Bonsai and
+the force calculation during the acceleration test in phiGRAPE for which we
+use double precision arithmetic.
+4.1. Performance
+To measure the performance of the implemented algorithms we execute
+simulations using Plummer [35] spheres with N = 215 ( 32k) up to N =
+224 ( 16M) particles (up to N = 222 ( 4M) for the GTX480, because of
+memory limitations). For the most time critical parts of the algorithm we
+measure the wall-clock time. For the tree-construction we distinguish three
+parts, namely sorting of the keys (sorting), reordering of particle properties
+based on the sorted keys (moving) and construction and linking of tree-cells
+(tree-construction). Furthermore, are timings presented for the multipole
+computation and tree-traverse. The results are presented in Fig. 6. The
+wall-clock time spend in the sorting, moving, tree-construction and multipole
+computation algorithms scales linearly with N for N & 106 . For smaller
+N , however, the scaling is sub-linear, because the parallel scan algorithms
+require more than 105 particles to saturate the GPU. The inset of Fig. 6
+shows that the average number of particle-cell interactions doubles between
+N & 32k and N . 1M and keeps gradually increasing for N & 1M. Finally,
+more than 90% with θ = 0.75 and 95% with θ = 0.5 of the wall-clock time is
+spent on tree-traversal. This allows for block time-step execution where the
+tree-traverse time is reduced by a factor Ngroups /Nactive , where Nactive is the
+number of groups with particles that have to be updated.
+In Fig. 7 we compare the performance of the tree-algorithms between the
+16
+10000
+Time [ms]
+1000
+Sorting
+Moving
+Tree construction
+Node properties
+Tree-traverse, GTX480 θ=0.75
+Tree-traverse, C1060 θ=0.75
+Total, GTX480 θ=0.75
+Tree-traverse, GTX480 θ=0.5
+N log(N)
+100
+p-p interactions
+p-c interactions
+10
+1500
+1000
+1
+500
+0
+10000
+0.1
+10000
+100000
+1e+06
+N
+1e+06
+1e+07
+1e+08
+1e+08
+Figure 6: The wall-clock time spent by various parts of the program versus the number of particles N . We used Plummer models as initial conditions [35] and varied the
+number of particles over two orders of magnitude. The solid black line, which is offset
+arbitrarily, shows the theoretical O(N log N ) scaling [10]. The asymptotic complexity of
+the tree-construction approaches O(N ), because all the constituent primitives share the
+same complexity. The tree-construction timing comes from the GTX480. To show that
+the linear scaling continues we added timing data for the C1060, which allows usage of
+larger data sets. For the GTX480 we included the results of the tree-traverse with θ = 0.5
+and the results of the tree-traverse with θ = 0.75. The inset shows the average number of
+particle-particle and particle-cell interactions for each simulation where θ = 0.75.
+17
+three generations of GPUs as well as against tuned CPU implementations8 .
+For all algorithms the CPU is between a factor of 2 (data reordering) to
+almost a factor 30 (tree-traverse) slower than the fastest GPU (GTX480).
+Comparing the results of the different GPUs we see that the GTS512 is slowest in all algorithms except for the data moving phase, in which the C1060
+is the slowest. This is surprising since the C1060 has more on-device bandwidth, but the lower memory clock-speed appears to have more influence than
+the total bandwidth. Overall the GF100 generation of GPUs have the best
+performance. In particular, during the tree-traverse part, they are almost a
+factor 2 faster than the GT200 series. This is more than their theoretical
+peak performance ratios, which are 1.1 and 1.25 for C1060 vs. C2050 and
+GTX285 vs. GTX480 respectively. In contrast, the GTX285 executes the
+tree-traverse faster than the C1060 by a factor of 1.1 which is exactly the
+peak performance ratio between these GPUs. We believe that the difference
+between the GT200 and GF100 GPUs is mainly caused by the lack of L1 and
+L2 caches on GT200 GPUs that are present on GF100 GPUs. In the latter,
+non-coalesced memory accesses are cached, which occur frequently during
+the tree-traverse, this reduces the need to request data from the relatively
+slow global memory. This is supported by auxiliary tests where the texture
+cache on the GT200 GPUs is used to cache non-coalesced memory reads,
+which resulted in a reduction of the tree-traverse execution time between 20
+and 30%. Comparing the C2050 results with ECC-memory to those without
+ECC-memory we notice a performance impact on memory-bound functions
+that can be as high as 50% (sorting), while the impact on the compute-bound
+tree-traverse is negligible, because the time to perform the ECC is hidden
+behind computations. Overall we find that the implementation scales very
+well over the different GPU generations and makes optimal use of the newly
+introduced features of the GF100 architecture. The performance of the treetraverse with θ = 0.75 is 2.1M particles/s and 2.8M particles/s on the C2050
+and GTX480 respectively for N = 1M.
+8
+The tree-construction method is similar to [23], and was implemented by Keigo Nitadori with OpenMP and SSE support. The tree-traverse is, however, from the CPU version
+of the MPI-parallel tree-code by John Dubinski [32]. It has monopole and quadrupole
+moments and uses the same multipole acceptance criterion as our code. We ran this code
+on the Xeon E5620 CPU using 4 parallel processes where each process uses one of the 4
+available physical cores.
+18
+100000
+10000
+CPU
+8800GTS512
+C1060
+GTX285
+C2050
+C2050-ECC
+GTX480
+Time [ms]
+1000
+100
+10
+1
+Sorting
+Moving
+Construction
+Properties
+Tree traverse
+Figure 7: Wall-clock time spent by the CPU and different generations of GPUs on various
+primitive algorithms. The bars show the time spent on the five selected sections of code
+on the CPU and 5 different GPUs (spread over 3 generations). The results indicate that
+the code outperforms the CPU on all fronts, and scales in a predictable manner between
+different GPUs. The C2050-ECC bars indicate the runs on the C2050 with ECC enabled,
+the C2050 bars indicate the runs with ECC disabled. Note that the y-axis is in log scale.
+(Timings using a 220 million body Plummer sphere with θ = 0.75)
+19
+4.2. Accuracy
+To measure the accuracy of the tree-code we use two tests. In the first, the
+accelerations due to the tree-code are compared with accelerations computed
+by direct summation. In the second test, we compared the performance and
+accuracy of three tree-codes and a direct summation code using a galaxy
+merger simulation.
+4.2.1. Acceleration
+To quantify the error in the accelerations between phiGRAPE and Bonsai
+we calculate
+∆a/a = |atree − adirect |/|adirect |,
+(2)
+where atree and adirect are accelerations obtained by tree and direct summation respectively. The direct summation results are computed with a double
+precision version of Sapporo, while for tree summation single precision is
+used. For both methods the softening is set to zero and a GTX480 GPU is
+used as computation device.
+In Fig. 8 the error distribution for different particle numbers and opening
+angles is shown. Each panel shows the fraction of particles (vertical-axis)
+having a relative acceleration error larger than a given value (horizontal-axis).
+The three horizontal dotted lines show the 50th, 10th and 1st percentile of
+the cumulative distribution (top to bottom). The results indicate that the
+acceleration error is slightly smaller (less than an order of magnitude) than
+Octgrav and comparable to CPU tree-codes with quadrupole corrections
+[36, 37, 38]. In Octgrav a different MAC is used than in Bonsai which
+explains the better accuracy results of Bonsai.
+The dependence of the acceleration error on θ and the number of particles
+is shown in Fig. 9. Here the median and first percentile of the relative
+acceleration error distributions of Fig. 8 are plotted as a function of θ. The
+figure shows that the relative acceleration error is nearly independent of
+N , which is a major improvement compared to Octgrav where the relative
+acceleration error clearly depends on N (Figure 5 in [17]). The results are
+consistent with those of Partree [32] which uses the same MAC.
+4.2.2. Galaxy merger
+A realistic comparison between the different N -body codes, instead of
+statistical tests only, is performed by executing a galaxy merger simulation.
+The merger consists of two galaxies, each with 105 dark matter particles,
+20
+1
+F(>∆a/a)
+0.1
+0.01
+0.001
+0.0001
+1e-05
+1e-06
+1e-04
+0.01
+1
+1e-06
+1e-04
+∆a/a
+∆a/a
+0.01
+1
+1e-06
+1e-04
+0.01
+1
+∆a/a
+Figure 8: Each panel displays a fraction of particles, F (> ∆a/a), having a relative acceleration error, ∆a/a, (vertical axis) greater than a specified value (horizontal axis). In
+each panel the solid lines show the errors for various opening angles, from left to right
+θ = 0.2, 0.3, 0.4, 0.5, 0.6, 0.7 and 0.8. The panels show, from left to right, simulations
+with N = 32768, N = 131072 and N = 1048576 particles. The dotted horizontal lines
+indicate 50%, 10% and 1% of the error distribution.
+2 × 104 star particles and one super massive black hole (for a total of 240.002
+bodies). The galaxies have a 1:3 mass ratio and the pericenter is 10kpc. The
+merger is simulated with Bonsai, Octgrav, Partree and phiGRAPE. The
+used hardware for Bonsai and Octgrav was 1 GTX480, Partree used 4 cores
+of the Intel Xeon E5620 and phiGRAPE used 4 GTX480 GPUs. With each
+tree-code we ran two simulations, one with θ = 0.5 and one with θ = 0.75.
+The end-time of the simulations is T = 1000 with a shared time-step of
+1
+(resulting in 64000 steps) and a gravitational softening of  = 0.1. For
+64
+phiGRAPE the default time-step settings were used, with the maximum time1
+and softening set to  = 0.1. The settings are summarised in
+step set to 16
+the first four columns of Table 2.
+We compared the density, cumulative mass and circular velocity profiles
+of the merger product as produced by the different simulation codes, but
+apart from slight differences caused by small number statistics the profiles
+are identical. As final comparison we recorded the distance between the
+two black holes over the course of the simulation. The results of which are
+shown in the bottom panel of Fig. 10, the results are indistinguishable up
+to the third pericenter passage at t = 300 after which the results, because
+of numerical differences, become incomparable. Apart from the simulation
+results we also compare the energy conservation. This is done by computing
+the relative energy error (dE, Eq. 3) and the maximal relative energy error
+21
+0.01
+50%
+1%
+∆a/a
+0.001
+0.0001
+1e-05
+1e-06
+0.2
+0.5
+opening angle (θ)
+0.8
+1
+Figure 9: The median and the first percentile of the relative acceleration error distribution
+as a function of the opening angle and the number of particles. We show the lines for
+N = 32768 (bottom striped and solid line) N = 131072 (middle striped and dotted line)
+and N = 1048576 (top striped and dotted line).
+22
+Table 2: Settings and results of the galaxy merger. The first two columns indicate the
+software and hardware used, the third the time-step (dt) and the fourth the opening
+angle (θ). The last three columns present the results, energy error at the time = 1000
+(fifth column), maximum energy error during the simulation (sixth column) and the total
+execution time (seventh column).
+Simulation
+Hardware
+phiGRAPE
+4x GTX480
+Bonsai run1
+1x GTX480
+Bonsai run2
+1x GTX480
+Octgrav run1 1x GTX480
+Octgrav run2 1x GTX480
+Patree run1
+Xeon E5620
+Patree run2
+Xeon E5620
+dt
+block
+1
+64
+1
+64
+1
+64
+1
+64
+1
+64
+1
+64
+θ
+0.75
+0.50
+0.75
+0.50
+0.75
+0.50
+dEend [×10−4 ] dEmax [×10−4 ]
+−1.9
+1.8
+0.21
+2.8
+0.44
+1.3
+−1.1
+3.5
+−1.1
+2.2
+−3.5
+3.8
+0.87
+0.96
+(dEmax ).
+dE =
+E0 − Et
+E0
+(3)
+Here E0 is the total energy (potential energy + kinetic energy) at the
+start of the simulation and Et is the total energy at time t. The time is in
+N -body units.
+The maximal relative energy error is presented in the top panel of Fig. 10,
+the tree-code simulations with θ = 0.75 give the highest dEmax which occurs
+for both θ = 0.75 and θ = 0.5 during the second pericenter passage at t ≈ 280.
+For θ = 0.5, the dEmax is roughly a factor 2 smaller than for θ = 0.75. For
+phiGRAPE dEmax shows a drift and does not stay constant after the second
+pericenter passage. The drift in the energy error is caused by the formation
+of binaries, for which phiGRAPE has no special treatment, resulting in the
+observed drift instead of a random walk.
+A detailed overview of the energy error is presented in Fig. 11 which shows
+the relative energy error (dE) over the course of the simulation. Comparing
+the dE of the tree-codes shows that Bonsai has a more stable evolution than
+Octgrav and Partree. Furthermore if we compare the results of θ = 0.75 and
+θ = 0.5 there hardly is any improvement visible for Octgrav while Bonsai
+and Partree show an energy error with smaller per time-step variance of the
+23
+time[s]
+62068
+7102
+12687
+11651
+15958
+118424
+303504
+0.00045
+Bonsai θ=0.75
+Bonsai θ=0.5
+0.0004
+Octgrav θ=0.75
+Octgrav θ=0.5
+Partree θ=0.75
+Partree θ=0.5
+phiGRAPE
+0.00035
+dEmax
+0.0003
+0.00025
+0.0002
+0.00015
+0.0001
+5e-05
+1000
+distance
+100
+10
+1
+0.1
+0.01
+0
+200
+400
+600
+800
+1000
+time
+Figure 10: The top panel shows the maximal relative energy error over the course of
+the simulation. The solid lines show the results of Bonsai, the striped lines the results of
+Octgrav and the striped-dotted lines show the results of Partree. In all cases the top lines
+show the result of θ = 0.75 and the bottom lines the result of θ = 0.5. Finally the dotted
+line shows the result of phiGRAPE. The bottom panel shows the distance between the two
+supermassive black-holes. The lines themselves have no labels since up to t = 300 the lines
+follow the same path and after t = 300 the motion becomes chaotic and incomparable.
+The distance and time are in N -body units.
+24
+energy error.
+The last thing to look at is the execution time of the various codes, which
+can be found in the last column of Tab. 2. Comparing Bonsai with Octgrav
+shows that the former is faster by a factor of 1.6 and 1.26 for θ = 0.75 and
+θ = 0.5 respectively. The smaller speed-up for θ = 0.5 results from the fact
+that the tree-traverse, which takes up most of the execution time, is faster in
+Octgrav than in Bonsai. Comparing the execution time of Bonsai with that
+of Partree shows that the former is faster by a factor of 17 (24) with θ = 0.75
+(θ = 0.5). Note that this speed-up is smaller than reported in Section 4.1
+due to different initial conditions. Finally, when comparing phiGRAPE with
+Bonsai, we find that Bonsai completes the simulation on 1 GTX480 faster
+than phiGRAPE, which uses 4 GTX480 GPUs, by a factor of 8.7 (θ = 0.75)
+and 4.9 (θ = 0.5).
+5. Discussion and Conclusions
+We have presented algorithms to efficiently construct and traverse hierarchical data-structures. These algorithms are implemented as part of a gravitational N -body tree-code. In contrast to other existing GPU tree-codes, this
+implementation is executed on the GPU. While the code is written in CUDA,
+the methods themselves are portable to other massively parallel architectures,
+provided that parallel scan-algorithms exist for such architectures. For this
+implementation a custom CUDA API wrapper is used that can be replaced
+with an OpenCL version. As such the code can be ported to OpenCL, by
+only rewriting the GPU functions, which is currently work in progress.
+The number of particles processed per unit time, is 2.8 million particles
+per second with θ = 0.75 on a GTX480. Combined with the stable energy
+evolution and efficient scaling permits us to routinely carry out simulations
+on the GPU. Since the current version can only use 1 GPU, the limitation is
+the amount of memory. For 5 million particles ±1 gigabyte of GPU memory
+is required.
+Although the the tree-traverse in Octgrav is ±10% faster than in Bonsai,
+the latter is much more appropriate for large (N > 106 ) simulations and
+simulations which employ block-time steps. In Octgrav the complete treestructure, particle array and multipole moments are send to the GPU during
+each time-step. When using shared-time steps this is a non-critical amount
+of overhead since the overall performance is dominated by the tree-traverse
+which takes up more than 90% of the total compute time. However, this
+25
+0.0004
+0.0003
+dE
+0.0002
+0.0001
+0
+-0.0001
+-0.0002
+0.0004
+θ=0.75
+Bonsai
+Octgrav
+Partree
+phiGRAPE
+0.0003
+dE
+0.0002
+0.0001
+0
+-0.0001
+-0.0002
+θ=0.5
+0
+200
+400
+600
+800
+1000
+time
+Figure 11: Relative energy error over the course of the simulation. The top panel shows
+the results of θ = 0.75 and the bottom panel the results of θ = 0.5, all other settings as
+defined in Tab. 2. The Bonsai results are shown by the blue lines, the Octgrav results are
+shown by the red lines, the Partree results are shown by the green lines and the black
+lines show the results of phiGRAPE. Note that the result of phiGRAPE is the same in the
+top and bottom panel and that the range of the y-axis is the same in both panels.
+26
+balance changes if one uses block time-steps. The tree-traverse time is reduced by a factor Ngroups /Nactive , where Nactive is the number of groups with
+particles that have to be updated. This number can be as small as a few
+percent of Ngroups , and therefore tree-construction, particle prediction and
+communication becomes the bottleneck. By shifting these computations to
+the GPU, this ceases to be a problem, and the required host communication
+is removed entirely.
+Even though the sorting, moving and tree-construction parts of the code
+take up roughly 10% of the execution time, these methods do not have to be
+executed during each time-step when using the block time-step method. It
+is sufficient to only recompute the multipole moments of tree-cells that have
+updated child particles. Only when the tree-traverse shows a considerable
+decline in performance the complete tree-structure has to be rebuild. This
+decline is the result of inefficient memory reads and an increase of the average number of particle-cell and particle-particle interactions. This quantity
+increases because the tree-cell size (l) increases, which causes more cells to
+be opened by the multipole acceptance criterion (Eq. 1).
+Although the algorithms described herein are designed for a shared-memory
+architecture, they can be used to construct and traverse tree-structures on
+parallel GPU clusters using the methods described in [23, 32]. Furthermore,
+in case of a parallel GPU tree-code, the CPU can exchange particles with
+the other nodes, while the GPU is traversing the tree-structure of the local
+data. In this way, it is possible to hide most of the communication time.
+The presented tree-construction and tree-traverse algorithms are not limited to the evaluation of gravitational forces, but can be applied to a variety of
+problems, such as neighbour search, clump finding algorithms, fast multipole
+method and ray tracing. In particular, it is straightforward to implement
+Smoothed Particle Hydrodynamics in such a code, therefore having a selfgravitating particle based hydrodynamics code implemented on the GPU.
+Acknowledgements
+This work is supported by NOVA and NWO grants (#639.073.803, #643.000.802,
+and #614.061.608, VICI #643.200.503, VIDI #639.042.607). The authors
+would like to thank Massimiliano Fatica and Mark Harris of NVIDIA for
+the help with getting the code to run on the Fermi architecture, Bernadetta
+Devecchi for her help with the galaxy merger simulation and Dan Caputo for
+his comments which improved the manuscript.
+27
+References
+[1] M. de Berg, M. van Kreveld, M. Overmars, O. Schwarzkopf, Computational Geometry: Algorithms and Applications, chap. 5 and 16,
+Springer-Verlag, second edn., 2000.
+[2] I. Buck, T. Foley, D. Horn, J. Sugerman, K. Fatahalian, M. Houston,
+P. Hanrahan, Brook for GPUs: stream computing on graphics hardware,
+in: SIGGRAPH ’04: ACM SIGGRAPH 2004 Papers, ACM, New York,
+NY, USA, 777–786, doi:http://doi.acm.org/10.1145/1186562.1015800,
+2004.
+[3] NVIDIA, NVIDIA CUDA Programming Guide 3.2, 2010.
+[4] Khronos Group Std., The OpenCL Specification Version 1.0 Rev.48 ,
+URL http://khronos.org/registry/cl/specs/opencl-1.0.48.pdf,
+2010.
+[5] S. F. Portegies Zwart, R. G. Belleman, P. M. Geldof, High-performance
+direct gravitational N-body simulations on graphics processing units,
+New Astronomy 12 (2007) 641–650, doi:10.1016/j.newast.2007.05.004.
+[6] T. Hamada, T. Iitaka, The Chamomile Scheme: An Optimized Algorithm for N-body simulations on Programmable Graphics Processing
+Units, ArXiv Astrophysics e-prints .
+[7] R. G. Belleman, J. Bédorf, S. F. Portegies Zwart, High performance
+direct gravitational N-body simulations on graphics processing units II:
+An implementation in CUDA, New Astronomy 13 (2008) 103–112, doi:
+10.1016/j.newast.2007.07.004.
+[8] J. Makino, M. Taiji, Scientific simulations with special-purpose computers : The GRAPE systems, Scientific simulations with special-purpose
+computers : The GRAPE systems /by Junichiro Makino & Makoto
+Taiji. Chichester ; Toronto : John Wiley & Sons, c1998., 1998.
+[9] E. Gaburov, S. Harfst, S. Portegies Zwart, SAPPORO: A way to turn
+your graphics cards into a GRAPE-6, New Astronomy 14 (7) (2009) 630
+– 637, ISSN 1384-1076, doi:DOI: 10.1016/j.newast.2009.03.002.
+[10] J. Barnes, P. Hut, A Hierarchical O(NlogN) Force-Calculation Algorithm, Nature 324 (1986) 446–449.
+28
+[11] J. E. Barnes, A Modified Tree Code Don’t Laugh: It Runs, Journal of
+Computational Physics 87 (1990) 161–+.
+[12] T. Fukushige, T. Ito, J. Makino, T. Ebisuzaki, D. Sugimoto,
+M. Umemura, GRAPE-1A: Special-Purpose Computer for N-body Simulation with a Tree Code, Publ. Astr. Soc. Japan 43 (1991) 841–858.
+[13] J. Makino, A Fast Parallel Treecode with GRAPE, Publications of the
+Astronomical Society of Japan 56 (2004) 521–531.
+[14] T. Hamada, K. Nitadori, K. Benkrid, Y. Ohno, G. Morimoto,
+T. Masada, Y. Shibata, K. Oguri, M. Taiji, Anovel multiplewalk parallel algorithm for the BarnesHut treecode on GPUs towards cost effective, high performance N-body simulation, Computer Science - Research and Development 24 (2009) 21–31, ISSN
+1865-2034, URL http://dx.doi.org/10.1007/s00450-009-0089-1,
+10.1007/s00450-009-0089-1.
+[15] T. Hamada, T. Narumi, R. Yokota, K. Yasuoka, K. Nitadori, M. Taiji,
+42 TFlops hierarchical N-body simulations on GPUs with applications
+in both astrophysics and turbulence, in: SC ’09: Proceedings of the
+Conference on High Performance Computing Networking, Storage and
+Analysis, ACM, New York, NY, USA, ISBN 978-1-60558-744-8, 1–12,
+doi:http://doi.acm.org/10.1145/1654059.1654123, 2009.
+[16] T. Hamada, K. Nitadori, 190 TFlops Astrophysical N-body
+Simulation on a Cluster of GPUs, in:
+Proceedings of the
+2010 ACM/IEEE International Conference for High Performance Computing, Networking, Storage and Analysis, SC ’10,
+IEEE Computer Society, Washington, DC, USA, ISBN 978-14244-7559-9, 1–9, doi:http://dx.doi.org/10.1109/SC.2010.1, URL
+http://dx.doi.org/10.1109/SC.2010.1, 2010.
+[17] E. Gaburov, J. Bédorf, S. Portegies Zwart, Gravitational Tree-Code on
+Graphics Processing Units: Implementation in CUDA, in: International
+Conference on Computational Science 2010, Elsevier, 2010.
+[18] R. Yokota, L. A. Barba, GPU Computing Gems Emerald Edition, chap.
+9: Treecode and fast multipole method for N-body simulation with
+29
+CUDA, Morgan Kaufmann Publishers Inc., San Francisco, CA, USA,
+1st edn., ISBN 0123849888, 9780123849885, 113–132, 2011.
+[19] K. Zhou, M. Gong, X. Huang, B. Guo, Highly Parallel Surface Reconstruction, Tech. Rep. MSR-TR-2008-53, Microsoft Research, 2008.
+[20] C. Lauterbach, M. Garland, S. Sengupta, D. Luebke, D. Manocha, Fast
+BVH Construction on GPUs, Comput. Graph. Forum 28 (2) (2009) 375–
+384.
+[21] J. Pantaleoni, D. Luebke, HLBVH: hierarchical LBVH construction for
+real-time ray tracing of dynamic geometry, in: Proceedings of the Conference on High Performance Graphics, HPG ’10, Eurographics Association, Aire-la-Ville, Switzerland, Switzerland, 87–95, 2010.
+[22] M. Burtscher, K. Pingali, GPU Computing Gems Emerald Edition,
+chap. 6: An Efficient CUDA Implementation of the Tree-based Barnes
+Hut n-Body Algorithm, Morgan Kaufmann Publishers Inc., San Francisco, CA, USA, 1st edn., ISBN 0123849888, 9780123849885, 75–92,
+2011.
+[23] M. S. Warren, J. K. Salmon, A parallel hashed Oct-Tree N-body algorithm, in: Supercomputing ’93: Proceedings of the 1993 ACM/IEEE
+conference on Supercomputing, ACM, New York, NY, USA, ISBN
+0-8186-4340-4, 12–21, doi:http://doi.acm.org/10.1145/169627.169640,
+1993.
+[24] G. M. Morton, A computer Oriented Geodetic Data Base; and a New
+Technique in File Sequencing, Tech. Rep., Ottawa, Canada: IBM Ltd.,
+1966.
+[25] N. Satish, M. Harris, M. Garland, Designing efficient sorting algorithms
+for manycore GPUs, in: IPDPS ’09: Proceedings of the 2009 IEEE International Symposium on Parallel&Distributed Processing, IEEE Computer Society, Washington, DC, USA, ISBN 978-1-4244-3751-1, 1–10,
+doi:http://dx.doi.org/10.1109/IPDPS.2009.5161005, 2009.
+[26] D. Merill, A. Grimshaw, Revisiting Sorting for GPGPU Stream Architectures, Tech. Rep. CS2010-03, Department of Computer Science,
+University of Virginia, 2010.
+30
+[27] L. Nyland, M. Harris, J. Prins, Fast N-body simulation with CUDA.,
+GPU Gems 3 (2007) 677–695.
+[28] P. Hut, J. Makino, S. McMillan, Building a better leapfrog, ApJL 443
+(1995) L93–L96, doi:10.1086/187844.
+[29] S. L. W. McMillan, S. J. Aarseth, An O(N log N) integration scheme for
+collisional stellar systems, ApJ 414 (1993) 200–212, doi:10.1086/173068.
+[30] J. Barnes, Computational Astrophysics, Springer-Verlag, Berlin, 1994.
+[31] J. K. Salmon, M. S. Warren, Skeletons from the treecode
+closet, Journal of Computational Physics 111 (1994) 136–155, doi:
+10.1006/jcph.1994.1050.
+[32] J. Dubinski, A parallel tree code, New Astronomy 1 (1996) 133–147,
+doi:10.1016/S1384-1076(96)00009-7.
+[33] S. Harfst, A. Gualandris, D. Merritt, R. Spurzem, S. Portegies Zwart,
+P. Berczik, Performance analysis of direct N-body algorithms on specialpurpose supercomputers, New Astronomy 12 (2007) 357–377, doi:
+10.1016/j.newast.2006.11.003.
+[34] S. Portegies Zwart, S. McMillan, S. Harfst, D. Groen, M. Fujii, B. Ó.
+Nualláin, E. Glebbeek, D. Heggie, J. Lombardi, P. Hut, V. Angelou,
+S. Banerjee, H. Belkus, T. Fragos, J. Fregeau, E. Gaburov, R. Izzard,
+M. Jurić, S. Justham, A. Sottoriva, P. Teuben, J. van Bever, O. Yaron,
+M. Zemp, A multiphysics and multiscale software environment for modeling astrophysical systems, New Astronomy 14 (2009) 369–378, doi:
+10.1016/j.newast.2008.10.006.
+[35] H. C. Plummer, The distribution of stars in globular clusters, MNRAS
+76 (1915) 107–121.
+[36] W. Dehnen, A Hierarchical O(N) Force Calculation Algorithm, Journal
+of Computational Physics 179 (2002) 27–42.
+[37] V. Springel, N. Yoshida, S. D. M. White, GADGET: a code for collisionless and gasdynamical cosmological simulations, New Astronomy 6
+(2001) 79–117, doi:10.1016/S1384-1076(01)00042-2.
+31
+[38] J. G. Stadel, Cosmological N-body simulations and their analysis, Ph.D.
+thesis, AA(UNIVERSITY OF WASHINGTON), 2001.
+[39] Guy E. Blelloch, Prefix Sums and Their Applications, Tech. Rep. CMUCS-90-190, School of Computer Science, Carnegie Mellon University,
+1990.
+[40] D. E. Knuth, The Art of Computer Programming, Volume 3: (3rd ed.)
+Sorting and Searching, chap. Sorting by Distribution, Addison-Wesley,
+ISBN 0-201-89685-0, 168–179, 1997.
+[41] Mark Harris (NVIDIA), Parallel Prefix Sum (Scan) with CUDA, CUDA
+Scan Whitepaper .
+[42] S. Sengupta, M. Harris, M. Garland, Efficient parallel scan algorithms
+for GPUs, Tech. Rep. NVR-2008-003, NVIDIA, 2008.
+[43] M. Billeter, O. Olsson, U. Assarsson, Efficient stream compaction
+on wide SIMD many-core architectures, in: HPG ’09: Proceedings of the Conference on High Performance Graphics 2009,
+ACM, New York, NY, USA, ISBN 978-1-60558-603-8, 159–166, doi:
+http://doi.acm.org/10.1145/1572769.1572795, 2009.
+[44] R. Raman, D. S. Wise, Converting to and from Dilated Integers,
+IEEE Trans. Comput. 57 (2008) 567–
+573,
+ISSN
+0018-9340,
+doi:10.1109/TC.2007.70814,
+URL
+http://dl.acm.org/citation.cfm?id=1345867.1345918.
+Appendix A. Scan algorithms
+Both tree-construction and tree-traverse make extensive use of parallelscan algorithms, also known as parallel prefix-sum algorithms. These algorithms are examples of computations that seem inherently sequential, but
+for which an efficient parallel algorithm can be defined. Blelloch [39] defines
+the scan operations as follows:
+Definition: The all-prefix-sums operation takes a binary associative operator ⊕, and an array of n elements
+[a0 , a1 , ..., an−1 ],
+32
+and returns the ordered set
+[a0 ,(a0 ⊕ a1 ), ...,(a0 ⊕ a1 ⊕ ... ⊕ an−1 )].
+Example: If ⊕ is the addition operator, then the all-prefix-sums operation
+on the array
+[3 1 7 0 4 1 6 3],
+would return
+[3 4 11 11 15 16 22 25].
+The prefix-sum algorithms form the building blocks for a variety of methods,
+including stream compaction, stream splitting, sorting, regular expressions,
+tree-depth determination and histogram construction. In the following paragraphs, we give a concise account on the algorithms we used in this work,
+however we refer the interested readers to the survey by Blelloch [39] for
+further examples and detailed descriptions.
+Appendix A.1. Stream Compaction
+Stream compaction removes “invalid” items from a stream of elements;
+this algorithm is also known as stream reduction. In the left panel of the
+Fig.A.12 an example of a compaction is shown where invalid elements are
+removed and valid elements are placed at the start of the output stream.
+Appendix A.2. Split and Sort
+Stream split is related to stream compaction, but differs in that the invalid
+elements are placed behind the valid ones in the output stream instead of
+being discarded (right panel of Fig.A.12). This algorithm is used as building
+block for the radix sort primitive. Namely, for each bit of an integer we call
+the split algorithm, starting from the least significant bit, and terminating
+with the most significant bit [40].
+Appendix A.3. Implementation
+All parts of our parallel octree algorithms use scan algorithms in one
+way or another. Therefore, it is important that these scan algorithms are
+implemented in the most efficient way and do not become the bottleneck of
+the application. There are many different implementations of scan algorithms
+on many-core architectures [41, 42, 43]. We use the method of Billeter et al.
+33
+Figure A.12: Example of compact and split algorithms. The “compact” discards invalid
+items whereas the “split” places these behind the valid items. We use this “split” primitive
+for our radix sort implementation because it preserves the item ordering–a property which
+is fundamental for the radix sort algorithm.
+[43] for stream compaction, split and radix-sort because it appears to be, at
+the moment of writing, the fastest and is easily adaptable for our purposes.
+Briefly, the method consists of three steps:
+1. Count the number of valid elements in the array.
+2. Compute output offsets using parallel prefix-sum.
+3. Place valid elements at the output offsets calculated in the previous
+step.
+We used the prefix-sum method described by Sengupta et al. [42], for all
+such operations in both the tree-construction and tree-traverse parts of the
+implementation.
+Appendix B. Morton Key generation
+One of the properties of the Morton key is its direct mapping between
+coordinates and keys. To generate the keys given a set of coordinates one
+can make use of look-up tables or generate the keys directly. Since the
+use of look-up tables is relative inefficient on GPUs (because of the many
+parallel threads that want to access the same memory) we decided to compute
+the keys directly. First we convert the floating point positions into integer
+positions. This is done by shifting the reference frame to the lower left corner
+of the domain and then multiply the new positions by the size of the domain.
+34
+Then we can apply bit-based dilate primitives to compute the Morton key
+(List.1, [44]). This dilate primitive converts the first 10 bits of an integer to
+a 30 bit representation, i.e. 0100111011 → 000 001 000 000 001 001 001
+000 001 001:
+List 1: The GPU code which we use to dilate the first 10-bits of an integer.
+1
+2
+3
+4
+5
+6
+7
+8
+9
+int dilate(const int value) {
+unsigned int x;
+x = value & 0x03FF;
+x = ((x << 16) + x) & 0xFF0000FF;
+x = ((x << 8) + x) & 0x0F00F00F;
+x = ((x << 4) + x) & 0xC30C30C3;
+x = ((x << 2) + x) & 0x49249249;
+return x;
+}
+This dilate primitive is combined with bit-shift and OR operators to get
+the particles’ key. In our implementation, we used 60-bit keys, which is
+sufficient for an octree with the maximal depth of 20 levels. We store a
+60-bit key in two 32-bit integers, each containing 30-bits of the key. The
+maximal depth imposes a limit on the method, but so far we have never run
+into problems with our simulations. This limitation can easily be lifted by
+either going to 90-bit keys for 30 levels or by modifying the tree-construction
+algorithm when we reach deepest levels. This is something we are currently
+investigating.
+35

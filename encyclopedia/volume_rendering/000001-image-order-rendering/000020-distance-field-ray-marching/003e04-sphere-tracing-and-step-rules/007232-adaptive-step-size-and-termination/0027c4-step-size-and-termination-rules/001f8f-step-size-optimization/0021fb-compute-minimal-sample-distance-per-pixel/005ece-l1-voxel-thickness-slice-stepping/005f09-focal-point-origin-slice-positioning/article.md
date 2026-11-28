@@ -1,0 +1,89 @@
+# Focal Point Origin Slice Positioning
+
+Also called: Focal point based slice grid, Offset slice indexing
+
+## Overview
+Focal Point Origin Slice Positioning is a method for determining the spatial coordinates of oblique slice planes in volume rendering by anchoring the slice grid's origin to the user-defined focal point rather than the volume's geometric minimum corner. It solves the problem of misaligned slice indexing, where standard implementations that derive slice positions from the volume corner shift the rendered plane away from the application's requested focal point, causing visual artifacts such as split voxels and horizontal lines [S1, unofficial]. It sets itself apart from sibling methods by decoupling the slice grid topology from the volume's bounding box, ensuring that the slice index $m$ corresponds directly to a displacement from the focal point, thereby preserving the exact plane requested by the application [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** The application-defined focal point $\mathbf{F}$ (a 3D vector in world or volume coordinates), the slice index $m$ (integer), and the L1 voxel thickness $T_v$ along the view normal (computed by the parent method [L1 Voxel Thickness Slice Stepping](17718-l1-voxel-thickness-slice-stepping.md)).
+*   **Output:** The 3D position $\mathbf{P}_m$ of the slice plane corresponding to index $m$.
+
+**Data Structures:**
+No complex data structures are required. The method relies on vector arithmetic using the focal point and the scalar step size.
+
+**Steps:**
+1.  **Retrieve Focal Point:** Obtain the exact focal point $\mathbf{F}$ provided by the application. Do not modify or snap this point to a grid derived from the volume corner [S1, unofficial].
+2.  **Retrieve Step Size:** Obtain the L1 voxel thickness $T_v$ along the view normal. This value ensures no voxel overlap or gaps between consecutive slices [S1, unofficial].
+3.  **Calculate Offset:** Compute the displacement vector from the focal point for slice index $m$. The offset is a scalar multiplication of the step size and the index:
+    $$ \text{offset} = m \times T_v $$
+4.  **Compute Position:** Calculate the slice position $\mathbf{P}_m$ by adding the offset to the focal point. Assuming the normal direction $\mathbf{n}$ (unit vector) defines the axis of slicing:
+    $$ \mathbf{P}_m = \mathbf{F} + (m \times T_v) \times \mathbf{n} $$
+    *Note: If the coordinate system is aligned such that the normal is one of the axes, this simplifies to adding $m \times T_v$ to the corresponding coordinate of $\mathbf{F}$.*
+
+**Parameters:**
+*   $m$: The slice index. Can be negative, zero, or positive.
+*   $T_v$: The L1 voxel thickness. Typical values depend on the volume resolution and view angle.
+*   $\mathbf{F}$: The focal point. Must be precise.
+
+**Pitfalls and Edge Cases:**
+*   **Misaligned Grid Origin:** If the slice grid origin is fixed at the volume's minimum corner ($\mathbf{min}$), the slice positions are calculated as $\mathbf{min} + m \times T_v$. This causes the application's requested plane (through $\mathbf{F}$) to be shifted, potentially by up to half a voxel, resulting in horizontal line artifacts where voxels appear split across neighboring slices [S1, unofficial].
+*   **Unsnapped Focal Point:** If the focal point is not aligned with the slice grid, the plane may fall between slice positions. While snapping the focal point to the nearest slice (via `snapFocalPointToSlice`) can remove visual artifacts, it violates the requirement to preserve the application's requested plane [S1, unofficial].
+*   **Oblique Normals:** The method must hold for oblique normals as well as acquisition orientations. The vector addition must correctly account for the direction of the normal $\mathbf{n}$ [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def calculate_slice_position(focal_point, slice_index, voxel_thickness_l1, normal_vector):
+    """
+    Calculates the 3D position of a slice plane anchored at the focal point.
+    
+    Args:
+        focal_point: 3D vector (x, y, z) representing the application's focal point.
+        slice_index: Integer m.
+        voxel_thickness_l1: Scalar T_v, the L1 voxel thickness along the normal.
+        normal_vector: 3D unit vector (nx, ny, nz) defining the slice direction.
+        
+    Returns:
+        3D vector representing the slice plane position.
+    """
+    # Calculate the scalar offset from the focal point
+    offset_scalar = slice_index * voxel_thickness_l1
+    
+    # Calculate the displacement vector
+    displacement = [
+        offset_scalar * normal_vector[0],
+        offset_scalar * normal_vector[1],
+        offset_scalar * normal_vector[2]
+    ]
+    
+    # Compute the final slice position
+    slice_position = [
+        focal_point[0] + displacement[0],
+        focal_point[1] + displacement[1],
+        focal_point[2] + displacement[2]
+    ]
+    
+    return slice_position
+```
+
+## Subtopics
+
+### [Snap Focal Point to Slice with Fixed Basis](17922-snap-focal-point-to-slice-with-fixed-basis.md)
+A mechanism to snap a focal point to a slice grid. The current implementation lacks a fixed basis focal point, causing non-idempotent snaps, non-returning round trips, and multiple snap positions for points within one slice.
+
+## Operating characteristics
+*   **Time Complexity:** $O(1)$ per slice position calculation. The method involves simple vector addition and scalar multiplication.
+*   **Memory Complexity:** $O(1)$. No additional data structures are required beyond the focal point and step size.
+*   **Strengths:** Preserves the exact plane requested by the application, eliminating shifts caused by volume corner alignment. Prevents horizontal line artifacts caused by split voxels.
+*   **Limitations:** Requires the application to provide a precise focal point. If the focal point is not aligned with the slice grid, visual artifacts may occur unless snapping is applied (which trades accuracy for visual correctness).
+*   **When to Use:** Use when the application requires precise control over the slice plane location relative to a specific anatomical or data point (focal point).
+*   **When Not to Use:** Avoid if the application does not provide a stable focal point or if the rendering pipeline relies on a fixed grid origin for other optimizations.
+
+## Background
+This method originated from issues in the Cornerstone3D library, where oblique slice stepping using L2 spacing caused voxels to appear on multiple slices [S1, unofficial]. The problem was exacerbated when the focal point was not aligned with the slice grid derived from the volume corner, leading to visual defects such as horizontal lines [S1, unofficial]. The correct behavior, keeping the focal point as the grid origin, was identified as a requirement to ensure that each slice index shows exactly one plane of voxels without overlap or gaps [S1, unofficial].
+
+## Sources
+[S1] A volume viewport steps an oblique slice by the L2 spacing, and shows the same voxels on two slices, https://github.com/cornerstonejs/cornerstone3D/issues/2912, fetched 2026-10-27 (unofficial)

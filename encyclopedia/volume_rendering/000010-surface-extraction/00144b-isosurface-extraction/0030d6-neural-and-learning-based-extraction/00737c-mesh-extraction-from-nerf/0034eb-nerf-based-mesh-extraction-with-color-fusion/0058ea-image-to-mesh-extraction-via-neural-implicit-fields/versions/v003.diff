@@ -1,0 +1,191 @@
+--- v002.md
++++ v003.md
+@@ -1,5 +1,5 @@
+ # Image-to-Mesh Extraction via Neural Implicit Fields
+ 
+-Also called: Batch Image-to-Mesh via TripoSR, TripoSR Mesh Extraction
++Also called: Batch Image-to-Mesh via TripoSR, TripoSR Mesh Extraction, image_to_mesh [S1, unofficial]
+ 
+ ## Overview
+@@ -8,28 +8,24 @@
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: A list of image paths (or PIL Images) and corresponding output paths.
+-- Output: 3D triangle meshes (e.g., `.glb`, `.obj`) with vertex colors.
++- Input: A list of image paths (or PIL Images) and corresponding output paths [S1, unofficial].
++- Output: 3D triangle meshes (e.g., `.glb`, `.obj`) with vertex colors [S1, unofficial].
+ 
+ **Data Structures:**
+-- `scene_codes`: Latent tensor representing the 3D structure and appearance.
+-- `meshes`: List of mesh objects containing vertices, faces, and vertex colors.
++- `scene_codes`: Latent tensor representing the 3D structure and appearance [S1, unofficial].
++- `meshes`: List of mesh objects containing vertices, faces, and vertex colors [S1, unofficial].
+ 
+ **Parameters:**
+-- `mc_resolution`: Integer specifying the Marching Cubes grid resolution. Default: 256 [S1, unofficial]. Higher values increase geometric detail.
++- `mc_resolution`: Integer specifying the Marching Cubes grid resolution. Default: 256 [S1, unofficial]. Higher values increase geometric detail [S1, unofficial].
+ - `foreground_ratio`: Float used during preprocessing to determine foreground segmentation size. Default: 0.85 [S1, unofficial].
+ - `chunk_size`: Integer for renderer chunking to manage memory. Default: 8192 [S1, unofficial].
+ 
+ **Steps:**
+-1. **Device Detection:** Detect available hardware. Prefer MPS (Apple Silicon), then CUDA, then CPU [S1, unofficial].
+-2. **Model Loading:** Load the TripoSR model from Hugging Face (`stabilityai/TripoSR`) using `config.yaml` and `model.ckpt`. Cache the model by device key [S1, unofficial].
++1. **Device Detection:** Detect available hardware, preferring MPS (Apple Silicon), then CUDA, then CPU [S1, unofficial].
++2. **Model Loading:** Load the TripoSR model from Hugging Face (`stabilityai/TripoSR`) using `config.yaml` and `model.ckpt`, caching by device key [S1, unofficial].
+ 3. **Renderer Configuration:** Set the renderer chunk size to 8192 and move the model to the detected device [S1, unofficial].
+-4. **Preprocessing:** For each input image:
+-   - Load and resize/pad to a square (default 512x512) on a white background [S1, unofficial].
+-   - Remove background using `rembg` and composite onto white [S1, unofficial].
+-   - Apply stylization (edge-aware shading, radial gradient) to simulate volume and lighting [S1, unofficial].
+-   - If preprocessing fails, record the error and skip the image [S1, unofficial].
++4. **Preprocessing:** For each input image: load and resize/pad to a square (default 512x512) on a white background, remove background using `rembg` and composite onto white, apply stylization (edge-aware shading, radial gradient) to simulate volume and lighting, and record errors if preprocessing fails [S1, unofficial].
+ 5. **Batch Inference:** Pass all preprocessed images through the model in evaluation mode (`torch.no_grad()`) to obtain `scene_codes` [S1, unofficial].
+ 6. **Mesh Extraction:** Call `model.extract_mesh(scene_codes, has_vertex_color=True, resolution=mc_resolution)` to generate meshes [S1, unofficial].
+-7. **Export:** For each mesh, create the output directory if needed. Export as `.glb` if the suffix matches, otherwise use the default format [S1, unofficial].
++7. **Export:** For each mesh, create the output directory if needed, and export as `.glb` if the suffix matches, otherwise use the default format [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -40,9 +36,8 @@
+ from PIL import Image
+ from pathlib import Path
+-import trimesh
++import scipy.ndimage as ndimage
+ 
+ def preprocess_for_triposr(image: Image.Image, foreground_ratio: float = 0.85) -> Image.Image:
+     """Preprocess image: resize, remove background, apply stylization."""
+-    # Resize and pad to square
+     size = 512
+     w, h = image.size
+@@ -50,19 +45,12 @@
+     new_w, new_h = int(w * scale), int(h * scale)
+     image = image.resize((new_w, new_h), Image.LANCZOS)
+-    
+-    # Center on white background
+     result = Image.new("RGBA", (size, size), (255, 255, 255, 255))
+     offset_x = (size - new_w) // 2
+     offset_y = (size - new_h) // 2
+     result.paste(image, (offset_x, offset_y), image)
+-    
+-    # Remove background (using rembg)
+     from rembg import remove
+     result = remove(result)
+-    # Composite onto white
+     white = Image.new("RGBA", result.size, (255, 255, 255, 255))
+     result = Image.alpha_composite(white, result)
+-    
+-    # Apply stylization (simplified edge-aware shading)
+     arr = np.array(result).astype(np.float32)
+     h, w = arr.shape[:2]
+@@ -70,21 +58,15 @@
+     white_thresh = 240
+     subject_mask = np.any(arr[:, :, :3] < white_thresh, axis=2).astype(np.float32)
+-    
+     if subject_mask.sum() < 100:
+         return result
+-        
+     coords = np.argwhere(subject_mask > 0)
+     cy, cx = coords.mean(axis=0)
+-    
+-    import scipy.ndimage as ndimage
+     dist_from_edge = ndimage.distance_transform_edt(subject_mask)
+     max_dist = dist_from_edge.max()
+     dist_norm = dist_from_edge / max_dist if max_dist > 0 else dist_from_edge
+-    
+     yy, xx = np.mgrid[0:h, 0:w]
+     radial = np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2)
+     max_radial = radial[subject_mask > 0].max() if subject_mask.sum() > 0 else 1.0
+     radial_norm = np.clip(radial / max(max_radial, 1.0), 0, 1)
+-    
+     light_dir_x, light_dir_y = -0.3, -0.5
+     light_map = 1.0 - 0.15 * (
+@@ -93,13 +75,11 @@
+     )
+     light_map = np.clip(light_map, 0.7, 1.15)
+-    
+     ao = 0.85 + 0.15 * dist_norm
+-    # Apply stylization to alpha channel or RGB as needed
+-    # Note: Full stylization logic is complex; this is a representative subset [S1, unofficial]
+-    
+-    return Image.fromarray(arr.astype(np.uint8))
++    rgb = arr[:, :, :3]
++    rgb = rgb * light_map[:, :, np.newaxis] * ao[:, :, np.newaxis]
++    rgb = np.clip(rgb, 0, 255).astype(np.uint8)
++    return Image.fromarray(rgb)
+ 
+ def extract_mesh_from_image(image_paths: list, output_paths: list, mc_resolution: int = 256, foreground_ratio: float = 0.85):
+-    # 1. Device Detection
+     if torch.backends.mps.is_available():
+         device = torch.device("mps")
+@@ -108,13 +88,9 @@
+     else:
+         device = torch.device("cpu")
+-        
+-    # 2. Load Model (Pseudocode for loading from HuggingFace)
++    # Model loading and inference implementation not provided in sources [S1, unofficial]
+     # model = load_tripoSR_model('stabilityai/TripoSR', device=device)
+     # model.renderer.set_chunk_size(8192)
+-    
+     processed_images = []
+     valid_items = []
+-    
+-    # 4. Preprocessing
+     for img_path, out_path in zip(image_paths, output_paths):
+         try:
+@@ -125,24 +101,15 @@
+         except Exception as e:
+             print(f"Error processing {img_path}: {e}")
+-            
+     if not processed_images:
+         return
+-        
+-    # 5. Batch Inference
+-    # with torch.no_grad():
+-    #     scene_codes = model(processed_images, device=device)
+-        
+-    # 6. Mesh Extraction
+-    # meshes = model.extract_mesh(scene_codes, has_vertex_color=True, resolution=mc_resolution)
+-    
+-    # 7. Export
+-    for i, (img_path, out_path) in enumerate(valid_items):
+-        # mesh = meshes[i]
+-        # Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+-        # if out_path.endswith('.glb'):
+-        #     mesh.export(out_path, file_type='glb')
+-        # else:
+-        #     mesh.export(out_path)
+-        pass
++    with torch.no_grad():
++        scene_codes = model(processed_images, device=device)
++    meshes = model.extract_mesh(scene_codes, has_vertex_color=True, resolution=mc_resolution)
++    for mesh, (img_path, out_path) in zip(meshes, valid_items):
++        Path(out_path).parent.mkdir(parents=True, exist_ok=True)
++        if out_path.endswith('.glb'):
++            mesh.export(out_path, file_type='glb')
++        else:
++            mesh.export(out_path)
+ ```
+ 
+@@ -152,12 +119,14 @@
+ Voxel2Mesh is a CNN-based architecture that generates 3D surface meshes directly from 3D image volumes without post-processing, avoiding artifacts and enabling end-to-end training. It sets itself apart from standard voxel rendering or segmentation methods by outputting explicit surface representations (vertices and faces) rather than labeled voxel grids, allowing for differentiable mesh operations and better accuracy in biomedical segmentation tasks.
+ 
++### Image-to-Mesh via Single Image with Multi-view and Geometry Losses
++Input: Single RGBA image (RGB values I, alpha values S) [S2, unofficial]. Network F(θ) predicts position and color value for each vertex in a mesh with specified topology (e.g., sphere) [S2, unofficial]. Multi-view loss: Render from random second view and compare against ground truth renderings from this new view [S2, unofficial]. Regularize with smoothness loss Lsm (penalizes difference in normals for neighboring faces) and Laplacian loss Llap (penalizes change in relative positions of neighboring vertices) [S2, unofficial]. Formulas: $$L_{IOU}(\theta) = \mathbb{E}_I \left[ 1 - \frac{\|S \tilde{S}\|_1}{\|S + \tilde{S} - S \tilde{S}\|_1} \right]$$, $$L_{col}(\theta) = \mathbb{E}_I \|I - \tilde{I}\|_1$$, $$L_1 = L_{IOU} + \lambda_{col} L_{col} + \lambda_{sm} L_{sm} + \lambda_{lap} L_{lap}$$ [S2, unofficial].
++
+ ## Operating characteristics
+ - **Time Complexity:** Linear with respect to the number of input images due to batch inference [S1, unofficial].
+-- **Memory Complexity:** Depends on `mc_resolution` and batch size. Higher resolutions increase memory usage for the Marching Cubes grid [S1, unofficial].
+-- **Performance:** Efficient for batch processing multiple images [S1, unofficial].
++- **Memory Complexity:** Depends on `mc_resolution` and batch size; higher resolutions increase memory usage for the Marching Cubes grid [G].
+ - **Strengths:** End-to-end pipeline from image to textured mesh; batch processing capability; vertex colors included in the mesh [S1, unofficial].
+ - **Limitations:** Quality depends on the TripoSR model's training data; preprocessing steps (background removal, stylization) can introduce artifacts if the input image is complex [S1, unofficial].
+-- **When to use:** When generating textured meshes from single images is required, especially in batches.
+-- **When not to use:** When high-fidelity geometry from multi-view stereo is needed, or when the input images have complex backgrounds that are difficult to segment [S1, unofficial].
++- **When to use:** When generating textured meshes from single images is required, especially in batches [S1, unofficial].
++- **When not to use:** When high-fidelity geometry from multi-view stereo is needed, or when the input images have complex backgrounds that are difficult to segment [G].
+ 
+ ## Background
+@@ -165,3 +134,4 @@
+ 
+ ## Sources
+-[S1] mohamedmansour/image-to-voxel, https://github.com/mohamedmansour/image-to-voxel, fetched 2026-10-26 (unofficial)+[S1] mohamedmansour/image-to-voxel, https://github.com/mohamedmansour/image-to-voxel, fetched 2026-10-26 (unofficial)
++[S2] Learning to Predict 3D Objects with an Interpolation-based Differentiable Renderer, https://doi.org/10.48550/arxiv.1908.01210, fetched 2026-10-26 (unofficial)

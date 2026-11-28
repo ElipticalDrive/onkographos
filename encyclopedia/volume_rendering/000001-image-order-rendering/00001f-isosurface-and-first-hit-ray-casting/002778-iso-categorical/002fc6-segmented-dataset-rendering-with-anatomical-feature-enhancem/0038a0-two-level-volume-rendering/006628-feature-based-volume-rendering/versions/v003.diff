@@ -1,0 +1,137 @@
+--- v002.md
++++ v003.md
+@@ -26,7 +26,7 @@
+ 2.  **Feature Representation Selection (Phase 2):**
+     An appropriate volumetric representation model is chosen for the selected features from three available models [S1, unofficial]:
+-    *   **Isosurface-triplets:** (Details not provided in sources.)
++    *   **Isosurface-triplets:** # Details not provided in the sources.
+     *   **Feature Volume:** Voxels with non-zero DOI values belonging to a feature are depicted as a volumetric object [S1, unofficial].
+-    *   **Feature Streamlines:** (Details not provided in sources.)
++    *   **Feature Streamlines:** # Details not provided in the sources.
+ 
+ 3.  **Rendering (Phase 3):**
+@@ -52,71 +52,58 @@
+ 
+ ```python
+-import math
++def feature_based_volume_rendering(doi_fields, color_fields, intensity_fields, ray_origin, ray_direction, step_size, max_steps, image_width, image_height):
++    # doi_fields: list of 3D arrays with smooth DOI values per feature
++    # color_fields: list of 3D arrays with base RGB color per feature
++    # intensity_fields: list of 3D arrays with scalar attribute for shading/intensity
++    image = [[0.0, 0.0, 0.0, 0.0] for _ in range(image_height * image_width)]
+ 
+-def feature_based_volume_rendering(raw_data, user_selections, ray_origin, ray_direction, step_size, image_width, image_height):
+-    # Phase 1: Generate DOI fields for each feature
+-    doi_fields = []
+-    for selection in user_selections:
+-        # [G] Interactive brushing selects regions in n-dimensional attribute space.
+-        # We assume a helper creates a smooth DOI field from the selection mask.
+-        binary_mask = [1.0 if raw_data[i,j,k].matches_criteria(selection) else 0.0 
+-                       for i in range(raw_data.dim_x) for j in range(raw_data.dim_y) for k in range(raw_data.dim_z)]
+-        smooth_doi = gaussian_smooth(binary_mask, kernel_size=5)
+-        max_val = max(smooth_doi) if smooth_doi else 1.0
+-        doi_fields.append([v / max_val for v in smooth_doi])
+-
+-    # Phase 2 & 3: Raycast and composite features
+-    composited_image = [[0.0, 0.0, 0.0, 0.0] for _ in range(image_height * image_width)]
+-    
+     for y in range(image_height):
+         for x in range(image_width):
+             t = 0.0
+-            r, g, b, a = 0.0, 0.0, 0.0, 0.0
+-            accumulated_alpha = 0.0
+-            
+-            while t < 100.0:
++            acc_r, acc_g, acc_b, acc_a = 0.0, 0.0, 0.0, 0.0
++
++            for step in range(max_steps):
+                 pos = [ray_origin[i] + t * ray_direction[i] for i in range(3)]
+-                doi_val = 0.0
+-                for field in doi_fields:
+-                    val = trilinear_sample(field, pos)
+-                    if val > doi_val: doi_val = val
+                 
+-                if doi_val > 0.0:
+-                    alpha_voxel = doi_val
+-                    base_color = [1.0, 0.0, 0.0]
+-                    intensity = trilinear_sample(raw_data.velocity_field, pos)
+-                    color_voxel = [base_color[i] * intensity for i in range(3)]
+-                    
+-                    weight = alpha_voxel * (1.0 - accumulated_alpha)
+-                    r += color_voxel[0] * weight
+-                    g += color_voxel[1] * weight
+-                    b += color_voxel[2] * weight
+-                    accumulated_alpha += weight
+-                    
+-                    if accumulated_alpha > 0.99:
+-                        break
++                for f_idx, doi_field in enumerate(doi_fields):
++                    doi_val = trilinear_sample(doi_field, pos)
++                    if doi_val > 0.0:
++                        # Opacity is a linear ramp from DOI value
++                        alpha_voxel = doi_val
++                        # Color: unique base color modulated by intensity attribute
++                        base_color = trilinear_sample(color_fields[f_idx], pos)
++                        intensity = trilinear_sample(intensity_fields[f_idx], pos)
++                        intensity = max(0.0, min(1.0, intensity)) # Clamp to [0,1]
++                        color_voxel = [base_color[i] * intensity for i in range(3)]
++
++                        # Front-to-back compositing
++                        weight = alpha_voxel * (1.0 - acc_a)
++                        acc_r += color_voxel[0] * weight
++                        acc_g += color_voxel[1] * weight
++                        acc_b += color_voxel[2] * weight
++                        acc_a += weight
++
++                        if acc_a >= 0.99:
++                            break
++                if acc_a >= 0.99:
++                    break
+                 t += step_size
+-            
+-            composited_image[y * image_width + x] = [r, g, b, accumulated_alpha]
+-            
+-    return composited_image
+ 
+-def gaussian_smooth(data, kernel_size):
+-    smoothed = [0.0] * len(data)
+-    for i in range(len(data)):
+-        total_weight = 0.0
+-        for j in range(-kernel_size, kernel_size + 1):
+-            if 0 <= i + j < len(data):
+-                w = math.exp(-0.5 * (j / (kernel_size / 2.0))**2)
+-                smoothed[i] += data[i + j] * w
+-                total_weight += w
+-        smoothed[i] /= total_weight
+-    return smoothed
++            image[y * image_width + x] = [acc_r, acc_g, acc_b, acc_a]
++    return image
+ 
+ def trilinear_sample(field, pos):
+     ix, iy, iz = int(pos[0]), int(pos[1]), int(pos[2])
+-    if not (0 <= ix < field.dim_x and 0 <= iy < field.dim_y and 0 <= iz < field.dim_z):
++    fx, fy, fz = pos[0] - ix, pos[1] - iy, pos[2] - iz
++    if not (0 <= ix < field.dim_x - 1 and 0 <= iy < field.dim_y - 1 and 0 <= iz < field.dim_z - 1):
+         return 0.0
+-    return field[ix, iy, iz]
++    c000 = field[ix, iy, iz]; c100 = field[ix+1, iy, iz]
++    c010 = field[ix, iy+1, iz]; c110 = field[ix+1, iy+1, iz]
++    c001 = field[ix, iy, iz+1]; c101 = field[ix+1, iy, iz+1]
++    c011 = field[ix, iy+1, iz+1]; c111 = field[ix+1, iy+1, iz+1]
++    c00 = c000 * (1-fx) + c100 * fx; c10 = c010 * (1-fx) + c110 * fx
++    c01 = c001 * (1-fx) + c101 * fx; c11 = c011 * (1-fx) + c111 * fx
++    c0 = c00 * (1-fy) + c10 * fy; c1 = c01 * (1-fy) + c11 * fy
++    return c0 * (1-fz) + c1 * fz
+ ```
+ 
+@@ -136,7 +123,7 @@
+ *   **Limitations:**
+     *   Requires user interaction for segmentation; non-interactive approaches may fail due to absence of sharp boundaries [S1, unofficial].
+-    *   Performance depends on the complexity of the smoothing and rendering of multiple volumes.
+-*   **When to use:** When visualizing complex flow simulation data where features lack sharp boundaries and occlusion is a significant problem.
+-*   **When not to use:** When fully automatic, non-interactive segmentation is required.
++    *   Performance depends on the complexity of the smoothing and rendering of multiple volumes [S1, unofficial].
++*   **When to use:** When visualizing complex flow simulation data where features lack sharp boundaries and occlusion is a significant problem [S1, unofficial].
++*   **When not to use:** When fully automatic, non-interactive segmentation is required [S1, unofficial].
+ 
+ ## Background

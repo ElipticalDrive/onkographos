@@ -1,0 +1,87 @@
+# Leaf Consideration
+
+
+## Overview
+Leaf Consideration is the termination step in sparse ray-octree traversal where an intersected leaf node is processed to determine occlusion and record hit data [S1, unofficial]. It distinguishes between pure voxel leaves and virtual leaves (intermediate nodes acting as leaves) to provide the precise intersection point and normal required for shading [S1, unofficial]. It sets itself apart from sibling methods like Octree Voxel-Triangle Intersection by focusing on axis-aligned bounding box (AABB) intersection and hit recording rather than geometric primitive intersection or light gathering.
+
+## How it works
+**Inputs:** Ray (origin, direction), leaf node identifier, current best hit state, traversal options (specifically `return_payload_indices`).
+**Outputs:** Updated best hit state.
+
+**Data Structures:**
+*   `HitCandidate`: A struct containing:
+    *   `hit` (`bool`): Indicates if a valid intersection was found.
+    *   `leaf_id` (`std::int32_t`): The identifier of the leaf node. If `options.return_payload_indices` is true, this is mapped via `octree.leaf_payload_indices()[leaf_id]`; otherwise, it is the raw `leaf_id` [S1, unofficial].
+    *   `t` (`float`): The distance along the ray to the intersection, clamped to `max(t_near, 0.0f)` [S1, unofficial].
+    *   `position` (`glm::vec3`): The 3D position of the intersection, calculated as `origin + direction * t` [S1, unofficial].
+    *   `depth` (`std::int32_t`): The depth of the leaf node in the octree [S1, unofficial].
+
+**Steps:**
+1.  **Intersect Ray with Bounds:** Compute the intersection of the ray with the leaf node's AABB. If there is no intersection, return immediately [S1, unofficial].
+2.  **Create HitCandidate:** Construct a `HitCandidate` object. Set `hit` to `true`. Calculate `t` as `max(t_near, 0.0f)`. Calculate `position` as `origin + direction * t`. Set `depth` to the node's depth. Resolve `leaf_id` based on the payload index option [S1, unofficial].
+3.  **Compare and Update:** Call `is_better_hit(candidate, best)`. If true, update `best` to `candidate` [S1, unofficial].
+
+**Comparison Logic:**
+`is_better_hit` prefers hits with a smaller `t` value. If `t` values are equal (within a small epsilon `kEpsilon`), it prefers the hit with the smaller `leaf_id` [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def leaf_consideration(ray_origin, ray_direction, leaf_aabb, leaf_id, current_best_hit, options, octree):
+    # Step 1: Intersect ray with bounds
+    t_near, t_far = intersect_ray_aabb(ray_origin, ray_direction, leaf_aabb)
+    if t_near is None:
+        return current_best_hit
+
+    # Step 2: Create HitCandidate
+    t = max(t_near, 0.0f)
+    position = ray_origin + ray_direction * t
+    
+    # Resolve leaf_id based on options
+    if options.return_payload_indices:
+        resolved_leaf_id = octree.leaf_payload_indices()[leaf_id]
+    else:
+        resolved_leaf_id = leaf_id
+
+    candidate = HitCandidate(
+        hit=True,
+        leaf_id=resolved_leaf_id,
+        t=t,
+        position=position,
+        depth=leaf_depth # Assumed available from context
+    )
+
+    # Step 3: Compare and Update
+    if is_better_hit(candidate, current_best_hit):
+        current_best_hit = candidate
+
+    return current_best_hit
+
+def is_better_hit(candidate, best):
+    # Prefers smaller t
+    if candidate.t < best.t - kEpsilon:
+        return True
+    # If t is equal (within epsilon), prefers smaller leaf_id
+    if abs(candidate.t - best.t) <= kEpsilon:
+        return candidate.leaf_id < best.leaf_id
+    return False
+```
+
+**Edge Cases:**
+*   **Precision:** The comparison `abs(candidate.t - best.t) <= kEpsilon` handles floating-point precision issues when determining hit order [S1, unofficial].
+*   **Payload Indices:** Failure to correctly map `leaf_id` via `octree.leaf_payload_indices()` when `return_payload_indices` is enabled will result in incorrect hit recording [S1, unofficial].
+
+## Subtopics
+
+## Operating characteristics
+*   **Time Complexity:** Constant time $O(1)$ per leaf node, as it involves a single AABB intersection and a few arithmetic operations [S1, unofficial].
+*   **Memory Complexity:** $O(1)$ auxiliary memory for the `HitCandidate` struct [S1, unofficial].
+*   **Strengths:** Efficiently terminates traversal and provides precise hit data for shading. The tie-breaking rule (smaller `leaf_id`) ensures deterministic behavior [S1, unofficial].
+*   **Limitations:** Only handles AABB intersection; does not perform volumetric sampling or triangle intersection within the leaf [S1, unofficial].
+
+## Background
+This method is part of the sparse voxel octree traversal pipeline, specifically following the DECIDE algorithm for sparse ray-octree intersection [S1, unofficial]. It is implemented in the `sparse-voxels` library [S1, unofficial].
+
+## Sources
+[S1] hectorpiteau/sparse-voxels, https://github.com/hectorpiteau/sparse-voxels, fetched 2026-10-24 (unofficial)

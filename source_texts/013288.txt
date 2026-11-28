@@ -1,0 +1,558 @@
+Question Which Vulkan 1.3 core compute shape is a credible milestone baseline on the current engine and Windows development machine: shader-visible voxel/material representation and partitioning, software traversal algorithm, camera/ray ...
+
+Prototype the portable compute-ray data and traversal baseline · Issue #52 · PetrSeifert/voxel-nexus · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Prototype the portable compute-ray data and traversal baseline #52
+New issue
+Copy link
+New issue
+Copy link
+Closed
+Closed
+Prototype the portable compute-ray data and traversal baseline#52
+Copy link
+Assignees
+Labels
+wayfinder:prototypeHITL prototype decision on a Wayfinder mapHITL prototype decision on a Wayfinder map
+Description
+PetrSeifert
+opened on Jul 14, 2026
+Issue body actions
+Question
+Which Vulkan 1.3 core compute shape is a credible milestone baseline on the current engine and Windows development machine: shader-visible voxel/material representation and partitioning, software traversal algorithm, camera/ray generation, offscreen storage-image output, and capability-aware presentation? Build only the cheapest concrete artifact needed to compare viable shapes against the canonical scene, semantic hit expectations, device limits, edit-driven rebuild needs, and descriptive timing/resource evidence; record what the milestone may safely claim and which risks remain.
+Reactions are currently unavailable
+Activity
+PetrSeifert
+added
+wayfinder:prototypeHITL prototype decision on a Wayfinder mapHITL prototype decision on a Wayfinder map
+on Jul 14, 2026
+PetrSeifert
+added a parent issue on Jul 14, 2026
+Shape the portable compute-ray milestone after localized raster convergence #50
+PetrSeifert
+marked this as blocking 3 issues on Jul 14, 2026
+Place the runtime Render Path switching seam #53
+Define newest-only compute-ray convergence semantics #54
+Define the semantic ray oracle and cross-path evidence contract #55
+PetrSeifert
+self-assigned this
+on Jul 15, 2026
+PetrSeifert commented on Jul 15, 2026
+PetrSeifert
+on Jul 15, 2026
+OwnerAuthor
+More actions
+#!/usr/bin/env python3
+"""PROTOTYPE — compare portable compute-ray voxel representations on the canonical scene."""
+from future import annotations
+import argparse
+import json
+import math
+import time
+from dataclasses import dataclass
+from typing import Callable, Iterable
+DIMENSIONS = (256, 128, 256)
+ORIGIN = (-8.0, -4.0, -8.0)
+VOXEL_SIZE = 0.0625
+CELL_EXTENT = 16
+EDIT_COORDINATES = ((0, 0, 0), (40, 0, 0), (80, 0, 0))
+MATERIALS = ("empty", "canonical-warm", "canonical-green", "canonical-blue")
+CAMERAS = {
+"overview": ((20.0, 14.0, 22.0), (0.0, 0.0, 0.0), (0.0, 1.0, 0.0), 50.0, 0.1, 100.0),
+"cavity-material-close-up": ((0.0, 1.0, 17.0), (-0.75, -0.5, 0.0), (0.0, 1.0, 0.0), 45.0, 0.1, 100.0),
+"boundary-cutaway": ((-14.0, 2.0, 8.0), (-7.5, -1.0, 0.0), (0.0, 1.0, 0.0), 45.0, 0.1, 100.0),
+}
+EPSILON = 1.0e-7
+@DataClass(frozen=True)
+class Hit:
+coordinate: tuple[int, int, int]
+material: int
+normal: tuple[int, int, int]
+@DataClass
+class TraceStats:
+rays: int = 0
+hits: int = 0
+fine_steps: int = 0
+coarse_steps: int = 0
+def add(left, right):
+return tuple(left[index] + right[index] for index in range(3))
+def subtract(left, right):
+return tuple(left[index] - right[index] for index in range(3))
+def scale(vector, factor):
+return tuple(component * factor for component in vector)
+def dot(left, right):
+return sum(left[index] * right[index] for index in range(3))
+def cross(left, right):
+return (
+left[1] * right[2] - left[2] * right[1],
+left[2] * right[0] - left[0] * right[2],
+left[0] * right[1] - left[1] * right[0],
+)
+def normalize(vector):
+length = math.sqrt(dot(vector, vector))
+return tuple(component / length for component in vector)
+def dense_index(coordinate):
+coordinate_x, coordinate_y, coordinate_z = coordinate
+width, height, _ = DIMENSIONS
+return (coordinate_z * height + coordinate_y) * width + coordinate_x
+def cell_dimensions():
+return tuple((dimension + CELL_EXTENT - 1) // CELL_EXTENT for dimension in DIMENSIONS)
+def cell_index(coordinate):
+coordinate_x, coordinate_y, coordinate_z = coordinate
+width, height, _ = cell_dimensions()
+return (coordinate_z * height + coordinate_y) * width + coordinate_x
+def local_cell_index(coordinate):
+coordinate_x, coordinate_y, coordinate_z = coordinate
+return (coordinate_z * CELL_EXTENT + coordinate_y) * CELL_EXTENT + coordinate_x
+def material_for_x(coordinate_x):
+if coordinate_x < 112:
+return 1
+if coordinate_x < 160:
+return 2
+return 3
+def is_occupied(coordinate_x, coordinate_y, coordinate_z):
+base = coordinate_x < 224 and coordinate_y < 32 and 16 <= coordinate_z < 240
+mesa = 32 <= coordinate_x < 192 and 32 <= coordinate_y < 104 and 40 <= coordinate_z < 216
+tunnel = 96 <= coordinate_x < 136 and 32 <= coordinate_y < 80 and 40 <= coordinate_z < 216
+isolated_overhang = 200 <= coordinate_x < 256 and 80 <= coordinate_y < 96 and 92 <= coordinate_z < 172
+return base or (mesa and not tunnel) or isolated_overhang
+def build_dense():
+width, height, depth = DIMENSIONS
+values = bytearray(width * height * depth)
+occupied = 0
+started = time.perf_counter()
+for coordinate_z in range(depth):
+for coordinate_y in range(height):
+row_start = (coordinate_z * height + coordinate_y) * width
+for coordinate_x in range(width):
+if is_occupied(coordinate_x, coordinate_y, coordinate_z):
+values[row_start + coordinate_x] = material_for_x(coordinate_x)
+occupied += 1
+return values, occupied, time.perf_counter() - started
+def build_occupancy(values):
+counts = [0] * math.prod(cell_dimensions())
+width, height, depth = DIMENSIONS
+started = time.perf_counter()
+for coordinate_z in range(depth):
+cell_z = coordinate_z // CELL_EXTENT
+for coordinate_y in range(height):
+cell_y = coordinate_y // CELL_EXTENT
+row_start = (coordinate_z * height + coordinate_y) * width
+for coordinate_x in range(width):
+if values[row_start + coordinate_x] != 0:
+counts[cell_index((coordinate_x // CELL_EXTENT, cell_y, cell_z))] += 1
+return counts, time.perf_counter() - started
+def build_compact(values, counts):
+directory = [-1] * len(counts)
+pool = []
+started = time.perf_counter()
+for index, count in enumerate(counts):
+if count:
+directory[index] = len(pool)
+pool.append(bytearray(CELL_EXTENT ** 3))
+width, height, depth = DIMENSIONS
+for coordinate_z in range(depth):
+cell_z, local_z = divmod(coordinate_z, CELL_EXTENT)
+for coordinate_y in range(height):
+cell_y, local_y = divmod(coordinate_y, CELL_EXTENT)
+row_start = (coordinate_z * height + coordinate_y) * width
+for coordinate_x in range(width):
+material = values[row_start + coordinate_x]
+if material == 0:
+continue
+cell_x, local_x = divmod(coordinate_x, CELL_EXTENT)
+slot = directory[cell_index((cell_x, cell_y, cell_z))]
+pool[slot][local_cell_index((local_x, local_y, local_z))] = material
+return directory, pool, time.perf_counter() - started
+def ray_box(origin, direction, near, far):
+maximum = tuple(ORIGIN[index] + DIMENSIONS[index] * VOXEL_SIZE for index in range(3))
+entry = near
+exit_value = far
+entry_axis = None
+entry_sign = 0
+for axis in range(3):
+if abs(direction[axis]) < EPSILON:
+if origin[axis] < ORIGIN[axis] or origin[axis] > maximum[axis]:
+return None
+continue
+first = (ORIGIN[axis] - origin[axis]) / direction[axis]
+second = (maximum[axis] - origin[axis]) / direction[axis]
+near_axis = min(first, second)
+far_axis = max(first, second)
+if near_axis > entry:
+entry = near_axis
+entry_axis = axis
+entry_sign = -1 if direction[axis] > 0.0 else 1
+exit_value = min(exit_value, far_axis)
+if entry > exit_value:
+return None
+normal = [0, 0, 0]
+if entry_axis is not None:
+normal[entry_axis] = entry_sign
+return max(entry, near), exit_value, tuple(normal)
+def traverse_grid(ray_origin, direction, start, end, grid_origin, cell_size, dimensions, start_normal):
+sample_t = min(end, start + EPSILON)
+sample = add(ray_origin, scale(direction, sample_t))
+coordinate = []
+for axis in range(3):
+value = math.floor((sample[axis] - grid_origin[axis]) / cell_size)
+coordinate.append(min(max(value, 0), dimensions[axis] - 1))
+step = [0, 0, 0]
+next_boundary = [math.inf, math.inf, math.inf]
+delta = [math.inf, math.inf, math.inf]
+for axis in range(3):
+if direction[axis] > EPSILON:
+step[axis] = 1
+boundary = grid_origin[axis] + (coordinate[axis] + 1) * cell_size
+next_boundary[axis] = (boundary - ray_origin[axis]) / direction[axis]
+delta[axis] = cell_size / direction[axis]
+elif direction[axis] < -EPSILON:
+step[axis] = -1
+boundary = grid_origin[axis] + coordinate[axis] * cell_size
+next_boundary[axis] = (boundary - ray_origin[axis]) / direction[axis]
+delta[axis] = -cell_size / direction[axis]
+current = start
+normal = start_normal
+while current <= end + EPSILON:
+if any(coordinate[axis] < 0 or coordinate[axis] >= dimensions[axis] for axis in range(3)):
+return
+cell_exit = min(end, min(next_boundary))
+yield tuple(coordinate), current, cell_exit, normal
+minimum = min(next_boundary)
+if minimum > end:
+return
+tied_axes = [axis for axis in range(3) if abs(next_boundary[axis] - minimum) <= EPSILON]
+normal_axis = tied_axes[0]
+normal = [0, 0, 0]
+normal[normal_axis] = -step[normal_axis]
+for axis in tied_axes:
+coordinate[axis] += step[axis]
+next_boundary[axis] += delta[axis]
+current = minimum
+def trace_fine(ray_origin, direction, start, end, start_normal, lookup):
+steps = 0
+for coordinate, _, _, normal in traverse_grid(
+ray_origin, direction, start, end, ORIGIN, VOXEL_SIZE, DIMENSIONS, start_normal
+):
+steps += 1
+material = lookup(coordinate)
+if material:
+return Hit(coordinate, material, normal), steps
+return None, steps
+def trace_dense(ray_origin, direction, near, far, lookup):
+intersection = ray_box(ray_origin, direction, near, far)
+if intersection is None:
+return None, 0, 0
+start, end, normal = intersection
+hit, fine_steps = trace_fine(ray_origin, direction, start, end, normal, lookup)
+return hit, fine_steps, 0
+def trace_hierarchical(ray_origin, direction, near, far, counts, lookup):
+intersection = ray_box(ray_origin, direction, near, far)
+if intersection is None:
+return None, 0, 0
+start, end, normal = intersection
+fine_steps = 0
+coarse_steps = 0
+coarse_size = VOXEL_SIZE * CELL_EXTENT
+for coordinate, cell_start, cell_end, cell_normal in traverse_grid(
+ray_origin, direction, start, end, ORIGIN, coarse_size, cell_dimensions(), normal
+):
+coarse_steps += 1
+if counts[cell_index(coordinate)] == 0:
+continue
+hit, steps = trace_fine(ray_origin, direction, cell_start, cell_end, cell_normal, lookup)
+fine_steps += steps
+if hit is not None:
+return hit, fine_steps, coarse_steps
+return None, fine_steps, coarse_steps
+def camera_rays(camera, width, height):
+eye, target, up, field_of_view, near, far = camera
+forward = normalize(subtract(target, eye))
+right = normalize(cross(forward, up))
+corrected_up = normalize(cross(right, forward))
+half_height = math.tan(math.radians(field_of_view) / 2.0)
+half_width = half_height * width / height
+for pixel_y in range(height):
+normalized_y = 1.0 - 2.0 * ((pixel_y + 0.5) / height)
+for pixel_x in range(width):
+normalized_x = 2.0 * ((pixel_x + 0.5) / width) - 1.0
+direction = normalize(
+add(forward, add(scale(right, normalized_x * half_width), scale(corrected_up, normalized_y * half_height)))
+)
+yield eye, direction, near, far
+def run_traces(values, counts, directory, pool, width, height):
+dense_lookup = lambda coordinate: values[dense_index(coordinate)]
+```
+def compact_lookup(coordinate):
+    cell_coordinate = tuple(component // CELL_EXTENT for component in coordinate)
+    slot = directory[cell_index(cell_coordinate)]
+    if slot < 0:
+        return 0
+    local_coordinate = tuple(component % CELL_EXTENT for component in coordinate)
+    return pool[slot][local_cell_index(local_coordinate)]
+
+modes: dict[str, Callable] = {
+    "dense-dda": lambda ray: trace_dense(*ray, dense_lookup),
+    "dense-occupancy-dda": lambda ray: trace_hierarchical(*ray, counts, dense_lookup),
+    "compact-brick-dda": lambda ray: trace_hierarchical(*ray, counts, compact_lookup),
+}
+signatures = {}
+records = []
+for camera_name, camera in CAMERAS.items():
+    rays = list(camera_rays(camera, width, height))
+    for mode_name, trace in modes.items():
+        stats = TraceStats()
+        mode_signatures = []
+        started = time.perf_counter()
+        for ray in rays:
+            hit, fine_steps, coarse_steps = trace(ray)
+            stats.rays += 1
+            stats.fine_steps += fine_steps
+            stats.coarse_steps += coarse_steps
+            if hit is None:
+                mode_signatures.append(None)
+            else:
+                stats.hits += 1
+                mode_signatures.append((hit.coordinate, hit.material, hit.normal))
+        elapsed = time.perf_counter() - started
+        signatures[(camera_name, mode_name)] = mode_signatures
+        records.append(
+            {
+                "camera": camera_name,
+                "mode": mode_name,
+                "resolution": [width, height],
+                "rays": stats.rays,
+                "hits": stats.hits,
+                "cpu_trace_ms": round(elapsed * 1000.0, 3),
+                "average_fine_steps": round(stats.fine_steps / stats.rays, 3),
+                "average_coarse_steps": round(stats.coarse_steps / stats.rays, 3),
+            }
+        )
+    dense = signatures[(camera_name, "dense-dda")]
+    for mode_name in ("dense-occupancy-dda", "compact-brick-dda"):
+        candidate = signatures[(camera_name, mode_name)]
+        mismatch_count = sum(left != right for left, right in zip(dense, candidate))
+        if mismatch_count:
+            raise RuntimeError(f"{camera_name} {mode_name} produced {mismatch_count} semantic mismatches")
+return records
+```
+def edit_effects(values, counts, directory, pool):
+dense_candidate = values.copy()
+occupancy_candidate = counts.copy()
+compact_directory = directory.copy()
+compact_pool = [brick.copy() for brick in pool]
+allocations = 0
+changed_cells = set()
+for coordinate in EDIT_COORDINATES:
+index = dense_index(coordinate)
+old_value = dense_candidate[index]
+new_value = 1 if old_value == 0 else 0
+dense_candidate[index] = new_value
+cell_coordinate = tuple(component // CELL_EXTENT for component in coordinate)
+cell = cell_index(cell_coordinate)
+changed_cells.add(cell)
+occupancy_candidate[cell] += 1 if old_value == 0 else -1
+slot = compact_directory[cell]
+if slot < 0 and new_value:
+slot = len(compact_pool)
+compact_directory[cell] = slot
+compact_pool.append(bytearray(CELL_EXTENT ** 3))
+allocations += 1
+local_coordinate = tuple(component % CELL_EXTENT for component in coordinate)
+compact_pool[slot][local_cell_index(local_coordinate)] = new_value
+return {
+"commands": len(EDIT_COORDINATES),
+"expected_final_revision": 4,
+"changed_traversal_cells": len(changed_cells),
+"dense_changed_payload_bytes": 4 * len(EDIT_COORDINATES),
+"dense_full_replacement_bytes": len(dense_candidate) * 4,
+"occupancy_words_changed": len(changed_cells),
+"occupancy_full_replacement_bytes": len(dense_candidate) * 4 + len(occupancy_candidate) * 4,
+"compact_new_slots": allocations,
+"compact_full_replacement_bytes": len(compact_directory) * 4 + len(compact_pool) * (CELL_EXTENT ** 3) * 4,
+"newest_only_requirement": "revisions 2 and 3 remain hidden; only complete revision 4 may replace revision 1",
+}
+def main():
+parser = argparse.ArgumentParser()
+parser.add_argument("--width", type=int, default=48)
+parser.add_argument("--height", type=int, default=27)
+parser.add_argument("--json", action="store_true")
+arguments = parser.parse_args()
+```
+values, occupied, dense_seconds = build_dense()
+counts, occupancy_seconds = build_occupancy(values)
+directory, pool, compact_seconds = build_compact(values, counts)
+trace_records = run_traces(values, counts, directory, pool, arguments.width, arguments.height)
+cells = len(counts)
+nonempty_cells = sum(count > 0 for count in counts)
+representations = [
+    {
+        "mode": "dense-dda",
+        "shader_visible_bytes": len(values) * 4,
+        "build_cpu_ms": round(dense_seconds * 1000.0, 3),
+        "edit_shape": "immutable full-buffer candidate; three four-byte logical patches",
+    },
+    {
+        "mode": "dense-occupancy-dda",
+        "shader_visible_bytes": len(values) * 4 + cells * 4,
+        "incremental_build_cpu_ms": round(occupancy_seconds * 1000.0, 3),
+        "nonempty_cells": nonempty_cells,
+        "total_cells": cells,
+        "edit_shape": "dense candidate plus occupied-count update; shader occupancy changes only on zero/nonzero transition",
+    },
+    {
+        "mode": "compact-brick-dda",
+        "shader_visible_bytes": cells * 4 + len(pool) * (CELL_EXTENT ** 3) * 4,
+        "incremental_build_cpu_ms": round(compact_seconds * 1000.0, 3),
+        "nonempty_bricks": len(pool),
+        "total_directory_entries": cells,
+        "edit_shape": "directory and pool candidate; empty-cell creation allocates slots",
+    },
+]
+result = {
+    "prototype": "portable-compute-ray-data-traversal-baseline",
+    "scope": "throwaway CPU logic model; timings are directional CPU evidence, not Vulkan GPU performance",
+    "canonical_scene": {
+        "revision": 1,
+        "dimensions": DIMENSIONS,
+        "voxel_size": VOXEL_SIZE,
+        "occupied_voxels": occupied,
+        "logical_u32_bytes": len(values) * 4,
+    },
+    "portable_floor_checks": {
+        "canonical_dense_buffer_fits_128_mib_maxStorageBufferRange_minimum": len(values) * 4 <= 128 * 1024 * 1024,
+        "canonical_3d_image_exactly_reaches_portable_256_dimension_minimum": max(DIMENSIONS) == 256,
+        "required_shader_integer_width_bits": 32,
+        "required_optional_features": [],
+        "output": "offscreen R8G8B8A8_UNORM storage image then fullscreen graphics composite",
+    },
+    "representations": representations,
+    "trace_records": trace_records,
+    "semantic_check": "all three representations returned identical hit coordinate, material, and normal for every sampled ray",
+    "edit_burst": edit_effects(values, counts, directory, pool),
+    "decision": {
+        "baseline": "dense-dda",
+        "first_measured_optimization": "dense-occupancy-dda",
+        "defer": "compact-brick-dda unless measured traversal or memory benefit justifies allocation and retirement complexity",
+        "remaining_risks": [
+            "GPU traversal cost at presentation resolution",
+            "DDA boundary and tie determinism against an independent semantic ray oracle",
+            "multi-volume nearest-hit and equal-distance semantics",
+            "presentation color encoding and synchronization",
+            "larger-than-portable-binding Voxel Volume rejection or paging policy",
+        ],
+    },
+}
+if arguments.json:
+    print(json.dumps(result, indent=2))
+    return
+print(json.dumps(result, indent=2))
+```
+if name == "main":
+main()
+PetrSeifert commented on Jul 15, 2026
+PetrSeifert
+on Jul 15, 2026
+OwnerAuthor
+More actions
+Resolution
+Use a Render-Path-owned flattened 32-bit voxel/material buffer with ordinary software 3D DDA as the portable compute-ray milestone baseline. Gate one bounded optimization experiment—a fixed 16³ occupancy directory derived independently from the same VoxelSceneView—on measured GPU evidence. Do not make compact bricks, a brick allocator, a 3D voxel image, an SVO, ray query, or a ray-tracing pipeline part of this milestone.
+The human selected dense, occupancy gated after reviewing the prototype comparison.
+Prototype artifact
+Throwaway executable logic-model source
+Invocation: python compute_ray_baseline_prototype.py --width 48 --height 27 --json
+Scope: current Large canonical Voxel Volume; three canonical camera poses; flattened dense words, dense words plus a 16³ occupancy directory, and compact 16³ bricks; fixed three-command edit burst.
+This is CPU logic and resource-shape evidence. Its timings are directional only and are not Vulkan GPU performance evidence.
+The model regenerated the current 256×128×256 canonical volume at Voxel Scene Revision 1, containing 8,388,608 logical voxels and 3,366,912 occupied voxels. It traced 1,296 pixel-centre rays from each of the three canonical camera poses. All three representations returned identical hit/miss, voxel coordinate, Voxel Material, and outward normal for all 3,888 sampled rays.
+Shape
+Shader-visible payload
+Canonical partition state
+Edit-burst consequence
+Flattened u32 + ordinary DDA
+32 MiB
+No traversal partition
+Three logical words change; the cheapest correct hidden candidate may replace/upload the complete 32 MiB buffer.
+Flattened u32 + 16³ occupancy directory
+32 MiB + 8 KiB
+944 nonempty of 2,048 occupancy cells
+The burst changes three occupancy words from empty to nonempty; no variable allocation or relocation.
+Compact 16³ bricks
+14.76 MiB initially
+944 allocated bricks and a 2,048-entry directory
+The burst creates three previously absent bricks, forcing allocation/capacity and retirement policy into the milestone.
+The occupancy model reduced sampled fine-grid steps without changing results:
+Canonical camera
+Ordinary DDA average fine steps
+Occupancy average fine steps
+Overview
+17.637
+1.693
+Cavity material close-up
+79.495
+5.702
+Boundary cutaway
+46.833
+5.162
+That is enough to justify an early GPU measurement, not enough to require the optimization. Compact bricks save about 17 MiB for the Large canonical volume, but they add exactly the allocation and candidate-lifetime problem exercised by the fixed edit burst before any GPU traversal benefit has been established.
+Baseline data contract
+For each Voxel Volume, the compute Render Path owns:
+one small volume header containing scene-space origin, voxel size or inverse voxel size, uvec3 dimensions, and a base word offset;
+one flattened storage-buffer range whose word is 0 for Empty and 1..N for a Render-Path-local Voxel Material index;
+a separate material table mapping those local indices to linear base colors and back to stable Voxel Material identities for evidence;
+CPU attribution to the source Voxel Scene identity and Voxel Scene Revision.
+Use 32-bit words and indexing only. Do not require byte storage, shader 64-bit integers, buffer device addresses, descriptor indexing, or optional ray-tracing features. The current Large canonical payload is 32 MiB, below the Vulkan core minimum 128 MiB maxStorageBufferRange; the milestone may therefore reject a Voxel Volume that does not fit the queried binding range rather than implementing general paging. CPU preparation should still read bounded Voxel Regions so it does not require another unbounded whole-volume temporary.
+The optional occupancy experiment adds one 32-bit word per fixed 16³ ray traversal cell. This is Render-Path-owned derived data, not a Raster Region, and its extent is an experimental traversal parameter rather than reuse of the raster-selected partition.
+Traversal, camera, and output
+Intersect finite Voxel Volume AABBs and traverse occupied candidates with ordinary 3D DDA.
+Generate rays through pixel centres from the shared camera pose: eye, target, up, vertical field of view, near plane, far plane, and drawable aspect ratio.
+Define zero direction components, rays starting inside a volume, negative directions, maximum-boundary entry, simultaneous axis crossings, near/far clipping, and normal tie order explicitly.
+For multiple Voxel Volumes, retain the nearest hit; equal-distance ordering remains a risk for the semantic-ray contract to resolve.
+Write linear output to an offscreen optimal-tiled R8G8B8A8_UNORM storage image.
+Present through a fullscreen graphics composite into the swapchain color attachment. Do not assume a swapchain supports storage or transfer usage.
+A 16×8 compute local size is a safe initial choice, subject to queried limits.
+The current Windows machine exposes an NVIDIA GeForce RTX 4070 and AMD Radeon integrated graphics. Both expose a graphics+compute queue, maxStorageBufferRange of 4,294,967,295 bytes, 1,024 maximum compute workgroup invocations, and optimal R8G8B8A8_UNORM storage-image support. These are local observations only; the milestone claim remains the Vulkan 1.3 core capability floor plus queried limits and format support.
+Edit-driven replacement and convergence implications
+Keep installed compute GPU data immutable. Prepare a complete hidden candidate attributed to its source revision, upload it, and install it only through the frame-boundary commit concept. For the established burst, Voxel Scene Revisions 2 and 3 must remain hidden and only complete Revision 4 may replace Visible Revision 1.
+The baseline may clone/prepare and upload a complete 32 MiB dense candidate for the canonical scene. This is intentionally a correctness-first milestone shape, not a claim that four-byte localized GPU patching is already safe. Newer adjacent changes may be accumulated into a hidden CPU candidate before upload, but authoritative generation/revision stale gates—not cancellation—establish correctness.
+If the occupancy experiment is retained, CPU occupied counts update with each changed coordinate and only zero/nonzero transitions change shader-visible occupancy words. Compact brick allocation, free lists, repacking, and holes are deferred.
+Evidence the milestone may safely claim
+The selected shape is credible if the implementation records, per device/scale/revision:
+Vulkan API/driver, queue flags, queried compute and descriptor limits, storage-image format support, and chosen presentation route;
+voxel, material, optional occupancy, output-image, staging, and hidden/visible resource bytes and counts;
+bounded scene-read/flatten, optional occupancy-build, upload, compute traversal, graphics composite, replacement construction, and frame-boundary installation phases;
+traversal step counters at correctness resolution and descriptive GPU timestamps at presentation resolution;
+Required and Visible Voxel Scene Revisions, stale rejection, retry/lifecycle outcomes, peak live resources, and zero owned resources after shutdown;
+independent semantic-ray-oracle results plus inspectability images.
+The milestone may compare those observations descriptively with the retained raster evidence. It must not require compute ray to beat raster, treat CPU prototype timings as GPU evidence, or make cross-machine performance claims.
+Remaining risks and follow-on decisions
+Full-resolution GPU traversal cost is unmeasured; the occupancy directory is the bounded first response if ordinary DDA is too costly.
+The independent semantic ray oracle must settle boundary/tie behavior and multi-volume nearest-hit semantics.
+Runtime Render Path switching needs a path-neutral camera owner, scene submission/status seam, readiness/handoff state, and capability-aware presentation operations.
+Compute-specific newest-only convergence must define failure, retry, presentation recreation, retirement, and shutdown without importing Raster Region scheduling.
+Larger-than-binding Voxel Volumes need an explicit rejection or later paging policy.
+Presentation color encoding and compute/graphics synchronization require explicit evidence.
+This preserves the decisions in Portable Phase 1 ray-rendering baseline and Define the Voxel Frontend–Render Path contract, while revalidating them against the completed localized-raster engine and current machine.
+PetrSeifert
+closed this as completedon Jul 15, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+PetrSeifert
+Labels
+wayfinder:prototypeHITL prototype decision on a Wayfinder mapHITL prototype decision on a Wayfinder map
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

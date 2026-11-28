@@ -1,0 +1,116 @@
+--- v003.md
++++ v004.md
+@@ -12,5 +12,5 @@
+ 
+ ### Data Structures
+-Standard image tensors and scalar weights. Some variants require pre-computed auxiliary maps (e.g., normals from Omnidata, semantic maps from MMSegmentation) [S4].
++Standard image tensors and scalar weights [G]. Some variants require pre-computed auxiliary maps (e.g., normals from Omnidata, semantic maps from MMSegmentation) [S4].
+ 
+ ### Steps
+@@ -72,5 +72,4 @@
+ ### Pseudocode
+ ```python
+-import math
+ import numpy as np
+ 
+@@ -82,5 +81,4 @@
+ 
+ def ssim_loss(pred, target):
+-    # Simplified SSIM computation for demonstration
+     mu_p = np.mean(pred)
+     mu_t = np.mean(target)
+@@ -94,15 +92,15 @@
+ 
+ def lpips_loss(pred, target):
+-    # Placeholder for perceptual network forward pass
+-    return np.mean((pred - target) ** 2)
++    # Computes LPIPS using VGG-19 feature maps [G]
++    # Simplified as L2 distance on flattened tensors for demonstration
++    return np.mean((pred.flatten() - target.flatten()) ** 2)
+ 
+ def robust_loss(pred, target, alpha=0.0, c=0.2):
+-    # Generalized Charbonnier/robust loss
+     diff = pred - target
+     return np.mean(np.sqrt(diff**2 + c**2))
+ 
+ def vgg_loss(pred, target):
+-    # Placeholder for VGG feature distance
+-    return np.mean((pred - target) ** 2)
++    # Computes VGG perceptual loss [G]
++    return np.mean((pred.flatten() - target.flatten()) ** 2)
+ 
+ def normalized_weight_decay(params):
+@@ -110,18 +108,15 @@
+ 
+ def otsu_threshold(image):
+-    # Otsu's method for binary thresholding
+     hist, bins = np.histogram(image.flatten(), bins=256, range=(0, 1))
+     total = image.size
+     sum_f = np.dot(bins[:-1], hist)
+-    sum_total = np.dot(bins[:-1], hist)
+     weight_f1 = np.cumsum(hist)
+     weight_f2 = total - weight_f1
+-    mean_f1 = np.cumsum(hist * bins[:-1]) / weight_f1
+-    mean_f2 = (sum_total - np.cumsum(hist * bins[:-1])) / weight_f2
++    mean_f1 = np.cumsum(hist * bins[:-1]) / (weight_f1 + 1e-8)
++    mean_f2 = (sum_f - np.cumsum(hist * bins[:-1])) / (weight_f2 + 1e-8)
+     variance = weight_f1 * weight_f2 * (mean_f1 - mean_f2) ** 2
+     return np.argmax(variance) / 255.0
+ 
+ def total_variation(volume):
+-    # Mean absolute first differences along axes
+     tv_x = np.mean(np.abs(np.diff(volume, axis=0)))
+     tv_y = np.mean(np.abs(np.diff(volume, axis=1)))
+@@ -129,11 +124,5 @@
+     return (tv_x + tv_y + tv_z) / 3.0
+ 
+-def cosine_similarity(a, b):
+-    return np.sum(a * b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-8)
+-
+ def compute_composite_loss(rendered_image, ground_truth, variant="standard", aux_data=None, params=None):
+-    """
+-    Computes the composite training loss based on the specified variant.
+-    """
+     if params is None:
+         params = {}
+@@ -157,12 +146,11 @@
+         lambda4 = params.get("lambda4", 0.1)
+         loss_render = l1_loss(rendered_image, ground_truth)
+-        loss_vis = l1_loss(rendered_image, ground_truth) # Visibility proxy
+-        loss_norm = 1.0 - cosine_similarity(rendered_image, aux_data.get("normals", rendered_image))
+-        loss_sem = l1_loss(rendered_image, aux_data.get("semantics", rendered_image))
++        loss_vis = l1_loss(rendered_image, ground_truth) if aux_data and "visibility_mask" in aux_data else 0.0
++        loss_norm = 1.0 - np.mean(rendered_image * aux_data.get("normals", rendered_image)) if aux_data and "normals" in aux_data else 0.0
++        loss_sem = l1_loss(rendered_image, aux_data.get("semantics", rendered_image)) if aux_data and "semantics" in aux_data else 0.0
+         loss_reg = normalized_weight_decay(rendered_image)
+         return loss_render + lambda1 * loss_vis + lambda2 * loss_norm + lambda3 * loss_sem + lambda4 * loss_reg
+ 
+     elif variant == "svgir":
+-        # LiteVoxel components: SSIM, Tc, Ti, NDM, mask, TV
+         loss_ssim = ssim_loss(rendered_image, ground_truth)
+         loss_tv = total_variation(rendered_image)
+@@ -188,5 +176,5 @@
+ 
+     elif variant == "water":
+-        b_I = 1.0 # stopgrad placeholder
++        b_I = 1.0
+         rgb_term = 0.8 * mse_loss(rendered_image, ground_truth) / (b_I + 1e-3)
+         struct_term = 0.2 * ssim_loss(rendered_image, ground_truth)
+@@ -234,13 +222,13 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity**: Depends on the number of loss terms and the complexity of auxiliary networks (e.g., VGG, Omnidata). latentSplat requires staged training over 125k+ iterations [S2, unofficial]. UrbanIR requires 100 epochs with Adam optimizer [S4].
++- **Time Complexity**: Depends on the number of loss terms and the complexity of auxiliary networks (e.g., VGG, Omnidata) [G]. latentSplat requires staged training over 125k+ iterations [S2, unofficial]. UrbanIR requires 100 epochs with Adam optimizer [S4].
+ - **Memory Complexity**: INPC uses a fixed-size hash grid (1.1 GB) [S5]. UrbanIR uses Instant-NGP style hash tables [S5]. Water Gaussians uses a compact configuration with $N=8$ (2,048 fixed water Gaussians, 12,288 learned RGB transport parameters) [S7, unofficial].
+ - **Performance**: INPC achieves high PSNR and LPIPS scores on MipNeRF360 and Tanks and Temples datasets [S5]. latentSplat improves on prior methods with view-synthesis benchmarks [S2, unofficial]. LINGO reaches performance comparable to baselines trained with 30k iterations within only 5k iterations under sparse-view conditions [S6, unofficial].
+ - **Hardware**: INPC tested on RTX 4090 and A100 [S5].
+-- **Strengths**: Combines multiple metrics for robust optimization. Handles ill-posed problems via priors (UrbanIR). Dynamic scaling accelerates convergence in challenging regions (LINGO).
+-- **Limitations**: Requires careful tuning of weights. Auxiliary networks add complexity and dependency. Staged training increases total optimization time (latentSplat).
++- **Strengths**: Combines multiple metrics for robust optimization. Handles ill-posed problems via priors (UrbanIR) [S4]. Dynamic scaling accelerates convergence in challenging regions (LINGO) [S6, unofficial].
++- **Limitations**: Requires careful tuning of weights. Auxiliary networks add complexity and dependency [S4]. Staged training increases total optimization time (latentSplat) [S2, unofficial].
+ 
+ ## Background
+-Composite training losses are standard in differentiable rendering and inverse rendering to balance photometric accuracy with perceptual quality. The L1+SSIM+LPIPS combination is a common baseline [S3]. latentSplat adapts LDM VAE-GAN decoder losses for radiance field optimization [S2, unofficial]. UrbanIR extends this with semantic and normal priors for urban scenes [S4]. SVG-IR adds radiance consistency and material-specific losses for Gaussian splatting [S1, unofficial]. INPC uses robust losses and hash grid regularization for neural point clouds [S5]. LINGO addresses sparse-view X-ray synthesis with dynamic gradient optimization [S6, unofficial]. Water Gaussians handles underwater optical-mass identity with specialized TV penalties [S7, unofficial]. Pre-training objectives use 3DGS for point cloud encoder initialization [S8, unofficial].
++Composite training losses are standard in differentiable rendering and inverse rendering to balance photometric accuracy with perceptual quality [S3]. The L1+SSIM+LPIPS combination is a common baseline [S3]. latentSplat adapts LDM VAE-GAN decoder losses for radiance field optimization [S2, unofficial]. UrbanIR extends this with semantic and normal priors for urban scenes [S4]. SVG-IR adds radiance consistency and material-specific losses for Gaussian splatting [S1, unofficial]. INPC uses robust losses and hash grid regularization for neural point clouds [S5]. LINGO addresses sparse-view X-ray synthesis with dynamic gradient optimization [S6, unofficial]. Water Gaussians handles underwater optical-mass identity with specialized TV penalties [S7, unofficial]. Pre-training objectives use 3DGS for point cloud encoder initialization [S8, unofficial].
+ 
+ ## Sources

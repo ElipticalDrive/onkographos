@@ -1,0 +1,66 @@
+# Multiscale Singularity Detection via Wavelet Maxima Lines
+
+Also called: Lipschitz exponent estimation from wavelet maxima, Singularity detection using scale-space curves
+
+## Overview
+This method detects singular points in a signal and determines their local regularity (Lipschitz exponent) by analyzing the asymptotic decay of wavelet coefficients along local maxima lines across scales [S1]. It distinguishes itself from standard spectral analysis by tracking the geometric evolution of wavelet transform magnitudes in scale-space, allowing for the precise localization of singularities and the quantification of their smoothness [S1]. Unlike global frequency analysis, this approach isolates local irregularities by following paths of maximal energy from coarse to fine scales [S1].
+
+## How it works
+**Inputs:** A discrete signal or volume data $f$; a choice of wavelet basis $\psi$; a set of scales $S = \{s_1, s_2, \dots, s_N\}$ where $s_1$ is the finest and $s_N$ is the coarsest.
+**Outputs:** A set of detected singularity locations and their estimated Lipschitz exponents $\alpha$.
+
+**Data Structures:**
+1.  **Wavelet Coefficients:** A 3D array (for volume data) or 2D array (for 1D signals) $Wf(s, x)$ storing the magnitude of the wavelet transform at each scale $s$ and position $x$.
+2.  **Maxima Lines:** A linked list or graph structure where each node represents a local maximum at a specific scale and position. Edges connect a maximum at scale $s_i$ to its parent maximum at scale $s_{i+1}$ (coarser scale).
+
+**Steps:**
+
+1.  **Compute Wavelet Transform:**
+    Calculate the wavelet transform $Wf(s, x)$ for all scales $s \in S$ and positions $x$. This is performed using the Fast Wavelet Transform (FWT) [S1, Parent].
+
+2.  **Identify Local Maxima:**
+    For each scale $s$, identify local maxima of the magnitude $|Wf(s, x)|$. A point $x$ is a local maximum if $|Wf(s, x)| \geq |Wf(s, x')|$ for all neighbors $x'$ in the spatial domain [S1].
+
+3.  **Construct Maxima Lines:**
+    Connect local maxima across scales to form scale-space curves (maxima lines). A maximum at position $x_i$ on scale $s_i$ is connected to a maximum at position $x_{i+1}$ on scale $s_{i+1}$ if $x_{i+1}$ is the spatial projection of $x_i$ onto the coarser grid or the nearest local maximum [S1]. The lines are traced from coarse scales to fine scales, pointing towards the singularities [S1].
+
+4.  **Estimate Lipschitz Exponent:**
+    For each maxima line pointing to a candidate singularity $x_0$, estimate the Lipschitz exponent $\alpha$ by measuring the decay rate of the wavelet coefficients along the line [S1].
+    
+    The relationship between the wavelet transform magnitude and the Lipschitz regularity $\alpha$ at a singularity $x_0$ is governed by:
+    $$|Wf(s, x)| \leq A \cdot (s^\alpha + |x - x_0|^\alpha) \quad (2)$$
+    where $A$ is a constant [S1].
+    
+    For points $x$ along the maxima line such that $|x - x_0| \leq s$, the decay follows $O(s^\alpha)$ [S1]. For isolated singularities, the exponent $\alpha$ is determined from the asymptotic decay along the maxima line pointing to $x_0$ using:
+    $$|Wf(s, x)| \leq K \cdot s^\alpha \quad (3)$$
+    where $K$ is a constant [S1].
+    
+    To compute $\alpha$, perform a linear regression on the log-log plot of the coefficient magnitudes $|Wf(s, x)|$ versus the scale $s$ for points along the maxima line. The slope of this line corresponds to $\alpha$ [S1].
+
+**Parameters:**
+-   **Wavelet Basis:** Must be chosen to match the signal characteristics (e.g., Daubechies, Symlets). Not given in the sources.
+-   **Number of Scales:** Determined by the resolution of the input data. Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+-   **Proximity to Singularity:** For points $x$ within a neighborhood of the singularity $x_0$ such that $|x - x_0| \leq s$, the decay follows $O(s^\alpha)$. For points further away, the decay is controlled by the distance to $x_0$, requiring careful selection of points along the maxima line for accurate $\alpha$ estimation [S1].
+-   **Noise:** Noise can create spurious maxima lines. Pre-filtering or thresholding of small coefficients may be required [G].
+-   **Non-Isolated Singularities:** The method assumes isolated singularities for the simple decay model $|Wf(s, x)| \leq K \cdot s^\alpha$. Complex singular structures may require more sophisticated analysis [S1].
+
+## Subtopics
+
+### [Time-Feature Extraction](23631-time-feature-extraction.md)
+Time-Feature Extraction is a method for analyzing time-resolved volume data by identifying regions with strong temporal variation through the measurement of local Lipschitz regularity. It distinguishes itself from standard temporal compression by operating on the multiresolution wavelet coefficients of individual volumes, treating the time-evolution of specific spatial-frequency components as 1D signals to detect singularities. This allows for adaptive reconstruction where high-variation regions are preserved with high accuracy while static regions are compressed more aggressively.
+
+## Operating characteristics
+-   **Time Complexity:** Dominated by the FWT computation, which is $O(N)$ for $N$ data points, plus the overhead of tracking maxima lines, which is proportional to the number of coefficients [S1, Parent].
+-   **Memory Complexity:** Requires storage for wavelet coefficients at all scales, $O(N \log N)$ for a dyadic decomposition [Parent].
+-   **Strengths:** Provides precise localization of singularities and quantifies local regularity, enabling adaptive compression and rendering [S1].
+-   **Limitations:** Sensitive to noise; requires careful selection of wavelet basis and scales [S1].
+-   **When to Use:** When the signal contains sharp transitions or singularities that need to be preserved or analyzed, such as in time-resolved volume data visualization [S1].
+-   **When Not to Use:** For smooth signals where global frequency content is sufficient, or when computational resources are extremely limited [G].
+
+## Background
+The method is based on the work of Mallat and Hwang, who established that the local maxima lines of the wavelet transform can detect singularities and estimate Lipschitz exponents [S1]. Jaffarth proved a general theorem stating that singularities can be detected from multiscale representations [S1]. This approach has been applied to the compression and visualization of time-resolved volume data, allowing for the extraction of time-features based on local regularity [S1].
+
+## Sources
+[S1] Compression domain rendering of time-resolved volume data, https://ieeexplore.ieee.org/document/480809/, fetched 2026-10-29

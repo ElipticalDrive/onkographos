@@ -1,0 +1,223 @@
+--- v001.md
++++ v002.md
+@@ -4,95 +4,88 @@
+ 
+ ## Overview
+-Axis-Aligned Neighbor Smoothing is a post-processing filter applied to rendered images to mitigate the discontinuities inherent in differentiable volume rendering and rasterization. It solves the problem of vanishing gradients by smoothing the rendering integrand along a specific axis (typically depth or screen-space coordinates) using a weighted average of neighboring pixels. Unlike [Smooth Gradient Estimation via Convolution](6449-smooth-gradient-estimation-via-convolution.md) which applies isotropic convolution, this method restricts smoothing to a single axis to preserve structural coherence, and unlike [Non-local Approximated Gradients](6784-non-local-approximated-gradients.md) which operates on image statistics, it operates directly on pixel values using geometric priors (depth, normal, color) to preserve edges [S1, unofficial].
++Axis-Aligned Neighbor Smoothing is a post-processing filter applied to rendered images to provide non-zero, directed gradients for differentiable volume rendering or rasterization-based optimization. It solves the problem of vanishing gradients at sharp object boundaries or noisy depth estimates by averaging color values along a single axis (typically depth or screen-space X/Y) while preserving edges. It sets itself apart from [Smooth Gradient Estimation via Convolution](6449-smooth-gradient-estimation-and-smoothing.md) by restricting the kernel to a single axis and using feature-aware weights (depth, normal, color) rather than a uniform or Gaussian blur, and from [Non-local Approximated Gradients](6784-non-local-approximated-gradients.md) by its strict axis-aligned locality and reliance on explicit geometric buffers rather than implicit non-local similarity.
+ 
+ ## How it works
+-The method implements a bilateral-like filter along a chosen axis. It assumes the existence of a depth buffer and a normal buffer packed into a single texture, alongside the color buffer.
++The method operates as a fragment shader pass that reads a color texture and a packed normal/depth texture, computes weighted averages of neighbors along a specified axis, and writes the smoothed color.
+ 
+-**Inputs:**
+-- `color_texture`: A 2D texture of `vec4<f32>` (RGBA) at binding 0.
+-- `normal_depth_texture`: A 2D texture of `vec4<f32>` at binding 1. The layout is defined as:
+-  - `x`: Normal X component
+-  - `y`: Normal Y component
+-  - `z`: Normal Z component
+-  - `w`: Depth value ($d$)
++**Inputs and Outputs:**
++*   Input 0: `color_texture` (`texture_2d<f32>`), containing the current frame's RGBA color.
++*   Input 1: `normal_depth_texture` (`texture_2d<f32>`), containing packed normal vectors and depth values. The exact packing scheme is implementation-dependent but must allow extraction of $\mathbf{n}$ and $d$ for each pixel.
++*   Output: `vec4f` at location 0, the smoothed color.
+ 
+-**Outputs:**
+-- A `vec4<f32>` color value for the current fragment.
++**Data Structures and Layout:**
++The shader samples textures at coordinates offset by integer steps along the chosen `axis`. The `normal_depth_texture` must provide:
++*   $d$: Depth value at the current pixel.
++*   $\mathbf{n}$: Normal vector at the current pixel.
++*   $d'$: Depth value at the neighbor pixel.
++*   $\mathbf{n}'$: Normal vector at the neighbor pixel.
++*   $\mathbf{c}'$: Color value at the neighbor pixel.
+ 
+ **Parameters:**
+-- `R`: Integer radius of the smoothing window. Default: `7` [S1, unofficial].
+-- `WINDOW`: Window size, calculated as `R * 2 + 1` [S1, unofficial].
+-- Constants:
+-  - `depth_scale`: `0.1` [S1, unofficial].
+-  - `depth_epsilon`: `0.01` [S1, unofficial].
+-  - `dist_scale`: `0.005` [S1, unofficial].
+-  - `color_scale`: `2.0` [S1, unofficial].
++*   `R`: Radius of the smoothing window. Default: `7` [S1, unofficial].
++*   `WINDOW`: Window size, calculated as `R * 2 + 1` [S1, unofficial].
++*   Constants:
++    *   Depth scale: `0.1` [S1, unofficial].
++    *   Depth epsilon: `0.01` [S1, unofficial].
++    *   Distance scale: `0.005` [S1, unofficial].
++    *   Color scale: `2.0` [S1, unofficial].
+ 
+-**Algorithm:**
+-For a fragment at screen coordinates $(u, v)$ with position $\mathbf{p}$, normal $\mathbf{n}$, depth $d$, and color $\mathbf{c}$:
+-
+-1. Initialize `result_color = vec4(0.0)` and `sum_weight = 0.0`.
+-2. Iterate over offset $i$ from $-R$ to $R$ along the chosen axis (e.g., horizontal axis $u$):
+-   a. Calculate neighbor coordinate: $u' = u + i$.
+-   b. Sample neighbor data from `normal_depth_texture` at $(u', v)$:
+-      - $\mathbf{n}' = (n'_x, n'_y, n'_z)$
+-      - $d' = w'$
+-   c. Sample neighbor color $\mathbf{c}'$ from `color_texture` at $(u', v)$.
+-   d. Compute individual weights:
+-      - Depth weight: $w_z = \exp\left( - \frac{|d - d'| \cdot 0.1}{\text{fwidth}(d) + 0.01} \right)$ [S1, unofficial].
+-        *Note: $\text{fwidth}(d)$ is the derivative-based width of depth, used for scale invariance.*
+-      - Normal weight: $w_n = |\mathbf{n} \cdot \mathbf{n}'|$ [S1, unofficial].
+-      - Distance weight: $w_d = \exp( - i^2 \cdot 0.005 )$ [S1, unofficial].
+-      - Color weight: $w_c = \exp( - \|\mathbf{c} - \mathbf{c}'\|^2 \cdot 2.0 )$ [S1, unofficial].
+-   e. Total weight: $w = w_n \cdot w_z \cdot w_d \cdot w_c$ [S1, unofficial].
+-   f. Accumulate:
+-      - `result_color += c' * w`
+-      - `sum_weight += w`
+-3. Finalize:
+-   - If `sum_weight > 0`: `result_color *= 1.0 / sum_weight`.
+-   - Else: `result_color` remains zero (or original, depending on implementation guard) [S1, unofficial].
++**Algorithm Steps:**
++1.  Initialize `result = vec4f(0.0)` and `sum_w = 0.0`.
++2.  For each integer offset `i` in the range `[-R, R]`:
++    a.  Compute neighbor coordinate: `pos = frag_pos`. If `axis` is X, `pos.x += i`; if Y, `pos.y += i`.
++    b.  Sample neighbor data from `normal_depth_texture` at `pos` to get $\mathbf{n}'$, $d'$.
++    c.  Sample neighbor color $\mathbf{c}'$ from `color_texture` at `pos`.
++    d.  Compute individual weights:
++        *   Depth weight: $w_z = \exp\left(-\frac{|d - d'| \cdot 0.1}{\text{fwidth}(d) + 0.01}\right)$ [S1, unofficial].
++        *   Normal weight: $w_n = |\mathbf{n} \cdot \mathbf{n}'|$ [S1, unofficial].
++        *   Distance weight: $w_d = \exp(-i^2 \cdot 0.005)$ [S1, unofficial].
++        *   Color weight: $w_c = \exp(-\|\mathbf{c} - \mathbf{c}'\|^2 \cdot 2.0)$ [S1, unofficial].
++    e.  Compute total weight: $w = w_n \cdot w_z \cdot w_d \cdot w_c$ [S1, unofficial].
++    f.  Accumulate: `result += c' * w` and `sum_w += w`.
++3.  If `sum_w > 0`, `result *= 1.0 / sum_w`. Else, `result` remains zero [S1, unofficial].
++4.  Return `result`.
+ 
+ **Pseudocode:**
+ ```python
+-def axis_aligned_neighbor_smoothing(u, v, R=7):
+-    # Current fragment data
+-    current_nd = sample_normal_depth_texture(u, v)
+-    current_color = sample_color_texture(u, v)
++def axis_aligned_neighbor_smoothing(frag_pos, axis, R=7):
++    # frag_pos: (x, y)
++    # axis: 'x' or 'y'
+     
+-    n = vec3(current_nd.x, current_nd.y, current_nd.z)
+-    d = current_nd.w
+-    c = current_color
+-    
+-    result_color = vec4(0.0)
++    result = [0.0, 0.0, 0.0, 0.0]
+     sum_w = 0.0
+     
+-    # Precompute fwidth for depth scale invariance [S1, unofficial]
+-    # In a shader, fwidth(d) is intrinsic. Here we assume it is available.
+-    fw = fwidth(d) 
++    # Current pixel data
++    n, d = sample_normal_depth(frag_pos)
++    c = sample_color(frag_pos)
++    
++    # fwidth approximation for depth (implementation specific, e.g., abs(ddx(d)) + abs(ddy(d)))
++    fw_d = fwidth(d) 
+     
+     for i in range(-R, R + 1):
+-        u_neighbor = u + i
++        # Compute neighbor position
++        if axis == 'x':
++            pos = (frag_pos[0] + i, frag_pos[1])
++        else:
++            pos = (frag_pos[0], frag_pos[1] + i)
++            
++        # Sample neighbor data
++        n_prime, d_prime = sample_normal_depth(pos)
++        c_prime = sample_color(pos)
+         
+-        # Sample neighbor data
+-        neighbor_nd = sample_normal_depth_texture(u_neighbor, v)
+-        neighbor_color = sample_color_texture(u_neighbor, v)
++        # Compute weights
++        # Depth weight
++        depth_diff = abs(d - d_prime)
++        w_z = exp(-(depth_diff * 0.1) / (fw_d + 0.01))
+         
+-        n_prime = vec3(neighbor_nd.x, neighbor_nd.y, neighbor_nd.z)
+-        d_prime = neighbor_nd.w
+-        c_prime = neighbor_color
+-        
+-        # Compute weights [S1, unofficial]
+-        # Depth weight: exponential decay based on depth difference normalized by fwidth
+-        w_z = exp( - (abs(d - d_prime) * 0.1) / (fw + 0.01) )
+-        
+-        # Normal weight: dot product of normals
++        # Normal weight
+         w_n = abs(dot(n, n_prime))
+         
+-        # Distance weight: exponential decay based on offset squared
+-        w_d = exp( - (i * i) * 0.005 )
++        # Distance weight (along the axis)
++        w_d = exp(-(i * i) * 0.005)
+         
+-        # Color weight: exponential decay based on color distance squared
+-        color_dist_sq = dot(c_prime - c, c_prime - c)
+-        w_c = exp( - color_dist_sq * 2.0 )
++        # Color weight
++        color_diff_sq = sum((c[k] - c_prime[k])**2 for k in range(4))
++        w_c = exp(-color_diff_sq * 2.0)
+         
+         # Total weight
+@@ -100,31 +93,48 @@
+         
+         # Accumulate
+-        result_color += c_prime * w
++        for k in range(4):
++            result[k] += c_prime[k] * w
+         sum_w += w
+         
+     # Normalize
+     if sum_w > 0.0:
+-        result_color = result_color * (1.0 / sum_w)
++        inv_sum = 1.0 / sum_w
++        result = [r * inv_sum for r in result]
+     else:
+-        # Guard against division by zero; result remains zero [S1, unofficial]
+-        pass
++        result = [0.0, 0.0, 0.0, 0.0]
+         
+-    return result_color
++    return result
+ ```
++
++**Edge Cases and Pitfalls:**
++*   Division by zero in the depth weight denominator is avoided by adding `0.01` to `fwidth(d)` [S1, unofficial].
++*   If `sum_w` is zero (e.g., all weights are zero due to extreme discontinuities), the result is set to zero [S1, unofficial].
++*   Boundary conditions: Sampling outside the texture bounds must be handled (e.g., clamping or repeating) to avoid undefined behavior.
+ 
+ ## Subtopics
+ 
+ ### K-Nearest Neighbor Feature Smoothing with Dropout
+-A variant used in Gaussian Splatting contexts where smoothing is applied to semantic features rather than pixel colors. It averages Gaussian semantic features with their $K$ nearest neighbors in 3D space. If a dropout rate is specified, a random subset of neighbors is selected for averaging to introduce regularization. It returns the original features if $K \le 1$ [S2, unofficial].
++A variant that smooths Gaussian semantic features rather than image colors. It averages features with the K nearest neighbors in 3D space, optionally applying dropout to selected neighbors to prevent over-smoothing or mode collapse. It is chosen when semantic consistency across spatially close primitives is required, such as in 3D Gaussian Splatting optimization. It differs from the axis-aligned method by operating in 3D neighbor space rather than screen-space axis alignment and by using feature vectors instead of color/depth buffers [S2, unofficial].
++*   **Definition:** Smoothing of Gaussian semantic features by averaging with K nearest neighbors, optionally applying dropout to selected neighbors [S2, unofficial].
++*   **Steps:**
++    1.  If $K \le 1$, return original `self.gaussian_semantic_features` [S2, unofficial].
++    2.  Compute K-nearest neighbors indices for all Gaussians using `pytorch3d.ops.knn_points` on `xyz`. Store in `self.feature_smooth_map` [S2, unofficial].
++    3.  Normalize features: `normed_features = torch.nn.functional.normalize(self.gaussian_semantic_features, dim=-1, p=2)` [S2, unofficial].
++    4.  If `0 < dropout < 1`, select random subset of neighbors: `select_point = torch.randperm(K)[: int(K * dropout)]` [S2, unofficial].
++    5.  Gather features for selected neighbors and average: `ret = normed_features[select_idx, :].mean(dim=1)` [S2, unofficial].
++    6.  If no dropout, average all K neighbors: `ret = normed_features[self.feature_smooth_map["m"], :].mean(dim=1)` [S2, unofficial].
++*   **Parameters:** $K$: Number of nearest neighbors. Default: 16 [S2, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(R)$ per pixel, where $R$ is the radius. Since it is axis-aligned, it is significantly faster than full 2D bilateral filtering ($O(R^2)$).
+-- **Memory Complexity:** $O(1)$ auxiliary memory per pixel, requiring only the input textures.
+-- **Strengths:** Preserves edges defined by depth discontinuities and normal changes; reduces noise in flat regions; provides smooth gradients for optimization.
+-- **Limitations:** Blurs along the axis direction if not constrained by depth/normal weights; sensitive to the choice of $R$ and weight scales; requires access to depth and normal buffers.
+-- **When to use:** When differentiable rendering suffers from noisy gradients due to aliasing or discrete sampling, and isotropic blurring would destroy geometric structure.
++*   **Time Complexity:** $O(R \cdot N)$, where $N$ is the number of pixels and $R$ is the radius. Each pixel performs $2R+1$ texture lookups and weight computations.
++*   **Memory Complexity:** $O(N)$ for the output texture. Requires access to `color_texture` and `normal_depth_texture`.
++*   **Performance:** The method is lightweight and suitable for real-time or near-real-time differentiable rendering pipelines. The fixed radius and axis-aligned access pattern allow for efficient cache usage.
++*   **Strengths:** Preserves sharp edges better than isotropic blurs by using depth and normal similarity weights. Provides robust gradients for optimization by smoothing noisy depth/normal estimates.
++*   **Limitations:** Directional bias (only smooths along one axis). May leave artifacts perpendicular to the smoothing axis. Performance degrades linearly with radius.
++*   **When to use:** When gradients are vanishing due to noisy depth/normal buffers or sharp edges, and a directional smoothing is acceptable.
++*   **When not to use:** When isotropic smoothing is required, or when the scene has complex geometry where axis-aligned smoothing introduces visible artifacts.
+ 
+ ## Background
+-The method originates from implementations in differentiable volume rendering and rasterization pipelines, specifically noted in the `voxel_ray_demo` repository [S1, unofficial]. It is designed to address the "localness" problem where standard derivatives are zero almost everywhere, by providing a smooth approximation of the integrand that allows gradient flow across pixel boundaries while respecting geometric edges.
++The method originates from implementations in differentiable rendering and neural rendering pipelines, specifically within the `voxel_ray_demo` project by newDINO [S1, unofficial]. It is designed to stabilize gradient-based optimization in volume rendering or rasterization-based novel view synthesis by ensuring that the rendering integrand is sufficiently smooth to allow Leibniz's rule to exchange differentiation and integration.
+ 
+ ## Sources

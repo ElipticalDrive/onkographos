@@ -1,0 +1,112 @@
+--- v005.md
++++ v006.md
+@@ -12,6 +12,6 @@
+ 
+ **Data Structures:**
+-- **Voxel Grid:** A 3D array storing per-voxel attributes. In the base Plenoxels implementation, this includes density ($\sigma$) and spherical harmonic (SH) coefficients for color [S1].
+-- **Pruning Mask:** A boolean or weight-based metric indicating voxel occupancy, derived from the maximum weight $T_i(1-\exp(-\bar{\sigma}_i\bar{\delta}_i))$ over all training rays or directly from the density value [S1].
++- **Voxel Grid:** A 3D array storing per-voxel attributes [S1]. In the base Plenoxels implementation, this includes density ($\sigma$) and spherical harmonic (SH) coefficients for color [S1].
++- **Pruning Mask:** A boolean or weight-based metric indicating voxel occupancy, derived from the maximum weight $T_i(1-\exp(-\sigma_i\delta_i))$ over all training rays or directly from the density value [S1].
+ 
+ **Parameters:**
+@@ -29,11 +29,11 @@
+    where $\mathcal{L}_{recon}$ is the Mean Squared Error (MSE) over rendered pixel colors and $\mathcal{L}_{TV}$ is the Total Variation regularizer [S1].
+ 
+-3. **Prune:** Remove voxels deemed unoccupied. A voxel $i$ is pruned if its maximum weight over all training rays falls below a threshold. The weight is calculated as:
+-   $$ w_i = T_i(1-\exp(-\bar{\sigma}_i \bar{\delta}_i)) $$
+-   where $T_i$ is the transmittance, $\bar{\sigma}_i$ is the average density, and $\bar{\delta}_i$ is the average step size along rays passing through voxel $i$ [S1]. Alternatively, pruning can be based directly on the density value [S1].
++3. **Prune:** Remove voxels deemed unoccupied [S1]. A voxel $i$ is pruned if its maximum weight over all training rays falls below a threshold [S1]. The weight is calculated as:
++   $$ w_i = T_i(1-\exp(-\sigma_i \delta_i)) $$
++   where $T_i$ is the transmittance, $\sigma_i$ is the density, and $\delta_i$ is the step size along rays passing through voxel $i$ [S1]. Alternatively, pruning can be based directly on the density value [S1].
+    
+    *Pitfall:* Naive pruning can adversely impact color and density near surfaces because trilinear interpolation uses values from immediate exterior voxels [S1].
+    
+-   *Solution:* Perform a dilation operation. A voxel is only pruned if both itself and its neighbors are deemed unoccupied [S1].
++   *Solution:* Perform a dilation operation [S1]. A voxel is only pruned if both itself and its neighbors are deemed unoccupied [S1].
+ 
+ 4. **Refine:** Subdivide each remaining voxel in half in each dimension (e.g., from $256^3$ to $512^3$) [S1].
+@@ -41,5 +41,5 @@
+ 5. **Initialize New Values:** Use trilinear interpolation to initialize the grid values for the new, finer resolution based on the coarser grid [S1]. Trilinear interpolation at resolution $128^3$ has been observed to outperform nearest neighbor interpolation at $256^3$ [S1].
+ 
+-6. **Repeat:** Continue optimizing at the new resolution. Repeat steps 2–5 until the target resolution $T_{final}$ is reached [S1].
++6. **Repeat:** Continue optimizing at the new resolution [S1]. Repeat steps 2–5 until the target resolution $T_{final}$ is reached [S1].
+ 
+ **Pseudocode:**
+@@ -75,5 +75,6 @@
+ 
+ def create_grid(resolution):
+-    return {"density": zeros(resolution**3), "sh_coeffs": zeros(resolution**3, 3)}
++    return {"density": zeros((resolution, resolution, resolution)),
++            "sh_coeffs": zeros((resolution, resolution, resolution, 3))}
+ 
+ def initialize_parameters(grid):
+@@ -82,5 +83,5 @@
+ 
+ def optimize_parameters(grid, rays, lambda_tv):
+-    # Standard gradient descent step minimizing L = L_recon + lambda_tv * L_TV
++    # Standard gradient descent step minimizing L = L_recon + lambda_tv * L_TV [G]
+     for ray in rays:
+         render_ray(grid, ray)
+@@ -127,13 +128,30 @@
+ 
+ def subdivide_grid(grid, new_res):
+-    new_density = zeros(new_res**3)
+-    new_sh = zeros(new_res**3, 3)
++    new_density = zeros((new_res, new_res, new_res))
++    new_sh = zeros((new_res, new_res, new_res, 3))
+     grid["density"] = new_density
+     grid["sh_coeffs"] = new_sh
+ 
+ def interpolate_from_coarser(grid, old_res, new_res):
+-    for voxel in new_grid_voxels:
+-        voxel.density = trilinear_interpolate(grid["density"], old_res, voxel.pos)
+-        voxel.sh_coeffs = trilinear_interpolate(grid["sh_coeffs"], old_res, voxel.pos)
++    for i in range(new_res):
++        for j in range(new_res):
++            for k in range(new_res):
++                pos = array([i, j, k]) * (old_res / new_res)
++                grid["density"][i, j, k] = trilinear_interpolate(grid["density"], old_res, pos)
++                grid["sh_coeffs"][i, j, k] = trilinear_interpolate(grid["sh_coeffs"], old_res, pos)
++
++def trilinear_interpolate(volume, res, pos):
++    # Standard trilinear interpolation [G]
++    i, j, k = pos
++    i0, j0, k0 = floor(i), floor(j), floor(k)
++    i1, j1, k1 = i0 + 1, j0 + 1, k0 + 1
++    i0, j0, k0 = clip([i0, j0, k0], 0, res - 1).astype(int)
++    i1, j1, k1 = clip([i1, j1, k1], 0, res - 1).astype(int)
++    w_i, w_j, w_k = i - i0, j - j0, k - k0
++    c00 = volume[i0, j0, k0] * (1 - w_i) + volume[i1, j0, k0] * w_i
++    c10 = volume[i0, j1, k0] * (1 - w_i) + volume[i1, j1, k0] * w_i
++    c01 = volume[i0, j0, k1] * (1 - w_i) + volume[i1, j0, k1] * w_i
++    c11 = volume[i0, j1, k1] * (1 - w_i) + volume[i1, j1, k1] * w_i
++    return (c00 * (1 - w_j) + c10 * w_j) * (1 - w_k) + (c01 * (1 - w_j) + c11 * w_j) * w_k
+ ```
+ 
+@@ -151,7 +169,7 @@
+ **Steps:**
+ 1. **Freeze Coarse Grid:** The optimized $V^{(\text{density})(c)}$ from the coarse stage is frozen [S2].
+-2. **Define Known Free Space:** A query point is in known free space if the post-activated alpha value from $V^{(\text{density})(c)}$ is less than threshold $\tau^{(c)}$. Otherwise, it is in unknown space [S2].
+-3. **Fine Voxels Allocation:** Densely query $V^{(\text{density})(c)}$ to find a BBox tightly enclosing the unknown space, with lengths $L_x^{(f)}, L_y^{(f)}, L_z^{(f)}$. Derive voxel size $s^{(f)}$ and grid dimensions $N_x^{(f)}, N_y^{(f)}, N_z^{(f)}$ from expected total voxels $M^{(f)}$ [S2].
+-4. **Fine-stage Points Sampling:** Filter out rays not intersecting known free space. Adjust near/far bounds $t^{(\text{near})}$ and $t^{(\text{far})}$ to ray-box intersection endpoints. Do not adjust $t^{(\text{near})}$ if $x_0$ is already inside the BBox [S2].
++2. **Define Known Free Space:** A query point is in known free space if the post-activated alpha value from $V^{(\text{density})(c)}$ is less than threshold $\tau^{(c)}$ [S2]. Otherwise, it is in unknown space [S2].
++3. **Fine Voxels Allocation:** Densely query $V^{(\text{density})(c)}$ to find a BBox tightly enclosing the unknown space, with lengths $L_x^{(f)}, L_y^{(f)}, L_z^{(f)}$ [S2]. Derive voxel size $s^{(f)}$ and grid dimensions $N_x^{(f)}, N_y^{(f)}, N_z^{(f)}$ from expected total voxels $M^{(f)}$ [S2].
++4. **Fine-stage Points Sampling:** Filter out rays not intersecting known free space [S2]. Adjust near/far bounds $t^{(\text{near})}$ and $t^{(\text{far})}$ to ray-box intersection endpoints [S2]. Do not adjust $t^{(\text{near})}$ if $x_0$ is already inside the BBox [S2].
+ 
+ **Parameters:**
+@@ -161,6 +179,6 @@
+ **Representation:**
+ The fine stage uses a higher-resolution density voxel grid $V^{(\text{density})(f)} \in \mathbb{R}^{1 \times N_x^{(f)} \times N_y^{(f)} \times N_z^{(f)}}$ with post-activated interpolation [S2]. For view-dependent color, a hybrid representation is used:
+-- A feature voxel grid $V^{(\text{feat})(f)} \in \mathbb{R}^{D \times N_x^{(f)} \times N_y^{(f)} \times N_z^{(f)}}$.
+-- A shallow MLP parameterized by $\Theta^{(f)}$.
++- A feature voxel grid $V^{(\text{feat})(f)} \in \mathbb{R}^{D \times N_x^{(f)} \times N_y^{(f)} \times N_z^{(f)}}$ [S2].
++- A shallow MLP parameterized by $\Theta^{(f)}$ [S2].
+ 
+ Queries for 3D points $\mathbf{x}$ and viewing direction $\mathbf{d}$ are performed by:
+@@ -170,5 +188,5 @@
+ 
+ **Progressive Scaling:**
+-Inspired by NSVF, the voxel grids $V^{(\text{density})(f)}$ and $V^{(\text{feat})(f)}$ are progressively scaled. Let $p_{g\_ckpt}$ be the set of checkpoint steps. The initial number of voxels is set to $\lfloor M^{(f)} / 2^{|p_{g\_ckpt}|} \rfloor$. When reaching a training step in $p_{g\_ckpt}$, the number of voxels is doubled such that the final number is $M^{(f)}$. At each checkpoint, the voxel grids are resized by trilinear interpolation [S2].
++Inspired by NSVF, the voxel grids $V^{(\text{density})(f)}$ and $V^{(\text{feat})(f)}$ are progressively scaled [S2]. Let $p_{g\_ckpt}$ be the set of checkpoint steps [S2]. The initial number of voxels is set to $\lfloor M^{(f)} / 2^{|p_{g\_ckpt}|} \rfloor$ [S2]. When reaching a training step in $p_{g\_ckpt}$, the number of voxels is doubled such that the final number is $M^{(f)}$ [S2]. At each checkpoint, the voxel grids are resized by trilinear interpolation [S2].
+ 
+ **Efficiency:**

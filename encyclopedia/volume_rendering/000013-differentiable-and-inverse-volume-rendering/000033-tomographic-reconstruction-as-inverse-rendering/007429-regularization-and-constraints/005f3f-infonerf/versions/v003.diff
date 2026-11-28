@@ -1,0 +1,210 @@
+--- v002.md
++++ v003.md
+@@ -38,5 +38,5 @@
+ 6.  **Compute Ray Entropy Loss:** Aggregate entropy over both seen and unseen rays, applying the mask to ignore non-hitting rays:
+     $$ \mathcal{L}_{\text{entropy}} = \frac{1}{|\mathcal{R}_s| + |\mathcal{R}_u|} \sum_{\mathbf{r} \in \mathcal{R}_s \cup \mathcal{R}_u} M(\mathbf{r}) \cdot H(\mathbf{r}) $$
+-    where $\cdot$ denotes element-wise multiplication (or scalar multiplication if $M$ is scalar per ray) [S1].
++    where $\cdot$ denotes scalar multiplication [S1].
+ 7.  **Generate Neighboring Ray:** For each ray $\mathbf{r} \in \mathcal{R}_s$, generate a neighboring ray $\tilde{\mathbf{r}}$ by slightly perturbing the camera pose of $\mathbf{r}$ within a range of $-5^\circ$ to $5^\circ$ [S1].
+ 8.  **Compute Information Gain Reduction Loss:** Calculate the Kullback-Leibler (KL) divergence between the normalized density distributions of the original ray $\mathbf{r}$ and its neighbor $\tilde{\mathbf{r}}$:
+@@ -54,5 +54,5 @@
+ 
+ ```python
+-import torch
++import math
+ 
+ def compute_ray_density_probabilities(sigma, delta):
+@@ -61,22 +61,16 @@
+     
+     Args:
+-        sigma: Tensor of shape (N,), volume densities.
+-        delta: Tensor of shape (N,), distances between adjacent samples.
+-        
+-    Returns:
+-        p: Tensor of shape (N,), normalized probabilities.
+-        alpha: Tensor of shape (N,), opacities.
+-    """
+-    # Opacity alpha_i = 1 - exp(-sigma_i * delta_i)
+-    alpha = 1.0 - torch.exp(-sigma * delta)
+-    
+-    # Sum of opacities for normalization
+-    sum_alpha = torch.sum(alpha)
+-    
+-    # Avoid division by zero
+-    sum_alpha = torch.clamp(sum_alpha, min=1e-8)
+-    
+-    # Normalized probability
+-    p = alpha / sum_alpha
++        sigma: List of floats, volume densities.
++        delta: List of floats, distances between adjacent samples.
++        
++    Returns:
++        p: List of floats, normalized probabilities.
++        alpha: List of floats, opacities.
++    """
++    alpha = [1.0 - math.exp(-sigma[i] * delta[i]) for i in range(len(sigma))]
++    sum_alpha = sum(alpha)
++    if sum_alpha < 1e-8:
++        sum_alpha = 1e-8
++    p = [a / sum_alpha for a in alpha]
+     return p, alpha
+ 
+@@ -86,13 +80,14 @@
+     
+     Args:
+-        p: Tensor of shape (N,), probabilities.
+-        
+-    Returns:
+-        H: Scalar, entropy value.
+-    """
+-    # Clamp p to avoid log(0)
+-    p_clamped = torch.clamp(p, min=1e-8)
+-    H = -torch.sum(p_clamped * torch.log(p_clamped))
+-    return H
++        p: List of floats, probabilities.
++        
++    Returns:
++        H: Float, entropy value.
++    """
++    entropy = 0.0
++    for prob in p:
++        if prob > 1e-8:
++            entropy -= prob * math.log(prob)
++    return entropy
+ 
+ def compute_kl_divergence(p_r, p_r_tilde):
+@@ -101,15 +96,15 @@
+     
+     Args:
+-        p_r: Tensor of shape (N,), probabilities for ray r.
+-        p_r_tilde: Tensor of shape (N,), probabilities for neighbor ray r_tilde.
+-        
+-    Returns:
+-        kl: Scalar, KL divergence value.
+-    """
+-    # Clamp probabilities to avoid log(0) or div/0
+-    p_r_clamped = torch.clamp(p_r, min=1e-8)
+-    p_r_tilde_clamped = torch.clamp(p_r_tilde, min=1e-8)
+-    
+-    kl = torch.sum(p_r_clamped * torch.log(p_r_clamped / p_r_tilde_clamped))
++        p_r: List of floats, probabilities for ray r.
++        p_r_tilde: List of floats, probabilities for neighbor ray r_tilde.
++        
++    Returns:
++        kl: Float, KL divergence value.
++    """
++    kl = 0.0
++    for i in range(len(p_r)):
++        pr = max(p_r[i], 1e-8)
++        pr_tilde = max(p_r_tilde[i], 1e-8)
++        kl += pr * math.log(pr / pr_tilde)
+     return kl
+ 
+@@ -139,5 +134,5 @@
+         
+     Returns:
+-        total_loss: Scalar loss value.
++        total_loss: Float loss value.
+     """
+     l_rgb = 0.0
+@@ -145,11 +140,10 @@
+     l_kl = 0.0
+     count_s = len(rays_s_origins)
+-    count_u = len(rays_u_directions)
++    count_u = len(rays_u_origins)
+     
+     # Process seen rays
+     for i in range(count_s):
+         # 1. Sample points along ray (two-stage: uniform then opacity-based) [S1]
+-        # Implementation detail: standard NeRF sampling strategy [S1]
+-        # Source does not specify exact sampling implementation [S1]
++        # Standard NeRF two-stage sampling (uniform then opacity-based) [G]
+         points, delta = sample_ray(rays_s_origins[i], rays_s_directions[i], N_samples)
+         
+@@ -158,10 +152,13 @@
+         
+         # 3. Compute rendered color for RGB loss [S1]
+-        alpha = 1.0 - torch.exp(-sigma * delta)
+-        transmittance = torch.cumprod(1.0 - alpha + 1e-10, dim=0)
+-        rendered_color = torch.sum(transmittance * alpha * color, dim=0)
++        # T_i = exp(-sum_{j=1}^{i-1} sigma_j * delta_j)
++        transmittance = [1.0]
++        for j in range(1, len(sigma)):
++            transmittance.append(transmittance[-1] * math.exp(-sigma[j-1] * delta[j-1]))
++        alpha = [1.0 - math.exp(-sigma[j] * delta[j]) for j in range(len(sigma))]
++        rendered_color = [sum(transmittance[j] * alpha[j] * color[j][k] for j in range(len(sigma))) for k in range(3)]
+         
+         # RGB Loss
+-        l_rgb += torch.mean((rendered_color - rays_s_gt_colors[i]) ** 2)
++        l_rgb += sum((rendered_color[k] - rays_s_gt_colors[i][k])**2 for k in range(3))
+         
+         # 4. Compute Probabilities for Entropy and KL [S1]
+@@ -169,5 +166,5 @@
+         
+         # 5. Ray Mask [S1]
+-        cumulative_density = torch.sum(1.0 - torch.exp(-sigma * delta))
++        cumulative_density = sum(1.0 - math.exp(-sigma[j] * delta[j]) for j in range(len(sigma)))
+         mask = 1.0 if cumulative_density > epsilon else 0.0
+         
+@@ -178,6 +175,6 @@
+         # 7. KL Loss component (Information Gain Reduction) [S1]
+         # Generate neighbor ray by perturbing camera pose (-5 to 5 degrees) [S1]
+-        # Implementation detail: pose perturbation is application-specific [G]
+-        neighbor_origin, neighbor_direction = perturb_pose(rays_s_origins[i], rays_s_directions[i], angle_deg=5.0)
++        # Standard pose perturbation within [-5, 5] degrees [G]
++        neighbor_origin, neighbor_direction = perturb_pose(rays_s_origins[i], rays_s_directions[i])
+         
+         points_tilde, delta_tilde = sample_ray(neighbor_origin, neighbor_direction, N_samples)
+@@ -197,5 +194,5 @@
+         p, _ = compute_ray_density_probabilities(sigma, delta)
+         
+-        cumulative_density = torch.sum(1.0 - torch.exp(-sigma * delta))
++        cumulative_density = sum(1.0 - math.exp(-sigma[j] * delta[j]) for j in range(len(sigma)))
+         mask = 1.0 if cumulative_density > epsilon else 0.0
+         
+@@ -205,9 +202,9 @@
+     # Normalize losses [S1]
+     if count_s > 0:
+-        l_rgb = l_rgb / count_s
+-        l_kl = l_kl / count_s
++        l_rgb /= count_s
++        l_kl /= count_s
+         
+     if count_s + count_u > 0:
+-        l_entropy = l_entropy / (count_s + count_u)
++        l_entropy /= (count_s + count_u)
+         
+     # Total Loss [S1]
+@@ -215,4 +212,14 @@
+     
+     return total_loss
++
++def sample_ray(origin, direction, N):
++    # Standard NeRF two-stage sampling (uniform then opacity-based) [G]
++    # Returns list of N points and N delta values
++    pass
++
++def perturb_pose(origin, direction):
++    # Standard pose perturbation within [-5, 5] degrees [G]
++    # Returns new origin and direction
++    pass
+ ```
+ 
+@@ -228,12 +235,12 @@
+ 
+ **Edge Cases and Pitfalls**
+-*   **Non-hitting Rays:** Rays that do not intersect any objects in the scene can artificially drive entropy to zero if not masked, leading to artifacts. The mask $M(\mathbf{r})$ based on cumulative density $Q(\mathbf{r})$ prevents this [S1].
+-*   **Overfitting to Redundant Views:** If training images are from similar viewpoints, the model may overfit, causing degenerate solutions where slight viewpoint changes result in completely different renderings. The KL loss $\mathcal{L}_{\text{KL}}$ mitigates this by enforcing smoothness between neighboring rays [S1].
+-*   **Noise in Few-Shot Settings:** Insufficient viewpoints lead to noisy 3D depth estimation and rendering. The entropy minimization encourages sparsity, reducing noise [S1].
++*   **Non-hitting Rays:** Rays that do not intersect any objects in the scene can artificially drive entropy to zero if not masked, leading to artifacts [S1]. The mask $M(\mathbf{r})$ based on cumulative density $Q(\mathbf{r})$ prevents this [S1].
++*   **Overfitting to Redundant Views:** If training images are from similar viewpoints, the model may overfit, causing degenerate solutions where slight viewpoint changes result in completely different renderings [S1]. The KL loss $\mathcal{L}_{\text{KL}}$ mitigates this by enforcing smoothness between neighboring rays [S1].
++*   **Noise in Few-Shot Settings:** Insufficient viewpoints lead to noisy 3D depth estimation and rendering [S1]. The entropy minimization encourages sparsity, reducing noise [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The method adds negligible computational cost because $\sigma$ and $\delta$ are already computed for volume rendering. Ray entropy is 1D, avoiding the heavy cost of 3D volume entropy methods that require large numbers of samples to estimate occupancy maps [S1].
++*   **Time Complexity:** The method adds negligible computational cost because $\sigma$ and $\delta$ are already computed for volume rendering [S1]. Ray entropy is 1D, avoiding the heavy cost of 3D volume entropy methods that require large numbers of samples to estimate occupancy maps [S1].
+ *   **Memory Complexity:** Does not require external data structures (voxels, meshes) or additional learnable parameters, avoiding memory bounds associated with explicit representations [S1].
+-*   **Performance:** Evaluated on Realistic Synthetic 360° (Lego, Materials, Ficus) in 4-view settings, DTU in 3-view settings, and ZJU-MoCap. Achieves improved PSNR, SSIM, LPIPS, FID, and KID metrics compared to baselines like PixelNeRF [S1].
++*   **Performance:** Evaluated on Realistic Synthetic 360° (Lego, Materials, Ficus) in 4-view settings, DTU in 3-view settings, and ZJU-MoCap [S1]. Achieves improved PSNR, SSIM, LPIPS, FID, and KID metrics compared to baselines like PixelNeRF [S1].
+ *   **Strengths:** Generic applicability to various NeRF-based algorithms; no need for scene priors or pretrained encoders; effective for few-shot scenarios [S1].
+ *   **Limitations:** Relies on the quality of the underlying neural implicit representation; performance depends on the effectiveness of the regularization weights ($\lambda_1, \lambda_2$) [S1].

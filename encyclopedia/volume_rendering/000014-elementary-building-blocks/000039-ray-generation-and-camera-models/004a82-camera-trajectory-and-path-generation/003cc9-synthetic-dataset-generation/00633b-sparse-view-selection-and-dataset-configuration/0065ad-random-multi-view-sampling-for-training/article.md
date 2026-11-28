@@ -1,0 +1,95 @@
+# Random Multi-view Sampling for Training
+
+Also called: Fitting Multi-view Images Baselines, Random View Subsetting
+
+## Overview
+Random multi-view sampling for training constructs minibatches by sampling rays from random views and selecting a random subset of views at each epoch [S1]. It addresses the problem of efficiently training neural representations when available training views are limited or computationally expensive to process [G]. Unlike deterministic selection methods, this approach relies on stochastic diversity rather than geometric constraints on view adjacency, distinguishing it from [Light Cone Construction](19580-light-cone-construction.md) [G].
+
+## How it works
+**Inputs:** A set of $N$ training images $\mathcal{I} = \{I_1, \dots, I_N\}$ with associated camera poses, a neural network architecture (e.g., MLP conditioned on positional encodings or hash encoding), and a target minibatch size $B$.
+**Outputs:** A minibatch of $B$ views and their corresponding rays/points for a single training iteration [S1].
+**Data Structures:**
+- **View Index List:** An array of integers $[0, \dots, N-1]$ representing the available training images.
+- **Minibatch Indices:** A list of $B$ unique integers sampled from the View Index List.
+**Steps:**
+1. **Initialization:** Store the total number of training views $N$.
+2. **Epoch Loop:** For each training epoch:
+   a. **Random Subset Selection:** Sample $B$ distinct indices from the range $[0, N-1]$ without replacement. Let this set be $\mathcal{B}$.
+   b. **Ray Generation:** For each view $i \in \mathcal{B}$, generate rays according to the camera model (see [Ray generation and camera models](19580-light-cone-construction.md)).
+   c. **Forward Pass:** Render the scene using the current neural representation for all rays in $\mathcal{B}$.
+   d. **Loss Computation:** Compute the reconstruction loss between rendered pixels and ground truth pixels for all views in $\mathcal{B}$.
+   e. **Backward Pass:** Update network parameters using automatic differentiation [S1].
+**Parameters:**
+- **Batch Size ($B$):** The number of views sampled per iteration.
+- **Epochs:** The number of full passes over the dataset. For baselines, grid search over width, depth, and hash-grid size matches storage costs [S1].
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def train_random_multi_view(model, images, poses, batch_size, num_epochs):
+    n_views = len(images)
+    seed = 0
+    for epoch in range(num_epochs):
+        # Step 2a: Random subset selection
+        indices = list(range(n_views))
+        for i in range(batch_size):
+            seed = (seed * 1103515245 + 12345) & 0x7fffffff
+            j = seed % (n_views - i) + i
+            indices[i], indices[j] = indices[j], indices[i]
+        batch_indices = indices[:batch_size]
+        
+        for idx in batch_indices:
+            # Step 2b: Ray generation (standard camera model step)
+            rays = generate_rays(poses[idx])
+            # Step 2c: Forward pass
+            rendered = model(rays)
+            # Step 2d: Loss computation
+            loss = sum((rendered - images[idx].flatten())**2) / len(rendered)
+            # Step 2e: Backward pass
+            loss.backward()
+        # Update parameters
+        for p in model.parameters():
+            p -= learning_rate * p.grad
+
+def generate_rays(pose):
+    # Standard ray generation from camera pose and image dimensions
+    pass # Not given in the sources.
+
+learning_rate = 0.01
+```
+**Edge Cases and Pitfalls:**
+- **Small $N$:** If the number of training views $N$ is smaller than the batch size $B$, sampling without replacement is impossible.
+- **View Correlation:** Random sampling may occasionally select highly correlated views (e.g., adjacent frames), leading to redundant gradients.
+- **Precision:** When using hash encodings for positional encoding, ensure the hash grid size is tuned to match the storage cost of the baseline models to ensure fair comparison [S1].
+
+## Subtopics
+
+### Farthest-Point Sampling for View Selection
+A deterministic variant used in sparse-view reconstruction to select training views [S2, unofficial]. It selects the first training image randomly, then iteratively selects remaining images by finding the camera center farthest from the already selected set in the SfM frame [S2, unofficial]. Multiple random seeds are run per scene/view count and the mean is reported [S2, unofficial]. A key pitfall is that reduced-view conditions often reuse the relative calibration and silhouette registration of the full sparse capture, modeling a pre-calibrated-rig regime rather than a genuine sparse capture which would require wide-baseline SfM calibration [S2, unofficial].
+
+### Patch Sampling with Shift
+A strategy to obtain a patch set $S_p$ from an image $I$ to ensure all areas are trained and enhance synthetic quality from different views [S3]. It shifts the patch center $(\Delta x, \Delta y)$ and adjusts the focal lengths by a zoom ratio $\alpha$ [S3]. The patch size $w \times h$ is kept less than 15% of the total image resolution $W \times H$ [S3]. This method manages GPU memory constraints while training on high-resolution images (e.g., KITTI, Brno Urban) [S3].
+
+### Quality-based Training Data Sampling
+A strategy to sample driving scene data based on synthetic quality, strengthening the model to learn sparse regions and reducing training time [S3]. It calculates a synthetic quality metric $Q(I_e)$ for each image $I_e$ in the set $S_e$ using perceptual loss [S3]. The top $n$ samples with the worst performance are selected as training data for the next phase [S3]. The sampling ratio is typically set to 80% [S3]. This method is chosen when the input point cloud has significant holes or outliers, and the goal is to focus training on difficult-to-render regions [S3].
+
+### Limited General Multi-Light Setting
+A setting used to evaluate whether improvements under multi-light conditions are due to extra input images rather than lighting diversity [S4]. For each view, one image is randomly selected as training input from the 3 images under different lighting conditions, guaranteeing the same number of training images as a single-light setting [S4]. On the synthetic dataset, this setting achieves a Normal MAE of 3.670, Albedo PSNR of 29.320, and NVS PSNR of 34.100 [S4].
+
+## Operating characteristics
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Not given in the sources.
+- **Performance:** In texture fitting baselines, training uses random subsets to form minibatches at each epoch [S1]. HKTex consistently outperforms high-resolution vertex colors and neural baselines across all evaluation metrics while requiring substantially less storage [S1]. Improvements in LPIPS and SSIM indicate that constraining the representation directly to the surface manifold preserves perceptual details and structural consistency more effectively during inverse rendering [S1].
+- **Strengths:** Simple to implement; does not require complex geometric analysis for view selection.
+- **Limitations:** May select redundant views in early epochs; does not guarantee coverage of specific geometric features unless combined with other strategies.
+- **When to use:** Not given in the sources.
+- **When not to use:** Not given in the sources.
+
+## Background
+The method originates from inverse rendering and neural texture fitting literature. It was used as a baseline in "Heat Kernel Textures the Geodesic Gaussians That Do Not Splat" to compare against the proposed HKTex model, demonstrating that constraining representation to the surface manifold provides a strong inductive bias [S1]. It is also referenced in the context of sparse-view 3D Gaussian Splatting (CADSplat) and large-scale neural scene rendering for autonomous driving (READ) [S2, unofficial][S3].
+
+## Sources
+[S1] Heat Kernel Textures the Geodesic Gaussians That Do Not Splat, https://doi.org/10.1007/978-3-032-37595-7_17, fetched 2026-10-29
+[S2] CADSplat: Sparse-View 3D Gaussian Splatting Aided by CAD Models for Robust, Photorealistic Digital-Twin Reconstruction, https://arxiv.org/abs/2609.18473, fetched 2026-10-30 (unofficial)
+[S3] READ: Large-Scale Neural Scene Rendering for Autonomous Driving, https://doi.org/10.1609/aaai.v37i2.25238, fetched 2026-10-29
+[S4] TensoIR: Tensorial Inverse Rendering, https://doi.org/10.1109/cvpr52729.2023.00024, fetched 2026-10-26

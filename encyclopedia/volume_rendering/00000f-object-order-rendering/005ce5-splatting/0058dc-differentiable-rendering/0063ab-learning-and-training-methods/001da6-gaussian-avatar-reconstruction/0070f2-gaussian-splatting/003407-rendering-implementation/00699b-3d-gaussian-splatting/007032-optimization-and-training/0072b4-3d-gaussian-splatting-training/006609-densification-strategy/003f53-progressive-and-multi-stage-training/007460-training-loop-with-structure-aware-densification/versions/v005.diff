@@ -1,0 +1,243 @@
+--- v004.md
++++ v005.md
+@@ -4,21 +4,29 @@
+ 
+ ## Overview
+-This method accelerates 3D Gaussian Splatting training by integrating a structure-aware densification strategy that estimates local frequency requirements to guide primitive placement [S1]. It solves the slow convergence of standard reactive densification by ensuring Gaussians are split early and precisely where high-frequency details exist, rather than relying on opacity thresholds alone [S1]. Unlike sibling methods that use uniform or opacity-based splitting, this approach precomputes multi-scale structure tensors and samples frequency violations within Gaussian footprints, achieving significant speedups (e.g., 18x faster than standard 3DGS on Mip-NeRF 360) while maintaining competitive perceptual quality [S1].
++This method accelerates 3D Gaussian Splatting training by replacing reactive, gradient-based densification with a proactive, structure-aware strategy that estimates local frequency requirements from image gradients [S1]. It solves the problem of slow convergence in standard 3DGS by ensuring primitives are placed and split early to match scene complexity, rather than waiting for optimization errors to accumulate [S1]. It sets itself apart from siblings like [Hybrid Coarse-to-Fine Strategy](7173-hybrid-coarse-to-fine-strategy.md) by using a single-pass frequency metric $\eta$ computed from precomputed structure tensors, avoiding the iterative refinement or multi-resolution pyramids of other approaches [S1].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Inputs:** Sparse reconstruction from Structure-from-Motion (SfM), training images, camera poses, and a bounding box defining the scene extent.
+-*   **Outputs:** Optimized set of 3D Gaussians $\mathcal{G}$ with positions, covariances, opacities, and spherical harmonic coefficients.
++**Inputs:**
++*   Sparse point cloud from Structure-from-Motion (SfM).
++*   Training images $\{I_i\}$.
++*   Camera poses $\{P_i\}$.
++
++**Outputs:**
++*   Optimized set of 3D Gaussians $\mathcal{G}$.
+ 
+ **Data Structures:**
+-*   **Multi-scale Structure Tensors:** Precomputed for each training image. Stored as a tensor field where each pixel holds the local structure tensor values. Memory cost equals the footprint of the input images [S1].
+-*   **Gaussian Set $\mathcal{G}$:** Standard 3DGS representation.
+-*   **Frequency Violation Metric ($\eta$):** A scalar value computed per Gaussian indicating the mismatch between the Gaussian's current frequency representation and the local image frequency [S1].
++*   **Multi-scale Structure Tensors:** A precomputed tensor field $\bar{\mathbf{T}}$ for each training image. The memory footprint equals the sum of the input images' sizes [S1].
++*   **Gaussian Set $\mathcal{G}$:** Standard 3DGS attributes (position, covariance, opacity, spherical harmonics) [S1].
++*   **Frequency Metric $\eta$:** A scalar value per Gaussian representing the highest local frequency within its footprint [S1].
++
++**Initialization:**
++1.  Initialize Gaussians from the SfM point cloud.
++2.  Place additional Gaussians on the faces of the scene's bounding box to ensure complete geometric coverage of empty regions [S1].
+ 
+ **Precomputation:**
+-1.  **Initialization:** Place initial Gaussians on the faces of the scene's bounding box to ensure complete geometric coverage, in addition to SfM points [S1].
+-2.  **Tensor Precomputation:** Compute multi-scale structure tensors for all training images using vectorized GPU operations. This incurs a one-time overhead of 0.7 seconds and memory equal to the input images' footprint [S1].
++1.  Compute multi-scale structure tensors $\bar{\mathbf{T}}$ for each training image using vectorized GPU operations [S1].
++    *   *Note:* This incurs a one-time overhead of 0.7 seconds and memory cost equal to the input images' footprint [S1].
+ 
+-**Training Loop Steps:**
++**Training Loop:**
+ The training loop runs for a fixed number of iterations ($N_{iter}$). In each iteration $t$:
+ 
+@@ -26,104 +34,71 @@
+     *   Batch size $B=2$ for indoor scenes (Mip-NeRF 360, Deep Blending).
+     *   Batch size $B=1$ for outdoor scenes (Tanks & Temples) [S1].
+-2.  **Forward Rendering:** Render the batch. Reuse the 2D covariance matrices and intermediate buffers from the forward pass for visible Gaussians [S1].
+-3.  **Frequency Estimation (Structure-Aware):**
+-    *   For each visible Gaussian, sample one point within its footprint using the precomputed 2D covariance [S1].
+-    *   Compute the frequency violation metric $\eta$ at the sampled point by comparing the local structure tensor against the Gaussian's current representation [S1].
+-    *   *Note:* This step avoids additional projection or sampling overhead by reusing forward pass data [S1].
+-4.  **Loss Computation:** Compute the total loss $\mathcal{L}$, which includes the standard photometric loss and an additional L2 loss applied to the training objective to accelerate convergence [S1].
+-5.  **Optimization Step:** Update Gaussian parameters (position, scale, rotation, SH coefficients, opacity) using the optimizer (e.g., Adam) [S1].
+-6.  **Densification (Every 100 iterations):** Apply the AbsGS densification strategy [Ye et al. 2024] to populate empty regions with primitives. This ensures that structure-aware densification has existing primitives to leverage [S1].
+-7.  **Structure-Aware Densification (Every 500 iterations):**
+-    *   Identify Gaussians with high $\eta$ values.
+-    *   Split or clone Gaussians based on $\eta$ to match the highest local frequency within the footprint [S1].
+-    *   *Stochastic Jitter Sampling:* To improve robustness and reduce sensitivity to edge alignment, sample random offsets (jitter) within each Gaussian's footprint when estimating $\eta$ [S1].
+-    *   *Conservative Splitting:* Use a split factor $p=0.5$ to partially compensate for the over-densification tendency caused by $\eta$ matching the highest local frequency [S1].
++2.  **Forward Rendering:** Render the batch using current $\mathcal{G}$.
++    *   Store the 2D covariance and intermediate buffers from the projection step for each visible Gaussian [S1].
++3.  **Frequency Estimation ($\eta$):**
++    *   For each visible Gaussian $g$, sample one point within its 2D footprint using the stored covariance and buffers [S1].
++    *   Compute $\eta_g$ based on the local structure tensor values at the sampled point [S1].
++    *   *Variant:* Use **Stochastic Jitter Sampling** to sample random offsets within the footprint to approximate local frequency, reducing sensitivity to edge alignment [S1]. This introduces minor variance but improves coverage [S1].
++4.  **Loss Computation:**
++    *   Compute standard photometric loss (L1/SSIM).
++    *   Apply an additional L2 loss on the parameters for faster convergence [S1].
++5.  **Backpropagation:** Update Gaussian parameters using the optimizer [S1].
++6.  **Densification:**
++    *   **Structure-Aware Densification:** Every 500 iterations, split or clone Gaussians based on $\eta_g$ [S1].
++        *   If $\eta_g$ exceeds a threshold, split the Gaussian to capture higher frequencies [S1].
++        *   The split factor is conservative ($p=0.5$) to compensate for over-densification tendency [S1].
++    *   **AbsGS Densification:** Every 100 iterations, apply the AbsGS densification strategy to populate empty regions with primitives, ensuring the structure-aware method has primitives to work with [S1].
+ 
+ **Parameters:**
++*   **Training Iterations:** 3,000 for Mip-NeRF 360 and Deep Blending; 7,000 for Tanks & Temples [S1].
++*   **Position Learning Rate Max Steps:** 3,000 for Mip-NeRF 360/Deep Blending; 7,000 for Tanks & Temples [S1].
+ *   **Densification Interval (Structure-Aware):** 500 iterations [S1].
+ *   **Densification Interval (AbsGS):** 100 iterations [S1].
+-*   **Split Factor ($p$):** 0.5 [S1].
+-*   **Training Iterations ($N_{iter}$):**
+-    *   3,000 for Mip-NeRF 360 and Deep Blending [S1].
+-    *   7,000 for Tanks & Temples [S1].
+-*   **Position Learning Rate Max Steps:** Matches $N_{iter}$ (3k or 7k) [S1].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def train_structure_aware_gaussian_splatting(scene_data, training_images, num_iterations):
+-    """
+-    Main training loop for Structure-Aware Densification.
+-    """
++def train_structure_aware_gaussians(scene_data, config):
+     # 1. Initialization
+-    gaussians = initialize_gaussians_from_sfm_and_bbox(scene_data)
++    gaussians = initialize_from_sfm(scene_data.sfm_points)
++    gaussians += initialize_on_bbox_faces(scene_data.bounding_box)
+     
+     # 2. Precomputation
+     # Precompute multi-scale structure tensors for all training images
+-    structure_tensors = precompute_structure_tensors(training_images)
++    structure_tensors = precompute_structure_tensors(scene_data.images)
+     
+     # 3. Training Loop
+-    for iteration in range(1, num_iterations + 1):
++    for iteration in range(config.total_iterations):
++        # Batch sampling
++        batch_views = sample_batch(scene_data.views, config.batch_size)
+         
+-        # 3.1 Batch Sampling
+-        batch_views = sample_batch(training_images, batch_size=2 if indoor else 1)
+-        
+-        # 3.2 Forward Rendering
++        # Forward pass
+         rendered_images, visible_gaussians, buffers = render(batch_views, gaussians)
+         
+-        # 3.3 Frequency Estimation & Loss
+-        # Compute standard photometric loss
+-        loss = compute_photometric_loss(rendered_images, batch_views)
++        # Frequency estimation for visible Gaussians
++        # Reuse 2D covariance and buffers from rendering
++        for g in visible_gaussians:
++            # Sample point within footprint (with optional jitter)
++            sample_point = sample_within_footprint(g.covariance_2d, jitter=config.use_jitter)
++            # Compute frequency metric eta from precomputed tensors
++            g.eta = compute_frequency_metric(sample_point, structure_tensors)
++            
++        # Loss computation
++        loss = compute_photometric_loss(rendered_images, batch_views.targets)
++        loss += config.l2_weight * compute_l2_loss(gaussians.parameters)
+         
+-        # Add L2 loss for faster convergence
+-        loss += compute_l2_loss(gaussians)
++        # Backpropagation
++        optimize(gaussians.parameters, loss)
+         
+-        # Compute frequency violation metric eta for visible Gaussians
+-        # Reuse 2D covariance and buffers from forward pass
+-        eta_values = compute_frequency_violation(visible_gaussians, buffers, structure_tensors)
+-        
+-        # 3.4 Optimization Step
+-        update_gaussians(gaussians, loss)
+-        
+-        # 3.5 Densification
++        # Densification
+         if iteration % 100 == 0:
+-            # Apply AbsGS densification to populate empty regions
+-            densify_absgs(gaussians)
++            # Populate empty regions
++            densify_absgs(gaussians, scene_data)
+             
+         if iteration % 500 == 0:
+-            # Apply structure-aware densification
+-            densify_structure_aware(gaussians, eta_values, split_factor=0.5)
++            # Structure-aware densification
++            densify_structure_aware(gaussians, config.eta_threshold)
+             
+     return gaussians
+-
+-def compute_frequency_violation(visible_gaussians, buffers, structure_tensors):
+-    """
+-    Computes eta by sampling one point within each Gaussian's footprint.
+-    Uses stochastic jitter for robustness.
+-    """
+-    eta = []
+-    for gaussian in visible_gaussians:
+-        # Sample a point within the Gaussian's 2D footprint
+-        # Use jitter to reduce edge alignment sensitivity
+-        sample_point = gaussian.sample_point_with_jitter(buffers)
+-        
+-        # Get local structure tensor at sample point
+-        local_tensor = structure_tensors.get_value(sample_point)
+-        
+-        # Compute violation metric based on mismatch between 
+-        # Gaussian's representation and local tensor
+-        eta_value = calculate_eta(gaussian, local_tensor)
+-        eta.append(eta_value)
+-    return eta
+-
+-def densify_structure_aware(gaussians, eta_values, split_factor=0.5):
+-    """
+-    Splits Gaussians with high frequency violation.
+-    """
+-    for i, gaussian in enumerate(gaussians):
+-        if eta_values[i] > threshold:
+-            # Split the Gaussian
+-            # Use conservative split factor to reduce over-densification
+-            split_gaussian(gaussian, split_factor)
+ ```
+ 
+@@ -135,35 +110,34 @@
+ ## Operating characteristics
+ **Time Complexity:**
+-*   Training time is significantly reduced compared to standard 3DGS.
++*   Significantly faster than standard 3DGS.
+ *   Mip-NeRF 360: 52.96 seconds (18x faster than 3DGS, 2.7x faster than FastGS-Base) [S1].
+ *   Deep Blending: 41.22 seconds (23x faster than 3DGS, 2.8x faster than FastGS-Base) [S1].
+ *   Tanks & Temples: 84.44 seconds (6.8x faster than 3DGS, 1.5x faster than FastGS-Base) [S1].
+-*   Precomputation overhead: 0.7 seconds one-time cost [S1].
++*   All timings measured on a single Nvidia H100 GPU [S1].
+ 
+ **Memory Complexity:**
+-*   Additional memory cost equal to the input images' footprint for storing precomputed multi-scale structure tensors [S1].
+-*   Tends to produce a higher number of Gaussians compared to budget-constrained methods due to frequency-aware densification [S1].
++*   Additional memory cost equal to the input images' footprint for storing precomputed structure tensors [S1].
++*   Produces a higher number of Gaussians compared to budget-constrained methods due to over-densification [S1].
+ 
+ **Strengths:**
+-*   Substantial speedup in convergence (e.g., 18x faster on Mip-NeRF 360) [S1].
+-*   Superior perceptual quality (SSIM and LPIPS) despite potentially lower PSNR due to fewer optimization steps [S1].
+-*   Minimal overhead during training by reusing forward pass buffers [S1].
++*   Rapid convergence due to early placement of primitives matching scene frequency [S1].
++*   Superior perceptual quality (SSIM, LPIPS) compared to baselines [S1].
++*   Minimal overhead for frequency estimation by reusing rendering buffers [S1].
+ 
+ **Limitations:**
+-*   Higher Gaussian count due to matching highest local frequency, leading to over-densification [S1].
+-*   Evaluates each Gaussian in isolation, ignoring collective contribution of overlapping primitives, which may trigger densification in regions with sufficient existing support [S1].
+-*   Lower PSNR compared to fully converged methods due to sub-pixel misalignments from fewer optimization steps [S1].
+-*   Not ideal for scenarios requiring minimal Gaussian count or strict memory budgets [S1].
++*   Over-densification: $\eta$ evaluates each Gaussian in isolation, ignoring collective contribution of overlapping primitives, leading to more Gaussians than necessary [S1].
++*   Lower PSNR compared to SSIM/LPIPS due to sub-pixel misalignments from fewer optimization steps [S1].
++*   Not ideal for compact representations; gradual densification strategies were found to increase convergence time [S1].
+ 
+-**When to Use:**
+-*   When training speed is critical and perceptual quality is prioritized over absolute PSNR.
+-*   For scenes with complex high-frequency details where standard densification is too slow.
++**When to use:**
++*   When training speed is the primary constraint and perceptual quality is prioritized over absolute PSNR [S1].
++*   For scenes with complex multi-scale backgrounds where standard 3DGS converges slowly [S1].
+ 
+-**When Not to Use:**
+-*   When memory is constrained due to higher Gaussian count.
+-*   When absolute PSNR is the primary metric and training time is not a concern.
++**When not to use:**
++*   When a compact Gaussian representation is required [S1].
++*   When absolute PSNR is the critical metric [S1].
+ 
+ ## Background
+-Originated in the paper "Faster 3D Gaussian Splatting Convergence via Structure-Aware Densification" [S1]. The method addresses the slow convergence of standard 3D Gaussian Splatting by introducing a frequency-aware densification strategy. It builds on the principles of progressive and multi-stage training [9966-progressive-and-multi-stage-training.md] and integrates with the AbsGS densification strategy [Ye et al. 2024] to ensure robust coverage. The approach was evaluated on Mip-NeRF 360, Deep Blending, and Tanks & Temples datasets, demonstrating significant speedups over baseline methods including FastGS [S1].
++Originated in "Faster 3D Gaussian Splatting Convergence via Structure-Aware Densification" (2026) [S1]. The method addresses the slow convergence of standard 3DGS by introducing a frequency-aware densification strategy that leverages precomputed image structure tensors. It builds on the principles of [Progressive and Multi-stage Training](9966-progressive-and-multi-stage-training.md) by integrating densification into a structured training loop with specific iteration counts and batch sizes tailored to scene complexity [S1].
+ 
+ ## Sources

@@ -1,0 +1,197 @@
+# MI-NeRF
+
+Also called: Multi-Identity NeRF, Single Unified Face NeRF
+
+## Overview
+MI-NeRF is a method for learning a single unified dynamic neural radiance field (NeRF) that models complex non-rigid facial motion for multiple identities using only monocular videos of arbitrary length [S1, unofficial]. It solves the problem of expensive per-identity optimization in dynamic face reconstruction by training a single implicit representation $F_\Theta$ conditioned on identity, expression, latent codes, position, and view direction [S1, unofficial]. Unlike previous generic NeRF models that require static settings and multiple input views during training, MI-NeRF works for monocular videos captured in the wild, reducing total training time by up to 90% compared to standard single-identity NeRFs [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Inputs:** Monocular RGB video frames for multiple identities; 3D Morphable Model (3DMM) parameters (head pose $P$, expression $e$) extracted per frame; randomly initialized identity codes $i$ and latent codes $l$ [S1, unofficial].
+*   **Outputs:** Rendered RGB video frames for novel viewpoints and expressions; personalized identity-specific models via fine-tuning [S1, unofficial].
+
+**Data Structures**
+*   **Identity Code ($i$):** Vector of size 79, randomly initialized per video, learned during training. Captures time-invariant identity information [S1, unofficial].
+*   **Latent Code ($l$):** Vector of size 32, randomly initialized per frame per video, learned during training. Captures time-varying information (illumination, appearance variations) [S1, unofficial].
+*   **Expression Parameters ($e$):** Vector of size 79, extracted via 3DMM fitting [S1, unofficial].
+*   **Head Pose ($P$):** $4 \times 4$ matrix, decomposed into rotation $R \in \mathbb{R}^{3 \times 3}$ and translation $t \in \mathbb{R}^{3 \times 1}$ [S1, unofficial].
+*   **Network Parameters ($\Theta$):** Weights of an 8-layer MLP with hidden size 256 and ReLU activations [S1, unofficial].
+
+**Method Steps**
+1.  **Preprocessing:** For each video frame, segment the head from the background [S1, unofficial]. Fit a 3DMM to extract head pose $P$ and expression parameters $e$ using an optimization-based method minimizing photo-consistency and landmark terms [S1, unofficial]. Use learned axes from Guo et al. (2018b) based on the Basel Face Model and FaceWarehouse [S1, unofficial].
+2.  **Initialization:** Randomly initialize one identity code $i \in \mathbb{R}^{79}$ per video and one latent code $l \in \mathbb{R}^{32}$ per frame per video [S1, unofficial].
+3.  **Canonical Transformation:** Transform sampled 3D points $x$ to the canonical space using the head pose $P = [R; t]$ before querying the network [S1, unofficial].
+4.  **Feature Interaction:** Compute the interaction between expression $e$ and identity $i$ using the Hadamard product (element-wise multiplication): $M(e, i) = e \odot i$ [S1, unofficial].
+5.  **NeRF Query:** For each ray, sample 3D points $x$ and view directions $v$. Encode $x$ and $v$ using positional encoding with 10 and 4 frequencies respectively [S1, unofficial]. Concatenate the encoded features with the interaction term $M(e, i)$ and the latent code $l$. Pass through the MLP $F_\Theta$ to predict density $\sigma$ and color $\mathbf{c}$ [S1, unofficial]:
+    $$ F_\Theta : (M(\mathbf{e}, \mathbf{i}), \mathbf{l}, \mathbf{x}, \mathbf{v}) \rightarrow (\mathbf{c}, \sigma) $$
+6.  **Volumetric Rendering:** Render the final color $C(\mathbf{r}; \Theta)$ for each ray $\mathbf{r}$ using volume rendering [S1, unofficial]:
+    $$ C(\mathbf{r}; \Theta) = \int_{t_n}^{t_f} \sigma(\mathbf{r}(t)) \mathbf{c}(\mathbf{r}(t), \mathbf{v}) T(t) dt $$
+    where $T(t) = \exp(-\int_{t_n}^t \sigma(\mathbf{r}(s)) ds)$, and $t_n, t_f$ are near and far bounds [S1, unofficial].
+7.  **Optimization:** Optimize the network parameters $\Theta$, identity codes $i$, and latent codes $l$ simultaneously using hierarchical sampling (coarse and fine models) [S1, unofficial]. Minimize the loss function:
+    $$ \mathcal{L} = \mathcal{L}_c + \lambda_l \mathcal{L}_l + \lambda_i \mathcal{L}_i $$
+    where $\mathcal{L}_c = \sum_r \| \hat{C}(\mathbf{r}; \Theta) - C(\mathbf{r}) \|_2^2$ is the photo-consistency loss, $\mathcal{L}_l = \|\mathbf{l}\|_2$, $\mathcal{L}_i = \|\mathbf{i}\|_2$, $\lambda_l = 0.01$, and $\lambda_i = 10^{-4}$ [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import torch.optim as optim
+
+def sample_rays(ray_o, ray_d, t_n, t_f, num_samples):
+    """Sample points along rays."""
+    t_vals = torch.linspace(t_n, t_f, num_samples).to(ray_o.device)
+    t_vals = t_vals.unsqueeze(0).expand(ray_o.shape[0], -1)
+    x = ray_o.unsqueeze(1) + ray_d.unsqueeze(1) * t_vals.unsqueeze(2)
+    v = ray_d.unsqueeze(1).expand(-1, num_samples, -1)
+    return x, v
+
+class MINeRF:
+    def __init__(self, num_identities, num_frames_per_video, hidden_size=256, num_layers=8):
+        self.num_identities = num_identities
+        self.num_frames_per_video = num_frames_per_video
+        
+        # Identity codes: one per identity, size 79
+        self.identity_codes = nn.Embedding(num_identities, 79)
+        nn.init.normal_(self.identity_codes.weight.data)
+        
+        # Latent codes: one per frame per video, size 32
+        self.latent_codes = nn.Embedding(num_identities * num_frames_per_video, 32)
+        nn.init.normal_(self.latent_codes.weight.data)
+        
+        # MLP Architecture
+        layers = []
+        # Interaction(79) + Latent(32) + PosEnc_x(60) + PosEnc_v(24) = 195
+        input_dim = 195
+        
+        for _ in range(num_layers):
+            layers.append(nn.Linear(input_dim, hidden_size))
+            layers.append(nn.ReLU())
+            input_dim = hidden_size
+            
+        self.color_branch = nn.Linear(hidden_size, 3)
+        self.density_branch = nn.Linear(hidden_size, 1)
+        self.mlp = nn.Sequential(*layers)
+        
+        self.optimizer = optim.Adam(
+            list(self.mlp.parameters()) + 
+            list(self.identity_codes.parameters()) + 
+            list(self.latent_codes.parameters()),
+            lr=5e-4
+        )
+        # Exponential decay to 5e-5 over training steps
+        self.scheduler = optim.lr_scheduler.ExponentialLR(self.optimizer, gamma=0.99) 
+        
+        self.lambda_l = 0.01
+        self.lambda_i = 1e-4
+        self.pos_freqs_x = 10
+        self.pos_freqs_v = 4
+
+    def positional_encoding(self, x, freqs):
+        pe = []
+        for i in range(freqs):
+            scale = 2**i * torch.pi
+            pe.append(torch.sin(scale * x))
+            pe.append(torch.cos(scale * x))
+        return torch.cat(pe, dim=-1)
+
+    def forward(self, identity_idx, frame_idx, x, v, e):
+        i = self.identity_codes(identity_idx).unsqueeze(1)
+        l = self.latent_codes(frame_idx).unsqueeze(1)
+        
+        # Hadamard product M(e, i)
+        M_ei = e * i
+        
+        pe_x = self.positional_encoding(x, self.pos_freqs_x)
+        pe_v = self.positional_encoding(v, self.pos_freqs_v)
+        
+        features = torch.cat([M_ei, l.expand_as(M_ei), pe_x, pe_v], dim=-1)
+        h = self.mlp(features)
+        
+        sigma = self.density_branch(h).squeeze(-1)
+        color = torch.sigmoid(self.color_branch(h))
+        return color, sigma
+
+    def render_ray(self, ray_o, ray_d, t_n, t_f, num_samples, identity_idx, frame_idx, e):
+        t_vals = torch.linspace(t_n, t_f, num_samples).to(ray_o.device)
+        t_vals = t_vals.unsqueeze(0).expand(ray_o.shape[0], -1)
+        x = ray_o.unsqueeze(1) + ray_d.unsqueeze(1) * t_vals.unsqueeze(2)
+        v = ray_d.unsqueeze(1).expand(-1, num_samples, -1)
+        
+        color, sigma = self.forward(identity_idx, frame_idx, x, v, e)
+        
+        deltas = t_vals[:, 1:] - t_vals[:, :-1]
+        delta_inf = torch.tensor(1e10).to(ray_o.device)
+        deltas = torch.cat([deltas, delta_inf.unsqueeze(0).expand_as(deltas)], dim=1)
+        
+        alpha = 1 - torch.exp(-sigma * deltas)
+        T = torch.cumprod(1 - alpha + 1e-10, dim=1)
+        T = torch.cat([torch.ones_like(T[:, :1]), T[:, :-1]], dim=1)
+        weights = alpha * T
+        C = torch.sum(weights.unsqueeze(2) * color, dim=1)
+        return C
+
+    def train_step(self, batch):
+        self.optimizer.zero_grad()
+        
+        video_idx = batch['video_idx']
+        frame_idx = batch['frame_idx']
+        gt_color = batch['gt_color']
+        pose = batch['pose']
+        expr = batch['expr']
+        
+        ray_o = batch['ray_o']
+        ray_d = batch['ray_d']
+        t_n, t_f = batch['t_n'], batch['t_f']
+        num_samples = batch['num_samples']
+        
+        x_world, v_world = sample_rays(ray_o, ray_d, t_n, t_f, num_samples)
+        
+        R = pose['R']
+        t = pose['t']
+        x_canonical = torch.matmul(R.transpose(-2, -1), (x_world - t).unsqueeze(-1)).squeeze(-1)
+        v_canonical = torch.matmul(R.transpose(-2, -1), v_world.unsqueeze(-1)).squeeze(-1)
+        
+        identity_idx = video_idx
+        frame_idx_global = video_idx * self.num_frames_per_video + batch['local_frame_idx']
+        
+        color, sigma = self.forward(identity_idx, frame_idx_global, x_canonical, v_canonical, expr)
+        C_pred = self.render_ray(ray_o, ray_d, t_n, t_f, num_samples, identity_idx, frame_idx_global, expr)
+        
+        L_c = torch.mean((C_pred - gt_color) ** 2)
+        L_l = torch.norm(self.latent_codes.weight)
+        L_i = torch.norm(self.identity_codes.weight)
+        
+        loss = L_c + self.lambda_l * L_l + self.lambda_i * L_i
+        loss.backward()
+        self.optimizer.step()
+        self.scheduler.step()
+        return loss.item()
+```
+
+**Parameters**
+*   **Expression parameter dimension:** 79 [S1, unofficial].
+*   **Identity code dimension:** 79 [S1, unofficial].
+*   **Latent code dimension:** 32 [S1, unofficial].
+*   **MLP architecture:** 8 linear layers, hidden size 256, ReLU activations [S1, unofficial].
+*   **Positional encoding frequencies:** 10 for position $x$, 4 for view direction $v$ [S1, unofficial].
+*   **Optimizer:** Adam, learning rate $5 \times 10^{-4}$ decaying exponentially to $5 \times 10^{-5}$ [S1, unofficial].
+*   **Regularization weights:** $\lambda_l = 0.01$, $\lambda_i = 10^{-4}$ [S1, unofficial].
+
+**Edge Cases and Pitfalls**
+*   **Short Videos:** The method works for very short video clips (only a few seconds), but personalization may require a short video of the target identity to capture details like wrinkles [S1, unofficial].
+*   **Monocular Input:** Unlike multi-view methods, MI-NeRF relies on monocular videos, which may lead to ambiguities in depth without strong priors from the 3DMM fitting [S1, unofficial].
+*   **Identity Disentanglement:** The Hadamard product is used to approximate non-linear interactions. The source notes that higher-degree interactions might be beneficial in other cases, but Hadamard was chosen for simplicity and effectiveness [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Training time is reduced by up to 90% compared to training multiple standard single-identity NeRFs, leading to a sublinear cost curve with respect to the number of identities [S1, unofficial].
+*   **Memory Complexity:** Requires storing one identity code (79 dims) per identity and one latent code (32 dims) per frame per video, plus the MLP weights [S1, unofficial].
+*   **Strengths:** Works with monocular videos of arbitrary length captured in the wild; robust to synthesizing novel expressions for any input identity; allows personalization with few iterations [S1, unofficial].
+*   **Limitations:** Requires 3DMM fitting for each frame to extract pose and expression; relies on the quality of the 3DMM fit (Basel Face Model/FaceWarehouse axes); may struggle with extreme occlusions or non-facial regions if not segmented properly [S1, unofficial].
+
+## Background
+MI-NeRF was introduced by Chatziagapi et al. in 2024 [S1, unofficial]. It addresses the challenge of capturing 4D dynamics and appearance of non-rigid human face motion, which has applications in AR/VR, video games, and virtual communication [S1, unofficial]. Previous approaches relied on 3DMMs or GANs, or required per-identity optimization for NeRFs [S1, unofficial]. MI-NeRF is the first method to learn a single unified face NeRF from monocular videos of multiple identities, leveraging a multiplicative module to disentangle identity and non-identity specific information [S1, unofficial].
+
+## Sources
+[S1] MI-NeRF: Learning a Single Face NeRF from Multiple Identities, https://arxiv.org/abs/2403.19920v2, fetched 2026-10-26 (unofficial)

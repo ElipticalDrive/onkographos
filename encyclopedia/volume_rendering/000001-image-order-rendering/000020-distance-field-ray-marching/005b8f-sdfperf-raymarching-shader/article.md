@@ -1,0 +1,283 @@
+# SDFPerf Raymarching Shader
+
+Also called: Node-based SDF Editor Raymarching, SDFPerf
+
+## Overview
+The SDFPerf Raymarching Shader is a fragment shader generated from a node-based graph editor that constructs Signed Distance Functions (SDFs) using basic primitives, CSG operations, and domain manipulations [S1, unofficial]. It differs from generic sphere tracing implementations by providing a specific, optimized set of domain transformation operators (bend, twist) and shading modes (ambient occlusion, depth, normals) directly integrated into the generated code, rather than relying on external scene graphs or complex hierarchical structures [S1, unofficial]. It builds on [Distance-field ray marching](21-distance-field-ray-marching.md) [G].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:**
+    *   `vs_texcoord` (vec2, location 0): Vertex shader texture coordinates, typically in range [0, 1] [S1, unofficial].
+    *   `u_camera_position` (vec3): Camera origin in world space [S1, unofficial].
+    *   `u_camera_front` (vec3): Camera forward direction vector [S1, unofficial].
+    *   `u_shading` (uint): Enum selecting the shading mode (0-4) [S1, unofficial].
+    *   `u_time` (float): Current time in seconds [S1, unofficial].
+    *   `params_block` (SSBO, binding 0, std430): A variable-size array of `vec4` parameters used by domain manipulation nodes (e.g., bend angle, twist angle, primitive dimensions) [S1, unofficial].
+*   **Outputs:**
+    *   `o_color` (vec4, location 0): The final rendered color [S1, unofficial].
+
+**Data Structures:**
+*   **Params Block:** Defined as `layout (std430, binding = 0) buffer params_block { vec4 params[]; };` [S1, unofficial]. The shader accesses specific `vec4` elements based on the node graph connections [S1, unofficial].
+*   **Hit Info:** A custom structure or tuple containing `id` (primitive identifier) and `distance` (SDF value) returned by the `map(p)` function [S1, unofficial].
+
+**Parameters:**
+*   `MAX_STEPS`: 256 (maximum iterations per ray) [S1, unofficial].
+*   `MAX_TRACE_DISTANCE`: 64.0 (maximum ray length) [S1, unofficial].
+*   `MIN_HIT_DISTANCE`: 0.001 (convergence threshold for surface hit) [S1, unofficial].
+
+**SDF Primitives and Operations:**
+The generated shader evaluates a composite SDF function `map(p)` which returns the distance to the nearest surface [S1, unofficial]. The following formulas are used for basic primitives and operations [S1, unofficial]:
+
+1.  **Sphere:** Center $c$, Radius $r$.
+    $$ d = \|p - c\| - r $$
+2.  **Box:** Half-extents $b = (b_x, b_y, b_z)$.
+    $$ d = \min(\max(d_x, \max(d_y, d_z)), 0.0) + \|\max(d, 0.0)\| $$
+    where $d = |p| - b$ [S1, unofficial].
+3.  **Plane:** Height $h$ (normal along Y).
+    $$ d = p_y - h $$
+4.  **Torus:** Major radius $t_x$, Minor radius $t_y$.
+    $$ d = \sqrt{(\|p_{xz}\| - t_x)^2 + p_y^2} - t_y $$
+5.  **Union:**
+    $$ d = \min(d_a, d_b) $$
+6.  **Intersection:**
+    $$ d = \max(d_a, d_b) $$
+7.  **Subtraction:**
+    $$ d = \max(-d_a, d_b) $$
+8.  **Smooth Minimum:** Parameter $k$.
+    $$ h = \text{clamp}(0.5 + 0.5 \frac{b - a}{k}, 0.0, 1.0) $$
+    $$ d = \text{mix}(b, a, h) - k \cdot h \cdot (1.0 - h) $$
+
+**Domain Manipulations:**
+These functions transform the query point $p$ before evaluation, effectively deforming the space [S1, unofficial].
+
+1.  **Twist:** Rotate XZ plane around Y axis by angle $t \cdot p_y$ [S1, unofficial].
+2.  **Bend:** Rotate XY plane around Z axis by angle $t \cdot p_y$ [S1, unofficial].
+
+**Algorithm Steps:**
+
+1.  **Ray Generation:**
+    *   Convert `vs_texcoord` to UV range [-1, 1] [S1, unofficial].
+    *   Compute camera right vector from `u_camera_front` and up vector [S1, unofficial].
+    *   Calculate pixel position using camera position, front, right, up vectors, and a fixed FOV of 50 degrees [S1, unofficial].
+    *   Construct ray $r$ with origin `u_camera_position` and normalized direction [S1, unofficial].
+
+2.  **Raymarching Loop:**
+    *   Initialize `res.id = -1`, `total_distance = 0`, `total_steps = 0` [S1, unofficial].
+    *   Loop while `total_steps < MAX_STEPS`:
+        *   Calculate current point $p = r.o + r.d \times \text{total\_distance}$ [S1, unofficial].
+        *   Evaluate $hit\_info = \text{map}(p)$ [S1, unofficial].
+        *   Add $hit\_info.distance$ to `total_distance` [S1, unofficial].
+        *   If $hit\_info.distance < \text{MIN\_HIT\_DISTANCE}$:
+            *   Set `res.id = hit_info.id`.
+            *   Break loop [S1, unofficial].
+        *   If $\text{total\_distance} > \text{MAX\_TRACE\_DISTANCE}$:
+            *   Reset `total_distance = 0.0`.
+            *   Break loop (discarding the ray) [S1, unofficial].
+        *   Increment `total_steps`.
+
+3.  **Normal Estimation:**
+    *   If a hit occurred, compute the normal $n$ using central finite differences with epsilon $\epsilon = 0.001$ [S1, unofficial]:
+        $$ e = (0.001, 0.0, 0.0) $$
+        $$ n_x = \text{map}(p + e_{xyy}).y - \text{map}(p - e_{xyy}).y $$
+        $$ n_y = \text{map}(p + e_{yxy}).y - \text{map}(p - e_{yxy}).y $$
+        $$ n_z = \text{map}(p + e_{yyx}).y - \text{map}(p - e_{yyx}).y $$
+        $$ n = \text{normalize}(n_x, n_y, n_z) $$
+    *   Note: The source code snippet uses `.y` to access the distance component of the hit info tuple, implying the SDF returns a vec2 or similar where the second component is the distance [S1, unofficial].
+
+4.  **Ambient Occlusion (AO):**
+    *   Compute AO using 5 steps along the normal [S1, unofficial]:
+        $$ \text{attenuation} = 0.5 $$
+        $$ \text{accum} = 0.0 $$
+        $$ \text{scale} = 1.0 $$
+        $$ \text{ao} = 1.0 $$
+        For `step` from 0 to 4:
+            $$ hr = 0.01 + 0.02 \times (\text{step}^2) $$
+            $$ aopos = p + n \times hr $$
+            $$ dist = \text{map}(aopos).y $$
+            $$ ao = -(dist - hr) $$
+            $$ \text{accum} += ao \times \text{scale} $$
+            $$ \text{scale} *= \text{attenuation} $$
+        $$ \text{ao} = 1.0 - \text{clamp}(\text{accum}, 0.0, 1.0) $$
+
+5.  **Shading:**
+    *   Based on `u_shading` mode [S1, unofficial]:
+        *   **0 (Depth):** $\sqrt{\frac{p_z}{\text{MAX\_TRACE\_DISTANCE}}}$ (Note: Source says `hit.z`, likely referring to distance or depth component) [S1, unofficial].
+        *   **1 (Steps):** Map `total_steps` percentage to colors using `smoothstep` [S1, unofficial].
+        *   **2 (AO):** $\text{pow}(\text{ao}, 3.0)$ [S1, unofficial].
+        *   **3 (Normals):** $n \times 0.5 + 0.5$ [S1, unofficial].
+        *   **4 (Diffuse):** Diffuse lighting with light at $(0, 2, 3)$ and AO $\text{pow}(\text{ao}, 3.0)$ [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+# Constants from source
+MAX_STEPS = 256
+MAX_TRACE_DISTANCE = 64.0
+MIN_HIT_DISTANCE = 0.001
+FOV_DEGREES = 50.0
+LIGHT_POS = (0.0, 2.0, 3.0)
+
+# Helper: SDF Primitives
+def sdf_sphere(p, center, radius):
+    return math.sqrt(sum((c - pi)**2 for pi, c in zip(p, center))) - radius
+
+def sdf_box(p, b):
+    d = (abs(p[0]) - b[0], abs(p[1]) - b[1], abs(p[2]) - b[2])
+    return min(max(d[0], max(d[1], d[2])), 0.0) + math.sqrt(max(d[0], 0.0)**2 + max(d[1], 0.0)**2 + max(d[2], 0.0)**2)
+
+def sdf_plane(p, h):
+    return p[1] - h
+
+def sdf_torus(p, t):
+    d_xz = math.sqrt(p[0]**2 + p[2]**2) - t[0]
+    d_y = p[1]
+    return math.sqrt(d_xz**2 + d_y**2) - t[1]
+
+# Helper: CSG Operations
+def sdf_union(a, b):
+    return min(a, b)
+
+def sdf_intersection(a, b):
+    return max(a, b)
+
+def sdf_subtraction(a, b):
+    return max(-a, b)
+
+def sdf_smooth_min(a, b, k):
+    h = max(0.0, min(1.0, 0.5 + 0.5 * (b - a) / k))
+    return b - h * (b - a) - k * h * (1.0 - h)
+
+# Helper: Domain Manipulations
+def domain_twist(p, t):
+    c = math.cos(t * p[1])
+    s = math.sin(t * p[1])
+    return (c * p[0] - s * p[2], p[1], s * p[0] + c * p[2])
+
+def domain_bend(p, t):
+    c = math.cos(t * p[1])
+    s = math.sin(t * p[1])
+    return (c * p[0] - s * p[1], s * p[0] + c * p[1], p[2])
+
+# Helper: Map Function (Composite SDF)
+def map(p):
+    # Example scene: twisted box
+    p_twisted = domain_twist(p, 0.5)
+    d = sdf_box(p_twisted, (1.0, 1.0, 1.0))
+    return (0.0, d) # id=0, distance=d
+
+# Helper: Normal Estimation
+def get_normal(p):
+    e = 0.001
+    n_x = map((p[0]+e, p[1], p[2]))[1] - map((p[0]-e, p[1], p[2]))[1]
+    n_y = map((p[0], p[1]+e, p[2]))[1] - map((p[0], p[1]-e, p[2]))[1]
+    n_z = map((p[0], p[1], p[2]+e))[1] - map((p[0], p[1], p[2]-e))[1]
+    mag = math.sqrt(n_x**2 + n_y**2 + n_z**2)
+    return (n_x/mag, n_y/mag, n_z/mag)
+
+# Helper: Ambient Occlusion
+def get_ao(p, n):
+    attenuation = 0.5
+    accum = 0.0
+    scale = 1.0
+    for step in range(5):
+        hr = 0.01 + 0.02 * (step * step)
+        aopos = (p[0] + n[0]*hr, p[1] + n[1]*hr, p[2] + n[2]*hr)
+        dist = map(aopos)[1]
+        ao_val = -(dist - hr)
+        accum += ao_val * scale
+        scale *= attenuation
+    return 1.0 - max(0.0, min(1.0, accum))
+
+# Main Raymarching
+def raymarch(ray_origin, ray_dir):
+    res_id = -1
+    total_distance = 0.0
+    total_steps = 0
+    
+    while total_steps < MAX_STEPS:
+        p = (ray_origin[0] + ray_dir[0]*total_distance, ray_origin[1] + ray_dir[1]*total_distance, ray_origin[2] + ray_dir[2]*total_distance)
+        hit_info = map(p)
+        dist = hit_info[1]
+        
+        total_distance += dist
+        
+        if dist < MIN_HIT_DISTANCE:
+            res_id = hit_info[0]
+            break
+            
+        if total_distance > MAX_TRACE_DISTANCE:
+            total_distance = 0.0
+            break
+            
+        total_steps += 1
+        
+    return res_id, total_distance, total_steps
+
+# Fragment Shader Entry
+def fragment_shader(vs_texcoord, u_camera_position, u_camera_front, u_shading):
+    # 1. Ray Generation
+    uv = (vs_texcoord[0] * 2.0 - 1.0, vs_texcoord[1] * 2.0 - 1.0)
+    aspect = 1.0 # Assume square for simplicity
+    fov_rad = math.radians(FOV_DEGREES)
+    ray_dir = (uv[0], uv[1] / aspect, 1.0 / math.tan(fov_rad / 2.0))
+    mag = math.sqrt(ray_dir[0]**2 + ray_dir[1]**2 + ray_dir[2]**2)
+    ray_dir = (ray_dir[0]/mag, ray_dir[1]/mag, ray_dir[2]/mag)
+    
+    ray_origin = u_camera_position
+    
+    # 2. March
+    hit_id, hit_dist, steps = raymarch(ray_origin, ray_dir)
+    
+    # 3. Shading
+    if hit_id != -1:
+        p_hit = (ray_origin[0] + ray_dir[0]*hit_dist, ray_origin[1] + ray_dir[1]*hit_dist, ray_origin[2] + ray_dir[2]*hit_dist)
+        n = get_normal(p_hit)
+        ao = get_ao(p_hit, n)
+        
+        if u_shading == 0: # Depth
+            color = math.sqrt(p_hit[2] / MAX_TRACE_DISTANCE)
+        elif u_shading == 1: # Steps
+            color = max(0.0, min(1.0, steps / MAX_STEPS)) # smoothstep approximation
+        elif u_shading == 2: # AO
+            color = ao ** 3.0
+        elif u_shading == 3: # Normals
+            color = (n[0]*0.5 + 0.5, n[1]*0.5 + 0.5, n[2]*0.5 + 0.5)
+        elif u_shading == 4: # Diffuse
+            l = (LIGHT_POS[0]-p_hit[0], LIGHT_POS[1]-p_hit[1], LIGHT_POS[2]-p_hit[2])
+            mag_l = math.sqrt(l[0]**2 + l[1]**2 + l[2]**2)
+            l = (l[0]/mag_l, l[1]/mag_l, l[2]/mag_l)
+            diff = max(0.0, n[0]*l[0] + n[1]*l[1] + n[2]*l[2])
+            color = diff * ao * 3.0
+        else:
+            color = 0.0
+    else:
+        color = 0.0
+        
+    return color
+```
+
+## Subtopics
+
+### [Tile-based SDF Rendering with RPN Interpreter](20783-tile-based-sdf-rendering-with-rpn-interpreter.md)
+This method renders large worlds composed of Signed Distance Functions (SDFs) by partitioning the scene into tiles, pruning irrelevant primitives per tile, and evaluating the remaining SDF expression in the fragment shader using a Reverse Polish Notation (RPN) interpreter [G]. It solves the problem of shader compilation latency and memory constraints when dealing with complex, large-scale SDF scenes. Unlike SDFPerf, which generates static shader code, this approach uses a dynamic interpreter pattern with command and operand buffers, allowing for on-the-fly simplification and avoiding the prohibitive cost of recompiling shaders for every tile [G]. See [Tile-based SDF Rendering with RPN Interpreter](20783-tile-based-sdf-rendering-with-rpn-interpreter.md).
+
+## Operating characteristics
+*   **Time Complexity:** $O(N \cdot M)$, where $N$ is the number of pixels and $M$ is the average number of steps per ray (up to `MAX_STEPS`) [G]. The complexity of the `map(p)` function depends on the number of primitives and operations in the node graph [S1, unofficial].
+*   **Memory Complexity:** $O(1)$ per pixel, plus $O(P)$ for the `params_block` where $P$ is the number of parameters [S1, unofficial].
+*   **Measured Performance:** Tested on NVIDIA GeForce GTX 970M and GTX 980 [S1, unofficial]. Performance is highly dependent on the complexity of the SDF graph and the number of steps [S1, unofficial].
+*   **Scaling:** Scales linearly with resolution [G]. Does not scale well with increasing SDF complexity due to the lack of spatial acceleration structures [G].
+*   **Strengths:** Simple implementation, no need for external scene graphs or BVH construction, easy to edit via node-based interface, good for real-time procedural geometry [S1, unofficial].
+*   **Limitations:** No spatial acceleration (slow for complex scenes), fixed step count can lead to aliasing or slow convergence, limited to convex primitives and simple CSG, no native support for shadows or reflections without additional raymarching passes [S1, unofficial].
+*   **When to use:** Real-time visualization of procedural geometry, educational purposes, simple VFX, scenes with low primitive count [G].
+*   **When not to use:** Complex scenes with many primitives, scenes requiring shadows/reflections, high-resolution rendering where aliasing is unacceptable [G].
+
+## Background
+The SDFPerf project was created by mwalczyk as a work-in-progress node-based editor for creating and manipulating signed-distance fields [S1, unofficial]. It was tested on Windows 8.1, Windows 10, and Ubuntu 18.04, using NVIDIA GeForce GTX 970M and GTX 980 GPUs, and built with Rust compiler version 1.37.0-nightly [S1, unofficial]. The project generates a raymarching shader string from a graph of operators, supporting basic SDF primitives, domain manipulation, and CSG operations [S1, unofficial].
+
+## Sources
+[S1] mwalczyk/sdfperf, https://github.com/mwalczyk/sdfperf, fetched 2026-10-27 (unofficial)

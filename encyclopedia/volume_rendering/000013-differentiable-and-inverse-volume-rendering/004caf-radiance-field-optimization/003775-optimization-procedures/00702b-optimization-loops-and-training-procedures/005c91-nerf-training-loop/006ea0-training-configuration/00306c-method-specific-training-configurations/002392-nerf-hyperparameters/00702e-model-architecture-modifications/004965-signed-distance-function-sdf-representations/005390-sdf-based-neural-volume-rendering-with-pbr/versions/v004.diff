@@ -1,0 +1,84 @@
+--- v003.md
++++ v004.md
+@@ -13,5 +13,5 @@
+ 1.  **Spatial MLP:** An $N$-layer Multi-Layer Perceptron [S1].
+     *   Input: Positional Encoded (PE) 3D coordinates $\mathbf{x}$.
+-    *   Output: Intermediate features used to derive SDF value $f(\mathbf{x})$, normal vector $\mathbf{n}$, volume density $\tau(\mathbf{x})$, and diffuse color $C_d$ [S1].
++    *   Output: Intermediate features used to derive SDF value $f(\mathbf{x})$, volume density $\tau(\mathbf{x})$, and diffuse color $C_d$ [S1].
+ 2.  **Directional MLP:** Used to compute the prefiltered specular color [S1].
+     *   Input: Surface normal $\mathbf{n}$, viewing direction $\omega_o$, roughness $\rho$.
+@@ -22,6 +22,6 @@
+ 
+ **Parameters:**
+-*   $\alpha$: Learnable parameter controlling the transition between volume and surface density. Large $\alpha$ implies a surface with low transmittance (e.g., metal); $\alpha \to 0$ implies a homogeneous medium (e.g., fog) [S1].
+-*   $\beta$: Scale parameter for the Laplace distribution. In VolSDF, it is fixed as $\alpha^{-1}$ [S1].
++*   $\alpha$: Learnable parameter controlling the transition between volume and surface density [S1].
++*   $\beta$: Scale parameter for the Laplace distribution [S1].
+ *   $\rho$: Surface roughness [S1].
+ *   $F_0$: Reflectance at a perpendicular angle [S1].
+@@ -32,11 +32,11 @@
+ 1.  **Ray Generation:** For each pixel, generate a ray $\mathbf{x} = \mathbf{o} + t\mathbf{d}$, where $\mathbf{o}$ is the camera origin, $\mathbf{d}$ is the direction, and $t$ is incrementally adjusted to sample points along the ray path [S1].
+ 2.  **Positional Encoding:** Apply one round of positional encoding (PE) to the sampled 3D points $\mathbf{x}$ [S1].
+-3.  **Spatial Feature Extraction:** Feed the encoded points into the Spatial MLP to generate perspective-independent intermediate values. The MLP outputs the SDF value $f(\mathbf{x})$, the volume density $\tau(\mathbf{x})$ derived from $f(\mathbf{x})$, and the diffuse color $C_d$ [S1]. The normal vector $\mathbf{n}$ is derived from the SDF gradient $\nabla f(\mathbf{x})$ [S1].
++3.  **Spatial Feature Extraction:** Feed the encoded points into the Spatial MLP to generate perspective-independent intermediate values [S1]. The MLP outputs the SDF value $f(\mathbf{x})$, the volume density $\tau(\mathbf{x})$ derived from $f(\mathbf{x})$, and the diffuse color $C_d$ [S1]. The normal vector $\mathbf{n}$ is derived from the SDF gradient $\nabla f(\mathbf{x})$ [S1].
+ 4.  **Density Conversion:** Convert the SDF value $f(\mathbf{x})$ to volume density $\sigma(\mathbf{x})$ using the cumulative distribution function $\Psi_\beta$ of a zero-mean Laplace distribution with scale $\beta > 0$:
+     $$ \sigma(\mathbf{x}) = \alpha \Psi_\beta(f(\mathbf{x})) $$
+     where $\Psi_\beta$ is the CDF of the Laplace distribution [S1].
+-5.  **Diffuse Color Retrieval:** Obtain $C_d$ directly from the Spatial MLP output. This simulates irradiance with low angular correlation, representing subsurface scattering or air impurities [S1].
++5.  **Diffuse Color Retrieval:** Obtain $C_d$ directly from the Spatial MLP output [S1]. This simulates irradiance with low angular correlation, representing subsurface scattering or air impurities [S1].
+ 6.  **Specular Color Calculation (PBR):**
+-    a.  **Prefiltering:** Calculate the prefiltered specular color $f_{\text{prefilteredColor}}$ using a Directional MLP. The incident direction $\omega_i$ for the prefiltering is the reflection of the viewing direction $\omega_o$ about the normal $\mathbf{n}$:
++    a.  **Prefiltering:** Calculate the prefiltered specular color $f_{\text{prefilteredColor}}$ using a Directional MLP [S1]. The incident direction $\omega_i$ for the prefiltering is the reflection of the viewing direction $\omega_o$ about the normal $\mathbf{n}$:
+         $$ \omega_i = 2 (\omega_o \cdot \mathbf{n}) \mathbf{n} - \omega_o $$
+         The prefiltered color depends on roughness $\rho$, position $\mathbf{p}$, and $\omega_i$ [S1].
+@@ -74,8 +74,9 @@
+ def laplace_cdf(x, beta):
+     """CDF of zero-mean Laplace distribution with scale beta."""
+-    abs_x = x if x >= 0 else -x
++    abs_x = abs(x)
+     if beta == 0:
+         return 0.5 if x == 0 else (1.0 if x > 0 else 0.0)
+-    return 0.5 * (1.0 + (1.0 if x >= 0 else -1.0) * (1.0 - math.exp(-abs_x / beta)))
++    sign = 1.0 if x >= 0 else -1.0
++    return 0.5 * (1.0 + sign * (1.0 - math.exp(-abs_x / beta)))
+ 
+ def get_brdf_lut_value(cos_theta, roughness, lut):
+@@ -89,11 +90,11 @@
+     return A, B
+ 
+-def render_ray(ray_origin, ray_direction, spatial_mlp, directional_mlp, brdf_lut, alpha, beta, F0, roughness, num_samples):
++def render_ray(ray_origin, ray_direction, spatial_mlp, directional_mlp, brdf_lut, alpha, beta, F0, roughness, num_samples, t_near, t_far):
+     """Renders a single ray using SDF-based Neural Volume Rendering with PBR."""
+-    t_values = np.linspace(0.0, 10.0, num_samples)
++    t_values = np.linspace(t_near, t_far, num_samples)
+     points = ray_origin + ray_direction * t_values[:, np.newaxis]
+     encoded_points = positional_encoding(points)
+ 
+-    # Spatial MLP outputs: SDF values, diffuse colors
++    # Spatial MLP outputs: SDF values and diffuse colors
+     sdf_values, diffuse_colors = spatial_mlp(encoded_points)
+ 
+@@ -129,11 +130,11 @@
+ 
+     # Volume rendering
+-    delta_t = np.diff(t_values)
+-    delta_t = np.insert(delta_t, 0, 0.0)
++    deltas = np.diff(t_values)
++    deltas = np.append(deltas, 0.0)
+     rendered_color = np.zeros(3)
+     T = 1.0
+     for i in range(num_samples):
+         sigma_i = densities[i]
+-        delta_i = t_values[i+1] - t_values[i] if i < num_samples - 1 else 0.0
++        delta_i = deltas[i]
+         alpha_i = 1.0 - math.exp(-sigma_i * delta_i)
+         rendered_color += T * alpha_i * final_colors[i]
+@@ -143,6 +144,6 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **SDF Gradient Noise:** Computing normals via finite differences on noisy SDF outputs can lead to jittery specular highlights. Smoothing or analytical gradients are recommended [G].
+-*   **Density Interpretation:** The parameter $\alpha$ controls the "sharpness" of the surface. If $\alpha$ is too small, the volume appears foggy; if too large, it may become too opaque too quickly, losing volumetric details [S1].
++*   **SDF Gradient Noise:** Computing normals via finite differences on noisy SDF outputs can lead to jittery specular highlights [G].
++*   **Density Interpretation:** The parameter $\alpha$ controls the transition between volume and surface density [S1].
+ *   **Roughness Input:** The source mentions roughness $\rho$ as an input to the prefiltering and LUT lookup but does not specify if it is a global constant, per-pixel input, or learned [S1].
+ 

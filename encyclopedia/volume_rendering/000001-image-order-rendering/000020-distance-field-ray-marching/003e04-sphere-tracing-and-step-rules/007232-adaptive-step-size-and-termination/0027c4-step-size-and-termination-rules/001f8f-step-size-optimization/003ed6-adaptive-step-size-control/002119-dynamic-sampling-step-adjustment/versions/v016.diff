@@ -1,0 +1,173 @@
+--- v015.md
++++ v016.md
+@@ -4,78 +4,85 @@
+ 
+ ## Overview
+-Dynamic Sampling Step Adjustment accelerates ray marching through homogeneous or empty regions by exponentially increasing the step size when no density is detected, then restoring the original step size upon encountering geometry [S1, unofficial]. It distinguishes itself from sibling methods like [Adaptive Step Size Ray Marching](2312-adaptive-step-size-ray-marching.md) by relying on binary emptiness checks rather than continuous density metrics, and from [Variance-based Step Size Adaptation](13161-variance-based-step-size-adaptation.md) by using discrete doubling rather than statistical variance to drive step selection [S1, unofficial].
++Dynamic Sampling Step Adjustment is a ray marching optimization technique that accelerates traversal through empty or homogeneous regions of a volume by exponentially increasing the step size when no density is detected [S1, unofficial]. It solves the problem of redundant sampling in sparse areas, such as the sky in atmospheric rendering, by skipping large distances until a feature is encountered [S1, unofficial]. It distinguishes itself from sibling methods like [Adaptive Step Size Ray Marching](2312-adaptive-step-size-ray-marching.md) by using a binary "empty/non-empty" heuristic rather than continuous gradient or variance metrics to drive step changes, and from [Variance-based Step Size Adaptation](13161-variance-based-step-size-adaptation.md) by relying on mip-level offsets rather than statistical error bounds [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   Input: Current ray position $t$, current step size $\Delta t$, current mip-map offset $mipOffset$, and a scalar field query function $S(p)$ returning density.
+-*   Output: Updated ray position $t_{new}$, updated step size $\Delta t_{new}$, and updated mip-map offset $mipOffset_{new}$.
++*   **Input:** Ray origin $\mathbf{o}$, normalized direction $\mathbf{d}$, base step size $\Delta t_{base}$, initial mip level $m_{base}$, and a scene function $V(\mathbf{p}, m)$ that returns density at position $\mathbf{p}$ and mip level $m$.
++*   **Output:** Updated ray parameter $t$, final position, and accumulated color/transmittance.
+ 
+ **Data Structures:**
+-*   `step_size`: Floating point value representing the current traversal step.
+-*   `mipOffset`: Integer or floating point index indicating the resolution level of the scalar field being sampled.
+-*   `consecutive_empty_count`: Integer counter tracking how many consecutive samples returned zero density.
++*   `current_step`: Float, current step size $\Delta t$.
++*   `current_mip`: Integer, current texture mip level $m$.
++*   `consecutive_empty`: Integer, counter for consecutive empty samples.
++*   `threshold`: Integer, number of consecutive empty samples required to trigger doubling (typically 2-4, not explicitly given in sources, but implied by "multiple consecutive" [S1, unofficial]).
++
++**Numbered Steps:**
++1.  Initialize $t = 0$, $\Delta t = \Delta t_{base}$, $m = m_{base}$, and `consecutive_empty` = 0.
++2.  Evaluate density $d = V(\mathbf{o} + t\mathbf{d}, m)$.
++3.  Check if $d$ is effectively zero (empty).
++    *   If empty:
++        *   Increment `consecutive_empty`.
++        *   If `consecutive_empty` $\ge$ threshold:
++            *   Double the step size: $\Delta t \leftarrow 2 \cdot \Delta t$.
++            *   Increase mip level: $m \leftarrow m + 1$ (if $m < m_{max}$).
++            *   Reset `consecutive_empty` to 0.
++        *   Advance ray: $t \leftarrow t + \Delta t$.
++    *   If non-empty:
++        *   Step back one step: $t \leftarrow t - \Delta t$.
++        *   Restore step size: $\Delta t \leftarrow \Delta t_{base}$.
++        *   Restore mip level: $m \leftarrow m_{base}$.
++        *   Reset `consecutive_empty` to 0.
++        *   Advance ray: $t \leftarrow t + \Delta t$.
++4.  Repeat until termination conditions (hit, escape, or max steps) are met.
++
++**Formulas:**
++*   Step update: $\Delta t_{new} = 2 \cdot \Delta t_{old}$
++*   Mip update: $m_{new} = m_{old} + 1$
++*   Position update: $\mathbf{p}_{new} = \mathbf{o} + (t + \Delta t)\mathbf{d}$
+ 
+ **Parameters:**
+-*   `initial_step_size`: The base step size for non-empty regions. Typical value: Not given in the sources.
+-*   `doubling_threshold`: The number of consecutive empty samples required to trigger a step size increase. Typical value: Not given in the sources (implies "multiple").
+-*   `mip_scale`: The factor by which `mipOffset` increases per doubling. Typical value: Not given in the sources.
++*   $\Delta t_{base}$: Base step size, typically determined by voxel size or desired resolution [S1, unofficial].
++*   $m_{base}$: Initial mip level, usually 0 or the highest resolution level [S1, unofficial].
++*   Threshold: Number of consecutive empty samples, not explicitly given in sources [S1, unofficial].
+ 
+-**Algorithm:**
+-1.  Sample the scalar field at the current ray position $t$ to obtain density $d = S(t)$.
+-2.  If $d > 0$ (non-empty):
+-    *   Reset `consecutive_empty_count` to 0.
+-    *   Restore `step_size` to `initial_step_size`.
+-    *   Restore `mipOffset` to its base value (typically 0 or the highest resolution level).
+-    *   Advance the ray by `step_size`: $t_{new} = t + step\_size$.
+-3.  If $d == 0$ (empty):
+-    *   Increment `consecutive_empty_count`.
+-    *   If `consecutive_empty_count` exceeds `doubling_threshold`:
+-        *   Double the `step_size`: $step\_size = step\_size \times 2$.
+-        *   Increase `mipOffset` to sample a coarser mip-map level: $mipOffset = mipOffset + mip\_scale$.
+-        *   Reset `consecutive_empty_count` to 0 (or keep incrementing depending on implementation; the source implies resetting the condition check for the next doubling).
+-    *   Advance the ray by the current `step_size`: $t_{new} = t + step\_size$.
+-4.  Clamp `step_size` to global bounds $[\Delta t_{min}, \Delta t_{max}]$ to prevent infinite loops or excessive skipping [S1, unofficial].
++**Edge Cases and Pitfalls:**
++*   **Artifacts:** The method may cause visual artifacts in some cases, particularly if the doubling skips over thin features or if the mip level change introduces texture aliasing [S1, unofficial].
++*   **Performance Gains:** The performance improvement is often small, as the overhead of checking density and managing state may outweigh the savings from skipping samples in moderately dense volumes [S1, unofficial].
++*   **Boundary Precision:** Stepping back one step when density is found ensures the feature is not missed, but requires careful handling of floating-point precision to avoid infinite loops or jittering near boundaries [G].
+ 
+ **Pseudocode:**
+ ```python
+-def dynamic_sampling_step_adjustment(ray_t, initial_step_size, mip_offset_base, scalar_field):
+-    step_size = initial_step_size
+-    mip_offset = mip_offset_base
++def dynamic_sampling_step_adjustment(ray_origin, ray_direction, scene_func, max_dist, max_steps, epsilon, base_step, base_mip, empty_threshold):
++    t = 0.0
++    step = base_step
++    mip = base_mip
+     consecutive_empty = 0
+     
+-    # Sample current position
+-    density = scalar_field.sample(ray_t, mip_offset)
+-    
+-    if density > 0:
+-        # Geometry found: reset adaptation
+-        consecutive_empty = 0
+-        step_size = initial_step_size
+-        mip_offset = mip_offset_base
+-        ray_t += step_size
+-    else:
+-        # Empty space detected
+-        consecutive_empty += 1
++    for i in range(max_steps):
++        if t > max_dist:
++            return False, t
+         
+-        # Check if we should double the step size
+-        # Note: 'multiple' is vague; assuming a threshold of 1 or more for immediate doubling 
+-        # or a specific count. Standard implementation often doubles after 1 or 2 empty samples.
+-        # Here we assume a threshold of 1 for immediate response to emptiness, 
+-        # or we can use a counter. The source says "multiple consecutive", implying >1.
+-        # Let's assume a threshold of 2 for safety, or 1 if 'multiple' implies just 'more than one frame'.
+-        # Given the ambiguity, we implement a generic threshold check.
+-        if consecutive_empty >= 2: 
+-            step_size *= 2
+-            mip_offset += 1 # Increase mip level for coarser sampling
+-            consecutive_empty = 0 # Reset counter for next doubling phase
++        p = ray_origin + ray_direction * t
++        density = scene_func(p, mip)
++        
++        # Check if empty (density below epsilon)
++        if density < epsilon:
++            consecutive_empty += 1
++            if consecutive_empty >= empty_threshold:
++                # Double step size and increase mip level
++                step *= 2.0
++                mip += 1
++                consecutive_empty = 0
++            t += step
++        else:
++            # Density found: step back and reset
++            t -= step
++            step = base_step
++            mip = base_mip
++            consecutive_empty = 0
++            t += step
+             
+-        ray_t += step_size
+-        
+-    return ray_t, step_size, mip_offset
++    return False, t
+ ```
+-
+-**Edge Cases and Pitfalls:**
+-*   **Artifacts:** The optimization provides small performance gains and may cause artifacts in some cases, particularly if the step size doubles too aggressively across thin features [S1, unofficial].
+-*   **Precision:** Restoring the exact `mipOffset` and `step_size` requires careful state management to avoid drift.
+-*   **Boundary Handling:** If the ray exits the volume bounds, the step size adjustment should be disabled or clamped to prevent sampling outside the valid data range.
+ 
+ ## Subtopics
+@@ -91,17 +98,17 @@
+ 
+ ### Geometry Sampling Adjustment
+-A method to adjust the maximum number of geometry samples per streamline based on a geometry sampling factor [S2, unofficial]. It sets `m_maxGeometrySamples` to `m_maxSamples / m_geometrySampling + 1`, where `m_maxSamples` is the base maximum number of samples per streamline and `m_geometrySampling` is a factor used to reduce the number of geometry samples [S2, unofficial].
++Geometry Sampling Adjustment is a method to adjust the maximum number of geometry samples per streamline based on a geometry sampling factor [S2, unofficial]. It sets `m_maxGeometrySamples` to `m_maxSamples / m_geometrySampling + 1`, where `m_maxSamples` is the base maximum number of samples per streamline and `m_geometrySampling` is a factor used to reduce the number of geometry samples [S2, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Reduces the number of samples in empty space by a factor of $2^k$ where $k$ is the number of doublings, leading to $O(1)$ average cost per empty region traversal compared to $O(N)$ for uniform sampling.
+-*   **Memory Complexity:** Minimal overhead; requires storing only the current step size, mip offset, and a counter.
+-*   **Performance:** Provides small performance gains [S1, unofficial].
+-*   **Strengths:** Simple to implement; effective for scenes with large empty volumes (e.g., atmospheric clouds with sparse bases).
+-*   **Limitations:** May cause artifacts if the doubling threshold is too low or the step size grows too large for the feature size [S1, unofficial]. Not suitable for high-frequency details without additional checks.
+-*   **When to use:** When rendering large volumes with significant empty space, such as atmospheric effects or sparse particle systems.
+-*   **When not to use:** When high-frequency details are present in empty-looking regions or when artifact sensitivity is high.
++*   **Time Complexity:** Reduces the number of samples in empty regions by a factor of up to $2^k$ where $k$ is the number of doublings, but adds overhead for state management and mip-level switching [S1, unofficial].
++*   **Memory Complexity:** Requires storage for the current step size, mip level, and empty counter, which is minimal [S1, unofficial].
++*   **Measured Performance:** Performance gains are described as "small" and may be negligible in scenes with significant density [S1, unofficial].
++*   **Strengths:** Simple to implement, effective for large empty volumes like sky or space [S1, unofficial].
++*   **Limitations:** Can introduce artifacts, especially with mip-level changes; less effective in moderately dense volumes [S1, unofficial].
++*   **When to Use:** Best for scenes with large empty regions, such as atmospheric rendering or space simulations [S1, unofficial].
++*   **When Not to Use:** Avoid in scenes with thin, high-frequency features or where artifact sensitivity is high [S1, unofficial].
+ 
+ ## Background
+-The technique is described in the context of implementing volumetric cloud effects in real-time rendering, specifically mentioning its use in conjunction with blue noise dithering and temporal upsampling [S1, unofficial]. It is noted as a simple optimization that can be combined with other techniques like HDRP-style cloud rendering [S1, unofficial].
++Dynamic Sampling Step Adjustment originated in the context of real-time volume rendering, particularly for atmospheric effects like clouds in game engines [S1, unofficial]. It was discussed in the context of implementing volume clouds in Unity, leveraging techniques similar to those used in HDRP and other high-end renderers [S1, unofficial]. The method is part of a broader set of optimizations for real-time rendering, including blue noise dithering and temporal upsampling [S1, unofficial].
+ 
+ ## Sources

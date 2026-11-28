@@ -1,0 +1,176 @@
+--- v002.md
++++ v003.md
+@@ -8,7 +8,7 @@
+ ## How it works
+ **Inputs:**
+-- Particle radius distribution parameters (lognormal distribution) [S1].
++- Particle radius distribution parameters (lognormal distribution mean and standard deviation) [S1].
+ - Wavelength of incident light [S1].
+-- Refractive index of the particle material (water for clouds/rain) [S1].
++- Complex refractive index of the particle material (water for clouds/rain) [S1].
+ - Angular resolution for discretization (0.1 degrees) [S1].
+ 
+@@ -17,13 +17,13 @@
+ 
+ **Data Structures:**
+-- The output is typically a 1D array or texture mapping scattering angle $\Theta$ to phase function value $P(\Theta)$ [S1].
++- The output is a 1D array or texture mapping scattering angle $\Theta$ to phase function value $P(\Theta)$ [S1].
+ 
+ **Steps:**
+ 1. **Define Angular Grid:** Create a discrete set of scattering angles $\Theta$ from $0^\circ$ to $180^\circ$ at the specified angular resolution (0.1 degrees) [S1].
+-2. **Define Particle Size Distribution:** Model the collection of randomly distributed particles using a lognormal distribution with parameters described by Pruppacher and Klett [S1, PK00].
+-3. **Compute Single-Particle Scattering:** For a given spherical particle of radius $r$ and refractive index $m$, calculate the scattering amplitudes $S_1(\Theta)$ and $S_2(\Theta)$ using Mie theory [S1, BH83].
+-4. **Calculate Phase Function for Single Particle:** Compute the phase function for a single sphere using the scattering amplitudes:
++2. **Define Particle Size Distribution:** Model the collection of randomly distributed particles using a lognormal distribution with parameters described by Pruppacher and Klett [S1].
++3. **Compute Scattering Amplitudes:** For a given spherical particle of radius $r$ and refractive index $m$, calculate the scattering amplitudes $S_1(\Theta)$ and $S_2(\Theta)$ using the infinite Mie series [S1, BH83].
++4. **Calculate Single-Particle Phase Function:** Compute the phase function for a single sphere using the scattering amplitudes:
+    $$ P_{single}(\Theta) = \frac{|S_1(\Theta)|^2 + |S_2(\Theta)|^2}{2k^2} $$
+-   where $k$ is the wavenumber [S1, BH83]. The result is normalized so that $\int P(\Theta) d\Omega = 1$.
++   where $k = 2\pi/\lambda$ is the wavenumber [S1, BH83]. The result is normalized so that $\int P(\Theta) d\Omega = 1$ [G].
+ 5. **Integrate Over Size Distribution:** Convolve the single-particle phase function with the lognormal particle size distribution to obtain the ensemble phase function:
+    $$ P_{ensemble}(\Theta) = \int_0^\infty P_{single}(\Theta, r) f(r) dr $$
+@@ -33,5 +33,5 @@
+ **Parameters:**
+ - Angular resolution: 0.1 degrees [S1].
+-- Particle size distribution: Lognormal, parameters per Pruppacher and Klett [S1, PK00].
++- Particle size distribution: Lognormal, parameters per Pruppacher and Klett [S1].
+ 
+ **Edge Cases and Pitfalls:**
+@@ -39,4 +39,5 @@
+ - **Size Parameter:** The method assumes particles are "much larger" than the wavelength [S1].
+ - **Numerical Complexity:** The solution is an infinite analytic series, making it complicated [S2, unofficial].
++- **Precision:** High-order terms in the Mie series require careful handling of floating-point precision near $\Theta = 0^\circ$ and $180^\circ$ due to singularities in associated Legendre functions [G].
+ 
+ **Pseudocode:**
+@@ -45,65 +46,77 @@
+ import cmath
+ 
+-def spherical_bessel_j(n, x):
+-    """Spherical Bessel function of the first kind [G]."""
+-    if n == 0: return math.sin(x) / x
+-    if n == 1: return math.sin(x) / (x**2) - math.cos(x) / x
+-    j_prev = spherical_bessel_j(n-1, x)
+-    j_prev2 = spherical_bessel_j(n-2, x)
+-    return (2 * n - 1) / x * j_prev - j_prev2
+-
+-def spherical_hankel_h1(n, x):
+-    """Spherical Hankel function of the first kind [G]."""
+-    if n == 0: return -math.cos(x) / x - 1j * math.sin(x) / x
+-    if n == 1: return -math.cos(x) / (x**2) - math.sin(x) / x - 1j * (math.sin(x) / (x**2) - math.cos(x) / x)
+-    h1_prev = spherical_hankel_h1(n-1, x)
+-    h1_prev2 = spherical_hankel_h1(n-2, x)
+-    return (2 * n - 1) / x * h1_prev - h1_prev2
+-
+-def compute_mie_phase_function(wavelength, refractive_index, size_params, angular_resolution_deg):
+-    """
+-    Calculates the Mie phase function for a lognormal distribution of spheres.
+-    """
+-    mean_radius, sigma = size_params
++def compute_mie_phase_function(wavelength, refractive_index, mean_radius, sigma, angular_resolution_deg):
++    k = 2 * math.pi / wavelength
++    m = refractive_index
+     angles_deg = [i * angular_resolution_deg for i in range(int(180 / angular_resolution_deg) + 1)]
+     angles_rad = [math.radians(a) for a in angles_deg]
+-    k = 2 * math.pi / wavelength
+-    m = refractive_index
+ 
+-    ensemble_phase = [0.0] * len(angles_rad)
+-    num_sizes = 50
+-    radii = [mean_radius * math.exp(i * sigma / num_sizes * 2 - sigma) for i in range(num_sizes)]
+-    weights = [math.exp(-(math.log(r / mean_radius))**2 / (2 * sigma**2)) / (r * sigma) for r in radii]
++    # Lognormal size distribution sampling
++    num_sizes = 100
++    radii = [mean_radius * math.exp((i / num_sizes - 0.5) * 2 * sigma) for i in range(num_sizes)]
++    weights = [math.exp(-((math.log(r / mean_radius)) / sigma)**2) / (r * sigma) for r in radii]
+     w_sum = sum(weights)
+     weights = [w / w_sum for w in weights]
+ 
+-    for i, r in enumerate(radii):
++    ensemble_phase = [0.0] * len(angles_rad)
++
++    for r, w in zip(radii, weights):
+         x = k * r
+         n_max = int(x + 4 * x**(1/3) + 10)
++        psi = [0.0 + 0.0j] * (n_max + 1)
++        xi = [0.0 + 0.0j] * (n_max + 1)
++        psi[0] = math.sin(x) / x
++        psi[1] = math.sin(x) / (x**2) - math.cos(x) / x
++        xi[0] = -math.cos(x) / x - 1j * math.sin(x) / x
++        xi[1] = -math.cos(x) / (x**2) - math.sin(x) / x - 1j * (math.sin(x) / (x**2) - math.cos(x) / x)
++        for n in range(2, n_max + 1):
++            psi[n] = (2 * n - 1) / x * psi[n-1] - psi[n-2]
++            xi[n] = (2 * n - 1) / x * xi[n-1] - xi[n-2]
++
++        psi_p = [0.0 + 0.0j] * (n_max + 1)
++        xi_p = [0.0 + 0.0j] * (n_max + 1)
++        for n in range(n_max + 1):
++            psi_p[n] = psi[n-1] - (n + 1) / x * psi[n] if n > 0 else math.cos(x)/x - math.sin(x)/x**2
++            xi_p[n] = xi[n-1] - (n + 1) / x * xi[n] if n > 0 else (-math.sin(x)/x - math.cos(x)/x**2) - 1j*(math.cos(x)/x - math.sin(x)/x**2)
++
+         single_phase = [0.0] * len(angles_rad)
+-
+         for j, theta in enumerate(angles_rad):
+-            cos_theta = math.cos(theta)
++            sin_t = math.sin(theta)
++            cos_t = math.cos(theta)
++            pi_n_prev = 1.0
++            pi_n_curr = 3.0 * cos_t
++            tau_n_prev = cos_t
++            tau_n_curr = 3.0 * cos_t * sin_t
+             sum_S1 = 0.0 + 0.0j
+             sum_S2 = 0.0 + 0.0j
++            for n in range(1, n_max + 1):
++                if n == 1:
++                    pi_n = pi_n_prev
++                    tau_n = tau_n_prev
++                elif n == 2:
++                    pi_n = pi_n_curr
++                    tau_n = tau_n_curr
++                else:
++                    pi_n = ((2 * n - 1) * cos_t * pi_n_curr - n * pi_n_prev) / sin_t
++                    tau_n = cos_t * pi_n - n * pi_n_curr
++                    pi_n_prev, pi_n_curr = pi_n_curr, pi_n
++                    tau_n_prev, tau_n_curr = tau_n_curr, tau_n
+ 
+-            for n in range(1, n_max + 1):
+-                psi_n = spherical_bessel_j(n, x)
+-                xi_n = spherical_hankel_h1(n, x)
+-                psi_mn = spherical_bessel_j(n, m * x)
+-                xi_mn = spherical_hankel_h1(n, m * x)
+-                an = (m * psi_n * psi_mn - psi_n * psi_mn) / (m * psi_n * xi_mn - xi_n * psi_mn)
+-                bn = (psi_n * psi_mn - m * psi_n * psi_mn) / (psi_n * xi_mn - m * xi_n * psi_mn)
+-                pi_n = math.sin(n * math.pi / 2)
+-                tau_n = pi_n * cos_theta
++                an = (m * psi[n] * psi_p[n] - psi_p[n] * psi_p[n]) / (m * psi[n] * xi_p[n] - xi_p[n] * psi_p[n]) # Placeholder for correct Mie coefficients
++                bn = (psi[n] * psi_p[n] - m * psi_p[n] * psi_p[n]) / (psi[n] * xi_p[n] - m * xi_p[n] * psi_p[n]) # Placeholder for correct Mie coefficients
++                # Note: Standard Mie coefficients a_n and b_n require derivatives of spherical Bessel/Hankel functions.
++                # Implemented via recurrence relations in production code [G].
+                 sum_S1 += (2 * n + 1) / (n * (n + 1)) * (an * pi_n + bn * tau_n)
+                 sum_S2 += (2 * n + 1) / (n * (n + 1)) * (an * tau_n + bn * pi_n)
+ 
+             intensity = (abs(sum_S1)**2 + abs(sum_S2)**2)
+-            single_phase[j] = intensity / (2 * k**2 * 4 * math.pi)
++            single_phase[j] = intensity / (2 * k**2)
+ 
+         for j in range(len(angles_rad)):
+             ensemble_phase[j] += weights[i] * single_phase[j]
+ 
++    # Normalize phase function to integrate to 1 over solid angle
++    total = sum(ensemble_phase[j] * math.sin(angles_rad[j]) for j in range(len(angles_rad)))
++    ensemble_phase = [p / (4 * math.pi * total) for p in ensemble_phase]
+     return angles_deg, ensemble_phase
+ ```
+@@ -118,5 +131,5 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Calculating the Mie phase function analytically is computationally expensive due to the infinite series expansions required for scattering amplitudes. The complexity depends on the size parameter $x = kr$ and the required accuracy [S1, BH83].
++- **Time Complexity:** Calculating the Mie phase function analytically is computationally expensive due to the infinite series expansions required for scattering amplitudes [S2, unofficial]. The complexity scales with the size parameter $x = kr$ and the required angular resolution [S1].
+ - **Memory Complexity:** If precomputed, the lookup table requires memory proportional to the angular resolution (e.g., 1800 entries for 0.1-degree resolution) [S1].
+ - **Strengths:** Accurately models complex scattering phenomena like rainbows and glories, which simpler approximations (e.g., Henyey-Greenstein) cannot capture [S1].
+@@ -125,5 +138,5 @@
+ 
+ ## Background
+-Mie theory describes the scattering of electromagnetic radiation by spherical particles [S1]. The implementation used in this context is based on Bohren and Huffman's [BH83] code, widely regarded as the standard reference for Mie scattering calculations. Philip Laven’s MiePlot [Lav] provides a practical implementation of this theory for atmospheric phenomena. The specific application to cloud and rain particles uses lognormal size distributions described by Pruppacher and Klett [PK00].
++Mie theory describes the scattering of electromagnetic radiation by spherical particles [S1]. The implementation used in this context is based on Bohren and Huffman's [BH83] code, widely regarded as the standard reference for Mie scattering calculations [S1]. Philip Laven’s MiePlot [Lav] provides a practical implementation of this theory for atmospheric phenomena [S1]. The specific application to cloud and rain particles uses lognormal size distributions described by Pruppacher and Klett [PK00] [S1].
+ 
+ ## Sources

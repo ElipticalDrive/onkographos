@@ -1,0 +1,138 @@
+# Parallel Volume Rendering via k-d Tree Subdivision and Binary-Swap Compositing
+
+Also called: Binary-Swap Parallel Rendering, Parallel Volume Rendering Using Binary-Swap Image Composition, Parallel Volume Rendering with Binary-Swap Compositing, Parallel volume rendering via k-d tree subdivision, binary-swap image compositing, parallel volume rendering using binary-swap
+
+## Overview
+This method enables the interactive rendering of volumetric datasets that exceed the texture memory capacity of a single graphics card by distributing the volume across a cluster of commodity PCs [S1, S2]. It solves the video memory bottleneck inherent in consumer hardware (e.g., 64 MB VRAM) by subdividing the volume spatially and aggregating the memory of multiple nodes [S2]. It differs from [MPI Volume Rendering (3D Decomposition)](2254-mpi-volume-rendering-3d-decomposition.md) by using a k-d tree for spatial subdivision and binary-swap compositing for image assembly, rather than strict 3D grid decomposition with MPI-based pixel accumulation [S1, S2].
+
+## How it works
+**Inputs:**
+*   Volumetric dataset $V$ of arbitrary dimensions.
+*   Cluster configuration: $N$ compute nodes (where $N$ is a power of two) and 1 host node [S2, S4].
+
+**Outputs:**
+*   Final rendered image $I$ displayed on the host [S1, S2].
+
+**Data Structures:**
+*   **Subvolume:** A resampled 3D texture of fixed dimensions $256 \times 256 \times 256$ voxels [S1, S2].
+*   **Subimage:** The 2D image fragment rendered by a single node [S4].
+
+**Steps:**
+1.  **Spatial Subdivision:** Subdivide the input volume $V$ spatially using a k-d tree algorithm to generate $N$ subvolumes [S1, S2]. The subdivision alternates binary subdivision along successive world axes to create a block decomposition [S3, S4].
+2.  **Resampling:** Perform higher-order resampling in software for each subvolume to a fixed resolution of $256 \times 256 \times 256$ voxels [S1, S2]. This fixed size permits higher-order resampling prior to hardware tri-linear interpolation [S2].
+3.  **Distribution:** Transfer each resampled subvolume to the texture memory of a distinct compute node, ensuring each volume fits entirely in the node's texture memory to avoid swapping over the slow graphics bus [S2].
+4.  **Parallel Rendering:** For each frame, every compute node renders its assigned subvolume to produce a subimage [S1, S2]. Nodes ray-cast from the identical view direction, casting only rays within the image region covering the corresponding subvolume [S4]. Rays accumulate values at regular intervals dependent on the volume size, not the image size [S3].
+5.  **Binary-Swap Compositing:** Composite the resulting subimages from all nodes using binary-swap compositing [S1, S2]. This method avoids bandwidth bottlenecks by having processors iteratively swap halves and quarters of their subimages with neighbors and composite them locally [S4].
+6.  **Display:** Send the final composite image to the host node for display and user interface control [S1, S2].
+
+**Formulas:**
+*   **Step Size:** $s = \frac{\max(d_x, d_y, d_z)}{N_s}$, where $d_x, d_y, d_z$ are the subvolume dimensions and $N_s$ is the number of samples along the ray [S3].
+*   **Front-to-Back Compositing:** $C_{out} = C_{in} + (1 - \alpha_{in}) \cdot c \cdot \alpha$, $\alpha_{out} = \alpha_{in} + (1 - \alpha_{in}) \cdot \alpha$, where $C$ is color, $\alpha$ is opacity, and $c, \alpha$ are the sampled voxel's color and opacity [G].
+
+**Parameters:**
+*   **Subvolume Resolution:** Fixed at $256 \times 256 \times 256$ voxels per node [S1, S2].
+*   **Cluster Size:** 9 computers (8 compute nodes, 1 host) in the cited implementation [S2].
+*   **Network:** Compute nodes use 100-Base-T Fast Ethernet; Host uses Gigabit Ethernet [S2].
+
+**Edge Cases and Pitfalls:**
+*   **Video Memory Limits:** Consumer graphics cards (e.g., Nvidia GeForce 3 with 64 MB) share memory between frame buffer and texture memory [S2]. Failing to fit the volume in texture memory causes swapping over the slow graphics bus, degrading performance [S1, S2].
+*   **Quality vs. Performance:** Rendering the full $512 \times 512 \times 512$ volume yields 1-2 fps, while rendering a scaled-down $256 \times 256 \times 256$ volume achieves over 10 fps [S1].
+*   **Load Balancing:** The k-d tree subdivision may produce uneven workloads if the volume density is non-uniform, and load-balancing problems remain to be addressed in this parallel implementation [S3].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def parallel_volume_rendering(volume_data, cluster_nodes, host_node):
+    # Step 1: k-d tree subdivision along alternating axes
+    def k_d_tree_subdivide(data, depth=0):
+        if len(cluster_nodes) == 1:
+            return [data]
+        axis = depth % 3
+        mid = data.shape[axis] // 2
+        if axis == 0:
+            left, right = data[:mid], data[mid:]
+        elif axis == 1:
+            left, right = data[:, :mid], data[:, mid:]
+        else:
+            left, right = data[:, :, :mid], data[:, :, mid:]
+        if len(cluster_nodes) > 2:
+            left = k_d_tree_subdivide(left, depth + 1)
+            right = k_d_tree_subdivide(right, depth + 1)
+        return left + right
+
+    # Step 2: Software resampling to fixed 256x256x256
+    def software_resample(subvol, target_size=256):
+        res = [[[[0.0 for _ in range(target_size)] for _ in range(target_size)] for _ in range(target_size)]]
+        sx, sy, sz = subvol.shape
+        for i in range(target_size):
+            for j in range(target_size):
+                for k in range(target_size):
+                    fx, fy, fz = i * sx / target_size, j * sy / target_size, k * sz / target_size
+                    res[0][i][j][k] = trilinear_interpolate(subvol, fx, fy, fz)
+        return res[0]
+
+    # Step 3: Distribution
+    subvolumes = k_d_tree_subdivide(volume_data)
+    resampled_subvolumes = [software_resample(sv) for sv in subvolumes]
+    for i, node in enumerate(cluster_nodes):
+        node.upload_texture(resampled_subvolumes[i])
+
+    # Step 4: Parallel Rendering (Raycasting)
+    def raycast_subimage(node_subvol, ray_origin, ray_dir, image_width, image_height):
+        step = max(node_subvol.shape) / 256.0
+        image = [[[0.0, 0.0, 0.0] for _ in range(image_width)] for _ in range(image_height)]
+        for y in range(image_height):
+            for x in range(image_width):
+                ray_o = (ray_origin[0] + x * ray_dir[0], ray_origin[1] + y * ray_dir[1], ray_origin[2])
+                color = [0.0, 0.0, 0.0]
+                opacity = 0.0
+                t = 0.0
+                while t < max(node_subvol.shape) and opacity < 1.0:
+                    sample = trilinear_interpolate(node_subvol, ray_o[0] + t * ray_dir[0], ray_o[1] + t * ray_dir[1], ray_o[2] + t * ray_dir[2])
+                    sample_color, sample_opacity = apply_transfer_function(sample)
+                    color[0] += (1.0 - opacity) * sample_color[0] * sample_opacity
+                    color[1] += (1.0 - opacity) * sample_color[1] * sample_opacity
+                    color[2] += (1.0 - opacity) * sample_color[2] * sample_opacity
+                    opacity += (1.0 - opacity) * sample_opacity
+                    t += step
+                image[y][x] = color
+        return image
+
+    subimages = [raycast_subimage(node.texture, camera_origin, camera_direction, img_w, img_h) for node in cluster_nodes]
+
+    # Step 5: Binary-Swap Compositing
+    def binary_swap_composite(images):
+        n = len(images)
+        stage = 1
+        while stage < n:
+            for i in range(n):
+                if i % (2 * stage) == 0:
+                    neighbor_idx = i + stage
+                    half_w = images[i][0].shape[1] // 2
+                    left_part = [row[:half_w] for row in images[i]]
+                    right_part = [row[half_w:] for row in images[neighbor_idx]]
+                    images[i] = composite_front_to_back(left_part, right_part)
+            stage *= 2
+        return images[0]
+
+    final_image = binary_swap_composite(subimages)
+    host_node.display(final_image)
+```
+
+## Operating characteristics
+*   **Time and Memory Complexity:** Memory scales linearly with the number of nodes, as each node stores only a $256^3$ subvolume [S2]. Compositing time scales as $O(N \log N)$ due to the binary-swap tree structure [S4].
+*   **Measured Performance:** On a 9-node cluster (8 compute nodes), rendering a $512 \times 512 \times 512$ volume to a $512 \times 512$ window achieves 1-2 frames per second [S1, S2]. Rendering a $256 \times 256 \times 256$ volume achieves over 10 fps [S1]. On a T3D with 32 partitions, rendering a $128^3$ volume takes 1.012s render and 0.249s composite; with 512 partitions, it takes 0.957s render and 0.162s composite [S4].
+*   **Scaling:** Performance scales with the combined fill-rate of multiple graphics cards and the aggregated texture memory across the cluster [S1, S2]. Fill rate performance achieves between 42 and 190 Mpix/sec, which is roughly 5% to 24% of the GeForce3’s theoretical peak fill rate of 800 Mpix/sec, depending on shader complexity [S5, unofficial].
+*   **Strengths and Limitations:** Enables interactive frame rates suitable for parameter tuning, which software-based methods cannot achieve [S2]. Aggregates video memory across the cluster to render volumes larger than any single card's capacity [S1, S2]. Performance is constrained by the combined fill-rate of the graphics cards and the network bandwidth for compositing [S1, S2]. The fixed subvolume size may introduce resampling artifacts if the original volume is significantly smaller than $256^3$ [S1, S2].
+*   **When to Use:** Use for interactive exploration of large volumetric datasets on a cluster where texture memory limits and fill-rate bottlenecks prevent single-node rendering [S2][S5, unofficial]. Avoid when load-balancing is critical for highly non-uniform data, as the k-d tree subdivision does not dynamically rebalance workloads [S3].
+
+## Background
+This technique was developed for PC clusters equipped with consumer-grade graphics hardware to address the limited video memory of cards like the Nvidia GeForce 3 [S1, S2]. It builds on [MPI Volume Rendering (3D Decomposition)](2254-mpi-volume-rendering-3d-decomposition.md) by replacing MPI-based pixel accumulation with binary-swap compositing and using k-d tree subdivision for load balancing and memory distribution [S1, S2]. The binary-swap image compositing technique was originally described by Kwan-Liu Ma, James Painter, Charles Hansen, and Michael Krogh in IEEE Computer Graphics and Applications, July 1994 [S5, unofficial]. The approach allows for the interactive visualization of large datasets, facilitating the fine-tuning of rendering parameters [S2]. It has been used as a base for renderers combined with displaced parallel projection with shears [S3].
+
+## Sources
+[S1] Interactive Multi-volume Visualization, https://doi.org/10.1007/3-540-46080-2_11, fetched 2026-10-26
+[S2] PDF Hardware-Accelerated Parallel Non-Photorealistic Volume Rendering, https://www3.cs.stonybrook.edu/~mueller/teaching/cse616/maNPR.pdf, fetched 2026-10-27
+[S3] Fast stereoscopic images with ray-traced volume rendering, https://digital.library.unt.edu/ark:/67531/metadc1315616/?q=ct volume rendering, fetched 2026-10-28
+[S4] Parallel rendering techniques for massively parallel visualization, https://digital.library.unt.edu/ark:/67531/metadc622843/?q=level of detail volume rendering, fetched 2026-10-28
+[S5] Chromium: A Stress-Processing Framework for Interactive Rendering on Clusters, https://digital.library.unt.edu/ark:/67531/metadc741962/?q=parallel volume rendering, fetched 2026-10-29 (unofficial)

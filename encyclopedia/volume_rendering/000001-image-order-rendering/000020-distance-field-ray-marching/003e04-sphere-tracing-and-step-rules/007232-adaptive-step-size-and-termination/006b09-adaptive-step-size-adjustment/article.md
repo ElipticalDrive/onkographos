@@ -1,0 +1,61 @@
+# Adaptive Step Size Adjustment
+## Overview
+Adaptive Step Size Adjustment refers to a family of techniques in distance-field ray marching that dynamically modify the step length during traversal to optimize the trade-off between rendering performance and visual fidelity. Unlike fixed-step methods, these algorithms adjust the step size based on local geometry (via Signed Distance Functions) or screen-space error metrics, often incorporating mechanisms to handle the risks of non-conservative stepping such as overshooting. This family is distinct from [Step Size and Termination Rules](4132-step-size-and-termination-rules.md) by its focus on dynamic adjustment logic rather than static thresholds, and from [Step Size and Tracing Geometry](20976-step-size-and-tracing-geometry.md) by its reliance on SDF properties rather than purely geometric bounding volumes.
+## Shared principles
+The core mechanism of adaptive step size adjustment in the context of sphere tracing involves calculating a step length $\Delta t$ that is a function of the current signed distance $d = f(\mathbf{p})$ and potentially other state variables. In standard sphere tracing, $\Delta t = d$. Adaptive methods modify this base step, often using a relaxation parameter $\omega$ such that $\Delta t = \omega \cdot d$ or similar variations, to accelerate convergence.
+
+Key shared concepts include:
+1.  **Dynamic Step Calculation:** The step size is not constant but computed per iteration based on the local SDF value.
+2.  **Safety Checks:** When $\omega > 1$, the step exceeds the conservative bound guaranteed by the Lipschitz condition of the SDF. This introduces the risk of overshooting the surface. A common shared principle is the detection of this overshoot, typically via an overlap test between the unbounding spheres of consecutive steps. If the spheres do not overlap, the surface may have been missed, triggering a fallback to a conservative step (e.g., $\omega = 1$).
+3.  **Screen-Space Error Metrics:** Many adaptive methods in this family utilize screen-space error (e.g., $r/t$) to determine termination or to select the best intersection candidate, particularly when the ray grazes the surface or exceeds iteration limits. This ensures that the final shading point is visually accurate even if the geometric convergence is not perfect.
+4.  **State Maintenance:** The algorithms typically maintain state variables such as the previous step's radius or step length to facilitate overlap tests and adaptive adjustments.
+
+## Subtopics
+
+### [Over-relaxation Sphere Tracing](3805-over-relaxation-sphere-tracing.md)
+[Over-relaxation Sphere Tracing](3805-over-relaxation-sphere-tracing.md) accelerates standard sphere tracing by stepping further than the conservative SDF bound allows, controlled by a relaxation parameter $\omega \in [1, 2)$. It reduces SDF evaluations by 20–40% in typical renders. Unlike standard sphere tracing, it risks overshooting; it detects this via an overlap test between consecutive unbounding spheres and falls back to standard sphere tracing if an intersection is missed. It also incorporates screen-space error metrics to select the best shading point when the ray grazes an object or exceeds the maximum iteration count, reducing artifacts compared to simply using the last evaluated point. Choose this method when performance is critical and the SDF is well-behaved (Lipschitz continuous).
+
+### Sphere Tracing with Fixed Offset Step
+**Definition:** A sphere tracing algorithm that advances by the SDF value plus a fixed step size [S1, unofficial].
+**Steps:**
+1. Initialize $t=0$ [S1, unofficial].
+2. Loop $i$ from 0 to $stepcount-1$ [S1, unofficial].
+3. Evaluate SDF: $ft = sdf(RAY(r,t))$ [S1, unofficial].
+4. If $ft \le 0$: return $vec2(t - stepsize, t)$ [S1, unofficial].
+5. Advance: $t += ft + stepsize$ [S1, unofficial].
+6. After loop: return $vec2(t - stepsize, t)$ [S1, unofficial].
+
+### Adaptive Sphere Tracing with Step Size Reduction
+**Definition:** A sphere tracing variant that dynamically adjusts step size based on previous and current distances to improve convergence [S1, unofficial].
+**Steps:**
+1. Define constant: `#define STEP_SIZE_REDUCTION 0.87` [S1, unofficial].
+2. Initialize variables: `float pft = 0, dt = 0, nft, msp = st_stepsize;` [S1, unofficial].
+3. Loop `st_stepcount` times:
+    a. Increment minimum step size: `msp += st_stepincr;` [S1, unofficial].
+    b. Calculate delta time: `dt = ft * (1 - STEP_SIZE_REDUCTION * (pft - ft - dt) / (pft - ft + dt)) + msp;` [S1, unofficial].
+    c. Evaluate SDF at new position: `nft = sdf(RAY(r, t + dt), r.v);` [S1, unofficial].
+    d. If step is valid, update position and distance: `if(dt < ft + nft + msp * 1.3) { ft = nft; t += dt; }` [S1, unofficial].
+    e. Else, take a larger step: `else { dt = ft + msp; t += dt; ft = sdf(RAY(r,t), r.v); }` [S1, unofficial].
+4. If distance is below pixel growth threshold, return hit info: `if(ft < t * cam_pixel_growth) return vec3(t - dt, sdf(RAY(r,t - dt), r.v), i);` [S1, unofficial].
+5. Return final position, distance, and step count: `return vec3(t, ft, st_stepcount);` [S1, unofficial].
+
+### Jittered Step Sizes
+**Definition:** Addresses banding artifacts by using higher sampling rates or jittered step sizes to break periodicity, ensuring more continuous integration [S2, unofficial].
+
+### Volume Step Size
+**Definition:** Volume Step size is the distance between volume shader samples [S3].
+**Steps:**
+1. Cycles automatically estimates the step size based on voxel size in volume objects and smoke simulations [S3].
+2. For procedural volume shaders that add detail, the step size can be increased per object, material, or world [S3].
+**Parameter:**
+*   **Step size:** The distance between volume shader samples. Increasing this value reduces render time but may cause loss of volume detail [S3].
+
+## Background
+Adaptive step size adjustment in the context of sphere tracing emerged from the need to optimize the computational cost of ray marching through Signed Distance Fields. Standard sphere tracing is conservative but slow, as it must take the smallest possible step to guarantee no surface penetration. Over-relaxation techniques, such as those described in [Over-relaxation Sphere Tracing](3805-over-relaxation-sphere-tracing.md), were developed to accelerate this process by allowing larger steps while mitigating the risk of overshooting through geometric checks [S1, unofficial]. The use of screen-space error metrics for intersection selection further refined these methods to handle edge cases like grazing rays, which are common in real-time rendering [S1, unofficial].
+
+In volume rendering, adaptive step sizing is often handled automatically by renderers based on voxel density or procedural detail, as seen in Blender's Cycles engine, where step size estimation balances render time against detail preservation [S3]. Banding artifacts caused by discrete sampling steps have led to the adoption of jittered step sizes to break periodicity, a technique noted in general volume rendering literature [S2, unofficial].
+
+## Sources
+[S1] Csabix/Interactive-SDF-Renderer, https://github.com/Csabix/Interactive-SDF-Renderer, fetched 2026-10-27 (unofficial)
+[S2] volume rendering, https://grokipedia.com/page/Volume_rendering, fetched 2026-10-26 (unofficial)
+[S3] Volumes - Blender 5.2 LTS Manual, https://docs.blender.org/manual/en/latest/render/cycles/render_settings/volumes.html, fetched 2026-10-29

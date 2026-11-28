@@ -1,0 +1,313 @@
+--- v015.md
++++ v016.md
+@@ -1,103 +1,234 @@
+ # DONeRF
+ 
+-Also called: Depth Oracle Neural Radiance Fields, DONeRF Training Configuration, DONeRF training setup, Depth Oracle Network, DoNeRF
++Also called: DONeRF (Depth Oracle Neural Radiance Fields), DONeRF Training Configuration, DONeRF training setup, Depth Oracle Network
+ 
+ ## Overview
+-DONeRF is a compact dual-network training configuration that replaces the standard NeRF raymarching scheme with a local sampling strategy to enable real-time neural rendering [S3]. It solves the prohibitive computational cost of evaluating dense MLPs along every ray by using a **depth oracle network** to predict optimal sample locations and a **shading network** to accumulate color and density using only a few samples per ray [S1, S3]. Unlike standard NeRF which requires hundreds of samples, DONeRF achieves equal or better quality with 2–4 samples per pixel, reducing inference costs by up to 48× compared to NeRF while maintaining a compact memory footprint [S3].
++DONeRF is a training configuration and architectural variant of NeRF that replaces the standard uniform raymarching with a two-network pipeline: a **depth oracle network** that predicts sample locations and a **shading network** that renders color and density at those locations [S3]. It solves the prohibitive computational cost of NeRF by reducing the number of samples per ray from hundreds to as few as 2–4, enabling real-time rendering on consumer GPUs [S3]. Unlike standard NeRF or acceleration methods like NSVF that rely on explicit spatial data structures (e.g., voxel octrees), DONeRF remains a compact MLP-based representation without additional memory overhead for acceleration structures [S3].
+ 
+ ## How it works
+-DONeRF consists of two distinct neural networks trained sequentially: a depth oracle network and a shading network. The pipeline operates in five stages: ray unification, non-linear depth consideration, oracle classification, space warping, and shading accumulation [S3].
++DONeRF operates via a two-stage pipeline involving a depth oracle network and a shading network. The process is divided into five logical stages: ray unification, non-linear depth consideration, oracle classification, space warping, and shading accumulation [S3].
+ 
+ ### Inputs and Outputs
+-*   **Inputs:** RGBD images (color and depth) sampled from a **view cell**. A view cell is a bounding box with a primary orientation and maximum viewing angle, capturing rays that originate within the box and stay within rotation limits [S3].
+-*   **Outputs:** Rendered RGB images.
++*   **Inputs:** Training images (RGBD if available, otherwise RGB), camera poses, intrinsics, and view cell parameters (bounding box and orientation limits) [S3].
++*   **Outputs:** Optimized weights for the depth oracle network and the shading network. The inference output is the rendered pixel color $\mathbf{c}$ and accumulated opacity $\alpha$ [S3].
+ 
+ ### Data Structures
+-*   **View Cell:** A spatial region defined by a bounding box and rotation limits. Rays are unified within this cell to remove input ambiguity [S3].
+-*   **Depth Oracle Network:** An 8-layer MLP with 256 hidden units per layer (ReLU activation), except for the last output layer [S1, S3].
+-    *   **Input:** Concatenated 3D position $\mathbf{x} \in \mathbb{R}^3$ and view direction $\mathbf{d} \in S^2$. **No positional encoding** is applied [S1].
+-    *   **Output:** Discretized depth classification logits (BCE loss target) [S3].
+-*   **Shading Network:** An 8-layer MLP with 256 hidden units per layer (ReLU activation), except for the last output layer [S1, S3].
+-    *   **Input:** 3D position $\mathbf{x}$ and view direction $\mathbf{d}$.
+-    *   **Encoding:** Positional encoding (PE) is applied to $\mathbf{x}$ and $\mathbf{d}$ to produce $\gamma(\mathbf{x})$ (63-dim) and $\gamma(\mathbf{d})$ (27-dim) [S1].
+-    *   **Architecture Detail:** $\gamma(\mathbf{x})$ is used at the first layer. $\gamma(\mathbf{d})$ is concatenated to the feature vector before the last layer [S1].
+-    *   **Output:** RGB color $\mathbf{c} \in \mathbb{R}^3$ and volume density $\sigma \in \mathbb{R}^+$ [S1].
++*   **View Cell:** A bounding box with a primary orientation and maximum viewing angle, defining the region of interest for a set of cameras [S3].
++*   **Depth Oracle Network:** An 8-layer MLP with 256 hidden units per layer. Input is the concatenation of 3D position $\mathbf{x} \in \mathbb{R}^3$ and view direction $\mathbf{d} \in S^2$. No positional encoding is applied [S1].
++*   **Shading Network:** An 8-layer MLP with 256 hidden units per layer. Input is $\mathbf{x}$ and $\mathbf{d}$. Positional encoding is applied to both [S1].
+ 
+ ### Numbered Steps
+ 
+-1.  **Ray Unification and View Cell Definition:**
+-    *   Define a view cell for the scene or sub-scene.
+-    *   Transform ray origins and directions into the unified space of the view cell to reduce input ambiguity [S3].
+-
+-2.  **Depth Oracle Network Training:**
+-    *   **Target Generation:** Use ground truth depth maps (or extracted depth from a dense NeRF if GT is unavailable) to create filtered, discretized target depth values [S3].
+-    *   **Training:** Train the depth oracle network to solve a classification task rather than directly estimating depth.
+-    *   **Loss:** Binary Cross-Entropy (BCE) loss [S3].
+-    *   **Duration:** 300,000 iterations [S3].
+-
+-3.  **Sample Selection (Oracle Inference):**
+-    *   For each ray, pass the unified position and direction through the trained depth oracle network.
+-    *   The oracle predicts importance/depth, selecting $N_s$ sample locations along the ray. Common configurations are DONeRF-2, DONeRF-4, DONeRF-8, or DONeRF-16, where $N$ is the number of samples per ray [S3].
+-    *   The number of runs per ray is calculated as $1 + N_s/N_p$, where $N_p=1$ in standard DONeRF [S1].
+-
+-4.  **Space Warping:**
+-    *   Transform the selected sample positions logarithmically and warp them towards the view cell [S3]. This non-linear transformation focuses sampling on close regions and helps the shading network capture different frequencies in the foreground and background [S3].
+-
+-5.  **Shading Network Training:**
+-    *   **Input:** Use the warped sample positions and original directions as inputs to the shading network.
+-    *   **Forward Pass:** Query the shading network to get $\mathbf{c}_i$ and $\sigma_i$ for each of the $N$ samples.
+-    *   **Volume Rendering:** Compute accumulated color $\hat{C}(\mathbf{r})$ using standard volume rendering:
+-        $$ \hat{C}(\mathbf{r}) = \sum_{i=1}^{N} T_i \alpha_i \mathbf{c}_i $$
+-        where $\alpha_i = 1 - \exp(-\sigma_i \delta_i)$, $T_i = \exp(-\sum_{j=1}^{i-1} \sigma_j \delta_j)$, and $\delta_i$ is the distance between samples [S3].
+-    *   **Loss Computation:**
+-        *   **MSE Loss:** Standard Mean Squared Error between $\hat{C}$ and ground truth RGB [S3].
+-        *   **Opacity Loss ($\text{loss}_O$):** A penalty term to prevent "cheating" (mixing background color via opacity) and dark pixel artifacts at low sample counts. If the accumulated opacity $\sum_{i=1}^N \delta_i < 1$, the loss is non-zero:
+-            $$ \text{loss}_O = \begin{cases} 0, & \text{if } \sum_{i=1}^N \delta_i \geq 1 \\ \left( \left( \sum_{i=1}^N \delta_i \right) - 1 \right)^2, & \text{otherwise} \end{cases} $$
+-            where $N$ is the number of samples per ray [S3].
+-        *   **Total Loss:**
+-            $$ \text{loss} = \alpha \cdot \text{loss}_{\text{MSE}} + \beta \cdot \text{loss}_O $$
+-            Typical values: $\alpha = 1.0$, $\beta = 10.0$ [S3].
+-    *   **Training:** Train the shading network for 300,000 iterations using the oracle's predictions [S3].
+-
+-6.  **Inference (Real-Time Rendering):**
+-    *   **Implementation:** Use custom CUDA kernels for ray unification, space warping, feature generation, and raymarching (one thread per ray). Evaluate networks using TensorRT in half-precision floating point [S3].
+-    *   **Pipeline:**
+-        1.  Ray unification (0.21 ms for 800x800).
+-        2.  Oracle network evaluation (12.64 ms).
+-        3.  Space warping and second feature generation (3.46 ms).
+-        4.  Shading network evaluation (scales linearly with samples: 34.9 ms for 2 samples, 65.4 ms for 4 samples, etc.) [S3].
+-        5.  Final color generation (0.09 ms) [S3].
++1.  **Ray Unification:** Rays are transformed into a unified space relative to the view cell's primary orientation. This reduces input ambiguity for the oracle network [S3].
++2.  **Oracle Input Construction:** The depth oracle network takes the unified position $\mathbf{x}$ and direction $\mathbf{d}$ as input. It does not use positional encoding [S1].
++3.  **Depth Classification:** The oracle network outputs a classification vector representing discretized depth bins along the ray. It learns to classify depth ranges rather than predicting a single continuous depth value [S3].
++4.  **Sample Selection:** Based on the oracle's classification, $N_s$ samples are selected along the ray. The number of selected samples $N_s$ is a hyperparameter (e.g., 2, 4, 8, 16) [S3].
++5.  **Space Warping:** The selected sample positions are transformed (warped) towards the view cell. This non-linear transformation focuses sampling density on foreground regions and handles large depth ranges [S3].
++6.  **Shading Network Forward Pass:** The warped sample positions and original directions are passed to the shading network.
++    *   Positional encoding $\gamma(\mathbf{x})$ (63-dim) is applied to positions and fed into the first layer.
++    *   Positional encoding $\gamma(\mathbf{d})$ (27-dim) is concatenated to the feature vector before the last layer [S1].
++    *   The network outputs RGB color $\mathbf{c} \in \mathbb{R}^3$ and volume density $\sigma \in \mathbb{R}^+$ for each sample [S1].
++7.  **Volume Rendering:** The final color is computed using the standard differentiable volume rendering integral over the $N_s$ samples [S3].
++
++### Formulas
++
++**Opacity Loss:**
++To prevent dark pixel artifacts caused by low sample counts failing to accumulate to full opacity for opaque surfaces, an opacity loss term is added [S3]:
++
++$$
++\text{loss}_O = 
++\begin{cases} 
++0, & \text{if } \sum_{i=1}^{N_s} \alpha_i \geq 1 \\
++\left( \left( \sum_{i=1}^{N_s} \alpha_i \right) - 1 \right)^2, & \text{otherwise}
++\end{cases}
++$$
++
++where $\alpha_i = 1 - \exp(-\sigma_i \delta_i)$ is the opacity of sample $i$, and $N_s$ is the number of samples per ray [S3].
++
++**Total Loss:**
++The total loss is a weighted sum of the Mean Squared Error (MSE) between rendered and ground truth colors, and the opacity loss [S3]:
++
++$$
++\text{loss} = \alpha \cdot \text{loss}_{\text{MSE}} + \beta \cdot \text{loss}_O
++$$
++
++Typical values are $\alpha = 1.0$ and $\beta = 10.0$ [S3].
++
++**Depth Oracle Loss:**
++The depth oracle is trained using Binary Cross Entropy (BCE) loss on the discretized depth classification targets [S3].
+ 
+ ### Parameters
+-*   **Network Architecture:** Both networks have 8 hidden layers with 256 hidden units [S3].
+-*   **Optimizer:** Adam, learning rate $0.0005$, batch size 4096 samples per iteration [S3].
+-*   **Samples per Ray ($N$):** 2, 4, 8, or 16. DONeRF-4 is a common configuration [S3].
+-*   **View Cell Parameters:** K-5, Z-5, I-128 (specific configuration details for the oracle input construction) [S3].
+-*   **Loss Weights:** $\alpha=1.0$, $\beta=10.0$ [S3].
++*   **Network Architecture:** Both oracle and shading networks have 8 hidden layers with 256 units [S3].
++*   **Samples per Ray ($N_s$):** Typically 2, 4, 8, or 16. DONeRF-4 is a common configuration [S3].
++*   **Training Iterations:** 300,000 iterations for the oracle network, followed by 300,000 iterations for the shading network [S3].
++*   **Optimizer:** Adam, learning rate 0.0005, batch size 4096 samples per iteration [S3].
++*   **View Cell:** Defined by a bounding box and rotation limits (e.g., 30° pitch, 20° yaw) [S3].
+ 
+ ### Edge Cases and Pitfalls
+-*   **Dark Pixel Artifacts:** At low sample counts, rays may not accumulate to opacity 1 for opaque surfaces, causing darkening. This is remedied by the opacity loss term [S3].
+-*   **Opacity Cheating:** Shading networks with low sample counts may rely on opacity outputs to mix background color. The opacity loss prevents this [S3].
+-*   **No Ground Truth Depth:** If GT depth is unavailable, train a dense NeRF (12 layers, 512 hidden units, 128 samples/ray) to extract depth maps, then train DONeRF using these extracted depths. Quality drops by ~1 dB on average compared to using GT depth [S3].
+-*   **Reflective/Transparent Surfaces:** Low sample counts and single depth estimates are insufficient for perfect replication of view-dependent phenomena like mirrors or refractive water [S3].
+-*   **Background Noise (No-GT):** NeRF may output high-frequency depth values in the background, creating zero-contribution samples. Adding background detection during oracle training is suggested to resolve this [S3].
+-*   **Non-End-to-End:** The architecture is not end-to-end trainable and struggles without high-quality depth supervision [S2].
++*   **Dark Pixel Artifacts:** Low sample counts may result in accumulated opacity $< 1$ for opaque surfaces, causing darkening. This is mitigated by the opacity loss term [S3].
++*   **Non-End-to-End Training:** The architecture is not jointly trainable in a single pass; the oracle must be trained first to provide stable sample locations for the shading network [S2].
++*   **Lack of Ground Truth Depth:** If GT depth is unavailable, a dense NeRF (12 layers, 512 units, 128 samples/ray) must be trained first to extract depth maps, which are then used as supervision for the oracle [S3]. This can introduce noise in background regions [S3].
++*   **Reflective/Transparent Surfaces:** Single-depth estimation is insufficient for mirrors or refractive surfaces, leading to artifacts [S3].
++
++### Pseudocode
++
++```python
++import torch
++import torch.nn as nn
++import torch.nn.functional as F
++
++class DepthOracle(nn.Module):
++    """
++    Depth Oracle Network: 8 layers, 256 hidden units.
++    Input: x (B, 3), d (B, 3). No positional encoding.
++    Output: Classification logits for depth bins.
++    """
++    def __init__(self):
++        super().__init__()
++        self.layers = nn.ModuleList([
++            nn.Linear(6, 256) for _ in range(7)
++        ] + [nn.Linear(256, 1)]) # Last layer outputs scalar depth/bin index
++
++    def forward(self, x, d):
++        # Concatenate x and d
++        inp = torch.cat([x, d], dim=-1)
++        h = inp
++        for i, layer in enumerate(self.layers[:-1]):
++            h = F.relu(layer(h))
++        # Last layer
++        out = self.layers[-1](h)
++        return out
++
++class ShadingNetwork(nn.Module):
++    """
++    Shading Network: 8 layers, 256 hidden units.
++    Input: x (B, 3), d (B, 3).
++    Output: RGB (B, 3), Density (B, 1).
++    """
++    def __init__(self, num_samples):
++        super().__init__()
++        self.num_samples = num_samples
++        # Positional encoding dimensions: 63 for x, 27 for d
++        self.pos_enc_x_dim = 63
++        self.pos_enc_d_dim = 27
++        
++        self.layers = nn.ModuleList([
++            nn.Linear(self.pos_enc_x_dim, 256), # First layer takes PE of x
++        ] + [
++            nn.Linear(256, 256) for _ in range(6)
++        ] + [
++            nn.Linear(256 + self.pos_enc_d_dim, 4) # Last layer: RGB(3) + Density(1)
++        ])
++
++    def forward(self, x, d):
++        # Apply positional encoding
++        # Note: Standard NeRF PE is assumed here. 
++        # gamma(x) -> 63 dim, gamma(d) -> 27 dim
++        gamma_x = positional_encoding(x, L=6) # 3 * (2*6 + 1) = 39? 
++        # Source says 63-dim. Standard NeRF uses L=10 for 3D -> 63.
++        gamma_x = positional_encoding(x, L=10) 
++        gamma_d = positional_encoding(d, L=4) # 3 * (2*4 + 1) = 27
++        
++        h = gamma_x
++        for i, layer in enumerate(self.layers[:-1]):
++            h = F.relu(layer(h))
++        
++        # Concatenate gamma_d before last layer
++        h = torch.cat([h, gamma_d], dim=-1)
++        out = self.layers[-1](h)
++        
++        rgb = out[:, :3]
++        sigma = out[:, 3:]
++        return rgb, sigma
++
++def render_ray(oracle, shading, x_origins, d_directions, near, far, N_samples):
++    """
++    Renders a batch of rays using DONeRF.
++    """
++    # 1. Ray Unification (Simplified: assume x is already in unified space or handled by oracle)
++    # In practice, this involves transforming x relative to view cell
++    
++    # 2. Oracle Prediction
++    # Oracle outputs classification logits for depth bins
++    oracle_logits = oracle(x_origins, d_directions)
++    
++    # 3. Sample Selection
++    # Select N_s samples based on oracle classification
++    # This step is complex and depends on the specific discretization scheme.
++    # For pseudocode, we assume a function `select_samples_from_oracle`
++    # that returns N_s 3D points along the ray.
++    selected_x = select_samples_from_oracle(oracle_logits, x_origins, d_directions, near, far, N_samples)
++    
++    # 4. Space Warping
++    # Warp selected samples towards view cell
++    warped_x = warp_samples(selected_x, view_cell_params)
++    
++    # 5. Shading Network Forward Pass
++    rgb, sigma = shading(warped_x, d_directions)
++    
++    # 6. Volume Rendering
++    # Compute distances between samples
++    # delta_i = distance(warped_x[i], warped_x[i-1])
++    # For the first sample, delta_1 = distance(warped_x[0], near)
++    # For the last sample, delta_N = distance(far, warped_x[N])
++    # This requires sorting warped_x by depth and computing deltas.
++    
++    # Simplified accumulation:
++    # T_i = exp(-sum(sigma_j * delta_j))
++    # alpha_i = 1 - exp(-sigma_i * delta_i)
++    # C = sum(T_i * alpha_i * rgb_i)
++    
++    # Note: Exact warping and delta calculation depends on the specific 
++    # non-linear transformation defined in the source.
++    
++    return C
++
++def train_donerf():
++    """
++    Training loop structure.
++    """
++    oracle = DepthOracle()
++    shading = ShadingNetwork(N_samples=4)
++    
++    # Phase 1: Train Oracle
++    optimizer_oracle = torch.optim.Adam(oracle.parameters(), lr=0.0005)
++    for i in range(300000):
++        # Get batch of rays and GT depth bins
++        # Loss = BCE(oracle_output, gt_depth_bins)
++        optimizer_oracle.zero_grad()
++        loss = compute_oracle_loss(oracle, batch)
++        loss.backward()
++        optimizer_oracle.step()
++        
++    # Phase 2: Train Shading
++    optimizer_shading = torch.optim.Adam(shading.parameters(), lr=0.0005)
++    for i in range(300000):
++        # Get batch of rays and GT color
++        # Render using oracle to get samples, then shading to get color
++        # Loss = MSE(rendered_color, gt_color) + 10 * OpacityLoss
++        optimizer_shading.zero_grad()
++        rendered_color = render_ray(oracle, shading, batch.rays)
++        loss_mse = F.mse_loss(rendered_color, batch.gt_color)
++        loss_opacity = compute_opacity_loss(rendered_color, batch.rays) # Based on sigma
++        loss = loss_mse + 10.0 * loss_opacity
++        loss.backward()
++        optimizer_shading.step()
++```
+ 
+ ## Subtopics
+ 
+ ### [DONeRF Oracle Input Construction](4737-donerf-oracle-input-construction.md)
+-Constructs the input vector for the depth oracle network, providing spatial context by supplying multiple 3D positions along the ray with a logarithmic transformation, omitting positional encoding.
++Constructs the input vector for the depth oracle network, providing spatial context by supplying multiple 3D positions along the ray. It sets itself apart by explicitly feeding discretized 3D positions with a logarithmic transformation, omitting positional encoding.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Inference cost scales nearly linearly with the number of samples per ray. DONeRF requires approximately 4.35 MFLOP per pixel [S3].
+-*   **Memory Complexity:** Compact. Uses only two MLPs (approx. 4 MB) without additional data structures or acceleration structures like voxel octrees [S3].
+-*   **Performance:** Renders at 22 ms per frame on a single GPU (NVIDIA RTX 3090) at 400x400 pixels (approx. 20 fps) with 4 samples per ray [S3]. For 800x800 with 2 samples, total time is 51.3 ms (~20 fps) [S3].
+-*   **Quality:** Achieves an average PSNR of 31.14 dB compared to NeRF's 30.52 dB [S3]. At 16 samples, DONeRF achieves up to 7 dB higher PSNR than NeRF [S3].
+-*   **Speedup:** Inference costs reduced by up to 48x compared to NeRF when conditioning on available ground truth depth [S3].
+-*   **Strengths:** Real-time rendering capability, high quality with few samples, compact memory footprint, no need for explicit caching/acceleration structures.
+-*   **Limitations:** Not end-to-end trainable, requires high-quality depth supervision (or pre-trained NeRF for depth extraction), struggles with reflective/transparent surfaces, view cell definition required for large scenes.
++*   **Time Complexity:** DONeRF requires approximately 4.35 MFLOP per pixel [S3]. Inference costs are reduced by up to 48x compared to NeRF [S3].
++*   **Memory Complexity:** Compact MLP representation. No additional memory for explicit caching or acceleration structures (unlike NSVF) [S3].
++*   **Performance:** Renders at 22 ms per frame on a single GPU at 400x400 pixels [S3]. On NVIDIA RTX 3090 at 800x800 with 2 samples/ray, total time is 51.3 ms (~20 fps) [S3].
++*   **Quality:** Average PSNR of 31.14 dB compared to NeRF's 30.52 dB [S3]. At 16 samples, up to 7 dB higher PSNR than NeRF [S3].
++*   **Strengths:** Real-time performance, compact memory footprint, high quality on large scenes [S3].
++*   **Limitations:** Not end-to-end trainable, struggles without high-quality depth supervision, artifacts on reflective/transparent surfaces, dark pixel artifacts at low sample counts [S2][S3].
+ 
+ ## Background
+-DONeRF was introduced by [S3] to bring compact neural representations closer to practical real-time rendering applications such as games and virtual reality. It addresses the prohibitive computational cost of NeRF, which requires dozens of petaFLOPS for dense raymarching. The method was developed to enable interactive rendering (20 fps) on a single GPU while maintaining high image quality. It builds on the concept of depth oracles [S2] but introduces a specific dual-network training scheme, view cell unification, and space warping to achieve real-time performance without explicit acceleration structures.
++DONeRF was introduced by [S3] to address the computational prohibitions of NeRF for real-time rendering. It was developed by researchers at Graz University of Technology and Facebook Reality Labs. The method builds on the concept of using depth information to guide sampling, replacing the coarse/fine network structure of NeRF with a dedicated depth oracle and shading network [S3].
+ 
+ ## Sources

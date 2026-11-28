@@ -1,0 +1,100 @@
+# Rate-Distortion Optimization Loss
+
+Also called: L2 loss between rendered and ground truth colors, MSE loss for NeRF
+
+## Overview
+The Rate-Distortion Optimization Loss is a composite objective function for training neural radiance fields that balances photometric accuracy against representation efficiency [S2]. It extends the standard NeRF training objective by explicitly adding a rate term and a regularization term weighted by hyperparameters, whereas standard formulations rely primarily on the Mean Squared Error between rendered and ground truth colors [S1, S2].
+
+## How it works
+**Inputs and Outputs**
+*   **Inputs:** A batch of training rays $\mathbf{R}$, ground truth colors $\mathbf{C}(\mathbf{r})$ for each ray, network parameters $\theta$ (density $\sigma$ and color $\mathbf{c}$), and hyperparameters $\lambda_1, \lambda_2$ [S1, S2].
+*   **Outputs:** A scalar total loss value $\mathcal{L}_{total}$ used for backpropagation [S2].
+
+**Data Structures**
+The method operates within the standard differentiable volume rendering framework [S1, S2]. For each ray $\mathbf{r}$, the renderer samples $N$ points with distances $\delta_i$ between neighboring points [S1]. Density $\sigma_i$ and color $\mathbf{c}_i$ are predicted per sampled point [S1].
+
+**Formulas**
+The rendered color $\hat{\mathbf{C}}(\mathbf{r})$ is computed via volume rendering [S1]:
+$$ \hat{\mathbf{C}}(\mathbf{r}) = \sum_{i=1}^N T_i (1 - \exp(-\sigma_i \delta_i)) \mathbf{c}_i $$
+where the accumulated transmittance $T_i$ is:
+$$ T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right) $$
+with $T_1 = 1$ [S1].
+
+The total loss is defined as [S2]:
+$$ \mathcal{L}_{total} = \sum_{\mathbf{r} \in \mathbf{R}} \|\mathbf{C}(\mathbf{r}) - \hat{\mathbf{C}}(\mathbf{r})\|^2 + \lambda_1 \mathcal{L}_{rate} + \lambda_2 \mathcal{L}_{reg} $$
+
+1.  **Distortion Loss ($\mathcal{L}_{dist}$):** The first term is the Mean Squared Error (MSE) between the ground truth color $\mathbf{C}(\mathbf{r})$ and the rendered color $\hat{\mathbf{C}}(\mathbf{r})$ [S1, S2].
+    $$ \mathcal{L}_{dist} = \sum_{\mathbf{r} \in \mathbf{R}} \|\mathbf{C}(\mathbf{r}) - \hat{\mathbf{C}}(\mathbf{r})\|^2 $$
+2.  **Rate Loss ($\mathcal{L}_{rate}$):** This term estimates the bitrate required to encode the radiance field representation [S2]. It is calculated based on the probability distribution of the quantized representation $\hat{\mathbf{y}}$ [S2]:
+    $$ \mathcal{L}_{rate} = \frac{1}{N} \sum_{\hat{\mathbf{y}}_i \in \mathcal{F}} -\log_2 [P(\hat{\mathbf{y}}_i)] $$
+    where $\mathcal{F}$ is the set of quantized field coefficients and $P(\hat{\mathbf{y}}_i)$ is the probability of coefficient $\hat{\mathbf{y}}_i$ [S2].
+3.  **Regularization Loss ($\mathcal{L}_{reg}$):** A regularization term applied to the representation [S2]. The specific formulation of $\mathcal{L}_{reg}$ is not detailed in the provided sources [G].
+
+**Parameters**
+*   $\lambda_1$: Rate-distortion trade-off parameter that balances rate loss and distortion loss to control the degree of compression [S2]. Tested values: $0.0001, 0.0005, 0.002, 0.005$ [S2].
+*   $\lambda_2$: Weight for the regularization loss applied to the representation [S2]. Value: $0.0001$ [S2].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def rate_distortion_loss(ground_truth_colors, densities_list, colors_list, distances_list, quantized_coeffs, lambda1, lambda2):
+    """
+    Computes the Rate-Distortion Optimization Loss over a batch of rays.
+    """
+    total_distortion = 0.0
+    for gt, densities, colors, distances in zip(ground_truth_colors, densities_list, colors_list, distances_list):
+        # Render color for this ray [S1]
+        rendered = compute_rendered_color(densities, colors, distances)
+        # Distortion term [S1, S2]
+        total_distortion += (gt - rendered) ** 2
+
+    # Rate loss [S2]
+    # Laplace distribution parameters initialized in source: mu=0, b=0.01 [S2]
+    mu = 0.0
+    b = 0.01
+    log2_e = 1.44269504089  # log2(e)
+    rate_loss = sum(math.log2(2 * b) + (abs(y - mu) / b) * log2_e for y in quantized_coeffs) / len(quantized_coeffs)
+
+    # Regularization loss [S2]
+    reg_loss = 0.0  # Specific formulation not given in the sources [G]
+
+    # Total loss [S2]
+    total_loss = total_distortion + lambda1 * rate_loss + lambda2 * reg_loss
+    return total_loss
+
+def compute_rendered_color(densities, colors, distances):
+    """
+    Computes rendered color using volume rendering integral [S1].
+    """
+    transmittances = [1.0]
+    for i in range(1, len(densities)):
+        prev_transmittance = transmittances[-1]
+        alpha_prev = 1.0 - math.exp(-densities[i-1] * distances[i-1])
+        transmittances.append(prev_transmittance * (1.0 - alpha_prev))
+
+    rendered_color = 0.0
+    for i in range(len(densities)):
+        alpha_i = 1.0 - math.exp(-densities[i] * distances[i])
+        weight_i = transmittances[i] * alpha_i
+        rendered_color += weight_i * colors[i]
+
+    return rendered_color
+```
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Strengths:** Explicitly controls the trade-off between image quality (PSNR) and bitrate, making it suitable for compression applications [S2].
+*   **Limitations:** The specific formulation of $\mathcal{L}_{reg}$ is not provided in the sources [G].
+*   **When to use:** When compressing neural radiance fields or dynamic NeRFs while maintaining visual quality [S2].
+*   **When not to use:** For standard NeRF training without compression goals, the standard MSE loss is sufficient [S1].
+
+## Background
+The method originates from research on efficient dynamic NeRF-based volumetric video coding [S2]. It adapts video coding principles by combining a distortion component derived from standard NeRF rendering loss [S1] with a rate component based on entropy models [S2]. It was evaluated on the ReRF and Dna-rendering datasets [S2].
+
+## Sources
+[S1] Learning Heterogeneous Mixture of Scene Experts for Large-Scale Neural Radiance Fields., https://doi.org/10.1109/tpami.2025.3603305, fetched 2026-10-26
+[S2] Efficient Dynamic-NeRF Based Volumetric Video Coding with Rate Distortion Optimization, https://doi.org/10.1109/icme57554.2024.10687892, fetched 2026-10-28

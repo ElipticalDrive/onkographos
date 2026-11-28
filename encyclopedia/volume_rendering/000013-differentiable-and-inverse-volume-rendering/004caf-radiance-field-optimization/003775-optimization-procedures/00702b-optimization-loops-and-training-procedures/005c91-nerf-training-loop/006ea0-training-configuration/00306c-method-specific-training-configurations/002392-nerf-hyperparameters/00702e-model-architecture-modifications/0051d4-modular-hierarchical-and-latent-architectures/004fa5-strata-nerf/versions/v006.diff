@@ -1,0 +1,402 @@
+--- v005.md
++++ v006.md
+@@ -4,29 +4,105 @@
+ 
+ ## Overview
+-Strata-NeRF is a neural radiance field method designed to model "stratified scenes"—environments that can be deconstructed into distinct hierarchical levels or tiers, such as the exterior and interior of a building, where structural discontinuities exist between levels [S1]. Unlike standard continuous NeRFs that produce cloudy artifacts and white haziness when trained jointly on multiple hierarchical levels, Strata-NeRF uses Vector Quantized (VQ) latent representations to explicitly capture these sudden changes in scene structure [S1]. It achieves this by conditioning a single radiance field network on discrete latent codes generated from 3D positions, allowing for seamless switching between levels while sharing architectural commonalities to reduce memory usage compared to training independent models per level [S1].
++Strata-NeRF is a neural radiance field method designed to implicitly capture scenes with multiple hierarchical levels (stratified scenes) by conditioning the radiance field on Vector Quantized (VQ) latent representations [S1]. Unlike standard continuous NeRFs, which produce artifacts like haziness and white clouds when trained jointly on images from different structural levels, Strata-NeRF uses discrete latent codes to model sudden changes and discontinuities in scene structure [S1]. It achieves this through a Latent Generator that compresses 3D positions into discrete codes and a Latent Router that conditions the radiance field MLP, allowing a single network to represent complex, multi-tiered environments such as buildings with distinct interior and exterior geometries [S1].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Inputs:** 3D spatial coordinates $\mathbf{x} \in \mathbb{R}^3$, viewing direction $\mathbf{d} \in \mathbb{R}^3$, and ray parameters $t$ (distance along ray).
+-*   **Outputs:** Volume density $\sigma$ and view-dependent color $\mathbf{c} \in \mathbb{R}^3$.
+-
+-**Data Structures:**
+-1.  **Codebook ($\mathbf{E}$):** A lookup table of discrete latent vectors.
+-    *   Size: $N \times D$.
+-    *   Values: $\mathbf{e}_i \in \mathbb{R}^D$ for $i \in \{0, \dots, N-1\}$.
+-    *   Typical Values: $N=1024$, $D=48$ [S1].
+-2.  **Latent Generator Encoder ($\mathcal{E}$):** A small MLP mapping positional encoding to latent space.
+-    *   Architecture: Two linear layers.
+-    *   Hidden size: 48 [S1].
+-3.  **Latent Generator Decoder ($\mathcal{D}$):** A small MLP reconstructing positional encoding from latent space.
+-    *   Architecture: One linear layer.
+-    *   Hidden size: 96 [S1].
+-4.  **Latent Router ($\mathcal{R}$):** An MLP mapping quantized latents to modulation parameters for the Radiance Field.
+-    *   Architecture: Two linear layers.
+-    *   Hidden size: 256 [S1].
+-5.  **Radiance Field ($F_\Theta$):** The base NeRF network (based on Mip-NeRF 360 [S1]).
+-    *   Conditioning: The first two layers are conditioned by the output of $\mathcal{R}$.
+-
+-**Pseudocode:**
++
++### Inputs and Outputs
++*   **Inputs:**
++    *   3D spatial position $\mathbf{x} \in \mathbb{R}^3$.
++    *   Viewing direction $\mathbf{d} \in \mathbb{R}^3$.
++    *   Camera pose parameters (implicitly handled via the ray generation process, consistent with the base Mip-NeRF 360 architecture).
++    *   Ground truth color $c^*(\mathbf{r})$ for reconstruction loss.
++*   **Outputs:**
++    *   Volume density $\sigma$.
++    *   View-dependent color $\mathbf{c} \in \mathbb{R}^3$.
++
++### Data Structures
++
++**1. Vector Codebook**
++*   **Layout:** A lookup table of discrete latent vectors.
++*   **Size:** $N = 1024$ entries.
++*   **Dimension:** $D = 48$ per vector.
++*   **Type:** Float32 (standard for VQ-VAE codebooks).
++*   **Access:** Nearest neighbor search based on Euclidean distance.
++
++**2. Latent Generator Encoder**
++*   **Structure:** Two linear layers.
++*   **Hidden Size:** 48.
++*   **Input:** Integrated Positional Encoded (IPE) position $\boldsymbol{\gamma}(\mathbf{x})$.
++*   **Output:** Continuous latent vector $\mathbf{z} \in \mathbb{R}^{48}$.
++
++**3. Latent Generator Decoder**
++*   **Structure:** One linear layer.
++*   **Hidden Size:** 96.
++*   **Input:** Quantized latent vector $\mathbf{z}_e \in \mathbb{R}^{48}$.
++*   **Output:** Reconstructed position $\mathbf{y} \in \mathbb{R}^{48}$ (matching IPE dimension).
++
++**4. Latent Router**
++*   **Structure:** Two linear layers.
++*   **Hidden Size:** 256.
++*   **Input:** Quantized latent vector $\mathbf{z}_e$.
++*   **Output:** Conditioning signal applied to the first two layers of the Radiance Field MLP.
++
++**5. Radiance Field MLP (Base)**
++*   **Architecture:** Based on Mip-NeRF 360 [S1].
++*   **Conditioning:** The first two layers are conditioned by the output of the Latent Router.
++
++### Numbered Steps
++
++1.  **Positional Encoding:** For a given 3D point $\mathbf{x}$ along a ray, compute the Integrated Positional Encoding (IPE) $\boldsymbol{\gamma}(\mathbf{x})$ [S1]. This matches the input dimension of the Latent Generator.
++2.  **Latent Generation:** Pass $\boldsymbol{\gamma}(\mathbf{x})$ through the Latent Generator Encoder to obtain a continuous latent vector $\mathbf{z}$:
++    $$ \mathbf{z} = \text{Encoder}_{\text{LG}}(\boldsymbol{\gamma}(\mathbf{x})) $$
++3.  **Vector Quantization:** Find the nearest neighbor in the Codebook $\mathbf{E} \in \mathbb{R}^{N \times D}$ to $\mathbf{z}$. Let $\mathbf{z}_e$ be the selected codebook vector:
++    $$ \mathbf{z}_e = \arg \min_{\mathbf{e}_i \in \mathbf{E}} ||\mathbf{z} - \mathbf{e}_i||_2 $$
++    *Note: During training, the gradient flows through $\mathbf{z}$ to the encoder and through $\mathbf{z}_e$ to the codebook using stop-gradient operators as defined in the loss.*
++4.  **Latent Routing:** Pass the quantized code $\mathbf{z}_e$ through the Latent Router MLP to produce a conditioning vector.
++5.  **Radiance Field Conditioning:** Inject the conditioning vector from the Latent Router into the first two layers of the Radiance Field MLP [S1].
++6.  **Density and Color Prediction:** Feed the spatial position $\mathbf{x}$, viewing direction $\mathbf{d}$, and the conditioned features into the rest of the Radiance Field MLP to predict volume density $\sigma$ and color $\mathbf{c}$ [S1].
++7.  **Volume Rendering:** Integrate $\sigma$ and $\mathbf{c}$ along the ray using the standard differentiable volume rendering equation (as defined in the parent article [Parent](3065-nerf-hyperparameters.md)) to produce the final pixel color $c(\mathbf{r}, t)$ [S1].
++8.  **Loss Calculation:** Compute the total loss $L_{total}$ (see Formulas) and backpropagate to update all parameters (Latent Generator, Codebook, Latent Router, and Radiance Field) [S1].
++
++### Formulas
++
++**1. Latent Generator VQ Loss ($L_{vq}$)**
++This loss trains the Latent Generator (VAE block) to reconstruct the encoded position and align with the codebook [S1]:
++$$ L_{vq} = ||\boldsymbol{\gamma}(\mathbf{x}) - \mathbf{y}||_2^2 + ||sg(\mathbf{z}_e) - \mathbf{z}||_2^2 + \beta||\mathbf{z}_e - sg(\mathbf{z})||_2^2 $$
++Where:
++*   $\boldsymbol{\gamma}(\mathbf{x})$: Integrated Positional Encoded input.
++*   $\mathbf{y}$: Reconstructed output from the Decoder.
++*   $\mathbf{z}$: Continuous latent output from the Encoder.
++*   $\mathbf{z}_e$: Quantized latent code from Codebook $\mathbf{E}$.
++*   $sg(\cdot)$: Stop-gradient operator.
++*   $\beta$: Commitment loss weight.
++
++**2. Total Training Loss ($L_{total}$)**
++$$ L_{total} = L_{recon}(c(\mathbf{r}, t), c^*(\mathbf{r})) + \lambda_1 L_{dist}(\mathbf{s}, \mathbf{w}) + \lambda_2 L_{vq} $$
++Where:
++*   $L_{recon}$: Photometric reconstruction loss between rendered color $c(\mathbf{r}, t)$ and ground truth $c^*(\mathbf{r})$.
++*   $L_{dist}$: Distortion loss between normalized ray distances $\mathbf{s}$ and weight vector $\mathbf{w}$ [S1].
++*   $L_{vq}$: The VQ loss defined above.
++*   $\lambda_1, \lambda_2$: Loss weights.
++
++### Parameters
++
++*   **$\lambda_1$ (Distortion Loss Weight):** 0.01 [S1].
++*   **$\lambda_2$ (VQ Loss Weight):** 0.1 [S1].
++*   **$\beta$ (Commitment Loss Weight):** 1.0 [S1].
++*   **Optimizer:** Adam [S1].
++*   **Learning Rate:** $1 \times 10^{-6}$ [S1].
++*   **Training Iterations:** 150,000 per scene [S1].
++*   **Codebook Size:** 1024 vectors [S1].
++*   **Codebook Dimension:** 48 [S1].
++*   **Encoder Hidden Size:** 48 [S1].
++*   **Decoder Hidden Size:** 96 [S1].
++*   **Router Hidden Size:** 256 [S1].
++
++### Edge Cases and Pitfalls
++
++*   **Continuous Artifacts:** Standard NeRFs (e.g., Mip-NeRF 360) trained jointly on stratified scenes produce "cloudy" or "sub-optimal" views with white artifacts and haziness because their continuous nature cannot model sudden structural changes between levels [S1]. Strata-NeRF mitigates this by using discrete VQ latents [S1].
++*   **Discontinuity Modeling:** The method explicitly relies on the discreteness of VQ codes to handle discontinuities. If the codebook is too small or the quantization is too aggressive, the model may fail to distinguish between distinct hierarchical levels [S1].
++*   **Base Architecture Dependency:** Strata-NeRF builds on Mip-NeRF 360. It does not alter the proposal MLP or the core volume rendering integration logic, relying instead on the conditioning mechanism [S1].
++
++### Pseudocode
+ 
+ ```python
+@@ -36,164 +112,143 @@
+ 
+ class StrataNeRF:
+-    def __init__(self, codebook_size=1024, latent_dim=48, pe_dim=27):
++    def __init__(self, codebook_size=1024, codebook_dim=48, ipe_dim=48):
+         """
+         Initialize Strata-NeRF components.
+-        pe_dim: Dimension of Integrated Positional Encoding (IPE) output.
+-        """
+-        self.codebook_size = codebook_size
+-        self.latent_dim = latent_dim
+-        self.pe_dim = pe_dim
+-        
++        """
+         # Codebook: N x D
+-        self.codebook = nn.Embedding(codebook_size, latent_dim)
+-        
+-        # Latent Generator Encoder: pe_dim -> latent_dim
+-        # Two linear layers, hidden size 48
++        self.codebook = nn.Embedding(codebook_size, codebook_dim)
++        # Initialize codebook weights
++        nn.init.uniform_(self.codebook.weight, -1/codebook_dim, 1/codebook_dim)
++        
++        # Latent Generator Encoder: 2 linear layers, hidden 48
+         self.encoder = nn.Sequential(
+-            nn.Linear(pe_dim, 48),
++            nn.Linear(ipe_dim, 48),
+             nn.ReLU(),
+-            nn.Linear(48, latent_dim)
++            nn.Linear(48, codebook_dim)
+         )
+         
+-        # Latent Generator Decoder: latent_dim -> pe_dim
+-        # One linear layer, hidden size 96
++        # Latent Generator Decoder: 1 linear layer, hidden 96
+         self.decoder = nn.Sequential(
+-            nn.Linear(latent_dim, 96),
++            nn.Linear(codebook_dim, 96),
+             nn.ReLU(),
+-            nn.Linear(96, pe_dim)
++            nn.Linear(96, ipe_dim)
+         )
+         
+-        # Latent Router: latent_dim -> modulation_params
+-        # Two linear layers, hidden size 256
+-        # Output size depends on the number of parameters in the first two layers of the Radiance Field
+-        # Not given in the sources. Assume output_dim matches the required conditioning size.
++        # Latent Router: 2 linear layers, hidden 256
+         self.router = nn.Sequential(
+-            nn.Linear(latent_dim, 256),
++            nn.Linear(codebook_dim, 256),
+             nn.ReLU(),
+-            nn.Linear(256, output_dim) # Placeholder for specific conditioning size
++            nn.Linear(256, 256) # Output size matches conditioning dim for first 2 layers of RF
+         )
+         
+-        # Radiance Field (Base Mip-NeRF 360)
++        # Radiance Field MLP (Base Mip-NeRF 360)
++        # Note: The specific architecture of the RF is assumed to be from Mip-NeRF 360.
+         # The first two layers are conditioned by the router output.
+-        self.nerf = MipNeRF360Base() 
+-
+-    def forward(self, x, d, t):
+-        """
+-        Forward pass for a batch of points.
+-        x: (B, 3) 3D coordinates
+-        d: (B, 3) Viewing directions
+-        t: (B, K) Distances along ray (for sampling)
+-        """
+-        # 1. Encode 3D position
+-        # gamma(x) is the Integrated Positional Encoding (IPE)
+-        pe_x = integrated_positional_encoding(x) 
+-        z_e = self.encoder(pe_x) # (B, latent_dim)
+-        
+-        # 2. Vector Quantization
+-        # Find nearest codebook vector
+-        # Compute distances: (B, N)
+-        distances = torch.cdist(z_e.unsqueeze(1), self.codebook.weight.unsqueeze(0)).squeeze(1)
+-        indices = torch.argmin(distances, dim=1) # (B,)
+-        
+-        # Get quantized latent code
+-        z_q = self.codebook(indices) # (B, latent_dim)
+-        
+-        # 3. Latent Routing
+-        # Route latent code to condition the NeRF
+-        routing_params = self.router(z_q) # (B, output_dim)
+-        
+-        # 4. Radiance Field Query
+-        # Condition the first two layers of the NeRF with routing_params
+-        # This implementation detail is specific to the base NeRF architecture.
+-        # Generally, this involves adding or scaling the weights/biases of the first two layers.
+-        sigma, color = self.nerf.query_with_conditioning(x, d, t, routing_params)
+-        
+-        return sigma, color, indices, z_e, z_q
+-
+-    def compute_loss(self, sigma, color, t, ray_indices, gt_color, pe_x, z_e, z_q):
++        self.radiance_field = MipNeRF360Base() 
++
++    def forward(self, x, d):
++        """
++        Forward pass for a single 3D point x and direction d.
++        """
++        # 1. Positional Encoding (Integrated PE)
++        # Assuming get_ipe is a helper that computes IPE for x
++        gamma_x = get_ipe(x) 
++        
++        # 2. Latent Generation
++        z = self.encoder(gamma_x)
++        
++        # 3. Vector Quantization
++        # Compute distances to all codebook entries
++        # z shape: (B, D), codebook weight shape: (N, D)
++        distances = torch.cdist(z, self.codebook.weight) # (B, N)
++        indices = torch.argmin(distances, dim=1)
++        
++        # Get quantized codes
++        z_e = self.codebook(indices)
++        
++        # 4. Latent Routing
++        # Condition the radiance field
++        router_output = self.router(z_e)
++        
++        # 5. Radiance Field Prediction
++        # The RF takes x, d, and the router_output as conditioning
++        sigma, c = self.radiance_field(x, d, conditioning=router_output)
++        
++        return sigma, c, z, z_e, gamma_x
++
++    def compute_loss(self, rendered_color, gt_color, sigma, weights, normalized_distances, 
++                     gamma_x, z, z_e, beta=1.0, lambda1=0.01, lambda2=0.1):
+         """
+         Compute total loss.
+         """
+-        # Reconstruction Loss (MSE between predicted and ground truth color)
+-        # c(r, t) is predicted color, c*(r) is ground truth
+-        L_recon = F.mse_loss(color, gt_color)
++        # Reconstruction Loss
++        l_recon = F.mse_loss(rendered_color, gt_color)
+         
+         # Distortion Loss (from Mip-NeRF 360)
+-        # s: normalized ray distances, w: weight vector
+-        # Not given in the sources how s and w are computed here. 
+-        # Assuming standard Mip-NeRF 360 distortion loss calculation.
+-        s = compute_normalized_ray_distances(t)
+-        w = compute_ray_weights(sigma, t)
+-        L_dist = distortion_loss(s, w)
++        l_dist = compute_distortion_loss(normalized_distances, weights)
+         
+         # VQ Loss
+-        # y is reconstructed output from decoder
+-        y = self.decoder(z_q)
++        # Decoder reconstruction
++        y = self.decoder(z_e)
++        recon_loss = torch.norm(gamma_x - y, p=2, dim=1).mean()
++        
++        # Commitment loss and codebook loss
+         # sg denotes stop-gradient
+-        L_vq = (torch.norm(pe_x - y, p=2, dim=1)**2).mean() + \
+-               (torch.norm((z_e.detach()) - z_q, p=2, dim=1)**2).mean() + \
+-               beta * (torch.norm(z_e - (z_q.detach()), p=2, dim=1)**2).mean()
+-               
++        z_e_stopped = z_e.detach()
++        z_stopped = z.detach()
++        
++        commitment_loss = torch.norm(z_e_stopped - z, p=2, dim=1).mean()
++        codebook_loss = torch.norm(z_e - z_stopped, p=2, dim=1).mean()
++        
++        l_vq = recon_loss + commitment_loss + beta * codebook_loss
++        
+         # Total Loss
+-        # lambda1 = 0.01, lambda2 = 0.1, beta = 1.0
+-        L_total = L_recon + 0.01 * L_dist + 0.1 * L_vq
+-        
+-        return L_total
++        l_total = l_recon + lambda1 * l_dist + lambda2 * l_vq
++        
++        return l_total, l_recon, l_dist, l_vq
++
++# Helper for Mip-NeRF 360 base architecture details would go here
++# This is a placeholder to satisfy the "self-contained" requirement for the RF part
++class MipNeRF360Base(nn.Module):
++    def __init__(self):
++        super().__init__()
++        # Placeholder for the actual Mip-NeRF 360 MLP structure
++        # The key modification is that the first two layers receive conditioning
++        pass
++    def forward(self, x, d, conditioning=None):
++        # In Strata-NeRF, conditioning is added to the first two layers
++        # This is a simplified representation
++        return 0.1, torch.zeros(3) # Dummy output
+ ```
+ 
+-**Step-by-Step Method:**
+-1.  **Positional Encoding:** For each 3D point $\mathbf{x}$ along a ray, compute the Integrated Positional Encoding (IPE), denoted as $\boldsymbol{\gamma}(\mathbf{x})$ [S1].
+-2.  **Latent Generation:** Pass $\boldsymbol{\gamma}(\mathbf{x})$ through the Latent Generator Encoder $\mathcal{E}$ to obtain a continuous latent vector $\mathbf{z}$ [S1].
+-3.  **Vector Quantization:** Find the nearest vector $\mathbf{z}_e$ in the codebook $\mathbf{E}$ to $\mathbf{z}$ using Euclidean distance. This discrete code $\mathbf{z}_e$ represents the "level" or "stratum" of the scene at that location [S1].
+-4.  **Latent Routing:** Pass $\mathbf{z}_e$ through the Latent Router $\mathcal{R}$ (an MLP) to generate modulation parameters [S1].
+-5.  **Radiance Field Conditioning:** Use the output of the Latent Router to condition the first two layers of the Radiance Field MLP. This allows the network to switch its internal representation based on the discrete level code [S1].
+-6.  **Rendering:** Query the conditioned Radiance Field with $\mathbf{x}$ and viewing direction $\mathbf{d}$ to obtain density $\sigma$ and color $\mathbf{c}$. Integrate along the ray using standard volume rendering [G].
+-
+-**Loss Functions:**
+-The total loss is a weighted sum of reconstruction, distortion, and VQ losses [S1]:
+-
+-$$
+-L_{total} = L_{recon}(\mathbf{c}(\mathbf{r}, t), \mathbf{c}^*(\mathbf{r})) + \lambda_1 L_{dist}(\mathbf{s}, \mathbf{w}) + \lambda_2 L_{vq}
+-$$
+-
+-Where:
+-*   $L_{recon}$ is the mean squared error between rendered color $\mathbf{c}$ and ground truth $\mathbf{c}^*$ [S1].
+-*   $L_{dist}$ is the distortion loss using normalized ray distances $\mathbf{s}$ and weight vector $\mathbf{w}$ [S1].
+-*   $L_{vq}$ is the VQ-VAE loss defined as:
+-
+-$$
+-L_{vq} = ||\boldsymbol{\gamma}(\mathbf{x}) - \mathbf{y}||_2^2 + ||sg(\mathbf{z}_e) - \mathbf{z}||_2^2 + \beta||\mathbf{z}_e - sg(\mathbf{z})||_2^2
+-$$
+-
+-Where:
+-*   $\mathbf{y}$ is the output of the Latent Generator Decoder $\mathcal{D}(\mathbf{z}_e)$ [S1].
+-*   $\mathbf{z}$ is the encoder output $\mathcal{E}(\boldsymbol{\gamma}(\mathbf{x}))$ [S1].
+-*   $sg$ denotes the stop-gradient operator [S1].
+-*   $\beta$ is a commitment loss weight [S1].
+-
+-**Parameters:**
+-*   $\lambda_1$ (distortion loss weight): 0.01 [S1].
+-*   $\lambda_2$ (VQ loss weight): 0.1 [S1].
+-*   $\beta$ (commitment loss weight): 1.0 [S1].
+-*   Codebook Size: 1024 [S1].
+-*   Latent Dimension: 48 [S1].
+-*   Training Iterations: 150,000 [S1].
+-*   Optimizer: Adam, learning rate $1 \times 10^{-6}$ [S1].
+-
+-**Edge Cases and Pitfalls:**
+-*   **Continuous Nature of Standard NeRFs:** Standard NeRFs (like Mip-NeRF 360) produce unsatisfactory results (cloudy views, white artifacts, haziness) when trained jointly on images from all hierarchical levels because their continuous nature is unsuitable for modeling sudden structural changes [S1]. Strata-NeRF addresses this by using discrete VQ latents [S1].
+-*   **Precision:** The VQ process involves discrete selection, which can lead to quantization errors. The commitment loss ($\beta$) helps stabilize training by encouraging the encoder to output vectors close to codebook entries [S1].
++## Subtopics
++
++### Mip-NeRF 360
++The base radiance field architecture used by Strata-NeRF. It provides the continuous volumetric representation and volume rendering pipeline that Strata-NeRF conditions. [Link](3065-nerf-hyperparameters.md)
++
++### VQ-VAE
++The underlying mechanism for Vector Quantization used in the Latent Generator. It learns a discrete codebook to model the latent space of 3D positions. [Link](14567-modular-hierarchical-and-latent-architectures.md) (See "Representation Basis" section in parent)
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Training requires 150k iterations [S1]. The additional computational overhead from the Latent Generator and Router is minimal as they are lightweight MLPs [S1].
+-*   **Memory Complexity:** The method introduces significantly fewer parameters than training an independent NeRF model for each level, leading to a significant reduction in memory usage [S1]. The codebook size is fixed at 1024 vectors of dimension 48 [S1].
+-*   **Performance:** Evaluated on a synthetic Stratified Scenes dataset (simple and complex geometry) and the real-world RealEstate10K dataset, Strata-NeRF demonstrates proficiency in depicting stratified scenes, reducing artifacts, and creating high-fidelity views, surpassing current methods like Mip-NeRF 360 [S1, S2].
+-*   **Strengths:** Handles discontinuities and sudden changes in scene hierarchy; reduces memory usage compared to multi-model approaches; high-fidelity novel views.
+-*   **Limitations:** Requires a stratified scene structure; performance on non-stratified scenes is not explicitly detailed beyond being a generalization of NeRF.
++
++*   **Time Complexity:** Training time is comparable to Mip-NeRF 360 but requires 150k iterations. The addition of the Latent Generator and Router adds minimal computational overhead per step as they are lightweight MLPs [S1].
++*   **Memory Complexity:** The method introduces significantly fewer parameters than training independent NeRF models for each level, leading to reduced memory usage [S1]. The codebook size (1024x48) is negligible compared to the MLP weights.
++*   **Measured Performance:** Evaluated on a synthetic Stratified Scenes dataset (simple and complex geometry) and the real-world RealEstate10K dataset. Strata-NeRF produces high-fidelity views and reduces artifacts (haziness, white clouds) compared to Mip-NeRF 360 when trained jointly on stratified levels [S1].
++*   **Strengths:**
++    *   Handles sudden structural changes and discontinuities in stratified scenes.
++    *   Single model for multi-level scenes.
++    *   Reduces memory footprint compared to per-level models.
++*   **Limitations:**
++    *   Relies on the quality of the VQ codebook; poor quantization may blur level distinctions.
++    *   Evaluated primarily on specific stratified datasets; generalization to non-stratified scenes is not the primary focus (though it functions as a conditional NeRF).
++*   **When to Use:** Use when rendering scenes with distinct, non-continuous hierarchical levels (e.g., interior/exterior of a building) where standard continuous NeRFs fail.
++*   **When Not to Use:** Use standard NeRF or Mip-NeRF 360 for scenes without significant structural discontinuities or hierarchical stratification.
+ 
+ ## Background
+-Strata-NeRF was proposed in 2023 by researchers including Ankit Tiwari [S1]. It addresses the limitation of existing NeRF methods in modeling "stratified scenes," which are scenes with multiple hierarchical levels (e.g., exterior and interior of a building) [S1]. The method builds on the Mip-NeRF 360 architecture [S1] and incorporates concepts from Vector Quantized Variational Autoencoders (VQ-VAE) [S1]. It was evaluated on a newly proposed synthetic dataset of stratified scenes and the RealEstate10K dataset [S1].
++
++Strata-NeRF was proposed in 2023 by Ati et al. [S1]. It addresses the limitation of existing NeRF methods in modeling "stratified scenes," which are defined as scenes deconstructible into several tiers or groupings of structure (e.g., exterior and interior levels of a building) [S1]. Previous methods like Mip-NeRF 360 produced unsatisfactory results (cloudy views, artifacts) when trained jointly on such scenes due to their continuous nature [S1]. Strata-NeRF introduces the concept of using Vector Quantized (VQ) latent representations to condition the NeRF, allowing for discrete switching between scene structures [S1]. The method was evaluated on a newly proposed synthetic Stratified Scenes dataset and the RealEstate10K dataset [S1].
+ 
+ ## Sources
++
+ [S1] Strata-NeRF : Neural Radiance Fields for Stratified Scenes, https://arxiv.org/abs/2308.10337v1, fetched 2026-10-26
+ [S2] Neural Radiance Field-based Visual Rendering: a Comprehensive Review, https://ieeexplore.ieee.org/abstract/document/11455380, fetched 2026-10-30

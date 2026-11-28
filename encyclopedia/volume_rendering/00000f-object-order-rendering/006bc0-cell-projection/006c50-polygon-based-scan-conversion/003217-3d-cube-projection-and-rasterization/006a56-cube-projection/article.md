@@ -1,0 +1,55 @@
+# Cube Projection
+
+Also called: Cube Projection for Neural Descriptors, Cube Region Projection
+
+## Overview
+Cube projection is a rasterization technique used in neural scene rendering to represent 3D point cloud regions corresponding to neural descriptors, contrasting with direct plane projection methods like NPBG [S1]. It solves the problem of invalid values (holes) in neural descriptors caused by sparse point clouds by mapping a 3D world point to a cube region rather than a single 2D projection [S1]. This approach is distinct from its siblings [2D Raycasting with Z-Buffering](8233-2d-raycasting-with-z-buffering.md), [Cube Map Rendering](16527-cube-map-rendering.md), and [Front-Face Webcam Projection](18799-front-face-webcam-projection.md) by explicitly modeling the spatial extent of a point as a volumetric cube in the descriptor space to mitigate sparsity artifacts [S1].
+
+## How it works
+Cube projection maps a 3D world point $p_i$ to a cube region in the neural descriptor space to reduce invalid values associated with sparse data [S1].
+
+**Inputs and Outputs:**
+*   **Input:** A set of input images, camera parameters, and a sparse point cloud $P = \{p_1, p_2, \dots, p_N\}$ [S1].
+*   **Output:** Synthesized photo-realistic images from multiple views [S1].
+
+**Data Structures:**
+*   **World Space:** Divided into regions containing $N$ voxels [S1].
+*   **Neural Descriptor:** Represents the color and properties of a world point. Unlike NPBG which stores a single descriptor per point, this method associates a cube region with each point [S1].
+
+**Steps:**
+1.  **World Space Division:** Divide the world space into regions with $N$ voxels [S1].
+2.  **Cube Region Assignment:** For each world point $p_i$, assign a cube region to represent it instead of projecting $p_i$ directly onto the image plane as a single neural descriptor [S1].
+3.  **Color Determination:** For a pixel coordinate $I_i$ on the image space, determine the color $\hat{I}(I_i)$ by aggregating contributions from the neural descriptors [S1]:
+    $$ \hat{I}(I_i) = \frac{1}{N} \sum_{i=1}^{N} I(p_i) $$
+    Where:
+    *   $N$ is the number of points/voxels in the region [S1].
+    *   $I(p_i)$ is the color value of world point $p_i$ [S1].
+    *   Note: The source text mentions $\alpha$ as a zoom ratio that shifts the patch $(\Delta x, \Delta y)$ to enhance synthetic quality, but does not explicitly include $\alpha$ in the summation formula provided [S1].
+
+**Parameters:**
+*   $N$: Number of voxels/points in the region [S1].
+*   $\alpha$: Zoom ratio for patch shifting (enhances quality) [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Sparse Point Clouds:** Direct projection (NPBG/ADOP) leads to many invalid values due to holes [S1]. Cube projection mitigates this but requires careful handling of the cube region boundaries [S1].
+*   **Outliers:** Point clouds from external reconstruction methods (e.g., Metashape) may contain outliers that degrade quality [S1].
+
+## Subtopics
+
+### Cube Projection for Neural Descriptors
+A specific application of cube projection where a 3D world point $p_i$ is represented using a cube region instead of direct projection onto the image plane [S1]. This method reduces invalid values (holes) in the neural descriptor caused by sparse point clouds [S1]. Unlike NPBG and ADOP, which project $p_i$ directly as a single neural descriptor leading to invalid values, this method uses a cube region [S1]. The world space is divided into regions with $N$ voxels [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:** Experiments on the KITTI benchmark and Brno Urban dataset show good qualitative and quantitative results [S1].
+*   **Strengths:** Reduces invalid regions in neural descriptors compared to direct plane projection [S1]. Enables synthesis of large-scale driving scenes from sparse point clouds [S1].
+*   **Limitations:** Dependent on the quality of the input point cloud; sparse clouds and outliers can still degrade quality if not properly screened [S1].
+*   **When to use:** When synthesizing large-scale driving scenes from sparse point clouds where direct projection leads to significant holes [S1].
+*   **When not to use:** When dense point clouds are available and direct projection is sufficient [S1].
+
+## Background
+Cube projection was introduced in the context of large-scale neural scene rendering for autonomous driving [S1]. It addresses limitations of previous point-based rendering methods like NPBG and ADOP, which suffer from invalid values due to sparse point clouds [S1]. The method was proposed to enable the synthesis of realistic driving scenarios and the editing/stitching of driving scenes for synthetic data generation [S1].
+
+## Sources
+[S1] READ: Large-Scale Neural Scene Rendering for Autonomous Driving, https://doi.org/10.1609/aaai.v37i2.25238, fetched 2026-10-29

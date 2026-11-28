@@ -1,0 +1,136 @@
+--- v001.md
++++ v002.md
+@@ -7,5 +7,5 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** A pretrained NeRF model representing the knowledge base state $S_0$; 5 input images of the object in a new state $S_1$; 3D positions $X_1$ of points in $S_1$ (derived from the 5 images via standard NeRF ray marching or depth estimation).
++*   **Inputs:** A pretrained NeRF model representing the knowledge base state $S_0$; 5 input images of the object in a new state $S_1$; 3D positions $X_1$ of points in $S_1$ (derived from the 5 images via standard NeRF ray marching [G]).
+ *   **Outputs:** Color $(r, g, b)$ and opacity $(\sigma)$ for points in $S_1$, enabling novel view synthesis for the dynamic state [S1].
+ 
+@@ -19,5 +19,5 @@
+ 1.  **Knowledge Base Construction:** Pretrain a standard NeRF model on a set of images of the articulated object in a specific initial pose $S_0$. This model serves as the frozen knowledge base [S1].
+ 2.  **Data Acquisition:** Capture 5 input images of the object in a new state $S_1$ [S1].
+-3.  **Projection Module Training:** Train the projection module $F_P$ end-to-end. The module is placed before the frozen NeRF. The training minimizes the Mean-Squared Error (MSE) loss between the projected point $X_0 = F_P(X_1)$ and the true corresponding point in $S_0$ (if ground truth is available) or implicitly learns the correspondence through the reconstruction loss of the rendered images from $S_1$ using the frozen NeRF [S1].
++3.  **Projection Module Training:** Train the projection module $F_P$ end-to-end with the frozen NeRF using Mean-Squared Error (MSE) loss to learn the correspondence between points in $S_1$ and $S_0$ [S1]. The module is placed before the frozen NeRF [S1].
+ 4.  **Rendering Query:** For a point $X_1$ in the current state $S_1$:
+     a. Query $F_P$ to obtain the corresponding position $X_0$ in $S_0$: $X_0 = F_P(X_1)$ [S1].
+@@ -44,6 +44,6 @@
+ **Pitfalls and Edge Cases:**
+ *   **Air Particles:** Air particles in $S_1$ may not have a correspondence to $S_0$. However, this is handled because their transparency makes them irrelevant to the reconstruction [S1].
+-*   **Reflective Surfaces:** The assumption that viewing angles are equal $(\theta_1, \phi_1) \approx (\theta_0, \phi_0)$ may fail for highly reflective surfaces, as the appearance would change significantly with viewing angle [S1].
+ *   **New Contents:** The introduction of new parts in $S_1$ that were not present in $S_0$ must be handled by the projection module $T(X_1)$, which implicitly learns these changes [S1].
++*   **Viewing Angle Assumption:** The method assumes $(\theta_1, \phi_1) \approx (\theta_0, \phi_0)$ because most points are not reflective and look the same from all directions [S1].
+ 
+ **Pseudocode:**
+@@ -55,79 +55,54 @@
+ 
+ class ProjectionModule(nn.Module):
+-    """
+-    Lightweight projection module F_P with 4 fully connected layers.
+-    Maps X1 (current state) to X0 (knowledge base state).
+-    """
+-    def __init__(self, input_dim=3, output_dim=3):
+-        super(ProjectionModule, self).__init__()
+-        # 4 fully connected layers as per source [S1]
+-        self.fc1 = nn.Linear(input_dim, 64)
++    """Lightweight projection module F_P with 4 fully connected layers [S1]."""
++    def __init__(self):
++        super().__init__()
++        self.fc1 = nn.Linear(3, 64)
+         self.fc2 = nn.Linear(64, 64)
+         self.fc3 = nn.Linear(64, 64)
+-        self.fc4 = nn.Linear(64, output_dim)
+-        
++        self.fc4 = nn.Linear(64, 3)
++
+     def forward(self, X1):
+-        # X1 shape: (N, 3)
+         x = F.relu(self.fc1(X1))
+         x = F.relu(self.fc2(x))
+         x = F.relu(self.fc3(x))
+-        X0 = self.fc4(x)
+-        return X0
++        return self.fc4(x)
+ 
+ class KnowledgeNeRF:
+     def __init__(self, pretrained_nerf, projection_module):
+-        """
+-        pretrained_nerf: Frozen NeRF model for state S0.
+-        projection_module: Trainable ProjectionModule F_P.
+-        """
+         self.pretrained_nerf = pretrained_nerf
+-        self.pretrained_nerf.eval() # Freeze
++        self.pretrained_nerf.eval()
+         self.projection_module = projection_module
+-        
++
+     def query(self, X1, theta1, phi1):
+-        """
+-        Query color and opacity for a point X1 in state S1.
+-        """
+-        # Step 1: Project X1 to X0 in knowledge base S0
++        """Map X1 to X0 and query frozen NeRF [S1]."""
+         X0 = self.projection_module(X1)
+-        
+-        # Step 2: Assume viewing angles are approximately equal
+-        # [S1] assumes (theta1, phi1) approx (theta0, phi0)
+         theta0 = theta1
+         phi0 = phi1
+-        
+-        # Step 3: Query frozen pretrained NeRF with X0 and assumed angles
+-        # Note: Standard NeRF query usually takes (x, y, z, theta, phi)
+-        # The frozen NeRF outputs color (r, g, b) and density (sigma)
+         with torch.no_grad():
+             color, sigma = self.pretrained_nerf(X0, theta0, phi0)
+-            
+         return color, sigma
+ 
+     def train_step(self, images_S1, rays_S1, optimizer):
+-        """
+-        Train the projection module using 5 images from state S1.
+-        """
++        """Train projection module using 5 images from S1 [S1]."""
+         optimizer.zero_grad()
+-        
+-        # Render images from S1 using the projection module and frozen NeRF
+         rendered_images = []
+         for ray in rays_S1:
+-            X1 = ray.origin + ray.direction * ray.t # Example ray marching
+-            color, sigma = self.query(X1, ray.theta, ray.phi)
+-            # Standard volume rendering integration would happen here
+-            # [G] Assuming standard NeRF volume rendering integration
+-            rendered_pixel = integrate_volume_rendering(color, sigma, ray.t)
++            origin, direction, theta, phi = ray.origin, ray.direction, ray.theta, ray.phi
++            t_vals = torch.linspace(ray.t_near, ray.t_far, 64)
++            deltas = t_vals[1:] - t_vals[:-1]
++            deltas = torch.cat([deltas, torch.tensor([0.0], device=deltas.device)])
++            X1 = origin + direction.unsqueeze(0) * t_vals.unsqueeze(1)
++            colors, sigmas = self.query(X1, theta, phi)
++            # Standard volume rendering integration [G]
++            alphas = 1.0 - torch.exp(-sigmas * deltas)
++            transmittance = torch.cumprod(torch.cat([torch.ones_like(alphas[:, :1]), 1.0 - alphas + 1e-10], dim=1)[:, :-1], dim=1)
++            weights = alphas * transmittance
++            rendered_pixel = torch.sum(weights * colors, dim=1)
+             rendered_images.append(rendered_pixel)
+-            
+         rendered_images = torch.stack(rendered_images)
+-        
+-        # Compute MSE loss against ground truth images from S1
+         loss = F.mse_loss(rendered_images, images_S1)
+-        
+-        # Backpropagate only through projection module
+         loss.backward()
+         optimizer.step()
+-        
+         return loss.item()
+ ```
+@@ -171,7 +146,7 @@
+ *   **Scaling:** The method scales to dynamic articulated objects by considering two frames at a time (pretrained base + current state) [S1].
+ *   **Strengths:** Few-shot capability (5 images), high clarity, efficient training (lightweight module), handles rigid motion and new contents [S1].
+-*   **Limitations:** Assumes viewing angles are approximately equal, which may not hold for reflective surfaces. Requires a pretrained NeRF for the initial state [S1].
++*   **Limitations:** Assumes viewing angles are approximately equal, which relies on the assumption that most points are not reflective and look the same from all directions [S1]. Requires a pretrained NeRF for the initial state [S1].
+ *   **When to use:** When reconstructing dynamic articulated objects from sparse views, especially when a pretrained model of the object in a previous state is available [S1].
+-*   **When not to use:** When the object is highly reflective, or when no initial state is available to train the knowledge base [S1].
++*   **When not to use:** When no initial state is available to train the knowledge base [S1].
+ 
+ ## Background

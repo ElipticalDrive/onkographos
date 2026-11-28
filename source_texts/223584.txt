@@ -1,0 +1,211 @@
+Potree point cloud viewer library core components for easier integration in a three.js project. - fix: discard clipped points outside the view volume (4 fps to 60 fps in one code line change) by Liquidmasl · Pull Request #106 · tentone/potree-core
+
+fix: discard clipped points outside the view volume (4 fps to 60 fps in one code line change) by Liquidmasl · Pull Request #106 · tentone/potree-core · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Liquidmasl
+commented
+Sep 14, 2026
+Copy link
+Copy Markdown
+Contributor
+Fix clipped points rasterising at the viewport corner
+One source-line change. The clipping rejection branch currently writes:
+```
+if (!visible) { gl_Position = vec4(1000.0); }
+```
+That expands to (1000, 1000, 1000, 1000). It satisfies the homogeneous clipping bounds -w <= x,y,z <= w with equality, so the point survives at NDC (1,1,1) instead of being discarded.
+gl_PointSize is assigned earlier and remains unchanged: rejected points retain their sprite size and all overlap the same corner pixels. This produces a visible artifact and can cause substantial overdraw.
+The fix uses (100,100,100,1), which is genuinely outside the clip volume, independent of camera position or projection. This matches the rejection position used by the full Potree viewer. Since #98 consolidated clipping, this one assignment covers all paths that set visible = false.
+No point data, visibility predicates, uniforms, API, point budget or point-size settings change.
+Direct WebGL reproduction
+One point at the origin, one clip box that excludes it, a 64×64 framebuffer, fixed point size 8. Use a plain THREE.Points with the real PointCloudMaterial to isolate shader rejection from octree CPU culling.
+Measured on Apple M1 Max / ANGLE Metal:
+Bundle / case
+Lit pixels
+Location
+Published 2.0.15, clipped point, size 8
+16
+viewport corner
+2.0.15 with the same discard-position correction
+0
+nowhere
+Published 2.0.15, clipped points, size 24
+144
+viewport corner
+Corrected bundle, size 24
+0
+nowhere
+The size-8 case also reproduces with CLIP_INSIDE and a box containing the point: 16 pixels before, zero after. The size-24 comparison came from a separate bounded 50k-point probe. The one-point reproduction below was executed against published 2.0.15 and its corrected bundle; current master b901ca9a was independently checked to contain the same defective assignment. A full build of current upstream master was not run locally.
+Run the minimal reproduction
+In an empty directory, install potree-core@2.0.15 and three@0.169.0, save the page below as index.html, and serve that directory over local HTTP:
+```
+npm install --ignore-scripts potree-core@2.0.15 three@0.169.0
+python3 -m http.server 8080 --bind 127.0.0.1
+```
+Open http://127.0.0.1:8080/. Expected: litPixels: 0. Published 2.0.15 produces litPixels: 16, cornerPixels: 16, glError: 0. To test this PR's build, point the potree-core import-map entry at the built bundle.
+Standalone reproduction (no dataset required)
+```
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>potree-core clip-cull repro</title>
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "/node_modules/three/build/three.module.js",
+      "potree-core": "/node_modules/potree-core/dist/index.js"
+    }
+  }
+  </script>
+</head>
+<body>
+  <canvas id="c" width="64" height="64"></canvas>
+  <pre id="out">running…</pre>
+  <script type="module">
+    import {
+      BufferAttribute, BufferGeometry, PerspectiveCamera,
+      Points, Scene, Vector3, WebGLRenderer
+    } from 'three';
+    import {
+      ClipMode, PointCloudMaterial, PointColorType,
+      PointSizeType, createClipBox
+    } from 'potree-core';
+
+    const SIZE = 64;
+    const POINT_SIZE = 8;
+    const renderer = new WebGLRenderer({
+      canvas: document.getElementById('c'),
+      antialias: false,
+      preserveDrawingBuffer: true
+    });
+    renderer.setPixelRatio(1);
+    renderer.setSize(SIZE, SIZE, false);
+    renderer.setClearColor(0x000000, 1);
+
+    const geometry = new BufferGeometry();
+    geometry.setAttribute('position', new BufferAttribute(
+      new Float32Array([0, 0, 0]), 3
+    ));
+    const material = new PointCloudMaterial();
+    material.pointSizeType = PointSizeType.FIXED;
+    material.pointColorType = PointColorType.COLOR;
+    material.size = POINT_SIZE;
+    material.clipMode = ClipMode.CLIP_OUTSIDE;
+    material.setClipBoxes([createClipBox(
+      new Vector3(1, 1, 1), new Vector3(1000, 1000, 1000)
+    )]);
+
+    const points = new Points(geometry, material);
+    points.frustumCulled = false;
+    const scene = new Scene();
+    scene.add(points);
+    const camera = new PerspectiveCamera(60, 1, 0.1, 100);
+    camera.position.set(0, 0, 6);
+    camera.lookAt(0, 0, 0);
+    renderer.render(scene, camera);
+
+    const gl = renderer.getContext();
+    const pixels = new Uint8Array(SIZE * SIZE * 4);
+    gl.readPixels(0, 0, SIZE, SIZE, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+    let lit = 0, corner = 0;
+    for (let y = 0; y < SIZE; y++) {
+      for (let x = 0; x < SIZE; x++) {
+        const i = (y * SIZE + x) * 4;
+        if ((pixels[i] | pixels[i + 1] | pixels[i + 2]) === 0) continue;
+        lit++;
+        if (x >= SIZE - POINT_SIZE && y >= SIZE - POINT_SIZE) corner++;
+      }
+    }
+    window.__result = {
+      litPixels: lit, cornerPixels: corner, glError: gl.getError()
+    };
+    document.getElementById('out').textContent =
+      JSON.stringify(window.__result, null, 2);
+  </script>
+</body>
+</html>
+```
+Real-scene impact and trace measurements
+Our viewer dropped to approximately 5 fps with cloud clipping enabled. After deploying only this discard-position correction, the developer observed smooth 60 fps, without reducing the configured point density. The post-fix rate is a developer observation, not a new instrumented post-fix trace or device-level GPU benchmark.
+The measurements below are from the pre-fix clipping-on versus clipping-off Chrome recordings, with the same scene and camera:
+Metric
+Clipping on
+Clipping off
+rAF interval, median
+199.34 ms
+16.67 ms
+rAF callback duration, median
+3.251 ms
+3.157 ms
+Dropped frame markers
+356 / 388 (91.8%)
+12 / 333 (3.6%)
+GPU-process main-thread task occupancy
+99.96%
+12.6%
+Submit-to-presentation latency, median
+624.8 ms
+23.9 ms
+Occupancy is the union of host-thread RunTask wall-time intervals—not CPU utilisation or GPU device utilisation. Recordings cover different durations (approximately 6.4 and 5.6 seconds for the frame-marker windows). There are no GPU device timings in these traces: they locate the stall downstream of page JavaScript, but cannot name the individual GPU operation. The roughly 200 ms profiler-startup task occurs once in both recordings and does not explain the repeated stalls.
+The synthetic reproduction demonstrates the correctness defect directly; the real-scene recovery demonstrates why this small change matters. Production data and raw traces are intentionally not needed for the reproduction.
+🤖 Generated with Claude Code
+fix: discard clipped points outside the view volume
+…
+a30b1ac
+```
+Keep rejected point sprites outside homogeneous clip-space bounds instead of rasterizing them at the viewport corner.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+```
+Liquidmasl
+marked this pull request as ready for review
+September 14, 2026 12:03
+Liquidmasl
+commented
+Sep 14, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+slightly overkill PR for a one line change, sorry;
+main point is with real world data; 4fps vs smooth as butter 60fps
+Liquidmasl
+changed the title
+fix: discard clipped points outside the view volume
+fix: discard clipped points outside the view volume (4 fps to 60 fps in one code line change)
+Sep 14, 2026
+tentone
+commented
+Oct 26, 2026
+Copy link
+Copy Markdown
+Owner
+Thanks a lot :) Merged
+tentone
+closed this
+Oct 26, 2026
+tentone
+reopened this
+Oct 26, 2026
+tentone
+merged commit 00262f1
+into
+tentone:master
+Oct 26, 2026
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,53 @@
+# TIP-Editor
+
+Also called: Text and Image Prompt-based Editor for 3D Gaussian Splatting
+
+## Overview
+TIP-Editor is a method for editing existing 3D Gaussian Splatting (3DGS) scenes using intuitive text and image prompts [S1]. It solves the problem of achieving accurate local editing while maintaining multi-view consistency, which is often compromised in text-guided 3D editing [S1]. It distinguishes itself from sibling methods like [GaussCtrl](14877-gaussctrl.md) by employing a stepwise 2D personalization strategy with LoRA-based reference image alignment and localization loss, rather than relying on depth-conditioned ControlNet for geometric consistency [S1].
+
+## How it works
+**Inputs:**
+*   An existing 3D Gaussian Splatting scene (set of Gaussians with position, covariance, opacity, and spherical harmonics coefficients).
+*   A text prompt describing the desired edit.
+*   An optional reference image for content personalization [S1].
+
+**Outputs:**
+*   An edited 3D Gaussian Splatting scene [S1].
+
+**Data Structures:**
+*   The 3DGS scene is represented as a collection of Gaussians. Specific internal layouts (e.g., covariance parameterization, SH coefficient storage) are inherited from the base 3DGS representation [S1].
+*   A set of "identified Gaussians" is selected for optimization based on the editing region [S1].
+
+**Steps:**
+1.  **Localization:** Identify the Gaussians corresponding to the region specified by the prompt. This involves a localization loss for scene adaptation [S1].
+2.  **Content Personalization:** Perform a content personalization step based on Low-Rank Adaptation (LoRA) to align the generation with a provided reference image, if applicable [S1].
+3.  **Optimization:** Optimize the identified Gaussians using Score Distillation Sampling (SDS) loss [S1][89].
+4.  **Refinement:** Apply pixel-level image refinement to the rendered images during optimization to ensure high-quality results [S1].
+
+**Formulas:**
+*   **SDS Loss:** The method utilizes the standard Score Distillation Sampling (SDS) loss as defined in [89] (referenced in [S1]). The exact formula is not provided in the source text [S1].
+*   **Localization Loss:** A localization loss is introduced for scene adaptation, but its mathematical definition is not provided in the source text [S1].
+
+**Parameters:**
+*   Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   Not given in the sources.
+
+## Subtopics
+
+### [GaussCtrl](14877-gaussctrl.md)
+A method for multi-view consistent editing using depth-conditioned ControlNet and attention-based latent code alignment. Choose when geometric consistency via depth guidance is prioritized over LoRA-based reference alignment.
+
+## Operating characteristics
+*   **Performance:** On the Instruct-N2N, DreamEditor, and TIP-Editor comparison, TIP-Editor achieved a CLIPdir score of 15.5, a DINOsim score of 39.5, a Votequality score of 70.8, and a Votealignment score of 81.2 [S1].
+*   **Quality:** The editing results exhibit superior quality compared with baselines [S1].
+*   **Time and Memory Complexity:** Not given in the sources.
+*   **Strengths:** Enables precise and flexible modifications using text and image prompts [S1].
+*   **Limitations:** Not given in the sources.
+
+## Background
+TIP-Editor is cited in a survey on 3D editing based on NeRF and 3DGS [S1]. It is part of the latest series of methods that employ SDS loss within 3DGS to facilitate creative editing [S1].
+
+## Sources
+[S1] A survey on 3D editing based on NeRF and 3DGS, https://link.springer.com/article/10.1007/s11704-025-41176-9, fetched 2026-10-28

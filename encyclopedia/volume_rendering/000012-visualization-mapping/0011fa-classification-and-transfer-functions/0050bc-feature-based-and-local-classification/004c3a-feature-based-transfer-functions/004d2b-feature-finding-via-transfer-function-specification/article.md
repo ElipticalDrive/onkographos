@@ -1,0 +1,108 @@
+# Feature Finding via Transfer Function Specification
+
+Also called: Feature Finding via TF Specification
+
+## Overview
+This method addresses the manual effort required in exploratory volume rendering by automatically generating transfer function components based on user-selected regions in the rendered image [S2]. It solves the problem of high-level feature editing (emphasizing, adding, or removing specific features) by deriving opacity and color components from relative visibility histograms [S2]. Unlike general histogram-based methods that analyze the entire dataset, this approach isolates features visible within a specific 2D viewport region, allowing for targeted modification of individual feature components [S2].
+
+## How it works
+**Inputs:**
+1. A volume dataset $V$ with scalar values.
+2. A current volume rendering image $I$ in 2D screen space.
+3. A user-selected rectangular region $R$ in the 2D screen space, typically centered on a point of interest (e.g., mouse cursor) [S2].
+
+**Outputs:**
+1. A set of transfer function components $F$, where each component corresponds to a selected region.
+2. A composed transfer function $T$ formed by the union of these components, which can be further edited [S2].
+
+**Data Structures:**
+*   **Relative Visibility Histogram ($H_G$):** A 1D histogram where the bin index corresponds to the scalar intensity value $i$ of the volume data, and the bin value represents the relative visibility (frequency of appearance) of that intensity within the view frustum defined by the selected region $R$.
+*   **Transfer Function Component ($F$):** A function mapping scalar intensity $i$ to an opacity value.
+
+**Steps:**
+1.  **Region Selection:** The user selects a rectangular region $R$ in the 2D rendered image [S2].
+2.  **Frustum Definition:** Determine the 3D view frustum corresponding to the 2D region $R$ and the current camera parameters [S2].
+3.  **Visibility Analysis:** Ray cast through the volume $V$ along the view rays intersecting region $R$. For each ray, record the scalar values encountered. Aggregate these values into a histogram $H_{all}$ representing the visibility of intensities within the frustum [S2].
+4.  **Relative Visibility Calculation:** Normalize $H_{all}$ to produce the relative visibility histogram $H_G$. The exact normalization formula is not specified in the sources, but it represents the distribution of visible features [S2].
+5.  **Component Generation:** For each intensity bin $i$, compute the transfer function component value $F(i)$ using the following rule [S2]:
+
+    $$
+    F(i) = \begin{cases} 
+    H_G(i) & \text{if } H_G(i) > 0 \\
+    0 & \text{otherwise}
+    \end{cases}
+    $$
+
+    where $H_G(i)$ is the value of the relative visibility histogram at intensity $i$ [S2].
+
+6.  **Composition:** Add $F$ to the set of active transfer function components. The final transfer function is the composition of all such components [S2].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def generate_tf_component(volume, camera, region_rect):
+    """
+    Generates a transfer function component F based on a 2D screen region.
+    
+    Args:
+        volume: 3D array of scalar values.
+        camera: Camera object with projection and view matrices.
+        region_rect: Tuple (x, y, width, height) defining the 2D screen region.
+        
+    Returns:
+        F: Dictionary or array mapping intensity i to opacity value.
+    """
+    # 1. Define the view frustum for the selected region
+    # This involves projecting the 2D rectangle corners into 3D view space
+    # and creating a frustum volume or ray bundle.
+    frustum_rays = compute_rays_for_region(camera, region_rect)
+    
+    # 2. Compute raw visibility histogram
+    # Ray cast through the volume along frustum_rays
+    # Count occurrences of each scalar value
+    raw_histogram = compute_histogram(volume, frustum_rays)
+    
+    # 3. Normalize to get relative visibility histogram H_G
+    # Not given in the sources. Typically involves dividing by total ray hits
+    # or normalizing to sum to 1.
+    H_G = normalize_histogram(raw_histogram)
+    
+    # 4. Generate Transfer Function Component F
+    F = {}
+    for i in range(number_of_bins):
+        if H_G[i] > 0:
+            F[i] = H_G[i]
+        else:
+            F[i] = 0
+            
+    return F
+```
+
+**Parameters:**
+*   **Region Size:** The dimensions of the rectangular selection in 2D screen space. It is modifiable according to user need. Default/Typical: Centered around a single point (e.g., mouse cursor) [S2].
+
+**Edge Cases:**
+*   **Empty Region:** If the selected region contains no visible data (e.g., background), $H_G$ will be all zeros, resulting in an empty component $F$ [S2].
+*   **Precision:** Histogram binning resolution affects the granularity of the generated component. Not given in the sources.
+
+## Subtopics
+
+### Feature Specification Using Transfer Function Components
+A specific implementation of the method where features are automatically generated as transfer function components based on relative visibility histograms from user-selected 2D regions [S2]. It allows for the separate modification of colors and opacity values for individual components derived from different regions [S2]. Choose this when you need to isolate and edit specific visual features identified in the rendered image without manually tuning the entire transfer function [S2].
+
+## Operating characteristics
+*   **Time Complexity:** Depends on the number of rays cast through the selected region and the volume size. Not given in the sources.
+*   **Memory Complexity:** Proportional to the number of bins in the histogram and the number of selected regions. Not given in the sources.
+*   **Strengths:** Automates the discovery of transfer function components for specific features, reducing manual effort [S2]. Allows for intuitive, image-space editing [S2].
+*   **Limitations:** Relies on the current view and camera position; changing the view may require re-selection [S2]. The normalization of $H_G$ is not specified, which may affect consistency [S2].
+*   **When to use:** Exploratory visualization where the user wants to quickly identify and isolate specific features visible in the current view [S2].
+*   **When not to use:** When global data properties are more important than view-dependent visibility [S2].
+
+## Background
+The concept of using transfer functions for feature finding in volume rendering has been discussed in the visualization community [S1]. Prior knowledge of data properties, such as tissue densities in Computed Tomography (CT) scans, can guide the specification of scalar ranges corresponding to specific regions [S1]. The specific method of using relative visibility histograms for automatic component generation was proposed to address the manual nature of feature finding [S2].
+
+## Sources
+[S1] Direct Volume Rendering: A 3D Plotting Technique for ..., https://www.sci.utah.edu/~cscheid/pubs/dvr.pdf, fetched 2026-10-27
+[S2] Intuitive Transfer Function Editing Using Relative Visibility Histograms, https://doi.org/10.24132/jwscg.2018.26.1.6, fetched 2026-10-26

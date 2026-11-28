@@ -1,0 +1,123 @@
+Summary The pure-Python marching_cubes_3d fallback (scikit-image marching cubes) produces a non-manifold mesh on a plain analytic sphere, while the C++ marching-tetrahedra kernel produces a watertight one. 48 edges are shared by four fac...
+
+[workbench][P3][correctness] marching_cubes_3d skimage 回退在普通球面上产生非流形网格（48 条四重边、24 个重复顶点；C++ 四面体剖分水密）——CI 从不测回退拓扑（ALGO-SEIS-07） · Issue #886 · WindWang2/paleo-workbench · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+[workbench][P3][correctness] marching_cubes_3d skimage 回退在普通球面上产生非流形网格（48 条四重边、24 个重复顶点；C++ 四面体剖分水密）——CI 从不测回退拓扑（ALGO-SEIS-07） #886
+New issue
+Copy link
+New issue
+Copy link
+Closed
+#908
+Closed
+[workbench][P3][correctness] marching_cubes_3d skimage 回退在普通球面上产生非流形网格（48 条四重边、24 个重复顶点；C++ 四面体剖分水密）——CI 从不测回退拓扑（ALGO-SEIS-07）#886
+#908
+Copy link
+Labels
+P3Edge-case bug / minor perf / maintainabilityEdge-case bug / minor perf / maintainabilityalgorithmaudit-2026-082026-08 full-repo adversarial audit batch2026-08 full-repo adversarial audit batchbugSomething isn't workingSomething isn't workingcorrectnessWrong behavior or outputWrong behavior or output
+Description
+WindWang2
+opened on Aug 20, 2026
+Issue body actions
+Summary
+The pure-Python marching_cubes_3d fallback (scikit-image marching cubes) produces a non-manifold mesh on a plain analytic sphere, while the C++ marching-tetrahedra kernel produces a watertight one. 48 edges are shared by four faces. This is the deferred ALGO-SEIS-07 "回退拓扑差异" item referenced in #830's Related section — recorded as a comment on #876 when that issue was closed, and split out here now that #876 is resolved so the defect stays tracked.
+Severity
+P3
+Affected code
+paleo_workbench/native_backend.py — _py_marching_cubes_3d / _marching_cubes_no_crossing_guard (the skimage fallback)
+Contrast: native/seismic_3d_core/src/seismic_3d_core.cpp — 6-tetrahedra decomposition, watertight by construction
+Failing assertion: tests/test_seismic_3d_api.py::test_marching_cubes_3d_sphere_mesh_is_watertight (passes with native, fails on fallback)
+Current behavior
+Fixture _sphere_volume() from the test suite (25.0 - ((x-10)²+(y-10)²+(z-10)²), 20³ grid, isovalue=0.0). Welding vertices and counting per-edge face multiplicity:
+```
+skimage ascent (current fallback)  faces=824  edge-mult={2: 1140, 4: 48}  watertight=False
+skimage descent                    faces=824  edge-mult={2: 1140, 4: 48}  watertight=False
+descent + manual face reversal     faces=824  edge-mult={2: 1140, 4: 48}  watertight=False
+```
+The 48 four-fold edges appear identically in every winding variant, so this is independent of the orientation fix that landed for #876 — it is the tessellation itself.
+It is not a vertex-quantization artifact of the test's 1e-4 welding: the multiplicities are unchanged at 1e-6 / 1e-9 / 1e-12, and the output additionally contains 24 byte-identical duplicated vertices in float32. These are genuine pinch points — the classic marching-cubes face-ambiguity crack, where two adjacent cubes resolve their shared face inconsistently and four triangles meet along one grid edge. A tetrahedra decomposition cannot produce them, which is why the C++ path passes.
+End to end:
+```
+with native seismic_3d_core present : 1 passed
+fallback only (no native module)    : 1 failed
+```
+Expected behavior
+Per the SymmetricParityContract both backends should yield an usable isosurface; at minimum the fallback should match the C++ on the property the existing test already asserts — every edge shared by exactly two faces. A downstream consumer that assumes a closed manifold (e.g. any volumetric or smoothing operation over the welded mesh) sees degenerate vertex neighbourhoods at the 24 duplicated vertices and non-manifold edges where it expects at most two faces.
+Evidence / Reproduction
+```
+import numpy as np
+from collections import Counter
+from skimage.measure import marching_cubes
+
+x, y, z = np.ogrid[:20, :20, :20]
+vol = (25.0 - ((x - 10) ** 2 + (y - 10) ** 2 + (z - 10) ** 2)).astype(np.float32)
+v, f, _, _ = marching_cubes(vol.astype(np.float64), level=0.0,
+                            gradient_direction="ascent")
+keys = np.round(v, decimals=4)
+_, inv = np.unique(keys, axis=0, return_inverse=True)
+g = inv[f]
+cnt = Counter()
+for a, b, c in g:
+    for e in ((a, b), (b, c), (c, a)):
+        cnt[tuple(sorted((int(e[0]), int(e[1]))))] += 1
+print(Counter(cnt.values()))   # {2: 1140, 4: 48}  -> non-manifold
+```
+Why CI is green anyway (test blind spot)
+tests/test_seismic_3d_api.py runs wherever a marching backend exists, but CI builds all native cores as required steps — so there marching_cubes_3d dispatches to the C++ kernel and the watertightness assertion tests the native mesh. The fallback's topology is never asserted in CI; the failure is visible only on an install without the cores (exactly the installs the fallback exists for, cf. #878). scikit-image only entered the dev extras in 7663257, so a fallback-topology test is now possible in CI.
+Root cause
+Marching-cubes face-ambiguity: adjacent cubes can resolve the same ambiguous shared face with inconsistent diagonals, producing four-triangle edges. The C++ kernel decomposes each cube into six tetrahedra, which fixes the ambiguity per-cube and yields a consistent (watertight) surface.
+Suggested direction
+Any one of:
+Port the C++ marching-tetrahedra tessellation to the Python fallback (identical topology to native, strongest parity, slower in pure Python).
+Post-process the skimage mesh: weld exact-duplicate vertices, then detect four-fold edges and re-tessellate the offending cube pairs — effectively re-resolving the ambiguity.
+If parity is relaxed to "usable surface, not identical mesh", document the divergence explicitly in the SymmetricParityContract entry for this function and weaken the watertightness test to native-only — the current silent divergence is the worst option.
+And regardless of the choice: make the watertightness test exercise the fallback explicitly (run once with native_backend.disabled_acceleration()), so this class of gap cannot hide behind the built-kernel CI legs again.
+Validation criteria
+test_marching_cubes_3d_sphere_mesh_is_watertight passes with the native core and under disabled_acceleration().
+A fallback-only CI configuration (or an explicit disabled-acceleration leg) asserts every-edge-shared-by-exactly-2 for the sphere fixture.
+The count of exactly-duplicated vertices in the fallback output is 0 after welding.
+Related
+[workbench][P3][correctness] marching_cubes_3d 纯 Python 回退三角形绕序与 C++ 相反（skimage 默认 gradient_direction=descent）：SymmetricParityContract 破裂，法线/有符号体积反向，测试被 np.abs() 掩盖 #876 — winding orientation divergence in the same fallback (fixed); this issue was originally recorded as a comment there.
+[workbench][P2][correctness] marching_cubes_3d 纯 Python 回退在边界等值面值抛 skimage RuntimeError（K-F2 parity 破裂）→ 上游静默关闭等值面开关 #830 — referenced ALGO-SEIS-07 (回退拓扑差异，另案 P3 批) as deferred; this is that case.
+Decide NaN-voxel handling in marching_cubes_3d (I2) #21 — NaN-voxel handling decision for marching_cubes_3d.
+[workbench][P1][packaging] native_factor_map/native_layer_tree 顶层硬导入 grid_render_core/layer_model_core：未手工构建原生核的安装上 paleo-workbench 入口直接 ModuleNotFoundError 启动失败，纯 Python 回退永不可达（本地 54 个测试模块 collection error） #878 — fallback-only installs are the ones affected; CI's mandatory core builds are why this hides.
+Baseline: main @ 8ff2c96 (2026-08-20), skimage 0.26.0, Python 3.13. Reproduced with native present and absent.
+Reactions are currently unavailable
+Activity
+WindWang2
+added
+bugSomething isn't workingSomething isn't working
+algorithm
+audit-2026-082026-08 full-repo adversarial audit batch2026-08 full-repo adversarial audit batch
+P3Edge-case bug / minor perf / maintainabilityEdge-case bug / minor perf / maintainability
+correctnessWrong behavior or outputWrong behavior or output
+on Aug 20, 2026
+WindWang2
+added a commit that references this issue on Aug 21, 2026
+Merge pull request #908 from WindWang2/fix/issue-886-mt-fallback
+...
+a81525e
+WindWang2
+closed this as completedin #908on Aug 21, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+P3Edge-case bug / minor perf / maintainabilityEdge-case bug / minor perf / maintainabilityalgorithmaudit-2026-082026-08 full-repo adversarial audit batch2026-08 full-repo adversarial audit batchbugSomething isn't workingSomething isn't workingcorrectnessWrong behavior or outputWrong behavior or output
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

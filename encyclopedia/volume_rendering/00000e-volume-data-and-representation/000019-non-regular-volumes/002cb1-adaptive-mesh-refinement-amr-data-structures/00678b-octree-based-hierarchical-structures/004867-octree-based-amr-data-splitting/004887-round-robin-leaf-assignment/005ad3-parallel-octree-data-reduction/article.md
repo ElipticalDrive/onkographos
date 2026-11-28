@@ -1,0 +1,195 @@
+# Parallel Octree Data Reduction
+
+Also called: Adaptive Multiresolution Subsampling, Adaptive Subsampling, Adaptive multiresolution visualization using parallel octrees, Parallel Octree Subsampling
+
+## Overview
+Parallel Octree Data Reduction is a technique for the interactive visualization of large scientific datasets by combining hierarchical data reduction with parallel computing [S1, unofficial]. It distributes data across Massively Parallel Processing (MPP) processors to build a distributed-memory octree, allowing users to interactively adapt resolution (refine or prune) on a local graphics workstation while retaining access to full-resolution data [S1, unofficial]. Unlike uniform grid subsampling, which uses a fixed grid and allows more grid points but higher approximation error in complex regions, this method places more points where data changes rapidly to minimize approximation error [S2]. It builds on [Round-robin Leaf Assignment](12287-round-robin-leaf-assignment.md) by providing the underlying hierarchical data structure and reduction logic that precedes the distribution strategy.
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** File-based scalar field data requiring only spatial coordinate information; no connectivity information is necessary [S2]. The input format supports unstructured tetrahedral and hexahedral, block adaptive, and uniform meshes [S2].
+*   **Output:** A reduced multiresolution dataset represented by a distributed octree. For each leaf octant, the output includes the agglomerated field data value (typically the mean) [S1, unofficial], statistical error indicators (normalized standard deviation $a_n$ and normalized maximum deviation $e_n$) [S1, unofficial], and spatial information for interoctant links [S1, unofficial].
+
+**Data Structures**
+The core data structure is a distributed octree [S1, unofficial].
+*   **Leaf Octant:** Contains the agglomerated scalar value, the standard deviation ($\sigma$), the maximum deviation from the mean ($\epsilon$), and the mean ($\mu$) used for normalization [S1, unofficial].
+*   **Interoctant Links:** Links between parent and child nodes, and between sibling nodes. These links may be local (within the same processor) or off-processor [S1, unofficial].
+*   **Local Root Structure:** Off-processor parent links are represented by a local root structure containing spatial information. This enables local point searches without communication [S1, unofficial].
+
+**Algorithm Steps**
+1.  **Insertion:** Loop through the input field data. For each data point, insert its spatial location and field data value into the appropriate leaf octant of the octree [S1, unofficial].
+2.  **Refinement Criterion Evaluation:** Evaluate each leaf octant according to a specified criterion [S2].
+    *   The criterion determines if the current leaf octant should divide to create eight new leaf octants [S1, unofficial].
+    *   Default criterion: Divide an octant leaf when a user-defined maximum number of elements have been inserted into it [S1, unofficial]. This maintains approximately uniform fidelity for h-adaptive meshes [S1, unofficial].
+    *   Alternative criteria: User-specified bounds on standard deviation or maximum deviation, or an automatically determined error bound given a performance constraint (maximum target number of leaf octants) [S2].
+    *   For uniform meshes or p-adaptive methods, the max-element criterion is insufficient; error indicator techniques such as energy norms or gradient bounds should be used [S1, unofficial].
+3.  **Splitting and Reassignment:** If the criterion indicates refinement is necessary, split the leaf octant and reassign its associated data points to the new child leaf octants [S2].
+4.  **Aggregation and Statistics:** After insertion (and any subsequent reassignments), aggregate the field data values within each leaf octant [S1, unofficial]. Typically, this involves averaging the values [S1, unofficial].
+5.  **Error Computation:** For each leaf octant, compute statistical values: standard deviation ($\sigma$) [S1, unofficial], maximum deviation from the mean ($\epsilon$) [S1, unofficial], and mean ($\mu$) [S1, unofficial].
+6.  **Normalization:** Normalize the standard deviation and maximum deviation by the mean to yield normalized error indicators:
+    $$ a_n = \sigma / \mu $$
+    $$ e_n = \epsilon / \mu $$
+    These values are included as additional scalar fields alongside the reduced data [S1, unofficial].
+7.  **Distribution:** Distribute the octree across the processors of the MPP using an octree partitioning algorithm and arbitrary octant migration for load balancing [S1, unofficial].
+8.  **Traversal and Output Generation:** Form the reduced data set by traversing each local octree and computing the values on each leaf [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+class OctreeNode:
+    def __init__(self, bounds, depth=0):
+        self.bounds = bounds  # (min_x, min_y, min_z, max_x, max_y, max_z)
+        self.depth = depth
+        self.children = [None] * 8
+        self.values = []
+        self.is_leaf = True
+        self.mean = 0.0
+        self.std_dev = 0.0
+        self.max_dev = 0.0
+        self.norm_std = 0.0
+        self.norm_max = 0.0
+
+    def insert(self, point, value):
+        if not self.contains(point):
+            raise ValueError("Point outside bounds")
+        if self.is_leaf:
+            self.values.append((point, value))
+        else:
+            idx = self._child_index(point)
+            self.children[idx].insert(point, value)
+
+    def contains(self, point):
+        return all(min_c <= p <= max_c for p, min_c, max_c in zip(point, self.bounds[:3], self.bounds[3:]))
+
+    def _child_index(self, point):
+        idx = 0
+        for i in range(3):
+            mid = (self.bounds[i] + self.bounds[i+3]) / 2
+            if point[i] > mid:
+                idx |= (1 << i)
+        return idx
+
+    def split(self):
+        if not self.is_leaf:
+            return
+        self.is_leaf = False
+        cx, cy, cz = (self.bounds[0]+self.bounds[3])/2, (self.bounds[1]+self.bounds[4])/2, (self.bounds[2]+self.bounds[5])/2
+        for i in range(8):
+            min_x = cx if i&1 else self.bounds[0]
+            max_x = self.bounds[3] if i&1 else cx
+            min_y = cy if i&2 else self.bounds[1]
+            max_y = self.bounds[4] if i&2 else cy
+            min_z = cz if i&4 else self.bounds[2]
+            max_z = self.bounds[5] if i&4 else cz
+            self.children[i] = OctreeNode((min_x, min_y, min_z, max_x, max_y, max_z), self.depth+1)
+        for point, val in self.values:
+            self.children[self._child_index(point)].insert(point, val)
+        self.values = []
+
+    def compute_statistics(self):
+        if not self.values:
+            self.mean = 0.0
+            self.std_dev = 0.0
+            self.max_dev = 0.0
+            self.norm_std = 0.0
+            self.norm_max = 0.0
+            return
+        vals = [v[1] for v in self.values]
+        self.mean = sum(vals) / len(vals)
+        variance = sum((v - self.mean)**2 for v in vals) / len(vals)
+        self.std_dev = variance ** 0.5
+        self.max_dev = max(abs(v - self.mean) for v in vals)
+        if self.mean != 0:
+            self.norm_std = self.std_dev / self.mean
+            self.norm_max = self.max_dev / self.mean
+        else:
+            self.norm_std = 0.0
+            self.norm_max = 0.0
+
+def parallel_octree_reduction(field_data, bounds, max_elements_per_octant=None, target_leaf_count=None):
+    """
+    field_data: List of tuples (x, y, z, value)
+    bounds: (min_x, min_y, min_z, max_x, max_y, max_z)
+    """
+    octree = OctreeNode(bounds)
+
+    # Step 1: Insertion
+    for x, y, z, value in field_data:
+        octree.insert((x, y, z), value)
+
+    # Step 2 & 3: Refinement Criterion Evaluation and Splitting
+    def criterion_func(node):
+        if max_elements_per_octant is not None:
+            return len(node.values) > max_elements_per_octant
+        # Placeholder for target_leaf_count or custom criteria as per [S2]
+        return False
+    # Simplified iterative refinement traversal
+    leaves = [octree]
+    while leaves:
+        current = leaves.pop(0)
+        if current.is_leaf:
+            if criterion_func(current):
+                current.split()
+                leaves.extend(current.children)
+        else:
+            leaves.extend([c for c in current.children if c is not None])
+
+    # Step 4, 5, 6: Aggregation, Statistics, Normalization
+    leaves = [octree]
+    while leaves:
+        current = leaves.pop(0)
+        if current.is_leaf:
+            current.compute_statistics()
+        else:
+            leaves.extend([c for c in current.children if c is not None])
+
+    # Step 8: Traversal and Output Generation
+    reduced_data = []
+    leaves = [octree]
+    while leaves:
+        current = leaves.pop(0)
+        if current.is_leaf:
+            reduced_data.append({
+                'center': ((current.bounds[0]+current.bounds[3])/2,
+                           (current.bounds[1]+current.bounds[4])/2,
+                           (current.bounds[2]+current.bounds[5])/2),
+                'value': current.mean,
+                'error_std': current.norm_std,
+                'error_max': current.norm_max
+            })
+        else:
+            leaves.extend([c for c in current.children if c is not None])
+    return reduced_data
+```
+
+**Parameters**
+*   **User-defined maximum number of elements per octant:** The threshold for subdividing an octant leaf. Typical value: Not specified, but used to maintain uniform fidelity for h-adaptive meshes [S1, unofficial].
+*   **Criterion:** A threshold controlling refinement. Can be a user-specified bound on standard deviation, maximum deviation, or an automatically determined error bound given a performance constraint (maximum target number of leaf octants) [S2].
+*   **Input format:** File-based scalar field data requiring only spatial coordinate information; no connectivity information is necessary [S2].
+
+**Edge Cases and Pitfalls**
+*   **Uniform/P-adaptive Meshes:** The max-element criterion is insufficient for uniform meshes or p-adaptive methods. Error indicator techniques such as energy norms or gradient bounds are required to determine subdivision [S1, unofficial].
+*   **Approximation Error Scaling:** Approximation errors increase as the original problem size increases, because a smaller percentage of points can be used in the reduced dataset due to local workstation memory limits [S2]. This is mitigated by adaptive refinement at the cost of increased communication [S2].
+*   **Complex Algorithms:** Complex algorithms operating on the reduced data set (such as streamlines or isosurface generation) may require fat-neighbor links or a guarantee of maximum level-difference between adjacent octants. Providing this functionality complicates octree insertion [S1, unofficial].
+
+## Subtopics
+
+### [AMR Structure-Preserving Parallel Volume Rendering](17552-amr-structure-preserving-parallel-volume-rendering.md)
+A parallel volume rendering method that preserves the Adaptive Mesh Refinement (AMR) block structure, distributing leaves of the octree among processors and using raycasting with adaptive sampling. It sets itself apart from its parent method [Parallel Octree Data Reduction](16751-parallel-octree-data-reduction.md) by explicitly maintaining the hierarchical block topology for rendering rather than reducing data for interactive preview, and from its child [VisIt Data Parallel Volume Rendering](17553-visit-data-parallel-volume-rendering.md) by not treating patches as atomic units with ghost-cell filtering, but rather distributing individual octree leaves. Choose this variant when preserving native AMR hierarchy for rendering is required over interactive preview reduction.
+
+## Operating characteristics
+*   **Time Complexity:** The reduced data set is formed by traversing each local octree and computing the values on each leaf [S1, unofficial].
+*   **Memory Complexity:** The maximum resolution of the reduced data set is limited by the memory size and speed of the local graphics workstation [S2].
+*   **Performance:** Used for interactive remote exploration of large terabyte/petabyte scalar field datasets on desktop workstations connected via high-speed networks [S2].
+*   **Strengths:** Minimizes approximation error by placing more points where data changes rapidly [S2]. Allows interactive adaptation of resolution (refine or prune) on a local workstation [S1, unofficial].
+*   **Limitations:** Approximation errors increase with problem size due to workstation memory limits [S2]. Complex algorithms may require additional links (fat-neighbor) which complicate insertion [S1, unofficial].
+*   **When to use:** Interactive remote exploration of large scalar field datasets where approximation error must be minimized in complex regions [S2].
+*   **When not to use:** When the data is uniform and a fixed grid subsampling would suffice, or when the workstation memory is too small to hold even the reduced dataset [S2].
+
+## Background
+Parallel Octree Data Reduction was developed to address the challenge of visualizing large scientific datasets that exceed the performance and memory capacity of powerful graphics workstations [S1, unofficial]. The technique combines hierarchical data reduction with parallel computing to allow interactive exploration while retaining full-resolution capability [S1, unofficial]. It was developed by researchers at Argonne National Laboratory, including Lori A. Freitag and Raymond M. Loy [S2]. The system uses a client/server model based on TCP/IP and Unix sockets, implemented via the ALICE Memory Snooper (AMS) from Argonne National Laboratory, for communication between the octree code and the desktop graphics application [S2]. The graphics application uses JAVA Swing components to provide a GUI to VTK classes [S2].
+
+## Sources
+[S1] Adaptive, multiresolution visualization of large data sets using parallel octrees., https://digital.library.unt.edu/ark:/67531/metadc624851/?q=multiresolution volume rendering, fetched 2026-10-28 (unofficial)
+[S2] Comparison of remote visualization strategies for interactive exploration of large data sets, https://digital.library.unt.edu/ark:/67531/metadc710831/?q=multiresolution volume rendering, fetched 2026-10-28

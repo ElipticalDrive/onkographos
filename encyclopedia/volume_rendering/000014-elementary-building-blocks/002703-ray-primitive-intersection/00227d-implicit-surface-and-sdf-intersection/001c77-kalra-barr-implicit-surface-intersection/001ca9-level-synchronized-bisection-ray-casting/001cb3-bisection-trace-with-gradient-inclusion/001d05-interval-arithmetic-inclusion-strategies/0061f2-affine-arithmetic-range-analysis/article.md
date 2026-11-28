@@ -1,0 +1,197 @@
+# Affine Arithmetic Range Analysis
+
+Also called: Applying Range Analysis to INRs, Range Analysis, Range Analysis via Affine Arithmetic
+
+## Overview
+Affine Arithmetic Range Analysis is a technique for bounding the output range of a function over a given input domain by decomposing value intervals into affine combinations of unit intervals, known as affine forms [S1]. It solves the problem of computing tight inclusion bounds for implicit functions, particularly Implicit Neural Representations (INRs), to enable efficient skipping of non-active regions during hierarchical iso-surface extraction [S1]. Unlike [Interval Arithmetic](1400-interval-arithmetic.md) which suffers from the dependency problem, or [Forward Linear Inclusion Function](1714-forward-linear-inclusion-function.md) which relies on local gradients, Affine Arithmetic tracks distinct sources of uncertainty via independent unit interval symbols, guaranteeing that the true output range is contained within the computed bounds [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A scalar field function $f: \mathbb{R}^d \rightarrow \mathbb{R}$ (e.g., an INR) and an input spatial region defined as a hyper-rectangle (e.g., a 3D cuboid).
+*   **Output:** An affine form representing the estimated range of $f$ over the input region, from which the interval bound $[x_0 - r, x_0 + r]$ is derived.
+
+**Data Structures:**
+*   **Affine Form ($\hat{x}$):** A tuple $(x_0, \alpha_1, \dots, \alpha_N)$ where:
+    *   $x_0 \in \mathbb{R}$ is the center (scalar).
+    *   $\alpha_i \in \mathbb{R}$ are coefficients for $i=1 \dots N$.
+    *   $N$ is the number of unit interval symbols.
+*   **Unit Interval Symbol ($\epsilon_i$):** A symbolic variable representing an independent source of uncertainty, with domain $\epsilon_i \in [-1, 1]$ [S1].
+
+**Numbered Steps:**
+
+1.  **Rewrite Input Region in Affine Form:**
+    Convert the input spatial region (e.g., a 3D cuboid centered at $\mathbf{x}_0$ with extents) into an affine form vector $\hat{\mathbf{v}}_0$. For a 2D rectangle centered at $x_0, y_0$ with width $2x_1$ and length $2y_1$, the affine form vector is $(\hat{x}, \hat{y})$ where:
+    $$
+    \hat{x} = x_0 + x_1 \epsilon_1
+    $$
+    $$
+    \hat{y} = y_0 + y_1 \epsilon_2
+    $$
+    where $\epsilon_1, \epsilon_2 \in [-1, 1]$ are independent unit interval symbols [S1]. For a 3D cuboid, this extends to three dimensions with corresponding $\epsilon$ symbols.
+
+2.  **Propagate Through Linear Layers:**
+    For each linear layer in the function (e.g., neural network linear layers), apply the affine arithmetic rule for linear functions. If $f(\hat{x}) = \alpha \hat{x} + \beta$, the output affine form is:
+    $$
+    f(\hat{x}) = \alpha x_0 + \beta + \sum_{i=1}^{N} \alpha x_i \epsilon_i
+    $$
+    where $\hat{x} = x_0 + \sum_{i=1}^{N} x_i \epsilon_i$ [S1]. This operation preserves the exact bounds for linear transformations.
+
+3.  **Approximate Nonlinear Functions:**
+    For each nonlinear activation function $f$, obtain a linear approximation $\bar{f}(x) \approx f(x) := \alpha x + \beta$. Calculate the maximum error $\gamma$ using Chebyshev polynomials to minimize $\gamma$:
+    $$
+    \gamma = \max_{x \in \text{range}(\hat{x})} |f(x) - \bar{f}(x)|
+    $$
+    Rewrite the nonlinear function as an affine form including a new error term $\epsilon_{N+1}$:
+    $$
+    f(\hat{x}) = \bar{f}(\hat{x}) + \gamma \epsilon_{N+1} = \alpha x_0 + \beta + \sum_{i=1}^{N} \alpha x_i \epsilon_i + \gamma \epsilon_{N+1}
+    $$
+    where $\epsilon_{N+1} \in [-1, 1]$ is a new independent unit interval symbol representing the approximation error [S1].
+
+4.  **Repeat Propagation:**
+    Repeat steps 2 and 3 for all layers in the function (e.g., all layers of the INR).
+
+5.  **Read Output Bound:**
+    Read the estimated scalar value bound from the final output affine form $\hat{v}'_{k-1}$. The range is calculated as:
+    $$
+    \text{range}(\hat{x}) = [x_0 - r, x_0 + r]
+    $$
+    where $r = \sum_{i=1}^{N} |x_i|$ [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def affine_form_from_cuboid(center: Vector3, extents: Vector3) -> AffineForm:
+    """
+    Converts a 3D cuboid defined by center and half-extents into an affine form.
+    Returns an affine form with 3 unit interval symbols.
+    """
+    # center = (cx, cy, cz)
+    # extents = (ex, ey, ez)
+    # Affine form: x0 + sum(alpha_i * epsilon_i)
+    # epsilon_1 corresponds to x, epsilon_2 to y, epsilon_3 to z
+    
+    x0 = center.x
+    y0 = center.y
+    z0 = center.z
+    
+    # Coefficients for epsilon_1, epsilon_2, epsilon_3
+    # The input region is [cx-ex, cx+ex] x [cy-ey, cy+ey] x [cz-ez, cz+ez]
+    # x = cx + ex * epsilon_1
+    # y = cy + ey * epsilon_2
+    # z = cz + ez * epsilon_3
+    
+    # We return a vector of affine forms, one for each dimension
+    ax = AffineForm(center=x0, coeffs=[ex, 0, 0])
+    ay = AffineForm(center=y0, coeffs=[0, ey, 0])
+    az = AffineForm(center=z0, coeffs=[0, 0, ez])
+    
+    return (ax, ay, az)
+
+def affine_linear_layer(input_affine: AffineForm, weight: float, bias: float) -> AffineForm:
+    """
+    Applies a linear transformation f(x) = weight * x + bias to an affine form.
+    """
+    new_center = weight * input_affine.center + bias
+    new_coeffs = [weight * c for c in input_affine.coeffs]
+    return AffineForm(center=new_center, coeffs=new_coeffs)
+
+def affine_nonlinear_layer(input_affine: AffineForm, activation_func, chebyshev_order=2) -> AffineForm:
+    """
+    Approximates a nonlinear function using a linear approximation and an error term.
+    Uses Chebyshev polynomials to minimize the maximum error gamma.
+    """
+    # 1. Determine the range of the input affine form to find the domain for approximation
+    # range = [center - sum(|coeffs|), center + sum(|coeffs|)]
+    radius = sum(abs(c) for c in input_affine.coeffs)
+    x_min = input_affine.center - radius
+    x_max = input_affine.center + radius
+    
+    # 2. Obtain linear approximation f_bar(x) = alpha * x + beta
+    # This typically involves fitting a line or using Chebyshev approximation
+    # For the purpose of this implementation, we assume a helper function exists
+    # that returns alpha and beta minimizing max error on [x_min, x_max]
+    alpha, beta = fit_linear_approximation(activation_func, x_min, x_max, chebyshev_order)
+    
+    # 3. Calculate maximum error gamma
+    # gamma = max |f(x) - (alpha*x + beta)| for x in [x_min, x_max]
+    gamma = compute_max_approximation_error(activation_func, alpha, beta, x_min, x_max)
+    
+    # 4. Apply linear part to input affine form
+    linear_part = affine_linear_layer(input_affine, alpha, beta)
+    
+    # 5. Add new error term gamma * epsilon_new
+    # The new affine form has one more coefficient than the input
+    new_coeffs = linear_part.coeffs + [gamma]
+    
+    return AffineForm(center=linear_part.center, coeffs=new_coeffs)
+
+def propagate_inr(input_affine_vector: Tuple[AffineForm, AffineForm, AffineForm], inr_layers: List[Layer]) -> AffineForm:
+    """
+    Propagates the input affine form vector through the INR layers.
+    """
+    current_affine = input_affine_vector
+    
+    for layer in inr_layers:
+        if layer.is_linear:
+            # Apply linear layer rules
+            # Assuming layer has weight matrix W and bias b
+            # This is a simplified 1D example; for 3D input, matrix multiplication of affine forms is needed
+            # For vector affine forms, each component is transformed by the matrix
+            new_affine = affine_matrix_vector_mult(current_affine, layer.weight, layer.bias)
+            current_affine = new_affine
+        else:
+            # Apply nonlinear activation
+            # Assuming element-wise activation for simplicity
+            new_affine = []
+            for aff in current_affine:
+                new_aff = affine_nonlinear_layer(aff, layer.activation)
+                new_affine.append(new_aff)
+            current_affine = tuple(new_affine)
+            
+    # The output is the final affine form (or vector of affine forms if multi-output)
+    # For scalar field, we take the last component or combine them
+    return current_affine[0] # Assuming scalar output
+
+def get_range(affine_form: AffineForm) -> Tuple[float, float]:
+    """
+    Calculates the interval range from an affine form.
+    """
+    radius = sum(abs(c) for c in affine_form.coeffs)
+    lower = affine_form.center - radius
+    upper = affine_form.center + radius
+    return (lower, upper)
+```
+
+**Parameters:**
+*   $\epsilon_i$: Independent unit intervals with domain $[-1, 1]$, representing distinct sources of uncertainty [S1].
+*   $\gamma$: The bound on the approximation error between the true nonlinear function and its affine approximation [S1].
+*   Chebyshev polynomials: Used to approximate nonlinear functions to minimize $\gamma$ [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Conservatism:** The estimated bounds are often too large (conservative), especially for complex scientific data with high-frequency features, leading to poor efficiency in skipping non-active regions [S1].
+*   **Looser Bounds:** Output bounds from affine forms are looser than real output intervals because new uncertainty terms $\epsilon_{N+1}$ are introduced in the approximation to the nonlinear function [S1].
+*   **High-Frequency Features:** Scalar fields from scientific simulations have more value oscillations and high-frequency features compared to SDFs, leading to large errors between the affine approximation and the true function [S1].
+
+## Subtopics
+
+### [Propagation of Affine Forms (PAF)](18502-propagation-of-affine-forms-paf.md)
+Propagates probabilistic affine forms to generate "soft" bounds, improving efficiency over conservative affine arithmetic bounds.
+
+### [Range Analysis with Uniform Assumption](18690-range-analysis-with-uniform-assumption.md)
+Treats error terms in affine forms as uniformly distributed random variables to generate less pessimistic bounds than vanilla range analysis.
+
+## Operating characteristics
+*   **Time Complexity:** Propagating affine forms through a network with $L$ layers and $N$ input dimensions involves arithmetic operations proportional to the number of coefficients. The number of coefficients grows with each nonlinear layer due to the introduction of new error terms $\epsilon_{N+1}$.
+*   **Memory Complexity:** Storage of affine forms requires storing the center and all coefficients. The number of coefficients increases with the depth of the network and the number of nonlinear operations.
+*   **Strengths:** Guarantees exact output bounds through linear functions for linear parts; handles dependencies better than Interval Arithmetic [S1].
+*   **Limitations:** Bounds can be overly conservative for complex, high-frequency functions, reducing the efficiency of region skipping [S1]. The introduction of new error terms for nonlinearities leads to looser bounds than the true output interval [S1].
+*   **When to use:** When tight bounds are required for hierarchical iso-surface extraction on INRs, and the function has significant linear components.
+*   **When not to use:** For functions with high-frequency oscillations where the affine approximation error $\gamma$ becomes large, leading to excessive conservatism [S1].
+
+## Background
+Affine Arithmetic Range Analysis was introduced in the context of improving the efficiency of iso-surface extraction on Implicit Neural Representations (INRs) [S1]. It builds on the general technique of range analysis, which uses interval arithmetic or affine arithmetic to bound function output ranges [S1]. The method was developed to address the issue that standard interval arithmetic bounds are often too loose, while affine arithmetic provides tighter bounds by tracking dependencies, though it can still be conservative for complex INRs [S1]. The use of Chebyshev polynomials for nonlinear approximation is cited from [23] in the source [S1].
+
+## Sources
+[S1] Improving Efficiency of Iso-Surface Extraction on Implicit Neural Representations Using Uncertainty Propagation, https://doi.org/10.1109/tvcg.2024.3365089, fetched 2026-10-26

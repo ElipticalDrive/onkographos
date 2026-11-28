@@ -1,0 +1,177 @@
+# Far Terrain LOD with Voxel Coverage Masking
+
+Also called: Far Terrain
+
+## Overview
+Far Terrain LOD with Voxel Coverage Masking is a rendering technique for distant terrain that uses multiple levels of detail (LOD) meshes which are discarded where voxel chunks are present, using a coverage mask to handle boundary transitions and prevent z-fighting or sky leaks [S1, unofficial]. It employs pre-generated static meshes with LOD, whereas voxel chunks are dynamically meshed per chunk, relying on hole rects and mask sampling to discard geometry in covered areas [S1, unofficial].
+
+## How it works
+
+### Inputs and Outputs
+*   **Inputs**: Player position $(px, pz)$, voxel chunk state data (mesh presence and missing status), LOD level index $l$ [S1, unofficial].
+*   **Outputs**: Visible far terrain mesh geometry, updated coverage mask texture, hole rectangle for finer levels [S1, unofficial].
+
+### Data Structures
+*   **Level State**: Each LOD level $l$ maintains `step`, `half`, `snap`, `cx`, `cz`, `wx`, `wz`, `ready`, `mesh`, and `hole` [S1, unofficial].
+*   **Coordinates**: `cx` and `cz` store the current center coordinates in world space, while `wx` and `wz` store the previous world center coordinates (initialized to NaN) [S1, unofficial].
+*   **Hole Rectangle**: `hole` is a `THREE.Vector4` representing the rectangle $(x_0, z_0, x_1, z_1)$ of the finer level's coverage area, used to define the hole for the current level [S1, unofficial].
+*   **Coverage Mask**: A texture or array storing coverage status for columns in the scan window, with values 0 (uncovered), 128 (edge/transition), and 255 (covered) [S1, unofficial].
+
+### Parameters
+*   `SKIRT`: Constant value $128.0$ used to sink vertices inside meshed voxel columns to prevent view rays from slipping between voxel chunks and far terrain [S1, unofficial].
+*   `N`: Grid dimension (size of the mesh in vertices/indices). Not given in the sources.
+*   `BASE_STEP`: Base step size for LOD 0. Not given in the sources.
+*   `LEVELS`: Total number of LOD levels. Not given in the sources.
+*   `MASK_R`: Radius of the scan window for updating the coverage mask. Not given in the sources.
+
+### Algorithm Steps
+1.  **Initialization**: For each level $l$ from $0$ to $LEVELS-1$, calculate `step` = $BASE\_STEP \ll l$, `half` = $N \times step / 2$, and `snap` = $step \times 8$ [S1, unofficial]. If $l > 0$, calculate `skip` = $\lfloor (half - 1.5 \times (snap + snap) - step) / step \rfloor$ [S1, unofficial]. Generate an index buffer for an $N \times N$ grid, alternating diagonals based on $(i + j) \& 1$ to prevent flat-shading artifacts [S1, unofficial]. Create a `BufferGeometry` with position (Float32, 3), color (Uint8, 4), and index [S1, unofficial]. Create a `hole` Vector4 initialized to $(1, 1, 0, 0)$ [S1, unofficial]. Create a `MeshLambertMaterial` with custom shader injection [S1, unofficial]. Set mesh properties: `frustumCulled=false`, `visible=false`, `receiveShadow=true`, `castShadow=false`, `matrixAutoUpdate=false`, `renderOrder=-1 + l \times 0.01` [S1, unofficial].
+2.  **Material Setup (for $l > 0$)**: Enable polygon offset to prevent depth ties with finer levels: `polygonOffset=true`, `polygonOffsetFactor=1+l`, `polygonOffsetUnits=2+2*l` [S1, unofficial]. Inject vertex shader code defining a `farMask` function sampling the `uFarMask` texture [S1, unofficial]. In `begin_vertex`, compute world position `wp`, sample 4 corners of `farMask`, take the minimum, and if `min > 0.25`, subtract `SKIRT` (128) from the y-coordinate [S1, unofficial]. Inject fragment shader code to discard if the vertex world position is inside the hole rect ($uHole.x < vWPos.x < uHole.z$ AND $uHole.y < vWPos.z < uHole.w$) or if the `farMask` sample $> 0.75$ (edge column kept at 0.5, sunk) [S1, unofficial].
+3.  **Update Loop (per frame)**: Call `updateMask(px, pz)` [S1, unofficial]. For each level $l$, if player distance from level center $(wx, wz) \le snap$ AND $wx$ is not NaN, skip this level [S1, unofficial]. Else, calculate new center $cx = \text{round}(px / snap) \times snap$ and $cz = \text{round}(pz / snap) \times snap$ [S1, unofficial]. Update $wx, wz$ to $cx, cz$ [S1, unofficial]. Calculate grid bounds $x_0 = cx - half$ and $z_0 = cz - half$ [S1, unofficial]. Request a meshing job with type `'far'`, id $0$, $x_0$, $z_0$, $step$, $n=N$ [S1, unofficial]. Define a callback `install(l, cx, cz, result)` [S1, unofficial].
+4.  **Install Mesh (Callback)**: Update position and color buffers from `result` [S1, unofficial]. Set $cx, cz$ and `ready=true` [S1, unofficial]. Set mesh position to $(cx - half, -1.5, cz - half)$ [S1, unofficial]. Update matrix and set `visible=true` [S1, unofficial]. Update hole for next coarser level ($l+1$): $m = half - up.step$, set `up.hole` to $(cx - m, cz - m, cx + m, cz + m)$ [S1, unofficial].
+5.  **UpdateMask(px, pz)**: Initialize `cov` array to 0 [S1, unofficial]. Scan columns in range $[pcx - MASK\_R, pcx + MASK\_R] \times [pcz - MASK\_R, pcz + MASK\_R]$ [S1, unofficial]. For each column $ci$, if `colState[ci] == 2`, check chunks by counting meshes and missing [S1, unofficial]. Covered if `meshes > 0` AND `missing == 0` [S1, unofficial]. If `meshes == 0`, remove chunks from settled set [S1, unofficial]. Store covered status in `cov` array [S1, unofficial]. For each column in scan window, if `cov[k]` is true, set $v=255$ [S1, unofficial]. Check 3x3 neighborhood in `cov` array; if any neighbor is uncovered (`cov[neighbor] == 0`), set $v=128$, else $v=255$ [S1, unofficial]. If $d[ci] \neq v$, update $d[ci]$ and set `changed=true` [S1, unofficial]. Clear texels outside scan window (set to 0) and update mask if `changed` [S1, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+# Constants
+SKIRT = 128.0
+MASK_R = 10  # Not given in the sources
+N = 64       # Not given in the sources
+BASE_STEP = 100  # Not given in the sources
+LEVELS = 4       # Not given in the sources
+
+class FarTerrainLevel:
+    def __init__(self, l):
+        self.l = l
+        self.step = BASE_STEP << l
+        self.half = N * self.step / 2
+        self.snap = self.step * 8
+        self.cx = 0.0
+        self.cz = 0.0
+        self.wx = float('nan')
+        self.wz = float('nan')
+        self.ready = False
+        self.hole = [1.0, 1.0, 0.0, 0.0]  # x0, z0, x1, z1
+        self.mesh = None
+        self.skip = 0
+        if l > 0:
+            self.skip = math.floor((self.half - 1.5 * (self.snap + self.snap) - self.step) / self.step)
+
+    def update_center(self, px, pz):
+        if not math.isnan(self.wx):
+            dist = math.sqrt((px - self.wx)**2 + (pz - self.wz)**2)
+            if dist <= self.snap:
+                return False  # Skip update
+        self.cx = round(px / self.snap) * self.snap
+        self.cz = round(pz / self.snap) * self.snap
+        self.wx = self.cx
+        self.wz = self.cz
+        return True
+
+    def get_grid_bounds(self):
+        return self.cx - self.half, self.cz - self.half
+
+def count_meshes(col_x, col_z):
+    # Returns number of active voxel meshes at column
+    return 1  # Placeholder logic for chunk registry lookup
+
+def count_missing(col_x, col_z):
+    # Returns number of missing chunks at column
+    return 0  # Placeholder logic for chunk registry lookup
+
+def remove_chunks(col_x, col_z):
+    # Removes chunks from settled set
+    pass  # Placeholder logic for chunk registry cleanup
+
+def sample_farmask_corners(wp, far_mask_texture):
+    # Samples 4 corners of the farMask texture around world position
+    # Returns list of 4 float values
+    return [0.5, 0.5, 0.5, 0.5]  # Standard texture sampling simulation
+
+def update_texture(data_array):
+    # Uploads coverage data to GPU texture
+    pass  # Standard graphics API call
+
+def vertex_shader_injection(wp, far_mask_texture, hole):
+    corners = sample_farmask_corners(wp, far_mask_texture)
+    min_sample = min(corners)
+    if min_sample > 0.25:
+        wp.y -= SKIRT
+    discard_flag = False
+    if hole[0] < wp.x < hole[2] and hole[1] < wp.z < hole[3]:
+        discard_flag = True
+    if min_sample > 0.75:
+        discard_flag = True
+    return wp, discard_flag
+
+def update_mask(px, pz, col_state, cov_array):
+    pcx = round(px / MASK_R) * MASK_R
+    pcz = round(pz / MASK_R) * MASK_R
+    cov = [[0 for _ in range(2 * MASK_R + 1)] for _ in range(2 * MASK_R + 1)]
+    for i in range(-MASK_R, MASK_R + 1):
+        for j in range(-MASK_R, MASK_R + 1):
+            ci = (i + MASK_R, j + MASK_R)
+            if col_state.get((pcx + i, pcz + j)) == 2:
+                meshes = count_meshes(pcx + i, pcz + j)
+                missing = count_missing(pcx + i, pcz + j)
+                if meshes > 0 and missing == 0:
+                    cov[ci[0]][ci[1]] = 1
+                elif meshes == 0:
+                    remove_chunks(pcx + i, pcz + j)
+    d = [[0 for _ in range(2 * MASK_R + 1)] for _ in range(2 * MASK_R + 1)]
+    changed = False
+    for i in range(-MASK_R, MASK_R + 1):
+        for j in range(-MASK_R, MASK_R + 1):
+            ci = (i + MASK_R, j + MASK_R)
+            v = 0
+            if cov[ci[0]][ci[1]] == 1:
+                v = 255
+                for ni in range(-1, 2):
+                    for nj in range(-1, 2):
+                        ni_ci = (i + ni + MASK_R, j + nj + MASK_R)
+                        if 0 <= ni_ci[0] < len(cov) and 0 <= ni_ci[1] < len(cov[0]):
+                            if cov[ni_ci[0]][ni_ci[1]] == 0:
+                                v = 128
+                                break
+                    if v == 128:
+                        break
+            if d[ci[0]][ci[1]] != v:
+                d[ci[0]][ci[1]] = v
+                changed = True
+    if changed:
+        update_texture(d)
+
+def install_mesh(level, cx, cz, result):
+    level.mesh.update_buffers(result)
+    level.cx = cx
+    level.cz = cz
+    level.ready = True
+    level.mesh.position = (cx - level.half, -1.5, cz - level.half)
+    level.mesh.update_matrix()
+    level.mesh.visible = True
+    # Update hole for next coarser level (l+1)
+    up = level.l + 1  # Reference to next level
+    m = level.half - up.step
+    up.hole = [cx - m, cz - m, cx + m, cz + m]
+```
+
+## Operating characteristics
+*   **Time Complexity**: The update loop runs per frame, with mask update complexity $O(MASK\_R^2)$ per frame [S1, unofficial]. Mesh generation is asynchronous and depends on chunk density [S1, unofficial].
+*   **Memory Complexity**: Requires $O(N^2)$ per LOD level for the mesh geometry and $O(MASK\_R^2)$ for the mask texture [S1, unofficial].
+*   **Performance**: Pre-generated static meshes reduce per-frame computation for distant terrain, while dynamic voxel chunks are handled separately [S1, unofficial].
+*   **Strengths**: Prevents z-fighting and sky leaks through polygon offset and vertex sinking [S1, unofficial]. Efficient for large distances [S1, unofficial].
+*   **Limitations**: Static meshes cannot adapt to dynamic changes in the far terrain unless regenerated [S1, unofficial]. Requires careful tuning of `SKIRT` and mask thresholds [S1, unofficial].
+*   **When to use**: Distant terrain rendering where voxel chunks are sparse or absent [S1, unofficial].
+*   **When not to use**: Close-range terrain where voxel chunks are dense [S1, unofficial].
+
+## Background
+*   **Origin**: Developed for a browser-based voxel engine using Rust WASM [S1, unofficial].
+*   **History**: Part of the effort to render distant terrain with LOD meshes and coverage masking [S1, unofficial].
+*   **Usage**: Implemented within the voxel rendering pipeline to handle transitions between static far terrain and dynamic voxel chunks [S1, unofficial].
+
+## Sources
+[S1] 12.8B destructible voxels rendered in the browser with Rust WASM custom engine, https://github.com/cktang88/2.5d-experiment, fetched 2026-10-26 (unofficial)

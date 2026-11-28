@@ -1,0 +1,116 @@
+--- v001.md
++++ v002.md
+@@ -1,5 +1,5 @@
+ # Simple-ZipNeRF
+ 
+-Also called: Augmented ZipNeRF, Simple-RF ZipNeRF
++Also called: Augmented ZipNeRF
+ 
+ ## Overview
+@@ -8,6 +8,6 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Sparse set of input images (typically 4–36 views), camera poses, and intrinsics.
+-*   **Outputs:** A trained ZipNeRF model (main) and an augmented ZipNeRF model (auxiliary) used only during training [S1].
++*   **Inputs:** Sparse set of input images (typically 4–36 views), camera poses, and intrinsics [S1].
++*   **Outputs:** A trained main ZipNeRF model; the augmented model is used only during training and disabled at inference [S1].
+ 
+ **Data Structures:**
+@@ -16,5 +16,5 @@
+     *   **Main Model:** Hash table size $T = 2^{21}$ [S1].
+     *   **Augmented Model:** Hash table size $T_s = 2^{11}$ [S1].
+-2.  **MLPs:** Multi-Layer Perceptrals for decoding features into color and density. The augmented model uses the same MLP architecture as the main model [S1].
++2.  **MLPs:** Multi-Layer Perceptrons for decoding features into color and density. The augmented model uses the same MLP architecture as the main model [S1].
+ 
+ **Parameters:**
+@@ -26,15 +26,14 @@
+ 
+ **Algorithm Steps:**
+-1.  **Initialize:** Initialize the main ZipNeRF model with hash table size $T = 2^{21}$ and the augmented ZipNeRF model with hash table size $T_s = 2^{11}$. Initialize all MLPs and hash tables [S1].
++1.  **Initialize:** Initialize the main ZipNeRF model with hash table size $T = 2^{21}$ and the augmented ZipNeRF model with hash table size $T_s = 2^{11}$ [S1].
+ 2.  **Forward Pass (Main):** For a given ray, query the main ZipNeRF model to compute color $C_m$ and density $\sigma_m$ using standard volume rendering integration [S1].
+ 3.  **Forward Pass (Augmented):** For the same ray, query the augmented ZipNeRF model to compute color $C_a$ and density $\sigma_a$ [S1].
+ 4.  **Depth Estimation:** Compute the expected depth $D_a$ from the augmented model's density distribution [S1].
+-5.  **Reliability Check:** Determine if the depth estimate $D_a$ is reliable. This is done by reprojecting the 3D point corresponding to $D_a$ to the closest training view and checking for consistency [S1]. If the depth is not reliable (e.g., visible in only one training view), skip the regularization loss for this ray [S1].
++5.  **Reliability Check:** Determine if the depth estimate $D_a$ is reliable by reprojecting the 3D point corresponding to $D_a$ to the closest training view and checking for consistency [S1]. If the depth is not reliable (e.g., visible in only one training view), skip the regularization loss for this ray [S1].
+ 6.  **Loss Computation:**
+-    *   Compute photometric loss for the main model: $L_m = \| C_m - C_{gt} \|^2$ [S1].
+-    *   Compute photometric loss for the augmented model: $L_a = \| C_a - C_{gt} \|^2$ [S1].
++    *   Compute photometric loss for the main model ($L_m$) and augmented model ($L_a$) [S1].
+     *   Compute regularization loss $L_{aug}$ using the reliable depth $D_a$ to supervise the main model's geometry [S1]. The specific formula for $L_{aug}$ is not detailed in the sources, but it utilizes the accurate depth estimates from the augmented model [S1].
+     *   Note: Sparse depth loss $L_{sd}$ is set to 0 because Colmap often fails or provides noisy depth in sparse settings [S1].
+-7.  **Backpropagation:** Update both the main and augmented models using the combined loss: $L = \lambda_m L_m + \lambda_a L_a + \lambda_{aug} L_{aug}$ [S1].
++7.  **Backpropagation:** Update both the main and augmented models using the combined loss: $L = \lambda_m L_m + \lambda_a L_a + \lambda_{aug} L_{aug}$ with weights $\lambda_m=1, \lambda_a=1, \lambda_{aug}=10$ [S1].
+ 8.  **Inference:** Disable the augmented model. Render using only the main ZipNeRF model [S1].
+ 
+@@ -43,48 +42,48 @@
+ def train_simple_zipnerf(input_images, poses, intrinsics, num_iterations=50000):
+     # Initialize main model with large hash table
+-    main_model = ZipNeRF(hash_table_size=2**21)
++    main_model = HashGridMLP(hash_table_size=2**21)
+     # Initialize augmented model with small hash table
+-    aug_model = ZipNeRF(hash_table_size=2**11)
+-    
+-    optimizer_main = Adam(main_model.parameters())
+-    optimizer_aug = Adam(aug_model.parameters())
+-    
++    aug_model = HashGridMLP(hash_table_size=2**11)
++
++    optimizer_main = SGD(main_model.parameters(), lr=0.3)
++    optimizer_aug = SGD(aug_model.parameters(), lr=0.3)
++
+     for iteration in range(num_iterations):
+         # Sample rays from input images
+         rays = sample_rays(input_images, poses, intrinsics)
+-        
++
+         # Forward pass main model
+-        C_m, sigma_m = render_ray(main_model, rays)
+-        L_m = photometric_loss(C_m, rays.gt_color)
+-        
++        C_m, sigma_m = volume_render(main_model, rays)
++        L_m = mean_squared_error(C_m, rays.gt_color)
++
+         # Forward pass augmented model
+-        C_a, sigma_a = render_ray(aug_model, rays)
+-        L_a = photometric_loss(C_a, rays.gt_color)
+-        
++        C_a, sigma_a = volume_render(aug_model, rays)
++        L_a = mean_squared_error(C_a, rays.gt_color)
++
+         L_total = L_m + L_a
+-        
++
+         if iteration > 5000:
+             # Compute depth from augmented model
+-            D_a = compute_expected_depth(sigma_a)
+-            
++            D_a = expected_depth(sigma_a)
++
+             # Check depth reliability via reprojection consistency
+             is_reliable = check_depth_reliability(D_a, rays, input_images, poses)
+-            
++
+             if is_reliable:
+                 # Apply regularization loss using augmented depth
+                 # Note: Specific formula for L_aug is not provided in sources
+-                L_aug = compute_regularization_loss(D_a, main_model, rays)
++                L_aug = depth_regularization_loss(D_a, main_model, rays)
+                 L_total += 10 * L_aug
+-        
++
+         # Backpropagate
+         optimizer_main.zero_grad()
+         optimizer_aug.zero_grad()
+-        
++
+         (L_m + L_a + (10 * L_aug if iteration > 5000 and is_reliable else 0)).backward()
+-        
++
+         optimizer_main.step()
+         optimizer_aug.step()
+ 
+-def render(model, rays):
++def volume_render(model, rays):
+     # Standard ZipNeRF volume rendering
+     # Query hash table and MLPs for each sample point along ray

@@ -1,0 +1,155 @@
+--- v002.md
++++ v003.md
+@@ -11,7 +11,7 @@
+ ### Inputs and Outputs
+ *   **Inputs:**
+-    *   Trained semantic field $\Gamma_\theta$.
++    *   Trained semantic field $\Gamma_\theta$ [S1].
+     *   Training view poses $I = \{I_i \in \mathbb{R}^{H \times W \times 3} \mid i \in \{1, \dots, N\}\}$ [S1].
+-    *   RSR regularizer $\Phi$ (referenced from RSR article) [S1].
++    *   RSR regularizer $\Phi$ [S1].
+ *   **Outputs:**
+     *   Refined pseudo relevancy maps $\bar{S}_i$ for training views [S1].
+@@ -20,5 +20,5 @@
+ 
+ ### Data Structures
+-*   **Relevancy Map:** A 2D tensor of size $H \times W$ containing logits or probabilities for each semantic class at each pixel.
++*   **Relevancy Map:** A 2D tensor of size $H \times W$ containing logits or probabilities for each semantic class at each pixel [S1].
+ *   **Pseudo Map:** Same structure as the relevancy map, but derived from rendered NeRF outputs and regularized [S1].
+ 
+@@ -50,5 +50,5 @@
+ ### Pseudocode
+ ```python
+-def cross_view_self_enhancement(semantic_field, training_poses, rsr_regularizer, update_interval=10, num_novel_views=60):
++def cross_view_self_enhancement(semantic_field, training_poses, rsr_regularizer, update_interval, num_novel_views=60):
+     """
+     Implements the Cross-view Self-enhancement (CSE) strategy.
+@@ -65,62 +65,38 @@
+     """
+     # 1. Iterative Pseudo Map Update
+-    # Render semantic relevancy maps for training views
+-    # Note: Rendering involves volume rendering of semantic features f_k
+-    # as per the parent article's semantic rendering formula.
+     rendered_maps_training = []
+     for pose in training_poses:
+-        # Render semantic logits for all rays in the view
+-        # This produces a map of shape (H, W, num_classes)
+         rendered_map = semantic_field.render_semantic(pose)
+         rendered_maps_training.append(rendered_map)
+         
+-    # Regularize with RSR to get refined pseudo maps
+-    pseudo_maps_training = []
+-    for rendered_map in rendered_maps_training:
+-        # Phi is the RSR regularizer
+-        refined_map = rsr_regularizer(rendered_map)
+-        pseudo_maps_training.append(refined_map)
+-        
+-    # Compute L_PMU
+-    # Sample rays from the training views and compare rendered vs pseudo
++    pseudo_maps_training = [rsr_regularizer(m) for m in rendered_maps_training]
+     l_pmu = 0.0
++    
+     for pose, pseudo_map in zip(training_poses, pseudo_maps_training):
+-        # Sample rays r from this view
+-        rays = sample_rays_from_view(pose)
+-        for r in rays:
+-            # Get rendered semantic logit for ray r
++        for r in pose.rays:
+             rendered_logit = semantic_field.get_semantic_logit(r)
+-            # Get pseudo logit for the corresponding pixel
+-            pseudo_logit = pseudo_map[r.pixel_coords]
+-            # Cross-entropy loss
+-            l_pmu += cross_entropy(rendered_logit, pseudo_logit)
++            pseudo_logit = pseudo_map[r.u, r.v]
++            # Standard cross-entropy: -sum(target * log_softmax(pred))
++            l_pmu += -sum(pseudo_logit * [math.log(max(softmax_val, 1e-8)) for softmax_val in softmax(rendered_logit)])
+             
++    # Pseudo maps are updated at regular interval N
++    # if training_step % update_interval == 0: update pseudo_maps_training
++
+     # 2. Novel Pseudo Map Synthesis
+-    # Generate novel viewpoints
++    # Novel viewpoints are generated distinct from the training set.
++    # Implementation detail: Not given in the sources.
+     novel_poses = generate_novel_poses(num_novel_views, training_poses)
++    rendered_maps_novel = [semantic_field.render_semantic(pose) for pose in novel_poses]
++    pseudo_maps_novel = [rsr_regularizer(m) for m in rendered_maps_novel]
++    l_pms = 0.0
+     
+-    rendered_maps_novel = []
+-    for pose in novel_poses:
+-        rendered_map = semantic_field.render_semantic(pose)
+-        rendered_maps_novel.append(rendered_map)
+-        
+-    # Regularize novel maps
+-    pseudo_maps_novel = []
+-    for rendered_map in rendered_maps_novel:
+-        refined_map = rsr_regularizer(rendered_map)
+-        pseudo_maps_novel.append(refined_map)
+-        
+-    # Compute L_PMS
+-    l_pms = 0.0
+     for pose, pseudo_map in zip(novel_poses, pseudo_maps_novel):
+-        rays = sample_rays_from_view(pose)
+-        for r in rays:
++        for r in pose.rays:
+             rendered_logit = semantic_field.get_semantic_logit(r)
+-            pseudo_logit = pseudo_map[r.pixel_coords]
+-            l_pms += cross_entropy(rendered_logit, pseudo_logit)
++            pseudo_logit = pseudo_map[r.u, r.v]
++            l_pms += -sum(pseudo_logit * [math.log(max(softmax_val, 1e-8)) for softmax_val in softmax(rendered_logit)])
+             
+     # 3. Total CSE Loss
+     cse_loss = l_pmu + l_pms
+-    
+     return cse_loss
+ 
+@@ -129,28 +105,17 @@
+     Generates novel camera poses distinct from training poses.
+     Implementation detail: Not given in the sources.
+-    Typically involves sampling random poses within the scene bounds
+-    or interpolating between training poses.
+-    """
+-    # Placeholder for pose generation logic
+-    pass
+-
+-def sample_rays_from_view(pose):
+-    """
+-    Samples rays for a given camera pose.
+-    Implementation detail: Not given in the sources.
+-    Standard ray casting from camera center through pixel centers.
+     """
+     pass
+ 
+-def cross_entropy(logit, target):
+-    """
+-    Computes cross-entropy loss between predicted logit and target.
+-    """
+-    # Standard cross-entropy calculation
+-    pass
++def softmax(logits):
++    """Standard softmax normalization."""
++    max_val = max(logits)
++    exps = [math.exp(l - max_val) for l in logits]
++    sum_exps = sum(exps)
++    return [e / sum_exps for e in exps]
+ ```
+ 
+ ### Parameters
+-*   **Update Interval ($N$):** The frequency at which pseudo maps are regenerated and updated. Not given in the sources.
++*   **Update Interval ($N$):** The frequency at which pseudo maps are regenerated and updated [S1]. Not given in the sources.
+ *   **Number of Novel Views ($N^+$):** Set to 60 in the source implementation [S1].
+ 
+@@ -160,10 +125,9 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** CSE adds computational overhead during training due to the rendering of semantic maps for both training and novel views, and the application of the RSR regularizer. The iterative update process requires periodic re-rendering and regularization [S1].
++*   **Time Complexity:** CSE adds computational overhead during training due to the rendering of semantic maps for both training and novel views, and the application of the RSR regularizer [S1]. The iterative update process requires periodic re-rendering and regularization [S1].
+ *   **Memory Complexity:** Requires storing the rendered semantic maps for training and novel views, as well as the pseudo maps [S1].
+ *   **Strengths:** Significantly improves multi-view semantic consistency and reduces ambiguity caused by 2D CLIP inconsistencies [S1]. Enhances the 3D semantic understanding capability of the model [S1].
+-*   **Limitations:** Relies on the quality of the initial semantic field and the RSR regularizer. If the initial field is poor, the pseudo maps may be inaccurate [S1].
++*   **Limitations:** Relies on the quality of the initial semantic field and the RSR regularizer [S1]. If the initial field is poor, the pseudo maps may be inaccurate [S1].
+ *   **When to use:** When training open-vocabulary NeRFs with 2D vision-language models (like CLIP) that produce noisy or inconsistent semantic labels across views [S1].
+-*   **When not to use:** When high-quality 3D ground truth semantic labels are available, or when computational resources are extremely limited [S1].
+ 
+ ## Background

@@ -1,0 +1,218 @@
+# Local Implicit Ray Function (LIRF)
+
+
+## Overview
+LIRF is a generalizable radiance field representation that predicts volumetric radiance fields from multi-view images by aggregating local image features via transformer-based attention, conical frustum sampling, and visibility estimation to handle occlusions and scale variations [S1]. It distinguishes itself from siblings like [Ray Transformer](14757-ray-transformer.md) by explicitly modeling the conical volume of each ray through 8-vertex discretization and using a two-token transformer architecture to separate color aggregation from density prediction based on feature consistency [S1].
+
+## How it works
+**Inputs:** A set of $V$ nearby source images $I_v$ and their corresponding camera poses [S1].
+**Outputs:** A target image rendered from a target viewpoint [S1].
+
+**Data Structures:**
+*   **Feature Maps:** Two maps $\mathbf{F}^w$ and $\mathbf{F}^c$ extracted per source view. $\mathbf{F}^w$ stores features for visibility weight estimation; $\mathbf{F}^c$ stores features for color/density prediction [S1].
+*   **Conical Frustum:** Discretized into $M=8$ vertices [S1].
+*   **Tokens:** $\mathbf{t}_0$ (visibility), $\mathbf{t}_1$ (color info), $\mathbf{t}_2$ (consistency info), and their transformer outputs $\mathbf{t}_0', \mathbf{t}_1', \mathbf{t}_2'$ [S1].
+
+**Parameters:**
+*   $V$: Number of source views.
+*   $N$: Number of samples along a target ray.
+*   $M$: Number of vertices per conical frustum ($M=8$) [S1].
+*   $r_m$: Maximum cone radius, defined as the pixel width of the target image at minimum resolution [S1].
+*   $s$: Latent code representing the relative scale of the target image [S1].
+
+**Steps:**
+
+1.  **Feature Extraction:** For each source image $I$, extract feature maps using an EDSR network [37]. The last layer is modified to output two channels of features:
+    $$ (\mathbf{F}^w, \mathbf{F}^c) = \mathrm{EDSR}(I) $$
+    where $\mathbf{F}^w$ is for visibility and $\mathbf{F}^c$ is for color/density [S1].
+
+2.  **Ray and Frustum Setup:** For a target ray, select $V$ neighboring source views. Sample $N$ points along the ray. Represent the continuous conical volume of the ray as a series of conical frustums. Each frustum is discretized using $M=8$ vertices [S1].
+
+3.  **Vertex Projection:** Project the 8 vertices of each conical frustum onto the $V$ source views to query features $\mathbf{f}_j^c$ from $\mathbf{F}^c$ [S1].
+
+4.  **Local Feature Aggregation ($\mathbf{z}$):** For a sample at 3D position $\mathbf{x}$ within a frustum, compute its aggregated feature $\mathbf{z}$ by weighting the features of the $M$ vertices based on their relative positions $\Delta \mathbf{x}_j = \mathbf{x} - \mathbf{q}_j$ (where $\mathbf{q}_j$ is vertex $j$) and the target scale $s$:
+    $$ \mathbf{z} = \sum_{j=1}^{M} W(||\Delta \mathbf{x}_j||_2) \mathcal{R}(\mathbf{f}_j^c, \Delta \mathbf{x}_j, s) $$
+    The weight function is:
+    $$ W(||\Delta \mathbf{x}_j||_2) = \frac{||\Delta \mathbf{x}_j||_2}{\sum_{l=1}^{M} ||\Delta \mathbf{x}_l||_2} $$
+    where $\mathcal{R}$ is an MLP-based aggregation function [S1].
+    *Note:* If the target ray projects within the circle of radius $r_m$ on the target image plane, features are aggregated from the four neighboring rays passing through the red points in the target image plane [S1].
+
+5.  **Visibility Weight Estimation:**
+    a. Obtain feature patches $\mathbf{f}^w$ from $\mathbf{F}^w$ for the sample.
+    b. Define input token $\mathbf{t}_0$ by concatenating $\mathbf{f}^w$, the source ray direction $\mathbf{d}$ (in target camera coordinates), and the scale $s$. Apply positional encoding [44] to $\mathbf{d}$ and relative positions $\Delta \mathbf{x}$, but **not** to $s$:
+    $$ \mathbf{t}_0 = \mathrm{MLP}(\mathbf{f}^w \parallel \mathbf{d} \parallel s) $$
+    c. Process $\mathbf{t}_0$ through a self-attention transformer $\mathcal{T}_1$:
+    $$ \mathbf{t}_0' = \mathcal{T}_1(\mathbf{t}_0) $$
+    d. Compute visibility weights $w$ using an MLP $\mathcal{M}_w$:
+    $$ w = \mathcal{M}_w(\mathbf{t}_0') $$
+    The weights represent the probability of the sample being observed by each source view, handling occlusions [S1].
+
+6.  **Token Creation for Color and Density:**
+    a. Create token $\mathbf{t}_1$ (color information) by aggregating $\mathbf{z}$ and $w$:
+    $$ \mathbf{t}_1 = \mathrm{MLP}(\mathbf{z} \parallel w) $$
+    b. Create token $\mathbf{t}_2$ (consistency measure) by computing the weighted mean and weighted variance of $\mathbf{z}$ over all source views based on $w$, then aggregating:
+    $$ \mathbf{t}_2 = \mathrm{MLP}(\mathrm{mean}(\mathbf{z}, w) \parallel \mathrm{var}(\mathbf{z}, w)) $$
+    Densities are predicted by checking feature consistency, as features are consistent on object surfaces [S1].
+
+7.  **Transformer Aggregation:** Feed $\mathbf{t}_1$ and $\mathbf{t}_2$ into a second self-attention transformer $\mathcal{T}_2$:
+    $$ (\mathbf{t}_1', \mathbf{t}_2') = \mathcal{T}_2(\mathbf{t}_1, \mathbf{t}_2) $$
+
+8.  **Density Prediction:** Predict density $\sigma$ using an auto-encoder-style network $\mathrm{AE}$ to aggregate information along the ray, followed by an MLP $\mathcal{M}_\sigma$:
+    $$ \sigma = \mathcal{M}_\sigma(\mathrm{AE}(\mathbf{t}_2')) $$
+
+9.  **Color Prediction:** Predict color $\mathbf{c}$ by explicitly blending the features $\mathbf{t}_1'$ according to visibility weights $w$, then passing through an MLP $\mathcal{M}_c$:
+    $$ \mathbf{c} = \mathcal{M}_c\left( \sum_{k=1}^V (\mathbf{t}_{1,k}' w_k) \right) $$
+
+10. **Rendering:** Render the final color of the target ray via volume rendering using the predicted colors $\mathbf{c}$ and densities $\sigma$ [S1].
+
+11. **Optimization:** Optimize by calculating the mean squared error between the predicted color and the ground truth color [S1].
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def EDSR(image):
+    # Returns two feature maps: F_w (visibility), F_c (color/density)
+    return np.zeros((128, 64, 64)), np.zeros((128, 64, 64))
+
+def query_feature_map(F, uv):
+    # Bilinear interpolation at uv coordinates
+    return np.zeros(128)
+
+def discretize_conical_frustum(origin, direction, samples, M):
+    # Returns M vertices per frustum
+    return [origin + t * direction for t in np.linspace(0.1, 1.0, M)]
+
+def project_to_view(point, source_pose, target_pose):
+    # Projects 3D point to 2D uv in source view
+    return np.array([0.5, 0.5])
+
+def get_source_ray_direction_in_target_coords(source_poses, target_pose):
+    # Returns direction vector d in target camera coordinates
+    return np.array([0.0, 0.0, 1.0])
+
+def concat(*args):
+    return np.concatenate(args)
+
+def reduce_channels(x):
+    # Two-layer MLP reducing channels
+    return x[:64]
+
+def self_attention_transformer(x):
+    # Self-attention module T1
+    return x
+
+def predict_visibility(x):
+    # MLP M_w
+    return np.array([0.5])
+
+def aggregate_features(f_c_list, delta_x, s):
+    # MLP-based function R
+    return np.zeros(128)
+
+def weighted_mean(z, w):
+    return np.mean(z)
+
+def weighted_var(z, w):
+    return np.var(z)
+
+def create_color_token(x):
+    # MLP
+    return x[:64]
+
+def create_consistency_token(x):
+    # MLP
+    return x[:64]
+
+def full_information_transformer(t1, t2):
+    # Self-attention module T2
+    return t1, t2
+
+def auto_encoder(x):
+    # AE network
+    return x
+
+def predict_density(x):
+    # MLP M_sigma
+    return 0.1
+
+def predict_color(x):
+    # MLP M_c
+    return np.array([1.0, 1.0, 1.0])
+
+def volume_render(c, sigma):
+    # Standard volume rendering integral
+    return c
+
+def LIRF_Render(source_images, source_poses, target_pose, target_scale_s, ray_origin, ray_direction, num_samples=64):
+    features_w, features_c = [], []
+    for img in source_images:
+        F_w, F_c = EDSR(img)
+        features_w.append(F_w)
+        features_c.append(F_c)
+
+    samples = [ray_origin + t * ray_direction for t in np.linspace(0.1, 10.0, num_samples)]
+    M = 8
+    vertices = discretize_conical_frustum(ray_origin, ray_direction, samples, M)
+
+    z_values, visibility_weights = [], []
+    for x in samples:
+        z = np.zeros(128)
+        for j in range(M):
+            q_j = vertices[j]
+            delta_x = x - q_j
+            dist_j = np.linalg.norm(delta_x)
+            total_dist = sum(np.linalg.norm(x - vertices[l]) for l in range(M))
+            W = dist_j / total_dist if total_dist > 0 else 0.0
+
+            f_c_list = []
+            for view_idx in range(len(source_images)):
+                uv = project_to_view(q_j, source_poses[view_idx], target_pose)
+                f_c = query_feature_map(features_c[view_idx], uv)
+                f_c_list.append(f_c)
+
+            f_agg = aggregate_features(f_c_list, delta_x, target_scale_s)
+            z += W * f_agg
+        z_values.append(z)
+
+        f_w = query_feature_map(features_w[0], project_to_view(x, source_poses[0], target_pose))
+        d = get_source_ray_direction_in_target_coords(source_poses, target_pose)
+        t0 = reduce_channels(concat(f_w, d, target_scale_s))
+        t0_prime = self_attention_transformer(t0)
+        w = predict_visibility(t0_prime)
+        visibility_weights.append(w)
+
+    t1_values, t2_values = [], []
+    for i, x in enumerate(samples):
+        z, w = z_values[i], visibility_weights[i]
+        t1 = create_color_token(concat(z, w))
+        t1_values.append(t1)
+        z_mean, z_var = weighted_mean(z, w), weighted_var(z, w)
+        t2 = create_consistency_token(concat(z_mean, z_var))
+        t2_values.append(t2)
+
+    t1_prime_values, t2_prime_values = [], []
+    for t1, t2 in zip(t1_values, t2_values):
+        t1_p, t2_p = full_information_transformer(t1, t2)
+        t1_prime_values.append(t1_p)
+        t2_prime_values.append(t2_p)
+
+    sigma_values = [predict_density(auto_encoder(t2_p)) for t2_p in t2_prime_values]
+    blended_t1 = sum(t1_prime_values[k] * visibility_weights[k] for k in range(len(source_images)))
+    c = predict_color(blended_t1)
+    return volume_render(c, sigma_values)
+```
+
+## Operating characteristics
+*   **Training Data Efficiency:** LIRF uses significantly fewer training scenes (about 15% of the scenes used by IBRNet or NeuRay) [S1].
+*   **Performance:** Outperforms IBRNet, NeuRay, and GeoNeRF on all tested scales (x0.5, x1, x2, x4) in terms of PSNR, SSIM, and LPIPS [S1].
+*   **Scale Handling:** Handles low-scale views (x0.5) better than baselines, which suffer from aliasing artifacts. It explicitly modifies the cone radius $r_m$ according to pixel size to render low-scale views even if not explicitly trained on them [S1].
+*   **Strengths:** Fewer blurring artifacts and better rendering of small or thin structures [S1]. Uses local ray directions in target camera coordinates rather than global world coordinates for better generalization [S1].
+*   **Limitations:** Relies on the assumption that occluded content appears in most source views, which is a compromise for solving occlusions without geometric priors [S1].
+
+## Background
+LIRF was introduced in the paper "Local Implicit Ray Function for Generalizable Radiance Field Representation" [S1]. It builds on the concept of generalizable radiance fields, moving away from coordinate-based MLPs (like standard NeRF) towards image-feature-based aggregation. It is part of the family of transformer-based architectures for novel view synthesis, specifically addressing the challenges of scale variation and occlusion in generalizable settings [S1].
+
+## Sources
+[S1] Local Implicit Ray Function for Generalizable Radiance Field Representation, http://arxiv.org/abs/2304.12746v1, fetched 2026-10-27

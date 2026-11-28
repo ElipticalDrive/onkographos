@@ -1,0 +1,99 @@
+--- v008.md
++++ v009.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Weighted Blended Order-Independent Transparency (WBOIT) is a transparency rendering technique that bypasses explicit depth sorting to achieve order-independent blending in a single pass [S1, unofficial][S2]. It solves the non-commutative nature of standard alpha blending by modifying the fragment weights in the translucency equation to estimate occlusion based on the transparency of surrounding objects [S2]. Unlike [Improved Order Independent Transparency for Opaque Kernels](4562-improved-order-independent-transparency-for-opaque-kernels.md) or [Hardware-Z Cull Depth Peeling](13947-hardware-z-cull-depth-peeling.md), which rely on sorting or sequential depth extraction, WBOIT approximates the correct blend order through weighted accumulation, making it suitable for resource-constrained environments such as integrated graphics or CPUs [S1, unofficial].
++Weighted Blended Order-Independent Transparency (WBOIT) is a transparency rendering technique that bypasses sorting entirely to achieve order-independent blending in a single pass [S1, unofficial][S2]. It solves the non-commutative nature of standard alpha blending by modifying fragment weights in the translucency equation to estimate occlusion based on the transparency of surrounding objects [S2]. Unlike [Improved Order Independent Transparency for Opaque Kernels](4562-improved-order-independent-transparency-for-opaque-kernels.md) or [Hardware-Z Cull Depth Peeling](13947-hardware-z-cull-depth-peeling.md), which rely on sorting or sequential depth extraction, WBOIT modifies blending weights to approximate depth-sorted accumulation without explicit ordering, making it suitable for resource-constrained environments such as integrated graphics or CPUs [S1, unofficial].
+ 
+ ## How it works
+@@ -12,5 +12,5 @@
+ 
+ **Data Structures:**
+-The method operates on standard fragment data. In implementations like `gsplat_rviz_plugin`, splats are packed into a `SplatGPU` structure for GPU consumption [S1, unofficial]:
++In implementations like `gsplat_rviz_plugin`, splats are packed into a `SplatGPU` structure for GPU consumption [S1, unofficial]:
+ *   `center[3]`: Float3 position.
+ *   `alpha`: Float opacity.
+@@ -18,58 +18,33 @@
+ *   `covB[3]`: Remaining covariance components $\{v_{22}, v_{23}, v_{33}\}$.
+ *   `sh[16][4]`: Spherical Harmonics coefficients (RGB + padding).
+-
+-These are often packed into a `Texture Buffer Object` (TBO) using half-precision floats for covariance components to save memory [S1, unofficial].
++These are packed into a `Texture Buffer Object` (TBO) using half-precision floats for covariance components to save memory [S1, unofficial].
+ 
+ **Parameters:**
+-*   `wboit_weight_scale`: Controls the scaling of the weight function.
+-*   `wboit_weight_exponent`: Controls the steepness of the weight falloff.
++*   `wboit_weight_scale`: Controls the scaling of the weight function [S1, unofficial].
++*   `wboit_weight_exponent`: Controls the steepness of the weight falloff [S1, unofficial].
+ *   `wboit_alpha_discard`: Threshold below which fragments are discarded to reduce noise [S1, unofficial].
+ 
+ **Algorithm Steps:**
+-1.  **Initialization:** Ensure the compositor viewport is defined and active. Set `wboit_compositor_active_` to true [S1, unofficial].
+-2.  **Weight Calculation:** For each fragment, calculate a weight $w$ based on its depth and the estimated transparency of the scene. The weight is derived from a function that estimates occlusion as a function of the transparency of the rest of the objects [S2].
+-    *   The specific formula is not provided in the sources, but it typically involves a power law function of depth or accumulated opacity, scaled by `wboit_weight_scale` and exponentiated by `wboit_weight_exponent` [S1, unofficial][S2].
+-3.  **Blending:** Perform standard alpha blending using the calculated weight $w$ instead of, or in addition to, the fragment's opacity $\alpha$. The blending equation is modified to be commutative.
+-    *   Standard blending: $C_{out} = C_{frag} \alpha_{frag} + C_{prev} (1 - \alpha_{frag})$.
+-    *   WBOIT blending: The weight $w$ modulates the contribution of the fragment to approximate its position in the depth-sorted order [S2].
++1.  **Initialization:** If the `transparency_mode_property` option is 1, enable WBOIT by calling `ensureDefined()`, `enable(vp)`, setting `compositor_viewport_ = vp`, and setting `wboit_compositor_active_ = true` [S1, unofficial].
++2.  **Weight Calculation:** For each fragment, calculate a weight $w$ based on its depth and the estimated transparency of the scene [S2]. The algorithm uses weights in the translucency equation running through the scene to estimate the occlusion for each depth as a function of the transparency of the rest of the objects considered [S2].
++3.  **Blending:** Perform blending using the calculated weight $w$ instead of, or in addition to, the fragment's opacity $\alpha$ [S2]. The blending equation is modified to be commutative [S2]. Standard blending follows $C_{out} = C_{frag} \alpha_{frag} + C_{prev} (1 - \alpha_{frag})$ [G]. WBOIT modulates the contribution of the fragment to approximate its position in the depth-sorted order [S2].
+ 4.  **Discard:** Fragments with $\alpha < \text{wboit\_alpha\_discard}$ are discarded to improve performance and reduce noise [S1, unofficial].
+-5.  **Termination:** If WBOIT is disabled, deactivate the compositor viewport and set `wboit_compositor_active_` to false [S1, unofficial].
++5.  **Termination:** If WBOIT is disabled and was active, call `disable(compositor_viewport_)` and set `wboit_compositor_active_ = false` [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-# Pseudocode for WBOIT fragment processing
+-# Note: Exact weight formula is not specified in sources [S2]
++def wboit_process_fragment(fragment, wboit_alpha_discard, wboit_weight_scale, wboit_weight_exponent, framebuffer_color):
++    # 1. Discard fragments below alpha threshold [S1, unofficial]
++    if fragment.alpha < wboit_alpha_discard:
++        return framebuffer_color
+ 
+-def process_fragment(fragment):
+-    # 1. Check alpha discard threshold
+-    if fragment.alpha < wboit_alpha_discard:
+-        discard()
++    # 2. Calculate weight based on depth and scene transparency [S2]
++    # Sources do not provide the exact weight formula [S2]
++    # Standard implementations typically use a power-law or exponential decay of depth/accumulated opacity
++    w = fragment.alpha * (wboit_weight_scale * fragment.depth) ** wboit_weight_exponent
+ 
+-    # 2. Calculate weight based on depth and scene transparency
+-    # The weight estimates occlusion for each depth as a function of 
+-    # the transparency of the rest of the objects [S2].
+-    # Implementation detail: This usually involves a power function 
+-    # of depth or accumulated opacity.
+-    # w = weight_function(fragment.depth, wboit_weight_scale, wboit_weight_exponent)
+-    
+-    # Since the exact formula is not given, we assume a generic weight calculation [G]
+-    # In practice, this might be: w = exp(-weight_scale * depth) ^ weight_exponent
+-    # or similar, tuned per scene [S2].
+-    w = calculate_wboit_weight(fragment)
+-
+-    # 3. Blend using the weight
+-    # The blending equation is modified to use w for order independence [S2]
+-    # FinalColor = FragmentColor * w + PreviousColor * (1 - w)
+-    # Note: Some implementations blend alpha and color separately or use 
+-    # a specific WBOIT blending equation.
+-    blended_color = fragment.color * w + current_framebuffer_color * (1 - w)
+-    
++    # 3. Blend using the calculated weight to approximate depth-sorted order [S2]
++    blended_color = fragment.color * w + framebuffer_color * (1.0 - w)
+     return blended_color
+-
+-def calculate_wboit_weight(fragment):
+-    # Placeholder for the specific weight function [G]
+-    # Sources state weights are used to estimate occlusion [S2]
+-    # and require expert adjustment per scene [S2].
+-    pass
+ ```
+ 
+@@ -90,5 +65,5 @@
+ *   **Strengths:** Fast, single-pass, low memory usage [S2].
+ *   **Limitations:** Visual artifacts in complex transparent clusters; requires manual tuning of weights per scene; less accurate than sorting-based methods [S2].
+-*   **When to Use:** Real-time applications on low-end hardware where approximate transparency is acceptable [S1, unofficial].
++*   **When to Use:** Resource-constrained CPUs and weaker GPUs (e.g., integrated graphics) where approximate transparency is acceptable [S1, unofficial].
+ *   **When Not to Use:** Medical visualization or scientific data inspection where precise depth sorting and color integrity are essential [S2].
+ 

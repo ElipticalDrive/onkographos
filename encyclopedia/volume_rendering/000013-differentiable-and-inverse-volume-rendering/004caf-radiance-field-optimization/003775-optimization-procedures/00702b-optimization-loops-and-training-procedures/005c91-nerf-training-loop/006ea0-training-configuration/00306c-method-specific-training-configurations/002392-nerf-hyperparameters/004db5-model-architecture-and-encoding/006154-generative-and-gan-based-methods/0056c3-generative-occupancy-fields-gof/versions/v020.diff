@@ -1,0 +1,282 @@
+--- v019.md
++++ v020.md
+@@ -1,3 +1,4 @@
+ # Generative Occupancy Fields (GOF)
++
+ 
+ ## Overview
+@@ -66,70 +67,49 @@
+ import random
+ 
+-def generate_ray(camera_pose):
+-    """Returns ray origin o and direction d."""
+-    # Implementation depends on camera model
+-    pass
+-
+ def query_generator(theta, x, z):
+-    """Returns alpha and color from generator g_theta."""
+-    alpha = theta(x, z) # Returns value in [0, 1]
+-    color = theta.color(x, z) # Returns vector in R^3
++    """Returns alpha in [0,1] and color in R^3 from generator g_theta."""
++    alpha = theta(x, z)
++    color = theta.color(x, z)
+     return alpha, color
+ 
+ def secant_method(f, a, b, iterations):
+-    """
+-    Finds root of f(x) = 0 in [a, b] using secant method.
+-    f should return alpha value.
+-    """
+-    fa = f(a)
+-    fb = f(b)
++    """Finds root of f(t) = 0 in [a, b] using secant method."""
++    t_prev, t_curr = a, b
++    f_prev, f_curr = f(t_prev), f(t_curr)
+     for _ in range(iterations):
+-        if abs(fb - fa) < 1e-8:
+-            break
+-        x_new = b - fb * (b - a) / (fb - fa)
+-        a, b = x_new, b # Simplified secant update; standard secant uses two previous points
+-        # Correct secant implementation:
+-        # x_new = b - fb * (b - a) / (fb - fa)
+-        # a, b = a, x_new
+-        # fa, fb = f(a), f(b)
+-        # Re-implementing standard secant for clarity:
+-        x_prev, x_curr = a, b
+-        f_prev, f_curr = f(x_prev), f(x_curr)
+-        for _ in range(iterations):
+-            if abs(f_curr - f_prev) < 1e-8:
+-                break
+-            x_next = x_curr - f_curr * (x_curr - x_prev) / (f_curr - f_prev)
+-            x_prev, x_curr = x_curr, x_next
+-            f_prev, f_curr = f_curr, f(x_curr)
+-        return x_curr
+-    return b
+-
+-def render_gof(theta, phi, z, camera_pose, tau=0.5, M=12, ms=3, N=12, delta_min=0.01, gamma=0.0, step=0):
+-    """
+-    Renders an image for a single ray using GOF.
+-    theta: Generator parameters
+-    phi: Discriminator parameters (not used in forward pass)
+-    z: Latent code
+-    camera_pose: Camera origin o and direction d
+-    tau: Threshold for root finding
+-    M: Number of bins for root finding
+-    ms: Secant iterations
+-    N: Number of rendering samples
+-    delta_min: Minimal sampling interval half-width
+-    gamma: Decay rate for shrinking
+-    step: Current training step
+-    """
++        if abs(f_curr - f_prev) < 1e-8:
++            break
++        t_next = t_curr - f_curr * (t_curr - t_prev) / (f_curr - f_prev)
++        t_prev, t_curr = t_curr, t_next
++        f_prev, f_curr = f_curr, f(t_curr)
++    return t_curr
++
++def compute_gan_loss(gen_logit, real_logit, lambda_grad=10.0):
++    """Computes non-saturating GAN loss with gradient penalty.
++    f(u) = -log(1 + exp(-u))
++    Gradient penalty ||grad_D(I)||^2 is computed via automatic differentiation in practice."""
++    def f(u):
++        return -math.log(1 + math.exp(-u))
++    return f(gen_logit) + f(-real_logit) + lambda_grad * 10.0
++
++def compute_normal_loss(theta, x_s, z, eps=0.01):
++    """Computes normal regularization loss: sum ||n(x_s) - n(x_s + eps*d)||^2.
++    Normal n is typically the normalized gradient of alpha w.r.t position."""
++    n_s = theta.gradient_alpha(x_s, z)
++    n_s_eps = theta.gradient_alpha(x_s + eps * theta.direction, z)
++    return sum((n_s[i] - n_s_eps[i])**2 for i in range(3))
++
++def compute_opacity_loss(alphas):
++    """Computes opacity regularization loss: 1/N sum (log(alpha) + log(1-alpha))."""
++    return sum(math.log(a) + math.log(1 - a) for a in alphas) / len(alphas)
++
++def render_gof(theta, z, camera_pose, tau=0.5, M=12, ms=3, N=12, delta_min=0.01, gamma=0.0, step=0):
+     o, d = camera_pose
+-    tn, tf = 0.1, 10.0 # Near and far bounds, typical values not specified in source, assumed standard NeRF bounds
+-    
++    tn, tf = 0.1, 10.0
++
+     # 1. Surface Location via Root-Finding
+-    # Sample M evenly-spaced points
+     t_bins = [tn + i * (tf - tn) / M for i in range(M + 1)]
+-    x_bins = [o + t * d for t in t_bins]
+-    
+-    # Query alpha values
+-    alphas = [query_generator(theta, x, z)[0] for x in x_bins]
+-    
+-    # Find bin k_S where alpha crosses tau
++    alphas = [query_generator(theta, o + t * d, z)[0] for t in t_bins]
++
+     k_S = -1
+     for k in range(M):
+@@ -137,78 +117,58 @@
+             k_S = k
+             break
+-    
++
+     if k_S == -1:
+-        # Fallback if surface not found in bins, e.g., all free or all occupied
+-        # Use midpoint or handle error
+         t_s = (tn + tf) / 2
+     else:
+-        # Secant method in bin [x_bins[k_S], x_bins[k_S+1]]
+-        # Define function for secant method
+         def alpha_func(t):
+-            x = o + t * d
+-            return query_generator(theta, x, z)[0]
+-        
+-        t_a = t_bins[k_S]
+-        t_b = t_bins[k_S+1]
+-        t_s = secant_method(alpha_func, t_a, t_b, ms)
+-    
++            return query_generator(theta, o + t * d, z)[0]
++        t_s = secant_method(alpha_func, t_bins[k_S], t_bins[k_S+1], ms)
++
+     # 2. Shrinking Sampling Region
+     delta_init = (tf - tn) / 2
+     delta_n = max(delta_init * math.exp(-gamma * step), delta_min)
+-    
+-    # Sample N points in [t_s - delta_n, t_s + delta_n]
++
+     t_start = t_s - delta_n
+     t_end = t_s + delta_n
+-    
+-    # Clamp to [tn, tf]
+     t_start = max(tn, t_start)
+     t_end = min(tf, t_end)
+-    
+-    # If region is invalid, fallback to uniform sampling or minimal region
+     if t_end <= t_start:
+         t_end = t_start + delta_min
+-        
+-    t_samples = [t_start + i * (t_end - t_start) / N for i in range(N)]
+-    
++
++    # Sample N points uniformly in [t_s - delta_n, t_s + delta_n]
++    t_samples = []
++    for i in range(1, N + 1):
++        lower = t_s - delta_n + (2 * i - 2) / N * delta_n
++        upper = t_s - delta_n + (2 * i) / N * delta_n
++        t_samples.append(random.uniform(lower, upper))
++
+     # 3. Rendering
+     color = [0.0, 0.0, 0.0]
+-    T = 1.0 # Transmittance
+-    
+-    for i, t in enumerate(t_samples):
++    T = 1.0
++    for t in t_samples:
+         x = o + t * d
+         alpha, c = query_generator(theta, x, z)
+-        
+-        # Alpha composition
+-        # C(r) = sum( alpha_i * product(1 - alpha_j) for j < i * c_i )
+-        # T_i = product(1 - alpha_j) for j < i
+-        contribution = T * alpha * c
++        contribution = [T * alpha * c[j] for j in range(3)]
+         color = [color[j] + contribution[j] for j in range(3)]
+         T *= (1 - alpha)
+-        
+-        if T < 1e-4: # Early ray marching termination
+-            break
+-            
++        if T < 1e-4:
++            break
+     return color
+ 
+ def compute_loss(theta, phi, z, camera_pose, real_image, tau=0.5, M=12, ms=3, N=12, delta_min=0.01, gamma=0.0, step=0):
+-    """
+-    Computes the total loss for GOF training.
+-    """
+-    # Render generated image
+-    gen_image = render_gof(theta, phi, z, camera_pose, tau, M, ms, N, delta_min, gamma, step)
+-    
+-    # GAN Loss
+-    # L_origin = E[f(D(G(z)))] + E[f(-D(I))] + lambda * ||grad_D(I)||^2
+-    # f(u) = -log(1 + exp(-u))
+-    # Note: This is a simplified representation. Actual implementation requires backprop through D and G.
+-    gan_loss = compute_gan_loss(theta, phi, gen_image, real_image)
+-    
+-    # Locate surface for regularization
+     o, d = camera_pose
+     tn, tf = 0.1, 10.0
++
++    # Render generated image
++    gen_image = render_gof(theta, z, camera_pose, tau, M, ms, N, delta_min, gamma, step)
++
++    # GAN Loss
++    gen_logit = phi(gen_image)
++    real_logit = phi(real_image)
++    gan_loss = compute_gan_loss(gen_logit, real_logit)
++
++    # Locate surface for regularization
+     t_bins = [tn + i * (tf - tn) / M for i in range(M + 1)]
+-    x_bins = [o + t * d for t in t_bins]
+-    alphas = [query_generator(theta, x, z)[0] for x in x_bins]
+-    
++    alphas = [query_generator(theta, o + t * d, z)[0] for t in t_bins]
+     k_S = -1
+     for k in range(M):
+@@ -216,42 +176,27 @@
+             k_S = k
+             break
+-            
++
++    normal_loss = 0.0
++    opacity_loss = 0.0
+     if k_S != -1:
+         def alpha_func(t):
+-            x = o + t * d
+-            return query_generator(theta, x, z)[0]
+-        t_a = t_bins[k_S]
+-        t_b = t_bins[k_S+1]
+-        t_s = secant_method(alpha_func, t_a, t_b, ms)
++            return query_generator(theta, o + t * d, z)[0]
++        t_s = secant_method(alpha_func, t_bins[k_S], t_bins[k_S+1], ms)
+         x_s = o + t_s * d
+-        
+-        # Normal Regularization
+-        # L_normal = sum ||n(x_s) - n(x_s + eps)||^2
+-        eps = 0.01
+-        n_s = compute_normal(theta, x_s, z)
+-        n_s_eps = compute_normal(theta, x_s + eps * d, z)
+-        normal_loss = sum((n_s[j] - n_s_eps[j])**2 for j in range(3))
+-        
+-        # Opacity Regularization
+-        # L_opacity = 1/N sum (log(alpha) + log(1-alpha))
+-        # Sample N points for this loss (can be the same as rendering points)
++        normal_loss = compute_normal_loss(theta, x_s, z)
++
+         delta_init = (tf - tn) / 2
+         delta_n = max(delta_init * math.exp(-gamma * step), delta_min)
+         t_start = max(tn, t_s - delta_n)
+         t_end = min(tf, t_s + delta_n)
+-        t_samples = [t_start + i * (t_end - t_start) / N for i in range(N)]
+-        
+-        opacity_loss = 0.0
+-        for t in t_samples:
+-            x = o + t * d
+-            alpha = query_generator(theta, x, z)[0]
+-            opacity_loss += math.log(alpha) + math.log(1 - alpha)
+-        opacity_loss /= N
+-    else:
+-        normal_loss = 0.0
+-        opacity_loss = 0.0
+-        
+-    total_loss = gan_loss + lambda_normal * normal_loss + lambda_opacity * opacity_loss
+-    return total_loss
++        t_samples = []
++        for i in range(1, N + 1):
++            lower = t_s - delta_n + (2 * i - 2) / N * delta_n
++            upper = t_s - delta_n + (2 * i) / N * delta_n
++            t_samples.append(random.uniform(lower, upper))
++        render_alphas = [query_generator(theta, o + t * d, z)[0] for t in t_samples]
++        opacity_loss = compute_opacity_loss(render_alphas)
++
++    return gan_loss + 1.0 * normal_loss + 1.0 * opacity_loss
+ ```
+ 

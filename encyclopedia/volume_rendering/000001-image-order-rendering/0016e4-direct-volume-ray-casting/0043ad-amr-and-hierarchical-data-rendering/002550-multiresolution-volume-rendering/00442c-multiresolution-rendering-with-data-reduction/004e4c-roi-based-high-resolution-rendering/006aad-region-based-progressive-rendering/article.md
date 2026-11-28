@@ -1,0 +1,137 @@
+# Region-Based Progressive Rendering
+
+Also called: region-based scheme
+
+## Overview
+Region-based progressive rendering is a transmission and rendering strategy for foveated volume data that prioritizes a user-defined Region of Interest (ROI) by reconstructing and displaying it at high resolution first, then iteratively adding peripheral layers at decreasing resolutions [S1, unofficial]. It differs from coarse-to-fine schemes by avoiding the interference of low-resolution coefficients on the high-resolution ROI, resulting in a clearer initial view of the area of interest at the cost of a longer initial wait time [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A multiresolution volume dataset (typically Haar wavelet coefficients), a ROI mask defined by center coordinates $(x, y, z)$ and dimensions $(s, s, s)$, and a viewing direction [S1, unofficial].
+*   **Output:** A sequence of rendered images, starting with the high-resolution ROI and progressively expanding to the full volume [S1, unofficial].
+
+**Data Structures**
+The method uses Haar wavelet coefficients organized into layers or blocks corresponding to resolution scales [S1, unofficial]. The ROI is defined by coordinate bounds or a binary mask [S1, unofficial].
+
+**Parameters**
+*   **Mask Center:** The center coordinates of the ROI mask. Typical value: $(128, 128, 128)$ for a $256^3$ volume [S1, unofficial].
+*   **Mask Size:** The dimensions of the ROI mask. Typical value: $(50, 50, 50)$ [S1, unofficial].
+*   **Resolution Scale:** In iteration $i$, sub-volumes are reconstructed at a resolution scale of $2^{i-1}$ relative to the inner layer [S1, unofficial].
+
+**Algorithm Steps**
+1.  **Initialization:** Define the ROI mask with center $(x, y, z)$ and size $(s, s, s)$ [S1, unofficial].
+2.  **First Iteration ($i=1$):** Reconstruct the center fovea using partial volume reconstruction from the available high-resolution data [S1, unofficial]. Render the fovea using a standard volume rendering algorithm [S1, unofficial]. Display the result [S1, unofficial].
+3.  **Subsequent Iterations ($i > 1$):** Identify the immediate outer layer surrounding the previously rendered region [S1, unofficial]. Divide this outer layer into 6 sub-volumes: Top, Bottom, Left, Right, Front, and Back [S1, unofficial]. Reconstruct each of the 6 sub-volumes at a resolution scale of $2^{i-1}$ [S1, unofficial]. Render each sub-volume separately using the standard rendering algorithm [S1, unofficial].
+4.  **Image Composition:** Combine the newly rendered images with the previous image [S1, unofficial]. For Top, Bottom, Left, and Right sub-volumes: Add the rendered images to the previous image at their correct spatial positions [S1, unofficial]. For Front and Back sub-volumes: Perform alpha compositing using the 'over' operator along the viewing ray [S1, unofficial].
+5.  **Repeat:** Continue iterations until the full volume is rendered or the user stops the process [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def region_based_progressive_rendering(volume_data, roi_mask, view_direction):
+    roi_center = roi_mask['center']
+    roi_size = roi_mask['size']
+    current_image = None
+    results = []
+
+    # Iteration 1: Reconstruct and render the center fovea using partial volume reconstruction [S1, unofficial]
+    fovea_data = reconstruct_partial_volume(volume_data, roi_center, roi_size, scale=1)
+    current_image = render_volume(fovea_data, view_direction)
+    results.append(current_image)
+
+    iteration = 2
+    while not is_full_volume_rendered(current_image, roi_center, roi_size, iteration):
+        # Identify the immediate outer layer surrounding the previously rendered region [S1, unofficial]
+        outer_bounds = get_outer_layer_bounds(roi_center, roi_size, iteration)
+
+        # Divide into 6 sub-volumes: top, bottom, left, right, front, back [S1, unofficial]
+        sub_volumes = divide_into_6_subvolumes(outer_bounds, roi_size, iteration)
+
+        new_images = {}
+        res_scale = 2 ** (iteration - 1)
+
+        # Reconstruct each sub-volume at resolution scale 2^(i-1) and render using standard algorithm [S1, unofficial]
+        for name, bounds in sub_volumes.items():
+            reconstructed_data = reconstruct_volume(volume_data, bounds, res_scale)
+            new_images[name] = render_volume(reconstructed_data, view_direction)
+
+        # Combine the newly rendered images with the previous image [S1, unofficial]
+        # Top, Bottom, Left, Right are added to the previous image at their correct positions [S1, unofficial]
+        for name in ['top', 'bottom', 'left', 'right']:
+            current_image = add_image_spatially(current_image, new_images[name], name)
+
+        # Front and Back images need image composition using the 'over' operator [S1, unofficial]
+        # Order: Front over Inner over Back
+        current_image = composite_over(new_images['front'], current_image)
+        current_image = composite_over(current_image, new_images['back'])
+
+        results.append(current_image)
+        iteration += 1
+
+    return results
+
+def reconstruct_partial_volume(data, center, size, scale):
+    """Reconstructs the center fovea using partial volume reconstruction [S1, unofficial]."""
+    return data.reconstruct_region(center, size, scale)
+
+def render_volume(data, view_direction):
+    """Renders volume data using a standard volume rendering algorithm (e.g., ray casting) [S1, unofficial]."""
+    return data.cast_rays(view_direction)
+
+def is_full_volume_rendered(image, center, size, iteration):
+    """Checks if the full volume bounds have been reached."""
+    return False  # Termination condition based on volume dimensions [G]
+
+def get_outer_layer_bounds(center, prev_size, iteration):
+    """Calculates bounding box for the immediate outer layer at iteration i."""
+    outer_size = prev_size * (2 ** (iteration - 1))
+    return (center[0] - outer_size/2, center[1] - outer_size/2, center[2] - outer_size/2,
+            center[0] + outer_size/2, center[1] + outer_size/2, center[2] + outer_size/2)
+
+def divide_into_6_subvolumes(outer_bounds, prev_size, iteration):
+    """Divides the outer layer into 6 sub-volumes surrounding the previous ROI."""
+    return {}
+
+def add_image_spatially(base, overlay, position):
+    """Adds overlay image to base image at the specified spatial position."""
+    return base.paste(overlay, position)
+
+def composite_over(pixel_a, pixel_b):
+    """
+    Performs the 'over' compositing operation on two pixels.
+    Given pixel A(d_a, alpha_a) and B(d_b, alpha_b).
+    Result C(d_c, alpha_c) where d_c = d_a + (1 - alpha_a) * d_b [S1, unofficial].
+    """
+    d_a, alpha_a = pixel_a
+    d_b, alpha_b = pixel_b
+    d_c = d_a + (1 - alpha_a) * d_b
+    alpha_c = alpha_a + (1 - alpha_a) * alpha_b
+    return (d_c, alpha_c)
+```
+
+**Edge Cases and Pitfalls**
+*   **Non-Orthogonal Viewing:** When viewing from a non-orthogonal direction, slices must be transformed to a sheared object space to allow efficient projection, then warped to the image plane [S1, unofficial].
+*   **Precision:** The 'over' operator is performed pixel-by-pixel. Floating-point precision issues may arise during compositing, especially with many layers [S1, unofficial].
+*   **Boundary Conditions:** The definition of "outer layer" must be precise to avoid gaps or overlaps between iterations [S1, unofficial].
+
+## Subtopics
+
+### Coarse-to-Fine Progressive Volume Rendering
+A variant where rendering starts with a rough average image of the entire volume and iteratively refines the fovea area [S1, unofficial]. It divides each layer (excluding the innermost) into 7 parts: Top, Bottom, Left, Right, Front, Back, and Center. The Center part is saved for the next iteration, and the Front/Back results are combined with the next iteration's result using the refinement equation $R = (RF_i + (1 - \alpha_{RF_i}) * R_{i+1}) + (1 - \alpha_{RF_i} * \alpha_{R_{i+1}}) * RB_i$ [S1, unofficial]. It is chosen when a very fast initial preview is prioritized over ROI clarity, as it has a shorter initial wait time (0.1468s vs 0.381s) but suffers from low-resolution interference in the ROI [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Not explicitly given, but involves iterative reconstruction and rendering of expanding layers.
+*   **Memory Complexity:** Depends on the multiresolution data structure (e.g., octree/wavelet) and the current rendered image buffer.
+*   **Measured Performance:**
+    *   **Initial Wait Time:** 0.381 seconds for the innermost ROI to arrive and be displayed [S1, unofficial].
+    *   **Comparison:** Coarse-to-fine has a shorter initial wait time of 0.1468 seconds [S1, unofficial].
+*   **Strengths:** Provides a clearer result for the ROI because it avoids interference from low-resolution coefficients that arrive early in coarse-to-fine schemes [S1, unofficial].
+*   **Limitations:** Longer initial wait time compared to coarse-to-fine schemes [S1, unofficial].
+*   **When to Use:** When the user's primary interest is the clarity of a specific region of interest and they are willing to wait longer for the initial high-quality view [S1, unofficial].
+
+## Background
+Originated in the context of progressive transmission and rendering of foveated volume data, based on wavelet foveation and Haar wavelet transforms for data compression and multiresolution searching [S1, unofficial]. The method is part of a broader effort to handle large-scale volume data stored on server repositories and progressively rendered on client sites [S1, unofficial].
+
+## Sources
+[S1] , https://www.scitepress.org/PublishedPapers/2006/13574/pdf/index.html, fetched 2026-10-27 (unofficial)

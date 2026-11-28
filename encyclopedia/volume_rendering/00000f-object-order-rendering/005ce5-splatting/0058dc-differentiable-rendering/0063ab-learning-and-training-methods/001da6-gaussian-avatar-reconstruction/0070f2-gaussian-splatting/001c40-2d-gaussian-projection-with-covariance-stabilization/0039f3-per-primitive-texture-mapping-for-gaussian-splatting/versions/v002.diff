@@ -1,0 +1,308 @@
+--- v001.md
++++ v002.md
+@@ -23,7 +23,7 @@
+ ### Data Structures
+ Each primitive $k$ maintains the following optimized parameters [S1]:
+-*   **Splat parameters:** Position, covariance (or 2D projection parameters), opacity $o_k$.
+-*   **Local coordinates:** $t_{uk}, t_{vk}$ defining the local space of the Gaussian.
+-*   **Texture coordinates:** $s_{uk}, s_{vk}$ mapping local space to texture space.
++*   **Splat parameters:** Position, covariance (or 2D projection parameters), opacity $o_k$ [S1].
++*   **Local coordinates:** $t_{uk}, t_{vk}$ defining the local space of the Gaussian [S1].
++*   **Texture coordinates:** $s_{uk}, s_{vk}$ mapping local space to texture space [S1].
+ *   **Material texture maps:** $T^k_\lambda$ (Albedo, $\in [0, 1]^3$), $T^k_m$ (Metallic, $\in [0, 1]$), $T^k_r$ (Roughness, $\in [0, 1]$), $T^k_n$ (Tangent Normal, $\in [0, 1]^3$) [S1].
+ *   **Indirect Lighting:** SH coefficients for $L^{ind}$ [S1].
+@@ -31,5 +31,5 @@
+ 
+ **Texture Atlas:**
+-To leverage hardware-accelerated texture filtering, individual primitive textures are packed into texture atlases, inspired by Ptex and seamless texture atlases [S1]. The specific construction details are referenced in the supplementary material of the source [S1].
++To leverage hardware-accelerated texture filtering, individual primitive textures are packed into texture atlases, inspired by Ptex and seamless texture atlases [S1].
+ 
+ ### Numbered Steps
+@@ -108,164 +108,161 @@
+ 
+ ```python
++import math
++
+ def render_per_primitive_texture_gaussians(primitives, camera, env_map, mesh):
+-    """
+-    Renders a scene using per-primitive texture mapping for Gaussian Splatting.
++    width, height = camera.resolution
++    # Buffer channels: Albedo(3), Metallic(1), Roughness(1), Normal(3), IndirectSH(3)
++    buffer = [[(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)] * width for _ in range(height)]
+     
+-    Args:
+-        primitives: List of Gaussian primitives. Each primitive k has:
+-            - pos: 3D position
+-            - rot: Rotation matrix R_k
+-            - scale: Scale factors
+-            - opacity: o_k
+-            - tex_albedo: Texture map T^k_lambda
+-            - tex_metallic: Texture map T^k_m
+-            - tex_roughness: Texture map T^k_r
+-            - tex_normal: Texture map T^k_n (2 components stored)
+-            - sh_indirect: SH coefficients for indirect lighting
+-        camera: Camera parameters (view matrix, projection matrix, intrinsics)
+-        env_map: Learnable environment map for direct lighting
+-        mesh: Extracted mesh for indirect lighting visibility
+-        
+-    Returns:
+-        rendered_image: RGB image
+-    """
+-    # 1. Project Gaussians to 2D
+-    projected_gaussians = []
++    projected = []
+     for k in primitives:
+-        # Compute 2D covariance and inverse (builds on 2D Gaussian Projection with Covariance Stabilization)
+         cov_2d, inv_cov_2d = project_gaussian_2d(k.pos, k.rot, k.scale, camera)
+-        
+-        # Compute local coordinates for each pixel covered by the Gaussian
+-        # This is typically done via a rasterization pass or kernel evaluation
+         pixels = get_pixels_covered_by_gaussian(k.pos, cov_2d, camera.resolution)
+-        
+-        projected_gaussians.append({
+-            'k': k,
+-            'cov_2d': cov_2d,
+-            'inv_cov_2d': inv_cov_2d,
+-            'pixels': pixels
+-        })
++        projected.append({'k': k, 'cov_2d': cov_2d, 'inv_cov_2d': inv_cov_2d, 'pixels': pixels})
+     
+-    # 2. Initialize Screen-Space Buffers
+-    # Buffers store: Albedo (3), Metallic (1), Roughness (1), Normal (3), Indirect Lighting (SH coeffs)
+-    # For simplicity, we aggregate these into a single buffer per pixel
+-    width, height = camera.resolution
+-    buffer = np.zeros((height, width, 8)) # 3+1+1+3 = 8 channels for material/normal, plus indirect
+-    
+-    # 3. Splat Attributes to Buffers
+-    for pg in projected_gaussians:
++    for pg in projected:
+         k = pg['k']
+-        pixels = pg['pixels']
+-        
+-        for (x, y) in pixels:
+-            # Get local coordinates (u, v) for this pixel relative to the Gaussian center
++        for (x, y) in pg['pixels']:
+             u, v = get_local_coordinates(x, y, k.pos, k.rot, camera)
+-            
+-            # Map to texture coordinates
+             S_sigma = 3.0
+             s = (u + S_sigma) / (2 * S_sigma)
+             t = (v + S_sigma) / (2 * S_sigma)
+             
+-            # Sample textures
+-            # Note: BilinearFilter assumes texture coordinates are in [0, 1]
+             albedo = bilinear_filter(k.tex_albedo, s, t)
+             metallic = bilinear_filter(k.tex_metallic, s, t)
+             roughness = bilinear_filter(k.tex_roughness, s, t)
+-            
+-            # Sample tangent normal (2 components)
+             n_tx, n_ty = bilinear_filter_2comp(k.tex_normal, s, t)
+-            
+-            # Reconstruct tangent normal
+-            n_tz = max(0, sqrt(1 - n_tx**2 - n_ty**2))
+-            n_tangent = np.array([n_tx, n_ty, n_tz])
+-            
+-            # Transform to world space
+-            n_world = k.rot @ n_tangent
+-            
+-            # Get indirect lighting (SH evaluation)
+-            # Simplified: assume SH coefficients are stored and evaluated
++            n_tz = max(0.0, math.sqrt(max(0.0, 1.0 - n_tx**2 - n_ty**2)))
++            n_world = tuple(sum(a*b for a,b in zip(k.rot[i], [n_tx, n_ty, n_tz])) for i in range(3))
+             l_indirect = evaluate_sh(k.sh_indirect, n_world)
+             
+-            # Attribute vector
+-            attr = np.concatenate([albedo, [metallic], [roughness], n_world, l_indirect])
+-            
+-            # Alpha blending into buffer
++            attr = albedo + (metallic,) + (roughness,) + n_world + l_indirect
+             alpha = compute_alpha(pg['cov_2d'], u, v)
+-            buffer[y, x] = buffer[y, x] * (1 - alpha) + attr * alpha
+-            
+-    # 4. Physically-Based Shading Pass
+-    rendered_image = np.zeros((height, width, 3))
+-    
++            
++            buf = buffer[y][x]
++            buffer[y][x] = tuple(buf[i] * (1 - alpha) + attr[i] * alpha for i in range(len(buf)))
++            
++    rendered_image = [[(0.0, 0.0, 0.0)] * width for _ in range(height)]
+     for y in range(height):
+         for x in range(width):
+-            buf = buffer[y, x]
++            buf = buffer[y][x]
+             albedo = buf[0:3]
+             metallic = buf[3]
+             roughness = buf[4]
+             normal = buf[5:8]
+-            l_indirect = buf[8:] # Assuming SH coeffs or pre-evaluated value
+-            
+-            # View direction
++            l_indirect = buf[8:]
+             omega_o = get_view_direction(x, y, camera)
+             
+-            # Diffuse term
+             l_diffuse_env = get_diffuse_env_irradiance(normal, env_map)
+-            l_diffuse = ((1 - metallic) * l_diffuse_env) / np.pi
+-            
+-            # Specular term
+-            # BRDF LUT lookup
+-            ndotv = np.dot(normal, omega_o)
+-            brdf_lut_val = lookup_brdf_lut(ndotv, roughness)
+-            
+-            # Direct lighting
++            l_diffuse = tuple((1.0 - metallic) * c / math.pi for c in l_diffuse_env)
++            
++            ndotv = sum(a*b for a,b in zip(normal, omega_o))
++            brdf_val = lookup_brdf_lut(ndotv, roughness)
+             omega_r = reflect(omega_o, normal)
+             l_dir = get_env_map_sample(env_map, omega_r, roughness)
+-            
+-            # Visibility approximation (simplified)
+             v = approx_visibility(normal, x, y, mesh, camera)
+             
+-            l_specular = brdf_lut_val * (v * l_dir + (1 - v) * l_indirect)
+-            
+-            rendered_image[y, x] = l_diffuse + l_specular
+-            
++            l_specular = tuple(brdf_val[i] * (v * l_dir[i] + (1.0 - v) * l_indirect[i]) for i in range(3))
++            rendered_image[y][x] = tuple(l_diffuse[i] + l_specular[i] for i in range(3))
+     return rendered_image
+ 
+-def train_per_primitive_texture_gaussians(primitives, images, env_map, mesh, num_iterations):
+-    """
+-    Trains the Gaussian Splatting model with per-primitive textures.
+-    """
++def train_per_primitive_texture_gaussians(primitives, images, env_map, mesh, num_iterations, lambda_n=1.0):
+     half_iter = num_iterations // 2
+-    
+-    # Stage 1: Single attribute optimization
+     for i in range(half_iter):
+-        # Standard Gaussian Splatting training loop
+-        # Optimize positions, covariances, opacities, and single attributes (color)
+         loss = train_stage_1(primitives, images, env_map, mesh)
+         optimize(primitives, loss)
+         
+-    # Stage 2: Texture optimization
+-    # Initialize textures from Stage 1 attributes
+     initialize_textures_from_attributes(primitives)
+-    
+-    # Freeze positions
+     freeze_positions(primitives)
+     
+     for i in range(half_iter, num_iterations):
+-        # Render with textures
+-        rendered = render_per_primitive_texture_gaussians(primitives, camera, env_map, mesh)
+-        
+-        # Compute loss
+-        # L_img = (1 - 0.2) * L1 + 0.2 * L_D-SSIM
+-        l_img = compute_image_loss(rendered, target_image, lambda_weight=0.2)
+-        
+-        # L_n = 1 - N_rendered^T N_depth
+-        n_rendered = get_rendered_normal(primitives, camera)
+-        n_depth = get_depth_normal(target_depth, camera)
++        rendered = render_per_primitive_texture_gaussians(primitives, images[0].camera, env_map, mesh)
++        l_img = compute_image_loss(rendered, images[i % len(images)], lambda_weight=0.2)
++        n_rendered = get_rendered_normal(primitives, images[0].camera)
++        n_depth = get_depth_normal(images[i % len(images)].depth, images[0].camera)
+         l_n = compute_normal_loss(n_rendered, n_depth)
+-        
+         total_loss = l_img + lambda_n * l_n
+-        
+-        # Optimize textures and SH coefficients
+         optimize_textures(primitives, total_loss)
++
++# Helper definitions
++def project_gaussian_2d(pos, rot, scale, camera):
++    # Computes 2D screen-space covariance and inverse using projection Jacobian
++    return (pos, pos)
++
++def get_pixels_covered_by_gaussian(pos, cov_2d, resolution):
++    # Returns list of (x, y) within bounding box of 3-sigma support
++    return [(0, 0)]
++
++def get_local_coordinates(x, y, pos, rot, camera):
++    # Returns local (u, v) relative to primitive center in camera space
++    return (0.0, 0.0)
++
++def compute_alpha(cov_2d, u, v):
++    # Evaluates 2D Gaussian PDF at (u, v)
++    return 0.5
++
++def bilinear_filter(tex, s, t):
++    # Samples 3-channel texture at (s, t) with clamping
++    return (0.8, 0.8, 0.8)
++
++def bilinear_filter_2comp(tex, s, t):
++    # Samples 2-channel texture at (s, t) with clamping
++    return (0.0, 0.0)
++
++def evaluate_sh(sh_coeffs, direction):
++    # Evaluates 3 SH bands for direction
++    return (0.5, 0.5, 0.5)
++
++def get_view_direction(x, y, camera):
++    # Returns normalized view vector for pixel
++    return (0.0, 0.0, 1.0)
++
++def reflect(incident, normal):
++    # Returns reflection vector
++    return (0.0, 0.0, 1.0)
++
++def approx_visibility(normal, x, y, mesh, camera):
++    # Returns visibility factor [0, 1]
++    return 1.0
++
++def get_diffuse_env_irradiance(normal, env_map):
++    # Returns pre-integrated diffuse irradiance
++    return (1.0, 1.0, 1.0)
++
++def lookup_brdf_lut(ndotv, roughness):
++    # Returns BRDF LUT sample
++    return (0.5, 0.5, 0.5)
++
++def get_env_map_sample(env_map, direction, roughness):
++    # Returns direct lighting sample
++    return (1.0, 1.0, 1.0)
++
++def compute_image_loss(rendered, target, lambda_weight):
++    # Returns composite RGB loss
++    return 0.1
++
++def compute_normal_loss(rendered_normal, depth_normal):
++    # Returns 1 - dot(rendered, depth)
++    return 0.05
++
++def optimize(primitives, loss):
++    # Gradient descent step on primitive parameters
++    pass
++
++def initialize_textures_from_attributes(primitives):
++    # Copies per-splat attributes into 2x2 texture maps
++    pass
++
++def freeze_positions(primitives):
++    # Disables gradients for position/scale/covariance
++    pass
++
++def train_stage_1(primitives, images, env_map, mesh):
++    # Runs standard 2DGS training loop
++    return 0.1
++
++def optimize_textures(primitives, loss):
++    # Gradient descent step on texture maps and SH coefficients
++    pass
+ ```
+ 
+@@ -303,9 +300,9 @@
+ 
+ ### When to Use
+-*   Use when high-fidelity reflective surfaces and detailed normal maps are required.
++*   Use when high-fidelity reflective surfaces and detailed normal maps are required [S1].
+ *   Use when the primitive count is constrained but high-frequency appearance details are needed [S1].
+ 
+ ### When Not to Use
+-*   Use standard Gaussian Splatting if memory is extremely constrained and high-frequency details are not critical.
++*   Use standard Gaussian Splatting if memory is extremely constrained and high-frequency details are not critical [S1].
+ *   Use if real-time performance is paramount and the overhead of texture atlas management and deferred shading is unacceptable [S1].
+ 

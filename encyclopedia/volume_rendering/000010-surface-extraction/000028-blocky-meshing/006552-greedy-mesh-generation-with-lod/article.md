@@ -1,0 +1,95 @@
+# Greedy Mesh Generation with LOD
+
+Also called: LOD Mesh Regeneration, Voxel Greedy Meshing
+
+## Overview
+Greedy Mesh Generation with LOD converts voxel data into an optimized triangle mesh by merging adjacent coplanar faces into larger rectangles and then into 3D boxes, supporting multiple levels of detail (LOD) for performance tuning [S1, unofficial]. It differs from its siblings by explicitly integrating LOD control into the mesh generation pipeline, allowing dynamic adjustment of voxel resolution and mesh simplification, whereas methods like [Cuberille Method](1718-cuberille-method.md) or [GPU Face Extraction](3760-gpu-face-extraction.md) typically focus on static or single-resolution extraction without built-in hierarchical detail management.
+
+## How it works
+**Inputs and Outputs:**
+*   Input: Voxel chunk data, an interner for vertex deduplication, a world-space translation offset (`Vec3`), and a level of detail specifier (`Lod`).
+*   Output: A `Mesh` asset containing position and normal attributes, and 32-bit unsigned integer indices, ready for rendering.
+
+**Data Structures:**
+*   `MeshData`: A temporary structure holding:
+    *   `vertices`: `Vec<Vec3>` (position coordinates).
+    *   `normals`: `Vec<Vec3>` (face normals).
+    *   `indices`: `Vec<u32>` (triangle vertex indices).
+
+**Steps:**
+1.  Initialize an empty `MeshData` instance with default values.
+2.  Call the chunk's greedy mesh generation function, passing the interner, the `MeshData` instance, the offset, and the LOD level. This function populates `MeshData` with vertices, normals, and indices by merging voxels into boxes based on the specified LOD [S1, unofficial].
+3.  Create a new `Mesh` object with `PrimitiveTopology::TriangleList` and default render asset usages.
+4.  Insert the generated indices into the mesh as `Indices::U32`.
+5.  Insert the vertices as the `Mesh::ATTRIBUTE_POSITION` attribute.
+6.  Insert the normals as the `Mesh::ATTRIBUTE_NORMAL` attribute.
+7.  Add the constructed mesh to the engine's asset collection.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def generate_greedy_mesh_with_lod(chunk, interner, offset, lod, mesh_assets):
+    # Step 1: Initialize MeshData
+    mesh_data = MeshData()
+    
+    # Step 2: Populate mesh data via greedy meshing with LOD
+    # The interner handles vertex deduplication.
+    # offset applies world-space translation.
+    # lod controls resolution and simplification.
+    chunk.generate_greedy_mesh_arrays(interner, mesh_data, offset, lod)
+    
+    # Step 3: Create Mesh object
+    mesh = Mesh(
+        topology=PrimitiveTopology.TRIANGLE_LIST,
+        usages=RenderAssetUsages.DEFAULT
+    )
+    
+    # Step 4: Insert indices
+    mesh.insert_indices(Indices.U32(mesh_data.indices))
+    
+    # Step 5: Insert position attribute
+    mesh.insert_attribute(Mesh.ATTRIBUTE_POSITION, mesh_data.vertices)
+    
+    # Step 6: Insert normal attribute
+    mesh.insert_attribute(Mesh.ATTRIBUTE_NORMAL, mesh_data.normals)
+    
+    # Step 7: Add to asset collection
+    mesh_id = mesh_assets.add(mesh)
+    
+    return mesh_id
+```
+
+**Parameters:**
+*   `offset` (`Vec3`): World-space translation applied during mesh generation [S1, unofficial].
+*   `lod` (`Lod`): Level of detail controlling voxel resolution and mesh simplification [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   Precision issues may arise if the offset values are extremely large, potentially affecting vertex attribute precision depending on the underlying graphics API.
+*   Degenerate input (empty chunks) should result in an empty mesh or be skipped to avoid unnecessary asset creation.
+*   LOD transitions must be handled carefully to avoid popping artifacts; this requires interpolation or cross-fading between LOD levels, which is not detailed in the core generation algorithm [G].
+
+## Subtopics
+
+### Sprite Stack to Mesh
+A host tool that converts a sprite stack (PNG slices) into a `.bmm` model file using greedy meshing to merge voxels into boxes [S2, unofficial]. It parses opaque pixels of each slice as voxels (treating alpha 0 or black as transparent), identifies same-colour rectangles within a slice, and joins equal rectangles on neighbouring slices into taller boxes. Boxes use the `bm-forge bm_core` format (8 vertices, 12 triangles per box) and are written using `export_bmm`. The model faces the -z direction and stands on y=0. Slice spacing is determined by the `--step` argument. `--dir h` specifies a horizontal stack layout; `--dir v` specifies a vertical sheet layout (required because `stackv` is not in `bm-core`). Default limits are 4096 vertices and 16384 triangles (512 boxes); `--kernel-limits` increases the box limit to 8191. If the stack exceeds the box limit, the tool exits with code 1 and prints the voxel count, box count, and the limit. Used in the `bm` project, specifically in `tools/stack2mesh.py` [S2, unofficial].
+
+### PolyVox Library Mesh Generation
+A C++ library technique for generating voxel meshes efficiently, including built-in methods for triangle count reduction and ambient occlusion generation [S3, unofficial]. It provides a high-level API to take a volume and generate the mesh automatically, handling optimization internally.
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources. Greedy meshing is generally linear with respect to the number of voxels, but LOD reduction can significantly decrease the output size.
+*   **Memory Complexity:** Proportional to the number of merged boxes. LOD reduces memory usage by increasing box size and reducing vertex/normal/index counts.
+*   **Performance:** Depends heavily on the scene's spatial coherence. Highly detailed or noisy scenes yield smaller boxes and higher triangle counts, while smooth surfaces yield large boxes and fewer triangles.
+*   **Strengths:** Significant reduction in draw calls and vertex count compared to per-voxel rendering. LOD support allows for dynamic performance tuning.
+*   **Limitations:** Static LOD levels may require regeneration if the voxel data changes. Interpolation between LOD levels is not natively supported by the basic algorithm [G].
+*   **When to use:** When rendering large voxel worlds with static or slowly changing geometry, and when performance tuning via LOD is required.
+*   **When not to use:** For highly dynamic voxel data where regeneration overhead is prohibitive, or when fine-grained geometric detail is critical and cannot be approximated by boxes.
+
+## Background
+The method is implemented in the `voxelis` project by WildPixelGames, which uses a Bevy-based engine to generate meshes from voxel chunks [S1, unofficial]. The concept of greedy meshing for voxel data has been widely discussed in the community, with libraries like PolyVox providing efficient C++ implementations for triangle count reduction and ambient occlusion [S3, unofficial]. The integration of LOD into the mesh generation process allows for scalable rendering of large voxel environments.
+
+## Sources
+[S1] WildPixelGames/voxelis, https://github.com/WildPixelGames/voxelis, fetched 2026-10-26 (unofficial)
+[S2] Stack to mesh: sprite stack to .bmm model (host tool), https://github.com/f-accomando/bm/pull/97, fetched 2026-10-26 (unofficial)
+[S3] OpenGL voxel engine slow, https://stackoverflow.com/questions/4563693/opengl-voxel-engine-slow, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,195 @@
+# Arbitrarily-Aligned Plane Visualization
+
+Also called: Arbitrarily-Aligned Plane, Cutting Plane Visualization, Multi-Planar Reconstruction, Off-Axis Slice, Slice Extraction via Virtual Plane
+
+## Overview
+Arbitrarily-Aligned Plane Visualization extracts a 2D image from a 3D volumetric dataset by intersecting it with a user-defined plane that is not necessarily aligned with the data's cardinal axes [S1][S2, unofficial]. It solves the problem of missing off-axis phenomena (such as spiral density waves in astrophysical simulations or oblique anatomical structures in medical imaging) that standard axial, coronal, or sagittal slicing might overlook [S1][S2, unofficial]. Unlike standard texture slicing which often relies on fixed grid alignments, this method explicitly constructs a local coordinate system for the cutting plane, allowing for publication-quality plots of complex, misaligned structures [S1].
+
+## How it works
+**Inputs:**
+*   Volumetric dataset $V$ (defined on a grid or unstructured mesh).
+*   Plane definition: a central point vector $\mathbf{c}$ and a normal vector $\mathbf{n}$ (orthogonal to the image plane) [S1].
+*   Image resolution and bounds for the output buffer [S1].
+
+**Outputs:**
+*   A 2D image $\gamma$ representing the intensity values of the volume data intersected by the plane [S3, unofficial].
+
+**Data Structures:**
+*   **Grid Vertices:** For each grid cell $i$, an array of 8 vertices $\mathbf{v}_{ji}$ where $j \in \{0, \dots, 7\}$ [S1].
+*   **Distance Array $D$:** A 2D array where $D_{ij} = \mathbf{v}_{ji} \cdot \mathbf{d}$, storing the signed distance of each vertex from the plane origin relative to the normal [S1].
+*   **Rotation Matrix $R$:** A $3 \times 3$ matrix used to transform coordinates between world space and the image plane space [S1].
+
+**Steps:**
+
+1.  **Define Local Basis Vectors:**
+    Determine the "North" vector $\mathbf{a}_0$ by selecting the cardinal axis (x, y, or z) that has the greatest cross product magnitude with the normal vector $\mathbf{n}$ [S1].
+    Compute the basis vectors for the image plane:
+    $$ \mathbf{p}_x = \mathbf{a}_0 \times \mathbf{n} $$
+    $$ \mathbf{p}_y = \mathbf{n} \times \mathbf{p}_x $$
+    Compute the inclination scalar $d$:
+    $$ d = -\mathbf{c} \cdot \mathbf{n} $$
+    [S1]
+
+2.  **Construct Rotation Matrix:**
+    Construct the rotation matrix $R$ using the basis vectors and the normal:
+    $$ R = \begin{bmatrix} \mathbf{p}_{xi} & \mathbf{p}_{xj} & \mathbf{p}_{xk} \\ \mathbf{p}_{yi} & \mathbf{p}_{yj} & \mathbf{p}_{yk} \\ \mathbf{n}_i & \mathbf{n}_j & \mathbf{n}_k \end{bmatrix} $$
+    The inverse matrix $R^{-1}$ is used to transform image plane coordinates back to world coordinates [S1].
+
+3.  **Identify Intersecting Grids:**
+    For each grid cell $i$, calculate $D_{ij} = \mathbf{v}_{ji} \cdot \mathbf{d}$ for all 8 vertices $j$ [S1].
+    A grid is accepted as intersected if all components of every $D_j$ have the identical sign (all $D_j < 0$ or all $D_j > 0$) [S1].
+    *Note: The source text implies this check identifies grids where the plane passes through the cell volume, though the condition "all identical sign" typically implies the plane does NOT pass through if the origin is outside. However, following the source strictly: "Grids are accepted if all three components of every Dj are of identical sign" [S1].*
+
+4.  **Select Data Points:**
+    For each data point $\mathbf{p}$ within the accepted grids, select it if:
+    $$ \|\mathbf{p} \cdot \mathbf{n} + d\| < \frac{\sqrt{dx^2 + dy^2 + dz^2}}{2} $$
+    where $dx, dy, dz$ are the grid spacing dimensions [S1].
+    *Pitfall:* This sphere-based intersection check generates false positives because cells are treated as spheres rather than rectangular prisms [S1]. These are removed during pixelization.
+
+5.  **Rotate to Image Plane:**
+    Rotate the selected data points $\mathbf{p}$ into the image plane coordinates $(x_p, y_p)$ using the rotation matrix:
+    $$ x_p = \mathbf{p} \cdot \mathbf{p}_x $$
+    $$ y_p = \mathbf{p} \cdot \mathbf{p}_y $$
+    [S1]
+
+6.  **Pixelization:**
+    Define $d_{pixel} = \sqrt{dx^2 + dy^2 + dz^2}$ [S1].
+    Iterate over every data point where $(x_p \pm d_{pixel}, y_p \pm d_{pixel})$ is within the image bounds.
+    For each potentially intersecting pixel in the output buffer:
+    a. Get pixel coordinates $(x_i, y_i, 0)$ in the image plane.
+    b. Rotate back to world coordinates $(x', y', z')$ using $R^{-1}$ [S1].
+    c. Compare against the original data points/field variables to determine the final color/intensity value, applying weights and transfer functions as necessary [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def arbitrarily_aligned_plane_visualization(volume_data, center_point, normal_vector, image_width, image_height, grid_spacing):
+    """
+    Extracts a slice from volume_data along an arbitrarily aligned plane.
+    
+    Args:
+        volume_data: List of grid cells, each containing 8 vertices and field values.
+        center_point: 3D vector (cx, cy, cz) defining the plane's origin.
+        normal_vector: 3D vector (nx, ny, nz) orthogonal to the image plane.
+        image_width: Integer width of the output image.
+        image_height: Integer height of the output image.
+        grid_spacing: Tuple (dx, dy, dz) representing cell dimensions.
+        
+    Returns:
+        2D array representing the sliced image.
+    """
+    import numpy as np
+    
+    # 1. Define Local Basis Vectors
+    # Select axis with greatest cross product with normal
+    axes = [np.array([1,0,0]), np.array([0,1,0]), np.array([0,0,1])]
+    cross_products = [np.linalg.norm(np.cross(axis, normal_vector)) for axis in axes]
+    a0 = axes[np.argmax(cross_products)]
+    
+    px = np.cross(a0, normal_vector)
+    py = np.cross(normal_vector, px)
+    d_scalar = -np.dot(center_point, normal_vector)
+    
+    # 2. Construct Rotation Matrix
+    R = np.array([
+        [px[0], px[1], px[2]],
+        [py[0], py[1], py[2]],
+        [normal_vector[0], normal_vector[1], normal_vector[2]]
+    ])
+    R_inv = np.linalg.inv(R)
+    
+    # 3. Identify Intersecting Grids and Select Points
+    selected_points = []
+    for grid in volume_data:
+        vertices = grid.vertices # 8 vertices
+        # Calculate D_ij = v_ji . d (Note: Source uses d as vector in dot product context, 
+        # but formula 10 says Dij = v_ji . d where d is likely the normal or related vector. 
+        # Based on formula 12, d_scalar is used for distance. 
+        # Source text: "Dij = vji · d" and then checks sign. 
+        # Assuming d in formula 10 refers to the normal vector n for distance calculation from origin,
+        # or potentially the vector defining the plane offset. 
+        # Given formula 12 uses d_scalar, and formula 10 uses d in dot product with vertex,
+        # and formula 8 defines d = -c.n, there is ambiguity. 
+        # However, standard plane check is v.n + d_scalar. 
+        # Source says: "all(Dj < 0) or all(Dj > 0)". 
+        # If Dj = v_j . n, then this checks if all vertices are on the same side of the plane passing through origin?
+        # Let's follow source literally: Dij = v_ji . d. 
+        # In formula 8, d is a scalar. In formula 10, d is used in dot product. 
+        # This implies d in formula 10 is a vector. 
+        # Re-reading S1: "Dij = vji · d". And "d = -c · n". 
+        # This is a contradiction in the source text (scalar vs vector). 
+        # However, later it says "select data points where ||p.n + d|| < ...". 
+        # Here d is clearly the scalar offset. 
+        # For grid intersection, usually we check if plane passes through cell. 
+        # Source says: "Grids are accepted if all three components of every Dj are of identical sign". 
+        # If Dj is scalar, "all three components" makes no sense. 
+        # If Dj is a vector, what is d? 
+        # Let's assume d in formula 10 is the normal vector n, and the check is for vertices relative to the plane defined by c and n.
+        # But the source explicitly writes "Dij = vji · d". 
+        # Let's assume d in formula 10 is a typo for n, or d is a vector derived from c. 
+        # Given the pitfall about false positives, the exact grid culling logic is complex. 
+        # We will implement the selection of points based on distance to plane as the primary filter.
+        pass
+
+    # Simplified implementation based on the most robust part of the source: Point Selection
+    # Iterate all vertices/points in volume
+    for grid in volume_data:
+        for vertex in grid.vertices:
+            # Check distance to plane
+            dist = np.dot(vertex, normal_vector) + d_scalar
+            threshold = np.sqrt(grid_spacing[0]**2 + grid_spacing[1]**2 + grid_spacing[2]**2) / 2
+            
+            if abs(dist) < threshold:
+                # Rotate to image plane
+                xp = np.dot(vertex, px)
+                yp = np.dot(vertex, py)
+                selected_points.append((xp, yp, vertex, grid.value))
+                
+    # 6. Pixelization
+    image_buffer = np.zeros((image_height, image_width))
+    d_pixel = np.sqrt(grid_spacing[0]**2 + grid_spacing[1]**2 + grid_spacing[2]**2)
+    
+    for xp, yp, world_p, value in selected_points:
+        # Check bounds
+        if -d_pixel <= xp <= image_width + d_pixel and -d_pixel <= yp <= image_height + d_pixel:
+            # Iterate potentially intersecting pixels
+            # This is a simplified overlap check
+            for xi in range(max(0, int(xp - d_pixel)), min(image_width, int(xp + d_pixel)) + 1):
+                for yi in range(max(0, int(yp - d_pixel)), min(image_height, int(yp + d_pixel)) + 1):
+                    # Rotate pixel coordinate back to world
+                    pixel_coord_img = np.array([xi, yi, 0])
+                    pixel_coord_world = R_inv @ pixel_coord_img
+                    
+                    # Compare against data points (simplified: assign value if close)
+                    # In reality, this involves interpolation and weighting
+                    # Source says: "compared against field variable, weighted by independent fields"
+                    # We assign the value of the nearest selected point for this pixel
+                    # [G] Standard nearest-neighbor or interpolation would be applied here.
+                    if not image_buffer[yi, xi]:
+                        image_buffer[yi, xi] = value
+                        
+    return image_buffer
+```
+
+## Subtopics
+
+### [Tangible Volume Slicing (Tablet Plane)](22218-tangible-volume-slicing-tablet-plane.md)
+Tangible Volume Slicing (Tablet Plane) is a technique where a physical tablet acts as a tangible planar object that defines a slice plane through a volumetric dataset. It solves the problem of intuitively navigating and visualizing internal structures by allowing the user to directly manipulate the slice geometry in 3D space using a physical object. It sets itself apart from standard texture slicing by replacing abstract UI controls with direct physical manipulation of the slice plane's pose, providing immediate haptic and visual feedback through a handheld window.
+
+## Operating characteristics
+*   **Time Complexity:** The method requires iterating over all grid cells to identify intersections and then over all data points for pixelization. The grid identification step uses fast array operations [S1], but the pixelization step involves rotating coordinates back and forth, which can be computationally expensive for high-resolution volumes.
+*   **Memory Complexity:** Requires storage for the volume data, the rotation matrices, and the output image buffer. The distance array $D$ is temporary and scales with the number of grid vertices [S1].
+*   **Strengths:** Allows visualization of complex, non-cardinal structures (e.g., spiral density waves) that would be missed by standard slicing [S1]. Provides publication-quality plots [S1].
+*   **Limitations:** The sphere-based intersection check generates false positives, requiring additional checks during pixelization to remove them [S1]. The method relies on a custom pixelization routine [S1].
+*   **When to use:** When analyzing phenomena not aligned with cardinal axes, such as oblique anatomical cuts in medical imaging or off-axis structures in astrophysical simulations [S1][S2, unofficial].
+*   **When not to use:** When real-time performance is critical and the overhead of rotation and custom pixelization is too high, or when the data is already aligned with cardinal axes.
+
+## Background
+The method originates from the `yt` toolkit, a multi-code analysis toolkit for astrophysical simulation data, which needed to visualize off-axis phenomena like spiral density waves that standard axial slicing might miss [S1]. It is also widely known in medical imaging as Multi-Planar Reconstruction (MPR), allowing users to view 3D data in orthogonal or oblique planes for assessment [S2, S3, unofficial]. The technique involves transforming intersected points into a new coordinate system for pixelization [S1].
+
+## Sources
+[S1] YT: A Multi-Code Analysis Toolkit for Astrophysical Simulation Data, https://digital.library.unt.edu/ark:/67531/metadc834104/?q=fluid simulation volume rendering, fetched 2026-10-28
+[S2] Llama version of Ct Volume Rendering, https://www.flyriver.com/l/ct-volume-rendering, fetched 2026-10-29 (unofficial)
+[S3] Intuitive Slice-based Exploration of Volumetric Medical Data, https://doi.org/10.17488/rmib.40.3.3, fetched 2026-10-29 (unofficial)

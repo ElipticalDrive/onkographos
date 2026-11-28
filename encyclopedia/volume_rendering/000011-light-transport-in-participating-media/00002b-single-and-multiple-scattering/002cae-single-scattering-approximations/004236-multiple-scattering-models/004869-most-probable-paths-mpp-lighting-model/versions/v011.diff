@@ -1,0 +1,288 @@
+--- v010.md
++++ v011.md
+@@ -9,13 +9,13 @@
+ ### Inputs and Outputs
+ **Inputs:**
+-*   Volume density field $\rho(x)$ or scattering coefficient $b(x)$.
+-*   Absorption coefficient $a(x)$ and extinction coefficient $c(x) = a(x) + b(x)$.
+-*   Phase function $P(\theta)$, assumed strongly forward-scattering with mean square scattering angle $\langle \theta^2 \rangle$.
+-*   Directional light source direction $\vec{\omega}_0$ and intensity $L_0$.
+-*   Object image $L_{obj}$ (rendered without media effects, only shadows).
+-*   Precomputed $\ell_{light}$ volume (scattering events from light to each voxel).
++*   Volume density field $\rho(x)$ or scattering coefficient $b(x)$ [S1].
++*   Absorption coefficient $a(x)$ and extinction coefficient $c(x) = a(x) + b(x)$ [S1].
++*   Phase function $P(\theta)$, assumed strongly forward-scattering with mean square scattering angle $\langle \theta^2 \rangle$ [S1].
++*   Directional light source direction $\vec{\omega}_0$ and intensity $L_0$ [S1].
++*   Object image $L_{obj}$ (rendered without media effects, only shadows) [S1].
++*   Precomputed $\ell_{light}$ volume (scattering events from light to each voxel) [S1].
+ 
+ **Outputs:**
+-*   Total radiance $L(x, \vec{\omega})$ at each sample point along the viewing ray.
++*   Total radiance $L(x, \vec{\omega})$ at each sample point along the viewing ray [S1].
+ 
+ ### Data Structures
+@@ -24,6 +24,6 @@
+ 
+ ### Parameters
+-*   $\ell$: Number of scattering events along a path.
+-*   $s$: Physical length (arclength) of the path.
++*   $\ell$: Number of scattering events along a path [S1].
++*   $s$: Physical length (arclength) of the path [S1].
+ *   $\langle \theta^2 \rangle$: Mean square scattering angle (assumed constant for the medium) [S1].
+ *   $\bar{b}$: Global average of the scattering coefficient, used for area estimation in blurred radiance [S1].
+@@ -67,210 +67,75 @@
+ 
+ ```python
+-def compute_radiance(viewing_ray, volume_data, light_volume, object_image):
++import math
++
++def compute_mpp_radiance(ray_origin, ray_direction, step_size, num_steps, 
++                         volume_data, light_volume, object_image, 
++                         light_direction, L_0, theta_sq, b_avg, gamma):
+     """
+     Computes radiance for a single viewing ray using the MPP model.
+-    
+-    Args:
+-        viewing_ray: Ray origin and direction.
+-        volume_data: Struct containing b(x), a(x), c(x) for sampling.
+-        light_volume: 3D texture storing l_light for each voxel.
+-        object_image: 2D texture storing L_obj.
+-        
+-    Returns:
+-        Total radiance L.
+     """
+-    # Constants
+-    theta_sq = volume_data.mean_square_scattering_angle
+-    b_avg = volume_data.global_average_scattering_coefficient
+-    gamma = 0.45  # Recommended for denser media; 1.0 for original
+-    
+-    # Precompute light path scattering events for the current ray's intersection
+-    # This requires sampling the light_volume along the ray from the light direction
+-    # For a directional light, l_light is constant for a given voxel if aligned,
+-    # but generally requires a ray cast from the voxel towards the light.
+-    # Here we assume l_light(x) is available via texture lookup.
+-    
+-    # Initialize accumulators
+     L_ss = 0.0
+     L_ms = 0.0
+-    L_obj_contrib = 0.0
++    l_eye = 0.0
+     
+-    # March along the viewing ray
+-    t = 0.0
+-    dt = step_size
+-    while t < ray_length:
+-        x = ray_origin + t * ray_direction
++    for i in range(num_steps):
++        t = i * step_size
++        x = ray_origin + ray_direction * t
++        
+         b_x = volume_data.get_scattering_coefficient(x)
+         c_x = volume_data.get_extinction_coefficient(x)
+         a_x = volume_data.get_absorption_coefficient(x)
+         
+-        # Get precomputed scattering events from light to this point
++        # Precomputed scattering events from light to this point
+         l_light = light_volume.sample(x)
+         
+-        # Calculate scattering events from this point to the eye (approximate)
+-        # In a single sweep, l_eye is accumulated backwards or computed via distance
+-        # For simplicity, assume l_eye is passed or computed from remaining distance
+-        # l_eye = integral(b(x) ds) from x to eye
+-        # If using the modified model, we often approximate l_eye based on depth
+-        l_eye = compute_l_eye(x, ray_origin, ray_direction, volume_data)
++        # Accumulate scattering events from eye to current point
++        l_eye += b_x * step_size
+         
+-        l_obj = l_eye  # Scattering events from object to eye (assuming object is at eye or near)
+-        # More accurately, l_obj is the integral from the object surface to the eye.
+-        # If the object is rendered into L_obj, l_obj corresponds to the path through media
+-        # from the object surface to the current sample point x? 
+-        # Actually, L_obj is the radiance leaving the object. The weight W applies to L_obj.
+-        # The term exp(-c/b * l_obj) in W accounts for attenuation from object to eye.
+-        # Here, we are computing radiance AT x. 
+-        # The standard formulation sums contributions along the ray.
+-        # L_obj term is usually a boundary condition or a separate pass.
+-        # However, the model splits radiance into components.
++        l_total = l_eye + l_light
+         
+-        # 1. Single Scattering Contribution
+-        # L_unscat at x
+-        l_light_at_x = l_light
+-        L_unscat = L_0 * exp(- (c_x / b_x) * l_light_at_x)
++        # Physical length of MPP: distance from eye to x plus x to light
++        dist_to_light = math.sqrt(math.pow(x[0] - light_direction[0], 2) + 
++                                  math.pow(x[1] - light_direction[1], 2) + 
++                                  math.pow(x[2] - light_direction[2], 2))
++        s = t + dist_to_light
+         
+-        # Phase function P(x, omega, omega_0)
+-        # omega is viewing direction (towards eye), omega_0 is light direction
+-        # Note: In rendering, we usually shoot towards light. 
+-        # If ray is from eye to scene, omega is -ray_direction.
+-        phase_ss = phase_function(dot(ray_direction, -light_direction))
+-        
+-        # Delta L_ss
+-        delta_L_ss = L_unscat * phase_ss * exp(- (c_x / b_x) * l_eye) * b_x * dt
+-        L_ss += delta_L_ss
+-        
+-        # 2. Multiple Scattering Contribution
+-        # Approximate l for the MPP. 
+-        # The MPP connects Eye -> Scattering Point -> Light.
+-        # l = l_eye + l_light
+-        l_total = l_eye + l_light_at_x
+-        
+-        # Physical length s of the MPP
+-        # s is approximated by the distance from eye to x plus x to light projection?
+-        # The formula uses s as the physical length of the path.
+-        # For the MPP approximation, s is often taken as the distance from eye to light
+-        # or the sum of segments. Let's use the distance from eye to x for the "eye" segment
+-        # and distance from x to light for the "light" segment?
+-        # The formula w(l, s) uses s as the path length.
+-        # In the single sweep, we are at x. The MPP passes through x.
+-        # The "path" for the MPP integral is the whole path.
+-        # However, the contribution is local.
+-        # The paper integrates over l. In practice, this is discretized or approximated.
+-        # A common simplification is to use the local l_total.
+-        
+-        # Calculate Gaussian width w
+-        # s needs to be defined. For the MPP passing through x, s is the total length?
+-        # Or is s the length of the segment?
+-        # Eq 4: w(l, s). s is physical length.
+-        # If we are integrating over l, we need to know s for each l.
+-        # The MPP is approximated by two straight lines.
+-        # Let's assume s is the distance from eye to light source projected?
+-        # Or simply the distance from eye to x?
+-        # The paper states: "width ... determined by path's l, its physical length s".
+-        # For the MPP, s is the total length of the path from eye to light.
+-        # This is constant for a given ray if the light is directional and far away?
+-        # Let's assume s is the distance from eye to the light source intersection.
+-        s = distance_from_eye_to_light_intersection(ray_origin, ray_direction, light_direction)
+-        
+-        # Calculate w^2
+-        # Note: a/b ratio
++        # Gaussian width w
+         if b_x > 0:
+             a_over_b = a_x / b_x
+         else:
+-            a_over_b = 0
++            a_over_b = 0.0
+             
+-        w_sq = (theta_sq * l_total * s**2 / 24) * (1 + (theta_sq * a_over_b * l_total**2) / 12)
+-        w = sqrt(w_sq)
++        w_sq = (theta_sq * l_total * s**2 / 24.0) * (1.0 + (theta_sq * a_over_b * l_total**2) / 12.0)
+         
+-        # Blurred Radiance L_blurred
+-        # This requires sampling the incident radiance L_0 blurred by w.
+-        # L_blurred(x_0, w) = (b_avg / (pi * theta_sq)) * integral(L_0(x) exp(-(x-x_0)^2/2w^2) dA)
+-        # In practice, this is a 2D Gaussian blur of the light source projection or shadow map.
+-        # For a directional light, L_0 is constant, so L_blurred is constant?
+-        # No, L_0(x) varies due to shadows and object occlusion.
+-        # We need the incident radiance at the plane perpendicular to light at x.
+-        # This is typically precomputed or sampled from a shadow map/depth buffer.
+-        L_incident = sample_incident_radiance_at_plane(x, light_direction, w)
+-        L_blurred = (b_avg / (pi * theta_sq)) * L_incident * (pi * w_sq) # Integral of Gaussian is 2pi w^2? 
+-        # Wait, the formula in [S1] has integral of exp(-x^2/2w^2) dA.
+-        # The integral of exp(-(x^2+y^2)/2w^2) over 2D plane is 2 pi w^2.
+-        # But the formula in [S1] Eq 6 does not have 2pi.
+-        # Let's look at Eq 6: L_blurred = (b_bar / pi theta^2) integral ...
+-        # And Eq 8 derivation: area = pi <theta^2>/b^2 ...
+-        # The text says: "Just integrating weighted radiance ... is incorrect. ... effective number of contributing paths ... area".
+-        # The factor (b_bar / pi theta^2) is the inverse of the area?
+-        # Area ~ pi theta^2 / b^2? No.
+-        # Let's stick to the provided formula Eq 6.
+-        # L_blurred = (b_avg / (pi * theta_sq)) * Integral.
+-        # If L_incident is the average radiance, and we assume the Gaussian integrates to 1 (normalized),
+-        # then Integral = L_incident.
+-        # But the Gaussian in Eq 6 is not normalized (value 1 at center).
+-        # Integral of exp(-r^2/2w^2) over 2D is 2 pi w^2.
+-        # So L_blurred = (b_avg / (pi * theta_sq)) * L_incident * 2 * pi * w^2
+-        # L_blurred = 2 * b_avg * w^2 / theta_sq * L_incident
++        # Blurred incident radiance L_blurred
++        # Integral of Gaussian exp(-r^2/2w^2) over 2D plane is 2*pi*w^2
++        # L_blurred = (b_avg / (pi * theta_sq)) * L_incident_avg * 2 * pi * w^2
++        # L_incident_avg is the unscattered radiance at the plane perpendicular to light
++        L_incident_avg = L_0 * math.exp(-(c_x / b_x) * l_light)
++        L_blurred = (2.0 * b_avg * w_sq / theta_sq) * L_incident_avg
+         
+-        # However, the paper's Eq 10 uses L_blurred in the context of L_ms.
+-        # Let's use the explicit formula from Eq 6 as written, assuming the integral is computed.
+-        # For implementation, L_blurred is often pre-filtered.
++        # Single Scattering Contribution
++        cos_angle = math.dot(ray_direction, -light_direction)
++        phase_ss = phase_function(cos_angle)
++        delta_L_ss = L_incident_avg * phase_ss * math.exp(-(c_x / b_x) * l_eye) * b_x * step_size
++        L_ss += delta_L_ss
+         
+-        # Multiple Scattering Phase Function P_MS
+-        # Argument: theta / sqrt(l(1-exp(-l)))
+-        # theta is the angle between viewing direction and light direction?
+-        # P_MS(theta, l) = N * P(theta / sqrt(l(1-exp(-l))))
+-        # We need the normalization constant N.
+-        # Usually, if P is normalized, P_MS is normalized by adjusting N.
+-        # For simplicity, if P is Henyey-Greenstein, we can compute it directly.
+-        # Let's assume P_MS is computed using the scaled angle.
+-        scale_factor = sqrt(l_total * (1 - exp(-l_total)))
+-        effective_theta = angle_between(ray_direction, -light_direction) / scale_factor
+-        phase_ms = phase_function_scaled(effective_theta, l_total) # Returns N * P(...)
++        # Multiple Scattering Contribution
++        scale_factor = math.sqrt(l_total * (1.0 - math.exp(-l_total)))
++        effective_cos = cos_angle / scale_factor if scale_factor > 1e-6 else cos_angle
++        phase_ms = phase_ms_function(effective_cos, l_total)
+         
+-        # Attenuation term
+-        # exp(-gamma * (c/b) * l) * exp(-Ac)
+-        # Ac is dropped (0)
+-        attenuation = exp(-gamma * (c_x / b_x) * l_total)
+-        
+-        # Delta L_ms
+-        # The integral over l is approximated by the value at l_total?
+-        # Or is l_total the variable of integration?
+-        # In the single sweep, we are at a specific x, so l_total is fixed for this sample.
+-        # The "integral over l" in the paper refers to summing contributions from different MPPs
+-        # (different l values) that pass through x?
+-        # Actually, the MPP is unique for a given l?
+-        # The paper says: "summing contributions only over paths close to the MPP".
+-        # And "outer integration is done over MPPs with different l".
+-        # This implies we might need to sum over a range of l.
+-        # However, for a given point x and direction, the MPP is determined by the geometry.
+-        # The "l" in the formula is the number of scattering events on the MPP.
+-        # So for a specific x, there is one l (l_eye + l_light).
+-        # So the integral becomes a single term evaluation?
+-        # Yes, for a specific sample point, l is determined.
+-        
+-        delta_L_ms = attenuation * phase_ms * L_blurred * b_x * dt
++        attenuation = math.exp(-gamma * (c_x / b_x) * l_total)
++        delta_L_ms = attenuation * phase_ms * L_blurred * b_x * step_size
+         L_ms += delta_L_ms
+         
+-        # 3. Object Image Contribution
+-        # This is usually a boundary term or a separate pass.
+-        # The weight W is applied to L_obj.
+-        # L_obj is the radiance from the object surface.
+-        # If the ray hits an object, we add W * L_obj.
+-        # If the ray is in the volume, this term is 0?
+-        # The formula L = W * L_obj + ... suggests L_obj is a component of the radiance at x.
+-        # But L_obj is defined at the object surface.
+-        # The term W * L_obj exp(-c l_obj / b) is the contribution of the object light
+-        # that has been scattered into the direction of the eye.
+-        # This is typically handled when the ray intersects the object.
+-        # For points in the volume, this term is 0.
+-        
+-        t += dt
+-        
+-    # If the ray hits an object at distance t_hit:
+-    # L_obj_val = object_image.sample(hit_uv)
+-    # l_obj_hit = compute_l_eye(hit_point, ray_origin, ...)
+-    # W_hit = (1 + l_obj_hit + (2 * b_avg**2 * w(l_obj_hit, s)**2 * l_obj_hit) / theta_sq) * exp(- (c/b) * l_obj_hit)
+-    # L_obj_contrib = W_hit * L_obj_val
++    # Object contribution (boundary term)
++    # Assuming ray hits object at t_hit with UV coordinates uv_hit
++    # l_obj is computed similarly to l_eye at t_hit
++    # W = (1 + l_obj + (2 * b_avg**2 * w(l_obj, s)**2 * l_obj) / theta_sq) * math.exp(-(c/b) * l_obj)
++    # L_obj_contrib = W * object_image.sample(uv_hit)
+     
+-    return L_ss + L_ms + L_obj_contrib
++    return L_ss + L_ms
+ ```
+ 

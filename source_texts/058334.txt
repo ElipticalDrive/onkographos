@@ -1,0 +1,494 @@
+# Improving Efficiency of Iso-Surface Extraction on Implicit Neural Representations Using Uncertainty Propagation
+
+Haoyu Li and Han-Wei Shen
+
+Abstract—Implicit Neural representations (INRs) are widely used for scientific data reduction and visualization by modeling the function that maps a spatial location to a data value. Without any prior knowledge about the spatial distribution of values, we are forced to sample densely from INRs to perform visualization tasks like iso-surface extraction which can be very computationally expensive. Recently, range analysis has shown promising results in improving the efficiency of geometric queries, such as ray casting and hierarchical mesh extraction, on INRs for 3D geometries by using arithmetic rules to bound the output range of the network within a spatial region. However, the analysis bounds are often too conservative for complex scientific data. In this paper, we present an improved technique for range analysis by revisiting the arithmetic rules and analyzing the probability distribution of the network output within a spatial region. We model this distribution efficiently as a Gaussian distribution by applying the central limit theorem. Excluding low probability values, we are able to tighten the output bounds, resulting in a more accurate estimation of the value range, and hence more accurate identification of iso-surface cells and more efficient isosurface extraction on INRs. Our approach demonstrates superior performance in terms of the iso-surface extraction time on four datasets compared to the original range analysis method and can also be generalized to other geometric query tasks.
+
+Index Terms—Iso-surface extraction, implicit neural representation, uncertainty propagation, affine arithmetic.
+
+### I. INTRODUCTION
+
+I MPLICIT neural representations (INRs), as a function mapping from spatial locations to scalar values, can represent both structured and unstructured data in a continuous and succinct way. These characteristics make them suitable for scientific data reduction [1], [2]. Moreover, combined with the temporal information or the priors about the parameters of a simulation, INRs can be easily extended to represent spatio-temporal data or work as a surrogate model to provide efficient preview visualization for complex simulations [3]. These advantages make INR a promising representation of scientific data. However, visualization and analysis techniques on implicit neural representations are not fully explored.
+
+Among many visualization techniques, iso-surface extraction is a widely used technique for visualizing scalar fields. The most popular approach for iso-surface extraction, Marching Cubes [4], requires that the scalar field be discretized into a grid, and triangle patches are extracted from the grid cells using linear interpolation. To ensure that the linear assumption within each grid cell holds, the reconstruction grid should be dense enough. However, when using INRs, a dense reconstruction is computationally expensive. Although approaches to increase the INR inference efficiency by utilizing the tensor cores' on-chip memory in modern GPUs were proposed [2], [5], these approaches depend on specific architecture and hardware. One appealing method to reduce the computation is through subdividing the field hierarchically and identifying the active cells that contain a component of the iso-surface [6], [7]. However, to build the hierarchical data structure for iso-surface extraction, the minimum and maximum values in the hierarchical nodes are needed. For INRs, there is no easy way to get the exact minimum and maximum values without dense reconstruction of the scalar values inside the regions. Preprocessing the INRs to get values is, again, computationally very expensive and will introduce non-negligible storage overhead, which defeats the purpose of using INR as an implicit, succinct, and continuous data representation.
+
+One recently proposed approach [8] innovatively applies range analysis to bound the output of INR given a region of input. The output bounds are useful in many general geometric query tasks on INRs. Using range analysis on INR of scalar fields, we can easily build spatial hierarchies and skip regions that do not contain the chosen iso-surface to increase extraction efficiency without preprocessing or storing metadata. However, the coarse approximations made by range analysis do not produce exactly the same bound as the true output range of the INR. The range analysis applies affine approximations to INR and uses the arithmetic rules to guarantee that the true output range is inside the approximated bounds by the analysis. However, the estimated bound is often too large, and hence too conservative to allow effective skipping of uninterested regions. Therefore the extraction efficiency is not improved. Our preliminary experiments on INRs of scalar fields shown in the middle of fig. 1 indicate that the bounds from the range analysis are overly conservative. A possible reason is that scalar fields from scientific simulations have more value oscillations and high-frequency features compared to signed distance functions or occupancy functions of 3D geometric models. INR learns more complex nonlinear functions leading to large errors between the affine approximation used by the range analysis and the INR
+
+To overcome the computation challenges of iso-surface extraction on scalar fields represented by INRs, in this paper, inspired by the range analysis technique, we propose an approach to have a more accurate estimate of the scalar value
+
+
+
+Fig. 1. Experiments of the iso-surface extraction on the Ethanediol dataset. The left image shows the example iso-surface extracted using dense reconstruction and marching cubes. The middle and the right images show the active cells found by the range analysis and our approach. Our approach finds more accurate active cells with less amount of INR reconstruction.
+
+range over any arbitrary regions. The major difference between the proposed technique and the original range analysis technique [8] is that we do not produce a "hard" bound on the INR output, which tends to be too conservative on a complex scalar field. Instead, we treat the input region as an uncertainty source to the INRs and propagate this uncertainty through the neural network to produce an estimated output value probability distribution. This uncertainty propagation is computationally much more efficient than densely reconstructing values inside the region. The produced output value probability distribution combined with a confidence interval can be used to provide a "soft" bound of the output range. Using the "soft" bounds, we can query the values adaptively in the spatial domain for efficient iso-surface extraction. Although we are still using an affine approximation to the INR, the "soft" bounds are tighter than the range analysis bounds, because we do not consider the extreme cases where all the approximation errors are maximized. Although this paper mainly focuses on uncertainty propagation applied to hierarchical iso-surface extraction on INRs, the described technique also applies to the general geometric query tasks on different INRs.
+
+In summary, the contribution of this paper is twofold:
+
+- We present a technique using uncertainty propagation to efficiently estimate the implicit neural representation output distribution over an input domain.
+- We demonstrate that this output distribution can be easily applied to build a hierarchical data structure for efficient iso-surface extraction on implicit-neural-networkrepresented data without preprocessing and metadata storage.
+
+#### II. RELATED WORKS
+
+Using coordinate-based neural networks to represent field data, also known as implicit neural representation, is recently a heated research topic in the machine learning literature. A comprehensive survey on the applications and the architectures of INR is given by Xie et al. [9]. Since this paper focuses on the efficient iso-surface extraction on INR of scalar fields, in this section, we first survey INR application in scientific data analysis and visualization and then discuss the computation challenge of iso-surface extraction from INRs.
+
+Applications of INRs in scientific visualization. The first and most apparent application of INR is to reduce large and highresolution scalar fields. Lu et al. [1] apply INR and network weight quantization techniques to compress 3D spatial data. Their experiments show that INR-based compression outperforms the traditional state-of-the-art algorithm at the cost of higher encoding and decoding latency. A follow-up study [2] reduces this latency by loading the models to modern GPU tensor cores' on-chip memory and achieves interactive rendering from INRs. Another work by Pan et al. [10] leverages INR as a mesh-agnostic dimensionality reduction tool to generate latent representations for spatio-temporal data. Despite the direct usage of INR on existing scientific data, other domains like medical imaging and physical simulations also adopt INRs. For example, INRs are used to predict density fields from medical scans of limited viewing angles and sparse views, where the prediction is supervised by mapping the output density value to the sensor domain via Fourier transform (MRI) or Radon transform (CT) [11], [12]. Raissi et al. [13] put forth physics-informed neural networks, where INRs are used to parameterize the solution space of partial differential equations (PDEs) to reduce the simulation computation. Later, this idea is extended to different PDEs [14]–[17]. The wide usage of INRs in these domains motivates an urgent need for efficient visualization techniques for field data represented by neural networks.
+
+Iso-surface extraction from INRs. Iso-surface extraction is a well-studied problem in the scientific visualization domain. Many techniques are proposed to improve the iso-surface extraction efficiency. A survey [18] on the iso-surface extraction literature summarizes these speed-up algorithms into three categories: hierarchical geometric [6], [7], interval-based [19]–[21] and propagation-based [22] methods. These speedup algorithms avoid the computation of non-active cells at the cost of preprocessing and storing metadata. However, when the scalar field is represented as INR, many issues prevent us from applying these techniques. First, interval-based and propagation-based techniques cannot be directly used because the INRs describe a continuous field without a structured grid or unstructured mesh, which interval-based methods rely on. Although we can reconstruct values and build the grid from INR, this defeats the purpose of using INR as a succinct and continuous data representation. Second, hierarchical geometric methods require the knowledge of the extrema of the values over a region to skip non-active regions. Traditionally, this information is acquired by preprocessing every grid and stored as metadata. However, getting this metadata from INR through dense reconstruction is computationally expensive, takes lots of storage, and is potentially inaccurate if we do not reconstruct dense enough. Sharp and Jacobson [8] proposed to apply range analysis or more specifically affine arithmetic, on INRs and bounds the network output over a spatial region directly without dense reconstruction. Their paper not only focuses on iso-surface extraction but proposes a general technique to perform geometric queries on INRs of 3D geometric models. However, due to more high-frequency features in scientific data scalar fields than signed distance functions/occupancy functions for 3D geometric models, range analysis does not give accurate enough bounds in our application and thus leads to poor efficiency. Our method, similar to the range analysis of INR, is focused on but not limited to the application of isosurface extraction and can be generalized to other visualization tasks that require data queries from INRs.
+
+In the remainder of this paper, we will explain our technique in detail and present the experiments for hierarchical isosurface extraction on INRs fitted to various datasets.
+
+#### III. BACKGROUND
+
+The algorithm proposed in this paper is closely related to the general query technique on INR [8]. Range analysis by affine arithmetic is performed on INRs to bound the output over an input region. The output bounds are used to increase the efficiency for different geometric query tasks including hierarchical mesh extraction on signed distance fields, which is very similar to iso-surface extraction from a scalar field. Before explaining the details of our method, we first introduce the range analysis approach and how it is applied to INRs in this section.
+
+#### A. Range Analysis via Affine Arithmetic
+
+Range analysis is a general technique to bound the function output range over a given input range. Interval arithmetic and affine arithmetic are two common methods for range analysis. Affine arithmetic decomposes a value interval into the affine combination of different unit intervals. This affine combination is called an affine form. Tracking these unit intervals by applying arithmetic rules guarantees exact output bounds through linear functions. Formally, an interval xˆ is expanded as follows:
+
+
+
+| $\hat{x} = x_0 + \sum_{i=1}^N x_i \epsilon_i,$ | $\epsilon_i \in [-1, 1],$ | (1) |
+|------------------------------------------------|---------------------------|-----|
+|                                                |                           |     |
+
+where each ϵi ∈ [−1, 1] is a unit interval symbol. The scalar value x0 denotes the interval center while each scalar value xi is the coefficient to scale each unit interval symbol ϵi . If either the function input or the output is multidimensional, we can easily extend this definition to intervals in each dimension. Intuitively, for any affine form represented interval, we can calculate the original interval when each unit interval takes its minimum and maximum value:
+
+| $\text{range}(\hat{x}) = [x_0 - r, x_0 + r],$ | $r = \sum_{i=1}^N  x_i .$ | (2) |  |
+|-----------------------------------------------|---------------------------|-----|--|
+
+A nice property of affine forms is that we can directly substitute the input variable in a linear function of affine form and get the exact bound of the function output. In that case, we use the following affine arithmetic rules for a linear function:
+
+
+$$f(\hat{x}) = \alpha x_0 + \beta + \sum_{i=1}^N \alpha x_i \epsilon_i. \quad (3)$$
+
+To deal with nonlinear functions, we first obtain a linear approximation to the original function f(x) ≈ ¯f(x) := αx+β. The maximum error between the nonlinear function and the linear approximation is γ = maxx∈range(ˆx) |f(x) − ¯f(x)|. Chebyshev polynomials [23] are used to approximate the nonlinear functions to minimize the maximum error γ. Therefore, we introduce a new unit interval symbol ϵN+1 ∈ [−1, 1] and the approximation error is bounded by γϵN+1. Having the error bounded, we can represent the nonlinear function by the affine form in the following way:
+
+
+$$f(\hat{x}) = \bar{f}(\hat{x}) + \gamma \epsilon_{N+1} = \alpha x_0 + \beta + \sum_{i=1}^N \alpha x_i \epsilon_i + \gamma \epsilon_{N+1}. \quad (4)$$
+
+An example of this approximation can be found on the left of fig. 3.
+
+Linear and nonlinear functions can be applied repeatedly to the affine forms (representing the input interval and the intermediate intervals), and the output range can be directly read off from the output affine forms. However, these output bounds from the affine forms are looser than the real output intervals because of the new uncertainty terms ϵN+1 introduced in the approximation to the nonlinear function.
+
+#### B. Applying Range Analysis to INRs
+
+In this section, we explain how the range analysis via affine arithmetic is applied to INRs. If we open the black box of neural networks, they are basically a sequence of functions applied to the network input and INR is not an exception. The input to INR is a coordinate tuple describing a spatial position. This input goes through multiple linear layers and nonlinear functions and then maps to an output of the scalar field value at that position. The linear layers in the INR are essentially performing matrix multiplications and the nonlinear function is chosen from activation functions, such as ReLU, ELU, and the sine function. If we define an input range to the INR, which could be a 2D or 3D region, performing range analysis via affine arithmetic through INR layers as shown in fig. 2 (a), we can obtain the estimated output range over the region.
+
+The first step is to rewrite the input region in the affine form, and then we can use the rules introduced in section III-A to propagate this affine form through the INR. Rewriting the input region in the affine form is an intuitive process, for example, a 2D rectangle centered at x0 and y0 with width 2x1 and length 2y1 can be written as an affine form vector (ˆx, yˆ), where xˆ = x0 +x1ϵ1 and yˆ = y0 +y1ϵ2, with ϵ1, ϵ2 ∈ [−1, 1]. By applying affine transformations to the vector (ˆx, yˆ), we can represent any parallelogram in the space. A similar approach can be extended to 3D and represent an input region of the rectangular cuboid.
+
+Once the input region is represented in the affine form as the vector vˆ0 in fig. 2 (a), we can apply the rules in eq. \(3\) and eq. \(4\) to propagate this range through the network. Finally, the estimated scalar value bound can be easily read off from the output affine form vˆ ′ k−1 . These estimated bounds can be used in the hierarchical iso-surface extraction to skip the regions where the iso-value is outside the bound. The details of hierarchical iso-surface extraction are discussed under our approach in section IV-D.
+
+#### IV. METHOD
+
+When the range analysis is applied to INRs (discussed in section III-B\), the number of unit interval symbols N is the sum of the input degree of freedom and the number of
+
+
+
+Fig. 2. The procedure of applying range analysis and uncertainty propagation through INRs. The scalar values in the network are represented by the affine forms (AF). Range analysis follows eq. \(3\) and eq. \(4\) while uncertainty propagation follows eq. \(8\) and eq. \(9\) when applied to INRs.
+
+
+
+Fig. 3. The difference between range analysis (left) and uncertainty propagation (right) when applying nonlinear functions. The nonlinear function is shown in blue and the linear approximation is in red. In the figure on the right, the shaded red region is the error of approximation. Given the input Gaussian distribution, we can calculate the variance γ 2 of the error distribution. Note that this error distribution is not necessarily Gaussian.
+
+activation functions in the network, where a new symbol is introduced when approximating every activation function. In affine arithmetic, to ensure the query result is always correct, conservative bounds that assume maximum approximation errors are used. However, this is unlikely to happen in practice. As mentioned in the introduction, we observe that the range analysis bounds are too conservative, resulting in poor efficiency when used for hierarchical iso-surface extraction.
+
+Based on this insight, we propose our approach that estimates the output value distribution over an input region to the INR instead of only the output bounds. Combining the estimated distribution and a confidence interval threshold, we can generate a "soft" bound for the INR output. To extract the iso-surfaces, we build a k-d tree in a top-down manner. The "soft" bounds are used to determine whether or not the region corresponding to a k-d tree node contains a component of the iso-surface. If yes, the space is subdivided adaptively and we only reconstruct the values densely at the regions of interest.
+
+To estimate the scalar value distribution, we first propose a straightforward method assuming each unit interval symbol from range analysis represents a uniformly distributed random variable in section IV-A. With that assumption, we can easily estimate the distribution from the range analysis output. However, this simple technique does not generate an accurate enough estimate. To solve this problem, in section IV-B we propose to use another technique called probabilistic affine forms (PAFs), which models the input to functions as random variables that are affine combinations of unit random variables. By tracking these PAFs through functions, we can get PAFs as the function output. We estimate these PAFs' distributions as Gaussian distributions by applying the central limit theorem (CLT). We expect this approach to generate a more accurate distribution estimation compared to the range analysis with uniform assumptions. The process that tracks PAF through functions is called uncertainty propagation. In the rest of this section, we provide the details of the technique and explain how it is used in hierarchical iso-surface extraction.
+
+#### A. Range Analysis with Uniform Assumption
+
+The affine form expressed in eq. \(1\) is merely a combination of the unit interval symbols, which does not tell the value probability distribution inside the interval. We first propose a straightforward approach that assumes the values are uniformly distributed inside each unit interval. To put it formally, for an affine form xˆ = x0 + PN i=1 xiϵi , we assume each xiϵi follows a uniform distribution defined between [−xi , xi ]. To calculate the exact probability distribution of xˆ, we need to convolve the probability density function of each xiϵi , which is too computationally expensive when N is large. Fortunately, we can estimate the probability distribution of xˆ as a Gaussian distribution using the central limit theorem (CLT). According to the CLT, the sample averages drawn from a sequence of n identically and independently distributed random samples converge in distribution to Gaussian as n → ∞. This also indicates the sums of the samples converge in distribution to Gaussian. However, since in the affine forms, each xiϵi is not identically distributed, we resolve to a specific variant of the CLT that relaxes the condition to non-identically distributed random variables called Lindeberg CLT [24]. The theorem states that for a sequence of independent random variables {X1, ..., Xn, ...}, each with the mean µi and the variance σ 2 i , the sum of (Xi − µi) converges in distribution to a Gaussian random variable as n → ∞:
+
+
+$$\sum_{i=1}^n (X_i - \mu_i) \xrightarrow{d} \mathcal{N}(0, \sigma_n^2), \quad \sigma_n^2 = \sum_i \sigma_i^2. \quad (5)$$
+
+Lindeberg CLT also requires that the random variables satisfy Lindeberg's condition [24]. This condition enforces that no random variable has a variance that is significantly larger than others.
+
+For a uniformly distributed random variable, variance is calculated as σ 2 = 12 (xupper−xlower) 2 . Therefore each symbol xiϵi (ϵi ∈ [−1, 1]), under the uniform distribution assumption, has µi = 0 and σ 2 i = 1 3 x 2 i . Applying eq. \(5\), the summation PN i=1 xiϵi follows a Gaussian distribution N (0, s2 N ), where s N = 3 PN i=1 x i . Therefore, we estimate the affine form xˆ = x0 + PN i=1 xiϵi to follow a Gaussian distribution N (x0, s2 N ). The independence, Lindeberg's condition, and the large number assumption cannot be strictly proved for our application on INRs, since no restriction is placed on the INR weights. However, we find the assumptions heuristically hold in our experiments and discuss the situations when these assumptions might break in section VI. Having this assumption, we can easily estimate the INR output distribution over an input region from the range analysis result and this distribution can be used to generate the "soft" bounds for iso-surface extraction, which we discuss in section IV-D. We call this simple modification range analysis with the uniform assumption (RA-UA)
+
+However, there are two pitfalls in RA-UA. The first is that the uniform assumption of error may not hold on different activation functions in INR. Although the CLT can be applied to any distribution shape, the variance calculated is incorrect if ϵi does not follow a uniform distribution. The second issue is that the distribution estimation only happens at the final INR output. In the intermediate layers, the "hard" bounds are still used to calculate γ in eq. \(4\). This already introduces intervals that contain values with low probability, which will eventually lead to pessimistic results especially when the INR network is deep.
+
+#### B. Uncertainty Propagation
+
+Because of the two downsides mentioned in the last section, we further propose uncertainty propagation through INR using the probabilistic affine form (PAF), where the probability estimation is performed in each layer of activation function approximation and, the exact variance of each estimation error can be calculated thanks to the property of Gaussian distribution. Uncertainty propagation is expected to have a more accurate output distribution estimate compared to the RA-UA which we will use as the baseline method in the evaluation.
+
+Probabilistic affine forms for uncertainty propagation were previously proposed by Bouissou et al. [25], [26]. These two papers describe a more general PAF considering arbitrary distributions and arbitrary dependency between random variables. However, for computation efficiency, we only consider a special case where random variables are independent and we approximate their linear combination with Gaussian distributions in this study. Therefore, the notations and definitions used in this paper are different from the previous papers for a simpler and clearer explanation. We discuss our PAF in this section and recommend the readers who are interested in a general and complete PAF definition to the previous papers.
+
+First, we formally define a random variable Xˆ as an affine combination of multiple unit random variables Zi :
+
+
+$$\hat{X} = x_0 + \sum_{i=1}^N x_i Z_i. \quad (6)$$
+
+Each Zi can have an arbitrary probability distribution, however, we enforce each Zi has unbiased mean and unit standard deviation (E(Zi) = 0 and Var(Zi) = 1). We will discuss how this is enforced later in this section. We also assume unit random variables to be independent of each other, so that the affine form can be approximated with a Gaussian distribution using the CLT.
+
+The probability density function (PDF) of Xˆ is the convolution of each individual PDF of Zi . For Zi that is arbitrarily distributed and does not have a general closed-form PDF expression, convolving the PDF of a large number of Zi is too computationally expensive to fit our application. Therefore, similar to the range analysis with uniform assumption discussed in section IV-A, we decide to approximate the distribution of Xˆ with Gaussian distributions using Lindeberg CLT. Because in PAFs, the mean of each term xiZi is zero and the variance is x 2 i . Following the eq. \(5\), the distribution of Xˆ can be estimated as:
+
+
+$$\hat{X} \sim \mathcal{N}(x_0, s_N^2), \quad s_N^2 = \sum_{i=1}^N x_i^2. \quad (7)$$
+
+Similar to RA-UA, the assumptions that enable us to apply Lindeberg CLT are discussed in section VI.
+
+The PAF can be similarly propagated through functions like affine forms in the range analysis. The rule to apply linear functions to PAF is similar to affine arithmetic as described in eq. \(3\):
+
+
+$$f(\hat{X}) = \alpha x_0 + \beta + \sum_{i=1}^N \alpha x_i Z_i, \quad (8)$$
+
+where α and β are the coefficients for the linear function. The random variable distribution is exact through linear functions because of the property of affine arithmetic. It is worth noting that we may have errors when modeling the distribution of Xˆ with Gaussian distribution following Lindeberg CLT. However, this inaccuracy is not introduced by the linear function.
+
+More differences exist between applying nonlinear functions to PAFs and affine forms. The nonlinear function is first approximated with a linear function f(x) ≈ ¯f(x) := αx + β and we introduce a new random variable γZN+1 that denotes the error of this approximation. In the right of fig. 3, we use the shaded red region to denote the approximation error. Then the application of the nonlinear function is converted to a linear function plus the approximation error:
+
+
+
+| $f(\hat{X}) = \bar{f}(\hat{X}) + \gamma Z_{N+1} = \alpha x_0 + \beta + \sum_{i=1}^N \alpha x_i Z_i + \gamma Z_{N+1}.$ (9) |
+|---------------------------------------------------------------------------------------------------------------------------|
+|---------------------------------------------------------------------------------------------------------------------------|
+
+Because we want to enforce that the random variables in the PAF have unit standard deviations, γ is set to be the standard deviation of the approximation error so that Var(ZN+1) = 1. The approximation error γZN+1 may have an arbitrary PDF determined by the activation function, approximation method, and the input distribution Xˆ. However, because we approximate the distribution of the PAF using the CLT as shown in eq. \(7\), calculating the error variance γ 2 is sufficient to propagate the PAF through a nonlinear function.
+
+The next step is to choose a method for the linear approximation. We choose the least square method for the following two reasons. First, the least square method minimizes the mean squared error (MSE) and the solution is unbiased. This ensures the introduced approximation error bias E(ZN+1) = 0 and minimizing the MSE is the same as minimizing the error variance γ 2 , because the MSE can be decomposed into the sum of the error variance and the squared bias: MSE = γ 2 + [E(ZN+1)]2 . Second, the linear least square method has the analytical solution to approximating different activation functions, which allows us to perform the propagation efficiently. To put it formally, given that the nonlinear function input PAF Xˆ follows a Gaussian distribution N (µ, σ2 ) with PDF g(x| µ, σ2 ), the MSE is an integral of the squared error overs this Gaussian PDF. Therefore, the optimization of the MSE is defined as:
+
+$$\arg \min_{\alpha, \beta} \int_{-\infty}^{\infty} g(x|\mu, \sigma^2) (f(x) - \alpha x - \beta)^2 \, dx, \quad (10)$$
+
+where α, β are parameters for the linear approximation. This minimum can be found by solving the following system: ∂MSE ∂α = 0, ∂MSE ∂β = 0. The analytical solution for the three commonly used activation functions, ReLU, ELU, and Sine, can be found in the appendix.
+
+#### C. Uncertainty Propagation through INRs
+
+Similar to the range analysis, uncertainty propagation through INRs also sequentially applies linear and activation functions on PAFs. We summarize these processes in fig. 2 (b). The input region is represented as a vector Vˆ 0 of PAFs. After the uncertainty propagation through an INR with k layers, we get an output PAF Vˆ ′ k−1 .
+
+The input region Vˆ 0 is represented by an affine combination of uniformly distributed random variables. For example, to describe 2D square centered at x0 and y0 with width of 2x1 and length of 2y1, the input PAF vector is (X, ˆ Yˆ ), where Xˆ = x0+ √x1 3 Z1 and Yˆ = y0+ √y1 3 Z2. The coefficients √x1 3 and √y1 3 normalize the uniform random variable Z1 and Z2 to have unit standard deviations since a uniform distribution defined on [−x1, x1] has standard deviation σ = √x1 3 . We can define rectangles with arbitrary shapes at any position by applying an affine transformation to (X, ˆ Yˆ ). A similar input definition can also be extended to 3D.
+
+Once the input region is written as a PAF vector, we can propagate it through the INR linear layers and activation functions using the rules defined by eq. \(8\) and eq. \(9\). In the last layer, we get the INR output distribution over the input region from the PAF. The output distribution is used to generate "soft" bounds for the hierarchical iso-surface extraction, which we will introduce in the next section.
+
+#### D. Hierarchical Iso-surface Extraction
+
+A trivial and straightforward way to extract iso-surface from the INR is through dense reconstruction. One can decide the dense grid resolution based on the maximum error that can be tolerated. After that, the marching cubes algorithm can be applied inside the grid assuming scalar values in the cells are linearly interpolated. To avoid densely reconstructing the data from INR, in this section, we propose a hierarchical isosurface extraction algorithm using the k-d tree. We estimate the value distribution inside the tree nodes through the technique discussed in section IV-C and use its confidence interval to adaptively build this tree with respect to the chosen iso-value and identify the potential active cells. The data reconstruction from the INR is only performed on the active cell corners to reduce computation. We present the pseudocode for the active cell finding in algorithm 1.
+
+The k-d tree [27] is built from top to bottom to subdivide the domain and find the finest active cells that contain a component of the iso-surfaces. The finest active cell is determined by the maximum depth of subdivision which is related to the
+
+#### Algorithm 1 KdTreeExtraction(fθ, xl , xu, c, t)
+
+Input: An INR fθ : R 3 → R of the scalar field, domain bounds xl , xu ∈ R 3 , iso-value c, and a hyperparameter t. Output: Predicted set A of the active cells.
+
+1: xc ← (xl + xu)/2 ▷ Node Center 2: V ← Diag( √ 3 (xu − xc)) ▷ Diagonal matrix for orthogonal axes 3: Xˆ ← xc + V ϵ ▷ Vector of PAFs in matrix notation 4: Yˆ ← UP(fθ, Xˆ ) ▷ Uncertainty propagation in section IV-C 5: µ, σ ← CLT(Yˆ ) ▷ Get µ and σ from output PAF using eq. \(7\) 6: if µ + tσ < c or µ − tσ > c then 7: return ∅ 8: else 9: if Max depth reached then 10: return {(xl , xu)} 11: else 12: x u , x l ← Split(xu, xl) ▷ Split along the widest dimension 13: Aleft ← KdTreeExtraction(fθ, xl , x u , c, t) 14: Aright ← KdTreeExtraction(fθ, x l , xu, c, t) 15: return Aleft ∪ Aright 16: end if 17: end if
+
+computation resources we have. Starting from the root node, we describe the corresponding 3D region as a bounding box with lower and upper corners xl and xu. To represent this region as a vector of PAFs, the center and the orthogonal axes of the box are calculated (see steps one through three in algorithm 1\). Having the PAF vector, we propagate it through the INR and get the output PAF Yˆ . Applying the CLT to the output PAF, we estimate the distribution of scalar values inside the node region with a Gaussian distribution with mean µ and standard deviation σ. A confidence level value t bounds the confidence interval of this region to be [µ − tσ, µ + tσ]. A larger t will give more conservative bounds and a smaller t will give tighter bounds. Detailed studies on the choices of hyperparameter t can be found in section V-B. The node is split when the interested iso-value is inside the bounds. Otherwise, the node is marked as non-active and skipped for further subdivision. We always split along the widest dimension in our algorithm, which ensures all three dimensions will be subdivided in turns. After subdivision, the algorithm is applied to the child nodes recursively. When the iso-value is inside the estimated bound AND the maximum depth of the k-d tree is reached, we mark this leaf node as an active cell. We enforce the maximum depth of the tree to be a multiple of three so that the active cell is always a cube. All active cells are collected as the algorithm output. After collecting all the predicted active cells, the grid corners of the active cells can be found. We query the INR for the scalar value at the grid corners and perform the marching cubes algorithm to extract the triangle meshes inside the cells.
+
+#### V. EXPERIMENTS
+
+We perform experiments to evaluate our proposed method from different perspectives. First, the hierarchical iso-surface extraction results from different datasets are reported to show the efficiency and the quality of the approach. Second, we extract the iso-surfaces in higher resolutions (larger k-d tree max depth) to test the scalability of the approach. Third, we directly compare our estimated value distribution to the true value distribution over a region calculated by Monte Carlo sampling to show the accuracy of our estimation.
+
+#### A. Experiment Settings
+
+In this section, we discuss the experiment setting including datasets used for experiments, the INRs for the datasets, the evaluation metrics, and the compared baseline methods.
+
+1) Datasets: We evaluate our iso-surface extraction efficiency and accuracy on four scalar fields from different datasets. Datasets are chosen to cover different resolutions and different densities of the iso-surfaces in the domain. We first briefly introduce the datasets used. The vortex dataset (Vortex) is from a pseudo-spectral turbulent simulation performed by the mechanical engineering department at Rutgers in 1995. The simulation outputs the vorticity magnitude field with spatial resolution 128 × 128 × 128 across 30 time steps. We use one specific time step which clearly shows the vortex features for the experiment. The ethanediol dataset (Ethanediol) is obtained from the topology toolkit [28]. The dataset contains bi-variate scalar fields of resolution 115 × 116 × 134 and describes an ethanediol molecule. We use one of the scalar fields for the experiments. The turbulent combustion dataset (Combustion) is the output from a direct numerical solver called S3D produced by Sandia National Laboratories. The available data contains a vorticity magnitude field of dimension 480×720×120, which is used for our experiments. The force isotropic dataset (Isotropic) from Johns Hopkins Turbulence Databases [29] is the result of a direct numerical simulation solving Navier-Stokes equations using the pseudospectral method. The dataset is in 10243 resolution and we calculate the vorticity magnitude field for our experiments.
+
+2) INR models: We use a SIREN [30] based architecture to train the INRs on different datasets, for its good representation power with a relatively small number of parameters. The SIREN is composed of multiple linear layers and sinusoidal activation functions. For the vortex, the ethanediol, and the combustion dataset, we use a relatively small network (8 layer and 32-width). For the isotropic dataset, we use a larger SIREN with three 128-width layers. A study on the network size's influence on extraction time and accuracy is performed in our evaluation. We also present the experiment results on INRs with ReLU and ELU activation functions in the appendix. INR representation size, quality, and the original data size are shown in table I. The reconstruction quality is calculated in peak signal-to-noise ratio (PSNR), which is a widely used metric for image and volumetric data quality. Our INR fitting quality is similar to the results shown by other studies [1], [2]. We analyze the INR qualitatively by volume rendering the densely resampled INR in the appendix. The scientific scalar fields contain much more high-frequency features compared to SDFs of 3D models.
+
+TABLE I INR RECONSTRUCTION QUALITY ON DIFFERENT DATASETS.
+
+| Dataset       | Vortex     | Ethanediol | Combustion  | Isotropic     |
+|---------------|------------|------------|-------------|---------------|
+| Size (MB)     | 8.1        | 6.9        | 159         | 5461          |
+| INR Size (KB) | 37 (0.44%) | 37 (0.52%) | 37 (0.002%) | 135 (0.0002%) |
+| PSNR (dB)     | 38.23      | 54.87      | 37.78       | 26.89         |
+
+3) Metrics: To evaluate the iso-surface extraction efficiency, we calculate the relative time of one single inference of the range analysis or the uncertainty propagation compared to an ordinary scalar evaluation of the INR. We also report the average volume of the non-active nodes in our experiments. We calculate the volume assuming the total volume of the domain is one. Larger sizes of the non-active nodes indicate that more nodes are skipped in the lower level of the kd-tree. Smaller computation time and larger non-active cells both lead to higher iso-surface extraction efficiency. We also calculate and compare the total iso-surface extraction time, which is the sum of the time to predict active cells (either by range analysis or uncertainty propagation), the time for network inference on active cells, and the time for generating triangle mesh inside the active cells.
+
+There are two types of errors in the hierarchical iso-surface extraction. The first type is false positive, i.e. non-active cells incorrectly predicted as active cells. The second type is false negative, i.e. active cells incorrectly predicted as non-active cells. False positives will lead to longer computation time but will not have incorrect extraction results. However, false negatives will lead to erroneous extraction results. Therefore, we calculate both the false negative rate (FNR) and the false positive rate (FPR) of our proposed method and the baseline methods. FPR is defined as F P F P +T N and FNR is defined as F N F N+T P , where FN, FN, TP, and TN denote the number of false negative, false negative, true positive, and true negative cells respectively. These two scores are in the range of [0, 1]. Lower values are better.
+
+4) Baselines: Our uncertainty propagation approach (UP) is compared to six different baselines for evaluation. The first and the most straightforward baseline is applying marching cubes to the densely reconstructed grid, which is called Dense in the remaining sections. For comparison, the grid resolution is chosen to match the maximum level of the kd tree in our approach. The second baseline is hierarchical iso-surface extraction through range analysis (RA) and its variants. Including the vanilla variant, there are four RA variants, namely, RA-Full, RA-Fixed, RA-Truncate, and RA-Append. RA-Full indicates the vanilla range analysis method introduced in section III, while the other variants aim to reduce the computation of range analysis by combining the RA coefficients at the expense of the tightness of the bounds. Details about how RA coefficients are combined in these variants can be found in the original paper [8].
+
+The third baseline is range analysis with the uniform assumption (RA-UA), a simple modification of the range analysis technique to tighten the output bounds that is already introduced in section III-A.
+
+5) Implementation: Our implementation of the uncertainty propagation follows the JAX framework [31] used by Sharp and Jacobson [8], which provides an easy and efficient way to combine neural networks with the range analysis or the uncertainty propagation. The network training, inference, and range estimation are all accelerated with an A100 GPU on a machine with a 16-core 2.3GHz processor. A GPU-accelerated parallel marching cubes algorithm that is similar to the one in Nvidia's CUDA SDK is implemented under the JAX framework. The source code of the implementation and the corresponding guides to run the code are available on OSF at [osf.io \(link\),](https://osf.io/dg6rc/?view_only=ec94d6a3454845dc98c7da88d585c0d3) released under the MIT license.
+
+#### B. Hyperparameter Choice
+
+The first hyperparameter is the target resolution for isosurface extraction, which is chosen based on the complexities of the different datasets. This resolution should be the same for all baseline methods and our method. The target resolution for the vortex and the ethanediol dataset is 2563 (max k-d tree depth d = 24). For the combustion dataset, we extract the surface at the 5123 (d = 27) resolution and the isotropic dataset at the 10243 (d = 30) resolution.
+
+The confidence level value t (introduced in section IV-D\) is a hyperparameter of our approach, which controls the tightness of the "soft" bound. Larger t will make it less likely to mistakenly skip the active cell but increase the time to subdivide the tree and reconstruct more data points. Therefore, we expect the choice to be a trade-off between quality and extraction time. To analyze the influence of t on the iso-surface extraction time and quality, we perform the experiments using the settings from t = 1 to t = 10. The time and quality results are shown for all four datasets in fig. 4. We observe that the extraction time roughly increases in a linear manner with the increase of t, while the number of missed iso-voxels decreases exponentially (the right figure in fig. 4 is in the log scale) with the increase of t. Therefore, the results indeed confirm that the choice of t is a trade-off.
+
+
+
+Fig. 4. We compare exaction time and quality under different hyperparameter choices from t = 1 to t = 10. The time is calculated as a percentage of the dense reconstruction time and the quality is indexed by the ratio of the missed iso-voxel out of the total number of iso-voxels in the log scale.
+
+We also show some rendered extraction result in fig. 5. When t = 2, there are many obvious missing components in the extraction. When t = 5, there are only subtle missing components that can be found with careful examination. When t = 10, the extraction results have no missing components for these two datasets. We can see that t = 5 is a good trade-off between computation time and quality. The extraction error is also data-dependent. For example, the vortex dataset has overall higher errors compared to the Ethandiol dataset under all t settings. Therefore, the value of t should be tweaked based on the use case and the dataset. It is worth noting that even when t = 10, the extraction time is still shorter than the time of the baseline methods and the dense reconstruction, and the extraction results are perfect for almost all tested datasets. In the rest of our experiments, we present the results of our approach with t = 2, t = 5, and t = 10.
+
+
+
+
+
+Fig. 5. The figure shows the extraction results, false negative rate (FNR), and extraction time of two datasets using different t values.
+
+#### C. Iso-surface Extraction Time
+
+Before reporting the total time for iso-surface extraction, we first present the relative inference time of different approaches (UP, RAUA, RA, etc.) and the averaged non-active node size. The experiments are performed on the model with 8 layers and 32 neurons in each layer. Theoratically, the relative inference time will increase when the number of parameters in the network is increased, because the number of uncertainty source N in eq. \(6\) is increased. The increase on relative inference time of our method and RA-Full will be in the same order, while other RA variants can be more scalable. The relative inference time for uncertainty propagation is 99.8 times an ordinary scalar evaluation of the network, compared to 126.2 times for RA-Full, 19.6 times for RA-fixed, 102.5 times for RA-Truncate, and 29.1 times for RA-Append. In terms of the time for single inference, our approach is faster than the vanilla RA variant (RA-Full) but slower than other variants. This is expected because other range analysis variants trade range estimation accuracy for computation time. However, less accurate estimation will increase the total count of network inference and thus make the total computation time longer. To show this, we also calculate the average volume of the nonactive nodes for different methods. A larger non-active node indicates less network inference is needed for the active nodes. Assuming the total volume of the domain is one, our approach has an average skipped volume of 7 ∗ 10−4 , which is about 20 times the average volume 0.35 ∗ 10−4 for RA-Full. Other variants' estimation is too loose to skip any non-active node. In that case, we are not able to calculate an average volume. However, not skipping any node in the tree structure shows these variants fall back to dense reconstruction.
+
+We present the total iso-surface extraction time in fig. 6. Among all approaches, ours has the smallest extraction time compared to dense reconstruction and different variants of range analysis. The vanilla range analysis (Full) works poorly in almost all datasets. The INR reconstruction time is similar to that of the dense reconstruction meaning not many cells are skipped, however, the overhead to performing range analysis makes it consume more computation than the dense reconstruction. These observations indicate the RA-generated bounds are too conservative. Other variants (fixed, truncate, and append) reduce the computation for active cell prediction as shown by the blue bars in fig. 6. As a result, these variants may be faster than RA-Full in some datasets. However, the range analysis bounds of these variants are more conservative, leading to more false positive cells and longer INR reconstruction time. Ultimately, these RA variants take longer time than our approach in all datasets. The INR inference time for the other baseline, range analysis with the uniform assumption (RA-UA), is slightly shorter than the dense reconstruction and vanilla range analysis. This shows that RA-UA generates slightly less pessimistic bounds. However, the extraction time is still much longer than our uncertainty propagation approach (UP).
+
+Additionally, across all approaches, the marching cubes computation time is much less compared to the INR inference time. More sophisticated algorithms like the one proposed by Liu et al. [32] can be used to further decrease the marching cubes computation time. Nevertheless, replacing the marching cubes algorithm with a different one will have similar effects on our method and the baseline methods. In essence, the marching cubes algorithm used in the experiments is only to demonstrate the iso-surface extraction results. It's independent of our proposed approach and therefore not the focus of this paper.
+
+#### D. Errors in Active Cell Prediction
+
+Two types of errors, i.e. false positive error and false negative error, could happen in the process of hierarchical iso-surface extraction. False positive errors incorrectly predict non-active cells as active cells leading to prolonged computation time. Inversely, false negative errors predict active cells as non-active leading to missing components in the iso-surface extraction results. We first present the quantitative results for the false positive and false negative in table II.
+
+The false positive rate (FPR) of the uncertainty propagation method is less than the FPR of the two baselines, which explains why our approach can achieve a much shorter isosurface extraction time. We also render the predicted active
+
+
+
+Fig. 6. Iso-surface extraction time (in seconds) comparison between our method UP with different t (UP-t) and the baseline methods on different datasets. The extraction time is separated into the active cell prediction time (ACP), the data reconstruction time (INR), and the surface generation time (MC).
+
+TABLE II FPR ( F P F P +T N ) AND FNR ( F N F N+T P ) OF THE ACTIVE CELL PREDICTION USING DIFFERENT APPROACHES. LOWER FPR AND FNR ARE BETTER. THE BEST SCORE IS HIGHLIGHTED IN BOLD TEXT. UP-t REPRESENTS UNCERTAINTY PROPAGATION USING DIFFERENT THRESHOLDS.
+
+|          | Vortex     | Ethanediol | Combustion   | Isotropic     |
+|----------|------------|------------|--------------|---------------|
+| UP-2     | 0.122      | 0.034      | 0.476        | 0.184         |
+| UP-5 FPR | 0.210      | 0.044      | 0.628        | 0.239         |
+| UP-10    | 0.375      | 0.056      | 0.759        | 0.324         |
+| RA-UA    | 1.000      | 0.212      | 0.985        | 0.386         |
+| RA       | 1.000      | 0.334      | 0.999        | 0.842         |
+| UP-2     | 0.042      | 0.036      | 0.003        | 0.003         |
+| UP-5     | 0 8 × 10 − | 3          |              |               |
+|          |            | 10 − 4     |              |               |
+|          |            |            | 0 7 × 10 − 4 |               |
+| FNR      |            |            |              | 0 96 × 10 − 5 |
+| UP-10    | 0.0        | 0.0        | 1 6 × 10 − 7 |               |
+| RA-UA    | 0.0        | 0.0        | 0.0          | 0.0           |
+| RA       | 0.0        | 0.0        | 0.0          | 0.0           |
+
+cells from each method in fig. 7 to demonstrate the false positive rate. Ideally, active cells should only be the cells that have iso-surface crossing. Observing the predicted active cells by RA and RA-UA in the second and the third column in fig. 7, in a lot of cases, these two methods predict non-active cells as active cells. Our approach predicts a lot fewer cells as active, which are tightly distributed near the iso-surface. Therefore, the false positive rate is lower.
+
+In terms of the false negative rate (FNR), because the analysis bounds are guaranteed to include the real bounds, vanilla range analysis will have zero false negative. Imperfect isosurface extraction is possible for our uncertainty propagation approach, which is confirmed by the FNR reported in table II. However, the FNR of the uncertainty propagation approach is very small across all datasets and controllable by the chosen value t.
+
+We also analyze the missing iso-surface components qualitatively and show the results in fig. 8. The first column
+
+
+
+Fig. 7. Predicted active cells from different approaches. Our approach UP has the most accurate prediction. The other two baselines tend to overpredict the number of active cells.
+
+shows the ground truth iso-surfaces extracted by dense data reconstruction from INRs. The second column shows the isosurfaces extracted using uncertainty propagation. We highlight the subtle missing components with red circles.
+
+
+
+Fig. 8. Comparison of the extracted iso-surfaces. The visual differences between our approach UP and the ground truth are highlighted by the circles. Our approach achieves better efficiency at the expense of only small errors.
+
+#### E. Scalability
+
+To show the computational efficiency of our approach, we test its scalability on INRs to higher resolutions and larger networks. When increasing the reconstruction granularity of
+
+
+
+Fig. 9. The iso-surface extraction time and quality comparison for higher resolutions (left) and different network sizes (right). The bar graphs show the extraction time comparison, while the line graphs present the missed cell percentage of our approach.
+
+the INR, the network parameters and the training data are kept the same. The isotropic dataset is used in the resolution scalability test. We test the iso-surface extraction time and quality in 20483 , 40963 , and 81923 resolution and show the results in fig. 9. We observe that the time for extraction increases cubically with the increase of the resolution in the dense reconstruction case, while the extraction time for our method increases quadratically. This aligns with our expectations because we are dealing with iso-surfaces in 3D volumes. The number of reconstruction grids in the dense case increases cubically. The number of reconstructions needed in the hierarchical extraction case increases with the number of active cells which is roughly quadratic to the resolution. The extraction error reduces slightly with the increase of resolution. This may be because distribution estimation is more accurate in cells of smaller sizes.
+
+In terms of the network size, we tested the network with parameters ranging from 3k to 400k, which covers the sizes typically used in INR network [1], [2]. We tweak the network width to change the total number of parameters but keep the number of layers untouched. We trained these networks on the Ethanediol dataset and tested on the target resolution of 2563 . The extraction time and quality of our approach and dense reconstruction are shown in fig. 9. We observe that our approach is consistently faster with decent accuracy. However, the active cell prediction error increases with the increase in the network size. This may be due to the fact that larger networks are less likely to satisfy the CLT assumptions and the distribution estimates are less accurate. In practice, we still get good extraction results (< 0.001% error) on our largest tested network. For even larger networks, using a larger threshold t could potentially solve this issue.
+
+#### F. Evaluation of the Estimated Distribution
+
+The reason for the higher efficiency of our approach lies in an accurate estimation of the INR output distribution. To get the true distribution, we perform Monte Carlo sampling over an input region. Inside a specific 3D block, we randomly sample 106 positions following a uniform distribution across the block and infer the INR to get the corresponding scalar values at the sample locations. A histogram is built using the output values representing the ground truth INR output distribution over the specific region. We compare the estimated distribution from our approach to the true distribution and two baselines. The first is RA-UA introduced in section IV-A and the second is Gaussian distribution estimate from a limited number of samples. Because our approach is approximately 100× more expensive than a regular scale value inference from the INR in the experiment, we choose 100 samples in this baseline to match the computation cost and use these samples to fit a Gaussian distribution. We refer to this baseline as "SAMPLE" in the experiment results. The estimated
+
+Fig. 10. The comparison between the estimated output distributions versus the true data distribution obtained by Monte Carlo sampling (MC). Different rows show the results from different experimented datasets. In the first column, we compare UP with RA-UA. In the second column, we compare UP with the Gaussian estimate using 100 samples. In the third column, we select some cases where the estimation using UP is inaccurate.
+
+Gaussian distributions from different approaches and the true data distribution are plotted in fig. 10. Different rows represent different datasets. The first column compares UP and RA-UA, although the true distribution is not necessarily Gaussian in every region, our approach reasonably approximates this distribution. Compared to the RA-UA, which predicts a biased mean and too large variance, our approximation has a much more similar distribution to the histogram obtained by Monte Carlo sampling. In the second column, we compare UP with the Gaussian distribution estimated using 100 samples (SAM-PLE). Our approach is slightly closer to the true distribution and the Gaussian estimate using 100 samples is also reasonably accurate. This indicates that we may use the Gaussian distribution estimated from a limited number of samples to generate the soft bound and then perform hierarchical isosurface extraction. However, more experiments are needed to decide how many samples are necessary. In the last row, we
+
+TABLE III THE AVERAGE KL DIVERGENCE OF THE MONTE CARLO HISTOGRAM FROM THE ESTIMATED GAUSSIAN DISTRIBUTION USING UP, RA-UA, AND LIMITED SAMPLES. THE DIVERGENCE IS CALCULATED IN THE NATURAL UNIT OF INFORMATION (NAT).
+
+| D KL (nat) | Vortex | Ethanediol | Combustion | Isotropic |
+|------------|--------|------------|------------|-----------|
+| UP         | 0.203  | 0.048      | 0.497      | 0.126     |
+| RA-UA      | 1.563  | 2.104      | 3.173      | 1.218     |
+| SAMPLE     | 0.244  | 0.044      | 0.482      | 0.129     |
+
+show some cases where our estimate deviates from the ground truth. When the original data is not Gaussian distributed (rows 1 and 2), the true data distribution can exceed the predicted soft bounds, which will lead to false negatives in active cell prediction. We also identify some cases (rows 3 and 4) where the predicted variance is much larger than the true variance, which could lead to false positives in the prediction.
+
+
+
+Quantitatively, we calculate the KL divergence of the Monte Carlo histogram P from the estimated Gaussian distribution Q. The KL divergence is calculated using the following equation:
+
+$$D_{\text{KL}}(P \parallel Q) = \int_{-\infty}^{\infty} p(x) \log \frac{p(x)}{q(x)} dx. \quad (11)$$
+
+The KL divergence (the lower the better) of P from Q can be interpreted as the expected excess surprise from using Q as a model when the real distribution is P. We average the KL divergence calculated from 100 randomly sampled blocks for different datasets and show the results in table III. Our method has significantly lower KL divergence compared to RA-UA and slightly lower KL divergence compared to the limited sample method, which confirms the qualitative observations. We also find that the KL divergences of different datasets match our iso-surface extraction time and quality. If the KL divergence is lower for a dataset, the scalar values are more likely to be Gaussian-distributed, and our approach works better, i.e., has lower computation time and higher extraction quality.
+
+#### VI. DISCUSSION AND FUTURE WORKS
+
+There are a few potential issues and limitations not fully discussed in the methods and the evaluation. We will discuss them and our future work in this section. Our work assumes that data values are Gaussian distribution in any arbitrary region. Although this assumption cannot be guaranteed, Gaussiandistributed data is very common in scientific simulations. If the original field follows this Gaussian assumption, its implicit neural representation should also follow the assumption as long as we have a reasonable fitting accuracy. Unless we have other prior knowledge about the data distribution, Gaussian distribution is a natural choice that has nice properties for calculation and descent accuracy to fit the true data distribution. From another perspective, we find that the affine form of the approximation to the INR output is also likely to be Gaussian distributed if the CLT conditions hold. Even though we cannot strictly prove the satisfaction of the CLT conditions, we find they are likely to be satisfied except for some special conditions. These three conditions are discussed in detail next. Because the observations from the two perspectives meet, we choose to model the regional INR output distribution as Gaussian in our method.
+
+Large number assumption. The number of random variables in PAF is equal to the number of activation functions in the last layer plus the input degree of freedom, which means the large number assumption holds in most cases. However, in the first few layers of INR, the number of random variables could be small. This can lead to inaccurate distribution estimation in the first few layers, and these errors can be carried to the output distribution.
+
+Independence assumption. We also assume each of the errors and input uncertainties are independent. However, they might not be fully independent in the application of uncertainty propagation on INRs. Introduced approximation errors and the input uncertainties could have complex dependencies between each other.
+
+Lindeberg's Condition. The last assumption for the central limit theorem is that the random variables are similarly distributed. In the classical CLT, it is even required that each random variable is identically distributed. This requirement can be relaxed to variables with similar distributions that satisfy Lyapunov's or Lindeberg's condition. Intuitively, these conditions ensure that no random variable has a significantly large deviation from the mean. Unfortunately, it is not possible to show the satisfaction of any of these two conditions on an arbitrary INR, because no restriction is given to the weights when the network is trained. However, in practice, because we minimize the mean squared error to every activation function, the variance of each uncertainty unit in the PAF is similarly small.
+
+In summary, we apply the CLT and model the INR output value as Gaussian distributions to increase the estimation efficiency. In theory, these assumptions may fail in some special cases, which leads to errors in the estimation. However, because the real-world data are likely to follow Gaussian distributions in most regions, in the experiments, we find the error is small enough to provide a decent estimation so that the efficiency of the iso-surface extraction is increased.
+
+The major limitation of our technique is that we cannot guarantee the correct extraction result. We show the number of incorrect active cells is small. However, these errors can have unexpected consequences, for example, changing the topology of the extracted iso-surface. Our future studies aim to improve the approach to ensure correct topology or having bounded errors for the extracted iso-surfaces. However, in the current stage, we suggest using our approach for a fast preview of large INR data. The resulting iso-surfaces are more suitable for visualization than geometry or topology analysis. Another limitation of this work is the implementation under the JAX framework. To prototype our approach and perform a fair comparison to the baseline methods, we follow the framework used by Sharp and Jacobson [8]. Only simple MLP-based INR is implemented in the experiments. Although extension to other architectures should be straightforward, this implementation still limits the easy adoption of popularly used frameworks like PyTorch and TensorFlow.
+
+We show some results of using our approach on other
+
+types of data like SDFs and other geometric query tasks like ray casting in the appendix. Our approach works equally well on mesh extraction from SDFs as from scientific scalar fields. Regarding the ray casting results, our approach is more efficient than RA-Full but much less efficient than RA-Fixed. This observation is also backed by the experiments in the range analysis paper [8]. Details about these experiments can be found in the appendix. To conclude, the uncertainty propagation method is superior to all range analysis variants in 3D geometric query tasks but less efficient than RA-Fixed in the 1D case due to the long overhead to track all the uncertainty units in the affine form. In the future, we plan to adopt uncertainty propagation to other applications like direct volume rendering and distribution-based data summary on INRs. There is great potential to increase the efficiency of different visualization tasks.
+
+#### VII. CONCLUSION
+
+In this paper, we propose an uncertainty propagation technique through implicit neural representations using probabilistic affine forms, which allows an efficient hierarchical isosurface extraction from the INR by estimating the output value bounds over a region. Compared to the baseline methods, our approach achieves a significant increase in extraction efficiency while preserving good extraction quality. The proposed technique can also be generalized to other visualization tasks on implicit neural representations.
+
+#### ACKNOWLEDGMENTS
+
+This work is supported in part by the National Science Foundation Division of Information and Intelligent Systems-1955764, the National Science Foundation Office of Advanced Cyberinfrastructure-2112606, U.S. Department of Energy Los Alamos National Laboratory contract 47145, and UT-Battelle LLC contract 4000159447 program manager Margaret Lentz.
+
+#### APPENDIX A RAY CASTING ON SDFS
+
+The uncertainty propagation approach proposed in this paper can also be applied to other geometric query tasks, for example, ray casting a signed distance function (SDF). In this section, we use INR-represented SDFs of two 3D models. The fox model uses the ReLU activation function with around 7558 parameters. The bunny model uses the ELU activation function with 29441 parameters. We follow the algorithm presented in the original range analysis paper for ray casting. The resolution for the fox model is 512×512 and the resolution for the bunny model is 400×400. We show this application's rendering time and quality and compare our method to the range analysis.
+
+The experiments performed by Sharp and Jacobson [8] have already shown range analysis with reduced affine coefficients is superior to the vanilla range analysis. The RA-Fixed strategy works best, where only input uncertainty units are kept and all other coefficients are combined. Therefore, we compare our approach with the vanilla range analysis (RA-Full) and RA-Fixed and show the results in fig. 11.
+
+Figure 1 shows three 3D visualizations of animals with different structures. Top row: Animal 1 (blue fox) with a red circle on its head and legs. Bottom row: Animal 2 (blue horse) with a red circle on its head and legs. Bottom right: Animal 3 (blue horse) with a red circle on its head and legs. The formation of the head and legs is different between the three visualizations.
+
+Fig. 11. Rendering of two models represented by signed distance functions through ray casting. The rendering time is presented under the corresponding image. Some imperfect rendering results when choosing a low threshold t using our method are highlighted.
+
+For the fox model, uncertainty propagation with the threshold t ≥ 4, RA-Fixed, and RA-Full all produce similar results. Uncertainty propagation with t < 4 can produce inaccurate results with missing parts in the rendering as highlighted in fig. 11. Regarding the rendering time, we confirm that RA-Fixed is much more efficient than RA-Full in the ray casting task. The uncertainty propagation is more efficient than RA-Full but takes more time than RA-Fixed. The results show that the uncertainty propagation is not efficient enough for 1D geometric query tasks like ray casting, due to the overhead to track all the uncertainty units in the affine form. However, our proposed approach is more efficient in 3D geometric query tasks like iso-surface extraction.
+
+#### APPENDIX B
+
+## MESH EXTRACTION FROM SDFS
+
+In addition to the scientific scalar fields presented in the paper, we perform experiments to extract mesh from SDFs using uncertainty propagation and compare that to the range analysis. Hierarchical mesh extraction from SDFs is essentially the same as our hierarchical iso-surface extraction using isovalue 0. The computation time and quality (measured in false negative rate and false positive rate) are presented in table IV.
+
+Uncertainty propagation takes less computation time than range analysis in mesh extraction and both of them are more efficient than dense reconstruction. When experimenting on
+
+TABLE IV WE PRESENT THE MESH EXTRACTION TIME AND QUALITY USING UNCERTAINTY PROPAGATION (UP) AND RANGE ANALYSIS (RA) FOR TWO DATASETS. "DENSE TIME" DENOTES THE BASELINE EXTRACTION TIME IF WE RECONSTRUCT THE DATA IN A DENSE GRID.
+
+| Data  | Dense Time | Method | Time   | FNR | FPR   |
+|-------|------------|--------|--------|-----|-------|
+| Fox   | 0.253s     | UP     | 0.088s | 0.0 | 0.035 |
+|       |            | RA     | 0.112s | 0.0 | 0.072 |
+| Bunny | 0.333s     | UP     | 0.125s | 0.0 | 0.063 |
+|       |            | RA     | 0.187s | 0.0 | 0.121 |
+
+scientific scalar fields, range analysis is less efficient than dense reconstruction in most cases. Since the INR structure and the algorithm are the same for SDFs and scalar fields, the only difference is the datasets themselves. The complex and high-frequency features in the scientific scalar fields may lead to complex INR models and conservative bounds from range analysis, which motivates the use of uncertainty propagation.
+
+Zero false negative rate in this experiment indicates that uncertainty propagation does not miss any components of the surface under the threshold of choice t = 5. A lower false positive rate of uncertainty propagation compared to range analysis shows that the lower computation time is due to more accurate bound estimation.
+
+#### APPENDIX C ANALYSIS OF THE INR QUALITY
+
+In the paper, we present the INR size compared to the original uncompressed data size and the PSNR of the reconstructed volume. In this section of the appendix, we provide more information on the dataset and the qualitative analysis of the INR representation. Although the INR quality is not the focus, it serves as an important background that motivates this paper.
+
+Comparing the INR reconstruction results with the original data, we find the reconstruction quality is very high for the vortex and the ethanediol dataset, which is also confirmed by the high PSNR values in the paper. Regarding the combustion and the isotropic dataset, the INR reconstruction blurs some regions of the original data due to a limited number of parameters in the network. Overall, we can see scientific datasets often contain more complex features compared to signed distance functions for 3D models. This may explain why the range analysis approach performs poorly on INRs trained on scientific datasets. The range analysis outperforms the dense reconstruction only on the ethanediol dataset, which is the only relatively simple dataset. It is worth noting the poor performance of range analysis is also related to the activation function choice, which we will show next.
+
+#### APPENDIX D
+
+#### SOLUTION TO ACTIVATION FUNCTION APPROXIMATIONS
+
+In section IV-B of the paper, we explain that the probabilistic affine forms can be propagated through the nonlinear activation functions by approximating them with linear functions. The linear approximation can be solved analytically using the least square method according to eq. (10). We show the solution to three commonly used activation functions, Sine, ReLU, and ELU function in table V.
+
+TABLE V
+
+THE TABLE SHOWS THE LINEAR APPROXIMATION COEFFICIENTS TO DIFFERENT ACTIVATION FUNCTIONS OBTAINED BY SOLVING EQ. (10) USING THE LEAST SQUARE METHOD. γ 2 IS THE MEAN SQUARED ERROR OF THIS APPROXIMATION. HERE WE USE µ AND σ TO DENOTE THE MEAN AND VARIANCE OF THE ESTIMATED GAUSSIAN PDF FOR THE INPUT PROBABILISTIC AFFINE FORM. THE erf IN THE TABLE DENOTES THE GAUSS ERROR FUNCTION.
+
+| Activation a | = α erf ( √− µ )       |            | β − µ 2       |        |       |     |   |    | γ 2                     |
+|--------------|------------------------|------------|---------------|--------|-------|-----|---|----|-------------------------|
+|              | 2 σ                    |            |               |        |       |     |   |    |                         |
+| α            | = 1                    |            |               |        |       |     |   |    |                         |
+|              | (1 − a )               |            |               |        |       |     |   |    |                         |
+|              |                        | β = √ σ    |               |        |       |     |   |    |                         |
+|              |                        | 2 π        |               |        |       |     |   |    |                         |
+|              |                        |            | 2 σ 2         | γ      |       |     |   |    |                         |
+|              |                        |            |               | 2 =    | 1     |     |   |    |                         |
+|              |                        |            |               |        | (1    | −   | a |    |                         |
+|              |                        |            |               |        |       |     |   | )( | µ                       |
+|              |                        |            |               |        |       |     |   |    | 2 + σ                   |
+| ReLU         |                        |            | e             |        |       |     |   |    | ) + aµβ − β             |
+| a            | = erf ( √− µ )         |            |               |        |       |     |   |    |                         |
+|              | 2 σ                    |            |               |        |       |     |   |    |                         |
+| b            | = [1 + erf ( − µ − σ 2 |            |               |        |       |     |   |    |                         |
+|              | 2 σ                    |            |               |        |       |     |   |    |                         |
+|              | )] e                   |            |               |        |       |     |   |    |                         |
+|              | µ                      | + σ 2      |               |        |       |     |   |    |                         |
+| α            | = 1                    |            |               |        |       |     |   |    |                         |
+|              | (1 − a + b )           |            |               |        |       |     |   |    |                         |
+|              |                        | c = √ 1    |               |        |       |     |   |    |                         |
+|              |                        | 2 π        |               |        |       |     |   |    |                         |
+|              |                        |            | − µ 2         |        |       |     |   |    |                         |
+|              |                        |            | 2 σ 2         |        |       |     |   |    |                         |
+|              |                        | β = 1      |               |        |       |     |   |    |                         |
+|              |                        | b (1       | − µ ) − 1     |        |       |     |   |    |                         |
+|              |                        |            | (1 + a        | ) + cσ |       |     |   |    |                         |
+|              |                        |            |               | 2 =    | 1     |     |   |    |                         |
+|              |                        |            |               |        | (1    | −   | a |    |                         |
+|              |                        |            |               |        |       |     |   | )( | µ                       |
+|              |                        |            |               |        |       |     |   |    | 2 + σ                   |
+|              |                        |            |               |        |       |     |   |    | ) + ( 1                 |
+|              |                        |            |               |        |       |     |   |    | ab − c                  |
+|              |                        |            |               |        |       |     |   |    | 2 − 1                   |
+|              |                        |            |               |        |       |     |   |    | 2 − 1                   |
+|              |                        |            |               |        |       |     |   |    | b ) σ                   |
+|              |                        |            |               | γ      |       |     |   |    | 2 + acµσ + b            |
+|              |                        |            |               | ( a    | − b + | 1)  |   | cσ | + 1                     |
+|              |                        |            |               |        |       |     |   |    | ( ab − b − a            |
+|              |                        |            |               |        |       |     |   |    | 2 + 1) µ + 1            |
+|              |                        |            |               |        |       |     |   |    | [1 + erf ( − µ − 2 σ 2  |
+|              |                        |            |               |        |       |     |   |    | 2 σ                     |
+|              |                        |            |               |        |       |     |   |    | )] e                    |
+| ELU          | √                      | e          |               |        |       |     |   |    | 2 µ +2 σ 2 + √          |
+|              |                        |            |               | 4 −    | 1     |     |   |    |                         |
+|              |                        |            |               |        | ( a   | −   | b | )  |                         |
+|              |                        |            |               |        |       |     |   | 2  | − 1 b                   |
+| Sine a       | = e                    |            |               |        |       |     |   |    |                         |
+|              | − 1                    |            |               |        |       |     |   |    |                         |
+|              | σ 2                    |            |               |        |       |     |   |    |                         |
+| α            | = a cos µ              |            |               |        |       |     |   |    |                         |
+|              |                        | β = a (sin | µ − µ cos µ ) | γ      |       |     |   |    |                         |
+|              |                        |            |               | 2 =    | − a   |     |   |    |                         |
+|              |                        |            |               |        |       | ( σ |   |    |                         |
+|              |                        |            |               |        |       |     |   |    | cos 2 µ + sin 2 µ ) + 1 |
+|              |                        |            |               |        |       |     |   |    | [1 − a                  |
+|              |                        |            |               |        |       |     |   |    | cos (2 µ )]             |
+
+
+
+
+
+Fig. 12. The volume rendering images for four tested datasets. The renderings of the original data are shown in the left column, while the renderings of the INR reconstructions are shown in the right. For the ethanediol dataset, we show a slice of the volume along with the volume rendering depicting the Ethandiol structure.
+
+#### APPENDIX E
+
+#### EVALUATION WITH OTHER ACTIVATION FUNCTIONS
+
+In the evaluation sections of the paper, we only present the INR models with sine activation functions because of the representation quality. Here, we include more experiment results using other activation functions on the vortex and ethanediol dataset with the same number of parameters in the network. Similarly, we apply uncertainty propagation along with range analysis and report the computation time, the false negative rate, and the false positive rate. We also report the fitting accuracy of the INR model in PSNR.
+
+TABLE VI
+
+THIS TABLE PRESENTS THE ISO-SURFACE EXTRACTION TIME AND QUALITY FROM INRS WITH DIFFERENT ACTIVATION FUNCTIONS ON THE VORTEX AND THE ETHANEDIOL DATASETS. THE QUALITY IS MEASURED IN FALSE NEGATIVE RATE (FNR) AND FALSE POSITIVE RATE (FPR). WE COMPARE UNCERTAINTY PROPAGATION (UP) AND RANGE ANALYSIS (RA)
+
+IN THE TABLE. THE FITTING QUALITY (PSNR) WITH DIFFERENT ACTIVATION FUNCTIONS IS ALSO SHOWN IN THE TABLE.
+
+| Data Activation | PSNR  | Method | Time   | FNR     | FPR   |
+|-----------------|-------|--------|--------|---------|-------|
+| Sine            | 38.23 | UP     | 0.176s | 0.0008  | 0.210 |
+|                 |       | RA     | 0.386s | 0.0     | 1.0   |
+| ReLU            | 31.31 | UP     | 0.154s | 0.001   | 0.198 |
+|                 |       | RA     | 0.299s | 0.0     | 0.706 |
+| ELU             | 30.54 | UP     | 0.154s | 0.0003  | 0.172 |
+|                 |       | RA     | 0.250s | 0.0     | 0.482 |
+| Sine            | 54.87 | UP     | 0.099s | 0.0001  | 0.044 |
+|                 |       | RA     | 0.235s | 0.0     | 0.334 |
+| ReLU            | 51.28 | UP     | 0.091s | 0.012   | 0.039 |
+|                 |       | RA     | 0.120s | 0.0     | 0.078 |
+| ELU             | 49.45 | UP     | 0.096s | 0.00007 | 0.045 |
+|                 |       | RA     | 0.121s | 0.0     | 0.087 |
+
+Range analysis is more efficient on ReLU and ELU functions compared to the Sine function. This is possibly due to that the approximation method used by range analysis has a high error on periodic functions and thus has conservative bounds. Uncertainty propagation is more efficient than range analysis under all activation functions as shown in table VI and the benefit is most significant for sine functions. Because the network size and the extraction resolution is kept the same, the dense reconstruction time for all settings is around 0.25 seconds. The computation time for the ethanediol dataset is much less compared to the vortex dataset using RA and UP because the ethanediol dataset has fewer high-frequency features compared to the vortex dataset and the total area of the tested iso-surface is smaller according to fig. 12. Based on these observations and the experiments of mesh extraction from SDFs, we can conclude that the poor performance of range analysis in our experiments is due to both the data complexity and the choice of activation functions. Uncertainty propagation is always more efficient with very small errors in
+
+- the iso-surface extraction task. REFERENCES [1] Y. Lu, K. Jiang, J. A. Levine, and M. Berger, "Compressive neural representations of volumetric scalar fields," Computer Graphics Forum, vol. 40, no. 3, pp. 135–146, 2021. [2] S. Weiss, P. Hermuller, and R. Westermann, "Fast neural representations ¨ for direct volume rendering," Computer Graphics Forum, vol. 41, no. 6, pp. 196–211, 2022. [3] J. Han and C. Wang, "Coordnet: Data generation and visualization generation for time-varying volumes via a coordinate-based neural network," IEEE Transactions on Visualization and Computer Graphics, 2022. [4] W. E. Lorensen and H. E. Cline, "Marching cubes: A high resolution 3d surface construction algorithm," ACM siggraph computer graphics, vol. 21, no. 4, pp. 163–169, 1987. [5] Q. Wu, M. J. Doyle, D. Bauer, and K.-L. Ma, "Instant neural representation for interactive volume rendering," arXiv preprint arXiv:2207.11620, 2022. [6] J. Wilhelms and A. Van Gelder, "Octrees for faster isosurface generation," ACM Transactions on Graphics (TOG), vol. 11, no. 3, pp. 201– 227, 1992. [7] P. Sutton and C. D. Hansen, "Isosurface extraction in time-varying fields using a temporal branch-on-need tree (t-bon)," in Proceedings Visualization'99 (Cat. No. 99CB37067). IEEE, 1999, pp. 147–520. [8] N. Sharp and A. Jacobson, "Spelunking the deep: Guaranteed queries on general neural implicit surfaces via range analysis," ACM Trans. Graph., vol. 41, no. 4, jul 2022. [Online]. Available:  [9] Y. Xie, T. Takikawa, S. Saito, O. Litany, S. Yan, N. Khan, F. Tombari,
+- J. Tompkin, V. Sitzmann, and S. Sridhar, "Neural fields in visual computing and beyond," Computer Graphics Forum, vol. 41, no. 2, pp. 641–676, 2022. [10] S. Pan, S. Brunton, and N. Kutz, "Neural implicit flow: A mesh-agnostic representation paradigm for spatio-temporal fields," in APS Division of Fluid Dynamics Meeting Abstracts, 2021, pp. M31–006. [11] G. Zang, R. Idoughi, R. Li, P. Wonka, and W. Heidrich, "Intratomo: self-supervised learning-based tomography via sinogram synthesis and prediction," in Proceedings of the IEEE/CVF International Conference on Computer Vision, 2021, pp. 1960–1970. [12] L. Shen, J. Pauly, and L. Xing, "Nerp: implicit neural representation learning with prior embedding for sparsely sampled image reconstruction," IEEE Transactions on Neural Networks and Learning Systems, 2022. [13] M. Raissi, P. Perdikaris, and G. E. Karniadakis, "Physics-informed neural networks: A deep learning framework for solving forward and inverse problems involving nonlinear partial differential equations," Journal of Computational physics, vol. 378, pp. 686–707, 2019. [14] J. Zehnder, Y. Li, S. Coros, and B. Thomaszewski, "Ntopo: Mesh-free topology optimization using implicit neural representations," Advances in Neural Information Processing Systems, vol. 34, pp. 10 368–10 381, 2021. [15] D. Izzo and P. Gomez, "Geodesy of irregular small bodies via neural ´ density fields," Communications Engineering, vol. 1, no. 1, p. 48, 2022. [16] J. D. Smith, K. Azizzadenesheli, and Z. E. Ross, "Eikonet: Solving the eikonal equation with deep neural networks," IEEE Transactions on Geoscience and Remote Sensing, vol. 59, no. 12, pp. 10 685–10 696, 2020. [17] S. Pfrommer, M. Halm, and M. Posa, "Contactnets: Learning discontinuous contact dynamics with smooth, implicit representations," in Conference on Robot Learning. PMLR, 2021, pp. 2279–2291. [18] T. S. Newman and H. Yi, "A survey of the marching cubes algorithm," Computers & Graphics, vol. 5, no. 30, pp. 854–879, 2006. [19] Y. Livnat, H.-W. Shen, and C. R. Johnson, "A near optimal isosurface extraction algorithm using the span space," IEEE transactions on Visualization and Computer Graphics, vol. 2, no. 1, pp. 73–84, 1996. [20] H.-W. Shen, C. D. Hansen, Y. Livnat, and C. R. Johnson, "Isosurfacing in span space with utmost efficiency (issue)," in Proceedings of Seventh Annual IEEE Visualization'96. IEEE, 1996, pp. 287–294. [21] P. Cignoni, C. Montani, E. Puppo, and R. Scopigno, "Optimal isosurface extraction from irregular volume data," in Proceedings of 1996 Symposium on Volume Visualization. IEEE, 1996, pp. 31–38. [22] T. Itoh and K. Koyamada, "Automatic isosurface propagation using an extrema graph and sorted boundary cell lists," IEEE Transactions on Visualization and Computer Graphics, vol. 1, no. 4, pp. 319–327, 1995. [23] M. Mudde, "Chebyshev approximation," Ph.D. dissertation, Faculty of Science and Engineering, 2017. [24] J. W. Lindeberg, "Eine neue herleitung des exponentialgesetzes in der wahrscheinlichkeitsrechnung," Mathematische Zeitschrift, vol. 15, no. 1, pp. 211–225, 1922. [25] O. Bouissou, E. Goubault, J. Goubault-Larrecq, and S. Putot, "A generalization of p-boxes to affine arithmetic," Computing, vol. 94, pp. 189–201, 2012. [26] O. Bouissou, E. Goubault, S. Putot, A. Chakarov, and S. Sankaranarayanan, "Uncertainty propagation using probabilistic affine forms and concentration of measure inequalities," in Tools and Algorithms for the Construction and Analysis of Systems: 22nd International Conference, TACAS 2016, Held as Part of the European Joint Conferences on Theory and Practice of Software, ETAPS 2016, Eindhoven, The Netherlands, April 2-8, 2016, Proceedings 22. Springer, 2016, pp. 225–243. [27] J. L. Bentley, "Multidimensional binary search trees used for associative searching," Communications of the ACM, vol. 18, no. 9, pp. 509–517, 1975. [28] J. Tierny, G. Favelier, J. A. Levine, C. Gueunet, and M. Michaux, "The topology toolkit," IEEE transactions on visualization and computer graphics, vol. 24, no. 1, pp. 832–842, 2017. [29] K. Kanov, R. Burns, C. Lalescu, and G. Eyink, "The johns hopkins turbulence databases: an open simulation laboratory for turbulence research," Computing in Science & Engineering, vol. 17, no. 5, pp. 10–17, 2015. [30] V. Sitzmann, J. Martel, A. Bergman, D. Lindell, and G. Wetzstein, "Implicit neural representations with periodic activation functions," Advances in Neural Information Processing Systems, vol. 33, pp. 7462– 7473, 2020. [31] J. Bradbury, R. Frostig, P. Hawkins, M. J. Johnson, C. Leary, D. Maclaurin, G. Necula, A. Paszke, J. VanderPlas, S. Wanderman-Milne, and
+  - Q. Zhang, "JAX: composable transformations of Python+NumPy programs," http://github.com/google/jax, 2018. [32] B. Liu, G. J. Clapworthy, F. Dong, and E. Wu, "Parallel marching blocks: A practical isosurfacing algorithm for large data on many-core architectures," in Computer Graphics Forum, vol. 35, no. 3. Wiley Online Library, 2016, pp. 211–220. Haoyu Li is a Ph.D. student in the Department of Computer Science and Engineering at the Ohio State University. He received his B.S. degree in Psychology from Beijing Normal University in 2017. His research interests are mainly in visualization for particle simulations and machine learning for scientific visualization.
+
+
+
+Han-Wei Shen is a full professor at the Ohio State University. He received his B.S. degree from the Department of Computer Science and Information Engineering at National Taiwan University in 1988, his M.S. degree in computer science from the State University of New York at Stony Brook in 1992, and his Ph.D. degree in computer science from the University of Utah in 1998. From 1996 to 1999, he was a research scientist at NASA Ames Research Center in Mountain View California. His primary research interests are scientific visualization and computer
+
+
+
+graphics. He is a winner of the National Science Foundation CAREER award and the U.S. Department of Energy Early Career Principal Investigator Award. He also won the Outstanding Teaching award twice in the Department of Computer Science and Engineering at the Ohio State University.

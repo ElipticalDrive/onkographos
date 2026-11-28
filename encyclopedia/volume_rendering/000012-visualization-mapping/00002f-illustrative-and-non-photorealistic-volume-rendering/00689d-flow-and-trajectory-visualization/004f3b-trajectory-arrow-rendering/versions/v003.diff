@@ -1,0 +1,137 @@
+--- v002.md
++++ v003.md
+@@ -1,8 +1,8 @@
+ # Trajectory Arrow Rendering
+ 
+-Also called: speed lines, particle trajectory visualization
++Also called: speed lines
+ 
+ ## Overview
+-Trajectory Arrow Rendering is an illustrative technique that overlays directional arrows on volume renderings of time-varying particle systems to visualize feature movement and provide temporal context within a single static image [S1, unofficial]. Unlike sequential volume renderings, which make it difficult to track features visually, this method integrates pathline geometry into the volumetric depth buffer to highlight flow properties such as separation, convergence, and recirculation [S1, unofficial]. It sets itself apart from standard volume rendering by explicitly decoupling the representation of particle trajectories from the scalar field density, using a multi-pass approach to ensure arrows are correctly occluded by and blended with the volume interior [S1, unofficial]. It builds on [Flow and Trajectory Visualization](20165-flow-and-trajectory-visualization.md) and differs from sibling methods like [Flow Volumes](19010-flow-volumes.md) by rendering explicit trajectory geometry rather than volumetric flow representations.
++Trajectory Arrow Rendering is an illustrative technique that overlays directional arrows on volume renderings of time-varying particle systems to visualize feature movement and provide temporal context within a single static image [S1, unofficial]. Unlike viewing sequential volume renderings, which makes it difficult to track features visually, this method integrates pathline geometry into the volumetric depth buffer to highlight flow properties such as separation, convergence, and recirculation [S1, unofficial]. It sets itself apart from standard volume rendering by explicitly decoupling the representation of particle trajectories from the scalar field density, using a multi-pass approach to ensure arrows are correctly occluded by and blended with the volume interior [S1, unofficial].
+ 
+ ## How it works
+@@ -11,5 +11,5 @@
+ *   Arrow width parameter [S1, unofficial].
+ *   Minimum pathline length threshold and minimum cluster size [S1, unofficial].
+-*   Volume rendering parameters, camera matrices, and final composite image layout: Not given in the sources.
++*   Volume rendering parameters, camera matrices, and final composite image layout: Not given in the sources [S1, unofficial].
+ 
+ **Outputs:**
+@@ -24,5 +24,5 @@
+ 
+ 1.  **Pathline Filtering:**
+-    *   Compute pathlines from temporal particle data.
++    *   Compute pathlines from temporal particle data [S1, unofficial].
+     *   Discard pathlines shorter than a preset threshold [S1, unofficial].
+     *   Discard clusters with fewer than a preset minimum number of pathlines [S1, unofficial].
+@@ -45,55 +45,58 @@
+ def render_trajectory_arrows(particles, view_matrix, arrow_width, min_length, min_cluster_size):
+     # Step 1: Filter Pathlines
+-    pathlines = compute_pathlines(particles)  # [G] Standard pathline integration
+-    valid_pathlines = []
+-    for pathline in pathlines:
+-        if length(pathline) < min_length:
+-            continue
+-        valid_pathlines.append(pathline)
+-    
+-    # Cluster filtering
+-    clusters = group_pathlines(valid_pathlines)  # [G] Spatial clustering
+-    valid_clusters = [c for c in clusters if len(c) >= min_cluster_size]
+-    valid_pathlines = [p for c in valid_clusters for p in c]
+-    
+-    # Step 2: Pass 1 - Render Arrow Geometry
+-    arrow_color_buffer = create_framebuffer()
+-    arrow_depth_buffer = create_depthbuffer()
+-    
++    pathlines = integrate_particles(particles)  # [G] Standard temporal integration
++    valid_pathlines = [p for p in pathlines if length(p) >= min_length]
++    clusters = group_spatially(valid_pathlines)  # [G] Standard spatial clustering
++    valid_pathlines = [p for c in clusters if len(c) >= min_cluster_size for p in c]
++
++    # Step 2: Pass 1 - Render Arrow Geometry to Frame Buffer
++    arrow_color_buffer = allocate_buffer()
++    arrow_depth_buffer = allocate_depth_buffer()
+     for pathline in valid_pathlines:
+-        direction = pathline.end - pathline.start
++        start = pathline[0]
++        end = pathline[-1]
++        direction = end - start
+         # Rotate trajectory line by viewing matrix
+-        view_direction = transform_view(direction, view_matrix)
++        view_dir = transform_view(direction, view_matrix)
+         # Compute perpendicular vector in view plane for billboarding
+-        up = vec3(0, 1, 0)
+-        perpendicular = normalize(cross(view_direction, up))
+-        # Expand geometry by adding arrow width to the rotated line
+-        half_width = arrow_width / 2.0
+-        vertices = generate_arrow_strip(pathline.start, pathline.end, perpendicular, half_width)
+-        render_triangle_strip(vertices, arrow_color_buffer, arrow_depth_buffer)
+-        
++        up = vec3(0.0, 1.0, 0.0)
++        if abs(dot(view_dir, up)) > 0.999:
++            up = vec3(1.0, 0.0, 0.0)
++        perp = normalize(cross(view_dir, up))
++        half_w = arrow_width / 2.0
++        # Generate triangle strip vertices by expanding width along perpendicular
++        vertices = []
++        for i in range(len(pathline) - 1):
++            p1 = pathline[i]
++            p2 = pathline[i+1]
++            vertices.append(p1 + perp * half_w)
++            vertices.append(p1 - perp * half_w)
++            vertices.append(p2 + perp * half_w)
++            vertices.append(p2 - perp * half_w)
++        draw_triangle_strip(vertices, arrow_color_buffer, arrow_depth_buffer)
++
+     # Step 3: Pass 2 - Render Full Screen Quad
+-    background_image = render_fullscreen_quad(arrow_color_buffer)
+-    
++    background_image = draw_fullscreen_quad(arrow_color_buffer)
++
+     # Step 4: Pass 3 - Volume Raycasting with Depth-Aware Blending
+-    final_image = create_framebuffer()
++    final_image = allocate_buffer()
+     for pixel in final_image:
+-        ray = generate_ray(pixel, view_matrix)
+-        accumulated_color = vec3(0)
++        ray_origin = camera_position
++        ray_direction = compute_ray_direction(pixel, view_matrix)
++        accumulated_color = vec3(0.0)
+         accumulated_alpha = 0.0
+-        
+-        for sample_pos in ray:
+-            depth_sample = length(sample_pos - camera_origin)
+-            depth_arrow = sample_depth(arrow_depth_buffer, pixel_coords(sample_pos))
+-            
++        for t in range(0, max_depth, step_size):
++            sample_pos = ray_origin + ray_direction * t
++            depth_sample = length(sample_pos - ray_origin)
++            depth_arrow = read_depth(arrow_depth_buffer, pixel)
+             if depth_sample > depth_arrow:
+-                arrow_color = sample_color(background_image, pixel_coords(sample_pos))
+-                accumulated_color = blend(accumulated_color, arrow_color, accumulated_alpha)
++                arrow_color = read_color(background_image, pixel)
++                accumulated_color = accumulated_color * (1.0 - accumulated_alpha) + arrow_color * accumulated_alpha
+                 break
+-            
+-            density = sample_volume(sample_pos)
+-            color = apply_transfer_function(density)
+-            accumulated_color, accumulated_alpha = accumulate(accumulated_color, accumulated_alpha, color, density)
+-            
++            density = read_volume(sample_pos)
++            color = apply_tf(density)
++            alpha = density * step_size
++            accumulated_color = accumulated_color * (1.0 - alpha) + color * alpha
++            accumulated_alpha += alpha
+         final_image[pixel] = accumulated_color
+     return final_image
+@@ -101,6 +104,6 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** Not given in the sources.
++*   **Time Complexity:** Not given in the sources [S1, unofficial].
++*   **Memory Complexity:** Not given in the sources [S1, unofficial].
+ *   **Strengths:** Provides immediate temporal context in a single image; effectively visualizes flow features without requiring animation [S1, unofficial].
+ *   **Limitations:** Requires pre-computed or real-time pathline generation; filtering parameters are critical and may require tuning to avoid visual clutter or loss of detail [S1, unofficial].

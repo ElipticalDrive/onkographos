@@ -1,0 +1,114 @@
+# View Transformations
+
+Also called: Modeling and Viewing Matrix Setup, VolPack View Transformations
+
+## Overview
+View Transformations define the sequence of affine and projective mappings that convert volume data from its native object coordinate system into the final image coordinate system [S1]. This method manages four distinct transformation matrices—modeling, viewing, projection, and viewport—to handle spatial positioning, camera orientation, and rasterization bounds [S1]. It is distinguished from sibling methods by its explicit support for a multi-stage pipeline (Object $\to$ World $\to$ Eye $\to$ Clip $\to$ Image) and its integration with light direction vector transformation, ensuring shading calculations occur in the correct coordinate space [S1].
+
+## How it works
+### Inputs and Outputs
+*   **Inputs**: Current transformation matrix state; geometric parameters (rotation angles, translation vectors, scaling factors, or window bounds); light direction vectors (for shading context) [S1].
+*   **Outputs**: Updated transformation matrices; transformed coordinates for volume data and light vectors [S1].
+
+### Data Structures
+The implementation relies on a `vpContext` structure which stores four $4 \times 4$ matrices: `VP_MODEL` (object to world), `VP_VIEW` (world to eye), `VP_PROJECT` (eye to clip), and `VP_VIEWPORT` (clip to image) [S1]. Each matrix is stored as a 16-element array representing the affine transformation [S1].
+
+### Numbered Steps
+1.  **Initialize Context**: Create or reset the rendering context and ensure volume data is defined within a unit cube centered at the origin in object coordinates [S1].
+2.  **Set Modeling Matrix**: Select the modeling matrix as the current target using `vpCurrentMatrix(vpc, VP_MODEL)` [S1]. Reset to identity using `vpIdentityMatrix(vpc)` [S1]. Apply rotations, translations, or scaling using helper functions [S1]. By default, these post-multiply the current matrix [S1]. Light direction vectors are transformed by the modeling matrix active at the time `vpSetLight` is called [S1].
+3.  **Set Viewing Matrix**: Select the viewing matrix as the current target using `vpCurrentMatrix(vpc, VP_VIEW)` [S1]. Reset to identity using `vpIdentityMatrix(vpc)` [S1]. Apply affine transforms to position the camera in world space, converting world coordinates to eye coordinates where the viewer looks down the negative Z-axis [S1].
+4.  **Set Projection Matrix**: Select the projection matrix as the current target using `vpCurrentMatrix(vpc, VP_PROJECT)` [S1]. Define the view volume using `vpWindow(vpc, type, left, right, bottom, top, near, far)` for a parallel projection box in eye coordinates, or `vpWindowPHIGS(vpc, vrp, vpn, vup, prp, viewport_umin, viewport_umax, viewport_vmin, viewport_vmax, viewport_front, viewport_back, type)` using the PHIGS viewing model [S1].
+5.  **Set Viewport Matrix**: This transform is set automatically when the image size is defined, mapping clip coordinates to image coordinates [S1].
+6.  **Render**: Apply the accumulated modeling, viewing, and projection matrices to the volume data during the rendering pass [S1]. The same viewing, projection, and viewport transforms are applied to all primitives at render time [S1].
+
+### Formulas
+*   **Post-Multiplication (Default)**: If $M$ is the current matrix and $T$ is the new transformation, the result is $M' = M \times T$ [S1].
+*   **Pre-Multiplication**: Enabled via `vpSeti` with `CONCAT_MODE`, resulting in $M' = T \times M$ [S1].
+*   **Vector Transformation**: Vectors are always post-multiplied: $v' = M' \times v$ [S1].
+
+### Parameters and Typical Values
+*   **Rotation Angles**: Specified in degrees or radians (e.g., 90.0, 23.0) [S1].
+*   **Window Bounds**: `left`, `right`, `bottom`, `top` define clipping planes in eye coordinates, with typical normalized values ranging from -0.5 to 0.5 [S1].
+*   **Near/Far**: Depth bounds in eye coordinates, with example values ranging from -0.5 to 0.5 [S1].
+
+### Edge Cases and Pitfalls
+*   **Octree Consistency**: If the underlying volume data array is modified, the min-max octree must be recomputed via `vpCreateMinMaxOctree()` or destroyed via `vpDestroyMinMaxOctree()`, otherwise renderings will be incorrect [S1].
+*   **Light Vector Timing**: Light direction vectors are captured based on the modeling matrix at the time of the light setup call, not at render time [S1].
+*   **Matrix Mode**: Forgetting to switch the current matrix mode (`VP_MODEL`, `VP_VIEW`, etc.) before applying transformations results in matrices being applied to the wrong pipeline stage [S1].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+class MatrixContext:
+    """Simulates the VolPack transformation matrix state machine."""
+    def __init__(self):
+        self.matrices = {
+            "MODEL": [[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]],
+            "VIEW": [[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]],
+            "PROJECT": [[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]],
+            "VIEWPORT": [[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]]
+        }
+        self.current_mode = "MODEL"
+
+    def current_matrix(self, mode):
+        self.current_mode = mode
+
+    def identity_matrix(self):
+        self.matrices[self.current_mode] = [[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]]
+
+    def rotate(self, axis, angle):
+        # Computes rotation matrix R for axis/angle and post-multiplies: M = M * R
+        self.matrices[self.current_mode] = self._mat_mul(self.matrices[self.current_mode], self._rotation_matrix(axis, angle))
+
+    def translate(self, x, y, z):
+        # Computes translation matrix T and post-multiplies: M = M * T
+        self.matrices[self.current_mode] = self._mat_mul(self.matrices[self.current_mode], self._translation_matrix(x, y, z))
+
+    def window(self, type, l, r, b, t, n, f):
+        # Constructs projection matrix P from bounds and stores it in the current matrix
+        self.matrices[self.current_mode] = self._projection_matrix(type, l, r, b, t, n, f)
+
+    def _mat_mul(A, B): return [[sum(A[i][k]*B[k][j] for k in range(4)) for j in range(4)] for i in range(4)]
+    def _rotation_matrix(axis, angle): return [[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]] # Placeholder for axis-angle rotation math
+    def _translation_matrix(x, y, z): return [[1,0,0,x],[0,1,0,y],[0,0,1,z],[0,0,0,1]]
+    def _projection_matrix(type, l, r, b, t, n, f): return [[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]] # Placeholder for parallel/perspective projection math
+
+def setup_view_transformations(context):
+    # 1. Setup Modeling Matrix
+    context.current_matrix("MODEL")
+    context.identity_matrix()
+    context.rotate("X_AXIS", 90.0)
+    context.rotate("Y_AXIS", 23.0)
+    # Light vectors would be transformed by this matrix if set here.
+
+    # 2. Setup Viewing Matrix
+    context.current_matrix("VIEW")
+    context.identity_matrix()
+    context.translate(0.1, 0.0, 0.0)
+
+    # 3. Setup Projection Matrix
+    context.current_matrix("PROJECT")
+    context.window("VP_PARALLEL", -0.5, 0.5, -0.5, 0.5, -0.5, 0.5)
+
+    # 4. Viewport is typically handled by image size settings
+```
+
+## Subtopics
+
+### View Transform Shader
+A GPU-based implementation where a fragment shader performs the view transformation [S2, unofficial]. It reads voxel coordinates from a source texture (stored in RGB channels) and transforms them using the viewing matrix [S2, unofficial]. The output texture stores 2D raster coordinates of the projection in the R and G channels, the depth value in the viewing coordinate system in the G channel, and the voxel property value in the alpha channel, yielding an output format of `<i, j, b, v>` [S2, unofficial]. This approach is typically followed by a GPGPU sorting step to order voxels by distance to the viewer for slab-based rendering [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity**: Matrix operations are $O(1)$ for fixed-size $4 \times 4$ matrices, with rendering cost dominated by the number of voxels transformed [S1].
+*   **Memory Complexity**: Requires storage for four $4 \times 4$ matrices and the volume data structure [S1].
+*   **Strengths**: Provides a flexible, standard pipeline for complex camera movements and lighting, with separation of modeling and viewing allowing efficient updates [S1].
+*   **Limitations**: The VolPack API is limited to parallel projections in `vpWindow` (perspective noted as future) and the state machine can be error-prone if matrix modes are not managed correctly [S1].
+*   **When to use**: When VolPack compatibility is required or strict separation between object transformation and camera transformation is needed for lighting consistency [S1].
+
+## Background
+The method originates from the VolPack library developed at Stanford University [S1]. It implements the standard computer graphics transformation pipeline (Object $\to$ World $\to$ Eye $\to$ Clip $\to$ Image) as described in foundational texts like *Computer Graphics: Principles and Practice* by Foley et al. [S1]. The GPU variant (View Transform Shader) represents a modern adaptation for image-space sheet-buffered splatting on GPGPU hardware [S2, unofficial].
+
+## Sources
+[S1] VolPack User's Guide, http://www-graphics.stanford.edu/software/volpack/vp_userguide.html, fetched 2026-10-28
+[S2] Image-space sheet-buffered splatting on the GPU, https://openalex.org/W2419486389, fetched 2026-10-27 (unofficial)

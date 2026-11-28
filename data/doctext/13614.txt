@@ -1,0 +1,163 @@
+Environment Operating System: Ubuntu Version / Commit SHA: 08409f0 Others: Optix 7.7.0 Describe the bug In the sample provided by OptiX, optixVolumeViewer, I am getting square artifacts while raymarching using HDDA that correspond to the...
+
+[BUG] Square/Planar Artifacts While Volume Rendering NVDB Files Using Optix · Issue #1812 · AcademySoftwareFoundation/openvdb · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+[BUG] Square/Planar Artifacts While Volume Rendering NVDB Files Using Optix #1812
+New issue
+Copy link
+New issue
+Copy link
+Closed
+Closed
+[BUG] Square/Planar Artifacts While Volume Rendering NVDB Files Using Optix#1812
+Copy link
+Labels
+bugnanovdb
+Description
+KaavayGupta
+opened on May 13, 2024
+Issue body actions
+Environment
+Operating System: Ubuntu
+Version / Commit SHA: 08409f0
+Others: Optix 7.7.0
+Describe the bug
+In the sample provided by OptiX, optixVolumeViewer, I am getting square artifacts while raymarching using HDDA that correspond to the vdb grid subdivisions. The volume I am using is wdas_cloud_half from here. I converted it to .nvdb using the shipped nanovdb_convert tool. I also replaced the nanovdb library in optixVolumeViewer with the newer one to handle the new volume.
+These are the artifacts I am talking about:
+They are only visible from one side and disappear when viewed from the opposite side.
+The code used in optixVolumeViewer's volume.cu that does volume rendering is (comments and other parts omitted):
+```
+template<typename AccT>
+inline __device__ float transmittanceHDDA(
+    const nanovdb::Vec3f& start,
+    const nanovdb::Vec3f& end,
+    AccT& acc, const float opacity )
+{
+    float transmittance = 1.f;
+    auto dir = end - start;
+    auto len = dir.length();
+    nanovdb::Ray<float> ray( start, dir / len, 0.0f, len );
+    nanovdb::Coord ijk = nanovdb::RoundDown<nanovdb::Coord>( ray.start() ); // first hit of bbox
+
+    nanovdb::HDDA<nanovdb::Ray<float> > hdda( ray, acc.getDim( ijk, ray ) );
+
+    float t = 0.0f;
+    float density = acc.getValue( ijk ) * opacity;
+    while( hdda.step() )
+    {
+        float dt = hdda.time() - t; // compute length of ray-segment intersecting current voxel/tile
+        transmittance *= expf( -density * dt );
+        t = hdda.time();
+        ijk = hdda.voxel();
+
+        density = acc.getValue( ijk ) * opacity;
+        hdda.update( ray, acc.getDim( ijk, ray ) ); // if necessary adjust DDA step size
+    }
+
+    return transmittance;
+}
+```
+```
+extern "C" __global__ void __closesthit__radiance_volume()
+{
+    const HitGroupData* sbt_data = reinterpret_cast<HitGroupData*>( optixGetSbtDataPointer() );
+
+    const auto* grid = reinterpret_cast<const nanovdb::FloatGrid*>(
+        sbt_data->geometry_data.volume.grid );
+    const auto& tree = grid->tree();
+    auto        acc  = tree.getAccessor();
+
+    const float3 ray_orig = optixGetWorldRayOrigin();
+    const float3 ray_dir  = optixGetWorldRayDirection();
+
+    const float t0 = optixGetRayTmax();
+    const float t1 = __uint_as_float( optixGetPayload_0() );
+
+    PayloadRadiance payload = {};
+    traceRadiance(
+        params.handle,
+        ray_orig,
+        ray_dir,
+        0.0f,
+        1e16f,
+        params.solid_objects, // visibility mask - limit intersections to solid objects
+        &payload
+    );
+
+    const auto ray = nanovdb::Ray<float>( reinterpret_cast<const nanovdb::Vec3f&>( ray_orig ), reinterpret_cast<const nanovdb::Vec3f&>( ray_dir ) );
+    auto start = grid->worldToIndexF( ray( t0 + 1e-3) );
+    auto end   = grid->worldToIndexF( ray( fminf( payload.depth, t1 ) ) );
+
+    auto bbox = grid->indexBBox();
+    confine( bbox, end );
+
+    const float opacity = sbt_data->material_data.volume.opacity;
+    float  transmittance = transmittanceHDDA( start, end, acc, opacity );
+
+    float3 result = payload.result * transmittance;
+
+    optixSetPayload_0( __float_as_uint( result.x ) );
+    optixSetPayload_1( __float_as_uint( result.y ) );
+    optixSetPayload_2( __float_as_uint( result.z ) );
+    optixSetPayload_3( __float_as_uint( 0.0f ) );
+}
+```
+Complete code can be found in the OptiX-Samples shipped with their SDK
+To Reproduce
+Steps to reproduce the behavior:
+Download and build OpenVDB with NanoVDB
+Download Optix 7.7.0
+Replace the nanovdb folder in optixVolumeViewer with the include/nanovdb folder from the directory where openvdb was installed. And then build it.
+Download wdas_cloud_half.vdb from here.
+Use nanovdb_convert in nanovdb to convert wdas_cloud_half.vdb to wdas_cloud_half.nvdb.
+Run optixVolumeViewer executable with argument --volume wdas_cloud_half.nvdb.
+Additional Context
+The sample smoke volume provided by Optix does not show these artifacts.
+Reactions are currently unavailable
+Activity
+KaavayGupta
+added
+bug
+on May 13, 2024
+Idclip
+added
+nanovdb
+on May 14, 2024
+KaavayGupta commented on May 16, 2024
+KaavayGupta
+on May 16, 2024
+Author
+More actions
+After alot tinkering around, I've finally figured out the solution.
+The problem was in example code provided by OptiX. It was accessing the volume coordinates in the raymarching loop.
+In the function template<typename AccT> inline __device__ float transmittanceHDDA(const nanovdb::Vec3f& start, const nanovdb::Vec3f& end, AccT& acc, const float opacity ):
+It used ijk = hdda.voxel() to get the current coordinate.
+Replacing it to ijk = nanovdb::RoundDown<nanovdb::Coord>(ray(hdda.time() + 1.0001f)); solved this issue.
+Though, I still cannot figure out the exact reason why this solved it.
+Thanks!
+KaavayGupta
+closed this as completedon May 16, 2024
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+bugnanovdb
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

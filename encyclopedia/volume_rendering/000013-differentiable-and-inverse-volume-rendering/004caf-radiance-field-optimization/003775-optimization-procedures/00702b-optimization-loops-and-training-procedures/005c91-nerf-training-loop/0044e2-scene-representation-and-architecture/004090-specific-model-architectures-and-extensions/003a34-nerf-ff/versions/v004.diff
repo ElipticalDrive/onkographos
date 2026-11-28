@@ -1,0 +1,349 @@
+--- v003.md
++++ v004.md
+@@ -4,214 +4,187 @@
+ 
+ ## Overview
+-NeRF-FF is a plug-in strategy that mitigates the degradation of Neural Radiance Field (NeRF) reconstruction quality caused by out-of-focus (defocus blurred) regions in input images [S1]. It operates by estimating binary image masks that identify in-focus regions using "Focus Frustums"—volumes in scene space corresponding to the depth of field for each camera view [S1]. Unlike methods that employ dynamic ray generation or explicit blur kernel modeling, NeRF-FF generates static masks compatible with runtime-optimized NeRF variants like Instant-NGP, nerfacto, and splatfacto [S1]. This allows the subsequent NeRF model to omit out-of-focus pixels during training, achieving state-of-the-art visual quality with training times reduced by two orders of magnitude [S1].
++NeRF-FF is a plug-in strategy that mitigates the degradation of Neural Radiance Field (NeRF) reconstruction quality caused by out-of-focus (defocus blurred) regions in input images [S1]. It estimates binary image masks based on "Focus Frustums"—the visible volume in scene space that is in-focus—and uses these masks to omit out-of-focus pixels during the training of a subsequent NeRF model [S1]. Unlike methods that employ dynamic ray generation or explicit blur kernels, NeRF-FF relies on static ray assumptions, making it compatible with high-performance, runtime-optimized NeRF variants such as Instant-NGP, nerfacto, and splatfacto [S1].
+ 
+ ## How it works
+-NeRF-FF functions as a preprocessing pipeline that generates per-image binary masks. These masks are applied during the training of a subsequent NeRF model (e.g., Instant-NGP) to restrict optimization to in-focus pixels only [S1]. The method consists of geometry estimation, focus indicator detection, initial frustum estimation, frustum refinement, and mask generation [S1].
++NeRF-FF operates as a preprocessing pipeline that generates per-image binary masks. These masks are applied during the training of a target NeRF model (e.g., Instant-NGP) to restrict optimization to in-focus regions [S1].
+ 
+ ### Inputs and Outputs
+-*   **Inputs:** A set of $N$ defocus-blurred input images $I_i \in [0, 255]^{3 \times W \times H}$ for $i=1 \dots N$, where $W$ and $H$ are image width and height. Camera intrinsics and extrinsics are required for ray casting.
+-*   **Outputs:** A set of binary masks $M_i \in \{0, 1\}^{W \times H}$ for each input image $I_i$, where $M_i(x,y)=1$ indicates an in-focus pixel [S1].
++*   **Inputs:**
++    *   Set of $M$ defocus-blurred input images $\{I_i\}_{i=1}^M$, where $I_i \in [0, 255]^{3 \times W \times H}$ represents the color information for image $i$ with width $W$ and height $H$ [S1].
++    *   Hyperparameters:
++        *   $\tau$: Threshold for the discrete Laplace operator (Typical value: 80) [S1].
++        *   $\epsilon$: Fraction of refined frustums each sampled point must be encompassed by (Typical value: 0.4) [S1].
++*   **Outputs:**
++    *   A set of binary masks $\{Mask_i\}_{i=1}^M$, where $Mask_i(x, y) \in \{0, 1\}$ indicates whether pixel $(x, y)$ in image $i$ is in-focus [S1].
+ 
+ ### Data Structures
+-*   **Preliminary NeRF Model:** An Instant-NGP instance trained on the raw blurred images to estimate scene geometry.
+-*   **Depth Maps:** $D_i \in \mathbb{R}^{W \times H}$, representing the distance from the camera center to the nearest surface along each ray, derived from the preliminary NeRF inference [S1].
+-*   **Indicator Pixels:** A set $P_i$ of 2D coordinates $(x,y)$ identified as sharp edges [S1].
+-*   **Focus Frustum (FF):** A volume defined by the camera's view frustum clipped by a near plane at depth $n_i$ and a far plane at depth $f_i$. It represents the estimated in-focus volume for image $i$ [S1].
+-*   **Refined Focus Frustum (RFF):** The updated volume defined by near plane $\hat{n}_i$ and far plane $\hat{f}_i$ after refinement [S1].
+-*   **Scene Points:** A set $S$ of high-density 3D points sampled from the scene geometry [S1].
++1.  **Preliminary NeRF Model:** An Instant-NGP instance trained on the raw blurred images to estimate scene geometry [S1].
++2.  **Depth Maps:** For each image $i$, a dense depth map $D_i \in \mathbb{R}^{W \times H}$, where $D_i(x, y)$ is the depth value at pixel $(x, y)$ derived from the preliminary NeRF inference [S1].
++3.  **Indicator Pixels:** A set $P_i$ for each image $i$, containing coordinates of pixels identified as in-focus [S1].
++4.  **Focus Frustums (FF):** For each image $i$, a volume defined by the camera view frustum clipped by a near plane depth $n_i$ and a far plane depth $f_i$ [S1].
++5.  **Refined Focus Frustums (RFF):** Updated volumes defined by near plane $\hat{n}_i$ and far plane $\hat{f}_i$ [S1].
++6.  **Scene Points:** A set $S$ of high-density points sampled from the scene geometry [S1].
+ 
+-### Parameters
+-*   $\tau$: Threshold for the discrete Laplace operator to distinguish in-focus edges. Typical value: 80 [S1].
+-*   $\epsilon$: Hyperparameter controlling the trade-off between scene coverage and reconstruction quality during frustum refinement. It defines the minimum fraction of refined frustums that must encompass each sampled scene point. Range: $[0, 1.0]$. Typical value: 0.4 [S1].
+-    *   $\epsilon = 0$: Omits the refinement step.
+-    *   $\epsilon = 1$: Equivalent to training without NeRF-FF (no masking) [S1].
++### Algorithm Steps
+ 
+-### Steps
++1.  **Preliminary Geometry Estimation:**
++    Train a preliminary Instant-NGP model on the input images $\{I_i\}$ to obtain per-view depth maps $\{D_i\}$ [S1]. Note: The appearance may suffer from blur, but the estimated geometry is adequate for depth estimation [S1].
+ 
+-1.  **Preliminary Geometry Estimation:** Train a preliminary Instant-NGP model on the blurred input images $I_i$ for a fixed number of iterations (e.g., 2,000 iterations) [S1]. Perform inference to generate dense depth maps $D_i$ for each view [S1]. Note: While the appearance is blurry, the estimated geometry is sufficient for depth estimation [S1].
++2.  **Identify In-Focus Indicator Pixels:**
++    For each image $I_i$:
++    a. Convert $I_i$ to grayscale.
++    b. Apply the discrete Laplace operator $\square$ to the grayscale image.
++    c. Identify indicator pixels $P_i$ where the Laplace value exceeds threshold $\tau$:
++    $$
++    P_i = \{(x, y) \mid \square(I_i)(x, y) > \tau\}
++    $$
++    where $\square(I_i)(x, y)$ is the Laplace value at pixel $(x, y)$ [S1].
+ 
+-2.  **Focus Indicator Detection:** Convert each input image $I_i$ to grayscale. Apply the discrete Laplace operator $\square$ to detect sharp edges. Identify indicator pixels $P_i$ where the Laplace response exceeds threshold $\tau$:
+-    $$ P_i = \{ (x, y) \mid \square(I_i)(x, y) > \tau \} $$
+-    where $\square(I_i)(x, y)$ is the Laplace value at pixel $(x,y)$ [S1].
++3.  **Initial Focus Frustum Estimation:**
++    For each image $i$:
++    a. Sample the depth map $D_i$ at the coordinates in $P_i$ to obtain a set of depth values.
++    b. Perform statistical analysis on these depth values to estimate the focus depth and range (Depth of Field, DoF) [S1].
++    c. Define the initial Focus Frustum $FF_i$ with near plane $n_i$ and far plane $f_i$ based on the estimated DoF [S1].
+ 
+-3.  **Initial Focus Frustum Estimation:** For each image $i$, sample the depth map $D_i$ at the coordinates in $P_i$. Perform statistical analysis on these sampled depths to estimate the initial near plane $n_i$ and far plane $f_i$ of the Focus Frustum. This defines the initial volume containing the in-focus regions [S1].
++4.  **Focus Frustum Refinement:**
++    Refine the near and far planes of each Focus Frustum to $\hat{n}_i$ and $\hat{f}_i$ to ensure scene coverage while minimizing volume expansion [S1].
++    a. Sample a set of high-density scene points $S$ from the preliminary NeRF geometry [S1].
++    b. Determine updated planes $\hat{n}_i, \hat{f}_i$ such that:
++        *   Any spatial position $p \in S$ is part of at least a fraction $\epsilon$ of the refined Focus Frustums $\{RFF_i\}$ [S1].
++        *   The accumulated change in depth $R$ is minimized [S1].
++    c. The accumulated change $R$ is calculated only for Focus Frustums whose view frustum encompasses $p$ [S1].
++    d. The hyperparameter $\epsilon \in [0, 1.0]$ controls this trade-off. $\epsilon = 0$ omits refinement; $\epsilon = 1$ implies no NeRF-FF masking [S1].
+ 
+-4.  **Focus Frustum Refinement:** Iteratively expand the near and far planes of the Focus Frustums to ensure robust scene coverage. The goal is to determine refined planes $\hat{n}_i$ and $\hat{f}_i$ such that:
+-    *   Every point $p \in S$ (a set of randomly sampled high-density scene points) is encompassed by at least a fraction $\epsilon$ of the refined Focus Frustums.
+-    *   The accumulated change in depth $R$ is minimized.
+-    
+-    The accumulated change $R$ is calculated only for frustums whose view frustums geometrically encompass point $p$ [S1]. The optimization selects $\hat{n}_i, \hat{f}_i$ to minimize $R$ subject to the coverage constraint defined by $\epsilon$ [S1].
++5.  **Mask Generation:**
++    For each image $i$ and pixel $(x, y)$:
++    a. Retrieve the depth $D_i(x, y)$ from the preliminary depth map.
++    b. Generate the binary mask $Mask_i(x, y)$:
++    $$
++    Mask_i(x, y) = \begin{cases} 
++    1, & \text{if } D_i(x, y) \in [\hat{n}_i, \hat{f}_i] \\
++    0, & \text{otherwise}
++    \end{cases}
++    $$
++    Note: Other boundaries of the Focus Frustum (horizontal/vertical) are not considered because all pixels in the depth map are visible in their corresponding image [S1].
+ 
+-5.  **Mask Generation:** Reproject the dense scene points encompassed by the refined Focus Frustums into the respective image space to generate binary masks. For each pixel $(x,y)$ in image $i$, the mask value $M_i(x,y)$ is determined by checking if the depth $D_i(x,y)$ lies within the refined depth range $[\hat{n}_i, \hat{f}_i]$:
+-    $$ M_i(x,y) = \begin{cases} 1, & \text{if } D_i(x,y) \in [\hat{n}_i, \hat{f}_i] \\ 0, & \text{otherwise} \end{cases} $$
+-    Since all pixels in the depth map are visible, other frustum boundaries (side clipping) do not need explicit checking for mask generation [S1].
+-
+-6.  **Subsequent NeRF Training:** Train the final NeRF model (e.g., Instant-NGP, nerfacto, or splatfacto) using the input images $I_i$, but only utilizing pixels where $M_i(x,y) = 1$. Out-of-focus regions are omitted during the loss computation [S1].
++6.  **Subsequent NeRF Training:**
++    Train the final NeRF model (e.g., Instant-NGP) using the input images $\{I_i\}$, but only consider pixels where $Mask_i(x, y) = 1$ [S1].
+ 
+ ### Pseudocode
+ 
+ ```python
+-def nerff_pipeline(blurred_images, camera_intrinsics, camera_extrinsics):
++def nerff_pipeline(input_images, tau=80, epsilon=0.4):
+     """
+-    Main pipeline for NeRF-FF.
+-    blurred_images: List of N images I_i with shape (H, W, 3), values [0, 255].
+-    camera_intrinsics: Camera matrix K.
+-    camera_extrinsics: List of N camera-to-world matrices C2W_i.
++    input_images: List of images I_i with shape (H, W, 3) and camera poses.
++    tau: Threshold for Laplace operator.
++    epsilon: Fraction of frustums covering scene points.
+     """
+-    N = len(blurred_images)
+-    tau = 80  # Optimal threshold for Laplace operator
+-    epsilon = 0.4  # Optimal coverage fraction
++    # Step 1: Preliminary Geometry Estimation
++    # Train a preliminary NeRF (e.g., Instant-NGP) on raw blurred images
++    preliminary_nerf = train_neRF(input_images)
+     
+-    # Step 1: Preliminary Geometry Estimation
+-    # Train a preliminary NeRF (e.g., Instant-NGP) on blurred images
+-    preliminary_neurf = train_neural_radiance_field(blurred_images, camera_intrinsics, camera_extrinsics, iterations=2000)
+-    
+-    # Generate dense depth maps D_i for each view
++    # Generate dense depth maps for all images
+     depth_maps = []
+-    for i in range(N):
+-        # Inference on preliminary model to get depth along rays
+-        D_i = get_depth_map(preliminary_neurf, camera_intrinsics[i], camera_extrinsics[i])
+-        depth_maps.append(D_i)
++    for img in input_images:
++        # Inference on preliminary model to get depth
++        d_map = get_depth_map(preliminary_nerf, img)
++        depth_maps.append(d_map)
+         
+-    # Step 2: Focus Indicator Detection
++    # Step 2: Identify In-Focus Indicator Pixels
+     indicator_pixels = []
+-    for i in range(N):
+-        I_i = blurred_images[i]
++    for i, img in enumerate(input_images):
+         # Convert to grayscale
+-        I_gray = rgb_to_grayscale(I_i)
++        gray_img = to_grayscale(img)
+         # Apply discrete Laplace operator
+-        laplace_map = apply_discrete_laplace(I_gray)
++        laplace_img = apply_laplace(gray_img)
+         # Threshold to find sharp edges
+-        P_i = []
++        pi = set()
+         for y in range(H):
+             for x in range(W):
+-                if laplace_map[y, x] > tau:
+-                    P_i.append((x, y))
+-        indicator_pixels.append(P_i)
++                if laplace_img[y, x] > tau:
++                    pi.add((x, y))
++        indicator_pixels.append(pi)
+         
+     # Step 3: Initial Focus Frustum Estimation
+-    # Estimate initial near (n_i) and far (f_i) planes based on depths at P_i
+-    initial_frustums = []
+-    for i in range(N):
+-        P_i = indicator_pixels[i]
+-        D_i = depth_maps[i]
+-        sampled_depths = [D_i[y, x] for (x, y) in P_i]
+-        
+-        if not sampled_depths:
+-            # Fallback if no indicators found (e.g., fully blurred image)
+-            # Use full depth range or skip mask generation
+-            initial_frustums.append((0.0, float('inf')))
+-            continue
+-            
+-        # Statistical analysis to determine DoF range
+-        # Example: Use percentiles or mean +/- std deviation
+-        n_i = min(sampled_depths)
+-        f_i = max(sampled_depths)
+-        initial_frustums.append((n_i, f_i))
++    initial_ffs = []
++    for i, pi in enumerate(indicator_pixels):
++        # Sample depths at indicator pixels
++        depths = [depth_maps[i][y, x] for (x, y) in pi]
++        # Statistical analysis to estimate DoF (min/max or mean/std)
++        # This provides initial near n_i and far f_i
++        n_i, f_i = estimate_dof(depths)
++        initial_ffs.append({'n': n_i, 'f': f_i})
+         
+     # Step 4: Focus Frustum Refinement
+-    # Sample high-density scene points S from the preliminary NeRF
+-    S = sample_scene_points(preliminary_neurf, num_samples=100000)
++    # Sample high-density scene points S from preliminary geometry
++    scene_points = sample_scene_points(preliminary_nerf)
+     
+-    refined_frustums = []
+-    for i in range(N):
+-        n_i, f_i = initial_frustums[i]
+-        
+-        # Optimize n_hat_i, f_hat_i to minimize accumulated depth change R
+-        # subject to: each p in S is in at least epsilon fraction of frustums
+-        # Note: This requires an optimization loop or iterative expansion
+-        # as described in the source. Here we simulate the result.
+-        
+-        # Simplified logic for implementation:
+-        # Expand frustums until coverage constraint is met.
+-        # The source minimizes R (change in depth) while ensuring coverage.
+-        
+-        # For the purpose of this pseudocode, we assume an optimizer
+-        # finds the optimal bounds.
+-        n_hat_i, f_hat_i = optimize_frustum_bounds(
+-            frustum_index=i,
+-            initial_n=n_i,
+-            initial_f=f_i,
+-            scene_points=S,
+-            camera_extrinsics=camera_extrinsics,
+-            epsilon=epsilon
+-        )
+-        refined_frustums.append((n_hat_i, f_hat_i))
++    refined_ffs = []
++    for i, initial_ff in enumerate(initial_ffs):
++        # Determine optimal n_hat and f_hat
++        # Constraints:
++        # 1. Each point p in scene_points is covered by >= epsilon fraction of all refined FFs
++        # 2. Minimize accumulated depth change R
++        # This is an optimization problem per image or global
++        n_hat, f_hat = refine_planes(initial_ff['n'], initial_ff['f'], 
++                                     scene_points, initial_ffs, epsilon)
++        refined_ffs.append({'n': n_hat, 'f': f_hat})
+         
+     # Step 5: Mask Generation
+     masks = []
+-    for i in range(N):
+-        D_i = depth_maps[i]
+-        n_hat_i, f_hat_i = refined_frustums[i]
+-        M_i = np.zeros((H, W), dtype=int)
+-        
++    for i, ref_ff in enumerate(refined_ffs):
++        mask = np.zeros((H, W), dtype=int)
+         for y in range(H):
+             for x in range(W):
+-                depth_val = D_i[y, x]
+-                # Check if depth is within refined frustum bounds
+-                if n_hat_i <= depth_val <= f_hat_i:
+-                    M_i[y, x] = 1
+-                else:
+-                    M_i[y, x] = 0
+-        masks.append(M_i)
++                d = depth_maps[i][y, x]
++                if ref_ff['n'] <= d <= ref_ff['f']:
++                    mask[y, x] = 1
++        masks.append(mask)
+         
+     # Step 6: Subsequent NeRF Training
+-    # Train final NeRF using masks to filter pixels
+-    final_neurf = train_neural_radiance_field_masked(
+-        images=blurred_images,
+-        masks=masks,
+-        camera_intrinsics=camera_intrinsics,
+-        camera_extrinsics=camera_extrinsics,
+-        model_type="Instant-NGP", # or nerfacto, splatfacto
+-        iterations=4000
+-    )
++    # Train final NeRF using only masked pixels
++    final_nerf = train_neRF_masked(input_images, masks)
+     
+-    return final_neurf
++    return final_nerf, masks
+ 
+-def optimize_frustum_bounds(frustum_index, initial_n, initial_f, scene_points, camera_extrinsics, epsilon):
++def refine_planes(n_init, f_init, scene_points, all_initial_ffs, epsilon):
+     """
+-    Iteratively expands the near and far planes to satisfy the coverage constraint
+-    defined by epsilon while minimizing accumulated depth change.
++    Optimizes n_hat and f_hat for a specific view.
++    In practice, this involves solving for bounds that satisfy the coverage constraint
++    while minimizing volume expansion.
+     """
+-    # This is a conceptual implementation of the refinement step.
+-    # The source states: "Refine the depths... such that the accumulated change 
+-    # in depth R is minimal, while any spatial position p in S is part of 
+-    # at least a certain fraction epsilon of the refined Focus Frustums."
+-    
+-    # 1. Determine which frustums can potentially encompass each point p.
+-    # A frustum i can encompass p if p is within the camera's view frustum.
+-    
+-    # 2. For each point p in S, count how many refined frustums contain it.
+-    # 3. Adjust n_hat and f_hat for frustum i to include more points if needed,
+-    #    or expand bounds to ensure the global epsilon constraint is met.
+-    
+-    # Since the exact optimization algorithm (e.g., gradient descent on bounds)
+-    # is not detailed beyond the objective function, we note that this step
+-    # expands the initial frustums.
+-    
+-    # Placeholder for the specific optimization routine described in [S1]
+-    # which minimizes R = sum of changes in n and f.
++    # Placeholder for the specific optimization logic described in [S1]
++    # The goal is to find n_hat, f_hat such that:
++    # count(p in RFF_i for all i) >= epsilon * M for each p in S
++    # and sum(|n_hat - n_init| + |f_hat - f_init|) is minimized
+     pass
+ ```
+ 
+-### Edge Cases and Pitfalls
+-*   **Fully Blurred Images:** If input images contain no in-focus regions, the preliminary NeRF reconstruction suffers from "floater artifacts" (volumetric density with no geometric counterpart). This leads to inferior depth maps and erroneous masks. NeRF-FF is not suited for datasets consisting entirely of fully blurred images [S1].
+-*   **Threshold $\tau$:**
+-    *   **Low $\tau$:** Causes bad performance because weak signals (texture in out-of-focus regions) are considered in-focus indicators, leading to incorrect depth estimates [S1].
+-    *   **High $\tau$:** Causes slowly decreasing performance because sharp edges in in-focus regions are missed. However, the decline is small because the initial frustums are refined in the subsequent step [S1].
+-*   **Dense Reconstruction Quality:** Mismatches between in-focus indicators and the actual spatial position of scene geometry cause erroneous depth estimates, negatively influencing initial Focus Frustum estimates. Low-quality dense reconstruction directly reduces mask quality [S1].
+-*   **Floater Artifacts:** Even with masking, the subsequent reconstruction may suffer from floater artifacts inherent to Instant-NGP, which can reduce image quality depending on the camera position [S1].
++### Parameters and Edge Cases
++*   **$\tau$ (Laplacian Threshold):**
++    *   Typical value: 80 [S1].
++    *   Low $\tau$: Includes weak signals/textures in out-of-focus regions as in-focus indicators, leading to bad performance [S1].
++    *   High $\tau$: Excludes sharp edges in in-focus regions, causing slowly decreasing performance. The decline is small because initial frustums are refined [S1].
++*   **$\epsilon$ (Coverage Fraction):**
++    *   Typical value: 0.4 maximizes PSNR and SSIM [S1].
++    *   $\epsilon = 0$: Omits refinement step.
++    *   $\epsilon = 1$: Equivalent to training without NeRF-FF [S1].
++*   **Pitfalls:**
++    *   **Fully Blurred Images:** NeRF-FF underperforms on datasets with fully blurred images because the preliminary NeRF produces low-quality dense reconstructions and floater artifacts (high optical density with no ground truth counterpart), leading to erroneous depth maps and masks [S1].
++    *   **Floater Artifacts:** Even with partial blur, Instant-NGP may produce floaters, which result in aberrated depth maps and impure masks, reducing image quality depending on camera position [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The method adds a preliminary training step and mask generation overhead. However, the subsequent training is accelerated.
+-*   **Memory Complexity:** Requires storing depth maps for all views and the preliminary NeRF model.
+-*   **Measured Performance:** On the Ma et al. real-world defocus dataset using an NVIDIA RTX 3090, NeRF-FF + Instant-NGP achieves an average training time of 45 seconds (including preliminary training and mask generation). This is a two orders of magnitude acceleration compared to state-of-the-art methods like PDRF, Deblur-NeRF, and DP-NeRF, which can take up to nearly one day [S1].
+-*   **Quality:** NeRF-FF + iNGP achieves PSNR on par with SOTA methods (Deblur-NeRF, DP-NeRF, PDRF) and consistently outperforms them in SSIM by a fair margin. It trails reference deblurring strategies slightly in LPIPS, but the difference is considered negligible given the speedup [S1]. On synthetic datasets with fully blurred images, it underperforms SOTA due to low-quality preliminary reconstruction [S1].
+-*   **Compatibility:** Compatible with Instant-NGP, nerfacto, and splatfacto (3D Gaussian Splatting). When applied to nerfacto and splatfacto, it improves PSNR, SSIM, and LPIPS with negligible impact on training duration [S1].
+-*   **Strengths:** Extremely fast training times; compatible with static-ray NeRF variants; plug-and-play nature.
+-*   **Limitations:** Relies on the quality of the preliminary NeRF's geometry; fails on fully blurred inputs; sensitive to $\tau$ and $\epsilon$ parameters [S1].
++*   **Time Complexity:** Training time is reduced to under 1 minute on end-consumer hardware (e.g., NVIDIA RTX 3090) for the combined NeRF-FF execution and Instant-NGP training [S1]. This constitutes an acceleration of two orders of magnitude compared to state-of-the-art methods like PDRF, DP-NeRF, or Deblur-NeRF, which may take up to nearly one day [S1].
++*   **Memory Complexity:** Not given in the sources.
++*   **Performance:**
++    *   On real-world defocus datasets (Ma et al.), NeRF-FF + Instant-NGP achieves PSNR on par with SOTA methods and consistently outperforms them in SSIM by a fair margin, though it trails reference deblurring strategies slightly in LPIPS [S1].
++    *   On synthetic datasets with fully blurred images, it underperforms SOTA due to inferior depth map quality from the preliminary reconstruction [S1].
++    *   On the Wu et al. dataset, it produces better quality images than DoF-NeRF [S1].
++*   **Compatibility:** Compatible with Instant-NGP, nerfacto, and splatfacto (3D Gaussian Splatting) [S1]. Applying NeRF-FF masks to nerfacto and splatfacto improves PSNR, SSIM, and LPIPS with negligible impact on training duration [S1].
++*   **Strengths:** High speed, compatibility with static-ray optimized NeRFs, robustness to partial blur.
++*   **Limitations:** Unsuitable for fully blurred images; sensitive to preliminary NeRF geometry quality; potential for floater artifacts in subsequent reconstruction [S1].
+ 
+ ## Background
+-NeRF-FF was proposed by T. Wirth, A. R., M. B., V. K., A. K., and D. W. F. in the paper "NeRF-FF: a plug-in method to mitigate defocus blur for runtime optimized neural radiance fields" [S1]. The method addresses the limitation of existing defocus mitigation strategies (like PDRF, Deblur-NeRF, DP-NeRF) which rely on dynamic ray generation and are incompatible with high-performance NeRF variants like Instant-NGP that use static rays and custom CUDA kernels [S1]. The work demonstrates that static-ray variants can achieve comparable or better quality with significantly reduced training times when combined with NeRF-FF's mask-based approach [S1].
++NeRF-FF was proposed by T. Wirth et al. in the paper "NeRF-FF: a plug-in method to mitigate defocus blur for runtime optimized neural radiance fields" [S1]. It addresses the limitation that standard NeRF reconstruction quality suffers significantly from out-of-focus regions in input images [S1]. Existing methods often use dynamic ray generation or blur kernels, which are incompatible with the static ray assumptions of performance-optimized NeRFs like Instant-NGP [S1]. NeRF-FF fills this gap by providing a static-mask-based approach [S1].
+ 
+ ## Sources

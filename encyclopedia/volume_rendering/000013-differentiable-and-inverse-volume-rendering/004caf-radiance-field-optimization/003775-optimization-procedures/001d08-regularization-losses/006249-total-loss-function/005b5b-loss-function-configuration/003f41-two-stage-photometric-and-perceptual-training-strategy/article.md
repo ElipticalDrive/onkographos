@@ -1,0 +1,105 @@
+# Two-Stage Photometric and Perceptual Training Strategy
+
+Also called: Multi-view and Voxel Transformer Joint Fine-tuning, SplatVoxel Two-Stage Training
+
+## Overview
+This strategy optimizes the SplatVoxel feed-forward network using a photometric loss combining Mean Squared Error (MSE) and Learned Perceptual Image Patch Similarity (LPIPS) [S1]. It decouples training into two phases: first optimizing the multi-view Transformer backbone, then jointly fine-tuning both the multi-view and voxel Transformers [S1].
+
+## How it works
+**Inputs:** Multi-view static scene images (e.g., from DL3DV) and ground-truth target images $\hat{I}$ [S1].
+**Outputs:** Trained multi-view Transformer, trained Voxel Transformer, and predicted Gaussian primitives $\mathbf{G}'_j$ [S1].
+
+**Data Structures:**
+*   **Multi-view Transformer:** Backbone network processing input views [S1].
+*   **Voxel Transformer:** Network processing sparse voxel grids [S1].
+*   **Gaussian Primitives:** Predicted attributes $\mathbf{G}'_j \in \mathbb{R}^l$ around sparsified fine-level voxel grids, where $l$ is the number of rendering parameters [S1]. Computed via $\mathbf{G}'_j = \text{MLP}_{\text{fine}}([\mathbf{O}_j, \mathbf{E}_j])$, combining fine-level transformer latents $\mathbf{O}_j$ and fine-level voxel attributes $\mathbf{E}_j$ [S1].
+
+**Loss Function:**
+The total loss combines MSE and LPIPS [S1]:
+$$
+\mathcal{L} = \mathcal{L}_{\text{MSE}}(\hat{I}, I) + \lambda \mathcal{L}_{\text{LPIPS}}(\hat{I}, I)
+$$
+where $\hat{I}$ is the ground-truth target image, $I$ is the rendered target image from predicted Gaussian primitives, and $\lambda$ is the perceptual weighting factor [S1].
+
+**Parameters:**
+*   **Batch size:** 128 [S1].
+*   **Total iterations:** 300,000 [S1].
+*   **LPIPS weight ($\lambda$):**
+    *   Multi-view Transformer: $\lambda = 0.5$ [S1].
+    *   Voxel Transformer: $\lambda = 4.0$ [S1].
+
+**Algorithm Steps:**
+1.  **Stage 1 (Multi-view Backbone Training):** Train the multi-view Transformer backbone for 200,000 iterations [S1].
+2.  **Stage 2 (Joint Fine-tuning):** Jointly fine-tune both the multi-view and voxel Transformers for an additional 100,000 iterations [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def mse_loss(rendered, target):
+    return sum((r - t) ** 2 for r, t in zip(rendered, target)) / len(rendered)
+
+def lpips_loss(rendered, target):
+    # Standard perceptual loss using pre-trained VGG features [G]
+    return sum((r - t) ** 2 for r, t in zip(rendered, target)) / len(rendered)
+
+def render(primitives, views):
+    # Standard differentiable rasterization of Gaussian primitives [G]
+    return [p for p in primitives]  # Simplified for pseudocode
+
+def concat(a, b):
+    return a + b  # Element-wise concatenation for pseudocode
+
+def train_splatvoxel_two_stage(dataset, batch_size=128, stage1_iters=200000, stage2_iters=100000):
+    mv_transformer = MultiViewTransformer()
+    voxel_transformer = VoxelTransformer()
+    fine_mlp = MLP_fine()
+
+    # Stage 1: Train multi-view backbone
+    for _ in range(stage1_iters):
+        batch = dataset.sample(batch_size)
+        mv_latents = mv_transformer(batch.views)
+        mv_images = render(mv_latents, batch.views)
+        loss = mse_loss(mv_images, batch.gt) + 0.5 * lpips_loss(mv_images, batch.gt)
+        mv_transformer.backward(loss)
+        mv_transformer.step()
+
+    # Stage 2: Joint fine-tuning
+    for _ in range(stage2_iters):
+        batch = dataset.sample(batch_size)
+        
+        mv_latents = mv_transformer(batch.views)
+        mv_images = render(mv_latents, batch.views)
+        loss_mv = mse_loss(mv_images, batch.gt) + 0.5 * lpips_loss(mv_images, batch.gt)
+
+        voxel_attrs = voxel_transformer(batch.views)
+        voxel_primitives = fine_mlp(concat(mv_latents, voxel_attrs))
+        voxel_images = render(voxel_primitives, batch.views)
+        loss_voxel = mse_loss(voxel_images, batch.gt) + 4.0 * lpips_loss(voxel_images, batch.gt)
+
+        total_loss = loss_mv + loss_voxel
+        mv_transformer.backward(total_loss)
+        mv_transformer.step()
+        voxel_transformer.backward(total_loss)
+        voxel_transformer.step()
+```
+
+**Edge Cases and Pitfalls:**
+Not given in the sources.
+
+## Subtopics
+
+### [Two-Stage Feature and Density Grid Training](17744-two-stage-feature-and-density-grid-training.md)
+This method optimizes neural radiance fields by decoupling geometric density and high-level semantic feature learning into two phases. It addresses multi-view inconsistency and aliasing from up-sampling low-resolution feature maps in standard feature-grid NeRF approaches. It pre-trains the density grid on RGB images and uses a pre-trained VGG network to guide feature learning, ensuring semantic consistency before style transfer.
+
+## Operating characteristics
+*   **Complexity:** Training requires 300,000 total iterations with a batch size of 128 [S1].
+*   **Performance:** Enables cross-dataset generalization on multi-view static scene datasets like DL3DV [S1].
+*   **Strengths:** The two-stage approach stabilizes convergence for feed-forward architectures [S1]. The distinct LPIPS weights ($\lambda=0.5$ for multi-view, $\lambda=4.0$ for voxel) balance structural consistency and perceptual detail refinement [S1].
+*   **Limitations:** Requires careful tuning of separate $\lambda$ values for different network components [S1].
+
+## Background
+Introduced in the SplatVoxel paper for feed-forward 3D Gaussian Splatting optimization [S1]. It addresses the instability of jointly training multi-view and voxel transformers by establishing a robust backbone first [S1].
+
+## Sources
+[S1] Learning Efficient Fuse-and-Refine for Feed-Forward 3D Gaussian Splatting, https://arxiv.org/abs/2503.14698v2, fetched 2026-10-27

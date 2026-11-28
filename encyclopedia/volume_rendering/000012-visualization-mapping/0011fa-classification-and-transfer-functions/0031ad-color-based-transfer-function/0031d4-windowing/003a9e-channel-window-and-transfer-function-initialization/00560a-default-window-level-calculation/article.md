@@ -1,0 +1,116 @@
+# Default Window/Level Calculation
+
+Also called: CT Abdomen Preset, Fixed Window Presets
+
+## Overview
+Default Window/Level Calculation provides an initial mapping of CT Hounsfield units (HU) to color and opacity ranges to highlight specific tissue types such as skin, soft tissue, or tumors [S1]. It differs from interactive windowing by establishing a reproducible baseline preset, typically using fixed parameters for specific anatomical regions, rather than relying solely on user-adjusted visual feedback [S1][S2, unofficial].
+
+## How it works
+**Inputs and Outputs**
+- Input: The image modality type (e.g., 'CT') and the dataset's intensity range (minimum and maximum HU values).
+- Output: A window width ($W$) and window level ($L$) pair used to initialize the transfer function.
+
+**Data Structures**
+No complex data structures are required. The method operates on scalar values representing the modality type and intensity bounds.
+
+**Steps**
+1. Determine the modality of the input dataset.
+2. If the modality is 'CT', apply the fixed abdomen preset:
+   - Set window width $W = 400.0$.
+   - Set window level $L = 40.0$.
+3. If the modality is not 'CT' or a different preset is required, calculate the window level based on the data's intensity range:
+   - Let $I_{min}$ be the minimum intensity in the dataset.
+   - Let $W$ be the chosen window width (if not fixed).
+   - Calculate $L$ as:
+     $$ L = I_{min} + \frac{W}{2} $$
+4. Return $W$ and $L$ for use in the channel window and transfer function initialization.
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def calculate_default_window_level(modality: str, intensity_min: float, intensity_max: float) -> tuple:
+    """
+    Calculate default window width and level for volume rendering initialization.
+    
+    Args:
+        modality: String identifier of the imaging modality (e.g., 'CT', 'MR').
+        intensity_min: Minimum intensity value in the dataset (e.g., min HU).
+        intensity_max: Maximum intensity value in the dataset (e.g., max HU).
+        
+    Returns:
+        A tuple (window_width, window_level).
+    """
+    # Step 1 & 2: Check for CT modality and apply fixed preset
+    if modality == 'CT':
+        # Fixed abdomen preset as per source [S2, unofficial]
+        window_width = 400.0
+        window_level = 40.0
+        return (window_width, window_level)
+    
+    # Step 3: Calculate level based on intensity range for non-CT or other presets
+    # Note: The source [S2, unofficial] implies a fallback calculation if not the fixed CT preset.
+    # We assume a default width if not specified, or use the full range.
+    # However, the source explicitly only defines the CT case and the general formula.
+    # For implementation completeness [G], we define a default width if not provided.
+    # If the source implies the formula is the *only* other method, we need a width.
+    # Since [S2, unofficial] only gives the CT fixed values, we assume a generic width calculation
+    # or that the caller provides W. Here we assume W is derived from range if not fixed.
+    
+    # Re-reading [S2, unofficial]: "Calculate the window level as the minimum intensity plus half the window width."
+    # This implies W must be known. If not fixed, it is often the range or a user-defined value.
+    # As [S2, unofficial] is the only source for the formula, and it pairs with the CT preset,
+    # we implement the formula assuming W is passed or calculated.
+    # To make this self-contained [G]: If W is not fixed, a common default is the full range.
+    
+    # Let's assume W is provided or calculated as range for non-CT if not specified.
+    # But the prompt says "no placeholders". We must define W.
+    # Since the source doesn't specify W for non-CT, we cannot guess [G] is forbidden for core definition.
+    # However, the formula requires W. We will assume W is an input or derived.
+    # Given the constraint, we will treat the CT case as the primary "Default" and the formula as a general rule.
+    
+    # Implementation decision: If not CT, we cannot determine W from sources alone.
+    # We will return None or raise error, or assume W is passed.
+    # Let's assume the function signature includes W for the general case, 
+    # but the "Default" method specifically refers to the CT preset in [S2, unofficial].
+    
+    # Revised Pseudocode to strictly follow [S2, unofficial] which links the formula to the general case:
+    # We need W. If not CT, W is not defined in sources.
+    # We will assume W is the range for the general case [G] to make it implementable, 
+    # but mark it as [G].
+    
+    window_width = intensity_max - intensity_min # [G] Default width assumption for non-CT
+    
+    window_level = intensity_min + (window_width / 2.0)
+    
+    return (window_width, window_level)
+```
+
+**Parameters**
+- Window Width ($W$): 400.0 for CT Abdomen preset [S2, unofficial].
+- Window Level ($L$): 40.0 for CT Abdomen preset [S2, unofficial].
+
+**Edge Cases and Pitfalls**
+- **Modality Mismatch**: The fixed preset is specific to CT. Applying it to MR or other modalities will result in incorrect tissue visualization [S1][S2, unofficial].
+- **Intensity Range**: The formula $L = I_{min} + W/2$ assumes a linear mapping. If the data contains outliers, $I_{min}$ may skew the level [S2, unofficial].
+
+## Subtopics
+
+### Interactive Windowing
+Allows users to adjust $W$ and $L$ via visual feedback to refine tissue contrast, saving the result as a preset [S1].
+
+### Color-Based Transfer Function
+Uses the windowed intensity values to map to specific colors and opacities for rendering [S1].
+
+## Operating characteristics
+- **Time Complexity**: $O(1)$ for the fixed preset. $O(1)$ for the formulaic calculation.
+- **Memory Complexity**: $O(1)$.
+- **Strengths**: Provides a consistent, reproducible starting point for CT abdomen visualization, reducing the need for manual tuning [S1][S2, unofficial].
+- **Limitations**: The fixed preset (400/40) is specific to the abdomen and may not be optimal for other CT regions (e.g., lung, bone) or non-CT modalities [S2, unofficial].
+
+## Background
+The method originates from clinical imaging workflows where reproducible presets are essential for surgical planning and diagnosis [S1]. The specific "CT Abdomen Preset" (400/40) is implemented in tools like `medviewer` to standardize the initial view of abdominal CT scans [S2, unofficial]. The concept of coupling windowing with color grading for visual feedback was described in the context of mixed-reality holographic overlays for chest wall surgery [S1].
+
+## Sources
+[S1] A System for Mixed-Reality Holographic Overlays of Real-Time Rendered 3D-Reconstructed Imaging Using a Video Pass-through Head-Mounted Display—A Pathway to Future Navigation in Chest Wall Surgery, https://doi.org/10.3390/jcm13072080, fetched 2026-10-26
+[S2] caitlin-leonard/medviewer, https://github.com/caitlin-leonard/medviewer, fetched 2026-10-27 (unofficial)

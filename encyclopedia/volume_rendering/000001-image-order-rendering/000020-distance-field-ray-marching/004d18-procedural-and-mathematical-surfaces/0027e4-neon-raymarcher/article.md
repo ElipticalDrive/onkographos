@@ -1,0 +1,175 @@
+# Neon Raymarcher
+
+Also called: Procedural Synthwave City Renderer, SDF Ray Marching in WebGL2
+
+## Overview
+Neon Raymarcher is a real-time WebGL2 renderer that generates an infinite procedural synthwave city using signed-distance fields (SDFs) within a single fullscreen fragment shader, requiring no meshes, textures, or scene graph [S1, unofficial]. It distinguishes itself from general-purpose SDF renderers by employing a deterministic integer-hashing contract shared between CPU and GPU to generate building layouts, and an analytic sine-wave curve to define the road centerline, ensuring perfect synchronization between the rendered visual and the camera path [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Frame time (`uTime`), camera state (`uCamPos`, `uCamRight`, `uCamUp`, `uCamForward`), and resolution (`uResolution`) [S1, unofficial].
+*   **Outputs:** A color buffer representing the rendered city scene [S1, unofficial].
+
+**Data Structures:**
+The scene is defined implicitly. No vertex buffers or texture arrays are used for geometry [S1, unofficial]. The only persistent data structures are the uniform variables passed from the CPU and the local variables within the fragment shader [S1, unofficial].
+
+**Parameters:**
+*   `MAX_STEPS`: 128 [S1, unofficial].
+*   `MAX_DIST`: 180.0 [S1, unofficial].
+*   `BLOCK_WIDTH`: 13.0 [S1, unofficial].
+*   `BLOCK_DEPTH`: 14.0 [S1, unofficial].
+*   `MARGIN`: 1.5 [S1, unofficial].
+*   Road Amplitudes: `RD_A1 = 6.0`, `RD_A2 = 3.0`, `RD_A3 = 1.2` [S1, unofficial].
+*   Road Frequencies: `RD_F1 = 0.03141593` ($2\pi/200$), `RD_F2 = 0.06613879` ($2\pi/95$), `RD_F3 = 0.11424174` ($2\pi/55$) [S1, unofficial].
+*   Road Phases: `RD_P2 = 1.7`, `RD_P3 = 4.2` [S1, unofficial].
+
+**Steps:**
+1.  **Initialization:** Create a WebGL2 context with antialiasing and alpha disabled, create a vertex array object (VAO) for a fullscreen triangle generated via `gl_VertexID`, and compile/link a vertex shader (`fullscreen.vert.glsl`) and fragment shader (`raymarch.frag.glsl`) [S1, unofficial].
+2.  **Uniform Setup:** Cache uniform locations for `uResolution`, `uTime`, `uCamPos`, `uCamRight`, `uCamUp`, and `uCamForward` [S1, unofficial].
+3.  **Frame Loop:** On each frame, resize the canvas to `clientSize * devicePixelRatio * renderScale`, set the viewport, and pass the `FrameState` (time and camera basis) to the shader uniforms [S1, unofficial]. Draw a single triangle with `gl.drawArrays(gl.TRIANGLES, 0, 3)` to invoke the fragment shader for every pixel [S1, unofficial].
+4.  **Ray Generation:** In the fragment shader, compute the ray origin $\mathbf{o}$ from `uCamPos` and ray direction $\mathbf{d}$ from the pixel UV, `uResolution`, and camera basis vectors:
+    $$ \mathbf{d} = \text{normalize}(\mathbf{f} + u \cdot \mathbf{r} + v \cdot \mathbf{u}) $$
+    where $\mathbf{f}$ is `uCamForward`, $\mathbf{r}$ is `uCamRight`, and $\mathbf{u}$ is `uCamUp` [S1, unofficial].
+5.  **Sphere Tracing:** Iterate up to `MAX_STEPS` (128) or until distance $> \text{MAX\_DIST}$ (180.0), evaluating the scene SDF at each step [S1, unofficial].
+6.  **Scene SDF Evaluation:** Combine the ground plane ($y=0$) and domain-repeated building boxes in 'road space', where the road centerline is defined by an analytic curve [S1, unofficial]. Compute road offset:
+    $$ \text{roadX}(z) = \text{RD\_A1} \sin(z \cdot \text{RD\_F1}) + \text{RD\_A2} \sin(z \cdot \text{RD\_F2} + \text{RD\_P2}) + \text{RD\_A3} \sin(z \cdot \text{RD\_F3} + \text{RD\_P3}) $$
+    [S1, unofficial]. Hash each building cell $(c_x, c_y, c_z)$ using a deterministic integer hash function shared with the CPU to determine footprint, height, and materials [S1, unofficial]. Buildings are placed in cells with a setback from the road, tiled with `BLOCK_WIDTH` (13.0) and `BLOCK_DEPTH` (14.0), with a margin of 1.5 units to prevent overlap between adjacent cells [S1, unofficial]. The scene SDF is the union: $S(\mathbf{p}) = \min(S_{\text{ground}}(\mathbf{p}), S_{\text{buildings}}(\mathbf{p}))$ [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+# Constants
+MAX_STEPS = 128
+MAX_DIST = 180.0
+BLOCK_WIDTH = 13.0
+BLOCK_DEPTH = 14.0
+MARGIN = 1.5
+RD_A1 = 6.0
+RD_A2 = 3.0
+RD_A3 = 1.2
+RD_F1 = 0.03141593
+RD_F2 = 0.06613879
+RD_F3 = 0.11424174
+RD_P2 = 1.7
+RD_P3 = 4.2
+
+def road_x(z):
+    return (RD_A1 * math.sin(z * RD_F1) +
+            RD_A2 * math.sin(z * RD_F2 + RD_P2) +
+            RD_A3 * math.sin(z * RD_F3 + RD_P3))
+
+def uhash(x):
+    x = x & 0xFFFFFFFF
+    x ^= (x >> 16)
+    x = (x * 0x7feb352d) & 0xFFFFFFFF
+    x ^= (x >> 15)
+    x = (x * 0x846ca68b) & 0xFFFFFFFF
+    return x & 0xFFFFFFFF
+
+def hash_cell(cx, cy, cz):
+    h = uhash((cx * 0x9e3779b9) & 0xFFFFFFFF)
+    h = uhash(h ^ ((cy * 0x85ebca6b) & 0xFFFFFFFF))
+    h = uhash(h ^ ((cz * 0xc2b2ae35) & 0xFFFFFFFF))
+    return h & 0xFFFFFFFF
+
+def hash_to_float(h):
+    return ((h >> 8) / 16777216.0)
+
+def sdf_box(p, center, half_size):
+    q = [abs(p[i] - center[i]) - half_size[i] for i in range(3)]
+    return min(max(q[0], max(q[1], q[2])), 0.0) + math.sqrt(sum(max(q[i], 0.0)**2 for i in range(3)))
+
+def sdf_building(p, cx, cy, cz, seed):
+    f1 = hash_to_float(seed)
+    f2 = hash_to_float(seed ^ 1)
+    f3 = hash_to_float(seed ^ 2)
+    
+    half_w = (BLOCK_WIDTH - MARGIN) * (0.5 + 0.5 * f1)
+    half_d = (BLOCK_DEPTH - MARGIN) * (0.5 + 0.5 * f2)
+    half_h = 10.0 + 20.0 * f3
+    
+    cell_cx = cx * BLOCK_WIDTH + BLOCK_WIDTH / 2.0
+    cell_cz = cz * BLOCK_DEPTH + BLOCK_DEPTH / 2.0
+    cell_cy = cy * BLOCK_DEPTH + BLOCK_DEPTH / 2.0
+    
+    center = [cell_cx + road_x(p[2]), cell_cy, cell_cz]
+    half_size = [half_w, half_h, half_d]
+    
+    return sdf_box(p, center, half_size)
+
+def scene_sdf(p):
+    rx = road_x(p[2])
+    p_local_x = p[0] - rx
+    
+    cx = math.floor(p_local_x / BLOCK_WIDTH)
+    cz = math.floor(p[2] / BLOCK_DEPTH)
+    cy = math.floor(p[1] / BLOCK_DEPTH)
+    
+    seed = hash_cell(cx, cy, cz)
+    d_build = sdf_building(p, cx, cy, cz, seed)
+    
+    d_ground = p[1]
+    
+    return min(d_ground, d_build)
+
+def compute_color(p, d):
+    return [0.0, 0.0, 0.0]
+
+def background_color():
+    return [0.0, 0.0, 0.0]
+
+def render_pixel(uv, cam_pos, cam_right, cam_up, cam_forward):
+    o = cam_pos
+    d = [cam_forward[i] + uv[0] * cam_right[i] + uv[1] * cam_up[i] for i in range(3)]
+    d_len = math.sqrt(sum(v**2 for v in d))
+    d = [v / d_len for v in d]
+    
+    t = 0.0
+    for _ in range(MAX_STEPS):
+        p = [o[i] + t * d[i] for i in range(3)]
+        d_val = scene_sdf(p)
+        
+        if d_val < 0.001:
+            return compute_color(p, d)
+        if t > MAX_DIST:
+            return background_color()
+        
+        t += max(d_val, 0.0)
+        
+    return background_color()
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The hash function uses 32-bit integer arithmetic to ensure bit-identical results between JavaScript (CPU) and GLSL (GPU). Using floating-point hashing (e.g., `fract(sin(...))`) would cause drift and mismatched geometry [S1, unofficial].
+*   **Road Curvature:** The road curve is designed to have a maximum heading of ~28 degrees and a minimum radius of curvature of ~29 units to ensure drivability and visual coherence [S1, unofficial].
+*   **Overlap:** The margin of 1.5 units prevents adjacent building cells from overlapping, ensuring the SDF union remains valid [S1, unofficial].
+
+## Subtopics
+
+### Terrain Raymarching
+Renders heightmap-based terrain using SDFs. Differs from Neon Raymarcher by using a 2D heightmap instead of a 3D procedural hash for geometry. Choose for natural landscapes. [Terrain Raymarching](1357-terrain-raymarching.md)
+
+### Menger Sponge Raymarching
+Renders fractal geometry using recursive SDF operations. Differs by using iterative min/max operations for fractal detail rather than hash-based placement. Choose for mathematical fractals. [Menger Sponge Raymarching](4875-menger-sponge-raymarching.md)
+
+### Fractals and Mathematical Surfaces
+General category for rendering fractals via SDFs. Neon Raymarcher is a specific application using hash-based placement. [Fractals and Mathematical Surfaces](10024-fractals-and-mathematical-surfaces.md)
+
+### Signed Distance Field Representations and Operations
+Defines the mathematical foundation (union, intersection, subtraction) used by Neon Raymarcher. [Signed Distance Field Representations and Operations](13339-signed-distance-field-representations-and-operations.md)
+
+## Operating characteristics
+*   **Time Complexity:** $O(N \cdot S)$ where $N$ is the number of pixels and $S$ is the number of steps (128). The SDF evaluation is $O(1)$ per step [S1, unofficial].
+*   **Memory Complexity:** $O(1)$ auxiliary memory. No scene graph or geometry buffers are stored [S1, unofficial].
+*   **Performance:** Runs in real-time on WebGL2-capable hardware. Performance is limited by fragment shader complexity and fill rate [S1, unofficial].
+*   **Strengths:** Infinite procedural generation, no asset loading, deterministic CPU/GPU sync [S1, unofficial].
+*   **Limitations:** Limited to procedural geometry; cannot render arbitrary meshes. Resolution limited by WebGL2 capabilities [S1, unofficial].
+
+## Background
+Neon Raymarcher is a WebGL2 experiment published on GitHub [S1, unofficial]. It demonstrates the capability of modern fragment shaders to render complex procedural scenes without traditional graphics pipeline assets. The project emphasizes the importance of deterministic hashing for cross-platform consistency in procedural generation [S1, unofficial].
+
+## Sources
+[S1] PIGJET/neon-raymarcher, https://github.com/PIGJET/neon-raymarcher, fetched 2026-10-27 (unofficial)

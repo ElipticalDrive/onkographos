@@ -1,0 +1,104 @@
+--- v006.md
++++ v007.md
+@@ -22,5 +22,5 @@
+ **Steps:**
+ 1. **Mesh Normalization:** Transform the mesh $M$ so that it fits inside a unit sphere centered at the origin [S2, unofficial].
+-2. **Surface Sampling:** Generate a set of points $P_{surf}$ uniformly distributed on the surface of $M$. The number of surface points is determined by the desired split ratio. According to the DeepSDF paper, a 2:2:1 split is used for surface, near, and uniform samples, meaning $N_{surf} = N_{near} = \frac{2}{5}N$ and $N_{uniform} = \frac{1}{5}N$ [S1].
++2. **Surface Sampling:** Generate a set of points $P_{surf}$ uniformly distributed on the surface of $M$ [S2, unofficial]. The number of surface points is determined by the desired split ratio [S1]. According to the DeepSDF paper, a 2:2:1 split is used for surface, near, and uniform samples, meaning $N_{surf} = N_{near} = \frac{2}{5}N$ and $N_{uniform} = \frac{1}{5}N$ [S1].
+ 3. **Near-Surface Perturbation:** For each point $p \in P_{surf}$, generate a perturbed point $p'$ by adding Gaussian noise:
+    $$ p' = p + \epsilon, \quad \epsilon \sim \mathcal{N}(0, \sigma^2 I) $$
+@@ -31,6 +31,6 @@
+    - **Sign:** Determine if the point is inside or outside the surface.
+      - *Normal Method:* Compute the dot product of the vector $(p' - q)$ and the normal $n_q$ at $q$ [S2, unofficial].
+-     - *Depth Method:* Project the point into the camera frame of each scan. If the point's depth is greater than the depth buffer value for any camera, it is outside (positive sign) [S2, unofficial].
+-6. **Validation:** Check the fraction of points inside the shape (negative SDF). If this fraction is less than `min_size` (default 0), throw an exception [S2, unofficial].
++     - *Depth Method:* Project the point into the camera frame of each scan [S2, unofficial]. If the point's depth is greater than the depth buffer value for any camera, it is outside (positive sign) [S2, unofficial].
++6. **Validation:** Check the fraction of points inside the shape (negative SDF) [S2, unofficial]. If this fraction is less than `min_size` (default 0), throw an exception [S2, unofficial].
+ 
+ **Pseudocode:**
+@@ -61,22 +61,23 @@
+ 
+ def sample_uniform_in_sphere(R, count):
+-    points = np.random.uniform(-R, R, size=(count * 2, 3))
+-    valid = np.sum(points**2, axis=1) <= R**2
+-    while np.sum(valid) < count:
+-        extra = np.random.uniform(-R, R, size=((count - np.sum(valid)) * 2, 3))
+-        valid = np.concatenate([valid, np.sum(extra**2, axis=1) <= R**2])
+-        points = np.vstack([points, extra])
+-    return points[valid][:count]
++    points = []
++    while len(points) < count:
++        extra = np.random.uniform(-R, R, size=(count * 2, 3))
++        valid = np.sum(extra**2, axis=1) <= R**2
++        points.append(extra[valid])
++    return np.vstack(points)[:count]
+ 
+-def get_surface_point_cloud(vertices, faces, method='sample'):
+-    cloud_pts = sample_mesh_surface(vertices, faces, 1000000)
+-    normals = np.zeros_like(cloud_pts)
+-    for i in range(len(cloud_pts)):
+-        f = faces[np.random.randint(len(faces))]
+-        v0, v1, v2 = vertices[f]
+-        n = np.cross(v1 - v0, v2 - v0)
+-        norm = np.linalg.norm(n)
+-        normals[i] = n / norm if norm > 0 else np.array([0.0, 0.0, 0.0])
+-    return cloud_pts, normals
++def get_surface_point_cloud(vertices, faces, count=1000000):
++    areas = np.linalg.norm(np.cross(
++        vertices[faces[:, 1]] - vertices[faces[:, 0]],
++        vertices[faces[:, 2]] - vertices[faces[:, 0]]
++    ), axis=1) / 2.0
++    face_normals = np.cross(vertices[faces[:, 1]] - vertices[faces[:, 0]], 
++                            vertices[faces[:, 2]] - vertices[faces[:, 0]])
++    face_normals /= np.linalg.norm(face_normals, axis=1, keepdims=True)
++    face_indices = np.random.choice(len(faces), size=count, p=areas/np.sum(areas))
++    pts = sample_mesh_surface(vertices, faces, count)
++    normals = face_normals[face_indices]
++    return pts, normals
+ 
+ def near_surface_point_sampling(vertices, faces, N=500000, sigma=0.01, R=1.0, min_size=0.0):
+@@ -92,5 +93,5 @@
+     P_all = np.vstack([P_near, P_uniform])
+     
+-    cloud_pts, normals = get_surface_point_cloud(vertices, faces, method='sample')
++    cloud_pts, normals = get_surface_point_cloud(vertices, faces, count=1000000)
+     dists = np.linalg.norm(P_all[:, None, :] - cloud_pts[None, :, :], axis=2)
+     idx = np.argmin(dists, axis=1)
+@@ -100,7 +101,8 @@
+     n = normals[idx]
+     vec = P_all - q
+-    S = np.sign(np.dot(vec, n))
++    S = np.sign((vec * n).sum(axis=1))
+     
+-    fraction_inside = np.sum(S == -1.0) / N
++    uniform_mask = slice(N_surf + N_near, None)
++    fraction_inside = np.sum(S[uniform_mask] == -1.0) / N_uniform
+     if fraction_inside < min_size:
+         raise Exception(f"Too few points inside shape: {fraction_inside} < {min_size}")
+@@ -111,5 +113,5 @@
+ **Edge Cases and Pitfalls:**
+ - **Non-watertight meshes:** The sampling method requires watertight meshes with correct face normals [S2, unofficial].
+-- **Sign determination:** The normal method can produce "bubble" artifacts in concave regions or near holes. The depth method avoids these artifacts but is less accurate [S2, unofficial].
++- **Sign determination:** The normal method can produce "bubble" artifacts in concave regions or near holes [S2, unofficial]. The depth method avoids these artifacts but is less accurate [S2, unofficial].
+ 
+ ## Subtopics
+@@ -134,9 +136,9 @@
+ 
+ ### Loose µ-Sample
+-A set of points $E$ is a loose $\mu$-sample of a surface $S$ if: 1) For all $x \in S \cap V(E)$, the ball $B(x, \mu \times \text{lfs}(x))$ contains a point from $E$ (radius of all surface Delaunay balls is less than $\mu$). 2) The Delaunay triangulation of $E$ restricted to $S$ has vertices on all connected components of $S$ [S3, unofficial]. It differs by providing a formal geometric sampling criterion for mesh generation refinement. Choose it when constructing isotopic surface meshes via Delaunay refinement. Parameter: $\mu$ (scaling factor for local feature size) [S3, unofficial].
++A set of points $E$ is a loose $\mu$-sample of a surface $S$ if: 1) For all $x \in S \cap V(E)$, the ball $B(x, \mu \times \text{lfs}(x))$ contains a point from $E$ (radius of all surface Delaunay balls is less than $\mu$). 2) The Delaunay triangulation of $E$ restricted to $S$ has vertices on all connected components of $S$ [S3, unofficial]. It differs by providing a formal geometric sampling criterion for mesh generation refinement [S3, unofficial]. Choose it when constructing isotopic surface meshes via Delaunay refinement [S3, unofficial]. Parameter: $\mu$ (scaling factor for local feature size) [S3, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Not given in the sources.
+-- **Memory Complexity:** Not given in the sources.
++- **Time Complexity:** Not given in the sources [S2, unofficial].
++- **Memory Complexity:** Not given in the sources [S2, unofficial].
+ - **Performance:** Training is performed on NVIDIA Tesla V100 GPUs using PyTorch with a batch size of 512 [S1].
+ - **Strengths:** Provides high-density samples near the surface, which improves the accuracy of the learned SDF [S1].
+@@ -144,5 +146,5 @@
+ 
+ ## Background
+-The method was proposed in the DeepSDF paper [S2, unofficial]. It is used in neural implicit surface reconstruction to provide training data that emphasizes the surface boundary. The implementation is available in the `mesh_to_sdf` repository [S2, unofficial].
++The method was proposed in the DeepSDF paper [S2, unofficial]. It is used in neural implicit surface reconstruction to provide training data that emphasizes the surface boundary [S1]. The implementation is available in the `mesh_to_sdf` repository [S2, unofficial].
+ 
+ ## Sources

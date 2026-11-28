@@ -1,0 +1,123 @@
+# Voxelize Point Cloud (Basic Mode)
+Also called: Basic partitioning mode
+## Overview
+Voxelize Point Cloud (Basic Mode) is a voxelization method that determines grid dimensions dynamically based on a user-specified target number of cells per axis ($N$) and the point cloud's bounding box extent [S1, unofficial]. It differs from sibling methods by applying a fixed percentage padding to the bounding box extent after an initial "preflight" calculation, which can result in output dimensions that deviate from the requested $N$ [S1, unofficial]. Unlike the [Existing Partition Grid Mode](15084-voxelize-point-cloud-existing-partition-grid-mode.md), it does not validate for zero spacing during preflight, risking division-by-zero errors on degenerate inputs [S1, unofficial].
+## How it works
+### Inputs and Outputs
+**Inputs:**
+- Point cloud data with 3D coordinates $(x, y, z)$ [S1, unofficial].
+- User parameter $N$: Target number of cells per axis [S1, unofficial].
+- Grid origin $(o_x, o_y, o_z)$ and cell size $s$ are derived, not input directly [G].
+
+**Outputs:**
+- A voxel grid (Image Geometry) with dimensions $D_x, D_y, D_z$ [S1, unofficial].
+- A binary mask or data array associated with the grid, indicating occupied voxels [S1, unofficial].
+
+### Data Structures
+The output geometry is an `ImageGeometry` object [S1, unofficial]. Key fields include:
+- `spacing`: A 3D vector $(s_x, s_y, s_z)$ representing cell dimensions [S1, unofficial]. In Basic Mode, $s_x = s_y = s_z = s$ [S1, unofficial].
+- `dimensions`: A 3D vector $(D_x, D_y, D_z)$ representing the number of voxels along each axis [S1, unofficial].
+- `origin`: The 3D coordinates of the grid's starting corner [G].
+
+### Steps
+1. **Calculate Bounding Box:** Determine the axis-aligned bounding box (AABB) of the input point cloud [S1, unofficial]. Let $E_x, E_y, E_z$ be the extents (max - min) along each axis [S1, unofficial].
+2. **Preflight Calculation:** Calculate initial spacing $s = \max(E_x, E_y, E_z) / N$ [S1, unofficial]. This step is used for preflight validation but does not define the final output [S1, unofficial].
+3. **Apply Padding:** Add a fixed padding factor to the extent [S1, unofficial]. The source specifies a padding of $0.1\%$ to the extent, implemented as a multiplier of $1.002$ in the dimension calculation step [S1, unofficial]. Padded extent: $E'_i = E_i \times 1.002$ [S1, unofficial].
+4. **Recalculate Dimensions:** The final dimensions are calculated using the preflight spacing $s$ and the padded extent: $D_i = \lceil E'_i / s \rceil = \lceil 1.002 \times E_i / s \rceil$ [S1, unofficial]. Substituting $s = \max(E_x, E_y, E_z) / N$ yields $D_i = \lceil 1.002 \times E_i \times N / \max(E_x, E_y, E_z) \rceil$ [S1, unofficial].
+5. **Voxelization:** Map each point $(p_x, p_y, p_z)$ to voxel indices $(v_x, v_y, v_z)$ using the shared principles of the parent method: $v_i = \lfloor (p_i - o_i) / s \rfloor$ [S1, unofficial]. Clamp indices to $[0, D_i - 1]$ [S1, unofficial]. Mark the corresponding voxel in the output mask/array [S1, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def voxelize_point_cloud_basic(points, N):
+    """
+    Voxelize a point cloud using Basic Mode.
+    Args:
+        points: List of 3D coordinates (x, y, z).
+        N: Target number of cells per axis.
+    Returns:
+        dimensions: Tuple (Dx, Dy, Dz)
+        spacing: Float s
+        mask: 3D boolean array of shape (Dx, Dy, Dz)
+    """
+    if not points:
+        raise ValueError("Empty point cloud")
+
+    # 1. Calculate Bounding Box
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+    zs = [p[2] for p in points]
+    min_x, max_x = min(xs), max(xs)
+    min_y, max_y = min(ys), max(ys)
+    min_z, max_z = min(zs), max(zs)
+    ex = max_x - min_x
+    ey = max_y - min_y
+    ez = max_z - min_z
+
+    # 2. Preflight Spacing Calculation
+    max_extent = max(ex, ey, ez)
+    spacing = max_extent / N
+
+    # 3 & 4. Recalculate Dimensions with Padding
+    # Padding factor 1.002 applied to extent
+    padded_ex = ex * 1.002
+    padded_ey = ey * 1.002
+    padded_ez = ez * 1.002
+
+    Dx = math.ceil(padded_ex / spacing)
+    Dy = math.ceil(padded_ey / spacing)
+    Dz = math.ceil(padded_ez / spacing)
+
+    # 5. Voxelization
+    # Origin is typically the min corner of the bounding box
+    origin_x, origin_y, origin_z = min_x, min_y, min_z
+
+    mask = [[[False for _ in range(Dz)] for _ in range(Dy)] for _ in range(Dx)]
+
+    for p in points:
+        px, py, pz = p
+        vx = int(math.floor((px - origin_x) / spacing))
+        vy = int(math.floor((py - origin_y) / spacing))
+        vz = int(math.floor((pz - origin_z) / spacing))
+
+        # Clamp to grid bounds
+        vx = max(0, min(vx, Dx - 1))
+        vy = max(0, min(vy, Dy - 1))
+        vz = max(0, min(vz, Dz - 1))
+
+        mask[vx][vy][vz] = True
+
+    return (Dx, Dy, Dz), spacing, mask
+```
+
+### Parameters
+- $N$: Target number of cells per axis [S1, unofficial]. Typical values are not specified, but values $< 500$ exhibit dimension inflation [S1, unofficial].
+
+### Edge Cases and Pitfalls
+1. **Dimension Inflation:** For $N < 500$, the executed dimensions are $N+1$, not $N$ [S1, unofficial]. For example, $N=10$ results in $11 \times 11 \times 11$, and $N=2$ results in $4 \times 4 \times 4$ [S1, unofficial].
+2. **Zero Extent (Degenerate Input):** If the bounding box has zero extent on an axis (e.g., a planar cloud at $z=100$), and the internal padding (noted as $1e-6$ in some contexts, but $0.1\%$ in the formula) is smaller than half a float32 ULP ($\approx 7.6e-6$), the padded extent may remain  [S1, unofficial]. This results in spacing 0, causing a divide-by-zero in dimension calculation ($\lceil distance/0 \rceil = \infty$), leading to undefined behavior, `bad_alloc`, or incorrect grids [S1, unofficial].
+3. **Preflight Mismatch:** Preflight dimensions and origin do not agree with the output dimensions, causing downstream filters to receive incorrect geometry information during preflight [S1, unofficial].
+4. **Zero Spacing Validation:** Unlike the 'Existing Image Geometry' path, Basic mode allows zero spacing if not fixed, leading to division by zero [S1, unofficial].
+
+## Subtopics
+
+### Adaptive Axis-Aligned Grid Generation
+Generates a grid aligned to the shortest axis of a point cloud, with padding $\epsilon$ [S2, unofficial]. It computes the bounding box from min/max of points, identifies the shortest axis, and uses `linspace` for that axis while using `arange` for the other two axes with spacing derived from the shortest axis length [S2, unofficial]. Returns a dictionary with keys: `grid_points` (tensor $[N, 3]$), `shortest_axis_length` (float), `xyz` (list of 1D arrays), and `shortest_axis_index` (int) [S2, unofficial].
+
+## Operating characteristics
+- Time complexity: Not given in the sources [S1, unofficial].
+- Memory complexity: Not given in the sources [S1, unofficial].
+- Strengths: Simple to implement; user-friendly parameter ($N$) instead of spacing [G].
+- Limitations: Unpredictable output dimensions due to padding and ceiling operations; prone to errors on degenerate (planar/point) clouds; preflight/output mismatch [S1, unofficial].
+- When to use: When a rough grid resolution is desired and the point cloud is well-formed (non-degenerate, 3D extent) [G].
+- When not to use: When exact grid dimensions are required; when processing planar or point-like clouds; when preflight consistency is critical for downstream processing [G].
+
+## Background
+This method is part of the `simplnx` library's voxelization filters [S1, unofficial]. The implementation highlights gaps in preflight testing and error handling for degenerate cases, as noted in code reviews [S1, unofficial].
+
+## Sources
+[S1] FILT: Voxelize Point Cloud, https://github.com/BlueQuartzSoftware/simplnx/pull/1724, fetched 2026-10-27 (unofficial)
+[S2] pbonazzi/guassian-diffusion, https://github.com/pbonazzi/guassian-diffusion, fetched 2026-10-28 (unofficial)

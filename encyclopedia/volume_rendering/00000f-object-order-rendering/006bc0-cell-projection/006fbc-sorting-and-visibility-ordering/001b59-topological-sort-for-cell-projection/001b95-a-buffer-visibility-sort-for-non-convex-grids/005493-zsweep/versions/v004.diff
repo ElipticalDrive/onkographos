@@ -1,0 +1,111 @@
+--- v003.md
++++ v004.md
+@@ -8,9 +8,9 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** An unstructured dataset containing tetrahedral and/or hexahedral cells [S3, unofficial]. A viewing direction defining the z-axis for the sweep.
++*   **Input:** An unstructured dataset containing tetrahedral and/or hexahedral cells [S3, unofficial]. A viewing direction defining the z-axis for the sweep [S3, unofficial].
+ *   **Output:** A rendered image with correct visibility and opacity accumulation.
+ 
+ **Data Structures:**
+-*   **Active Cell Set:** A data structure holding only the cells currently intersected by the sweep plane. This keeps the memory footprint low [S2, unofficial].
++*   **Active Cell Set:** A data structure holding only the cells currently intersected by the sweep plane [S2, unofficial]. This keeps the memory footprint low [S2, unofficial].
+ *   **Face Intersection List:** A short list of ordered face intersections for each pixel, known to be correct and complete at the instant each stage of computation is completed [S3, unofficial].
+ *   **Auxiliary Data Structures:** Store partial information taken from a small number of "slices" of the dataset [S3, unofficial].
+@@ -29,53 +29,61 @@
+ **Pseudocode:**
+ ```python
+-# Pseudocode for ZSWEEP
+-# Note: Specific implementation details for the sweep plane traversal and 
+-# face projection logic are not fully detailed in the sources beyond the high-level steps.
+-# The following represents the logical flow described in [S2, S3, unofficial][S4].
+-
+ def zsweep_render(mesh, view_direction, pre_integration_table):
+     # 1. Sort vertices by their coordinate along the view direction (z)
+-    sorted_vertices = sort_vertices_by_z(mesh.vertices, view_direction)
++    sorted_vertices = sorted(mesh.vertices, key=lambda v: dot(v.position, view_direction))
+     
+     # 2. Initialize active cell set and auxiliary data structures
+     active_cells = set()
+-    pixel_intersections = initialize_pixel_lists()
++    pixel_intersections = {}  # Maps pixel_id to list of (face, depth, cell_data)
+     
+     # 3. Sweep plane moves from front to back (increasing z)
+     for vertex in sorted_vertices:
+         # Identify cells incident to the current vertex
+-        incident_cells = get_incident_cells(mesh, vertex)
++        incident_cells = mesh.get_cells_incident_to(vertex)
+         
+         # Add incident cells to the active set if not already present
+         for cell in incident_cells:
+-            if cell not in active_cells:
+-                active_cells.add(cell)
+-                
++            active_cells.add(cell)
++            
+         # 4. Project faces of cells incident to the current vertex
+         # Avoid double projection of internal faces
+-        projected_faces = project_faces_for_vertex(mesh, active_cells, vertex)
+-        
++        projected_faces = []
++        for cell in active_cells:
++            for face in cell.faces:
++                if face.is_boundary or face.owner == cell:
++                    projected_faces.append(face)
++                    
+         # 5. Rasterize and update pixel intersection lists
+         for face in projected_faces:
+-            rasterize_face(face, pixel_intersections)
++            screen_coords = project_to_screen(face, view_direction)
++            pixel_id = get_pixel_id(screen_coords)
++            if pixel_id not in pixel_intersections:
++                pixel_intersections[pixel_id] = []
++            pixel_intersections[pixel_id].append((face, face.center_depth, cell.data))
+             
+         # 6. Compute pixel contributions using the ordered intersection lists
+         # The list is guaranteed to be correct and complete at this stage
+-        for pixel in active_pixels:
+-            intersections = get_ordered_intersections(pixel_intersections, pixel)
+-            if intersections:
+-                # Use pre-integrated table for optical model (absorption + emission)
+-                color, opacity = integrate_through_intersections(
+-                    intersections, 
+-                    pre_integration_table, 
+-                    mesh.cell_data
+-                )
+-                composite_pixel(pixel, color, opacity)
+-                
++        for pixel_id in list(pixel_intersections.keys()):
++            intersections = pixel_intersections[pixel_id]
++            intersections.sort(key=lambda x: x[1])  # Sort front-to-back
++            color, opacity = 0.0, 0.0
++            for face, depth, cell_data in intersections:
++                sample_color, sample_opacity = pre_integration_table.lookup(cell_data)
++                alpha = 1.0 - opacity
++                color += sample_color * sample_opacity * alpha
++                opacity += sample_opacity * alpha
++                if opacity >= 1.0:
++                    break
++            del pixel_intersections[pixel_id]  # Clear after processing
++            
+         # Remove cells from active set if they are no longer intersected by the sweep plane
+-        # This keeps memory footprint low
+-        active_cells = update_active_cells(active_cells, vertex)
++        active_cells = {c for c in active_cells if c.is_behind_sweep_plane(vertex)}
+         
+-    return rendered_image
++    return pixel_intersections
++
++# Helper definitions (standard operations)
++def dot(a, b): return sum(x * y for x, y in zip(a, b))
++def project_to_screen(face, view_dir): return [v - dot(v, view_dir) * view_dir for v in face.vertices]
++def get_pixel_id(coords): return (int(coords[0]), int(coords[1]))
+ ```
+ 
+@@ -95,5 +103,5 @@
+ 
+ ### X-Bucket and X-Actives Processing
+-This variant involves processing scanlines from bottom to top. For each scanline, a 'critical section' of code is entered, where only one processor can run at a time [S6]. The surviving polygons of the previous pixel's x-actives list must be updated with newly interpolated values of field data and screen-z. New screen-z values may require rearrangement of polygons among survivors to maintain screen-z order [S6]. Taking into account the line-of-sight distance between the two polygons, the color-opacity contribution for that inter-polygon region is calculated and composited into a software floating point frame buffer using standard equations [S6].
++This variant involves processing scanlines from bottom to top [S6]. For each scanline, a 'critical section' of code is entered, where only one processor can run at a time [S6]. The surviving polygons of the previous pixel's x-actives list must be updated with newly interpolated values of field data and screen-z [S6]. New screen-z values may require rearrangement of polygons among survivors to maintain screen-z order [S6]. Taking into account the line-of-sight distance between the two polygons, the color-opacity contribution for that inter-polygon region is calculated and composited into a software floating point frame buffer using standard equations [S6].
+ 
+ ## Operating characteristics

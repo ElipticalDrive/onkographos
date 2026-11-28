@@ -1,0 +1,4012 @@
+# CaSE-NeRF: Camera Settings Editing of Neural Radiance Fields
+
+Perform controlled editing of camera settings in the scene
+
+https://github.com/CPREgroup/CaSE-NeRF/assets/65144944/b7a747be-8f5d-471b-b86a-f5ddb5ae7b15
+
+# Training
+Run the following command, make sure the path is correct.
+`python -m train --gin_file=configs/llff.gin --logtostderr`  
+
+You can also train your own dataset, as long as it confroms to NeRF data format.  
+
+# Data
+You can download the datasets from the following link：(https://pan.baidu.com/s/1gcWQ6i8lz7GnLZ_xpdSZyg?pwd=auqw).
+
+### datatool.py
+```
+import cv2
+import numpy as np
+import os
+
+def mkdir(path):
+    folder = os.path.exists(path)
+    if not folder:
+        os.makedirs(path)
+#3,7,15,31,51,71,101
+kernel_size = 201
+data_in_path = 'data/tt/1'
+data_out_path = 'data/tt/{}/images_1/'.format(kernel_size)
+mkdir(data_out_path)
+
+if __name__ == "__main__":
+    imgs_T = os.listdir(data_in_path)
+    for image_name in imgs_T:
+        if image_name == '.ipynb_checkpoints':
+            continue
+        img_T = cv2.imread(os.path.join(data_in_path , image_name))
+        print(data_in_path + image_name)
+        dst = cv2.GaussianBlur(img_T, (kernel_size, kernel_size), 0) 
+        cv2.imwrite(os.path.join(data_out_path , image_name), dst)
+        # cv2.waitKey()
+```
+
+### eval.py
+```
+# Copyright 2021 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Lint as: python3
+"""Evaluation script for mip-NeRF."""
+import functools
+from os import path
+
+from absl import app
+from absl import flags
+import flax
+from flax.metrics import tensorboard
+from flax.training import checkpoints
+import jax
+from jax import random
+import numpy as np
+
+from internal import datasets
+from internal import math
+from internal import models
+from internal import utils
+from internal import vis
+
+FLAGS = flags.FLAGS
+utils.define_common_flags()
+flags.DEFINE_bool(
+    'eval_once', True,
+    'If True, evaluate the model only once, otherwise keeping evaluating new'
+    'checkpoints if any exist.')
+flags.DEFINE_bool('save_output', True,
+                  'If True, save predicted images to disk.')
+
+
+def main(unused_argv):
+    
+  #lens params
+
+  #pixel_scale = 50#根据lens公式算出来的是coc以0-1的空间算的。但实际我们训练是按pixel单位算的，需要转换。
+  a=0.02#*pixel_scale
+  f=0.1
+  l=0.6#0.6
+  train_coc=1
+  
+  
+    
+    
+  config = utils.load_config()
+
+  dataset = datasets.get_dataset('test', FLAGS.data_dir, config)
+  model, init_variables = models.construct_mipnerf(
+      random.PRNGKey(20200823), dataset.peek())
+  optimizer = flax.optim.Adam(config.lr_init).create(init_variables)
+  state = utils.TrainState(optimizer=optimizer)
+  del optimizer, init_variables
+
+  # Rendering is forced to be deterministic even if training was randomized, as
+  # this eliminates 'speckle' artifacts.
+  def render_eval_fn(variables, _, rays, a, f, l, train_coc):
+    return jax.lax.all_gather(
+        model.apply(
+            variables,
+            random.PRNGKey(0),  # Unused.
+            rays,
+            randomized=False,
+            white_bkgd=config.white_bkgd, a=a, f=f, l=l, train_coc=train_coc),
+        axis_name='batch')
+
+  render_eval_pfn = jax.pmap(
+      render_eval_fn,
+      in_axes=(None, None, 0, None, None, None, None),  # Only distribute the data input.
+      donate_argnums=(2,),
+      axis_name='batch',
+  )
+
+  #ssim_fn = jax.jit(functools.partial(math.compute_ssim, max_val=1.))
+
+  last_step = 0
+  out_dir = path.join(FLAGS.train_dir,
+                      'path_renders' if config.render_path else 'test_preds')
+  if not FLAGS.eval_once:
+    summary_writer = tensorboard.SummaryWriter(
+        path.join(FLAGS.train_dir, 'eval'))
+  while True:
+    state = checkpoints.restore_checkpoint(FLAGS.train_dir, state)
+    step = int(state.optimizer.state.step)
+    if step <= last_step:
+      continue
+    if FLAGS.save_output and (not utils.isdir(out_dir)):
+      utils.makedirs(out_dir)
+    psnr_values = []
+    #ssim_values = []
+    avg_values = []
+    if not FLAGS.eval_once:
+      showcase_index = random.randint(random.PRNGKey(step), (), 0, dataset.size)
+    for idx in range(dataset.size):
+#     for idx in range(2):
+      print(f'Evaluating {idx+1}/{dataset.size}')
+      batch = next(dataset)
+      pred_color, pred_distance, pred_acc = models.render_image(
+          functools.partial(render_eval_pfn, state.optimizer.target),
+          batch['rays'],
+          None,
+          chunk=FLAGS.chunk, a=a, f=f, l=l, train_coc=train_coc)
+
+      #vis_suite = vis.visualize_suite(pred_distance, pred_acc)
+
+      if jax.host_id() != 0:  # Only record via host 0.
+        continue
+      if not FLAGS.eval_once and idx == showcase_index:
+        showcase_color = pred_color
+        showcase_acc = pred_acc
+        #showcase_vis_suite = vis_suite
+        if not config.render_path:
+          showcase_gt = batch['pixels']
+      if not config.render_path:
+        psnr = float(
+            math.mse_to_psnr(((pred_color - batch['pixels'])**2).mean()))
+        #ssim = float(ssim_fn(pred_color, batch['pixels']))
+        print(f'PSNR={psnr:.4f}')
+        #print(f'PSNR={psnr:.4f} SSIM={ssim:.4f}')
+        psnr_values.append(psnr)
+        #ssim_values.append(ssim)
+      if FLAGS.save_output and (config.test_render_interval > 0):
+        if (idx % config.test_render_interval) == 0:
+          utils.save_img_uint8(
+              pred_color, path.join(out_dir, 'color_{:03d}.png'.format(idx)))
+          # utils.save_img_float32(
+          #     pred_distance,
+          #     path.join(out_dir, 'distance_{:03d}.tiff'.format(idx)))
+          # utils.save_img_float32(
+          #     pred_acc, path.join(out_dir, 'acc_{:03d}.tiff'.format(idx)))
+          #for k, v in vis_suite.items():
+            #utils.save_img_uint8(
+                #v, path.join(out_dir, k + '_{:03d}.png'.format(idx)))
+    print('AVG_PSNR: ', np.mean(np.array(psnr_values)))
+    if (not FLAGS.eval_once) and (jax.host_id() == 0):
+      summary_writer.image('pred_color', showcase_color, step)
+      summary_writer.image('pred_acc', showcase_acc, step)
+      #for k, v in showcase_vis_suite.items():
+        #summary_writer.image('pred_' + k, v, step)
+      if not config.render_path:
+        summary_writer.scalar('psnr', np.mean(np.array(psnr_values)), step)
+        #summary_writer.scalar('ssim', np.mean(np.array(ssim_values)), step)
+        summary_writer.image('target', showcase_gt, step)
+    if FLAGS.save_output and (not config.render_path) and (jax.host_id() == 0):
+      with utils.open_file(path.join(out_dir, f'psnrs_{step}.txt'), 'w') as f:
+        f.write(' '.join([str(v) for v in psnr_values]))
+      #with utils.open_file(path.join(out_dir, f'ssims_{step}.txt'), 'w') as f:
+        #f.write(' '.join([str(v) for v in ssim_values]))
+    if FLAGS.eval_once:
+      break
+    if int(step) >= config.max_steps:
+      break
+    last_step = step
+
+
+if __name__ == '__main__':
+  app.run(main)
+```
+
+### eval_f.py
+```
+# Copyright 2021 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Lint as: python3
+"""Evaluation script for mip-NeRF."""
+import functools
+from os import path
+
+from absl import app
+from absl import flags
+import flax
+from flax.metrics import tensorboard
+from flax.training import checkpoints
+import jax
+from jax import random
+import numpy as np
+import os
+from skimage.metrics import structural_similarity as SSIM
+
+from internal import datasets
+from internal import math
+from internal import models
+from internal import utils
+from internal import vis
+
+
+
+import lpips
+
+FLAGS = flags.FLAGS
+utils.define_common_flags()
+flags.DEFINE_bool(
+    'eval_once', True,
+    'If True, evaluate the model only once, otherwise keeping evaluating new'
+    'checkpoints if any exist.')
+flags.DEFINE_bool('save_output', True,
+                  'If True, save predicted images to disk.')
+
+
+def main(unused_argv):
+    
+  #lens params
+
+  #pixel_scale = 50#根据lens公式算出来的是coc以0-1的空间算的。但实际我们训练是按pixel单位算的，需要转换。
+  a=0 #0.02#*pixel_scale
+  f=0.1
+  l=0.6#0.6
+  train_coc=1
+  
+  
+    
+    
+  config = utils.load_config()
+  FLAGS.train_dir = config.train_dir
+  FLAGS.data_dir = config.data_dir
+  dataset = datasets.get_dataset('test', FLAGS.data_dir, config)
+  # dataset_r3 = datasets.get_dataset('test', path.join(config.data_dir, 'Guassblur', '3'), config)
+  # dataset_r7 = datasets.get_dataset('test', path.join(config.data_dir, 'Guassblur', '7'), config)
+  # dataset_r15 = datasets.get_dataset('test', path.join(config.data_dir, 'Guassblur', '15'), config)
+  # dataset_r31 = datasets.get_dataset('test', path.join(config.data_dir, 'Guassblur', '31'), config)
+  # dataset_r51 = datasets.get_dataset('test', path.join(config.data_dir, 'Guassblur', '51'), config)
+  model, init_variables = models.construct_mipnerf(
+      random.PRNGKey(20200823), dataset.peek())
+  optimizer = flax.optim.Adam(config.lr_init).create(init_variables)
+  state = utils.TrainState(optimizer=optimizer)
+  del optimizer, init_variables
+
+  # Rendering is forced to be deterministic even if training was randomized, as
+  # this eliminates 'speckle' artifacts.
+  def render_eval_fn(variables, _, rays, a, f, l, train_coc):
+    return jax.lax.all_gather(
+        model.apply(
+            variables,
+            random.PRNGKey(0),  # Unused.
+            rays,
+            randomized=False,
+            white_bkgd=config.white_bkgd, a=a, f=f, l=l, train_coc=train_coc),
+        axis_name='batch')
+
+  render_eval_pfn = jax.pmap(
+      render_eval_fn,
+      in_axes=(None, None, 0, None, None, None, None),  # Only distribute the data input.
+      donate_argnums=(2,),
+      axis_name='batch',
+  )
+
+  ssim_fn = jax.jit(functools.partial(math.compute_ssim, max_val=1.))
+  lpips_fn = lpips.LPIPS(net="vgg").eval()
+
+  last_step = 0
+  out_dir = path.join(FLAGS.train_dir,
+                      'path_renders_{}_{}'.format(config.render_temp,config.render_exp) if config.render_path else 'test_preds_{}_{}'.format(config.render_temp,config.render_exp))
+  if not FLAGS.eval_once:
+    summary_writer = tensorboard.SummaryWriter(
+        path.join(FLAGS.train_dir, 'eval'))
+  while True:
+    state = checkpoints.restore_checkpoint(FLAGS.train_dir, state)
+    step = int(state.optimizer.state.step)
+    if step <= last_step:
+      continue
+    if FLAGS.save_output and (not utils.isdir(out_dir)):
+      utils.makedirs(out_dir)
+    psnr_values = []
+    ssim_values = []
+    lpips_values = []
+    avg_values = []
+    if not FLAGS.eval_once:
+      showcase_index = random.randint(random.PRNGKey(step), (), 0, dataset.size)
+    for idx in range(dataset.size):
+      o = dataset.rays.origins[idx]
+      d = dataset.rays.directions[idx]
+      v = dataset.rays.viewdirs[idx]
+      r = dataset.rays.radii[idx]
+      # temp = dataset.render_rays.temperature[idx]
+      # exp = dataset.render_rays.exposure[idx]
+      train_coc = dataset.rays.coc[idx][0][0][0] #1
+      temp = dataset.rays.temperature[idx]
+      exp = dataset.rays.exposure[idx]
+      coc = dataset.rays.coc[idx]
+      loss_mult = dataset.rays.lossmult[idx]
+      ne_ar = dataset.rays.near[idx]
+      f_ar = dataset.rays.far[idx]
+      rrays = utils.Rays(
+          origins=o,
+          directions=d,
+          viewdirs=v,
+          radii=r,
+          lossmult=loss_mult,
+          near=ne_ar,
+          far=f_ar,
+          temperature=temp,
+          exposure=exp,
+          coc=coc,
+      )
+
+      batch = next(dataset)
+#     for idx in range(2):
+#       print(f'Evaluating {idx+1}/{dataset_r3.size*5}')
+#       if idx // 2 == 0:
+#         batch = next(dataset)
+#         train_coc = 1
+#         print(train_coc)
+#       elif idx // 2 == 1:
+#         batch = next(dataset_r3)
+#         train_coc = 3
+#         print(train_coc)
+#       elif idx // 2 == 2:
+#         batch = next(dataset_r7)
+#         train_coc = 7
+#         print(train_coc)
+#       elif idx // 2 == 3:
+#         batch = next(dataset_r15)
+#         train_coc = 15
+#         print(train_coc)
+#       elif idx // 2 == 4:
+#         batch = next(dataset_r31)
+#         train_coc = 31
+#         print(train_coc)
+      # elif idx // 2 == 5:
+      #   batch = next(dataset_r51)
+      #   train_coc = 51
+      #   print(train_coc)
+
+      pred_color, pred_distance, pred_acc = models.render_image(
+          functools.partial(render_eval_pfn, state.optimizer.target),
+          rrays, #batch['rays'],
+          None,
+          chunk=FLAGS.chunk, a=a, f=f, l=l, train_coc=train_coc)
+
+      #vis_suite = vis.visualize_suite(pred_distance, pred_acc)
+
+      if jax.host_id() != 0:  # Only record via host 0.
+        continue
+      if not FLAGS.eval_once and idx == showcase_index:
+        showcase_color = pred_color
+        showcase_acc = pred_acc
+        #showcase_vis_suite = vis_suite
+        if not config.render_path:
+          showcase_gt = batch['pixels']
+      if not config.render_path:
+        psnr = float(
+            math.mse_to_psnr(((pred_color - batch['pixels'])**2).mean()))
+        # ssim = float(ssim_fn(pred_color, batch['pixels']))
+        t1_np = jax.device_get(pred_color)
+        t2_np = jax.device_get(batch['pixels'])
+        ssim = SSIM(t1_np,t2_np,multichannel=True)
+        t1 = t1_np * 255
+        t2 = t2_np * 255
+        lpips_score = lpips_fn(lpips.im2tensor(t1),lpips.im2tensor(t2) , normalize=True).item()
+        # print(f'PSNR={psnr:.4f} lpips={lpips_score:.4f}')
+        print(f'PSNR={psnr:.4f} SSIM={ssim:.4f} LPIPS={lpips_score:.4f}')
+        psnr_values.append(psnr)
+        ssim_values.append(ssim)
+        lpips_values.append(lpips_score)
+        all = jax.numpy.concatenate((t1_np,t2_np),axis = 1)
+      if FLAGS.save_output and (config.test_render_interval > 0):
+        if (idx % config.test_render_interval) == 0:
+          utils.save_img_uint8(
+            all, path.join(out_dir, 'color1_{:03d}.png'.format(idx)))
+          utils.save_img_uint8(
+              pred_color, path.join(out_dir, 'color_{:03d}.png'.format(idx)))
+          # utils.save_img_float32(
+          #     pred_distance,
+          #     path.join(out_dir, 'distance_{:03d}.tiff'.format(idx)))
+          # utils.save_img_float32(
+          #     pred_acc, path.join(out_dir, 'acc_{:03d}.tiff'.format(idx)))
+          #for k, v in vis_suite.items():
+            #utils.save_img_uint8(
+                #v, path.join(out_dir, k + '_{:03d}.png'.format(idx)))
+    print('AVG_PSNR: ', np.mean(np.array(psnr_values)),'AVG_SSIM: ', np.mean(np.array(ssim_values)),'AVG_lpips: ', np.mean(np.array(lpips_values)))
+    if (not FLAGS.eval_once) and (jax.host_id() == 0):
+      summary_writer.image('pred_color', showcase_color, step)
+      summary_writer.image('pred_acc', showcase_acc, step)
+      #for k, v in showcase_vis_suite.items():
+        #summary_writer.image('pred_' + k, v, step)
+      if not config.render_path:
+        summary_writer.scalar('psnr', np.mean(np.array(psnr_values)), step)
+        summary_writer.scalar('ssim', np.mean(np.array(ssim_values)), step)
+        summary_writer.image('target', showcase_gt, step)
+    if FLAGS.save_output and (not config.render_path) and (jax.host_id() == 0):
+      with utils.open_file(path.join(out_dir, f'psnrs_{step}.txt'), 'w') as f:
+        f.write(' '.join([str(v) for v in psnr_values]))
+      with utils.open_file(path.join(out_dir, f'ssims_{step}.txt'), 'w') as f:
+        f.write(' '.join([str(v) for v in ssim_values]))
+      with utils.open_file(path.join(out_dir, f'lpips_{step}.txt'), 'w') as f:
+        f.write(' '.join([str(v) for v in lpips_values]))
+    if FLAGS.eval_once:
+      break
+    if int(step) >= config.max_steps:
+      break
+    last_step = step
+
+
+if __name__ == '__main__':
+  app.run(main)
+```
+
+### eval_render.py
+```
+# -*- coding: utf-8 -*-
+# Copyright 2021 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Lint as: python3
+"""Evaluation script for mip-NeRF."""
+import functools
+from os import path
+
+from absl import app
+from absl import flags
+import flax
+from flax.metrics import tensorboard
+from flax.training import checkpoints
+import jax
+from jax import random
+import numpy as np
+
+from internal import datasets
+from internal import math
+from internal import models
+from internal import utils
+from internal import vis
+from run_nerf_helpers import *
+import imageio
+
+import os
+os.environ["XLA_FLAGS"]="--xla_gpu_strict_conv_algorithm_picker=false"
+os.environ["XLA_FLAGS"]="--xla_gpu_autotune_level=0"
+os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] ='false'
+os.environ['XLA_PYTHON_CLIENT_ALLOCATOR']='platform'
+os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'
+
+FLAGS = flags.FLAGS
+utils.define_common_flags()
+flags.DEFINE_bool(
+    'eval_once', True,
+    'If True, evaluate the model only once, otherwise keeping evaluating new'
+    'checkpoints if any exist.')
+flags.DEFINE_bool('save_output', True,
+                  'If True, save predicted images to disk.')
+
+
+def main(unused_argv):
+    
+  
+  #set the lens parameters for interpolation
+  a1=0.02 #0.02
+  f1=0.1
+  l1=0.67 #0.67
+  pose1=4
+    
+  a2=0.02 #0.02
+  f2=0.1
+  l2=0.67 #0.67
+  pose2=1#0
+
+  train_coc=1
+  fix_pose = True
+
+  # n_frames = 90
+    
+    
+  config = utils.load_config()
+  FLAGS.train_dir = config.train_dir
+  FLAGS.data_dir = config.data_dir
+  dataset = datasets.get_dataset('test', FLAGS.data_dir, config)
+  model, init_variables = models.construct_mipnerf(
+      random.PRNGKey(20200823), dataset.peek())
+  optimizer = flax.optim.Adam(config.lr_init).create(init_variables)
+  state = utils.TrainState(optimizer=optimizer)
+  del optimizer, init_variables
+
+
+  def render_eval_fn(variables, _, rays, a, f, l, train_coc):
+    return jax.lax.all_gather(
+        model.apply(
+            variables,
+            random.PRNGKey(0),  # Unused.
+            rays,
+            randomized=False,
+            white_bkgd=config.white_bkgd, a=a, f=f, l=l, train_coc=train_coc),
+        axis_name='batch')
+
+  render_eval_pfn = jax.pmap(
+      render_eval_fn,
+      in_axes=(None, None, 0, None, None, None, None),  # Only distribute the data input.
+      donate_argnums=(2,),
+      axis_name='batch',
+  )
+    
+
+  ssim_fn = jax.jit(functools.partial(math.compute_ssim, max_val=1.))
+
+  last_step = 0
+  out_dir = path.join(FLAGS.train_dir,
+                      'path_renders_T{}_E{}_A{}'.format(config.render_temp,config.render_exp,a1)
+                      if config.render_path else 'test_preds_T{}_E{}_A{}'.format(config.render_temp,config.render_exp,a1))
+  if not FLAGS.eval_once:
+    summary_writer = tensorboard.SummaryWriter(
+        path.join(FLAGS.train_dir, 'eval'))
+  while True:
+    state = checkpoints.restore_checkpoint(FLAGS.train_dir, state)
+    step = int(state.optimizer.state.step)
+    if step <= last_step:
+      continue
+    if FLAGS.save_output and (not utils.isdir(out_dir)):
+      utils.makedirs(out_dir)
+    psnr_values = []
+    ssim_values = []
+    avg_values = []
+    rgbs = []
+    rays = []
+    n_frames = dataset.render_poses.shape[0]
+    # n_frames = 20
+    if not FLAGS.eval_once:
+      showcase_index = random.randint(random.PRNGKey(step), (), 0, dataset.size)
+    for idx in range(dataset.size):
+        batch = next(dataset)
+        rays.append(batch['rays'])
+        loss_mult = batch['rays'].lossmult
+        ne_ar = batch['rays'].near
+        f_ar = batch['rays'].far
+    for i in range(n_frames):
+        theta = i/n_frames
+
+        o = dataset.render_rays.origins[i]
+        d = dataset.render_rays.directions[i]
+        v = dataset.render_rays.viewdirs[i]
+        r = dataset.render_rays.radii[i]
+        temp = dataset.render_rays.temperature[i]
+        exp = dataset.render_rays.exposure[i]
+        coc =dataset.render_rays.coc[i]
+        
+        a = a1*theta + a2*(1-theta) #aperture
+        f = f1*theta + f2*(1-theta) #focal length
+        l = l1*theta + l2*(1-theta) #focus distance
+        
+        
+        
+        rrays = utils.Rays(
+        origins=o,
+        directions=d,
+        viewdirs=v,
+        radii=r,
+        lossmult=loss_mult,
+        near=ne_ar,
+        far=f_ar,
+        temperature=temp,
+        exposure=exp,
+        coc =coc,
+        )
+        print(f'New__Evaluating {i+1}/n_frames')
+        
+        pred_color, pred_distance, pred_acc = models.render_image(
+          functools.partial(render_eval_pfn, state.optimizer.target),
+          rrays,
+          None,
+          chunk=FLAGS.chunk, a=a, f=f, l=l, train_coc=1)
+        
+        rgbs.append(pred_color)
+        vis_suite = vis.visualize_suite(pred_distance, pred_acc)
+        if jax.host_id() != 0:  # Only record via host 0.
+            continue
+        if FLAGS.save_output and (config.test_render_interval > 0):
+            if (idx % config.test_render_interval) == 0:
+              print('Starting Save!!!!!!!!!!!!!!!!!')
+              print(out_dir)
+              print('color_{:03d}.png'.format(i))
+              utils.save_img_uint8(
+                  pred_color, path.join(out_dir, 'color_{:03d}.png'.format(i)))
+              # utils.save_img_float32(
+              #     pred_distance, path.join(out_dir, 'distance_{:03d}.tiff'.format(i)))
+              # utils.save_img_float32(
+              #     pred_acc, path.join(out_dir, 'acc_{:03d}.tiff'.format(i)))
+              # for k, v in vis_suite.items():
+              #   utils.save_img_uint8(
+              #       v, path.join(out_dir, k + '_{:03d}.png'.format(i)))
+
+    rgbs = np.stack(rgbs, 0)
+    print('Generating video!!!!!!!!!')
+    imageio.mimwrite(path.join(out_dir, 'video.mp4'), to8b(rgbs), fps=24, quality=9)
+    if FLAGS.eval_once:
+      break
+    if int(step) >= config.max_steps:
+      break
+    last_step = step
+
+
+if __name__ == '__main__':
+  app.run(main)
+```
+
+### eval_vid.py
+```
+# -*- coding: utf-8 -*-
+# Copyright 2021 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Lint as: python3
+"""Evaluation script for mip-NeRF."""
+import functools
+from os import path
+
+from absl import app
+from absl import flags
+import flax
+from flax.metrics import tensorboard
+from flax.training import checkpoints
+import jax
+from jax import random
+import numpy as np
+
+from internal import datasets
+from internal import math
+from internal import models
+from internal import utils
+from internal import vis
+from run_nerf_helpers import *
+import imageio
+
+import os
+# os.environ["XLA_FLAGS"]="--xla_gpu_strict_conv_algorithm_picker=false"
+# os.environ["XLA_FLAGS"]="--xla_gpu_autotune_level=0"
+# os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] ='false'
+# os.environ['XLA_PYTHON_CLIENT_ALLOCATOR']='platform'
+# os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'
+
+FLAGS = flags.FLAGS
+utils.define_common_flags()
+flags.DEFINE_bool(
+    'eval_once', True,
+    'If True, evaluate the model only once, otherwise keeping evaluating new'
+    'checkpoints if any exist.')
+flags.DEFINE_bool('save_output', True,
+                  'If True, save predicted images to disk.')
+
+
+def main(unused_argv):
+    
+  
+  #set the lens parameters for interpolation
+  a1=0.02 #0.2
+  f1=0.1
+  l1=0.67
+  pose1=3
+    
+  a2=0.02 #0.02
+  f2=0.1
+  l2=0.67
+  pose2=3
+
+  train_coc=1
+  fix_pose = True
+
+  n_frames = 80
+    
+    
+  config = utils.load_config()
+  FLAGS.train_dir = config.train_dir
+  FLAGS.data_dir = config.data_dir
+  dataset = datasets.get_dataset('test', FLAGS.data_dir, config)
+  model, init_variables = models.construct_mipnerf(
+      random.PRNGKey(20200823), dataset.peek())
+  optimizer = flax.optim.Adam(config.lr_init).create(init_variables)
+  state = utils.TrainState(optimizer=optimizer)
+  del optimizer, init_variables
+
+
+  def render_eval_fn(variables, _, rays, a, f, l, train_coc):
+    return jax.lax.all_gather(
+        model.apply(
+            variables,
+            random.PRNGKey(0),  # Unused.
+            rays,
+            randomized=False,
+            white_bkgd=config.white_bkgd, a=a, f=f, l=l, train_coc=train_coc),
+        axis_name='batch')
+
+  render_eval_pfn = jax.pmap(
+      render_eval_fn,
+      in_axes=(None, None, 0, None, None, None, None),  # Only distribute the data input.
+      donate_argnums=(2,),
+      axis_name='batch',
+  )
+    
+
+  ssim_fn = jax.jit(functools.partial(math.compute_ssim, max_val=1.))
+
+  last_step = 0
+  out_dir = path.join(FLAGS.train_dir,
+                      'path_renders' if config.render_path else 'test_preds_A{}_L{}'.format(a1,l1))
+  if not FLAGS.eval_once:
+    summary_writer = tensorboard.SummaryWriter(
+        path.join(FLAGS.train_dir, 'eval'))
+  while True:
+    state = checkpoints.restore_checkpoint(FLAGS.train_dir, state)
+    step = int(state.optimizer.state.step)
+    if step <= last_step:
+      continue
+    if FLAGS.save_output and (not utils.isdir(out_dir)):
+      utils.makedirs(out_dir)
+    psnr_values = []
+    ssim_values = []
+    avg_values = []
+    rgbs = []
+    rays = []
+
+    if not FLAGS.eval_once:
+      showcase_index = random.randint(random.PRNGKey(step), (), 0, dataset.size)
+    for idx in range(dataset.size):
+        batch = next(dataset)
+        rays.append(batch['rays'])
+        loss_mult = batch['rays'].lossmult
+        ne_ar = batch['rays'].near
+        f_ar = batch['rays'].far
+    print(idx)
+    origins = rays[pose2].origins - rays[pose1].origins
+    directions = rays[pose2].directions - rays[pose1].directions
+    viewdirs = rays[pose2].viewdirs - rays[pose1].viewdirs
+    radii = rays[pose2].radii - rays[pose1].radii
+    ones = np.ones_like(origins[..., :1])
+    temp = ones * dataset.render_temp[0]
+    exp = ones * dataset.render_exp[0]
+    coc = rays[pose2].coc
+    for i in range(n_frames):
+        
+        theta = i/n_frames
+
+        o = origins * theta + rays[pose1].origins
+        d = directions * theta + rays[pose1].directions
+        v = viewdirs * theta + rays[pose1].viewdirs
+        r = radii * theta + rays[pose1].radii
+        
+        a= a1*theta + a2*(1-theta) #aperture
+        f= f1*theta + f2*(1-theta) #focal length
+        l= l1*theta + l2*(1-theta) #focus distance
+        
+        
+        
+        rrays = utils.Rays(
+        origins=o,
+        directions=d,
+        viewdirs=v,
+        radii=r,
+        lossmult=loss_mult,
+        near=ne_ar,
+        far=f_ar,
+        temperature=temp,
+        exposure=exp,
+        coc=coc,
+        )
+        print(f'New__Evaluating {i+1}/n_frames')
+        
+        pred_color, pred_distance, pred_acc = models.render_image(
+          functools.partial(render_eval_pfn, state.optimizer.target),
+          rrays,
+          None,
+          chunk=FLAGS.chunk, a=a, f=f, l=l, train_coc=1)
+        
+        rgbs.append(pred_color)
+        vis_suite = vis.visualize_suite(pred_distance, pred_acc)
+        if jax.host_id() != 0:  # Only record via host 0.
+            continue
+        if FLAGS.save_output and (config.test_render_interval > 0):
+            if (idx % config.test_render_interval) == 0:
+              print('Starting Save!!!!!!!!!!!!!!!!!')
+              print(out_dir)
+              print('color_{:03d}.png'.format(i))
+              utils.save_img_uint8(
+                  pred_color, path.join(out_dir, 'color_{:03d}.png'.format(i)))
+              # utils.save_img_float32(
+              #     pred_distance, path.join(out_dir, 'distance_{:03d}.tiff'.format(i)))
+              # utils.save_img_float32(
+              #     pred_acc, path.join(out_dir, 'acc_{:03d}.tiff'.format(i)))
+              # for k, v in vis_suite.items():
+              #   utils.save_img_uint8(
+              #       v, path.join(out_dir, k + '_{:03d}.png'.format(i)))
+
+    rgbs = np.stack(rgbs, 0)
+    print('Generating video!!!!!!!!!')
+    imageio.mimwrite(path.join(out_dir, 'video.mp4'), to8b(rgbs), fps=24, quality=9)
+    if FLAGS.eval_once:
+      break
+    if int(step) >= config.max_steps:
+      break
+    last_step = step
+
+
+if __name__ == '__main__':
+  app.run(main)
+```
+
+### run_nerf_helpers.py
+```
+import torch
+torch.autograd.set_detect_anomaly(True)
+import torch.nn as nn
+import torch.nn.functional as F
+import numpy as np
+
+
+# Misc
+img2mse = lambda x, y : torch.mean((x - y) ** 2)
+mse2psnr = lambda x : -10. * torch.log(x) / torch.log(torch.Tensor([10.]))
+to8b = lambda x : (255*np.clip(x,0,1)).astype(np.uint8)
+
+
+# Positional encoding (section 5.1)
+class Embedder:
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+        self.create_embedding_fn()
+        
+    def create_embedding_fn(self):
+        embed_fns = []
+        d = self.kwargs['input_dims']
+        out_dim = 0
+        if self.kwargs['include_input']:
+            embed_fns.append(lambda x : x)
+            out_dim += d
+            
+        max_freq = self.kwargs['max_freq_log2']
+        N_freqs = self.kwargs['num_freqs']
+        
+        if self.kwargs['log_sampling']:
+            freq_bands = 2.**torch.linspace(0., max_freq, steps=N_freqs)
+        else:
+            freq_bands = torch.linspace(2.**0., 2.**max_freq, steps=N_freqs)
+            
+        for freq in freq_bands:
+            for p_fn in self.kwargs['periodic_fns']:
+                embed_fns.append(lambda x, p_fn=p_fn, freq=freq : p_fn(x * freq))
+                out_dim += d
+                    
+        self.embed_fns = embed_fns
+        self.out_dim = out_dim
+        
+    def embed(self, inputs):
+        return torch.cat([fn(inputs) for fn in self.embed_fns], -1)
+
+
+def get_embedder(multires, i=0, input_dims = 3):
+
+    if i == -1:
+        return nn.Identity(), 3
+    
+    embed_kwargs = {
+                'include_input' : True,
+                'input_dims' : input_dims,
+                'max_freq_log2' : multires-1,
+                'num_freqs' : multires,
+                'log_sampling' : True,
+                'periodic_fns' : [torch.sin, torch.cos],
+    }
+    
+    embedder_obj = Embedder(**embed_kwargs)
+    embed = lambda x, eo=embedder_obj : eo.embed(x)
+    return embed, embedder_obj.out_dim
+
+
+# Model
+class NeRF(nn.Module):
+    def __init__(self, D=8, W=256, input_ch=3, input_ch_views=3, output_ch=4, skips=[4], use_viewdirs=False, image_features = 0):
+        """ 
+        """
+        super(NeRF, self).__init__()
+        self.D = D
+        self.W = W
+        self.input_ch = input_ch
+        self.input_ch_views = input_ch_views
+        self.image_features = image_features
+        self.skips = skips
+        self.use_viewdirs = use_viewdirs
+        
+        self.pts_linears = nn.ModuleList(
+            [nn.Linear(input_ch, W)] + [nn.Linear(W, W) if i not in self.skips else nn.Linear(W + input_ch, W) for i in range(D-1)])
+        
+        ### Implementation according to the official code release (https://github.com/bmild/nerf/blob/master/run_nerf_helpers.py#L104-L105)
+        self.views_linears = nn.ModuleList([nn.Linear(input_ch_views + W, W//2)])
+
+        ### Implementation according to the paper
+        # self.views_linears = nn.ModuleList(
+        #     [nn.Linear(input_ch_views + W, W//2)] + [nn.Linear(W//2, W//2) for i in range(D//2)])
+        
+        if use_viewdirs:
+            self.feature_linear = nn.Linear(W, W)
+            self.alpha_linear = nn.Linear(W, 1)
+            self.rgb_linear = nn.Linear(W//2, 3)
+        else:
+            self.output_linear = nn.Linear(W, output_ch)
+
+    def forward(self, x):
+        inputs_features, input_pts, input_views = torch.split(x, [self.image_features, self.input_ch, self.input_ch_views], dim=-1)
+        h = torch.cat([inputs_features, input_pts], -1)
+        # h = input_pts
+        for i, l in enumerate(self.pts_linears):
+            h = self.pts_linears[i](h)
+            h = F.relu(h)
+            if i in self.skips:
+                h = torch.cat([inputs_features, input_pts, h], -1)
+
+        if self.use_viewdirs:
+            alpha = self.alpha_linear(h)
+            feature = self.feature_linear(h)
+            h = torch.cat([feature, input_views], -1)
+        
+            for i, l in enumerate(self.views_linears):
+                h = self.views_linears[i](h)
+                h = F.relu(h)
+
+            rgb = self.rgb_linear(h)
+            outputs = torch.cat([rgb, alpha], -1)
+        else:
+            outputs = self.output_linear(h)
+
+        return outputs    
+
+    def load_weights_from_keras(self, weights):
+        assert self.use_viewdirs, "Not implemented if use_viewdirs=False"
+        
+        # Load pts_linears
+        for i in range(self.D):
+            idx_pts_linears = 2 * i
+            self.pts_linears[i].weight.data = torch.from_numpy(np.transpose(weights[idx_pts_linears]))    
+            self.pts_linears[i].bias.data = torch.from_numpy(np.transpose(weights[idx_pts_linears+1]))
+        
+        # Load feature_linear
+        idx_feature_linear = 2 * self.D
+        self.feature_linear.weight.data = torch.from_numpy(np.transpose(weights[idx_feature_linear]))
+        self.feature_linear.bias.data = torch.from_numpy(np.transpose(weights[idx_feature_linear+1]))
+
+        # Load views_linears
+        idx_views_linears = 2 * self.D + 2
+        self.views_linears[0].weight.data = torch.from_numpy(np.transpose(weights[idx_views_linears]))
+        self.views_linears[0].bias.data = torch.from_numpy(np.transpose(weights[idx_views_linears+1]))
+
+        # Load rgb_linear
+        idx_rbg_linear = 2 * self.D + 4
+        self.rgb_linear.weight.data = torch.from_numpy(np.transpose(weights[idx_rbg_linear]))
+        self.rgb_linear.bias.data = torch.from_numpy(np.transpose(weights[idx_rbg_linear+1]))
+
+        # Load alpha_linear
+        idx_alpha_linear = 2 * self.D + 6
+        self.alpha_linear.weight.data = torch.from_numpy(np.transpose(weights[idx_alpha_linear]))
+        self.alpha_linear.bias.data = torch.from_numpy(np.transpose(weights[idx_alpha_linear+1]))
+
+
+
+# Ray helpers
+def get_rays(H, W, K, c2w):
+    i, j = torch.meshgrid(torch.linspace(0, W-1, W), torch.linspace(0, H-1, H))  # pytorch's meshgrid has indexing='ij'
+    i = i.t()
+    j = j.t()
+    dirs = torch.stack([(i-K[0][2])/K[0][0], -(j-K[1][2])/K[1][1], -torch.ones_like(i)], -1)
+    # Rotate ray directions from camera frame to the world frame
+    rays_d = torch.sum(dirs[..., np.newaxis, :] * c2w[:3,:3], -1)  # dot product, equals to: [c2w.dot(dir) for dir in dirs]
+    # Translate camera frame's origin to the world frame. It is the origin of all rays.
+    rays_o = c2w[:3,-1].expand(rays_d.shape)
+    return rays_o, rays_d
+
+
+def get_rays_np(H, W, K, c2w):
+    i, j = np.meshgrid(np.arange(W, dtype=np.float32), np.arange(H, dtype=np.float32), indexing='xy')
+    dirs = np.stack([(i-K[0][2])/K[0][0], -(j-K[1][2])/K[1][1], -np.ones_like(i)], -1)
+    # Rotate ray directions from camera frame to the world frame
+    rays_d = np.sum(dirs[..., np.newaxis, :] * c2w[:3,:3], -1)  # dot product, equals to: [c2w.dot(dir) for dir in dirs]
+    # Translate camera frame's origin to the world frame. It is the origin of all rays.
+    rays_o = np.broadcast_to(c2w[:3,-1], np.shape(rays_d))
+    return rays_o, rays_d
+
+
+def ndc_rays(H, W, focal, near, rays_o, rays_d):
+    # Shift ray origins to near plane
+    t = -(near + rays_o[...,2]) / rays_d[...,2]
+    rays_o = rays_o + t[...,None] * rays_d
+    
+    # Projection
+    o0 = -1./(W/(2.*focal)) * rays_o[...,0] / rays_o[...,2]
+    o1 = -1./(H/(2.*focal)) * rays_o[...,1] / rays_o[...,2]
+    o2 = 1. + 2. * near / rays_o[...,2]
+
+    d0 = -1./(W/(2.*focal)) * (rays_d[...,0]/rays_d[...,2] - rays_o[...,0]/rays_o[...,2])
+    d1 = -1./(H/(2.*focal)) * (rays_d[...,1]/rays_d[...,2] - rays_o[...,1]/rays_o[...,2])
+    d2 = -2. * near / rays_o[...,2]
+    
+    rays_o = torch.stack([o0,o1,o2], -1)
+    rays_d = torch.stack([d0,d1,d2], -1)
+    
+    return rays_o, rays_d
+
+
+# Hierarchical sampling (section 5.2)
+def sample_pdf(bins, weights, N_samples, det=False, pytest=False):
+    # Get pdf
+    weights = weights + 1e-5 # prevent nans
+    pdf = weights / torch.sum(weights, -1, keepdim=True)
+    cdf = torch.cumsum(pdf, -1)
+    cdf = torch.cat([torch.zeros_like(cdf[...,:1]), cdf], -1)  # (batch, len(bins))
+
+    # Take uniform samples
+    if det:
+        u = torch.linspace(0., 1., steps=N_samples)
+        u = u.expand(list(cdf.shape[:-1]) + [N_samples])
+    else:
+        u = torch.rand(list(cdf.shape[:-1]) + [N_samples])
+
+    # Pytest, overwrite u with numpy's fixed random numbers
+    if pytest:
+        np.random.seed(0)
+        new_shape = list(cdf.shape[:-1]) + [N_samples]
+        if det:
+            u = np.linspace(0., 1., N_samples)
+            u = np.broadcast_to(u, new_shape)
+        else:
+            u = np.random.rand(*new_shape)
+        u = torch.Tensor(u)
+
+    # Invert CDF
+    u = u.contiguous()
+    inds = torch.searchsorted(cdf, u, right=True)
+    below = torch.max(torch.zeros_like(inds-1), inds-1)
+    above = torch.min((cdf.shape[-1]-1) * torch.ones_like(inds), inds)
+    inds_g = torch.stack([below, above], -1)  # (batch, N_samples, 2)
+
+    # cdf_g = tf.gather(cdf, inds_g, axis=-1, batch_dims=len(inds_g.shape)-2)
+    # bins_g = tf.gather(bins, inds_g, axis=-1, batch_dims=len(inds_g.shape)-2)
+    matched_shape = [inds_g.shape[0], inds_g.shape[1], cdf.shape[-1]]
+    cdf_g = torch.gather(cdf.unsqueeze(1).expand(matched_shape), 2, inds_g)
+    bins_g = torch.gather(bins.unsqueeze(1).expand(matched_shape), 2, inds_g)
+
+    denom = (cdf_g[...,1]-cdf_g[...,0])
+    denom = torch.where(denom<1e-5, torch.ones_like(denom), denom)
+    t = (u-cdf_g[...,0])/denom
+    samples = bins_g[...,0] + t * (bins_g[...,1]-bins_g[...,0])
+
+    return samples
+
+
+def config_parser():
+
+    import configargparse
+    parser = configargparse.ArgumentParser()
+    parser.add_argument('--config', is_config_file=True,
+                        help='config file path')
+    parser.add_argument("--expname", type=str,
+                        help='experiment name')
+    parser.add_argument("--basedir", type=str, default='./logs/',
+                        help='where to store ckpts and logs')
+    parser.add_argument("--datadir", type=str, default='./data/llff/fern',
+                        help='input data directory')
+
+    # training options
+    parser.add_argument("--netdepth", type=int, default=8,
+                        help='layers in network')
+    parser.add_argument("--netwidth", type=int, default=256,
+                        help='channels per layer')
+    parser.add_argument("--netdepth_fine", type=int, default=8,
+                        help='layers in fine network')
+    parser.add_argument("--netwidth_fine", type=int, default=256,
+                        help='channels per layer in fine network')
+    parser.add_argument("--N_rand", type=int, default=32*32*4,
+                        help='batch size (number of random rays per gradient step)')
+    parser.add_argument("--lrate", type=float, default=5e-4,
+                        help='learning rate')
+    parser.add_argument("--lrate_decay", type=int, default=250,
+                        help='exponential learning rate decay (in 1000 steps)')
+    parser.add_argument("--chunk", type=int, default=1024*32,
+                        help='number of rays processed in parallel, decrease if running out of memory')
+    parser.add_argument("--netchunk", type=int, default=1024*64,
+                        help='number of pts sent through network in parallel, decrease if running out of memory')
+    parser.add_argument("--no_batching", action='store_true',
+                        help='only take random rays from 1 image at a time')
+    parser.add_argument("--no_reload", action='store_true', default=True,
+                        help='do not reload weights from saved ckpt')
+    parser.add_argument("--ft_path", type=str, default=None,
+                        help='specific weights npy file to reload for coarse network')
+
+    # rendering options
+    parser.add_argument("--N_samples", type=int, default=64,
+                        help='number of coarse samples per ray')
+    parser.add_argument("--N_importance", type=int, default=0,
+                        help='number of additional fine samples per ray')
+    parser.add_argument("--perturb", type=float, default=1.,
+                        help='set to 0. for no jitter, 1. for jitter')
+    parser.add_argument("--use_viewdirs", action='store_true',
+                        help='use full 5D input instead of 3D')
+    parser.add_argument("--i_embed", type=int, default=0,
+                        help='set 0 for default positional encoding, -1 for none')
+    parser.add_argument("--multires", type=int, default=10,
+                        help='log2 of max freq for positional encoding (3D location)')
+    parser.add_argument("--multires_views", type=int, default=4,
+                        help='log2 of max freq for positional encoding (2D direction)')
+    parser.add_argument("--raw_noise_std", type=float, default=0.,
+                        help='std dev of noise added to regularize sigma_a output, 1e0 recommended')
+
+    parser.add_argument("--render_only", action='store_true',
+                        help='do not optimize, reload weights and render out render_poses path')
+    parser.add_argument("--render_test", action='store_true',
+                        help='render the test set instead of render_poses path')
+    parser.add_argument("--render_factor", type=int, default=0,
+                        help='downsampling factor to speed up rendering, set 4 or 8 for fast preview')
+
+    # training options
+    parser.add_argument("--precrop_iters", type=int, default=0,
+                        help='number of steps to train on central crops')
+    parser.add_argument("--precrop_frac", type=float,
+                        default=.5, help='fraction of img taken for central crops')
+
+    # dataset options
+    parser.add_argument("--dataset_type", type=str, default='llff',
+                        help='options: llff / blender / deepvoxels')
+    parser.add_argument("--testskip", type=int, default=8,
+                        help='will load 1/N images from test/val sets, useful for large datasets like deepvoxels')
+
+    ## deepvoxels flags
+    parser.add_argument("--shape", type=str, default='greek',
+                        help='options : armchair / cube / greek / vase')
+
+    ## blender flags
+    parser.add_argument("--white_bkgd", action='store_true',
+                        help='set to render synthetic data on a white bkgd (always use for dvoxels)')
+    parser.add_argument("--half_res", action='store_true',
+                        help='load blender synthetic data at 400x400 instead of 800x800')
+
+    ## llff flags
+    parser.add_argument("--factor", type=int, default=8,
+                        help='downsample factor for LLFF images')
+    parser.add_argument("--no_ndc", action='store_true',
+                        help='do not use normalized device coordinates (set for non-forward facing scenes)')
+    parser.add_argument("--lindisp", action='store_true',
+                        help='sampling linearly in disparity rather than depth')
+    parser.add_argument("--spherify", action='store_true',
+                        help='set for spherical 360 scenes')
+    parser.add_argument("--llffhold", type=int, default=8,
+                        help='will take every 1/N images as LLFF test set, paper uses 8')
+
+    # logging/saving options
+    parser.add_argument("--i_print",   type=int, default=100,
+                        help='frequency of console printout and metric loggin')
+    parser.add_argument("--i_img",     type=int, default=500,
+                        help='frequency of tensorboard image logging')
+    parser.add_argument("--i_weights", type=int, default=10000,
+                        help='frequency of weight ckpt saving')
+    parser.add_argument("--i_testset", type=int, default=50000,
+                        help='frequency of testset saving')
+    parser.add_argument("--i_video",   type=int, default=50000,
+                        help='frequency of render_poses video saving')
+
+    # flags for attention model
+    parser.add_argument("--attention_direction_multires", type=int, default=10,
+                        help='frequency of embedding for value')
+    parser.add_argument("--attention_view_multires", type=int, default=4,
+                        help='frequency of embedding for direction')
+    parser.add_argument("--render_per_scene", type=int, default=-1,
+                        help="number of views to render per scene, -1 for all")
+    parser.add_argument("--training_recon", action='store_true',
+                        help="perform testing with training set as input, if not passed, perform one two shot")
+    parser.add_argument("--use_quaternion", action='store_true', help="use quaternion")
+    parser.add_argument("--no_globl", action='store_true', help="use global features in unet")
+    parser.add_argument("--no_render_pose", action='store_true', help="use rendered pose in unet")
+    parser.add_argument("--use_attsets", default=True, action='store_true', help="use rendered pose in unet")
+
+    parser.add_argument("--from_scene", type=int, default=0, help="scene to start rendering from in sorted order")
+
+    parser.add_argument("--to_scene", type=int, default=-1, help="scene to end rendering from in sorted order")
+
+    return parser
+
+
+def invert(mat):
+    rot = mat[...,:3,:3]
+    trans = mat[...,:3,3,None]
+    rot_t = rot.permute(0,2,1)
+    # trans_t = -1 * tf.transpose(rot, [0,2,1]) @ trans
+    trans_t = -1 * rot.permute(0,2,1) @ trans
+    return torch.cat([rot_t, trans_t], -1)
+
+def make_indices(pts, attention_poses, intrinsic, H, W):
+    # hom_points = torch.cat([pts, tf.broadcast_to([1.0], pts.shape[:-1] + (1,))], -1)
+    a = torch.tensor([1.0])
+    hom_points = torch.cat([pts, a.repeat(pts.shape[:-1] + (1,))], -1)
+    extrinsic = invert(attention_poses)[:, :3]
+    focal = intrinsic[0, 0]
+
+    pt_camera = hom_points[None, ...].repeat(extrinsic.shape[0], hom_points.shape[0], hom_points.shape[1])\
+                @ extrinsic.permute(0,2,1)
+
+    pt_camera = focal / pt_camera[:, :, 2][..., None] * pt_camera
+
+    final = 1.0 / focal * (pt_camera @ tf.transpose(intrinsic))
+    final = tf.reverse(final, axis=[-1])[..., 1:]
+    final = (tf.constant([0., W]) - final) * tf.constant([-1., 1.])
+    final = tf.round(final)
+    final = tf.math.maximum(tf.math.minimum(final, [H-1.,W-1.]),0)
+    final = tf.cast(final, dtype=torch.int32)
+
+    return final
+```
+
+### train.py
+```
+# -*- coding: utf-8 -*-
+# Copyright 2021 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Lint as: python3
+"""Training script for Nerf."""
+
+import functools
+import gc
+import time
+from absl import app
+from absl import flags
+import flax
+from flax.metrics import tensorboard
+from flax.training import checkpoints
+import jax
+from jax import random
+import jax.numpy as jnp
+import numpy as np
+import os
+
+from internal import datasets
+from internal import math
+from internal import models
+from internal import utils
+from internal import vis
+
+
+FLAGS = flags.FLAGS
+utils.define_common_flags()
+flags.DEFINE_integer('render_every', 5000,#5000
+                     'The number of steps between test set image renderings.')
+
+jax.config.parse_flags_with_absl()
+
+def mkdir(path):
+    folder = os.path.exists(path)
+    if not folder:
+        os.makedirs(path)
+
+def train_step(model, config, rng, state, batch, lr, a=0, f=0.1, l=0.6, train_coc=0):
+  """One optimization step.
+
+  Args:
+    model: The linen model.
+    config: The configuration.
+    rng: jnp.ndarray, random number generator.
+    state: utils.TrainState, state of the model/optimizer.
+    batch: dict, a mini-batch of data for training.
+    lr: float, real-time learning rate.
+
+  Returns:
+    new_state: utils.TrainState, new training state.
+    stats: list. [(loss, psnr), (loss_coarse, psnr_coarse)].
+    rng: jnp.ndarray, updated random number generator.
+  """
+  rng, key = random.split(rng)
+
+  def loss_fn(variables):
+
+    def tree_sum_fn(fn):
+      return jax.tree_util.tree_reduce(
+          lambda x, y: x + fn(y), variables, initializer=0)
+
+    weight_l2 = config.weight_decay_mult * (
+        tree_sum_fn(lambda z: jnp.sum(z**2)) /
+        tree_sum_fn(lambda z: jnp.prod(jnp.array(z.shape))))
+
+    ret = model.apply(
+        variables,
+        key,
+        batch['rays'],
+        randomized=config.randomized,
+        white_bkgd=config.white_bkgd, a=a, f=f, l=l, train_coc=train_coc)#lens params
+
+    mask = batch['rays'].lossmult
+    if config.disable_multiscale_loss:
+      mask = jnp.ones_like(mask)
+
+    losses = []
+    for (rgb, _, _) in ret:
+      losses.append(
+          (mask * (rgb - batch['pixels'][..., :3])**2).sum() / mask.sum())
+    losses = jnp.array(losses)
+
+    loss = (
+        config.coarse_loss_mult * jnp.sum(losses[:-1]) + losses[-1] + weight_l2)
+
+    stats = utils.Stats(
+        loss=loss,
+        losses=losses,
+        weight_l2=weight_l2,
+        psnr=0.0,
+        psnrs=0.0,
+        grad_norm=0.0,
+        grad_abs_max=0.0,
+        grad_norm_clipped=0.0,
+    )
+    return loss, stats
+
+  (_, stats), grad = (
+      jax.value_and_grad(loss_fn, has_aux=True)(state.optimizer.target))
+  grad = jax.lax.pmean(grad, axis_name='batch')
+  stats = jax.lax.pmean(stats, axis_name='batch')
+
+  def tree_norm(tree):
+    return jnp.sqrt(
+        jax.tree_util.tree_reduce(
+            lambda x, y: x + jnp.sum(y**2), tree, initializer=0))
+
+  if config.grad_max_val > 0:
+    clip_fn = lambda z: jnp.clip(z, -config.grad_max_val, config.grad_max_val)
+    grad = jax.tree_util.tree_map(clip_fn, grad)
+
+  grad_abs_max = jax.tree_util.tree_reduce(
+      lambda x, y: jnp.maximum(x, jnp.max(jnp.abs(y))), grad, initializer=0)
+
+  grad_norm = tree_norm(grad)
+  if config.grad_max_norm > 0:
+    mult = jnp.minimum(1, config.grad_max_norm / (1e-7 + grad_norm))
+    grad = jax.tree_util.tree_map(lambda z: mult * z, grad)
+  grad_norm_clipped = tree_norm(grad)
+
+  new_optimizer = state.optimizer.apply_gradient(grad, learning_rate=lr)
+  new_state = state.replace(optimizer=new_optimizer)
+
+  psnrs = math.mse_to_psnr(stats.losses)
+  stats = utils.Stats(
+      loss=stats.loss,
+      losses=stats.losses,
+      weight_l2=stats.weight_l2,
+      psnr=psnrs[-1],
+      psnrs=psnrs,
+      grad_norm=grad_norm,
+      grad_abs_max=grad_abs_max,
+      grad_norm_clipped=grad_norm_clipped,
+  )
+
+  return new_state, stats, rng
+
+
+def main(unused_argv):
+  # file = open('my_curve/curve.txt', 'w')
+  a=0 #a=0.1*50 效果和原配置差不多
+  f=0.1
+  l=0.6
+  train_coc=1
+
+  rng = random.PRNGKey(20200823)
+  # Shift the numpy random seed by host_id() to shuffle data loaded by different
+  # hosts.
+  np.random.seed(20201473 + jax.host_id())
+
+  config = utils.load_config()
+  FLAGS.train_dir = config.train_dir
+  FLAGS.data_dir = config.data_dir
+  if config.batch_size % jax.device_count() != 0:
+    raise ValueError('Batch size must be divisible by the number of devices.')
+
+  dataset = datasets.get_dataset('train', config.data_dir, config) #data/horns
+  # dataset_r3 = datasets.get_dataset('train', os.path.join(config.data_dir,'focus','3'), config)
+  # dataset_r7 = datasets.get_dataset('train', os.path.join(config.data_dir,'focus','7'), config)
+  # dataset_r15 = datasets.get_dataset('train', os.path.join(config.data_dir,'focus','15'), config)
+  # dataset_r31 = datasets.get_dataset('train', os.path.join(config.data_dir,'focus','31'), config)
+  # dataset_r51 = datasets.get_dataset('train', os.path.join(config.data_dir,'focus','51'), config)
+  # dataset_r71 = datasets.get_dataset('train', 'data/horns_Guassblur/71', config)
+  # dataset_r101 = datasets.get_dataset('train', 'data/horns_Guassblur/101', config)
+  test_dataset = datasets.get_dataset('test', config.data_dir, config) #data/horns
+    
+  #test_dataset = datasets.get_dataset('test', FLAGS.data_dir, config)
+
+  rng, key = random.split(rng)
+  model, variables = models.construct_mipnerf(key, dataset.peek())
+  num_params = jax.tree_util.tree_reduce(
+      lambda x, y: x + jnp.prod(jnp.array(y.shape)), variables, initializer=0)
+  print(f'Number of parameters being optimized: {num_params}')
+  optimizer = flax.optim.Adam(config.lr_init).create(variables)
+  state = utils.TrainState(optimizer=optimizer)
+  del optimizer, variables
+
+  learning_rate_fn = functools.partial(
+      math.learning_rate_decay,
+      lr_init=config.lr_init,
+      lr_final=config.lr_final,
+      max_steps=config.max_steps,
+      lr_delay_steps=config.lr_delay_steps,
+      lr_delay_mult=config.lr_delay_mult)
+
+  train_pstep = jax.pmap(
+      functools.partial(train_step, model, config),
+      axis_name='batch',
+      in_axes=(0, 0, 0, None, None, None, None, None),#a=0, f=0.1, l=0.6, train_coc=0
+      donate_argnums=(2,))
+
+  # Because this is only used for test set rendering, we disable randomization.
+  def render_eval_fn(variables, _, rays, a, f, l, train_coc):
+    return jax.lax.all_gather(
+        model.apply(
+            variables,
+            random.PRNGKey(0),  # Unused.
+            rays,
+            randomized=False,
+            white_bkgd=config.white_bkgd, a=a, f=f, l=l, train_coc=train_coc),
+        axis_name='batch')
+
+  render_eval_pfn = jax.pmap(
+      render_eval_fn,
+      in_axes=(None, None, 0, None, None, None, None),  # Only distribute the data input.
+      donate_argnums=(2,),
+      axis_name='batch',
+  )
+
+  ssim_fn = jax.jit(functools.partial(math.compute_ssim, max_val=1.))
+  #ssim_fn = functools.partial(math.compute_ssim, max_val=1.)
+
+  if not utils.isdir(FLAGS.train_dir):
+    utils.makedirs(FLAGS.train_dir)
+  state = checkpoints.restore_checkpoint(FLAGS.train_dir, state)
+  # Resume training a the step of the last checkpoint.
+  init_step = state.optimizer.state.step + 1
+  state = flax.jax_utils.replicate(state)
+
+  if jax.host_id() == 0:
+    summary_writer = tensorboard.SummaryWriter(FLAGS.train_dir)
+
+  # Prefetch_buffer_size = 3 x batch_size
+  print('d')
+  pdataset = flax.jax_utils.prefetch_to_device(dataset, 3)
+  # pdataset_r3 = flax.jax_utils.prefetch_to_device(dataset_r3, 3)
+  # pdataset_r7 = flax.jax_utils.prefetch_to_device(dataset_r7, 3)
+  # pdataset_r15 = flax.jax_utils.prefetch_to_device(dataset_r15, 3)
+  # pdataset_r31 = flax.jax_utils.prefetch_to_device(dataset_r31, 3)
+  # pdataset_r51 = flax.jax_utils.prefetch_to_device(dataset_r51, 3)
+  # pdataset_r71 = flax.jax_utils.prefetch_to_device(dataset_r71, 3)
+  # pdataset_r101 = flax.jax_utils.prefetch_to_device(dataset_r101, 3)
+    
+  rng = rng + jax.host_id()  # Make random seed separate across hosts.
+  keys = random.split(rng, jax.local_device_count())  # For pmapping RNG keys.
+  gc.disable()  # Disable automatic garbage collection for efficiency.
+  stats_trace = []
+  reset_timer = True
+
+
+
+# next(test_dataset)pdataset, pdataset_r11, pdataset_r21, pdataset_r51, pdataset_r101
+
+  for step in range(init_step, config.max_steps + 1):
+    #train_coc = np.random.choice([1,3,7,15,31,51,71,101],p=[0.3,0.2,0.15,0.1,0.1,0.05,0.05,0.05])
+    # train_coc = np.random.choice([1,3,7,15,31,51],p=[0.4,0.15,0.15,0.1,0.1,0.1])
+    # train_coc = np.random.choice([1, 3, 7, 15, 31], p=[0.4, 0.2, 0.2, 0.1, 0.1])
+    train_coc = np.random.choice([1], p=[1])
+    # train_coc = np.random.choice([1,3], p=[0.6,0.4])
+    if train_coc == 1:
+        batch = next(pdataset)
+        train_coc = batch['rays'].coc[0]
+    # elif train_coc == 3:
+    #     batch = next(pdataset_r3)
+    # elif train_coc == 7:
+    #     batch = next(pdataset_r7)
+    # elif train_coc == 15:
+    #     batch = next(pdataset_r15)
+    # elif train_coc == 31:
+    #     batch = next(pdataset_r31)
+    # elif train_coc == 51:
+    #     batch = next(pdataset_r51)
+    # elif train_coc == 71:
+    #     batch = next(pdataset_r71)
+    # elif train_coc == 101:
+    #     batch = next(pdataset_r101)
+        
+    #print("in main loop---------------train_coc:",train_coc)    
+        
+    if reset_timer:
+      t_loop_start = time.time()
+      reset_timer = False
+    lr = learning_rate_fn(step)
+    state, stats, keys = train_pstep(keys, state, batch, lr, a, f, l, train_coc)
+    if jax.host_id() == 0:
+      stats_trace.append(stats)
+    if step % config.gc_every == 0:
+      gc.collect()
+
+    # Log training summaries. This is put behind a host_id check because in
+    # multi-host evaluation, all hosts need to run inference even though we
+    # only use host 0 to record results.
+    if jax.host_id() == 0:
+      if step % config.print_every == 0:
+        summary_writer.scalar('num_params', num_params, step)
+        summary_writer.scalar('train_loss', stats.loss[0], step)
+        summary_writer.scalar('train_psnr', stats.psnr[0], step)
+        for i, l in enumerate(stats.losses[0]):
+          summary_writer.scalar(f'train_losses_{i}', l, step)
+        for i, p in enumerate(stats.psnrs[0]):
+          summary_writer.scalar(f'train_psnrs_{i}', p, step)
+        summary_writer.scalar('weight_l2', stats.weight_l2[0], step)
+        avg_loss = np.mean(np.concatenate([s.loss for s in stats_trace]))
+        avg_psnr = np.mean(np.concatenate([s.psnr for s in stats_trace]))
+        max_grad_norm = np.max(
+            np.concatenate([s.grad_norm for s in stats_trace]))
+        avg_grad_norm = np.mean(
+            np.concatenate([s.grad_norm for s in stats_trace]))
+        max_clipped_grad_norm = np.max(
+            np.concatenate([s.grad_norm_clipped for s in stats_trace]))
+        max_grad_max = np.max(
+            np.concatenate([s.grad_abs_max for s in stats_trace]))
+        stats_trace = []
+        summary_writer.scalar('train_avg_loss', avg_loss, step)
+        summary_writer.scalar('train_avg_psnr', avg_psnr, step)
+        summary_writer.scalar('train_max_grad_norm', max_grad_norm, step)
+        summary_writer.scalar('train_avg_grad_norm', avg_grad_norm, step)
+        summary_writer.scalar('train_max_clipped_grad_norm',
+                              max_clipped_grad_norm, step)
+        summary_writer.scalar('train_max_grad_max', max_grad_max, step)
+        summary_writer.scalar('learning_rate', lr, step)
+        steps_per_sec = config.print_every / (time.time() - t_loop_start)
+        reset_timer = True
+        rays_per_sec = config.batch_size * steps_per_sec
+        summary_writer.scalar('train_steps_per_sec', steps_per_sec, step)
+        summary_writer.scalar('train_rays_per_sec', rays_per_sec, step)
+        precision = int(np.ceil(np.log10(config.max_steps))) + 1
+        print(('{:' + '{:d}'.format(precision) + 'd}').format(step) +
+              f'/{config.max_steps:d}: ' + f'i_loss={stats.loss[0]:0.4f}, ' +
+              f'avg_loss={avg_loss:0.4f}, ' +
+              f'weight_l2={stats.weight_l2[0]:0.2e}, ' + f'lr={lr:0.2e}, ' +
+              f'{rays_per_sec:0.0f} rays/sec')
+      if step % config.save_every == 0:
+        state_to_save = jax.device_get(jax.tree_map(lambda x: x[0], state))
+        checkpoints.save_checkpoint(
+            FLAGS.train_dir, state_to_save, int(step), keep=100)
+
+    # Test-set evaluation.
+    if FLAGS.render_every > 0 and step % FLAGS.render_every == 0:
+      # We reuse the same random number generator from the optimization step
+      # here on purpose so that the visualization matches what happened in
+      # training.
+      data_out_path = os.path.join(FLAGS.train_dir,'vis_img')
+      mkdir(data_out_path)
+      t_eval_start = time.time()
+      eval_variables = jax.device_get(jax.tree_map(lambda x: x[0],
+                                                   state)).optimizer.target
+      test_case = next(test_dataset)
+      pred_color, pred_distance, pred_acc = models.render_image(
+          functools.partial(render_eval_pfn, eval_variables),
+          test_case['rays'],
+          keys[0],
+          chunk=FLAGS.chunk, a=a, f=f, l=l, train_coc=1)
+      utils.save_img_uint8(
+          pred_color, os.path.join(data_out_path, 'color_{}.png'.format(step)))
+      vis_suite = vis.visualize_suite(pred_distance, pred_acc)
+      for k, v in vis_suite.items():
+          utils.save_img_uint8(v, os.path.join(data_out_path, k + '_{:03d}.png'.format(step)))
+
+      # Log eval summaries on host 0.
+      if jax.host_id() == 0:
+        psnr = math.mse_to_psnr(((pred_color - test_case['pixels'])**2).mean())
+        #ssim = ssim_fn(pred_color, test_case['pixels'])
+        eval_time = time.time() - t_eval_start
+        num_rays = jnp.prod(jnp.array(test_case['rays'].directions.shape[:-1]))
+        rays_per_sec = num_rays / eval_time
+        # summary_writer.scalar('test_rays_per_sec', rays_per_sec, step)
+        print(f'Eval {step}: {eval_time:0.3f}s., {rays_per_sec:0.0f} rays/sec')
+        # summary_writer.scalar('test_psnr', psnr, step)
+        #summary_writer.scalar('test_ssim', ssim, step)
+        # summary_writer.image('test_pred_color', pred_color, step)
+        # for k, v in vis_suite.items():
+        #   summary_writer.image('test_pred_' + k, v, step)
+        # summary_writer.image('test_pred_acc', pred_acc, step)
+        # summary_writer.image('test_target', test_case['pixels'], step)
+        print('step: ' + str(step) + ' ' + 'psnr: ' + str(psnr) + '\r\n')
+        # file.write('step: ' + str(step) + ' ' + 'psnr: ' + str(psnr) + '\r\n')
+
+  if config.max_steps % config.save_every != 0:
+    state = jax.device_get(jax.tree_map(lambda x: x[0], state))
+    checkpoints.save_checkpoint(
+        FLAGS.train_dir, state, int(config.max_steps), keep=100)
+
+
+if __name__ == '__main__':
+  app.run(main)
+```
+
+### internal/datasets.py
+```
+# Copyright 2021 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Lint as: python3
+"""Different datasets implementation plus a general port for all the datasets."""
+import json
+import os
+from os import path
+import queue
+import threading
+import cv2
+import jax
+import numpy as np
+from PIL import Image
+from internal import utils
+
+
+def get_dataset(split, train_dir, config):
+  return dataset_dict[config.dataset_loader](split, train_dir, config)
+
+
+def convert_to_ndc(origins, directions, focal, w, h, near=1.):
+  """Convert a set of rays to NDC coordinates."""
+  # Shift ray origins to near plane
+  t = -(near + origins[..., 2]) / directions[..., 2]
+  origins = origins + t[..., None] * directions
+
+  dx, dy, dz = tuple(np.moveaxis(directions, -1, 0))
+  ox, oy, oz = tuple(np.moveaxis(origins, -1, 0))
+
+  # Projection
+  o0 = -((2 * focal) / w) * (ox / oz)
+  o1 = -((2 * focal) / h) * (oy / oz)
+  o2 = 1 + 2 * near / oz
+
+  d0 = -((2 * focal) / w) * (dx / dz - ox / oz)
+  d1 = -((2 * focal) / h) * (dy / dz - oy / oz)
+  d2 = -2 * near / oz
+
+  origins = np.stack([o0, o1, o2], -1)
+  directions = np.stack([d0, d1, d2], -1)
+  return origins, directions
+
+
+class Dataset(threading.Thread):
+  """Dataset Base Class."""
+
+  def __init__(self, split, data_dir, config):
+    super(Dataset, self).__init__()
+    self.queue = queue.Queue(3)  # Set prefetch buffer to 3 batches.
+    self.daemon = True
+    self.split = split
+    self.data_dir = data_dir
+    self.near = config.near
+    self.far = config.far
+    if split == 'train':
+      self._train_init(config)
+    elif split == 'test':
+      self._test_init(config)
+    else:
+      raise ValueError(
+          'the split argument should be either \'train\' or \'test\', set'
+          'to {} here.'.format(split))
+    self.batch_size = config.batch_size // jax.host_count()
+    self.batching = config.batching
+    self.render_path = config.render_path
+    self.start()
+
+  def __iter__(self):
+    return self
+
+  def __next__(self):
+    """Get the next training batch or test example.
+
+    Returns:
+      batch: dict, has 'pixels' and 'rays'.
+    """
+    x = self.queue.get()
+    if self.split == 'train':
+      return utils.shard(x)
+    else:
+      return utils.to_device(x)
+
+  def peek(self):
+    """Peek at the next training batch or test example without dequeuing it.
+
+    Returns:
+      batch: dict, has 'pixels' and 'rays'.
+    """
+    x = self.queue.queue[0].copy()  # Make a copy of the front of the queue.
+    if self.split == 'train':
+      return utils.shard(x)
+    else:
+      return utils.to_device(x)
+
+  def run(self):
+    if self.split == 'train':
+      next_func = self._next_train
+    else:
+      next_func = self._next_test
+    while True:
+      self.queue.put(next_func())
+
+  @property
+  def size(self):
+    return self.n_examples
+
+  def _train_init(self, config):
+    """Initialize training."""
+    self._load_renderings(config)
+    self._generate_rays(config)
+
+    if config.batching == 'all_images':
+      # flatten the ray and image dimension together.
+      self.images = self.images.reshape([-1, 3])
+      self.rays = utils.namedtuple_map(lambda r: r.reshape([-1, r.shape[-1]]),
+                                       self.rays)
+    elif config.batching == 'single_image':
+      self.images = self.images.reshape([-1, self.resolution, 3])
+      self.rays = utils.namedtuple_map(
+          lambda r: r.reshape([-1, self.resolution, r.shape[-1]]), self.rays)
+    else:
+      raise NotImplementedError(
+          f'{config.batching} batching strategy is not implemented.')
+
+  def _test_init(self, config):
+    self._load_renderings(config)
+    self._generate_rays(config)
+    self.it = 0
+
+  def _next_train(self):
+    """Sample next training batch."""
+
+    if self.batching == 'all_images':
+      ray_indices = np.random.randint(0, self.rays[0].shape[0],
+                                      (self.batch_size,))
+      batch_pixels = self.images[ray_indices]
+      batch_rays = utils.namedtuple_map(lambda r: r[ray_indices], self.rays)
+    elif self.batching == 'single_image':
+      image_index = np.random.randint(0, self.n_examples, ())
+      ray_indices = np.random.randint(0, self.rays[0][0].shape[0],
+                                      (self.batch_size,))
+      batch_pixels = self.images[image_index][ray_indices]
+      batch_rays = utils.namedtuple_map(lambda r: r[image_index][ray_indices],
+                                        self.rays)
+    else:
+      raise NotImplementedError(
+          f'{self.batching} batching strategy is not implemented.')
+
+    return {'pixels': batch_pixels, 'rays': batch_rays}
+
+  def _next_test(self):
+    """Sample next test example."""
+    idx = self.it
+    self.it = (self.it + 1) % self.n_examples
+
+    if self.render_path:
+      return {'rays': utils.namedtuple_map(lambda r: r[idx], self.render_rays)}
+    else:
+      return {
+          'pixels': self.images[idx],
+          'rays': utils.namedtuple_map(lambda r: r[idx], self.rays)
+      }
+
+  # TODO(bydeng): Swap this function with a more flexible camera model.
+  def _generate_rays(self,config):
+    """Generating rays for all images."""
+    x, y = np.meshgrid(  # pylint: disable=unbalanced-tuple-unpacking
+        np.arange(self.w, dtype=np.float32),  # X-Axis (columns)
+        np.arange(self.h, dtype=np.float32),  # Y-Axis (rows)
+        indexing='xy')
+    camera_dirs = np.stack(
+        [(x - self.w * 0.5 + 0.5) / self.focal,
+         -(y - self.h * 0.5 + 0.5) / self.focal, -np.ones_like(x)],
+        axis=-1)
+    directions = ((camera_dirs[None, ..., None, :] *
+                   self.camtoworlds[:, None, None, :3, :3]).sum(axis=-1))
+    origins = np.broadcast_to(self.camtoworlds[:, None, None, :3, -1],
+                              directions.shape)
+    viewdirs = directions / np.linalg.norm(directions, axis=-1, keepdims=True)
+
+    # Distance from each unit-norm direction vector to its x-axis neighbor.
+    dx = np.sqrt(
+        np.sum((directions[:, :-1, :, :] - directions[:, 1:, :, :])**2, -1))
+    dx = np.concatenate([dx, dx[:, -2:-1, :]], 1)
+    # Cut the distance in half, and then round it out so that it's
+    # halfway between inscribed by / circumscribed about the pixel.
+
+    radii = dx[..., None] * 2 / np.sqrt(12)
+
+    ones = np.ones_like(origins[..., :1])
+    temperature = np.tile(self.temperature[:,None,None,:],[1,*ones.shape[1:3],1])
+    exposure = np.tile(self.exposure[:,None,None,:],[1,*ones.shape[1:3],1])
+    coc = np.tile(self.coc[:,None,None,:],[1,*ones.shape[1:3],1])
+    self.rays = utils.Rays(
+        origins=origins,
+        directions=directions,
+        viewdirs=viewdirs,
+        radii=radii,
+        lossmult=ones,
+        near=ones * self.near,
+        far=ones * self.far,
+        temperature=temperature,
+        exposure=exposure,
+        coc = coc,
+        )
+
+
+class Multicam(Dataset):
+  """Multicam Dataset."""
+
+  def _load_renderings(self, config):
+    """Load images from disk."""
+    if config.render_path:
+      raise ValueError('render_path cannot be used for the Multicam dataset.')
+    with utils.open_file(path.join(self.data_dir, 'metadata.json'),
+                         'r') as fp:
+      self.meta = json.load(fp)[self.split]
+    self.meta = {k: np.array(self.meta[k]) for k in self.meta}
+    # should now have ['pix2cam', 'cam2world', 'width', 'height'] in self.meta
+    images = []
+    for fbase in self.meta['file_path']:
+      fname = os.path.join(self.data_dir, fbase)
+      with utils.open_file(fname, 'rb') as imgin:
+        image = np.array(Image.open(imgin), dtype=np.float32) / 255.
+      if config.white_bkgd:
+        image = image[..., :3] * image[..., -1:] + (1. - image[..., -1:])
+      images.append(image[..., :3])
+    self.images = images
+    self.n_examples = len(self.images)
+
+  def _train_init(self, config):
+    """Initialize training."""
+    self._load_renderings(config)
+    self._generate_rays()
+
+    def flatten(x):
+      # Always flatten out the height x width dimensions
+      x = [y.reshape([-1, y.shape[-1]]) for y in x]
+      if config.batching == 'all_images':
+        # If global batching, also concatenate all data into one list
+        x = np.concatenate(x, axis=0)
+      return x
+
+    self.images = flatten(self.images)
+    self.rays = utils.namedtuple_map(flatten, self.rays)
+
+  def _test_init(self, config):
+    self._load_renderings(config)
+    self._generate_rays()
+    self.it = 0
+
+  def _generate_rays(self):
+    """Generating rays for all images."""
+    pix2cam = self.meta['pix2cam']
+    cam2world = self.meta['cam2world']
+    width = self.meta['width']
+    height = self.meta['height']
+
+    def res2grid(w, h):
+      return np.meshgrid(  # pylint: disable=unbalanced-tuple-unpacking
+          np.arange(w, dtype=np.float32) + .5,  # X-Axis (columns)
+          np.arange(h, dtype=np.float32) + .5,  # Y-Axis (rows)
+          indexing='xy')
+
+    xy = [res2grid(w, h) for w, h in zip(width, height)]
+    pixel_dirs = [np.stack([x, y, np.ones_like(x)], axis=-1) for x, y in xy]
+    camera_dirs = [v @ p2c[:3, :3].T for v, p2c in zip(pixel_dirs, pix2cam)]
+    directions = [v @ c2w[:3, :3].T for v, c2w in zip(camera_dirs, cam2world)]
+    origins = [
+        np.broadcast_to(c2w[:3, -1], v.shape)
+        for v, c2w in zip(directions, cam2world)
+    ]
+    viewdirs = [
+        v / np.linalg.norm(v, axis=-1, keepdims=True) for v in directions
+    ]
+
+    def broadcast_scalar_attribute(x):
+      return [
+          np.broadcast_to(x[i], origins[i][..., :1].shape)
+          for i in range(self.n_examples)
+      ]
+
+    lossmult = broadcast_scalar_attribute(self.meta['lossmult'])
+    near = broadcast_scalar_attribute(self.meta['near'])
+    far = broadcast_scalar_attribute(self.meta['far'])
+
+    # Distance from each unit-norm direction vector to its x-axis neighbor.
+    dx = [
+        np.sqrt(np.sum((v[:-1, :, :] - v[1:, :, :])**2, -1)) for v in directions
+    ]
+    dx = [np.concatenate([v, v[-2:-1, :]], 0) for v in dx]
+    # Cut the distance in half, and then round it out so that it's
+    # halfway between inscribed by / circumscribed about the pixel.
+    radii = [v[..., None] * 2 / np.sqrt(12) for v in dx]
+
+    self.rays = utils.Rays(
+        origins=origins,
+        directions=directions,
+        viewdirs=viewdirs,
+        radii=radii,
+        lossmult=lossmult,
+        near=near,
+        far=far)
+
+
+class Blender(Dataset):
+  """Blender Dataset."""
+
+  def _load_renderings(self, config):
+    """Load images from disk."""
+    if config.render_path:
+      raise ValueError('render_path cannot be used for the blender dataset.')
+    with utils.open_file(
+        path.join(self.data_dir, 'transforms_{}.json'.format(self.split)),
+        'r') as fp:
+      meta = json.load(fp)
+    images = []
+    cams = []
+    for i in range(len(meta['frames'])):
+      frame = meta['frames'][i]
+      fname = os.path.join(self.data_dir, frame['file_path'] + '.png')
+      with utils.open_file(fname, 'rb') as imgin:
+        image = np.array(Image.open(imgin), dtype=np.float32) / 255.
+        if config.factor == 2:
+          [halfres_h, halfres_w] = [hw // 2 for hw in image.shape[:2]]
+          image = cv2.resize(
+              image, (halfres_w, halfres_h), interpolation=cv2.INTER_AREA)
+        elif config.factor > 0:
+          raise ValueError('Blender dataset only supports factor=0 or 2, {} '
+                           'set.'.format(config.factor))
+      cams.append(np.array(frame['transform_matrix'], dtype=np.float32))
+      images.append(image)
+    self.images = np.stack(images, axis=0)
+    if config.white_bkgd:
+      self.images = (
+          self.images[..., :3] * self.images[..., -1:] +
+          (1. - self.images[..., -1:]))
+    else:
+      self.images = self.images[..., :3]
+    self.h, self.w = self.images.shape[1:3]
+    self.resolution = self.h * self.w
+    self.camtoworlds = np.stack(cams, axis=0)
+    camera_angle_x = float(meta['camera_angle_x'])
+    self.focal = .5 * self.w / np.tan(.5 * camera_angle_x)
+    self.n_examples = self.images.shape[0]
+
+
+class LLFF(Dataset):
+  """LLFF Dataset."""
+
+  def _load_renderings(self, config):
+    """Load images from disk."""
+    # Load images.
+    imgdir_suffix = ''
+    if config.factor > 0:
+      imgdir_suffix = '_{}'.format(config.factor)
+      factor = config.factor
+    else:
+      factor = 1
+    imgdir = path.join(self.data_dir, 'images' + imgdir_suffix)
+    if not utils.file_exists(imgdir):
+      raise ValueError('Image folder {} does not exist.'.format(imgdir))
+    imgfiles = [
+        path.join(imgdir, f)
+        for f in sorted(utils.listdir(imgdir))
+        if f.endswith('JPG') or f.endswith('jpg') or f.endswith('png')
+    ]
+    images = []
+    for imgfile in imgfiles:
+      with utils.open_file(imgfile, 'rb') as imgin:
+        image = np.array(Image.open(imgin), dtype=np.float32) / 255.
+        images.append(image)
+    images = np.stack(images, axis=-1)
+
+    # Load poses and bds.
+    with utils.open_file(path.join(self.data_dir, 'poses_bounds.npy'),
+                         'rb') as fp:
+      poses_arr = np.load(fp)
+    temperature = np.load(path.join(self.data_dir, 'temperature.npy'))
+    exposure = np.load(path.join(self.data_dir, 'exposure.npy'))
+    coc = np.load(path.join(self.data_dir, 'coc.npy'))
+    # coc = np.ones_like(exposure)
+    temperature = temperature.astype(np.float32) /10000
+    exposure = (exposure.astype(np.float32) +3) /6
+    coc = coc.astype(np.float32)
+    temperature = temperature.reshape(images.shape[3],-1)
+    exposure = exposure.reshape(images.shape[3],-1)
+    coc = coc.reshape(images.shape[3],-1)
+    poses = poses_arr[:, :-2].reshape([-1, 3, 5]).transpose([1, 2, 0])
+    bds = poses_arr[:, -2:].transpose([1, 0])
+    if poses.shape[-1] != images.shape[-1]:
+      raise RuntimeError('Mismatch between imgs {} and poses {}'.format(
+          images.shape[-1], poses.shape[-1]))
+
+    # Update poses according to downsampling.
+    poses[:2, 4, :] = np.array(images.shape[:2]).reshape([2, 1])
+    poses[2, 4, :] = poses[2, 4, :] * 1. / factor
+
+    # Correct rotation matrix ordering and move variable dim to axis 0.
+    poses = np.concatenate(
+        [poses[:, 1:2, :], -poses[:, 0:1, :], poses[:, 2:, :]], 1)
+    poses = np.moveaxis(poses, -1, 0).astype(np.float32)
+    images = np.moveaxis(images, -1, 0)
+    bds = np.moveaxis(bds, -1, 0).astype(np.float32)
+
+    # Rescale according to a default bd factor.
+    scale = 1. / (bds.min() * .75)
+    poses[:, :3, 3] *= scale
+    bds *= scale
+
+    # Recenter poses.
+    poses = self._recenter_poses(poses)
+
+    # Generate a spiral/spherical ray path for rendering videos.
+    if config.spherify:
+      poses = self._generate_spherical_poses(poses, bds)
+      self.spherify = True
+    else:
+      self.spherify = False
+    if not config.spherify and self.split == 'test':
+      self._generate_spiral_poses(poses, bds,config.render_temp,config.render_exp)
+
+    # Select the split.
+    i_test = np.arange(images.shape[0])[::config.llffhold]
+#     i_test = np.arange(0, 12, 1)
+    i_train = np.array(
+        [i for i in np.arange(int(images.shape[0])) if i not in i_test])
+    if self.split == 'train':
+      indices = i_train
+    else:
+      indices = i_test
+    images = images[indices]
+    poses = poses[indices]
+    temperature = temperature[indices]
+    exposure = exposure[indices]
+    coc = coc[indices]
+
+    self.images = images
+    self.temperature = temperature
+    self.exposure = exposure
+    self.coc = coc
+    self.camtoworlds = poses[:, :3, :4]
+    self.focal = poses[0, -1, -1]
+    self.h, self.w = images.shape[1:3]
+    self.resolution = self.h * self.w
+    if config.render_path:
+      self.n_examples = self.render_poses.shape[0]
+    else:
+      self.n_examples = images.shape[0]
+
+  def _generate_rays(self,config):
+    """Generate normalized device coordinate rays for llff."""
+    if self.split == 'test' :
+      n_render_poses = self.render_poses.shape[0]
+      self.camtoworlds = np.concatenate([self.render_poses, self.camtoworlds],
+                                        axis=0)
+      self.temperature = np.concatenate([self.render_temp, self.temperature],
+                                        axis=0)
+      self.exposure = np.concatenate([self.render_exp, self.exposure],
+                                        axis=0)
+      zeros = np.ones_like(self.render_exp)
+      self.coc = np.concatenate([zeros, self.coc],
+                                        axis=0)
+
+
+    super()._generate_rays(config)
+
+    if not self.spherify:
+      ndc_origins, ndc_directions = convert_to_ndc(self.rays.origins,
+                                                   self.rays.directions,
+                                                   self.focal, self.w, self.h)
+
+      mat = ndc_origins
+      # Distance from each unit-norm direction vector to its x-axis neighbor.
+      dx = np.sqrt(np.sum((mat[:, :-1, :, :] - mat[:, 1:, :, :])**2, -1))
+      dx = np.concatenate([dx, dx[:, -2:-1, :]], 1)
+
+      dy = np.sqrt(np.sum((mat[:, :, :-1, :] - mat[:, :, 1:, :])**2, -1))
+      dy = np.concatenate([dy, dy[:, :, -2:-1]], 2)
+      # Cut the distance in half, and then round it out so that it's
+      # halfway between inscribed by / circumscribed about the pixel.
+      radii = (0.5 * (dx + dy))[..., None] * 2 / np.sqrt(12)
+
+      ones = np.ones_like(ndc_origins[..., :1])
+      temperature = self.rays.temperature
+      exposure = self.rays.exposure
+      coc = self.rays.coc
+      self.rays = utils.Rays(
+          origins=ndc_origins,
+          directions=ndc_directions,
+          viewdirs=self.rays.directions,
+          radii=radii,
+          lossmult=ones,
+          near=ones * self.near,
+          far=ones * self.far,
+          temperature=temperature,
+          exposure=exposure,
+          coc = coc,
+        )
+
+    # Split poses from the dataset and generated poses
+    if self.split == 'test':
+      self.camtoworlds = self.camtoworlds[n_render_poses:]
+      self.temperature = self.temperature[n_render_poses:]
+      self.exposure = self.exposure[n_render_poses:]
+      split = [np.split(r, [n_render_poses], 0) for r in self.rays]
+      split0, split1 = zip(*split)
+      self.render_rays = utils.Rays(*split0)
+      self.rays = utils.Rays(*split1)
+
+  def _recenter_poses(self, poses):
+    """Recenter poses according to the original NeRF code."""
+    poses_ = poses.copy()
+    bottom = np.reshape([0, 0, 0, 1.], [1, 4])
+    c2w = self._poses_avg(poses)
+    c2w = np.concatenate([c2w[:3, :4], bottom], -2)
+    bottom = np.tile(np.reshape(bottom, [1, 1, 4]), [poses.shape[0], 1, 1])
+    poses = np.concatenate([poses[:, :3, :4], bottom], -2)
+    poses = np.linalg.inv(c2w) @ poses
+    poses_[:, :3, :4] = poses[:, :3, :4]
+    poses = poses_
+    return poses
+
+  def _poses_avg(self, poses):
+    """Average poses according to the original NeRF code."""
+    hwf = poses[0, :3, -1:]
+    center = poses[:, :3, 3].mean(0)
+    vec2 = self._normalize(poses[:, :3, 2].sum(0))
+    up = poses[:, :3, 1].sum(0)
+    c2w = np.concatenate([self._viewmatrix(vec2, up, center), hwf], 1)
+    return c2w
+
+  def _viewmatrix(self, z, up, pos):
+    """Construct lookat view matrix."""
+    vec2 = self._normalize(z)
+    vec1_avg = up
+    vec0 = self._normalize(np.cross(vec1_avg, vec2))
+    vec1 = self._normalize(np.cross(vec2, vec0))
+    m = np.stack([vec0, vec1, vec2, pos], 1)
+    return m
+
+  def _normalize(self, x):
+    """Normalization helper function."""
+    return x / np.linalg.norm(x)
+
+  def _generate_spiral_poses(self, poses, bds, temp, exp):
+    """Generate a spiral path for rendering."""
+    c2w = self._poses_avg(poses)
+    # Get average pose.
+    up = self._normalize(poses[:, :3, 1].sum(0))
+    # Find a reasonable 'focus depth' for this dataset.
+    close_depth, inf_depth = bds.min() * .9, bds.max() * 5.
+    dt = .75
+    mean_dz = 1. / (((1. - dt) / close_depth + dt / inf_depth))
+    focal = mean_dz
+    # Get radii for spiral path.
+    tt = poses[:, :3, 3]
+    rads = np.percentile(np.abs(tt), 90, 0)
+    c2w_path = c2w
+    n_views = 30
+    n_rots = 1
+    # Generate poses for spiral path.
+    render_poses = []
+    rads = np.array(list(rads) + [1.])
+    hwf = c2w_path[:, 4:5]
+    zrate = .5
+    for theta in np.linspace(0., 2. * np.pi * n_rots, n_views + 1)[:-1]:
+      c = np.dot(c2w[:3, :4], (np.array(
+          [np.cos(theta), -np.sin(theta), -np.sin(theta * zrate), 1.]) * rads))
+      z = self._normalize(c - np.dot(c2w[:3, :4], np.array([0, 0, -focal, 1.])))
+      render_poses.append(np.concatenate([self._viewmatrix(z, up, c), hwf], 1))
+    self.render_poses = np.array(render_poses).astype(np.float32)[:, :3, :4]
+    render_t = np.linspace(temp/10000,temp/10000,n_views)
+    # render_t = np.linspace(5200.0 / 10000, 2000.0 / 10000, n_views)
+    render_t = render_t.reshape(-1,1)
+    render_t = np.array(render_t).astype(np.float32)
+    render_e = np.linspace((exp+3)/6,(exp+3)/6,n_views)
+    # render_e = np.linspace((-2 + 3) / 6, (1 + 3) / 6, n_views)
+    render_e = render_e.reshape(-1,1)
+    render_e = np.array(render_e).astype(np.float32)
+    self.render_temp = render_t
+    self.render_exp = render_e
+
+  def _generate_spherical_poses(self, poses, bds):
+    """Generate a 360 degree spherical path for rendering."""
+    # pylint: disable=g-long-lambda
+    p34_to_44 = lambda p: np.concatenate([
+        p,
+        np.tile(np.reshape(np.eye(4)[-1, :], [1, 1, 4]), [p.shape[0], 1, 1])
+    ], 1)
+    rays_d = poses[:, :3, 2:3]
+    rays_o = poses[:, :3, 3:4]
+
+    def min_line_dist(rays_o, rays_d):
+      a_i = np.eye(3) - rays_d * np.transpose(rays_d, [0, 2, 1])
+      b_i = -a_i @ rays_o
+      pt_mindist = np.squeeze(-np.linalg.inv(
+          (np.transpose(a_i, [0, 2, 1]) @ a_i).mean(0)) @ (b_i).mean(0))
+      return pt_mindist
+
+    pt_mindist = min_line_dist(rays_o, rays_d)
+    center = pt_mindist
+    up = (poses[:, :3, 3] - center).mean(0)
+    vec0 = self._normalize(up)
+    vec1 = self._normalize(np.cross([.1, .2, .3], vec0))
+    vec2 = self._normalize(np.cross(vec0, vec1))
+    pos = center
+    c2w = np.stack([vec1, vec2, vec0, pos], 1)
+    poses_reset = (
+        np.linalg.inv(p34_to_44(c2w[None])) @ p34_to_44(poses[:, :3, :4]))
+    rad = np.sqrt(np.mean(np.sum(np.square(poses_reset[:, :3, 3]), -1)))
+    sc = 1. / rad
+    poses_reset[:, :3, 3] *= sc
+    bds *= sc
+    rad *= sc
+    centroid = np.mean(poses_reset[:, :3, 3], 0)
+    zh = centroid[2]
+    radcircle = np.sqrt(rad**2 - zh**2)
+    new_poses = []
+
+    for th in np.linspace(0., 2. * np.pi, 120):
+      camorigin = np.array([radcircle * np.cos(th), radcircle * np.sin(th), zh])
+      up = np.array([0, 0, -1.])
+      vec2 = self._normalize(camorigin)
+      vec0 = self._normalize(np.cross(vec2, up))
+      vec1 = self._normalize(np.cross(vec2, vec0))
+      pos = camorigin
+      p = np.stack([vec0, vec1, vec2, pos], 1)
+      new_poses.append(p)
+
+    new_poses = np.stack(new_poses, 0)
+    new_poses = np.concatenate([
+        new_poses,
+        np.broadcast_to(poses[0, :3, -1:], new_poses[:, :3, -1:].shape)
+    ], -1)
+    poses_reset = np.concatenate([
+        poses_reset[:, :3, :4],
+        np.broadcast_to(poses[0, :3, -1:], poses_reset[:, :3, -1:].shape)
+    ], -1)
+    if self.split == 'test':
+      self.render_poses = new_poses[:, :3, :4]
+    return poses_reset
+
+
+dataset_dict = {
+    'blender': Blender,
+    'llff': LLFF,
+    'multicam': Multicam,
+}
+```
+
+### internal/math.py
+```
+# Copyright 2021 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Lint as: python3
+"""Mathy utility functions."""
+import jax
+import jax.numpy as jnp
+import jax.scipy as jsp
+
+
+def matmul(a, b):
+  """jnp.matmul defaults to bfloat16, but this helper function doesn't."""
+  return jnp.matmul(a, b, precision=jax.lax.Precision.HIGHEST)
+
+
+def safe_trig_helper(x, fn, t=100 * jnp.pi):
+  return fn(jnp.where(jnp.abs(x) < t, x, x % t))
+
+
+def safe_cos(x):
+  """jnp.cos() on a TPU may NaN out for large values."""
+  return safe_trig_helper(x, jnp.cos)
+
+
+def safe_sin(x):
+  """jnp.sin() on a TPU may NaN out for large values."""
+  return safe_trig_helper(x, jnp.sin)
+
+
+def mse_to_psnr(mse):
+  """Compute PSNR given an MSE (we assume the maximum pixel value is 1)."""
+  return -10. / jnp.log(10.) * jnp.log(mse)
+
+
+def psnr_to_mse(psnr):
+  """Compute MSE given a PSNR (we assume the maximum pixel value is 1)."""
+  return jnp.exp(-0.1 * jnp.log(10.) * psnr)
+
+
+def compute_avg_error(psnr, ssim, lpips):
+  """The 'average' error used in the paper."""
+  mse = psnr_to_mse(psnr)
+  dssim = jnp.sqrt(1 - ssim)
+  return jnp.exp(jnp.mean(jnp.log(jnp.array([mse, dssim, lpips]))))
+
+
+def compute_ssim(img0,
+                 img1,
+                 max_val,
+                 filter_size=11,
+                 filter_sigma=1.5,
+                 k1=0.01,
+                 k2=0.03,
+                 return_map=False):
+  """Computes SSIM from two images.
+
+  This function was modeled after tf.image.ssim, and should produce comparable
+  output.
+
+  Args:
+    img0: array. An image of size [..., width, height, num_channels].
+    img1: array. An image of size [..., width, height, num_channels].
+    max_val: float > 0. The maximum magnitude that `img0` or `img1` can have.
+    filter_size: int >= 1. Window size.
+    filter_sigma: float > 0. The bandwidth of the Gaussian used for filtering.
+    k1: float > 0. One of the SSIM dampening parameters.
+    k2: float > 0. One of the SSIM dampening parameters.
+    return_map: Bool. If True, will cause the per-pixel SSIM "map" to returned
+
+  Returns:
+    Each image's mean SSIM, or a tensor of individual values if `return_map`.
+  """
+  # Construct a 1D Gaussian blur filter.
+  hw = filter_size // 2
+  shift = (2 * hw - filter_size + 1) / 2
+  f_i = ((jnp.arange(filter_size) - hw + shift) / filter_sigma)**2
+  filt = jnp.exp(-0.5 * f_i)
+  filt /= jnp.sum(filt)
+
+  # Blur in x and y (faster than the 2D convolution).
+  def convolve2d(z, f):
+    return jsp.signal.convolve2d(
+        z, f, mode='valid', precision=jax.lax.Precision.HIGHEST)
+
+  filt_fn1 = lambda z: convolve2d(z, filt[:, None])
+  filt_fn2 = lambda z: convolve2d(z, filt[None, :])
+
+  # Vmap the blurs to the tensor size, and then compose them.
+  num_dims = len(img0.shape)
+  map_axes = tuple(list(range(num_dims - 3)) + [num_dims - 1])
+  for d in map_axes:
+    filt_fn1 = jax.vmap(filt_fn1, in_axes=d, out_axes=d)
+    filt_fn2 = jax.vmap(filt_fn2, in_axes=d, out_axes=d)
+  filt_fn = lambda z: filt_fn1(filt_fn2(z))
+
+  mu0 = filt_fn(img0)
+  mu1 = filt_fn(img1)
+  mu00 = mu0 * mu0
+  mu11 = mu1 * mu1
+  mu01 = mu0 * mu1
+  sigma00 = filt_fn(img0**2) - mu00
+  sigma11 = filt_fn(img1**2) - mu11
+  sigma01 = filt_fn(img0 * img1) - mu01
+
+  # Clip the variances and covariances to valid values.
+  # Variance must be non-negative:
+  sigma00 = jnp.maximum(0., sigma00)
+  sigma11 = jnp.maximum(0., sigma11)
+  sigma01 = jnp.sign(sigma01) * jnp.minimum(
+      jnp.sqrt(sigma00 * sigma11), jnp.abs(sigma01))
+
+  c1 = (k1 * max_val)**2
+  c2 = (k2 * max_val)**2
+  numer = (2 * mu01 + c1) * (2 * sigma01 + c2)
+  denom = (mu00 + mu11 + c1) * (sigma00 + sigma11 + c2)
+  ssim_map = numer / denom
+  ssim = jnp.mean(ssim_map, list(range(num_dims - 3, num_dims)))
+  return ssim_map if return_map else ssim
+
+
+def linear_to_srgb(linear):
+  # Assumes `linear` is in [0, 1]. https://en.wikipedia.org/wiki/SRGB
+  eps = jnp.finfo(jnp.float32).eps
+  srgb0 = 323 / 25 * linear
+  srgb1 = (211 * jnp.maximum(eps, linear)**(5 / 12) - 11) / 200
+  return jnp.where(linear <= 0.0031308, srgb0, srgb1)
+
+
+def srgb_to_linear(srgb):
+  # Assumes `srgb` is in [0, 1]. https://en.wikipedia.org/wiki/SRGB
+  eps = jnp.finfo(jnp.float32).eps
+  linear0 = 25 / 323 * srgb
+  linear1 = jnp.maximum(eps, ((200 * srgb + 11) / (211)))**(12 / 5)
+  return jnp.where(srgb <= 0.04045, linear0, linear1)
+
+
+def learning_rate_decay(step,
+                        lr_init,
+                        lr_final,
+                        max_steps,
+                        lr_delay_steps=0,
+                        lr_delay_mult=1):
+  """Continuous learning rate decay function.
+
+  The returned rate is lr_init when step=0 and lr_final when step=max_steps, and
+  is log-linearly interpolated elsewhere (equivalent to exponential decay).
+  If lr_delay_steps>0 then the learning rate will be scaled by some smooth
+  function of lr_delay_mult, such that the initial learning rate is
+  lr_init*lr_delay_mult at the beginning of optimization but will be eased back
+  to the normal learning rate when steps>lr_delay_steps.
+
+  Args:
+    step: int, the current optimization step.
+    lr_init: float, the initial learning rate.
+    lr_final: float, the final learning rate.
+    max_steps: int, the number of steps during optimization.
+    lr_delay_steps: int, the number of steps to delay the full learning rate.
+    lr_delay_mult: float, the multiplier on the rate when delaying it.
+
+  Returns:
+    lr: the learning for current step 'step'.
+  """
+  if lr_delay_steps > 0:
+    # A kind of reverse cosine decay.
+    delay_rate = lr_delay_mult + (1 - lr_delay_mult) * jnp.sin(
+        0.5 * jnp.pi * jnp.clip(step / lr_delay_steps, 0, 1))
+  else:
+    delay_rate = 1.
+  t = jnp.clip(step / max_steps, 0, 1)
+  log_lerp = jnp.exp(jnp.log(lr_init) * (1 - t) + jnp.log(lr_final) * t)
+  return delay_rate * log_lerp
+
+
+def sorted_piecewise_constant_pdf(key, bins, weights, num_samples, randomized):
+  """Piecewise-Constant PDF sampling from sorted bins.
+
+  Args:
+    key: jnp.ndarray(float32), [2,], random number generator.
+    bins: jnp.ndarray(float32), [batch_size, num_bins + 1].
+    weights: jnp.ndarray(float32), [batch_size, num_bins].
+    num_samples: int, the number of samples.
+    randomized: bool, use randomized samples.
+
+  Returns:
+    t_samples: jnp.ndarray(float32), [batch_size, num_samples].
+  """
+  # Pad each weight vector (only if necessary) to bring its sum to `eps`. This
+  # avoids NaNs when the input is zeros or small, but has no effect otherwise.
+  eps = 1e-5
+  weight_sum = jnp.sum(weights, axis=-1, keepdims=True)
+  padding = jnp.maximum(0, eps - weight_sum)
+  weights += padding / weights.shape[-1]
+  weight_sum += padding
+
+  # Compute the PDF and CDF for each weight vector, while ensuring that the CDF
+  # starts with exactly 0 and ends with exactly 1.
+  pdf = weights / weight_sum
+  cdf = jnp.minimum(1, jnp.cumsum(pdf[..., :-1], axis=-1))
+  cdf = jnp.concatenate([
+      jnp.zeros(list(cdf.shape[:-1]) + [1]), cdf,
+      jnp.ones(list(cdf.shape[:-1]) + [1])
+  ],
+                        axis=-1)
+
+  # Draw uniform samples.
+  if randomized:
+    s = 1 / num_samples
+    u = jnp.arange(num_samples) * s
+    u += jax.random.uniform(
+        key,
+        list(cdf.shape[:-1]) + [num_samples],
+        maxval=s - jnp.finfo('float32').eps)
+    # `u` is in [0, 1) --- it can be zero, but it can never be 1.
+    u = jnp.minimum(u, 1. - jnp.finfo('float32').eps)
+  else:
+    # Match the behavior of jax.random.uniform() by spanning [0, 1-eps].
+    u = jnp.linspace(0., 1. - jnp.finfo('float32').eps, num_samples)
+    u = jnp.broadcast_to(u, list(cdf.shape[:-1]) + [num_samples])
+
+  # Identify the location in `cdf` that corresponds to a random sample.
+  # The final `True` index in `mask` will be the start of the sampled interval.
+  mask = u[..., None, :] >= cdf[..., :, None]
+
+  def find_interval(x):
+    # Grab the value where `mask` switches from True to False, and vice versa.
+    # This approach takes advantage of the fact that `x` is sorted.
+    x0 = jnp.max(jnp.where(mask, x[..., None], x[..., :1, None]), -2)
+    x1 = jnp.min(jnp.where(~mask, x[..., None], x[..., -1:, None]), -2)
+    return x0, x1
+
+  bins_g0, bins_g1 = find_interval(bins)
+  cdf_g0, cdf_g1 = find_interval(cdf)
+
+  t = jnp.clip(jnp.nan_to_num((u - cdf_g0) / (cdf_g1 - cdf_g0), 0), 0, 1)
+  samples = bins_g0 + t * (bins_g1 - bins_g0)
+  return samples
+```
+
+### internal/math_test.py
+```
+# Copyright 2021 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Lint as: python3
+"""Unit tests for math."""
+import functools
+
+from absl.testing import absltest
+import jax
+from jax import random
+from jax import test_util as jtu
+import jax.numpy as jnp
+import numpy as np
+import scipy as sp
+import tensorflow as tf
+
+from internal import math
+
+
+def safe_trig_harness(fn, max_exp):
+  x = 10**np.linspace(-30, max_exp, 10000)
+  x = np.concatenate([-x[::-1], np.array([0]), x])
+  y_true = getattr(np, fn)(x)
+  y = getattr(math, 'safe_' + fn)(x)
+  return y_true, y
+
+
+class MathUtilsTest(jtu.JaxTestCase):
+
+  def test_sin(self):
+    """In [-1e10, 1e10] safe_sin and safe_cos are accurate."""
+    for fn in ['sin', 'cos']:
+      y_true, y = safe_trig_harness(fn, 10)
+      self.assertLess(np.max(np.abs(y - y_true)), 1e-4)
+      self.assertFalse(jnp.any(jnp.isnan(y)))
+    # Beyond that range it's less accurate but we just don't want it to be NaN.
+    for fn in ['sin', 'cos']:
+      y_true, y = safe_trig_harness(fn, 60)
+      self.assertFalse(jnp.any(jnp.isnan(y)))
+
+  def test_psnr_round_trip(self):
+    """MSE -> PSNR -> MSE is a no-op."""
+    mse = 0.07
+    self.assertAllClose(math.psnr_to_mse(math.mse_to_psnr(mse)), mse)
+
+  def test_learning_rate_decay(self):
+    np.random.seed(0)
+    for _ in range(10):
+      lr_init = np.exp(np.random.normal() - 3)
+      lr_final = lr_init * np.exp(np.random.normal() - 5)
+      max_steps = int(np.ceil(100 + 100 * np.exp(np.random.normal())))
+
+      lr_fn = functools.partial(
+          math.learning_rate_decay,
+          lr_init=lr_init,
+          lr_final=lr_final,
+          max_steps=max_steps)
+
+      # Test that the rate at the beginning is the initial rate.
+      self.assertAllClose(lr_fn(0), lr_init)
+
+      # Test that the rate at the end is the final rate.
+      self.assertAllClose(lr_fn(max_steps), lr_final)
+
+      # Test that the rate at the middle is the geometric mean of the two rates.
+      self.assertAllClose(lr_fn(max_steps / 2), np.sqrt(lr_init * lr_final))
+
+      # Test that the rate past the end is the final rate
+      self.assertAllClose(lr_fn(max_steps + 100), lr_final)
+
+  def test_delayed_learning_rate_decay(self):
+    np.random.seed(0)
+    for _ in range(10):
+      lr_init = np.exp(np.random.normal() - 3)
+      lr_final = lr_init * np.exp(np.random.normal() - 5)
+      max_steps = int(np.ceil(100 + 100 * np.exp(np.random.normal())))
+      lr_delay_steps = int(np.random.uniform(low=0.1, high=0.4) * max_steps)
+      lr_delay_mult = np.exp(np.random.normal() - 3)
+
+      lr_fn = functools.partial(
+          math.learning_rate_decay,
+          lr_init=lr_init,
+          lr_final=lr_final,
+          max_steps=max_steps,
+          lr_delay_steps=lr_delay_steps,
+          lr_delay_mult=lr_delay_mult)
+
+      # Test that the rate at the beginning is the delayed initial rate.
+      self.assertAllClose(lr_fn(0), lr_delay_mult * lr_init)
+
+      # Test that the rate at the end is the final rate.
+      self.assertAllClose(lr_fn(max_steps), lr_final)
+
+      # Test that the rate at after the delay is over is the usual rate.
+      self.assertAllClose(
+          lr_fn(lr_delay_steps),
+          math.learning_rate_decay(lr_delay_steps, lr_init, lr_final,
+                                   max_steps))
+
+      # Test that the rate at the middle is the geometric mean of the two rates.
+      self.assertAllClose(lr_fn(max_steps / 2), np.sqrt(lr_init * lr_final))
+
+      # Test that the rate past the end is the final rate
+      self.assertAllClose(lr_fn(max_steps + 100), lr_final)
+
+  def test_ssim_golden(self):
+    """Test our SSIM implementation against the Tensorflow version."""
+    rng = random.PRNGKey(0)
+    shape = (2, 12, 12, 3)
+    for _ in range(4):
+      rng, key = random.split(rng)
+      max_val = random.uniform(key, minval=0.1, maxval=3.)
+      rng, key = random.split(rng)
+      img0 = max_val * random.uniform(key, shape=shape, minval=-1, maxval=1)
+      rng, key = random.split(rng)
+      img1 = max_val * random.uniform(key, shape=shape, minval=-1, maxval=1)
+      rng, key = random.split(rng)
+      filter_size = random.randint(key, shape=(), minval=1, maxval=10)
+      rng, key = random.split(rng)
+      filter_sigma = random.uniform(key, shape=(), minval=0.1, maxval=10.)
+      rng, key = random.split(rng)
+      k1 = random.uniform(key, shape=(), minval=0.001, maxval=0.1)
+      rng, key = random.split(rng)
+      k2 = random.uniform(key, shape=(), minval=0.001, maxval=0.1)
+
+      ssim_gt = tf.image.ssim(
+          img0,
+          img1,
+          max_val,
+          filter_size=filter_size,
+          filter_sigma=filter_sigma,
+          k1=k1,
+          k2=k2).numpy()
+      for return_map in [False, True]:
+        ssim_fn = jax.jit(
+            functools.partial(
+                math.compute_ssim,
+                max_val=max_val,
+                filter_size=filter_size,
+                filter_sigma=filter_sigma,
+                k1=k1,
+                k2=k2,
+                return_map=return_map))
+        ssim = ssim_fn(img0, img1)
+        if not return_map:
+          self.assertAllClose(ssim, ssim_gt)
+        else:
+          self.assertAllClose(np.mean(ssim, [1, 2, 3]), ssim_gt)
+        self.assertLessEqual(np.max(ssim), 1.)
+        self.assertGreaterEqual(np.min(ssim), -1.)
+
+  def test_ssim_lowerbound(self):
+    """Test the unusual corner case where SSIM is -1."""
+    sz = 11
+    img = np.meshgrid(*([np.linspace(-1, 1, sz)] * 2))[0][None, ..., None]
+    eps = 1e-5
+    ssim = math.compute_ssim(
+        img, -img, 1., filter_size=sz, filter_sigma=1.5, k1=eps, k2=eps)
+    self.assertAllClose(ssim, -np.ones_like(ssim))
+
+  def test_srgb_linearize(self):
+    x = np.linspace(-1, 3, 10000)  # Nobody should call this <0 but it works.
+    # Check that the round-trip transformation is a no-op.
+    self.assertAllClose(math.linear_to_srgb(math.srgb_to_linear(x)), x)
+    self.assertAllClose(math.srgb_to_linear(math.linear_to_srgb(x)), x)
+    # Check that gradients are finite.
+    self.assertTrue(
+        np.all(np.isfinite(jax.vmap(jax.grad(math.linear_to_srgb))(x))))
+    self.assertTrue(
+        np.all(np.isfinite(jax.vmap(jax.grad(math.srgb_to_linear))(x))))
+
+  def test_sorted_piecewise_constant_pdf_train_mode(self):
+    """Test that piecewise-constant sampling reproduces its distribution."""
+    batch_size = 4
+    num_bins = 16
+    num_samples = 1000000
+    precision = 1e5
+    rng = random.PRNGKey(20202020)
+
+    # Generate a series of random PDFs to sample from.
+    data = []
+    for _ in range(batch_size):
+      rng, key = random.split(rng)
+      # Randomly initialize the distances between bins.
+      # We're rolling our own fixed precision here to make cumsum exact.
+      bins_delta = jnp.round(precision * jnp.exp(
+          random.uniform(key, shape=(num_bins + 1,), minval=-3, maxval=3)))
+
+      # Set some of the bin distances to 0.
+      rng, key = random.split(rng)
+      bins_delta *= random.uniform(key, shape=bins_delta.shape) < 0.9
+
+      # Integrate the bins.
+      bins = jnp.cumsum(bins_delta) / precision
+      rng, key = random.split(rng)
+      bins += random.normal(key) * num_bins / 2
+      rng, key = random.split(rng)
+
+      # Randomly generate weights, allowing some to be zero.
+      weights = jnp.maximum(
+          0, random.uniform(key, shape=(num_bins,), minval=-0.5, maxval=1.))
+      gt_hist = weights / weights.sum()
+      data.append((bins, weights, gt_hist))
+
+    # Tack on an "all zeros" weight matrix, which is a common cause of NaNs.
+    weights = jnp.zeros_like(weights)
+    gt_hist = jnp.ones_like(gt_hist) / num_bins
+    data.append((bins, weights, gt_hist))
+
+    bins, weights, gt_hist = [jnp.stack(x) for x in zip(*data)]
+
+    for randomized in [True, False]:
+      rng, key = random.split(rng)
+      # Draw samples from the batch of PDFs.
+      samples = math.sorted_piecewise_constant_pdf(
+          key,
+          bins,
+          weights,
+          num_samples,
+          randomized,
+      )
+      self.assertEqual(samples.shape[-1], num_samples)
+
+      # Check that samples are sorted.
+      self.assertTrue(jnp.all(samples[..., 1:] >= samples[..., :-1]))
+
+      # Verify that each set of samples resembles the target distribution.
+      for i_samples, i_bins, i_gt_hist in zip(samples, bins, gt_hist):
+        i_hist = jnp.float32(jnp.histogram(i_samples, i_bins)[0]) / num_samples
+        i_gt_hist = jnp.array(i_gt_hist)
+
+        # Merge any of the zero-span bins until there aren't any left.
+        while jnp.any(i_bins[:-1] == i_bins[1:]):
+          j = int(jnp.where(i_bins[:-1] == i_bins[1:])[0][0])
+          i_hist = jnp.concatenate([
+              i_hist[:j],
+              jnp.array([i_hist[j] + i_hist[j + 1]]), i_hist[j + 2:]
+          ])
+          i_gt_hist = jnp.concatenate([
+              i_gt_hist[:j],
+              jnp.array([i_gt_hist[j] + i_gt_hist[j + 1]]), i_gt_hist[j + 2:]
+          ])
+          i_bins = jnp.concatenate([i_bins[:j], i_bins[j + 1:]])
+
+        # Angle between the two histograms in degrees.
+        angle = 180 / jnp.pi * jnp.arccos(
+            jnp.minimum(
+                1.,
+                jnp.mean(
+                    (i_hist * i_gt_hist) /
+                    jnp.sqrt(jnp.mean(i_hist**2) * jnp.mean(i_gt_hist**2)))))
+        # Jensen-Shannon divergence.
+        m = (i_hist + i_gt_hist) / 2
+        js_div = jnp.sum(
+            sp.special.kl_div(i_hist, m) + sp.special.kl_div(i_gt_hist, m)) / 2
+        self.assertLessEqual(angle, 0.5)
+        self.assertLessEqual(js_div, 1e-5)
+
+  def test_sorted_piecewise_constant_pdf_large_flat(self):
+    """Test sampling when given a large flat distribution."""
+    num_samples = 100
+    num_bins = 100000
+    key = random.PRNGKey(0)
+    bins = jnp.arange(num_bins)
+    weights = np.ones(len(bins) - 1)
+    samples = math.sorted_piecewise_constant_pdf(
+        key,
+        bins[None],
+        weights[None],
+        num_samples,
+        True,
+    )[0]
+    # All samples should be within the range of the bins.
+    self.assertTrue(jnp.all(samples >= bins[0]))
+    self.assertTrue(jnp.all(samples <= bins[-1]))
+
+    # Samples modded by their bin index should resemble a uniform distribution.
+    samples_mod = jnp.mod(samples, 1)
+    self.assertLessEqual(
+        sp.stats.kstest(samples_mod, 'uniform', (0, 1)).statistic, 0.2)
+
+    # All samples should collectively resemble a uniform distribution.
+    self.assertLessEqual(
+        sp.stats.kstest(samples, 'uniform', (bins[0], bins[-1])).statistic, 0.2)
+
+  def test_sorted_piecewise_constant_pdf_sparse_delta(self):
+    """Test sampling when given a large distribution with a big delta in it."""
+    num_samples = 100
+    num_bins = 100000
+    key = random.PRNGKey(0)
+    bins = jnp.arange(num_bins)
+    weights = np.ones(len(bins) - 1)
+    delta_idx = len(weights) // 2
+    weights[delta_idx] = len(weights) - 1
+    samples = math.sorted_piecewise_constant_pdf(
+        key,
+        bins[None],
+        weights[None],
+        num_samples,
+        True,
+    )[0]
+
+    # All samples should be within the range of the bins.
+    self.assertTrue(jnp.all(samples >= bins[0]))
+    self.assertTrue(jnp.all(samples <= bins[-1]))
+
+    # Samples modded by their bin index should resemble a uniform distribution.
+    samples_mod = jnp.mod(samples, 1)
+    self.assertLessEqual(
+        sp.stats.kstest(samples_mod, 'uniform', (0, 1)).statistic, 0.2)
+
+    # The delta function bin should contain ~half of the samples.
+    in_delta = (samples >= bins[delta_idx]) & (samples <= bins[delta_idx + 1])
+    self.assertAllClose(jnp.mean(in_delta), 0.5, atol=0.05)
+
+  def test_sorted_piecewise_constant_pdf_single_bin(self):
+    """Test sampling when given a small `one hot' distribution."""
+    num_samples = 625
+    key = random.PRNGKey(0)
+    bins = jnp.array([0, 1, 3, 6, 10], jnp.float32)
+    for randomized in [False, True]:
+      for i in range(len(bins) - 1):
+        weights = np.zeros(len(bins) - 1, jnp.float32)
+        weights[i] = 1.
+        samples = math.sorted_piecewise_constant_pdf(
+            key,
+            bins[None],
+            weights[None],
+            num_samples,
+            randomized,
+        )[0]
+
+        # All samples should be within [bins[i], bins[i+1]].
+        self.assertTrue(jnp.all(samples >= bins[i]))
+        self.assertTrue(jnp.all(samples <= bins[i + 1]))
+
+
+if __name__ == '__main__':
+  absltest.main(testLoader=jtu.JaxTestLoader())
+```
+
+### internal/mip.py
+```
+# -*- coding: utf-8 -*-
+# Copyright 2021 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Lint as: python3
+"""Helper functions for mip-NeRF."""
+
+from jax import lax
+from jax import random
+import jax.numpy as jnp
+
+from internal import math
+
+
+
+
+def pos_enc(x, min_deg, max_deg, append_identity=True):
+  """The positional encoding used by the original NeRF paper."""
+  scales = jnp.array([2**i for i in range(min_deg, max_deg)])
+  xb = jnp.reshape((x[..., None, :] * scales[:, None]),
+                   list(x.shape[:-1]) + [-1])
+  four_feat = jnp.sin(jnp.concatenate([xb, xb + 0.5 * jnp.pi], axis=-1))
+  if append_identity:
+    return jnp.concatenate([x] + [four_feat], axis=-1)
+  else:
+    return four_feat
+
+
+def expected_sin(x, x_var):
+  """Estimates mean and variance of sin(z), z ~ N(x, var)."""
+  # When the variance is wide, shrink sin towards zero.
+  y = jnp.exp(-0.5 * x_var) * math.safe_sin(x)
+  y_var = jnp.maximum(
+      0, 0.5 * (1 - jnp.exp(-2 * x_var) * math.safe_cos(2 * x)) - y**2)
+  return y, y_var
+
+
+def lift_gaussian(d, t_mean, t_var, r_var, diag):
+  """Lift a Gaussian defined along a ray to 3D coordinates.""" 
+  mean = d[..., None, :] * t_mean[..., None]
+  d_mag_sq = jnp.maximum(1e-10, jnp.sum(d**2, axis=-1, keepdims=True))
+  if diag:
+    d_outer_diag = d**2
+    null_outer_diag = 1 - d_outer_diag / d_mag_sq
+    t_cov_diag = t_var[..., None] * d_outer_diag[..., None, :]
+    xy_cov_diag = r_var[..., None] * null_outer_diag[..., None, :]
+    cov_diag = t_cov_diag + xy_cov_diag
+    return mean, cov_diag
+  else:
+    d_outer = d[..., :, None] * d[..., None, :]
+    eye = jnp.eye(d.shape[-1])
+    null_outer = eye - d[..., :, None] * (d / d_mag_sq)[..., None, :]
+    t_cov = t_var[..., None, None] * d_outer[..., None, :, :]
+    xy_cov = r_var[..., None, None] * null_outer[..., None, :, :]
+    cov = t_cov + xy_cov
+    return mean, cov
+
+
+def conical_frustum_to_gaussian(d, t0, t1, base_radius, diag, a=0, f=1, l=0.5, stable=True):
+  """Approximate a conical frustum as a Gaussian distribution (mean+cov).
+
+  Assumes the ray is originating from the origin, and base_radius is the
+  radius at dist=1. Doesn't assume `d` is normalized.
+
+  Args:
+    d: jnp.float32 3-vector, the axis of the cone
+    t0: float, the starting distance of the frustum.
+    t1: float, the ending distance of the frustum.
+    base_radius: float, the scale of the radius as a function of distance.
+    diag: boolean, whether or the Gaussian will be diagonal or full-covariance.
+    stable: boolean, whether or not to use the stable computation described in
+      the paper (setting this to False will cause catastrophic failure).
+
+  Returns:
+    a Gaussian (mean and covariance).
+  """
+  if stable:
+    mu = (t0 + t1) / 2
+    hw = (t1 - t0) / 2
+    t_mean = mu + (2 * mu * hw**2) / (3 * mu**2 + hw**2)
+    t_var = (hw**2) / 3 - (4 / 15) * ((hw**4 * (12 * mu**2 - hw**2)) /
+                                      (3 * mu**2 + hw**2)**2)
+    
+    base_radius += abs((a*(mu - l)) / l)
+
+    r_var = base_radius**2 * ((mu**2) / 4 + (5 / 12) * hw**2 - 4 / 15 *
+                              (hw**4) / (3 * mu**2 + hw**2))
+  else:
+    t_mean = (3 * (t1**4 - t0**4)) / (4 * (t1**3 - t0**3))
+    r_var = base_radius**2 * (3 / 20 * (t1**5 - t0**5) / (t1**3 - t0**3))
+    t_mosq = 3 / 5 * (t1**5 - t0**5) / (t1**3 - t0**3)
+    t_var = t_mosq - t_mean**2
+  return lift_gaussian(d, t_mean, t_var, r_var, diag)
+
+
+def cylinder_to_gaussian(d, t0, t1, radius, diag):
+  """Approximate a cylinder as a Gaussian distribution (mean+cov).
+
+  Assumes the ray is originating from the origin, and radius is the
+  radius. Does not renormalize `d`.
+
+  Args:
+    d: jnp.float32 3-vector, the axis of the cylinder
+    t0: float, the starting distance of the cylinder.
+    t1: float, the ending distance of the cylinder.
+    radius: float, the radius of the cylinder
+    diag: boolean, whether or the Gaussian will be diagonal or full-covariance.
+
+  Returns:
+    a Gaussian (mean and covariance).
+  """
+  t_mean = (t0 + t1) / 2
+  r_var = radius**2 / 4
+  t_var = (t1 - t0)**2 / 12
+  return lift_gaussian(d, t_mean, t_var, r_var, diag)
+
+
+def cast_rays(t_vals, origins, directions, radii, ray_shape, diag=True, a=0, f=1, l=0.5):
+  """Cast rays (cone- or cylinder-shaped) and featurize sections of it.
+
+  Args:
+    t_vals: float array, the "fencepost" distances along the ray.
+    origins: float array, the ray origin coordinates.
+    directions: float array, the ray direction vectors.
+    radii: float array, the radii (base radii for cones) of the rays.
+    ray_shape: string, the shape of the ray, must be 'cone' or 'cylinder'.
+    diag: boolean, whether or not the covariance matrices should be diagonal.
+
+  Returns:
+    a tuple of arrays of means and covariances.
+  """
+  t0 = t_vals[..., :-1]
+  t1 = t_vals[..., 1:]
+  if ray_shape == 'cone':
+    gaussian_fn = conical_frustum_to_gaussian
+  elif ray_shape == 'cylinder':
+    gaussian_fn = cylinder_to_gaussian
+  else:
+    assert False
+  means, covs = gaussian_fn(directions, t0, t1, radii, diag, a=a, f=f, l=l)
+  means = means + origins[..., None, :]
+  return means, covs
+
+
+def integrated_pos_enc(x_coord, min_deg, max_deg, diag=True):
+  """Encode `x` with sinusoids scaled by 2^[min_deg:max_deg-1].
+
+  Args:
+    x_coord: a tuple containing: x, jnp.ndarray, variables to be encoded. Should
+      be in [-pi, pi]. x_cov, jnp.ndarray, covariance matrices for `x`.
+    min_deg: int, the min degree of the encoding.
+    max_deg: int, the max degree of the encoding.
+    diag: bool, if true, expects input covariances to be diagonal (full
+      otherwise).
+
+  Returns:
+    encoded: jnp.ndarray, encoded variables.
+  """
+  if diag:
+    x, x_cov_diag = x_coord
+    scales = jnp.array([2**i for i in range(min_deg, max_deg)])
+    shape = list(x.shape[:-1]) + [-1]
+    y = jnp.reshape(x[..., None, :] * scales[:, None], shape)
+    y_var = jnp.reshape(x_cov_diag[..., None, :] * scales[:, None]**2, shape)
+  else:
+    x, x_cov = x_coord
+    num_dims = x.shape[-1]
+    basis = jnp.concatenate(
+        [2**i * jnp.eye(num_dims) for i in range(min_deg, max_deg)], 1)
+    y = math.matmul(x, basis)
+    y_var = jnp.sum((math.matmul(x_cov, basis)) * basis, -2)
+
+  return expected_sin(
+      jnp.concatenate([y, y + 0.5 * jnp.pi], axis=-1),
+      jnp.concatenate([y_var] * 2, axis=-1))[0]
+
+
+def volumetric_rendering(rgb, density, t_vals, dirs, white_bkgd):
+  """Volumetric Rendering Function.
+
+  Args:
+    rgb: jnp.ndarray(float32), color, [batch_size, num_samples, 3]
+    density: jnp.ndarray(float32), density, [batch_size, num_samples, 1].
+    t_vals: jnp.ndarray(float32), [batch_size, num_samples].
+    dirs: jnp.ndarray(float32), [batch_size, 3].
+    white_bkgd: bool.
+
+  Returns:
+    comp_rgb: jnp.ndarray(float32), [batch_size, 3].
+    disp: jnp.ndarray(float32), [batch_size].
+    acc: jnp.ndarray(float32), [batch_size].
+    weights: jnp.ndarray(float32), [batch_size, num_samples]
+  """
+  t_mids = 0.5 * (t_vals[..., :-1] + t_vals[..., 1:])
+  t_dists = t_vals[..., 1:] - t_vals[..., :-1]
+  delta = t_dists * jnp.linalg.norm(dirs[..., None, :], axis=-1)
+  # Note that we're quietly turning density from [..., 0] to [...].
+  density_delta = density[..., 0] * delta
+
+  alpha = 1 - jnp.exp(-density_delta)
+  trans = jnp.exp(-jnp.concatenate([
+      jnp.zeros_like(density_delta[..., :1]),
+      jnp.cumsum(density_delta[..., :-1], axis=-1)
+  ],
+                                   axis=-1))
+  weights = alpha * trans
+
+  comp_rgb = (weights[..., None] * rgb).sum(axis=-2)
+  acc = weights.sum(axis=-1)
+  distance = (weights * t_mids).sum(axis=-1) / acc
+  distance = jnp.clip(
+      jnp.nan_to_num(distance, jnp.inf), t_vals[:, 0], t_vals[:, -1])
+  if white_bkgd:
+    comp_rgb = comp_rgb + (1. - acc[..., None])
+  return comp_rgb, distance, acc, weights
+
+
+def sample_along_rays(key, origins, directions, radii, num_samples, near, far,
+                      randomized, lindisp, ray_shape, a=0, f=1, l=0.5):
+  """Stratified sampling along the rays.
+
+  Args:
+    key: jnp.ndarray, random generator key.
+    origins: jnp.ndarray(float32), [batch_size, 3], ray origins.
+    directions: jnp.ndarray(float32), [batch_size, 3], ray directions.
+    radii: jnp.ndarray(float32), [batch_size, 3], ray radii.
+    num_samples: int.
+    near: jnp.ndarray, [batch_size, 1], near clip.
+    far: jnp.ndarray, [batch_size, 1], far clip.
+    randomized: bool, use randomized stratified sampling.
+    lindisp: bool, sampling linearly in disparity rather than depth.
+    ray_shape: string, which shape ray to assume.
+
+  Returns:
+    t_vals: jnp.ndarray, [batch_size, num_samples], sampled z values.
+    means: jnp.ndarray, [batch_size, num_samples, 3], sampled means.
+    covs: jnp.ndarray, [batch_size, num_samples, 3, 3], sampled covariances.
+  """
+  batch_size = origins.shape[0]
+
+  t_vals = jnp.linspace(0., 1., num_samples + 1)
+  if lindisp:
+    t_vals = 1. / (1. / near * (1. - t_vals) + 1. / far * t_vals)
+  else:
+    t_vals = near * (1. - t_vals) + far * t_vals
+
+  if randomized:
+    mids = 0.5 * (t_vals[..., 1:] + t_vals[..., :-1])
+    upper = jnp.concatenate([mids, t_vals[..., -1:]], -1)
+    lower = jnp.concatenate([t_vals[..., :1], mids], -1)
+    t_rand = random.uniform(key, [batch_size, num_samples + 1])
+    t_vals = lower + (upper - lower) * t_rand
+  else:
+    # Broadcast t_vals to make the returned shape consistent.
+    t_vals = jnp.broadcast_to(t_vals, [batch_size, num_samples + 1])
+  means, covs = cast_rays(t_vals, origins, directions, radii, ray_shape, a=a, f=f, l=l)
+  return t_vals, (means, covs)
+
+
+def resample_along_rays(key, origins, directions, radii, t_vals, weights,
+                        randomized, ray_shape, stop_grad, resample_padding, a=0, f=1, l=0.5):
+  """Resampling.
+
+  Args:
+    key: jnp.ndarray(float32), [2,], random number generator.
+    origins: jnp.ndarray(float32), [batch_size, 3], ray origins.
+    directions: jnp.ndarray(float32), [batch_size, 3], ray directions.
+    radii: jnp.ndarray(float32), [batch_size, 3], ray radii.
+    t_vals: jnp.ndarray(float32), [batch_size, num_samples+1].
+    weights: jnp.array(float32), weights for t_vals
+    randomized: bool, use randomized samples.
+    ray_shape: string, which kind of shape to assume for the ray.
+    stop_grad: bool, whether or not to backprop through sampling.
+    resample_padding: float, added to the weights before normalizing.
+
+  Returns:
+    t_vals: jnp.ndarray(float32), [batch_size, num_samples+1].
+    points: jnp.ndarray(float32), [batch_size, num_samples, 3].
+  """
+  # Do a blurpool.
+  weights_pad = jnp.concatenate([
+      weights[..., :1],
+      weights,
+      weights[..., -1:],
+  ],
+                                axis=-1)
+  weights_max = jnp.maximum(weights_pad[..., :-1], weights_pad[..., 1:])
+  weights_blur = 0.5 * (weights_max[..., :-1] + weights_max[..., 1:])
+
+  # Add in a constant (the sampling function will renormalize the PDF).
+  weights = weights_blur + resample_padding
+
+  new_t_vals = math.sorted_piecewise_constant_pdf(
+      key,
+      t_vals,
+      weights,
+      t_vals.shape[-1],
+      randomized,
+  )
+  if stop_grad:
+    new_t_vals = lax.stop_gradient(new_t_vals)
+  means, covs = cast_rays(new_t_vals, origins, directions, radii, ray_shape, a=a, f=f, l=l)
+  return new_t_vals, (means, covs)
+```
+
+### internal/models.py
+```
+# Copyright 2021 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Lint as: python3
+"""Different model implementation plus a general port for all the models."""
+import functools
+from typing import Any, Callable
+from flax import linen as nn
+import gin
+import jax
+from jax import random
+import jax.numpy as jnp
+import numpy
+
+from internal import mip
+from internal import utils
+        
+
+
+
+@gin.configurable
+class MipNerfModel(nn.Module):
+  """Nerf NN Model with both coarse and fine MLPs."""
+  num_samples: int = 128  # The number of samples per level.
+  num_levels: int = 2  # The number of sampling levels.
+  resample_padding: float = 0.01  # Dirichlet/alpha "padding" on the histogram.
+  stop_level_grad: bool = True  # If True, don't backprop across levels')
+  use_viewdirs: bool = True  # If True, use view directions as a condition.
+  lindisp: bool = False  # If True, sample linearly in disparity, not in depth.
+  ray_shape: str = 'cone'  # The shape of cast rays ('cone' or 'cylinder').
+  min_deg_point: int = 0  # Min degree of positional encoding for 3D points.
+  max_deg_point: int = 16  # Max degree of positional encoding for 3D points.
+  deg_view: int = 4  # Degree of positional encoding for viewdirs.
+  density_activation: Callable[..., Any] = nn.softplus  # Density activation.
+  density_noise: float = 0.  # Standard deviation of noise added to raw density.
+  density_bias: float = -1.  # The shift added to raw densities pre-activation.
+  rgb_activation: Callable[..., Any] = nn.sigmoid  # The RGB activation.
+  rgb_padding: float = 0.001  # Padding added to the RGB outputs.
+  disable_integration: bool = False  # If True, use PE instead of IPE.
+
+  @nn.compact
+  def __call__(self, rng, rays, randomized, white_bkgd, a=0, f=0.1, l=0.6, train_coc=1):
+    """The mip-NeRF Model.
+
+    Args:
+      rng: jnp.ndarray, random number generator.
+      rays: util.Rays, a namedtuple of ray origins, directions, and viewdirs.
+      randomized: bool, use randomized stratified sampling.
+      white_bkgd: bool, if True, use white as the background (black o.w.).
+
+    Returns:
+      ret: list, [*(rgb, distance, acc)]
+    """
+    # Construct the MLP.
+    mlp = MLP()
+    isp = ISP()
+    ret = []
+    for i_level in range(self.num_levels):
+      key, rng = random.split(rng)
+      if i_level == 0:
+        # Stratified sampling along rays
+        t_vals, samples = mip.sample_along_rays(
+            key,
+            rays.origins,
+            rays.directions,
+            rays.radii*train_coc,
+            self.num_samples,
+            rays.near,
+            rays.far,
+            randomized,
+            self.lindisp,
+            self.ray_shape, a=a, f=f, l=l,
+        )
+      else:
+        t_vals, samples = mip.resample_along_rays(
+            key,
+            rays.origins,
+            rays.directions,
+            rays.radii*train_coc,
+            t_vals,
+            weights,
+            randomized,
+            self.ray_shape,
+            self.stop_level_grad,
+            resample_padding=self.resample_padding, a=a, f=f, l=l,
+        )
+      if self.disable_integration:
+        samples = (samples[0], jnp.zeros_like(samples[1]))
+      samples_enc = mip.integrated_pos_enc(
+          samples,
+          self.min_deg_point,
+          self.max_deg_point,
+      )
+    
+    
+    
+      # Point attribute predictions
+      if self.use_viewdirs:
+        viewdirs_enc = mip.pos_enc(
+            rays.viewdirs,
+            min_deg=0,
+            max_deg=self.deg_view,
+            append_identity=True,
+        )
+        
+        raw_rgb, raw_density = mlp(samples_enc, viewdirs_enc)
+      else:
+        raw_rgb, raw_density = mlp(samples_enc)
+
+      # Add noise to regularize the density predictions if needed.
+      if randomized and (self.density_noise > 0):
+        key, rng = random.split(rng)
+        raw_density += self.density_noise * random.normal(
+            key, raw_density.shape, dtype=raw_density.dtype)
+
+      # Volumetric rendering.
+      rgb = self.rgb_activation(raw_rgb)
+      rgb = rgb * (1 + 2 * self.rgb_padding) - self.rgb_padding
+      density = self.density_activation(raw_density + self.density_bias)
+      comp_rgb, distance, acc, weights = mip.volumetric_rendering(
+          rgb,
+          density,
+          t_vals,
+          rays.directions,
+          white_bkgd=white_bkgd,
+      )
+      #Add
+      rgb_out =isp(comp_rgb,rays.temperature,rays.exposure)
+      # ret.append((comp_rgb, distance, acc))
+      ret.append((rgb_out, distance, acc))
+
+    return ret
+
+
+def construct_mipnerf(rng, example_batch):
+  """Construct a Neural Radiance Field.
+
+  Args:
+    rng: jnp.ndarray. Random number generator.
+    example_batch: dict, an example of a batch of data.
+
+  Returns:
+    model: nn.Model. Nerf model with parameters.
+    state: flax.Module.state. Nerf model state for stateful parameters.
+  """
+  model = MipNerfModel()
+  key, rng = random.split(rng)
+  init_variables = model.init(
+      key,
+      rng=rng,
+      rays=utils.namedtuple_map(lambda x: x[0], example_batch['rays']),
+      randomized=False,
+      white_bkgd=False)
+  return model, init_variables
+
+
+@gin.configurable
+class MLP(nn.Module):
+  """A simple MLP."""
+  net_depth: int = 8  # The depth of the first part of MLP.
+  net_width: int = 256  # The width of the first part of MLP.
+  net_depth_condition: int = 1  # The depth of the second part of MLP.
+  net_width_condition: int = 128  # The width of the second part of MLP.
+  net_activation: Callable[..., Any] = nn.relu  # The activation function.
+  skip_layer: int = 4  # Add a skip connection to the output of every N layers.
+  num_rgb_channels: int = 3  # The number of RGB channels.
+  num_density_channels: int = 1  # The number of density channels.
+
+  @nn.compact
+  def __call__(self, x, condition=None):
+    """Evaluate the MLP.
+
+    Args:
+      x: jnp.ndarray(float32), [batch, num_samples, feature], points.
+      condition: jnp.ndarray(float32), [batch, feature], if not None, this
+        variable will be part of the input to the second part of the MLP
+        concatenated with the output vector of the first part of the MLP. If
+        None, only the first part of the MLP will be used with input x. In the
+        original paper, this variable is the view direction.
+
+    Returns:
+      raw_rgb: jnp.ndarray(float32), with a shape of
+           [batch, num_samples, num_rgb_channels].
+      raw_density: jnp.ndarray(float32), with a shape of
+           [batch, num_samples, num_density_channels].
+    """
+    #print("in mlp_call-------------x.shape:", x.shape)#(2048, 128, 96)
+    feature_dim = x.shape[-1]
+    num_samples = x.shape[1]
+    x = x.reshape([-1, feature_dim])
+    dense_layer = functools.partial(
+        nn.Dense, kernel_init=jax.nn.initializers.glorot_uniform())
+    inputs = x
+    for i in range(self.net_depth):
+      x = dense_layer(self.net_width)(x)
+      x = self.net_activation(x)
+      if i % self.skip_layer == 0 and i > 0:
+        x = jnp.concatenate([x, inputs], axis=-1)
+    raw_density = dense_layer(self.num_density_channels)(x).reshape(
+        [-1, num_samples, self.num_density_channels])
+
+    if condition is not None:
+      # Output of the first part of MLP.
+      bottleneck = dense_layer(self.net_width)(x)
+      # Broadcast condition from [batch, feature] to
+      # [batch, num_samples, feature] since all the samples along the same ray
+      # have the same viewdir.
+      condition = jnp.tile(condition[:, None, :], (1, num_samples, 1))
+      # Collapse the [batch, num_samples, feature] tensor to
+      # [batch * num_samples, feature] so that it can be fed into nn.Dense.
+      condition = condition.reshape([-1, condition.shape[-1]])
+      x = jnp.concatenate([bottleneck, condition], axis=-1)
+      # Here use 1 extra layer to align with the original nerf model.
+      for i in range(self.net_depth_condition):
+        x = dense_layer(self.net_width_condition)(x)
+        x = self.net_activation(x)
+    raw_rgb = dense_layer(self.num_rgb_channels)(x).reshape(
+        [-1, num_samples, self.num_rgb_channels])
+    return raw_rgb, raw_density
+
+@gin.configurable
+class WbModel(nn.Module):
+  net_depth: int = 2  # The depth of the first part of MLP.
+  net_width: int = 32  # The width of the first part of MLP.
+  net_activation: Callable[..., Any] = nn.relu  # The activation function.
+  rgb_activation: Callable[..., Any] = nn.sigmoid  # The RGB activation.
+  num_rgb_channels: int = 3  # The number of RGB channels.
+
+  @nn.compact
+  def __call__(self, x, condition=0.5):
+    """
+    Returns:
+      rgb_wb: jnp.ndarray(float32), with a shape of
+           [batch, num_rgb_channels].
+    """
+
+    dense_layer = functools.partial(
+        nn.Dense, kernel_init=jax.nn.initializers.glorot_uniform())
+    inputs_rgb = x
+    input_temp = condition
+    for i in range(self.net_depth):
+      input_temp = dense_layer(self.net_width)(input_temp)
+      input_temp = self.net_activation(input_temp)
+    w = dense_layer(self.num_rgb_channels)(input_temp)
+    w = self.rgb_activation(w) * 2
+
+    rgb_wb = jnp.multiply(inputs_rgb,w)
+
+    return rgb_wb
+
+@gin.configurable
+class ExpModel(nn.Module):
+  net_depth: int = 2  # The depth of the first part of MLP.
+  net_width: int = 32  # The width of the first part of MLP.
+  net_activation: Callable[..., Any] = nn.relu  # The activation function.
+  rgb_activation: Callable[..., Any] = nn.sigmoid  # The RGB activation.
+  one_rgb_channels: int = 1  # The number of RGB channels.
+
+  @nn.compact
+  def __call__(self, x, condition=1):
+    """
+    Returns:
+      rgb_exp: jnp.ndarray(float32), with a shape of
+           [batch, num_rgb_channels].
+    """
+
+    dense_layer = functools.partial(
+        nn.Dense, kernel_init=jax.nn.initializers.glorot_uniform())
+    inputs_rgb = x
+    input_exp = condition
+
+    r = inputs_rgb[:, 0:1]
+    g = inputs_rgb[:, 1:2]
+    b = inputs_rgb[:, 2:3]
+    for i in range(self.net_depth):
+      input_exp = dense_layer(self.net_width)(input_exp)
+      input_exp = self.net_activation(input_exp)
+    w = dense_layer(self.one_rgb_channels)(input_exp)
+    w = self.rgb_activation(w) * 1.5
+
+    r_e = r + jnp.log(w)
+    g_e = g + jnp.log(w)
+    b_e = b + jnp.log(w)
+    rgb_exp = jnp.concatenate([r_e,g_e,b_e],axis=-1)
+
+    return rgb_exp
+
+@gin.configurable
+class CrfModel(nn.Module):
+  net_depth: int = 1  # The depth of the first part of MLP.
+  net_width: int = 256  # The width of the first part of MLP.
+  net_activation: Callable[..., Any] = nn.relu  # The activation function.
+  rgb_activation: Callable[..., Any] = nn.sigmoid  # The RGB activation.
+  one_rgb_channels: int = 1  # The number of RGB channels.
+
+  @nn.compact
+  def __call__(self, x):
+    """
+    Returns:
+      rgb_out: jnp.ndarray(float32), with a shape of
+           [batch, num_rgb_channels].
+    """
+
+    dense_layer = functools.partial(
+        nn.Dense, kernel_init=jax.nn.initializers.glorot_uniform())
+    inputs_rgb = x
+
+    r_e = inputs_rgb[:, 0:1]
+    g_e = inputs_rgb[:, 1:2]
+    b_e = inputs_rgb[:, 2:3]
+    for i in range(self.net_depth):
+        r_e = dense_layer(self.net_width)(r_e)
+        r_e = self.net_activation(r_e)
+    r_e = dense_layer(self.one_rgb_channels)(r_e)
+    r_e = self.rgb_activation(r_e)
+
+    for i in range(self.net_depth):
+        g_e = dense_layer(self.net_width)(g_e)
+        g_e = self.net_activation(g_e)
+    g_e = dense_layer(self.one_rgb_channels)(g_e)
+    g_e = self.rgb_activation(g_e)
+
+    for i in range(self.net_depth):
+        b_e = dense_layer(self.net_width)(b_e)
+        b_e = self.net_activation(b_e)
+    b_e = dense_layer(self.one_rgb_channels)(b_e)
+    b_e = self.rgb_activation(b_e)
+
+    rgb_out = jnp.concatenate([r_e,g_e,b_e],axis=-1)
+
+    return rgb_out
+
+@gin.configurable
+class ISP(nn.Module):
+  """A simple ISP."""
+  net_depth: int = 8  # The depth of the first part of MLP.
+  net_width: int = 256  # The width of the first part of MLP.
+  net_depth_condition: int = 1  # The depth of the second part of MLP.
+  net_width_condition: int = 128  # The width of the second part of MLP.
+  net_activation: Callable[..., Any] = nn.relu  # The activation function.
+  skip_layer: int = 4  # Add a skip connection to the output of every N layers.
+  num_rgb_channels: int = 3  # The number of RGB channels.
+  num_density_channels: int = 1  # The number of density channels.
+
+  @nn.compact
+  def __call__(self, x, temperature,exposure):
+    """
+    Returns:
+      raw_rgb: jnp.ndarray(float32), with a shape of
+           [batch, num_rgb_channels].
+    """
+    wb = WbModel()
+    exp = ExpModel()
+    crf = CrfModel()
+    input = x
+    input_wb = wb(input,temperature)
+    input_exp = exp(input_wb,exposure)
+    res = crf(input_exp)
+
+    return res
+
+def render_image(render_fn, rays, rng, a, f, l, train_coc, chunk=8192):
+  """Render all the pixels of an image (in test mode).
+
+  Args:
+    render_fn: function, jit-ed render function.
+    rays: a `Rays` namedtuple, the rays to be rendered.
+    rng: jnp.ndarray, random number generator (used in training mode only).
+    chunk: int, the size of chunks to render sequentially.
+
+  Returns:
+    rgb: jnp.ndarray, rendered color image.
+    disp: jnp.ndarray, rendered disparity image.
+    acc: jnp.ndarray, rendered accumulated weights per pixel.
+  """
+  height, width = rays[0].shape[:2]
+  num_rays = height * width
+  rays = utils.namedtuple_map(lambda r: r.reshape((num_rays, -1)), rays)
+
+  host_id = jax.host_id()
+  results = []
+  for i in range(0, num_rays, chunk):
+    # pylint: disable=cell-var-from-loop
+    chunk_rays = utils.namedtuple_map(lambda r: r[i:i + chunk], rays)
+    chunk_size = chunk_rays[0].shape[0]
+    rays_remaining = chunk_size % jax.device_count()
+    if rays_remaining != 0:
+      padding = jax.device_count() - rays_remaining
+      chunk_rays = utils.namedtuple_map(
+          lambda r: jnp.pad(r, ((0, padding), (0, 0)), mode='edge'), chunk_rays)
+    else:
+      padding = 0
+    # After padding the number of chunk_rays is always divisible by
+    # host_count.
+    rays_per_host = chunk_rays[0].shape[0] // jax.host_count()
+    start, stop = host_id * rays_per_host, (host_id + 1) * rays_per_host
+    chunk_rays = utils.namedtuple_map(lambda r: utils.shard(r[start:stop]),
+                                      chunk_rays)
+    chunk_results = render_fn(rng, chunk_rays, a, f, l, train_coc)[-1]
+    results.append([utils.unshard(x[0], padding) for x in chunk_results])
+    # pylint: enable=cell-var-from-loop
+  rgb, distance, acc = [jnp.concatenate(r, axis=0) for r in zip(*results)]
+  rgb = rgb.reshape((height, width, -1))
+  distance = distance.reshape((height, width))
+  acc = acc.reshape((height, width))
+  return (rgb, distance, acc)
+```
+
+### internal/utils.py
+```
+# Copyright 2021 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Lint as: python3
+"""Utility functions."""
+import collections
+import os
+from os import path
+from absl import flags
+import dataclasses
+import flax
+import gin
+import jax
+import jax.numpy as jnp
+import numpy as np
+from PIL import Image
+
+gin.add_config_file_search_path('../')
+
+
+gin.config.external_configurable(flax.nn.relu, module='flax.nn')
+gin.config.external_configurable(flax.nn.sigmoid, module='flax.nn')
+gin.config.external_configurable(flax.nn.softplus, module='flax.nn')
+
+
+@flax.struct.dataclass
+class TrainState:
+  optimizer: flax.optim.Optimizer
+
+
+@flax.struct.dataclass
+class Stats:
+  loss: float
+  losses: float
+  weight_l2: float
+  psnr: float
+  psnrs: float
+  grad_norm: float
+  grad_abs_max: float
+  grad_norm_clipped: float
+
+
+Rays = collections.namedtuple(
+    'Rays',
+    ('origins', 'directions', 'viewdirs', 'radii', 'lossmult', 'near', 'far','temperature','exposure','coc'))
+
+
+# TODO(barron): Do a default.gin thing
+@gin.configurable()
+@dataclasses.dataclass
+class Config:
+  """Configuration flags for everything."""
+  dataset_loader: str = 'multicam'  # The type of dataset loader to use.
+  batching: str = 'all_images'  # Batch composition, [single_image, all_images].
+  batch_size: int = 4096  # The number of rays/pixels in each batch.
+  factor: int = 0  # The downsample factor of images, 0 for no downsampling.
+  spherify: bool = False  # Set to True for spherical 360 scenes.
+  render_path: bool = False  # If True, render a path. Used only by LLFF.
+  llffhold: int = 8  # Use every Nth image for the test set. Used only by LLFF.
+  lr_init: float = 5e-4  # The initial learning rate.
+  lr_final: float = 5e-6  # The final learning rate.
+  lr_delay_steps: int = 2500  # The number of "warmup" learning steps.
+  lr_delay_mult: float = 0.01  # How much sever the "warmup" should be.
+  grad_max_norm: float = 0.  # Gradient clipping magnitude, disabled if == 0.
+  grad_max_val: float = 0.  # Gradient clipping value, disabled if == 0.
+  max_steps: int = 300000  # The number of optimization steps.
+  save_every: int = 10000  # The number of steps to save a checkpoint.
+  print_every: int = 100  # The number of steps between reports to tensorboard.
+  gc_every: int = 10000  # The number of steps between garbage collections.
+  test_render_interval: int = 1  # The interval between images saved to disk.
+  disable_multiscale_loss: bool = False  # If True, disable multiscale loss.
+  randomized: bool = True  # Use randomized stratified sampling.
+  near: float = 2.  # Near plane distance.
+  far: float = 6.  # Far plane distance.
+  coarse_loss_mult: float = 0.1  # How much to downweight the coarse loss(es).
+  weight_decay_mult: float = 0.  # The multiplier on weight decay.
+  white_bkgd: bool = True  # If True, use white as the background (black o.w.).
+  data_dir:str = "horns"
+  train_dir:str = "experiments/horns"
+  render_temp:float = 3500.
+  render_exp:float = 0.5
+
+
+def define_common_flags():
+  # Define the flags used by both train.py and eval.py
+  flags.DEFINE_multi_string('gin_file', None,
+                            'List of paths to the config files.')
+  flags.DEFINE_multi_string(
+      'gin_param', None, 'Newline separated list of Gin parameter bindings.')
+  flags.DEFINE_string('train_dir', None, 'where to store ckpts and logs')
+  flags.DEFINE_string('data_dir', None, 'input data directory.')
+  flags.DEFINE_integer(
+      'chunk', 1024, #3072,
+      'the size of chunks for evaluation inferences, set to the value that'
+      'fits your GPU/TPU memory.')
+
+
+def load_config():
+  gin.parse_config_files_and_bindings(flags.FLAGS.gin_file,
+                                      flags.FLAGS.gin_param)
+  return Config()
+
+
+def open_file(pth, mode='r'):
+  return open(pth, mode=mode)
+
+
+def file_exists(pth):
+  return path.exists(pth)
+
+
+def listdir(pth):
+  return os.listdir(pth)
+
+
+def isdir(pth):
+  return path.isdir(pth)
+
+
+def makedirs(pth):
+  os.makedirs(pth)
+
+
+def namedtuple_map(fn, tup):
+  """Apply `fn` to each element of `tup` and cast to `tup`'s namedtuple."""
+  return type(tup)(*map(fn, tup))
+
+
+def shard(xs):
+  """Split data into shards for multiple devices along the first dimension."""
+  return jax.tree_map(
+      lambda x: x.reshape((jax.local_device_count(), -1) + x.shape[1:]), xs)
+
+
+def to_device(xs):
+  """Transfer data to devices (GPU/TPU)."""
+  return jax.tree_map(jnp.array, xs)
+
+
+def unshard(x, padding=0):
+  """Collect the sharded tensor to the shape before sharding."""
+  y = x.reshape([x.shape[0] * x.shape[1]] + list(x.shape[2:]))
+  if padding > 0:
+    y = y[:-padding]
+  return y
+
+
+def save_img_uint8(img, pth):
+  """Save an image (probably RGB) in [0, 1] to disk as a uint8 PNG."""
+  with open_file(pth, 'wb') as f:
+    Image.fromarray(
+        (np.clip(np.nan_to_num(img), 0., 1.) * 255.).astype(jnp.uint8)).save(
+            f, 'PNG')
+
+
+def save_img_float32(depthmap, pth):
+  """Save an image (probably a depthmap) to disk as a float32 TIFF."""
+  with open_file(pth, 'wb') as f:
+    Image.fromarray(np.nan_to_num(depthmap).astype(np.float32)).save(f, 'TIFF')
+```
+
+### internal/vis.py
+```
+# Copyright 2021 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Lint as: python3
+"""Helper functions for visualizing things."""
+import jax
+import jax.numpy as jnp
+import jax.scipy as jsp
+import matplotlib.cm as cm
+
+
+def sinebow(h):
+  """A cyclic and uniform colormap, see http://basecase.org/env/on-rainbows."""
+  f = lambda x: jnp.sin(jnp.pi * x)**2
+  return jnp.stack([f(3 / 6 - h), f(5 / 6 - h), f(7 / 6 - h)], -1)
+
+
+def convolve2d(z, f):
+  return jsp.signal.convolve2d(
+      z, f, mode='same', precision=jax.lax.Precision.HIGHEST)
+
+
+def depth_to_normals(depth):
+  """Assuming `depth` is orthographic, linearize it to a set of normals."""
+  f_blur = jnp.array([1, 2, 1]) / 4
+  f_edge = jnp.array([-1, 0, 1]) / 2
+  dy = convolve2d(depth, f_blur[None, :] * f_edge[:, None])
+  dx = convolve2d(depth, f_blur[:, None] * f_edge[None, :])
+  inv_denom = 1 / jnp.sqrt(1 + dx**2 + dy**2)
+  normals = jnp.stack([dx * inv_denom, dy * inv_denom, inv_denom], -1)
+  return normals
+
+
+def visualize_depth(depth,
+                    acc=None,
+                    near=None,
+                    far=None,
+                    ignore_frac=0,
+                    curve_fn=lambda x: -jnp.log(x + jnp.finfo(jnp.float32).eps),
+                    modulus=0,
+                    colormap=None):
+  """Visualize a depth map.
+
+  Args:
+    depth: A depth map.
+    acc: An accumulation map, in [0, 1].
+    near: The depth of the near plane, if None then just use the min().
+    far: The depth of the far plane, if None then just use the max().
+    ignore_frac: What fraction of the depth map to ignore when automatically
+      generating `near` and `far`. Depends on `acc` as well as `depth'.
+    curve_fn: A curve function that gets applied to `depth`, `near`, and `far`
+      before the rest of visualization. Good choices: x, 1/(x+eps), log(x+eps).
+        Note that the default choice will flip the sign of depths, so that the
+        default colormap (turbo) renders "near" as red and "far" as blue.
+    modulus: If > 0, mod the normalized depth by `modulus`. Use (0, 1].
+    colormap: A colormap function. If None (default), will be set to
+      matplotlib's turbo if modulus==0, sinebow otherwise.
+
+  Returns:
+    An RGB visualization of `depth`.
+  """
+  if acc is None:
+    acc = jnp.ones_like(depth)
+  acc = jnp.where(jnp.isnan(depth), jnp.zeros_like(acc), acc)
+
+  # Sort `depth` and `acc` according to `depth`, then identify the depth values
+  # that span the middle of `acc`, ignoring `ignore_frac` fraction of `acc`.
+  sortidx = jnp.argsort(depth.reshape([-1]))
+  depth_sorted = depth.reshape([-1])[sortidx]
+  acc_sorted = acc.reshape([-1])[sortidx]
+  cum_acc_sorted = jnp.cumsum(acc_sorted)
+  mask = ((cum_acc_sorted >= cum_acc_sorted[-1] * ignore_frac) &
+          (cum_acc_sorted <= cum_acc_sorted[-1] * (1 - ignore_frac)))
+  depth_keep = depth_sorted[mask]
+
+  # If `near` or `far` are None, use the highest and lowest non-NaN values in
+  # `depth_keep` as automatic near/far planes.
+  eps = jnp.finfo(jnp.float32).eps
+  near = near or depth_keep[0] - eps
+  far = far or depth_keep[-1] + eps
+
+  # Curve all values.
+  depth, near, far = [curve_fn(x) for x in [depth, near, far]]
+
+  # Wrap the values around if requested.
+  if modulus > 0:
+    value = jnp.mod(depth, modulus) / modulus
+    colormap = colormap or sinebow
+  else:
+    # Scale to [0, 1].
+    value = jnp.nan_to_num(
+        jnp.clip((depth - jnp.minimum(near, far)) / jnp.abs(far - near), 0, 1))
+    colormap = colormap or cm.get_cmap('turbo')
+
+  vis = colormap(value)[:, :, :3]
+
+  # Set non-accumulated pixels to white.
+  vis = vis * acc[:, :, None] + (1 - acc)[:, :, None]
+
+  return vis
+
+
+def visualize_normals(depth, acc, scaling=None):
+  """Visualize fake normals of `depth` (optionally scaled to be isotropic)."""
+  if scaling is None:
+    mask = ~jnp.isnan(depth)
+    x, y = jnp.meshgrid(
+        jnp.arange(depth.shape[1]), jnp.arange(depth.shape[0]), indexing='xy')
+    xy_var = (jnp.var(x[mask]) + jnp.var(y[mask])) / 2
+    z_var = jnp.var(depth[mask])
+    scaling = jnp.sqrt(xy_var / z_var)
+
+  scaled_depth = scaling * depth
+  normals = depth_to_normals(scaled_depth)
+  vis = jnp.isnan(normals) + jnp.nan_to_num((normals + 1) / 2, 0)
+
+  # Set non-accumulated pixels to white.
+  if acc is not None:
+    vis = vis * acc[:, :, None] + (1 - acc)[:, :, None]
+
+  return vis
+
+
+def visualize_suite(depth, acc):
+  """A wrapper around other visualizations for easy integration."""
+  vis = {
+      'depth': visualize_depth(depth, acc),
+      # 'depth_mod': visualize_depth(depth, acc, modulus=0.1),
+      # 'depth_normals': visualize_normals(depth, acc)
+  }
+  return vis
+```

@@ -1,0 +1,117 @@
+--- v006.md
++++ v007.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Shading Lookup Table Computation recomputes the entries of a color lookup table based on current lighting, material, and view transformation parameters [S2]. It uses color index mode with texture lookup tables instead of pre-shaded color values to allow interactive manipulation of visual quantities [S1, S3]. It differs from [Hardcoded Transfer Function](1098-hardcoded-transfer-function.md) by computing values dynamically based on current scene parameters, and from [UpdateOpacityTransferFunction](2489-updateopacitytransferfunction.md) by encompassing the full color/opacity computation rather than just opacity adjustments [G].
++Shading Lookup Table Computation recomputes the entries of a color lookup table based on current lighting, material, and view transformation parameters [S2]. It uses color index mode with texture lookup tables instead of pre-shaded color values to allow interactive manipulation of visual quantities [S1, S3]. It differs from [Hardcoded Transfer Function](1098-hardcoded-transfer-function.md) by computing values dynamically based on current scene parameters, and from [UpdateOpacityTransferFunction](2489-updateopacitytransferfunction.md) by encompassing the full color and opacity computation rather than just opacity adjustments [G].
+ 
+ ## How it works
+@@ -12,5 +12,5 @@
+ 
+ **Data Structures:**
+-The method assumes color index mode, where textures store color indices that are transformed to color values during rendering rather than pre-shaded color values [S1, S3]. For internal layout, size constraints, and normalization schemes, see [Lookup Table Implementation](5347-lookup-table-implementation.md).
++The method assumes color index mode, where textures store color indices that are transformed to color values during rendering rather than pre-shaded color values [S1, S3]. For internal layout, size constraints, and normalization schemes, see [Lookup Table Implementation](5347-lookup-table-implementation.md) [G].
+ 
+ **Steps:**
+@@ -23,5 +23,5 @@
+     e. Compute the opacity entry $\alpha_i$ using the sample slice distance $\Delta$:
+         $$ \alpha_i = 1 - e^{-map[C_i] \Delta} $$
+-    f. Store the resulting $(R, G, B, \alpha)$ in the LUT at index $i$ [S2].
++    f. Store the resulting $(R, G, B, \alpha_i)$ in the LUT at index $i$ [S2].
+ 3.  **Opacity Correction:** If the sample slice distance changes from $\Delta_0$ to $\Delta_k$, correct the stored opacity values in the color table using the new distance [S1].
+ 4.  **Commit:** Finalize the table for rendering [S2].
+@@ -38,63 +38,35 @@
+ **Pseudocode:**
+ ```python
+-def compute_shading_lookup_table(lut_size, scalar_values, lighting_params, material_params, view_matrix, sample_distance):
++def compute_shading_lookup_table(lut_size, scalar_values, normals, lighting, material, view_matrix, sample_distance):
+     """
+-    Computes the shading lookup table entries.
+-    
+-    Args:
+-        lut_size (int): Number of entries.
+-        scalar_values (list): Scalar values for each LUT index.
+-        lighting_params (dict): Ambient, diffuse, specular coefficients and light directions.
+-        material_params (dict): Diffuse color, specular color, shininess.
+-        view_matrix (list): 3x3 view transformation matrix.
+-        sample_distance (float): Current sample slice distance Delta.
+-        
+-    Returns:
+-        list: List of (R, G, B, alpha) tuples for the LUT.
++    Recomputes the shading lookup table entries based on current lighting, material, and view parameters.
+     """
+     lut = []
+-    
+     for i in range(lut_size):
+         v = scalar_values[i]
+-        
+-        # Retrieve normal vector for this scalar value
+-        n = get_normal_for_scalar(v)
++        n = normals[i]
+         
+         # Transform normal to view space
+-        n_view = transform_vector(view_matrix, n)
++        n_view = [sum(view_matrix[j][k] * n[k] for k in range(3)) for j in range(3)]
+         
+         # Compute shading (Phong model)
+-        ambient = lighting_params['ambient'] * material_params['diffuse']
+-        
+-        light_dir = normalize(lighting_params['light_direction'])
+-        diff_intensity = max(0.0, dot(n_view, light_dir))
+-        diffuse = diff_intensity * lighting_params['diffuse_coeff'] * material_params['diffuse']
++        ambient = [lighting['ambient'][j] * material['diffuse'][j] for j in range(3)]
++        light_dir = normalize(lighting['direction'])
++        diff = max(0.0, dot(n_view, light_dir))
++        diffuse = [diff * lighting['coeff'][j] * material['diffuse'][j] for j in range(3)]
+         
+         view_dir = normalize([-view_matrix[0][2], -view_matrix[1][2], -view_matrix[2][2]])
+         reflect_dir = reflect(-light_dir, n_view)
+-        spec_intensity = pow(max(0.0, dot(view_dir, reflect_dir)), material_params['shininess'])
+-        specular = spec_intensity * lighting_params['specular_coeff'] * material_params['specular']
++        spec = pow(max(0.0, dot(view_dir, reflect_dir)), material['shininess'])
++        specular = [spec * lighting['coeff'][j] * material['specular'][j] for j in range(3)]
+         
+         color = [ambient[j] + diffuse[j] + specular[j] for j in range(3)]
+         
+-        # Compute opacity from scalar value
+-        extinction = map_scalar_to_extinction(v)
++        # Map scalar to extinction coefficient and compute opacity
++        extinction = extinction_map[v]  # [G] Apply transfer function mapping to scalar value v
+         alpha = 1.0 - exp(-extinction * sample_distance)
+         
+         lut.append(color + [alpha])
+-        
+     return lut
+-
+-def get_normal_for_scalar(v):
+-    # [G] Returns a normal vector associated with the scalar value
+-    return [0.0, 0.0, 1.0]
+-
+-def transform_vector(matrix, vector):
+-    # [G] Applies 3x3 linear transformation
+-    return [sum(matrix[j][k] * vector[k] for k in range(3)) for j in range(3)]
+-
+-def map_scalar_to_extinction(v):
+-    # [G] Maps scalar value to extinction coefficient via transfer function
+-    return v * 0.5
+ ```
+ 
+@@ -102,13 +74,13 @@
+ 
+ ### Color Index Mode with LUT
+-Color Index Mode with LUT is a variant where the texture stores color indices rather than pre-shaded color values. These indices are transformed to color values using the shading lookup table during rendering [S3]. It is chosen over pre-shaded color values because it allows interactive manipulation of visual quantities (such as lighting and material properties) at runtime, whereas pre-shaded values are static and lack this interactivity [S3]. Pre-shaded values are often favored in practical applications for performance, but Color Index Mode is necessary when dynamic shading is required [S1, S3].
++Color Index Mode with LUT is a variant where the texture stores color indices rather than pre-shaded color values [S1, S3]. These indices are transformed to color values using the shading lookup table during rendering [S3]. It is chosen over pre-shaded color values because it allows interactive manipulation of visual quantities (such as lighting and material properties) at runtime, whereas pre-shaded values are static and lack this interactivity [S3]. Pre-shaded values are often favored in practical applications for performance, but Color Index Mode is necessary when dynamic shading is required [S1, S3].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** Not given in the sources.
++*   **Time Complexity:** Not given in the sources [G].
++*   **Memory Complexity:** Not given in the sources [G].
+ *   **Performance:** The computation is performed once per parameter change rather than per voxel, supporting interactive rendering [S2].
+ *   **Strengths:** Enables dynamic lighting and material adjustments without re-rendering the entire volume or pre-computing multiple LUTs [S1, S3].
+ *   **Limitations:** Requires color index mode support, which may not be available in all pipelines [S1, S3]. Opacity correction adds implementation complexity [S1].
+-*   **When to use:** Interactive visualization requiring real-time lighting/material updates.
++*   **When to use:** Interactive visualization requiring real-time lighting/material updates [G].
+ *   **When not to use:** Static rendering where pre-shaded values offer better performance [S3].
+ 

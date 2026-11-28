@@ -1,0 +1,1435 @@
+Cameras as Relative Positional Encoding
+Ruilong Li1,2∗ Brent Yi1∗ Junchen Liu1∗ Hang Gao1
+1
+UC Berkeley
+2
+NVIDIA
+Yi Ma1,3
+3
+Angjoo Kanazawa1
+HKU
+arXiv:2507.10496v2 [cs.CV] 13 Nov 2025
+Abstract
+Transformers are increasingly prevalent for multiview computer vision tasks, where
+geometric relationships between viewpoints are critical for 3D perception. To
+leverage these relationships, multiview transformers must use camera geometry
+to ground visual tokens in 3D space. In this work, we compare techniques for
+conditioning transformers on cameras: token-level raymap encodings, attentionlevel relative pose encodings, and a new relative encoding—Projective Positional
+Encoding (PRoPE)—that captures complete camera frustums, both intrinsics and
+extrinsics, as a relative positional encoding. Our experiments begin by showing
+how relative conditioning methods improve performance in feedforward novel
+view synthesis, with further gains from PRoPE. This holds across settings: scenes
+with both shared and varying intrinsics, when combining token- and attention-level
+conditioning, and for generalization to inputs with out-of-distribution sequence
+lengths and camera intrinsics. We then verify that these benefits persist for different
+tasks, stereo depth estimation and discriminative spatial cognition, as well as larger
+model sizes. Code is available on our project webpage2 .
+1
+Introduction
+Images of our world exist in the context of the viewpoints they were captured from. The geometry
+of these viewpoints—intrinsic and extrinsic parameters that give pixel coordinates their physical
+meaning—ground visual observations in 3D space. This spatial grounding is increasingly important
+in deep learning, especially as advances in 3D vision and embodied intelligence make multiview
+tasks more ubiquitous.
+To solve multiview tasks with transformers, models must bind viewpoint information to patch
+tokens from each input image. This binding requires special care: just as naive positional encoding
+techniques for 1D sequences hinder performance for learning in language models [1], naive encodings
+of camera geometry may also be suboptimal for multiview vision models [2–4]. Advances in both
+settings can be summarized as transitions from absolute [5] to relative [6] encodings.
+In this work, we study the problem of conditioning vision transformers on the camera geometry of
+input images. We survey existing techniques for addressing this, which include (i) absolute encodings
+in the form of pixel-aligned, token-level raymaps—these are the most common in recent state-of-theart models [7–10]—and (ii) attention-level relative encodings based on SE(3) pose relationships [3, 4].
+We then present a new camera conditioning technique, Projective Positional Encoding (PRoPE), that
+is designed to capture the complete geometry of cameras as a relative positional encoding. PRoPE
+models viewing frustum relationships that describe both intrinsics and extrinsics, while remaining
+easy to incorporate with standard transformer architectures and fused attention kernels [11].
+Our experiments are on three tasks, which span six datasets. We begin with a series of studies comparing camera conditioning techniques for feedforward novel view synthesis using RealEstate10K [12]
+and Objaverse [13]. Our results highlight the advantages of relative encodings—particularly PRoPE—
+compared to absolute ones. We then verify that these benefits extend to other settings: we demonstrate
+improvements when integrating PRoPE into UniMatch [14] for stereo depth estimation across three
+∗
+2
+Equal contribution
+https://www.liruilong.cn/prope/
+Preprint.
+Absolute Positional Encoding (APE)
+LLM
+cats
+1
+are
+2
+cute
+3
+Multiview
+Geometry
+Relative Positional Encoding (RPE)
+cats
+are
+Distance
+cute
+Transformation
+Figure 1: Cameras as relative positional encoding. Language models and multiview transformers
+must both bind “positional” information to input tokens, in terms of sequence position for language
+and camera parameters for multiview computer vision. We present a study on camera conditioning
+that includes absolute positional encodings (raymaps), relative pose encodings [2, 4], and a new
+method captures relative projective relationships between more complete camera frustums.
+benchmarks, for a discriminative spatial cognition task using DL3DV [15], and when scaling to larger
+novel view synthesis models [7, 8].
+The contributions of this paper are as follows:
+(1) Survey. We survey both absolute raymap and relative SE(3) conditioning techniques for camera
+geometry in multiview transformers.
+(2) Method. We propose PRoPE (Projective Positional Encoding), a new relative positional encoding
+technique that injects both camera intrinsics and extrinsics into a transformer’s self-attention blocks.
+(3) Evaluation. We present a series of novel view synthesis (NVS) experiments that compare camera
+conditioning techniques empirically. Our results highlight the advantages of relative pose encoding
+methods like CAPE [4] and GTA [3], while demonstrating further improvements from PRoPE
+across a range of settings: scenes with shared intrinsics, scenes with varying intrinsics, for hybrid
+conditioning that combines both token-level and attention-level representations, and in generalization
+for out-of-distribution test inputs.
+(4) Task generalization. We show that the benefits of cameras as relative positional encoding
+generalize (i) to stereo depth estimation when integrated into UniMatch, (ii) to discriminative spatial
+cognition, and (iii) when scaling to larger model sizes.
+2
+Related Work
+Absolute and relative positional encodings. Transformer architectures are permutation-invariant;
+they therefore require explicit position encoding to understand token order in sequential inputs [5].
+Position encoding in sequence models has been an active area of research [1, 16–19]. While early
+works [20–27] focused on absolute positional encoding (APE), recent methods have increasingly
+adopted relative positional encoding (RPE), particularly RoPE [28], as a standard across domains,
+including natural language processing [29, 30, 1, 31] and computer vision [32–34, 28, 35]. Relative
+encodings aim to improve models by defining positions as relative offsets between token pairs. These
+offsets are injected into the pairwise interactions of standard dot product attention [5]:
+
+
+QK ⊤
+√
+V,
+(1)
+Attn(Q, K, V ) = softmax
+d
+where Q, K, V ∈ RT ×d . Position offsets can be injected using the pairwise nature of the
+QK ⊤ ∈ RT ×T matrix, either via additive biases [6, 36, 37] or SO(2)-based rotation [1]. RPE
+offers important advantages over APE, including translation invariance, improved relationship modeling, and generalization to long sequences [38, 1, 39]. In this work, we study both absolute and
+relative encodings for conditioning transformers on camera geometry instead of 1D position.
+Multiview transformers. Many computer vision tasks are multiview: they take multiple images
+and known camera geometry for each image as input. Examples exist in 3D reconstruction and view
+synthesis [40–44], pose estimation [45], depth prediction [14, 46, 47], 3D scene understanding [48,
+49], robotics [50], and world models [51]. Many recent works leverage the improved scaling
+properties [22, 52, 53] of vision transformers for solving these tasks [8, 7, 9, 10, 54]. These models
+slice input images into patches, and use each patch as an independent visual token for the transformer.
+In this work, we use the model designs proposed by LVSM [8] and UniMatch [14] as a starting point
+for studying a critical design decision—how transformers are conditioned on camera geometry.
+2
+Camera conditioning in transformers. The dominant approach for conditioning multiview transformers on cameras is currently raymaps [45, 7, 8, 10]: per-pixel 6D embeddings that contain either
+ray origins and directions [44, 7] or Plücker coordinates [55, 45]. Concatenating these parameters
+to pixels enables conditioning on both camera intrinsics and extrinsics at the token level. Raymaps,
+however, require defining a frame of reference [56, 7, 57], which is problematic because the choice
+of world coordinate system is arbitrary and can hinder generalization. While this problem can be
+partially addressed by normalizing poses [58, 57, 8], prior works have shown that a more fundamental
+fix is possible through relative parameters [2–4, 59]. Notably, attention-level encodings that capture
+relative SE(3) poses don’t require defining a consistent global frame, are compatible with fused
+attention kernels [11], and have been shown to improve novel view synthesis performance [3, 4].
+In the following section, we survey both absolute raymap and relative SE(3) methods for encoding
+camera geometry for transformers. We then propose a new relative encoding method, PRoPE, that
+encodes relationships between more complete camera frustums.
+3
+Conditioning Transformers on Cameras
+3.1
+Preliminaries
+We study transformers that take N images from known cameras as input:
+N
+{(I i , K i , T cw
+i )}i=1 ,
+(2)
+where each I i ∈ RH×W ×3 is an image, K i ∈ R3×3 is the camera intrinsics, and T cw
+=
+i
+cw
+(Rcw
+,
+t
+)
+∈
+SE(3)
+is
+the
+transformation
+for
+computing
+camera
+coordinates
+from
+world
+coordii
+i
+nates. The latter two terms encode the viewing frustum that corresponds to each image: intrinsics
+capture the shape and field-of-view of the frustum, while extrinsics capture position and orientation.
+Both intrinsics and extrinsics are encapsulated in the “world-to-image” projection matrix P i ∈ R3×4 :
+
+
+P i = K i 03×1 T cw
+(3)
+i .
+For notational convenience, these 3 × 4 projection matrices can be made invertible by lifting to 4 × 4
+with the standard basis vector e4 = (0, 0, 0, 1)⊤ . This transformation maps 3D world coordinates to
+a projective image space defined by the frustum of camera i. It can be used to compute 2D image
+coordinates from world coordinates:
+ 
+ 
+P
+x̃i
+P̃ i = ⊤i ;
+∝ P̃ i X̃world ,
+(4)
+1
+e4
+where x̃i ∈ R3 and X̃world ∈ R4 are homogeneous coordinates in the image and world respectively.
+The inverse relationship can be used to compute ray directions in 3D space from 2D image coordinates.
+For homogeneous image coordinate x̃u,v
+= (u, v, 1)⊤ ,
+i
+ u,v 
+ u,v 
+−1 x̃
+αdi
+i
+∝ P̃ i
+,
+(5)
+1
+1
+where α ∈ R is a scalar magnitude and du,v
+∈ S2 is a unit-norm ray direction.
+i
+3.2
+Pixel-aligned Camera Encoding
+Token-level, pixel-aligned raymaps are the dominant method for encoding geometry in multiview
+transformers [7, 42, 10, 9]. Networks that employ raymaps concatenate images I i ∈ RH×W ×3
+with per-pixel raymaps Mi ∈ RH×W ×R along the channel dimension, which expands inputs to
+RH×W ×(3+R) . There are two main approaches for computing these raymaps, which we refer to as
+“naive” and Plücker.
+Naive raymaps. Naive raymaps [7] are computed as per-pixel origin and direction vectors:
+
+
+oi
+u,v
+Mi,Naive = u,v ∈ R6 for (u, v) ∈ [1, W ] × [1, H]
+di
+⊤ cw
+oi = −(Rcw
+i ) ti ,
+(6)
+(7)
+where each ray direction du,v
+is computed using P̃ i by following Equation 5.
+i
+3
+Plücker raymaps. Plücker raymaps [45, 8] can be implemented by replacing the origin term in naive
+raymaps with a moment term:
+
+
+oi × du,v
+i
+Mu,v
+=
+∈ R6 for (u, v) ∈ [1, W ] × [1, H].
+(8)
+i,Plücker
+du,v
+i
+This moment term makes the ray representation invariant to the choice of origin along the ray.
+Properties. Raymaps offer a simple approach for conditioning on both camera intrinsics and
+extrinsics. An important drawback, however, is that they are absolute: similar to early position
+encoding techniques for 1D sequences [5], raymaps are expressed in global terms. They are sensitive
+to the arbitrary choice of reference frame, which can hinder generalization.
+3.3
+Relative SE(3) Encoding
+To remove the need for a global reference frame, recent works have introduced relative encodings for
+SE(3) camera poses. Two existing approaches fall under this category: CaPE [4] and GTA [3]. Given
+cw −1
+images i1 and i2 , both aim to condition networks on T cw
+using modified self-attention
+i1 (T i2 )
+blocks. This captures dense relationships—how each camera pose is situated relative to every other
+camera pose—and makes networks invariant to how the world frame w is defined.
+Notation. To formalize the operations required for attention-level geometry encoding, we denote the
+batched matrix-vector product ⊚ , Kronecker product ⊗, and identity matrices Ik ∈ Rk×k . We use
+i for image/camera indices and t for patch/token indices. i(t) is the index of the image that patch
+t belongs to. Rows of the Q, K, V ∈ RT ×d matrices are subscripted Qt , Kt , Vt ∈ Rd . Batched
+matrix-vector products are defined as:
+A ∈ RN ×d1 ×d2 , B ∈ RN ×d2 =⇒ (A ⊚ B) ∈ RN ×d1
+X
+(A ⊚ B)nj =
+Anjk Bnk .
+(9)
+(10)
+k
+We use D ∈ RT ×d×d to denote batches of block-diagonal matrices, where individual matrices in
+D = [D1 , . . . , DT ] are subscripted Dt ∈ Rd×d .
+CaPE [4]. CaPE injects relative SE(3) pose by transforming the Q and K matrices before they are
+passed to self-attention. CaPE can be formalized using per-token block-diagonal matrices DCaPE
+,
+t
+which is computed by diagonally repeating the camera extrinsics:
+DCaPE
+= Id/4 ⊗ T cw
+t
+i(t)
+(11)
+Like RoPE [1], transformations are then applied to the Q and K matrices before self-attention. This
+can be encapsulated into an augmented self-attention block:
+AttnCaPE (Q, K, V ) = Attn((DCaPE )⊤ ⊚ Q, (DCaPE )−1 ⊚ K, V ).
+(12)
+⊤
+T ×T
+is replaced with:
+The effect of this is that each Q⊤
+t1 Kt2 ∈ R dot product in QK ∈ R
+CaPE
+CaPE −1
+Q⊤
+Kt2 ∈ R,
+(13)
+t1 Dt1 (Dt2 )
+i
+h
+cw
+CaPE −1
+−1
+, thus conditioning outputs on relative pose.
+where DCaPE
+= Id/4 ⊗ T cw
+t1 (Dt2 )
+i(t1 ) (T i(t2 ) )
+GTA [3]. GTA proposes a formulation for per-token transformations with a similar high-level goal as
+CaPE. GTA’s attention variant transforms the Q and K matrices the same way, while proposing to
+also transform the V matrix:
+AttnGTA (Q, K, V ) = DGTA ⊚ Attn((DGTA )⊤ ⊚ Q, (DGTA )−1 ⊚ K, (DGTA )−1 ⊚ V ).
+(14)
+This has the added benefit of injecting relative transformations into the attention operator’s value
+aggregation. The attention layer output for each token t1 becomes
+X
+
+
+GTA −1
+αt1 ,t2 DGTA
+Vt2 ,
+(15)
+AttnGTA (Q, K, V ) t1 =
+t1 (Dt2 )
+t2
+where αt1 ,t2 is a softmax score computed from the transformed dot product (Equation 13). GTA’s
+experiments [3] compare several SE(3)-based formulations for DGTA , with and without the value
+matrix transformation. The best-performing methods include the value transform, and both SE(3) for
+camera pose and RoPE [1] for 2D patch position. Our experiments include GTA using these terms.
+4
+3.4
+Projective Position Encoding (PRoPE)
+We introduce a new relative positional encoding method in our study, which we call PRoPE. The core
+observation of PRoPE is that the SE(3) poses considered by existing relative encoding techniques are
+only a partial representation of camera geometry. Instead of relating each camera i1 and camera i2
+cw
+with only their poses T cw
+i1 and T i2 , PRoPE uses the projective relationship between full frustums:
+−1
+P̃ i1 P̃ i2 .
+(16)
+This 4 × 4 matrix can be interpreted as a transformation between the local projective spaces defined by
+each camera; it encodes the complete geometric relationship between camera views. As we will see
+in Equation 20, it also retains the key global invariance property of SE(3)-based relative encodings.
+To implement PRoPE, we define a new set of DPRoPE
+∈ Rd×d matrices and use GTA-style attention
+t
+(Equation 14) to inject them into transformer blocks. We design these matrices to (1) encode frustum
+relationships between cameras—this uses the projective relationship in Equation 16—and (2) encode
+relative patch positions within cameras—this follows GTA [3] and uses RoPE terms. These goals are
+achieved with complementary submatrices, each with shape d2 × d2 :
+ Proj
+
+Dt
+0
+PRoPE
+Dt
+=
+(17)
+0
+DRoPE
+t
+d
+d
+DProj
+= Id/8 ⊗ P̃ i(t) ∈ R 2 × 2
+t
+
+
+d
+d
+RoPEd/4 (xt )
+0
+RoPE
+Dt
+=
+∈ R2×2 .
+0
+RoPEd/4 (yt )
+(18)
+(19)
+In these definitions, RoPEd/4 (·) constructs d4 × d4 rotary embeddings [1] for (xt , yt ), which are the
+patch coordinates for token t.
+3.5
+Properties of PRoPE
+PRoPE has several important properties, which become more evident when we expand the projective
+transformation:
+
+
+
+
+−1
+K i 0 cw cw −1 K −1
+0
+j
+P̃ i1 P̃ i2 =
+T i (T j )
+.
+(20)
+0 1
+0
+1
+Global frame invariance. Redefining the world frame is equivalent to right-multiplying both T cw
+SE(3) terms, which is algebraically eliminated in Equation 20.
+Reduction to relative SE(3) attention. For cameras with identity intrinsics, Equation 20 reduces to
+the relative SE(3) transformations utilized in CAPE and GTA. These methods can be interpreted as
+a case of PRoPE where the intrinsic matrices are set to identity.
+Reduction to RoPE [28]. Equation 20 evaluates to identity for patches from the same image. For
+these token pairs, DPRoPE
+contains only the RoPE terms used by single-image vision transformers.
+t
+4
+Experiments
+The goal of our experiments is to understand how camera conditioning techniques—including
+PRoPE—impact the performance of multiview transformers. To accomplish this, we present experiments comparing encoding strategies under several task and evaluation conditions.
+4.1
+Experiment Setup
+We include metrics for several camera conditioning techniques—Naive and Plücker raymap encodings,
+CAPE [4], GTA [3], and PRoPE. In our experiments, GTA refers to the SE(3)+SO(2) variation studied
+by [3], where SO(2) refers to RoPE on patch positions. As discussed in Section 3.4, PRoPE adopts
+the self-attention mechanism and RoPE combination proposed by GTA. The primary difference
+between PRoPE and GTA is therefore the use of relative projective relationships instead of relative
+SE(3) relationships between cameras.
+Our core experiments evaluate camera conditioning techniques using feedforward novel view synthesis (NVS). NVS is an ideal benchmarking task because it requires fine-grained geometric reasoning:
+5
+Method
+RealEstate10K [12]
+PSNR↑
+LPIPS↓
+SSIM↑
+PSNR↑
+Objaverse [13]
+LPIPS↓
+SSIM↑
+Plücker Raymap
+Naive Raymap
+20.48
+20.54
+0.209
+0.210
+0.622
+0.623
+21.44
+21.59
+0.159
+0.153
+0.851
+0.856
+CAPE [4]
+GTA [3]
+PRoPE
+21.11
+22.51
+22.80
+0.234
+0.164
+0.146
+0.656
+0.707
+0.725
+19.68
+23.70
+23.70
+0.220
+0.104
+0.104
+0.827
+0.879
+0.879
+Table 1: Novel view synthesis comparison, with constant intrinsics in each scene. We compare
+different camera conditioning approaches applied to the LVSM [8] framework.
+Method
+RealEstate10K [12]
+PSNR↑
+LPIPS↓
+SSIM↑
+PSNR↑
+Objaverse [13]
+LPIPS↓
+SSIM↑
+Plücker Raymap
+Naive Raymap
+19.89
+20.56
+0.327
+0.301
+0.608
+0.629
+21.43
+21.00
+0.177
+0.191
+0.852
+0.845
+CAPE [4]
+GTA [3]
+PRoPE
+15.94
+15.77
+21.42
+0.497
+0.512
+0.247
+0.699
+0.641
+0.678
+16.78
+18.00
+22.98
+0.322
+0.257
+0.138
+0.760
+0.775
+0.871
+Table 2: Novel view synthesis, with varying intrinsics in each scene. We compare the LVSM [8]
+model trained with different camera conditioning strategies, on intrinsics-augmented dataset variants.
+models are trained to render scenes from target viewpoints, given only calibrated reference images
+and target camera parameters. We do this by reimplementing and training variants of LVSM [8], a
+state-of-the-art novel view synthesis method that originally encoded camera geometry with Plücker
+raymaps. We train and evaluate separately on the RealEstate10K [12] and Objaverse [13] datasets.
+Scenes in RealEstate10K are captured with constant intrinsics, but cameras vary between scenes.
+Objaverse renders use the same camera intrinsics across the entire dataset.
+We take several steps to ensure fairness in evaluations. Models are trained in the same codebase, with
+matched hyperparameters and training steps. All main experiments use identical input, output, and
+overall model sizes (∼25M parameters); we also validate larger models in Section 4.7. More details
+are provided in Appendix A.1.1.
+4.2
+Relative vs Absolute Positional Encodings
+Novel view synthesis results are presented in Table 1 and discussed below.
+Relative encodings outperform absolute ones. Consistent with prior work [4, 3], we observe that
+relative encodings for camera geometry consistently outperform absolute ones. CAPE, GTA, and
+PRoPE all yield improvements over widely used raymap encodings, with PRoPE (followed closely
+by GTA) producing the best results.
+Projective positional encoding improves view synthesis quality. PRoPE consistently outperforms
+other encoding methods across metrics on RealEstate10K [12], despite the dataset’s limited intrinsics
+variation. This confirms that capturing more complete camera information (both intrinsic and
+extrinsic) in our relative encoding is beneficial. We also find no loss of performance when the train
+and test images all have constant intrinsics: GTA [3] and PRoPE produce identical metrics for the
+Objaverse dataset, which verifies that PRoPE reduces to GTA when camera intrinsics are unimportant.
+4.3
+Attention-Level Intrinsics Conditioning
+Real-world data often involves different cameras and focal lengths—consider multiview rigs on
+autonomous cars or zoom lenses on point-and-shoot cameras. To understand how effective PRoPE is
+at encoding intrinsics information, we evaluate each conditioning method on intrinsics-augmented
+versions of the RealEstate10K [12] and Objaverse [13] datasets. We augment RealEstate10K by
+applying a zoom factor sampled uniformly in [1, 3] to each image. For Objaverse, we switch from
+constant field of views to uniformly sampled ones between 35 and 50 degrees. In contrast to
+Section 4.2, this means that cameras within scenes can vary in both extrinsics and intrinsics. We
+present quantitative results in Table 2 and qualitative results in Figure A.1.
+PRoPE enables intrinsic-aware multiview understanding. We observe that PRoPE outperforms
+all alternative camera conditioning techniques for both the RealEstate10K and Objaverse datasets.
+Existing attention-based methods, which let networks condition on relative pose, perform poorly
+6
+Figure 2: Hybrid camera encoding. Left: token-level conditioning using only raymaps, which
+capture both intrinsics and extrinsics. Right: hybrid encoding where attention-level PRoPE captures
+relationships between camera frustums, and token-level CamRay encodes local ray directions.
+Method
+RealEstate10K [12]
+PSNR↑
+LPIPS↓
+SSIM↑
+PSNR↑
+Objaverse [13]
+LPIPS↓
+SSIM↑
+GTA [3]
+GTA+CamRay
+15.77
+21.41
+0.512
+0.238
+0.641
+0.673
+16.98
+22.69
+0.261
+0.123
+0.762
+0.869
+PRoPE
+PRoPE+CamRay
+21.42
+21.78
+0.247
+0.211
+0.678
+0.692
+22.82
+22.98
+0.119
+0.114
+0.872
+0.874
+Table 3: Novel view synthesis with hybrid camera encodings, with varying intrinsics in each
+scene. Intrinsics can be conditioned by concatenating local frame camera rays to the network input.
+without knowledge of intrinsics. While token-level raymaps carry sufficient camera information, they
+perform worse overall than PRoPE’s relative conditioning formulation.
+4.4 Hybrid Encoding Strategies
+Token- and attention-level camera encodings require modifications to different parts of the transformer
+architecture. They are therefore compatible with each other: both conditioning styles can be used
+simultaneously. To compare PRoPE against a stronger baseline while simultaneously exploring these
+“hybrid” conditioning strategies (Figure 2), we train LVSM variations that couple relative encodings
+with local, camera-frame raymaps:
+cw u,v
+Mu,v
+∝ K −1
+i [u
+i,CamRay = Ri di
+v
+⊤
+1] ∈ R3
+(21)
+We refer to this raymap as CamRay. CamRay shares many properties with existing raymaps (Section 3.2)—it encodes intrinsics, is pixel-aligned, and can be concatenated to input images—but it
+is not tied to an absolute coordinate system. It can therefore be used in conjunction with relative
+pose and camera encoding techniques without sacrificing global frame invariance. As we observe in
+Section 4.6, this provides empirical advantages over Plücker raymaps.
+CamRay can be interpreted as a token-level encoding of camera intrinsics. We therefore evaluate it
+using the intrinsics-augmented NVS datasets described in Section 4.3. Results are reported in Table 3
+and discussed below.
+PRoPE effectively encodes camera geometry. On both RealEstate10K and Objaverse, we observe
+that PRoPE is comparable with or outperforms GTA+CamRay. This is true even though PRoPE is
+simpler: it is only applied attention-level, while GTA+CamRay includes both attention-level and
+token-level terms.
+Token-level and attention-level conditioning techniques are complementary. GTA and PRoPE
+both benefit from the extra CamRay input. GTA benefits significantly more; this can be explained by
+the absence of intrinsics information in the standard SE(3)-based GTA formulation.
+4.5
+Out-of-distribution Robustness
+One hypothesis for why relative camera encodings outperform absolute ones is improved generalization characteristics; this is similar to why RoPE [28] can improve performance for language modeling.
+To test this, we benchmark conditioning methods using test-time settings that introduce distribution
+shifts in sequence length and intrinsics (Figure 3).
+Setting 1: Longer Input Sequences at Test Time. Inspired by test-time context length extrapolation [60,
+61], our first setting deploys NVS models trained with a fixed number of input views (2 in our
+experiments) to significantly more views (up to 16) at test time. This is particularly important
+7
+Longer Sequence Lengths
+Unseen Intrinsics
+Longer Sequence Lengths
+Unseen Intrinsics
+Figure 3: Out-of-distribution tasks. Left: We evaluate camera conditioning methods on both longer
+sequence lengths and unseen camera intrinsics. Right: PRoPE improves results for both unseen
+sequence lengths and unseen intrinsics.
+(a) Testing with {2, 4, 8, 16} input views.
+(b) Testing with {1, 2, 3}× zooming-in.
+Figure 4: Evaluation on RealEstate10K [12]. Relative encoding methods demonstrate superior
+robustness on handling (a) varying numbers of input views and (b) different focal lengths at test time.
+CAPE
+GTA
+Plucker
+PRoPE PRoPE+CamRay
+Testing w/
+2 views
+GT
+Testing w/
+16 views
+Figure 5: Results of Longer Input Sequences at Test Time. PRoPE demonstrates superior robustness when tested with varying numbers of input views, despite being trained with only 2 views.
+Plucker
+CAPE
+GTA
+PRoPE
+PRoPE+CamRay
+GT
+Testing w/
+zoom 3x
+Figure 6: Results of Varying Focal Length at Test Time. PRoPE explicitly models relative
+intrinsics—we find this makes it more robust to zoomed-in test views.
+in real-world scenarios where the number of observations can vary substantially across different
+applications, and sometimes dynamically increase.
+Setting 2: Out-of-distribution Intrinsics at Test Time. Our second setting evaluates a model’s ability to
+handle varying focal lengths at test time. This is crucial as focal length can vary significantly across
+8
+Dataset
+Model
+Abs Rel
+Sq Rel
+RMSE
+RMSE log
+RGBD [62]
+UniMatch
+UniMatch + PRoPE
+0.123
+0.105
+0.175†
+0.203†
+0.678
+0.573
+0.203
+0.181
+SUN3D [63]
+UniMatch
+UniMatch + PRoPE
+0.131
+0.117
+0.098
+0.075
+0.397
+0.343
+0.169
+0.152
+Scenes11 [64]
+UniMatch
+UniMatch + PRoPE
+0.065
+0.049
+0.085
+0.063
+0.575
+0.474
+0.126
+0.104
+Reference
+Target
+UniMatch
++PRoPE
+UniMatch
+Table 4: Performance Improvement on Stereo Depth Estimation Task with UniMatch [14]. †The
+“Sq Rel” metric is less reliable on the RGBD dataset due to the imperfect depth and camera pose [64].
+RGBD
+Scenes11
+SUN3D
+Figure 7: Qualitative Results on Stereo Depth Estimation Task. Attention-level camera conditioning in UniMatch [14] leads to significant estimation improvements.
+Method
+5 views
+9 views
+17 views
+Plücker
+PRoPE+Plücker
+PRoPE+CamRay
+69.1%
+81.1%
+86.1%
+76.9%
+90.5%
+93.0%
+74.6%
+91.8%
+94.3%
+Table 5: Spatial cognition results. We report the accuracy of detecting inconsistent image-camera
+pairs on the DL3DV [15] dataset under varying numbers of input views. Both CamRay and PRoPE
+significantly help with performance, without introducing additional model parameters. An illustration
+of this task can be found in Figure A.3.
+different cameras and zoom levels, and it is impractical to train a separate model for every possible
+focal length. We test our models with focal lengths ranging from 1× to 5× the training focal length,
+simulating scenarios where more zoomed-in images are seen during deployment.
+Relative encodings improve generalization; PRoPE outperforms alternatives. Evaluated results
+on the RealEstate10K [12] dataset are summarized in Figure 4, with visuals provided in Figure 5 and 6.
+We make three main observations. First, while Plücker Raymap encodes more complete camera
+information than CAPE and GTA, it consistently underperforms across all settings—even when
+intrinsics information is critical. Second, PRoPE improves performance and robustness in both outof-distribution settings, particularly when handling out-of-distribution focal lengths. This indicates
+that explicitly modeling the relative projective relationship between cameras is more effective than
+modeling only the relative SE(3) relationship, as done in GTA and CAPE. Finally, we found adding
+CamRay to PRoPE actually hurts performance for intrinsics extrapolation; this suggests that PRoPE
+is uniquely useful for intrinsics generalization.
+4.6
+Task Generalization
+Like our results so far, prior studies on relative pose encodings [3, 4] for multiview transformers have
+focused experiments on novel view synthesis. To better understand how these conclusions generalize,
+we evaluate PRoPE in two new tasks: stereo depth estimation using UniMatch [14] and a spatial
+cognition task designed around DL3DV [15].
+Stereo Depth Estimation. We set up this task using UniMatch [14], a pretrained multiview transformer
+that has seen wide adoption in downstream applications [65–68]. UniMatch was originally trained on
+9
+Method
+Plücker Raymap
+PRoPE
+PSNR↑
+20.48
+22.80
+1× Compute
+SSIM↑
+LPIPS↓
+0.622
+0.725
+0.209
+0.146
+PSNR↑
+25.64
+26.56
+100× Compute
+SSIM↑
+LPIPS↓
+0.809
+0.832
+0.084
+0.071
+Table 6: Scaling LVSM with increased compute. We compare LVSM [8] models trained with
+Plücker raymaps versus PRoPE on RealEstate10K [12] at two compute scales.
+three different tasks; we focus on the stereo depth estimation task, which assumes known relative
+camera poses between input views. We incorporate camera information into UniMatch’s cross-view
+attention mechanism using PRoPE, modifying only ∼50 lines of the official code. All models follow
+the exact same training protocols as described in the original paper.
+Spatial Cognition. Next, we design a spatial cognition task inspired by [69]. In this task, a network
+is given multiple images of the same scene, each paired with camera information. The problem is
+designed so that it cannot be solved by analyzing the camera information alone, the images alone, or
+without reasoning about the multiview relationships among all inputs. One of the image-camera pairs
+is intentionally corrupted by assigning it an incorrect camera pose sampled from other frames. The
+network is then required to identify the incorrect image-camera pair based on geometric consistency.
+See Appendix A.1.3 for implementation details, and Figure A.3 for input-output examples.
+PRoPE’s benefits generalize across tasks. For depth estimation, we provide quantitative results in
+Table 4 and qualitative results in Figure 7. For spatial cognition, accuracy metrics are provided in
+Table 5. We find that PRoPE significantly improves multiview understanding across both tasks. In our
+spatial cognition task, we observe that performance with PRoPE continues to improve as the number
+of views increase during testing, whereas the Plücker raymaps do not exhibit the same trend. We
+also observe improvements when replacing Plücker with CamRay, which indicates that the absolute
+extrinsics information hinders the model’s ability to generalize.
+4.7
+Scaling PRoPE
+In our final set of experiments, we evaluate how the advantages of relative camera encoding extend to
+larger models with more computational resources. We conducted two experiments for this, which are
+discussed below.
+PRoPE’s benefits persist when scaling LVSM. We scale our LVSM training pipeline with approximately 100× more computational resources (details in Appendix A.1.1). We train two variants of
+this larger LVSM model: one that follows the original LVSM paper [8] and uses Plücker rays and one
+that incorporates PRoPE. Results are reported in Table 6, where we observe that the relative PRoPE
+encoding continues to improve model quality—by a smaller but still significant margin—on larger
+model variants trained with more resources.
+PRoPE improves CAT3D results. With assistance from the original authors, we add PRoPE to
+and retrain CAT3D [7], a large multiview diffusion model conditioned on naive raymaps. We report
+metrics from this model in Table A.2. PRoPE produces consistent improvements across metrics,
+while introducing zero additional model parameters and negligible computational overhead.
+5
+Conclusion and Future Work
+In this work, we highlight how representing cameras as relative positional encodings—particularly
+in a way that captures both camera intrinsics and extrinsics—improves multiview transformers
+across settings and tasks. Possibilities for future work include improving numerical stability when
+directly multiplying projective matrices with Q/K/V vectors; it may be possible, for example, for
+ill-conditioned matrices to emerge from telephoto focal lengths. It would also be interesting to extend
+PRoPE to distorted camera models, for example by applying PRoPE to per-patch projective approximations. Furthermore, incorporating “multi-frequency” [19, 1] encoding for camera parameters
+remains nontrivial due to the non-commutativity of projective transforms, a challenge shared by
+relative SE(3) attention methods [3, 4].
+10
+References
+[1] Jianlin Su, Murtadha Ahmed, Yu Lu, Shengfeng Pan, Wen Bo, and Yunfeng Liu. Roformer: Enhanced
+transformer with rotary position embedding. Neurocomputing, 568:127063, 2024.
+[2] Aleksandr Safin, Daniel Duckworth, and Mehdi SM Sajjadi. Repast: Relative pose attention scene
+representation transformer. arXiv preprint arXiv:2304.00947, 2023.
+[3] Takeru Miyato, Bernhard Jaeger, Max Welling, and Andreas Geiger. Gta: A geometry-aware attention
+mechanism for multi-view transformers. In International Conference on Learning Representations (ICLR),
+2024.
+[4] Xin Kong, Shikun Liu, Xiaoyang Lyu, Marwan Taher, Xiaojuan Qi, and Andrew J Davison. Eschernet: A
+generative model for scalable view synthesis. In Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition, pages 9503–9513, 2024.
+[5] Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N Gomez, Łukasz
+Kaiser, and Illia Polosukhin. Attention is all you need. Advances in neural information processing systems,
+30, 2017.
+[6] Peter Shaw, Jakob Uszkoreit, and Ashish Vaswani. Self-attention with relative position representations.
+arXiv preprint arXiv:1803.02155, 2018.
+[7] Ruiqi Gao, Aleksander Holynski, Philipp Henzler, Arthur Brussee, Ricardo Martin-Brualla, Pratul Srinivasan, Jonathan T Barron, and Ben Poole. Cat3d: Create anything in 3d with multi-view diffusion models.
+arXiv preprint arXiv:2405.10314, 2024.
+[8] Haian Jin, Hanwen Jiang, Hao Tan, Kai Zhang, Sai Bi, Tianyuan Zhang, Fujun Luan, Noah Snavely,
+and Zexiang Xu. Lvsm: A large view synthesis model with minimal 3d inductive bias. arXiv preprint
+arXiv:2410.17242, 2024.
+[9] Jensen Zhou, Hang Gao, Vikram Voleti, Aaryaman Vasishta, Chun-Han Yao, Mark Boss, Philip Torr,
+Christian Rupprecht, and Varun Jampani. Stable virtual camera: Generative view synthesis with diffusion
+models. arXiv preprint arXiv:2503.14489, 2025.
+[10] Ethan Weber, Norman Müller, Yash Kant, Vasu Agrawal, Michael Zollhöfer, Angjoo Kanazawa, and
+Christian Richardt. Fillerbuster: Multi-view scene completion for casual captures, 2025. arXiv:2502.05175.
+[11] Tri Dao. Flashattention-2: Faster attention with better parallelism and work partitioning. arXiv preprint
+arXiv:2307.08691, 2023.
+[12] Tinghui Zhou, Richard Tucker, John Flynn, Graham Fyffe, and Noah Snavely. Stereo magnification:
+learning view synthesis using multiplane images. ACM Transactions on Graphics (TOG), 37(4):1–12,
+2018.
+[13] Matt Deitke, Dustin Schwenk, Jordi Salvador, Luca Weihs, Oscar Michel, Eli VanderBilt, Ludwig Schmidt,
+Kiana Ehsani, Aniruddha Kembhavi, and Ali Farhadi. Objaverse: A universe of annotated 3d objects. In
+Proceedings of the IEEE/CVF conference on computer vision and pattern recognition, pages 13142–13153,
+2023.
+[14] Haofei Xu, Jing Zhang, Jianfei Cai, Hamid Rezatofighi, Fisher Yu, Dacheng Tao, and Andreas Geiger. Unifying flow, stereo and depth estimation. IEEE Transactions on Pattern Analysis and Machine Intelligence,
+2023.
+[15] Lu Ling, Yichen Sheng, Zhi Tu, Wentian Zhao, Cheng Xin, Kun Wan, Lantao Yu, Qianyu Guo, Zixun Yu,
+Yawen Lu, et al. Dl3dv-10k: A large-scale scene dataset for deep learning-based 3d vision. In Proceedings
+of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 22160–22169, 2024.
+[16] Amirhossein Kazemnejad, Inkit Padhi, Karthikeyan Natesan Ramamurthy, Payel Das, and Siva Reddy. The
+impact of positional encoding on length generalization in transformers. Advances in Neural Information
+Processing Systems, 36:24892–24928, 2023.
+[17] Bowen Peng, Jeffrey Quesnelle, Honglu Fan, and Enrico Shippole. Yarn: Efficient context window
+extension of large language models. arXiv preprint arXiv:2309.00071, 2023.
+[18] Olga Golovneva, Tianlu Wang, Jason Weston, and Sainbayar Sukhbaatar. Contextual position encoding:
+Learning to count what’s important. arXiv preprint arXiv:2405.18719, 2024.
+11
+[19] Connor Schenck, Isaac Reid, Mithun George Jacob, Alex Bewley, Joshua Ainslie, David Rendleman,
+Deepali Jain, Mohit Sharma, Avinava Dubey, Ayzaan Wahid, et al. Learning the ropes: Better 2d and 3d
+position encodings with string. arXiv preprint arXiv:2502.02562, 2025.
+[20] Alec Radford, Karthik Narasimhan, Tim Salimans, Ilya Sutskever, et al. Improving language understanding
+by generative pre-training. 2018.
+[21] Jacob Devlin, Ming-Wei Chang, Kenton Lee, and Kristina Toutanova. Bert: Pre-training of deep bidirectional transformers for language understanding. In Proceedings of the 2019 conference of the North
+American chapter of the association for computational linguistics: human language technologies, volume
+1 (long and short papers), pages 4171–4186, 2019.
+[22] Alexey Dosovitskiy, Lucas Beyer, Alexander Kolesnikov, Dirk Weissenborn, Xiaohua Zhai, Thomas
+Unterthiner, Mostafa Dehghani, Matthias Minderer, Georg Heigold, Sylvain Gelly, Jakob Uszkoreit,
+and Neil Houlsby. An image is worth 16×16 words: Transformers for image recognition at scale. In
+International Conference on Learning Representations, 2021.
+[23] Mathilde Caron, Hugo Touvron, Ishan Misra, Hervé Jégou, Julien Mairal, Piotr Bojanowski, and Armand
+Joulin. Emerging properties in self-supervised vision transformers. In Proceedings of the IEEE/CVF
+international conference on computer vision, pages 9650–9660, 2021.
+[24] Alec Radford, Jong Wook Kim, Chris Hallacy, Aditya Ramesh, Gabriel Goh, Sandhini Agarwal, Girish
+Sastry, Amanda Askell, Pamela Mishkin, Jack Clark, et al. Learning transferable visual models from
+natural language supervision. In International conference on machine learning, pages 8748–8763. PmLR,
+2021.
+[25] Robin Rombach, Andreas Blattmann, Dominik Lorenz, Patrick Esser, and Björn Ommer. High-resolution
+image synthesis with latent diffusion models. In Proceedings of the IEEE/CVF conference on computer
+vision and pattern recognition, pages 10684–10695, 2022.
+[26] Xiaohua Zhai, Basil Mustafa, Alexander Kolesnikov, and Lucas Beyer. Sigmoid loss for language
+image pre-training. In Proceedings of the IEEE/CVF international conference on computer vision, pages
+11975–11986, 2023.
+[27] Alexander Kirillov, Eric Mintun, Nikhila Ravi, Hanzi Mao, Chloe Rolland, Laura Gustafson, Tete Xiao,
+Spencer Whitehead, Alexander C Berg, Wan-Yen Lo, et al. Segment anything. In Proceedings of the
+IEEE/CVF international conference on computer vision, pages 4015–4026, 2023.
+[28] Byeongho Heo, Song Park, Dongyoon Han, and Sangdoo Yun. Rotary position embedding for vision
+transformer. In European Conference on Computer Vision, pages 289–305. Springer, 2024.
+[29] Colin Raffel, Noam Shazeer, Adam Roberts, Katherine Lee, Sharan Narang, Michael Matena, Yanqi Zhou,
+Wei Li, and Peter J Liu. Exploring the limits of transfer learning with a unified text-to-text transformer.
+Journal of machine learning research, 21(140):1–67, 2020.
+[30] Hugo Touvron, Thibaut Lavril, Gautier Izacard, Xavier Martinet, Marie-Anne Lachaux, Timothée Lacroix,
+Baptiste Rozière, Naman Goyal, Eric Hambro, Faisal Azhar, et al. Llama: Open and efficient foundation
+language models. arXiv preprint arXiv:2302.13971, 2023.
+[31] Daya Guo, Dejian Yang, Haowei Zhang, Junxiao Song, Ruoyu Zhang, Runxin Xu, Qihao Zhu, Shirong
+Ma, Peiyi Wang, Xiao Bi, et al. Deepseek-r1: Incentivizing reasoning capability in llms via reinforcement
+learning. arXiv preprint arXiv:2501.12948, 2025.
+[32] Haotian Liu, Chunyuan Li, Qingyang Wu, and Yong Jae Lee. Visual instruction tuning. Advances in neural
+information processing systems, 36:34892–34916, 2023.
+[33] Patrick Esser, Sumith Kulal, Andreas Blattmann, Rahim Entezari, Jonas Müller, Harry Saini, Yam Levi,
+Dominik Lorenz, Axel Sauer, Frederic Boesel, et al. Scaling rectified flow transformers for high-resolution
+image synthesis. In Forty-first international conference on machine learning, 2024.
+[34] Black Forest Labs. Flux. https://github.com/black-forest-labs/flux, 2024.
+[35] Genmo Team. Mochi 1. https://github.com/genmoai/models, 2024.
+[36] Colin Raffel, Noam Shazeer, Adam Roberts, Katherine Lee, Sharan Narang, et al. Exploring the limits
+of transfer learning with a unified text-to-text transformer. Journal of Machine Learning Research,
+21(140):1–67, 2020.
+12
+[37] Ofir Press, Noah A. Smith, and Mike Lewis. Train short, test long: Attention with linear biases enables
+input length extrapolation. In ICLR, 2022.
+[38] Ofir Press, Noah A Smith, and Mike Lewis. Train short, test long: Attention with linear biases enables
+input length extrapolation. arXiv preprint arXiv:2108.12409, 2021.
+[39] Abhimanyu Dubey, Abhinav Jauhri, Abhinav Pandey, Abhishek Kadian, Ahmad Al-Dahle, Aiesha Letman,
+Akhil Mathur, Alan Schelten, Amy Yang, Angela Fan, et al. The llama 3 herd of models. arXiv preprint
+arXiv:2407.21783, 2024.
+[40] Mohammed Suhail, Carlos Esteves, Leonid Sigal, and Ameesh Makadia. Light field neural rendering. In
+Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 8269–8279,
+2022.
+[41] Mehdi SM Sajjadi, Henning Meyer, Etienne Pot, Urs Bergmann, Klaus Greff, Noha Radwan, Suhani Vora,
+Mario Lučić, Daniel Duckworth, Alexey Dosovitskiy, et al. Scene representation transformer: Geometryfree novel view synthesis through set-latent scene representations. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition, pages 6229–6238, 2022.
+[42] Rundi Wu, Ruiqi Gao, Ben Poole, Alex Trevithick, Changxi Zheng, Jonathan T. Barron, and Aleksander
+Holynski. CAT4D: Create Anything in 4D with Multi-View Video Diffusion Models. arXiv:2411.18613,
+2024.
+[43] Hanxue Liang, Jiawei Ren, Ashkan Mirzaei, Antonio Torralba, Ziwei Liu, Igor Gilitschenski, Sanja Fidler,
+Cengiz Oztireli, Huan Ling, Zan Gojcic, et al. Feed-forward bullet-time reconstruction of dynamic scenes
+from monocular videos. arXiv preprint arXiv:2412.03526, 2024.
+[44] Ben Mildenhall, Pratul P Srinivasan, Matthew Tancik, Jonathan T Barron, Ravi Ramamoorthi, and Ren
+Ng. Nerf: Representing scenes as neural radiance fields for view synthesis. Communications of the ACM,
+65(1):99–106, 2021.
+[45] Jason Y Zhang, Amy Lin, Moneish Kumar, Tzu-Hsuan Yang, Deva Ramanan, and Shubham Tulsiani.
+Cameras as rays: Pose estimation via ray diffusion. arXiv preprint arXiv:2402.14817, 2024.
+[46] Lihe Yang, Bingyi Kang, Zilong Huang, Xiaogang Xu, Jiashi Feng, and Hengshuang Zhao. Depth anything:
+Unleashing the power of large-scale unlabeled data. In Proceedings of the IEEE/CVF Conference on
+Computer Vision and Pattern Recognition, pages 10371–10381, 2024.
+[47] Bingxin Ke, Anton Obukhov, Shengyu Huang, Nando Metzger, Rodrigo Caye Daudt, and Konrad Schindler.
+Repurposing diffusion-based image generators for monocular depth estimation. In Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 9492–9502, 2024.
+[48] Yining Hong, Chunru Lin, Yilun Du, Zhenfang Chen, Joshua B Tenenbaum, and Chuang Gan. 3d concept
+learning and reasoning from multi-view images. In Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition, pages 9202–9212, 2023.
+[49] Chenming Zhu, Tai Wang, Wenwei Zhang, Jiangmiao Pang, and Xihui Liu. Llava-3d: A simple yet
+effective pathway to empowering lmms with 3d-awareness. arXiv preprint arXiv:2409.18125, 2024.
+[50] Mohit Shridhar, Lucas Manuelli, and Dieter Fox. Perceiver-actor: A multi-task transformer for robotic
+manipulation. In Conference on Robot Learning, pages 785–799. PMLR, 2023.
+[51] Ryan Po, Yotam Nitzan, Richard Zhang, Berlin Chen, Tri Dao, Eli Shechtman, Gordon Wetzstein, and
+Xun Huang. Long-context state-space video world models. arXiv preprint arXiv:2505.20171, 2025.
+[52] Ze Liu, Yutong Lin, Yue Cao, Han Hu, Yixuan Wei, Zheng Zhang, Stephen Lin, and Baining Guo. Swin
+transformer: Hierarchical vision transformer using shifted windows. In Proceedings of the IEEE/CVF
+International Conference on Computer Vision (ICCV), pages 10012–10022, 2021.
+[53] William Peebles and Saining Xie. Scalable diffusion models with transformers. In Proceedings of the
+IEEE/CVF international conference on computer vision, pages 4195–4205, 2023.
+[54] Amir Bar, Gaoyue Zhou, Danny Tran, Trevor Darrell, and Yann LeCun. Navigation world models. In
+Proceedings of the Computer Vision and Pattern Recognition Conference, pages 15791–15801, 2025.
+[55] Julius Plucker. Xvii. on a new geometry of space. Philosophical Transactions of the Royal Society of
+London, (155):725–791, 1865.
+13
+[56] Ben Mildenhall, Pratul P Srinivasan, Rodrigo Ortiz-Cayon, Nima Khademi Kalantari, Ravi Ramamoorthi,
+Ren Ng, and Abhishek Kar. Local light field fusion: Practical view synthesis with prescriptive sampling
+guidelines. ACM Transactions on Graphics (ToG), 38(4):1–14, 2019.
+[57] Vitor Guizilini, Muhammad Zubair Irshad, Dian Chen, Greg Shakhnarovich, and Rares Ambrus. Zero-shot
+novel view and depth synthesis with multi-view geometric diffusion. arXiv preprint arXiv:2501.18804,
+2025.
+[58] Jonáš Kulhánek, Erik Derner, Torsten Sattler, and Robert Babuška. Viewformer: Nerf-free neural rendering
+from few images using transformers. In European Conference on Computer Vision, pages 198–216.
+Springer, 2022.
+[59] Brent Yi, Vickie Ye, Maya Zheng, Yunqi Li, Lea Müller, Georgios Pavlakos, Yi Ma, Jitendra Malik, and
+Angjoo Kanazawa. Estimating body and hand motion in an ego-sensed world. In Proceedings of the
+Computer Vision and Pattern Recognition Conference, pages 7072–7084, 2025.
+[60] Reiner Pope, Sholto Douglas, Aakanksha Chowdhery, Jacob Devlin, James Bradbury, Jonathan Heek,
+Kefan Xiao, Shivani Agrawal, and Jeff Dean. Efficiently scaling transformer inference. Proceedings of
+Machine Learning and Systems, 5:606–624, 2023.
+[61] Xindi Wang, Mahsa Salmani, Parsa Omidi, Xiangyu Ren, Mehdi Rezagholizadeh, and Armaghan Eshaghi.
+Beyond the limits: A survey of techniques to extend the context length in large language models. arXiv
+preprint arXiv:2402.02244, 2024.
+[62] Jürgen Sturm, Nikolas Engelhard, Felix Endres, Wolfram Burgard, and Daniel Cremers. A benchmark for
+the evaluation of rgb-d slam systems. In 2012 IEEE/RSJ international conference on intelligent robots and
+systems, pages 573–580. IEEE, 2012.
+[63] Jianxiong Xiao, Andrew Owens, and Antonio Torralba. Sun3d: A database of big spaces reconstructed
+using sfm and object labels. In Proceedings of the IEEE international conference on computer vision,
+pages 1625–1632, 2013.
+[64] Benjamin Ummenhofer, Huizhong Zhou, Jonas Uhrig, Nikolaus Mayer, Eddy Ilg, Alexey Dosovitskiy, and
+Thomas Brox. Demon: Depth and motion network for learning monocular stereo. In Proceedings of the
+IEEE conference on computer vision and pattern recognition, pages 5038–5047, 2017.
+[65] Yuedong Chen, Haofei Xu, Chuanxia Zheng, Bohan Zhuang, Marc Pollefeys, Andreas Geiger, Tat-Jen
+Cham, and Jianfei Cai. Mvsplat: Efficient 3d gaussian splatting from sparse multi-view images. In
+European Conference on Computer Vision, pages 370–386. Springer, 2024.
+[66] Yuedong Chen, Chuanxia Zheng, Haofei Xu, Bohan Zhuang, Andrea Vedaldi, Tat-Jen Cham, and Jianfei
+Cai. Mvsplat360: Feed-forward 360 scene synthesis from sparse views. Advances in Neural Information
+Processing Systems, 37:107064–107086, 2025.
+[67] Cameron Smith, David Charatan, Ayush Tewari, and Vincent Sitzmann. Flowmap: High-quality camera
+poses, intrinsics, and depth via gradient descent. arXiv preprint arXiv:2404.15259, 2024.
+[68] Muyao Niu, Xiaodong Cun, Xintao Wang, Yong Zhang, Ying Shan, and Yinqiang Zheng. Mofa-video:
+Controllable image animation via generative motion field adaptions in frozen image-to-video diffusion
+model. In European Conference on Computer Vision, pages 111–128. Springer, 2024.
+[69] Tyler Bonnen, Stephanie Fu, Yutong Bai, Thomas O’Connell, Yoni Friedman, Nancy Kanwisher, Josh
+Tenenbaum, and Alexei Efros. Evaluating multiview object consistency in humans and image models.
+Advances in Neural Information Processing Systems, 37:43533–43548, 2025.
+[70] Jonathan T Barron, Ben Mildenhall, Dor Verbin, Pratul P Srinivasan, and Peter Hedman. Zip-nerf: Antialiased grid-based neural radiance fields. In Proceedings of the IEEE/CVF International Conference on
+Computer Vision, pages 19697–19705, 2023.
+[71] Kyle Sargent, Zizhang Li, Tanmay Shah, Charles Herrmann, Hong-Xing Yu, Yunzhi Zhang, Eric Ryan
+Chan, Dmitry Lagun, Li Fei-Fei, Deqing Sun, et al. Zeronvs: Zero-shot 360-degree view synthesis from a
+single image. arXiv preprint arXiv:2310.17994, 2023.
+[72] Rundi Wu, Ben Mildenhall, Philipp Henzler, Keunhong Park, Ruiqi Gao, Daniel Watson, Pratul P Srinivasan, Dor Verbin, Jonathan T Barron, Ben Poole, et al. Reconfusion: 3d reconstruction with diffusion
+priors. In Proceedings of the IEEE/CVF conference on computer vision and pattern recognition, pages
+21551–21561, 2024.
+14
+A.1
+Experiment details
+A.1.1
+LVSM-based Model Details
+We adhere to the original LVSM [8] implementation specifications, maintaining consistency across
+most settings. For complete details regarding these configurations, we direct readers to the original
+LVSM paper [8]. The modifications we made include:
+• We trained exclusively at 256×256 resolution and did not perform the additional fine-tuning
+at higher resolutions.
+• Limited by academic-level resources, we use a smaller version of the LVSM model with 6
+transformer blocks, and reduce the MLP channel dimension from 3072 to 1024. Our models
+are trained on 2x GPUs with a total batch size of 4, as opposed to 512 in the original paper.
+This applies to all experiments expect for the ones in Section 4.7.
+• For the scaling-up experiments in Section 4.7, we use a LVSM model with 12 transformer
+blocks and keep the all other configurations including the MLP channel dimension (3072).
+These models are trained on 8x GPUs with a total batch size of 64.
+A.1.2
+UniMatch Modification Details
+UniMatch [14]’s model consists of a cross-attention transformer to capture multi-view relationship,
+as well as a self-attention transformer that serves as a single-view image encoder/decoder. We inject
+the camera information into both transformers, on the Q/K/V/O vectors, using our formulation. Note
+that our formula exactly falls back to RoPE [28] in the single-view scenario. It therefore naturally
+works with both transformer networks in UniMatch.
+A.1.3
+Spatial Cognition Model Details
+We formulate this task as a classification problem, where the number of classes corresponds to
+the number of input image-camera pairs, and the “ground-truth” class is the ID of the inconsistent
+image-camera pair. The training objective is to identify the inconsistent pair, which we optimize using
+the cross-entropy loss. The architecture of the model is largely similar to LVSM [8], where the only
+change is that the last linear layer is modified to output a single scalar for each token. Outputs are
+then averaged over all tokens for each input pair, resulting in a vector that represents the probability
+that each input pair is the “bad” one (over softmax). We provide more data exemplars we used for
+training and testing in Figure A.3.
+A.2
+Additional Results
+A.2.1
+Ablating PRoPE
+As our proposed PRoPE includes two terms: the projective relationship between cameras (DProj
+t ) and
+the patch coordinate relationship (DRoPE
+). We here ablate each of them to study their contribution.
+t
+As shown in Table A.1, as a crucial component to the system, modeling the projective relationship
+between cameras alone already yields strong performance. Introducing RoPE [28] further enhances
+model’s ability on understanding patch relationship, which is a minimal unit in vision transformer
+architecture. Notably, in PRoPE, we allocate half of the feature channels to encode each term.
+Ablating one term therefore means using all feature channels to encode the remaining one.
+A.2.2
+PRoPE v.s. GTA: More Analysis on the Affect of Intrinsic Modeling
+The main difference between our proposed PRoPE and prior work GTA [3] is the introduce of camera
+intrinsic into the formulation. While GTA itself does not take into account camera intrinsics, as
+we have pointed out in Section 4.4, it is compatible with our proposed CamRay – which encodes
+the intrinsic at token level – to form a complete representation for camera conditioning. In this
+section, we run more thorough experiments focusing comparing PRoPE and GTA in differnet settings
+(with/without CamRay) as the camera conditioning techniques on both UniMatch for stereo depth
+15
+Encoding Method
+PSNR↑
+LPIPS↓
+SSIM↑
+w/o DProj
+t
+w/o DRoPE
+t
+16.04
+21.39
+0.505
+0.238
+0.509
+0.673
+PRoPE
+21.78
+0.211
+0.692
+Table A.1: Ablation Study on PRoPE. DProj
+is crucial for encoding the relative camera information,
+t
+and DRoPE
+is
+also
+helpful
+to
+capture
+the
+relative
+patch coordinate. Experiments are conducted on
+t
+RealEstate10K [12] with CamRay as input.
+Method
+3-view
+6-view
+9-view
+PSNR ↑ SSIM ↑ LPIPS ↓ PSNR ↑ SSIM ↑ LPIPS ↓ PSNR ↑ SSIM ↑ LPIPS ↓
+Zip-NeRF [70]
+ZeroNeRF [71]
+ReconFusion [72]
+CAT3D [7]
+CAT3D [7] + PRoPE
+12.77
+14.44
+15.50
+16.62
+16.93
+0.271
+0.316
+0.358
+0.377
+0.382
+0.705
+0.680
+0.585
+0.515
+0.505
+13.61
+15.51
+16.93
+17.72
+18.01
+0.284
+0.337
+0.401
+0.425
+0.443
+0.663
+0.663
+0.544
+0.482
+0.479
+14.30
+15.99
+18.19
+18.67
+18.98
+0.312
+0.350
+0.432
+0.460
+0.474
+0.633
+0.655
+0.511
+0.460
+0.461
+Table A.2: Incorporating PRoPE into CAT3D. Adding PRoPE to the CAT3D [7] multiview
+diffusion model yields improvements over the original model, with zero additional model parameters
+and negligible computational overhead.
+Method
+1×
+3×
+5×
+7×
+Plücker
+GTA
+GTA+CamRay
+PRoPE
+PRoPE+CamRay
+19.89
+15.77
+21.41
+21.42
+21.86
+21.03
+18.14
+22.70
+22.95
+23.06
+20.75
+18.12
+22.35
+22.75
+22.83
+20.32
+18.29
+21.77
+22.40
+22.40
+PSNR (↑) across zoom-in levels.
+Method
+1×
+3×
+5×
+7×
+Method
+1×
+3×
+5×
+7×
+Plücker
+GTA
+GTA+CamRay
+PRoPE
+PRoPE+CamRay
+0.608
+0.512
+0.673
+0.678
+0.693
+0.694
+0.626
+0.741
+0.748
+0.751
+0.732
+0.683
+0.764
+0.775
+0.776
+0.755
+0.721
+0.780
+0.794
+0.794
+Plücker
+GTA
+GTA+CamRay
+PRoPE
+PRoPE+CamRay
+0.327
+0.641
+0.238
+0.247
+0.218
+0.272
+0.488
+0.191
+0.193
+0.183
+0.308
+0.439
+0.242
+0.227
+0.220
+0.345
+0.403
+0.288
+0.244
+0.242
+SSIM (↑) across zoom-in levels.
+LPIPS (↓) across zoom-in levels.
+Table A.3: Additional Novel View Synthesis Results on Out-of-distribution Intrinsics at Test
+Time. Experiments are conducted with LVSM [8] on RealEstate10K [12] dataset with augmented
+intrinsics (1-3× zoom-in) as described in Section 4.3.
+estimation in Table A.4 and LVSM for novel view synthesis in Table A.3, both with augmented
+intrinsics in training to highlight the benefits of PRoPE on intrinsic modeling.
+The new results corroborate the benefits of PRoPE that were originally shown in the main paper.
+We find that PRoPE consistently outperforms GTA. Importantly, both PRoPE and PRoPE+CamRay
+outperform GTA+CamRay, despite the fact that these methods include the same information and
+are all invariant to the choice of global frame. This supports our finding that attention-level intrinsic
+conditioning (as in PRoPE) is important.
+A.2.3
+Qualitative Results for Stereo Depth Estimation
+In Figure A.2 we show more qualitative results on the task of stereo depth estimation with UniMatch [14].
+16
+Method
+UniMatch
++Plucker
++GTA
++GTA+CamRay
++PRoPE
++PRoPE+CamRay
+1.0×
+1.5×
+2.0×
+3.0×
+0.234
+-2.47%
+-28.83%
+-29.90%
+-33.75%
+-31.99%
+0.228
+-9.35%
+-33.48%
+-35.25%
+-36.66%
+-35.82%
+0.238
+-7.74%
+-32.15%
+-32.42%
+-33.85%
+-33.24%
+0.299
+-4.67%
+-12.55%
+-13.65%
+-26.40%
+-28.21%
+Method
+UniMatch
++Plucker
++GTA
++GTA+CamRay
++PRoPE
++PRoPE+CamRay
+abs_rel (↓) across zoom-in levels.
+Method
+UniMatch
++Plucker
++GTA
++GTA+CamRay
++PRoPE
++PRoPE+CamRay
+1.0×
+1.5×
+1.059
++1.03%
+-19.55%
+-20.41%
+-28.64%
+-26.86%
+1.031
+-3.95%
+-26.12%
+-27.44%
+-29.79%
+-29.29%
+2.0×
+1.0×
+1.5×
+2.0×
+3.0×
+0.357
+-1.08%
+-31.77%
+-33.54%
+-45.13%
+-41.79%
+0.376
+-9.46%
+-41.52%
+-44.06%
+-46.79%
+-46.75%
+0.408
+-2.76%
+-41.16%
+-42.34%
+-44.53%
+-44.08%
+0.613
+-3.37%
+-11.88%
+-13.09%
+-38.56%
+-39.88%
+sq_rel (↓) across zoom-in levels.
+3.0×
+Method
+1.035
+1.188
+-0.53% +1.64%
+-25.68% -4.50%
+-25.72% -6.12%
+-28.25% -22.61%
+-28.09% -23.74%
+UniMatch
++Plucker
++GTA
++GTA+CamRay
++PRoPE
++PRoPE+CamRay
+rmse (↓) across zoom-in levels.
+1.0×
+1.5×
+0.322
++0.49%
+-23.29%
+-24.08%
+-32.01%
+-29.98%
+0.322
+-5.46%
+-30.33%
+-31.64%
+-33.56%
+-32.68%
+2.0×
+3.0×
+0.336
+0.421
+-2.33% +2.00%
+-30.03% -3.24%
+-30.23% -4.34%
+-32.67% -26.78%
+-32.31% -27.71%
+rmse_log (↓) across zoom-in levels.
+RealEstate10K
+Objaverse
+Table A.4: Additional Stereo Depth Estimation Results on Out-of-distribution Intrinsics at Test
+Time. Experiments are conducted with UniMatch [14]’s official code as described in Section 4.6 but
+with 1/8 of the training resources (2 GPUs x 50k steps).
+Plucker Raymap Naive Raymap
+GTA
+PRoPE
+PRoPE+CamRay
+GT
+Figure A.1: More Qualitative Results of Novel View Synthesis on RealEstate10K [12] and
+Objaverse [13].
+17
+Uni-Match
++ours
+Uni-Match
+GT Target
+GT Reference
+Figure A.2: More Qualitative Results of Stereo Depth Estimation on RGBD [62], SUN3D [63]
+and Scenes11 [64].
+18
+Figure A.3: The Spatial Cognition Task. The model takes multi-view images and corresponding
+camera information as input and aims to identify inconsistent image-camera pairs (yellow here).
+Understanding the cross-view relationships between images and cameras is crucial for this task.
+19

@@ -1,0 +1,67 @@
+# Symmetric Matrix Data Structure
+Also called: SMat3
+## Overview
+The Symmetric Matrix Data Structure is a compact memory layout for 3x3 symmetric matrices, storing only the 6 unique elements to eliminate redundancy [S1, unofficial]. It differs from a full 9-element matrix by enforcing $m_{ij} = m_{ji}$, reducing storage and computation costs for operations like covariance analysis or stress tensor representation [G].
+## How it works
+**Inputs:** Six scalar values representing the independent components of a 3x3 symmetric matrix [S1, unofficial].
+**Outputs:** An instance of the `SMat3` data structure [S1, unofficial].
+**Data Structure Layout:** The structure `SMat3` consists of six public `float` fields [S1, unofficial]. The layout maps directly to the lower triangular part of the 3x3 matrix: `m00` (row 0, col 0), `m01` (row 0, col 1), `m02` (row 0, col 2), `m11` (row 1, col 1), `m12` (row 1, col 2), and `m22` (row 2, col 2) [S1, unofficial].
+**Numbered Steps:**
+1. Allocate an `SMat3` instance.
+2. Call `setSymmetric` with six scalar parameters $a_{00}, a_{01}, a_{02}, a_{11}, a_{12}, a_{22}$ [S1, unofficial].
+3. Assign each parameter to the corresponding public field: `m00 = a00`, `m01 = a01`, `m02 = a02`, `m11 = a11`, `m12 = a12`, `m22 = a22` [S1, unofficial].
+**Formulas:** The structure enforces symmetry via implicit equality: $m_{01} = m_{10}$, $m_{02} = m_{20}$, $m_{12} = m_{21}$ [S1, unofficial].
+**Parameters:** Six `float` values representing the independent lower-triangular components [S1, unofficial]. Typical values depend on the application (e.g., covariance or stress tensors) [G].
+**Edge Cases and Pitfalls:**
+- **Symmetry Enforcement:** The structure relies on the programmer to maintain symmetry [G]. Operations that modify only one side must explicitly update the corresponding stored field [G]. In this specific layout, $m_{01}$ and $m_{10}$ are the same field, so symmetry is inherent to the storage, but logical symmetry must be preserved during calculations [G].
+- **Precision:** Uses `float` (single precision) by default in the reference implementation [S1, unofficial]. Double precision requires changing the field type [G].
+- **Degenerate Input:** No specific validation is mentioned for singular or non-positive-definite matrices; the structure stores raw values [S1, unofficial].
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+class SMat3:
+    def __init__(self, m00=0.0, m01=0.0, m02=0.0, m11=0.0, m12=0.0, m22=0.0):
+        self.m00 = m00
+        self.m01 = m01
+        self.m02 = m02
+        self.m11 = m11
+        self.m12 = m12
+        self.m22 = m22
+
+    def set_symmetric(self, a00, a01, a02, a11, a12, a22):
+        """Sets all 6 fields from 6 parameters."""
+        self.m00 = a00
+        self.m01 = a01
+        self.m02 = a02
+        self.m11 = a11
+        self.m12 = a12
+        self.m22 = a22
+
+    def clear(self):
+        """Resets the matrix to zero."""
+        self.set_symmetric(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+
+    def copy_from(self, rhs: 'SMat3'):
+        """Copies values from another SMat3 instance."""
+        self.set_symmetric(rhs.m00, rhs.m01, rhs.m02, rhs.m11, rhs.m12, rhs.m22)
+```
+## Subtopics
+
+### [Symmetric Matrix Stripping](7951-symmetric-matrix-stripping.md)
+Symmetric Matrix Stripping extracts the 6 unique elements from the lower triangular part of a batch of 3x3 symmetric matrices (typically covariance matrices) into a flat tensor of shape `(N, 6)`. It solves the problem of efficiently storing and transmitting symmetric matrices by eliminating redundant upper-triangular elements, leveraging the property that $M_{ij} = M_{ji}$. This method is distinct from general matrix flattening as it assumes symmetry and follows a specific row-major lower-diagonal ordering. Choose when batching symmetric matrices for GPU transfer or serialization.
+
+### [Stress Tensor Representation](9783-stress-tensor-representation.md)
+A stress tensor representation models the internal forces acting on a material point by defining the traction vector on any arbitrary cutting plane through that point. It is distinguished from general symmetric matrices by its specific physical interpretation of diagonal components as normal stress and off-diagonal components as shear stress, along with a defined sign convention for eigenvalues. Choose when the matrix represents physical stress/strain rather than abstract geometry.
+
+## Operating characteristics
+**Time Complexity:** Not given in the sources. [S1, unofficial]
+**Memory Complexity:** Not given in the sources. [S1, unofficial]
+**Strengths:** Not given in the sources. [S1, unofficial]
+**Limitations:** Not given in the sources. [S1, unofficial]
+**When to use:** Not given in the sources. [S1, unofficial]
+**When not to use:** Not given in the sources. [S1, unofficial]
+## Background
+The `SMat3` structure appears in the `DualContouringCSharp` repository by tuckbone, used in the context of dual contouring algorithms for implicit surface reconstruction [S1, unofficial]. Dual contouring often involves computing covariance matrices of sample points, which are symmetric positive-definite, making this structure suitable for such geometric processing tasks [G].
+## Sources
+[S1] tuckbone/DualContouringCSharp, https://github.com/tuckbone/DualContouringCSharp, fetched 2026-10-26 (unofficial)

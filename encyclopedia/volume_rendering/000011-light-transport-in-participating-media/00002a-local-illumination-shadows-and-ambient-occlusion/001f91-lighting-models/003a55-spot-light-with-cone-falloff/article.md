@@ -1,0 +1,126 @@
+# Spot Light with Cone Falloff
+Also called: Cross-Pipeline Spotlight Illumination, Cross-pipeline spot lights, Delta Spot Light, Spot Light Falloff Computation, Spot lights
+
+## Overview
+This method computes the attenuation factor for a spotlight emitting within a specific cone direction, applying smooth angular and distance falloff to the light intensity at a shading point [S1, unofficial]. It treats the source as a delta light, optionally modulating the geometric falloff with a photometric IES profile [S3, unofficial]. It builds on [Lighting Models](2056-lighting-models.md) by adding directional cone constraints and pipeline-compatible parameter passing [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** `g_LightDirection` (4D vector), `lightVec` (normalized direction from shading point $\mathbf{p}$ to light), `normalized_distance` (distance to light divided by light range), `angleScale`, `angleOffset`, and an optional IES profile object [S1, unofficial].
+*   **Output:** Scalar attenuation factor $f_{\text{spot}} \in [0, 1]$.
+
+**Data Structures:**
+The light direction is stored as a 4D vector $\mathbf{g}_{\text{LightDirection}} = (x, y, z, w)$ [S1, unofficial].
+*   If $w \neq 0.0$, the light is a spotlight [S2, unofficial].
+*   If $w = 0.0$, the light is a standard point light and spot falloff is skipped [S1, unofficial].
+
+**Steps:**
+1.  **Check Spotlight Status:** Inspect the $w$-component of $\mathbf{g}_{\text{LightDirection}}$ [S2, unofficial]. If $w == 0.0$, return attenuation factor $1.0$.
+2.  **Compute Distance Attenuation:** Calculate smooth quadratic decay using $(1 - x)^2$, where $x$ is the normalized distance [S1, unofficial].
+3.  **Compute Cone Attenuation:** Calculate the dot product between the normalized 3D light direction and $\mathbf{l}$ [S2, unofficial]. Apply `angleScale` and `angleOffset` to generate a smooth angular falloff [S1, unofficial].
+4.  **Blend IES Profile:** If an IES profile is provided, modulate the combined geometric falloff with the photometric intensity at the corresponding angle [S3, unofficial].
+5.  **Discard if Zero:** If the computed $f_{\text{spot}} \leq 0.0$, discard the lighting contribution and return the ambient color [S2, unofficial].
+
+**Formulas:**
+Distance attenuation:
+$$ f_{\text{dist}} = (1 - d_{\text{norm}})^2 $$
+Cone attenuation (standard smooth falloff using provided parameters) [G]:
+$$ f_{\text{cone}} = \max(0.0, \mathbf{d} \cdot \mathbf{l})^{\text{angleScale}} \times \text{smoothstep}(1.0 - \text{angleOffset}, 1.0, \mathbf{d} \cdot \mathbf{l}) $$
+Total attenuation:
+$$ f_{\text{spot}} = f_{\text{dist}} \times f_{\text{cone}} \times f_{\text{IES}} $$
+where $\mathbf{d}$ is the normalized light direction, $\mathbf{l}$ is the normalized vector to the light, and $f_{\text{IES}}$ is the IES intensity value (default $1.0$) [S3, unofficial].
+
+**Parameters:**
+*   `angleScale`: Controls the exponent of the cone falloff curve [S1, unofficial].
+*   `angleOffset`: Controls the smooth transition width at the cone edge [S1, unofficial].
+*   Maximum supported spot lights: $2$ [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **HDRP Camera-Relative Rendering:** HDRP transforms to camera-relative world space, causing positional mismatch with absolute C# spotlight coordinates [S1, unofficial]. Convert sample positions to absolute world space using the camera offset before attenuation.
+*   **Precision:** Clamp the dot product to $[-1.0, 1.0]$ before power functions to prevent NaNs [G].
+*   **Degenerate Input:** Guard against zero-length light direction vectors before normalization [G].
+*   **Intensity Double-Counting:** The intensity is already packed into `params.w`; do not multiply by an additional intensity scalar in the shader [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def smoothstep(edge0, edge1, x):
+    t = max(0.0, min(1.0, (x - edge0) / (edge1 - edge0)))
+    return t * t * (3.0 - 2.0 * t)
+
+def compute_spot_falloff(g_LightDirection, lightVec, normalized_distance, angleScale, angleOffset, ies_profile=None):
+    # Step 1: Check spotlight status
+    if g_LightDirection.w == 0.0:
+        return 1.0
+
+    # Step 2: Distance attenuation (1-x)^2
+    dist_falloff = (1.0 - normalized_distance) ** 2
+
+    # Step 3: Cone attenuation
+    dir_x, dir_y, dir_z = g_LightDirection.x, g_LightDirection.y, g_LightDirection.z
+    length = (dir_x**2 + dir_y**2 + dir_z**2) ** 0.5
+    if length == 0.0:
+        return 0.0
+    dir_x, dir_y, dir_z = dir_x / length, dir_y / length, dir_z / length
+
+    dot = dir_x * lightVec[0] + dir_y * lightVec[1] + dir_z * lightVec[2]
+    dot = max(-1.0, min(1.0, dot))
+
+    # Smooth cone falloff using angleScale and angleOffset [G]
+    cone_falloff = max(0.0, dot) ** angleScale
+    cone_falloff *= smoothstep(1.0 - angleOffset, 1.0, dot)
+
+    spot_falloff = dist_falloff * cone_falloff
+
+    # Step 4: IES blend
+    if ies_profile is not None:
+        # IES profile sampling not detailed in sources [S3, unofficial]
+        pass
+
+    return spot_falloff
+
+def apply_spot_lighting(g_LightDirection, lightVec, normalized_distance, angleScale, angleOffset, ies_profile, ambient_color, light_color):
+    falloff = compute_spot_falloff(g_LightDirection, lightVec, normalized_distance, angleScale, angleOffset, ies_profile)
+    
+    # Step 5: Discard if zero
+    if falloff <= 0.0:
+        return ambient_color
+        
+    # Direct lighting contribution (intensity is already in params.w)
+    return ambient_color + falloff * light_color
+```
+
+## Operating characteristics
+**Time and Memory Complexity:**
+*   **Time:** $O(1)$ per shading point. Requires a few vector operations, a dot product, and a power function [S1, unofficial].
+*   **Memory:** $O(1)$ additional memory. Static IES profile data is loaded once per light source [S3, unofficial].
+
+**Measured Performance:**
+*   Not given in the sources.
+
+**Scaling:**
+*   Scales linearly with the number of shading points [S1, unofficial]. Independent of scene complexity as it is a local illumination model.
+
+**Strengths and Limitations:**
+*   **Strengths:** Computationally cheap; provides realistic directional lighting effects; supports photometric accuracy via IES profiles [S3, unofficial].
+*   **Limitations:** Delta light approximation may cause aliasing in shadows; does not account for light scattering within the cone volume [G].
+
+**When to Use:**
+*   Use when directional, focused lighting is required in a volume rendering context [S1, unofficial].
+*   Avoid when soft, volumetric light beams are needed, as this method only computes point attenuation [G].
+
+## Background
+**Origin:**
+The method originates from the OpenVDBForUnity project, which unified Classic and Realtime renderers with cross-pipeline spotlight support [S1, unofficial]. It is also implemented in the photon-engine as a delta light with optional IES profile [S3, unofficial].
+
+**History and Development:**
+Initial implementations supported up to 2 spot lights with smooth inverse-square distance falloff and cone attenuation [S1, unofficial]. Subsequent updates decoupled spotlight brightness from directional light influence via a dedicated `_SpotLightInfluence` parameter and fixed HDRP camera-relative rendering mismatches [S1, unofficial]. The photon-engine variant added IES LM-63 parsing with symmetry folding [S3, unofficial].
+
+**Where it is used:**
+Used for local illumination in participating media within Unity's HDRP and Built-in render pipelines [S1, unofficial]. Also applied in photon-engine for photometric lighting in volumetric scenes [S3, unofficial].
+
+## Sources
+[S1] Unify volume rendering architecture with cross-pipeline spotlight support, https://github.com/llcheesell/OpenVDBForUnity/pull/3, fetched 2026-10-26 (unofficial)
+[S2] destroflyer/cubes, https://github.com/destroflyer/cubes, fetched 2026-10-26 (unofficial)
+[S3] Add volumetric rendering, advanced materials, and imager effects, https://github.com/MihrimatriX/photon-engine/pull/3, fetched 2026-10-28 (unofficial)

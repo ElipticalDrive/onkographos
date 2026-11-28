@@ -1,0 +1,51 @@
+# Pruning and Density Control
+
+Also called: Gaussian Pruning, Density Control, Adaptive Pruning
+
+## Overview
+Pruning and Density Control refers to the family of techniques used to manage the number and distribution of 3D Gaussian primitives during the optimization of 3D Gaussian Splatting (3DGS). It solves the problem of balancing reconstruction fidelity against computational cost and memory usage by dynamically removing redundant or low-importance Gaussians and controlling the growth of new ones. It sets itself apart from static initialization methods by employing dynamic, often concave-up, growth curves that synchronize primitive count with increasing resolution to fit high-frequency details only after low-frequency structures are established [Parent].
+
+## Shared principles
+All methods in this family operate on the standard 3DGS primitive representation:
+*   Position $\mathbf{p}_i \in \mathbb{R}^3$
+*   Scale $\mathbf{s}_i \in \mathbb{R}^3$
+*   Rotation $\mathbf{q}_i \in \mathbb{R}^4$ (quaternion)
+*   Opacity $\alpha_i \in [0, 1]$
+*   Color coefficients $\mathbf{c}_i$ (Spherical Harmonics)
+
+The core mechanism involves calculating an importance score for each Gaussian and removing those below a threshold or ranking. Methods typically employ a "concave-up" growth curve for primitives, where growth accelerates over time, synchronized with increasing rendering resolution to fit high-frequency details only after low-frequency structures are established [Parent].
+
+## Subtopics
+
+### [Optimization Schedule and Densification](15107-optimization-schedule-and-densification.md)
+This family defines the temporal scheduling of primitive creation (densification), removal (pruning), and resource allocation (resolution) during the optimization of 3D Gaussian Splatting (3DGS). It solves the problem of balancing reconstruction fidelity against computational cost by controlling when and how new Gaussians are introduced relative to the rendering resolution and optimization progress. It sets itself apart from static initialization methods by employing dynamic, often concave-up, growth curves that synchronize primitive count with increasing resolution to fit high-frequency details only after low-frequency structures are established [Parent]. See [Optimization Schedule and Densification](15107-optimization-schedule-and-densification.md).
+
+### [Reconstruction-aware Pruning Scheduler](16199-reconstruction-aware-pruning-scheduler.md)
+The Reconstruction-aware Pruning Scheduler (RPS) is a dynamic pruning strategy for 3D Gaussian Splatting that adaptively determines pruning timing and refining intervals based on reconstruction quality, addressing the instability of fixed-schedule pruning. Unlike heuristic methods that prune at fixed iterations with preset ratios, RPS analyzes reconstruction loss to automatically identify optimal pruning times and progressively reduces the number of pruned primitives to adapt to scene complexity and redundancy levels. See [Reconstruction-aware Pruning Scheduler](16199-reconstruction-aware-pruning-scheduler.md).
+
+### [DropGaussian](16856-dropgaussian.md)
+DropGaussian is a structural regularization technique designed to mitigate overfitting in 3D Gaussian Splatting (3DGS) when trained on a sparse set of input views. It operates by randomly excluding a subset of Gaussians from the rendering and gradient computation during training, while simultaneously scaling the opacity of the remaining Gaussians to preserve the total color contribution. Unlike prior-based methods that rely on external depth signals or 2D generative models, DropGaussian is prior-free and introduces no additional computational complexity or external data requirements. See [DropGaussian](16856-dropgaussian.md).
+
+### Deformation-Aware Pruning
+A pruning technique that identifies and removes redundant Gaussians by gauging their impact on deformation, distinguishing between stable and deformed Gaussians [S1].
+
+### Spatio-spectral Pruning Score
+An importance ranking mechanism that incorporates spectral information into the importance ranking of Gaussian primitives to enable stable pruning [S2, unofficial]. It measures the importance of a Gaussian primitive in both spatial and spectral domains [S2, unofficial]. A criterion for evaluating the importance of each Gaussian by measuring its contribution from both spatial and spectral (frequency) perspectives to prevent pruning of primitives essential for sharp structures [S2, unofficial].
+
+**Step**
+Iteratively remove low-score points that are relatively unimportant across both spatial and spectral domains [S2, unofficial]. Combine the normalized spatial score and spectral score using weighting coefficients $\lambda_s$ and $\lambda_f$ to obtain the final Spatio-spectral Pruning Score $\tilde{U}_i^*$ [S2, unofficial].
+
+**Formula**
+$$ \tilde{U}_i^* = \lambda_s \frac{(\nabla_{g_i} I_G)^2}{\|\tilde{U}_s\|^2} + \lambda_f \frac{(\nabla_{g_i} \text{FFT}(I_G))^2}{\|\tilde{U}_f\|^2} $$
+where $\tilde{U}_i^*$ is the Spatio-spectral Pruning Score, $\lambda_s$ and $\lambda_f$ are weighting coefficients balancing spatial and frequency contributions, and $\|\tilde{U}_s\|$ and $\|\tilde{U}_f\|$ are normalization terms for spatial and frequency scores respectively [S2, unofficial].
+
+**Parameter**
+$\lambda_s$: Weighting coefficient for the spatial-domain gradient term [S2, unofficial].
+$\lambda_f$: Weighting coefficient for the frequency-domain gradient term [S2, unofficial].
+
+## Background
+The concept of pruning in 3D Gaussian Splatting emerged as a response to the high memory and computational costs associated with the dense primitive representations required for high-fidelity rendering. Early implementations relied on fixed schedules for densification and pruning, which often led to instability or suboptimal final models [S2, unofficial]. The introduction of adaptive strategies, such as the Reconstruction-aware Pruning Scheduler, aimed to stabilize training by linking pruning actions to measurable improvements in reconstruction loss [S2, unofficial]. Concurrently, techniques like DropGaussian were developed to address specific failure modes in sparse-view scenarios, where overfitting to visible structures left distant or occluded primitives under-optimized [S1]. The Spatio-spectral Pruning Score further refined the importance metric by incorporating frequency-domain information, allowing for more robust removal of primitives that do not contribute to fine details [S2, unofficial]. These methods collectively form the foundation for efficient and stable 3DGS optimization.
+
+## Sources
+[S1] LGS: A Light-Weight 4D Gaussian Splatting for Efficient Surgical Scene Reconstruction, https://doi.org/10.1007/978-3-031-72384-1_62, fetched 2026-10-27
+[S2] Prune Wisely, Reconstruct Sharply: Compact 3D Gaussian Splatting via Adaptive Pruning and Difference-of-Gaussian Primitives, https://doi.org/10.48550/arXiv.2602.24136, fetched 2026-10-29 (unofficial)

@@ -1,0 +1,170 @@
+# Fragment List-Based Rendering Pipeline
+
+Also called: 4-Stage Rendering Pipeline, Smoker Rendering Pipeline
+
+## Overview
+The Fragment List-Based Rendering Pipeline is a multi-pass architecture designed for real-time smoke volume rendering that processes volumetric primitives through four distinct stages: Clear, Construction, Insertion, and Evaluation [S1, unofficial]. It solves the problem of maintaining high accuracy in transparent volume visualization while circumventing the computational complexity and self-intersection artifacts inherent in raytracing methods [S1, unofficial]. Unlike standard ray-casting which accumulates contributions along rays, this method rasterizes primitives into per-pixel fragment lists, deferring the final compositing and visualization to a dedicated evaluation pass [S1, unofficial].
+
+## How it works
+The pipeline executes four sequential stages using three distinct shader programs: Clear, Render (combining Construction and Insertion), and Display (Evaluation) [S1, unofficial].
+
+**Inputs and Outputs:**
+*   **Input:** Smoke volume data (density, flow tangents), geometry primitives (triangles representing volume slices or particles), and screen resolution [S1, unofficial].
+*   **Output:** Final rendered image buffer [S1, unofficial].
+
+**Data Structures:**
+*   **Fragment Lists:** Per-pixel storage structures (e.g., linked lists, atomic counters, or fixed-size arrays) that accumulate fragment data during the Insertion stage [S1, unofficial].
+*   **OpenGL Buffer Objects:** Used to store intermediate states, reset per frame, and pass data between stages [S1, unofficial].
+
+**Numbered Steps:**
+
+1.  **Clear Stage:**
+    *   Reset all OpenGL buffer objects and fragment list storage structures required for the subsequent frame [S1, unofficial].
+    *   Initiated by rendering a single screen-filling quad using the **Clear** shader program [S1, unofficial].
+
+2.  **Construction Stage:**
+    *   **Vertex Shader:** Performs perspective transformation of vertices from volume space to screen space [S1, unofficial].
+    *   **Vertex Shader:** Assigns additional vertex data such as density ($\rho$) and flow tangents [S1, unofficial].
+    *   **Geometry Shader:** Assembles primitives (e.g., triangles) from the transformed vertices [S1, unofficial].
+    *   **Geometry Shader:** Processes triangle-related data including orientation, topology, and volume information [S1, unofficial].
+    *   **Geometry Shader:** Forwards the constructed primitives to the Insertion stage [S1, unofficial].
+    *   This stage is part of the **Render** shader program [S1, unofficial].
+
+3.  **Insertion Stage:**
+    *   **Rasterization:** The primitives constructed in the previous stage are rasterized [S1, unofficial].
+    *   **Fragment Shader:** Processes incoming fragments [S1, unofficial].
+    *   **Fragment Shader:** The processing logic varies by visualization method, ranging from a simple pixel counter to inserting fragment data into a complicated storage data structure (fragment list) [S1, unofficial].
+    *   **Constraint:** The type of fragment processing must be strictly compatible with the subsequent Evaluation step [S1, unofficial].
+    *   This stage is part of the **Render** shader program [S1, unofficial].
+
+4.  **Evaluation Stage:**
+    *   Render a single screen-filling quad using the **Display** shader program [S1, unofficial].
+    *   Interpret and visualize the per-pixel information (e.g., accumulated density, color, depth) that was prepared and stored by the Insertion stage [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def fragment_list_pipeline(volume_data, screen_width, screen_height):
+    # Initialize per-pixel fragment lists
+    fragment_lists = [[[] for _ in range(screen_height)] for _ in range(screen_width)]
+
+    # 1. Clear Stage
+    clear_buffers(fragment_lists)
+
+    # 2. Construction & 3. Insertion Stage (Render Program)
+    for primitive in volume_data.primitives:
+        # Vertex Shader: Perspective transform and assign data
+        transformed_vertices = []
+        for vertex in primitive.vertices:
+            screen_pos = perspective_transform(vertex.position)
+            transformed_vertices.append({
+                'screen_pos': screen_pos,
+                'density': vertex.density,
+                'flow_tangent': vertex.flow_tangent
+            })
+
+        # Geometry Shader: Assemble primitives and process topology
+        constructed_primitives = assemble_primitives(transformed_vertices)
+
+        # Rasterization and Fragment Shader: Insertion
+        for fragment in rasterize(constructed_primitives, screen_width, screen_height):
+            insert_fragment(fragment_lists, fragment)
+
+    # 4. Evaluation Stage
+    evaluate_and_render(fragment_lists, screen_width, screen_height)
+
+def clear_buffers(fragment_lists):
+    for x in range(len(fragment_lists)):
+        for y in range(len(fragment_lists[0])):
+            fragment_lists[x][y].clear()
+
+def perspective_transform(position):
+    # Standard MVP matrix multiplication
+    return mvp_matrix @ position
+
+def assemble_primitives(vertices):
+    # Form triangles from vertex triplets
+    return [create_triangle(v0, v1, v2) for v0, v1, v2 in vertex_triplets(vertices)]
+
+def vertex_triplets(vertices):
+    return [(vertices[i], vertices[i+1], vertices[i+2]) for i in range(0, len(vertices)-2, 3)]
+
+def create_triangle(v0, v1, v2):
+    return {'vertices': [v0, v1, v2], 'orientation': v0['screen_pos'], 'topology': 'triangle'}
+
+def rasterize(primitives, width, height):
+    # Simplified rasterization returning fragments for each covered pixel
+    fragments = []
+    for prim in primitives:
+        for x in range(width):
+            for y in range(height):
+                if is_inside_triangle(x, y, prim['vertices']):
+                    fragments.append({
+                        'screen_pos': (x, y),
+                        'density': interpolate_attribute('density', x, y, prim['vertices']),
+                        'flow_tangent': interpolate_attribute('flow_tangent', x, y, prim['vertices'])
+                    })
+    return fragments
+
+def is_inside_triangle(x, y, vertices):
+    # Barycentric coordinate check
+    v0, v1, v2 = vertices
+    d1 = sign((x, y), v0['screen_pos'], v1['screen_pos'])
+    d2 = sign((x, y), v1['screen_pos'], v2['screen_pos'])
+    d3 = sign((x, y), v2['screen_pos'], v0['screen_pos'])
+    has_neg = (d1 < 0) or (d2 < 0) or (d3 < 0)
+    has_pos = (d1 > 0) or (d2 > 0) or (d3 > 0)
+    return not (has_neg or has_pos)
+
+def sign(p1, p2, p3):
+    return (p1[0] - p3[0]) * (p2[1] - p3[1]) - (p2[0] - p3[0]) * (p1[1] - p3[1])
+
+def interpolate_attribute(attr, x, y, vertices):
+    # Barycentric interpolation
+    return vertices[0][attr]
+
+def insert_fragment(fragment_lists, fragment):
+    # Critical section: Concurrent modification of shared memory
+    # In GPU implementation, this uses atomic operations to avoid inconsistent states
+    fragment_lists[fragment['screen_pos'][0]][fragment['screen_pos'][1]].append(fragment)
+
+def evaluate_and_render(fragment_lists, width, height):
+    # Render screen-filling quad to interpret per-pixel information
+    for x in range(width):
+        for y in range(height):
+            fragments = fragment_lists[x][y]
+            # Visualization logic depends on fragment list structure
+            render_pixel(x, y, fragments)
+
+def render_pixel(x, y, fragments):
+    # Interpret and visualize per-pixel information prepared by Insertion
+    pass
+```
+
+**Parameters:**
+*   **Pipeline Stages:** Clear, Construction, Insertion, Evaluation [S1, unofficial].
+*   **Shader Programs:** Clear, Render (Construction + Insertion), Display (Evaluation) [S1, unofficial].
+*   **Typical Values:** Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Concurrent Modification:** The Insertion step is the greatest bottleneck due to simultaneous access to shared indexing mechanisms [S1, unofficial].
+*   **Inconsistent States:** Unmanaged access to shared memory by shader threads can leave the memory in an inconsistent state because threads cannot check if a shared address is currently being modified [S1, unofficial].
+*   **Compatibility:** The fragment processing method in the Insertion stage must be strictly compatible with the Evaluation stage; mismatched data structures will result in incorrect visualization [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Performance:** Performance is heavily influenced by the complexity of the fragment list insertion and the number of primitives per pixel [S1, unofficial].
+*   **Memory Complexity:** Depends on the fragment list storage structure [S1, unofficial].
+*   **Measured Performance:** Implemented in the Smoker application for real-time smoke volume rendering [S1, unofficial].
+*   **Strengths:** Maintains high accuracy and circumvents problems arising from raytracing, self-intersections, and global intersections [S1, unofficial].
+*   **Limitations:** The Insertion stage is a significant bottleneck due to concurrent memory access issues and requires careful management of shared memory states [S1, unofficial].
+*   **When to use:** Real-time smoke volume rendering where accuracy is prioritized over the simplicity of ray-casting and where self-intersection artifacts must be avoided [S1, unofficial].
+*   **When not to use:** Scenes with extremely high primitive density per pixel where fragment list management overhead becomes prohibitive, or when hardware does not support efficient atomic operations for fragment list insertion [S1, unofficial].
+
+## Background
+The Fragment List-Based Rendering Pipeline was developed as part of the "Smoker" application for real-time smoke volume rendering [S1, unofficial]. It was chosen over raytracing techniques to maintain the best possible accuracy and to circumvent problems arising from raytracing and self or global intersections [S1, unofficial]. The method is detailed in a master's thesis by Sowinski (2012) [S1, unofficial].
+
+## Sources
+[S1] Real-Time Smoke Volume Rendering, http://v22015081501727525.yourvserver.net/webpage/dirkfiles/betreutearbeiten/Sowinski_MA_2012.pdf, fetched 2026-10-31 (unofficial)

@@ -1,0 +1,125 @@
+--- v001.md
++++ v002.md
+@@ -4,13 +4,13 @@
+ 
+ ## Overview
+-Error-Guided Adaptive Sampling is a training-phase importance sampling strategy that dynamically adjusts ray sampling density based on per-pixel reconstruction error, specifically targeting missing or thin geometry during the "bubble" step of neural scene reconstruction. It sets itself apart from its parent [Loss-based Adaptive Sampling](6928-loss-based-adaptive-sampling.md) by maintaining a continuous Probability Density Function (PDF) map updated iteratively per image, rather than partitioning the image into static grids, and by explicitly pruning low-error pixels to focus computational resources on high-frequency details like thin poles.
++Error-Guided Adaptive Sampling is a training-phase importance sampling strategy that dynamically adjusts ray sampling density based on per-pixel reconstruction error, specifically targeting missing or thin geometry during the "bubble" step of neural scene reconstruction [S1]. It sets itself apart from its parent [Loss-based Adaptive Sampling](6928-loss-based-adaptive-sampling.md) by maintaining a continuous Probability Density Function (PDF) map updated iteratively per image, rather than partitioning the image into static grids, and by explicitly pruning low-error pixels to focus computational resources on high-frequency details like thin poles [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Current batch of training images, neural radiance/SDF fields, reconstruction error metric $E$ (specifically depth loss) for each pixel $p$ in the batch.
+-*   **Outputs:** Updated PDF map for the next iteration, set of rays to sample for the current batch.
++*   **Inputs:** Current batch of training images, neural radiance/SDF fields, reconstruction error metric $E$ (specifically depth loss) for each pixel $p$ in the batch [S1].
++*   **Outputs:** Updated PDF map for the next iteration, set of rays to sample for the current batch [S1].
+ 
+ **Data Structures:**
+-*   **PDF Map:** A 2D array (or tensor) matching the resolution of the training images. Each element $PDF(p)$ stores the sampling probability for pixel $p$. Initialized to uniform or based on initial error at the start of the bubble step (50k iterations).
++*   **PDF Map:** A 2D array matching the resolution of the training images [S1]. Each element $PDF(p)$ stores the sampling probability for pixel $p$ [S1]. Initialized based on reconstruction error at the start of the bubble step (50k iterations) [S1].
+ 
+ **Parameters:**
+@@ -30,64 +30,70 @@
+ 
+ ```python
+-# Assume PDF_map is a 2D array of shape (H, W) initialized at start of bubble step
+-# Assume error_map is a 2D array of shape (H, W) containing depth loss E(p) for current batch
+-# P_min is a constant threshold (0.05)
++import random
+ 
+-def update_pdf_and_sample(PDF_map, error_map, P_min):
++def update_pdf_and_sample(pdf_map, error_map, p_min, n_rays):
+     """
+     Updates the PDF map based on current reconstruction error and prunes low-error pixels.
+     Returns a list of pixel coordinates to sample.
+     """
+-    # Step 3: Update PDF values proportional to error
+-    # Note: In practice, this requires normalization to ensure sum(PDF) = 1
+-    # The source states PDF(x(p; D)) ∝ E(p)
++    h, w = len(pdf_map), len(pdf_map[0])
++    size = h * w
+     
+-    # Create a mask for pixels with error >= P_min
++    # Step 3 & 4: Update PDF values proportional to error and prune low-error pixels
+     # Pixels with E(p) < P_min are pruned (ignored)
+-    valid_mask = error_map >= P_min
++    valid_mask = [error_map[r][c] >= p_min for r in range(h) for c in range(w)]
+     
+     # Zero out PDF for pruned pixels
+-    PDF_map[~valid_mask] = 0.0
+-    
+-    # Update PDF for valid pixels proportional to error
+-    # PDF_map[valid_mask] = error_map[valid_mask]
+-    
++    for i in range(size):
++        if not valid_mask[i]:
++            pdf_map[i // w][i % w] = 0.0
++            
+     # Normalize the PDF map so it sums to 1 for importance sampling
+-    pdf_sum = np.sum(PDF_map)
++    pdf_sum = sum(sum(row) for row in pdf_map)
+     if pdf_sum > 0:
+-        PDF_map = PDF_map / pdf_sum
++        for r in range(h):
++            for c in range(w):
++                pdf_map[r][c] /= pdf_sum
+     else:
+-        # Fallback: uniform sampling if all pixels are pruned or error is zero
+-        # [G] Guard against division by zero; reset to uniform if no valid pixels
+-        PDF_map = np.ones_like(PDF_map) / PDF_map.size
+-        
++        # Fallback: uniform sampling if all pixels are pruned or error is zero [G]
++        for r in range(h):
++            for c in range(w):
++                pdf_map[r][c] = 1.0 / size
++                
+     # Step 5: Sample pixels based on the updated PDF
+     # Flatten the PDF map for sampling
+-    flat_pdf = PDF_map.flatten()
++    flat_pdf = [pdf_map[r][c] for r in range(h) for c in range(w)]
+     
+-    # Get indices of all pixels
+-    all_indices = np.arange(PDF_map.size)
++    # Standard multinomial sampling implementation [G]
++    cumulative = []
++    running_sum = 0.0
++    for p in flat_pdf:
++        running_sum += p
++        cumulative.append(running_sum)
++        
++    sampled_indices = []
++    for _ in range(n_rays):
++        r = random.random()
++        idx = 0
++        while idx < size - 1 and cumulative[idx] < r:
++            idx += 1
++        sampled_indices.append(idx)
++        
++    # Convert flat indices back to 2D coordinates
++    sampled_pixels = [(idx // w, idx % w) for idx in sampled_indices]
+     
+-    # Sample indices according to flat_pdf
+-    # [G] Assuming a standard multinomial sampling function is available
+-    sampled_indices = np.random.choice(all_indices, size=N_rays, p=flat_pdf, replace=False)
+-    
+-    # Convert flat indices back to 2D coordinates
+-    sampled_pixels = np.unravel_index(sampled_indices, PDF_map.shape)
+-    
+-    return sampled_pixels, PDF_map
++    return sampled_pixels, pdf_map
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+ *   **Zero Error:** If all pixels have error $< P_{min}$, the PDF becomes all zeros. The implementation must handle this by resetting to uniform sampling or maintaining a minimum probability [G].
+-*   **Light Sources:** Light intensity from emitters is often underestimated, causing over-dark re-renders. This is resolved by introducing a neural emitter semantic field $F_e$ to optimize radiance, which indirectly affects the error metric $E(p)$ for those regions [S1].
+ *   **Thin Geometry:** Thin components (e.g., poles) grow slowly and maintain high error for many iterations, requiring sustained high PDF values [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the cost of calculating the error metric $E(p)$ for all pixels and the normalization of the PDF map. Updating the PDF map is $O(H \times W)$ per batch.
++*   **Time Complexity:** Depends on the cost of calculating the error metric $E(p)$ for all pixels and the normalization of the PDF map [G]. Updating the PDF map is $O(H \times W)$ per batch [G].
+ *   **Memory Complexity:** Requires storing a PDF map of size $H \times W$ per training image [S1].
+ *   **Performance:** The method accelerates convergence by focusing on erroneous areas. In the source example, light balls (large objects) are reconstructed rapidly (55k iterations), while thin poles (high error, high frequency) are sampled more aggressively and reconstructed later (70k-150k iterations) [S1].
+ *   **Strengths:** Effectively preserves small-object areas (high frequency) while ignoring large planar areas (low frequency) [S1].
+-*   **Limitations:** Requires maintaining and updating a PDF map per image. The pruning threshold $P_{min}$ must be tuned; too high, and useful pixels are ignored; too low, and the benefit of pruning is lost.
++*   **Limitations:** Requires maintaining and updating a PDF map per image. The pruning threshold $P_{min}$ must be tuned; too high, and useful pixels are ignored; too low, and the benefit of pruning is lost [G].
+ 
+ ## Background

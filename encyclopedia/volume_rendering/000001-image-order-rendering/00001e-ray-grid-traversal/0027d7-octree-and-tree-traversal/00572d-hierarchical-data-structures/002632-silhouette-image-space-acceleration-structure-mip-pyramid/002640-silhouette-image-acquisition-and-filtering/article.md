@@ -1,0 +1,126 @@
+# Silhouette Image Acquisition and Filtering
+
+Also called: Chroma-keyed silhouette generation, Gaussian-filtered silhouette images
+
+## Overview
+This method acquires and preprocesses silhouette images from raw camera data to create smooth, calibrated binary masks used for visual hull approximation [S1]. It solves the problem of converting raw, distorted Bayer-pattern sensor data into high-quality silhouette inputs for hierarchical acceleration structures [S1]. It is distinguished from sibling methods by its unified compute kernel approach that simultaneously handles lens distortion, demosaicing, and chroma-keying, followed by separable Gaussian filtering to control surface smoothness [S1].
+
+## How it works
+**Inputs:** Raw Bayer pattern image data from a camera; camera parameters for distortion correction; chroma key color range [S1].
+**Outputs:** Calibrated silhouette images (2D arrays of 0s and 1s); filtered silhouette images [S1].
+
+**Data Structures:**
+*   **Input Texture:** 2D texture array storing raw Bayer data (8 bits per pixel) [S1].
+*   **Output Texture:** 2D texture array storing silhouette values (float or integer, 0 or 1) [S1].
+*   **Filter Kernel:** Separable Gaussian kernel with unit integral [S1].
+
+**Steps:**
+1.  **Upload Data:** Upload raw Bayer pattern data to the GPU as a 2D texture array, reducing camera bus and CPU/GPU bandwidth usage compared to higher-bit formats [S1].
+2.  **Compute Kernel Launch:** Launch a single GPU compute kernel where each thread or thread block processes a portion of the image [S1].
+3.  **Distortion Correction:** Remove radial lens distortion from the pixel coordinates to produce calibrated silhouette images [S1].
+4.  **Demosaicing:** Convert the Bayer pattern data to full RGB or luminance values [S1].
+5.  **Chroma Keying:** Segment foreground and background pixels [S1]. Foreground pixels are assigned a value of $0$, and background pixels are assigned a value of $1$ [S1]. This creates the initial binary silhouette image $\mathcal{I}_i$ [S1].
+6.  **Filtering:** Apply a separable Gaussian filter to the binary silhouette images [S1]. The filter has a unit integral, and the kernel width is a parameter [S1]. Increasing the width increases blur, resulting in a smoother visual hull surface $S(\mathbf{p})$ [S1]. Implementation uses a thread block per row/column strategy to fit the entire image row or column in shared memory, leveraging separability for performance [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def correct_radial_distortion(x, y, intrinsics):
+    # Standard radial distortion correction using camera intrinsics
+    cx, cy, fx, fy = intrinsics['cx'], intrinsics['cy'], intrinsics['fx'], intrinsics['fy']
+    k1, k2 = intrinsics['k1'], intrinsics['k2']
+    u_norm = (x - cx) / fx
+    v_norm = (y - cy) / fy
+    r2 = u_norm**2 + v_norm**2
+    scale = 1.0 + k1 * r2 + k2 * r2**2
+    return u_norm * scale * fx + cx, v_norm * scale * fy + cy
+
+def demosaic_bayer(u, v, bayer_data):
+    # Bilinear interpolation of Bayer pattern to RGB
+    x, y = int(u), int(v)
+    # Assuming standard RGGB pattern
+    r = (bayer_data[y, x] + bayer_data[y+1, x+1]) / 2.0
+    g = (bayer_data[y, x+1] + bayer_data[y+1, x]) / 2.0
+    b = bayer_data[y+1, x+1]
+    return r, g, b
+
+def is_in_chroma_range(r, g, b, chroma_range):
+    # Check if color falls within the specified foreground chroma range
+    return (chroma_range['r_min'] <= r <= chroma_range['r_max'] and
+            chroma_range['g_min'] <= g <= chroma_range['g_max'] and
+            chroma_range['b_min'] <= b <= chroma_range['b_max'])
+
+def create_gaussian_1d(width):
+    # Create 1D Gaussian kernel with unit integral
+    sigma = width / 6.0
+    kernel = []
+    for i in range(-int(width/2), int(width/2) + 1):
+        val = math.exp(-(i**2) / (2 * sigma**2))
+        kernel.append(val)
+    norm = sum(kernel)
+    return [v / norm for v in kernel]
+
+def apply_1d_filter(image, kernel, axis='horizontal'):
+    # Apply 1D separable filter using shared memory per row/column
+    height, width = len(image), len(image[0])
+    output = [[0.0] * width for _ in range(height)]
+    for i in range(height):
+        row = image[i]
+        # Simulate shared memory load with padding for boundary handling
+        shared = [0.0] * (width + len(kernel))
+        for j in range(width):
+            shared[j + len(kernel)//2] = row[j]
+        for j in range(width):
+            acc = 0.0
+            for k in range(len(kernel)):
+                acc += shared[j + k] * kernel[k]
+            output[i][j] = acc
+    if axis == 'vertical':
+        return [[output[j][i] for j in range(height)] for i in range(width)]
+    return output
+
+def process_silhouette_pipeline(bayer_data, intrinsics, chroma_range, kernel_width):
+    # Steps 1-5: Acquire and chroma-key
+    silhouette = [[0.0] * len(bayer_data[0]) for _ in range(len(bayer_data))]
+    for y in range(len(bayer_data)):
+        for x in range(len(bayer_data[0])):
+            u, v = correct_radial_distortion(x, y, intrinsics)
+            r, g, b = demosaic_bayer(u, v, bayer_data)
+            silhouette[y][x] = 0.0 if is_in_chroma_range(r, g, b, chroma_range) else 1.0
+    # Step 6: Filter
+    temp = apply_1d_filter(silhouette, create_gaussian_1d(kernel_width), 'horizontal')
+    filtered = apply_1d_filter(temp, create_gaussian_1d(kernel_width), 'vertical')
+    return filtered
+```
+
+**Parameters:**
+*   **Kernel Width:** Controls the amount of blur. Larger values produce smoother surfaces $S(\mathbf{p})$ [S1]. Not given in the sources.
+*   **Chroma Range:** The color threshold for segmentation. Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Using 8-bit Bayer data reduces bandwidth but may limit color precision for chroma keying [G].
+*   **Boundaries:** Shared memory usage requires careful handling of image boundaries during the separable filter passes [G].
+
+## Subtopics
+
+### Slab Silhouette Maps with Early Depth Test
+A technique that exploits slab silhouette maps and an early depth test to skip empty spaces along the direction normal to the texture slice [S2]. It is used to optimize volume rendering by avoiding computation in non-transparent regions [S2]. It is distinguished by its specific application of early depth testing in conjunction with slab-based silhouette data for empty space skipping [S2].
+
+## Operating characteristics
+*   **Time Complexity:** The compute kernel runs in $O(N)$ time for $N$ pixels, with the filtering step also being $O(N)$ due to separability [S1].
+*   **Memory Complexity:** Requires storage for the input Bayer texture array and output silhouette textures [S1]. Shared memory is used for filter rows/columns to increase convolution performance [S1].
+*   **Performance:** The single compute kernel approach and shared memory usage for filtering provide high performance on GPUs [S1].
+*   **Strengths:** Reduces data bandwidth; produces smooth surfaces suitable for visual hull approximation; efficient GPU implementation [S1].
+*   **Limitations:** Requires camera calibration for distortion correction [S1].
+*   **When to use:** When real-time or high-resolution silhouette acquisition from raw camera data is needed for visual hull-based volume rendering [S1].
+*   **When not to use:** When high-precision color segmentation is required beyond chroma keying capabilities, or when camera calibration is unavailable [G].
+
+## Background
+This method is described in the context of real-time high-resolution sparse voxelization and image-based modeling [S1]. It was introduced by the authors of the source paper to efficiently generate silhouette inputs for visual hull oracle kernels [S1]. The use of chroma keying and Gaussian filtering for silhouette smoothing is a standard technique in image-based modeling to create smooth visual hull surfaces [S1]. The concept of using slab silhouette maps for empty space skipping was explored by Keleş et al. [S2].
+
+## Sources
+[S1] Real-time high-resolution sparse voxelization with application to image-based modeling, https://doi.org/10.1145/2492045.2492053, fetched 2026-11-01
+[S2] Volume Visualization: A Technical Overview with a Focus on ..., https://pmc.ncbi.nlm.nih.gov/articles/PMC3138940/, fetched 2026-10-27

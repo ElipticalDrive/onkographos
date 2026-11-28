@@ -1,0 +1,140 @@
+# Curvature-Based Feature Contouring
+
+Also called: Curvature Convolution Volume Rendering, Transfer Functions Based on Surface Curvature
+
+## Overview
+Curvature-Based Feature Contouring is a non-photorealistic volume rendering technique that renders feature contours with roughly constant image-space thickness, clarifying the shape and position of individual structures such as bones [S2]. It sets itself apart from standard silhouette rendering by applying a curvature correction to maintain fixed width in image space, distinguishing between ridge and valley features based on curvature magnitude [S1]. It builds on [Curvature-Controlled Style Contours](5350-curvature-controlled-style-contours.md) by utilizing dynamic convolution-based field reconstruction within the transfer function [S1].
+
+## How it works
+**Inputs and Outputs:**
+- Input: Volumetric scalar field data, view direction vector $\mathbf{v}$, surface normal vector $\mathbf{n}$ (derived from gradient), and curvature measures.
+- Output: Rendered image with feature contours of constant image-space thickness.
+
+**Data Structures:**
+- **Transfer Function:** Implemented as lookup tables. Specifically, two two-dimensional lookup tables (for opacity and silhouettes) and one one-dimensional lookup table (for depth cueing) [S2].
+- **Curvature Field:** A field reconstructed via dynamic convolution to provide curvature measures for the transfer function [S1].
+
+**Steps:**
+1. **Field Reconstruction:** Perform a dynamic convolution-based field reconstruction to compute curvature measures from the volumetric data [S1].
+2. **Normal and View Calculation:** For each fragment, compute the surface normal $\mathbf{n}$ and retrieve the view direction $\mathbf{v}$ [S1].
+3. **Silhouette Detection:** Determine silhouette contribution using the dot product $\mathbf{n} \cdot \mathbf{v}$, similar to Gooch's environment map approach [S1].
+4. **Curvature Correction:** Apply a curvature correction to the silhouette rendering to ensure fixed width in image space [S1]. This involves using the magnitude of curvature to adjust the rendering parameters [S1].
+5. **Feature Classification:** Use curvature magnitude to distinguish between ridge and valley features [S1].
+6. **Transfer Function Evaluation:** Evaluate the modified transfer function. This function incorporates the curvature-based silhouette contribution and opacity [S2]. The transfer function is implemented as two 2D lookup tables (opacity and silhouettes) and one 1D lookup table (depth cueing) [S2].
+7. **Depth Cueing:** Apply depth cueing to clarify the relationship between foreground and background objects [S2].
+8. **Rendering:** Render the final image on fragment shading hardware [S1].
+
+**Formulas:**
+- Silhouette factor: $\mathbf{n} \cdot \mathbf{v}$ [S1].
+- Curvature magnitude: Used to distinguish ridge and valley features [S1]. Exact formula for curvature magnitude is not provided in the sources, but it is derived from the dynamic convolution-based field reconstruction [S1].
+
+**Parameters:**
+- Lookup table dimensions: Two 2D tables and one 1D table [S2]. Specific dimensions are not given in the sources.
+- Curvature threshold: Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+- Precision in curvature calculation may affect the distinction between ridge and valley features [S1].
+- Boundary conditions for the dynamic convolution are not specified [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Pseudocode for Curvature-Based Feature Contouring
+# Note: Specific implementation details of dynamic convolution and lookup table evaluation are not provided in sources.
+
+def curvature_based_feature_contouring(volume_data, view_direction):
+    # Step 1: Field Reconstruction
+    # Perform dynamic convolution-based field reconstruction to get curvature measures
+    curvature_field = dynamic_convolution_reconstruction(volume_data)
+    
+    # Step 2: Initialize output image
+    output_image = initialize_image(volume_data.resolution)
+    
+    # Step 3: Iterate over fragments
+    for fragment in volume_data.fragments:
+        # Compute surface normal
+        normal = compute_normal(fragment.position, volume_data)
+        
+        # Step 4: Silhouette Detection
+        # Similar to Gooch's environment map approach
+        silhouette_factor = dot(normal, view_direction)
+        
+        # Step 5: Curvature Correction
+        # Apply curvature correction for fixed width in image space
+        curvature_magnitude = compute_curvature_magnitude(curvature_field, fragment.position)
+        corrected_silhouette = apply_curvature_correction(silhouette_factor, curvature_magnitude)
+        
+        # Step 6: Feature Classification
+        # Distinguish between ridge and valley features
+        feature_type = classify_feature(curvature_magnitude)
+        
+        # Step 7: Transfer Function Evaluation
+        # Evaluate modified transfer function
+        # Implemented as two 2D lookup tables (opacity, silhouettes) and one 1D lookup table (depth cueing)
+        opacity = lookup_opacity(fragment.position, volume_data)
+        silhouette_value = lookup_silhouette(corrected_silhouette, feature_type)
+        depth_cue = lookup_depth_cue(fragment.depth)
+        
+        # Combine contributions
+        final_color = combine(opacity, silhouette_value, depth_cue)
+        
+        # Step 8: Render
+        output_image[fragment.position] = final_color
+        
+    return output_image
+
+def dynamic_convolution_reconstruction(volume_data):
+    # Not given in the sources. Placeholder for dynamic convolution-based field reconstruction.
+    pass
+
+def compute_normal(position, volume_data):
+    # Not given in the sources. Placeholder for normal computation.
+    pass
+
+def compute_curvature_magnitude(curvature_field, position):
+    # Not given in the sources. Placeholder for curvature magnitude computation.
+    pass
+
+def apply_curvature_correction(silhouette_factor, curvature_magnitude):
+    # Not given in the sources. Placeholder for curvature correction.
+    pass
+
+def classify_feature(curvature_magnitude):
+    # Not given in the sources. Placeholder for feature classification.
+    pass
+
+def lookup_opacity(position, volume_data):
+    # Not given in the sources. Placeholder for opacity lookup.
+    pass
+
+def lookup_silhouette(silhouette_value, feature_type):
+    # Not given in the sources. Placeholder for silhouette lookup.
+    pass
+
+def lookup_depth_cue(depth):
+    # Not given in the sources. Placeholder for depth cueing lookup.
+    pass
+
+def combine(opacity, silhouette_value, depth_cue):
+    # Not given in the sources. Placeholder for combining contributions.
+    pass
+```
+
+## Operating characteristics
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Not given in the sources.
+- **Measured Performance:** Not given in the sources.
+- **Strengths:** Renders feature contours with roughly constant image-space thickness, clarifying the shape and position of individual bones [S2]. Distinguishes between ridge and valley features [S1].
+- **Limitations:** Relies on dynamic convolution-based field reconstruction, which may be computationally intensive [S1]. Specific performance metrics are not provided.
+- **When to use:** When clarifying the shape and position of individual structures (e.g., bones) in volumetric data is required [S2].
+- **When not to use:** When constant image-space thickness is not desired or when computational resources are limited [S1].
+
+## Background
+- **Origin:** Proposed by Kindlmann et al. in [KWTM03] [S1].
+- **History:** Curvature in volume rendering was previously used by Interrante [Int97] to illustrate surface shape using evenly-spaced streamlines directed according to principal curvature directions. Kindlmann et al. extended this by using a modified transfer function with dynamic convolution-based field reconstruction [S1].
+- **Usage:** Used in scientific visualization, particularly in small animal imaging to visualize bone structures in embryos [S2].
+
+## Sources
+[S1] State of the Art Non-Photorealistic Rendering (NPR) Techniques, https://doi.org/10.2312/localchapterevents/tpcg/tpcg06/089-098, fetched 2026-10-26
+[S2] Scientific Visualization in Small Animal Imaging, https://sci.utah.edu/scientific-visualization-in-small-animal-imaging/, fetched 2026-10-27

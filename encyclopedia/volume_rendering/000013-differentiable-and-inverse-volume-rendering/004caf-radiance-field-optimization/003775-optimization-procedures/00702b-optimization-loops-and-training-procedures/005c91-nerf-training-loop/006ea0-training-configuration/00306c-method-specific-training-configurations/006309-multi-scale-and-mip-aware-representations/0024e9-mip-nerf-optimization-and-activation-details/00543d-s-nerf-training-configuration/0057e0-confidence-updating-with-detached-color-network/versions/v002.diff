@@ -1,0 +1,296 @@
+--- v001.md
++++ v002.md
+@@ -1,187 +1,143 @@
+ # Confidence Updating with Detached Color Network
+ 
+-Also called: Cn-based confidence scoring, PSNR-based confidence update
++Also called: Cn-based confidence scoring, Color Network w/o View Direction, Detached Color Network for Confidence, Isolated Color Network, PSNR-based confidence update
+ 
+ ## Overview
+-This method addresses the problem of pose outlier contamination in neural surface reconstruction, where shape-radiance ambiguity causes outlier poses to exhibit higher rendering quality (PSNR) than inlier poses, leading to incorrect ray sampling [S1]. It distinguishes itself by employing a detached color network ($C_n$) that excludes viewing direction inputs to mitigate this ambiguity, using its output to dynamically update confidence scores for pose weighting during training [S1].
++This method distinguishes inlier and outlier camera poses by using a detached color network that omits the viewing direction as input, minimizing the impact of shape-radiance ambiguities that cause high PSNR for wrong poses [S1]. It solves the issue where outliers might have higher PSNR than inliers due to shape-radiance ambiguity, which traditional rendering metrics fail to detect [S1]. Unlike previous works using rendering metrics directly, this approach uses a detached network to provide reliable confidence scores for pose filtering [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** A set of training images $V$, initial confidence scores $CS(v_i)$ derived from keypoint matches, a detached color network $C_n$, and the primary color network $C_o$.
+-*   **Outputs:** Updated confidence scores $CS(v_i)$ used to guide ray sampling probabilities, and filtered outlier poses identified by the discrepancy between $C_o$ and $C_n$ outputs.
++*   **Inputs:** A set of training images $V$, initial camera poses, a scene graph, and a primary NeRF model (including geometry SDF $f$ and traditional color network $C_o$).
++*   **Outputs:** Updated confidence scores $CS(v_i)$ for each view $v_i \in V$, used to guide ray sampling.
+ 
+ **Data Structures:**
+-*   **Confidence Score ($CS(v_i)$):** A scalar value for each view $v_i \in V$. Initialized based on keypoint matching quality [S1].
+-*   **PSNR ($PSNR(v_i)$):** A scalar value representing the Peak Signal-to-Noise Ratio for image $v_i$, estimated from the rendering loss [S1].
+-*   **Threshold ($\tau_1$):** A scalar constant for detecting outliers based on PSNR discrepancy. Default value: 9 [S1].
+-*   **Learning Rate ($\lambda_c$):** A scalar constant for updating confidence scores. Value not given in the sources.
++*   **Confidence Score ($CS(v_i)$):** A scalar value representing the reliability of pose $v_i$. Initialized based on keypoint matches and updated iteratively.
++*   **Detached Color Network ($C_n$):** A shallow Multi-Layer Perceptron (MLP) identical in architecture to the primary color network $C_o$ but without viewing direction input.
++*   **PSNR Estimates:**
++    *   $PSNR_o$: PSNR estimated using the primary color network $C_o$.
++    *   $PSNR_n$: PSNR estimated using the detached color network $C_n$.
+ 
+-**Algorithm Steps:**
++**Parameters:**
++*   $\lambda_c$: Weight for PSNR contribution to confidence update. [G] Typical value not explicitly given in sources; assumed to be a small positive constant (e.g., 1.0 or normalized weight) based on standard additive update rules.
++*   $\tau_1$: Inlier-outlier threshold for PSNR discrepancy between $C_o$ and $C_n$. Set to 9 [S1].
++*   $\lambda$: Weight for regularization term in loss. Set to 0.1 [S1].
+ 
+-1.  **Initialize Confidence:** Compute initial confidence scores $CS(v_i)$ for all views based on the number of keypoint matches. Normalize these scores to form a probability distribution:
++**Numbered Steps:**
++
++1.  **Initialize Confidence Scores:**
++    Calculate initial confidence scores $CS(v_i)$ based on keypoint matches from the scene graph. Let $|M_i|$ be the total number of edges (matches) for view $v_i$. Normalize these scores to form a probability distribution:
++    $$ CS(v_i) = \frac{|M_i|}{\sum_{v \in V} |M_v|} $$
++    (Note: The source describes normalizing based on match counts initially, then updating additively [S1]).
++
++2.  **Construct Detached Color Network ($C_n$):**
++    Create a color network $C_n$ that takes only geometry features (from the SDF network) as input, explicitly excluding the viewing direction vector. Use the same sampling points and geometry features as the original color network $C_o$ [S1].
++
++3.  **Detach Optimization Graph:**
++    Detach all computations involving $C_n$ from the main pose-NeRF optimization graph. This ensures that the loss calculated from $C_n$ does not backpropagate to the SDF network or the primary color network $C_o$, maintaining the performance of the NSR backbone [S1].
++
++4.  **Compute Rendering Losses:**
++    For each training image $i$:
++    *   Render the image using $C_o$ to get $\hat{C}_o$. Compute photometric loss $L_{color}(C_o) = \|\hat{C}_o - C\|_1$ [S1].
++    *   Render the image using $C_n$ to get $\hat{C}_n$. Compute photometric loss $L_{color}(C_n) = \|\hat{C}_n - C\|_1$ [S1].
++    *   Estimate $PSNR_o$ from $L_{color}(C_o)$ and $PSNR_n$ from $L_{color}(C_n)$ [S1].
++
++5.  **Update Confidence Scores:**
++    Update the confidence score for each view $v_i$ using the PSNR estimated by the detached network $C_n$:
++    $$ CS(v_i) = CS(v_i) + \lambda_c \cdot PSNR_n(v_i) $$
++    where $PSNR_n(v_i)$ is the PSNR value for view $v_i$ estimated by $C_n$ [S1].
++
++6.  **Normalize Confidence Scores:**
++    After updating, normalize the confidence scores to form a probability distribution for ray sampling:
+     $$ CS(v_i) = \frac{CS(v_i)}{\sum_{v \in V} CS(v)} $$
+-    This distribution guides the initial ray sampling [S1].
++    This distribution guides the training to sample more rays from poses with higher confidence [S1].
+ 
+-2.  **Train Detached Color Network ($C_n$):**
+-    *   Construct $C_n$ using the same sampling points and geometry features as the original color network $C_o$.
+-    *   Crucially, $C_n$ does **not** take viewing direction as input. This design mitigates shape-radiance ambiguity and prevents overfitting to specific viewpoints [S1].
+-    *   Detach all computations related to $C_n$ from the main computational graph. The loss computed using $C_n$ is backpropagated only to $C_n$ and does not impact the gradients of the primary network $C_o$ or the SDF network [S1].
+-
+-3.  **Estimate PSNR:**
+-    *   Calculate the photometric loss $L_{color}$ for both networks:
+-        $$ L_{color} = \frac{1}{k} \sum_{i=1}^k (\hat{C}_i - C_i)^2 $$
+-        where $\hat{C}_i$ is the rendered color from volume rendering and $C_i$ is the ground truth color [S1].
+-    *   Estimate $PSNR(v_i)$ for each image based on the current rendering loss for efficiency [S1].
+-    *   Record $PSNR_o(v_i)$ derived from the original network $C_o$ [S1].
+-    *   Record $PSNR_n(v_i)$ derived from the detached network $C_n$ [S1].
+-
+-4.  **Update Confidence Scores:**
+-    *   Update the confidence score for each view using the PSNR estimated from the detached network $C_n$:
+-        $$ CS(v_i) = CS(v_i) + \lambda_c \cdot PSNR_n(v_i) $$
+-    *   Re-normalize the confidence scores to form a new probability distribution:
+-        $$ CS(v_i) = \frac{CS(v_i)}{\sum_{v \in V} CS(v)} $$
+-    *   Use this updated distribution to sample rays, prioritizing poses with higher confidence [S1].
+-
+-5.  **Outlier Filtering:**
+-    *   Monitor the discrepancy between $PSNR_o$ and $PSNR_n$.
+-    *   Identify poses as outliers if:
+-        $$ |PSNR_o - PSNR_n| > \tau_1 $$
+-    *   The threshold $\tau_1$ is set to 9 [S1]. Significant discrepancy indicates anomalous data due to shape-radiance ambiguity [S1].
++7.  **Identify Outliers (Optional Filtering):**
++    Monitor the discrepancy between $PSNR_o$ and $PSNR_n$. If $|PSNR_o - PSNR_n| > \tau_1$ (where $\tau_1 = 9$), the pose is identified as an outlier [S1]. This discrepancy indicates shape-radiance ambiguity where the view-dependent network $C_o$ overfits to the wrong pose while the view-independent network $C_n$ fails to render accurately [S1].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def update_confidence_and_detect_outliers(views, initial_cs, lambda_c, tau_1, C_o, C_n, geometry_features, sampling_points, ground_truth_images):
++def initialize_confidence(views, scene_graph):
+     """
+-    Updates confidence scores using a detached color network and detects outliers.
++    Initialize confidence scores based on keypoint matches.
++    views: List of view indices.
++    scene_graph: Graph structure containing match counts.
++    """
++    confidence_scores = {}
++    total_matches = 0
++    for v in views:
++        # |M_v| is the number of matching pairs/edges for view v
++        match_count = scene_graph.get_edge_count(v)
++        confidence_scores[v] = match_count
++        total_matches += match_count
+     
+-    Args:
+-        views: List of view indices v_i.
+-        initial_cs: Initial confidence scores based on keypoint matches.
+-        lambda_c: Learning rate for confidence update.
+-        tau_1: Threshold for outlier detection (default 9).
+-        C_o: Original color network (takes viewing direction).
+-        C_n: Detached color network (does NOT take viewing direction).
+-        geometry_features: Geometry features for sampling points.
+-        sampling_points: 3D sampling points along rays.
+-        ground_truth_images: Ground truth RGB images for views.
++    # Normalize to form initial probability distribution
++    for v in views:
++        confidence_scores[v] /= total_matches
+         
+-    Returns:
+-        normalized_cs: Updated normalized confidence scores.
+-        outliers: Set of view indices identified as outliers.
++    return confidence_scores
++
++def train_detached_color_network(C_n, geometry_features, ground_truth_images, lr=0.001):
+     """
+-    # Step 1: Initialize Confidence
+-    # Normalize initial scores to form probability distribution
+-    sum_cs = sum(initial_cs.values())
+-    cs = {v: initial_cs[v] / sum_cs for v in views}
++    Train the detached color network C_n independently.
++    C_n: MLP taking only geometry features.
++    geometry_features: Features from SDF network at sampled points.
++    ground_truth_images: GT RGB images.
++    """
++    optimizer = torch.optim.Adam(C_n.parameters(), lr=lr)
+     
+-    outliers = set()
+-    
++    for epoch in range(num_epochs):
++        optimizer.zero_grad()
++        rendered_colors = C_n(geometry_features)
++        loss = torch.mean(torch.abs(rendered_colors - ground_truth_images))
++        loss.backward()
++        optimizer.step()
++        
++    return loss
++
++def update_confidence(views, confidence_scores, psnr_n_values, lambda_c=1.0):
++    """
++    Update confidence scores using PSNR from detached network.
++    psnr_n_values: Dict mapping view index to PSNR_n.
++    """
+     for v in views:
+-        # Step 2: Forward pass through networks
+-        # C_o uses viewing direction; C_n does not
+-        # Both use same sampling_points and geometry_features
++        psnr_n = psnr_n_values[v]
++        confidence_scores[v] += lambda_c * psnr_n
+         
+-        # Render color using original network C_o
+-        rendered_color_o = volume_render(C_o, sampling_points, geometry_features, viewing_direction=v)
++    # Normalize
++    total_confidence = sum(confidence_scores.values())
++    for v in views:
++        confidence_scores[v] /= total_conf
+         
+-        # Render color using detached network C_n
+-        # Note: C_n input does not include viewing direction
+-        rendered_color_n = volume_render(C_n, sampling_points, geometry_features, viewing_direction=None)
+-        
+-        # Get ground truth color for view v
+-        gt_color = ground_truth_images[v]
+-        
+-        # Step 3: Calculate Photometric Loss and PSNR
+-        # L_color = mean((rendered - ground_truth)^2)
+-        loss_o = mean_squared_error(rendered_color_o, gt_color)
+-        loss_n = mean_squared_error(rendered_color_n, gt_color)
+-        
+-        # Estimate PSNR from loss (standard conversion or direct metric)
+-        # The source states PSNR is estimated from current image rendering loss
+-        psnr_o = calculate_psnr_from_loss(loss_o)
+-        psnr_n = calculate_psnr_from_loss(loss_n)
+-        
+-        # Step 4: Update Confidence using PSNR from Detached Network (C_n)
+-        # CS(v_i) = CS(v_i) + lambda_c * PSNR(v_i)
+-        cs[v] = cs[v] + lambda_c * psnr_n
+-        
+-        # Step 5: Outlier Detection
+-        # If |PSNR_o - PSNR_n| > tau_1, mark as outlier
+-        if abs(psnr_o - psnr_n) > tau_1:
+-            outliers.add(v)
+-            
+-    # Re-normalize confidence scores
+-    sum_cs = sum(cs.values())
+-    normalized_cs = {v: cs[v] / sum_cs for v in views}
+-    
+-    return normalized_cs, outliers
++    return confidence_scores
+ 
+-def volume_render(network, points, features, viewing_direction):
++def identify_outliers(psnr_o_values, psnr_n_values, threshold=9.0):
+     """
+-    Simulates volume rendering.
+-    If viewing_direction is None, the network ignores it (for C_n).
++    Identify outliers based on discrepancy between C_o and C_n PSNR.
+     """
+-    # Implementation detail: The network predicts color based on points, features, and optionally direction.
+-    # For C_n, the direction argument is ignored or not passed to the MLP.
+-    colors = []
+-    for i, point in enumerate(points):
+-        # Get feature for point
+-        feat = features[i]
+-        
+-        # Predict color
+-        if viewing_direction is not None:
+-            color = network(point, feat, viewing_direction)
+-        else:
+-            color = network(point, feat)
+-        colors.append(color)
+-    
+-    # Aggregate colors using volume rendering equation (e.g., alpha compositing)
+-    # This is a placeholder for the specific volume rendering implementation
+-    rendered_color = aggregate_colors(colors)
+-    return rendered_color
+-
+-def calculate_psnr_from_loss(mse_loss):
+-    """
+-    Converts Mean Squared Error loss to PSNR.
+-    PSNR = 10 * log10(1 / MSE) for normalized pixel values in [0,1].
+-    """
+-    import math
+-    if mse_loss == 0:
+-        return float('inf')
+-    return 10 * math.log10(1.0 / mse_loss)
+-
+-def mean_squared_error(rendered, ground_truth):
+-    return mean((rendered - ground_truth) ** 2)
+-
+-def aggregate_colors(colors):
+-    # Placeholder for actual volume rendering aggregation (e.g., weighted sum)
+-    # In standard volume rendering, this involves opacity and depth weighting.
+-    # The source cites [27, 38] for the volume rendering equation.
+-    return sum(colors) / len(colors) # Simplified placeholder
++    outliers = []
++    for v in psnr_o_values:
++        discrepancy = abs(psnr_o_values[v] - psnr_n_values[v])
++        if discrepancy > threshold:
++            outliers.append(v)
++    return outliers
+ ```
+ 
+-**Parameters:**
+-*   $\tau_1$: Inlier-outlier threshold for PSNR discrepancy. Set to 9 [S1].
+-*   $\lambda_c$: Weight for PSNR contribution to confidence update. Value not given in the sources.
+-*   $\lambda$: Weight for regularization loss. Set to 0.1 [S1].
+-*   $\alpha, \beta$: Other loss weights. Set to 0.2 and 0.001 respectively [S1].
+-*   $N_p$: Particle number. Set to 24 for efficiency [S1].
+-
+ **Edge Cases and Pitfalls:**
+-*   **Shape-Radiance Ambiguity:** Outliers may have higher PSNR than inliers if only the original network $C_o$ is used, leading to incorrect sampling [S1]. The detached network $C_n$ mitigates this by removing viewing direction dependence [S1].
+-*   **Precision:** The threshold $\tau_1 = 9$ is described as an "extremely large performance gap" [S1].
++*   **Shape-Radiance Ambiguity:** Traditional color networks $C_o$ (with view direction) can render high-PSNR images even for wrong poses, leading to incorrect sampling if used for confidence [S1].
++*   **Overfitting:** The detached network $C_n$ must not be coupled with the main optimization to prevent it from learning pose-specific artifacts that defeat its purpose [S1].
++*   **Computational Cost:** While $C_n$ adds overhead, using a shallow MLP minimizes the impact on training time [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The method adds computational overhead by maintaining a second color network $C_n$. However, since $C_n$ is a shallow MLP (similar to existing works [38, 59]), it does not introduce significant computational overhead [S1].
+-*   **Memory Complexity:** Requires storing parameters for the additional detached color network $C_n$ [S1].
+-*   **Performance:** On the SG-NeRF dataset, the method runs for 150k iterations in an average of 13 hours on NVIDIA RTX 3090 GPUs. On the DTU dataset, it runs for 300k iterations in 22 hours [S1].
+-*   **Strengths:** Effectively identifies and filters outliers caused by shape-radiance ambiguity, improving robustness in object-level 3D surface reconstruction from unorganized inward-facing images [S1].
+-*   **Limitations:** Relies on the assumption that the discrepancy between $C_o$ and $C_n$ is a reliable indicator of outliers. The threshold $\tau_1$ is fixed at 9, which may not be optimal for all scenes.
++*   **Time Complexity:** Adds minimal computational overhead because $C_n$ is a shallow MLP, similar to the existing color network [S1]. Training time increases slightly but remains comparable to baseline NeuS/SG-NeRF (e.g., 13 hours for 150k iterations on SG-NeRF, 22 hours for 300k iterations on DTU on RTX 3090) [S1].
++*   **Memory Complexity:** Requires storing parameters for an additional shallow MLP $C_n$. [G] Exact memory footprint not given, but described as not substantially increasing costs.
++*   **Performance:** Effectively differentiates inliers and outliers, leading to higher quality 3D reconstructions and accurate pose rectification [S1].
++*   **Strengths:** Robust against shape-radiance ambiguity; simple rule-based thresholding ($\tau_1=9$) for outlier detection; does not complicate the joint pose-NeRF optimization [S1].
++*   **Limitations:** Relies on the assumption that view-independent rendering quality correlates better with pose correctness than view-dependent rendering; requires careful tuning of $\lambda_c$ and $\tau_1$ [S1].
+ 
+ ## Background
+-*   **Origin:** Proposed in "Robust SG-NeRF: Robust Scene Graph Aided Neural Surface Reconstruction" (2024) [S1].
+-*   **Development:** The method builds upon NeuS [59] and addresses limitations in pose estimation and outlier handling in neural surface reconstruction. It leverages insights from NeRF++ [73] regarding the use of shallow MLPs for color networks as implicit regularization [S1].
+-*   **Usage:** Used for object-level 3D surface reconstruction from unorganized inward-facing images, specifically on datasets like SG-NeRF and DTU [S1].
++*   **Origin:** Introduced in "Robust SG-NeRF: Robust Scene Graph Aided Neural Surface Reconstruction" [S1].
++*   **History:** Addresses limitations in SG-NeRF where heuristic confidence updating based solely on PSNR failed to distinguish inliers from outliers due to shape-radiance ambiguity [S1].
++*   **Usage:** Used in object-level 3D surface reconstruction from unorganized inward-facing images, specifically on datasets like SG-NeRF and DTU [S1].
+ 
+ ## Sources

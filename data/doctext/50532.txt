@@ -1,0 +1,868 @@
+### DualContouring/ADCMeshGenerator.cs
+```
+﻿using System;
+using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+using Drok.DualContouring.Octrees;
+
+namespace Drok.DualContouring
+{
+    /// <summary>
+    /// Holds all relevant code and data to generate a mesh with DC.
+    /// </summary>
+    /// <remarks>
+    /// Needs to be rewritten and better documented.
+    /// </remarks>
+    public static class ADCMeshGenerator
+    {
+
+        #region Data provided by the original DC impl.  Used for the contouring process.
+
+        private readonly static int[,] edgevmap =
+        {
+            {0,4},{1,5},{2,6},{3,7},	// x-axis 
+	        {0,2},{1,3},{4,6},{5,7},	// y-axis
+	        {0,1},{2,3},{4,5},{6,7}		// z-axis
+            };
+
+        private readonly static int[] edgemask = { 5, 3, 6 };
+
+        private readonly static int[,] vertMap =
+        {
+            {0,0,0},
+            {0,0,1},
+            {0,1,0},
+            {0,1,1},
+            {1,0,0},
+            {1,0,1},
+            {1,1,0},
+            {1,1,1}
+        };
+
+        private readonly static int[,] faceMap = { { 4, 8, 5, 9 }, { 6, 10, 7, 11 }, { 0, 8, 1, 10 }, { 2, 9, 3, 11 }, { 0, 4, 2, 6 }, { 1, 5, 3, 7 } };
+        private readonly static int[,] cellProcFaceMask = { { 0, 4, 0 }, { 1, 5, 0 }, { 2, 6, 0 }, { 3, 7, 0 }, { 0, 2, 1 }, { 4, 6, 1 }, { 1, 3, 1 }, { 5, 7, 1 }, { 0, 1, 2 }, { 2, 3, 2 }, { 4, 5, 2 }, { 6, 7, 2 } };
+        private readonly static int[,] cellProcEdgeMask = { { 0, 1, 2, 3, 0 }, { 4, 5, 6, 7, 0 }, { 0, 4, 1, 5, 1 }, { 2, 6, 3, 7, 1 }, { 0, 2, 4, 6, 2 }, { 1, 3, 5, 7, 2 } };
+
+        private readonly static int[,,] faceProcFaceMask = {
+            {{4,0,0},{5,1,0},{6,2,0},{7,3,0}},
+            {{2,0,1},{6,4,1},{3,1,1},{7,5,1}},
+            {{1,0,2},{3,2,2},{5,4,2},{7,6,2}}
+        };
+
+        private readonly static int[,,] faceProcEdgeMask = {
+            {{1,4,0,5,1,1},{1,6,2,7,3,1},{0,4,6,0,2,2},{0,5,7,1,3,2}},
+            {{0,2,3,0,1,0},{0,6,7,4,5,0},{1,2,0,6,4,2},{1,3,1,7,5,2}},
+            {{1,1,0,3,2,0},{1,5,4,7,6,0},{0,1,5,0,4,1},{0,3,7,2,6,1}}
+        };
+
+        private readonly static int[,,] edgeProcEdgeMask = {
+            {{3,2,1,0,0},{7,6,5,4,0}},
+            {{5,1,4,0,1},{7,3,6,2,1}},
+            {{6,4,2,0,2},{7,5,3,1,2}},
+        };
+
+        private readonly static int[,] processEdgeMask = { { 3, 2, 1, 0 }, { 7, 5, 6, 4 }, { 11, 10, 9, 8 } };
+
+        #endregion
+
+        /// <summary>
+        /// Generates a mesh from the octree using DC.
+        /// </summary>
+        /// <param name="octree"></param>
+        /// <param name="mesh"></param>
+        public static void GenerateMeshFromOctree(Octree octree, Mesh mesh)
+        {
+            if (octree == null)
+            {
+                throw new NullReferenceException("Octree cannot be null.");
+            }
+            else if (!octree.completed)
+            {
+                throw new ArgumentException("Octree must be completed before a mesh can be generated.");
+            }
+            else if (octree.baseNode == null)
+            {
+                Debug.LogWarning("Octree base node is null.  Is this a mistake?");
+                return;
+            }
+
+            List<Vector3> vertices = new List<Vector3>();
+            List<Vector3> normals = new List<Vector3>();
+            List<int> indices = new List<int>();
+
+            // Generate Indices for every vertex.
+            GenerateVertexIndices(octree.baseNode, vertices, normals);
+
+            // Begin processing all nodes in the octree.
+            ContourCellProc(octree.baseNode, indices);
+
+            // Assign all relevant mesh data.
+            mesh.vertices = vertices.ToArray();
+            mesh.normals = normals.ToArray();
+            mesh.triangles = indices.ToArray();
+        }
+
+        private static void GenerateVertexIndices(OctreeNode node, List<Vector3> verts, List<Vector3> norms)
+        {
+            if (node == null)
+            {
+                return;
+            }
+
+            if (node.type != OctreeNodeType.NODE_LEAF)
+            {
+                for (int i = 0; i < 8; i++)
+                {
+                    GenerateVertexIndices(node.children[i], verts, norms);
+                }
+            }
+
+            if (node.type != OctreeNodeType.NODE_INTERNAL) {
+                OctreeDrawInfo drawInfo = node.drawInfo;
+                //if (drawInfo == null) {
+                    //throw new NullReferenceException("Could not add vertex!  DrawInfo was null!");
+                //}
+
+                drawInfo.index = verts.Count;
+                verts.Add(drawInfo.position);
+                norms.Add(drawInfo.normal);
+
+            }
+        }
+
+        /// <summary>
+        /// Process all nodes depth first.
+        /// </summary>
+        /// <param name="node">The starting node.</param>
+        /// <param name="ind">A list of indices.</param>
+        private static void ContourCellProc(OctreeNode node, List<int> ind)
+        {
+            //Test if the node exists.
+            if (node == null)
+            {
+                return;
+            }
+
+            // Test if the node is NODE_INTERNAL.
+            if (node.type == OctreeNodeType.NODE_INTERNAL)
+            {
+                // Loop through and process all child nodes.
+                for (int i = 0; i < 8; i++)
+                {
+                    ContourCellProc(node.children[i], ind);
+                }
+
+                for (int i = 0; i < 12; i++)
+                {
+                    OctreeNode[] faceNodes = new OctreeNode[2];
+                    int[] c = {
+                        cellProcFaceMask[i, 0],
+                        cellProcFaceMask[i, 1]
+                    };
+
+                    faceNodes[0] = node.children[c[0]];
+                    faceNodes[1] = node.children[c[1]];
+
+                    ContourFaceProc(faceNodes, cellProcFaceMask[i, 2], ind);
+                }
+
+                for (int i = 0; i < 6; i++)
+                {
+                    OctreeNode[] edgeNodes = new OctreeNode[4];
+                    int[] c = {
+                        cellProcEdgeMask[i, 0],
+                        cellProcEdgeMask[i, 1],
+                        cellProcEdgeMask[i, 2],
+                        cellProcEdgeMask[i, 3]
+                    };
+
+                    for (int j = 0; j < 4; j++)
+                    {
+                        edgeNodes[j] = node.children[c[j]];
+                    }
+
+                    ContourEdgeProc(edgeNodes, cellProcEdgeMask[i, 4], ind);
+                }
+            }
+        }
+
+        private static void ContourFaceProc(OctreeNode[] nodes, int dir, List<int> ind)
+        {
+            // Test if both nodes exist.
+            if (nodes[0] == null || nodes[1] == null)
+            {
+                return;
+            }
+
+            // Test if either node is NODE_INTERNAL.
+            if (nodes[0].type == OctreeNodeType.NODE_INTERNAL || nodes[1].type == OctreeNodeType.NODE_INTERNAL)
+            {
+                for (int i = 0; i < 4; i++)
+                {
+                    OctreeNode[] faceNodes = new OctreeNode[2];
+                    int[] c = {
+                        faceProcFaceMask[dir, i, 0],
+                        faceProcFaceMask[dir, i, 1]
+                    };
+
+                    for (int j = 0; j < 2; j++)
+                    {
+                        if (nodes[j].type != OctreeNodeType.NODE_INTERNAL)
+                        {
+                            faceNodes[j] = nodes[j];
+                        }
+                        else
+                        {
+                            faceNodes[j] = nodes[j].children[c[j]];
+                        }
+                    }
+
+                    ContourFaceProc(faceNodes, faceProcFaceMask[dir, i, 2], ind);
+                }
+
+                int[,] orders = {
+                    { 0, 0, 1, 1 },
+                    { 0, 1, 0, 1 }
+                };
+
+                for (int i = 0; i < 4; i++)
+                {
+                    OctreeNode[] edgeNodes = new OctreeNode[4];
+                    int[] c = {
+                        faceProcEdgeMask[dir, i, 1],
+                        faceProcEdgeMask[dir, i, 2],
+                        faceProcEdgeMask[dir, i, 3],
+                        faceProcEdgeMask[dir, i, 4],
+                    };
+
+                    int index = faceProcEdgeMask[dir, i, 0];
+                    for (int j = 0; j < 4; j++)
+                    {
+                        if (nodes[orders[index, j]].type == OctreeNodeType.NODE_LEAF || nodes[orders[index, j]].type == OctreeNodeType.NODE_PSUEDO)
+                        {
+                            edgeNodes[j] = nodes[orders[index, j]];
+                        }
+                        else
+                        {
+                            edgeNodes[j] = nodes[orders[index, j]].children[c[j]];
+                        }
+                    }
+
+                    ContourEdgeProc(edgeNodes, faceProcEdgeMask[dir, i, 5], ind);
+                }
+            }
+        }
+
+        private static void ContourEdgeProc(OctreeNode[] nodes, int dir, List<int> ind)
+        {
+            // Test if any nodes are null.
+            if (nodes[0] == null || nodes[1] == null || nodes[2] == null || nodes[3] == null)
+            {
+                return;
+            }
+            // Test if all nodes are not NODE_INTERNAL.
+            else if (nodes[0].type != OctreeNodeType.NODE_INTERNAL && nodes[1].type != OctreeNodeType.NODE_INTERNAL && nodes[2].type != OctreeNodeType.NODE_INTERNAL && nodes[3].type != OctreeNodeType.NODE_INTERNAL)
+            {
+                ContourProcessEdge(nodes, dir, ind);
+            }
+            else
+            {
+                for (int i = 0; i < 2; i++)
+                {
+                    OctreeNode[] edgeNodes = new OctreeNode[4];
+                    int[] c =
+                    {
+                        edgeProcEdgeMask[dir, i, 0],
+                        edgeProcEdgeMask[dir, i, 1],
+                        edgeProcEdgeMask[dir, i, 2],
+                        edgeProcEdgeMask[dir, i, 3],
+                    };
+
+                    for (int j = 0; j < 4; j++)
+                    {
+                        if (nodes[j].type == OctreeNodeType.NODE_LEAF || nodes[j].type == OctreeNodeType.NODE_PSUEDO)
+                        {
+                            edgeNodes[j] = nodes[j];
+                        }
+                        else
+                        {
+                            edgeNodes[j] = nodes[j].children[c[j]];
+                        }
+                    }
+
+                    ContourEdgeProc(edgeNodes, edgeProcEdgeMask[dir, i, 4], ind);
+                }
+            }
+        }
+
+        private static void ContourProcessEdge(OctreeNode[] nodes, int dir, List<int> ind)
+        {
+            float minSize = int.MaxValue;
+            int minIndex = 0;
+            int[] indices = { -1, -1, -1, -1 };
+            bool flip = false;
+            bool[] signChange = { false, false, false, false };
+
+            for (int i = 0; i < 4; i++)
+            {
+                int edge = processEdgeMask[dir, i];
+                int c1 = edgevmap[edge, 0];
+                int c2 = edgevmap[edge, 1];
+
+                int m1 = (nodes[i].drawInfo.corners >> c1) & 1;
+                int m2 = (nodes[i].drawInfo.corners >> c2) & 1;
+
+                if (nodes[i].size < minSize)
+                {
+                    minSize = nodes[i].size;
+                    minIndex = i;
+                    flip = m1 != Octree.MATERIAL_AIR;
+                }
+
+                indices[i] = nodes[i].drawInfo.index;
+
+                signChange[i] =
+                    (m1 == Octree.MATERIAL_AIR && m2 != Octree.MATERIAL_AIR) ||
+                    (m1 != Octree.MATERIAL_AIR && m2 == Octree.MATERIAL_AIR);
+            }
+
+            if (signChange[minIndex])
+            {
+                if (!flip)
+                {
+                    ind.Add(indices[0]);
+                    ind.Add(indices[1]);
+                    ind.Add(indices[3]);
+
+                    ind.Add(indices[0]);
+                    ind.Add(indices[3]);
+                    ind.Add(indices[2]);
+                }
+                else
+                {
+                    ind.Add(indices[0]);
+                    ind.Add(indices[3]);
+                    ind.Add(indices[1]);
+
+                    ind.Add(indices[0]);
+                    ind.Add(indices[2]);
+                    ind.Add(indices[3]);
+                }
+            }
+        }
+    }
+}
+```
+
+### DualContouring/QEFData.cs
+```
+﻿using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+
+public struct QEFData
+{
+    /// <summary>
+    /// An array of positions of zero crossing points.
+    /// </summary>
+    public Vector3[] positions;
+    /// <summary>
+    /// And array of normals for the points held in positions.
+    /// </summary>
+    public Vector3[] normals;
+    /// <summary>
+    /// The point calculated when this data is solved.
+    /// </summary>
+    public Vector3 point;
+    /// <summary>
+    /// The error squared of the solution to this data.
+    /// </summary>
+    public float error;
+}
+```
+
+### DualContouring/QEFSolver.cs
+```
+﻿using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+
+public static class QEFSolver
+{
+    public static int steps = 8;
+
+    /// <summary>
+    /// Aproximates the solution to the provided data.
+    /// </summary>
+    /// <param name="data"></param>
+    /// <returns></returns>
+    public static QEFData Solve3D(QEFData data)
+    {
+        float increment = 1f / steps;
+
+        data.error = float.MaxValue;
+
+        for (float x = 0; x <= 1; x += increment)
+        {
+            for (float y = 0; y <= 1; y += increment)
+            {
+                for (float z = 0; z <= 1; z += increment)
+                {
+                    Vector3 point = new Vector3(x, y, z);
+
+                    float error = GetError(data, point);
+
+                    if (error < data.error) {
+                        data.point = point;
+                        data.error = error;
+                    }
+                }
+            }
+        }
+
+        return data;
+    }
+
+    public static float GetError(QEFData data, Vector3 point) {
+        float error = 0;
+
+        for (int i = 0; i < data.positions.Length; i++)
+        {
+            Plane plane = new Plane(data.normals[i], data.positions[i]);
+            error += Mathf.Pow(Mathf.Abs(plane.GetDistanceToPoint(point)), 2);
+        }
+
+        return error;
+    }
+}
+```
+
+### DualContouring/Octrees/Octree.cs
+```
+﻿using System;
+using System.Collections.Generic;
+using UnityEngine;
+
+namespace Drok.DualContouring.Octrees
+{
+    public class Octree
+    {
+
+        public const int MATERIAL_SOLID = 1;
+        public const int MATERIAL_AIR = 0;
+
+        private const int steps = 8;
+
+        /// <summary>
+        /// Offset values when creating children.
+        /// </summary>
+        private static readonly Vector3[] CHILD_MIN_OFFSETS =
+        {
+            // needs to match the vertMap from Dual Contouring impl.
+            new Vector3( 0, 0, 0 ),
+            new Vector3( 0, 0, 1 ),
+            new Vector3( 0, 1, 0 ),
+            new Vector3( 0, 1, 1 ),
+
+            new Vector3( 1, 0, 0 ),
+            new Vector3( 1, 0, 1 ),
+            new Vector3( 1, 1, 0 ),
+            new Vector3( 1, 1, 1 )
+
+        };
+
+        /// <summary>
+        /// A reversed version of CHILD_MIN_OFFSETS
+        /// </summary>
+        private static readonly int[,,] CHILD_MIN_OFFSETS_REVERSE =
+        {
+            // Needs to be the reverse of CHILD_MIN_OFFSETS.
+
+            // X == 0
+            {
+                // Y == 0
+                {
+                    0,
+                    1
+                },
+
+                // Y == 1
+                {
+                    2,
+                    3
+                }
+            },
+
+            // X == 1
+            {
+                // Y == 0
+                {
+                    4,
+                    5
+                },
+
+                // Y == 1
+                {
+                    6,
+                    7
+                }
+            }
+        };
+
+        /// <summary>
+        /// Contains vertices for specific edges.
+        /// </summary>
+        private static readonly int[,] edgevmap =
+        {
+            {0,4},{1,5},{2,6},{3,7},	// x-axis 
+	        {0,2},{1,3},{4,6},{5,7},	// y-axis
+	        {0,1},{2,3},{4,5},{6,7}		// z-axis
+        };
+
+        /// <summary>
+        /// A function that returns a density. Positive numbers are solid and negative are empty.
+        /// </summary>
+        private Func<float, float, float, float> function;
+
+        /// <summary>
+        /// The base node of which this octree stems.
+        /// </summary>
+        public OctreeNode baseNode;
+        public bool completed = false;
+
+        public Octree(int size)
+        {
+            baseNode = new OctreeNode();
+            baseNode.size = size;
+            baseNode.type = OctreeNodeType.NODE_INTERNAL;
+        }
+
+        /// <summary>
+        /// Dynamically constructs an Octree from a given set of nodes.
+        /// </summary>
+        public void ConstructOctreeFromNodes(OctreeNode[] nodes)
+        {
+            List<OctreeNode> parents = new List<OctreeNode>();
+            foreach (OctreeNode node in nodes)
+            {
+                ConstructOctreeUpwards(node, parents);
+            }
+
+            completed = true;
+        }
+
+        private void ConstructOctreeUpwards(OctreeNode node, List<OctreeNode> parents)
+        {
+            int parentSize = node.size * 2;
+            Vector3 parentPos = node.position - VectorUtils.Mod(node.position, parentSize);
+            Vector3 childPos = (node.position - parentPos) / node.size;
+            int childIndex = CHILD_MIN_OFFSETS_REVERSE[(int)childPos.x, (int)childPos.y, (int)childPos.z];
+
+            if (node.size < (baseNode.size / 2))
+            {
+
+                foreach (OctreeNode p in parents)
+                {
+                    if (p.size == parentSize && p.position == parentPos)
+                    {
+                        p.children[childIndex] = node;
+                        ConstructOctreeUpwards(p, parents);
+                        return;
+                    }
+                }
+
+                OctreeNode parent = new OctreeNode();
+                parents.Add(parent);
+                parent.type = OctreeNodeType.NODE_INTERNAL;
+                parent.size = parentSize;
+                parent.position = parentPos;
+                parent.children[childIndex] = node;
+                ConstructOctreeUpwards(parent, parents);
+            }
+            else
+            {
+                baseNode.children[childIndex] = node;
+            }
+        }
+
+        /// <summary>
+        /// Recursively constructs OctreeNodes depth first.
+        /// </summary>
+        public void ConstructOctreeFromDensity(Func<float, float, float, float> func)
+        {
+            function = func;
+
+            completed = false;
+            baseNode = ConstructOctreeNodes(baseNode);
+            completed = true;
+        }
+
+        /// <summary>
+        /// Recursively constructs OctreeNodes depth first.
+        /// </summary>
+        /// <param name="node">The base node to split from.</param>
+        /// <returns></returns>
+        private OctreeNode ConstructOctreeNodes(OctreeNode node)
+        {
+            // If the node doesn't exist return.
+            if (node == null)
+            {
+                return null;
+            }
+
+            // If size equals 1 then the node is a possible leaf.
+            if (node.size == 1)
+            {
+                return ConstructLeafNode(node);
+            }
+
+            int childSize = node.size / 2;
+            bool hasChildren = false;
+
+            for (int i = 0; i < 8; i++)
+            {
+                OctreeNode child = new OctreeNode();
+                child.size = childSize;
+                child.position = node.position + (CHILD_MIN_OFFSETS[i] * childSize);
+                child.type = OctreeNodeType.NODE_INTERNAL;
+
+                node.children[i] = ConstructOctreeNodes(child);
+                hasChildren |= (node.children[i] != null);
+            }
+
+            if (!hasChildren)
+            {
+                node = null;
+                return null;
+            }
+
+            return node;
+        }
+
+        /// <summary>
+        /// Constructs a leaf node with the required info for dual contouring.
+        /// </summary>
+        /// <param name="node">The node to construct.</param>
+        /// <returns></returns>
+        private OctreeNode ConstructLeafNode(OctreeNode node)
+        {
+            int corners = 0;
+            for (int i = 0; i < 8; i++)
+            {
+                Vector3 cornerPos = node.position + CHILD_MIN_OFFSETS[i];
+                float density = function(cornerPos.x, cornerPos.y, cornerPos.z);
+                int solid = density > 0f ? MATERIAL_SOLID : MATERIAL_AIR;
+                corners |= (solid << i);
+            }
+
+            // Test if the node is entirely inside or outside of the volume.
+            if (corners == 0 || corners == 255)
+            {
+                // Delete the nodes
+                return null;
+            }
+
+            // Set the node type to leaf.
+            node.type = OctreeNodeType.NODE_LEAF;
+
+            node.drawInfo = new OctreeDrawInfo();
+
+            // Set the vertex position to be in the middle of the node.
+            Vector3 centerOffset = Vector3.one * ((float)node.size / 2);
+            node.drawInfo.position = node.position + FindBestVertex(node.position.x, node.position.y, node.position.z, corners);
+            node.drawInfo.corners = corners;
+            node.drawInfo.normal = CalculateSurfaceNormal(node.position.x, node.position.y, node.position.z);
+
+            return node;
+        }
+
+        /// <summary>
+        /// Calculates the surface normal at position (<paramref name="x">, <paramref name="y">, <paramref name="z">).
+        /// </summary>
+        /// <param name="x">The x coordinate of the calculated normal.</param>
+        /// <param name="y">The y coordinate of the calculated normal.</param>
+        /// <param name="z">The z coordinate of the calculated normal.</param>
+        /// <returns>A normalized Vector3.</returns>
+        private Vector3 CalculateSurfaceNormal(float x, float y, float z)
+        {
+            float offset = 0.001f;
+
+            float dx = function(x + offset, y, z) - function(x - offset, y, z);
+            float dy = function(x, y + offset, z) - function(x, y - offset, z);
+            float dz = function(x, y, z + offset) - function(x, y, z - offset);
+
+            return new Vector3(-dx, -dy, -dz).normalized;
+        }
+
+        private Vector3 FindBestVertex(float x, float y, float z, int corners)
+        {
+            QEFData data = new QEFData();
+            data.positions = GetCrossingPoints(x, y, z, corners);
+            data.normals = new Vector3[data.positions.Length];
+
+            for (int i = 0; i < data.normals.Length; i++) {
+                Vector3 point = data.positions[i];
+                data.normals[i] = CalculateSurfaceNormal(point.x + x, point.y + y, point.z + z);
+            }
+
+            data = QEFSolver.Solve3D(data);
+
+            return data.point;
+        }
+
+        private Vector3[] GetCrossingPoints(float x, float y, float z, int corners)
+        {
+            List<Vector3> points = new List<Vector3>();
+            int MAX_CROSSINGS = 8;
+            int edgeCount = 0;
+
+            for (int i = 0; i < 12 && edgeCount < MAX_CROSSINGS; i++) {
+                int c1 = edgevmap[i, 0];
+                int c2 = edgevmap[i, 1];
+
+                int m1 = (corners >> c1) & 1;
+                int m2 = (corners >> c2) & 1;
+
+                if (m1 == m2) {
+                    // There is no zero crossing point for this edge.
+                    continue;
+                }
+
+                Vector3 from = new Vector3(x, y, z) + CHILD_MIN_OFFSETS[c1];
+                Vector3 to = new Vector3(x, y, z) + CHILD_MIN_OFFSETS[c2];
+
+                Vector3 point = ApproximateCrossingPosition(from, to) - new Vector3(x, y, z);
+                points.Add(point);
+            }
+
+            return points.ToArray();
+        }
+
+        /// <summary>
+        /// Approximates the zero crossing of the specified edge. 
+        /// </summary>
+        /// <param name="from">Starting Vector3.</param>
+        /// <param name="to">Ending Vector3.</param>
+        /// <returns></returns>
+        private Vector3 ApproximateCrossingPosition(Vector3 from, Vector3 to)
+        {
+            float minValue = float.MaxValue;
+            Vector3 result = new Vector3();
+            float increment = 1.0f / steps;
+
+            for (float t = 0; t < 1.0f; t += increment)
+            {
+                Vector3 pos = Vector3.Lerp(from, to, t);
+                float value = function(pos.x, pos.y, pos.z);
+
+                if (value < minValue)
+                {
+                    minValue = value;
+                    result = pos;
+                }
+            }
+
+            return result;
+        }
+    }
+}
+```
+
+### DualContouring/Octrees/OctreeDrawInfo.cs
+```
+﻿using UnityEngine;
+
+namespace Drok.DualContouring.Octrees
+{
+    /// <summary>
+    /// Holds info on how this node should be drawn.
+    /// </summary>
+    public class OctreeDrawInfo
+    {
+        /// <summary>
+        /// The position of the vertex associated with this node.
+        /// </summary>
+        public Vector3 position;
+        /// <summary>
+        /// The normal of the vertex associated with this node.
+        /// </summary>
+        public Vector3 normal;
+        /// <summary>
+        /// The index of the vertex associated with this node.
+        /// </summary>
+        public int index;
+        /// <summary>
+        /// A number representing what corners are within the shape.
+        /// </summary>
+        public int corners;
+
+        public OctreeDrawInfo Clone() {
+            OctreeDrawInfo clone = new OctreeDrawInfo();
+
+            clone.position = position;
+            clone.normal = normal;
+            clone.index = index;
+            clone.corners = corners;
+
+            return clone;
+        }
+    }
+}
+```
+
+### DualContouring/Octrees/OctreeNode.cs
+```
+﻿using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+
+namespace Drok.DualContouring.Octrees
+{
+    public class OctreeNode
+    {
+
+        public OctreeNodeType type;
+        public Vector3 position;
+        public int size;
+
+        public OctreeDrawInfo drawInfo;
+
+        public OctreeNode[] children = new OctreeNode[8];
+
+        public OctreeNode()
+        {
+            type = OctreeNodeType.NODE_NONE;
+            position = Vector3.zero;
+            size = 1;
+        }
+
+        public OctreeNode Clone()
+        {
+            OctreeNode clone = new OctreeNode();
+
+            clone.type = type;
+            clone.position = position;
+            clone.size = size;
+            clone.drawInfo = drawInfo.Clone();
+
+            return clone;
+        }
+    }
+}
+```
+
+### DualContouring/Octrees/OctreeNodeType.cs
+```
+﻿namespace Drok.DualContouring.Octrees
+{
+
+    public enum OctreeNodeType
+    {
+        NODE_NONE,
+        NODE_INTERNAL,
+        NODE_PSUEDO,
+        NODE_LEAF
+    }
+}
+```

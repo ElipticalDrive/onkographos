@@ -1,0 +1,330 @@
+--- v003.md
++++ v004.md
+@@ -4,76 +4,80 @@
+ 
+ ## Overview
+-The Staggered Optimization Scheme decomposes the coupled optimization of shape (mesh geometry) and Point Spread Function (PSF) parameters into two sequential, alternating sub-problems to manage computational cost and avoid bias [S1, unofficial]. Unlike methods that optimize all parameters simultaneously, this approach iterates between a shape update step using an approximate, narrow-band Fourier Transform (FT) and a PSF update step using an exact, full-spectrum FT [S1, unofficial]. It is specifically designed for differentiable rendering in 3D fluorescence microscopy where the forward pass is significantly slower than the backward pass, and where the narrow-band approximation introduces bias dependent on the current PSF state [S1, unofficial].
++The Staggered Optimization Scheme is a training procedure for differentiable volume rendering that decouples the joint optimization of geometric shape parameters and Point Spread Function (PSF) parameters into two sequential sub-problems [S1, unofficial]. It solves the problem of optimization instability and computational bias caused by the strong coupling between shape and PSF, where optimizing them simultaneously can lead to degenerate shapes or incorrect blur estimation [S1, unofficial]. Unlike joint optimization methods that update all parameters in a single step, this scheme alternates between a shape optimization phase and a PSF optimization phase, allowing each to converge more stably [S1, unofficial]. It is specifically designed for differentiable mesh-based rendering in fluorescence microscopy, where the forward pass is significantly slower than the backward pass [S1, unofficial].
+ 
+ ## How it works
+-The method operates on a nonmanifold multimaterial mesh representation with $n_v$ vertices (typically 1,000–10,000) and a Gaussian isotropic PSF defined by a covariance matrix $\Sigma$ [S1, unofficial]. The optimization alternates between minimizing a shape-specific loss and a PSF-specific loss, iterating until convergence [S1, unofficial].
++The method operates on a nonmanifold multimaterial mesh representation of the scene, typically containing 1,000–10,000 vertices [S1, unofficial]. The optimization iterates between two distinct steps: Shape Optimization and PSF Optimization. The core mechanism relies on the differentiability of the mesh Fourier Transform (FT) computation, which serves as the forward rendering operator in this context [S1, unofficial].
+ 
+ ### Inputs and Outputs
+ *   **Inputs:**
+-    *   Ground truth image volume $I_{GT}$.
+-    *   Initial mesh topology (e.g., foam-like multimaterial mesh) with $n_v$ vertices $v$.
+-    *   Initial PSF parameters (covariance matrix $\Sigma$).
+-    *   Number of optimization iterations.
++    *   Initial mesh geometry $M_0$ (vertex positions $v$), typically a "foam-like" multimaterial mesh with the correct number of cells [S1, unofficial].
++    *   Ground truth image $I_{GT}$ from 3D fluorescence microscopy [S1, unofficial].
++    *   PSF parameters $\Sigma$ (covariance matrix), initialized to a Gaussian isotropic PSF [S1, unofficial].
++    *   Hyperparameters: Learning rate $\eta$, regularization weight $\lambda = 50$, number of iterations [S1, unofficial].
+ *   **Outputs:**
+-    *   Optimized vertex positions $v$.
+-    *   Optimized PSF covariance matrix $\Sigma$.
++    *   Optimized vertex positions $v^*$ [S1, unofficial].
++    *   Optimized PSF covariance matrix $\Sigma^*$ [S1, unofficial].
+ 
+ ### Data Structures
+-*   **Mesh:** Nonmanifold multimaterial mesh. Stores vertex positions $v \in \mathbb{R}^{n_v \times 3}$ and connectivity.
+-*   **Laplacian Matrix:** $L \in \mathbb{R}^{n_v \times n_v}$, the mesh Laplacian.
+-*   **PSF:** Gaussian isotropic PSF parameterized by covariance matrix $\Sigma$.
+-*   **Fourier Transform (FT):** Computed via the mesh FT operator. Two variants are used:
+-    *   *Narrow-band:* Approximate, fast, limited frequency range.
+-    *   *Exact:* Full frequency range, slower.
++*   **Mesh:** Nonmanifold multimaterial mesh. Vertices $v \in \mathbb{R}^{n_v \times 3}$.
++*   **Laplacian Matrix:** $L \in \mathbb{R}^{n_v \times n_v}$, the mesh Laplacian [S1, unofficial].
++*   **PSF:** Covariance matrix $\Sigma$ [S1, unofficial].
+ 
+ ### Algorithm Steps
+ 
+-1.  **Initialization:** Generate an initial multimaterial mesh with the correct number of cells (topology) [S1, unofficial]. Initialize PSF parameters $\Sigma$.
+-2.  **Iteration Loop:** Repeat for the specified number of iterations (e.g., 10,000 for artificial benchmarks, 1k–10k for embryo data) [S1, unofficial]:
+-    *   **Step A: Shape Optimization**
+-        1.  Compute the rendered image $\hat{I}$ using the current mesh $v$ and current PSF $\Sigma$. Use the **narrow-band** approximation for the mesh FT to compute the gradient efficiently [S1, unofficial].
+-        2.  Compute the shape loss $L$:
+-            $$
+-            L = \frac{\langle I - I_{GT}, I - I_{GT} \rangle}{\langle I_{GT}, I_{GT} \rangle} = \frac{\frac{1}{N} \text{tr}((I - I_{GT})^2)}{\frac{1}{N} \text{tr}(I_{GT})}
+-            $$
+-            where $\langle \cdot, \cdot \rangle$ denotes the Frobenius inner product average, and $N$ is the number of pixels. This normalization downweights dark regions in $I_{GT}$ [S1, unofficial].
+-        3.  Compute the gradient $\frac{\partial L}{\partial v}$ via backpropagation through the narrow-band FT [S1, unofficial].
+-        4.  Update vertex positions $v$ using the regularized update rule:
+-            $$
+-            v \leftarrow v - \eta (1 + \lambda L)^{-2} \frac{\partial L}{\partial v}
+-            $$
+-            where $\eta$ is the learning rate, $\lambda = 50$, and $L$ is the mesh Laplacian [S1, unofficial].
+-        5.  **Implementation Note:** To avoid explicit memory-intensive inversion of $(1 + \lambda L)^{-2}$ for large $n_v$, solve the linear system:
+-            $$
+-            (1 + \lambda L)^{-2} A = \frac{\partial L}{\partial v}
+-            $$
+-            for $A$ using GPU-parallelized sparse Cholesky decomposition, then update $v \leftarrow v - \eta A$ [S1, unofficial].
+-        6.  Handle remeshing, collision detection, and topological transitions using the multimaterial mesh-based surface tracking method [S1, unofficial].
+-    *   **Step B: PSF Optimization**
+-        1.  Compute the rendered image $\hat{I}$ using the **fixed** updated mesh $v$ and current PSF $\Sigma$. Use the **exact** mesh FT (all frequencies) to avoid bias from the narrow-band threshold, which depends on PSF values [S1, unofficial].
+-        2.  Compute the PSF loss $L_0$:
+-            $$
+-            L_0 = \| I - I_{GT} \|_2
+-            $$
+-            This regular L2 norm is suitable for reconstructing both bright and dark regions [S1, unofficial].
+-        3.  Compute the gradient $\frac{\partial L_0}{\partial \Sigma}$ via backpropagation through the exact FT [S1, unofficial].
+-        4.  Update PSF parameters $\Sigma$ using the Adam optimizer [S1, unofficial].
++1.  **Initialization:**
++    *   Generate an initial mesh $M_0$ with the correct topology (e.g., sphere or torus for artificial benchmarks, foam-like for biological data) [S1, unofficial].
++    *   Initialize PSF parameters $\Sigma$ (e.g., Gaussian isotropic) [S1, unofficial].
++
++2.  **Iteration Loop:**
++    For each optimization step $k$:
++
++    **Step A: Shape Optimization**
++    *   **Objective:** Update vertex positions $v$ while keeping $\Sigma$ fixed.
++    *   **Forward Pass:** Compute the rendered image $I$ using the **narrow-band approximation** of the mesh FT. This method is fast but approximate, suitable for shape updates [S1, unofficial].
++    *   **Loss Calculation:** Compute the loss $L$ using the normalized trace formulation:
++        $$
++        L = \frac{\frac{1}{N} \text{tr}((I - I_{GT})^2)}{\frac{1}{N} \text{tr}(I_{GT})}
++        $$
++        where $\text{tr}(A)$ denotes the normalized trace (Frobenius inner product average), and $N$ is the number of pixels. This loss downweights dark regions in $I_{GT}$ [S1, unofficial].
++    *   **Gradient Computation:** Compute the gradient $\frac{\partial L}{\partial v}$. To save time, the narrow-band method is applied in the backward computation as well, as the forward pass is ~10x slower than the backward pass [S1, unofficial].
++    *   **Parameter Update:** Update vertex positions $v$ using the regularized AdamUniform optimizer. The update rule applies a diffusion-based regularization via the mesh Laplacian $L$:
++        $$
++        v \leftarrow v - \eta (1 + \lambda L)^{-2} \frac{\partial L}{\partial v}
++        $$
++        where $\lambda = 50$ [S1, unofficial].
++    *   **Implementation Detail:** Explicitly computing $(1 + \lambda L)^{-2}$ is memory-intensive for large $n_v$. Instead, solve the equivalent linear system for the update direction $A$:
++        $$
++        (1 + \lambda L)^{-2} A = \frac{\partial L}{\partial v}
++        $$
++        This is solved using GPU-parallelized sparse Cholesky decomposition [S1, unofficial].
++
++    **Step B: PSF Optimization**
++    *   **Objective:** Update PSF parameters $\Sigma$ while keeping $v$ fixed.
++    *   **Forward Pass:** Compute the rendered image $I$ using the **exact mesh FT** across all available frequencies. This avoids bias from the narrow-band threshold, which depends on the current PSF values [S1, unofficial].
++    *   **Loss Calculation:** Compute the loss $L_0$ using the standard L2 norm:
++        $$
++        L_0 = ||I - I_{GT}||_2
++        $$
++        This formulation is suitable for reconstructing both bright and dark regions [S1, unofficial].
++    *   **Parameter Update:** Optimize $\Sigma$ using the Adam optimizer [S1, unofficial].
++
++3.  **Termination:**
++    *   Repeat Steps A and B for a fixed number of iterations (e.g., 10,000 for artificial benchmarks, 1k–10k for biological data) [S1, unofficial].
+ 
+ ### Pseudocode
+ 
+ ```python
+-import numpy as np
+-from scipy.sparse import cholsolve # Pseudocode for GPU-parallelized sparse Cholesky
+-
+-def staggered_optimization(mesh, I_GT, num_iterations, eta, lambda_reg):
++def staggered_optimization(mesh, I_GT, Sigma, num_iterations, eta, lambda_reg):
+     """
+     Staggered optimization of mesh shape and PSF parameters.
+     
+     Args:
+-        mesh: Initial multimaterial mesh object with vertices v and Laplacian L.
+-        I_GT: Ground truth image array.
+-        num_iterations: Total number of alternating steps.
++        mesh: Nonmanifold multimaterial mesh object with vertex positions v.
++        I_GT: Ground truth image tensor.
++        Sigma: PSF covariance matrix.
++        num_iterations: Total number of optimization steps.
+         eta: Learning rate for shape optimization.
+-        lambda_reg: Regularization parameter for shape update (default 50).
++        lambda_reg: Regularization weight (default 50).
+         
+     Returns:
+@@ -81,128 +85,98 @@
+         Sigma: Optimized PSF covariance matrix.
+     """
+-    # Initialize PSF parameters (e.g., isotropic Gaussian)
+-    Sigma = initialize_PSF() 
++    
++    # Precompute mesh Laplacian L
++    L = compute_mesh_laplacian(mesh.v)
++    
++    # Precompute Cholesky decomposition for (1 + lambda * L)
++    # We need to solve (1 + lambda * L)^2 * A = grad for A
++    # Note: The source solves (1 + lambda * L)^-2 * A = grad, 
++    # which is equivalent to solving (1 + lambda * L)^2 * x = grad for x, 
++    # then A = x. However, the source explicitly states solving 
++    # (1 + lambda * L)^-2 A = grad via sparse Cholesky. 
++    # This implies solving the linear system for the update direction directly.
++    # Let M = (1 + lambda * L). We solve M^-2 A = grad => M M A = grad.
++    # So we solve M (M A) = grad.
++    M = 1.0 + lambda_reg * L
++    M_chol = sparse_cholesky(M)
+     
+     for step in range(num_iterations):
+         # --- Step A: Shape Optimization ---
+         
+-        # 1. Render image using narrow-band FT for speed
+-        # narrow_band_mesh_ft computes the FT approximation limited by current PSF
+-        I_hat = render_with_narrow_band(mesh.v, Sigma)
++        # 1. Forward pass with narrow-band approximation (fast)
++        I_render = render_narrow_band(mesh.v, Sigma)
+         
+-        # 2. Compute Shape Loss: Normalized Frobenius norm
+-        # L = ||I - I_GT||_F^2 / ||I_GT||_F^2
+-        numerator = np.sum((I_hat - I_GT) ** 2)
+-        denominator = np.sum(I_GT ** 2)
+-        L_shape = numerator / denominator
++        # 2. Compute Loss L = tr((I - I_GT)^2) / tr(I_GT)
++        # Note: tr(A) here is normalized trace (mean of diagonal or Frobenius inner product avg)
++        diff = I_render - I_GT
++        loss_num = trace_squared(diff)
++        loss_den = trace(I_GT)
++        L_shape = loss_num / loss_den
+         
+-        # 3. Compute gradient of loss w.r.t vertices
+-        # Backprop through narrow-band FT
+-        grad_L_v = compute_gradient_narrow_band(mesh, Sigma, I_hat, I_GT)
++        # 3. Backward pass with narrow-band approximation (fast)
++        grad_L_v = compute_gradient_narrow_band(mesh.v, Sigma, L_shape)
+         
+-        # 4. Regularized Vertex Update
+-        # Solve (1 + lambda * L)^2 * A = grad_L_v for A
+-        # Note: (1 + lambda * L)^-2 applied to grad is equivalent to solving
+-        # (1 + lambda * L)^2 * A = grad. However, the source specifies solving
+-        # (1 + lambda * L)^-2 A = grad. 
+-        # Re-reading source: "v <- v - eta * (1 + lambda L)^-2 * dL/dv"
+-        # "solve the equivalent linear system (1 + lambda L)^-2 A = dL/dv"
+-        # This implies we solve for A such that (1 + lambda L)^-2 * A = grad_L_v.
+-        # Then v = v - eta * A.
++        # 4. Solve (1 + lambda * L)^-2 A = grad_L_v for A
++        # This is equivalent to solving (1 + lambda * L) * (1 + lambda * L) * A = grad_L_v
++        # First solve (1 + lambda * L) * y = grad_L_v
++        y = sparse_solve(M_chol, grad_L_v)
++        # Then solve (1 + lambda * L) * A = y
++        A = sparse_solve(M_chol, y)
+         
+-        # Construct matrix M = (1 + lambda_reg * mesh.L)
+-        # We need to solve M^-2 * A = grad_L_v
+-        # This is equivalent to solving M * M * A = grad_L_v? 
+-        # No, M^-2 A = g => A = M^2 g. 
+-        # But source says "solve ... via Cholesky". Cholesky solves M x = b.
+-        # If we want A = M^2 g, we can solve M y = g, then M A = y.
+-        # Or if the source implies the update is v = v - eta * A where A is the 
+-        # result of applying the inverse squared Laplacian to the gradient.
+-        
+-        # Let's follow the source text strictly:
+-        # "solve the equivalent linear system (1 + lambda L)^-2 A = dL/dv"
+-        # This phrasing is slightly ambiguous. Usually, one solves (1 + lambda L) x = b.
+-        # Applying (1 + lambda L)^-2 twice is computationally expensive if done explicitly.
+-        # However, if we interpret "solve ... for A" as finding A, and the update is v - eta*A,
+-        # then A = (1 + lambda L)^-2 * grad.
+-        # To compute A efficiently:
+-        # Let M = (1 + lambda_reg * mesh.L)
+-        # Solve M * y = grad_L_v  => y = M^-1 * grad
+-        # Solve M * A = y         => A = M^-1 * y = M^-2 * grad
+-        
+-        M = np.eye(mesh.n_v) + lambda_reg * mesh.L
+-        # Solve M * y = grad_L_v using sparse Cholesky
+-        y = cholsolve(M, grad_L_v)
+-        # Solve M * A = y using sparse Cholesky
+-        A = cholsolve(M, y)
+-        
+-        # Update vertices
++        # 5. Update vertices
+         mesh.v = mesh.v - eta * A
+-        
+-        # Handle remeshing/topology if necessary
+-        mesh.handle_topological_changes()
+         
+         # --- Step B: PSF Optimization ---
+         
+-        # 1. Render image using exact FT to avoid bias
+-        # exact_mesh_ft computes the full spectrum FT
+-        I_hat_exact = render_with_exact_ft(mesh.v, Sigma)
++        # 1. Forward pass with exact FT (slow, but unbiased)
++        I_render_exact = render_exact_ft(mesh.v, Sigma)
+         
+-        # 2. Compute PSF Loss: L2 norm
+-        L_psf = np.linalg.norm(I_hat_exact - I_GT)
++        # 2. Compute Loss L0 = ||I - I_GT||_2
++        diff_exact = I_render_exact - I_GT
++        L_psf = l2_norm(diff_exact)
+         
+-        # 3. Compute gradient of loss w.r.t Sigma
+-        grad_L_Sigma = compute_gradient_exact_ft(mesh, Sigma, I_hat_exact, I_GT)
++        # 3. Backward pass with exact FT
++        grad_L_Sigma = compute_gradient_exact_ft(mesh.v, Sigma, L_psf)
+         
+-        # 4. Update PSF parameters using Adam
++        # 4. Update Sigma using Adam optimizer
+         Sigma = adam_update(Sigma, grad_L_Sigma)
+         
+     return mesh, Sigma
++
++def trace_squared(M):
++    """Compute sum of squared elements (Frobenius norm squared) divided by N."""
++    return sum(M**2) / M.size
++
++def trace(M):
++    """Compute normalized trace (mean of diagonal or sum/N depending on definition).
++    Source defines tr(A) = 1/N tr(A) as normalized trace."""
++    return sum(diagonal(M)) / M.shape[0] # Assuming square or appropriate normalization
+ ```
+ 
+-### Parameters and Typical Values
+-*   **Learning Rate ($\eta$):** Not specified in sources. [G: Typical values for Adam in similar geometry optimization range from $10^{-4}$ to $10^{-2}$].
+-*   **Regularization ($\lambda$):** 50 [S1, unofficial].
+-*   **Iterations:** 10,000 for artificial benchmarks (sphere/torus); 1,000–10,000 for embryo data [S1, unofficial].
+-*   **PSF Model:** Gaussian isotropic [S1, unofficial].
+-
+ ### Edge Cases and Pitfalls
+-*   **Computational Cost:** The forward pass is approximately 10 times slower than the backward pass. The narrow-band method is applied in the backward computation whenever possible to save time [S1, unofficial].
+-*   **Bias:** Using the narrow-band method for PSF optimization introduces bias because the threshold depends on the current PSF values. Therefore, the exact FT must be used during the PSF optimization step [S1, unofficial].
+-*   **Memory:** Explicit inversion of $(1 + \lambda L)^{-2}$ is memory-intensive for large vertex counts ($n_v$). The linear system solver approach is required [S1, unofficial].
+-*   **Topology:** Remeshing and collision detection are necessary for dynamic shapes. The method relies on a multimaterial mesh-based surface tracking method to handle these transitions [S1, unofficial].
++*   **Computational Cost:** The forward pass is approximately 10 times slower than the backward pass. Using the narrow-band method in the backward computation is critical for performance [S1, unofficial].
++*   **Bias:** Using the narrow-band method for PSF optimization introduces bias because the threshold depends on the current PSF values. Therefore, the exact FT must be used in Step B [S1, unofficial].
++*   **Memory:** Explicitly computing $(1 + \lambda L)^{-2}$ is memory-intensive for large vertex counts ($n_v$). The linear system solver approach is required [S1, unofficial].
++*   **Degenerate Shapes:** Joint optimization can lead to degenerate primitive shapes due to the coupled influence of rotation, scaling, and skewness. The staggered approach prevents this by decoupling updates [S1, unofficial].
+ 
+ ## Subtopics
+ 
+-### Narrow-band Fourier Transform
+-An approximate, fast method for computing the mesh FT limited to a specific frequency range. Used in shape optimization to reduce computational cost. [Link to FT methods if available, otherwise self-contained].
+-
+-### Exact Fourier Transform
+-A slower, full-spectrum method for computing the mesh FT. Used in PSF optimization to avoid bias from the narrow-band threshold.
+-
+-### Multimaterial Mesh Representation
+-A nonmanifold mesh representation used to model complex biological structures like cell clusters. Supports topological changes and remeshing.
++### [Alternating Optimization Strategy](10041-alternating-optimization-strategy.md)
++A variant that partitions shape-related parameters (rotation, scaling, skewness) into disjoint groups and optimizes them alternately to prevent degenerate primitive shapes. It stabilizes gradient descent by freezing one group while optimizing the other. Choose this when optimizing complex primitive shapes with multiple coupled geometric parameters.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The method is computationally expensive. The forward pass is ~10x slower than the backward pass. The narrow-band method is used for shape optimization to mitigate this, while the exact method is used for PSF optimization, which is slower but necessary for accuracy [S1, unofficial].
+-*   **Memory Complexity:** Memory usage is high for large vertex counts if explicit inversion is used. The sparse Cholesky decomposition approach reduces memory pressure by solving linear systems instead of inverting matrices [S1, unofficial].
+-*   **Performance:**
+-    *   **Artificial Benchmarks:** Converges to original shapes (sphere/torus) within 10,000 iterations [S1, unofficial].
+-    *   **Robustness:**
+-        *   *Zoom:* MSE ranges from 0.0042 (factor 0.9) to 0.0084 (factor 1.5) after 400 iterations [S1, unofficial].
+-        *   *Shift:* MSE ranges from 0.0039 to 0.0072 after 400 iterations [S1, unofficial].
+-        *   *Noise:* MSE increases from $6.58 \times 10^{-3}$ (level 0) to $9.66 \times 10^{-2}$ (level 0.1) after 400 iterations [S1, unofficial].
+-    *   **Comparison:** Outperforms DM3D on 15 mouse organoid 3D images across MSE, SSIM, and PSNR metrics [S1, unofficial].
+-*   **Strengths:**
+-    *   Avoids bias from narrow-band approximation by alternating with exact FT.
+-    *   Efficient shape optimization via narrow-band FT and regularized updates.
+-    *   Robust to noise and initial condition variations.
+-*   **Limitations:**
+-    *   Computationally intensive due to FT calculations.
+-    *   Requires careful handling of mesh topology and remeshing.
+-    *   Limited to specific applications (3D fluorescence microscopy, cell shape inference).
++*   **Time Complexity:** The method is computationally expensive due to the Fourier Transform (FT) computations. The forward pass is ~10x slower than the backward pass [S1, unofficial]. The use of narrow-band approximation in Step A reduces this cost, but Step B requires the exact FT, which is slower [S1, unofficial].
++*   **Memory Complexity:** Memory usage is dominated by the mesh Laplacian and its decomposition. Explicit inversion is avoided using sparse Cholesky decomposition, making it feasible for large vertex counts ($n_v$) [S1, unofficial].
++*   **Performance:** On artificial images (sphere/torus), convergence is achieved within 10,000 iterations [S1, unofficial]. On biological data (embryos), convergence occurs within 1k–10k steps [S1, unofficial].
++*   **Robustness:** The method is robust to noise and initial conditions. For a Spot reference mesh with 400 iterations:
++    *   Zoom factor 0.9: MSE 0.0042; 1.0: 0.0048; 1.1: 0.0045; 1.2: 0.0055; 1.5: 0.0084 [S1, unofficial].
++    *   Shift (Delta/Radius) 0: MSE 0.0048; 0.1: 0.0059; 0.2: 0.0039; 0.3: 0.0070; 0.5: 0.0072 [S1, unofficial].
++    *   Noise Level 0: MSE $6.58 \times 10^{-3}$; 0.01: $8.98 \times 10^{-3}$; 0.05: $4.22 \times 10^{-2}$; 0.1: $9.66 \times 10^{-2}$ [S1, unofficial].
++*   **Comparison:** Outperforms DM3D (Deforming Mesh 3D) on 15 mouse organoid 3D images across MSE, SSIM, and PSNR metrics [S1, unofficial].
++*   **When to Use:** Suitable for differentiable mesh-based rendering in fluorescence microscopy where shape and PSF are coupled and need to be inferred from 3D images (single-view/dual-view light-sheet, point-scanning confocal) [S1, unofficial].
++*   **When Not to Use:** Not suitable for real-time applications due to the computational cost of FT calculations. Not ideal if the PSF is known and fixed, as the exact FT step adds unnecessary overhead.
+ 
+ ## Background
+-The Staggered Optimization Scheme was introduced in the context of differentiable rendering for 3D fluorescence microscopy, specifically for the deltaMic method [S1, unofficial]. It addresses the challenge of jointly optimizing mesh geometry and PSF parameters, which are coupled and computationally expensive to optimize simultaneously. The method was applied to infer cell shapes in early-stage embryos (mouse, ascidian, worm) from 3D fluorescence microscopy images acquired using single-view light-sheet, dual-view light-sheet, and point-scanning confocal microscopes [S1, unofficial].
++The Staggered Optimization Scheme was introduced in the context of differentiable rendering for 3D fluorescence microscopy, specifically in the deltaMic method [S1, unofficial]. It addresses the challenges of inferring cell shapes in early-stage embryos (mouse, ascidian, worm) from 3D fluorescence microscopy images [S1, unofficial]. The method builds on the differentiability of the mesh Fourier Transform and the need to handle remeshing and topological transitions using multimaterial meshes [S1, unofficial]. It was benchmarked against DM3D and applied to various microscopy modalities including single-view light-sheet, dual-view light-sheet, and point-scanning confocal microscopy [S1, unofficial].
+ 
+ ## Sources

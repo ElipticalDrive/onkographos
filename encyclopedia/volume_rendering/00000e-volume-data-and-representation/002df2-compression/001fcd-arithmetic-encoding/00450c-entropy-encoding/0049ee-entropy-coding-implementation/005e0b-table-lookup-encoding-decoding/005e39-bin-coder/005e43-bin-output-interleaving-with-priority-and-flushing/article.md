@@ -1,0 +1,117 @@
+# Bin Output Interleaving with Priority and Flushing
+
+Also called: Priority-based Bin Interleaving, Flushed Bin Output
+
+## Overview
+This method manages the output of multiple parallel bin coders by enforcing a strict priority ordering on the generated codewords to ensure a deterministic, decodable bitstream. It solves the problem of merging independent zero-entropy encodings into a single stream by forcing lower-priority bins to emit empty bits when they lag behind higher-priority bins. It is distinct from non-interleaved approaches by guaranteeing fine-grained, codeword-by-codeword synchronization, which is essential for streaming or single-channel transmission but incurs significant overhead compared to batched or non-interleaved methods.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of active bin coders, each processing a stream of source bits. Each bin has an assigned priority integer.
+*   **Output:** A single, interleaved binary stream.
+
+**Data Structures:**
+*   **Bin Priority Queue:** A list or heap of active bins, sorted by priority. Lower priority numbers indicate higher precedence (must be encoded first).
+*   **Bin State:** Each bin tracks its current accumulated bits and whether it has generated a valid codeword.
+
+**Numbered Steps:**
+1.  **Initialize Priorities:** Assign a unique priority integer to each bin based on the order in which its source bits appeared. The bin receiving the first bit has the lowest priority number (highest precedence).
+2.  **Select Highest Priority Bin:** Identify the bin with the smallest priority number among those that have not yet emitted a codeword for the current logical step.
+3.  **Check Codeword Availability:** Determine if the selected bin has accumulated enough source bits to form a complete codeword according to its specific bin coder rules.
+4.  **Flush if Necessary:** If the selected bin has *not* accumulated enough bits to generate a codeword, insert "flush bits" (empty bits) into the bin's output buffer. This forces the bin to emit a placeholder codeword or empty symbol, ensuring it meets the priority constraint. [S1, unofficial]
+5.  **Emit Codeword:** Once the bin has a valid codeword (either from source bits or forced by flushing), append the codeword bits to the global output stream.
+6.  **Advance State:** Mark the bin as having emitted for this step. If the bin has exhausted its source data, remove it from the active set.
+7.  **Repeat:** Return to Step 2 until all bins are exhausted and the output stream is complete.
+
+**Formulas:**
+Let $B_i$ be a bin with priority $P_i$. Let $C_i$ be the codeword emitted by bin $i$.
+The condition for emission is:
+$$ \forall i, j: P_i < P_j \implies C_i \text{ is emitted before } C_j $$
+If bin $i$ lacks source bits, output $O_i = \text{Flush}$.
+
+**Parameters:**
+*   **Priority Assignment:** Deterministic, based on source bit arrival order.
+*   **Flush Bit Value:** Typically a predefined symbol representing "no data" or an empty codeword, specific to the bin coder's alphabet.
+
+**Edge Cases and Pitfalls:**
+*   **Precision/Overhead:** The insertion of flush bits adds overhead, slowing down encoding and reducing overall coding efficiency. [S1, unofficial]
+*   **Degenerate Input:** If source bits arrive in a highly irregular pattern, frequent flushing may dominate the output stream, severely degrading compression ratio.
+*   **Boundary Conditions:** Ensure the priority system is strictly total; ties in priority must be broken deterministically (e.g., by bin ID) to avoid decoder mismatch.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def encode_with_priority_flush(bins, source_streams):
+    """
+    bins: List of Bin objects, each with a priority attribute.
+    source_streams: List of iterators yielding bits for each bin.
+    Returns: Interleaved bit stream.
+    """
+    output_stream = []
+    active_bins = sorted(bins, key=lambda b: b.priority)
+    
+    # Track if a bin has emitted a codeword for the current synchronization step
+    # In a real implementation, this might be a generation counter or state flag
+    emitted_this_step = {b.id: False for b in active_bins}
+    
+    while active_bins:
+        # Find the highest priority bin (lowest number) that hasn't emitted yet
+        # Note: In a strict step-by-step interleaving, we process one codeword per bin per "round"
+        # or we process the single highest priority bin available. 
+        # The source implies a strict ordering where lower priority MUST emit before higher priority.
+        # This suggests a sequential processing of bins by priority, but since they are parallel,
+        # we must wait for the lower priority bin to be ready.
+        
+        # Re-reading source: "A bin with a larger priority number is not allowed to place a codeword... 
+        # if a bin with a smaller priority number has not yet done so."
+        # This implies a global sequence. We pick the smallest priority bin that is ready.
+        
+        candidate = None
+        for b in active_bins:
+            if not emitted_this_step[b.id]:
+                candidate = b
+                break # Since sorted by priority, first one is highest priority
+        
+        if candidate is None:
+            # All bins emitted in this round, reset for next round of source bits
+            emitted_this_step = {b.id: False for b in active_bins}
+            continue
+            
+        # Check if candidate has enough bits
+        if candidate.has_codeword():
+            codeword = candidate.get_codeword()
+            output_stream.extend(codeword)
+            emitted_this_step[candidate.id] = True
+        else:
+            # Not enough bits: Insert flush bits
+            flush_codeword = candidate.get_flush_codeword()
+            output_stream.extend(flush_codeword)
+            emitted_this_step[candidate.id] = True
+            
+        # If bin is exhausted of source, remove it
+        if candidate.is_exhausted():
+            active_bins.remove(candidate)
+            
+    return output_stream
+```
+
+## Subtopics
+
+### Non-Interleaved Bin Coding
+This variant eliminates bin output interleaving entirely. Bins encode their respective data segments independently and output them sequentially or in parallel blocks without codeword-by-codeword synchronization. It is chosen for high-performance computing scenarios where data must be written to disk as quickly as possible to minimize simulation delay. It offers higher compression speed and efficiency by removing the overhead of priority management and flushing, but requires the decoder to handle non-interleaved streams, making it unsuitable for single-channel streaming or contexts requiring strict interleaved decoding. [S1, unofficial]
+
+## Operating characteristics
+*   **Time Complexity:** $O(N \cdot B)$, where $N$ is the number of source bits and $B$ is the number of bins. The priority check and potential flush insertion add constant overhead per codeword.
+*   **Memory Complexity:** $O(B)$, storing the state of each active bin.
+*   **Performance:** The process adds overhead, slowing down encoding and reducing overall coding efficiency due to the insertion of non-informative flush bits. [S1, unofficial]
+*   **Strengths:** Guarantees deterministic, fine-grained interleaving suitable for streaming live data over a single channel. [S1, unofficial]
+*   **Limitations:** High overhead makes it less favorable compared to other methods in batch-processing or high-throughput environments. [S1, unofficial]
+*   **When to Use:** Streaming live data, single-channel transmission, or desktop PC image compression where decoder synchronization is critical. [S1, unofficial]
+*   **When Not to Use:** High-performance computing simulations requiring maximum write speed to disk. [S1, unofficial]
+
+## Background
+This method is described in the context of bin coders, which are zero-order entropy coders covering the probability range $0.5 \le p \le 1.0$. The specific interleaving and flushing mechanism is detailed in [S1, unofficial], which references a more detailed description in source [35] (not provided in the current source list). The method is contrasted with non-interleaved approaches in high-performance computing contexts. [S1, unofficial]
+
+## Sources
+[S1] Length-Limited Data Transformation and Compression, https://digital.library.unt.edu/ark:/67531/metadc874691/?q=volume data compression rendering, fetched 2026-10-28 (unofficial)

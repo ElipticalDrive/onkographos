@@ -1,0 +1,132 @@
+# AbsGS Gradient Densification
+
+Also called: Homodirectional Gradient
+
+## Overview
+AbsGS Gradient Densification is a strategy for 3D Gaussian Splatting that eliminates gradient collision by computing the homodirectional view-space positional gradient. It uses the absolute value of per-pixel gradient components before summing, ensuring all pixel contributions reinforce the magnitude rather than canceling out due to direction differences. This accurately identifies over-reconstructed Gaussians that standard gradient magnitude misses. Unlike standard 3D-GS, which sums signed gradients and risks cancellation, AbsGS sums absolute values per axis, providing a more robust signal for splitting large, over-reconstructed Gaussians.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** The set of active 3D Gaussians $\{G_i\}$, the current training iteration counter, and the loss function $L$.
+*   **Output:** A binary decision for each Gaussian $G_i$ indicating whether it should be split.
+
+**Data Structures:**
+*   **Gaussian $G_i$:** Contains position $\mu_i$, scale $S_i$, opacity $\alpha_i$, and color $c_i$. The position $\mu_i$ is in 3D world space, but gradients are computed in view space.
+*   **Gradient Accumulator:** For each Gaussian $G_i$, two accumulators are maintained: `sum_abs_x` and `sum_abs_y`.
+
+**Numbered Steps:**
+1.  **Iteration Check:** The densification check is performed every 100 training iterations [S1].
+2.  **Gradient Accumulation:** For each Gaussian $G_i$ that influences at least one pixel:
+    a. Initialize `sum_abs_x = 0` and `sum_abs_y = 0`.
+    b. Identify all pixels $j$ covered by the projection of $G_i$.
+    c. For each pixel $j$, compute the partial derivatives of the loss $L_j$ with respect to the view-space position components of $G_i$: $\frac{\partial L_j}{\partial \mu_{i,x}}$ and $\frac{\partial L_j}{\partial \mu_{i,y}}$.
+    d. Take the absolute value of these components and add them to the respective accumulators:
+       $$ \text{sum\_abs\_x} \leftarrow \text{sum\_abs\_x} + \left| \frac{\partial L_j}{\partial \mu_{i,x}} \right| $$
+       $$ \text{sum\_abs\_y} \leftarrow \text{sum\_abs\_y} + \left| \frac{\partial L_j}{\partial \mu_{i,y}} \right| $$
+3.  **Homodirectional Gradient Calculation:** Compute the final scalar gradient magnitude $\text{abs}(G_i)$ as the L2 norm of the summed absolute components:
+    $$ \text{abs}(G_i) = \sqrt{\text{sum\_abs\_x}^2 + \text{sum\_abs\_y}^2} $$
+    This value $\hat{g}_i$ represents the homodirectional gradient [S1].
+4.  **Densification Criteria Check:** Compare $\text{abs}(G_i)$ against the gradient threshold $\tau_p$ and the Gaussian's scale against the scale threshold $\tau_S$.
+5.  **Split Decision:** If $\text{abs}(G_i) > \tau_p$ AND the scale of $G_i$ (typically the maximum dimension or volume metric defined by the implementation) $> \tau_S$, trigger a split operation for $G_i$. Note that the clone operation follows the original 3D-GS strategy, not AbsGS [S1].
+
+**Formulas:**
+The core formula for the homodirectional gradient magnitude is:
+$$ \hat{g}_i = \sqrt{ \left( \sum_{j=1}^m \left| \frac{\partial L_j}{\partial \mu_{i,x}} \right| \right)^2 + \left( \sum_{j=1}^m \left| \frac{\partial L_j}{\partial \mu_{i,y}} \right| \right)^2 } $$
+Where:
+*   $m$ is the number of pixels covered by Gaussian $G_i$.
+*   $\frac{\partial L_j}{\partial \mu_{i,x}}$ is the gradient of the loss at pixel $j$ with respect to the x-component of the Gaussian's view-space position.
+*   $\frac{\partial L_j}{\partial \mu_{i,y}}$ is the gradient of the loss at pixel $j$ with respect to the y-component of the Gaussian's view-space position.
+
+**Parameters:**
+*   **Gradient Threshold ($\tau_p$):** The minimum homodirectional gradient magnitude required to trigger a split.
+    *   Default in standard 3D-GS: 0.0002 [S1].
+    *   AbsGS typical values: 0.0004 or 0.0008. Higher values are used in AbsGS experiments to account for the increased magnitude resulting from the absolute value summation [S1].
+*   **Scale Threshold ($\tau_S$):** The minimum scale required to trigger a split.
+    *   Default in standard 3D-GS: 0.01 [S1].
+    *   AbsGS typical value: 0.001. This reduction allows splitting of smaller details that might be missed by the default threshold [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Gradient Collision:** In standard 3D-GS, gradients from different pixels covering the same Gaussian may point in opposite directions, causing cancellation when summed. This is particularly problematic for large Gaussians covering many pixels, where maintaining consistent gradient directions is challenging. AbsGS mitigates this by using absolute values [S1].
+*   **Over-reconstruction:** Standard gradient magnitude may fail to surpass $\tau_p$ for over-reconstructed Gaussians due to cancellation, hindering necessary splits. AbsGS accurately identifies these regions [S1].
+*   **Small Details:** If $\tau_S$ is too high (e.g., default 0.01), small-scale details may not trigger splits. Reducing $\tau_S$ to 0.001 improves the capture of fine details [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_absgs_gradient(gaussian, pixels_covered):
+    """
+    Computes the homodirectional gradient magnitude for a single Gaussian.
+    
+    Args:
+        gaussian: Object containing properties of the 3D Gaussian.
+        pixels_covered: List of pixel indices covered by the Gaussian's projection.
+        
+    Returns:
+        float: The homodirectional gradient magnitude abs(G_i).
+    """
+    sum_abs_x = 0.0
+    sum_abs_y = 0.0
+    
+    for pixel_j in pixels_covered:
+        # Calculate per-pixel gradient components in view space
+        # dL_j / dmu_i_x and dL_j / dmu_i_y are obtained from the autograd engine
+        grad_x_j = get_gradient_loss_pixel(gaussian, pixel_j, axis='x')
+        grad_y_j = get_gradient_loss_pixel(gaussian, pixel_j, axis='y')
+        
+        # Take absolute value to ensure homodirectionality
+        sum_abs_x += abs(grad_x_j)
+        sum_abs_y += abs(grad_y_j)
+    
+    # Compute L2 norm of homodirectional components
+    abs_G_i = sqrt(sum_abs_x**2 + sum_abs_y**2)
+    
+    return abs_G_i
+
+def check_absgs_densification(gaussian, abs_G_i, tau_p, tau_S):
+    """
+    Checks if a Gaussian should be split based on AbsGS criteria.
+    
+    Args:
+        gaussian: Object containing properties of the 3D Gaussian.
+        abs_G_i: The computed homodirectional gradient magnitude.
+        tau_p: Gradient threshold.
+        tau_S: Scale threshold.
+        
+    Returns:
+        bool: True if the Gaussian should be split, False otherwise.
+    """
+    # Get the scale of the Gaussian (e.g., max dimension or volume metric)
+    scale_i = get_gaussian_scale(gaussian)
+    
+    # Check densification criteria
+    if abs_G_i > tau_p and scale_i > tau_S:
+        return True
+    else:
+        return False
+
+# Main loop called every 100 training iterations
+def absgs_densification_step(gaussians, tau_p=0.0004, tau_S=0.001):
+    for gaussian in gaussians:
+        pixels_covered = get_covered_pixels(gaussian)
+        if not pixels_covered:
+            continue
+            
+        abs_G_i = compute_absgs_gradient(gaussian, pixels_covered)
+        
+        if check_absgs_densification(gaussian, abs_G_i, tau_p, tau_S):
+            split_gaussian(gaussian)
+```
+
+## Operating characteristics
+*   **Time Complexity:** The gradient computation requires iterating over all pixels covered by each Gaussian. For a Gaussian covering $m$ pixels, the complexity is $O(m)$. Summing over all Gaussians, the total complexity per densification step is proportional to the total number of splats-pixel interactions.
+*   **Memory Complexity:** Requires storing two accumulators (`sum_abs_x`, `sum_abs_y`) per Gaussian, which is $O(1)$ per Gaussian.
+*   **Measured Performance:** In experiments on the Mip-NeRF360 dataset using a single NVIDIA V100 GPU, AbsGS showed competitive PSNR and SSIM scores compared to 3D-GS and 3D-GS* (3D-GS with reduced $\tau_S$). For example, on the "Bicycle" scene, AbsGS-0004 achieved a PSNR of 0.820 and SSIM of 0.191, while 3D-GS achieved 0.897 and 0.240 respectively (Note: Lower LPIPS is better, higher PSNR/SSIM is better; the table in [S1] shows LPIPS values like 0.191 for AbsGS-0004 vs 0.240 for 3D-GS, indicating better detail preservation). Memory usage varied, with AbsGS-0004 using 728MB and AbsGS-0008 using 450MB on the "Bicycle" scene, compared to 624MB for 3D-GS [S1].
+*   **Strengths:** Effectively identifies over-reconstructed Gaussians that standard gradient magnitude misses due to gradient collision. Allows for better capture of fine details when combined with a reduced scale threshold.
+*   **Limitations:** The absolute value summation increases the magnitude of the gradient, requiring careful tuning of $\tau_p$. The method is specifically designed for the split operation; the clone operation remains unchanged from 3D-GS.
+
+## Background
+AbsGS (AbsGS: Recovering Fine Details in 3D Gaussian Splatting) was proposed to address the issue of gradient collision in 3D Gaussian Splatting optimization. The method was introduced in the paper "AbsGS: Recovering Fine Details in 3D Gaussian Splatting" [S1]. The authors observed that standard gradient magnitude computation in 3D-GS is weakened by irrelevant gradient directions and collision effects, particularly for large Gaussians covering many pixels. AbsGS eliminates this by computing the homodirectional view-space positional gradient. The method was evaluated on 13 distinct environments from the Mip-NeRF360 dataset and other sources, demonstrating improved ability to recover fine details compared to baseline 3D-GS and Instant-NGP.
+
+## Sources
+[S1] AbsGS: Recovering Fine Details in 3D Gaussian Splatting, https://doi.org/10.1145/3664647.3681361, fetched 2026-10-31

@@ -1,0 +1,130 @@
+# Blob Field Generation
+
+Also called: Inverse Distance Weighting for Isosurfaces, Inverse Square Blob Field, Metaball Scalar Field Construction, Procedural Blob Field
+
+## Overview
+Blob Field Generation is a procedural method for constructing a 3D scalar field by summing inverse-square distance contributions from a set of source points (blobs), creating smooth, organic "metaball" shapes suitable for isosurface extraction via Marching Cubes [S1, S2, unofficial]. It differs from Radial Gaussian Density Field Generation by using $1/r^2$ falloff instead of exponential decay, resulting in sharper, more compact isosurfaces with heavier tails, and from Fuzzy Metaballs Hyper-parameters by relying on explicit inverse-distance weighting rather than probabilistic or fuzzy logic blending [S1, S2, unofficial][S3].
+
+## How it works
+**Inputs:**
+- A set of $N$ source points (blob centers) $P_i = (x_i, y_i, z_i)$ for $i \in \{0, \dots, N-1\}$ [S2, unofficial].
+- A set of weights $w_i$ for each blob [S2, unofficial].
+- A query point $Q = (x, y, z)$ in 3D space [S2, unofficial].
+- Optional: Time parameter $t$ for animated blob positions [S1, unofficial].
+- Optional: Floor effect parameters if a ground plane is included [S1, unofficial].
+
+**Outputs:**
+- A scalar field value $f(x, y, z)$ representing the density at $Q$ [S2, unofficial].
+
+**Data Structures:**
+- `sSourcePoint`: An array of $N$ structures, each containing three floating-point coordinates $(fX, fY, fZ)$ [S2, unofficial].
+- `weights`: An array of $N$ floating-point values $w_i$ [S2, unofficial].
+
+**Steps:**
+1. **Initialize Result:** Set $fResult = 0.0$ [S2, unofficial].
+2. **Iterate Blobs:** For each blob $i$ from $0$ to $N-1$:
+   a. Calculate the squared Euclidean distance between the query point $Q$ and the blob center $P_i$:
+      $$distSq = (x - x_i)^2 + (y - y_i)^2 + (z - z_i)^2$$
+      [S1, S2, unofficial].
+   b. **Handle Singularity:** Add a small epsilon $\epsilon$ to the denominator to prevent division by zero if $Q$ coincides with $P_i$ [S1, S2, unofficial].
+   c. **Compute Contribution:** Add the weighted inverse square distance to the result:
+      $$fResult \leftarrow fResult + \frac{w_i}{distSq + \epsilon}$$
+      [S1, S2, unofficial].
+3. **Optional Floor Effect:** If a floor is defined at height $y_{floor}$:
+   a. Calculate vertical distance $dy = y - y_{floor}$ [S1, unofficial].
+   b. Compute floor contribution:
+      $$floorVal = \frac{w_{floor}}{dy^2 + \epsilon_{floor}} - C_{offset}$$
+      [S1, unofficial].
+   c. If $floorVal > 0$, add it to $fResult$ [S1, unofficial].
+4. **Return:** Return $fResult$ [S2, unofficial].
+
+**Formulas:**
+- Standard Euclidean Blob Field:
+  $$f(x,y,z) = \sum_{i} \frac{w_i}{(x - x_i)^2 + (y - y_i)^2 + (z - z_i)^2}$$
+  [S2, unofficial].
+- Distance Metrics for Non-Spherical Shapes:
+  - Euclidean: $dist(p1, p2) = \sqrt{(p1.x - p2.x)^2 + (p1.y - p2.y)^2 + (p1.z - p2.z)^2}$ [S2, unofficial].
+  - Taxicab (Manhattan): $dist1(p1, p2) = |p1.x - p2.x| + |p1.y - p2.y| + |p1.z - p2.z|$ [S2, unofficial].
+  - Max-Metric: $distMax(p1, p2) = \max(|p1.x - p2.x|, |p1.y - p2.y|, |p1.z - p2.z|)$ [S2, unofficial].
+
+**Parameters:**
+- `weights` ($w_i$): Control the influence of each blob. In the example, weights are $0.5, 1.0, 1.5$ [S2, unofficial].
+- `epsilon` ($\epsilon$): Small constant to prevent division by zero. Value $0.000001$ is used in [S1, unofficial], $0.0001$ for floor in [S1, unofficial].
+- `time` ($t$): Used to animate blob positions via sinusoidal functions [S1, unofficial].
+- `strength`: In [S1, unofficial], a uniform strength is calculated as $1.2 / ((\sqrt{numBlobs} - 1) / 4 + 1)$.
+- `offset`: A constant subtracted from the field value to control the isovalue threshold. Value $-12.0$ is used in [S1, unofficial].
+- `alpha`: Constant for fading effect in cloud variants. Value $0.6$ used in [S3].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def evaluate_blob_field(x, y, z, source_points, weights, epsilon=1e-6, use_floor=False, floor_y=0.0, floor_weight=2.0, floor_epsilon=1e-4, floor_offset=12.0):
+    """
+    Evaluates the blob field at point (x, y, z).
+    
+    Args:
+        x, y, z: Coordinates of the query point.
+        source_points: List of tuples (px, py, pz) representing blob centers.
+        weights: List of floats representing blob weights.
+        epsilon: Small constant to prevent division by zero.
+        use_floor: Boolean to enable floor effect.
+        floor_y: Y-coordinate of the floor plane.
+        floor_weight: Weight for the floor effect.
+        floor_epsilon: Epsilon for floor distance calculation.
+        floor_offset: Constant subtracted from floor value.
+        
+    Returns:
+        Scalar field value at (x, y, z).
+    """
+    f_result = 0.0
+    
+    # Iterate over all blobs
+    for i in range(len(source_points)):
+        px, py, pz = source_points[i]
+        w = weights[i]
+        
+        # Calculate squared Euclidean distance
+        dx = x - px
+        dy = y - py
+        dz = z - pz
+        dist_sq = dx*dx + dy*dy + dz*dz
+        
+        # Add epsilon to prevent division by zero
+        f_result += w / (dist_sq + epsilon)
+        
+    # Optional floor effect
+    if use_floor:
+        fy = y - floor_y
+        floor_val = floor_weight / (fy*fy + floor_epsilon) - floor_offset
+        if floor_val > 0:
+            f_result += floor_val
+            
+    return f_result
+```
+
+**Edge Cases and Pitfalls:**
+- **Division by Zero:** If the evaluation point coincides exactly with a source point, the distance term becomes zero, causing the value to approach infinity [S2, unofficial]. A small epsilon must be added to the denominator [S1, S2, unofficial].
+- **Metric Selection:** Using standard Euclidean distance creates spherical metaballs. To create cubic or "Minecraft-like" isosurfaces, Taxicab or Max-metric distances should be used instead [S2, unofficial].
+
+## Subtopics
+
+### Cumuliforms with Optimized Metaballs
+Applies Blinn's metaball technique for organic n-dimensional objects to generate cumulus clouds [S3]. It differs from other methods by using optimized equations and pre-calculating the mean value on the CPU for high performance [S3]. The field is evaluated as $f(x) = \sum_i \frac{r_i^2}{|x - c_i|^2}$, where $r_i$ is the sphere radius and $c_i$ is the center [S3]. A constant $\alpha = 0.6$ adjusts the fading effect at the cloud edges [S3]. Render quality is sufficient but lower than Algorithm 1, using only six spheres with randomized radii [S3].
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$ per query point, where $N$ is the number of blobs [S2, unofficial].
+- **Memory Complexity:** $O(N)$ to store source points and weights [S2, unofficial].
+- **Performance:** High performance, especially when mean values are pre-calculated on the CPU [S3].
+- **Strengths:** Simple to implement, produces smooth organic shapes, computationally efficient [S1, unofficial][S3].
+- **Limitations:** Sharp falloff can lead to aliasing if not sampled finely; singularities require handling [S2, unofficial].
+- **Use Cases:** Isosurface generation for organic shapes, cloud rendering [S1, unofficial][S3].
+- **When Not to Use:** When exponential falloff (Gaussian) is preferred for softer edges, or when complex procedural noise is needed [S2, unofficial][S3].
+
+## Background
+Originated from Blinn's metaball technique for creating organic-looking n-dimensional objects [S3]. The inverse square distance method is commonly used in conjunction with the Marching Cubes algorithm for isosurface extraction [S1, S2, unofficial]. It has been applied in computer graphics for generating clouds, organic shapes, and fluid-like surfaces [S1, unofficial][S3].
+
+## Sources
+[S1] 3merillon/WebGL2-GPU-Marching-Cubes, https://github.com/3merillon/WebGL2-GPU-Marching-Cubes, fetched 2026-10-28 (unofficial)
+[S2] 2 Isovalue in Marching Cubes Algorithm, https://stackoverflow.com/questions/11177604/isovalue-in-marching-cubes-algorithm?rq=4, fetched 2026-10-30 (unofficial)
+[S3] Efficient Algorithms for Real-Time GPU Volumetric Cloud Rendering with Enhanced Geometry, https://doi.org/10.3390/sym10040125, fetched 2026-10-26

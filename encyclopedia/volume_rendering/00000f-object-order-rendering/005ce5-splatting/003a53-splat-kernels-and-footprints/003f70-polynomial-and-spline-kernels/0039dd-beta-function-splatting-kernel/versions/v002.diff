@@ -1,0 +1,166 @@
+--- v001.md
++++ v002.md
+@@ -4,95 +4,96 @@
+ 
+ ## Overview
+-The Beta Function Splatting Kernel is a 2D footprint function used in object-order volume rendering that replaces the standard Normal (Gaussian) distribution with a Beta distribution to control the shape of the splat [S1, unofficial]. It solves the problem of tuning visual parameters like opacity and zoom by offering smaller footprints for equivalent visual quality, which reduces the number of overlapping pixels and accelerates rendering [S1, unofficial]. It is distinguished from sibling Polynomial and Spline Kernels by its specific parametric control over curve openness and height via the Beta function's shape parameters, allowing for easier tuning under visual changes [S1, unofficial].
++The Beta Function Splatting Kernel is a 2D footprint function used in object-order volume rendering that replaces the standard Normal (Gaussian) distribution with a Beta function to control the shape of the splat [S1, unofficial]. It solves the problem of tuning visual parameters such as opacity, zoom, and shading by allowing independent control over the openness, height, and width of the kernel curve [S1, unofficial]. It sets itself apart from its siblings, such as [Quadratic Spline Splatting](8112-quadratic-spline-splatting.md) and [Raised Cosine Splatting](9916-raised-cosine-splatting.md), by offering smaller footprints for equivalent visual quality, which can result in significantly faster execution times [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Voxel position $(x_D, y_D)$ in screen space, voxel density/opacity $\rho$, and kernel shape parameters $a, b$ and scaling factor $k_{scale}$.
+-*   **Output:** A 2D weight value $W(x,y)$ for each pixel $(x,y)$ within the splat's footprint, used during alpha blending.
++*   **Inputs:** Screen coordinates relative to the splat center $(x, y)$, shape parameters $a$ and $b$, scaling factor $k_{scale}$, and voxel density $\rho$.
++*   **Outputs:** The weight $W(x,y)$ contributed by the splat to the pixel.
+ 
+ **Data Structures:**
+-The kernel is defined by a scalar function. No complex data structures are required beyond the parameters $a, b, k_{scale}$ and the current pixel coordinates relative to the voxel center.
++The kernel is defined by a set of parameters:
++*   $a, b$: Shape parameters (floats).
++*   $k_{scale}$: Scaling factor (float).
++*   $x, y$: Normalized coordinates in the range $[0, 1]$ relative to the footprint's local domain.
+ 
+-**Formula:**
+-The weight $W$ at a normalized position $x \in [0, 1]$ is calculated as [S1, unofficial]:
+-$$ W(x) = k_{scale} \cdot x^a \cdot (1 - x)^b $$
+-Where:
+-*   $x$ is the normalized distance from the center of the splat, mapped to the range $[0, 1]$. In implementation, if the pixel coordinate is $p$ and the voxel center is $c$, and the footprint radius is $R$, then $x = \frac{|p - c|}{R}$, clamped to $[0, 1]$.
+-*   $a, b$ are shape parameters controlling the curve's openness. Identical values ($a=b$) produce symmetric curves. Lower values produce wider, flatter ("more opened") curves [S1, unofficial].
+-*   $k_{scale}$ is a scaling factor that adjusts the height and effective range of the curve [S1, unofficial].
++**Formulas:**
++The core Beta function is defined as:
++$$ \text{Beta}(x, a, b) = k_{scale} \cdot x^a \cdot (1 - x)^b $$
++where $x \in [0, 1]$ [S1, unofficial].
+ 
+-**Numbered Steps:**
+-1.  **Transform:** Project the voxel center $\mathbf{p}_k$ to screen space $(x_D, y_D)$ using the Model-View-Projection matrix [S1, unofficial].
+-2.  **Determine Footprint:** Calculate the radius $R$ of the splat based on the zoom level, voxel size, and desired visual continuity. The source notes that holes may appear if opacity decreases without adjusting footprint size, so $R$ must be tuned to maintain continuity between neighbor voxels, especially at feature boundaries [S1, unofficial].
+-3.  **Rasterize:** For each pixel $(x, y)$ within the bounding box $[x_D - R, x_D + R] \times [y_D - R, y_D + R]$:
+-    a. Calculate the normalized distance $x_{norm} = \frac{|x - x_D|}{R}$ and $y_{norm} = \frac{|y - y_D|}{R}$.
+-    b. Compute the weight using the Beta function. Note: The source formula $Beta(x, a, b) = k_{scale} x^a (1-x)^b$ is defined for $x \in [0,1]$. For 2D isotropic splatting, this is typically applied radially or as a product of 1D kernels. The source implies a 2D kernel function [S1, unofficial]. A common interpretation for 2D symmetric splats using this 1D form is to apply it to the radial distance or as a separable kernel. Given the source describes "smaller footprints" and "visual quality equivalent to Normal," and provides the 1D formula, we assume the weight is computed based on the distance from the center. If separable: $W(x,y) = W_x(x) \cdot W_y(y)$. If radial: $W(r) = k_{scale} r^a (1-r)^b$ where $r$ is normalized radial distance. The source explicitly states "Beta(x, a, b) = ... where x is in range [0,1]" [S1, unofficial]. We will use the radial interpretation for isotropic 2D splats as it matches the "footprint" description best, or separable if the implementation requires it. The source does not explicitly specify separable vs radial, but "2D kernel function" suggests a single function. However, the formula is 1D. We will assume the weight is calculated based on the normalized distance $d$ from the center:
+-    $$ W(d) = k_{scale} \cdot d^a \cdot (1 - d)^b $$
+-    where $d = \frac{\sqrt{(x-x_D)^2 + (y-y_D)^2}}{R}$, clamped to $[0, 1]$.
+-    c. If $W(d) > 0$, accumulate the contribution to the pixel buffer.
+-4.  **Composite:** Alpha-blend the splat contribution into the pixel buffer using the calculated weight and voxel opacity [S1, unofficial].
++In the context of 2D splatting, the footprint $F(x,y)$ is typically constructed by combining independent 1D Beta profiles along the x and y axes, or by using a radial distance $r$ mapped to $[0,1]$. The source describes using a "kernel base distribution" and scaling factors to generate sections [S1, unofficial]. For a symmetric curve where $a=b$, the function is symmetric around $x=0.5$.
++
++**Parameters:**
++*   $a, b$: Control the curve shape. Identical values produce symmetric curves. Lower values produce more 'opened' (wider/flatter) curves [S1, unofficial].
++*   $k_{scale}$: Adjusts the range/height of the curve [S1, unofficial].
++*   Typical values: Not given in the sources.
++
++**Steps:**
++1.  Map the screen-space distance from the splat center to a normalized coordinate $u \in [0, 1]$. This often involves defining a support radius $R$ such that $u = \frac{\sqrt{(x-x_c)^2 + (y-y_c)^2}}{R}$ [G].
++2.  Evaluate the Beta function using the mapped coordinate $u$ and parameters $a, b, k_{scale}$:
++    $$ W = k_{scale} \cdot u^a \cdot (1 - u)^b $$
++3.  Modulate the weight by the voxel density $\rho$:
++    $$ P(x,y) = W \cdot \rho $$
++4.  Accumulate $P(x,y)$ into the pixel buffer using alpha blending [S1, unofficial].
++
++**Pitfalls:**
++*   **Holes:** Holes may appear when voxel opacity decreases, requiring changes in footprint size to maintain continuity between neighbor voxels. This is especially noticeable at feature boundaries in tagged volumes [S1, unofficial].
++*   **Precision:** The term $x^a$ can suffer from precision issues if $x$ is very close to 0 and $a$ is large.
+ 
+ **Pseudocode:**
+ ```python
+-def beta_splat_kernel(x_pixel, y_pixel, x_center, y_center, radius, a, b, k_scale):
++def beta_kernel(u, a, b, k_scale):
+     """
+-    Computes the weight for a single pixel using the Beta function splatting kernel.
++    Evaluate the Beta function kernel.
++    u: normalized distance in [0, 1]
++    a, b: shape parameters
++    k_scale: scaling factor
++    """
++    # Guard against log(0) or 0^0 issues
++    if u <= 0.0:
++        if a > 0:
++            return 0.0
++        else:
++            # If a=0, limit is 1, but practically handled by k_scale
++            return k_scale
++    if u >= 1.0:
++        if b > 0:
++            return 0.0
++        else:
++            return k_scale
++            
++    return k_scale * (u ** a) * ((1.0 - u) ** b)
++
++def splat_pixel(screen_x, screen_y, center_x, center_y, radius, a, b, k_scale, density):
++    """
++    Calculate contribution of a splat to a pixel.
++    """
++    # Calculate normalized distance
++    dist = sqrt((screen_x - center_x)**2 + (screen_y - center_y)**2)
++    u = dist / radius
+     
+-    Args:
+-        x_pixel, y_pixel: Screen coordinates of the pixel.
+-        x_center, y_center: Screen coordinates of the voxel center.
+-        radius: The radius of the splat footprint.
+-        a, b: Shape parameters of the Beta distribution.
+-        k_scale: Scaling factor for the kernel height.
+-        
+-    Returns:
+-        float: The weight value for the pixel.
+-    """
+-    # Calculate Euclidean distance from center
+-    dist = math.sqrt((x_pixel - x_center)**2 + (y_pixel - y_center)**2)
++    # Clamp u to [0, 1]
++    u = max(0.0, min(1.0, u))
+     
+-    # Normalize distance to [0, 1]
+-    if radius <= 0:
+-        return 0.0
+-    normalized_dist = dist / radius
+-    
+-    # Clamp to [0, 1] to handle boundary conditions
+-    if normalized_dist < 0.0:
+-        normalized_dist = 0.0
+-    if normalized_dist > 1.0:
+-        return 0.0
+-        
+-    # Compute Beta function weight
+-    # Formula: k_scale * x^a * (1-x)^b
+-    weight = k_scale * (normalized_dist ** a) * ((1.0 - normalized_dist) ** b)
+-    
+-    return weight
++    weight = beta_kernel(u, a, b, k_scale)
++    return weight * density
+ ```
+-
+-**Parameters:**
+-*   $a, b$: Shape parameters. Typical values are not explicitly given in the sources, but the source notes that "lower a, b values produce curves more opened" [S1, unofficial]. Identical values produce symmetric curves [S1, unofficial].
+-*   $k_{scale}$: Scaling factor. Value not given in the sources [S1, unofficial].
+-
+-**Edge Cases and Pitfalls:**
+-*   **Holes:** Holes may appear when voxel opacity decreases if the footprint size is not adjusted to maintain continuity between neighbor voxels. This is especially noticeable at feature boundaries in tagged volumes [S1, unofficial].
+-*   **Precision:** The term $x^a$ can suffer from precision issues if $x$ is very close to 0 and $a$ is large, or if $x$ is 0 and $a$ is 0. Implementation should handle $0^0$ as 1 or clamp small values [G].
+ 
+ ## Subtopics
+ 
+ ### [Deformable Beta Splatting](9228-deformable-beta-splatting.md)
+-A variant that adapts the Beta kernel to deformable volumes.
++An explicit radiance field rendering method that replaces the standard Gaussian kernel with an adaptive, bounded Beta function kernel. It allows the kernel's profile to deform during training via a single learnable parameter, enabling better modeling of sharp boundaries and high-frequency details.
+ 
+ ### [Universal Beta Splatting (UBS)](10589-universal-beta-splatting-ubs.md)
+-An N-dimensional kernel using a gated product form for per-dimension shape control, addressing dimensional coupling limitations.
++An N-dimensional splatting kernel that replaces the Gaussian distribution with a Beta function to enable independent per-dimension shape control, addressing limitations of methods like 6DGS and 7DGS.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The source states that Beta footprints are smaller than Normal distribution footprints, resulting in faster execution. In the tested example, execution was twice as fast [S1, unofficial]. This is due to the reduced number of pixels covered by each splat.
+-*   **Memory Complexity:** Not given in the sources.
+-*   **Strengths:** Smaller footprints for equivalent visual quality, easier tuning of visual parameters (opacity, zoom), faster rendering [S1, unofficial].
+-*   **Limitations:** Potential for holes if footprint size is not dynamically adjusted for opacity changes, especially at feature boundaries [S1, unofficial].
+-*   **When to use:** When rendering performance is critical and visual quality equivalent to Gaussian splatting is acceptable, particularly for tagged volume visualizations where feature boundaries are important [S1, unofficial].
++*   **Performance:** Beta footprints are smaller than Normal distribution footprints while providing equivalent visual quality. In tested examples, this resulted in execution being twice as fast [S1, unofficial].
++*   **Memory:** Not given in the sources.
++*   **Strengths:** Smaller footprints reduce the number of pixels touched per splat, improving rasterization speed. The parameters $a$ and $b$ allow easy tuning of openness and width [S1, unofficial].
++*   **Limitations:** Holes may appear at feature boundaries if opacity varies significantly, requiring careful tuning of footprint size relative to opacity [S1, unofficial].
+ 
+ ## Background
+-The Beta Function Splatting Kernel was proposed in the context of splatting multiresolution volume data using a feature graph [S1, unofficial]. It was introduced to improve rendering performance by using smaller footprints that are easier to tune under visual changes [S1, unofficial]. The method is part of a view-aligned splatting approach for feature graphs [S1, unofficial].
++The Beta Function Splatting Kernel was proposed in the context of rendering classified datasets using a feature graph representation [S1, unofficial]. The method was introduced to improve rendering performance by using smaller footprints that are easier to tune under visual changes such as zooming and opacity adjustments [S1, unofficial].
+ 
+ ## Sources

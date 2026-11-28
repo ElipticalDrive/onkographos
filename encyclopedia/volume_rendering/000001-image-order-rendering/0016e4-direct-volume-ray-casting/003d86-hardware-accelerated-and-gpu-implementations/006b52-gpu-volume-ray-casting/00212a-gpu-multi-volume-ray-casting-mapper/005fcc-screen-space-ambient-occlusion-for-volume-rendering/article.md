@@ -1,0 +1,123 @@
+# Screen-space ambient occlusion for volume rendering
+
+Also called: SSAO for volumes, VTK volume SSAO
+
+## Overview
+Integrates Screen-Space Ambient Occlusion (SSAO) into volume rendering by extracting per-fragment depth, world position, and surface normals from the volume ray-casting fragment shader, then feeding them into a standard SSAO pass to compute ambient occlusion for semi-transparent volumes [S1, unofficial]. It differs from standard SSAO by handling the extraction of geometric proxies (position/normal) from volumetric ray-casting data rather than opaque surface geometry, and requires bypassing the standard SSAO API's opaque-pass limitation [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Volume dataset, camera matrices (projection, model-view, volume, texture dataset), scalar opacity transfer function, volume property with shading enabled.
+*   **Outputs:** Final color buffer with SSAO darkening, SSAO auxiliary buffers (Position in `gl_FragData[1]`, Normal in `gl_FragData[2]`, Depth in `gl_FragDepth`).
+
+**Data Structures:**
+The method relies on VTK's shader replacement hooks to inject variables into the fragment shader pipeline. The following global variables are declared in the shader context:
+*   `g_dataPos`: World-space position of the current fragment (from ray-casting).
+*   `g_dataNormal`: World-space normal of the current fragment (from ray-casting).
+*   `g_srcColor`: Current fragment color including opacity.
+*   `g_skip`: Boolean flag indicating if the fragment should be skipped.
+*   `l_opaqueFragPos`: `vec3` storing the position of the first opaque fragment found. Initialized to `vec3(-1.0)`.
+*   `l_opaqueFragNormal`: `vec3` storing the normal of the first opaque fragment found.
+*   `l_updateDepth`: `bool` flag, initialized to `true`, ensuring only the first fragment with opacity > 0 writes depth.
+
+**Numbered Steps:**
+
+1.  **Enable Shading:** Ensure the volume property has shading enabled (`ShadeOn()`). Without this, the modified shader fails to compile [S1, unofficial].
+2.  **Inject Shader Replacements:** Add five fragment shader replacements to the VTK pipeline at specific hooks: `//VTK::ComputeLighting::Dec`, `//VTK::RenderToImage::Dec`, `//VTK::RenderToImage::Init`, `//VTK::RenderToImage::Impl`, and `//VTK::RenderToImage::Exit` [S1, unofficial].
+3.  **Extract First Opaque Fragment:** In the `Impl` hook, check if the current fragment has opacity greater than 0.0 and if depth update is allowed. If so, store the current fragment's position and normal, and disable further depth updates for this frame [S1, unofficial].
+4.  **Compute and Write Geometry:** In the `Exit` hook, if a valid fragment was found (position != `vec3(-1.0)`), compute the clip-space depth and world-space position/normal, then write them to the output buffers. If no fragment was found, write default values to avoid artifacts [S1, unofficial].
+5.  **SSAO Pass:** The standard SSAO pass reads the position (`gl_FragData[1]`), normal (`gl_FragData[2]`), and depth (`gl_FragDepth`) buffers to compute ambient occlusion. Note that the standard SSAO API only enables the opaque pass; therefore, the renderer pass must be managed directly (e.g., using `vtkRenderStepPass` or commenting out depth buffer blits for surfaces) to prevent the volume from disappearing or causing depth conflicts [S1, unofficial].
+
+**Formulas:**
+
+*   **Depth Mapping:** The depth value is mapped from clip space to framebuffer space [S1, unofficial]:
+    $$
+    gl\_FragDepth = 0.5 \times (gl\_DepthRange.far - gl\_DepthRange.near) \times depthValue.z + 0.5 \times (gl\_DepthRange.far + gl\_DepthRange.near)
+    $$
+    Where $depthValue$ is the clip-space position transformed by projection, model-view, volume, and texture dataset matrices, then divided by $w$ [S1, unofficial].
+
+*   **World Position:**
+    $$
+    gl\_FragData[1] = in\_modelViewMatrix \times in\_volumeMatrix[0] \times in\_textureDatasetMatrix[0] \times vec4(l\_opaqueFragPos, 1.0)
+    $$
+
+*   **World Normal:**
+    $$
+    gl\_FragData[2] = vec4(normalize(l\_opaqueFragNormal), 0.0)
+    $$
+
+**Parameters:**
+*   **SSAO Size Scale (Radius):** Controls the spatial extent of the occlusion kernel. Small values highlight small irregularities; medium values simulate drop shadows; large values blur the effect until it becomes useless [S1, unofficial].
+*   **Opacity Transfer Function Shape:** A ramp function with adjustable steepness and maximum is recommended. A step function causes edge artifacts [S1, unofficial].
+*   **Opacity Threshold:** Default is `g_srcColor.a > 0.0`. A configurable threshold is suggested to prevent writing depth for nearly transparent voxels, which causes a 'shell' artifact [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Shader Replacement Code for VTK Pipeline
+
+# Hook: //VTK::ComputeLighting::Dec
+# Add declarations for data passed from ray-casting
+declare vec3 g_dataNormal;
+
+# Hook: //VTK::RenderToImage::Dec
+# Add local variables for tracking the first opaque fragment
+declare vec3 l_opaqueFragNormal;
+declare vec3 l_opaqueFragPos;
+declare bool l_updateDepth;
+
+# Hook: //VTK::RenderToImage::Init
+# Initialize tracking variables
+l_opaqueFragPos = vec3(-1.0);
+l_updateDepth = true;
+
+# Hook: //VTK::RenderToImage::Impl
+# Capture the first fragment with opacity > 0
+if (not g_skip and g_srcColor.a > 0.0 and l_updateDepth):
+    l_opaqueFragPos = g_dataPos;
+    l_opaqueFragNormal = g_dataNormal;
+    l_updateDepth = false;
+
+# Hook: //VTK::RenderToImage::Exit
+# Write geometry data for SSAO pass
+if (l_opaqueFragPos == vec3(-1.0)):
+    # No fragment found, write defaults to avoid artifacts
+    gl_FragDepth = 1.0;
+    # gl_FragData[1] and [2] remain unchanged or set to safe defaults
+else:
+    # Compute clip-space depth
+    depthValue = in_projectionMatrix * in_modelViewMatrix * in_volumeMatrix[0] * in_textureDatasetMatrix[0] * vec4(l_opaqueFragPos, 1.0);
+    depthValue = depthValue / depthValue.w;
+    
+    # Map depth to framebuffer range
+    gl_FragDepth = 0.5 * (gl_DepthRange.far - gl_DepthRange.near) * depthValue.z + 0.5 * (gl_DepthRange.far + gl_DepthRange.near);
+    
+    # Write world-space position
+    gl_FragData[1] = in_modelViewMatrix * in_volumeMatrix[0] * in_textureDatasetMatrix[0] * vec4(l_opaqueFragPos, 1.0);
+    
+    # Write world-space normal (normalized)
+    gl_FragData[2] = vec4(normalize(l_opaqueFragNormal), 0.0);
+```
+
+**Edge Cases and Pitfalls:**
+*   **Unnormalized Normals:** Failing to normalize the extracted normal causes grainy/dark artifacts in the SSAO texture. Fix: Apply `normalize()` to `l_opaqueFragNormal` before writing [S1, unofficial].
+*   **Shell Artifact:** Writing depth for any voxel with opacity > 0 causes a 'shell' effect with high transparency. Fix: Use a higher opacity threshold or only write depth for the front-most opaque fragment [S1, unofficial].
+*   **Depth Buffer Conflicts:** Standard SSAO pass expects an opaque-only render pass, causing the volume to disappear or depth buffer conflicts. Workaround: Comment out the depth buffer blit required for surfaces to occlude the volume, or switch to `vtkRenderStepPass` [S1, unofficial].
+*   **Shading Disabled:** If shading is not enabled on the volume property, the modified shader fails to compile [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Adds one additional post-processing pass (SSAO) after volume ray-casting. Complexity depends on the SSAO kernel size and resolution.
+*   **Memory Complexity:** Requires additional framebuffers for position (`gl_FragData[1]`), normal (`gl_FragData[2]`), and depth (`gl_FragDepth`).
+*   **Performance:** Performance impact depends on the SSAO implementation and hardware. The extraction step is minimal (per-fragment).
+*   **Strengths:** Adds depth cues and realism to volume rendering, especially for complex internal structures.
+*   **Limitations:** Requires modifying the renderer pass directly; not compatible with standard SSAO API out-of-the-box; potential artifacts from semi-transparent depth writing.
+*   **When to Use:** When depth cues are needed for volumetric data and standard surface SSAO is not applicable.
+*   **When Not to Use:** When performance is critical and SSAO overhead is unacceptable, or when standard opaque surface SSAO is sufficient.
+
+## Background
+Originated from discussions in the 3D Slicer community regarding the feasibility of implementing SSAO for volume rendering in VTK/3DSlicer [S1, unofficial]. The method was developed as a workaround to extend SSAO capabilities to volumetric data, which typically lacks explicit surface geometry [S1, unofficial].
+
+## Sources
+[S1] Screen-space ambient occlusion for volume rendering, https://discourse.slicer.org/t/screen-space-ambient-occlusion-for-volume-rendering/32323, fetched 2026-10-27 (unofficial)

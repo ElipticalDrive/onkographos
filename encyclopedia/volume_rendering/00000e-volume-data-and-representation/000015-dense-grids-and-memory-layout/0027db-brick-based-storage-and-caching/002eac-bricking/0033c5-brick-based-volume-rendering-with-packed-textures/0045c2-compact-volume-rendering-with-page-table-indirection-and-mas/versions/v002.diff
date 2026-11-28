@@ -1,0 +1,163 @@
+--- v001.md
++++ v002.md
+@@ -4,16 +4,16 @@
+ 
+ ## Overview
+-Compact Volume Rendering is a rendering mode that stores only selected groups of voxels (bricks) in a packed 2D array texture, using a page table for spatial indexing and an optional bitmask for sparse storage, to fit within a 1024 MiB GPU memory budget [S1, unofficial]. It differs from the original mode, which loads the full volume into a single 3D texture, by enabling rendering of datasets that exceed `MAX_3D_TEXTURE_SIZE` or the available GPU memory through spatial partitioning and indirection [S1, unofficial]. It builds on [Brick-based volume rendering with packed textures](7106-brick-based-volume-rendering-with-packed-textures.md).
++Compact Volume Rendering is a rendering mode that stores only selected groups of voxels (bricks) in a packed 2D array texture, using a page table for spatial indexing and an optional bitmask for sparse storage, to fit within a 1024 MiB GPU memory budget [S1, unofficial]. It differs from the original mode, which loads the full volume into a single 3D texture, by enabling rendering of datasets that exceed `MAX_3D_TEXTURE_SIZE` or the available GPU memory through spatial partitioning and indirection [S1, unofficial]. It builds on [Brick-based volume rendering with packed textures](7106-brick-based-volume-rendering-with-packed-textures.md) [G].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A volume dataset, a memory budget (default 1024 MiB), and rendering parameters (`stepSize`, `cutoff`, `windowMax`).
+-*   **Output:** GPU textures (`packed`, `pages`, `maskTexture`) and shader uniforms for ray marching.
++*   **Input:** A volume dataset, a memory budget (default 1024 MiB), and rendering parameters (`stepSize`, `cutoff`, `windowMax`) [S1, unofficial].
++*   **Output:** GPU textures (`packed`, `pages`, `maskTexture`) and shader uniforms for ray marching [S1, unofficial].
+ 
+ **Data Structures:**
+-1.  **Packed Density Texture (`packed`):** `TEXTURE_2D_ARRAY`. Dimensions `[packedWidth, packedHeight, layers]`. Internal format `R16UI` or `R8UI` depending on `meta.bytes_per_voxel`. Type `UNSIGNED_SHORT` or `UNSIGNED_BYTE`. Bound to texture unit 0.
+-2.  **Page Table Texture (`pages`):** `TEXTURE_3D`. Dimensions `[meta.grid_xyz]`. Internal format `RGBA32UI`. Type `UNSIGNED_INT`. Bound to texture unit 1. Each texel stores indices into the packed texture and mask texture.
+-3.  **Mask Texture (`maskTexture`):** `TEXTURE_2D_ARRAY`. Dimensions `[maskWidth, maskHeight, maskLayers]`. Internal format `RG32UI`. Type `UNSIGNED_INT`. Bound to texture unit 3. Used for sparse storage optimization.
+-4.  **Original Texture (`original`):** `TEXTURE_3D` placeholder `[1,1,1]`.
++1.  **Packed Density Texture (`packed`):** `TEXTURE_2D_ARRAY`. Dimensions `[packedWidth, packedHeight, layers]`. Internal format `R16UI` or `R8UI` depending on `meta.bytes_per_voxel`. Type `UNSIGNED_SHORT` or `UNSIGNED_BYTE`. Bound to texture unit 0 [S1, unofficial].
++2.  **Page Table Texture (`pages`):** `TEXTURE_3D`. Dimensions `[meta.grid_xyz]`. Internal format `RGBA32UI`. Type `UNSIGNED_INT`. Bound to texture unit 1. Each texel stores indices into the packed texture and mask texture [S1, unofficial].
++3.  **Mask Texture (`maskTexture`):** `TEXTURE_2D_ARRAY`. Dimensions `[maskWidth, maskHeight, maskLayers]`. Internal format `RG32UI`. Type `UNSIGNED_INT`. Bound to texture unit 3. Used for sparse storage optimization [S1, unofficial].
++4.  **Original Texture (`original`):** `TEXTURE_3D` placeholder `[1,1,1]` [S1, unofficial].
+ 
+ **Parameters:**
+@@ -78,5 +78,5 @@
+ 
+ ```python
+-def compact_volume_rendering(volume_meta, budget=1024 * 1048576):
++def compact_volume_rendering_setup(volume_meta, budget=1024 * 1048576):
+     # Step 1: Calculate total bytes
+     total_bytes = 0
+@@ -90,6 +90,6 @@
+     # Step 2: Determine dimensions
+     total_voxels = volume_meta.total_voxels
+-    packed_width = min(MAX_TEXTURE_SIZE, total_voxels)
+-    layers = max(1, (total_voxels + MAX_TEXTURE_SIZE**2 - 1) // (MAX_TEXTURE_SIZE**2))
++    packed_width = min(volume_meta.max_texture_size, total_voxels)
++    layers = max(1, (total_voxels + volume_meta.max_texture_size**2 - 1) // (volume_meta.max_texture_size**2))
+     height = max(1, (total_voxels + packed_width * layers - 1) // (packed_width * layers))
+     packed_height = height
+@@ -99,5 +99,5 @@
+     mask_values = [0] * (volume_meta.mask_width * volume_meta.mask_height * volume_meta.mask_layers * 2)
+     
+-    if len(padded) * 4 + len(mask_values) * 4 + volume_meta.page_bytes > budget:
++    if len(padded) * volume_meta.bytes_per_voxel + len(mask_values) * 4 + volume_meta.page_bytes > budget:
+         raise MemoryError("Allocation exceeds budget")
+ 
+@@ -108,5 +108,4 @@
+     
+     for i, group in enumerate(volume_meta.selected_groups):
+-        # Load density values and index entries
+         density_values = group.load_density()
+         entries = group.load_index_entries()
+@@ -118,4 +117,9 @@
+             for record in mask_records:
+                 record[0] += offset
++        
++        # Update page table before incrementing offset
++        table[group.cell_index] = entries[1] + (mask_offset if masked else offset)
++        table[group.cell_index + 1] = entries[2]
++        table[group.cell_index + 2] = entries[3]
+         
+         # Write density
+@@ -124,38 +128,50 @@
+             offset += 1
+             
+-        # Update page table
+-        # Assuming entries structure: [cell, next_offset, ...]
+-        # Note: Exact mapping of entries[i+1] to table indices depends on meta.grid_xyz layout
+-        # This is a simplified representation based on the note's logic
+-        table[group.cell_index] = entries[1] + (mask_offset if masked else offset - len(density_values))
+-        table[group.cell_index + 1] = entries[2]
+-        table[group.cell_index + 2] = entries[3]
+-        
+         if masked:
+             mask_offset += len(mask_records) // 2
+ 
+     # Step 5: Create GPU textures
+-    # Implementation details for GPU driver calls omitted as per standard graphics API usage
+-    create_texture_2d_array('packed', packed_width, packed_height, layers, padded)
+-    create_texture_3d('pages', volume_meta.grid_xyz, table)
+-    create_texture_2d_array('maskTexture', volume_meta.mask_width, volume_meta.mask_height, volume_meta.mask_layers, mask_values)
+-    create_texture_3d('original', [1, 1, 1])
+-
+-def fragment_shader(d, step_size, tf_low, tf_mid, tf_high, tf_opacity, remaining):
+-    # Step 6: Shader execution
+-    if d < 0.5:
+-        f = d * 2
+-        tint = mix(tf_low, tf_mid, f)
+-        extinction = mix(tf_opacity.x, tf_opacity.y, f)
+-    else:
+-        f = (d - 0.5) * 2
+-        tint = mix(tf_mid, tf_high, f)
+-        extinction = mix(tf_opacity.y, tf_opacity.z, f)
+-        
+-    alpha = 1.0 - exp(-extinction * step_size)
+-    rgb = remaining * alpha * tint
+-    remaining = remaining * (1.0 - alpha)
+-    
+-    return rgb, remaining, alpha
++    packed_texture = allocate_texture_2d_array(packed_width, packed_height, layers, padded)
++    pages_texture = allocate_texture_3d(volume_meta.grid_xyz, table)
++    mask_texture = allocate_texture_2d_array(volume_meta.mask_width, volume_meta.mask_height, volume_meta.mask_layers, mask_values)
++    original_texture = allocate_texture_3d([1, 1, 1])
++    
++    return packed_texture, pages_texture, mask_texture, original_texture
++
++def fragment_shader(d, step_size, tf_low, tf_mid, tf_high, tf_opacity, use_transfer):
++    remaining = 1.0
++    rgb = [0.0, 0.0, 0.0]
++    sample_index = 0
++    while sample_index < 1000: # Standard ray march limit [G]
++        if use_transfer:
++            if d < 0.5:
++                f = d * 2.0
++                tint = mix(tf_low, tf_mid, f)
++                extinction = mix(tf_opacity[0], tf_opacity[1], f)
++            else:
++                f = (d - 0.5) * 2.0
++                tint = mix(tf_mid, tf_high, f)
++                extinction = mix(tf_opacity[1], tf_opacity[2], f)
++        else:
++            tint = [1.0, 1.0, 1.0]
++            extinction = d
++            
++        alpha = 1.0 - exp(-extinction * step_size)
++        rgb[0] += remaining * alpha * tint[0]
++        rgb[1] += remaining * alpha * tint[1]
++        rgb[2] += remaining * alpha * tint[2]
++        remaining *= 1.0 - alpha
++        sample_index += 1
++        if remaining < 1e-4:
++            break
++    return rgb
++
++def allocate_texture_2d_array(width, height, layers, data):
++    # Standard GPU driver call to create a 2D array texture [G]
++    pass
++
++def allocate_texture_3d(dimensions, data):
++    # Standard GPU driver call to create a 3D texture [G]
++    pass
+ ```
+ 
+@@ -176,12 +192,11 @@
+ *   **Time Complexity:** Depends on the number of selected groups and the ray marching step size. Page table lookups are $O(1)$ per sample.
+ *   **Memory Complexity:** Bounded by the 1024 MiB budget. Scales with the number of selected voxels and the overhead of the page table and mask textures [S1, unofficial].
+-*   **Measured Performance:** Benchmarks show significant memory savings compared to loading the full volume, enabling rendering of larger datasets on GPUs with limited memory [S1, unofficial].
+-*   **Strengths:** Fits large volumes into limited GPU memory; supports sparse data via masking.
+-*   **Limitations:** Requires pre-processing to select and pack bricks; page table indirection adds complexity; not suitable for dynamic volumes that change frequently [S1, unofficial].
+-*   **When to use:** When the volume size exceeds `MAX_3D_TEXTURE_SIZE` or available GPU memory, and the data can be partitioned into static bricks.
++*   **Strengths:** Fits large volumes into limited GPU memory; supports sparse data via masking [S1, unofficial].
++*   **Limitations:** Requires pre-processing to select and pack bricks; page table indirection adds complexity [S1, unofficial].
++*   **When to use:** When the volume size exceeds `MAX_3D_TEXTURE_SIZE` or available GPU memory, and the data can be partitioned into static bricks [S1, unofficial].
+ *   **When not to use:** For small volumes that fit in a single 3D texture, or for highly dynamic data [S1, unofficial].
+ 
+ ## Background
+-Compact Volume Rendering was developed as part of the VolumeSegmenter project by Winson-L [S1, unofficial]. It addresses the limitation of traditional volume rendering methods that require loading the entire volume into GPU memory, which is often impractical for large datasets. The method was introduced in the GitHub repository `Winson-L/VolumeSegmenter` [S1, unofficial].
++Not given in the sources.
+ 
+ ## Sources

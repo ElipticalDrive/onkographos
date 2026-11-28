@@ -1,0 +1,134 @@
+# Tile-Based Wave Synchronization
+
+Also called: Wavefront Rendering
+
+## Overview
+Tile-Based Wave Synchronization manages tile assignment and synchronization across worker threads using wave indices and tokens [S1, unofficial]. It serves as a synchronization primitive within tiled parallel compositing, ensuring that threads progress through discrete "waves" of work, allowing for coordinated state updates and potential cache coherency benefits [S1, unofficial]. It differs from pure dynamic load balancing by enforcing synchronization barriers at wave boundaries, which can induce temporal cache coherency but risks load imbalance [S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A configuration specifying `num_waves`, `num_workers`, and `tile_size` [S1, unofficial].
+*   **Output:** Completed image tiles, with synchronization managed via internal provider state.
+
+**Data Structures:**
+*   **Token:** Holds a `tile_index`, `wave_index`, and `job_id` [S1, unofficial]. Created by `TileProvider::next()` [S1, unofficial].
+*   **Tile Wave Map (`m_tile_wave`):** Maps tile indices to their current wave index [S1, unofficial].
+*   **Configuration:** Includes `unsigned int num_waves`, `unsigned int num_workers`, and `image_size_t tile_size` [S1, unofficial].
+
+**Steps:**
+1.  **Token Acquisition:** A worker thread calls `TileProvider::next()` to obtain a `Token` containing the assigned tile index and wave index [S1, unofficial].
+2.  **Processing:** The worker processes the assigned tile [S1, unofficial].
+3.  **Wave Completion:** Upon destruction of the `Token`, the provider updates the tile wave map: `m_tp.m_tile_wave[m_idx] = m_wave_idx` [S1, unofficial].
+4.  **Notification:** The provider notifies all waiting threads via `m_tp.m_tile_wave[m_idx].notify_all()` [S1, unofficial].
+5.  **Synchronization:** Workers wait for the next wave index to be available before proceeding to new tiles [S1, unofficial].
+6.  **Graceful Shutdown:** Workers can call `stop_at_next_wave()` to finish their current wave before terminating [S1, unofficial].
+
+**Formulas:**
+*   **ETA Calculation:** Used for progress tracking [S1, unofficial]:
+    $$ \text{avg\_progress\_rate} = \frac{\text{progress}}{\text{elapsed\_time}} $$
+    $$ \text{eta} = \frac{1 - \text{progress}}{\text{avg\_progress\_rate}} $$
+
+**Parameters:**
+*   `num_waves`: Number of synchronization waves [S1, unofficial].
+*   `num_workers`: Number of worker threads [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Load Imbalance:** If tiles have varying amounts of volume coverage, some threads may finish significantly earlier than others, causing idle time at synchronization barriers [S2, unofficial].
+*   **Precision:** Not given in the sources.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+class TileProvider:
+    def __init__(self, num_waves, num_workers, tile_count):
+        self.num_waves = num_waves
+        self.num_workers = num_workers
+        self.tile_count = tile_count
+        self.tile_wave = {}  # Maps tile_idx -> wave_idx
+        self.lock = Lock()
+        self.condition = Condition(self.lock)
+        self.current_wave = 0
+        self.finished_in_wave = 0
+
+    def next(self):
+        """Acquire a tile and wave index for a worker."""
+        with self.lock:
+            # Simple round-robin or hash-based assignment could be used here
+            # For wave sync, we assign tiles to waves
+            tile_idx = self.finished_in_wave % self.tile_count
+            wave_idx = self.current_wave
+            
+            # Wait if this tile is not yet assigned to the current wave
+            # In a real implementation, this would involve more complex state
+            # to ensure all threads are in the same wave before proceeding
+            while tile_idx not in self.tile_wave or self.tile_wave[tile_idx] != wave_idx:
+                self.condition.wait()
+            
+            return Token(tile_idx, wave_idx)
+
+    def on_token_destroy(self, token):
+        """Called when a worker finishes a tile."""
+        with self.lock:
+            self.tile_wave[token.tile_idx] = token.wave_idx
+            self.finished_in_wave += 1
+            
+            # Notify waiting threads
+            self.condition.notify_all()
+            
+            # Check if wave is complete
+            if self.finished_in_wave % self.num_workers == 0:
+                self.current_wave += 1
+
+class Token:
+    def __init__(self, tile_idx, wave_idx):
+        self.tile_idx = tile_idx
+        self.wave_idx = wave_idx
+    
+    def __del__(self):
+        # This is a simplification; in C++, destructors are explicit
+        # In Python, we might use a context manager or explicit finish()
+        pass
+
+class Worker:
+    def __init__(self, provider):
+        self.provider = provider
+        self.stop_requested = False
+
+    def run(self):
+        while not self.stop_requested:
+            token = self.provider.next()
+            try:
+                self.process_tile(token.tile_idx)
+            finally:
+                # Simulate token destruction triggering sync
+                self.provider.on_token_destroy(token)
+
+    def process_tile(self, tile_idx):
+        # Ray casting logic
+        pass
+
+    def stop_at_next_wave(self):
+        self.stop_requested = True
+```
+
+## Subtopics
+
+### Static Work Assignment with Synchronization
+A static work assignment algorithm that forces all threads to synchronize at the block level to induce temporal cache coherency by accessing nearby memory locations synchronously [S2, unofficial]. This method performs poorly and was abandoned due to load imbalance, particularly when image tiles have less coverage of the 3D volume and calculate substantially fewer ray integration steps [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Synchronization overhead increases with the number of waves and the disparity in tile processing times [S2, unofficial].
+*   **Memory Complexity:** Requires storage for the tile wave map and token state [S1, unofficial].
+*   **Measured Performance:** Static synchronization ("sync") performed poorly compared to dynamic assignment, with higher runtimes and L2 cache misses in some configurations [S2, unofficial]. Z-ordered memory layout resulted in consistently better performance due to better use of the memory hierarchy [S2, unofficial].
+*   **Strengths:** Can induce temporal cache coherency [S2, unofficial].
+*   **Limitations:** Prone to load imbalance, especially with uneven volume coverage [S2, unofficial].
+*   **When to use:** When cache coherency is critical and tile workloads are uniform.
+*   **When not to use:** When tile workloads vary significantly (e.g., sparse volumes) [S2, unofficial].
+
+## Background
+The method is implemented in the `Shibodd/volume_path_tracer` repository [S1, unofficial]. The concept of static work assignment with synchronization was investigated in research on multi-core and many-core shared-memory parallel raycasting volume rendering optimization [S2, unofficial].
+
+## Sources
+[S1] Shibodd/volume_path_tracer, https://github.com/Shibodd/volume_path_tracer, fetched 2026-10-26 (unofficial)
+[S2] Multi-core and Many-core Shared-memory Parallel Raycasting Volume Rendering Optimization and Tuning, https://digital.library.unt.edu/ark:/67531/metadc829701/?q=empty space skipping volume rendering, fetched 2026-10-28 (unofficial)

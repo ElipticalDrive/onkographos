@@ -1,0 +1,210 @@
+--- v001.md
++++ v002.md
+@@ -4,39 +4,29 @@
+ 
+ ## Overview
+-Sparse Brick Set Rendering is a method for rendering Signed Distance Fields (SDFs) using hardware-accelerated raytracing against a Bounding Volume Hierarchy (BVH) of leaf bricks, where each brick contains SDF data and is intersected via software shaders and sphere-tracing [S1, unofficial]. It differs from its parent [ExaBricks Rendering with RTX BVH](2577-exabricks-rendering-with-rtx-bvh.md) by specifically utilizing SDF sphere-tracing within leaf nodes rather than general volume integration, and from [RTX BVH Ray Tracing](2957-rtx-bvh-ray-tracing.md) by relying on software intersection shaders for the SDF geometry rather than hardware-native triangle or primitive intersection.
++Sparse Brick Set Rendering is a method for rendering Signed Distance Fields (SDFs) using hardware-accelerated raytracing against a Bounding Volume Hierarchy (BVH) of leaf bricks, where each brick contains SDF data and is intersected via software shaders and sphere-tracing [S1, unofficial]. It differs from its parent [ExaBricks Rendering with RTX BVH](2577-exabricks-rendering-with-rtx-bvh.md) by specifically utilizing SDF sphere-tracing within leaf nodes rather than general volume integration, and from [RTX BVH Ray Tracing](2957-rtx-bvh-ray-tracing.md) by relying on software intersection shaders for the SDF geometry rather than hardware-native triangle or primitive intersection [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A set of leaf bricks, each containing a 3D texture of distance values. A BVH constructed from AABBs enclosing these bricks. A camera ray defined by origin $\mathbf{o}$ and direction $\mathbf{d}$.
+-*   **Output:** The intersection distance $t$ to the nearest isosurface (typically $d=0$), the surface normal $\mathbf{n}$, and the object-space position $\mathbf{p}$.
++*   **Input:** A set of leaf bricks, each containing a 3D texture of distance values. A BVH constructed from AABBs enclosing these bricks. A camera ray defined by origin $\mathbf{o}$ and direction $\mathbf{d}$ [S1, unofficial].
++*   **Output:** The intersection distance $t$ to the nearest isosurface, the surface normal $\mathbf{n}$, and the object-space position $\mathbf{p}$ [S1, unofficial].
+ 
+ **Data Structures:**
+-*   **Brick:** A 3D texture of size $8^3 = 512$ samples.
+-    *   **Inner Data:** The central $6^3 = 216$ samples (indices 1 to 6 in each dimension, assuming 0-based indexing for the full 8) contain the actual SDF data for sphere-tracing [S1, unofficial].
+-    *   **Padding:** The outer layer of voxels (indices 0 and 7 in each dimension) is duplicated from the adjacent inner voxels. This padding ensures that trilinear sampling does not cross brick boundaries, which would otherwise access invalid or discontinuous data from neighboring bricks [S1, unofficial].
+-    *   **Note:** 58% of the brick's memory is dedicated to this adjacency/padding data [S1, unofficial].
++*   **Brick:** A 3D texture of size $8^3 = 512$ samples [S1, unofficial].
++    *   **Inner Data:** The inner $6^3$ samples are sphere-traced [S1, unofficial].
++    *   **Padding:** A neighbourhood of voxels is duplicated for each brick to avoid the texture sampler crossing brick boundaries during linear filtering [S1, unofficial].
++    *   **Note:** 58% of each brick is dedicated to adjacency data [S1, unofficial].
+ *   **BVH:** A hierarchy of AABBs. Only leaf nodes (representing individual bricks) are stored in the final structure used for traversal; internal nodes are discarded after construction [S1, unofficial].
+ 
+ **Algorithm Steps:**
+-1.  **BVH Traversal:** Perform hardware-accelerated ray-BVH traversal. When a ray potentially intersects a leaf brick's AABB, invoke a software intersection shader [S1, unofficial].
+-2.  **AABB Intersection:** Calculate the entry ($t_{min}$) and exit ($t_{max}$) distances of the ray with respect to the brick's AABB. This defines the interval $[t_{min}, t_{max}]$ for sphere-tracing [S1, unofficial].
+-3.  **Local Coordinate Transformation:** Transform the ray origin $\mathbf{o}$ and direction $\mathbf{d}$ into the brick's local coordinate system, where the brick spans $[0, 1]^3$. Let the local ray be $\mathbf{o}'$ and $\mathbf{d}'$ [S1, unofficial].
+-4.  **Sphere-Tracing:** Iteratively step along the local ray to find the intersection with the isosurface ($d=0$):
+-    *   Initialize current position $\mathbf{p}' = \mathbf{o}'$ and step count $k=0$.
+-    *   Loop while $k < K_{max}$ and distance $> \epsilon$:
+-        *   Sample the distance value $d_{val}$ at $\mathbf{p}'$ from the brick's texture using trilinear filtering [S1, unofficial].
+-        *   Transform $d_{val}$ from its stored format to the physical distance in the local space. Let this be $d_{local}$ [S1, unofficial].
+-        *   If $d_{local} \le 0$, an intersection has been found (or the ray is inside the surface). Terminate and record $\mathbf{p}'$ [S1, unofficial].
+-        *   Advance $\mathbf{p}' \leftarrow \mathbf{p}' + d_{local} \cdot \mathbf{d}'$.
+-        *   Increment $k$.
+-    *   *Note:* Sphere-tracing is used for simplicity, despite analytical intersections being potentially faster [S1, unofficial].
+-5.  **Object-Space Transformation:** If an intersection is found at local position $\mathbf{p}'$, transform $\mathbf{p}'$ back to object-space to get $\mathbf{p}$ [S1, unofficial].
+-6.  **Distance Calculation:** Calculate the final intersection distance $t$ as the distance between the original object-space ray origin $\mathbf{o}$ and the object-space intersection point $\mathbf{p}$:
+-    $$ t = \| \mathbf{p} - \mathbf{o} \| $$
+-    (Or more precisely, the scalar projection if the ray is normalized, but the text specifies "distance between... origin and... position", implying Euclidean distance or parameter $t$ if $\mathbf{d}$ is unit length) [S1, unofficial].
+-7.  **Normal Calculation:** Calculate the surface normal $\mathbf{n}$ at $\mathbf{p}$ using central differencing on the SDF in object-space:
+-    $$ \mathbf{n} = \nabla d(\mathbf{p}) \approx \left( \frac{d(\mathbf{p} + \Delta \mathbf{x}) - d(\mathbf{p} - \Delta \mathbf{x})}{2\Delta x}, \frac{d(\mathbf{p} + \Delta \mathbf{y}) - d(\mathbf{p} - \Delta \mathbf{y})}{2\Delta y}, \frac{d(\mathbf{p} + \Delta \mathbf{z}) - d(\mathbf{p} - \Delta \mathbf{z})}{2\Delta z} \right) $$
+-    Normalize $\mathbf{n}$ to unit length [S1, unofficial].
+-    *   *Pitfall:* Central differencing requires 6 samples. The tetrahedron technique requires only 4 samples but is not implemented in this specific method [S1, unofficial].
++1.  **BVH Construction:** Construct an AABB for every brick and place them into a BVH for hardware-accelerated raytracing. Only leaf bricks are required; other levels are discarded after construction [S1, unofficial].
++2.  **BVH Traversal:** Perform hardware-accelerated ray-BVH traversal. When a ray potentially intersects a leaf brick's AABB, invoke a software intersection shader [S1, unofficial].
++3.  **AABB Intersection:** Calculate the entry ($t_{min}$) and exit ($t_{max}$) distances of the ray with respect to the brick's AABB. This defines the ray interval for checking intersection with the isosurface [S1, unofficial].
++4.  **Local Coordinate Transformation:** Transform the intersection point into the bounding box's local coordinate system, ranging from $[0, 1]$ [S1, unofficial].
++5.  **Sphere-Tracing:** Iteratively find the intersection between the ray and the isosurface using sphere-tracing [S1, unofficial].
++6.  **Distance Sampling:** Sample distance values from the volume using trilinear sampling [S1, unofficial].
++7.  **Distance Transformation:** Transform sampled distances from their formatted form in the volume texture to distances in the space encoded within the AABB where sphere tracing is performed [S1, unofficial].
++8.  **Termination:** Terminate sphere-tracing upon the first intersection with the surface, as all geometry within a brick is opaque [S1, unofficial].
++9.  **Object-Space Transformation:** Transform the intersection point back into object-space to calculate the $t$-value of intersection as the distance between the object-space ray origin and the object-space position of intersection [S1, unofficial].
++10. **Normal Calculation:** Calculate surface normals using central differencing to find the gradient in the distance field at the point of intersection [S1, unofficial].
+ 
+ **Parameters:**
+@@ -44,4 +34,5 @@
+ *   **Sphere-Trace Max Steps:** Not given in the sources.
+ *   **Epsilon:** Not given in the sources.
++*   **Distance Format Transformation:** Not given in the sources.
+ 
+ **Pseudocode:**
+@@ -49,80 +40,82 @@
+ def sparse_brick_set_render(ray_origin, ray_direction, bvh, brick_textures):
+     # 1. Hardware BVH traversal to find potential leaf brick intersection
+-    # Returns the brick ID and the t_min, t_max of the AABB intersection
++    # Returns brick_id, t_min, t_max of AABB intersection
+     brick_id, t_min, t_max = bvh.intersect_aabb(ray_origin, ray_direction)
+-    
+     if brick_id is None:
+-        return None # No intersection with any brick
++        return None
+ 
+-    # 2. Get the brick data
+     brick = brick_textures[brick_id]
+-    
+-    # 3. Transform ray to brick local space [0,1]^3
+-    # Assume brick has a known transformation matrix M_inv from object to local
+-    local_ray_origin = transform(ray_origin, M_inv)
+-    local_ray_dir = transform_direction(ray_direction, M_inv)
+-    
+-    # 4. Sphere-tracing in local space
++
++    # 2. Transform ray to brick local space [0,1]^3
++    local_ray_origin = transform_point(ray_origin, M_obj_to_local)
++    local_ray_dir = transform_direction(ray_direction, M_obj_to_local)
++
++    # 3. Sphere-tracing in local space
+     current_pos = local_ray_origin
+-    max_steps = 100 # Not given in sources, typical value
+-    epsilon = 1e-4  # Not given in sources, typical value
+-    
+-    for i in range(max_steps):
+-        # Sample distance using trilinear filtering
+-        # The texture handles the padding, so we can sample directly
++    max_steps = 100  # Not given in the sources.
++    epsilon = 1e-4   # Not given in the sources.
++
++    for _ in range(max_steps):
++        # 4. Sample distance using trilinear filtering
+         dist_val = brick.sample_trilinear(current_pos)
+-        
+-        # Transform stored distance value to local space distance
+-        # This depends on the specific encoding/format of the distance values
+-        local_dist = transform_distance_format(dist_val)
+-        
+-        # Check for intersection
++
++        # 5. Transform stored distance value to local space distance
++        local_dist = transform_distance_format(dist_val)  # Not given in the sources.
++
++        # 6. Check for intersection
+         if local_dist <= epsilon:
+-            # Intersection found
+             break
+-            
+-        # Advance along the ray
+-        current_pos = current_pos + local_dist * local_ray_dir
+-        
+-        # Safety check for leaving the brick (though t_min/t_max should handle this)
+-        if distance(current_pos, local_ray_origin) > t_max:
+-            return None # Missed the surface within this brick
+-            
++
++        # 7. Advance along the ray
++        current_pos = [current_pos[i] + local_ray_dir[i] * local_dist for i in range(3)]
++
++        # Safety check for leaving the brick
++        dx = current_pos[0] - local_ray_origin[0]
++        dy = current_pos[1] - local_ray_origin[1]
++        dz = current_pos[2] - local_ray_origin[2]
++        if (dx*dx + dy*dy + dz*dz)**0.5 > t_max:
++            return None
++
+     else:
+-        return None # Max steps reached or no intersection
++        return None
+ 
+-    # 5. Transform intersection point back to object space
+-    object_pos = transform(current_pos, M) # M is inverse of M_inv
+-    
+-    # 6. Calculate t-value
+-    # Assuming ray_direction is normalized, t is the dot product
+-    # Or Euclidean distance if not normalized, but standard ray tracing uses t
+-    t = dot(object_pos - ray_origin, ray_direction)
+-    
+-    # 7. Calculate normal using central differencing in object space
+-    # We need to sample the SDF at object_pos. 
+-    # Note: The brick texture is in local space, so we must transform the offset points
+-    # back to local space to sample, or have a world-space SDF access function.
+-    # Assuming we have a function to get SDF value at any object-space point via the brick:
+-    
+-    delta = 1.0 / 512.0 # Approximate voxel size in object space? 
+-    # Actually, central differencing usually uses a small epsilon in world space.
+-    # Let's assume we can query SDF at object space points.
+-    
+-    dx = (sdf_at(object_pos + vec3(delta, 0, 0)) - sdf_at(object_pos - vec3(delta, 0, 0))) / (2 * delta)
+-    dy = (sdf_at(object_pos + vec3(0, delta, 0)) - sdf_at(object_pos - vec3(0, delta, 0))) / (2 * delta)
+-    dz = (sdf_at(object_pos + vec3(0, 0, delta)) - sdf_at(object_pos - vec3(0, 0, delta))) / (2 * delta)
+-    
+-    normal = normalize(vec3(dx, dy, dz))
+-    
++    # 8. Transform intersection point back to object space
++    object_pos = transform_point(current_pos, M_local_to_obj)
++
++    # 9. Calculate t-value
++    t = (object_pos[0] - ray_origin[0]) * ray_direction[0] + \
++        (object_pos[1] - ray_origin[1]) * ray_direction[1] + \
++        (object_pos[2] - ray_origin[2]) * ray_direction[2]
++
++    # 10. Calculate normal using central differencing in object space
++    delta = 1.0 / 512.0  # Approximate voxel size in object space
++    # Not given in the sources: exact SDF query implementation depends on brick layout.
++    dx = (query_sdf(object_pos[0]+delta, object_pos[1], object_pos[2]) - query_sdf(object_pos[0]-delta, object_pos[1], object_pos[2])) / (2 * delta)
++    dy = (query_sdf(object_pos[0], object_pos[1]+delta, object_pos[2]) - query_sdf(object_pos[0], object_pos[1]-delta, object_pos[2])) / (2 * delta)
++    dz = (query_sdf(object_pos[0], object_pos[1], object_pos[2]+delta) - query_sdf(object_pos[0], object_pos[1], object_pos[2]-delta)) / (2 * delta)
++    normal_len = (dx*dx + dy*dy + dz*dz)**0.5
++    normal = [dx/normal_len, dy/normal_len, dz/normal_len]
++
+     return t, normal, object_pos
++
++def transform_point(p, M):
++    return [p[0]*M[0][0] + p[1]*M[1][0] + p[2]*M[2][0] + M[3][0],
++            p[0]*M[0][1] + p[1]*M[1][1] + p[2]*M[2][1] + M[3][1],
++            p[0]*M[0][2] + p[1]*M[1][2] + p[2]*M[2][2] + M[3][2]]
++
++def transform_direction(v, M):
++    return [v[0]*M[0][0] + v[1]*M[1][0] + v[2]*M[2][0],
++            v[0]*M[0][1] + v[1]*M[1][1] + v[2]*M[2][1],
++            v[0]*M[0][2] + v[1]*M[1][2] + v[2]*M[2][2]]
++
++def query_sdf(x, y, z): return 0.0  # Not given in the sources.
+ ```
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** BVH traversal is $O(\log N)$ where $N$ is the number of bricks. Sphere-tracing steps depend on the distance to the surface and the minimum step size (epsilon), typically $O(D/\epsilon)$ where $D$ is the distance to the surface.
+-*   **Memory Complexity:** Each brick uses $8^3$ samples, with 58% being padding. This is significantly higher memory usage than a pure $6^3$ brick but avoids boundary checks and divergent reads [S1, unofficial].
+-*   **Performance:** Rendering is generally much faster than construction, so optimization efforts in the source focused on construction rather than rendering [S1, unofficial]. Sphere-tracing is noted as simpler but potentially slower than analytical intersections [S1, unofficial].
+-*   **Strengths:** Simple implementation, leverages hardware BVH traversal, avoids boundary issues with texture sampling via padding.
+-*   **Limitations:** High memory overhead due to padding (58%). Sphere-tracing may be slower than analytical methods. Central differencing for normals requires 6 samples, whereas the tetrahedron technique requires 4 [S1, unofficial].
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Each brick uses $8^3$ samples, with 58% being padding [S1, unofficial].
++*   **Performance:** Rendering is generally much faster than construction, and consequently optimization efforts were focused on construction instead [S1, unofficial].
++*   **Strengths:** Simple implementation, leverages hardware BVH traversal, avoids boundary issues with texture sampling via padding [S1, unofficial].
++*   **Limitations:** High memory overhead due to padding (58%). Sphere-tracing is used for simplicity despite analytical intersections being potentially faster [S1, unofficial]. Central differencing for normals requires 6 samples, whereas the tetrahedron technique requires only 4 [S1, unofficial].
+ 
+ ## Background

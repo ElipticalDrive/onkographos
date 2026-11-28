@@ -1,0 +1,95 @@
+# Feature Enhancement
+
+Also called: Feature Enhancement Network
+
+## Overview
+Feature enhancement is a compositing technique that adds texture and contrast to a volume render, furthering the effects of edge enhancement by increasing the visibility of fine details [S1]. In the context of 3D Gaussian Splatting, it refers to a lightweight network that refines coarse RGB outputs by decoding feature vectors assigned to each Gaussian, compensating for missing high-frequency details [S2, 2, unofficial]. It builds on [Boundary Enhancement](8071-boundary-enhancement.md) by addressing texture fidelity rather than just boundary sharpness.
+
+## How it works
+The method manifests in two distinct contexts: traditional volumetric ray casting and modern Gaussian Splatting.
+
+### Context 1: Volumetric Ray Casting
+In traditional pipelines, this step follows edge enhancement to add 3D features and texture [S1].
+1.  **Input**: Enhanced volume data (post-edge enhancement).
+2.  **Process**: Apply texture synthesis or contrast enhancement algorithms to the accumulated color values.
+3.  **Output**: Volume render with enhanced texture and contrast between objects at different depths [S1].
+*Note: Specific algorithmic steps for this traditional context are not detailed in the sources beyond the qualitative description of adding texture and contrast [S1].*
+
+### Context 2: Anchor-Based 3D Gaussian Splatting
+In Anchor3DGS, feature enhancement is a learnable module that refines the rendering output [S2, 2, unofficial].
+
+**Data Structures:**
+*   **Gaussian Primitive**: Contains standard attributes (position, covariance, opacity, base color) plus a **Feature Vector** $f$.
+*   **Feature Vector**: A latent representation assigned to each Gaussian. Size is not specified in the sources [S2, 2, unofficial].
+*   **Lightweight Network**: A neural network decoder $N(\cdot)$ that maps splatted features to high-frequency color residuals or refined colors. Architecture details are not specified [S2, 2, unofficial].
+
+**Steps:**
+1.  **Assign Features**: Assign a feature vector $f_i$ to each Gaussian primitive $i$ in addition to standard attributes [S2, 2, unofficial].
+2.  **Splat Features**: Project and accumulate feature vectors $f_i$ into screen-space feature buffers using the same splatting projection as the RGB attributes. Let $F_{pixel}$ be the accumulated feature vector for a pixel.
+3.  **Decode**: Pass the accumulated feature vector $F_{pixel}$ through the lightweight network $N$ to produce the refined output $C_{refined} = N(F_{pixel})$ [S2, 2, unofficial].
+4.  **Refine**: Use $C_{refined}$ to compensate for high-frequency details missing from the coarse splatted RGB image [S2, 2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Context: Anchor3DGS Feature Enhancement
+# Inputs: 
+#   gaussians: List of Gaussian primitives, each with attributes {pos, cov, opacity, color, feature_vector}
+#   network: Lightweight neural network decoder N
+#   image_size: (H, W)
+#   camera: Camera projection parameters
+
+def feature_enhance(gaussians, network, image_size, camera):
+    H, W = image_size
+    
+    # Initialize feature buffer
+    # Shape: (H, W, D) where D is feature dimension
+    feature_buffer = zeros((H, W, D))
+    
+    # Step 1 & 2: Splat feature vectors
+    for g in gaussians:
+        # Project Gaussian to screen space
+        # Calculate bounding box and rasterize
+        screen_coords = project_to_screen(g.pos, camera)
+        cov_2d = project_covariance(g.cov, camera)
+        
+        # Rasterize feature vector g.feature_vector to feature_buffer
+        # Using alpha-weighted accumulation similar to RGB splatting
+        rasterize_feature(screen_coords, cov_2d, g.feature_vector, g.opacity, feature_buffer)
+        
+    # Step 3: Decode features
+    # Reshape buffer to (H*W, D) for network input
+    flat_features = reshape(feature_buffer, (-1, D))
+    
+    # Decode using lightweight network
+    refined_colors = network(flat_features)
+    
+    # Reshape back to image
+    refined_image = reshape(refined_colors, (H, W, 3))
+    
+    return refined_image
+```
+
+**Parameters:**
+*   **Network Depth/Width**: Not specified [S2, 2, unofficial].
+*   **Feature Dimension**: Not specified [S2, 2, unofficial].
+
+**Edge Cases:**
+*   **Unobserved Regions**: The method leverages context from well-observed neighbors to produce plausible appearances in poorly observed regions, avoiding holes common in pixel-aligned methods [S2, 2, unofficial].
+*   **Precision**: Standard floating-point precision applies for feature accumulation.
+
+## Operating characteristics
+*   **Time Complexity**: Adds the cost of a lightweight network inference pass per pixel after splatting. The network is described as "lightweight" [S2, 2, unofficial].
+*   **Memory Complexity**: Requires storing an additional feature vector per Gaussian primitive [S2, 2, unofficial].
+*   **Performance**: In sparse-view settings (3 and 6 input views), Anchor3DGS with feature enhancement significantly outperforms baselines [S2, 2, unofficial]. In dense-view settings (32 views), it achieves comparable quality with an order of magnitude fewer Gaussians than pixel-aligned approaches [S2, 2, unofficial].
+*   **Strengths**: Improves rendering fidelity and high-frequency detail recovery without requiring a massive number of Gaussian primitives [S2, 2, unofficial].
+*   **Limitations**: Requires training/optimizing the lightweight network alongside the Gaussians [S2, 2, unofficial].
+
+## Background
+*   **Volumetric Context**: The term was used in early volumetric visualization pipelines for medical imaging (e.g., OCT) to describe a step that adds texture and contrast after edge enhancement [S1].
+*   **Gaussian Splatting Context**: The specific implementation as a "Feature Enhancement Network" was introduced in Anchor3DGS, a feed-forward 3D Gaussian Splatting method using a compact anchor-based representation [S2, 2, unofficial].
+
+## Sources
+[S1] Enhanced volumetric visualization for real time 4D intraoperative ophthalmic swept-source OCT, https://doi.org/10.1364/boe.7.001815, fetched 2026-11-08
+[S2] Anchor3DGS: Feed-Forward 3D Gaussian Splatting with Compact Anchor-Based Representation, https://doi.org/10.48550/arxiv.2610.21634, fetched 2026-10-26 (unofficial)

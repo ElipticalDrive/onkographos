@@ -1,0 +1,727 @@
+A powerful planner for Minecraft builders and modpack players. Design builds in 3D, calculate materials, view layered blueprints, and plan Create mod automation systems with dynamic recipe support for modded gameplay. Build smarter before you build in-game. - Implement greedy meshing pipeline with worker thread and opaque/translucent separation by DreamerTone · Pull Request #1 · DreamerTone/MC-Universal-Planner
+
+Implement greedy meshing pipeline with worker thread and opaque/translucent separation by DreamerTone · Pull Request #1 · DreamerTone/MC-Universal-Planner · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+DreamerTone
+commented
+May 25, 2026
+Copy link
+Copy Markdown
+Owner
+Summary
+This PR completes the chunk meshing pipeline by implementing a full 3D greedy mesher running in a dedicated Web Worker, with proper separation of opaque and translucent geometry. The renderer now dispatches mesh jobs to the worker with zero-copy buffer transfers, receives completed render buffers, and uploads them to separate Three.js geometries per render pass.
+Key Changes
+Core Meshing Pipeline
+WorldRenderer.ts: Completely refactored to manage the worker lifecycle, dispatch mesh jobs with padded section data (centre + 26 neighbours), and handle opaque/translucent geometry separately. Now maintains two material slots and two mesh maps (opaque/translucent per section).
+GreedyMesher.ts: Implemented full 3D greedy meshing algorithm that sweeps across all 6 face directions, merges adjacent identical faces into maximal rectangles, and separates results into opaque and translucent quad lists.
+MeshBuilder.ts: Converts greedy-mesher quads into flat typed arrays (position, normal, uv, ao, tintColor) suitable for Three.js BufferGeometry. Handles UV tiling for merged quads and per-vertex AO baking.
+MeshWorker.ts: Dedicated worker thread that receives INIT_REGISTRIES, UPDATE_BAKED_CACHE, and MESH_REQUEST messages. Owns the opaque ID set and baked quad cache, runs the mesher, and transfers completed buffers back to main thread.
+SectionSampler.ts: New utility providing padded read access to a section plus its 26 neighbours via a sparse map. Handles coordinate routing and treats missing neighbours as uniform air.
+Data-Driven Architecture
+BakedModelRegistry integration: WorldRenderer now calls initWorkerFromRegistry() to walk all cached blockstates, convert BakedModels to simplified MeshSampleQuad form, and push to worker. Rebuilds the opaque ID set from the same data for consistent face culling.
+MeshSampleQuad type: Simplified quad representation (face, texture atlas ID, UV bounds, tint index, opacity flag) that the worker uses instead of full BakedModel objects.
+No block-specific logic: All opacity and face geometry flows through BakedModelRegistry → MeshSampleQuad → worker. New blocks (vanilla or modded) automatically work.
+Opaque/Translucent Separation
+Two BufferGeometry objects per section: one for opaque pass, one for translucent pass.
+Two material slots: opaqueMaterial and translucentMaterial (currently both use the block shader; translucent variant with alpha blending + no depth write is a future enhancement).
+Greedy mesher separates quads at generation time based on BakedQuad.isTranslucent flag.
+MeshBuilder produces separate RenderBuffers for each pass.
+Worker Protocol
+INIT_REGISTRIES: Send opaque blockstate ID set (once at startup, refreshed on registry growth).
+UPDATE_BAKED_CACHE: Push [stateId, MeshSampleQuad[]][] entries when BakedModelRegistry updates.
+MESH_REQUEST: Dispatch a job with centre section + sparse neighbour map (both Uint32Array, transferred for zero-copy).
+MESH_RESPONSE: Receive completed opaque + translucent RenderBuffers (transferred back).
+Type & Infrastructure
+meshing.ts: Comprehensive wire-format types with detailed ownership rules and index layout documentation.
+global.d.ts: Window augmentation for window.electronAPI (Electron IPC bridge).
+tsconfig updates: Added rootDir to desktop configs, fixed composite builds, updated all packages to use tsc -b for incremental compilation.
+.gitignore: Added comprehensive ignore patterns for build artifacts, Electron, and cache.
+Minor Fixes
+AOGenerator.ts: Added as const to offset arrays for stricter typing.
+ModelBaker.ts: Added unreachable default case in face direction switch.
+ModelResolver.ts:
+https://claude.ai/code/session_01MUs1d2drTJqsBtWGNHtfzR
+claude
+added 30 commits
+May 25, 2026 04:57
+Wire the worker-based chunk meshing pipeline end-to-end
+…
+a509c59
+```
+Replaces the placeholder inline mesh worker in WorldRenderer with a real
+off-main-thread pipeline that runs section meshing through a dedicated
+Web Worker. Fills in the SectionSampler (was empty) and reconciles the
+type contracts so MeshBuilder, GreedyMesher, MeshWorker, and the
+BlockShader all agree on attribute layout.
+
+- SectionSampler: padded read view across the centre section + 26
+  neighbours; handles signed coords for AO peek-out.
+- MeshBuilder: emits per-vertex `ao` and `tintColor` buffers matching
+  the BlockShader attribute contract; drops the redundant `color` array
+  and the pre-baked face shading (shader derives it from normal).
+- GreedyMesher: switched to MeshSampleQuad resolver (the worker-side
+  simplified BakedQuad form); fixed missing Z-sweep axis assignment;
+  permutes (x,y,z,w,h) per face direction for MeshBuilder.
+- MeshWorker: data-driven cache (INIT_REGISTRIES / UPDATE_BAKED_CACHE /
+  MESH_REQUEST / RESET_CACHE / MESH_ERROR); transferable buffers
+  updated to new RenderBuffers layout; fallback cube removed
+  (data-driven rule — unknown ids simply emit nothing).
+- WorldRenderer: real worker via `new Worker(new URL, { type:'module' })`;
+  gathers 27 neighbour sections and decompresses each to a flat
+  Uint32Array; separate opaque / translucent meshes per section;
+  `setBakedModelRegistry()` converts BakedModels to MeshSampleQuads
+  for full-cube models and derives the opaque-id set.
+- RendererCore: `setBakedModelRegistry()` forwarder.
+- PipelineOrchestrator: hands the registry to the renderer before
+  invalidating chunks so the worker has data to mesh with.
+- BakedModelRegistry: public `entries()` iterator.
+- meshing.ts: adds `UncompressedQuad` (shared between MeshBuilder +
+  GreedyMesher) and `MeshSampleQuad` (worker cache form); rewrites
+  `RenderBuffers` to match the shader attributes.
+```
+Add @types/node to @mc-planner/shared
+…
+d7c0ae0
+```
+ipc.ts references NodeJS.Platform but the package was missing the
+node typings. Surfaced as TS2503 'Cannot find namespace NodeJS' when
+running 'pnpm -r typecheck' from a fresh install.
+```
+Fix pre-existing strict-mode errors and remove dead duplicate
+…
+7afc2a9
+```
+- ecs/tsconfig.json: add DOM lib so console/performance/etc. resolve
+- ecs/src/ECS.ts: guard componentNames[0] for noUncheckedIndexedAccess
+- world-engine/chunk/Chunk.ts: only set onDirty when defined
+  (exactOptionalPropertyTypes rejects assigning undefined to optional)
+- world-engine/world/ChunkSection.ts: removed (20-line duplicate of
+  the real chunk/ChunkSection.ts; nothing imports it)
+- asset-pipeline/blockstates/BlockstateCompiler.ts: typed compiled
+  shape so .push() works; guard destructured [k, v] from split()
+- asset-pipeline/models/ModelResolver.ts: conditional elements
+  assignment to satisfy exactOptionalPropertyTypes
+
+These were surfaced by 'pnpm -r typecheck' (which doesn't build deps
+first). The remaining TS6305 'output file not built' errors disappear
+when running 'pnpm typecheck' via turbo, which respects dependsOn:^build.
+```
+turbo.json: rename 'pipeline' to 'tasks' for turbo 2.x
+…
+5aabd79
+```
+Turbo 2.0 renamed the top-level config field. The repo still had the
+1.x form so 'pnpm typecheck' (which invokes turbo) refused to run.
+```
+Use 'tsc -b --noEmit' for typechecks across all packages
+…
+ea0c235
+```
+tsc --noEmit on a composite project doesn't build referenced projects
+first — it requires their .d.ts files to already exist on disk, which
+gives TS6305 'Output file has not been built' errors when run from a
+clean tree. tsc -b --noEmit is build-aware: it typechecks referenced
+projects in dependency order, in-memory, without writing output.
+```
+Use 'tsc -b' for typecheck; add root .gitignore
+…
+d91f3fb
+```
+'tsc -b --noEmit' fails on composite project chains with TS6310
+'Referenced project may not disable emit' because --noEmit propagates
+to referenced projects, which composite projects forbid. Plain 'tsc -b'
+both typechecks AND emits the .d.ts files into dist/ — these are
+gitignored (the new .gitignore covers dist, node_modules, .turbo,
+electron build outputs, editor metadata, and caches).
+```
+Invert asset-pipeline → apps/desktop dependency
+…
+fb86d0c
+```
+CacheManager was reaching across rootDir into apps/desktop's
+appDirectories.ts (TS6059 / TS6307 layering errors). Packages must
+not depend on apps. Fix:
+
+- CacheManager exposes setAssetCacheRoot(rootDir) and stores the path
+  in a module-local. Throws with a clear message if invoked before
+  the host has configured the root.
+- apps/desktop/electron/ipc/assetHandlers.ts injects the cache root
+  on first lazy-import of the asset-pipeline package, using its own
+  getAppDirPath('cache').
+```
+BakedModelRegistry: restore missing class-closing brace
+…
+3bfbe96
+```
+My earlier 'entries()' iterator edit dropped the trailing '}' of the
+class body, surfacing as TS1005 "'}' expected" at the end of the file.
+```
+renderer-core: clear all strict-mode and Three.js r164 errors
+…
+69f06ba
+```
+- ao/AOGenerator.ts: defensive defaults for vOffsets[vertexIndex]
+  reads (noUncheckedIndexedAccess gives number | undefined)
+- atlas/index.ts: drop stale 'AtlasPacker' class export (file only
+  has the packRects function)
+- baking/ModelBaker.ts: default branch on facePositions switch to
+  satisfy 'function must return' under exhaustive FaceDir
+- baking/QuadTransformer.ts: cast Y/X rotation tables to
+  Readonly<Record<FaceDir,FaceDir[]>> — computed-key inference
+  widens numeric const keys to plain number otherwise
+- blockstate/BlockstateLoader.ts: rename returned 'compiled' to
+  'blockstatesCompiled' to match the declared signature
+- model/ModelResolver.ts: conditional 'rotation' assignment and
+  drop the explicit 'rotation: undefined' literal for the missing
+  cube — exactOptionalPropertyTypes rejects them
+- meshing/GreedyMesher.ts: default mask[maskIdx] to 0 instead of
+  letting it flow as number | undefined
+- meshing/MeshWorker.ts, WorldRenderer.ts: cast TypedArray.buffer
+  as ArrayBuffer at the postMessage boundary — TS 5.7+ widens to
+  ArrayBufferLike to cover SharedArrayBuffer, which we never produce
+- RendererCore.ts: pass logarithmicDepthBuffer via WebGLRenderer
+  constructor (no longer assignable as a property in Three.js r164)
+- packages/renderer-core/src/global.d.ts: declare Window.electronAPI
+  augmentation locally — 'declare global' doesn't propagate across
+  TS project references
+```
+apps/desktop: use TS project references for workspace deps
+…
+72b481e
+```
+When 'composite: true' is set, every source file must be under rootDir.
+The base tsconfig's 'paths' alias resolved @mc-planner/* to each
+package's src/index.ts, pulling those source files into the desktop
+compilation and producing dozens of TS6059 'not under rootDir' errors.
+
+Fix:
+- Add 'references' so desktop's tsc -b sees shared / renderer-core
+  as separate composite projects and reads their built .d.ts files.
+- Override 'paths' in both desktop tsconfigs to point at dist/index.d.ts
+  instead of src/index.ts. .d.ts files are allowed outside rootDir,
+  so the rootDir constraint stops firing.
+- Vite has its own alias map (apps/desktop/vite.config.ts) that
+  continues to resolve to src/index.ts for dev/build — this change
+  only affects 'tsc -b', not the bundler.
+- Set rootDir explicitly on both desktop tsconfigs.
+- Run BOTH tsconfigs through 'tsc -b' so the electron main process
+  is also typechecked.
+```
+apps/desktop dev: compile electron main before launch
+…
+e885e10
+```
+'pnpm -F @mc-planner/desktop dev' tried to start electronmon against
+dist/electron/main.js without ever building it first, producing
+'Cannot find module dist/electron/main.js' on a clean tree.
+
+- Run 'tsc -b tsconfig.electron.json' once before concurrently kicks
+  in, so the file exists when electronmon starts watching it.
+- Add a second concurrent process: 'tsc -b -w' for the electron main
+  so edits to electron/ recompile in the background. electronmon
+  picks up the new dist/electron/main.js and restarts the app.
+- 'tsc -b' (not '-p') so the composite reference chain (shared,
+  shared's deps) builds correctly from a clean state.
+```
+apps/desktop: fix dev entry path after rootDir change
+…
+b7b040b
+```
+Adding rootDir: '.' to tsconfig.electron.json (needed for the
+composite-project fix) means TS preserves the source layout under
+outDir. electron/main.ts now lands at dist/electron/electron/main.js,
+and preload/index.ts at dist/electron/preload/index.js.
+
+main.ts's preload reference (path.join(__dirname, '../preload/...'))
+still resolves correctly from the nested main location. The only
+broken references were package.json's 'main' field and the dev
+script's electronmon target — both updated to the new path.
+```
+apps/desktop: allow inline scripts in dev CSP for Vite Fast Refresh
+…
+7bcf1ef
+```
+@vitejs/plugin-react injects an inline preamble <script> in dev mode for
+React Fast Refresh / HMR. The previous strict CSP blocked it, so React
+never mounted (empty #root) and the renderer threw "can't detect
+preamble" on any component import.
+
+Conditionally add 'unsafe-inline' to script-src and allow the localhost
+HMR websocket only when isDev. Production CSP is unchanged.
+```
+renderer-core + apps/desktop: wire orbit camera + asset import panel
+…
+98e4752
+```
+Two latent bugs left the app uninteractive:
+
+1. OrbitCameraController existed at packages/renderer-core/src/camera/
+   but was never instantiated, and its math was wrong (orbited around
+   origin, mapped pitch directly to Y). Rewrote it with proper
+   spherical coordinates around a configurable target, screen-plane
+   panning on right/middle drag, pitch clamping, exponential wheel
+   zoom, and listeners on window (so dragging continues off-canvas).
+   Exported it from the package index and instantiated it in
+   RendererCore aimed at the test platform center (16, 64, 16).
+
+2. AssetLoader component existed but App.tsx never rendered it, so
+   there was no way to import JAR files. Added a 280px left sidebar
+   that hosts AssetLoader and feeds the loaded AssetIndex into App
+   state for downstream consumers (block picker, etc.).
+```
+Add pnpm-lock.yaml for reproducible installs
+da2b665
+Fix JAR import crash and StrictMode double-renderer race
+…
+46d7526
+```
+Two bugs surfaced in the console after wiring the orbit camera and asset
+panel:
+
+asset:loadJar → SyntaxError: Unexpected token 'export'
+  The Electron main process did 'await import("@mc-planner/asset-pipeline")',
+  but the package's package.json had main/types/exports all pointing at
+  src/index.ts — raw TypeScript with ES exports. Node loaded the .ts file
+  as JavaScript and choked.
+
+  Repointed main/types/exports at dist/index.js (CommonJS output) and
+  added the package to tsconfig.electron.json's project references so it
+  gets compiled as part of the electron build step. The renderer keeps
+  consuming source through the Vite alias in vite.config.ts.
+
+Camera unresponsive
+  Console showed [RendererCore] Initialized and [ViewportRoot]
+  Renderer + World initialized printing twice — React 18 StrictMode was
+  double-invoking the effect, and the async init() resolved after the
+  first cleanup, leaving two RendererCores (and two OrbitCameraControllers)
+  bound to the same canvas. Input events fired twice and cancelled out.
+
+  Added a 'cancelled' flag the cleanup sets, and an early return in init()
+  after the dynamic imports resolve, so only the surviving mount creates
+  a renderer.
+```
+OrbitCameraController: add diagnostic logging for camera-stuck debug
+…
+589180f
+```
+Camera still unresponsive after StrictMode race fix. Adding three logs
+to narrow down where input is being dropped:
+
+  - constructor: prints canvas bounding rect + initial camera position,
+    so we can confirm the controller is bound to a visible, non-zero-
+    sized canvas.
+  - handleMouseDown: prints every click on the canvas with button index
+    and target tag, so we can see whether clicks even reach the canvas.
+  - handleMouseMove: prints the first 3 drag events, so we can see
+    whether window-level mousemove is firing while dragging.
+
+Will be removed once the root cause is identified.
+```
+RendererCore: stamp init log with v2-orbit marker to verify fresh source
+…
+f365039
+```
+Diagnostic logs added in 589180f never appear in the user's console even
+though they're on the right commit and cleared the Vite cache. Adding a
+version marker to the existing Initialized log so we can prove definitively
+whether the running renderer-core is the latest source or a stale module
+cached somewhere we haven't found yet.
+```
+main.ts: clear Chromium caches on dev startup
+…
+b4cdbd7
+```
+Source edits in renderer-core weren't reaching the running Electron app
+even after clearing Vite's transform cache. The source-map line numbers
+in the renderer console pointed at the OLD positions of moved log lines,
+proving Chromium's HTTP/code cache inside Electron was serving stale
+bundles across restarts.
+
+Clear defaultSession's cache, code caches, and ephemeral storage on
+ready() in dev mode only. Production builds load from file:// and don't
+hit the HTTP cache path.
+```
+main.ts: hard-disable Chromium HTTP cache + cache-bust renderer URL i…
+…
+eb63006
+```
+…n dev
+
+Previous fix (clearCache on ready) cleared the disk cache but stale
+modules still got served — most likely because Chromium kept resources
+in its in-memory cache that persists across renderer reloads when the
+session is reused.
+
+Two additional belt-and-suspenders mitigations for dev only:
+
+  - app.commandLine.appendSwitch('disable-http-cache') before app is
+    ready. Disables HTTP caching at the Chromium level so the renderer
+    can't reuse any previously fetched module from any cache layer.
+
+  - Append ?t=<unix-ms> to the loadURL call. Even if some intermediary
+    held a stale entry, a unique URL forces a fresh fetch.
+
+Together these guarantee that 'pnpm dev' will always run the source on
+disk, not whatever Chromium decided to remember from the last session.
+```
+RendererCore: stamp window title + add clean-stale-dist helper
+…
+3894bec
+```
+Cache-investigation continues. File on disk has v2-orbit marker but
+running renderer still shows old log text. Adding two new diagnostics
+that bypass the console entirely:
+
+  - document.title is set from the RendererCore constructor to
+    'MC Universal Planner [v2-orbit]'. The OS window title is
+    impossible to cache, filter, or hide. If it doesn't update, we
+    know with absolute certainty that the new module isn't loading.
+
+  - scripts/clean-stale-dist.ps1 wipes leftover renderer-core/dist,
+    world-engine/dist, ecs/dist, and .vite optimized-dep cache so
+    Vite has zero ambiguity about which file is canonical for each
+    workspace package.
+```
+RendererCore: paint background magenta as visual fresh-source proof
+…
+020afd4
+```
+Title bar diagnostic from 3894bec didn't update either. Going one
+notch louder: paint the viewport background bright magenta. If the
+user still sees sky-blue after pulling this commit, the running
+RendererCore is definitively an old cached version (and not the
+one on disk which now has FF00FF).
+
+The fog colour is matched so transitions don't look weird while
+debugging.
+```
+Camera works: revert diagnostics, harden cleanup script
+…
+05877d3
+```
+Root cause confirmed: stray .js files were sitting alongside .ts source
+inside packages/renderer-core/src/ (legacy build output from before the
+tsconfig outDir was wired correctly). Vite's resolver prefers .js over
+.ts per Node convention, so it served the OLD compiled JS forever
+afterwards no matter how many caches we cleared. Deleting those files
+unblocked the dev loop and the orbit camera now responds to input.
+
+Cleanup:
+  - RendererCore: restore sky-blue scene background, restore original
+    [RendererCore] init log, drop the document.title hack.
+  - OrbitCameraController: drop the [OrbitCamera] attached / mousedown /
+    drag-move diagnostics now that we know the chain works.
+
+Defence in depth:
+  - scripts/clean-stale-dist.ps1 now also wipes stray .js / .js.map /
+    .d.ts(.map) inside every packages/*/src/ (preserving global.d.ts).
+    If anything ever pollutes src/ with build output again, one run of
+    this script fixes it.
+```
+Wire PipelineOrchestrator: JAR import now drives atlas + baker + shader
+…
+0e7012c
+```
+After AssetLoader finishes indexing and BlockstateLoader compiles, the
+loaded AssetIndex was reaching App but going nowhere. The full atlas →
+ModelResolver → BakedModelRegistry → BlockShader → re-mesh pipeline was
+already implemented in PipelineOrchestrator but had no caller.
+
+Flow now end-to-end:
+
+  AssetLoader → onAssetsLoaded(index)
+      ↓
+  App lifts AssetIndex into state
+      ↓
+  ViewportRoot receives assetIndex via prop and, in an effect keyed on
+  it, instantiates PipelineOrchestrator against the live RendererCore
+  and runs it.
+      ↓
+  Orchestrator builds the texture atlas, creates the ModelResolver
+  (IPC-backed against the asset pipeline in main), constructs the
+  BakedModelRegistry, hands a real ShaderMaterial to the WorldRenderer,
+  pushes the registry to the mesh worker, and dirties all chunks.
+      ↓
+  The mesh worker now has real BakedQuads for placed blocks and emits
+  textured geometry on the next remesh pass.
+
+Side wiring:
+  - StatusBar listens to a new window event 'pipeline:progress'
+    emitted from ViewportRoot during the orchestrator run, so the
+    user sees "Pipeline: atlas 42%" / "shader 100%" / "Assets baked"
+    instead of a frozen "Ready" while a large modpack bakes.
+  - RendererCore lifecycle is unchanged; pipeline effect uses a
+    rendererReadyTick so it re-binds against the renderer after a
+    StrictMode remount.
+```
+clean-stale-dist: also wipe orphan .tsbuildinfo files
+…
+7d79956
+```
+JAR import crashed with 'Cannot find module asset-pipeline/dist/index.js'
+even after a clean pnpm install. Root cause: each package's
+tsconfig.tsbuildinfo lives at the package root, not inside dist/. So
+deleting dist/ leaves the buildinfo orphaned. On the next 'tsc -b' run,
+TypeScript reads the buildinfo, sees content hashes still match the
+source, decides the build is up to date, and refuses to re-emit the
+missing .js output.
+
+Cleanup script now also recursively deletes every *.tsbuildinfo under
+the repo (outside node_modules), forcing tsc to do a full rebuild from
+source on the next dev launch.
+```
+App: log full asset index shape on load for entries-vs-header diagnosis
+…
+a6f05e2
+```
+Pipeline reported 1168 blocks / 3517 textures in the header but
+BlockstateLoader compiled 0 and AtlasBuilder packed 0 sprites — meaning
+index.entries[] is either empty, truncated, or has type fields that
+don't match the filter ('blockstate' / 'texture').
+
+Log the header counts side-by-side with the actual entries array length
+and per-type counts plus a 3-row sample. One look at the output tells us
+whether IPC is dropping rows, whether a stale cache file is feeding back
+broken data, or whether the type field is being mangled somewhere.
+```
+Pipeline: pre-bake registered BlockStates before syncing worker
+…
+b535bdf
+```
+After cache wipe, blockstate compile and atlas build both succeeded
+(1168 blockstates, 2193 atlas sprites) — but the mesh worker still got
+0 mesh entries and the test platform stayed invisible.
+
+Root cause: BakedModelRegistry is lazy. Its entries() iterator only
+yields BAKED models, and bakeSync() is a no-op until the resolver has
+fetched the model JSON. We were handing the registry to the worker
+immediately after construction, when nothing had been baked yet.
+
+Fix: between registry construction and setBakedModelRegistry, iterate
+every id currently in globalBlockStateRegistry (skipping air at index
+0) and call prebake() — which uses bakeAsync and properly awaits the
+ModelResolver IPC fetch. After this loop the registry contains real
+BakedModel data for every state placed in the world, so the worker
+receives non-empty mesh entries and the chunk re-mesh produces actual
+geometry.
+
+Surfaced as 'Pipeline: baking models X%' in the status bar so large
+modpacks show progress instead of a frozen 'shader 0%'.
+```
+AssetPipeline: detect and reject corrupt index, log cache hit/miss
+…
+c29b8c5
+```
+Pipeline regressed to BlockstateLoader compiling 0 / AtlasBuilder
+producing 0 sprites despite the JAR header reporting 1168 blocks and
+3517 textures. Means index.entries[] is empty but counts are populated
+— a corrupt index getting fed back through the system.
+
+Two defensive layers:
+
+1. On cache read: if cached entries[] is empty but cached header counts
+   are > 0, discard the cache and re-extract instead of returning the
+   poison payload. Also emit a clear "Cache hit" / "Cache miss" log so
+   we can see in the main-process terminal whether we're reading from
+   disk or extracting fresh.
+
+2. On cache write: if the newly-built index has the same empty/non-zero
+   contradiction, log an error and SKIP persisting. This stops a single
+   bad run from poisoning every subsequent import. Also log the indexed
+   entry counts on a successful build so we can confirm the JAR is being
+   parsed correctly on the main side.
+
+If after pulling this we still see "Pre-baked 0 blockstates", the main-
+process terminal will tell us exactly where the entries are getting
+dropped.
+```
+BlockShader: drop redundant attribute/uniform declarations
+…
+c927d8b
+```
+Vertex shader was failing to compile silently:
+  'THREE.WebGLProgram: Shader Error 0 - VALIDATE_STATUS false'
+  'Vertex shader is not compiled.'
+
+Root cause: Three.js's ShaderMaterial auto-injects declarations for
+position, normal, uv, modelViewMatrix, projectionMatrix, and
+normalMatrix before the user GLSL source. The block shader redeclared
+all of them which produced a GLSL duplicate-symbol error.
+
+Removed the duplicate declarations from both vertex and fragment
+sources. Custom attributes (ao, tintColor) stay declared because Three
+doesn't know about them. With this the program links, the worker's
+1764 mesh entries actually reach the GPU, and the test platform
+renders.
+```
+App: dump entries type histogram + sampled rows as JSON strings
+…
+e0b9980
+```
+User's latest console showed sample: Array(3) — meaning entries are
+NOT empty (filter not catching that). But BlockstateLoader/AtlasBuilder
+still report 0 results, which means the entries are present but their
+'type' field doesn't match 'blockstate'/'texture'.
+
+To avoid another round-trip asking the user to expand objects in
+DevTools, log:
+  - a complete histogram of every distinct 'type' value across the
+    entries array (with '<undefined>' as a bucket for missing field)
+  - the first entry as a JSON string
+  - entries at indexes 100, 500, 1000 as JSON strings
+
+Whichever entry-type bucket has the bulk of the 1168/3517 count is the
+string the renderer's filters should be matching against. One screenshot
+of this log pinpoints whether it's a type-rename, a case mismatch, or
+a structural change in the entry shape.
+```
+claude
+added 5 commits
+May 25, 2026 15:24
+AssetPipeline: re-populate raw data on cache hit
+…
+1b1ba9a
+```
+Diagnostic histogram in the renderer confirmed the AssetIndex was
+correct end-to-end: 1168 blockstate entries, 3517 texture entries,
+3673 model entries, all with the right 'type' field. Yet
+BlockstateLoader compiled 0 and AtlasBuilder packed 0 sprites.
+
+Root cause: AssetRegistry.restoreFromCacheIndex() is a no-op. On a
+cache hit we returned the metadata index but the in-process rawData
+Map stayed empty, so every getBlockstateJson() / getModelJson() IPC
+call returned null, downstream consumers found nothing to compile,
+and the world stayed empty.
+
+This is why everything worked the one time the cache was wiped
+(forced a cache miss → ran the extractJar loop → populated rawData)
+and broke on every reimport afterwards (cache hit → metadata only,
+no raw data).
+
+Fix: on cache hit, iterate jarPaths and call extractJar() on each
+purely for its side-effect of storing raw buffers into the registry.
+We discard the returned metadata entries since the cached index is
+authoritative and JAR hashes matching guarantees byte identity.
+
+The full raw-data-on-disk persistence path remains a future
+optimisation; this restores correctness without that infrastructure.
+```
+WorldRenderer: instrument dirty→dispatch→complete→upload chain
+…
+83dc3ca
+```
+Pipeline reports 1764 mesh entries synced + all chunks invalidated, but
+no visible geometry. Adding logs at every transition point to find
+where the chain breaks:
+
+  - update(): drained N entries, dispatching N jobs
+  - onMeshComplete(): per-section opaque/translucent index counts
+  - uploadOrRemove(): mesh added to chunkGroup, total children count
+
+After the next pipeline run, the console should print:
+  drained 96 dirty entries
+  dispatching N mesh jobs
+  mesh complete @ (...) opaque=288 idx, translucent=0 idx
+  added mesh section_..._o to chunkGroup (now N children)
+
+If the first log fires but later ones don't, the worker isn't returning
+results. If they all fire but nothing renders, the mesh is in the scene
+but invisible (transform/material/culling). If even the first doesn't
+fire, markAllDirty isn't actually marking the test chunks dirty.
+```
+BlockShader: force solid red fragment as visibility diagnostic
+…
+23ef73e
+```
+Console confirms 4 meshes built with 24 indices each, added to
+chunkGroup at expected section positions, using the block shader
+material — yet nothing visible in the viewport. The shader's
+alpha-discard at < 0.1 is the strongest suspect: if the atlas UVs
+land in transparent padding, every fragment is discarded.
+
+Override the fragment shader to emit solid (1,0,0,1) regardless of
+texture / uv / ao / tint. Reading the result:
+  - Visible red plates at the platform → geometry/camera are fine,
+    bug is in texture sampling or UV mapping.
+  - Still nothing visible → geometry is degenerate or frustum-culled.
+
+Reverted once the question is answered.
+```
+BlockShader: diagnostic atlas/UV sample (no discard, no multipliers)
+…
+bfdad46
+```
+Red-square test confirmed geometry/transforms/camera are all correct
+— the platform shows up exactly where expected, just tiny because
+greedy meshing merges each chunk's slab into a single quad and the
+camera is far. The pre-red shader was invisibly discarding every
+fragment.
+
+Next step is to narrow the texture/UV pipeline. New override does:
+
+  gl_FragColor = vec4(texture2D(uAtlas, vUv).rgb, 1.0);
+
+with no alpha discard and none of the colour multipliers (vTint,
+vAo, vFaceShade, uSkyLight). Reading what shows up:
+
+  - Stone texture visible → atlas + UVs are fine; the bug was either
+    the alpha discard or one of the multipliers being zero.
+  - Solid black plates    → atlas uniform not bound; texture2D returns
+    (0,0,0,0).
+  - Wrong-colour pixels   → UVs are pointing to the wrong sprite.
+
+A commented-out vUv visualiser stays in the file for the next round
+if needed.
+```
+Fix atlas texture upload + restore real BlockShader fragment
+…
+87fee4c
+```
+Diagnostic confirmed: red-debug shader renders the platform, atlas-
+direct shader renders the platform solid black → atlas texture wasn't
+reaching the GPU sampler.
+
+AtlasBuilder was creating an OffscreenCanvas, painting all sprites
+into it, then snapshotting it as ImageBitmap (correctly) but then
+constructing THREE.CanvasTexture from the original OffscreenCanvas
+and DISCARDING the bitmap. CanvasTexture + OffscreenCanvas interop in
+Three.js is inconsistent across versions (sometimes the canvas is
+uploaded before all draws have flushed; sometimes the upload silently
+fails on the worker boundary) so the sampler was reading from the
+default 1×1 black texture instead.
+
+Fix: use the already-created ImageBitmap as the texture image source
+via plain THREE.Texture. ImageBitmap is universally supported as a
+TexImageSource and uploads deterministically. flipY=false because
+ImageBitmap is already top-down (the default flipY=true would mirror
+every sprite vertically and break UV mapping).
+
+Side cleanup:
+  - BlockShader fragment restored to real lighting (tint × faceShade ×
+    AO × skyLight + fog), with alpha discard back at 0.1. Forces
+    gl_FragColor alpha=1 to keep the cutout path simple while we
+    confirm; will revisit when translucent pass lands.
+  - WorldRenderer instrumentation logs removed now that the dirty →
+    dispatch → upload chain is confirmed working.
+```
+DreamerTone
+merged commit 87fee4c
+into
+main
+May 25, 2026
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

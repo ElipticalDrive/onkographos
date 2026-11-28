@@ -1,0 +1,170 @@
+--- v008.md
++++ v009.md
+@@ -1,57 +1,54 @@
+ # Binary Search IsoSurface Extraction
+ 
+-Also called: Bisection Isosurface Extraction, Isovalue Stepping, RayEvaluationSteppingIso
++Also called: Bisection Isosurface Extraction, Isosurface Raycasting with Bisection, Isovalue Stepping, RayEvaluationSteppingIso
+ 
+ ## Overview
+-Binary Search IsoSurface Extraction approximates the position of an isosurface between two sample points by iteratively halving the interval based on scalar field values [S1, unofficial]. It solves the problem of locating the precise intersection of a ray with an implicit surface defined by a scalar volume, offering higher accuracy than coarse marching methods while remaining simpler than analytical root finding [S3, unofficial]. It distinguishes itself from [Trilinear Isosurface Intersection](2213-trilinear-isosurface-intersection.md) by using iterative bisection rather than solving the trilinear equation analytically, and from [Hybrid Implicit Isosurface Ray Tracing](3832-hybrid-implicit-isosurface-ray-tracing.md) by not requiring spatial acceleration structures for the search phase [S1, unofficial][S2, unofficial].
++Binary Search IsoSurface Extraction approximates the position of an isosurface between two sample points by iteratively halving the interval based on scalar field values [S1, S3, unofficial]. It solves the problem of locating the precise intersection of a ray with a scalar volume's isovalue surface without requiring analytical derivatives or complex root-finding algorithms [S1, S2, unofficial]. Unlike [Trilinear Isosurface Intersection](2213-trilinear-isosurface-intersection.md), which assumes linear variation within a voxel, this method uses discrete sampling and bisection, making it robust for non-linear or noisy data but potentially slower due to multiple texture lookups [S1, S3, unofficial]. It serves as the geometric foundation for [Isocontour Shading with Curvature](3819-isocontour-shading-with-curvature.md) and [Surface Location via Segment Endpoint Values](3756-surface-location-via-segment-endpoint-values.md) [S1, S2, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs**
+-*   **Inputs**:
+-    *   `left`: 3D point where the scalar field value is less than or equal to the isovalue.
+-    *   `right`: 3D point where the scalar field value is greater than the isovalue.
+-    *   `iso`: The target isovalue (scalar or batched tensor) [S1, unofficial][S2, unofficial].
+-    *   `texVol`: The volume texture object containing the scalar field [S1, unofficial].
+-    *   `rec_depth`: The number of binary search iterations (typically 5) [S1, unofficial].
+-*   **Outputs**:
+-    *   `surf`: The 3D position of the estimated isosurface intersection [S1, unofficial].
++**Inputs:**
++*   `left`: 3D vector representing the start of the search interval (typically the ray entry point or previous sample).
++*   `right`: 3D vector representing the end of the search interval (typically the ray exit point or next sample).
++*   `iso`: The scalar isovalue defining the surface. Can be a single scalar or a batched tensor [S1, S2, unofficial].
++*   `texVol`: A 3D texture object providing access to the volume scalar field [S1, S2, unofficial].
++*   `rec_depth` (or `binarySearchSteps`): The fixed number of bisection iterations [S1, S2, S3, unofficial].
+ 
+-**Data Structures**
+-The method relies on standard 3D vector types (`vec3`) and scalar types (`float`). In GPU implementations (CUDA), parameters are often packed into a struct for constant memory access [S2, unofficial]:
++**Outputs:**
++*   `surf`: A 3D vector representing the estimated intersection point on the isosurface [S1, unofficial].
+ 
++**Data Structures:**
++In GPU implementations (e.g., CUDA), parameters are often packed into a struct for constant memory access [S2, unofficial]:
+ ```cpp
+ struct Parameters {
+     scalar_t stepsize;
+     int binarySearchSteps;
+-    // If isovalue is batched:
+-    ::kernel::Tensor1Read<scalar_t> isovalue;
+-    // If isovalue is scalar:
+-    // scalar_t isovalue; 
++    // If batched: ::kernel::Tensor1Read<scalar_t> isovalue;
++    // If scalar: scalar_t isovalue;
+     scalar_t isocontourRange;
+-    cudaTextureObject_t isocontourTexture;
++    cudaTextureObject_t isocontourTexture; // For curvature features
+ };
+ ```
+ 
+-**Algorithm Steps**
+-1.  Initialize the interval boundaries `left` and `right` such that $V(\mathbf{left}) \le \text{iso}$ and $V(\mathbf{right}) > \text{iso}$, where $V$ is the sampled scalar value [S1, unofficial].
+-2.  Loop `iter` from $0$ to `rec_depth` - 1:
+-    a.  Compute the midpoint: $\mathbf{mid} = \frac{\mathbf{right} + \mathbf{left}}{2.0}$ [S1, unofficial].
+-    b.  Sample the scalar value at the midpoint: $v_{mid} = \text{texture}(\text{texVol}, \mathbf{mid}).x$ [S1, unofficial].
+-    c.  Compare $v_{mid}$ with `iso`:
+-        *   If $v_{mid} \le \text{iso}$, the surface lies in the right half; update $\mathbf{left} = \mathbf{mid}$ [S1, unofficial].
+-        *   Else, the surface lies in the left half; update $\mathbf{right} = \mathbf{mid}$ [S1, unofficial].
+-3.  Return the final surface position as the midpoint of the final interval: $\mathbf{surf} = \frac{\mathbf{right} + \mathbf{left}}{2.0}$ [S1, unofficial].
++**Algorithm Steps:**
++1.  Initialize the interval boundaries `left` and `right` [S1, unofficial].
++2.  Loop `iter` from 0 to `rec_depth - 1` [S1, unofficial]:
++    a. Compute the midpoint: `mid = (left + right) / 2.0` [S1, unofficial].
++    b. Sample the scalar value at the midpoint: `curIso = texture(texVol, mid).x` [S1, unofficial].
++    c. Compare `curIso` with `iso`:
++       - If `curIso <= iso`, the surface is in the right half (or at mid); set `left = mid` [S1, unofficial].
++       - Else (`curIso > iso`), the surface is in the left half; set `right = mid` [S1, unofficial].
++3.  Return the final surface position as the midpoint of the final interval: `surf = (left + right) / 2.0` [S1, unofficial].
+ 
+-**Pseudocode**
++**Pseudocode:**
+ ```python
+-def binary_search_isosurface_extraction(left: vec3, right: vec3, iso: float, texVol: Texture, rec_depth: int = 5) -> vec3:
++def binary_search_isosurface(left: vec3, right: vec3, iso: float, texVol: Texture3D, rec_depth: int = 5) -> vec3:
+     """
+     Finds the isosurface intersection between left and right using binary search.
+     
+     Args:
+-        left: Point where scalar value <= iso.
+-        right: Point where scalar value > iso.
+-        iso: Target isovalue.
+-        texVol: Volume texture for sampling.
++        left: Start point of the interval.
++        right: End point of the interval.
++        iso: The target isovalue.
++        texVol: 3D texture object for volume sampling.
+         rec_depth: Number of bisection iterations.
+         
+@@ -60,12 +57,7 @@
+     """
+     for iter in range(rec_depth):
+-        # Calculate midpoint
+-        mid = (right + left) / 2.0
++        mid = (left + right) / 2.0
++        cur_iso = texVol.sample(mid).x  # Assuming .x accesses the scalar component
+         
+-        # Sample scalar value at midpoint
+-        # Assuming texture access returns a vector, take the first component
+-        cur_iso = texVol.sample(mid).x
+-        
+-        # Bisection step
+         if cur_iso <= iso:
+             left = mid
+@@ -73,23 +65,22 @@
+             right = mid
+             
+-    # Final surface position
+-    surf = (right + left) / 2.0
++    surf = (left + right) / 2.0
+     return surf
+ ```
+ 
+-**Parameters**
+-*   `rec_depth`: Fixed number of bisection iterations. Default/Fixed value is 5 [S1, unofficial].
+-*   `iso`: The scalar density value defining the surface. Can be a single double or a batched tensor. Default 0.5 [S2, unofficial].
+-*   `binarySearchSteps`: In some implementations, this controls the refinement steps. Range 0-20. Default 0 (implying fixed depth or separate logic) [S2, unofficial].
++**Parameters:**
++*   `rec_depth`: Fixed number of bisection iterations. Default is 5 [S1, S3, unofficial]. This provides a precision of $2^{-5} = 1/32$ of the initial interval length.
++*   `binarySearchSteps`: Alternative parameter name for the iteration count. Range 0-20. Default 0 (if 0, no refinement is performed) [S2, unofficial].
++*   `iso`: Default 0.5 [S2, unofficial].
+ 
+-**Edge Cases and Pitfalls**
+-*   **Bracketing Requirement**: The method assumes `left` and `right` strictly bracket the isovalue ($V(\mathbf{left}) \le \text{iso} < V(\mathbf{right})$). If the initial interval does not bracket the surface, the algorithm will converge to a local extremum or boundary rather than the intersection [G].
+-*   **Precision**: The accuracy is limited by `rec_depth`. With 5 iterations, the interval size is reduced by a factor of $2^5 = 32$. For high-resolution volumes, this may still result in visible aliasing if the initial step size is large [S1, unofficial].
+-*   **Texture Sampling**: The method relies on `texture(texVol, mid)`. If `mid` falls outside the volume bounds, the result depends on the texture addressing mode (clamp, repeat, or border color) [G].
++**Edge Cases and Pitfalls:**
++*   **Bracketing:** The method assumes the isovalue is bracketed by `left` and `right` (i.e., one side is $\le iso$ and the other is $> iso$). If the volume does not cross the isovalue within the interval, the result is arbitrary [S1, unofficial].
++*   **Precision:** The accuracy is limited by the number of iterations and the sampling resolution. [S3, unofficial] notes that adaptive sampling may be required for small features or silhouettes where standard sampling fails [S3, unofficial].
++*   **Performance:** Each iteration requires a texture lookup. [S3, unofficial] reports that at a sampling distance of 1.0, performance is 24 fps, while at 5.0, it is 66 fps, indicating sensitivity to the number of steps and sampling density [S3, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Surface Location via Segment Endpoint Values](3756-surface-location-via-segment-endpoint-values.md)
+-This method locates isosurface intersections as a function of the scalar field values at the segment endpoints along a ray to eliminate coverage gaps that cause aliasing artifacts. It builds on [Binary Search IsoSurface Extraction](1316-binary-search-isosurface-extraction.md) by using endpoint values to determine surface presence without intermediate sampling checks [G].
++This variant locates isosurface intersections as a function of the scalar field values at the segment endpoints along a ray to eliminate coverage gaps that cause aliasing artifacts. It builds on [Binary Search IsoSurface Extraction](1316-binary-search-isosurface-extraction.md) by using endpoint values to determine surface presence without intermediate sampling checks [G].
+ 
+ ### [Isocontour Shading with Curvature](3819-isocontour-shading-with-curvature.md)
+@@ -100,20 +91,21 @@
+ 
+ ### Isosurface Function
+-A ray function that computes whether a given isovalue $\sigma$ exists along the ray. It produces the same result as marching cubes but with higher accuracy [S3, unofficial].
++A ray function that computes whether a given isovalue $\sigma$ exists along the ray. It produces the same result as marching cubes but with higher accuracy [S4, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: $O(k)$, where $k$ is the number of binary search iterations (typically 5). This is constant time per ray intersection, independent of volume resolution, but dependent on the initial interval size for convergence quality [S1, unofficial].
+-*   **Memory Complexity**: $O(1)$ auxiliary memory per thread. The volume data is accessed via texture memory [S1, unofficial].
+-*   **Performance**: Very fast for single-surface extraction. The fixed iteration count makes it predictable for GPU execution [S1, unofficial].
+-*   **Strengths**: Simple to implement; robust convergence if the function is monotonic within the interval; higher accuracy than linear interpolation [S3, unofficial].
+-*   **Limitations**: Requires a valid bracketing interval; may miss thin structures if the initial step size is too large; does not provide surface normals directly (requires gradient sampling) [G].
+-*   **When to use**: When high precision is needed for a single isosurface and the volume is well-sampled; when analytical solutions are too complex [S3, unofficial].
+-*   **When not to use**: When multiple isosurfaces need to be extracted simultaneously (use Marching Cubes or similar); when the scalar field is not monotonic within the search interval [G].
++*   **Time Complexity:** $O(k)$, where $k$ is the number of bisection steps (typically 5-20) [S1, S2, S3, unofficial]. Each step involves a constant-time texture lookup and arithmetic operations.
++*   **Memory Complexity:** $O(1)$ auxiliary memory per ray, plus the volume texture storage [S1, S2, unofficial].
++*   **Performance:** [S3, unofficial] reports 24 fps at sampling distance 1.0 and 66 fps at sampling distance 5.0 on the tested hardware [S3, unofficial]. The method has virtually no impact on performance when used for refinement [S3, unofficial].
++*   **Strengths:** Simple to implement; robust for non-linear fields; does not require gradient computation [S1, S3, unofficial].
++*   **Limitations:** Slower than analytical methods if high precision is required (many iterations); susceptible to aliasing if the interval is too large or sampling is sparse [S1, S3, unofficial].
++*   **When to use:** When the volume data is discrete or noisy, and high precision is needed without computing gradients [S1, S3, unofficial].
++*   **When not to use:** When real-time performance is critical and the field is smooth enough for linear interpolation [S1, unofficial].
+ 
+ ## Background
+-The method originates from the general class of ray evaluation stepping techniques in volume visualization [S2, unofficial]. It is described in educational contexts as a way to achieve higher accuracy than marching cubes by using software or hardware ray casting [S3, unofficial]. The specific implementation with `rec_depth = 5` is found in open-source ray tracing examples [S1, unofficial]. The CUDA-based implementation with curvature shading is part of the fV-SRN renderer [S2, unofficial].
++The method originates from early volume ray-casting techniques that sought to accurately locate isosurfaces without the geometric complexity of marching cubes [S4, unofficial]. It was further refined in the context of GPU-based volume ray-casting with advanced illumination techniques, where it was used to refine intersection points detected by coarser methods [S3, unofficial]. The approach is widely used in scientific visualization for its simplicity and reliability [S1, S4, unofficial].
+ 
+ ## Sources
+ [S1] ShashwatC/Ray, https://github.com/ShashwatC/Ray, fetched 2026-10-26 (unofficial)
+ [S2] shamanDevel/fV-SRN, https://github.com/shamanDevel/fV-SRN, fetched 2026-10-26 (unofficial)
+-[S3] PDF CS 519: Scientific Visualization - University of Illinois Urbana-Champaign, https://courses.grainger.illinois.edu/cs519/fa2017/Lecture%2012%20-%20Volume%20Visualization.pdf, fetched 2026-10-27 (unofficial)+[S3] GPU-Based Volume Ray-Casting with Advanced Illumination, https://www.uni-ulm.de/fileadmin/website_uni_ulm/iui.inst.100/institut/Papers/viscom/2008/advanced_illumination.pdf, fetched 2026-10-29 (unofficial)
++[S4] PDF CS 519: Scientific Visualization - University of Illinois Urbana-Champaign, https://courses.grainger.illinois.edu/cs519/fa2017/Lecture%2012%20-%20Volume%20Visualization.pdf, fetched 2026-10-27 (unofficial)

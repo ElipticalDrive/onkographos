@@ -1,0 +1,137 @@
+Overview §1.9 (🟡). § L3's exit criteria are asserted in ExitCriteriaTests against a 4096-sample Hammersley reference. Owed is quality rather than criteria: the adaptive probes' device half, importance sampling, and bilinear history taps....
+
+1.9 Screen probe gather: adaptive probes' device half, importance sampling, bilinear history · Issue #68 · Rikarin/Vixen · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+1.9 Screen probe gather: adaptive probes' device half, importance sampling, bilinear history #68
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+1.9 Screen probe gather: adaptive probes' device half, importance sampling, bilinear history#68
+Copy link
+Labels
+area: renderingSubsystem: renderingSubsystem: renderingroadmapA numbered roadmap item (1.x / Phase N)A numbered roadmap item (1.x / Phase N)
+Description
+Rikarin
+opened on Sep 1, 2026
+Issue body actions
+Overview §1.9 (🟡). § L3's exit criteria are asserted in ExitCriteriaTests against a 4096-sample Hammersley reference. Owed is quality rather than criteria: the adaptive probes' device half, importance sampling, and bilinear history taps. ⚠ ScreenTraces is off by default — probe origins are a frame older than the depth the rays march.
+Filed from the Vixen internal backlog as task #249.
+Activity
+Rikarin commented on Sep 3, 2026
+Rikarin
+on Sep 3, 2026
+OwnerAuthor
+More actions
+Landed: the history reprojected into the vertically mirrored tile
+Not one of the three owed items — a defect found while surveying for the bilinear taps, in the
+function that would carry them.
+ScreenProbeHistory.TryReproject (Core/Vixen.Rendering.ScreenProbes/ScreenProbeHistory.cs:280)
+mapped clip y to a pixel row without the negation:
+```
+var y = (int)MathF.Floor(((ndc.Y * 0.5f) + 0.5f) * Layout.Viewport.Y);
+```
+Transform.NdcToUv negates y and does not negate x, and every sibling spells that out —
+ScreenSpaceTrace.rvn-side twin at ScreenSpaceTrace.cs:197,224, ReconstructedScreenSurface.cs:123
+(with its own ⚠ correcting an earlier comment that claimed the opposite), and the shader at
+Raven/Library/ScreenProbes/ScreenProbeAccumulate.rvn:94. This one function did not.
+Scope — deliberately understated
+⚠ No shipped frame was wrong. ScreenProbeHistory has no runtime caller: grepping for the type
+outside its own file and the tests finds only three doc-comment references. The shader, which is what
+a frame runs, had the sign. What was wrong is:
+§ L3's exit criteria for ghosting and pan (ACameraCutKeepsNoGhost, AFastPanSmearsNothing), which
+are asserted through this reference; and
+the shader/reference parity in ScreenProbeAccumulateDeviceTests, which is the only thing holding
+the two halves together.
+Why it survived — two independent reasons, both worth keeping
+The plane test cannot object. A mirrored probe on the same floor is coplanar with the surface
+asking, so ScreenProbeAtlas.Mismatch is zero and the wrong history is accepted. The mechanism
+built to catch a bad reprojection is blind to this particular bad one.
+⚠ Nothing that could have caught it varied down the screen. ScreenProbeHistoryTests.Seeded
+builds surfaces with World(anchor.Y) — y-down, agreeing with the code under test and with
+nothing else, so the fixture checked the reprojection against itself. Every scenario in that file
+and in ExitCriteriaTests is uniform, varies along x (AFastPanSmearsNothing pans in x), or moves
+a plane in z (ACameraCutKeepsNoGhost). All eight pre-existing history tests pass under both
+conventions — which is the proof that they measured nothing about this one.
+The device parity test had the same hole for a different reason: it can only see a disagreement,
+and no frame in its matrix varied along y, so the two halves disagreed invisibly from the day both
+were written.
+Evidence
+Two new facts in ScreenProbeHistoryTests, both placing surfaces by unprojecting each anchor pixel
+the way ReconstructedScreenSurface does — which is what the real pipeline feeds this — rather than
+inventing a pixel-to-world map: one with radiance varying by row, one with each row on its own
+plane so the rejection count speaks. Red against the old sign at 1.5 for every row (y blended with
+3 − y — uniform, which is how it hid) and at 16 rejections out of 16.
+One frame added to ScreenProbeAccumulateDeviceTests' matrix whose radiance varies by row.
+Sabotage-tested: with the old sign restored it fails on a real device (MoltenVK, 22/22 → 1 fail),
+at exactly that frame, reference 1.519 vs device 3.038.
+Core/Vixen.Rendering.ScreenProbes.Tests 79/79, 0 skipped. Screen-probe golden tests 22/22, 0 skipped,
+VIXEN_REQUIRE_VULKAN=1 on a real device. ./build.sh CheckFormat green.
+Still owed — all three original items, untouched
+Bilinear history taps. The tap is still a single nearest-tile fetch
+(ScreenProbeHistory.cs:138-152, one [index] load each; shader ScreenProbeAccumulate.rvn:137-151,
+integer Loads with no sampler declared). ⚠ Whoever takes it must do both halves together — the
+device test asserts they agree — and must not break AFastPanSmearsNothing, which asserts
+exactness per column and is built to catch precisely the smear a naive four-tap blend produces.
+Per-tap plane rejection with weight renormalisation, as ScreenProbeUpsample.rvn:150-186 already
+does, is the shape.
+The adaptive probes' device half. Confirmed genuinely absent, not merely unreached: the host
+half is complete (ScreenProbeLayout.AdaptiveRows/AdaptiveCapacity/AdaptiveOrigin,
+ScreenProbeAtlas.PlaceAdaptive, TracedScreenProbeGather.PlaceAdaptive), and there is no shader
+struct, buffer, dispatch or stub anywhere. ScreenProbeTraceFill.Stage loops the grid only, and
+ScreenProbeGatherRenderer.EnsureLattice builds new(new(size, TileSize)) — adaptiveRows
+defaults to 0, so the device lattice has no adaptive capacity at all.
+Importance sampling. Confirmed absent. Directions are a deterministic full-sphere octahedral
+texel-centre sweep (ScreenProbeAtlas.rvn:28-37, ScreenProbeTrace.rvn:458), and the only per-ray
+weight is the exact solid angle applied as a multiply — there is no 1/pdf division on either
+side, so this item has to introduce one that does not currently exist.
+⚠ One caveat on the exit criteria, for whoever reads them as a gate
+ExitCriteriaTests never runs a shader. Its project references only Vixen.Rendering.ScreenProbes,
+.DistanceFields and .IrradianceFields — no device. The chain is shader ≡ C# reference (the golden
+tests) and C# reference ≈ C# Monte Carlo (here), never shader ≈ ground truth. It also shares
+DistanceFieldTracer.Trace with the subject under test, so a bug in the sphere-marcher cancels on both
+sides. That is exactly the gap this fix fell through, one level up.
+Rikarin commented on Sep 3, 2026
+Rikarin
+on Sep 3, 2026
+OwnerAuthor
+More actions
+A defect landed on master in 5d639ead; the three quality items this issue names are untouched. Staying open.
+⚠ ScreenProbeHistory.TryReproject mapped clip y to a pixel row without the negation Transform.NdcToUv requires — found while surveying for the bilinear taps, in the very function that would carry them. Every sibling spells it out: ScreenSpaceTrace.cs:197,224, ReconstructedScreenSurface.cs:123, and the shader ScreenProbeAccumulate.rvn:94. This one did not, so a surface reprojected into the vertically mirrored tile.
+Scope, deliberately understated: no shipped frame was wrong. ScreenProbeHistory has no runtime caller — the shader, which is what a frame actually runs, had the sign. What was wrong is § L3's ghosting and pan exit criteria, which are asserted through this reference, and the shader/reference parity that is the only thing holding the two halves together.
+⚠ Two independent reasons it survived, and both are instrument failures rather than oversights:
+The plane test cannot object. A mirrored probe on the same floor is coplanar, so Mismatch is zero and the wrong history is accepted.
+Nothing that could catch it varied down the screen. Seeded builds surfaces y-down, agreeing with the code under test and nothing else — so the fixture was checking the reprojection against itself.
+I verified the second claim independently rather than taking it. Restoring the old sign fails exactly the two new tests and none of the other 77 — all eight pre-existing history tests included. They measured nothing about this axis.
+Evidence: two facts that place surfaces by unprojecting each anchor the way ReconstructedScreenSurface does — red before the fix at 1.5 for every row (y blended with 3−y, uniform, which is how it hid) and 16 rejections of 16. Plus one y-varying frame in the device parity matrix, which fails on a real adapter with the old sign at reference 1.519 against device 3.038. Vixen.Rendering.ScreenProbes.Tests 79/79 and the screen-probe golden 2/2 on a real device, 0 skipped either way.
+⚠ The gap this fell through is one level up, and is not closed. ExitCriteriaTests never runs a shader — its project references no device. The chain is shader ≡ C# reference and reference ≈ C# Monte Carlo, never shader ≈ ground truth, and it shares DistanceFieldTracer.Trace with the subject under test.
+Still owed here: the adaptive probes' device half, importance sampling, and the bilinear history taps. No optimisation was measured, and none is claimed.
+Rikarin
+added
+area: renderingSubsystem: renderingSubsystem: rendering
+roadmapA numbered roadmap item (1.x / Phase N)A numbered roadmap item (1.x / Phase N)
+on Sep 4, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+area: renderingSubsystem: renderingSubsystem: renderingroadmapA numbered roadmap item (1.x / Phase N)A numbered roadmap item (1.x / Phase N)
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

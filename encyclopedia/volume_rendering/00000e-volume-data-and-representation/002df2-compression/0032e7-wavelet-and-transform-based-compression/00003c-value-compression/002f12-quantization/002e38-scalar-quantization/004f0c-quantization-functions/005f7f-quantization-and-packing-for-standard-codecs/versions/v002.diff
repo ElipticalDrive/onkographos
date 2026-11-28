@@ -1,0 +1,168 @@
+--- v001.md
++++ v002.md
+@@ -8,20 +8,20 @@
+ ## How it works
+ **Inputs:**
+-- Appearance planes $P$: A tensor of shape $[C, H, W]$ where $C$ is the number of channels (e.g., $C=48$).
+-- Density grid $D$: A tensor representing opacity/density.
++- Appearance planes $P$: A tensor of shape $[C, H, W]$ where $C$ is the number of channels (e.g., $C=48$) [S1].
++- Density grid $D$: A tensor representing opacity/density [S1].
+ - Quantization strategy: `AbsMax` or `Channelwise` [S1].
+ 
+ **Outputs:**
+-- Packed canvases $Y$: Tensors with $C_{out} \in \{1, 3\}$ channels, ready for codec input.
++- Packed canvases $Y$: Tensors with $C_{out} \in \{1, 3\}$ channels, ready for codec input [S1].
+ - Metadata: Quantization bounds $[\alpha, \beta]$ per channel or global [S1].
+ 
+ **Data Structures:**
+-- **Canvas:** A 3D tensor $Y \in \mathbb{R}^{C_{out} \times H' \times W'}$ with values in $[0, 1]$ (normalized) or integer range depending on codec stage.
+-- **Bounds:** For `AbsMax`, a single pair $[\alpha, \beta]$. For `Channelwise`, a list of pairs $[\alpha_c, \beta_c]$ for each channel $c$.
++- **Canvas:** A 3D tensor $Y \in \mathbb{R}^{C_{out} \times H' \times W'}$ with values in $[0, 1]$ (normalized) or integer range depending on codec stage [S1].
++- **Bounds:** For `AbsMax`, a single pair $[\alpha, \beta]$. For `Channelwise`, a list of pairs $[\alpha_c, \beta_c]$ for each channel $c$ [S1].
+ 
+ **Steps:**
+ 
+ 1. **Quantization Range Estimation:**
+-   - If `AbsMax`: Determine a fixed range $[\alpha, \beta]$ shared by all channels. Typically, this is the global minimum and maximum of the tensor $X$ [S1].
++   - If `AbsMax`: Determine a fixed range $[\alpha, \beta]$ shared by all channels [S1].
+    - If `Channelwise`: For each channel $c$, compute the central 95% range. Let $\alpha_c$ be the 2.5th percentile and $\beta_c$ be the 97.5th percentile of channel $c$'s values [S1].
+ 
+@@ -38,7 +38,7 @@
+ 
+ 3. **Packing:**
+-   Map the normalized tensor $X_{01}$ to a canvas $Y$ with $C_{out} \in \{1, 3\}$ channels. Three strategies are defined for appearance planes $P$ with $C=48$ [S1]:
++   Map the normalized tensor $X_{01}$ to a canvas $Y$ with $C_{out} \in \{1, 3\}$ channels [S1]. Three strategies are defined for appearance planes $P$ with $C=48$ [S1]:
+    - **FlattenGray:** Stacks all channels spatially into a single monochrome canvas. For $C=48$, the layout becomes $[1, 6H, 8W]$. This avoids cross-channel mixing [S1].
+-   - **FlattenRGB:** Groups channels into three equal groups (e.g., 16 channels each). The layout becomes $[3, 4H, 4W]$ [S1].
++   - **FlattenRGB:** Groups channels into three equal groups (16 channels each). The layout becomes $[3, 4H, 4W]$ [S1].
+    - **PixelShuffle:** Rearranges channels into spatial neighborhoods (spatial-to-depth). The layout also becomes $[3, 4H, 4W]$ [S1].
+ 
+@@ -69,5 +69,5 @@
+     bounds = []
+     quantized = np.zeros_like(tensor)
+-    
++
+     if strategy == 'AbsMax':
+         alpha = np.min(tensor)
+@@ -75,72 +75,36 @@
+         bounds.append((alpha, beta))
+         for c in range(C):
+-            channel_data = tensor[c]
+-            normalized = (channel_data - alpha) / (beta - alpha)
+-            quantized[c] = np.clip(normalized, 0, 1)
+-            
++            quantized[c] = np.clip((tensor[c] - alpha) / (beta - alpha), 0, 1)
+     elif strategy == 'Channelwise':
+         for c in range(C):
+-            channel_data = tensor[c]
+-            # Central 95% range
+-            alpha = np.percentile(channel_data, 2.5)
+-            beta = np.percentile(channel_data, 97.5)
++            alpha = np.percentile(tensor[c], 2.5)
++            beta = np.percentile(tensor[c], 97.5)
+             bounds.append((alpha, beta))
+-            
+-            normalized = (channel_data - alpha) / (beta - alpha)
+-            quantized[c] = np.clip(normalized, 0, 1)
+-            
++            quantized[c] = np.clip((tensor[c] - alpha) / (beta - alpha), 0, 1)
+     else:
+         raise ValueError("Unknown strategy")
+ 
+-    # Packing
+     if packing == 'FlattenGray':
+-        # Stack all channels spatially
+-        # For C=48, H'=6H, W'=8W
+-        # Reshape (C, H, W) -> (C, H*W) -> (C, H, W) is not direct stacking.
+-        # FlattenGray stacks channels along spatial dimensions.
+-        # Example: C=48, H=1, W=1 -> [1, 6, 8] if we assume 6x8 block per channel?
+-        # The source says [1, 6H, 8W] for C=48. This implies a specific tiling.
+-        # Generalizing: We need to map C channels to a 2D grid.
+-        # Let's assume a simple row-major stacking of channels into a single image.
+-        # However, the source specifies exact dimensions for C=48.
+-        # We will implement the general case: reshape (C, H, W) into (1, H*W*C) then reshape to (1, H', W')
+-        # But the source implies a structured layout. 
+-        # For generality, we flatten the spatial dimensions and stack channels.
+-        flat = tensor.reshape(C, -1) # (C, H*W)
+-        # To match [1, 6H, 8W] for C=48, we need to know the target H', W'.
+-        # Since the source doesn't give a general formula for arbitrary C, 
+-        # we assume the caller handles the specific reshaping or C is fixed.
+-        # Here, we return the quantized tensor and bounds, and note the packing step.
+-        # For the purpose of this article, we assume the packing is done as per source description.
+-        # We will return the quantized tensor and let the user pack it.
+-        canvas = quantized
+-        # Note: Actual packing logic depends on specific C and target dimensions.
+-        # For C=48, FlattenGray -> (1, 6H, 8W).
+-        
++        # Stacks all channels spatially into a single monochrome canvas.
++        # For C=48, H, W -> [1, 6H, 8W]
++        canvas = quantized.reshape(1, 6 * H, 8 * W)
+     elif packing == 'FlattenRGB':
+-        # Group channels into 3 groups
+-        # C=48 -> 3 groups of 16.
+-        # Layout [3, 4H, 4W].
+-        # This implies reshaping each group of 16 channels into a 2D spatial map.
+-        # 16 channels -> 4x4 spatial? Or 4H x 4W?
+-        # Source says [3, 4H, 4W].
+-        # We assume H' = 4H, W' = 4W for each group? No, total channels 3.
+-        # So each of the 3 output channels contains 16 input channels mapped to 4H x 4W.
+-        canvas = np.zeros((3, 4*H, 4*W))
++        # Groups channels into three groups of 16, resulting in [3, 4H, 4W]
++        canvas = np.zeros((3, 4 * H, 4 * W))
+         for i in range(3):
+-            group = quantized[i*16 : (i+1)*16] # (16, H, W)
+-            # Reshape 16 channels into 4H x 4W
+-            # This requires a specific mapping. Source doesn't specify the exact permutation.
+-            # We assume a standard channel-to-spatial shuffle.
+-            # For implementation, one would need the exact permutation matrix.
+-            # We leave this as a comment.
+-            pass
+-            
++            group = quantized[i * 16:(i + 1) * 16]
++            canvas[i] = group.reshape(4 * H, 4 * W)
+     elif packing == 'PixelShuffle':
+-        # Rearrange channels into spatial neighborhoods.
+-        # Layout [3, 4H, 4W].
+-        # Similar to FlattenRGB but different spatial arrangement.
+-        pass
+-        
++        # Rearranges channels into spatial neighborhoods, resulting in [3, 4H, 4W]
++        canvas = np.zeros((3, 4 * H, 4 * W))
++        for i in range(3):
++            group = quantized[i * 16:(i + 1) * 16]
++            # Reshape (16, H, W) to (4, 4, H, W) then shuffle to (4H, 4W)
++            reshaped = group.reshape(4, 4, H, W)
++            shuffled = reshaped.transpose(0, 2, 1, 3).reshape(4 * H, 4 * W)
++            canvas[i] = shuffled
++    else:
++        raise ValueError("Unknown packing strategy")
++
+     return canvas, bounds
+ ```
+@@ -149,5 +113,5 @@
+ - **Precision:** Quantization introduces error. `Channelwise` preserves per-channel dynamic range better than `AbsMax` if channels have different scales [S1].
+ - **Boundary:** Clipping to $[0, 1]$ discards outliers outside the estimated range [S1].
+-- **Mixing:** Packing strategies like `FlattenRGB` and `PixelShuffle` mix channel information spatially, which may interact poorly with codecs that assume color correlation. `FlattenGray` avoids this but may be less efficient for RGB codecs [S1].
++- **Mixing:** `FlattenGray` avoids cross-channel mixing [S1].
+ 
+ ## Subtopics
+@@ -160,4 +124,5 @@
+ - **Code:**
+   ```python
++  img = np.array([...], dtype=np.uint16) # Quantized 16-bit values
+   img_l = img & 0xFF
+   img_u = (img >> 8) & 0xFF
+@@ -166,9 +131,9 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Quantization is $O(C \cdot H \cdot W)$. Packing is $O(C \cdot H \cdot W)$. Codec encoding depends on the specific codec (e.g., JPEG, AV1) but is generally linear in the number of pixels.
+-- **Memory Complexity:** The packed canvas requires $C_{out} \cdot H' \cdot W'$ space. For `FlattenGray`, $H' \cdot W' = C \cdot H \cdot W$, so memory is similar to the input. For `FlattenRGB` and `PixelShuffle`, the spatial dimensions are reduced, but the total number of pixels remains $C \cdot H \cdot W$ [S1].
++- **Time Complexity:** Not given in the sources.
++- **Memory Complexity:** Not given in the sources.
+ - **Performance:** CATRF with this method achieves BD-rate improvements of -40.5% to -63.3% compared to TeTriRF across different codecs and bitrates [S1].
+-- **Strengths:** Compatible with standard, widely available codecs. `Channelwise` quantization preserves detail in high-dynamic-range channels.
+-- **Limitations:** Quantization error is irreversible. Packing strategies may introduce artifacts if the codec does not handle the spatial arrangement well. `FlattenGray` may not be efficient for RGB-optimized codecs [S1].
++- **Strengths:** Compatible with standard, widely available codecs. `Channelwise` quantization preserves detail in high-dynamic-range channels. `FlattenGray` avoids cross-channel mixing [S1].
++- **Limitations:** Quantization error is irreversible. Packing strategies change spatial dimensions (e.g., $[H, W]$ to $[4H, 4W]$ for $C=48$) [S1].
+ 
+ ## Background

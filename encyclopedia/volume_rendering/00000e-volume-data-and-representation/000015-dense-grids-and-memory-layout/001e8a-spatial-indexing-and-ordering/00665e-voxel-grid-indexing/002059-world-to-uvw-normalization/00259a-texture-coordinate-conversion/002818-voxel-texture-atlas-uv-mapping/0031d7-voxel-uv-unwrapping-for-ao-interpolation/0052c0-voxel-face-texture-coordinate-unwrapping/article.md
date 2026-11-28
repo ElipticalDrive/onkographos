@@ -1,0 +1,139 @@
+# Voxel Face Texture Coordinate Unwrapping
+Also called: Cube Face Texture Coordinate Unwrapping
+
+## Overview
+This method computes 2D texture coordinates for a voxel/cube grid based on vertex position and normal, handling face selection and coordinate mapping [S1, unofficial].
+
+## How it works
+**Inputs:**
+- `vertPosition`: World-space position of the vertex ($\mathbb{R}^3$).
+- `vertNormal`: Normal vector of the face/vertex ($\mathbb{R}^3$, normalized).
+- `tileCoord`: The integer tile index on the texture atlas ($\mathbb{R}^2$).
+
+**Outputs:**
+- `texcoord`: Final 2D texture coordinate ($\mathbb{R}^2$).
+
+**Data Structures:**
+- `loc`: Integer block location ($\mathbb{Z}^3$).
+- `off`: Local offset within the block, normalized to $[0,1]$ ($\mathbb{R}^3$).
+- `texcoordOff`: Offset within the specific face tile ($\mathbb{R}^2$).
+
+**Parameters:**
+- `epsilon`: Small constant for floating-point precision, $0.00001$ [S1, unofficial].
+- `BLOCK_SIZE`: Size of a voxel block in world units, $3.0$ [S1, unofficial].
+
+**Steps:**
+
+1. **Calculate Block Location:** Determine which block the vertex belongs to.
+   $$ loc = \left( \text{int}\left(\frac{vertPosition.x}{3.0} + \epsilon\right), \text{int}\left(\frac{vertPosition.y}{3.0} + \epsilon\right), \text{int}\left(\frac{vertPosition.z}{3.0} + \epsilon\right) \right) $$
+   [S1, unofficial]
+
+2. **Calculate Local Offset:** Determine the position within the block, normalized to $[0,1]$.
+   $$ off = \left( \frac{(vertPosition.x + \epsilon) \bmod 3.0}{3.0}, \frac{(vertPosition.y + \epsilon) \bmod 3.0}{3.0}, \frac{(vertPosition.z + \epsilon) \bmod 3.0}{3.0} \right) $$
+   [S1, unofficial]
+
+3. **Initialize Face Offset:**
+   $$ texcoordOff = (0, 0) $$
+   [S1, unofficial]
+
+4. **Select Face and Map Coordinates:** Determine the face based on which component of `off` is smallest, then map coordinates based on the normal direction.
+   - **If** $off.x \le \epsilon$:
+     - If $vertNormal.x < -0.5$:
+       $$ texcoordOff.x = off.z, \quad texcoordOff.y = off.y $$
+     - Else:
+       $$ texcoordOff.x = 1.0 - off.z, \quad texcoordOff.y = off.y $$
+   - **Else If** $off.y \le \epsilon$:
+     - If $vertNormal.y > 0.5$:
+       $$ texcoordOff.x = off.z, \quad texcoordOff.y = off.x $$
+     - Else:
+       $$ texcoordOff.x = 1.0 - off.z, \quad texcoordOff.y = off.x $$
+   - **Else If** $off.z \le \epsilon$:
+     - If $vertNormal.z > 0.5$:
+       $$ texcoordOff.x = off.x, \quad texcoordOff.y = off.y $$
+     - Else:
+       $$ texcoordOff.x = 1.0 - off.x, \quad texcoordOff.y = off.y $$
+   [S1, unofficial]
+
+5. **Compute Final Texture Coordinate:**
+   $$ texcoord = \frac{tileCoord + texcoordOff}{16.0} $$
+   Invert Y:
+   $$ texcoord.y = 1.0 - texcoord.y $$
+   [S1, unofficial]
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def voxel_face_uv_unwrap(vert_position, vert_normal, tile_coord, epsilon=1e-5, block_size=3.0):
+    # Step 1: Calculate integer block location
+    loc_x = int((vert_position[0] / block_size) + epsilon)
+    loc_y = int((vert_position[1] / block_size) + epsilon)
+    loc_z = int((vert_position[2] / block_size) + epsilon)
+    
+    # Step 2: Calculate local offset within block
+    off_x = ((vert_position[0] + epsilon) % block_size) / block_size
+    off_y = ((vert_position[1] + epsilon) % block_size) / block_size
+    off_z = ((vert_position[2] + epsilon) % block_size) / block_size
+    
+    # Step 3: Initialize texcoordOff
+    texcoord_off = [0.0, 0.0]
+    
+    # Step 4: Determine face and map coordinates
+    if off_x <= epsilon:
+        if vert_normal[0] < -0.5:
+            texcoord_off[0] = off_z
+            texcoord_off[1] = off_y
+        else:
+            texcoord_off[0] = 1.0 - off_z
+            texcoord_off[1] = off_y
+    elif off_y <= epsilon:
+        if vert_normal[1] > 0.5:
+            texcoord_off[0] = off_z
+            texcoord_off[1] = off_x
+        else:
+            texcoord_off[0] = 1.0 - off_z
+            texcoord_off[1] = off_x
+    elif off_z <= epsilon:
+        if vert_normal[2] > 0.5:
+            texcoord_off[0] = off_x
+            texcoord_off[1] = off_y
+        else:
+            texcoord_off[0] = 1.0 - off_x
+            texcoord_off[1] = off_y
+    else:
+        # Vertex is not near any face boundary.
+        # [G] Return default or handle error.
+        texcoord_off = [0.0, 0.0]
+
+    # Step 5: Compute final texcoord
+    texcoord_x = (tile_coord[0] + texcoord_off[0]) / 16.0
+    texcoord_y = (tile_coord[1] + texcoord_off[1]) / 16.0
+    
+    # Invert Y
+    texcoord_y = 1.0 - texcoord_y
+    
+    return [texcoord_x, texcoord_y]
+```
+
+## Subtopics
+
+### Decal Warping
+A technique to stamp SVG paths onto voxel faces by warping path coordinates via bilinear interpolation onto the projected face quad, ensuring perspective-correct rendering without affine approximation [S2, unofficial]. Decals are defined as `<path>` elements in a 0–1 unit coordinate space and referenced by name in face style configuration [S2, unofficial]. Every path coordinate is warped via bilinear interpolation onto the projected face quad [S2, unofficial]. Use `vector-effect="non-scaling-stroke"` in SVG path definitions to ensure uniform stroke widths across faces [S2, unofficial]. Arcs in SVG paths must be automatically converted to cubic beziers before warping [S2, unofficial]. Decals are not clipped by occlusion culling; partially occluded faces render decals at full size, relying on the painter's algorithm (back-to-front rendering) to hide overflow, though this may be visible with transparent occluders [S2, unofficial].
+
+### Ambient Occlusion UV Mapping for Voxels
+Computes and assigns tile-based ambient occlusion UV coordinates to the four vertices of a voxel face based on neighboring voxel occupancy [S3, unofficial]. Call `getAOTile(voxels, pos, dir)` to retrieve an AO tile for the face [S3, unofficial]. If a tile exists, set `uv2` for the four face vertices using `uvStart` and `uvEnd` coordinates: v0=(end.x, start.y), v1=(start.x, start.y), v2=(start.x, end.y), v3=(end.x, end.y) [S3, unofficial]. If no tile exists, set all four `uv2` coordinates to `(-1f, -1f)` [S3, unofficial]. Missing AO tile data results in invalid UVs `(-1f, -1f)`, which must be handled by the shader to avoid sampling errors or visual artifacts [S3, unofficial].
+
+## Operating characteristics
+Time and memory complexity: Not given in the sources.
+Measured performance with hardware, resolution and scene: Not given in the sources.
+Scaling: Not given in the sources.
+Strengths and limitations: Not given in the sources.
+When to use it and when not: Not given in the sources.
+
+## Background
+This method originates from the "Cubes" demo in the JMonkeyEngine (JME3) framework, specifically in the `TestPicking` class and associated block terrain logic [S1, unofficial]. It is used to map textures onto a voxel grid where the world is divided into $3 \times 3 \times 3$ blocks, and a texture atlas is used to store the textures for these blocks [S1, unofficial].
+
+## Sources
+[S1] destroflyer/cubes, https://github.com/destroflyer/cubes, fetched 2026-10-26 (unofficial)
+[S2] meodai/heerich, https://github.com/meodai/heerich, fetched 2026-10-26 (unofficial)
+[S3] Hunternif/VoxelArchitecture, https://github.com/Hunternif/VoxelArchitecture, fetched 2026-10-27 (unofficial)

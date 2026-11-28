@@ -1,0 +1,140 @@
+# Proximal Jointly-Optimized Reconstruction and Denoising
+
+Also called: Iterative Reconstruction with Integrated Denoising, Proximal Optimization Framework
+
+## Overview
+Proximal Jointly-Optimized Reconstruction and Denoising is a GPU-accelerated iterative tomographic reconstruction method that integrates noise reduction directly into the reconstruction process [S1]. Unlike traditional pipelines that apply denoising as separate pre- or post-processing steps, this method solves an optimization problem where reconstruction and denoising are performed simultaneously, maintaining a direct consistency check between the reconstructed tomogram and the raw input projection images [S1]. It builds on [SART (Simultaneous Algebraic Reconstruction Technique)](3277-sart-simultaneous-algebraic-reconstruction-technique.md) as the primary solver for the data fidelity term, preferred over Conjugate Gradient for sparse-view settings [S1].
+
+## How it works
+The method formulates tomographic reconstruction as a joint optimization problem solved via a proximal algorithm framework [S1]. It alternates between minimizing the re-projection error (reconstruction) and decreasing noise (regularization/denoising) [S1].
+
+**Inputs and Outputs:**
+*   **Input:** Aligned tilt-series from cryogenic electron microscopy (noisy 2D projections) [S1].
+*   **Output:** A denoised 3D tomogram [S1].
+
+**Data Structures:**
+*   **Tilt-series:** A set of 2D projection images corresponding to specific tilt angles. The exact bit-packing or memory layout is not specified in the sources, but the implementation is GPU-accelerated [S1].
+*   **Tomogram:** The 3D volume being reconstructed.
+*   **Regularizer/Denoiser:** A module implementing a specific denoising method (e.g., total variation, non-local means, or deep learning-based denoiser). The specific internal structure of the regularizer is not defined, as the framework is designed to be flexible and open-source, allowing extension with additional methods [S1].
+
+**Algorithm Steps:**
+The algorithm iteratively updates the tomogram estimate $x$ using a proximal splitting method. While the exact mathematical formulation of the proximal operator is not detailed in the provided text, the process is described as alternating between two main steps [S1]:
+
+1.  **Reconstruction Step (Data Fidelity):** Minimize the re-projection error using an algebraic reconstruction technique, specifically SART or SIRT [S1]. This step ensures the reconstructed volume is consistent with the measured projection data.
+    *   If SART is used, it updates the volume based on the ratio of measured to estimated projections for each ray [S1].
+    *   If SIRT is used, it updates the volume based on the average difference between measured and estimated projections [S1].
+2.  **Denoising Step (Regularization):** Apply a regularization or denoising method to the current tomogram estimate to suppress noise [S1]. This step acts as a proximal operator in the optimization framework, pulling the solution towards a "cleaner" manifold [S1].
+
+**Parameters:**
+*   **Reconstruction Algorithm:** SART or SIRT [S1].
+*   **Regularizer/Denoiser:** Any compatible denoising method [S1].
+*   **Number of Iterations:** Not specified, but results are achieved in minutes [S1].
+*   **GPU Acceleration:** The method is implemented for execution on GPUs to accelerate the iterative process [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def proximal_jointly_optimized_reconstruction(tilt_series, angles, num_iterations, reconstruction_algo, denoiser):
+    """
+    Perform tomographic reconstruction with integrated denoising.
+    
+    Args:
+        tilt_series: List of 2D projection images.
+        angles: List of tilt angles corresponding to the projections.
+        num_iterations: Number of iterative updates.
+        reconstruction_algo: 'SART' or 'SIRT'.
+        denoiser: A function that takes a 3D volume and returns a denoised 3D volume.
+        
+    Returns:
+        x: The reconstructed 3D tomogram.
+    """
+    # Initialize the tomogram. Not given in the sources. [G]
+    # Common initialization is zero or FBP, but we assume zero for simplicity.
+    x = initialize_zero_volume(tilt_series, angles)
+    
+    for i in range(num_iterations):
+        # Step 1: Minimize re-projection error using algebraic reconstruction technique
+        if reconstruction_algo == 'SART':
+            x = sart_update(x, tilt_series, angles)
+        elif reconstruction_algo == 'SIRT':
+            x = sirt_update(x, tilt_series, angles)
+        else:
+            raise ValueError("Unsupported reconstruction algorithm")
+            
+        # Step 2: Decrease noise using regularization/denoising method
+        x = denoiser(x)
+        
+        # Optional: Visualize reconstruction error on projections or within the tomogram [S1]
+        # visualize_error(x, tilt_series, angles)
+        
+    return x
+
+def sart_update(x, tilt_series, angles):
+    """
+    Perform one iteration of SART update.
+    Note: The exact SART formula is not provided in the sources. 
+    This is a placeholder for the standard SART algorithm which updates 
+    voxel values based on the ratio of measured to estimated projections.
+    """
+    # Standard SART update logic would go here.
+    # Since the source does not provide the exact SART implementation details,
+    # we assume the standard SART algorithm is used as referenced in [S1].
+    # [G] Standard SART update:
+    # For each projection p with angle theta:
+    #   For each voxel v in the ray path:
+    #     estimate = sum of voxel values along the ray
+    #     correction = (measured_p - estimate) / (sum of weights along the ray)
+    #     v += correction * weight
+    # Normalize by number of rays passing through v.
+    pass
+
+def sirt_update(x, tilt_series, angles):
+    """
+    Perform one iteration of SIRT update.
+    Note: The exact SIRT formula is not provided in the sources.
+    """
+    # Standard SIRT update logic would go here.
+    # [G] Standard SIRT update:
+    # For each projection p with angle theta:
+    #   For each voxel v in the ray path:
+    #     estimate = sum of voxel values along the ray
+    #     correction = (measured_p - estimate) / (sum of weights along the ray)
+    #     v += correction * weight
+    # Average corrections over all rays passing through v.
+    pass
+
+def initialize_zero_volume(tilt_series, angles):
+    """
+    Initialize the 3D volume to zeros.
+    """
+    # Determine volume dimensions from tilt_series and angles.
+    # Not given in the sources. [G]
+    pass
+```
+
+**Edge Cases and Pitfalls:**
+*   **Noise Levels:** The method is specifically designed for cryo-ET where projections are very noisy due to low electron doses [S1].
+*   **Consistency Check:** The method maintains a direct relationship between the original tilt-series and the reconstructed tomogram, enabling a direct consistency check, which is difficult in complex pipelines with separate denoising steps [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Not explicitly given, but the method is GPU-accelerated and achieves results in minutes [S1].
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:** The method produces much cleaner tomograms than existing approaches that use separate pre- or post-reconstruction denoising [S1]. It achieves excellent denoising results and sharp details [S1].
+*   **Strengths:**
+    *   Integrates denoising into reconstruction, removing the need for separate steps [S1].
+    *   Maintains direct consistency with raw input data [S1].
+    *   Flexible framework allowing multiple combinations of reconstruction algorithms and regularizers [S1].
+    *   GPU-accelerated for speed [S1].
+    *   Allows visualization of reconstruction error throughout the iterative process [S1].
+*   **Limitations:**
+    *   Specifically evaluated for cryo-ET; applicability to other modalities is not discussed [S1].
+    *   Requires aligned tilt-series as input [S1].
+*   **When to use:** When reconstructing noisy tomograms (e.g., from cryo-ET) and wanting to avoid the complexity and potential inconsistency of separate denoising steps [S1].
+*   **When not to use:** When high-speed, single-pass reconstruction is required without iterative refinement, or when the input projections are not noisy [S1].
+
+## Background
+The method was presented by J. Strnad, Z. Zhang, S. Li, I. Viola, and W. Heidrich in 2022 [S1]. It addresses the challenge of reconstructing 3D tomograms from noisy electron microscopy tilt-series, where the destructive nature of electron imaging necessitates low electron doses, resulting in low signal-to-noise ratios [S1]. Traditional pipelines apply denoising before reconstruction (on tilt-series) or after reconstruction (on tomograms), which can lead to inconsistencies or loss of information [S1]. This method was developed to provide a flexible, robust, and GPU-accelerated alternative that integrates these steps [S1]. It is implemented as an open-source framework, allowing easy extension with additional reconstruction and denoising methods [S1].
+
+## Sources
+[S1] GPU Accelerated 3D Tomographic Reconstruction and Visualization From Noisy Electron Microscopy Tilt-Series., https://doi.org/10.1109/tvcg.2022.3230445, fetched 2026-10-28

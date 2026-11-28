@@ -1,0 +1,173 @@
+# Variable Step Euler LIC
+
+Also called: CL-LIC, Cabral and Leedom LIC
+
+## Overview
+Variable Step Euler LIC is a texture-based filtering technique that blurs an input texture locally along given vector field lines, causing voxel intensities to be highly correlated along the field lines but independent in directions perpendicular to them [S1]. It is a 2D Line Integral Convolution method where field lines are computed using a variable step Euler's method to approximate local vector field behavior [S1]. It sets itself apart from its siblings by explicitly computing curved field line paths via numerical integration for each pixel, rather than using straight-line approximations (like DDA) or pre-computed streamline seeds, allowing it to capture small-scale structures like eddies and vortices that straight-line methods miss [S1].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A 2D scalar field (input texture) $F_{in}$, a 2D vector field $V$, a convolution filter kernel $k(w)$, and a convolution length parameter $L$ [S1].
+- Output: A 2D scalar field (output texture) $F_{out}$ [S1].
+
+**Data Structures:**
+- $F_{in}$: 2D array of pixel values [S1].
+- $V$: 2D array of 2D vectors $(V_x, V_y)$ [S1].
+- $P_i$: 2D coordinates $(x, y)$ of the $i$-th point on the field line [S1].
+- $\Delta s_i$: Scalar arc length step size [S1].
+
+**Numbered Steps:**
+1. For each pixel at integer coordinates $(x, y)$ in the output image:
+    a. Set the start point $P_0 = (x + 0.5, y + 0.5)$ [S1].
+    b. Compute the downstream field line points $P_i$ for $i = 1, \dots, l$ using variable step Euler integration [S1]:
+       $$P_i = P_{i-1} + \frac{V(P_{i-1})}{||V(P_{i-1})||} \Delta s_{i-1}$$
+       where $V(P_{i-1})$ is the vector field value at $P_{i-1}$, and $\Delta s_{i-1}$ is the arc length step [S1].
+    c. Compute the upstream field line points $P'_i$ for $i = 1, \dots, l'$ using variable step Euler integration [S1]:
+       $$P'_i = P'_{i-1} - \frac{V(P'_{i-1})}{||V(P'_{i-1})||} \Delta s'_{i-1}$$
+       starting from $P'_0 = P_0$ [S1].
+    d. Calculate the integration weights $h_i$ and $h'_i$ for each step [S1]:
+       $$h_i = \int_{s_i}^{s_i + \Delta s_i} k(w) dw$$
+       $$h'_i = \int_{s'_i}^{s'_i + \Delta s'_i} k(w) dw$$
+       where $k(w)$ is the convolution filter function [S1].
+    e. Compute the output intensity $F_{out}(x, y)$ by summing the weighted input texture values along the field lines and normalizing by the sum of weights [S1]:
+       $$F_{out}(x, y) = \frac{\sum_{i=0}^{l} F_{in}(P_i) h_i + \sum_{i=0}^{l'} F_{in}(P'_i) h'_i}{\sum_{i=0}^{l} h_i + \sum_{i=0}^{l'} h'_i}$$
+       where $l$ and $l'$ are the number of steps downstream and upstream, respectively [S1].
+
+**Formulas:**
+- Forward step: $P_i = P_{i-1} + \frac{V(P_{i-1})}{||V(P_{i-1})||} \Delta s_{i-1}$ [S1]
+- Backward step: $P'_i = P'_{i-1} - \frac{V(P'_{i-1})}{||V(P'_{i-1})||} \Delta s'_{i-1}$ [S1]
+- Convolution output: $F_{out}(x, y) = \frac{\sum_{i=0}^{l} F_{in}(P_i) h_i + \sum_{i=0}^{l'} F_{in}(P'_i) h'_i}{\sum_{i=0}^{l} h_i + \sum_{i=0}^{l'} h'_i}$ [S1]
+- Weight: $h_i = \int_{s_i}^{s_i + \Delta s_i} k(w) dw$ [S1]
+
+**Parameters:**
+- Convolution length $2L$: Determines the extent of blurring [S1]. Stalling and Hege found good results choosing $2L$ to be $1/10$th of the image width [S1]. If $L=0$, the input texture is unchanged [S1].
+- $l$ and $l'$: The convolution distances (number of steps) along the positive and negative directions, respectively [S1].
+- $k(w)$: The convolution filter function [S1].
+
+**Pitfalls:**
+- The algorithm is very compute intensive and slow due to the large number of arithmetic operations and the recomputation of field line parts for multiple pixels [S1].
+- Precision issues may arise if the vector field magnitude is near zero, causing division by zero in the normalization term $||V(P_{i-1})||$ [G]. A guard should check for small magnitudes [G].
+- Boundary conditions: Points $P_i$ may fall outside the image domain [G]. Sampling $F_{in}$ at these points requires handling (e.g., clamping, wrapping, or zero-padding) [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def variable_step_euler_lic(F_in, V, L, image_width, image_height, step_size=0.5):
+    """
+    F_in: 2D list of input texture values
+    V: 2D list of 2D vectors (V_x, V_y)
+    L: half-convolution length
+    image_width, image_height: dimensions of the image
+    step_size: arc length step delta_s (variable step rule not specified in sources)
+    """
+    F_out = [[0.0] * image_width for _ in range(image_height)]
+
+    def magnitude(vx, vy):
+        return math.sqrt(vx * vx + vy * vy)
+
+    def sample_2d(grid, x, y):
+        # Clamp coordinates to image boundaries [G]
+        x = max(0, min(image_width - 1, x))
+        y = max(0, min(image_height - 1, y))
+        return grid[int(y)][int(x)]
+
+    for y in range(image_height):
+        for x in range(image_width):
+            curr_x = x + 0.5
+            curr_y = y + 0.5
+
+            # Downstream integration
+            s_curr = 0.0
+            weighted_sum_down = 0.0
+            total_weight_down = 0.0
+
+            while s_curr < L:
+                vx = V[int(curr_y)][int(curr_x)][0]
+                vy = V[int(curr_y)][int(curr_x)][1]
+                mag = magnitude(vx, vy)
+
+                if mag < 1e-6:
+                    break # Guard against division by zero [G]
+
+                nx = vx / mag
+                ny = vy / mag
+                delta_s = step_size # Variable step size rule not specified in sources [G]
+                h_i = delta_s # Uniform kernel assumption for weight calculation [G]
+
+                fin_val = sample_2d(F_in, curr_x, curr_y)
+                weighted_sum_down += fin_val * h_i
+                total_weight_down += h_i
+
+                curr_x += nx * delta_s
+                curr_y += ny * delta_s
+                s_curr += delta_s
+
+            # Upstream integration
+            curr_x = x + 0.5
+            curr_y = y + 0.5
+            s_curr = 0.0
+            weighted_sum_up = 0.0
+            total_weight_up = 0.0
+
+            while s_curr < L:
+                vx = V[int(curr_y)][int(curr_x)][0]
+                vy = V[int(curr_y)][int(curr_x)][1]
+                mag = magnitude(vx, vy)
+
+                if mag < 1e-6:
+                    break
+
+                nx = vx / mag
+                ny = vy / mag
+                delta_s = step_size
+                h_i = delta_s
+
+                fin_val = sample_2d(F_in, curr_x, curr_y)
+                weighted_sum_up += fin_val * h_i
+                total_weight_up += h_i
+
+                curr_x -= nx * delta_s
+                curr_y -= ny * delta_s
+                s_curr += delta_s
+
+            total_weight = total_weight_down + total_weight_up
+            if total_weight > 0:
+                F_out[y][x] = (weighted_sum_down + weighted_sum_up) / total_weight
+            else:
+                F_out[y][x] = sample_2d(F_in, x + 0.5, y + 0.5)
+
+    return F_out
+```
+
+## Subtopics
+
+### [Seed Line Integral Convolution](8864-seed-line-integral-convolution.md)
+Uses sparse seed points to generate streamlines, reducing computation compared to per-pixel integration. Choose when performance is critical and high-frequency detail is less important.
+
+### [Image Space Fabric Visualization](10569-image-space-fabric-visualization.md)
+A frequency-domain approach that avoids explicit integration. Choose for real-time applications or when integration is too expensive.
+
+### [Box Filter Dye Advection](12157-box-filter-dye-advection.md)
+Uses a box filter for convolution, which is simpler but less accurate than variable step Euler for curved fields. Choose for simplicity and speed.
+
+### [Variable Convolution Length for Dye](12158-variable-convolution-length-for-dye.md)
+Adjusts convolution length based on local flow properties. Choose when varying detail levels are needed across the field.
+
+## Operating characteristics
+- **Time Complexity:** The algorithm is very compute intensive and slow due to the large number of arithmetic operations and recomputation of field line parts for multiple pixels [S1].
+- **Memory Complexity:** $O(N)$ for storing input and output textures [G].
+- **Measured Performance:** Not given in the sources.
+- **Scaling:** Performance degrades linearly with image resolution and convolution length [G].
+- **Strengths:** Captures curved field lines and small-scale structures like eddies and vortices better than straight-line approximations (DDA) [S1].
+- **Limitations:** Very slow due to per-pixel integration and recomputation of field lines [S1].
+- **When to use:** Not given in the sources.
+- **When not to use:** Not given in the sources.
+
+## Background
+Variable Step Euler LIC was introduced in 1993 by Cabral and Leedom [S1]. The specific algorithm using variable step Euler's method is referred to as CL-LIC [S1]. It is a foundational technique in scientific visualization for representing vector fields with high accuracy [S1].
+
+## Sources
+[S1] PDF Lecture notes: Visualization I Visualization of vector fields using ..., https://www.sci.utah.edu/~pascucci/classes/2009_fall/files/lec07-notes.pdf, fetched 2026-10-27

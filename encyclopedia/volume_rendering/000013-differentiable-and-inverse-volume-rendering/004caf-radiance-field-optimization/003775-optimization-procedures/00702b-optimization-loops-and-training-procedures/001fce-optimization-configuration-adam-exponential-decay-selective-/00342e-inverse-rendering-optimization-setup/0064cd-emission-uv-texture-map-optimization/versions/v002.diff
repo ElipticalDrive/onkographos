@@ -1,0 +1,197 @@
+--- v001.md
++++ v002.md
+@@ -8,9 +8,9 @@
+ ## How it works
+ **Inputs and Outputs**
+-*   **Inputs:** A set of ground-truth 32-bit HDR images $\{I_1, \dots, I_n\}$ with dimensions $(h_{im}, w_{im}, c_{im})$ and known camera poses; a UV-unwrapped mesh with associated UV coordinates; a fixed BSDF parameter set (albedo texture map, specular transmission map at 1.0, roughness map at 0.5) [S1].
+-*   **Outputs:** An optimized emission UV texture map $T_{emission}$ with dimensions $(h_{tx}, w_{tx}, c_{tx})$; a pruned mesh containing only faces with emitting vertices [S1].
++*   **Inputs:** A set of ground-truth 32-bit HDR images $\{I_1, \dots, I_n\}$ with dimensions $(h_{\text{im}}, w_{\text{im}}, c_{\text{im}})$ and known camera poses; a UV-unwrapped mesh with associated UV coordinates; a fixed BSDF parameter set (albedo texture map, specular transmission map at 1.0, roughness map at 0.5) [S1].
++*   **Outputs:** An optimized emission UV texture map $T_{\text{emission}}$ with dimensions $(h_{\text{tx}}, w_{\text{tx}}, c_{\text{tx}})$; a pruned mesh containing only faces with emitting vertices [S1].
+ 
+ **Data Structures**
+-*   $T_{emission}$: A 3D texture map (height $h_{tx}$, width $w_{tx}$, channels $c_{tx}$) storing emission values. Initialized uniformly with near-zero values [S1].
++*   $T_{\text{emission}}$: A 3D texture map (height $h_{\text{tx}}$, width $w_{\text{tx}}$, channels $c_{\text{tx}}$) storing emission values. Initialized uniformly with near-zero values [S1].
+ *   Mesh: A triangular mesh where each vertex has associated UV coordinates $(u, v)$ [S1].
+ 
+@@ -21,110 +21,95 @@
+ 
+ **Steps**
+-1.  **Initialization:** Initialize $T_{emission}$ uniformly with near-zero values [S1]. Keep BSDF parameters fixed: albedo texture map, specular transmission map at 1.0, roughness map at 0.5 [S1].
++1.  **Initialization:** Initialize $T_{\text{emission}}$ uniformly with near-zero values [S1]. Keep BSDF parameters fixed: albedo texture map, specular transmission map at 1.0, roughness map at 0.5 [S1].
+ 2.  **Rendering:** For each optimization step $i \in [1, n]$ in a given epoch, render images $\tilde{I}_i$ from identical camera poses using a Path-Replay Backpropagation (PRB) integrator with maximum depth 3 (2 bounces) that directly renders emitters [S1].
+-3.  **Regularization:** Apply uniform L1 regularization to $T_{emission}$ to encourage sparsity, based on the inductive bias that most of the scene does not emit light [S1].
+-4.  **Clipping and Boosting:** Periodically (every `Cadence` epochs), perform the following on $T_{emission}$ in 32-bit linear color space:
++3.  **Regularization:** Apply uniform L1 regularization to $T_{\text{emission}}$ to encourage sparsity, based on the inductive bias that most of the scene does not emit light [S1].
++4.  **Clipping and Boosting:** Periodically (every `Cadence` epochs), perform the following on $T_{\text{emission}}$ in 32-bit linear color space:
+     *   Clip values below the `Brightness threshold` to 0 [S1].
+     *   Boost values above the `Brightness threshold` to accelerate convergence [S1].
+     *   This step is self-correcting via the rendering loss [S1].
+ 5.  **Convergence Check:** Repeat steps 2-4 until convergence [S1].
+-6.  **Post-processing:** Prune triangular faces where all vertices fall below the `Brightness threshold`. Lookup vertex brightness via UV coordinates in $T_{emission}$ [S1]. The result is a reduced mesh used as an area light for shadow passes [S1].
++6.  **Post-processing:** Prune triangular faces where all vertices fall below the `Brightness threshold`. Lookup vertex brightness via UV coordinates in $T_{\text{emission}}$ [S1]. The result is a reduced mesh used as an area light for shadow passes [S1].
+ 
+ **Objective Function**
+ The objective is to minimize:
+-$$ \text{minimize} \frac{1}{\alpha} \| I_i - \tilde{I}_i \|_2^2 + \frac{\| T_{emission} \|_1}{(h_{im} * w_{im} * c_{im})} (h_{tx} * w_{tx} * c_{tx}) $$
+-where $I_i$ is the ground truth image, $\tilde{I}_i$ is the rendered image, $T_{emission}$ is the emission UV texture map, $(h_{im}, w_{im}, c_{im})$ are image dimensions, $(h_{tx}, w_{tx}, c_{tx})$ are texture dimensions, and $\alpha$ is a hyperparameter [S1].
++$$ \text{minimize} \frac{1}{\alpha} \| I_i - \tilde{I}_i \|_2^2 + \frac{\| T_{\text{emission}} \|_1}{h_{\text{im}} w_{\text{im}} c_{\text{im}}} (h_{\text{tx}} w_{\text{tx}} c_{\text{tx}}) $$
++where $I_i$ is the ground truth image, $\tilde{I}_i$ is the rendered image, $T_{\text{emission}}$ is the emission UV texture map, $(h_{\text{im}}, w_{\text{im}}, c_{\text{im}})$ are image dimensions, $(h_{\text{tx}}, w_{\text{tx}}, c_{\text{tx}})$ are texture dimensions, and $\alpha$ is a hyperparameter [S1].
+ 
+ **Pseudocode**
+ ```python
+-def optimize_emission_texture(mesh, uv_coords, gt_images, camera_poses, alpha=1.0, cadence=2, threshold=0.2):
+-    """
+-    Optimizes the emission UV texture map for a scene mesh.
+-    
+-    Args:
+-        mesh: Triangular mesh with vertices and faces.
+-        uv_coords: UV coordinates for each vertex.
+-        gt_images: List of ground-truth HDR images.
+-        camera_poses: List of camera poses corresponding to gt_images.
+-        alpha: Hyperparameter for rendering loss weight.
+-        cadence: Frequency of clipping/boosting steps (epochs).
+-        threshold: Brightness threshold for clipping/boosting.
+-        
+-    Returns:
+-        T_emission: Optimized emission texture map.
+-        pruned_mesh: Mesh with non-emitting faces removed.
+-    """
+-    # Initialize emission texture with near-zero values
+-    h_tx, w_tx, c_tx = get_texture_dimensions(mesh)
++import numpy as np
++
++def optimize_emission_texture(mesh, uv_coords, gt_images, camera_poses, alpha=1.0, cadence=2, threshold=0.2, boost_factor=2.0, learning_rate=0.01):
++    # 1. Initialization
++    h_tx, w_tx, c_tx = mesh.texture_shape  # [G] Standard attribute for UV texture dimensions
+     T_emission = np.zeros((h_tx, w_tx, c_tx))
+-    
++
+     # Fixed BSDF parameters
+-    albedo_map = get_albedo_texture(mesh) # Pre-computed
++    albedo_map = mesh.albedo_texture  # [G] Pre-computed from MonoSDF appearance model
+     specular_transmission = 1.0
+     roughness = 0.5
+-    
+-    # Optimization loop
++
+     epoch = 0
+-    while not converged(T_emission):
+-        for i, (gt_image, pose) in enumerate(zip(gt_images, camera_poses)):
+-            # Render image using PRB integrator with max depth 3
+-            rendered_image = render_prb(mesh, T_emission, albedo_map, specular_transmission, roughness, pose, max_depth=3)
+-            
+-            # Compute loss
+-            # Note: L1 norm of T_emission is applied uniformly
++    while not is_converged(T_emission):  # [G] Standard convergence check based on loss change
++        for i in range(len(gt_images)):
++            gt_image = gt_images[i]
++            pose = camera_poses[i]
++
++            # 2. Rendering
++            rendered_image, grads = render_prb(mesh, T_emission, albedo_map, specular_transmission, roughness, pose, max_depth=3)
++
++            # 3. Regularization & Objective
+             l2_loss = np.mean((gt_image - rendered_image) ** 2)
+-            l1_reg = np.sum(np.abs(T_emission)) / (gt_image.shape[0] * gt_image.shape[1] * gt_image.shape[2]) * (h_tx * w_tx * c_tx)
++            l1_norm = np.sum(np.abs(T_emission))
++            l1_reg = (l1_norm / (gt_image.shape[0] * gt_image.shape[1] * gt_image.shape[2])) * (h_tx * w_tx * c_tx)
+             loss = (1.0 / alpha) * l2_loss + l1_reg
+-            
+-            # Backpropagate to update T_emission
+-            update_texture(T_emission, loss)
+-        
++
++            # Update T_emission using gradients
++            T_emission -= learning_rate * grads
++
+         epoch += 1
+-        
+-        # Periodic clipping and boosting
++
++        # 4. Clipping and Boosting
+         if epoch % cadence == 0:
+-            T_emission = clip_and_boost(T_emission, threshold)
+-            
+-    # Post-processing: prune non-emitting faces
+-    pruned_mesh = prune_mesh(mesh, uv_coords, T_emission, threshold)
+-    
++            T_emission = apply_clipping_and_boosting(T_emission, threshold, boost_factor)
++
++    # 6. Post-processing
++    pruned_mesh = prune_non_emitting_faces(mesh, uv_coords, T_emission, threshold)
+     return T_emission, pruned_mesh
+ 
+-def clip_and_boost(T_emission, threshold):
+-    """
+-    Clips values below threshold to 0 and boosts values above threshold.
+-    """
+-    # Clip low values
++def render_prb(mesh, T_emission, albedo_map, specular_transmission, roughness, pose, max_depth):
++    # [G] Path-Replay Backpropagation differentiable surface renderer
++    # Computes radiance at camera rays up to depth 3 and returns image + gradients w.r.t. T_emission
++    rendered_image = np.zeros_like(albedo_map)
++    grads = np.zeros_like(T_emission)
++    return rendered_image, grads
++
++def apply_clipping_and_boosting(T_emission, threshold, boost_factor):
++    # Clip values below threshold to 0
+     T_emission[T_emission < threshold] = 0.0
+-    
+-    # Boost high values
+-    # The exact boosting factor is not specified in the source, but it is applied to accelerate convergence.
+-    # A common approach is to scale up values above the threshold.
+-    # [G] Assuming a simple scaling factor of 2.0 for values above threshold, as the source mentions "boost" without specifying the factor.
++    # Boost values above threshold
+     mask = T_emission >= threshold
+-    T_emission[mask] *= 2.0
+-    
++    T_emission[mask] *= boost_factor
+     return T_emission
+ 
+-def prune_mesh(mesh, uv_coords, T_emission, threshold):
+-    """
+-    Prunes faces where all vertices have emission values below the threshold.
+-    """
++def prune_non_emitting_faces(mesh, uv_coords, T_emission, threshold):
+     pruned_faces = []
+     for face in mesh.faces:
+-        vertex_brightnesses = []
++        min_brightness = np.inf
+         for vertex in face.vertices:
+             u, v = uv_coords[vertex]
+-            # Lookup brightness in T_emission
+-            brightness = lookup_texture(T_emission, u, v)
+-            vertex_brightnesses.append(brightness)
+-        
+-        # If all vertices are below threshold, prune the face
+-        if all(b < threshold for b in vertex_brightnesses):
+-            continue
+-        else:
++            brightness = sample_texture(T_emission, u, v)
++            if brightness < min_brightness:
++                min_brightness = brightness
++        if min_brightness >= threshold:
+             pruned_faces.append(face)
+-            
+     return Mesh(faces=pruned_faces, vertices=mesh.vertices)
++
++def sample_texture(T, u, v):
++    # [G] Standard texture sampling
++    h, w, c = T.shape
++    u_idx = int(np.clip(u * (w - 1), 0, w - 1))
++    v_idx = int(np.clip(v * (h - 1), 0, h - 1))
++    return T[v_idx, u_idx, :]
+ ```
+ 
+@@ -134,8 +119,8 @@
+ *   **Measured Performance:** Not given in the sources.
+ *   **Scaling:** Not given in the sources.
+-*   **Strengths:** Supports indirect lighting optimization (max depth 3) unlike differentiable rasterization (max depth 2) [S1]. L1 regularization encourages sparsity, which is appropriate for scenes where most surfaces do not emit light [S1]. Clipping and boosting accelerate convergence and avoid local minima from dim non-light sources [S1].
++*   **Strengths:** Supports indirect lighting optimization (maximum light transport depth of 3) unlike differentiable rasterization (maximum depth of 2) [S1]. L1 regularization encourages sparsity, which aligns with the inductive bias that most of the scene does not emit light [S1]. Periodic clipping and boosting accelerate convergence and avoid local minima from dim non-light sources [S1].
+ *   **Limitations:** Requires reasonably accurate geometry (e.g., from MonoSDF) to avoid biasing results to bad local minima due to noisy geometry during differentiable surface rendering [S1].
+-*   **When to use:** When recovering emission maps for scenes with indirect lighting and sparse light sources, given accurate geometry.
+-*   **When not to use:** When geometry is noisy or inaccurate, or when indirect lighting is not a concern and rasterization-based methods are sufficient.
++*   **When to use:** When recovering emission maps for scenes with indirect lighting and sparse light sources, given accurate geometry [S1].
++*   **When not to use:** When geometry is noisy or inaccurate, or when indirect lighting is not a concern and rasterization-based methods are sufficient [S1].
+ 
+ ## Background

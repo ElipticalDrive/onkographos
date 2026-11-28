@@ -1,0 +1,83 @@
+# Uniform Grid Indexing
+
+Also called: 3D Grid Index Calculation, 3D to 1D Grid Mapping, Froxel Index Calculation, Position Index Calculation, RegularGrid Data Layout and Indexing, getPositionIndex
+
+## Overview
+Uniform Grid Indexing converts a continuous 3D world position into a discrete 1D linear array index within a uniform voxel grid, enabling efficient memory access for dense volume data [S1, S2, S3, unofficial]. It solves the problem of mapping spatial coordinates to a flat memory layout by combining coordinate transformation (translation, scaling, discretization) with row-major linearization [G]. Unlike [Voxel Index Computation](13870-voxel-index-computation.md), which may handle sparse or irregular structures, this method assumes a fixed, homogeneous grid where strides are derived directly from grid dimensions [S1, S2, S3, unofficial].
+
+## How it works
+**Inputs:**
+- `position`: A 3D vector $(p_x, p_y, p_z)$ representing the world coordinate [G].
+- `boundsMin`: A 3D vector $(b_{min,x}, b_{min,y}, b_{min,z})$ defining the minimum corner of the grid's axis-aligned bounding box (AABB) [G].
+- `boundsMax`: A 3D vector $(b_{max,x}, b_{max,y}, b_{max,z})$ defining the maximum corner of the AABB [G].
+- `cellsPerEdge`: An integer $N$ representing the number of divisions along each axis, assuming a cubic grid where $N_x = N_y = N_z = N$ [S3, unofficial].
+
+**Outputs:**
+- `linearIndex`: A single integer representing the position in the 1D array [S1, S2, S3, unofficial].
+
+**Data Structures:**
+- The grid is stored as a 1D array of size $N_x \times N_y \times N_z$ (or $N^3$ for cubic grids) [G].
+- Indices are 0-based integers [G].
+
+**Steps:**
+1. **Translate**: Compute the relative position of the point with respect to the grid's minimum bound: $\mathbf{p}_{rel} = \mathbf{p} - \mathbf{b}_{min}$ [G].
+2. **Scale**: Normalize the relative position to the range $[0, 1]$ by dividing by the bounding box size $\mathbf{s} = \mathbf{b}_{max} - \mathbf{b}_{min}$, then scale by $N$: $\mathbf{c}_{float} = \mathbf{p}_{rel} / \mathbf{s} \times N$ [G]. Handle division by zero if any dimension of the bounding box is zero by clamping $\mathbf{s}$ to a small epsilon $\epsilon = 10^{-9}$ [S4, unofficial].
+3. **Discretize**: Convert floating-point coordinates to integer grid indices using the floor operation: $i = \lfloor c_{float,x} \rfloor$, $j = \lfloor c_{float,y} \rfloor$, $k = \lfloor c_{float,z} \rfloor$ [G].
+4. **Clamp**: Clamp the integer indices to the valid range $[0, N-1]$ to prevent out-of-bounds access for points outside the AABB [G].
+5. **Linearize**: Compute the 1D index using row-major ordering ($X$ fastest, $Z$ slowest): $I = i \cdot N_y N_z + j \cdot N_z + k$ [G]. For a cubic grid with $N_x=N_y=N_z=N$: $I = k \cdot N^2 + j \cdot N + i$ [S1, S2, S3, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_linear_index(position, bounds_min, bounds_max, cells_per_edge):
+    rel = [position[d] - bounds_min[d] for d in range(3)]
+    size = [bounds_max[d] - bounds_min[d] for d in range(3)]
+    epsilon = 1e-9
+    size = [max(s, epsilon) for s in size]
+    idx_float = [rel[d] / size[d] * cells_per_edge for d in range(3)]
+    idx_int = [int(f) for f in idx_float]
+    idx_int = [max(0, min(n - 1, i)) for i, n in zip(idx_int, [cells_per_edge]*3)]
+    return idx_int[0] + idx_int[1] * cells_per_edge + idx_int[2] * cells_per_edge * cells_per_edge
+```
+
+**Parameters:**
+- `cellsPerEdge`: Defines the grid resolution per axis [S3, unofficial].
+- `boundsMin/Max`: Define the spatial extent of the grid [G].
+
+**Edge Cases and Pitfalls:**
+- **Out-of-Bounds**: Points outside the AABB must be clamped to $[0, N-1]$ rather than rejected to avoid crashes [G].
+- **Zero-Dimension Bounds**: If any dimension of the bounding box is zero, division by zero occurs; clamping the box size to a small epsilon prevents this [S4, unofficial].
+- **Precision**: Floating-point precision errors near grid boundaries are handled by flooring the scaled coordinates before clamping [G].
+
+## Subtopics
+
+### Regular Grid Indexing
+The grid consists of two parallel arrays of size `numDivs.x * numDivs.y * numDivs.z`: `_grid` (`std::vector<uint16_t>`) stores voxel states (`VOXEL_EMPTY`, `VOXEL_FREE`, or cluster indices), and `_thermal` (`std::vector<float>`) stores per-voxel temperature values [S3, unofficial]. Linear indexing is computed via `getPositionIndex(x, y, z, _numDivs)` [S3, unofficial]. Access and modification are performed through `at(x,y,z)` and `set(x,y,z,i)` methods [S3, unofficial]. `VOXEL_EMPTY` represents an unoccupied voxel, while `VOXEL_FREE` represents an occupied but non-anomalous voxel [S3, unofficial].
+
+### Voxel Remapping
+A compute shader that remaps voxel indices from one grid size to another, specifically to multiples of 8, likely for optimization or alignment purposes [S5, unofficial]. It calculates the source `voxel_index` from `gl_GlobalInvocationID` using `model_size` [S5, unofficial]. It extracts `col_idx` from `voxels[voxel_index / 4]` using `shift = 8 * (voxel_index % 4)` [S5, unofficial]. It calculates the target `new_index` using `remap_size` [S5, unofficial]. It writes `col_idx` to `remapped_voxels[new_index / 4]` at `shift_new = 8 * (new_index % 4)` using `atomicOr` [S5, unofficial]. The `InstanceData` struct contains `instance_size` (source grid dimensions), `remapped_size` (target grid dimensions), and `instance_position_offset` [S5, unofficial].
+
+### Point Cloud to Voxel Grid Linear Indexing
+Finds the $x, y, z$ extents of a point cloud, then finds an integer index for each coordinate [S6, unofficial]. The final linear index uses row-major ordering with a square $x$-$y$ resolution: $index = z_{index} \cdot res^2 + y_{index} \cdot res + x_{index}$ [S6, unofficial]. The parameter `res` is the grid resolution, assumed identical for the $x$ and $y$ dimensions [S6, unofficial].
+
+## Operating characteristics
+- **Time Complexity**: $O(1)$ for index calculation, as it involves a fixed number of arithmetic operations [G].
+- **Memory Complexity**: $O(N^3)$ for storing the grid data, where $N$ is the number of divisions per axis [G].
+- **Measured Performance**: Not given in the sources [S1, S2, S3, S4, S5, S6, unofficial].
+- **Scaling**: Not given in the sources [S1, S2, S3, S4, S5, S6, unofficial].
+- **Strengths**: Not given in the sources [S1, S2, S3, unofficial].
+- **Limitations**: Not given in the sources [S1, S2, S3, unofficial].
+- **When to Use**: Not given in the sources [S1, S2, S3, unofficial].
+- **When Not to Use**: Not given in the sources [S1, S2, S3, unofficial].
+
+## Background
+The method originates from implementations in voxel-based rendering and spatial partitioning systems [S1, S2, S3, unofficial]. Specific historical origins, original papers, or development timelines are not given in the sources [S1, S2, S3, S4, S5, S6, unofficial].
+
+## Sources
+[S1] AlfonsoLRz/VoxelFragmentML, https://github.com/AlfonsoLRz/VoxelFragmentML, fetched 2026-10-26 (unofficial)
+[S2] ArminTajik/ue5-froxel-lighting, https://github.com/ArminTajik/ue5-froxel-lighting, fetched 2026-10-27 (unofficial)
+[S3] AlfonsoLRz/tpc-anomalies, https://github.com/AlfonsoLRz/tpc-anomalies, fetched 2026-10-27 (unofficial)
+[S4] JI20/unreal-splat, https://github.com/JI20/unreal-splat, fetched 2026-10-27 (unofficial)
+[S5] knosvoxel/voxel-meshing-v2, https://github.com/knosvoxel/voxel-meshing-v2, fetched 2026-10-26 (unofficial)
+[S6] How do I "voxelize" an OBJ mesh that was created in a voxel editor?, https://gamedev.stackexchange.com/questions/197031/how-do-i-voxelize-an-obj-mesh-that-was-created-in-a-voxel-editor, fetched 2026-10-27 (unofficial)

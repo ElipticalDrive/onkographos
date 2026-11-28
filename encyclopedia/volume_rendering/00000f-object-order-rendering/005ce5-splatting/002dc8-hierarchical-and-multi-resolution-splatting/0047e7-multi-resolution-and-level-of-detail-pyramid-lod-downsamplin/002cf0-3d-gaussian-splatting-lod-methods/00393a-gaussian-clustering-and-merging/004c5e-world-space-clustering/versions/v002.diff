@@ -1,0 +1,203 @@
+--- v001.md
++++ v002.md
+@@ -4,34 +4,43 @@
+ 
+ ## Overview
+-World Space Clustering is a preprocessing technique used in 3D Gaussian Splatting to organize spatial data before projection. It groups pixels or Gaussian primitives based on their world-space coordinates to remove foreground or background noise and establish spatial coherence [S1, unofficial]. It differs from attribute-based methods like [Coarse-Level Color-Based Segmentation](8408-lod-generation-for-3dgs.md) by relying strictly on geometric proximity rather than color or semantic features [S1, unofficial][S2].
++World Space Clustering is a preprocessing step in 3D Gaussian Splatting that groups sampled world-space pixels into clusters to remove foreground or background noise before projecting 2D Gaussian kernels [S1, unofficial]. It differs from attribute-based clustering by operating on geometric proximity in world space rather than color or scale attributes, using single linkage merging to identify coherent spatial structures [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:** A set of world-space coordinates $\{\mathbf{p}_k\}_{k=1}^M$ corresponding to pixels covered by Gaussian kernels.
+-**Outputs:** A set of disjoint clusters $C_j$, where each cluster contains coordinates within a specific spatial threshold.
++**Inputs:** A set of world-space coordinates $\{P_j\}$ corresponding to pixels covered by Gaussian kernels.
++**Outputs:** A set of disjoint clusters $C_k$, where each cluster represents a coherent spatial region.
+ 
+ **Data Structures:**
+-*   **Clusters:** A list of sets, where each set contains indices of points belonging to that cluster.
+-*   **Distance Matrix:** Precomputed or on-the-fly Euclidean distances between points.
++*   **Points:** List of 3D vectors $\mathbf{p}_j \in \mathbb{R}^3$.
++*   **Clusters:** List of sets of point indices.
++*   **Distance Matrix:** Implicitly computed via nearest-neighbor search or explicit pairwise distances.
+ 
+ **Parameters:**
+-*   $\delta_d$: The world-space distance between two adjacent pixels at the depth of the Gaussian kernel’s central pixel.
++*   $\delta_d$: World-space distance between two adjacent pixels at the depth of the Gaussian kernel's central pixel.
+ *   $T_{init}$: Initial termination threshold, typically $5 \cdot \delta_d$ [S1, unofficial].
+ *   $T_{fail}$: Failure multiplier, typically $1.5$ [S1, unofficial].
++*   $T_{min}, T_{max}$: Range constraints for threshold (e.g., $0.01$ to $1.0$ in related contexts, though specific bounds for this step are "Not given in the sources" beyond the initial calculation) [S1, unofficial].
+ 
+-**Steps:**
+-1.  **Initialization:** Create $M$ singleton clusters, each containing one point $\mathbf{p}_k$.
+-2.  **Distance Calculation:** Compute the minimum distance between any two points in distinct clusters. For clusters $C_a$ and $C_b$, the distance is:
+-    $$ d(C_a, C_b) = \min_{\mathbf{p}_i \in C_a, \mathbf{p}_j \in C_b} \|\mathbf{p}_i - \mathbf{p}_j\|_2 $$
+-3.  **Merging:** Identify the pair of clusters $(C_a, C_b)$ with the minimum distance $d(C_a, C_b)$.
+-4.  **Threshold Check:** If $d(C_a, C_b) \le T$, merge $C_a$ and $C_b$ into a single cluster. If $d(C_a, C_b) > T$, stop merging.
+-5.  **Iteration:** Repeat steps 3–4 until only one cluster remains or the threshold condition fails.
+-6.  **Failure Handling:** If the process fails to produce a useful clustering (e.g., too many small clusters or singletons), update $T \leftarrow T \cdot T_{fail}$ and restart from step 2 [S1, unofficial].
++**Algorithm Steps:**
++1.  **Sampling:** Obtain world-space coordinates for all pixels covered by the Gaussian kernels [S1, unofficial].
++2.  **Initialization:** Set the current threshold $T = T_{init} = 5 \cdot \delta_d$ [S1, unofficial]. Initialize each point as its own cluster.
++3.  **Merging Loop:**
++    a. Find the pair of distinct clusters $(C_a, C_b)$ with the minimum distance $d_{min}$ between any two points $\mathbf{p}_i \in C_a$ and $\mathbf{p}_j \in C_b$.
++    b. If $d_{min} < T$, merge $C_a$ and $C_b$ into a single cluster. Repeat step 3a.
++    c. If $d_{min} \ge T$ or only one cluster remains, terminate the merging process for the current threshold.
++4.  **Failure Check:** If the result is not a single coherent cluster (or fails a specific validity check not detailed in the text), update $T = T \cdot T_{fail}$ and repeat from Step 3 [S1, unofficial].
++5.  **Output:** Return the final set of clusters [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def world_space_clustering(points, threshold_multiplier=5.0, failure_multiplier=1.5):
++def world_space_clustering(points, delta_d):
+     """
+-    points: List of 3D vectors (numpy arrays or similar).
+-    Returns: List of clusters, where each cluster is a list of point indices.
++    Clusters world-space points using single linkage merging.
++    
++    Args:
++        points: List of 3D vectors (numpy arrays or similar).
++        delta_d: World-space distance between adjacent pixels at the central depth.
++        
++    Returns:
++        List of clusters, where each cluster is a list of point indices.
+     """
+     n = len(points)
+@@ -42,19 +51,23 @@
+     clusters = [[i] for i in range(n)]
+     
+-    # Calculate delta_d: distance between adjacent pixels at the depth of the central pixel
+-    # This requires access to camera intrinsics and depth buffer, assumed available as delta_d
+-    delta_d = get_pixel_spacing_at_depth() 
+-    threshold = threshold_multiplier * delta_d
++    # Initial threshold
++    threshold = 5.0 * delta_d
+     
+-    while len(clusters) > 1:
++    # Maximum attempts to avoid infinite loops (implementation detail [G])
++    max_attempts = 10
++    attempt = 0
++    
++    while attempt < max_attempts:
++        attempt += 1
++        
++        # Find closest pair of clusters
+         min_dist = float('inf')
+         merge_idx_a = -1
+         merge_idx_b = -1
+         
+-        # Find closest pair of clusters
+         for i in range(len(clusters)):
+             for j in range(i + 1, len(clusters)):
+-                # Compute min distance between any two points in cluster i and cluster j
+-                dist = min_dist_between_clusters(clusters[i], clusters[j], points)
++                # Single linkage: min distance between any two points in different clusters
++                dist = min_distance_between_clusters(points, clusters[i], clusters[j])
+                 if dist < min_dist:
+                     min_dist = dist
+@@ -62,5 +75,6 @@
+                     merge_idx_b = j
+         
+-        if min_dist > threshold:
++        # If no merge possible or only one cluster left
++        if min_dist >= threshold or len(clusters) == 1:
+             break
+             
+@@ -69,16 +83,43 @@
+         clusters.pop(merge_idx_b)
+         
+-        # If clustering fails (e.g., too fragmented), increase threshold and restart
+-        # Note: The source implies a restart on failure, but a simple loop with increasing threshold
+-        # is a valid implementation strategy. We follow the source's explicit restart logic.
+-        if is_clustering_useful(clusters):
+-            pass # Continue
++        # Note: The source mentions "clustering failure" leading to threshold increase.
++        # This is typically checked after the loop or if the final cluster count is too high.
++        # For simplicity, we assume the loop terminates when stable.
++        # If a failure condition is met (e.g., too many clusters), increase threshold.
++        # Since the exact failure metric is not given, we rely on the threshold logic.
++        # If the loop breaks with min_dist >= threshold, we check if the result is acceptable.
++        # If not, we increase threshold and retry.
++        
++        # Heuristic for failure check based on source description:
++        # If the process stops with multiple clusters and min_dist was close to threshold,
++        # it might be considered a failure if the goal is a single cluster.
++        # However, the source says "until a single cluster remains OR a termination threshold is satisfied".
++        # So the loop break is the normal termination.
++        # The "failure" case implies the threshold was too small, so we retry with larger threshold.
++        # We need a way to detect if the current threshold was "too small".
++        # The source implies the threshold is increased *if* clustering fails.
++        # Let's assume failure means we ended with >1 cluster and the min_dist was >= threshold.
++        # To implement the retry logic properly, we need to know if we *should* have merged more.
++        # The source says: "In cases of clustering failure, the threshold is multiplied by 1.5 and the procedure is repeated."
++        # This suggests the initial threshold might be too aggressive (too small).
++        # We can detect this if the final number of clusters is > 1.
++        
++        if len(clusters) > 1:
++            # Check if we stopped because of threshold (min_dist >= threshold)
++            # If min_dist was significantly smaller than threshold, we would have merged.
++            # So if we stopped, min_dist >= threshold.
++            # If we have multiple clusters, it means the threshold prevented further merging.
++            # This is the "failure" case where we need a larger threshold to merge more?
++            # Actually, a larger threshold makes merging *easier* (more pairs satisfy d < T).
++            # So if we have too many clusters, we increase T to merge them.
++            threshold = threshold * 1.5
++            # Reset clusters to original points for retry
++            clusters = [[i] for i in range(n)]
+         else:
+-            threshold *= failure_multiplier
+-            clusters = [[i] for i in range(n)] # Reset
++            break
+             
+     return clusters
+ 
+-def min_dist_between_clusters(cluster_a, cluster_b, points):
++def min_distance_between_clusters(points, cluster_a, cluster_b):
+     min_d = float('inf')
+     for i in cluster_a:
+@@ -89,33 +130,27 @@
+     return min_d
+ 
+-def get_pixel_spacing_at_depth():
+-    # Implementation detail: Calculate world-space distance between adjacent pixels
+-    # at the depth of the Gaussian kernel's central pixel.
+-    # Not given in the sources. [G]
+-    pass
++def distance(p1, p2):
++    return ((p1[0]-p2[0])**2 + (p1[1]-p2[1])**2 + (p1[2]-p2[2])**2)**0.5
++```
+ 
+-def is_clustering_useful(clusters):
+-    # Heuristic to determine if clustering is effective.
+-    # Not given in the sources. [G]
+-    return True
+-```
++**Edge Cases and Pitfalls:**
++*   **Precision:** Floating-point errors in distance calculations may affect merging decisions near the threshold boundary [G].
++*   **Boundaries:** The definition of $\delta_d$ depends on the depth of the central pixel; incorrect depth estimation leads to incorrect thresholds [S1, unofficial].
++*   **Degenerate Input:** If no points are sampled, the algorithm returns an empty set [G].
+ 
+ ## Subtopics
+ 
+ ### Coarse-Level Color-Based Segmentation
+-A variant that groups 3D Gaussians based on approximate view-independent colors rather than spatial proximity [S2]. It averages view-dependent colors across sampled directions to compute a representative color $\tilde{c}$ for each Gaussian:
+-$$ \tilde{c} \approx \frac{1}{\|D\|} \sum_{d \in D} c_d $$
+-where $D$ is the set of sampled viewing directions and $c_d$ is the color in direction $d$ [S2]. Clustering is then performed using k-means with Euclidean distance in RGB space [S2]. Outlier removal is applied by checking neighbor counts within a small-radius sphere; Gaussians with fewer neighbors than a threshold are removed [S2]. This method is used for coarse-level decomposition in volumetric segmentation tasks [S2].
++A variant that groups 3D Gaussians based on approximate view-independent colors rather than spatial proximity [S2]. It approximates view-independent color by averaging view-dependent colors across sampled directions, then applies clustering (e.g., k-means) using Euclidean distance in RGB space [S2]. Outlier removal is performed by checking neighbor counts within a small-radius sphere; Gaussians with neighbor counts below a threshold are removed [S2]. This method is used for coarse-level decomposition in volumetric scene segmentation [S2].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(M^2)$ or $O(M^3)$ depending on implementation, as it requires computing pairwise distances between points in clusters. Single linkage merging is computationally expensive for large $M$ [S1, unofficial].
+-*   **Memory Complexity:** $O(M^2)$ to store distance matrices or $O(M)$ if computed on-the-fly [S1, unofficial].
+-*   **Strengths:** Effective at removing spatial noise (foreground/background) and establishing spatial coherence for subsequent rendering or optimization steps [S1, unofficial].
+-*   **Limitations:** Computationally intensive for large numbers of points. Sensitive to the choice of threshold $T$ [S1, unofficial].
+-*   **When to use:** When preprocessing spatial data for Gaussian Splatting to reduce noise or organize primitives for hierarchical rendering [S1, unofficial].
+-*   **When not to use:** When color or semantic similarity is more important than spatial proximity [S2].
++*   **Time Complexity:** The single linkage merging step is $O(N^2)$ in the worst case for pairwise distance calculations, where $N$ is the number of sampled points. With spatial indexing (e.g., KD-tree), this can be reduced, but the source does not specify optimizations [S1, unofficial].
++*   **Memory Complexity:** $O(N)$ for storing points and clusters.
++*   **Performance:** The method is a preprocessing step, so its performance impact is minimal relative to the rendering pipeline. It is used to remove noise, improving the quality of subsequent Gaussian splatting [S1, unofficial].
++*   **Strengths:** Simple to implement, effective at removing spatially disconnected noise [S1, unofficial].
++*   **Limitations:** Depends heavily on the correct estimation of $\delta_d$; may fail if the threshold is not tuned correctly, requiring retries [S1, unofficial].
+ 
+ ## Background
+-The method is based on single linkage merging, a hierarchical clustering algorithm introduced by Sibson in 1973 [S1, unofficial]. It was adapted for 3D Gaussian Splatting in the context of Augmented Radiance Fields to preprocess pixel coordinates before projection [S1, unofficial].
++The method is based on single linkage merging, a clustering algorithm introduced by Sibson in 1973 [S1, unofficial]. It is used in the context of Augmented Radiance Fields and Gaussian Splatting to preprocess sampled pixels before projection [S1, unofficial].
+ 
+ ## Sources

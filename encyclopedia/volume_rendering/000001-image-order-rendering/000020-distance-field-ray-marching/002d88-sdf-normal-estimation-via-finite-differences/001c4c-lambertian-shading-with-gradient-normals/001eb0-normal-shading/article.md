@@ -1,0 +1,87 @@
+# Normal Shading
+
+Also called: Absolute Normal Visualization, Clamped Normal Visualization, Normal Check, Normal Visualization, Normal Visualization for Debugging
+
+## Overview
+Normal Shading visualizes surface normals by mapping the absolute values of the normal vector components to color channels [S2, unofficial]. It serves as a debugging technique to verify the correctness of computed normals [S3, unofficial]. It discards sign information via absolute value, unlike [Normal Integrator](4451-normal-integrator.md) which preserves it through a linear shift-and-scale mapping [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: Surface normal vector $\mathbf{n} = (n_x, n_y, n_z)$ [S2, unofficial].
+- Output: RGB color value $C \in [0, 1]^3$ [S2, unofficial].
+
+**Data Structures:**
+Not given in the sources.
+
+**Steps:**
+1. Compute the absolute value of each component of the normal vector $\mathbf{n}$ [S2, unofficial].
+2. Clamp the resulting components to the range $[0, 1]$ [S2, unofficial].
+3. Assign the clamped $x, y, z$ components to the Red, Green, and Blue channels respectively [S3, unofficial].
+
+**Formula:**
+The visualization color $N_{vis}$ is defined as:
+$$ N_{vis} = \max(0, \min(1, |\mathbf{n}|)) $$
+where $|\mathbf{n}|$ denotes the component-wise absolute value operation [S2, unofficial]. Specifically, if $\mathbf{n} = (n_x, n_y, n_z)$, then $N_{vis} = (|n_x|, |n_y|, |n_z|)$ [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def normal_shading(nx: float, ny: float, nz: float) -> tuple[float, float, float]:
+    """
+    Visualizes surface normals using absolute component mapping.
+    
+    Args:
+        nx, ny, nz: Components of the surface normal vector.
+        
+    Returns:
+        A tuple (r, g, b) with components in [0, 1].
+    """
+    # Take absolute value of each component
+    r = abs(nx)
+    g = abs(ny)
+    b = abs(nz)
+    
+    # Clamp to [0, 1]
+    r = max(0.0, min(1.0, r))
+    g = max(0.0, min(1.0, g))
+    b = max(0.0, min(1.0, b))
+    
+    return (r, g, b)
+```
+
+**Edge Cases and Pitfalls:**
+Not given in the sources.
+
+## Subtopics
+
+### [Laplacian Shading](1832-laplacian-shading.md)
+Laplacian Shading visualizes the surface Laplacian of a Signed Distance Field (SDF) to highlight regions of high curvature or rapid change in the distance function. It sets itself apart from Normal Shading by visualizing the second-order derivative (divergence of the gradient) rather than first-order gradient components, providing insight into the local geometry's concavity and convexity. See [Laplacian Shading](1832-laplacian-shading.md).
+
+### [Spin Shader](1959-spin-shader.md)
+The Spin Shader visualizes surface geometry by mapping surface normals and camera orientation to a cyclic color field, mimicking spin-1/2 behavior where a 360-degree rotation reverses the texture orientation. It sets itself apart from Normal Shading by encoding rotational phase information rather than absolute normal direction. See [Spin Shader](1959-spin-shader.md).
+
+### [Normal Integrator](4451-normal-integrator.md)
+The Normal Integrator is a visualization technique that renders the surface normal vector of a geometry as an RGB color image. It sets itself apart from Normal Shading by preserving sign information through a linear shift-and-scale mapping ($\mathbf{n} \to (\mathbf{n}+1)/2$) rather than taking absolute values. This allows debugging of normal orientation (e.g., distinguishing front-facing from back-facing surfaces). See [Normal Integrator](4451-normal-integrator.md).
+
+### [Normals Shader](7710-normals-shader.md)
+The Normals Shader visualizes surface normals by converting vector components from the range $[-1, 1]$ to the displayable range $[0, 1]$. It serves as a debugging and visualization tool within the Normal Shading family, distinct from the Spin Shader's rotational encoding and the Normal Integrator's gradient accumulation. It outputs the normal direction as an emission color, allowing developers to verify normal orientation and smoothness. See [Normals Shader](7710-normals-shader.md).
+
+### Tangent Space Visualization
+Tangent Space Visualization projects the surface normal onto the sensor plane to visualize the tangent space components [S2, unofficial]. It sets itself apart from Normal Shading by encoding the relationship between the normal and the camera view direction [S2, unofficial].
+- **Steps:**
+  1. Let $e_\alpha$ and $e_\beta$ be an orthonormal basis for the sensor plane, and $v_p$ be the unit vector from pixel $p$ to the focal point [S2, unofficial].
+  2. Project the surface normal $N_p$ onto the sensor plane: $T_p = N_p - (N_p \cdot v_p)v_p$ [S2, unofficial].
+  3. Express $T_p$ in the basis $e_\alpha, e_\beta$ as $T_p = \alpha e_\alpha + \beta e_\beta$ [S2, unofficial]. The result is a vector $(\alpha, \beta)$ where $\alpha^2 + \beta^2 \leq 1$ [S2, unofficial].
+  4. Treat $(\alpha, \beta)$ as a complex number $\alpha + i\beta$ and apply domain coloring techniques to visualize the result [S2, unofficial].
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+Normal Shading is used in the context of Signed Distance Field (SDF) constructive geometry systems and ray marching [S2, unofficial]. It is applied to verify the correctness of computed normals in rendering pipelines [S3, unofficial]. The specific absolute-value variant is noted in community implementations for its simplicity in visualizing normal magnitude symmetry [S2, unofficial].
+
+## Sources
+[S1] autonomousvision/sdfstudio, https://github.com/autonomousvision/sdfstudio, fetched 2026-10-26 (unofficial)
+[S2] kyle-rosa/ray_marching, https://github.com/kyle-rosa/ray_marching, fetched 2026-10-26 (unofficial)
+[S3] How to avoid curvature artifact in raytracer?, https://computergraphics.stackexchange.com/questions/11072/how-to-avoid-curvature-artifact-in-raytracer, fetched 2026-10-27 (unofficial)

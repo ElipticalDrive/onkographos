@@ -1,0 +1,621 @@
+--- v001.md
++++ v002.md
+@@ -4,80 +4,117 @@
+ 
+ ## Overview
+-Frequency-Aware Adaptive Splat Spawning is a densification strategy for 3D Gaussian Splatting that spawns new splats in regions of high-frequency content or low opacity (holes) by scoring pixels based on frequency gaps and alpha gaps, then sampling new splats from the nearest existing cloud points [S1, unofficial]. It differs from sibling methods by explicitly incorporating image frequency analysis into the splitting decision, targeting detail loss rather than just gradient magnitude or opacity thresholds [S1, unofficial].
++Frequency-Aware Adaptive Splat Spawning is a densification strategy for 3D Gaussian Splatting that spawns new splats in regions of high-frequency content or low opacity (holes) by scoring pixels based on frequency gaps and alpha gaps, then sampling new splats from the nearest existing cloud points [S1, unofficial]. It differs from sibling methods by explicitly incorporating high-frequency image gradients into the splitting decision, targeting texture-rich areas that standard opacity-based splitting might miss, while also addressing geometric holes via alpha thresholds [S1, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- Rendered color image $I_{pred}$ and alpha map $\alpha_{pred}$ for the current training step.
+-- Current set of 3D Gaussians (splats) with attributes: means $\mu$, scales $s$, rotations $q$, colors $c$, opacities $\alpha$.
+-- Camera extrinsics $W2C$ (rotation $R$, translation $t$) and intrinsics $K$ ($f_x, f_y, c_x, c_y$).
+-- Current training step $t_{step}$ and total iterations $T_{total}$.
+-- Target splat count $N_{target}$ (default 500,000 if $\le 0$) [S1, unofficial].
++- Current set of 3D Gaussians (splats) with attributes: means ($\mathbf{m}$), quaternions ($\mathbf{q}$), scales ($\mathbf{s}$), colors ($\mathbf{c}$), opacities ($\alpha$).
++- Camera parameters: world-to-camera rotation $R_{cam}$ and translation $t_{cam}$ (from $w2c$ matrix), intrinsic matrix $K$.
++- Rendered image: predicted color $C_{pred}$ and alpha $\alpha_{pred}$ for the current view.
++- Training step counter $step$.
++- Hyperparameters: $target\_splats$ (default 500,000), $n\_spawn$ (number of splats to spawn per iteration, not explicitly defined in notes but implied by logic), threshold for alpha gap (0.5), weight for alpha gap (2.0).
+ 
+ **Outputs:**
+-- Updated set of 3D Gaussians with new splats added via splitting existing ones.
++- Updated set of 3D Gaussians with new splats added.
+ 
+ **Data Structures:**
+-- Splats: List of objects or tensors containing $\mu \in \mathbb{R}^3$, $s \in \mathbb{R}^3$, $q \in \mathbb{R}^4$, $c \in \mathbb{R}^3$, $\alpha \in \mathbb{R}$.
+-- Score Map: 2D tensor of size $H \times W$ storing spawn scores per pixel.
+-
+-**Steps:**
+-
+-1. **Check Spawning Conditions:**
+-   Proceed only if:
+-   - $t_{step} > 100$
+-   - $t_{step} \pmod{50} == 0$
+-   - Current splat count $N_{curr} < N_{target}$
+-   - $t_{step} < 0.85 \times T_{total}$ [S1, unofficial]
+-
+-2. **Compute Spawn Scores:**
+-   - Initialize `splat_scores` tensor of zeros, size matching the number of splats.
+-   - Project all splat centers to 2D pixel coordinates $(u, v)$ in camera space:
+-     $$ \mu_{cam} = R \mu + t $$
+-     $$ z = \mu_{cam, z} $$
+-     $$ u = \left\lfloor \frac{\mu_{cam, x}}{z} f_x + c_x \right\rfloor $$
+-     $$ v = \left\lfloor \frac{\mu_{cam, y}}{z} f_y + c_y \right\rfloor $$
+-     Clamp $z \ge 0.1$ [S1, unofficial].
+-   - Filter valid splats where $u, v$ are within image bounds and $z > 0.1$.
+-   - Compute **Frequency Gap**:
+-     $$ \text{freq\_gap} = \text{ComputeFrequencyGap}(I_{pred}, I_{gt}) $$
+-     *Note: The exact formula for `ComputeFrequencyGap` is not provided in the source, but it measures high-frequency discrepancies between predicted and ground truth images [S1, unofficial].*
+-   - Compute **Alpha Gap**:
+-     $$ \text{alpha\_gap} = \max(0, 0.5 - \alpha_{pred}) $$
+-     *Note: $\alpha_{pred}$ is the rendered alpha map [S1, unofficial].*
+-   - Assign scores to valid splats based on their projected pixel coordinates:
+-     $$ \text{splat\_scores}[i] = \text{freq\_gap}[u_i, v_i] + 2.0 \times \text{alpha\_gap}[u_i, v_i] $$
+-     [S1, unofficial]
+-
+-3. **Select Splats to Split:**
+-   - Calculate number of splats to split:
+-     $$ N_{split} = \min\left(\left\lfloor \frac{N_{curr}}{10} \right\rfloor, N_{target} - N_{curr}, 5000\right) $$
+-     [S1, unofficial]
+-   - Select top $N_{split}$ splats with highest scores using `torch.topk`. Let these indices be $I_{split}$ [S1, unofficial].
+-
+-4. **Split Selected Splats:**
+-   For each parent splat $p \in I_{split}$:
+-   - Find the longest axis of the Gaussian:
+-     $$ a_{long} = \arg\max_j(s_p[j]) $$
+-     [S1, unofficial]
+-   - Compute the world-space direction of the longest axis:
+-     $$ d_{world} = R_p[:, a_{long}] $$
+-     where $R_p$ is the rotation matrix derived from quaternion $q_p$ [S1, unofficial].
+-   - Compute offset distance:
+-     $$ d_{offset} = \exp(s_p[a_{long}]) \times 0.5 $$
+-     [S1, unofficial]
+-   - Compute offset vector:
+-     $$ \Delta = d_{world} \times d_{offset} $$
+-     [S1, unofficial]
+-   - Create two child splats (parent and child):
+-     - **Means**:
+-       $$ \mu_{parent} = \mu_p + \Delta $$
+-       $$ \mu_{child} = \mu_p - \Delta $$
+-       [S1, unofficial]
+-     - **Scales**: Halve the longest axis in log space:
+-       $$ s'_{parent}[j] = s'_{child}[j] = s_p[j] \quad \text{for } j \neq a_{long} $$
+-       $$ s'_{parent}[a_{long}] = s'_{child}[a_{long}] = s_p[a_{long}] - \ln(2) $$
+-       *Note: The source subtracts 0.693 ($\ln 2$) from the scale value, implying scales are stored in log space or the operation is applied to log-scales. If scales are linear, this operation is invalid. Given the context of "subtracting 0.693", it is assumed scales are in log space or the source implies log-scale representation [S1, unofficial].*
+-     - **Other Attributes**: Copy $q, c, \alpha$ from parent to both children.
+-   - Replace the parent splat with the two children in the splat list [S1, unofficial].
++- `splats`: Dictionary or object containing tensors for `means` ($N \times 3$), `quats` ($N \times 4$), `scales` ($N \times 3$), `colors` ($N \times 3$), `opacities` ($N \times 1$).
++- `cloud_pts`: 3D points from the initial reconstruction or previous step, used as source for spawning.
++- `tree_2d`: 2D KD-tree built from projected valid cloud points.
++
++**Numbered Steps:**
++
++1.  **Check Spawning Conditions:**
++    Proceed with spawning only if:
++    - $step > 100$
++    - $step \pmod{50} == 0$
++    - Current splat count $< target\_splats$
++    - $step < iterations \times 0.85$
++    If any condition fails, return without modification [S1, unofficial].
++
++2.  **Compute Spawn Scores:**
++    - Initialize `splat_scores` tensor of zeros with size $N$ (number of current splats).
++    - Project all current splat centers to 2D pixel coordinates $(u, v)$:
++      $$ \mathbf{m}_{cam} = \mathbf{m} R_{cam}^T + t_{cam} $$
++      $$ z = \mathbf{m}_{cam}[:, 2] $$
++      $$ u = \left\lfloor \frac{\mathbf{m}_{cam}[:, 0]}{z} K_{0,0} + K_{0,2} \right\rfloor $$
++      $$ v = \left\lfloor \frac{\mathbf{m}_{cam}[:, 1]}{z} K_{1,1} + K_{1,2} \right\rfloor $$
++      Clamp $z$ to minimum 0.1 to avoid division by zero [S1, unofficial].
++    - Identify valid splats where $u, v$ are within image bounds and $z > 0.1$.
++    - Compute **Frequency Gap**:
++      $$ \text{freq\_gap} = \text{ComputeFrequencyGap}(C_{pred}, \text{pixels}) $$
++      (Note: The exact implementation of `_compute_freq_gap` is not detailed in the notes, but it measures high-frequency content in the predicted image) [S1, unofficial].
++    - Compute **Alpha Gap**:
++      $$ \text{alpha\_gap} = \max(0, 0.5 - \alpha_{pred}) $$
++      This highlights regions where opacity is low (holes) [S1, unofficial].
++    - Calculate **Spawn Score** for each valid splat:
++      $$ \text{score} = \text{freq\_gap} + 2.0 \times \text{alpha\_gap} $$
++      Assign these scores to `splat_scores` at the corresponding pixel locations. Flatten `splat_scores` to 1D [S1, unofficial].
++
++3.  **Determine Number of Splats to Spawn:**
++    - If sum of `score_flat` is near zero, return None (no spawning needed) [S1, unofficial].
++    - Compute probabilities:
++      $$ \text{probs} = \frac{\text{score\_flat}}{\sum \text{score\_flat}} $$
++    - Determine $n\_spawn$:
++      $$ n\_spawn = \min(n\_spawn, \sum (\text{score\_flat} > 0), \text{len}(\text{cloud\_pts})) $$
++      (Note: $n\_spawn$ is a hyperparameter; if not provided, it may be derived from context or set to a fixed value like 5000 as seen in splitting logic, but spawning logic uses a separate $n\_spawn$ variable) [S1, unofficial].
++
++4.  **Sample Pixel Indices:**
++    - Sample $n\_spawn$ pixel indices from `probs` without replacement:
++      $$ \text{pixel\_idx} = \text{Multinomial}(\text{probs}, n\_spawn, \text{replacement=False}) $$
++    - Convert pixel indices to coordinates:
++      $$ p_y = \lfloor \text{pixel\_idx} / W \rfloor $$
++      $$ p_x = \text{pixel\_idx} \pmod W $$
++      where $W$ is image width [S1, unofficial].
++
++5.  **Unproject Pixels to World Space:**
++    - Compute camera position in world space:
++      $$ \mathbf{c}_{pos} = -R_{cam}^T t_{cam} $$
++    - Compute ray directions in camera space:
++      $$ \mathbf{d}_{cam} = \begin{bmatrix} \frac{p_x - K_{0,2}}{K_{0,0}} \\ \frac{p_y - K_{1,2}}{K_{1,1}} \\ 1 \end{bmatrix} $$
++    - Transform ray directions to world space:
++      $$ \mathbf{d}_{world} = \text{normalize}(R_{cam}^T \mathbf{d}_{cam}) $$
++    - (Note: The notes mention unprojecting to 3D world space, but for spawning, the key is to find the nearest existing cloud point in 2D projection space, not necessarily unprojecting to a specific depth) [S1, unofficial].
++
++6.  **Find Nearest Cloud Points:**
++    - Project existing cloud points ($\text{cloud\_pts}$) to camera space:
++      $$ \text{cloud}_{cam} = \text{cloud\_pts} R_{cam}^T + t_{cam} $$
++    - Filter valid cloud points with depth $> 0.1$:
++      $$ \text{valid} = \text{cloud}_{cam}[:, 2] > 0.1 $$
++    - Project valid cloud points to 2D UV:
++      $$ u_{cloud} = \frac{\text{cloud}_{cam}[:, 0]}{\text{cloud}_{cam}[:, 2]} K_{0,0} + K_{0,2} $$
++      $$ v_{cloud} = \frac{\text{cloud}_{cam}[:, 1]}{\text{cloud}_{cam}[:, 2]} K_{1,1} + K_{1,2} $$
++    - Build a 2D KD-tree from valid projected cloud points $(u_{cloud}, v_{cloud})$ [S1, unofficial].
++    - For each spawn pixel $(p_x, p_y)$, find the nearest neighbor in the 2D KD-tree:
++      $$ \text{nn\_idx} = \text{tree\_2d.query}([p_x, p_y]) $$
++    - Map 2D nearest neighbor indices back to original cloud point indices:
++      $$ \text{orig\_idx} = \text{valid\_idx}[\text{nn\_idx}] $$
++    - Retrieve new splat attributes (means, normals, colors) from the original cloud data using `orig_idx` [S1, unofficial].
++
++7.  **Spawn New Splats:**
++    - Create new splats with the retrieved attributes.
++    - Add these new splats to the `splats` set [S1, unofficial].
++
++8.  **Split Existing Splats (Optional/Combined Step):**
++    - The notes also describe a splitting mechanism that occurs in the same function. This is distinct from spawning but part of the densification process.
++    - Calculate number of splats to split:
++      $$ n\_split = \min(\lfloor \text{cur\_n} / 10 \rfloor, \text{target\_splats} - \text{cur\_n}, 5000) $$
++    - Select top $n\_split$ splats by score using `torch.topk` [S1, unofficial].
++    - For each selected parent splat:
++      - Find longest axis:
++        $$ \text{longest\_ax} = \arg\max(\mathbf{s}) $$
++      - Compute world-space direction of longest axis:
++        $$ \mathbf{R}_{splat} = \text{QuatToRotMat}(\mathbf{q}) $$
++        $$ \mathbf{ax\_dir} = \mathbf{R}_{splat}[:, :, \text{longest\_ax}] $$
++      - Compute offset distance:
++        $$ \text{offset\_dist} = \exp(\mathbf{s}[:, \text{longest\_ax}]) \times 0.5 $$
++      - Compute offset vector:
++        $$ \text{offset} = \mathbf{ax\_dir} \times \text{offset\_dist} $$
++      - Create two children:
++        - Parent mean: $\mathbf{m} + \text{offset}$
++        - Child mean: $\mathbf{m} - \text{offset}$
++      - Halve the longest axis scale in log space:
++        $$ \mathbf{s}_{new} = \mathbf{s} - 0.693 \times \mathbf{e}_{\text{longest\_ax}} $$
++        (where $0.693 \approx \ln(2)$) [S1, unofficial].
++      - Concatenate parent and child data for all attributes, replacing the original splat [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -86,188 +123,271 @@
+ import torch
+ import numpy as np
+-
+-def frequency_aware_spawn(splats, images_pred, images_gt, alphas_pred, 
+-                          w2c, intrinsic, step, total_iters, target_splats=500000):
++from scipy.spatial import KDTree
++
++def frequency_aware_adaptive_splat_spawning(
++    splats, 
++    cloud_pts, 
++    w2c, 
++    K, 
++    C_pred, 
++    alpha_pred, 
++    step, 
++    iterations, 
++    target_splats=500000,
++    n_spawn=5000  # Hyperparameter
++):
+     """
+-    Perform frequency-aware adaptive splat spawning.
++    Perform frequency-aware adaptive splat spawning and splitting.
+     
+     Args:
+-        splats: Dict of tensors for splat attributes (means, scales, quats, colors, opacities).
+-        images_pred: Rendered color images (B, H, W, 3).
+-        images_gt: Ground truth color images (B, H, W, 3).
+-        alphas_pred: Rendered alpha maps (B, H, W, 1).
+-        w2c: World-to-camera transformation (B, 3, 4) [R|t].
+-        intrinsic: Camera intrinsic matrix (B, 3, 3).
+-        step: Current training step.
+-        total_iters: Total training iterations.
+-        target_splats: Target number of splats.
++        splats: Dict with keys 'means', 'quats', 'scales', 'colors', 'opacities'
++        cloud_pts: N x 3 tensor of initial cloud points
++        w2c: 3 x 4 world-to-camera matrix [R | t]
++        K: 3 x 3 intrinsic matrix
++        C_pred: H x W x 3 predicted color image
++        alpha_pred: H x W x 1 predicted alpha image
++        step: Current training step
++        iterations: Total training iterations
++        target_splats: Target number of splats
++        n_spawn: Number of splats to spawn per iteration
+         
+     Returns:
+-        Updated splats dict.
++        Updated splats dict
+     """
+-    # 1. Check conditions
+-    if step <= 100 or step % 50 != 0 or step >= 0.85 * total_iters:
++    # 1. Check Spawning Conditions
++    if step <= 100 or step % 50 != 0 or len(splats['means']) >= target_splats or step >= iterations * 0.85:
+         return splats
+-    
+-    n_curr = splats['means'].shape[0]
+-    if n_curr >= target_splats:
+-        return splats
+-    
+-    # 2. Compute scores
++
++    R_cam = w2c[:3, :3]
++    t_cam = w2c[:3, 3]
++    fx, fy = K[0, 0], K[1, 1]
++    cx, cy = K[0, 2], K[1, 2]
++    H, W = C_pred.shape[:2]
++
++    # 2. Compute Spawn Scores
++    N = len(splats['means'])
++    splat_scores = torch.zeros(N, device=C_pred.device)
++    
+     # Project splat centers to 2D
+-    means = splats['means']  # (N, 3)
+-    R_cam = w2c[:, :3, :3]   # (B, 3, 3)
+-    t_cam = w2c[:, :3, 3]    # (B, 3)
+-    
+-    # Assuming single camera for simplicity, or batched. 
+-    # The source implies a single view or per-view processing. 
+-    # We'll assume batch dimension B=1 for the main logic, or loop over B.
+-    # For clarity, we assume single camera parameters for the spawn logic 
+-    # as the source code snippet uses single extrinsic/intrinsic.
+-    
+-    # Transform means to camera space
+-    means_cam = means @ R_cam[0].T + t_cam[0]  # (N, 3)
+-    z = means_cam[:, 2]
+-    
+-    # Clamp z
+-    z = torch.clamp(z, min=0.1)
+-    
+-    # Project to 2D
+-    fx, fy = intrinsic[0, 0, 0], intrinsic[0, 1, 1]
+-    cx, cy = intrinsic[0, 0, 2], intrinsic[0, 1, 2]
+-    
++    means_cam = splats['means'] @ R_cam.T + t_cam
++    z = means_cam[:, 2].clamp(min=0.1)
+     u = ((means_cam[:, 0] / z) * fx + cx).long()
+     v = ((means_cam[:, 1] / z) * fy + cy).long()
+     
+-    # Filter valid splats
+-    H, W = images_pred.shape[1:3]
++    # Valid splats
+     valid_mask = (u >= 0) & (u < W) & (v >= 0) & (v < H) & (z > 0.1)
+     
+-    if not torch.any(valid_mask):
++    # Compute Frequency Gap (placeholder for actual implementation)
++    # freq_gap = _compute_freq_gap(C_pred, pixels)
++    # For demonstration, assume freq_gap is computed and available
++    freq_gap = torch.zeros(H, W, device=C_pred.device) # Placeholder
++    # In reality, this would be a function of image gradients
++    
++    # Compute Alpha Gap
++    alpha_gap = torch.relu(0.5 - alpha_pred.squeeze(-1))
++    
++    # Assign scores to valid splats
++    # Note: Multiple splats might project to the same pixel; this logic assumes
++    # one-to-one or takes the max. The notes imply assigning to pixel coordinates.
++    # We'll assume we accumulate or take the last one. For simplicity, we take the score
++    # at the projected pixel for each valid splat.
++    # To avoid overwriting, we might use scatter_add or similar, but notes say "set score".
++    # Let's assume we take the score at the projected pixel for each valid splat.
++    
++    # Flatten scores for probability calculation
++    score_flat = splat_scores.clone()
++    if score_flat.sum() == 0:
+         return splats
+         
+-    # Compute frequency gap and alpha gap
+-    # Note: ComputeFrequencyGap is not defined in source. 
+-    # We assume it returns a tensor of same shape as images_pred[...0]
+-    freq_gap = compute_frequency_gap(images_pred, images_gt) # Placeholder for undefined function
+-    alpha_gap = torch.relu(0.5 - alphas_pred.squeeze(-1)) # (B, H, W)
+-    
+-    # Initialize scores
+-    splat_scores = torch.zeros(n_curr, device=means.device)
+-    
+-    # Assign scores to valid splats
+-    # Flatten indices for indexing
+-    valid_u = u[valid_mask]
+-    valid_v = v[valid_mask]
+-    
+-    # Accumulate scores (if multiple splats project to same pixel, sum? Source says "set score")
+-    # Source: "set score to freq_gap at projected pixel coordinates"
+-    # This implies a map-based accumulation or direct assignment. 
+-    # We'll use scatter_add to handle overlaps if any, or direct assignment if unique.
+-    # Given the source uses "set", we assume direct assignment or max. 
+-    # Let's use scatter_add for robustness.
+-    
+-    freq_gap_val = freq_gap[0, valid_v, valid_u] # (N_valid,)
+-    alpha_gap_val = alpha_gap[0, valid_v, valid_u] # (N_valid,)
+-    
+-    scores = freq_gap_val + 2.0 * alpha_gap_val
+-    
+-    # Scatter scores to splat_scores
+-    splat_scores[valid_mask] = scores
+-    
+-    # 3. Select splats to split
+-    n_split = min(n_curr // 10, target_splats - n_curr, 5000)
+-    if n_split <= 0:
++    # 3. Determine Number of Splats to Spawn
++    probs = score_flat / score_flat.sum()
++    n_spawn_actual = min(n_spawn, (score_flat > 0).sum().item(), len(cloud_pts))
++    
++    if n_spawn_actual == 0:
+         return splats
+         
+-    _, topk_idx = torch.topk(splat_scores, n_split)
+-    split_idx = topk_idx[splat_scores[topk_idx] > 0] # Ensure positive scores
+-    
+-    if split_idx.numel() == 0:
+-        return splats
+-        
+-    # 4. Split splats
+-    parent_means = means[split_idx]
+-    parent_scales = splats['scales'][split_idx]
+-    parent_quats = splats['quats'][split_idx]
+-    parent_colors = splats['colors'][split_idx]
+-    parent_opacities = splats['opacities'][split_idx]
+-    
+-    # Find longest axis
+-    longest_ax = torch.argmax(parent_scales, dim=-1) # (N_split,)
+-    
+-    # Get rotation matrices
+-    R_splat = quat_to_rotmat(parent_quats) # (N_split, 3, 3)
+-    
+-    # Direction of longest axis
+-    ax_dir = R_splat[torch.arange(len(split_idx)), :, longest_ax] # (N_split, 3)
+-    
+-    # Offset distance
+-    offset_dist = torch.exp(parent_scales[torch.arange(len(split_idx)), longest_ax]) * 0.5
+-    
+-    # Offset vector
+-    offset = ax_dir * offset_dist.unsqueeze(-1) # (N_split, 3)
+-    
+-    # New means
+-    new_means_parent = parent_means + offset
+-    new_means_child = parent_means - offset
+-    
+-    # New scales (halve longest axis in log space)
+-    # Assuming scales are in log space as per source subtraction of ln(2)
+-    new_scales = parent_scales.clone()
+-    new_scales[torch.arange(len(split_idx)), longest_ax] -= np.log(2)
+-    
+-    # Concatenate
+-    new_means = torch.cat([new_means_parent, new_means_child], dim=0)
+-    new_scales = torch.cat([new_scales, new_scales], dim=0)
+-    new_quats = torch.cat([parent_quats, parent_quats], dim=0)
+-    new_colors = torch.cat([parent_colors, parent_colors], dim=0)
+-    new_opacities = torch.cat([parent_opacities, parent_opacities], dim=0)
+-    
+-    # Remove old splats and add new ones
+-    mask = torch.ones(n_curr, dtype=torch.bool)
+-    mask[split_idx] = False
+-    remaining_means = means[mask]
+-    remaining_scales = splats['scales'][mask]
+-    remaining_quats = splats['quats'][mask]
+-    remaining_colors = splats['colors'][mask]
+-    remaining_opacities = splats['opacities'][mask]
+-    
+-    final_means = torch.cat([remaining_means, new_means], dim=0)
+-    final_scales = torch.cat([remaining_scales, new_scales], dim=0)
+-    final_quats = torch.cat([remaining_quats, new_quats], dim=0)
+-    final_colors = torch.cat([remaining_colors, new_colors], dim=0)
+-    final_opacities = torch.cat([remaining_opacities, new_opacities], dim=0)
+-    
+-    splats['means'] = final_means
+-    splats['scales'] = final_scales
+-    splats['quats'] = final_quats
+-    splats['colors'] = final_colors
+-    splats['opacities'] = final_opacities
+-    
+-    return splats
+-
+-def compute_frequency_gap(pred, gt):
+-    """Placeholder for undefined frequency gap computation."""
+-    # Source does not define this function. 
+-    # It likely involves FFT or Laplacian pyramid differences.
+-    return torch.abs(pred - gt) # Dummy implementation
++    # 4. Sample Pixel Indices
++    pixel_idx = torch.multinomial(probs, n_spawn_actual, replacement=False)
++    py = (pixel_idx // W).float()
++    px = (pixel_idx % W).float()
++    
++    # 5. Unproject Pixels to World Space (for context, but we use 2D NN)
++    # Compute camera position
++    cam_pos = -R_cam.T @ t_cam
++    
++    # 6. Find Nearest Cloud Points
++    # Project cloud points to 2D
++    cloud_cam = cloud_pts @ R_cam.T + t_cam
++    cloud_z = cloud_cam[:, 2]
++    valid_cloud = cloud_z > 0.1
++    
++    cloud_u = (cloud_cam[:, 0] / cloud_z) * fx + cx
++    cloud_v = (cloud_cam[:, 1] / cloud_z) * fy + cy
++    
++    # Build 2D KD-tree
++    cloud_uv_valid = torch.stack([cloud_u[valid_cloud], cloud_v[valid_cloud]], dim=1).cpu().numpy()
++    tree_2d = KDTree(cloud_uv_valid)
++    
++    # Find nearest neighbors
++    spawn_uv_np = torch.stack([px, py], dim=1).cpu().numpy()
++    _, nn_idx = tree_2d.query(spawn_uv_np)
++    
++    # Map to original cloud point indices
++    valid_idx = torch.where(valid_cloud)[0]
++    orig_idx = valid_idx[nn_idx]
++    
++    # Retrieve new splat attributes
++    new_means = splats['means'][orig_idx].clone()
++    new_quats = splats['quats'][orig_idx].clone()
++    new_scales = splats['scales'][orig_idx].clone()
++    new_colors = splats['colors'][orig_idx].clone()
++    new_opacities = splats['opacities'][orig_idx].clone()
++    
++    # 7. Spawn New Splats
++    # Add new splats to the existing set
++    new_splats = {
++        'means': torch.cat([splats['means'], new_means], dim=0),
++        'quats': torch.cat([splats['quats'], new_quats], dim=0),
++        'scales': torch.cat([splats['scales'], new_scales], dim=0),
++        'colors': torch.cat([splats['colors'], new_colors], dim=0),
++        'opacities': torch.cat([splats['opacities'], new_opacities], dim=0)
++    }
++    
++    # 8. Split Existing Splats
++    cur_n = len(new_splats['means'])
++    n_split = min(cur_n // 10, target_splats - cur_n, 5000)
++    
++    if n_split > 0:
++        # Select top n_split splats by score
++        # Note: score_flat is for original splats. We need to recompute or map scores.
++        # For simplicity, assume we select from the original splats that were valid.
++        # This part is complex because we added new splats.
++        # The notes imply splitting happens on the current set.
++        # Let's assume we split the top scoring splats from the original set.
++        
++        # Re-compute scores for the new set? Or just split the top ones from before?
++        # The notes say "Select top n_split splats by score".
++        # We'll assume we split the top scoring splats from the original set.
++        
++        # Get indices of top n_split splats from the original set
++        top_k_idx = torch.topk(splat_scores, n_split, largest=True, sorted=False).indices
++        
++        # Prepare new splats for splitting
++        split_means = []
++        split_quats = []
++        split_scales = []
++        split_colors = []
++        split_opacities = []
++        
++        for idx in top_k_idx:
++            parent_mean = new_splats['means'][idx]
++            parent_quat = new_splats['quats'][idx]
++            parent_scale = new_splats['scales'][idx]
++            parent_color = new_splats['colors'][idx]
++            parent_opacity = new_splats['opacities'][idx]
++            
++            # Find longest axis
++            longest_ax = torch.argmax(parent_scale)
++            
++            # Compute world-space direction of longest axis
++            R_splat = quat_to_rotmat(parent_quat)
++            ax_dir = R_splat[:, :, longest_ax]
++            
++            # Compute offset distance
++            offset_dist = torch.exp(parent_scale[longest_ax]) * 0.5
++            
++            # Compute offset vector
++            offset = ax_dir * offset_dist
++            
++            # Create children
++            child1_mean = parent_mean + offset
++            child2_mean = parent_mean - offset
++            
++            # Halve the longest axis scale in log space
++            new_scale = parent_scale.clone()
++            new_scale[longest_ax] -= 0.693  # log(2)
++            
++            split_means.append(child1_mean)
++            split_means.append(child2_mean)
++            split_quats.append(parent_quat)
++            split_quats.append(parent_quat)
++            split_scales.append(new_scale)
++            split_scales.append(new_scale)
++            split_colors.append(parent_color)
++            split_colors.append(parent_color)
++            split_opacities.append(parent_opacity)
++            split_opacities.append(parent_opacity)
++            
++        # Remove the parent splats and add the children
++        # This is a bit tricky with tensors. We need to remove the parents and add the children.
++        # For simplicity, we'll create a mask to keep non-split parents and add children.
++        
++        keep_mask = torch.ones(cur_n, dtype=torch.bool)
++        keep_mask[top_k_idx] = False
++        
++        kept_means = new_splats['means'][keep_mask]
++        kept_quats = new_splats['quats'][keep_mask]
++        kept_scales = new_splats['scales'][keep_mask]
++        kept_colors = new_splats['colors'][keep_mask]
++        kept_opacities = new_splats['opacities'][keep_mask]
++        
++        final_means = torch.cat([kept_means, torch.stack(split_means)], dim=0)
++        final_quats = torch.cat([kept_quats, torch.stack(split_quats)], dim=0)
++        final_scales = torch.cat([kept_scales, torch.stack(split_scales)], dim=0)
++        final_colors = torch.cat([kept_colors, torch.stack(split_colors)], dim=0)
++        final_opacities = torch.cat([kept_opacities, torch.stack(split_opacities)], dim=0)
++        
++        new_splats = {
++            'means': final_means,
++            'quats': final_quats,
++            'scales': final_scales,
++            'colors': final_colors,
++            'opacities': final_opacities
++        }
++        
++    return new_splats
++
++def quat_to_rotmat(q):
++    """Convert quaternion to rotation matrix."""
++    # Standard quaternion to rotation matrix conversion
++    w, x, y, z = q[:, 0], q[:, 1], q[:, 2], q[:, 3]
++    R = torch.zeros(q.shape[0], 3, 3, device=q.device)
++    R[:, 0, 0] = 1 - 2 * (y**2 + z**2)
++    R[:, 0, 1] = 2 * (x*y - w*z)
++    R[:, 0, 2] = 2 * (x*z + w*y)
++    R[:, 1, 0] = 2 * (x*y + w*z)
++    R[:, 1, 1] = 1 - 2 * (x**2 + z**2)
++    R[:, 1, 2] = 2 * (y*z - w*x)
++    R[:, 2, 0] = 2 * (x*z - w*y)
++    R[:, 2, 1] = 2 * (y*z + w*x)
++    R[:, 2, 2] = 1 - 2 * (x**2 + y**2)
++    return R
+ ```
+ 
++**Parameters:**
++- $target\_splats$: Target number of splats. If $\le 0$, defaults to 500,000 [S1, unofficial].
++- $n\_spawn$: Number of splats to spawn per iteration. Not explicitly defined in notes, but implied by logic [S1, unofficial].
++- Alpha gap threshold: 0.5 [S1, unofficial].
++- Alpha gap weight: 2.0 [S1, unofficial].
++- Splitting frequency: Every 50 steps [S1, unofficial].
++- Training duration for splitting: First 85% of iterations [S1, unofficial].
++
+ **Edge Cases and Pitfalls:**
+-- **Frequency Gap Undefined:** The source does not provide the implementation for `ComputeFrequencyGap`. Implementers must define this, e.g., using high-pass filtering or Laplacian differences [S1, unofficial].
+-- **Scale Representation:** The source subtracts $\ln(2)$ from scales. This implies scales are stored in log space. If scales are linear, this operation is incorrect. Implementers must ensure consistency [S1, unofficial].
+-- **Pixel Overlap:** Multiple splats may project to the same pixel. The source uses "set score", which may imply overwriting. Using `scatter_add` or `scatter_max` is safer to accumulate scores [S1, unofficial].
+-- **Boundary Conditions:** Splats projecting outside image bounds or with $z \le 0.1$ are ignored [S1, unofficial].
++- Precision: Clamping $z$ to 0.1 avoids division by zero [S1, unofficial].
++- Boundaries: Checking $u, v$ within image bounds prevents out-of-bounds access [S1, unofficial].
++- Degenerate Input: If score sum is near zero, no spawning occurs [S1, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N)$ for projection and score computation, where $N$ is the number of splats. Splitting is $O(N_{split})$. Overall per-step cost is linear in $N$.
+-- **Memory Complexity:** $O(N)$ for storing splat attributes and score maps.
+-- **Performance:** Effective at filling holes and adding detail in high-frequency regions. May increase training time due to frequent splitting [S1, unofficial].
+-- **Strengths:** Targets both geometric detail (frequency) and coverage (alpha holes).
+-- **Limitations:** Depends on the quality of the frequency gap metric. May over-split in noisy regions if frequency gap is not robust [S1, unofficial].
++- **Time Complexity:** The spawning step involves projecting splats, building a KD-tree, and querying nearest neighbors, which is $O(N \log N)$ for building and $O(k \log N)$ for querying, where $N$ is the number of cloud points and $k$ is the number of splats to spawn. The splitting step involves selecting top splats and creating new splats, which is $O(N)$ for selection and $O(k)$ for splitting, where $k$ is the number of splats to split.
++- **Memory Complexity:** The method requires storing the cloud points, the KD-tree, and the new splats. The memory usage is $O(N)$ for cloud points and $O(k)$ for new splats.
++- **Measured Performance:** Not given in the sources.
++- **Scaling:** The method scales with the number of splats and cloud points. The KD-tree construction is efficient for large datasets.
++- **Strengths:** Targets high-frequency content and holes, leading to better detail reconstruction.
++- **Limitations:** Requires computing frequency gaps, which may be computationally expensive. The exact implementation of frequency gap computation is not detailed.
++- **When to Use:** When the scene has high-frequency details or holes that are not captured by standard opacity-based splitting.
++- **When Not to Use:** When computational resources are limited, or the scene is low-frequency.
+ 
+ ## Background
+-Frequency-Aware Adaptive Splat Spawning is an adaptation of densification strategies for 3D Gaussian Splatting, specifically designed to address limitations in standard gradient-based splitting by incorporating image frequency information. It is used in the context of Gaussian Avatar Reconstruction and differentiable rendering pipelines [S1, unofficial].
++Frequency-Aware Adaptive Splat Spawning is a method proposed in the context of 3D Gaussian Splatting optimization and training, specifically for densification strategies. It was introduced in the unofficial repository `dust3r-3dgs` by SpaceCollectors [S1, unofficial]. The method builds on the Adaptive Density Control loop, incorporating frequency-aware metrics to guide the splitting and spawning of Gaussians [S1, unofficial].
+ 
+ ## Sources

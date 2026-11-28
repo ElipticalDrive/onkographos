@@ -1,0 +1,241 @@
+OpenH1: Halo: Combat Evolved ported from its decompilation to macOS, Windows, Linux, Android and VR - Ambient occlusion from hardware ray queries ("ray_traced", Vulkan) by g0atbutt · Pull Request #787 · OpenH1/OpenH1
+
+Ambient occlusion from hardware ray queries ("ray_traced", Vulkan) by g0atbutt · Pull Request #787 · OpenH1/OpenH1 · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+g0atbutt
+commented
+Nov 7, 2026
+Copy link
+Copy Markdown
+Part of #602 (step 2's first part: ambient occlusion from hardware ray queries on desktop Vulkan).
+What it is
+A new opt-in value, display.ambient_occlusion = "ray_traced" (Video Setup > Advanced Graphics > Ambient Occlusion: OFF / WORLD / RAY TRACED). It is "world" in every part but one: the dynamic objects' rays in the occlusion pass are cast by the GPU's ray queries (VK_KHR_ray_query) through the objects' own collision meshes, instead of stepping through the distance-field scene. Off by default. Where the device has no ray queries, and on Metal for now, it draws as "world" and logs the reason once.
+Design
+The scene (port/linux/game/world_rt.c, world_rt_game.c, world_rt.h):
+The loaded structure BSP's collision geometry is one mesh, built once per BSP.
+Each definition gets one mesh per node from that node's collision BSP, turned to face out by the sign of its volume.
+An item with no collision geometry (a grenade) gets a box about its bounding sphere. Anything else with none (emitters, wires, the sky's ring) gets no mesh.
+Each frame's instances are the structure plus every dynamic object's node meshes, placed with the drawn (interpolated) node matrices.
+Left out, as the proxies leave them out: the static scenery that the field and its pages hold, and held weapons.
+Why collision meshes rather than the proxies' shapes: they are the objects' own shapes and rigid per node. So each BLAS is built once and only the TLAS changes; there is no skinning and no refit. The proxies are already fitted to these meshes, and they have about a tenth of the render models' triangles. Capsules and boxes suit a distance field, not a ray tracer.
+The structure only stops rays. A ray that hits it counts as a miss, because the lightmaps (level pixels) and the field with its reference (models) already hold the level's own occlusion. So "the level doesn't darken itself" still holds, and objects behind a wall or floor no longer shade through it, as they could in the distance-field scene.
+The command stream (version 21):
+WORLD_AO_MESH carries a mesh; id 0 releases all of them.
+WORLD_AO_INSTANCES carries the frame's instances.
+ray_queries is in the backend's INITIALIZE answer.
+Each draw's owner among the instances goes in world_ao[2] of the uniforms, and the pre-pass twins write it into the inputs' spare word so that a pixel's own instances are skipped.
+The pass's history[3] is 2 for ray queries. A backend without them treats it as 1, so Metal is unchanged.
+The decoder checks the sizes, ids and counts. The backend checks each instance's mesh, owner, kind and that its transform values are finite.
+The network protocol is unchanged.
+The Vulkan backend (port/linux/vulkan/xgpu_vulkan_rt.c):
+The core enables the acceleration structure and ray query extensions and buffer device addresses where the device has them. It skips them on CPU devices and with HALO_VULKAN_NO_RAY_QUERIES=1.
+BLASes use prefer-fast-trace and are built once, all of a frame's new ones in one call, into 16 MB buffers of their own.
+The TLAS uses prefer-fast-build and is rebuilt each frame before the first pass that reads it. There are three in turn, each reused only once the GPU is done with it.
+All builds go in the early command buffer, so no render pass is ended for them.
+Binding 8 of the occlusion set names the latest TLAS, or an empty one.
+The ray-query pipeline is prepared with the map's pipelines. Until it and the scene are ready, the pass falls back to the distance-field rays.
+The rays (SPIR-V emitter, world_ao_traced_rays):
+The same 4 cosine-weighted rays per pixel as "world": 0.1 to 2 wu, quarter resolution, the same history blend (temporal accumulation).
+Back faces are culled. Object instances are non-opaque, so each candidate except the pixel's own object is committed.
+The vehicles' occlusion fields are not walked here, because their meshes are traced. The static scenery's shapes and fields are walked as before.
+The emitted module passes spirv-val --target-env vulkan1.3.
+Measurements
+RTX 4090, release build, a10's start held still (fixed-step frames, offscreen, unpaced, windowed). Values are medians of 600-frame windows: GPU time per frame from HALO_GPU_STATS, and the pass's own draw from HALO_VULKAN_DRAW_TIMES=10 in separate runs.
+1080p frame / pass
+4K frame / pass
+off
+0.368 / none ms
+0.640 / none ms
+world
+0.517 / 0.066 ms
+1.297 / 0.245 ms
+ray_traced
+0.708 / 0.115 ms
+1.547 / 0.369 ms
+The pass costs 0.05 ms (1080p) and 0.12 ms (4K) more than the distance-field step.
+The rest of the frame difference, about 0.14 ms, is the per-frame TLAS rebuild of 931 instances and its barrier. a10's start has 154 meshes (96,388 triangles); Blood Gulch has 45 meshes and 89 instances.
+Spark GB10: it builds and traces the scene (the pass runs with ray queries), but the timing runs were cut off when the machine dropped off the network. Those numbers are still to come.
+Images (the same frames)
+These are in the scratchpad on the machine I worked on, not attached here:
+a10: shaded and occlusion-only (shaded frame divided by off's), world vs ray_traced. Doors in their frames get contact shade from the doors' real meshes. World's soft halo on the wall behind the first crewman and consoles is mostly gone with 2 wu rays. The mean occlusion over the frame is 0.947 (world) vs 0.945 (ray_traced).
+b30: world darkens the whole beach by about a fifth (mean 0.79 vs 0.94). Most likely that is the vehicles' long-reach occlusion fields, which world walks and ray_traced does not.
+Checks
+Vulkan validation layers on the 4090 (a10, a30 and Blood Gulch, including the map changes between them): 0 messages.
+Facing, checked on the GPU: a box wound counterclockwise seen from outside, placed around the camera, shades nothing inside it as instanced, and does shade the floor inside it with HALO_VULKAN_RT_FLIP=1.
+tools/harness/tests/test_world_rt.py (new, 9 negative controls) and test_world_ao.py (a new rays case, 5 more controls): pass on the Mac and on x86-64 Linux.
+tools/test_render_stream.py (new checks that malformed mesh and instance records are stopped): passes on x86-64 Linux. The display-pacing check fails on this Mac, as it does on master.
+tools/test_vulkan_passes.py (the fake GPU builds xgpu_vulkan_rt.c), tools/test_world_trace.py and tools/test_port_settings.py: pass.
+Builds: ninja linux_x86_64 (debug and release), ninja linux_arm64 (Spark), ninja macos, ninja android and ninja ios_sim all succeed.
+Not done yet
+The models' structure term by rays. It needs the reference found by rays too, for example a small pass at each object's lighting point; with it, "ray_traced" would no longer need the field bake.
+A TLAS refit when only transforms change.
+The vehicles' long-reach occlusion: their fields have it, 2 wu rays do not.
+Metal's intersector (M3, A17 Pro).
+Steam Deck (RADV), the Frame and phones, each to be measured first, per Measure ambient occlusion's real cost on tile GPUs (Android, iOS, iPad, Steam Frame) before keeping it off there #432's rule.
+llvmpipe (Mesa 25 on the Spark) crashed inside its own code when the TLAS was rebuilt each frame, even with no BLAS. I did not find the cause, so CPU devices are left without ray queries. RADV shares Mesa's BVH builder and is untested.
+One existing test threshold changed: the render stream's "vertices kept" count depends on where waits for room fall (6 with 580 bytes of uniforms, 5 with 584, confirmed by changing the size alone), so it now asks for at least 5.
+g0atbutt
+added 6 commits
+November 7, 2026 11:30
+Add the ray-traced scene's records to the renderer's command stream
+…
+277e03f
+```
+display.ambient_occlusion "ray_traced" (#602) hands the backend the meshes
+and instances its ray queries trace through: WORLD_AO_MESH (a mesh's
+triangles, built once into a bottom-level acceleration structure; id 0
+lets go of every mesh) and WORLD_AO_INSTANCES (the frame's instances of
+them, its top-level structure). The backend says whether it has ray
+queries in INITIALIZE's answer (ray_queries), a draw's uniforms carry its
+object's owner among the instances (world_ao[2]), and the pass's
+history[3] 2 asks for the hardware's rays (a backend without them traces
+as before, 1).
+
+The decoder checks the records' sizes and ids and the instances' count;
+the backend checks each instance's mesh, owner and transform. The stream's
+version is 21. port/android/tests/host_render_stream_test.c checks the
+malformed records are stopped; its vertices kept test's count of
+vertices sent again depends on where waits for room fall (6 with 580
+bytes of uniforms, 5 with 584, checked by changing the size alone), so it
+asks for 5, and still checks what the host drew against what was sent. Nothing machines send each other changes.
+```
+Make the ray-traced scene of the level's and the objects' collision m…
+…
+38b6815
+```
+…eshes
+
+With display.ambient_occlusion "ray_traced" and a backend that has ray
+queries, world_rt.c makes the scene they trace: the loaded structure BSP's
+collision geometry as one mesh, each definition's nodes' collision
+geometry a mesh each (turned to face out by the sign of the volume they
+hold; for an item with none, a grenade, a box about its bounding sphere;
+anything else with none, an emitter or the sky's ring, has no mesh), made as
+first drawn and kept until the map unloads, and each frame the instances:
+the structure, which stops a ray and occludes nothing (the lightmaps and
+the field hold its occlusion), and every dynamic object's meshes on its
+nodes as drawn. The static scenery the field and its pages hold, and held
+weapons, are left out, as the proxies leave them out.
+
+Collision meshes rather than the proxies' shapes: they are the objects'
+own shape (the shapes are what a distance field can hold, not what a
+ray tracer needs), rigid on each node, so each is built once and only the
+instances move; and they are what the proxies are fitted to already.
+
+world_ao_mode gives WORLD_AO_RAYS where the backend has ray queries, else
+draws "world" and says once why. HALO_WORLD_AO_COUNTS logs each
+definition's meshes and the instances a frame (a10's start: 154 meshes,
+96,388 triangles, 931 instances). Each draw names its object's owner among
+the instances (its datum index plus one), which its pixels' rays leave out.
+
+tools/harness/tests/test_world_rt.py checks the turning, the box, the
+transforms and a fake world's frames (9 negative controls);
+test_world_ao.py the mode and the owners (5 more).
+```
+Trace the occlusion pass's rays by ray queries in the SPIR-V emitter
+…
+7b51652
+```
+xgpu_spirv_options ray_queries makes the occlusion's pass with
+SPV_KHR_ray_query: the dynamic objects' occlusion found by the same rays
+from the same point (4 a pixel, cosine-weighted, 0.1 to 2 wu, the same
+history blended in), each the nearest front face it meets in the
+ray-traced scene (set 3, binding 8): an object's collision mesh but the
+pixel's own (its custom index against the inputs' last word, which the
+pre-pass's twins now write), or the structure's, which stops it. The
+dynamic objects' occlusion fields are then not walked: their meshes are
+traced. The static scenery's shapes and fields are walked as before.
+
+The ray frame and directions are shared with the distance-field scene's
+rays (world_ao_ray_frame, world_ao_ray_direction), unchanged.
+tools/ambient_occlusion_light/check.c's pass_rays writes the module;
+spirv-val --target-env vulkan1.3 passes it.
+```
+Build the ray-traced scene's acceleration structures in the Vulkan ba…
+…
+048caf7
+```
+…ckend
+
+Where the device has VK_KHR_ray_query and VK_KHR_acceleration_structure
+(and buffer device addresses), the core asks for them and
+xgpu_vulkan_rt.c builds the scene: each mesh a bottom-level structure,
+built once (fast to trace) into large buffers of its own, all the frame's
+new ones in one call; the frame's instances a top-level structure built
+again (fast to build) before the first pass that reads it, three in turn.
+The builds go in the early commands, so no pass is ended for them. The
+occlusion set names the latest scene (or an empty one) at binding 8.
+
+The pass is drawn with ray queries where the window asks for them
+(history[3] 2) and the scene and its pipeline are made (prepared with the
+map's); else with the distance-field scene's rays. HALO_VULKAN_DRAW_TIMES
+names the pass's own draw "aofe". HALO_VULKAN_NO_RAY_QUERIES makes a
+device without them; a processor's (llvmpipe) is left without them: Mesa
+25's crashed in its own code as the scene was built again each frame, on
+the Spark. The log says when the pass begins and stops tracing by ray
+queries.
+
+Checked on an RTX 4090: the validation layers say nothing over a10, a30
+and Blood Gulch (map changes included); a box wound counterclockwise seen
+from outside, placed about the camera, shades nothing inside it as
+instanced and the floor inside it with HALO_VULKAN_RT_FLIP=1, so the
+facing is right unflipped. The fake GPU's passes test builds the file.
+```
+Add "ray_traced" to display.ambient_occlusion
+…
+248055d
+```
+The setting, its config.toml comment, the README's table and the Advanced
+Graphics page's spinner (OFF, WORLD, RAY TRACED), written again by
+tools/port_settings.py: only that screen changed. Off stays the default;
+where the GPU has no Vulkan ray queries (and on Metal for now) it draws as
+"world".
+```
+Describe "ray_traced" and its measurements in docs/world-ao.md
+…
+52e7e35
+```
+The #602 section says what was built (the scene of collision meshes, the
+records, the backend's structures, the rays), why collision meshes rather
+than the proxies' shapes, how the triangles' facing was checked, the RTX
+4090's timings at 1080p and 4K, how it compares with "world" at a10's
+and b30's starts, and what is left.
+```
+g0atbutt
+marked this pull request as draft
+November 7, 2026 16:31
+Expect "ray_traced" among display.ambient_occlusion's words in the re…
+…
+f008cd8
+```
+…named-words tests
+```
+startupfoundry
+marked this pull request as ready for review
+November 7, 2026 20:42
+Hide details
+View details
+startupfoundry
+merged commit b9f9f40
+into
+master
+Nov 7, 2026
+13 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

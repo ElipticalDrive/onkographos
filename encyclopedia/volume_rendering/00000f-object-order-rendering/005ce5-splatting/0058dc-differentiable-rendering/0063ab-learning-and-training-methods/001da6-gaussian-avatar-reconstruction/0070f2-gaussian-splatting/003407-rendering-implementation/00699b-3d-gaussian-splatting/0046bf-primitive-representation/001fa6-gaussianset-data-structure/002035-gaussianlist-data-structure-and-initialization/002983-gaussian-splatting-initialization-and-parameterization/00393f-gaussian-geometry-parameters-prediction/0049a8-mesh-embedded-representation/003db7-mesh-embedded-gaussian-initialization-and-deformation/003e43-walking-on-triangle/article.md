@@ -1,0 +1,110 @@
+# Walking on Triangle
+
+
+## Overview
+Walking on Triangle is a constraint mechanism in mesh-embedded Gaussian splatting that prevents Gaussians from drifting outside their corresponding mesh triangles during optimization or deformation [S1, unofficial]. It solves the problem of Gaussians "sticking and piling up" on triangle boundaries, which causes visible artifacts when the avatar is animated into novel poses [S1, unofficial]. Unlike standard Euclidean updates that ignore mesh topology, this method ensures Gaussians remain topologically bound to their host triangles, maintaining geometric fidelity [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: Gaussian positions defined by barycentric coordinates $(u, v)$ within a mesh triangle, and the mesh triangle vertices.
+- Output: Clipped barycentric coordinates that remain strictly within the valid triangle domain.
+
+**Data Structures:**
+- Each Gaussian is associated with a specific triangle index and initial barycentric coordinates $(u, v)$.
+- The valid domain for barycentric coordinates is defined by $u \ge 0$, $v \ge 0$, and $u + v \le 1$ [S1, unofficial].
+
+**Steps:**
+1. **Retrieve Coordinates:** For each Gaussian, retrieve its current barycentric coordinates $(u, v)$ relative to its assigned mesh triangle.
+2. **Clip Coordinates:** Apply boundary constraints to ensure the Gaussian stays within the triangle. The clipping logic is:
+   $$
+   u = \max(0, \min(u, 1))
+   $$
+   $$
+   v = \max(0, \min(v, 1 - u))
+   $$
+   This ensures $u \ge 0$, $v \ge 0$, and $u + v \le 1$ [S1, unofficial].
+3. **Reconstruct Position:** Convert the clipped barycentric coordinates back to 3D world space using the triangle's vertex positions $V_0, V_1, V_2$:
+   $$
+   P = (1 - u - v)V_0 + uV_1 + vV_2
+   $$
+   [S1, unofficial]
+
+**Parameters:**
+- No tunable parameters are specified for the basic clipping mechanism [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Disabling the Mechanism:** If the walking on triangle constraint is disabled, Gaussians are allowed to move freely in Euclidean space. This causes them to accumulate at triangle boundaries, leading to significant visual artifacts during animation [S1, unofficial].
+- **Precision:** Standard floating-point precision is assumed for barycentric calculations [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def walking_on_triangle(u: float, v: float) -> tuple[float, float]:
+    """
+    Clips barycentric coordinates to ensure they remain within the valid triangle domain.
+    
+    Args:
+        u: Initial barycentric coordinate u.
+        v: Initial barycentric coordinate v.
+        
+    Returns:
+        Clipped (u, v) tuple.
+    """
+    # Ensure u is non-negative and does not exceed 1
+    u = max(0.0, min(u, 1.0))
+    
+    # Ensure v is non-negative and u + v <= 1
+    # This implies v <= 1 - u
+    v = max(0.0, min(v, 1.0 - u))
+    
+    return u, v
+
+def reconstruct_position(u: float, v: float, v0: Vector3, v1: Vector3, v2: Vector3) -> Vector3:
+    """
+    Reconstructs 3D position from barycentric coordinates.
+    
+    Args:
+        u: Barycentric coordinate u.
+        v: Barycentric coordinate v.
+        v0, v1, v2: Vertices of the mesh triangle.
+        
+    Returns:
+        3D position P.
+    """
+    return (1.0 - u - v) * v0 + u * v1 + v * v2
+```
+
+## Subtopics
+
+### Mani-GS
+Mani-GS is a variant that defines a local triangle space for each triangle to ensure robust results even with inaccurate meshes [S2]. It binds Gaussians to the mesh and optimizes their attributes within this local space, allowing mesh manipulation to be transferred directly to the 3D Gaussian Splatting representation [S2]. This enables large deformations, soft body simulation, and local manipulation [S2]. Compared to SuGaR, Mani-GS produces fewer artifacts and reduces blurring effects [S2].
+
+### Geodesic Position Optimisation
+Geodesic Position Optimisation is a Riemannian gradient descent optimizer that restricts kernel source movements to the mesh surface [S3]. Instead of Euclidean updates, it projects the gradient $\nabla_{p^*} L$ to the local tangent plane $T_{p^*} M$ to define an initial velocity $v^*$ [S3]. It then computes the exponential map $Exp(p^*, v^*)$ to trace the geodesic and determine the updated kernel position [S3]. To accelerate convergence, it parallel transports accumulated momentum to the new kernel position [S3]. The implementation uses the straightest geodesic algorithm with a CUDA-parallelised implementation [S3].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+- The basic walking on triangle clipping is $O(1)$ per Gaussian per update step [S1, unofficial].
+- Geodesic Position Optimisation requires computing tangent planes, exponential maps, and parallel transport, which is more computationally expensive than simple clipping [S3].
+
+**Measured Performance:**
+- Disabling walking on triangle significantly degrades performance [S1, unofficial]:
+  - **Bala Head Avatar:** PSNR drops from 30.04 to 29.91, SSIM from 0.938 to 0.933, and LPIPS increases from 0.062 to 0.070 [S1, unofficial].
+  - **Male-3-Casual Full-Body Avatar:** PSNR drops from 33.01 to 32.48, SSIM from 0.982 to 0.979, and LPIPS increases from 0.020 to 0.024 [S1, unofficial].
+
+**Strengths and Limitations:**
+- **Strengths:** Prevents topological artifacts during animation; maintains Gaussian distribution within mesh bounds [S1, unofficial]. Mani-GS variant handles inaccurate meshes robustly [S2].
+- **Limitations:** Simple clipping may not handle complex deformations as well as geodesic methods [S3]. Disabling it leads to boundary piling [S1, unofficial].
+
+**When to Use:**
+- Use when animating mesh-embedded Gaussians to prevent boundary artifacts [S1, unofficial].
+- Use Geodesic Position Optimisation when high-fidelity surface adherence is required during optimization [S3].
+
+## Background
+Walking on Triangle was introduced in the context of relightable modeling with explicit shape representations, specifically in the SplattingAvatar method [S1, unofficial]. It addresses the limitations of methods that compromise pixel-wise metrics for shape representation [S1, unofficial]. The mechanism was ablated to demonstrate its importance in maintaining visual quality during novel pose animation [S1, unofficial].
+
+## Sources
+[S1] SplattingAvatar, https://arxiv.org/abs/2403.05087, fetched 2026-10-27 (unofficial)
+[S2] A survey on 3D editing based on NeRF and 3DGS, https://link.springer.com/article/10.1007/s11704-025-41176-9, fetched 2026-10-28
+[S3] Heat Kernel Textures the Geodesic Gaussians That Do Not Splat, https://doi.org/10.1007/978-3-032-37595-7_17, fetched 2026-10-29

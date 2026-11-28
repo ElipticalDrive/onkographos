@@ -1,0 +1,29 @@
+# Voxel-based Neighbor Counting
+
+
+## Overview
+Voxel-based Neighbor Counting is a family of ambient occlusion techniques that estimate local light blockage by sampling the occupancy status of voxels surrounding a target point in a 3D grid . It solves the problem of computing shading in voxel-based or voxelized scenes without performing expensive ray marching or complex geometric intersection tests . It sets itself apart from ray-based siblings like [Local Ambient Occlusion](4977-local-ambient-occlusion.md) by relying on direct grid lookups, and from SDF-based siblings like [Ambient Occlusion via SDF/Geometry](2527-ambient-occlusion-via-sdf-geometry.md) by operating on discrete binary or density data rather than continuous signed distances .
+
+## Shared principles
+All methods in this family share the core mechanism of evaluating the spatial distribution of solid voxels relative to a query point to derive an occlusion factor .
+1. **Voxel Grid Representation**: The scene is represented as a 3D grid where each cell stores occupancy information (e.g., boolean `true`/`false` or integer density) and potentially color data .
+2. **Neighborhood Sampling**: The algorithm defines a local neighborhood around the target voxel or vertex. This neighborhood is typically a cubic volume defined by a radius or a fixed set of offsets (e.g., the 26 immediate neighbors in a $3 \times 3 \times 3$ block) .
+3. **Occlusion Factor Calculation**: The occlusion factor $AO$ is derived from the ratio or weighted sum of solid neighbors to total neighbors. The general form is:
+   $$ AO = 1.0 - f(\text{solid\_count}, \text{total\_count}) $$
+   where $f$ is a function that maps the neighbor counts to a dimming factor in $[0, 1]$ .
+4. **Shading Application**: The computed $AO$ factor is multiplied by the base color or intensity of the target voxel/vertex .
+
+## Subtopics
+
+### [JAOCC Shading](3634-jaocc-shading.md)
+JAOCC Shading computes a depth-weighted dimming factor by counting non-empty neighbors in a cubic neighborhood. It sets itself apart by dynamically determining surface orientation via Y-axis weighted neighbor counts, avoiding fixed AABB face normals. Choose it for smooth shading in voxel art but be aware it is slow and prone to errors with thin objects.
+
+### [Vertex Ambient Occlusion Approximation](6623-vertex-ambient-occlusion-approximation.md)
+This method darkens mesh vertices generated from voxel data based on the density of solid voxels in their local hemisphere. It sets itself apart by operating on vertex data rather than voxel centers and using a hemisphere-based dot product test to ignore back-facing neighbors. Choose it for efficient post-processing of voxelized meshes.
+
+### [Voxel Ambient Occlusion](6646-voxel-ambient-occlusion.md)
+Voxel AO estimates occlusion by sampling the solidity of surrounding voxels in a 2D grid relative to the surface normal. It sets itself apart by performing real-time, position-based shading directly on the voxel grid using a fixed set of neighbor samples and face-specific weights. Choose it for real-time applications where ray marching is too expensive.
+
+## Background
+The specific implementations of Voxel-based Neighbor Counting, such as JAOCC and Voxel AO, are primarily documented in unofficial sources and community implementations for voxel-based rendering engines . The approach leverages the inherent spatial coherence of voxel grids to approximate ambient occlusion, a technique common in voxel art and Minecraft-style rendering [G].
+

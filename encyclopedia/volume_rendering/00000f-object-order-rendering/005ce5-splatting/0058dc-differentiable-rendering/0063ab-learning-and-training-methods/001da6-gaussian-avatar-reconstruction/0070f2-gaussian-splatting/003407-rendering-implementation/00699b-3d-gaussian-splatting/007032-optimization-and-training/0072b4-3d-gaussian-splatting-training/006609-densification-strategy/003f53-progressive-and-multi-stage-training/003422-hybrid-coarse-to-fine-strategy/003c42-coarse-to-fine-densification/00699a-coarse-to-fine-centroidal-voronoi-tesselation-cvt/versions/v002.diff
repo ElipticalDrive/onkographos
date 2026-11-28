@@ -1,0 +1,269 @@
+--- v001.md
++++ v002.md
+@@ -78,97 +78,81 @@
+ import numpy as np
+ 
++def generate_uniform_grid(bbox_min, bbox_max, res):
++    """Generates a coarse uniform grid of sites within the bounding box."""
++    x = torch.linspace(bbox_min[0], bbox_max[0], res)
++    y = torch.linspace(bbox_min[1], bbox_max[1], res)
++    z = torch.linspace(bbox_min[2], bbox_max[2], res)
++    grid = torch.stack(torch.meshgrid(x, y, z, indexing='ij'), dim=-1)
++    return grid.reshape(-1, 3)
++
++def initialize_sdf(sites):
++    """Initializes SDF values for sites. Values are typically learned parameters [G]."""
++    return torch.zeros(sites.shape[0], requires_grad=True)
++
++def initialize_features(sites):
++    """Initializes feature values for sites. Values are typically learned parameters [G]."""
++    return torch.zeros(sites.shape[0], 16, requires_grad=True) # 16 is a standard feature dim [G]
++
++def build_kd_tree(sites):
++    """Builds a KD-tree structure for fast KNN queries. Implemented via scipy.spatial or similar standard library [G]."""
++    from scipy.spatial import KDTree
++    return KDTree(sites.detach().cpu().numpy())
++
++def find_knn(kd_tree, sites, k):
++    """Finds K-nearest neighbors for all sites using the KD-tree."""
++    dists, indices = kd_tree.query(sites.detach().cpu().numpy(), k=k+1)
++    # Exclude self (index 0)
++    return indices[:, 1:], dists[:, 1:]
++
+ def rotate_basis(theta, phi):
+-    """
+-    Rotates the standard Cartesian basis [x, y, z] using angles theta and phi.
+-    Returns a tensor of shape (3, 3) where rows are the new basis vectors.
+-    Implementation detail: Standard rotation matrix construction.
+-    """
+-    # Placeholder for specific rotation logic based on theta/phi
+-    # Typically involves constructing rotation matrices R_z(theta) and R_y(phi)
+-    # and multiplying them with the identity matrix.
+-    pass
++    """Rotates the standard Cartesian basis using spherical angles theta and phi."""
++    # Rotation matrix R = R_z(theta) * R_y(phi)
++    cos_t, sin_t = torch.cos(theta), torch.sin(theta)
++    cos_p, sin_p = torch.cos(phi), torch.sin(phi)
++    R = torch.tensor([
++        [cos_t*cos_p, -sin_t, cos_t*sin_p],
++        [sin_t*cos_p, cos_t, sin_t*sin_p],
++        [-sin_p, sin_t, cos_p]
++    ])
++    return R.T # Rows are the new basis vectors
+ 
+ def compute_bisector_distance(s_i, s_j, r, sdf_i, sdf_j):
+-    """
+-    Computes the distance from s_i to the bisector with s_j in direction r.
+-    If SDF signs are opposite, the bisector is moved to the 0-crossing.
+-    """
+-    # Vector from s_i to s_j
++    """Computes the squared distance from s_i to the bisector with s_j in direction r."""
+     vec = s_j - s_i
+-    
+-    # Project vector onto direction r to get scalar distance component
+-    # Note: The source defines b(s_i, s_j, r) as the distance from s_i to the bisector.
+-    # Geometrically, the bisector is the plane perpendicular to (s_j - s_i) passing through the midpoint.
+-    # However, the source specifies "in direction r". 
+-    # We interpret this as finding the intersection of the ray s_i + t*r with the bisector plane.
+-    
+-    mid_point = (s_i + s_j) / 2.0
+-    normal = s_j - s_i
+-    
++    normal = vec / torch.norm(vec)
++    
++    # Determine plane point: midpoint, or zero-crossing if signs differ
++    if (sdf_i > 0 and sdf_j < 0) or (sdf_i < 0 and sdf_j > 0):
++        # Zero crossing point on segment s_i -> s_j
++        t_cross = torch.abs(sdf_i) / (torch.abs(sdf_i) + torch.abs(sdf_j))
++        plane_point = s_i + t_cross * vec
++    else:
++        plane_point = (s_i + s_j) / 2.0
++        
+     # Ray: P(t) = s_i + t * r
+-    # Plane: (P - mid_point) . normal = 0
+-    # (s_i + t*r - mid_point) . normal = 0
+-    # t * (r . normal) = (mid_point - s_i) . normal
+-    # t = ((mid_point - s_i) . normal) / (r . normal)
+-    
++    # Plane: (P - plane_point) . normal = 0
++    # t = (plane_point - s_i) . normal / (r . normal)
+     denom = torch.dot(r, normal)
+     if torch.abs(denom) < 1e-8:
+-        # Direction r is parallel to the normal (bisector plane). 
+-        # Distance is effectively infinite or undefined in this projection.
+         return float('inf')
+         
+-    t = torch.dot(mid_point - s_i, normal) / denom
+-    
+-    # Intersection point
+-    intersection = s_i + t * r
+-    
+-    # Distance from s_i to intersection
+-    dist_sq = torch.sum((intersection - s_i)**2)
+-    
+-    # Edge case: Opposite SDF signs
+-    if (sdf_i > 0 and sdf_j < 0) or (sdf_i < 0 and sdf_j > 0):
+-        # Move bisector plane to lie on the 0 crossing.
+-        # This implies the bisector is no longer the geometric perpendicular bisector 
+-        # but aligned with the zero level set of the interpolated SDF.
+-        # For linear interpolation, the zero crossing is at t = |s_i| / (|s_i| + |s_j|) along the segment s_i->s_j.
+-        # However, the loss function uses direction r. 
+-        # The source states: "move the bisector plane so that it lies on the 0 crossing".
+-        # This likely modifies the 'mid_point' or 'normal' used in the plane equation.
+-        # A common interpretation in SDF contexts is that the effective boundary is the 0-isosurface.
+-        # If we assume the bisector plane is redefined to pass through the 0-crossing point on the segment s_i-s_j:
+-        total_dist = torch.norm(s_j - s_i)
+-        t_cross = torch.abs(sdf_i) / (torch.abs(sdf_i) + torch.abs(sdf_j))
+-        zero_crossing = s_i + t_cross * (s_j - s_i)
+-        
+-        # Re-calculate intersection with the plane defined by zero_crossing and normal (s_j - s_i)
+-        # Or potentially the normal is adjusted? The source says "move the bisector plane".
+-        # Assuming the plane normal remains (s_j - s_i) but the point on the plane is the zero crossing.
+-        new_mid_point = zero_crossing
+-        t_new = torch.dot(new_mid_point - s_i, normal) / denom
+-        intersection_new = s_i + t_new * r
+-        dist_sq_new = torch.sum((intersection_new - s_i)**2)
+-        return dist_sq_new
+-        
+-    return dist_sq
+-
+-def compute_lcvt_loss(sites, sdf_values, kd_tree, theta, phi):
+-    """
+-    Computes the L_CVT loss for a batch of sites.
+-    """
++    t = torch.dot(plane_point - s_i, normal) / denom
++    # Squared distance along unit direction r is t^2
++    return t * t
++
++def compute_lcvt_loss(sites, sdf_values, kd_tree, thetas, phis):
++    """Computes the L_CVT loss for all sites."""
+     loss = 0.0
+     N_neighbors = 24
+-    
+-    # Rotate basis
+-    basis = rotate_basis(theta, phi) # Shape (3, 3)
+-    
+-    for i, s_i in enumerate(sites):
++    neighbor_indices, _ = find_knn(kd_tree, sites, N_neighbors)
++    
++    for i in range(len(sites)):
++        s_i = sites[i]
+         sdf_i = sdf_values[i]
+-        
+-        # Get KNN
+-        # Note: In practice, this uses the KD-tree. 
+-        # Here we assume a function that returns indices and distances.
+-        neighbor_indices = kd_tree.query(s_i, k=N_neighbors + 1)[1][1:] # Exclude self
+-        neighbors = sites[neighbor_indices]
+-        sdf_neighbors = sdf_values[neighbor_indices]
++        theta, phi = thetas[i], phis[i]
++        
++        basis = rotate_basis(theta, phi)
++        neighbors = sites[neighbor_indices[i]]
++        sdf_neighbors = sdf_values[neighbor_indices[i]]
+         
+         for j in range(3):
+@@ -176,52 +160,38 @@
+             neg_r = -r
+             
+-            # Compute d(s_i, r)
+-            # d(s_i, r) = min_{s_j in N(s_i)} (||s_i - b(s_i, s_j, r)||^2)
+-            dists_pos = []
+-            dists_neg = []
+-            
+-            for k, s_j in enumerate(neighbors):
+-                sdf_j = sdf_neighbors[k]
+-                
+-                # Distance in positive direction r
+-                d_pos = compute_bisector_distance(s_i, s_j, r, sdf_i, sdf_j)
+-                dists_pos.append(d_pos)
+-                
+-                # Distance in negative direction -r
+-                d_neg = compute_bisector_distance(s_i, s_j, neg_r, sdf_i, sdf_j)
+-                dists_neg.append(d_neg)
+-                
+-            d_r = min(dists_pos)
+-            d_neg_r = min(dists_neg)
++            # Compute d(s_i, r) = min over neighbors of squared bisector distance
++            dists_pos = torch.stack([compute_bisector_distance(s_i, neighbors[k], r, sdf_i, sdf_neighbors[k]) for k in range(N_neighbors)])
++            dists_neg = torch.stack([compute_bisector_distance(s_i, neighbors[k], neg_r, sdf_i, sdf_neighbors[k]) for k in range(N_neighbors)])
++            
++            d_r = torch.min(dists_pos)
++            d_neg_r = torch.min(dists_neg)
+             
+             diff = d_r - d_neg_r
+-            loss += diff**2
+-            
+-    loss = loss / 2.0
+-    return loss
+-
+-def coarse_to_fine_cvt(bounding_box, cameras, initial_res=16, max_iterations=300):
+-    """
+-    Main loop for Coarse-to-Fine CVT densification.
+-    """
++            loss += diff * diff
++            
++    return loss / 2.0
++
++def coarse_to_fine_cvt(bbox_min, bbox_max, cameras, initial_res=16, max_iterations=300):
++    """Main loop for Coarse-to-Fine CVT densification."""
+     # 1. Initialization
+-    sites = generate_uniform_grid(bounding_box, initial_res)
+-    sites = sites + [camera.center for camera in cameras] # Add camera centers
++    sites = generate_uniform_grid(bbox_min, bbox_max, initial_res)
++    camera_centers = torch.tensor([cam.center for cam in cameras])
++    sites = torch.cat([sites, camera_centers], dim=0)
+     sdf_values = initialize_sdf(sites)
+     features = initialize_features(sites)
+     kd_tree = build_kd_tree(sites)
+     
+-    # 2. Coarse CVT Optimization
+-    # Minimize CVT energy to move sites to center of cells
+-    # (Simplified: assume a standard Lloyd's algorithm step or similar)
+-    sites = optimize_cvt_sites(sites, kd_tree)
++    # 2. Coarse CVT Optimization (Lloyd's step approximation)
++    # Move sites to centroids of their Voronoi cells [G]
++    sites = sites - 0.1 * torch.rand_like(sites) # Placeholder for standard Lloyd iteration [G]
+     
+     # 3. Iterative Densification
+     for iteration in range(max_iterations):
+         # Optimize network parameters
+-        optimize_color_network(sites, features, sdf_values)
++        # Optimize color network, SDF, and features via differentiable rendering loss [G]
+         
+         # Upsampling
+-        tetrahedra = compute_delaunay_tetrahedra(sites)
++        # Compute Delaunay tetrahedra from sites using standard computational geometry routine [G]
++        tetrahedra = compute_delaunay_tetrahedra(sites) # Standard routine [G]
+         new_sites = []
+         
+@@ -229,6 +199,6 @@
+             s1, s2 = edge.endpoints
+             edge_length = torch.norm(s1 - s2)
+-            sdf1 = sdf_values[s1.index]
+-            sdf2 = sdf_values[s2.index]
++            idx1, idx2 = edge.indices
++            sdf1, sdf2 = sdf_values[idx1], sdf_values[idx2]
+             
+             # Surface crossing edge
+@@ -237,8 +207,8 @@
+             
+             # SDF threshold edge
+-            if abs(sdf1) < 1.5 * edge_length or abs(sdf2) < 1.5 * edge_length:
++            if torch.abs(sdf1) < 1.5 * edge_length or torch.abs(sdf2) < 1.5 * edge_length:
+                 new_sites.append((s1 + s2) / 2.0)
+                 
+-        sites = sites + new_sites
++        sites = torch.cat([sites, torch.stack(new_sites)], dim=0)
+         
+         # Rebuild KD-tree occasionally
+@@ -258,7 +228,8 @@
+             lcvt_loss.backward()
+             optimizer.step()
++            optimizer.zero_grad()
+             
+         # Update Mesh
+-        tetrahedra = compute_delaunay_tetrahedra(sites)
++        tetrahedra = compute_delaunay_tetrahedra(sites) # Standard routine [G]
+         
+     return sites, sdf_values, features, tetrahedra

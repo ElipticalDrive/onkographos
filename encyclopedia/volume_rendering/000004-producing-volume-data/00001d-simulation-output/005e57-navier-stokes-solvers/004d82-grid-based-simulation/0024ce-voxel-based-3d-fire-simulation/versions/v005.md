@@ -1,0 +1,102 @@
+# Voxel-based 3D Fire Simulation
+
+Also called: 3D Texture Fire Simulation, Navier-Stokes Fire Simulation
+
+## Overview
+This method simulates fire and smoke by solving the Navier-Stokes equations on a 3D voxelized grid to compute velocity, pressure, temperature, and fuel density [S1, unofficial]. It differs from particle-based fire by maintaining a continuous volumetric field, allowing for realistic interaction between smoke, heat, and fuel, and enabling direct volume rendering of the resulting 3D textures [S1, unofficial]. It builds on [Grid-Based Simulation](13502-grid-based-simulation.md).
+
+## How it works
+**Inputs:**
+- Simulation domain dimensions (e.g., $128 \times 128 \times 128$ voxels) [S1, unofficial].
+- Physical constants: $P$ (pressure constant), $m$ (molecular mass), $g$ (gravity), $R$ (gas constant), $T_0$ (reference temperature) [S1, unofficial].
+- Simulation parameters: time step $\delta t$, vorticity confinement strength $\epsilon$, grid spacing $\delta x$ [S1, unofficial].
+
+**Outputs:**
+- Four 3D textures (or equivalent 3D arrays) storing per-voxel values:
+  1. Velocity vector $\mathbf{u}$ (3 components) [S1, unofficial].
+  2. Pressure scalar $p$ [S1, unofficial].
+  3. Temperature scalar $T$ [S1, unofficial].
+  4. Fuel density scalar (implied by "fuel level" in attributes) [S1, unofficial].
+  - Smoke density is also tracked as an attribute [S1, unofficial].
+
+**Data Structures:**
+- The spatial domain is discretized into a 3D grid of voxels.
+- Each voxel stores scalar or vector attributes in contiguous memory, typically mapped to 3D textures for GPU access [S1, unofficial].
+- GPU implementation uses blocks of size $16 \times 16 \times 16$ with 512 threads per block [S1, unofficial].
+
+**Formulas:**
+The core dynamics are governed by the Navier-Stokes equation for incompressible flow [S1, unofficial]:
+$$
+\frac{\partial \mathbf{u}}{\partial t} = -(\mathbf{u} \cdot \nabla) \mathbf{u} - \frac{1}{\rho} \nabla p + \mathbf{f}
+$$
+Where:
+- $\mathbf{u}$ is the velocity vector [S1, unofficial].
+- $p$ is the pressure scalar [S1, unofficial].
+- $\rho$ is the density of the molecule mass [S1, unofficial].
+- $\mathbf{f}$ is the external force vector [S1, unofficial].
+- The term $-(\mathbf{u} \cdot \nabla) \mathbf{u}$ represents advection [S1, unofficial].
+- The term $-\frac{1}{\rho} \nabla p$ represents pressure gradient force [S1, unofficial].
+
+The external force $\mathbf{f}$ consists of buoyancy and vorticity confinement [S1, unofficial]:
+1. **Buoyancy Force:**
+   $$
+   \mathbf{f}_{buoyancy} = \frac{Pmg}{R} \left(\frac{1}{T_0} - \frac{1}{T}\right) \mathbf{z}
+   $$
+   Where:
+   - $T$ is the current temperature [S1, unofficial].
+   - $T_0$ is the reference temperature [S1, unofficial].
+   - $\mathbf{z}$ is the unit vector in the vertical direction (gravity direction) [S1, unofficial].
+   - Higher temperatures result in larger upward velocity [S1, unofficial].
+
+2. **Vorticity Confinement Force:**
+   $$
+   \mathbf{f}_{vc} = \epsilon (\Psi \times \omega) \delta x
+   $$
+   Where:
+   - $\epsilon$ is a scaling factor [S1, unofficial].
+   - $\delta x$ is the grid spacing [S1, unofficial].
+   - $\omega$ is the vorticity vector ($\nabla \times \mathbf{u}$) [S1, unofficial].
+   - $\Psi$ is the normalized gradient of the vorticity magnitude:
+     $$
+     \Psi = \frac{\eta}{|\eta|}
+     $$
+   - $\eta$ is the gradient of the magnitude of vorticity:
+     $$
+     \eta = \nabla |\omega|
+     $$
+   This force restores curling behavior lost due to numerical dissipation [S1, unofficial].
+
+**Algorithm Steps:**
+1. **Initialize** the 3D textures for velocity, pressure, temperature, and fuel to initial conditions (e.g., zero velocity, ambient temperature) [S1, unofficial].
+2. **For each time step:**
+   a. **Compute Forces:** Calculate buoyancy $\mathbf{f}_{buoyancy}$ based on current temperature $T$ and vorticity confinement $\mathbf{f}_{vc}$ based on current vorticity $\omega$ [S1, unofficial].
+   b. **Advection:** Compute the advection term $-(\mathbf{u} \cdot \nabla) \mathbf{u}$ based on interactions between neighboring voxels [S1, unofficial].
+   c. **Divergence/Pressure:** Compute divergence and solve for pressure $p$ to enforce incompressibility (implied by the Navier-Stokes form and "propagate changes in pressure") [S1, unofficial].
+   d. **Update Velocity:** Apply forces and pressure gradient to update velocity $\mathbf{u}$ [S1, unofficial].
+   e. **Update Scalars:** Propagate changes in temperature, fuel, and smoke density based on the updated velocity field (advection of scalars) [S1, unofficial].
+   f. **Store:** Update the values in the respective 3D textures [S1, unofficial].
+3. **Render:** Inject a shader into the post-processing pipeline to ray march through the 3D textures and render the fire [S1, unofficial].
+
+**Pitfalls:**
+- **HLSL Global Variables:** In HLSL compute shaders, global variables cannot be assigned within the shader file using an assignment operator during declaration; this results in zero values without a syntax error [S1, unofficial].
+  - *Solution:* Manually assign these variables in the host driver script (e.g., C#) before each invocation of the compute kernels [S1, unofficial].
+- **Debugging:** HLSL shaders lack print debugging capabilities [S1, unofficial]. Use debug shaders that fill 3D textures with specific values when thresholds are met, or external tools like RenderDoc [S1, unofficial]. Cross-validate formulas with a Python script [S1, unofficial].
+
+## Subtopics
+
+### Stam and Fiume Fire Animation
+A variant that applies the diffusion method to the animation of fire and other gaseous phenomena [S2]. It is noted for handling complex scenes, though progressive energy shooting can be expensive, potentially requiring a hierarchical approach [S2].
+
+## Operating characteristics
+- **Performance:** Achieved real-time performance (60+ fps) on an NVIDIA RTX 2060 graphics card [S1, unofficial].
+- **Resolution:** Tested with a voxel grid size of $128 \times 128 \times 128$ [S1, unofficial].
+- **Parallelism:** Uses GPU blocks of $16 \times 16 \times 16$ with 512 threads per block [S1, unofficial].
+- **Strengths:** Realistic interaction between smoke, heat, and fuel; continuous volumetric representation suitable for volume rendering [S1, unofficial].
+- **Limitations:** Debugging is difficult due to lack of print support in shaders [S1, unofficial]. Performance scales with grid resolution and may require hierarchical approaches for very complex scenes [S2].
+
+## Background
+This method is based on the Navier-Stokes equations for fluid dynamics [S1, unofficial]. It was implemented and demonstrated in a project reported on GitHub Pages, achieving real-time results on consumer hardware [S1, unofficial]. The diffusion method for fire animation was previously applied by Stam and Fiume [S2].
+
+## Sources
+[S1] Fire Simulation and Rendering - GitHub Pages, https://cs184-firesim.github.io/final-report/, fetched 2026-10-27 (unofficial)
+[S2] A survey on participating media rendering techniques, https://doi.org/10.1007/s00371-005-0287-1, fetched 2026-10-26

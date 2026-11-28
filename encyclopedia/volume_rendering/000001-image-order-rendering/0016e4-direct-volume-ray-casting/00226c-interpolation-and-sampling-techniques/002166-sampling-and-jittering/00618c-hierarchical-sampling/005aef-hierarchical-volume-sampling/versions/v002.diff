@@ -1,0 +1,175 @@
+--- v001.md
++++ v002.md
+@@ -3,29 +3,32 @@
+ 
+ ## Overview
+-Hierarchical volume sampling is an importance sampling strategy for direct volume ray casting that reduces computational cost by concentrating samples in regions of high density. It differs from standard NeRF [S1, unofficial][S2] by using a single network for both coarse and fine stages [S1, unofficial], or by employing a compact 3D volume representation in the fine stage [S2].
++Hierarchical volume sampling is an importance sampling strategy for direct volume ray casting that concentrates samples in regions of high density to improve rendering quality per sample [S1, unofficial][S2]. It differs from standard NeRF by using a single network for both coarse and fine stages [S1, unofficial], or by constructing a compact 3D view frustum volume in the fine stage [S2].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Camera ray parameters (origin, direction), near/far clipping planes, coarse density predictions.
+-*   **Outputs:** Final pixel color and alpha.
++*   **Inputs:** Camera ray parameters (origin, direction), near and far clipping planes, coarse density predictions [S1, unofficial][S2].
++*   **Outputs:** Final pixel color and alpha [S1, unofficial][S2].
+ 
+ **Data Structures:**
+-*   **Coarse Samples:** $N$ points uniformly distributed along the ray segment $[t_n, t_f]$.
+-*   **Fine Samples:** $M$ points distributed according to the probability density function (PDF) derived from coarse predictions.
+-*   **Fine Volume (MuRF specific):** A 3D tensor $z \in \mathbb{R}^{W/8 \times H/8 \times D \times C_{fine}}$, where $C_{fine}$ is the reduced channel dimension [S2].
++*   **Coarse Samples:** $N$ points uniformly distributed along the ray segment $[t_n, t_f]$ [S1, unofficial][S2].
++*   **Fine Samples:** $M$ points distributed according to the probability density function (PDF) derived from coarse predictions [S1, unofficial][S2].
++*   **Fine Volume (MuRF specific):** A 3D tensor $z \in \mathbb{R}^{W/8 \times H/8 \times D \times 16}$ constructed at full resolution with a reduced channel dimension [S2].
+ 
+ **Steps:**
+ 1.  **Coarse Sampling:** Uniformly sample $N$ points along the ray between the near and far planes [S1, unofficial][S2].
+-2.  **Coarse Prediction:** Query the coarse model (or single network) at these $N$ points to obtain density $\sigma_i$ and color $c_i$ [S1, unofficial][S2].
+-3.  **PDF Construction:** Compute the unnormalized weight $w_i$ for each sample using the volume rendering equation's opacity term [S2]:
+-    $$ w_i = \alpha_i \prod_{j=1}^{i-1} (1 - \alpha_j) $$
+-    where $\alpha_i = 1 - \exp(-\sigma_i \delta_i)$, $\delta_i$ is the distance between adjacent samples, and the product is 1 for $i=1$ [S2].
+-    Normalize these weights to form the PDF $p_i$:
+-    $$ p_i = \frac{w_i}{\sum_{k=1}^{N} w_k} $$
+-4.  **Importance Sampling:** Sample $M$ new points along the ray according to the distribution $p_i$ [S1, unofficial][S2].
+-5.  **Fine Prediction:**
++2.  **Coarse Prediction:** Query the coarse model (or single network) at these $N$ points to obtain density and color [S1, unofficial][S2].
++3.  **PDF Construction:** Compute the PDF on each ray by normalizing the color composition weights in the volume rendering equation derived from the coarse density prediction [S2].
++4.  **Importance Sampling:** Sample $M$ new points along the ray according to this distribution [S1, unofficial][S2].
++5.  **Fine Prediction:** 
+     *   *Single Network (StyleNeRF):* Query the same network at the $M$ fine points to get density and color [S1, unofficial].
+-    *   *Compact Volume (MuRF):* Construct a target view frustum volume at full resolution but with reduced channel dimension ($C_{fine} = 16$ vs coarse $128$) [S2]. Use a lightweight 3D U-Net to predict color and density from this compact volume [S2].
++    *   *Compact Volume (MuRF):* Construct a target view frustum volume at full resolution, reduce the channel dimension from 128 to 16, and use a lightweight 3D U-Net to predict color and density from this compact volume [S2].
+ 6.  **Final Rendering:** Composite the fine samples using the volume rendering equation to produce the final color [S1, unofficial][S2].
++
++**Formulas:**
++*   Transmittance: $T_i = \prod_{j=1}^{i-1} (1 - \alpha_j)$ [G]
++*   Opacity: $\alpha_i = 1 - \exp(-\sigma_i \delta_i)$ [G]
++*   Unnormalized weight: $w_i = T_i \alpha_i$ [G]
++*   PDF: $p_i = w_i / \sum_{k=1}^{N} w_k$ [G]
++where $\sigma_i$ is density, $\delta_i$ is the distance between adjacent samples, and the empty product for $i=1$ equals 1 [G].
+ 
+ **Parameters:**
+@@ -35,73 +38,76 @@
+ *   Fine channel dimension: 16 [S2].
+ 
+-**Edge Cases:**
+-*   If all coarse densities are zero, the PDF is uniform, and fine sampling degrades to uniform sampling [S2].
+-*   Precision issues in $\alpha_i$ calculation when $\sigma_i \delta_i$ is very large or very small [G].
++**Edge Cases and Pitfalls:**
++*   If all coarse densities are zero, the PDF becomes uniform and fine sampling degrades to uniform sampling [S2].
++*   Precision issues in $\exp(-\sigma \delta)$ calculation when $\sigma \delta$ is very large or very small [G].
++*   Degenerate rays (zero direction components) require careful handling of $\delta_i$ to avoid division by zero or incorrect spacing [G].
+ 
+ **Pseudocode:**
+ ```python
++import math
++import random
++
+ def hierarchical_volume_sampling(ray_origin, ray_direction, near, far, coarse_model, fine_model, N=64, M=16):
+     # Step 1: Coarse Uniform Sampling
+-    t_coarse = linspace(near, far, N)
+-    points_coarse = ray_origin + t_coarse[:, None] * ray_direction
++    t_coarse = [near + i * (far - near) / (N - 1) for i in range(N)]
++    points_coarse = [(ray_origin[0] + t * ray_direction[0], ray_origin[1] + t * ray_direction[1], ray_origin[2] + t * ray_direction[2]) for t in t_coarse]
++
++    # Step 2: Coarse Prediction
++    sigma_coarse, c_coarse = coarse_model(points_coarse)
++
++    # Step 3: PDF Construction
++    delta = t_coarse[1] - t_coarse[0]
++    alpha = [1.0 - math.exp(-s * delta) for s in sigma_coarse]
+     
+-    # Step 2: Coarse Prediction
+-    # Returns density sigma and color c for each point
+-    sigma_coarse, c_coarse = coarse_model(points_coarse)
+-    
+-    # Step 3: PDF Construction
+-    # Calculate alpha and weights
+-    # delta is distance between samples; assume uniform spacing for simplicity
+-    delta = t_coarse[1] - t_coarse[0]
+-    alpha = 1.0 - exp(-sigma_coarse * delta)
+-    
+-    # Accumulate transmittance T_i = product(1 - alpha_j) for j < i
+-    T = ones(N)
++    T = [1.0]
+     for i in range(1, N):
+-        T[i] = T[i-1] * (1.0 - alpha[i-1])
++        T.append(T[-1] * (1.0 - alpha[i-1]))
+         
+-    # Unnormalized weights
+-    w = T * alpha
+-    
+-    # Normalize to PDF
+-    pdf = w / sum(w)
+-    
++    w = [T[i] * alpha[i] for i in range(N)]
++    pdf = [w_i / sum(w) for w_i in w]
++
+     # Step 4: Importance Sampling
+-    # Sample M indices based on pdf
+-    indices = sample_with_replacement(N, pdf, M)
+-    t_fine = t_coarse[indices]
+-    # Add small jitter or interpolate if needed, but sources imply discrete selection
+-    points_fine = ray_origin + t_fine[:, None] * ray_direction
+-    
++    indices = inverse_cdf_sample(N, pdf, M)
++    t_fine = [t_coarse[i] for i in indices]
++    points_fine = [(ray_origin[0] + t * ray_direction[0], ray_origin[1] + t * ray_direction[1], ray_origin[2] + t * ray_direction[2]) for t in t_fine]
++
+     # Step 5: Fine Prediction
+-    # Option A: Single Network (StyleNeRF)
+     sigma_fine, c_fine = coarse_model(points_fine)
+-    
+-    # Option B: Compact Volume (MuRF) - Not fully detailed in sources, marked [G]
+-    # if use_compact_volume:
+-    #     volume_tensor = construct_frustum_volume(points_fine, coarse_features)
+-    #     sigma_fine, c_fine = fine_model(volume_tensor)
+-    
++
+     # Step 6: Final Rendering
+-    # Recalculate alpha for fine samples
+-    alpha_fine = 1.0 - exp(-sigma_fine * delta)
+-    
+-    # Recalculate T for fine samples (assuming sorted t_fine)
+-    T_fine = ones(M)
++    alpha_fine = [1.0 - math.exp(-s * delta) for s in sigma_fine]
++    T_fine = [1.0]
+     for i in range(1, M):
+-        T_fine[i] = T_fine[i-1] * (1.0 - alpha_fine[i-1])
++        T_fine.append(T_fine[-1] * (1.0 - alpha_fine[i-1]))
+         
+-    final_color = sum(T_fine * alpha_fine * c_fine)
++    final_color = sum(T_fine[i] * alpha_fine[i] * c_fine[i] for i in range(M))
+     return final_color
++
++def inverse_cdf_sample(population_size, probabilities, k):
++    cum_probs = []
++    s = 0.0
++    for p in probabilities:
++        s += p
++        cum_probs.append(s)
++    indices = []
++    for _ in range(k):
++        r = random.random()
++        idx = 0
++        while idx < population_size - 1 and cum_probs[idx] < r:
++            idx += 1
++        indices.append(idx)
++    return indices
+ ```
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N + M)$ per ray, where $N$ is coarse samples and $M$ is fine samples. Typically $N \gg M$ (e.g., 64 vs 16) [S2].
+-*   **Memory Complexity:** Reduced in the fine stage if a compact volume is used (channel dim 128 $\to$ 16) [S2].
+-*   **Strengths:** Removes empty space and occluded regions, allowing fewer samples for similar quality [S2]. Single-network approach reduces memory footprint compared to two-network NeRF [S1, unofficial].
++*   **Time Complexity:** $O(N + M)$ per ray, where $N$ is coarse samples and $M$ is fine samples [S2].
++*   **Memory Complexity:** Reduced in the fine stage if a compact volume is used, lowering the channel dimension from 128 to 16 [S2].
++*   **Strengths:** Removes empty space and occluded regions, allowing fewer samples for similar quality [S2].
+ *   **Limitations:** Requires two passes (coarse then fine) [S1, unofficial][S2].
++*   **When to use:** When rendering scenes with sparse geometry or high dynamic range density, or when memory bandwidth limits fine-grained sampling [S2].
++*   **When not to use:** When the coarse prediction is inaccurate, as importance sampling will misallocate fine samples [G].
+ 
+ ## Background
+-Originated in NeRF (Mildenhall et al., 2020) [S1, unofficial][S2]. Adopted by StyleNeRF using a single network [S1, unofficial] and by MuRF using a compact 3D U-Net [S2].
++The method is adopted from NeRF-style hierarchical sampling [S1, unofficial][S2]. StyleNeRF implements it using a single network for both coarse and fine stages [S1, unofficial]. MuRF implements it using a compact 3D U-Net operating on a reduced-channel view frustum volume [S2].
+ 
+ ## Sources

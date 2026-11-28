@@ -1,0 +1,85 @@
+# Particle Fog Density Injection
+
+Also called: Particle Emission Update (for fog), Volume Fog Injection
+
+## Overview
+Particle Fog Density Injection is a method to add fog density to an area using a particle emitter, working only in the Legacy Particle Editor [S1, S2].
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** A particle emitter instance configured in the Legacy Particle Editor [S1, S2].
+- **Output:** A volumetric fog density field defined by the spatial extent and properties of the emitted particles [S1, S2].
+
+**Data Structures:**
+The method relies on parameters stored in the particle emitter's "Advanced" group [S1, S2]:
+- `Volume Fog`: Boolean flag enabling fog density injection [S1, S2].
+- `Volume Thickness`: Float value adjusting volume thickness, range 0 to 10 [S1, S2].
+- `Wind Influence`: Float value controlling global wind influence on the fog volume, range 0 to 20 [S1, S2].
+- `Enabled`: Boolean flag controlling the entity's on/off state [S1, S2].
+- `Texture`, `Alpha`, `Alpha Clip`, `Size`, `Fill Rate Cost`, `Plane Align Blend Distance`: Parameters affecting fog density and appearance [S1, S2].
+- `Tessellation Parameter`: Explicitly not supported [S1, S2].
+
+**Steps:**
+1. **Enable Volume Fog:** Set the `Volume Fog` parameter in the "Advanced" group to true [S1, S2].
+2. **Configure Thickness:** Set `Volume Thickness` to define the density magnitude (0–10) [S1, S2].
+3. **Apply Wind Influence:** Set `Wind Influence` to control how global wind affects the fog volume (0–20) [S1, S2].
+4. **Adjust Visual Attributes:** Configure `Texture`, `Alpha`, `Alpha Clip`, `Size`, `Fill Rate Cost`, and `Plane Align Blend Distance` to refine appearance and performance [S1, S2].
+5. **Enable Entity:** Ensure the `Enabled` flag is true for the emitter [S1, S2].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def configure_particle_fog(emitter):
+    # Enable fog injection
+    emitter.Volume_Fog = True
+    
+    # Set density thickness (0-10)
+    emitter.Volume_Thickness = 5.0
+    
+    # Set wind influence (0-20)
+    emitter.Wind_Influence = 10.0
+    
+    # Ensure emitter is active
+    emitter.Enabled = True
+    
+    # Configure visual and performance attributes
+    emitter.Texture = "fog_texture.png"
+    emitter.Alpha = 0.5
+    emitter.Alpha_Clip = False
+    emitter.Size = 1.0
+    emitter.Fill_Rate_Cost = 100
+    emitter.Plane_Align_Blend_Distance = 0.0
+    
+    # Tessellation Parameter is not supported
+```
+
+**Edge Cases and Pitfalls:**
+- **Legacy Editor Only:** This method only works in the Legacy Particle Editor [S1, S2].
+- **Tessellation:** The `Tessellation Parameter` is explicitly not supported [S1, S2].
+- **Performance:** `Fill Rate Cost` indicates rendering performance impact; high particle counts or large sizes increase cost [S1, S2].
+
+## Subtopics
+
+### [Height Fog](14108-height-fog.md)
+Defines fog density based on world height rather than particle positions. Use when fog needs to be tied to terrain elevation.
+
+### [Procedural Volume Data Creation](13065-procedural-volume-data-creation.md)
+A broader category of methods for generating volume data. Use when more complex procedural logic is needed beyond particle emission.
+
+## Operating characteristics
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Not given in the sources.
+- **Measured Performance:** Not given in the sources.
+- **Scaling:** Not given in the sources.
+- **Strengths:** Enables localized, dynamic fog volumes driven by particle systems [S1, S2].
+- **Limitations:** Restricted to the Legacy Particle Editor; performance scales with particle count and `Fill Rate Cost` [S1, S2].
+- **When to use:** When localized, dynamic fog is required within the Legacy Particle Editor workflow [S1, S2].
+- **When not to use:** When using modern particle systems or when height-based fog is needed [S1, S2].
+
+## Background
+Documented in CRYENGINE 3 and CRYENGINE 5 volumetric fog documentation [S1, S2]. It integrates particle emitters into the engine's volumetric fog system to act as density sources [S1, S2].
+
+## Sources
+[S1] CRYENGINE | Documentation - Volumetric Fog, https://www.cryengine.com/docs/static/engines/cryengine-5/categories/23756816/pages/26215326, fetched 2026-10-29
+[S2] CRYENGINE | Documentation - Volumetric Fog, https://www.cryengine.com/docs/static/engines/cryengine-3/categories/1114113/pages/21268322, fetched 2026-10-29

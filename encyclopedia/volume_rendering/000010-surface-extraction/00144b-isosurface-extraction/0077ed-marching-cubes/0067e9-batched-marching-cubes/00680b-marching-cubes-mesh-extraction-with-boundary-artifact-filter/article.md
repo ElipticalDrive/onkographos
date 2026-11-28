@@ -1,0 +1,201 @@
+# Marching Cubes Mesh Extraction with Boundary Artifact Filtering
+
+Also called: MC meshing, cumcubes marching cubes
+
+## Overview
+This method extracts a triangular mesh from a Signed Distance Field (SDF) using the Marching Cubes algorithm, specifically designed to operate on batches of volume data. It solves the problem of boundary artifacts and invalid geometry that arise when processing discrete voxel grids by filtering out vertices and faces that lie outside the valid spatial domain or lack sufficient neighborhood support. It sets itself apart from standard Marching Cubes implementations by integrating a strict validity mask check and a 27-neighbor consistency filter to ensure the resulting mesh is topologically sound within the processed block [S1, unofficial].
+
+## How it works
+**Inputs:**
+- `mesh_xyz`: Tensor of candidate vertex coordinates (shape $[N, 3]$).
+- `get_sdf(pos)`: Function returning SDF values at given positions.
+- `get_valid_mask(pos)`: Function returning a boolean mask indicating if positions are within the valid spatial bounds.
+- `lower`, `upper`: 3D vectors defining the spatial bounds of the current batch in world coordinates.
+- `_res`: Scalar float representing the voxel resolution (grid spacing).
+- `x_num`, `y_num`, `z_num`: Integers defining the grid dimensions.
+- `k_vis_attribute`: Integer flag (0 or 1) controlling vertex coloring.
+- `count`: Integer offset for global vertex indexing.
+- `save_enabled`: Boolean flag indicating whether to store results.
+
+**Outputs:**
+- Updated global vertex, face, and color buffers (if `save_enabled`).
+- Updated `count` offset.
+
+**Data Structures:**
+- `mesh_sdf`: 3D tensor of shape $[x\_num, y\_num, z\_num]$ storing SDF values.
+- `vertices_cu`: Tensor of shape $[V, 3]$ containing extracted vertex coordinates.
+- `faces_cu`: Tensor of shape $[F, 3]$ containing face indices referencing `vertices_cu`.
+- `qpts`: Tensor of shape $[V, 3]$ with integer grid coordinates.
+
+**Parameters:**
+- Threshold: $0.0$ [S1, unofficial].
+- Small positive value for outside space: $10^{-6}$ [S1, unofficial].
+
+**Steps:**
+
+1.  **Validity Masking:** Compute a boolean mask `mesh_mask` for `mesh_xyz` using `get_valid_mask(mesh_xyz)`. If `mesh_mask.sum() == 0`, skip the block [S1, unofficial].
+2.  **Indexing:** Extract valid coordinates: `valid_mesh_xyz = mesh_xyz[mesh_mask]` [S1, unofficial].
+3.  **SDF Query:** Query the SDF for valid points: `mask_xyz_sdf = get_sdf(valid_mesh_xyz)[0]` [S1, unofficial].
+4.  **Grid Initialization:** Initialize a full SDF tensor `mesh_sdf` of shape $[x\_num, y\_num, z\_num]$ with value $10^{-6}$ to represent outside space. Populate valid indices with `mask_xyz_sdf` using index assignment [S1, unofficial].
+5.  **Bounds Calculation:** Calculate grid upper bounds: $upper[i] = lower[i] + dim\_num \times \_res$ for $i \in \{x, y, z\}$ [S1, unofficial].
+6.  **Marching Cubes:** Execute `mc::marching_cubes(mesh_sdf, 0.0, lower, upper)` to obtain `vertices_cu` and `faces_cu`. If no faces/vertices are generated, skip [S1, unofficial].
+7.  **Quantization:** Quantize vertex coordinates to grid cells: $qpts = \lfloor vertices\_cu / \_res \rfloor$, cast to `int16` [S1, unofficial].
+8.  **Neighbor Retrieval:** Retrieve 27 neighbors (including self) for each quantized point: `neighbors = spc_ops::points_to_neighbors(qpts)`, reshaped to $[-1, 3]$ [S1, unofficial].
+9.  **World Coordinate Conversion:** Convert neighbor grid indices back to world coordinates: $world\_neighbors = neighbors \times \_res$ [S1, unofficial].
+10. **Neighbor Validity Check:** Determine valid vertices by checking if all 27 neighbors are valid: `valid_mask = get_valid_mask(world_neighbors).view(-1, 27).all(1)` [S1, unofficial].
+11. **Face Filtering:** A face is valid only if all 3 of its vertex indices correspond to valid vertices. Apply mask: `face_valid = valid_mask[faces_cu.view(-1)].view(-1, 3).all(-1)`. Select valid faces using `torch::nonzero` and update `faces_cu` [S1, unofficial]. If all faces/vertices are removed, skip [S1, unofficial].
+12. **Vertex Coloring:**
+    - If `k_vis_attribute == 0`: Set vertex color to gray $0.5$.
+    - If `k_vis_attribute == 1`: Compute normalized gradient (normal) and map to RGB $[0, 1]$ via $color = \frac{normal}{2.0} + 0.5$ [S1, unofficial].
+13. **Storage:** If `save_enabled`:
+    - Offset face indices by `count`.
+    - Increment `count` by vertex count.
+    - Reset world coordinates (context-dependent) [S1, unofficial].
+    - Store vertices, faces, and colors (clamped to $[0, 255]$ uint8) in mesher vectors [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def extract_mesh_with_boundary_filter(
+    mesh_xyz, 
+    get_sdf, 
+    get_valid_mask, 
+    lower, 
+    upper, 
+    _res, 
+    x_num, 
+    y_num, 
+    z_num, 
+    k_vis_attribute, 
+    count, 
+    save_enabled,
+    mc_marching_cubes,
+    spc_ops_points_to_neighbors
+):
+    # Step 1: Compute valid mask
+    mesh_mask = get_valid_mask(mesh_xyz)
+    
+    # Step 2: Skip if no valid vertices
+    if mesh_mask.sum() == 0:
+        return count, None, None, None
+
+    # Step 3: Index valid points
+    valid_mesh_xyz = mesh_xyz[mesh_mask]
+    
+    # Step 4: Query SDF
+    mask_xyz_sdf = get_sdf(valid_mesh_xyz)[0]
+    
+    # Step 5: Initialize SDF grid with small positive value
+    mesh_sdf = torch.full((x_num, y_num, z_num), 1e-6, dtype=torch.float32)
+    
+    # Step 6: Populate valid indices (Assuming valid_mesh_xyz maps to grid indices)
+    # Note: The source implies direct index_put_ on the mask, 
+    # but typically one needs grid indices. We assume valid_mesh_xyz 
+    # corresponds to the flattened grid or the mask aligns with the grid.
+    # Based on source: mesh_sdf.index_put_({mesh_mask}, mask_xyz_sdf)
+    # This implies mesh_mask is a boolean tensor of the same shape as mesh_sdf flattened or broadcastable.
+    # For implementation clarity, we assume mesh_mask is reshaped to (x_num, y_num, z_num) if it represents grid validity.
+    # However, the source says "Index the mesh coordinates... Query SDF... Initialize full SDF tensor... populate valid indices".
+    # It is likely mesh_mask is derived from the grid bounds.
+    # Let's assume mesh_mask is a boolean tensor of shape (x_num, y_num, z_num) representing valid voxels.
+    # If mesh_xyz are world coords, we need to map them to grid. The source skips this mapping detail, 
+    # implying mesh_mask is already aligned with the SDF grid structure.
+    mesh_sdf[mesh_mask] = mask_xyz_sdf
+    
+    # Step 7: Calculate upper bounds (redundant if upper is passed, but source mentions it)
+    # upper[i] = lower[i] + dim_num * _res
+    
+    # Step 8: Execute Marching Cubes
+    vertices_cu, faces_cu = mc_marching_cubes(mesh_sdf, 0.0, lower, upper)
+    
+    if vertices_cu is None or faces_cu is None or len(faces_cu) == 0:
+        return count, None, None, None
+
+    # Step 9: Quantize vertices
+    qpts = torch.floor(vertices_cu / _res).to(torch.int16)
+    
+    # Step 10: Retrieve 27 neighbors
+    neighbors = spc_ops_points_to_neighbors(qpts)
+    neighbors = neighbors.view(-1, 3)
+    
+    # Step 11: Convert to world coordinates
+    world_neighbors = neighbors * _res
+    
+    # Step 12: Check validity of all 27 neighbors
+    # get_valid_mask returns a boolean tensor. We assume it handles batched input.
+    neighbor_validity = get_valid_mask(world_neighbors)
+    # Reshape to (-1, 27) and check if all are valid
+    valid_mask = neighbor_validity.view(-1, 27).all(dim=1)
+    
+    # Step 13: Filter faces
+    # faces_cu contains indices into vertices_cu. 
+    # We need to check if the vertex at each face index is valid.
+    # valid_mask corresponds to vertices_cu indices.
+    face_vertex_validity = valid_mask[faces_cu.view(-1)]
+    face_vertex_validity = face_vertex_validity.view(-1, 3)
+    face_valid = face_vertex_validity.all(dim=1)
+    
+    valid_face_indices = torch.nonzero(face_valid).squeeze()
+    
+    if valid_face_indices.numel() == 0:
+        return count, None, None, None
+        
+    faces_cu = faces_cu[valid_face_indices]
+    vertices_cu = vertices_cu[valid_mask] # Filter vertices too
+    
+    # Step 14: Compute colors
+    if k_vis_attribute == 0:
+        colors = torch.full((vertices_cu.shape[0], 3), 0.5, dtype=torch.float32)
+    elif k_vis_attribute == 1:
+        # Compute normalized gradient (normal)
+        # Note: Source says "compute normalized gradient". 
+        # We assume a function get_normals(vertices_cu) exists or is computed via finite differences on mesh_sdf.
+        # Since the source doesn't specify the gradient computation method, we mark it as a placeholder for the specific implementation.
+        normals = compute_normals(vertices_cu, mesh_sdf, _res) # [G] Placeholder for gradient computation
+        normals = normals / (torch.norm(normals, dim=1, keepdim=True) + 1e-8)
+        colors = normals / 2.0 + 0.5
+        colors = torch.clamp(colors, 0.0, 1.0)
+    else:
+        colors = torch.full((vertices_cu.shape[0], 3), 0.5, dtype=torch.float32)
+
+    # Step 15: Save
+    if save_enabled:
+        # Offset face indices
+        faces_cu = faces_cu + count
+        
+        # Update count
+        count = count + vertices_cu.shape[0]
+        
+        # Clamp colors to 0-255 uint8
+        colors_uint8 = (colors * 255).to(torch.uint8)
+        
+        # Store in mesher vectors (Assuming global lists `g_vertices`, `g_faces`, `g_colors`)
+        # g_vertices.append(vertices_cu)
+        # g_faces.append(faces_cu)
+        # g_colors.append(colors_uint8)
+        
+        return count, vertices_cu, faces_cu, colors_uint8
+        
+    return count, None, None, None
+
+def compute_normals(vertices, sdf_grid, res):
+    # [G] Placeholder: Compute normals using finite differences on the SDF grid.
+    # This is not detailed in the source but required for k_vis_attribute == 1.
+    pass
+```
+
+## Operating characteristics
+- **Time Complexity:** Dominated by the SDF query and Marching Cubes extraction. The neighbor check is $O(V)$ where $V$ is the number of vertices.
+- **Memory Complexity:** Requires storage for the SDF grid ($x\_num \times y\_num \times z\_num$) and temporary neighbor tensors.
+- **Strengths:** Effectively removes boundary artifacts and invalid geometry that would otherwise appear at the edges of batched processing blocks.
+- **Limitations:** May remove valid geometry if the valid region is too narrow (less than 27 voxels wide) or if the SDF query is inaccurate at boundaries.
+- **When to use:** When extracting meshes from large volumes processed in batches, especially where boundary consistency is critical.
+- **When not to use:** For small volumes where boundary effects are negligible, or when real-time performance is critical and the overhead of neighbor checking is prohibitive.
+
+## Background
+This method is part of the GS-SDF pipeline, which integrates Gaussian Splatting with Signed Distance Fields for novel view synthesis and mesh extraction. It builds on [Batched Marching Cubes](19943-batched-marching-cubes.md) to handle memory constraints and improve mesh quality by filtering out invalid boundary regions.
+
+## Sources
+[S1] hku-mars/GS-SDF, https://github.com/hku-mars/GS-SDF, fetched 2026-10-27 (unofficial)

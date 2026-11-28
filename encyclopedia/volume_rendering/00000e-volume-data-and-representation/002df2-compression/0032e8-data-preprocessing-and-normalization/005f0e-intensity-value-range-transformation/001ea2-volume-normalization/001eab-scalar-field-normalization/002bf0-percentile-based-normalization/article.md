@@ -1,0 +1,97 @@
+# Percentile-based Normalization
+
+Also called: DRR Image Normalization, Grayscale Mapping
+
+## Overview
+Percentile-based Normalization scales scalar field data to a target range (typically [0, 1] or [0, 255]) by using robust statistical bounds (percentiles) rather than absolute global extrema [S1, unofficial]. This method solves the problem of outlier-driven contrast loss, where a few extreme values compress the dynamic range of the majority of the data [S1, unofficial]. It differs from [Scaling](2287-scaling.md) and [Scalar Field Normalization](1842-scalar-field-normalization.md) by ignoring the absolute minimum and maximum in favor of percentile thresholds [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A scalar field array (e.g., CT projection or volume data) of floating-point values.
+- Output: A normalized array in the range [0, 1] (float) or [0, 255] (uint8).
+
+**Data Structures:**
+- Input array: $N$-dimensional numeric array (float32/float64).
+- Parameters: Lower percentile $p_{lo}$, upper percentile $p_{hi}$, numerical stability constant $\epsilon$.
+
+**Steps:**
+1. **Compute Percentile Bounds:** Calculate the lower bound $min\_val$ as the $p_{lo}$-th percentile and the upper bound $max\_val$ as the $p_{hi}$-th percentile of the input data [S1, unofficial].
+2. **Clip Data:** Clip the input array values to the range $[min\_val, max\_val]$ [S1, unofficial].
+3. **Normalize:** Apply linear scaling:
+   $$image\_normalized = \frac{image\_clipped - min\_val}{max\_val - min\_val + \epsilon}$$
+   where $\epsilon$ is a small constant to prevent division by zero [S1, unofficial].
+4. **Scale to Output Range:** For 8-bit visualization, multiply by 255 and cast to uint8:
+   $$image\_8bit = \lfloor image\_normalized \times 255 \rfloor$$
+   (Standard casting truncates toward zero, equivalent to floor for positive normalized values) [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def percentile_normalize(image, p_lo=5.0, p_hi=95.0, epsilon=1e-8):
+    """
+    Normalize image using percentile-based bounds.
+    
+    Args:
+        image: Input scalar field array.
+        p_lo: Lower percentile (default 5.0).
+        p_hi: Upper percentile (default 95.0).
+        epsilon: Small constant for numerical stability (default 1e-8).
+        
+    Returns:
+        Normalized array cast to uint8 in range [0, 255].
+    """
+    # Step 1: Compute percentile bounds
+    min_val, max_val = np.percentile(image, [p_lo, p_hi])
+    
+    # Step 2: Clip data
+    image_clipped = np.clip(image, min_val, max_val)
+    
+    # Step 3: Normalize
+    image_normalized = (image_clipped - min_val) / (max_val - min_val + epsilon)
+    
+    # Step 4: Scale to 8-bit
+    image_8bit = (image_normalized * 255).astype(np.uint8)
+    
+    return image_8bit
+```
+
+**Parameters:**
+- $p_{lo}$: Lower percentile threshold. Typical value: 5.0 [S1, unofficial].
+- $p_{hi}$: Upper percentile threshold. Typical value: 95.0 [S1, unofficial].
+- $\epsilon$: Numerical stability constant. Typical value: $1e-8$ [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Division by Zero:** Prevented by adding $\epsilon$ to the denominator [S1, unofficial].
+- **Non-Finite Values:** Handling of NaN or Inf values is Not given in the sources.
+- **Constant Data:** Fallback behavior when $min\_val = max\_val$ is Not given in the sources.
+
+## Subtopics
+
+### [Weighted Percentile Computation](7031-weighted-percentile-computation.md)
+Computes weighted percentiles of a step function defined by points $t$ and weights $w$, where weights sum to 1. It differs from standard percentile computation by incorporating a weight vector into the cumulative distribution calculation.
+
+### [Intensity-to-Grayscale Mapping](11937-intensity-to-grayscale-mapping.md)
+Converts absolute scalar field intensity values into 8-bit grayscale luminance indices in the range $[0, 255]$. It solves the problem of visualizing high-precision floating-point data by compressing the dynamic range and enhancing contrast in low-intensity regions through gamma compression. Unlike simple linear normalization, this method uses percentile-based saturation thresholds to ignore outliers and applies a non-linear power law to brighten subtle features.
+
+### [Median Normalization](15468-median-normalization.md)
+Scales a scalar field by dividing each valid value by the median of the valid values and multiplying by a configurable multiplier. It handles NaNs and non-positive values by replacing NaNs with zero and excluding non-positive values from the median calculation.
+
+### [Robust Percentile Contrast Limit Calculation](16685-robust-percentile-contrast-limit-calculation.md)
+Computes robust lower and upper contrast limits for volume rendering by ignoring non-finite values and using percentiles. It solves the problem where single outlier voxels dominate the full [min, max] range, which would otherwise compress the visible detail of the majority of the data. It sets itself apart from absolute min/max normalization by excluding extreme tails of the distribution, and from weighted percentiles by using uniform sampling weights.
+
+## Operating characteristics
+- **Time and Memory Complexity:** Not given in the sources.
+- **Measured Performance:** Generating a 512x512 DRR image requires computing over 260,000 rays; pure Python loops are slow, requiring C/C++ extensions, Numba JIT, or GPU acceleration for performance [S1, unofficial].
+- **Strengths:** Robust to outliers; enhances contrast in low-intensity regions; simple to implement [S1, unofficial].
+- **Limitations:** Computationally more expensive than min/max normalization; sensitive to the choice of percentiles [S1, unofficial].
+- **When to Use:** When data contains significant outliers or noise that would distort min/max-based normalization [S1, unofficial].
+- **When Not to Use:** When real-time performance is critical and data is clean (use [Scaling](2287-scaling.md)) [S1, unofficial].
+
+## Background
+Originated in medical imaging for generating Digital Radiography (DRR) images and volume visualization, where robust contrast adjustment is essential for visualizing anatomical structures [S1, unofficial]. It is widely used in CT projection processing and volume rendering pipelines to map high-precision floating-point data to 8-bit display ranges [S1, unofficial].
+
+## Sources
+[S1] 医疗影像开发实战:如何用光线投射算法快速生成DRR图像(附Python代码), https://un.csdn.net/98nhkcg5t04h, fetched 2026-10-26 (unofficial)

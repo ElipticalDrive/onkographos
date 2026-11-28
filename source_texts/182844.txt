@@ -1,0 +1,770 @@
+What's the algorithm for 2:1 balancing a linear octree? - Stack Overflow
+Collectives™ on Stack Overflow
+Find centralized, trusted content and collaborate around the technologies you use most.
+Learn more about Collectives
+Teams
+Q&A for work
+Connect and share knowledge within a single location that is structured and easy to search.
+Learn more about Teams
+Get early access and see previews of new features.
+Learn more about Labs
+What's the algorithm for 2:1 balancing a linear octree?
+Ask Question
+Asked
+9 years, 5 months ago
+Modified
+9 years, 5 months ago
+Viewed
+2k times
+5
+I have a top-down procedure that builds a linear octree (e.g. with leaves arranged in an array and sorted by Morton encoding) from an high-level description of 3D objects. The problem is that, for my intended application, the resulting octree must be 2:1 balanced, i.e. there must not be any pair of adjacent blocks where one is more than double the size of the other.
+The only thing I could find is the article "Bottom Up Construction and 2:1 Balance Refinement of Linear Octrees in Parallel" (you find it from multiple sources but the copyright is not clear, not sure what's the policy for linking things like that on this site), which explains an algorithm to do that. The problem is that the presented algorithm works in a parallel message-passing architecture, and it's overkill for my application. The other problem is that the (bottom-up) construction and balancing algorithms seem tied together, and I don't know at a glance how to only balance it after having constructed the tree with my own method.
+So what is a (hopefully simple and) efficient method for 2:1 balancing a linear octree? A parallel algorithm would also be great, but with a shared memory model, not a message passing one like the linked algorithm.
+algorithm
+octree
+Share
+Improve this question
+Follow
+asked Aug 14, 2014 at 13:52
+Nicola GiganteNicola Gigante
+3,1541919 silver badges3535 bronze badges
+Add a comment
+|
+2 Answers
+2
+Sorted by:
+Reset to default
+Highest score (default)
+Trending (recent votes count more)
+Date modified (newest first)
+Date created (oldest first)
+4
+The simplest sequential algorithm probably is to keep a queue containing unprocessed octree nodes and process each one in turn by ensuring that its three level - 1 non-sibling neighbors exist. The additional nodes created during processing go in the queue.
+```
+-----------------
+| | | | |       |
+---------       |
+| | | | |       |
+---------       |
+| | |d| |       |
+--b------       |
+| | |a|e|       |
+-----------------
+|       |       |
+|       |       |
+|       |       |
+|   c   |       |
+|       |       |
+|       |       |
+|       |       |
+-----------------
+```
+Here a's two (quadtree) level - 1 non-sibling neighbors are b and an as yet nonexistent child of c. Nodes d and e are the (same-level) sibling neighbors.
+The complex part of this algorithm is determining how to find these neighbors. This can be accomplished by computing the coordinates of the node and its non-sibling neighbors, Morton encoding them, and then looking for the most-significant set bit in the XOR of the encoding for the node and each of its neighbors in turn. The index of this bit over three plus one is the number of parent links that need to be traversed.
+For example, let's use yxyxyx as the Morton interleaving for the quadtree diagram. Node a is the square from (2,4) to (3,5) and has Morton coordinates 100100. Node b is the square from (0,4) to (2,6) and has Morton coordinates 100000. Node c is the square from (0,0) to (4,4) and has Morton coordinates 000000. Node d is the square from (2,5) to (3,6) and has Morton coordinates 100110. Node e is the square from (3,4) to (4,5) and has Morton coordinates 100101.
+To find a's neighbors, we encode (2+1, 4) and (2-1, 4) and (2, 4+1) and (2, 4-1). Let's do (2, 4-1) = (2,3). The Morton encoding of (2,3) is 001110. Compared with a's Morton encoding,
+```
+    001110
+    100100
+XOR ------
+    101010
+    \/\/\/
+```
+Since the third-least significant group of two bits is nonzero, we ascend to the leaf level minus three (i.e., three parent links from a) and then descend twice (three minus one times) according to the Morton code. When we encounter nonexistent children, as with the second descending step, we make them as needed and add them to the queue.
+Parallel version
+Since I have avoided some complicating optimizations in the sequential algorithm, it is robust to changes in the processing order and even to parallelism, so long as there are no races in splitting octree nodes. For shared-memory parallelism, given a compare-and-swap primitive, it's easy enough to make constructing a child lock-free (allocate a node and then CAS the appropriate child pointer from null; if the CAS fails, then just read the winning child). Given that CAS is available, an efficient shared collection for the queue shouldn't be too hard (it doesn't have to be FIFO). I have no idea what kind of speedup parallelism would give here.
+Share
+Improve this answer
+Follow
+edited Aug 14, 2014 at 15:26
+answered Aug 14, 2014 at 15:01
+David EisenstatDavid Eisenstat
+64.6k77 gold badges6060 silver badges122122 bronze badges
+5
+Thanks, but there are a couple of parts that are not clear. Can you clarify the part about finding the non-existent nodes? What does that XOR trick do exactly? Moreover, you go fast on the addition of the created nodes: "we make them as needed". Ho do I insert them in the linear representation of the octree, given that it is an array? how do I add elements without the linear overhead of the insertion?
+– Nicola Gigante
+Aug 14, 2014 at 15:18
+@gigabytes Sorry, I assumed (wrongly, as it turns out) that you were using a standard octree representation with parent/child pointers. I need to think about how to cope with the array representation.
+– David Eisenstat
+Aug 14, 2014 at 15:26
+@gigabytes The inserts will be slow unless they're done as a batch. I would suggest that you switch representations for this step to a pointer-based structure and then recover the sorted order with a depth-first traversal. The XOR trick uses the fact that each d-bit group of the Morton encoding in essence specifies a child index; we're finding the leafmost common ancestor of the node and its neighbor so that we can navigate efficiently to that neighbor. The problem of finding the successor of a node in a binary tree uses similar logic.
+– David Eisenstat
+Aug 14, 2014 at 15:41
+Ok. But in a binary tree I have one successor. Here I have to find all the surrounding neighbors to check for balance, or am I missing something?
+– Nicola Gigante
+Aug 15, 2014 at 9:03
+1
+@gigabytes To find the next (rightward) leaf node in a complete binary tree, you ascend parent pointers until you come from the left child of some node u, then you descend via the u's right child's left descendants. In a quad/octree, the logic is to ascend parent pointers until you come from a child that is not positioned rightmost in the parent square/cube, then descend similarly.
+– David Eisenstat
+Aug 15, 2014 at 13:51
+Add a comment
+|
+4
+The paper that you referenced is a previous work from my group. Since you asked about copyright, the code is available under GPL2 from our group webpage: http://padas.ices.utexas.edu/software
+A new code (pvfmm, which I am working on) is also available for download from the above link and is available under GPL3. This one has a simpler and very efficient algorithm for balancing.
+The algorithm is described in this paper: http://padas.ices.utexas.edu/static/papers/pvfmm.pdf
+I have adapted the code below to remove distributed memory parallelism.
+The function balanceOctree implements the algorithm.
+```
+#include <vector>
+#include <set>
+#include <cstdlib>
+#include <cmath>
+#include <stdint.h>
+#include <omp.h>
+#include <algorithm>
+#include <cstring>
+
+#ifndef MAX_DEPTH
+#define MAX_DEPTH 30
+#endif
+
+#if MAX_DEPTH < 7
+#define UINT_T uint8_t
+#define  INT_T  int8_t
+#elif MAX_DEPTH < 15
+#define UINT_T uint16_t
+#define  INT_T  int16_t
+#elif MAX_DEPTH < 31
+#define UINT_T uint32_t
+#define  INT_T  int32_t
+#elif MAX_DEPTH < 63
+#define UINT_T uint64_t
+#define  INT_T  int64_t
+#endif
+
+
+namespace omp_par{
+
+template <class T,class StrictWeakOrdering>
+void merge(T A_,T A_last,T B_,T B_last,T C_,int p,StrictWeakOrdering comp){
+  typedef typename std::iterator_traits<T>::difference_type _DiffType;
+  typedef typename std::iterator_traits<T>::value_type _ValType;
+
+  _DiffType N1=A_last-A_;
+  _DiffType N2=B_last-B_;
+  if(N1==0 && N2==0) return;
+  if(N1==0 || N2==0){
+    _ValType* A=(N1==0? &B_[0]: &A_[0]);
+    _DiffType N=(N1==0?  N2  :  N1   );
+    #pragma omp parallel for
+    for(int i=0;i<p;i++){
+      _DiffType indx1=( i   *N)/p;
+      _DiffType indx2=((i+1)*N)/p;
+      memcpy(&C_[indx1], &A[indx1], (indx2-indx1)*sizeof(_ValType));
+    }
+    return;
+  }
+
+  //Split both arrays ( A and B ) into n equal parts.
+  //Find the position of each split in the final merged array.
+  int n=10;
+  _ValType* split=new _ValType[p*n*2];
+  _DiffType* split_size=new _DiffType[p*n*2];
+  #pragma omp parallel for
+  for(int i=0;i<p;i++){
+    for(int j=0;j<n;j++){
+      int indx=i*n+j;
+      _DiffType indx1=(indx*N1)/(p*n);
+      split   [indx]=A_[indx1];
+      split_size[indx]=indx1+(std::lower_bound(B_,B_last,split[indx],comp)-B_);
+
+      indx1=(indx*N2)/(p*n);
+      indx+=p*n;
+      split   [indx]=B_[indx1];
+      split_size[indx]=indx1+(std::lower_bound(A_,A_last,split[indx],comp)-A_);
+    }
+  }
+
+  //Find the closest split position for each thread that will
+  //divide the final array equally between the threads.
+  _DiffType* split_indx_A=new _DiffType[p+1];
+  _DiffType* split_indx_B=new _DiffType[p+1];
+  split_indx_A[0]=0;
+  split_indx_B[0]=0;
+  split_indx_A[p]=N1;
+  split_indx_B[p]=N2;
+  #pragma omp parallel for
+  for(int i=1;i<p;i++){
+    _DiffType req_size=(i*(N1+N2))/p;
+
+    int j=std::lower_bound(&split_size[0],&split_size[p*n],req_size,std::less<_DiffType>())-&split_size[0];
+    if(j>=p*n)
+      j=p*n-1;
+    _ValType  split1     =split     [j];
+    _DiffType split_size1=split_size[j];
+
+    j=(std::lower_bound(&split_size[p*n],&split_size[p*n*2],req_size,std::less<_DiffType>())-&split_size[p*n])+p*n;
+    if(j>=2*p*n)
+      j=2*p*n-1;
+    if(abs(split_size[j]-req_size)<abs(split_size1-req_size)){
+      split1     =split   [j];
+      split_size1=split_size[j];
+    }
+
+    split_indx_A[i]=std::lower_bound(A_,A_last,split1,comp)-A_;
+    split_indx_B[i]=std::lower_bound(B_,B_last,split1,comp)-B_;
+  }
+  delete[] split;
+  delete[] split_size;
+
+  //Merge for each thread independently.
+  #pragma omp parallel for
+  for(int i=0;i<p;i++){
+    T C=C_+split_indx_A[i]+split_indx_B[i];
+    std::merge(A_+split_indx_A[i],A_+split_indx_A[i+1],B_+split_indx_B[i],B_+split_indx_B[i+1],C,comp);
+  }
+  delete[] split_indx_A;
+  delete[] split_indx_B;
+}
+
+template <class T,class StrictWeakOrdering>
+void merge_sort(T A,T A_last,StrictWeakOrdering comp){
+  typedef typename std::iterator_traits<T>::difference_type _DiffType;
+  typedef typename std::iterator_traits<T>::value_type _ValType;
+
+  int p=omp_get_max_threads();
+  _DiffType N=A_last-A;
+  if(N<2*p){
+    std::sort(A,A_last,comp);
+    return;
+  }
+
+  //Split the array A into p equal parts.
+  _DiffType* split=new _DiffType[p+1];
+  split[p]=N;
+  #pragma omp parallel for
+  for(int id=0;id<p;id++){
+    split[id]=(id*N)/p;
+  }
+
+  //Sort each part independently.
+  #pragma omp parallel for
+  for(int id=0;id<p;id++){
+    std::sort(A+split[id],A+split[id+1],comp);
+  }
+
+  //Merge two parts at a time.
+  _ValType* B=new _ValType[N];
+  _ValType* A_=&A[0];
+  _ValType* B_=&B[0];
+  for(int j=1;j<p;j=j*2){
+    for(int i=0;i<p;i=i+2*j){
+      if(i+j<p){
+        merge(A_+split[i],A_+split[i+j],A_+split[i+j],A_+split[(i+2*j<=p?i+2*j:p)],B_+split[i],p,comp);
+      }else{
+        #pragma omp parallel for
+        for(int k=split[i];k<split[p];k++)
+          B_[k]=A_[k];
+      }
+    }
+    _ValType* tmp_swap=A_;
+    A_=B_;
+    B_=tmp_swap;
+  }
+
+  //The final result should be in A.
+  if(A_!=&A[0]){
+    #pragma omp parallel for
+    for(int i=0;i<N;i++)
+      A[i]=A_[i];
+  }
+
+  //Free memory.
+  delete[] split;
+  delete[] B;
+}
+
+template <class T>
+void merge_sort(T A,T A_last){
+  typedef typename std::iterator_traits<T>::value_type _ValType;
+  merge_sort(A,A_last,std::less<_ValType>());
+}
+
+template <class T, class I>
+T reduce(T* A, I cnt){
+  T sum=0;
+  #pragma omp parallel for reduction(+:sum)
+  for(I i = 0; i < cnt; i++)
+    sum+=A[i];
+  return sum;
+}
+
+template <class T, class I>
+void scan(T* A, T* B,I cnt){
+  int p=omp_get_max_threads();
+  if(cnt<(I)100*p){
+    for(I i=1;i<cnt;i++)
+      B[i]=B[i-1]+A[i-1];
+    return;
+  }
+
+  I step_size=cnt/p;
+
+  #pragma omp parallel for
+  for(int i=0; i<p; i++){
+    int start=i*step_size;
+    int end=start+step_size;
+    if(i==p-1) end=cnt;
+    if(i!=0)B[start]=0;
+    for(I j=(I)start+1; j<(I)end; j++)
+      B[j]=B[j-1]+A[j-1];
+  }
+
+  T* sum=new T[p];
+  sum[0]=0;
+  for(int i=1;i<p;i++)
+    sum[i]=sum[i-1]+B[i*step_size-1]+A[i*step_size-1];
+
+  #pragma omp parallel for
+  for(int i=1; i<p; i++){
+    int start=i*step_size;
+    int end=start+step_size;
+    if(i==p-1) end=cnt;
+    T sum_=sum[i];
+    for(I j=(I)start; j<(I)end; j++)
+      B[j]+=sum_;
+  }
+  delete[] sum;
+}
+
+}
+
+
+class MortonId{
+
+ public:
+
+  MortonId();
+
+  MortonId(MortonId m, unsigned char depth);
+
+  template <class T>
+  MortonId(T x_f,T y_f, T z_f, unsigned char depth=MAX_DEPTH);
+
+  template <class T>
+  MortonId(T* coord, unsigned char depth=MAX_DEPTH);
+
+  unsigned int GetDepth() const;
+
+  template <class T>
+  void GetCoord(T* coord);
+
+  MortonId NextId() const;
+
+  MortonId getAncestor(unsigned char ancestor_level) const;
+
+  /**
+   * \brief Returns the deepest first descendant.
+   */
+  MortonId getDFD(unsigned char level=MAX_DEPTH) const;
+
+  void NbrList(std::vector<MortonId>& nbrs,unsigned char level, int periodic) const;
+
+  std::vector<MortonId> Children() const;
+
+  int operator<(const MortonId& m) const;
+
+  int operator>(const MortonId& m) const;
+
+  int operator==(const MortonId& m) const;
+
+  int operator!=(const MortonId& m) const;
+
+  int operator<=(const MortonId& m) const;
+
+  int operator>=(const MortonId& m) const;
+
+  int isAncestor(MortonId const & other) const;
+
+ private:
+
+  UINT_T x,y,z;
+  unsigned char depth;
+
+};
+
+inline MortonId::MortonId():x(0), y(0), z(0), depth(0){}
+
+inline MortonId::MortonId(MortonId m, unsigned char depth_):x(m.x), y(m.y), z(m.z), depth(depth_){}
+
+template <class T>
+inline MortonId::MortonId(T x_f,T y_f, T z_f, unsigned char depth_): depth(depth_){
+  UINT_T max_int=((UINT_T)1)<<(MAX_DEPTH);
+  x=(UINT_T)floor(x_f*max_int);
+  y=(UINT_T)floor(y_f*max_int);
+  z=(UINT_T)floor(z_f*max_int);
+}
+
+template <class T>
+inline MortonId::MortonId(T* coord, unsigned char depth_): depth(depth_){
+  UINT_T max_int=((UINT_T)1)<<(MAX_DEPTH);
+  x=(UINT_T)floor(coord[0]*max_int);
+  y=(UINT_T)floor(coord[1]*max_int);
+  z=(UINT_T)floor(coord[2]*max_int);
+}
+
+template <class T>
+inline void MortonId::GetCoord(T* coord){
+  UINT_T max_int=((UINT_T)1)<<(MAX_DEPTH);
+  T s=1.0/((T)max_int);
+  coord[0]=x*s;
+  coord[1]=y*s;
+  coord[2]=z*s;
+}
+
+inline unsigned int MortonId::GetDepth() const{
+  return depth;
+}
+
+inline MortonId MortonId::NextId() const{
+  MortonId m=*this;
+
+  UINT_T mask=((UINT_T)1)<<(MAX_DEPTH-depth);
+  int i;
+  for(i=depth;i>=0;i--){
+    m.x=(m.x^mask);
+    if((m.x & mask))
+      break;
+    m.y=(m.y^mask);
+    if((m.y & mask))
+      break;
+    m.z=(m.z^mask);
+    if((m.z & mask))
+      break;
+    mask=(mask<<1);
+  }
+  m.depth=i;
+  return m;
+}
+
+inline MortonId MortonId::getAncestor(unsigned char ancestor_level) const{
+  MortonId m=*this;
+  m.depth=ancestor_level;
+
+  UINT_T mask=(((UINT_T)1)<<(MAX_DEPTH))-(((UINT_T)1)<<(MAX_DEPTH-ancestor_level));
+  m.x=(m.x & mask);
+  m.y=(m.y & mask);
+  m.z=(m.z & mask);
+  return m;
+}
+
+inline MortonId MortonId::getDFD(unsigned char level) const{
+  MortonId m=*this;
+  m.depth=level;
+  return m;
+}
+
+inline int MortonId::operator<(const MortonId& m) const{
+  if(x==m.x && y==m.y && z==m.z) return depth<m.depth;
+  UINT_T x_=(x^m.x);
+  UINT_T y_=(y^m.y);
+  UINT_T z_=(z^m.z);
+
+  if((z_>x_ || ((z_^x_)<x_ && (z_^x_)<z_)) && (z_>y_ || ((z_^y_)<y_ && (z_^y_)<z_)))
+    return z<m.z;
+  if(y_>x_ || ((y_^x_)<x_ && (y_^x_)<y_))
+    return y<m.y;
+  return x<m.x;
+}
+
+inline int MortonId::operator>(const MortonId& m) const{
+  if(x==m.x && y==m.y && z==m.z) return depth>m.depth;
+  UINT_T x_=(x^m.x);
+  UINT_T y_=(y^m.y);
+  UINT_T z_=(z^m.z);
+
+  if((z_>x_ || ((z_^x_)<x_ && (z_^x_)<z_)) && (z_>y_ || ((z_^y_)<y_ && (z_^y_)<z_)))
+    return z>m.z;
+  if((y_>x_ || ((y_^x_)<x_ && (y_^x_)<y_)))
+    return y>m.y;
+  return x>m.x;
+}
+
+inline int MortonId::operator==(const MortonId& m) const{
+  return (x==m.x && y==m.y && z==m.z && depth==m.depth);
+}
+
+inline int MortonId::operator!=(const MortonId& m) const{
+  return !(*this==m);
+}
+
+inline int MortonId::operator<=(const MortonId& m) const{
+  return !(*this>m);
+}
+
+inline int MortonId::operator>=(const MortonId& m) const{
+  return !(*this<m);
+}
+
+inline int MortonId::isAncestor(MortonId const & other) const {
+  return other.depth>depth && other.getAncestor(depth)==*this;
+}
+
+
+void MortonId::NbrList(std::vector<MortonId>& nbrs, unsigned char level, int periodic) const{
+  nbrs.clear();
+  static int dim=3;
+  static int nbr_cnt=(int)(pow(3.0,dim)+0.5);
+  static UINT_T maxCoord=(((UINT_T)1)<<(MAX_DEPTH));
+
+  UINT_T mask=maxCoord-(((UINT_T)1)<<(MAX_DEPTH-level));
+  UINT_T pX=x & mask;
+  UINT_T pY=y & mask;
+  UINT_T pZ=z & mask;
+
+  MortonId mid_tmp;
+  mask=(((UINT_T)1)<<(MAX_DEPTH-level));
+  for(int i=0; i<nbr_cnt; i++){
+    INT_T dX = ((i/1)%3-1)*mask;
+    INT_T dY = ((i/3)%3-1)*mask;
+    INT_T dZ = ((i/9)%3-1)*mask;
+    INT_T newX=(INT_T)pX+dX;
+    INT_T newY=(INT_T)pY+dY;
+    INT_T newZ=(INT_T)pZ+dZ;
+    if(!periodic){
+      if(newX>=0 && newX<(INT_T)maxCoord)
+      if(newY>=0 && newY<(INT_T)maxCoord)
+      if(newZ>=0 && newZ<(INT_T)maxCoord){
+        mid_tmp.x=newX; mid_tmp.y=newY; mid_tmp.z=newZ;
+        mid_tmp.depth=level;
+        nbrs.push_back(mid_tmp);
+      }
+    }else{
+      if(newX<0) newX+=maxCoord; if(newX>=(INT_T)maxCoord) newX-=maxCoord;
+      if(newY<0) newY+=maxCoord; if(newY>=(INT_T)maxCoord) newY-=maxCoord;
+      if(newZ<0) newZ+=maxCoord; if(newZ>=(INT_T)maxCoord) newZ-=maxCoord;
+      mid_tmp.x=newX; mid_tmp.y=newY; mid_tmp.z=newZ;
+      mid_tmp.depth=level;
+      nbrs.push_back(mid_tmp);
+    }
+  }
+}
+
+std::vector<MortonId> MortonId::Children() const{
+  static int dim=3;
+  static int c_cnt=(1UL<<dim);
+  static UINT_T maxCoord=(((UINT_T)1)<<(MAX_DEPTH));
+  std::vector<MortonId> child(c_cnt);
+
+  UINT_T mask=maxCoord-(((UINT_T)1)<<(MAX_DEPTH-depth));
+  UINT_T pX=x & mask;
+  UINT_T pY=y & mask;
+  UINT_T pZ=z & mask;
+
+  mask=(((UINT_T)1)<<(MAX_DEPTH-(depth+1)));
+  for(int i=0; i<c_cnt; i++){
+    child[i].x=pX+mask*((i/1)%2);
+    child[i].y=pY+mask*((i/2)%2);
+    child[i].z=pZ+mask*((i/4)%2);
+    child[i].depth=depth+1;
+  }
+  return child;
+}
+
+
+
+//list must be sorted.
+void lineariseList(std::vector<MortonId> & list) {
+  if(!list.empty()) {// Remove duplicates and ancestors.
+    std::vector<MortonId> tmp;
+    for(unsigned int i = 0; i < (list.size()-1); i++) {
+      if( (!(list[i].isAncestor(list[i+1]))) && (list[i] != list[i+1]) ) {
+        tmp.push_back(list[i]);
+      }
+    }
+    tmp.push_back(list[list.size()-1]);
+    list.swap(tmp);
+  }
+}
+
+void balanceOctree (std::vector<MortonId > &in, std::vector<MortonId > &out,
+    unsigned int maxDepth, bool periodic) {
+  unsigned int  dim=3;
+
+  int omp_p=omp_get_max_threads();
+  if(in.size()==1){
+    out=in;
+    return 0;
+  }
+
+  //Build level-by-level set of nodes.
+  std::vector<std::set<MortonId> > nodes((maxDepth+1)*omp_p);
+  #pragma omp parallel for
+  for(int p=0;p<omp_p;p++){
+    size_t a=( p   *in.size())/omp_p;
+    size_t b=((p+1)*in.size())/omp_p;
+    for(size_t i=a;i<b;){
+      size_t d=in[i].GetDepth();
+      if(d==0){i++; continue;}
+      MortonId pnode=in[i].getAncestor(d-1);
+      nodes[d-1+(maxDepth+1)*p].insert(pnode);
+      while(i<b && d==in[i].GetDepth() && pnode==in[i].getAncestor(d-1)) i++;
+    }
+
+    //Add new nodes level-by-level.
+    std::vector<MortonId> nbrs;
+    unsigned int num_chld=1UL<<dim;
+    for(unsigned int l=maxDepth;l>=1;l--){
+      //Build set of parents of balancing nodes.
+      std::set<MortonId> nbrs_parent;
+      std::set<MortonId>::iterator start=nodes[l+(maxDepth+1)*p].begin();
+      std::set<MortonId>::iterator end  =nodes[l+(maxDepth+1)*p].end();
+      for(std::set<MortonId>::iterator node=start; node != end;){
+        node->NbrList(nbrs, l, periodic);
+        int nbr_cnt=nbrs.size();
+        for(int i=0;i<nbr_cnt;i++)
+          nbrs_parent.insert(nbrs[i].getAncestor(l-1));
+        node++;
+      }
+      //Get the balancing nodes.
+      std::set<MortonId>& ancestor_nodes=nodes[l-1+(maxDepth+1)*p];
+      start=nbrs_parent.begin();
+      end  =nbrs_parent.end();
+      ancestor_nodes.insert(start,end);
+    }
+
+    //Remove ancestors nodes. (optional)
+    for(unsigned int l=1;l<=maxDepth;l++){
+      std::set<MortonId>::iterator start=nodes[l  +(maxDepth+1)*p].begin();
+      std::set<MortonId>::iterator end  =nodes[l  +(maxDepth+1)*p].end();
+      std::set<MortonId>& ancestor_nodes=nodes[l-1+(maxDepth+1)*p];
+      for(std::set<MortonId>::iterator node=start; node != end; node++){
+        MortonId parent=node->getAncestor(node->GetDepth()-1);
+        ancestor_nodes.erase(parent);
+      }
+    }
+  }
+
+  //Resize out.
+  std::vector<size_t> node_cnt(omp_p,0);
+  std::vector<size_t> node_dsp(omp_p,0);
+  #pragma omp parallel for
+  for(int i=0;i<omp_p;i++){
+    for(unsigned int j=0;j<=maxDepth;j++)
+      node_cnt[i]+=nodes[j+i*(maxDepth+1)].size();
+  }
+  omp_par::scan(&node_cnt[0],&node_dsp[0], omp_p);
+  out.resize(node_cnt[omp_p-1]+node_dsp[omp_p-1]);
+
+  //Copy leaf nodes to out.
+  #pragma omp parallel for
+  for(int p=0;p<omp_p;p++){
+    size_t node_iter=node_dsp[p];
+    for(unsigned int l=0;l<=maxDepth;l++){
+      std::set<MortonId>::iterator start=nodes[l  +(maxDepth+1)*p].begin();
+      std::set<MortonId>::iterator end  =nodes[l  +(maxDepth+1)*p].end();
+      for(std::set<MortonId>::iterator node=start; node != end; node++)
+        out[node_iter++]=*node;
+    }
+  }
+
+  //Sort, Linearise, Redistribute.
+  omp_par::merge_sort(&out[0], &out[out.size()]);
+  lineariseList(out);
+
+  { // Add children
+    MortonId nxt_mid(0,0,0,0);
+
+    std::vector<MortonId> out1;
+    std::vector<MortonId> children;
+    for(size_t i=0;i<out.size();i++){
+      while(nxt_mid.getDFD()<out[i]){
+        while(nxt_mid.isAncestor(out[i])){
+          nxt_mid=nxt_mid.getAncestor(nxt_mid.GetDepth()+1);
+        }
+        out1.push_back(nxt_mid);
+        nxt_mid=nxt_mid.NextId();
+      }
+
+      children=out[i].Children();
+      for(size_t j=0;j<8;j++){
+        out1.push_back(children[j]);
+      }
+      nxt_mid=out[i].NextId();
+    }
+    while(nxt_mid.GetDepth()>0){
+      out1.push_back(nxt_mid);
+      nxt_mid=nxt_mid.NextId();
+    }
+    out.swap(out1);
+  }
+}
+```
+The above code is optimized for performance, and OpenMP further complicates things, but the basic idea is this:
+Build a level-by-level set of tree nodes (MortonIds).
+Loop over the levels from the finest level to the root level.
+At each level, loop over all tree node at that level and compute MortonId for its parent's neighbours. Add these to the set of tree nodes at the coarser level (making sure not to add duplicate nodes).
+Finally, take all the tree nodes (from all levels), and sort them by their MortonId.
+Remove ancestor nodes to obtain the balanced linear octree.
+Share
+Improve this answer
+Follow
+edited Aug 19, 2014 at 21:45
+answered Aug 15, 2014 at 3:11
+DhairyaDhairya
+17922 silver badges44 bronze badges
+1
+Thank you, this is very nice! I'm going to read the paper, but would you mind to outline a little bit how the balancing algorithm work?
+– Nicola Gigante
+Aug 15, 2014 at 9:01
+Add a comment
+|
+Not the answer you're looking for? Browse other questions tagged
+algorithm
+octree
+or ask your own question.
+The Overflow Blog
+How to build a role-playing video game in 24 hours
+Featured on Meta
+Sites can now request to enable a banner to warn about their policy on...
+Temporary policy: Generative AI (e.g., ChatGPT) is banned
+Visit chat
+Related
+14
+Balancing a Binary Tree (AVL)
+1
+Mesh rendering using Octree algorithm
+12
+Should an octree be rebuilt every frame?
+1
+How to use a quad/oct tree for a block world
+1
+How is balancing of binary trees implemented?
+1
+Iterative octree traversal
+3
+Octree neighbour search
+6
+Octree implementation for triangular mesh and particles
+2
+Mapping a balanced tree to points on the plane
+0
+When i need to to stop dividing octants in Octree?
+Hot Network Questions
+Why is swatting only a thing in North America?
+How much do you win in the Bingo Golf Flax Lottery?
+How to I make a plane wrap around and object?
+Septīmus or septĭmus?
+Is it feasible to replace the apricot jam in a sacher torte with apricot preserves?
+How does the SSL/TLS protocol determine if a certificate is expired or not?
+What planet was the Doctor really from?
+Dot file and an adjacent identically named file without dot?
+Have or has high scores?
+What could Russia hope to gain by continuing their war against Ukraine?
+How to catch the last WinResized event?
+Conveying 'jump on the bandwagon'
+CP-SAT: Workarounds for OnlyEnforceIf with Linear Expressions
+Exact time evolution of Stern-Gerlach (SG) apparatus
+I have heard that my "former" high school teacher is shooting videos and no longer teaches. - is "former" necessary here?
+Is parsimony crucial for statistical inference?
+Did LEGO ever make motorised boats?
+I'm looking for the word that means lying in bed after waking up, enjoying the peace and tranquility
+How can I write Log[a]/Log[b] in the form Log[b,a]?
+Series which is a product of sequences which converges, but diverges when one of them is shifted by 1
+Why does peer-discovery work for IPv6 but not IPv4?
+Mounting an 11W SCR with a Flat Profile
+License: "Just Dance" hardly usable without a subscription? And do I really have to buy a new release every year (2019, 2024 etc)?
+What happen if you cast Knock on a target that is both mundanely locked and has Arcane Lock cast on it?
+more hot questions
+Question feed

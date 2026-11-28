@@ -1,0 +1,182 @@
+--- v004.md
++++ v005.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-A compute shader-based ray tracing technique for voxel data that uses a Bounding Volume Hierarchy (BVH) to accelerate ray-mesh intersection tests for lighting and ambient occlusion calculations [S1, unofficial]. It differs from hardware-accelerated approaches like [Sparse Voxel Set (SVS)](9654-sparse-voxel-set-svs.md) or [GPU-based Ray Shooting for Volumetric Mapping](18280-gpu-based-ray-shooting-for-volumetric-mapping.md) by performing the traversal logic entirely within a custom compute shader rather than relying on dedicated DXR hardware pipelines [S1, unofficial]. This method is specifically designed for deferred shading pipelines where position and normal buffers are available, enabling efficient shadow and occlusion queries against sparse voxel meshes [S1, unofficial].
++A compute shader-based ray tracing technique for voxel data that uses a Bounding Volume Hierarchy (BVH) to accelerate ray-mesh intersection tests for lighting and ambient occlusion calculations [S1, unofficial]. It differs from hardware-accelerated approaches like [Sparse Voxel Set (SVS)](9654-sparse-voxel-set-svs.md) or [GPU-based Ray Shooting for Volumetric Mapping](18280-gpu-based-ray-shooting-for-volumetric-mapping.md) by performing the traversal logic entirely within a custom compute shader rather than relying on dedicated ray-tracing hardware pipelines [S1, unofficial]. This method is specifically designed for deferred shading pipelines where position and normal buffers are available, enabling efficient shadow and occlusion queries against sparse voxel meshes [S1, unofficial].
+ 
+ ## How it works
+@@ -47,7 +47,5 @@
+ 1.  **Initialization**: Calculate screen coordinates from the global invocation ID multiplied by 2 [S1, unofficial].
+ 2.  **Position Check**: Load the world position from `position_texture` using the screen coordinates [S1, unofficial]. If the position's alpha component is $\le 0$, store $1.0$ in the light and AO textures and return [S1, unofficial].
+-3.  **Normal Extraction**: Extract the world position and normal from the textures [S1, unofficial]. Convert the normal from the $[0, 1]$ range to the $[-1, 1]$ range using:
+-    $$ \mathbf{n} = 2 \cdot \mathbf{c}_{normal} - 1 $$
+-    where $\mathbf{c}_{normal}$ is the color value from `normal_texture` [S1, unofficial]. Set `hitPosition` to the position's RGB components [S1, unofficial].
++3.  **Normal Extraction**: Extract the world position and normal from the textures [S1, unofficial]. Convert the normal from the $[0, 1]$ range to the $[-1, 1]$ range using the formula below. Set `hitPosition` to the position's RGB components [S1, unofficial].
+ 4.  **Sun Lighting Calculation**:
+     *   Offset `hitPosition` along the normal by epsilon ($\epsilon = 0.01$) to get `newHitPosition` [S1, unofficial].
+@@ -66,73 +64,86 @@
+         *   Call `voxelMeshQuery` with `hitPosition`, the sample direction, and a max distance of 0.99 [S1, unofficial].
+         *   If an intersection is found, increment the `hit` counter [S1, unofficial].
+-    *   Calculate the occlusion factor:
+-        $$ f_{occlusion} = 1.0 - \frac{\text{hit}}{4} $$
+-    *   Apply this factor to the AO color channels [S1, unofficial].
++    *   Calculate the occlusion factor using the formula below and apply it to the AO color channels [S1, unofficial].
++
++### Formulas
++*   Normal conversion: $\mathbf{n} = 2 \cdot \mathbf{c}_{normal} - 1$, where $\mathbf{c}_{normal}$ is the color value from `normal_texture` [S1, unofficial].
++*   Occlusion factor: $f_{occlusion} = 1.0 - \frac{\text{hit}}{4}$ [S1, unofficial].
++*   Ray direction construction in camera space: $\mathbf{d} = \text{normalize}(\text{screenCoord}.x \cdot (-\mathbf{c}_{right}) \cdot \tan(\text{halfFov}) \cdot \mathbf{c}_{settings}.y + \text{screenCoord}.y \cdot \mathbf{c}_{up} \cdot \tan(\text{halfFov}) + \mathbf{c}_{forward})$ [S1, unofficial].
+ 
+ ### Pseudocode
+ ```python
+-# Helper functions defined in source [S1, unofficial]
+-
+-def build_orthonormal_basis(N: vec3) -> Basis:
++import math
++
++def normalize(v):
++    length = math.sqrt(v[0]**2 + v[1]**2 + v[2]**2)
++    return (v[0]/length, v[1]/length, v[2]/length)
++
++def cross(a, b):
++    return (a[1]*b[2] - a[2]*b[1], a[2]*b[0] - a[0]*b[2], a[0]*b[1] - a[1]*b[0])
++
++def build_orthonormal_basis(N):
+     """Constructs a basis (T, B, N) avoiding singularity when N is parallel to up."""
+-    up = vec3(0.0, 1.0, 0.0) if abs(N.z) < 0.999 else vec3(0.0, 0.0, 1.0)
++    up = (0.0, 1.0, 0.0) if abs(N[2]) < 0.999 else (0.0, 0.0, 1.0)
+     T = normalize(cross(up, N))
+     B = normalize(cross(N, T))
+-    return Basis(T, B, N)
+-
+-def cosine_weighted_hemisphere_sample(u: f32, v: f32) -> vec3:
++    return (T, B, N)
++
++def cosine_weighted_hemisphere_sample(u, v):
+     """Generates a direction on the upper hemisphere weighted by cosine."""
+-    phi = 2.0 * 3.1415926535 * u
+-    r = sqrt(v)
+-    x = r * cos(phi)
+-    y = r * sin(phi)
+-    z = sqrt(1.0 - v)
+-    return vec3(x, y, z)
+-
+-def voxel_ray_marching_with_bvh_acceleration(global_invocation_id: vec3, 
+-                                            position_texture: Texture2D, 
+-                                            normal_texture: Texture2D, 
+-                                            light_texture: StorageTexture2D, 
+-                                            ao_texture: StorageTexture2D,
+-                                            scene_props: SceneProps,
+-                                            camera: Camera,
+-                                            voxel_bvh: Array[AABB],
+-                                            voxel_indice: Array[vec2u],
+-                                            voxel_meshes: Array[VoxelMesh],
+-                                            vertices: Array[VoxelMeshVertex],
+-                                            indices: Array<u32>):
++    phi = 2.0 * math.pi * u
++    r = math.sqrt(v)
++    x = r * math.cos(phi)
++    y = r * math.sin(phi)
++    z = math.sqrt(1.0 - v)
++    return (x, y, z)
++
++def voxel_ray_marching_with_bvh_acceleration(global_invocation_id, 
++                                            position_texture, 
++                                            normal_texture, 
++                                            light_texture, 
++                                            ao_texture,
++                                            scene_props,
++                                            camera,
++                                            voxel_bvh,
++                                            voxel_indice,
++                                            voxel_meshes,
++                                            vertices,
++                                            indices):
+     
+     # 1. Calculate screen coordinates
+-    screen_coord = global_invocation_id.xy * 2
++    screen_coord = (global_invocation_id[0] * 2, global_invocation_id[1] * 2)
+     
+     # 2. Load position
+     pos_color = position_texture.sample(screen_coord)
+-    if pos_color.a <= 0.0:
+-        light_texture.store(screen_coord, vec4(1.0, 1.0, 1.0, 1.0))
+-        ao_texture.store(screen_coord, vec4(1.0, 1.0, 1.0, 1.0))
++    if pos_color[3] <= 0.0:
++        light_texture.store(screen_coord, (1.0, 1.0, 1.0, 1.0))
++        ao_texture.store(screen_coord, (1.0, 1.0, 1.0, 1.0))
+         return
+ 
+     # 3. Extract world position and normal
+-    hit_position = pos_color.rgb
++    hit_position = pos_color[0:3]
+     normal_color = normal_texture.sample(screen_coord)
+-    normal = (2.0 * normal_color) - 1.0
++    normal = (2.0 * normal_color[0] - 1.0, 2.0 * normal_color[1] - 1.0, 2.0 * normal_color[2] - 1.0)
+     
+     # 4. Sun Lighting
+-    new_hit_position = hit_position + normal * 0.01 # Epsilon offset
+-    
+-    sun_direction = normalize(scene_props.sun_position - new_hit_position)
++    new_hit_position = (hit_position[0] + normal[0] * 0.01, 
++                        hit_position[1] + normal[1] * 0.01, 
++                        hit_position[2] + normal[2] * 0.01)
++    
++    sun_direction = normalize((scene_props.sun_position[0] - new_hit_position[0],
++                               scene_props.sun_position[1] - new_hit_position[1],
++                               scene_props.sun_position[2] - new_hit_position[2]))
+     sun_basis = build_orthonormal_basis(sun_direction)
+     
+     # Call BVH query for sun
+-    # Note: The specific implementation of voxelMeshQuery is not provided in the source,
+-    # but it takes origin, direction, and max distance.
++    # voxelMeshQuery implementation not provided in sources [S1, unofficial]
+     sun_hit = voxel_mesh_query(new_hit_position, sun_direction, 300.0, 
+                                voxel_bvh, voxel_indice, voxel_meshes, vertices, indices)
+     
+     if sun_hit:
+-        light_color = vec4(0.25, 0.25, 0.25, 1.0)
++        light_color = (0.25, 0.25, 0.25, 1.0)
+     else:
+         # Error case handling as per source
+-        light_color = vec4(1.0, 0.0, 0.0, 1.0)
++        light_color = (1.0, 0.0, 0.0, 1.0)
+         
+     light_texture.store(screen_coord, light_color)
+@@ -144,4 +155,5 @@
+     for i in range(4):
+         # Generate random numbers based on seed
++        # getTwoRandomNumbers implementation not provided in sources [S1, unofficial]
+         u, v = get_two_random_numbers(screen_coord, time)
+         
+@@ -150,4 +162,5 @@
+         
+         # Transform to world space
++        # hemisphereToWorld implementation not provided in sources [S1, unofficial]
+         world_sample = hemisphere_to_world(local_sample, surf_basis)
+         
+@@ -163,5 +176,5 @@
+             
+     occlusion_factor = 1.0 - (hit_count / 4.0)
+-    ao_color = vec4(occlusion_factor, occlusion_factor, occlusion_factor, 1.0)
++    ao_color = (occlusion_factor, occlusion_factor, occlusion_factor, 1.0)
+     ao_texture.store(screen_coord, ao_color)
+ ```
+@@ -181,10 +194,10 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: Depends on the BVH traversal depth and the number of samples (4 for AO). The BVH traversal is generally $O(\log N)$ for sparse data, but worst-case can be $O(N)$ if the BVH is unbalanced or the scene is dense [S1, unofficial].
++*   **Time Complexity**: Not given in the sources.
+ *   **Memory Complexity**: Requires storage for the BVH nodes (`voxel_bvh`), indices (`voxel_indice`), meshes (`voxel_meshes`), and vertices (`vertices`) [S1, unofficial].
+-*   **Performance**: Offloading traversal to a custom compute shader avoids the overhead of setting up DXR pipelines but requires manual implementation of the BVH traversal logic [S1, unofficial].
+-*   **Strengths**: Flexible, works on hardware without DXR support, integrates well with deferred shading pipelines [S1, unofficial].
+-*   **Limitations**: Requires manual implementation of BVH traversal, potentially slower than hardware-accelerated methods on supported GPUs [S1, unofficial].
+-*   **When to use**: When DXR is not available or when custom lighting/occlusion logic is required that doesn't fit standard ray tracing pipelines [S1, unofficial].
++*   **Performance**: Not given in the sources.
++*   **Strengths**: Flexible, works on hardware without dedicated ray-tracing support, integrates well with deferred shading pipelines [S1, unofficial].
++*   **Limitations**: Requires manual implementation of BVH traversal and helper functions, potentially slower than hardware-accelerated methods on supported GPUs [S1, unofficial].
++*   **When to use**: When dedicated ray-tracing hardware is unavailable or when custom lighting/occlusion logic is required that doesn't fit standard ray tracing pipelines [S1, unofficial].
+ *   **When not to use**: When hardware ray tracing is available and standard ray tracing features are sufficient [S1, unofficial].
+ 

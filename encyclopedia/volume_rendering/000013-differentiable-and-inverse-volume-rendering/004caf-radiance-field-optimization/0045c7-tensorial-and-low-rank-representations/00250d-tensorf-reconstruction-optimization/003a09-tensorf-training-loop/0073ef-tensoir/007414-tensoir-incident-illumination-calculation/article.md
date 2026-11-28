@@ -1,0 +1,120 @@
+# TensoIR Incident Illumination Calculation
+
+Also called: Light visibility and indirect illumination
+
+## Overview
+This method computes the incident illumination $L_i$ at a surface point $\hat{\mathbf{x}}$ for a specific direction $\boldsymbol{\omega}_i$ by combining direct lighting with physically-based indirect effects. It solves the problem of accurately modeling secondary shading (bounces) in inverse rendering without the prohibitive computational cost of traditional neural radiance field (NeRF) methods. It differs from its parent [TensoIR](22896-tensoir.md) by explicitly separating the visibility and indirect components using the radiance field's own transmittance and color outputs, enabling efficient online Monte Carlo integration via tensor factorization.
+
+## How it works
+The method calculates incident illumination by evaluating a physically-based rendering integral. It relies on the radiance field representation to provide both visibility (transmittance) and indirect illumination (radiance color) along secondary rays.
+
+**Inputs:**
+*   Surface point position $\hat{\mathbf{x}}$.
+*   Incident direction $\boldsymbol{\omega}_i$.
+*   Radiance field parameters (tensor factors).
+*   Spherical Gaussian (SG) parameters for the environment map.
+*   Number of secondary rays $N$ (for Monte Carlo integration).
+
+**Outputs:**
+*   Incident illumination $L_i(\hat{\mathbf{x}}, \boldsymbol{\omega}_i)$.
+
+**Data Structures:**
+*   **Spherical Gaussians (SG):** The direct illumination environment map is represented as a mixture of SGs. Each SG is defined by an amplitude $a$, a center direction $\mathbf{c}$, and a sharpness $\sigma$. [S1]
+*   **Radiance Field:** The tensorial representation stores volume density and color. It allows efficient evaluation of transmittance $T$ and color $C_{\text{RF}}$ along any ray. [S1]
+
+**Formulas:**
+The incident illumination is the sum of direct and indirect components [S1]:
+$$
+L_i(\hat{\mathbf{x}}, \boldsymbol{\omega}_i) = V(\hat{\mathbf{x}}, \boldsymbol{\omega}_i)L_d(\boldsymbol{\omega}_i) + L_{\text{ind}}(\hat{\mathbf{x}}, \boldsymbol{\omega}_i) \quad (7)
+$$
+where:
+*   $V(\hat{\mathbf{x}}, \boldsymbol{\omega}_i)$ is the light visibility.
+*   $L_d(\boldsymbol{\omega}_i)$ is the direct illumination from direction $\boldsymbol{\omega}_i$.
+*   $L_{\text{ind}}(\hat{\mathbf{x}}, \boldsymbol{\omega}_i)$ is the indirect illumination.
+
+Visibility and indirect illumination are derived directly from the radiance field [S1]:
+$$
+V(\hat{\mathbf{x}}, \boldsymbol{\omega}_i) = T(\hat{\mathbf{x}}, \boldsymbol{\omega}_i)
+$$
+$$
+L_{\text{ind}}(\hat{\mathbf{x}}, \boldsymbol{\omega}_i) = C_{\text{RF}}(\hat{\mathbf{x}}, \boldsymbol{\omega}_i) \quad (8)
+$$
+Here, $T(\hat{\mathbf{x}}, \boldsymbol{\omega}_i)$ is the volume transmittance of the final point sampled on the secondary ray $\mathbf{r}_i(t) = \hat{\mathbf{x}} + t\boldsymbol{\omega}_i$, and $C_{\text{RF}}(\hat{\mathbf{x}}, \boldsymbol{\omega}_i)$ is the radiance field color along that ray. [S1]
+
+**Steps:**
+1.  **Sample Secondary Rays:** For each surface point $\hat{\mathbf{x}}$ during training, generate $N$ secondary rays with directions $\boldsymbol{\omega}_i$ using stratified sampling over the hemisphere or sphere. [S1]
+2.  **Evaluate Direct Illumination:** For each direction $\boldsymbol{\omega}_i$, compute $L_d(\boldsymbol{\omega}_i)$ by evaluating the mixture of Spherical Gaussians. Note that SGs are used here only for compact parameterized representation, not for closed-form integral approximation. [S1]
+3.  **Compute Visibility:** Evaluate the volume transmittance $T(\hat{\mathbf{x}}, \boldsymbol{\omega}_i)$ along the secondary ray $\mathbf{r}_i(t) = \hat{\mathbf{x}} + t\boldsymbol{\omega}_i$ to the final sampled point. This serves as the light visibility $V$. [S1]
+4.  **Compute Indirect Illumination:** Evaluate the radiance field color $C_{\text{RF}}(\hat{\mathbf{x}}, \boldsymbol{\omega}_i)$ along the same secondary ray. This serves as the indirect illumination $L_{\text{ind}}$. [S1]
+5.  **Combine Components:** Calculate the incident illumination for each ray using Equation (7). [S1]
+6.  **Monte Carlo Integration:** Average the incident illumination values over the $N$ sampled rays to approximate the rendering integral for physically-based rendering. [S1]
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_incident_illumination(surface_point, radiance_field, sg_env_map, num_samples):
+    """
+    Computes incident illumination L_i at surface_point for directions sampled
+    via stratified sampling, using the radiance field for visibility and indirect light.
+    """
+    total_illumination = 0.0
+    
+    # Stratified sampling for secondary rays
+    directions = stratified_sample_hemisphere(num_samples, surface_point.normal)
+    
+    for omega_i in directions:
+        # 1. Direct Illumination from SGs
+        # L_d is evaluated by summing the SG contributions at direction omega_i
+        L_d = evaluate_spherical_gaussians(omega_i, sg_env_map)
+        
+        # 2. Define secondary ray
+        # r_i(t) = surface_point + t * omega_i
+        # The ray extends to the final point sampled for transmittance/color
+        
+        # 3. Visibility (Transmittance)
+        # T is the volume transmittance along the ray to the final point
+        # This is computed efficiently via tensor factorization
+        T = radiance_field.compute_transmittance(surface_point, omega_i)
+        
+        # 4. Indirect Illumination (Radiance Color)
+        # C_RF is the radiance field color along the ray
+        C_RF = radiance_field.compute_color(surface_point, omega_i)
+        
+        # 5. Combine: L_i = V * L_d + L_ind
+        # V = T, L_ind = C_RF
+        L_i = T * L_d + C_RF
+        
+        total_illumination += L_i
+        
+    # Monte Carlo integration: average over samples
+    return total_illumination / num_samples
+```
+
+**Parameters:**
+*   `num_samples`: Number of secondary rays for Monte Carlo integration. Not given in the sources.
+*   SG parameters: Amplitude, center, sharpness for the environment map. [S1]
+
+**Edge Cases and Pitfalls:**
+*   **Computational Cost:** Previous NeRF-based methods found this process expensive, requiring 128 TPUs or days of offline pre-computation with extra MLPs. TensoIR avoids this by performing the calculation online using efficient tensor factorization. [S1]
+*   **SG Usage:** Unlike previous methods that use SGs for closed-form integral approximation, TensoIR uses SGs solely for compact representation. [S1]
+
+## Subtopics
+
+### TensoIR Second-Bounce Ray Marching
+This variant refers to the specific implementation of the Monte Carlo integration step where multiple secondary rays are marched from each surface point $\hat{\mathbf{x}}$ during training. It uses stratified sampling for the secondary rays. For each ray, it obtains direct illumination from Spherical Gaussians (SGs) and computes visibility $T(\hat{\mathbf{x}}, \boldsymbol{\omega}_i)$ and indirect illumination $C_{\text{RF}}(\hat{\mathbf{x}}, \boldsymbol{\omega}_i)$ using the radiance field rendering equation directly. This approach is notable because it performs second-bounce ray marching online, achieving higher accuracy than previous methods that required 128 TPUs or days of offline pre-computation with extra MLPs. [S1]
+
+## Operating characteristics
+*   **Time Complexity:** The method is efficient enough to be performed online during training, unlike previous NeRF-based methods. This efficiency is attributed to the highly efficient tensor factorization-based representation. [S1]
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:** Achieves higher accuracy than methods using offline pre-computation or heavy hardware requirements. [S1]
+*   **Strengths:** Online computation of physically-based rendering integral; avoids expensive offline pre-computation or massive hardware requirements (128 TPUs); no extra MLPs required for this step. [S1]
+*   **Limitations:** Requires a radiance field representation that supports efficient transmittance and color evaluation along arbitrary rays. [S1]
+*   **When to use:** When accurate secondary shading (indirect illumination) is required in inverse rendering, and computational resources for offline pre-computation or massive parallel hardware are unavailable. [S1]
+*   **When not to use:** When real-time inference is required without pre-computation and the tensor factorization overhead is prohibitive (though the source emphasizes efficiency, it is a training-time optimization). [S1]
+
+## Background
+The method originates from the TensoIR paper, which introduces a tensorial inverse rendering framework. It addresses the limitations of previous NeRF-based inverse rendering methods that struggled with the computational cost of physically-based rendering integrals. By leveraging tensor factorization, TensoIR enables efficient online computation of incident illumination, including indirect effects, without the need for extra MLPs or offline pre-computation. [S1]
+
+## Sources
+[S1] TensoIR: Tensorial Inverse Rendering, https://doi.org/10.1109/cvpr52729.2023.00024, fetched 2026-10-26

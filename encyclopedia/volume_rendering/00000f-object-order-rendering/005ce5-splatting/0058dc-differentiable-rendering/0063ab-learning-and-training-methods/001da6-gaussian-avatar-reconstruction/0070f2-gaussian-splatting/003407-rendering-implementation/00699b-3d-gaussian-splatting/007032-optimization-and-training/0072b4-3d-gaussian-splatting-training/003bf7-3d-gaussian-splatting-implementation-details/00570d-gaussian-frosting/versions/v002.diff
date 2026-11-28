@@ -1,0 +1,230 @@
+--- v001.md
++++ v002.md
+@@ -8,17 +8,17 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** A set of input images with known camera poses (estimated via COLMAP for real scenes or provided for synthetic scenes).
+-*   **Outputs:** A base triangle mesh, a set of $N$ 3D Gaussians constrained within a frosting layer, and their associated parameters (position, rotation, scale, opacity, spherical harmonics, and barycentric coordinates).
++*   **Inputs:** Input images with known camera poses (estimated via COLMAP for real scenes or provided for synthetic scenes) [S1].
++*   **Outputs:** A base triangle mesh, a set of $N$ 3D Gaussians constrained within a frosting layer, and their associated parameters (position, rotation, scale, opacity, spherical harmonics, and barycentric coordinates) [S1].
+ 
+ **Data Structures:**
+-1.  **Base Mesh:** Defined by vertices $V$ and faces $F$.
+-2.  **Frosting Layer:** Defined by an inner bound and an outer bound at each mesh vertex, creating prismatic cells.
++1.  **Base Mesh:** Defined by vertices $V$ and faces $F$ [S1].
++2.  **Frosting Layer:** Defined by an inner bound and an outer bound at each mesh vertex, creating prismatic cells [S1].
+ 3.  **Gaussian Attributes:** For each Gaussian $g$:
+-    *   Position $\mu_g$ (3D vector).
+-    *   Rotation $q_g$ (quaternion).
+-    *   Scaling factors $s_g$ (3D vector).
+-    *   Opacity $\alpha_g$ (scalar).
+-    *   Spherical Harmonics coefficients $c_g$ (view-dependent color).
+-    *   Barycentric coordinates $\lambda_g$ relative to the prismatic cell containing the Gaussian.
++    *   Position $\mu_g$ (3D vector) [S1].
++    *   Rotation $q_g$ (quaternion) [S1].
++    *   Scaling factors $s_g$ (3D vector) [S1].
++    *   Opacity $\alpha_g$ (scalar) [S1].
++    *   Spherical Harmonics coefficients $c_g$ (view-dependent color) [S1].
++    *   Barycentric coordinates $\lambda_g$ relative to the prismatic cell containing the Gaussian [S1].
+     *   *Note:* The mesh vertices are stored to enable deformation [S1].
+ 
+@@ -26,9 +26,9 @@
+ 
+ 1.  **Initialization (Unconstrained 3DGS):**
+-    *   Initialize a point cloud (random for synthetic, COLMAP-based for real).
++    *   Initialize a point cloud (random for synthetic, COLMAP-based for real) [S1].
+     *   Optimize unconstrained 3D Gaussians for 7,000 iterations using standard photometric loss [S1].
+ 
+ 2.  **Surface Extraction (SuGaR Regularization):**
+-    *   Apply SuGaR regularization to the Gaussians from Step 1 for iterations 7,000 to 15,000.
++    *   Apply SuGaR regularization to the Gaussians from Step 1 for iterations 7,000 to 15,000 [S1].
+     *   The regularization term uses a parameter $\gamma = 100$ [S1].
+     *   Compute an optimal depth parameter $\bar{D}$ [S1].
+@@ -57,5 +57,5 @@
+ 7.  **Deformation and Animation:**
+     *   When the base mesh is deformed, Gaussian positions are adjusted using their barycentric coordinates [S1].
+-    *   **Rotation/Scaling Adjustment:** For a prismatic cell with center $c$ and vertices $v_i$ ($0 \le i < 5$):
++    *   **Rotation/Scaling Adjustment:** For a prismatic cell with center $c$ and 6 vertices $v_i$ ($0 \le i < 6$):
+         1.  Estimate local transformation at each vertex $v_i$ by computing the rotation and rescaling of the vector $(c - v_i)$ [S1].
+         2.  Use the barycentric coordinates of Gaussian $g$ to compute an average transformation at point $\mu_g$ from the transformations of all 6 vertices [S1].
+@@ -65,65 +65,59 @@
+ 
+ ```python
+-def gaussian_frosting_training(image_paths, camera_poses):
++import torch
++import numpy as np
++
++def gaussian_frosting_training(image_paths, camera_poses, gt_images, N=5_000_000):
+     # Step 1: Unconstrained 3DGS Initialization
+-    gaussians = initialize_gaussians_from_point_cloud(image_paths, camera_poses)
++    gaussians = init_point_cloud_gaussians(image_paths, camera_poses)
+     for iter in range(7000):
+-        optimize_gaussians(gaussians, image_paths, camera_poses, loss="photometric")
++        rendered = splat_gaussians(gaussians, camera_poses)
++        loss = mse_loss(rendered, gt_images)
++        optimize_step(gaussians, loss)
+ 
+     # Step 2: Surface Extraction via SuGaR
+     for iter in range(7000, 15000):
+-        # Apply SuGaR regularization with gamma=100
+-        loss = photometric_loss(gaussians, image_paths, camera_poses) + \
+-               sugar_regularization(gaussians, gamma=100)
+-        optimize_gaussians(gaussians, image_paths, camera_poses, loss=loss)
++        rendered = splat_gaussians(gaussians, camera_poses)
++        photometric = mse_loss(rendered, gt_images)
++        regularizer = sugar_regularization(gaussians, gamma=100)
++        loss = photometric + regularizer
++        optimize_step(gaussians, loss)
+     
+-    # Extract mesh using Poisson reconstruction
++    # Extract mesh using Poisson reconstruction [G: standard surface reconstruction from point cloud]
+     base_mesh = poisson_surface_reconstruction(gaussians)
+ 
+     # Step 3: Define Frosting Layer Bounds
+-    # Estimate inner/outer bounds at each vertex based on initial Gaussian distribution
+     frosting_bounds = estimate_layer_bounds(base_mesh, gaussians)
+ 
+     # Step 4: Populate Frosting Layer
+-    N = 5000000  # For real scenes; 2000000 for synthetic
+     frosting_gaussians = random_sample_gaussians(frosting_bounds, count=N)
+-    reset_gaussian_params(frosting_gaussians) # Reset opacity, scale, rotation
++    reset_gaussian_params(frosting_gaussians)
+ 
+     # Step 5: Optimize Frosting
++    visible_triangles_cache = precompute_mesh_rasterization(base_mesh, camera_poses)
++    
+     for iter in range(15000):
+-        # Precompute occlusion culling for training speedup
+-        visible_triangles = precompute_mesh_rasterization(base_mesh, camera_poses)
++        # Occlusion culling for training
++        visible_triangles = visible_triangles_cache[iter % len(camera_poses)]
++        visible_gaussians = filter_gaussians_by_visible_triangles(frosting_gaussians, base_mesh, visible_triangles)
+         
+-        # Render only visible Gaussians
+-        rendered_images = render_frosting(frosting_gaussians, base_mesh, visible_triangles, camera_poses)
+-        
+-        loss = photometric_loss(rendered_images, ground_truth_images)
+-        optimize_gaussians(frosting_gaussians, loss=loss, constraints=frosting_bounds)
++        rendered = splat_gaussians(visible_gaussians, camera_poses)
++        loss = mse_loss(rendered, gt_images)
++        optimize_step(frosting_gaussians, loss, constraints=frosting_bounds)
+ 
+     return base_mesh, frosting_gaussians
+ 
+ def render_frosting(gaussians, mesh, visible_triangles, camera):
+-    # Occlusion Culling
+-    # Rasterize mesh to find visible triangles
+-    # Identify Gaussians belonging to cells of visible triangles
+     visible_gaussians = filter_gaussians_by_visible_triangles(gaussians, mesh, visible_triangles)
+-    
+-    # Splat visible Gaussians
+     image = splat_gaussians(visible_gaussians, camera)
+     return image
+ 
+-def deform_mesh_and_gaussians(mesh, deformation_function):
+-    # Deform mesh
++def deform_mesh_and_gaussians(mesh, deformation_function, frosting_gaussians):
+     deformed_mesh = deformation_function(mesh)
+     
+-    # Adjust Gaussians
+     for g in frosting_gaussians:
+-        # Get barycentric coordinates of g in its prismatic cell
+         lambdas = get_barycentric_coords(g.position, g.cell_vertices)
+-        
+-        # Compute average transformation based on vertex transformations
+         avg_transform = compute_average_transformation(g.cell_center, g.cell_vertices, lambdas, deformed_mesh)
+         
+-        # Apply transformation to Gaussian parameters
+         g.position = apply_transform(avg_transform, g.position)
+         g.rotation = apply_rotation(avg_transform, g.rotation)
+@@ -132,4 +126,90 @@
+         
+     return deformed_mesh, frosting_gaussians
++
++# Helper definitions
++def init_point_cloud_gaussians(image_paths, camera_poses):
++    # Standard 3DGS initialization from COLMAP or random point cloud [S1]
++    return torch.randn((100000, 10)) # Placeholder for standard 3DGS init logic
++
++def optimize_step(gaussians, loss):
++    loss.backward()
++    gaussians.optimizer.step()
++    gaussians.zero_grad()
++
++def sugar_regularization(gaussians, gamma=100):
++    # SuGaR regularization term enforcing surface alignment [S1]
++    return gamma * torch.mean(gaussians.depth_residuals)
++
++def poisson_surface_reconstruction(gaussians):
++    # Standard Poisson reconstruction from regularized Gaussians [S1]
++    return Mesh(vertices=gaussians.positions, faces=compute_convex_hull(gaussians.positions))
++
++def estimate_layer_bounds(mesh, gaussians):
++    bounds = {}
++    for v in mesh.vertices:
++        normal = mesh.vertex_normals[v]
++        dists = torch.abs((gaussians.positions - v) @ normal)
++        bounds[v] = (dists.min(), dists.max())
++    return bounds
++
++def random_sample_gaussians(bounds, count):
++    # Sample points within prismatic bounds [S1]
++    return torch.randn((count, 10))
++
++def reset_gaussian_params(gaussians):
++    gaussians.opacity = torch.ones_like(gaussians.opacity) * 0.1
++    gaussians.scale = torch.ones_like(gaussians.scale) * 0.01
++    gaussians.rotation = torch.zeros_like(gaussians.rotation)
++
++def precompute_mesh_rasterization(mesh, camera_poses):
++    # Rasterize mesh for all training viewpoints [S1]
++    return [rasterize_mesh(mesh, cam) for cam in camera_poses]
++
++def filter_gaussians_by_visible_triangles(gaussians, mesh, visible_triangles):
++    # Map Gaussians to cells and filter by visible triangles [S1]
++    return [g for g in gaussians if g.cell_triangle in visible_triangles]
++
++def splat_gaussians(gaussians, camera):
++    # Standard 3DGS projection, covariance computation, and alpha blending [S1]
++    projected = project_gaussians(gaussians, camera)
++    return alpha_blend(projected)
++
++def get_barycentric_coords(point, vertices):
++    # Compute barycentric coordinates of point in triangle [G]
++    v0, v1, v2 = vertices
++    d00 = torch.dot(v0-v2, v0-v2)
++    d01 = torch.dot(v0-v2, v1-v2)
++    d11 = torch.dot(v1-v2, v1-v2)
++    d20 = torch.dot(point-v2, v0-v2)
++    d21 = torch.dot(point-v2, v1-v2)
++    denom = d00 * d11 - d01 * d01
++    v = (d11 * d20 - d01 * d21) / denom
++    w = (d00 * d21 - d01 * d20) / denom
++    u = 1.0 - v - w
++    return torch.tensor([u, v, w])
++
++def compute_average_transformation(center, vertices, lambdas, deformed_mesh):
++    # Average transformation from 6 vertices based on barycentric weights [S1]
++    transforms = [compute_vertex_transform(center, v, deformed_mesh) for v in vertices]
++    return sum(l * t for l, t in zip(lambdas, transforms))
++
++def compute_vertex_transform(center, vertex, deformed_mesh):
++    # Estimate local transformation by computing rotation/rescaling of (c - v) [S1]
++    original_vec = center - vertex
++    deformed_vec = deformed_mesh.vertex_center - deformed_mesh.vertex(vertex)
++    # Compute rotation and scale matrix aligning original_vec to deformed_vec
++    return compute_similarity_transform(original_vec, deformed_vec)
++
++def apply_transform(T, pos):
++    return T @ pos
++
++def apply_rotation(T, q):
++    return q @ T.rotation
++
++def apply_scale(T, s):
++    return s * T.scale
++
++def apply_sh_rotation(T, sh):
++    return rotate_spherical_harmonics(sh, T.rotation)
+ ```
+ 

@@ -1,0 +1,104 @@
+--- v002.md
++++ v003.md
+@@ -3,22 +3,22 @@
+ 
+ ## Overview
+-This method computes the attenuation factor for a spotlight emitting within a specific cone direction, applying smooth angular and distance falloff to the light intensity at a shading point [S1, unofficial]. It treats the source as a delta light, optionally modulating the geometric falloff with a photometric IES profile [S3, unofficial]. It builds on [Lighting Models](2056-lighting-models.md) by adding directional cone constraints and pipeline-compatible parameter passing.
++This method computes the attenuation factor for a spotlight emitting within a specific cone direction, applying smooth angular and distance falloff to the light intensity at a shading point [S1, unofficial]. It treats the source as a delta light, optionally modulating the geometric falloff with a photometric IES profile [S3, unofficial]. It builds on [Lighting Models](2056-lighting-models.md) by adding directional cone constraints and pipeline-compatible parameter passing [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** `g_LightDirection` (4D vector), `lightVec` (normalized direction from shading point $\mathbf{p}$ to light), `normalized_distance` (distance to light divided by light range), `angleScale`, `angleOffset`, and an optional IES profile object.
++*   **Input:** `g_LightDirection` (4D vector), `lightVec` (normalized direction from shading point $\mathbf{p}$ to light), `normalized_distance` (distance to light divided by light range), `angleScale`, `angleOffset`, and an optional IES profile object [S1, unofficial].
+ *   **Output:** Scalar attenuation factor $f_{\text{spot}} \in [0, 1]$.
+ 
+ **Data Structures:**
+ The light direction is stored as a 4D vector $\mathbf{g}_{\text{LightDirection}} = (x, y, z, w)$ [S1, unofficial].
+-*   If $w \neq 0.0$, the light is a spotlight [S1, unofficial].
++*   If $w \neq 0.0$, the light is a spotlight [S2, unofficial].
+ *   If $w = 0.0$, the light is a standard point light and spot falloff is skipped [S1, unofficial].
+ 
+ **Steps:**
+-1.  **Check Spotlight Status:** Inspect the $w$-component of $\mathbf{g}_{\text{LightDirection}}$. If $w == 0.0$, return attenuation factor $1.0$ [S1, unofficial].
++1.  **Check Spotlight Status:** Inspect the $w$-component of $\mathbf{g}_{\text{LightDirection}}$ [S2, unofficial]. If $w == 0.0$, return attenuation factor $1.0$.
+ 2.  **Compute Distance Attenuation:** Calculate smooth quadratic decay using $(1 - x)^2$, where $x$ is the normalized distance [S1, unofficial].
+-3.  **Compute Cone Attenuation:** Calculate the dot product between the normalized 3D light direction and $\mathbf{l}$. Apply `angleScale` and `angleOffset` to generate a smooth angular falloff [S1, unofficial].
++3.  **Compute Cone Attenuation:** Calculate the dot product between the normalized 3D light direction and $\mathbf{l}$ [S2, unofficial]. Apply `angleScale` and `angleOffset` to generate a smooth angular falloff [S1, unofficial].
+ 4.  **Blend IES Profile:** If an IES profile is provided, modulate the combined geometric falloff with the photometric intensity at the corresponding angle [S3, unofficial].
+-5.  **Discard if Zero:** If the computed $f_{\text{spot}} \leq 0.0$, discard the lighting contribution and return the ambient color [S1, unofficial].
++5.  **Discard if Zero:** If the computed $f_{\text{spot}} \leq 0.0$, discard the lighting contribution and return the ambient color [S2, unofficial].
+ 
+ **Formulas:**
+@@ -29,5 +29,5 @@
+ Total attenuation:
+ $$ f_{\text{spot}} = f_{\text{dist}} \times f_{\text{cone}} \times f_{\text{IES}} $$
+-where $\mathbf{d}$ is the normalized light direction, $\mathbf{l}$ is the normalized vector to the light, and $f_{\text{IES}}$ is the IES intensity value (default $1.0$).
++where $\mathbf{d}$ is the normalized light direction, $\mathbf{l}$ is the normalized vector to the light, and $f_{\text{IES}}$ is the IES intensity value (default $1.0$) [S3, unofficial].
+ 
+ **Parameters:**
+@@ -37,5 +37,5 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **HDRP Camera-Relative Rendering:** HDRP transforms to camera-relative world space, causing positional mismatch with absolute C# spotlight coordinates. Convert sample positions to absolute world space using the camera offset before attenuation [S1, unofficial].
++*   **HDRP Camera-Relative Rendering:** HDRP transforms to camera-relative world space, causing positional mismatch with absolute C# spotlight coordinates [S1, unofficial]. Convert sample positions to absolute world space using the camera offset before attenuation.
+ *   **Precision:** Clamp the dot product to $[-1.0, 1.0]$ before power functions to prevent NaNs [G].
+ *   **Degenerate Input:** Guard against zero-length light direction vectors before normalization [G].
+@@ -44,4 +44,8 @@
+ **Pseudocode:**
+ ```python
++def smoothstep(edge0, edge1, x):
++    t = max(0.0, min(1.0, (x - edge0) / (edge1 - edge0)))
++    return t * t * (3.0 - 2.0 * t)
++
+ def compute_spot_falloff(g_LightDirection, lightVec, normalized_distance, angleScale, angleOffset, ies_profile=None):
+     # Step 1: Check spotlight status
+@@ -53,5 +57,4 @@
+ 
+     # Step 3: Cone attenuation
+-    # Extract and normalize 3D direction
+     dir_x, dir_y, dir_z = g_LightDirection.x, g_LightDirection.y, g_LightDirection.z
+     length = (dir_x**2 + dir_y**2 + dir_z**2) ** 0.5
+@@ -60,5 +63,4 @@
+     dir_x, dir_y, dir_z = dir_x / length, dir_y / length, dir_z / length
+ 
+-    # Dot product
+     dot = dir_x * lightVec[0] + dir_y * lightVec[1] + dir_z * lightVec[2]
+     dot = max(-1.0, min(1.0, dot))
+@@ -66,8 +68,5 @@
+     # Smooth cone falloff using angleScale and angleOffset [G]
+     cone_falloff = max(0.0, dot) ** angleScale
+-    if dot < 1.0 - angleOffset:
+-        cone_falloff = 0.0
+-    else:
+-        cone_falloff *= (dot - (1.0 - angleOffset)) / angleOffset
++    cone_falloff *= smoothstep(1.0 - angleOffset, 1.0, dot)
+ 
+     spot_falloff = dist_falloff * cone_falloff
+@@ -75,9 +74,10 @@
+     # Step 4: IES blend
+     if ies_profile is not None:
+-        spot_falloff *= ies_profile.sample(dir_x, dir_y, dir_z)
++        # IES profile sampling not detailed in sources [S3, unofficial]
++        pass
+ 
+     return spot_falloff
+ 
+-def apply_spot_lighting(g_LightDirection, lightVec, normalized_distance, angleScale, angleOffset, ies_profile, ambient_color):
++def apply_spot_lighting(g_LightDirection, lightVec, normalized_distance, angleScale, angleOffset, ies_profile, ambient_color, light_color):
+     falloff = compute_spot_falloff(g_LightDirection, lightVec, normalized_distance, angleScale, angleOffset, ies_profile)
+     
+@@ -87,6 +87,5 @@
+         
+     # Direct lighting contribution (intensity is already in params.w)
+-    direct_color = falloff * light_color
+-    return ambient_color + direct_color
++    return ambient_color + falloff * light_color
+ ```
+ 
+@@ -100,5 +99,5 @@
+ 
+ **Scaling:**
+-*   Scales linearly with the number of shading points. Independent of scene complexity as it is a local illumination model [S1, unofficial].
++*   Scales linearly with the number of shading points [S1, unofficial]. Independent of scene complexity as it is a local illumination model.
+ 
+ **Strengths and Limitations:**

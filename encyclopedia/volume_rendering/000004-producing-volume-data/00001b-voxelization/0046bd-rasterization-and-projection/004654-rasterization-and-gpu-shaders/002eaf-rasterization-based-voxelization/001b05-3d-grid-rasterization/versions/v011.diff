@@ -1,0 +1,271 @@
+--- v010.md
++++ v011.md
+@@ -4,18 +4,14 @@
+ 
+ ## Overview
+-3D Grid Rasterization converts a triangle mesh into a binary occupancy grid by projecting the mesh onto three orthogonal planes (XY, YZ, XZ) using hardware rasterization and combining the results [S4, unofficial]. It solves the problem of efficiently determining which voxels in a fixed-resolution 3D grid are intersected by the mesh surface, serving as a fast, GPU-accelerated alternative to CPU-based raycasting or brute-force AABB intersection tests [S4, unofficial]. Unlike [Conservative Voxelization](3247-conservative-voxelization.md) which guarantees no holes by expanding primitives, this method relies on standard rasterization rules and bit-packing to achieve high throughput, prioritizing speed over watertightness for complex internal structures [S1, unofficial].
++3D Grid Rasterization converts a triangle mesh into a binary occupancy grid by projecting the mesh onto three orthogonal planes (XY, YZ, XZ) using hardware rasterization and combining the results [S4, unofficial]. It solves the problem of efficiently determining which voxels in a fixed-resolution 3D grid are intersected by the mesh surface without performing explicit CPU-side raycasting or complex geometric intersection tests [S4, unofficial]. It differs from [Conservative Voxelization](3247-conservative-voxelization.md) by relying on standard rasterization rules (which may miss thin features) and from [A-Buffer Solid Voxelization](1189-a-buffer-solid-voxelization.md) by discarding occluded fragments rather than retaining depth lists, making it faster but potentially less watertight for complex internal structures [S1, S4, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** A triangle mesh (vertices, indices, optional colors/normals) and a target grid resolution.
+-*   **Output:** A 3D occupancy grid (binary or color) representing the voxelized mesh.
++**Inputs:** A triangle mesh (vertices, indices, optional colors/normals), a target resolution (integer), and grid bounds.
++**Outputs:** A 3D occupancy grid (binary or colored) representing the voxelized mesh.
+ 
+ **Data Structures:**
+-*   **Voxel Grid Storage:** A compact 1-bit-per-voxel format is often used for occupancy. The grid is stored as a `std::vector<uint32_t>` (or equivalent) of size $(N_x \times N_y \times N_z) / 32$, where each `uint32_t` stores 32 voxels [S4, unofficial]. Memory order is linear in X, then Y, then Z [S4, unofficial].
+-*   **Intermediate Projections:** Three 3D textures (or image buffers) are used to store the rasterized projections along the X, Y, and Z axes. These textures are organized in "slabs" of 32 voxels along the projection axis to facilitate batch processing [S4, unofficial].
+-    *   `xProjTextureId`: Dimensions $(N_y, N_z, N_x/32)$.
+-    *   `yProjTextureId`: Dimensions $(N_x, N_z, N_y/32)$.
+-    *   `zProjTextureId`: Dimensions $(N_x, N_y, N_z/32)$.
+-*   **Voxel Coordinate Hash:** For CPU variants or hash-table based implementations, a `VoxelCoord` struct with `x, y, z` integers is hashed using primes $p_1=73856093, p_2=19349663, p_3=83492791$: $hash = x \cdot p_1 \oplus y \cdot p_2 \oplus z \cdot p_3$ [S1, unofficial].
++*   **Voxel Grid Storage:** A compact 1-bit-per-voxel format. For a grid of dimensions $N_x \times N_y \times N_z$, the storage is a `std::vector<uint32_t>` of size $\lceil (N_x \cdot N_y \cdot N_z) / 32 \rceil$. Each `uint32_t` stores 32 voxels. Memory order is linear in X, then Y, then Z [S4, unofficial].
++*   **Projection Textures:** Three 3D textures (`xProjTextureId`, `yProjTextureId`, `zProjTextureId`) used as intermediate buffers. Their dimensions are adjusted to store 32 slices per texture layer to match the bit-packing width. For example, `xProjTextureId` has dimensions $(N_y, N_z, N_x/32)$ [S4, unofficial].
++*   **VoxelCoord:** A struct with integer fields `x`, `y`, `z`. Hash function for sparse variants uses primes $p_1=73856093, p_2=19349663, p_3=83492791$: $hash = x \cdot p_1 \oplus y \cdot p_2 \oplus z \cdot p_3$ [S1, unofficial].
+ 
+ **Parameters:**
+@@ -26,98 +22,135 @@
+ **Steps:**
+ 
+-1.  **Bounding Box and Grid Setup:**
+-    Compute the axis-aligned bounding box (AABB) of the mesh vertices. Calculate the voxel size $v_s$ using the smallest dimension of the bounding box divided by the resolution [S4, unofficial]. Round the number of voxels in each dimension up to the nearest multiple of 32 to align with the slab-based storage [S4, unofficial]. Calculate the grid origin (minCorner) and dimensions [S4, unofficial].
+-
+-2.  **Projection Passes (X, Y, Z):**
+-    For each axis (X, Y, Z), perform a rasterization pass:
+-    *   **Setup:** Allocate a 3D texture for the projection. Bind slices of this texture to the framebuffer color attachment.
+-    *   **Camera/View:** Set up an orthographic projection matrix. The view direction is along the current axis. The near and far planes are set to cover a slab of 32 voxels: $[z_{slice}, z_{slice} + 32 \cdot v_s]$ [S4, unofficial].
+-    *   **Rotation:** Rotate the mesh or view matrix so the projection axis aligns with the camera's view direction. For example, for Z-projection, rotate 180° around Z and 180° around Y [S4, unofficial].
+-    *   **Rasterization:** Render the mesh triangles into the current slice. Use `GL_OR` logic operation or additive blending to accumulate occupancy bits. Disable depth testing to ensure all fragments within the slab contribute [S4, unofficial].
+-    *   **Loop:** Iterate through all slices along the projection axis (step 32) and repeat.
+-
+-3.  **Combination (Optional for Z-axis):**
+-    In some implementations, the X and Y projections are combined into the Z-projection texture using a fragment shader (`compileProjections`) that reads from the X and Y textures and writes to the Z texture, effectively performing a 3D intersection test via 2D rasterization [S4, unofficial].
+-
+-4.  **Result Retrieval:**
+-    Read back the final 3D texture (e.g., `zProjTextureId`) using `glGetTexImage` with format `GL_RGBA_INTEGER` and type `GL_UNSIGNED_INT_8_8_8_8` (or equivalent bit-packed format) to retrieve the occupancy grid on the CPU [S4, unofficial].
+-
+-**Pseudocode (GPU-based Slab Rasterization):**
++1.  **Grid Initialization:**
++    *   Compute the mesh bounding box in world space.
++    *   Calculate `voxel_size` based on the smallest dimension of the bounding box and the target `resolution` [S4, unofficial].
++    *   Round the number of voxels in each dimension up to the nearest multiple of 32 to facilitate bit-packing [S4, unofficial].
++    *   Calculate `minCorner` and `maxCorner` based on the bounding box center and the rounded voxel count:
++        $$ \text{minCorner} = \text{boundingBoxCenter} - 0.5 \times (\text{roundedNbVoxels} \times \text{voxelSize}) $$
++        [S4, unofficial]
++    *   Allocate the three projection 3D textures and the final compact 1-bit grid [S4, unofficial].
++
++2.  **X-Axis Projection (YZ Plane):**
++    *   Iterate through the X-axis in steps of 32 (slabs). For each slab index `sliceX`:
++        *   Bind the corresponding slice of `xProjTextureId` to the framebuffer.
++        *   Set viewport to $(N_y, N_z)$.
++        *   Clear the buffer.
++        *   Set up an orthographic projection matrix looking down the X-axis. The view frustum covers the Y and Z extents of the grid, and the near/far planes cover the current 32-voxel slab in X:
++            $$ \text{viewProj} = \text{ortho}(\min Y, \max Y, \min Z, \max Z, \text{sliceX} \cdot \text{voxelSize}, (\text{sliceX} + 32) \cdot \text{voxelSize}) $$
++            [S4, unofficial]
++        *   Apply rotation to align the mesh for X-projection: $R = \text{rotate}(-90^\circ, \hat{x}) \times \text{rotate}(90^\circ, \hat{z})$ [S4, unofficial].
++        *   Rasterize the mesh triangles into the 2D slice. Use `GL_OR` logic operation or additive blending to set bits in the texture [S4, unofficial].
++
++3.  **Y-Axis Projection (XZ Plane):**
++    *   Iterate through the Y-axis in steps of 32. For each `sliceY`:
++        *   Bind slice of `yProjTextureId` (dimensions $N_x \times N_z \times N_y/32$).
++        *   Set viewport to $(N_x, N_z)$.
++        *   Orthographic projection:
++            $$ \text{viewProj} = \text{ortho}(\min X, \max X, \min Z, \max Z, \text{sliceY} \cdot \text{voxelSize}, (\text{sliceY} + 32) \cdot \text{voxelSize}) $$
++            [S4, unofficial]
++        *   Rotation: $R = \text{rotate}(-90^\circ, \hat{x})$ [S4, unofficial].
++        *   Rasterize mesh into the slice.
++
++4.  **Z-Axis Projection (XY Plane):**
++    *   Iterate through the Z-axis in steps of 32. For each `sliceZ`:
++        *   Bind slice of `zProjTextureId` (dimensions $N_x \times N_y \times N_z/32$).
++        *   Set viewport to $(N_x, N_y)$.
++        *   Orthographic projection:
++            $$ \text{viewProj} = \text{ortho}(\min X, \max X, \min Y, \max Y, \text{sliceZ} \cdot \text{voxelSize}, (\text{sliceZ} + 32) \cdot \text{voxelSize}) $$
++            [S4, unofficial]
++        *   Rotation: $R = \text{rotate}(180^\circ, \hat{z}) \times \text{rotate}(180^\circ, \hat{y})$ [S4, unofficial].
++        *   Rasterize mesh into the slice.
++
++5.  **Combination (Compilation):**
++    *   Use a `compileProjections` shader. Bind `xProjTextureId` to unit 0, `yProjTextureId` to unit 1.
++    *   For each `sliceZ` (step 32):
++        *   Set uniform `slice` to `sliceZ`.
++        *   Bind the target slice of `zProjTextureId` to the framebuffer.
++        *   Draw a full-screen quad (or triangle strip) to combine the X and Y projections into the Z texture. The fragment shader computes the logical AND of the bits from the X and Y projections to determine final occupancy for the Z-slab [S4, unofficial].
++        *   *Note:* Some implementations use a single pass per axis and combine later, or use a 3D texture with image stores for direct writing [S3, S4, unofficial]. The specific "compile" step described in [S4, unofficial] combines X and Y to verify Z-intersection.
++
++6.  **Result Retrieval:**
++    *   Read the final `zProjTextureId` (or the combined result) using `glGetTexImage` with format `GL_RGBA_INTEGER` and type `GL_UNSIGNED_INT_8_8_8_8` (or similar bit-packed format) into a CPU buffer [S4, unofficial].
++    *   Unpack the bits into the final 1-bit grid or convert to a boolean array [S4, unofficial].
++
++**Pseudocode:**
+ 
+ ```python
+-def rasterize_mesh_to_grid(mesh, resolution):
+-    # 1. Compute Bounding Box and Grid Params
+-    min_coords, max_coords = mesh.compute_aabb()
+-    min_side = min(max_coords.x - min_coords.x, 
+-                   max_coords.y - min_coords.y, 
+-                   max_coords.z - min_coords.z)
+-    voxel_size = min_side / resolution
++def rasterize_3d_grid(mesh, resolution):
++    # 1. Compute Grid Parameters
++    bbox_min, bbox_max = mesh.compute_bounding_box()
++    bbox_size = bbox_max - bbox_min
++    min_dim = min(bbox_size.x, bbox_size.y, bbox_size.z)
++    voxel_size = min_dim / resolution
+     
+     # Round dimensions to multiple of 32
+-    nb_voxels = [round_up_to_multiple_32(max_coords.x - min_coords.x / voxel_size),
+-                 round_up_to_multiple_32(max_coords.y - min_coords.y / voxel_size),
+-                 round_up_to_multiple_32(max_coords.z - min_coords.z / voxel_size)]
+-    
+-    min_corner = min_coords - 0.5 * (nb_voxels * voxel_size)
+-    
+-    # 2. Allocate Intermediate Textures
+-    x_proj = allocate_3d_texture(nb_voxels.y, nb_voxels.z, nb_voxels.x // 32)
+-    y_proj = allocate_3d_texture(nb_voxels.x, nb_voxels.z, nb_voxels.y // 32)
+-    z_proj = allocate_3d_texture(nb_voxels.x, nb_voxels.y, nb_voxels.z // 32)
++    nb_voxels = [
++        ceil(bbox_size.x / voxel_size) / 32 * 32,
++        ceil(bbox_size.y / voxel_size) / 32 * 32,
++        ceil(bbox_size.z / voxel_size) / 32 * 32
++    ]
++    
++    # Center the grid
++    bbox_center = (bbox_min + bbox_max) / 2.0
++    min_corner = bbox_center - 0.5 * (nb_voxels * voxel_size)
++    
++    # 2. Allocate Textures
++    x_proj = allocate_3d_texture(nb_voxels.y, nb_voxels.z, nb_voxels.x / 32)
++    y_proj = allocate_3d_texture(nb_voxels.x, nb_voxels.z, nb_voxels.y / 32)
++    z_proj = allocate_3d_texture(nb_voxels.x, nb_voxels.y, nb_voxels.z / 32)
+     
+     # 3. X-Axis Projection
+-    for slice_x in range(0, nb_voxels.x, 32):
+-        bind_texture_3d_slice(x_proj, 0, slice_x // 32)
++    for slice_x in range(0, int(nb_voxels.x), 32):
++        bind_texture_3d_slice(x_proj, slice_x / 32)
+         set_viewport(nb_voxels.y, nb_voxels.z)
+         clear_buffer()
+-        # Ortho view: look along X axis, slab [slice_x, slice_x + 32*voxel_size]
+-        view_proj = ortho(min_coords.y, max_coords.y, 
+-                          min_coords.z, max_coords.z, 
+-                          min_corner.x + slice_x * voxel_size, 
+-                          min_corner.x + (slice_x + 32) * voxel_size)
+-        # Rotate mesh to align X with view direction
+-        mesh.model_matrix = rotate_x(-90) * rotate_z(90)
+-        mesh.draw(view_proj)
++        
++        # Ortho projection for X-slab
++        view_proj = ortho(
++            min_corner.y, min_corner.y + nb_voxels.y * voxel_size,
++            min_corner.z, min_corner.z + nb_voxels.z * voxel_size,
++            min_corner.x + slice_x * voxel_size,
++            min_corner.x + (slice_x + 32) * voxel_size
++        )
++        rotation = rotate(-90, vec3(1,0,0)) * rotate(90, vec3(0,0,1))
++        draw_mesh(mesh, view_proj, rotation)
+         
+     # 4. Y-Axis Projection
+-    for slice_y in range(0, nb_voxels.y, 32):
+-        bind_texture_3d_slice(y_proj, 0, slice_y // 32)
++    for slice_y in range(0, int(nb_voxels.y), 32):
++        bind_texture_3d_slice(y_proj, slice_y / 32)
+         set_viewport(nb_voxels.x, nb_voxels.z)
+         clear_buffer()
+-        view_proj = ortho(min_coords.x, max_coords.x, 
+-                          min_coords.z, max_coords.z, 
+-                          min_corner.y + slice_y * voxel_size, 
+-                          min_corner.y + (slice_y + 32) * voxel_size)
+-        mesh.model_matrix = rotate_x(-90)
+-        mesh.draw(view_proj)
++        
++        view_proj = ortho(
++            min_corner.x, min_corner.x + nb_voxels.x * voxel_size,
++            min_corner.z, min_corner.z + nb_voxels.z * voxel_size,
++            min_corner.y + slice_y * voxel_size,
++            min_corner.y + (slice_y + 32) * voxel_size
++        )
++        rotation = rotate(-90, vec3(1,0,0))
++        draw_mesh(mesh, view_proj, rotation)
+         
+     # 5. Z-Axis Projection
+-    for slice_z in range(0, nb_voxels.z, 32):
+-        bind_texture_3d_slice(z_proj, 0, slice_z // 32)
++    for slice_z in range(0, int(nb_voxels.z), 32):
++        bind_texture_3d_slice(z_proj, slice_z / 32)
+         set_viewport(nb_voxels.x, nb_voxels.y)
+         clear_buffer()
+-        view_proj = ortho(min_coords.x, max_coords.x, 
+-                          min_coords.y, max_coords.y, 
+-                          min_corner.z + slice_z * voxel_size, 
+-                          min_corner.z + (slice_z + 32) * voxel_size)
+-        mesh.model_matrix = rotate_z(180) * rotate_y(180)
+-        mesh.draw(view_proj)
+-        
+-    # 6. Combine Projections (if using compile shader)
+-    # Bind x_proj and y_proj to texture units 0 and 1
+-    # Bind z_proj slice to framebuffer
+-    # Draw full-screen quad with compileProjections shader
+-    # This step merges X and Y occupancy into Z
+-    
+-    # 7. Readback
+-    grid_data = glGetTexImage(z_proj, format=GL_RGBA_INTEGER, type=GL_UNSIGNED_INT_8_8_8_8)
+-    return grid_data
++        
++        view_proj = ortho(
++            min_corner.x, min_corner.x + nb_voxels.x * voxel_size,
++            min_corner.y, min_corner.y + nb_voxels.y * voxel_size,
++            min_corner.z + slice_z * voxel_size,
++            min_corner.z + (slice_z + 32) * voxel_size
++        )
++        rotation = rotate(180, vec3(0,0,1)) * rotate(180, vec3(0,1,0))
++        draw_mesh(mesh, view_proj, rotation)
++        
++    # 6. Combine Projections (Simplified: Logical AND of X, Y, Z)
++    # In the specific implementation [S4, unofficial], X and Y are combined into Z.
++    # Here we assume a generic combination step.
++    final_grid = combine_projections(x_proj, y_proj, z_proj)
++    
++    return final_grid
+ ```
+-
+-**Edge Cases and Pitfalls:**
+-*   **Triangles Outside Grid:** Triangles outside the `[GridMin, GridMax]` region map outside the valid NDC range and are not voxelized [S3, unofficial].
+-*   **Precision Glitches:** On some hardware (e.g., Intel HD 4400 on Linux), rasterization may suffer from glitches or lower max resolution compared to other platforms [S4, unofficial].
+-*   **Additive Blending Assumptions:** Using additive blending (`GL_ONE, GL_ONE`) assumes opaque mesh fragments. If multiple fragments write to the same pixel with different bits, it may cause issues if exact single-bit setting is required, though the slab logic usually isolates bits [S5, unofficial].
+-*   **Division by Zero:** Handle cases where grid dimension is zero [S8, unofficial].
+ 
+ ## Subtopics
+@@ -148,20 +181,20 @@
+ 
+ ### Projection Voxelization Shader
+-A vertex shader that generates a full-screen quad to process each voxel slice, outputting non-normalized voxel coordinates for the fragment shader [S4, unofficial]. It defines quad corners `vec2(0,0), vec2(1,0), vec2(0,1), vec2(1,1)` and calculates voxel coordinate `texelCoord = vec3(corner * gridSize.xy, slice)` where `corner` is selected by `gl_VertexID` [S4, unofficial]. It sets clip space position `gl_Position = vec4(corner*2-1, 0, 1)` [S4, unofficial]. Inputs include `uniform uint slice` and `uniform vec3 gridSize` [S4, unofficial].
++A vertex shader that generates a full-screen quad to process each voxel slice, outputting non-normalized voxel coordinates for the fragment shader [S4, unofficial]. It defines quad corners `vec2(0,0), vec2(1,0), vec2(0,1), vec2(1,1)`, calculates voxel coordinate `texelCoord = vec3(corner * gridSize.xy, slice)`, and sets clip space position `gl_Position = vec4(corner*2-1, 0, 1)` [S4, unofficial]. Input uniforms are `slice` (current Z-slice index) and `gridSize` (voxel grid dimensions) [S4, unofficial].
+ 
+ ### 3D Rasterization Algorithm
+-A simplicial covering method that computes the minimal bounding box and centroid of the polygon/solid [S12, unofficial]. It constructs a tetrahedron (in 3D) or triangle (in 2D) between the origin vertex (centroid) and one edge (or face) of the polygon/solid [S12, unofficial]. It rasterizes the simplex in the P-Buffer (Presence Buffer), flipping all positions (bits) covered by it [S12, unofficial]. It repeats this for all edges/faces until no edges are left, then transfers all positions from the P-Buffer within the minimal bounding box that have a presence value of 1 to the framebuffer, applying the corresponding color [S12, unofficial]. The P-Buffer is a 3D buffer where each position stores a single bit representing the presence value of a voxel (1 if inside, 0 if outside) [S12, unofficial].
++A simplicial covering method that computes the minimal bounding box and centroid of the polygon/solid, constructs a tetrahedron (in 3D) or triangle (in 2D) between the origin vertex (centroid) and one edge (or face), and rasterizes the simplex in the P-Buffer (Presence Buffer), flipping all positions (bits) covered by it [S12, unofficial]. It repeats this for all edges/faces until no edges are left, then transfers all positions from the P-Buffer within the minimal bounding box that have a presence value of 1 to the framebuffer, applying the corresponding color [S12, unofficial]. The P-Buffer is a 3D buffer where each position stores a single bit representing the presence value of a voxel (1 if inside, 0 if outside) [S12, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N \cdot V)$ where $N$ is the number of triangles in the mesh and $V$ is the number of slices (proportional to grid resolution). Each slice renders the entire mesh [S4, unofficial].
+-*   **Measured Performance:** On an Intel HD 4400 with a Suzanne model (31,000 vertices): 64³ grid takes 2 ms; 128³ takes 9 ms; 256³ takes 10 ms; 512³ takes 120 ms. A 1,000,000 vertex model at 128³ takes 45 ms [S4, unofficial].
+-*   **Scaling:** Performance scales linearly with the number of triangles and the number of slices (resolution). The 32-slab optimization reduces the number of draw calls and texture binds [S4, unofficial].
+-*   **Strengths:** High throughput on GPU hardware; simple implementation using standard rasterization pipeline; compact 1-bit storage reduces memory bandwidth [S4, unofficial].
+-*   **Limitations:** Not inherently watertight; may produce holes or artifacts on complex geometry or thin surfaces; precision issues on some hardware [S4, unofficial].
+-*   **When to Use:** When speed is critical and approximate occupancy is sufficient (e.g., global illumination voxelization, sparse voxel octree initialization) [S3, unofficial].
+-*   **When Not to Use:** When watertightness is required for simulation or precise collision detection; use [Conservative Voxelization](3247-conservative-voxelization.md) or [A-Buffer Solid Voxelization](1189-a-buffer-solid-voxelization.md) instead.
++**Time Complexity:** $O(N \cdot V)$ where $N$ is the number of triangles in the mesh and $V$ is the number of slices (proportional to grid resolution). Each slice renders the entire mesh [S4, unofficial].
++**Memory Complexity:** $O(N_x \cdot N_y \cdot N_z / 32)$ for the compact 1-bit grid storage [S4, unofficial]. Intermediate 3D textures require similar memory proportional to the grid volume.
++**Measured Performance:** On an Intel HD 4400 with a Suzanne model (31,000 vertices): $64^3$ grid takes 2 ms; $128^3$ takes 9 ms; $256^3$ takes 10 ms; $512^3$ takes 120 ms. A 1,000,000 vertex model at $128^3$ takes 45 ms [S4, unofficial]. On a CPU (Intel Xeon) vs GPU (NVIDIA A100) for a PegInsertionSide-v1 mesh (281K verts, 561K faces) at $1024^3$ resolution: CPU takes 1.35s, GPU takes 0.56s (3x faster) [S1, unofficial].
++**Strengths:** Leverages highly optimized GPU hardware rasterization; compact memory storage; simple implementation using standard OpenGL/Direct3D features.
++**Limitations:** Precision glitches on some hardware (e.g., Linux/Intel HD 4400); triangles outside the grid bounds are not voxelized; thin features may be missed due to rasterization gaps; additive blending assumes opaque mesh [S3, S4, S5, unofficial].
++**When to use:** When a fast, approximate occupancy grid is needed for global illumination (VXGI) or collision detection, and watertightness is not critical.
++**When not to use:** When exact surface reconstruction (dual vertices) is required, or when the mesh has transparency or complex internal structures that require depth sorting [S1, S3, unofficial].
+ 
+ ## Background
+-Originating from GPU-based voxelization techniques for global illumination (VXGI) and real-time rendering, this method leverages the efficiency of hardware rasterization to avoid CPU-side intersection tests [S3, unofficial]. It is a core component of pipelines like o-voxel, where it serves as the fast "intersect scanline" step to discover occupied voxels before more expensive surface reconstruction steps [S1, unofficial]. The technique was popularized by implementations such as `voxelizer-gpu` which demonstrated the feasibility of using OpenGL 3.3+ rasterization for 3D grid generation [S4, unofficial].
++Originating from hardware-accelerated voxelization techniques for global illumination (VXGI) and real-time rendering, this method utilizes the GPU's rasterization pipeline to project geometry onto 3D grids [S3, S4, unofficial]. It is a core component of the o-voxel pipeline, specifically the "intersect scanline" step, which discovers occupied voxels without performing the subsequent QEF (Quadratic Error Function) minimization or dual vertex solving steps [S1, unofficial]. The technique was popularized by implementations such as TRELLIS.2 and various GPU voxelizer projects [S1, S4, unofficial].
+ 
+ ## Sources

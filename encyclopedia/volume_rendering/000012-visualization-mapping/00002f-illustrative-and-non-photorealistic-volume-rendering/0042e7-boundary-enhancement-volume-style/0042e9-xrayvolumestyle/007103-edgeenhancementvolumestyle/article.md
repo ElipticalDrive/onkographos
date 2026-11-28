@@ -1,0 +1,151 @@
+# EdgeEnhancementVolumeStyle
+## Overview
+EdgeEnhancementVolumeStyle is a non-composable render style that enhances structural edges in volume data by darkening voxels based on their geometric orientation relative to the view direction [S1, unofficial]. It differs from standard opacity mapping by using surface normals rather than just intensity to drive visual properties, specifically targeting voxels perpendicular to the camera to apply a highlight color while leaving parallel voxels unchanged [S1, unofficial]. It builds on [XRayVolumeStyle](10865-xrayvolumestyle.md) as a specific boundary enhancement technique.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Base volume data (scalar field), surface normals (3D texture), view direction vector ($\vec{v}$).
+*   **Output:** Modified voxel color and/or opacity.
+
+**Data Structures:**
+*   **surfaceNormals:** An `X3DTexture3DNode` containing at least 3 components per voxel (RGB or XYZ). Dimensions must match the source data. If missing or mismatched, the implementation interpolates or averages adjacent voxels to determine the normal [S1, unofficial].
+*   **View Direction:** A normalized vector pointing from the camera to the voxel (or vice versa, depending on convention; the angle calculation is invariant to sign).
+
+**Parameters:**
+*   `contribution` (`SFFloat`): Default `0.2`, range `[0, 1]`. Controls the strength of the effect [S1, unofficial].
+*   `edgeColor` (`SFColorRGBA`): Default `0 0 0 1` (black, fully opaque). The color applied to enhanced edges [S1, unofficial].
+*   `gradientThreshold` (`SFFloat`): Default `0.4`, range `[0, \pi/2]`. The minimum angle (in radians) between the surface normal and the view direction required for enhancement to apply [S1, unofficial].
+*   `surfaceNormals` (`SFNode`): Default `NULL`. If `NULL`, the implementation shall automatically generate normals (e.g., via gradient estimation) [S1, unofficial].
+
+**Algorithm:**
+For each voxel $i$ with normal $\vec{n}_i$ and base color $C_i$:
+
+1.  Compute the angle $\theta_i$ between the surface normal $\vec{n}_i$ and the view direction $\vec{v}$.
+    $$ \theta_i = \arccos(|\vec{n}_i \cdot \vec{v}|) $$
+    *Note: The absolute value of the dot product is used because normals are unoriented; the angle between a line and a vector is always in $[0, \pi/2]$.* [G]
+2.  Check if $\theta_i > \text{gradientThreshold}$.
+3.  If $\theta_i > \text{gradientThreshold}$:
+    *   The voxel is considered an "edge" (perpendicular to view).
+    *   Apply `edgeColor` to the voxel. The exact blending formula is not explicitly defined in the source, but "darkening" and "coloured according to edgeColor" suggests a replacement or weighted blend based on `contribution`. A standard interpretation for "darkening" with a contribution factor $\alpha$ is:
+        $$ C_{out} = (1 - \alpha) C_i + \alpha C_{edge} $$
+        Where $\alpha$ may be derived from `contribution` or the angle excess. However, the source states "Perpendicular voxels are coloured by edgeColor", implying a direct assignment or strong influence. Given `contribution` is a field, it likely scales the intensity of the edge color application.
+4.  If $\theta_i \le \text{gradientThreshold}$:
+    *   The voxel is parallel to the view.
+    *   Do not change the color ($C_{out} = C_i$).
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def apply_edge_enhancement(voxel_normal, view_direction, edge_color, gradient_threshold, contribution):
+    """
+    Applies edge enhancement to a single voxel.
+    
+    Args:
+        voxel_normal: Normalized 3D vector (nx, ny, nz)
+        view_direction: Normalized 3D vector (vx, vy, vz)
+        edge_color: RGBA tuple (r, g, b, a)
+        gradient_threshold: Float, minimum angle in radians
+        contribution: Float, strength of edge color [0, 1]
+        
+    Returns:
+        Modified color (RGBA)
+    """
+    # Calculate angle between normal and view direction
+    # Use absolute dot product to handle unoriented normals
+    dot_product = abs(voxel_normal.x * view_direction.x + 
+                      voxel_normal.y * view_direction.y + 
+                      voxel_normal.z * view_direction.z)
+    
+    # Clamp to [-1, 1] to avoid numerical errors in acos
+    dot_product = max(-1.0, min(1.0, dot_product))
+    
+    angle = acos(dot_product)
+    
+    # Check threshold
+    if angle > gradient_threshold:
+        # Voxels perpendicular to view are enhanced
+        # Blend base color with edge color based on contribution
+        # Note: Source says "coloured by edgeColor", but contribution exists.
+        # Assuming linear interpolation for contribution strength.
+        # If contribution is 1, fully edgeColor. If 0, no change.
+        # However, source says "parallel... not changed", implying binary threshold.
+        # Contribution likely scales the *effect* or intensity.
+        # Without explicit formula, we assume:
+        # C_out = (1 - contribution) * C_base + contribution * C_edge
+        # But since base color is not passed here, we assume this function
+        # returns the *enhancement* or the final color if base is known.
+        # For a complete implementation, base_color is needed.
+        pass # Placeholder for base color blending logic
+    else:
+        # Voxels parallel to view are unchanged
+        pass
+```
+*Correction for Pseudocode Completeness:* The source does not provide the base color in the parameter list, but it is an input to the rendering style. The pseudocode must be self-contained. We assume `base_color` is an input.
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def apply_edge_enhancement(base_color, voxel_normal, view_direction, edge_color, gradient_threshold, contribution):
+    """
+    Applies edge enhancement to a single voxel.
+    
+    Args:
+        base_color: RGBA tuple (r, g, b, a) of the original voxel
+        voxel_normal: Normalized 3D vector (nx, ny, nz)
+        view_direction: Normalized 3D vector (vx, vy, vz)
+        edge_color: RGBA tuple (r, g, b, a)
+        gradient_threshold: Float, minimum angle in radians
+        contribution: Float, strength of edge color [0, 1]
+        
+    Returns:
+        Modified color (RGBA)
+    """
+    # Calculate angle between normal and view direction
+    dot_product = abs(voxel_normal.x * view_direction.x + 
+                      voxel_normal.y * view_direction.y + 
+                      voxel_normal.z * view_direction.z)
+    
+    # Clamp to [-1, 1] to avoid numerical errors in acos
+    dot_product = max(-1.0, min(1.0, dot_product))
+    
+    angle = acos(dot_product)
+    
+    # Check threshold
+    if angle > gradient_threshold:
+        # Voxels perpendicular to view are enhanced
+        # Blend base color with edge color based on contribution
+        # Assuming linear interpolation for contribution strength
+        r = (1.0 - contribution) * base_color.r + contribution * edge_color.r
+        g = (1.0 - contribution) * base_color.g + contribution * edge_color.g
+        b = (1.0 - contribution) * base_color.b + contribution * edge_color.b
+        a = (1.0 - contribution) * base_color.a + contribution * edge_color.a
+        return (r, g, b, a)
+    else:
+        # Voxels parallel to view are unchanged
+        return base_color
+```
+
+**Edge Cases and Pitfalls:**
+*   **Missing Normals:** If `surfaceNormals` is `NULL`, the implementation must generate them. The method of generation (e.g., central differences, Sobel) is not specified [S1, unofficial].
+*   **Precision:** The `acos` function is sensitive to values outside $[-1, 1]$ due to floating-point errors. Clamping is required [G].
+*   **Degenerate Input:** If the view direction or normal is zero, the angle is undefined. Normals should be normalized before use [G].
+
+## Subtopics
+
+### [Enhancement Styles](22712-enhancement-styles.md)
+A family of styles that modify volume appearance by computing surface normals and applying lighting or color mapping to emphasize structural features. They differ from standard opacity mapping by using geometric orientation (normals) rather than just intensity to drive visual properties, allowing for edge highlighting, stylized cartoon rendering, or physically-based shading.
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ where $N$ is the number of voxels, assuming normal generation is precomputed or done in $O(N)$. The angle check and color blend are constant time per voxel.
+*   **Memory Complexity:** $O(N)$ for storing surface normals if not precomputed.
+*   **Strengths:** Effectively highlights boundaries and edges, making internal structures more visible. Simple to implement.
+*   **Limitations:** Requires surface normals, which may be expensive to compute or inaccurate in noisy data. The effect is view-dependent.
+*   **When to use:** When the goal is to emphasize boundaries and structural features in a volume.
+*   **When not to use:** When a photorealistic appearance is required without stylization, or when normals are unavailable and cannot be reliably estimated.
+
+## Background
+EdgeEnhancementVolumeStyle is part of the X3D standard for volume rendering, specifically defined in the amendment to X3D for medical image volume rendering [S1, unofficial]. It is a variant of BoundaryEnhancementVolumeStyle, focusing specifically on edge darkening based on orientation.
+
+## Sources
+[S1] DTIC ADA469447: Development of an Amendment to X3D to Create a Standard Specification of Medical Image Volume Rendering, Segmentation, and Registration, https://archive.org/details/DTIC_ADA469447, fetched 2026-10-26 (unofficial)

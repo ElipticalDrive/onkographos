@@ -1,0 +1,141 @@
+# GLTF/GLB Buffer & Accessor Packing
+
+Also called: GLB Serialization Packing, GLTF Packing
+
+## Overview
+Packs Gaussian Splatting attributes into GLTF buffer views and accessors, enforcing 4-byte alignment and handling component types for GLB serialization [S1, unofficial]. It differs from texture-based packing (e.g., [Gaussian Splat Texture Packing](3283-gaussian-splat-texture-packing.md)) by storing data in flat binary buffers accessible via standard GLTF accessors, and from SPZ packing ([SPZ Packed Format](3926-spz-packed-format.md)) by keeping the raw attribute layout explicit rather than fully compressed into a single stream.
+
+## How it works
+**Inputs:** Gaussian attributes (positions, scales, rotations, SH coefficients, opacity) in host memory arrays; configuration flags for normalization and min/max computation.
+**Outputs:** A valid GLB file containing a JSON chunk and a BIN chunk with aligned buffer views.
+
+**Data Structures:**
+*   `GLTF_ACCESSOR_COMPONENTS`: Maps accessor types to component counts. SCALAR:1, VEC2:2, VEC3:3, VEC4:4, MAT2:4, MAT3:9, MAT4:16 [S1, unofficial].
+*   `BufferView`: A slice of the binary buffer. Must be 4-byte aligned.
+*   `Accessor`: Metadata describing the data type, count, and component layout within a BufferView.
+
+**Steps:**
+1.  **Align Buffer Views:** For each buffer view, if `length % 4 != 0`, allocate `4 - (length % 4)` bytes of padding at the end [S1, unofficial].
+2.  **Process Accessors:**
+    *   **FLOAT (5126):** Convert array to `Float32Array`. If count is 0, set count to `array.length / comps`. Compute min/max per component if requested [S1, unofficial].
+    *   **UNSIGNED_BYTE (5121):** Convert to `Uint8Array`. Set min=[0], max=[255] if requested. Apply normalization flag if set [S1, unofficial].
+3.  **Assemble GLB:**
+    *   Calculate binary padding length: `binPadLength = pad4Length(byteLength)` [S1, unofficial].
+    *   Calculate JSON padding length: `jsonPadLength = pad4Length(jsonChunk.length)` [S1, unofficial].
+    *   Compute total file length: `totalLen = 12 + 8 + jsonDataLength + 8 + binDataLength` [S1, unofficial].
+    *   Write GLB header: 12 bytes containing magic 'glTF', version 2, and total length [S1, unofficial].
+    *   Write JSON chunk header: 8 bytes containing JSON data length and magic 'JSON' [S1, unofficial].
+    *   Write JSON data, then JSON padding (if >0) [S1, unofficial].
+    *   Write BIN chunk header: 8 bytes containing binary data length, magic 'BIN', and a null padding byte at index 7 [S1, unofficial].
+    *   Write binary buffer parts, then binary padding (if >0) [S1, unofficial].
+    *   Write all chunks sequentially to the file descriptor [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def pad4_length(length):
+    """Returns padding bytes needed to align to 4-byte boundary."""
+    remainder = length % 4
+    return 0 if remainder == 0 else 4 - remainder
+
+def pack_gaussian_to_glb(positions, scales, quats, opacities, sh_coeffs, json_data):
+    """
+    Packs Gaussian attributes into a GLB file.
+    Assumes positions, scales, quats are Float32 arrays.
+    sh_coeffs are flattened Float32 arrays.
+    """
+    # 1. Create binary buffer from attributes
+    # Note: In a real implementation, each attribute would be a separate BufferView
+    # with its own offset and alignment. Here we concatenate for simplicity of example.
+    binary_parts = []
+    
+    # Example: Positions (VEC3)
+    pos_bytes = positions.tobytes() # Assuming numpy or similar
+    binary_parts.append(pos_bytes)
+    
+    # Example: Scales (VEC3)
+    scale_bytes = scales.tobytes()
+    binary_parts.append(scale_bytes)
+    
+    # Example: Quaternions (VEC4)
+    quat_bytes = quats.tobytes()
+    binary_parts.append(quat_bytes)
+    
+    # Example: Opacity (SCALAR)
+    opac_bytes = opacities.tobytes()
+    binary_parts.append(opac_bytes)
+    
+    # Example: SH Coefficients (VEC4)
+    sh_bytes = sh_coeffs.tobytes()
+    binary_parts.append(sh_bytes)
+    
+    # Concatenate all binary data
+    bin_data = b''.join(binary_parts)
+    bin_data_length = len(bin_data)
+    
+    # 2. Align binary data
+    bin_pad_length = pad4_length(bin_data_length)
+    if bin_pad_length > 0:
+        bin_data += b'\x00' * bin_pad_length
+    bin_data_length_aligned = bin_data_length + bin_pad_length
+    
+    # 3. Prepare JSON chunk
+    json_chunk = json.dumps(json_data).encode('utf-8')
+    json_data_length = len(json_chunk)
+    json_pad_length = pad4_length(json_data_length)
+    if json_pad_length > 0:
+        json_chunk += b' ' * json_pad_length # Space padding is common for JSON chunks
+    json_data_length_aligned = json_data_length + json_pad_length
+    
+    # 4. Compute total length
+    # Header (12) + JSON Chunk Header (8) + JSON Data (aligned) + BIN Chunk Header (8) + BIN Data (aligned)
+    total_len = 12 + 8 + json_data_length_aligned + 8 + bin_data_length_aligned
+    
+    # 5. Write GLB Header
+    magic = b'glTF'
+    version = 2
+    header = magic + struct.pack('<I', version) + struct.pack('<I', total_len)
+    
+    # 6. Write JSON Chunk
+    json_chunk_header = struct.pack('<I', json_data_length) + b'JSON'
+    
+    # 7. Write BIN Chunk
+    bin_chunk_header = struct.pack('<I', bin_data_length) + b'BIN\x00'
+    
+    # 8. Assemble file
+    file_data = header + json_chunk_header + json_chunk + bin_chunk_header + bin_data
+    
+    return file_data
+```
+
+**Parameters:**
+*   `alignment`: Always 4 bytes for GLB [S1, unofficial].
+*   `component_type`: FLOAT (5126) or UNSIGNED_BYTE (5121) [S1, unofficial].
+
+**Edge Cases:**
+*   **Zero Count:** If accessor count is 0, set count to `array.length / comps` [S1, unofficial].
+*   **Alignment:** Failure to pad buffer views or chunks to 4-byte boundaries results in invalid GLB files [S1, unofficial].
+*   **Endianness:** GLB is little-endian. Ensure host memory is converted if necessary [S1, unofficial].
+
+## Subtopics
+
+### 3DGS GLTF Extension Structure
+Defines the GLTF primitive attributes and extensions required to serialize compressed 3D Gaussian Splatting data for 3D Tiles [S1, unofficial]. It sets `extensionsUsed` to `KHR_gaussian_splatting`, `KHR_gaussian_splatting_compression_spz_2`, and `KHR_materials_unlit`, and `extensionsRequired` to `KHR_gaussian_splatting` and `KHR_gaussian_splatting_compression_spz_2` [S1, unofficial]. It attaches SPZ compressed stream bytes to a buffer view and references it in the `KHR_gaussian_splatting_compression_spz_2` extension [S1, unofficial]. SH coefficient attributes are defined as `SH_DEGREE_1_COEF_0..2` (VEC4, FLOAT), `SH_DEGREE_2_COEF_0..4` (VEC4, FLOAT), and `SH_DEGREE_3_COEF_0..6` (VEC4, FLOAT) [S1, unofficial].
+
+### GLB File Serialization
+Focuses on the byte-level assembly of the GLB file. It calculates binary and JSON padding lengths using `pad4Length` [S1, unofficial]. It computes the total file length as `12 + 8 + jsonDataLength + 8 + binDataLength` [S1, unofficial]. It writes the GLB header (12 bytes: magic 'glTF', version 2, total length), JSON chunk header (8 bytes: JSON data length, magic 'JSON'), and BIN chunk header (8 bytes: binary data length, magic 'BIN', null padding byte at index 7) [S1, unofficial]. It assembles chunks in order: GLB header, JSON header, JSON data, JSON padding, BIN header, binary buffer parts, binary padding [S1, unofficial]. It writes all chunks sequentially using `writeAllBuffersSync` [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of Gaussian splats and the size of the SH coefficients. Padding and header writing are constant time relative to data size.
+*   **Memory Complexity:** Linear with respect to the number of Gaussian splats. Requires storing the full binary buffer in memory before writing.
+*   **Strengths:** Standard GLTF format compatibility; easy to debug and inspect; supports standard GLTF extensions.
+*   **Limitations:** Larger file size compared to compressed formats like SPZ or PNG-based compression ([PNG-based Gaussian Compression](4834-png-based-gaussian-compression.md)) due to lack of compression.
+*   **When to Use:** When interoperability with standard GLTF viewers is required, or when debugging attribute data.
+*   **When Not to Use:** When file size is a critical constraint, or when streaming large datasets is required.
+
+## Background
+Originated from the need to serialize 3D Gaussian Splatting data for web-based viewers and 3D Tiles. The method is implemented in tools like the `3DGS-PLY-3DTiles-Converter` [S1, unofficial]. It builds on the GLTF 2.0 specification and the GLB binary format.
+
+## Sources
+[S1] lzy-0618/3DGS-PLY-3DTiles-Converter, https://github.com/lzy-0618/3DGS-PLY-3DTiles-Converter, fetched 2026-10-27 (unofficial)

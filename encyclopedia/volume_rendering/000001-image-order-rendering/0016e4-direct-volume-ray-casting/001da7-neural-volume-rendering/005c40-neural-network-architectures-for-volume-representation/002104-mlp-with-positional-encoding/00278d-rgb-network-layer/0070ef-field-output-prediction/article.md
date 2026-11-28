@@ -1,0 +1,91 @@
+# Field Output Prediction
+
+Also called: Model Output Unpacking
+
+## Overview
+Field Output Prediction transforms raw neural network outputs into semantically meaningful values for a specific reconstruction target [S1, S2, unofficial]. It handles direct semantic unpacking of the MLP's final layer, differing from [Sigma Network Layer](6256-sigma-network-layer.md) which focuses specifically on density/opacity, and [CNN Post-Processing Network](7179-cnn-post-processing-network.md) which applies spatial filters [S1, S2, unofficial].
+
+## How it works
+The method takes raw predictions from the preceding network layer and converts them based on the configured `reconstruction_target` [S1, unofficial].
+
+**Inputs and Outputs:**
+- Input: Raw tensor from the neural network model, shape $(N, C)$ or $(N,)$, where $N$ is the number of samples and $C$ is the channel dimension [S1, unofficial].
+- Output: Unpacked tensor of semantically meaningful values (e.g., density, temperature, RGB) [S1, S2, unofficial].
+
+**Data Structures:**
+- `reconstruction_target`: A string or enum specifying the output type (e.g., "plasma", "rgb") [S1, unofficial].
+- `bounds_dict`: Optional dictionary containing lower and upper bounds for physical quantities, used in clamping variants [S1, unofficial].
+
+**Steps:**
+1. **Model Forward Pass:** Compute raw outputs by passing input positions $x_{AABB}$ through the neural network model $M$ [S1, unofficial].
+   $$ raw = M(x_{AABB}) $$
+2. **Dimension Handling:** If the output dimensionality of $raw$ is one less than the input dimensionality of $x_{AABB}$, append a singleton dimension to preserve spatial structure [S1, unofficial].
+   $$ \text{if } raw.ndim == x_{AABB}.ndim - 1: \quad raw = raw[..., \text{None}] $$
+3. **Flattening:** Reshape $raw$ to a 2D tensor for batch processing [S1, unofficial].
+   $$ raw_{flat} = raw.reshape(-1, raw.shape[-1]) $$
+4. **Unpacking:** Apply the unpacking function specific to the reconstruction target [S1, unofficial].
+   $$ outs, log\_ne, log\_temp = \text{unpack\_plasma\_outputs}(raw_{flat}, \text{reconstruction\_target}) $$
+5. **Clamping:** If enabled, clamp $log\_ne$ to $[log\_ne_{min}, log\_ne_{max}]$ and $log\_temp$ to $[log\_temp_{min}, log\_temp_{max}]$ [S1, unofficial].
+   $$ log\_ne = \text{clamp}(log\_ne, log\_ne_{min}, log\_ne_{max}) $$
+   $$ log\_temp = \text{clamp}(log\_temp, log\_temp_{min}, log\_temp_{max}) $$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def field_output_prediction(model, x_AABB, reconstruction_target, clamp=False, log_ne_min=None, log_ne_max=None, log_temp_min=None, log_temp_max=None):
+    raw = model(x_AABB)
+    if raw.ndim == x_AABB.ndim - 1:
+        raw = raw[..., None]
+    raw_flat = raw.reshape(-1, raw.shape[-1])
+    outs, log_ne, log_temp = unpack_plasma_outputs(raw_flat, reconstruction_target)
+    if clamp:
+        if log_ne is not None:
+            log_ne = torch.clamp(log_ne, log_ne_min, log_ne_max)
+        if log_temp is not None:
+            log_temp = torch.clamp(log_temp, log_temp_min, log_temp_max)
+    return outs, log_ne, log_temp
+
+def unpack_plasma_outputs(raw_flat, reconstruction_target):
+    if reconstruction_target == "plasma":
+        log_ne = raw_flat[:, 0]
+        log_temp = raw_flat[:, 1]
+        outs = torch.stack([log_ne, log_temp], dim=-1)
+    elif reconstruction_target == "rgb":
+        rgb = raw_flat[:, :3]
+        sigma = raw_flat[:, 3]
+        alpha = 1.0 - torch.exp(-sigma)
+        weights = alpha * torch.cumprod(torch.ones_like(alpha) - alpha + 1e-10, dim=0)
+        rgb_map = torch.sum(weights.unsqueeze(-1) * rgb, dim=0)
+        return rgb_map, None, None
+    else:
+        raise ValueError(f"Target {reconstruction_target} not implemented")
+```
+
+**Parameters and Edge Cases:**
+- `reconstruction_target`: Determines the unpacking logic [S1, unofficial].
+- **Precision:** Raw outputs can be numerically unstable [G].
+- **Boundaries:** Unconstrained outputs may lead to physically impossible values (e.g., negative density) [G].
+- **Clamping Bounds:** Bounds are derived by combining PSI and atomic constraints, raising an error if the lower bound exceeds the upper bound [S1, unofficial].
+
+## Subtopics
+
+### [MLP Model (Density Baseline)](16835-mlp-model-density-baseline.md)
+A baseline neural volume representation that maps 3D Cartesian positions to density using a Multi-Layer Perceptron (MLP) with explicit positional encoding [G]. It serves as a reference for density reconstruction capabilities in neural tomography, distinct from hash-grid or latent-feature approaches [G].
+
+### Raw to Outputs Conversion
+This variant transforms raw network predictions into semantically meaningful values like RGB, depth, and weights for volume rendering [S2, unofficial]. It extracts RGB values from the first three channels, converts raw sigma to alpha and weights using a `raw2alpha` function, and computes RGB, depth, disparity, and accumulated alpha maps by summing weighted contributions [S2, unofficial]. If a white background is requested, it adds the difference between 1 and accumulated alpha to the RGB map [S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** Linear with respect to the number of samples $N$, as it involves a single forward pass and element-wise operations [G].
+- **Memory Complexity:** Linear with respect to $N$, storing the raw and unpacked tensors [G].
+- **Strengths:** Provides a flexible interface for different reconstruction targets; ensures physical validity in specialized domains like plasma simulation [G].
+- **Limitations:** Performance depends on the underlying model's output dimension; clamping may introduce bias if bounds are too tight [G].
+- **When to use:** When the application requires specific physical parameters (e.g., density, temperature) or standard rendering attributes (RGB, depth) from a neural field [G].
+
+## Background
+The method originates from implementations in neural volume rendering repositories, specifically those dealing with plasma reconstruction and point-based NeRF variants [S1, S2, unofficial]. It addresses the need to map latent space representations to observable quantities [G].
+
+## Sources
+[S1] AlanHsu314/CoroNeRF_public, https://github.com/AlanHsu314/CoroNeRF_public, fetched 2026-10-27 (unofficial)
+[S2] Xharlie/pointnerf, https://github.com/Xharlie/pointnerf, fetched 2026-10-26 (unofficial)

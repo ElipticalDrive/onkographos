@@ -1,0 +1,143 @@
+--- v008.md
++++ v009.md
+@@ -4,14 +4,14 @@
+ 
+ ## Overview
+-The absorption-only model renders a participating medium composed of cold, perfectly black particles that absorb all intercepted light without scattering or emitting [S1, unofficial][S4, book][S6]. It solves for light intensity attenuation along a ray, producing an X-ray-like projection or a "black smoke" obscuring a background [S4, book][S7, unofficial]. Unlike the [Emission-only Model](1016-emission-only-model.md) which adds radiance, or the [Single Scattering Model](1053-single-scattering-model.md) which redirects light, this model considers only the exponential decay of incident radiance [S3, S8]. It is distinguished from [X-ray simulation via ray integration](1445-x-ray-simulation-via-ray-integration.md) by its general applicability to any scalar field mapped to extinction, rather than strictly physical X-ray attenuation, and from [Absorbing Particle Rendering](9665-absorbing-particle-rendering.md) by its continuous medium formulation [S1, unofficial][S3].
++The absorption-only model renders a participating medium composed of cold, perfectly black particles that absorb all intercepted light without scattering or emitting [S1, unofficial][S4, book][S6]. It solves for light intensity attenuation along a ray, producing an X-ray-like projection or a "black smoke" obscuring a background [S4, book][S7, unofficial]. Unlike the [Emission-only Model](1016-emission-only-model.md) which adds radiance, or the [Single Scattering Model](1053-single-scattering-model.md) which redirects light, this model considers only the exponential decay of incident radiance [S3][S8].
+ 
+ ## How it works
+ **Inputs and Outputs**
+-*   **Input:** A scalar field $f(\mathbf{x})$ representing density or material property; a transfer function mapping $f$ to the extinction coefficient $\tau(\mathbf{x})$; a camera ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$; and an incident radiance $L_i$ at the ray entry point (or background intensity $I_0$) [S1, unofficial][S3][S7, unofficial].
++*   **Input:** A scalar field $f(\mathbf{x})$ representing density; a transfer function mapping $f$ to the extinction coefficient $\tau(\mathbf{x})$; a camera ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$; and an incident radiance $L_i$ at the ray entry point (or background intensity $I_0$) [S1, unofficial][S3][S7, unofficial].
+ *   **Output:** The transmitted radiance $L_o$ at the ray origin (or pixel) [S3][S7, unofficial].
+ 
+ **Data Structures**
+ *   **Scalar Field:** A 3D grid or continuous function $f(\mathbf{x})$ [S1, S5, unofficial].
+-*   **Extinction Coefficient:** A scalar field $\tau(\mathbf{x})$ derived from $f(\mathbf{x})$ via a transfer function. Units are $m^{-1}$ [S2, S5, unofficial].
++*   **Extinction Coefficient:** A scalar field $\tau(\mathbf{x})$ derived from $f(\mathbf{x})$ via a transfer function. Units are $m^{-1}$ [S2, S5, unofficial][S7, unofficial].
+ *   **Ray:** Defined by origin $\mathbf{o}$ and direction $\mathbf{d}$ (unit vector) [S3].
+ 
+@@ -30,5 +30,5 @@
+ 
+ **Parameters**
+-*   $\tau(\mathbf{x})$: Extinction coefficient. Can be constant (homogeneous) or varying (inhomogeneous) [S3][S7, unofficial].
++*   $\tau(\mathbf{x})$: Extinction coefficient. Can be constant (homogeneous) or varying (inhomogeneous) [S1, unofficial][S7, unofficial].
+ *   $I_0$ or $L_i$: Initial intensity/radiance. Can be a constant background or pixel-dependent [S7, unofficial][S3].
+ 
+@@ -38,6 +38,6 @@
+     *   If the ray hits a surface at $t_{hit}$, calculate the transmittance from the ray origin to $t_{hit}$ [S3].
+     *   If the ray misses the scene, return 0 (or background) [S3].
+-3.  **Integrate Extinction:** Compute the optical depth $\tau_{opt} = \int_{t_{entry}}^{t_{exit}} \tau(\mathbf{r}(t)) \, dt$.
+-    *   For homogeneous media, $\tau_{opt} = \tau \cdot (t_{exit} - t_{entry})$ [S3].
++3.  **Integrate Extinction:** Compute the optical depth $\tau_{opt} = \int_{t_{entry}}^{t_{exit}} \tau(\mathbf{r}(t)) \, dt$ [S1, unofficial].
++    *   For homogeneous media, $\tau_{opt} = \tau \cdot (t_{exit} - t_{entry})$ [S1, unofficial].
+     *   For inhomogeneous media, sample $\tau$ along the ray and sum (e.g., trilinear interpolation of scalar field $f$ mapped to $\tau$) [S1, S5, unofficial].
+ 4.  **Compute Transmittance:** Calculate $T = \exp(-\tau_{opt})$ [S3].
+@@ -48,47 +48,59 @@
+ **Pseudocode**
+ ```python
++def sample_primary(camera, screen_pos):
++    # Returns (origin, direction)
++    return (camera.origin, normalize(camera.target - camera.origin))
++
++def intersect_scene(scene, ray_origin, ray_direction):
++    # Returns (distance, material, is_light) or None
++    closest = None
++    for prim in scene.primitives:
++        t = ray_intersect_primitive(ray_origin, ray_direction, prim)
++        if t is not None and (closest is None or t < closest[0]):
++            closest = (t, prim.material, prim.is_light)
++    return closest
++
++def get_background(screen_pos):
++    # Returns default background color
++    return (0.0, 0.0, 0.0)
++
+ def render_absorption_only(screen_pos, camera, scene, volume):
+-    # 1. Sample ray
+-    ray = sample_primary(camera, screen_pos)
+-    
+-    # 2. Intersect with scene to find hit point and surface emission
+-    isect = intersect(scene, ray)
+-    
++    origin, direction = sample_primary(camera, screen_pos)
++    isect = intersect_scene(scene, origin, direction)
++
+     if isect:
+-        # Distance from ray origin to hit point
+-        t_hit = isect.distance
+-        
+-        # 3. Integrate extinction along the ray segment [0, t_hit]
+-        # For homogeneous medium with constant sigma_a:
+-        optical_depth = volume.sigma_a * t_hit
+-        
+-        # For inhomogeneous medium, integrate tau(t) along the ray
+-        # optical_depth = integrate(volume.get_extinction, ray, 0, t_hit)
+-        
+-        # 4. Compute transmittance
++        t_hit = isect[0]
++        if volume.is_homogeneous:
++            optical_depth = volume.sigma_a * t_hit
++        else:
++            optical_depth = 0.0
++            t = 0.0
++            dt = volume.step_size
++            while t < t_hit:
++                pos = origin + direction * t
++                optical_depth += volume.get_extinction(pos) * dt
++                t += dt
+         transmittance = exp(-optical_depth)
+-        
+-        # 5. Get surface emission radiance
+-        Le = isect.material.emission_radiance
+-        
+-        # Return attenuated surface radiance
++        Le = isect[1].emission if isect[2] else (0.0, 0.0, 0.0)
+         return transmittance * Le
+     else:
+-        # No intersection: return attenuated background
+-        # Assume background intensity I0 is available or 0
+-        I0 = get_background_intensity(screen_pos)
+-        
+-        # Integrate through the entire volume or to a far plane
+-        # Assuming volume extends to t_far
++        I0 = get_background(screen_pos)
+         t_far = volume.far_plane_distance
+-        optical_depth = volume.sigma_a * t_far
+-        
++        if volume.is_homogeneous:
++            optical_depth = volume.sigma_a * t_far
++        else:
++            optical_depth = 0.0
++            t = 0.0
++            dt = volume.step_size
++            while t < t_far:
++                pos = origin + direction * t
++                optical_depth += volume.get_extinction(pos) * dt
++                t += dt
+         transmittance = exp(-optical_depth)
+-        
+         return transmittance * I0
+ ```
+ 
+ **Edge Cases and Pitfalls**
+-*   **Opacity vs. Extinction:** Do not confuse the extinction coefficient $\tau$ (units $m^{-1}$) with voxel opacity $\alpha$ (dimensionless). $\alpha$ depends on the path length through the voxel. If a voxel is scaled or viewed diagonally, the path length differs from the edge length $l$, making $\alpha = 1 - \exp(-\tau l)$ invalid if $\tau$ is treated as constant opacity [S1, unofficial][S6].
++*   **Opacity vs. Extinction:** Do not confuse the extinction coefficient $\tau$ (units $m^{-1}$) with voxel opacity $\alpha$ (dimensionless). $\alpha$ depends on the path length through the voxel. If a voxel is scaled or viewed diagonally, the path length differs from the edge length $l$, making $\alpha = 1 - \exp(-\tau l)$ invalid if $\tau$ is treated as constant opacity [S5, unofficial].
+ *   **Thresholding:** For binary volumes, $\tau$ can be set to $\infty$ for opaque regions and $0$ for transparent ones. This allows rendering via z-buffer or painter's algorithm without integration [S1, unofficial][S6].
+ *   **Precision:** The exponential function can be computed once per pixel. In early implementations, gamma correction tables were used for this lookup [S1, unofficial][S6].
+@@ -109,6 +121,5 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$ per pixel, where $N$ is the number of samples along the ray. For homogeneous media, $O(1)$ if analytical integration is used [S3].
+-*   **Memory Complexity:** $O(V)$ for the scalar field storage, where $V$ is the volume size [S1, unofficial].
++*   **Time Complexity:** $O(N)$ per pixel, where $N$ is the number of samples along the ray. For homogeneous media, $O(1)$ if analytical integration is used [S1, unofficial].
+ *   **Performance:** Fastest of the optical models. The exponential term can be precomputed or looked up [S1, unofficial][S6].
+ *   **Strengths:** Physically accurate for non-emitting, non-scattering media (e.g., X-rays, black smoke). Simple to implement [S4, book][S7, unofficial].
+@@ -117,5 +128,5 @@
+ 
+ ## Background
+-The absorption-only model is the simplest participating medium model, derived from the geometric optics of light interacting with particles [S1, unofficial]. It was formalized in the context of direct volume rendering by Max [S1, unofficial][S6] and Blinn [S1, S7, unofficial]. The differential equation for intensity decay is analogous to neutron transport absorption cross-sections [S7, unofficial]. Early implementations used Fourier methods (Malzbender, Totsuka/Levoy) to compute integrals rapidly via the projection slice theorem [S1, unofficial][S6]. It is foundational for understanding more complex models like emission-absorption and scattering [S1, unofficial][S3].
++The absorption-only model is the simplest participating medium model, derived from the geometric optics of light interacting with particles [S1, unofficial]. It was formalized in the context of direct volume rendering by Max [S1, unofficial][S6] and Blinn [S1, S7, unofficial]. The differential equation for intensity decay is analogous to neutron transport absorption cross-sections [S7, unofficial]. Early implementations used Fourier methods (Malzbender, Totsuka/Levoy) to compute integrals rapidly via the projection slice theorem [S1, unofficial][S6].
+ 
+ ## Sources

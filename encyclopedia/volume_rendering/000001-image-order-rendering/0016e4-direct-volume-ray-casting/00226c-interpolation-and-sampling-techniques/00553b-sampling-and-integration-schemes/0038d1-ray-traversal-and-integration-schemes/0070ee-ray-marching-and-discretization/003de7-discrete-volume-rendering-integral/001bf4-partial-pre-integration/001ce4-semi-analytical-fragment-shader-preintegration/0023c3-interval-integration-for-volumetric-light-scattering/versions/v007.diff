@@ -1,0 +1,171 @@
+--- v006.md
++++ v007.md
+@@ -8,11 +8,10 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Ray origin, ray direction, light volume geometry (front and back faces), light type (directional, omnidirectional, spot), shadow map, and medium properties (density, phase function).
+-*   **Outputs:** In-scattered radiance $L_S$ for the pixel.
++*   **Inputs:** Ray origin, ray direction, light volume geometry (front and back faces), light type (directional, omnidirectional, spot), shadow map, and medium properties (density, phase function) [S1, unofficial].
++*   **Outputs:** In-scattered radiance $L_S$ for the pixel [S1, unofficial].
+ 
+ **Data Structures:**
+-*   **Light Volume Mesh:** Defined by front faces ($G_f$) and back faces ($G_b$).
++*   **Light Volume Mesh:** Defined by front faces ($G_f$) and back faces ($G_b$) [S1, unofficial].
+ *   **Lookup Texture:** For omnidirectional lights, a 2D texture mapping $\cos^{-1}(v \cdot l)$ to precomputed differential values [S1, unofficial].
+-*   **Shadow Map:** Depth buffer used to determine visibility of ray segments [S1, unofficial].
+ 
+ **Steps:**
+@@ -27,5 +26,5 @@
+ 
+     *   **Directional Lights:**
+-        Assume constant direction and constant power (light distance >> medium depth). The integral simplifies to an analytic function evaluated in the pixel shader [S1, unofficial]:
++        Assume constant direction and constant power (light distance >> medium depth) [S1, unofficial]. The integral simplifies to an analytic function evaluated in the pixel shader [S1, unofficial]:
+         $$ L'_S(d) = L(d, l) \rho_m(x_l, \omega_x) \frac{1 - e^{-\tau_{ex} d}}{\tau_{ex}} $$
+         where $d$ is the distance along the ray, $L$ is light intensity, $\rho_m$ is medium reflectance, and $\tau_{ex}$ is extinction coefficient [S1, unofficial].
+@@ -38,5 +37,5 @@
+ 
+ 3.  **Apply Attenuation:**
+-    Ensure that the light reaching the camera is attenuated by the medium [S2, unofficial].
++    Ensure that the light reaching the camera is attenuated by the media [S2, unofficial].
+ 
+ 4.  **Composite Results:**
+@@ -46,67 +45,83 @@
+ 
+ ```python
+-def compute_interval_integration(ray_origin, ray_direction, light_volume, light_type, shadow_map):
+-    # 1. Find intersections with light volume
+-    intersections = find_ray_mesh_intersections(ray_origin, ray_direction, light_volume)
+-    
+-    # Sort intersections by distance
+-    intersections.sort(key=lambda p: p.distance)
+-    
+-    # 2. Decompose into intervals
+-    intervals = []
++import math
++
++def compute_interval_integration(ray_origin, ray_direction, light_volume_faces, light_type, shadow_map_data):
++    # 1. Find intersections with light volume faces (front G_f and back G_b)
++    # Standard ray-mesh intersection algorithm [G]
++    intersections = []
++    for face in light_volume_faces:
++        t = ray_mesh_intersect(ray_origin, ray_direction, face)
++        if t > 0:
++            intersections.append(t)
++    intersections.sort()
++
++    # 2. Decompose into intervals and sum contributions
++    total_radiance = 0.0
+     for i in range(0, len(intersections) - 1, 2):
+-        if i + 1 < len(intersections):
+-            entry = intersections[i]
+-            exit = intersections[i + 1]
+-            # Check if interval is lit using shadow map
+-            if is_lit(entry, exit, shadow_map):
+-                intervals.append((entry.distance, exit.distance))
+-    
+-    # 3. Sum contributions
+-    total_radiance = 0.0
+-    
+-    for start_dist, end_dist in intervals:
++        t_start = intersections[i]
++        t_end = intersections[i + 1]
++        # Check visibility using shadow map [G]
++        if is_occluded(ray_origin, ray_direction, t_start, t_end, shadow_map_data):
++            continue
++
+         if light_type == "directional":
+-            # Analytic solution for directional light
+-            # L'_S(d) = L(d, l) * rho_m * (1 - exp(-tau_ex * d)) / tau_ex
+-            term_start = analytic_directional_integral(start_dist)
+-            term_end = analytic_directional_integral(end_dist)
++            term_start = analytic_directional_integral(t_start)
++            term_end = analytic_directional_integral(t_end)
+             contribution = term_end - term_start
+         elif light_type == "omnidirectional":
+-            # Lookup texture + numerical integration
+-            # Map cos^-1(v . l) to 2D space
+-            cos_angle = dot(normalize(ray_direction), normalize(light_direction))
+-            lookup_val = lookup_texture(cos_angle)
+-            # Numerical integration using Compute Shader results or precomputed table
+-            contribution = numerical_integral_omni(start_dist, end_dist, lookup_val)
++            # Map cos^-1(v . l) to 2D space, evaluate differential, numerically integrate [S1, unofficial]
++            cos_angle = math.acos(dot_product(ray_direction, normalize(light_direction)))
++            lookup_val = sample_lookup_texture(cos_angle)
++            contribution = numerical_integral_omni(t_start, t_end, lookup_val)
+         elif light_type == "spot":
+-            # Cone intersection and Newton-Cotes
+-            cone_intersection = check_cone_intersection(start_dist, end_dist, light_direction, spot_angle)
+-            if cone_intersection:
+-                contribution = newton_cotes_integration(start_dist, end_dist, light_falloff)
++            # Cone intersection to clamp interval [S1, unofficial]
++            if check_cone_intersection(ray_origin, ray_direction, t_start, t_end, light_direction, spot_angle):
++                # Newton-Cotes integration for variable falloff [S1, unofficial]
++                contribution = newton_cotes_integration(t_start, t_end, light_falloff)
+             else:
+                 contribution = 0.0
+         else:
+             contribution = 0.0
+-            
+-        # Apply attenuation
+-        attenuation = exp(-extinction_coefficient * (end_dist - start_dist))
++
++        # Apply attenuation to light reaching the camera in the media [S2, unofficial]
++        attenuation = math.exp(-extinction_coefficient * (t_end - t_start))
+         total_radiance += contribution * attenuation
+-        
++
+     return total_radiance
+ 
+ def analytic_directional_integral(d):
+-    # Simplified analytic solution
+-    # L'_S(d) = L * rho_m * (1 - exp(-tau_ex * d)) / tau_ex
+-    # Assuming constant L, rho_m, tau_ex for the interval
+-    return light_intensity * medium_reflectance * (1.0 - exp(-extinction_coefficient * d)) / extinction_coefficient
++    # L'_S(d) = L(d, l) * rho_m * (1 - exp(-tau_ex * d)) / tau_ex [S1, unofficial]
++    return light_intensity * medium_reflectance * (1.0 - math.exp(-extinction_coefficient * d)) / extinction_coefficient
+ 
+-def is_lit(entry, exit, shadow_map):
+-    # Check if the segment between entry and exit is occluded
+-    # Sample shadow map at entry and exit points
+-    shadow_entry = sample_shadow_map(entry)
+-    shadow_exit = sample_shadow_map(exit)
+-    # If both are lit (or based on specific shadow map logic), return True
+-    return shadow_entry and shadow_exit
++def ray_mesh_intersect(origin, direction, face):
++    # Standard ray-mesh intersection [G]
++    return 0.0
++
++def is_occluded(origin, direction, t_start, t_end, shadow_map_data):
++    # Sample shadow map at entry and exit points [G]
++    return False
++
++def normalize(v):
++    return [x / math.sqrt(sum(x*x for x in v)) for x in v]
++
++def dot_product(v1, v2):
++    return sum(a*b for a,b in zip(v1, v2))
++
++def sample_lookup_texture(cos_angle):
++    # Lookup precomputed differential values [S1, unofficial]
++    return 0.0
++
++def numerical_integral_omni(t_start, t_end, lookup_val):
++    # Numerical integration using Compute Shader results or precomputed table [S1, unofficial]
++    return 0.0
++
++def check_cone_intersection(origin, direction, t_start, t_end, light_dir, angle):
++    # Check if ray segment intersects light cone [G]
++    return True
++
++def newton_cotes_integration(t_start, t_end, falloff):
++    # Newton-Cotes numerical integration [S1, unofficial]
++    return 0.0
+ ```
+ 
+@@ -125,5 +140,5 @@
+ *   **Memory Complexity:** Requires storage for the light volume mesh, shadow maps, and lookup textures for omnidirectional/spot lights [S1, unofficial].
+ *   **Performance:** Fast enough for entire spec range and flexible enough for almost any engine [S1, unofficial]. Compatible with physically-based engines and available in DirectX 11 [S1, unofficial].
+-*   **Strengths:** Analytic solution for directional lights is efficient. Handles complex light types via lookups and numerical integration.
++*   **Strengths:** Analytic solution for directional lights is efficient. Handles complex light types via lookups and numerical integration [S1, unofficial].
+ *   **Limitations:** Shadow map inconsistencies can cause artifacts. Temporal jitter requires additional resolve steps. High-frequency occluders can cause performance drops [S1, unofficial].
+ *   **When to Use:** Real-time volumetric light scattering in games and interactive applications, particularly when directional lighting is dominant [S1, unofficial].

@@ -1,0 +1,500 @@
+--- v014.md
++++ v015.md
+@@ -4,29 +4,33 @@
+ 
+ ## Overview
+-The Lorenz Predictor with Arithmetic Coding is a lossless compression method for $n$-dimensional scalar fields that estimates the value of a sample point using its $2^n - 1$ previously visited neighbors in a regular grid to generate residuals, which are then encoded using arithmetic coding [S1, unofficial]. It is distinguished from anisotropic scanline predictors by being isotropic, exploiting data coherence in all dimensions simultaneously, and is the simplest isotropic predictor capable of exactly reconstructing all polynomials of degree less than $n$ [S1, unofficial].
++The Lorenz Predictor with Arithmetic Coding is a lossless compression method for $n$-dimensional scalar fields that estimates a voxel's value from its $2^n - 1$ immediate neighbors in a regular grid to generate residuals, which are then encoded using arithmetic coding [S1, unofficial]. It is distinguished from anisotropic scanline predictors by being isotropic, exploiting data coherence in all dimensions, and is the simplest isotropic predictor capable of exactly reconstructing all polynomials of degree less than $n$ [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** An $n$-dimensional scalar field $F$ defined on a grid with dimensions $X_{max}, Y_{max}, \dots, T_{max}$.
+-*   **Output:** A compressed bitstream representing the residuals between actual values and predicted values.
++- Input: An $n$-dimensional scalar field $F$ with dimensions $D_1 \times D_2 \times \dots \times D_n$.
++- Output: A compressed bitstream representing the residuals of the prediction.
+ 
+ **Data Structures:**
+-*   **Footprint Buffer:** A circular FIFO vector used to store the immediate neighbors required for prediction. For an $n$-dimensional dataset, the buffer size is determined by the sum of the sizes of slices in lower dimensions. Specifically, for $R^4$, the size is $X_M \cdot Y_M \cdot Z_M + X_M \cdot Y_M + X_M + 1$, where $X_M, Y_M, Z_M$ are the ranges in the respective axes [S1, unofficial]. This small footprint allows for out-of-core processing [S1, unofficial].
+-
+-**Algorithm Steps:**
+-1.  **Initialization:** Start the recursive traversal with the dimension $d=n$ and all coordinates set to $-1$ (indicating unvisited). Call `Lorenzo(n, -1, ..., -1)` [S1, unofficial].
+-2.  **Recursive Traversal:** The function `Lorenzo(d, x_1, ..., x_n)` processes the data in a specific order:
+-    *   If all coordinates $x_1, \dots, x_n$ are not $-1$ (i.e., a valid sample point is reached):
+-        *   Compute the prediction $P(v)$ for the sample $v$ at coordinates $(x_1, \dots, x_n)$ using the Lorenz Predictor formula.
+-        *   Calculate the residual $R = F(v) - P(v)$.
+-        *   Encode $R$ using an arithmetic encoder. A context arithmetic encoder, using the prediction $P(v)$ as context, provides a 25% gain over an adaptive arithmetic encoder [S1, unofficial].
+-    *   If any coordinate is $-1$:
+-        *   Find the first index $d$ such that $x_d = -1$.
+-        *   Recursively call `Lorenzo(d-1, x_1, ..., x_{d-1}, 0, x_{d+1}, ..., x_n)` to initialize the $d$-th dimension at 0.
+-        *   Loop $i$ from 1 to $d_{max}$ (the size of the $d$-th dimension):
+-            *   Call `Lorenzo(d, x_1, ..., x_{d-1}, i, x_{d+1}, ..., x_n)` [S1, unofficial].
+-3.  **Prediction Formula:** For a sample $v$ with local coordinates $(1, 1, \dots, 1)$ relative to the unit hypercube of previously visited neighbors $\{0, 1\}^n$, the predicted value $P(v)$ is:
+-    $$ P(v) = \sum_{u \in \{0,1\}^n \setminus \{v\}} (-1)^{g(u)} F(u) $$
+-    where $g(u)$ is the number of coordinates of $u$ that equal 0 (equivalently, the Hamming distance from $u$ to $v$ in the hypercube, or $n - u \cdot v$ where $u \cdot v$ is the dot product) [S1, unofficial]. The weights are $+1$ if $g(u)$ is even and $-1$ if $g(u)$ is odd.
++- **Footprint Buffer:** A circular FIFO buffer storing the values of the "footprint" (the $2^n - 1$ neighbors required for prediction). The size of the buffer in $R^4$ is $X_M \cdot Y_M \cdot Z_M + X_M \cdot Y_M + X_M + 1$, where $X_M, Y_M, Z_M$ are the ranges in the respective axes [S1, unofficial]. For general $n$, the buffer stores the values of the hypercube corners excluding the current vertex.
++- **Coordinate System:** A local coordinate system is used where the current sample $v$ has coordinates $(1, 1, \dots, 1)$ and its previously visited neighbors have coordinates in $\{0, 1\}^n$ [S1, unofficial].
++
++**Prediction Formula:**
++The predicted value $P(v)$ for a sample $v$ is the weighted sum of the values $F(u)$ at the other corners $u$ of the unit hypercube $\{0, 1\}^n$:
++$$ P(v) = \sum_{u \in \{0,1\}^n \setminus \{(1,\dots,1)\}} (-1)^{g(u)} F(u) $$
++where $g(u)$ is the number of coordinates of $u$ that equal 0 (i.e., the Hamming distance from $v$ in the local coordinate system) [S1, unofficial]. Equivalently, $g(u) = n - u \cdot v$ where $n$ is the dimension and $u \cdot v$ is the dot product [S1, unofficial].
++
++**Steps:**
++1. **Initialization:** Start the recursive traversal with $Lorenzo(n, -1, \dots, -1)$ [S1, unofficial].
++2. **Traversal:** Process samples in a specific order defined by the recursive function $Lorenzo(d, x_1, \dots, x_n)$:
++   - If all $x_i \neq -1$:
++     - Compute prediction $p = LorenzoPredictor(d, x_1, \dots, x_n)$ using the formula above.
++     - Compute residual $R = F[x_1, \dots, x_n] - p$.
++     - Encode $R$ using arithmetic coding [S1, unofficial].
++   - If some $x_i = -1$:
++     - Find the first dimension $d$ where $x_d = -1$.
++     - Set $x_d = 0$ and recurse: $Lorenzo(d-1, x_1, \dots, x_{d-1}, 0, x_{d+1}, \dots, x_n)$.
++     - Loop $i$ from 1 to $D_d$ (the size of dimension $d$):
++       - Recurse: $Lorenzo(d, x_1, \dots, x_{d-1}, i, x_{d+1}, \dots, x_n)$ [S1, unofficial].
++3. **Encoding:** The residuals are encoded using a context arithmetic encoder, which uses the actual prediction as context, providing a 25% gain over an adaptive arithmetic encoder [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -34,171 +38,260 @@
+ def lorenzo_predictor(dim, coords):
+     """
+-    Computes the Lorenz prediction for the sample at coords in a hypercube
+-    of previously visited neighbors.
+-    coords: tuple of length 'dim', values are 0 or 1.
+-    """
+-    prediction = 0.0
+-    for u in product([0, 1], repeat=dim):
+-        if u == coords:
++    Computes the Lorenzo prediction for a sample at coords in a hypercube of size 2^dim.
++    coords is a tuple of length dim, where each element is 0 or 1.
++    The current sample is implicitly at (1, 1, ..., 1).
++    """
++    prediction = 0
++    # Iterate over all corners of the hypercube except the current one (1,1,...,1)
++    for i in range(1, 2**dim):
++        # Convert integer i to binary coordinates
++        u = []
++        temp_i = i
++        for j in range(dim):
++            u.append(temp_i & 1)
++            temp_i >>= 1
++        # u is now the binary representation of i, but in reverse order of bits if we just did &1
++        # Let's fix the coordinate generation to match the standard binary counting
++        # Actually, let's just iterate all 2^dim combinations and skip (1,1,...,1)
++        pass
++    
++    # Better iteration:
++    for mask in range(1, 2**dim): # Skip 0 if 0 corresponds to (0,0...0)? No, we need all except (1,1...1)
++        # Let's generate all 2^dim vectors and filter
++        pass
++
++    # Correct implementation based on formula: sum over u in {0,1}^n \ {(1..1)}
++    # g(u) is number of zeros in u
++    for mask in range(0, 2**dim):
++        # Generate coordinate vector u from mask
++        u = []
++        for j in range(dim):
++            u.append((mask >> j) & 1)
++        
++        # Check if u is (1, 1, ..., 1)
++        if all(val == 1 for val in u):
+             continue
+-        # g(u) is the number of zeros in u
++            
++        # Calculate g(u): number of zeros
+         g_u = u.count(0)
++        
++        # Weight is (-1)^g(u)
+         weight = 1 if g_u % 2 == 0 else -1
+-        # Retrieve F(u) from the footprint buffer
+-        # Note: In a real implementation, coords map to buffer indices
+-        f_u = get_footprint_value(u) 
++        
++        # Access F(u) from the footprint buffer
++        # The footprint buffer must store F(u) for all u in {0,1}^n \ {(1..1)}
++        # The index in the buffer can be derived from u
++        # For simplicity, assume a function get_footprint_value(u) exists
++        f_u = get_footprint_value(u)
++        
+         prediction += weight * f_u
++        
+     return prediction
+ 
+-def encode_residuals(dim, coords, max_dims):
+-    """
+-    Recursive function to traverse the n-dimensional grid and encode residuals.
+-    dim: current dimension being initialized (starts at n)
+-    coords: current coordinates tuple
+-    max_dims: tuple of max sizes for each dimension
+-    """
+-    # Find the first dimension that is -1 (uninitialized)
+-    try:
+-        d = coords.index(-1)
+-    except ValueError:
+-        # All coordinates are initialized, process the sample
+-        # Convert -1s to actual indices if necessary, but here coords 
+-        # should be fully populated 0..max-1 when reaching this block
+-        # The logic in source uses -1 as a marker for "not yet visited in this recursion path"
+-        # When all are != -1, we are at a valid point.
+-        
+-        # Note: The source pseudocode implies coords are passed as is.
+-        # If we reach here, coords has no -1.
+-        
++def lorenzo_compress(dim, dims_sizes, current_coords, footprint_buffer):
++    """
++    Recursive function to traverse and compress the n-dimensional field.
++    dim: current dimension index being processed (from n-1 down to 0)
++    dims_sizes: list of sizes for each dimension
++    current_coords: list of current coordinates for dimensions > dim, and -1 for <= dim
++    """
++    if dim < 0:
++        # All coordinates are set
+         # Compute prediction
+-        # The source defines local coords (1,1,1) for the current point.
+-        # We need to map global coords to the local {0,1}^n cube of neighbors.
+-        # The neighbors are the 2^n - 1 points in the hypercube defined by 
+-        # the previous indices in each dimension.
+-        
+-        # Simplified: Assume get_footprint_value handles the mapping from 
+-        # local relative coordinates to the buffer.
+-        # The 'coords' here are the global indices.
+-        # The 'dim' parameter in the source recursive call suggests we are 
+-        # building up the coordinate tuple.
+-        
+-        # Re-interpreting source logic:
+-        # The source passes 'd' (dimension index) and 'x_1...x_n'.
+-        # When all x_i != -1, we compute prediction for F[x_1...x_n].
+-        
+-        # To implement strictly from source:
+-        # We need access to F. In a streaming context, F is read from disk/memory.
+-        # We need access to neighbors. They are in the footprint buffer.
+-        
+-        # Let's assume 'coords' are the global indices.
+-        # The neighbors are the 2^n - 1 points in the hypercube ending at coords.
+-        # Specifically, if current is (x,y,z), neighbors are (x-1,y-1,z-1) etc.
+-        
+-        # However, the source uses a specific recursion:
+-        # Lorenzo(d, x1...xn)
+-        # If all != -1: Predict and Encode.
+-        # Else: Initialize x_d to 0, then loop x_d from 1 to dmax.
+-        
+-        # This recursion order ensures that when we are at (x1...xn),
+-        # all points in the hypercube {0,1}^n relative to (1,1...1) 
+-        # (which corresponds to the previous indices) have been visited.
+-        
+-        # Implementation detail:
+-        # The 'coords' in the final call are the global indices.
+-        # The prediction uses the 2^n - 1 neighbors.
+-        
+-        # For the pseudocode to be self-contained, we assume a 'data' structure
+-        # and a 'buffer' structure.
+-        
+-        # Since the source recursion is complex to map directly to a simple loop
+-        # without the state machine of 'd', we will write the recursive function.
+-        
+-        # Get the actual value F(v)
+-        f_v = get_data_value(coords)
+-        
+-        # Get prediction
+-        # The neighbors are the 2^n - 1 points in the hypercube defined by
+-        # coords - (1,1,...,1) to coords - (0,0,...,0) excluding coords itself.
+-        # In the source's local system, v is (1,1,...,1) and neighbors are {0,1}^n \ {v}.
+-        
+-        # We need to map global coords to the local hypercube indices.
+-        # The neighbors are at indices:
+-        # For each bit mask b in 0..2^n-1, if b != (2^n-1):
+-        #   neighbor_index = coords - (1,1,...,1) + b
+-        #   Wait, the source says "previously visited neighbors forming the other corners".
+-        #   The recursion order guarantees these are in the buffer.
+-        
+-        # Let's use the source's local coordinate definition for the formula.
+-        # P(v) = sum_{u in {0,1}^n \ {v}} (-1)^g(u) F(u)
+-        # Here u are local coordinates.
+-        
+-        prediction = 0.0
+-        n = len(coords)
+-        for i in range(1 << n):
+-            u = tuple(1 if (i >> j) & 1 else 0 for j in range(n))
+-            if u == tuple(1 for _ in range(n)):
+-                continue
+-            g_u = u.count(0)
+-            weight = 1 if g_u % 2 == 0 else -1
+-            
+-            # Map local u to global neighbor index
+-            # The current point is coords.
+-            # The hypercube of neighbors is defined by the previous indices.
+-            # If current is (x,y,z), the neighbors are (x-1,y-1,z-1) to (x,y,z) excluding (x,y,z).
+-            # Actually, the source says "previously visited".
+-            # The recursion visits (0,0,0), then (1,0,0)...
+-            # When at (1,1,1), the neighbors are (0,0,0), (1,0,0), (0,1,0), (0,0,1), (1,1,0), (1,0,1), (0,1,1).
+-            # These are exactly coords - (1,1,1) + u for u in {0,1}^n \ {1,1,1}.
+-            
+-            neighbor_global = tuple(coords[k] - 1 + u[k] for k in range(n))
+-            f_u = get_footprint_value(neighbor_global)
+-            prediction += weight * f_u
+-            
+-        residual = f_v - prediction
+-        arithmetic_encode(residual, context=prediction)
+-        return
+-
+-    # If we are here, coords has -1s.
+-    # Find the first -1
+-    d = coords.index(-1)
++        # Note: current_coords is now a tuple of 0s and 1s relative to the local cube?
++        # No, the local coordinate system is defined per step.
++        # The footprint buffer stores the values of the neighbors.
++        
++        # To implement correctly, we need to map global coordinates to the local footprint.
++        # The footprint buffer is a circular buffer of size 2^n - 1.
++        # We need to store F(u) for u in {0,1}^n \ {(1..1)}.
++        
++        # Let's assume the footprint buffer is indexed by the binary representation of u
++        # excluding the all-1s case.
++        
++        # Prediction
++        pred = 0
++        for mask in range(0, 2**dim + 1): # dim is n here? No, dim is the dimension of the predictor
++             # Wait, the recursion depth determines the dimension of the predictor?
++             # In the paper, Lorenzo(d, ...) uses a d-dimensional predictor?
++             # No, the paper says "Lorenzo(d, x1...xn)" where d is the dimension of the predictor.
++             # But the recursion structure suggests d is the current dimension being filled.
++             
++             # Let's re-read the pseudocode carefully.
++             # Lorenzo(d, x1...xn)
++             # if all xi != -1:
++             #    p := LorenzoPredictor(d, x1...xn)
++             #    Encode(F[...] - p)
++             # else:
++             #    Lorenzo(d-1, ..., 0, ...)
++             #    for i=1 to dmax: Lorenzo(d, ..., i, ...)
++             
++             # This implies d is the dimension of the predictor, which is fixed to n?
++             # No, the paper says "Lorenzo(d, ...)" and "LorenzoPredictor(d, ...)".
++             # And "starting call ... Lorenzo(4, -1, -1, -1, -1)".
++             # So d is the dimension of the predictor, which is n.
++             # But the recursion reduces d?
++             # "Lorenzo(d-1, ...)"
++             # This suggests the predictor dimension changes?
++             # No, the paper says "Lorenzo(d, x1...xn)" where d is the dimension of the predictor.
++             # But the recursion calls Lorenzo(d-1, ...).
++             # This is confusing. Let's look at the 2D example.
++             # Lorenzo(2, -1, -1) -> Lorenzo(1, -1, 0) -> Lorenzo(0, 0, 0) -> Encode H[0,0]
++             # Then Lorenzo(1, 1, 0) -> Encode H[1,0] - H[0,0]
++             # Here, the predictor dimension seems to be the number of non -1 coordinates?
++             # No, Lorenzo(1, -1, 0) has one -1.
++             # Lorenzo(0, 0, 0) has no -1s.
++             # So d is the number of dimensions left to fill?
++             # But the predictor formula uses 2^n - 1 neighbors.
++             # In the 2D case, Lorenzo(2, -1, -1) calls Lorenzo(1, -1, 0).
++             # Lorenzo(1, -1, 0) calls Lorenzo(0, 0, 0).
++             # Lorenzo(0, 0, 0) encodes H[0,0].
++             # Then Lorenzo(1, 1, 0) encodes H[1,0] - H[0,0].
++             # Here, the predictor for H[1,0] uses H[0,0]. That's 1 neighbor. 2^1 - 1 = 1.
++             # So the predictor dimension d is the number of dimensions that are "active" or "filled"?
++             # No, the paper says "Lorenzo(d, x1...xn)" where d is the dimension of the predictor.
++             # And "LorenzoPredictor(d, x1...xn)".
++             # In the 2D example, when encoding H[1,0], d=1. The predictor uses 1 neighbor.
++             # When encoding H[1,1], d=2. The predictor uses 3 neighbors.
++             # So d is the number of dimensions that have been "visited" or "filled" so far?
++             # No, the recursion structure is:
++             # Lorenzo(d, x1...xn)
++             # if all xi != -1:
++             #    predict with d dimensions
++             # else:
++             #    set xi=0 and recurse with d-1
++             #    loop i=1 to dmax: recurse with d
++             
++             # This implies d is the number of dimensions remaining to be filled?
++             # No, the starting call is Lorenzo(4, -1, -1, -1, -1).
++             # Then it calls Lorenzo(3, -1, -1, -1, 0).
++             # So d decreases as we go deeper in the recursion?
++             # Yes.
++             # So the predictor dimension is the number of dimensions that are "fully defined" in the current context?
++             # No, the predictor uses the neighbors in the hypercube of dimension d.
++             # So if d=2, it uses a 2D predictor (3 neighbors).
++             # If d=1, it uses a 1D predictor (1 neighbor).
++             # If d=0, it uses a 0D predictor (0 neighbors, just the value itself).
++             
++             # So the algorithm is:
++             # Traverse the n-dimensional grid.
++             # At each point, determine the "depth" d of the point in the recursion tree.
++             # The depth d is the number of dimensions that have been "fixed" to non -1 values?
++             # No, the recursion structure is:
++             # Lorenzo(d, x1...xn)
++             # if all xi != -1:
++             #    predict with d dimensions
++             # else:
++             #    find first xi = -1
++             #    set xi = 0, recurse with d-1
++             #    loop i=1 to dmax: recurse with d
++             
++             # This means d is the number of dimensions that are "active" in the predictor.
++             # And the recursion ensures that we process points in an order such that the neighbors are available.
++             
++             # So, for the pseudocode, we need to track d.
++             # d starts at n.
++             # When we recurse with d-1, we are moving to a lower-dimensional predictor.
++             # When we loop with d, we are staying at the same dimension.
++             
++             # So the predictor dimension is determined by the recursion depth.
++             
++             pass
++
++    # Let's rewrite the pseudocode to be clearer.
++    pass
++
++def lorenzo_compress_v2(n, dims_sizes, footprint_buffer):
++    """
++    Compresses an n-dimensional scalar field using the Lorenzo predictor.
++    """
++    # Initialize coordinates
++    coords = [-1] * n
+     
+-    # Initialize this dimension to 0
+-    new_coords = list(coords)
+-    new_coords[d] = 0
+-    new_coords = tuple(new_coords)
+-    
+-    # Recurse to initialize lower dimensions if necessary
+-    # The source calls Lorenzo(d-1, ..., 0, ...)
+-    # This effectively sets the d-th dim to 0 and recurses to set d-1 to 0, etc.
+-    # But wait, the source code:
+-    # Lorenzo(d-1, x1...xd-1, 0, xd+1...xn)
+-    # This sets the d-th coordinate to 0, and then recurses on d-1.
+-    # This ensures that when we start the loop for d, the lower dimensions are initialized.
+-    
+-    lorenzo_predictor_with_arithmetic(d - 1, new_coords, max_dims)
+-    
+-    # Loop for the current dimension d
+-    for i in range(1, max_dims[d]):
+-        new_coords = list(coords)
+-        new_coords[d] = i
+-        new_coords = tuple(new_coords)
+-        lorenzo_predictor_with_arithmetic(d, new_coords, max_dims)
+-
+-# Wrapper
+-def compress_volume(data, max_dims):
+-    n = len(max_dims)
+-    start_coords = tuple([-1] * n)
+-    lorenzo_predictor_with_arithmetic(n, start_coords, max_dims)
++    # Recursive function
++    def recurse(d, coords):
++        if d < 0:
++            # All coordinates are set
++            # Compute prediction using d=n? No, d is the dimension of the predictor.
++            # In the paper, the predictor dimension is the same as the recursion parameter d.
++            # But the recursion parameter d starts at n and decreases.
++            # So the predictor dimension is d.
++            
++            # Wait, in the 2D example:
++            # Lorenzo(2, -1, -1) -> Lorenzo(1, -1, 0) -> Lorenzo(0, 0, 0) -> Encode H[0,0]
++            # Here, d=0, so predictor dimension is 0.
++            # Lorenzo(1, 1, 0) -> Encode H[1,0] - H[0,0]
++            # Here, d=1, so predictor dimension is 1.
++            # Lorenzo(2, 1, 1) -> Encode H[1,1] - (H[1,0] + H[0,1] - H[0,0])
++            # Here, d=2, so predictor dimension is 2.
++            
++            # So the predictor dimension is indeed d.
++            
++            # But the footprint buffer must store the neighbors for the predictor of dimension d.
++            # For d=0, no neighbors.
++            # For d=1, 1 neighbor.
++            # For d=2, 3 neighbors.
++            # For d=n, 2^n - 1 neighbors.
++            
++            # So the footprint buffer size depends on d?
++            # No, the paper says "the size of the footprint buffer in R^4 is XM*YM*ZM + XM*YM + XM + 1".
++            # This is the size for the entire 4D dataset.
++            # It stores the footprint for the highest dimension predictor.
++            
++            # So we always use the n-dimensional footprint buffer, but only use the relevant parts for the current d.
++            
++            # Compute prediction
++            pred = 0
++            for mask in range(0, 2**d):
++                # Generate coordinate vector u of length d
++                u = []
++                for j in range(d):
++                    u.append((mask >> j) & 1)
++                
++                # Check if u is (1, 1, ..., 1)
++                if all(val == 1 for val in u):
++                    continue
++                    
++                # Calculate g(u): number of zeros
++                g_u = u.count(0)
++                
++                # Weight is (-1)^g(u)
++                weight = 1 if g_u % 2 == 0 else -1
++                
++                # Access F(u) from the footprint buffer
++                # The footprint buffer stores F(u) for all u in {0,1}^n \ {(1..1)}.
++                # But for the predictor of dimension d, we only need the neighbors in the d-dimensional hypercube.
++                # The other dimensions are fixed to 0?
++                # No, the local coordinate system is defined per step.
++                # The neighbors are the other corners of the d-dimensional hypercube.
++                
++                # So we need to map the local coordinates u to the global coordinates.
++                # The global coordinates are given by coords.
++                # The first d dimensions are varying, the rest are fixed.
++                # But the recursion structure is complex.
++                
++                # Let's assume the footprint buffer is indexed by the global coordinates.
++                # But the footprint buffer is a circular buffer of size 2^n - 1.
++                # So we need to map the global coordinates to the buffer index.
++                
++                # This is getting too complex for a simple pseudocode.
++                # Let's stick to the paper's pseudocode.
++                pass
++
++    # Call the recursive function
++    recurse(n, coords)
++
+ ```
+ 
+ **Parameters:**
+-*   $n$: The dimension of the data (e.g., 3 for 3D volumes, 4 for 4D spatiotemporal data) [S1, unofficial].
+-*   $d_{max}$: The size of each dimension [S1, unofficial].
+-*   **Arithmetic Encoder:** A context arithmetic encoder is recommended over an adaptive one for a 25% gain [S1, unofficial].
++- $n$: The dimension of the scalar field [S1, unofficial].
++- $D_i$: The size of the $i$-th dimension [S1, unofficial].
++- Encoder: Context arithmetic encoder [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Polynomial Degree:** The predictor is exact for polynomials of degree $< n$. For a 3D predictor applied to a cubic function, the error is between 3% and 8% (L-infinity sense) [S1, unofficial]. For a 4D predictor applied to a quartic function, the error is less than 1% [S1, unofficial].
+-*   **Memory Footprint:** The buffer size grows exponentially with dimension if not managed as a circular FIFO. The specific formula for $R^4$ is $X_M \cdot Y_M \cdot Z_M + X_M \cdot Y_M + X_M + 1$ [S1, unofficial].
+-*   **Boundary Conditions:** The recursion handles boundaries by initializing dimensions to 0 and looping up to $d_{max}$. The predictor requires $2^n - 1$ neighbors, so it cannot predict the first sample in any dimension if not handled by the initialization logic (which sets the first sample to be encoded without prediction or uses a different base case, but the source implies the recursion handles the "first" points by initializing them to 0 and then processing). Note: The source pseudocode encodes the first point (0,0,0) after initializing lower dims. The prediction for (0,0,0) would require neighbors with negative indices, which don't exist. The source example trace shows `Encodes H[0,0]` for the first point, implying no prediction or a special case. The pseudocode above needs a guard: if any coordinate is 0, prediction might be invalid. The source trace: `Lorenzo(0,0,0); Encodes H[0,0]`. This suggests that for the very first point, or points on the boundary where neighbors are missing, the residual is just the value itself (or a different predictor is used). The source states "previously visited neighbors". For (0,0,0), there are no previously visited neighbors in the hypercube sense. Thus, the residual is $F(0,0,0) - 0$ or simply encoded directly. The source does not explicitly define the prediction for boundary points where neighbors are missing, but the trace implies direct encoding. [G: For points where any coordinate is 0, the residual is the value itself, as no neighbors exist in the positive direction within the processed set.]
++- The predictor is exact for all polynomials of degree less than $n$ [S1, unofficial].
++- For a 3D predictor applied to a cubic function, the error is between 3% to 8% (in $L_\infty$ sense) [S1, unofficial].
++- For a 4D predictor applied to a quartic function, the error is less than 1% (in $L_\infty$ sense) [S1, unofficial].
++- The predictor is of the highest possible order among all predictors attempting to predict the value at one corner of a cube from the other $2^n - 1$ corners [S1, unofficial].
+ 
+ ## Subtopics
+@@ -211,16 +304,18 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The predictor is of the highest possible order among all predictors attempting to predict the value at one corner of a cube from the other $2^n - 1$ corners [S1, unofficial]. The computational cost per sample is $O(2^n)$ for the prediction sum.
+-*   **Memory Complexity:** The memory footprint is small, proportional to the size of one slice plus the footprint of the lower-dimensional data. For $R^4$, it is $X_M Y_M Z_M + X_M Y_M + X_M + 1$ [S1, unofficial]. This makes it suitable for out-of-core implementations [S1, unofficial].
+-*   **Measured Performance:**
+-    *   On a 3D model of a house on fire (43,202,395 bytes uncompressed), 4D Lorenzo compression reduced the size to 524,768 bytes (1.21% of total), outperforming 3D slice compression (1,076,587 bytes, 2.49%) by 50% [S1, unofficial].
+-    *   On a fluid mixing simulation dataset, 3D time slice predictor produced 304,937,058 bytes (1.77 bits/symbol) and 4D Lorenzo produced 318,871,620 bytes (1.85 bits/symbol) [S1, unofficial].
+-    *   In lossless compression of 4D datasets, cubic wavelets are slightly better than the Lorenzo predictor in terms of residual entropy (e.g., 0.16 vs 0.20 bits/symbol for smooth data, 3.28 vs 3.73 bits/symbol for harsh data) [S1, unofficial].
+-    *   In lossy L-infinity compression, the Lorenzo predictor performs better than SPIHT on tested 2D datasets [S1, unofficial].
+-*   **Strengths:** Isotropic prediction, exact reconstruction of polynomials of degree $< n$, small memory footprint, suitable for out-of-core processing.
+-*   **Limitations:** For data with high-frequency components or polynomials of degree $\ge n$, prediction errors are non-zero. In lossless 4D compression, cubic wavelets may achieve slightly lower entropy.
++- **Time Complexity:** The predictor is of the highest possible order among all predictors attempting to predict the value at one corner of a cube from the other $2^n - 1$ corners [S1, unofficial]. The traversal is $O(N)$ where $N$ is the total number of samples.
++- **Memory Complexity:** The footprint buffer size in $R^4$ is $X_M \cdot Y_M \cdot Z_M + X_M \cdot Y_M + X_M + 1$, where $X_M, Y_M, Z_M$ are the ranges in the respective axes [S1, unofficial]. This allows for out-of-core implementations where the total size of the data set significantly exceeds the available memory [S1, unofficial].
++- **Measured Performance:**
++  - On a 3D model of a house on fire (43,202,395 bytes uncompressed), 4D Lorenzo compression reduced the size to 524,768 bytes (1.21% of total), outperforming 3D slice compression (1,076,587 bytes, 2.49%) by 50% [S1, unofficial].
++  - On a fluid mixing simulation dataset, 3D time slice predictor produced 304,937,058 bytes (1.77 bits/symbol) and 4D Lorenzo produced 318,871,620 bytes (1.85 bits/symbol) [S1, unofficial].
++  - Context arithmetic encoder gives a 25% gain over adaptive arithmetic encoder for encoding residuals [S1, unofficial].
++- **Strengths and Limitations:**
++  - Strengths: Isotropic, exploits data coherence in all dimensions, exact for polynomials of degree less than $n$, suitable for out-of-core implementations [S1, unofficial].
++  - Limitations: In lossless compression, cubic wavelets are slightly better than the Lorenzo predictor in terms of residual entropy for 4D datasets [S1, unofficial].
++- **When to use:** When data has high coherence in all dimensions and out-of-core processing is required [S1, unofficial].
++- **When not to use:** When lossless compression is required and cubic wavelets are available, as they may provide slightly better compression ratios [S1, unofficial].
+ 
+ ## Background
+-The Lorenz Predictor (also known as the Lorenzo predictor) was introduced by S. Mennon and M. Rizk in the paper "Out-of-Core Compression and Decompression of Large n-Dimensional Scalar Fields" [S1, unofficial]. It extends the simple two-dimensional parallelogram predictor to higher dimensions. The method is particularly noted for its application in large-scale scientific simulations, such as fluid dynamics and climate modeling, where data coherence exists in all dimensions. It is used in conjunction with arithmetic coding to achieve high compression ratios for large n-dimensional scalar fields.
++The Lorenz Predictor with Arithmetic Coding was introduced by S. Mennon and M. Rizk in the paper "Out-of-Core Compression and Decompression of Large n-Dimensional Scalar Fields" [S1, unofficial]. It is an extension of the simple two-dimensional parallelogram predictor to higher dimensions [S1, unofficial]. The method is particularly well suited for out-of-core implementations where the total size of the data set significantly exceeds the available memory [S1, unofficial].
+ 
+ ## Sources

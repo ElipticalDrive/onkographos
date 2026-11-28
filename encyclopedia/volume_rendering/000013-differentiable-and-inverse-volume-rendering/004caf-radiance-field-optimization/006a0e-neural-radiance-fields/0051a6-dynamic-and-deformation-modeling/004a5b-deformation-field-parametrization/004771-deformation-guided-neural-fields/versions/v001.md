@@ -1,0 +1,65 @@
+# Deformation-Guided Neural Fields
+
+Also called: Deformation Field NeRF, Morphable Model Guided NeRF, RigNeRF
+
+## Overview
+Deformation-Guided Neural Fields extend static Neural Radiance Fields (NeRF) to dynamic scenes by introducing a deformation field that maps time-varying coordinates to a canonical space [S1]. Unlike static NeRF, which assumes a rigid scene, this method solves the problem of rendering articulated or deformable subjects (such as human faces) by decoupling geometry deformation from appearance [S1]. It sets itself apart from sibling methods like [Neural Deformation Field](12724-neural-deformation-field.md) by explicitly guiding the deformation MLP with a parametric morphable 3D face model (3DMM), ensuring physically plausible facial topology and enabling explicit control over pose and expression parameters [S1].
+
+## How it works
+The method relies on the shared principles of deformation field parametrization [12731-deformation-field-parametrization.md], where a query point $\mathbf{x}_t$ at time $t$ is transformed into a canonical coordinate $\mathbf{x}_c$ [12731-deformation-field-parametrization.md].
+
+**Inputs:**
+*   Camera pose parameters (extrinsics/intrinsics).
+*   Driving signals for the 3DMM (e.g., expression coefficients, rotation/translation for pose).
+*   3D query points $\mathbf{x}_t$ sampled along rays.
+
+**Outputs:**
+*   Density $\sigma$ and color $\mathbf{c}$ for volume rendering.
+
+**Data Structures:**
+1.  **3DMM Model:** A parametric mesh model providing a rigid base shape and basis vectors for expression/pose variations.
+2.  **Deformation MLP ($f_{\Delta}$):** A neural network that takes canonical coordinates and 3DMM parameters as input to predict displacement vectors.
+3.  **Static Radiance Field ($F_{\text{static}}$):** An MLP (or grid-based representation) that maps canonical coordinates to density and color.
+
+**Steps:**
+1.  **Canonical Transformation:** For a query point $\mathbf{x}_t$ observed at time $t$, compute the canonical coordinate $\mathbf{x}_c$ using the deformation function guided by the 3DMM parameters $\theta_t$ (pose and expression):
+    $$
+    \mathbf{x}_c = \mathbf{x}_t + \Delta(\mathbf{x}_t, \theta_t)
+    $$
+    Here, $\Delta$ is the displacement predicted by the deformation MLP, which is constrained or initialized by the 3DMM geometry to ensure the deformation respects facial topology [S1].
+2.  **Field Query:** Pass $\mathbf{x}_c$ into the static radiance field $F_{\text{static}}$ to obtain density $\sigma$ and color $\mathbf{c}$:
+    $$
+    (\sigma, \mathbf{c}) = F_{\text{static}}(\mathbf{x}_c)
+    $$
+3.  **Volume Rendering:** Compute the pixel color $\hat{C}(\mathbf{r})$ using the standard emission-absorption model [44-radiance-field-optimization.md]:
+    $$
+    \hat{C}(\mathbf{r}) = \sum_{i=1}^N T_i (1 - \exp(-\sigma_i \delta_i)) \mathbf{c}_i
+    $$
+    where $T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right)$ [44-radiance-field-optimization.md].
+
+**Parameters:**
+*   3DMM coefficients: Typically 10-50 dimensions for expression, 3 for rotation, 3 for translation [S1].
+*   MLP hidden layers: Not given in the sources.
+
+**Edge Cases:**
+*   **Fitting Errors:** If the 3DMM fitting to real-world input is imperfect, the deformation field may produce artifacts. [S1] notes that subsequent works (e.g., LightAvatar) introduce warping fields to correct these errors, but the core Deformation-Guided NeRF relies on the accuracy of the 3DMM fit [S1].
+*   **Boundary Conditions:** The deformation field must handle points outside the facial mesh volume appropriately, typically by zeroing displacement or clamping [G].
+
+## Subtopics
+
+### Mesh-anchored Hash Table Blendshapes
+A variant that achieves real-time rendering with high fidelity and fine-grained control by linking each vertex of a 3DMM mesh to a local hash table [S1]. This allows for expression-dependent embeddings and localized facial deformations [S1]. Local blendshapes are combined using per-vertex weights predicted in UV space from driving signals [S1]. The system uses a hash encoding with a decoding MLP in a hybrid neural implicit field to predict color and density from 3D queries via volume rendering [S1]. This approach is chosen when real-time performance and localized control are prioritized over global canonical space consistency.
+
+## Operating characteristics
+*   **Time Complexity:** Depends on the depth of the deformation MLP and the static radiance field MLP. Real-time variants using hash tables (Mesh-anchored) achieve significantly lower latency than pure MLP-based approaches [S1].
+*   **Memory Complexity:** Proportional to the number of parameters in the deformation MLP, static radiance field, and the 3DMM model. Hash table variants may have higher memory overhead for the hash structures [S1].
+*   **Strengths:** Enables controllable pose and expression via 3DMM sliders; robust to geometry variations compared to static NeRF [S1].
+*   **Limitations:** Relies on the quality of the 3DMM fit; struggles with non-facial or highly articulated body parts unless extended (e.g., Neural Body) [S1].
+*   **When to use:** Dynamic face avatars where explicit control over expression and pose is required.
+*   **When not to use:** Static scenes or scenes with non-rigid deformations not captured by 3DMMs (e.g., hair, clothing) without additional extensions [S1].
+
+## Background
+Deformation-Guided Neural Fields emerged as a solution to the limitations of standard NeRF in handling moving subjects [S1]. While standard NeRF struggled with moving bodies, mesh deformation approaches like Neural Body demonstrated the ability to interpolate between frames and poses [S1]. RigNeRF, introduced in June 2022, innovated on this by using deformation field MLPs guided by a morphable 3D face model to create fully 3D face portraits with controllable pose and expression [S1]. This paradigm was inspired by earlier works like A-NeRF (Feb 2021) and Animatable NeRF (May 2021), establishing a baseline skeleton-based approach for animating articulated bodies [S1].
+
+## Sources
+[S1] Neural Radiance Fields in 3D Vision: A Comprehensive Review, https://doi.org/10.26599/cvm.2026.9450535, fetched 2026-10-28

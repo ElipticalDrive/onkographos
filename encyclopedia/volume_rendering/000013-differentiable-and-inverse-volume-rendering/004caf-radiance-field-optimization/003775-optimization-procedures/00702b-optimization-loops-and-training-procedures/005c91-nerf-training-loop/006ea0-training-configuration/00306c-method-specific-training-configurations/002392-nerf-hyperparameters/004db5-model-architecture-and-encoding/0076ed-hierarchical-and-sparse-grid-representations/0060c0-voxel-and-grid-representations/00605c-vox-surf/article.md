@@ -1,0 +1,398 @@
+# Vox-Surf
+
+Also called: Voxel-based Implicit Surface Representation
+
+## Overview
+Vox-Surf is a voxel-based neural implicit surface representation that combines explicit sparse voxel structures with neural implicit surface representations to enable efficient surface reconstruction and realistic rendering from multi-view posed images [S1]. It differs from dense neural implicit methods (like [NeRF](18180-sparse-feature-volume.md) or [NeuS](18180-sparse-feature-volume.md)) by dividing the scene into bounded voxels, thereby reducing sampling and learning in empty areas, and from traditional voxel-based methods by storing only trainable embeddings at voxel corners rather than explicit SDF or color values in every voxel [S1]. This approach allows for finer surface representation with larger voxels and a lightweight network, while the resulting explicit voxel structure serves as efficient bounding volumes for collision detection and scene editing [S1].
+
+## How it works
+**Inputs:** Multiple-view posed images (RGB), camera poses, and an approximate bounding box of the scene. Optional depth sensor data (e.g., from LiDAR or ToF) [S1].
+**Outputs:** Rendered images, a signed distance field (SDF) surface, and a sparse octree of optimized voxels [S1].
+
+**Data Structures:**
+1.  **Sparse Hierarchical Octree:** The scene space is divided into uniformly spaced coarse voxels $V = \{V_1, ..., V_k\}$, which form the leaf nodes of a sparse octree [S1].
+2.  **Vertex Embeddings:** Each voxel has eight corner vertices. Each vertex stores a fixed-length trainable embedding vector $e \in \mathbb{R}^{L_e}$ containing encoded geometry and appearance information [S1]. Adjacent voxels share 4 vertices and their corresponding embeddings [S1].
+3.  **Geometry Extractor ($F_\sigma$):** An MLP mapping $F_\sigma: \mathbb{R}^{L_e} \rightarrow \mathbb{R}^{1+L_f}$. It takes an embedding $e$ and outputs a signed distance value $\sigma \in \mathbb{R}$ (the first element, index `[0]`) and a geometry feature vector $f \in \mathbb{R}^{L_f}$ (the remaining elements, index `[1:]`) [S1].
+4.  **Appearance Extractor ($F_c$):** An MLP mapping color based on concatenated features [S1].
+
+**Parameters:**
+*   $L_e$: Dimension of vertex embeddings.
+*   $L_f$: Dimension of geometry features.
+*   $\tau$: Distance threshold for voxel pruning.
+*   $\delta t$: Small noise tolerance depth range for depth loss intervals, dependent on sensor confidence [S1].
+*   $s$: Scale parameter for the S-density function [S1].
+*   $N_p$: Number of uniform sample points inside each voxel for pruning checks [S1].
+*   Positional Encoding: Applied to embedding $e$ and view direction $d$ before feeding into networks, as in [NeRF](18180-sparse-feature-volume.md) [S1].
+
+**Steps:**
+
+1.  **Initialization:**
+    *   Divide the bounding area into uniformly spaced coarse voxels [S1].
+    *   Build a sparse hierarchical octree with these voxels as leaf nodes [S1].
+    *   Assign each vertex a random initial embedding $e \in \mathbb{R}^{L_e}$ [S1].
+
+2.  **Ray Generation and Culling:**
+    *   Generate rays $r=(o,d)$ from camera centers [S1].
+    *   Perform an axis-aligned bounding box (AABB) intersection test between each ray and the octree [S1].
+    *   Cull rays that do not intersect any voxels [S1].
+    *   For remaining rays, calculate the distance $m_{V_i}$ inside each intersected voxel $V_i$ [S1].
+
+3.  **Surface-Aware Sampling:**
+    *   **Step 1 (Uniform Voxel Sampling):** Uniformly sample points $p$ on rays inside the intersected voxels [S1].
+    *   **Step 2 (Cross-Surface Voxel Searching):** Compute SDF values using $F_\sigma(\Gamma(p))$. Find points $p_i, p_{i+1}$ where the SDF changes sign (positive to negative) along the ray. Mark the voxels containing these points as "important voxels" [S1].
+    *   **Step 3 (Resampling):** Increase sampling probability in important voxels. Normalize probabilities along the ray. Resample rays with a fixed total point count. Two variants exist: 'full' (all important voxels) for unstable shapes, and 'first' (only the first important voxel) for fine details on stable shapes [S1].
+    *   **Boundary Handling:** To prevent cross-voxel accumulation (where sampling spacing exceeds voxel boundaries due to independent interpolation), cut off intervals near voxel boundaries and recalculate sample points $t_i$ and $t_j$ [S1].
+
+4.  **Point Retrieval and Extraction:**
+    *   For any 3D point $p$ within a voxel, retrieve its embedding $e$ via the retrieval function $\Gamma: \mathbb{R}^3 \rightarrow \mathbb{R}^{L_e}$, which maps $p$ to an embedding vector using trilinear interpolation of the eight voxel corner embeddings [S1].
+    *   **Geometry Extraction:** Pass $e$ to $F_\sigma$ to get $\sigma = F_\sigma(e)[0]$ and $f = F_\sigma(e)[1:]$ [S1].
+    *   **Normal Calculation:** Compute normal $n$ via automatic differentiation (double backpropagation) on the SDF output: $n = \frac{d F_\sigma(\Gamma(p))[0]}{dp}$ [S1].
+    *   **Appearance Extraction:** Concatenate geometry feature $f$, ray direction $d$, and point embedding $e$. Feed into $F_c$ to obtain color $c = F_c(\text{concat}(f, d, e))$ [S1].
+
+5.  **Volume Rendering:**
+    *   Define the S-density function: $\phi_s(\sigma) = \frac{s e^{-s\sigma}}{(1 + e^{-s\sigma})^2}$, which is the derivative of the Sigmoid $\Phi_s(\sigma) = (1 + e^{-s\sigma})^{-1}$ [S1].
+    *   Calculate discrete volume density weight: $\alpha(t_i) = \text{ReLU}\left( \frac{\Phi_s(F_\sigma(\Gamma(r(t_i)))[0]) - \Phi_s(F_\sigma(\Gamma(r(t_{i+1})))[0])}{\Phi_s(F_\sigma(\Gamma(r(t_i)))[0])} \right)$ [S1].
+    *   Calculate discrete accumulated transmittance: $T(t_i) = \prod_{j=1}^{i-1} (1 - \alpha(t_j))$ [S1].
+    *   Rendered color: $C(r) = \sum_i T(t_i)\alpha(t_i)c_i$ [S1].
+
+6.  **Progressive Training (Pruning and Splitting):**
+    *   **Voxel Pruning:** Uniformly sample $N_p$ points inside each voxel. Compute SDF values. If any point $p$ inside voxel $V_i$ has $|F_\sigma(\Gamma(p))[0]| < \tau$, keep the voxel ($K=1$); otherwise, prune it ($K=0$) from the octree [S1].
+    *   **Voxel Splitting:** Periodically split existing voxels into 8 sub-voxels and insert them into the octree. Compute initial embeddings for new vertices using $\Gamma$. Optimize these embeddings independently of parent nodes [S1].
+
+7.  **Loss Functions:**
+    *   **Color Loss:** $L_{color} = \sum_r ||\hat{C}(r) - C(r)||_1$, where $\hat{C}(r)$ is the ground truth color [S1].
+    *   **Eikonal Loss:** $L_{eikonal} = \sum_i (||\nabla F_\sigma(\Gamma(p_i))[0]||_2 - 1)^2$, applied to sampled points to constrain SDF gradient magnitude to 1 [S1].
+    *   **Depth Loss (if depth data available):**
+        *   Occupancy function: $\text{occ}(t) = \text{Sigmoid}(-\text{scale} \cdot F_\sigma(\Gamma(r(t)))[0])$ [S1].
+        *   $L_{outside} = \sum_{t < \hat{t} - \delta t} ||1 - \text{occ}(t)||_2^2$ [S1].
+        *   $L_{near} = \sum_{\hat{t} - \delta t \le t \le \hat{t} + \delta t} ||F_\sigma(\Gamma(r(t)))[0]||_2^2$ [S1].
+        *   $L_{inside} = \sum_{t > \hat{t} + \delta t} ||\text{occ}(t)||_2^2$ [S1].
+        *   Total Depth Loss: $L_{depth} = L_{outside} + L_{near} + L_{inside}$ [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import numpy as np
+
+class VoxSurf:
+    def __init__(self, voxel_size, embedding_dim, feature_dim, octree):
+        """
+        Initialize Vox-Surf.
+        :param voxel_size: Initial coarse voxel size.
+        :param embedding_dim: Dimension of vertex embeddings (Le).
+        :param feature_dim: Dimension of geometry features (Lf).
+        :param octree: Sparse hierarchical octree structure containing leaf voxels.
+        """
+        self.embedding_dim = embedding_dim
+        self.feature_dim = feature_dim
+        self.octree = octree
+        # Initialize embeddings for all vertices in the octree
+        # Each vertex has a trainable embedding e in R^Le
+        self.vertex_embeddings = self._init_vertex_embeddings(octree)
+        
+        # Define MLPs
+        self.geometry_extractor = GeometryExtractorMLP(embedding_dim, 1 + feature_dim)
+        self.appearance_extractor = AppearanceExtractorMLP(1 + feature_dim + embedding_dim)
+        
+        # Parameters
+        self.pruning_threshold = 0.01 # tau
+        self.depth_noise_tol = 0.05   # delta_t
+        self.s_density_scale = 10.0   # s
+
+    def _init_vertex_embeddings(self, octree):
+        # Initialize random embeddings for each unique vertex in the octree
+        # Adjacent voxels share vertices, so we map vertex coordinates to embeddings
+        unique_vertices = octree.get_unique_vertices()
+        embeddings = torch.randn(len(unique_vertices), self.embedding_dim, requires_grad=True)
+        return embeddings
+
+    def retrieve_embedding(self, points, octree):
+        """
+        Retrieve embedding for points via trilinear interpolation of voxel corner embeddings.
+        :param points: Tensor of shape (N, 3) containing 3D coordinates.
+        :param octree: The current octree structure.
+        :return: Tensor of shape (N, Le) containing interpolated embeddings.
+        """
+        # Find which voxel each point belongs to
+        voxel_ids = octree.query_voxel(points)
+        
+        # Get the 8 corner coordinates and their embeddings for each voxel
+        corner_coords, corner_embeds = octree.get_voxel_corners(voxel_ids)
+        
+        # Compute barycentric coordinates / interpolation weights
+        # This requires mapping global point coordinates to local voxel coordinates
+        local_coords = points - corner_coords[:, 0, :] # Assuming corner 0 is min corner
+        
+        # Normalize to [0, 1] based on voxel size
+        voxel_sizes = octree.get_voxel_sizes(voxel_ids)
+        normalized_coords = local_coords / voxel_sizes.unsqueeze(1)
+        
+        # Trilinear interpolation
+        # Embeddings are stored in corner_embeds shape (N, 8, Le)
+        weights = self._trilinear_weights(normalized_coords)
+        interpolated_embeds = torch.sum(weights.unsqueeze(-1) * corner_embeds, dim=1)
+        
+        return interpolated_embeds
+
+    def _trilinear_weights(self, coords):
+        # coords shape (N, 3) in [0, 1]
+        x, y, z = coords[:, 0], coords[:, 1], coords[:, 2]
+        # 8 corners: (0,0,0), (1,0,0), (0,1,0), (1,1,0), (0,0,1), (1,0,1), (0,1,1), (1,1,1)
+        w000 = (1-x)*(1-y)*(1-z)
+        w100 = x*(1-y)*(1-z)
+        w010 = (1-x)*y*(1-z)
+        w110 = x*y*(1-z)
+        w001 = (1-x)*(1-y)*z
+        w101 = x*(1-y)*z
+        w011 = (1-x)*y*z
+        w111 = x*y*z
+        return torch.stack([w000, w100, w010, w110, w001, w101, w011, w111], dim=1)
+
+    def forward(self, rays, octree, depth_data=None):
+        """
+        Forward pass for a batch of rays.
+        :param rays: Tensor of shape (B, 2, 3) where rays[:, 0] is origin o, rays[:, 1] is direction d.
+        :param octree: Current octree structure.
+        :param depth_data: Optional depth sensor data.
+        :return: Rendered colors, losses.
+        """
+        batch_size = rays.shape[0]
+        rendered_colors = []
+        losses = []
+        
+        for i in range(batch_size):
+            o, d = rays[i, 0], rays[i, 1]
+            
+            # 1. Ray Generation and Culling
+            intersected_voxels, distances = octree.aabb_intersect(o, d)
+            if len(intersected_voxels) == 0:
+                continue # Ray culled
+            
+            # 2. Surface-Aware Sampling
+            # Step 1: Uniform sampling inside intersected voxels
+            # Calculate total distance inside voxels
+            total_dist = sum(distances)
+            num_samples = 128 # Example fixed number
+            # Inverse CDF sampling based on voxel intersection distances
+            sample_t_values = self._inverse_cdf_sampling(distances, num_samples)
+            
+            # Step 2: Cross-Surface Voxel Searching (Initial pass)
+            sample_points = o + sample_t_values.unsqueeze(1) * d.unsqueeze(0) # Shape (num_samples, 3)
+            
+            # Retrieve embeddings and compute SDF
+            embeds = self.retrieve_embedding(sample_points, octree)
+            sdfs = self.geometry_extractor(embeds)[:, 0] # Shape (num_samples,)
+            
+            # Find sign changes (surface crossings)
+            sign_changes = torch.where(sdfs[:-1] * sdfs[1:] < 0)[0]
+            important_voxel_indices = set()
+            for idx in sign_changes:
+                # Mark voxels containing these points
+                voxel_id = octree.query_voxel(sample_points[idx])
+                important_voxel_indices.add(voxel_id)
+            
+            # Step 3: Resampling
+            # Increase probability in important voxels
+            voxel_probs = torch.zeros(len(octree.get_all_voxels()))
+            for vid in intersected_voxels:
+                if vid in important_voxel_indices:
+                    voxel_probs[vid] += 10.0 # Boost weight
+                else:
+                    voxel_probs[vid] += 1.0
+            
+            # Normalize probabilities along the ray
+            # Resample rays with fixed total point count
+            final_sample_t_values = self._resample_based_on_probs(distances, voxel_probs, num_samples)
+            final_sample_points = o + final_sample_t_values.unsqueeze(1) * d.unsqueeze(0)
+            
+            # Boundary Handling: Cut off intervals near voxel boundaries
+            final_sample_points = self._handle_boundary_crossings(final_sample_points, intersected_voxels, octree)
+            
+            # 3. Point Retrieval and Extraction
+            final_embeds = self.retrieve_embedding(final_sample_points, octree)
+            geo_outputs = self.geometry_extractor(final_embeds) # Shape (num_samples, 1+Lf)
+            sdfs = geo_outputs[:, 0]
+            geo_features = geo_outputs[:, 1:]
+            
+            # Normal calculation via autograd
+            sdfs.sum().backward(retain_graph=True)
+            normals = torch.autograd.grad(sdfs, final_sample_points, grad_outputs=torch.ones_like(sdfs), create_graph=True)[0]
+            normals = torch.nn.functional.normalize(normals, dim=1)
+            
+            # Appearance Extraction
+            # Concatenate geo feature, ray direction, and point embedding
+            # Note: d needs to be repeated for each sample point
+            d_repeated = d.unsqueeze(0).expand_as(final_sample_points)
+            input_to_appearance = torch.cat([geo_features, d_repeated, final_embeds], dim=1)
+            colors = self.appearance_extractor(input_to_appearance)
+            
+            # 4. Volume Rendering
+            # S-density function
+            phi_s = self._sigmoid_sdf(sdfs)
+            phi_s_next = self._sigmoid_sdf(torch.roll(sdfs, -1))
+            phi_s_next[-1] = phi_s[-1] # Handle last point
+            
+            alpha = torch.relu((phi_s - phi_s_next) / phi_s)
+            alpha[-1] = 0 # Last point has no next
+            
+            T = torch.cumprod(1 - alpha, dim=0)
+            T = torch.cat([torch.ones_like(T[:1]), T[:-1]], dim=0) # T(t_i) = prod_{j=1}^{i-1} (1-alpha_j)
+            
+            rendered_color = torch.sum(T * alpha * colors, dim=0)
+            rendered_colors.append(rendered_color)
+            
+            # 5. Loss Calculation
+            # Color Loss
+            gt_color = self.get_gt_color(i) # Assume helper to get ground truth
+            l_color = torch.nn.functional.l1_loss(rendered_color, gt_color)
+            losses.append(l_color)
+            
+            # Eikonal Loss
+            # Recompute gradient for eikonal loss if not already done efficiently
+            # Here we assume normals were computed via backward pass above
+            eikonal_term = (torch.norm(normals, dim=1) - 1)**2
+            l_eikonal = torch.mean(eikonal_term)
+            losses.append(l_eikonal)
+            
+            # Depth Loss (if available)
+            if depth_data is not None:
+                depth_val = depth_data[i]
+                l_depth = self._compute_depth_loss(final_sample_points, sdfs, depth_val, self.depth_noise_tol)
+                losses.append(l_depth)
+        
+        return torch.stack(rendered_colors), sum(losses)
+
+    def _sigmoid_sdf(self, sdf):
+        s = self.s_density_scale
+        return 1.0 / (1.0 + torch.exp(-s * sdf))
+
+    def _inverse_cdf_sampling(self, distances, num_samples):
+        # Simple uniform sampling weighted by distance for demonstration
+        # In practice, use inverse CDF of the distribution defined by distances
+        total_dist = sum(distances)
+        if total_dist == 0:
+            return torch.zeros(num_samples)
+        probs = torch.tensor(distances) / total_dist
+        # Sample t values within each voxel segment
+        # This is a simplified placeholder for the actual inverse CDF logic
+        t_values = []
+        current_t = 0
+        for dist in distances:
+            # Sample points within this voxel segment
+            n_seg = int(num_samples * (dist / total_dist))
+            if n_seg == 0: n_seg = 1
+            seg_samples = torch.linspace(current_t, current_t + dist, n_seg)
+            t_values.append(seg_samples)
+            current_t += dist
+        t_values = torch.cat(t_values)
+        # Return midpoints of intervals
+        return (t_values[:-1] + t_values[1:]) / 2
+
+    def _resample_based_on_probs(self, distances, voxel_probs, num_samples):
+        # Simplified resampling logic
+        # Re-weight distances based on voxel_probs
+        weighted_distances = [dist * voxel_probs[vid] for vid, dist in zip(self.intersected_voxel_ids, distances)]
+        return self._inverse_cdf_sampling(weighted_distances, num_samples)
+
+    def _handle_boundary_crossings(self, points, intersected_voxels, octree):
+        # Cut off intervals near voxel boundaries and recalculate
+        # This ensures sampling spacing does not exceed voxel boundary
+        # Implementation detail: check if point is too close to boundary of its voxel
+        # If so, clamp to boundary or redistribute
+        return points # Placeholder for complex boundary logic
+
+    def _compute_depth_loss(self, points, sdfs, depth_val, delta_t):
+        # occ(t) = Sigmoid(-scale * sdf)
+        occ = torch.sigmoid(-self.s_density_scale * sdfs)
+        
+        # Determine intervals relative to depth_val
+        # t is approximated by distance along ray
+        # Assuming points are ordered along ray
+        dists = torch.norm(points - self.ray_origin, dim=1)
+        
+        mask_outside = dists < (depth_val - self.depth_noise_tol)
+        mask_near = (dists >= (depth_val - self.depth_noise_tol)) & (dists <= (depth_val + self.depth_noise_tol))
+        mask_inside = dists > (depth_val + self.depth_noise_tol)
+        
+        l_outside = torch.mean((1 - occ[mask_outside])**2) if mask_outside.any() else 0
+        l_near = torch.mean(sdfs[mask_near]**2) if mask_near.any() else 0
+        l_inside = torch.mean(occ[mask_inside]**2) if mask_inside.any() else 0
+        
+        return l_outside + l_near + l_inside
+
+    def prune_and_split(self, octree):
+        """
+        Perform voxel pruning and splitting.
+        """
+        # Pruning
+        for voxel in octree.get_leaf_voxels():
+            # Sample Np points inside voxel
+            points = self._sample_inside_voxel(voxel, Np=10)
+            embeds = self.retrieve_embedding(points, octree)
+            sdfs = self.geometry_extractor(embeds)[:, 0]
+            
+            # Check if any point has |sdf| < tau
+            if torch.any(torch.abs(sdfs) < self.pruning_threshold):
+                voxel.keep = True
+            else:
+                voxel.keep = False
+                octree.remove_voxel(voxel)
+        
+        # Splitting
+        for voxel in octree.get_leaf_voxels():
+            if voxel.should_split(): # Heuristic based on detail or error
+                sub_voxels = voxel.split()
+                octree.add_sub_voxels(sub_voxels)
+                # Initialize embeddings for new vertices
+                for sub_v in sub_voxels:
+                    for vertex in sub_v.vertices:
+                        if vertex not in self.vertex_embeddings:
+                            # Retrieve embedding from parent or interpolate
+                            new_embed = self.retrieve_embedding(vertex.coord, octree)
+                            self.vertex_embeddings[vertex] = new_embed
+
+class GeometryExtractorMLP(nn.Module):
+    def __init__(self, input_dim, output_dim):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, 128),
+            nn.ReLU(),
+            nn.Linear(128, 128),
+            nn.ReLU(),
+            nn.Linear(128, output_dim)
+        )
+    def forward(self, x):
+        return self.net(x)
+
+class AppearanceExtractorMLP(nn.Module):
+    def __init__(self, input_dim):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, 128),
+            nn.ReLU(),
+            nn.Linear(128, 128),
+            nn.ReLU(),
+            nn.Linear(128, 3) # RGB
+        )
+    def forward(self, x):
+        return self.net(x)
+```
+
+## Operating characteristics
+*   **Time Complexity:** Depends on the number of voxels and sampling points. The sparse octree accelerates ray intersection tests [S1]. Progressive pruning reduces the number of voxels and thus sample points over time, improving inference speed [S1].
+*   **Memory Complexity:** Proportional to the number of active voxels and their vertex embeddings. By pruning empty voxels, memory usage is significantly reduced compared to dense grids [S1].
+*   **Measured Performance:** Experiments on DTU, ScanNet, and KITTI-360 datasets show that Vox-Surf learns fine surface details and accurate colors with less memory and faster rendering than previous methods (e.g., NeuS) [S1]. It can approach real-time at low resolution [S1].
+*   **Strengths:** Efficient surface reconstruction, realistic rendering, memory efficiency via sparsity, explicit voxel structure useful for collision detection and scene editing [S1].
+*   **Limitations:** Requires multiple-view posed images and approximate scene extent [S1]. Performance depends on the quality of depth sensor data if used [S1]. Early-stage voxel pruning can cause surface missing if sampling density is not increased [S1].
+*   **When to use:** When explicit surface representation, collision detection, or scene editing is required, and memory efficiency is a concern. Suitable for scenes with varying scales [S1].
+*   **When not to use:** For scenes with significant transparency where density-based rendering is preferred, or when posed images are not available [S1].
+
+## Background
+Vox-Surf was proposed in the paper "Vox-Surf: Voxel-Based Implicit Surface Representation" [S1]. It builds on the principles of neural implicit surface representations (like [NeuS](18180-sparse-feature-volume.md)) and voxel-based methods (like [Sparse Feature Volume](18180-sparse-feature-volume.md)), aiming to combine the benefits of both: the flexibility of neural implicit functions and the efficiency of explicit voxel structures. The method was developed to address the limitations of dense neural implicit methods in terms of memory and sampling efficiency in empty areas, and traditional voxel methods in terms of representation power and smoothness [S1].
+
+## Sources
+[S1] Vox-Surf: Voxel-Based Implicit Surface Representation, https://doi.org/10.1109/tvcg.2022.3225844, fetched 2026-10-26

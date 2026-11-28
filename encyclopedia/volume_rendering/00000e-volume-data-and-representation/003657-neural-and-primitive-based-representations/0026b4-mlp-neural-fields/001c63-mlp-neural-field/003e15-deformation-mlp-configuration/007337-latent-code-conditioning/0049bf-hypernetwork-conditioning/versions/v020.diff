@@ -1,0 +1,136 @@
+--- v019.md
++++ v020.md
+@@ -1,76 +1,92 @@
+ # HyperNetwork Conditioning
+ 
+-Also called: Hypernetwork-based conditioning, HyperNet
++Also called: HyperNetwork
+ 
+ ## Overview
+-HyperNetwork Conditioning generates instance-specific decoder weights by passing a latent code through a secondary network (the HyperNetwork), resulting in a unique Neural Field for each input instance [S1, unofficial]. Unlike Concatenation Conditioning, which shares a single set of decoder weights across all instances, this method allows the primary decoder network to have significantly lower complexity while maintaining high representational capacity [S1, unofficial].
++HyperNetwork Conditioning generates instance-specific decoder weights by passing a latent code through a secondary network, creating a unique Neural Field for each input instance [S2, unofficial]. Unlike Concatenation Conditioning, which shares decoder weights across all instances, this method allows the primary decoder network to have significantly lower complexity while maintaining high representational capacity [S2, unofficial]. Trade-offs are detailed in Operating characteristics.
+ 
+ ## How it works
+ **Inputs:**
+-*   Latent code $z_i \in \mathbb{R}^D$ for instance $i$.
+-*   Query point $x$ (spatial coordinates).
+-*   HyperNetwork parameters $\phi$.
+-*   Base decoder architecture definition (e.g., MLP depth, width, activation).
++*   Latent code $z \in \mathbb{R}^n$ for an instance [S1, unofficial].
++*   Query point $x$ (spatial coordinates) [G].
++*   HyperNetwork parameters $\phi$ [G].
++*   Base decoder architecture definition (layer sizes, activations) [G].
+ 
+ **Outputs:**
+-*   Instance-specific decoder weights $\theta_i$.
+-*   Volume density/opacity $\sigma_i$ and color $c_i$ at $x$.
++*   Instance-specific decoder weights $\theta$ [S1, unofficial].
++*   Volume properties (e.g., density $\sigma$, color $c$) at $x$ [G].
+ 
+ **Data Structures:**
+-*   $z_i$: Vector of dimension $D$. Common values are $D=512$ for volumetric applications or $D=256$ for shape space learning [S1, unofficial].
+-*   $\theta_i$: Flattened vector of all weights and biases in the decoder MLP.
+-*   $h_\phi$: The HyperNetwork MLP.
++*   $z$: Vector of dimension $n$ [S1, unofficial].
++*   $\theta$: Flattened vector of all weights and biases in the decoder [S1, unofficial].
++*   $h_\phi$: The HyperNetwork MLP [S2, unofficial].
+ 
+ **Steps:**
+ 1.  **HyperNetwork Forward Pass:** Compute the instance-specific weights by passing the latent code through the HyperNetwork:
+-    $$ \theta_i = h_\phi(z_i) $$
+-    The HyperNetwork $h_\phi$ maps $\mathbb{R}^D \to \mathbb{R}^W$, where $W$ is the total number of parameters in the decoder.
+-2.  **Weight Reshaping:** Reshape the vector $\theta_i$ into the specific tensor shapes required by the decoder layers (e.g., weight matrices $W_l$ and bias vectors $b_l$ for each layer $l$).
+-3.  **Instance-Specific Decoding:** Evaluate the decoder $f_{\theta_i}$ at query point $x$:
+-    $$ y_i = f_{\theta_i}(x) $$
+-    where $y_i$ represents the predicted volume properties (e.g., density $\sigma$, color $c$).
++    $$ \theta = h_\phi(z) $$
++    The HyperNetwork maps $\mathbb{R}^n \rightarrow \mathbb{R}^W$, where $W$ is the total number of parameters in the decoder [S1, unofficial]. Formally, this is expressed as:
++    $$ \Psi : \mathbb{R}^n \rightarrow \mathbb{R}^{mln}, \quad z \mapsto \Psi(z) = (W_{(0,0)}, ..., W_{(m,l)}, b_0, ..., b_m) $$
++    where $z \in \mathbb{R}^n$, $W \in \mathbb{R}^{m \times l}$, and $b \in \mathbb{R}^l$ [S1, unofficial].
++2.  **Weight Reshaping:** Reshape the vector $\theta$ into the specific tensor shapes required by the decoder layers (e.g., weight matrices $W_l$ and bias vectors $b_l$ for each layer $l$) [G].
++3.  **Instance-Specific Decoding:** Evaluate the decoder $f_\theta$ at query point $x$ to obtain the output $y$ [G].
+ 
+ **Pseudocode:**
+ ```python
+-def hypernetwork_conditioning(z_i, x, hypernet, decoder_arch):
++def hypernetwork_conditioning(z, x, hypernet, decoder_shapes):
+     """
+-    z_i: latent code vector
+-    x: query coordinate vector
+-    hypernet: function mapping z -> theta
+-    decoder_arch: definition of decoder layer sizes and activations
++    z: latent code vector of shape (n,)
++    x: query coordinate vector of shape (d,)
++    hypernet: callable returning flattened weight vector of shape (W,)
++    decoder_shapes: list of tuples (in_features, out_features) for each linear layer
+     """
+-    # Step 1: Generate weights
+-    theta_i = hypernet(z_i)
++    # Step 1: Generate flattened weight vector
++    theta = hypernet(z)
+     
+-    # Step 2: Reshape weights into layer-specific tensors
+-    # Implementation detail: Split theta_i according to decoder_arch parameter counts
+-    layer_weights = reshape_weights(theta_i, decoder_arch)
+-    
++    # Step 2: Reshape into layer tensors
++    layer_params = []
++    offset = 0
++    for in_f, out_f in decoder_shapes:
++        # Weight matrix: out_f x in_f
++        w = theta[offset:offset + out_f * in_f].reshape(out_f, in_f)
++        # Bias vector: out_f
++        b = theta[offset + out_f * in_f:offset + out_f * in_f + out_f]
++        layer_params.append((w, b))
++        offset += out_f * in_f + out_f
++        
+     # Step 3: Evaluate decoder with generated weights
+-    # This is a standard MLP forward pass using the generated weights
+-    output = evaluate_mlp(x, layer_weights)
+-    
+-    return output
++    h = x
++    for w, b in layer_params[:-1]:
++        h = w @ h + b
++        h = h * (h > 0)  # ReLU activation [G]
++    # Last layer (typically linear for regression)
++    w_last, b_last = layer_params[-1]
++    y = w_last @ h + b_last
++    return y
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Memory:** Storing distinct weights $\theta_i$ for every instance increases memory usage compared to shared weights.
+-*   **Training Stability:** The HyperNetwork must learn to map latent codes to valid decoder weights; poor initialization can lead to unstable gradients [S1, unofficial].
+-*   **Complexity:** While the primary decoder can be smaller, the total parameter count includes the HyperNetwork, which must be sized to output the full weight vector of the decoder [S1, unofficial].
++*   **Precision:** Generating weights via a secondary network can amplify numerical instability if the HyperNetwork outputs extreme values [G].
++*   **Shape Mismatch:** The flattened weight vector $\theta$ must exactly match the total parameter count of the decoder architecture; otherwise, reshaping will fail [G].
++*   **Not given in the sources.** for memory footprint, training stability, or specific complexity scaling metrics.
+ 
+ ## Subtopics
+ 
+ ### Hybrid Conditioning
+-Uses a combination of global and local latent codes. One global code encodes information shared across all instances, while several local codes encode instance-specific details [S1, unofficial]. This approach allows the HyperNetwork to handle specific variations while the global code maintains structural consistency.
++Uses one global code to encode basic information shared between instances, and several local codes to encode instance-specific details [S2, unofficial].
++
++### Attribute Map
++Maps a per-image learnable latent code $\beta$ to a set of $A$ attributes $\alpha$ for controlling specific elements [S3].
+ 
+ ## Operating characteristics
+-*   **Complexity:** Allows the primary Neural Field decoder to have lower complexity (fewer parameters) compared to a single large shared decoder, as the HyperNetwork offloads the complexity of representing instance differences [S1, unofficial].
+-*   **Memory:** Higher memory footprint than Concatenation Conditioning because each instance requires its own set of decoder weights $\theta_i$ to be stored or recomputed.
+-*   **Performance:** Inference requires an additional forward pass through the HyperNetwork to generate weights before evaluating the decoder.
+-*   **Use Case:** Suitable when instances are highly diverse and a single shared decoder cannot capture the variations efficiently, or when the number of instances is manageable relative to the cost of weight generation.
++*   **Complexity:** Allows the primary Neural Field decoder to have lower complexity compared to a single large shared decoder, as the HyperNetwork offloads the complexity of representing instance differences [S2, unofficial].
++*   **Memory:** Not given in the sources.
++*   **Performance:** Not given in the sources.
++*   **Use Case:** Suitable when instances are highly diverse and a single shared decoder cannot capture the variations efficiently [S2, unofficial].
+ 
+ ## Background
+-The concept originates from the use of HyperNetworks [Ha et al., 2016] in neural network parameter prediction. In the context of Neural Fields, it was highlighted as an intriguing alternative to concatenation-based conditioning for creating instance-specific representations [S1, unofficial]. Recent research suggests that this approach can lead to more compact representations by reducing the complexity of the primary network [Galanti & Wolf, 2020].
++The concept originates from the use of HyperNetworks [Ha et al., 2016] in neural network parameter prediction [S2, unofficial]. In the context of Neural Fields, it was highlighted as an intriguing alternative to concatenation-based conditioning for creating instance-specific representations [S2, unofficial]. Recent research suggests that this approach can lead to more compact representations by reducing the complexity of the primary network [S2, unofficial].
+ 
+ ## Sources
+-[S1] Introduction to Neural Fields - inovex GmbH, https://www.inovex.de/de/blog/introduction-to-neural-fields/, fetched 2026-10-29 (unofficial)+[S1] MetaSDF: Meta-learning Signed Distance Functions, https://doi.org/10.48550/arxiv.2006.09662, fetched 2026-10-26 (unofficial)
++[S2] Introduction to Neural Fields - inovex GmbH, https://www.inovex.de/de/blog/introduction-to-neural-fields/, fetched 2026-10-29 (unofficial)
++[S3] CoNeRF: Controllable Neural Radiance Fields, https://doi.org/10.1109/cvpr52688.2022.01807, fetched 2026-10-26

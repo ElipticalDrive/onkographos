@@ -1,0 +1,103 @@
+# N^3 Tree with Node/Brick Pools
+
+Also called: Crassin et al. method, Engel/Reichl method
+
+## Overview
+This method accelerates sparse voxel traversal by decoupling the tree structure from the voxel data, storing them in separate memory pools. It solves the memory overhead and cache inefficiency of storing full child and neighbor pointers for every node. Unlike [N^3 Tree](5193-n3-tree.md), which discusses the general N^3 structure, this method specifically implements the node/brick pool architecture introduced by Crassin et al. [S1].
+
+## How it works
+**Inputs:** Ray origin, ray direction, N^3 tree root pointer, node pool, brick pool.
+**Outputs:** Transmittance and color accumulation along the ray.
+
+**Data Structures:**
+1.  **Node Pool:** An array of node entries. Each entry contains:
+    *   `child_ptr`: A single pointer to a contiguous block of $N^3$ child node indices (or null if leaf).
+    *   `brick_ptr`: A pointer to the voxel data (brick) in the Brick Pool.
+2.  **Brick Pool:** An array of voxel data blocks. Each block stores the volumetric data for a leaf node.
+3.  **Ray State:** Current position, step size, accumulated transmittance/color.
+
+**Algorithm:**
+The traversal uses an adapted kd-restart algorithm [FS05]. The key optimization is that all $N^3$ children are stored contiguously, allowing a single pointer dereference to access the child block.
+
+1.  **Initialize:** Start at the root node. Calculate initial step size based on the brick resolution.
+2.  **Traverse:**
+    a.  Determine the current brick index along the ray.
+    b.  If the current node is a leaf (indicated by `child_ptr` being null or a specific flag):
+        i.  Sample the voxel data at `brick_ptr` using the current ray position.
+        ii. Update accumulation (compositing).
+        iii. Advance ray by step size.
+    c.  If the current node is internal:
+        i.  Dereference `child_ptr` to get the block of $N^3$ child indices.
+        ii. Determine which child contains the current ray position.
+        iii. Update current node to the selected child.
+        iv. Adjust step size if necessary (e.g., if entering a finer level).
+3.  **Terminate:** When ray exits the volume or transmittance drops below threshold.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def traverse_ray(ray_origin, ray_direction, root_node_idx, node_pool, brick_pool):
+    # Initialize ray state
+    t = 0.0
+    alpha = 0.0
+    color = (0.0, 0.0, 0.0)
+    current_node_idx = root_node_idx
+    
+    # Assume brick resolution is known or derived from context
+    brick_size = get_brick_size() 
+    step = brick_size
+    
+    while t < ray_max_distance:
+        # Calculate current position
+        pos = ray_origin + ray_direction * t
+        
+        # Get current node
+        node = node_pool[current_node_idx]
+        
+        if node.child_ptr is None:
+            # Leaf node: sample brick
+            brick_data = brick_pool[node.brick_ptr]
+            sample = sample_voxel(brick_data, pos)
+            
+            # Volume compositing (front-to-back)
+            alpha_new = 1.0 - exp(-sample.density * step)
+            color += sample.color * alpha_new * (1.0 - alpha)
+            alpha += alpha_new * (1.0 - alpha)
+            
+            if alpha >= 1.0:
+                break
+                
+            t += step
+        else:
+            # Internal node: find child
+            child_block = node_pool[node.child_ptr] # Block of N^3 children
+            child_idx = find_child_index(child_block, pos, brick_size)
+            current_node_idx = child_block[child_idx]
+            
+            # Adjust step size if entering finer level (simplified)
+            # In practice, step size might change based on child resolution
+            pass
+            
+    return color, alpha
+```
+
+**Edge Cases:**
+*   **Precision:** Floating-point errors in ray position calculation can cause incorrect child selection. Use epsilon guards [G].
+*   **Boundaries:** Ensure ray exit detection is robust to avoid out-of-bounds memory access.
+
+## Subtopics
+
+### [N^3-Tree with Mipmapped Bricks](22989-n-3-tree-with-mipmapped-bricks.md)
+This method renders large volumetric datasets by combining an adaptive $N^3$-tree (a generalized octree) with mipmapped 3D texture bricks, enabling high-quality filtering and efficient GPU traversal.
+
+## Operating characteristics
+*   **Memory:** Significantly reduced compared to storing 8 child pointers + 6 neighbor pointers per node. Only one child pointer and one brick pointer are stored [S1].
+*   **Cache Coherence:** Storing children contiguously improves cache locality during traversal [S1].
+*   **Performance:** Efficient for sparse data where many nodes are leaves. Traversal overhead is low due to simple pointer chasing.
+
+## Background
+Introduced by Crassin et al. in [CN09, CNLE09], this method was designed to handle large-scale volumetric datasets on GPUs. Engel [Eng11] and Reichl et al. [RTW13] adopted and refined this structure. It builds on the concept of page tables for volume rendering [S1].
+
+## Sources
+[S1] State-of-the-Art in GPU-Based Large-Scale Volume Visualization, https://vcg.seas.harvard.edu/publications/20150513-stateof-the-art-in-gpu-based-large-scale-volume-visualization/paper, fetched 2026-10-24

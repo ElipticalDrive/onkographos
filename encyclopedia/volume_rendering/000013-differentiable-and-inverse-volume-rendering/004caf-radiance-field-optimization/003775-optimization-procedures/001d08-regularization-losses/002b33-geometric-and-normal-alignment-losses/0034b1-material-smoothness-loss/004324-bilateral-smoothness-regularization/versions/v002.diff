@@ -1,0 +1,108 @@
+--- v001.md
++++ v002.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Bilateral Smoothness Regularization is a geometric and normal alignment loss applied to material fields to enforce spatial smoothness of BRDF parameters (such as roughness and specular tint) weighted by image gradients [S1, unofficial][S2]. It alleviates the ambiguity between material and illumination by constraining material gradients to correspond with image edges, preventing noisy, inconsistent material reconstructions [S2]. It differs from standard smoothness losses by using the image gradient as a bilateral weight, preserving material boundaries where the image shows sharp transitions [S1, unofficial][S2].
++Bilateral Smoothness Regularization is a geometric and normal alignment loss applied to material fields to enforce spatial smoothness of BRDF parameters weighted by image gradients [S1, unofficial][S2]. It alleviates the ambiguity between material and illumination by constraining material gradients to correspond with image edges, preventing noisy and inconsistent material reconstructions [S2]. It differs from standard smoothness losses by using the image gradient as a bilateral weight to preserve material boundaries where the image shows sharp transitions [S1, unofficial][S2].
+ 
+ ## How it works
+@@ -22,8 +22,8 @@
+ **Steps:**
+ 1.  **Pre-compute Image Gradient:** Calculate the gradient magnitude $\|\nabla_p I(p)\|$ for all pixels $p$ in the ground truth image $I$ before training [S2].
+-2.  **Compute Material Gradient:** For each BRDF parameter $x$ and each pixel $i$ in the mask $M$, compute the second-order derivative (Laplacian-like) in the x and y dimensions, denoted as $\nabla^2_d x(i)$ [S1, unofficial]. Note: Source [S2] uses first-order gradients $\|\nabla_{x_s} \alpha(x_s)\|$ for surface points $x_s$, while Source [S1, unofficial] uses second-order derivatives $\nabla^2_d$ for pixel indices $i$. The implementation must align with the specific source's definition of the gradient operator.
+-3.  **Calculate Bilateral Weight:** Compute the exponential weight $e^{\nabla_d I(i)}$ (Source [S1, unofficial]) or $e^{-\|\nabla_p I(p)\|}$ (Source [S2]). Source [S1, unofficial] uses the gradient itself in the exponent, while Source [S2] uses the negative magnitude. This discrepancy must be resolved based on the specific implementation variant.
++2.  **Compute Material Gradient:** For each BRDF parameter $x$ and each pixel $i$ in the mask $M$, compute the spatial derivative in the x and y dimensions [S1, unofficial][S2]. Source [S1, unofficial] uses second-order derivatives $\nabla^2_d$, while Source [S2] uses first-order gradients $\|\nabla_{x_s}\|$ for surface points $x_s$ [S1, unofficial][S2].
++3.  **Calculate Bilateral Weight:** Compute the exponential weight using the pre-computed image gradient [S1, unofficial][S2]. Source [S1, unofficial] uses $e^{\nabla_d I(i)}$, while Source [S2] uses $e^{-\|\nabla_p I(p)\|}$ [S1, unofficial][S2].
+ 4.  **Aggregate Loss:** Sum the product of the material gradient magnitude and the bilateral weight over all pixels in the mask [S1, unofficial][S2].
+-5.  **Normalize:** Divide by the number of pixels in $S_I$ if using the formulation from Source [S2] [S2].
++5.  **Normalize:** Divide by the number of pixels in $S_I$ when using the formulation from Source [S2] [S2].
+ 
+ **Formula:**
+@@ -42,9 +42,20 @@
+ **Pitfalls:**
+ *   **Noise:** Without this regularization, the model generates noisy materials that are inconsistent across the same material, making it unsuitable for material editing applications [S2].
+-*   **Formula Discrepancy:** Sources [S1, unofficial] and [S2] use different gradient orders (second vs. first) and different signs in the exponential weight. Implementers must choose one variant or clarify the intended behavior [S1, unofficial][S2].
++*   **Formula Discrepancy:** Sources [S1, unofficial] and [S2] use different gradient orders (second vs. first) and different signs in the exponential weight [S1, unofficial][S2].
+ *   **Boundary Conditions:** The handling of image gradient computation at image boundaries is not specified [S1, unofficial][S2].
+ 
+ **Pseudocode:**
+ ```python
++def compute_gradient_magnitude(field):
++    """Computes gradient magnitude using central finite differences."""
++    h, w = len(field), len(field[0])
++    grad_mag = [[0.0] * w for _ in range(h)]
++    for r in range(1, h - 1):
++        for c in range(1, w - 1):
++            dx = (field[r][c+1] - field[r][c-1]) / 2.0
++            dy = (field[r+1][c] - field[r-1][c]) / 2.0
++            grad_mag[r][c] = (dx**2 + dy**2)**0.5
++    return grad_mag
++
+ def bilateral_smoothness_loss(material_field, ground_truth_image, mask):
+     """
+@@ -53,46 +64,33 @@
+     as it explicitly handles normalization and distinct material parameters.
+     """
+-    # 1. Pre-compute image gradient magnitude (assumed pre-computed in training loop)
+-    # Using Sobel operators for gradient magnitude
+-    grad_x = sobel_filter(ground_truth_image, axis=1)
+-    grad_y = sobel_filter(ground_truth_image, axis=0)
+-    image_grad_magnitude = np.sqrt(grad_x**2 + grad_y**2)
++    # 1. Pre-compute image gradient magnitude
++    image_grad_magnitude = compute_gradient_magnitude(ground_truth_image)
+     
+     # 2. Get material gradients for roughness and specular tint
+-    # Assuming material_field contains [roughness, specular_tint] channels
+     roughness = material_field[..., 0]
+     specular_tint = material_field[..., 1]
+     
+-    # Compute first-order gradients for material parameters
+-    rough_grad_x = sobel_filter(roughness, axis=1)
+-    rough_grad_y = sobel_filter(roughness, axis=0)
+-    rough_grad_mag = np.sqrt(rough_grad_x**2 + rough_grad_y**2)
++    rough_grad_mag = compute_gradient_magnitude(roughness)
++    spec_grad_mag = compute_gradient_magnitude(specular_tint)
+     
+-    spec_grad_x = sobel_filter(specular_tint, axis=1)
+-    spec_grad_y = sobel_filter(specular_tint, axis=0)
+-    spec_grad_mag = np.sqrt(spec_grad_x**2 + spec_grad_y**2)
++    # 3. Calculate bilateral weight: e^(-||grad I||)
++    weight = [[0.0] * len(ground_truth_image[0]) for _ in range(len(ground_truth_image))]
++    for r in range(len(weight)):
++        for c in range(len(weight[0])):
++            weight[r][c] = __import__('math').exp(-image_grad_magnitude[r][c])
+     
+-    # 3. Calculate bilateral weight
+-    # Source [S2] uses e^(-||grad I||)
+-    weight = np.exp(-image_grad_magnitude)
+-    
+-    # 4. Aggregate loss
+-    # Apply mask
+-    masked_rough_grad = rough_grad_mag * mask
+-    masked_spec_grad = spec_grad_mag * mask
+-    masked_weight = weight * mask
+-    
+-    # Sum over pixels in S_I (mask)
+-    sum_grad = np.sum(masked_rough_grad + masked_spec_grad)
+-    sum_weight = np.sum(masked_weight)
+-    
++    # 4. Aggregate loss over pixels in S_I (mask)
++    sum_grad = 0.0
++    num_pixels = 0
++    for r in range(len(mask)):
++        for c in range(len(mask[0])):
++            if mask[r][c] > 0.5:
++                sum_grad += (rough_grad_mag[r][c] + spec_grad_mag[r][c]) * weight[r][c]
++                num_pixels += 1
++                
+     # 5. Normalize by |S_I|
+-    # Note: Source [S2] divides by |S_I|, which is the count of pixels in the mask
+-    num_pixels = np.sum(mask)
+     if num_pixels == 0:
+         return 0.0
+-        
+     loss = sum_grad / num_pixels
+-    
+     return loss
+ ```

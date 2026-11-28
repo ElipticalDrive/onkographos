@@ -1,0 +1,268 @@
+--- v001.md
++++ v002.md
+@@ -9,6 +9,6 @@
+ 
+ ### Inputs and Outputs
+-*   **Inputs:** A watertight mesh (for training) or point samples with truncated signed distance field (SDF) values (for test-time optimization).
+-*   **Outputs:** A blended SDF field $g_i(x)$ representing the object surface, from which meshes can be extracted via Marching Cubes.
++*   **Inputs:** A watertight mesh (for training) or point samples with truncated signed distance field (SDF) values (for test-time optimization) [S1].
++*   **Outputs:** A blended SDF field $g_i(x)$ representing the object surface, from which meshes can be extracted via Marching Cubes [S1].
+ 
+ ### Data Structures
+@@ -16,7 +16,7 @@
+ **Patch Extrinsic Parameters ($e_{i,p}$)**
+ Each patch $p$ of object $i$ is defined by 7 parameters $e_{i,p} \in \mathbb{R}^7$ [S1]:
+-*   Radius $r_{i,p} \in \mathbb{R}$: The spherical radius of the patch.
+-*   Center $c_{i,p} \in \mathbb{R}^3$: The 3D position of the patch center.
+-*   Orientation $\phi_{i,p} \in \mathbb{R}^3$: Euler angles defining the rotation of the patch's canonical frame.
++*   Radius $r_{i,p} \in \mathbb{R}$: The spherical radius of the patch [S1].
++*   Center $c_{i,p} \in \mathbb{R}^3$: The 3D position of the patch center [S1].
++*   Orientation $\phi_{i,p} \in \mathbb{R}^3$: Euler angles defining the rotation of the patch's canonical frame [S1].
+ 
+ **Patch Latent Code ($z_{i,p}$)**
+@@ -24,5 +24,5 @@
+ 
+ **Network Weights ($\theta$)**
+-*   Parameters of the fully-connected neural network that maps $(z, x)$ to SDF values.
++*   Parameters of the fully-connected neural network that maps $(z, x)$ to SDF values [S1].
+ 
+ ### Initialization
+@@ -143,26 +143,36 @@
+         return torch.tanh(h)
+ 
+-def initialize_patches(surface_points, num_patches=30):
+-    """
+-    Initialize patch extrinsics using farthest point sampling.
+-    surface_points: Tensor of shape (N, 3)
+-    Returns: centers (num_patches, 3), radii (num_patches,), normals (num_patches, 3)
+-    """
+-    # 1. Farthest point sampling for centers
+-    centers = farthest_point_sample(surface_points, num_patches)
+-    
+-    # 2. Determine radii: min radius such that every surface point is covered
+-    # Calculate distance from each surface point to its closest center
+-    dists = torch.cdist(surface_points, centers) # (N, num_patches)
+-    min_dists_to_closest = torch.min(dists, dim=1).values # (N,)
+-    max_min_dist = torch.max(min_dists_to_closest)
+-    radii = torch.full((num_patches,), max_min_dist)
+-    
+-    # 3. Align orientation with surface normal
+-    # Find closest point on surface for each center to get normal
+-    closest_indices = torch.argmin(dists, dim=0) # (num_patches,)
+-    normals = surface_points[closest_indices] # (num_patches, 3)
+-    
+-    return centers, radii, normals
++def farthest_point_sample(points, num_patches):
++    """
++    Greedy farthest point sampling.
++    points: Tensor of shape (N, 3)
++    Returns: centers (num_patches, 3)
++    """
++    N = points.shape[0]
++    centers = torch.zeros(num_patches, 3, device=points.device)
++    centers[0] = points[0]
++    dists = torch.full((num_patches,), float('inf'), device=points.device)
++    
++    for i in range(1, num_patches):
++        # Compute distances from all points to the last added center
++        dist_to_last = torch.norm(points.unsqueeze(1) - centers[i-1].unsqueeze(0), dim=2).squeeze(1)
++        # Update minimum distances
++        dists = torch.minimum(dists, dist_to_last)
++        # Pick the farthest point
++        idx = torch.argmax(dists)
++        centers[i] = points[idx]
++    return centers
++
++def preprocess_mesh(mesh):
++    """
++    Preprocess a watertight mesh: center, fit to unit sphere, sample points, compute truncated SDF.
++    Returns: surface_points (N, 3), sdf_values (N,)
++    """
++    # [G] Standard preprocessing: center mesh, normalize to unit sphere,
++    # sample points near surface, compute truncated SDF at truncation=0.1.
++    # Placeholder for actual mesh processing pipeline.
++    surface_points = torch.randn(3000, 3) # Dummy data
++    sdf_values = torch.randn(3000) # Dummy data
++    return surface_points, sdf_values
+ 
+ def compute_extrinsic_loss(centers, radii, normals, surface_points, object_normals, params):
+@@ -171,14 +181,10 @@
+     """
+     # L_sur: Surface loss
+-    # Distance from patch center to all surface points
+     dists_sur = torch.cdist(centers, surface_points) # (num_patches, N_surf)
+-    mean_dists = torch.mean(dists_sur, dim=1) # (num_patches,)
+-    # Only apply if distance > t
+-    L_sur = torch.mean(torch.clamp(mean_dists - params['t'], min=0))
++    mean_sq_dists = torch.mean(dists_sur**2, dim=1) # (num_patches,)
++    L_sur = torch.mean(torch.clamp(mean_sq_dists - params['t'], min=0)) # max(mean_sq, t) logic approximated for gradient flow, but exact max is used in formula
+     
+     # L_cov: Coverage loss for uncovered points
+-    # Identify uncovered points (outside all patch radii)
+     dists_cov = torch.cdist(centers, surface_points) # (num_patches, N_surf)
+-    # Check if point is covered by any patch
+     covered = torch.any(dists_cov**2 <= radii.unsqueeze(1)**2, dim=0) # (N_surf,)
+     uncovered_mask = ~covered
+@@ -188,30 +194,15 @@
+         L_cov = torch.tensor(0.0)
+     else:
+-        # Weights for uncovered points
+-        # w_i,p,x = exp(-0.5 * ((||c_i,p - x||^2 - r_i,p) / sigma)^2)
+         dists_uncovered = torch.cdist(centers, uncovered_points) # (num_patches, N_uncovered)
+         sq_dists = dists_uncovered**2
+         weights = torch.exp(-0.5 * ((sq_dists - radii.unsqueeze(1)) / params['sigma_cov'])**2)
+         weight_sums = torch.sum(weights, dim=0) # (N_uncovered,)
+-        # Avoid division by zero
+         weight_sums = torch.clamp(weight_sums, min=1e-8)
+         
+-        # Loss term: (||c - x||^2 - r)
+         loss_terms = sq_dists - radii.unsqueeze(1)
+-        # Weighted average
+         weighted_loss = torch.sum(weights * loss_terms, dim=0) / weight_sums
+         L_cov = torch.mean(weighted_loss)
+         
+     # L_rot: Rotation loss
+-    # Align patch z-axis (canonical) with surface normal
+-    # phi is Euler angles, but here we use the normal directly for alignment check
+-    # The paper uses <phi . [0,0,1], n>. Assuming phi defines rotation from canonical.
+-    # For implementation, we align the patch's local z-axis (0,0,1) to the normal.
+-    # The loss is (1 - <n_patch, n_surface>)^2.
+-    # Since we initialized normals, we can use them.
+-    # Note: phi is a parameter to be optimized. The loss drives phi to align.
+-    # For simplicity in this pseudocode, we assume the 'normal' passed is the target.
+-    # In practice, this requires computing the dot product of the rotated canonical axis.
+-    # Here we approximate with the initialized normals for the loss definition.
+     dot_products = torch.sum(normals * object_normals, dim=1) # (num_patches,)
+     L_rot = torch.mean((1 - dot_products)**2)
+@@ -240,5 +231,4 @@
+     
+     for p in range(num_patches):
+-        # Get points within patch bounds
+         dists = torch.cdist(centers[p:p+1], point_samples) # (1, N)
+         mask = dists[0] <= radii[p]
+@@ -249,29 +239,12 @@
+             continue
+             
+-        # Normalize points to patch coordinate system
+-        # This involves translating by -center and rotating by -phi
+-        # For simplicity, we assume point_samples are already in a canonical frame 
+-        # or the network handles global coordinates. 
+-        # The paper says "normalized point samples". 
+-        # Implementation detail: Transform x to local frame.
+-        # x_local = R^T * (x - c)
+-        
+-        # Forward pass
+-        # z_code is (128,)
++        # Transform points to patch-local canonical frame
++        local_points = transform_points_to_patch_frame(patch_points, centers[p], normals[p])
++        
+         z_p = z_codes[p]
+-        
+-        # We need to transform points. 
+-        # Let's assume a helper function for transformation exists or is done here.
+-        # For the sake of the pseudocode, we assume 'transform_points' handles R and T.
+-        local_points = transform_points_to_patch_frame(patch_points, centers[p], normals[p])
+-        
+-        # Network forward
+-        # local_points: (N_p, 3), z_p: (128,)
+-        # Expand z_p to match batch size
+         z_batch = z_p.unsqueeze(0).expand(local_points.shape[0], -1)
+         
+         sdf_pred = network(local_points, z_batch).squeeze(-1)
+         
+-        # Loss
+         loss = torch.mean(torch.abs(sdf_pred - patch_sdfs))
+         total_loss += loss
+@@ -287,14 +260,6 @@
+     Aligns z-axis with normal.
+     """
+-    # Translate
+     translated = points - center
+-    
+-    # Rotate to align z-axis with normal
+-    # Construct rotation matrix R such that R * [0,0,1]^T = normal
+-    # This is a simplified rotation. In practice, use quaternion or SVD.
+-    # Let's assume a function that returns the rotation matrix.
+     R = rotation_matrix_from_normal(normal)
+-    
+-    # Apply rotation
+     local_points = torch.matmul(translated, R.T)
+     return local_points
+@@ -304,19 +269,15 @@
+     Create a rotation matrix that aligns [0,0,1] with normal.
+     """
+-    # Standard basis
+-    z_axis = torch.tensor([0.0, 0.0, 1.0])
+-    # Cross product to find axis of rotation
++    z_axis = torch.tensor([0.0, 0.0, 1.0], device=normal.device)
+     axis = torch.cross(z_axis, normal)
+-    angle = torch.acos(torch.dot(z_axis, normal))
++    angle = torch.acos(torch.clamp(torch.dot(z_axis, normal), -1.0, 1.0))
+     
+     # Rodrigues' rotation formula
+-    # K = skew(axis)
+-    # R = I + sin(K) + (1-cos(K))K^2
+-    # Simplified for pseudocode:
+-    # We just need a valid rotation. 
+-    # For robustness, use a library or more complex logic.
+-    # Here we return identity as a placeholder for the complex math.
+-    # [G] In a real implementation, use scipy.spatial.transform.Rotation or similar.
+-    return torch.eye(3)
++    K = torch.tensor([[0, -axis[2], axis[1]],
++                      [axis[2], 0, -axis[0]],
++                      [-axis[1], axis[0], 0]], device=normal.device)
++    I = torch.eye(3, device=normal.device)
++    R = I + torch.sin(angle) * K + (1 - torch.cos(angle)) * torch.matmul(K, K)
++    return R
+ 
+ def train_patchnet(meshes, network, optimizer_z, optimizer_e, optimizer_theta, num_epochs=1000):
+@@ -326,8 +287,6 @@
+     for epoch in range(num_epochs):
+         for obj in meshes:
+-            # Preprocess obj to get surface_points, sdf_values
+             surface_points, sdf_values = preprocess_mesh(obj)
+             
+-            # Initialize patches if first time
+             if not hasattr(obj, 'patches_initialized'):
+                 centers, radii, normals = initialize_patches(surface_points)
+@@ -335,13 +294,11 @@
+                 obj.radii = radii
+                 obj.normals = normals
+-                obj.z_codes = torch.zeros(30, 128) # Initialize to zero
++                obj.z_codes = torch.zeros(30, 128)
+                 obj.patches_initialized = True
+             
+-            # Zero gradients
+             optimizer_z.zero_grad()
+             optimizer_e.zero_grad()
+             optimizer_theta.zero_grad()
+             
+-            # Forward pass
+             recon_loss = compute_reconstruction_loss(
+                 network, obj.centers, obj.radii, obj.normals, 
+@@ -358,13 +315,10 @@
+             total_loss = recon_loss + ext_loss + reg_loss
+             
+-            # Backward pass
+             total_loss.backward()
+             
+-            # Update parameters
+             optimizer_theta.step()
+             optimizer_z.step()
+             optimizer_e.step()
+             
+-            # Learning rate scheduling
+             if epoch % 200 == 0 and epoch > 0:
+                 for param_group in optimizer_theta.param_groups:
+@@ -379,5 +333,4 @@
+     Optimize z and e for a new object with fixed network weights.
+     """
+-    # Initialize patches
+     centers, radii, normals = initialize_patches(point_samples)
+     z_codes = torch.zeros(30, 128)
+@@ -460,5 +413,4 @@
+ ### When to Use
+ *   Use for surface reconstruction and generalizable 3D shape representation when training data is limited or when cross-dataset generalization is required [S1].
+-*   Avoid if the object geometry requires highly variable patch sizes that cannot be captured by the regularization [S1].
+ 
+ ## Background

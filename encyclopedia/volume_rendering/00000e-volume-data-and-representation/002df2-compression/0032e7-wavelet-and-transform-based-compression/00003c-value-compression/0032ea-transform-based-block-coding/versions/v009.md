@@ -1,0 +1,37 @@
+# Transform-based Block Coding
+
+Also called: Block Transform Coding
+
+## Overview
+Transform-based block coding compresses volumetric data by partitioning it into fixed-size blocks, applying a linear transform to decorrelate values, and entropy coding the resulting coefficients. It differs from global transform methods by enabling localized random access and from predictive coding by exploiting spatial frequency redundancy within blocks rather than inter-voxel differences.
+
+## Shared principles
+All methods in this family share the mechanism of decomposing the input volume $V$ into a set of coefficients $C$ using a linear transform, followed by encoding and optional decoding for rendering.
+
+1.  **Transform:** The volume is decomposed using a separable 1D filter bank applied along each axis. For a 3D volume, this results in subbands representing different frequency components. In wavelet transforms, these are typically approximation (low-pass) and detail (high-pass) coefficients. In Laplacian pyramids, they are detail residuals between levels of a Gaussian pyramid [see [Wavelet and Pyramid Transforms](3856-wavelet-and-pyramid-transforms.md)].
+2.  **Hierarchy:** The decomposition is recursive. The approximation subband from level $j$ is further decomposed at level $j+1$, creating a tree-like structure of coefficients. This allows for multi-resolution access, where coarse data is available at the root and fine details are deeper in the tree [see [Value compression](6-value-compression.md)].
+3.  **Quantization and Entropy Encoding:** Coefficients are quantized (lossy) or kept precise (lossless). Entropy coding (e.g., Huffman, Arithmetic, Run-Length) is applied to the quantized or raw coefficients to produce the compressed bitstream [see [Value compression](6-value-compression.md)].
+4.  **Reconstruction:** To render, the necessary coefficients are decoded and the inverse transform is applied. This can be done globally (full reconstruction) or locally (block-wise or point-wise) to support adaptive resolution rendering [see [Value compression](6-value-compression.md)].
+
+## Subtopics
+
+### [ZFP Block-Based Compression](1504-zfp-block-based-compression.md)
+ZFP is a floating-point compression algorithm that encodes blocks of 4×4×4 values using fixed-rate, fixed-precision, or fixed-accuracy modes, serving as a de facto standard in the High-Performance Computing (HPC) community. It distinguishes itself from sibling methods like JPEG2000 and TSDF Block Transform Coding by achieving exceptional rate-distortion performance and throughput (up to 2 GB/s) without introducing visual artifacts, while maintaining random access at block granularity. Unlike learned transform coding, ZFP relies on deterministic tensor-product transforms and bit-plane encoding, making it highly predictable and efficient for cache-based decompression.
+
+### [TSDF Block Transform Coding](2548-tsdf-block-transform-coding.md)
+TSDF Block Transform Coding is a compression method for Truncated Signed Distance Function (TSDF) volumes that decomposes the input into fixed-size voxel blocks, applies a 3D Discrete Cosine Transform (DCT) to map spatial values to frequency coefficients, and entropy codes the retained low-frequency components. It distinguishes itself from sibling methods like JPEG2000 by using a fixed, data-independent 3D DCT kernel rather than wavelets, and from Learned Transform Coding by avoiding the need to compute and transmit scene-specific transform parameters, thereby targeting real-time streaming across arbitrary scenes.
+
+### JPEG2000
+JPEG2000 is a wavelet-based compression standard for still images that serves as the primary benchmark for 2-D coding systems in volumetric data compression . In the context of volume rendering, it is often employed as a baseline method where each 2D layer of a layered image is coded separately using JPEG2000 Part-1, referred to as "Individual layer coding" [S1]. This approach sets itself apart from 3D volumetric schemes by ignoring inter-slice correlations, resulting in lower compression efficiency and visible artifacts at layer boundaries compared to methods that exploit 3D redundancy [S1].
+
+### [Learned Transform Coding](7046-learned-transform-coding.md)
+Learned transform coding is a compression approach used when direct rate-distortion optimization is intractable for high-dimensional data. It transforms input data $x$ into a latent representation $z$ via an encoder $E$, recovers a lossy version $\hat{x}$ from a quantized latent $\hat{z}$ via a decoder $D$, and optimizes both transformations jointly with a learned probability model for the latent. It differs from standard transform-based block coding (e.g., [JPEG2000](2883-jpeg2000.md), [ZFP Block-Based Compression](1504-zfp-block-based-compression.md)) by replacing fixed linear transforms and static entropy models with differentiable neural networks and learned priors, allowing for non-linear feature extraction and adaptive bit allocation.
+
+### Block Transformation Coding
+A technique based on block transformation coding to address difficulties of rendering large datasets on a GPU [S1].
+
+## Background
+The concept of block transformation coding for volume rendering was introduced to address the difficulties of rendering large datasets on GPUs. Fout and Ma proposed a real-time volume compression and decompression technique based on block transformation coding for use in GPU-based raycasting pipelines [S1].
+
+## Sources
+[S1] Volume Visualization: A Technical Overview with a Focus on ..., https://pmc.ncbi.nlm.nih.gov/articles/PMC3138940/, fetched 2026-10-27

@@ -1,0 +1,123 @@
+--- v002.md
++++ v003.md
+@@ -17,5 +17,5 @@
+ 
+ **Data Structures:**
+-*   Network $g_v$: A SIREN network mapping $\mathbb{R}^3 \to S^2 \times K_c$ [S1]. It consists of 5 hidden layers, each with 128 units [S1]. The output is reshaped to $K_c$ vectors in $\mathbb{R}^2$, which are normalized to unit length to form directions in $S^2$ [G].
++*   Network $g_v$: A SIREN network mapping $\mathbb{R}^3 \to S^2 \times K_c$ [S1]. It consists of 5 hidden layers, each with 128 units [S1]. The output is reshaped to $K_c$ vectors, which are normalized to unit length to form directions in $S^2$ [G].
+ 
+ **Steps:**
+@@ -34,10 +34,10 @@
+ To train $g_v$, minimize the loss $\mathcal{L}_{v^*}$ consisting of three terms [S1]:
+ 1.  **Depth and Visibility:** Encourages minimum visible depth.
+-    $$\frac{1}{K_c} \sum_i d(p, v_i^*(p)) - \xi(p, v_i^*(p))$$
++    $$\frac{1}{K_c} \sum_i \left( d(p, v_i^*(p)) - \xi(p, v_i^*(p)) \right)$$
+     The $d$ term linearly penalizes longer distances, and the $-\xi$ term pushes visibility to be high [S1].
+ 2.  **Candidate Collapse Prevention:** Prevents candidates from collapsing to a single direction (local minima) [S1].
+     $$\frac{2\tau_n}{K_c^2 - K_c} \sum_i \sum_{j \neq i} v_i^*(p)^T v_j^*(p)$$
+ 3.  **Normal Alignment:** Encodes alignment with local surface normals $n(p, v_i^*(p))$ [S1].
+-    $$\frac{\tau_d}{K_c} \sum_i [v_i^*(p)^T n(p, v_i^*(p)) + 1]^2$$
++    $$\frac{\tau_d}{K_c} \sum_i \left[ v_i^*(p)^T n(p, v_i^*(p)) + 1 \right]^2$$
+ 
+ **Parameters:**
+@@ -54,60 +54,35 @@
+ 
+ ```python
+-import torch
+-import torch.nn as nn
+-import torch.nn.functional as F
+-
+-class CandidateDirectionNetwork(nn.Module):
+-    def __init__(self, Kc=5):
+-        super().__init__()
+-        self.Kc = Kc
+-        # 5 hidden layers, 128 units each, mapping R^3 to R^(2*Kc) [S1]
+-        self.net = nn.Sequential(
+-            nn.Linear(3, 128), nn.Sine(),
+-            nn.Linear(128, 128), nn.Sine(),
+-            nn.Linear(128, 128), nn.Sine(),
+-            nn.Linear(128, 128), nn.Sine(),
+-            nn.Linear(128, 128), nn.Sine(),
+-            nn.Linear(128, 2 * Kc)
+-        )
+-
+-    def forward(self, p):
+-        # p: (B, 3)
+-        out = self.net(p)  # (B, 2*Kc)
+-        # Reshape to (B, Kc, 2) and normalize to S^2 [G]
+-        dirs = out.view(-1, self.Kc, 2)
+-        dirs = F.normalize(dirs, dim=-1)
+-        return dirs
+-
+-def compute_udf_and_vstar(p, candidate_net, eta_T, eps_s, tau_n, tau_d, Kc=5):
++def extract_udf_and_vstar(p, candidate_net, eta_T, eps_s, query_ddf):
+     # 1. Generate candidates [S1]
+     v_candidates = candidate_net(p)  # (B, Kc, 2)
+-
++    
+     # 2. Compute distance and visibility for each candidate [S1]
+-    # External trained (P)DDF query for distance d and visibility xi
+-    d, xi = torch.zeros_like(v_candidates[:, :, 0]), torch.ones_like(v_candidates[:, :, 0])
+-
++    d = torch.zeros_like(v_candidates[:, :, 0])
++    xi = torch.zeros_like(v_candidates[:, :, 0])
++    for i in range(v_candidates.shape[1]):
++        d[:, i], xi[:, i] = query_ddf(p, v_candidates[:, i, :])
++        
+     # 3. Compute weights [S1]
+-    # omega = Softmax( (eta_T^-1 * xi) / (eps_s + d) )
+     logits = (xi / eta_T) / (eps_s + d)
+-    weights = F.softmax(logits, dim=1)  # (B, Kc)
+-
++    weights = torch.softmax(logits, dim=1)  # (B, Kc)
++    
+     # 4. Compute UDF estimate [S1]
+     udf_estimate = torch.sum(weights * d, dim=1)  # (B,)
+-
++    
+     # 5. Compute v* estimate [S1]
+     v_bar = torch.sum(weights.unsqueeze(-1) * v_candidates, dim=1)  # (B, 2)
+-    v_star = F.normalize(v_bar, dim=-1)  # (B, 2)
+-
++    v_star = torch.nn.functional.normalize(v_bar, dim=-1)  # (B, 2)
++    
+     return udf_estimate, v_star, weights, v_candidates, d, xi
+ 
+-def compute_training_loss(p, candidate_net, eta_T, eps_s, tau_n, tau_d, Kc=5):
+-    udf, v_star, weights, v_candidates, d, xi = compute_udf_and_vstar(
+-        p, candidate_net, eta_T, eps_s, tau_n, tau_d, Kc
++def compute_training_loss(p, candidate_net, eta_T, eps_s, tau_n, tau_d, Kc, query_ddf):
++    udf, v_star, weights, v_candidates, d, xi = extract_udf_and_vstar(
++        p, candidate_net, eta_T, eps_s, query_ddf
+     )
+-
++    
+     # Term 1: Depth and Visibility [S1]
+     term1 = torch.mean(torch.sum(d - xi, dim=1) / Kc)
+-
++    
+     # Term 2: Candidate Collapse Prevention [S1]
+     dot_products = torch.bmm(v_candidates, v_candidates.transpose(1, 2))  # (B, Kc, Kc)
+@@ -115,11 +90,12 @@
+     dot_products = dot_products * mask
+     term2 = (2 * tau_n / (Kc**2 - Kc)) * torch.mean(torch.sum(dot_products, dim=(1, 2)))
+-
++    
+     # Term 3: Normal Alignment [S1]
+-    # Query surface normals n(p, v) from DDF
+     normals = torch.zeros_like(v_candidates)
++    for i in range(v_candidates.shape[1]):
++        normals[:, i, :] = query_ddf_normal(p, v_candidates[:, i, :])
+     vn_dot = torch.sum(v_candidates * normals, dim=-1)  # (B, Kc)
+     term3 = (tau_d / Kc) * torch.mean(torch.sum((vn_dot + 1)**2, dim=1))
+-
++    
+     loss = term1 + term2 + term3
+     return loss
+@@ -127,5 +103,5 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the number of candidates $K_c$ and the cost of querying the (P)DDF. Each query point requires $K_c$ forward passes through the (P)DDF [S1].
++*   **Time Complexity:** Depends on the number of candidates $K_c$ and the cost of querying the (P)DDF, requiring $K_c$ forward passes per query point [S1].
+ *   **Memory Complexity:** Low, as it only stores the small SIREN network $g_v$ (5 layers, 128 units) and the batch of candidate directions [S1].
+ *   **Strengths:** Provides a stable and less noisy estimate of $v^*$ compared to gradient-based methods [S1]. Explicitly handles visibility and distance trade-offs via softmax weighting [S1].

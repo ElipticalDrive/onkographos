@@ -1,0 +1,170 @@
+# DaReNeRF
+
+Also called: DaReNeRF architecture, Direction-Aware Representation, Direction-aware Representation for Dynamic Scenes
+
+## Overview
+DaReNeRF is a method for novel view synthesis of dynamic scenes that extends plane-based 4D volume decomposition with a direction-aware representation to capture scene dynamics from six distinct directions [S1]. It addresses the shift variance and direction ambiguity (checkerboard artifacts) inherent in traditional 2D Discrete Wavelet Transforms (DWT) by utilizing the Inverse Dual-Tree Complex Wavelet Transform (DTCWT) [S1][S2, unofficial]. Unlike D-NeRF, which models dynamic scenes using a static MLP with time as an input, DaReNeRF decomposes the 4D spatiotemporal volume into low-rank plane-based components enhanced by directional wavelet coefficients, offering improved efficiency and artifact reduction for complex motions [S1][S2, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Inputs:** A set of posed 2D images with timestamps. The scene is represented in Normalized Device Coordinates (NDC) [S1].
+*   **Outputs:** Rendered RGB images for arbitrary camera poses and time steps via differentiable volumetric rendering [S1].
+
+**Data Structures**
+The core data structure is the Direction-Aware Representation, which decomposes the 4D spatiotemporal volume $D$ into three terms, each consisting of the Hadamard product of two 2D plane-based representations and a learned vector [S1].
+
+1.  **Plane-based Representations ($M$):** Learned 2D tensors $M_{rAB} \in \mathbb{R}^{A \times B}$ where $(A, B) \in \{X, Y, Z, T\}^2$ and $A \neq B$. These are not stored directly but are reconstructed from wavelet coefficients [S1].
+2.  **Learned Vectors ($v$):** Vectors $v_{ri} \in \mathbb{R}^F$ along the feature axes, where $F=3$ for RGB colors [S1].
+3.  **Wavelet Coefficients:** For each plane $M_{rAB}$, the representation is defined by:
+    *   One approximation coefficient: $W^{AB}_{a,r} \in \mathbb{R}^{m/2 \times n/2}$.
+    *   Six real direction-aware wavelet coefficients: $\{R\{W^{AB}_{i,r}\}\}_{i=1}^6$.
+    *   Six imaginary direction-aware wavelet coefficients: $\{I\{W^{AB}_{i,r}\}\}_{i=1}^6$.
+    *   Here, $m, n$ are the spatial dimensions of the plane, and $l$ is the DTCWT transformation level [S1].
+4.  **Masks ($M^{AB}$):** Learnable scalar masks used to enforce sparsity [S1].
+5.  **Voxel Grid:** A small 3D voxel representation indicating emptiness, used to skip points in empty regions [S1].
+
+**Formulas**
+The 4D volume $D$ is represented as the sum of three components [S1]:
+
+$$
+D = \sum_{r=1}^{R_1} M_{rXY} \circ M_{rZT} \circ v_{r1} + \sum_{r=1}^{R_2} M_{rXZ} \circ M_{rYT} \circ v_{r2} + \sum_{r=1}^{R_3} M_{rYZ} \circ M_{rXT} \circ v_{r3}
+$$
+
+where $R_1, R_2, R_3$ are the number of low-rank components, and $R = R_1 + R_2 + R_3 \ll N$ (spatial resolution) [S1].
+
+The plane-based representation $M^{AB}_r$ is recovered from the wavelet coefficients using the Inverse Dual-Tree Complex Wavelet Transform (IDTCWT) [S1]:
+
+$$
+M^{AB}_r = \text{IDTCWT}\left([W^{AB}_{a,r}, \{R\{W^{AB}_{i,r}\}\}_{i=1}^6, \{I\{W^{AB}_{i,r}\}\}_{i=1}^6]\right)
+$$
+
+To handle storage and sparsity, wavelet coefficients are masked [S1]:
+
+$$
+\tilde{W}^{AB} = \text{sg}\left(H(M^{AB}) - \text{sigmoid}(M^{AB})\right) \odot W^{AB}
+$$
+
+where $\text{sg}$ is the stop-gradient operator, $H$ is the Heaviside step function, and $M^{AB}$ are the learned masks [S1].
+
+For static scenes, the decomposition simplifies to a TensorRF-like form [S1]:
+
+$$
+D = \sum_{r=1}^{R_1} M^{XY}_r \circ v^r_Z \circ v^{r1} + \sum_{r=1}^{R_2} M^{XZ}_r \circ v^r_Y \circ v^{r2} + \sum_{r=1}^{R_3} M^{YZ}_r \circ v^r_X \circ v^{r3}
+$$
+
+**Numbered Steps**
+1.  **Decomposition:** Decompose the 4D spatiotemporal volume $D$ into the sum of three terms as defined in the volume formula above [S1].
+2.  **Reconstruction:** For each pair of planes (e.g., XY and ZT), reconstruct the plane-based representation $M^{AB}_r$ from the approximation and directional wavelet coefficients using IDTCWT [S1].
+3.  **Feature Extraction:** Extract feature vectors from the paired planes. Multiply these feature vectors element-wise [S1].
+4.  **Concatenation:** Concatenate the multiplied results from all three terms into a single vector [S1].
+5.  **Feature Projection:** Multiply the concatenated vector by $V_{RF}$, a 2D tensor stacking all $v_{ri}$, to compute density and appearance features [S1].
+6.  **Opacity Query:** Query point opacities directly from the computed density features [S1].
+7.  **Color Regression:** Regress RGB color values using a compact Multi-Layer Perceptron (MLP). The inputs to the MLP are the appearance features and the view directions [S1].
+8.  **Rendering:** Synthesize final images via differentiable volumetric rendering along rays [S1].
+9.  **Optimization:** Minimize the total loss function, which includes photometric loss, total variation regularization, and mask sparsity loss [S1].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def darenerf_forward(xyzt, view_dirs, params):
+    """
+    Forward pass for DaReNeRF.
+    xyzt: (N, 4) tensor of space-time coordinates [x, y, z, t] in NDC.
+    view_dirs: (N, 3) tensor of view directions.
+    params: Dictionary containing wavelet coefficients, vectors, masks, and MLP weights.
+    """
+    # 1. Reconstruct planes from wavelet coefficients
+    # For each term r in {1, 2, 3} and plane pairs (AB, CD)
+    planes = {}
+    for r in range(3):
+        for pair in [('XY', 'ZT'), ('XZ', 'YT'), ('YZ', 'XT')]:
+            plane_ab_name, plane_cd_name = pair
+            # Apply mask to wavelet coefficients
+            W_ab = apply_mask(params['W_' + plane_ab_name + '_' + str(r)], params['M_' + plane_ab_name])
+            W_cd = apply_mask(params['W_' + plane_cd_name + '_' + str(r)], params['M_' + plane_cd_name])
+            
+            # Reconstruct plane using IDTCWT
+            M_ab = idtcwt(W_ab)
+            M_cd = idtcwt(W_cd)
+            
+            planes[(r, plane_ab_name)] = M_ab
+            planes[(r, plane_cd_name)] = M_cd
+
+    # 2. Compute features for each point
+    density_features = []
+    appearance_features = []
+    
+    for r in range(3):
+        # Get feature vectors for the two planes
+        # Note: In implementation, this involves sampling M_ab and M_cd at xyzt projections
+        feat_ab = sample_plane(planes[(r, 'AB')], xyzt[:, :2]) # Example: XY plane
+        feat_cd = sample_plane(planes[(r, 'CD')], xyzt[:, 2:]) # Example: ZT plane
+        
+        # Element-wise multiplication
+        prod = feat_ab * feat_cd
+        
+        # Concatenate results from all 3 terms
+        # (Assuming prod is reshaped appropriately)
+        density_features.append(prod[:, :DENSITY_DIM])
+        appearance_features.append(prod[:, APPEARANCE_START:APPEARANCE_END])
+
+    # Concatenate all terms
+    all_density = torch.cat(density_features, dim=1)
+    all_appearance = torch.cat(appearance_features, dim=1)
+    
+    # Multiply by V_RF (stacked vectors)
+    # V_RF shape: (Total_R * Feature_Size, Feature_Out)
+    final_density = torch.matmul(all_density, params['V_RF_density'])
+    final_appearance = torch.matmul(all_appearance, params['V_RF_appearance'])
+    
+    # 3. Query Opacity
+    opacity = sigmoid(final_density)
+    
+    # 4. Regress Color
+    # MLP takes appearance features and view directions
+    color = color_mlp(final_appearance, view_dirs)
+    
+    return opacity, color
+
+def apply_mask(W, M):
+    """Apply trainable mask to wavelet coefficients."""
+    # sg: stop-gradient, H: Heaviside, sigmoid: sigmoid function
+    mask_val = stop_gradient(heaviside(M) - sigmoid(M))
+    return mask_val * W
+
+def idtcwt(coeffs):
+    """Inverse Dual-Tree Complex Wavelet Transform."""
+    # coeffs: [approx, real_coeffs_6, imag_coeffs_6]
+    # Returns 2D plane representation
+    pass
+```
+
+**Parameters**
+*   **F:** Feature size, typically 3 (RGB) [S1].
+*   **R:** Total number of low-rank components ($R = R_1 + R_2 + R_3$), where $R \ll N$ [S1].
+*   **Spatial Grid Size:** 512 [S1].
+*   **Temporal Grid Size:** 300 [S1].
+*   **Batch Size:** 4,096 [S1].
+*   **Loss Weights:** $\lambda_{reg}$ for total variation loss, $\lambda_m$ for mask sparsity loss [S1].
+
+**Edge Cases and Pitfalls**
+*   **Shift Variance:** Traditional 2D DWT suffers from shift variance, where small shifts in input signal disrupt wavelet oscillation patterns, causing poor results in dynamic regions with motion or camera movement [S1]. DaReNeRF uses DTCWT to ensure shift invariance [S1].
+*   **Direction Ambiguity:** Traditional 2D DWT has poor direction selectivity, producing a checkerboard pattern that blends representations from $\pm 45^\circ$, leading to ghosting artifacts around moving objects [S1]. DaReNeRF uses 6 real and 6 imaginary coefficients aligned to specific directions to eliminate this [S1].
+*   **Empty Regions:** Large empty regions in dynamic scenes waste computation. DaReNeRF uses a small 3D voxel representation indicating emptiness by aggregating maximum opacities across time steps to skip these points [S1].
+
+## Operating characteristics
+*   **Memory Complexity:** Reduced from $O(N^3 T F)$ for direct 4D volume modeling to $O(R N^2 T F)$ using the plane-based decomposition [S1].
+*   **Training Time:** Achieves a twofold reduction in training time compared to prior work [S2, unofficial].
+*   **Hardware:** Trained on a single A100 GPU [S1].
+*   **Strengths:** Eliminates checkerboard artifacts and shift variance issues of DWT; efficient memory usage for high-resolution dynamic scenes; handles complex motions well [S1].
+*   **Limitations:** Requires careful tuning of mask sparsity; DTCWT implementation is more complex than standard DWT [S1].
+*   **When to Use:** Novel view synthesis of dynamic scenes with complex motion where high fidelity and artifact reduction are critical [S1].
+*   **When Not to Use:** Static scenes (simpler methods like TensorRF may suffice); real-time applications requiring extremely low latency without pre-training [S1].
+
+## Background
+DaReNeRF was introduced in the paper "DaReNeRF: Direction-aware Representation for Dynamic Scenes" [S1]. It builds upon plane-based 4D volume decomposition methods [S1] and addresses limitations of 2D DWT-based representations [S1]. The method is used in DaReNeRF and DaReNeRF-S (sparse variant) for novel view synthesis on Plenoptic Video and D-NeRF datasets [S1].
+
+## Sources
+[S1] DaReNeRF: Direction-aware Representation for Dynamic Scenes, https://doi.org/10.1109/cvpr52733.2024.00481, fetched 2026-10-27
+[S2] Dynamic Scene Reconstruction: Recent Advance in Real-time Rendering and Streaming, https://doi.org/10.48550/arXiv.2503.08166, fetched 2026-10-29 (unofficial)

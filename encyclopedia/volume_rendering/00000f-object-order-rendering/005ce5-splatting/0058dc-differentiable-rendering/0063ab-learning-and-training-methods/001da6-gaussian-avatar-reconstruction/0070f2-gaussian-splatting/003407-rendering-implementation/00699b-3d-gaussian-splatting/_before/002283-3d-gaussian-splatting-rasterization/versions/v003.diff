@@ -1,0 +1,116 @@
+--- v002.md
++++ v003.md
+@@ -45,5 +45,5 @@
+ 
+ 2.  **3D Covariance Construction:** Compute the 3D covariance matrix from quaternions and scales [S1, S2, unofficial]:
+-    $$ \mathbf{C}_{3D} = \mathbf{R} \mathbf{S} \mathbf{S}^T \mathbf{R}^T $$
++    $$ \mathbf{C}_{3D} = \mathbf{R} \mathbf{S}^2 \mathbf{R}^T $$
+     where $\mathbf{R}$ is the rotation matrix derived from `quats` and $\mathbf{S}$ is the diagonal scale matrix from `scales` [S2, unofficial]. Result shape: $[N, 3, 3]$ [S1, unofficial].
+ 
+@@ -113,6 +113,6 @@
+ def compute_cov_3D(quats, scales):
+     R = quat_to_rot_mat(quats)
+-    S = np.diagflat(scales)
+-    return R @ S @ S.T @ R.T
++    cov_3D = R @ (scales[:, :, None] * scales[:, None, :]) @ R.T
++    return cov_3D
+ 
+ def project_to_2d(means_3D, cov_3D, viewmats, Ks, width, height):
+@@ -125,10 +125,11 @@
+         K = Ks[c]
+         means_c = (V[:3, :3] @ means_3D.T + V[:3, 3:4]).T
+-        means_2D[c] = (K @ means_c.T).T[:, :2] / means_c[:, 2:3]
++        depths_c = means_c[:, 2:3]
++        means_2D[c] = (K @ means_c.T).T[:, :2] / depths_c
+         J = np.zeros((2, 3))
+-        J[0, 0] = K[0, 0] / means_c[:, 2]
+-        J[0, 2] = -K[0, 0] * means_c[:, 0] / (means_c[:, 2]**2)
+-        J[1, 1] = K[1, 1] / means_c[:, 2]
+-        J[1, 2] = -K[1, 1] * means_c[:, 1] / (means_c[:, 2]**2)
++        J[0, 0] = K[0, 0] / depths_c[:, 0]
++        J[0, 2] = -K[0, 0] * means_c[:, 0] / (depths_c[:, 0]**2)
++        J[1, 1] = K[1, 1] / depths_c[:, 0]
++        J[1, 2] = -K[1, 1] * means_c[:, 1] / (depths_c[:, 0]**2)
+         cov_2D[c] = J @ cov_3D @ J.T
+     return means_2D, cov_2D
+@@ -141,9 +142,26 @@
+             M = cov_2D[c, n]
+             det = M[0, 0]*M[1, 1] - M[0, 1]*M[1, 0]
+-            if det == 0: det = 1e-6
++            det = max(det, 1e-6)
+             conics[c, n, 0] = M[1, 1] / det
+             conics[c, n, 1] = -M[0, 1] / det
+             conics[c, n, 2] = M[0, 0] / det
+     return conics
++
++def compute_radii(cov_2D, width, height):
++    C, N, _, _ = cov_2D.shape
++    radii = np.zeros((C, N, 2))
++    for c in range(C):
++        for n in range(N):
++            M = cov_2D[c, n]
++            trace = M[0, 0] + M[1, 1]
++            det = M[0, 0]*M[1, 1] - M[0, 1]*M[1, 0]
++            disc = np.sqrt(max(trace**2 - 4*det, 0))
++            lambda1 = (trace + disc) / 2
++            lambda2 = (trace - disc) / 2
++            r_x = 3.0 * np.sqrt(max(lambda1, 0))
++            r_y = 3.0 * np.sqrt(max(lambda2, 0))
++            radii[c, n, 0] = min(r_x, width)
++            radii[c, n, 1] = min(r_y, height)
++    return radii
+ 
+ def tile_intersection(means2d, radii, depths, tile_size, tile_width, tile_height):
+@@ -193,5 +211,5 @@
+     means_2D, cov_2D = project_to_2d(means_3D, cov_3D, viewmats, Ks, width, height)
+     
+-    radii = np.ones((C, N, 2)) * 2.0
++    radii = compute_radii(cov_2D, width, height)
+     conics = compute_conics(cov_2D)
+     depths = np.zeros((C, N))
+@@ -210,5 +228,5 @@
+         dirs_norm = np.maximum(np.linalg.norm(dirs, axis=-1, keepdims=True), 1e-8)
+         dirs = dirs / dirs_norm
+-        colors_for_raster = np.zeros((C, N, 3))
++        colors_for_raster = colors[None, :, :]
+     else:
+         colors_for_raster = colors[None, :, :]
+@@ -217,9 +235,8 @@
+     alphas = compute_alphas(opacities_cn, means_2D, conics, width, height)
+     
+-    mask = depths >= near_plane
+-    idxs = np.argsort(depths[mask], axis=0)
+-    means2d_sorted = means_2D[mask][idxs]
+-    alphas_sorted = alphas[mask][idxs]
+-    colors_sorted = colors_for_raster[mask][idxs]
++    sorted_indices = np.argsort(depths, axis=1)
++    means2d_sorted = np.take_along_axis(means_2D, sorted_indices[:, :, None], axis=1)
++    alphas_sorted = np.take_along_axis(alphas, sorted_indices[:, :, None, None], axis=1)
++    colors_sorted = np.take_along_axis(colors_for_raster[:, :, None, None, :], sorted_indices[:, :, None, None, None], axis=1)
+     
+     transmittance = np.ones((C, 1, H, W))
+@@ -227,7 +244,7 @@
+     render_alphas = np.zeros((C, H, W, 1))
+     
+-    for i in range(alphas_sorted.shape[0]):
+-        alpha_i = alphas_sorted[i]
+-        color_i = colors_sorted[i]
++    for i in range(alphas_sorted.shape[1]):
++        alpha_i = alphas_sorted[:, i, :, :]
++        color_i = colors_sorted[:, i, :, :, :]
+         weight = alpha_i * transmittance
+         render_colors += weight[..., None] * color_i
+@@ -305,12 +322,5 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Not given in the sources.
+-- **Memory Complexity:** Not given in the sources.
+-- **Measured Performance:** Not given in the sources.
+-- **Scaling:** Not given in the sources.
+-- **Strengths:** Not given in the sources.
+-- **Limitations:** Not given in the sources.
+-- **When to use:** Not given in the sources.
+-- **When not to use:** Not given in the sources.
++Not given in the sources.
+ 
+ ## Background

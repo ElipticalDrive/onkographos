@@ -1,0 +1,236 @@
+--- v004.md
++++ v005.md
+@@ -1,115 +1,156 @@
+ # CNN Post-Processing Network
+ 
+-Also called: Reflectance Padding CNN, Shallow Refinement CNN
++Also called: Lightweight CNN
+ 
+ ## Overview
+-The CNN Post-Processing Network is a shallow convolutional neural network applied after the initial volumetric rendering step to enhance texture detail and convert feature representations into final RGB colors [S1]. It solves the problem of blurry or low-fidelity outputs from standard neural volume rendering by leveraging spatial context from neighboring pixels, ensuring that the rendering process for each pixel depends on its local neighborhood rather than just the individual ray [S1]. It sets itself apart from its siblings, the [RGB Network Layer](4051-rgb-network-layer.md) and [Sigma Network Layer](6256-sigma-network-layer.md), by operating in image space (2D) rather than feature space along the ray, and by explicitly using padding strategies to prevent upsampling artifacts [S1].
++A post-processing convolutional neural network applied to MLP-decoded results to reduce boundary artifacts [S1, S2]. It sets itself apart from its sibling [Field Output Prediction](4830-field-output-prediction.md) by operating on the final rendered image or feature maps rather than predicting field values directly, and from [Sigma Network Layer](6256-sigma-network-layer.md) by focusing on spatial texture refinement and artifact mitigation rather than density estimation [S1, S2].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A 2D feature map (or rendered patch) $R$ of size $H \times W \times C_{in}$, where $C_{in}$ is the number of input channels (features).
+-*   **Output:** An RGB image of size $H \times W \times 3$.
++*   **Input:** The output from the finest-scale MLPs (RGB values or feature maps) [S1, S2].
++*   **Output:** Refined RGB image with reduced boundary artifacts [S1, S2].
+ 
+ **Data Structures:**
+-The network consists of a sequence of convolutional layers followed by a fully connected (perceptron) layer.
+-*   **Convolutional Layers:** Use $3 \times 3$ kernels.
+-*   **Padding:** "Reflectance" padding is applied to the inputs of each convolution.
+-*   **Activation:** ReLU is used after each convolutional layer.
+-*   **Final Layer:** A feed-forward perceptron (fully connected layer) maps the final feature space to RGB space.
++*   **CNN Architecture:** A shallow convolutional network. Specific implementations vary:
++    *   *ECNR variant:* Five convolution layers, each with 32 channels. No skip connections [S1].
++    *   *AligNeRF variant:* 3-layer convolutional network with ReLU activations and 3×3 kernels [S2].
++    *   *VoxGRAF variant:* 2 hidden layers of dimension 16 and kernel size 3 [S3].
+ 
+ **Steps:**
+-1.  **Padding:** Apply reflectance padding to the input feature map $R$. This involves mirroring the boundary pixels to create a padded tensor $R_{pad}$.
+-2.  **Convolution 1:** Apply a $3 \times 3$ convolution to $R_{pad}$.
+-3.  **Crop:** Remove the padding values from the output of Convolution 1 to restore the original spatial dimensions $H \times W$. This prevents checkerboard artifacts [S1].
+-4.  **Activation:** Apply ReLU activation to the cropped output.
+-5.  **Convolution 2:** Apply a $3 \times 3$ convolution to the activated output.
+-6.  **Crop:** Remove padding values from the output of Convolution 2.
+-7.  **Activation:** Apply ReLU activation.
+-8.  **Convolution 3:** Apply a $3 \times 3$ convolution to the activated output.
+-9.  **Crop:** Remove padding values from the output of Convolution 3.
+-10. **Perceptron:** Apply a feed-forward perceptron layer to the final feature map to convert it from feature space to RGB space.
++1.  **Input Padding:** Apply "reflectance" padding to the input features to handle boundary conditions [S2].
++2.  **Convolution:** Pass the padded input through the convolutional layers.
++    *   For the ECNR variant, apply five convolutions with 32 channels [S1].
++    *   For the AligNeRF variant, apply three convolutions with 3×3 kernels [S2].
++    *   For the VoxGRAF variant, apply two hidden layers with dimension 16 and kernel size 3 [S3].
++3.  **Output Trimming:** Remove the padding values from the outputs to prevent checkerboard artifacts [S2].
++4.  **Feature-to-RGB Conversion:** Use a feed-forward perceptron layer to convert the representation from feature space to RGB space [S2].
++5.  **Training (Optional):** Train the CNN using a loss function defined as the Mean Squared Error (MSE) between the MLP-decoded results and the ground-truth (GT) volume [S1].
++6.  **Quantization (Optional):** Apply quantization with 9 bits without subsequent fine-tuning to reduce model size [S1].
+ 
+ **Formulas:**
+-Let $f$ be the convolution operation with reflectance padding. Let $c$ be the cropping operation that removes the border of width $p$ (where $p$ is the padding size). Let $\sigma$ be the ReLU activation function. Let $P$ be the perceptron layer.
+-$$ F_1 = \sigma(c(f(R, k=3, p=1))) $$
+-$$ F_2 = \sigma(c(f(F_1, k=3, p=1))) $$
+-$$ F_3 = c(f(F_2, k=3, p=1)) $$
+-$$ I_{RGB} = P(F_3) $$
++*   **Loss Function (ECNR):**
++    $$ L = \text{MSE}(R_{MLP}, V_{GT}) $$
++    Where $R_{MLP}$ is the MLP-decoded result and $V_{GT}$ is the ground-truth volume [S1].
+ 
+ **Parameters:**
+-*   Kernel size: $3 \times 3$ [S1].
+-*   Number of convolutional layers: 3 [S1].
+-*   Activation: ReLU [S1].
+-*   Padding type: Reflectance [S1].
++*   **ECNR:** 5 convolution layers, 32 channels per layer, 9-bit quantization [S1].
++*   **AligNeRF:** 3 convolution layers, 3×3 kernels, ReLU activation [S2].
++*   **VoxGRAF:** 2 hidden layers, dimension 16, kernel size 3, alias-free layers with critical sampling [S3].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Checkerboard Artifacts:** Standard upsampling or improper padding can cause checkerboard artifacts. This is prevented by using reflectance padding and explicitly removing the padding values in the outputs [S1].
+-*   **Multiview Inconsistency:** Because the CNN is very shallow and performs no upsampling, multiview inconsistency is avoided [S1].
++*   **Boundary Artifacts:** Limited capacity does not guarantee removal of boundary artifacts when distortion is significant; remaining artifacts may still negatively impact rendering quality [S1].
++*   **Checkerboard Artifacts:** Prevented by removing padding values in the outputs [S2].
++*   **Multiview Inconsistency:** Avoided because the CNN is very shallow and performs no upsampling [S2].
+ 
+ **Pseudocode:**
+ ```python
+-def cnn_post_processing(feature_map):
++def cnn_post_processing(input_features, architecture='ecnr'):
+     """
+-    Applies a 3-layer shallow CNN with reflectance padding and cropping
+-    to convert feature maps to RGB.
++    Applies CNN post-processing to MLP-decoded results.
+     
+     Args:
+-        feature_map: Tensor of shape (H, W, C_in)
++        input_features: Tensor of shape (H, W, C) or (B, H, W, C) from MLP.
++        architecture: String specifying the CNN variant ('ecnr', 'alignerf', 'voxgraf').
+         
+     Returns:
+-        Tensor of shape (H, W, 3)
++        Refined RGB tensor.
+     """
+-    # Step 1: Reflectance Padding
+-    # Reflectance padding mirrors the boundary. For kernel size 3, padding is 1.
+-    padded = reflectance_pad(feature_map, pad_size=1)
+-    
+-    # Step 2: Convolution 1
+-    conv1 = conv2d(padded, kernel_size=3, channels_out=feature_map.shape[2]) # Assuming same channels or defined by model
+-    # Step 3: Crop
+-    cropped1 = crop(padded_output=conv1, crop_size=1)
+-    # Step 4: Activation
+-    act1 = relu(cropped1)
+-    
+-    # Step 5: Convolution 2
+-    conv2 = conv2d(act1, kernel_size=3, channels_out=feature_map.shape[2])
+-    # Step 6: Crop
+-    cropped2 = crop(conv2, crop_size=1)
+-    # Step 7: Activation
+-    act2 = relu(cropped2)
+-    
+-    # Step 8: Convolution 3
+-    conv3 = conv2d(act2, kernel_size=3, channels_out=feature_map.shape[2])
+-    # Step 9: Crop
+-    cropped3 = crop(conv3, crop_size=1)
+-    
+-    # Step 10: Perceptron to RGB
+-    # Flatten spatial dimensions, apply linear layer, reshape
+-    flat = flatten_spatial(cropped3)
+-    rgb_flat = perceptron(flat) # Maps to 3 channels
+-    rgb_image = reshape_to_image(rgb_flat, H, W, 3)
+-    
+-    return rgb_image
++    if architecture == 'ecnr':
++        # ECNR: 5 conv layers, 32 channels, no skip connections
++        x = reflectance_pad(input_features)
++        for i in range(5):
++            x = conv2d(x, filters=32, kernel_size=3, stride=1, padding='valid')
++            x = relu(x)
++        # No quantization in inference, only during training/storage
++        return x
++        
++    elif architecture == 'alignerf':
++        # AligNeRF: 3 conv layers, 3x3 kernels, ReLU, then perceptron
++        x = reflectance_pad(input_features)
++        for i in range(3):
++            x = conv2d(x, filters=32, kernel_size=3, stride=1, padding='valid')
++            x = relu(x)
++        # Remove padding values to prevent checkerboard artifacts
++        x = trim_padding(x)
++        # Convert feature space to RGB space
++        rgb = perceptron_layer(x)
++        return rgb
++        
++    elif architecture == 'voxgraf':
++        # VoxGRAF: 2 hidden layers, dim 16, kernel 3, alias-free
++        x = reflectance_pad(input_features)
++        for i in range(2):
++            x = alias_free_conv2d(x, filters=16, kernel_size=3, stride=1, padding='valid')
++            x = relu(x)
++        # Final layer to RGB
++        rgb = conv2d(x, filters=3, kernel_size=1, stride=1, padding='valid')
++        return rgb
++        
++    else:
++        raise ValueError("Unknown architecture")
++
++def reflectance_pad(tensor):
++    """Applies reflectance padding to handle boundaries."""
++    # Implementation depends on framework, typically replicates boundary values
++    return pad(tensor, mode='reflect')
++
++def trim_padding(tensor):
++    """Removes padding values from the output."""
++    # Assuming padding was 1 pixel on each side
++    return tensor[:, 1:-1, 1:-1, :]
++
++def alias_free_conv2d(tensor, filters, kernel_size, stride, padding):
++    """Applies alias-free convolution with critical sampling."""
++    # Upsample, convolve, downsample to prevent texture sticking
++    # Simplified: standard conv for pseudocode clarity, 
++    # but note that alias-free layers use specific upsampling/downsampling
++    return conv2d(tensor, filters, kernel_size, stride, padding)
++
++def perceptron_layer(tensor):
++    """Converts feature space to RGB space."""
++    # Flatten, dense layer to 3 channels
++    flat = flatten(tensor)
++    rgb = dense(flat, units=3)
++    return reshape(rgb, tensor.shape[:-1] + (3,))
+ ```
+ 
+ ## Subtopics
+ 
++### [Supplementary Feature Input for Super-Resolution](7251-supplementary-feature-input-for-super-resolution.md)
++A technique where the super-resolution network accepts multiple feature maps alongside the low-resolution color image to improve reconstruction quality, specifically adapted for volumetric rendering. It sets itself apart from standard image super-resolution by incorporating volumetric-specific auxiliary data (depth, color-opacity vectors) to resolve ambiguities inherent in volume rendering, such as undefined depth in transparent regions.
++
+ ### 2D Refinement Layers
+-An optional shallow 2D CNN used to refine the rendered image, specifically designed to prevent texture sticking under viewpoint changes [S2]. It sets itself apart from the standard post-processing CNN by using alias-free layers with critical sampling [S2]. It is chosen when high-fidelity synthesis is required and texture consistency across views is critical [S2].
+-*   **Definition:** A shallow 2D CNN applied to refine the rendered image [S2].
+-*   **Step:** Apply a shallow 2D CNN with 2 hidden layers of dimension 16 and kernel size 3 [S2]. Use alias-free layers with critical sampling [S2].
+-*   **Parameter:** Hidden layers: 2 [S2]. Hidden layer dimension: 16 [S2]. Kernel size: 3 [S2].
++An optional shallow 2D CNN applied to refine the rendered image, using alias-free layers to prevent texture sticking under viewpoint changes [S3]. It sets itself apart by using alias-free layers with critical sampling to maintain consistency across viewpoints [S3]. Choose this when rendering dynamic scenes with viewpoint changes where texture aliasing is a concern [S3].
++
++### Boundary Artifact Mitigation
++Mitigates rendering artifacts caused by inconsistent outputs between adjacent disjoint volumetric blocks along their boundaries [S1]. It sets itself apart by specifically targeting block-boundary discontinuities in multiscale representations [S1]. Choose this when using block-based MLP encoding (like ECNR) where boundary artifacts are prominent [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear with respect to the number of pixels and channels, as it is a shallow CNN with fixed kernel size [S1].
+-*   **Memory Complexity:** Low, as the network is shallow and does not store large intermediate feature maps beyond the input and output [S1].
+-*   **Strengths:** Improves texture detail without causing multiview inconsistency [S1]. Prevents checkerboard artifacts [S1].
+-*   **Limitations:** Does not perform upsampling, so it cannot increase resolution [S1].
+-*   **When to use:** When the initial neural volume rendering produces blurry outputs and multiview consistency is required [S1].
+-*   **When not to use:** When resolution increase is needed (use super-resolution variants instead) [S1].
++**Time and Memory Complexity:**
++*   **Encoding Overhead:** Adds approximately 5 minutes to encoding time and 100 KB to model size [S1].
++*   **Decoding Overhead:** Adds approximately 50 seconds to decoding time due to sequential inference [S1].
++*   **Memory:** The CNN parameter size is small (e.g., 100 KB for the ECNR variant) [S1].
++
++**Measured Performance:**
++*   Despite the added sequential inference time, decoding remains significantly faster than neurcomp [S1].
++*   The CNN yields the best result with the same model size compared to other methods like MINER+ [S1].
++
++**Strengths and Limitations:**
++*   **Strengths:** Reduces boundary artifacts effectively; avoids multiview inconsistency due to shallow depth and lack of upsampling [S1, S2].
++*   **Limitations:** Limited capacity does not guarantee removal of boundary artifacts when distortion is significant; training overhead is non-negligible [S1].
++
++**When to Use:**
++*   Use when boundary artifacts from block-based MLP encoding are visually distracting and performance constraints allow for sequential CNN inference [S1].
++*   Use when multiview consistency is critical and upsampling artifacts must be avoided [S2].
++
++**When Not to Use:**
++*   Do not use when real-time performance is critical and the overhead of sequential inference is unacceptable [S1].
++*   Do not use when distortion is significant, as the CNN may not fully remove artifacts [S1].
+ 
+ ## Background
+-The CNN Post-Processing Network was introduced in the context of high-fidelity neural radiance fields, specifically in the AligNeRF paper [S1]. It builds on the idea that rendering each pixel should depend on neighboring regions to produce better texture detail [S1]. The 2D Refinement Layer variant was introduced in VoxGRAF to address texture sticking under viewpoint changes [S2].
++Originated in the context of efficient compressive neural representations for time-varying volumetric datasets, specifically in the ECNR method [S1]. It was developed to address the issue of inconsistent outputs between adjacent blocks in multiscale spatiotemporal representations [S1]. The technique has been adapted in various forms for different neural rendering tasks, such as AligNeRF for high-fidelity radiance fields [S2] and VoxGRAF for fast 3D-aware image synthesis [S3].
+ 
+ ## Sources
+-[S1] AligNeRF: High-Fidelity Neural Radiance Fields via Alignment-Aware Training, https://doi.org/10.1109/cvpr52729.2023.00013, fetched 2026-10-26
+-[S2] VoxGRAF: Fast 3D-Aware Image Synthesis with Sparse Voxel Grids, https://doi.org/10.52202/068431-2464, fetched 2026-10-26+[S1] ECNR: Efficient Compressive Neural Representation of Time-Varying Volumetric Datasets, https://doi.org/10.1109/pacificvis60374.2024.00017, fetched 2026-10-26
++[S2] AligNeRF: High-Fidelity Neural Radiance Fields via Alignment-Aware Training, https://doi.org/10.1109/cvpr52729.2023.00013, fetched 2026-10-26
++[S3] VoxGRAF: Fast 3D-Aware Image Synthesis with Sparse Voxel Grids, https://doi.org/10.52202/068431-2464, fetched 2026-10-26

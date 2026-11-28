@@ -1,0 +1,224 @@
+--- v002.md
++++ v003.md
+@@ -4,13 +4,13 @@
+ 
+ ## Overview
+-The CUDA GPU Implementation is a direct volume ray casting method that offloads the per-ray sampling, classification, and compositing loop to the NVIDIA CUDA architecture, mirroring the semantic behavior of a reference CPU marcher while leveraging hardware acceleration for real-time performance [S1, unofficial]. It sets itself apart from CPU-based ray casting by utilizing the GPU's parallel thread architecture to significantly reduce computational complexity for intersection calculation, resampling, and compositing [S1, unofficial][S2, unofficial], and differs from generic hardware-accelerated approaches by explicitly decoupling ray traversal logic from the volume data structure to allow for adaptive algorithms and custom spatial indices [S2, unofficial].
++The CUDA GPU Implementation is a direct volume ray casting method that offloads the per-ray sampling, classification, and compositing loop to the NVIDIA CUDA architecture, mirroring the semantic behavior of a reference CPU marcher while leveraging hardware acceleration for real-time performance [S1, unofficial][S2, unofficial]. It sets itself apart from CPU-based ray casting by utilizing the GPU's parallel thread architecture to significantly reduce computational complexity for intersection calculation, resampling, and compositing [S1, unofficial][S2, unofficial], and differs from generic hardware-accelerated approaches by explicitly decoupling ray traversal logic from the volume data structure to allow for adaptive algorithms and custom spatial indices [S2, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Volumetric data (scalar field or SDF), transfer function (LUT), camera parameters, and rendering options (isosurface threshold, lighting model, cut planes).
+-*   **Output:** Final 2D image (color and depth) and optional accumulated opacity.
++*   **Input:** Volumetric data (scalar field or SDF), transfer function (LUT), camera parameters, and rendering options (isosurface threshold, lighting model, cut planes) [S1, unofficial].
++*   **Output:** Final 2D image (color and depth) and optional accumulated opacity [G].
+ 
+ **Data Structures:**
+-*   **Volume Data:** Stored in device memory (texture or linear buffer). For SDF volumes, gradient computation uses de Boor splines [S1, unofficial].
++*   **Volume Data:** Stored in device memory (texture or linear buffer) [S1, unofficial]. For SDF volumes, gradient computation uses de Boor splines [S1, unofficial].
+ *   **Transfer Function:** Baked Lookup Table (LUT) stored in device memory [S1, unofficial].
+ *   **Spatial Index:** A dynamic redundant octree (Guennebaud et al.) used for efficient neighbor sampling and adaptive traversal [S2, unofficial].
+@@ -29,8 +29,8 @@
+ 1.  **Initialization:** Upload volume data and LUT from host to device (H2D) for each render pass [S1, unofficial]. Ensure CUDA error state is cleared before launch to prevent spurious fallbacks from previous unrelated errors [S1, unofficial].
+ 2.  **Kernel Launch:** Launch one CUDA thread per pixel in 16x16 blocks [S1, unofficial].
+-3.  **Ray Generation:** Each thread computes ray parameters from camera matrices and determines entry/exit points via slab intersection [S1, unofficial].
++3.  **Ray Generation:** Each thread computes ray parameters from camera matrices and determines entry/exit points via slab intersection [G].
+ 4.  **Ray Traversal:**
+     *   **Isosurface Path:** Use Amanatides-Woo DDA to traverse cells, enumerating every crossed cell to avoid silhouette holes [S1, unofficial].
+-    *   **General Path:** Implement either constant step size or adaptive algorithm. Adaptive recursion is managed via a local memory stack [S2, unofficial].
++    *   **General Path:** Implement either constant step size or adaptive algorithm [S2, unofficial]. Adaptive recursion is managed via a local memory stack [S2, unofficial].
+     *   **Neighbor Access:** Use the dynamic redundant octree to find neighbor samples efficiently [S2, unofficial].
+ 5.  **Sampling:**
+@@ -55,109 +55,77 @@
+ **Pseudocode:**
+ ```python
+-# CUDA Kernel: raycast_kernel
+-# Inputs: volume_data, lut, camera_params, isovalue, cut_planes
+-# Outputs: out_color, out_depth
++def intersect_slab(ray_origin, ray_direction, bounds_min, bounds_max):
++    """Returns (hit, t_entry, t_exit) for ray vs axis-aligned slab."""
++    t_entry = -float('inf')
++    t_exit = float('inf')
++    for i in range(3):
++        inv_d = 1.0 / ray_direction[i] if ray_direction[i] != 0.0 else float('inf')
++        t1 = (bounds_min[i] - ray_origin[i]) * inv_d
++        t2 = (bounds_max[i] - ray_origin[i]) * inv_d
++        if inv_d >= 0:
++            t_entry = max(t_entry, t1)
++            t_exit = min(t_exit, t2)
++        else:
++            t_entry = max(t_entry, t2)
++            t_exit = min(t_exit, t1)
++    if t_entry > t_exit or t_exit < 0:
++        return False, 0.0, 0.0
++    return True, t_entry, t_exit
+ 
+-__global__ void raycast_kernel(float* volume_data, float* lut, CameraParams cam, float isovalue, CutPlane* cut_planes, float4* out_color, float* out_depth) {
+-    // 1. Thread Indexing
+-    int x = blockIdx.x * blockDim.x + threadIdx.x;
+-    int y = blockIdx.y * blockDim.y + threadIdx.y;
+-    
+-    // Check bounds
+-    if (x >= width || y >= height) return;
++def raycast_kernel(volume_data, lut, cam, isovalue, cut_planes, width, height):
++    # Simulates execution of a single CUDA thread
++    x, y = get_thread_index()
++    if x >= width or y >= height:
++        return
+ 
+-    // 2. Ray Generation
+-    Ray ray = generate_ray(cam, x, y);
+-    
+-    // 3. Slab Intersection
+-    float t_entry, t_exit;
+-    if (!intersect_slab(ray, volume_bounds, t_entry, t_exit)) {
+-        out_color[y * width + x] = make_float4(0, 0, 0, 0);
+-        return;
+-    }
++    ray = generate_ray(cam, x, y)
++    hit, t_entry, t_exit = intersect_slab(ray.origin, ray.direction, volume_bounds_min, volume_bounds_max)
++    if not hit:
++        out_color[y * width + x] = (0.0, 0.0, 0.0, 0.0)
++        return
+ 
+-    // 4. Ray Traversal & Compositing
+-    float acc_color_r = 0.0f, acc_color_g = 0.0f, acc_color_b = 0.0f, acc_alpha = 0.0f;
+-    float t = t_entry;
+-    float step_size = get_step_size(ray, t_entry, t_exit); // Constant or adaptive
+-    
+-    // Stack for adaptive traversal (local memory)
+-    // Stack is managed implicitly by recursion or explicit local array
+-    
+-    while (t < t_exit) {
+-        // 5. Sampling
+-        float3 pos = ray.origin + t * ray.direction;
+-        float density = sample_volume_trilinear(volume_data, pos);
+-        
+-        // Gradient computation for SDF
+-        float3 grad;
+-        if (is_sdf) {
+-            grad = compute_gradient_deboor(volume_data, pos);
+-        } else {
+-            grad = compute_gradient_trilinear(volume_data, pos);
+-        }
++    acc_color = [0.0, 0.0, 0.0]
++    acc_alpha = 0.0
++    t = t_entry
++    step_size = compute_step_size(ray, t_entry, t_exit)
+ 
+-        // 6. Classification
+-        float alpha, color_r, color_g, color_b;
+-        
+-        // Isosurface check
+-        if (is_isosurface_mode) {
+-            // Amanatides-Woo DDA ensures all crossed cells are visited
+-            // Check if cell contains isosurface using correct NaN handling
+-            if (contains_isosurface(pos, isovalue)) {
+-                // Get color from LUT
+-                float4 tf = lookup_lut(lut, density);
+-                alpha = tf.a;
+-                color_r = tf.r;
+-                color_g = tf.g;
+-                color_b = tf.b;
+-                
+-                // Apply lighting (Blinn-Phong)
+-                float3 light_dir = normalize(light_position - pos);
+-                float3 view_dir = normalize(-ray.direction);
+-                float3 half_dir = normalize(light_dir + view_dir);
+-                float NdotH = max(0.0f, dot(normalize(grad), half_dir));
+-                float specular = pow(NdotH, shininess);
+-                
+-                color_r = color_r * diffuse + specular * specular_factor;
+-                color_g = color_g * diffuse + specular * specular_factor;
+-                color_b = color_b * diffuse + specular * specular_factor;
+-            } else {
+-                t += step_size;
+-                continue;
+-            }
+-        } else {
+-            // Standard DVF
+-            float4 tf = lookup_lut(lut, density);
+-            alpha = tf.a;
+-            color_r = tf.r;
+-            color_g = tf.g;
+-            color_b = tf.b;
+-            
+-            // Apply gradient ramp, density window, cut planes
+-            if (apply_cut_planes(pos, cut_planes)) {
+-                t += step_size;
+-                continue;
+-            }
+-        }
++    while t < t_exit:
++        pos = [ray.origin[i] + t * ray.direction[i] for i in range(3)]
++        density = sample_volume_trilinear(volume_data, pos)
+ 
+-        // 7. Compositing (Front-to-Back)
+-        float weight = alpha * (1.0f - acc_alpha);
+-        acc_color_r += weight * color_r;
+-        acc_color_g += weight * color_g;
+-        acc_color_b += weight * color_b;
+-        acc_alpha += weight;
++        if is_sdf_mode:
++            grad = compute_gradient_deboor(volume_data, pos)
++        else:
++            grad = compute_gradient_trilinear(volume_data, pos)
+ 
+-        // 8. Early Ray Termination
+-        if (acc_alpha > 0.95f) break;
++        alpha, color = lookup_lut(lut, density)
+ 
+-        // Advance
+-        t += step_size;
+-    }
++        if is_isosurface_mode:
++            if contains_isosurface(pos, isovalue):
++                light_dir = normalize(light_pos - pos)
++                view_dir = normalize([-d for d in ray.direction])
++                half_dir = normalize([light_dir[i] + view_dir[i] for i in range(3)])
++                NdotH = max(0.0, dot(grad, half_dir))
++                specular = NdotH ** shininess
++                color = [c * diffuse + specular * spec_factor for c in color]
++            else:
++                t += step_size
++                continue
++        else:
++            if apply_cut_planes(pos, cut_planes):
++                t += step_size
++                continue
+ 
+-    // 9. Output
+-    out_color[y * width + x] = make_float4(acc_color_r, acc_color_g, acc_color_b, acc_alpha);
+-    out_depth[y * width + x] = t_exit; // Or depth latch value
+-}
++        weight = alpha * (1.0 - acc_alpha)
++        acc_color = [acc_color[i] + weight * color[i] for i in range(3)]
++        acc_alpha += weight
++
++        if acc_alpha > 0.95:
++            break
++
++        t += step_size
++
++    out_color[y * width + x] = (acc_color[0], acc_color[1], acc_color[2], acc_alpha)
++    out_depth[y * width + x] = t_exit
+ ```
+ 
+@@ -175,5 +143,5 @@
+ ## Operating characteristics
+ **Time and Memory Complexity:**
+-*   **Time:** Linear with respect to the number of rays (pixels) and the number of samples per ray. The GPU implementation provides significant speedups over CPU counterparts due to massive parallelism [S1, unofficial].
++*   **Time:** Linear with respect to the number of rays (pixels) and the number of samples per ray. The GPU implementation provides significant speedups over CPU counterparts due to massive parallelism [S1, unofficial][S2, unofficial].
+ *   **Memory:** Requires storage for the volume data, LUT, and spatial index (octree) in device memory. The octree allows for dynamic updates and control of memory footprint versus performance [S2, unofficial].
+ 
+@@ -192,7 +160,7 @@
+ 
+ **When to Use:**
+-*   Real-time interactive volume rendering on NVIDIA hardware.
+-*   Single-volume scenes with complex lighting or isosurface extraction.
+-*   When image-level parity with a CPU reference is required.
++*   Real-time interactive volume rendering on NVIDIA hardware [S2, unofficial].
++*   Single-volume scenes with complex lighting or isosurface extraction [S1, unofficial].
++*   When image-level parity with a CPU reference is required [S1, unofficial].
+ 
+ **When Not to Use:**

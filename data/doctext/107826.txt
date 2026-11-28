@@ -1,0 +1,950 @@
+# VC-SDFGen
+A 3D mesh generation architecture which uses voxel model as condition
+
+### train.py
+```
+import matplotlib.pyplot as plt
+import numpy as np
+
+from tqdm import tqdm
+
+from trainer.DeepSDFTrainer import DeepSDFTrainer
+from data.dataset import ShapeNetSDF
+from model.DeepSDF import DeepSDF
+
+from trainer.VCCNFTrainer import VCCNFTrainer
+from data.dataset import ShapeNetVoxel32
+from model.VCCNF import VCCNF
+
+from trainer.FullTrainer import FullTrainer
+
+from visualize import Visualizer
+import random
+
+import torch
+
+from torch.utils.tensorboard import SummaryWriter
+writer = SummaryWriter()
+
+import kagglehub
+shapenetsdf_path = kagglehub.dataset_download("turtlejaywang/shapenetsdf")
+shapenetvoxel32_path = kagglehub.dataset_download("turtlejaywang/shapenetvoxel64")
+
+def train_deepsdf(writer : SummaryWriter):
+    deepsdf_model = DeepSDF(latent_dim=512, hidden_dim=512, n_hidden_layers=8)
+    deepsdf_dataset = ShapeNetSDF(shapenetsdf_path)
+
+    deepsdf_model_infos = {
+        "deepsdf" : {
+            "model" : deepsdf_model,
+            "init_lr" : 5e-4
+        }
+    }
+
+    deepsdf_trainer = DeepSDFTrainer(
+        deepsdf_model_infos,
+        deepsdf_dataset,
+        epochs=2000, batch_size=24,
+        results_dir="results/results_deepsdf_latent512_hidden512_dropout02_v1",
+        model_save_frequency=100
+    )
+
+    for e, losses in tqdm(deepsdf_trainer):
+        writer.add_scalar("Loss/DeepSDF_train", losses[-1], e)
+        writer.flush()
+        
+    return deepsdf_trainer
+        
+def train_vccnf(writer : SummaryWriter, embeddings):
+    vccnf_model = VCCNF(latent_dim=512, hidden_dim=512, voxel_grid_size=32, voxel_latent_dim=512)
+    shapenetvoxel32 = ShapeNetVoxel32(shapenetvoxel32_path)
+
+    vccnf_model_info = {
+        "vccnf" : {
+            "model" : vccnf_model,
+            "init_lr" : 1e-3
+        }
+    }
+
+    vccnf_trainer = VCCNFTrainer(
+        vccnf_model_info,
+        shapenetvoxel32,
+        epochs=2000, batch_size=24, 
+        results_dir="results/results_vccnf",
+        embeddings=embeddings
+    )
+
+    for e, losses in tqdm(vccnf_trainer):
+        writer.add_scalar("Loss/VCCNF_train", losses[-1], e)
+        writer.flush()
+        
+    return vccnf_trainer
+        
+if __name__ == "__main__":
+    is_train_deepsdf = True
+    is_train_vccnf = True
+    is_visualize = False
+    
+    writer = SummaryWriter()
+    
+    deepsdf_trainer = train_deepsdf(writer)
+    embeddings = deepsdf_trainer.embeddings
+    deepsdf_model = deepsdf_trainer.deepsdf_model
+
+    vccnf_trainer = None
+    if is_train_vccnf:
+        vccnf_trainer = train_vccnf(writer, embeddings)
+    
+    full_trainer = FullTrainer(deepsdf_trainer, vccnf_trainer, 2000, 4, "results/results_full_v1")
+    
+    for e, losses in tqdm(full_trainer):
+        writer.add_scalar("Loss/Full_train", losses[-1], e)
+        writer.flush()
+
+    visualizer = Visualizer(full_trainer.vccnf_model, full_trainer.deepsdf_model, embeddings)
+    for i in tqdm(range(0, len(deepsdf_trainer.deepsdf_dataset))):
+        visualizer.generate_sdf_objs("results/model_reconstruct/phase1", i)
+        visualizer.generate_sdf_objs_with_full_network(f"results/model_reconstruct/phase3/mesh_reconstruct_{i}.obj", full_trainer.full_dataset[i][0])
+    
+    writer.close()
+```
+
+### visualize.py
+```
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+import numpy as np
+import random
+import trimesh
+from skimage import measure
+import os
+from math import sqrt
+
+from model.DeepSDF import DeepSDF
+from model.VCCNF import VCCNF
+
+class Visualizer:
+    def __init__(self, cnf_encoder : VCCNF, sdf_decoder : DeepSDF, latent_vecs : nn.Embedding):
+        self.cnf_encoder = cnf_encoder
+        self.sdf_decoder = sdf_decoder
+        self.latent_dim = self.sdf_decoder.latent_dim
+
+        self.latent_vecs = latent_vecs
+
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.sdf_decoder.to(self.device)
+
+    def get_sdf_for_marching_cube(self, latent_vec):
+        # Initialize to mesh grid points
+        x, y, z = np.mgrid[-1 : 1 : 0.02, -1 : 1 : 0.02, -1 : 1 : 0.02]
+        x = torch.tensor(x)
+        y = torch.tensor(y)
+        z = torch.tensor(z)
+
+        # Change the mesh grid points from 100x100x100x3 to 1000000x3
+        points = torch.stack((x, y, z), dim=3).view(-1, 3).float()
+        points = points.to(self.device)
+
+        # Split the points into 4 seperate splits to prevent running out of memory
+        points_splits = points.split(250000)
+
+        latent_code = latent_vec
+        latent_code = latent_code.to(self.device)
+
+        sdfs = torch.zeros(0, device="cpu")
+        for points_split in points_splits:
+            points_split = points_split.view(1, 250000, 3)
+            sdfs = torch.cat((sdfs, torch.clamp(self.sdf_decoder(latent_code, points_split).cpu(), -0.1, 0.1)))
+
+        sdfs = sdfs.view((100, 100, 100))
+        sdfs = sdfs.numpy()
+        return sdfs
+
+    def generate_sdf_objs(self, path, index):
+        self.sdf_decoder.eval()
+        with torch.no_grad():
+            # Get the sdf values from model
+            sdfs = self.get_sdf_for_marching_cube(self.latent_vecs(torch.tensor([index]).cuda()))
+            
+            print(f"Volume range: {np.min(sdfs)} to {np.max(sdfs)}")
+
+            # Marching Cube
+            verts, faces, normals, _ = measure.marching_cubes(sdfs, 0)
+            
+            # Output the result into mesh
+            mesh = trimesh.Trimesh(vertices=verts, faces=faces, face_normals=normals)
+            
+            if not os.path.exists(path):
+                os.makedirs(path)
+            with open(os.path.join(path, f"mesh_reconstruct_model_{index}.obj"), "w") as f:
+                mesh.export(f, "obj")
+                
+    def generate_sdf_objs_with_full_network(self, mesh_path, voxel_model):
+        self.cnf_encoder.eval()
+        self.sdf_decoder.eval()
+        
+        self.cnf_encoder = self.cnf_encoder.to(self.device)
+        self.sdf_decoder = self.sdf_decoder.to(self.device)
+        with torch.no_grad():
+            gaussian_latent = (torch.randn((1, self.latent_dim)) / sqrt(self.latent_dim)).to(self.device)
+            latent_code = self.cnf_encoder(voxel_model.view(1, 32, 32, 32).to(self.device), gaussian_latent)
+            sdfs = self.get_sdf_for_marching_cube(latent_code)
+        
+            print(f"Volume range: {np.min(sdfs)} to {np.max(sdfs)}")
+
+            # Marching Cube
+            verts, faces, normals, _ = measure.marching_cubes(sdfs, 0)
+            
+            # Output the result into mesh
+            mesh = trimesh.Trimesh(vertices=verts, faces=faces, face_normals=normals)
+            
+            if not os.path.exists(os.path.split(mesh_path)[0]):
+                os.makedirs(os.path.split(mesh_path)[0])
+            with open(mesh_path, "w") as f:
+                mesh.export(f, "obj")
+```
+
+### data/dataset.py
+```
+import torch
+from torch.utils.data import Dataset, DataLoader
+import numpy as np
+import os
+
+class ShapeNetSDF(Dataset):
+    def __init__(self, path, used_categories="All"):
+        category_names = os.listdir(path)
+        self.points, self.sdfs = [], []
+        for category_name in category_names:
+            model_file_names = os.listdir(os.path.join(path, category_name))
+            for model_file_name in model_file_names:
+                points, sdfs = self.load_npz_file(os.path.join(path, category_name, model_file_name))
+                self.points.append(points)
+                self.sdfs.append(sdfs)
+        self.n_models = len(self.points)
+
+    def __len__(self):
+        return self.n_models
+
+    def __getitem__(self, index):
+        return self.points[index], self.sdfs[index], index
+
+    def load_npz_file(self, file_path):
+        data = np.load(file_path)
+        return torch.from_numpy(data["points"]), torch.from_numpy(data["sdfs"])
+
+class ShapeNetVoxel32(Dataset):
+    def __init__(self, path, used_categories="All"):
+        category_names = os.listdir(path)
+        self.voxels = []
+        for category_name in category_names:
+            model_file_names = os.listdir(os.path.join(path, category_name))
+            for model_file_name in model_file_names:
+                voxel_grid = self.load_npz_file(os.path.join(path, category_name, model_file_name))
+                self.voxels.append(voxel_grid)
+        self.n_models = len(self.voxels)
+        
+    def __len__(self):
+        return self.n_models
+    
+    def __getitem__(self, index):
+        return self.voxels[index], index
+    
+    def load_npz_file(self, file_path):
+        data = np.load(file_path)
+        return torch.from_numpy(data["voxel_data"]).float()
+```
+
+### model/DeepSDF.py
+```
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class DeepSDF(nn.Module):
+    def __init__(self, latent_dim, hidden_dim, n_hidden_layers, skip_layers=[3, 7]):
+        super(DeepSDF, self).__init__()
+        self.latent_dim = latent_dim
+        self.hidden_dim = hidden_dim
+        self.n_hidden_layers = n_hidden_layers
+        self.skip_layers = skip_layers
+
+        # Define the input layer
+        self.input_layer = nn.Linear(latent_dim + 3, hidden_dim)
+
+        # Define the hidden layers
+        self.hidden_layers = nn.ModuleList()
+        for i in range(n_hidden_layers):
+            if i in skip_layers:
+                self.hidden_layers.append(nn.Sequential(
+                    nn.Linear(hidden_dim + latent_dim + 3, hidden_dim),
+                    nn.ReLU()
+                ))
+            else:
+                self.hidden_layers.append(nn.Sequential(
+                    nn.Linear(hidden_dim, hidden_dim),
+                    nn.ReLU()
+                ))
+
+        # Define the output layer
+        self.output_layer = nn.Linear(hidden_dim, 1)
+        self.dropout = nn.Dropout(0.2)
+
+    def forward(self, latent_code, points):
+        n_models, n_samples = points.shape[0:2]
+        latent_code = latent_code.view(n_models, 1, self.latent_dim).repeat(1, n_samples, 1).view(-1, self.latent_dim)
+        points = points.view(-1, 3)
+        # Concatenate the latent code and points
+        x = torch.cat([latent_code, points], dim=-1)
+
+        # Pass through the input layer
+        x = self.input_layer(x)
+        x = F.relu(x)
+        x = self.dropout(x)
+
+        # Pass through the hidden layers
+        for i, layer in enumerate(self.hidden_layers):
+            if i in self.skip_layers:
+                x = torch.cat([latent_code, points, x], dim=-1)
+            x = layer(x)
+            x = self.dropout(x)
+
+        # Pass through the output layer
+        sdf_value = self.output_layer(x)
+        sdf_value = torch.tanh(sdf_value)
+        return sdf_value
+```
+
+### model/VCCNF.py
+```
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torchdiffeq import odeint
+
+class VoxelEncoder(nn.Module):
+    def __init__(self, voxel_grid_size, output_dim):
+        super(VoxelEncoder, self).__init__()
+        self.voxel_grid_size = voxel_grid_size
+        self.output_dim = output_dim
+
+        # Define the encoder layers
+        self.encoder = nn.Sequential(
+            nn.Conv3d(1, 32, kernel_size=3, padding=1),  # 32x32x32 -> 32x32x32
+            nn.ReLU(),
+            nn.MaxPool3d(kernel_size=2, stride=2),  # 32x32x32 -> 16x16x16
+            
+            nn.Conv3d(32, 128, kernel_size=3, padding=1),  # 16x16x16 -> 16x16x16
+            nn.ReLU(),
+            nn.MaxPool3d(kernel_size=2, stride=2),  # 16x16x16 -> 8x8x8
+            
+            nn.Conv3d(128, 256, kernel_size=3, padding=1),  # 8x8x8 -> 8x8x8
+            nn.ReLU(),
+            nn.MaxPool3d(kernel_size=2, stride=2),  # 8x8x8 -> 4x4x4
+            
+            nn.Conv3d(256, self.output_dim, kernel_size=4, stride=1, padding=0),  # 4x4x4 -> 1x1x1
+            nn.Flatten()
+        )
+        
+    def forward(self, x):
+        x = x.unsqueeze(1)
+        # x shape: (batch_size, 1, voxel_grid_size, voxel_grid_size, voxel_grid_size)
+        x = self.encoder(x)
+        return x  # shape: (batch_size, output_dim)
+
+class ODEFunc(nn.Module):
+    def __init__(self, latent_dim, voxel_latent_dim, n_layers=4, hidden_dim=512, skip_frequency=2):
+        super(ODEFunc, self).__init__()
+        self.latent_dim = latent_dim
+        self.voxel_latent_dim = voxel_latent_dim
+        self.skip_frequency = skip_frequency
+        self.hidden_dim = hidden_dim
+        self.n_layers = n_layers
+
+        # Define the ODE function layers
+        self.input_layer = nn.Linear(latent_dim + voxel_latent_dim + 1, hidden_dim)
+        self.hidden_layers = nn.ModuleList()
+        for i in range(n_layers):
+            if i % skip_frequency == 1:
+                self.hidden_layers.append(nn.Sequential(
+                    nn.Linear(hidden_dim + voxel_latent_dim + 1, hidden_dim),
+                    nn.ReLU()
+                ))
+            else:
+                self.hidden_layers.append(nn.Sequential(
+                    nn.Linear(hidden_dim, hidden_dim),
+                    nn.ReLU()
+                ))
+        self.output_layer = nn.Linear(hidden_dim, latent_dim)
+    
+    def forward(self, t, latent, voxel_latent):
+        # Concatenate the latent code and voxel latent
+        batch_size = latent.size(0)
+        x = torch.cat([latent, voxel_latent, t.unsqueeze(0).repeat(batch_size).unsqueeze(1)], dim=-1)
+        
+        # Pass through the input layer
+        x = self.input_layer(x)
+        x = F.relu(x)
+
+        # Pass through the hidden layers
+        for i, layer in enumerate(self.hidden_layers):
+            if i % self.skip_frequency == 1:
+                x = torch.cat([x, voxel_latent, t.unsqueeze(0).repeat(batch_size).unsqueeze(1)], dim=-1)
+            x = layer(x)
+
+        # Pass through the output layer
+        output = self.output_layer(x)
+        return output
+
+class VCCNF(nn.Module):
+    def __init__(self, latent_dim, voxel_grid_size, voxel_latent_dim, n_layers=4, hidden_dim=512, skip_frequency=2, device="cuda"):
+        super(VCCNF, self).__init__()
+        self.latent_dim = latent_dim
+        self.voxel_grid_size = voxel_grid_size
+        self.voxel_latent_dim = voxel_latent_dim
+
+        # Define the encoder
+        self.encoder = VoxelEncoder(voxel_grid_size, voxel_latent_dim)
+
+        # Define the ODE function
+        self.ode_func = ODEFunc(latent_dim, voxel_latent_dim, n_layers=n_layers, hidden_dim=hidden_dim, skip_frequency=skip_frequency)
+        
+        self.integrated_time = torch.tensor([0, 1]).float().to(device)  # Time points for integration
+        
+    def forward(self, voxel_grid, latent_code):
+        # Encode the voxel grid
+        voxel_latent = self.encoder(voxel_grid)
+        
+        def odeint_func(t, latent_code):
+            # Reshape the latent code to match the expected input shape
+            latent_code = latent_code.view(-1, self.latent_dim)
+            return self.ode_func(t, latent_code, voxel_latent)
+        
+        # Integrate the ODE
+        latent_code = odeint(odeint_func, latent_code, self.integrated_time, method="rk4")[-1]
+        
+        return latent_code
+```
+
+### model/VoxelSDF.py
+```
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class VoxelSDF(nn.Module):
+    def __init__(self, latent_dim=32, voxel_grid_size=8, num_layers=4, hidden_dim=128):
+        super(VoxelSDF, self).__init__()
+        
+        self.sdf_mlp = nn.Sequential(
+            nn.Linear(latent_dim + 3, hidden_dim),
+            nn.ReLU(),
+            *[nn.Sequential(
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.ReLU()
+            ) for _ in range(num_layers)],
+            nn.Linear(hidden_dim, 1),
+            nn.Tanh()
+        )
+
+        self.voxel_grid_size = voxel_grid_size
+        self.latent_dim = latent_dim
+
+    def forward(self, embeddings, points):
+        n_models, n_points_per_model = points.shape[0:2]
+
+        points = points.view(n_models, n_points_per_model, 1, 1, 3)
+
+        embeddings = embeddings.view(
+            n_models, self.latent_dim,
+            self.voxel_grid_size + 1,
+            self.voxel_grid_size + 1,
+            self.voxel_grid_size + 1
+        )
+
+        latent = F.grid_sample(
+            embeddings,
+            points,
+            mode='bilinear',
+            padding_mode='zeros',
+            align_corners=True
+        ).view(n_models, n_points_per_model, self.latent_dim)
+        
+        points = points.view(n_models, n_points_per_model, 3)
+        sdf = self.sdf_mlp(torch.cat([latent, points], dim=-1))
+        return sdf
+```
+
+### model/embedding.py
+```
+import torch
+import torch.nn as nn
+
+class GridEmbedding(nn.Module):
+    def __init__(self, n, grid_size, latent_dim):
+        super(GridEmbedding, self).__init__()
+        self.grid_size = grid_size
+
+        self.embeddings = nn.Parameter(torch.randn(n, grid_size + 1, grid_size + 1, grid_size + 1, latent_dim))
+        self.register_parameter('embeddings', self.embeddings)
+
+    def forward(self, indices):
+        n_models = indices.shape[0]
+        embeddings = self.embeddings[indices].view(
+            n_models, 
+            self.grid_size + 1, self.grid_size + 1, self.grid_size + 1, 
+            -1
+        )
+        return embeddings
+```
+
+### trainer/BaseTrainer.py
+```
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import DataLoader, Dataset, random_split
+import numpy as np
+import os
+import random
+from math import sqrt
+
+class BaseTrainer:
+    def __init__(self, model_infos : dict, epochs, batch_size, result_dir, loss_file_name, model_save_frequency=100):
+        seed = 42
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if torch.cuda.is_available():
+            print(f"Using GPU: {torch.cuda.get_device_name(0)}")
+        else:
+            print("Using CPU")
+        
+        self.model_infos = model_infos
+        self.epochs = epochs
+        self.batch_size = batch_size
+        
+        if not os.path.exists(result_dir):
+            os.makedirs(result_dir)
+        
+        self.model_file_names = list(self.model_infos.keys())
+        self.models = []
+        for model_name, model_info in self.model_infos.items():
+            self.models.append(model_info["model"])
+
+        for i, model in enumerate(self.models):
+            self.models[i] = model.to(self.device)
+            self.models[i].train()
+        
+        self.loss_file_name = os.path.splitext(loss_file_name)[0] + ".npy"
+        self.result_dir = result_dir
+        
+        self.model_save_frequency = model_save_frequency
+        
+        self.load_datasets()
+        
+        self.set_optimizer()
+            
+    def __len__(self):
+        return self.epochs - self.get_latest_epoch()
+        
+    def __iter__(self):
+        self.pre_train()
+        
+        for e in range(self.start_epoch, self.epochs):
+            epoch = e + 1
+            epoch_loss = self.epoch_train(epoch)
+            
+            self.losses.append(epoch_loss)
+
+            if epoch % self.model_save_frequency == 0:
+                self.save_models(epoch)
+                self.save_loss()
+                self.save_optimizer()
+                
+            yield epoch, self.losses
+        
+    def epoch_train(self, epoch):
+        """In epoch train, we will train the model for one epoch. All you need to do is manage the tensor dimensions and the data loader."""
+        pass
+    
+    def load_datasets(self):
+        pass
+        
+    def set_optimizer(self):
+        pass
+    
+    def save_optimizer(self):
+        pass
+    
+    def pre_train(self):
+        self.load_loss()
+    
+        self.start_epoch = self.get_latest_epoch()
+        if self.start_epoch > 0:
+            self.load_models(self.start_epoch)
+    
+    def save_models(self, epoch):
+        for i, model in enumerate(self.models):
+            torch.save(model.state_dict(), os.path.join(self.result_dir, f"{self.model_file_names[i]}_epoch_{epoch}.pth"))
+            
+    def load_models(self, epoch):
+        for i, model in enumerate(self.models):
+            model.load_state_dict(torch.load(os.path.join(self.result_dir, f"{self.model_file_names[i]}_epoch_{epoch}.pth"), weights_only=True))
+    
+    def load_loss(self):
+        if os.path.exists(os.path.join(self.result_dir, self.loss_file_name)):
+            self.losses = np.load(os.path.join(self.result_dir, self.loss_file_name)).tolist()
+            self.losses = self.losses[:self.get_latest_epoch()]
+        else:
+            self.losses = []
+    
+    def save_loss(self):
+        np.save(os.path.join(self.result_dir, self.loss_file_name), np.array(self.losses))
+    
+    def get_latest_epoch(self):
+        if os.path.exists(os.path.join(self.result_dir, self.loss_file_name)):
+            losses = np.load(os.path.join(self.result_dir, self.loss_file_name)).tolist()
+            if losses:
+                latest_epoch = len(losses) // self.model_save_frequency * self.model_save_frequency
+                is_true_latest = True
+                for model_file_name in self.model_file_names:
+                    if not os.path.exists(os.path.join(self.result_dir, f"{model_file_name}_epoch_{latest_epoch}.pth")):
+                        is_true_latest = False
+                        break
+                while not is_true_latest:
+                    latest_epoch -= self.model_save_frequency
+                    is_true_latest = True
+                    for model_file_name in self.model_file_names:
+                        if not os.path.exists(os.path.join(self.result_dir, f"{model_file_name}_epoch_{latest_epoch}.pth")):
+                            is_true_latest = False
+                            break
+                return latest_epoch
+            else:
+                return 0
+        else:
+            return 0
+```
+
+### trainer/DeepSDFTrainer.py
+```
+import sys
+sys.path.append("..")
+
+from model.DeepSDF import DeepSDF
+from trainer.BaseTrainer import BaseTrainer
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import DataLoader
+
+import numpy as np
+from math import sqrt
+import os
+
+class DeepSDFTrainer(BaseTrainer):
+    def __init__(self, deepsdf_model_infos, deepsdf_dataset, epochs, batch_size, results_dir, model_save_frequency=100):
+        self.deepsdf_model : DeepSDF = deepsdf_model_infos["deepsdf"]["model"]
+        
+        self.latent_dim = self.deepsdf_model.latent_dim
+        self.embeddings = nn.Embedding(len(deepsdf_dataset), self.latent_dim, max_norm=1.0)
+        torch.nn.init.normal_(self.embeddings.weight.data, 0, 1 / sqrt(self.latent_dim))
+        
+        deepsdf_model_infos["latent_codes"] = {
+            "model" : self.embeddings,
+            "init_lr" : 1e-3
+        }
+        
+        self.deepsdf_dataset = deepsdf_dataset
+        
+        super().__init__(
+            deepsdf_model_infos, 
+            epochs, batch_size,
+            results_dir,
+            "losses_deepsdf_train.npy", 
+            model_save_frequency
+        )
+    
+    def load_datasets(self):
+        self.deepsdf_train_dataloader = DataLoader(self.deepsdf_dataset, batch_size=self.batch_size, shuffle=True)
+        
+    def set_optimizer(self):
+        model_lr = [
+            { "params" : self.deepsdf_model.parameters(), "lr" : 5e-4 },
+            { "params" : self.embeddings.parameters(), "lr" : 1e-3 }
+        ]    
+        self.optimizer = torch.optim.Adam(model_lr)
+        self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=500, gamma=0.5)
+        self.scheduler.last_epoch = self.get_latest_epoch() - 1
+        
+        start_epoch = self.get_latest_epoch()
+        if start_epoch > 0:
+            self.optimizer.load_state_dict(torch.load(os.path.join(self.result_dir, "optimizer_deepsdf_embedding.pth"), weights_only=True))
+            self.scheduler.load_state_dict(torch.load(os.path.join(self.result_dir, "scheduler_deepsdf_embedding.pth"), weights_only=True))
+        
+    def save_optimizer(self):
+        torch.save(self.optimizer.state_dict(), os.path.join(self.result_dir, "optimizer_deepsdf_embedding.pth"))
+        torch.save(self.scheduler.state_dict(), os.path.join(self.result_dir, "scheduler_deepsdf_embedding.pth"))
+        
+    def epoch_train(self, epoch):
+        self.deepsdf_model.train()
+        epoch_loss = 0
+        for i, (points, sdfs, indices) in enumerate(self.deepsdf_train_dataloader):
+            self.optimizer.zero_grad()
+            points, sdfs = points.to(self.device), sdfs.to(self.device)
+            sdfs = sdfs.view(-1, 1)
+            
+            latents = self.embeddings(indices.to(self.device))
+            latents = latents.view(-1, self.latent_dim)
+            
+            # Forward pass
+            sdf_preds = self.deepsdf_model(latents, points)
+            
+            # Compute loss
+            loss = F.l1_loss(sdf_preds.view(-1), sdfs.view(-1), reduction="sum")
+            loss.backward()
+            self.optimizer.step()
+            
+            epoch_loss += loss.item()
+            
+        self.scheduler.step()
+        return epoch_loss
+
+if __name__ == "__main__":
+    from model.DeepSDF import DeepSDF
+    from data.dataset import ShapeNetSDF
+    
+    # Example usage
+    shapenetsdf_path = ""
+    deepsdf_model = DeepSDF(latent_dim=512, hidden_dim=512, n_hidden_layers=8)
+    deepsdf_dataset = ShapeNetSDF(shapenetsdf_path)
+    
+    trainer = DeepSDFTrainer(
+        deepsdf_model,
+        deepsdf_dataset, 
+        epochs=2000, batch_size=24, 
+        results_dir="results_deepsdf_latent512_hidden512"
+    )
+```
+
+### trainer/FullTrainer.py
+```
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+from torch.utils.data import Dataset, DataLoader, random_split
+
+import numpy as np
+import os
+from math import sqrt
+
+from trainer.BaseTrainer import BaseTrainer
+from data.dataset import ShapeNetSDF, ShapeNetVoxel32
+from trainer.DeepSDFTrainer import DeepSDFTrainer
+from trainer.VCCNFTrainer import VCCNFTrainer
+
+class FullDataset(Dataset):
+    def __init__(self, shapenetsdf : ShapeNetSDF, shapenetvoxel32 : ShapeNetVoxel32):
+        self.shapenetsdf = shapenetsdf
+        self.shapenetvoxel32 = shapenetvoxel32
+        
+    def __len__(self):
+        return len(self.shapenetsdf)
+    
+    def __getitem__(self, index):
+        points, sdfs, i = self.shapenetsdf[index]
+        voxel_data, i = self.shapenetvoxel32[index]
+        return voxel_data, points, sdfs
+
+class FullTrainer(BaseTrainer):
+    def __init__(self, deepsdf_trainer : DeepSDFTrainer, vccnf_trainer : VCCNFTrainer, epochs, batch_size, result_dir):
+        self.latent_dim = deepsdf_trainer.latent_dim
+        
+        self.deepsdf_model = deepsdf_trainer.deepsdf_model
+        self.vccnf_model = vccnf_trainer.vccnf_model
+        
+        self.shapenetsdf = deepsdf_trainer.deepsdf_dataset
+        self.shapenetvoxel32 = vccnf_trainer.shapenetvoxel32_dataset
+        
+        self.deepsdf_result_dir = deepsdf_trainer.result_dir
+        self.vccnf_result_dir = vccnf_trainer.result_dir
+        
+        self.model_infos = {
+            "deepsdf" : {
+                "model" : self.deepsdf_model,
+                "init_lr" : 0.0
+            },
+            "vccnf" : {
+                "model" : self.vccnf_model,
+                "init_lr" : 0.0
+            }
+        }
+        
+        super().__init__(
+            self.model_infos,
+            2000, 24,
+            result_dir,
+            "loss_full.npy"
+        )
+        
+    def load_datasets(self):
+        self.full_dataset = FullDataset(self.shapenetsdf, self.shapenetvoxel32)
+        self.training_dataset, _ = random_split(self.full_dataset, [0.8, 0.2], torch.Generator().manual_seed(42))
+        self.training_loader = DataLoader(self.training_dataset, self.batch_size, True)
+        
+    def set_optimizer(self):
+        self.deepsdf_optimizer = optim.Adam(self.deepsdf_model.parameters(), 0.0000675)
+        self.vccnf_optimizer = optim.Adam(self.vccnf_model.parameters(), 0.000125)
+        self.deepsdf_scheduler = optim.lr_scheduler.StepLR(self.deepsdf_optimizer, 1000, 0.5)
+        self.vccnf_scheduler = optim.lr_scheduler.StepLR(self.vccnf_optimizer, 1000, 0.5)
+        
+        if self.get_latest_epoch() > 0:
+            self.deepsdf_optimizer.load_state_dict(torch.load(os.path.join(self.result_dir, "deepsdf_optimizer.pth"), weights_only=True))
+            self.vccnf_optimizer.load_state_dict(torch.load(os.path.join(self.result_dir, "vccnf_optimizer.pth"), weights_only=True))
+            self.deepsdf_scheduler.load_state_dict(torch.load(os.path.join(self.result_dir, "deepsdf_scheduler.pth"), weights_only=True))
+            self.vccnf_scheduler.load_state_dict(torch.load(os.path.join(self.result_dir, "vccnf_scheduler.pth"), weights_only=True))
+        
+    def save_optimizer(self):
+        torch.save(self.deepsdf_optimizer.state_dict(), os.path.join(self.result_dir, "deepsdf_optimizer.pth"))
+        torch.save(self.vccnf_optimizer.state_dict(), os.path.join(self.result_dir, "vccnf_optimizer.pth"))
+        torch.save(self.deepsdf_scheduler.state_dict(), os.path.join(self.result_dir, "deepsdf_scheduler.pth"))
+        torch.save(self.vccnf_scheduler.state_dict(), os.path.join(self.result_dir, "vccnf_scheduler.pth"))
+        
+    def epoch_train(self, epoch):
+        epoch_loss = 0
+        self.vccnf_model.train()
+        self.deepsdf_model.train()
+        for i, (voxels, points, sdfs) in enumerate(self.training_loader):
+            voxels = voxels.to(self.device)
+            points = points.to(self.device)
+            sdfs = sdfs.to(self.device)
+            
+            batch_size = voxels.shape[0]
+            
+            mean = 0.0
+            std = 1 / sqrt(self.latent_dim)
+            gaussian_latents = torch.randn((batch_size, self.latent_dim)) * std + mean
+            gaussian_latents = gaussian_latents.to(self.device)
+            
+            latent_codes = self.vccnf_model(voxels, gaussian_latents)
+            sdf_preds = self.deepsdf_model(latent_codes, points)
+            
+            loss = F.l1_loss(sdf_preds.view(-1), sdfs.view(-1), reduction="sum")
+            
+            self.deepsdf_optimizer.zero_grad()
+            self.vccnf_optimizer.zero_grad()
+            
+            loss.backward()
+            
+            self.deepsdf_optimizer.step()
+            self.vccnf_optimizer.step()
+            
+            epoch_loss += loss.item()
+
+        self.deepsdf_scheduler.step()
+        self.vccnf_scheduler.step()
+        
+        return epoch_loss
+```
+
+### trainer/VCCNFTrainer.py
+```
+from model.VCCNF import VCCNF
+from data.dataset import ShapeNetVoxel32
+from trainer.BaseTrainer import BaseTrainer
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import DataLoader, random_split
+import numpy as np
+import os
+import random
+from math import sqrt
+from torch.optim.lr_scheduler import StepLR
+
+class VCCNFTrainer(BaseTrainer):
+    def __init__(self, vccnf_model_info, dataset, results_dir, epochs, batch_size, embeddings):
+        self.epochs = epochs
+        self.batch_size = batch_size
+        
+        self.embeddings = embeddings
+        self.vccnf_model : VCCNF = vccnf_model_info["vccnf"]["model"]
+        
+        self.shapenetvoxel32_dataset = dataset
+        
+        super().__init__(
+            vccnf_model_info, 
+            epochs, batch_size,
+            results_dir,
+            "losses_vccnf_train.npy",
+            100
+        )
+        
+        self.loss_fn = nn.MSELoss()
+        
+    def load_datasets(self):
+        self.shapenetvoxel64_dataset_splits = random_split(
+            self.shapenetvoxel32_dataset, 
+            [0.8, 0.2], 
+            generator=torch.Generator().manual_seed(42)
+        )
+        self.shapenetvoxel64_loader_training = DataLoader(
+            self.shapenetvoxel64_dataset_splits[0],
+            batch_size=self.batch_size,
+            shuffle=True
+        )
+        
+    def set_optimizer(self):
+        model_lr = [{
+            "params" : self.vccnf_model.parameters(),
+            "lr" : 1e-3
+        }]
+        self.optimizer = torch.optim.Adam(model_lr, lr=1e-3)
+        self.scheduler = StepLR(self.optimizer, step_size=500, gamma=0.5)
+        
+        if self.get_latest_epoch() > 0:
+            self.optimizer.load_state_dict(torch.load(os.path.join(self.result_dir, "optimizer_vccnf.pth"), weights_only=True))
+            self.scheduler.load_state_dict(torch.load(os.path.join(self.result_dir, "scheduler_vccnf.pth"), weights_only=True))
+        
+    def save_optimizer(self):
+        torch.save(self.optimizer.state_dict(), os.path.join(self.result_dir, "optimizer_vccnf.pth"))
+        torch.save(self.scheduler.state_dict(), os.path.join(self.result_dir, "scheduler_vccnf.pth"))
+        
+    def epoch_train(self, epoch):
+        epoch_loss = 0
+        self.vccnf_model.train()
+        for i, (voxel_data, indices) in enumerate(self.shapenetvoxel64_loader_training):
+            indices = indices.to(self.device)
+            latent_codes = self.embeddings(indices)
+            latent_codes = latent_codes.to(self.device)
+            
+            mean = 0.0
+            std = 1 / sqrt(latent_codes.size(-1))
+            
+            gaussian_latents = torch.randn_like(latent_codes) * std + mean
+            gaussian_latents = gaussian_latents.to(self.device)
+            
+            voxel_data = voxel_data.to(self.device)
+            
+            latent_pred = self.vccnf_model(voxel_data, gaussian_latents)
+            
+            loss = self.loss_fn(latent_pred, latent_codes)
+            self.optimizer.zero_grad()
+            loss.backward()
+            self.optimizer.step()
+            
+            epoch_loss += loss.item() 
+        self.scheduler.step()
+        self.losses.append(epoch_loss)
+        return epoch_loss
+```

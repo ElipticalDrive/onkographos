@@ -1,0 +1,93 @@
+--- v004.md
++++ v005.md
+@@ -18,11 +18,11 @@
+ This method uses a tree-based up-sweep (reduce) and down-sweep (scan) phase [S3, unofficial].
+ 
+-1. **Padding:** If $n$ is not a power of two, compute $n_{p2} = 2^{\lceil \log_2 n \rceil}$. Allocate memory for size $n_{p2}$ [S3, unofficial].
+-2. **Initialization:** Copy $I$ to the input buffer. Zero-pad the buffer from index $n$ to $n_{p2}-1$ [S3, unofficial].
+-3. **Up-Sweep (Reduce):** Perform a parallel reduction to compute inclusive sums in a tree structure. Loop $d$ from $0$ to $\lceil \log_2 n_{p2} \rceil - 1$:
++1. **Padding:** If $n$ is not a power of two, compute $n_{p2} = 2^{\lceil \log_2 n \rceil}$ [S3, unofficial].
++2. **Initialization:** Copy $I$ to the input buffer and zero-pad the buffer from index $n$ to $n_{p2}-1$ [S3, unofficial].
++3. **Up-Sweep (Reduce):** Perform a parallel reduction to compute inclusive sums in a tree structure [S3, unofficial]. Loop $d$ from $0$ to $\lceil \log_2 n_{p2} \rceil - 1$:
+    - Calculate stride $d1 = 2^d$ and $d2 = 2^{d+1}$ [S3, unofficial].
+    - Launch kernel where threads at indices $k \cdot d2$ add the value at $k \cdot d2 + d1 - 1$ to $k \cdot d2 + d2 - 1$ [S3, unofficial].
+ 4. **Root Reset:** Set the root element (last element of the buffer, index $n_{p2}-1$) to 0 [S3, unofficial].
+-5. **Down-Sweep (Scan):** Perform the exclusive scan by propagating sums down the tree. Loop $d$ from $\lceil \log_2 n_{p2} \rceil - 1$ down to $0$:
++5. **Down-Sweep (Scan):** Perform the exclusive scan by propagating sums down the tree [S3, unofficial]. Loop $d$ from $\lceil \log_2 n_{p2} \rceil - 1$ down to $0$:
+    - Calculate stride $d1 = 2^d$ and $d2 = 2^{d+1}$ [S3, unofficial].
+    - Launch kernel where threads at indices $k \cdot d2$ save the value at $k \cdot d2 + d1 - 1$, set that position to the value at $k \cdot d2 + d2 - 1$, and add the saved value to $k \cdot d2 + d2 - 1$ [S3, unofficial].
+@@ -32,5 +32,5 @@
+ For verification or small $n$, a simple loop suffices [S4]:
+ 1. Set $O[0] = 0$.
+-2. For $i$ from 1 to $n-1$: $O[i] = O[i-1] + I[i-1]$ [S3, unofficial][S4].
++2. For $i$ from $1$ to $n-1$: $O[i] = O[i-1] + I[i-1]$ [S3, unofficial][S4].
+ 
+ **Formula:**
+@@ -46,50 +46,42 @@
+ - **Non-power-of-two sizes:** Must be zero-padded to the next power of two before processing. Only the first $n$ results are valid; the rest are artifacts of padding [S3, unofficial].
+ - **Empty Input:** If $n \le 0$, return immediately [S3, unofficial].
+-- **Precision:** For transmittance calculations, linear sums may underflow. Use [Log-space Exclusive Cumulative Sum for Transmittance](4819-log-space-exclusive-cumulative-sum-for-transmittance.md) instead [S1].
++- **Precision:** Linear sums may underflow for transmittance calculations; use logarithmic-space variants when opacity values are small [G].
+ 
+-**Pseudocode (GPU Work-Efficient):**
++**Pseudocode (GPU Work-Efficient, ThreadReduction == 0):**
+ ```python
++import math
++
+ def exclusive_scan_gpu(n, idata):
+-    # 1. Pad to power of two
+     if n <= 0:
+         return []
+-    
++    # 1. Pad to next power of two
+     n_p2 = 1
+     while n_p2 < n:
+         n_p2 *= 2
+-        
+-    # Allocate ping-pong buffers
+-    dev_data = allocate_array(n_p2)
+-    
+-    # 2. Copy and pad
++    # 2. Initialize buffer with input and zero-padding
++    dev_data = [0] * n_p2
+     for i in range(n):
+         dev_data[i] = idata[i]
+-    for i in range(n, n_p2):
+-        dev_data[i] = 0
+-        
+     # 3. Up-Sweep (Reduce)
+-    num_levels = int(log2(n_p2))
++    num_levels = int(math.log2(n_p2))
+     for d in range(num_levels):
+         stride = 1 << d
+-        # Launch kernel: for each block, threads add data[index + stride - 1] to data[index + 2*stride - 1]
+-        # where index is a multiple of 2*stride
+-        launch_up_sweep_kernel(n_p2, d, dev_data)
+-        
++        d2 = 1 << (d + 1)
++        for index in range(0, n_p2, d2):
++            dev_data[index + d2 - 1] += dev_data[index + stride - 1]
+     # 4. Reset Root
+     dev_data[n_p2 - 1] = 0
+-    
+     # 5. Down-Sweep (Scan)
+     for d in range(num_levels - 1, -1, -1):
+         stride = 1 << d
+-        # Launch kernel: for each block, threads save data[index + stride - 1],
+-        # set data[index + stride - 1] = data[index + 2*stride - 1],
+-        # add saved value to data[index + 2*stride - 1]
+-        launch_down_sweep_kernel(n_p2, d, dev_data)
+-        
++        d2 = 1 << (d + 1)
++        for index in range(0, n_p2, d2):
++            t = dev_data[index + stride - 1]
++            dev_data[index + stride - 1] = dev_data[index + d2 - 1]
++            dev_data[index + d2 - 1] += t
+     # 6. Copy result
+-    odata = allocate_array(n)
++    odata = [0] * n
+     for i in range(n):
+         odata[i] = dev_data[i]
+-        
+     return odata
+ ```

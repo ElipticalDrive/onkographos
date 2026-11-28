@@ -1,0 +1,100 @@
+# IDX Multiresolution File Format
+
+Also called: Hierarchical Z (HZ) order, IDX
+
+## Overview
+IDX is a hierarchical multiresolution data format designed for fast, efficient, and cache-oblivious access to large-scale scientific datasets [S1]. It solves the problem of high-latency I/O in interactive visualization by enabling progressive access from coarse to fine resolutions without storing redundant data for different levels [S1]. Unlike classical database approaches that use standard Z-order indexing, IDX utilizes a specific Hierarchical Z (HZ) order that allows conversion via simple bit-string manipulations and ensures data locality independent of out-of-core block structures [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of data samples with $N$-dimensional spatial coordinates.
+*   **Output:** A file containing data samples ordered by increasing HZ level and HZ index within that level.
+
+**Data Structures:**
+The IDX format does not store explicit metadata for grid dimensions or resolution levels in a complex header structure that ties the data to a specific block layout. The data is stored as a contiguous stream of samples. The logical structure is defined by the HZ order:
+1.  **HZ Level ($L$):** An integer indicating the resolution level. Level 0 is the coarsest.
+2.  **HZ Index ($I$):** The position of the sample within the HZ ordering at level $L$.
+
+**Algorithm:**
+The generation of the IDX file involves calculating the HZ order for each sample and sorting them.
+
+1.  **Calculate HZ Level and Index:**
+    For each data sample with spatial coordinates $(x, y, z)$, calculate its Hierarchical Z (HZ) order. The HZ order is analogous to the Z-order (Morton code) but structured hierarchically.
+    *   Let $L$ be the HZ level assigned to the sample.
+    *   Let $I$ be the HZ index within that level.
+    *   The HZ level determines the granularity. With each increasing level $L$, the number of elements (or the density of samples) increases by a factor of 2 compared to the previous level [S1].
+    *   The conversion from standard Z-order indexing to IDX HZ-order indexing can be implemented with a simple sequence of bit-string manipulations [S1].
+
+2.  **Assign Levels:**
+    Samples are assigned a particular HZ level, analogous to different levels of resolution from coarse to fine [S1].
+
+3.  **Sort Data:**
+    Sort all samples first by HZ Level (ascending), and then by HZ Index (ascending) within each level [S1].
+
+4.  **Write Data:**
+    Write the data samples to the file in the sorted order [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def generate_idx_file(samples):
+    """
+    samples: List of tuples (x, y, z, value)
+    Returns: List of tuples (hz_level, hz_index, value) sorted by (hz_level, hz_index)
+    """
+    processed_samples = []
+    
+    for (x, y, z, value) in samples:
+        # Calculate HZ level and index based on spatial coordinates
+        # The exact bit-manipulation for HZ order is derived from Z-order
+        # but structured hierarchically.
+        hz_level, hz_index = calculate_hz_order(x, y, z)
+        processed_samples.append((hz_level, hz_index, value))
+    
+    # Sort by HZ level first, then by HZ index
+    processed_samples.sort(key=lambda item: (item[0], item[1]))
+    
+    return processed_samples
+
+def calculate_hz_order(x, y, z):
+    """
+    Placeholder for the specific bit-string manipulation that converts
+    spatial coordinates to HZ level and index.
+    The source states this is a simple sequence of bit-string manipulations
+    from Z-order indexing [S1].
+    """
+    # Implementation detail: Not given in the sources.
+    # Typically involves interleaving bits of coordinates to form a Morton code,
+    # then mapping that code to a hierarchical level structure.
+    pass
+```
+
+**Parameters:**
+*   **Resolution Levels:** The number of levels is determined by the data size and desired granularity. Each level increases the number of elements by a factor of 2 [S1].
+*   **Storage Overhead:** IDX does not store redundant data for different resolutions, avoiding increased storage requirements associated with other hierarchical schemes [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Parallel Restarts:** The order of data is independent of the out-of-core block structure. This means no data reorganization is required when using different settings (e.g., local disk vs. network) or varying numbers of nodes in a parallel setting [S1].
+*   **Small File Accesses:** In parallel writing, small-sized file accesses from each process are suboptimal. The PIDX strategy avoids this by aggregating data [S1].
+
+## Subtopics
+
+### PIDX Parallel Write Strategy
+PIDX is a parallel library that enables parallel simulations to directly write IDX data, coordinating data access among processes to concurrently write to the same dataset with coherent results [S1]. It employs a two-phase I/O strategy: each process first performs a local HZ encoding of its own data, then the data is aggregated by a subset of processes (aggregators) which write the aggregated data to disk [S1]. This strategy avoids suboptimal small-sized file accesses from each process in favor of large, contiguous accesses performed by a select few aggregators [S1].
+
+### VisIt IDX Integration
+VisIt includes a plugin and infrastructural modifications to enable reading IDX data, dynamic view-dependent read capabilities, and visualization of IDX data hosted on remote servers [S1]. It allows manual control of the resolution level [S1]. VisIt uses a distributed parallel mechanism for this, whereas ViSUS supports thread-parallel operation [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Access is cache-oblivious and progressive, allowing fast reads from coarse to fine resolution [S1]. Conversion from Z-order to HZ-order is $O(1)$ per sample using bit-string manipulations [S1].
+*   **Memory Complexity:** IDX does not store redundant data for different resolutions, minimizing storage requirements [S1].
+*   **Performance:** Enables interactive exploration of massive scientific models on various hardware, from desktops to handheld devices, using a tiny fraction of compute power compared to reading full-resolution data [S1].
+*   **Strengths:** Independent of out-of-core block structure, facilitating restarts with varying node counts and network settings without reorganization [S1]. Efficient parallel writing via PIDX [S1].
+*   **Limitations:** Requires specific libraries (PIDX) for parallel writing and plugins (VisIt) for visualization support [S1].
+
+## Background
+IDX was developed to address the challenges of visualizing large-scale simulation datasets. It is described in the paper "Fast Multiresolution Reads of Massive Simulation Datasets" [S1]. The format is supported by the PIDX library for parallel writing and integrated into the VisIt visualization application [S1]. It is also natively supported by the ViSUS Viewer [S1].
+
+## Sources
+[S1] Fast Multiresolution Reads of Massive Simulation Datasets, https://doi.org/10.1007/978-3-319-07518-1_20, fetched 2026-10-26

@@ -1,0 +1,306 @@
+The Vesuvius Challenge monorepo. Contribute to ScrollPrize/villa development by creating an account on GitHub.
+
+optimized_inference: prepare keeps the signal of 16-bit layer TIFFs by tencur · Pull Request #1998 · ScrollPrize/villa · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+tencur
+commented
+Oct 7, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+In one sentence: STEP=prepare now builds a usable surface volume from 16-bit layer TIFFs, which is what
+volume-cartographer renders, instead of a volume that is 255 everywhere.
+One real example: Starting with the 16-bit layers/ of Scroll 5 segment 20241127171800
+(full-scrolls/Scroll5/PHerc172.volpkg/paths/20241127171800/layers/), I ran the prepare step's
+create_surface_volume_zarr and looked at the result before running inference.
+Before: (villa main e0bbb8b)
+```
+input layer:  uint16 (5360, 5998), values in segment 11349..65535
+prepared:     uint8, distinct values in segment: 1, pixels equal to 255: 100.00%
+equals raw >> 8:                  False
+equals cv2.IMREAD_GRAYSCALE read: False
+```
+The step logs "Surface volume zarr created successfully". Inference then clips to 200 and feeds the model a
+constant image.
+After this PR:
+```
+prepared:     uint8, distinct values in segment: 197, pixels equal to 255: 0.02%
+equals raw >> 8:                  True
+equals cv2.IMREAD_GRAYSCALE read: True
+```
+Proof: before_after_layer32_crop.png (same 512 px crop: blank, fixed, reference) and
+c03_prediction_before_after.png (TimeSformer on a 640 px crop of layers 17–42: a uniform tile pattern on main, a
+data-driven prediction with the fix; the two runs used strides 64 and 32).
+python reproduce_prepare_16bit.py /path/to/villa prints the blocks above; it downloads one 61 MiB layer and needs
+only requirements-cpu-only.txt. Checked on layers 30, 31 and 32: all three byte-identical to raw >> 8 after the fix.
+Before (main)
+After (this PR)
+before_after_layer32_crop.png:
+c03_prediction_before_after.png:
+Why / where this is useful: Scroll 5 segment layers are published as 16-bit TIFFs, so anyone using the production pipeline on them gets a blank input and a meaningless prediction, with no error. With this fix the same pipeline works on Scroll 5 without converting the layers first. This section was written by Claude Code under my direction.
+I personally verified that the example and proof above were produced by this PR on the stated data.
+Details
+_read_gray_any clipped every non-uint8 TIFF to [0, 255]. For uint16 it now takes the high byte. Other dtypes
+keep the old path.
+This matches the readers already in the package: cv2.IMREAD_GRAYSCALE for PNG/JPEG layers and in
+entrypoint.load_layers_to_numpy.
+16-bit layers are now read exactly as cv2.IMREAD_GRAYSCALE reads them (high byte), for every 16-bit file; a uint16 file that only holds values below 256 therefore becomes near zero, the same as with OpenCV.
+Tests: none in this PR (removed at review request). The 4 cases written for it (3 fail on main; the folder's 8 existing tests pass) are recorded in the evidence repo (tests.txt), next to the before/after script reproduce_prepare_16bit.py.
+Not tested: float or 32-bit TIFF layers, S3 output paths, GPU inference on the repaired volume.
+Reproduction scripts: tencur/villa-pr-evidence/C03 (run with run_proof.sh).
+Tested commit: 44f9032d on upstream main e0bbb8b. The head 4dd2eb5e only removes the tests; processing.py is unchanged.
+Found and written with Claude Code under my direction.
+Downstream effect on a GPU (added 2026-10-08)
+Same pipeline, run end to end (prepare → inference → reduce) on a rented A40 with the public scrollprize/timesformer_scroll5_27112024 checkpoint and the real 16-bit layers 0–25 of PHerc172 segment 20241127171800 (dl.ash2txt.org), production defaults (tile 64, stride 16, batch 256):
+upstream main e0bbb8b
+this PR
+prepared surface volume, sampled voxels equal to 255
+71.2 %
+0.02 %
+prediction (5360 × 5998, uint8): std
+18.7
+49.9
+prediction pixels above 128
+0.0 %
+8.85 %
+prediction sha256
+2a5e12c2… (identical on two separate pods)
+1e0620a3…
+On main the prediction is a constant 40 inside the segment mask. A direct model probe explains the number: a zero tile gives logit −1.674, which is 40 after the sigmoid and the ×255 scaling, so the model was fed nothing it could use. No claim is made about legible text in the fixed output; it only shows the model responding to the data.
+Second physical segment, 20241028121112 (3840 × 29542, 26 × 16-bit layers, stride 32): main 77.8 % saturated → prediction std 17.3, 0 % above 128; this PR → std 48.2, 8.1 % above 128.
+Scripts and per-run statistics: https://github.com/tencur/villa-pr-evidence/tree/main/C03/gpu
+🤖 Generated with Claude Code
+optimized_inference: keep the signal of 16-bit layer TIFFs in prepare
+…
+c2ccdac
+```
+_read_gray_any clipped every non-uint8 TIFF to [0, 255]. A 16-bit layer,
+which is what volume-cartographer renders, came out as a constant 255
+wherever the segment had data, so the surface volume carried no CT signal.
+
+Take the high byte for uint16 input, which is what cv2.IMREAD_GRAYSCALE
+already does for the other formats and for the legacy numpy loader.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+```
+Copilot
+AI
+balanced review requested due to automatic review settings
+October 7, 2026 16:22
+tencur
+requested a review
+from erdpx
+as a code owner
+October 7, 2026 16:22
+vercel
+Bot
+commented
+Oct 7, 2026
+Copy link
+Copy Markdown
+@tencur is attempting to deploy a commit to the scroll Team on Vercel.
+A member of the Team first needs to authorize it.
+Copilot started reviewing on behalf of
+tencur
+October 7, 2026 16:23
+View session
+Copilot
+AI
+reviewed
+Oct 7, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🟢 Approval recommended
+The focused fix matches existing OpenCV behavior and includes appropriate regression coverage.
+0 open findings
+What changed in this PR
+Fixes preparation of 16-bit TIFF layers by preserving their high-byte signal instead of saturating values.
+Changes:
+Converts uint16 TIFF data to uint8 using a right shift.
+Adds unit and integration coverage for 8-bit and 16-bit layers.
+File
+Description
+ink-detection/​optimized_inference/​processing.py
+Correctly converts 16-bit TIFF layers.
+ink-detection/​optimized_inference/​tests/​test_prepare_layer_reading.py
+Verifies conversion and surface-volume output.
+🧠 Review effort: Balanced
+💡 Add a code-review agent skill or configure MCP servers for context-aware, tailored reviews. Learn more in the docs.
+Copilot
+AI
+balanced review requested due to automatic review settings
+October 8, 2026 04:39
+Copilot started reviewing on behalf of
+tencur
+October 8, 2026 04:40
+View session
+tencur
+force-pushed
+the
+fix/prepare-16bit-layers
+branch
+from
+5c82dbc to
+34e4986
+Compare
+October 8, 2026 04:40
+optimized_inference: give the test suite an explicit OpenCV pixel limit
+…
+44f9032
+```
+The package modules set OPENCV_IO_MAX_IMAGE_PIXELS to "0" before importing
+cv2, and OpenCV reads that variable at import time and treats "0" as a
+zero-pixel limit. Whichever test module imports a package module first
+therefore decided whether cv2.imread worked for the rest of the session,
+and the 16-bit reader test (which compares against cv2) failed when run
+after the other optimized_inference tests. A tests/conftest.py now sets an
+explicit large limit before any test module is imported. The package
+default itself is a separate problem.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+```
+tencur
+force-pushed
+the
+fix/prepare-16bit-layers
+branch
+from
+34e4986 to
+44f9032
+Compare
+October 8, 2026 04:41
+Copilot
+AI
+reviewed
+Oct 8, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🔵 Needs a closer look
+The test environment setup does not reliably override the zero-pixel OpenCV limit.
+0 open findings
+Previously missed (1)
+In code that hasn't changed since last review
+Explicitly set environment before importing cv2
+ink-detection/​optimized_inference/​tests/​test_prepare_layer_reading.py:10
+setdefault preserves the existing value "0", including the value installed by processing or by the test runner. In that case the later OpenCV comparison can return None, so this setup does not provide the stated import-order/environment independence. Override the value explicitly before importing cv2 (and isolate the comparison in a subprocess if cv2 may already have initialized).
+🧠 Review effort: Balanced
+Give feedback about Copilot approvals in this survey to enter a drawing for a $150 gift card.
+Copilot
+AI
+balanced review requested due to automatic review settings
+October 8, 2026 04:42
+Copilot started reviewing on behalf of
+tencur
+October 8, 2026 04:43
+View session
+Copilot
+AI
+reviewed
+Oct 8, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🟡 Changes recommended
+Required real-data proof, author verification, and human-written usefulness commentary are incomplete.
+0 open findings
+🧠 Review effort: Balanced
+Give feedback about Copilot approvals in this survey to enter a drawing for a $150 gift card.
+pmh47
+assigned
+jrudolph
+Oct 11, 2026
+bruniss
+commented
+Oct 21, 2026
+Copy link
+Copy Markdown
+Member
+remove the gigantic test please
+optimized_inference: drop the 16-bit prepare tests and their conftest
+…
+4dd2eb5
+```
+As asked in review: the PR is the processing.py change only.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Copilot
+AI
+balanced review requested due to automatic review settings
+October 21, 2026 12:32
+Copilot
+AI
+reviewed
+Oct 21, 2026
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Copilot was unable to review this pull request because the user who requested the review has reached their quota limit.
+tencur
+commented
+Oct 21, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+Done: the test file and its conftest are removed, so the PR is now only the processing.py change.
+Hide details
+View details
+bruniss
+merged commit a911920
+into
+ScrollPrize:main
+Oct 21, 2026
+16 of 17 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+4 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

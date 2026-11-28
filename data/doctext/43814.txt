@@ -1,0 +1,4193 @@
+# Volumetric display
+The code for the software part of my graduation project at SSPŠ is stored here. The 3d models can be found in [this](https://cad.onshape.com/documents/511c9212d0a2d905b0dfb74b/w/9b3b828cfae5ab9d0141f07e/e/48d7492fafb73baf2ace87d0?renderMode=0&uiState=6998445690e5d9c5d21373ef)
+Onshape document.
+
+A custom rendering library is featured, which can render using points from any pointcloud file. It also supports dithering using an 8x8x8 Bayer matrix.
+
+This code will only run correctly on a Raspberry Pi 4 due to processor specific GPIO settings. Other models will likely be too slow, maybe except for RPi 3.
+
+## Running
+I used DietPi as my operating system. First, connect to your Pi by SSH (desktop will work too, but make sure you are connected to the internet). Make sure there is not too much other stuff running, as this may cause artefacting of the displays. 
+
+First clone the repo:
+
+```
+git clone https://github.com/quertzuiop/Volumetric-display.git
+```
+Next build the software:
+
+``` 
+(cd driver/ && mkdir build && make)
+(cd speedRegulator/ && mkdir build && make)
+(cd apps/showObj && mkdir build && make)
+(cd apps/snake && mkdir build && make)
+```
+You will also need FastAPI:
+
+```
+pip install fastapi
+```
+
+Next, launch the control panel server. This will create the driver and process for reading rotation speed. It will also create a web page that can be used for keyboard input to apps running on the display.
+
+```
+cd controlPanel/backend/ && fastapi dev main.py
+``` 
+
+Now, you can run an app. I have made 2 example apps.
+## .obj displayer
+This app reads a .obj file and scales it to fit in the display. Textures are not supported yet.
+
+Upload your .obj files to ```apps/showObj/assets```.
+Run the app with
+```
+cd apps/showObj/
+build/main [filename]
+```
+The filename should be passed without the .obj extension.
+There are also a few options:
+- ```-color``` possible values are ```white, black, red, green, blue, magenta, cyan, yellow```.
+- ```-padding``` (float) the offset from the walls of the display. The object
+- ```-thickness``` (float) the line width of the rendered wireframe.
+## Snake
+The second app is the classis snake game. The playing field is 5x5x8. To control the snake, press ```W, A, S, D, I, J``` while focused onto the control panel web page.
+
+## Docs
+### Creating an  app
+If you wish to write you own app, you will need some boilerplate code.
+
+Create a new folder in ```apps/```.
+make folders and files like this:
+```
+apps/yourApp/
+  |- build/
+  |- main.cpp
+  |- Makefile
+```
+You can copy and paste the makefile from one of the default apps.
+
+In main.cpp paste this code:
+``` cpp
+#include "renderer.h"
+#include "types.h"
+
+int main() {
+    Scene scene = Scene();
+}
+```
+## Renderer
+All objects are managed through ```Scene```. The scene has objects. Each object consists of a geometry, color and internally a transformation. There are a few types of geometry:
+
+```ParticleGeometry```: A sphere defined by its position and radius. Is limited to one cell of the spatial index so it should not be used for large or accurate spheres. 
+
+```CapsuleGeometry```: A line or cylinder with rounded ends, defined by a start point, end point, and radius.
+
+```TriangleGeometry```: A triangle in 3D space defined by three vertices and a thickness.
+
+```SphereGeometry```: A sphere defined by a center position, radius, and optional wall thickness. By default is filled in.
+
+```CuboidGeometry```: A box defined by two opposite corner vertices (v1 and v2). It can optionally be rendered as a wireframe.
+
+```MeshGeometry```: A custom 3D mesh with its own transformations. It can also be rendered as a wireframe. Can be loaded from an .obj file using ```loadMeshObj()``` accessible by  ```#include io.h```
+
+```TextGeometry```: 3D text defined by a string, position, size, and an orientation in 3D space (e.g., facing POS_X, NEG_Y, etc.).
+
+### Creating and Modifying Objects
+To add an object to the scene, define its geometry and call ```scene.createObject()```. This method takes a ```Geometry``` struct, a ```Color``` (also clipping behavior but other than AND not implemented), and returns an ```ObjectId```. This ID is used to reference the object in the scene.
+
+Colors are defined using RGB floats between 0 and 1 (e.g., ```{1.0f, 0.5f, 0.0f}```). There are also predefined constants available: ```RED, GREEN, BLUE, WHITE, BLACK, CYAN, MAGENTA, YELLOW```.
+
+Once an object is created, you can modify it using its ```ObjectId```.
+
+**Transformations:** 
+
+Move, rotate, or scale the object using ```scene.setObjectTranslation(id, {x, y, z})```, ```scene.setObjectRotation(id, {x, y, z})```, or ```scene.setObjectScale(id, {x, y, z})```. You can also set an intrinsic pivot point using ```scene.setObjectIntrinsicPivot(id, {x, y, z})```.
+
+**Appearance:**
+
+Update an object's look on the fly using ```scene.setObjectGeometry(id, newGeometry)``` or ```scene.setObjectColor(id, newColor)```.
+
+**Removal:** 
+
+Delete a specific object using ```scene.removeObject(id)```, or clear the entire display by calling ```scene.wipe()```.
+
+### Rendering and Input
+**Rendering:**
+
+To push your changes and draw the current scene to the volumetric display, call ```scene.render()```.
+
+**Input:**
+
+You can read user input from the control panel web interface using ```scene.getPressedKeys()```, which returns an array of the last 8 pressed characters.
+
+### Example Usage
+Here is a simple example that creates a 10x10x10 grid of colored cuboids and renders them to the display:
+
+```cpp
+#include "renderer.h"
+#include "types.h"
+
+int main() {
+    Scene scene = Scene();
+
+    float size = 4.5f;
+    CuboidGeometry cube = {.v1 = {-size/2, -size/2, -size/2}, .v2 = {size/2, size, size/2} };
+
+    // Generate a 10x10x10 grid of cubes
+    for (int i = 0; i < 10; ++i) {
+        for (int j = 0; j < 10; ++j) {
+            for (int k = 0; k < 10; ++k) {
+                // Create the object with an RGB color based on its position in the grid
+                ObjectId newObj = scene.createObject(cube, {(float) i / 9, (float) k / 9, (float) j / 9});
+                
+                // Translate the object to its correct grid position
+                scene.setObjectTranslation(newObj, {22.5f - size*(i+1), 22.5f - size*(j+1), size*(k+1)});
+            }
+        }
+    }
+
+    // Push the objects to the display
+    scene.render();
+}
+```
+
+### shm/readerTest.cpp
+```
+#include <shm.h>
+#include <stdio.h>
+#include <unistd.h>
+
+using namespace std;
+int main() {
+    const Header header = {
+        .signature = 0xB0B,
+        .version = 1
+    };
+    ShmLayout* ptr = initShm(header, (const char*)"testshm");
+    while (true) {
+        ShmVoxelFrame& frame = ptr->data;
+        printf("reading frame\n");
+        for (uint8_t val : frame) {
+            if (val != 0) {
+                printf("%d\n", val);
+            }
+        }
+        sleep(1);
+    }
+}
+```
+
+### shm/shm.cpp
+```
+#include<shm.h>
+#include<iostream>
+#include<sys/shm.h>
+#include<sys/mman.h>
+#include<sys/stat.h>
+#include<fcntl.h>
+#include<unistd.h>
+#include<cstring>
+#include <assert.h>
+
+
+
+ShmLayout* initShm(const Header header, const char* name) {
+    int g_fd = shm_open(name, O_CREAT | O_RDWR, 0666);
+    if (g_fd == -1) {
+        perror("initShm: shm_open failed");
+        return nullptr;
+    }
+    if (ftruncate(g_fd, sizeof(ShmLayout)) == -1) {
+        perror("initShm: ftruncate failed");
+        return nullptr;
+    }
+
+    void* ptr = mmap(0, sizeof(ShmLayout), PROT_READ | PROT_WRITE, MAP_SHARED, g_fd, 0);
+    if (ptr == MAP_FAILED) {
+        perror("initShm: mmap failed");
+        return nullptr;
+    }
+
+    ShmLayout* g_shmPtr = static_cast<ShmLayout*>(ptr);
+
+    g_shmPtr->header = header;
+
+    return g_shmPtr;
+}
+ShmLayout* initShm(const Header header, const char* name, int colCount) {
+    int g_fd = shm_open(name, O_CREAT | O_RDWR, 0666);
+    if (g_fd == -1) {
+        perror("initShm: shm_open failed");
+        return nullptr;
+    }
+    
+    // Dynamically calculate required size
+    size_t totalSize = sizeof(ShmLayout) + (colCount * sizeof(ShmVoxelSlice));
+    
+    if (ftruncate(g_fd, totalSize) == -1) {
+        perror("initShm: ftruncate failed");
+        return nullptr;
+    }
+
+    void* ptr = mmap(0, totalSize, PROT_READ | PROT_WRITE, MAP_SHARED, g_fd, 0);
+    if (ptr == MAP_FAILED) {
+        perror("initShm: mmap failed");
+        return nullptr;
+    }
+
+    ShmLayout* g_shmPtr = static_cast<ShmLayout*>(ptr);
+    g_shmPtr->header = header;
+
+    return g_shmPtr;
+}
+
+
+ShmLayout* openShm(const char* name) {
+    int g_fd = shm_open(name, O_RDWR, 0666);
+    if (g_fd == -1) {
+        if (errno == ENOENT) {
+            cerr << "Driver not running (SHM not found)." << endl;
+        } else {
+            perror("openShm: shm_open failed\n");
+        }
+        return nullptr;
+    }
+
+    struct stat statbuf;
+    if (fstat(g_fd, &statbuf) == -1) {
+        perror("openShm: fstat failed");
+        return nullptr;
+    }
+    size_t totalSize = statbuf.st_size;
+
+    void* ptr = mmap(0, totalSize, PROT_READ | PROT_WRITE, MAP_SHARED, g_fd, 0);
+    if (ptr == MAP_FAILED) {
+        perror("openShm: mmap failed");
+        return nullptr;
+    }
+    
+    ShmLayout* layoutPtr = static_cast<ShmLayout*>(ptr);
+    assert(layoutPtr->header.signature == 0xB0B);
+
+    return layoutPtr;
+}
+```
+
+### shm/shm.h
+```
+#pragma once
+
+#include <array>
+#include <cstdint>
+#include <chrono>
+#include <iostream>
+#include <sys/shm.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <cstring>
+#include <assert.h>
+#include "../renderer/include/types.h"
+
+using namespace std;
+
+struct ShmVoxelSlice {
+    uint8_t index1;
+    uint8_t index2;
+    array<uint8_t, 64*4> data;
+};
+
+struct alignas(64) Header {
+    uint32_t signature; //4
+    uint16_t version;   //2
+    uint32_t sliceCount;
+    bool twoBitColor;
+    uint8_t reserved[51];
+};
+
+struct ShmLayout {
+    Header header;
+    int64_t nextFrameStart;
+    int64_t nextFrameDuration;
+    KeyboardState keyboardState;
+
+    ShmVoxelSlice data[]; 
+};
+
+ShmLayout* initShm(const Header header, const char* name, int colCount);
+
+ShmLayout* openShm(const char* name);
+```
+
+### shm/writerTest.cpp
+```
+#include <shm.h>
+#include <unistd.h>
+#include <stdio.h>
+
+int main() {
+    ShmLayout* ptr = openShm("testshm");
+    int i = 0;
+    while (++i) {
+        ptr->data[1] = i;
+        printf("wrote %d\n", i);
+        sleep(2);
+    }
+}
+```
+
+### speedRegulator/main.cpp
+```
+#include "shm.h"
+#include <chrono>
+#include <wiringPi.h>
+
+using namespace std;
+using namespace chrono_literals;
+const double targetFps = 24.;
+const int dataPin = 16;
+const auto minOnTime = 10ms;
+const float minFps = 0.2;
+
+int main() {
+    volatile ShmLayout* shmPointer = openShm("vdshm");
+    wiringPiSetupGpio();
+    pinMode(dataPin, INPUT);
+
+    int64_t lastFrameStart;
+    int frameNum = 0;
+    printf("speed regulator setup succesfully\n");
+    while (true) {
+        auto currentTime = chrono::time_point_cast<chrono::nanoseconds>(chrono::steady_clock::now()).time_since_epoch().count();
+
+        if (frameNum >= 1) {
+            auto frameDuration =  chrono::steady_clock::now().time_since_epoch().count() - lastFrameStart;
+            float fps = 1000000000.0/frameDuration;
+            printf("frame duration: %ld, fps: %f\n", frameDuration, 1000000000.0/frameDuration);
+            if (fps > minFps) {
+                shmPointer->nextFrameStart = currentTime;
+                shmPointer->nextFrameDuration = frameDuration;
+            }
+        }
+        lastFrameStart = currentTime;
+        while (true) {
+            while (digitalRead(dataPin) == HIGH) {}
+            auto start = chrono::steady_clock::now();
+            bool passed = false;
+            while (digitalRead(dataPin) == LOW) {
+                if (chrono::steady_clock::now() - start > minOnTime) {
+                    passed = true;
+                    break;
+                } 
+            }
+            if (passed) { break; }
+        }
+
+        while (true) {
+            while (digitalRead(dataPin) == LOW) {}
+            auto start = chrono::steady_clock::now();
+            bool passed = false;
+            while (digitalRead(dataPin) == HIGH) {
+                if (chrono::steady_clock::now() - start > minOnTime) {
+                    passed = true;
+                    break;
+                } 
+            }
+            if (passed) { break; }
+        }
+
+        frameNum++;
+    }
+    // auto start = chrono::steady_clock::now();
+    // auto a = chrono::duration_cast<chrono::microseconds>(chrono::steady_clock::now() - start).count();
+    // for (int i = 0; i < 48000; i++) {
+    //     a = chrono::duration_cast<chrono::microseconds>(chrono::steady_clock::now() - start).count();
+    // }
+    // auto end = chrono::steady_clock::now();
+    // auto duration = chrono::duration_cast<chrono::microseconds>(end - start).count();
+    
+    // printf("Total time for 10000 calls: %lld microseconds\n", duration);
+}
+```
+
+### update_pattern_gen/output_formatter.py
+```
+input_file = open("fanda_1200.txt", "r")
+
+res = []
+for line in input_file:
+    frame, index, a, b, c, d = map(int, line.strip().split())
+    res.append((frame, index, (a, b, c, d)))
+
+out = sorted(res, key=lambda x: x[0])
+output_file = open(f"update_pattern_{len(res)}_sorted.txt", "w")
+for frame, index, (a, b, c, d) in out:
+    output_file.write(f"{frame} {index} {a} {b} {c} {d}\n")
+```
+
+### update_pattern_gen/test.py
+```
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.ndimage import gaussian_filter
+
+def get_void_and_cluster_ranks(shape, sigma=1.5):
+    """
+    Generates a Blue Noise dither array using the Void-and-Cluster method (Ulichney).
+    """
+    h, w = shape
+    n_pixels = h * w
+    
+    # 1. INITIAL BINARY PATTERN (Random start)
+    # We start with a random noise with roughly 10% minority pixels
+    # (Simplified for this demo: we just start with a random scatter)
+    initial_pixels = np.zeros((h, w))
+    # Fill 10% randomly
+    n_initial = int(n_pixels * 0.1) 
+    indices = np.random.choice(n_pixels, n_initial, replace=False)
+    initial_pixels.flat[indices] = 1
+
+    # 2. RELAXATION (Make the initial pattern "Blue")
+    # We swap '1's from clusters to '0's in voids until stable.
+    # In a full implementation, we loop this. 
+    # For this demo, we assume the sorting phases below will fix the distribution.
+    
+    # 3. GENERATE RANKS
+    # We need to assign a rank 0..N-1 to every pixel.
+    rank_matrix = np.zeros((h, w), dtype=int)
+    
+    # Current state of the binary pattern
+    binary_pattern = initial_pixels.copy()
+    
+    # We use a Gaussian to represent the "energy" of clusters
+    # mode='wrap' is CRITICAL for tileable/volumetric displays
+    def get_energy(pattern):
+        return gaussian_filter(pattern.astype(float), sigma=sigma, mode='wrap')
+
+    # --- PHASE 1: REMOVE MINORITY (Rank 0 to Initial) ---
+    # We have some 1s. We want to remove them one by one to find the ranks 
+    # from (n_initial-1) down to 0.
+    
+    temp_pattern = binary_pattern.copy()
+    ones_indices = np.argwhere(temp_pattern == 1)
+    
+    # We calculate energy of the current pattern
+    # We remove the '1' that is in the "tightest cluster" (highest energy)
+    for r in range(n_initial - 1, -1, -1):
+        energy = get_energy(temp_pattern)
+        
+        # Mask out zeros, we only care about ones
+        energy[temp_pattern == 0] = -9999 
+        
+        # Find the max energy pixel (tightest cluster)
+        y, x = np.unravel_index(np.argmax(energy), shape)
+        
+        # Assign rank and remove pixel
+        rank_matrix[y, x] = r
+        temp_pattern[y, x] = 0
+
+    # --- PHASE 2: FILL MAJORITY (Rank Initial to End) ---
+    # Now we go from our initial pattern up to 100% full.
+    # We add '1's to the "largest voids" (lowest energy spots).
+    
+    temp_pattern = binary_pattern.copy()
+    
+    for r in range(n_initial, n_pixels):
+        energy = get_energy(temp_pattern)
+        
+        # Mask out ones, we only care about zeros
+        energy[temp_pattern == 1] = 9999 
+        
+        # Find the min energy pixel (largest void)
+        y, x = np.unravel_index(np.argmin(energy), shape)
+        
+        # Assign rank and add pixel
+        rank_matrix[y, x] = r
+        temp_pattern[y, x] = 1
+        
+    # Normalize to 0.0 - 1.0
+    return rank_matrix / n_pixels
+
+# --- CONFIGURATION ---
+W, H = 64, 64 # kept small for calculation speed in this demo
+sigma = 1.4   # Controls the "frequency" of the blue noise
+
+print("Generating Void-and-Cluster map (this uses Gaussian convolution)...")
+# Depending on your CPU, this might take a few seconds
+vc_map = get_void_and_cluster_ranks((H, W), sigma=sigma)
+
+# Create Gradient for testing
+img_gradient = np.zeros((H, W, 3))
+for x in range(W):
+    intensity = (x / W) * 1  # Gradient 0% to 60%
+    img_gradient[:, x] = intensity
+
+# --- APPLY DITHERING (OFFSET STRATEGY) ---
+# Now we test the OFFSET strategy again.
+# With Mitchell (previous turn), Red/Blue looked grainy.
+# With Void-and-Cluster, they should look smooth.
+
+img_vc_offset = np.zeros((H, W, 3))
+
+# Green uses the raw map
+g_thresh = vc_map
+# Red uses +0.33 offset (wrapping around)
+r_thresh = (vc_map + 0.33) % 1.0
+# Blue uses +0.66 offset (wrapping around)
+b_thresh = (vc_map + 0.66) % 1.0
+
+r_thresh = np.random.rand(W,H)
+g_thresh = np.random.rand(W,H)
+b_thresh = np.random.rand(W,H)
+
+
+img_vc_offset[:, :, 0] = img_gradient[:, :, 0] > r_thresh
+img_vc_offset[:, :, 1] = img_gradient[:, :, 1] > g_thresh
+img_vc_offset[:, :, 2] = img_gradient[:, :, 2] > b_thresh
+
+# --- VISUALIZATION ---
+fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+
+# 1. The Rank Map itself
+axes[0].imshow(vc_map, cmap='gray')
+axes[0].set_title("Void-and-Cluster Rank Map\n(0.0 = Black, 1.0 = White)")
+
+# 2. The Resulting Dithered Image (Offset Strategy)
+axes[1].imshow(img_vc_offset)
+axes[1].set_title("Result: Offset Strategy\nNotice: ALL colors are smooth now.")
+
+# 3. Channel Breakdown (Zoomed)
+# Let's look at just the RED channel (the one that was grainy before)
+axes[2].imshow(img_vc_offset[:,:,0], cmap='Reds')
+axes[2].set_title("Red Channel Isolation\n(Uses Ranks ~0.33 - ~0.53)\nPerfectly spaced (No Grain!)")
+
+plt.tight_layout()
+plt.show()
+```
+
+### update_pattern_gen/update_pattern_generator.py
+```
+import cv2
+import numpy as np
+from scipy.spatial import KDTree
+from itertools import product
+import random
+from tqdm import tqdm
+import cProfile
+
+ncols = 600
+height,width = 64,64
+pitch=2.5
+panel2_offset = 17/pitch # in mm / pitch in mm
+img_scale = 12
+
+def get_point_pos(index, side2, angle, offset=None):
+    panel_center_dist = (index + (side2 * width/2) - width/2 + 0.5)
+    if offset is None:
+        x = panel_center_dist * np.cos(angle)
+        y = panel_center_dist * np.sin(angle)
+    else:
+        x = -offset * np.sin(angle) - panel_center_dist * np.cos(angle)
+        y = offset * np.cos(angle) - panel_center_dist * np.sin(angle)
+    return x, y
+
+def nearest_neighbor_distance(pts, pt, tree):
+    if len(pts) == 0:
+        return 0
+    dists, _ = tree.query([pt], k=2)  # k=2 to include the point itself (distance 0)
+    
+    return np.average(dists[0][:1])
+
+pts_display1 = np.array([])
+pts_display2 = np.array([])
+img = np.zeros((height*img_scale, width*img_scale, 3), dtype=np.uint8)
+
+r = list(range(ncols))
+n=0
+random.shuffle(r)
+
+for frame in tqdm(r):
+    angle = frame / ncols * 2 * np.pi
+    max_score = float('-inf')
+    best_choice = None
+    
+    for index in range(width//2):
+        for activation_pattern in product(range(2), repeat=4):
+            if 1 not in activation_pattern: continue
+            pts1, pts2 = [], []
+            for i, active in enumerate(activation_pattern):
+                if i < 2 and active:
+                    pts1 += [get_point_pos(index, i%2, angle)]
+                elif i >= 2 and active:
+                    pts2 += [get_point_pos(index, i%2, angle, offset=panel2_offset)]
+            score = 0
+            for ptgroup in [pts1, pts2]:
+                pts = pts_display1 if ptgroup is pts1 else pts_display2
+                if len(ptgroup) == 0: continue
+                if len (pts) == 0:
+                    score += 1000  # Large constant for first points
+                    continue
+                tree = KDTree(pts)
+                if len(ptgroup) == 1:
+                    score += nearest_neighbor_distance(pts, ptgroup[0], tree)
+                else:
+                    score += (nearest_neighbor_distance(pts, ptgroup[0], tree) + nearest_neighbor_distance(pts, ptgroup[1], tree))* 0.65
+            
+            if score > max_score:
+                max_score = score
+                best_choice = (index, activation_pattern, pts1, pts2)
+                
+    index, activation_pattern, pts1, pts2 = best_choice
+    n+=sum(activation_pattern)
+    if frame % 100 == 0:
+        print(" ", n, " ") #spaces to prevent tqdm overwriting
+    for pt in pts1:
+        pts_display1 = np.append(pts_display1, [pt], axis=0) if pts_display1.size else np.array([pt])
+        x = int(pt[0]*img_scale + width*img_scale/2)
+        y = int(pt[1]*img_scale + height*img_scale/2)
+        img = cv2.circle(img, (x, y), 1, (0, 0, 255), -1)
+    for pt in pts2:
+        pts_display2 = np.append(pts_display2, [pt], axis=0) if pts_display2.size else np.array([pt])
+        x = int(pt[0]*img_scale + width*img_scale/2)
+        y = int(pt[1]*img_scale + height*img_scale/2)
+        img = cv2.circle(img, (x, y), 1, (0, 255, 0), -1)
+    #print(activation_pattern)
+    #if left_on:
+    #    pts = np.append(pts, [pt_l], axis=0)
+    #if right_on:
+    #    pts = np.append(pts, [pt_r], axis=0)
+    cv2.imshow('Pattern Visualization', img)
+    cv2.waitKey(1)
+```
+
+### apps/brain/main.cpp
+```
+#include "renderer.h"
+#include "types.h"
+#include "io.h"
+#include "../utils/utils.h"
+
+#include <fstream>
+
+int main(int argc, char* argv[]) {
+    Scene scene = Scene();
+
+    ifstream file("assets/1.txt");
+    string str;
+    string file_contents;
+    vector<Vec3<float>> vertices;
+
+    while (getline(file, str)) {
+        vector<float> coords = getFloats(str);
+        vertices.push_back({ coords[0], coords[1], coords[2]*stof(argv[1]) });
+    }
+    
+    for (auto& vertex : vertices) {
+        ParticleGeometry g =  {
+            .pos = vertex,
+            .radius = 0.3
+        };
+        scene.createObject(g, BLUE);
+    }
+    scene.render();
+}
+```
+
+### apps/demo/main.cpp
+```
+#include "../../renderer/include/renderer.h"
+#include "../../renderer/include/types.h"
+#include "../../renderer/include/io.h"
+#include <filesystem>
+
+int main() {
+    Scene scene = Scene();
+
+    //Mesh mesh = loadMeshObj("assets/enjoybigfixed.obj");
+
+    //SphereGeometry origin = {.pos = {0, 0, 20}, .radius = 5, .thickness= 0.5};
+    float size = 45. / 10.;
+    // CuboidGeometry cube = {.v1 = {-size/2, -size/2, -size/2}, .v2 = {size/2, size/2, 0} };
+    CuboidGeometry cube = {.v1 = {-size/2, -size/2, -size/2}, .v2 = {size/2, size, size/2} };
+
+    for (int i = 0; i < 10; ++i) {
+        for (int j = 0; j < 10; ++j) {
+            for (int k = 0; k < 10; ++k) {
+
+                ObjectId newObj = scene.createObject(cube, {(float) i /9, (float) k / 9, (float) j /9});
+                // ObjectId newObj = scene.createObject(cube, {(float) i /9, (float) i /9, (float) i /9});
+                scene.setObjectTranslation(newObj, {(45/2) - (size)*(i+1), (45/2) - (size)*(j+1), (size)*(k+1)});
+            }
+        }
+    }
+
+    // for (int i = 0; i < 10; ++i) {
+    //     ObjectId newObj = scene.createObject(cube, {(float) i /9, 1 - ((float) i /9), 1});
+    //     scene.setObjectTranslation(newObj, {(50/2) - (size)*(i), 0, size});
+    // }
+
+    // scene.createObject(origin, {0.5, 1, 0.5});
+    //MeshGeometry geom = {.mesh = mesh, .isWireframe=true, .thickness=0.5};
+
+    //auto meshObj = scene.createObject(geom, RED);
+    //scene.setObjectRotation(meshObj, {3.1415/2, 0, 0}, {0, 0, 0});
+    //scene.setObjectScale(meshObj, {20, 20, 20});
+    scene.render();
+}
+```
+
+### apps/demo/movingTest.cpp
+```
+#include "../../renderer/include/renderer.h"
+#include "../../renderer/include/types.h"
+#include "../../renderer/include/io.h"
+#include <iostream>
+#include <filesystem>
+#include <unistd.h>
+#include <chrono>
+
+int main() {
+    using namespace std::chrono;
+
+    Scene scene = Scene();
+    SphereGeometry G = {.pos = {0, 0, 32}, .radius=6};
+    auto sphere = scene.createObject(G, RED);
+    printf("created object");
+    //scene.render();
+    //scene.setObjectTranslation(sphere, {1, 0, 0});
+    //scene.render();
+    //scene.setObjectTranslation(sphere, {0, 0.5, 0});
+    int i = 0;
+    while(true) {
+        auto start = steady_clock::now();
+        usleep(10000);
+        scene.setObjectTranslation(sphere, {static_cast<float>(sin(i/100.) * 30.), 0, 0});
+        scene.render();
+        i++;
+        auto fps = 1/duration<double>(steady_clock::now() - start).count();
+        printf("fps: %f\n", fps);
+    }
+}
+```
+
+### apps/demo/objtest.cpp
+```
+#include "../../renderer/include/renderer.h"
+#include "../../renderer/include/types.h"
+#include "../../renderer/include/io.h"
+#include <iostream>
+#include <filesystem>
+
+int main() {
+    std::cout<<"loading scene"<<endl;
+    Scene scene = Scene();
+    std::cout<<"loaded"<<endl;
+
+    Mesh mesh = loadMeshObj("assets/test.obj");
+    std::cout<<"mesh"<<endl;
+
+    // scene.createObject(origin, {0.5, 1, 0.5});
+    MeshGeometry geom = {.mesh = mesh, .isWireframe=true, .thickness=0.5};
+
+    auto meshObj = scene.createObject(geom, WHITE);
+    scene.setObjectTranslation(meshObj, {0, 0, 0});
+    scene.setObjectScale(meshObj, {10, 10, 10});
+    scene.render();
+}
+```
+
+### apps/graphing/main.cpp
+```
+#include "../../renderer/include/renderer.h"
+#include "../../renderer/include/types.h"
+#include <math.h>
+#include <chrono>
+#include <thread>
+
+using namespace std;
+
+int main() {
+    Scene scene = Scene();
+    while (true) {
+        auto start = chrono::steady_clock::now().time_since_epoch().count();
+        scene.removeAllObjects();
+        for (float x = -32; x < 32; x++) {
+            for (float y = -32; y < 32; y++) {
+                float z = sin(x/10. + chrono::steady_clock::now().time_since_epoch().count()/1000000000.) * 10  + sin(y/10.) * 10 + 20;
+                
+                ParticleGeometry g = {
+                    .pos = {x, y, z},
+                    .radius = 0.8
+                };
+                
+                scene.createObject(g, BLUE);
+            }
+        }
+        scene.wipeScreen();
+        scene.render();
+        auto end = chrono::steady_clock::now().time_since_epoch().count();
+        printf("fps: %f", 1000000000./(end-start));
+        // this_thread::sleep_for(chrono::milliseconds(50));
+    }
+}
+```
+
+### apps/keyboard_input_test/main.cpp
+```
+#include "types.h"
+#include "renderer.h"
+#include <iostream>
+#include <unistd.h>
+
+using namespace std;
+
+int main() {
+    Scene scene = Scene();
+
+    while (true) {
+        cout << " Pressed keys: ";
+        for (char key : scene.getPressedKeys()) {
+            printf("%c, ", key);
+        }
+        cout<<endl;
+        sleep(2);
+    }
+}
+```
+
+### apps/minecraft/main.cpp
+```
+#include "../../renderer/include/renderer.h"
+#include "../../renderer/include/types.h"
+#include "../../renderer/include/io.h"
+#include "../utils/utils.h"
+#include <iostream>
+#include <string>
+#include <vector>
+#include <stdlib.h>
+#include <filesystem>
+#include <fstream>
+
+
+using WorldModel = vector<pair<Vec3<float>, Color>>;
+
+int main(int argc, char* argv[]) {
+    Scene scene = Scene();
+    vector<string> args(argv, argv + argc);
+    int padding = 2;
+    if (find(args.begin(), args.end(), "-padding") != args.end()) {
+        padding = getOption<float>("-padding", argc, argv);
+    }
+    
+
+    ifstream file(format("assets/{}.txt", argv[1]));
+    stringstream buffer;
+
+    buffer << file.rdbuf();
+    string fileStr = buffer.str();
+
+    vector<string> splitFileStr = split(fileStr, "\n");
+    printf("loaded %d blocks\n", splitFileStr.size());
+    WorldModel worldModel;
+
+    for (string s : splitFileStr) {
+        cout<<s<<endl;
+        
+        vector<float> floatData = getFloats(s);
+
+        Vec3<float> pos = {floatData[0], floatData[2], floatData[1]};
+        Color color = {floatData[3], floatData[4], floatData[5]};
+
+        worldModel.push_back({pos, color});
+    }
+    Vec3<float> min = {__FLT_MAX__, __FLT_MAX__, __FLT_MAX__};
+    Vec3<float> max = {-__FLT_MAX__, -__FLT_MAX__, -__FLT_MAX__};
+
+    Vec3<float> boundsMin = {-32 + padding, -32 + padding, 0 + padding};
+    Vec3<float> boundsMax = {32 - padding, 32 - padding, 64 - padding};
+
+    auto boundsCenter = (boundsMin + boundsMax) * 0.5;
+
+    for (const auto& block : worldModel) {
+        auto v = block.first;
+        min.x = min.x < v.x ? min.x : v.x;
+        min.y = min.y < v.y ? min.y : v.y;
+        min.z = min.z < v.z ? min.z : v.z;
+    
+        max.x = max.x > v.x ? max.x : v.x;
+        max.y = max.y > v.y ? max.y : v.y;
+        max.z = max.z > v.z ? max.z : v.z;
+    }
+    max = max + 1;
+
+    auto meshCenter = (min + max) * 0.5;
+    
+    auto meshSize = max - min;
+    auto targetSize = boundsMax - boundsMin;
+
+    float scaleX = (meshSize.x > 0) ? targetSize.x / meshSize.x : 1.0f;
+    float scaleY = (meshSize.y > 0) ? targetSize.y / meshSize.y : 1.0f;
+    float scaleZ = (meshSize.z > 0) ? targetSize.z / meshSize.z : 1.0f;
+
+    float scaleFactor = std::min({scaleX, scaleY, scaleZ});
+    std::cout<<"calculated mesh center: "<<meshCenter << ", bounds center: " <<boundsCenter << ", scale factor: " <<scaleFactor<<std::endl;
+    std::cout << "min: " << min << ", max: " << max<<std::endl;
+    for (auto block : worldModel) {
+        auto v = block.first;
+        v = v - meshCenter;
+        v = v * scaleFactor;
+        v = v + boundsCenter;
+        CuboidGeometry g = {
+            .v1 = v,
+            .v2 = v + scaleFactor,
+            .isWireframe = false,
+        };
+
+        scene.createObject(g, block.second);
+    }
+
+    scene.render();
+}
+```
+
+### apps/showObj/main.cpp
+```
+#include "../../renderer/include/renderer.h"
+#include "../../renderer/include/types.h"
+#include "../../renderer/include/io.h"
+#include "../utils/utils.h"
+#include <unordered_map>
+#include <iostream>
+#include <stdlib.h>
+
+using namespace std;
+unordered_map<string, Color> colorMap = {
+    {"white", WHITE},
+    {"black", BLACK},
+    {"red", RED},
+    {"blue", BLUE},
+    {"green", GREEN},
+    {"yellow", YELLOW},
+    {"cyan", CYAN},
+    {"magenta", MAGENTA},
+    {"lime", {0.5, 1, 0}},
+    {"pink", {1, 0.5, 0.8}},
+    {"brown", {0.5, 0.4, 0}}
+};
+
+
+int main(int argc, char* argv[]) {
+    Scene scene = Scene();
+    Color color = WHITE;
+    bool isWireframe = true;
+    float padding = 2.0f;
+    float thickness = 0.5f;
+
+    
+    if (argc < 2) {
+        cerr<<"No object file specified."<<endl;
+        return 0;
+    }
+    vector<string> args(argv, argv + argc);
+
+    Mesh mesh = loadMeshObj(format("assets/{}.obj", args[1]));
+
+    if (find(args.begin(), args.end(), "-padding") != args.end()) {
+        padding = getOption<float>("-padding", argc, argv);
+    }
+    
+    if (find(args.begin(), args.end(), "-thickness") != args.end()) {
+        thickness = getOption<float>("-thickness", argc, argv);
+    }
+    
+    if (find(args.begin(), args.end(), "-color") != args.end()) {
+        color = colorMap[getOption<string>("-color", argc, argv)];
+    }
+
+    mesh.center(padding);
+
+    MeshGeometry meshGeom = {
+        .mesh = mesh,
+        .isWireframe = isWireframe,
+        .thickness = thickness
+    };
+
+    auto meshObj = scene.createObject(meshGeom, color);
+    scene.render();
+}
+```
+
+### apps/snake/main.cpp
+```
+#include <iostream>
+#include <chrono>
+#include <thread>
+#include <random>
+#include "renderer.h"
+#include "types.h"
+
+using namespace std;
+
+const float height = 64;
+const float maxSizeFactorXY = 1./sqrt(2); //45.25
+const int cellCountZ = 8;
+const int cellCountXY = floor(cellCountZ * maxSizeFactorXY);
+const float cellSize = height/cellCountZ;
+
+const float snakeMaxRadius = cellSize * 0.4;
+const float snakeMinRadius = snakeMaxRadius/2.0;
+const Color snakeColor1 = GREEN;
+const Color snakeColor2 = BLUE;
+
+
+const float appleRadius = cellSize * 0.4;
+const Color appleColor = RED;
+
+const int sleepTimeMs = 500;
+
+
+unordered_map<char, Vec3<int>> inputMoveMap = {
+    {'d', {-1, 0, 0}},
+    {'a', {1, 0, 0}},
+    {'w', {0, -1, 0}},
+    {'s', {0, 1, 0}},
+    {'j', {0, 0, -1}},
+    {'i', {0, 0, 1}}
+};
+
+struct SnakeSegment {
+    Vec3<int> p1;
+    Vec3<int> p2;
+    ObjectId objectId1; // tail half
+    ObjectId objectId2; // head half
+};
+
+using Snake = vector<SnakeSegment>;
+
+Vec3<float> getPosOfCell(Vec3<int> pos) {;
+    // if (pos.x >= cellCountXY or pos.y >= cellCountXY or pos.z >= cellCountZ) {
+    //     printf("(%d, %d, %d)\n", pos.x, pos.y, pos.z);el
+    //     throw invalid_argument("out of bounds");
+    // }
+    return {
+        (pos.x+0.5) * cellSize - (cellCountXY * cellSize / 2.),
+        (pos.y+0.5) * cellSize - (cellCountXY * cellSize / 2.),
+        (pos.z+0.5) * cellSize
+    };
+}
+
+Snake buildSnake(const vector<Vec3<int>>& snakePositions, Scene& scene) {
+    Snake res;
+    
+    for (int i = 0; i < snakePositions.size() - 1; i++) {         
+        Color currentColor = (i % 2 == 1) ? snakeColor2 : snakeColor1;
+        
+        Vec3<float> p1_pos = getPosOfCell(snakePositions[i]);
+        Vec3<float> p2_pos = getPosOfCell(snakePositions[i+1]);
+
+        CapsuleGeometry g1 = {.start = p2_pos, .end = p1_pos};
+        CapsuleGeometry g2 = {.start = p1_pos, .end = p1_pos};
+        
+        auto id1 = scene.createObject(g1, currentColor);
+        auto id2 = scene.createObject(g2, currentColor);
+        
+        res.push_back((SnakeSegment){
+            .p1 = snakePositions[i], 
+            .p2 = snakePositions[i+1], 
+            .objectId1 = id1, 
+            .objectId2 = id2
+        });
+    }
+    return res;
+}
+
+Vec3<int> getNewApplePos(Snake snake) {
+    Vec3<int> res;
+    while (true) {
+        res = {
+            static_cast<int> (random() % cellCountXY),
+            static_cast<int> (random() % cellCountXY),
+            static_cast<int> (random() % cellCountZ)
+        };
+        bool collision = false;
+        for (auto segment : snake) {
+            if (segment.p1 == res or segment.p2 == res) {
+                collision = true;
+            }
+        }
+        if (not collision) {return res;}
+    }
+}
+;
+TextGeometry gameOverGeom1 = {
+    .text = "GAME",
+    .pos = {2.75*8, 0, 44},
+    .size = 8,
+    .thickness = 0.8,
+    .orientation = TextOrientation::POS_Y
+};
+TextGeometry gameOverGeom2 = {
+    .text = "OVER",
+    .pos = {2.75*8, 0, 32},
+    .size = 8,
+    .thickness = 0.8,
+    .orientation = TextOrientation::POS_Y
+};
+TextGeometry scoreGeom = {
+    .text = "",
+    .pos = {2.75*8, 0, 20},
+    .size = 4.5,
+    .thickness = 0.6,
+    .orientation = TextOrientation::POS_Y
+};
+
+
+TextGeometry numberGeom = {
+    .text = "3",
+    .pos = {5, 0, 30},
+    .size = 10,
+    .thickness = 0.8,
+    .orientation = TextOrientation::POS_Y
+};
+
+void gameOver(Scene scene, int score) {
+    scene.wipeScreen();
+    scene.createObject(gameOverGeom1, RED);
+    scene.createObject(gameOverGeom2, RED);
+    scoreGeom.text = format("SCR {}", score);
+    scene.createObject(scoreGeom, CYAN);
+    scene.render();
+    printf("GAME OVER\n");
+    this_thread::sleep_for(chrono::milliseconds(2000));
+    scene.wipeScreen();
+}
+
+int main() {
+    Scene scene = Scene();
+    srand(time(0));
+
+    auto countdown = scene.createObject(numberGeom, YELLOW);
+    scene.render();
+    this_thread::sleep_for(chrono::milliseconds(1000));
+
+    numberGeom.text = "2";
+    scene.setObjectGeometry(countdown, numberGeom);
+    scene.render();
+    this_thread::sleep_for(chrono::milliseconds(1000));
+
+    numberGeom.text = "1";
+    scene.setObjectGeometry(countdown, numberGeom);
+    scene.render();
+    this_thread::sleep_for(chrono::milliseconds(1000));
+
+    scene.removeObject(countdown);
+
+    
+    auto boundaryCorner1 = getPosOfCell({0, 0, 0});
+    boundaryCorner1 = boundaryCorner1 - cellSize/2-0.5;
+    
+    auto boundaryCorner2 = getPosOfCell({cellCountXY-1, cellCountXY-1, cellCountZ-1});
+    boundaryCorner2 = boundaryCorner2 + cellSize/2-0.5;
+    
+    
+    CuboidGeometry boundaryGeometry = {
+        .v1 = boundaryCorner1,
+        .v2 = boundaryCorner2,
+        .thickness = 0.7,
+        .isWireframe = true
+    };
+    
+    scene.createObject(boundaryGeometry, WHITE);
+    
+    Vec3<int> headPos = {cellCountXY/2, cellCountXY/2, cellCountZ/2};
+
+    auto headSegment = scene.createObject(
+        (CapsuleGeometry){getPosOfCell(headPos), getPosOfCell(headPos + (Vec3<int>){0, 0, -1})},
+        GREEN
+    );
+
+    //LOGIC
+    auto snake = buildSnake({
+        headPos,
+        headPos + (Vec3<int>){0, 0, -1},
+        headPos + (Vec3<int>){0, 1, -1},
+        headPos + (Vec3<int>){1, 1, -1}
+    }, scene);
+
+    Vec3<int> movementDirection = inputMoveMap['i'];
+    
+    Vec3<int> applePos = getNewApplePos(snake);
+
+    auto apple = scene.createObject((SphereGeometry) {
+        .pos = getPosOfCell(applePos),
+        .radius = appleRadius
+    }, appleColor);
+
+    // scene.render();
+    bool running = true;
+    int appleCount = 0;
+    while (running) {
+        auto keys = scene.getPressedKeys();
+
+        for (int keyIndex = keys.size()-1; keyIndex >= 0; keyIndex--) {
+            if (inputMoveMap.find(keys[keyIndex]) != inputMoveMap.end()) {
+                auto newDirection = inputMoveMap[keys[keyIndex]];
+                if (not (newDirection == (movementDirection * -1.0f))) { 
+                    movementDirection = newDirection;
+                    break;
+                }
+            }
+        }
+        
+        headPos = snake[0].p1 + movementDirection;
+        
+        // --- 1. Apple Logic & Growth ---
+        bool ateApple = false;
+        if (headPos == applePos) {
+            ateApple = true;
+            appleCount++;
+
+            auto snakeEnd = snake.back().p2;
+            CapsuleGeometry g = {.start = getPosOfCell(snakeEnd), .end = getPosOfCell(snakeEnd), .radius = 0.0f};
+            
+            Color currentColor = (snake.size() % 2 == 1) ? snakeColor2 : snakeColor1;
+            
+            auto newSegment1 = scene.createObject(g, currentColor);
+            auto newSegment2 = scene.createObject(g, currentColor);
+
+            snake.push_back((SnakeSegment) {
+                .p1 = snakeEnd,
+                .p2 = snakeEnd,
+                .objectId1 = newSegment1,
+                .objectId2 = newSegment2
+            });
+        } 
+
+        if (
+            headPos.x < 0 || headPos.y < 0 || headPos.z < 0 ||
+            headPos.x >= cellCountXY || headPos.y >= cellCountXY || headPos.z >= cellCountZ
+        ) {
+            gameOver(scene, appleCount);
+            running = false;
+            continue;
+        }
+
+        // self Collision
+        for (int j = 1; j < snake.size(); j++) {
+            if (snake[j].p1 == headPos) { 
+                gameOver(scene, appleCount);
+                running = false;
+            }
+        }
+        if (!running) continue;
+
+        vector<Vec3<int>> next_p1(snake.size());
+        next_p1[0] = headPos;
+        for (int j = 1; j < snake.size(); j++) {
+            next_p1[j] = snake[j-1].p1;
+        }
+
+        // animation
+        int numFrames = 10; // Splitting the movement into 10 smooth steps
+        int frameSleepMs = sleepTimeMs / numFrames;
+
+        for (int frame = 1; frame <= numFrames; frame++) {
+            float f = (float)frame / numFrames; // f goes from 0.0 to 1.0
+
+            for (int j = snake.size() - 1; j >= 0; j--) {
+                float t = (float)(snake.size() - 1 - j) / (float)(snake.size() - 1);
+                float radius = snakeMinRadius + (snakeMaxRadius - snakeMinRadius) * t;
+
+                Vec3<float> pivot = getPosOfCell(snake[j].p1);
+                Vec3<float> p2_pos = getPosOfCell(snake[j].p2);
+                Vec3<float> next_pos = getPosOfCell(next_p1[j]);
+
+                // Interpolate without relying on Vec3 operator overloads
+                Vec3<float> tailPos = {
+                    p2_pos.x + (pivot.x - p2_pos.x) * f,
+                    p2_pos.y + (pivot.y - p2_pos.y) * f,
+                    p2_pos.z + (pivot.z - p2_pos.z) * f
+                };
+
+                Vec3<float> headPosVis = {
+                    pivot.x + (next_pos.x - pivot.x) * f,
+                    pivot.y + (next_pos.y - pivot.y) * f,
+                    pivot.z + (next_pos.z - pivot.z) * f
+                };
+
+                // Apply geometry
+                scene.setObjectGeometry(snake[j].objectId1, (CapsuleGeometry){
+                    .start = tailPos, 
+                    .end = pivot,
+                    .radius = radius
+                });
+                scene.setObjectGeometry(snake[j].objectId2, (CapsuleGeometry){
+                    .start = pivot, 
+                    .end = headPosVis,
+                    .radius = radius
+                });
+            }
+            scene.render();
+            this_thread::sleep_for(chrono::milliseconds(frameSleepMs));
+        }
+
+        cout << "new player pos" << headPos << endl;
+        for (int j = snake.size() - 1; j >= 0; j--) {
+            snake[j].p2 = snake[j].p1;
+            snake[j].p1 = next_p1[j];
+        }
+
+        // --- 6. Respawn Apple ---
+        if (ateApple) {
+            auto newPos = getNewApplePos(snake);
+            scene.setObjectGeometry(apple, (SphereGeometry) {
+                .pos = getPosOfCell(newPos),
+                .radius = appleRadius
+            });
+            applePos = newPos;
+        }
+    }
+}
+```
+
+### apps/utils/utils.cpp
+```
+
+```
+
+### apps/utils/utils.h
+```
+#include "../../renderer/include/types.h"
+#include <stdexcept>
+#include <string>
+#include <string_view>
+
+
+template<typename T>
+concept optionType = std::same_as<T, int> ||
+                     std::same_as<T, bool> ||
+                     std::same_as<T, std::string> ||
+                     std::same_as<T, float>;
+
+template<optionType T>
+T getOption(std::string_view argname, int argc, char* argv[]) {
+    for (int i = 0; i < argc - 1; i++) {
+        if (argv[i] == argname) {
+            if constexpr(std::same_as<T, int>) {
+                if (i + 1 < argc) {
+                    return atoi(argv[i+1]);
+                }
+            } 
+            else if constexpr(std::same_as<T, bool>) {
+                return true;
+            }
+            else if constexpr(std::same_as<T, std::string>) {
+                if (i + 1 < argc) {
+                    return argv[i+1];
+                }
+            }
+            if constexpr(std::same_as<T, float>) {
+                if (i + 1 < argc) {
+                    return atof(argv[i+1]);
+                }
+            } 
+        }
+    }
+    if constexpr(std::same_as<T, bool>) {
+        return false; //dont expect argument
+    }
+
+    throw std::invalid_argument("argument not found: " + std::string(argname));
+}
+```
+
+### controlPanel/backend/main.py
+```
+from fastapi import FastAPI
+from starlette.responses import FileResponse 
+from pydantic import BaseModel
+from contextlib import asynccontextmanager
+
+import subprocess
+
+import time
+
+from shm import Shm
+
+def print_nice(x): print(f"[Control panel] {x}")
+    
+DRIVER_BIN = "../../driver/build/main"
+SPEED_REGULATOR_BIN = "../../speedRegulator/build/main"
+
+SLICE_COUNT = 2000
+USE_2_BIT = False
+
+class Key_stroke(BaseModel):
+    key_code: str
+    timestamp: int
+
+class Key_strokes(BaseModel):
+    keys: list[Key_stroke]
+
+shm = Shm("vdshm", SLICE_COUNT, USE_2_BIT)
+shm.create()
+processes = []
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global processes
+    
+    print_nice("Launching driver")
+    try:
+        p_driver = subprocess.Popen([DRIVER_BIN, str(SLICE_COUNT)])
+        processes.append(p_driver)
+    except FileNotFoundError:
+        print_nice(f"Error: Could not find {DRIVER_BIN + f" {SLICE_COUNT}"}")
+    
+    time.sleep(1)
+    print_nice("Launching speed regulator")
+    
+    try:
+        p_speed = subprocess.Popen([SPEED_REGULATOR_BIN])
+        processes.append(p_speed)
+    except FileNotFoundError:
+        print_nice(f"Error: Could not find {SPEED_REGULATOR_BIN}")
+    
+    time.sleep(0.5)
+    
+    yield
+    
+    shm.close()
+
+app = FastAPI(lifespan = lifespan)
+pressed_keys: list[Key_stroke]
+
+@app.get("/")
+async def read_index():
+    return FileResponse('../index.html')
+
+@app.get("/keystrokes/")
+async def get_pressed_keys():
+    return pressed_keys
+
+@app.put("/keystrokes/")
+async def set_pressed_keys(new: Key_strokes):
+    print_nice(f"new keys {new}")
+    pressed_keys = new
+    shm.write_keys(new.keys)
+```
+
+### controlPanel/backend/shm.py
+```
+from multiprocessing import shared_memory
+import ctypes
+import gc
+
+SHM_SIGNATURE = 0xB0B
+SHM_VERSION = 2
+
+class Header(ctypes.Structure):
+    _fields_ = [
+        ("signature", ctypes.c_uint32),    # 4 bytes
+        ("version", ctypes.c_uint16),      # 2 bytes
+        ("sliceCount", ctypes.c_uint32),      # 4 bytes
+        ("twoBitColor", ctypes.c_bool),
+        ("reserved", ctypes.c_uint8 * 53)
+    ]
+    # Total size: 64 bytes (matches alignas(64))
+
+class ShmVoxelSlice(ctypes.Structure):
+    _fields_ = [
+        ("index1", ctypes.c_uint8),        # 1 byte
+        ("index2", ctypes.c_uint8),        # 1 byte
+        ("data", ctypes.c_uint8 * 256)     # 64 * 4 = 256 bytes
+    ]
+    # Total size: 258 bytes
+
+
+class Shm:
+    def __init__(self, name, colCount, twoBitColor):
+        ShmVoxelFrame = ShmVoxelSlice * colCount
+
+        class ShmLayout(ctypes.Structure):
+            _fields_ = [
+                ("header", Header),
+                ("nextFrameStart", ctypes.c_int64),
+                ("nextFrameDuration", ctypes.c_int64),
+                ("keyboardState", ctypes.c_uint8 * 8), #actually are chars, but i encountered some bugs
+                ("data", ShmVoxelFrame),
+            ]
+            
+        self.name = name
+        self.size = ctypes.sizeof(ShmLayout)
+        self.shm = None
+        self.layout = None
+        self.colCount = colCount
+        self.twoBitColor = twoBitColor
+        self.layoutClass = ShmLayout
+        
+    def create(self):
+        try:
+            self.shm = shared_memory.SharedMemory(name=self.name, create=True, size = self.size)
+        
+        except FileExistsError: # wipe old shm
+            temp_shm = shared_memory.SharedMemory(name=self.name, create=False, size = self.size)
+            temp_shm.unlink()
+            temp_shm.close()
+            
+            self.shm = shared_memory.SharedMemory(name=self.name, create=True, size = self.size)
+        
+        self.layout = self.layoutClass.from_buffer(self.shm.buf)
+
+        self.layout.header.signature = SHM_SIGNATURE
+        self.layout.header.version = SHM_VERSION
+        self.layout.header.sliceCount = self.colCount
+        self.layout.header.twoBitColor = self.twoBitColor
+        
+    
+    def write_keys(self, key_strokes):
+        print(f"Python Layout Size: {ctypes.sizeof(self.layoutClass)}")
+        print(f"Offset of keyboardState: {self.layoutClass.keyboardState.offset}")
+        print(f"Python keyboard state size: {ctypes.sizeof(ctypes.c_uint8 * 8)}")
+        
+        #Python Layout Size: 516088
+        #Offset of keyboardState: 80
+        if not self.layout:
+            print("layout is none")
+            return
+        raw_keys = (ctypes.c_uint8*8)()
+        ctypes.memset(ctypes.addressof(self.layout.keyboardState), 0, 8)
+        for i, key in enumerate(key_strokes[:8]):
+            if len(key.key_code) > 1: continue
+            print(type(key.key_code))
+            raw_keys[i] = ord(key.key_code) #ignore timestamp for now
+        self.layout.keyboardState = raw_keys
+        
+        for k in self.layout.keyboardState:
+            print(chr(k))
+    
+    def close(self):
+        if self.shm == None:
+            print("shm not created yet")
+            return
+        gc.collect() #release pointers
+        self.shm.close()
+```
+
+### driver/include/displayControl.h
+```
+#pragma once
+
+#include <array>
+#include <cstdint>
+#include <chrono>
+
+#ifndef DISPLAY_CONTROL_H
+#define DISPLAY_CONTROL_H
+
+class ColorInterface {
+    public:
+        std::array<int, 6> pinNums1;
+        std::array<int, 6> pinNums2;
+        int clockPinNum;
+        void pushColor(int c11, int c12, int c21, int c22, uint8_t bitMask);
+    ColorInterface (std::array<int, 6> ColorPins1, std::array<int, 6> ColorPins2, int clockPin);
+};
+class AddressInterface {
+    public:
+        std::array<int, 5> addressPins;
+        void setAddress(int address);
+    AddressInterface(std::array<int, 5> pins);
+};
+class OutputInterface {
+    public:
+        int latchPin, oePin;
+        int showUntil(int64_t stopTime);
+        void enableOutput(bool enable);
+        void latch();
+    OutputInterface(int latchPin_, int oePin_);
+};
+void busy_wait_nanos(long nanos);
+void tiny_wait(int n);
+void cleanup();
+void setup_io();
+#endif
+```
+
+### driver/src/controlTest.cpp
+```
+#include <iostream>
+#include "displayControl.h"
+#include <cstring>
+#include <chrono>
+#include <unistd.h>
+
+using namespace std;
+using namespace std::chrono;
+
+int main() {
+    cpu_set_t cpus;
+    CPU_ZERO(&cpus);
+    CPU_SET(3, &cpus);
+    if (sched_setaffinity(0, sizeof(cpus), &cpus) != 0) {
+        cerr << "sched_setaffinity failed: " << strerror(errno) << " (continuing)\n";
+    }
+    setup_io();
+    // array<int, 6> colorPins1 = {11, 27, 7, 8, 9, 10};
+
+    // int clockPin = 17;
+    // ColorInterface colorInterface(colorPins1, clockPin);
+
+    // int addressPins[5] = {22, 23, 24, 25, 15};
+    // AddressInterface addressInterface(addressPins);
+
+    // int latchPin = 4;
+    // int oePin = 18;
+    // OutputInterface outputInterface(latchPin, oePin);
+
+    
+    array<int, 6> colorPins1 = {11, 27, 7, 8, 9, 10};
+    array<int, 6> colorPins2 = {12, 5, 6, 19, 13, 20};
+    int clockPin = 17;
+    ColorInterface colorInterface(colorPins1, colorPins2, clockPin);
+
+    array<int, 5> addressPins1 = {22, 23, 24, 25, 15};
+    array<int, 5> addressPins2 = {1, 1, 1, 1, 1};
+    AddressInterface addressInterface1(addressPins1);
+    AddressInterface addressInterface2(addressPins2);
+
+    int latchPin = 4;
+    int oePin = 18;
+    OutputInterface outputInterface(latchPin, oePin);
+
+
+    // Test the interfaces
+    outputInterface.enableOutput(true);
+    colorInterface.pushColor(0b111, 0, 0, 0);
+    const int frames = 20000;
+
+    // Main loop, measure one timestamp per frame (in microseconds)
+    auto frame_start = steady_clock::now();
+    for (int i = 0; i < frames; i++) {
+        for (int a = 0; a < 32; a++) {
+            auto frame_start = steady_clock::now();
+            addressInterface1.setAddress(a);
+            addressInterface2.setAddress(a);
+            for (int px = 0; px < 64; px++) {
+                if (px <32) {
+                    colorInterface.pushColor((a==5) ? 0b100 : 0b000, 0b000, 0, 0);
+                } else {
+                    colorInterface.pushColor(0b000, 0b001*px%3, 0b001*px%4, 0);
+                }
+            }
+            outputInterface.showUntil(chrono::time_point_cast<chrono::nanoseconds>(chrono::steady_clock::now()).time_since_epoch().count() + 100000);
+            //usleep(10000);
+        }
+       
+    }
+    auto frame_end = steady_clock::now();
+    auto fps = (double)frames / ((double)duration_cast<milliseconds>(frame_end - frame_start).count() / 1000.0);
+    cout << "fps: " << fps << endl;
+    cout << "displaycols " << (fps / 64 * 24) <<endl;;
+    
+    outputInterface.enableOutput(false);
+    cleanup();
+    return 0;
+}
+```
+
+### driver/src/displayControl.cpp
+```
+#include <iostream>
+#include <sys/mman.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <list>
+#include <chrono>
+#include <sched.h>
+#include <pthread.h>
+#include <cstring>
+#include <vector>
+#include <algorithm>
+#include <iomanip>
+#include <array>
+#include "displayControl.h"
+
+using namespace std;
+using namespace std::chrono;
+
+#define BCM2711_PERI_BASE        0xFE000000
+#define GPIO_REGISTER_OFFSET         0x200000
+#define GPIO_BASE (BCM2711_PERI_BASE + GPIO_REGISTER_OFFSET)
+
+const int PAGE_SIZE = 4*1024;
+const int BLOCK_SIZE = 4*1024;
+
+int mem_fd;
+void *gpio_map;
+volatile unsigned *gpio;
+
+#define INP_GPIO(g) *(gpio+((g)/10)) &= ~(7<<(((g)%10)*3))
+#define OUT_GPIO(g) *(gpio+((g)/10)) |=  (1<<(((g)%10)*3))
+#define SET_GPIO_ALT(g,a) *(gpio+(((g)/10))) |= (((a)<=3?(a)+4:(a)==4?3:2)<<(((g)%10)*3))
+
+#define GPIO_SET *(gpio+7)  // sets   bits which are 1 ignores bits which are 0
+#define GPIO_CLR *(gpio+10) // clears bits which are 1 ignores bits which are 0
+
+#define GET_GPIO(g) (*(gpio+13)&(1<<g)) // 0 if LOW, (1<<g) if HIGH
+
+#define GPIO_PULL *(gpio+37) // Pull up/pull down
+#define GPIO_PULLCLK0 *(gpio+38) // Pull up/pull down clock
+
+const int addressPins[] = {22, 23, 24, 25, 15};
+list<int> initializedPins;
+
+void setAddress(int address) { 
+    for (int i = 0; i < 5; i++) {
+        if ((address>>i)%2==1) { //get nth bit of address
+            tiny_wait(20);
+            GPIO_SET = (1<<addressPins[i]);
+        }
+        else {
+            tiny_wait(20);
+            GPIO_CLR = (1<<addressPins[i]);
+        }
+    }
+}
+void cleanup() {
+    for (int pin: initializedPins) {
+        GPIO_CLR = (1<<pin);
+        usleep(100);
+    }
+    munmap(gpio_map, BLOCK_SIZE);
+}
+void pinInit(int pin, bool initialHigh=false) {
+    if (pin > 27) {cleanup(); exit(-1);}
+    INP_GPIO(pin);
+    OUT_GPIO(pin);
+    if (initialHigh) {
+        GPIO_SET = (1<<pin);
+    } else {
+        GPIO_CLR = (1<<pin);
+    }
+    initializedPins.push_front(pin);
+    usleep(100);
+}
+
+void setup_io();
+
+static inline void spin_asm() {
+    asm("");
+}
+
+void busy_wait_nanos(long nanos) {
+    auto t1 = steady_clock::now();
+	while (duration_cast<nanoseconds>(steady_clock::now() - t1).count() < nanos - 100) {
+		spin_asm();
+	}
+}
+
+void tiny_wait(int n) {
+    volatile int sink=0;
+    for (int j = 0; j<n; ++j) {
+        sink += j;
+    }
+}
+
+ColorInterface::ColorInterface (array<int, 6> colorPins1, array<int, 6> colorPins2, int clockPin) {
+    for (int i = 0; i < 6; i++) {
+        pinNums1[i] = colorPins1[i];
+        pinNums2[i] = colorPins2[i];
+        pinInit(colorPins1[i]);
+        pinInit(colorPins2[i]);
+    }
+    clockPinNum=clockPin;
+    pinInit(clockPinNum);
+}
+
+void ColorInterface::pushColor(int c11, int c12, int c21, int c22, uint8_t bitMask) {
+    int regVal = (((c11>>4 & bitMask) != 0)<<pinNums1[0]) | (((c11>>2 & bitMask) != 0)<<pinNums1[1]) | (((c11 & bitMask) != 0)<<pinNums1[2])
+                |(((c12>>4 & bitMask) != 0)<<pinNums1[3]) | (((c12>>2 & bitMask) != 0)<<pinNums1[4]) | (((c12 & bitMask) != 0)<<pinNums1[5])
+                |(((c21>>4 & bitMask) != 0)<<pinNums2[0]) | (((c21>>2 & bitMask) != 0)<<pinNums2[1]) | (((c21 & bitMask) != 0)<<pinNums2[2])
+                |(((c22>>4 & bitMask) != 0)<<pinNums2[3]) | (((c22>>2 & bitMask) != 0)<<pinNums2[4]) | (((c22 & bitMask) != 0)<<pinNums2[5]);
+
+                
+    // int regVal = (1<<pinNums1[0]) | (1<<pinNums1[1]) | (1<<pinNums1[2])
+    //             |(1<<pinNums1[3]) | (1<<pinNums1[4]) | (1<<pinNums1[5])
+    //             |(1<<pinNums2[0]) | (1<<pinNums2[1]) | (1<<pinNums2[2])
+    //             |(1<<pinNums2[3]) | (1<<pinNums2[4]) | (1<<pinNums2[5]);
+
+    GPIO_SET = regVal;
+    tiny_wait(5);
+    GPIO_SET = (1<<clockPinNum);
+    tiny_wait(25); //adjust this for less flicker but less brightness
+    GPIO_CLR = regVal | (1<<clockPinNum);
+    tiny_wait(5);
+}
+
+AddressInterface::AddressInterface(array<int, 5> pins) {
+    for (int i = 0; i < 5; i++) {
+        addressPins[i] = pins[i];
+        pinInit(addressPins[i]);
+    }
+}
+void AddressInterface::setAddress(int address) {
+    uint32_t set = 0;
+    uint32_t clear = 0;
+    for (int i = 0; i < 5; i++) {
+        // tiny_wait(5000);
+        if ((address>>i)%2==1) { //get nth bit
+            set |= (1<<addressPins[i]);
+        } else {
+            clear |= (1<<addressPins[i]);
+        }
+    }
+    GPIO_SET = set;
+    GPIO_CLR = clear;
+}
+
+OutputInterface::OutputInterface(int latchPin_, int oePin_) {
+    latchPin = latchPin_;
+    oePin = oePin_;
+    pinInit(latchPin);
+    pinInit(oePin, true);
+}
+
+int OutputInterface::showUntil(int64_t stopTime) {
+    int i =0;
+    GPIO_SET = (1<<latchPin);
+    tiny_wait(10);
+    GPIO_CLR = (1<<latchPin);
+    GPIO_CLR = (1<<oePin);
+    while (std::chrono::steady_clock::now().time_since_epoch().count() < stopTime) {i++;}
+    GPIO_SET = (1<<18);
+    return i;
+}
+void OutputInterface::latch() {
+    GPIO_SET = (1<<latchPin);
+    tiny_wait(10);
+    GPIO_CLR = (1<<latchPin);
+    tiny_wait(5);
+    
+}
+
+void OutputInterface::enableOutput(bool enable) {
+    if (enable) {
+        GPIO_CLR = (1<<oePin);
+    } else {
+        GPIO_SET = (1<<oePin);
+    }
+}
+
+class PinInterface {
+    public:
+        int pinNum;
+        bool value;
+        void on() {
+            GPIO_SET = (1<<pinNum);
+            value=true;
+        }
+        void off() {
+            GPIO_CLR = (1<<pinNum);
+            value=false;
+        }
+    PinInterface(int pinNum_) {
+        if (pinNum <= 27  and pinNum >= 0) {
+            pinNum=pinNum_;
+            pinInit(pinNum_);
+        } else {
+            cout << "failed to initialize pin " << pinNum <<endl;
+        }
+    }
+};
+
+
+
+void setup_io() {
+    if ((mem_fd = open("/dev/mem", O_RDWR|O_SYNC) ) < 0) {
+        printf("can't open /dev/mem \n");
+        exit(-1);
+    }
+    gpio_map = mmap(
+        NULL,             //Any address in our space will do
+        BLOCK_SIZE,       //Map length
+        PROT_READ|PROT_WRITE,// Enable reading & writing to mapped memory
+        MAP_SHARED,       //Shared with other processes
+        mem_fd,           //File to map
+        GPIO_BASE         //Offset to GPIO peripheral
+    );
+    close(mem_fd);
+    
+    if (gpio_map == MAP_FAILED) {
+      perror("mmap");//errno also set!
+      exit(-1);
+   }
+   cout << "GPIO mapped at address " << gpio_map << endl;
+   // Always use volatile pointer!
+   gpio = (volatile unsigned *)gpio_map;
+}
+```
+
+### driver/src/driver.cpp
+```
+#include <time.h>
+#include <chrono>
+#include "shm.h"
+#include "displayControl.h"
+#include <unistd.h>
+#include<cstring>
+#include<iostream>
+#include <cassert>    // Required for assert
+#include <typeinfo>   // Required for typeid
+#include <vector>
+#include <string>
+
+using namespace std;
+using namespace chrono_literals;
+using Time = chrono::steady_clock;
+
+const double gammaCorrectionRatio = 0.78;
+
+template<typename T>
+concept optionType = same_as<T, int> ||
+                     same_as<T, bool>;
+
+//passing bool returns true if the flag is present, shouldnt have true or false after
+template<optionType T>
+T getOption(string_view argname, int argc, char* argv[]) {
+    for (int i = 0; i < argc - 1; i++) {
+        if (argv[i] == argname) {
+            if constexpr(same_as<T, int>) {
+                if (i + 1 < argc) {
+                    return atoi(argv[i+1]);
+                }
+            } else if constexpr(same_as<T, bool>) {
+                return true;
+            }
+        }
+    }
+    if constexpr(same_as<T, bool>) {
+        return false; //dont expect argument
+    }
+
+    throw invalid_argument("argument not found");
+}
+
+
+int main(int argc, char* argv[]) {
+    bool usePhotointerrupterFps = true; 
+    int  fps = 0;
+
+    try {
+        fps = getOption<int>("-fps", argc, argv);
+        usePhotointerrupterFps = false;
+    } catch (invalid_argument& e) {
+        printf("fps value cannot be parsed\n");
+        // usePhotointerrupterFps = false;
+        // fps = 10;
+    }
+
+    if (usePhotointerrupterFps) {
+        printf("Using photinterrupter for fps\n");
+    } else {
+        printf("Fps set to: %d\n", fps);
+    }
+
+    cpu_set_t cpus;
+    CPU_ZERO(&cpus);
+    CPU_SET(1, &cpus);
+    if (sched_setaffinity(0, sizeof(cpus), &cpus) != 0) {
+        cerr << "sched_setaffinity failed: " << strerror(errno) << " (continuing)\n";
+    }
+    setup_io();
+
+    array<int, 6> colorPins1 = {11, 27, 7, 8, 9, 10};
+    array<int, 6> colorPins2 = {12, 5, 6, 19, 13, 20};
+    int clockPin = 17;
+    ColorInterface colorInterface(colorPins1, colorPins2, clockPin);
+
+    array<int, 5> addressPins1 = {22, 23, 24, 25, 15};
+    array<int, 5> addressPins2 = {2, 3, 21, 26, 14};
+    AddressInterface addressInterface1(addressPins1);
+    AddressInterface addressInterface2(addressPins2);
+
+    int latchPin = 4;
+    int oePin = 18;
+    OutputInterface outputInterface(latchPin, oePin);
+
+    printf("Opening Shared memory\n");
+    volatile ShmLayout *shmPointer = openShm("vdshm");
+
+    volatile auto& frame = shmPointer->data;
+
+    auto sliceCount = shmPointer->header.sliceCount;
+    printf("[driver] slice count: %d\n", sliceCount);
+
+    auto useTwoBitColor = shmPointer->header.twoBitColor;
+
+    auto startTime = Time::now();
+    int frameNum = 0;
+
+    //wait for speed regulator
+    while (shmPointer->nextFrameDuration == 0 && usePhotointerrupterFps) {}
+    printf("first frame duration info received");
+    int64_t lastFrameStart = 0;
+
+    int sliceColorPushTimeCompensation = 0; // ns
+
+    while (true) {
+        while (lastFrameStart == shmPointer->nextFrameStart && usePhotointerrupterFps) {} //if new frame hasnt started (we are ahead), wait 
+        int64_t nextFrameStart;
+        int64_t nextFrameDuration;
+        if (usePhotointerrupterFps) {
+            nextFrameStart = shmPointer->nextFrameStart;
+            nextFrameDuration = shmPointer->nextFrameDuration;
+        } else {
+            nextFrameStart = chrono::time_point_cast<chrono::nanoseconds>(chrono::steady_clock::now()).time_since_epoch().count();
+            nextFrameDuration = 1000000000/fps;
+        }
+        
+        lastFrameStart = nextFrameStart;
+
+        printf("Frame %d\n", frameNum);
+        long frameSum = 0;
+        long totalWaitMSB = 0;
+        long totalWaitLSB = 0;
+
+        if (not useTwoBitColor) {
+            for (int i = 0; i < sliceCount; i++) {
+                const ShmVoxelSlice& slice = const_cast<ShmVoxelSlice&>(shmPointer->data[i]);
+                //265.25
+                //192.651
+                auto targetSliceEndTime = (nextFrameDuration/sliceCount * (i+1) + nextFrameStart);
+    
+                auto index1 = 31-static_cast<int> (slice.index1);
+                auto index2 = 31-static_cast<int> (slice.index2);
+    
+                addressInterface1.setAddress(index1);
+                addressInterface2.setAddress(index2);
+    
+                for(int j = 0; j < 64; j++) {
+                    //frameSum += slice.data[0+j] + slice.data[64+j] + slice.data[128+j] + slice.data[192+j];
+                    colorInterface.pushColor(slice.data[63-j], slice.data[127-j], slice.data[191-j], slice.data[255-j], 0b10);
+                }
+                totalWaitMSB += outputInterface.showUntil(targetSliceEndTime);
+                // usleep(10000);
+            }
+        } else {
+            for (int i = 0; i < sliceCount; i++) {
+                const ShmVoxelSlice& slice = const_cast<ShmVoxelSlice&>(shmPointer->data[i]);
+                
+                auto index1 = 31-static_cast<int> (slice.index1);
+                auto index2 = 31-static_cast<int> (slice.index2);
+                
+                addressInterface1.setAddress(index1);
+                addressInterface2.setAddress(index2);
+
+                auto time = std::chrono::steady_clock::now().time_since_epoch().count();
+
+                auto targetSliceEndTime = (nextFrameDuration/sliceCount * (i+1) + nextFrameStart);
+
+                //auto targetFirstBitEndTime = time + gammaCorrectionRatio * (targetSliceEndTime - time);
+
+                int64_t remainingTime = targetSliceEndTime - time;
+
+                int64_t targetFirstBitEndTime = time + static_cast<int64_t>(remainingTime * gammaCorrectionRatio);
+
+                for(int j = 0; j < 64; j++) {
+                    //frameSum += slice.data[0+j] + slice.data[64+j] + slice.data[128+j] + slice.data[192+j];
+                    colorInterface.pushColor(slice.data[63-j], slice.data[127-j], slice.data[191-j], slice.data[255-j], 0b10);    
+                }
+                totalWaitMSB += outputInterface.showUntil(targetFirstBitEndTime + sliceColorPushTimeCompensation);
+                //200000: 148 / 432
+                //250000: 150 / 430
+                //300000: 570 / 0
+                //500000: 590 / 0
+                for(int j = 0; j < 64; j++) {
+                    //frameSum += slice.data[0+j] + slice.data[64+j] + slice.data[128+j] + slice.data[192+j];
+                    colorInterface.pushColor(slice.data[63-j], slice.data[127-j], slice.data[191-j], slice.data[255-j], 0b01);    
+                }
+                totalWaitLSB += outputInterface.showUntil(targetSliceEndTime);
+            }
+        }
+        auto avgWaitLSB = (double) totalWaitLSB/ (double) sliceCount;
+        auto avgWaitMSB = (double) totalWaitMSB/ (double) sliceCount;
+
+        printf("avg LSB wait time: %f, avg MSB wait time: %f, compensation: %d\n", avgWaitLSB, avgWaitMSB, sliceColorPushTimeCompensation);
+        int expectedMSBAvgWait = (avgWaitLSB + avgWaitMSB) * gammaCorrectionRatio;
+
+        int diff = expectedMSBAvgWait - avgWaitMSB;
+
+        sliceColorPushTimeCompensation += diff*10;
+
+        frameNum++;
+    }
+}
+```
+
+### renderer/include/dither.h
+```
+#pragma once
+
+#include "types.h"
+
+BinaryColor dither(Color color, Vec3<float> pos);
+BinaryColor dither(Color color, float ditherRank);
+```
+
+### renderer/include/grid.h
+```
+#pragma once
+
+#include<array>
+#include<vector>
+#include "types.h"
+
+using namespace std;
+
+inline int packIndex(int ix, int iy, int iz);
+
+inline array<int, 3> unpackIndex(int packed);
+
+int calculateIndex(const GridParams& params, const Vec3<float>& ptCoords);
+
+vector<int> calculateIndicesFromBB(const GridParams& params, const Vec3<float>& min, const Vec3<float>& max, float padding = 0.);
+
+tuple<unordered_map<int, UpdatePattern>, GridParams> buildGrid(const UpdatePattern& points, int ptsPerCell);
+```
+
+### renderer/include/io.h
+```
+#pragma once
+
+#include "vector"
+#include "string"
+
+#include "types.h"
+
+using namespace std;
+
+vector<float> getFloats(string str);
+
+vector<string> split(const string& s, const string& delimiter = " ");
+
+vector<float> extractPointCloudData(string str, int nDataPoints = 6);
+
+void writePtcloudToFile(const ptCloud& points, const string& path);
+
+void writeRenderToFile(const Render& render, const string& path);
+
+vector<Vec3<float>> loadPointsObj(string path);
+
+Mesh loadMeshObj(string path);
+
+UpdatePattern loadUpdatePattern(string path);
+```
+
+### renderer/include/linalg.h
+```
+#pragma once
+#include"types.h"
+#include <cmath>
+#include <algorithm>
+#include <tuple>
+
+template<typename T>
+inline Vec3<T> operator-(const Vec3<T>& a, const Vec3<T>& b) {
+    return { a.x - b.x, a.y - b.y, a.z - b.z };
+}
+template<typename T>
+inline Vec3<T> operator+(const Vec3<T>& a, const Vec3<T>& b) {
+    return { a.x + b.x, a.y + b.y, a.z + b.z };
+}
+template<typename A, typename B>
+inline Vec3<A> operator+(const Vec3<A>& a, const Vec3<B>& b) {
+    return { a.x + b.x, a.y + b.y, a.z + b.z };
+}
+template<typename T>
+inline Vec3<T> operator-(const Vec3<T>& v, float d) { // subtract vector (d, d, d)
+    return { v.x - d, v.y - d, v.z - d };
+}
+template<typename T>
+inline Vec3<T> operator+(const Vec3<T>& v, float d) { // add vector (d, d, d)
+    return { v.x + d, v.y + d, v.z + d };
+}
+template<typename T>
+inline Vec3<T> operator*(const Vec3<T>& v, float s) {
+    return { v.x * s, v.y * s, v.z * s };
+}
+template<typename T>
+bool operator==(const Vec3<T>& a, const Vec3<T>& b) {
+    return {a.x == b.x and a.y == b.y and a.z == b.z};
+}
+template<typename T>
+inline T mnhtDist(const Vec3<T>& p1, const Vec3<T>& p2) {
+    return abs(p1.x - p2.x) + abs(p1.y - p2.y) + abs(p1.z - p2.z);
+}
+template<typename T>
+inline float dist(const Vec3<T>& p1, const Vec3<T>& p2) {
+    return sqrt(pow(p1.x - p2.x, 2) + pow(p1.y - p2.y, 2) + pow(p1.z - p2.z, 2));
+}
+template<typename T>
+inline float dist2(const Vec3<T>& p1, const Vec3<T>& p2) {
+    return pow(p1.x - p2.x, 2) + pow(p1.y - p2.y, 2) + pow(p1.z - p2.z, 2);
+}
+template<typename T>
+inline T dot(const Vec3<T>& v1, const Vec3<T>& v2) {
+    return v1.x * v2.x + v1.y * v2.y + v1.z * v2.z;
+}
+template<typename T>
+inline Vec3<T> cross(const Vec3<T>& v1, const Vec3<T>& v2) {
+    return {
+        v1.y * v2.z - v1.z * v2.y,
+        v1.z * v2.x - v1.x * v2.z,
+        v1.x * v2.y - v1.y * v2.x,
+    };
+}
+
+template<typename T>
+inline Vec3<T> min(const Vec3<T>& a, const Vec3<T>& b) {
+    return {
+        a.x < b.x ? a.x : b.x,
+        a.y < b.y ? a.y : b.y,
+        a.z < b.z ? a.z : b.z,
+    };
+}
+
+template<typename T>
+inline Vec3<T> max(const Vec3<T>& a, const Vec3<T>& b) {
+    return {
+        a.x > b.x ? a.x : b.x,
+        a.y > b.y ? a.y : b.y,
+        a.z > b.z ? a.z : b.z,
+    };
+}
+
+template <typename T> inline int sgn(T val) {
+    return (T(0) < val) - (val < T(0));
+}
+template<typename T>
+inline T magnitude_2(const Vec3<T>& v) {
+    return v.x * v.x + v.y * v.y + v.z * v.z;
+}
+inline Vec3<float> matColMul(const Mat4& matrix, Vec3<float> vec) {
+    return {
+        matrix[0][0] * vec.x + matrix[0][1] * vec.y + matrix[0][2] * vec.z + matrix[0][3],
+        matrix[1][0] * vec.x + matrix[1][1] * vec.y + matrix[1][2] * vec.z + matrix[1][3],
+        matrix[2][0] * vec.x + matrix[2][1] * vec.y + matrix[2][2] * vec.z + matrix[2][3],
+    };
+}
+Mat4 matMul(const Mat4& mat1, const Mat4& mat2);
+
+inline void scale(Vec3<float>& pt, float factor, const Vec3<float>& hinge) {
+    float relativeX = pt.x - hinge.x;
+    float relativeY = pt.y - hinge.y;
+    float relativeZ = pt.z - hinge.z;
+
+    pt.x = (relativeX * factor) + hinge.x;
+    pt.y = (relativeY * factor) + hinge.y;
+    pt.z = (relativeZ * factor) + hinge.z;
+}
+template<typename T>
+std::tuple<Vec3<T>, Vec3<T>> arrangeBoundingBox(const Vec3<T>& p1, const Vec3<T>& p2) {
+    return { {
+        std::min(p1.x, p2.x),
+        std::min(p1.y, p2.y),
+        std::min(p1.z, p2.z),
+    }, {
+        std::max(p1.x, p2.x),
+        std::max(p1.y, p2.y),
+        std::max(p1.z, p2.z),
+    } };
+}
+```
+
+### renderer/include/renderer.h
+```
+#pragma once
+#include<vector>
+#include<unordered_map>
+#include <variant>
+
+#include "types.h"
+#include "linalg.h"
+#include "dither.h"
+#include "shm.h"
+
+using namespace std;
+
+struct Transformation {
+    Vec3<float> translation = {0, 0, 0};
+    Vec3<float> rotation = {0, 0, 0};
+    Vec3<float> scale = {1, 1, 1};
+    Vec3<float> pivot = { 0, 0, 0 };
+    Mat4 getMatrix() const;
+};
+
+struct ParticleGeometry {
+    Vec3<float> pos;
+    float radius;
+};
+struct CapsuleGeometry {
+    Vec3<float> start;
+    Vec3<float> end;
+    float radius;
+};
+
+struct TriangleGeometry {
+    Vec3<float> v1;
+    Vec3<float> v2;
+    Vec3<float> v3;
+    float thickness;
+};
+
+struct SphereGeometry {
+    Vec3<float> pos;
+    float radius;
+    float thickness = 0.;
+};
+
+struct CuboidGeometry {
+    Vec3<float> v1;
+    Vec3<float> v2;
+    float thickness = 0.;
+    bool isWireframe = false;
+};
+
+struct MeshGeometry {
+    Mesh mesh;
+    bool isWireframe;
+    Transformation transformation;
+    float thickness = 0.;
+};
+
+enum class TextOrientation {
+    POS_X, NEG_X,
+    POS_Y, NEG_Y,
+    POS_Z, NEG_Z
+};
+
+// Update your TextGeometry struct
+struct TextGeometry {
+    std::string text;
+    Vec3<float> pos;
+    float size;
+    float thickness = 0.;
+    TextOrientation orientation = TextOrientation::POS_Y;
+};
+
+using Geometry = variant<ParticleGeometry, CapsuleGeometry, TriangleGeometry, SphereGeometry, CuboidGeometry, MeshGeometry, TextGeometry>;
+
+
+
+
+class Object {
+    public:
+        bool toRerender = true;
+        ObjectId getId() const { return id; }
+        const Geometry& getGeometry() const { return geometry; }
+        const Transformation& getTransformation() const { return transformation; }
+        const Color& getColor() const { return color; }
+        ClippingBehavior getClippingBehavior() const { return clippingBehavior; }
+        
+        Geometry getTransformedGeometry();
+        void setGeometry(Geometry newGeometry);
+        void setColor(Color newColor);
+        void translate(Vec3<float> translation);
+        void rotate(Vec3<float> newRotation);
+        void scale(Vec3<float> newScale);
+        void setPivot(Vec3<float> newPivot);
+
+        Object(ObjectId initId, Geometry initGeometry, Color initColor, ClippingBehavior initClippingBehavior);
+    private:
+        const Geometry& transformGeometry();
+        ObjectId id;
+        Geometry geometry;
+        Transformation transformation;
+        ClippingBehavior clippingBehavior;
+        Color color;
+};
+
+class Scene {
+    public: 
+        GridParams params;
+        std::unordered_map<int, UpdatePattern> mapping;
+        ObjectId createObject(const Geometry& initGeometry, const Color& initColor, ClippingBehavior initClippingBehavior=ADD);
+        Object& getObject(ObjectId);
+        void render(bool writeToFile = false);
+
+        KeyboardState getPressedKeys();
+
+        void setObjectGeometry(ObjectId id, Geometry newGeometry);
+        void setObjectColor(ObjectId id, Color newColor);
+        void setObjectTranslation(ObjectId id, Vec3<float> newTranslation);
+        void setObjectRotation(ObjectId id, Vec3<float> newRotation);
+        void setObjectScale(ObjectId id, Vec3<float> newScale);
+        void setObjectIntrinsicPivot(ObjectId id, Vec3<float> newPivot);
+
+        void wipeScreen();
+        void removeObject(ObjectId objectId);
+        void removeAllObjects();
+
+        void regenBayerOffset();
+        
+    Scene();
+    private:
+        int sliceCount;
+        ObjectId lastId = 0;
+        vector<Object> objects = {};
+        vector<ObjectId> toRemove = {};
+        unordered_map<ObjectId, uint32_t> idToIndex;
+        ObjectId nextId();
+
+        ShmLayout* shmPointer;
+
+        Render lastRender = {};
+        
+        void draw(Object& object, Render& render);
+        void drawParticle(
+            const ParticleGeometry& geometry,
+            const Color& color,
+            ClippingBehavior clippingBehavior,
+            ObjectId objectId,
+            Render& render
+        );
+        void drawCapsule(
+            const CapsuleGeometry& geometry,
+            const Color& color, 
+            ClippingBehavior clippingBehavior,
+            ObjectId objectId, 
+            Render& render
+        );
+        void drawTriangle(
+            const TriangleGeometry& geometry, 
+            const Color& color,
+            ClippingBehavior clippingBehavior,
+            ObjectId objectId, 
+            Render& render
+        );
+        void drawSphere(
+            const SphereGeometry& geometry, 
+            const Color& color,
+            ClippingBehavior clippingBehavior,
+            ObjectId objectId,
+            Render& render
+        );
+        void drawCuboid(
+            const CuboidGeometry& geometry,
+            const Color& color,
+            ClippingBehavior clippingBehavior,
+            ObjectId objectId, 
+            Render& render
+        );
+        void drawMesh(
+            const MeshGeometry& geometry,
+            const Transformation& transformation,
+            const Color& color,
+            ClippingBehavior clippingBehavior,
+            ObjectId objectId, 
+            Render& render
+        );
+        void drawText(
+            const TextGeometry& geometry,
+            const Color& color,
+            ClippingBehavior clippingBehavior,
+            ObjectId objectId, 
+            Render& render
+        );
+};
+// scene = Scene()
+// snakeContainer = scene.addContainer()
+// 
+// snakeContainer.push_back(drawCylinder())
+// snakeContainer.pop(0)
+
+// scene = Scene()
+// scene.add("snakeSegment5", drawCylinder())
+// scene.remove("snakeSegment0")
+// scene.move("player", 1, 0, 0)
+// snakeContainer.pop(0)
+```
+
+### renderer/include/types.h
+```
+#pragma once
+#include<vector>
+#include<unordered_map>
+#include<array>
+#include<stdint.h>
+#include<ostream>
+
+template<typename T>
+struct Vec3 {
+    T x;
+    T y;
+    T z;
+};
+
+template<typename T>
+std::ostream& operator<<(std::ostream& os, const Vec3<T>& v) {
+    return os << v.x << ", " << v.y << ", " << v.z;
+}
+
+using Mat4 = std::array<std::array<float, 4>, 4>;
+
+struct BinaryColor {
+    uint8_t r;
+    uint8_t g;
+    uint8_t b;
+
+    inline operator uint8_t() const {
+        return
+            static_cast<uint8_t>(
+              (r<<4)
+            | (g<<2)
+            |  b
+        );
+    }
+};
+struct Color {
+    float r;
+    float g;
+    float b;
+
+    inline operator BinaryColor() const {
+        return {
+            (uint8_t)(r*3) & 3, //clamp to avoid overflow
+            (uint8_t)(g*3) & 3,
+            (uint8_t)(b*3) & 3
+        };
+    }
+};
+const Color RED =     {1, 0, 0}; 
+const Color GREEN =   {0, 1, 0};
+const Color BLUE =    {0, 0, 1};
+const Color WHITE =   {1, 1, 1};
+const Color BLACK =   {0, 0, 0};
+const Color CYAN =    {0, 1, 1};
+const Color MAGENTA = {1, 0, 1};
+const Color YELLOW =  {1, 1, 0};
+
+enum ClippingBehavior {
+    ADD,
+    OVERWRITE,
+};
+
+//struct Point {
+//    Vec3 pos;
+//    Vec3 normal;
+//    Color color;
+//    PointDisplayParams pointDisplayParams;
+//    Vec3 shmAddr;
+//};
+
+struct GridParams {
+    Vec3<float> boundingBoxMin;
+    Vec3<float> boundingBoxMax;
+    int gridSize;
+    Vec3<float> cellSizes;
+};
+
+using Point = std::pair<Vec3<float>, Vec3<float>>;
+using ptCloud = std::vector<Point>;
+
+using ObjectId = uint32_t; //::MAX is reserved for negative points
+
+struct PointDisplayParams {
+    uint16_t sliceIndex;
+    uint8_t colIndex;
+    uint8_t rowIndex;
+    bool isDisplay1;
+    bool isSide1;
+};
+
+struct RenderedPoint {
+    ObjectId objectId;
+    PointDisplayParams pointDisplayParams;
+    Vec3<float> pos;
+    Vec3<float> normal;
+    BinaryColor color;
+    ClippingBehavior clippingBehavior;
+};
+
+struct UpdatePatternPoint {
+    PointDisplayParams pointDisplayParams;
+    Vec3<float> pos;
+    Vec3<float> normal;
+    float ditherRank;
+};
+
+using Render = std::vector<RenderedPoint>;
+using UpdatePattern = std::vector<UpdatePatternPoint>;
+
+
+struct Mesh {
+    std::vector<Vec3<float>> vertices;
+    std::vector<std::pair<int, int>> edges;
+    std::vector<std::array<int, 3>> faces;
+
+    void center(float padding = 0);
+};
+
+using KeyboardState = std::array<char, 8>; //doesnt include timestamp!
+```
+
+### renderer/src/dither.cpp
+```
+#include<vector>
+#include<assert.h>
+#include<cmath>
+#include<cstdio>
+#include "types.h"
+
+using namespace std;
+//uses the algorithm for generation bayer matrices from wikipedia generalized to 3d
+template <class T>
+using Mat3d = vector<vector<vector<T>>>;
+
+template <class T>
+Mat3d<T> operator+(const Mat3d<T>& m, T a) { // add vector (d, d, d)
+    for (const vector<vector<T>>&slice : m) {
+        for (const vector<T>& row: slice) {
+            for(T& element : row) {
+                element += a;
+            }
+        }
+    }
+}
+template <class T>
+Mat3d<T> operator+(const Mat3d<T>& a, const Mat3d<T>& b) { // add vector (d, d, d)
+    Mat3d<T> res;
+    size_t Ax = a.size(), Ay = a[0].size(), Az = a[0][0].size();
+    assert(Ax == b.size());
+    assert(Ay == b[0].size());
+    assert(Az == b[0][0].size());
+    res.assign(Ax, vector<vector<T>>(Ay,vector<T>(Az)));
+
+    for (int x = 0; x < Ax; ++x) {
+        for (int y = 0; y < Ay; ++y) {
+            for (int z = 0; z < Az; ++z) {
+                res[x][y][z] = a[x][y][z] + b[x][y][z];
+            }
+        }
+    }
+    return res;
+}
+template <class T>
+Mat3d<float> operator*(const Mat3d<T>& m, float factor) { // add vector (d, d, d)
+    Mat3d<float> res;
+    size_t Ax = m.size(), Ay = m[0].size(), Az = m[0][0].size();
+    res.assign(Ax, vector<vector<float>>(Ay,vector<float>(Az)));
+
+    for (int x = 0; x < Ax; ++x) {
+        for (int y = 0; y < Ay; ++y) {
+            for(int z = 0; z < Az; ++z) {
+                res[x][y][z] = (float) m[x][y][z] * factor;
+            }
+        }
+    }
+}
+Mat3d<int> operator*(const Mat3d<int>& m, int factor) { // add vector (d, d, d)
+    Mat3d<int> res;
+    size_t Ax = m.size(), Ay = m[0].size(), Az = m[0][0].size();
+    res.assign(Ax, vector<vector<int>>(Ay,vector<int>(Az)));
+
+    for (int x = 0; x < Ax; ++x) {
+        for (int y = 0; y < Ay; ++y) {
+            for(int z = 0; z < Az; ++z) {
+                res[x][y][z] = m[x][y][z] * factor;
+            }
+        }
+    }
+    return res;
+}
+const int N=3;
+const int bayerSize = pow(2, N);
+const Mat3d<int> bayer2x2 = {{
+    {
+        {0, 2},
+        {5, 7}
+    }, {
+        {6, 4},
+        {3, 1}
+    }
+}};
+const Mat3d<int> ones2 = {{
+    {
+        {1, 1},
+        {1, 1}
+    }, {
+        {1, 1},
+        {1, 1}
+    }
+}};
+
+Mat3d<int> generate_ones(int size) {
+    return Mat3d<int> (size, vector<vector<int>>(size, vector<int>(size, 1)));
+}
+
+Mat3d<int> kronecker3d(Mat3d<int> a, Mat3d<int> b) {
+    Mat3d<int> res;
+    size_t Ax = a.size(), Ay = a[0].size(), Az = a[0][0].size();
+    size_t Bx = b.size(), By = b[0].size(), Bz = b[0][0].size();
+    // printf("%d %d,%d %d, %d %d\n", Ax,Bx, Ay,By, Az,Bz);
+    res.assign(Ax * Bx, vector<vector<int>>(Ay * By,vector<int>(Az * Bz)));
+    for (int xa = 0; xa < Ax; ++xa) {
+        for (int ya = 0; ya < Ay; ++ya) {
+            for (int za = 0; za < Az; ++za) {
+                for (int xb = 0; xb < Bx; ++xb) {
+                    for (int yb = 0; yb < By; ++yb) {
+                        for (int zb = 0; zb < Bz; ++zb) {
+                            res[xb + xa*Bx][yb + ya*By][zb+za*Bz] = a[xa][ya][za] * b[xb][yb][zb];
+                        }
+                    }
+                }
+            }    
+        }
+    }
+    return res;
+}
+
+Mat3d<float> generateBayer(int n) {
+    Mat3d<int> bayer = bayer2x2;
+    for (int i = 2; i <= n; ++i) {
+        bayer = kronecker3d(ones2, bayer * 8) + kronecker3d(bayer2x2, generate_ones(pow(2, i-1)));
+    }
+    for (int x = 0; x < bayer.size(); ++x){
+        for (int y = 0; y < bayer[0].size(); ++y){
+            for (int z = 0; z < bayer[0][0].size(); ++z){
+                printf("%d, ", bayer[x][y][z]);
+            }
+            printf("\n");
+        }
+        printf("------\n");
+    }
+    Mat3d<float> normalized;
+    normalized.assign(bayer.size(), vector<vector<float>>(bayer[0].size(),vector<float>(bayer[0][0].size())));
+    for (int x = 0; x < bayer.size(); ++x){
+        for (int y = 0; y < bayer[0].size(); ++y){
+            for (int z = 0; z < bayer[0][0].size(); ++z){
+                normalized[x][y][z] = (bayer[x][y][z]) / (float) pow(bayerSize, 3);
+            }       
+        }
+    }
+    return normalized;
+}
+Mat3d<float> bayer = generateBayer(N);
+
+BinaryColor dither(Color color, float ditherRank) {
+    printf("rank: %f color: %f\n", ditherRank, color.r);
+    bool r = powf(color.r, 1.5) > ditherRank;
+    //bool g = powf(color.g, 1.5) > fmod(ditherRank + 0.333 ,1.);
+    // bool r = false;
+    bool g = false;
+    bool b = powf(color.b, 1.5) > fmod(ditherRank + 0.666, 1.);
+    return {r, g, b};
+}
+BinaryColor dither(Color color, Vec3<float> pos) {
+    int ix = floor(pos.x)+35; //avoid negative index modulo error
+    int iy = floor(pos.y)+35; //avoid negative index modulo error
+    int iz = floor(pos.z)+1;
+    uint8_t r = max(0, min(3, (int)(3 * color.r + bayer[(ix  ) % bayerSize][iy     % bayerSize][iz     % bayerSize])));
+    uint8_t g = max(0, min(3, (int)(3 * color.g + bayer[(ix+1) % bayerSize][(iy+2) % bayerSize][iz     % bayerSize])));
+    uint8_t b = max(0, min(3, (int)(3 * color.b + bayer[(ix+1) % bayerSize][(iy+1) % bayerSize][(iz+1) % bayerSize])));
+    //printf("requested: %f %f %f, got: %d %d %d, compared with: %f %f %f\n", color.r, color.g, color.b, r, g, b, bayer[(ix+1) % bayerSize][iy % bayerSize][iz % bayerSize], bayer[ix% bayerSize][(iy+1) % bayerSize][iz % bayerSize], bayer[ix % bayerSize][iy % bayerSize][(iz+1) % bayerSize]);
+    return {r, g, b};
+}
+```
+
+### renderer/src/draw.cpp
+```
+#include "renderer.h"
+#include "types.h"
+#include "grid.h"
+#include <cstdio>
+#include <iostream>
+#include <algorithm>
+
+void Scene::draw(Object& object, Render& render) {
+    auto geometry = object.getTransformedGeometry();
+    auto color = object.getColor();
+    auto clippingBehavior = object.getClippingBehavior();
+    auto objectId = object.getId();
+
+    // printf("-drawing object with id %d\n", (int) objectId);
+    Render pointsToAdd = {};
+    visit([&](auto&& arg)
+    {
+    using T = std::decay_t<decltype(arg)>;
+    if constexpr (std::is_same_v<T, ParticleGeometry>)
+        drawParticle(arg, color, clippingBehavior, objectId, pointsToAdd);
+
+    else if constexpr (std::is_same_v<T, CapsuleGeometry>)
+        drawCapsule(arg, color, clippingBehavior, objectId, pointsToAdd);
+
+    else if constexpr (std::is_same_v<T, TriangleGeometry>)
+        drawTriangle(arg, color, clippingBehavior, objectId, pointsToAdd);
+
+    else if constexpr (std::is_same_v<T, SphereGeometry>)
+        drawSphere(arg, color, clippingBehavior, objectId, pointsToAdd);
+
+    else if constexpr (std::is_same_v<T, CuboidGeometry>)
+        drawCuboid(arg, color, clippingBehavior, objectId, pointsToAdd);
+
+    else if constexpr (std::is_same_v<T, MeshGeometry>)
+        drawMesh(arg, object.getTransformation(), color, clippingBehavior, objectId, pointsToAdd);
+
+    else if constexpr (std::is_same_v<T, TextGeometry>)
+        drawText(arg, color, clippingBehavior, objectId, pointsToAdd);
+    
+    else
+        static_assert(false, "non-exhaustive visitor!");
+    }, geometry);
+
+    //add negative points (remove ones from last render)
+    for (RenderedPoint& lastRenderPoint : lastRender) {
+        if (lastRenderPoint.objectId == objectId) {
+            lastRenderPoint.objectId = (ObjectId)-1; // uint32_t max
+            lastRenderPoint.color = BLACK;
+            render.push_back(lastRenderPoint);
+        }
+    }
+    render.insert(render.end(), pointsToAdd.begin(), pointsToAdd.end());
+}
+
+
+void Scene::drawParticle( //can have parts cut off, points sampled from 1 cell
+    const ParticleGeometry& geometry,
+    const Color& color,
+    ClippingBehavior clippingBehavior,
+    ObjectId objectId,
+    Render& render
+){
+    auto& pos = geometry.pos;    
+
+    int index = calculateIndex(params, pos);
+    auto it = mapping.find(index);
+    if (it == mapping.end()) return;
+    const UpdatePattern& bucket = it->second;
+
+    float radius2 = pow(geometry.radius, 2);
+
+    for (const UpdatePatternPoint& pt : bucket) {
+        Vec3 potentialPtCoords = pt.pos;
+        double d2 = dist2(pos, potentialPtCoords);
+        if (d2 <= radius2) render.push_back({objectId, pt.pointDisplayParams, pos, pt.normal, dither(color, potentialPtCoords), clippingBehavior});
+    }
+}
+
+void Scene::drawCapsule(
+    const CapsuleGeometry& geometry,
+    const Color& color,
+    ClippingBehavior clippingBehavior,
+    ObjectId objectId,
+    Render& render
+) {
+    auto& start = geometry.start;
+    auto& end = geometry.end;
+    auto radius = geometry.radius;
+
+    float length = dist(start, end);
+    float length2 = length * length;
+    float radius2 = radius * radius;
+
+    auto vec = end - start;
+    auto [minV, maxV] = arrangeBoundingBox(start, end);
+    auto bucketIndices = calculateIndicesFromBB(params, minV, maxV, radius);
+
+    for (int bucketIndex : bucketIndices) {
+        auto it = mapping.find(bucketIndex);
+        if (it == mapping.end()) continue;
+        const UpdatePattern& bucket = it->second;
+        for (const UpdatePatternPoint& pt : bucket) {
+            const Vec3<float>& ptCoords = pt.pos;
+            auto v1 = ptCoords-start;
+            auto v2 = ptCoords-end;
+            // float d12 = dist(ptCoords, start);
+            // float d22 = dist(ptCoords, end);
+            
+            // if (d1 + d2 > length + radius) continue; // discard point outside ellipsoid
+            float dot1 = dot(v1, vec);
+            float dot2 = dot(v2, vec);
+
+            float d2;
+            if (dot1 >= 0 and dot2 >=0) {
+                d2 = dist2(ptCoords, end);
+            } 
+            else if (dot1 <= 0 and dot2 <= 0) {
+                d2 = dist2(ptCoords, start);
+            } 
+            else {
+                d2 = magnitude_2(cross(vec, v1)) / length2;
+            }
+
+            if (d2 < radius2 ) render.push_back({ objectId, pt.pointDisplayParams, ptCoords, pt.normal, dither(color, ptCoords), clippingBehavior });
+        }
+    }
+}
+
+void Scene::drawTriangle(
+    const TriangleGeometry& geometry,
+    const Color& color,
+    ClippingBehavior clippingBehavior,
+    ObjectId objectId,
+    Render& render
+) {
+    auto& v1 = geometry.v1;
+    auto& v2 = geometry.v2;
+    auto& v3 = geometry.v3;
+    auto thickness = geometry.thickness;
+
+    Vec3<float> minV = {
+        min(min(v1.x, v2.x), v3.x),
+        min(min(v1.y, v2.y), v3.y),
+        min(min(v1.z, v2.z), v3.z),
+    };
+    Vec3<float> maxV = {
+        max(max(v1.x, v2.x), v3.x),
+        max(max(v1.y, v2.y), v3.y),
+        max(max(v1.z, v2.z), v3.z),
+    };
+
+    auto bucketIndices = calculateIndicesFromBB(params, minV, maxV, thickness);
+
+    Vec3 v21 = v2 - v1;
+    Vec3 v32 = v3 - v2;
+    Vec3 v13 = v1 - v3;
+
+    float magV21 = magnitude_2(v21);
+    float magV32 = magnitude_2(v32);
+    float magV13 = magnitude_2(v13);
+
+    Vec3 normal = cross(v21, v13);
+    float magNormal = magnitude_2(normal);
+
+    Vec3 c21 = cross(v21, normal);
+    Vec3 c32 = cross(v32, normal);
+    Vec3 c13 = cross(v13, normal);
+
+    float thickness2 = thickness * thickness;
+
+    for (int bucketIndex : bucketIndices) {
+        auto it = mapping.find(bucketIndex);
+        if (it == mapping.end()) continue;
+        const UpdatePattern& bucket = it->second;
+
+        for (const UpdatePatternPoint& pt : bucket) {
+            const auto& ptCoords = pt.pos;
+
+            Vec3 p1 = ptCoords - v1;
+            Vec3 p2 = ptCoords - v2;
+            Vec3 p3 = ptCoords - v3;
+
+            bool inside = (sgn(dot(c21, p1)) + sgn(dot(c21, p1)) + sgn(dot(c21, p1))) < 2.;
+            float d2;
+            if (inside) {
+                d2 = min(min(
+                    magnitude_2(v21 * clamp(dot(v21, p1) / magV21, (float)0., (float)1.) - p1),
+                    magnitude_2(v32 * clamp(dot(v32, p2) / magV32, (float)0., (float)1.) - p2)),
+                    magnitude_2(v13 * clamp(dot(v13, p3) / magV13, (float)0., (float)1.) - p3));
+            }
+            else {
+                d2 = pow(dot(normal, p1), 2) /magNormal;
+            }
+            if (d2 < thickness2) render.push_back({ objectId, pt.pointDisplayParams, ptCoords, pt.normal, dither(color, ptCoords), clippingBehavior });
+        }
+    }
+}
+
+void Scene::drawSphere (
+    const SphereGeometry& geometry,
+    const Color& color,
+    ClippingBehavior clippingBehavior,
+    ObjectId objectId,
+    Render& render
+) {
+    auto& pos = geometry.pos;
+    auto radius = geometry.radius;
+    auto thickness = geometry.thickness;
+
+    printf("-sphere: pos coords: %f, %f, %f\n", pos.x, pos.y, pos.z);
+    printf("-radius: %f\n", radius);
+    printf("-params: %f %f %\n", params.boundingBoxMax.x, params.cellSizes.x, params.gridSize);
+
+    auto bucketIndices = calculateIndicesFromBB(params, pos, pos, radius);
+
+    float radius2 = radius * radius;
+
+    printf("-got %d bucket indices", (int) bucketIndices.size());
+
+    for (int bucketIndex : bucketIndices) {
+        auto it = mapping.find(bucketIndex);
+        if (it == mapping.end()) continue;
+        const UpdatePattern& bucket = it->second;
+
+        for (const UpdatePatternPoint& pt : bucket) {
+            const auto& ptCoords = pt.pos;
+            float d2 = dist2(ptCoords, pos);
+            //printf("d2: %f, r2: %f\n");
+            if (thickness > 0 && d2 < (2 * radius * thickness - radius2)) continue; // magic math supr
+            if (d2 < radius2) render.push_back({ objectId, pt.pointDisplayParams, ptCoords, pt.normal, dither(color, ptCoords), clippingBehavior });
+        }
+    }
+}
+
+void Scene::drawCuboid(
+    const CuboidGeometry& geometry,
+    const Color& color,
+    ClippingBehavior clippingBehavior,
+    ObjectId objectId,
+    Render& render
+) {
+    cout<<"drawing cuboid"<<endl;
+    printf("wireframe: %d\n", geometry.isWireframe);
+    auto& v1 = geometry.v1;
+    auto& v2 = geometry.v2;
+    auto thickness = geometry.thickness;
+    
+    auto [minV, maxV] = arrangeBoundingBox(v1, v2);
+    printf("params: %f %f %d\n", params.boundingBoxMax.x, params.cellSizes.x, params.gridSize);
+
+    if (not geometry.isWireframe) {
+        auto bucketIndices = calculateIndicesFromBB(params, minV, maxV);
+        printf("got %d bucket indices\n", bucketIndices.size());
+        for (int bucketIndex : bucketIndices) {
+            auto it = mapping.find(bucketIndex);
+            if (it == mapping.end()) continue;
+            const UpdatePattern& bucket = it->second;
+            for (const UpdatePatternPoint& pt : bucket) {
+                const auto& ptCoords = pt.pos;
+                if (thickness > 0 &&
+                    minV.x + thickness < ptCoords.x &&
+                    minV.y + thickness < ptCoords.y &&
+                    minV.z + thickness < ptCoords.z &&
+                    maxV.x - thickness > ptCoords.x &&
+                    maxV.y - thickness > ptCoords.y &&
+                    maxV.z - thickness > ptCoords.z)continue;
+
+                if (minV.x < ptCoords.x &&
+                    minV.y < ptCoords.y &&
+                    minV.z < ptCoords.z &&
+                    maxV.x > ptCoords.x &&
+                    maxV.y > ptCoords.y &&
+                    maxV.z > ptCoords.z){
+                    render.push_back({ objectId, pt.pointDisplayParams, ptCoords, pt.normal, dither(color, ptCoords), clippingBehavior });;
+                }
+            }
+        }
+    } else {
+        //draw only edges, not diagonals
+        for (uint combinedCoord1 = 0; combinedCoord1 < 2*2*2; combinedCoord1++) {            
+            Vec3 p1 = {
+                (combinedCoord1 & 1) ? minV.x : maxV.x,
+                (combinedCoord1 & 2) ? minV.y : maxV.y,
+                (combinedCoord1 & 4) ? minV.z : maxV.z
+            };
+            for (uint shift : array<uint, 3> {1, 2, 4}) {
+                if ((combinedCoord1 & shift) != 0) { continue; } // new combined would be outside cube / break due to carry
+                uint combinedCoord2 = combinedCoord1 + shift;
+
+                Vec3 p2 = {
+                    (combinedCoord2 & 1) ? minV.x : maxV.x, 
+                    (combinedCoord2 & 2) ? minV.y : maxV.y, 
+                    (combinedCoord2 & 4) ? minV.z : maxV.z
+                }; 
+                drawCapsule({p1, p2, thickness}, color, clippingBehavior, objectId, render);
+            }
+        }
+    }
+    cout<<render.size()<<endl;
+}
+
+
+void Scene::drawMesh(
+    const MeshGeometry& geometry,
+    const Transformation& transformation,
+    const Color& color,
+    ClippingBehavior clippingBehavior,
+    ObjectId objectId, 
+    Render& render
+) {
+    const Mesh& mesh = geometry.mesh;
+    const auto& vertices = mesh.vertices;
+    const auto& faces = mesh.faces;
+
+    const auto& tMatrix = transformation.getMatrix();
+    float maxScale = max(max(transformation.scale.x, transformation.scale.y), transformation.scale.z);
+
+    printf("2| n vert. of mesh: %d\n", vertices.size());
+
+    bool isWireframe = geometry.isWireframe;
+    if (isWireframe) {
+        for (const auto& face : faces) {
+            for (int i = 0; i < 3-1; ++i) {
+                for (int j = i; j < 3; ++j) {
+                    drawCapsule(
+                        {
+                            matColMul(tMatrix, vertices[face[i]]), 
+                            matColMul(tMatrix, vertices[face[j]]),
+                            geometry.thickness
+                        },
+                        color,
+                        clippingBehavior,
+                        objectId,
+                        render
+                    );
+                }
+            }
+        }
+    }
+    else {
+        for (const auto& face : faces) {
+            drawTriangle(
+                {
+                    matColMul(tMatrix, vertices[face[0]]),
+                    matColMul(tMatrix, vertices[face[1]]), 
+                    matColMul(tMatrix, vertices[face[2]]), 
+                    geometry.thickness
+                },
+                color,
+                clippingBehavior,
+                objectId,
+                render
+            );
+        }
+    }
+}
+
+void Scene::drawText(
+    const TextGeometry& geometry,
+    const Color& color,
+    ClippingBehavior clippingBehavior,
+    ObjectId objectId,
+    Render& render
+) {
+    float s = geometry.size;
+    float t = geometry.thickness;
+    float cursorOffset = 0.0f;
+
+    auto mapCoords = [&](float cx, float cy) -> Vec3<float> {
+        float actualX = (cx + cursorOffset) * s;
+        float actualY = cy * s;
+        Vec3<float> p = geometry.pos;
+        
+        switch (geometry.orientation) {
+            case TextOrientation::POS_Z: return {p.x - actualX, p.y - actualY, p.z};
+            case TextOrientation::NEG_Z: return {p.x + actualX, p.y - actualY, p.z};
+            case TextOrientation::POS_X: return {p.x, p.y - actualX, p.z + actualY};
+            case TextOrientation::NEG_X: return {p.x, p.y + actualX, p.z + actualY};
+            case TextOrientation::POS_Y: return {p.x - actualX, p.y, p.z + actualY};
+            case TextOrientation::NEG_Y: return {p.x + actualX, p.y, p.z + actualY};
+            default: return {p.x + actualX, p.y + actualY, p.z};
+        }
+    };
+
+    auto addLine = [&](float x1, float y1, float x2, float y2) {
+        Vec3<float> start = mapCoords(x1, y1);
+        Vec3<float> end = mapCoords(x2, y2);
+        CapsuleGeometry cap = {start, end, t};
+        drawCapsule(cap, color, clippingBehavior, objectId, render);
+    };
+
+    for (char c : geometry.text) {
+        c = std::toupper(c);
+        
+        if (c == 'A') { addLine(0,0, 0,1); addLine(0,1, 1,1); addLine(1,1, 1,0); addLine(0,0.5, 1,0.5); }
+        else if (c == 'B') { addLine(0,0, 0,1); addLine(0,1, 1,1); addLine(1,1, 1,0); addLine(1,0, 0,0); addLine(0,0.5, 1,0.5); }
+        else if (c == 'C') { addLine(1,1, 0,1); addLine(0,1, 0,0); addLine(0,0, 1,0); }
+        else if (c == 'D') { addLine(0,0, 0,1); addLine(0,1, 1,1); addLine(1,1, 1,0); addLine(1,0, 0,0); }
+        else if (c == 'E') { addLine(1,1, 0,1); addLine(0,1, 0,0); addLine(0,0, 1,0); addLine(0,0.5, 1,0.5); }
+        else if (c == 'F') { addLine(1,1, 0,1); addLine(0,1, 0,0); addLine(0,0.5, 1,0.5); }
+        else if (c == 'G') { addLine(1,1, 0,1); addLine(0,1, 0,0); addLine(0,0, 1,0); addLine(1,0, 1,0.5); addLine(0.5,0.5, 1,0.5); }
+        else if (c == 'H') { addLine(0,1, 0,0); addLine(1,1, 1,0); addLine(0,0.5, 1,0.5); }
+        else if (c == 'I') { addLine(0.5,1, 0.5,0); addLine(0,1, 1,1); addLine(0,0, 1,0); }
+        else if (c == 'J') { addLine(1,1, 1,0); addLine(1,0, 0,0); addLine(0,0, 0,0.5); }
+        else if (c == 'K') { addLine(0,1, 0,0); addLine(1,1, 0,0.5); addLine(0,0.5, 1,0); }
+        else if (c == 'L') { addLine(0,1, 0,0); addLine(0,0, 1,0); }
+        else if (c == 'M') { addLine(0,0, 0,1); addLine(0,1, 0.5,0.5); addLine(0.5,0.5, 1,1); addLine(1,1, 1,0); }
+        else if (c == 'N') { addLine(0,0, 0,1); addLine(0,1, 1,0); addLine(1,0, 1,1); }
+        else if (c == 'O') { addLine(0,0, 0,1); addLine(0,1, 1,1); addLine(1,1, 1,0); addLine(1,0, 0,0); }
+        else if (c == 'P') { addLine(0,0, 0,1); addLine(0,1, 1,1); addLine(1,1, 1,0.5); addLine(1,0.5, 0,0.5); }
+        else if (c == 'Q') { addLine(0,0, 0,1); addLine(0,1, 1,1); addLine(1,1, 1,0); addLine(1,0, 0,0); addLine(0.5,0.5, 1,0); }
+        else if (c == 'R') { addLine(0,0, 0,1); addLine(0,1, 1,1); addLine(1,1, 1,0.5); addLine(1,0.5, 0,0.5); addLine(0,0.5, 1,0); }
+        else if (c == 'S') { addLine(1,1, 0,1); addLine(0,1, 0,0.5); addLine(0,0.5, 1,0.5); addLine(1,0.5, 1,0); addLine(1,0, 0,0); }
+        else if (c == 'T') { addLine(0,1, 1,1); addLine(0.5,1, 0.5,0); }
+        else if (c == 'U') { addLine(0,1, 0,0); addLine(0,0, 1,0); addLine(1,0, 1,1); }
+        else if (c == 'V') { addLine(0,1, 0.5,0); addLine(0.5,0, 1,1); }
+        else if (c == 'W') { addLine(0,1, 0,0); addLine(0,0, 0.5,0.5); addLine(0.5,0.5, 1,0); addLine(1,0, 1,1); }
+        else if (c == 'X') { addLine(0,1, 1,0); addLine(1,1, 0,0); }
+        else if (c == 'Y') { addLine(0,1, 0.5,0.5); addLine(1,1, 0.5,0.5); addLine(0.5,0.5, 0.5,0); }
+        else if (c == 'Z') { addLine(0,1, 1,1); addLine(1,1, 0,0); addLine(0,0, 1,0); }
+        else if (c == '0') { addLine(0,0, 0,1); addLine(0,1, 1,1); addLine(1,1, 1,0); addLine(1,0, 0,0); addLine(0,0, 1,1); }
+        else if (c == '1') { addLine(0.5,0, 0.5,1); addLine(0.25,0.75, 0.5,1); }
+        else if (c == '2') { addLine(0,1, 1,1); addLine(1,1, 1,0.5); addLine(1,0.5, 0,0.5); addLine(0,0.5, 0,0); addLine(0,0, 1,0); }
+        else if (c == '3') { addLine(0,1, 1,1); addLine(1,1, 1,0); addLine(1,0, 0,0); addLine(0,0.5, 1,0.5); }
+        else if (c == '4') { addLine(0,1, 0,0.5); addLine(0,0.5, 1,0.5); addLine(1,1, 1,0); }
+        else if (c == '5') { addLine(1,1, 0,1); addLine(0,1, 0,0.5); addLine(0,0.5, 1,0.5); addLine(1,0.5, 1,0); addLine(1,0, 0,0); }
+        else if (c == '6') { addLine(1,1, 0,1); addLine(0,1, 0,0); addLine(0,0, 1,0); addLine(1,0, 1,0.5); addLine(1,0.5, 0,0.5); }
+        else if (c == '7') { addLine(0,1, 1,1); addLine(1,1, 1,0); }
+        else if (c == '8') { addLine(0,0, 0,1); addLine(0,1, 1,1); addLine(1,1, 1,0); addLine(1,0, 0,0); addLine(0,0.5, 1,0.5); }
+        else if (c == '9') { addLine(1,0, 1,1); addLine(1,1, 0,1); addLine(0,1, 0,0.5); addLine(0,0.5, 1,0.5); }
+        else if (c == '-') { addLine(0,0.5, 1,0.5); }
+        else if (c == '_') { addLine(0,0, 1,0); }
+        
+        cursorOffset += 1.5f; 
+    }
+}
+```
+
+### renderer/src/grid.cpp
+```
+#include<array>
+#include<iostream>
+#include<cmath>
+#include<cstdio>
+
+#include "types.h"
+
+using namespace std;
+inline int packIndex(int ix, int iy, int iz) {
+    return (ix << 22) | (iy << 11) | iz;
+}
+
+inline array<int, 3> unpackIndex(int packed) {
+    return { packed >> 22, (packed >> 11) & ((1 << 11) - 1), packed & ((1 << 11) - 1) };
+}
+int calculateIndex(const GridParams& params, const Vec3<float>& ptCoords) {
+    const Vec3<float>& min = params.boundingBoxMin;
+    const Vec3<float>& cellSizes = params.cellSizes;
+
+    int bitMax = pow(2, 10);
+
+    int ix = floor((ptCoords.x - min.x) / cellSizes.x);
+    int iy = floor((ptCoords.y - min.y) / cellSizes.y);
+    int iz = floor((ptCoords.z - min.z) / cellSizes.z);
+
+    //ix - (10 bits), iy - (11 bits), iz - (11bits)
+    return packIndex(ix, iy, iz);
+
+}
+vector<int> calculateIndicesFromBB(const GridParams& params, const Vec3<float>& min, const Vec3<float>& max, float padding = 0.) {
+    const Vec3<float>& boxMin = params.boundingBoxMin;
+    const Vec3<float>& boxMax = params.boundingBoxMax;
+
+    const Vec3<float>& cellSizes = params.cellSizes;
+
+    int minIx = floor((min.x - boxMin.x - padding) / cellSizes.x);
+    int minIy = floor((min.y - boxMin.y - padding) / cellSizes.y);
+    int minIz = floor((min.z - boxMin.z - padding) / cellSizes.z);
+
+    int maxIx = floor((max.x - boxMin.x + padding) / cellSizes.x);
+    int maxIy = floor((max.y - boxMin.y + padding) / cellSizes.y);
+    int maxIz = floor((max.z - boxMin.z + padding) / cellSizes.z);
+    //printf("---indices: bounding box min and max: %f %f %f, %f %f %f\n", min.x, min.y, min.z, max.x, max.y, max.z);
+    //printf("---min values: %d %d %d\n--max values: %d %d %d\n", minIx, minIy, minIz, maxIx, maxIy, maxIz);
+    vector<int> res;
+    res.reserve((maxIx - minIx + 1) * (maxIy - minIy + 1) * (maxIz - minIz + 1));
+    for (int ix = minIx; ix <= maxIx; ix++) {
+        for (int iy = minIy; iy <= maxIy; iy++) {
+            for (int iz = minIz; iz <= maxIz; iz++) {
+                res.push_back(packIndex(ix, iy, iz));
+            }
+        }
+    }
+    return res;
+}
+tuple<unordered_map<int, UpdatePattern>, GridParams> buildGrid(const UpdatePattern& points, int ptsPerCell) {
+    int numPoints = points.size();
+    int nCells = numPoints / ptsPerCell;
+    int gridSize = ceil(pow(nCells, 1. / 3.));
+
+    //find bounding box
+    Vec3<float> Min = { 0, 0, 0 };
+    Vec3<float> Max = { 0, 0, 0 };
+
+    for (const UpdatePatternPoint& pt : points) {
+        auto ptCoords = pt.pos;
+        Min.x = min(Min.x, ptCoords.x);
+        Min.y = min(Min.y, ptCoords.y);
+        Min.z = min(Min.z, ptCoords.z);
+
+        Max.x = max(Max.x, ptCoords.x);
+        Max.y = max(Max.y, ptCoords.y);
+        Max.z = max(Max.z, ptCoords.z);
+    }
+
+    cout << "grid size: " << gridSize << endl;
+    printf("Min: %f %f %f\n", Min.x, Min.y, Min.z);
+    printf("Max: %f %f %f\n", Max.x, Max.y, Max.z);
+
+    float cellSizeZ = (Max.z - Min.z) / gridSize;
+    float cellSizeX = (Max.x - Min.x) / gridSize;
+    float cellSizeY = (Max.y - Min.y) / gridSize;
+
+    GridParams params = {
+        Min,
+        Max,
+        gridSize,
+        Vec3 {cellSizeX, cellSizeY, cellSizeZ}
+    };
+    cout << "cells sizes: " << cellSizeX << ", " << cellSizeY << ", " << cellSizeZ << endl;
+    unordered_map<int, UpdatePattern> map;
+
+    for (int i = 0; i < points.size(); i++) {
+        int packed = calculateIndex(params, points[i].pos);
+        auto& mapVal = map[packed];
+        mapVal.push_back(std::move(points[i]));
+        //array<int, 3> unpacked = unpackIndex(packed);
+        //if (unpacked != array<int, 3>{ix, iy, iz}) cout << "failed. reconstructed:" << endl;
+        //cout << bitset<32>(packed).to_string() << endl;
+    }
+    return { map, params };
+}
+```
+
+### renderer/src/io.cpp
+```
+#include <vector>
+#include <array>
+#include <string>
+#include <regex>
+#include <fstream>
+#include <iostream>
+#include <sstream>
+#include <assert.h>
+#include <algorithm>
+#include <filesystem>
+#include <format>
+#include "types.h"
+using namespace std;
+
+vector<float> getFloats(string str) {
+    vector<float> res;
+    regex nums_regex("[+-]?([0-9]*[.])?[0-9]+");
+    auto words_begin = sregex_iterator(str.begin(), str.end(), nums_regex);
+    auto words_end = sregex_iterator();
+
+    for (sregex_iterator i = words_begin; i != words_end; ++i)
+    {
+        smatch match = *i;
+        string match_str = match.str();
+        res.push_back((float)stod(match_str));
+        //cout << match_str;
+
+    }
+    //cout << endl;
+    return res;
+
+}
+
+vector<string> split(const string& s, const string& delimiter = " ") {
+    size_t pos_start = 0, pos_end, delim_len = delimiter.length();
+    string token;
+    vector<string> res;
+
+    while ((pos_end = s.find(delimiter, pos_start)) != string::npos) {
+        token = s.substr(pos_start, pos_end - pos_start);
+        pos_start = pos_end + delim_len;
+        res.push_back(token);
+    }
+
+    res.push_back(s.substr(pos_start));
+    return res;
+}
+
+vector<float> extractPointCloudData(string str, int nDataPoints = 6) {
+    size_t pos_start = 0, pos_end;
+    string token;
+    vector<float> res;
+    if (str.find(".") == string::npos || str == "format ascii 1.0") return res;
+    for (int i = 0; i < nDataPoints - 1; i++) {
+        if ((pos_end = str.find(" ", pos_start)) == string::npos) {
+            cout << "warning: Not enough values in string: " << str << endl;
+            return res;
+        }
+        token = str.substr(pos_start, pos_end - pos_start);
+        pos_start = pos_end + 1;
+        res.push_back(stof(token));
+    } res.push_back(stof(str.substr(pos_start)));
+    return res;
+}
+void writePtcloudToFile(const ptCloud& points, const string& path) {
+    ofstream PtCloudFile(path);
+    PtCloudFile << "ply\n"
+        "format ascii 1.0\n"
+        "element vertex " << points.size() << "\n"
+        "property float x\n"
+        "property float y\n"
+        "property float z\n"
+        "property float nx\n"
+        "property float ny\n"
+        "property float nz\n"
+        "end_header\n";
+
+    for (const Point& pt : points) {
+        PtCloudFile << pt.first.x << " " << pt.first.y << " " << pt.first.z << " " << pt.second.x << " " << pt.second.y << " " << pt.second.z << endl;
+    }
+}
+
+void writeRenderToFile(const Render& render, const string& path) {
+    ofstream RenderFile(path);
+    RenderFile << "ply\n"
+        "format ascii 1.0\n"
+        "element vertex " << render.size() << "\n"
+        "property float x\n"
+        "property float y\n"
+        "property float z\n"
+        "property float nx\n"
+        "property float ny\n"
+        "property float nz\n"
+        "property uchar red\n"
+        "property uchar green\n"
+        "property uchar blue\n"
+        "end_header\n";
+
+    auto in = [] (bool c) { return c ? 255 : 0; };
+    for (const RenderedPoint& pt : render) {
+        const Vec3<float>& pos = pt.pos;
+        const Vec3<float>& norm = pt.normal;
+        BinaryColor color = pt.color;
+        RenderFile << pos.x << " " << pos.y << " " << pos.z
+            << " " << norm.x << " " << norm.y << " " << norm.z 
+            << " " << in(color.r) << " " << in(color.g) << " " << in(color.b)
+            << endl;
+    }
+}
+
+vector<Vec3<float>> loadPointsObj(string path) {
+    ifstream file(path);
+    string str;
+    string file_contents;
+    vector<Vec3<float>> vertices;
+
+    while (getline(file, str)) {
+        if (str.find("v ") != string::npos) {
+            vector<float> coords = getFloats(str);
+            vertices.push_back({ coords[0], coords[1], coords[2] });
+        }
+        else if (str.find("f ") != string::npos) {
+
+        }
+    }
+    return vertices;
+}
+
+Mesh loadMeshObj(string path) {
+    ifstream file(path);
+    string str;
+    string file_contents;
+    Mesh res;
+    vector<Vec3<float>>& vertices = res.vertices;
+    vector<pair<int, int>>& edges = res.edges;
+    vector<array<int, 3>>& faces = res.faces;
+    
+    while (getline(file, str)) {
+        if (str.find("v ") != string::npos) {
+            vector<float> coords = getFloats(str);
+            vertices.push_back({ coords[0], coords[1], coords[2] });
+        }
+        else if (str.find("f ") != string::npos) {
+            array<int, 3> face;
+
+            vector<string> faceInfo = split(str.substr(2));
+            if (faceInfo.size() > 3) cerr << "Warning: obj file has face with more than 3 vertices";
+            for (int i = 0; i < 3; i++) {
+                string vertexIndexStr = split(faceInfo[i], "/")[0];
+                face[i] = (stoi(vertexIndexStr)) - 1; //ply indexing starts from 1
+            }
+            faces.push_back(face);
+
+            //iterate over all unordered pairs
+            for (int i = 0; i < 2; ++i) {
+                for (int j = i + 1; i < 3; ++i) {
+                    edges.push_back({ face[i], face[j] });
+                }
+            }
+        }
+    }
+    return res;
+}
+
+bool comparePatterns(const UpdatePatternPoint& p1, const UpdatePatternPoint& p2) {
+    return p1.pointDisplayParams.sliceIndex < p2.pointDisplayParams.sliceIndex;
+}
+
+UpdatePattern loadUpdatePattern(string path) {
+    cout<<"loading update pattern file '"<<path<<"' into memory"<<endl;
+    ifstream file(path);
+    stringstream buffer;
+
+    buffer << file.rdbuf();
+    string fileStr = buffer.str();
+
+    vector<string> splitFileStr = split(fileStr, "\n");
+    UpdatePattern res;
+    cout<<"parsing update pattern file, length: "<<splitFileStr.size()<<endl;
+    for (const string& line : splitFileStr) {
+        if (line == "") continue;
+        vector<string> lineInfo = split(line);
+        //516 31 31 1 1 1 1 -1.5826960226627385,31.46021413308955,0 0.025122159089884737,-0.49936847830300873,0 -4.409725716973366,-31.761680042168166,0.5 -6.0175438987259895,0.19790256922439192,0.5
+        assert(lineInfo.size() >= 9);
+        
+        int sliceIndex = stoi(lineInfo[0]);
+        int index1 = stoi(lineInfo[1]);
+        int index2 = stoi(lineInfo[2]);
+        array<bool, 4> pattern {lineInfo[3] == "1", lineInfo[4] == "1", lineInfo[5] == "1", lineInfo[6] == "1"};
+        
+        int i = 0;
+        for (int j = 0; j < 4; ++j) {
+            bool isPixelOn = pattern[j];
+            if (isPixelOn) {
+                bool isDisplay1 = j < 2;
+                bool isSide1 = j%2==0;
+                uint16_t index = isDisplay1 ? index1 : index2;
+                vector<string> posStr = split(lineInfo[7 + i], ",");
+
+                assert(posStr.size() == 3);
+                Vec3 pos = { stof(posStr[0]), stof(posStr[1]), stof(posStr[2])};
+
+                for (uint8_t rowIndex = 0; rowIndex < 64; ++rowIndex) {
+                    Vec3 newPos = pos;
+                    UpdatePatternPoint newPt = {
+                        .pointDisplayParams = {
+                            .sliceIndex = (uint16_t) sliceIndex, 
+                            .colIndex = (uint8_t) index, 
+                            .rowIndex = rowIndex,
+                            .isDisplay1 = isDisplay1,
+                            .isSide1 = isSide1
+                        },
+                        .pos = pos, .ditherRank=1
+                    };
+                    res.push_back(newPt);
+                    pos.z += 1;
+                }
+
+                ++i;
+            }
+        }
+    }
+    printf("finished parsing. update pattern has %d points.\n", res.size());
+    sort(res.begin(), res.end(), comparePatterns);
+    return res;
+}
+```
+
+### renderer/src/math.cpp
+```
+#include"types.h"
+#include"linalg.h"
+#include <algorithm>
+#include <iostream>
+
+Mat4 matMul(const Mat4& mat1, const Mat4& mat2) {
+    auto a = sgn(-2);
+    Mat4 res;
+    for (int i = 0; i < 4; i++) {
+        for (int j = 0; j < 4; j++) {
+            res[i][j] = 0;
+            for (int k = 0; k < 4; k++) {
+                res[i][j] += mat1[i][k] * mat2[k][j];
+            }
+        }
+    }
+    return res;
+}
+
+void Mesh::center(float padding) {
+    Vec3<float> min = {__FLT_MAX__, __FLT_MAX__, __FLT_MAX__};
+    Vec3<float> max = {-__FLT_MAX__, -__FLT_MAX__, -__FLT_MAX__};
+
+    Vec3<float> boundsMin = {-32 + padding, -32 + padding, 0 + padding};
+    Vec3<float> boundsMax = {32 - padding, 32 - padding, 64 - padding};
+
+    auto boundsCenter = (boundsMin + boundsMax) * 0.5;
+
+    for (const auto& v : vertices) {
+        min.x = min.x < v.x ? min.x : v.x;
+        min.y = min.y < v.y ? min.y : v.y;
+        min.z = min.z < v.z ? min.z : v.z;
+    
+        max.x = max.x > v.x ? max.x : v.x;
+        max.y = max.y > v.y ? max.y : v.y;
+        max.z = max.z > v.z ? max.z : v.z;
+    }
+
+    auto meshCenter = (min + max) * 0.5;
+    
+    auto meshSize = max - min;
+    auto targetSize = boundsMax - boundsMin;
+
+    float scaleX = (meshSize.x > 0) ? targetSize.x / meshSize.x : 1.0f;
+    float scaleY = (meshSize.y > 0) ? targetSize.y / meshSize.y : 1.0f;
+    float scaleZ = (meshSize.z > 0) ? targetSize.z / meshSize.z : 1.0f;
+
+    float scaleFactor = std::min({scaleX, scaleY, scaleZ});
+    std::cout<<"calculated mesh center: "<<meshCenter << ", bounds center: " <<boundsCenter << ", scale factor: " <<scaleFactor<<std::endl;
+    std::cout << "min: " << min << ", max: " << max<<std::endl;
+    for (auto& v : vertices) {
+        v = v - meshCenter;
+        v = v * scaleFactor;
+        v = v + boundsCenter;
+    }
+}
+```
+
+### renderer/src/renderer.cpp
+```
+#include <string>
+#include <iostream>
+#include <vector>
+#include <chrono>
+#include <cmath>
+
+#include "types.h"
+#include "linalg.h"
+#include "grid.h"
+#include "io.h"
+#include "renderer.h"
+#include "dither.h"
+#include "shm.h"
+
+using namespace std;
+
+int getTime() {
+    return chrono::duration_cast<chrono::microseconds> (chrono::system_clock::now().time_since_epoch()).count();
+}
+
+Mat4 Transformation::getMatrix() const {
+    float x = rotation.x;
+    float y = rotation.y;
+    float z = rotation.z;
+
+    Mat4 rMatrixX = {{
+        {1, 0,      0,       0},
+        {0, cos(x), -sin(x), 0},
+        {0, sin(x),  cos(x), 0},
+        {0, 0,      0,       1}
+    }};
+    Mat4 rMatrixY = {{
+        {cos(y),  0, sin(y), 0},
+        {0,       1, 0,      0},
+        {-sin(y), 0, cos(y), 0},
+        {0, 0, 0, 1}
+    }};
+    Mat4 rMatrixZ = {{
+        {cos(z), -sin(z), 0, 0},
+        {sin(z),  cos(z), 0, 0},
+        {0,      0,       1, 0},
+        {0,      0,       0, 1}
+    }};
+    Mat4 sMatrix = {{
+        {scale.x, 0,       0,       0},
+        {0,       scale.y, 0,       0},
+        {0,       0,       scale.z, 0},
+        {0,       0,       0,       1}
+    }};
+    Mat4 rMatrix = matMul(matMul(rMatrixX, rMatrixY), rMatrixZ);
+    Mat4 matrix = matMul(rMatrix, sMatrix);
+
+    matrix[0][3] = translation.x;
+    matrix[1][3] = translation.y;
+    matrix[2][3] = translation.z;
+    // printf("new translation x in getMatrix(): %f\n", translation.x);
+    return matrix;
+}
+
+Object::Object(ObjectId initId, Geometry initGeometry, Color initColor, ClippingBehavior initClippingBehavior = ADD) {
+    id = initId;
+    geometry = initGeometry;
+    color = initColor;
+    clippingBehavior = initClippingBehavior;
+}
+
+Geometry Object::getTransformedGeometry() {
+    Mat4 tMatrix = transformation.getMatrix();
+    const Vec3<float>& pivot = transformation.pivot;
+    float maxScale = max({transformation.scale.x, transformation.scale.y, transformation.scale.z});
+    Geometry res;
+    visit([&](auto&& arg)
+    {
+        using T = std::decay_t<decltype(arg)>;
+        if constexpr (std::is_same_v<T, ParticleGeometry>)
+        res = ParticleGeometry{
+            .pos = pivot + matColMul(tMatrix, arg.pos - pivot),
+            .radius = arg.radius * maxScale
+        };
+        else if constexpr (std::is_same_v<T, CapsuleGeometry>)
+        res = CapsuleGeometry{
+            .start = pivot + matColMul(tMatrix, arg.start - pivot),
+            .end = pivot + matColMul(tMatrix, arg.end - pivot),
+            .radius = arg.radius * maxScale
+        };
+        else if constexpr (std::is_same_v<T, TriangleGeometry>)
+        res = TriangleGeometry{
+            .v1 = pivot + matColMul(tMatrix, arg.v1 - pivot),
+            .v2 = pivot + matColMul(tMatrix, arg.v2 - pivot),
+            .v3 = pivot + matColMul(tMatrix, arg.v3 - pivot),
+            .thickness = arg.thickness * maxScale
+        };
+        else if constexpr (std::is_same_v<T, SphereGeometry>)
+            res = SphereGeometry{
+                .pos = pivot + matColMul(tMatrix, arg.pos - pivot),
+                .radius = arg.radius * maxScale
+            };
+        else if constexpr (std::is_same_v<T, CuboidGeometry>)
+        res = CuboidGeometry{
+            .v1 = pivot + matColMul(tMatrix, arg.v1 - pivot),
+            .v2 = pivot + matColMul(tMatrix, arg.v2 - pivot),
+            .thickness = arg.thickness * maxScale,
+            .isWireframe = arg.isWireframe
+        };
+        else if constexpr (std::is_same_v<T, MeshGeometry>) 
+        res = MeshGeometry{
+            .mesh = arg.mesh,
+            .isWireframe = arg.isWireframe,
+            .transformation = transformation,
+            .thickness = arg.thickness
+        };
+        else if constexpr (std::is_same_v<T, TextGeometry>) {
+            res = arg;
+            if (tMatrix != (Mat4) {{
+                {1, 0, 0, 0},
+                {0, 1, 0, 0},
+                {0, 0, 1, 0},
+                {0, 0, 0, 1}
+            }}) {
+                cerr<<"Warning: Transformation logic for text is not implemented. change geometry instead."<<endl;
+            }
+        }
+        else
+        static_assert(false, "non-exhaustive visitor!");
+    }, geometry);
+        
+    return res;
+}
+void Object::setGeometry(Geometry newGeometry) {
+    geometry = newGeometry;
+    toRerender = true;
+}
+void Object::setColor(Color newColor) {
+    color = newColor;
+    toRerender = true;
+}
+void Object::translate(Vec3<float> translation) {
+    transformation.translation = translation;
+    toRerender = true;
+}
+void Object::rotate(Vec3<float> rotation) {
+    transformation.rotation = rotation;
+    toRerender = true;
+}
+void Object::scale(Vec3<float> factors) {
+    transformation.scale = factors;
+    toRerender = true;
+}
+void Object::setPivot(Vec3<float> pivot) {
+    transformation.pivot = pivot;
+    toRerender = true;
+}
+
+Scene::Scene() {
+    cout<<"opening shm..."<<endl;
+
+    shmPointer = openShm("vdshm");
+    if (shmPointer == nullptr) { 
+        printf("SHM failed to open");
+        return; 
+    }
+
+    sliceCount = shmPointer->header.sliceCount;
+    printf("slice count: %d\n", sliceCount);
+
+    cout<<"wiping voxel data..."<<endl;
+    wipeScreen();
+    
+    cout<<"loading update pattern..."<<endl;
+    UpdatePattern updatePattern = loadUpdatePattern(format("../../update_pattern_gen/{}.txt", sliceCount));
+    cout<<"building grid..."<<endl;
+    auto [mapping_, params_] = buildGrid(updatePattern, 20);
+    mapping = mapping_;
+    params = params_;
+    lastId = 0;
+
+}
+ObjectId Scene::nextId() {
+    return ++lastId;
+}
+ObjectId Scene::createObject(const Geometry& initGeometry, const Color& initColor, ClippingBehavior initClippingBehavior) {
+    ObjectId newId = nextId();
+    Object newObj = Object(newId, initGeometry, initColor, initClippingBehavior);
+    objects.push_back(newObj);
+    // cout<<"created object "<< newId<<endl;
+    idToIndex[lastId] = objects.size() - 1;
+    return lastId;
+}
+Object& Scene::getObject(ObjectId id) {
+    for (auto& object : objects) {
+        if (object.getId() == id) {
+            return object;
+        }
+    }
+    throw invalid_argument("No object found with this id.");
+    cerr<<"No object found"<<endl;
+}
+void Scene::setObjectGeometry(ObjectId id, Geometry newGeometry) {
+    auto& object = getObject(id);
+    object.setGeometry(newGeometry);
+}
+
+void Scene::setObjectTranslation(ObjectId id, Vec3<float> translation) {
+    auto& object = getObject(id);
+    object.translate(translation);
+}
+
+void Scene::setObjectScale(ObjectId id, Vec3<float> factors) {
+    auto& object = getObject(id);
+    object.scale(factors);
+}
+
+void Scene::setObjectRotation(ObjectId id, Vec3<float> rotation) {
+    auto& object = getObject(id);
+    object.rotate(rotation);
+}
+
+void Scene::setObjectIntrinsicPivot(ObjectId id, Vec3<float> newPivot) {
+    auto& object = getObject(id);
+    object.setPivot(newPivot);
+}
+
+void Scene::render(bool writeToFile) {
+    printf("rendering %d objects\n", objects.size());
+    Render render;
+    for (auto objToRemove : toRemove) {
+        for (RenderedPoint& lastRenderPoint : lastRender) {
+            if (lastRenderPoint.objectId == objToRemove) {
+                lastRenderPoint.objectId = (ObjectId)-1; // uint32_t max
+                lastRenderPoint.color = BLACK;
+                render.push_back(lastRenderPoint);
+            }
+        }
+    }
+    for (Object& object : objects) {
+        if (object.toRerender) {
+            draw(object, render);
+            object.toRerender = false;
+        }
+    }
+    printf("writing render with %d points\n", render.size());
+    lastRender = render;
+    if (writeToFile) {
+        writeRenderToFile(render, "output/render.ply");
+    } else {
+        for (const RenderedPoint& renderedPoint : render) {
+            const PointDisplayParams& params = renderedPoint.pointDisplayParams;
+            ShmVoxelSlice& targetSlice = shmPointer->data[params.sliceIndex];
+            uint8_t& colIndex = params.isDisplay1 ? targetSlice.index1 : targetSlice.index2;
+            colIndex = params.colIndex;
+
+            int baseIndexNumber = (static_cast<int>(!params.isDisplay1) * 128) + static_cast<int>(!params.isSide1)*64;
+            targetSlice.data[baseIndexNumber+params.rowIndex] = static_cast<uint8_t>(renderedPoint.color);
+        }
+    }
+}
+
+void Scene::wipeScreen() {
+    for (uint32_t i = 0; i < sliceCount; i++) {
+        for (auto& voxel : shmPointer->data[i].data) {
+            voxel = 0;
+        }
+    }
+}
+
+void Scene::removeAllObjects() {
+    objects = {};
+}
+
+void Scene::removeObject(ObjectId objectId) {
+    toRemove.push_back(objectId);
+    for (int i = 0; i < objects.size(); i++) {
+        if (objects[i].getId() == objectId) {
+            objects.erase(objects.begin() + i);
+        }
+    }
+}
+
+// void Scene::regenBayerOffset() {
+    
+// }
+
+KeyboardState Scene::getPressedKeys() {
+    auto upper =  shmPointer->keyboardState;
+    KeyboardState lower;
+    for (int i = 0; i < upper.size(); i++) {
+        lower[i] = std::tolower(upper[i]);
+    }
+    return lower;
+}
+```
+
+### update_pattern_gen/src/main.rs
+```
+use image::{ImageBuffer, Rgba};
+use anyhow::Result;
+use rand::{rng, seq::SliceRandom};
+use rayon::prelude::*;
+use std::f64::consts::PI;
+use itertools::Itertools;
+use imageproc::drawing::draw_filled_circle_mut;
+use std::fs::File;
+use std::io::Write;
+
+const SIZE: i32 = 64;
+const NCOLLS: i32 = 2000;
+const PITCH: f64 = 2.5;
+const PANEL_2_OFFSET: f64 = 15.0/PITCH;
+const IMAGE_SCALE: i32 = 12;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Point {
+    x: f64,
+    y: f64,
+    z: f64,
+}
+
+impl Point{
+    fn new(x: f64, y: f64, z: f64) -> Self {
+        Point { x, y, z}
+    }
+    fn distance(&self, other: &Point) -> f64 {
+        let dx = self.x - other.x;
+        let dy = self.y - other.y;
+        let dz = self.z - other.z;
+        (dx * dx + dy * dy + dz * dz).sqrt()
+    }
+    fn from_angle(index: i32, side: bool, angle: f64, offset: f64) -> Self {
+        let panel_center_dist = (index as f64 - (if side {(SIZE as f64) / 2.0} else {0.0})) + 0.5;
+        let z = if offset == 0.0 {0.0} else {0.5};
+        if offset == 0.0 {
+            let x = panel_center_dist * angle.cos();
+            let y = panel_center_dist * angle.sin();
+            return Point::new(x, y, z)
+        } else{
+            let x = -offset * angle.sin() - panel_center_dist * angle.cos();
+            let y = offset * angle.cos() - panel_center_dist * angle.sin();
+            return Point::new(x, y, z)
+        }
+    }
+    fn nearest_point(&self, points: &Vec<Point>, normal: &Point, normals: &Vec<Point>) -> f64 {
+        let mut nearest_distance = f64::MAX;
+        for i in 0..points.len() {
+            if normal.dot(&normals[i]) < 0.0 {
+                continue;
+            }
+            let distance = self.distance(&points[i]);
+            if distance < nearest_distance {
+                nearest_distance = distance;
+            }
+        }
+        nearest_distance
+    }
+    fn dist_to_origin(&self) -> f64 {
+        (self.x * self.x + self.y * self.y).sqrt()
+    }
+    fn normal(side: bool, angle: f64) -> Self {
+        if side {
+            return Point::new(angle.sin(), -angle.cos(), 0.0);
+        } else {
+            return Point::new(-angle.sin(), angle.cos(), 0.0);
+        }
+    }
+    fn dot(&self, other: &Point) -> f64 {
+        self.x * other.x + self.y * other.y + self.z * other.z
+    }
+}
+
+fn save_img(img: &ImageBuffer<Rgba<u8>, Vec<u8>>, path: &str) -> Result<()> {
+    img.save(path)?;
+    Ok(())
+}
+
+fn product<T: Clone>(items: &[T], repeat: usize) -> Vec<Vec<T>> {
+    if repeat == 0 {
+        return vec![vec![]];
+    }
+
+    let iterators = vec![items.iter(); repeat];
+
+    iterators
+        .into_iter()
+        .multi_cartesian_product()
+        .map(|vec_of_refs| vec_of_refs.into_iter().cloned().collect::<Vec<T>>())
+        .collect()
+}
+
+fn write_to_file(path: &str, best: &Vec<(i32, Best)>) -> Result<()> {
+    let mut file = File::create(path)?;
+    for (frame, best_item) in best.iter() {
+        let index1 = best_item.index1;
+        let index2 = best_item.index2;
+        let pattern = best_item.pattern;
+        let mut pt_coords: Vec<Point> = best_item.pts1.clone();
+        pt_coords.extend(&best_item.pts2);
+        let mut next_str = format!("{} {} {} {} {} {} {}", frame, index1, index2, pattern[0] as i32, pattern[1] as i32, pattern[2] as i32, pattern[3] as i32);
+        let mut i = 0;
+        for j in 0..4 {
+            if pattern[j] == true {
+                next_str.push_str(&format!(" {},{},{}", pt_coords[i].x, pt_coords[i].y, pt_coords[i].z));
+                i+=1;
+            }
+        }
+        writeln!(file, "{}", next_str)?;
+    }
+    Ok(())
+}
+
+fn write_pointcloud_to_file(path: &str, points: &Vec<Point>, normals: &Vec<Point>) -> Result<()> {
+    let mut file = File::create(path)?;
+    let height: i32 = 64;
+    writeln!(file, "ply\nformat ascii 1.0")?;
+    writeln!(file, "element vertex {}", points.len() as i32 * height)?;
+    writeln!(file, "property float x\nproperty float y\nproperty float z")?;
+    writeln!(file, "property float nx\nproperty float ny\nproperty float nz")?;
+    writeln!(file, "end_header")?;
+    for i in 0..points.len() {
+        let pt = points[i];
+        let normal = normals[i];
+        for j in 0..height {
+            write!(file, "{} {} {} ", pt.x, pt.y, pt.z+j as f64)?;
+            writeln!(file, "{} {} {}", normal.x, normal.y, normal.z)?;
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct Best {
+    index1: i32,
+    index2: i32,
+    pattern: [bool; 4],
+    pts1: Vec<Point>,
+    pts2: Vec<Point>,
+    normal1: Point,
+    normal2: Point,
+}
+
+fn main() {
+    let start = std::time::Instant::now();
+    let mut rng = rng();
+
+    let mut best_choices: Vec<(i32, Best)> = vec![];
+
+    let mut pts: Vec<Point> = vec![];
+
+    let mut normals: Vec<Point> = vec![];
+
+    let mut img: ImageBuffer<Rgba<u8>, Vec<u8>> = ImageBuffer::new((SIZE*IMAGE_SCALE) as u32, (SIZE*IMAGE_SCALE) as u32);
+
+    let mut n = 0;
+
+    let mut r = (0..NCOLLS).collect::<Vec<i32>>();
+    r.shuffle(&mut rng);
+
+    for frame in r {
+        let angle = (frame as f64) / (NCOLLS as f64) * PI * 2.0;
+        let normal1 = Point::normal(true, angle);
+        let normal2 = Point::normal(false, angle);
+        
+        let best_choice = (0..(1<<10 as i32)).into_par_iter().map(|index_encoded| {
+            let index1 = index_encoded >> 5;
+            let index2 = index_encoded & 0b11111;
+            let mut best_choice_local: Best = Best { index1: 0, index2:0, pattern: [false, false, false, false], pts1: vec![], pts2: vec![] , normal1: Point::new(0.0, 0.0, 0.0), normal2: Point::new(0.0, 0.0, 0.0)};
+            let mut max_score_local: f64 = -1.0;
+            for activation_pattern in product(&[true, false], 4).iter() {
+                if activation_pattern.iter().all(|&x| x == false) {
+                    continue;
+                }
+                let mut pts1: Vec<Point> = vec![];
+                let mut pts2: Vec<Point> = vec![];
+
+                for (i, active) in activation_pattern.iter().enumerate() {
+                    if !*active {
+                        //pts1.push(Point::new(0.0, 0.0, 0.0))
+                        continue;
+                    }
+                    else if i<2 {
+                        pts1.push(Point::from_angle(index1, !(i%2==0), angle, 0.0));
+                    }
+                    else {
+                        pts2.push(Point::from_angle(index2, !(i%2==0), angle, PANEL_2_OFFSET));
+                    }
+                }
+                let mut score: f64 = 0.0;
+                for ptgroup in [&pts1, &pts2].iter() {
+                    let dist_f = if ptgroup == &&pts1 {10.0} else {0.0};
+                    let normal = if ptgroup == &&pts1 {&normal1} else {&normal2};
+                    if ptgroup.iter().all(|p| p.x == 0.0 && p.y == 0.0) {
+                        continue;
+                    }
+                    if pts.len() == 0 {
+                        score += 1000.0; //first frame, dont care what happens
+                        continue;
+                    }
+                    if ptgroup.len() == 1 {
+                        let pt = ptgroup[0];
+                        score += pt.nearest_point(&pts, normal, &normals).powf(2.0) * (dist_f + pt.dist_to_origin().powf(1.2));
+                        //println!("base {}, origin {}", pt.nearest_point(&pts).powf(2.0), pt.dist_to_origin()*10.0);
+                    }
+                    else {
+                        score += ptgroup.iter().map(|p| p.nearest_point(&pts, normal, &normals).powf(2.0) * (dist_f + p.dist_to_origin().powf(1.2))).sum::<f64>() * 0.9;
+                    }
+
+                }
+
+                if score > max_score_local {
+                    max_score_local = score;
+                    best_choice_local = Best { 
+                        index1, 
+                        index2, 
+                        pattern: [activation_pattern[0], activation_pattern[1], activation_pattern[2], activation_pattern[3]], 
+                        pts1: pts1.clone(), 
+                        pts2: pts2.clone(),
+                        normal1: Point::normal(true, angle),
+                        normal2: Point::normal(false, angle),
+                    };
+                }
+            }
+            (best_choice_local, max_score_local)
+        }).max_by(|a, b| a.1.partial_cmp(&b.1).unwrap()).unwrap().0;
+
+        best_choices.push((frame, best_choice.clone()));
+        let Best { index1: _index1, index2: _index2, pattern, pts1: new_pts1, pts2: new_pts2, normal1: new_normal1, normal2: new_normal2 } = best_choice;
+
+        n += pattern[0] as i32 + pattern[1] as i32 + pattern[2] as i32 + pattern[3] as i32;
+
+        for pt in new_pts1.iter().chain(new_pts2.iter()) {
+            pts.push(*pt);
+            normals.push(if new_pts1.contains(pt) {new_normal1} else {new_normal2});
+            let img_x = pt.x * (IMAGE_SCALE as f64) + ((SIZE * IMAGE_SCALE) as f64) / 2.0;
+            let img_y = pt.y * (IMAGE_SCALE as f64) + ((SIZE * IMAGE_SCALE) as f64) / 2.0;
+            let color = if new_pts1.contains(pt) {Rgba([255, 0, 0, 255])} else {Rgba([0, 255, 0, 255])};
+            draw_filled_circle_mut(&mut img, (img_x as i32, img_y as i32), 2, color);
+        }
+    }
+
+    let mut sum: f64 = 0.0;
+
+    for i in 0..pts.len() {
+        let other_pts = [&pts[..i], &pts[i+1..]].concat();
+        sum += pts[i].nearest_point(&other_pts, &normals[i], &normals);
+        // println!("{}", pts[i].nearest_point(&other_pts, &normals[i], &normals));
+    }
+    let avg = sum / pts.len() as f64;
+    println!("Average: {}", avg * PITCH as f64);
+
+
+    save_img(&img, "output.png").expect("Unable to save image");
+    write_to_file("output.txt", &best_choices).expect("Unable to write to file");
+    write_pointcloud_to_file("pointcloud.ply", &pts, &normals).expect("Unable to write point cloud to file");
+    println!("{n}");
+    let duration = start.elapsed();
+    println!("Time elapsed: {:?}", duration);
+}
+```

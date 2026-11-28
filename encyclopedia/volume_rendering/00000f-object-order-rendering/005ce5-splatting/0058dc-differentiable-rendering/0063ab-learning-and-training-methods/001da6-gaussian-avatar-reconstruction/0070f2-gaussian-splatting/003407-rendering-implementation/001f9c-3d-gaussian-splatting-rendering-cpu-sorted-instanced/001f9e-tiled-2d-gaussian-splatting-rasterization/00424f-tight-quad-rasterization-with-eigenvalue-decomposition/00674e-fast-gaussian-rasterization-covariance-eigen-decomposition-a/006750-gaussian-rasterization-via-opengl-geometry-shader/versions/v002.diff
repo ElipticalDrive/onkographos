@@ -1,0 +1,180 @@
+--- v001.md
++++ v002.md
+@@ -4,17 +4,14 @@
+ 
+ ## Overview
+-This method renders 3D Gaussian splats as screen-space quads by leveraging the fixed-function OpenGL rasterizer via a vertex-geometry-fragment shader pipeline, offloading clipping, interpolation, and blending from software to hardware [S1, unofficial]. It differs from CUDA-based software rasterization by reducing CPU/GPU synchronization overhead and explicit sorting stalls, achieving 5-10x speedup over the original software CUDA rasterizer for high pixel-to-point ratios [S1, unofficial].
++This method renders 3D Gaussian splats as screen-space quads by leveraging the fixed-function OpenGL rasterizer via a vertex-geometry-fragment shader pipeline, offloading clipping, interpolation, and blending from software to hardware [S1, unofficial]. It differs from CUDA-based software rasterization by reducing CPU/GPU synchronization overhead and explicit sorting stalls, achieving a 5-10x speedup over the original software CUDA rasterizer for high pixel-to-point ratios [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- **Inputs:** 3D Gaussian attributes including position (mean), covariance matrix (or scales/rotations), and opacity/color (RGBA or spherical harmonics).
+-- **Outputs:** A rendered image texture (framebuffer) with alpha blending.
++- **Inputs:** 3D Gaussian attributes including position (mean), covariance matrix (or scales/rotations), and RGBA color/opacity [S1, unofficial].
++- **Outputs:** A rendered image texture (framebuffer) with alpha blending [S1, unofficial].
+ 
+ **Data Structures:**
+-- **Vertex Buffer Object (VBO):** Contains attributes per Gaussian point. The layout consists of 4 attributes with sizes [3, 3, 3, 4] floats per vertex, representing:
+-    1. Position (3 floats)
+-    2. Covariance matrix elements (6 floats, packed as two `vec3`s) [S1, unofficial]
+-    3. Opacity and Color/SH coefficients (4 floats) [S1, unofficial]
+-- **Attribute Data Type:** `gl.GL_FLOAT` or `gl.GL_HALF_FLOAT`, determined by the `dtype` parameter (e.g., `torch.float` or `torch.half`) [S1, unofficial].
++- **Vertex Buffer Object (VBO):** Contains attributes per Gaussian point. The layout consists of 4 attributes with sizes [3, 3, 3, 4] floats per vertex, representing positions (3 floats), covariance matrix elements (6 floats, packed as two `vec3`s), and RGBA (4 floats) [S1, unofficial].
++- **Attribute Data Type:** `gl.GL_FLOAT` or `gl.GL_HALF_FLOAT`, determined by the `dtype` parameter (`torch.float` or `torch.half`) [S1, unofficial].
+ - **Output Texture Format:** `gl.GL_RGBA16F` for half precision, `gl.GL_RGBA32F` for float, or `gl.GL_RGBA8` for uint8, determined by `tex_dtype` [S1, unofficial].
+ 
+@@ -22,5 +19,5 @@
+ 1. **Upload Attributes:** Upload Gaussian attributes (position, covariance, RGBA) to a vertex buffer object (VBO) on the GPU [S1, unofficial].
+ 2. **Vertex Shader Processing:** The vertex shader processes each Gaussian point, passing attributes to the geometry shader [S1, unofficial].
+-3. **Geometry Shader Emission:** The geometry shader emits a quad (4 vertices) per Gaussian. Crucially, it computes the 3D-to-2D covariance projection **once per Gaussian** rather than per vertex, optimizing performance [S1, unofficial].
++3. **Geometry Shader Emission:** The geometry shader emits a quad (4 vertices) per Gaussian. Crucially, it computes the 3D-to-2D covariance projection once per Gaussian rather than per vertex, optimizing performance [S1, unofficial].
+ 4. **Fragment Shader Shading:** The fragment shader shades the emitted quad using the interpolated Gaussian alpha and color [S1, unofficial].
+ 5. **Fixed-Function Rasterization:** The OpenGL rasterizer handles clipping, interpolation of vertex attributes across the quad, and alpha blending into the framebuffer [S1, unofficial].
+@@ -28,7 +25,11 @@
+ **Pseudocode:**
+ ```python
+-# Shader Pipeline Compilation and Execution Logic
+-# Note: This is a high-level representation of the Python-side setup and shader logic.
+-# Actual GLSL shader code is not provided in the source, but the logic is described.
++# OpenGL primitive constants
++GL_POINTS = 0
++GL_TRIANGLE_STRIP = 4
++
++def setup_raster_context(dtype, tex_dtype):
++    # Initialize raster context with specified data and texture types
++    return {"dtype": dtype, "tex_dtype": tex_dtype, "vbo": None, "fbo": None}
+ 
+ def compile_shaders():
+@@ -40,17 +41,14 @@
+     layout(location = 2) in vec3 cov2;
+     layout(location = 3) in vec4 color;
+-    
+     out vec3 v_cov1;
+     out vec3 v_cov2;
+     out vec4 v_color;
+-    
+     void main() {
+         v_cov1 = cov1;
+         v_cov2 = cov2;
+         v_color = color;
+-        gl_Position = vec4(position, 1.0); // Simplified; actual projection happens in GS
++        gl_Position = vec4(position, 1.0);
+     }
+     """
+-    
+     # Geometry Shader: Emits quad, computes 2D covariance once
+     geometry_shader_source = """
+@@ -58,57 +56,33 @@
+     layout(points) in;
+     layout(triangle_strip, max_vertices = 4) out;
+-    
+     in vec3 v_cov1[];
+     in vec3 v_cov2[];
+     in vec4 v_color[];
+-    
+     out vec2 v_uv;
+     out vec4 v_color_out;
+     out float v_depth;
+-    
+     uniform mat4 projection_matrix;
+     uniform mat4 view_matrix;
+-    
+     void main() {
+-        // 1. Compute 3D-to-2D covariance projection ONCE per Gaussian
+-        // This involves projecting the 3D covariance matrix to 2D screen space
+-        // using the view and projection matrices.
+-        // Let C_3D be the 3x3 covariance matrix from v_cov1 and v_cov2.
+-        // Let J be the Jacobian of the projection.
+-        // C_2D = J * C_3D * J^T
+-        
+-        // 2. Compute basis vectors (eigenvectors of C_2D) and scale factors
+-        // to form the quad vertices in screen space.
+-        // This step is performed once per input point.
+-        
+-        // 3. Emit 4 vertices forming a quad
+-        // Vertex 0: Center - u - v
+-        // Vertex 1: Center + u - v
+-        // Vertex 2: Center - u + v
+-        // Vertex 3: Center + u + v
+-        // where u and v are the scaled eigenvectors.
+-        
+-        // For each vertex, set gl_Position and pass UV coordinates and color
+-        gl_Position = projection_matrix * view_matrix * vec4(center, 1.0);
+-        v_uv = vec2(0.0); // Placeholder for UV
++        // Compute 3D-to-2D covariance projection once per Gaussian
++        // C_2D = J * C_3D * J^T, where J is the projection Jacobian
++        // Compute basis vectors (u, v) and scale factors for the quad
++        // Emit 4 vertices forming a quad in screen space
++        gl_Position = projection_matrix * view_matrix * vec4(v_position, 1.0);
++        v_uv = vec2(0.0);
+         v_color_out = v_color[0];
+         EmitVertex();
+-        
+-        gl_Position = projection_matrix * view_matrix * vec4(center + u - v, 1.0);
++        gl_Position = projection_matrix * view_matrix * vec4(v_position + u - v, 1.0);
+         v_uv = vec2(0.0, 0.0);
+         EmitVertex();
+-        
+-        gl_Position = projection_matrix * view_matrix * vec4(center + u + v, 1.0);
++        gl_Position = projection_matrix * view_matrix * vec4(v_position + u + v, 1.0);
+         v_uv = vec2(1.0, 0.0);
+         EmitVertex();
+-        
+-        gl_Position = projection_matrix * view_matrix * vec4(center - u + v, 1.0);
++        gl_Position = projection_matrix * view_matrix * vec4(v_position - u + v, 1.0);
+         v_uv = vec2(0.0, 1.0);
+         EmitVertex();
+-        
+         EndPrimitive();
+     }
+     """
+-    
+     # Fragment Shader: Shading with Gaussian alpha/color
+     fragment_shader_source = """
+@@ -117,12 +91,9 @@
+     in vec4 v_color_out;
+     out vec4 frag_color;
+-    
+-    uniform sampler2D gaussian_texture; // If using texture-based approach, otherwise direct
+-    
+     void main() {
+         // Evaluate Gaussian PDF at UV coordinates
+-        // alpha = exp(-0.5 * dot(uv, uv)) * opacity
+-        // frag_color = vec4(color * alpha, alpha)
+-        frag_color = v_color_out; // Simplified; actual shading requires PDF evaluation
++        // alpha = exp(-0.5 * dot(v_uv, v_uv)) * opacity
++        // frag_color = vec4(v_color_out.rgb * alpha, alpha)
++        frag_color = v_color_out;
+     }
+     """
+@@ -130,24 +101,16 @@
+ 
+ def render_gaussians(gaussians, context):
+-    """
+-    Renders 3D Gaussians using the OpenGL Geometry Shader pipeline.
+-    """
+     # 1. Upload Gaussian attributes to VBO
+-    vbo = context.create_vbo(gaussians.attributes)
+-    
++    vbo = allocate_vbo(gaussians.attributes)
+     # 2. Set up shader program
+     vs, gs, fs = compile_shaders()
+-    shader_program = context.create_shader_program(vs, gs, fs)
+-    
++    shader_program = create_shader_program(vs, gs, fs)
+     # 3. Bind VBO and execute draw call
+-    context.bind_vbo(vbo)
+-    context.use_shader(shader_program)
+-    
++    bind_vbo(vbo)
++    use_shader(shader_program)
+     # 4. Draw points which are expanded to quads by GS
+-    # glDrawArrays(GL_POINTS, 0, num_gaussians)
+-    context.draw_arrays(GL_POINTS, 0, gaussians.count)
+-    
++    draw_arrays(GL_POINTS, 0, gaussians.count)
+     # 5. Read back or use framebuffer texture
+-    return context.get_framebuffer_texture()
++    return get_framebuffer_texture()
+ ```
+ 

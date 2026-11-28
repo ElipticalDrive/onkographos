@@ -1,0 +1,61 @@
+# Sparse Voxel Octree Attribute Encoding (Neighbor)
+## Overview
+This method compresses volumetric attributes stored in a Sparse Voxel Octree (SVO) by encoding attribute values as deltas relative to the attributes of spatially adjacent neighbors [S1, unofficial]. It solves the problem of high storage and bandwidth costs for dense attribute data by leveraging spatial coherence [S1, unofficial]. It sets itself apart from [SVO Attribute Compression via Parent Delta Encoding](13266-svo-attribute-compression-via-parent-delta-encoding.md) by using direct 3D spatial neighbors rather than hierarchical parent nodes [S1, unofficial].
+## How it works
+**Inputs and Outputs:**
+*   **Input:** `coord`: A tensor of shape $[N, 3]$ containing the integer grid coordinates of each occupied sparse voxel [S1, unofficial]. `res`: The resolution of the sparse voxel grid [S1, unofficial]. `attr`: A tensor of shape $[N, C]$ containing the attribute values for each occupied voxel [S1, unofficial].
+*   **Output:** `delta`: A tensor of shape $[N, C]$ containing the encoded delta values [S1, unofficial].
+
+**Data Structures:** Not given in the sources.
+
+**Algorithm:**
+1. **Encode:** Compute the attribute of a sparse voxel octree into deltas from its neighbors [S1, unofficial].
+2. **Decode:** Compute the attribute of a sparse voxel octree from its neighbors and deltas [S1, unofficial].
+
+**Formulas:** Not given in the sources.
+
+**Parameters:** `coord`, `res`, `attr`, and `delta` as defined above [S1, unofficial].
+
+**Edge Cases and Pitfalls:** Not given in the sources.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def encode_sparse_voxel_octree_attr_neighbor_cpu(coord, res, attr):
+    N = len(coord)
+    C = len(attr[0])
+    delta = [[0.0] * C for _ in range(N)]
+    coord_to_idx = {tuple(coord[i]): i for i in range(N)}
+    offsets = [(dx, dy, dz) for dx in (-1, 0, 1) for dy in (-1, 0, 1) for dz in (-1, 0, 1) if not (dx == 0 and dy == 0 and dz == 0)]
+    for i in range(N):
+        # Not given in the sources: exact prediction formula P_i from neighbors
+        predicted = [0.0] * C
+        delta[i] = [attr[i][c] - predicted[c] for c in range(C)]
+    return delta
+
+def decode_sparse_voxel_octree_attr_neighbor_cpu(coord, res, delta):
+    N = len(coord)
+    C = len(delta[0])
+    attr = [[0.0] * C for _ in range(N)]
+    coord_to_idx = {tuple(coord[i]): i for i in range(N)}
+    offsets = [(dx, dy, dz) for dx in (-1, 0, 1) for dy in (-1, 0, 1) for dz in (-1, 0, 1) if not (dx == 0 and dy == 0 and dz == 0)]
+    for i in range(N):
+        # Not given in the sources: exact reconstruction logic from neighbors and delta
+        attr[i] = [delta[i][c] + 0.0 for c in range(C)]
+    return attr
+```
+## Subtopics
+
+### [Vector to Closest Point (VCP) Octree](9709-vector-to-closest-point-vcp-octree.md)
+The Vector to Closest Point (VCP) Octree is a hierarchical sparse data structure for surface ray-casting that stores a vector field pointing to the closest point on the original geometry at each grid node, rather than a scalar distance. It solves the problem of block artifacts and loss of sharp features in standard scalar voxel octrees by encoding directionality, allowing for smooth surface approximation and normal derivation via interpolation. It sets itself apart from its parent [Sparse Voxel Octree Attribute Encoding (Neighbor)](2641-sparse-voxel-octree-attribute-encoding-neighbor.md) by using geometric vectors to the surface rather than attribute deltas, and from standard Signed Distance Fields (SDFs) by storing explicit direction information which prevents feature blurring during linear interpolation.
+
+### [SVO Attribute Compression via Parent Delta Encoding](13266-svo-attribute-compression-via-parent-delta-encoding.md)
+SVO Attribute Compression via Parent Delta Encoding is a method for compressing volumetric attributes (such as color or alpha) stored in Sparse Voxel Octrees (SVOs) by encoding deltas relative to parent node attributes rather than direct spatial neighbors. It solves the problem of random access complexity and missing neighbors in 3D sparse data, where direct neighbor access requires logarithmic time and potentially loading the entire SVO into memory, unlike the constant-time access available in 2D images. It sets itself apart from sibling methods like Neighbor-based encoding by leveraging the hierarchical structure of the SVO to ensure streamability and low memory complexity during decoding.
+
+## Operating characteristics
+Time and memory complexity: Not given in the sources. Measured performance with hardware, resolution and scene: Not given in the sources. Scaling: Not given in the sources. Strengths and limitations: Not given in the sources. When to use it and when not: Not given in the sources.
+## Background
+Origin (who, when, which paper): Not given in the sources. History and development: Not given in the sources. Where it is used: Not given in the sources.
+## Sources
+[S1] quantaji/o-voxel-gpu, https://github.com/quantaji/o-voxel-gpu, fetched 2026-10-29 (unofficial)

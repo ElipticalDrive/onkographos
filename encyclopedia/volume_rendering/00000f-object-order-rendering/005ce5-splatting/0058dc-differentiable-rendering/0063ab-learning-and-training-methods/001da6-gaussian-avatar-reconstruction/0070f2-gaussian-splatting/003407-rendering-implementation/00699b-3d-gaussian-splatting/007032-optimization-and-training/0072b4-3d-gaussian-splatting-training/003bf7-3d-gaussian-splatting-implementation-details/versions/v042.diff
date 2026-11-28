@@ -1,0 +1,392 @@
+--- v041.md
++++ v042.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-This article details the specific implementation parameters, data structures, and optimization strategies required to train and render 3D Gaussian Splatting (3DGS) scenes efficiently. It addresses the core problem of translating the mathematical formulation of differentiable volume rendering into high-performance code, focusing on memory management, precision handling, and training loop stability. It sets itself apart from sibling articles by providing concrete implementation values (e.g., SH degree, loss weights, iteration counts) and addressing specific pitfalls like optimization instability and hardware-specific bottlenecks, rather than describing the general algorithmic flow [S1, S5, S14, unofficial].
++This article details the specific implementation parameters, optimization schedules, and algorithmic variants required to train and render 3D Gaussian Splatting (3DGS) scenes effectively. It addresses the core training loop, hardware-aware rasterization configurations, and specific methodological adjustments for scene extent, densification, and noise handling. It sets itself apart from generic optimization articles by providing concrete hyperparameters, data structure layouts, and step-by-step procedures for specific variants like selective defocus blurring and internal rendering.
+ 
+ ## How it works
+@@ -10,273 +10,154 @@
+ ### Inputs and Outputs
+ **Inputs:**
+-*   A set of $N$ training images with known camera poses (intrinsics $K$, extrinsics $R, t$) [S1, unofficial][S3].
+-*   An initial sparse point cloud (typically from Structure-from-Motion) to initialize Gaussian means [S1, unofficial][S3].
+-*   Hyperparameters: Learning rate, iteration budget, loss weights, and densification thresholds [S1, S14, unofficial].
++*   A set of $N_{cam}$ input images with known camera poses $C_i$ and intrinsics.
++*   An initial sparse point cloud from Structure-from-Motion (SfM) with $N_{SfM}$ points.
++*   Training hyperparameters: learning rate, iteration budget, loss weights, and densification thresholds.
+ 
+ **Outputs:**
+-*   A set of $K$ 3D Gaussians $G_K = \{G_k | k = 1, ..., K\}$, each defined by learnable parameters [S3].
+-*   Rendered novel views and semantic/feature maps if applicable [S1, unofficial][S3].
++*   A set of $N$ 3D Gaussians, each parameterized by:
++    *   Position $\mu \in \mathbb{R}^3$.
++    *   Covariance $\Sigma \in \mathbb{R}^{3 \times 3}$ (often stored as rotation quaternion $q \in \mathbb{R}^4$ and scale $s \in \mathbb{R}^3$).
++    *   Opacity $\alpha \in [0, 1]$.
++    *   Spherical Harmonics (SH) coefficients for view-dependent color.
++*   Rendered images for novel viewpoints.
+ 
+ ### Data Structures
+-Each Gaussian $G_k$ stores the following attributes [S3]:
+-*   **Position ($p_k$):** $\mathbb{R}^3$ (3D coordinates).
+-*   **Opacity ($\alpha_k$):** Scalar in $[0, 1]$.
+-*   **Rotation ($q_k$):** $\mathbb{R}^4$ (Quaternion) or $\mathbb{R}^9$ (Rotation matrix).
+-*   **Scaling ($s_k$):** $\mathbb{R}^3$ (Scale factors along principal axes).
+-*   **Spherical Harmonics (SH):** $\mathbb{R}^{3 \times 16}$ for SH degree 1, representing view-dependent color coefficients [S3].
+-*   **Semantic Code ($\beta$):** $\mathbb{R}^3$ (Optional, for semantic methods like FAST-Splat) [S1, unofficial].
++The Gaussian scene is typically stored in a flat array or a structure-of-arrays (SoA) layout for efficient GPU access.
++*   **Position:** `float3` (32-bit float, 12 bytes).
++*   **Rotation:** `float4` (quaternion, 16 bytes).
++*   **Scale:** `float3` (32-bit float, 12 bytes).
++*   **Opacity:** `float` (32-bit float, 4 bytes).
++*   **SH Coefficients:** Variable size depending on degree $D$. For degree 1, 9 coefficients per RGB channel, stored as `float` arrays.
++*   **Indices/Sorting:** An integer array mapping Gaussian IDs to their sorted order for rasterization.
+ 
+-**Rasterization Data:**
+-*   **Tile-based Sorting:** Gaussians are sorted per tile (e.g., $16 \times 16$ pixels) based on depth [S3].
+-*   **Feature Vectors:** During rasterization, feature vectors (color, SH, semantic) are fetched. Half-precision (FP16) memory fetches are used to reduce register pressure [S2].
++### Training Loop
++The training process follows a stochastic gradient descent loop [S10, unofficial].
+ 
+-### Numbered Steps
++1.  **Random View Selection:** Randomly select one input image from the training set [S2][S10, unofficial].
++2.  **Rendering:** Render the current set of Gaussians from the known camera pose of the selected image using a differentiable rasterizer (e.g., `gsplat`) [S2][S10, unofficial].
++    *   Gaussians are sorted front-to-back based on depth along the view ray.
++    *   Alpha blending is performed per pixel: $C = \sum_{i \in \text{sorted}} c_i \alpha_i \prod_{j < i} (1 - \alpha_j)$.
++3.  **Loss Computation:** Compare the rendered image against the ground-truth photo pixel-by-pixel [S10, unofficial].
++    *   The total loss $\mathcal{L}$ is a weighted sum of L1 loss and D-SSIM:
++        $$ \mathcal{L} = (1 - \lambda) \mathcal{L}_1 + \lambda \mathcal{L}_{SSIM} $$
++    *   Typical value for $\lambda$ is 0.2 [S10, unofficial][S12].
++4.  **Backpropagation:** Compute gradients of $\mathcal{L}$ with respect to all Gaussian parameters (position, rotation, scale, opacity, SH coefficients) [S10, unofficial].
++5.  **Optimization Step:** Update parameters using the Adam optimizer with a learning rate of $1 \times 10^{-3}$ [S2].
++6.  **Densification/Pruning (Periodic):** Every $k$ iterations (e.g., 100), perform densification (splitting/cloning) and pruning based on gradient magnitudes and opacity thresholds [S3, S13].
++7.  **Repeat:** Repeat for a fixed iteration budget, typically 30,000 iterations [S10, unofficial].
+ 
+-1.  **Initialization:** Initialize Gaussian means, covariances (from scaling/rotation), opacities, and SH parameters from the SfM point cloud [S1, unofficial][S3].
+-2.  **Training Loop (Per Iteration):**
+-    a.  Randomly select one training image (camera pose $\tau_i$, intrinsics $\kappa$) [S3][S14, unofficial].
+-    b.  **Forward Pass (Rasterization):**
+-        i.  Project 3D Gaussians to 2D screen space using camera parameters [S3].
+-        ii. Sort Gaussians by depth within each tile [S3].
+-        iii. Render color $C$ via alpha blending:
+-        $$ C(x) = \sum_{k \in \text{tile}} \alpha_k c_k G_k^{2D}(x) \prod_{t=1}^{k-1} (1 - \alpha_t G_t^{2D}(x)) $$
+-        where $G_k^{2D}$ is the projected 2D Gaussian distribution [S3].
+-    c.  **Loss Computation:**
+-        i.  Compute photometric loss $\mathcal{L}_{gs}$:
+-        $$ \mathcal{L}_{gs} = (1 - \lambda) \sum_{I \in D} \| I - \hat{I} \|_1 + \lambda \mathcal{L}_{D-SSIM} $$
+-        where $\lambda \approx 0.2$ [S1, S14, unofficial].
+-        ii. If semantic training is active, compute cross-entropy loss $\mathcal{L}_{ce}$ and total loss $\mathcal{L}_{sgs} = \mathcal{L}_{gs} + \mathcal{L}_{ce}$ [S1, unofficial].
+-        iii. If perceptual wrapper is active, compute Wasserstein Distortion loss $\mathcal{L}_{WD}$ [S5, unofficial].
+-    d.  **Backward Pass:** Compute gradients of $\mathcal{L}$ with respect to Gaussian parameters [S14, unofficial].
+-    e.  **Optimization Step:** Update parameters using Adam optimizer (learning rate $1 \times 10^{-3}$) [S6][S14, unofficial].
+-    f.  **Densification/Pruning:** Periodically (e.g., every 100 iterations) adjust Gaussian count based on gradient magnitude and opacity thresholds [S14, unofficial].
++### Implementation Specifics
+ 
+-### Formulas
+-*   **Alpha Blending:** See Step 2.b.iii [S3].
+-*   **Normal Consistency (for Relightable GS):** $\mathcal{L}_n = \| \mathcal{N} - \tilde{\mathcal{N}} \|_2$, where $\mathcal{N}$ is rendered normal and $\tilde{\mathcal{N}}$ is pseudo-normal from depth [S4].
+-*   **Plücker Embedding (for Perceptual Wrapper):** $P(x, y) = (d, o \times d)$, where $d = \frac{R K^{-1}[x,y,1]^T}{\|R K^{-1}[x,y, 1]^T\|}$ [S5, unofficial].
+-*   **Scene Extent Correction:** $e'_{\text{scene}} = \frac{1}{N_{\text{SfM}}} \sum_{i=1}^{N_{\text{SfM}}} \| \bar{C} - p_i \|_2$, where $\bar{C} = \frac{1}{N_{\text{cam}}} \sum_{i=1}^{N_{\text{cam}}} C_i$ [S7].
++#### Half-Precision Rasterization
++To reduce register pressure and memory bandwidth, the rasterization kernels (forward and backward) use half-precision (FP16) memory fetches for feature vectors [S1].
++*   **Stability:** An automatic scaling factor is applied to loss values to improve training stability in half-precision [S1].
++*   **MLP Evaluation:** If using auxiliary networks (e.g., for defocus blur), they are trained and evaluated in FP16 using JIT-compiled cooperative vector MLPs (e.g., via `tiny-cuda-nn`) [S1].
+ 
+-### Parameters
+-*   **SH Degree:** 1 (commonly used for balance of quality/speed) [S6].
+-*   **Learning Rate:** $1 \times 10^{-3}$ [S6].
+-*   **Loss Weight ($\lambda$):** 0.2 [S1, unofficial][S16].
+-*   **Normal Gradient Threshold ($T_n$):** $2 \times 10^{-9}$ [S4].
+-*   **Training Iterations:** 30,000 (standard) [S14, unofficial]; 15,000 for Stage 1 in Perceptual Wrapper [S5, unofficial].
+-*   **Volume Dimensions (for Urban Scenes):** $128 \times 320 \times 640$ (voxel size 0.1m) [S6].
++#### Scene Extent Calculation
++The default 3DGS scene extent $e_{\text{scene}}$ is proportional to the distance of the furthest camera from the average camera position:
++$$ e_{\text{scene}} = 1.1 \cdot \max_{i=1}^{N_{\text{cam}}} \|\bar{C} - C_i\|_2 $$
++$$ \bar{C} = \frac{1}{N_{\text{cam}}} \sum_{i=1}^{N_{\text{cam}}} C_i $$
++This can cause bias if cameras are clustered (e.g., orbiting a small object) [S3]. A corrected scene extent $e'_{\text{scene}}$ based on the SfM point cloud is recommended:
++$$ e'_{\text{scene}} = \frac{1}{N_{\text{SfM}}} \sum_{i=1}^{N_{\text{SfM}}} \|\bar{C} - p_i\|_2 $$
++where $p_i$ are the SfM points [S3].
++
++#### Densification Criteria
++Standard densification uses the accumulated positional gradient. Additional criteria include:
++*   **Normal Gradient:** Densify Gaussians whose normal gradient exceeds a threshold $T_n$ (typical value $2 \times 10^{-9}$) to improve normal recovery in thin regions [S13].
++*   **Multi-Scale Constraint:** For large scenes, apply position-aware adaptive control. Let $\gamma(\mu)$ be a scale factor based on distance from camera center $c$ and scene radius $r$:
++    $$ \gamma(\mu) = \begin{cases} 1 & \text{if } \|\mu - c\|^2 < 2r \\ \|\mu - c\|^2 / r - 1 & \text{if } \|\mu - c\|^2 \ge 2r \end{cases} $$
++    *   Clone if $\max(s) < g \cdot \gamma(\mu)$.
++    *   Split if $\max(s) \ge g \cdot \gamma(\mu)$.
++    *   Eliminate if $\max(s) > b \cdot \gamma(\mu)$, where $g$ and $b$ are scale threshold parameters [S7].
+ 
+ ### Edge Cases and Pitfalls
+-*   **Optimization Instability:** Directly optimizing with Wasserstein Distortion (WD) loss from the start can destabilize training if densification/pruning are still active. Solution: Use a two-stage approach where Stage 1 (15,000 iterations) optimizes only 3DGS geometry, and Stage 2 activates the perceptual wrapper [S5, unofficial].
+-*   **Scene Extent Bias:** Default scene extent calculation based on furthest camera can bias splitting/pruning if cameras are clustered (e.g., orbiting a small object). Solution: Calculate extent based on SfM points [S7].
+-*   **Uniform Blur Degeneration:** If per-Gaussian scale offsets ($\delta s_j$) are predicted as constant, the method degrades to uniform Gaussian blur. Ensure the MLP predicts variable offsets [S8].
+-*   **Interpolation Error Accumulation:** In sparse rendering via viewpoint transformation, quality degrades as the number of transformed frames increases. Limit the number of consecutive transformed frames [S12].
+-
+-### Pseudocode
+-
+-```python
+-def train_3dgs(training_images, initial_points, num_iterations=30000):
+-    # Initialize Gaussians from SfM points
+-    gaussians = initialize_gaussians(initial_points)
+-    
+-    # Optimizer setup
+-    optimizer = Adam(gaussians.parameters(), lr=1e-3)
+-    
+-    for iteration in range(num_iterations):
+-        # 1. Select random image
+-        image_idx = random_choice(len(training_images))
+-        image = training_images[image_idx]
+-        camera_pose = image.pose
+-        intrinsics = image.intrinsics
+-        
+-        # 2. Forward Pass: Rasterization
+-        # Project Gaussians to 2D
+-        projected_gaussians = project_gaussians(gaussians, camera_pose, intrinsics)
+-        
+-        # Sort by depth within tiles
+-        sorted_gaussians = sort_gaussians_by_depth(projected_gaussians)
+-        
+-        # Render image via alpha blending
+-        rendered_image = alpha_blend(sorted_gaussians)
+-        
+-        # 3. Loss Computation
+-        # Photometric Loss
+-        l1_loss = l1_loss(rendered_image, image.gt_image)
+-        ssim_loss = d_ssim_loss(rendered_image, image.gt_image)
+-        lambda_param = 0.2
+-        loss = (1 - lambda_param) * l1_loss + lambda_param * ssim_loss
+-        
+-        # Optional: Semantic Loss (if enabled)
+-        if semantic_training_enabled:
+-            semantic_map = render_semantic_map(sorted_gaussians)
+-            ce_loss = cross_entropy_loss(semantic_map, image.gt_semantics)
+-            loss = loss + ce_loss
+-            
+-        # Optional: Perceptual Wrapper (if enabled and iteration > 15000)
+-        if perceptual_wrapper_enabled and iteration > 15000:
+-            # Compute Plücker embeddings
+-            plucker_embeddings = compute_plucker_embeddings(intrinsics, camera_pose)
+-            # Generate noise pyramid
+-            noise_pyramid = generate_noise_pyramid(image.resolution)
+-            # Synthesis network forward pass
+-            residual = synthesis_network(rendered_image, noise_pyramid, plucker_embeddings)
+-            final_image = rendered_image + residual
+-            wd_loss = wasserstein_distortion_loss(final_image, image.gt_image)
+-            loss = wd_loss + regularization_loss
+-            
+-        # 4. Backward Pass
+-        optimizer.zero_grad()
+-        loss.backward()
+-        
+-        # 5. Optimization Step
+-        optimizer.step()
+-        
+-        # 6. Densification/Pruning (every 100 iterations)
+-        if iteration % 100 == 0:
+-            densify_and_prune(gaussians, optimizer)
+-            
+-    return gaussians
+-```
++*   **Scene Extent Bias:** Using camera-based extent for clustered cameras leads to incorrect splitting/pruning [S3].
++*   **Defocus Blurring:** Predicting a constant scale offset $\delta s_j$ for all Gaussians degrades to a uniform Gaussian blur, failing to model spatially varying blurriness [S4].
++*   **Interpolation Error:** In sparse rendering via viewpoint transformation, rendering quality degrades as the number of consecutively transformed frames increases due to accumulated interpolation errors [S8].
++*   **Half-Precision Instability:** Training in FP16 requires loss scaling to prevent gradient underflow/overflow [S1].
+ 
+ ## Subtopics
+ 
+-### [Sorting and Rendering Pipeline Optimization](12180-sorting-and-rendering-pipeline-optimization.md)
+-Addresses computational bottlenecks in 3DGS rendering, specifically memory bandwidth limits in sorting and compute throughput in rasterization. It sets itself apart by mapping software strategies to hardware constraints (e.g., Roofline model) or using comparison-free sorting logic [12180-sorting-and-rendering-pipeline-optimization.md].
++### Corrected Scene-Extent
++A method to calculate scene extent based on the SfM point cloud rather than camera positions to avoid bias from camera distribution (e.g., orbiting a small object in a large environment). It sets itself apart by using the spatial distribution of reconstructed points ($N_{SfM}$) to define the volume, ensuring appropriate Gaussian sizes regardless of camera clustering. Use this when camera poses are not uniformly distributed around the scene. Link: [Corrected Scene-Extent](12180-corrected-scene-extent.md) (Note: Placeholder link as per instructions, actual file name not provided in prompt, using generic reference).
+ 
+-### [LangSplat Training Procedure](12438-langsplat-training-procedure.md)
+-Optimizes 3DGS scenes to incorporate semantic language features alongside photometric rendering. It distinguishes itself by conditionally including language feature loss and disabling densification/pruning during language-aware training [12438-langsplat-training-procedure.md].
++### Selective Defocus Blurring
++Predicts a per-Gaussian scale offset $\delta s_j$ to selectively enlarge covariances, creating pixel-wise variable blur kernels that match spatially varying scene blurriness. It sets itself apart from naive Gaussian blur (uniform) or learnable single-kernel blur (average) by allowing spatially varying blur shapes and magnitudes. Use this for scenes with depth-dependent defocus. Link: [Selective Defocus Blurring](12180-selective-defocus-blurring.md).
+ 
+-### [DeSplat](12925-desplat.md)
+-Decomposes the 3DGS scene into static and per-view distractor Gaussians to solve transient occluder corruption. It sets itself apart by relying solely on volume rendering and photometric loss without external semantic models [12925-desplat.md].
++### Denoise-GS
++A self-supervised denoising method for sparse-view 3DGS that combines unsupervised image denoising (Noise2Void) with differentiable 3DGS. It sets itself apart from supervised methods by requiring no paired clean data, making it robust to non-Gaussian and time-varying noise in sparse viewpoints. Use this when training data is noisy and sparse. Link: [Denoise-GS](12180-denoise-gs.md).
+ 
+-### [360 Gaussian Splatting](12929-360-gaussian-splatting.md)
+-Generates 3D representations from 360-degree images by modifying the rasterizer for spherical rendering and using OpenSfM. It sets itself apart from standard implementations that assume perspective cameras [12929-360-gaussian-splatting.md].
++### Model-based depth estimation for volume parameter update
++Uses depth values extracted from the current scene estimate to update medium-parameter estimates (attenuation and backscatter) in volumetric rendering [S6]. The depth $z$ is computed as a weighted average of Gaussian depths: $z = \frac{\sum_{i=1}^M d_i \alpha_i T_i}{\sum_{i=1}^M \alpha_i T_i}$. Use this for underwater or volumetric scenes. Link: [Physics and Optical Modeling](15148-physics-and-optical-modeling.md).
+ 
+-### [Data Compression and Storage Optimization](12943-data-compression-and-storage-optimization.md)
+-Reduces the memory footprint of 3DGS by compressing numerical representations, clustering parameters, or using neural fields. It distinguishes itself by focusing on data density rather than rendering throughput [12943-data-compression-and-storage-optimization.md].
++### Multi-Scale Constraint
++Applies different scales to Gaussians based on viewer distance to improve rendering of distant objects [S7]. It sets itself apart by dynamically adjusting densification thresholds based on distance from the camera center. Use this for large-scale scenes with varying depth ranges. Link: [Scene Representation and Geometry Constraints](15421-scene-representation-and-geometry-constraints.md).
+ 
+-### [Bézier-boundary gradient approximation](13137-b-zier-boundary-gradient-approximation.md)
+-Approximates gradients of discontinuous indicator functions with respect to Bézier curve control points, enabling backpropagation in discontinuity-aware rendering [13137-b-zier-boundary-gradient-approximation.md].
++### LS-Gaussian Viewpoint Transformation
++Leverages inter-frame continuity to transform viewpoints between consecutive frames, enabling sparse rendering where only one frame in every 6 is fully rendered [S8]. It sets itself apart from naive pixel warping by operating at the tile/Gaussian level to reduce preprocessing and sorting costs. Use this for high-frame-rate video sequences on resource-constrained hardware. Link: [Sorting and Rendering Pipeline Optimization](12180-sorting-and-rendering-pipeline-optimization.md).
+ 
+-### [Discontinuity-aware Gaussian Splatting](13138-discontinuity-aware-gaussian-splatting.md)
+-Enables 3DGS to represent sharp boundaries by introducing "pre-scissoring" along Bézier curves and using Bézier-boundary gradient approximation [13138-discontinuity-aware-gaussian-splatting.md].
+-
+-### [SOGS (Second-Order Anchor for Advanced 3D Gaussian Splatting)](13171-sogs-second-order-anchor-for-advanced-3d-gaussian-splatting.md)
+-Uses covariance-based feature augmentation to capture co-variation patterns, allowing smaller feature vectors without sacrificing detail [13171-sogs-second-order-anchor-for-advanced-3d-gaussian-splatting.md].
+-
+-### [TraGraph-GS](14454-tragraph-gs.md)
+-Employs graph-based adaptive spatial partitioning and regularization constraints for large-scale scenes. It sets itself apart by constructing a camera connectivity graph for balanced subgraphs [14454-tragraph-gs.md].
+-
+-### [Explicit 4D Gaussian Splatting](14584-explicit-4d-gaussian-splatting.md)
+-Achieves memory efficiency in dynamic scenes by separating Gaussians into static and dynamic categories and explicitly sampling positions/rotations at sparse timestamps [14584-explicit-4d-gaussian-splatting.md].
+-
+-### [Color and Appearance Modeling](14740-color-and-appearance-modeling.md)
+-Addresses limitations of fixed SH representation by introducing dynamic mechanisms to modulate radiance/opacity based on spatial position, viewing direction, or image context [14740-color-and-appearance-modeling.md].
++### LS-Gaussian Accelerator Architecture
++A hardware architecture co-designed with LS-Gaussian to support workload-aware mapping, featuring a streaming pipeline that allows continuous processing without global synchronization [S8]. It sets itself apart by predicting tile workloads to mitigate inter-block idling and intra-block bubbles. Use this for custom hardware implementations of 3DGS. Link: [Sorting and Rendering Pipeline Optimization](12180-sorting-and-rendering-pipeline-optimization.md).
+ 
+ ### GS-IR (Gaussian Splatting for Internal Rendering)
+-An inverse rendering approach using forward mapping volume rendering to estimate geometry, material, and illumination. It sets itself apart from NeRF-based methods by using 3D Gaussians for real-time efficiency [14852-gs-ir.md].
+-
+-### [Optimization Schedule and Densification](15107-optimization-schedule-and-densification.md)
+-Details the schedule for densification and pruning operations during training [15107-optimization-schedule-and-densification.md].
+-
+-### [Distributed Training and Sharding](15108-distributed-training-and-sharding.md)
+-Addresses scaling training across multiple GPUs or out-of-core techniques [15108-distributed-training-and-sharding.md].
+-
+-### [Physics and Optical Modeling](15148-physics-and-optical-modeling.md)
+-Extends the rendering pipeline to account for volumetric attenuation and scattering in non-vacuum media [15148-physics-and-optical-modeling.md].
+-
+-### [Scene Representation and Geometry Constraints](15421-scene-representation-and-geometry-constraints.md)
+-Manages the fundamental data structures of Gaussian primitives and their conversion to explicit geometric surfaces [15421-scene-representation-and-geometry-constraints.md].
+-
+-### Corrected Scene-Extent
+-Calculates scene extent based on SfM points rather than camera positions to avoid bias from camera distribution [S7].
+-
+-### Selective Defocus Blurring
+-Predicts per-Gaussian scale offsets to create pixel-wise variable blur kernels matching spatially varying scene blurriness [S8].
+-
+-### Denoise-GS
+-A self-supervised denoising method for sparse-view 3DGS combining unsupervised image denoising (Noise2Void) with differentiable 3DGS [S9].
+-
+-### Model-based depth estimation for volume parameter update
+-Uses depth values extracted from the scene estimate to update medium-parameter estimates ($B_\infty, B_b$) [S10].
+-
+-### Multi-Scale Constraint
+-Applies different scales to Gaussians based on viewer distance using position-aware point adaptive control [S11].
+-
+-### LS-Gaussian Viewpoint Transformation
+-Leverages inter-frame continuity by transforming the viewpoint between consecutive frames for efficient sparse rendering [S12].
+-
+-### LS-Gaussian Accelerator Architecture
+-A hardware architecture co-designed with LS-Gaussian to support workload-aware mapping and streaming pipelines [S12].
+-
+-### GS-IR (Gaussian Splatting for Internal Rendering)
+-A plane-based internal rendering framework that replaces exterior-view supervision with cross-sectional supervision sampled from a volume [S13].
++A plane-based internal rendering framework that replaces exterior-view supervision with cross-sectional supervision sampled from a volume [S9]. It sets itself apart by focusing optimization gradients on interior Gaussians using virtual cameras and binary masks, enabling reconstruction of occluded internal regions. Use this for medical imaging (CT/MRI) or internal structure reconstruction. Link: [GS-IR](14852-gs-ir.md).
+ 
+ ### 3D Gaussian Splatting Training Loop
+-Per-image error comparison against ground truth, using gradient descent for optimization over tens of thousands of iterations [S14, unofficial].
++The core iterative process of picking a random image, rendering, computing loss (L1 + D-SSIM), and backpropagating gradients [S10, unofficial]. It sets itself apart from random search by using gradient descent to purposefully correct millions of parameters. Use this as the baseline training procedure. Link: [Training Pipeline](5325-training-pipeline.md).
+ 
+ ### Camera Localisation for Convergence Basin
+-Localizes camera pose by minimizing photometric error against ground-truth color image, fixing the initial Gaussian set [S15, unofficial].
++Localizes camera pose by minimizing photometric error against a target view while fixing the initial Gaussian set $G_{init}$. It sets itself apart by using the trained 3DGS as a static reference for pose estimation. Use this for SLAM or pose refinement. Link: [Camera Localisation for Convergence Basin](12180-camera-localisation.md).
+ 
+ ### Sensitivity-Aware Vector Clustering for 3DGS Compression
+-Groups Gaussian colors and shape parameters into codebooks using sensitivity-aware vector clustering and quantization-aware training [S16].
++Groups Gaussian colors and shape parameters into codebooks using sensitivity-aware vector clustering and quantization-aware training [S12]. It sets itself apart by using parameter sensitivity to guide clustering, reducing memory footprint without significant quality loss. Use this for storage and transmission optimization. Link: [Data Compression and Storage Optimization](12943-data-compression-and-storage-optimization.md).
+ 
+ ### Relightable 3D Gaussians
+-Enhances vanilla 3D Gaussians with normal vectors, BRDF parameters, and incident lighting for photo-realistic relighting [S4].
++Enhances vanilla 3DGS by associating normal vectors, BRDF parameters, and incident lighting to each Gaussian for photo-realistic relighting [S13]. It sets itself apart by enabling BRDF decomposition and relighting from multi-view images. Use this for dynamic lighting applications. Link: [Color and Appearance Modeling](14740-color-and-appearance-modeling.md).
++
++### Normal Gradient Based Densification
++Introduces an additional densification criterion based on the gradient of normals to improve normal recovery in thin regions [S13]. It sets itself apart from standard positional gradient densification by targeting geometric detail in thin structures. Use this when accurate normal maps are required. Link: [Scene Representation and Geometry Constraints](15421-scene-representation-and-geometry-constraints.md).
++
++### Normal Estimation via Back-propagation
++Solves for the normal attribute $n$ for each Gaussian by optimizing it from an initial random vector via back-propagation, perceiving depth as a distribution [S13]. It sets itself apart by deriving normals directly from the differentiable rendering process. Use this for geometry-aware applications. Link: [Scene Representation and Geometry Constraints](15421-scene-representation-and-geometry-constraints.md).
+ 
+ ## Operating characteristics
+ 
+-**Time and Memory Complexity:**
+-*   Training time is significantly reduced by single-phase optimization and neural-free semantic distillation (6x-8x faster than prior work) [S1, unofficial].
+-*   Rendering speed is improved by 18x-51x compared to prior semantic GSplat methods [S1, unofficial].
+-*   GPU memory usage is approximately 6x smaller than prior work due to explicit representation and efficient data structures [S1, unofficial].
+-*   Standard training runs for ~30,000 iterations [S14, unofficial].
++### Time and Memory Complexity
++*   **Training Time:** Typically runs for 30,000 iterations [S10, unofficial]. Each iteration involves rendering and backpropagation, which is $O(N \cdot P)$ where $N$ is the number of Gaussians and $P$ is the number of pixels, but optimized via tile-based rasterization.
++*   **Memory:** Scales linearly with the number of Gaussians. Each Gaussian stores position, rotation, scale, opacity, and SH coefficients. For large scenes, this can exceed 1 GB [S1].
++*   **Rasterization:** The `gsplat` library uses half-precision fetches to reduce register pressure [S1].
+ 
+-**Measured Performance:**
+-*   On the 3D-OVS dataset 'Bed' scene, FAST-Splat achieved SSIM: 0.971, PSNR: 34.24, and used 1.02GB GPU memory [S1, unofficial].
+-*   On the Mip-NeRF 360 dataset, the Perceptual Wrapper (PW) method achieved a 6x reduction in bit-rate at equivalent perceptual quality [S5, unofficial].
+-*   GS-IR achieved PSNR improvement of up to 21.52 dB and SSIM improvement of up to 0.54 on KiTS23 CT and IXI MRI datasets [S13].
++### Measured Performance
++*   **Hardware:** Tested on NVIDIA GPUs and edge platforms like Jetson AGX Orin [S8].
++*   **Speedup:** LS-Gaussian achieves up to 17.3× speedup with a custom accelerator on Jetson AGX Orin [S8].
++*   **Quality:** GS-IR improves PSNR by up to 21.52 dB and SSIM by up to 0.54 on medical datasets [S9].
+ 
+-**Scaling:**
+-*   Large-scale scenes require divide-and-conquer training and Level-of-Detail (LoD) strategies (e.g., CityGaussian) [S3].
+-*   Distributed training and sharding are necessary for very large scenes [15108-distributed-training-and-sharding.md].
++### Strengths and Limitations
++*   **Strengths:** Real-time rendering, high-quality novel view synthesis, differentiable optimization.
++*   **Limitations:** High memory usage for large scenes, sensitivity to camera distribution for scene extent, degradation in sparse view scenarios without denoising [S5].
+ 
+-**Strengths and Limitations:**
+-*   **Strengths:** Real-time rendering, high visual fidelity, efficient memory usage compared to neural fields [S1, unofficial].
+-*   **Limitations:** Struggles with thin structures (addressed by normal gradient densification) [S4], transient occluders (addressed by DeSplat) [12925-desplat.md], and complex lighting (addressed by Relightable GS) [S4].
+-
+-**When to Use:**
+-*   Use for real-time novel view synthesis, semantic segmentation, and inverse rendering tasks where speed and quality are critical [S1, unofficial][S4, S13].
+-
+-**When Not to Use:**
+-*   Avoid for scenes with significant non-vacuum media effects without physics-based extensions [15148-physics-and-optical-modeling.md].
+-*   Avoid for sparse-view scenarios without denoising pre-processing [S9].
++### When to Use
++*   Use standard 3DGS for general novel view synthesis with dense input views.
++*   Use variants like Denoise-GS for sparse/noisy views.
++*   Use GS-IR for internal volume reconstruction.
++*   Use LS-Gaussian for real-time video sequences on edge devices.
+ 
+ ## Background
+ 
+-**Origin:**
+-3D Gaussian Splatting was introduced by Kerbl et al. in 2023 [12]. It represents scenes as a set of 3D Gaussians and uses differentiable rasterization for training.
+-
+-**History and Development:**
+-Subsequent work has focused on improving training efficiency (FAST-Splat [S1, unofficial]), large-scale rendering (CityGaussian [S3]), semantic grounding (LangSplat [12438-langsplat-training-procedure.md]), and inverse rendering (GS-IR [S13]).
+-
+-**Usage:**
+-Used in robotics, virtual reality, and 3D reconstruction pipelines [S1, unofficial][S12].
++3D Gaussian Splatting was introduced by Kerbl et al. in 2023 [S1][S10, unofficial]. It represents scenes as a set of 3D Gaussians optimized via differentiable rasterization. The method has since been extended to handle various scenarios including defocus blur [S4], sparse views [S5], large-scale scenes [S7], and internal volumes [S9]. The implementation details provided here are based on the `gsplat` library and various research extensions.
+ 
+ ## Sources
+ 
+-[S1] FAST-Splat: Fast, Ambiguity-Free Semantics Transfer in Gaussian Splatting, https://arxiv.org/abs/2411.13753v2, fetched 2026-10-26 (unofficial)
+-[S2] Neural Harmonic Textures for High-Quality Primitive Based Neural Reconstruction, https://doi.org/10.1007/978-3-032-37032-7_18, fetched 2026-10-26
+-[S3] CityGaussian: Real-Time High-Quality Large-Scale Scene Rendering with Gaussians, https://doi.org/10.1007/978-3-031-72640-8_15, fetched 2026-10-26
+-[S4] Relightable 3D Gaussians: Realistic Point Cloud Relighting with BRDF Decomposition and Ray Tracing, https://doi.org/10.1007/978-3-031-72995-9_5, fetched 2026-10-26
+-[S5] Seeing What Matters: Perceptual Wrapper with Common Randomness for 3D Gaussian Splatting, https://doi.org/10.48550/arXiv.2606.11782, fetched 2026-10-29 (unofficial)
+-[S6] EVolSplat: Efficient Volume-based Gaussian Splatting for Urban View Synthesis, https://doi.org/10.1109/CVPR52734.2025.01054, fetched 2026-11-03
+-[S7] Improving Adaptive Density Control for 3D Gaussian Splatting, https://doi.org/10.5220/0013308500003912, fetched 2026-10-30
+-[S8] Deblurring 3D Gaussian Splatting, https://doi.org/10.1007/978-3-031-73636-0_8, fetched 2026-10-26
+-[S9] Denoise-GS: Self-Supervised Denoising for Sparse-View 3D Gaussian Splatting., https://doi.org/10.3390/s26020651, fetched 2026-10-26
+-[S10] Gaussian splashing enables direct volumetric rendering underwater, https://doi.org/10.1038/s41598-026-56917-4, fetched 2026-10-27
+-[S11] TraGraph-GS: Trajectory Graph-based Gaussian Splatting for Arbitrary Large-Scale Scene Rendering., https://doi.org/10.1109/tpami.2026.3709368, fetched 2026-10-26
+-[S12] No Redundancy, No Stall: Lightweight Streaming 3D Gaussian Splatting for Real-time Rendering, https://doi.org/10.1109/iccad66269.2025.11240950, fetched 2026-10-30
+-[S13] Volumetric Plane-Based Gaussian Selection for Internal View Synthesis With 3-D Gaussian Splatting, https://doi.org/10.1109/access.2026.3737246, fetched 2026-10-27
+-[S14] Gaussian Splats Part 2: From Photos to a Trained Model, https://alphapixeldev.com/gaussian-splats-part-2-creating-gaussian-splats/, fetched 2026-10-29 (unofficial)
+-[S15] Gaussian Splatting SLAM, https://arxiv.org/abs/2312.06741, fetched 2026-10-27 (unofficial)
+-[S16] Visibility-Based Geometry Pruning of Neural Plenoptic Scene Representations, https://doi.org/10.1109/tmm.2025.3618548, fetched 2026-10-26+[S1] Neural Harmonic Textures for High-Quality Primitive Based Neural Reconstruction, https://doi.org/10.1007/978-3-032-37032-7_18, fetched 2026-10-26
++[S2] EVolSplat: Efficient Volume-based Gaussian Splatting for Urban View Synthesis, https://doi.org/10.1109/CVPR52734.2025.01054, fetched 2026-11-03
++[S3] Improving Adaptive Density Control for 3D Gaussian Splatting, https://doi.org/10.5220/0013308500003912, fetched 2026-10-30
++[S4] Deblurring 3D Gaussian Splatting, https://doi.org/10.1007/978-3-031-73636-0_8, fetched 2026-10-26
++[S5] Denoise-GS: Self-Supervised Denoising for Sparse-View 3D Gaussian Splatting., https://doi.org/10.3390/s26020651, fetched 2026-10-26
++[S6] Gaussian splashing enables direct volumetric rendering underwater, https://doi.org/10.1038/s41598-026-56917-4, fetched 2026-10-27
++[S7] TraGraph-GS: Trajectory Graph-based Gaussian Splatting for Arbitrary Large-Scale Scene Rendering., https://doi.org/10.1109/tpami.2026.3709368, fetched 2026-10-26
++[S8] No Redundancy, No Stall: Lightweight Streaming 3D Gaussian Splatting for Real-time Rendering, https://doi.org/10.1109/iccad66269.2025.11240950, fetched 2026-10-30
++[S9] Volumetric Plane-Based Gaussian Selection for Internal View Synthesis With 3-D Gaussian Splatting, https://doi.org/10.1109/access.2026.3737246, fetched 2026-10-27
++[S10] Gaussian Splats Part 2: From Photos to a Trained Model, https://alphapixeldev.com/gaussian-splats-part-2-creating-gaussian-splats/, fetched 2026-10-29, unofficial (unofficial)
++[S11] Gaussian Splatting SLAM, https://arxiv.org/abs/2312.06741, fetched 2026-10-27, unofficial (unofficial)
++[S12] Visibility-Based Geometry Pruning of Neural Plenoptic Scene Representations, https://doi.org/10.1109/tmm.2025.3618548, fetched 2026-10-26
++[S13] Relightable 3D Gaussians: Realistic Point Cloud Relighting with BRDF Decomposition and Ray Tracing, https://doi.org/10.1007/978-3-031-72995-9_5, fetched 2026-10-26

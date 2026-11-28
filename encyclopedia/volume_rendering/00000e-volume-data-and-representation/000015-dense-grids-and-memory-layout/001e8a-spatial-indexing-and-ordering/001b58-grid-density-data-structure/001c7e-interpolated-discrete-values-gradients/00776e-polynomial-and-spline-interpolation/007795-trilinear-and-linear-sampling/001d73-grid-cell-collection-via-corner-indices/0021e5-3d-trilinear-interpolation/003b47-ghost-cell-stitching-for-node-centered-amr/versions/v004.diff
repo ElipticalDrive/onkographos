@@ -1,0 +1,317 @@
+--- v003.md
++++ v004.md
+@@ -1,171 +1,163 @@
+ # Ghost Cell Stitching for Node-Centered AMR
+ 
+-Also called: Ghost Cell Generation for AMR, Ghost Cell Stitching, Ghost cell generation, Ghost data generation
++Also called: Ghost Cell Stitching
+ 
+ ## Overview
+-Ghost Cell Stitching is a method for handling data continuity between different Adaptive Mesh Refinement (AMR) levels in node-centered grids by introducing ghost cells at level boundaries [S1, unofficial]. It solves the problem of rendering artifacts (such as cracks or "ghosting") that occur when isosurface extraction or volume rendering requires access to neighboring cells that reside on different processing elements or different refinement levels [S2]. Unlike methods that redistribute the entire dataset, this approach uses simulation-provided abutment information to selectively exchange only the necessary boundary data, ensuring that stitch cells can be generated consistently across coarse-fine interfaces [S2]. It builds on [3D Trilinear Interpolation](2613-3d-trilinear-interpolation.md) [G].
++Ghost Cell Stitching is a technique for handling Adaptive Mesh Refinement (AMR) data in visualization frameworks by marking coarse cells that are refined at a lower level as "ghost" cells [S1, S3, unofficial]. This method allows structured grids to retain their native form, enabling proper trilinear interpolation at patch boundaries and hanging nodes without converting the data into an unstructured grid [S1, S3, unofficial]. It is specifically designed for node-centered AMR data, where both sides of a level boundary form structured node-centered grids that naturally lend to trilinear interpolation [S2, unofficial]. By preserving the structured layout, it avoids the memory overhead and interpolation artifacts associated with removing refined cells or creating unstructured meshes [S1, S3, unofficial].
+ 
+ ## How it works
+-The method generates ghost cells to provide surrounding data for stitch cell generation, ensuring that the values at the vertices of stitch cells are consistent across AMR level boundaries [S2]. It relies on the fact that for node-centered AMR, both sides of a level boundary form structured node-centered grids that naturally lend to trilinear interpolation [S1, unofficial].
++### Inputs and Outputs
++**Inputs:**
++- AMR dataset consisting of multiple patches (boxes) at various refinement levels.
++- Simulation-derived abutment information describing how boxes connect [S4].
++- Scalar field values associated with grid nodes or cells.
+ 
+-### Inputs and Outputs
+-*   **Inputs**:
+-    *   AMR dataset consisting of boxes at various refinement levels [S2].
+-    *   `BoxAbutment` data structure: For each box $B$, this lists the boxes $B^*_0, B^*_1, \dots, B^*_{n-1}$ that $B$ abuts with and the locations of those abutments. This includes abutment for boxes at the same refinement level and nesting for boxes at different refinement levels [S2].
+-    *   `BoxToProcessingElement` map: A map indicating which processing element (PE) each box resides on [S2].
+-    *   Grid data values for each box [S2].
+-*   **Outputs**:
+-    *   Extended boxes where boundary cells are duplicated as ghost cells [S1, unofficial].
+-    *   `Ghost Flag Array`: An array specifying for each grid cell whether it is a ghost cell. If flagged, the type is also specified (boundary ghost or invalidation ghost) [S2].
++**Outputs:**
++- A structured grid representation where boundary cells are augmented with "ghost" cells.
++- A ghost flag array marking each cell as non-ghost, boundary ghost, or invalidation ghost [S4].
++- Stitch cells (in the context of isosurface extraction) that bridge coarse and fine levels [S4].
+ 
+ ### Data Structures
+-*   **BoxAbutment[B]**: A list of tuples or objects describing abutting boxes. Each entry contains the reference to the abutting box $B^*$ and the specific location/offset of the abutment region on box $B$ [S2].
+-*   **Ghost Flag Array**: A boolean or integer array aligned with the grid cells. It indicates if a cell is a ghost. If true, it distinguishes between:
+-    *   *Boundary Ghost*: Cells added to support stitching at domain or level boundaries [S2].
+-    *   *Invalidation Ghost*: Cells marked invalid because a finer grid provides a more accurate representation [S2].
+-*   **Messages**: Data structures used during the exchange phase, containing destination box ID, the data values, and the location of that data on the destination patch [S2].
++1.  **Ghost Flag Array**: An array of flags, one per grid cell, specifying whether the cell is a ghost cell. If flagged as ghost, the flag also specifies the type:
++    -   **Boundary Ghost**: Cells added to provide surrounding data for interpolation or stitch cell generation [S4].
++    -   **Invalidation Ghost**: Cells marked as invalid because a more accurate data representation (finer level) is available [S4].
++2.  **BoxAbutment**: A data structure where `BoxAbutment[B]` lists the boxes $B_0, B_1, \dots, B_{n-1}$ that box $B$ abuts with, along with the locations of those abutments. This includes abutment for boxes at the same refinement level and nesting for boxes at different refinement levels [S4].
++3.  **BoxToProcessingElement**: A map indicating which processing element (PE) each box resides on, used for parallel communication [S4].
++
++### Steps
++The method involves generating ghost data to fill boundaries between patches and levels, followed by visualization processing, and finally cleanup.
++
++1.  **Initialize (Parallel Setup)**:
++    -   Each processing element identifies which boxes it has loaded.
++    -   Processing elements exchange information to create the `BoxToProcessingElement` map [S4].
++
++2.  **Pack (Message Construction)**:
++    -   Every processing element iterates over the boxes it owns.
++    -   For each box $B$, determine its abutting patches $B_i$ using `BoxAbutment[B]`.
++    -   For each $B_i$, extract one layer of cells in the abutment region.
++    -   Convert this layer into a message containing the destination box, the data, and the location of that data on the destination patch.
++    -   Append this message to the overall message buffer for the processing element designated by `BoxToProcessingElement[B_i]` [S4].
++
++3.  **Exchange (Communication)**:
++    -   Each processing element sends its messages to others.
++    -   This is typically implemented using an MPI `Alltoallv` command [S4].
++
++4.  **Unpack (Ghost Cell Population)**:
++    -   Every processing element extends its boxes with ghost cells using the incoming messages.
++    -   The values in these ghost cells must satisfy specific conditions to ensure consistent stitch cell generation [S4]:
++        -   **Domain Boundaries**: If a ghost cell coincides with the boundary of the domain, no ghost data is needed [S4].
++        -   **Adjacent Box Values**: If a ghost cell coincides with the cell of an adjacent box in the same level, the ghost cell is filled with the value from that adjacent box [S4].
++        -   **Coarse Parent Values**: If no neighboring box overlapping the ghost cell exists in the same level, the ghost cell is filled with the value from the cell it refines in the parent level ($i-1$). Since a level is always completely contained in its parent level, such a cell always exists [S4].
++        -   **Level Dependency**: When generating ghost data for a box in level $i$, only data from level $i$ and parent level $i-1$ are considered. Data from finer levels ($>i$) is ignored [S4].
++    -   A single layer of ghost cells around a box is always sufficient to determine appropriate stitch cell vertex values [S4].
++
++5.  **Visualization Processing**:
++    -   Most algorithms operate identically on ghost and non-ghost cells, ignoring the ghost markings during processing [S1, S3, unofficial].
++    -   The ghost flag array is used by visualization algorithms (e.g., Marching Cubes) to blank out ghost cells, preventing artifacts like cracked isosurfaces at hanging nodes [S1, unofficial][S4].
++
++6.  **Cleanup**:
++    -   After all algorithms have been applied, a module walks the data set and removes all cells or geometry resulting from a ghost cell [S1, S3, unofficial].
++
++### Pseudocode
++```python
++def generate_ghost_cells(boxes, BoxAbutment, BoxToProcessingElement, my_pe):
++    """
++    Generates ghost cells for AMR data in a parallel environment.
++    """
++    # Phase 1: Initialize
++    # BoxToProcessingElement is assumed to be pre-computed or exchanged
++    
++    # Phase 2: Pack
++    messages = {} # Map: dest_pe -> list of messages
++    
++    for box in boxes_owned_by(my_pe):
++        abutting_patches = BoxAbutment[box]
++        for patch in abutting_patches:
++            dest_pe = BoxToProcessingElement[patch]
++            if dest_pe not in messages:
++                messages[dest_pe] = []
++            
++            # Extract one layer of cells in the abutment region
++            ghost_data = extract_boundary_layer(box, patch)
++            
++            # Create message
++            msg = {
++                'dest_box': patch,
++                'data': ghost_data,
++                'location': get_abutment_location(box, patch)
++            }
++            messages[dest_pe].append(msg)
++
++    # Phase 3: Exchange
++    # In MPI, this would be Alltoallv. Here we simulate the receipt.
++    received_messages = exchange_alltoallv(messages)
++
++    # Phase 4: Unpack
++    for box in boxes_owned_by(my_pe):
++        for msg in received_messages.get(my_pe, []):
++            if msg['dest_box'] == box:
++                fill_ghost_cells(box, msg['data'], msg['location'])
++
++def fill_ghost_cells(box, data, location):
++    """
++    Fills ghost cells in a box based on specific rules.
++    """
++    for cell in location:
++        if is_domain_boundary(cell):
++            continue # No ghost data needed for domain boundaries
++        
++        if is_adjacent_box_cell(cell):
++            # Fill with value from adjacent box
++            value = get_value_from_adjacent_box(cell)
++        else:
++            # Fill with value from parent level
++            parent_cell = get_parent_cell(cell)
++            value = get_value(parent_cell)
++        
++        set_value(cell, value)
++        mark_as_ghost(cell, type='boundary_ghost')
++
++def process_visualization(grid, ghost_flags):
++    """
++    Runs visualization algorithms, ignoring ghost cells.
++    """
++    for cell in grid:
++        if ghost_flags[cell] == 'non_ghost':
++            process_cell(cell)
++        # Ghost cells are processed identically but results are ignored/blanked
++
++def cleanup(grid, ghost_flags):
++    """
++    Removes ghost cells after processing.
++    """
++    for cell in grid:
++        if ghost_flags[cell] != 'non_ghost':
++            remove_cell(cell)
++```
+ 
+ ### Parameters
+-*   **Ghost Cell Count**: A single layer of ghost cells around a box is always sufficient to determine appropriate stitch cell vertex values [S2].
+-*   **Level Dependency**: When generating ghost data for a box in level $i$, only data in the same level $i$ and the parent level $i-1$ are considered. Data from finer levels ($> i$) is ignored during this specific generation step [S2].
+-
+-### Steps
+-The ghost cell generation process involves four phases: Initialize, Pack, Exchange, and Unpack [S2].
+-
+-1.  **Initialize**:
+-    *   Each processing element (PE) identifies which boxes it has loaded [S2].
+-    *   PEs exchange information to create the `BoxToProcessingElement` map, stating which PE each box resides on [S2].
+-
+-2.  **Pack**:
+-    *   Every PE iterates over the boxes $B$ it owns [S2].
+-    *   For each box $B$, determine its abutting patches $B_i$ using `BoxAbutment[B]` [S2].
+-    *   For each abutting patch $B_i$, identify the one layer of cells in the abutment region [S2].
+-    *   Convert these cells into a message [S2].
+-    *   Append this message to the overall message buffer designated for the PE identified by `BoxToProcessingElement[B_i]` [S2].
+-
+-3.  **Exchange**:
+-    *   Each PE sends its accumulated messages to the other PEs [S2].
+-    *   This is typically implemented using an MPI `Alltoallv` command, allowing the MPI implementation to optimize communication based on the interconnect [S2].
+-
+-4.  **Unpack**:
+-    *   Every PE receives messages from other PEs [S2].
+-    *   For each incoming message, the PE extends its local boxes with ghost cells [S2].
+-    *   The data for these ghost cells is populated from the incoming messages [S2].
+-
+-### Ghost Cell Value Assignment Rules
+-When filling the ghost cells during the Unpack phase (or if generating locally without exchange), the following rules determine the values [S2]:
+-
+-1.  **Domain Boundaries**: If a ghost cell coincides with the boundary of the domain, there is no need to connect to other grids. No ghost data is needed or generated for these edges [S2].
+-2.  **Adjacent Box Values**: If a ghost cell coincides with the cell of an adjacent box (in the same level), the ghost cell must be filled with the value from that adjacent box [S2].
+-3.  **Coarse Parent Values**: If no neighboring box overlapping the ghost cell exists in the same level, the stitch cell (and thus the ghost cell) must be filled with the value from the cell it refines in the parent level ($i-1$). Since a level is always completely contained in its parent level, such a cell always exists. This ensures that several cells in the fine box (corresponding to the refinement ratio) are filled with the coarse grid value, simplifying look-up for connecting coarse grid values in stitch cell generation [S2].
+-4.  **Invalidation**: If a cell is flagged as an invalidation ghost (due to finer grid refinement), it is marked in the `Ghost Flag Array`. Visualization algorithms use this flag to blank out these cells, operating on the original rectilinear grids [S2].
+-
+-### Pseudocode
+-
+-```python
+-def generate_ghost_cells(boxes, box_abutment, box_to_pe, local_pe_id):
+-    """
+-    Generates ghost cells for AMR data using the Pack-Exchange-Unpack pattern.
+-    
+-    Args:
+-        boxes: Dict mapping box_id -> Box object. Box object has:
+-               - data: 3D array of values
+-               - ghost_flag_array: array aligned with data
+-        box_abutment: Dict mapping box_id -> List of AbutmentInfo.
+-                      AbutmentInfo has:
+-                      - neighbor_box_id: int
+-                      - abutment_region_indices: list of local cell indices
+-                      - target_indices: list of indices in the neighbor's ghost layer
+-        box_to_pe: Dict mapping box_id -> int (PE ID)
+-        local_pe_id: int, the ID of the current processing element.
+-        
+-    Returns:
+-        Updated boxes with ghost cells added and flagged.
+-    """
+-    
+-    # Phase 1: Initialize
+-    # box_to_pe is populated via collective communication (e.g., MPI_Allgather)
+-    # to map every box_id to its owning PE.
+-    
+-    # Phase 2: Pack
+-    # messages[dest_pe_id] stores lists of data to send to each destination PE
+-    messages = {pe_id: [] for pe_id in set(box_to_pe.values())}
+-    
+-    for box_id, box in boxes.items():
+-        # Only process boxes owned by this PE
+-        if box_to_pe[box_id] != local_pe_id:
+-            continue
+-            
+-        # Get abutting patches for this box
+-        abutments = box_abutment.get(box_id, [])
+-        for abut in abutments:
+-            neighbor_box_id = abut.neighbor_box_id
+-            dest_pe_id = box_to_pe[neighbor_box_id]
+-            
+-            # Identify the one layer of cells in the abutment region
+-            region_indices = abut.abutment_region_indices
+-            values = [box.data[i] for i in region_indices]
+-            
+-            msg = {
+-                'source_box_id': box_id,
+-                'values': values,
+-                'target_box_id': neighbor_box_id,
+-                'target_indices': abut.target_indices
+-            }
+-            messages[dest_pe_id].append(msg)
+-            
+-    # Phase 3: Exchange
+-    # In MPI, this is MPI_Alltoallv.
+-    # We simulate the collective exchange by gathering messages destined for local_pe_id.
+-    received_messages = []
+-    for dest_pe, msg_list in messages.items():
+-        if dest_pe == local_pe_id:
+-            received_messages.extend(msg_list)
+-            
+-    # Phase 4: Unpack
+-    for msg in received_messages:
+-        target_box_id = msg['target_box_id']
+-        target_indices = msg['target_indices']
+-        values = msg['values']
+-        
+-        if target_box_id in boxes:
+-            target_box = boxes[target_box_id]
+-            # Extend box data structure to accommodate ghost cells if necessary
+-            # Set values in ghost cells from incoming message
+-            for idx, val in zip(target_indices, values):
+-                target_box.data[idx] = val
+-            # Mark these cells as ghost cells in the Ghost Flag Array
+-            for idx in target_indices:
+-                target_box.ghost_flag_array[idx] = 'boundary_ghost'
+-                
+-    return boxes
+-```
++-   **Ghost Cell Count**: A single layer of ghost cells around a box is always sufficient [S4].
++-   **BoxAbutment**: Requires simulation-derived abutment information [S4].
+ 
+ ### Edge Cases and Pitfalls
+-*   **Domain Boundaries**: If a ghost cell coincides with the boundary of the domain, there is no need to connect to other grids. The algorithm should not attempt to fetch data from non-existent neighbors [S2].
+-*   **Adjacent Box Values**: If a ghost cell coincides with the cell of an adjacent box (in the same level), the ghost cell must be filled with the value from the adjacent box. This ensures continuity across box boundaries within the same level [S2].
+-*   **Coarse Parent Values**: If no neighboring box overlapping the ghost cell exists in the same level, the value must be taken from the parent level ($i-1$). This is guaranteed to exist because a level is always completely contained in its parent level [S2].
+-*   **Level Dependency**: When generating ghost data for a box in level $i$, only data from level $i$ and level $i-1$ are considered. Data from finer levels ($> i$) is ignored because it will be handled when generating stitch cells for the finer boxes themselves [S2].
+-*   **Precision**: The method relies on the structured nature of node-centered grids. For cell-centered AMR, stitching requires unstructured mesh geometry (tets or hexes), making this method inapplicable without significant modification [S1, unofficial].
++-   **Hanging Nodes**: Without ghost cells, hanging nodes at patch boundaries with different refinement levels cause incorrect interpolation and cracked isosurfaces in algorithms like Marching Cubes [S1, S3, unofficial].
++-   **Memory Footprint**: Removing ghost cells before applying visualization algorithms creates an unstructured grid with a memory footprint an order of magnitude larger [S1, S3, unofficial].
++-   **Domain Boundaries**: Ghost cells coinciding with the domain boundary do not require data exchange [S4].
++-   **Parallel Communication**: The approach requires collective communication (e.g., MPI Alltoallv) and cannot work in an out-of-core setting [S4].
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: The complexity is dominated by the communication phase. The Pack and Unpack phases are linear with respect to the number of boundary cells. The Exchange phase uses MPI `Alltoallv`, which is efficient but requires collective communication [S2].
+-*   **Memory Complexity**: Requires storage for the `BoxAbutment` structure and the `Ghost Flag Array`. The ghost cells themselves add a small overhead (one layer of cells per box boundary) [S2].
+-*   **Measured Performance**: This approach incurs lower costs than methods that redistribute the entire dataset (like D3) because it only exchanges necessary boundary data [S2].
+-*   **Strengths**:
+-    *   Efficient for in-core processing.
+-    *   Leverages existing simulation abutment information.
+-    *   Ensures crack-free isosurfaces by providing consistent stitch cell vertex values [S2].
+-*   **Limitations**:
+-    *   Requires collective communication, which can be a bottleneck in large-scale parallel systems.
+-    *   Cannot work in an out-of-core setting due to the requirement for collective communication and the `BoxAbutment` data structure [S2].
+-    *   Specific to node-centered AMR; cell-centered AMR requires different handling [S1, unofficial].
++-   **Time Complexity**: The ghost generation phase involves communication proportional to the surface area of the patches. The visualization phase operates in linear time with respect to the number of cells, as most algorithms ignore ghost markings [S1, S3, unofficial].
++-   **Memory Complexity**: Maintains the native structured grid memory footprint. Avoids the order-of-magnitude increase associated with unstructured grids [S1, S3, unofficial].
++-   **Strengths**: Preserves structured grid efficiency; enables correct trilinear interpolation at hanging nodes; avoids cracked isosurfaces; compatible with existing visualization modules that ignore ghost flags [S1, S3, unofficial][S4].
++-   **Limitations**: Requires collective communication (not suitable for out-of-core); depends on simulation code providing abutment information; only works for node-centered AMR where boundaries form structured grids [S2, unofficial][S4].
++-   **When to Use**: Node-centered AMR data where crack-free isosurfaces or correct interpolation at patch boundaries is required, and simulation data includes abutment information [S1, unofficial][S4].
++-   **When Not to Use**: Cell-centered AMR (requires unstructured mesh geometry for stitching) [S2, unofficial]; out-of-core processing [S4]; when abutment information is unavailable [S4].
+ 
+ ## Background
+-*   **Origin**: The method is based on previous work using dual grids and procedurally generated stitch cells [S2]. It was developed to address artifacts in parallel processing boundaries in AMR isosurface extraction [S2].
+-*   **History**: The approach was described in the context of efficient parallel extraction of crack-free isosurfaces from AMR data [S2]. It contrasts with earlier methods like D3, which redistributed the entire dataset, and Isenburg et al., which worked in an out-of-core setting for block-decomposed rectilinear grids [S2].
+-*   **Usage**: It is used in visualization tools like VisIt to handle ghost data at boundaries and due to invalidation by finer grids [S2].
++Ghost Cell Stitching was developed as part of the VisIt visualization framework to handle AMR data efficiently [S1, S3, unofficial]. It addresses the challenge of interpolating data at hanging nodes in AMR grids, which previously led to artifacts like cracked isosurfaces in Marching Cubes implementations [S1, S3, unofficial]. The method leverages the fact that for node-centered AMR, both sides of a level boundary form structured node-centered grids, allowing trilinear interpolation to work correctly when ghost cells are introduced [S2, unofficial]. The parallel implementation, described in [S4], uses abutment information from simulation codes to re-create ghost data, incurring lower costs than redistributing the entire dataset [S4].
+ 
+ ## Sources
+-[S1] CPU volume rendering of adaptive mesh refinement data, https://www.researchgate.net/publication/321321949_CPU_volume_rendering_of_adaptive_mesh_refinement_data, fetched 2026-10-26 (unofficial)
+-[S2] Efficient parallel extraction of crack-free isosurfaces from adaptive mesh refinement (AMR) data, https://doi.org/10.1109/ldav.2012.6378973, fetched 2026-11-01+[S1] Visualization Tools for Adaptive Mesh Refinement Data, https://digital.library.unt.edu/ark:/67531/metadc894061/, fetched 2026-10-26 (unofficial)
++[S2] CPU volume rendering of adaptive mesh refinement data, https://www.researchgate.net/publication/321321949_CPU_volume_rendering_of_adaptive_mesh_refinement_data, fetched 2026-10-26 (unofficial)
++[S3] Visualization of Scalar Adaptive Mesh Refinement Data, https://digital.library.unt.edu/ark:/67531/metadc901373/?q=adaptive mesh refinement visualization ray casting, fetched 2026-10-28 (unofficial)
++[S4] Efficient parallel extraction of crack-free isosurfaces from adaptive mesh refinement (AMR) data, https://doi.org/10.1109/ldav.2012.6378973, fetched 2026-11-01

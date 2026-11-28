@@ -1,0 +1,157 @@
+--- v001.md
++++ v002.md
+@@ -28,6 +28,6 @@
+ 
+ 1.  **Compute Basis Vectors:**
+-    For each surfel with normal $\vec{n}$, compute the tangent $\vec{u}$ and binormal $\vec{v}$ vectors to form the rotation basis.
+-    *   Define reference vector $\vec{a} = (0, 1, 0)$.
++    For each surfel with normal $\vec{n}$, compute the tangent $\vec{u}$ and binormal $\vec{v}$ vectors to form the rotation basis [S1, unofficial].
++    *   Define reference vector $\vec{a} = (0, 1, 0)$ [S1, unofficial].
+     *   Check for degeneracy: If $\vec{n}$ is parallel to $\vec{a}$ (i.e., $\vec{n} = (0, \pm 1, 0)$), set $\vec{a} = (0, 0, -1)$ [S1, unofficial].
+     *   Compute $\vec{u} = \vec{a} \times \vec{n}$ [S1, unofficial].
+@@ -64,78 +64,48 @@
+ 
+ ```python
+-def render_surfel(surfel, template_vertices, texture_mask):
+-    """
+-    Renders a single surfel using hardware-accelerated instancing logic.
+-    
+-    Args:
+-        surfel: Object with attributes p (vec3), n (vec3), r (float), color (vec4).
+-        template_vertices: List of 4 vec3s representing the canonical quad (-1,-1,0) to (1,1,0).
+-        texture_mask: Function or texture sampler for Gaussian alpha.
+-        
+-    Returns:
+-        List of fragments or direct rasterization commands.
+-    """
++EPSILON = 1e-6
++
++def vec3(x, y, z): return (x, y, z)
++def vec4(x, y, z, w): return (x, y, z, w)
++def dot(a, b): return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
++def cross(a, b): return (a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0])
++def normalize(v):
++    l = (v[0]**2 + v[1]**2 + v[2]**2)**0.5
++    return (v[0]/l, v[1]/l, v[2]/l)
++def mat_mul(A, B):
++    return tuple(tuple(sum(A[i][k]*B[k][j] for k in range(4)) for j in range(4)) for i in range(4))
++def mat_vec_mul(M, v):
++    return tuple(sum(M[i][j]*v[j] for j in range(4)) for i in range(4))
++
++def render_surfel(surfel, template_vertices, texture_coords):
+     # 1. Compute Basis Vectors
+-    a = vec3(0, 1, 0)
+-    # Check for parallelism between n and a
+-    # Dot product of unit vectors: if abs(dot(n, a)) == 1, they are parallel
+-    if abs(dot(surfel.n, a)) >= 1.0 - epsilon:
+-        a = vec3(0, 0, -1)
+-    
+-    # Cross product u = a x n
+-    u = cross(a, surfel.n)
+-    # Normalize u
+-    u = normalize(u)
+-    
+-    # Cross product v = n x u
++    a = vec3(0.0, 1.0, 0.0)
++    if abs(dot(surfel.n, a)) >= 1.0 - EPSILON:
++        a = vec3(0.0, 0.0, -1.0)
++    u = normalize(cross(a, surfel.n))
+     v = cross(surfel.n, u)
+-    # v is already normalized if n and u are orthonormal
+-    
+-    # 2. Construct Matrices
+-    # Translation Matrix
+-    T = mat4(
+-        1, 0, 0, surfel.p.x,
+-        0, 1, 0, surfel.p.y,
+-        0, 0, 1, surfel.p.z,
+-        0, 0, 0, 1
+-    )
+-    
+-    # Scale Matrix (isotropic r in x and y)
+-    S = mat4(
+-        surfel.r, 0, 0, 0,
+-        0, surfel.r, 0, 0,
+-        0, 0, 1, 0,
+-        0, 0, 0, 1
+-    )
+-    
+-    # Rotation Matrix
+-    R = mat4(
+-        u.x, v.x, surfel.n.x, 0,
+-        u.y, v.y, surfel.n.y, 0,
+-        u.z, v.z, surfel.n.z, 0,
+-        0, 0, 0, 1
+-    )
+-    
+-    # Combined Model Matrix
+-    M = T * S * R
+-    
+-    # 3. Transform Template Vertices
++    # v is guaranteed normalized if n and u are orthonormal
++
++    # 2. Construct Transformation Matrix M = T * S * R
++    T = ((1,0,0,surfel.p[0]), (0,1,0,surfel.p[1]), (0,0,1,surfel.p[2]), (0,0,0,1))
++    S = ((surfel.r,0,0,0), (0,surfel.r,0,0), (0,0,1,0), (0,0,0,1))
++    R = ((u[0],v[0],surfel.n[0],0), (u[1],v[1],surfel.n[1],0), (u[2],v[2],surfel.n[2],0), (0,0,0,1))
++    M = mat_mul(mat_mul(T, S), R)
++
++    # 3. Transform Template Vertices to Object Space
+     transformed_vertices = []
+     for q in template_vertices:
+-        # q is vec3, treat as vec4 with w=1 for matrix mult
+-        q_hom = vec4(q.x, q.y, q.z, 1)
+-        obj_pos = M * q_hom
+-        transformed_vertices.append(vec3(obj_pos.x, obj_pos.y, obj_pos.z))
+-        
+-    # 4. Apply World/View/Projection (Assumed available in context)
++        q_hom = vec4(q[0], q[1], q[2], 1.0)
++        obj_pos = mat_vec_mul(M, q_hom)
++        transformed_vertices.append(vec3(obj_pos[0], obj_pos[1], obj_pos[2]))
++
++    # 4. Apply World/View/Projection (handled by pipeline)
+     # clip_vertices = Projection * View * World * transformed_vertices
+-    # For this self-contained example, we assume transformed_vertices are in clip space 
+-    # or subsequent pipeline stages handle the rest.
+-    
++
+     # 5. Rasterization and Shading
+-    # The hardware rasterizer handles back-face culling and fragment generation.
+-    # For each fragment (x, y) covered by the quad:
+-    #   alpha = texture_sample(texture_mask, texture_coords)
+-    #   color = surfel.color * lighting(x, y)
++    # Hardware rasterizer performs back-face culling and schedules front-facing geometry.
++    # For each fragment covered by the quad:
++    #   alpha = sample_texture_mask(texture_coords)
++    #   color = surfel.color * lighting()
+     #   if depth_test_pass:
+     #       blend(color, alpha) into color_buffer
+@@ -143,19 +113,17 @@
+ 
+ ### Edge Cases and Pitfalls
+-*   **Parallel Normal:** If the surfel normal $\vec{n}$ is parallel to the reference vector $\vec{a}=(0,1,0)$, the cross product $\vec{a} \times \vec{n}$ yields a zero vector. The algorithm must detect this and switch $\vec{a}$ to $(0,0,-1)$ [S1, unofficial].
+-*   **Boundary Artifacts:** Sharp square-shaped boundary artifacts may appear due to alpha-blending and rendering order. Disabling depth buffer operations can mitigate this but introduces other sorting issues [S1, unofficial].
+-*   **Isotropy Assumption:** The method assumes isotropic surfels. If anisotropic scaling is required, the scale matrix $S$ must be modified to use distinct $r_x$ and $r_y$ values [S1, unofficial].
++*   **Parallel Normal:** If the surfel normal $\vec{n}$ is parallel to the reference vector $\vec{a}=(0,1,0)$, the cross product $\vec{a} \times \vec{n}$ yields a zero vector [S1, unofficial]. The algorithm must detect this and switch $\vec{a}$ to $(0,0,-1)$ [S1, unofficial].
++*   **Boundary Artifacts:** Sharp square-shaped boundary artifacts may appear due to alpha-blending and rendering order [S1, unofficial]. Disabling depth buffer operations can mitigate this but introduces other sorting issues [S1, unofficial].
++*   **Isotropy Assumption:** The method assumes isotropic surfels [S1, unofficial]. If anisotropic scaling is required, the scale matrix $S$ must be modified to use distinct $r_x$ and $r_y$ values [S1, unofficial].
+ 
+ ## Operating characteristics
+-
+-*   **Time Complexity:** $O(N)$ where $N$ is the number of surfels, as each surfel is processed independently as a primitive.
+-*   **Memory Complexity:** $O(N)$ to store surfel attributes. Video memory is the primary constraint for buffer sizes [S1, unofficial].
+-*   **Strengths:** Leverages hardware-accelerated geometry instancing and rasterization. Simple to implement on standard graphics pipelines.
+-*   **Limitations:** Prone to sharp boundary artifacts if not handled. Requires careful handling of the normal-to-basis conversion to avoid degeneracy.
+-*   **When to use:** When rendering scanned point clouds or meshes where surface orientation is known and hardware rasterization is preferred over ray tracing.
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources. Video memory is the primary constraint for buffer sizes [S1, unofficial].
++*   **Strengths:** Leverages hardware-accelerated geometry instancing and rasterization [S1, unofficial].
++*   **Limitations:** Prone to sharp boundary artifacts if not handled [S1, unofficial]. Requires careful handling of the normal-to-basis conversion to avoid degeneracy [S1, unofficial].
++*   **When to use:** When rendering scanned point clouds or meshes where surface orientation is known and hardware rasterization is preferred over ray tracing [G].
+ 
+ ## Background
+-
+-Surfel rendering was introduced as a technique to render scanned 4D media using hardware-accelerated geometry instancing. The method treats surfels as oriented, texture-mapped quadrilaterals aligned to surface curvature [S1, unofficial]. It was developed to address the limitations of traditional billboard rendering by providing surface-aligned primitives that better represent the underlying geometry [S1, unofficial].
++Surfel rendering was introduced as a technique to render scanned 4D media using hardware-accelerated geometry instancing [S1, unofficial]. The method treats surfels as oriented, texture-mapped quadrilaterals aligned to surface curvature [S1, unofficial]. It was developed to address the limitations of traditional billboard rendering by providing surface-aligned primitives that better represent the underlying geometry [S1, unofficial].
+ 
+ ## Sources

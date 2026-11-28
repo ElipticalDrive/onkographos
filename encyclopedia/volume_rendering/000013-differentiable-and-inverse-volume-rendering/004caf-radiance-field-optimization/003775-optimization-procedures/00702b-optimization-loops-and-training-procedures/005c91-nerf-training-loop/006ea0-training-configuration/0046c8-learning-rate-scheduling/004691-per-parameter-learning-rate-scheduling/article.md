@@ -1,0 +1,83 @@
+# Per-Parameter Learning Rate Scheduling
+
+Also called: Feature LR, Opacity LR, Other Learning Rate Adjustments, Rotation LR, Scaling LR
+
+## Overview
+Per-Parameter Learning Rate Scheduling adjusts the learning rates for specific parameter groups (scaling, opacity, rotation, and feature vectors) independently during each training iteration [S1, unofficial]. It sets apart from uniform scheduling by allowing distinct optimization dynamics for geometric, radiometric, and structural parameters, which is critical for 3D Gaussian Splatting (3DGS) and related radiance field representations [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: Current training iteration $t$, initial learning rates for each parameter group ($\eta_{scale}, \eta_{opacity}, \eta_{rotation}, \eta_{feature}$) [S1, unofficial].
+- Output: Updated learning rates for each parameter group for the current iteration.
+
+**Data Structures:**
+- A dictionary or optimizer parameter group configuration mapping parameter names to their current learning rate values [G].
+
+**Steps:**
+1. Initialize learning rates for each parameter group based on empirical ranges or a base rate [G].
+2. For each training iteration $t$:
+   a. Compute the decay factor or scaling multiplier for each parameter group based on the chosen schedule [G].
+   b. Update the learning rate for each group:
+      $$ \eta_{group}(t) = \eta_{group, initial} \times \text{decay}(t) $$
+      where $\text{decay}(t)$ is specific to the group and iteration [G].
+   c. Apply the updated learning rates to the respective parameter groups in the optimizer (e.g., Adam) [G].
+
+**Parameters:**
+- $\eta_{scale, initial}$: Initial learning rate for scaling parameters. Typical optimal range: $[10^{-3}, 10^{-6}]$ [S1, unofficial]. Recommended value: $0.005$; using $0.05$ increases training time by a factor of 2–3 with similar PSNR [S1, unofficial].
+- $\eta_{opacity, initial}$: Initial learning rate for opacity parameters. Not given in the sources.
+- $\eta_{rotation, initial}$: Initial learning rate for rotation parameters. Not given in the sources.
+- $\eta_{feature, initial}$: Initial learning rate for feature parameters. Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+- Setting $\eta_{feature} = 0$ does not significantly change training speed or quality, indicating that feature learning has less impact on improvement compared to other parameters [S1, unofficial].
+- High learning rates for scaling cause a wider distribution of Gaussian scales, leading to excessively large Gaussians (high computational demand) and negligibly small Gaussians (negligible contribution) [S1, unofficial].
+- Large learning rates can cause numerical instability (NaN values) during optimization [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def update_per_parameter_lrs(iteration, initial_lrs, schedule_fn):
+    """
+    Update learning rates for each parameter group based on iteration and a schedule function.
+    
+    Args:
+    iteration (int): Current training iteration.
+    initial_lrs (dict): Dictionary with initial learning rates for 'scale', 'opacity', 'rotation', 'feature'.
+    schedule_fn (callable): Function that takes (group_name, iteration, initial_lr) and returns the current LR.
+    
+    Returns:
+    dict: Updated learning rates for each parameter group.
+    """
+    updated_lrs = {}
+    for group in ['scale', 'opacity', 'rotation', 'feature']:
+        updated_lrs[group] = schedule_fn(group, iteration, initial_lrs[group])
+    return updated_lrs
+```
+*Note: Specific decay schedules (e.g., cosine, step, exponential) are implementation-dependent and not specified in the sources [G].*
+
+## Subtopics
+
+### [gscache_optimize_level](18364-gscache-optimize-level.md)
+Handles per-level parameter updates, structural maintenance, and state resets in multi-level Gaussian hierarchies, integrating densification/pruning directly into the update cycle rather than as a separate global phase.
+
+### Stepwise Constant Learning Rate Schedule
+Modifies the positional learning rate schedule to align with DashGaussian's two-stage (LR/HR) optimization, holding it constant during LR training and decaying it only after a specific iteration threshold [S2]. The positional learning rate is kept constant at its initial value throughout the LR optimization stage and only allowed to decay from the iteration $i = \arg\min_i \lfloor r(i) \rfloor = 1$ [S2].
+
+## Operating characteristics
+- **Time Complexity:** The overhead of updating per-parameter learning rates is minimal, typically $O(1)$ per iteration, as it involves simple arithmetic operations [G].
+- **Memory Complexity:** Negligible, as it only requires storing a few additional scalar values for each parameter group [G].
+- **Measured Performance:** Adjusting the scaling learning rate within the range $[10^{-3}, 10^{-6}]$ explicitly changes the final rendering result and training speed [S1, unofficial]. Using a learning rate of $0.05$ for scaling increases training time by a factor of 2–3 compared to $0.005$ with similar PSNR [S1, unofficial].
+- **Strengths:** Allows fine-tuned control over different aspects of the model, potentially leading to better convergence and higher quality results [G].
+- **Limitations:** Requires careful tuning of initial learning rates and decay functions for each parameter group. Setting feature learning rate to zero may not significantly impact performance, suggesting limited benefit from tuning this parameter [S1, unofficial].
+- **When to Use:** When different parameters require different optimization dynamics, such as in complex scenes where geometric and radiometric properties need distinct handling [G].
+- **When Not to Use:** When computational resources are limited, or when the impact of per-parameter tuning is negligible for the specific application [G].
+
+## Background
+Per-Parameter Learning Rate Scheduling was introduced in I3DGS: Improve 3D Gaussian Splatting from Multiple Dimensions [S1, unofficial], which explored the impact of adjusting learning rates for scaling, opacity, rotation, and feature parameters in each training iteration [S1, unofficial]. The approach has since been adopted and adapted in various other works, such as DashGaussian [S2], to enhance optimization efficiency and rendering quality.
+
+## Sources
+[S1] I3DGS: Improve 3D Gaussian Splatting from Multiple Dimensions, https://arxiv.org/abs/2405.06408v1, fetched 2026-10-26 (unofficial)
+[S2] DashGaussian: Optimizing 3D Gaussian Splatting in 200 Seconds, https://doi.org/10.1109/cvpr52734.2025.01041, fetched 2026-10-31

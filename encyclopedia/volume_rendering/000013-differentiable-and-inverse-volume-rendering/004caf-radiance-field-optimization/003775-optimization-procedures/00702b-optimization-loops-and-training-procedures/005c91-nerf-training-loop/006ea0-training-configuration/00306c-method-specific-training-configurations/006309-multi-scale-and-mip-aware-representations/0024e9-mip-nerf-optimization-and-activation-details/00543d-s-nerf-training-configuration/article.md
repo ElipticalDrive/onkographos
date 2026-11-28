@@ -1,0 +1,178 @@
+# S-NeRF Training Configuration
+
+Also called: S-NeRF Optimization Setup, S-NeRF Hyperparameters
+
+## Overview
+S-NeRF defines the specific hyperparameters, network architectures, and training loops required to optimize Neural Radiance Fields for dynamic street scenes using LiDAR and RGB data [S1, unofficial]. It distinguishes itself from standard NeRF variants by separating the optimization of foreground moving vehicles from the static background, applying distinct loss weights, sampling strategies, and confidence-guided learning to handle depth outliers and motion [S1, unofficial]. This configuration builds on [Mip-NeRF Optimization and Activation Details](3409-mip-nerf-optimization-and-activation-details.md) by adopting its coarse-fine network sharing and log-linear scheduling while introducing scene-specific parameters for large-scale urban environments.
+
+## How it works
+**Inputs and Outputs**
+*   **Inputs:** Sparse LiDAR point clouds from consecutive frames ($t-1, t, t+1$), RGB images, and camera poses.
+*   **Outputs:** Optimized MLP weights for foreground vehicles and background scenes, producing novel view RGB and depth renders.
+
+**Data Structures**
+The method uses two distinct MLP architectures depending on the scene component:
+1.  **Foreground Vehicle MLP:** 4 layers, 256 hidden units per layer.
+2.  **Background Scene MLPs:**
+    *   Density MLP: 8 layers, 1024 hidden units per layer.
+    *   Color MLP: 3 layers, 128 hidden units per layer.
+    *   *Note:* The background coarse and fine networks share parameters as per mip-NeRF conventions [S1, unofficial].
+
+**Training Procedure**
+The training is split into two independent phases: foreground vehicle optimization and background scene optimization.
+
+1.  **Foreground Vehicle Training:**
+    *   **Sampling:** 64 samples per ray.
+    *   **Iterations:** 30,000 iterations.
+    *   **Optimizer:** Adam.
+    *   **Learning Rate:** $5 \times 10^{-4}$ (constant).
+    *   **Batch Size:** 1024.
+    *   **Loss Weights:** Depth loss weight $\lambda_1 = 1$, Smoothness loss weight $\lambda_2 = 0.15$.
+    *   **Duration:** ~2 hours per vehicle on a single NVIDIA RTX 3090 GPU [S1, unofficial].
+
+2.  **Background Scene Training:**
+    *   **Scene Parameterization:** Radius $r = 3$.
+    *   **Confidence Threshold:** $\tau = 20\%$ for filtering outliers [S1, unofficial].
+    *   **Sampling:** 128 samples per ray on a log scale.
+    *   **Iterations:** 100,000 iterations.
+    *   **Optimizer:** Adam.
+    *   **Learning Rate Schedule:** Log-linear decay from $5 \times 10^{-4}$ to $5 \times 10^{-6}$ with a warm-up phase of 2,500 iterations.
+    *   **Batch Size:** 2048.
+    *   **Loss Weights:** Depth loss weight $\lambda_1 = 0.2$, Smoothness loss weight $\lambda_2 = 0.01$.
+    *   **Duration:** ~17 hours per scene (250 images, 1280×1920) on two NVIDIA RTX 3090 GPUs [S1, unofficial].
+
+**Confidence Map Computation**
+To reduce the influence of depth outliers (e.g., moving objects), S-NeRF computes geometry and projection confidence maps [S1, unofficial]:
+1.  **Reprojection:** Project 3D LiDAR points from frames $t-1$ and $t+1$ to frame $t$ using the displacement $\Delta P$ between frames.
+2.  **Consistency Check:** Use optical flow and depth projection to identify and remove outliers from moving objects.
+3.  **Component Calculation:** Compute individual confidence maps for Depth, Flow, RGB, SSIM, and VGG features.
+4.  **Aggregation:** Combine these components via learnable aggregation to produce final confidence maps used in the loss function [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def train_snerf_foreground(vehicle_data, iterations=30000, lr=5e-4):
+    """
+    Optimizes the MLP for a single foreground vehicle.
+    """
+    model = MLP(layers=4, hidden_units=256)
+    optimizer = Adam(model.parameters(), lr=lr)
+    
+    for step in range(iterations):
+        # Sample 64 points per ray
+        rays = sample_rays(vehicle_data, num_samples=64)
+        
+        # Render RGB and Depth
+        rgb_pred, depth_pred = model.render(rays)
+        rgb_gt, depth_gt = vehicle_data.get_ground_truth(rays)
+        
+        # Compute losses
+        # lambda_1 = 1, lambda_2 = 0.15
+        loss_depth = lambda_1 * L1Loss(depth_pred, depth_gt)
+        loss_smooth = lambda_2 * SmoothnessLoss(depth_pred)
+        loss_rgb = L1Loss(rgb_pred, rgb_gt)
+        
+        total_loss = loss_rgb + loss_depth + loss_smooth
+        
+        optimizer.zero_grad()
+        total_loss.backward()
+        optimizer.step()
+        
+    return model
+
+def train_snerf_background(scene_data, iterations=100000, lr_start=5e-4, lr_end=5e-6, warmup=2500):
+    """
+    Optimizes the background street scene.
+    """
+    # Coarse and Fine networks share parameters
+    model = SharedMLP(density_layers=8, density_hidden=1024, 
+                      color_layers=3, color_hidden=128)
+    optimizer = Adam(model.parameters(), lr=lr_start)
+    
+    radius = 3
+    tau = 0.20  # 20% confidence threshold
+    
+    for step in range(iterations):
+        # Learning rate schedule: log-linear decay with warmup
+        if step < warmup:
+            lr = lr_start * (step / warmup)
+        else:
+            # Log-linear decay approximation
+            progress = (step - warmup) / (iterations - warmup)
+            lr = lr_start * (lr_end / lr_start) ** progress
+            
+        optimizer.param_groups[0]['lr'] = lr
+        
+        # Sample 128 points per ray on log scale
+        rays = sample_rays(scene_data, num_samples=128, log_scale=True)
+        
+        # Compute confidence maps to filter outliers
+        confidence_maps = compute_confidence_maps(scene_data, rays, tau)
+        
+        # Render with confidence weighting
+        rgb_pred, depth_pred = model.render(rays, confidence=confidence_maps)
+        rgb_gt, depth_gt = scene_data.get_ground_truth(rays)
+        
+        # lambda_1 = 0.2, lambda_2 = 0.01
+        loss_depth = 0.2 * L1Loss(depth_pred, depth_gt)
+        loss_smooth = 0.01 * SmoothnessLoss(depth_pred)
+        loss_rgb = L1Loss(rgb_pred, rgb_gt)
+        
+        total_loss = loss_rgb + loss_depth + loss_smooth
+        
+        optimizer.zero_grad()
+        total_loss.backward()
+        optimizer.step()
+        
+    return model
+
+def compute_confidence_maps(scene_data, rays, tau):
+    """
+    Computes geometry and projection confidence maps.
+    """
+    # 1. Reprojection from t-1 and t+1
+    points_t_minus_1 = scene_data.get_lidar_points(t-1)
+    points_t_plus_1 = scene_data.get_lidar_points(t+1)
+    
+    displacement_t_minus_1 = get_displacement(points_t_minus_1, scene_data.get_pose(t))
+    displacement_t_plus_1 = get_displacement(points_t_plus_1, scene_data.get_pose(t))
+    
+    projected_t_minus_1 = project_to_frame(points_t_minus_1, displacement_t_minus_1)
+    projected_t_plus_1 = project_to_frame(points_t_plus_1, displacement_t_plus_1)
+    
+    # 2. Consistency check using optical flow and depth
+    flow_conf = check_flow_consistency(scene_data, rays)
+    depth_conf = check_depth_consistency(projected_t_minus_1, projected_t_plus_1, rays)
+    
+    # 3. Photometric and feature consistency
+    rgb_conf = compute_rgb_consistency(scene_data, rays)
+    ssim_conf = compute_ssim_consistency(scene_data, rays)
+    vgg_conf = compute_vgg_consistency(scene_data, rays)
+    
+    # 4. Learnable aggregation
+    confidence = aggregate_confidences(depth_conf, flow_conf, rgb_conf, ssim_conf, vgg_conf)
+    
+    return confidence
+```
+
+## Subtopics
+
+### [Confidence Updating with Detached Color Network](16065-confidence-updating-with-detached-color-network.md)
+This variant distinguishes inlier and outlier camera poses by using a detached color network that omits the viewing direction as input, minimizing the impact of shape-radiance ambiguities that cause high PSNR for wrong poses. It solves the issue where outliers might have higher PSNR than inliers due to shape-radiance ambiguity, which traditional rendering metrics fail to detect. Unlike previous works using rendering metrics directly, this approach uses a detached network to provide reliable confidence scores for pose filtering.
+
+### [NeRF Image Refinement through End-to-End Sampling Point Optimization](23739-nerf-image-refinement-through-end-to-end-sampling-point-opti.md)
+This method optimizes the positions of sampling points along camera rays to reduce rendering artifacts and produce more detailed images in Neural Radiance Fields (NeRF). Unlike canonical NeRF, which places sampling points at fixed regular intervals regardless of scene content, this approach dynamically concentrates sampling points in critical areas, particularly around object surfaces, by using an MLP-Mixer-based architecture for end-to-end optimization.
+
+## Operating characteristics
+*   **Time Complexity:** Training is computationally intensive. Foreground vehicles take ~2 hours per vehicle on a single RTX 3090. Background scenes take ~17 hours per scene (250 images, 1280×1920) on two RTX 3090 GPUs [S1, unofficial].
+*   **Memory Complexity:** The model contains 8.76M learnable parameters, which is comparable to other state-of-the-art methods (8.7–9.9M) [S1, unofficial].
+*   **Performance:** On the Waymo dataset, S-NeRF achieves a PSNR of 23.60 and SSIM of 0.743, outperforming Mip-NeRF (16.89 PSNR) and Mip-NeRF 360 (22.10 PSNR) [S1, unofficial].
+*   **Strengths:** Handles dynamic scenes and large-scale urban environments effectively by separating foreground and background optimization. The confidence-guided learning reduces the impact of LiDAR outliers.
+*   **Limitations:** Training time is significantly longer than methods that do not require coarse rendering supervision (e.g., Mip-NeRF 360 is faster) [S1, unofficial]. Requires synchronized LiDAR and RGB data.
+
+## Background
+S-NeRF was introduced in the paper "S-NeRF: Neural Radiance Fields for Street Views" published at ICLR 2023 [S1, unofficial]. The method addresses the challenges of reconstructing large-scale, dynamic street scenes using sparse LiDAR and RGB data. It builds upon the mip-NeRF framework to handle multi-scale representations and introduces specific training configurations to manage the complexity of urban environments, including moving vehicles and static backgrounds.
+
+## Sources
+[S1] S-NeRF: Neural Radiance Fields for Street Views, https://doi.org/10.48550/arxiv.2303.00749, fetched 2026-10-29 (unofficial)

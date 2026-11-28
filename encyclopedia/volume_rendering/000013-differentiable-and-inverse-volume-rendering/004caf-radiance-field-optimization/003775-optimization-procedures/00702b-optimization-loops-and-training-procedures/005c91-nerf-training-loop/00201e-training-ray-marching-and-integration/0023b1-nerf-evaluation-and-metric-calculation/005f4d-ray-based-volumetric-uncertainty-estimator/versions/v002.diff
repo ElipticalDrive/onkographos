@@ -1,0 +1,155 @@
+--- v001.md
++++ v002.md
+@@ -8,9 +8,9 @@
+ ## How it works
+ **Inputs and Outputs**
+-*   **Inputs**: A trained NeRF model (MLP parameters $\Theta$), a camera pose (origin $o$, direction $d$), and the number of samples $N$ per ray.
++*   **Inputs**: A trained NeRF model (MLP parameters $\Theta$), a camera pose (origin $o$, direction $d$), and the number of samples $N$ per ray [S1].
+ *   **Outputs**: A scalar uncertainty value (entropy $H$) for each ray, and optionally a mean entropy value for the entire image [S1].
+ 
+ **Data Structures**
+-*   **Ray Samples**: An array of $N$ positions $t_i$ along the ray $r(t) = o + td$.
++*   **Ray Samples**: An array of $N$ positions $t_i$ along the ray $r(t) = o + td$ [S1].
+ *   **NeRF Query**: For each sample point $r(t_i)$, the MLP returns volume density $\sigma_i$ and color $c_i$ [S1].
+ *   **Weights**: An array of $N$ weights $w_i$ representing the contribution of each sample to the final color [S1].
+@@ -24,6 +24,6 @@
+ 4.  **Weight Calculation**: Calculate the weight $w_i$ for each sample using the accumulated transmittance from previous samples:
+     $$ w_i = (1 - p_i) \prod_{j=1}^{i-1} p_j $$
+-    This weight represents the probability that the ray is occluded at sample $i$ [S1].
+-5.  **Normalization**: Normalize the weights $w_i$ to form a valid probability distribution $P(x_i)$ such that $\sum_{i=1}^N P(x_i) = 1$. The normalized probability for the $i$-th sample is:
++    This weight represents the contribution of the $i$-th sample to the final rendered color, derived from the opacity derivative [S1].
++5.  **Normalization**: Normalize the weights $w_i$ to form a valid probability distribution $P(x_i)$ such that $\sum_{i=1}^N P(x_i) = 1$ [S1]. The normalized probability for the $i$-th sample is:
+     $$ P(x_i) = \frac{w_i}{\sum_{k=1}^N w_k} $$
+     [S1]. Note: In standard volume rendering, $\sum w_i \approx 1$ for rays hitting an object, but normalization ensures a valid PDF for entropy calculation [S1].
+@@ -38,5 +38,5 @@
+ import numpy as np
+ 
+-def compute_ray_uncertainty(nerf_model, ray_origin, ray_direction, num_samples):
++def compute_ray_uncertainty(nerf_model, ray_origin, ray_direction, t_min, t_max, num_samples):
+     """
+     Computes the volumetric uncertainty (entropy of weight distribution) for a single ray.
+@@ -46,4 +46,6 @@
+         ray_origin: 3D vector (o_x, o_y, o_z).
+         ray_direction: 3D vector (d_x, d_y, d_z), assumed normalized.
++        t_min: Float, near clipping distance along the ray.
++        t_max: Float, far clipping distance along the ray.
+         num_samples: Integer N, number of samples along the ray.
+         
+@@ -52,35 +54,16 @@
+     """
+     # Step 1: Sample points along the ray
+-    # Assuming uniform spacing for simplicity, though hierarchical sampling may be used in practice.
+-    # t values range from near to far clipping planes.
+-    t_vals = np.linspace(t_near, t_far, num_samples + 1)
+-    # Sample points at midpoints or endpoints depending on convention. 
+-    # Standard NeRF often uses t_i as the start of the segment.
+-    # Let's assume t_i are the sample positions.
+-    t_samples = t_vals[:-1] # N samples
+-    
+-    # Calculate delta_i = t_{i+1} - t_i
++    t_vals = np.linspace(t_min, t_max, num_samples + 1)
++    t_samples = t_vals[:-1]
+     deltas = np.diff(t_vals)
+     
+     # Step 2: Query NeRF
+-    # Points are ray_origin + t_samples * ray_direction
+     points = ray_origin + np.outer(t_samples, ray_direction)
+-    # NeRF typically takes points and view directions.
+-    # Assuming nerf_model returns (sigma, color) for batched inputs.
+     sigma, color = nerf_model(points, ray_direction)
+     
+     # Step 3 & 4: Calculate weights
+-    # p_i = exp(-sigma_i * delta_i)
+     p = np.exp(-sigma * deltas)
+     
+-    # w_i = (1 - p_i) * product(p_j for j < i)
+-    # Cumulative product of p, shifted.
+-    # prod_j=1^{i-1} p_j is the accumulated transmittance T_i
+-    # T_1 = 1 (empty product)
+-    # T_i = T_{i-1} * p_{i-1}
+-    
+-    # Calculate accumulated transmittance T_i for each sample i
+-    # T[i] = exp(-sum_{j=0}^{i-1} sigma[j] * delta[j])
+-    # This is equivalent to the cumulative product of p, starting with 1.
++    # Calculate accumulated transmittance T_i = prod_{j=1}^{i-1} p_j
+     accumulated_transmittance = np.ones(num_samples)
+     for i in range(1, num_samples):
+@@ -90,18 +73,10 @@
+     
+     # Step 5: Normalize weights to form probability distribution
+-    # Sum of weights should be close to 1 if the ray hits an object.
+-    # However, for entropy calculation, we normalize to ensure sum(P) = 1.
+     weight_sum = np.sum(weights)
+     if weight_sum == 0:
+-        # If no weight is accumulated (ray misses object or empty space), 
+-        # entropy is undefined or zero. 
+-        # In practice, this might be handled by masking or returning 0.
+-        return 0.0
+-        
++        return 0.0 # [G] Guard against division by zero for rays missing the object
+     probabilities = weights / weight_sum
+     
+     # Step 6: Calculate Shannon Entropy
+-    # H = - sum(P(x) * log(P(x)))
+-    # Handle log(0) by ignoring zero probabilities
+     entropy = 0.0
+     for prob in probabilities:
+@@ -111,25 +86,16 @@
+     return entropy
+ 
+-def compute_image_uncertainty(nerf_model, camera_pose, image_width, image_height, num_samples, downsample_factor=4):
++def compute_image_uncertainty(nerf_model, ray_origin, ray_directions, t_min, t_max, num_samples, downsample_factor=4):
+     """
+-    Computes the mean entropy for an entire image.
++    Computes the mean entropy for an entire image given precomputed ray directions.
+     """
+-    # Downsample for speed
+-    h, w = image_height // downsample_factor, image_width // downsample_factor
+-    
+     total_entropy = 0.0
+     count = 0
+     
+-    # Generate rays for downsampled grid
+-    for y in range(0, image_height, downsample_factor):
+-        for x in range(0, image_width, downsample_factor):
+-            # Convert pixel (x,y) to ray direction
+-            # This depends on the camera intrinsics. 
+-            # Assuming standard pinhole camera model.
+-            # u = (x - cx) / fx, v = (y - cy) / fy
+-            # direction = normalize([u, v, -1]) rotated by camera orientation
+-            ray_dir = get_ray_direction(x, y, camera_pose, intrinsics)
+-            
+-            h_val = compute_ray_uncertainty(nerf_model, camera_pose.origin, ray_dir, num_samples)
++    # Iterate over downsampled grid
++    for i in range(0, ray_directions.shape[0], downsample_factor):
++        for j in range(0, ray_directions.shape[1], downsample_factor):
++            ray_dir = ray_directions[i, j]
++            h_val = compute_ray_uncertainty(nerf_model, ray_origin, ray_dir, t_min, t_max, num_samples)
+             total_entropy += h_val
+             count += 1
+@@ -146,18 +112,18 @@
+ **Edge Cases and Pitfalls**
+ *   **Transparency**: The method is restricted to non-transparent objects with solid surfaces [S1]. It fails for transparent objects (e.g., glass) because Marching Cubes removes low density regions (noise) and transparent surfaces do not produce a clear single peak in weight distribution [S1].
+-*   **Empty Space**: If a ray does not hit any object, the weights will be near zero, leading to potential division by zero or undefined entropy. The pseudocode handles this by returning 0.0.
++*   **Empty Space**: If a ray does not hit any object, the weights will be near zero, leading to potential division by zero or undefined entropy. The implementation returns 0.0 in this case [G].
+ *   **Precision**: The calculation of accumulated transmittance involves products of values less than 1, which can lead to underflow for very long rays or high densities. Log-space computation is recommended for stability in implementation [G].
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: $O(N \cdot P)$ per image, where $N$ is the number of samples per ray and $P$ is the number of pixels. The method requires a forward pass through the NeRF MLP for every sample point.
+-*   **Memory Complexity**: $O(N)$ per ray to store weights and transmittance values.
+-*   **Performance**: The method is computationally expensive due to the need to query the MLP for every sample point on every ray. Downsampling by a factor of 4 is used to mitigate this [S1].
+-*   **Strengths**: It provides a direct measure of geometric uncertainty from the implicit representation without requiring explicit mesh extraction or additional training. It is applicable to any NeRF-based approach [S1].
+-*   **Limitations**: It is not suitable for transparent objects or scenes with significant transparency [S1]. It assumes that the weight distribution concentration correlates with geometric certainty, which may not hold for all scene types.
++*   **Time Complexity**: $O(N \cdot P)$ per image, where $N$ is the number of samples per ray and $P$ is the number of pixels [G]. The method requires a forward pass through the NeRF MLP for every sample point [S1].
++*   **Memory Complexity**: $O(N)$ per ray to store weights and transmittance values [G].
++*   **Performance**: The method is computationally expensive due to the need to query the MLP for every sample point on every ray [S1]. Downsampling by a factor of 4 is used to mitigate this [S1].
++*   **Strengths**: It provides a direct measure of geometric uncertainty from the implicit representation without requiring explicit mesh extraction or additional training [S1]. It is applicable to any NeRF-based approach [S1].
++*   **Limitations**: It is not suitable for transparent objects or scenes with significant transparency [S1]. It assumes that the weight distribution concentration correlates with geometric certainty, which may not hold for all scene types [S1].
+ *   **When to use**: Active robotic 3D reconstruction to determine the next best view for effective 3D reconstruction of an object [S1].
+ *   **When not to use**: Scenes with transparent objects or when explicit geometric meshes are required directly from the NeRF without further processing [S1].
+ 
+ ## Background
+-The Ray-Based Volumetric Uncertainty Estimator was introduced in the paper "Uncertainty Guided Policy for Active Robotic 3D Reconstruction Using Neural Radiance Fields" [S1]. The authors leveraged the popular neural radiance fields-based object representation to solve the next-best-view selection problem for dense 3D reconstruction. The key insight is that the weight distribution in NeRF, which is the derivative of the opacity function, can be treated as a probability density function. By computing the entropy of this distribution, the method provides a proxy for the uncertainty of the underlying 3D geometry. This approach distinguishes itself from explicit 3D representations and RGB-D fusion methods by using the implicit neural shape representation to estimate information gain without relying on structure-from-motion or depth sensors [S1]. It is also distinct from Bayesian NeRF variants like S-NeRF as it requires no model modification [S1].
++The Ray-Based Volumetric Uncertainty Estimator was introduced in the paper "Uncertainty Guided Policy for Active Robotic 3D Reconstruction Using Neural Radiance Fields" [S1]. The authors leveraged the popular neural radiance fields-based object representation to solve the next-best-view selection problem for dense 3D reconstruction [S1]. The key insight is that the weight distribution in NeRF, which is the derivative of the opacity function, can be treated as a probability density function [S1]. By computing the entropy of this distribution, the method provides a proxy for the uncertainty of the underlying 3D geometry [S1]. This approach distinguishes itself from explicit 3D representations and RGB-D fusion methods by using the implicit neural shape representation to estimate information gain without relying on structure-from-motion or depth sensors [S1]. It is also distinct from Bayesian NeRF variants like S-NeRF as it requires no model modification [S1].
+ 
+ ## Sources

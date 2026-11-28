@@ -1,0 +1,356 @@
+--- v012.md
++++ v013.md
+@@ -25,5 +25,5 @@
+         $$ u_j = 2^{\frac{j-N/2}{N/2-1}}, \quad j \in \{1, \dots, N/2\} $$
+         The full set of sample positions is $\{l_1, \dots, l_{N/2-1}, u_1, \dots, u_{N/2}\}$ [S1].
+-2.  **Sampling Network:** An MLP with 8 hidden layers, 256 units per layer, and a skip connection to the fifth layer [S1]. It takes the ray parameters (derived from $A, B$) and outputs $N$ raw weights.
++2.  **Sampling Network:** An MLP with 8 hidden layers, 256 units per layer, and a skip connection to the fifth layer [S1]. It takes the ray parameters (derived from $A, B$) and outputs $N$ raw weights [S1].
+ 3.  **Shading Network:** The original NeRF color network (pre-trained) [S1].
+ 
+@@ -40,5 +40,5 @@
+ 3.  **Normalize Weights:** Normalize the weights so they sum to 1:
+     $$ \hat{w}_i = \frac{w_i}{\sum_{j=0}^{N} w_j} $$
+-4.  **Distribution Matching (Max-Resampling):** The ground truth weights are defined at arbitrary $z_i$ locations, but the sampling network predicts weights for fixed bins defined by the centered-logarithmic points. To align them:
++4.  **Distribution Matching (Max-Resampling):** The ground truth weights are defined at arbitrary $z_i$ locations, but the sampling network predicts weights for fixed bins defined by the centered-logarithmic points [S1]. To align them:
+     *   Define new bins $b_j$ delimited by $[\hat{z}_j, \hat{z}_{j+1}]$ based on the fixed sample positions [S1].
+     *   Assign weight $\hat{w}_j$ to bin $b_j$ using max-resampling:
+@@ -64,205 +64,151 @@
+ import torch.optim as optim
+ 
++# Constants from [S1]
++SEGMENT_LENGTH = 4.0
++BLUR_K = 9
++BLUR_SIGMA = 3.0
++LR_SAMPLING = 5e-4
++LR_COLOR = 5e-5
++
+ class SamplingNetwork(nn.Module):
+-    """
+-    8 hidden layers, 256 units, skip connection to 5th layer.
+-    Input: Ray parameters (derived from A, B).
+-    Output: N raw weights.
+-    """
++    """8 hidden layers, 256 units, skip connection to 5th layer [S1]."""
+     def __init__(self, N):
+         super().__init__()
+         self.N = N
+-        # Architecture details inferred from [S1]
+-        self.layers = nn.ModuleList([
+-            nn.Linear(3, 256), # Assuming 3D input for simplicity, actual input is ray param
+-            nn.ReLU(),
+-            nn.Linear(256, 256),
+-            nn.ReLU(),
+-            nn.Linear(256, 256),
+-            nn.ReLU(),
+-            nn.Linear(256, 256),
+-            nn.ReLU(),
+-            nn.Linear(256, 256), # 5th layer
+-            nn.ReLU(),
+-            nn.Linear(256, 256),
+-            nn.ReLU(),
+-            nn.Linear(256, 256),
+-            nn.ReLU(),
+-            nn.Linear(256, 256),
+-            nn.ReLU(),
+-            nn.Linear(256, 256),
+-            nn.ReLU(),
+-            nn.Linear(256, N)
+-        ])
+-        self.skip_layer_idx = 4 # 0-indexed, corresponds to 5th layer
+-
+-    def forward(self, ray_input):
+-        x = ray_input
++        self.layers = nn.ModuleList([nn.Linear(6, 256)] + [nn.Linear(256, 256) for _ in range(7)])
++        self.skip_idx = 4  # 5th layer (0-indexed)
++
++    def forward(self, x):
++        skip = None
+         for i, layer in enumerate(self.layers):
+             x = layer(x)
+-            if i == self.skip_layer_idx:
++            if i == self.skip_idx:
+                 skip = x
+-            if i > self.skip_layer_idx:
++            if i > self.skip_idx and skip is not None:
+                 x = x + skip
+         return x
+ 
++def compute_ray_segment(origin, direction):
++    """Compute A and B such that |B-A| = SEGMENT_LENGTH and midpoint is closest to origin [S1]."""
++    d = direction / torch.norm(direction)
++    t = -torch.dot(origin, d)
++    mid = origin + t * d
++    A = mid - (d * SEGMENT_LENGTH) / 2.0
++    B = mid + (d * SEGMENT_LENGTH) / 2.0
++    return A, B
++
+ def get_centered_logarithmic_samples(N, A, B):
+-    """
+-    Generates N sample positions along segment A->B.
+-    Returns list of positions s_i relative to A.
+-    """
++    """Generate N sample positions along segment A->B [S1]."""
+     d = B - A
+-    samples = []
+-    # l_i for i in 1..N/2-1
+     half = N // 2
+-    l_vals = []
+-    for i in range(1, half):
+-        val = 1 - 2**((1 - i) / (half - 1))
+-        l_vals.append(val)
+-    
+-    # u_j for j in 1..N/2
+-    u_vals = []
+-    for j in range(1, half + 1):
+-        val = 2**((j - half) / (half - 1))
+-        u_vals.append(val)
+-        
+-    # Concatenate l and u
+-    all_s = l_vals + u_vals
+-    
+-    # Return points A + s_i * d
+-    points = [A + s * d for s in all_s]
+-    return points
+-
+-def gaussian_blur(weights, K=9, sigma=3.0):
+-    """
+-    Applies Gaussian blur to 1D weight array.
+-    """
+-    # Implementation of 1D Gaussian convolution
++    l_vals = [1.0 - 2.0**((1.0 - i) / (half - 1)) for i in range(1, half)]
++    u_vals = [2.0**((j - half) / (half - 1)) for j in range(1, half + 1)]
++    s = l_vals + u_vals
++    return [A + s_i * d for s_i in s]
++
++def linear_interpolate(z, w, z_target):
++    """Linear interpolation of weight w at z_target given sorted arrays z, w [S1]."""
++    idx = torch.searchsorted(z, z_target)
++    idx = torch.clamp(idx, 1, len(z) - 1)
++    z0, z1 = z[idx-1], z[idx]
++    w0, w1 = w[idx-1], w[idx]
++    return w0 + (w1 - w0) * (z_target - z0) / (z1 - z0)
++
++def max_resample(old_z, old_w, new_z):
++    """Resample old weights to new bin boundaries defined by new_z [S1]."""
++    new_w = []
++    for j in range(len(new_z) - 1):
++        z_start, z_end = new_z[j], new_z[j+1]
++        mask = (old_z >= z_start) & (old_z <= z_end)
++        local_max = torch.max(old_w[mask]) if torch.any(mask) else 0.0
++        w_start = linear_interpolate(old_z, old_w, z_start)
++        w_end = linear_interpolate(old_z, old_w, z_end)
++        new_w.append(max(local_max, w_start, w_end))
++    return torch.tensor(new_w)
++
++def apply_gaussian_blur(weights, K=BLUR_K, sigma=BLUR_SIGMA):
++    """Apply 1D Gaussian blur to weights [S1]."""
+     kernel_size = K
+     kernel = torch.exp(-torch.arange(kernel_size) ** 2 / (2 * sigma ** 2))
+     kernel = kernel / kernel.sum()
+-    
+-    # Pad and convolve
+     padded = torch.nn.functional.pad(weights, (kernel_size//2, kernel_size//2), mode='reflect')
+     blurred = torch.nn.functional.conv1d(padded.unsqueeze(0).unsqueeze(0), kernel.unsqueeze(0).unsqueeze(0)).squeeze()
+     return blurred
+ 
+-def max_resample(old_z, old_w, new_z):
+-    """
+-    Resamples old weights to new bin boundaries defined by new_z.
+-    new_z defines the boundaries of the bins.
+-    """
+-    new_w = []
+-    for j in range(len(new_z) - 1):
+-        z_start = new_z[j]
+-        z_end = new_z[j+1]
+-        
+-        # Find max weight in range
+-        mask = (old_z >= z_start) & (old_z <= z_end)
+-        local_max = 0.0
+-        if torch.any(mask):
+-            local_max = torch.max(old_w[mask])
+-            
+-        # Interpolate weights at boundaries
+-        w_start = interpolate_weight(old_z, old_w, z_start)
+-        w_end = interpolate_weight(old_z, old_w, z_end)
+-        
+-        # Max of local max and interpolated boundaries
+-        w_j = max(local_max, w_start, w_end)
+-        new_w.append(w_j)
+-        
+-    return torch.tensor(new_w)
+-
+-def interpolate_weight(z, w, z_target):
+-    """
+-    Linear interpolation of weight at z_target given z, w arrays.
+-    """
+-    # Find indices surrounding z_target
+-    # This is a simplified placeholder for the actual interpolation logic
+-    # In practice, use torch.searchsorted or similar
+-    pass
+-
+-def train_sampling_network(color_net, sampling_net, dataloader, N_samples=128, N_eq=64):
+-    """
+-    Phase 2: Train Sampling Network against pre-trained Color Net.
+-    """
+-    optimizer = optim.Adam(sampling_net.parameters(), lr=5e-4)
++def sample_from_distribution(probs, num_samples):
++    """Draw samples from categorical distribution defined by probs [G]."""
++    indices = torch.multinomial(probs, num_samples, replacement=True)
++    return indices
++
++def train_phase(color_net, sampling_net, dataloader, N_gt=196, N_pred=128, N_eq=64):
++    """Phase 2 & 3: Train sampling network and jointly fine-tune [S1]."""
++    opt_sampling = optim.Adam(sampling_net.parameters(), lr=LR_SAMPLING)
++    opt_color = optim.Adam(color_net.parameters(), lr=LR_COLOR)
+     sampling_net.train()
+-    color_net.eval()
+-    
+-    for ray, gt_color in dataloader:
+-        # 1. Get ground truth weights from Color Net
+-        # Evaluate fine NeRF at 196 points (64 coarse + 128 fine + 64 extra)
+-        z_gt, sigma_gt = evaluate_fine_nerf(color_net, ray, num_points=196)
+-        
+-        # 2. Compute raw weights
++    color_net.train()
++
++    for ray_origin, ray_direction, gt_color in dataloader:
++        # 1. Generate ground truth weights from fine NeRF [S1]
++        A, B = compute_ray_segment(ray_origin, ray_direction)
++        z_gt = torch.linspace(A, B, N_gt)
++        sigma_gt, _ = color_net(z_gt, ray_direction)
+         delta = z_gt[1:] - z_gt[:-1]
+         transmittance = torch.exp(-torch.cumsum(sigma_gt[:-1] * delta, dim=0))
+         raw_w = transmittance * (1 - torch.exp(-sigma_gt[:-1] * delta))
+-        
+-        # 3. Normalize
+         raw_w = raw_w / raw_w.sum()
+-        
+-        # 4. Define fixed bins using centered-logarithmic sampling
+-        # Assume A and B are derived from ray parameters
+-        A, B = get_ray_boundaries(ray)
+-        fixed_points = get_centered_logarithmic_samples(N_samples, A, B)
+-        new_z = [A + (B-A) * s for s in fixed_points] # Approximation, actual bins are between points
+-        
+-        # 5. Max-Resample
+-        # Note: The paper describes resampling to match the bins defined by the fixed points
+-        # We need to map old_z to new bin centers/boundaries
++
++        # 2. Define fixed bins and resample [S1]
++        fixed_points = get_centered_logarithmic_samples(N_pred, A, B)
++        new_z = fixed_points
+         new_w = max_resample(z_gt, raw_w, new_z)
+-        
+-        # 6. Blur
+-        new_w = gaussian_blur(new_w, K=9, sigma=3.0)
+-        
+-        # 7. Normalize again
++
++        # 3. Blur and normalize [S1]
++        new_w = apply_gaussian_blur(new_w)
+         new_w = new_w / new_w.sum()
+-        
+-        # 8. Forward pass through Sampling Network
+-        ray_input = get_ray_input(ray) # Extract A, B, etc.
++
++        # 4. Forward sampling network [S1]
++        ray_input = torch.cat([A, B], dim=-1)
+         pred_raw_w = sampling_net(ray_input)
+         pred_w = pred_raw_w / pred_raw_w.sum()
+-        
+-        # 9. Loss
++
++        # 5. Loss and update [S1]
+         loss = nn.MSELoss()(pred_w, new_w)
+-        
+-        optimizer.zero_grad()
++        opt_sampling.zero_grad()
+         loss.backward()
+-        optimizer.step()
+-
+-def render_terminerf(color_net, sampling_net, ray, N_pred=128, N_eq=64):
+-    """
+-    Phase 3: Joint Fine-Tuning / Inference.
+-    """
++        opt_sampling.step()
++
++        # Joint fine-tuning: sample points and update color net [S1]
++        sampled_indices = sample_from_distribution(pred_w, N_pred)
++        sampled_z = new_z[sampled_indices]
++        eq_z = torch.linspace(A, B, N_eq)
++        all_z = torch.cat([sampled_z, eq_z]).sort()[0]
++        sigma_all, color_all = color_net(all_z, ray_direction)
++        delta_all = all_z[1:] - all_z[:-1]
++        trans_all = torch.exp(-torch.cumsum(sigma_all[:-1] * delta_all, dim=0))
++        rendered_color = (trans_all * color_all[:-1] * delta_all).sum()
++        color_loss = nn.MSELoss()(rendered_color, gt_color)
++        opt_color.zero_grad()
++        color_loss.backward()
++        opt_color.step()
++
++def render(color_net, sampling_net, ray_origin, ray_direction, N_pred=128, N_eq=64):
++    """Inference: render a single ray [S1]."""
+     sampling_net.eval()
+     color_net.eval()
+-    
+-    # 1. Predict distribution
+-    ray_input = get_ray_input(ray)
++    A, B = compute_ray_segment(ray_origin, ray_direction)
++    ray_input = torch.cat([A, B], dim=-1)
+     pred_raw_w = sampling_net(ray_input)
+     pred_w = pred_raw_w / pred_raw_w.sum()
+-    
+-    # 2. Sample N_pred points stochastically from pred_w
+-    # Map probabilities to positions along the ray
+-    sampled_z = sample_from_distribution(pred_w, N_pred)
+-    
+-    # 3. Add N_eq equidistant points
+-    A, B = get_ray_boundaries(ray)
++
++    sampled_indices = sample_from_distribution(pred_w, N_pred)
++    fixed_points = get_centered_logarithmic_samples(N_pred, A, B)
++    sampled_z = fixed_points[sampled_indices]
+     eq_z = torch.linspace(A, B, N_eq)
+-    
+-    # 4. Combine and sort
+     all_z = torch.cat([sampled_z, eq_z]).sort()[0]
+-    
+-    # 5. Evaluate Color Network
+-    # Get sigma and color at all_z
+-    sigma, color = evaluate_color_net(color_net, ray, all_z)
+-    
+-    # 6. Volumetric Rendering
+-    delta = all_z[1:] - all_z[:-1]
+-    transmittance = torch.exp(-torch.cumsum(sigma[:-1] * delta, dim=0))
+-    final_color = (transmittance * color[:-1] * delta).sum() # Simplified aggregation
+-    
++
++    sigma_all, color_all = color_net(all_z, ray_direction)
++    delta_all = all_z[1:] - all_z[:-1]
++    trans_all = torch.exp(-torch.cumsum(sigma_all[:-1] * delta_all, dim=0))
++    final_color = (trans_all * color_all[:-1] * delta_all).sum()
+     return final_color
+ ```
+@@ -274,6 +220,6 @@
+ *   **Sampling Network Learning Rate:** $5 \cdot 10^{-4}$ [S1].
+ *   **Color Network Learning Rate:** $5 \cdot 10^{-5}$ [S1].
+-*   **Samples per Ray (Training):** 128 predicted + 64 equidistant [S1].
+-*   **Samples per Ray (Inference):** Variable, e.g., 32 [S1].
++*   **Samples per Ray (Training/Fine-Tuning):** 128 predicted + 64 equidistant [S1].
++*   **Samples per Ray (Inference):** Configurable based on network output size $N$ [S1].
+ 
+ ### Edge Cases and Pitfalls
+@@ -282,4 +228,9 @@
+ *   **Free Space Learning:** If only predicted samples are used, the sampling network may never learn geometry in unsampled regions (free space). Adding equidistant samples ensures density values are acquired for these regions [S1].
+ *   **False Positives:** A false-positive sampling network misprediction (predicting a sample in free space) poses no issue for the color network, as the density will be low [S1].
++
++## Subtopics
++
++### Robust Sampling Strategy
++A robust sampling strategy for the learned sampler that produces stable neural rendering using significantly fewer depth samples [S3]. The strategy enables rendering with 20 samples per ray while maintaining image quality on par with baselines relying on post-processing super resolution [S3].
+ 
+ ## Operating characteristics
+@@ -295,3 +246,4 @@
+ ## Sources
+ [S1] TermiNeRF: Ray Termination Prediction for Efficient Neural Rendering, https://doi.org/10.1109/3dv53792.2021.00118, fetched 2026-10-26
+-[S2] Recent Advances and Trends in Learning‐Based 3D Representations, https://doi.org/10.1111/cgf.70530, fetched 2026-10-26+[S2] Recent Advances and Trends in Learning‐Based 3D Representations, https://doi.org/10.1111/cgf.70530, fetched 2026-10-26
++[S3] What You See is What You GAN: Rendering Every Pixel for High-Fidelity Geometry in 3D GANs, https://doi.org/10.1109/cvpr52733.2024.02148, fetched 2026-10-26

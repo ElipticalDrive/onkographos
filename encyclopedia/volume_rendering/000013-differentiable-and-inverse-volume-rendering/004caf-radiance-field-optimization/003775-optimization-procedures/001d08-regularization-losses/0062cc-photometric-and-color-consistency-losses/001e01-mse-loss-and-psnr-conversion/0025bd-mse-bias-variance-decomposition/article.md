@@ -1,0 +1,106 @@
+# MSE Bias-Variance Decomposition
+Also called: Bias-Variance Decomposition of MSE, MSE Decomposition
+
+## Overview
+The MSE Bias-Variance Decomposition separates the Mean Squared Error (MSE) between a predicted value and a ground truth into two distinct components: the variance of the estimator and the squared bias. In the context of differentiable volume rendering, this decomposition is used to analyze the correctness of stochastic estimators (such as those used in Temporal Anti-Aliasing or inverse rendering), where variance corresponds to temporal instability (flickering) and bias corresponds to systematic reconstruction errors (ghosting) [S1, unofficial]. It sets apart from sibling metrics like PSNR or SSIM by providing a theoretical breakdown of error sources rather than a single scalar quality score, explaining *why* an optimization might converge to a suboptimal fixed point [S1, unofficial][S2].
+
+## How it works
+**Inputs and Outputs:**
+- Input: $F$, the output of the stochastic estimator (e.g., a noisy rendered pixel value); $G$, the true ground truth value.
+- Output: The scalar MSE value, decomposed into $V[F]$ (variance) and $\beta[F]^2$ (squared bias).
+
+**Data Structures:**
+- No specific data structures are required for the decomposition itself; it operates on scalar or vector estimates.
+
+**Mathematical Formulation:**
+The decomposition is defined by the following identity [S1, unofficial]:
+
+$$
+\text{MSE}[F] = \mathbb{E}[(F - G)^2] = V[F] + \beta[F]^2
+$$
+
+Where:
+- $\mathbb{E}[\cdot]$ denotes the expectation operator over the stochastic sampling process.
+- $V[F] = \mathbb{E}[(F - \mathbb{E}[F])^2]$ is the variance of the estimator $F$.
+- $\beta[F] = \mathbb{E}[F] - G$ is the bias of the estimator $F$ relative to the ground truth $G$.
+
+**Implementation Steps:**
+1. Compute the expected value of the estimator: $\mu_F = \mathbb{E}[F]$. In practice, this is approximated by averaging $N$ independent samples of the rendering process.
+2. Compute the bias: $\beta[F] = \mu_F - G$.
+3. Compute the variance: $V[F] = \mathbb{E}[(F - \mu_F)^2]$. In practice, this is approximated by calculating the sample variance of the $N$ independent samples.
+4. Compute the squared bias: $\beta[F]^2$.
+5. Sum the variance and squared bias to obtain the MSE: $\text{MSE} = V[F] + \beta[F]^2$.
+
+**Pitfalls:**
+- **Estimation of Expectation:** Accurately estimating $\mathbb{E}[F]$ requires a large number of samples $N$, which can be computationally expensive in volume rendering [S2].
+- **Non-L2 Losses:** The decomposition strictly applies to MSE. When using non-L2 losses (e.g., L1), the bias term in the loss derivative can cause undesirable convergence, as the estimator's bias interacts with the non-linearity of the loss function [S2].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def mse_bias_variance_decomposition(estimator_samples, ground_truth):
+    """
+    Decomposes MSE into Variance and Squared Bias.
+    
+    Args:
+        estimator_samples (list[float]): A list of N independent samples from the stochastic estimator F.
+        ground_truth (float): The true value G.
+        
+    Returns:
+        dict: Contains 'mse', 'variance', 'bias', 'squared_bias'.
+    """
+    n = len(estimator_samples)
+    if n == 0:
+        raise ValueError("Estimator samples cannot be empty.")
+    
+    # Step 1: Compute expected value of the estimator (mean of samples)
+    # Note: In a real-time or iterative setting, this might be a running average.
+    # Here we assume a batch of independent samples for analysis.
+    expected_f = sum(estimator_samples) / n
+    
+    # Step 2: Compute bias
+    bias = expected_f - ground_truth
+    
+    # Step 3: Compute variance
+    # Variance = E[(F - E[F])^2]
+    squared_diffs = [(f - expected_f) ** 2 for f in estimator_samples]
+    variance = sum(squared_diffs) / n
+    
+    # Step 4: Compute squared bias
+    squared_bias = bias ** 2
+    
+    # Step 5: Compute MSE
+    mse = variance + squared_bias
+    
+    return {
+        'mse': mse,
+        'variance': variance,
+        'bias': bias,
+        'squared_bias': squared_bias
+    }
+```
+
+## Subtopics
+
+### Brute Force Debiased Estimator
+A theoretical estimator used to demonstrate that bias causes undesirable convergence in non-L2 loss optimization [S2]. It separately computes and subtracts the bias term from the loss derivative [S2]. The formula for the debiased loss derivative is:
+$$
+\langle \partial \mathcal{L}(F_\theta) \rangle_{\text{BFD}} = \partial \mathcal{L}(\langle F_\theta \rangle) + \partial \mathcal{L}(\mathbb{E}[\langle F_\theta \rangle]) - \mathbb{E}[\partial \mathcal{L}(\langle F_\theta \rangle)]
+$$
+where $\langle F_\theta \rangle$ is the noisy rendering estimate, $\mathbb{E}[\langle F_\theta \rangle]$ is its expected value, and $\mathcal{L}$ is the loss function [S2]. This estimator shares the variance characteristics of the original but eliminates bias, allowing optimization to converge to the reference answer [S2]. It is not a practical solution for implementation because it requires computing expected values separately, which is computationally prohibitive [S2].
+
+## Operating characteristics
+- **Time Complexity:** Computing the decomposition requires $O(N)$ samples to estimate the mean and variance, where $N$ is the number of independent samples. This is comparable to the cost of rendering the estimator itself if samples are reused.
+- **Memory Complexity:** $O(N)$ to store the samples for variance estimation, or $O(1)$ if using Welford’s algorithm for online variance calculation.
+- **Strengths:** Provides a clear diagnostic tool for understanding error sources in stochastic rendering. It explains why certain optimizations fail (due to bias) even if variance is low [S1, unofficial][S2].
+- **Limitations:** Requires multiple samples to estimate the expectation, which is expensive in volume rendering [S2]. The decomposition is specific to MSE; it does not directly apply to other loss functions without modification [S2].
+- **When to use:** When analyzing the convergence behavior of differentiable volume rendering, particularly when using non-L2 losses or temporal anti-aliasing techniques [S1, unofficial][S2].
+- **When not to use:** When a single scalar metric for image quality is sufficient (use PSNR/SSIM) or when computational budget does not allow for multiple samples per pixel [S2].
+
+## Background
+The bias-variance decomposition of MSE is a fundamental concept in statistical estimation theory [S1, unofficial]. In the context of volume rendering, it was explicitly applied to analyze Temporal Anti-Aliasing (TAA) algorithms, where ghosting is mapped to bias and flickering to variance [S1, unofficial]. It was further utilized in inverse rendering research to demonstrate that bias in stochastic estimators can lead to suboptimal convergence when using non-L2 losses, motivating the development of control variate methods [S2].
+
+## Sources
+[S1] Temporal Anti-Aliasing for Real-Time Froxel-Based Volumetric Rendering - Advances in volumetric temporal anti-aliasing for real-time rendering of participating media, https://openalex.org/W7218067689, fetched 2026-11-01 (unofficial)
+[S2] Recursive Control Variates for Inverse Rendering, https://doi.org/10.1145/3592139, fetched 2026-10-27

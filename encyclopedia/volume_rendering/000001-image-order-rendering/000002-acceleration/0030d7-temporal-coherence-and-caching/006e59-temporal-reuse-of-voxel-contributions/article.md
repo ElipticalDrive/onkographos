@@ -1,0 +1,110 @@
+# Temporal Reuse of Voxel Contributions
+Also called: Temporal caching for volume rendering
+
+## Overview
+Temporal reuse of voxel contributions is an optimization for animated sequences that caches segment integrals from prior frames to update only changed regions, optimizing performance for time-varying data [S1, unofficial]. It sets itself apart from sibling methods like [Inter-Ray Coherency](1030-inter-ray-coherency.md) by focusing on temporal stability of accumulated radiance rather than spatial ray-path correlation, and differs from [Reprojection with Temporal Accumulation](8337-reprojection-with-temporal-accumulation.md) by caching volumetric integration results rather than final pixel colors.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Current volume data $V_t$, previous frame's cached segment integrals $C_{t-1}$, camera transform $M_t$, and a change detection mask $D$ identifying regions where $V_t$ differs from $V_{t-1}$.
+*   **Output:** Rendered image $I_t$ and updated cache $C_t$.
+
+**Data Structures:**
+The cache $C$ stores pre-integrated segment contributions. For a given ray, the cache typically holds:
+*   `entry_pos`: 3D float vector, the entry point into the volume.
+*   `exit_pos`: 3D float vector, the exit point from the volume.
+*   `accumulated_transmittance`: float, the transmittance at the exit point.
+*   `accumulated_color`: 3D float vector, the accumulated color contribution.
+*   `valid`: boolean, indicating if the cache entry is valid for the current frame's ray.
+
+**Numbered Steps:**
+1.  **Change Detection:** Identify voxels or subvolumes that have changed between frame $t-1$ and $t$. This can be done by comparing scalar field values or using a dirty-region tracking mechanism [S1, unofficial].
+2.  **Ray Casting:** For each pixel, cast a ray through the volume.
+3.  **Cache Lookup:** Determine if the ray's path through the volume overlaps with cached segments from $C_{t-1}$.
+    *   If the ray path is identical and the volume data is unchanged, reuse the cached segment integral.
+    *   If the volume data has changed in the overlapping region, mark the cached segment as invalid or partially invalid.
+4.  **Integration:**
+    *   For valid cached segments, use the stored `accumulated_transmittance` and `accumulated_color` to skip integration over that portion of the ray.
+    *   For invalid or new segments, perform standard volume integration (e.g., ray marching) to compute new contributions.
+5.  **Cache Update:** Store the computed segment integrals for the current frame into $C_t$ for potential reuse in frame $t+1$.
+6.  **Compositing:** Composite the contributions from cached and newly computed segments to form the final pixel color.
+
+**Formulas:**
+The standard volume rendering integral is:
+$$ C = \int_{t_0}^{t_1} T(t) \cdot c(t) \cdot \sigma(t) \, dt $$
+where $T(t) = \exp\left(-\int_{t_0}^{t} \sigma(\tau) \, d\tau\right)$ is the transmittance, $c(t)$ is the color, and $\sigma(t)$ is the density.
+
+With temporal reuse, if a segment $[t_a, t_b]$ is cached:
+$$ C_{total} = C_{cached} + T(t_b) \cdot \int_{t_b}^{t_1} T'(t) \cdot c(t) \cdot \sigma(t) \, dt $$
+where $C_{cached}$ is the pre-computed contribution from $[t_a, t_b]$, and $T(t_b)$ is the transmittance at the start of the new integration.
+
+**Parameters:**
+*   **Cache Size:** Not given in the sources. Depends on memory constraints and temporal coherence length.
+*   **Change Threshold:** Not given in the sources. Determines when a voxel is considered "changed."
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Reusing cached transmittance can accumulate floating-point errors over many frames. [G] Consider periodically resetting the cache or using higher precision for transmittance accumulation.
+*   **Boundaries:** Ray entry/exit points must be computed with sufficient precision to match cached segments. [G] Use epsilon tolerances when comparing positions.
+*   **Degenerate Input:** If the volume changes drastically (e.g., explosion), the cache becomes invalid. [S1, unofficial] A robust change detection mechanism is required to avoid visual artifacts.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_frame(volume_t, cache_prev, camera_t, change_mask):
+    image = zeros_like(screen)
+    cache_curr = {}
+    
+    for pixel in screen_pixels:
+        ray = cast_ray(pixel, camera_t)
+        
+        # Check for cache hit
+        cached_segment = cache_prev.get(ray.id)
+        
+        if cached_segment and is_valid(cached_segment, volume_t, change_mask):
+            # Reuse cached contribution
+            color = cached_segment.accumulated_color
+            transmittance = cached_segment.accumulated_transmittance
+            start_t = cached_segment.exit_pos
+        else:
+            # Compute from scratch or from last valid point
+            color = vec3(0.0)
+            transmittance = 1.0
+            start_t = ray.entry_pos
+        
+        # Integrate remaining ray
+        for t in ray_march(start_t, ray.exit_pos, step_size):
+            density = sample_volume(volume_t, ray.position_at(t))
+            if density > 0:
+                color += transmittance * sample_color(volume_t, t) * density * step_size
+                transmittance *= exp(-density * step_size)
+        
+        image[pixel] = color
+        cache_curr[ray.id] = CacheEntry(start_t, ray.exit_pos, transmittance, color)
+        
+    return image, cache_curr
+```
+
+## Subtopics
+
+### Time-step caching for volume animation
+A circular buffer mechanism that stores previous volume data and gradients to allow temporal interpolation or reuse without recomputation [S2, unofficial]. It sets itself apart by storing full volume data snapshots rather than just segment integrals, enabling more complex temporal interpolation. Choose this when the volume data changes smoothly over time and interpolation is feasible.
+*   **Layout:** Per subvolume: `oldTimeStep[tstepCache]` (int), `oldData[tstepCache]` (pointer to voxel data), `oldGrad[tstepCache]` (pointer to gradient data), `oldTSpos` (int, current write index) [S2, unofficial].
+*   **Pitfall:** Circular buffer overwrites oldest entries when full. The code does not implement a replacement policy beyond simple modulo wrapping, meaning older timesteps are permanently lost once the buffer is full [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ where $N$ is the number of pixels, but with a reduced constant factor proportional to the fraction of unchanged voxels.
+*   **Memory Complexity:** $O(V)$ where $V$ is the number of voxels, for storing the cache.
+*   **Measured Performance:** Not given in the sources.
+*   **Scaling:** Scales well with temporal coherence. Performance gain is higher when the volume changes slowly.
+*   **Strengths:** Significant speedup for slowly changing volumes. Reduces redundant computation.
+*   **Limitations:** Requires additional memory for caching. Can introduce visual artifacts if change detection is inaccurate.
+*   **When to use:** Animated sequences with slow temporal changes (e.g., fluid simulation, medical imaging over time).
+*   **When not to use:** Highly dynamic scenes with rapid changes, or memory-constrained environments.
+
+## Background
+Temporal reuse of voxel contributions was introduced as an optimization for animated sequences to cache segment integrals from prior frames [S1, unofficial]. It is particularly useful for time-varying data like fluid simulations, where large portions of the volume remain unchanged between frames. This method trades initial precomputation time for real-time rendering speeds, though accuracy depends on silhouette fidelity and may introduce minor boundary errors in highly opaque scenes [S1, unofficial].
+
+## Sources
+[S1] volume rendering, https://grokipedia.com/page/Volume_rendering, fetched 2026-10-26 (unofficial)
+[S2] ouyting/simian-spacemonkey, https://github.com/ouyting/simian-spacemonkey, fetched 2026-10-27 (unofficial)

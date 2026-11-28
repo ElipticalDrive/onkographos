@@ -1,0 +1,134 @@
+# MR-TF Approach
+
+Also called: interactive ROI-based DVR in MR-HMDs, intuitive and semi-automated MR-TF approach
+
+## Overview
+The MR-TF approach is an interactive method for Direct Volume Rendering (DVR) in Mixed Reality Head-Mounted Displays (MR-HMDs) that uses biometric interfaces for Region of Interest (ROI) selection and optimizes Transfer Function (TF) parameters to match a target visibility, weighted by color contrast with physical backgrounds [S1]. It distinguishes itself from other optimization methods by integrating real-time biometric input (eye-gaze and finger pointing) for ROI definition and employing a Nelder-Mead simplex optimization on a parameterized tent-shaped TF to balance visibility tolerance against parameter stability [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** 3D volume data (scalar intensity field), MR-HMD tracking data (eye convergence point, head center point, finger pointing vector), user-defined target visibility multiple $V_T$ (hyperparameter), and initial TF parameters $\theta$ [S1].
+*   **Output:** Optimized TF parameters $\theta^*$ and the resulting DVR image [S1].
+
+**Data Structures:**
+*   **Volume Data:** 3D grid of scalar intensity values [S1].
+*   **Transfer Function:** A set of tent-shaped components mapping intensity to opacity. Each component is defined by its peak intensity value, peak opacity, and fixed base opacity. The base remains unchanged during optimization [S1].
+*   **ROI Mask:** Binary mask identifying voxels belonging to the selected Region of Interest, generated via region growing [S1].
+
+**Steps:**
+
+1.  **Biometric ROI Selection:** Generate a gazing line by connecting the eye convergence point and the MR-HMD center point [S1]. Calculate the 3D intersection point between this gazing line and the user's finger pointing vector [S1]. Display a yellow sphere at the intersection point for validation [S1]. Allow manual adjustment of the 3D position in 5-mm units along each axis via a control panel if precise placement is required [S1].
+2.  **ROI Segmentation:** Use the validated 3D intersection point as the seed voxel for a region growing algorithm [S1]. Retrieve the intensity value $I_{\text{seed}}$ of the seed voxel [S1]. Define a threshold range $[I_{\text{seed}} - \Delta, I_{\text{seed}} + \Delta]$ [S1]. The threshold level $L$ is selected by the user (e.g., via voice command) [S1]. Level 1 corresponds to $\Delta = 30$ intensity units, increasing by 30 steps per level up to a maximum level of 10 (i.e., $\Delta = 30 \times L$) [S1]. Iteratively propagate to adjacent voxels [S1]. If a neighbor's intensity falls within the threshold range, add it to the ROI and continue propagation [S1]. Stop when no neighboring voxels fall within the range [S1].
+3.  **Initial TF Setup:** Initialize the TF as a set of tent-shaped components [S1]. The intensity range representing the ROI is mapped to opacity parameters [S1]. The tent shape is chosen to depict iso-surfaces and allow semi-transparent exhibition of multiple ROIs [S1]. The bottom sides of the tents (base opacity) remain unchanged during optimization [S1]. Only the peak positions and heights are optimized [S1].
+4.  **Visibility Computation:** Perform DVR using the current TF parameters $\theta$ to compute the current visibility $V_C$ of the ROI [S1]. $V_C$ is derived from the rendered image, comparing the ROI's appearance against the background [S1].
+5.  **TF Parameter Optimization:** Minimize the loss function $F(\theta)$ using the Nelder-Mead simplex method [S1]:
+    $$ F(\theta) = \omega F_T(\theta) + (1 - \omega) F_M(\theta) $$
+    Where:
+    *   $\theta$: Set of opacity parameters of the initial TF (specifically the peaks of the tent-shaped components) [S1].
+    *   $\omega$: Weight for the visibility tolerance [S1].
+    *   $F_T(\theta)$: Visibility tolerance loss, calculated as the squared error between the user-assigned target visibility $V_T$ and the computed visibility $V_C$:
+        $$ F_T(\theta) = (V_T - V_C)^2 $$
+    *   $F_M(\theta)$: Tolerance of TF movements, penalizing large changes in parameters to ensure stability [S1].
+    The target visibility $V_T$ is an intuitive hyperparameter expressed as a multiple of the initial visibility of the ROI, set via voice commands [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def mr_tf_approach(volume, eye_convergence, head_center, finger_origin, finger_direction, target_visibility_multiple, omega):
+    # Step 1: Biometric ROI Selection
+    gazing_dir = head_center - eye_convergence
+    intersection_point = intersect_3d_lines(eye_convergence, gazing_dir, finger_origin, finger_direction)
+    validated_point = get_user_validated_point(intersection_point, step=5.0)
+
+    # Step 2: ROI Segmentation
+    seed_idx = get_voxel_index(validated_point, volume.shape)
+    seed_intensity = volume[seed_idx]
+    level = get_user_selected_level()
+    delta = 30 * level
+    threshold_range = (seed_intensity - delta, seed_intensity + delta)
+    roi_mask = region_growing_bfs(volume, seed_idx, threshold_range)
+
+    # Step 3: Initial TF Setup
+    initial_tf = initialize_tent_tf(roi_mask, volume)
+    theta = [comp['peak_opacity'] for comp in initial_tf]
+    prev_theta = theta.copy()
+    initial_visibility = compute_visibility_dvr(volume, initial_tf, roi_mask)
+    target_visibility = target_visibility_multiple * initial_visibility
+
+    # Step 4 & 5: Optimization
+    def loss_function(params):
+        tf_params = initial_tf.copy()
+        for i, comp in enumerate(tf_params):
+            comp['peak_opacity'] = params[i]
+        current_visibility = compute_visibility_dvr(volume, tf_params, roi_mask)
+        ft = (target_visibility - current_visibility) ** 2
+        fm = sum((p - prev_p)**2 for p, prev_p in zip(params, prev_theta))
+        return omega * ft + (1 - omega) * fm
+
+    # Nelder-Mead simplex method minimization [G]
+    optimized_theta = nelder_mead_minimize(loss_function, theta)
+    return optimized_theta
+
+# Helper functions (self-contained standard implementations)
+def intersect_3d_lines(p1, d1, p2, d2):
+    # Standard 3D line-line intersection solver
+    cross_d = np.cross(d1, d2)
+    if np.linalg.norm(cross_d) < 1e-9: return p1  # Parallel
+    return p1 + np.dot(np.cross(p2 - p1, d2), cross_d) / np.dot(cross_d, cross_d) * d1
+
+def get_user_validated_point(point, step=5.0):
+    # UI loop: displays validation sphere, returns point adjusted in 5-mm increments
+    return point  # Simplified for pseudocode; handles 5-mm grid snapping
+
+def get_voxel_index(coord, shape):
+    return tuple(int(round(c / s)) for c, s in zip(coord, shape))
+
+def region_growing_bfs(volume, seed_idx, threshold_range):
+    mask = np.zeros(volume.shape, dtype=bool)
+    queue = [seed_idx]
+    while queue:
+        idx = queue.pop(0)
+        if mask[idx]: continue
+        if threshold_range[0] <= volume[idx] <= threshold_range[1]:
+            mask[idx] = True
+            for neighbor in get_6_neighbors(idx, volume.shape):
+                if not mask[neighbor]: queue.append(neighbor)
+    return mask
+
+def initialize_tent_tf(roi_mask, volume):
+    # Creates tent-shaped components spanning the ROI intensity range
+    min_i, max_i = volume[roi_mask].min(), volume[roi_mask].max()
+    return [{'peak_intensity': (min_i + max_i) / 2, 'peak_opacity': 1.0, 'base_opacity': 0.0}]
+
+def compute_visibility_dvr(volume, tf_params, roi_mask):
+    # Simple DVR accumulation and ROI visibility metric
+    opacity = np.interp(volume, [tf_params[0]['peak_intensity']-100, tf_params[0]['peak_intensity'], tf_params[0]['peak_intensity']+100], 
+                        [tf_params[0]['base_opacity'], tf_params[0]['peak_opacity'], tf_params[0]['base_opacity']])
+    rendered = np.sum(opacity * volume)
+    roi_rendered = np.sum(opacity[roi_mask] * volume[roi_mask])
+    return roi_rendered / (rendered + 1e-9)
+
+def nelder_mead_minimize(func, x0):
+    # Standard derivative-free Nelder-Mead optimizer [G]
+    pass
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Manual adjustment is limited to 5-mm units [S1].
+*   **Threshold Selection:** The threshold level is discrete (1 to 10), which may lead to coarse ROI segmentation if the intensity variation is high [S1].
+*   **Computational Load:** The method is designed for low-spec commercial MR-HMDs, relying on simple region growing and Nelder-Mead, which may not scale well to very large volumes or complex TF shapes [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Depends on the region growing algorithm (typically linear in the number of voxels in the ROI) and the Nelder-Mead optimization iterations [S1].
+*   **Memory Complexity:** Requires storage for the volume data, ROI mask, and TF parameters [S1].
+*   **Performance:** Designed for on-device implementation on low-spec MR-HMDs, suggesting real-time or near-real-time interactivity [S1].
+*   **Strengths:** Intuitive user interaction via biometrics; semi-automated ROI selection; robust to noise due to region growing; simple TF parameterization [S1].
+*   **Limitations:** Limited to scalar intensity-based TFs; threshold-based ROI segmentation may not capture complex structures; Nelder-Mead may converge slowly or to local minima; visibility metric computation is non-trivial and not fully detailed [S1].
+
+## Background
+The MR-TF approach was introduced in 2025 by the authors of the paper "An intuitive and semi-automated transfer function design for interactive region of interest-based direct volume rendering in mixed reality head mounted devices" [S1]. It addresses the challenge of interactive volume visualization in Mixed Reality environments, where users need to intuitively select and highlight specific regions of interest (ROIs) within complex 3D data [S1]. The method builds on previous work in biometric interaction for VR/MR and automatic TF optimization [S1].
+
+## Sources
+[S1] An intuitive and semi-automated transfer function design for interactive region of interest-based direct volume rendering in mixed reality head mounted devices, https://doi.org/10.1007/s10055-025-01121-4, fetched 2026-10-30

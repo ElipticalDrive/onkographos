@@ -1,0 +1,138 @@
+# Semantic Ray (S-Ray)
+
+Also called: S-Ray
+
+## Overview
+Semantic Ray (S-Ray) is a method for learning a generalizable semantic field that infers semantic labels on novel viewpoints across unseen scenes, addressing the overfitting and lack of generalization inherent in single-scene semantic NeRFs like Semantic-NeRF [S1]. It distinguishes itself by training a unified model on multiple scenes and utilizing a Cross-Reprojection Attention module to exploit semantic context from multiple views, rather than estimating semantics from a single ray [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A set of $m$ input views with known camera poses and semantic labels; a query ray $\mathbf{r}$ from a novel viewpoint.
+*   **Outputs:** A rendered semantic map (logits or probabilities) and color image for the novel view.
+
+**Data Structures:**
+*   **Contextual Space ($\mathbf{M}$):** A matrix of shape $m \times N \times C$, where $m$ is the number of input views, $N$ is the number of sampled points along the reprojected ray, and $C$ is the channel dimension. $\mathbf{M} = [\mathbf{F}_1, \mathbf{F}_2, \dots, \mathbf{F}_m]^T$.
+*   **Radial Feature ($\mathbf{F}_i$):** A matrix of shape $N \times C$ representing the features for the $i$-th view along the reprojected ray. $\mathbf{F}_i = [\mathbf{f}_i(r^*(z_1)), \mathbf{f}_i(r^*(z_2)), \dots, \mathbf{f}_i(r^*(z_N))]$, where $r^*(z_k)$ denotes the reprojected position of the $k$-th sample point.
+
+**Parameters:**
+*   $N$: Number of random quadrature points between near plane $t_n$ and far plane $t_f$ used to approximate continuous integration [S1].
+*   $H$: Number of heads in the intra-view radial attention module [S1].
+*   $C$: Channel dimension of the feature vectors [S1].
+
+**Steps:**
+1.  **Build Initial 3D Contextual Space:**
+    For each input view $i \in \{1, \dots, m\}$, reproject the query ray $\mathbf{r}$ to the view. Since the emitted ray is virtual, the network models the uncertainty of reprojection, obtaining a reprojected ray showing possible positions rather than exact points [S1]. Apply a CNN-based module to extract contextual features for sampled points along this reprojected ray, forming $\mathbf{F}_i$ [S1]. Assemble these into $\mathbf{M}$ [S1].
+
+2.  **Cross-Reprojection Attention:**
+    Decompose the dense attention over $\mathbf{M}$ into two lightweight modules to reduce computational cost [S1]:
+    *   **Intra-view Radial Attention:** Learns relations among sampled points within each view. For each $\mathbf{F}_i \in \mathbb{R}^{N \times C}$, compute attention with $H$ heads:
+        $$ \text{Attention}(\mathbf{Q}, \mathbf{K}, \mathbf{V}) = \text{softmax}\left(\frac{\mathbf{Q}\mathbf{K}^T}{\sqrt{d_k}}\right)\mathbf{V} $$
+        where $\mathbf{Q}, \mathbf{K}, \mathbf{V}$ are derived from $\mathbf{F}_i$ [S1].
+    *   **Cross-view Sparse Attention:** Distinguishes the same point across different viewpoints and scores the semantic contribution of each view [S1].
+    The output is a refined contextual space $\mathbf{M}'$ [S1].
+
+3.  **Semantic Ray Construction:**
+    Adopt a **Semantic-Aware Weight Net** to learn the significance of each view. This net assigns weights to the views in $\mathbf{M}'$ to construct the semantic ray, effectively aggregating the refined contextual information [S1].
+
+4.  **Geometry-Aware Rendering:**
+    Leverage a **Geometry-Aware Net** to predict volume density $\sigma$ and color $\mathbf{c}$ [S1]. Render the semantics along the query ray using the weighted semantic features from Step 3 and the density/color from Step 4. The color rendering follows the standard volume rendering equation [S1]:
+    $$ \hat{C}(\mathbf{r}; \theta) = \sum_{k=1}^{N} T(t_k) \alpha(\sigma(t_k) \delta_k) \mathbf{c}(t_k) $$
+    where $T(t_k) = \exp\left(-\sum_{k'=1}^{k-1} \sigma(t_{k'}) \delta_{k'}\right)$, $\alpha(x) = 1 - \exp(-x)$, and $\delta_k = t_{k+1} - t_k$ [S1]. The semantic output is rendered similarly, using the aggregated semantic features instead of $\mathbf{c}(t_k)$ [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def semantic_ray_rendering(input_views, query_ray, camera_poses):
+    """
+    input_views: List of m images with semantic labels.
+    query_ray: Ray origin and direction for the novel view.
+    camera_poses: Poses of the input views.
+    """
+    m = len(input_views)
+    N = 128  # Number of quadrature points [S1]
+    C = 256  # Channel dimension [S1]
+    
+    # Step 1: Build Initial 3D Contextual Space
+    M = []
+    for i in range(m):
+        # Reproject query ray to view i
+        # Model uncertainty by sampling points along the reprojected ray
+        reprojected_ray = reproject_ray(query_ray, camera_poses[i])
+        samples = sample_along_ray(reprojected_ray, N)
+        
+        # Extract features using CNN
+        # Note: The source mentions a CNN-based module but does not specify architecture details [S1]
+        # [G] Assuming a standard CNN feature extractor F_cnn
+        F_i = extract_features(input_views[i], samples) 
+        M.append(F_i)
+        
+    M = stack(M) # Shape: (m, N, C)
+    
+    # Step 2: Cross-Reprojection Attention
+    # Intra-view Radial Attention
+    M_refined = []
+    for i in range(m):
+        F_i = M[i] # Shape: (N, C)
+        # Standard Multi-Head Attention
+        Q, K, V = linear_heads(F_i, H=8) # H is number of heads [S1]
+        attn_output = multi_head_attention(Q, K, V)
+        M_refined.append(attn_output)
+        
+    M_refined = stack(M_refined) # Shape: (m, N, C)
+    
+    # Cross-view Sparse Attention
+    # [G] The source describes the function (distinguishing points across views, scoring contribution)
+    # but does not provide the exact mathematical formulation for the cross-view module.
+    # We assume a sparse attention mechanism over the view dimension m.
+    M_final = cross_view_sparse_attention(M_refined)
+    
+    # Step 3: Semantic Ray Construction
+    # Semantic-Aware Weight Net
+    weights = semantic_weight_net(M_final) # Shape: (m, 1) or (m,)
+    # Aggregate features weighted by view significance
+    semantic_ray_features = aggregate_features(M_final, weights)
+    
+    # Step 4: Geometry-Aware Rendering
+    # Geometry-Aware Net
+    # [G] The source mentions a "Geometry-Aware Net" but does not specify its inputs/outputs beyond density/color.
+    # We assume it takes the query ray and possibly the semantic features to predict sigma and color.
+    sigma, color = geometry_aware_net(query_ray, semantic_ray_features)
+    
+    # Render Color
+    color_rendered = volume_render_color(query_ray, sigma, color, N)
+    
+    # Render Semantics
+    # [G] The source states semantics are rendered along the query ray using the semantic ray features.
+    # The exact weighting function for semantic rendering is not explicitly detailed beyond the weight net.
+    # We assume a similar volume rendering process using the aggregated semantic features.
+    semantic_rendered = volume_render_semantic(query_ray, sigma, semantic_ray_features, N)
+    
+    return color_rendered, semantic_rendered
+```
+
+**Edge Cases and Pitfalls:**
+*   **Computational Cost:** Directly performing dense attention over sampled points on each reprojected ray of multiple views suffers from heavy computational costs [S1]. The decomposition into intra-view and cross-view attention is critical to mitigate this [S1].
+*   **Reprojection Uncertainty:** Since the emitted ray from the query point is virtual, the network cannot obtain the exact reprojected point on each view, but a reprojected ray showing possible positions. The network must model this uncertainty [S1].
+*   **Overfitting:** Unlike Semantic-NeRF, which relies on positional encoding and is prone to overfitting the current scene, S-Ray is designed to generalize [S1].
+
+## Subtopics
+
+### SegNeRF
+SegNeRF addresses generalization by learning a semantic field and performing reconstruction and segmentation in a self-supervised fashion from a single view, allowing for semantic object/scene completion [S2].
+
+## Operating characteristics
+*   **Time Complexity:** The decomposition of dense attention into intra-view radial and cross-view sparse attention reduces computational costs compared to dense multi-view attention [S1].
+*   **Memory Complexity:** Storing the contextual space $\mathbf{M}$ requires $O(m \cdot N \cdot C)$ memory [S1].
+*   **Performance:** S-Ray achieves comparable quality to Semantic-NeRF's result for 100k iterations per-scene optimization by fine-tuning on more images for only 10 min (2k iterations) [S1].
+*   **Strengths:** Generalizes to unseen scenes; exploits rich semantic context from multiple views; efficient attention mechanism [S1].
+*   **Limitations:** Requires multiple input views for the cross-reprojection attention; relies on the quality of the CNN feature extractor for the initial contextual space [S1].
+*   **When to use:** When generalizing semantic understanding across diverse, unseen scenes is required, and multiple input views are available [S1].
+*   **When not to use:** When only a single view is available (consider SegNeRF [S2]) or when per-scene optimization is feasible and generalization is not needed (Semantic-NeRF [S1]).
+
+## Background
+Semantic Ray (S-Ray) was introduced by Fangfu Liu, Chubin Zhang, Yu Zheng, and Yueqi Duan from Tsinghua University in March 2023 [S1]. It was proposed to address the limitations of Semantic-NeRF, which trains one specific model for each scene and relies on positional encoding prone to overfitting [S1]. S-Ray trains one unified model on multiple scenes and generalizes to unseen scenes [S1]. It was evaluated on synthetic scenes from the Replica dataset and real-world scenes from the ScanNet dataset [S1].
+
+## Sources
+[S1] Semantic Ray: Learning a Generalizable Semantic Field with Cross-Reprojection Attention, https://doi.org/10.1109/cvpr52729.2023.01668, fetched 2026-10-29
+[S2] Semantically-aware Neural Radiance Fields for Visual Scene Understanding: A Comprehensive Review, https://link.springer.com/article/10.1007/s11263-025-02663-5, fetched 2026-10-27

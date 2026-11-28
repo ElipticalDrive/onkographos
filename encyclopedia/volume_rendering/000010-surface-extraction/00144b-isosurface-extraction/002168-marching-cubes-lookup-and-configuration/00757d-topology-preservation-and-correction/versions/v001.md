@@ -1,0 +1,36 @@
+# Topology Preservation and Correction
+
+Also called: Topological Correction, Manifold Marching Cubes
+
+## Overview
+This family addresses the topological inconsistencies (holes, non-manifold vertices, and cracks) inherent in the standard Marching Cubes lookup tables, particularly in ambiguous cases and specific adjacent configurations like Case 3/Case 6. It differs from [Lookup Table and Ambiguity Handling](10327-lookup-table-and-ambiguity-handling.md) by focusing on explicit connectivity corrections or modified tables to ensure manifold output, and from [Algorithmic Modifications and Improvements](11203-algorithmic-modifications-and-improvements.md) by targeting topological validity rather than general performance or accuracy.
+
+## Shared principles
+The family relies on the standard Marching Cubes framework defined in [Marching Cubes Lookup and Configuration](2518-marching-cubes-lookup-and-configuration.md), specifically the `edgeTable` and `triangleTable` structures. The core deviation lies in modifying the `triangleTable` entries or the decision logic for specific case indices to enforce manifold connectivity.
+
+1.  **Manifold Constraint**: The primary goal is to ensure that every edge in the resulting mesh is shared by exactly two triangles, preventing holes and non-manifold vertices [S1].
+2.  **Vertex Valence**: Some variants, such as Modified Marching Cubes, explicitly aim to limit the maximum vertex valence to six to simplify connectivity coding and mesh processing [S1].
+3.  **Adjacency Awareness**: Correction methods often require checking the configuration of neighboring voxels to detect inconsistencies that arise from local ambiguities [S1].
+
+## Subtopics
+
+### [Marching Cubes with Topological Correction (Case 6c)](4349-marching-cubes-with-topological-correction-case-6c.md)
+A variant that resolves topological holes specifically when a Case 3 cube is adjacent to a Case 6 cube. It differs from standard Marching Cubes by detecting this specific adjacency and swapping the triangle connectivity for the Case 6 cube to an alternate facetization (Case 6c). It differs from [Marching Cubes 2](1393-marching-cubes-2.md) by focusing on this specific topological correction rather than a general lookup table reimplementation.
+*   **When to choose**: Use when the scalar field contains saddle points leading to Case 3/Case 6 adjacencies and strict manifold continuity is required without global remeshing.
+*   **Link**: [Marching Cubes with Topological Correction (Case 6c)](4349-marching-cubes-with-topological-correction-case-6c.md)
+
+### [Modified Marching Cubes](22923-modified-marching-cubes.md)
+A method that replaces the standard lookup tables with modified versions (e.g., Lengyel's tables) to regularize mesh connectivity, achieving a maximum vertex valence of six. It solves topological inconsistencies and potential holes in terrain generation caused by the original Marching Cubes lookup tables. By reconsidering the triangulation of voxel cubes, MMC improves mesh topology and significantly reduces connectivity coding costs compared to the original algorithm.
+*   **When to choose**: Use when a consistent manifold mesh with low vertex valence is needed for efficient connectivity coding or terrain rendering.
+*   **Link**: [Modified Marching Cubes](22923-modified-marching-cubes.md)
+
+### Topology-Preserving Marching Cubes
+An efficiency improvement that selects one valid topology from ambiguous cases to minimize topological or combinatorial measures, such as total triangle count, number of connected shells, or total genus [S1].
+*   **Definition**: Selects the topology that minimizes the chosen measure [S1].
+*   **Step**: Positions each vertex of the isosurface at the midpoints of the lattice edges joining inside and outside samples, preserving topological and combinatorial properties while improving efficiency [S1].
+
+## Background
+The original Marching Cubes algorithm by Lorensen and Cline (1987) introduced lookup tables that could produce non-manifold geometries in ambiguous cases (46, 47, 98, 99, 210, 213, 214, 215) and specific adjacent configurations [G]. Research by Andújar et al. focused on improving efficiency by selecting valid topologies that minimize measures like triangle count and genus, suggesting vertex placement at edge midpoints [S1]. Lee et al. proposed Modified Marching Cubes (MMC) to regularize connectivity, addressing holes in terrain generation [S1]. The Case 6c correction specifically targets the hole formation between Case 3 and Case 6 cubes [S1].
+
+## Sources
+[S1] Evaluation of Manifold Dual Contouring Algorithms Based on K-d Tree and Octree Data Structures, https://doi.org/10.31449/inf.v48i3.5420, fetched 2026-10-26

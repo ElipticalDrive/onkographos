@@ -1,0 +1,79 @@
+# Geometry-Guided Appearance Modeling
+
+Also called: Appearance module, GAM
+
+## Overview
+Geometry-Guided Appearance Modeling (GAM) is a method for predicting view-dependent colors in 3D Gaussian Splatting by incorporating geometric cues, specifically surface normals and learned geometric features derived from a Signed Distance Field (SDF) [S1]. It addresses the failure of standard appearance modeling, which relies solely on spatial position and viewing direction, to capture fine-grained geometry and reflective surfaces [S1]. Unlike siblings that optimize fixed Spherical Harmonics coefficients or use post-processing transformations, GAM replaces the SH representation with a geometry-conditioned Multi-Layer Perceptron (MLP) [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Gaussian centroid position $\mathbf{p}_k$, viewing direction $\mathbf{d}$, SDF-derived normal $\nabla f_{\text{sdf}}$, and SDF-derived geometric feature vector $\mathbf{F}_{\text{geo}}$.
+*   **Output:** RGB color $\mathbf{c}_k$ for the Gaussian.
+
+**Data Structures:**
+*   **SDF Module ($f_{\text{sdf}}$):** An MLP that maps a 3D position to a scalar signed distance $s$ and a geometric feature vector $\mathbf{F}_{\text{geo}}$.
+*   **Appearance Module ($f_{\text{rgb}}$):** An MLP that maps the concatenated inputs to an RGB color vector.
+
+**Parameters:**
+*   **Appearance MLP Architecture:** 4 layers, 256 hidden units per layer, ReLU activation [S1].
+*   **SDF MLP Architecture:** 8 layers, 256 hidden units per layer, ReLU activation [S1].
+*   **Training Initialization:** The SDF is initialized as a sphere [S1]. SDF learning is delayed for the first 500 iterations to promote robust convergence [S1].
+
+**Steps:**
+1.  **SDF Prediction:** For each Gaussian centroid $\mathbf{p}_k$, query the SDF module to obtain the signed distance $s$ and the geometric feature vector $\mathbf{F}_{\text{geo}}$:
+    $$ (s, \mathbf{F}_{\text{geo}}) = f_{\text{sdf}}(\mathbf{p}_k) $$
+    [S1]
+2.  **Normal Computation:** Compute the surface normal by taking the gradient of the SDF output with respect to the position:
+    $$ \mathbf{n} = \nabla f_{\text{sdf}}(\mathbf{p}_k) $$
+    [S1]
+3.  **Color Prediction:** Feed the centroid position $\mathbf{p}_k$, viewing direction $\mathbf{d}$, the computed normal $\mathbf{n}$, and the geometric feature $\mathbf{F}_{\text{geo}}$ into the appearance module to produce the final color:
+    $$ \mathbf{c}_k = f_{\text{rgb}}(\mathbf{p}_k, \mathbf{d}, \mathbf{n}, \mathbf{F}_{\text{geo}}) $$
+    [S1]
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def geometry_guided_appearance_modeling(p_k, d, f_sdf, f_rgb):
+    """
+    Predicts color for a Gaussian using geometry-guided appearance modeling.
+    
+    Args:
+        p_k: 3D position of the Gaussian centroid (tensor, shape [3])
+        d: Viewing direction vector (tensor, shape [3])
+        f_sdf: SDF MLP function returning (signed_distance, geometric_feature)
+        f_rgb: Appearance MLP function returning RGB color
+        
+    Returns:
+        c_k: Predicted RGB color (tensor, shape [3])
+    """
+    # Step 1: Get SDF value and geometric features
+    s, F_geo = f_sdf(p_k)
+    
+    # Step 2: Compute normal from SDF gradient
+    # Note: In practice, this requires autograd or analytical gradient of f_sdf
+    # Here we assume a helper function `compute_gradient` exists for the MLP
+    n = compute_gradient(f_sdf, p_k)
+    
+    # Step 3: Predict color using appearance MLP
+    c_k = f_rgb(p_k, d, n, F_geo)
+    
+    return c_k
+```
+
+**Edge Cases and Pitfalls:**
+*   **Opacity Bias:** The method assumes high opacity for most Gaussians to align with the surface. If opacity is unconstrained, the SDF learning process becomes unstable, introducing noise and higher Chamfer Distance (CD) [S1].
+*   **Semi-transparent Objects:** The method forces opacity towards 1 via entropy regularization, treating semi-transparent volumes as opaque outer shells. This causes the appearance MLP to "bake" internal volumetric transmission details into high-frequency textures on the surface, which may be inaccurate for truly translucent objects like glass [S1].
+*   **Training Delay:** SDF learning must be delayed (e.g., first 500 iterations) to avoid instability during initial Gaussian densification [S1].
+
+## Operating characteristics
+*   **Performance:** On the OmniObject3D dataset, removing GAM degrades PSNR from 40.06 to 39.19, SSIM from 0.986 to 0.984, and increases LPIPS from 0.025 to 0.031 [S1].
+*   **Strengths:** Improves geometry reconstruction and rendering quality, particularly for reflective surfaces and fine geometric details where spherical harmonics fail [S1].
+*   **Limitations:** Struggles with semi-transparent structures (e.g., glass jars) due to the opacity bias forcing an opaque shell representation [S1].
+*   **Hardware:** Optimized using Adam optimizer on a single NVIDIA A800 GPU [S1].
+
+## Background
+Geometry-Guided Appearance Modeling was introduced in the GSurf method, which adapts 2D Gaussian Splatting for high-quality 3D reconstruction by learning SDFs from splatting opaque Gaussians [S1]. It draws inspiration from neural implicit surface methods where incorporating geometric cues like normals and features has proven effective [S1]. The method modifies vanilla 3DGS/2DGS by replacing spherical harmonics with an MLP conditioned on SDF-derived geometry [S1].
+
+## Sources
+[S1] GSurf: Learning signed distance fields from splatting opaque Gaussians for high-quality 3D reconstruction, https://doi.org/10.1016/j.cad.2026.104106, fetched 2026-10-26

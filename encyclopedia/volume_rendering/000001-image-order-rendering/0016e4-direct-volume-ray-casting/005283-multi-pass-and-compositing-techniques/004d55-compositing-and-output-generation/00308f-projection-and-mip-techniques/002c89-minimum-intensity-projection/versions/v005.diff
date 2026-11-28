@@ -1,0 +1,251 @@
+--- v004.md
++++ v005.md
+@@ -3,74 +3,99 @@
+ 
+ ## Overview
+-Minimum Intensity Projection (MinIP) is a volume rendering technique that identifies the voxel with the lowest scalar intensity along each viewing ray and renders that specific voxel's color and position [S1][S2, unofficial]. It solves the problem of visualizing low-intensity structures, such as air-filled vessels or bones in CT angiography, which are often obscured by higher-intensity surrounding tissue in standard volume rendering [S1]. Unlike the parent [Direct volume ray casting](19-direct-volume-ray-casting.md) which composites all samples, MinIP discards all but the single minimum value, losing depth information but providing high contrast for specific anatomical features [S1].
++Minimum Intensity Projection (MinIP) is a volume rendering technique that identifies and renders the voxel with the lowest intensity value along each viewing ray traversing the object [S1]. Unlike standard ray casting which integrates opacity and color, MinIP uses a commutative aggregation function (minimum) to select a single scalar value per pixel, discarding all other depth information [S1][S2, unofficial]. It is primarily used in diagnostic imaging to highlight dark structures such as vessels or bones against brighter backgrounds, offering rapid visualization at the cost of depth perception [S1].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** Volume scalar field $V$, camera ray $r(t) = \mathbf{o} + t\mathbf{d}$, ray segment $[t_{start}, t_{end}]$, number of coarse steps $N$, colormap function $C(\cdot)$, material opacity $\alpha_{mat}$, and transformation matrices.
+-*   **Output:** Pixel color $C_{out}$, depth $z_{out}$, and world coordinate $\mathbf{p}_{out}$ of the minimum intensity voxel.
++**Inputs:**
++*   Volume dataset $V$ with dimensions $D_x \times D_y \times D_z$.
++*   Ray parameters: start coordinate $C_{start}$, step vector $\Delta C$, and number of steps $N$.
++*   Transfer function $T$ mapping scalar values to color/opacity.
++*   Material opacity scalar $u_{opacity}$.
++*   Transformation matrices: world transform $M_{world}$, camera transform $M_{cam}$, projection transform $M_{proj}$.
++
++**Outputs:**
++*   Pixel color $C_{out}$ in physical (linear) color space.
++*   Pixel depth $Z_{ndc}$ in normalized device coordinates.
++*   Coordinate $C_{min}$ of the minimum intensity voxel.
+ 
+ **Data Structures:**
+-*   `the_ref`: Scalar accumulator for the minimum intensity value found so far. Initialized to positive infinity.
+-*   `the_coord`: 3D coordinate (vec3) of the current minimum voxel.
+-*   `the_value`: 4D vector (vec4) containing the sampled scalar and potentially auxiliary data (e.g., gradient or normal) at `the_coord`.
++*   `the_ref`: Scalar accumulator for the minimum intensity found so far. Initialized to $+\infty$ (or a value larger than any possible data value, e.g., 999999.0) [S2, unofficial].
++*   `the_coord`: Vector storing the 3D coordinates of the current minimum [S2, unofficial].
++*   `the_value`: Vector storing the sampled RGBA value at `the_coord` [S2, unofficial].
+ 
+-**Algorithm Steps:**
++**Algorithm:**
+ 
+-1.  **Initialization:** Set `the_ref` to a value larger than any possible volume intensity (e.g., $999999.0$ for normalized floats) [S2, unofficial]. Set `the_coord` to the ray entry point $t_{start}$ [S2, unofficial].
+-2.  **Coarse Search:** Iterate $i$ from $0$ to $N-1$:
+-    *   Calculate sample position: $\mathbf{p}_i = \mathbf{o} + (t_{start} + i \cdot \Delta t)\mathbf{d}$ [S2, unofficial].
+-    *   Sample volume: $\mathbf{v}_i = \text{sample}(\mathbf{p}_i)$ [S2, unofficial].
+-    *   Extract scalar: $s_i = \mathbf{v}_i.r$ [S2, unofficial].
+-    *   Update minimum: If $s_i < \text{the\_ref}$, set $\text{the\_ref} = s_i$, $\text{the\_coord} = \mathbf{p}_i$, $\text{the\_value} = \mathbf{v}_i$ [S2, unofficial].
+-3.  **Refinement (Local Search):** To improve precision beyond the coarse grid, perform a binary-search-like refinement [S2, unofficial]:
+-    *   Initialize step size $\delta = \Delta t$ [S2, unofficial].
+-    *   Loop $k$ from $0$ to $3$ (4 iterations):
+-        *   Halve step: $\delta = \delta / 2$ [S2, unofficial].
+-        *   Define neighbors: $\mathbf{p}_1 = \text{the\_coord} - \delta \cdot \mathbf{d}$, $\mathbf{p}_2 = \text{the\_coord} + \delta \cdot \mathbf{d}$ [S2, unofficial].
+-        *   Sample neighbors: $\mathbf{v}_1 = \text{sample}(\mathbf{p}_1)$, $\mathbf{v}_2 = \text{sample}(\mathbf{p}_2)$ [S2, unofficial].
+-        *   Extract scalars: $s_1 = \mathbf{v}_1.r$, $s_2 = \mathbf{v}_2.r$ [S2, unofficial].
+-        *   Update minimum:
+-            *   If $s_1 \le \text{the\_ref}$, update $\text{the\_ref} = s_1$, $\text{the\_coord} = \mathbf{p}_1$, $\text{the\_value} = \mathbf{v}_1$ [S2, unofficial].
+-            *   Else if $s_2 < \text{the\_ref}$, update $\text{the\_ref} = s_2$, $\text{the\_coord} = \mathbf{p}_2$, $\text{the\_value} = \mathbf{v}_2$ [S2, unofficial].
+-            *   *Note: The source uses $\le$ for the first neighbor and $<$ for the second, preferring the first neighbor in ties* [S2, unofficial].
+-4.  **Color and Depth Computation:**
+-    *   Map value to color: $\mathbf{c} = C(\text{the\_value})$ [S2, unofficial].
+-    *   Convert to physical color space (linear): If colormap is sRGB, $\mathbf{c}_{phys} = \text{srgb2linear}(\mathbf{c}.rgb)$; else $\mathbf{c}_{phys} = \mathbf{c}.rgb$ [S2, unofficial].
+-    *   Compute opacity: $\alpha = \mathbf{c}.a \cdot \alpha_{mat}$ [S2, unofficial].
+-    *   Compute final color: $\mathbf{C}_{out} = \mathbf{c}_{phys}$ with alpha $\alpha$ [S2, unofficial].
+-    *   Compute depth: Transform $\text{the\_coord}$ to world space, then to NDC. $z_{out} = \frac{z_{ndc}}{w_{ndc}}$ [S2, unofficial].
++1.  **Primary Search:** Iterate $i$ from $0$ to $N-1$.
++    *   Calculate current coordinate: $C_i = C_{start} + i \cdot \Delta C$.
++    *   Sample volume: $V_i = \text{sample}(C_i, V)$.
++    *   Extract scalar reference: $r_i = V_i.r$.
++    *   If $r_i < \text{the\_ref}$:
++        *   $\text{the\_ref} \leftarrow r_i$
++        *   $\text{the\_coord} \leftarrow C_i$
++        *   $\text{the\_value} \leftarrow V_i$
++
++2.  **Refinement:** To improve positional accuracy of the minimum, perform a binary search-like refinement.
++    *   Initialize `substep` = $\Delta C$.
++    *   Iterate $j$ from $0$ to $3$ (4 iterations):
++        *   `substep` $\leftarrow$ `substep` $\times 0.5$.
++        *   Calculate test coordinates: $C_1 = \text{the\_coord} - \text{substep}$, $C_2 = \text{the\_coord} + \text{substep}$.
++        *   Sample: $V_1 = \text{sample}(C_1, V)$, $V_2 = \text{sample}(C_2, V)$.
++        *   Extract references: $r_1 = V_1.r$, $r_2 = V_2.r$.
++        *   If $r_1 \le \text{the\_ref}$:
++            *   $\text{the\_ref} \leftarrow r_1$
++            *   $\text{the\_coord} \leftarrow C_1$
++            *   $\text{the\_value} \leftarrow V_1$
++        *   Else if $r_2 < \text{the\_ref}$:
++            *   $\text{the\_ref} \leftarrow r_2$
++            *   $\text{the\_coord} \leftarrow C_2$
++            *   $\text{the\_value} \leftarrow V_2$
++
++3.  **Color Mapping:**
++    *   Map value to color: $C_{raw} = T(\text{the\_value})$.
++    *   Convert to physical (linear) color space:
++        *   If color space is 'srgb': $C_{phys} = \text{srgb2linear}(C_{raw}.rgb)$.
++        *   Else: $C_{phys} = C_{raw}.rgb$.
++    *   Calculate opacity: $\alpha = C_{raw}.a \times u_{opacity}$.
++    *   Final color: $C_{out} = (C_{phys}, \alpha)$.
++
++4.  **Depth Calculation:**
++    *   Convert texture coordinate to data position: $P_{data} = \text{the\_coord} \times D - (0.5, 0.5, 0.5)$.
++    *   Transform to world: $P_{world} = M_{world} \times (P_{data}, 1.0)$.
++    *   Transform to NDC: $P_{ndc} = M_{proj} \times M_{cam} \times P_{world}$.
++    *   Depth: $Z_{ndc} = P_{ndc}.z / P_{ndc}.w$.
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def minip_ray_cast(o, d, t_start, t_end, n_steps, volume_sampler, colormap, mat_opacity, world_transform, proj_transform, cam_transform):
++def minip_render(start_coord, step_coord, nsteps, volume, sizef, transfer_func, 
++                 world_transform, cam_transform, proj_transform, colorspace='srgb', 
++                 material_opacity=1.0):
+     """
+     Renders a single ray using Minimum Intensity Projection.
+     """
+-    dt = (t_end - t_start) / n_steps
++    # Initialization
+     the_ref = float('inf')
+-    the_coord = o + t_start * d
++    the_coord = start_coord
+     the_value = None
+-
+-    # 1. Coarse Search
+-    for i in range(n_steps):
+-        coord = o + (t_start + i * dt) * d
+-        value = volume_sampler(coord)
+-        scalar = value.r
++    
++    # Primary loop: coarse search for minimum
++    for i in range(nsteps):
++        coord = start_coord + i * step_coord
++        value = sample_volume(coord, volume, sizef)
++        reff = value.r
+         
+-        if scalar < the_ref:
+-            the_ref = scalar
++        if reff < the_ref:
++            the_ref = reff
+             the_coord = coord
+             the_value = value
+-
+-    # 2. Refinement Loop (4 iterations, halving step each time)
+-    substep_dt = dt
++            
++    # Refinement loop: binary search for precise minimum location
++    substep_coord = step_coord
+     for _ in range(4):
+-        substep_dt *= 0.5
+-        coord1 = the_coord - substep_dt * d
+-        coord2 = the_coord + substep_dt * d
++        substep_coord = substep_coord * 0.5
++        coord1 = the_coord - substep_coord
++        coord2 = the_coord + substep_coord
+         
+-        value1 = volume_sampler(coord1)
+-        value2 = volume_sampler(coord2)
++        value1 = sample_volume(coord1, volume, sizef)
++        value2 = sample_volume(coord2, volume, sizef)
+         
+         ref1 = value1.r
+@@ -85,53 +110,61 @@
+             the_coord = coord2
+             the_value = value2
+-
+-    # 3. Color Mapping
+-    color = colormap(the_value)
+-    # Assuming color.rgb is in sRGB; convert to linear
+-    physical_color = srgb_to_linear(color.rgb)
+-    opacity = color.a * mat_opacity
++            
++    # Color mapping
++    color = transfer_func(the_value)
+     
+-    # 4. Depth and Coordinate Output
+-    # Note: The source applies a -0.5 offset to coordinate before world transform
+-    data_pos = the_coord - vec3(0.5, 0.5, 0.5)
++    if colorspace == 'srgb':
++        physical_color = srgb_to_linear(color.rgb)
++    else:
++        physical_color = color.rgb
++        
++    opacity = color.a * material_opacity
++    out_color = vec4(physical_color, opacity)
++    
++    # Depth calculation
++    data_pos = the_coord * sizef - vec3(0.5, 0.5, 0.5)
+     world_pos = world_transform * vec4(data_pos, 1.0)
+     ndc_pos = proj_transform * cam_transform * world_pos
+     depth = ndc_pos.z / ndc_pos.w
+     
+-    return {
+-        'color': vec4(physical_color, opacity),
+-        'coord': the_coord,
+-        'depth': depth
+-    }
++    return out_color, depth, the_coord
+ 
+-def srgb_to_linear(c):
+-    """Helper to convert sRGB to linear RGB."""
+-    # Standard sRGB linearization
+-    return vec3(
+-        12.92 * c.x if c.x <= 0.04045 else ((c.x + 0.055) / 1.055) ** 2.4,
+-        12.92 * c.y if c.y <= 0.04045 else ((c.y + 0.055) / 1.055) ** 2.4,
+-        12.92 * c.z if c.z <= 0.04045 else ((c.z + 0.055) / 1.055) ** 2.4
+-    )
++def sample_volume(coord, volume, sizef):
++    """
++    [G] Standard trilinear interpolation with boundary clamping.
++    """
++    # Normalize to [0, 1] range assuming volume is stored in [0, sizef-1]
++    # Note: Exact sampling implementation depends on the specific volume 
++    # data structure and interpolation library used. This is a placeholder 
++    # for the core sampling logic required by the algorithm.
++    pass
++
++def srgb_to_linear(color_rgb):
++    """
++    [G] Converts sRGB components to linear RGB.
++    """
++    linear = []
++    for c in color_rgb:
++        if c <= 0.04045:
++            linear.append(c / 12.92)
++        else:
++            linear.append(((c + 0.055) / 1.055) ** 2.4)
++    return vec3(linear)
+ ```
+ 
+-**Parameters:**
+-*   $N$ (coarse steps): Not given in the sources.
+-*   Refinement iterations: 4 [S2, unofficial].
+-*   Initial `the_ref`: $999999.0$ (implementation-specific sentinel) [S2, unofficial].
+-
+-**Edge Cases:**
+-*   **Ties:** The refinement step prefers the "negative" direction (coord1) if values are equal ($s_1 \le \text{the\_ref}$) [S2, unofficial].
+-*   **Boundaries:** The refinement step samples outside the coarse grid. If $\mathbf{p}_1$ or $\mathbf{p}_2$ falls outside the volume AABB, `volume_sampler` must handle clamping or return a value that does not incorrectly become the minimum (e.g., by returning the max possible intensity) [G].
++**Edge Cases and Pitfalls:**
++*   **Initialization:** `the_ref` must be initialized to a value strictly greater than any possible intensity in the volume (e.g., $+\infty$ or max uint16/float32) to ensure the first sample updates the minimum [S2, unofficial].
++*   **Refinement Direction:** The refinement step checks neighbors in both directions ($-\Delta$ and $+\Delta$). If the minimum lies exactly between grid points, the discrete sampling may oscillate or settle on one side; the 4-iteration binary search provides a heuristic approximation [S2, unofficial].
++*   **Depth Loss:** Because only the minimum value is stored, the resulting image lacks inherent depth cues. Interactive exploration or animation is recommended to mitigate this [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N + K)$ per ray, where $N$ is the number of coarse samples and $K$ is the number of refinement iterations (constant 4) [S2, unofficial].
+-*   **Memory Complexity:** $O(1)$ per ray, storing only the current minimum [S2, unofficial].
+-*   **Strengths:** Rapid generation; clearly displays low-intensity structures like vessels or bones; hardware-acceleratable due to commutative min operation [S1].
+-*   **Limitations:** Loses depth information; only a small fraction of data is used; static images lack depth perception [S1].
+-*   **When to use:** CT/MR angiography, bone visualization, interactive exploration where depth is less critical than feature contrast [S1].
+-*   **When not to use:** When depth cues are essential or when high-intensity structures are the target (use MIP instead) [S1].
++*   **Time Complexity:** $O(N)$ per ray, where $N$ is the number of samples. The refinement step adds a constant overhead ($4 \times 2$ samples).
++*   **Memory Complexity:** $O(1)$ per pixel for accumulators (`the_ref`, `the_coord`, `the_value`).
++*   **Performance:** MinIP is computationally inexpensive and can be accelerated by graphics hardware [S1]. It is significantly faster than full volume rendering with alpha blending because it avoids per-sample compositing and early termination based on opacity.
++*   **Strengths:** Rapid generation of images highlighting dark structures (vessels, bones); parallelizable due to commutative aggregation [S1].
++*   **Limitations:** Loss of depth information; only a small fraction of data (the minimum) is used, potentially obscuring context [S1].
+ 
+ ## Background
+-MinIP was developed in the context of projective diagnostic imaging to complement Maximum Intensity Projection (MIP) [S1]. It is widely used in 3D CT and MR angiography to visualize vessels and bones by highlighting the darkest voxels along the ray [S1]. While static MinIPs suffer from a lack of depth information, they are effective in interactive exploration or animation sequences [S1].
++MinIP originated in projective diagnostic imaging as a method to clearly represent vessels or bones by selecting the minimum intensity along viewing rays [S1]. It is widely used in 3D CT and MR angiography alongside Maximum Intensity Projection (MIP) [S1]. While static MinIPs lack depth perception, they are effective for interactive exploration or animation sequences [S1].
+ 
+ ## Sources

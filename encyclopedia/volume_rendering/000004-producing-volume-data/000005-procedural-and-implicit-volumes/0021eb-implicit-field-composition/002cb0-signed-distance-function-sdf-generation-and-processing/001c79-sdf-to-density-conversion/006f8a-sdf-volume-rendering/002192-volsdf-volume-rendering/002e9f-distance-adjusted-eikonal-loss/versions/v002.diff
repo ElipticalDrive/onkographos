@@ -1,0 +1,140 @@
+--- v001.md
++++ v002.md
+@@ -7,14 +7,14 @@
+ 
+ ## How it works
+-The method operates on a neural network that outputs a signed distance value $d(x)$ for any 3D query point $x$. The core mechanism is the application of a weighted Eikonal loss during training.
++The method operates on a neural network that outputs a signed distance value $d(x)$ for any 3D query point $x$ [S2]. The core mechanism is the application of a weighted Eikonal loss during training [S1, S2].
+ 
+ **Inputs and Outputs:**
+-*   **Input:** A set of 3D query points $\{x_i\}$ sampled along camera rays, where each $x_i$ has an associated metric distance $d_i$ from the camera origin along the ray.
+-*   **Output:** A scalar loss value $L_{Eikonal}$ used for backpropagation.
++*   **Input:** A set of 3D query points $\{x_i\}$ sampled along camera rays, where each $x_i$ has an associated metric distance $d_i$ from the camera origin along the ray [S1, S2].
++*   **Output:** A scalar loss value $L_{Eikonal}$ used for backpropagation [S1, S2].
+ 
+ **Data Structures:**
+-*   **Query Points:** A list or tensor of 3D coordinates $x_i \in \mathbb{R}^3$.
+-*   **Distances:** A list or tensor of scalar distances $d_i \in \mathbb{R}^+$ corresponding to each $x_i$.
+-*   **SDF Values:** The network output $d(x_i) \in \mathbb{R}$.
++*   **Query Points:** A list or tensor of 3D coordinates $x_i \in \mathbb{R}^3$ [G].
++*   **Distances:** A list or tensor of scalar distances $d_i \in \mathbb{R}^+$ corresponding to each $x_i$ [G].
++*   **SDF Values:** The network output $d(x_i) \in \mathbb{R}$ [S2].
+ 
+ **Numbered Steps:**
+@@ -32,58 +32,44 @@
+ **Pseudocode:**
+ ```python
++import math
++
++def vector_norm(v):
++    """Computes the Euclidean norm of a vector."""
++    return math.sqrt(sum(x * x for x in v))
++
++def compute_gradient(f, x):
++    """Computes the gradient of scalar output f(x) w.r.t. input vector x.
++    Requires automatic differentiation support in the network implementation [G]."""
++    pass  # Standard autograd engine call
++
+ def distance_adjusted_eikonal_loss(sdf_network, query_points, camera_origin):
+     """
+     Computes the distance-adjusted Eikonal loss.
+-    
+     Args:
+-        sdf_network: Neural network returning SDF value d(x) for input x.
+-        query_points: Tensor of shape (N, 3) containing 3D query points x_i.
+-        camera_origin: Tensor of shape (3,) containing the camera position.
+-        
++        sdf_network: Callable returning SDF value d(x) for input x.
++        query_points: List of 3D coordinates x_i.
++        camera_origin: 3D coordinate of the camera.
+     Returns:
+-        loss: Scalar tensor representing the weighted Eikonal loss.
++        loss: Scalar loss value.
+     """
+-    # 1. Compute SDF values and their gradients
+-    # Requires double differentiation support in the network implementation
+-    query_points.requires_grad_(True)
+-    
+-    # Forward pass to get SDF values
+-    sdf_values = sdf_network(query_points)
+-    
+-    # Compute gradient of SDF w.r.t. input points
+-    # This requires computing the gradient of the sum of sdf_values 
+-    # w.r.t. query_points to enable backpropagation through the network
+-    grad_sdf = torch.autograd.grad(
+-        sdf_values.sum(), 
+-        query_points, 
+-        create_graph=True, 
+-        retain_graph=True
+-    )[0]
+-    
+-    # 2. Compute the norm of the gradient
+-    grad_norm = torch.norm(grad_sdf, dim=1, keepdim=True) # Shape: (N, 1)
+-    
+-    # 3. Compute metric distances from camera origin
+-    # d_i is the distance along the ray, which is the Euclidean distance 
+-    # from the camera origin to the query point
+-    ray_directions = query_points - camera_origin
+-    distances = torch.norm(ray_directions, dim=1, keepdim=True) # Shape: (N, 1)
+-    
+-    # 4. Compute weights: eta_i = d_i^-2
+-    # Guard against division by zero if a point is at the camera origin
+-    # [G] Add a small epsilon to distances to prevent numerical instability
+-    epsilon = 1e-8
+-    weights = 1.0 / (distances + epsilon)**2
+-    
+-    # 5. Compute the Eikonal loss term: (||grad|| - 1)^2
+-    eikonal_term = (grad_norm - 1.0)**2
+-    
+-    # 6. Apply distance-adjusted weights
+-    weighted_loss = weights * eikonal_term
+-    
+-    # 7. Sum over all samples (approximating the expectation)
+-    loss = weighted_loss.sum()
+-    
+-    return loss
++    total_loss = 0.0
++    for x in query_points:
++        # 1. Compute SDF value and its gradient w.r.t. x [S2]
++        d_x = sdf_network(x)
++        grad_d = compute_gradient(sdf_network, x)
++        grad_norm = vector_norm(grad_d)
++
++        # 2. Compute metric distance from camera origin along the ray [S1]
++        ray_vec = [x[i] - camera_origin[i] for i in range(3)]
++        d_i = vector_norm(ray_vec)
++
++        # 3. Compute weight eta_i = d_i^-2 [S1]
++        epsilon = 1e-8
++        eta_i = 1.0 / (d_i + epsilon) ** 2
++
++        # 4. Accumulate weighted Eikonal term (||grad|| - 1)^2 [S1, S2]
++        total_loss += eta_i * (grad_norm - 1.0) ** 2
++
++    return total_loss
+ ```
+ 
+@@ -97,7 +83,11 @@
+ *   **Precision:** Care must be taken with numerical precision when computing gradients, especially for points far from the camera where distances are large and weights are small [S1, S2].
+ 
++## Subtopics
++
++### Ray-Eikonal Loss
++A ray-based Eikonal regularizer implemented only for the naive baseline SVRaster+SDF [S3, unofficial]. It penalizes deviations from the expected SDF slope along ray segments [S3, unofficial]. For each ray segment intersecting a voxel, it determines the entry $p_{in}$ and exit $p_{out}$ coordinates, evaluates the SDF values $f(p_{in})$ and $f(p_{out})$ via trilinear interpolation of the voxel’s corner SDFs, and computes the directional gradient along the ray as $\frac{f(p_{out}) - f(p_{in})}{\|p_{out} - p_{in}\|_2}$ [S3, unofficial]. The weight for this loss is set to $\lambda_{re} = 10^{-3}$ [S3, unofficial].
++
+ ## Operating characteristics
+-*   **Time Complexity:** The method adds a computational overhead proportional to the number of samples $N$ due to the gradient computation. The gradient calculation requires an additional backward pass through the SDF network, effectively doubling the forward/backward cost for the Eikonal term [S2].
+-*   **Memory Complexity:** Requires storing the gradients of the SDF with respect to the input points, which scales with the number of samples $N$ and the dimensionality of the input (3) [S2].
++*   **Time Complexity:** The method adds a computational overhead proportional to the number of samples $N$ due to the gradient computation [G].
+ *   **Strengths:** Improves background reconstruction quality without degrading foreground surface quality [S1]. It allows a single model to handle both foreground (SDF) and background (volume) effectively [S1].
+ *   **Limitations:** Requires careful implementation of gradient computation (double differentiation) [S2]. The choice of weight exponent ($d^{-2}$) is specific to the method and may not be optimal for all scenes [S1].
+@@ -106,7 +96,8 @@
+ 
+ ## Background
+-The Distance-Adjusted Eikonal Loss was introduced in the context of neural rendering methods that use Signed Distance Functions (SDFs) to represent surfaces. It was proposed to address the limitations of standard Eikonal regularization, which tends to negatively impact background reconstruction [S1]. The method builds upon the VolSDF approach, which parameterizes the object surface as an SDF to facilitate surface extraction and provide analytical normals [S2]. The specific distance-adjusted weighting scheme was detailed in HybridNeRF [S1], while the broader context of SDF representation and Eikonal loss in radiance field inversion was presented in [S2].
++The Distance-Adjusted Eikonal Loss was introduced in the context of neural rendering methods that use Signed Distance Functions (SDFs) to represent surfaces [S1, S2]. It was proposed to address the limitations of standard Eikonal regularization, which tends to negatively impact background reconstruction [S1]. The method builds upon the VolSDF approach, which parameterizes the object surface as an SDF to facilitate surface extraction and provide analytical normals [S2]. The specific distance-adjusted weighting scheme was detailed in HybridNeRF [S1], while the broader context of SDF representation and Eikonal loss in radiance field inversion was presented in [S2].
+ 
+ ## Sources
+ [S1] HybridNeRF: Efficient Neural Rendering via Adaptive Volumetric Surfaces, https://doi.org/10.1109/cvpr52733.2024.01858, fetched 2026-10-26
+-[S2] Shape, Pose, and Appearance from a Single Image via Bootstrapped Radiance Field Inversion, https://doi.org/10.1109/cvpr52729.2023.00427, fetched 2026-10-26+[S2] Shape, Pose, and Appearance from a Single Image via Bootstrapped Radiance Field Inversion, https://doi.org/10.1109/cvpr52729.2023.00427, fetched 2026-10-26
++[S3] SVRecon: Sparse Voxel Rasterization for Surface Reconstruction, https://doi.org/10.48550/arxiv.2511.17364, fetched 2026-10-26 (unofficial)

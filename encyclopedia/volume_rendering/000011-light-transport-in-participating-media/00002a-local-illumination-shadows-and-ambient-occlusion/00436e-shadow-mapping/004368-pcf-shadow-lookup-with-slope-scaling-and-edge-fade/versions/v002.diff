@@ -1,0 +1,229 @@
+--- v001.md
++++ v002.md
+@@ -4,104 +4,127 @@
+ 
+ ## Overview
+-Computes sun shadow occlusion at a world position using a comparison sampler and a dynamic Percentage-Closer Filtering (PCF) kernel, with slope-scaled depth bias and distance-based edge fading to prevent peter-panning and hard shadow edges [S1, unofficial]. It differs from standard shadow mapping by offsetting the sample position along the surface normal rather than the light direction to maintain contact stability, and by fading occlusion at the periphery of the shadow map to avoid black artifacts at volume boundaries [S1, unofficial].
++This method computes sun shadow occlusion for volume rendering by sampling a shadow map with a dynamic Percentage-Closer Filtering (PCF) kernel, applying a slope-scaled depth bias to prevent peter-panning, and using distance-based edge fading to soften shadow boundaries [S1, unofficial]. It distinguishes itself from standard shadow mapping by offsetting the sample position along the surface normal rather than the light direction, ensuring contact points remain stable, and by explicitly fading occlusion at the edges of the shadow map slab to avoid hard black walls [S1, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- `world_pos`: The 3D world position of the point being shaded.
+-- `normal`: The surface normal at `world_pos`, normalized.
+-- `scene.shadow_params`: A uniform vector containing:
+-  - `.x`: Texel size in UV space.
+-  - `.y`: Base normal offset magnitude.
+-  - `.z`: Shadow strength multiplier (0 disables shadows).
+-  - `.w`: Kernel radius in texels (dynamically adjusted).
+-- `scene.light_view_proj`: The 4x4 view-projection matrix for the directional light.
+-- `shadow_map`: A `sampler2DShadow` comparison sampler [S1, unofficial].
++*   `world_pos`: The 3D world position of the point being shaded.
++*   `normal`: The surface normal at `world_pos`, normalized.
++*   `light_dir`: The direction from the point to the light source (normalized).
++*   `scene.light_view_proj`: The 4x4 view-projection matrix transforming world coordinates to light clip space.
++*   `scene.shadow_params`: A uniform vector containing:
++    *   `x`: Texel size in UV space.
++    *   `y`: Base normal offset magnitude.
++    *   `z`: Shadow strength multiplier (0 disables shadows).
++    *   `w`: Kernel radius in texels (dynamically adjusted).
++*   `shadow_map`: A `sampler2DShadow` comparison sampler [S1, unofficial].
+ 
+ **Outputs:**
+-- `float`: The final shadow occlusion value in the range $[0.0, 1.0]$, where 0.0 is fully lit and 1.0 is fully shadowed.
++*   `occlusion`: A float in $[0, 1]$ representing the shadow factor. 0.0 is fully lit, 1.0 is fully shadowed.
+ 
+ **Data Structures:**
+-- `shadow_map`: Declared as `layout(set = 0, binding = 2) uniform sampler2DShadow shadow_map;` [S1, unofficial]. This sampler performs the depth comparison internally.
++*   `shadow_map`: A 2D depth texture accessed via `texture(shadow_map, vec3(u, v, depth))`. The comparison sampler returns 1.0 if the stored depth is less than or equal to the provided depth, and 0.0 otherwise. In PCF, this is sampled multiple times and averaged.
+ 
+-**Constants:**
+-- `SHADOW_PCF_MAX_RADIUS = 4`: Limits the kernel half-width to a maximum of 9x9 samples [S1, unofficial].
+-- `SHADOW_SLOPE_OFFSET = 2.0`: Constant float for slope scaling bias [S1, unofficial].
+-- `SHADOW_FADE_START = 0.85`: Constant float, fraction of map half-width where fade begins [S1, unofficial].
++**Parameters:**
++*   `SHADOW_PCF_MAX_RADIUS`: Integer constant, typically 4. Limits the kernel half-width to a maximum of 9x9 samples [S1, unofficial].
++*   `SHADOW_SLOPE_OFFSET`: Float constant, typically 2.0. Controls the magnitude of the slope-scaled bias [S1, unofficial].
++*   `SHADOW_FADE_START`: Float constant, typically 0.85. The fraction of the map half-width where edge fading begins [S1, unofficial].
+ 
+-**Steps:**
+-1.  **Normal-Light Alignment:** Calculate the dot product of the surface normal and the light direction, clamped to $[0.0, 1.0]$.
+-    $$ n\_dot\_l = \text{clamp}(\text{dot}(\text{normal}, \text{light\_dir}), 0.0, 1.0) $$
+-2.  **Slope-Scaled Offset:** Compute the normal offset magnitude. The offset increases as the surface becomes more perpendicular to the light (lower $n\_dot\_l$), mitigating peter-panning on steep angles.
++**Algorithm Steps:**
++
++1.  **Normal-Light Dot Product:**
++    Calculate the alignment between the surface normal and the light direction.
++    $$ n\_dot\_l = \text{clamp}(\mathbf{n} \cdot \mathbf{l}, 0.0, 1.0) $$
++
++2.  **Slope-Scaled Offset:**
++    Compute a normal offset to prevent peter-panning. The offset magnitude increases as the surface becomes more perpendicular to the light (lower $n\_dot\_l$).
+     $$ \text{offset} = \text{scene.shadow\_params.y} \times (1.0 + \text{SHADOW\_SLOPE\_OFFSET} \times (1.0 - n\_dot\_l)) $$
+-3.  **Light Space Transformation:** Transform the world position, adjusted by the normal offset, into the light's clip space.
+-    $$ \text{light\_clip} = \text{scene.light\_view\_proj} \times \text{vec4}(\text{world\_pos} + \text{normal} \times \text{offset}, 1.0) $$
+-4.  **NDC Conversion:** Convert to Normalized Device Coordinates (NDC). If the point is outside the light's view frustum in depth ($z \le 0.0$ or $z \ge 1.0$), return 0.0 (fully lit) [S1, unofficial].
+-    $$ \text{ndc} = \text{light\_clip.xyz} / \text{light\_clip.w} $$
+-    If $\text{ndc.z} \le 0.0$ or $\text{ndc.z} \ge 1.0$, return $0.0$.
+-5.  **UV Mapping:** Convert NDC to texture coordinates. If outside $[0, 1]$, return 0.0 [S1, unofficial].
+-    $$ \text{uv} = \text{ndc.xy} \times 0.5 + 0.5 $$
+-    If $\text{uv.x} < 0.0$ or $\text{uv.x} > 1.0$ or $\text{uv.y} < 0.0$ or $\text{uv.y} > 1.0$, return $0.0$.
+-6.  **Kernel Setup:** Determine the texel size and clamp the kernel radius to the maximum allowed.
++    *Note: The offset is applied along the surface normal, not the light direction, to keep contact points fixed [S1, unofficial].*
++
++3.  **Transform to Light Clip Space:**
++    Apply the offset to the world position and transform to light clip space.
++    $$ \mathbf{p}_{offset} = \mathbf{world\_pos} + \mathbf{n} \times \text{offset} $$
++    $$ \mathbf{light\_clip} = \text{scene.light\_view\_proj} \times \begin{bmatrix} \mathbf{p}_{offset} \\ 1.0 \end{bmatrix} $$
++
++4.  **Convert to NDC:**
++    Perform perspective division.
++    $$ \mathbf{ndc} = \frac{\mathbf{light\_clip.xyz}}{\mathbf{light\_clip.w}} $$
++    **Edge Case:** If $\mathbf{ndc}.z \le 0.0$ or $\mathbf{ndc}.z \ge 1.0$, the point is outside the light's view frustum. Return 0.0 (fully lit) [S1, unofficial].
++
++5.  **Compute UV Coordinates:**
++    Map NDC to texture UV space $[0, 1]$.
++    $$ \mathbf{uv} = \mathbf{ndc.xy} \times 0.5 + 0.5 $$
++    **Edge Case:** If $\mathbf{uv}.x < 0.0$, $\mathbf{uv}.x > 1.0$, $\mathbf{uv}.y < 0.0$, or $\mathbf{uv}.y > 1.0$, the point is outside the shadow map. Return 0.0 (fully lit) to avoid black walls at volume edges [S1, unofficial].
++
++6.  **Initialize PCF Kernel:**
++    Get texel size and clamp the radius.
+     $$ \text{texel} = \text{scene.shadow\_params.x} $$
+-    $$ \text{radius} = \text{clamp}(\text{int}(\text{scene.shadow\_params.w} + 0.5), 0, \text{SHADOW\_PCF\_MAX\_RADIUS}) $$
+-7.  **PCF Sampling:** Loop over the square kernel centered at `uv`. Accumulate the inverse of the shadow comparison result. The `sampler2DShadow` returns 1.0 if the sampled depth is less than or equal to the stored depth (occluded) and 0.0 otherwise. The code accumulates `1.0 - texture(...)`, meaning it counts *unoccluded* samples and subtracts from 1.0 later, or effectively sums occlusion if the texture return is interpreted as occlusion. Based on the source `occlusion += 1.0 - texture(...)`, if `texture` returns 1 (occluded), we add 0. If `texture` returns 0 (lit), we add 1. This logic seems inverted for "occlusion" accumulation if the goal is to sum occlusion. However, the source explicitly states: `occlusion += 1.0 - texture(shadow_map, vec3(tap, ndc.z))`. Let's trace: If `ndc.z` is behind the shadow map surface, `texture` returns 1. `1.0 - 1.0 = 0`. If `ndc.z` is in front, `texture` returns 0. `1.0 - 0.0 = 1`. This accumulates "lit" contributions. Then it divides by total samples. Then it returns `occlusion * fade`. If `occlusion` is the fraction of *lit* samples, then `1.0 - occlusion` would be shadow. The source says `return occlusion * fade * strength`. This implies `occlusion` variable holds the *lit* factor, but is named `occlusion`. Or, the source code might be returning the *lit* value directly. Given the name "Shadow Lookup", usually we want shadow. Let's look at the final return: `return occlusion * fade * strength`. If `occlusion` is the lit fraction, a shadowed pixel (all samples occluded) would have `occlusion = 0`. A lit pixel would have `occlusion = 1`. This returns the *lit* intensity. This is consistent with "Shadow Occlusion" often being a multiplier for light intensity. So `occlusion` here represents the *transmittance* or *lit factor*.
+-    
+-    *Correction*: The prompt notes say "Computes sun shadow occlusion". Usually occlusion 1 means shadow. If the code returns `occlusion * fade`, and `occlusion` is the average of `1 - shadow_test`, then `occlusion` is the *lit* amount. To get shadow occlusion, one would typically return `1.0 - occlusion`. However, the source explicitly returns `occlusion`. I will follow the source's variable naming and logic exactly, noting that the variable `occlusion` accumulates the *lit* contribution.
+-    
++    $$ \text{radius} = \text{clamp}(\lfloor \text{scene.shadow\_params.w} + 0.5 \rfloor, 0, \text{SHADOW\_PCF\_MAX\_RADIUS}) $$
++
++7.  **Accumulate Occlusion:**
++    Sample the shadow map in a square kernel centered at `uv`.
+     $$ \text{occlusion} = 0.0 $$
+     For $y$ from $-\text{radius}$ to $\text{radius}$:
+-      For $x$ from $-\text{radius}$ to $\text{radius}$:
+-        $$ \text{tap} = \text{uv} + \text{vec2}(x, y) \times \text{texel} $$
+-        $$ \text{sample} = \text{texture}(\text{shadow\_map}, \text{vec3}(\text{tap}, \text{ndc.z})) $$
+-        $$ \text{occlusion} += 1.0 - \text{sample} $$
+-8.  **Averaging:** Average the accumulated values over the kernel size.
+-    $$ \text{occlusion} /= \text{float}((2 \times \text{radius} + 1) \times (2 \times \text{radius} + 1)) $$
+-    At this point, `occlusion` holds the fraction of samples that are *lit* (unoccluded).
+-9.  **Edge Fade:** Compute the distance from the center of the shadow map to the current UV coordinate. Fade out the shadow effect near the edges to prevent hard cutoffs at the volume boundary.
+-    $$ \text{edge} = \max(|\text{uv.x} - 0.5|, |\text{uv.y} - 0.5|) \times 2.0 $$
++        For $x$ from $-\text{radius}$ to $\text{radius}$:
++            $$ \mathbf{tap} = \mathbf{uv} + \begin{bmatrix} x \\ y \end{bmatrix} \times \text{texel} $$
++            $$ \text{sample} = \text{texture}(\text{shadow\_map}, \begin{bmatrix} \mathbf{tap} \\ \mathbf{ndc}.z \end{bmatrix}) $$
++            $$ \text{occlusion} += 1.0 - \text{sample} $$
++    *Note: The comparison sampler returns 1.0 if the depth is occluded. We subtract from 1.0 to get "lit" contribution, then sum "occluded" contribution.*
++
++8.  **Average Occlusion:**
++    $$ \text{occlusion} = \frac{\text{occlusion}}{(2 \times \text{radius} + 1)^2} $$
++
++9.  **Edge Fade:**
++    Compute distance from the center of the shadow map to fade out shadows at the edges.
++    $$ \text{edge} = \max(|\mathbf{uv}.x - 0.5|, |\mathbf{uv}.y - 0.5|) \times 2.0 $$
+     $$ \text{fade} = 1.0 - \text{smoothstep}(\text{SHADOW\_FADE\_START}, 1.0, \text{edge}) $$
+-10. **Final Result:** Multiply the lit fraction by the fade factor and the strength multiplier.
+-    $$ \text{return } \text{occlusion} \times \text{fade} \times \text{scene.shadow\_params.z} $$
++
++10. **Final Result:**
++    $$ \text{result} = \text{occlusion} \times \text{fade} \times \text{scene.shadow\_params.z} $$
+ 
+ **Pseudocode:**
++
+ ```python
+-def pcf_shadow_lookup(world_pos, normal, light_dir, scene):
+-    # 1. Normal-Light Alignment
+-    n_dot_l = clamp(dot(normal, light_dir), 0.0, 1.0)
++def pcf_shadow_lookup(world_pos, normal, light_dir, scene, shadow_map):
++    # 1. Normal-Light Dot Product
++    n_dot_l = max(dot(normal, light_dir), 0.0)
+     
+     # 2. Slope-Scaled Offset
+     offset = scene.shadow_params.y * (1.0 + SHADOW_SLOPE_OFFSET * (1.0 - n_dot_l))
+     
+-    # 3. Light Space Transformation
+-    light_clip = scene.light_view_proj * vec4(world_pos + normal * offset, 1.0)
++    # 3. Transform to Light Clip Space
++    p_offset = world_pos + normal * offset
++    light_clip = scene.light_view_proj * vec4(p_offset, 1.0)
+     
+-    # 4. NDC Conversion
++    # 4. Convert to NDC
+     ndc = light_clip.xyz / light_clip.w
++    
++    # Edge case: Outside light frustum
+     if ndc.z <= 0.0 or ndc.z >= 1.0:
+-        return 0.0 # Fully lit (outside frustum)
+-        
+-    # 5. UV Mapping
++        return 0.0
++    
++    # 5. Compute UV Coordinates
+     uv = ndc.xy * 0.5 + 0.5
++    
++    # Edge case: Outside shadow map
+     if uv.x < 0.0 or uv.x > 1.0 or uv.y < 0.0 or uv.y > 1.0:
+-        return 0.0 # Fully lit (outside map)
+-        
+-    # 6. Kernel Setup
++        return 0.0
++    
++    # 6. Initialize PCF Kernel
+     texel = scene.shadow_params.x
+     radius = clamp(int(scene.shadow_params.w + 0.5), 0, SHADOW_PCF_MAX_RADIUS)
+     
+-    # 7. PCF Sampling
+-    occlusion_sum = 0.0
+-    kernel_size = (2 * radius + 1) * (2 * radius + 1)
++    occlusion = 0.0
++    kernel_size = 2 * radius + 1
+     
++    # 7. Accumulate Occlusion
+     for y in range(-radius, radius + 1):
+         for x in range(-radius, radius + 1):
+             tap = uv + vec2(x, y) * texel
+-            # texture2DShadow returns 1.0 if depth <= stored, 0.0 otherwise
+-            shadow_sample = texture(shadow_map, vec3(tap, ndc.z))
+-            # Accumulate "lit" contribution (1 - shadow)
+-            occlusion_sum += 1.0 - shadow_sample
++            # Comparison sampler returns 1.0 if depth <= ndc.z, else 0.0
++            sample = texture(shadow_map, vec3(tap, ndc.z))
++            occlusion += 1.0 - sample
+             
+-    # 8. Averaging
+-    occlusion = occlusion_sum / float(kernel_size)
++    # 8. Average Occlusion
++    occlusion /= float(kernel_size * kernel_size)
+     
+     # 9. Edge Fade
+@@ -113,26 +136,13 @@
+ ```
+ 
+-**Edge Cases and Pitfalls:**
+-- **Peter-Panning:** Pure depth bias can cause shadows to detach from geometry. Offsetting along the normal instead of the light direction keeps contact points fixed relative to the surface geometry [S1, unofficial].
+-- **Volume Edges:** If the point is outside the shadow map slab (NDC z out of bounds or UV out of bounds), the method returns 0.0 (fully lit) rather than 1.0 (fully shadowed). This prevents black walls at volume edges where the shadow map does not cover the entire scene [S1, unofficial].
+-- **Degenerate Normals:** If the model matrix is degenerate (e.g., fully flattened scale), the normal might be invalid. The source notes a check `length(result) > 1e-4` to fallback to a world normal, though this is part of the grain perturbation logic, not the shadow lookup itself. The shadow lookup assumes a valid `normal` input.
+-
+ ## Operating characteristics
+-- **Time Complexity:** $O(R^2)$ where $R$ is the kernel radius. With `SHADOW_PCF_MAX_RADIUS = 4`, the maximum number of texture lookups is $9 \times 9 = 81$ per sample. This is constant and small, making it suitable for real-time rendering.
+-- **Memory Complexity:** $O(1)$ additional memory beyond the shadow map texture.
+-- **Strengths:**
+-  - Prevents peter-panning via slope-scaled normal offset.
+-  - Softens shadow edges via PCF.
+-  - Avoids harsh artifacts at the boundaries of the shadow map via edge fading.
+-  - Simple to implement using standard hardware comparison samplers.
+-- **Limitations:**
+-  - Performance scales with kernel size; larger radii increase fill rate usage.
+-  - The edge fade is a heuristic and may not perfectly match the physical falloff of participating media shadows.
+-  - Relies on a pre-computed shadow map; does not handle dynamic shadow casting from participating media directly (requires volume shadow map generation).
+-- **When to use:** Suitable for real-time rendering of directional light shadows on surfaces or volume boundaries where soft shadows and stability are prioritized over exact physical accuracy.
+-- **When not to use:** Not suitable for high-precision offline rendering or when the shadow map resolution is insufficient to capture fine details, as PCF can blur these further.
++*   **Time Complexity:** $O(R^2)$ per pixel, where $R$ is the PCF radius. With $R \le 4$, this is a constant 81 samples maximum.
++*   **Memory Complexity:** $O(1)$ additional memory per pixel, plus the shadow map texture.
++*   **Strengths:** The slope-scaled offset effectively reduces peter-panning artifacts without requiring complex depth bias calculations. The edge fade prevents harsh discontinuities at the boundaries of the shadow map, which is particularly useful for large volumes or distant lights.
++*   **Limitations:** The method relies on a pre-computed shadow map, which may not capture dynamic self-shadowing within the volume accurately if the volume geometry changes frequently. The linear interpolation in PCF can cause soft shadows that may not match the physical attenuation of participating media.
++*   **When to Use:** Suitable for static or slowly changing volumes where performance is critical and soft shadows are desired. Not ideal for highly dynamic scenes requiring precise self-shadowing.
+ 
+ ## Background
+-This method is derived from the lighting implementation in the VoxelPhase project, which focuses on real-time volumetric rendering. It combines standard shadow mapping techniques with specific adjustments for volume rendering contexts, such as edge fading to handle the finite extent of shadow maps in large scenes. The slope-scaled offset is a common technique in shadow mapping (often attributed to Williams' "Casting Casting Shadows at a Distance" or similar bias techniques), adapted here for normal-based offsetting.
++This method is derived from techniques used in real-time rendering for terrain and voxel-based environments. It combines standard PCF shadow mapping with specific adjustments for normal-based biasing and edge handling, as seen in implementations like `VoxelPhase` [S1, unofficial]. The approach addresses common artifacts in volume shadowing, such as peter-panning and hard edges, by leveraging normal information and spatial fading.
+ 
+ ## Sources

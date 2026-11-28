@@ -1,0 +1,334 @@
+--- v001.md
++++ v002.md
+@@ -4,166 +4,215 @@
+ 
+ ## Overview
+-Gaussian Piling is a slice-based volumetric reconstruction method that unifies 3D Gaussian Splatting with an imaging system-aware focus model to compress aggressively while preserving internal structure [S1, unofficial]. Unlike standard 3D Gaussian Splatting, which discards internal volumetric information and produces incoherent 3D structures with floating artifacts for slice-based modalities, Gaussian Piling models the finite focal zone to preserve high-frequency internal volumetric detail [S1, unofficial]. It achieves this by maintaining Gaussian primitives' form through axial re-parameterization, opacity modulation, and additive rasterization to enforce 3D-to-2D consistency [S1, unofficial].
++Gaussian Piling is a slice-based volumetric reconstruction method that unifies 3D Gaussian Splatting with an imaging system-aware focus model to compress data aggressively while preserving internal volumetric structure [S1, unofficial]. Unlike standard 3D Gaussian Splatting, which discards internal volumetric information and produces incoherent 3D structures with floating artifacts for slice-based modalities, Gaussian Piling models the finite focal zone to preserve high-frequency internal volumetric detail [S1, unofficial]. It achieves this by enforcing 3D-to-2D consistency through axial re-parameterization and opacity modulation, preventing ghosting artifacts across slices [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** A set of $M$ 3D Gaussian primitives defined in world space, each with center $\boldsymbol{\mu}$, covariance $\boldsymbol{\Sigma}$, opacity $\alpha$, and scale/orientation parameters. The imaging system's axial resolution $\sigma_z$ (standard deviation of the point spread function in the elevational direction).
++*   **Inputs:** A set of $M$ 3D Gaussian primitives defined by mean $\boldsymbol{\mu}$, covariance $\boldsymbol{\Sigma}$ (derived from scale $\mathbf{S}$ and rotation $\mathbf{R}$), opacity $\alpha$, and color/radiance parameters. The imaging system's axial resolution $\sigma_z$ is required.
+ *   **Outputs:** Rendered 2D slice images $I(p)$ and a differentiable 3D voxel volume $\sigma(\mathbf{x})$.
+ 
+ **Data Structures:**
+ Each Gaussian primitive $i$ stores:
+-*   Position $\boldsymbol{\mu} \in \mathbb{R}^3$ (world space).
+-*   Scale $s_x, s_y, s_z \in \mathbb{R}$ and Rotation quaternion $q \in \mathbb{R}^4$ (used to construct $\boldsymbol{\Sigma}$).
+-*   Opacity $\alpha \in [0, 1]$.
+-*   *Note:* Gaussian Piling discards spherical harmonics (SH) coefficients used in standard 3DGS for BRDF fitting, reducing parameters per primitive by ~40% [S1, unofficial].
+-
+-**Covariance Factorization:**
+-The covariance matrix $\boldsymbol{\Sigma}$ is factorized as $\boldsymbol{\Sigma} = \mathbf{R}\mathbf{S}\mathbf{S}^\top\mathbf{R}^\top$, where $\mathbf{S} = \text{diag}(s_x, s_y, s_z)$ and $\mathbf{R}$ is a rotation matrix derived from unit quaternion $q$ [S1, unofficial].
+-
+-**Rendering Pipeline Steps:**
++*   Position $\boldsymbol{\mu}_i \in \mathbb{R}^3$ (world space).
++*   Scale $\mathbf{s}_i \in \mathbb{R}^3$ and Rotation $\mathbf{q}_i \in \mathbb{R}^4$ (unit quaternion), combined to form $\boldsymbol{\Sigma}_i = \mathbf{R}_i \mathbf{S}_i \mathbf{S}_i^\top \mathbf{R}_i^\top$.
++*   Opacity $\alpha_i \in [0, 1]$.
++*   Color/Radiance: Unlike standard 3DGS, Gaussian Piling discards spherical harmonics (SH) coefficients to reduce parameters by ~40% and improve geometric fidelity [S1, unofficial].
++
++**Parameters:**
++*   $\sigma_z$: Axial resolution term (slice thickness). Estimated via scanning step $\delta_z$ satisfying Nyquist criterion ($\sigma_z \approx \delta_z$) if experimental calibration is unavailable [S1, unofficial].
++*   $\tau$: Opacity minimal threshold for culling primitives. Default: 0.02 [S1, unofficial].
++*   $\lambda$: Weight balancing perceptual (SSIM) and pixel-wise (L1) fidelity. Default: 0.2 [S1, unofficial].
++*   Learning Rates: Position 0.0006, Opacity 0.02, Scale 0.002, Rotation 0.001. Exponentially decay to 0.1 of initial values [S1, unofficial].
++*   $M$: Initial number of Gaussians. Default: 1,000,000 [S1, unofficial].
++*   Gradient threshold for adaptive control: 0.00005 [S1, unofficial].
++
++**Algorithm Steps:**
+ The rendering pipeline consists of three stages: Scan, Axial Re-parameterization & Opacity Modulation, and Screen-space Projection & Additive Rasterization [S1, unofficial].
+ 
+-1.  **Scan:** Project Gaussians onto slices at different depths. The analysis is conducted in the camera coordinate system (subscript $c$). The point spread function (PSF) is modeled as a spatially invariant 3D Gaussian with standard deviations $\sigma_x, \sigma_y, \sigma_z$ [S1, unofficial]. The sensitivity map $h$ is defined as the system's reversed impulse response along the elevational direction:
+-    $$h(-z_c) = \exp\left(-\frac{z_c^2}{2\sigma_z^2}\right)$$
++1.  **Scan:** Project 3D Gaussians onto slices at different depths. The analysis is conducted in the camera coordinate system (subscript $c$). The imaging system's Point Spread Function (PSF) is modeled as a spatially invariant 3D Gaussian with standard deviations $\sigma_x, \sigma_y, \sigma_z$. The sensitivity map $h$ along the elevational direction is defined as:
++    $$ h(-z_c) = \exp\left(-\frac{z_c^2}{2\sigma_z^2}\right) $$
+     where $z_c$ is the coordinate in the camera system [S1, unofficial].
+ 
+-2.  **Axial Re-parameterization:** To encode finite slice thickness, the axial resolution term is injected into the inverse covariance matrix in camera coordinates. This shrinks the axial support without disturbing the lateral structure, producing an "Effective Gaussian" $\mathcal{G}(\boldsymbol{\mu}_e, \boldsymbol{\Sigma}_e)$ [S1, unofficial]:
+-    $$\boldsymbol{\Sigma}_e^{-1} = \boldsymbol{\Sigma}_c^{-1} + \frac{\mathbf{e}_3 \mathbf{e}_3^\top}{\sigma_z^2}$$
+-    $$\boldsymbol{\mu}_e = \boldsymbol{\Sigma}_e \boldsymbol{\Sigma}_c^{-1} \boldsymbol{\mu}_c$$
++2.  **Axial Re-parameterization:** To encode finite slice thickness, the axial resolution term is injected into the inverse covariance matrix in camera coordinates. This shrinks the axial support without disturbing the lateral structure, producing an "Effective Gaussian" $\mathcal{G}_e \sim \mathcal{G}(\boldsymbol{\mu}_e, \boldsymbol{\Sigma}_e)$:
++    $$ \boldsymbol{\Sigma}_e^{-1} = \boldsymbol{\Sigma}_c^{-1} + \frac{\mathbf{e}_3 \mathbf{e}_3^\top}{\sigma_z^2} $$
++    $$ \boldsymbol{\mu}_e = \boldsymbol{\Sigma}_e \boldsymbol{\Sigma}_c^{-1} \boldsymbol{\mu}_c $$
+     where $\mathbf{e}_3 = [0, 0, 1]^\top$ [S1, unofficial].
+ 
+-3.  **Opacity Modulation:** To suppress contributions from out-of-focus primitives and prevent ghosting artifacts, opacity is modulated based on the change in Mahalanobis distance induced by the axial injection [S1, unofficial]:
+-    $$\text{opacity}_r = \exp\left(-\frac{1}{2}(\boldsymbol{\mu}_c^\top \boldsymbol{\Sigma}_c^{-1} \boldsymbol{\mu}_c - \boldsymbol{\mu}_e^\top \boldsymbol{\Sigma}_e^{-1} \boldsymbol{\mu}_e)\right)$$
+-    Primitives with opacity below a threshold $\tau$ are culled [S1, unofficial].
+-
+-4.  **Screen-space Projection:** The 2D Gaussian parameters on the imaging plane are obtained by marginalizing the Effective Gaussian's covariance $\boldsymbol{\Sigma}_e$ over the $(x_c, y_c)$ plane [S1, unofficial]:
+-    $$\boldsymbol{\Sigma}_{2d} = \begin{bmatrix} \Sigma_e[0,0] & \Sigma_e[1,0] \\ \Sigma_e[1,0] & \Sigma_e[1,1] \end{bmatrix}$$
+-    $$\boldsymbol{\mu}_{2d} = [\mu_e[0], \mu_e[1]]^\top$$
+-    The final rendered intensity $\tilde{\alpha}$ is normalized using the determinant of the 2D covariance to preserve total energy as primitives stretch or shrink [S1, unofficial]:
+-    $$\tilde{\alpha} = \alpha \cdot \text{opacity}_r / \sqrt{\det(\boldsymbol{\Sigma}_{2d})}$$
+-
+-5.  **Additive Rasterization:** In slice imaging, pixel intensity originates from the integral of Gaussian opacities along the projection line, where contributions superimpose without occlusion. For each pixel $p$, sum the contributions of overlapping Gaussians $i \in \mathcal{N}(p)$ [S1, unofficial]:
+-    $$I(p) = \sum_{i \in \mathcal{N}(p)} \tilde{\alpha}_i \exp\left(-\frac{1}{2}\mathbf{d}_i^\top \boldsymbol{\Sigma}_{2d,i}^{-1} \mathbf{d}_i\right)$$
+-    where $\mathbf{d}_i$ is the vector from $\boldsymbol{\mu}_{2d}$ to pixel $p$ [S1, unofficial].
++3.  **Opacity Modulation:** To suppress contributions from out-of-focus primitives and prevent ghosting artifacts, opacity is modulated based on the change in Mahalanobis distance:
++    $$ \text{opacity}_r = \exp\left(-\frac{1}{2}(\boldsymbol{\mu}_c^\top \boldsymbol{\Sigma}_c^{-1} \boldsymbol{\mu}_c - \boldsymbol{\mu}_e^\top \boldsymbol{\Sigma}_e^{-1} \boldsymbol{\mu}_e)\right) $$
++    Primitives with opacity below threshold $\tau$ are culled [S1, unofficial].
++
++4.  **Screen-space Projection:** Compute the 2D marginal distribution of the Effective Gaussian with respect to the $(x_c, y_c)$ plane:
++    $$ \boldsymbol{\Sigma}_{2d} = \begin{bmatrix} \Sigma_e[0,0] & \Sigma_e[1,0] \\ \Sigma_e[1,0] & \Sigma_e[1,1] \end{bmatrix}, \quad \boldsymbol{\mu}_{2d} = [\mu_e[0], \mu_e[1]]^\top $$
++    The final rendered intensity $\tilde{\alpha}$ is normalized using the determinant of the 2D covariance to preserve total energy:
++    $$ \tilde{\alpha} = \alpha \cdot \text{opacity}_r / \sqrt{\det(\boldsymbol{\Sigma}_{2d})} $$
++    [S1, unofficial].
++
++5.  **Additive Rasterization:** Pixel intensity is the sum of overlapping Gaussian contributions (no occlusion):
++    $$ I(p) = \sum_{i \in \mathcal{N}(p)} \tilde{\alpha}_i \exp\left(-\frac{1}{2}\mathbf{d}_i^\top \boldsymbol{\Sigma}_{2d,i}^{-1} \mathbf{d}_i\right) $$
++    where $\mathcal{N}(p)$ is the set of Gaussians overlapping pixel $p$, and $\mathbf{d}_i = \boldsymbol{\mu}_{2d,i} - p$ [S1, unofficial].
+ 
+ **Differentiable Voxelization:**
+-To enable 3D visualization, a differentiable voxelizer partitions 3D space into uniform $8^3$ tiles. Gaussians are culled per tile if their spatial support (3-$\sigma$ ellipsoid) does not intersect the tile. Voxel intensity $\sigma(\mathbf{x})$ is computed by summing world-space Gaussians [S1, unofficial]:
+-$$\sigma(\mathbf{x}) = \sum_{i=1}^M g_i^3(\mathbf{x}; \boldsymbol{\mu}_i, \boldsymbol{\Sigma}_i)$$
++To enable 3D visualization, a differentiable voxelizer partitions 3D space into uniform $8^3$ tiles. Gaussians are culled per tile if their 3-$\sigma$ ellipsoid does not intersect the tile. Voxel intensity is computed by summing world-space Gaussians:
++$$ \sigma(\mathbf{x}) = \sum_{i=1}^M g_i^3(\mathbf{x}; \boldsymbol{\mu}_i, \boldsymbol{\Sigma}_i) $$
+ where $g_i^3$ is the original Gaussian primitive in world coordinates [S1, unofficial].
+ 
+ **Optimization:**
+-*   **Loss Function:** The framework is optimized using a weighted combination of L1 loss $\mathcal{L}_1$ and D-SSIM loss $\mathcal{L}_{ssim}$ [S1, unofficial]:
+-    $$\mathcal{L} = \mathcal{L}_1 + \lambda \mathcal{L}_{ssim}$$
+-*   **Gradients:** Full gradient propagation is implemented in CUDA. The gradient w.r.t. opacity $\alpha$ is [S1, unofficial]:
+-    $$\frac{\partial \mathcal{L}}{\partial \alpha} = \frac{\partial \mathcal{L}}{\partial \tilde{\alpha}} \cdot \frac{\text{opacity}_r}{\sqrt{\det(\boldsymbol{\Sigma}_{2d})}}$$
+-    The gradient w.r.t. effective covariance $\boldsymbol{\Sigma}_e$ couples the determinant term and the conic term [S1, unofficial]:
+-    $$\frac{\partial \mathcal{L}}{\partial \boldsymbol{\Sigma}_e} \propto \frac{\partial \mathcal{L}}{\partial \tilde{\alpha}} \cdot \frac{\partial \tilde{\alpha}}{\partial \det} + (\text{conic})$$
+-*   **Densification/Pruning:** An adaptive mechanism based on tile-wise focus radii and Gaussian opacity scores refines the distribution. Adaptive control runs with a gradient threshold [S1, unofficial].
++The loss function is a weighted combination of L1 and D-SSIM losses:
++$$ \mathcal{L} = \mathcal{L}_1 + \lambda \mathcal{L}_{ssim} $$
++Gradients are propagated through the focus-aware pipeline. The gradient w.r.t. opacity $\alpha$ is:
++$$ \frac{\partial \mathcal{L}}{\partial \alpha} = \frac{\partial \mathcal{L}}{\partial \tilde{\alpha}} \cdot \frac{\text{opacity}_r}{\sqrt{\det(\boldsymbol{\Sigma}_{2d})}} $$
++The gradient w.r.t. effective covariance $\boldsymbol{\Sigma}_e$ couples the determinant term and the conic term [S1, unofficial].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-import torch
+-import math
+-
+-def gaussian_piling_render(gaussians, camera_params, sigma_z, resolution=(512, 512)):
+-    """
+-    Render a single slice using Gaussian Piling.
++import numpy as np
++
++def gaussian_piling_render(gaussians, camera_matrix, sigma_z, image_shape):
++    """
++    Renders 2D slices using Gaussian Piling.
+     
+     Args:
+-        gaussians: List of dicts with keys 'mu' (3,), 's' (3,), 'q' (4,), 'alpha' (float).
+-        camera_params: Dict with 'R_cam' (3x3), 'T_cam' (3,), 'focal_length'.
++        gaussians: List of dicts with keys 'mu' (3,), 'S' (3,), 'q' (4,), 'alpha' (float).
++        camera_matrix: 4x4 projection matrix.
+         sigma_z: Axial resolution of the imaging system.
+-        resolution: (height, width) of the output image.
++        image_shape: Tuple (H, W).
+         
+     Returns:
+-        image: Tensor of shape (H, W).
+-    """
+-    # 1. Transform Gaussians to Camera Space
++        rendered_image: 2D numpy array (H, W).
++    """
++    H, W = image_shape
++    image = np.zeros((H, W))
++    
++    # Precompute camera-space parameters for all Gaussians
++    # Note: In practice, this is done in CUDA. Here we assume helper functions exist.
+     cam_gaussians = []
+     for g in gaussians:
+-        # Transform position
+-        mu_c = camera_params['R_cam'] @ g['mu'] + camera_params['T_cam']
++        mu_c = transform_to_camera(g['mu'], camera_matrix)
++        # Covariance in camera space: J * T * Sigma_world * T^T * J^T
++        # Simplified for demonstration: assume Sigma_c is provided or computed via Jacobian J
++        Sigma_c = compute_camera_covariance(g['S'], g['q'], camera_matrix)
++        cam_gaussians.append({'mu_c': mu_c, 'Sigma_c': Sigma_c, 'alpha': g['alpha']})
+         
+-        # Transform covariance
+-        # R is derived from quaternion q
+-        R = quaternion_to_rotation_matrix(g['q'])
+-        S = torch.diag(torch.tensor(g['s']))
+-        Sigma_c = R @ S @ S.T @ R.T
+-        
+-        cam_gaussians.append({
+-            'mu_c': mu_c,
+-            'Sigma_c': Sigma_c,
+-            'alpha': g['alpha']
+-        })
+-    
+-    # 2. Axial Re-parameterization and Opacity Modulation
+-    e3 = torch.tensor([0.0, 0.0, 1.0])
+-    # Add axial resolution term to inverse covariance
+-    Sigma_c_inv = torch.inverse(torch.tensor([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]) * 1e-6) # Placeholder for actual inverse logic if not precomputed
+-    # Note: In practice, Sigma_c_inv is computed from Sigma_c. 
+-    # Here we assume Sigma_c_inv is available or computed.
+-    
+-    # Effective inverse covariance
+-    # Sigma_e_inv = Sigma_c_inv + (e3 @ e3.T) / sigma_z**2
+-    # Sigma_e = torch.inverse(Sigma_e_inv)
+-    # Mu_e = Sigma_e @ Sigma_c_inv @ Mu_c
+-    
+-    # Opacity modulation factor
+-    # opacity_r = exp(-0.5 * (Mu_c.T @ Sigma_c_inv @ Mu_c - Mu_e.T @ Sigma_e_inv @ Mu_e))
+-    
+-    # 3. Screen-space Projection
+-    # Marginalize to 2D
+-    # Sigma_2d = Sigma_e[:2, :2]
+-    # Mu_2d = Mu_e[:2]
+-    
+-    # 4. Additive Rasterization
+-    # Initialize image
+-    image = torch.zeros(resolution)
+-    
+-    # For each pixel (or tile-based optimization in CUDA)
+-    # This is a simplified CPU version for clarity
+-    for y in range(resolution[0]):
+-        for x in range(resolution[1]):
+-            pixel_coord = torch.tensor([x, y])
+-            # Map pixel to camera plane coordinates (simplified)
+-            # d_i calculation and summation
+-            pass
++    # Iterate over pixels (or use tile-based rasterization in implementation)
++    for y in range(H):
++        for x in range(W):
++            pixel_pos = np.array([x, y, 0]) # Camera space 2D
++            
++            # Find overlapping Gaussians (N(p))
++            # Optimization: Use spatial hashing or bounding box check
++            overlapping = [g for g in cam_gaussians if is_overlapping(g, pixel_pos)]
++            
++            intensity = 0.0
++            for g in overlapping:
++                mu_c = g['mu_c']
++                Sigma_c = g['Sigma_c']
++                alpha = g['alpha']
++                
++                # 1. Axial Re-parameterization
++                # e3 = [0, 0, 1]
++                # Sigma_e_inv = Sigma_c_inv + (e3 @ e3.T) / sigma_z^2
++                Sigma_c_inv = np.linalg.inv(Sigma_c)
++                e3 = np.array([0, 0, 1])
++                Sigma_e_inv = Sigma_c_inv + (np.outer(e3, e3)) / (sigma_z ** 2)
++                Sigma_e = np.linalg.inv(Sigma_e_inv)
++                
++                # mu_e = Sigma_e @ Sigma_c_inv @ mu_c
++                mu_e = Sigma_e @ (Sigma_c_inv @ mu_c)
++                
++                # 2. Opacity Modulation
++                # opacity_r = exp(-0.5 * (mu_c^T Sigma_c_inv mu_c - mu_e^T Sigma_e_inv mu_e))
++                mahal_c = mu_c @ Sigma_c_inv @ mu_c
++                mahal_e = mu_e @ Sigma_e_inv @ mu_e
++                opacity_r = np.exp(-0.5 * (mahal_c - mahal_e))
++                
++                # Cull if below threshold
++                if opacity_r < 0.02:
++                    continue
++                    
++                # 3. Screen-space Projection
++                # Sigma_2d is top-left 2x2 of Sigma_e
++                Sigma_2d = Sigma_e[:2, :2]
++                mu_2d = mu_e[:2]
++                
++                # Det check for stability
++                det_Sigma_2d = np.linalg.det(Sigma_2d)
++                if det_Sigma_2d <= 1e-8:
++                    continue
++                    
++                # 4. Additive Rasterization
++                # d_i = mu_2d - pixel_pos
++                d_i = mu_2d - pixel_pos
++                Sigma_2d_inv = np.linalg.inv(Sigma_2d)
++                
++                # Exponent term
++                exponent = -0.5 * (d_i @ Sigma_2d_inv @ d_i)
++                
++                # Normalized intensity
++                # alpha_tilde = alpha * opacity_r / sqrt(det(Sigma_2d))
++                alpha_tilde = alpha * opacity_r / np.sqrt(det_Sigma_2d)
++                
++                intensity += alpha_tilde * np.exp(exponent)
++                
++            image[y, x] = intensity
+             
+     return image
+ 
++def compute_camera_covariance(S, q, camera_matrix):
++    """
++    Computes the 3D covariance matrix in camera space from scale, rotation, and projection.
++    This is a placeholder for the full Jacobian-based projection logic described in 3DGS.
++    """
++    # Construct rotation matrix from quaternion
++    R = quaternion_to_rotation_matrix(q)
++    # Construct scale matrix
++    S_mat = np.diag(S)
++    # World covariance
++    Sigma_world = R @ S_mat @ S_mat.T @ R.T
++    # Project to camera space (simplified affine approximation)
++    # In full implementation, use the 3x4 Jacobian of the projection
++    # For this pseudocode, we assume a helper exists or return world cov for simplicity
++    # Note: Real implementation requires J * T * Sigma * T^T * J^T
++    return Sigma_world
++
+ def quaternion_to_rotation_matrix(q):
+-    """Convert unit quaternion to 3x3 rotation matrix."""
+     w, x, y, z = q
+-    return torch.tensor([
++    return np.array([
+         [1 - 2*y*y - 2*z*z, 2*x*y - 2*z*w, 2*x*z + 2*y*w],
+         [2*x*y + 2*z*w, 1 - 2*x*x - 2*z*z, 2*y*z - 2*x*w],
+         [2*x*z - 2*y*w, 2*y*z + 2*x*w, 1 - 2*x*x - 2*y*y]
+     ])
++
++def transform_to_camera(mu, camera_matrix):
++    """Transforms world point to camera coordinates."""
++    # Homogeneous coordinates
++    mu_h = np.append(mu, 1)
++    # Apply inverse view matrix (assuming camera_matrix is view-projection, extract view part)
++    # Simplified: assume camera_matrix includes the view transform
++    mu_cam_h = camera_matrix @ mu_h
++    return mu_cam_h[:3] / mu_cam_h[3]
++
++def is_overlapping(g, pixel_pos):
++    """Checks if Gaussian bounding box overlaps pixel."""
++    # Simplified check: distance from center < 3 sigma
++    # In practice, use tile-based culling
++    return True # Placeholder
+ ```
+ 
+-**Parameters:**
+-*   $\sigma_z$: Axial resolution term representing slice thickness. Estimated theoretically, numerically, or via experimental calibration. If unknown, assumed equal to scanning step $\delta_z$ satisfying Nyquist criterion ($\sigma_z \approx \delta_z$) [S1, unofficial].
+-*   $\tau$: Opacity minimal threshold for culling primitives. Default value is 0.02 [S1, unofficial].
+-*   $\lambda$: Weight balancing perceptual (SSIM) and pixel-wise (L1) fidelity in the loss function. Default value is 0.2 [S1, unofficial].
+-*   Learning rates: Position 0.0006, Opacity 0.02, Scale 0.002, Rotation 0.001. Exponentially decay to 0.1 of initial values [S1, unofficial].
+-*   $M$: Initial number of Gaussians. Default value is 1000k [S1, unofficial].
+-*   Gradient threshold for adaptive control: 0.00005 [S1, unofficial].
+-
+ **Edge Cases and Pitfalls:**
+-*   Ghosting or floating artifacts across slices are prevented by downweighting primitives far from the focal vicinity via opacity modulation, which naturally attenuates transparency for out-of-focus primitives [S1, unofficial].
+-*   Standard 3DGS fails for slice-based modalities because it discards internal volumetric information; Gaussian Piling addresses this by enforcing 3D-to-2D consistency through the focus-aware model [S1, unofficial].
++*   **Ghosting Artifacts:** Without opacity modulation, primitives far from the focal plane contribute to adjacent slices, causing floating artifacts. The exponential attenuation of $\text{opacity}_r$ prevents this [S1, unofficial].
++*   **Precision:** The determinant term $\sqrt{\det(\boldsymbol{\Sigma}_{2d})}$ in the normalization of $\tilde{\alpha}$ ensures brightness adapts to footprint size. Numerical instability occurs if $\det(\boldsymbol{\Sigma}_{2d})$ is near zero; a small epsilon guard is required [S1, unofficial].
++*   **SH Discard:** Standard 3DGS uses SH for view-dependent color. Gaussian Piling discards SH, which reduces parameters but assumes isotropic or fixed lighting conditions suitable for slice imaging [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The method delivers high-quality results in as few as 3 minutes, up to 11× faster than NeRF-based approaches [S1, unofficial].
+-*   **Memory Complexity:** Quantization and compression achieve a 16× reduction over voxel-based storage while retaining full 2D rendering fidelity and volumetric consistency [S1, unofficial].
+-*   **Performance:** Differentiable Voxelizer performance is > 100 FPS for real-time query performance [S1, unofficial].
+-*   **Strengths:** Preserves high-frequency internal volumetric detail; achieves 16× compression over voxel grids; fast training and rendering; prevents ghosting artifacts.
+-*   **Limitations:** Discards spherical harmonics, which may limit view-dependent appearance modeling compared to standard 3DGS (though this reduces parameters by ~40% and improves geometric fidelity) [S1, unofficial].
+-*   **When to use:** Slice-based volumetric imaging (e.g., microscopy, ultrasound) where internal structure preservation and compression are critical.
+-*   **When not to use:** Surface-only rendering where view-dependent BRDF effects are paramount and internal volume consistency is not required.
++*   **Time Complexity:** Training is significantly faster than NeRF-based approaches, delivering high-quality results in as few as 3 minutes (up to 11× faster) [S1, unofficial]. The differentiable voxelizer achieves > 100 FPS for real-time query performance [S1, unofficial].
++*   **Memory Complexity:** The method achieves a 16× reduction in storage over voxel-based grids while retaining full 2D rendering fidelity and volumetric consistency [S1, unofficial].
++*   **Strengths:** Preserves high-frequency internal volumetric detail; enforces 3D-to-2D consistency; compact encoding via Morton sorting and entropy compression (LZMA) [S1, unofficial].
++*   **Limitations:** Discards spherical harmonics, limiting view-dependent color modeling compared to standard 3DGS; relies on accurate $\sigma_z$ estimation (though Nyquist approximation is robust) [S1, unofficial].
++*   **When to use:** Slice-based volumetric imaging (microscopy, ultrasound) where internal structure preservation and compression are critical.
++*   **When not to use:** Surface rendering from multi-view images where view-dependent appearance is paramount.
+ 
+ ## Background
+-Gaussian Piling was introduced as a unified sparse Gaussian splatting framework for slice-based volumetric reconstruction [S1, unofficial]. It addresses the gap between the high compression ratio of Implicit Neural Representations (INRs) and the fast fitting of 3D Gaussian Splatting (3DGS), specifically for scientific and medical imaging where complete internal structure is paramount [S1, unofficial]. The method was evaluated on datasets including TDSC-ABUS (ultrasound), rDL-LSM (microscopy), and cellular datasets [S1, unofficial].
++Gaussian Piling (GaussianPile) was introduced to bridge the gap between the high compression ratio of Implicit Neural Representations (INRs) and the fast fitting of 3D Gaussian Splatting (3DGS) for slice-based volumetric imaging [S1, unofficial]. Standard 3DGS is designed for surface appearance from multi-view images and discards internal volumetric information, making it unsuitable for scientific and medical imaging [S1, unofficial]. The method was developed by researchers at Tsinghua University and published in 2026 [S1, unofficial]. It utilizes a unified sparse Gaussian splatting framework that incorporates an imaging system-aware focus model [S1, unofficial].
+ 
+ ## Sources

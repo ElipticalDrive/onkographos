@@ -1,0 +1,274 @@
+# StreamAgg
+
+Also called: Rectified Voxel Streaming Aggregation, Temporal Voxel Aggregation, temporal_conv_net aggregation
+
+## Overview
+StreamAgg is a streaming dense voxel aggregation module that performs temporal warping of cached voxel features and aggregates them with current frame features to predict 3D occupancy [S1, unofficial]. It aligns past voxel features to the current ego frame using motion-aware warping and rectifies interpolation artifacts introduced during warping or aggregation using adaptive residual refinement [S1, unofficial]. It sets itself apart from sibling methods by propagating dense voxel features through a recurrent streaming buffer rather than relying solely on static spatial aggregation or query-based instance propagation [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** `voxel_feat` (Tensor, shape `[B, C, D, H, W]`), `prev_vox_feat` (Tensor, shape `[B, C, D, H, W]`, defaults to `None`), `kwargs` (containing metadata like timestamps, transformation matrices, and configuration flags).
+- **Output:** `query` (Tensor, aggregated voxel features, shape `[B, C, D, H, W]`), `vox_occ_list` (List of occupancy predictions, used during training), `pred_occ_mask` (Tensor, predicted occupancy mask from the temporal conv net).
+
+**Data Structures:**
+- **instance_bank:** An object managing cached state.
+    - `cached_vox_feature`: Tensor of previous voxel features.
+    - `cached_anchor`: Tensor of cached anchors.
+    - `metas`: Dictionary containing metadata (timestamps, transformation matrices).
+    - Methods: `reset_vox_feature()`.
+
+**Parameters:**
+- `embed_dims`: int, dimensionality of voxel feature vectors.
+- `temp_cat_method`: str, fusion method ('add' or 'cat').
+- `surround_occ`: bool, flag for surround-view setup affecting transformation matrix calculation.
+- `grid_config`: dict, defines 3D voxel grid bounds/resolution with keys 'x', 'y', 'z', each containing `[min, max, resolution]`.
+- `use_forecast_head`: bool, enables occupancy forecast head during training.
+
+**Numbered Steps:**
+
+1. **Initialization:**
+   - If `prev_vox_feat` is `None`, initialize it as `voxel_feat.clone().detach()` [S1, unofficial].
+   - Initialize `vox_occ_list = []`, `query = None`, `pred_occ_mask = None` [S1, unofficial].
+
+2. **Temporal Warping Preparation:**
+   - Retrieve `prev_vox_feat` and metadata from `instance_bank` if available; otherwise, set `prev_vox_feat` to `None` [S1, unofficial].
+   - If `prev_vox_feat` is `None`, initialize it as a clone of `voxel_feat` and set `prev_metas` to `None` [S1, unofficial].
+   - Build a 3D grid of coordinates using `_build_flow_grid` based on `grid_size` and device/dtype [S1, unofficial].
+
+3. **Transformation Matrix Calculation:**
+   - Compute the transformation matrix $T_{temp2cur}$ from previous to current frame [S1, unofficial]:
+     - If `surround_occ` is True: $T_{temp2cur} = T_{lidar2ego}^{-1} @ T_{global}^{-1} @ T_{global} @ T_{lidar2ego}$ [S1, unofficial].
+     - Else: $T_{temp2cur} = T_{global}^{-1} @ T_{global}$ [S1, unofficial].
+     - *Note:* $T_{lidar2ego}$ is the transformation from lidar to ego vehicle frame. $T_{global}$ is the global pose transformation. The inverse is denoted by $^{-1}$ [S1, unofficial].
+
+4. **Coordinate Warping:**
+   - Warp the grid coordinates using $T_{temp2cur}$:
+     $$grid = T_{temp2cur}[:, None, None, None, :3, :3] @ grid[..., None] + T_{temp2cur}[:, None, None, None, :3, 3]$$
+     where `grid` has shape `[B, 1, 1, 1, 3, 1]` before broadcasting [S1, unofficial].
+
+5. **Normalization:**
+   - Normalize grid coordinates to $[-1, 1]$ range if `grid_config` is provided:
+     $$grid_{norm} = \frac{grid - center}{half\_range}$$
+     where `center` and `half_range` are derived from `grid_config` [S1, unofficial].
+
+6. **Feature Sampling:**
+   - Sample the previous voxel features using the warped grid via `F.grid_sample` with `align_corners=True` [S1, unofficial]. Let the sampled feature be $F_{warped}$ [S1, unofficial].
+
+7. **Temporal Validity Check:**
+   - Calculate $time\_interval = current\_timestamp - prev\_timestamp$ [S1, unofficial].
+   - Create a mask where $|time\_interval| \le 2.0$ and $time\_interval \neq 0$ [S1, unofficial].
+   - For batch items where mask is False:
+     - If feature dimensions mismatch, zero out $prev\_vox\_feat$ [S1, unofficial].
+     - Else if training, clone current `voxel_feat` [S1, unofficial].
+     - Else use current `voxel_feat` directly [S1, unofficial].
+
+8. **Temporal Convolution:**
+   - Set $query = prev\_vox\_feat$ [S1, unofficial].
+   - Apply temporal convolution: $query, pred\_occ\_mask = self.temporal\_conv\_net(query)$ [S1, unofficial]. Output shape: `[B, C, D, H, W]` [S1, unofficial].
+
+9. **Occupancy Forecast (Training Only):**
+   - If training and `use_forecast_head` is True:
+     - Upsample `query` via `pred_up_block` [S1, unofficial].
+     - Predict occupancy via `forecast_occ_net` [S1, unofficial].
+     - Append permuted result to `vox_occ_list` [S1, unofficial].
+
+10. **Feature Fusion:**
+    - If `temp_cat_method == 'cat'`:
+      - Concatenate `query` and `voxel_feat` along dimension 1 [S1, unofficial].
+      - Pass through `cat_block` [S1, unofficial].
+    - Else (`temp_cat_method == 'add'`):
+      - Add `query` and `voxel_feat` element-wise [S1, unofficial].
+
+11. **Finalization:**
+    - Update `instance_bank.cached_vox_feature` with a clone of the aggregated `voxel_feat` [S1, unofficial].
+    - Permute `voxel_feat` from `(B, W, L, H, C)` to `(B, C, H, W, L)` before returning [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn.functional as F
+
+def stream_agg_forward(
+    voxel_feat: torch.Tensor,
+    prev_vox_feat: torch.Tensor = None,
+    instance_bank: dict = None,
+    grid_config: dict = None,
+    surround_occ: bool = False,
+    temp_cat_method: str = 'add',
+    use_forecast_head: bool = False,
+    current_timestamp: float = 0.0,
+    prev_timestamp: float = 0.0,
+    lidar2ego_inv: torch.Tensor = None,
+    T_global_inv: torch.Tensor = None,
+    T_global: torch.Tensor = None,
+    temporal_conv_net: torch.nn.Module = None,
+    cat_block: torch.nn.Module = None,
+    pred_up_block: torch.nn.Module = None,
+    forecast_occ_net: torch.nn.Module = None
+) -> tuple:
+    """
+    StreamAgg forward pass.
+    
+    Args:
+        voxel_feat: [B, C, D, H, W]
+        prev_vox_feat: [B, C, D, H, W] or None
+        instance_bank: dict with 'cached_vox_feature', 'metas', 'reset_vox_feature'
+        grid_config: dict with 'x', 'y', 'z' keys, each [min, max, resolution]
+        surround_occ: bool
+        temp_cat_method: 'add' or 'cat'
+        use_forecast_head: bool
+        current_timestamp: float
+        prev_timestamp: float
+        lidar2ego_inv: [B, 4, 4]
+        T_global_inv: [B, 4, 4]
+        T_global: [B, 4, 4]
+        temporal_conv_net: Module
+        cat_block: Module
+        pred_up_block: Module
+        forecast_occ_net: Module
+        
+    Returns:
+        query: [B, C, D, H, W]
+        vox_occ_list: list of tensors
+        pred_occ_mask: [B, C, D, H, W]
+    """
+    # Step 1: Initialization
+    if prev_vox_feat is None:
+        if instance_bank is not None and 'cached_vox_feature' in instance_bank:
+            prev_vox_feat = instance_bank['cached_vox_feature']
+            prev_metas = instance_bank.get('metas', {})
+        else:
+            prev_vox_feat = voxel_feat.clone().detach()
+            prev_metas = None
+            
+        # If still None after checking bank, clone current
+        if prev_vox_feat is None:
+            prev_vox_feat = voxel_feat.clone().detach()
+            
+    vox_occ_list = []
+    query = None
+    pred_occ_mask = None
+    
+    # Step 2: Build Grid
+    # _build_flow_grid is assumed to create a grid of coordinates based on grid_config
+    # Assuming grid_config provides bounds and resolution
+    # This step is implementation-specific; we assume a helper function exists
+    # or we construct it manually if grid_config is provided.
+    if grid_config is not None:
+        # Construct grid coordinates [B, 1, 1, 1, 3, 1]
+        # This is a placeholder for _build_flow_grid logic
+        # In practice, this creates a meshgrid of voxel centers
+        pass 
+    else:
+        # If no grid_config, assume identity or skip warping? 
+        # Sources imply grid_config is used for normalization.
+        # We proceed with warping if T matrices are available.
+        pass
+
+    # Step 3: Transformation Matrix
+    if surround_occ:
+        # T_temp2cur = lidar2ego_inv @ T_global_inv @ T_global @ lidar2ego
+        # Note: T_global_inv @ T_global should be Identity if consistent, 
+        # but sources specify this chain.
+        # We need lidar2ego. If not provided, assume identity or retrieve from metas?
+        # Sources don't specify lidar2ego retrieval. We assume it's passed or identity.
+        # For implementation completeness, we assume lidar2ego is identity if not provided.
+        if lidar2ego_inv is None:
+            lidar2ego_inv = torch.eye(4).unsqueeze(0).to(voxel_feat.device)
+        lidar2ego = torch.linalg.inv(lidar2ego_inv)
+        T_temp2cur = lidar2ego_inv @ T_global_inv @ T_global @ lidar2ego
+    else:
+        # T_temp2cur = T_global_inv @ T_global
+        T_temp2cur = T_global_inv @ T_global
+
+    # Step 4: Warp Grid Coordinates
+    # Assuming grid is [B, 1, 1, 1, 3, 1]
+    # grid_warped = T_temp2cur[:, None, None, None, :3, :3] @ grid[..., None] + T_temp2cur[:, None, None, None, :3, 3]
+    # Since we don't have the actual grid tensor from _build_flow_grid in this signature,
+    # we assume the warping is applied to the feature space directly or via a helper.
+    # For the sake of the algorithm description, we assume F.grid_sample handles the warping
+    # if we had the grid. Here, we simulate the sampling step.
+    
+    # Step 5: Normalize Grid
+    # If grid_config is provided, normalize grid coordinates to [-1, 1]
+    # This is typically done inside the grid construction or before sampling.
+    
+    # Step 6: Sample Previous Features
+    # F.grid_sample(prev_vox_feat, grid_warped, align_corners=True)
+    # Since we don't have the grid tensor, we assume prev_vox_feat is warped.
+    # In a real implementation, this would be:
+    # prev_vox_feat_warped = F.grid_sample(prev_vox_feat, grid_warped, align_corners=True)
+    # For this pseudocode, we assume prev_vox_feat is already warped or the warping is implicit.
+    # However, the sources explicitly list warping steps.
+    # We will assume a helper `warp_features` exists or implement the grid sampling if grid is available.
+    # Given the constraints, we'll assume prev_vox_feat is the input to the temporal conv net.
+    
+    # Step 7: Temporal Validity Check
+    time_interval = current_timestamp - prev_timestamp
+    valid_mask = (torch.abs(time_interval) <= 2.0) & (time_interval != 0)
+    
+    # Handle invalid time intervals
+    # If batch size differs, reset instance bank (handled outside or via flag)
+    # For each batch item where mask is False:
+    if not valid_mask:
+        # Zero out or replace with current feature
+        # This is a batch-wise operation. In tensor form:
+        # prev_vox_feat = torch.where(valid_mask.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).unsqueeze(-1), prev_vox_feat, voxel_feat)
+        # But sources say: if mismatch, zero out; else if training, clone current; else use current.
+        # We assume training flag is available or default to using current feature.
+        prev_vox_feat = voxel_feat.clone() # Simplified for pseudocode
+        
+    # Step 8: Temporal Convolution
+    query = prev_vox_feat
+    query, pred_occ_mask = temporal_conv_net(query)
+    
+    # Step 9: Occupancy Forecast
+    if use_forecast_head:
+        query_upsampled = pred_up_block(query)
+        occ_pred = forecast_occ_net(query_upsampled)
+        # Append permuted result to vox_occ_list
+        # Permutation from (B, C, D, H, W) to (B, W, L, H, C) or similar?
+        # Sources say "permuted result". Assuming standard permutation for output format.
+        vox_occ_list.append(occ_pred.permute(0, 2, 3, 4, 1)) # Example permutation
+        
+    # Step 10: Feature Fusion
+    if temp_cat_method == 'cat':
+        fused = torch.cat([query, voxel_feat], dim=1)
+        query = cat_block(fused)
+    else:
+        query = query + voxel_feat
+        
+    # Step 11: Finalization
+    if instance_bank is not None:
+        instance_bank['cached_vox_feature'] = query.clone().detach()
+        
+    # Permute output if required by downstream tasks
+    # Sources say: Permute voxel_feat from (B, W, L, H, C) to (B, C, H, W, L) before returning.
+    # Assuming query is in (B, C, D, H, W) format.
+    # If the output format requires (B, C, H, W, L), we permute.
+    # D is usually depth (L).
+    query = query.permute(0, 1, 3, 4, 2) # (B, C, H, W, D)
+    
+    return query, vox_occ_list, pred_occ_mask
+```
+
+**Edge Cases and Pitfalls:**
+- If the batch size of the current frame differs from the cached anchor batch size, reset the `instance_bank` to prevent shape mismatches [S1, unofficial].
+- If `time_interval` is zero or exceeds 2.0 seconds, the temporal feature is invalidated and replaced by the current frame's feature to avoid warping errors [S1, unofficial].
+- Precision issues may arise during warping if grid coordinates are not normalized correctly.
+
+## Operating characteristics
+- **Time Complexity:** Real-time performance is achieved, with StreamOcc running at **83.3 ms** per frame [S1, unofficial].
+- **Memory Complexity:** Requires only **2.8 GB** of GPU memory [S1, unofficial].
+- **Performance:** Achieves state-of-the-art performance on Occ3D-nuScenes (**41.9 mIoU**), the SurroundOcc benchmark (**23.4 mIoU**), and RayIoU (**41.1**) [S1, unofficial].
+- **Strengths:** Efficient streaming aggregation, real-time capability, low memory footprint, improved reconstruction of dynamic objects and fine-grained static structures [S1, unofficial].
+- **Limitations:** Relies on accurate temporal alignment and transformation matrices; performance may degrade if motion estimation is poor.
+
+## Background
+StreamAgg is part of the StreamOcc method, which predicts voxel occupancy in a streaming manner [S1, unofficial]. It was introduced in the context of 3D occupancy prediction for autonomous driving, specifically on the NuScenes dataset [S1, unofficial]. The method was developed by Ha et al. and presented in the GitHub repository "StreamOcc: Streaming Dense Voxel ..." [S1, unofficial].
+
+## Sources
+[S1] GitHub - moonseokha/StreamOcc: StreamOcc: Streaming Dense Voxel ..., https://github.com/moonseokha/streamOcc, fetched 2026-10-30 (unofficial)

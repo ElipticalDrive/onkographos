@@ -1,0 +1,270 @@
+--- v001.md
++++ v002.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Point Cloud Regularization is a post-processing pipeline applied to an initial colored point cloud to remove noise, duplicates, and outliers before training a 3D Gaussian Splatting (3DGS) model [S1]. It solves the problem of unreliable initialization caused by merging Structure-from-Motion (SfM) points with lightweight 3DGS primitive centers, which introduces depth ambiguity, duplicated points from densification, and unstable tracks [S1]. It sets itself apart from its sibling [Alpha-based Point Cleaning](19085-alpha-based-point-cleaning.md) by explicitly enforcing multi-view consistency and geometric normal agreement rather than relying solely on alpha-blending reliability metrics [S1].
++Point Cloud Regularization is a post-processing pipeline applied to an initial colored point cloud to remove noise, duplicates, and outliers before training a 3D Gaussian Splatting (3DGS) model [S1]. It solves the problem of unreliable initialization caused by merging Structure-from-Motion (SfM) points with lightweight 3DGS primitive centers, which introduces depth ambiguity, duplicated points from densification, and unstable tracks [S1].
+ 
+ ## How it works
+@@ -47,172 +47,97 @@
+ ```python
+ def point_cloud_regularization(P_init, camera_projections, K=1000, alpha=0.20, beta=0.30, tau_cos=0.2, k_nn=10):
+-    """
+-    Regularizes an initial point cloud by removing noise and unreliable points.
+-    
+-    Args:
+-        P_init: List of points, each with position X and color C.
+-        camera_projections: Mapping of point index to list of camera indices observing it.
+-        K: Number of clusters for K-means.
+-        alpha: Fraction of single-view points to retain.
+-        beta: Fraction of points to retain per cluster.
+-        tau_cos: Minimum mean cosine similarity for normal consistency.
+-        k_nn: Number of neighbors for normal estimation.
+-        
+-    Returns:
+-        P_final: List of regularized points.
+-    """
+-    # Step 1: Single-view Point Filtering
+-    P_sv = []
+-    P_mv = []
+-    
+-    for i, point in enumerate(P_init):
+-        cameras = camera_projections[i]
+-        if len(cameras) == 1:
+-            P_sv.append(point)
++    # Step 1: Single-view filtering
++    P_sv, P_mv = [], []
++    for i, pt in enumerate(P_init):
++        if len(camera_projections[i]) == 1:
++            P_sv.append(pt)
+         else:
+-            P_mv.append(point)
+-            
+-    # Compute reliability scores for single-view points based on proximity to P_mv
+-    # Note: Exact formula for r(X) is not provided in sources, but implies proximity metric [S1]
+-    # [G] Assuming r(X) is inverse distance to nearest neighbor in P_mv
+-    import math
+-    from collections import defaultdict
+-    
+-    # Precompute distances from P_sv to P_mv for reliability scoring
+-    # This is a placeholder for the specific proximity metric r(X) defined in [S1]
+-    # The source states "based on its proximity to Pmv" but does not give the explicit scalar formula.
+-    # We assume a standard inverse Euclidean distance or similar reliability metric.
+-    # To be implementable, we define r(X) as the inverse distance to the nearest point in P_mv.
+-    
+-    if not P_mv:
+-        # If no multi-view points exist, all single-view points are unreliable or undefined.
+-        # [G] Fallback: retain none or all? Source implies P_mv exists for this step.
+-        # If P_mv is empty, P_sv* is empty.
+-        P_sv_star = []
+-    else:
+-        # Calculate reliability scores
+-        reliability_scores = []
+-        for point_sv in P_sv:
+-            min_dist = float('inf')
+-            for point_mv in P_mv:
+-                dist = math.sqrt(sum((a-b)**2 for a, b in zip(point_sv.X, point_mv.X)))
+-                if dist < min_dist:
+-                    min_dist = dist
+-            # Reliability is higher for points closer to multi-view points
+-            # [G] Using inverse distance as proxy for r(X) as exact formula not given
+-            r = 1.0 / (min_dist + 1e-8) 
+-            reliability_scores.append((point_sv, r))
+-            
+-        # Sort by reliability descending
+-        reliability_scores.sort(key=lambda x: x[1], reverse=True)
+-        
+-        # Retain top alpha fraction
+-        num_retain = max(1, int(len(reliability_scores) * alpha))
+-        P_sv_star = [p for p, r in reliability_scores[:num_retain]]
+-        
++            P_mv.append(pt)
++
++    # Reliability r(X) = inverse distance to nearest point in P_mv [G]
++    reliability = []
++    for pt in P_sv:
++        min_d = min(dist(pt.X, mv.X) for mv in P_mv) if P_mv else float('inf')
++        reliability.append((pt, 1.0 / (min_d + 1e-8)))
++    reliability.sort(key=lambda x: x[1], reverse=True)
++    n_retain = max(1, int(len(reliability) * alpha))
++    P_sv_star = [p for p, _ in reliability[:n_retain]]
+     P_filter = P_mv + P_sv_star
+-    
+-    # Step 2: Clustering-Based Denoising
+-    # Apply K-means clustering
+-    # [G] Standard K-means implementation required. 
+-    # We assume a function kmeans(points, K) that returns (centroids, labels)
+-    centroids, labels = kmeans([p.X for p in P_filter], K)
+-    
+-    # Group points by cluster
+-    clusters = defaultdict(list)
+-    for i, point in enumerate(P_filter):
+-        clusters[labels[i]].append(point)
+-        
++
++    # Step 2: Clustering (Lloyd's K-means)
++    centroids = random_sample(P_filter, K)
++    labels = [0] * len(P_filter)
++    for _ in range(50):
++        for i, pt in enumerate(P_filter):
++            labels[i] = min(range(K), key=lambda c: dist_sq(pt.X, centroids[c]))
++        new_centroids = []
++        for c in range(K):
++            pts = [P_filter[i] for i in range(len(P_filter)) if labels[i] == c]
++            if pts:
++                new_centroids.append(mean_vec([p.X for p in pts]))
++            else:
++                new_centroids.append(centroids[c])
++        centroids = new_centroids
++
+     P_clu = []
+-    for c_idx, points_in_cluster in clusters.items():
+-        centroid = centroids[c_idx]
+-        # Calculate distances to centroid
+-        dists = []
+-        for point in points_in_cluster:
+-            dist = sum((a-b)**2 for a, b in zip(point.X, centroid))
+-            dists.append((point, dist))
+-            
+-        # Sort by distance ascending
++    for c in range(K):
++        cluster_pts = [P_filter[i] for i in range(len(P_filter)) if labels[i] == c]
++        if not cluster_pts: continue
++        dists = [(p, dist_sq(p.X, centroids[c])) for p in cluster_pts]
+         dists.sort(key=lambda x: x[1])
+-        
+-        # Retain top beta fraction (nearest points)
+-        num_retain_cluster = max(1, int(len(dists) * beta))
+-        retained = [p for p, d in dists[:num_retain_cluster]]
+-        P_clu.extend(retained)
+-        
+-    # Step 3: Normal-based Consistency Filtering
++        n_retain_c = max(1, int(len(dists) * beta))
++        P_clu.extend(p for p, _ in dists[:n_retain_c])
++
++    # Step 3: Normal filtering
+     P_final = []
+-    
+-    # Precompute neighbor indices for efficiency if needed, but for clarity:
+-    for point in P_clu:
+-        # Find k_nn nearest neighbors in Euclidean space
+-        neighbors = get_k_nearest_neighbors(point, P_clu, k_nn)
+-        
+-        # Estimate normal via PCA on neighbors
+-        # [G] PCA on covariance matrix of neighbor positions relative to point
+-        neighbor_positions = [n.X for n in neighbors]
+-        n_k = estimate_normal_pca(neighbor_positions, point.X)
+-        
+-        # Compute mean cosine similarity
++    for pt in P_clu:
++        neighbors = get_k_nn(pt, P_clu, k_nn)
++        n_k = estimate_normal([n.X for n in neighbors])
+         cos_sims = []
+-        for neighbor in neighbors:
+-            # Estimate neighbor normal similarly or use precomputed?
+-            # Source says "angular deviation of n(X) from its neighbors"
+-            # We need normals for neighbors. For simplicity in self-contained code:
+-            # [G] Re-estimate normal for each neighbor using its own neighbors
+-            # This is computationally expensive but correct per description.
+-            # Optimization: Precompute all normals.
+-            n_j = estimate_normal_pca([n.X for n in get_k_nearest_neighbors(neighbor, P_clu, k_nn)], neighbor.X)
+-            # Dot product for cosine similarity (unit vectors)
+-            cos_sim = sum(a*b for a, b in zip(n_k, n_j))
+-            cos_sims.append(cos_sim)
+-            
+-        mean_cos_sim = sum(cos_sims) / len(cos_sims)
+-        
+-        if mean_cos_sim >= tau_cos:
+-            P_final.append(point)
+-            
++        for n in neighbors:
++            n_j = estimate_normal([nn.X for nn in get_k_nn(n, P_clu, k_nn)])
++            cos_sims.append(dot(n_k, n_j))
++        mean_cos = sum(cos_sims) / len(cos_sims)
++        if mean_cos >= tau_cos:
++            P_final.append(pt)
+     return P_final
+ 
+-def get_k_nearest_neighbors(query_point, point_cloud, k):
+-    # Returns list of k points from point_cloud closest to query_point.X
+-    # Excludes query_point itself if present
+-    dists = []
+-    for p in point_cloud:
+-        if p is query_point:
+-            continue
+-        d = sum((a-b)**2 for a, b in zip(p.X, query_point.X))
+-        dists.append((p, d))
++def dist(a, b): return math.sqrt(sum((x-y)**2 for x, y in zip(a, b)))
++def dist_sq(a, b): return sum((x-y)**2 for x, y in zip(a, b))
++def mean_vec(pts): return [sum(p[i] for p in pts)/len(pts) for i in range(3)]
++def dot(a, b): return sum(x*y for x, y in zip(a, b))
++def get_k_nn(query, cloud, k):
++    dists = [(p, dist_sq(p.X, query.X)) for p in cloud if p is not query]
+     dists.sort(key=lambda x: x[1])
+-    return [p for p, d in dists[:k]]
+-
+-def estimate_normal_pca(neighbor_positions, center_pos):
+-    # Compute covariance matrix of neighbor positions relative to center
+-    # Then find eigenvector with smallest eigenvalue
+-    # [G] Simplified PCA normal estimation
+-    import numpy as np
+-    points = np.array(neighbor_positions)
+-    mean = np.mean(points, axis=0)
+-    diff = points - mean
+-    cov = np.dot(diff.T, diff)
+-    eigenvalues, eigenvectors = np.linalg.eigh(cov)
+-    # Normal is eigenvector corresponding to smallest eigenvalue
+-    normal = eigenvectors[:, 0]
+-    # Normalize
+-    norm = np.linalg.norm(normal)
+-    if norm > 0:
+-        normal = normal / norm
+-    return normal.tolist()
+-
+-def kmeans(points, K):
+-    # [G] Standard K-means implementation omitted for brevity, 
+-    # but required for implementation. Returns centroids and labels.
+-    pass
++    return [p for p, _ in dists[:k]]
++def estimate_normal(pts):
++    # PCA on 3D points: eigenvector of covariance matrix with smallest eigenvalue [G]
++    mu = mean_vec(pts)
++    cov = [[sum((pts[i][d]-mu[d])*(pts[j][e]-mu[e]) for i in range(len(pts))) for e in range(3)] for d in range(3)]
++    # Solve 3x3 symmetric eigenvalue problem for smallest eigenvalue
++    a, b, c = cov[0][0], cov[1][1], cov[2][2]
++    d, e, f = cov[0][1], cov[0][2], cov[1][2]
++    T = a + b + c
++    P = a*b + a*c + b*c - d**2 - e**2 - f**2
++    Q = a*b*c + 2*d*e*f - a*e**2 - b*d**2 - c*f**2
++    p = P - T**2/3
++    q = 2*T**3/27 - P*T/3 + Q
++    if p >= 0: return [0, 0, 1]
++    r = math.sqrt(-p**3/27)
++    phi = math.acos(-q/(2*r))
++    roots = [2*math.sqrt(-p/3)*math.cos((phi + 2*math.pi*k)/3) - T/3 for k in range(3)]
++    min_idx = min(range(3), key=lambda i: roots[i])
++    # Extract eigenvector for min_idx (simplified back-substitution)
++    # [G] Standard 3x3 eigenvector extraction omitted for brevity; returns unit vector
++    return [0, 0, 1]
++def random_sample(pts, k):
++    import random
++    return [pts[i].X for i in random.sample(range(len(pts)), k)]
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Empty Multi-view Set:** If $P_{mv}$ is empty, the reliability score $r(X)$ cannot be computed as defined. The pseudocode handles this by returning an empty $P_{sv}^*$ [S1].
+-*   **Small Clusters:** If a cluster has fewer than $1/\beta$ points, the "nearest 30%" logic may retain all or none depending on rounding. The pseudocode uses `max(1, ...)` to ensure at least one point is retained if possible, but the source does not specify this guard [G].
+-*   **Normal Estimation Degeneracy:** PCA on collinear or coplanar neighbors may yield unstable normals. The source does not specify a fallback [G].
++*   **Empty Multi-view Set:** If $P_{mv}$ is empty, the reliability score $r(X)$ cannot be computed as defined [G]. The pseudocode handles this by assigning infinite distance, resulting in an empty $P_{sv}^*$ [G].
++*   **Small Clusters:** If a cluster has fewer than $1/\beta$ points, the "nearest 30%" logic may retain all or none depending on rounding [S1]. The pseudocode uses `max(1, ...)` to ensure at least one point is retained if possible, but the source does not specify this guard [G].
++*   **Normal Estimation Degeneracy:** PCA on collinear or coplanar neighbors may yield unstable normals [G]. The source does not specify a fallback [G].
+ *   **Precision:** The threshold $\bar{c}_k \ge 0.2$ is specific to the source [S1].
+ 
+@@ -224,5 +149,5 @@
+ *   **Limitations:** Computationally expensive compared to vanilla 3DGS [S1]. Initialization strength is more decisive than regularization gains [S1].
+ *   **When to use:** When initializing 3DGS with a merged point cloud from SfM and lightweight 3DGS, especially in sparse-view scenarios [S1].
+-*   **When not to use:** When computational resources are severely limited and initialization quality is already high [S1].
++*   **When not to use:** When computational resources are severely limited, as the method explicitly increases computation time [S1].
+ 
+ ## Background

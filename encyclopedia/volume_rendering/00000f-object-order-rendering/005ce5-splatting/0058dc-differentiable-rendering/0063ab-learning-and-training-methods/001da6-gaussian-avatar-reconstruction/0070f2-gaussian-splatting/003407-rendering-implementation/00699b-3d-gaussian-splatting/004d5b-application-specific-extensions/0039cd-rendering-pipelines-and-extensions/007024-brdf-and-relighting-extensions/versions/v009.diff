@@ -1,0 +1,307 @@
+--- v008.md
++++ v009.md
+@@ -1,169 +1,175 @@
+ # BRDF and Relighting Extensions
+ 
+-Also called: Physically-based 3D Gaussian Splatting, Inverse Rendering with Gaussians, Relightable 3D Gaussians
++Also called: Physically-based 3D Gaussian Splatting, Relightable 3D Gaussian, Inverse Rendering with Gaussians
+ 
+ ## Overview
+-BRDF and Relighting Extensions extend standard 3D Gaussian Splatting by decoupling material properties from geometry and lighting, enabling physically-based rendering (PBR) and dynamic relighting [S1, S2, unofficial]. Unlike standard splatting which bakes lighting into spherical harmonics (SH) coefficients via an emission-absorption model, these methods store per-Gaussian BRDF parameters (e.g., albedo, roughness, metalness) and evaluate them against arbitrary light sources or environment maps [S1, unofficial]. This allows for accurate specular reflections, shadow casting, and indirect illumination reconstruction, addressing the limitations of baked lighting on highly reflective surfaces [S1, unofficial].
++BRDF and Relighting Extensions extend 3D Gaussian Splatting [3D Gaussian Splatting](3D-gaussian-splatting.md) by replacing the standard view-dependent emission-absorption model with physically based rendering (PBR) parameters, enabling dynamic relighting and accurate specular shading synthesis [S1, unofficial]. Unlike standard 3DGS, which bakes lighting conditions into spherical harmonics coefficients and fails on highly reflective surfaces, these methods decompose geometry, material, and lighting [S1, unofficial]. They are distinguished from sibling methods like [GaussianShader](8013-gaussianshader-material-model.md) by their specific strategies for embedding incident lighting and material properties, such as using precomputed visibility or split-sum approximations for indirect light [S1, S2, unofficial].
+ 
+ ## How it works
+-The method modifies the standard 3D Gaussian Splatting rendering pipeline by replacing the direct color evaluation with a physically-based BRDF evaluation.
++The method retains the core 3D Gaussian primitive representation $\mathcal{G} = \{G_i\}_{i=1}^M$ [G]. Each kernel $G_i$ is defined by position $\mathbf{p}_i$, rotation $\mathbf{R}_i$, scale $\mathbf{S}_i$, and covariance $\mathbf{\Sigma}_i = \mathbf{R}_i \mathbf{S}_i \mathbf{S}_i^\top \mathbf{R}_i^\top$ [G]. The geometric projection computes the 2D covariance $\mathbf{\hat{\Sigma}}_i$ using the Jacobian $J$ and extrinsic rotation $W$ [G].
+ 
+-**Inputs:**
+-- 3D Gaussian primitives: Position $\mathbf{p}$, Covariance $\Sigma$, Opacity $\alpha$, and new PBR attributes (Albedo $\mathbf{c}_{diff}$, Roughness $\rho$, Metalness $m$, Normal $\mathbf{n}$, Indirect Lighting SH coefficients).
+-- Camera parameters: View matrix $W$, Projection matrix.
+-- Lighting: Environment map $L_e(\omega)$ or point/area lights.
++### Inputs and Outputs
++*   **Inputs:** Multi-view images of a scene; optionally, ground-truth physical attributes (albedo, roughness, normals) if available [S1, unofficial].
++*   **Outputs:** A set of Gaussians with PBR attributes (base color, metalness, roughness, normal) and an environment light map or SH coefficients for indirect illumination [S2, unofficial]. Rendered images under novel lighting conditions.
+ 
+-**Outputs:**
+-- Rendered image with physically accurate reflections and shadows.
++### Data Structures
++Each Gaussian $G_i$ stores:
++*   $\mathbf{p}_i \in \mathbb{R}^3$: Position [G].
++*   $\mathbf{R}_i \in \mathbb{R}^{3 \times 3}$: Rotation [G].
++*   $\mathbf{S}_i \in \mathbb{R}^{3 \times 3}$: Scale [G].
++*   $\mathbf{c}_{base, i} \in \mathbb{R}^3$: Base color (albedo) [S2, unofficial].
++*   $m_i \in [0, 1]$: Metalness [S2, unofficial].
++*   $r_i \in [0.09, 1]$: Roughness [S2, unofficial].
++*   $\mathbf{n}_i \in \mathbb{R}^3$: Surface normal [S1, S2, unofficial].
++*   $\mathbf{L}_{indirect, i}$: Indirect illumination coefficients (e.g., SH) [S2, unofficial].
+ 
+-**Data Structures:**
+-Each Gaussian primitive stores:
+-- $\mathbf{p} \in \mathbb{R}^3$: Center position.
+-- $\Sigma \in \mathbb{R}^{3 \times 3}$: Covariance matrix (decomposed into rotation $R$ and scale $S$).
+-- $\alpha \in \mathbb{R}$: Opacity.
+-- $\mathbf{c}_{diff} \in \mathbb{R}^3$: Diffuse albedo color.
+-- $\rho \in \mathbb{R}$: Roughness parameter.
+-- $m \in \mathbb{R}$: Metalness parameter.
+-- $\mathbf{n} \in \mathbb{R}^3$: Surface normal (derived from $\Sigma$ or learned).
+-- $c_{SH}^{indirect}$: Coefficients for indirect illumination.
++### Rendering Steps
++1.  **Projection:** Transform 3D Gaussians to camera space. Compute projected 2D covariance $\mathbf{\hat{\Sigma}}_i$ [G].
++2.  **Rasterization:** Sort Gaussians by depth. Project to screen space and compute coverage [G].
++3.  **Attribute Retrieval:** For each pixel covered by a Gaussian, retrieve $\mathbf{c}_{base}$, $m$, $r$, and $\mathbf{n}$ [S2, unofficial].
++4.  **BRDF Evaluation:**
++    *   If physical attributes are available, use a simplified Disney principle-based BRDF model [S1, unofficial].
++    *   Calculate Normal Distribution Function (NDF), Fresnel term, and Geometry term using Neilf's formula [S1, unofficial].
++    *   If physical attributes are lacking, use MLPs or LSTMs to regress BRDF as a light reflection weight based on incident and reflected light energy distribution [S1, unofficial].
++5.  **Lighting Integration:**
++    *   Compute direct lighting using the environment map and surface normal [S2, unofficial].
++    *   Compute indirect lighting using precomputed visibility and SH coefficients [S2, S1, unofficial].
++    *   Combine diffuse and specular components.
++6.  **Compositing:** Alpha composite the resulting colors along the ray [G].
+ 
+-**Steps:**
++### Training Steps (Phys3DGS Pipeline)
++1.  **Stage 1:** Optimize standard 3DGS geometry and view-dependent color [S2, unofficial].
++2.  **Stage 2:** Train PBR parameters (albedo, metalness, roughness, indirect SH) using a deferred rendering pipeline [S2, unofficial].
++    *   **Light Sampling:** Use Fibonacci sampling for random incoming light during training [S2, unofficial]. For relighting evaluation, use Multiple Importance Sampling (MIS) with equal light importance and GGX importance rays [S2, unofficial].
++    *   **Loss:** Apply bilateral smoothness loss to BRDF parameters [S2, unofficial].
++    *   **Constraints:** Clamp base color and metalness to $[0, 1]$. Scale roughness to $[0.09, 1]$ to prevent excessively strong specular reflectance [S2, unofficial].
++3.  **Denoising:** Apply a non-parametric bilateral denoiser to handle low samples per point (spp) [S2, unofficial].
+ 
+-1. **Normal Estimation:**
+-   The surface normal $\mathbf{n}$ for a Gaussian is derived from its anisotropy. If $\Sigma$ is decomposed into scale $S$ and rotation $R$, the normal is typically the first column of $R$ (or the eigenvector corresponding to the smallest eigenvalue of $\Sigma$) [S1, unofficial].
+-
+-2. **Projection and Rasterization:**
+-   Follow the standard 3DGS projection:
+-   $$ \Sigma_c = J W \Sigma W^T J^T $$
+-   Extract $\Sigma_{2D}$ as the upper-left $2 \times 2$ block. Compute 2D bounding box and assign to tiles [G].
+-
+-3. **BRDF Evaluation:**
+-   For each pixel covered by a Gaussian, evaluate the BRDF.
+-   - **Direct Lighting:** Evaluate the BRDF $f_r(\omega_i, \omega_o, \mathbf{n}, \rho, m)$ using the incident light direction $\omega_i$ and view direction $\omega_o$.
+-   - **Disney Model:** For datasets with physical attributes, use a simplified Disney principle-based BRDF model. Calculate Normal Distribution Function (NDF) $D$, Fresnel term $F$, and Geometry term $G$ using Neilf's formula [S1, unofficial].
+-   - **Indirect Lighting:** Add indirect illumination estimated via SH coefficients or environment map sampling [S2, unofficial].
+-
+-4. **Compositing:**
+-   Accumulate color using front-to-back blending. The color contribution of a Gaussian $i$ is:
+-   $$ c_i = \int_{\Omega} f_r(\omega_i, \omega_o, \mathbf{n}_i, \rho_i, m_i) L_i(\omega_i) (\mathbf{n}_i \cdot \omega_i) d\omega_i $$
+-   The final pixel color is:
+-   $$ I_f = \sum_{i=1}^N c_i \tilde{\sigma}_i \tilde{\mathcal{G}}_i(\mathbf{p}) \prod_{j=1}^{i-1} (1 - \tilde{\sigma}_j \tilde{\mathcal{G}}_j(\mathbf{p})) $$
+-   where $\tilde{\sigma}_i$ is the effective opacity and $\tilde{\mathcal{G}}_i$ is the 2D Gaussian density [G].
+-
+-5. **Training Optimization:**
+-   - **Loss Functions:** Use photometric loss between rendered and ground truth images. Apply bilateral smoothness loss to BRDF parameters to prevent noise [S2, unofficial].
+-   - **Highlight Preservation:** If training reflection weights directly without physical constraints, apply a brightening operation to training images: multiply pixels with gray values surpassing a threshold by a brightness coefficient to mitigate highlight loss [S1, unofficial].
+-   - **Parameter Clamping:** Clamp base color and metallic to $[0, 1]$. Scale and shift roughness to lie between $0.09$ and $1$ to prevent exceedingly strong specular reflectance [S2, unofficial].
+-
+-**Pseudocode:**
+-
++### Pseudocode
+ ```python
+-def render_pbr(primitives, camera, lights, env_map):
+-    H, W = camera['height'], camera['width']
+-    tiles = [(y, x) for y in range(0, H, 16) for x in range(0, W, 16)]
+-    tile_prims = {t: [] for t in tiles}
++def render_gaussian_pbr(gaussians, camera, light_env):
++    """
++    Renders a scene using PBR 3D Gaussians.
++    gaussians: List of Gaussian objects with attributes (p, R, S, c_base, m, r, n, L_indirect)
++    camera: Camera object with projection matrix and view matrix
++    light_env: Environment map or SH coefficients for lighting
++    """
++    image = zeros_like(screen_resolution)
+     
+-    # 1. Project & Filter
+-    for p in primitives:
+-        p_cam = transform_to_camera(p, camera['view_matrix'])
+-        J = perspective_jacobian(p_cam['z'])
+-        W_mat = camera['view_matrix']
+-        Sigma_2d = (J @ W_mat) @ p['Sigma'] @ (W_mat.T @ J.T)
+-        Sigma_2d = Sigma_2d[:2, :2]
+-        bbox = compute_2d_bbox(p_cam['xy'], Sigma_2d)
+-        for t in tiles:
+-            if intersects_bbox(bbox, t, 16):
+-                tile_prims[t].append({'data': p_cam, 'sigma_2d': Sigma_2d, 'depth': p_cam['z'], 'pbr': p['pbr']})
++    # 1. Project and Sort
++    projected_gaussians = []
++    for g in gaussians:
++        # Compute 2D covariance using Jacobian J and extrinsic W [G]
++        Sigma_3d = g.R @ g.S @ g.S.T @ g.R.T
++        Sigma_2d = J @ W @ Sigma_3d @ W.T @ J.T
++        
++        # Project mean position
++        p_2d = project(g.p, camera)
++        
++        projected_gaussians.append({
++            'p_2d': p_2d,
++            'Sigma_2d': Sigma_2d,
++            'depth': g.p.z,
++            'c_base': g.c_base,
++            'm': g.m,
++            'r': g.r,
++            'n': g.n,
++            'L_indirect': g.L_indirect
++        })
+     
+-    # 2. Sort & Rasterize
+-    image = zeros((H, W, 3))
+-    for t in tiles:
+-        prims = tile_prims[t]
+-        prims.sort(key=lambda x: x['depth'])
+-        for y in range(t[0], min(t[0] + 16, H)):
+-            for x in range(t[1], min(t[1] + 16, W)):
+-                acc_color = zeros(3)
+-                T = 1.0
+-                for prim in prims:
+-                    diff = vec2(x, y) - prim['data']['xy']
+-                    inv_sig = inverse_2x2(prim['sigma_2d'])
+-                    g_val = exp(-0.5 * dot(diff, inv_sig @ diff))
+-                    alpha = prim['data']['opacity'] * g_val
+-                    
+-                    # BRDF Evaluation
+-                    normal = get_normal(prim['pbr']['Sigma'])
+-                    view_dir = get_view_dir(camera, prim['data']['pos'])
+-                    light_dir = get_light_dir(prim['data']['pos'], lights)
+-                    
+-                    # Evaluate Disney BRDF
+-                    brdf_val = evaluate_disney_brdf(
+-                        normal=normal, 
+-                        view_dir=view_dir, 
+-                        light_dir=light_dir,
+-                        albedo=prim['pbr']['albedo'],
+-                        roughness=clamp(prim['pbr']['roughness'], 0.09, 1.0),
+-                        metalness=clamp(prim['pbr']['metalness'], 0.0, 1.0)
+-                    )
+-                    
+-                    # Add indirect lighting
+-                    indirect = evaluate_sh_indirect(prim['pbr']['sh_coeffs'], normal)
+-                    
+-                    color = brdf_val * light_intensity + indirect
+-                    
+-                    weight = alpha * T
+-                    acc_color += color * weight
+-                    T *= (1.0 - alpha)
+-                    if T < 1e-4: break
+-                image[y, x] = acc_color
++    projected_gaussians.sort(key=lambda x: x['depth'])
++    
++    # 2. Rasterize and Composite
++    for g_proj in projected_gaussians:
++        # Compute coverage and alpha
++        alpha = compute_gaussian_alpha(g_proj['Sigma_2d'], g_proj['p_2d'])
++        if alpha < threshold: continue
++        
++        # Retrieve BRDF parameters
++        base_color = g_proj['c_base']
++        metalness = g_proj['m']
++        roughness = g_proj['r']
++        normal = g_proj['n']
++        
++        # 3. Evaluate BRDF
++        # Direct Lighting
++        light_dir = sample_light_direction(light_env) # Fibonacci or MIS
++        radiance_direct = evaluate_brdf(base_color, metalness, roughness, normal, light_dir)
++        
++        # Indirect Lighting
++        radiance_indirect = evaluate_indirect_light(normal, g_proj['L_indirect'])
++        
++        # Composite
++        color = radiance_direct + radiance_indirect
++        image = composite_pixel(image, color, alpha)
++        
+     return image
+ 
+-def get_normal(Sigma):
+-    # Eigenvector corresponding to smallest eigenvalue
+-    eigenvalues, eigenvectors = eig(Sigma)
+-    idx = argmin(eigenvalues)
+-    return eigenvectors[:, idx]
++def evaluate_brdf(base_color, metalness, roughness, normal, light_dir):
++    """
++    Evaluates Disney-style BRDF using Neilf's formula components [S1, unofficial].
++    """
++    # Calculate NDF (Normal Distribution Function)
++    ndf = ggx_ndf(normal, light_dir, roughness)
++    
++    # Calculate Fresnel term
++    fresnel = schlick_fresnel(metalness, normal, light_dir)
++    
++    # Calculate Geometry term
++    geometry = smith_geometry(normal, light_dir, roughness)
++    
++    # Combine
++    # Simplified Disney model
++    diffuse = base_color * (1.0 - metalness)
++    specular = fresnel * ndf * geometry / (4.0 * dot(normal, light_dir) * dot(normal, view_dir) + epsilon)
++    
++    return diffuse + specular
++```
+ 
+-def evaluate_disney_brdf(normal, view_dir, light_dir, albedo, roughness, metalness):
+-    # Simplified Disney BRDF evaluation
+-    # Calculate NDF, Fresnel, Geometry terms
+-    # Return reflected radiance
+-    pass
+-```
++### Parameters
++*   **Roughness Range:** $[0.09, 1]$ [S2, unofficial].
++*   **Samples per Pixel (spp):** 64 spp with denoiser for real-time rendering; 1,024 spp for comparison with voxel-based methods [S2, unofficial].
++*   **Training Steps:** 10k steps for PBR training [S2, unofficial].
++
++### Edge Cases and Pitfalls
++*   **Highlight Loss:** Direct training of reflection weights without physical constraints may lead to loss of highlight information [S1, unofficial]. Mitigate by applying a brightening operation to training images: multiply pixels with gray values surpassing a threshold by a brightness coefficient [S1, unofficial].
++*   **Degenerate Geometry:** Imperfect surface mesh quality and large gradients in HDR space can cause dramatic position shifts of vertices, impairing visibility [S2, unofficial].
++*   **Specular Strength:** Unconstrained roughness can lead to exceedingly strong specular reflectance. Clamp roughness to $[0.09, 1]$ [S2, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [3D Gaussian Splatting with BRDF Embedding](1174-3d-gaussian-splatting-with-brdf-embedding.md)
+-Extends 3DGS by embedding physically based rendering parameters into each Gaussian primitive, enabling per-point BRDF evaluation and relighting. It distinguishes itself by explicitly storing incident lighting and BRDF parameters per Gaussian, facilitating direct lighting reconstruction via environment maps and indirect lighting via spherical harmonics.
++Extends 3DGS by embedding physically based rendering parameters into each Gaussian primitive, enabling per-point BRDF evaluation and dynamic relighting. It addresses the limitation of standard 3DGS, which uses an emission-absorption model that bakes lighting conditions into spherical harmonics coefficients, thereby limiting performance on highly reflective surfaces and preventing relighting. It is distinguished from sibling methods like [GaussianShader](8013-gaussianshader-material-model.md) by its specific embedding of incident lighting alongside material properties.
+ 
+ ### [3D Gaussian Splatting with Reflection and Relighting](5873-3d-gaussian-splatting-with-reflection-and-relighting.md)
+-Extends 3DGS by incorporating classical PBR concepts to address limitations with highly reflective surfaces and enable relighting under novel illumination. Unlike standard 3DGS, it decomposes geometry, material, and lighting, allowing for dynamic specular shading synthesis. It is distinguished by its specific integration of secondary ray tracing for interreflections and the derivation of normals from the Gaussian kernel's anisotropy.
++Extends 3DGS by incorporating classical PBR concepts to address limitations with highly reflective surfaces and enable relighting under novel illumination. Unlike standard 3DGS, which bakes lighting into spherical harmonics via an emission-absorption model, this approach decomposes geometry, material, and lighting, allowing for dynamic specular shading synthesis. It distinguishes itself from NeRF-based PBR methods by leveraging the Gaussian kernel’s natural normal estimation, avoiding the time-consuming training and slow rendering speeds associated with gradient-based normal estimation in volumetric representations.
+ 
+ ### [Relightable 3D Gaussian](6001-relightable-3d-gaussian.md)
+-Extends 3DGS by assigning per-Gaussian BRDF parameters and precomputed visibility to enable dynamic relighting and shadow casting. It distinguishes itself by evaluating material responses to arbitrary light sources rather than relying solely on captured environment maps.
++Extends 3D Gaussian Splatting to support dynamic lighting and physically-based materials by assigning per-Gaussian BRDF parameters and precomputed visibility for shadows. It differs from standard 3D Gaussian Splatting by enabling relighting capabilities, setting it apart from siblings like [3D Gaussian Splatting with BRDF Embedding](1174-3d-gaussian-splatting-with-brdf-embedding.md) which may use different embedding strategies, and [Inverse Rendering with Gaussians (GS-IR / GIR)](6153-inverse-rendering-with-gaussians-gs-ir-gir.md) which focuses on inverse rendering with split-sum approximations.
+ 
+ ### [Inverse Rendering with Gaussians (GS-IR / GIR)](6153-inverse-rendering-with-gaussians-gs-ir-gir.md)
+-Employs 3DGS inverse rendering techniques to accurately estimate material properties and lighting conditions. It allows precise control over lighting and material appearance, making results more photorealistic. Unlike sibling methods that may rely on simplified equations or learned light approximations, GIR uses a split-sum approximation to handle indirect light.
++Employs 3D Gaussian Splatting inverse rendering techniques to accurately estimate details such as material properties and lighting conditions. It solves the problem of recovering physically plausible scene parameters (geometry, BRDF, illumination) from images by jointly optimizing Gaussian geometry and an environment light probe. What sets it apart from its siblings is its use of a split-sum approximation to handle indirect light, allowing it to model inter-reflections more accurately than methods relying solely on simplified direct-light equations or learned light approximations.
+ 
+ ### [GaussianShader Material Model](8013-gaussianshader-material-model.md)
+-Enhances 3DGS by incorporating trainable material parameters—diffuse color, specular intensity, roughness, and surface normal—along with a global environment map to achieve PBR. It distinguishes itself by disentangling geometry from material properties, allowing for accurate specular reflections and relighting capabilities.
++Enhances 3D Gaussian Splatting (3DGS) by incorporating trainable material parameters—diffuse color, specular intensity, roughness, and surface normal—alongside a global environment map to enable physically-based rendering (PBR). It distinguishes itself from standard 3DGS by binding these material properties directly to the Gaussian kernels, allowing for the accurate modeling of specular reflections and complex lighting interactions that standard opacity-based splatting cannot capture.
+ 
+ ### [BRDF-SMAE](12538-brdf-smae.md)
+-A method for spatially varying BRDF decomposition in neural volumes, where a single BRDF embedding is stored at each point to enable spatially varying material representation. It differs from standard neural volume rendering by explicitly encoding material properties via an auto-encoder structure rather than implicit color or density fields, allowing for disentangled material analysis.
++A method for spatially varying BRDF decomposition in neural volumes, where a single BRDF embedding is stored at each point to enable spatially varying material representation. It differs from standard neural volume rendering by explicitly encoding material properties via an auto-encoder structure rather than implicit color or density fields, allowing for disentangled material analysis. It builds on [BRDF Decoder Strategies](8147-brdf-decoder-strategies.md).
+ 
+ ### Deferred Rendering Pipeline for Phys3DGS
+ A rendering pipeline used to train PBR parameters, involving multiple importance sampling for light rays and post-processing denoising [S2, unofficial].
+-- **Light Sampling:** Use Fibonacci sampling for random incoming light sampling during training. For relighting, adopt NVDiffrecMC’s multiple importance sampling by casting an equal amount of light importance rays and GGX importance rays [S2, unofficial].
+-- **Denoising:** Apply a non-parametric bilateral denoiser to the PBR result to cope with low samples per point (spp), enabling real-time rendering [S2, unofficial].
+-- **Parameters:** 64 spp used for real-time rendering with denoiser, compared to 1,024 spp for voxel grid-based methods [S2, unofficial].
++*   **Light Sampling:** Use Fibonacci sampling for random incoming light sampling during training. For relighting, adopt NVDiffrecMC’s multiple importance sampling by casting an equal amount of light importance rays and GGX importance rays [S2, unofficial].
++*   **Denoising:** Apply a non-parametric bilateral denoiser to the PBR result to cope with low samples per point (spp), enabling real-time rendering [S2, unofficial].
++*   **Parameter:** 64 spp used for real-time rendering with denoiser, compared to 1,024 spp for voxel grid-based methods [S2, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Rendering is $O(N)$ per pixel where $N$ is the number of overlapping Gaussians. Training is significantly slower than standard 3DGS due to the complexity of BRDF evaluation and the need for multiple importance sampling in inverse rendering setups [S2, unofficial].
+-- **Memory Complexity:** Each Gaussian stores additional attributes (albedo, roughness, metalness, normal, SH coefficients), increasing memory usage per primitive compared to standard 3DGS [S1, unofficial].
+-- **Performance:** Phys3DGS achieves real-time rendering with 64 spp and a bilateral denoiser, outperforming voxel grid-based methods that require 1,024 spp [S2, unofficial].
+-- **Strengths:** Physically accurate reflections, dynamic relighting, and shadow casting. Better handling of highly reflective surfaces compared to baked lighting methods [S1, unofficial].
+-- **Limitations:** Training can be unstable due to large gradients in HDR space, leading to degenerate cases where vertices undergo dramatic position shifts [S2, unofficial]. Direct training of reflection weights without physical constraints may lead to loss of highlight information [S1, unofficial].
++*   **Time Complexity:** Rendering is real-time compatible with low samples per pixel (64 spp) when combined with denoising [S2, unofficial]. Training takes approximately 30 minutes for 10k steps on a single NVIDIA RTX 4090 [S2, unofficial].
++*   **Memory Complexity:** Higher than standard 3DGS due to additional per-Gaussian attributes (albedo, metalness, roughness, normal, indirect SH) [S2, unofficial].
++*   **Performance:** Outperforms voxel grid-based methods in complex geometry scenes (e.g., Ficus) with higher PSNR (24.296 vs 29.124 to 31.927) [S2, unofficial].
++*   **Strengths:** Enables dynamic relighting, accurate specular reflections, and physically plausible material representation [S1, unofficial].
++*   **Limitations:** Sensitive to mesh quality; imperfect geometry can lead to degenerate cases during PBR training [S2, unofficial]. Direct training of reflection weights may lose highlight information without mitigation [S1, unofficial].
+ 
+ ## Background
+-BRDF and Relighting Extensions emerged as a response to the limitations of standard 3D Gaussian Splatting, which bakes lighting into spherical harmonics coefficients and struggles with dynamic lighting and highly reflective surfaces [S1, unofficial]. The field has seen rapid development with methods like Phys3DGS [S2, unofficial] and Relightable 3D Gaussian [S1, unofficial] introducing physically based material models and inverse rendering techniques to 3DGS. These methods build on the foundational work of 3D Gaussian Splatting [G] and integrate concepts from traditional PBR and inverse rendering [S1, S2, unofficial].
++Originating from the need to overcome the limitations of standard 3D Gaussian Splatting's emission-absorption model, which bakes lighting into spherical harmonics and fails on reflective surfaces [S1, unofficial], these extensions integrate PBR principles into the Gaussian representation [S2, unofficial]. The Phys3DGS method [S2, unofficial] and STensoRRF [S1, unofficial] represent key developments in applying inverse rendering and BRDF embedding to 3D Gaussians, leveraging the efficiency of splatting while maintaining physical accuracy.
+ 
+ ## Sources

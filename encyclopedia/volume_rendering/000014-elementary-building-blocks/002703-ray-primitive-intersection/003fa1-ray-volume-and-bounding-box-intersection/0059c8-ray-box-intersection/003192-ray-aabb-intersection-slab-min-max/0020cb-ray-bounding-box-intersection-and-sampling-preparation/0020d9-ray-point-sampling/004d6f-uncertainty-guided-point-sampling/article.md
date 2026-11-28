@@ -1,0 +1,115 @@
+# Uncertainty-guided Point Sampling
+
+Also called: Uncertainty-guided point sampling with oversampling, importance sampling with oversampling, uncertain point sampling
+
+## Overview
+Uncertainty-guided point sampling selects 2D coordinates within bounding boxes by prioritizing regions of high prediction uncertainty [S1, unofficial]. It oversamples points randomly, selects a fraction via an uncertainty function, and fills the remainder with random points [S1, unofficial].
+
+## How it works
+**Inputs:**
+- `coarse_logits`: A tensor of shape `(num_boxes, C, H_coarse, W_coarse)` containing coarse network predictions [S1, unofficial].
+- `num_points`: The desired number of final samples per box [S1, unofficial].
+- `oversample_ratio`: An integer $\ge 1$ determining the initial oversampling factor [S1, unofficial].
+- `importance_sample_ratio`: A float in $[0, 1]$ determining the fraction of final points selected via uncertainty [S1, unofficial].
+- `uncertainty_func`: A function mapping logits to scalar uncertainty values [S1, unofficial].
+
+**Outputs:**
+- `point_coords`: A tensor of shape `(num_boxes, num_points, 2)` containing the selected 2D coordinates [S1, unofficial].
+
+**Data Structures:**
+- `point_coords`: Stores the final selected coordinates [S1, unofficial].
+- `point_logits`: Intermediate tensor storing logits at sampled locations [S1, unofficial].
+- `point_uncertainties`: Tensor storing uncertainty scores [S1, unofficial].
+
+**Steps:**
+1. Validate parameters: Assert `oversample_ratio >= 1` and `0 <= importance_sample_ratio <= 1` [S1, unofficial].
+2. Compute `num_boxes` as the first dimension of `coarse_logits` [S1, unofficial].
+3. Compute the number of initial random samples: `num_sampled = int(num_points * oversample_ratio)` [S1, unofficial].
+4. Generate `num_sampled` random 2D coordinates for each box: `point_coords = torch.rand(num_boxes, num_sampled, 2, device=coarse_logits.device)` [S1, unofficial].
+5. Sample the coarse logits at these random coordinates using bilinear interpolation with `align_corners=False` [S1, unofficial].
+6. Compute uncertainty for each sampled point: `point_uncertainties = uncertainty_func(point_logits)` [S1, unofficial].
+7. Calculate the number of points to select based on uncertainty and the remainder for random sampling: `num_uncertain_points = int(importance_sample_ratio * num_points)` and `num_random_points = num_points - num_uncertain_points` [S1, unofficial].
+8. Select the top-$k$ points with the highest uncertainty for each box: `idx = torch.topk(point_uncertainties[:, 0, :], k=num_uncertain_points, dim=1)[1]` [S1, unofficial].
+9. Flatten the indices to a global index space by adding a box offset: `shift = num_sampled * torch.arange(num_boxes, dtype=torch.long, device=coarse_logits.device)` [S1, unofficial].
+10. Apply the offset: `idx += shift[:, None]` [S1, unofficial].
+11. Gather the corresponding coordinates from the initial random set: `point_coords = point_coords.view(-1, 2)[idx.view(-1), :].view(num_boxes, num_uncertain_points, 2)` [S1, unofficial].
+12. If `num_random_points > 0`, generate additional random coordinates of shape `(num_boxes, num_random_points, 2)` and concatenate them to the uncertain coordinates [S1, unofficial].
+13. Return the combined `point_coords` [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn.functional as F
+
+def uncertainty_guided_point_sampling(coarse_logits, num_points, oversample_ratio, importance_sample_ratio, uncertainty_func):
+    # 1. Validate parameters
+    assert oversample_ratio >= 1
+    assert 0 <= importance_sample_ratio <= 1
+    
+    num_boxes = coarse_logits.shape[0]
+    num_sampled = int(num_points * oversample_ratio)
+    
+    # 2. Generate initial random coordinates in [0, 1]
+    point_coords = torch.rand(num_boxes, num_sampled, 2, device=coarse_logits.device)
+    
+    # 3. Sample logits at these coordinates [G]
+    # Standard bilinear interpolation: normalize to [-1, 1], apply grid_sample, return (num_boxes, num_sampled, C)
+    coords_norm = 2.0 * point_coords - 1.0
+    grid_coords = coords_norm.permute(0, 2, 1).unsqueeze(2)
+    point_logits = F.grid_sample(coarse_logits, grid_coords, mode='bilinear', align_corners=False, padding_mode='zeros')
+    point_logits = point_logits.squeeze(-1).transpose(1, 2)
+    
+    # 4. Compute uncertainties
+    point_uncertainties = uncertainty_func(point_logits)
+    
+    # 5. Determine counts
+    num_uncertain_points = int(importance_sample_ratio * num_points)
+    num_random_points = num_points - num_uncertain_points
+    
+    # 6. Select top-k uncertain points
+    # Assumes point_uncertainties has shape (num_boxes, 1, num_sampled) or (num_boxes, C, num_sampled)
+    idx = torch.topk(point_uncertainties[:, 0, :], k=num_uncertain_points, dim=1)[1]
+    
+    # 7. Flatten indices with box offset
+    shift = num_sampled * torch.arange(num_boxes, dtype=torch.long, device=coarse_logits.device)
+    idx += shift[:, None]
+    
+    # 8. Gather coordinates
+    point_coords = point_coords.view(-1, 2)[idx.view(-1), :].view(num_boxes, num_uncertain_points, 2)
+    
+    # 9. Add random points if needed
+    if num_random_points > 0:
+        random_coords = torch.rand(num_boxes, num_random_points, 2, device=coarse_logits.device)
+        point_coords = torch.cat([point_coords, random_coords], dim=1)
+        
+    return point_coords
+```
+
+**Parameters:**
+- `oversample_ratio`: Integer factor to increase initial random samples before filtering. Must be $\ge 1$ [S1, unofficial].
+- `importance_sample_ratio`: Float fraction of final points selected via uncertainty. Range: $[0, 1]$ [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Pre-computation Error:** Calculating uncertainty on coarse predictions *before* sampling yields incorrect values [S1, unofficial].
+- If `uncertainty_func(logits) = -|logits|`, a point sampled between logits -1 and 1 might have 0 logits, resulting in 0 uncertainty [S1, unofficial].
+- Pre-computing coarse uncertainties would assign -1 to that point, biasing the selection [S1, unofficial].
+- Uncertainty must be computed on the logits sampled at the specific random coordinates [S1, unofficial].
+
+## Subtopics
+
+### Random Point Sampling in Bounds
+Generates uniformly distributed points within specified bounds [G]. Use when no prior knowledge of uncertainty is available or for baseline comparison [G]. [Link](3914-random-point-sampling.md)
+
+### Background Point Sampling
+Samples points in regions predicted to be empty/background [G]. Use when the goal is to accelerate rendering by skipping empty space [G]. [Link](6423-background-point-sampling.md)
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+Uncertainty-guided point sampling was introduced in the `pixel-nerf` repository for pixel-wise neural rendering [S1, unofficial]. It leverages the principle that regions with high prediction variance contain more information that needs to be resolved [S1, unofficial].
+
+## Sources
+[S1] sxyu/pixel-nerf, https://github.com/sxyu/pixel-nerf, fetched 2026-10-26 (unofficial)

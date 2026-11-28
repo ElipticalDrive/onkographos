@@ -1,0 +1,116 @@
+--- v001.md
++++ v002.md
+@@ -4,19 +4,19 @@
+ 
+ ## Overview
+-This method is a rendering pass that computes RGB colors from spherical harmonics (SH) coefficients in Python before rasterization, bypassing the rasterizer's built-in SH evaluation [S1, unofficial]. It rasterizes Gaussians using precomputed geometry and opacity, then converts SH coefficients to RGB colors post-rasterization [S1, unofficial]. It differs from [Opacity Rendering with SH Colors](7480-opacity-rendering-with-sh-colors.md) by performing the SH-to-RGB conversion in the Python host code rather than precomputing colors for the rasterizer, allowing the rasterizer to use simpler color inputs while deferring the directional color evaluation to the CPU/GPU Python layer [S1, unofficial].
++This method is a rendering pass that computes RGB colors from spherical harmonics (SH) coefficients in Python before rasterization [S1, unofficial]. It rasterizes Gaussians using precomputed geometry and opacity, then converts SH coefficients to RGB colors post-rasterization [S1, unofficial]. It differs from [Opacity Rendering with SH Colors](7480-opacity-rendering-with-sh-colors.md) by performing the SH-to-RGB conversion in the Python host code rather than precomputing colors for the rasterizer [S1, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- `gaussians`: A Gaussian model object containing 3D means, SH coefficients, opacities, scales, rotations, and covariance matrices.
+-- `viewpoint_camera`: Camera parameters including `camera_center`.
+-- `pipeline`: Rendering pipeline configuration.
+-- `background`: Background color tensor.
++- `gaussians`: A Gaussian model object containing 3D means, SH coefficients, opacities, scales, rotations, and covariance matrices [S1, unofficial].
++- `viewpoint_camera`: Camera parameters including `camera_center` [S1, unofficial].
++- `pipeline`: Rendering pipeline configuration [S1, unofficial].
++- `background`: Background color tensor [S1, unofficial].
+ - `active_sh_degree`: Integer controlling the order of spherical harmonics used for color evaluation [S1, unofficial].
+ 
+ **Outputs:**
+-- `render`: Rendered RGB image.
+-- `depth`: Rendered depth map.
+-- `alpha`: Rendered alpha mask.
+-- `radii`: Visibility filter (radii > 0).
++- `render`: Rendered RGB image [S1, unofficial].
++- `depth`: Rendered depth map [S1, unofficial].
++- `alpha`: Rendered alpha mask [S1, unofficial].
++- `radii`: Visibility filter (radii > 0) [S1, unofficial].
+ - `viewspace_points`, `visibility_filter`, `opacity`, `color`: Additional metadata [S1, unofficial].
+ 
+@@ -31,5 +31,5 @@
+    $$ \text{dir\_pp} = \text{pc.get\_xyz} - \text{viewpoint\_camera.camera\_center.repeat}(\text{pc.get\_features.shape}[0], 1) $$
+    $$ \text{dir\_pp\_normalized} = \frac{\text{dir\_pp}}{\|\text{dir\_pp}\|_2} $$
+-3. **Evaluate SH to RGB:** Use `eval_sh` with `active_sh_degree`, `shs_view`, and `dir_pp_normalized` to get RGB values [S1, unofficial].
++3. **Evaluate SH to RGB:** Evaluate SH to get RGB values using the active SH degree, reshaped coefficients, and normalized directions [S1, unofficial].
+    $$ \text{sh2rgb} = \text{eval\_sh}(\text{active\_sh\_degree}, \text{shs\_view}, \text{dir\_pp\_normalized}) $$
+ 4. **Clamp colors:** Clamp resulting RGB values to a minimum of 0.0 after adding a 0.5 bias [S1, unofficial].
+@@ -40,37 +40,38 @@
+ **Pseudocode:**
+ ```python
++def eval_sh(degree, sh_coeffs, directions):
++    # sh_coeffs: (N, 3, num_bases), directions: (N, 3)
++    # Standard spherical harmonic evaluation: compute basis vectors for each direction
++    # and perform dot product with coefficients.
++    num_bases = sh_coeffs.shape[2]
++    # Compute SH basis vectors for degrees 0 to degree for each direction
++    # (Standard SH basis evaluation)
++    bases = compute_sh_basis(degree, directions)
++    return torch.sum(bases * sh_coeffs, dim=1)
++
++def compute_sh_basis(degree, directions):
++    # Standard SH basis computation up to the given degree
++    # Returns tensor of shape (N, num_bases, 3)
++    # Implementation follows standard spherical harmonic definitions
++    # Not given in the sources.
++    pass
++
+ def render_sh_to_rgb(gaussians, viewpoint_camera, pipeline, background, active_sh_degree):
+     # Step 1: Reshape SH features
+-    # pc.get_features shape: (N, 3, (max_sh_degree+1)^2) or similar
+-    # Transpose and view as (-1, 3, (max_sh_degree+1)^2)
+     shs_view = gaussians.get_features.transpose(1, 2).view(-1, 3, (gaussians.max_sh_degree + 1) ** 2)
+     
+     # Step 2: Compute normalized view directions
+-    # dir_pp: (N, 3)
+     dir_pp = gaussians.get_xyz - viewpoint_camera.camera_center.repeat(gaussians.get_features.shape[0], 1)
+-    # dir_pp_normalized: (N, 3)
+     dir_pp_normalized = dir_pp / dir_pp.norm(dim=1, keepdim=True)
+     
+     # Step 3: Evaluate SH to RGB
+-    # sh2rgb: (N, 3)
+     sh2rgb = eval_sh(active_sh_degree, shs_view, dir_pp_normalized)
+     
+     # Step 4: Clamp colors
+-    # color: (N, 3)
+-    color = torch.clamp_min(sh2rgb + 0.5, 0.0)
++    color = torch.clamp(sh2rgb + 0.5, min=0.0)
+     
+     # Step 5: Rasterize
+-    # Note: colors_precomp is None, SH is handled in Python
+-    render_pkg = rasterize_gaussians(
+-        means3D=gaussians.get_xyz,
+-        means2D=gaussians.get_means2D(), # Precomputed or computed here
+-        shs=gaussians.get_features,
+-        colors_precomp=None,
+-        opacities=gaussians.get_opacity,
+-        scales=gaussians.get_scales,
+-        rotations=gaussians.get_rotations,
+-        cov3D_precomp=gaussians.get_covariance,
+-        background=background,
+-        pipeline=pipeline
++    render_pkg = render(
++        viewpoint_camera, gaussians, pipeline, background, inference=True
+     )
+     
+@@ -97,12 +98,12 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** O(N) for SH evaluation and clamping, where N is the number of Gaussians [S1, unofficial]. Rasterization complexity depends on the rasterizer implementation [S1, unofficial].
+-- **Memory Complexity:** O(N * (max_sh_degree+1)^2) for storing SH coefficients [S1, unofficial].
++- **Time Complexity:** Not given in the sources.
++- **Memory Complexity:** Not given in the sources.
+ - **Measured Performance:** Not given in the sources.
+-- **Scaling:** Linear with number of Gaussians [S1, unofficial].
+-- **Strengths:** Decouples SH evaluation from rasterization, allowing for flexible color updates [S1, unofficial].
+-- **Limitations:** Requires Python-side computation for SH evaluation, potentially slower than GPU-based SH evaluation [S1, unofficial].
+-- **When to use:** When SH coefficients need to be updated frequently or when using a rasterizer that does not support SH evaluation [S1, unofficial].
+-- **When not to use:** When performance is critical and SH evaluation can be done efficiently on the GPU [S1, unofficial].
++- **Scaling:** Not given in the sources.
++- **Strengths:** Not given in the sources.
++- **Limitations:** Not given in the sources.
++- **When to use:** Not given in the sources.
++- **When not to use:** Not given in the sources.
+ 
+ ## Background

@@ -1,0 +1,4460 @@
+# rhyolite-fluids
+An in-progress, bare-bones rendering engine built with Vulkano, tailored for my research project, _Improving sphere blending performance for fluid simulation applications using ray-marched rendering._ Includes separate ray-marched and mesh rendering engines, utilizing marching-cubes and a smooth-min distance field, respectively, for sphere blending
+
+Rhyolite is built first and foremost as a personal project and a renderer for my research, but it can be used for all sorts of 
+applications! Currently, it's able to load and render .obj files, both unlit and lit. Unlit models are rendered entirely with a chosen albedo color,
+while lit models are shaded with Phong shading. To light models, Rhyolite offers point and directional lights, each with controllable color and 
+brightness parameters.
+
+Here's an example of Rhyolite in action:
+
+![rhyolite](https://user-images.githubusercontent.com/29758429/210491738-b8defba2-e8f9-419f-a428-a89a1e326a55.gif)
+
+In order to use Rhyolite, it's necessary to enable the features that you want to use in your `Cargo.toml`. To enable
+mesh rendering, do so under `[dependencies]`, as seen below:
+
+```
+rhyolite = { version = foo, features = ["mesh"] }
+```
+
+and for ray-marched rendering:
+
+```
+rhyolite = { version = foo, features = ["marched"] }
+```
+
+As of now, ray-marched rendering is unstable and does not feature support for custom functions, so it's not recommended to use. These feature flags, therefore, will avoid bloating binaries with unnecessary code. 
+
+---
+
+The code of this library is based partly on [Taidaesal's Vulkano tutorial](https://github.com/taidaesal/vulkano_tutorial), which, in turn, is based 
+on the official Vulkano examples. It's adapted to be more extensible and user-friendly than the code in the tutorial, with Phong-shaded point lights,
+more abstraction for `Camera`s and `Renderer`s, performance optimizations, and (a lot of) refactoring for better readability and usability. 
+
+All code used from outside sources has been provided under the [MIT License](https://opensource.org/licenses/MIT).
+
+### examples/src/lib.rs
+```
+use nalgebra_glm::{identity, normalize, rotate_x, rotate_y, rotate_z, vec3, Vec3};
+use rhyolite::camera::Camera;
+use std::f32::consts;
+use winit::event::VirtualKeyCode;
+
+use rhyolite::input::Keyboard;
+
+pub enum KeyBinding {
+    WASD,
+    ARROWS,
+}
+
+// TODO: get_axis() method, move to Keyboard struct
+
+pub fn get_axes(keyboard: &Keyboard, key_binding: KeyBinding) -> Vec3 {
+    match key_binding {
+        KeyBinding::WASD => vec3(
+            (keyboard.key_down(VirtualKeyCode::D) as i32
+                - keyboard.key_down(VirtualKeyCode::A) as i32) as f32,
+            (keyboard.key_down(VirtualKeyCode::LShift) as i32
+                - keyboard.key_down(VirtualKeyCode::Space) as i32) as f32,
+            (keyboard.key_down(VirtualKeyCode::S) as i32
+                - keyboard.key_down(VirtualKeyCode::W) as i32) as f32,
+        ),
+        KeyBinding::ARROWS => vec3(
+            (keyboard.key_down(VirtualKeyCode::Down) as i32
+                - keyboard.key_down(VirtualKeyCode::Up) as i32) as f32,
+            (keyboard.key_down(VirtualKeyCode::Left) as i32
+                - keyboard.key_down(VirtualKeyCode::Right) as i32) as f32,
+            0.0,
+        ),
+    }
+}
+
+pub enum CamRotationMode {
+    Mesh,
+    Marched,
+}
+
+pub fn do_camera_movement(
+    rotation_mode: CamRotationMode,
+    camera: &mut Camera,
+    camera_euler: &mut Vec3,
+    camera_pos: &mut Vec3,
+    keyboard: &Keyboard,
+    delta_time: f32,
+) {
+    const CAM_MOVE_SPEED: f32 = 4.0;
+    const CAM_ROT_SPEED: f32 = 0.6;
+
+    let camera_move = get_axes(keyboard, KeyBinding::WASD);
+    let camera_rotate = get_axes(keyboard, KeyBinding::ARROWS);
+
+    let (do_move, do_rotate) = (
+        camera_move.magnitude() != 0.0,
+        camera_rotate.magnitude() != 0.0,
+    );
+    if do_move || do_rotate {
+        let transform = camera.transform_mut();
+        if do_rotate {
+            *camera_euler += normalize(&camera_rotate) * CAM_ROT_SPEED * delta_time;
+            camera_euler.x = camera_euler.x.clamp(-consts::PI / 2.0, consts::PI / 2.0);
+
+            // TODO: THIS IS FUCKED (it works tho)
+            transform.set_rotation_mat(
+                match rotation_mode {
+                    CamRotationMode::Mesh => rotate_z(&rotate_x(&rotate_y(&identity(), camera_euler.y), camera_euler.x), camera_euler.z),
+                    CamRotationMode::Marched => rotate_y(&rotate_x(&rotate_z(&identity(), camera_euler.z), camera_euler.x), camera_euler.y),
+                },
+            );
+        }
+        if do_move {
+            *camera_pos += nalgebra_glm::rotate_y_vec3(&normalize(&camera_move), camera_euler.y)
+                * CAM_MOVE_SPEED
+                * delta_time;
+            transform.set_translation(&camera_pos);
+        }
+    }
+}
+```
+
+### rhyolite/src/camera.rs
+```
+use std::cell::Cell;
+use nalgebra_glm::{perspective, TMat4};
+use vulkano::buffer::allocator::SubbufferAllocator;
+use vulkano::buffer::Subbuffer;
+
+use crate::{shaders::albedo_vert, transform::Transform, UnconfiguredError};
+use crate::renderer::staging::UniformSrc;
+
+pub struct Camera {
+    fovy: f32,
+    near_clipping_plane: f32,
+    far_clipping_plane: f32,
+    transform: Transform,
+    /// A struct containing post-configuration data that must be added after the engine is created
+    post_config: Option<CameraPostConfig>,
+    /// A cache of the view matrix so that it doesn't need to be recalculated every frame
+    cache: Cell<Option<TMat4<f32>>>,
+}
+
+struct CameraPostConfig {
+    aspect_ratio: f32,
+    projection: TMat4<f32>,
+} // :)
+
+impl Camera {
+    /// Creates a new camera with a specified transform, FOV, and clipping planes.
+    /// * `transform`: The transform to create the camera with, ignoring scale.
+    /// * `fovy`: The camera's vertical field of view.
+    /// * `near_clipping_plane`: The nearest distance at which geometry will clip out of view.
+    /// * `far_clipping_plane`: The farthest distance at which geometry will clip out of view.
+    pub fn new(
+        transform: Transform,
+        fovy: f32,
+        near_clipping_plane: f32,
+        far_clipping_plane: f32,
+    ) -> Self {
+        Camera {
+            transform,
+            fovy,
+            near_clipping_plane,
+            far_clipping_plane,
+            post_config: None,
+            cache: Cell::new(None),
+        }
+    }
+
+    // TODO: find a way to do this automatically
+    /// Configures the camera's aspect ratio. Needs to be run before the camera can be used.
+    pub fn configure(&mut self, dimensions: [i32; 2]) {
+        let aspect_ratio = dimensions[0] as f32 / dimensions[1] as f32;
+        let projection = perspective(
+            aspect_ratio,
+            self.fovy,
+            self.near_clipping_plane,
+            self.far_clipping_plane,
+        );
+
+        self.post_config = Some(CameraPostConfig {
+            aspect_ratio,
+            projection,
+        });
+    }
+
+    fn get_post_config(&self) -> Result<&CameraPostConfig, UnconfiguredError> {
+        self.post_config.as_ref().ok_or(UnconfiguredError(
+            "Camera not yet configured. Do so with `Camera::configure()` before accessing projection matrix"
+        ))
+    }
+
+    fn get_post_config_mut(&mut self) -> Result<&mut CameraPostConfig, UnconfiguredError> {
+        self.post_config.as_mut().ok_or(UnconfiguredError(
+            "Camera not yet configured. Do so with `Camera::configure()` before accessing projection matrix"
+        ))
+    }
+
+    pub(crate) fn is_configured(&self) -> bool {
+        self.post_config.is_some()
+    }
+
+    /// Gets a mutable reference to the camera's transform.
+    ///
+    /// Calling this function forces the camera's subbuffers to be updated at the end of the frame,
+    /// so only use it when it's necessary to move the camera.
+    pub fn transform_mut(&mut self) -> &mut Transform {
+        self.cache.set(None);
+        &mut self.transform
+    }
+
+    /// Gets an immutable reference to the camera's transform.
+    pub fn transform(&self) -> &Transform {
+        &self.transform
+    }
+
+    /// Calculates the camera's view matrix, and caches the result
+    fn get_view(&self) -> TMat4<f32> {
+        if let Some(cache) = self.cache.get() {
+            return cache;
+        }
+        let view = self
+            .transform
+            .get_matrices()
+            .0
+            .try_inverse()
+            .unwrap();
+        self.cache.set(Some(view));
+        view
+    }
+
+    /// Returns a subbuffer containing the camera's view and projection data as required for
+    /// rendering. Allocates from a `SubbufferAllocator`.
+    pub(crate) fn get_vp_subbuffer(
+        &mut self,
+        subbuffer_allocator: &SubbufferAllocator,
+    ) -> Result<Subbuffer<albedo_vert::UCamData>, UnconfiguredError> {
+        let buf = subbuffer_allocator.allocate_sized().unwrap();
+        *buf.write().unwrap() = self.get_raw();
+
+        Ok(buf)
+    }
+}
+
+impl UniformSrc<albedo_vert::UCamData> for Camera {
+    fn get_raw(&self) -> albedo_vert::UCamData {
+        albedo_vert::UCamData {
+            view: self.get_view().into(),
+            projection: self.get_post_config().expect( // TODO: EWWW EXPECT (should be unconfigurederror somehow)
+                "Camera must be configured before getting buffer"
+            ).projection.into(),
+        }
+    }
+}
+```
+
+### rhyolite/src/input.rs
+```
+use std::collections::HashSet;
+use winit::event::{ElementState, VirtualKeyCode};
+
+pub struct Keyboard {
+    pressed_keys: HashSet<VirtualKeyCode>,
+    held_keys: HashSet<VirtualKeyCode>,
+    released_keys: HashSet<VirtualKeyCode>,
+}
+
+impl Keyboard {
+    pub(crate) fn new() -> Self {
+        Self {
+            pressed_keys: HashSet::new(),
+            held_keys: HashSet::new(),
+            released_keys: HashSet::new(),
+        }
+    }
+    pub(crate) fn add_input(&mut self, input: &winit::event::KeyboardInput) {
+        let keycode = input.virtual_keycode.unwrap();
+
+        if input.state == ElementState::Pressed {
+            // Check if the key is already held before inserting to prevent key repeats from registering
+            if !self.held_keys.contains(&keycode) {
+                self.pressed_keys.insert(keycode);
+                self.held_keys.insert(keycode);
+            }
+        } else {
+            self.held_keys.remove(&keycode);
+            self.released_keys.insert(keycode);
+        }
+    }
+    pub(crate) fn clear_inputs(&mut self) {
+        self.pressed_keys.clear();
+        self.released_keys.clear();
+    }
+
+    pub fn key_pressed(&self, keycode: VirtualKeyCode) -> bool {
+        self.pressed_keys.contains(&keycode)
+    }
+    pub fn key_down(&self, keycode: VirtualKeyCode) -> bool {
+        self.held_keys.contains(&keycode)
+    }
+    pub fn key_released(&self, keycode: VirtualKeyCode) -> bool {
+        self.released_keys.contains(&keycode)
+    }
+}
+```
+
+### rhyolite/src/lib.rs
+```
+#![allow(dead_code)]
+
+extern crate core;
+
+use core::time;
+use std::time::Instant;
+
+use crate::input::Keyboard;
+use renderer::Renderer;
+use winit::{
+    event::{Event, WindowEvent},
+    event_loop::{ControlFlow, EventLoop, EventLoopWindowTarget},
+};
+
+#[cfg(feature = "mesh")]
+use crate::renderer::mesh::MeshRenderer;
+
+#[cfg(feature = "marched")]
+use crate::renderer::marched::MarchedRenderer;
+
+// #[cfg(feature = "vulkano")]
+// pub use { vulkano, vulkano_shaders };
+
+pub mod camera;
+pub mod geometry;
+pub mod input;
+pub mod lighting;
+pub mod renderer;
+pub mod shaders;
+pub mod transform;
+
+// TODO: implement frames in flight if not implemented in the tutorial
+// TODO: replace PersistentDescriptorSet instances with a type expected to be shorter-lived
+
+/// The base struct of all Rhyolite operations.
+pub struct Rhyolite<T: Renderer> {
+    pub renderer: T,
+    event_loop: Option<EventLoop<()>>,
+}
+
+#[cfg(feature = "mesh")]
+impl Rhyolite<MeshRenderer> {
+    /// Creates a new Rhyolite Mesh renderer with a specified Winit event loop.
+    pub fn mesh() -> Rhyolite<MeshRenderer> {
+        let event_loop = EventLoop::new();
+        let renderer = MeshRenderer::new(&event_loop);
+        Rhyolite {
+            renderer,
+            event_loop: Some(event_loop),
+        }
+    }
+}
+
+#[cfg(feature = "marched")]
+impl Rhyolite<MarchedRenderer> {
+    /// Creates a new Rhyolite ray ray_marching renderer with a specified Winit event loop.
+    pub fn ray_marched() -> Rhyolite<MarchedRenderer> {
+        let event_loop = EventLoop::new();
+        let renderer = MarchedRenderer::new(&event_loop);
+        Rhyolite {
+            renderer,
+            event_loop: Some(event_loop),
+        }
+    }
+}
+
+impl<T: Renderer + 'static> Rhyolite<T> {
+    /// Runs a FnMut closure with the Rhyolite instance. Events for program exiting, swapchain recreation on resize, and TimeState calculation are executed before
+    /// the closure is called.
+    pub fn run<F>(mut self, mut handler: F)
+    where
+        F: 'static
+            + FnMut(
+                Event<'_, ()>,
+                &Keyboard,
+                &EventLoopWindowTarget<()>,
+                &mut ControlFlow,
+                &TimeState,
+                &mut T,
+            ),
+    {
+        let mut time_state = TimeState::new();
+        let mut keyboard = Keyboard::new();
+
+        let mut occluded = false;
+
+        self.event_loop
+            .take()
+            .unwrap()
+            .run(move |event, target, control_flow| {
+                let mut clear_inputs = false;
+
+                match &event {
+                    Event::WindowEvent { event, .. } => match event {
+                        WindowEvent::CloseRequested => {
+                            *control_flow = ControlFlow::Exit;
+                        }
+                        WindowEvent::Resized(_) => {
+                            self.renderer.recreate_all_size_dependent();
+                        }
+                        WindowEvent::KeyboardInput { input, .. } => {
+                            keyboard.add_input(input);
+                        }
+                        WindowEvent::Occluded(val) => {
+                            occluded = *val;
+                        }
+                        _ => (),
+                    },
+                    Event::RedrawEventsCleared => {
+                        time_state.update();
+                        clear_inputs = true;
+                    },
+                    _ => (),
+                }
+
+                if occluded {
+                    std::thread::sleep(time::Duration::from_millis(1000 / 60));
+                    return;
+                }
+
+                handler(
+                    event,
+                    &keyboard,
+                    target,
+                    control_flow,
+                    &time_state,
+                    &mut self.renderer,
+                );
+
+                if clear_inputs { keyboard.clear_inputs(); }
+            });
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct UnconfiguredError(&'static str);
+impl std::fmt::Display for UnconfiguredError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// A struct representing various time-related values, automatically calculated by Rhyolite before each frame.
+/// * `current`: The amount of time elapsed since the start of the program, in seconds.
+/// * `delta`: The amount of time elapsed since the last frame, in seconds.
+pub struct TimeState {
+    start_instant: Instant,
+    pub current: f32,
+    pub delta: f32,
+}
+impl TimeState {
+    pub(crate) fn new() -> Self {
+        TimeState {
+            start_instant: Instant::now(),
+            current: 0.0,
+            delta: 0.0,
+        }
+    }
+    pub(crate) fn update(&mut self) {
+        let new_time = self.start_instant.elapsed().as_secs_f32();
+        self.delta = new_time - self.current;
+        self.current = new_time
+    }
+}
+```
+
+### rhyolite/src/lighting.rs
+```
+use nalgebra_glm::Vec3;
+use vulkano::buffer::Subbuffer;
+
+use crate::renderer::staging::{IntoPersistentUniform, UniformSrc};
+use crate::shaders::{ambient_frag, expand_vec3, marched_frag, point_frag};
+
+// TODO: ideally make the get_buffer thing a trait
+
+#[derive(Default, Clone)]
+pub struct AmbientLight {
+    color: Vec3,
+    intensity: f32,
+    subbuffer: Option<Subbuffer<ambient_frag::UAmbientLightData>>,
+}
+
+impl AmbientLight {
+    pub fn new(color: Vec3, intensity: f32) -> Self {
+        Self {
+            color,
+            intensity,
+            subbuffer: None,
+        }
+    }
+
+    fn raw(&self) -> ambient_frag::UAmbientLightData {
+        ambient_frag::UAmbientLightData {
+            color: expand_vec3(&self.color),
+            intensity: self.intensity.into(),
+        }
+    }
+}
+
+impl UniformSrc<ambient_frag::UAmbientLightData> for AmbientLight {
+    fn get_raw(&self) -> ambient_frag::UAmbientLightData {
+        ambient_frag::UAmbientLightData {
+            color: expand_vec3(&self.color),
+            intensity: self.intensity.into(),
+        }
+    }
+}
+
+impl IntoPersistentUniform<ambient_frag::UAmbientLightData> for AmbientLight {
+    fn get_current_buffer(&self) -> Option<Subbuffer<ambient_frag::UAmbientLightData>> { self.subbuffer.clone() }
+    fn set_current_buffer(&mut self, buf: Subbuffer<ambient_frag::UAmbientLightData>) { self.subbuffer = Some(buf) }
+}
+
+
+#[derive(Default, Clone)]
+pub struct PointLight {
+    position: Vec3,
+    color: Vec3,
+    intensity: f32,
+    subbuffer: Option<Subbuffer<point_frag::UPointLightData>>,
+}
+
+impl PointLight {
+    pub fn new(position: Vec3, color: Vec3, intensity: f32) -> Self {
+        Self {
+            position,
+            color,
+            intensity,
+            subbuffer: None,
+        }
+    }
+}
+
+impl UniformSrc<point_frag::UPointLightData> for PointLight {
+    fn get_raw(&self) -> point_frag::UPointLightData {
+        point_frag::UPointLightData {
+            position: expand_vec3(&self.position),
+            color: expand_vec3(&self.color),
+            intensity: self.intensity.into(),
+        }
+    }
+}
+
+#[cfg(feature = "mesh")]
+impl IntoPersistentUniform<point_frag::UPointLightData> for PointLight {
+    fn get_current_buffer(&self) -> Option<Subbuffer<point_frag::UPointLightData>> { self.subbuffer.clone() }
+    fn set_current_buffer(&mut self, buf: Subbuffer<point_frag::UPointLightData>) { self.subbuffer = Some(buf) }
+}
+
+#[cfg(feature = "marched")]
+impl From<point_frag::UPointLightData> for marched_frag::UPointLight {
+    fn from(value: point_frag::UPointLightData) -> Self {
+        Self {
+            color: value.color,
+            intensity: value.intensity,
+            position: value.position,
+        }
+    }
+}
+```
+
+### rhyolite/src/transform.rs
+```
+use std::cell::Cell;
+use nalgebra_glm::{identity, inverse_transpose, scale, translate, vec3, Mat4, TMat4, Vec3};
+
+pub struct Transform {
+    translation: TMat4<f32>,
+    rotation: TMat4<f32>,
+    scale: TMat4<f32>,
+    /// A cache containing the model (0) and normal (1) matrices
+    cache: Cell<Option<(TMat4<f32>, TMat4<f32>)>>,
+}
+
+impl Transform {
+    /// Gets a transform with default translation, rotation, and scale parameters.
+    pub fn identity() -> Self {
+        Self {
+            cache: Cell::new(None),
+            translation: identity(),
+            rotation: identity(),
+            scale: identity(),
+        }
+    }
+
+    /// Uses a rotation matrix to set the rotation parameter of the transform.
+    pub fn set_rotation_mat(&mut self, rotation: Mat4) {
+        self.rotation = rotation;
+        self.cache.set(None);
+    }
+
+    /// Uses a translation matrix to set the translation parameter of the transform.
+    pub fn set_translation_mat(&mut self, translation: Mat4) {
+        self.translation = translation;
+        self.cache.set(None);
+    }
+
+    /// Uses a scale matrix to set the scale parameter of the transform.
+    pub fn set_scale_mat(&mut self, scale: Mat4) {
+        self.scale = scale;
+        self.cache.set(None);
+    }
+
+    // TODO: function for set_rotation that takes quaternion
+    // TODO: potentially store vec3s and quaternions for later access, and generate all matrices in get_rendering_matrices
+
+    /// Uses a Vec3 to set the translation parameter of the transform.
+    pub fn set_translation(&mut self, val: &Vec3) {
+        self.translation = translate(&identity(), val);
+        self.cache.set(None);
+    }
+
+    /// Uses a Vec3 to set the scale parameter of the transform.
+    pub fn set_scale(&mut self, val: &Vec3) {
+        self.scale = scale(&identity(), val);
+        self.cache.set(None);
+    }
+
+    pub fn get_translation(&self) -> Vec3 {
+        vec3(
+            self.translation[12],
+            self.translation[13],
+            self.translation[14],
+        )
+    }
+    pub fn get_rotation_mat(&self) -> Mat4 {
+        self.rotation
+    }
+
+    /// Caches the model and normal transformation matrices if there has been a change since the
+    /// last time this function was called, and then returns these cached matrices.
+    pub fn get_matrices(&self) -> (TMat4<f32>, TMat4<f32>) {
+        if let Some(cache) = self.cache.get() {
+            return cache;
+        }
+        let model = self.translation * self.rotation * self.scale;
+        let normal =  inverse_transpose(model);
+        self.cache.set(Some((model, normal)));
+
+        (model, normal)
+    }
+}
+```
+
+### examples/src/bin/mesh_basic.rs
+```
+use rhyolite::camera::Camera;
+use rhyolite::geometry::mesh::{MeshObject, MeshObjectBuilder};
+use rhyolite::lighting::{AmbientLight, PointLight};
+use rhyolite::renderer::mesh::DrawInfo;
+use rhyolite::transform::Transform;
+use rhyolite::Rhyolite;
+
+use winit::event::{Event, WindowEvent};
+use nalgebra_glm::{identity, rotate_x, rotate_y, rotate_z, vec3};
+use examples::CamRotationMode;
+use rhyolite::renderer::Renderer;
+
+fn main() {
+    let rhyolite = Rhyolite::mesh();
+    let renderer = &rhyolite.renderer;
+
+    let camera_transform = Transform::identity();
+    let mut camera = Camera::new(camera_transform, 1.2, 0.02, 100.0);
+
+    // Build the models
+    let mut suzanne = MeshObjectBuilder::from_file(
+        "examples/models/monkey_smooth.obj",
+        &vec3(-1.0, -2.0, -5.0),
+        &vec3(1.0, 1.0, 1.0),
+        &vec3(1.0, 1.0, 1.0),
+        (0.3, 4.0),
+    ).build(renderer);
+
+    let mut teapot = MeshObjectBuilder::from_file(
+        "examples/models/teapot.obj",
+        &vec3(3.0, 2.0, -10.0),
+        &vec3(0.5, 0.5, 0.5),
+        &vec3(1.0, 1.0, 1.0),
+        (1.0, 128.0),
+    ).build(renderer);
+
+    let plane = MeshObjectBuilder::from_file(
+        "examples/models/plane.obj",
+        &vec3(0.0, 5.0, -8.0),
+        &vec3(10.0, 10.0, 10.0),
+        &vec3(0.5, 0.5, 0.5),
+        (0.2, 2.0),
+    ).build(renderer);
+
+    let mut torus1 = MeshObjectBuilder::from_file(
+        "examples/models/torus.obj",
+        &vec3(-5.0, 5.0, -10.0),
+        &vec3(3.0, 3.0, 3.0),
+        &vec3(0.0, 1.0, 0.0),
+        (1.0, 128.0),
+    ).build(renderer);
+
+    let mut torus2 = MeshObjectBuilder::from_file(
+        "examples/models/torus.obj",
+        &vec3(-7.0, 6.0, -11.0),
+        &vec3(3.5, 3.5, 3.5),
+        &vec3(1.0, 0.0, 0.0),
+        (1.0, 128.0),
+    ).build(renderer);
+
+    let mut bunny = MeshObjectBuilder::from_file(
+        "examples/models/bunny.obj",
+        &vec3(5.0, 5.0, -4.0),
+        &vec3(14.0, 14.0, 14.0),
+        &vec3(1.0, 1.0, 1.0),
+        (0.2, 2.0),
+    ).build(renderer);
+
+    torus1.transform_mut().set_rotation_mat({
+        let mut rotation = identity();
+        rotation = rotate_x(&rotation, 0.5);
+        rotation = rotate_y(&rotation, 2.1);
+        rotation
+    });
+
+    torus2.transform_mut().set_rotation_mat({
+        let mut rotation = identity();
+        rotation = rotate_y(&rotation, 0.6);
+        rotation = rotate_z(&rotation, -1.1);
+        rotation
+    });
+
+    bunny
+        .transform_mut()
+        .set_rotation_mat(rotate_y(&identity(), -0.6));
+
+    // Lighting
+    let mut ambient_light = AmbientLight::new(
+        vec3(1.0, 1.0, 1.0),
+        0.05,
+    );
+
+    let mut directional_lights: Vec<(PointLight, MeshObject<_>)> = vec![
+        (vec3(-4.0, 0.0, -2.0), vec3(1.0, 0.0, 0.0), 3.0f32),
+        (vec3(0.0, -3.0, -14.0), vec3(0.0, 1.0, 0.0), 8.0f32),
+        (vec3(4.0, -2.0, -1.0), vec3(0.0, 0.0, 1.0), 5.0f32),
+        (vec3(0.0, -25.0, -5.0), vec3(1.0, 0.9, 0.8), 80.0f32),
+    ]
+    .iter()
+    .map(|f| {
+        let obj = MeshObjectBuilder::from_file(
+            "examples/models/sphere.obj",
+            &f.0,
+            &(vec3(0.1, 0.1, 0.1) * f.2.sqrt()),
+            &f.1,
+            // TODO: shouldn't be necessary to specify specular data here
+            (0.2, 2.0),
+        ).build(renderer);
+        (PointLight::new(f.0, f.1, f.2), obj)
+    })
+    .collect();
+
+    // Other
+    let mut camera_pos = vec3(0.0, 0.0, 0.0);
+    let mut camera_euler = vec3(0.0, 0.0, 0.0);
+
+    rhyolite.run(move |event, keyboard, _, _, time, renderer| {
+        match event {
+            Event::WindowEvent {
+                event: WindowEvent::Resized(_),
+                ..
+            } => {
+                camera.configure(renderer.get_window_size());
+            }
+            Event::RedrawEventsCleared => {
+                suzanne
+                    .transform_mut()
+                    .set_translation(&vec3(time.current.cos() - 1.0, -0.5, -5.0));
+                suzanne.transform_mut().set_rotation_mat({
+                    let mut rotation = identity();
+                    rotation = rotate_y(&rotation, time.current);
+                    rotation = rotate_x(&rotation, time.current / 2.);
+                    rotation = rotate_z(&rotation, time.current / 3.);
+                    rotation
+                });
+
+                teapot.transform_mut().set_rotation_mat({
+                    let mut rotation = identity();
+                    rotation = rotate_x(&rotation, -time.current);
+                    rotation = rotate_y(&rotation, time.current / 5.0);
+                    rotation = rotate_z(&rotation, time.current / 2.);
+                    rotation
+                });
+
+                // Camera movement
+                examples::do_camera_movement(
+                    CamRotationMode::Mesh,
+                    &mut camera,
+                    &mut camera_euler,
+                    &mut camera_pos,
+                    &keyboard,
+                    time.delta,
+                );
+
+                // Rendering
+                renderer.start_render_pass(&mut camera);
+                renderer.draw_lit_auto(DrawInfo::Vertex { object: &suzanne });
+                renderer.draw_lit_auto(DrawInfo::Vertex { object: &plane });
+                renderer.draw_lit_auto(DrawInfo::Vertex { object: &teapot });
+                renderer.draw_lit_auto(DrawInfo::Vertex { object: &torus1 });
+                renderer.draw_lit_auto(DrawInfo::Vertex { object: &torus2 });
+                renderer.draw_lit_auto(DrawInfo::Vertex { object: &bunny });
+                renderer.draw_ambient_light(&mut ambient_light);
+                for light in directional_lights.iter_mut() {
+                    renderer.draw_point_light(&mut light.0);
+                }
+                // for light in directional_lights.iter_mut() {
+                //     // TODO: should ideally use an instancing method instead of this, buffer recreated multiple times per frame
+                //     renderer.draw_unlit(DrawType::Vertex(&light.1), None);
+                // }
+                renderer.end_render_pass();
+            }
+            _ => (),
+        }
+    });
+}
+```
+
+### examples/src/bin/ray_marching.rs
+```
+use rhyolite::geometry::marched::Metaball;
+use rhyolite::lighting::AmbientLight;
+use rhyolite::transform::Transform;
+use rhyolite::Rhyolite;
+use rhyolite::{camera::Camera, lighting::PointLight};
+
+use winit::event::{Event, VirtualKeyCode, WindowEvent};
+use nalgebra_glm::{vec3, Vec3};
+
+use examples::{CamRotationMode, KeyBinding};
+
+use rhyolite::renderer::Renderer;
+
+fn main() {
+    let mut rhyolite = Rhyolite::ray_marched();
+
+    let camera_transform = Transform::identity();
+    let mut camera = Camera::new(camera_transform, 1.2, 0.02, 100.0);
+
+    // Add point lights to the scene
+    let mut point_lights = vec![
+        PointLight::new(
+            vec3(0.0, 10.0, -10.0),
+            vec3(0.0, 0.2, 1.0),
+            60.0
+        ),
+        PointLight::new(
+            vec3(0.0, -10.0, 10.0),
+            vec3(1.0, 0.2, 0.0),
+            60.0
+        ),
+    ];
+    let mut ambient_light = AmbientLight::new(
+        vec3(1.0, 1.0, 1.0),
+        0.1
+    );
+
+    rhyolite.renderer.config_lighting(&mut point_lights, &mut ambient_light);
+
+    const GRID_WIDTH: u32 = 3;
+    const GRID_HEIGHT: u32 = 3;
+
+    let mut metaballs: Vec<Metaball> = Vec::with_capacity(81);
+    metaballs.push(Metaball::new(vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0), 0.6));
+    for i in 0..(GRID_WIDTH * GRID_HEIGHT) {
+        metaballs.push(Metaball::new(
+            vec3(
+                (i / GRID_HEIGHT) as f32 * 2.,
+                0.0,
+                (i % GRID_HEIGHT) as f32 * 2.,
+            ),
+            vec3(1.0, 1.0, 1.0),
+            0.45,
+        ));
+    }
+
+    let mut ctrl_metaball_pos = vec3(0.0, 0.0, 0.0);
+    let mut control_mode = false;
+
+    // Other
+    let mut camera_pos: Vec3 = vec3(0.0, 0.0, 0.0);
+    let mut camera_euler: Vec3 = vec3(0.0, 0.0, 0.0);
+
+    rhyolite.run(move |event, keyboard, _, _, time, renderer| {
+        match event {
+            Event::WindowEvent {
+                event: WindowEvent::Resized(_),
+                ..
+            } => {
+                camera.configure(renderer.get_window_size());
+            }
+            Event::RedrawEventsCleared => {
+                if keyboard.key_pressed(VirtualKeyCode::Escape) {
+                    control_mode = !control_mode;
+                }
+
+                if !control_mode {
+                    examples::do_camera_movement(
+                        CamRotationMode::Marched,
+                        &mut camera,
+                        &mut camera_euler,
+                        &mut camera_pos,
+                        &keyboard,
+                        time.delta,
+                    );
+
+                    ctrl_metaball_pos = vec3(2.0, time.current.sin() * 3., 2.0)
+
+                } else {
+                    let wasd_move = examples::get_axes(keyboard, KeyBinding::WASD);
+                    ctrl_metaball_pos +=
+                        nalgebra_glm::rotate_y_vec3(&wasd_move, camera_euler.y) * 0.1;
+                }
+
+                metaballs[0].set_position(ctrl_metaball_pos);
+
+                // Rendering
+                renderer.start(&mut camera);
+                renderer.add_objects(&metaballs);
+                renderer.finish().unwrap();
+            }
+            _ => (),
+        }
+    });
+}
+```
+
+### rhyolite/src/geometry/dummy.rs
+```
+use crate::renderer::staging::StagingBuffer;
+use crate::renderer::RenderBase;
+use vulkano::buffer::{Buffer, BufferContents, BufferCreateInfo, BufferUsage, Subbuffer};
+use vulkano::memory::allocator::{AllocationCreateInfo, MemoryAllocator, MemoryUsage};
+use vulkano::pipeline::graphics::vertex_input::Vertex;
+
+#[repr(C)]
+#[derive(Vertex, Clone, Copy, Debug, BufferContents)]
+pub(crate) struct DummyVertex {
+    #[format(R32G32_SFLOAT)]
+    pub position: [f32; 2],
+}
+
+impl DummyVertex {
+    pub fn list() -> [DummyVertex; 6] {
+        [
+            DummyVertex {
+                position: [-1.0, -1.0],
+            },
+            DummyVertex {
+                position: [-1.0, 1.0],
+            },
+            DummyVertex {
+                position: [1.0, 1.0],
+            },
+            DummyVertex {
+                position: [-1.0, -1.0],
+            },
+            DummyVertex {
+                position: [1.0, 1.0],
+            },
+            DummyVertex {
+                position: [1.0, -1.0],
+            },
+        ]
+    }
+
+    pub fn buf(
+        buffer_allocator: &(impl MemoryAllocator + ?Sized),
+        base: &RenderBase,
+    ) -> Subbuffer<[DummyVertex]> {
+        Buffer::from_iter(
+            buffer_allocator,
+            BufferCreateInfo {
+                usage: BufferUsage::TRANSFER_SRC | BufferUsage::VERTEX_BUFFER,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                usage: MemoryUsage::Upload,
+                ..Default::default()
+            },
+            DummyVertex::list(),
+        )
+        .unwrap()
+        .into_device_local(6, buffer_allocator, &base)
+    }
+}
+```
+
+### rhyolite/src/geometry/marched.rs
+```
+use nalgebra_glm::Vec3;
+use crate::renderer::staging::UniformSrc;
+use crate::shaders::{expand_vec3, marched_frag};
+
+/// A metaball, or a sphere that blends with other spheres. The default object in ray_marching rendering.
+pub struct Metaball {
+    position: Vec3,
+    color: Vec3,
+    radius: f32,
+}
+
+impl Metaball {
+    pub fn new(position: Vec3, color: Vec3, radius: f32) -> Self {
+        Self {
+            position,
+            color,
+            radius,
+        }
+    }
+    pub fn set_position(&mut self, pos: Vec3) {
+        self.position = pos;
+    }
+    pub fn get_position(&self) -> &Vec3 {
+        &self.position
+    }
+    pub fn get_color(&self) -> &Vec3 {
+        &self.color
+    }
+    pub fn get_radius(&self) -> f32 {
+        self.radius
+    }
+}
+
+impl UniformSrc<marched_frag::UMetaball> for Metaball {
+    fn get_raw(&self) -> marched_frag::UMetaball {
+        marched_frag::UMetaball {
+            position: expand_vec3(self.get_position()),
+            color: expand_vec3(self.get_color()),
+            radius: self.get_radius(),
+        }
+    }
+}
+```
+
+### rhyolite/src/geometry/mod.rs
+```
+#[cfg(feature = "mesh")]
+pub mod mesh;
+
+#[cfg(feature = "marched")]
+pub mod marched;
+
+pub mod dummy;
+```
+
+### rhyolite/src/renderer/marched.rs
+```
+use std::mem::MaybeUninit;
+use std::sync::Arc;
+
+use vulkano::buffer::allocator::{SubbufferAllocator, SubbufferAllocatorCreateInfo};
+use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer};
+use vulkano::descriptor_set::WriteDescriptorSet;
+use vulkano::descriptor_set::{allocator::StandardDescriptorSetAllocator, PersistentDescriptorSet};
+use vulkano::device::Device;
+use vulkano::format::Format;
+use vulkano::image::view::ImageView;
+use vulkano::image::{ImageAccess, SwapchainImage};
+use vulkano::memory::allocator::{AllocationCreateInfo, FreeListAllocator, GenericMemoryAllocator, MemoryUsage, StandardMemoryAllocator};
+use vulkano::padded::Padded;
+use vulkano::pipeline::graphics::input_assembly::InputAssemblyState;
+use vulkano::pipeline::graphics::vertex_input::Vertex;
+use vulkano::pipeline::graphics::viewport::{Viewport, ViewportState};
+use vulkano::pipeline::{GraphicsPipeline, Pipeline, PipelineBindPoint};
+use vulkano::render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass, Subpass};
+
+use crate::geometry::dummy::DummyVertex;
+use crate::geometry::marched::Metaball;
+use crate::lighting::{AmbientLight, PointLight};
+use crate::renderer::staging::{IntoPersistentUniform, StagingBuffer, UniformSrc};
+use crate::shaders::{marched_frag, ShaderModulePair};
+
+use crate::UnconfiguredError;
+
+use super::{RenderBase, Renderer};
+
+const MAX_POINT_LIGHTS: usize = 16;
+const MAX_METABALLS: usize = 1024;
+
+pub struct MarchedRenderer {
+    base: RenderBase,
+
+    render_pass: Arc<RenderPass>,
+
+    buffer_allocator: Arc<StandardMemoryAllocator>,
+    descriptor_set_allocator: StandardDescriptorSetAllocator,
+    subbuffer_allocator: SubbufferAllocator,
+
+    vp_set: Option<Arc<PersistentDescriptorSet>>,
+    geometry_set: Option<Arc<PersistentDescriptorSet>>,
+    lighting_data: Option<MarchedLightingData>, // Contains a PersistentDescriptorSet and a point light count
+
+    dummy_vertex_buf: Subbuffer<[DummyVertex]>,
+
+    pipeline: Arc<GraphicsPipeline>,
+    framebuffers: Vec<Arc<Framebuffer>>,
+
+    objects: Vec<Metaball>,
+}
+
+impl MarchedRenderer {
+    pub fn new(event_loop: &winit::event_loop::EventLoop<()>) -> Self {
+        let mut base = RenderBase::new(&event_loop);
+        let render_pass = get_render_pass(&base.device, base.swapchain.image_format());
+
+        // Buffer allocators
+        // Generic allocator for framebuffer attachments, descriptor sets, vertex buffers, etc.
+        // TODO: might want to have multiple allocators separated based on function
+        let buffer_allocator = Arc::from(
+            GenericMemoryAllocator::<Arc<FreeListAllocator>>::new_default(base.device.clone()),
+        );
+        // TODO: use a descriptor pool instead of a descriptor set allocator
+        let descriptor_set_allocator = StandardDescriptorSetAllocator::new(base.device.clone());
+
+        let subbuffer_allocator = SubbufferAllocator::new(
+            buffer_allocator.clone(),
+            SubbufferAllocatorCreateInfo {
+                arena_size: 512, // TODO: FIND THE ACTUAL VALUE
+                buffer_usage: BufferUsage::UNIFORM_BUFFER,
+                memory_usage: MemoryUsage::Upload,
+                ..Default::default()
+            },
+        );
+
+        // Create a dummy vertex buffer used for full-screen shaders
+        let dummy_vertex_buf = DummyVertex::buf(&buffer_allocator, &base);
+
+        // Includes framebuffers and other attachments that aren't stored
+        let (framebuffers, pipeline) = window_size_dependent_setup(
+            &base.images,
+            render_pass.clone(),
+            &mut base.viewport,
+            &base.device,
+        );
+
+        Self {
+            base,
+
+            render_pass,
+
+            buffer_allocator,
+            descriptor_set_allocator,
+            subbuffer_allocator,
+
+            vp_set: None,
+            geometry_set: None,
+            lighting_data: None,
+
+            dummy_vertex_buf,
+
+            pipeline,
+            framebuffers,
+
+            objects: vec![],
+        }
+    }
+
+    /// Starts the rendering process, configuring buffers for the camera, recreating the swapchain
+    /// if necessary, and performing necessary acquisition of rendering resources.
+    pub fn start(&mut self, camera: &mut crate::camera::Camera) {
+        if !camera.is_configured() {
+            camera.configure(self.get_window_size());
+        }
+
+        let vp_layout = self
+            .pipeline
+            .layout()
+            .set_layouts()
+            .get(0)
+            .unwrap()
+            .clone();
+        let vp_subbuffer = camera.get_vp_subbuffer(&self.subbuffer_allocator).unwrap();
+        self.vp_set = Some(
+            PersistentDescriptorSet::new(
+                &self.descriptor_set_allocator,
+                vp_layout,
+                [WriteDescriptorSet::buffer(0, vp_subbuffer)],
+            )
+            .unwrap(),
+        );
+
+        if self.base.should_recreate_swapchain {
+            camera.configure(self.get_window_size());
+            self.recreate_all_size_dependent();
+        }
+
+        self.base.start(&mut self.framebuffers);
+    }
+
+    /// Finishes the rendering process and draws to the screen.
+    pub fn finish(&mut self) -> Result<(), UnconfiguredError>{
+        if self.base.render_error {
+            return Ok(());
+        }
+
+        let geometry_set = match self.geometry_set.as_ref() {
+            Some(gs) => gs,
+            None => { return Err(UnconfiguredError(
+                "Geometry descriptor set is not configured! It must be configured with \
+                `add_objects()` before the finish() function is called."
+            )); }
+        }.clone();
+
+        let lighting_data = match self.lighting_data.as_ref() {
+            Some(ld) => ld,
+            None => { return Err(UnconfiguredError(
+                "Lighting descriptor set is not configured! It must be configured with \
+                `config_lighting()` before the finish() function is called."
+            )); }
+        };
+
+        self.base
+            .commands_mut()
+            .bind_pipeline_graphics(self.pipeline.clone())
+            .bind_descriptor_sets(
+                PipelineBindPoint::Graphics,
+                self.pipeline.layout().clone(),
+                0,
+                (
+                    self.vp_set.as_ref().unwrap().clone(),
+                    lighting_data.set.clone(),
+                    geometry_set,
+                ),
+            )
+            .bind_vertex_buffers(0, self.dummy_vertex_buf.clone())
+            .draw(self.dummy_vertex_buf.len() as u32, 1, 0, 0)
+            .unwrap();
+
+        self.base.finish();
+
+        Ok(())
+    }
+
+    /// Configures the lighting descriptor set of the scene. Buffers created are device-only, so
+    /// this should not be run often.
+    pub fn config_lighting(&mut self, point_lights: &mut Vec<PointLight>, ambient_light: &mut AmbientLight) {
+        let point_light_count = point_lights.len();
+
+        let point_light_data = unsafe {
+            to_partially_init_arr::<MAX_POINT_LIGHTS, Padded<marched_frag::UPointLight, 12>>(
+                point_lights.iter()
+                    .map(|pl| {
+                        let raw: marched_frag::UPointLight = pl.get_raw().into();
+                        Padded::from(raw)
+                    })
+            )
+        };
+
+        let point_light_buf: Subbuffer<marched_frag::UPointLightsData> = Buffer::from_data(
+            &self.buffer_allocator,
+            BufferCreateInfo {
+                usage: BufferUsage::TRANSFER_SRC | BufferUsage::UNIFORM_BUFFER,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                usage: MemoryUsage::Upload,
+                ..Default::default()
+            },
+            marched_frag::UPointLightsData {
+                data: point_light_data,
+                len: point_light_count as u32,
+            }
+        )
+            .unwrap()
+            .into_device_local(1, &self.buffer_allocator, self.get_base());
+
+
+        let layout = self.pipeline.layout().set_layouts().get(1).unwrap().clone();
+        let set = PersistentDescriptorSet::new(
+            &self.descriptor_set_allocator,
+            layout.clone(),
+            [
+                WriteDescriptorSet::buffer(
+                    0,
+                    point_light_buf
+                ),
+                WriteDescriptorSet::buffer(
+                    1,
+                    ambient_light.get_buffer(&self.buffer_allocator, self.get_base()),
+                ),
+            ],
+        ).unwrap();
+
+        self.lighting_data = Some(MarchedLightingData {
+            point_light_count,
+            set,
+        });
+    }
+
+    /// Adds metaball objects to the scene. Metaball objects do not persist between frames, so
+    /// this function must be called on a per-frame basis.
+    pub fn add_objects(&mut self, objects: &Vec<Metaball>) {
+        let objects: Vec<Padded<marched_frag::UMetaball, 12>> = objects
+            .iter()
+            .map(|obj| {
+                Padded::from(obj.get_raw())
+            })
+            .collect();
+
+        let len = objects.len() as u32;
+        let data = unsafe {
+            to_partially_init_arr::<MAX_METABALLS, Padded<marched_frag::UMetaball, 12>>(objects)
+        };
+
+        let metaball_buf = self.subbuffer_allocator.allocate_unsized(MAX_METABALLS as u64).unwrap();
+        *metaball_buf.write().unwrap() = marched_frag::UMetaballData { data, len };
+
+        let layout = self.pipeline.layout().set_layouts().get(2).unwrap().clone();
+        self.geometry_set = Some(PersistentDescriptorSet::new(
+            &self.descriptor_set_allocator,
+            layout.clone(),
+            [WriteDescriptorSet::buffer(0, metaball_buf.clone())],
+        ).expect("Unable to create geometry descriptor set"));
+    }
+}
+
+impl Renderer for MarchedRenderer {
+    /// Recreates the ray_marching renderer's framebuffers, pipeline, and swapchain, all of which depend
+    /// on the window size.
+    fn recreate_all_size_dependent(&mut self) {
+        self.base.recreate_swapchain();
+        // TODO: use a different allocator?
+        let (framebuffers, pipeline) = window_size_dependent_setup(
+            &self.base.images,
+            self.render_pass.clone(),
+            &mut self.base.viewport,
+            &self.base.device,
+        );
+        self.framebuffers = framebuffers;
+        self.pipeline = pipeline;
+    }
+    fn get_base(&self) -> &RenderBase {
+        &self.base
+    }
+}
+
+/// Sets up the framebuffers and graphics pipeline based on the size of the viewport
+fn window_size_dependent_setup(
+    images: &[Arc<SwapchainImage>],
+    render_pass: Arc<RenderPass>,
+    viewport: &mut Viewport,
+    device: &Arc<Device>,
+) -> (Vec<Arc<Framebuffer>>, Arc<GraphicsPipeline>) {
+    let dimensions = images[0].dimensions().width_height();
+    viewport.dimensions = [dimensions[0] as f32, dimensions[1] as f32];
+
+    let framebuffers = images
+        .iter()
+        .map(|image| {
+            let view = ImageView::new_default(image.clone()).unwrap();
+            Framebuffer::new(
+                render_pass.clone(),
+                FramebufferCreateInfo {
+                    attachments: vec![view],
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+
+    let pipeline = get_pipeline(&render_pass, dimensions, device);
+
+    (framebuffers, pipeline)
+}
+
+/// Gets the render pass to use with the ray_marching renderer. In Vulkan, a render pass is the set of
+/// attachments, the way they are used, and the rendering work that is performed using them.
+pub(crate) fn get_render_pass(device: &Arc<Device>, final_format: Format) -> Arc<RenderPass> {
+    vulkano::single_pass_renderpass!(
+        device.clone(),
+        attachments: {
+            final_color: {
+                load: Clear,
+                store: Store,
+                format: final_format,
+                samples: 1,
+            }
+        },
+        pass: {
+            color: [final_color],
+            depth_stencil: {}
+        }
+    )
+    .unwrap()
+}
+
+/// Gets the graphics pipeline containing the ray_marching vertex and fragment shaders.
+pub fn get_pipeline(
+    render_pass: &Arc<RenderPass>,
+    dimensions: [u32; 2],
+    device: &Arc<Device>,
+) -> Arc<GraphicsPipeline> {
+    let shaders = ShaderModulePair::marched_default(device);
+
+    GraphicsPipeline::start()
+        .vertex_input_state(DummyVertex::per_vertex())
+        .vertex_shader(shaders.vert.entry_point("main").unwrap(), ())
+        .input_assembly_state(InputAssemblyState::new())
+        .viewport_state(ViewportState::viewport_fixed_scissor_irrelevant([
+            Viewport {
+                origin: [0.0, 0.0],
+                dimensions: [dimensions[0] as f32, dimensions[1] as f32],
+                depth_range: 0.0..1.0,
+            },
+        ]))
+        .fragment_shader(shaders.frag.entry_point("main").unwrap(), ())
+        .render_pass(Subpass::from(render_pass.clone(), 0).unwrap())
+        .build(device.clone())
+        .unwrap()
+}
+
+struct MarchedLightingData {
+    point_light_count: usize,
+    set: Arc<PersistentDescriptorSet>,
+}
+
+/// A helper function that creates a partially uninitialized array, useful for creating a variable
+/// number of objects when a fixed-length array is required.
+///
+/// # Panics
+/// - Panics if the number of elements in `values` exceeds `MAX_LEN`
+pub unsafe fn to_partially_init_arr<const MAX_LEN: usize, T>(values: impl IntoIterator<Item = T>) -> [T; MAX_LEN] {
+    let mut uninit_array: MaybeUninit<[T; MAX_LEN]> = MaybeUninit::uninit();
+    let mut ptr_i = uninit_array.as_mut_ptr() as *mut T;
+
+    for (i, val) in values.into_iter().enumerate() {
+        if i + 1 == MAX_LEN {
+            panic!(
+                "Overflowed maximum capacity of partially initialized array: {}",
+                MAX_LEN
+            )
+        }
+        ptr_i.write(val);
+        ptr_i = ptr_i.add(1);
+    }
+    uninit_array.assume_init()
+}
+```
+
+### rhyolite/src/renderer/mesh.rs
+```
+use crate::camera::Camera;
+use crate::geometry::dummy::DummyVertex;
+use crate::geometry::mesh::loader::BasicVertex;
+use crate::geometry::mesh::{MeshObject, MeshObjectBuilder, MeshObjectParams};
+use crate::lighting::{AmbientLight, PointLight};
+use crate::renderer::staging::{IntoPersistentUniform, UniformSrc};
+use crate::shaders::{albedo_frag, Shaders, albedo_vert};
+
+use vulkano;
+use vulkano::buffer::{BufferUsage, Subbuffer};
+use vulkano::command_buffer::{DrawIndirectCommand, SubpassContents, PipelineExecutionError};
+use vulkano::descriptor_set::allocator::{StandardDescriptorSetAllocator, StandardDescriptorSetAlloc};
+use vulkano::descriptor_set::{PersistentDescriptorSet, WriteDescriptorSet, DescriptorSetsCollection};
+use vulkano::device::Device;
+use vulkano::format::Format;
+use vulkano::image::view::ImageView;
+use vulkano::image::{AttachmentImage, ImageAccess, SwapchainImage};
+use vulkano::memory::allocator::{MemoryAllocator, MemoryUsage, StandardMemoryAllocator};
+use vulkano::pipeline::graphics::color_blend::{
+    AttachmentBlend, BlendFactor, BlendOp, ColorBlendState,
+};
+use vulkano::pipeline::graphics::depth_stencil::DepthStencilState;
+use vulkano::pipeline::graphics::input_assembly::InputAssemblyState;
+use vulkano::pipeline::graphics::rasterization::{CullMode, RasterizationState};
+use vulkano::pipeline::graphics::vertex_input::Vertex;
+use vulkano::pipeline::graphics::viewport::{Viewport, ViewportState};
+use vulkano::pipeline::{GraphicsPipeline, Pipeline, PipelineBindPoint};
+use vulkano::render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass, Subpass};
+use winit::event_loop::EventLoop;
+
+use std::sync::Arc;
+use vulkano::buffer::allocator::{SubbufferAllocator, SubbufferAllocatorCreateInfo};
+
+use super::{RenderBase, Renderer};
+
+// TODO: see if draw can be called ONCE after binding multiple vertex buffers
+// TODO: somehow support custom descriptors in `draw_object()`
+
+// TODO: implement instancing???
+pub enum DrawInfo<'a, T: Vertex> {
+    /// What you'll use most of the time. Draws a MeshObject.
+    Vertex { object: &'a MeshObject<T> },
+    /// Executes a graphics pipeline with a specified number of vertices, without binding a vertex buffer.
+    /// Useful if you're using a custom uniform buffer instead of vertex data.
+    /// If you're using the default render pipeline, you can add a non-`None` value for 
+    Blank { vertex_count: u32},
+    /// Draws an in indirect object, usually with a vertex buffer generated by a compute shader,
+    /// that will later be lit.
+    IndirectVertex { indirect_commands: Subbuffer<[DrawIndirectCommand]>, object: &'a MeshObject<T> },
+    /// Executes a graphics pipeline with an indirectly-generated draw command, without binding a vertex buffer.
+    /// Useful if you're using a custom uniform buffer instead of vertex data.
+    IndirectBlank { indirect_commands: Subbuffer<[DrawIndirectCommand]>}
+}
+
+/// An enum representing the sequential stages of rendering necessary for construction of the
+/// command buffer. Since Rhyolite's Mesh engine uses deferred rendering, they must be added
+/// in the following order:
+/// 1. Albedo
+/// 2. Ambient
+/// 3. Point (optional)
+/// 4. Unlit (optional)
+#[derive(Debug, Clone, PartialEq)]
+enum RenderStage {
+    Stopped,
+    Albedo,
+    Ambient,
+    Point,
+    Unlit,
+}
+
+impl RenderStage {
+    /// Advances this `RenderStage`'s value to match that of new_stage.
+    /// # Panics
+    /// Since advancement between `RenderStage`s is meant to be manually implemented rather than
+    /// determined programmatically, the purpose of this function is to panic if the stages are
+    /// called out of order. The function will panic in these circumstances:
+    /// 1. Trying to enter `RenderStage::Albedo` when the current stage is something other than
+    /// `RenderStage::Stopped` or `RenderStage::Albedo`
+    /// 2. Trying to enter `RenderStage::Ambient` when the current stage is something other than
+    /// `RenderStage::Albedo`
+    /// 3. Trying to enter `RenderStage::Point` when the current stage is something other than
+    /// `RenderStage::Ambient` or `RenderStage::Point`
+    /// 4. Trying to enter `RenderStage::Unlit` when the current stage is something other than
+    /// `RenderStage::Ambient`, `RenderStage::Point`, or `RenderStage::Unlit`
+    /// 5. Trying to enter `RenderStage::Stopped` (usually by calling the renderer's `finish()`
+    /// function) when the current stage is something other than `RenderStage::Ambient`,
+    /// `RenderStage::Point`, or `RenderStage::Unlit`
+    fn update(&mut self, new_stage: RenderStage) {
+        let mut out_of_order = false;
+        match new_stage {
+            RenderStage::Albedo => match self {
+                RenderStage::Stopped => {
+                    *self = RenderStage::Albedo;
+                }
+                RenderStage::Albedo => (),
+                _ => out_of_order = true,
+            },
+            RenderStage::Ambient => match self {
+                RenderStage::Albedo => {
+                    *self = RenderStage::Ambient;
+                }
+                _ => out_of_order = true,
+            },
+            RenderStage::Point => match self {
+                RenderStage::Ambient => {
+                    *self = RenderStage::Point;
+                }
+                RenderStage::Point => (),
+                _ => out_of_order = true,
+            },
+            RenderStage::Unlit => match self {
+                RenderStage::Ambient | RenderStage::Point => {
+                    *self = RenderStage::Unlit;
+                }
+                RenderStage::Unlit => (),
+                _ => out_of_order = true,
+            },
+            RenderStage::Stopped => match self {
+                RenderStage::Ambient | RenderStage::Point | RenderStage::Unlit => {
+                    *self = RenderStage::Stopped;
+                }
+                _ => out_of_order = true,
+            },
+        }
+        if out_of_order {
+            panic!(
+                "can't enter {:?} stage after {:?} stage, rendering stopped",
+                new_stage, self
+            )
+        }
+    }
+}
+
+pub struct MeshRenderer {
+    base: RenderBase,
+
+    render_pass: Arc<RenderPass>,
+
+    buffer_allocator: Arc<StandardMemoryAllocator>,
+    descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
+    subbuffer_allocator: SubbufferAllocator,
+
+    vp_set: Option<Arc<PersistentDescriptorSet>>,
+
+    dummy_vertex_buf: Subbuffer<[DummyVertex]>,
+
+    pipelines: Pipelines,
+    framebuffers: Vec<Arc<Framebuffer>>,
+    attachment_buffers: AttachmentBuffers,
+
+    render_stage: RenderStage,
+}
+
+impl MeshRenderer {
+    pub fn new(event_loop: &EventLoop<()>) -> Self {
+        let mut base = RenderBase::new(&event_loop);
+
+        // Declare the render pass, a structure that lets us define how the rendering process should work. Tells the hardware
+        // where it can expect to find input and where it can store output
+        let render_pass = get_render_pass(&base.device, base.swapchain.image_format());
+        // let pipelines = Pipelines::new(&render_pass, &device);
+
+        // Buffer allocators
+        // Generic allocator for framebuffer attachments, descriptor sets, vertex buffers, etc.
+        // TODO: might want to have multiple allocators separated based on function
+        let buffer_allocator = Arc::from(StandardMemoryAllocator::new_default(base.device.clone()));
+        // TODO: use a descriptor pool instead of a descriptor set allocator
+        let descriptor_set_allocator = Arc::from(StandardDescriptorSetAllocator::new(base.device.clone()));
+
+        // A buffer pool for all data used in rendering, including ambient lights, point lights, albedo, unlit, and view/projection matrices
+        let subbuffer_allocator = SubbufferAllocator::new(
+            buffer_allocator.clone(),
+            SubbufferAllocatorCreateInfo {
+                arena_size: 512, // TODO: FIND THE ACTUAL VALUE
+                buffer_usage: BufferUsage::UNIFORM_BUFFER,
+                memory_usage: MemoryUsage::Upload,
+                ..Default::default()
+            },
+        );
+
+        // Create a dummy vertex buffer used for full-screen shaders
+        let dummy_vertex_buf = DummyVertex::buf(&buffer_allocator, &base);
+
+        // Includes framebuffers and other attachments that aren't stored
+        let (framebuffers, attachment_buffers, pipelines) = window_size_dependent_setup(
+            &buffer_allocator,
+            &base.images,
+            render_pass.clone(),
+            &mut base.viewport,
+            &base.device,
+        );
+
+        Self {
+            base,
+
+            render_pass,
+
+            buffer_allocator,
+            descriptor_set_allocator,
+            subbuffer_allocator,
+
+            vp_set: None,
+
+            dummy_vertex_buf,
+
+            pipelines,
+            framebuffers,
+            attachment_buffers,
+
+            render_stage: RenderStage::Stopped,
+        }
+    }
+
+    /// Starts the rendering process for the current frame
+    pub fn start_render_pass(&mut self, camera: &mut Camera) {
+        if !camera.is_configured() {
+            camera.configure(self.get_window_size());
+        }
+
+        let vp_layout = self
+            .pipelines
+            .albedo
+            .layout()
+            .set_layouts()
+            .get(0)
+            .unwrap()
+            .clone();
+        let vp_subbuffer = camera.get_vp_subbuffer(&self.subbuffer_allocator).unwrap();
+        self.vp_set = Some(
+            PersistentDescriptorSet::new(
+                &self.descriptor_set_allocator,
+                vp_layout,
+                [WriteDescriptorSet::buffer(0, vp_subbuffer)],
+            )
+            .unwrap(),
+        );
+
+        if self.base.should_recreate_swapchain {
+            camera.configure(self.get_window_size());
+            self.recreate_all_size_dependent();
+        }
+
+        self.base.start(&mut self.framebuffers);
+    }
+
+    /// Finishes the rendering process and draws to the screen
+    /// # Panics
+    /// Panics if not called after a `draw_object_unlit()` call or a `draw_point()` call
+    pub fn end_render_pass(&mut self) {
+        if self.base.render_error {
+            return;
+        }
+        self.render_stage.update(RenderStage::Stopped);
+        self.base.finish();
+    }
+
+    /// Gets the descriptors used with the default lit graphics pipeline. These descriptors are formatted as follows:
+    /// 
+    /// ```txt
+    /// set 0: vp_set
+    /// | binding 0: UCamData
+    /// | | view (mat4)
+    /// | | projection (mat4)
+    /// set 1: albedo_set
+    /// | binding 0: UModelData
+    /// | | model (mat4)
+    /// | | normals (mat4)
+    /// | binding 1: USpecularData
+    /// | | intensity (float)
+    /// | | shininess (float)
+    /// ```
+    pub fn default_lit_descriptors(
+        &self, params: &MeshObjectParams
+    ) -> (Arc<PersistentDescriptorSet<StandardDescriptorSetAlloc>>, Arc<PersistentDescriptorSet<StandardDescriptorSetAlloc>>) {
+        let model_subbuffer: Subbuffer<albedo_vert::UModelData> = self.subbuffer_allocator.allocate_sized().unwrap();
+        *model_subbuffer.write().unwrap() = params.get_raw();
+
+        // TODO: Do this with textures instead!!!!!!!!! Not a subbuffer!!!!!!!!!
+        // or at least store the buffer instead of recreating it every frame.....
+        let specular_subbuffer: Subbuffer<albedo_frag::USpecularData> = self.subbuffer_allocator.allocate_sized().unwrap();
+        *specular_subbuffer.write().unwrap() = params.get_raw();
+
+        let albedo_layout = self
+            .pipelines
+            .albedo
+            .layout()
+            .set_layouts()
+            .get(1)
+            .unwrap()
+            .clone();
+        let albedo_set = PersistentDescriptorSet::new(
+            &self.descriptor_set_allocator,
+            albedo_layout.clone(),
+            [
+                WriteDescriptorSet::buffer(0, model_subbuffer),
+                WriteDescriptorSet::buffer(1, specular_subbuffer),
+            ],
+        ).unwrap();
+        
+        (self.vp_set.as_ref().unwrap().clone(), albedo_set.clone())
+    }
+
+    /// The base operations for drawing. Meant to be paired with `draw_lit` and `draw_unlit`. If there is an error during
+    /// pipeline execution, such as an incorrect binding, it will be propagated by this function. 
+    fn draw(
+        &mut self, data: DrawInfo<impl Vertex>, 
+        pipeline: Arc<GraphicsPipeline>, 
+        descriptors: impl DescriptorSetsCollection
+    ) -> Result<(), PipelineExecutionError> {
+        self.base.commands_mut().bind_pipeline_graphics(pipeline.clone());
+
+        self.base.commands_mut().bind_descriptor_sets(
+            PipelineBindPoint::Graphics,
+            pipeline.layout().clone(),
+            0,
+            descriptors
+        );
+
+        match data {
+            DrawInfo::Vertex { object } => {
+                self.base.commands_mut()
+                    .bind_vertex_buffers(0, object.vertex_buffer().clone())
+                    .draw(object.vertex_buffer().len() as u32, 1, 0, 0)?
+            },
+            DrawInfo::Blank { vertex_count, .. } =>{
+                self.base.commands_mut()
+                    .draw(vertex_count, 1, 0, 0)?
+            },
+            DrawInfo::IndirectVertex { indirect_commands, object } => {
+                self.base.commands_mut()
+                    .bind_vertex_buffers(0, object.vertex_buffer().clone())
+                    .draw_indirect(indirect_commands)?
+            },
+            DrawInfo::IndirectBlank { indirect_commands, .. } => {
+                self.base.commands_mut()
+                    .draw_indirect(indirect_commands)?
+            },
+        };
+        Ok(())
+    }
+
+    // TODO: there should be a way to not bind any descriptors, since right now passing in `None` signifies to use the default lit descriptors. 
+    // TODO: explain the format of data that should be returned from the pipeline (or nuke deferred rendering altogether)
+
+    /// Draws an object that will later be lit. If `pipeline` is `None`, the function uses the default lit pipeline. 
+    /// 
+    /// # Panics
+    /// - Panics if not called after a `start()` call or another `draw_object()` call.
+    pub fn draw_lit(
+        &mut self,
+        info: DrawInfo<impl Vertex>, 
+        pipeline: Arc<GraphicsPipeline>, 
+        descriptors: impl DescriptorSetsCollection,
+    ) -> Result<(), PipelineExecutionError> {
+        self.render_stage.update(RenderStage::Albedo);
+        if self.base.render_error {
+            return Ok(());
+        }
+
+        self.draw(info, pipeline, descriptors)?;
+        
+        return Ok(());
+    }
+
+    /// Has the same functionality as `draw_lit()`, with the only difference being the fact that it will attempt to
+    /// use the default lit pipeline and descriptor sets (see `default_lit_descriptors`) rather than a custom one. 
+    /// 
+    /// # Panics
+    /// - This function should **NEVER** be used with `DrawInfo::Blank` or `DrawInfo::IndirectBlank`. If it is, it 
+    /// will immediately panic.
+    pub fn draw_lit_auto (
+        &mut self,
+        info: DrawInfo<impl Vertex>,
+    ) {
+        let pipeline = self.pipelines.albedo.clone();
+        
+        let descriptors = self.default_lit_descriptors(
+            match &info {
+                DrawInfo::Vertex { object } | DrawInfo::IndirectVertex { object, .. } => object.params(),
+                DrawInfo::Blank { .. } | DrawInfo::IndirectBlank { .. } => panic!("No descriptor sets were added or bound. This should probably be implemented (or check if () implements DescriptorSetsCollection)")
+            }
+        );
+
+        self.draw_lit(info, pipeline, descriptors).unwrap(); // Unwrap is safe to use here because bindings are correct
+    }
+
+    /// Draws an ambient light, which adds global illumination to the entire scene
+    /// # Panics
+    /// Panics if not called after a `draw_object()` call
+    pub fn draw_ambient_light(&mut self, light: &mut AmbientLight) {
+        if self.base.render_error {
+            return;
+        }
+        self.render_stage.update(RenderStage::Ambient);
+
+        let ambient_layout = self
+            .pipelines
+            .ambient
+            .layout()
+            .set_layouts()
+            .get(0)
+            .unwrap();
+
+        let ambient_set = PersistentDescriptorSet::new(
+            &self.descriptor_set_allocator,
+            ambient_layout.clone(),
+            [
+                WriteDescriptorSet::image_view(0, self.attachment_buffers.albedo_buffer.clone()),
+                WriteDescriptorSet::buffer(1, light.get_buffer(&self.buffer_allocator, &self.base)),
+            ],
+        )
+        .unwrap();
+
+        // Add ambient light commands to the command buffer
+        self.base
+            .commands_mut()
+            .next_subpass(SubpassContents::Inline)
+            .unwrap()
+            .bind_pipeline_graphics(self.pipelines.ambient.clone())
+            .bind_descriptor_sets(
+                PipelineBindPoint::Graphics,
+                self.pipelines.ambient.layout().clone(),
+                0,
+                ambient_set.clone(),
+            )
+            .bind_vertex_buffers(0, self.dummy_vertex_buf.clone())
+            .draw(self.dummy_vertex_buf.len() as u32, 1, 0, 0)
+            .unwrap();
+    }
+
+    /// Draws a point light with a specified color and position
+    /// # Panics
+    /// Panics if not called after a `draw_ambient()` call or `another draw_point()` call
+    pub fn draw_point_light(&mut self, light: &mut PointLight) {
+        if self.base.render_error {
+            return;
+        }
+        self.render_stage.update(RenderStage::Point);
+
+        let point_layout = self
+            .pipelines
+            .point
+            .layout()
+            .set_layouts()
+            .get(1)
+            .unwrap()
+            .clone();
+
+        let point_set = PersistentDescriptorSet::new(
+            &self.descriptor_set_allocator,
+            point_layout.clone(),
+            [
+                WriteDescriptorSet::image_view(0, self.attachment_buffers.albedo_buffer.clone()),
+                WriteDescriptorSet::image_view(1, self.attachment_buffers.normal_buffer.clone()),
+                WriteDescriptorSet::image_view(2, self.attachment_buffers.frag_pos_buffer.clone()),
+                WriteDescriptorSet::image_view(3, self.attachment_buffers.specular_buffer.clone()),
+                WriteDescriptorSet::buffer(4, light.get_buffer(&self.buffer_allocator, &self.base)),
+            ],
+        )
+        .unwrap();
+
+        self.base
+            .commands_mut()
+            .bind_pipeline_graphics(self.pipelines.point.clone())
+            .bind_descriptor_sets(
+                PipelineBindPoint::Graphics,
+                self.pipelines.point.layout().clone(),
+                0,
+                (self.vp_set.as_ref().unwrap().clone(), point_set),
+            )
+            .bind_vertex_buffers(0, self.dummy_vertex_buf.clone())
+            .draw(self.dummy_vertex_buf.len() as u32, 1, 0, 0)
+            .unwrap();
+    }
+
+    /*
+    /// Draws an object with an unlit shader by rendering it after shadows are drawn
+    /// # Panics
+    /// Panics if not called after a `draw_point()` call or another `draw_object_unlit()` call
+    pub fn draw_unlit<T: Vertex>(&mut self, info: DrawInfo<T>, pipeline: impl Into<Option<Arc<GraphicsPipeline>>>) -> Result<(), PipelineExecutionError> {
+        self.render_stage.update(RenderStage::Unlit);
+        if self.base.render_error {
+            return Ok(());
+        }
+
+        let pipeline: Arc<GraphicsPipeline> = match pipeline.into() {
+            Some(custom_pipeline) => custom_pipeline,
+            None => self.pipelines.unlit.clone(),
+        };
+
+        if let DrawInfo::Vertex(obj) = info {
+            self.bind_default_lit_descriptors(obj.params())
+        }
+
+        self.draw(info, pipeline)?;
+        
+        return Ok(());
+    }
+    */
+
+    fn get_render_stage(&self) -> &RenderStage {
+        &self.render_stage
+    }
+    fn set_render_stage(&mut self, new_stage: RenderStage) {
+        self.render_stage = new_stage;
+    }
+
+    pub fn get_buffer_allocator(&self) -> Arc<StandardMemoryAllocator> {
+        self.buffer_allocator.clone()
+    }
+    pub fn get_descriptor_set_allocator(&self) -> Arc<StandardDescriptorSetAllocator> {
+        self.descriptor_set_allocator.clone()
+    }
+    pub fn get_render_pass(&self) -> Arc<RenderPass> {
+        self.render_pass.clone()
+    }
+    pub fn get_subbuffer_allocator(&self) -> &SubbufferAllocator {
+        &self.subbuffer_allocator
+    }
+
+    pub fn get_base_mut(&mut self) -> &mut RenderBase {
+        &mut self.base
+    }
+}
+
+impl Renderer for MeshRenderer {
+    /// Recreates all of the structures dependent on the window size, including the framebuffers,
+    /// attachment buffers, swapchain, and pipelines
+    fn recreate_all_size_dependent(&mut self) {
+        self.base.recreate_swapchain();
+        // TODO: use a different allocator?
+        let (framebuffers, attachment_buffers, pipelines) = window_size_dependent_setup(
+            &self.buffer_allocator,
+            &self.base.images,
+            self.render_pass.clone(),
+            &mut self.base.viewport,
+            &self.base.device,
+        );
+        self.framebuffers = framebuffers;
+        self.attachment_buffers = attachment_buffers;
+        self.pipelines = pipelines;
+    }
+
+    fn get_base(&self) -> &RenderBase {
+        &self.base
+    }
+}
+
+pub(crate) struct AttachmentBuffers {
+    pub albedo_buffer: Arc<ImageView<AttachmentImage>>,
+    pub normal_buffer: Arc<ImageView<AttachmentImage>>,
+    pub frag_pos_buffer: Arc<ImageView<AttachmentImage>>,
+    pub specular_buffer: Arc<ImageView<AttachmentImage>>,
+}
+
+/// Sets up the framebuffers based on the size of the viewport.
+fn window_size_dependent_setup(
+    allocator: &(impl MemoryAllocator + ?Sized),
+    images: &[Arc<SwapchainImage>],
+    render_pass: Arc<RenderPass>,
+    viewport: &mut Viewport,
+    device: &Arc<Device>,
+) -> (Vec<Arc<Framebuffer>>, AttachmentBuffers, Pipelines) {
+    let dimensions = images[0].dimensions().width_height();
+    viewport.dimensions = [dimensions[0] as f32, dimensions[1] as f32];
+
+    let depth_buffer = ImageView::new_default(
+        AttachmentImage::transient(allocator, dimensions, Format::D16_UNORM).unwrap(),
+    )
+    .unwrap();
+    let albedo_buffer = ImageView::new_default(
+        AttachmentImage::transient_input_attachment(
+            allocator,
+            dimensions,
+            Format::A2B10G10R10_UNORM_PACK32,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let normal_buffer = ImageView::new_default(
+        AttachmentImage::transient_input_attachment(
+            allocator,
+            dimensions,
+            Format::R16G16B16A16_SFLOAT,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let frag_pos_buffer = ImageView::new_default(
+        AttachmentImage::transient_input_attachment(
+            allocator,
+            dimensions,
+            Format::R16G16B16A16_SFLOAT,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let specular_buffer = ImageView::new_default(
+        AttachmentImage::transient_input_attachment(allocator, dimensions, Format::R16G16_SFLOAT)
+            .unwrap(),
+    )
+    .unwrap();
+
+    let framebuffers = images
+        .iter()
+        .map(|image| {
+            let view = ImageView::new_default(image.clone()).unwrap();
+            Framebuffer::new(
+                render_pass.clone(),
+                FramebufferCreateInfo {
+                    attachments: vec![
+                        view,
+                        albedo_buffer.clone(),
+                        normal_buffer.clone(),
+                        frag_pos_buffer.clone(),
+                        specular_buffer.clone(),
+                        depth_buffer.clone(),
+                    ],
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+
+    let attachment_buffers = AttachmentBuffers {
+        albedo_buffer: albedo_buffer.clone(),
+        normal_buffer: normal_buffer.clone(),
+        frag_pos_buffer: frag_pos_buffer.clone(),
+        specular_buffer: specular_buffer.clone(),
+    };
+
+    let pipelines = Pipelines::new(&render_pass, dimensions, device);
+
+    (framebuffers, attachment_buffers, pipelines)
+}
+
+struct Pipelines {
+    albedo: Arc<GraphicsPipeline>,
+    point: Arc<GraphicsPipeline>,
+    ambient: Arc<GraphicsPipeline>,
+    unlit: Arc<GraphicsPipeline>,
+}
+
+impl Pipelines {
+    pub fn new(render_pass: &Arc<RenderPass>, dimensions: [u32; 2], device: &Arc<Device>) -> Self {
+        let shaders = Shaders::mesh_default(device);
+
+        // Declare the render pass, a structure that lets us define how the rendering process should work. Tells the hardware
+        // where it can expect to find input and where it can store output
+        let albedo_pass = Subpass::from(render_pass.clone(), 0).unwrap();
+        let lighting_pass = Subpass::from(render_pass.clone(), 1).unwrap();
+
+        // Render pipelines
+        let albedo = GraphicsPipeline::start()
+            .vertex_input_state(BasicVertex::per_vertex())
+            .vertex_shader(shaders.albedo.vert.entry_point("main").unwrap(), ())
+            .input_assembly_state(InputAssemblyState::new())
+            .viewport_state(ViewportState::viewport_fixed_scissor_irrelevant([
+                Viewport {
+                    origin: [0.0, 0.0],
+                    dimensions: [dimensions[0] as f32, dimensions[1] as f32],
+                    depth_range: 0.0..1.0,
+                },
+            ]))
+            .fragment_shader(shaders.albedo.frag.entry_point("main").unwrap(), ())
+            .depth_stencil_state(DepthStencilState::simple_depth_test())
+            .rasterization_state(RasterizationState::new().cull_mode(CullMode::Back))
+            .render_pass(albedo_pass)
+            .build(device.clone())
+            .unwrap();
+
+        let point = GraphicsPipeline::start()
+            .vertex_input_state(DummyVertex::per_vertex())
+            .vertex_shader(shaders.point.vert.entry_point("main").unwrap(), ())
+            .input_assembly_state(InputAssemblyState::new())
+            .viewport_state(ViewportState::viewport_fixed_scissor_irrelevant([
+                Viewport {
+                    origin: [0.0, 0.0],
+                    dimensions: [dimensions[0] as f32, dimensions[1] as f32],
+                    depth_range: 0.0..1.0,
+                },
+            ]))
+            .fragment_shader(shaders.point.frag.entry_point("main").unwrap(), ())
+            .color_blend_state(
+                ColorBlendState::new(lighting_pass.num_color_attachments()).blend(
+                    AttachmentBlend {
+                        color_op: BlendOp::Add,
+                        color_source: BlendFactor::One,
+                        color_destination: BlendFactor::One,
+                        alpha_op: BlendOp::Max,
+                        alpha_source: BlendFactor::One,
+                        alpha_destination: BlendFactor::One,
+                    },
+                ),
+            )
+            .rasterization_state(RasterizationState::new().cull_mode(CullMode::Back))
+            .render_pass(lighting_pass.clone())
+            .build(device.clone())
+            .unwrap();
+
+        let ambient = GraphicsPipeline::start()
+            .vertex_input_state(DummyVertex::per_vertex())
+            .vertex_shader(shaders.ambient.vert.entry_point("main").unwrap(), ())
+            .input_assembly_state(InputAssemblyState::new())
+            .viewport_state(ViewportState::viewport_fixed_scissor_irrelevant([
+                Viewport {
+                    origin: [0.0, 0.0],
+                    dimensions: [dimensions[0] as f32, dimensions[1] as f32],
+                    depth_range: 0.0..1.0,
+                },
+            ]))
+            .fragment_shader(shaders.ambient.frag.entry_point("main").unwrap(), ())
+            .color_blend_state(
+                ColorBlendState::new(lighting_pass.num_color_attachments()).blend(
+                    AttachmentBlend {
+                        color_op: BlendOp::Add,
+                        color_source: BlendFactor::One,
+                        color_destination: BlendFactor::One,
+                        alpha_op: BlendOp::Max,
+                        alpha_source: BlendFactor::One,
+                        alpha_destination: BlendFactor::One,
+                    },
+                ),
+            )
+            .rasterization_state(RasterizationState::new().cull_mode(CullMode::Back))
+            .render_pass(lighting_pass.clone())
+            .build(device.clone())
+            .unwrap();
+
+        let unlit = GraphicsPipeline::start()
+            .vertex_input_state(BasicVertex::per_vertex())
+            .vertex_shader(shaders.unlit.vert.entry_point("main").unwrap(), ())
+            .input_assembly_state(InputAssemblyState::new())
+            .viewport_state(ViewportState::viewport_fixed_scissor_irrelevant([
+                Viewport {
+                    origin: [0.0, 0.0],
+                    dimensions: [dimensions[0] as f32, dimensions[1] as f32],
+                    depth_range: 0.0..1.0,
+                },
+            ]))
+            .fragment_shader(shaders.unlit.frag.entry_point("main").unwrap(), ())
+            .depth_stencil_state(DepthStencilState::simple_depth_test())
+            .rasterization_state(RasterizationState::new().cull_mode(CullMode::Back))
+            .render_pass(lighting_pass.clone())
+            .build(device.clone())
+            .unwrap();
+
+        Self {
+            albedo,
+            point,
+            ambient,
+            unlit,
+        }
+    }
+}
+
+/// Gets the render pass to use with the Mesh renderer. In Vulkan, a render pass is the set of
+/// attachments, the way they are used, and the rendering work that is performed using them.
+fn get_render_pass(device: &Arc<Device>, final_format: Format) -> Arc<RenderPass> {
+    vulkano::ordered_passes_renderpass!(
+        device.clone(),
+        attachments: {
+            final_color: {
+                load: Clear,
+                store: Store,
+                format: final_format,
+                samples: 1,
+            },
+            albedo: {
+                load: Clear,
+                store: DontCare,
+                format: Format::A2B10G10R10_UNORM_PACK32,
+                samples: 1,
+            },
+            normals: {
+                load: Clear,
+                store: DontCare,
+                format: Format::R16G16B16A16_SFLOAT,
+                samples: 1,
+            },
+            frag_pos: {
+                load: Clear,
+                store: DontCare,
+                format: Format::R16G16B16A16_SFLOAT,
+                samples: 1,
+            },
+            // TODO: textures would typically be used for specular instead of renderpass attachments
+            specular: {
+                load: Clear,
+                store: DontCare,
+                format: Format::R16G16_SFLOAT,
+                samples: 1,
+            },
+            depth: {
+                load: Clear,
+                store: DontCare,
+                format: Format::D16_UNORM,
+                samples: 1,
+            }
+        },
+        passes: [
+            {
+                color: [albedo, normals, frag_pos, specular],
+                depth_stencil: {depth},
+                input: []
+            },
+            {
+                color: [final_color],
+                depth_stencil: {depth},
+                input: [albedo, normals, frag_pos, specular]
+            }
+        ]
+    )
+    .unwrap()
+}
+```
+
+### rhyolite/src/renderer/mod.rs
+```
+use vulkano::{self, swapchain, sync};
+
+use vulkano::command_buffer::allocator::{
+    StandardCommandBufferAlloc, StandardCommandBufferAllocator,
+    StandardCommandBufferAllocatorCreateInfo,
+};
+use vulkano::command_buffer::{
+    AutoCommandBufferBuilder, CommandBufferUsage, PrimaryAutoCommandBuffer, RenderPassBeginInfo,
+    SubpassContents,
+};
+use vulkano::device::physical::{PhysicalDevice, PhysicalDeviceType};
+use vulkano::device::{
+    Device, DeviceCreateInfo, DeviceExtensions, Queue, QueueCreateInfo, QueueFlags,
+};
+use vulkano::format::ClearValue;
+use vulkano::image::SwapchainImage;
+use vulkano::instance::{Instance, InstanceCreateInfo};
+use vulkano::library::VulkanLibrary;
+use vulkano::pipeline::graphics::viewport::Viewport;
+use vulkano::render_pass::Framebuffer;
+use vulkano::swapchain::{
+    AcquireError, Surface, Swapchain, SwapchainAcquireFuture, SwapchainCreateInfo,
+    SwapchainCreationError, SwapchainPresentInfo,
+};
+use vulkano::sync::{FlushError, GpuFuture};
+use vulkano::Version;
+use vulkano_win;
+use winit::event_loop::EventLoop;
+use winit::window::{Window, WindowBuilder};
+
+use std::sync::Arc;
+use winit::dpi::LogicalSize;
+
+#[cfg(feature = "marched")]
+pub mod marched;
+#[cfg(feature = "mesh")]
+pub mod mesh;
+pub mod staging;
+
+pub trait Renderer {
+    fn recreate_all_size_dependent(&mut self);
+    fn get_base(&self) -> &RenderBase;
+    fn get_window_size(&self) -> [i32; 2] {
+        self.get_base().window.inner_size().into()
+    }
+}
+
+/// A struct representing the essential elements of any rendering engine created with Rhyolite.
+///
+/// The `RenderBase` takes care of the following responsibilities:
+/// - Basic setup of Vulkan structs, including the Vulkan instance, physical and logical devices,
+/// surface, queues, swapchain, viewport, and command buffers
+/// - GPU synchronization
+/// - Swapchain recreation (if necessary)
+/// - Management and execution of command buffers
+pub struct RenderBase {
+    instance: Arc<Instance>,
+    surface: Arc<Surface>,
+    window: Arc<Window>,
+    device: Arc<Device>,
+    swapchain: Arc<Swapchain>,
+    pub(crate) images: Vec<Arc<SwapchainImage>>,
+
+    graphics_queue: Arc<Queue>,
+    transfer_queue: Arc<Queue>,
+
+    command_buffer_allocator: StandardCommandBufferAllocator,
+
+    viewport: Viewport,
+    previous_frame_end: Option<Box<dyn GpuFuture>>,
+
+    commands: Option<
+        AutoCommandBufferBuilder<
+            PrimaryAutoCommandBuffer<StandardCommandBufferAlloc>,
+            StandardCommandBufferAllocator,
+        >,
+    >,
+    image_idx: u32,
+    acquire_future: Option<SwapchainAcquireFuture>,
+
+    should_recreate_swapchain: bool,
+    render_error: bool,
+}
+
+impl RenderBase {
+    pub fn new(event_loop: &EventLoop<()>) -> Self {
+        // Create the instance, the "root" object of all Vulkan operations
+        let instance = get_instance();
+
+        let window = Arc::from(
+            WindowBuilder::new()
+                .with_title(env!("CARGO_PKG_NAME"))
+                .with_inner_size(LogicalSize::new(250, 250))
+                // .with_inner_size(LogicalSize::new(1280, 720))
+                .build(event_loop)
+                .unwrap(),
+        );
+
+        let surface =
+            vulkano_win::create_surface_from_winit(window.clone(), instance.clone()).unwrap();
+
+        // Get the device and physical device
+        let (physical_device, device, queues) = get_device(&instance, &surface);
+
+        let queues: Vec<Arc<Queue>> = queues.collect();
+
+        let find_queue = |queue_flags: QueueFlags| -> Arc<Queue> {
+            queues
+                .iter()
+                .find(|q| {
+                    physical_device.queue_family_properties()[q.queue_family_index() as usize]
+                        .queue_flags
+                        .contains(queue_flags)
+                })
+                .unwrap()
+                .clone()
+        };
+
+        let graphics_queue = find_queue(QueueFlags::GRAPHICS);
+        let transfer_queue = find_queue(QueueFlags::TRANSFER);
+
+        println!(
+            "Queue families:\n\tQueueFlags::GRAPHICS: {}\n\tQueueFlags::TRANSFER: {}",
+            graphics_queue.queue_family_index(),
+            transfer_queue.queue_family_index()
+        );
+
+        // Create the swapchain, an object which contains a vector of Images used for rendering and information on
+        // how to show them to the user
+        let (swapchain, images) = get_swapchain(&physical_device, &device, &surface, &window);
+
+        let viewport = Viewport {
+            origin: [0.0, 0.0],
+            dimensions: [0.0, 0.0],
+            depth_range: 0.0..1.0,
+        };
+
+        let command_buffer_allocator = StandardCommandBufferAllocator::new(
+            device.clone(),
+            StandardCommandBufferAllocatorCreateInfo::default(),
+        );
+
+        let previous_frame_end = Some(Box::new(sync::now(device.clone())) as Box<dyn GpuFuture>);
+
+        let commands = None;
+        let image_idx = 0;
+        let acquire_future = None;
+
+        Self {
+            instance,
+            surface,
+            window,
+            device,
+            swapchain,
+            images,
+
+            graphics_queue,
+            transfer_queue,
+
+            viewport,
+            previous_frame_end,
+
+            commands,
+            image_idx,
+            acquire_future,
+
+            command_buffer_allocator,
+
+            should_recreate_swapchain: false,
+            render_error: false,
+        }
+    }
+
+    /// Starts the rendering process for the current frame
+    fn start(&mut self, framebuffers: &Vec<Arc<Framebuffer>>) {
+        self.previous_frame_end
+            .as_mut()
+            .expect(
+                "previous_frame_end future is null. Did you remember to finish the previous frame?",
+            )
+            .cleanup_finished();
+
+        // Get an image from the swapchain, recreating the swapchain if its settings are suboptimal
+        let (image_idx, suboptimal, acquire_future) =
+            match swapchain::acquire_next_image(self.swapchain.clone(), None) {
+                Ok(r) => r,
+                Err(AcquireError::OutOfDate) => {
+                    self.should_recreate_swapchain = true;
+                    self.render_error = true;
+                    return;
+                }
+                Err(e) => panic!("Failed to acquire next image: {:?}", e),
+            };
+
+        if suboptimal {
+            // self.should_recreate_swapchain = true;
+            // TODO: for some reason, swapchain is permanently suboptimal after moving to a retina display and then scaling
+            println!("Swapchain is suboptimal");
+        }
+
+        // Set the clear values for each of the buffers
+        let clear_values: Vec<Option<ClearValue>> = vec![
+            Some(ClearValue::Float([0.0, 0.0, 0.0, 1.0])),
+            Some(ClearValue::Float([0.0, 0.0, 0.0, 1.0])),
+            Some(ClearValue::Float([0.0, 0.0, 0.0, 1.0])),
+            Some(ClearValue::Float([0.0, 0.0, 0.0, 1.0])),
+            Some(ClearValue::Float([0.0, 0.0, 0.0, 1.0])),
+            Some(ClearValue::Depth(1f32)),
+        ];
+
+        self.image_idx = image_idx;
+        self.acquire_future = Some(acquire_future);
+
+        let viewport = self.viewport.clone();
+
+        self.commands_mut()
+            .begin_render_pass(
+                RenderPassBeginInfo {
+                    clear_values,
+                    ..RenderPassBeginInfo::framebuffer(framebuffers[image_idx as usize].clone())
+                },
+                SubpassContents::Inline,
+            )
+            .unwrap()
+            .set_viewport(0, [viewport]);
+    }
+
+    /// Finishes the rendering process and draws to the screen
+    /// # Panics
+    /// Panics if not called after a `draw_object_unlit()` call or a `draw_point()` call
+    fn finish(&mut self) {
+        // End and build the render pass
+        let mut command_buffer_builder = self.commands.take().unwrap();
+        command_buffer_builder.end_render_pass().unwrap();
+        let command_buffer = command_buffer_builder.build().unwrap();
+
+        let af = self.acquire_future.take().unwrap();
+        let fe = self.previous_frame_end.take().unwrap();
+
+        let future = fe
+            .join(af)
+            .then_execute(self.graphics_queue.clone(), command_buffer)
+            .unwrap()
+            .then_swapchain_present(
+                self.graphics_queue.clone(),
+                SwapchainPresentInfo::swapchain_image_index(self.swapchain.clone(), self.image_idx),
+            )
+            .then_signal_fence_and_flush();
+
+        match future {
+            Ok(future) => self.previous_frame_end = Some(Box::new(future)),
+            Err(FlushError::OutOfDate) => {
+                self.render_error = true;
+                self.previous_frame_end = Some(Box::new(sync::now(self.device.clone())));
+                return;
+            }
+            Err(e) => {
+                println!("Failed to flush future: {:?}", e);
+                self.render_error = true;
+                self.previous_frame_end = Some(Box::new(sync::now(self.device.clone())));
+                return;
+            }
+        }
+
+        self.commands = None;
+
+        // TODO: In complicated programs it’s likely that one or more of the operations we’ve just scheduled
+        // will block. This happens when the graphics hardware can not accept further commands and the program
+        // has to wait until it can. Vulkan provides no easy way to check for this. Because of this, any serious
+        // application will probably want to have command submissions done on a dedicated thread so the rest of
+        // the application can keep running in the background. We will be completely ignoring this for the sake
+        // of these tutorials but just keep this in mind for your own future work.
+    }
+
+    /// Recreates the swapchain. Should be called if the swapchain is invalidated, such as by a window resize
+    fn recreate_swapchain(&mut self) {
+        let (new_swapchain, new_images) = match self.swapchain.recreate(SwapchainCreateInfo {
+            image_extent: self.window.inner_size().into(),
+            ..self.swapchain.create_info()
+        }) {
+            Ok(r) => r,
+            Err(SwapchainCreationError::ImageExtentNotSupported { .. }) => return,
+            Err(e) => panic!("Failed to recreate swapchain: {:?}", e),
+        };
+
+        self.swapchain = new_swapchain;
+        self.images = new_images;
+    }
+
+    /// Gets a mutable reference to the current command buffer, which holds a list of commands that
+    /// tell the graphics hardware what to do. If no such buffer yet exists, the function will
+    /// create a new one.
+    pub fn commands_mut(
+        &mut self,
+    ) -> &mut AutoCommandBufferBuilder<
+        PrimaryAutoCommandBuffer<StandardCommandBufferAlloc>,
+        StandardCommandBufferAllocator,
+    > {
+        let cbb = match self.commands.take() {
+            None => {
+                 AutoCommandBufferBuilder::primary(
+                    &self.command_buffer_allocator,
+                    self.graphics_queue.queue_family_index(),
+                    CommandBufferUsage::OneTimeSubmit,
+                ).unwrap()
+            }
+            Some(current_cbb) => { current_cbb }
+        };
+        self.commands = Some(cbb);
+        self.commands.as_mut().unwrap()
+    }
+
+    pub fn get_device(&self) -> Arc<Device> { self.device.clone() }
+    pub fn get_viewport(&self) -> &Viewport { &self.viewport }
+}
+
+// ========================================
+// HELPER FUNCTIONS FOR RENDERBASE CREATION
+// ========================================
+
+/// Selects the best physical device based on the available hardware, returning the device and the
+/// indices of the necessary queues
+pub(crate) fn select_physical_device(
+    instance: &Arc<Instance>,
+    surface: &Arc<Surface>,
+    device_extensions: &DeviceExtensions,
+) -> (Arc<PhysicalDevice>, Vec<u32>) {
+    let (physical_device, queue_families) = instance
+        .enumerate_physical_devices()
+        .unwrap()
+        .filter(|p| p.supported_extensions().contains(device_extensions))
+        .filter_map(|p| {
+            find_queue_families(
+                &[QueueFlags::GRAPHICS, QueueFlags::TRANSFER],
+                p.clone(),
+                surface,
+            )
+                .map(|q| (p, q))
+        })
+        .min_by_key(|(p, _)| match p.properties().device_type {
+            PhysicalDeviceType::DiscreteGpu => 0,
+            PhysicalDeviceType::IntegratedGpu => 1,
+            PhysicalDeviceType::VirtualGpu => 2,
+            PhysicalDeviceType::Cpu => 3,
+            PhysicalDeviceType::Other => 4,
+            _ => 5,
+        })
+        .unwrap();
+
+    println!(
+        "Using device: {} (type: {:?})",
+        physical_device.properties().device_name,
+        physical_device.properties().device_type,
+    );
+
+    (physical_device, queue_families)
+}
+
+// QUEUE FAMILIES
+
+fn find_queue_family(
+    required_flags: QueueFlags,
+    physical_device: Arc<PhysicalDevice>,
+    surface: &Surface,
+) -> Option<usize> {
+    physical_device
+        .queue_family_properties()
+        .iter()
+        .enumerate()
+        .find(|&q| {
+            if required_flags.contains(QueueFlags::GRAPHICS)
+                && !physical_device
+                .surface_support(q.0 as u32, surface)
+                .unwrap_or(false)
+            {}
+            q.1.queue_flags.contains(required_flags)
+        })
+        .map(|q| q.0)
+}
+
+fn find_queue_families(
+    required_flags: &[QueueFlags],
+    physical_device: Arc<PhysicalDevice>,
+    surface: &Surface,
+) -> Option<Vec<u32>> {
+    let mut queue_families = Vec::new();
+    for flags in required_flags.into_iter() {
+        if let Some(family) = find_queue_family(flags.clone(), physical_device.clone(), surface) {
+            queue_families.push(family as u32);
+        } else {
+            return None;
+        }
+    }
+    queue_families.sort();
+    queue_families.dedup();
+    Some(queue_families)
+}
+
+pub struct QueueFamilies {
+    graphics: u32,
+    transfer: u32,
+}
+
+/// Gets the Vulkan instance to use for rendering. May need to be modified based on what extensions
+/// are required or what version is used
+pub(crate) fn get_instance() -> Arc<Instance> {
+    let library = VulkanLibrary::new().unwrap();
+    let required_extensions = vulkano_win::required_extensions(&*library);
+    Instance::new(
+        library,
+        InstanceCreateInfo {
+            enabled_extensions: required_extensions,
+            enumerate_portability: true,
+            max_api_version: Some(Version::V1_1),
+            ..Default::default()
+        },
+    )
+        .unwrap()
+}
+
+/// Creates the physical device, logical device, and queues that will be needed for rendering
+pub(crate) fn get_device(
+    instance: &Arc<Instance>,
+    surface: &Arc<Surface>,
+) -> (
+    Arc<PhysicalDevice>,
+    Arc<Device>,
+    impl ExactSizeIterator<Item = Arc<Queue>>,
+) {
+    // Specify features for the physical device with the relevant extensions
+    let enabled_extensions = DeviceExtensions {
+        khr_swapchain: true,
+        khr_storage_buffer_storage_class: true,
+        ..DeviceExtensions::empty()
+    };
+
+    let (physical_device, queue_families) =
+        select_physical_device(instance, surface, &enabled_extensions);
+
+    let queue_create_infos = queue_families
+        .iter()
+        .map(|q| QueueCreateInfo {
+            queue_family_index: *q,
+            ..Default::default()
+        })
+        .collect();
+
+    // Create a device, which is the software representation of the hardware stored in the physical device
+    let (device, queues) = Device::new(
+        physical_device.clone(),
+        DeviceCreateInfo {
+            queue_create_infos,
+            enabled_extensions,
+            ..Default::default()
+        },
+    )
+        .expect("Unable to create logical device!");
+
+    (physical_device, device, queues)
+}
+
+/// Creates a swapchain for the provided surface based on the capabilities of the physical device
+pub(crate) fn get_swapchain(
+    physical_device: &Arc<PhysicalDevice>,
+    device: &Arc<Device>,
+    surface: &Arc<Surface>,
+    window: &Arc<Window>,
+) -> (Arc<Swapchain>, Vec<Arc<SwapchainImage>>) {
+    let caps = physical_device
+        .surface_capabilities(&surface, Default::default())
+        .unwrap();
+    let usage = caps.supported_usage_flags;
+    let image_format = Some(
+        physical_device
+            .surface_formats(&surface, Default::default())
+            .unwrap()[0]
+            .0,
+    );
+    Swapchain::new(
+        device.clone(),
+        surface.clone(),
+        SwapchainCreateInfo {
+            min_image_count: caps.min_image_count, // TODO: +1?
+            image_format,
+            image_extent: window.inner_size().into(),
+            image_usage: usage,
+            ..Default::default()
+        },
+    )
+        .unwrap()
+}
+```
+
+### rhyolite/src/renderer/staging.rs
+```
+use crate::renderer::RenderBase;
+use vulkano::buffer::{Buffer, BufferContents, BufferCreateInfo, BufferUsage, Subbuffer};
+use vulkano::command_buffer::{
+    AutoCommandBufferBuilder, CommandBufferUsage, CopyBufferInfo, PrimaryCommandBufferAbstract,
+};
+use vulkano::memory::allocator::{AllocationCreateInfo, MemoryAllocator, MemoryUsage};
+use vulkano::sync::GpuFuture;
+
+pub trait StagingBuffer {
+    fn into_device_local(
+        self,
+        buffer_len: u64,
+        buffer_allocator: &(impl MemoryAllocator + ?Sized),
+        render_base: &RenderBase,
+    ) -> Self;
+}
+
+// TODO: remove the buffer_len parameter by improving generics and utilizing len() function of Subbuffer<[T]>
+
+impl<T: BufferContents + ?Sized> StagingBuffer for Subbuffer<T> {
+    /// Creates a device local buffer, using this buffer for staging and subsequently executing a
+    /// command buffer to copy its contents into the device local buffer on the GPU. This should
+    /// only be used for buffers that aren't modified very often, such as vertex buffers.
+    ///
+    /// The subbuffer that this is called on should have `BufferUsage::TRANSFER_SRC` in its
+    /// `buffer_usage`, and `MemoryUsage::Upload` in its `AllocationCreateInfo`. All flags on the
+    /// original buffer except for `BufferUsage::TRANSFER_SRC` will be applied to the device-local
+    /// buffer, and `BufferUsage::TRANSFER_DST` will automatically be added.
+    ///
+    /// The value of `buffer_len` should match the length of the buffer in which this function
+    /// is called. If this function is called on a non-array type, the value of this parameter
+    /// should be set to 1.
+    ///
+    /// # Panics
+    /// - The function will panic if the length passed in through the `buffer_len` parameter is not
+    /// equal to the length of the length of the buffer this function is called on.
+    fn into_device_local(
+        self,
+        buffer_len: u64,
+        buffer_allocator: &(impl MemoryAllocator + ?Sized),
+        render_base: &RenderBase,
+    ) -> Subbuffer<T> {
+        let usage = self.buffer().usage().difference(BufferUsage::TRANSFER_SRC);
+        let device_local_buf = Buffer::new_unsized::<T>(
+            buffer_allocator,
+            BufferCreateInfo {
+                usage: BufferUsage::TRANSFER_DST | usage,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                // Specify use for upload to the device.
+                usage: MemoryUsage::DeviceOnly,
+                ..Default::default()
+            },
+            buffer_len,
+        )
+        .unwrap();
+
+        assert_eq!(&self.size(), &device_local_buf.size());
+
+        // Create a one-time command to copy between the buffers.
+        let mut cbb = AutoCommandBufferBuilder::primary(
+            &render_base.command_buffer_allocator,
+            render_base.transfer_queue.queue_family_index(),
+            CommandBufferUsage::OneTimeSubmit,
+        )
+        .unwrap();
+
+        // Add the copy command to the command buffer
+        cbb.copy_buffer(CopyBufferInfo::buffers(
+            self,
+            device_local_buf.clone(), // This is chill because it's basically just cloning an arc (the parent) and a few integers
+        ))
+        .unwrap();
+
+        // Execute the copy command and wait for completion before proceeding.
+        cbb.build()
+            .unwrap()
+            .execute(render_base.transfer_queue.clone())
+            .unwrap()
+            .then_signal_fence_and_flush()
+            .unwrap()
+            .wait(None)
+            .unwrap();
+
+        // println!("Created device-local buffer: {:?}", buffer_usage);
+
+        return device_local_buf;
+    }
+}
+
+pub trait UniformSrc<T: BufferContents> {
+    fn get_raw(&self) -> T;
+}
+
+pub(crate) trait IntoPersistentUniform<T: BufferContents>: UniformSrc<T> {
+    fn get_current_buffer(&self) -> Option<Subbuffer<T>>;
+    fn set_current_buffer(&mut self, buf: Subbuffer<T>);
+
+    fn create_buffer(
+        &mut self,
+        buffer_allocator: &(impl MemoryAllocator + ?Sized),
+        render_base: &RenderBase
+    ) -> Subbuffer<T> {
+        let buf: Subbuffer<T> = Buffer::from_data(
+            buffer_allocator,
+            BufferCreateInfo {
+                usage: BufferUsage::TRANSFER_SRC | BufferUsage::UNIFORM_BUFFER,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                usage: MemoryUsage::Upload,
+                ..Default::default()
+            },
+            self.get_raw()
+        )
+            .unwrap()
+            .into_device_local(1, buffer_allocator, render_base);
+        self.set_current_buffer(buf.clone());
+        buf
+    }
+
+    fn get_buffer(
+        &mut self,
+        buffer_allocator: &(impl MemoryAllocator + ?Sized),
+        render_base: &RenderBase
+    ) -> Subbuffer<T>{
+        return if let Some(buffer) = self.get_current_buffer().as_ref() {
+            buffer.clone()
+        } else {
+            self.create_buffer(buffer_allocator, render_base)
+        }
+    }
+}
+```
+
+### rhyolite/src/shaders/mod.rs
+```
+use std::sync::Arc;
+
+use nalgebra_glm::Vec3;
+use vulkano::{device::Device, shader::ShaderModule};
+
+pub mod albedo_vert {
+    vulkano_shaders::shader! {
+        ty: "vertex",
+        path: "src/shaders/mesh/albedo.vert",
+    }
+}
+
+pub mod albedo_frag {
+    vulkano_shaders::shader! {
+        ty: "fragment",
+        path: "src/shaders/mesh/albedo.frag",
+    }
+}
+
+pub mod point_vert {
+    vulkano_shaders::shader! {
+        ty: "vertex",
+        path: "src/shaders/mesh/lighting/point.vert",
+    }
+}
+
+pub mod point_frag {
+    vulkano_shaders::shader! {
+        ty: "fragment",
+        path: "src/shaders/mesh/lighting/point.frag",
+    }
+}
+
+pub mod ambient_vert {
+    vulkano_shaders::shader! {
+        ty: "vertex",
+        path: "src/shaders/mesh/lighting/ambient.vert",
+    }
+}
+
+pub mod ambient_frag {
+    vulkano_shaders::shader! {
+        ty: "fragment",
+        path: "src/shaders/mesh/lighting/ambient.frag",
+    }
+}
+
+pub mod unlit_vert {
+    vulkano_shaders::shader! {
+        ty: "vertex",
+        path: "src/shaders/mesh/unlit.vert",
+    }
+}
+
+pub mod unlit_frag {
+    vulkano_shaders::shader! {
+        ty: "fragment",
+        path: "src/shaders/mesh/unlit.frag",
+    }
+}
+
+pub mod marched_vert {
+    vulkano_shaders::shader! {
+        ty: "vertex",
+        path: "src/shaders/marched/marched.vert",
+    }
+}
+
+pub mod marched_frag {
+    vulkano_shaders::shader! {
+        ty: "fragment",
+        path: "src/shaders/marched/marched.frag",
+    }
+}
+
+// TODO: find a better way to do this
+
+pub struct ShaderModulePair {
+    pub vert: Arc<ShaderModule>,
+    pub frag: Arc<ShaderModule>,
+}
+
+impl ShaderModulePair {
+    pub(crate) fn marched_default(device: &Arc<Device>) -> Self {
+        Self {
+            vert: marched_vert::load(device.clone()).unwrap(),
+            frag: marched_frag::load(device.clone()).unwrap(),
+        }
+    }
+}
+pub struct Shaders {
+    pub albedo: ShaderModulePair,
+    pub point: ShaderModulePair,
+    pub ambient: ShaderModulePair,
+    pub unlit: ShaderModulePair,
+}
+impl Shaders {
+    pub(crate) fn mesh_default(device: &Arc<Device>) -> Self {
+        Self {
+            albedo: ShaderModulePair {
+                vert: albedo_vert::load(device.clone()).unwrap(),
+                frag: albedo_frag::load(device.clone()).unwrap(),
+            },
+            point: ShaderModulePair {
+                vert: point_vert::load(device.clone()).unwrap(),
+                frag: point_frag::load(device.clone()).unwrap(),
+            },
+            ambient: ShaderModulePair {
+                vert: ambient_vert::load(device.clone()).unwrap(),
+                frag: ambient_frag::load(device.clone()).unwrap(),
+            },
+            unlit: ShaderModulePair {
+                vert: unlit_vert::load(device.clone()).unwrap(),
+                frag: unlit_frag::load(device.clone()).unwrap(),
+            },
+        }
+    }
+}
+
+/// A utility function to convert from a vec3 to a f32 array with length 4. Meant to aid with byte alignment for
+/// descriptor sets.
+pub(crate) fn expand_vec3(vec3: &Vec3) -> [f32; 4] {
+    return [vec3.x, vec3.y, vec3.z, 0.0];
+}
+```
+
+### examples/src/bin/marching_cubes/main.rs
+```
+use rhyolite::camera::Camera;
+use rhyolite::geometry::marched::Metaball;
+use rhyolite::lighting::{AmbientLight, PointLight};
+use rhyolite::renderer::mesh::DrawInfo;
+use rhyolite::transform::Transform;
+use rhyolite::{Rhyolite, TimeState};
+
+use winit::event::{Event, VirtualKeyCode, WindowEvent};
+use nalgebra_glm::{vec3, Vec3, translate, identity};
+use examples::{CamRotationMode, KeyBinding};
+use rhyolite::geometry::mesh::{MeshObjectParams, BasicVertex};
+use rhyolite::renderer::Renderer;
+
+mod marching_cubes;
+mod metaball;
+
+use crate::marching_cubes::MarchingCubesGenerator;
+
+fn main() {
+    let rhyolite = Rhyolite::mesh();
+
+    let camera_transform = Transform::identity();
+    let mut camera = Camera::new(camera_transform, 1.2, 0.02, 100.0);
+
+    let mut generator = MarchingCubesGenerator::new(&rhyolite.renderer);
+
+    // Lighting
+    let mut ambient_light = AmbientLight::new(
+        vec3(1.0, 1.0, 1.0),
+        0.1
+    );
+
+    // Add point lights to the scene
+    let mut point_lights = vec![
+        PointLight::new(
+            vec3(0.0, 10.0, -10.0),
+            vec3(0.0, 0.2, 1.0),
+            60.0
+        ),
+        PointLight::new(
+            vec3(0.0, -10.0, 10.0),
+            vec3(1.0, 0.2, 0.0),
+            60.0
+        ),
+    ];
+
+    // Other
+    let mut camera_pos: Vec3 = vec3(0.0, 0.0, 0.0);
+    let mut camera_euler: Vec3 = vec3(0.0, 0.0, 0.0);
+    
+    let params = MeshObjectParams {
+        transform: Transform::identity(),
+        specular_intensity: 1.0,
+        shininess: 64.0,
+    };
+
+    const GRID_WIDTH: u32 = 3;
+    const GRID_HEIGHT: u32 = 3;
+
+    let mut metaballs: Vec<Metaball> = Vec::with_capacity(81);
+    metaballs.push(Metaball::new(vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0), 0.6));
+    for i in 0..(GRID_WIDTH * GRID_HEIGHT) {
+        metaballs.push(Metaball::new(
+            vec3(
+                (i / GRID_HEIGHT) as f32 * 2.,
+                0.0,
+                (i % GRID_HEIGHT) as f32 * 2.,
+            ),
+            vec3(1.0, 1.0, 1.0),
+            0.45,
+        ));
+    }
+
+    let mut ctrl_metaball_pos = vec3(0.0, 0.0, 0.0);
+    let mut control_mode = false;
+
+    rhyolite.run(move |event, keyboard, _, _, time, renderer| {
+        match event {
+            Event::WindowEvent {
+                event: WindowEvent::Resized(_),
+                ..
+            } => {
+                camera.configure(renderer.get_window_size());
+                generator.recreate_graphics_pipeline(renderer);
+            }
+            Event::RedrawEventsCleared => {
+                if keyboard.key_pressed(VirtualKeyCode::Escape) {
+                    control_mode = !control_mode;
+                }
+
+                if !control_mode {
+                    examples::do_camera_movement(
+                        CamRotationMode::Mesh,
+                        &mut camera,
+                        &mut camera_euler,
+                        &mut camera_pos,
+                        &keyboard,
+                        time.delta,
+                    );
+
+                    ctrl_metaball_pos = vec3(2.0, time.current.sin() * 3., 2.0)
+
+                } else {
+                    let wasd_move = examples::get_axes(keyboard, KeyBinding::WASD);
+                    ctrl_metaball_pos +=
+                        nalgebra_glm::rotate_y_vec3(&wasd_move, camera_euler.y) * 0.1;
+                }
+                metaballs[0].set_position(ctrl_metaball_pos);
+
+                let vertex_buffer = generator.vertex_buffer();
+                let indirect_buffer = generator.indirect_buffer();
+
+                // Bind the command to update the storage buffers
+                generator.generate_vertices(
+                    renderer,
+                    vertex_buffer.clone(),
+                    indirect_buffer.clone(),
+                    &metaballs,
+                );
+
+                // Rendering
+                renderer.start_render_pass(&mut camera);
+
+                let info: DrawInfo<BasicVertex> = DrawInfo::IndirectBlank{ indirect_commands: indirect_buffer.clone() };
+                renderer.draw_lit(
+                    info,
+                    generator.graphics_pipeline().clone(), 
+                    generator.graphics_descriptors(vertex_buffer, renderer, &params)
+                ).unwrap();
+
+                renderer.draw_ambient_light(&mut ambient_light);
+                for point_light in point_lights.iter_mut() {
+                    renderer.draw_point_light(point_light);
+                }
+
+                renderer.end_render_pass();
+            }
+            _ => (),
+        }
+    });
+}
+```
+
+### examples/src/bin/marching_cubes/marching_cubes.rs
+```
+use std::sync::Arc;
+use rhyolite::{renderer::{mesh::MeshRenderer, Renderer}, geometry::{mesh::MeshObjectParams, marched::Metaball}};
+use vulkano::{
+    buffer::allocator::{SubbufferAllocator, SubbufferAllocatorCreateInfo},
+    buffer::BufferUsage,
+    command_buffer::DrawIndirectCommand,
+    descriptor_set::{PersistentDescriptorSet, WriteDescriptorSet},
+    pipeline::{
+        ComputePipeline,
+        Pipeline,
+        GraphicsPipeline,
+        graphics::{
+            input_assembly::InputAssemblyState,
+            viewport::{ViewportState, Viewport},
+            depth_stencil::DepthStencilState,
+            rasterization::{RasterizationState, CullMode}
+        }
+    },
+    render_pass::Subpass,
+};
+use vulkano::buffer::{Buffer, BufferCreateInfo, Subbuffer};
+use vulkano::memory::allocator::{AllocationCreateInfo, MemoryAllocator, MemoryUsage};
+use vulkano::padded::Padded;
+use vulkano::pipeline::PipelineBindPoint;
+use rhyolite::renderer::RenderBase;
+use rhyolite::renderer::staging::StagingBuffer;
+
+use crate::metaball;
+
+const GRID_SIZE: [u32; 3] = [64, 64, 64];
+const MAX_VERTICES_PER_THREAD: u32 = 5;
+
+mod cs {
+    vulkano_shaders::shader! {
+        ty: "compute",
+        path: "src/bin/marching_cubes/shaders/marching_cubes.comp"
+    }
+}
+mod fs {
+    vulkano_shaders::shader! {
+        ty: "fragment",
+        path: "src/bin/marching_cubes/shaders/marching_cubes.frag"
+    }
+}
+mod vs {
+    vulkano_shaders::shader! {
+        ty: "vertex",
+        path: "src/bin/marching_cubes/shaders/marching_cubes.vert"
+    }
+}
+
+pub struct MarchingCubesGenerator {
+    indirect_args_pool: SubbufferAllocator,
+    vertex_pool: SubbufferAllocator,
+    compute_pipeline: Arc<ComputePipeline>,
+    graphics_pipeline: Arc<GraphicsPipeline>,
+    index_descriptors: Arc<PersistentDescriptorSet>,
+}
+
+impl MarchingCubesGenerator {
+    pub fn new(renderer: &MeshRenderer) -> Self {
+        let buffer_allocator = renderer.get_buffer_allocator();
+        let render_base = renderer.get_base();
+        let device = render_base.get_device();
+
+        // Create descriptor pools for the indirect and vertex buffers
+        let vertex_pool = SubbufferAllocator::new(
+            buffer_allocator.clone(),
+            SubbufferAllocatorCreateInfo {
+                // DOESN'T HAVE BufferUsage::VERTEX_BUFFER!!! FAKE VERTEX BUFFER, ONLY USE IT AS A
+                // STORAGE BUFFER!!!!
+                buffer_usage: BufferUsage::STORAGE_BUFFER,
+                ..Default::default()
+            },
+        );
+        let indirect_args_pool = SubbufferAllocator::new(
+            buffer_allocator.clone(),
+            SubbufferAllocatorCreateInfo {
+                buffer_usage: BufferUsage::INDIRECT_BUFFER | BufferUsage::STORAGE_BUFFER,
+                ..Default::default()
+            },
+        );
+
+        // Create the compute and graphics pipelines
+        let cs = cs::load(device.clone()).unwrap();
+        let compute_pipeline = ComputePipeline::new(
+            device.clone(),
+            cs.entry_point("main").unwrap(),
+            &(),
+            None,
+            |_| {}
+        ).unwrap();
+
+        let graphics_pipeline = create_graphics_pipeline(renderer);
+
+        // Load a descriptor set for index data used in the marching cubes compute shader, based on
+        // the data from `triangle_counts.txt` and `vertex_edge_indices.txt`.
+        let polygon_counts = get_u32_buf(
+            include_str!("render_data/triangle_counts.txt"),
+            &buffer_allocator,
+            render_base
+        );
+        let polygon_edge_indices = get_u32_buf(
+            include_str!("render_data/vertex_edge_indices.txt"),
+            &buffer_allocator,
+            render_base
+        );
+        let index_descriptors = PersistentDescriptorSet::new(
+            &renderer.get_descriptor_set_allocator(),
+            compute_pipeline.layout().set_layouts().get(1).unwrap().clone(),
+            [
+                WriteDescriptorSet::buffer(0, polygon_counts),
+                WriteDescriptorSet::buffer(1, polygon_edge_indices),
+            ]
+        ).unwrap();
+
+        Self {
+            indirect_args_pool,
+            vertex_pool,
+            compute_pipeline,
+            graphics_pipeline,
+            index_descriptors,
+        }
+    }
+
+    /// Create the indirect buffer, used to keep track of the number of vertices that have been initialized
+    pub fn indirect_buffer(&self) -> Subbuffer<[DrawIndirectCommand]> {
+        let indirect_commands = [DrawIndirectCommand {
+            vertex_count: 0,
+            instance_count: 1,
+            first_vertex: 0,
+            first_instance: 0,
+        }];
+        let indirect_buffer = self.indirect_args_pool
+            .allocate_slice(indirect_commands.len() as u64)
+            .unwrap();
+        indirect_buffer
+            .write()
+            .unwrap()
+            .copy_from_slice(&indirect_commands);
+        indirect_buffer
+    }
+
+    /// Create a buffer for vertex data, zeroed for initialization
+    pub fn vertex_buffer(&self) -> Subbuffer<[[f32; 4]]> {
+        const NUM_THREADS: u32 = GRID_SIZE[0] * GRID_SIZE[1] * GRID_SIZE[2];
+
+        // The number of vertices = vec4s per vertex * maximum possible vertices per thread * number of threads
+        let vertex_iter = (0..(3 * MAX_VERTICES_PER_THREAD * NUM_THREADS)).map(|_| [0.0; 4]);
+        let vertex_buffer = self.vertex_pool.allocate_slice(vertex_iter.len() as u64).unwrap();
+        for (entry, data) in vertex_buffer.write().unwrap().iter_mut().zip(vertex_iter) {
+            *entry = data
+        }
+        vertex_buffer
+    }
+
+    /// Gets the `GraphicsPipeline` associated with this `MarchingCubesGenerator`.
+    pub fn graphics_pipeline(&self) -> &Arc<GraphicsPipeline> {
+        &self.graphics_pipeline
+    }
+
+    pub fn recreate_graphics_pipeline(&mut self, renderer: &MeshRenderer) {
+        self.graphics_pipeline = create_graphics_pipeline(renderer);
+    }
+
+    /// Gets the descriptor data for the compute pipeline
+    pub fn compute_descriptors(
+        &self,
+        renderer: &MeshRenderer,
+        vertex_buffer: Subbuffer<[[f32; 4]]>,
+        indirect_buffer: Subbuffer<[DrawIndirectCommand]>,
+        objects: &Vec<Metaball>,
+    ) -> (Arc<PersistentDescriptorSet>, Arc<PersistentDescriptorSet>, Arc<PersistentDescriptorSet>) {
+        let set_layouts = self.compute_pipeline.layout().set_layouts();
+
+        let layout = set_layouts.get(0).unwrap();
+        let sbo_set = PersistentDescriptorSet::new(
+            &renderer.get_descriptor_set_allocator(),
+            layout.clone(),
+            [
+                WriteDescriptorSet::buffer(0, vertex_buffer.clone()),
+                WriteDescriptorSet::buffer(1, indirect_buffer.clone()),
+            ]
+        ).unwrap();
+
+        let metaball_set = metaball::metaball_set(
+            renderer, 
+            objects, 
+            self.compute_pipeline.layout().set_layouts().get(2).unwrap().clone()
+        );
+
+        (sbo_set, self.index_descriptors.clone(), metaball_set)
+    }
+
+    /// Gets descriptor data for the render pipeline. Doesn't get all of the render descriptors, 
+    /// just the vertex buffer with the correct binding
+    pub fn graphics_descriptors(
+        &self,
+        vertex_buffer: Subbuffer<[[f32; 4]]>,
+        renderer: &MeshRenderer,
+        params: &MeshObjectParams
+    ) -> (Arc<PersistentDescriptorSet>, Arc<PersistentDescriptorSet>, Arc<PersistentDescriptorSet>) {
+        let set_layouts = self.graphics_pipeline.layout().set_layouts();
+        let layout = set_layouts.get(2).unwrap();
+
+        let vertex_set = PersistentDescriptorSet::new(
+            &renderer.get_descriptor_set_allocator(),
+            layout.clone(),
+            [
+                WriteDescriptorSet::buffer(0, vertex_buffer.clone()),
+            ]
+        ).unwrap();
+
+        let default_descriptors = renderer.default_lit_descriptors(&params);
+
+        (default_descriptors.0, default_descriptors.1, vertex_set)
+    }
+
+    pub fn generate_vertices(
+        &self,
+        renderer: &mut MeshRenderer,
+        vertex_buffer: Subbuffer<[[f32; 4]]>,
+        indirect_buffer: Subbuffer<[DrawIndirectCommand]>,
+        objects: &Vec<Metaball>,
+    ) {
+        let compute_descriptors = self.compute_descriptors(renderer, vertex_buffer, indirect_buffer, objects);
+        renderer.get_base_mut().commands_mut()
+            .bind_descriptor_sets(
+                PipelineBindPoint::Compute,
+                self.compute_pipeline.layout().clone(),
+                0,
+                compute_descriptors,
+            )
+            .bind_pipeline_compute(self.compute_pipeline.clone())
+            .dispatch([32, 32, 32])
+            .unwrap();
+    }
+}
+
+fn create_graphics_pipeline(renderer: &MeshRenderer) -> Arc<GraphicsPipeline> {
+    let base = renderer.get_base();
+    let device = base.get_device();
+
+    let albedo_pass = Subpass::from(renderer.get_render_pass().clone(), 0).unwrap();
+    let dimensions = base.get_viewport().dimensions;
+
+    let fs = fs::load(device.clone()).unwrap();
+    let vs = vs::load(device.clone()).unwrap();
+
+    GraphicsPipeline::start()
+        // .vertex_input_state(vulkano::pipeline::graphics::vertex_input::VertexInputState::)
+        .vertex_shader(vs.entry_point("main").unwrap(), ())
+        .input_assembly_state(InputAssemblyState::new())
+        .viewport_state(ViewportState::viewport_fixed_scissor_irrelevant([
+            Viewport {
+                origin: [0.0, 0.0],
+                dimensions: [dimensions[0] as f32, dimensions[1] as f32],
+                depth_range: 0.0..1.0,
+            },
+        ]))
+        .fragment_shader(fs.entry_point("main").unwrap(), ())
+        .depth_stencil_state(DepthStencilState::simple_depth_test())
+        .rasterization_state(RasterizationState::new().cull_mode(CullMode::Back))
+        .render_pass(albedo_pass)
+        .build(base.get_device().clone())
+        .unwrap()
+}
+
+
+/// Parses a string, like the ones found in `triangle_counts.txt` and `vertex_edge_indices.txt`,
+/// into a buffer of `u32`s.
+fn get_u32_buf(
+    data: &'static str,
+    buffer_allocator: &(impl MemoryAllocator + ?Sized),
+    render_base: &RenderBase
+) -> Subbuffer<[Padded<u32, 12>]> {
+    let values = data
+        .split(" ")
+        .map(|s| Padded::from(s.parse::<u32>().unwrap()))
+        .collect::<Vec<Padded<u32, 12>>>();
+    let num_values = values.len();
+
+    Buffer::from_iter(
+        buffer_allocator,
+        BufferCreateInfo {
+            usage: BufferUsage::TRANSFER_SRC | BufferUsage::UNIFORM_BUFFER,
+            ..Default::default()
+        },
+        AllocationCreateInfo {
+            usage: MemoryUsage::Upload,
+            ..Default::default()
+        },
+        values
+            .into_iter(),
+    )
+        .unwrap()
+        .into_device_local(num_values as u64, buffer_allocator, &render_base)
+
+}
+```
+
+### examples/src/bin/marching_cubes/metaball.rs
+```
+use std::sync::Arc;
+
+use rhyolite::geometry::marched::Metaball;
+use rhyolite::renderer::marched::to_partially_init_arr;
+use rhyolite::renderer::staging::UniformSrc;
+use vulkano::descriptor_set::layout::DescriptorSetLayout;
+use vulkano::descriptor_set::{PersistentDescriptorSet, WriteDescriptorSet};
+use vulkano::padded::Padded;
+use rhyolite::renderer::mesh::MeshRenderer;
+use rhyolite::shaders::marched_frag;
+
+const MAX_METABALLS: usize = 1024;
+
+pub fn metaball_set(renderer: &MeshRenderer, objects: &Vec<Metaball>, layout: Arc<DescriptorSetLayout>) -> Arc<PersistentDescriptorSet> {
+    let objects: Vec<Padded<marched_frag::UMetaball, 12>> = objects
+        .iter()
+        .map(|obj| {
+            Padded::from(obj.get_raw())
+        })
+        .collect();
+
+    let len = objects.len() as u32;
+    let data = unsafe {
+        to_partially_init_arr::<MAX_METABALLS, Padded<marched_frag::UMetaball, 12>>(objects)
+    };
+
+    let metaball_buf = renderer.get_subbuffer_allocator().allocate_unsized(MAX_METABALLS as u64).unwrap();
+    *metaball_buf.write().unwrap() = marched_frag::UMetaballData { data, len };
+
+    PersistentDescriptorSet::new(
+        &renderer.get_descriptor_set_allocator(),
+        layout.clone(),
+        [WriteDescriptorSet::buffer(0, metaball_buf.clone())],
+    ).expect("Unable to create geometry descriptor set")
+}
+```
+
+### rhyolite/src/geometry/mesh/loader.rs
+```
+use std::{
+    fs::File,
+    io::{BufRead, BufReader},
+};
+use vulkano::buffer::BufferContents;
+use vulkano::pipeline::graphics::vertex_input::Vertex;
+
+#[repr(C)]
+#[derive(Vertex, Clone, Copy, Debug, Default, BufferContents)]
+pub struct BasicVertex {
+    #[format(R32G32B32_SFLOAT)]
+    pub position: [f32; 3],
+    #[format(R32G32B32_SFLOAT)]
+    pub normal: [f32; 3],
+    #[format(R32G32B32_SFLOAT)]
+    pub color: [f32; 3],
+}
+
+#[repr(C)]
+#[derive(Vertex, Clone, Copy, Debug, Default, BufferContents)]
+pub struct UnlitVertex {
+    #[format(R32G32B32_SFLOAT)]
+    pub position: [f32; 3],
+    #[format(R32G32B32_SFLOAT)]
+    pub color: [f32; 3],
+}
+
+struct RawVertex(f32, f32, f32);
+
+impl RawVertex {
+    /// Loads vertex data from a str containing 3 values separated by whitespace, for example `0.0 0.0 0.0`
+    fn from_str(input: &str) -> RawVertex {
+        let mut contents: Vec<f32> = input
+            .split_whitespace()
+            .map(|item| {
+                item.parse()
+                    .expect(&format!("Unable to parse element \"{}\"", input))
+            })
+            .collect();
+        if contents.len() == 2 {
+            contents.push(0.0);
+        }
+        RawVertex(contents[0], contents[1], contents[2])
+    }
+
+    fn to_arr(&self) -> [f32; 3] {
+        [self.0, self.1, self.2]
+    }
+}
+
+#[derive(Debug)]
+pub struct RawFace {
+    pub vertex_indices: [usize; 3],
+    pub normal_indices: Option<[usize; 3]>,
+    pub tex_coord_indices: Option<[usize; 3]>,
+}
+
+impl RawFace {
+    pub fn from_str(input: &str, invert: bool) -> Self {
+        let args = RawFace::parse_args(input);
+        Self {
+            vertex_indices: RawFace::get_indices(&args, 0, invert).unwrap(),
+            tex_coord_indices: RawFace::get_indices(&args, 1, invert),
+            normal_indices: RawFace::get_indices(&args, 2, invert),
+        }
+    }
+    /// Parses an vertex of the face declaration in the format `v/vt/vn v/vt/vn v/vt/vn`, returning a value in the format
+    /// `[[v, vt, vn], [v, vt, vn], [v, vt, vn]]`
+    fn parse_args(input: &str) -> Vec<Vec<Option<usize>>> {
+        input
+            .split_whitespace()
+            .map(|item| {
+                let mut contents: Vec<Option<usize>> =
+                    item.split('/').map(|item| item.parse().ok()).collect();
+                while contents.len() < 3 {
+                    contents.push(None);
+                }
+                contents
+            })
+            .collect::<Vec<Vec<Option<usize>>>>()
+    }
+
+    /// Gets the indices of a specified type for all of the vertices in the face (e.g., all of the normal indices), returning None
+    /// if any of the indices are None for that data type
+    fn get_indices(
+        input: &Vec<Vec<Option<usize>>>,
+        data_type_idx: usize,
+        invert: bool,
+    ) -> Option<[usize; 3]> {
+        let index_iter = [
+            input[0][data_type_idx],
+            input[1][data_type_idx],
+            input[2][data_type_idx],
+        ]
+        .into_iter()
+        .map(|wrapped_idx| wrapped_idx.map(|idx| idx - 1));
+
+        if invert {
+            return index_iter
+                .rev()
+                .collect::<Option<Vec<usize>>>()
+                .map(|val| val.try_into().unwrap());
+        } else {
+            return index_iter
+                .collect::<Option<Vec<usize>>>()
+                .map(|val| val.try_into().unwrap());
+        }
+    }
+}
+
+pub struct ModelBuilder {
+    name: Option<String>,
+    vertices: Vec<RawVertex>,
+    normals: Vec<RawVertex>,
+    tex_coords: Vec<RawVertex>,
+    faces: Vec<RawFace>,
+}
+
+impl ModelBuilder {
+    pub fn from_file(filename: &'static str, invert_winding_order: bool) -> Self {
+        let data = File::open(filename).unwrap();
+        let buffered_data = BufReader::new(data);
+
+        let mut name = None;
+
+        let mut vertices = Vec::new();
+        let mut normals = Vec::new();
+        let mut tex_coords = Vec::new();
+        let mut faces = Vec::new();
+
+        for line in buffered_data.lines() {
+            let line = line.unwrap();
+            match line.split_at(2) {
+                ("o ", val) => {
+                    name = Some(String::from(val));
+                }
+                ("v ", val) => vertices.push(RawVertex::from_str(val)),
+                ("vn", val) => normals.push(RawVertex::from_str(val)),
+                ("vt", val) => tex_coords.push(RawVertex::from_str(val)),
+                ("f ", val) => faces.push(RawFace::from_str(val, invert_winding_order)),
+                (_, _) => {}
+            }
+        }
+
+        Self {
+            name,
+            vertices,
+            normals,
+            tex_coords,
+            faces,
+        }
+    }
+
+    /// Builds an array of vertices from the model. Does not require texture coordinates in the loaded model, but does
+    /// require normals and vertices.
+    pub fn build_basic(&self, custom_color: [f32; 3]) -> Vec<BasicVertex> {
+        let mut result = Vec::new();
+        for face in &self.faces {
+            let verts = face.vertex_indices;
+            let norms = face.normal_indices.unwrap();
+            for i in 0..3 {
+                result.push(BasicVertex {
+                    position: self.vertices[verts[i]].to_arr(),
+                    normal: self.normals[norms[i]].to_arr(),
+                    color: custom_color,
+                });
+            }
+        }
+        result
+    }
+
+    /// Builds an array of unlit vertices from the model. Does not require texture coordinates or normals in the loaded model, but
+    /// does require vertices.
+    pub fn build_unlit(&self, custom_color: [f32; 3]) -> Vec<UnlitVertex> {
+        let mut result = Vec::new();
+        for face in &self.faces {
+            let verts = face.vertex_indices;
+            for i in 0..3 {
+                result.push(UnlitVertex {
+                    position: self.vertices[verts[i]].to_arr(),
+                    color: custom_color,
+                })
+            }
+        }
+        result
+    }
+}
+```
+
+### rhyolite/src/geometry/mesh/mod.rs
+```
+use nalgebra_glm::Vec3;
+use vulkano::buffer::{Buffer, BufferCreateInfo, Subbuffer};
+use vulkano::memory::allocator::{AllocationCreateInfo, MemoryUsage};
+use vulkano::pipeline::graphics::vertex_input::Vertex;
+use vulkano::buffer::BufferUsage;
+
+use crate::{transform::Transform};
+
+use crate::renderer::staging::{StagingBuffer, UniformSrc};
+use crate::renderer::Renderer;
+
+/// Utilities for loading vertex and normal data from .obj files
+pub mod loader;
+pub use loader::{BasicVertex, UnlitVertex};
+
+use loader::ModelBuilder;
+use crate::renderer::mesh::MeshRenderer;
+use crate::shaders::{albedo_vert, albedo_frag};
+
+pub struct MeshObjectBuilder<T: Vertex> {
+    vertices: Vec<T>,
+    pub transform: Transform,
+    specular_intensity: f32,
+    shininess: f32,
+}
+
+impl MeshObjectBuilder<BasicVertex> {
+    pub fn from_file(
+        path: &'static str,
+        translate: &Vec3,
+        scale: &Vec3,
+        color: &Vec3,
+        specular: (f32, f32),
+    ) -> MeshObjectBuilder<BasicVertex> {
+        let vertices = ModelBuilder::from_file(path, true).build_basic([color.x, color.y, color.z]);
+        let mut object_transform = Transform::identity();
+        object_transform.set_translation(translate);
+        object_transform.set_scale(scale);
+        MeshObjectBuilder::from_vertices(object_transform, vertices, specular.0, specular.1)
+    }
+}
+
+impl<T: Vertex> MeshObjectBuilder<T> {
+    pub(crate) fn from_vertices(
+        transform: Transform,
+        vertices: Vec<T>,
+        specular_intensity: f32,
+        shininess: f32,
+    ) -> Self {
+        Self {
+            vertices,
+            transform,
+            specular_intensity,
+            shininess,
+        }
+    }
+
+    pub fn build(self, renderer: &MeshRenderer) -> MeshObject<T> {
+        let buffer_allocator = renderer.get_buffer_allocator();
+        let base = renderer.get_base();
+
+        let num_vertices = self.vertices.len();
+        let vertex_buffer = Buffer::from_iter(
+            &buffer_allocator,
+            BufferCreateInfo {
+                usage: BufferUsage::TRANSFER_SRC | BufferUsage::VERTEX_BUFFER,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                usage: MemoryUsage::Upload,
+                ..Default::default()
+            },
+            self.vertices
+                .into_iter(),
+        )
+            .unwrap()
+            .into_device_local(num_vertices as u64, &buffer_allocator, &base);
+
+        MeshObject::from_vertex_buffer(
+            self.transform, 
+            vertex_buffer, 
+            self.specular_intensity, 
+            self.shininess
+        )
+    }
+}
+
+pub struct MeshObjectParams {
+    pub specular_intensity: f32,
+    pub shininess: f32,
+    pub transform: Transform,
+}
+
+impl UniformSrc<albedo_vert::UModelData> for MeshObjectParams {
+    /// Gets the raw uniform data of this MeshObject, in the format of `albedo_vert::UModelData`.
+    fn get_raw(&self) -> albedo_vert::UModelData {
+        let (model_mat, normal_mat) = self.transform.get_matrices();
+
+        albedo_vert::UModelData {
+            model: model_mat.into(),
+            normals: normal_mat.into(),
+        }
+    }
+}
+
+impl UniformSrc<albedo_frag::USpecularData> for MeshObjectParams {
+    /// Gets the raw uniform data of this MeshObject, in the format of `albedo_vert::UModelData`.
+    fn get_raw(&self) -> albedo_frag::USpecularData {
+        albedo_frag::USpecularData { 
+            intensity: self.specular_intensity,
+            shininess: self.shininess,
+        }
+    }
+}
+
+/// An object, containing vertices and other data, that is rendered as a Mesh.
+pub struct MeshObject<T: Vertex> {
+    vertex_buffer: Subbuffer<[T]>,
+    params: MeshObjectParams 
+}
+
+impl<T: Vertex> MeshObject<T> {
+    pub fn from_vertex_buffer(
+        transform: Transform,
+        vertex_buffer: Subbuffer<[T]>,
+        specular_intensity: f32,
+        shininess: f32,
+    ) -> Self {
+        Self {
+            params: MeshObjectParams {
+                transform,
+                specular_intensity,
+                shininess,
+            },
+            vertex_buffer,
+        }
+    }
+
+    pub(crate) fn vertex_buffer(&self) -> &Subbuffer<[T]> {
+        &self.vertex_buffer
+    }
+    pub(crate) fn params(&self) -> &MeshObjectParams {
+        &self.params
+    }
+    pub fn transform(&self) -> &Transform {
+        &self.params.transform
+    }
+    pub fn transform_mut(&mut self) -> &mut Transform {
+        &mut self.params.transform
+    }
+}
+```
+
+### rhyolite/src/shaders/marched/marched.frag
+```
+#version 450
+
+#define MAX_POINT_LIGHTS 16
+#define MAX_METABALLS 1024
+#define BLEND_FACTOR 2.0
+
+layout(location = 0) in vec2 uv;
+
+layout(set = 0, binding = 0) uniform UCamData {
+    mat4 view;
+    mat4 projection;
+} vp_uniforms;
+
+struct UPointLight {
+    vec4 position;
+    vec4 color;
+    float intensity;
+};
+
+layout(set = 1, binding = 0) uniform UPointLightsData {
+    UPointLight data[MAX_POINT_LIGHTS];
+    uint len;
+} point_lights;
+
+layout(set = 1, binding = 1) uniform UAmbientLightData {
+    vec4 color;
+    float intensity;
+} ambient_light;
+
+struct UMetaball {
+    vec4 position;
+    vec4 color;
+    float radius;
+};
+
+layout(set = 2, binding = 0) uniform UMetaballData {
+    UMetaball data[MAX_METABALLS];
+    uint len;
+} metaballs;
+
+layout(location = 0) out vec4 out_color;
+
+
+float smin(float a, float b, float k) {
+    float h = clamp(0.5 + 0.5*(a-b)/k, 0.0, 1.0);
+    return mix(a, b, h) - k*h*(1.0-h);
+}
+
+float distance_from_sphere(in vec3 p, in vec3 c, float r) {
+    return length(p-c) - r;
+}
+
+float map_the_world(in vec3 p) {
+    float result = 32767.0;
+    for (int i = 0; i < metaballs.len; i++) {
+        UMetaball metaball = metaballs.data[i];
+        result = smin(result, distance_from_sphere(p, metaball.position.xyz, metaball.radius), BLEND_FACTOR);
+    }
+    return result;
+    
+}
+
+vec3 get_normal(in vec3 p) {
+    const vec3 step = vec3(0.001, 0.0, 0.0);
+    float gradient_x = map_the_world(p + step.xyy) - map_the_world(p - step.xyy);
+    float gradient_y = map_the_world(p + step.yxy) - map_the_world(p - step.yxy);
+    float gradient_z = map_the_world(p + step.yyx) - map_the_world(p - step.yyx);
+    vec3 normal = vec3(gradient_x, gradient_y, gradient_z);
+    
+    return normalize(normal);
+}
+
+vec3 phong(in vec3 frag_pos, in UPointLight light, in vec3 cam_pos) {
+    const float specular_intensity = 1.0;
+    const float specular_shininess = 64.0;
+
+    vec3 light_dir = vec3(light.position) - frag_pos;
+    float dist_squared = pow(length(light_dir), 2.0);
+    light_dir = normalize(light_dir);
+
+    vec3 normal = get_normal(frag_pos);
+
+    float lambertian = max(dot(normal, light_dir), 0.0);
+    float specular = 0.0;
+
+    if (lambertian > 0.0) {
+        vec3 view_dir = normalize(cam_pos - frag_pos);
+        vec3 reflect_dir = reflect(-light_dir, normal);
+        float spec_angle = max(dot(reflect_dir, view_dir), 0.0);
+        specular = pow(spec_angle, specular_shininess);
+    }
+
+    return (lambertian + specular) * light.color.rgb * light.intensity / dist_squared;
+}
+
+vec3 get_lighting(in vec3 frag_pos, in vec3 cam_pos) {
+    vec3 out_color = vec3(0.0);
+    for (int i = 0; i < point_lights.len; i++) {
+        out_color += phong(frag_pos, point_lights.data[i], cam_pos);
+    }
+    out_color += ambient_light.color.rgb * ambient_light.intensity;
+    return out_color;
+}
+
+vec3 ray_march(in vec3 ro, in vec3 rd) {
+    float distance_traveled = 0.0;
+    const uint NUMBER_OF_STEPS = 100;
+    const float MINIMUM_HIT_DISTANCE = 0.01;
+    const float MAXIMUM_TRACE_DISTANCE = 50.0;
+    
+    for (uint i = 0; i < NUMBER_OF_STEPS; i++) {
+        vec3 current_position = ro + distance_traveled * rd;
+        float distance_to_closest = map_the_world(current_position);
+        
+        if (distance_to_closest < MINIMUM_HIT_DISTANCE) {
+            return get_lighting(current_position, ro);
+        }
+        
+        if (distance_traveled > MAXIMUM_TRACE_DISTANCE) {
+            break;
+        }
+        
+        distance_traveled += distance_to_closest;
+    }
+    return vec3(0.0);
+}
+
+void main() {    
+    mat4 view_i = inverse(vp_uniforms.view);
+    vec3 cam_pos = vec3(view_i[3][0], view_i[3][1], view_i[3][2]);
+
+    vec3 ro = cam_pos;
+    vec3 rd = mat3(vp_uniforms.view) * normalize(vec3(uv, 1.0));
+    rd.z *= -1;
+
+    vec3 shaded_color = ray_march(ro, rd);
+    
+    out_color = vec4(shaded_color, 1.0);
+}
+```
+
+### rhyolite/src/shaders/marched/marched.vert
+```
+#version 450
+
+layout(location = 0) in vec2 position;
+
+layout(set = 0, binding = 0) uniform UCamData {
+    mat4 view;
+    mat4 projection;
+} vp_uniforms;
+
+layout(location = 0) out vec2 uv;
+
+void main() {
+    float f = vp_uniforms.projection[1][1];
+    uv = vec2(position.x * f / vp_uniforms.projection[0][0], position.y);
+    gl_Position = vec4(position, 0.0, 1.0);
+}
+```
+
+### rhyolite/src/shaders/mesh/albedo.frag
+```
+#version 450
+
+layout(location = 0) in vec3 in_color;
+layout(location = 1) in vec3 in_normal;
+layout(location = 2) in vec4 in_pos;
+
+layout(set = 1, binding = 1) uniform USpecularData {
+    float intensity;
+    float shininess;
+} specular;
+
+layout(location = 0) out vec4 out_color;
+layout(location = 1) out vec3 out_normal;
+layout(location = 2) out vec4 out_frag_pos;
+layout(location = 3) out vec2 out_specular;
+
+void main() {
+    out_color = vec4(in_color, 1.0);
+    out_normal = in_normal;
+    out_frag_pos = in_pos;
+    out_specular = vec2(specular.intensity, specular.shininess);
+}
+```
+
+### rhyolite/src/shaders/mesh/albedo.vert
+```
+#version 450
+
+layout(location = 0) in vec3 position;
+layout(location = 1) in vec3 normal;
+layout(location = 2) in vec3 color;
+
+layout(set = 0, binding = 0) uniform UCamData {
+    mat4 view;
+    mat4 projection;
+} vp_uniforms;
+
+layout(set = 1, binding = 0) uniform UModelData {
+    mat4 model;
+    mat4 normals;
+} model_uniforms;
+
+layout(location = 0) out vec3 out_color;
+layout(location = 1) out vec3 out_normal;
+layout(location = 2) out vec4 out_pos;
+
+void main() {
+    vec4 frag_pos = vp_uniforms.projection * vp_uniforms.view * model_uniforms.model * vec4(position, 1.0);
+    gl_Position = frag_pos;
+    out_color = color;
+    out_normal = mat3(model_uniforms.normals) * normal;
+    out_pos = model_uniforms.model * vec4(position, 1.0);
+}
+```
+
+### rhyolite/src/shaders/mesh/unlit.frag
+```
+#version 450
+layout(location = 0) in vec3 in_color;
+layout(location = 0) out vec4 f_color;
+
+void main() {
+    f_color = vec4(in_color, 1.0);
+}
+```
+
+### rhyolite/src/shaders/mesh/unlit.vert
+```
+#version 450
+
+layout(location = 0) in vec3 position;
+layout(location = 1) in vec3 color;
+
+layout(set = 0, binding = 0) uniform UCamData {
+    mat4 view;
+    mat4 projection;
+} vp_uniforms;
+
+layout(set = 1, binding = 0) uniform UModelData {
+    mat4 model;
+} model_uniforms;
+
+layout(location = 0) out vec3 out_color;
+
+void main() {
+    gl_Position = vp_uniforms.projection * vp_uniforms.view * model_uniforms.model * vec4(position, 1.0);
+    out_color = color;
+}
+```
+
+### examples/src/bin/marching_cubes/shaders/marching_cubes.comp
+```
+#version 450
+
+// smaller number means more subdivisions per unit (higher resolution)
+#define RESOLUTION 0.10
+#define MAX_METABALLS 1024
+#define BLEND_FACTOR 2.0
+
+// layout(local_size_x = 10, local_size_y = 10, local_size_z = 10) in;
+layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
+
+// A buffer containing data for the vertices, alternating between position and normal data. Thus, to index into the
+// buffer with any index `i`, you should go to index `[i * 2]` for position data and `[i * 2 + 1]` for normal data.
+layout(set = 0, binding = 0) writeonly buffer SVertices {
+    vec4 data[];
+} vertices;
+
+// We use this buffer to describe to the vertex shader how many vertices to draw
+layout(set = 0, binding = 1) writeonly buffer SIndirectDrawArgs {
+    uint vertex_count;
+    uint unused0;
+    uint unused1;
+    uint unused2;
+};
+
+// Marching cubes method - we want to render a surface defined by a 3D function f outputting a scalar. If f(x,y,z) < 0,
+// point is outside the surface, f(x,y,z) > 0 means point is inside. f(x,y,z) defines points on the surface we want to
+// render. space is divided into cells, each cell has 8 corners, in each corner, the function can either be positive or
+// negative. That means there are 2^8 = 256 possibilities in which corners can be positive/negative (configuration can
+// be expressed by 8 bits).
+// if I take all eight corners, and for each one, I determine whether f in it is positive or negative. This gives me
+// 8 bits, joining them together gives me the configuration number for each configuration, there are given triangles
+// that define the surface. triangle_counts represents how many triangles have to be rendered for given configuration,
+// these go from 0 to 5.
+layout(set = 1, binding = 0) uniform UTriangleCounts {
+    uint triangle_counts[256];
+};
+
+// Describes the edges on which the vertices lie for each triangle of a given configuration. Up to 5 triangles are
+// described for each, and triangles that are not generated for a configuration are listed as `255 255 255` (see
+// `vertex_edge_indices.txt`).
+layout(set = 1, binding = 1) uniform UTriangleVertices {
+    uint vertex_edge_indices[3 * 5 * 256];
+};
+
+struct UMetaball {
+    vec4 position;
+    vec4 color;
+    float radius;
+};
+
+layout(set = 2, binding = 0) uniform UMetaballData {
+    UMetaball data[MAX_METABALLS];
+    uint len;
+} metaballs;
+
+
+// The dimensions of the grid, which we'll use to center the grid on the origin
+uvec3 grid_size = gl_WorkGroupSize * gl_NumWorkGroups;
+
+
+struct UVertex {
+    vec4 position;
+    vec4 normal;
+    vec4 color;
+};
+void add_vertex(uint vertex_offset, UVertex vertex) {
+    vertices.data[vertex_offset * 3] = vertex.position;
+    vertices.data[vertex_offset * 3 + 1] = vertex.normal;
+    vertices.data[vertex_offset * 3 + 2] = vertex.color;
+}
+void add_triangle(uint first_vertex_offset, UVertex[3] vertices) {
+    for (int i = 0; i < 3; i++) {
+        add_vertex(first_vertex_offset + i, vertices[i]);
+    }
+}
+
+float smin(float a, float b, float k) {
+    float h = clamp(0.5 + 0.5*(a-b)/k, 0.0, 1.0);
+    return mix(a, b, h) - k*h*(1.0-h);
+}
+
+float distance_from_sphere(in vec3 p, in vec3 c, float r) {
+    return length(p-c) - r;
+}
+
+// TODO: USE A SEPARATE COMPUTE SHADER TO GENERATE AN IMAGE3D FOR THIS!!!! right now it has to check the same position for 8 nodes
+float get_density(vec3 position) {
+    // float distance_field = 0.0;
+    // for (int i = 0; i < metaballs.len; i++) {
+    //     float dist = distance(vec3(metaballs.data[i].position), gl_GlobalInvocationID) - metaballs.data[i].radius;
+    //     // distance_field += S / (0.0001 + pow(dist, 2)) - 0.05;
+    //     distance_field -= dist;
+    // }
+    // // return -sqrt(1.0 / distance_field);
+    // return distance_field;
+
+    float result = 32767.0;
+    for (int i = 0; i < metaballs.len; i++) {
+        UMetaball metaball = metaballs.data[i];
+        result = smin(result, distance_from_sphere(position, metaball.position.xyz, metaball.radius), BLEND_FACTOR);
+    }
+    return -result;
+
+    // return metaballs.data[0].radius - distance(vec3(index) * RESOLUTION, vec3(metaballs.data[0].position));
+}
+
+// The offsets of each of the corners in the order of the bits they correspond to.
+const ivec3 corner_offsets[8] = ivec3[8](
+    ivec3(0, 0, 0), ivec3(1, 0, 0), ivec3(1, 1, 0), ivec3(0, 1, 0),
+    ivec3(0, 0, 1), ivec3(1, 0, 1), ivec3(1, 1, 1), ivec3(0, 1, 1)
+);
+
+// The corner indices that each edge is formed by.
+const uvec2 edges[12] = uvec2[12](
+    uvec2(0, 1), uvec2(1, 2), uvec2(2, 3), uvec2(3, 0),
+    uvec2(4, 5), uvec2(5, 6), uvec2(6, 7), uvec2(7, 4),
+    uvec2(0, 4), uvec2(1, 5), uvec2(2, 6), uvec2(3, 7)
+);
+
+// Gets the vertices for a triangle based on the densities that surround it,
+UVertex[3] get_triangle(float[8] densities, uint configuration, uint triangle_i) {
+    uint absolute_offset = configuration * 15 + triangle_i * 3;
+
+    UVertex triangle_vertices[3];
+    for (int i = 0; i < 3; i++) {
+        uint edge_i = vertex_edge_indices[absolute_offset + i];
+        uvec2 edge = edges[edge_i];
+        float a = densities[edge[0]] / (densities[edge[0]] - densities[edge[1]]);
+        vec3 pos = (vec3(gl_GlobalInvocationID) + mix(corner_offsets[edge.r], corner_offsets[edge.g], a) - grid_size / 2) * RESOLUTION;
+        triangle_vertices[i].position = vec4(pos, 1.0);// + vec4(0.0, float(triangle_i) * 0.2, 0.0, 0.0);
+    }
+    vec4 normal = vec4(normalize(cross(
+        triangle_vertices[2].position.xyz - triangle_vertices[0].position.xyz,
+        triangle_vertices[1].position.xyz - triangle_vertices[0].position.xyz
+    )), 1.0);
+    for (int i = 0; i < 3; i++) {
+        vec4 tri_color = vec4(1.0, 0.0, 0.0, 0.0);
+
+//         Colorful mode (for debugging marching cubes configurations)
+//        switch(triangle_i) {
+//            case 0: tri_color = vec4(1.0, 0.0, 0.0, 0.0); break;
+//            case 1: tri_color = vec4(1.0, 1.0, 0.0, 0.0); break;
+//            case 2: tri_color = vec4(0.0, 1.0, 0.0, 0.0); break;
+//            case 3: tri_color = vec4(0.0, 0.0, 1.0, 0.0); break;
+//            case 4: tri_color = vec4(1.0, 0.0, 1.0, 0.0); break;
+//        }
+
+        triangle_vertices[i].normal = normal;
+        triangle_vertices[i].color = tri_color;
+    }
+    return triangle_vertices;
+}
+
+void main() {
+    int configuration = 0;
+    float densities[8];
+
+    for (int i = 0; i < 8; i++) {
+        vec3 node_pos = (vec3(gl_GlobalInvocationID) + corner_offsets[i] - grid_size / 2) * RESOLUTION;
+        densities[i] = get_density(node_pos);
+        configuration |= int(densities[i] > 0.0) << i;
+    }
+
+    uint triangle_count = triangle_counts[configuration];
+
+    // the offset of the first vertex in the vertex buffer
+    uint vertex_offset = atomicAdd(vertex_count, triangle_count * 3);
+
+    for (int triangle_i = 0; triangle_i < triangle_count; triangle_i++) {
+        add_triangle(vertex_offset + triangle_i * 3, get_triangle(densities, configuration, triangle_i));
+    }
+}
+```
+
+### examples/src/bin/marching_cubes/shaders/marching_cubes.frag
+```
+#version 450
+
+layout(location = 0) in vec3 in_color;
+layout(location = 1) in vec3 in_normal;
+layout(location = 2) in vec4 in_pos;
+
+layout(set = 1, binding = 1) uniform USpecularData {
+    float intensity;
+    float shininess;
+} specular;
+
+layout(location = 0) out vec4 out_color;
+layout(location = 1) out vec3 out_normal;
+layout(location = 2) out vec4 out_frag_pos;
+layout(location = 3) out vec2 out_specular;
+
+void main() {
+    out_color = vec4(in_color, 1.0);
+    out_normal = in_normal;
+    out_frag_pos = in_pos;
+    out_specular = vec2(specular.intensity, specular.shininess);
+}
+```
+
+### examples/src/bin/marching_cubes/shaders/marching_cubes.vert
+```
+#version 450
+
+layout(set = 0, binding = 0) uniform UCamData {
+    mat4 view;
+    mat4 projection;
+} vp_uniforms;
+
+layout(set = 1, binding = 0) uniform UModelData {
+    mat4 model;
+    mat4 normals;
+} model_uniforms;
+
+layout(set = 2, binding = 0) readonly buffer UVertices {
+    vec4 data[]; // Alternates between position and normal
+} vertices;
+
+layout(location = 0) out vec3 out_color;
+layout(location = 1) out vec3 out_normal;
+layout(location = 2) out vec4 out_pos;
+
+void main() {
+    int i = gl_VertexIndex;
+    vec4 position = vertices.data[i * 3];
+    vec4 normal = vertices.data[i * 3 + 1];
+    vec4 color = vertices.data[i * 3 + 2];
+
+    vec4 frag_pos = vp_uniforms.projection * vp_uniforms.view * model_uniforms.model * position;
+    gl_Position = frag_pos;
+    out_color = vec3(color);
+    out_normal = mat3(model_uniforms.normals) * vec3(normal);
+    out_pos = model_uniforms.model * position;
+}
+```
+
+### rhyolite/src/shaders/mesh/lighting/ambient.frag
+```
+#version 450
+
+layout(input_attachment_index = 0, set = 0, binding = 0) uniform subpassInput u_color;
+
+layout(set = 0, binding = 1) uniform UAmbientLightData {
+    vec4 color;
+    float intensity;
+} light;
+
+layout(location = 0) out vec4 f_color;
+
+void main() {
+    vec3 ambient_color = light.intensity * light.color.rgb;
+    vec3 combined_color = ambient_color * subpassLoad(u_color).rgb;
+    f_color = vec4(combined_color, 1.0);
+}
+```
+
+### rhyolite/src/shaders/mesh/lighting/ambient.vert
+```
+#version 450
+
+layout(location = 0) in vec2 position;
+
+void main() {
+    gl_Position = vec4(position, 0.0, 1.0);
+}
+```
+
+### rhyolite/src/shaders/mesh/lighting/point.frag
+```
+#version 450
+
+layout(location = 0) in vec3 cam_pos;
+
+// Unlike binding, the value of input_attachment_index depends on the order the attachments are given in the 
+// renderpass, not in the descriptor set.
+layout(input_attachment_index = 0, set = 1, binding = 0) uniform subpassInput u_color;
+layout(input_attachment_index = 1, set = 1, binding = 1) uniform subpassInput u_normals;
+layout(input_attachment_index = 2, set = 1, binding = 2) uniform subpassInput u_frag_pos;
+layout(input_attachment_index = 3, set = 1, binding = 3) uniform subpassInput u_specular;
+
+layout(set = 1, binding = 4) uniform UPointLightData {
+    vec4 position;
+    vec4 color;
+    float intensity;
+} light;
+
+layout(location = 0) out vec4 f_color;
+
+// Phong shading
+void main() {
+    vec3 frag_pos = subpassLoad(u_frag_pos).xyz;
+
+    vec3 light_dir = light.position.xyz - frag_pos;
+    float dist_squared = pow(length(light_dir), 2);
+    light_dir = normalize(light_dir);
+
+    vec3 normal = normalize(subpassLoad(u_normals).xyz);
+
+    float specular_intensity = subpassLoad(u_specular).x;
+    float specular_shininess = subpassLoad(u_specular).y;
+
+    float lambertian = max(dot(normal, light_dir), 0.0);
+    float specular = 0.0;
+
+    if (lambertian > 0.0) {
+        vec3 view_dir = normalize(cam_pos - frag_pos);
+        vec3 reflect_dir = reflect(-light_dir, normal);
+        float specAngle = max(dot(reflect_dir, view_dir), 0.0);
+        specular = pow(specAngle, specular_shininess);
+    }
+
+    vec3 light_color = (lambertian * light.color.rgb + specular * light.color.rgb) * light.intensity / dist_squared;
+
+    f_color = vec4(subpassLoad(u_color).rgb * light_color, 1.0);
+}
+```
+
+### rhyolite/src/shaders/mesh/lighting/point.vert
+```
+#version 450
+
+layout(location = 0) in vec2 position;
+
+layout(set = 0, binding = 0) uniform UCamData {
+    mat4 view;
+    mat4 projection;
+} vp_uniforms;
+
+layout(location = 0) out vec3 cam_pos;
+
+void main() {
+    mat4 view_i = inverse(vp_uniforms.view);
+    cam_pos = vec3(view_i[3][0], view_i[3][1], view_i[3][2]);
+    
+    gl_Position = vec4(position, 0.0, 1.0);
+}
+```

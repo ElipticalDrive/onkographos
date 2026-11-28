@@ -1,0 +1,341 @@
+--- v002.md
++++ v003.md
+@@ -1,208 +1,164 @@
+ # Soft Rasterizer
+ 
+-Also called: Liu et al. method, SoftRas, SoftRas Rasterization
++Also called: C ∞ Smooth Renderer (SR), Liu et al. method, Smooth Differentiable Renderer, Soft Rasterization (General), SoftRas, SoftRas Rasterization
+ 
+ ## Overview
+-Soft Rasterizer is a differentiable rendering method that replaces the deterministic z-buffer depth test with a probabilistic aggregation, treating each triangle as a probabilistic cloud to compute pixel color as a weighted sum of contributions from all mesh triangles, including hidden ones [S1, S3]. It solves the problem of non-differentiable visibility discontinuities in standard rasterization, allowing gradients to flow to occluded and distant triangle vertices, which makes it particularly suitable for geometry optimization tasks like single-view mesh reconstruction [S1, S3]. Unlike its siblings, it does not use z-culling; instead, it relies on a probability map derived from 2D screen-space distances and depth to fuse color contributions, ensuring that the entire image contributes to the gradient of every vertex [S2, unofficial].
++The Soft Rasterizer is a differentiable rendering method that replaces the deterministic, binary visibility test of traditional rasterization with a probabilistic aggregation of all projected triangles, including occluded ones [S1][S3, unofficial][S4]. By treating triangles as probabilistic clouds and blending their contributions based on screen-space distance and depth, it ensures that pixel color is a smooth, differentiable function of vertex positions, allowing gradients to flow through occlusions and dis-occlusions [S2, unofficial][S4]. It is distinguished from siblings like [Monte Carlo Radiance Estimate for Scene Reconstruction](1119-monte-carlo-radiance-estimate-for-scene-reconstruction.md) by its rasterization-based approach rather than ray sampling, and from [HardSoftRas](10744-hardsoftras.md) by its purely soft, non-hybrid depth blending which avoids pseudo-occlusion artifacts at the cost of potential transparency artifacts [S1].
+ 
+ ## How it works
+-**Inputs and Outputs**
+-*   **Inputs:** A mesh defined by vertices $V \in \mathbb{R}^{N_v \times 3}$ and faces $F \in \mathbb{R}^{N_f \times 3}$ (indices into $V$); camera parameters (intrinsics and extrinsics); image resolution $H \times W$; a blur radius parameter $\sigma$ (or equivalent softness control); and per-vertex or per-face attributes (e.g., color, normal).
+-*   **Outputs:** A rendered image $C \in \mathbb{R}^{H \times W \times 3}$ and the computational graph enabling backpropagation to $V$ and attributes.
++**Inputs and Outputs:**
++*   **Inputs:** A mesh defined by vertex positions $V \in \mathbb{R}^{N \times 3}$ and triangle connectivity $F \in \mathbb{R}^{M \times 3}$; camera parameters (intrinsics and extrinsics); image resolution $H \times W$; edge smoothness parameter $s$; opacity parameter $o$ [S2, unofficial].
++*   **Outputs:** A rendered image tensor $I \in \mathbb{R}^{H \times W \times C}$ and its gradients with respect to $V$ and other parameters.
+ 
+-**Data Structures**
+-*   **Projected Vertices:** For each vertex $v_i$, compute its screen-space position $p_i = (u_i, v_i)$ and depth $z_i$ using the camera projection matrix.
+-*   **Triangle Attributes:** Each triangle $j$ has projected vertices $p_{j,0}, p_{j,1}, p_{j,2}$ and depths $z_{j,0}, z_{j,1}, z_{j,2}$. The triangle's representative depth is typically the average or interpolated depth at the pixel location.
+-*   **Probability Map:** A tensor $P \in \mathbb{R}^{H \times W \times N_f}$ storing the probability that triangle $j$ contributes to pixel $(u, v)$.
++**Data Structures:**
++*   **Projected Vertices:** For each triangle $j$, the 2D screen coordinates of its vertices are computed via perspective projection: $p_{j,k} = (x_{j,k}, y_{j,k})$ for $k \in \{1,2,3\}$ [S3, unofficial].
++*   **Visibility Tensor:** A tensor $V \in [0,1]^{H \times W \times M}$ where $V_{h,w,j}$ represents the probability that triangle $j$ contributes to pixel $(h,w)$ [S2, unofficial].
++*   **Depth Values:** The depth $z_{j,k}$ of each projected vertex in camera space is stored to compute visibility weights [S2, S3, unofficial].
+ 
+-**Steps**
+-1.  **Projection:** Project all mesh vertices from 3D world space to 2D screen space $(u, v)$ and compute their depth $z$.
+-2.  **Triangle Rasterization (Soft):** For each pixel $(u, v)$ and each triangle $j$:
+-    *   Check if the pixel lies within the 2D bounding box of the projected triangle. If not, probability $P_{u,v,j} = 0$.
+-    *   If inside, compute the barycentric coordinates $(\alpha, \beta, \gamma)$ of the pixel with respect to the projected triangle vertices.
+-    *   Compute the depth $z_{tri}$ of the triangle at the pixel location, typically via perspective-correct interpolation of the vertex depths:
+-        $$ z_{tri} = \frac{\alpha/z_0 + \beta/z_1 + \gamma/z_2}{\alpha/z_0^2 + \beta/z_1^2 + \gamma/z_2^2} $$
+-        [G: This is the standard perspective-correct interpolation formula used in graphics; if the source implies linear interpolation, it would be $z_{tri} = \alpha z_0 + \beta z_1 + \gamma z_2$, but perspective correction is standard for depth. The source [S2, unofficial] mentions "distance between the camera and the triangle along the viewing direction," which corresponds to $z$.]
+-    *   Compute the 2D screen-space distance $d_{2D}$ from the pixel to the triangle's centroid or use the barycentric coordinates directly to form a spatial kernel. The source [S2, unofficial] states weights are based on "distances between a pixel and a triangle in the 2D screen space." A common implementation uses a Gaussian kernel centered on the triangle's centroid or uses the barycentric coordinates to define a soft mask.
+-    *   Compute the depth-based weight $w_z$. The source [S2, unofficial] states weights are based on "the distance between the camera and the triangle, along the viewing direction." This implies a function of $z_{tri}$.
+-    *   Combine spatial and depth weights to form the probability $P_{u,v,j}$. The source [S1, S3] describes modeling triangles as "probabilistic clouds with a blur radius." This is often implemented as a Gaussian falloff from the triangle edges or centroid.
+-3.  **Color Aggregation:** For each pixel $(u, v)$, compute the final color $C_{u,v}$ as the weighted sum of the colors $C_j$ of all triangles:
+-    $$ C_{u,v} = \frac{\sum_{j=1}^{N_f} P_{u,v,j} \cdot C_j}{\sum_{j=1}^{N_f} P_{u,v,j}} $$
+-    [G: Normalization by the sum of probabilities is standard to prevent brightness blow-up when many triangles contribute. The source [S2, unofficial] says "fuses all color probabilities... as a weighted sum," implying normalization or a softmax-like behavior.]
+-4.  **Differentiability:** Since all operations (projection, interpolation, Gaussian weighting, summation) are differentiable, gradients $\frac{\partial C_{u,v}}{\partial V}$ can be computed via backpropagation. Gradients flow to all triangles $j$ that have non-zero $P_{u,v,j}$, including occluded ones.
++**Steps:**
++1.  **Projection:** Project all mesh vertices from 3D world space to 2D screen space using the camera matrix. Compute the 2D bounding box for each triangle to cull triangles completely outside the image [S3, unofficial].
++2.  **Pixel-Triangle Coverage Probability:** For each pixel $(h,w)$ and each triangle $j$ within its bounding box, compute the probability that the triangle covers the pixel. This is modeled as a sigmoid function of the signed distance from the pixel to the triangle edge, scaled by the edge smoothness parameter $s$ [S2, unofficial][S5].
++    *   Let $d_{h,w,j}$ be the signed distance from pixel $(h,w)$ to the boundary of triangle $j$ in screen space.
++    *   The coverage probability is:
++        $$ V_{h,w,j} = \sigma(s \cdot d_{h,w,j}) $$
++        where $\sigma(x) = \frac{1}{1 + e^{-x}}$ is the sigmoid function [S2, unofficial][S5].
++    *   *Note:* In the disk example, $d$ is the radial distance from the center, and the formula is $\sigma(r - d)$ [S5]. For general triangles, $d$ is the distance to the edge [S5].
++3.  **Depth Weighting (Soft Z-Buffer):** Compute a weight for each triangle based on its depth relative to other triangles covering the same pixel. This replaces the hard z-buffer. A common approach is to use a SoftMin or SoftMax over the depths of covering triangles to determine visibility dominance [S2, unofficial].
++    *   Let $z_{j}$ be the depth of triangle $j$ (e.g., average or minimum depth of its vertices).
++    *   The visibility weight $W_{h,w,j}$ is computed using a weighted SoftMin of the depths, modulated by the coverage probability $V_{h,w,j}$ [S2, unofficial]:
++        $$ W_{h,w,j} = \frac{V_{h,w,j} \cdot \exp(-\lambda z_j)}{\sum_{k \in \text{covering}} V_{h,w,k} \cdot \exp(-\lambda z_k)} $$
++        where $\lambda$ is a temperature parameter controlling the sharpness of the depth selection [S2, unofficial]. *Note:* Some implementations simplify this by using the coverage probability directly as the weight if depth differentiation is handled via the sigmoid's sensitivity to vertex movement [S3, unofficial][S4]. The sources indicate that weights are based on 2D screen space distance and camera distance [S3, unofficial].
++4.  **Color Aggregation:** Compute the final pixel color as a weighted sum of the colors of all contributing triangles.
++    *   Let $C_j$ be the color of triangle $j$ (computed via shading models like flat, Gouraud, or Phong) [S3, unofficial].
++    *   The pixel color $I_{h,w}$ is:
++        $$ I_{h,w} = \sum_{j=1}^{M} W_{h,w,j} \cdot C_j $$
++    *   If opacity $o$ is used, it modulates the contribution, allowing background visibility [S2, unofficial].
+ 
+-**Parameters**
+-*   **Blur Radius ($\sigma$):** Controls the softness of the triangle edges and the depth falloff. Larger $\sigma$ increases the influence of distant/occluded triangles but reduces sharpness. Typical values depend on resolution; not given in sources.
+-*   **Depth Weighting:** The specific function mapping depth difference to probability is not explicitly defined in the sources beyond "distance between the camera and the triangle." [G: In practice, this is often a Gaussian $e^{-\frac{(z - z_{ref})^2}{2\sigma_z^2}}$ or similar, where $z_{ref}$ might be the depth of the closest triangle or a global reference. Without explicit formula, we note the dependency.]
++**Parameters:**
++*   $s$: Edge smoothness parameter. Higher values produce sharper edges; lower values produce blurrier edges [S2, unofficial]. Typical values are not specified in sources, but it controls the steepness of the sigmoid [S2, unofficial].
++*   $o$: Opacity parameter. Controls transparency [S2, unofficial].
++*   $\lambda$: Depth softness parameter (if used in SoftMin). Not given in the sources.
++*   $\epsilon$: Stability constant for distance calculation (e.g., $10^{-6}$) [S5].
+ 
+-**Edge Cases and Pitfalls**
+-*   **Precision:** Perspective-correct interpolation is critical for correct depth and attribute values, especially for distant triangles.
+-*   **Performance:** The method is $O(H \cdot W \cdot N_f)$ in naive implementation, as every pixel considers every triangle. This is the primary limitation compared to hard rasterizers.
+-*   **Degenerate Input:** Triangles with zero area in screen space should be handled to avoid division by zero in barycentric coordinate calculations.
+-
+-**Pseudocode**
++**Pseudocode:**
+ ```python
+ import torch
+-import torch.nn.functional as F
+ 
+-def soft_rasterize(vertices, faces, camera_matrix, image_size, blur_sigma):
++def soft_rasterize(vertices, faces, camera_intrinsics, camera_extrinsics, image_size, edge_smoothness=10.0, opacity=1.0):
+     """
+-    vertices: (N_v, 3)
+-    faces: (N_f, 3) indices into vertices
+-    camera_matrix: (4, 4) projection matrix
+-    image_size: (H, W)
+-    blur_sigma: float, controls softness
++    Soft Rasterizer implementation.
++    
++    Args:
++        vertices: Tensor of shape (N, 3), vertex positions.
++        faces: Tensor of shape (M, 3), triangle indices.
++        camera_intrinsics: Camera intrinsic matrix.
++        camera_extrinsics: Camera extrinsic matrix (rotation and translation).
++        image_size: Tuple (H, W).
++        edge_smoothness: Parameter s for the sigmoid edge softening.
++        opacity: Parameter o for triangle transparency.
++        
++    Returns:
++        rendered_image: Tensor of shape (H, W, 3).
+     """
+     H, W = image_size
+-    N_v, _ = vertices.shape
+-    N_f = faces.shape[0]
+     
+-    # 1. Project vertices
+-    # Add homogeneous coordinate
+-    vertices_h = torch.cat([vertices, torch.ones(N_v, 1, device=vertices.device)], dim=1)
+-    projected_h = vertices_h @ camera_matrix.T # (N_v, 4)
++    # 1. Project vertices to screen space
++    # Transform vertices to camera space
++    vertices_cam = transform_to_camera_space(vertices, camera_extrinsics)
++    # Project to 2D screen coordinates
++    vertices_screen = project_to_screen(vertices_cam, camera_intrinsics) # Shape (N, 2)
+     
+-    # Perspective divide
+-    z = projected_h[:, 2]
+-    x = projected_h[:, 0] / z
+-    y = projected_h[:, 1] / z
++    # Compute depth for each triangle (e.g., mean depth of vertices)
++    depths = torch.mean(vertices_cam[faces], dim=1) # Shape (M,)
+     
+-    # Map to screen coordinates (assuming normalized device coordinates -1 to 1)
+-    # Adjust based on specific camera matrix convention
+-    u = (x + 1) * W / 2
+-    v = (y + 1) * H / 2
++    # 2. Initialize visibility tensor and color accumulator
++    # V: (H, W, M)
++    V = torch.zeros(H, W, faces.shape[0], device=vertices.device)
++    # Accumulate color: (H, W, 3)
++    color_accum = torch.zeros(H, W, 3, device=vertices.device)
+     
+-    # 2. For each triangle, compute contribution to each pixel
+-    # This is the expensive part. In practice, optimized via rasterization kernels.
+-    # Here we outline the logic.
++    # 3. For each triangle, compute coverage probability for all pixels
++    for j in range(faces.shape[0]):
++        # Get 2D coordinates of the 3 vertices of triangle j
++        v1, v2, v3 = vertices_screen[faces[j, 0]], vertices_screen[faces[j, 1]], vertices_screen[faces[j, 2]]
++        
++        # Create meshgrid of pixel coordinates
++        ys, xs = torch.meshgrid(torch.arange(H, device=vertices.device), 
++                                torch.arange(W, device=vertices.device), indexing="ij")
++        
++        # Compute signed distance from each pixel to the triangle edges
++        # This requires computing the distance to the 3 line segments forming the triangle
++        # and taking the minimum (for inside) or appropriate signed distance.
++        # A common approximation is using barycentric coordinates or distance to edges.
++        # Let d_signed be the signed distance (positive inside, negative outside).
++        d_signed = compute_signed_distance_to_triangle(xs, ys, v1, v2, v3) # Shape (H, W)
++        
++        # Compute coverage probability using sigmoid
++        # V[:, :, j] = sigmoid(s * d_signed)
++        V[:, :, j] = torch.sigmoid(edge_smoothness * d_signed)
++        
++        # Compute triangle color (e.g., flat shading)
++        # C_j is a tensor of shape (3,) representing the color of triangle j
++        C_j = compute_triangle_color(vertices[faces[j]], camera_extrinsics) # Shape (3,)
++        
++        # Accumulate color weighted by coverage
++        # Note: In a full implementation, depth weighting (SoftMin) would be applied here
++        # to determine the final weight W_{h,w,j}. For simplicity, we use V as the weight
++        # or combine with depth. Sources mention weights based on 2D distance and depth [S3, unofficial].
++        # Here we use V as the primary weight, modulated by opacity.
++        color_accum += V[:, :, j] * opacity * C_j
++        
++    # 4. Normalize or finalize
++    # If using SoftMin for depth, the weights would be normalized.
++    # If using simple accumulation, the result might need normalization or clamping.
++    # The sources describe a weighted sum [S3, unofficial].
++    rendered_image = color_accum
+     
+-    # Initialize probability map and color accumulator
+-    # P: (H, W, N_f)
+-    # C_acc: (H, W, 3)
+-    
+-    # Get triangle vertices in screen space
+-    u_tri = u[faces] # (N_f, 3)
+-    v_tri = v[faces]
+-    z_tri = z[faces]
+-    
+-    # Create pixel grid
+-    pixel_u, pixel_v = torch.meshgrid(torch.arange(W, device=vertices.device), 
+-                                      torch.arange(H, device=vertices.device), indexing='ij')
+-    pixel_u = pixel_u.float()
+-    pixel_v = pixel_v.float()
+-    
+-    # Compute barycentric coordinates for each pixel against each triangle
+-    # This requires vectorized computation. 
+-    # For a single triangle t, and all pixels:
+-    
+-    # Vectorized approach for all triangles at once is memory intensive.
+-    # We assume a loop over triangles for clarity, or a batched operation.
+-    
+-    P = torch.zeros(H, W, N_f, device=vertices.device)
+-    C_acc = torch.zeros(H, W, 3, device=vertices.device)
+-    
+-    # Assume vertex colors are available
+-    # colors: (N_v, 3)
+-    # color_tri: (N_f, 3)
+-    
+-    for t in range(N_f):
+-        # Get triangle vertices
+-        u0, u1, u2 = u_tri[t]
+-        v0, v1, v2 = v_tri[t]
+-        z0, z1, z2 = z_tri[t]
+-        
+-        # Compute barycentric coordinates for all pixels
+-        # Using cross-product method
+-        # Area of triangle
+-        area = 0.5 * abs((u1 - u0) * (v2 - v0) - (u2 - u0) * (v1 - v0))
+-        if area < 1e-6:
+-            continue
+-            
+-        # Barycentric coords alpha, beta, gamma
+-        # alpha = area(P, v1, v2) / area(v0, v1, v2)
+-        # beta = area(v0, P, v2) / area(v0, v1, v2)
+-        # gamma = 1 - alpha - beta
+-        
+-        # Vectorized barycentric calculation
+-        denom = (v1 - v2) * (u0 - u2) + (u2 - u1) * (v0 - v2)
+-        alpha = ((v1 - v2) * (u0 - pixel_u) + (u2 - u1) * (v0 - pixel_v)) / denom
+-        beta = ((v2 - v0) * (u0 - pixel_u) + (u0 - u2) * (v0 - pixel_v)) / denom
+-        gamma = 1.0 - alpha - beta
+-        
+-        # Mask for pixels inside triangle
+-        inside = (alpha >= 0) & (beta >= 0) & (gamma >= 0)
+-        
+-        # Compute depth at pixel (perspective correct)
+-        # z_inv = alpha/z0 + beta/z1 + gamma/z2
+-        # z_pixel = 1 / z_inv
+-        z_inv = alpha / z0 + beta / z1 + gamma / z2
+-        z_pixel = 1.0 / z_inv
+-        
+-        # Compute probability based on spatial distance and depth
+-        # Source [S2, unofficial]: weights based on 2D distance and depth distance
+-        # Simplified: Gaussian falloff from centroid or edges?
+-        # Source [S1]: "probabilistic clouds with a blur radius"
+-        # Let's use a Gaussian centered on the triangle's centroid in screen space
+-        # and a depth-based weight.
+-        
+-        centroid_u = (u0 + u1 + u2) / 3
+-        centroid_v = (v0 + v1 + v2) / 3
+-        
+-        dist_2d = torch.sqrt((pixel_u - centroid_u)**2 + (pixel_v - centroid_v)**2)
+-        
+-        # Spatial weight
+-        w_spatial = torch.exp(-dist_2d**2 / (2 * blur_sigma**2))
+-        
+-        # Depth weight (relative to some reference, e.g., average depth or closest)
+-        # Source [S2, unofficial]: "distance between the camera and the triangle"
+-        # Let's assume a simple Gaussian falloff from the triangle's average depth
+-        avg_z = (z0 + z1 + z2) / 3
+-        dist_z = torch.abs(z_pixel - avg_z)
+-        w_depth = torch.exp(-dist_z**2 / (2 * blur_sigma**2))
+-        
+-        prob = w_spatial * w_depth
+-        
+-        # Apply mask
+-        prob = prob * inside.float()
+-        
+-        # Accumulate
+-        P[:, :, t] = prob
+-        
+-        # Interpolate color
+-        # color_t = alpha * color0 + beta * color1 + gamma * color2
+-        # Assuming colors are passed or derived from vertices
+-        # For this pseudocode, we assume a dummy color per triangle
+-        color_t = torch.rand(3, device=vertices.device) # Placeholder for actual color interpolation
+-        
+-        C_acc += prob.unsqueeze(-1) * color_t.unsqueeze(0).unsqueeze(0)
+-        
+-    # Normalize
+-    P_sum = P.sum(dim=2)
+-    # Avoid division by zero
+-    P_sum = torch.clamp(P_sum, min=1e-6)
+-    C_final = C_acc / P_sum.unsqueeze(-1)
+-    
+-    return C_final
++    return rendered_image
++
++def compute_signed_distance_to_triangle(xs, ys, v1, v2, v3):
++    """
++    Compute signed distance from pixels to triangle edges.
++    Positive inside, negative outside.
++    """
++    # This is a placeholder for the actual geometric computation.
++    # A robust implementation would use barycentric coordinates or distance to segments.
++    # For the disk example, it's radial distance [S5].
++    # For general triangles, it's the distance to the boundary.
++    # We assume a helper function exists that returns the signed distance.
++    # [G] In practice, this involves computing the distance to the 3 line segments
++    # and determining the sign based on the triangle's orientation.
++    pass
+ ```
++
++**Edge Cases and Pitfalls:**
++*   **Zero Gradients:** Using hard coverage (e.g., `distance < radius`) results in zero gradients for all parameters, preventing optimization [S5].
++*   **Occlusion Discontinuities:** Traditional rasterizers fail to provide reasonable gradients for reversing erroneous self-intersections because they cannot differentiate with respect to occlusion [S2, unofficial]. Soft Rasterizer avoids this by blending visibility [S2, unofficial].
++*   **Performance:** Without z-culling, all triangles contribute to all pixels, which can be computationally expensive for high triangle counts [S1, S4].
+ 
+ ## Subtopics
+ 
+ ### [HardSoftRas](10744-hardsoftras.md)
+-HardSoftRas is a hardware-accelerated differentiable rasterization method that propagates gradients from screen space to far-range vertex attributes by combining hard face rasterization with soft face expansion. It solves the problem of pseudo-occlusion artifacts and sparse, discontinuous gradients common in prior soft rasterizers (like SoftRas) and geometric anti-aliasing methods (like Nvdiffrast) when using a small number of depth peeling buffers. Unlike its siblings, it uses a hybrid hard/soft depth test and uniform edge pixel blending to ensure dense, smooth gradients for inverse rendering.
++A hardware-accelerated variant that combines hard face rasterization with soft face expansion to solve pseudo-occlusion artifacts and sparse gradients.
++
++### [HardSoftRas](10744-hardsoftras.md)
++A specific implementation by Che et al. that uses a smooth z-buffer and soft blending to achieve $C^\infty$ smoothness.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(H \cdot W \cdot N_f)$ for naive implementation, as every pixel must consider every triangle. This is significantly slower than hard rasterizers ($O(H \cdot W)$) and makes it unsuitable for real-time applications without optimization or acceleration structures.
+-*   **Memory Complexity:** $O(H \cdot W \cdot N_f)$ to store the probability map if computed explicitly, or $O(H \cdot W)$ if computed on the fly with optimized kernels.
+-*   **Measured Performance:** Jrender's SoftRas implementation takes 7.0ms for forward rendering + gradient on a 280-triangle bowl at 256x256 resolution, compared to 7.2ms for official SoftRas [S3]. Performance scales with resolution and triangle count; e.g., at 4096x4096, Jrender takes 24.3ms for the same bowl, while official SoftRas takes 43.7ms [S3]. Pytorch3d's implementation is slower, taking 12.8ms at 256x256 for the bowl [S3].
+-*   **Strengths:** Fully differentiable with respect to all vertices; gradients flow to occluded and distant triangles, aiding geometry optimization; simple to implement conceptually.
+-*   **Limitations:** Computationally expensive for high-resolution images or complex meshes; produces blurry outputs due to probabilistic blending; no control over forward pass sharpness (unlike DIB-R) [S2, unofficial].
+-*   **When to Use:** Geometry optimization, single-view mesh reconstruction, shape-fitting tasks where gradient flow to occluded geometry is beneficial [S1, S3].
+-*   **When Not to Use:** Real-time rendering, applications requiring sharp edges, or scenes with very high triangle counts where performance is critical.
++*   **Time Complexity:** $O(H \cdot W \cdot M)$ in the naive implementation, where $H, W$ are image dimensions and $M$ is the number of triangles. This is because every pixel must consider every triangle (or at least those in its bounding box) [S1, S4].
++*   **Memory Complexity:** $O(H \cdot W \cdot M)$ to store the visibility tensor $V$ if computed explicitly, or $O(H \cdot W)$ if computed on the fly and aggregated [S2, unofficial].
++*   **Measured Performance:** Jrender's SoftRas implementation takes 7.0ms for forward rendering + gradient on a 280-triangle bowl at 256x256 resolution, compared to 7.2ms for official SoftRas [S4]. Performance scales with resolution and triangle count [S4].
++*   **Strengths:** Allows gradients to flow to occluded and far triangles, which helps geometry optimization converge faster [S1, S4]. It is $C^\infty$ smooth, avoiding discontinuities at occlusions [S2, unofficial].
++*   **Limitations:** Can produce blurry edges if the smoothness parameter is not tuned [S3, unofficial]. Does not use z-culling, which can be inefficient for complex scenes [S1].
++*   **When to Use:** Suitable for tasks needing to refine object vertices and requiring gradients through occlusions, such as single-view mesh reconstruction and image-based shape-fitting [S1, S4].
++*   **When Not to Use:** When real-time performance is critical and the scene has many triangles, or when sharp, non-differentiable edges are desired.
+ 
+ ## Background
+-Soft Rasterizer was proposed by Liu et al. [S1, S3][S2, unofficial] as a representative method for modifying the rasterization stage to make it differentiable. It treats each triangle as a probabilistic cloud, replacing the deterministic z-buffer with a stochastic aggregation. It has been validated in single-view mesh reconstruction and image-based shape-fitting tasks, achieving state-of-the-art results [S1, S3]. Pytorch3d [S1, S3] provides a highly optimized implementation, and Jrender [S1, S3] has shown better performance in benchmarks.
++The Soft Rasterizer was introduced by Liu et al. in 2019 as part of the SoftRas method [S5]. It was designed to address the non-differentiability of traditional rasterization, particularly at occlusion boundaries. The method has been widely adopted in differentiable rendering libraries such as PyTorch3D [S1, S4] and Jrender [S1, S4]. It is used in applications like single-view mesh reconstruction, image-based shape-fitting, and 3D reconstruction from images [S1, S5].
+ 
+ ## Sources
+ [S1] Jrender: An efficient differentiable rendering library based on Jittor, https://doi.org/10.1016/j.gmod.2023.101202, fetched 2026-10-27
+-[S2] Differentiable Rendering: A Survey, https://doi.org/10.48550/arxiv.2006.12057, fetched 2026-10-26 (unofficial)
+-[S3] Jrender: An efficient differentiable rendering library based on Jittor, https://www.sciencedirect.com/science/article/pii/S1524070323000322, fetched 2026-11-01+[S2] Pix2Vex: Image-to-Geometry Reconstruction using a Smooth Differentiable Renderer, https://doi.org/10.48550/arxiv.1903.11149, fetched 2026-10-26 (unofficial)
++[S3] Differentiable Rendering: A Survey, https://doi.org/10.48550/arxiv.2006.12057, fetched 2026-10-26 (unofficial)
++[S4] Jrender: An efficient differentiable rendering library based on Jittor, https://www.sciencedirect.com/science/article/pii/S1524070323000322, fetched 2026-11-01
++[S5] Differentiable Rendering - 可微渲染：从2D 学习3D, https://www.ultralytics.com/zh/glossary/differentiable-rendering, fetched 2026-10-30

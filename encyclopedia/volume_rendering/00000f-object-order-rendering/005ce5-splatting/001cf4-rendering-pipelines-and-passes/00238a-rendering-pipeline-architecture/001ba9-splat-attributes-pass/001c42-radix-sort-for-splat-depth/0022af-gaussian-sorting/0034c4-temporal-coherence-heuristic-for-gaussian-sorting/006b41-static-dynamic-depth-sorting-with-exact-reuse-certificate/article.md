@@ -1,0 +1,208 @@
+# Static-Dynamic Depth Sorting with Exact Reuse Certificate
+
+Also called: Depth Travel Bound reuse, Depth-Order Certificate, Mobile-4DGS sorting, Static-Dynamic separation sorting, Two-Stream Depth Order
+
+## Overview
+Static-Dynamic Depth Sorting with Exact Reuse Certificate is a rendering optimization for 4D Gaussian Splatting that reduces computational overhead during playback by selectively reusing previously committed depth orders [S1, unofficial]. It solves the problem of expensive per-frame re-projection, sorting, merging, and index-buffer updates by separating Gaussians into static and dynamic sets, caching the static depth order, and verifying the validity of the global draw list using a closed-form depth-motion bound [S1, unofficial]. It sets itself apart from its parent [Temporal Coherence Heuristic for Gaussian Sorting](7339-temporal-coherence-heuristic-for-gaussian-sorting.md) by providing a mathematically exact certificate for reuse (or a bounded budget-based relaxation) rather than relying solely on heuristic temporal coherence, thereby guaranteeing visual consistency for reused frames [S1, unofficial].
+
+## How it works
+The method operates on a binary partition of Gaussians into a static set $S$ and a dynamic set $D$, where $g_i=0$ for $i \in S$ and $g_i=1$ for $i \in D$ [S1, unofficial].
+
+**Inputs and Outputs**
+*   **Inputs:** Committed draw list $\pi_c$, its commit time $t_c$, streams $S$ and $D$, precomputed bounds $V, A, t'_{\min}, t'_{\max}$, mean Gaussian radius $\bar{s}$, budget tolerance $r$, current time $t$, and camera parameters (depth row $n$, depth range $[z_{\min}, z_{\max}]$).
+*   **Outputs:** A draw list $\pi$ (either reused $\pi_c$ or newly computed) and a status flag indicating reuse or commit.
+
+**Data Structures**
+*   **Static Cache:** Stores the sorted indices of $S$ for a fixed camera configuration. Invalidated if $n$ or $[z_{\min}, z_{\max}]$ changes.
+*   **Global Bounds:** Scalars $V = \max_{i \in D} \|v_i\|_2$, $A = \max_{i \in D} \|a_i\|_2$, $t'_{\min} = \min_{i \in D} t'_i$, $t'_{\max} = \max_{i \in D} t'_i$ [S1, unofficial].
+*   **Committed List $\pi_c$:** Array of $N$ indices representing the sorted order at $t_c$.
+
+**Algorithm Steps**
+
+1.  **Check Camera Change:** If the camera depth mapping ($n$ or $[z_{\min}, z_{\max}]$) has changed since $t_c$:
+    *   Invalidate static cache.
+    *   Re-project and sort $S$ (refresh static cache).
+    *   Re-project and sort $D$.
+    *   Merge streams $S$ and $D$ to produce $\pi$.
+    *   Update $\pi_c \leftarrow \pi$, $t_c \leftarrow t$.
+    *   Recompute $g_{\min}$ if $r=0$.
+    *   Return $\pi$ and commit status.
+
+2.  **Compute Motion Bound:** Calculate the maximum quantized key shift $M(t)$ for dynamic Gaussians:
+    *   Compute temporal offset bound: $\tau(t) = \max(|t - t'_{\min}|, |t - t'_{\max}|)$ [S1, unofficial].
+    *   Compute depth motion bound: $\Delta z(t) = |t - t_c| \|n\|_2 \times V + \frac{1}{2} A (\tau(t) + \tau(t_c))$ [S1, unofficial].
+    *   Compute quantized bound: $M(t) = \kappa \Delta z(t)$, where $\kappa = \frac{B-1}{z_{\max}-z_{\min}}$ and $B=2^{16}$ [S1, unofficial].
+
+3.  **Evaluate Reuse Certificate:**
+    *   **Case $r=0$ (Exact):** Identify relevant neighboring pairs in $\pi_c$: $K_c = \{k : \pi_c(k) \in D \text{ or } \pi_c(k+1) \in D\}$ [S1, unofficial]. Compute $g_{\min} = \min_{k \in K_c} (q_{\pi_c(k+1)}(t_c) - q_{\pi_c(k)}(t_c))$. If $2M(t) < g_{\min}$, acknowledge reuse. If $g_{\min}=0$ (tie), reject reuse.
+    *   **Case $r>0$ (Budget):** If $M(t) \leq \lceil \kappa r \bar{s} \|n\|_2 \rceil$, acknowledge reuse. This allows small local ordering changes [S1, unofficial].
+
+4.  **Handle Reuse or Commit:**
+    *   **Reuse:** Worker keeps $\pi_c$, performs no re-projection/sort/merge, returns O(1) acknowledgement. Main thread skips index upload.
+    *   **Commit:** Re-project and sort $D$ only (static cache is valid). Merge $S$ and $D$ to produce $\pi$. Update $\pi_c \leftarrow \pi$, $t_c \leftarrow t$. Recompute $g_{\min}$ if $r=0$. Return $\pi$ and commit status.
+
+**Pseudocode**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def adaptive_depth_order_reuse(pi_c, t_c, S, D, V, A, t_min, t_max, s_bar, r, t, n, z_min, z_max, B=65536):
+    """
+    Adaptive depth-order reuse for 4D Gaussian Splatting.
+    
+    Args:
+        pi_c: Committed draw list (array of indices)
+        t_c: Time of commit
+        S: Static Gaussian stream (indices)
+        D: Dynamic Gaussian stream (indices)
+        V: Max velocity magnitude in D
+        A: Max acceleration magnitude in D
+        t_min: Min temporal support in D
+        t_max: Max temporal support in D
+        s_bar: Mean Gaussian radius
+        r: Budget tolerance (0 for exact, >0 for relaxed)
+        t: Current time
+        n: Camera depth row vector
+        z_min: Near plane depth
+        z_max: Far plane depth
+        B: Number of quantization bins (2^16)
+        
+    Returns:
+        pi: Draw list
+        reused: Boolean, True if pi_c was reused
+    """
+    # 1. Check for camera change
+    if camera_depth_mapping_changed(n, z_min, z_max):
+        # Invalidate static cache and recompute everything
+        pi_s = sort_stream(S, n, z_min, z_max, B)
+        pi_d = sort_stream(D, n, z_min, z_max, B)
+        pi = merge_streams(pi_s, pi_d)
+        pi_c = pi
+        t_c = t
+        if r == 0:
+            g_min = compute_g_min(pi_c, D)
+        return pi, False
+
+    # 2. Compute motion bound
+    tau_t = max(abs(t - t_min), abs(t - t_max))
+    tau_tc = max(abs(t_c - t_min), abs(t_c - t_max))
+    
+    # Depth motion bound
+    delta_z = abs(t - t_c) * norm(n) * V + 0.5 * A * (tau_t + tau_tc)
+    
+    # Quantization factor
+    kappa = (B - 1) / (z_max - z_min)
+    M = kappa * delta_z
+    
+    # 3. Evaluate reuse certificate
+    if r == 0:
+        # Exact reuse
+        if 2 * M < g_min:
+            return pi_c, True
+        else:
+            # Commit new order
+            pi_d = sort_stream(D, n, z_min, z_max, B)
+            pi_s = get_cached_static_stream(S) # Static cache valid
+            pi = merge_streams(pi_s, pi_d)
+            pi_c = pi
+            t_c = t
+            g_min = compute_g_min(pi_c, D)
+            return pi, False
+            
+    elif r > 0:
+        # Budget reuse
+        threshold = ceil(kappa * r * s_bar * norm(n))
+        if M <= threshold:
+            return pi_c, True
+        else:
+            # Commit new order
+            pi_d = sort_stream(D, n, z_min, z_max, B)
+            pi_s = get_cached_static_stream(S)
+            pi = merge_streams(pi_s, pi_d)
+            pi_c = pi
+            t_c = t
+            # g_min not needed for r > 0 in this branch logic, 
+            # but recomputed if r changes to 0 later
+            return pi, False
+
+def sort_stream(stream, n, z_min, z_max, B):
+    """
+    Stable counting sort for a stream of Gaussians.
+    """
+    kappa = (B - 1) / (z_max - z_min)
+    keys = []
+    for i in stream:
+        # Project to view-space depth
+        z_i = dot(n, get_center(i)) 
+        # Quantize
+        q_i = clip(kappa * (z_i - z_min), 0, B - 1)
+        keys.append((q_i, i))
+    
+    # Stable counting sort
+    # Since input is ordered by row-id, stable sort preserves row-id for ties
+    return argsort(keys)
+
+def merge_streams(pi_s, pi_d):
+    """
+    Standard two-pointer merge of two sorted streams.
+    """
+    result = []
+    i, j = 0, 0
+    while i < len(pi_s) and j < len(pi_d):
+        # Compare (key, index) tuples
+        if pi_s[i] <= pi_d[j]:
+            result.append(pi_s[i])
+            i += 1
+        else:
+            result.append(pi_d[j])
+            j += 1
+    result.extend(pi_s[i:])
+    result.extend(pi_d[j:])
+    return result
+
+def compute_g_min(pi_c, D):
+    """
+    Compute minimum depth-key gap between relevant neighbors.
+    """
+    g_min = infinity
+    for k in range(len(pi_c) - 1):
+        idx_curr = pi_c[k]
+        idx_next = pi_c[k+1]
+        
+        # Check if at least one is dynamic
+        if idx_curr in D or idx_next in D:
+            key_curr = get_quantized_key(idx_curr)
+            key_next = get_quantized_key(idx_next)
+            gap = key_next - key_curr
+            if gap < g_min:
+                g_min = gap
+    return g_min
+```
+
+**Parameters**
+*   $B = 2^{16}$: Number of quantization bins [S1, unofficial].
+*   $r$: Tolerance parameter. Default $0.5$ (mean radii) [S1, unofficial]. $r=0$ for exact certificate.
+*   $\bar{s}$: Mean Gaussian radius, computed once from decoded scales [S1, unofficial].
+
+**Edge Cases and Pitfalls**
+*   **Ties:** If two relevant Gaussians share the same key, $g_{\min}=0$, and exact reuse is conservatively rejected [S1, unofficial].
+*   **Camera Change:** If $n$ or $[z_{\min}, z_{\max}]$ changes, the static cache is invalidated, requiring full recomputation [S1, unofficial].
+*   **Precision:** The certificate guarantees exact reuse only for the 16-bit quantized ordering [S1, unofficial].
+
+## Subtopics
+
+### Adaptive Depth-Order Reuse
+An algorithm that determines if the previously computed global draw list can be reused for a playback frame, avoiding re-sorting [S1, unofficial]. It extends the basic certificate by supporting a "budget branch" ($r>0$) that allows small local ordering changes relative to the mean Gaussian radius, providing a practical relaxation for dense scenes where the exact certificate might be too conservative [S1, unofficial]. It is chosen when visual quality can tolerate minor depth-order swaps within overlapping footprints, whereas the exact mode ($r=0$) is chosen for strict consistency [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Reused frame cost is O(1) for certificate computation on the worker and O(1) communication [S1, unofficial]. Committed frame cost is O(N+B) for projection/sort/merge on the worker and O(N) for index upload on the main thread [S1, unofficial].
+*   **Memory Complexity:** Requires storage for the committed draw list ($4N$ bytes) and precomputed bounds (constant space) [S1, unofficial]. The counting-sort scratch space ($B=2^{16}$) is reused across frames [S1, unofficial].
+*   **Performance:** On mobile devices, this method substantially reduces rendering overhead by skipping re-projection, sorting, merging, and index uploads for frames that pass the certificate [S1, unofficial].
+*   **Strengths:** Eliminates redundant computation for static scenes and reduces load for dynamic scenes by bounding motion [S1, unofficial].
+*   **Limitations:** The exact certificate can be conservative in dense scenes with small depth-key gaps [S1, unofficial]. The budget branch may allow minor visual artifacts due to local ordering changes [S1, unofficial].
+
+## Background
+The method was introduced in Mobile-4DGS, a framework for unified static-dynamic real-time mobile Gaussian Splatting [S1, unofficial]. It builds on the binary static-dynamic partition learned during optimization, enabling continuous-time modeling without runtime deformation networks [S1, unofficial]. The Depth-Order Certificate (DOC) leverages this partition to cache static depth orders and bound dynamic motion, enabling real-time 3D and 4D Gaussian Splatting on mobile devices [S1, unofficial].
+
+## Sources
+[S1] Mobile-4DGS: Unified Static-Dynamic Real-time Mobile Gaussian Splatting, https://arxiv.org/abs/2610.05289, fetched 2026-10-29 (unofficial)

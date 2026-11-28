@@ -1,0 +1,225 @@
+--- v001.md
++++ v002.md
+@@ -1,130 +1,120 @@
+ # Tricubic Interpolation
++
+ Also called: Tricubic Hermite Interpolation
++
+ ## Overview
+-Tricubic interpolation is a higher-order method that employs cubic polynomials over a 4x4x4 neighborhood of 64 points to approximate smooth underlying functions with an accuracy of $O(h^4)$, where $h$ is the grid spacing [S1]. It provides $C^1$ continuity, reducing artifacts in gradient-sensitive tasks like volume rendering, whereas trilinear interpolation only achieves $C^0$ continuity [S1]. It is chosen when differentiable outputs are required for visualization [S1].
++Tricubic interpolation is a higher-order method that employs cubic polynomials over a 4x4x4 neighborhood of 64 points to approximate smooth underlying functions with an accuracy of $O(h^4)$, where $h$ is the grid spacing [S1]. Unlike trilinear interpolation which provides only $C^0$ continuity, tricubic interpolation yields $C^1$ continuity, significantly reducing artifacts in gradient-sensitive tasks such as volume rendering and medical imaging upsampling [S1]. It is chosen when differentiable outputs are required, despite the increased computational expense compared to lower-order methods [S1].
++
+ ## How it works
+-Tricubic interpolation, specifically in its Hermite form, constructs cubic patches using both scalar values and their first-order gradients (tangents) at grid vertices [S2, unofficial]. This approach requires four control points and four tangents per dimension to define the patch [S2, unofficial].
+-
+ **Inputs and Outputs:**
+-*   **Input:** A query point $\mathbf{p} = (x, y, z)$ in world space; a structured 3D grid of scalar values $V$ and their gradients $\nabla V$.
+-*   **Output:** The interpolated scalar value $u(\mathbf{p})$ and optionally its gradient $\nabla u(\mathbf{p})$.
++- Input: A dense grid tensor $\mathbf{G}$ of shape $(D_x, D_y, D_z, C)$ containing scalar values and their spatial gradients [S1][S2, unofficial].
++- Input: A query point $\mathbf{p} \in \mathbb{R}^3$.
++- Output: The interpolated value $f(\mathbf{p})$ and optionally its gradient $\nabla f(\mathbf{p})$.
+ 
+ **Data Structures:**
+-The grid stores values $V_{i,j,k}$ and gradients $\nabla V_{i,j,k} = (\frac{\partial V}{\partial x}, \frac{\partial V}{\partial y}, \frac{\partial V}{\partial z})$ at integer coordinates $(i,j,k)$. The gradients are typically computed via finite differences or provided as part of the volume data [S2, unofficial].
++The method requires access to the grid values and gradients at the 8 corners of the enclosing grid cell. For a cell defined by integer indices $(i, j, k)$, the required data consists of:
++- 8 scalar values: $\mathbf{G}_{i+l, j+m, k+n}$ for $l,m,n \in \{0,1\}$.
++- 24 gradient vectors: $\nabla \mathbf{G}_{i+l, j+m, k+n}$ for $l,m,n \in \{0,1\}$, where each gradient is a 3D vector $(\partial_x, \partial_y, \partial_z)$.
+ 
+-**Steps:**
+-1.  **Locate Cell:** Determine the grid cell containing $\mathbf{p}$. Let $(i, j, k)$ be the integer coordinates such that $i \le x < i+1$, $j \le y < j+1$, $k \le z < k+1$.
+-2.  **Normalize Coordinates:** Compute local coordinates $t_x, t_y, t_z \in [0, 1]$ relative to the cell:
+-    $$ t_x = x - i, \quad t_y = y - j, \quad t_z = z - k $$
+-3.  **Gather Coefficients:** Collect the 8 corner values $V_{i',j',k'}$ and their 24 gradient components (3 per corner) for $i' \in \{i, i+1\}, j' \in \{j, j+1\}, k' \in \{k, k+1\}$ [S2, unofficial].
+-4.  **Evaluate Basis:** Compute the Hermite basis functions for each dimension. For a dimension with local coordinate $t$, the basis functions for value and derivative are:
+-    $$ h_{00}(t) = 2t^3 - 3t^2 + 1 $$
+-    $$ h_{10}(t) = t^3 - 2t^2 + t $$
+-    $$ h_{01}(t) = -2t^3 + 3t^2 $$
+-    $$ h_{11}(t) = t^3 - t^2 $$
+-    These functions ensure $C^1$ continuity across cell boundaries [S2, unofficial].
+-5.  **Compute Value:** Combine the gathered coefficients using the tensor product of the basis functions. The value $u(\mathbf{p})$ is computed as:
+-    $$ u(\mathbf{p}) = \sum_{d_x \in \{0,1\}} \sum_{d_y \in \{0,1\}} \sum_{d_z \in \{0,1\}} H_{d_x}(t_x) H_{d_y}(t_y) H_{d_z}(t_z) C_{d_x,d_y,d_z} $$
+-    where $C_{d_x,d_y,d_z}$ represents the appropriate value or gradient component scaled by the grid spacing if gradients are not normalized [S2, unofficial]. Specifically, the term involving the gradient $\frac{\partial V}{\partial x}$ is multiplied by $h_{10}(t_x)$ or $h_{11}(t_x)$ and the grid spacing $\Delta x$ (if gradients are not pre-scaled) [S2, unofficial].
++**Numbered Steps:**
++1. **Coordinate Mapping:** Map the query point $\mathbf{p}$ to local cell coordinates $(u, v, w) \in [0, 1]^3$ relative to the enclosing grid cell defined by integer indices $(i, j, k)$ [S1][S2, unofficial].
++2. **Boundary Clamping:** Clamp indices $(i+l, j+m, k+n)$ to the grid domain $[0, D_d-1]$ if they fall outside the bounds [S1][S2, unofficial].
++3. **Basis Evaluation:** Evaluate the 1D cubic Hermite basis functions for each dimension. The basis functions $H_0(t)$ and $H_1(t)$ for $t \in \{u, v, w\}$ are defined as:
++   $$ H_0(t) = 2t^3 - 3t^2 + 1 $$
++   $$ H_1(t) = t^3 - 2t^2 + t $$
++   The derivatives of these basis functions are:
++   $$ H'_0(t) = 6t^2 - 6t $$
++   $$ H'_1(t) = 3t^2 - 4t + 1 $$
++4. **Interpolation:** Compute the interpolated value using the tensor product of the basis functions and the gathered data. For a scalar field, the value is:
++   $$ f(\mathbf{p}) = \sum_{l=0}^{1} \sum_{m=0}^{1} \sum_{n=0}^{1} \left[ H_l(u)H_m(v)H_n(w) \mathbf{G}_{i+l,j+m,k+n} + H'_l(u)H_m(v)H_n(w) \partial_x \mathbf{G}_{i+l,j+m,k+n} + H_l(u)H'_m(v)H_n(w) \partial_y \mathbf{G}_{i+l,j+m,k+n} + H_l(u)H_m(v)H'_n(w) \partial_z \mathbf{G}_{i+l,j+m,k+n} \right] $$
++   Note: The gradient components $\partial_x, \partial_y, \partial_z$ must be scaled by the grid spacing $h$ if the gradients are stored as finite differences rather than normalized derivatives [S2, unofficial].
+ 
+ **Parameters:**
+-*   Grid spacing $h$: Implicit in the coordinate normalization.
+-*   Gradient computation method: Typically central differences for interior points, forward/backward for boundaries [G].
++- Grid spacing $h$: Determines the scaling of gradient terms. Not given in the sources.
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Boundary Conditions:** Gradients at the volume boundaries must be handled carefully, as central differences are not possible. Forward or backward differences are used [G].
+-*   **Precision:** The evaluation involves multiple polynomial multiplications, which may accumulate floating-point errors in extreme cases [G].
+-*   **Computational Cost:** Requires 64 points and gradient evaluations, significantly more than trilinear [S1].
++- **Precision:** The use of cubic polynomials increases computational cost and potential numerical instability if gradients are noisy [S1].
++- **Boundary Conditions:** Standard clamping is applied, but discontinuities at boundaries may still cause artifacts if gradients are not consistent [S1].
+ 
+ **Pseudocode:**
+ ```python
+-def tricubic_hermite_interpolate(V, grad_V, p, h):
+-    """
+-    V: 3D array of scalar values
+-    grad_V: 3D array of gradient vectors (dx, dy, dz)
+-    p: query point (x, y, z)
+-    h: grid spacing
+-    """
+-    x, y, z = p
+-    i, j, k = floor(x), floor(y), floor(z)
++def tricubic_interpolate(G, gradients, p, grid_shape):
++    # 1. Map p to local coordinates
++    i, j, k = floor(p)
++    u, v, w = p - (i, j, k)
+     
+-    # Normalize coordinates to [0, 1]
+-    tx = (x - i) / h
+-    ty = (y - j) / h
+-    tz = (z - k) / h
++    # 2. Clamp indices
++    i = clamp(i, 0, grid_shape[0] - 2)
++    j = clamp(j, 0, grid_shape[1] - 2)
++    k = clamp(k, 0, grid_shape[2] - 2)
+     
+-    # Basis functions
+-    def h00(t): return 2*t**3 - 3*t**2 + 1
+-    def h10(t): return t**3 - 2*t**2 + t
+-    def h01(t): return -2*t**3 + 3*t**2
+-    def h11(t): return t**3 - t**2
++    # 3. Gather data
++    # Values at 8 corners
++    vals = []
++    for l in [0, 1]:
++        for m in [0, 1]:
++            for n in [0, 1]:
++                vals.append(G[i+l, j+m, k+n])
+     
+-    # Gather 8 corners
+-    corners = []
+-    for di in [0, 1]:
+-        for dj in [0, 1]:
+-            for dk in [0, 1]:
+-                idx, idy, idz = i + di, j + dj, k + dk
+-                val = V[idx, idy, idz]
+-                gx, gy, gz = grad_V[idx, idy, idz]
+-                corners.append({
+-                    'val': val,
+-                    'gx': gx * h, # Scale gradient by spacing if not pre-scaled
+-                    'gy': gy * h,
+-                    'gz': gz * h
+-                })
++    # Gradients at 8 corners
++    grads = []
++    for l in [0, 1]:
++        for m in [0, 1]:
++            for n in [0, 1]:
++                grads.append(gradients[i+l, j+m, k+n])
++                
++    # 4. Evaluate basis functions
++    H0_u, H1_u = hermite_basis(u)
++    H0_v, H1_v = hermite_basis(v)
++    H0_w, H1_w = hermite_basis(w)
+     
+-    # Compute interpolated value
+-    # This is a simplified tensor product structure
+-    # In practice, this is often implemented as a series of 1D interpolations
+-    # or a direct 64-term sum. Here we show the conceptual combination.
++    dH0_u, dH1_u = hermite_derivative(u)
++    dH0_v, dH1_v = hermite_derivative(v)
++    dH0_w, dH1_w = hermite_derivative(w)
+     
+-    # Weights for value and derivatives in each dimension
+-    # W_val_x = [h00(tx), h01(tx)]
+-    # W_deriv_x = [h10(tx), h11(tx)]
+-    # Similar for y and z
+-    
+-    # The full expansion is complex; a common efficient implementation
+-    # uses the property that it's a tensor product of 1D Hermite interpolants.
+-    
+-    # 1D Hermite interpolation for a single dimension
+-    def hermite_1d(p0, p1, d0, d1, t):
+-        return h00(t)*p0 + h10(t)*d0 + h01(t)*p1 + h11(t)*d1
++    # 5. Compute interpolated value
++    result = 0.0
++    idx = 0
++    for l in [0, 1]:
++        for m in [0, 1]:
++            for n in [0, 1]:
++                # Basis weights
++                w_val = [H0_u, H1_u][l] * [H0_v, H1_v][m] * [H0_w, H1_w][n]
++                w_dx = [dH0_u, dH1_u][l] * [H0_v, H1_v][m] * [H0_w, H1_w][n]
++                w_dy = [H0_u, H1_u][l] * [dH0_v, dH1_v][m] * [H0_w, H1_w][n]
++                w_dz = [H0_u, H1_u][l] * [H0_v, H1_v][m] * [dH0_w, dH1_w][n]
++                
++                # Add contribution
++                result += w_val * vals[idx]
++                # Note: Gradient scaling by grid spacing h is assumed to be handled in gradients storage
++                result += w_dx * grads[idx][0]
++                result += w_dy * grads[idx][1]
++                result += w_dz * grads[idx][2]
++                idx += 1
++                
++    return result
+ 
+-    # Interpolate along x for each of the 8 corners' values and derivatives
+-    # This step is conceptual; actual implementation requires careful tensor product handling
+-    # to combine value and gradient contributions correctly.
+-    
+-    # A more direct approach for the scalar value:
+-    # u = sum_{i,j,k} (basis_x(i) * basis_y(j) * basis_z(k) * coeff(i,j,k))
+-    # where coeff includes value and gradient terms.
+-    
+-    # Given the complexity, we rely on the basis functions defined above.
+-    # The final value is a linear combination of the 8 values and 24 gradient components.
+-    
+-    # Placeholder for the full tensor product expansion which is lengthy.
+-    # The key is that the basis functions h00, h01, h10, h11 are applied to tx, ty, tz
+-    # and combined with the corresponding V and grad_V components.
+-    
+-    # For brevity, we assume a helper function `tensor_hermite` exists that performs
+-    # the 3D tensor product of the 1D Hermite bases with the 8x3 coefficients.
+-    
+-    # return tensor_hermite(corners, tx, ty, tz)
+-    pass
++def hermite_basis(t):
++    H0 = 2*t**3 - 3*t**2 + 1
++    H1 = t**3 - 2*t**2 + t
++    return H0, H1
++
++def hermite_derivative(t):
++    dH0 = 6*t**2 - 6*t
++    dH1 = 3*t**2 - 4*t + 1
++    return dH0, dH1
+ ```
+-*Note: The pseudocode above outlines the structure. A complete implementation requires explicitly expanding the tensor product of the 1D Hermite bases with the 8 values and 24 gradient components. The scaling of gradients by $h$ is critical if gradients are not stored as dimensionless derivatives [S2, unofficial].*
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(1)$ per sample, but with a significantly higher constant factor than trilinear due to 64 points and gradient evaluations [S1].
+-*   **Memory Complexity:** Requires storing gradients alongside values, increasing memory usage by a factor of 4 (1 value + 3 gradient components per vertex) [S2, unofficial].
+-*   **Accuracy:** $O(h^4)$ for smooth functions, superior to trilinear's $O(h^2)$ [S1].
+-*   **Continuity:** $C^1$ continuous, reducing artifacts in gradient-sensitive tasks [S1].
+-*   **Strengths:** High accuracy, smooth gradients, suitable for differentiable rendering [S1].
+-*   **Limitations:** High computational cost, increased memory usage, potential for overshoot/undershoot (Runge's phenomenon) if not carefully constrained [G].
+-*   **When to use:** When $C^1$ continuity is needed for visualization [S1].
+-*   **When not to use:** When performance is critical and smoothness is less important (use trilinear) [S1].
++- **Time Complexity:** $O(1)$ per query, but with a significantly higher constant factor than trilinear due to 64 coefficients and gradient evaluations [S1].
++- **Memory Complexity:** Requires storing gradients alongside values, increasing memory usage by a factor of 4 (1 value + 3 gradient components per voxel) [S2, unofficial].
++- **Measured Performance:** Studies confirm tricubic's edge in accuracy over trilinear for upsampled 3D volumes, albeit with longer processing times [S1].
++- **Strengths:** $C^1$ continuity, superior approximation for smooth functions ($O(h^4)$ accuracy) [S1].
++- **Limitations:** Increased computational expense, potential for artifacts if gradients are noisy or inconsistent [S1].
++- **When to use:** When $C^1$ continuity is needed for differentiable outputs in visualization [S1].
++- **When not to use:** When performance is critical and $C^0$ continuity is sufficient, or when data is not smooth [S1].
+ 
+ ## Background
+-Tricubic interpolation is a higher-order alternative to trilinear interpolation, developed to provide smoother results in 3D data reconstruction [S1]. It is particularly relevant in medical imaging and volume rendering where gradient information is important [S1]. The Hermite form, using samples and gradients, was highlighted in the context of irradiance volumes for games [S2, unofficial].
++Tricubic interpolation was developed as a higher-order alternative to trilinear interpolation, leveraging cubic Hermite patches which require four control points and four tangents (gradients) [S2, unofficial]. It is widely used in medical imaging and volume rendering where smoothness and gradient continuity are important [S1]. The method is discussed in the context of irradiance volumes for games, highlighting its suitability for constructing smooth patches from samples and gradients [S2, unofficial].
+ 
+ ## Sources

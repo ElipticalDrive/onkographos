@@ -1,0 +1,213 @@
+--- v004.md
++++ v005.md
+@@ -1,5 +1,3 @@
+ # DVGO Volume Rendering Forward
+-
+-
+ ## Overview
+ Performs volume rendering for a batch of rays, including sampling, density/alpha computation, transmittance calculation, color estimation, and ray marching [S1, S2, unofficial]. It computes the final rendered color, distance, accumulation, and weights from RGB, density, t_vals, directions, and background color assumption [S2, unofficial]. It differs from [NeRF Volume Rendering](12442-nerf-volume-rendering.md) by using a pre-allocated 3D voxel grid for density and color storage, enabling faster training and inference via direct memory access, while maintaining the volume rendering integral formulation [S2, unofficial].
+@@ -40,18 +38,18 @@
+ 
+ 1.  **Sample Points:** Sample points on rays using `self.sample_ray` [S1, unofficial].
+-2.  **Compute Midpoints:** Compute $t_{mids}$ as $0.5 \times (t_{vals}[:, :-1] + t_{vals}[:, 1:])$ [S2, unofficial].
++2.  **Compute Midpoints:** Compute $t_{mids}$ as $0.5 \times (t_{vals}[\dots, :-1] + t_{vals}[\dots, 1:])$ [S2, unofficial].
+ 3.  **Free Space Masking:** If `mask_cache` exists and `use_fourier_grid` is false, filter `ray_pts`, `ray_id`, and `step_id` by the mask [S1, unofficial].
+-4.  **Compute Distances:** Compute $t_{dists}$ as $t_{vals}[:, 1:] - t_{vals}[:, :-1]$ [S2, unofficial].
++4.  **Compute Distances:** Compute $t_{dists}$ as $t_{vals}[\dots, 1:] - t_{vals}[\dots, :-1]$ [S2, unofficial].
+ 5.  **Query Density:** Query density from the density network/grid [S1, unofficial].
+ 6.  **Compute Delta:** Compute $\delta$ as $t_{dists}$ multiplied by the norm of `dirs` [S2, unofficial].
+ 7.  **Activate Density:** Activate density to alpha using `self.activate_density` [S1, unofficial].
+-8.  **Compute Density Delta:** Compute `density_delta` as `density[:, 0] * delta` [S2, unofficial].
++8.  **Compute Density Delta:** Compute `density_delta` as `density[\dots, 0] * delta` [S2, unofficial].
+ 9.  **Fast Color Filtering:** If `fast_color_thres > 0` and `use_fourier_grid` is false, filter points where `alpha > fast_color_thres` [S1, unofficial].
+-10. **Compute Transmittance:** Compute `trans` by concatenating zeros with cumsum of `density_delta[:, :-1]`, then exp of the negative [S2, unofficial].
+-    $$ trans = \exp(-\text{cumsum}(\text{density\_delta}[:, :-1])) $$
+-    (Note: `trans` is typically padded with 1.0 at the start or end depending on implementation details, here described as concatenating zeros then exp negative).
++10. **Compute Transmittance:** Compute `trans` by concatenating zeros with cumsum of `density_delta[\dots, :-1]`, then exp of the negative [S2, unofficial].
++    $$ trans = \exp(-\text{cumsum}(\text{density\_delta}[\dots, :-1])) $$
++    The sources specify concatenating zeros before the cumulative sum [S2, unofficial].
+ 11. **Compute Weights:** Compute accumulated transmittance weights using `Alphas2Weights.apply` with `alpha`, `ray_id`, and `N` [S1, unofficial].
+     $$ weights = \alpha \times trans $$
+-12. **Compute RGB:** Compute `comp_rgb` as sum of `weights[:, None] * rgb` along axis -2 [S2, unofficial].
++12. **Compute RGB:** Compute `comp_rgb` as sum of `weights[\dots, None] * rgb` along axis -2 [S2, unofficial].
+ 13. **Fast Color Filtering (Weights):** If `fast_color_thres > 0` and `use_fourier_grid` is false, filter points where `weights > fast_color_thres` [S1, unofficial].
+ 14. **Compute Accumulation:** Compute `acc` as sum of `weights` along axis -1 [S2, unofficial].
+@@ -59,7 +57,7 @@
+ 16. **Compute Distance:** Compute `distance` as sum of `weights * t_mids` along axis -1, divided by `acc` [S2, unofficial].
+ 17. **View-Dependent Color:** If `rgbnet` exists, compute view-dependent color. If `rgbnet_direct` is true, use `k0` as view feature; otherwise split `k0` into diffuse (first 3 channels) and view (remaining channels) [S1, unofficial].
+-18. **Clip Distance:** Clip `distance` using `nan_to_num` (replacing inf with inf) and clipping to $[t_{vals}[:, 0], t_{vals}[:, -1]]$ [S2, unofficial].
++18. **Clip Distance:** Clip `distance` using `nan_to_num` (replacing inf with inf) and clipping to $[t_{vals}[\dots, 0], t_{vals}[\dots, -1]]$ [S2, unofficial].
+ 19. **View Direction Embedding:** Compute positional embedding for `viewdirs`: flatten `viewdirs`, multiply by `viewfreq`, concatenate sin/cos embeddings, then flatten and index by `ray_id` [S1, unofficial].
+-20. **Background Addition:** If `white_bkgd` is True, add $(1. - acc[:, None])$ to `comp_rgb` [S2, unofficial].
++20. **Background Addition:** If `white_bkgd` is True, add $(1. - acc[\dots, None])$ to `comp_rgb` [S2, unofficial].
+ 21. **RGB Network:** Concatenate `k0_view` and `viewdirs_emb`, pass through `rgbnet` to get `rgb_logit` [S1, unofficial].
+ 22. **Final RGB:** Compute final RGB: if `rgbnet_direct`, $\text{sigmoid}(rgb\_logit)$; else $\text{sigmoid}(rgb\_logit + k0\_diffuse)$ [S1, unofficial].
+@@ -71,5 +69,4 @@
+ ```python
+ import torch
+-import torch.nn.functional as F
+ 
+ def dvgo_volume_rendering_forward(
+@@ -106,60 +103,50 @@
+     """
+     # Step 2: Compute Midpoints
+-    t_mids = 0.5 * (t_vals[:, :-1] + t_vals[:, 1:])
+-    
+-    # Step 3: Free Space Masking (Placeholder for specific mask logic)
++    t_mids = 0.5 * (t_vals[..., :-1] + t_vals[..., 1:])
++    
++    # Step 3: Free Space Masking
+     if mask_cache is not None and not use_fourier_grid:
+-        # Filter ray_pts, ray_id, step_id by mask
+-        # This step is implementation-specific and depends on the mask_cache structure
++        # Filter ray_pts, ray_id, step_id by mask. Sources do not specify exact mask application logic.
+         pass
+         
+     # Step 4: Compute Distances
+-    t_dists = t_vals[:, 1:] - t_vals[:, :-1]
++    t_dists = t_vals[..., 1:] - t_vals[..., :-1]
+     
+     # Step 6: Compute Delta
+     delta = t_dists * torch.norm(dirs, dim=-1)
+     
+-    # Step 7: Activate Density (Placeholder for specific activation logic)
+-    # self.activate_density is called here
+-    # Assuming density is already activated or this step modifies it
++    # Step 7: Activate Density
++    # self.activate_density is called here. Sources do not specify exact activation function.
+     # density = self.activate_density(density)
+     
+     # Step 8: Compute Density Delta
+-    density_delta = density[:, :, 0] * delta
+-    
+-    # Step 9: Fast Color Filtering (Placeholder)
++    density_delta = density[..., 0] * delta
++    
++    # Step 9: Fast Color Filtering
+     if fast_color_thres > 0 and not use_fourier_grid:
+-        # Filter points where alpha > fast_color_thres
+-        # alpha = 1 - torch.exp(-density_delta)
+-        # mask = alpha > fast_color_thres
+-        # density_delta = density_delta[mask]
+-        # ... filter other tensors accordingly
++        alpha = 1.0 - torch.exp(-density_delta)
++        mask = alpha > fast_color_thres
++        # Filter tensors by mask. Sources do not specify exact filtering implementation.
+         pass
+         
+     # Step 10: Compute Transmittance
+-    # Concatenate zeros with cumsum of density_delta[:, :-1], then exp of the negative
+-    # Note: The exact indexing might vary, assuming standard cumulative product logic
+-    cumsum_density = torch.cat([torch.zeros_like(density_delta[:, :1]), 
+-                                torch.cumsum(density_delta[:, :-1], dim=-1)], dim=-1)
++    # Concatenate zeros with cumsum of density_delta[..., :-1], then exp of the negative [S2, unofficial]
++    cumsum_density = torch.cat([torch.zeros_like(density_delta[..., :1]), 
++                                torch.cumsum(density_delta[..., :-1], dim=-1)], dim=-1)
+     trans = torch.exp(-cumsum_density)
+     
+     # Step 11: Compute Weights
+-    # alpha = 1 - exp(-density_delta)
+-    alpha = 1 - torch.exp(-density_delta)
++    alpha = 1.0 - torch.exp(-density_delta)
++    # Alphas2Weights.apply with alpha, ray_id, and N [S1, unofficial]
+     # weights = alpha * trans
+-    # Note: trans needs to be aligned with alpha. Usually trans[i] is transmittance BEFORE sample i.
+-    # If trans is computed as above, it might need adjustment.
+-    # Assuming trans is aligned such that trans[:, i] is transmittance before sample i.
+-    # The pseudocode in S2 says "concatenating zeros with cumsum of density_delta[..., :-1]".
+-    # This implies trans shape is (batch, num_samples-1).
+-    # weights shape is (batch, num_samples-1).
+     weights = alpha * trans
+     
+     # Step 12: Compute RGB
+-    comp_rgb = torch.sum(weights[:, :, None] * rgb[:, :-1], dim=-2)
+-    
+-    # Step 13: Fast Color Filtering (Weights) (Placeholder)
++    comp_rgb = torch.sum(weights[..., None] * rgb[..., :-1], dim=-2)
++    
++    # Step 13: Fast Color Filtering (Weights)
+     if fast_color_thres > 0 and not use_fourier_grid:
+-        # Filter points where weights > fast_color_thres
++        mask = weights > fast_color_thres
++        # Filter tensors by mask. Sources do not specify exact filtering implementation.
+         pass
+         
+@@ -168,5 +155,5 @@
+     
+     # Step 15: Query Color Feature
+-    k0 = None # Placeholder for k0 network query
++    k0 = None
+     if not rgbnet_full_implicit:
+         # k0 = k0_network(...)
+@@ -174,7 +161,5 @@
+         
+     # Step 16: Compute Distance
+-    # distance = sum(weights * t_mids) / acc
+-    # Handle division by zero
+-    distance = torch.sum(weights * t_mids, dim=-1) / (acc + 1e-8)
++    distance = torch.sum(weights * t_mids, dim=-1) / (acc + 1e-8) # [G] epsilon added to prevent division by zero
+     
+     # Step 17: View-Dependent Color
+@@ -184,10 +169,9 @@
+             k0_diffuse = None
+         else:
+-            k0_diffuse = k0[:, :, :3]
+-            k0_view = k0[:, :, 3:]
++            k0_diffuse = k0[..., :3]
++            k0_view = k0[..., 3:]
+             
+         # Step 19: View Direction Embedding
+-        # Flatten viewdirs, multiply by viewfreq, concatenate sin/cos embeddings
+-        viewdirs = dirs[:, 0] # Example: use first direction or mean
++        viewdirs = dirs[..., 0, :] # Example: use first direction or mean
+         viewdirs_flat = viewdirs.view(-1, 3)
+         freq_bands = 2 ** torch.arange(viewfreq).to(viewdirs.device)
+@@ -197,5 +181,4 @@
+         
+         # Step 21: RGB Network
+-        # Concatenate k0_view and viewdirs_emb, pass through rgbnet
+         if k0_view is not None:
+             rgb_input = torch.cat([k0_view, viewdirs_emb], dim=-1)
+@@ -211,20 +194,20 @@
+             
+         # Recompute comp_rgb with final RGB
+-        comp_rgb = torch.sum(weights[:, :, None] * rgb_final[:, :-1], dim=-2)
++        comp_rgb = torch.sum(weights[..., None] * rgb_final[..., :-1], dim=-2)
+         
+     # Step 20: Background Addition
+     if white_bkgd:
+-        comp_rgb = comp_rgb + (1. - acc[:, None])
++        comp_rgb = comp_rgb + (1.0 - acc[..., None])
+         
+     # Step 18: Clip Distance
+-    distance = torch.clamp(distance, min=t_vals[:, 0], max=t_vals[:, -1])
++    distance = torch.clamp(distance, min=t_vals[..., 0], max=t_vals[..., -1])
+     distance = torch.nan_to_num(distance, nan=float('inf'))
+     
+-    # Step 23: Marched RGB (Placeholder for segment_coo)
+-    # This step aggregates results by ray_id
++    # Step 23: Marched RGB
++    # segment_coo: sum of (weights * rgb) grouped by ray_id, plus background contribution [S1, unofficial]
+     # comp_rgb = segment_coo(weights * rgb, ray_id) + alphainv_last * bg
+     pass
+     
+-    # Step 24: Depth Output (Placeholder)
++    # Step 24: Depth Output
+     if render_depth:
+         # depth = segment_coo(weights * step_id, ray_id)
+@@ -238,7 +221,7 @@
+ 
+ **Edge Cases and Pitfalls:**
+-- Division by zero in distance calculation when `acc` is zero. Mitigated by adding a small epsilon or handling zero accumulation separately.
+-- Precision issues with cumulative sums and exponentials for transmittance.
+-- Boundary conditions for ray sampling and masking.
++- Division by zero in distance calculation when `acc` is zero. Mitigated by adding a small epsilon or handling zero accumulation separately [G].
++- Precision issues with cumulative sums and exponentials for transmittance [G].
++- Boundary conditions for ray sampling and masking [G].
+ 
+ ## Subtopics
+@@ -262,3 +245,4 @@
+ [S1] sjtuytc/UnboundedNeRFPytorch, https://github.com/sjtuytc/UnboundedNeRFPytorch, fetched 2026-10-26 (unofficial)
+ [S2] https://github.com/CPREgroup/CaSE-NeRF, https://github.com/CPREgroup/CaSE-NeRF, fetched 2026-10-30 (unofficial)
+-[S3] mdmubarak/OctaNeRF, https://github.com/mdmubarak/OctaNeRF, fetched 2026-10-27 (unofficial)+[S3] mdmubarak/OctaNeRF, https://github.com/mdmubarak/OctaNeRF, fetched 2026-10-27 (unofficial)
++[S4] OSHMOS/IPRF, https://github.com/OSHMOS/IPRF, fetched 2026-10-27 (unofficial)

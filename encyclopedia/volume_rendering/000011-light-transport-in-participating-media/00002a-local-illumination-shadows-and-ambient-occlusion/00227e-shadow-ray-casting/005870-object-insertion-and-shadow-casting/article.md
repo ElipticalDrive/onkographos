@@ -1,0 +1,101 @@
+# Object Insertion and Shadow Casting
+
+Also called: Object Insertion, Object Insertion and Shadow Casting in UrbanIR, UrbanIR Object Insertion
+
+## Overview
+Object Insertion and Shadow Casting is a hybrid rendering strategy for inserting virtual objects into scenes [S1]. It casts object shadows in the scene and scene shadows on the object, enhancing realism [S1]. It is distinguished from sibling methods by being explicitly visibility-aware, enabling rendering effects when an object enters into a shadow [S1]. It builds on [Shadow Ray Casting](2796-shadow-ray-casting.md).
+
+## How it works
+The method operates in two main phases: the insertion pass (camera ray casting) and the shadow pass (light ray casting). It assumes a pre-existing volume representation and a mesh representation of the inserted object [S1].
+
+### Inputs and Outputs
+*   **Inputs:**
+    *   Camera ray $r$ (origin $\mathbf{o}$ and direction $\mathbf{d}$).
+    *   Volume rendering depth $D_{vol}(r)$.
+    *   Inserted object mesh $M$.
+    *   Light source direction $\mathbf{l}$.
+    *   Volume albedo $A_{vol}$, normal $N_{vol}$, and depth $D_{vol}$ fields [S1].
+*   **Outputs:**
+    *   Updated albedo $A(r)$, normal $N(r)$, depth $D(r)$, and visibility $V(r)$ for the final pixel [S1].
+
+### Data Structures
+*   **Ray:** Defined by origin $\mathbf{o}$ and direction $\mathbf{d}$ [G].
+*   **Intersection:** Returns point $\mathbf{p}$, distance $t$, normal $\mathbf{n}$, and albedo $\mathbf{c}$ [G].
+*   **VolumeSampler:** Provides `get_depth(ray)`, `get_albedo(point)`, and `get_normal(point)` methods [G].
+*   **Mesh:** Provides `intersect(ray_origin, ray_direction) -> Intersection or None` method [G].
+
+### Steps
+1.  **Camera Ray Casting (Insertion Pass):** Cast ray $r$ from the camera. Estimate ray-mesh intersection for the inserted object $M$. If the ray hits the mesh and the distance is shorter than the volume rendering depth, replace albedo $A(r)$, normal $N(r)$, and depth $D(r)$ with object attributes [S1].
+2.  **Shadow Pass:** Calculate visibility from surface points to the light source. Estimate ray-mesh intersection for tracing rays. If rays hit the mesh (occlusion by the object), update visibility $V(r) = 0$ [S1].
+3.  **Shading:** Apply shading using the updated albedo $A(r)$, normal $N(r)$, and visibility $V(r)$ to render images with virtual objects [S1].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def dot(a, b):
+    return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
+
+def insert_object_and_cast_shadow(ray_origin, ray_direction, volume_sampler, object_mesh, light_direction):
+    # Step 1: Camera Ray Casting
+    # Estimate ray-mesh intersection for the inserted object [S1]
+    obj_hit = object_mesh.intersect(ray_origin, ray_direction)
+    
+    # Get volume depth for the ray [S1]
+    vol_depth = volume_sampler.get_depth(ray_origin, ray_direction)
+    
+    # Determine if object is in front of volume [S1]
+    if obj_hit is not None and obj_hit.distance < vol_depth:
+        # Replace volume attributes with object attributes [S1]
+        final_albedo = obj_hit.albedo
+        final_normal = obj_hit.normal
+        final_depth = obj_hit.distance
+        hit_point = obj_hit.point
+    else:
+        # Use volume attributes at the volume depth [G]
+        vol_pos = ray_origin + ray_direction * vol_depth
+        final_albedo = volume_sampler.get_albedo(vol_pos)
+        final_normal = volume_sampler.get_normal(vol_pos)
+        final_depth = vol_depth
+        hit_point = vol_pos
+
+    # Step 2: Shadow Pass
+    # Calculate visibility from surface point to light source [S1]
+    shadow_direction = light_direction
+    shadow_hit = object_mesh.intersect(hit_point, shadow_direction)
+    
+    # If rays hit the mesh (occlusion by the object), update visibility V(r) = 0 [S1]
+    if shadow_hit is not None:
+        visibility = 0.0
+    else:
+        # Visibility is 1.0 if not occluded by the object [G]
+        visibility = 1.0
+
+    # Step 3: Shading
+    # Apply shading using updated A(r), N(r), V(r) [S1]
+    # Standard diffuse shading model [G]
+    diffuse_factor = max(0.0, dot(final_normal, shadow_direction))
+    final_color = final_albedo * visibility * diffuse_factor
+    
+    return final_color, final_albedo, final_normal, final_depth, visibility
+```
+
+### Parameters and Edge Cases
+*   **Depth Comparison:** The condition $t_{obj} < D_{vol}(r)$ determines whether the object is inserted [S1].
+*   **Visibility Awareness:** The method checks if the object itself is in shadow by testing occlusion against the object mesh in the shadow pass, ensuring realistic self-shadowing and interaction with scene shadows [S1].
+
+## Subtopics
+
+### [Differentiable Object Insertion](19344-differentiable-object-insertion.md)
+Composites a virtual 3D object with known geometry and material into a real-world image, ensuring the object is illuminated by estimated scene lighting and casts physically plausible shadows on the background. It distinguishes itself from standard compositing by rendering both the foreground object's appearance and the background's shadow map as differentiable operations, allowing gradients from the final composited image to backpropagate to the underlying lighting parameters. Choose this variant when joint optimization of lighting estimation and object insertion for augmented reality applications is required.
+
+## Operating characteristics
+*   **Complexity:** The method adds a constant number of ray-mesh intersections per pixel (one for insertion, one for shadowing) to the existing volume rendering cost [S1].
+*   **Strengths:** It provides high-fidelity integration of virtual objects by handling both object-to-scene and scene-to-object shadows [S1]. It is visibility-aware, handling cases where objects enter existing shadows [S1].
+*   **Limitations:** It requires a mesh representation of the inserted object and accurate depth information from the volume [S1].
+
+## Background
+The method was introduced in **UrbanIR** (Large-Scale Urban Scene Inverse Rendering from a Single Video) [S1]. It addresses the limitations of previous object insertion techniques by ensuring that inserted objects interact realistically with the lighting and shadows of the reconstructed urban scene [S1]. It is specifically designed for inverse rendering pipelines where scene geometry and lighting are estimated from video data [S1].
+
+## Sources
+[S1] UrbanIR: Large-Scale Urban Scene Inverse Rendering from a Single Video, https://doi.org/10.1109/3dv66043.2025.00052, fetched 2026-10-30

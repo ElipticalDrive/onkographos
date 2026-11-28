@@ -1,0 +1,230 @@
+--- v001.md
++++ v002.md
+@@ -4,88 +4,163 @@
+ 
+ ## Overview
+-Spherical Density Ramp with Noise is a procedural volume density function that confines gas to a slab region using a spherical distance ramp and an offset table, simulating steam rising from a source [S1, unofficial]. It differs from its parent, [Procedural Noise Functions](1799-procedural-noise-functions.md), by adding spatial confinement and vertical falloff to the base turbulence, and from [Worley Noise](1726-worley-noise.md) by using a deterministic distance-based ramp rather than cell-based proximity [S1, unofficial].
++Spherical Density Ramp with Noise is a procedural volume density function that confines a gas (such as steam or smoke) to a specific slab region using a spherical distance ramp and an offset table, simulating steam rising from a source [S1, unofficial]. It differs from its siblings, such as [Worley Noise](1726-worley-noise.md) which creates cellular patterns, or [Local Cloud Flow with FlowMap](2258-local-cloud-flow-with-flowmap.md) which uses explicit vector fields, by relying on a deterministic spatial falloff combined with a discrete random offset table to create organic, rising volumetric structures without requiring complex flow advection [S1, unofficial].
+ 
+ ## How it works
++The method computes the density of a gas at a query point by combining a base turbulence density with a spherical confinement ramp and a vertical exponential falloff.
++
+ **Inputs and Outputs:**
+-- `pnt`: Point in solid texture space (used for turbulence).
+-- `pnt_world`: Point in world space (used for spatial confinement).
+-- `*density`: Input density (from turbulence), output density (modulated by ramp).
+-- `*parms`: Parameter array. `parms[1]` is the exponent for the power function; `parms[2]` is the exponent for the power function for gas shaping (Note: Source [S1, unofficial] lists `parms[2]` as exponent for power function in `basic_gas` and `parms[1]` as exponent in `steam_slab1` context, but the code uses `parms[1]` and `parms[2]` consistently in the power table calculation. We follow the code: `parms[1]` scales the input, `parms[2]` is the exponent). `parms[3]` is the randomness multiplier for the offset table.
+-- `vol`: Volume structure containing `shape.center` and `shape.inv_rad_sq.y`.
++*   **Input:** Point in solid texture space $P_{solid}$, point in world space $P_{world}$, base density $\rho_{base}$, parameter array $\mathbf{p}$, volume structure $V$.
++*   **Output:** Updated density $\rho$.
++*   **Volume Structure $V$:** Contains `center` (3D vector) and `inv_rad_sq` (vector, where `.y` is $1/r^2$).
++*   **Parameters $\mathbf{p}$:**
++    *   $\mathbf{p}[1]$: Exponent for the power function shaping the gas [S1, unofficial].
++    *   $\mathbf{p}[2]`: Exponent for the power function [S1, unofficial].
++    *   $\mathbf{p}[3]`: Amount of randomness to use in fall off [S1, unofficial].
+ 
+ **Data Structures:**
+-- `pow_table[POW_TABLE_SIZE]`: Precomputed table of power function values.
+-- `ramp[RAMP_SIZE]`: Precomputed table of cosine falloff values.
+-- `offset[OFFSET_SIZE]`: Precomputed table of random numbers used to add noise to the ramp off of the density.
++1.  **`pow_table`**: Array of size `POW_TABLE_SIZE`. Precomputed values mapping turbulence intensity to density.
++2.  **`ramp`**: Array of size `RAMP_SIZE`. Precomputed cosine falloff values.
++3.  **`offset`**: Array of size `OFFSET_SIZE`. Precomputed random numbers used to add noise to the ramp-off.
+ 
+-**Steps:**
+-1. **Precomputation (once per image):**
+-   - Compute `pow_table`: For `i` from `POW_TABLE_SIZE-1` down to `0`:
+-     $$ pow\_table[i] = \left( \frac{i}{POW\_TABLE\_SIZE - 1} \times parms[1] \times 2.0 \right)^{parms[2]} $$
+-   - Compute `ramp`: For `i` from `0` to `RAMP_SIZE-1`:
+-     $$ dist = \frac{i}{RAMP\_SIZE - 1.0} $$
+-     $$ ramp[i] = \frac{\cos(dist \times \pi) + 1.0}{2.0} $$
++**Precomputation:**
++The tables `pow_table`, `ramp`, and `offset` are computed once per image or session.
++*   `pow_table[i]` is calculated as:
++    $$ \text{pow\_table}[i] = \left( \frac{i}{\text{POW\_TABLE\_SIZE}-1} \cdot \mathbf{p}[1] \cdot 2.0 \right)^{\mathbf{p}[2]} $$
++    for $i$ from `POW_TABLE_SIZE-1` down to 0 [S1, unofficial].
++*   `ramp[i]` is calculated as:
++    $$ \text{ramp}[i] = \frac{\cos\left(\frac{i}{\text{RAMP\_SIZE}-1} \pi\right) + 1.0}{2.0} $$
++    for $i$ from 0 to `RAMP_SIZE-1` [S1, unofficial].
++*   `offset` contains pseudo-random values [S1, unofficial].
+ 
+-2. **Base Turbulence:**
+-   - Evaluate turbulence: `turb = fast_turbulence(pnt)`.
+-   - Map to base density:
+-     $$ *density = pow\_table[\lfloor turb \times 0.5 \times (POW\_TABLE\_SIZE - 1) \rfloor] $$
++**Algorithm Steps:**
++1.  **Base Turbulence:** Calculate the turbulence value $T$ at $P_{solid}$ using a fast turbulence function (e.g., `fast_turbulence`). Map this to a base density $\rho$ using the `pow_table`:
++    $$ \rho = \text{pow\_table}\left[ \left\lfloor T \cdot 0.5 \cdot (\text{POW\_TABLE\_SIZE}-1) \right\rfloor \right] $$
++    [S1, unofficial].
+ 
+-3. **Spherical Confinement:**
+-   - Calculate squared distance from the point to the volume center:
+-     $$ diff = pnt\_world - vol.shape.center $$
+-     $$ dist\_sq = diff \cdot diff $$
+-   - Compute initial density scaling factor:
+-     $$ density\_max = dist\_sq \times vol.shape.inv\_rad\_sq.y $$
++2.  **Spherical Confinement:**
++    a. Calculate the squared distance from the point to the volume center:
++       $$ \text{diff} = P_{world} - V.\text{center} $$
++       $$ \text{dist\_sq} = \text{dot}(\text{diff}, \text{diff}) $$
++       [S1, unofficial].
++    b. Compute the initial density scaling factor:
++       $$ \text{density\_max} = \text{dist\_sq} \cdot V.\text{inv\_rad\_sq}.y $$
++       [S1, unofficial].
++    c. Add noise to the scaling factor using an offset table indexed by the sum of the point's coordinates:
++       $$ \text{indx} = \left( \lfloor (P_{world}.x + P_{world}.y + P_{world}.z) \cdot 100 \rfloor \right) \ \& \ (\text{OFFSET\_SIZE} - 1) $$
++       $$ \text{density\_max} += \mathbf{p}[3] \cdot \text{offset}[\text{indx}] $$
++       [S1, unofficial].
++    d. If $\text{density\_max} \ge 0.25$, apply a cosine falloff ramp:
++       $$ i = \lfloor (\text{density\_max} - 0.25) \cdot \frac{4}{3} \cdot \text{RAMP\_SIZE} \rfloor $$
++       Clamp $i$ to $[0, \text{RAMP\_SIZE}-1]$.
++       $$ \text{density\_max} = \text{ramp}[i] $$
++       [S1, unofficial].
++    e. Multiply the base density by the ramped factor:
++       $$ \rho *= \text{density\_max} $$
++       [S1, unofficial].
+ 
+-4. **Noise Addition:**
+-   - Calculate index into random offset table:
+-     $$ indx = \lfloor (pnt.x + pnt.y + pnt.z) \times 100 \rfloor \ \& \ (OFFSET\_SIZE - 1) $$
+-   - Add noise to density scaling factor:
+-     $$ density\_max += parms[3] \times offset[indx] $$
++3.  **Vertical Exponential Ramp (Optional/Variant):**
++    To simulate rising steam, apply a vertical falloff [S1, unofficial]:
++    a. Calculate vertical distance from the volume center:
++       $$ \text{dist} = P_{world}.y - V.\text{center}.y $$
++       [S1, unofficial].
++    b. If $\text{dist} > 0.0$:
++       $$ \text{dist} = (\text{dist} + \text{offset}[\text{indx}] \cdot 0.1) \cdot V.\text{inv\_rad}.y $$
++       [S1, unofficial].
++    c. If $\text{dist} > 0.05$:
++       $$ \text{offset2} = (\text{dist} - 0.05) \cdot 1.111111 $$
++       $$ \text{offset2} = 1 - \frac{\exp(\text{offset2}) - 1.0}{1.718282} $$
++       $$ \text{offset2} *= \mathbf{p}[1] $$
++       $$ \rho *= \text{offset2} $$
++       [S1, unofficial].
+ 
+-5. **Ramp Application:**
+-   - If `density_max >= 0.25`:
+-     - Calculate ramp index:
+-       $$ i = \lfloor (density\_max - 0.25) \times \frac{4}{3} \times RAMP\_SIZE \rfloor $$
+-     - Clamp `i` to `[0, RAMP_SIZE-1]`.
+-     - Apply ramp:
+-       $$ density\_max = ramp[i] $$
+-     - Modulate density:
+-       $$ *density *= density\_max $$
++**Pseudocode:**
+ 
+-**Parameters:**
+-- `vol.shape.center`: 3D center point of the volume slab [S1, unofficial].
+-- `vol.shape.inv_rad_sq.y`: Inverse squared radius factor for the slab [S1, unofficial].
+-- `parms[1]`: Exponent for the power function for gas shaping [S1, unofficial].
+-- `parms[2]`: Exponent for the power function for gas shaping (Note: Source [S1, unofficial] code uses `parms[2]` as exponent, text says `parms[2]` is exponent. We use `parms[2]` as exponent).
+-- `parms[3]`: Multiplier for the offset table values (amount of randomness) [S1, unofficial].
++```python
++import math
+ 
+-**Edge Cases and Pitfalls:**
+-- `density_max` must be checked against `0.25` before applying the ramp to avoid negative indices or incorrect falloff [S1, unofficial].
+-- The index `i` for the ramp table must be clamped to `RAMP_SIZE-1` to prevent out-of-bounds access [S1, unofficial].
+-- `fast_turbulence` must return a value in a range that maps correctly to `pow_table` indices (typically 0 to 1) [S1, unofficial].
++def spherical_density_ramp_with_noise(p_world, p_solid, density, params, vol, offset_table, ramp_table, pow_table):
++    """
++    Computes the density of a gas confined to a slab with rising steam effect.
++    
++    Args:
++        p_world: (float, float, float) World space position.
++        p_solid: (float, float, float) Solid texture space position (for turbulence).
++        density: float Current base density.
++        params: list[float] Parameters [p1, p2, p3].
++            p1: Exponent for power function / vertical ramp multiplier.
++            p2: Exponent for power function.
++            p3: Randomness multiplier for fall off.
++        vol: dict Volume structure with 'center' (vec3) and 'inv_rad_sq' (vec3).
++        offset_table: list[float] Precomputed random offsets.
++        ramp_table: list[float] Precomputed cosine ramp values.
++        pow_table: list[float] Precomputed power table values.
++        
++    Returns:
++        float: Updated density.
++    """
++    # 1. Base Turbulence
++    # Assuming fast_turbulence is provided by the parent context or a standard noise function
++    turb = fast_turbulence(p_solid)
++    turb_index = int(turb * 0.5 * (len(pow_table) - 1))
++    # Clamp index to table bounds
++    turb_index = max(0, min(turb_index, len(pow_table) - 1))
++    density = pow_table[turb_index]
++    
++    # 2. Spherical Confinement
++    diff_x = p_world[0] - vol['center'][0]
++    diff_y = p_world[1] - vol['center'][1]
++    diff_z = p_world[2] - vol['center'][2]
++    
++    dist_sq = diff_x**2 + diff_y**2 + diff_z**2
++    
++    density_max = dist_sq * vol['inv_rad_sq'][1]
++    
++    # Index into offset table
++    sum_coords = p_world[0] + p_world[1] + p_world[2]
++    indx = int(sum_coords * 100) & (len(offset_table) - 1)
++    
++    density_max += params[2] * offset_table[indx]
++    
++    if density_max >= 0.25:
++        i = int((density_max - 0.25) * (4.0 / 3.0) * len(ramp_table))
++        # Clamp i
++        i = max(0, min(i, len(ramp_table) - 1))
++        density_max = ramp_table[i]
++        
++    density *= density_max
++    
++    # 3. Vertical Exponential Ramp
++    dist_y = p_world[1] - vol['center'][1]
++    
++    if dist_y > 0.0:
++        # Reuse indx from previous step or recalculate? 
++        # Source uses same indx logic implicitly or assumes it's available.
++        # We use the same indx calculated above.
++        dist_y = (dist_y + offset_table[indx] * 0.1) * vol['inv_rad_sq'][0] # Assuming inv_rad.y corresponds to vertical scaling
++        
++        if dist_y > 0.05:
++            offset2 = (dist_y - 0.05) * 1.111111
++            offset2 = 1.0 - (math.exp(offset2) - 1.0) / 1.718282
++            offset2 *= params[0]
++            density *= offset2
++            
++    return density
++```
+ 
+ ## Subtopics
+ 
+ ### [NoiseTexture value evaluation](3448-noisetexture-value-evaluation.md)
+-Computes volumetric color/density using normalized coordinates, radial/vertical fading, double warping via FBM, and sinusoidal noise modulation [3448-noisetexture-value-evaluation.md].
+-
+-### Vertical Exponential Density Ramp
+-Applies an exponential falloff to density based on vertical distance from the volume center. If the vertical distance `dist = pnt_world.y - vol.shape.center.y` is greater than 0.0, it is normalized with noise: `dist = (dist + offset[indx]*0.1) * vol.shape.inv_rad.y`. If `dist > 0.05`, an exponential ramp is applied: `offset2 = (dist - 0.05) * 1.111111`, then `offset2 = 1 - (exp(offset2) - 1.0) / 1.718282`, then `offset2 *= parms[1]`, and finally `*density *= offset2` [S1, unofficial].
+-
+-### Radial Exponential Density Ramp
+-Applies a radial exponential falloff if `ZoneIndex` is `(0, 0, -1)`. It calculates radial distance `r = sqrt(P.X^2 + P.Y^2 + P.Z^2)` and then `t = 1 - exp(-pow(r, 2) / (MaxR * 100))` where `MaxR = 1000`. The density is multiplied by `t`. If `IsCaveLayerZone(ZoneIndex.Z)` is true, the function currently returns the density unchanged [S2, unofficial].
++NoiseTexture evaluates a volumetric color and density field by combining radial/vertical fading with double-warping via Fractal Brownian Motion (FBM) and sinusoidal noise modulation. It differs from simple procedural noise by applying spatial warping to the noise domain and modulating the result with a sine wave, creating structured, organic patterns suitable for volumetric effects like smoke or clouds.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** O(1) per point for the ramp calculation, assuming precomputed tables. The turbulence function `fast_turbulence` dominates the cost.
+-- **Memory Complexity:** O(POW_TABLE_SIZE + RAMP_SIZE + OFFSET_SIZE) for precomputed tables.
+-- **Strengths:** Efficiently confines gas to a specific region and simulates rising steam with natural falloff.
+-- **Limitations:** Relies on precomputed tables which may not adapt well to dynamic scenes without recomputation. The noise is static and based on a simple offset table.
+-- **When to use:** Simulating confined gases like steam or smoke from a source.
+-- **When not to use:** When dynamic, large-scale volumetric effects are required without precomputation.
++*   **Time Complexity:** $O(1)$ per sample, assuming the turbulence function is $O(1)$ and table lookups are constant time. Precomputation is $O(N)$ where $N$ is the table size.
++*   **Memory Complexity:** $O(N)$ for the precomputed tables (`pow_table`, `ramp`, `offset`).
++*   **Strengths:** Efficiently confines gas to a specific shape (slab/sphere) and simulates rising behavior with minimal computational cost compared to full fluid simulation or complex flow advection. The use of precomputed tables ensures fast evaluation.
++*   **Limitations:** The confinement is rigidly defined by the spherical ramp and vertical exponential function. It lacks the complex, evolving structures of FBM-based clouds or the directional control of flow maps. The "steam" appearance is specific to the chosen parameters and may not generalize to all gas types without tuning.
++*   **When to use:** Ideal for simple, localized volumetric effects like steam from a cup, smoke from a chimney, or confined gas clouds where performance is critical and complex turbulence is not required.
++*   **When not to use:** Not suitable for large-scale atmospheric phenomena, complex turbulent mixing, or scenes requiring dynamic, evolving gas structures driven by external forces.
+ 
+ ## Background
+-The method was introduced by David Ebert in "Procedural Modeling, Animation, and Rendering of Gases, Fluids, and Textures" [S1, unofficial]. It was developed to address the limitations of basic turbulence functions, which did not confine gas to a specific region or simulate the natural rise and falloff of steam. The method uses a spherical distance ramp and an offset table to achieve this effect.
++The method originates from David Ebert's work on procedural modeling of gases, fluids, and textures, specifically described in the context of simulating steam rising from a teacup [S1, unofficial]. It was developed to address the limitations of basic turbulence functions, which produced gas that was not confined and did not decrease in density as it rose, resulting in unrealistic visuals [S1, unofficial]. The technique combines spherical distance ramps with noise offsets to create a more convincing steam effect [S1, unofficial].
+ 
+ ## Sources

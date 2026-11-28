@@ -1,0 +1,105 @@
+# Sigma Network Layer
+## Overview
+The Sigma Network Layer computes the volume density $\sigma$ along a ray in neural volume rendering. It builds on the [RGB Network Layer](4051-rgb-network-layer.md) by applying the same multi-layer perceptron forward pass to predict density instead of color, enabling alpha compositing during ray marching [S1, unofficial].
+
+## How it works
+The layer executes a two-hidden-layer perceptron forward pass on coordinate embeddings to produce density values, using shared memory for thread-block parallelism [S1, unofficial].
+
+### Inputs and Outputs
+**Inputs:**
+- `xyzs_embedding`: Input coordinate embeddings of shape $[N, d_{in}]$, where $N$ is the number of subnetworks/rays and $d_{in}$ is the input dimension [S1, unofficial].
+- `sigma_weights`: Flattened weight tensor containing all parameters for the two hidden layers [S1, unofficial].
+- `block_dim`: Thread block dimension [S1, unofficial].
+- `sigma_n_input`: Number of input neurons ($d_{in}$) [S1, unofficial].
+- `net_width`: Hidden layer width [S1, unofficial].
+- `sigma_sm_preload`: Number of weight elements preloaded to shared memory [S1, unofficial].
+- `sigma_n_output`: Number of output neurons (typically 1 for density) [S1, unofficial].
+- `sigma_layer1_base`: Base index in `sigma_weights` for the second hidden layer [S1, unofficial].
+- `did_launch_num`: Threshold indicating active subnetworks in the current launch [S1, unofficial].
+
+**Outputs:**
+- `out_1`: Density array indexed by `temp_hit`, storing $\sigma$ values [S1, unofficial].
+- `final_embedding`: Array storing hidden layer outputs `hid2` for all subnetworks [S1, unofficial].
+
+### Data Structures
+- `weight`: Shared memory array of size `sigma_sm_preload` holding preloaded network weights [S1, unofficial].
+- `input_val`: Shared memory array of shape $[d_{in}, \text{block\_dim}]$ holding coordinate embeddings for the current block [S1, unofficial].
+- `hid1`: Shared memory array of shape $[\text{net\_width}, \text{block\_dim}]$ storing first hidden layer activations [S1, unofficial].
+- `hid2`: Shared memory array of shape $[\text{sigma\_n\_output}, \text{block\_dim}]$ storing second hidden layer activations [S1, unofficial].
+
+### Parameters
+- `block_dim`, `sigma_n_input`, `sigma_model_size`, `net_width`, `sigma_sm_preload`, `sigma_n_output`, `sigma_layer1_base` [S1, unofficial].
+
+### Algorithm Steps
+1. Iterate over each subnetwork index `sn` in `self.padd_block_network[None]` [S1, unofficial].
+2. Calculate thread ID: `tid = sn % block_dim` [S1, unofficial].
+3. Preload network weights into shared memory: `weight[k] = self.sigma_weights[k]` for `k` in `range(self.sigma_sm_preload)` [S1, unofficial].
+4. Load input embeddings into shared memory: `input_val[i, tid] = self.xyzs_embedding[sn, i]` for `i` in `range(self.sigma_n_input)` [S1, unofficial].
+5. Synchronize threads within the block: `ti.simt.block.sync()` [S1, unofficial].
+6. If `sn < did_launch_num`, compute the first hidden layer: for each neuron `i` in `range(self.net_width)`, compute $\text{temp} = \sum_{j=0}^{d_{in}-1} \text{input\_val}[j, \text{tid}] \times \text{weight}[i \times d_{in} + j]$, and store in `hid1[i, tid]` [S1, unofficial].
+7. Compute the second hidden layer (density output): for each output `i` in `range(self.sigma_n_output)`, compute $\text{temp} = \sum_{j=0}^{\text{net\_width}-1} \text{ReLU}(\text{hid1}[j, \text{tid}]) \times \text{weight}[\text{sigma\_layer1\_base} + i \times \text{net\_width} + j]$, and store in `hid2[i, tid]` [S1, unofficial].
+8. Compute final density: `self.out_1[self.temp_hit[sn]] = \exp(\text{hid2}[0, \text{tid}])` [S1, unofficial].
+9. Store all hidden layer outputs: `self.final_embedding[sn, i] = hid2[i, tid]` [S1, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_sigma_density(sn, tid, xyzs_embedding, sigma_weights, 
+                          block_dim, sigma_n_input, net_width, sigma_sm_preload,
+                          sigma_n_output, sigma_layer1_base, did_launch_num,
+                          hid1, hid2, out_1, temp_hit, final_embedding):
+    # Load input embeddings into shared memory
+    for i in range(sigma_n_input):
+        input_val[i, tid] = xyzs_embedding[sn, i]
+    
+    # Synchronize threads within the block
+    sync_block()
+
+    # First hidden layer computation
+    if sn < did_launch_num:
+        for i in range(net_width):
+            temp = 0.0
+            for j in range(sigma_n_input):
+                temp += input_val[j, tid] * sigma_weights[i * sigma_n_input + j]
+            hid1[i, tid] = temp
+
+    # Second hidden layer (output layer for sigma)
+    for i in range(sigma_n_output):
+        temp = 0.0
+        for j in range(net_width):
+            # ReLU activation: max(0.0, x) [G]
+            activated = max(0.0, hid1[j, tid])
+            temp += activated * sigma_weights[sigma_layer1_base + i * net_width + j]
+        hid2[i, tid] = temp
+
+    # Final density computation
+    density = math.exp(hid2[0, tid])
+    out_1[temp_hit[sn]] = density
+    
+    # Store hidden layer outputs
+    for i in range(sigma_n_output):
+        final_embedding[sn, i] = hid2[i, tid]
+```
+
+### Edge Cases and Pitfalls
+- **Precision Casting**: The source uses `data_type` wrappers around `exp` and `max` operations, indicating explicit type casting is required to match the target hardware's floating-point format [S1, unofficial].
+- **Boundary Conditions**: The guard `sn < did_launch_num` means inactive subnetworks skip the first hidden layer computation; `hid1` and `hid2` must be zero-initialized or properly scoped to avoid garbage values [S1, unofficial].
+- **Shared Memory Synchronization**: The block synchronization step is mandatory before reading `input_val` and `weight`; omitting it causes race conditions across threads [S1, unofficial].
+
+## Subtopics
+
+### [Subdivision of Output Layers](18075-subdivision-of-output-layers.md)
+A reparameterization technique that increases the number of depth samples during training by duplicating and rearranging weight and bias tensors in the last layer, preserving the network's output for existing rays. Choose this when training requires finer depth sampling without altering the radiance field representation.
+
+## Operating characteristics
+- **Time Complexity**: $O(N \cdot d_{in} \cdot d_h)$ per ray sample for the forward pass, where $d_{in}$ is input dimension and $d_h$ is hidden width [S1, unofficial].
+- **Memory Complexity**: Shared memory usage is $O(d_{in} + d_h + d_{out})$ per thread block, plus global storage for embeddings and outputs [S1, unofficial].
+- **Strengths**: High parallelism via shared memory preloading; explicit control over thread-block execution; compatible with GPU compute shaders [S1, unofficial].
+- **Limitations**: Requires careful shared memory management and explicit synchronization; precision casting adds minor overhead; inactive thread guards must be handled correctly [S1, unofficial].
+
+## Background
+The Sigma Network Layer is used in neural volume rendering pipelines to predict volumetric density along rays, complementing color prediction networks [S1, unofficial]. Its implementation details originate from a Taichi-based neural graphics pipeline renderer [S1, unofficial].
+
+## Sources
+[S1] Linyou/taichi-ngp-renderer, https://github.com/Linyou/taichi-ngp-renderer, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,211 @@
+--- v001.md
++++ v002.md
+@@ -1,102 +1,137 @@
+ # Smooth Vertex Lighting with Ambient Occlusion Effect
+-Also called: Smooth Lighting Calculation
++
++Also called: Smooth Ambient Occlusion, Soft Vertex Lighting, Smooth Lighting Calculation
++
+ ## Overview
+-A lighting calculation method for voxel meshes that computes vertex lighting by averaging light values from surrounding voxel cells to ensure smooth transitions, while naturally darkening concave areas to simulate ambient occlusion [S1, unofficial]. It differs from standard ambient occlusion, which simulates self-shadowing by casting rays from a surface and darkening areas based on distance to other surfaces, by achieving a similar darkening effect in concave areas as a side effect of averaging surrounding voxel light values, without ray casting [S1, unofficial].
++This method calculates the lighting value for a specific vertex of a polygon mesh generated from voxel data by averaging the light intensities of the four surrounding voxel cells in the direction of the face normal [S1, S2, unofficial]. It solves the problem of harsh, blocky lighting transitions and incorrect zero-light values on blocked faces by sampling neighbors rather than the cell itself [S2, unofficial]. Unlike standard ray-casted ambient occlusion, it achieves a similar darkening effect in concave areas as a side effect of this averaging process, without the computational cost of ray casting [S2, unofficial].
++
+ ## How it works
+-**Inputs and Outputs**
+-- Input: A polygon mesh generated from voxel data, where each voxel cell has a pre-calculated light value.
+-- Output: A vertex color attribute for each vertex in the polygon mesh.
++**Inputs and Outputs:**
++*   **Input:** A voxel mesh vertex index, the side (face orientation) of the voxel cell being processed, and a pre-computed array of light intensities for the voxel neighborhood.
++*   **Output:** A single `float32` lighting value for the vertex, which is applied to the vertex of the generated polygon mesh [S1, S2, unofficial].
+ 
+-**Data Structures**
+-- Voxel Grid: A 3D array or hash map storing light values for each voxel cell. The light value is a scalar representing the amount of light hitting the voxel face from surrounding cells.
+-- Polygon Mesh: A collection of vertices and faces. Each vertex corresponds to a corner of a voxel face.
++**Data Structures:**
++The method relies on a lookup table to determine which neighbor indices correspond to the four sampling positions relative to a vertex on a specific face.
+ 
+-**Parameters**
+-- Sampling count: 4 voxel cells are sampled per vertex [S1, unofficial].
++*   `NEIGHBOR_VERTEX_LOOKUP`: A 3D array with layout `[[[usize; 4]; 4]; 6]`.
++    *   Dimension 0 (Size 6): Represents the 6 sides of a voxel face (e.g., +X, -X, +Y, -Y, +Z, -Z).
++    *   Dimension 1 (Size 4): Represents the 4 vertices of the face (indices 0-3).
++    *   Dimension 2 (Size 4): Represents the 4 neighbor indices to sample. These indices refer to positions in the `neighbors` array returned by the neighborhood gathering function.
++    *   The four neighbor roles are:
++        1.  `side`: The direct neighbor in the direction of the face normal.
++        2.  `side1`: A lateral neighbor.
++        3.  `side2`: The other lateral neighbor.
++        4.  `corner`: The diagonal neighbor opposite the vertex.
+ 
+-**Steps**
+-1. For each vertex of the polygon mesh, identify the four voxel cells surrounding the vertex in the direction of the voxel face normal.
+-2. Retrieve the pre-calculated light value for each of the four surrounding voxel cells.
+-3. Calculate the final vertex light value by taking the average of the four sampled light values.
+-4. Apply the calculated light value to the vertex of the polygon mesh.
++**Numbered Steps:**
++1.  Identify the current side index `idx` (0-5) and the vertex index `VERTEX` (0-3) for the face being processed [S1, unofficial].
++2.  Retrieve the four neighbor indices from the lookup table:
++    *   `side_idx = NEIGHBOR_VERTEX_LOOKUP[idx][VERTEX][0]`
++    *   `side1_idx = NEIGHBOR_VERTEX_LOOKUP[idx][VERTEX][1]`
++    *   `side2_idx = NEIGHBOR_VERTEX_LOOKUP[idx][VERTEX][2]`
++    *   `corner_idx = NEIGHBOR_VERTEX_LOOKUP[idx][VERTEX][3]` [S1, unofficial]
++3.  Retrieve the pre-calculated light values for these four neighbor positions from the `neighbors` array. Let these values be `side`, `side1`, `side2`, and `corner` [S1, S2, unofficial].
++    *   If a neighbor index is out of bounds or corresponds to an empty/invalid voxel (represented as `None` in the source logic), the light value defaults to `0` [S1, unofficial].
++4.  Calculate the final vertex lighting value using the arithmetic mean of the four sampled values [S1, S2, unofficial]:
++    $$ L_{vertex} = \frac{side + side1 + side2 + corner}{4.0} $$
++5.  Apply the resulting `L_vertex` value to the corresponding vertex of the polygon mesh [S2, unofficial].
+ 
+-**Pseudocode**
++**Pseudocode:**
+ ```python
+-def compute_smooth_vertex_lighting(mesh, voxel_light_values):
++# Constants
++NEIGHBOR_VERTEX_COUNT = 4
++VERTEX_COUNT = 4
++SIDE_COUNT = 6
++
++# Lookup table structure: NEIGHBOR_VERTEX_LOOKUP[SIDE][VERTEX][NEIGHBOR_ROLE]
++# Roles: 0=side, 1=side1, 2=side2, 3=corner
++# This table is assumed to be pre-populated based on voxel geometry.
++
++def calculate_smooth_vertex_light(neighbors: list, side: int, vertex: int) -> float:
+     """
+-    Computes smooth vertex lighting with ambient occlusion effect for a voxel mesh.
++    Calculate smooth lighting for a specific vertex of a voxel face.
+     
+     Args:
+-        mesh: A polygon mesh object with vertices and faces.
+-        voxel_light_values: A 3D array or hash map storing light values for each voxel cell.
++        neighbors: List of light intensity values for the 26 surrounding voxels.
++                   Indices correspond to positions in the neighborhood grid.
++        side: Integer 0-5 representing the face side.
++        vertex: Integer 0-3 representing the vertex on the face.
+         
+     Returns:
+-        A dictionary mapping vertex indices to their computed light values.
++        Float lighting value for the vertex.
+     """
+-    vertex_light_values = {}
++    # Step 1 & 2: Retrieve neighbor indices from lookup table
++    # Note: In a real implementation, NEIGHBOR_VERTEX_LOOKUP is a static constant.
++    # Here we assume it is accessible.
++    idx = side
+     
+-    for vertex in mesh.vertices:
+-        # Identify the four voxel cells surrounding the vertex in the direction of the voxel face normal.
+-        # Note: The exact method for identifying these cells depends on the mesh generation algorithm.
+-        # Assuming the vertex normal direction indicates the primary face orientation.
+-        surrounding_cells = get_surrounding_voxel_cells(vertex, voxel_light_values)
+-        
+-        # Retrieve the pre-calculated light value for each of the four surrounding voxel cells.
+-        light_values = []
+-        for cell in surrounding_cells:
+-            light_values.append(voxel_light_values[cell])
+-            
+-        # Calculate the final vertex light value by taking the average of the four sampled light values.
+-        if len(light_values) == 4:
+-            vertex_light_value = sum(light_values) / 4.0
+-        else:
+-            # Edge case: If fewer than 4 cells are found (e.g., at boundaries), handle appropriately.
+-            # For now, assume all 4 cells are always available for valid vertices.
+-            vertex_light_value = 0.0
+-            
+-        # Apply the calculated light value to the vertex of the polygon mesh.
+-        vertex_light_values[vertex.index] = vertex_light_value
+-        
+-    return vertex_light_values
++    side_idx = NEIGHBOR_VERTEX_LOOKUP[idx][vertex][0]
++    side1_idx = NEIGHBOR_VERTEX_LOOKUP[idx][vertex][1]
++    side2_idx = NEIGHBOR_VERTEX_LOOKUP[idx][vertex][2]
++    corner_idx = NEIGHBOR_VERTEX_LOOKUP[idx][vertex][3]
++    
++    # Step 3: Retrieve light values, defaulting to 0 if index is invalid/None
++    # Assuming neighbors is a list where None or out-of-bounds means no light
++    def get_light_value(index):
++        if 0 <= index < len(neighbors) and neighbors[index] is not None:
++            return neighbors[index]
++        return 0.0
+ 
+-def get_surrounding_voxel_cells(vertex, voxel_light_values):
++    side_val = get_light_value(side_idx)
++    side1_val = get_light_value(side1_idx)
++    side2_val = get_light_value(side2_idx)
++    corner_val = get_light_value(corner_idx)
++    
++    # Step 4: Calculate average
++    result = (side_val + side1_val + side2_val + corner_val) / 4.0
++    
++    return result
++
++def process_face_vertices(neighbors: list, side: int) -> list:
+     """
+-    Identifies the four voxel cells surrounding a vertex in the direction of the voxel face normal.
++    Calculate lighting for all 4 vertices of a given side.
+     
+     Args:
+-        vertex: A vertex object with position and normal.
+-        voxel_light_values: A 3D array or hash map storing light values for each voxel cell.
++        neighbors: List of light intensity values for the neighborhood.
++        side: Integer 0-5 representing the face side.
+         
+     Returns:
+-        A list of four voxel cell identifiers.
++        List of 4 float32 lighting values for the vertices.
+     """
+-    # This function's implementation depends on the specific mesh generation algorithm.
+-    # It should return the four voxel cells that are adjacent to the vertex in the direction of the vertex normal.
+-    # For example, if the vertex is at the corner of a voxel face, the four surrounding cells might be the ones
+-    # sharing that corner in the direction of the normal.
+-    # Note: The exact logic for this is not provided in the sources and must be derived from the mesh generation process.
+-    # [G] Placeholder for implementation detail based on mesh generation.
+-    pass
++    soft_vertex_light = []
++    for v in range(VERTEX_COUNT):
++        light_val = calculate_smooth_vertex_light(neighbors, side, v)
++        soft_vertex_light.append(light_val)
++    return soft_vertex_light
+ ```
+ 
+-**Edge Cases and Pitfalls**
+-- Applying the voxel cell's light value directly to the vertex generates incorrect lighting because most voxels block light, resulting in a value of zero for blocked faces. The method avoids this by sampling surrounding cells rather than the cell itself [S1, unofficial].
+-- Boundary conditions: If a vertex is at the edge of the voxel grid, fewer than four surrounding cells may be available. The pseudocode assumes all four cells are always available, but in practice, this needs to be handled (e.g., by clamping, mirroring, or using fewer samples).
++**Parameters:**
++*   `VERTEX`: A constant generic parameter (0-3) identifying which of the 4 vertices of the face to calculate [S1, unofficial].
++*   `NEIGHBOR_VERTEX_COUNT`: Set to 4, representing the 4 neighbor positions relevant to a vertex [S1, unofficial].
++*   Sampling count: Exactly 4 voxel cells are sampled per vertex [S2, unofficial].
++
++**Edge Cases and Pitfalls:**
++*   **Boundary Conditions:** If a neighbor index falls outside the voxel chunk or world bounds, the light value must default to 0 [S1, unofficial]. This prevents crashes and correctly simulates darkness at the edge of the world.
++*   **Direct Cell Application:** A common pitfall is applying the light value of the voxel cell *itself* to its vertices. Since most voxels are opaque and block light, this would result in a value of zero for blocked faces, creating incorrect lighting [S2, unofficial]. This method avoids this by strictly sampling the *surrounding* cells [S2, unofficial].
++*   **Precision:** The calculation uses floating-point division by 4.0. Standard `float32` precision is sufficient for the averaging operation [S1, unofficial].
++
++## Subtopics
++
++### Global Smooth Lighting Pass
++This variant describes the broader pass that iterates over all voxels in a chunk to compute and store these soft lighting values for each face, handling light emitters and occlusion checks [S1, unofficial]. It retrieves the chunk's kind and light storage, then iterates over all voxels. If a voxel is air/empty, it is skipped. If a voxel is fully occluded, it is skipped. If the voxel is a light emitter, a `FacesSoftLight` structure is created with uniform intensity equal to the voxel's greater intensity. If not a light emitter, it gathers neighborhood light using `gather_neighborhood_light`. For each of the 6 sides, it checks if the face is occluded; if not, it computes `soft_vertex_light` using the method described above; if occluded, it uses default zero values. The resulting `FacesSoftLight` is stored in the chunk's soft light storage [S1, unofficial].
+ 
+ ## Operating characteristics
+-- Time Complexity: O(V), where V is the number of vertices in the mesh. Each vertex requires a constant number of lookups and an average calculation.
+-- Memory Complexity: O(V) for storing the vertex light values.
+-- Measured Performance: The method is described as "cheap to calculate" and only needs to be computed when the mesh is created [S1, unofficial].
+-- Scaling: The method scales linearly with the number of vertices.
+-- Strengths: Provides smooth lighting transitions and a subtle ambient occlusion effect without the computational cost of ray casting.
+-- Limitations: The ambient occlusion effect is a side effect and may not be as accurate or controllable as traditional ambient occlusion methods. Boundary conditions need careful handling.
+-- When to use: When a cheap, visually pleasing lighting effect is desired for voxel meshes, and the mesh is static or changes infrequently.
+-- When not to use: When accurate self-shadowing is required, or when the mesh is dynamic and lighting needs to be updated frequently.
++*   **Time Complexity:** $O(1)$ per vertex. The calculation involves a fixed number of array lookups and a single arithmetic mean. The global pass is $O(V)$ where $V$ is the number of voxels, as it processes each voxel and its 6 faces once.
++*   **Memory Complexity:** $O(1)$ additional memory per vertex for the calculation. The lookup table `NEIGHBOR_VERTEX_LOOKUP` is a small static constant ($6 \times 4 \times 4$ integers), requiring negligible memory.
++*   **Measured Performance:** The method is described as "cheap to calculate" because it only needs to be computed when the mesh is created, not per-frame [S2, unofficial]. It avoids the high cost of ray casting associated with standard ambient occlusion [S2, unofficial].
++*   **Strengths:** Produces smooth lighting transitions and naturally darkens concave areas (fake ambient occlusion) without complex shaders or ray tracing [S2, unofficial]. It is aesthetically pleasing for voxel worlds [S2, unofficial].
++*   **Limitations:** It is a static approximation. It does not account for dynamic lighting changes in real-time unless the mesh is regenerated. It may produce incorrect lighting in areas with complex geometry if the voxel resolution is too low, as it only samples immediate neighbors [S2, unofficial].
++*   **When to use:** Ideal for static or semi-static voxel worlds where performance is critical and real-time dynamic shadows are not required. It is particularly useful for generating meshes for rendering engines that support vertex colors or per-vertex lighting.
++*   **When not to use:** Not suitable for dynamic scenes with moving light sources or complex, non-voxel geometry where accurate self-shadowing is required.
+ 
+ ## Background
+-- Origin: The method is described in the context of procedural generation of voxel worlds with castles [S1, unofficial].
+-- History and Development: The method was developed to address lighting anomalies in voxel meshes, such as incorrect shadows on castle walls [S1, unofficial].
+-- Where it is used: In procedural generation of voxel worlds, particularly for static meshes where lighting is computed once during mesh creation.
++The method originates from the implementation of voxel world generation in the "Procedural Generation of Voxel Worlds with Castles" research project [S2, unofficial]. It was developed to address lighting anomalies in voxel meshes, such as incorrect shadows on castle walls, by providing a smooth, aesthetically pleasing lighting model that mimics ambient occlusion without the computational overhead of ray casting [S2, unofficial]. The implementation is available in the `afonsolage/projekto` repository [S1, unofficial].
+ 
+ ## Sources
+-[S1] Procedural Generation of Voxel Worlds with Castles, https://researchcommons.waikato.ac.nz/entities/publication/70d98783-1629-43df-9d01-b973ddbb5d75, fetched 2026-10-28 (unofficial)+[S1] afonsolage/projekto, https://github.com/afonsolage/projekto, fetched 2026-10-27 (unofficial)
++[S2] Procedural Generation of Voxel Worlds with Castles, https://researchcommons.waikato.ac.nz/entities/publication/70d98783-1629-43df-9d01-b973ddbb5d75, fetched 2026-10-28 (unofficial)

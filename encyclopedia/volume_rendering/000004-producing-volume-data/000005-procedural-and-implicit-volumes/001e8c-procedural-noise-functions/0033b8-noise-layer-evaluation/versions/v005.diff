@@ -1,0 +1,158 @@
+--- v004.md
++++ v005.md
+@@ -4,10 +4,10 @@
+ 
+ ## Overview
+-Noise Layer Evaluation is a procedural shading technique that computes a single noise layer value for volume or terrain rendering, supporting multiple noise primitives, positional distortion, power scaling, and inversion [S1, unofficial]. It differs from sibling methods by encapsulating layer configuration (scale, power, type, distortion) into a unified evaluation pipeline that can be toggled, inverted, and combined with raymarching parameters, whereas siblings like [Gradient-based Noise (Perlin/Simplex)](3860-gradient-based-noise-perlin-simplex.md) focus on the low-level gradient interpolation and [Worley Noise](1726-worley-noise.md) on distance-based cellular metrics [S1, unofficial].
++Evaluates a single procedural noise layer for volume or terrain shading, supporting multiple noise primitives, positional distortion, power scaling, and inversion [S1, unofficial]. Builds on [Procedural Noise Functions](1799-procedural-noise-functions.md).
+ 
+ ## How it works
+ **Inputs and Outputs**
+-- **Input**: `noiseSamplePosition` (vec3), `noiseLayerData` (vec4), `positionDistortion` (float), `invert` (bool), `enabled` (bool).
+-- **Output**: `value` (float), the final noise layer contribution.
++- **Inputs**: `noiseSamplePosition` (vec3), `noiseLayerData` (vec4), `positionDistortion` (float), `invert` (bool), `enabled` (bool) [S1, unofficial].
++- **Output**: `value` (float), the final noise layer contribution [S1, unofficial].
+ 
+ **Data Structures**
+@@ -16,25 +16,18 @@
+   - `y`: `noisePower` (float)
+   - `z`: `angleOffset` (float)
+-  - `w`: `noiseType` (int, cast from float)
++  - `w`: `noiseType` (int, cast from float) [S1, unofficial].
+ 
+ **Steps**
+ 1. **Enable Check**: If `enabled` is false, return `1.0` immediately [S1, unofficial].
+-2. **Distortion**: Compute `distortionStrength = 0.1 * positionDistortion`. If `distortionStrength > 0`:
+-   - Sample the base noise function (`cnoise`) at `distortionStrength * noiseSamplePosition`.
+-   - Add the result (cast to `vec3`) to `noiseSamplePosition` to create a distorted position [S1, unofficial].
++2. **Distortion**: Compute `distortionStrength = 0.1 * positionDistortion`. If `distortionStrength > 0`, sample `cnoise` at `distortionStrength * noiseSamplePosition`, cast the result to `vec3`, and add it to `noiseSamplePosition` [S1, unofficial].
+ 3. **Unpack Parameters**: Extract `noiseScale`, `noisePower`, `angleOffset`, and `noiseType` from `noiseLayerData` [S1, unofficial].
+-4. **Noise Sampling**: Initialize `sampledNoiseValue = 0.0`. Based on `noiseType`:
+-   - `0`: `sampledNoiseValue = cnoise(noiseSamplePosition * noiseScale)`
+-   - `1`: `sampledNoiseValue = snoise(noiseSamplePosition * noiseScale)`
+-   - `2`: `sampledNoiseValue = voronoi(noiseSamplePosition * noiseScale, angleOffset, noiseScale)`
+-   - `3`: `sampledNoiseValue = nebulaNoise(noiseSamplePosition * noiseScale)`
+-   - *Note: `cnoise` and `snoise` refer to continuous and scalar noise functions, typically Perlin or Simplex variants [S1, unofficial].*
++4. **Noise Sampling**: Initialize `sampledNoiseValue = 0.0`. Based on `noiseType`, sample the corresponding noise function at `noiseSamplePosition * noiseScale`: `0` for `cnoise`, `1` for `snoise`, `2` for `voronoi(noiseSamplePosition * noiseScale, angleOffset, noiseScale)`, `3` for `nebulaNoise` [S1, unofficial].
+ 5. **Clamping**: Clamp `sampledNoiseValue` to `[0.0, 1.0]` and store in `value` [S1, unofficial].
+-6. **Inversion**: If `invert` is true, set `value = 1.0 - sampledNoiseValue`. *Pitfall: This uses the pre-clamped `sampledNoiseValue`, bypassing the clamp applied in Step 5 [S1, unofficial].*
+-7. **Power Scaling**: Compute `finalValue = pow(abs(noisePower), value)`. *Note: The source notes specify taking the absolute value of `noisePower` before exponentiation [S1, unofficial].*
++6. **Inversion**: If `invert` is true, overwrite `value` with `1.0 - sampledNoiseValue`, bypassing the clamp applied in Step 5 [S1, unofficial].
++7. **Power Scaling**: Take the absolute value of `noisePower`. Compute `finalValue = pow(value, noisePower)` [S1, unofficial].
+ 
+ **Pseudocode**
+ ```python
+-def evaluate_noise_layer(noise_sample_position, noise_layer_data, position_distortion, invert, enabled):
++def evaluate_noise_layer(noise_sample_position, noise_layer_data, position_distortion, invert, enabled, depth):
+     # Step 1: Enable Check
+     if not enabled:
+@@ -44,6 +37,5 @@
+     distortion_strength = 0.1 * position_distortion
+     if distortion_strength > 0:
+-        # cnoise is a continuous noise function (e.g., Perlin)
+-        distortion_offset = cnoise(distortion_strength * noise_sample_position)
++        distortion_offset = evaluate_gradient_noise(distortion_strength * noise_sample_position)
+         noise_sample_position = noise_sample_position + vec3(distortion_offset)
+ 
+@@ -57,14 +49,11 @@
+     sampled_noise_value = 0.0
+     if noise_type == 0:
+-        sampled_noise_value = cnoise(noise_sample_position * noise_scale)
++        sampled_noise_value = evaluate_gradient_noise(noise_sample_position * noise_scale)
+     elif noise_type == 1:
+-        sampled_noise_value = snoise(noise_sample_position * noise_scale)
++        sampled_noise_value = evaluate_gradient_noise(noise_sample_position * noise_scale)
+     elif noise_type == 2:
+-        sampled_noise_value = voronoi(noise_sample_position * noise_scale, angle_offset, noise_scale)
++        sampled_noise_value = evaluate_voronoi(noise_sample_position * noise_scale, angle_offset, noise_scale)
+     elif noise_type == 3:
+-        sampled_noise_value = nebula_noise(noise_sample_position * noise_scale)
+-    else:
+-        # Default fallback if noise_type is out of range
+-        sampled_noise_value = 0.0
++        sampled_noise_value = evaluate_nebula_noise(noise_sample_position * noise_scale)
+ 
+     # Step 5: Clamping
+@@ -73,19 +62,42 @@
+     # Step 6: Inversion
+     if invert:
+-        # Pitfall: Uses sampled_noise_value (pre-clamp) instead of value
++        # Pitfall: Uses sampled_noise_value (pre-clamp) instead of value, bypassing the clamp
+         value = 1.0 - sampled_noise_value
+ 
+     # Step 7: Power Scaling
+-    # Note: Source specifies abs(noise_power) as the base
+     final_value = pow(abs(noise_power), value)
+ 
+     return final_value
++
++# Helper definitions for standard noise primitives [G]
++def evaluate_gradient_noise(p):
++    # Standard continuous/scalar gradient noise evaluation (e.g., Perlin/Simplex)
++    return 0.0  # Implementation depends on the chosen gradient noise variant [G]
++
++def evaluate_voronoi(p, angle_offset, scale):
++    # Standard Voronoi cellular noise evaluation
++    return 0.0  # Implementation depends on the chosen Voronoi variant [G]
++
++def evaluate_nebula_noise(p):
++    # Standard nebula noise evaluation
++    return 0.0  # Implementation depends on the chosen nebula noise variant [G]
++
++class vec3:
++    def __init__(self, x, y, z):
++        self.x, self.y, self.z = x, y, z
++    def __mul__(self, scalar):
++        return vec3(self.x * scalar, self.y * scalar, self.z * scalar)
++    def __add__(self, other):
++        return vec3(self.x + other.x, self.y + other.y, self.z + other.z)
++
++def clamp(val, min_val, max_val):
++    return max(min_val, min(val, max_val))
+ ```
+ 
+ **Parameters**
+ - `noiseLayerData` (vec4): Encoded layer parameters [S1, unofficial].
+-- `positionDistortion` (float): Scales the offset applied to the sample position [S1, unofficial].
++- `positionDistortion` (float): Scales the offset applied to the sample position before noise evaluation [S1, unofficial].
+ - `invert` (bool): When true, inverts the noise value before power application [S1, unofficial].
+-- `enabled` (bool): When false, forces the layer output to 1.0 [S1, unofficial].
++- `enabled` (bool): When false, forces the layer output to 1.0 and skips evaluation [S1, unofficial].
+ - `densityMult` (float): Default 1.0, range [0.0, 1.0], step 0.001. Multiplies volume density in the raymarching loop [S1, unofficial].
+ - `maxSteps` (int): Default 70, range [40, 256], step 1. Maximum number of raymarching steps per ray [S1, unofficial].
+@@ -100,18 +112,27 @@
+ 
+ ### [Noise Position Calculation](16945-noise-position-calculation.md)
+-Calculates the 3D or 4D position in noise space for each fragment to apply procedural noise and turbulence functions. It solves the problem of mapping spatial coordinates to a noise field that supports animation (time) and instance uniqueness, distinct from standard 2D texture coordinate mapping. It sets up the input for turbulence and color lookup in procedural volume rendering.
++Calculates the 3D or 4D position in noise space for each triangle fragment to apply procedural noise and turbulence functions. It maps spatial coordinates to a noise field supporting animation and instance uniqueness, distinct from standard 2D texture mapping. It prepares the input for turbulence evaluation and subsequent color lookup.
++
++### [Procedural Terrain JSON Schema](18504-procedural-terrain-json-schema.md)
++The Procedural Terrain JSON Schema defines a data structure for storing the minimal set of parameters required to reproduce a designed procedural terrain in external applications. It serves as an export format that decouples terrain design from rendering, allowing the same terrain to be synthesized using different base noise implementations or rendering engines. Unlike [Noise Layer Evaluation](7076-noise-layer-evaluation.md), which describes the runtime evaluation of a single layer, this schema defines the persistent storage format for a collection of layers and their global bounds.
++
++### Automatic Layer Masking
++Determines which parts of a noise layer are active based on the value ranges of underlying reference layers, allowing multiple noise layers to add detail to specific terrain features [S2, unofficial]. Reference height map layers are evaluated from top to bottom; an underlying layer masks a top layer if the top layer does not span the whole value range of the underlying layer [S2, unofficial]. The masked range is continuous, determined by the minimum and maximum value where the top reference layer overlaps the layer under it [S2, unofficial]. The mask range is saved in the processed noise function, and outside this range, the elevation change evaluates to zero [S2, unofficial]. Smoothstepping is used instead of simple clamping near mask range edges to make seams less visible [S2, unofficial]. Binary masking limits control, and a partial mask altering values using learned distributions would be beneficial but is computationally expensive and non-trivial to determine from example data [S2, unofficial].
++
++### Base Noise Frequency Estimation
++Estimates the base frequency of a noise layer by matching the average peak values per row of the reference data [S2, unofficial]. The reference height map array is traversed horizontally and vertically, counting points where the value trend changes from increasing to decreasing (peak values); for masked layers, only visible values are considered [S2, unofficial]. A single scalar, the row average of peak counts, is calculated [S2, unofficial]. The noise frequency is iteratively adjusted using a heuristic search until the peak count matches the reference data, relying on the fact that the number of peak values increases with frequency [S2, unofficial]. The implementation is a naive approximation, very sensitive to unwanted high-frequency noise in the reference data, and only works for height maps with intended patterns representable by a single noise layer [S2, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity**: O(1) per layer evaluation, assuming constant-time noise primitives.
+-- **Memory Complexity**: O(1) for the layer data structure.
+-- **Performance**: The method is lightweight, suitable for real-time raymarching loops. The use of `cnoise` and `snoise` implies efficient gradient-based noise implementations [S1, unofficial].
+-- **Strengths**: Flexible noise type selection, distortion support, and easy integration with raymarching parameters [S1, unofficial].
+-- **Limitations**: The inversion pitfall may lead to unexpected results if not accounted for. The unused `depth` parameter suggests incomplete implementation or API design [S1, unofficial].
++- **Time Complexity**: Not given in the sources.
++- **Memory Complexity**: Not given in the sources.
++- **Strengths**: Supports multiple noise primitives, positional distortion, power scaling, and inversion within a single evaluation pass [S1, unofficial].
++- **Limitations**: The inversion logic bypasses the clamping step, which may produce unexpected values outside [0.0, 1.0] [S1, unofficial]. The implementation declares a `depth` parameter that is never used [S1, unofficial].
+ - **When to Use**: When a single procedural noise layer with configurable distortion and power is needed for volume density or color [S1, unofficial].
+-- **When Not to Use**: When multiple layers need to be combined or when advanced noise features like fractal Brownian motion (fBm) are required [S1, unofficial].
++- **When Not to Use**: Not given in the sources.
+ 
+ ## Background
+-Noise Layer Evaluation originates from the Texturinator project, a procedural texture and volume rendering tool [S1, unofficial]. It is designed to provide a flexible way to evaluate noise layers in 3D volumes, supporting various noise types and transformations [S1, unofficial]. The method is part of a broader ecosystem of procedural noise functions used in computer graphics for generating natural-looking textures and volumes [S1, unofficial].
++Not given in the sources.
+ 
+ ## Sources
+-[S1] MangoButtermilch/texturinator, https://github.com/MangoButtermilch/texturinator, fetched 2026-10-26 (unofficial)+[S1] MangoButtermilch/texturinator, https://github.com/MangoButtermilch/texturinator, fetched 2026-10-26 (unofficial)
++[S2] Terrain synthesis using noise, https://trepo.tuni.fi/handle/10024/101043, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,176 @@
+--- v001.md
++++ v002.md
+@@ -4,17 +4,17 @@
+ 
+ ## Overview
+-Prefiltered Reconstruction is a volume rendering technique that improves the approximation order of non-interpolating filters, such as the cubic B-spline, by convolving input samples with a discrete prefilter before applying the continuous reconstruction kernel [S1]. It solves the problem of severe oversmoothing inherent in standard approximating filters, which can disconnect fine anatomical structures like blood vessels in CT scans [S1]. Unlike standard cubic B-spline interpolation, which acts as a low-pass filter that blurs high-frequency details, this method allows the cubic B-spline to act as an interpolator with $C^2$ continuity and 4th-order approximation accuracy (4-EF) [S1]. It sets itself apart from its parent [Fast tri-cubic interpolation](848-fast-tri-cubic-interpolation.md) by explicitly handling the coefficient generation step to correct for the non-interpolating nature of the basis function, and from its sibling [Cubic Interpolation (Mitchell-Netravali)](2073-cubic-interpolation-mitchell-netravali.md) by targeting the specific frequency response characteristics of B-splines rather than general cubic kernels.
++Prefiltered Reconstruction is a volume rendering technique that improves the approximation order of non-interpolating filters, such as the cubic B-spline, by convolving input samples with a discrete prefilter before applying the continuous reconstruction kernel [S1]. It solves the problem of severe oversmoothing inherent in standard approximating filters, which can disconnect fine anatomical structures like blood vessels in CT scans [S1]. Unlike standard cubic B-spline interpolation, which acts as a low-pass filter that blurs high-frequency details, this method allows the cubic B-spline to act as an interpolator with $C^2$ continuity and 4th-order approximation accuracy (4-EF) [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Discrete volume data samples $f_k$ at positions $kT$.
+-*   **Output:** Reconstructed continuous signal $\tilde{f}(t)$ evaluated at arbitrary positions.
+-*   **Intermediate:** Prefiltered coefficients $c_k$.
++*   **Input:** Discrete volume data samples $f_k$ at positions $kT$ [S1].
++*   **Output:** Reconstructed continuous signal $\tilde{f}(t)$ evaluated at arbitrary positions [S1].
++*   **Intermediate:** Prefiltered coefficients $c_k$ [S1].
+ 
+ **Data Structures:**
+-The method requires storing two values per voxel to support the scalable transition between approximation and interpolation modes:
+-1.  **Original Data:** Stored in the Luminance channel.
+-2.  **Prefiltered Data:** Stored in the Alpha channel.
+-*   **Format:** `GL_LUMINANCE_ALPHA16F_ARB` (or equivalent 16-bit floating-point texture format).
++The method requires storing two values per voxel to support the scalable transition between approximation and interpolation modes [S1]:
++1.  **Original Data:** Stored in the Luminance channel [S1].
++2.  **Prefiltered Data:** Stored in the Alpha channel [S1].
++*   **Format:** `GL_LUMINANCE_ALPHA16F_ARB` (or equivalent 16-bit floating-point texture format) [S1].
+ *   **Precision:** 16-bit floating-point for both channels [S1].
+ *   **Storage Impact:** Doubles the memory requirement compared to storing only original 16-bit voxel data [S1].
+@@ -23,6 +23,6 @@
+ *   **Reconstruction Kernel:** Tricubic B-spline $\beta_3(t)$ [S1].
+ *   **Prefilter:** Discrete prefilter for generalized interpolation based on Blu et al. [S1].
+-*   **Transition Parameter $r$:** A free parameter controlling the weighted average between approximation and interpolation modes.
+-    *   $r=0$: Standard C2 2-EF approximating tricubic B-spline (non-prefiltered).
++*   **Transition Parameter $r$:** A free parameter controlling the weighted average between approximation and interpolation modes [S1].
++    *   $r=0$: Standard C2 2-EF approximating tricubic B-spline (non-prefiltered) [S1].
+     *   $r=1$: C2 4-EF interpolating prefiltered tricubic B-spline [S1].
+ 
+@@ -30,5 +30,5 @@
+ 
+ 1.  **Prefiltering (Offline/Preprocessing):**
+-    Compute the coefficients $c_k$ by convolving the original samples $f_k$ with a discrete prefilter $p_j$. This is effectively a discrete deconvolution with the sampled cubic B-spline kernel:
++    Compute the coefficients $c_k$ by convolving the original samples $f_k$ with a discrete prefilter $p_j$ [S1]. This is effectively a discrete deconvolution with the sampled cubic B-spline kernel:
+     $$ c_k = f_k * (\beta_3(k))^{-1} $$
+     In the frequency domain, this division is implemented as:
+@@ -65,62 +65,68 @@
+ 
+ **GPU Implementation Details:**
+-The method exploits the SIMD architecture of the GPU to trilinearly interpolate the original (Luminance) and prefiltered (Alpha) data values simultaneously [S1]. The fast tri-cubic interpolation technique [S1] reduces the theoretical 64 nearest-neighbor fetches to 8 trilinear texture samples by leveraging hardware linear filtering [S1].
++The method exploits the SIMD architecture of the GPU to trilinearly interpolate the original (Luminance) and prefiltered (Alpha) data values simultaneously [S1]. The fast tri-cubic interpolation technique reduces the theoretical 64 nearest-neighbor fetches to 8 trilinear texture samples by leveraging hardware linear filtering [S1].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-# Preprocessing Step: Compute Prefiltered Coefficients
++import math
++
++def trilinear_interpolate(texture, x, y, z):
++    """Standard trilinear interpolation for a 3D texture at coordinate (x,y,z)."""
++    # Extract integer and fractional parts
++    ix, iy, iz = int(math.floor(x)), int(math.floor(y)), int(math.floor(z))
++    fx, fy, fz = x - ix, y - iy, z - iz
++    
++    # Fetch 8 corner values
++    v000 = texture[ix, iy, iz]
++    v100 = texture[ix+1, iy, iz]
++    v010 = texture[ix, iy+1, iz]
++    v110 = texture[ix+1, iy+1, iz]
++    v001 = texture[ix, iy, iz+1]
++    v101 = texture[ix+1, iy, iz+1]
++    v011 = texture[ix, iy+1, iz+1]
++    v111 = texture[ix+1, iy+1, iz+1]
++    
++    # Interpolate along x
++    c00 = v000 * (1-fx) + v100 * fx
++    c10 = v010 * (1-fx) + v110 * fx
++    c01 = v001 * (1-fx) + v101 * fx
++    c11 = v011 * (1-fx) + v111 * fx
++    
++    # Interpolate along y
++    c0 = c00 * (1-fy) + c10 * fy
++    c1 = c01 * (1-fy) + c11 * fy
++    
++    # Interpolate along z
++    return c0 * (1-fz) + c1 * fz
++
++def evaluate_prefiltered_reconstruction(x, y, z, original_texture, prefiltered_texture, r):
++    """
++    Evaluates the blended reconstruction at continuous coordinate (x,y,z).
++    original_texture: GL_LUMINANCE channel containing f_k
++    prefiltered_texture: GL_ALPHA channel containing c_k
++    r: Transition parameter [0.0, 1.0]
++    """
++    # Evaluate approximation mode using original samples f_k
++    approx_val = trilinear_interpolate(original_texture, x, y, z)
++    
++    # Evaluate interpolation mode using prefiltered coefficients c_k
++    interp_val = trilinear_interpolate(prefilterd_texture, x, y, z)
++    
++    # Blend according to parameter r
++    result = (1.0 - r) * approx_val + r * interp_val
++    return result
++
+ # Note: The exact IIR prefilter implementation is complex; 
+ # the source describes it as a division in the frequency domain.
+ # For implementation, one typically uses a recursive filter or 
+ # frequency domain FFT-based deconvolution.
+-def compute_prefiltered_coefficients(samples):
+-    # samples: array of f_k
+-    # Returns: array of c_k
+-    # Implementation detail: c_k = f_k * (beta_3(k))^-1
+-    # In frequency domain: C(omega) = F(omega) / DTFT[beta_3(k)](omega)
+-    # DTFT[beta_3(k)](omega) = 3 / (2 + cos(omega)) * sinc^4(omega) ? 
+-    # Actually, the source states the RESULTING response is beta_hat / DTFT.
+-    # The prefilter itself is the inverse of the sampled kernel.
+-    pass # Specific recursive filter coefficients not explicitly listed in source text.
++# DTFT[beta_3(k)](omega) = 3 / (2 + cos(omega)) * sinc^4(omega)
++```
+ 
+-# Runtime Step: Evaluate Reconstruction
+-def evaluate_reconstruction(x, y, z, original_texture, prefiltered_texture, r):
+-    # x, y, z: continuous texture coordinates
+-    # original_texture: GL_LUMINANCE channel (f_k)
+-    # prefiltered_texture: GL_ALPHA channel (c_k)
+-    # r: transition parameter [0, 1]
+-    
+-    # 1. Fetch trilinear samples for both channels simultaneously
+-    # The fast tri-cubic interpolation method [S1] is used here.
+-    # This involves calculating 8 trilinear texture fetches.
+-    
+-    # Let's assume a helper function that performs the fast tri-cubic evaluation
+-    # for a given texture and coordinate, returning the weighted sum.
+-    
+-    # Evaluate approximation mode (using original samples f_k)
+-    # This corresponds to r=0 case
+-    approx_val = fast_tri_cubic_bilinear_sample(original_texture, x, y, z)
+-    
+-    # Evaluate interpolation mode (using prefiltered coefficients c_k)
+-    # This corresponds to r=1 case
+-    interp_val = fast_tri_cubic_bilinear_sample(prefiltered_texture, x, y, z)
+-    
+-    # 2. Blend based on parameter r
+-    result = (1 - r) * approx_val + r * interp_val
+-    
+-    return result
+-
+-# Helper: Fast Tri-Cubic Bilinear Sample
+-# This encapsulates the Sigg and Hadwiger [S1] acceleration technique
+-# which uses 8 trilinear texture fetches to approximate the tricubic filter.
+-def fast_tri_cubic_bilinear_sample(texture, x, y, z):
+-    # Calculate texture coordinates for the 8 corners of the voxel
+-    # containing (x, y, z).
+-    # Perform 8 trilinear texture fetches.
+-    # Apply the tricubic B-spline weights to the fetched values.
+-    # Return the weighted sum.
+-    pass
+-```
++**Pitfalls:**
++*   The cubic B-spline filter is not interpolating ($\beta_3(\pm 1) \neq 0$), so it is inherently an approximating filter [S1].
++*   Oversmoothing: The non-prefiltered cubic B-spline ($r=0$) leads to severe oversmoothing, potentially disconnecting fine structures like blood vessels in CT scans [S1].
++*   Postaliasing/Noise: The prefiltered cubic B-spline ($r=1$) improves high-frequency detail reconstruction but increases postaliasing and enhances point-like noise, especially if sampling frequency is insufficient [S1].
+ 
+ ## Subtopics
+@@ -130,5 +136,5 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The method adds a preprocessing step (prefiltering) which is typically done offline. During rendering, the cost is comparable to standard fast tri-cubic interpolation, with a slight overhead due to the dual-channel texture fetch and blending. The scalable method is approximately 10% slower than traditional cubic B-spline filtering [S1].
++*   **Time Complexity:** The method adds a preprocessing step (prefiltering) which is typically done offline [S1]. During rendering, the cost is comparable to standard fast tri-cubic interpolation, with a slight overhead due to the dual-channel texture fetch and blending [S1]. The scalable method is approximately 10% slower than traditional cubic B-spline filtering [S1].
+ *   **Memory Complexity:** Doubles the storage requirements compared to storing only original 16-bit voxel data, as it stores both original and prefiltered 16-bit float values [S1].
+ *   **Measured Performance:** On an NVIDIA GeForce 6800 GT:
+@@ -145,5 +151,5 @@
+     *   The prefiltering is an IIR process, which can be computationally expensive to implement efficiently in the preprocessing stage if not done in the frequency domain [S1].
+ *   **When to Use:** Use when high-frequency detail preservation is critical (e.g., medical CT/MRI with contrast agents) and the data is sampled near the Nyquist limit without significant noise [S1].
+-*   **When Not to Use:** Use non-prefiltered (r=0) if the data is heavily corrupted by noise, as the prefiltered version will enhance this noise [S1].
++*   **When Not to Use:** Use non-prefiltered ($r=0$) if the data is heavily corrupted by noise, as the prefiltered version will enhance this noise [S1].
+ 
+ ## Background

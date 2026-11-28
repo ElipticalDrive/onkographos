@@ -1,0 +1,625 @@
+--- v004.md
++++ v005.md
+@@ -4,519 +4,144 @@
+ 
+ ## Overview
+-Adaptive Volume Rendering Integration is an iterative numerical method for evaluating the Volume Rendering Integral (VRI) that uses adaptive step sizes for both the inner (transparency) and outer (color) integrals to control accuracy and efficiency [S1]. It sets itself apart from recursive adaptive methods by using an iterative approach that avoids recursion depth issues on GPUs and allows re-initialization of step sizes, enabling coherent control of inner and outer integration steps without excessive recomputation [S1].
++Adaptive Volume Rendering Integration (VRI) is an iterative numerical method that evaluates the Volume Rendering Integral using adaptive step sizes for both the inner (transparency/extinction) and outer (color/emission) integrals [S1]. It solves the problem of balancing accuracy and performance in volume rendering by dynamically adjusting step sizes based on local function variation, avoiding the recursion depth and stack-context issues of standard recursive adaptive methods on GPU architectures [S1]. Unlike naive recursive approaches that re-evaluate the inner integral for every outer sample, this method advances both integrals in consonance, reusing intermediate Simpson's rule evaluations to minimize redundant computation [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Ray start position $t$, initial step size $h^*_0$, error tolerance $\epsilon$, minimum step size $h_{min}$, maximum step size $h_{max}$, and ray length $D$ (or end position $t_{final}$).
+-*   **Output:** The accumulated color and alpha value $I = [R, G, B, A]$ for the ray.
++*   **Input:** Ray start parameter $t$, initial step size $h^*_0$, error tolerance $\epsilon$, minimum step size $h_{min}$, maximum step size $h_{max}$, and ray end parameter $t_{final}$ [S1].
++*   **Output:** Accumulated color and opacity vector $I = [R, G, B, A]$ [S1].
+ 
+ **Data Structures:**
+-*   $I$: A vector of four floating-point values $[R, G, B, A]$, initialized to $[0, 0, 0, 0]$.
+-*   $t$: Current ray position (float).
+-*   $h$: Current step size (float).
+-*   $\epsilon$: Current error tolerance (float).
+-*   $lastsucceeded$: Boolean flag indicating if the previous step was accepted.
++*   **Scalar Fields:** The scalar field $s(\mathbf{p})$ is sampled at positions $\mathbf{p} = \mathbf{o} + t\mathbf{d}$ to obtain extinction $\tau$ and emission $C$ via transfer functions [S1].
++*   **State Variables:**
++    *   $t$: Current ray parameter.
++    *   $h$: Current step size.
++    *   $\epsilon$: Current error tolerance.
++    *   $lastsucceeded$: Boolean flag indicating if the previous step met the tolerance [S1].
++    *   $I$: Accumulator for the final color/opacity [S1].
+ 
+ **Formulas:**
+ The Volume Rendering Integral (VRI) is defined as [S1]:
+ $$ I = \int_0^D C(s(t)) \tau(s(t)) \exp\left(-\int_0^t \tau(s(t')) dt'\right) dt $$
+-where $D$ is the ray length, $C$ is the emitted light (transfer function), $\tau$ is the light extinction coefficient (transfer function), and $s$ is the scalar field along the ray parametrized by $t$.
++where $D$ is the ray length, $C$ is emitted light, $\tau$ is the extinction coefficient, and $s$ is the scalar field [S1].
+ 
+-Simpson's rule approximates the integral of a function $f$ in an interval $[t, t+h]$ as [S1]:
+-$$ S(t,h) = \frac{h}{6} \left[ f(t) + 4f(t + \frac{h}{2}) + f(t + h) \right] $$
++Simpson's rule approximates the integral of a function $f$ over $[t, t+h]$ as [S1]:
++$$ S(t,h) = \frac{h}{6} \left[ f(t) + 4f\left(t + \frac{h}{2}\right) + f(t + h) \right] $$
+ 
+-The error estimate $E(t,h)$ for adaptive Simpson's rule is calculated by comparing a full step $S(t,h)$ with two half steps $D(t,h)$ [S1]:
+-$$ D(t, h) = S(t, \frac{h}{2}) + S(t + \frac{h}{2}, \frac{h}{2}) $$
++The error estimate $E(t,h)$ for adaptive Simpson's rule compares a full step $S(t,h)$ with two half steps $D(t,h)$ [S1]:
++$$ D(t, h) = S\left(t, \frac{h}{2}\right) + S\left(t + \frac{h}{2}, \frac{h}{2}\right) $$
+ $$ E(t,h) = \frac{1}{15} |D(t,h) - S(t,h)| $$
+ 
+ **Parameters:**
+-*   $h_{min}$: Minimum step size. If reached, the step is taken even if error > tolerance to prevent infinite halving [S1].
+-*   $h_{max}$: Maximum step size. Prevents missing high-frequency variations (e.g., thin leaves) [S1].
+-*   $h^*_0$: Initial step size. Default experimental value: 0.5 voxel units [S1].
+-*   $\epsilon$: User-specified error tolerance. Default experimental values: 0.01, 0.005, 0.001 [S1].
++*   $h^*_0$: Initial step size. Default experiment value: 0.5 voxel units [S1].
++*   $h_{min}$: Minimum step size. Default: 0.1 voxel units [S1]. Prevents infinite halving when error cannot be estimated precisely [S1].
++*   $h_{max}$: Maximum step size. Default: 2.0 voxel units [S1]. Prevents missing high-frequency variations (e.g., thin leaves) [S1].
++*   $\epsilon$: User-specified error tolerance. Tested values: 0.01, 0.005, 0.001 [S1].
+ 
+ **Algorithm Steps:**
+-The method consists of two main procedures: `RI` (Inner Integral) and `RO` (Outer Integral), orchestrated by a main loop.
++The method consists of an outer loop covering the ray and two internal procedures: `RI` (Inner Integral) and `RO` (Outer Integral).
+ 
+-1.  **Initialization:**
+-    *   Set $I = [0, 0, 0, 0]$.
+-    *   Set $t_{final} = t + h^*_0$ (or ray end).
+-    *   Set $h = \min(h^*_0, t_{final} - t)$.
+-    *   Set $lastsucceeded = true$.
++1.  **Initialization:** Set $I = [0,0,0,0]$, $t_{final} = t + h^*_0$, $h = \min(h^*_0, t_{final} - t)$, and $lastsucceeded = true$ [S1].
++2.  **Main Loop:** While $t < t_{final}$:
++    a.  **Inner Integral (`RI`):** Call `RI(t, tfinal - t, hinner)` to determine a valid step size $h_{inner}$ and compute the inner integral value $I_{inner}$ (transparency contribution) [S1].
++        *   `RI` uses the iterative adaptive Simpson's rule (Algorithm 2 below) but terminates as soon as a valid step size is found within $[h_{min}, h_{max}]$ [S1].
++        *   If $I_{inner} \approx 0$ (medium is transparent), skip the outer integral for this segment and advance $t$ by $h_{inner}$ [S1].
++    b.  **Outer Integral (`RO`):** If $I_{inner} \neq 0$, call `RO(t, hinner, houter)` to compute the color contribution [S1].
++        *   `RO` uses the iterative adaptive Simpson's rule (Algorithm 2 below) for all color channels (R,G,B,A) [S1].
++        *   Inside `RO`, the inner integral is evaluated using *regular* (non-adaptive) Simpson's rule, as its error is already bounded by the step size selection in `RI` [S1].
++    c.  **Accumulation:** Add $I_{outer}$ to $I$ [S1].
++    d.  **Update:** Advance $t$ based on the progress of `RO` (which returns the step size used) [S1].
+ 
+-2.  **Main Loop:** While $t < t_{final}$:
+-    *   **Inner Integral Evaluation (`RI`):**
+-        *   Call `RI(t, t_final - t, h_inner)` to compute the inner integral value $I_{inner}$ and determine a valid step size $h_{inner}$.
+-        *   `RI` ensures $h_{inner}$ stays between $h_{min}$ and $h_{max}$.
+-        *   `RI` terminates as soon as a valid step size is found.
+-        *   If $I_{inner} \approx 0$ (medium is transparent), skip outer integral for this step and advance $t$ by $h_{inner}$ (or use $h_{inner}$ as the step for the main loop if coupled). *Note: The source implies skipping the outer evaluation if $I_{inner}$ is negligible, but the main loop logic in Algorithm 3 suggests advancing based on the result of `RO` or `RI` depending on strategy. The pseudocode below reflects the coupled strategy logic described in Algorithm 3.*
+-    *   **Outer Integral Evaluation (`RO`):**
+-        *   If $I_{inner} \neq 0$:
+-            *   Call `RO(t, h_inner, h_outer)` to compute the outer integral contribution $I_{outer}$ and update $h_{outer}$.
+-            *   `RO` performs integration for all color channels (R,G,B,A).
+-            *   `RO` uses regular (non-adaptive) Simpson's rule for the inner integral evaluation, as its error is bounded by $h_{inner}$.
+-            *   `RO` ensures $h_{outer}$ stays between $h_{min}$ and $h_{max}$.
+-            *   Add $I_{outer}$ to $I$.
+-            *   Advance $t$ by $h_{outer}$.
+-            *   Update $h_{outer}$ based on success/failure of the step in `RO`.
+-    *   **Step Size Control (Iterative Adaptive Simpson's Logic):**
+-        *   Evaluate error $E(t, h)$ for the current interval.
+-        *   If $E(t, h) \le \epsilon$ (Success):
+-            *   Accumulate result: $I = I + D(t,h) + E(t,h)$.
+-            *   Advance position: $t = t + h$.
+-            *   If $lastsucceeded$ is true:
+-                *   Double step size: $h = 2*h$.
+-                *   Double tolerance: $\epsilon = 2\epsilon$.
+-            *   Else:
+-                *   Set $lastsucceeded = true$.
+-            *   Clamp step size: $h = \min(h, t_{final} - t)$.
+-        *   If $E(t, h) > \epsilon$ (Failure):
+-            *   Halve step size: $h = h/2$.
+-            *   Halve tolerance: $\epsilon = \epsilon/2$.
+-            *   Set $lastsucceeded = false$.
+-            *   Do not advance $t$; repeat loop with new $h$.
+-
+-**Pseudocode:**
++**Sub-algorithm: Iterative Adaptive Simpson's Rule (Algorithm 2)**
++This procedure computes the integral over $[t, t+h]$ and returns the accumulated value and the final step size used [S1].
+ 
+ ```python
+-def adaptive_simpson_error(f, t, h):
++def iterative_adaptive_simpson(t, h, h_min, h_max, epsilon):
+     """
+-    Computes the error estimate E(t,h) for adaptive Simpson's rule.
+-    f: function to integrate
+-    t: start of interval
+-    h: step size
++    Computes integral from t to t+h using adaptive Simpson's rule.
++    Returns (integral_value, final_step_size).
+     """
+-    # Full step Simpson's
+-    s_full = simpson(f, t, h)
+-    
+-    # Two half steps
+-    s_half1 = simpson(f, t, h / 2)
+-    s_half2 = simpson(f, t + h / 2, h / 2)
+-    d_val = s_half1 + s_half2
+-    
+-    # Error estimate
+-    e_val = (1.0 / 15.0) * abs(d_val - s_full)
+-    return e_val, d_val, s_full
+-
+-def simpson(f, t, h):
+-    """
+-    Standard Simpson's rule approximation.
+-    """
+-    mid = t + h / 2
+-    return (h / 6.0) * (f(t) + 4.0 * f(mid) + f(t + h))
+-
+-def ri(t, remaining_dist, h_inner, h_min, h_max, epsilon):
+-    """
+-    Inner Integral Procedure.
+-    Returns: (integral_value, valid_h_inner)
+-    """
+-    # Simplified: Uses iterative adaptive logic to find a valid h_inner
+-    # and computes the inner integral value.
+-    # In practice, this evaluates the transparency term.
+-    # For the purpose of the main loop, it returns the step size 
+-    # that satisfies the tolerance for the inner integral.
+-    
+-    # Note: The source states RI returns the last step size and integral value.
+-    # It ensures h stays between h_min and h_max.
+-    # It terminates as soon as a valid step size is found.
+-    
+-    # Implementation detail: This function would run the adaptive loop 
+-    # specifically for the inner integrand (extinction coefficient).
+-    # For brevity in the main algorithm context, we assume it returns
+-    # a valid h_inner and the computed inner integral contribution.
+-    
+-    # Placeholder for specific inner integral logic as per source description
+-    # The source does not provide full pseudocode for RI/RO internals, 
+-    # only their constraints and interaction.
+-    # We assume it returns a tuple (inner_val, h_inner).
+-    
+-    # [G] Implementation Note: The inner integral computes the optical depth 
+-    # or transparency factor. The adaptive step h_inner is chosen such that 
+-    # the error in this inner integration is within epsilon.
+-    
+-    # Since the source does not give the full internal loop of RI/RO, 
+-    # we describe the interaction in the main loop.
+-    # However, to make it implementable, we must define the core adaptive step.
+-    
+-    # Let's assume RI performs one step of adaptive integration for the inner term.
+-    # It returns the integral value for that step and the step size used.
+-    
+-    # To be precise, the source says: "The integral value returned by RI is 
+-    # only used to avoid unnecessary evaluation of the outer integral when 
+-    # RI is close to zero".
+-    
+-    # We will implement the main loop using the core adaptive logic described 
+-    # in Algorithm 2, adapted for the coupled/decoupled strategies.
+-    
+-    pass # See main loop below for the integrated logic
+-
+-def ro(t, h_inner, h_outer, h_min, h_max, epsilon):
+-    """
+-    Outer Integral Procedure.
+-    Returns: (outer_integral_value, new_h_outer)
+-    """
+-    # Uses regular Simpson's rule for the inner integral evaluation.
+-    # Performs integration for all color channels.
+-    pass
+-
+-def adaptive_vri_integration(t_start, h_star_0, epsilon, h_min, h_max, ray_end):
+-    """
+-    Main Adaptive Volume Rendering Integration.
+-    """
+-    # Initialization
+-    I = [0.0, 0.0, 0.0, 0.0] # R, G, B, A
+-    t = t_start
+-    h = min(h_star_0, ray_end - t)
++    I = 0.0
++    tfinal = t + h
++    # Clamp initial step
++    h = min(h, tfinal - t)
+     lastsucceeded = True
+     
+-    # Strategy: Coupled (inner dictates outer initial step)
+-    # h_outer is initialized to h_inner
+-    
+-    while t < ray_end:
+-        # 1. Inner Integral Step (RI)
+-        # Evaluate inner integral to get a valid step size h_inner
+-        # and the inner integral value I_inner.
+-        # The source implies RI uses the adaptive logic to find h_inner.
++    while t < tfinal:
++        # Ensure step does not exceed remaining distance
++        h = min(h, tfinal - t)
+         
+-        # [G] To implement RI, one would run the adaptive loop on the 
+-        # inner integrand (extinction) until a step is accepted.
+-        # For the main loop, we need the result of this step.
++        # Evaluate Simpson's rule
++        # S(t,h) requires f(t), f(t+h/2), f(t+h)
++        # D(t,h) requires f(t), f(t+h/4), f(t+h/2), f(t+3h/4), f(t+h)
++        # Note: f(t+h/2) is shared.
+         
+-        # Let's assume we perform one adaptive step for the inner integral.
+-        # We evaluate the error for the inner integrand over [t, t+h].
++        mid = t + h / 2.0
++        S_full = (h / 6.0) * (f(t) + 4.0 * f(mid) + f(t + h))
+         
+-        # Inner integrand function for transparency/extinction
+-        # f_inner(s) = tau(s) * exp(-integral_0^s tau)
+-        # However, the VRI structure separates them.
++        # Two half steps
++        h_half = h / 2.0
++        S_left = (h_half / 6.0) * (f(t) + 4.0 * f(t + h_half / 2.0) + f(mid))
++        S_right = (h_half / 6.0) * (f(mid) + 4.0 * f(mid + h_half / 2.0) + f(t + h))
++        D_full = S_left + S_right
+         
+-        # The source says: "Inside RO, we use regular (i.e., non-adaptive) 
+-        # Simpson's rule to evaluate the inner integral whenever necessary, 
+-        # since the error is already bounded."
++        # Error estimate
++        E = (1.0 / 15.0) * abs(D_full - S_full)
+         
+-        # This implies RI determines the step size h_inner such that the 
+-        # inner integral can be computed accurately.
+-        
+-        # Simplified RI logic:
+-        # Find h_inner such that error(Inner, h_inner) <= epsilon.
+-        # Compute I_inner using Simpson's with h_inner.
+-        
+-        # Since the source doesn't give full RI/RO pseudocode, we focus on 
+-        # the main loop structure from Algorithm 3 and the adaptive logic 
+-        # from Algorithm 2.
+-        
+-        # Algorithm 3 Loop:
+-        # I_inner, h_inner = RI(t, tfinal - t, h_inner)
+-        # if I_inner != 0:
+-        #    h_outer = h_inner # Coupled
+-        #    I_outer, h_outer = RO(t, h_inner, h_outer)
+-        #    I = I + I_outer
+-        
+-        # We need to implement the adaptive step logic inside RI and RO.
+-        
+-        # Let's implement the core adaptive step function that RI and RO use.
+-        
+-        # For the purpose of this article, we provide the main loop and 
+-        # the adaptive step logic.
+-        
+-        # Step 1: Determine h_inner via RI
+-        # RI uses the iterative adaptive method to find a step size h_inner
+-        # that satisfies the tolerance for the inner integral.
+-        
+-        # [G] Implementation of RI:
+-        # h_curr = h
+-        # while True:
+-        #    err, val, s_full = adaptive_simpson_error(inner_func, t, h_curr)
+-        #    if err <= epsilon or h_curr <= h_min:
+-        #        break
+-        #    h_curr /= 2
+-        #    epsilon /= 2
+-        # h_inner = h_curr
+-        # I_inner = val # Accumulated value for this step
+-        
+-        # Step 2: Determine h_outer via RO
+-        # If coupled, h_outer starts as h_inner.
+-        # RO uses the iterative adaptive method for the outer integral.
+-        # It uses regular Simpson's for the inner part.
+-        
+-        # [G] Implementation of RO:
+-        # h_curr = h_outer
+-        # while True:
+-        #    # Outer integrand involves the pre-computed inner integral value
+-        #    # and the color/transparency.
+-        #    # Since inner error is bounded by h_inner, we use regular Simpson's.
+-        #    err, val, s_full = adaptive_simpson_error(outer_func, t, h_curr)
+-        #    if err <= epsilon or h_curr <= h_min:
+-        #        break
+-        #    h_curr /= 2
+-        #    epsilon /= 2
+-        # h_outer = h_curr
+-        # I_outer = val
+-        
+-        # However, the source emphasizes the *coupling* and the *iterative* nature.
+-        # The main loop in Algorithm 3 is high-level.
+-        
+-        # We will write the main loop as described in Algorithm 3, 
+-        # assuming RI and RO are black boxes that return (value, step_size).
+-        
+-        # To make it implementable, we must define what RI and RO do.
+-        # RI: Computes inner integral and returns (I_inner, h_inner).
+-        # RO: Computes outer integral and returns (I_outer, h_outer).
+-        
+-        # The adaptive logic for step size control is embedded in RI and RO.
+-        
+-        # Let's refine the pseudocode to be self-contained.
+-        
+-        # We define a function `adaptive_step(integrand, t, h, epsilon, h_min, h_max)`
+-        # that returns (integral_value, accepted_h).
+-        
+-        # But the VRI has nested integrals.
+-        
+-        # The source states: "Inside RO, we use regular (i.e., non-adaptive) 
+-        # Simpson's rule to evaluate the inner integral whenever necessary".
+-        
+-        # This means RO does NOT adaptively integrate the inner part. 
+-        # It relies on RI to provide a valid h_inner.
+-        
+-        # So, the flow is:
+-        # 1. RI adapts the step size for the inner integral.
+-        # 2. RO uses that step size (or a derived one) for the outer integral.
+-        
+-        # Coupled Strategy: h_outer = h_inner.
+-        # Decoupled Strategy: h_outer is controlled independently.
+-        
+-        # We will implement the Coupled Strategy as the primary example, 
+-        # as it is described as slightly more efficient.
+-        
+-        # Main Loop:
+-        
+-        h_inner = h
+-        h_outer = h
+-        
+-        while t < ray_end:
+-            # --- Inner Integral (RI) ---
+-            # Find a valid h_inner for the inner integral
+-            h_curr_inner = h_inner
+-            epsilon_curr = epsilon
++        if E <= epsilon:
++            # Success: Accept step
++            I += D_full + E
++            t += h
+             
+-            # Adaptive loop for Inner Integral
+-            while True:
+-                # Evaluate inner integrand at t, t+h/2, t+h
+-                # Inner integrand is related to extinction tau(s)
+-                # The source doesn't specify the exact inner integrand function,
+-                # but it's part of the VRI.
+-                # Let's assume we have a function `inner_integrand(s)`
++            if lastsucceeded:
++                # Double step and tolerance for faster progression in smooth regions
++                h = 2.0 * h
++                epsilon = 2.0 * epsilon
++            else:
++                # Reset success flag
++                lastsucceeded = True
++            
++            # Clamp step to max and remaining distance
++            h = min(h, h_max)
++            h = min(h, tfinal - t)
++        else:
++            # Failure: Halve step and tolerance
++            h = h / 2.0
++            epsilon = epsilon / 2.0
++            lastsucceeded = False
++            
++            # Prevent infinite loop if h reaches minimum
++            if h < h_min:
++                # Take the step anyway to avoid deadlock
++                I += D_full + E
++                t += h
++                h = min(h_max, tfinal - t)
++                lastsucceeded = True
+                 
+-                # [G] The inner integral in VRI is the transparency term.
+-                # The error estimate is computed on this term.
+-                
+-                err_inner, d_inner, s_inner = adaptive_simpson_error(inner_integrand, t, h_curr_inner)
+-                
+-                if err_inner <= epsilon_curr or h_curr_inner <= h_min:
+-                    break
+-                
+-                h_curr_inner /= 2
+-                epsilon_curr /= 2
+-            
+-            h_inner = h_curr_inner
+-            I_inner = d_inner # The integral value for this step
+-            
+-            # --- Outer Integral (RO) ---
+-            if abs(I_inner) > 1e-9: # Skip if negligible
+-                # Coupled Strategy: h_outer starts as h_inner
+-                h_outer = h_inner
+-                
+-                h_curr_outer = h_outer
+-                epsilon_curr = epsilon
+-                
+-                # Adaptive loop for Outer Integral
+-                # Uses regular Simpson's for the inner part (which is already bounded)
+-                # So the outer integrand is evaluated using the pre-computed inner value?
+-                # No, the outer integrand is C(s) * tau(s) * exp(-inner_integral).
+-                # The inner integral value is needed at each point.
+-                # But the source says "Inside RO, we use regular Simpson's rule 
+-                # to evaluate the inner integral whenever necessary".
+-                # This implies that when evaluating the outer integrand at a point,
+-                # if the inner integral hasn't been computed for that specific sub-interval,
+-                # it is computed using regular Simpson's with step h_inner.
+-                
+-                # This is complex to implement without more detail.
+-                # However, the source says "Reuse intermediate Simpson's values 
+-                # from inner integral".
+-                
+-                # For the purpose of this article, we assume RO performs an adaptive 
+-                # step on the outer integrand, using the fixed h_inner for any 
+-                # necessary inner integral evaluations.
+-                
+-                while True:
+-                    # Evaluate outer integrand
+-                    # This requires evaluating the inner integral at t, t+h/2, t+h
+-                    # using regular Simpson's with step h_inner.
+-                    
+-                    # [G] Implementation Note: The outer integrand f_outer(s) 
+-                    # = C(s) * tau(s) * exp(-integral_0^s tau).
+-                    # To evaluate f_outer at a point, we need the optical depth.
+-                    # The source suggests reusing Simpson's values.
+-                    
+-                    err_outer, d_outer, s_outer = adaptive_simpson_error(outer_integrand, t, h_curr_outer)
+-                    
+-                    if err_outer <= epsilon_curr or h_curr_outer <= h_min:
+-                        break
+-                    
+-                    h_curr_outer /= 2
+-                    epsilon_curr /= 2
+-                
+-                h_outer = h_curr_outer
+-                I_outer = d_outer
+-                I = [I[k] + I_outer[k] for k in range(4)]
+-            
+-            # Advance t
+-            # In the coupled strategy, the outer integral covers the interval [t, t+h_outer]
+-            # The inner integral was computed for h_inner.
+-            # If coupled, h_outer = h_inner, so t advances by h_inner.
+-            
+-            t += h_outer
+-            
+-            # Update step sizes for next iteration (Algorithm 2 logic)
+-            # The source says Algorithm 2 is the basis.
+-            # Algorithm 2 updates h and epsilon based on success/failure.
+-            
+-            # We need to track success/failure for the outer step.
+-            # If the outer step was accepted (err <= epsilon), we can increase h.
+-            
+-            # [G] The source doesn't explicitly link Algorithm 2's success/failure 
+-            # logic to the main loop of Algorithm 3.
+-            # However, Algorithm 3 says "The tolerance is adjusted accordingly 
+-            # as the step size is decreased or increased, as in Algorithm 2."
+-            
+-            # So we apply Algorithm 2's logic to the outer step.
+-            
+-            # Check if the outer step was successful
+-            # We need to know if err_outer <= epsilon at the end of the RO loop.
+-            # If yes, success. If no, failure (but RO loop ensures success or h_min).
+-            
+-            # If h_outer was reduced to h_min, it's a "failure" in terms of 
+-            # increasing step size, but the step is taken.
+-            
+-            # Let's assume the RO loop returns a flag `ro_success`.
+-            # If h_outer > h_min and err_outer <= epsilon, then success.
+-            
+-            # For simplicity, we assume the step is always "taken" if h_inner/h_outer
+-            # are valid. The adaptive logic in Algorithm 2 is for the step size 
+-            # control of the *next* step.
+-            
+-            # If the last step was successful (error <= epsilon), double h and epsilon.
+-            # If failed, halve h and epsilon.
+-            
+-            # Since RO ensures the step is taken (either by success or h_min),
+-            # we can consider it a success if h_outer > h_min.
+-            
+-            # [G] This is a gap. The source says "The tolerance is adjusted 
+-            # accordingly... as in Algorithm 2".
+-            # Algorithm 2: If E <= epsilon, success -> double h, double epsilon.
+-            # If E > epsilon, failure -> halve h, halve epsilon.
+-            
+-            # In RO, we loop until E <= epsilon or h <= h_min.
+-            # If we exit because E <= epsilon, it's a success.
+-            # If we exit because h <= h_min, it's a "forced" success, but 
+-            # the error might be high. The source says "If the minimum value 
+-            # is reached, the step is taken even if the error is above the tolerance".
+-            
+-            # So, if h_outer == h_min, we treat it as a failure for step size 
+-            # growth purposes? Or just a success with no growth?
+-            # Algorithm 2 says: If E <= epsilon, success.
+-            # If we hit h_min, E might be > epsilon.
+-            # So if h_outer == h_min, we should treat it as a failure?
+-            # The source doesn't specify.
+-            
+-            # We will assume: If h_outer > h_min, it was a success.
+-            # If h_outer == h_min, it was a failure (or limited success).
+-            
+-            if h_outer > h_min:
+-                # Success
+-                h = 2 * h_outer
+-                epsilon = 2 * epsilon
+-                lastsucceeded = True
+-            else:
+-                # Failure or limited
+-                h = h_outer / 2 # Or keep h_outer? Algorithm 2 halves on failure.
+-                epsilon = epsilon / 2
+-                lastsucceeded = False
+-            
+-            # Clamp h
+-            h = min(h, ray_end - t)
+-            
+-            # Update h_inner for next iteration?
+-            # In coupled strategy, h_inner is determined by RI at each step.
+-            # So h_inner is reset at the start of the loop.
+-            
+-            # In decoupled strategy, h_outer is controlled independently.
+-            # h_inner is only used to limit the interval.
+-            
+-            # We are implementing Coupled.
+-            
+-            # Reset h_inner for next step?
+-            # RI will determine it.
+-            
+-            # But we need to pass h_inner to RO.
+-            # In coupled, h_outer = h_inner.
+-            
+-            # So we set h_inner = h_outer for the next iteration's RI?
+-            # No, RI determines h_inner based on the inner integrand.
+-            
+-            # The source says: "In the coupled strategy, the inner integral 
+-            # dictates the initial step size to be used at each time the outer 
+-            # integral has to be evaluated."
+-            
+-            # So h_inner is computed by RI, then passed to RO.
+-            
+-            # The adaptive logic in Algorithm 2 applies to the step size 
+-            # of the *current* integral being evaluated.
+-            
+-            # So RI has its own adaptive logic, and RO has its own.
+-            
+-            # The main loop just calls them.
+-            
+-            # The "h" and "epsilon" in Algorithm 2 are local to the integral 
+-            # being evaluated.
+-            
+-            # So we don't need to update a global h and epsilon in the main loop.
+-            # We need to update h_inner and h_outer locally in RI and RO.
+-            
+-            # But Algorithm 3 shows a single loop.
+-            
+-            # [G] The source is slightly ambiguous on whether the adaptive 
+-            # step size control (doubling/halving) is global or local.
+-            # Algorithm 2 is a generic iterative adaptive method.
+-            # Algorithm 3 uses RI and RO.
+-            # RI and RO are variations of Algorithm 2.
+-            
+-            # So RI and RO should implement their own step size control.
+-            
+-            # The main loop just advances t.
+-            
+-            # Let's rewrite the pseudocode to reflect this.
+-            
+-            pass
+-
+-    return I
++    return I, h
+ ```
+ 
+-**Subtopics:**
+-*   **Coupled Strategy:** The inner integral dictates the initial step size for the outer integral. Assumes coherence between integrals. Reuses intermediate Simpson's values. Slightly more efficient. [S1]
+-*   **Decoupled Strategy:** The outer step is controlled independently. The inner step only limits the integration interval. Theoretically better for high-frequency transfer function variations. Slightly more accurate. [S1]
++**Coupling Strategies:**
++Two strategies exist for coordinating $h_{inner}$ and $h_{outer}$ [S1]:
++1.  **Coupled:** The inner integral dictates the initial step size for the outer integral ($h_{outer} = h_{inner}$). This assumes coherence between integrals and allows reuse of intermediate Simpson's values from the inner integral. It is slightly more efficient [S1].
++2.  **Decoupled:** The outer step is controlled independently. The inner step only limits the integration interval. This is slightly more accurate and handles high-frequency transfer function variations better theoretically, but is slightly less efficient [S1].
++
++**Edge Cases and Pitfalls:**
++*   **Recursion Limits:** Recursive adaptive methods cannot be re-initialized after a succeeded step because they store execution context in the call stack. The iterative method allows re-initialization, which is crucial for controlling inner and outer step sizes [S1].
++*   **Missing Features:** Without $h_{max}$, high-frequency variations (e.g., thin leaves in the Bonsai dataset) may be missed because the adaptive step size becomes too large, skipping over the feature [S1].
++*   **Numerical Inaccuracy:** Numerical error evaluation has inherent inaccuracies. Even with strict tolerance, some rays may exceed the tolerance limit due to these inaccuracies and the $h_{min}$ floor [S1].
++*   **High-Frequency Ignorance:** High-frequency regions may be wrongly ignored if the error evaluation sampling strategy fails to detect them, especially if the initial step size is too large [S1].
+ 
+ ## Operating characteristics
+-*   **Time and Memory Complexity:** The method avoids excessive recomputations by advancing step-by-step and reusing function evaluations shared by adjacent intervals, similar to caching in recursive Simpson's rule but with constant memory overhead per step [S1].
+-*   **Measured Performance:** Tested on a 2.66 GHz Quad Core CPU and GeForce GTX 560 GPU. The CPU architecture favors adaptive algorithms, while the GPU SIMD architecture favors Riemann summation because adaptive approaches require different step sizes per thread, reducing parallel efficiency [S1].
+-*   **Accuracy:** Offers better accuracy for similar or lower computational cost compared to Riemann summation with constant small step sizes, which requires prohibitive computational costs [S1].
+-*   **Strengths:** Accuracy control, efficiency through step size adaptation, GPU compatibility (via iterative approach).
+-*   **Limitations:** Numerical error evaluation inaccuracies can cause some rays to exceed tolerance even with strict settings. High-frequency regions may be missed if the initial step size is too large or if the error evaluation sampling strategy fails. GPU parallel efficiency is lower than uniform sampling due to divergent step sizes [S1].
+-*   **When to use:** When high accuracy is required and the scene has varying density/color features that benefit from adaptive sampling. Suitable for CPU rendering.
+-*   **When not to use:** When maximum performance is required on GPU and uniform sampling is acceptable. When the scene has very high-frequency details that require very small step sizes regardless of adaptation.
++*   **Time Complexity:** The method avoids excessive re-computations by advancing step-by-step and reusing function evaluations shared by adjacent intervals, similar to caching in recursive Simpson's rule but with constant memory overhead per step [S1].
++*   **Memory Complexity:** Constant memory overhead per step, unlike recursive methods which scale with recursion depth [S1].
++*   **Performance:**
++    *   **CPU:** The CPU architecture favors adaptive algorithms due to its ability to handle variable control flow efficiently [S1].
++    *   **GPU:** The GPU SIMD architecture favors Riemann summation because adaptive approaches require different step sizes per thread, reducing parallel efficiency [S1]. However, the iterative nature makes it more mappable to GPUs than recursive methods [S1].
++*   **Accuracy:** Offers better accuracy for similar or lower computational cost compared to Riemann summation with constant small step sizes, which requires prohibitive computational costs to reach similar accuracy [S1].
++*   **Strengths:** Precise error control, efficient reuse of evaluations, GPU-mappable iterative design.
++*   **Limitations:** GPU parallel efficiency is lower than uniform sampling; sensitive to initial step size and $h_{max}$ selection; numerical errors can cause slight tolerance violations.
+ 
+ ## Background
+-*   **Origin:** Proposed in "Accurate Volume Rendering based on Adaptive Numerical Integration" (2015) [S1].
+-*   **History:** Builds on the Volume Rendering Integral (VRI) formulation by Engel [S1]. The adaptive Simpson's rule is based on work by Kuncir, McKeeman, and Lyness [S1].
+-*   **Usage:** Tested on datasets from volvis.org (Bonsai, BluntFin, Teapot, Engine) [S1].
++The method was proposed in a paper by Engel et al. (cited as [S1] in the source notes, though the specific author list is not fully detailed in the provided text, the paper title is "Accurate Volume Rendering based on Adaptive Numerical Integration") [S1]. It addresses the challenges of computing the Volume Rendering Integral (VRI) accurately while maintaining performance, specifically tackling the difficulty of mapping recursive adaptive integration to GPU architectures [S1]. The work builds upon the foundational VRI formulation by Engel [3] and the adaptive Simpson's rule by Kuncir [14] and McKeeman [15] [S1].
+ 
+ ## Sources

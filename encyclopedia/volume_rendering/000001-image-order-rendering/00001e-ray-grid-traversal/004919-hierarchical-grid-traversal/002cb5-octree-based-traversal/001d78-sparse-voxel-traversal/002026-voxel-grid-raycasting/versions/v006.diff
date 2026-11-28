@@ -1,0 +1,248 @@
+--- v005.md
++++ v006.md
+@@ -4,110 +4,103 @@
+ 
+ ## Overview
+-Voxel Grid Raycasting is a rendering technique that stores scene geometry in a 3D voxel grid and traces rays through the grid by stepping from voxel to voxel to determine intersections and surface normals [S1, S2, S5, unofficial]. It solves the problem of efficiently determining ray-voxel intersections without performing explicit geometric intersection tests against primitives [S2, unofficial]. Unlike [Sparse Voxel Traversal](1525-sparse-voxel-traversal.md) which uses hierarchical structures like octrees to skip empty space, this method assumes a uniform grid and steps through every voxel boundary along the ray path [S2, S3, unofficial]. It differs from [Regular Grid Traversal](5939-regular-grid-traversal.md) in that it typically renders volumetric density or solid occupancy directly, whereas the latter accelerates geometric ray tracing by storing primitive pointers [S2, S3, 3950-regular-grid, unofficial].
++Voxel Grid Raycasting is a rendering technique that stores scene geometry in a 3D voxel grid and traces rays through the grid by stepping from voxel to voxel to determine intersections and surface normals [S1, S2, S5, unofficial]. It solves the problem of efficiently determining ray-voxel intersections without performing explicit geometric intersection tests against primitives [S2, unofficial]. Unlike hierarchical methods such as [Sparse Voxel Traversal](1525-sparse-voxel-traversal.md) or [Octree Traversal](1587-octree-traversal.md) which skip empty space using tree structures, this method assumes a uniform grid and traverses every voxel boundary along the ray path, making it simpler to implement but potentially slower in sparse scenes [S2, S3, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+ *   **Inputs:** Ray origin $O$, ray direction $D$ (normalized), voxel grid dimensions ($W, H, D$), voxel size $v_{size}$, and the voxel data buffer.
+-*   **Outputs:** Hit position, voxel coordinates, surface normal, and optionally material/color data. If no intersection is found within the bounds or max distance, the ray is considered missed.
++*   **Outputs:** Hit position, hit voxel coordinates, surface normal, and optionally material/color data.
+ 
+ **Data Structures:**
+-The voxel grid is typically stored in a 1D storage buffer or array.
+-*   **Layout:** A 1D array of integers (e.g., `u32` or `int`).
+-*   **Indexing:** The index for a voxel at grid coordinates $(x, y, z)$ is calculated as:
+-    $$ index = x + y \cdot W + z \cdot (W \cdot H) $$
+-    where $W$ is the width and $H$ is the height of the grid [S1, unofficial].
+-    *Note:* Some implementations use a different permutation, such as $(x \cdot 16 + z) \cdot 16 + y$ for a $16^3$ grid [S2, unofficial].
+-*   **Content:** A value of `0` indicates an empty voxel. Non-zero values indicate occupied voxels, potentially encoding color or material type (e.g., packed via `unpack4x8unorm`) [S1, S2, unofficial].
++The voxel grid is typically stored in a 1D array or buffer.
++*   **Layout (Standard):** A 1D array `blocks` of size $W \times H \times D$. Indexing is calculated as $index = (x \cdot H + z) \cdot W + y$ or similar permutations depending on memory layout [S2, unofficial].
++*   **Layout (Chunked):** A 1D storage buffer `voxels: array<u32>`. Each `u32` represents a single voxel. The index is calculated as $index = x + y \cdot W + z \cdot (W \cdot H)$, where $W$ is chunk width and $H$ is chunk height [S1, unofficial]. A value of `0u` indicates an empty voxel; non-zero values indicate occupied voxels, often encoding color via `unpack4x8unorm` [S1, unofficial].
++
++**Algorithm Steps:**
++The traversal uses a Digital Differential Analyzer (DDA) approach [S2, S3, unofficial].
++
++1.  **Initialization:**
++    *   Normalize ray direction: $ray = \text{normalize}(ray\_end - ray\_start)$ [S2, unofficial].
++    *   Calculate starting voxel coordinates: $current\_voxel = \lfloor ray\_start / v_{size} \rfloor$ [S2, unofficial].
++    *   Determine step directions for each axis: $step_i = \text{sign}(ray_i)$ [S1, S2, unofficial].
++    *   Calculate distance to traverse one full voxel width: $tDelta_i = v_{size} / |ray_i|$ [S1, S2, unofficial].
++    *   Calculate distance to the next voxel boundary:
++        $$tMax_i = \frac{(current\_voxel_i + step_i) \cdot v_{size} - ray\_start_i}{ray_i}$$
++        If $ray_i = 0$, set $tMax_i = \infty$ (or `FLT_MIN` in implementation to exclude from min-check) [S2, unofficial].
++    *   Handle negative ray direction edge case: If the ray starts in a voxel different from the target end voxel and moves in a negative direction, decrement the corresponding voxel coordinate to ensure correct traversal start [S2, unofficial].
++
++2.  **Traversal Loop:**
++    While the ray has not exited the grid bounds and no hit is found:
++    *   Find the axis with the minimum $tMax$: $axis = \text{argmin}(tMax_x, tMax_y, tMax_z)$ [S1, unofficial].
++    *   Increment the grid position on that axis: $current\_voxel_{axis} += step_{axis}$ [S1, unofficial].
++    *   Update the distance traveled: $dist = tMax_{axis}$ [S1, unofficial].
++    *   Advance the $tMax$ for that axis to the next boundary: $tMax_{axis} += tDelta_{axis}$ [S1, unofficial].
++    *   **Intersection Check:** Load voxel data at $current\_voxel$. If occupied:
++        *   Calculate surface normal using the axis of entry: $normal = axis\_dir\_normal(axis, ray\_dir)$ [S1, unofficial].
++        *   Return hit data (position, normal, voxel index) [S1, S5, unofficial].
++
++3.  **Ray Bouncing (Optional):**
++    *   If a hit is found, spawn a new ray from $start\_pos + dist \cdot ray\_dir + \epsilon \cdot normal$ to prevent self-intersection [S1, unofficial].
++    *   Re-initialize traversal state for the new ray [S1, unofficial].
++    *   Repeat until max bounces or ray leaves scene [S1, unofficial].
++
++**Pseudocode:**
++```python
++def raycast_voxel_grid(ray_origin, ray_direction, voxel_grid, voxel_size, grid_dims):
++    # 1. Normalize and prepare
++    ray = normalize(ray_direction)
++    bin_size = voxel_size
++    
++    # 2. Initial voxel position
++    current_voxel = floor(ray_origin / bin_size)
++    
++    # 3. Step directions
++    step = vec3(1 if ray.x >= 0 else -1, 
++                1 if ray.y >= 0 else -1, 
++                1 if ray.z >= 0 else -1)
++    
++    # 4. Calculate tMax and tDelta
++    # Distance to next boundary
++    next_boundary = (current_voxel + step) * bin_size
++    
++    # Avoid division by zero for axis-aligned rays
++    t_delta = vec3(
++        bin_size / ray.x if ray.x != 0 else float('inf'),
++        bin_size / ray.y if ray.y != 0 else float('inf'),
++        bin_size / ray.z if ray.z != 0 else float('inf')
++    )
++    
++    t_max = vec3(
++        (next_boundary.x - ray_origin.x) / ray.x if ray.x != 0 else float('inf'),
++        (next_boundary.y - ray_origin.y) / ray.y if ray.y != 0 else float('inf'),
++        (next_boundary.z - ray_origin.z) / ray.z if ray.z != 0 else float('inf')
++    )
++    
++    # 5. Traverse
++    while is_within_bounds(current_voxel, grid_dims):
++        # Check occupancy
++        if voxel_grid[current_voxel] != 0:
++            # Hit found
++            axis = argmin(t_max)
++            normal = get_normal_for_axis(axis)
++            hit_pos = ray_origin + t_max[axis] * ray
++            return HitResult(position=hit_pos, normal=normal, voxel=current_voxel)
++        
++        # Advance to next voxel
++        axis = argmin(t_max)
++        t_max[axis] += t_delta[axis]
++        current_voxel[axis] += step[axis]
++        
++    return None
++```
+ 
+ **Parameters:**
+-*   `voxel_size` ($v_{size}$): Physical size of a voxel in world units. Typical value: $0.1$ [S1, unofficial].
+-*   `epsilon`: Small offset to prevent self-intersection. Typical value: $v_{size} \times 0.01$ [S1, unofficial].
+-*   `max_dist`: Maximum ray travel distance. Typical value: $16.0$ [S1, unofficial].
+-*   `_bin_size`: Side length of a voxel. Often hardcoded to $1.0$ in normalized coordinate systems [S2, unofficial].
++*   `voxel_size`: Physical size of each voxel (e.g., 0.1 world units) [S1, unofficial].
++*   `epsilon`: Small offset (e.g., $voxel\_size \times 0.01$) to prevent self-intersection when spawning new rays [S1, unofficial].
++*   `max_dist`: Maximum ray length before termination [S1, S5, unofficial].
+ 
+-**Algorithm Steps:**
+-
+-1.  **Normalize Ray:** Ensure the ray direction is normalized.
+-    ```python
+-    ray_dir = normalize(ray_end - ray_start)
+-    ```
+-    [S2, unofficial]
+-
+-2.  **Initialize Traversal State:**
+-    *   Calculate the starting voxel coordinates by flooring the start position divided by the bin size:
+-        ```python
+-        current_voxel = ivec3(floor(ray_start / _bin_size))
+-        ```
+-        [S2, unofficial]
+-    *   Determine step directions for each axis based on the sign of the ray direction:
+-        ```python
+-        stepX = 1 if ray_dir[0] >= 0 else -1
+-        stepY = 1 if ray_dir[1] >= 0 else -1
+-        stepZ = 1 if ray_dir[2] >= 0 else -1
+-        ```
+-        [S2, unofficial]
+-    *   Calculate the distance to the next voxel boundary for each axis ($t_{max}$). If the ray component is zero, set $t_{max}$ to a minimal value (e.g., `FLT_MIN`) to effectively ignore that axis in comparisons [S2, unofficial].
+-        ```python
+-        next_boundary_x = (current_voxel[0] + stepX) * _bin_size
+-        tMaxX = (ray_dir[0] != 0) ? (next_boundary_x - ray_start[0]) / ray_dir[0] : FLT_MIN
+-        # Similarly for Y and Z
+-        ```
+-        [S2, unofficial]
+-    *   Calculate the delta distance to traverse one full voxel width ($t_{delta}$):
+-        ```python
+-        tDeltaX = (ray_dir[0] != 0) ? _bin_size / ray_dir[0] * stepX : FLT_MIN
+-        # Similarly for Y and Z
+-        ```
+-        [S2, unofficial]
+-    *   **Edge Case (Negative Ray Direction):** If the ray starts in a voxel different from the target end voxel and moves in a negative direction, decrement the corresponding voxel coordinate to ensure correct traversal alignment [S2, unofficial].
+-        ```python
+-        if current_voxel[0] != last_voxel[0] and ray_dir[0] < 0:
+-            current_voxel[0] -= 1
+-        # Repeat for Y and Z
+-        ```
+-        [S2, unofficial]
+-
+-3.  **Traverse Grid:**
+-    Iterate while the current voxel has not passed the target end voxel (or until a hit is found/max iterations reached):
+-    *   Find the axis with the minimum $t_{max}$ value.
+-    *   Increment the grid position on that axis by the corresponding step direction.
+-    *   Update the distance traveled to the $t_{max}$ of that axis.
+-    *   Increment the $t_{max}$ of that axis by its corresponding $t_{delta}$ to move to the next boundary.
+-        ```python
+-        if tMaxX < tMaxY:
+-            if tMaxX < tMaxZ:
+-                current_voxel[0] += stepX
+-                tMaxX += tDeltaX
+-            else:
+-                current_voxel[2] += stepZ
+-                tMaxZ += tDeltaZ
+-        else:
+-            if tMaxY < tMaxZ:
+-                current_voxel[1] += stepY
+-                tMaxY += tDeltaY
+-            else:
+-                current_voxel[2] += stepZ
+-                tMaxZ += tDeltaZ
+-        ```
+-        [S2, unofficial]
+-
+-4.  **Intersection Check:**
+-    *   Load voxel data at `current_voxel`.
+-    *   If the voxel is occupied (non-zero), an intersection occurred.
+-    *   Calculate the surface normal based on the axis of the last step (the axis with the minimum $t_{max}$). For example, if the X-axis was crossed, the normal is $(\pm 1, 0, 0)$ depending on the step direction [S1, unofficial].
+-    *   Return hit data (position, normal, voxel index) [S1, S5, unofficial].
+-
+-5.  **Ray Bouncing (Optional):**
+-    *   If the implementation supports reflections, spawn a new ray from the hit position:
+-        $$ start_{new} = hit\_pos + \epsilon \cdot normal $$
+-        [S1, unofficial]
+-    *   Re-initialize traversal state for the new ray.
+-    *   Limit bounce depth (e.g., max 3-5 bounces) to prevent infinite loops [S1, unofficial].
+-
+-**Pitfalls:**
+-*   **Division by Zero:** If a ray component is exactly 0, $t_{max}$ and $t_{delta}$ must be handled carefully (set to `FLT_MIN` or infinity) to avoid division by zero errors [S2, unofficial].
+-*   **Self-Intersection:** When spawning new rays from a surface, an offset (`epsilon * normal`) is required to prevent the new ray from immediately re-intersecting the same surface [S1, unofficial].
+-*   **Out of Bounds:** The traversal must check if the ray has left the defined grid boundaries. If so, the loop breaks and the ray contributes to the background/sky color [S1, unofficial].
+-*   **Precision Errors:** Floating-point inaccuracies in $t_{max}$ calculations can cause the ray to skip voxels or jitter. Using robust DDA variants or epsilon offsets mitigates this [S1, S3, unofficial].
++**Edge Cases and Pitfalls:**
++*   **Zero Ray Component:** If a ray component is 0, $tMax$ and $tDelta$ are set to infinity (or `FLT_MIN` in some implementations to effectively remove the axis from comparison) to avoid division by zero [S2, unofficial].
++*   **Negative Direction Start:** Explicit adjustment of `current_voxel` is required if the ray starts in a voxel that is not the 'last' voxel and moves negatively, ensuring traversal coordinates align with the entry point [S2, unofficial].
++*   **Out of Bounds:** The traversal must check bounds after every step. If the ray leaves the defined grid, it breaks and returns miss/sky color [S1, unofficial].
+ 
+ ## Subtopics
+@@ -129,5 +122,5 @@
+ 
+ ### [Regular Grid Traversal](5939-regular-grid-traversal.md)
+-Regular Grid Traversal is a ray-grid traversal method that accelerates ray-primitive intersection tests by mapping primitives to a uniform 3D voxel grid and stepping through occupied cells using 3D-DDA. It solves the problem of redundant intersection tests in dense scenes by skipping empty space, reducing the number of primitive intersection checks [3950-regular-grid]. Unlike [Voxel Grid Raycasting](2218-voxel-grid-raycasting.md) which typically renders volumetric density, this method accelerates geometric ray tracing by storing primitive pointers in voxels [3950-regular-grid]. It differs from [Hierarchical Grid Traversal](52-name.md) by using a flat, uniform structure without hierarchical levels, and from [Sparse Voxel Traversal](5228-sparse-voxel-traversal.md) by not using sparse data structures like octrees [3950-regular-grid].
++Regular Grid Traversal is a ray-scene intersection acceleration technique that partitions the scene's Axis-Aligned Bounding Box (AABB) into a fixed-size 3D grid of uniform cells (voxels). It solves the problem of $O(N)$ ray-primitive intersection tests by allowing rays to skip empty cells, testing only primitives stored in intersected voxels . Unlike hierarchical structures (e.g., BVH, Octree) that partition primitives into disjoint sets, the Regular Grid partitions space into disjoint sub-blocks, meaning a single primitive can belong to multiple cells . It is distinguished by its constant-time cell access, simple traversal logic, and suitability for dynamic scenes due to its linear build time, though it suffers from high memory overhead in sparse scenes .
+ 
+ ### [Voxel Raytracer](6403-voxel-raytracer.md)
+@@ -137,6 +130,9 @@
+ DirectVoxGO is a volume rendering method that accelerates neural radiance field training and inference by sampling points directly on a structured voxel grid rather than uniformly along rays. It solves the problem of inefficient ray marching in sparse scenes by using a mask cache to skip free space and a direct lookup of density and color features from the voxel grid. It sets itself apart from standard NeRF by replacing uniform sampling with grid-based point selection and from other sparse voxel methods by using a dense voxel grid with a binary mask cache for acceleration.
+ 
++### [Voxel Grid Accelerated Ray-Point Intersection](16937-voxel-grid-accelerated-ray-point-intersection.md)
++This method accelerates the identification of the $k$ nearest points within a cylinder of radius $\delta$ around a query ray in a point cloud, specifically optimized for parallel GPU execution and dynamic scenes where the point cloud changes frequently. Unlike static acceleration structures such as octrees, which require $O(n \log n)$ construction time, this voxel grid approach achieves $O(n)$ construction, making it superior for inverse rendering and dynamic scenarios where the structure must be rebuilt every iteration.
++
+ ### Voxel Resolve Search
+-A search algorithm used by voxel resolve and GI update to find the pixel's voxel again in the brick named by the visibility buffer [S7, unofficial]. It finds the cell holding the ray's point at the stored depth, then the two cells along each axis whose centers lie nearest that point (which hold the point regardless of rounding), stopping at the first cell whose hit gives the stored depth again, bit for bit [S7, unofficial]. A voxel's test depends only on the ray and the voxel, ensuring every pass meets it at the same $t$ [S7, unofficial].
++A search algorithm used by voxel resolve and GI update to find the pixel's voxel again in the brick named by the visibility buffer [S7, unofficial]. It finds the cell holding the ray's point at the stored depth, then the two cells along each axis whose centers lie nearest that point (which hold the point regardless of rounding), stopping at the first cell whose hit gives the stored depth again, bit for bit [S7, unofficial]. A voxel's test depends only on the ray and the voxel, ensuring every pass meets it at the same t [S7, unofficial].
+ 
+ ### Narrow Band Voxelization
+@@ -144,17 +140,17 @@
+ 
+ ### Dense Octree Accelerated Raymarching
+-An acceleration structure using a dense octree stored in a 3D texture to skip empty space during ray traversal [S9, unofficial]. The raymarcher first traverses the octree texture; once it hits a leaf node (occupied octant), it switches to the fine-grained voxel texture for detailed collision detection [S9, unofficial]. The octree is stored as a 3D texture (`texture_3d<u32>`) with data for different levels interleaved in the Z dimension [S9, unofficial]. The implementation uses a 3D texture for the octree instead of a linear buffer with Morton curve ordering, which was found to be significantly faster for ray traversal because graphics hardware is optimized for spatially local texture access [S9, unofficial].
++An acceleration structure using a dense octree stored in a 3D texture to skip empty space during ray traversal [S9, unofficial]. The raymarcher first traverses the octree texture; once it hits a leaf node (occupied octant), it switches to the fine-grained voxel texture for detailed collision detection [S9, unofficial]. The octree is stored as a 3D texture (`texture_3d<u32>`), with data for different levels interleaved in the Z dimension [S9, unofficial]. The 3D texture approach is significantly faster for ray traversal than linear buffers with Morton curve ordering because graphics hardware is optimized for spatially local texture access [S9, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$ where $N$ is the number of voxels intersected by the ray. In the worst case (ray passes through the entire grid), $N = W + H + D$.
+-*   **Memory Complexity:** $O(W \cdot H \cdot D)$ for the uniform grid storage. This can be prohibitive for large volumes compared to sparse methods [S1, S2, unofficial].
+-*   **Performance:** Highly efficient on GPUs due to regular memory access patterns and lack of branching (compared to tree traversal) [S1, S9, unofficial]. However, it suffers in sparse scenes where most voxels are empty, as it still steps through them [S2, unofficial].
+-*   **Strengths:** Simple implementation, no complex data structure maintenance, predictable memory access [S1, S2, unofficial].
+-*   **Limitations:** Poor performance in sparse scenes, high memory usage for large volumes, inability to skip empty space efficiently without auxiliary structures [S2, S3, unofficial].
+-*   **When to Use:** Dense voxel volumes, real-time rendering where simplicity and speed are prioritized over memory efficiency, or as a base for more complex hierarchical methods [S1, S2, unofficial].
+-*   **When Not to Use:** Sparse scenes, large worlds with significant empty space, or when memory bandwidth is a bottleneck [S2, S9, unofficial].
++*   **Time Complexity:** $O(N)$ where $N$ is the number of voxels intersected by the ray. In the worst case (ray passing through the entire grid), this is proportional to the grid dimension in the ray's direction.
++*   **Memory Complexity:** $O(W \times H \times D)$ for the voxel grid storage.
++*   **Performance:** Fast for dense, uniform volumes. Performance degrades significantly in sparse scenes compared to hierarchical methods like [Sparse Voxel Traversal](1525-sparse-voxel-traversal.md) because it cannot skip empty space [S2, unofficial].
++*   **Strengths:** Simple implementation, no build time for acceleration structures, constant-time access to any voxel, suitable for dynamic scenes where the grid changes frequently [S2, S6, unofficial].
++*   **Limitations:** High memory usage for large sparse volumes, inability to skip empty space, precision issues near voxel boundaries if not handled carefully (e.g., epsilon offsets) [S1, S2, unofficial].
++*   **When to use:** Dense voxel data, real-time applications with limited preprocessing time, or when the scene is fully occupied [S2, unofficial].
++*   **When not to use:** Sparse scenes, large worlds with significant empty space, or when memory bandwidth is a bottleneck [S2, unofficial].
+ 
+ ## Background
+-Voxel Grid Raycasting is based on the Digital Differential Analyzer (DDA) algorithm for grid traversal, originally described by Amanatides and Woo in 1987 [S3, unofficial]. It is widely used in voxel-based games (e.g., Minecraft, Teardown) and real-time rendering applications due to its simplicity and hardware efficiency [S1, S4, unofficial]. The method has been adapted for various purposes, including shadow volume rendering, global illumination, and neural radiance field acceleration [S1, S7, S9, unofficial].
++The method is based on the Digital Differential Analyzer (DDA) algorithm for ray traversal, originally described by Amanatides and Woo in 1987 [S3, unofficial]. It is widely used in voxel-based games (e.g., *Teardown*, *Minecraft* rendering optimizations) and real-time ray tracing demos [S1, unofficial]. The distinction between Voxel-Volume-Raycasting and general Volume-Raycasting is that voxels are defined as integer-coordinate functions $f: \mathbb{N}^3 \to U$, whereas general volume raycasting may use floating-point sampling and interpolation [S3, unofficial].
+ 
+ ## Sources

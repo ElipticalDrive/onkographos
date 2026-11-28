@@ -1,0 +1,232 @@
+--- v002.md
++++ v003.md
+@@ -4,27 +4,97 @@
+ 
+ ## Overview
+-Local Eikonal Loss (Lle) is a regularization term for Signed Distance Field (SDF) representations that enforces the Eikonal equation ($||\nabla f|| = 1$) specifically at the centers of active voxels in a hierarchical grid [S1, unofficial]. Unlike the parent method, Global Eikonal Loss, which samples random dense coordinates, Lle operates on the structured voxel lattice, providing a geometrically consistent gradient constraint near the surface [S1, unofficial]. It is distinct from sibling methods like Surface SDF Loss by focusing on the volumetric gradient magnitude rather than surface proximity or smoothness between adjacent gradients [S1, unofficial].
++Local Eikonal Loss (Lle) is a regularization term for Signed Distance Field (SDF) representations that enforces the Eikonal equation ($||\nabla f|| = 1$) specifically at the centers of active voxels in a hierarchical grid [S1, unofficial]. Unlike global Eikonal loss which samples dense random coordinates, Lle operates on the underlying voxel structure, providing a sparse but geometrically aligned constraint that stabilizes SDF training near the surface [S1, unofficial]. It serves as a computationally efficient alternative to dense sampling by leveraging the analytical gradients of trilinear interpolation within the voxel hierarchy.
+ 
+ ## How it works
+ **Inputs and Outputs**
+-*   **Input**: A hierarchical voxel structure (e.g., Octree) where each active voxel $v$ has a center $c_v$ and eight corner SDF values $geo_v = \{f_{i,j,k} \mid i,j,k \in \{0,1\}\}$ [S1, unofficial].
+-*   **Output**: A scalar loss value $L_{le}$ and its gradient with respect to the network weights [S1, unofficial].
++*   **Input**: A hierarchical voxel grid (e.g., Octree) where each active voxel $v$ has a center $c_v$ and eight corner SDF values $geo_v = \{f_{i,j,k} \mid i,j,k \in \{0,1\}\}$.
++*   **Output**: A scalar loss value $L_{le}$ representing the deviation of the gradient magnitude from unity at voxel centers.
+ 
+ **Data Structures**
+-*   **Voxel Center ($c_v$)**: The 3D coordinate of the voxel center in world space.
+-*   **Corner Values ($geo_v$)**: The SDF values $f_{i,j,k}$ at the eight corners of the voxel, obtained via trilinear interpolation of the underlying neural network or stored explicitly [S1, unofficial].
+-*   **Voxel Size ($h_v$)**: The side length of the voxel in world units [S1, unofficial].
++*   **Voxel Grid**: Hierarchical structure (parent-child). Active voxels are those containing geometry or required for rendering.
++*   **Corner Values**: For a voxel $v$ of size $h_v$, the SDF values at the 8 corners are retrieved via nearest-voxel search (NVS) and trilinear interpolation if necessary [S1, unofficial].
+ 
+ **Steps**
+-1.  **Iterate** over all active voxels $v$ in the hierarchy (parents and children) where the level $L > 9$ [S1, unofficial].
+-2.  **Compute Gradient**: Calculate the analytical gradient $\nabla_x f(c_v)$ at the voxel center $c_v$ by differentiating the trilinear interpolation function of the eight corner SDF values [S1, unofficial].
+-    *   The x-component is computed by averaging the differences along the x-edges:
++1.  **Eligibility Check**: Identify active voxels $v$ in the hierarchy.
++2.  **Sampling Probability**: For each eligible voxel, evaluate the loss with probability $p=0.5$ [S1, unofficial]. If evaluated, scale the weight by $1/p = 2$ to maintain the expected contribution [S1, unofficial].
++3.  **Gradient Computation**: Compute the spatial gradient $\nabla_x f(c_v)$ analytically using the corner SDF values. The gradient is derived from the trilinear interpolation function [S1, unofficial].
++    *   The x-component $\frac{\partial f}{\partial x}$ is computed by averaging differences along the x-edges:
+         $$ \frac{\partial f}{\partial x} \approx \frac{1}{4h_v} \sum_{j,k \in \{0,1\}} (f_{1,j,k} - f_{0,j,k}) $$
+-    *   The y and z components are computed similarly by averaging differences along their respective axes [S1, unofficial].
+-3.  **Evaluate Loss**: Compute the deviation of the gradient magnitude from 1 for each eligible cell:
+-    $$ L_{le} = \frac{1}{N_{vox}} \sum_{i=1}^{N} (\|\nabla_x f(c_v)\|_2 - 1)^2 $$
+-    where $N_{vox}$ is the total number of voxels including all parents and children [S1, unofficial].
+-4.  **Stochastic Sampling**: To manage computational cost, evaluate $L_{le}$ on each eligible cell with a probability of 0.5 [S1, unofficial].
+-5.  **Weight Scaling**: Scale the weight of the loss term by 2 (inverse of the probability) so that the expected contribution matches the target hyperparameter $\lambda_{le}$ [S1, unofficial].
++    *   Similarly, $\frac{\partial f}{\partial y}$ and $\frac{\partial f}{\partial z}$ are computed by averaging differences along the y and z edges respectively [S1, unofficial].
++4.  **Loss Calculation**: Compute the squared error between the gradient magnitude and 1 for all evaluated voxels:
++    $$ L_{le} = \frac{1}{N_{vox}} \sum_{i=1}^{N} (\|\nabla_x f(c_{v_i})\|_2 - 1)^2 $$
++    where $N_{vox}$ is the number of voxels including all parents and children, and $N$ is the number of voxels actually evaluated in the current step [S1, unofficial].
++
++**Pseudocode**
++```python
++def local_eikonal_loss(voxel_grid, lambda_le, iteration):
++    """
++    Computes the Local Eikonal Loss for a hierarchical voxel grid.
++    
++    Args:
++        voxel_grid: Hierarchical structure containing active voxels.
++        lambda_le: Weight for the loss term.
++        iteration: Current training iteration.
++        
++    Returns:
++        Scalar loss value.
++    """
++    total_loss = 0.0
++    count = 0
++    
++    # Iterate over all active voxels (parents and children)
++    for voxel in voxel_grid.active_voxels:
++        # Probability sampling: evaluate with 50% chance
++        if random() < 0.5:
++            # Retrieve SDF values at the 8 corners of the voxel
++            # f_{i,j,k} corresponds to corner (i, j, k) where i,j,k in {0,1}
++            corners = get_corner_sdf_values(voxel)
++            
++            # Voxel size h_v
++            h_v = voxel.size
++            
++            # Compute gradient components analytically from trilinear interpolation
++            # x-component: average difference along x-edges
++            df_dx = 0.0
++            for j in [0, 1]:
++                for k in [0, 1]:
++                    # f_{1,j,k} is corner with x=1, f_{0,j,k} is corner with x=0
++                    df_dx += (corners[1, j, k] - corners[0, j, k])
++            df_dx = df_dx / (4.0 * h_v)
++            
++            # y-component: average difference along y-edges
++            df_dy = 0.0
++            for i in [0, 1]:
++                for k in [0, 1]:
++                    df_dy += (corners[i, 1, k] - corners[i, 0, k])
++            df_dy = df_dy / (4.0 * h_v)
++            
++            # z-component: average difference along z-edges
++            df_dz = 0.0
++            for i in [0, 1]:
++                for j in [0, 1]:
++                    df_dz += (corners[i, j, 1] - corners[i, j, 0])
++            df_dz = df_dz / (4.0 * h_v)
++            
++            # Compute gradient magnitude
++            grad_mag = sqrt(df_dx**2 + df_dy**2 + df_dz**2)
++            
++            # Compute squared error from 1
++            error = (grad_mag - 1.0)**2
++            
++            # Scale weight by 2 to compensate for 0.5 probability
++            # Note: The formula divides by N_vox, so we accumulate the scaled error
++            total_loss += 2.0 * error
++            count += 1
++            
++    # Normalize by total number of voxels (including those not evaluated)
++    # N_vox is the total count of active voxels in the hierarchy
++    N_vox = voxel_grid.total_active_voxels_count
++    
++    if N_vox > 0:
++        return (lambda_le / N_vox) * total_loss
++    else:
++        return 0.0
++```
+ 
+ **Parameters**
+@@ -33,102 +103,27 @@
+     *   DTU scenes: Iterations $6,000 \le \tau \le 8,000$ [S1, unofficial].
+     *   Tanks-and-Temples: Iterations $6,000 \le \tau \le 10,000$ [S1, unofficial].
+-*   **Level Threshold**: Applied only for voxel levels $L > 9$ [S1, unofficial].
++*   **Probability**: 0.5 [S1, unofficial].
+ 
+-**Pseudocode**
+-```python
+-def local_eikonal_loss(voxels, lambda_le, level_threshold=9):
+-    """
+-    Computes the Local Eikonal Loss for a set of active voxels.
+-    
+-    Args:
+-        voxels: List of active voxel objects, each containing:
+-            - center: 3D coordinate (x, y, z)
+-            - corners: Array of 8 SDF values [f000, f001, f010, f011, f100, f101, f110, f111]
+-            - level: Integer level in the hierarchy
+-            - size: Voxel side length h_v
+-        lambda_le: Target weight for the loss term.
+-        level_threshold: Minimum level L to apply the loss.
+-        
+-    Returns:
+-        loss: Scalar loss value.
+-    """
+-    total_loss = 0.0
+-    count = 0
+-    
+-    for v in voxels:
+-        # Step 1: Check level threshold
+-        if v.level <= level_threshold:
+-            continue
+-            
+-        # Step 2: Stochastic sampling with probability 0.5
+-        if random() > 0.5:
+-            continue
+-            
+-        # Step 3: Compute analytical gradient at center
+-        # Corners are indexed as f(i,j,k) where i,j,k in {0,1}
+-        # Mapping: 0->000, 1->001, 2->010, 3->011, 4->100, 5->101, 6->110, 7->111
+-        f = v.corners
+-        h = v.size
+-        
+-        # X-component: average difference along x-edges
+-        # Edges are pairs (0,4), (1,5), (2,6), (3,7)
+-        dx = ( (f[4] - f[0]) + (f[5] - f[1]) + (f[6] - f[2]) + (f[7] - f[3]) ) / (4.0 * h)
+-        
+-        # Y-component: average difference along y-edges
+-        # Edges are pairs (0,2), (1,3), (4,6), (5,7)
+-        dy = ( (f[2] - f[0]) + (f[3] - f[1]) + (f[6] - f[4]) + (f[7] - f[5]) ) / (4.0 * h)
+-        
+-        # Z-component: average difference along z-edges
+-        # Edges are pairs (0,1), (2,3), (4,5), (6,7)
+-        dz = ( (f[1] - f[0]) + (f[3] - f[2]) + (f[5] - f[4]) + (f[7] - f[6]) ) / (4.0 * h)
+-        
+-        # Step 4: Compute gradient magnitude
+-        grad_mag = sqrt(dx*dx + dy*dy + dz*dz)
+-        
+-        # Step 5: Compute squared error from 1
+-        error = (grad_mag - 1.0) ** 2
+-        
+-        # Step 6: Accumulate loss
+-        # Note: The formula divides by N_vox. We accumulate sum and divide at the end.
+-        # However, since we sample with p=0.5, we must scale the contribution.
+-        # The expected value of the sum is 0.5 * N_vox * E[error].
+-        # To match lambda_le * E[error], we multiply by 2.
+-        # The final loss is lambda_le * (1/N_vox) * sum(error).
+-        # Here we just sum the errors. The scaling by lambda_le and 1/N_vox is applied later.
+-        total_loss += error
+-        count += 1
+-        
+-    # Normalize by number of voxels (N_vox)
+-    # Note: The source defines N_vox as total voxels including parents/children.
+-    # If count < N_vox due to sampling, we still divide by total N_vox to maintain the mean.
+-    # However, the source says "scale the weight accordingly". 
+-    # Standard practice: Loss = lambda * (1/N) * sum(sampled_errors * scaling_factor).
+-    # If we sum 'count' errors, and we want the average over N_vox, we do:
+-    # Loss = lambda_le * (1/N_vox) * sum(sampled_errors) * (1/p)
+-    
+-    # Assuming N_vox is passed or known globally, we return the raw sum for external scaling
+-    # or implement the full formula here if N_vox is available.
+-    # For self-containedness, we assume N_vox is the total number of eligible voxels.
+-    # Since N_vox is not an input to this function in the snippet, we return the sum.
+-    # The caller would do: return lambda_le * (2.0 / N_vox) * total_loss
+-    
+-    return total_loss
+-```
++**Edge Cases and Pitfalls**
++*   **Precision**: The analytical gradient assumes linear interpolation between corners. If the SDF varies non-linearly within the voxel, the gradient approximation may be inaccurate [S1, unofficial].
++*   **Boundaries**: Corner values must be retrieved correctly. If a corner lies outside the defined grid, appropriate padding or clamping is required [G].
++*   **Degenerate Input**: If a voxel has zero size or invalid geometry, the gradient computation may fail. Guard against division by zero in $h_v$ [G].
+ 
+ ## Subtopics
+ 
+ ### [Global Eikonal Loss](19124-global-eikonal-loss.md)
+-Enforces the Eikonal equation on random dense coordinates rather than voxel centers. Choose this when a resolution-independent, stochastic sampling approach is preferred over structured grid constraints.
++Enforces the Eikonal equation across a dense grid of samples rather than sparse voxel centers. It is the dense counterpart to Lle, ensuring unit gradient magnitude throughout the volume but with higher computational cost sensitive to resolution changes.
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: Linear with respect to the number of active voxels $N_{vox}$, but reduced by the 0.5 sampling probability [S1, unofficial].
+-*   **Memory Complexity**: Requires storing SDF values at voxel corners and centers [S1, unofficial].
+-*   **Performance**: Computationally efficient for hierarchical structures as it only processes active voxels at fine levels ($L > 9$) [S1, unofficial].
+-*   **Strengths**: Provides stable gradient constraints near the surface without the noise of random sampling; integrates naturally with voxel-based rendering pipelines [S1, unofficial].
+-*   **Limitations**: Computationally sensitive to voxel resolution; requires a hierarchical structure with defined levels [S1, unofficial].
+-*   **When to use**: During the fine stages of training (e.g., iterations 6,000–10,000) for DTU or Tanks-and-Temples datasets [S1, unofficial].
++*   **Time Complexity**: Linear with respect to the number of active voxels $N_{vox}$, but reduced by the 0.5 sampling probability. Computation per voxel is constant (analytical gradient).
++*   **Memory Complexity**: Minimal additional memory, only requiring storage of corner SDF values during the forward pass.
++*   **Performance**: Efficient for hierarchical representations where the number of active voxels is much smaller than the total volume resolution.
++*   **Strengths**: Geometrically aligned with the voxel structure; computationally cheaper than dense random sampling; stabilizes training in fine stages [S1, unofficial].
++*   **Limitations**: Only constrains gradients at voxel centers, potentially missing errors in between; accuracy depends on voxel size relative to surface curvature [S1, unofficial].
++*   **When to Use**: When using hierarchical voxel grids (e.g., Octrees) and computational resources are limited compared to dense sampling methods.
++*   **When Not to Use**: When high-fidelity gradient information is required everywhere in the volume, not just at voxel centers.
+ 
+ ## Background
+-Local Eikonal Loss was introduced in the context of sparse voxel rasterization for surface reconstruction, specifically in the Vipe (Video Pose Engine for 3D geometric perception) framework [S1, unofficial]. It serves as a local, structured alternative to global Eikonal regularization, leveraging the analytical gradients of trilinear interpolation within voxel grids [S1, unofficial].
++Local Eikonal Loss was introduced in the context of video pose engines for 3D geometric perception, specifically in the Vipe framework [S1, unofficial]. It addresses the need for efficient regularization in sparse voxel rasterization for surface reconstruction, where dense sampling is prohibitive. The method leverages the analytical properties of trilinear interpolation to compute gradients without numerical differentiation, improving stability and speed [S1, unofficial].
+ 
+ ## Sources

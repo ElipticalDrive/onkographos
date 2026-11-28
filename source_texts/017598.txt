@@ -1,0 +1,729 @@
+
+
+# HAL Id: hal-05046040 *
+
+Submitted on 28 Apr 2025
+
+HAL is a multi-disciplinary open access archive for the deposit and dissemination of scientific research documents, whether they are published or not. The documents may come from teaching and research institutions in France or abroad, or from public or private research centers.
+
+
+
+L'archive ouverte pluridisciplinaire HAL, est destinée au dépôt et à la diffusion de documents scientifiques de niveau recherche, publiés ou non, émanant des établissements d'enseignement et de recherche français ou étrangers, des laboratoires publics ou privés.
+
+# Fast sphere tracing of procedural volumetric noise for very large and detailed scenes
+
+Mathéo Moinet, Fabrice Neyret
+
+# To cite this version:
+
+Mathéo Moinet, Fabrice Neyret. Fast sphere tracing of procedural volumetric noise for very large and detailed scenes. Computer Graphics Forum, 2025, 44 (2), pp.1-18. ⟨10.1111/cgf.70072⟩. ⟨hal-05046040⟩
+
+# Fast sphere tracing of procedural volumetric noise for very large and detailed scenes
+
+Mathéo Moinet[1](https://orcid.org/0009-0005-5492-9223) and Fabrice Neyret[1](https://orcid.org/0000-0003-0777-2401)
+
+1 INRIA / LJK (CNRS, UGA, INP-G), France firstname.name@inria.fr
+
+
+
+Figure 1: From left to right*: Very large and detailed walk through a typical procedural 3D noise (zero storage) rendered in* 16*ms with our method (at resolution* 1024 × 1024 on a Nvidia 4080Ti), vs 110*ms using naive Sphere tracing; other results showing semi-transparent objects, animation, hypertexture, heightfields. See Section 9 and joined video for more results and comparisons.*
+
+#### Abstract
+
+Real-time walk through very large and detailed scenes is a challenge for both content design, data management, and rendering, and requires LOD to handle the scale range. In the case of partly stochastic content (clouds, cosmic dust, fire, terrains, etc.), proceduralism allows arbitrary large and detailed scenes with no or little storage and offers embedded LOD, but the rendering gets even costlier. In this paper, we propose to boost the performance of Fractional Brownian Motion (FBM)-based noise rendering (e.g., 3D Perlin noise, hypertextures) in two ways: improving the stepping efficiency of Sphere Tracing of general Signed Distance Functions (SDF) considering the first and second derivatives, and treating cascaded sums such as FBM as nested bounding volumes. We illustrate this on various scenes made of either opaque material, constant semi-transparent material, or non-constant (i.e., full volumetric inside) material, including animated content - thanks to on-the-fly proceduralism. We obtain real-time performances with speedups up to 12-folds on opaque or constant semi-transparent scenes compared to classical Sphere tracing, and up to 2-folds (through empty space skipping optimization) on non-constant density volumetric scenes.
+
+CCS Concepts
+
+• Computing methodologies → Rendering; Computer graphics;
+
+# 1. Introduction
+
+Procedural 3D noise [MVN68, Per85, Per02] is a convenient way to design very large and detailed stochastic content (clouds, cosmic dust, fire, terrain... [EMP∗ 02]), possibly modulating smoother shapes (hypertextures [PH89]). The problem is its high rendering cost, especially in the scope of real-time rendering. Precomputing volumes and pre-flagging voids is a possibility, but storage is an issue in the scope of large open worlds and prevents animation. However, FBM-based noises share similarities with distance fields for which Sphere tracing algorithms [Har96] allow fast convergence to the isosurfaces. For volumes with density content bounded to FBM > threshold regions, this corresponds to efficient skipping of empty spaces.
+
+To boost the performances, this paper proposes two main contributions:
+
+• Accelerating the marching of FBM cascaded sums in general,
+
+by progressive evaluation of octaves while bounding the remaining sum, which can be seen as a dynamic Bounding Volume Hierarchy, which we detail in Section 4.2. We obtain gains up to ×1.8. • Improving the Sphere tracing performance especially in the costly case of near silhouettes and backward sides, drawing on [AZ23] (for 2-Lipschitz functions) to better combine the 2 first Lipschitz constraints of the SDF, as explained in Section 6.2. This gives an extra gain of up to ×4.0, see analysis and comparisons in Section 9.
+
+These combined allow to accelerate up to about 12-fold the rendering of volumetric fields of high FBM complexity. But they partly also apply to non 2-Lipschitz functions (e.g., Perlin turbulence including abs()), and each separately is useful in a broader scope.
+
+Our method is compatible with semi-transparency, and with the modulation of a smooth main shape function (as for hypertextures), animation comes for free since everything is computed on the fly, so that we could produce ultra detailed & large walkthrough at high framerates, as seen in section 9, figures 1,12,13,14 and the companion video.
+
+# 2. Previous Work
+
+Volume ray-casting of explicit or implicit volumetric data - to draw either isosurfaces or semi-transparent content - usually relies on ray-marching with fix steps. For sparse density fields described implicitly by a function, adaptive approaches allow dynamic steps to reach the nearest isosurface delimiting the opaque region. This rayisosurface intersection problem is analog to first root-finding of the implicit function along the ray, and can rarely be solved analytically. Instead, two main classes of costlier (iterative) root-finding methods can be used:
+
+- Marching methods progressively march along the ray to get closer to the root. To do so, Lipschitz methods are used at each step to estimate a safe marching step size, i.e. a distance guaranteed not to walk past the root (i.e. isosurface). This iterative process is known as Sphere tracing [Har96]. Lipschitz methods require the implicit function to be Lipschitz (hence the name), i.e. that the function should be continuous and its derivative bounded by a constant: the Lipschitz constant of the function.
+- Bisection methods detect if the root can be inside a given rayinterval (often using interval arithmetic [Mit90], and sometimes Lipschitz methods [KB89]), and if so divide the interval into subintervals recursively.
+
+Both interval arithmetic and Lipschitz methods can be used in the same framework using special forward inclusion functions [AZ23], which we use to formally describe our method.
+
+As we focus on Sphere tracing in this paper, please refer to the work of Aydinlilar et al. [AZ23] for a more detailed overview of bisection-based and advanced interval arithmetic methods.
+
+Cascaded noise functions as the FBM family [MVN68] (e.g. [Per85, Per02]) – either used directly or for smooth shape modulation as for hypertextures [PH89] – are Lipschitz and can fit the Sphere tracing framework. However, in addition to their high evaluation cost, their Lipschitz constant is very high and thus the safe step distance very short, leading to many expensive small steps.
+
+Closest distance to shape used by the seminal Sphere tracing approach is still a crude estimation of the intersection distance in the ray direction: in particular, the stepping get uselessly short close to the silhouettes for grazing rays, and once past an object it is still slowed down by the close shape behind. To improve performance of Sphere tracing for general functions, two major paths have been explored:
+
+- Safely marching bigger steps, either thanks to over-relaxation methods [KSK∗ 14,BV18], by using a more local or directional Lipschitz constant [GGPP20], or by considering the gradient of the field directly [AZ23]. We draw on the later two techniques in the case of FBM, and improve them.
+- Reducing the evaluation cost of each step, e.g. by evaluating cheaper proxy shapes [Qui19]. But these are generally specified manually, and designing one can be a hard process on arbitrary shapes – especially if not isolated in space – , stochastic noise being the worst. Building on previous work from our team about lazy evaluation of Perlin noise [Arn09], we propose a solution for FBM in the form of a totally automatic implicit Bounding Volume Hierarchy (BVH), bringing massing speed-up to the Sphere tracing of highly complex FBM.
+
+In between, some have studied and improved Sphere tracing in the special case of the sum of independent elementary noise functions [WH96]. We follow a similar approach in spirit, but explicitly defining the implicit BVH – especially in the case of FBM – allows us to go further. Our approach is also more GPU friendly (Sec. 5.1), enabling fast real-time implementations.
+
+When the purpose is to render densities inside the threshold isovalue, Sphere tracing can be used to skip empty spaces, using regular ray-marching inside. This was done for clouds by precomputing the SDF of the field in a 3D texture [Sch23], which is however not compatible with full procedural very large worlds or animation. Note that in the special case of constant density, one just have to directly find the exit point. For some approaches - including us - it is identical to finding the incoming intersection.
+
+Another important issue on GPU is that switching between different cases along the ray can induce SIMD divergence between threads, reducing parallelism. Our method avoid these.
+
+# 3. Overview
+
+We consider a scene defined by a density field f(p), and we want to do real-time volume rendering of this object.
+
+Our density field is directly defined by a high octave-count FBM of a 3D noise function. The semi-transparent object exists where the density field is higher than a certain threshold value v, and doesn't exist (i.e. is fully transparent) otherwise. For now, this threshold will be zero, meaning that the object exists with density f(p) when this density is higher than zero.
+
+At first, we will consider the case where the noise function noise(p) can be any arbitrary function, as long as noise(p) ∈ [−1,1].
+
+Without more a-priory knowledge of this function, the only way to render it is by using ray-marching. This means sampling the density field along the ray at regular interval, accumulating density along the way. The cost of ray-marching is however proportional to the cost of evaluating f , which in our case where f is a high octave-count FBM, means very expensive to compute. Worse, in empty areas of the scene where f(p) < v, evaluations of f are done only to find out that the object is transparent at this location. Such evaluations of f have no impact on the final aspect of the image, making expensive evaluations go to waste.
+
+Our work focuses on reducing the cost of traversing empty areas of the scene. We do so by leveraging properties of how FBM is constructed, which helps us predict when f might be under zero or not.
+
+In Section 4.2, we detail how a procedural BVH-like structure can be built for this purpose. In Section 4.3, we show how to use this BVH to know, for any position in the scene, the minimum number of octaves that have to be computed to be sure that there is no object at this position. Doing so, we reduce the cost of evaluating f by safely evaluating the least possible amount of octaves in empty areas, speeding up ray-marching.
+
+With a bit more a-priory knowledge about our noise function, we can do more. When noise is Lipschitz, a Signed Distance Function of f can be built and used through Sphere tracing to make bigger steps in empty areas. However when dealing with high-octave FBM fields, the associated global Lipschitz constant is very high if computed in the traditional way, only allowing small steps and greatly limiting the performances of Sphere tracing.
+
+Thanks to our BVH, we drastically reduce this by dynamically computing safe distances toward the smoother bounding volumes of our object instead of the hole object. Doing so allows us to safely use a much lower Lipschitz constant when far from the object - resulting in bigger yet still safe steps - while also reducing the computational cost of each step, making it doubly effective (Sec. 5).
+
+To get even greater results when noise is compatible, we show how to adapt [AZ23] to use the gradient of the field directly, combining it with our BVH for even better results (Sec. 6) . On the way, we identify an issue with [AZ23] causing slowdowns with certain type of functions such as FBM, and propose a new formulation which fixes this issue (Sec. 6.2).
+
+Lastly in Section 7 we show how shape modulation (Hypertextures) can be achieved with FBM fields in a way that still allows all of the aforementioned speedups to be used.
+
+Note that the implementation of each presented improvement happens in the FBM loop itself, as described in Algorithm 1.
+
+Many of the techniques we show in this paper are compatible with more general sums of bounded functions, of which FBM are a particular case. Rather than focusing solely on FBM, we provide more general equations applicable in a wider scope, specifying the particularities of FBM when relevant. Nonetheless, please keep in mind throughout reading this paper that our final goal remains the applications to FBM, which is the only case we later validate with our results.
+
+#### 3.1. Definitions and notations
+
+This Section contains definitions and notations useful to the understanding of our paper.
+
+#### 3.1.1. Implicit surfaces
+
+An implicit surface S can be defined as the v-isosurface of a scalar field function f(p), i.e., the set of points p satisfying S = n p ∈ R 3 | f(p) = v o (we consider v = 0 until Section 7). In this paper, we define the interior of the implicit surface to be when f(p) > v and the exterior when f(p) < v, as is often the case when using density fields.
+
+#### 3.1.2. Fractional Brownian Motion
+
+A noise function is usually band-limited around a certain frequency (which means it is likely Lipschitz). To create a noise-like function with a larger spectrum, a construction combining multiple of the same base noise can be used. Fractional Brownian Motion (FBM) is such a simple construction, allowing to create fractal-like noise with many frequencies by summing variations of a single base noise function whose parameters are scaled differently. FBM has been used extensively in computer graphics to create stochastic patterns with details at – potentially many – different scales.
+
+In this paper, we define FBM as follows. With a point p ∈ R 3 , a noise function noise(p) ∈ [−1,1], a constant parameter β ∈ [0,2], and n ∈ N + the number of octaves, Fractional Brownian Motion is defined as :
+
+$$B_n(\mathbf{p}) = \sum_{i=1}^n o_i(\mathbf{p}), \text{ with } o_i(\mathbf{p}) = \frac{noise(2^{i-1}\mathbf{p})}{2^{\beta(i-1)}} \quad (1)$$
+
+The term octave (corresponding to oi above) is often used to talk about each component of the sum individually, with each octave corresponding to a certain frequency band.
+
+The β constant is related to the lacunarity property of the constructed fractal pattern. β = 1 corresponds to 1/ f noise in the literature, commonly found in nature and thus mostly used in computer graphics.
+
+To enhance readability we will assume β = 1 throughout this paper, but our work is compatible with different values of β. Full equations with β included can be found in Appendix B, and our code implementation also includes this parameter (Appx A).
+
+#### 3.1.3. Our density field definition
+
+We define the implicit volumetric objects used in this paper as follows, where ρ : R 3 → R is the density function:
+
+| $f(\mathbf{p}) = B_n(\mathbf{p})$                                                                                           |  |  |  |  |  |  |  |     |
+|-----------------------------------------------------------------------------------------------------------------------------|--|--|--|--|--|--|--|-----|
+| $\rho(\mathbf{p}) = \begin{cases} h(f(\mathbf{p})) & \text{when } f(\mathbf{p}) \geq v \\ 0 & \text{otherwise} \end{cases}$ |  |  |  |  |  |  |  | (2) |
+
+Such definition of ρ forces the density to zero where f(p) < v, but allows arbitrary remapping of the values of f through h when the density is ≥ 0. As long as h is a positive function, the 0 isosurface of ρ will correspond to the v-isosurface of f , thus we can consider the problem of finding the v-isosurface of f rather than ρ.
+
+#### 3.1.4. Implicit surface ray-tracing
+
+To ray-trace this implicit surface, i.e. to find the closest intersection point between a ray and the implicit surface, the ray equation δ(t) = o+t*u is combined with the above surface equation : *f(δ(t)) = v. The goal is thus to solve this equation to find t. This means that this problem is analog to 1D root finding, where we are only interested in finding the first (smallest) positive root. To simplify notations, we use t in place of δ(t) in this paper.
+
+#### 3.1.5. Lipschitz functions
+
+For f : R d → R, f is Lipschitz if there is a minimum constant λ called the Lipschitz constant of f such that: ∀x,y ∈ R d with x ̸= y, |f(x)− f(y)| ||x−y|| ≤ λ.
+
+λ tells us how fast can the function change at its fastest. It can be understood as the maximum magnitude of the function's derivative.
+
+Out of convenience, we define the following Lipschitz operator, which takes as an input a function and returns its associated global Lipschitz constant λ.
+
+$$Lip(f) = \max_{\mathbf{x}, \mathbf{y}} \frac{|f(\mathbf{x}) - f(\mathbf{y})|}{\|\mathbf{x} - \mathbf{y}\|} \quad (3)$$
+
+### 3.1.6. Sphere tracing, SDF, and SDB
+
+Sphere tracing [Har96] is an algorithm for iterative ray-tracing of the isosurface of a Lipschitz implicit function. It works by repeatedly marching along the ray, where the function is evaluated at each step to dynamically deduce a safe stepping distance – guaranteed not to cross the surface – until convergence to the surface. Such safe step is computed thanks to the Lipschitz constant of the function: A function cannot grow faster than its maximum derivative, thus f(x) λ is guaranteed to be a safe step toward the 0-isosurface of f .
+
+In general, f(x) λ is called a Signed Distance Bound (SDB) and gives the radius of an unbounding sphere around x (i.e. guaranteed not to contain the object). When ∀x,|∇ f(x)| = λ = 1, the unbounding sphere is additionally guaranteed to touch the closest object, thus its radius corresponds to the exact distance to the object. This special case is called a Signed Distance Function (SDF).
+
+In the context of Sphere tracing, both SDF and SDB can be used equivalently. However, we want to emphasize on the fact that SDFs in general are used by many other techniques in Computer Graphics (e.g. for ambient occlusion, soft shadows, CSG and smooth union), some of which rely explicitly on the distance output to be exact (rather than a bound), thus not being compatible with SDBs.
+
+### 3.1.7. Inclusion functions
+
+Aydinlilar et al. [AZ23] recently introduced useful notations for Lipschitz functions root-finding, which we will use in this paper.
+
+In short, instead of directly providing a step size calculation such as f(x) λ , they define bounding functions of f which are simple enough to analytically compute the root of. This decomposition is useful to manipulate SDB expressions in different ways.
+
+We adapted their definitions as such. First, an inclusion function noted [ f ] of f is defined as a set of points containing (at least) all possible values of f(x). [ f ] consists of two functions: the lower bound f− and the upper bound f+ of [ f ], where f−(x) ≤ f(x) ≤ f+(x). As a shortcut notation, [ f ](x) = a ± b is used to define both f− and f+ by replacing ± accordingly.
+
+In the context of ray-tracing, we work along the ray. With t*0 the current sample location on the ray, a *forward inclusion function [AZ23] is defined ∀t > t*0 to be exact at the query point *t*0, *i.e.: f(t*0) = *f−(t*0) = *f+(*t*0).
+
+When the bounds f− and f+ are linear functions, [ f ] is referred to as a linear inclusion function. Combining the above definitions, a forward linear inclusion function correspond to a pair of bounding lines starting at the query point, which can be visualized as a bounding cone starting at f(*t*0) (see blue area in figure 2).
+
+
+
+Figure 2: Linear (Blue) and quadratic Taylor (Red) forward inclusion functions [ f ] and [ f ] of f (Purple) at t*0. The slope of f*+(t) is equal to λ*, thus its intersection with the v-threshold (here v* = 0*) gives the expected step size of* | f(t*0)/λ|.*
+
+As an example, applying these notations to classic Sphere tracing as per [Har96] gives the following forward linear inclusion function: [ f ](t) = f(t*0) ± λ(*t − t*0). [ *f ](t) notations provide a formal way of describing that the values of f are all contained within the upper bound f+ and lower bound f−. Solving for t the intersection of these bounding lines with the zero axis indeed gives back equations corresponding to step = f(*t*0) λ .
+
+The problem of finding the correct step size equation can thus be solved by finding correct upper and lower bounding functions (which can be different from each other) and computing the intersection of these bounding functions with the 0 (or v) threshold. The closer these bounding functions are to the real function, the closer the step size will be to the real maximum safe distance, maximizing Sphere tracing performances.
+
+Of course, these bounding functions do not have to be linear, as long as their analytical intersection can be computed. As such, Aydinlilar et al. [AZ23] also introduced quadratic forward inclusion functions, of which we use their quadratic Taylor variant based on the quadratic Taylor expansion at t = *t*0.
+
+Usage of such quadratic Taylor inclusion functions requires f ′ (t) to be computed at each step – which can be costly or invalid depending on f – and f ′ (t) itself to be Lipschitz continuous as well (we denote γ = Lip(f ′ ) the second order Lipschitz constant of f). In this case, the inclusion function is defined as such:
+
+$$[f](t) = f(t_0) + (t - t_0) \left( f'(t_0) \pm \frac{1}{2} \gamma(t - t_0) \right)$$
+
+#### 4. Sum of bounded functions: exploiting the implicit BVH
+
+Our goal throughout this paper is to efficiently find isosurfaces of an implicit function which is a sum of multiple bounded functions, i.e. of known range. We also assume that each bounded function costs approximately the same computation time.
+
+For pedagogy, the spirit of the sections detailing the core of our contributions (Sections 4,5,6) is that each progressively considers an additional hypothesis that allows us to introduce a new cumulative element improving the overall performance.
+
+#### 4.1. Preliminaries
+
+Let's take a very simple example, the sum of two 1D scalar functions of known interval: f(x) = f*1(*x) + f*2(*x) with f*1(*x) ∈ [−1,1] and f*2(*x) ∈ [−0.5,0.5].
+
+Without evaluating any of these functions, we only know that f(x) ∈ [−1.5,1.5]. However if we evaluate either of the two functions for a specific x, the corresponding range of f(x) is reduced, for example f(x) ∈ [ f*1(*x) ± 0.5]. In essence, [ f ](x) = f*1(*x) ± 0.5 indeed is an inclusion function of f , with f± its upper and lower bounds (see figure 3). Although not a bounding cone (the inclusion function here does not have the forward property (Sec. 3.1.7)) these bounds delimit a bounding region around f . For some values of f*1(*x), it is possible to have 0 ∈/ f*1(*x) ± 0.5, which is sufficient to tell that no root of f is present at this location without having to evaluate f*2(*x) (see dashed areas in figure 3). Note however the importance of evaluating functions in the optimal order, as – given the range of these two functions – evaluating *f*2 alone will never be sufficient to exclude the possibility of a root (see red curve on figure 3).
+
+
+
+Figure 3: f(x) (Purple) i.e. the sum of f*1(*x) = cos(x) (Blue) and f*2(*x) = 0.5cos(2*x*) (Red), and their corresponding inclusion functions of f(x): [ f ](x) = f*1(*x)±0.5 & [ f ](x) = f*2(*x)±1*. Notice the dashed areas where the range of f*1(x)±0.5 is totally under or above 0, meaning that f(x) cannot contain a root at this location. Also notice that this doesn't happen for f*2(*x)±1*.*
+
+Although trivial in this toy example, this key idea extends to 2D (Fig. 5) and 3D scalar functions, as well as sums of n functions (Fig. 4 and Sec. 4.2), where evaluating only a subset of the functions at a given location might be sufficient to guarantee the absence of a root.
+
+#### 4.2. A procedural Bounding Volume Hierarchy
+
+Let's now complicate our initial example: we define Fn(p) = ∑ n i=1 fi(p) the sum of n scalar functions fi : R d → R for i ∈ [1,n]. Fi(p) is then an intermediate sum, from f*1 to *fi
+
+We use ∆f to denote the range of values of a function f such that f ∈ [−∆f ,∆f ]. Then for any intermediate sum Fi , we know that adding the next fi+1 will make the sum fluctuate by at most ∆fi+1 . With inclusion function notations, this gives:
+
+$$[F_{i+1}](\mathbf{p}) = F_i(\mathbf{p}) \pm \Delta_{f_{i+1}} \quad (4)$$
+
+Now this can be repeated to find how adding more than one function to Fi will change the corresponding range of values. We note s(i, j) the sum of intermediate ∆fi from i to j: ∀i, j ∈ [1,n] | j ≥ i, s(i, j) = ∑ j m=i ∆fm . It then follows that:
+
+[Fj ](p) = Fi(p)±s(i+1, j) (5)
+
+Equation 5 is powerful, as it shows that any partial sum can be used as an inclusion function of a higher sum, as long as it is offseted by the right amount given by s. When we set j = n, each bounding function Fn±(p) = Fi(p)±s(i+1,n) is a bounding function of the final Fn(p), creating a bounding hierarchy. Graphically, this corresponds to Figure 4 in 1D, Figure 5 in 2D, and extends to an implicit Bounding Volume Hierarchy (BVH) in 3D (where each level corresponds to a less tight – but simplified – version of its child). We note the following inclusion functions of Fn computed from the partial sum Fi as:
+
+| $\text{BVH}_{\pm}(\mathbf{p}) = F_i(\mathbf{p}) \pm s(i+1, n)$ | (6) |
+|----------------------------------------------------------------|-----|
+|----------------------------------------------------------------|-----|
+
+
+
+Figure 4: 1D inclusion functions of F*4(*p) (Purple): BVH*1±(*p) (Red), BVH*2±(*p) (Green), BVH*3±(*p) (Cyan).
+
+For the purpose of reducing the range of values of the sum Fn (thus potentially guaranteeing the absence of a root) by evaluating as few intermediate functions fi as possible, the best strategy is to evaluate them in order of higher to lower range of values. We then assume that the functions fi are presorted in this order, such that ∀i ∈ [1,n−1],∆fi ≥ ∆fi+1 .
+
+#### 4.3. Speeding up Ray Marching: Early stop
+
+As we did not yet make the assumption that noise is Lipschitz (which we will starting from Sec. 5.1), at this stage the only way to compute the ray-intersection with our implicit surface would be using ray-marching. This requires sampling Fn(t) regularly along the ray until finding a t for which Fn(t) ≥ v.
+
+Even without Sphere marching, our BVH can help us doing so
+
+Figure 5: Illustration of a 2D isosurface defined by an FBM of Perlin noise (black) and its corresponding outer BVH. Each shade of gray is delimited by a lower octave's outer bounding isosurface, i.e. where each intermediate BVHi+(p) = v.
+
+more efficiently: for a position to be inside the volume defined by Fn(p), it must also be inside its bounding volume(s).
+
+Translated into inclusion functions notations, if an upper bound Fn+(p) of Fn is lower than v for a given position along the ray, then by definition Fn(p) cannot be over v. This is true for any upper bound of Fn, which means we can test it for each BVH*i*+(p) as we compute the corresponding Fi . Doing so only requires to compute the associated s(i + 1,n) value, which can be done cheaply when compared to computing fi .
+
+For a given position p, we note i*min the *i corresponding to the first level of the BVH for which the position is not in the associated bounding volume BVH*i*+(p), i.e.:
+
+| $i_{\min} = \min\{i \mid \text{BVH}_{i+}(\mathbf{p}) < v\}$ | (7) |
+|-------------------------------------------------------------|-----|
+|-------------------------------------------------------------|-----|
+
+Note that i*min can equivalently be defined with BVH*i−(p) > v when inside the volume and searching for the isosurface .
+
+As soon as we detect that a position along the ray is not inside the BVH, i.e. that i*min is reached, we know that following *fi are not necessary, so the Fn loop can break early. We call this optimization Early stop (ES) in the remainder of this paper.
+
+In figure 5, the area delimited by a BVH level corresponds to different values of i*min. Nested levels require more and more *fi , up to the final object where Fn is computed.
+
+#### 4.4. A special sum: Fractional Brownian Motion
+
+The base building block of FBM, the noise function, has values contained in [−1,1]. It then follows that octaves oi have bounded ranges as well. Fractional Brownian Motion Bn(p) is thus simply a special case of the general sum of bounded function Fn(p) described previously, and a BVH structure of it can be computed, with:
+
+$$f_i(\mathbf{p}) = o_i(\mathbf{p}), \quad \Delta_{f_i} = \frac{1}{2^{i-1}} s(i, j) = \sum_{m=i}^j \frac{1}{2^{m-1}} = 2 - \frac{1}{2^{j-1}} \quad (8)$$
+
+Octaves are by definition sorted by range of values, providing optimal evaluation order. Additionally, both ∆i and s(i,n) have simple analytic expressions, which means no memory is needed to store them. This makes Fractional Brownian Motion a perfect candidate to use with our BVH.
+
+
+
+#### 5. Efficient Sphere tracing using our BVH
+
+From this section, we now consider that the bounded functions fi making up the sum Fn we are interested in are all Lipschitz, noting λ*fi* their respective Lipschitz constants. Sphere tracing can then be used to dynamically step faster when possible and to guarantee closest root finding.
+
+To apply Sphere tracing, as explained in 3.1.7, one uses the Lipschitz properties of a function to create an upper bound of it, allowing to find a worse case position of its root which can safely be marched toward.
+
+If we naively compute the global Lipschitz constant λ*Fn* of the sum Fn, we get the following forward inclusion function:
+
+$$\lambda_{F_n} = \sum_{i=1}^n \lambda_{f_i} \quad (9)$$
+
+$$[F_n](t) = F_n(t_0) \pm \lambda_{F_n}(t - t_0)$$
+
+If n is large, λ*Fn* can become very big, limiting the efficiency of Sphere tracing.
+
+In the following sub-sections, we present multiple enhancements which take advantage of the bounded nature of the functions – through our BVH – to make bigger (Sec. 5.1 & 5.2) and cheaper (Sec. 5.3) steps.
+
+# 5.1. BVH & Sphere tracing: Adaptive Lipschitz constant
+
+Our BVH can be used to adaptively compute lower Lipschitz constants and use them in a safe way.
+
+By construction of our BVH, we know that the volume BVH*n* corresponding to Fn is contained inside every BVH*i* . In terms of ray-tracing, this means that the ray will intersect nested BVH levels in order before eventually reaching the final volume BVH*n*, meaning that these intermediate intersection points are safe positions to step toward from the current position t*0 along the ray. As long as we are outside a of nested BVH level (*i.e. i ≥ *i*min), we can thus compute a step size toward it instead of the final inner volume.
+
+Now there is one question that remains: how can we compute the root of BVH*i* along the ray (i.e. the ray-intersection with its isosurface)? We can use the same trick as we did for BVH*n* (Eq. 9), i.e. use the Lipschitz condition to construct a forward inclusion function of BVH*i* (Fig. 6a). We indeed have λBVH*i* = λ*Fi* available, as adding s(i + 1,n) doesn't change the Lipschitz constant of BVH*i* . BVH*i* already is an inclusion function of Fn, thus, by computing what is in essence (forward) inclusion functions of inclusion functions of Fn (upper bounds of upper bounds are valid upper bounds), we have for any BVH level i ∈ [1,n]:
+
+| $[F_n](t) \in [\text{BVH}_{\pm i}](t) = \text{BVH}_{\pm i}(t_0) \pm \lambda_{\text{BVH}_i}(t - t_0)$ | (10) |
+|------------------------------------------------------------------------------------------------------|------|
+|                                                                                                      |      |
+
+Equation 10 shows how to construct a valid inclusion function of
+
+Fn(t) whose root (thus a step size) can easily be computed for each level of the BVH from i*min to *n (Fig. 6b).
+
+
+
+Figure 6: Illustrations on how to create a tighter forward inclusion function of Fn by combining the forward inclusion functions of every BVHi±.
+
+Because equation 10 holds for multiple i, we get multiple bounds of the same function (Fn), meaning that we can combine them (Fig. 6b) to narrow the range of possible values:
+
+| $F_n(t) \in \bigcap_{i=1}^n [\text{BVH}_{i\pm}](t)$ | (11) |
+|-----------------------------------------------------|------|
+|-----------------------------------------------------|------|
+
+$$i=1$$
+
+$$F_{n-1}(t) = \max_{i \in [1, n]} (\text{BVH}_{i-1}(t_0) - \lambda_{\text{BVH}_i}(t - t_0)) \quad (11)$$
+
+Equations 11 and 12 tell us that at each step, we can compute step size candidates based on each bounding volume, and simply keep the best as our final step size.
+
+By solving Equation 11 to find the step size, we fall back onto equations equivalent to what was presented by Worley and Hart [WH96]. However, we added intuition to this mechanism by showing the relation with an implicit BVH, and propose inclusion functions describing this technique. In the following sections, these notations allow us to go much deeper into optimizing this problem.
+
+Note that the result of Equation 11 depends on the order in which the sum is computed. In fact, optimal (i.e. maximal) step size could be obtained once all fi are computed by dynamically re-ordering the sum according to a sorting criteria [WH96]. However, such dynamic sum re-ordering is not GPU-friendly: it requires to store each element of the sum independently in a n length array (requiring perfragment shader memory in O(n)), and to sort this array – an expensive operation – based on a dynamic criteria at every step. Because of this, and because some of the techniques we present later-on would prove themselves challenging to combine with a dynamic order, we do not use dynamic re-ordering as presented by Worley and Hart [WH96].
+
+Instead, rather than any fixed order, one can "pre-sort" the sum elements in the order most likely to be optimal given the same sorting criteria and statistics about our functions. Depending on the summed functions, this can give close to maximal steps without the heavy associated runtime overheads. When the sum has the right properties (which is the case of FBM, see Sec. 5.1.1), the order used so far (sorting from higher to lower range of values) already corresponds to such "close to optimal" order.
+
+# 5.1.1. Applied to Fractional Brownian Motion
+
+Once again, Fractional Brownian Motion is a special case of Fn. As long as noise is Lipschitz (we note its Lipschitz constant λ*noise*), we can derive the Lipschitz constants of octaves analytically, and use equations from the previous Section to speed-up Sphere tracing of FBM fields (see extended notations for β ̸= 1 in Appendix B):
+
+$$\begin{aligned} \lambda_{f_i} &= \lambda_{o_i} = \text{Lip}(o_i) = \lambda_{noise} \\ \lambda_{F_n} &= \lambda_{B_n} = \text{Lip}(B_n) = \sum_{i=1}^n \lambda_{o_i} = n \cdot \lambda_{noise} \end{aligned} \quad (13)$$
+
+The optimal sorting criteria is to re-order sum elements by sorting their value of fi λ*f* [WH96]. However, we are in a situation (when β = 1) where every octave share the same Lipschitz constant, thus only the octaves' value matter. As each octave is built from the same noise function, they share the same relative variance, thus presorting them by range of value (as is already done) correspond to the optimal pre-sorted order.
+
+## 5.2. Sub-stepping
+
+The root-finding algorithm described in Sec. 5.1, although more effective than the naive variant, is rather wasteful. As we compute candidate step sizes for each level of the BVH, we only keep the best one (which implies that bad candidates are computed wastefully). There is, in fact, no guarantee that computing additional fi will help stepping further, and no clear indications on when to stop (we will expand on the later in Sec. 5.3).
+
+To understand why, let's analyse how computing an additional fi can change the candidate step size with the method described previously (Eq. 10). Given BVH*i*+(t*0) with *i ∈ [i*min,*n − 1], and v = 0:
+
+$$\begin{aligned} \text{step}_{i_{\min}} &= \frac{v - \text{BVH}_{i_{\min}+(t_0)}}{\lambda_{F_{i_{\min}}}} = -\frac{F_{i_{\min}}(t_0) + s(i_{\min} + 1, n)}{\lambda_{F_{i_{\min}}}} \quad (14) \\ \text{step}_{i+1} &= -\frac{F_{i+1}(t_0) + s(i+2, n)}{\lambda_{F_{i+1}}} \\ &= -\frac{F_i(t_0) + s(i+1, n)}{\lambda_{F_i} + \lambda_{f_{i+1}}} + \frac{\Delta_{f_{i+1}} - f_{i+1}(t_0)}{\lambda_{F_i} + \lambda_{f_{i+1}}} \\ &= \text{step}_i \cdot \frac{\lambda_{F_i}}{\lambda_{F_i} + \lambda_{f_{i+1}}} + \frac{\Delta_{f_{i+1}} - f_{i+1}(t_0)}{\lambda_{F_i} + \lambda_{f_{i+1}}} \\ \text{with } 0 \leq \frac{\lambda_{F_i}}{\lambda_{F_i} + \lambda_{f_{i+1}}} &\leq 1 \text{ and } (\Delta_{f_{i+1}} - f_{i+1}(t_0)) \geq 0 \end{aligned}$$
+
+From the above equations, it is not possible to predict beforehand if step*i*+1 will be bigger or smaller than step*i* , as some components increase while others decrease.
+
+We propose a better algorithm, Sub-stepping (SS), which guarantees that step*i*+1 ≥ step*i* . Our new algorithm works by safely making intermediate sub-steps along the ray as intermediate sums Fi are computed (Fig. 7):
+
+After computing a step size using BVH*i* (step*i* ), we can (sub)step by this distance, in which case the value of BVH*i* could have reached v. To remain safe, we can consider this worst case scenario to be true, i.e. that BVH*i*+(t*0 +step*i ) = v. Once at the new position t*0 + step*i , we can evaluate fi+1 at this new position, and replace the value of ∆fi+1 that was present in BVH*i*± (through s(i+1,n)) by fi+1(t*0 +step*i ). This gives the following step equation for i ∈ [i*min,*n]:
+
+$$\text{step}_{i+1} = \text{step}_i + \frac{\Delta_{f_{i+1}} - f_{i+1}(t_0 + \text{step}_i)}{\lambda_{f_i} + \lambda_{f_{i+1}}} \quad (15)$$
+
+On average, fi+1(t*0) and *fi+1(t*0 +step*i ) get similar values, which additionally means that on average:
+
+$$\text{step}_i \frac{\lambda_{F_i}}{\lambda_{F_i} + \lambda_{f_{i+1}}} + \frac{\Delta_{f_{i+1}} - f_{i+1}(t_0)}{\lambda_{F_i} + \lambda_{f_{i+1}}} \leq \text{step}_i + \frac{\Delta_{f_{i+1}} - f_{i+1}(t_0 + \text{step}_i)}{\lambda_{F_i} + \lambda_{f_{i+1}}}$$
+
+In other words, Sub-stepping performs (again, on average) better than the algorithm from Sec. 5.1.
+
+
+
+Figure 7: One step using Sub-stepping (Orange dashed) (with multiple Sub-steps from 1 to 4) vs. without (Green dashed). Each new Sub-step safely moves along the ray before computing the next fi , leading to improved results.
+
+#### 5.3. Early stop strategies
+
+In the previous sections, we show improvements when the whole sum Fn(t) is computed at every step. With Sub-stepping (see Eq. 15), every additional fi ∀i ∈ [i*min,*n] now improves the total step size, however this has diminishing returns. Indeed, the denominator λ*Fi* gets higher with i while the numerator ∆fi − fi tends to get lower on average (recall that they were presorted, Sec. 4.2). Sub-steps will thus tend to get smaller and smaller as i gets higher.
+
+The total computation cost of Sphere tracing in our case depends on the number of fi computed, rather than just the number of steps. Like with ray-marching (Sec. 4.3), it might be more efficient to apply Early stop to only compute a minimal amount of fi . Unlike with ray-marching, the computed step size might get smaller when considering less fi , which might increase the total number of steps required to converge, potentially making the final cost higher. A good trade-off thus has to be found.
+
+We call Early stop+k the strategy in which the sum only up to Fi*min+*k is computed, at which point the sum loop breaks.
+
+From the above, because increasing i has diminishing returns, we might be tempted to use Early stop+*0, *i.e. compute as few fi as strictly necessary to get the first step size. This is however a bad idea, and going back to the BVH view of the problem helps to understand why. Indeed, using Early stop+*0 is equivalent to using Sphere tracing to *safely step toward the current outer bounding volume in the hierarchy, and to keep doing so until reaching this level's isosurface. This results in slow convergence at each level of the BVH traversal, massively increasing the total number of steps (Fig. 8a). Even worse, a ray passing very close to a bounding volume without entering it would also be considerably slowed down. This is the issue referred to as grazing rays for objects. In our case, the probability for a ray to be a grazing ray will be much higher, as it could happen with any of the bounding volumes. In essence, *Early stop+*0 makes Sphere tracing unnecessary safe: in our case it is okay to step past a certain level of the BVH as long as we don't step past the final level.
+
+
+
+Figure 8: A 2D FBM surface of 4 octaves is Sphere-traced using different types of Early stop strategies. (8c) No convergence until BVHn, but computes every fi up to n at each step. (8a) Early stop+0 computes the minimum number of fi , but induces slow convergence at every level of the BVH, (8b) Early stop+1 gives results very similar to 8c by only computing 1 additional fi than 8a
+
+With Early stop+*1 a single extra level of the BVH is considered. Thanks to it, slow convergence can only happen when the isosurface of both levels of the BVH are very close spatially. This occurs rarely, making unnecessary slow convergence and *grazing rays much less likely. In the end, this drastically diminishes the major cause of performance loss of Early stop+*0 at a fairly negligible cost *i.e. computing a single more fi . For this reason, using Early stop+k with k at least equal to 1 is highly recommended.
+
+Using Early stop+k with k > 1 makes the convergence issue even less likely, and slightly increases the computed step size. However, it does so with diminishing returns as discussed previously (see Fig. 8b vs 8c). When compared to Early stop+*1, the added cost of computing more *fi for these small additional gains is most of the time not worth it (as discussed in the result Section 9.1.3.3).
+
+#### 6. Adapting quadratic Taylor inclusion functions
+
+As described in 3.1.7, one of the flaw of Sphere tracing is that it is not able to take the direction of the ray into account to adapt the step size, leading to slowdowns especially for grazing rays. For functions whose derivative is Lipschitz continuous and can be computed on the fly, we can use quadratic Taylor inclusion bounds instead of linear ones to solve this problem [AZ23].
+
+In this section, we make the above assumptions for all fi , noting γ fi their respecting 2nd order Lipschitz constants. We then have for the sum Fn(t):
+
+$$F'_n(t) = \sum_{m=1}^n f_m'(t) \quad (16)$$
+
+$$\gamma_{E_n} = \sum_{m=1}^n \gamma_{f_m} \quad (17)$$
+
+with 
+$$f'(t)$$
+ denoting  $\mathbf{u} \cdot \nabla f(\boldsymbol{\delta}(t))$ , the gradient in the ray direction.
+
+We can then build the following forward quadratic Taylor inclusion function of Fn from position *t*0 along the ray:
+
+$$[F_n](t) = F_n(t_0) + (t - t_0)(F_n'(t_0) \pm \frac{1}{2}\gamma_{F_n} \cdot (t - t_0)) \quad (18)$$
+
+Like for linear inclusion functions in Section 5, we could use this quadratic inclusion function to estimate the root of Fn directly, but would encounter the sames issues when n is high. Worse, for some functions such as FBM, γ*Fn* grows exponentially with n (Sec. 6.1.1), making quadratic bounds extremely inefficient, often performing even worse than linear ones.
+
+In the following sub-sections, we first present how the BVHrelated improvements presented previously (Sec. 5) can be adapted to work with quadratic Taylor bounds (Sec. 6.1). Then, we proceed to show a flaw of regular quadratic bounds with high 2nd derivative, which explains why they can sometimes be worse than linear bounds. We introduce a new improved type of quadratic bound – usable outside of this paper's scope –, which fixes this issue and gives results equal or better than both linear and regular quadratic bounds (6.2).
+
+# 6.1. Combining BVH & quadratic Taylor inclusion functions
+
+Quadratic Taylor bounds are directly compatible with Adaptive Lipschitz constant – γ*Fi* here – (Sec. 5.1) and Early stop+k strategy (Sec. 5.3), and can thus be used in place of linear bounds mentioned in the previous sections. In the same way as for linear bounds, ES+k allows to use smaller Lipschitz constants with quadratic bounds, replacing γ*n* by γ*i* .
+
+Sub-stepping (Sec. 5.2) can be made compatible easily. With linear bounds, as we make Sub-steps along the ray, we use the 1st order Lipschitz condition to estimate a worst case scenario value of BVH*i*+(t*0 +step*i ), which happens to always be v. With quadratic bounds on the other hand, the value of F ′ i is also required at the new location, meaning that we have to estimate F ′ i (t*0 + step*i ) as well. This is done using the 2nd order Lipschitz constant, and again in a worst case scenario – where the acceleration was maximum for the entire Sub-step –, we get F ′ i (t*0 +step*i ) = F ′ i (t*0) + (γ*i ·step*i* ) for the first Sub-step (this can be applied recursively for the next Substeps). Once this new derivative value is estimated, we can add to it the next derivative evaluated at the new location: f ′ i+1 (t*0 + step*i )) in order to compute the new quadratic bound.
+
+# 6.1.1. Quad. bounds of Fractional Brownian Motion
+
+If noise′ (p) is Lipschitz continuous, and γ*noise* its 2nd order Lipschitz constant then:
+
+> f ′
+
+$$f_i'(t) = o_i'(t) = \text{noise}'(2^{i-1}t) \\ f_n'(t) = B_n'(t) = \sum_{m=1}^n o_m'(t) \quad (19)$$
+
+′
+
+i−1
+
+$$\gamma_{f_i} = \gamma_{o_i} = 2^{(i-1)} \gamma_{noise}$$
+
+$$\gamma_{F_n} = \gamma_{B_n} = \sum_{i=1}^n \gamma_{o_i} = \gamma_{noise} \cdot \sum_{i=1}^n 2^{(i-1)} = \gamma_{noise} \cdot (2^n - 1) \quad (20)$$
+
+As mentioned earlier, we can see from Equation 20 that γ*Fi* scales exponentially with i, which makes regular quadratic bounds perform badly, as discussed next in Section 6.2.
+
+### 6.2. Improved quadratic Taylor inclusion function
+
+In this sub-section, we take a step back from the problem of summing bounded functions, and rather take a more general look at quadratic inclusion functions. The outcomes are applicable to a wide range of contexts, including ours.
+
+Given a line and an upward parabola, even if the line is over the parabola for some x, the parabola will get back over the line at some point . This elementary fact implicates that any forward quadratic Taylor upper bound with positive acceleration (2nd order derivative) γ will, when t gets big enough, go over any linear upper bound, thus providing less tight bounding from this point onward.
+
+When the quadratic's acceleration is low, the quadratic bound usually stays under the linear bound up to the intersection with the root, making this issue non-apparent. In our case however, the quadratic bound acceleration is tied to γ*Fi* , which for FBM grows extremely fast with i. When the quadratic term is high, quadratic bounds can increase too fast and reach the zero axis before linear bounds (see Fig. 9). In this case, the step size computed using quadratic bounds will be smaller than with linear bounds, even though the quadratic ones required costly local derivative information.
+
+
+
+Figure 9: 1D illustration of linear (Blue), regular quadratic Taylor (Red), and our improved quadratic Taylor (Orange) forward upper bounds of a function (Purple). The regular quadratic bound reaches the zero axis first, indicating worse computed step size, while our improved quadratic bound shows the best results.
+
+So what is wrong with regular quadratic bounds? They simply have no way to enforce the constraint given by the first order Lipschitz constant λ. Indeed, the derivative of quadratic bounds can become arbitrarily large, including larger than λ, which we know f itself cannot do (nor its linear bounds). This is not optimal, and is why quadratic inclusion functions can perform badly.
+
+We propose to solve this with a simple solution: by enforcing the constraints given by both the first and second order Lipschitz constants at the same time, obtaining an optimal inclusion function. In practice, our new improved inclusion function is defined to be exactly the same as the regular quadratic as long as its derivative is in [−λ,λ], but switches back to a linear inclusion function afterwards. The point at which to switch to linear bounds can easily be computed analytically, leading to the following definition:
+
+$$\begin{aligned} \text{with } q_{\pm}(t) &= f(t_0) + (t - t_0) \cdot \left( f'(t_0) \pm \frac{1}{2}\gamma(t - t_0) \right) \\ \text{and } t_{\pm} &= t_0 + \frac{\pm\lambda - f'(t_0)}{\pm\gamma} \end{aligned} \tag{21}$$
+
+$$f_{\pm}(t) = \begin{cases} q_{\pm}(t) & \forall t \in [t_0, t_{\pm}] \\ q_{\pm}(t_{\pm}) \pm \lambda \cdot (t - t_{\pm}) & \forall t > t_{\pm} \end{cases}$$
+
+Using our improved quadratic inclusion functions requires the same conditions and computational cost as regular quadratic inclusion function. However, our improved inclusion function performs at least equal and potentially better than both linear and quadratic inclusion functions. There is thus no reason not to use our improved version over regular quadratic inclusion function.
+
+#### 7. Using FBM for amplifying shapes
+
+FBM is a rich feature for designing fractal shapes and details, but it is rarely used alone directly in CG scenes. Classical combination operators like min (for union), max (for intersection), subtract, clamp (threshold v) can be applied directly. Another classical use is the modulation of a macroscopic shape, used either as a bounding volume where to locate or modulate the noise, or as a visible shape to alter with details (e.g. hypertextures [PH89]).
+
+So far, we have only considered the case where the threshold v
+
+defining inside/outside regions is constant and equal to zero. This limits rather heavily the kind of scenes we are able to create. What if we wanted a v ̸= 0, or a v(p) varying with position, which can be used for shape modulation and amplification (Sec. 7.1)?
+
+Had we defined an SDF or SDB directly (Sec. 3.1.6), which depend on both the implicit function and v, we would have to redefine them with the new v or v(p).
+
+However, a nice property of inclusion functions is that they are defined based only on the implicit function itself. With inclusion functions, we define upper and lower bounds, of which we can compute the intersection with v independently. This means that even if we change v, all previously introduced implicit functions (and corresponding bounds) and acceleration techniques are still valid.
+
+Because the final forward inclusion functions we use are simple (linear, regular quadratic, or improved quadratic), computing their intersection with a constant v(p) = b is trivial. In fact, as long as we are able to compute its intersection with the bounds, v(p) could be any function. If the intersection with v(p) is too hard to compute, we could use its forward inclusion function [v](p) instead in order to safely approximate v(p).
+
+In practice, v(p) often varies slowly with respect to f(p) (especially for hypertextures, Sec. 7.1). In this case, any complicated v(p) can be approximated non-safely (but with minimal error) by its Taylor series at t in the ray direction. In its simplest form, v(t*0+*t)is approximated by its first-order Taylor polynomial: the affine function v(t) = v(t*0) +*v ′ (t*0)·(*t −*t*0).
+
+#### 7.1. Hypertextures & FBM: Surface amplification
+
+One common usage of FBM in the context of hypertextures is the amplification of the surface defined by an SDF to add details on its surface [PH89], defining the following isosurface: SDF(p) +Bn(p) = 0.
+
+For this kind of hypertexture, we can rearrange the terms into Bn(p) = v(p) where v(p) = −SDF(p). It is then equivalent to consider only the implicit function Bn(p) but with a spatially varying threshold defined by SDF(p). This means that we can use every techniques described in this paper to accelerate Sphere tracing of such FBM amplified surfaces.
+
+#### 8. Implementation
+
+We implemented the techniques described in this paper for the case of FBM in GLSL fragment shaders. We do not use acceleration structures others than our BVH, and no external object data is used: everything is fully procedural.
+
+In the case of FBM, every improvement described in this paper is contained inside the code of the FBM function sum (see pseudocode in Alg. 1). In addition to Bi(p), a step distance is computed inside the sum as it progresses. The computed distance is a valid SDB, which could be used in place of any SDF/SDB inside of a Sphere tracing implementation to render isosurfaces.
+
+Our code supports defining arbitrary noise(p) ∈ [−1,1], and thus
+
+requires the values of λ*noise* and γ*noise* as parameters. In practice, we used Perlin noise [Per85] in most of our scenes, with or without abs(), except for one with Worley noise [Wor96] and one based on an arrangement of cos functions.
+
+With respect to spatially varying threshold for hypertextures, the SDF(p) we used vary slowly with respect to B*p(*n). In practice, we had great success in approximating v(p) by its 1st order (affine) Taylor polynomial without any noticeable error, so we did not implement higher order threshold functions.
+
+In addition to the provided pseudocode (Alg. 1), a portable version of the code implemented as a GLSL fragment shader is available on Shadertoy (Appx. A).
+
+Algorithm 1: High-level view algorithm of how step size is computed during the FBM loop with our different enhancements (for readability, outside ray case only). Keep colored parts to enable features: Default (naive global Lipschitz), Adaptive Lipschitz (Sec. 5.1), Sub-stepping (Sec. 5.2), Early stop+k (Sec. 5.3), Quadratic Taylor inclusion function (Sec. 6). For low-level view (including β and inside/outside ray cases), please refer to the provided shader code (Appx. A).
+
+Input: p,n, v (threshold function), u (ray direction), k
+
+Result: F,step
+
+F,dF,step ← 0 2 λ ← λ*Fn* , γ ← γ*Fn* // Global Lipschitz for i ∈ [1,n] do // For each octave F ← F +oi(p) // Add current octave dF ← dF + (u · o ′ (p)) // and Deriv. along ray BV H ← F +s(i+1,n) // Bounding volume compStep ← i == n // Is last octave? compStep ← compStep OR (BV H − v(0) < 0) /\* Is outside Bounding Volume? \*/ if compStep then // Compute step size Replace λ by λ*Fi* , γ by γ*Fi* // Adaptive Lip. inclFuncParams ← (BV H,λ,dF, γ) curr\_*step* ← intersect(inclFuncParams, v) step ← step+curr\_*step* // Add Sub-Step step ← max(step, curr\_*step*) /\* Can be removed if SS is on \*/ Sub-stepping related p ← p+u · curr\_*step* // Move Along Ray F ← v(curr\_*step*) // Update sum v ← v at curr\_*step* // and threshold dF ← dF +γ · curr\_*step* // and dF dF ← max(dF,λ) // If Impr Quad. k ← k − 1 if k < 0 then break // Early stop+k return F, step
+
+#### 8.1. GPU efficiency
+
+In terms of GPU efficiency, thread divergence is one major concern. Luckily, our techniques only slightly change the code of the FBM loop, in a way which doesn't introduce new different paths for SIMD. This remains true even between rays whose current sample positions are inside vs. outside of the volume (transparent Sphere tracing), and even if one ray is stepping inside volumetric densities (ray-marching) since FBM has to be evaluated at each step anyway.
+
+In our case, the only thread divergence that can occur is inherent to Early stop. The FBM sum itself (implemented as a loop) might exit earlier for some threads than others, in which case the real SIMD cost is the one of the deepest sum. This only reduces a bit the improvements of ES, and cannot make Sphere tracing itself slower than without our improvements. Testing on scenes presented in Section 9.2.1, we observed that the sum diverges by just a single octave in most situations. Indeed, rays from the same warp are spatially coherent, and they seem to stay roughly coherent while performing Sphere tracing (except for grazing rays).
+
+Per thread memory usage can also drastically limit the SIMD capabilities of a GPU. Contrary to [WH96], we do not require per thread data in the order of O(n) (nor sort this data at each step), making our approach way more suitable for a fast GPU implementation.
+
+# 9. Results & Analysis
+
+In this section, in addition to visuals, we perform multiple performance tests and comment on the results. All tests were performed on a recent high-end GPU (Nvidia RTX 4080 Ti) at resolution 1024×1024. All given statistics are average per image.
+
+The number of step per ray is often used as metric to compare ray-marching algorithms. However in our case, as we use Early stop to compute less octaves per step, the cost of each step can vary massively. We then also use "number of octaves" (abbreviated #octaves), which sums up the number of individual octaves evaluated at every step along the rays. This second metric is most directly related to performance in our case. The scale of each provided cost heatmap (in terms of number of octaves) is indicated in the ramp. As complement, we also provide the real time in ms to account for all overheads and the different kinds of noise functions.
+
+# 9.1. Performance evaluation and Ablation study
+
+We first present a study of how gradually enabling the different techniques we introduced along the paper affect performance in different scenarios. As mentioned before, we focus our study on the special sum that is FBM, although our results could also apply to the more general case.
+
+### 9.1.1. Testing methodology & scenes
+
+In Section 9, the baseline for comparison is what we call a naive implementation. For ray-marching, this means no Early stop. For Sphere tracing, this means implemented as in the classic implementation by Hart [Har96], i.e. using the global Lipschitz constant λ*Fn* for every step, and using linear inclusion functions.
+
+If we directly compared against this naive method, our's could achieve almost arbitrary speedups simply by selecting a very high n value. Indeed, our method (with Early stop) naturally adapts the number of octaves it computes to what is strictly needed, whereas a totally naive implementation does not.
+
+To make the comparison more realistic and fair, we let both our's and the naive approach use "natural FBM LODs" by gradually reducing the value of n as the ray progresses, as higher frequency details become indistinguishable. For Sphere tracing, this also includes reducing n in the naive λ*Fn* Lipschitz constant computation.
+
+
+
+Figure 10: The two test viewpoints of the Sponge scene, made of a 20-octave FBM of Perlin noise
+
+Scene wise, in Section 9.1 we test our techniques on two views (see Fig. 10) of a scene corresponding to a very large and detailed volumetric procedural noise, referred to as Sponge. In this scene, the density field is a raw FBM of 20 octaves of basic Perlin noise (compatible with each of our improvements). The first chosen point of view Sponge (Fig. 10a) allows to display the full range of the 20 octaves, with both really close-up view (on the right) and very far and intricate structures (on the left and middle). The second point of view Sponge (far) (Fig. 10b) corresponds to a more centered trajectory in the same scene, *i.e.*where rays start far from any density cluster. The procedural scene is infinite. We still enforce a maximum ray length by security, but it is never reached.
+
+# 9.1.2. Ray marching with Early stop (ES)
+
+We begin by testing ray-marching (fixed step size) performance with and without using Early stop (introduced in Section 4.3). In this sub-section, we do as if noise was not Lipschitz, simulating the hypothesis used in Section 4.
+
+| Scene        | Early stop       | Avg. # octaves ↓ | Time (ms) ↓ | Speedup |
+|--------------|------------------|------------------|-------------|---------|
+| Sponge       | No ( naive ) Yes | 49596.3 24252.6  | 770.0 399.8 | × 1.9   |
+| Sponge (far) | No ( naive ) Yes | 56577.8 10347.0  | 843.0 178.4 | × 4.7   |
+
+Table 1: Ray-marching performance with and without using our BVH to early stop octave computation.
+
+From our measurements (Table 1) we see that the average number of octaves computed by each ray is greatly reduced when using Early stop, improving framerate in similar proportions. This shows that, in situations where the cost of evaluating noise dominates, reducing the number of such evaluations thanks to Early stop largely compensates the minimal introduced overheads (ES criterion computation using our BVH).
+
+Note that in the close view of the Sponge scene, about half of the
+
+image consists of rays beginning very close to the high-octave implicit surface, where many octaves need to be evaluated regardless of Early stop, limiting improvements to a ×1.9 speedup. Reversely in the far away view, most rays traverse regions far from the implicit surface where Early stop grants a ×4.7 speedup instead.
+
+#### 9.1.3. Sphere tracing with linear bounds
+
+In the following sub-sections, we quantitatively show the improvements on Sphere tracing from each technique described in Section 5, i.e. using linear inclusion functions only. We now consider that noise is Lipschitz (and ignore its 2nd order Lipschitz properties for now). Tables are provided in each sub-section (note that speedups are to be cumulated across sections), and Figure 11 gathers the cost heat-maps of the progressive improvements corresponding to Sections 9.1.3 and 9.1.4.
+
+9.1.3.1. Adaptive Lipschitz constant The simplest usage of our BVH to improve performance is to compute adaptive Lipschitz constants dictated by the BVH instead of using a global Lipschitz constant, while still computing every octave at each step (Sec. 5.1).
+
+| Scene               | Method       | Avg. # steps ↓ | Time (ms) ↓ | Speedup |
+|---------------------|--------------|----------------|-------------|---------|
+| Sponge       | naive | 428.1          | 110.2       | × 1.3   |
+|                     | Adaptive     | 331.7   | 87.1 |         |
+| Sponge (far) | naive | 223.7          | 42.4        | × 1.5   |
+|                     | Adaptive     | 154.5   | 28.3 |         |
+
+Table 2: Sphere tracing performance with and without using our BVH to improve step size (Section 5.1).
+
+Without surprise, Table 2 shows a measurable reduction in the number of steps (indicating bigger steps), which in turns yields proportional performance gains.
+
+As discussed in Section 5.1, dynamic re-ordering [WH96] could yield slightly better step size than ours, resulting in a reduced number of steps. However, their method induce a much larger performance overhead (memory requirement + sorting) thus it is unlikely that this would translate in overall better performance on GPU.
+
+9.1.3.2. Sub-stepping (SS) When using Adaptive Lipschitz constant, improved efficiency can be obtained using Sub-stepping, which moves along the ray as it evaluates the FBM sum (Sec. 5.2). Unlike the previous methods (Sec. 5.1 and [WH96]), with Substepping computing more octaves can always improve the final step size.
+
+| Scene        | Method                 | Avg. # steps ↓ | Time (ms) ↓ | Speedup |
+|--------------|------------------------|----------------|-------------|---------|
+| Sponge       | Adaptive Adaptive + SS | 331.7 265.2    | 87.1 72.5   | × 1.2   |
+| Sponge (far) | Adaptive Adaptive + SS | 154.5 273.0    | 28.3 22.0   | × 1.3   |
+
+Table 3: Sphere tracing performance of Sub-stepping (*SS, Section 5.2) used in addition to Adaptive Lipschitz constant.*
+
+Sub-stepping provides a significant reduction in the number of steps over the simple Adaptive Lipschitz constant version (Table 3), allowing respectively ×1.2 and ×1.3 extra speedups on
+
+
+
+Figure 11: Heatmaps of the number of octaves computed per ray on the Sponge scene (20 octaves Perlin FBM) with cumulated enhancements (Adaptive Lipschitz constant, Sub-stepping*,* Early stop+1*) and types of inclusion functions (linear, regular quadratic, improved quadratic).*
+
+both tested scenes. Sub-stepping requires only a few simple code changes (Alg. 1, green), adding virtually no overhead.
+
+9.1.3.3. Early stop strategies (ES+k) Using Early stop+k, and by adjusting k, we can balance between a higher number of cheaper steps, and a smaller number of costlier steps (Sec. 5.3). As the number of octaves per step is now variable, the metric most directly related to performance becomes the total number of octaves computed per ray instead of the number of steps.
+
+| Scene    | ES+k | Avg. # steps ↓ | Avg. oct/step ↓ | Avg. # octaves ↓ | Time (ms) ↓ | Speedup | ↑   |
+|----------|------|----------------|-----------------|------------------|-------------|---------|-----|
+| No       | ES   | 265.2          | 16.96           | 4314.0           | 72.5        | (ref)   |     |
+| k        | = 0  | 842.0          | 10.29           | 7506.7           | 129.0       | ×       | 0.6 |
+| k Sponge | = 1  | 362.3          | 11.42           | 3815.0           | 65.0        | ×       | 1.1 |
+| k        | = 2  | 300.5          | 12.48           | 3480.6           | 59.9        | ×       | 1.2 |
+| k        | = 3  | 279.6          | 13.45           | 3513.6           | 60.8        | ×       | 1.2 |
+| No       | ES   | 116.2          | 10.22           | 1123.6           | 22.7        | (ref)   |     |
+| k Sponge | = 0  | 273.0          | 3.65            | 972.0            | 22.0        | ×       | 1.0 |
+| k (far)  | = 1  | 147.8          | 5.23            | 749.6            | 16.7        | ×       | 1.4 |
+| k        | = 2  | 127.3          | 6.31            | 782.5            | 17.7        | ×       | 1.3 |
+
+Table 4: Sphere tracing performance using different Early stop+k (*ES+*k) strategies (*Sub-stepping *enabled).
+
+As it was illustrated in Figure 8, our results (Table 4) confirm that ES+*0 performs badly as it converges slowly at every stage of the BVH traversal (Fig. 8a). On *Sponge we observe worse performance with ES+*0 than without because of the extremely increased number of steps. On *Sponge (far) with *ES+*0 the number of octaves per step is massively reduced, roughly just enough to compensate the increased number of steps.
+
+As anticipated (Section 5.3), computing just a single additional octave per step with *ES+*1 improves the situation by nearly removing these unnecessary intermediate convergences (Fig. 8b). This is confirmed by our results with speedups of ×1.1 and ×1.4 on the two tested scenes.
+
+Using ES+k with k > 1 can sometimes be beneficial depending on the scene (here with Sponge), but our results confirm that performance starts to decrease as k gets too high (when k > 2 for Sponge and k > 1 for Sponge (far)). Note how even if both test scenes present different views of the same object, they need different values of k for best performance, showing that choosing a fixed k > 1 can be tricky.
+
+Testing on all the scenes shown in Section 9.2.1, Early stop+*1 consistently performed better than *Early stop+*3 and than not using *Early stop. Also note that using k > 1 was never found to be faster when using quadratic bounds. As such we recommend using *ES+*1 as a good default choice.
+
+#### 9.1.4. Sphere Tracing with quadratic taylor bounds
+
+Finally, in the next sub-sections we evaluate the performance of our techniques when used in conjunction with regular quadratic Taylor inclusion functions, and show the reduction in the number of steps when using our improved over the regular quadratic bounds.
+
+9.1.4.1. BVH methods applied to regular quadratic forward bounds As mentioned in Section 6.1, in the case of FBM, the second order Lipschitz constant γ*Fn* grows exponentially with n, making regular quadratic bounds not efficient (Fig. 9) if used directly. This is confirmed by our results (Table 5). Without our enhancements, quadratic bounds result in worse step size (more steps) in addition to the added overhead of computing gradients of octaves at each step, causing respectively a significant ×0.6 and ×0.4 slowdown on both test scenes when compared to linear ones.
+
+On the other hand, when our BVH is used to adaptively compute γ*Fi* and our other improvements are used (Sub-stepping and *ES+*1), we observe massive performance gains. When compared to linear bounds using the same enhancements, we measure respectively ×4.0 and ×1.7 speedups on both test scenes. Such gains are possible because, in addition to faster overall convergence, quadratic bounds greatly improve the performance of grazing rays [AZ23], which in our case can happen at any level of the BVH traversal.
+
+With respect to the naive method, quadratic bounds used with
+
+our enhancements amount to ×6.7 and ×4.1 speedups on the test scenes.
+
+| Scene Enhance ments Lin. None Impr Sponge | Bound. func. ( naive ) Regular Quad. Quad. | Avg. # steps ↓ 428.1 599.9 354.9 | Avg. octaves 6690.4 8969.0 5425.7 | # Time ↓ (ms) 110.2 181.8 111.0 | ↓     | vs. Lin. ↑ (ref) × 0.6 × 1.0 | naive | vs. ↑ (ref) ← ← |
+|--------------------------------------------|--------------------------------------------|----------------------------------|-----------------------------------|---------------------------------|-------|------------------------------|-------|-----------------|
+| All ( SS ,                                 |                                            |                                  |                                   |                                 |       |                              |       |                 |
+| ES+ 1)                                     |                                            |                                  |                                   |                                 |       |                              |       |                 |
+| Lin.                                       |                                            | 362.3                            | 3815.0                            | 65.0                            | (ref) |                              | ×     | 1.7             |
+| Regular                                    | Quad.                                      | 70.0                             | 651.1                             | 16.3                            | ×     | 4.0                          | ×     | 6.7             |
+| Impr                                       | Quad.                                      | 70.0                             | 651.1                             | 16.3                            | ×     | 4.0                          | ×     | 6.7             |
+| Lin.                                       | ( naive )                                  | 223.7                            | 2219.9                            | 40.7                            | (ref) |                              | (ref) |                 |
+| Regular None                               | Quad.                                      | 416.6                            | 4671.5                            | 96.2                            | ×     | 0.4                          | ←     |                 |
+| Impr Sponge                                | Quad.                                      | 198.7                            | 1986.0                            | 44.7                            | ×     | 0.9                          | ←     |                 |
+| All ( SS ,                                 |                                            |                                  |                                   |                                 |       |                              |       |                 |
+| ES+ 1)                                     |                                            |                                  |                                   |                                 |       |                              |       |                 |
+| Lin. (far)                                 |                                            | 147.8                            | 749.6                             | 16.7                            | (ref) |                              | ×     | 2.4             |
+| Regular                                    | Quad.                                      | 55.8                             | 300.6                             | 9.8                             | ×     | 1.7                          | ×     | 4.1             |
+| Impr                                       | Quad.                                      | 55.8                             | 300.6                             | 9.7                             | ×     | 1.7                          | ×     | 4.2             |
+
+Table 5: Sphere tracing performance of linear and quadratic (improved and regular) Taylor inclusion functions, with and without our enhancements enabled (*Sub-stepping,* ES+1*).*
+
+9.1.4.2. Improved quadratic Taylor inclusion function In Section 6.2, we introduced a new type of function to replace quadratic bounds, ensuring both the first and second order Lipschitz constraints at the same time. Results from Table 5 confirm what was apparent in Figure 9 in 1D: our new improved quadratic bound yield bigger step size than the best of linear and quadratic bounds.
+
+Without any enhancements enabled, our improved quadratic bounds already allow for ×1.2 and ×1.1 reduction in the number of steps on the test scenes, beating both linear and regular quadratic bounds. However, – like regular quadratic bounds – they need to compute the gradient of the function at every step. This extra cost is not negligible, and in our case it makes improved quadratic bounds perform slightly slower than linear bounds. In other usage contexts, our improved quadratic bounds might reduce the number of steps sufficiently to make it faster than linear bounds. Regardless, when the gradients of the function are computed, it is always worth to use our improved variant instead of regular quadratic bounds.
+
+When used with our enhancements, the Adaptive computation of γ*Fn* reduces the 2nd derivative so much that our improved quadratic bound gives results similar to regular quadratic. The improvement (reduction of the number of step) over normal quadratic bound – although measured – is too small to appear in Table 5. We thus get similar performance with our improved and the normal quadratic bounds when used in conjunction with our enhancements.
+
+# 9.2. Results and Performance Analysis on various scene types
+
+We now show results and compare our enhancements against the naive method in a broader range of scenarios. For opaque rendering, we show how our method (with all applicable techniques enabled) compares against the naive one on a selection of scenes (Sec. 9.2.1). We then show performances in the case of volumetric semi-transparent material of both constant and varying density (Sec. 9.2.2).
+
+### 9.2.1. Opaque isosurface rendering
+
+We implemented different kinds of opaque scenes, of which we present visuals, Heatmaps, and timings in Figure 12.
+
+The most basic ones correspond to a plain FBM field of Perlin noise, which is 2nd order Lipschitz and of which the gradient is cheap to compute, allowing us to use the improved quadratic bounds in addition to our other enhancements. We have the previously mentioned Sponge (far)*scene (Fig. 12d) on which we achieve ×4.2, and one corresponding to the isosurface of *Clouds like objects (Fig. 12h) with ×5.7 speedups.
+
+Beyond simple FBM of Perlin noise, we also tested different FBM's β values, non second-Lipschitz turbulence (i.e.*Perlin with *abs in the base function), various other noises (cos, Worley), use of FBM as 3D surface modulation (*i.e.*hypertextures) and as height fields:
+
+To create regular patterns, we used a cos based function as our noise to create a fractal looking Cos world scene (Fig. 12j).
+
+To showcase Hypertexture compatibility, still using FBM field of Perlin noise with quadratic bounds, we use various SDF as varying threshold to produce an animated Hypertextured sphere whose parameters change over time (Fig. 12c) and an animated Amplified wall (Fig. 12e). Note that thanks to the varying threshold, our BVH and Early stop, we do not need to manually add bounding spheres or volumes around Hypertextures to improve performances of rays far from the objects, allowing respectively ×10.6 and ×4.0 speedups. Additionally, we use an SDF operator to intersect a rounded cube and our FBM noise field, creating an Eroded Cube object (Fig. 12a).
+
+More challenging, we model FBM of noise functions which are not 2nd order Lipschitz, only allowing enhancements applicable to linear bounds. This includes a Worley-based noise [Wor96] FBM (here the base function was just the SDF to the closest point-seed centered sphere, but linear combination of the k-nearests would work as well) which creates a different style of clouds-like objects (Fig. 12f) as well as animated Turbulent [PH89] noise corresponding to 1−abs(noise(p)) which creates sharp edges, applied as surface amplification of a sphere to create a fire ball looking object (Fig. 12b). On both, as we cannot use quadratic bounds, we observe that edges remain particularly challenging areas, subject to grazing rays related slowdowns.
+
+Additionally, we showcase simple Hypertextured spheres but with different values of the FBM lacunarity β parameter, changing from the default 1/ f type of fractal noise obtained using β = 1 (see implications in 5.1). Low β values (Fig. 12i, β = 0.4) are particularly challenging and tend to create noisy-looking – high frequency – patterns which are hard to render. Our enhancements prove themselves extremely efficient, allowing a ×12.2 speedup compared to the naive method. Oppositely, High β values (Fig. 12g) produce smoother – lower frequency – patterns, in which higher octaves have close to no impact from afar. In this case, our BVH allows to ignore these octaves in most areas of the scene, again providing high ×4.7 speedups.
+
+For completeness we also demonstrate FBM used as height fields (see Fig. 1 and companion video). These are implemented in shadertoy, using 1000 octaves of Perlin noise (most never evaluated). Note that since everything is procedural, everything can be animated for free, which we show in several sequences in the companion video.
+
+
+
+Figure 12: Visuals and corresponding octave Heatmaps and performance for the various scenes described in Section 9.2.1. Left: Object, middle: naive*, right: ours.*
+
+Lastly, we demonstrate the gains from our method when used to create surface details on more complex existing SFD objects (Fig. 13). Here, we use the SDFs' forward inclusion functions as affine thresholds to guarantee rendering quality, rather than an affine Taylor approximation of it. First on [Arlo](https://www.shadertoy.com/view/4dtGWM) (handmade SDF by [Inigo Quilez\)](https://iquilezles.org/), we create an example where it is hypertextured with abs(noise(p)) Perlin FBM noise, creating a cloud-like aspect following the original shape (Fig. 13a). Then, we change to 1−abs(noise(p)) instead and create a rough-like skin effect on [Arlo](https://www.shadertoy.com/view/4dtGWM) (Fig. 13b). We observe ×3.2 and ×2.5 speedups over the naive implementation. Secondly, we carve a [Bunny](https://www.shadertoy.com/view/wtVyWK) (Neural SDF learned from a mesh, courtesy of [Blackle Mori\)](https://www.shadertoy.com/user/blackle) shaped Sponge using an SDF intersection operator (Fig. 13c), on which we observe ×1.5 speedups.
+
+
+
+Figure 13: Complex SDF objects Hypertextured with FBM-noise.
+
+# 9.2.2. Semi-transparent Volumetric rendering
+
+Our final goal is to perform empty-space skipping in the context of volumetric rendering, rather than only implicit surface rendering. In the following, we show the different performance improvements achievable when using different types of density functions ρ(p) (Fig. 14).
+
+
+
+Figure 14: Clouds scene with (14a) constant density, (14b) varying density computed from the FBM field.
+
+In the case of transparent or semi-transparent objects with constant density material (simple opacity, refraction in glass...), the ray has to continue inside, toward the exit point, at which point the optical contribution of the inner ray segment is evaluated analytically from its length. To perform Sphere tracing inside of objects, we can use exactly the same BVH techniques (considering lower bounds rather than upper bounds), and performance gains are thus very similar to the opaque case (Table 6). Note that compared to the naive case, quadratic bounds allows us to quickly go away from the entry surface [AZ23], and thus perform way better.
+
+In the case of varying density, we have to resort to full volumetric rendering when inside of volumes, i.e. switching to constant-size ray-marching to numerically integrate density, which part we do not optimize. Our only gain is then the fast empty-space skipping done using Sphere tracing when outside of the volumes, which can be optimized using our methods. We measured ×1.8 improvements compared to naive Sphere tracing (Table 6), although note that the performance gains of empty-space skipping greatly depend on the amount of empty-space in the scene.
+
+Note that the transparency effect is more easy to see in the companion video.
+
+| Render   |                                |           | Time   |           |
+|----------|--------------------------------|-----------|--------|-----------|
+| mode     | Sphere tracing algo.           | Avg. #    |        |           |
+|          |                                | octaves ↓ |        |           |
+|          |                                |           | (ms) ↓ |           |
+|          |                                |           |        | Speedup ↑ |
+|          | naive                          | 1892.0    | 31.9   | (ref)     |
+| Surface  | Ours, Lin. ( SS , ES+ 1)       | 513.6     | 10.8   | × 2.9     |
+|          | Ours, Impr Quad. ( SS , ES+ 1) | 196.3     | 5.6    | × 5.7     |
+| Const. ρ |                                |           |        |           |
+|          | naive                          | 3692.8    | 60.6   | (ref)     |
+|          | Ours, Lin. ( SS , ES+ 1)       | 1600.4    | 30.4   | × 2.0     |
+|          | Ours, Impr Quad. ( SS , ES+ 1) | 687.8     | 18.2   | × 3.3     |
+| Var. ρ   |                                |           |        |           |
+|          | naive                          | 4087.4    | 66.5   | (ref)     |
+|          | Ours, Lin. ( SS , ES+ 1)       | 2305.0    | 40.8   | × 1.6     |
+|          | Ours, Impr Quad. ( SS , ES+ 1) | 1675.9    | 37.9   | × 1.8     |
+
+Table 6: Performance improvements using our method on Clouds scene (see Fig. 14b) with constant or varying density. With the former, Sphere tracing is used both inside and outside of volumes. With the later, Sphere tracing is used to perform empty-space skipping, and ray-marching is used inside volumes to perform the volumetric integration.
+
+# 10. Conclusion
+
+In this paper we introduced several cumulable methods improving the ray-tracing performance of large-scale high-octave FBM volumetric noise – either directly or used as part of Hypertextures (Sec. 7) –, applicable to both opaque isosurface (Sec. 9.2.1) and semi-transparent (constant and varying density) real-time rendering (Sec. 9.2.2).
+
+Through careful examination of FBM-like constructions, exploiting the bounded nature of octaves, and combining the corresponding inclusion functions, we show how a fully procedural, memory-less, implicit Bounding Volume Hierarchy of the implicit FBM volume can be generated and accessed on the fly with practically no computational overhead (Sec. 4.2).
+
+Exploiting this BVH, we improve implicit surface ray-tracing performance, first of ray-marching (Sec. 4.3) then of Sphere tracing (Sec. 5), by computing a lesser amount of octaves at each step (Early stop, Sec. 5.3). In the case of Sphere tracing and thanks to our BVH, we additionally better estimate safe step distances toward the implicit volume by adaptively considering lesser Lipschitz constants (Sec. 5.1) and performing sub-steps in parallel to FBM computation (Sub-stepping, Sec. 5.2).
+
+When gradients of FBM are available, theoretically more effective quadratic bounds can be used. The seminal method [AZ23] is however counter-productive when applied to FBM, which we fixed by introducing a new improved quadratic bound – applicable to a wider scope – which is all-around better than both previous quadratic and non-quadratic bounds, especially in handling such problematic high 2nd order Lipschitz constants (Sec. 6.2).
+
+Combining the introduced techniques, we achieve speedups up to 12-folds on opaque or constant semi-transparent scenes compared to classical Sphere Tracing (Sec. 9.2.1), and up to 1.8-folds (only through empty space skipping optimization) on non-constant density volumetric scenes (Sec. 9.2.2).
+
+At the end of the day we just patch the user-defined FBM sum, and the performance are obtained without any explicit acceleration structure to be added. Note that since everything is procedural, besides the memory-less design of very large and/or detailed scenes, everything can be animated for free. Also, our target is real-time rendering, but our method can directly be used in path-tracing as well.
+
+In terms of limitations, we only deal with noises defined as linear combinations of base functions or FBMs (or selector operators like min (for union) or max (for intersection)). Other usages of noise and FBM exist but are not directly supported, such as operators like smoothmin (for chamfers), multifractals, non-linear transform of FBM or FBM used as domain warping.
+
+In terms of future work, exploring how our work could be extended for such usages of noise would be useful, for example starting with the simple combination of FBMs of two noises like done with Perlin-Worley noise used for more realistic clouds [Sch23]. We also did not investigate any optimization of the volumetric rendering itself in varying-density clusters, but we think there are avenues here. More complicated is the question of precise integration of sub-pixel details in the context of LOD, i.e. estimating analytically the contribution of smaller-than-pixel clusters or cluster parts. Aggregated LOD of details is a whole field in itself, but at least our method can provide as narrow as desired bounding volumes of not-empty areas. Regarding improvements to the presented techniques, Early stop+k currently works with a fixed k value, which is not optimal. We believe k could be dynamically chosen based on the relative expected gains of computing extra octaves versus their cost. However – based on some internal prototypes – this complicates things SIMD-wise, as one thread deciding to compute more octaves forces the whole warp to do so. A potential way to overcome this would be to make this decision-making at warp-level, using e.g. subgroup operations for intra-warp communication.
+
+# Acknowledgement
+
+We first thank the reviewers for their feedback and suggestions. We also thank P.Luton, A.Richermoz, T.Tricard, and N.Mestres for their help on proofreading, video editing, and comments on the paper.
+
+#### References
+
+- [Arn09] ARNERIN R.: A journey in a procedural volume Optimization and filtering of Perlin noise. Master's thesis, University of Grenoble, June 2009. URL: [https://inria.hal.science/](https://inria.hal.science/inria-00598443) [inria-00598443](https://inria.hal.science/inria-00598443). 2 [AZ23] AYDINLILAR M., ZANNI C.: Forward inclusion functions for ray-tracing implicit surfaces. Computers and Graphics 114 (2023), 190–
+- 200. [doi:10.1016/j.cag.2023.05.026](https://doi.org/10.1016/j.cag.2023.05.026). 2, 3, 4, 9, 13, 16 [BV18] BÁLINT C., VALASEK G.: Accelerating Sphere Tracing. In EG - Short Papers (2018). [doi:10.2312/egs.20181037](https://doi.org/10.2312/egs.20181037). 2 [EMP∗02] EBERT D. S., MUSGRAVE F. K., PEACHEY D., PERLIN K., WORLEY S.: Texturing & modeling, A procedural approach. 2002. 1 [GGPP20] GALIN E., GUÉRIN E., PARIS A., PEYTAVIE A.: Segment tracing using local lipschitz bounds. In Proceedings of Eurographics '20 (2020), pp. 545–554. [doi:10.1111/cgf.13951](https://doi.org/10.1111/cgf.13951). 2 [Har96] HART J. C.: Sphere tracing: A geometric method for the antialiased ray tracing of implicit surfaces. The Visual Computer (1996), 527–545. [doi:10.1007/s003710050084](https://doi.org/10.1007/s003710050084). 1, 2, 4, 11 [KB89] KALRA D., BARR A. H.: Guaranteed ray intersections with implicit surfaces. In Proceedings of ACM SIGGRAPH '89 (1989),
+- p. 297–306. [doi:10.1145/74333.74364](https://doi.org/10.1145/74333.74364). 2 [KSK∗14] KEINERT B., SCHÄFER H., KORNDÖRFER J., GANSE U., STAMMINGER M.: Enhanced Sphere Tracing. In Smart Tools and Apps for Graphics - Eurographics Italian Chapter Conference (2014). [doi:](https://doi.org/10.2312/stag.20141233) [10.2312/stag.20141233](https://doi.org/10.2312/stag.20141233). 2 [Mit90] MITCHELL D. P.: Robust ray intersection with interval arithmetic. In Proceedings of Graphics Interface '90 (1990), pp. 68–
+- 74. URL: [http://graphicsinterface.org/wp-content/](http://graphicsinterface.org/wp-content/uploads/gi1990-8.pdf) [uploads/gi1990-8.pdf](http://graphicsinterface.org/wp-content/uploads/gi1990-8.pdf). 2 [MVN68] MANDELBROT B. B., VAN NESS J. W.: Fractional brownian motions, fractional noises and applications. SIAM Review 10, 4 (1968), 422–437. URL: , [doi:](https://doi.org/10.1137/1010093) [10.1137/1010093](https://doi.org/10.1137/1010093). 1, 2 [Per85] PERLIN K.: An image synthesizer. In Proceedings of ACM SIG-GRAPH '85 (1985), p. 287–296. [doi:10.1145/325334.325247](https://doi.org/10.1145/325334.325247). 1, 2, 11 [Per02] PERLIN K.: Improving noise. In Proceedings of ACM SIG-GRAPH '02 (2002), p. 681–682. [doi:10.1145/566570.566636](https://doi.org/10.1145/566570.566636). 1, 2 [PH89] PERLIN K., HOFFERT E. M.: Hypertexture. In Proceedings of ACM SIGGRAPH '89 (1989), pp. 253–262. [doi:10.1145/74333.](https://doi.org/10.1145/74333.74359) [74359](https://doi.org/10.1145/74333.74359). 1, 2, 10, 14 [Qui19] QUILEZ I.: Sdf bounding volumes, 2019. URL: [https://](https://iquilezles.org/articles/sdfbounding/) [iquilezles.org/articles/sdfbounding/](https://iquilezles.org/articles/sdfbounding/). 2 [Sch23] SCHNEIDER A.: Nubis3 , methods (and madness) to model and render immersive real-time voxel-based clouds. In Proceedings of ACM SIGGRAPH '23 Courses, Advances in Real-Time Rendering (Part I) (2023). [doi:10.1145/3587423.3607877](https://doi.org/10.1145/3587423.3607877). 2, 17 [WH96] WORLEY S. P., HART J. C.: Hyper-rendering of hyper-textured surfaces. In Proc. of Implicit Surfaces (1996), vol. 96, pp. 99–104. 2, 7, 11, 12 [Wor96] WORLEY S.: A cellular texture basis function. In Proceedings of ACM SIGGRAPH '96 (1996), p. 291–294. [doi:10.1145/237170.](https://doi.org/10.1145/237170.237267) [237267](https://doi.org/10.1145/237170.237267). 11, 14
+
+Appendix A: Shadertoy code implementation
+
+Available at: [www.shadertoy.com/playlist/mcG3Wc](https://www.shadertoy.com/playlist/mcG3Wc)
+
+# Appendix B: Fractional Brownian Motion Extended β notations
+
+# Section 5.1.1, Equation 13
+
+$$\begin{aligned} \lambda_{o_i} &= \text{Lip}(o_i) = \lambda_{noise} \cdot 2^{(1-\beta)(i-1)} \\ \lambda_{B_n} &= \text{Lip}(B_n) = \sum_{i=1}^n \lambda_{o_i} = \lambda_{noise} \cdot \sum_{i=1}^n 2^{(1-\beta)(i-1)} \\ &= \begin{cases} \lambda_{noise} \cdot \frac{1-2^{(1-\beta)\cdot n}}{1-2^{(1-\beta)}} & \text{if } \beta \neq 1 \\ \lambda_{noise} \cdot n & \text{otherwise} \end{cases} \end{aligned} \quad (22)$$
+
+#### Section 6.1.1, Equations 19 and 20
+
+$$\begin{aligned} f_i'(t) &= o_i'(t) = 2^{(1-\beta)(i-1)} \text{noise}'(2^{i-1}t) \\ F_n'(t) &= B_n'(t) = \sum_{m=1}^n o_m'(t) \\ \gamma_{f_i} &= \gamma_{o_i} = 2^{(2-\beta)(i-1)} \gamma_{\text{noise}} \\ \gamma_{F_n} &= \gamma_{B_n} = \sum_{i=1}^n \gamma_{o_i} = \gamma_{\text{noise}} \cdot \sum_{i=1}^n 2^{(2-\beta)(i-1)} \\ &= \begin{cases} \gamma_{\text{noise}} \cdot \frac{1-2^{(2-\beta)\cdot n}}{1-2^{(2-\beta)}} & \text{if } \beta \neq 2 \\ \gamma_{\text{noise}} \cdot n & \text{otherwise} \end{cases} \end{aligned} \quad (23)$$

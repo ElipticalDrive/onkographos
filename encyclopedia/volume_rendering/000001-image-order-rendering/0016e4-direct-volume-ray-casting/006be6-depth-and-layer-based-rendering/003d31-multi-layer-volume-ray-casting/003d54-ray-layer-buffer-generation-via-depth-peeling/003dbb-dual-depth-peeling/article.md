@@ -1,0 +1,180 @@
+# Dual Depth Peeling
+
+Also called: Bidirectional Depth Peeling, Depth Peeling Rendering Pipeline, Depth peeling loop, On-the-fly front-to-back peeling
+
+## Overview
+Dual Depth Peeling is an order-independent transparency technique that decomposes a scene into depth layers by rendering primitives multiple times, discarding fragments closer than the previous layer, and blending the resulting layers to assemble the final image [S1]. It improves upon standard Depth Peeling by performing simultaneous peeling in both directions—front-to-back and back-to-front—thereby reducing the total number of rendering passes required for $N$ layers by approximately $N/2$ [S2]. Unlike standard Depth Peeling, which processes layers sequentially, this method resolves depth ordering per pixel, making it robust against self-intersecting surfaces that often complicate depth-sorting approaches [S1].
+
+## How it works
+The method executes a depth peeling loop for each frame, consisting of iterative peel and blend stages [S1].
+
+**Inputs and Outputs:**
+*   **Input:** Discrete representation of integral surfaces (e.g., triangles or quadrilaterals) with associated texture coordinates and normal vectors [S1].
+*   **Output:** Final composited image with correct transparency and silhouette shading [S1].
+
+**Data Structures:**
+1.  **Color Buffer:** A floating-point color buffer is used for blending to prevent banding artifacts when many surface layers are present [S1].
+2.  **Normal Buffer:** A secondary floating-point RGBA buffer stores surface normals required for the blend stage [S1].
+3.  **Mask Buffer:** The alpha component of the normal buffer acts as a mask to distinguish integral surface pixels from context/background pixels [S1].
+4.  **Depth Texture:** Stores the depth information of the current surface layer, required for the depth peeling algorithm's occlusion tests [S1].
+
+**Parameters:**
+*   **Silhouette Color:** User-specified color for fading surface edges [S1].
+*   **Lighting Model:** Phong or Gooch models for diffuse color evaluation [S1].
+*   **Modulation Type:** Multiplicative or additive transparency modulation [S1].
+
+**Numbered Steps:**
+
+1.  **Initialize:** Set up the floating-point color buffer, normal buffer, and depth texture [S1]. Initialize the depth peeling loop [S1].
+2.  **Peel Stage (Iterative):**
+    a.  **Depth Test:** Render the primitives using a depth test that discards fragments closer than the depth stored in the depth texture from the previous iteration [S1]. The first iteration peels the front-most layer [S1].
+    b.  **Shading:** Perform full surface shading for the visible fragments [S1].
+        i.  **Transparency:** Compute the view-dependent transparency term $\alpha_{view}$ from the fragment's normal vector [S1]. If normal-variation transparency is used, evaluate partial derivatives using `dFdx` and `dFdy` [S1].
+        ii. **Pattern/Texture:** If adaptive patterns are used, compute $l_s$ and $l_t$ using `dFdx` and `dFdy`, and evaluate the pattern equation to obtain texture color $c_{tex}$ and texture alpha $\alpha_{tex}$ [S1].
+        iii. **Lighting:** Evaluate diffuse color $c_{diffuse}$ using the specified lighting model (Phong or Gooch) [S1]. Compute specular highlight terms $(c, \alpha)_{spec}$ if specified [S1].
+        iv. **Combination:** Compute the final RGBA output $(c, \alpha)_{peel}$ for the peel pass [S1].
+            *   For multiplicative modulation:
+                $$ \alpha_{final} = \alpha_{view} \cdot \alpha_{tex} + \alpha_{specular} $$
+                $$ c_{final} = c_{diffuse} \cdot c_{tex} + c_{specular} $$
+            *   For additive modulation:
+                $$ \alpha_{final} = \alpha_{view} + \alpha_{tex} + \alpha_{specular} $$
+                (Note: $c_{final}$ remains $c_{diffuse} \cdot c_{tex} + c_{specular}$) [S1].
+    c.  **Storage:** Write the final RGBA values to the color buffer [S1]. Store surface normals in the normal buffer, setting the alpha component to a mask flag indicating the pixel belongs to the integral surface [S1].
+    d.  **Depth Update:** Update the depth texture with the depth values of the current layer for the next iteration [S1].
+3.  **Blend Stage:**
+    a.  **Silhouette Detection:** Apply a Sobel edge detection filter to both the normal buffer and the depth buffer to determine silhouette strength [S1].
+    b.  **Masking:** Use the mask flag in the normal buffer to exclude pixels that have the flag set for one of the pixels contributing to the filter, avoiding silhouette generation across surface-context and context-background boundaries [S1].
+    c.  **Silhouette Blending:** Smoothly fade the surface color into the user-specified silhouette color based on the computed silhouette strength [S1].
+    d.  **Accumulation:** Blend the result into the final floating-point color buffer [S1].
+4.  **Termination:** Adaptively terminate the peeling loop if no pixels are rendered during the peel stage, determined using an occlusion query for each iteration [S1]. The total number of iterations is one greater than the number of surface layers for the current viewpoint [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def dual_depth_peeling(primitives, silhouette_color, lighting_model, modulation_type):
+    # Initialize buffers as per [S1]
+    color_buffer = allocate_floating_point_buffer()
+    normal_buffer = allocate_floating_point_buffer()  # RGBA, A is mask
+    depth_texture = allocate_depth_texture()
+    
+    # Initial depth boundary for the first iteration (front-most layer) [S1]
+    current_depth_boundary = 0.0
+    
+    # Occlusion query for adaptive termination [S1]
+    occlusion_query = create_occlusion_query()
+    
+    while True:
+        begin_occlusion_query(occlusion_query)
+        
+        # PEEL STAGE
+        # Render primitives, discarding fragments closer than current_depth_boundary [S1]
+        render_primitives(primitives, depth_test_less_than=current_depth_boundary)
+        
+        # Shading pass [S1]
+        alpha_view = compute_alpha_view_from_normal()
+        if normal_variation_transparency:
+            alpha_view = evaluate_normal_variation(alpha_view, dFdx, dFdy)
+            
+        if adaptive_pattern:
+            ls, lt = compute_pattern_coords(dFdx, dFdy)
+            c_tex, alpha_tex = evaluate_pattern(ls, lt)
+        else:
+            c_tex, alpha_tex = sample_texture()
+            
+        c_diffuse = evaluate_lighting(normal, position, lighting_model)
+        c_spec, alpha_spec = evaluate_specular(normal, position, view_dir)
+        
+        if modulation_type == ADDITIVE:
+            alpha_final = alpha_view + alpha_tex + alpha_spec
+        else:  # Multiplicative
+            alpha_final = alpha_view * alpha_tex + alpha_spec
+            
+        c_final = c_diffuse * c_tex + c_spec
+        
+        # Write to buffers [S1]
+        write_to_color_buffer(c_final, alpha_final)
+        write_to_normal_buffer(normal, mask_flag=1)
+        
+        # Update depth texture for next iteration [S1]
+        update_depth_texture(depth_texture)
+        
+        end_occlusion_query(occlusion_query)
+        
+        # Adaptive termination [S1]
+        if not query_has_results(occlusion_query) or not query_is_positive(occlusion_query):
+            break
+            
+        # Update depth boundary for next pass [S1]
+        current_depth_boundary = get_next_depth_boundary(depth_texture)
+        
+        # BLEND STAGE (per iteration) [S1]
+        # Apply Sobel filter to normal and depth buffers [S1]
+        sobel_results = apply_sobel_filter(normal_buffer, depth_texture)
+        
+        # Masking to avoid silhouette across context boundaries [S1]
+        silhouette_strength = compute_silhouette_strength(sobel_results, normal_buffer.mask)
+        
+        # Fade surface color to silhouette color [S1]
+        blended_color = blend_silhouette(color_buffer, silhouette_color, silhouette_strength)
+        
+        # Accumulate into final color buffer [S1]
+        accumulate_to_color_buffer(blended_color)
+        
+    return color_buffer
+
+# Helper definitions (standard operations)
+def allocate_floating_point_buffer(): return {}
+def allocate_depth_texture(): return {}
+def create_occlusion_query(): return {}
+def begin_occlusion_query(q): pass
+def end_occlusion_query(q): pass
+def query_has_results(q): return True
+def query_is_positive(q): return True
+def render_primitives(prims, depth_test_less_than): pass
+def compute_alpha_view_from_normal(): return 0.5
+def evaluate_normal_variation(av, dx, dy): return av
+def compute_pattern_coords(dx, dy): return (0.0, 0.0)
+def evaluate_pattern(ls, lt): return (1.0, 0.5)
+def sample_texture(): return (1.0, 0.5)
+def evaluate_lighting(n, p, model): return (0.8, 0.8, 0.8)
+def evaluate_specular(n, p, v): return ((1.0, 1.0, 1.0), 0.2)
+def write_to_color_buffer(c, a): pass
+def write_to_normal_buffer(n, mask_flag): pass
+def update_depth_texture(dt): pass
+def get_next_depth_boundary(dt): return 0.1
+def apply_sobel_filter(nb, dt): return {}
+def compute_silhouette_strength(sr, mask): return 0.5
+def blend_silhouette(cb, sc, ss): return cb
+def accumulate_to_color_buffer(bc): pass
+```
+
+**Edge Cases and Pitfalls:**
+*   **Silhouette Width:** Silhouettes are extracted twice (once per pair of successive depth layers), which may result in inner silhouettes of increased width. This is mitigated by using a sharp and symmetric edge detection filter [S1].
+*   **Banding Artifacts:** Slight banding artifacts can appear if blending directly to the output framebuffer in the presence of many surface layers. Using a floating-point color buffer improves blending accuracy [S1].
+*   **Depth Sorting Precision:** Elements at different depths within the same layer may be stored if no intermediate geometry occludes them, reducing depth-sorting precision [S2].
+
+## Subtopics
+
+### [Effective Depth Peeling](17010-effective-depth-peeling.md)
+Integrates Potentially Visible Hidden-Volume (PVHV) analysis into the depth peeling process to cull redundant fragments, reducing the number of effective layers required for high-quality multi-view warping.
+
+### [Volume-peeling](17165-volume-peeling.md)
+Extends Dual Depth Peeling to handle volumetric data intermixed with translucent polygonal geometry by using geometry peel depths as entry/exit points for volume ray-casting.
+
+## Operating characteristics
+*   **Time Complexity:** Rendering speed is largely a function of surface geometry size and is dominated by the requirement to submit the surface for rendering multiple times during depth peeling [S1].
+*   **Memory Complexity:** Requires storage for multiple buffers: a floating-point color buffer, a normal buffer (with mask), and a depth texture [S1].
+*   **Measured Performance:** Achieves interactive frame rates exceeding 15fps on NVIDIA GTX280 for small to medium meshes of below ≈500K triangles with medium depth complexity of 10 layers or less [S1].
+*   **Strengths:** Resolves depth ordering per pixel, making it robust against self-intersecting surfaces which complicate depth sorting [S1]. Reduces the number of passes by $N/2$ for $N$ layers compared to standard depth peeling [S2].
+*   **Limitations:** Performance degrades with larger meshes and higher depth complexity [S1]. May still store elements at different depths within the same layer if no intermediate geometry occludes them, reducing depth-sorting precision [S2].
+*   **When to Use:** Suitable for interactive visualization of integral surfaces (e.g., stream surfaces, path surfaces) that may self-intersect, where correct transparency and silhouette shading are required [S1].
+*   **When Not to Use:** Not suitable for scenes with very high depth complexity or extremely large meshes where the multiple render passes become prohibitive [S1].
+
+## Background
+Dual Depth Peeling was introduced as an improvement to the standard Depth Peeling algorithm to reduce the number of rendering passes required for order-independent transparency [S2]. It allows simultaneous peeling in both directions: from the camera to the background and from the background to the camera [S2]. The technique is implemented in OpenGL using GLSL shader programs, but the concepts can be ported to DirectX [S1]. It is particularly useful in illustrative rendering for integral surfaces, such as streamlines on stream surfaces, where visual clarity and correct transparency are critical [S1].
+
+## Sources
+[S1] IRIS: Illustrative Rendering for Integral Surfaces, https://doi.org/10.1109/tvcg.2010.173, fetched 2026-10-27
+[S2] Hybrid visualisation of medical image: Surface and volume rendering ..., https://www.sciencedirect.com/science/article/pii/S0097849325002948, fetched 2026-10-28

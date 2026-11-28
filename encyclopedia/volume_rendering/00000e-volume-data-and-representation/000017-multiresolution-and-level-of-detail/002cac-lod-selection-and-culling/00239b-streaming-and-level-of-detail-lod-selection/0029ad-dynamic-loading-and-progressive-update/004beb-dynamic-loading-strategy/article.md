@@ -1,0 +1,109 @@
+# Dynamic Loading Strategy
+
+Also called: Dynamic Loading
+
+## Overview
+A strategy to determine the level-of-detail (LOD) and specific data blocks to be loaded, thereby reducing VRAM usage by projecting block regions onto the camera plane to determine visibility [S1]. It sets itself apart from static LOD systems by dynamically computing visibility and resolution requirements per frame based on the current viewpoint, avoiding the storage overhead of precomputed full-resolution hierarchies for extremely large 3D volumes [S1].
+
+## How it works
+**Inputs:** Camera position and orientation; a set of 3D blocks, each defined by its spatial extent and associated LOD levels.
+**Outputs:** A subset of blocks and their corresponding LOD levels to be loaded and rendered for the current frame.
+
+**Data Structures:**
+*   **Block:** A 3D volume partition.
+    *   `xy_corners`: Array of 4 2D coordinates defining the base rectangle of the block.
+    *   `z_max`: Scalar, the height of the highest part within the block.
+    *   `lod_levels`: List of available resolution levels (coarsest to finest).
+*   **Camera:**
+    *   `position`: 3D vector.
+    *   `projection_matrix`: Matrix for projecting 3D points to 2D screen space.
+*   **Threshold:** Scalar, the maximum distance from the camera to a block for which a finer LOD is required. [G] (Typical values depend on scene scale; not explicitly defined in [S1]).
+
+**Steps:**
+1.  **Define 3D Center Point:** For each block, compute the 3D center point. The $x$ and $y$ components are the center points of the block on the $xy$ plane (obtained from the block's geometry). The $z$ component is assigned the height of the highest part within the block ($z_{max}$) [S1].
+2.  **Define Block Region:** Construct a rectangular region for the block. This region is formed by the block’s four $xy$ corner points and the previously determined $z$ value ($z_{max}$) [S1]. Effectively, this creates a 3D bounding box or frustum segment for the block.
+3.  **Visibility Check:** Project the block region onto the camera plane. Determine whether the block is visible to the camera. Blocks that are not visible are eliminated from the loading queue [S1].
+4.  **LOD Selection:** Starting with the coarsest LOD, check if the distance from the camera to all visible blocks within the finer LOD exceeds a certain threshold.
+    *   If the distance exceeds the threshold, rendering is performed using the resources loaded at the current LOD.
+    *   Otherwise, the evaluation progresses to the subsequent, finer LOD [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def dynamic_loading_strategy(blocks, camera, distance_threshold):
+    loaded_blocks = []
+    
+    for block in blocks:
+        # Step 1: Define 3D center point
+        # xy_components from block's center on xy plane
+        # z_component from block's highest part
+        center_3d = vec3(block.xy_center, block.z_max)
+        
+        # Step 2: Define block region
+        # Rectangle formed by block's four xy corner points and z_max
+        region = define_block_region(block.xy_corners, block.z_max)
+        
+        # Step 3: Visibility check
+        # Project region onto camera plane
+        if not is_visible(region, camera):
+            continue
+            
+        # Step 4: LOD Selection
+        # Start with coarsest LOD
+        current_lod = block.lod_levels[0]
+        
+        # Check distance to finer LODs
+        for lod in block.lod_levels[1:]:
+            # Calculate distance from camera to block
+            dist = distance(camera.position, center_3d)
+            
+            # If distance exceeds threshold, use current LOD
+            if dist > distance_threshold:
+                break
+            # Otherwise, progress to finer LOD
+            current_lod = lod
+            
+        loaded_blocks.append((block, current_lod))
+        
+    return loaded_blocks
+
+def is_visible(region, camera):
+    # Project region corners to screen space
+    screen_corners = [project_to_screen(corner, camera) for corner in region.corners]
+    # Check if any part of the region is within the view frustum
+    return is_in_frustum(screen_corners, camera)
+
+def define_block_region(xy_corners, z_max):
+    # Create a 3D region using xy corners and z_max
+    # Assuming base z is 0 or derived from block geometry
+    corners_3d = [vec3(corner.x, corner.y, 0) for corner in xy_corners]
+    # Add z_max to define the vertical extent
+    # Note: The source describes a rectangle formed by xy corners and z value.
+    # This implies a bounding box or a specific geometric primitive.
+    return Region(corners_3d, z_max)
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Floating-point errors in projection may cause blocks near the frustum boundary to be incorrectly culled or included.
+*   **Degenerate Input:** Blocks with zero height ($z_{max}$ equal to base height) may result in degenerate regions.
+*   **Threshold Tuning:** The distance threshold is critical. Too low, and fine LODs are loaded unnecessarily; too high, and visual quality degrades. [G]
+
+## Subtopics
+
+### [Progressive Multiscale Loading](13806-progressive-multiscale-loading.md)
+Progressive Multiscale Loading is a rendering strategy where each frame selects the appropriate resolution level per volume region, aiming for approximately one voxel per screen pixel. Coarse data fills the view first, and finer data replaces it region-by-region as it arrives, producing a complete coarse view within seconds that sharpens in place. It sets itself apart from static LOD systems by dynamically determining the minimum resolution required per frame based on projected size, avoiding the storage overhead of precomputed full-resolution hierarchies for extremely large 3D volumes.
+
+## Operating characteristics
+*   **Time Complexity:** Depends on the number of blocks and LOD levels. Visibility checks are $O(N)$ where $N$ is the number of blocks. LOD selection is $O(L)$ where $L$ is the number of LOD levels per block.
+*   **Memory Complexity:** VRAM usage is reduced by only loading visible blocks and appropriate LODs. The reduction factor depends on the scene density and camera position.
+*   **Strengths:** Significant VRAM savings for large scenes; adaptive quality based on distance.
+*   **Limitations:** Requires dynamic visibility computation; may cause popping if LOD transitions are not smooth.
+*   **When to use:** Large-scale scenes with limited VRAM; real-time rendering on web or mobile platforms.
+*   **When not to use:** Small scenes where VRAM is not a constraint; scenes where static LODs are precomputed and fit in memory.
+
+## Background
+Originated in the context of real-time neural rendering of large-scale scenes on the web, specifically in the "City-on-Web" project [S1]. The method addresses the challenge of rendering massive urban environments with limited client-side resources by dynamically managing data loading based on visibility and distance [S1].
+
+## Sources
+[S1] City-on-Web: Real-Time Neural Rendering of Large-Scale Scenes on the Web, https://doi.org/10.1007/978-3-031-72970-6_22, fetched 2026-10-26

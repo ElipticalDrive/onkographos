@@ -1,0 +1,127 @@
+--- v012.md
++++ v013.md
+@@ -8,51 +8,22 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Current NeRF parameters $\theta$ (density $\sigma$ and color $\mathbf{c}$), a set of observed camera poses $\mathcal{C}_{obs}$, and a set of novel camera poses $\mathcal{C}_{novel}$ sampled from the scene domain.
+-*   **Outputs:** Updated parameters $\theta'$ after gradient descent.
++*   **Inputs:** Current NeRF parameters $\theta$ (density $\sigma$ and color $\mathbf{c}$), observed camera rays, and novel view rays $\mathbf{r}_{novel}$ [S1, G].
++*   **Outputs:** Updated parameters $\theta'$ after gradient descent [G].
+ 
+ **Data Structures:**
+-*   **Ray Set:** A collection of rays $\mathbf{r} = (o, d)$ where $o$ is the origin and $d$ is the direction. For novel views, $o$ and $d$ are derived from $\mathcal{C}_{novel}$.
+-*   **Sample Points:** Along each ray, points $t_i$ are sampled using the same strategy as the primary rendering (e.g., uniform or importance sampling) [S1].
++*   **Ray Set:** A collection of rays $\mathbf{r} = (o, d)$ combining observed and novel view rays [S1, G].
++*   **Sample Points:** Along each ray, points $t_i$ are sampled using the primary rendering strategy [G].
+ 
+ **Numbered Steps:**
+-1.  **Ray Sampling:** Construct a batch of rays. This batch includes rays from observed views (for standard color loss) and rays from novel views $\mathbf{r}_{novel}$ [S1].
+-2.  **Volume Rendering:** For each ray $\mathbf{r}$, compute the rendered color $\hat{\mathbf{C}}(\mathbf{r})$ and depth $\hat{\mathbf{D}}(\mathbf{r})$ using the differentiable volume rendering equation [S1, 7475-geometric-baseline-regularization.md]:
+-    $$ \hat{\mathbf{C}}(\mathbf{r}) = \sum_{i=1}^N w_i \mathbf{c}_i, \quad \hat{\mathbf{D}}(\mathbf{r}) = \sum_{i=1}^N w_i t_i $$
+-    where $w_i = T_i (1 - \exp(-\sigma_i \delta_i))$ are the rendering weights [S1].
+-3.  **Loss Computation:** Compute the loss $\mathcal{L}$ for the novel view rays. While the specific loss function is not detailed in the provided notes, it typically involves comparing the rendered novel view against a target or enforcing geometric consistency [S1]. The notes indicate that combining geometric adaptation loss $\mathcal{L}_{geo}$ with other losses yields the best results [S1].
+-4.  **Backpropagation:** Compute gradients $\nabla_\theta \mathcal{L}$ flowing back through the rendered color and depth to the network parameters [S1, 8582-regnerf.md].
+-5.  **Update:** Update $\theta$ using an optimizer (e.g., Adam) [S1].
++1.  **Ray Sampling:** Construct a batch of rays including observed rays and novel view rays $\mathbf{r}_{novel}$ [S1].
++2.  **Volume Rendering:** For each ray $\mathbf{r}$, compute rendered color $\hat{\mathbf{C}}(\mathbf{r})$ and depth $\hat{\mathbf{D}}(\mathbf{r})$ using differentiable volume rendering [7475-geometric-baseline-regularization.md].
++3.  **Loss Computation:** Compute the total loss $\mathcal{L}$, which combines standard supervision with geometric adaptation loss $\mathcal{L}_{geo}$ to guide geometry [S1].
++4.  **Backpropagation:** Compute gradients $\nabla_\theta \mathcal{L}$ flowing back through the rendered outputs to the network parameters [S1, 8582-regnerf.md].
++5.  **Update:** Update $\theta$ using gradient descent [G].
+ 
+-**Pseudocode:**
+-```python
+-def novel_view_regularization_step(model, observed_cameras, novel_cameras, optimizer):
+-    # 1. Sample rays from observed and novel views
+-    rays_obs = sample_rays(observed_cameras)
+-    rays_novel = sample_rays(novel_cameras)
+-    all_rays = rays_obs + rays_novel
+-    
+-    # 2. Render colors and depths for all rays
+-    # model.forward_rays returns rendered color C_hat and depth D_hat
+-    C_hat_obs, D_hat_obs = model.forward_rays(rays_obs)
+-    C_hat_novel, D_hat_novel = model.forward_rays(rays_novel)
+-    
+-    # 3. Compute losses
+-    # Standard color loss for observed views
+-    loss_obs = color_loss(C_hat_obs, ground_truth_colors_obs)
+-    
+-    # Novel view regularization loss
+-    # The specific formulation is not detailed in [S1], but it guides geometry
+-    # [G] Assuming a standard L2 or perceptual loss on novel view colors/depths
+-    loss_novel = geometric_loss(C_hat_novel, D_hat_novel)
+-    
+-    total_loss = loss_obs + loss_novel
+-    
+-    # 4. Backpropagate and update
+-    optimizer.zero_grad()
+-    total_loss.backward()
+-    optimizer.step()
+-    
+-    return total_loss
+-```
++**Formulas:**
++The rendering process computes expected color and depth along rays $r(t) = o + td$ using sample points $t_i$ with weights $w_i = T(t_i)\rho(t_i)$, where $\rho(t_i) = 1 - \exp(-\sigma(\mathbf{r}(t_i))(t_{i+1} - t_i))$ and $T(t_i) = \prod_{j=1}^{i-1} (1 - \rho(t_j))$ [7475-geometric-baseline-regularization.md]. The rendered depth is typically the expected distance along the ray:
++$$ \hat{D}(\mathbf{r}) = \sum_{i=1}^N w_i t_i $$
++where $w_i = T_i (1 - \exp(-\sigma_i \delta_i))$ are the rendering weights, $t_i$ are sample depths, and $T_i$ is the accumulated transmittance [7475-geometric-baseline-regularization.md].
+ 
+ **Parameters:**
+@@ -64,12 +35,56 @@
+ *   **Overfitting:** Without novel view supervision, the model may overfit to the observed views, leading to poor generalization [S1].
+ 
++**Pseudocode:**
++```python
++def sample_rays(cameras):
++    rays = []
++    for cam in cameras:
++        for u in range(cam.width):
++            for v in range(cam.height):
++                origin = cam.origin + u * cam.dx + v * cam.dy
++                rays.append((origin, cam.direction))
++    return rays
++
++def volume_render(rays, model):
++    C_hat, D_hat = [], []
++    for o, d in rays:
++        t = uniform_sample_points(o, d)
++        sigma, c = model(o, d, t)
++        delta = t[1:] - t[:-1]
++        alpha = 1.0 - exp(-sigma * delta)
++        T = cumprod(concat([ones_like(alpha[:1]), 1.0 - alpha[:-1]]))
++        w = T * alpha
++        C_hat.append(sum(w * c))
++        D_hat.append(sum(w * t))
++    return C_hat, D_hat
++
++def novel_view_regularization_step(model, obs_cameras, novel_cameras, gt_colors_obs, optimizer):
++    rays_obs = sample_rays(obs_cameras)
++    rays_novel = sample_rays(novel_cameras)
++
++    C_hat_obs, D_hat_obs = volume_render(rays_obs, model)
++    C_hat_novel, D_hat_novel = volume_render(rays_novel, model)
++
++    loss_obs = mean((C_hat_obs - gt_colors_obs) ** 2)
++    loss_novel = mean(D_hat_novel ** 2)  # [G] Geometric loss placeholder; exact form not in sources
++    total_loss = loss_obs + loss_novel
++
++    optimizer.zero_grad()
++    total_loss.backward()
++    optimizer.step()
++    return total_loss
++```
++
+ ## Subtopics
++**Few-View Reconstruction via Regularization:** A family of approaches that mitigate shape-radiance ambiguity in sparse-input settings by applying geometric or semantic priors to prevent overfitting and reduce floaters [S1, G]. Choose it when supervision from multiple viewpoints is limited and explicit regularization is preferred over progressive capacity restraint [S1, G]. [Few-View Reconstruction via Regularization](12946-few-view-reconstruction-via-regularization.md)
++
++**NGP-ERGAS:** A regularization strategy for Instant Neural Graphics Primitives that improves fine detail reconstruction by incorporating nonlocal structural information via thread-based global error computation [S1, G]. Choose it when training Instant-NGP and standard per-pixel losses fail to capture fine structural details [S1, G]. [NGP-ERGAS](21717-ngp-ergas.md)
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Increases training time due to the additional rendering pass for novel views [S1].
+-*   **Memory Complexity:** No significant additional memory overhead beyond storing the novel view rays and intermediate rendering buffers [S1].
+ *   **Performance:** Reduces overfitting and enhances geometry accuracy compared to training without novel view supervision [S1]. It significantly reduces floaters and improves cross-scale geometric adaptation [S1].
+ *   **Strengths:** Improves rendering quality and geometric consistency in few-shot scenarios [S1].
+-*   **Limitations:** Requires careful balancing of the novel view loss weight to avoid destabilizing training [S1].
++*   **Limitations:** Omitting novel view rays risks converging to local minima, causing incorrect geometry [S1].
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
+ 
+ ## Background

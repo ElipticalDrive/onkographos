@@ -1,0 +1,212 @@
+--- v001.md
++++ v002.md
+@@ -4,42 +4,84 @@
+ 
+ ## Overview
+-This method converts a set of 2D pixel coordinates into a 3D triangle mesh representing a voxelized image, where each pixel corresponds to a 1mm cube [S1, unofficial]. It solves the problem of generating efficient surface geometry from discrete 2D data by culling interior faces between adjacent same-group pixels to minimize triangle count [S1, unofficial]. It differs from general surface extraction methods like Marching Cubes by operating directly on grid-aligned pixel data without interpolating scalar fields, and from blocky meshing methods that process 3D voxel volumes by treating the input as a 2D heightmap-like structure extruded into Z [S1, unofficial].
++This method converts a set of 2D pixel coordinates into a 3D triangle mesh representing a voxelized image, where each pixel corresponds to a unit cube [S1, unofficial]. It solves the problem of generating efficient surface geometry from discrete 2D data by emitting only exterior faces and culling interior faces between adjacent same-group pixels [S1, unofficial]. Unlike general surface extraction methods that operate on 3D volumes, this approach operates directly on 2D pixel grids, assuming a fixed depth (Z-axis) extent [S1, unofficial]. It differs from [Voxel Block Placement with Face Culling](923-voxel-block-placement-with-face-culling.md) by treating the input as a flat set of pixels rather than a 3D block structure, and from [Face Coverage Mask Culling](3397-face-coverage-mask-culling.md) by using simple cardinal neighbor checks rather than projected coverage masks.
+ 
+ ## How it works
+ **Inputs:**
+-*   `pixels`: A list of 2D integer coordinates `(X, Y)` representing occupied pixel positions.
+-*   `imageHeight`: An integer representing the height of the source image grid, used for the final rotation transformation.
++- `pixels`: A list of 2D integer coordinates `List<(int X, int Y)>` representing occupied pixel positions.
++- `imageHeight`: An integer representing the height of the source image in pixels, used for the final rotation transformation [S1, unofficial].
+ 
+ **Outputs:**
+-*   `Mesh`: A container holding a list of unique `Vertex` structures and a list of `Triangle` structures.
++- `Mesh`: A structure containing:
++  - `Vertices`: A `List<Vertex>` where `Vertex` is a record struct with three `float` fields: `X`, `Y`, `Z` [S1, unofficial].
++  - `Triangles`: A `List<Triangle>` where `Triangle` is a record struct with three `int` fields: `V1`, `V2`, `V3`, representing indices into `Vertices` [S1, unofficial].
++
++**Parameters:**
++- `CubeSize`: The physical size of each voxel cube in world units. The standard value is `1.0f`, representing 1mm per pixel [S1, unofficial].
+ 
+ **Data Structures:**
+-*   `Vertex`: A record struct with three `float` fields: `X`, `Y`, `Z`.
+-*   `Triangle`: A record struct with three `int` fields: `V1`, `V2`, `V3`, representing indices into the `Mesh.Vertices` list.
+-*   `Mesh`: A class containing `Vertices: List<Vertex>` and `Triangles: List<Triangle>`.
+-*   `vertexMap`: A dictionary mapping `Vertex` to `int` (index) to ensure vertex uniqueness and sharing.
+-*   `pixelSet`: A hash set of `(int X, int Y)` tuples for O(1) neighbor lookup.
+-
+-**Parameters:**
+-*   `CubeSize`: The physical size of each voxel cube in world units. Default value is `1.0f` (representing 1mm per pixel) [S1, unofficial].
++- `pixelSet`: A `HashSet<(int X, int Y)>` created from the input `pixels` list to enable O(1) neighbor lookup [S1, unofficial].
++- `vertexMap`: A `Dictionary<Vertex, int>` mapping unique vertex coordinates to their index in `mesh.Vertices` [S1, unofficial].
+ 
+ **Algorithm Steps:**
+-1.  Initialize an empty `Mesh` object and an empty `vertexMap`.
+-2.  Create `pixelSet` from the input `pixels` list.
+-3.  Iterate through each pixel `(px, py)` in `pixels`:
+-    a.  Calculate cube bounds:
+-        $$ x_0 = px \times CubeSize $$
+-        $$ y_0 = py \times CubeSize $$
+-        $$ x_1 = x_0 + CubeSize $$
+-        $$ y_1 = y_0 + CubeSize $$
+-        $$ z_0 = 0.0f $$
+-        $$ z_1 = CubeSize $$
+-    b.  Emit the bottom face ($Z = z_0$) unconditionally. Vertices in Counter-Clockwise (CCW) order: $(x_0, y_1, z_0), (x_1, y_1, z_0), (x_1, y_0, z_0), (x_0, y_0, z_0)$.
+-    c.  Emit the top face ($Z = z_1$) unconditionally. Vertices in CCW order: $(x_0, y_0, z_1), (x_1, y_0, z_1), (x_1, y_1, z_1), (x_0, y_1, z_1)$.
+-    d.  Check for left neighbor at $(px-1, py)$. If not present in `pixelSet`, emit the left face ($X = x_0$). Vertices in CCW order: $(x_0, y_0, z_1), (x_0, y_1, z_1), (x_0, y_1, z_0), (x_0, y_0, z_0)$.
+-    e.  Check for right neighbor at $(px+1, py)$. If not present in `pixelSet`, emit the right face ($X = x_1$). Vertices in CCW order: $(x_1, y_1, z_1), (x_1, y_0, z_1), (x_1, y_0, z_0), (x_1, y_1, z_0)$.
+-    f.  Check for front neighbor at $(px, py-1)$. If not present in `pixelSet`, emit the front face ($Y = y_0$). Vertices in CCW order: $(x_1, y_0, z_1), (x_0, y_0, z_1), (x_0, y_0, z_0), (x_1, y_0, z_0)$.
+-    g.  Check for back neighbor at $(px, py+1)$. If not present in `pixelSet`, emit the back face ($Y = y_1$). Vertices in CCW order: $(x_0, y_1, z_1), (x_1, y_1, z_1), (x_1, y_1, z_0), (x_0, y_1, z_0)$.
+-4.  After processing all pixels, apply a 180-degree rotation around the X-axis to make the object "face up". Calculate $y_{max} = imageHeight \times CubeSize$. For each vertex $v$ in `mesh.Vertices`, update it to $(v.X, y_{max} - v.Y, CubeSize - v.Z)$ [S1, unofficial].
++
++1.  **Initialization**: Create an empty `Mesh` object. Initialize `vertexMap` as an empty dictionary. Create `pixelSet` from the input `pixels` list [S1, unofficial].
++
++2.  **Iteration**: For each pixel `(px, py)` in `pixels`:
++    a.  **Calculate Bounds**: Compute the world-space coordinates of the voxel cube:
++        $$x_0 = px \times CubeSize$$
++        $$y_0 = py \times CubeSize$$
++        $$x_1 = x_0 + CubeSize$$
++        $$y_1 = y_0 + CubeSize$$
++        $$z_0 = 0.0f$$
++        $$z_1 = CubeSize$$
++        [S1, unofficial]
++
++    b.  **Emit Bottom Face**: Emit the face at $Z = z_0$ unconditionally. The vertices are defined in Counter-Clockwise (CCW) order:
++        $$v_0 = (x_0, y_1, z_0)$$
++        $$v_1 = (x_1, y_1, z_0)$$
++        $$v_2 = (x_1, y_0, z_0)$$
++        $$v_3 = (x_0, y_0, z_0)$$
++        [S1, unofficial]
++
++    c.  **Emit Top Face**: Emit the face at $Z = z_1$ unconditionally. The vertices are defined in CCW order:
++        $$v_0 = (x_0, y_0, z_1)$$
++        $$v_1 = (x_1, y_0, z_1)$$
++        $$v_2 = (x_1, y_1, z_1)$$
++        $$v_3 = (x_0, y_1, z_1)$$
++        [S1, unofficial]
++
++    d.  **Check Left Neighbor**: Check for a neighbor at $(px-1, py)$. If $(px-1, py)$ is **not** in `pixelSet`, emit the left face at $X = x_0$. Vertices in CCW order:
++        $$v_0 = (x_0, y_0, z_1)$$
++        $$v_1 = (x_0, y_1, z_1)$$
++        $$v_2 = (x_0, y_1, z_0)$$
++        $$v_3 = (x_0, y_0, z_0)$$
++        [S1, unofficial]
++
++    e.  **Check Right Neighbor**: Check for a neighbor at $(px+1, py)$. If $(px+1, py)$ is **not** in `pixelSet`, emit the right face at $X = x_1$. Vertices in CCW order:
++        $$v_0 = (x_1, y_1, z_1)$$
++        $$v_1 = (x_1, y_0, z_1)$$
++        $$v_2 = (x_1, y_0, z_0)$$
++        $$v_3 = (x_1, y_1, z_0)$$
++        [S1, unofficial]
++
++    f.  **Check Front Neighbor**: Check for a neighbor at $(px, py-1)$. If $(px, py-1)$ is **not** in `pixelSet`, emit the front face at $Y = y_0$. Vertices in CCW order:
++        $$v_0 = (x_1, y_0, z_1)$$
++        $$v_1 = (x_0, y_0, z_1)$$
++        $$v_2 = (x_0, y_0, z_0)$$
++        $$v_3 = (x_1, y_0, z_0)$$
++        [S1, unofficial]
++
++    g.  **Check Back Neighbor**: Check for a neighbor at $(px, py+1)$. If $(px, py+1)$ is **not** in `pixelSet`, emit the back face at $Y = y_1$. Vertices in CCW order:
++        $$v_0 = (x_0, y_1, z_1)$$
++        $$v_1 = (x_1, y_1, z_1)$$
++        $$v_2 = (x_1, y_1, z_0)$$
++        $$v_3 = (x_0, y_1, z_0)$$
++        [S1, unofficial]
++
++3.  **Rotation**: After processing all pixels, apply a 180-degree rotation around the X-axis to orient the mesh "face up". Calculate $y_{max} = imageHeight \times CubeSize$. For each vertex $v$ in `mesh.Vertices`, update it to:
++    $$v.X = v.X$$
++    $$v.Y = y_{max} - v.Y$$
++    $$v.Z = CubeSize - v.Z$$
++    [S1, unofficial]
+ 
+ **Pseudocode:**
+@@ -48,22 +90,21 @@
+ def generate_mesh(pixels: List[Tuple[int, int]], image_height: int, cube_size: float = 1.0f) -> Mesh:
+     mesh = Mesh()
+-    vertex_map = {}  # Maps Vertex -> int index
+-    
++    vertex_map = {}
+     pixel_set = set(pixels)
+     
+-    def get_or_add_vertex(v: Vertex) -> int:
++    def get_or_add_vertex(v: Tuple[float, float, float]) -> int:
+         if v in vertex_map:
+             return vertex_map[v]
+-        idx = len(mesh.vertices)
+-        mesh.vertices.append(v)
+-        vertex_map[v] = idx
+-        return idx
++        index = len(mesh.vertices)
++        mesh.vertices.append(Vertex(v[0], v[1], v[2]))
++        vertex_map[v] = index
++        return index
+ 
+-    def emit_face(v0: Vertex, v1: Vertex, v2: Vertex, v3: Vertex):
++    def emit_face(v0: Tuple[float, float, float], v1: Tuple[float, float, float], 
++                  v2: Tuple[float, float, float], v3: Tuple[float, float, float]):
+         i0 = get_or_add_vertex(v0)
+         i1 = get_or_add_vertex(v1)
+         i2 = get_or_add_vertex(v2)
+         i3 = get_or_add_vertex(v3)
+-        # Two triangles: (i0, i1, i2) and (i0, i2, i3)
+         mesh.triangles.append(Triangle(i0, i1, i2))
+         mesh.triangles.append(Triangle(i0, i2, i3))
+@@ -76,28 +117,28 @@
+         z0 = 0.0f
+         z1 = cube_size
+-        
++
+         # Bottom face (Z = z0)
+-        emit_face(Vertex(x0, y1, z0), Vertex(x1, y1, z0), Vertex(x1, y0, z0), Vertex(x0, y0, z0))
++        emit_face((x0, y1, z0), (x1, y1, z0), (x1, y0, z0), (x0, y0, z0))
+         
+         # Top face (Z = z1)
+-        emit_face(Vertex(x0, y0, z1), Vertex(x1, y0, z1), Vertex(x1, y1, z1), Vertex(x0, y1, z1))
++        emit_face((x0, y0, z1), (x1, y0, z1), (x1, y1, z1), (x0, y1, z1))
+         
+         # Left face (X = x0)
+         if (px - 1, py) not in pixel_set:
+-            emit_face(Vertex(x0, y0, z1), Vertex(x0, y1, z1), Vertex(x0, y1, z0), Vertex(x0, y0, z0))
++            emit_face((x0, y0, z1), (x0, y1, z1), (x0, y1, z0), (x0, y0, z0))
+             
+         # Right face (X = x1)
+         if (px + 1, py) not in pixel_set:
+-            emit_face(Vertex(x1, y1, z1), Vertex(x1, y0, z1), Vertex(x1, y0, z0), Vertex(x1, y1, z0))
++            emit_face((x1, y1, z1), (x1, y0, z1), (x1, y0, z0), (x1, y1, z0))
+             
+         # Front face (Y = y0)
+         if (px, py - 1) not in pixel_set:
+-            emit_face(Vertex(x1, y0, z1), Vertex(x0, y0, z1), Vertex(x0, y0, z0), Vertex(x1, y0, z0))
++            emit_face((x1, y0, z1), (x0, y0, z1), (x0, y0, z0), (x1, y0, z0))
+             
+         # Back face (Y = y1)
+         if (px, py + 1) not in pixel_set:
+-            emit_face(Vertex(x0, y1, z1), Vertex(x1, y1, z1), Vertex(x1, y1, z0), Vertex(x0, y1, z0))
++            emit_face((x0, y1, z1), (x1, y1, z1), (x1, y1, z0), (x0, y1, z0))
+ 
+-    # Rotation transformation
++    # Rotation
+     y_max = image_height * cube_size
+     for i in range(len(mesh.vertices)):
+@@ -109,17 +150,18 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Diagonal Adjacency:** Only cardinal neighbors (up, down, left, right) are checked for face culling. Diagonal adjacency does not share a face, so diagonal pixels do not cause face culling [S1, unofficial].
+-*   **Winding Order Preservation:** The rotation transformation (mirroring Y and Z) preserves winding order because two reflections equal a rotation [S1, unofficial].
++- **Diagonal Adjacency**: Only cardinal neighbors (up, down, left, right) are checked for face culling. Diagonal adjacency does not share a face, so diagonal pixels do not cause face culling [S1, unofficial].
++- **Winding Order Preservation**: The rotation transformation (mirroring Y and Z) preserves winding order because two reflections equal a rotation [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$ where $N$ is the number of pixels, assuming O(1) hash set lookups and dictionary operations. Each pixel generates a constant number of face checks and potential triangle emissions.
+-*   **Memory Complexity:** $O(V + T)$ where $V$ is the number of unique vertices and $T$ is the number of triangles. The `vertexMap` stores one entry per unique vertex.
+-*   **Strengths:** Extremely fast generation for 2D pixel data; minimal triangle count by culling all internal faces; simple implementation.
+-*   **Limitations:** Only works for 2D pixel grids extruded into 3D; does not support arbitrary 3D voxel volumes; diagonal connections are not treated as solid faces.
+-*   **When to use:** When converting 2D sprite sheets or pixel art into 3D voxel meshes for rendering or physics.
+-*   **When not to use:** For general 3D volumetric data or smooth surface extraction.
++- **Time Complexity**: $O(N)$ where $N$ is the number of pixels, as each pixel is processed once with O(1) neighbor lookups.
++- **Memory Complexity**: $O(V + T)$ where $V$ is the number of unique vertices and $T$ is the number of triangles. The `vertexMap` and `pixelSet` add $O(N)$ overhead.
++- **Performance**: Reduces triangle count significantly by culling interior faces, making it efficient for rendering large voxelized images [S1, unofficial].
++- **Strengths**: Simple implementation, fast generation, effective culling for 2D-derived voxel data.
++- **Limitations**: Only handles 2D pixel inputs; assumes fixed Z-depth; does not handle transparency or 3D volume data directly [S1, unofficial].
++- **When to use**: When converting 2D sprite sheets or pixel art into 3D voxel meshes for rendering.
++- **When not to use**: For 3D volumetric data or when diagonal face culling is required.
+ 
+ ## Background
+-This method originates from a simple .NET console application designed to convert pixel coordinates into triangle meshes [S1, unofficial]. It is part of a broader ecosystem of voxelization tools that prioritize simplicity and speed for 2D-to-3D conversion tasks.
++This method originates from the `jsonger/voxelizer` project, a simple .NET console application designed to convert pixel coordinates into triangle meshes [S1, unofficial]. It was developed as a practical solution for generating voxelized representations of 2D images, emphasizing efficiency through interior face culling [S1, unofficial].
+ 
+ ## Sources

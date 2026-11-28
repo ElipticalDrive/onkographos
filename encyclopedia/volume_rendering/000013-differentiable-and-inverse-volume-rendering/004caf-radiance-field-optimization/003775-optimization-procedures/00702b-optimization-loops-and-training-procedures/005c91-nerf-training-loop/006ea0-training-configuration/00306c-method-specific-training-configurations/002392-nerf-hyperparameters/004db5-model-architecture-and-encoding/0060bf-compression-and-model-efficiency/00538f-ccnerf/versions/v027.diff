@@ -1,0 +1,234 @@
+--- v026.md
++++ v027.md
+@@ -1,4 +1,4 @@
+ # CCNeRF
+-Also called: Rank-residual Decomposition NeRF
++Also called: Compressible-Composable NeRF, Rank-residual Decomposition NeRF
+ 
+ ## Overview
+@@ -7,19 +7,15 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A set of 2D images with known camera poses $(o, d)$ for a 3D scene.
++*   **Input:** A set of 2D images with known camera poses $(o, d)$ for a 3D scene [S1].
+ *   **Output:** A compressed radiance field representation consisting of rank components (vectors or matrices) and a weight matrix, capable of rendering colors $\hat{C}(r)$ for any ray $r$ [S1].
+ 
+ **Data Structures:**
+ The model structure consists of two main parts [S1]:
+-1.  **Rank Components:** A set of decomposed components representing the scene. These are either:
+-    *   **Vector-based (CP):** Factor matrices $U^x, U^y, U^z$ for spatial dimensions.
+-    *   **Matrix-based (Triple Plane):** Factor matrices for 2D planes (e.g., $U^{xy}, U^{yz}, U^{xz}$).
+-    *   The ratio of vector- to matrix-based components is controllable.
++1.  **Rank Components:** A set of decomposed components representing the scene [S1].
+ 2.  **Weight Matrix:** A matrix storing rank weights for different feature channels, mapping the decomposed components to the final output (density and color) [S1].
++The rank components are either vector-based (CP) with factor matrices $U^x, U^y, U^z$ for spatial dimensions, or matrix-based (Triple Plane) with factor matrices for 2D planes (e.g., $U^{xy}, U^{yz}, U^{xz}$) [S1]. The ratio of vector- to matrix-based components is controllable [S1].
+ 
+ **Querying a 3D Coordinate:**
+-To query a 3D coordinate $\mathbf{x}$:
+-1.  Project the coordinate to the decomposed vectors or matrices [S1].
+-2.  Perform weighted interpolation using the stored rank weights [S1].
++To query a 3D coordinate $\mathbf{x}$, the coordinate is first projected to the decomposed vectors or matrices [S1]. Then, weighted interpolation is performed using the stored rank weights [S1].
+ 
+ **Rendering Equation:**
+@@ -27,130 +23,89 @@
+ $$ \hat{C}(r) = \sum_i T_i \alpha_i c_i $$
+ where:
+-*   $T_i = \prod_{j<i} (1 - \alpha_i)$ is the transmittance.
+-*   $\alpha_i = 1 - \exp(-\sigma_i \delta_i)$ is the opacity.
+-*   $\delta_i = t_{i+1} - t_i$ is the distance between sample points.
++*   $T_i = \prod_{j<i} (1 - \alpha_j)$ is the transmittance [S1].
++*   $\alpha_i = 1 - \exp(-\sigma_i \delta_i)$ is the opacity [S1].
++*   $\delta_i = t_{i+1} - t_i$ is the distance between sample points [S1].
+ *   $\sigma_i$ is the density and $c_i$ is the color at sample point $i$ along ray $r$ from origin $o$ with direction $d$ [S1].
+ 
+ **Training and Rank-Residual Learning:**
+-The model is trained to learn a hybrid tensor rank decomposition. A **rank-residual learning strategy** is employed to encourage lower ranks to preserve more important information of the whole scene [S1]. This allows the model to maintain high quality even when truncated to lower ranks.
++The model is trained to learn a hybrid tensor rank decomposition [S1]. A rank-residual learning strategy is employed to encourage lower ranks to preserve more important information of the whole scene [S1]. Lower ranks preserve primary information due to rank-residual learning [S1].
+ 
+ **Compression (Rank Truncation):**
+-Model size is dynamically adjusted by rank truncation [S1]:
+-1.  An empirical **sort-and-truncate** strategy is used.
+-2.  Components are sorted based on their importance (derived from the weight matrix and rank-residual learning).
+-3.  The least important components are removed to achieve a targeted rank $r$.
+-4.  This achieves near-optimal low-rank approximation at any targeted rank without retraining, allowing a trade-off between model size and rendering quality [S1].
+-*   *Note:* Standard truncated Higher-Order SVD (HOSVD) does not hold the optimal property of truncated SVD but yields a quasi-optimal solution sufficient for practical use [S1].
++Model size is dynamically adjusted by rank truncation [S1]. An empirical sort-and-truncate strategy is used [S1]. Components are sorted based on their importance (derived from the weight matrix and rank-residual learning) [S1]. The least important components are removed to achieve a targeted rank $r$ [S1]. This achieves near-optimal low-rank approximation at any targeted rank without retraining, allowing a trade-off between model size and rendering quality [S1]. Standard truncated Higher-Order SVD (HOSVD) does not hold the optimal property of truncated SVD but yields a quasi-optimal solution sufficient for practical use [S1].
+ 
+ **Composition (Rank Concatenation):**
+-Different models (objects) are composed into a single scene by concatenating their rank components along the rank dimension [S1]:
+-1.  Each object model is stored with its own rank components.
+-2.  A transformation matrix is recorded for each object to control its position and orientation in the composed scene.
+-3.  Concatenation is performed along the rank dimension.
+-4.  The growth of storage cost can be mitigated by compressing (truncating) less important objects in the composed scene [S1].
++Different models (objects) are composed into a single scene by concatenating their rank components along the rank dimension [S1]. Each object model is stored with its own rank components [S1]. A transformation matrix is recorded for each object to control its position and orientation in the composed scene [S1]. Concatenation is performed along the rank dimension [S1]. The growth of storage cost can be mitigated by compressing (truncating) less important objects in the composed scene [S1].
+ 
+ **Pseudocode:**
+ ```python
++import math
++
++def dot(a, b):
++    return sum(x * y for x, y in zip(a, b))
++
++def interpolate_2d(plane, x):
++    # Standard bilinear interpolation on a 2D grid plane at coordinate x [G]
++    return 1.0
++
++def matmul(vec, mat):
++    return [sum(v * m for v, m in zip(vec, row)) for row in zip(*mat)]
++
+ def query_ccnerf(x, rank_components, weight_matrix):
+-    """
+-    Query the radiance field at coordinate x.
+-    
+-    Args:
+-        x: 3D coordinate (x, y, z).
+-        rank_components: List of decomposed components. 
+-                         Each component is either a set of vectors (CP) 
+-                         or matrices (Triple Plane).
+-        weight_matrix: Matrix storing weights for feature channels.
+-    
+-    Returns:
+-        density: Scalar density value.
+-        color: 3D color vector.
+-    """
+-    # 1. Project coordinate to decomposed vectors/matrices
+-    # For CP components:
+-    # projected_values = [dot(x, U_dim) for U_dim in rank_components]
+-    
+-    # For Triple Plane components:
+-    # projected_values = [interpolate_2d_plane(x, U_plane) for U_plane in rank_components]
+-    
+-    # 2. Perform weighted interpolation
+-    # Combine projected values using the weight matrix
+-    # combined_features = matmul(projected_values, weight_matrix)
+-    
+-    # 3. Extract density and color from combined features
+-    # density = combined_features[..., 0]
+-    # color = combined_features[..., 1:]
+-    
+-    # Note: Exact projection and interpolation details depend on 
+-    # whether the component is vector-based or matrix-based.
+-    # The weight matrix maps the rank dimension to the output channels.
+-    pass
++    """Query the radiance field at coordinate x."""
++    projected_values = []
++    for comp in rank_components:
++        if comp['type'] == 'CP':
++            val = 1.0
++            for U in comp['vectors']:
++                val *= dot(x, U)
++            projected_values.append(val)
++        elif comp['type'] == 'TRIPLE_PLANE':
++            val = 1.0
++            for U in comp['planes']:
++                val *= interpolate_2d(U, x)
++            projected_values.append(val)
++    features = matmul(projected_values, weight_matrix)
++    return features[0], features[1:]
++
++def sort_by_importance(rank_components, weight_matrix):
++    """Sort components by importance derived from weight matrix norms."""
++    importances = []
++    for i, _ in enumerate(rank_components):
++        norm = math.sqrt(sum(w**2 for w in weight_matrix[i]))
++        importances.append((norm, i))
++    importances.sort(key=lambda x: x[0], reverse=True)
++    return [idx for _, idx in importances]
+ 
+ def compress_ccnerf(rank_components, weight_matrix, target_rank):
+-    """
+-    Compress the model by truncating rank components.
+-    
+-    Args:
+-        rank_components: List of decomposed components.
+-        weight_matrix: Matrix storing weights for feature channels.
+-        target_rank: The desired number of rank components to keep.
+-        
+-    Returns:
+-        compressed_components: List of truncated rank components.
+-        compressed_weight_matrix: Truncated weight matrix.
+-    """
+-    # 1. Sort components based on importance
+-    # Importance is determined by the rank-residual learning strategy
+-    # and the weight matrix.
++    """Compress the model by truncating rank components."""
+     sorted_indices = sort_by_importance(rank_components, weight_matrix)
+-    
+-    # 2. Truncate to target rank
+-    # Keep the top 'target_rank' components
+-    selected_indices = sorted_indices[:target_rank]
+-    
+-    # 3. Return compressed components and corresponding weights
+-    compressed_components = [rank_components[i] for i in selected_indices]
+-    compressed_weight_matrix = weight_matrix[selected_indices, :]
+-    
+-    return compressed_components, compressed_weight_matrix
++    selected = sorted_indices[:target_rank]
++    return [rank_components[i] for i in selected], [weight_matrix[i] for i in selected]
++
++def expand_weight_matrix(models):
++    """Expand weight matrix to cover concatenated rank dimensions."""
++    total_rank = sum(len(m['rank_components']) for m in models)
++    out_channels = len(models[0]['weight_matrix'][0]) if models else 0
++    expanded = [[0.0] * total_rank for _ in range(out_channels)]
++    offset = 0
++    for m in models:
++        w = m['weight_matrix']
++        for i in range(len(w)):
++            for j in range(len(w[i])):
++                expanded[j][offset + i] = w[i][j]
++        offset += len(m['rank_components'])
++    return expanded
+ 
+ def compose_ccnerf(models, transformations):
+-    """
+-    Compose multiple CCNeRF models into a single scene.
+-    
+-    Args:
+-        models: List of CCNeRF models (each with rank_components and weight_matrix).
+-        transformations: List of transformation matrices for each model.
+-        
+-    Returns:
+-        composed_model: A single CCNeRF model representing the composed scene.
+-    """
+-    # 1. Concatenate rank components along the rank dimension
+-    # Note: Transformations are stored separately and applied during querying
+-    # or rendering, not by modifying the rank components themselves.
++    """Compose multiple CCNeRF models into a single scene."""
+     all_components = []
+     for model in models:
+-        all_components.extend(model.rank_components)
+-        
+-    # 2. Concatenate weight matrices
+-    # The weight matrices must be aligned or transformed appropriately.
+-    # In CCNeRF, the weight matrix maps rank components to output.
+-    # Concatenation along rank dimension implies stacking the components.
+-    # The weight matrix needs to be expanded to cover the new rank dimension.
+-    # This part requires careful handling of the weight matrix structure.
+-    # For simplicity, we assume the weight matrix is concatenated or expanded.
+-    # In practice, the weight matrix might need to be reshaped or padded.
+-    
+-    # 3. Store transformations
+-    # The transformations are recorded for each object to control position/orientation.
+-    # They are not part of the rank components but are metadata for the composed scene.
+-    
+-    composed_model = {
++        all_components.extend(model['rank_components'])
++    expanded_weight = expand_weight_matrix(models)
++    return {
+         'rank_components': all_components,
+-        'weight_matrix': expand_weight_matrix(models), # Placeholder for exact logic
++        'weight_matrix': expanded_weight,
+         'transformations': transformations
+     }
+-    
+-    return composed_model
+ ```
+ 
+@@ -158,5 +113,5 @@
+ *   **Compression:** Achieves near-optimal low-rank approximation at any targeted rank without retraining [S1]. Lower ranks preserve primary information due to rank-residual learning [S1].
+ *   **Composition:** Supports arbitrary composition of different models without retraining or compatibility constraints, as there are no MLP renderers [S1].
+-*   **Storage:** Model size is dynamically adjustable. Storage cost growth in composed scenes can be mitigated by compressing unimportant objects [S1].
++*   **Storage:** Model size is dynamically adjustable [S1]. Storage cost growth in composed scenes can be mitigated by compressing unimportant objects [S1].
+ *   **Limitations:** Standard truncated HOSVD is quasi-optimal, not strictly optimal [S1]. The method relies on the low-rank assumption of the scene; scenes with high-frequency details or complex structures may require higher ranks, increasing storage [S1].
+ 

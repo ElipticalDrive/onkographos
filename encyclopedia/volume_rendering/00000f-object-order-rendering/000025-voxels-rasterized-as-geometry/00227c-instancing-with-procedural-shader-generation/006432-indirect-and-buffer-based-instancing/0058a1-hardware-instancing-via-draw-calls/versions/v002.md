@@ -1,0 +1,36 @@
+# Hardware Instancing via Draw Calls
+
+Also called: GPU Instancing, Instanced Rendering
+
+## Overview
+Hardware Instancing via Draw Calls is a rendering technique that renders a large number of identical meshes (voxels) efficiently by issuing a single draw call that instructs the GPU to replicate a base primitive multiple times [Instanced Rendering](13354-instanced-rendering.md). It solves the CPU bottleneck associated with issuing individual draw calls for large numbers of voxels by decoupling the CPU-side draw call issuance from the GPU-side execution logic [GPU Instancing with Indirect Draw Calls](2205-gpu-instancing-with-indirect-draw-calls.md). Unlike standard per-object rendering, which requires repeated matrix multiplications, uniform uploads, and state changes per frame, this method uploads transformation data once and lets the GPU handle the replication [Instanced Rendering](13354-instanced-rendering.md). It sets itself apart from siblings like [Indirect and Buffer-Based Instancing](19066-indirect-and-buffer-based-instancing.md) by relying on explicit draw calls rather than compute-driven dispatch [Instanced Rendering](13354-instanced-rendering.md).
+
+## Shared principles
+The family relies on the GPU's ability to iterate over a base geometry and apply per-instance attributes (such as position, scale, or color) defined in a buffer. The core mechanism involves:
+1. **Base Geometry:** A single mesh (e.g., a voxel cube) is defined with vertices and indices. For voxels, this often includes duplicated vertices for flat shading (e.g., 24 vertices and 36 indices for a cube) [Instanced Rendering](13354-instanced-rendering.md).
+2. **Instance Data Buffer:** A GPU-accessible buffer (e.g., `StructuredBuffer`, `SSBO`, or VBO) stores per-instance parameters. Common data includes position (x, y, z), occupancy flags, scale, and color [Instanced Rendering](13354-instanced-rendering.md).
+3. **Instanced Draw Call:** A specific API call (e.g., `gl.drawElementsInstanced`, `Graphics.DrawMeshInstancedIndirect`) is used. This call takes the base geometry, the instance buffer, and an instance count. The GPU automatically iterates through the instance buffer, applying the per-instance data to the base vertices during vertex shader execution [Instanced Rendering](13354-instanced-rendering.md).
+4. **Vertex Shader Processing:** The vertex shader accesses the instance data using a built-in instance ID (e.g., `gl_InstanceID` or `unity_InstanceID`) to transform the base vertex position into world space [GPU Instancing with Indirect Draw Calls](2205-gpu-instancing-with-indirect-draw-calls.md).
+
+## Subtopics
+
+### [GPU Instancing with Indirect Draw Calls](2205-gpu-instancing-with-indirect-draw-calls.md)
+GPU Instancing with Indirect Draw Calls is a technique to render a large number of identical meshes (voxels) efficiently by using indirect draw calls. Instead of issuing one draw call per instance, a single draw call is issued that reads instance counts and parameters from a GPU-accessible buffer, allowing the GPU to generate the draw commands itself. It is distinguished from its siblings by decoupling the CPU-side draw call issuance from the GPU-side execution logic, enabling dynamic instance counts and reducing CPU-GPU synchronization overhead compared to standard hardware instancing. Choose when CPU overhead of command generation is a bottleneck. [GPU Instancing with Indirect Draw Calls](2205-gpu-instancing-with-indirect-draw-calls.md)
+
+### [WebGL 2 Hardware Instancing](3152-webgl-2-hardware-instancing.md)
+WebGL 2 Hardware Instancing is a rendering technique that sends a single base primitive (typically a 2x2x2 cube) to the GPU and executes `gl.drawElementsInstanced` to render hundreds of thousands of copies simultaneously. It solves the CPU bottleneck associated with issuing individual draw calls for large numbers of voxels by packing translation, scaling, and color data into flat typed arrays. Unlike surface-based instancing which modulates geometry with noise, this method relies on explicit instance buffers and procedural sampling to dictate vertex positions and colors. Choose for WebGL 2 environments with static or moderately dynamic voxel grids. [WebGL 2 Hardware Instancing](3152-webgl-2-hardware-instancing.md)
+
+### [Instanced Rendering](13354-instanced-rendering.md)
+Instanced Rendering is a rendering technique where a single vertex object is uploaded once, and transformation matrices are uploaded in a buffer, allowing efficient drawing of many static objects with the same geometry. It avoids repeated matrix multiplications, inverses, uniform uploads, and texture state changes per frame, which are expensive operations. Choose for general-purpose static or semi-static voxel rendering. [Instanced Rendering](13354-instanced-rendering.md)
+
+### [GPU Instancing with Layered Offset for Volume Clouds](20778-gpu-instancing-with-layered-offset-for-volume-clouds.md)
+GPU Instancing with Layered Offset for Volume Clouds renders volumetric cloud appearance by using GPU instancing to draw multiple vertically offset layers of a base mesh with distinct noise sampling parameters. It differs from ray-marching or parallax mapping by relying on discrete geometric layers with per-instance shader property variations to create a 3D noise-based volume effect. Choose for volumetric cloud rendering where ray-marching is too expensive. [GPU Instancing with Layered Offset for Volume Clouds](20778-gpu-instancing-with-layered-offset-for-volume-clouds.md)
+
+### GPU Instancing for Horizon Entities
+A technique to reduce CPU overhead from entity management by using true GPU instancing with an instance buffer and compute shader for frustum, occlusion, and distance tests. In flight, it uses one mesh per region tile per stage. Measured on the chain merge before batching, 88k horizon entities gave 5 fps at 4.5 M triangles and 16 fps at 240 k triangles, showing per-entity CPU work (visibility ranges, transform propagation, extraction) was the bound, not triangles. Choose for large-scale horizon/entity rendering where per-entity CPU work is the bottleneck. [S1, unofficial]
+
+## Background
+The technique originated as a solution to the performance limitations of traditional immediate mode rendering, where each object required a separate draw call [G]. Early implementations focused on static geometry with shared materials [G]. The method has since evolved to support dynamic instance data via GPU buffers and indirect command buffers, allowing for complex, large-scale voxel scenes and particle systems [G]. It is widely used in voxel-based games, terrain rendering, and particle effects where thousands of identical or similar primitives are rendered [G].
+
+## Sources
+[S1] Simplify cached fine chunks far from the camera into a mid-detail surface, https://github.com/aaronsb/dwarf-eye/issues/10, fetched 2026-10-26 (unofficial)

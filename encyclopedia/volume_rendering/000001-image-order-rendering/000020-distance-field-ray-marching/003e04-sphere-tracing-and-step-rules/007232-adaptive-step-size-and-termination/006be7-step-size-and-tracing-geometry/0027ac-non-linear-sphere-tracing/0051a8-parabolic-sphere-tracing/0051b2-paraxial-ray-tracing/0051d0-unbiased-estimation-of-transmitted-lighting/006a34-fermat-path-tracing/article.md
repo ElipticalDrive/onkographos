@@ -1,0 +1,62 @@
+# Fermat-Path-Tracing
+
+Also called: Fermat's Principle Path Tracing, Two-Point Tracing for Caustics
+
+## Overview
+Fermat-Path-Tracing (FPT) is a path-finding method that simulates any number of diffractions or reflections by minimizing the optical path length according to Fermat’s principle [S1]. It is distinguished from Min-Path-Tracing (MPT) by its specific objective function: while MPT minimizes a generic cost function, FPT explicitly minimizes the optical path length [S1]. This makes it suitable for unbiased estimation of transmitted lighting in complex environments involving refractive interfaces and heterogeneous media, building on the parent framework of [Unbiased Estimation of Transmitted Lighting](14564-unbiased-estimation-of-transmitted-lighting.md).
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Scene geometry (implicit surfaces, media), light source positions, receptor points, and an initial guess for the path vertices.
+*   **Output:** A valid light path where the optical path length is minimized, satisfying boundary conditions at interfaces.
+
+**Data Structures:**
+The method operates on a sequence of vertices $\mathbf{x}_0, \mathbf{x}_1, \dots, \mathbf{x}_n$ representing the path. Each vertex has spatial coordinates. For refractive interfaces defined by implicit surfaces $g(\cdot)=0$, the gradient $\nabla g$ is required for normal calculations.
+
+**Algorithm Steps:**
+1.  **Initialization:** Initialize the path vertices. For a connection between a point $\mathbf{x}_0$ inside a medium and a point $\mathbf{y}$ on a boundary, initialize the ray direction or intermediate points [S1].
+2.  **Optimization Loop:** Iteratively adjust the path vertices to minimize the objective function.
+    *   The objective function is the optical path length (OPL). For a path segment in a medium with refractive index $n(\mathbf{x})$, the OPL is $\int n(\mathbf{x}) ds$. In discrete form, it is the sum of weighted distances.
+    *   Use a gradient-based optimizer (e.g., L-BFGS) to minimize this function [S1].
+    *   The optimization simulates diffractions and reflections by allowing the path to "bend" at interfaces according to Snell's law implicitly through the minimization of OPL [S1].
+3.  **Convergence Check:**
+    *   Evaluate the MPT loss function $L$. The loss function evaluates to zero when the path is valid (i.e., satisfies geometric constraints and Fermat's principle) [S1].
+    *   Since exact zero comparison is numerically unstable, use a smoothing function $s$ to approximate the check: $s(L) < \epsilon$, where $\epsilon$ is a small tolerance [S1].
+    *   If converged, return the path. Otherwise, continue optimization.
+
+**Formulas:**
+*   **Optical Path Length (OPL):** $OPL = \sum_{i} n_i \|\mathbf{x}_{i+1} - \mathbf{x}_i\|$ for piecewise homogeneous media, or $\int_{\mathbf{x}_0}^{\mathbf{x}_n} n(\mathbf{x}) \|d\mathbf{x}\|$ for heterogeneous media [S1].
+*   **Loss Function:** $L(\mathbf{x})$ is defined such that $L=0$ iff the path is physically valid [S1].
+*   **Smoothing Function:** $s(L)$ approximates the indicator function for $L=0$. The exact form is not specified in the sources, but it is used to replace the discontinuous check $L=0$ [S1].
+
+**Parameters:**
+*   **Tolerance $\epsilon$:** Not given in the sources.
+*   **Optimizer:** Gradient-based method. Not specified in the sources.
+*   **Smoothing Function $s$:** Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Local Minima:** The optimization may converge to a local minimum of the OPL, resulting in a non-physical path. This is a known issue in iterative path finding [S1].
+*   **Discontinuity:** The convergence check is the only discontinuity in the method. The smoothing function $s$ is critical to maintain differentiability for the optimizer [S1].
+*   **Boundary Conditions:** For Type-1 connections (see Subtopics), the explicit geometric constraint of the medium boundary $g(\mathbf{y})=0$ must be enforced during optimization [S1].
+
+## Subtopics
+
+### [Type-1 Direct Connection Algorithm](23214-type-1-direct-connection-algorithm.md)
+The Type-1 Direct Connection Algorithm computes a refractive light path between a vertex $\mathbf{y}$ located on a medium boundary (defined by an implicit surface $g(\cdot)=0$) and a vertex $\mathbf{x}_0$ located inside the medium. It solves the boundary value problem by optimizing the initial velocity $\mathbf{v}_0$ of a ray propagated from $\mathbf{x}_0$ such that the ray intersects $\mathbf{y}$. It is distinguished from Type-2 connections by its use of the explicit geometric constraint of the medium boundary, which provides a better-behaved loss function and faster convergence rates for surface intersections.
+
+### Min-Path-Tracing
+Min-Path-Tracing (MPT) is a path finding method that simulates any number and any type of interactions by minimizing a cost function [S1]. It finds a path using an iterative approach and uses the MPT loss function, which evaluates to zero when the path is valid, checking convergence using the smoothing function $s$ [S1]. It is described in [10] (Eertmans et al., 2023) [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources. Depends on the number of iterations for convergence and the cost of evaluating the loss function and its gradient.
+*   **Memory Complexity:** Not given in the sources.
+*   **Strengths:** Can simulate any number of diffractions or reflections [S1]. Explicitly minimizes optical path length, adhering to Fermat's principle [S1].
+*   **Limitations:** Iterative approach may be slow to converge. Sensitive to local minima. The smoothing function approximation introduces potential inaccuracies [S1].
+*   **When to use:** When unbiased estimation of transmitted caustics is required in complex refractive environments [S1].
+*   **When not to use:** When real-time performance is critical and iterative methods are too slow. When specular reflections on planar surfaces are the only requirement (Image Method is faster) [S1].
+
+## Background
+Fermat-Path-Tracing (FPT) is part of a framework for fully differentiable ray tracing via discontinuity smoothing, designed for radio network optimization and potentially applicable to optical rendering [S1]. It was introduced in the context of the DiffeRT2d/3d toolbox, which is available as an open-source Python module [S1]. The method is distinguished from Min-Path-Tracing (MPT) [10] and Image Method (IM) [S1]. The framework supports both 2D and 3D scenes [S1].
+
+## Sources
+[S1] Fully Differentiable Ray Tracing via Discontinuity Smoothing for Radio Network Optimization, https://doi.org/10.23919/eucap60739.2024.10501570, fetched 2026-10-29

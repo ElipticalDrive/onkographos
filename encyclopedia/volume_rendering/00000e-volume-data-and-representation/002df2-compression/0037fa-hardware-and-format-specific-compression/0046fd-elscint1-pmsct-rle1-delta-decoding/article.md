@@ -1,0 +1,110 @@
+# ELSCINT1/PMSCT_RLE1 Delta Decoding
+Also called: PMSCT_RLE1 decompression
+
+## Overview
+Decodes a custom Run-Length Encoding (RLE) and Delta compression byte stream used by ELSCINT1/PMSCT medical imaging devices into a sequence of 16-bit unsigned integers [S1, unofficial]. It differs from standard RLE or Delta encoding by using specific escape markers (`0xa5` for RLE, `0x5a` for 16-bit delta values) and operating on a two-pass process (RLE expansion followed by delta reconstruction) to handle 16-bit pixel data compressed into a byte stream [S1, unofficial].
+
+## How it works
+The method decompresses a byte stream into 16-bit unsigned integers through two sequential passes: an RLE expansion pass to reconstruct the intermediate byte stream, and a delta decoding pass to reconstruct the final 16-bit values [S1, unofficial].
+
+### Inputs and Outputs
+- **Input**: `inbuffer`, a pointer to the compressed byte stream; `length`, the number of bytes in `inbuffer` [S1, unofficial].
+- **Output**: `output`, a reference to a container (e.g., `std::vector<unsigned short>`) storing the decoded 16-bit pixel values [S1, unofficial].
+
+### Data Structures
+- **`temp`**: An intermediate buffer (`std::vector<char>`) storing the RLE-decoded byte stream before delta decoding [S1, unofficial].
+- **`delta`**: A 16-bit unsigned integer accumulator used to track the previous decoded value for delta decoding, initialized to 0 [S1, unofficial].
+
+### Steps
+1. **RLE Expansion Pass**: Iterate through `inbuffer` to expand RLE sequences into `temp` [S1, unofficial].
+   - If the current byte `inbuffer[i]` equals the RLE marker `0xa5`:
+     - Read the next byte `inbuffer[i+1]` as the repeat count parameter [S1, unofficial].
+     - Calculate the repeat count: $repeat = inbuffer[i+1] + 1$ [S1, unofficial].
+     - Read the next byte `inbuffer[i+2]` as the value to repeat [S1, unofficial].
+     - Append this value to `temp` exactly $repeat$ times [S1, unofficial].
+     - Increment the index $i$ by 3 (skipping the count and value bytes, plus the loop's increment) [S1, unofficial].
+   - Otherwise:
+     - Append `inbuffer[i]` to `temp` [S1, unofficial].
+     - Increment the index $i$ by 1 [S1, unofficial].
+2. **Delta Decoding Pass**: Iterate through `temp` to reconstruct 16-bit values into `output` [S1, unofficial].
+   - Initialize `delta = 0` [S1, unofficial].
+   - If the current byte `temp[i]` equals the Delta marker `0x5a`:
+     - Read the next byte `v1 = temp[i+1]` (low byte) [S1, unofficial].
+     - Read the byte after that `v2 = temp[i+2]` (high byte) [S1, unofficial].
+     - Compute the 16-bit value: $value = v2 \times 256 + v1$ [S1, unofficial].
+     - Append $value$ to `output` [S1, unofficial].
+     - Update `delta = value` [S1, unofficial].
+     - Increment the index $i$ by 3 (skipping the low and high bytes, plus the loop's increment) [S1, unofficial].
+   - Otherwise:
+     - Compute the 16-bit value: $value = temp[i] + delta$ [S1, unofficial].
+     - Append $value$ to `output` [S1, unofficial].
+     - Update `delta = value` [S1, unofficial].
+     - Increment the index $i$ by 1 [S1, unofficial].
+3. **Post-processing**:
+   - If `output.size() % 2 != 0`, remove the last element from `output` to handle potential padding bytes in the compressed stream [S1, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def decode_elscint1(inbuffer, length):
+    # temp: std::vector<char>
+    temp = []
+    i = 0
+    while i < length:
+        if inbuffer[i] == 0xa5:
+            if i + 2 >= length:
+                break  # [G] Guard against truncated RLE sequence
+            repeat = inbuffer[i+1] + 1
+            value = inbuffer[i+2]
+            for _ in range(repeat):
+                temp.append(value)
+            i += 3  # Skip marker, count, and value
+        else:
+            temp.append(inbuffer[i])
+            i += 1
+
+    # output: std::vector<unsigned short>
+    output = []
+    delta = 0
+    i = 0
+    while i < len(temp):
+        if temp[i] == 0x5a:
+            if i + 2 >= len(temp):
+                break  # [G] Guard against truncated delta sequence
+            v1 = temp[i+1]
+            v2 = temp[i+2]
+            value = (v2 * 256) + v1
+            output.append(value)
+            delta = value
+            i += 3  # Skip marker, low byte, and high byte
+        else:
+            value = temp[i] + delta
+            output.append(value)
+            delta = value
+            i += 1
+
+    # Handle odd-sized output due to padding
+    if len(output) % 2 != 0:
+        output.pop()
+
+    return output
+```
+
+### Parameters
+- `inbuffer`: Pointer to the compressed input byte stream [S1, unofficial].
+- `length`: Number of bytes in `inbuffer` [S1, unofficial].
+- `output`: Reference to the output container for 16-bit values [S1, unofficial].
+
+### Edge Cases and Pitfalls
+- **Padding**: The decoded output size may be odd if the compressed stream contains padding. The algorithm handles this by truncating the last byte if `output.size() % 2 != 0` [S1, unofficial].
+- **Marker Collision**: The escape markers `0xa5` (RLE) and `0x5a` (Delta) must not appear as literal data values in the compressed stream, as they trigger escape sequences [S1, unofficial].
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+The ELSCINT1/PMSCT_RLE1 compression method is used by ELSCINT1/PMSCT medical imaging devices [S1, unofficial]. It is a custom format combining RLE and Delta encoding to compress 16-bit pixel data into a byte stream [S1, unofficial].
+
+## Sources
+[S1] oprogramadorreal/vize, https://github.com/oprogramadorreal/vize, fetched 2026-10-26 (unofficial)

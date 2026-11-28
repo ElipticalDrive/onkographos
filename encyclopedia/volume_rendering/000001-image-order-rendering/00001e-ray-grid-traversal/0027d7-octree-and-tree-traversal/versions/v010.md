@@ -1,0 +1,99 @@
+# Octree and Tree Traversal
+
+
+## Overview
+Octree and Tree Traversal methods determine which nodes of a hierarchical spatial structure (typically an octree or sparse voxel octree) a ray intersects, enabling efficient rendering of sparse volumetric data by skipping empty space [S1][S6, unofficial]. Unlike uniform grid ray marching which samples every voxel, these methods use the tree hierarchy to jump over empty regions, reducing computational cost [S1][S6, unofficial]. They differ from BVH-based approaches by operating directly on the octree structure without an intermediate bounding volume hierarchy, although some implementations may convert the SVO to a BVH for specific traversal optimizations [S1][S6, unofficial].
+
+## Shared principles
+All methods in this family share the core mechanism of hierarchical descent and ascent [G]. The traversal begins at the root of the octree and determines which of the eight children (octants) the ray intersects. This is typically done by comparing the ray's position relative to the center of the current node's bounding box [S1][S2, unofficial][G].
+
+1.  **Child Selection:** For a node with center $\mathbf{c}$ and half-extent $s$, the ray position $\mathbf{p}$ determines the child index $k \in \{0, \dots, 7\}$:
+    $$
+    k = 4 \cdot \mathbb{I}(p_x \ge c_x) + 2 \cdot \mathbb{I}(p_y \ge c_y) + 1 \cdot \mathbb{I}(p_z \ge c_z)
+    $$
+    where $\mathbb{I}(\cdot)$ is the indicator function [S1][S2, unofficial][G].
+
+2.  **Empty Space Skipping:** If the selected child is marked as empty (or uniform), the traversal skips the subtree [G]. This is achieved by advancing the ray parameter $t$ to the exit of the current node or using neighbor pointers to jump to the next potentially occupied node [S1][G].
+
+3.  **Leaf Handling:** Upon reaching a leaf node, the method typically switches to a fixed-step traversal (like DDA) within the leaf's voxel grid to sample the volume data [S1][G].
+
+4.  **Backtracking:** Because octrees are sparse and irregular, traversal often requires backtracking to the parent node when a ray exits a subtree or encounters an empty branch [G]. This is implemented using an explicit stack (on GPU) or recursion (on CPU) [S4, unofficial][G].
+
+## Subtopics
+
+### [Hermite Data Computation via Bisection](822-hermite-data-computation-via-bisection.md)
+Hermite Data Computation via Bisection precisely locates isosurface intersections on the edges of an adaptive octree's leaf cells and computes surface normals. It solves geometric inaccuracy in dual contouring by refining intersection positions to sub-cell accuracy for Quadratic Error Function (QEF) vertex placement, unlike [Octree Path Computation](897-octree-path-computation.md) which focuses on traversal efficiency.
+
+### [Stackless Traversal](5202-stackless-traversal.md)
+Stackless Traversal eliminates the explicit stack data structure in hierarchical volume traversal by recalculating Digital Differential Analyzer (DDA) parameters at every descent and ascent step. It trades increased computational cost for zero stack memory usage, making it advantageous in memory-constrained environments like early GPU architectures.
+
+### [GPU Octree Volume Rasterization with Shadow Mapping](5209-gpu-octree-volume-rasterization-with-shadow-mapping.md)
+This method decouples branch-intensive octree traversal from the raycasting loop using a rasterization pass to identify active volume regions and a shadow mapping pass for lighting. It solves performance bottlenecks on sparse data by moving empty-space culling into a graphics pipeline stage, achieving 2 to 4 times faster rendering than state-of-the-art algorithms on large out-of-core datasets.
+
+### [DDA Tree Traversal with Mini-Stack](5244-dda-tree-traversal-with-mini-stack.md)
+This method extends the Digital Differential Analyzer (DDA) algorithm to N-ary hierarchical trees for GPU shader implementation. It solves efficient traversal of sparse voxel structures by maintaining a small, fixed-size stack of DDA states, allowing descent and ascent without dynamic memory allocation.
+
+### [Compositing Tree Rendering](5860-compositing-tree-rendering.md)
+Compositing Tree Rendering minimizes computational cost for time-varying volume rendering by rendering only modified data subtrees and compositing them with retained partial images of unmodified data. It differs from standard incremental rendering by maintaining a persistent hierarchical structure that mirrors the data's compressed octree, enabling efficient spatial updates without full re-rendering.
+
+### [Tree Marcher](7534-tree-marcher.md)
+The Tree Marcher is a hierarchical ray traversal algorithm designed to step a ray through a generic grid structure (such as OpenVDB) to identify intersections with active nodes. It solves efficient navigation of sparse, multi-resolution volumetric data by skipping empty subtrees and returning precise intersection intervals for occupied nodes, bridging coarse hierarchical culling and fine-grained voxel sampling.
+
+### [Camera-Driven Octree Subdivision](7636-camera-driven-octree-subdivision.md)
+Camera-Driven Octree Subdivision constructs a spatial hierarchy by recursively splitting nodes based on the proximity of visible camera centers to the node's center. It solves efficient mapping of 3D space into local warp spaces for multi-view rendering by ensuring regions near cameras are represented with higher resolution, using camera-centric distance metrics rather than data density.
+
+### [JIT Type Specialization](7740-jit-type-specialization.md)
+JIT Type Specialization performs type resolution and function routing at Just-In-Time (JIT) compilation time, inlining traversal, type checks, and address lookups to eliminate switch statements and runtime overhead. It sets itself apart from standard dynamic dispatch by making access time independent of the number of elemental node types, as specialized code paths are baked into the executable.
+
+### [Ray Traversal Algorithms](7918-ray-traversal-algorithms.md)
+Ray Traversal Algorithms are a family of hierarchical methods that determine the sequence of nodes or cells intersected by a ray within a spatial data structure, primarily to accelerate volume rendering and surface intersection tests. This family is distinguished from [Stackless Traversal](5202-stackless-traversal.md) by its explicit reliance on parent-child pointer relationships and backtracking logic rather than encoding traversal state into a bitstream.
+
+### [Tetrahedralization of Octree Cells](9049-tetrahedralization-of-octree-cells.md)
+Tetrahedralization of Octree Cells generates a manifold isosurface from an adaptive octree by constructing a dual simplicial partition. It solves self-intersections and non-manifold vertices inherent in adaptive octrees by creating a dual structure that ensures convexity and manifold topology, unlike Dual Marching Tetrahedra (DMC) which can produce self-intersecting flaps.
+
+### [Topology-Caching for Dynamic Particle Volume Raycasting](9341-topology-caching-for-dynamic-particle-volume-raycasting.md)
+Topology-Caching is a GPU-based volume rendering technique for interactive visualization of dynamic particle systems (e.g., SPH) that reconstructs a scalar field via raycasting without preprocessing. It solves the performance bottleneck of gathering particle contributions by using three GPU-managed caches: a node-cache for accelerated tree traversal, an influence-cache for fast particle access, and a slab-cache for intermediate compositing.
+
+### [Budgeted-GS Factoring LOD](9677-budgeted-gs-factoring-lod.md)
+Budgeted-GS Factoring LOD is a hierarchical level-of-detail method for real-time large-scale Gaussian Splatting that reduces rendering cost by aggregating primitives into equivalent planks based on a pixel-footprint budget. It solves rendering millions of Gaussians in real-time by dynamically selecting between raw primitives, fine equivalent planks, or coarse aggregate planks depending on distance and scale relative to the camera.
+
+### [Hierarchical Tree Node Traversal](12213-hierarchical-tree-node-traversal.md)
+Hierarchical Tree Node Traversal accelerates ray-volume intersection by traversing a sparse octree structure to identify contiguous segments of active data. It solves inefficiently sampling empty space in large volumetric datasets by skipping inactive nodes and resolving hits at the node level rather than the individual voxel level, providing entry and exit times for line-integration.
+
+### [Frustum and Visibility Culling](12355-frustum-and-visibility-culling.md)
+Frustum and Visibility Culling methods optimize volume rendering by identifying and discarding geometry that does not contribute to the final image, thereby reducing computational load. This family distinguishes itself from sibling traversal methods by decoupling visibility determination from the core sampling loop, often serving as a pre-pass or integrated filter to limit the working set of voxels, splats, or bricks.
+
+### [Data Structure and Indexing](12420-data-structure-and-indexing.md)
+Data Structure and Indexing defines how hierarchical volume data (typically octrees) is organized in memory and accessed during ray traversal. It solves efficiently mapping spatial coordinates to volume samples while minimizing memory bandwidth and traversal overhead, focusing on storage layout and connectivity required to support traversal algorithms.
+
+### [Octree Sampled SDF Dataset](13111-octree-sampled-sdf-dataset.md)
+An Octree Sampled SDF Dataset generates signed-distance function (SDF) samples from a sparse octree acceleration structure constructed from a single mesh shape. It limits sampling to occupied octree cells, supports equal distribution of samples per cell, and allows online resampling via a cached narrowband pool, optionally including RGB data derived from mesh textures.
+
+### [Spatial Hierarchies](13154-spatial-hierarchies.md)
+Spatial hierarchies organize volumetric or geometric primitives into a tree structure to accelerate ray intersection tests and point location. They solve the problem of $O(N)$ linear scans by enabling $O(\log N)$ traversal, reducing the number of samples required to render a volume, and adapt to data sparsity by skipping empty regions entirely.
+
+### [Octree-based Entropy Rendering](13580-octree-based-entropy-rendering.md)
+Octree-based Entropy Rendering accelerates volume rendering by using hierarchical error metrics stored in non-leaf octree nodes to skip or approximate low-entropy regions. Unlike standard traversal which visits all occupied nodes, this method dynamically adjusts traversal granularity based on a user-defined error tolerance or time budget, trading visual fidelity for performance in smooth or transparent areas.
+
+### Photon Splatting for Direct Illumination
+Store incoming radiance from a light source in the octree leaves by rendering the scene from the light's view using standard rasterization to output a world position map (light-view map), where each pixel represents a photon [S1]. Photons are splatted using a fragment shader with one thread per light-view-map pixel, storing them as a direction distribution and energy proportional to the subtended solid angle of the pixel as seen from the light [S1]. Atomic add operations are used to handle multiple photons ending up in the same voxel, though they are currently only available for integer textures, requiring a 16-bit normalized texture format denormalized upon access [S1]. Voxels are repeated for adjacent bricks for fast hardware-supported filtering, but copying photons directly to all required locations in adjacent bricks leads to many thread collisions and bandwidth issues [S1].
+
+### Selective Rendering with Tree Representation
+A rendering strategy that uses the tree representation to perform selective rendering efficiently, reducing I/O costs and enabling distribution of data and calculations to multiple workstations [S2, unofficial]. It examines the encoded data to identify partial images built from subtrees which have not changed, and reuses the identified unchanged partial images in the following time steps [S2, unofficial].
+
+### Tile-based Octree Traversal
+A smaller leaf-node size leads to less overlap of node lists between image tiles, but increases storage and traversal overhead [S3, unofficial].
+
+### Brick-of-Bricks Decomposition
+A storage format where the volume is stored as a flat hierarchy of bricks of size $n^3$ to improve cache-coherence, derived from fully expanded octrees [S4, unofficial]. It uses an efficient indexing scheme to quickly find the memory address of voxels located in the 8-neighborhood required for trilinear interpolation [S4, unofficial].
+
+## Background
+The use of octrees for volume rendering originated as a method to handle sparse data efficiently, reducing memory usage and traversal time compared to uniform grids [S7, unofficial]. Early implementations focused on minimizing the number of transparent voxels during accumulation [S7, unofficial]. The concept of using hierarchical structures for time-varying data was explored to reduce I/O costs and enable selective rendering, allowing unchanged subtrees to be reused across time steps [S2, unofficial]. Modern implementations often combine these hierarchical traversal techniques with GPU-specific optimizations, such as stackless traversal or mini-stacks, to handle the parallel nature of volume rendering on graphics hardware [S1].
+
+## Sources
+[S1] Interactive Indirect Illumination Using Voxel Cone Tracing, https://doi.org/10.1111/j.1467-8659.2011.02063.x, fetched 2026-10-26
+[S2] DTIC ADA349761: Efficient Encoding and Rendering of Time-Varying Volume Data, https://archive.org/details/DTIC_ADA349761, fetched 2026-10-26 (unofficial)
+[S3] Skalierbares Webbasiertes Volume Rendering großer biomedizinischer Datensätze, https://doi.org/10.34726/hss.2023.106203, fetched 2026-10-26 (unofficial)
+[S4] Overview of Volume Rendering - Stony Brook Computer Science, https://www3.cs.stonybrook.edu/~mueller/papers/volvisOverview.pdf, fetched 2026-10-27 (unofficial)
+[S6] sparse-octree module, https://github.com/vanruesc/sparse-octree, fetched 2026-10-27 (unofficial)
+[S7] Introduction to volume rendering, https://slidetodoc.com/introduction-to-volume-rendering-presented-by-zvi-devir/, fetched 2026-10-29 (unofficial)

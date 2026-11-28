@@ -1,0 +1,276 @@
+# Sphere Light Sampling with Multiple Strategies
+
+Also called: getPixelColorWithSphereLightDBG
+
+## Overview
+Calculates direct lighting from a spherical light source using Monte Carlo integration with various sampling strategies [S1, unofficial]. It estimates direct illumination from a spherical light by sampling uniformly over the full 4π solid angle, ignoring the light's actual extent, or by using importance sampling techniques [S1, unofficial]. Unlike [Sphere Light Shading with Importance Solid Angle Sampling](2236-sphere-light-shading-with-importance-solid-angle-sampling.md) which samples the solid angle subtended by the light, or [Importance Sampling for Sphere Surface Area](2223-importance-sampling-for-sphere-surface-area.md) which samples the physical surface points directly, this method provides a framework supporting multiple strategies including Uniform Solid Angle, Importance Solid Angle, Importance Surface Area, Importance Phong, and Cosine Weighted sampling [S1, unofficial].
+
+## How it works
+**Inputs:**
+- Light source: A sphere defined by center $C$, radius $R$, and radiance $L_i$ [S1, unofficial].
+- Shading point: Position $X$, surface normal $N$, and material properties (diffuse/specular exponent) [S1, unofficial].
+- Sampling mode: Enum `SampleMode` selecting the strategy [S1, unofficial].
+- Random numbers: Uniform random variables $\eta_1, \eta_2 \in [0, 1)$ [S1, unofficial].
+
+**Outputs:**
+- Estimated radiance contribution $L_r$ from the spherical light [S1, unofficial].
+
+**Data Structures:**
+- `Vector3`: 3D vector with components $(x, y, z)$ [S1, unofficial].
+- `Sphere`: Contains center, radius, and radiance [S1, unofficial].
+- `Object`: Contains material type (DIFFUSE, SPECULAR), exponent (for Phong), and color [S1, unofficial].
+
+**Steps:**
+
+1.  **Calculate Geometry:**
+    Compute the distance from the shading point $X$ to the light center $C$:
+    $$ d = \| C - X \| $$
+    Compute the maximum sine and cosine of the half-angle subtended by the light:
+    $$ \sin\theta_{max} = \frac{R}{d} $$
+    $$ \cos\theta_{max} = \sqrt{1 - \sin^2\theta_{max}} $$
+    [S1, unofficial]
+
+2.  **Sample Direction:**
+    Call `getSample` with the light sphere, point $X$, `SampleMode`, normal $N$, and $\sin\theta_{max}$ [S1, unofficial]. This returns a sampled direction $V_{sample}$ [S1, unofficial]. The specific sampling logic depends on `SampleMode`:
+    -   **Uniform_Solid_Angle**: Samples a direction uniformly over the full $4\pi$ sphere [S1, unofficial].
+    -   **Uniform_Hemisphere_Solid_Angle**: Samples a direction uniformly over the hemisphere above the surface [S1, unofficial].
+    -   **Importance_Solid_Angle**: Samples a direction uniformly within the cone defined by the light's extent [S1, unofficial].
+    -   **Importance_Surface_Area**: Samples a point on the visible surface area of the sphere [S1, unofficial].
+    -   **Importance_Phong**: Samples based on a Phong distribution [S1, unofficial].
+    -   **Cosine_Weighted**: Samples based on cosine weighting relative to the normal [S1, unofficial].
+
+3.  **Trace Ray to Light:**
+    Trace a ray from $X$ in direction $V_{sample}$ [S1, unofficial]. Find the intersection distance $t$ to the light sphere [S1, unofficial]. If $t > \epsilon$ (where $\epsilon$ is a small epsilon), the ray hits the light [S1, unofficial]. Proceed to shadow check.
+
+4.  **Shadow Check:**
+    Trace a shadow ray from $X$ to the intersection point on the light sphere [S1, unofficial]. Let $t_{near}$ be the distance to the first intersection with any occluder [S1, unofficial]. If an intersection occurs at $t_{near}$ such that $t_{near}^2 < d^2$ (distance squared to light center), the point is in shadow [S1, unofficial]. *Pitfall:* The shadow ray origin must be offset by $10^{-9}$ along the normal $N$ to prevent self-intersection artifacts [S1, unofficial]. Define boolean `inShadow`: true if occluded, false if visible [S1, unofficial].
+
+5.  **Calculate Angles and BRDF:**
+    Compute the light direction vector $L_{dir}$ (from $X$ to light intersection) and normalize it [S1, unofficial]. Compute the incident angle cosine:
+    $$ \cos\theta_i = \text{clamp}(L_{dir} \cdot N) $$
+    Compute the outgoing angle cosine (for specular):
+    $$ \cos\theta_o = \text{clamp}(-N_{light} \cdot L_{dir}) $$
+    where $N_{light}$ is the normal at the light intersection point [S1, unofficial].
+    [S1, unofficial]
+
+    Calculate the BRDF $f_r$:
+    -   **DIFFUSE**:
+        $$ f_r = \frac{1}{\pi} $$
+    -   **SPECULAR (Phong)**:
+        Let $R_{dir}$ be the reflected direction.
+        $$ \text{temp} = R_{dir} \cdot V_{sample} $$
+        $$ f_r = \text{pow}(-1 \cdot \text{temp}, \text{exponent}) \cdot \frac{\text{exponent} + 2}{2\pi} $$
+    [S1, unofficial]
+
+6.  **Accumulate Radiance:**
+    Initialize $L_r = 0$. Based on `SampleMode`, update $L_r$:
+    -   **Importance_Solid_Angle**:
+        $$ pdf = 2\pi (1 - \cos\theta_{max}) $$
+        $$ L_r += \frac{L_i \cdot (1 - \text{inShadow}) \cdot \cos\theta_i \cdot f_r}{pdf} $$
+        [S1, unofficial]
+    -   **Importance_Surface_Area**:
+        $$ Area = 2\pi (1 - \sin\theta_{max}) \frac{R^2}{d^2} $$
+        $$ L_r += L_i \cdot (1 - \text{inShadow}) \cdot \cos\theta_i \cdot \cos\theta_o \cdot Area \cdot f_r $$
+        [S1, unofficial]
+    -   **Uniform_Solid_Angle**:
+        $$ L_r += f_r \cdot L_i \cdot (1 - \text{inShadow}) \cdot \cos\theta_i \cdot 4\pi $$
+        [S1, unofficial]
+    -   **Uniform_Hemisphere_Solid_Angle**:
+        $$ L_r += f_r \cdot L_i \cdot (1 - \text{inShadow}) \cdot \cos\theta_i \cdot 2\pi $$
+        [S1, unofficial]
+    -   **Importance_Phong**:
+        $$ L_r += L_i \cdot (1 - \text{inShadow}) \cdot \cos\theta_i $$
+        [S1, unofficial]
+    -   **Cosine_Weighted**:
+        $$ L_r += L_i \cdot (1 - \text{inShadow}) \cdot f_r $$
+        [S1, unofficial]
+
+7.  **Average:**
+    Repeat steps 2-6 for $N$ samples.
+    $$ L_r = \frac{1}{N} \sum_{k=1}^{N} L_r^{(k)} $$
+    [S1, unofficial]
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import random
+
+class Vector3:
+    def __init__(self, x, y, z):
+        self.x, self.y, self.z = x, y, z
+    def dot(self, other):
+        return self.x * other.x + self.y * other.y + self.z * other.z
+    def cross(self, other):
+        return Vector3(self.y * other.z - self.z * other.y,
+                       self.z * other.x - self.x * other.z,
+                       self.x * other.y - self.y * other.x)
+    def length(self):
+        return math.sqrt(self.x**2 + self.y**2 + self.z**2)
+    def normalize(self):
+        l = self.length()
+        return Vector3(self.x/l, self.y/l, self.z/l) if l > 0 else Vector3(0,0,0)
+    def __sub__(self, other):
+        return Vector3(self.x - other.x, self.y - other.y, self.z - other.z)
+    def __add__(self, other):
+        return Vector3(self.x + other.x, self.y + other.y, self.z + other.z)
+    def __mul__(self, s):
+        return Vector3(self.x * s, self.y * s, self.z * s)
+
+class Ray:
+    def __init__(self, origin, direction):
+        self.origin = origin
+        self.direction = direction
+
+def scene_intersect(ray):
+    # Placeholder for global scene intersection logic.
+    # Returns distance to nearest hit or infinity.
+    return float('inf')
+
+def get_sample_uniform_solid_angle(point, normal):
+    eta1 = random.random()
+    eta2 = random.random()
+    theta = math.acos(1 - 2 * eta1)
+    phi = 2 * math.pi * eta2
+    x = math.sin(theta) * math.cos(phi)
+    y = math.sin(theta) * math.sin(phi)
+    z = math.cos(theta)
+    sample = Vector3(x, y, z)
+    if abs(normal.z) < 0.999:
+        v = Vector3(0, 0, 1).cross(normal).normalize()
+    else:
+        v = Vector3(1, 0, 0).cross(normal).normalize()
+    w = normal.cross(v).normalize()
+    rotated = Vector3(sample.x * v.x + sample.y * w.x + sample.z * normal.x,
+                      sample.x * v.y + sample.y * w.y + sample.z * normal.y,
+                      sample.x * v.z + sample.y * w.z + sample.z * normal.z)
+    return rotated.normalize()
+
+def get_sample_importance_solid_angle(sphere, point, normal, sin_theta_max):
+    eta1 = random.random()
+    eta2 = random.random()
+    cos_theta_min = math.sqrt(1 - sin_theta_max**2)
+    cos_theta = cos_theta_min + eta1 * (1 - cos_theta_min)
+    sin_theta = math.sqrt(1 - cos_theta**2)
+    phi = 2 * math.pi * eta2
+    x = sin_theta * math.cos(phi)
+    y = sin_theta * math.sin(phi)
+    z = cos_theta
+    sample = Vector3(x, y, z)
+    if abs(normal.z) < 0.999:
+        v = Vector3(0, 0, 1).cross(normal).normalize()
+    else:
+        v = Vector3(1, 0, 0).cross(normal).normalize()
+    w = normal.cross(v).normalize()
+    rotated = Vector3(sample.x * v.x + sample.y * w.x + sample.z * normal.x,
+                      sample.x * v.y + sample.y * w.y + sample.z * normal.y,
+                      sample.x * v.z + sample.y * w.z + sample.z * normal.z)
+    return rotated.normalize()
+
+def sphere_light_sampling(point, normal, sphere, sample_mode, n_samples):
+    L_r = Vector3(0, 0, 0)
+    center = sphere.get_center()
+    radius = sphere.get_radius()
+    radiance = sphere.get_radiance()
+    dist_vec = center - point
+    d = dist_vec.length()
+    if d <= 0:
+        return L_r
+    sin_theta_max = radius / d
+    cos_theta_max = math.sqrt(1 - sin_theta_max**2)
+    for _ in range(n_samples):
+        if sample_mode == 'Uniform_Solid_Angle':
+            direction = get_sample_uniform_solid_angle(point, normal)
+        elif sample_mode == 'Importance_Solid_Angle':
+            direction = get_sample_importance_solid_angle(sphere, point, normal, sin_theta_max)
+        elif sample_mode == 'Uniform_Hemisphere_Solid_Angle':
+            # Sources do not provide explicit sampling formula for hemisphere mode.
+            direction = get_sample_uniform_solid_angle(point, normal)
+        elif sample_mode == 'Importance_Surface_Area':
+            # Sources do not provide explicit sampling formula for surface area mode.
+            direction = get_sample_importance_solid_angle(sphere, point, normal, sin_theta_max)
+        elif sample_mode == 'Importance_Phong':
+            # Sources do not provide explicit sampling formula for Phong mode.
+            direction = get_sample_uniform_solid_angle(point, normal)
+        elif sample_mode == 'Cosine_Weighted':
+            # Sources do not provide explicit sampling formula for cosine weighted mode.
+            direction = get_sample_uniform_solid_angle(point, normal)
+        else:
+            direction = get_sample_uniform_solid_angle(point, normal)
+        ray = Ray(point, direction)
+        t_hit = sphere.find_intersection(ray)
+        if t_hit <= 1e-9:
+            continue
+        shadow_point = point + direction * t_hit
+        shadow_ray_origin = point + normal * 1e-9
+        shadow_ray = Ray(shadow_ray_origin, shadow_point - shadow_ray_origin)
+        t_near = scene_intersect(shadow_ray)
+        in_shadow = False
+        if t_near > 0 and t_near < d:
+            in_shadow = True
+        light_dir = (shadow_point - point).normalize()
+        cos_theta_i = max(0.0, light_dir.dot(normal))
+        light_normal = sphere.get_normal_at(shadow_point)
+        cos_theta_o = max(0.0, -light_normal.dot(light_dir))
+        material = object.get_material()
+        exponent = object.get_exponent()
+        if material == 'DIFFUSE':
+            brdf = 1.0 / math.pi
+        elif material == 'SPECULAR':
+            reflected_dir = normal * (2 * normal.dot(-direction)) + (-direction)
+            temp = reflected_dir.dot(direction)
+            brdf = (math.pow(-1 * temp, exponent) * (exponent + 2)) / (2 * math.pi)
+        else:
+            brdf = 0.0
+        L_i = radiance
+        if sample_mode == 'Importance_Solid_Angle':
+            pdf = 2 * math.pi * (1 - cos_theta_max)
+            L_r += L_i * (1 - in_shadow) * cos_theta_i * brdf / pdf
+        elif sample_mode == 'Importance_Surface_Area':
+            area = 2 * math.pi * (1 - sin_theta_max) * (radius**2) / (d**2)
+            L_r += L_i * (1 - in_shadow) * cos_theta_i * cos_theta_o * area * brdf
+        elif sample_mode == 'Uniform_Solid_Angle':
+            L_r += brdf * L_i * (1 - in_shadow) * cos_theta_i * 4 * math.pi
+        elif sample_mode == 'Uniform_Hemisphere_Solid_Angle':
+            L_r += brdf * L_i * (1 - in_shadow) * cos_theta_i * 2 * math.pi
+        elif sample_mode == 'Importance_Phong':
+            L_r += L_i * (1 - in_shadow) * cos_theta_i
+        elif sample_mode == 'Cosine_Weighted':
+            L_r += L_i * (1 - in_shadow) * brdf
+    L_r /= n_samples
+    return L_r
+```
+
+## Subtopics
+
+### [Importance Sampling for Sphere Surface Area](2223-importance-sampling-for-sphere-surface-area.md)
+Estimates direct illumination from a spherical light source by sampling points on its visible surface area, with a probability density function (PDF) proportional to the projected area. Unlike [Sphere Light Shading with Importance Solid Angle Sampling](2236-sphere-light-shading-with-importance-solid-angle-sampling.md) which samples the solid angle subtended by the light, this method samples the physical surface points directly, requiring a geometric correction factor in the estimator to account for the varying projected area relative to the viewing direction.
+
+### [Sphere Light Shading with Importance Solid Angle Sampling](2236-sphere-light-shading-with-importance-solid-angle-sampling.md)
+This method estimates direct illumination from a spherical light source using Monte Carlo integration over the solid angle subtended by the light. It samples directions uniformly within the cone defined by the light's extent at the shading point. It is a specific strategy within the broader [Sphere Light Sampling with Multiple Strategies](2207-sphere-light-sampling-with-multiple-strategies.md) framework [G].
+
+### Sphere Light Shading with Uniform Solid Angle Sampling
+Estimates direct illumination from a spherical light by sampling uniformly over the hemisphere above the surface. Sample a direction uniformly over the hemisphere. Trace ray. If it hits the light, compute shadow. Update estimator: $L_r += f_r \cdot L_i \cdot (1 - \text{inShadow}) \cdot \cos\theta_i \cdot 2\pi$. Average over N samples. PDF is $1/2\pi$ [S1, unofficial].
+
+### [EquiAngular Sampling](2272-equiangular-sampling.md)
+EquiAngular Sampling is a Monte Carlo integration technique used to estimate direct lighting from point lights in participating media by importance sampling the distance domain along a ray. It solves the high variance caused by the $1/r^2$ geometric falloff and potential partial occlusion of the light source by sampling propagation distances proportional to the inverse squared length of the connecting edge. Unlike uniform solid angle or surface area sampling, which treat the light as a distant or extended object, this method re-parameterizes the integration into angular steps relative to the orthogonal projection of the light onto the ray, ensuring equal angular contributions. It is specifically designed for single scattering in homogeneous media.
+
+### [Importance Sampling of Procedural Skies using Marginal and Conditional CDFs](17503-importance-sampling-of-procedural-skies-using-marginal-and-c.md)
+This method reduces variance and computation time when sampling directions for a procedural sky (modeled as a spherical light source) by concentrating samples in luminous regions, such as the sun, rather than using uniform sphere sampling. It achieves this by discretizing the sky's luminosity into 2D and 1D textures representing conditional and marginal probability distributions, allowing for efficient rejection-free sampling via inverse transform sampling. Unlike [Importance Sampling for Sphere Surface Area](2223-importance-sampling-for-sphere-surface-area.md) which focuses on geometric surface area, or [Sphere Light Shading with Importance Solid Angle Sampling](2236-sphere-light-shading-with-importance-solid-angle-sampling.md) which may use analytical approximations, this method relies on pre-integrated numerical CDFs derived directly from the procedural sky's color data.
+
+## Operating characteristics
+- **Time Complexity:** $O(N \cdot C)$ where $N$ is the number of samples and $C$ is the cost of ray intersection tests (shadow ray + light ray) [G].
+- **Memory Complexity:** $O(1)$ auxiliary memory per sample [G].
+- **Performance:** Depends heavily on the sampling strategy. Importance sampling strategies (Solid Angle, Surface Area) generally reduce variance for large lights compared to Uniform Solid Angle [G].
+- **Strengths:** Supports multiple sampling strategies for different light sizes and material types. Handles self-intersection artifacts via offset [S1, unofficial].
+- **Limitations:** Uniform Solid Angle is inefficient for small lights (low hit rate). Importance Surface Area requires careful geometric correction [G].
+- **When to use:** When rendering scenes with spherical lights and varying material properties (diffuse/specular) [G].
+- **When not to use:** For very large lights where other approximations might be faster, or if the light is not spherical [G].
+
+## Background
+Originated in the `VolumeSingleScattering` C++ ray tracer implementation by WangYue (2016) [S1, unofficial]. The codebase implements direct lighting calculations for spherical lights using various sampling strategies within a path tracing framework [S1, unofficial].
+
+## Sources
+[S1] wangyuehi/VolumeSingleScattering, https://github.com/wangyuehi/VolumeSingleScattering, fetched 2026-10-26 (unofficial)

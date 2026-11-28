@@ -1,0 +1,65 @@
+# Dynamic Work Assignment
+
+Also called: Dynamic scheduling
+
+## Overview
+Dynamic work assignment is a parallel rendering technique that redistributes uneven computational tasks to improve resource utilization and overall performance compared to static assignment [S1, unofficial][S2, unofficial]. It addresses idle resources caused by uneven tile lists, variable pixel traversal, or large block sizes that lead to poor load balancing in static methods [S1, unofficial][S2, unofficial]. Instead of fixed mappings, it distributes work units dynamically, either based on current demand or historical rendering cost [S1, unofficial][S3, unofficial].
+
+## How it works
+**Inputs:**
+*   A set of work units (e.g., volume blocks or screen regions) [S1, unofficial][S3, unofficial].
+*   A pool of available processing threads or nodes [S1, unofficial][S3, unofficial].
+*   (For cost-based variants) Historical rendering time for previous frames [S3, unofficial].
+
+**Outputs:**
+*   Completed rendered image or volume data [G].
+*   Updated cost metrics for subsequent frames (if applicable) [S3, unofficial].
+
+**Data Structures:**
+*   **Work Queue:** A shared data structure containing unassigned work units. The specific layout is not detailed in the sources [G].
+*   **Cost History:** An array or map storing the rendering time of regions/blocks from the previous frame [S3, unofficial].
+
+**Steps:**
+1.  **Initialization:** Populate the work queue with all work units (volume blocks or screen regions) [S1, unofficial][S3, unofficial].
+2.  **Assignment:** Threads or a master GPU dynamically assign work units from the queue [S1, unofficial][S3, unofficial]. For cost-based variants, regions are distributed in order of descending cost, where cost is the time taken to render the region in the previous frame [S3, unofficial].
+3.  **Processing:** Each assigned unit is processed (e.g., ray casting, compositing, or Gaussian splatting) [S1, unofficial][S2, unofficial].
+4.  **Synchronization:** Threads synchronize only upon completion of their assigned unit, avoiding the idle time associated with static "sync" variants that force synchronization at fixed block boundaries [S1, unofficial].
+5.  **Cost Update (Optional):** After a frame completes, record the time taken for each region/block to update the cost history for the next frame [S3, unofficial].
+
+**Formulas:**
+*   **Cost Metric:** $Cost_i = Time_{render, i}^{previous}$, where $Time_{render, i}$ is the time taken to render region/block $i$ in the previous frame [S3, unofficial].
+*   **Performance Gain:** Assignment based on descending cost provides approximately a 10-20% increase in frame rate under most conditions compared to other methods [S3, unofficial].
+
+**Parameters:**
+*   **Region Size (for screen partitioning):** 65x65 pixels [S3, unofficial].
+*   **Replicated Edges:** Two edges of replicated rays are included in each region to support adaptive sampling without seams [S3, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Static Sync Failure:** Static work assignment with forced synchronization ("sync" variant) performs poorly due to load imbalance and is abandoned in favor of dynamic assignment [S1, unofficial].
+*   **Cache Coherence:** Smaller block sizes in static assignment may lead to lower temporal cache coherence and higher L2 cache misses [S1, unofficial]. Dynamic assignment mitigates this by allowing threads to process units that fit their cache state better, though Z-ordered memory layout is noted as beneficial for cache performance [S1, unofficial].
+*   **Adaptive Sampling Incompatibility:** Scanline-based assignment precludes adaptive sampling because screen areas, not lines, produce the greatest adaptive-sampling efficiency [S3, unofficial].
+*   **Warp Divergence:** Static mappings are prone to warp divergence due to footprint coverage and early termination, which dynamic scheduling mitigates by redistributing work through dynamic tile assignment [S2, unofficial].
+
+## Subtopics
+
+### Load Balancing via Screen Region Partitioning
+A parallel rendering load balancing technique where a master GPU dynamically assigns screen regions to ray casting nodes to adjust load balance [S3, unofficial]. It offers two assignment methods:
+1.  **Scanline Mode:** The master assigns sequential scan lines to nodes on a first-come-first-serve (FCFS) basis [S3, unofficial]. This provides good balance but precludes adaptive sampling [S3, unofficial].
+2.  **Square Region Mode:** The master distributes 65x65-pixel screen regions to nodes on an FCFS basis [S3, unofficial]. Regions are distributed in order of descending cost, where cost is the time taken to render the region in the previous frame [S3, unofficial]. This method provides approximately a 10-20% increase in frame rate under most conditions compared to other methods [S3, unofficial]. The region size includes two edges of replicated rays to support adaptive sampling without seams [S3, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Not explicitly given, but dynamic assignment reduces overall runtime by improving load balancing compared to static assignment [S1, unofficial].
+*   **Memory Complexity:** Not explicitly given. Z-ordered memory layout is noted to result in consistently better performance due to better use of the memory hierarchy and lower L2 cache misses [S1, unofficial].
+*   **Performance:** Dynamic work assignment shows better overall performance than static work assignment [S1, unofficial]. Static "sync" variant performed so poorly it was abandoned [S1, unofficial]. Cost-based assignment provides a 10-20% frame rate increase [S3, unofficial]. Balanced 3DGS redistributes work through dynamic tile assignment to improve SIMT utilization [S2, unofficial].
+*   **Strengths:** Better load balancing, especially when block sizes are large or scene coverage varies [S1, unofficial]. Supports adaptive sampling when using square regions [S3, unofficial]. Redistributes uneven tasks to address idle resources from variable pixel traversal [S2, unofficial].
+*   **Limitations:** Scanline assignment is incompatible with adaptive sampling [S3, unofficial]. Static mappings are prone to warp divergence due to footprint coverage and early termination [S2, unofficial].
+*   **When to use:** When scene density varies significantly or when using large block sizes that cause load imbalance in static assignment [S1, unofficial]. When uneven tile lists or variable pixel traversal cause SIMT idle resources [S2, unofficial].
+*   **When not to use:** When adaptive sampling is required and scanline assignment is used [S3, unofficial].
+
+## Background
+Dynamic work assignment was developed as an optimization for parallel raycasting volume rendering [S1, unofficial]. It was introduced to address the limitations of static work assignment, particularly the "sync" variant which forced synchronization at block levels and suffered from poor load balancing [S1, unofficial]. The method is part of a broader effort to optimize multi-core and many-core shared-memory parallel raycasting [S1, unofficial]. The screen region partitioning variant was implemented in the VISTAnet system for interactive multimodal volume visualization [S3, unofficial]. In modern Gaussian splatting pipelines, dynamic scheduling redistributes uneven tasks to improve SIMT utilization and mitigate warp divergence [S2, unofficial].
+
+## Sources
+[S1] Multi-core and Many-core Shared-memory Parallel Raycasting Volume Rendering Optimization and Tuning, https://digital.library.unt.edu/ark:/67531/metadc829701/?q=empty space skipping volume rendering, fetched 2026-10-28 (unofficial)
+[S2] From Splats to Silicon: Rethinking Computational Efficiency of 3DGS, https://arxiv.org/abs/2609.06157, fetched 2026-10-29 (unofficial)
+[S3] Interactive Multimodal Volume Visualization for a ..., http://www.cs.unc.edu/techreports/94-040.pdf, fetched 2026-10-29 (unofficial)

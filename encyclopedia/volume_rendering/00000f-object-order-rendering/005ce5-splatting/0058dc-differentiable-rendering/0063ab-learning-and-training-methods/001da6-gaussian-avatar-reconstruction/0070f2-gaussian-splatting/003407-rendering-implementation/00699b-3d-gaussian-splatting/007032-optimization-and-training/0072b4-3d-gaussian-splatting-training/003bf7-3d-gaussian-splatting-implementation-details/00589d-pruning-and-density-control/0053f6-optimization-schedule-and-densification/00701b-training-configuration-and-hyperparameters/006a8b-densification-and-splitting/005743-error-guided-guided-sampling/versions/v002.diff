@@ -1,0 +1,501 @@
+--- v001.md
++++ v002.md
+@@ -1,285 +1,263 @@
+ # Error-guided Guided Sampling
+ 
+-Also called: Error-guided multi-scale sampling, Guided sampling step, EMS
++Also called: Error-guided multi-scale sampling, Guided sampling step
+ 
+ ## Overview
+-Error-guided Guided Sampling (EMS) is a densification strategy for 3D Gaussian Splatting that replaces gradient-based refinement with SSIM-driven error localization. It identifies training views with low structural similarity, generates a pixel-wise error mask, and spawns new Gaussians exclusively in high-error regions using depth-aware placement to avoid occlusion artifacts. Unlike standard densification which relies on accumulated 2D positional gradients and radius thresholds, EMS uses a patch-based median depth estimator and a checkerboard center mask to control spatial density and prevent overlapping primitives [S1, unofficial].
++Error-guided Guided Sampling (EMS) is a densification strategy for 3D Gaussian Splatting that targets regions of high perceptual error rather than relying solely on gradient magnitude or opacity thresholds. It identifies low-SSIM training views, computes a pixel-wise error mask, and spawns new Gaussians specifically in high-error areas while using depth information and spatial masks to prevent overlapping placements and edge artifacts [S1, unofficial]. Unlike standard densification which refines existing primitives based on local gradients, EMS performs a global view-based error analysis to insert new primitives where the current representation fails to reconstruct the image structure [S1, unofficial].
+ 
+ ## How it works
+-### Inputs and Outputs
+ **Inputs:**
+-*   Current Gaussian set $\mathcal{G}$ with parameters $(\mu_k, \Sigma_k, \alpha_k, \mathbf{c}_k)$.
++*   Current set of 3D Gaussians $\mathcal{G}$.
+ *   Current training iteration $I$.
+-*   Reference image $I_{gt}$ and rendered image $I_{render}$ for a selected viewpoint.
+-*   Depth map $D$ corresponding to the viewpoint.
+-*   Configuration parameters: $I_{start}$ (start iteration), $I_{max}$ (max iterations), $T_{ssim}$ (SSIM threshold, default 0.88), $T_{err}$ (error percentile), $N_{patch}$ (patch size, 16), $N_{spawn}$ (points per ray/region).
++*   Current camera view $V$ with image $I_{img}$, ground truth $I_{gt}$, and depth map $D$.
++*   Parameters: `emsstartfromiterations`, `selectedlength`, `opt.emsthr`, `opt.farray`, `opt.rayends`, `opt.shuffleems`.
+ 
+ **Outputs:**
+-*   Updated Gaussian set $\mathcal{G}'$ with new primitives added in high-error regions.
++*   Updated Gaussian set $\mathcal{G}'$ with new primitives added.
+ *   Updated buffers: `visibility_filter`, `radii`, `viewspace_point_tensor`.
+ 
+-### Data Structures
+-*   **Error Mask ($M_{err}$):** Binary tensor of shape $(H, W)$, where $H, W$ are image dimensions. $M_{err}[i,j] = 1$ if pixel $(i,j)$ is in a high-error patch, else $0$.
+-*   **Center Mask ($M_{center}$):** Binary tensor of shape $(H, W)$ enforcing minimum spacing. Initialized to ones, then set to $0$ at every other pixel in a $16 \times 16$ grid pattern to prevent clustering.
+-*   **Depth Map ($D$):** Float tensor of shape $(H, W)$. Values equal to $15.0$ are treated as invalid [S1, unofficial].
+-
+-### Steps
++**Data Structures:**
++*   `visibility_filter`: Boolean tensor of shape $(N)$, where $N$ is the number of Gaussians. Extended by concatenating zeros for new points.
++*   `radii`: Float tensor of shape $(N)$, storing the 2D radius of each Gaussian. Extended by concatenating zeros.
++*   `viewspace_point_tensor`: Float tensor of shape $(N, 3)$, storing the 3D position of each Gaussian in viewspace. Extended by concatenating zeros.
++
++**Steps:**
++
+ 1.  **Trigger Check:**
+-    EMS is triggered if:
+-    *   $I > I_{start}$
+-    *   A specific flag `flag_ems` is set to $2$ [S1, unofficial].
+-    *   The number of EMS iterations performed $C_{ems} < I_{max}$.
+-    *   The current view is in the selected view list.
+-    *   $I - I_{last\_ems} > 100$ [S1, unofficial].
+-    
+-    If triggered, remove the view from the selection list, increment $C_{ems}$, update $I_{last\_ems} = I$, and compute the current SSIM score $S_{curr}$.
++    EMS is triggered if all conditions are met:
++    *   $I > \text{emsstartfromiterations}$
++    *   A specific flag `flagems == 2` is set.
++    *   $\text{emscnt} < \text{selectedlength}$ (count of EMS iterations performed).
++    *   $V.\text{image\_name} \in \text{selectviews}$ (a pre-selected list of views to process).
++    *   $I - \text{lasterems} > 100$ (minimum 100 iterations since last EMS run).
++    
++    If triggered:
++    *   Remove $V.\text{image\_name}$ from `selectviews`.
++    *   Increment `emscnt`.
++    *   Update `lasterems = I`.
++    *   Compute current SSIM of the rendered view.
+ 
+ 2.  **Error Mask Generation:**
+-    If $S_{curr} < T_{ssim}$:
+-    *   Normalize images: $I'_{adj} = I_{render} / (\text{mean}(I_{render}) + \epsilon)$ and $I'_{gt} = I_{gt} / (\text{mean}(I_{gt}) + \epsilon)$, where $\epsilon = 0.01$ [S1, unofficial].
+-    *   Compute absolute difference per channel: $D_{diff} = |I'_{adj} - I'_{gt}|$.
+-    *   Sum over channels: $D_{sum} = \sum_{c} D_{diff}[c]$.
+-    *   Flatten $D_{sum}$, sort values, and find the threshold $T_{th}$ at the $T_{err}$-th percentile.
+-    *   Create binary mask: $M_{raw}[i,j] = 1$ if $D_{sum}[i,j] > T_{th}$, else $0$.
++    If current SSIM $< 0.88$:
++    *   Normalize images:
++        $$ I_{adj} = \frac{I_{img}}{\text{mean}(I_{img}) + 0.01} $$
++        $$ GT_{adj} = \frac{I_{gt}}{\text{mean}(I_{gt}) + 0.01} $$
++    *   Compute absolute difference per channel, sum over channels (dim=0), and flatten.
++    *   Sort the flattened differences.
++    *   Find the threshold value at percentile `opt.emsthr`.
++    *   Create binary error mask $M_{err}$:
++        $$ M_{err}(p) = \begin{cases} 1 & \text{if } \text{diff}(p) > \text{threshold} \\ 0 & \text{otherwise} \end{cases} $$
+ 
+ 3.  **Patch Processing:**
+-    *   Pad $M_{raw}$ to multiples of $N_{patch} \times N_{patch}$ using constant padding (value 0).
+-    *   Extract non-overlapping $16 \times 16$ patches.
+-    *   Filter patches: A patch is kept if the sum of its values $> 16 \times 16 \times 0.85$ [S1, unofficial].
+-    *   Broadcast the kept patch mask back to the full image resolution to form $M_{err}$.
+-
+-4.  **Depth Estimation and Clamping:**
+-    *   Extract the depth map $D$ for the current view.
++    *   Pad $M_{err}$ to multiples of $16 \times 16$ using constant padding (value=0).
++    *   Extract $16 \times 16$ patches with stride $16 \times 16$.
++    *   Filter patches: Calculate sum of each patch. Keep patch if sum $> 16 \times 16 \times 0.85$.
++    *   Broadcast the kept patch mask back to $16 \times 16$ size to create $M_{patch}$.
++
++4.  **Depth Estimation:**
++    *   Extract depth map $D$ for the current view.
+     *   Pad $D$ to multiples of $16 \times 16$.
+-    *   Extract $16 \times 16$ patches from $D$.
+-    *   Compute the median depth for each patch along the spatial dimensions.
+-    *   Broadcast the median depth back to the patch resolution and reshape to $(H, W)$.
+-    *   Crop to original dimensions.
+-    *   Identify invalid depth pixels ($D == 15.0$) and mask them out [S1, unofficial].
+-    *   Compute the 70th percentile of valid depths ($D_{med}$).
+-    *   Clamp depth values: $D_{clamped} = \min(D, D_{med})$ [S1, unofficial].
+-
+-5.  **Center Mask Application:**
+-    *   Create $M_{center}$: Initialize with ones. Set $M_{center}[i,j] = 0$ for $i \in \{0, 2, \dots, 14\}$ and $j \in \{0, 2, \dots, 14\}$ within each $16 \times 16$ block.
+-    *   Apply border removal: Strip the top/bottom $10\%$ and left/right $10\%$ of $M_{center}$ to prevent edge artifacts [S1, unofficial].
+-    *   Combine masks: $M_{final} = M_{err} \land M_{center}$.
+-
+-6.  **Gaussian Spawning:**
+-    *   Find indices $P_{bad}$ where $M_{final} > 0$.
+-    *   For each point in $P_{bad}$, spawn new Gaussians using the clamped depth $D_{clamped}$ and the original GT image.
+-    *   The number of points spawned per location is determined by $N_{spawn}$ (parameter `opt.farray`) [S1, unofficial].
+-    *   New Gaussians are added to $\mathcal{G}$.
+-
+-7.  **Buffer Update:**
+-    *   Extend `visibility_filter` by concatenating zeros for the new points.
+-    *   Extend `radii` by concatenating zeros for the new points.
+-    *   Extend `viewspace_point_tensor` by concatenating zeros for the new points [S1, unofficial].
+-
+-### Pseudocode
++    *   Unfold into $16 \times 16$ patches.
++    *   Reshape patches to $(B, P, 256)$.
++    *   Compute median depth per patch along the spatial dimension (dim=2).
++    *   Broadcast median depth back to patch size, reshape, and permute to match image dimensions.
++    *   Crop to original depth size.
++
++5.  **Center Masking (Spacing Control):**
++    *   Initialize a mask $M_{center}$ of ones with image dimensions.
++    *   Set every other pixel in a $16 \times 16$ grid to 0:
++        $$ M_{center}(i, j) = 0 \quad \text{if } i \in \{0, 2, \dots, 14\} \text{ and } j \in \{0, 2, \dots, 14\} $$
++    *   Multiply $M_{patch}$ by $M_{center}$ (element-wise).
++    *   Unfold, permute, and reshape back to image size.
++    *   Crop to image dimensions.
++    *   Remove a 10% border from $M_{center}$ (top/bottom: $H/10$, left/right: $W/10$) to prevent edge artifacts.
++
++6.  **Invalid Depth Handling:**
++    *   Create invalid depth mask where $D == 15.0$ (treated as invalid/occluded) [S1, unofficial].
++    *   Find non-zero indices in the processed center mask ($M_{final}$). These are `badindices`.
++    *   Compute median depth of valid depth map at the 70th percentile ($D_{med}$).
++    *   Clamp depth values:
++        $$ D_{clamped}(p) = \begin{cases} D_{med} & \text{if } D(p) > D_{med} \\ D(p) & \text{otherwise} \end{cases} $$
++
++7.  **Gaussian Spawning:**
++    *   Call `gaussians.addgaussians(badindices, V, D_{clamped}, I_{gt}, numperay=\text{opt.farray}, ratioend=\text{opt.rayends}, depthmax=D_{max}, shuffle=\text{opt.shuffleems})`.
++    *   This function spawns new Gaussians at the `badindices` locations, using the depth map for placement and the error mask to guide density.
++
++8.  **Buffer Update:**
++    *   Let $N_{new}$ be the number of spawned Gaussians.
++    *   Extend `visibility_filter` by concatenating `torch.zeros(N_new)` along dim=0.
++    *   Extend `radii` by concatenating `torch.zeros(N_new)` along dim=0.
++    *   Extend `viewspace_point_tensor` by concatenating `torch.zeros(N_new, 3)` along dim=0.
++
++**Pseudocode:**
+ 
+ ```python
+-def error_guided_guided_sampling(gaussians, iteration, viewpoint_cam, gt_image, render_image, depth_map, config):
+-    """
+-    Implements Error-guided Guided Sampling (EMS).
+-    
+-    Args:
+-        gaussians: Current Gaussian object containing xyz, opacity, scales, rotations, sh_coeffs.
+-        iteration: Current training iteration.
+-        viewpoint_cam: Camera object with image_name, intrinsics, etc.
+-        gt_image: Ground truth image tensor (H, W, 3).
+-        render_image: Rendered image tensor (H, W, 3).
+-        depth_map: Depth map tensor (H, W).
+-        config: Configuration object with EMS parameters.
+-        
+-    Returns:
+-        Updated gaussians object.
+-    """
++def error_guided_guided_sampling(gaussians, iteration, viewpoint_cam, opt, emscnt, lasterems, selectviews):
+     # 1. Trigger Check
+-    if iteration <= config.ems_start_from_iterations:
+-        return gaussians
+-    if config.flag_ems != 2:
+-        return gaussians
+-    if config.ems_cnt >= config.selected_length:
+-        return gaussians
+-    if viewpoint_cam.image_name not in config.select_views:
+-        return gaussians
+-    if iteration - config.last_ems_iteration <= 100:
+-        return gaussians
+-
+-    # Update state
+-    config.select_views.remove(viewpoint_cam.image_name)
+-    config.ems_cnt += 1
+-    config.last_ems_iteration = iteration
++    if iteration <= opt.emsstartfromiterations:
++        return emscnt, lasterems, selectviews
++    if opt.flagems != 2:
++        return emscnt, lasterems, selectviews
++    if emscnt >= opt.selectedlength:
++        return emscnt, lasterems, selectviews
++    if viewpoint_cam.image_name not in selectviews:
++        return emscnt, lasterems, selectviews
++    if iteration - lasterems <= 100:
++        return emscnt, lasterems, selectviews
++
++    # Triggered
++    selectviews.remove(viewpoint_cam.image_name)
++    emscnt += 1
++    lasterems = iteration
++    
++    # Render current view to get image and depth
++    render_result = render_viewpoint(gaussians, viewpoint_cam)
++    I_img = render_result['image']
++    D = render_result['depth']
++    I_gt = viewpoint_cam.gt_image
+     
+     # Compute SSIM
+-    ssim_val = compute_ssim(render_image, gt_image)
+-    if ssim_val >= 0.88:
+-        return gaussians
++    current_ssim = compute_ssim(I_img, I_gt)
++    
++    if current_ssim >= 0.88:
++        return emscnt, lasterems, selectviews
+ 
+     # 2. Error Mask Generation
+-    # Normalize
+-    eps = 0.01
+-    img_adj = render_image / (torch.mean(render_image) + eps)
+-    gt_adj = gt_image / (torch.mean(gt_image) + eps)
+-    
+-    # Diff
+-    diff = torch.abs(img_adj - gt_adj)
+-    diff_sum = torch.sum(diff, dim=0) # Sum over channels
+-    
+-    # Threshold
+-    flat_diff = diff_sum.flatten()
+-    threshold = torch.quantile(flat_diff, config.ems_thr)
++    I_adj = I_img / (torch.mean(I_img) + 0.01)
++    GT_adj = I_gt / (torch.mean(I_gt) + 0.01)
++    diff = torch.abs(I_adj - GT_adj)
++    diff_sum = diff.sum(dim=0) # Sum over channels
++    diff_flat = diff_sum.flatten()
++    diff_flat_sorted, _ = torch.sort(diff_flat)
++    threshold = diff_flat_sorted[int(len(diff_flat_sorted) * opt.emsthr / 100.0)]
+     outmask = (diff_sum > threshold).float()
+ 
+     # 3. Patch Processing
++    H, W = outmask.shape
+     kh, kw = 16, 16
+     dh, dw = 16, 16
+     
+     # Pad to multiples of 16
+-    pad_h = (kh - outmask.shape[0] % kh) % kh
+-    pad_w = (kw - outmask.shape[1] % kw) % kw
++    pad_h = (kh - H % kh) % kh
++    pad_w = (kw - W % kw) % kw
+     outmask_padded = torch.nn.functional.pad(outmask, (0, pad_w, 0, pad_h), mode='constant', value=0)
+     
+     # Unfold into patches
+     patches = outmask_padded.unfold(0, kh, dh).unfold(1, kw, dw)
+-    # patches shape: (num_patches, kh, kw)
+-    patches = patches.reshape(-1, kh, kw)
+-    
+-    # Filter patches
+-    patch_sum = patches.sum(dim=(1, 2))
+-    patch_threshold = kh * kw * 0.85
+-    patch_mask = (patch_sum > patch_threshold).unsqueeze(1).unsqueeze(2) # (num_patches, 1, 1)
+-    
+-    # Broadcast back
+-    outmask_filtered = patches * patch_mask
+-    # Reshape back to image size
+-    # Note: Implementation details for reshaping unfold output back to spatial dims vary.
+-    # Assuming standard unfold->fold logic or manual reconstruction.
+-    # Here we assume a helper `fold_patches` exists or we reconstruct manually.
+-    # For self-contained pseudocode, we simulate the reconstruction:
+-    h_p, w_p = outmask_padded.shape
+-    num_patches_h = h_p // kh
+-    num_patches_w = w_p // kw
+-    
+-    reconstructed_mask = torch.zeros_like(outmask_padded)
+-    for i in range(num_patches_h):
+-        for j in range(num_patches_w):
+-            idx = i * num_patches_w + j
+-            reconstructed_mask[i*kh:(i+1)*kh, j*kw:(j+1)*kw] = outmask_filtered[idx]
+-            
+-    # Crop to original size
+-    outmask_final = reconstructed_mask[:outmask.shape[0], :outmask.shape[1]]
+-
+-    # 4. Depth Processing
+-    depth_padded = torch.nn.functional.pad(depth_map, (0, pad_w, 0, pad_h), mode='constant', value=0)
+-    depth_patches = depth_padded.unfold(0, kh, dh).unfold(1, kw, dw).reshape(-1, kh*kw)
+-    
+-    # Median depth per patch
+-    median_depth_patches = torch.median(depth_patches, dim=1)
+-    
++    patches_sum = patches.sum(dim=(2, 3))
++    patches_musk = (patches_sum > kh * kw * 0.85).float()
++    
++    # Broadcast mask back
++    # Note: In PyTorch, unfolding creates a view. We need to reconstruct or use scatter.
++    # Simplified logic: create a zero tensor of padded size, then fill in the kept patches.
++    M_patch = torch.zeros_like(outmask_padded)
++    # This step requires careful indexing to map patch indices back to pixel coordinates.
++    # For implementation clarity, we assume a helper `broadcast_patches` exists or implement via scatter.
++    # Here we describe the logical operation:
++    # M_patch = patches_musk * 1.0, reshaped and permuted back to (H+pad_h, W+pad_w)
++    M_patch = broadcast_patches(patches_musk, H+pad_h, W+pad_w, kh, kw, dh, dw)
++
++    # 4. Depth Estimation
++    D_padded = torch.nn.functional.pad(D, (0, pad_w, 0, pad_h), mode='constant', value=0)
++    D_patches = D_padded.unfold(0, kh, dh).unfold(1, kw, dw)
++    D_patches_reshaped = D_patches.reshape(-1, kh * kw)
++    D_median = torch.median(D_patches_reshaped, dim=1)
+     # Broadcast median depth back to patch size
+-    median_depth_patches_expanded = median_depth_patches.unsqueeze(1).unsqueeze(2).repeat(1, kh, kw)
+-    
+-    # Reconstruct depth map
+-    reconstructed_depth = torch.zeros_like(depth_padded)
+-    for i in range(num_patches_h):
+-        for j in range(num_patches_w):
+-            idx = i * num_patches_w + j
+-            reconstructed_depth[i*kh:(i+1)*kh, j*kw:(j+1)*kw] = median_depth_patches_expanded[idx]
+-            
+-    depth_final = reconstructed_depth[:depth_map.shape[0], :depth_map.shape[1]]
+-    
+-    # Invalid depth mask (15.0)
+-    invalid_depth_mask = (depth_final == 15.0)
+-    
+-    # Clamp depth
+-    valid_depths = depth_final[~invalid_depth_mask]
+-    if valid_depths.numel() > 0:
+-        median_depth_global = torch.quantile(valid_depths, 0.7)
+-        depth_final = torch.where(depth_final > median_depth_global, median_depth_global, depth_final)
+-    else:
+-        median_depth_global = 0.0 # Fallback
+-
+-    # 5. Center Mask
+-    midpatch = torch.ones_like(outmask_final)
+-    # Set every other pixel in 16x16 grid to 0
+-    # This is a checkerboard pattern within each 16x16 block
++    D_median_patches = broadcast_patches(D_median.unsqueeze(1).unsqueeze(1), H+pad_h, W+pad_w, kh, kw, dh, dw)
++    D_median_img = D_median_patches[:, :H, :W]
++
++    # 5. Center Masking
++    M_center = torch.ones((H, W))
+     for i in range(0, kh, 2):
+         for j in range(0, kw, 2):
+-            # Apply to all blocks
+-            for block_i in range(num_patches_h):
+-                for block_j in range(num_patches_w):
+-                    r = block_i * kh + i
+-                    c = block_j * kw + j
+-                    if r < midpatch.shape[0] and c < midpatch.shape[1]:
+-                        midpatch[r, c] = 0
+-                        
++            # This logic applies to the 16x16 grid pattern repeated
++            # In practice, this is a checkerboard pattern with period 2 in the 16x16 block
++            # But the source says "every other pixel in 16x16 grid", implying a sparse grid.
++            # The source code snippet: "set every other pixel in 16x16 grid to 0 (i, j in range(0, kh, 2), range(0, kw, 2))"
++            # This creates a mask where only (0,0), (0,2)... are 1? No, it sets them to 0.
++            # So (1,1), (1,3)... are 1?
++            # Let's re-read: "initialize midpatch of ones, set every other pixel... to 0"
++            # This implies a sparse sampling grid.
++            pass 
++            
++    # Correct interpretation of source:
++    # M_center is initialized to ones.
++    # Pixels at (i, j) where i is even and j is even (within the 16x16 block) are set to 0.
++    # This creates a grid of available positions.
++    M_center_sparse = torch.ones((H, W))
++    for i in range(0, H, 2): # Assuming the pattern repeats or applies globally?
++        # The source says "in 16x16 grid". This likely means the pattern is applied per 16x16 block.
++        # However, the code snippet `range(0, kh, 2)` suggests it's defining the pattern within the block.
++        # Let's assume a global checkerboard with stride 2 for simplicity, or block-wise.
++        # Given "center mask to prevent overlapping", a global stride-2 grid is standard.
++        for j in range(0, W, 2):
++             M_center_sparse[i, j] = 0
++             
++    # Apply to patches
++    M_final = M_patch * M_center_sparse
++    
+     # Remove 10% border
+-    h, w = midpatch.shape
+-    offset_h = h // 10
+-    offset_w = w // 10
+-    center_mask = midpatch[offset_h:h-offset_h, offset_w:w-offset_w]
+-    outmask_final = outmask_final[offset_h:h-offset_h, offset_w:w-offset_w]
+-    
+-    # Combine
+-    final_mask = (outmask_final > 0) & (center_mask > 0)
+-    
+-    # 6. Spawn Gaussians
+-    bad_indices = torch.nonzero(final_mask, as_tuple=False).squeeze()
+-    if bad_indices.numel() == 0:
+-        return gaussians
+-        
+-    # Spawn new Gaussians
+-    # The actual spawning logic is encapsulated in add_gaussians
+-    # Parameters: bad_indices, viewpoint_cam, depth_final, gt_image, num_per_ray, ray_ends, depth_max, shuffle
+-    gaussians.add_gaussians(
+-        bad_indices=bad_indices,
+-        viewpoint_cam=viewpoint_cam,
+-        depth=depth_final,
+-        gt_image=gt_image,
+-        num_per_ray=config.farray,
+-        ray_ends=config.ray_ends,
+-        depth_max=config.depth_max,
+-        shuffle=config.shuffle_ems != 0
++    offsetH = H // 10
++    offsetW = W // 10
++    M_final = M_final[offsetH:-offsetH, offsetW:-offsetW]
++    
++    # 6. Invalid Depth Handling
++    invalid_depth_mask = (D == 15.0)
++    # Find non-zero indices in M_final (relative to cropped image)
++    # Map back to original image coordinates
++    bad_indices_global = torch.nonzero(M_final, as_tuple=False) + torch.tensor([[offsetH, offsetW]])
++    bad_indices_flat = bad_indices_global[:, 0] * W + bad_indices_global[:, 1]
++    
++    # Clamp depth
++    valid_depth = D[~invalid_depth_mask]
++    D_med = torch.median(valid_depth)
++    D_clamped = torch.where(D > D_med, D_med, D)
++    
++    # 7. Spawn Gaussians
++    new_gaussians = gaussians.add_gaussians(
++        bad_indices_flat, 
++        viewpoint_cam, 
++        D_clamped, 
++        I_gt, 
++        numperay=opt.farray, 
++        ratioend=opt.rayends, 
++        depthmax=gaussians.depth_dict[viewpoint_cam.image_name], 
++        shuffle=(opt.shuffleems != 0)
+     )
+     
+-    # 7. Buffer Update
+-    # Extend buffers with zeros for new points
+-    num_new = gaussians.get_xyz.shape[0] - gaussians.prev_xyz_count # Assuming prev_xyz_count tracks old size
+-    # Note: In the source, buffers are extended by concatenating zeros.
+-    # visibility_filter
+-    gaussians.visibility_filter = torch.cat([gaussians.visibility_filter, torch.zeros(num_new, device="cuda", dtype=torch.bool)])
+-    # radii
+-    gaussians.radii = torch.cat([gaussians.radii, torch.zeros(num_new, device="cuda")])
+-    # viewspace_point_tensor
+-    gaussians.viewspace_point_tensor = torch.cat([gaussians.viewspace_point_tensor, torch.zeros(num_new, 3, device="cuda")])
+-    
+-    return gaussians
++    # 8. Buffer Update
++    N_new = new_gaussians.shape[0]
++    gaussians.visibility_filter = torch.cat([gaussians.visibility_filter, torch.zeros(N_new, device="cuda")])
++    gaussians.radii = torch.cat([gaussians.radii, torch.zeros(N_new, device="cuda")])
++    gaussians.viewspace_point_tensor = torch.cat([gaussians.viewspace_point_tensor, torch.zeros(N_new, 3, device="cuda")])
++    
++    return emscnt, lasterems, selectviews
+ ```
+ 
+-### Parameters
+-*   `emsstartfromiterations`: Iteration index after which EMS begins. Not given in the sources.
+-*   `selectedlength`: Maximum number of EMS iterations. Not given in the sources.
+-*   `emsthr`: Percentile threshold for error mask generation. Controls sensitivity. Not given in the sources.
+-*   `farray`: Number of points to spawn per error region/ray. Not given in the sources.
+-*   `rayends`: Ray end parameter for Gaussian placement. Not given in the sources.
+-*   `shuffle_ems`: Boolean flag to shuffle spawning order. Not given in the sources.
+-
+-### Edge Cases and Pitfalls
+-*   **Invalid Depth:** Depth values exactly equal to $15.0$ are treated as invalid and masked out to prevent spawning in occluded or missing geometry regions [S1, unofficial].
+-*   **Edge Artifacts:** A $10\%$ border is stripped from the center mask to prevent overlapping Gaussians at image boundaries [S1, unofficial].
+-*   **Clustering:** The center mask uses a checkerboard-like pattern (every other pixel set to $0$ in a $16 \times 16$ grid) to enforce minimum spacing between newly spawned Gaussians [S1, unofficial].
+-*   **Depth Clamping:** Depth values above the 70th percentile of valid depths are clamped to the median to prevent spawning in far-away erroneous regions [S1, unofficial].
++**Parameters:**
++*   `opt.emsthr`: Percentile threshold for error mask generation. Controls sensitivity. Value not specified in sources.
++*   `kh, kw`: Patch kernel size, fixed at 16.
++*   `dh, dw`: Patch stride, fixed at 16.
++*   `opt.farray`: Number of points to spawn per error region/ray.
++*   `opt.rayends`: Ray end parameter for Gaussian placement.
++*   `emsstartfromiterations`: Iteration index after which EMS begins.
++*   `selectedlength`: Maximum number of EMS iterations allowed.
++
++**Edge Cases and Pitfalls:**
++*   **Invalid Depth:** Depth values exactly equal to 15.0 are treated as invalid and masked out to prevent spawning in occluded regions [S1, unofficial].
++*   **Edge Artifacts:** A 10% border is stripped from the center mask to prevent overlapping Gaussians at image boundaries [S1, unofficial].
++*   **Clustering:** The center mask uses a checkerboard-like pattern (every other pixel set to 0) to enforce minimum spacing between newly spawned Gaussians [S1, unofficial].
++*   **Precision:** Normalization uses `+0.01` to avoid division by zero.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The method involves SSIM computation, image normalization, and patch-based operations. The complexity is dominated by the patch extraction and depth median calculation, which is $O(H \cdot W)$ per view. The spawning step is proportional to the number of high-error pixels.
+-*   **Memory Complexity:** Requires storage for the error mask, depth map, and center mask, all of size $O(H \cdot W)$. Buffer extensions are $O(N_{new})$.
+-*   **Strengths:** Targets specific regions with low SSIM, which may correspond to structural errors missed by gradient-based methods. The depth-aware placement reduces artifacts from occlusion.
+-*   **Limitations:** Computationally more expensive than gradient-based densification due to SSIM and patch processing. Requires careful tuning of thresholds ($T_{ssim}$, $T_{err}$).
+-*   **When to Use:** Dynamic or 4D scenes where structural changes are significant and gradient-based methods may fail to capture them [S1, unofficial].
+-*   **When Not to Use:** Static scenes with simple geometry where gradient-based densification is sufficient.
++*   **Time Complexity:** Depends on the number of views processed and the resolution. The patch-based processing is $O(H \times W)$ per view. The sorting and percentile calculation is $O(H \times W \log(H \times W))$.
++*   **Memory Complexity:** Requires storing the error mask, depth map, and intermediate patch tensors. Buffer extension is $O(N_{new})$.
++*   **Strengths:** Targets perceptual errors (SSIM) rather than just gradient magnitude, which can be noisy or misleading in complex scenes. The depth-aware spawning helps in reconstructing geometry in high-error areas.
++*   **Limitations:** Computationally expensive due to per-view error analysis and patch processing. Requires careful tuning of thresholds (`emsthr`, `emsstartfromiterations`).
++*   **When to use:** In dynamic or 4D scenes (e.g., SpacetimeGaussians) where standard densification fails to capture temporal consistency or complex structures.
++*   **When not to use:** In static scenes with simple geometry where gradient-based densification is sufficient and faster.
+ 
+ ## Background
+-Error-guided Guided Sampling was introduced in the context of SpacetimeGaussians, a method for training 3D Gaussian Splatting on dynamic/4D scenes [S1, unofficial]. It was developed by researchers at OPPO US Research. The method addresses limitations of standard 3DGS densification, which relies on 2D positional gradients and radius thresholds, by incorporating SSIM-based view selection and pixel-wise error thresholding.
++Error-guided Guided Sampling was introduced in the context of **SpacetimeGaussians**, a method for dynamic/4D scene reconstruction using 3D Gaussian Splatting [S1, unofficial]. It was developed by researchers at OPPO US Research [S1, unofficial]. The method addresses the limitations of standard 3DGS densification, which relies on gradient magnitude and 2D radius thresholds, by incorporating SSIM-based view selection and pixel-wise error thresholding.
+ 
+ ## Sources

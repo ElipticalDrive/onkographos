@@ -1,0 +1,923 @@
+Contribute to Backpacked333/Furygymconfigurator development by creating an account on GitHub.
+
+Path tracing: faster local tracing, plus optional rendering on a cloud GPU by Backpacked333 · Pull Request #10 · Backpacked333/Furygymconfigurator · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Backpacked333
+commented
+Oct 15, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Stacked on #9 (the path tracer). Merge #9 first, or retarget this PR to main once it lands. #9's latest commits (contact shadows and local reflections) are merged in; the one conflict, the README's list of URL parameters, keeps both sides.
+Six rounds of work, plus a gateway merged in from #11:
+Round 1: tracing started late and restarted from zero on every camera move. It now starts promptly and reuses samples across views.
+Round 2: cuts per-view work: regions stop sampling once they settle, and scene edits update in place.
+Round 3: the owner chose off-device rendering. Resting views are rendered by Blender Cycles on a Modal L40S GPU that switches off when idle. It's optional: nothing changes until VITE_CLOUD_RENDER_URL is set.
+Protect cloud GPU rendering with a server-verified PIN #11 (merged here): a CPU-only gateway is now the only public endpoint and calls the GPU through a private Modal method. Two speed regressions it introduced are fixed below.
+Round 4: orbiting no longer re-renders every view. The GPU renders the angles around the resting view ahead of time.
+PIN removed: at the owner's request, the configurator always opens.
+Round 5: a 64-sample preview first, the visitor's renders ahead of pre-renders, and scene data kept across cold starts.
+Round 6: every view is path traced. The exterior is a 72-angle path-traced spin at three distances, the interior a 360° panorama, behind a loading screen. It runs on eight L40S GPUs, with one Blender process per GPU.
+Round 6: path-traced spin
+Asked: make the initial view better and keep it that good at every moment, including while switching views or moving around; a loading screen of about 30 s is acceptable. The owner chose a path-traced spin on eight L40S GPUs with a one-minute idle shut-off. ?spin=0 keeps the previous behaviour.
+What it does
+Every view is a path-traced frame (src/render/spin.ts).
+The exterior is a ring of 72 frames (every 5°) at three distances, like a 360° product spin. Dragging lands on the nearest frame; an arrow press moves one step.
+The interior is one 360° panorama, so looking around inside stays path traced at every angle.
+Once a view is rendered, the real-time image is not shown.
+Loading screen (SpinLoading in src/App.tsx): on opening, it stays up until the visitor's view is at full quality and its ring is ready as previews, or for a minute at most. Frames wait for the scanned textures, so a design renders once, complete. A view's first visit shows it again only if nothing of that view is ready.
+Order of work:
+the visitor's frame, as a preview and then at full quality;
+its ring as previews, nearest first, then the other distances;
+the panorama preview;
+full quality for everything, then the full panorama.
+A design change keeps the previous frame up ("Path tracing your changes") until the new one crossfades in.
+Server side:
+Frames are finished on the server (exposure, the browser's bloom, AgX, dither; fury_render/finishing.py) and sent as WebP: 0.2 MB at 1200×827 instead of 4 MB.
+They are cached on the volume by the SHA-256 of everything that determines them, together with their exposure reading.
+One Blender process per GPU: whole frames render eight at a time behind the shared priority queue. Splitting each 1-megapixel frame across eight GPUs would mostly idle them.
+Exposure: metered once per lighting look and per view, then held, like a camera on manual exposure. The real-time frame and a 16-sample traced frame are compared at the same camera and size; the interior's is measured while the visitor is still outside.
+Cost guards:
+rendering pauses while the tab is hidden;
+a busy server (429/503) is asked again after 2 s;
+after three failures in a row the spin stays off for that page.
+Gateway render limit: now 600 a minute (burst 240), to fit twelve open frame requests per visitor.
+Bugs found while testing
+Windows were dark mirrors from inside (predates this PR). Cycles' Fresnel node treats a back face as light leaving glass, so it reflected totally beyond 41°. A 3 cm pane passed 8% of the light seen through it at 60°.
+The converter now uses Schlick's Fresnel on |cos θ|, which also brightens the view into the gym from outside, ?spin=0 included.
+A server test fails without the fix.
+Exposure metering read wrong three ways, each fixed and covered by tests:
+the meter render's camera was taken before the view was framed;
+the scene was captured before the textures arrived (white walls read bright);
+a 128-pixel meter reads brighter than the full frame.
+Mipmaps blurred the panorama and would have drawn a seam where it wraps; they are off for spin frames.
+Verification
+Vitest: 326 passing. New spin.test.ts covers:
+frame geometry (round trips, wrap-around, orbit limits, the camera looking at the target);
+ring order and the panorama mapping;
+scheduling order and per-view gains;
+re-metering when the design changes mid-meter;
+holding the design while textures load, dropping stale frames, the busy back-off, the hidden-tab pause and the one-minute timeout.
+pytest: 28 passing:
+the frame cache, which now returns the exposure key on hits;
+panoramas;
+the two-worker queue;
+glass seen from both sides.
+A real two-worker CPU server rendered two requests side by side with no queue wait.
+Full app (Chromium, WebGL 2 on a software GPU, local CPU render server at test sample counts):
+loading screen and timeout;
+first frame framed exactly as the real-time view, brightness within about 5% in a clear patch (gain 1.59 outside, 1.62 inside);
+key and drag stepping;
+the interior panorama's orientation, with windows now clear;
+switching views both ways.
+Repeated after merging Model Fury's portfolio builds and path-trace resting views #9's contact shadows and reflections: one meter per view (gains 1.58 and 1.45), and the new site probe does not restart the spin.
+Not measured: anything on the eight-GPU container. My estimates, from the single-L40S numbers below (14 s per full frame, 1.5 s per preview):
+the loading screen at about 15–30 s warm;
+a design's full spin at 433 renders, about an hour of GPU time (roughly $2);
+the container at about $15.60 an hour while on.
+It needs a redeploy (modal deploy modal_app.py; L40S:8 is now the default) before any of this runs in the cloud.
+Round 5: preview first
+Measured on the deployed L40S: the default 1200×827 view took 14 s at full quality, and loosening the noise threshold cost measurable quality.
+Each view first shows a 64-sample preview (about 1.5 s), then crossfades to the full image.
+Waiting renders are queued preview, then view, then pre-render.
+Scene blobs live on the Modal volume, so a cold start no longer re-uploads 24.5 MB.
+PIN removed
+The owner asked to remove the PIN page and make the configurator always work.
+Removed: the PIN screen, the browser's session token, the gateway's /auth endpoint and token check, and the fury-render-auth Modal secret.
+Behaviour now: the configurator opens straight away. With a cloud renderer configured, views render there without a PIN. If it can't be reached, the browser traces on its own GPU, as before.
+Still protecting the GPU:
+CORS limited to the configured origins;
+request validation;
+the 15 s render cap;
+global rate limits, then 40 renders a minute (burst 8; now 600, see Round 6) and 1 GiB of uploads an hour.
+Cost risk: those limits are in-process, and a script that ignores CORS can still use them up. The Modal workspace spending limit is the hard cap.
+Verified:
+In Chromium with a renderer URL configured, the configurator opened directly with no PIN page.
+Gateway tests cover forwarding renders and uploads without a PIN, the render-time cap, throttling, body limits and CORS.
+An earlier change to the PIN screen's error handling was reverted at the owner's request before this.
+Round 4: pre-rendered orbit views
+Asked: reach full-resolution traced images without re-rendering on every slight move. A traced image is only valid for the exact pose it was rendered from, so the owner chose to pre-render the views around the resting one (over more GPUs per render, or warping the traced image while moving). Since Round 6 this is the ?spin=0 behaviour.
+What it does
+Resting views sit on a grid (src/render/orbit.ts).
+The grid has 48 azimuths (every 7.5°), 5° elevation steps, and 6% zoom steps.
+When the exterior camera stops, it eases onto the nearest pose in 280 ms. That is a correction of at most 3.75°.
+An arrow key or short drag always advances at least one step; it is never snapped back.
+Snapping applies only with a cloud renderer, in the exterior view, and not while auto-rotating.
+The ring is pre-rendered (CloudSession in src/render/cloud.ts).
+Once the visitor's view is shown, the other 47 azimuths at that elevation and zoom render one at a time, nearest first, at the same full resolution.
+Orbiting then lands on finished images: no render request, and no local tracing.
+The badge reads "Path traced · 12/48 angles ready".
+The visitor comes first.
+Pre-renders use their own server session, so neither drops the other.
+They wait while the visitor's own view is in flight.
+A view the visitor lands on while it is being pre-rendered is joined, not rendered twice.
+When it stops: a design edit stops the ring. It pauses while the tab is hidden or after 3 minutes without input, and stops after three failures in a row.
+Images stay compressed in memory.
+The server can now send the image as a gzip file ("transfer": "file") instead of gzip transfer encoding, which the browser would inflate.
+A 320 MB cache keeps about 60 views at 1920×1200. Decoding one takes about 30–50 ms.
+Gateway render limit: raised from 12 to 40 a minute (burst 8), so a visitor plus their pre-renders fit.
+Cost: a full ring is 47 extra renders while someone is using the page. I estimate a few seconds of L40S time each, but it is not measured.
+Bug found by the browser check (predates this PR)
+motionPixels measured rotation as acos(q·q'). A unit quaternion's dot with itself can round to just under 1, which happened for 17 of 48 test orientations.
+A camera at rest then read as a sliver of motion every frame.
+So the snap never started, and settleGlide kept requesting frames while the view was still.
+An unmoved camera now reads as exactly still, with a test that fails without the fix.
+Verification
+Vitest: 308 passing.
+Covers grid round trips, nearest and nudged snapping, azimuth wrap-around, a match against OrbitControls' camera matrix, ring order and keys, and LRU eviction.
+Also covers gzip-file decoding, that a cached view never starts the local tracer, and exact stillness.
+pytest: 21 passing.
+The file transfer is a gzip file with no Content-Encoding, it is smaller, and it decodes to the same image.
+Also checks the gateway's burst.
+Full app (Chromium, WebGL 2 on a software GPU, local CPU render server, 550×427):
+The first view rested on grid pose 4/15/23 and rendered in 16 s.
+The ring started at once, about 1.0 MB per view.
+One arrow-key press later, the camera rested on pose 5/15/23 and the view was shown from the cache, with no render request.
+Decoding took 31 ms. The exposure match took 10.2 s, waiting on a GPU fence behind the software renderer's roughly 1 s frames.
+Not verified: pre-render times on the L40S, and the time from rest to a cached view on a real GPU. ?traceStats=1 logs both.
+Round 3: cloud GPU rendering
+A laptop GPU can't reach 1024 spp at full resolution in seconds. A server GPU with hardware ray tracing (OptiX) and GPU denoising can.
+What it does
+render-server/: Blender Cycles (bpy 4.5) behind a FastAPI app, in a child process that owns bpy.
+modal_app.py ran at most one L40S, switched off after 5 idle minutes (now eight L40S and one minute, see Round 6). OptiX kernel caches are kept on a Modal volume.
+Since Protect cloud GPU rendering with a server-verified PIN #11, the public endpoint is a CPU-only gateway (fury_render/gateway.py). It validates and rate-limits requests before calling the private GPU method. Its PIN has since been removed (above).
+Scene transport (src/render/cloud.ts):
+The browser sends the same prepared path-trace scene the local tracer captures, as JSON. Geometry, instance matrices, the sky map and texture files go as content-hashed blobs, uploaded only when the server answers 409.
+Since Protect cloud GPU rendering with a server-verified PIN #11, the browser uploads texture bytes itself; the server never fetches URLs.
+A camera move or finish change sends just the JSON. Cycles' persistent data re-syncs only what changed.
+Matching the local tracer: light units were calibrated against three-gpu-pathtracer:
+emission and sky radiance carry over 1:1;
+sun strength is irradiance;
+point and spot power is 4π × intensity;
+area power is π × area × radiance.
+Spot cones fade over the same angles, glass is thin-walled, and one-sided faces are culled except for shadow rays.
+Image format: linear half floats, packed losslessly and gzip-compressed. The browser decodes 1920×1200 in about 50 ms and applies the usual exposure match, bloom and tone mapping.
+Hybrid with local tracing (src/render/session.ts):
+A server that answered within 4 minutes gets a 6 s head start. Otherwise the local tracer starts at once, and the cloud image crossfades over it.
+On a failure, tracing continues locally.
+Lite devices and WebGL-only browsers leave tracing to the cloud.
+Limits:
+one GPU at most;
+a session's superseded requests are dropped;
+15 s of sampling per render;
+gateway rate limits;
+CORS restricted to explicitly configured origins.
+Modal workspace spending controls are the hard cap.
+Fixes after #11 (measured on the merged code)
+Images were inflated in transit. The private method read the renderer's response with httpx, which decompresses gzip, so a 1920×1200 view crossed the gateway and the internet as 18.4 MB instead of 4.9 MB.
+fury_render/rpc.py now passes the raw, still-compressed body through with its Content-Encoding.
+A gateway test checks the wire length; with the real renderer, the same view now crosses as 4.9 MB.
+Denoising had moved to the CPU. Protect cloud GPU rendering with a server-verified PIN #11 found that OptiX's denoiser fails on Modal and switched to OIDN, but also turned off OIDN's GPU mode. CPU OIDN with the accurate prefilter took about 12.5 s per 1920×1200 frame on 4 vCPUs.
+OIDN now runs on the GPU; it has its own CUDA kernels, independent of OptiX.
+If GPU denoising fails at warm-up, at start or mid-render, the renderer falls back to CPU OIDN with the fast prefilter (about 3.5 s on the same machine).
+FURY_DENOISE=cpu forces the CPU. /health, X-Denoise and ?traceStats=1 report which is in use.
+GPU denoising was later confirmed on Modal (X-Denoise: gpu, Round 5).
+To turn it on (owner)
+See render-server/README.md: deploy with FURY_ALLOWED_ORIGINS, then set VITE_CLOUD_RENDER_URL to the gateway URL on a preview branch.
+Verification (round 3)
+render-server pytest suite on CPU Cycles, also run in CI. It covers:
+uploads, renders and camera reuse;
+the gateway's limits and CORS;
+compressed passthrough;
+the denoiser choice and its fallbacks.
+typecheck, lint, format:check and build all pass.
+Full app (Chromium, WebGL 2, local CPU server, before Protect cloud GPU rendering with a server-verified PIN #11):
+the first view rendered 930×627 in 19 s after uploading its blobs;
+after an orbit, the next view re-rendered with 3 ms of scene sync and no uploads.
+Protect cloud GPU rendering with a server-verified PIN #11 rendered a 640×480 test scene through the deployed gateway on L40S/OptiX in 660 ms. That was before GPU denoising and compressed transfer.
+Rounds 1–2 (local tracing)
+Prompt rest (src/render/motion.ts): a flick comes to rest in 125 frames instead of 644, and tracing starts 6 frames + 150 ms later.
+Sample reuse across views (src/render/history.ts): a 6° orbit reached 32 spp 1.84× sooner, with lower error.
+Finishing settled regions (src/render/adaptive.ts): at a 256 spp cap, 216 s instead of 263 s at equal quality.
+In-place edits: material, transform and sky changes no longer recompile the tracer.
+Scheduler look-ahead patch for three-gpu-pathtracer.
+Rejected: a raw-noise threshold, and CSS-resolution tracing with upscaling (4.0% vs 1.6% error).
+🤖 Generated with Claude Code
+https://claude.ai/code/session_017Ab2hkxqewaQMNmu7NNe2A
+claude
+added 3 commits
+October 15, 2026 05:00
+Start path tracing promptly after the camera stops
+…
+74713cc
+```
+OrbitControls' damping shrinks an orbit's glide 5% a frame, so after a
+drag the camera kept moving by fractions of a pixel for ~640 frames
+(10-20 s). Any matrix change counted as motion, so the tracer could not
+start until that tail underflowed, then also waited for the full raster
+settle window and 220 ms.
+
+Below 0.6 px a frame the glide now decays faster, and below 0.05 px it
+is stopped with a final step under 0.2 px: a fast flick comes to rest in
+125 frames instead of 644, with the visible glide unchanged. Tracing
+starts after six still frames plus 150 ms instead of the full settle.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_017Ab2hkxqewaQMNmu7NNe2A
+```
+Keep path-traced samples when the camera moves
+…
+ab531c5
+```
+Every camera move reset the accumulation, so each new angle re-climbed
+to 1024 samples from zero. When tracing stops, the view's accumulation,
+sample counts, and rasterized positions, normals, and albedo are now
+kept, and the next view of the same scene is seeded from them by a
+compute pass that reprojects each pixel to the same surface point in
+the old view.
+
+A pixel inherits old samples only where that point was visible and
+only as far as its look is view-independent: none for glass, mirrors,
+metals, clear coats, or glossy finishes; most for rough dielectrics,
+less as the viewing angle turns, when zooming in, and across shadow
+edges. Light (color over albedo) is carried over and re-multiplied by
+the new view's own albedo, so textures stay sharp. At least a quarter of
+every pixel's samples stay fresh, and the tracer spends its time on
+what the old view did not show. Seeded views are first denoised at 2
+samples.
+
+The denoiser's albedo/normal raster pass becomes this G-buffer,
+rendered when tracing starts.
+
+On SwiftShader WebGPU, a 6-degree orbit reaches 32 spp 1.84x sooner
+and is closer to a 256-spp reference than a fresh render (4.15% vs
+4.78% mean per-pixel error), with no brightness bias.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_017Ab2hkxqewaQMNmu7NNe2A
+```
+Document prompt tracing and sample reuse
+…
+d44800e
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_017Ab2hkxqewaQMNmu7NNe2A
+```
+vercel
+Bot
+commented
+Oct 15, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+The latest updates on your projects. Learn more about Vercel for GitHub.
+Project
+Deployment
+Actions
+Updated
+furygymconfigurator
+Ready
+Preview
+Oct 16, 2026 8:20am UTC
+vercel
+Bot
+deployed
+to
+Preview
+October 15, 2026 05:14
+View deployment
+claude
+added 2 commits
+October 15, 2026 07:52
+Finish settled regions early and update edits in place
+…
+2feb366
+```
+Path tracing still took minutes per view on a laptop: every pixel got
+1024 samples at device resolution, and every design or time-of-day edit
+re-captured the scene and recompiled the tracer's three largest kernels.
+
+- Retire regions whose denoised image has settled. Milestones now
+  double; each new denoised image is compared with the last in 16 px
+  tiles, and a tile that changed under 1% on average (15% at most) at
+  two doublings in a row stops taking samples, with its neighbours.
+  Sky and walls finish after a few dozen samples; glass, shadow, and
+  foliage keep refining up to the cap. Cycles' raw-noise threshold was
+  tried first and retired nothing before 192 spp, because the denoiser,
+  not raw convergence, is what makes these images clean.
+- Patch three-gpu-pathtracer (patch-package, pinned 0.0.27) so a slot
+  that draws a finished pixel looks a few queue entries further instead
+  of idling for the round, as the library's own TODO describes.
+- Split the scene fingerprint by kind of change: only new or reshaped
+  meshes re-capture; moves refit the BVH, finishes rewrite material
+  buffers, lights and sky update in place. A material edit now re-traces
+  with no new pipelines (was three) and starts in 4 ms (was 117 ms).
+- The status line drops "/ 1024", since most views finish before it;
+  ?traceStats=1 logs time to first image and to settled per view.
+
+Measured on SwiftShader WebGPU (96x64, cap 256): 37% of pixels retired
+by 64 spp and 61% by 128; done in 216 s vs 263 s uniform, with the
+final denoised image as close to a 512-spp reference (1.98% vs 1.94%
+mean error). The saving grows with the 1024 cap. The scheduler patch is
+correct but not measurably faster in the emulator.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_017Ab2hkxqewaQMNmu7NNe2A
+```
+Document adaptive finishing, in-place edits, and what was rejected
+…
+72290fd
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_017Ab2hkxqewaQMNmu7NNe2A
+```
+vercel
+Bot
+deployed
+to
+Preview
+October 15, 2026 07:54
+View deployment
+Backpacked333
+changed the title
+Path tracing: start promptly and keep samples when the camera moves
+Path tracing: start promptly, reuse samples, and finish where the image has settled
+Oct 15, 2026
+claude
+added 3 commits
+October 15, 2026 21:34
+Add a Blender Cycles render server for cloud GPUs
+…
+63d2e9c
+```
+render-server/ renders the configurator's resting views with Cycles
+(OptiX and GPU denoising where available) behind a small HTTP API, and
+deploys to Modal on one L40S that switches off after five idle minutes.
+
+Scenes arrive as a JSON description plus content-hashed blobs
+(geometry, instance matrices, sky, textures) that are uploaded once and
+cached, so camera moves and material edits send only JSON. Blender keeps
+its scene between renders, and light units, spot cones, thin glass and
+one-sided culling are calibrated to match the browser's path tracer.
+Images return as losslessly packed linear half floats.
+
+CI runs the server's pytest suite, which renders small scenes on the CPU.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_017Ab2hkxqewaQMNmu7NNe2A
+```
+Render resting views on the cloud GPU when one is configured
+…
+7740787
+```
+With VITE_CLOUD_RENDER_URL set, a resting view is described to the
+render server (the same prepared scene the local tracer captures),
+missing blobs are uploaded on request, and the returned linear image
+crossfades in with the local tracer's exposure match and finishing.
+
+TraceSession coordinates both tracers. A recently answering (warm)
+server gets a six-second head start. Otherwise the local tracer starts
+at once and the cloud image fades over what it reached. Failures fall
+back to local tracing. Lite devices and WebGL-only browsers leave
+tracing to the cloud and default to it being on. The status line says
+when a view is tracing in the cloud, and ?cloud=0 or
+?cloud=http://127.0.0.1:8787 overrides the server.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_017Ab2hkxqewaQMNmu7NNe2A
+```
+Document cloud rendering and how to deploy it
+…
+4cc9457
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_017Ab2hkxqewaQMNmu7NNe2A
+```
+Backpacked333
+changed the title
+Path tracing: start promptly, reuse samples, and finish where the image has settled
+Path tracing: faster local tracing, plus optional rendering on a cloud GPU
+Oct 15, 2026
+vercel
+Bot
+deployed
+to
+Preview
+October 15, 2026 21:35
+View deployment
+Gate cloud rendering with PIN sessions and private GPU RPC
+…
+5f299a5
+```
+Co-Authored-By: roysalman@backpacked.ai <roysalman@backpacked.ai>
+```
+devin-ai-integration
+Bot
+mentioned this pull request
+Oct 15, 2026
+Protect cloud GPU rendering with a server-verified PIN
+#11
+Merged
+devin-ai-integration
+Bot
+and others
+added 2 commits
+October 16, 2026 00:29
+Fix contrast and focus visibility on PIN gate
+…
+778a511
+```
+Co-Authored-By: roysalman@backpacked.ai <roysalman@backpacked.ai>
+```
+Merge pull request #11 from Backpacked333/devin/1792106473-pin-gated-…
+…
+88b3ef7
+```
+…cloud-rendering
+
+* Gate cloud rendering with PIN sessions and private GPU RPC
+
+Co-Authored-By: roysalman@backpacked.ai <roysalman@backpacked.ai>
+
+* Fix contrast and focus visibility on PIN gate
+
+Co-Authored-By: roysalman@backpacked.ai <roysalman@backpacked.ai>
+
+---------
+
+Co-authored-by: Devin AI <158243242+devin-ai-integration[bot]@users.noreply.github.com>
+Co-authored-by: roysalman@backpacked.ai <roysalman@backpacked.ai>
+```
+vercel
+Bot
+deployed
+to
+Preview
+October 16, 2026 00:57
+View deployment
+claude
+added 2 commits
+October 16, 2026 01:23
+Keep cloud images compressed and denoise on the GPU again
+…
+7015306
+```
+Two regressions from the PIN gateway (#11), measured on the merged code:
+
+- The private Modal method read the renderer's response with httpx, which
+  inflates gzip, so a 1920x1200 view crossed the gateway and the internet
+  as 18.4 MB instead of 4.9 MB. fury_render/rpc.py passes the raw,
+  still-compressed body and its encoding through.
+- Denoising had moved to the CPU: OptiX's denoiser fails on Modal, but
+  OIDN's GPU mode was turned off with it. OIDN with the accurate prefilter
+  took about 12.5 s per 1920x1200 frame on 4 vCPUs. OIDN now runs on the
+  GPU (its own CUDA kernels, not OptiX). If that fails at warm-up, at
+  start, or mid-render, the renderer falls back to CPU OIDN with the fast
+  prefilter (about 3.5 s). FURY_DENOISE=cpu forces it, and /health,
+  X-Denoise and ?traceStats=1 report which is in use.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_017Ab2hkxqewaQMNmu7NNe2A
+```
+Document compressed transfer, GPU denoising, and the #11 review
+…
+e0c541d
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_017Ab2hkxqewaQMNmu7NNe2A
+```
+vercel
+Bot
+deployed
+to
+Preview
+October 16, 2026 01:23
+View deployment
+Pre-render orbit views around the resting view on the cloud GPU
+…
+db15bbd
+```
+In the exterior view the camera now rests on a grid of orbit poses (48
+directions, 5° elevation and 6% zoom steps) and eases onto the nearest
+one when it stops. Once the visitor's view is shown, the cloud renders
+the rest of that ring in the background, nearest first, so orbiting
+lands on finished full-resolution images without a new render.
+
+- orbit.ts: the pose grid, snapping, ring order, and an LRU view cache.
+- CloudSession keeps rendered views compressed (the server can now send
+  the image as a gzip file), joins a pre-render the visitor lands on,
+  and pauses when the tab is hidden or the visitor is idle.
+- A cached view never starts the local tracer.
+- The gateway allows 40 renders a minute (burst 8) for the pre-renders.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_017Ab2hkxqewaQMNmu7NNe2A
+```
+vercel
+Bot
+deployed
+to
+Preview
+October 16, 2026 01:58
+View deployment
+Log the orbit pose of each cloud view with ?traceStats=1
+…
+5ce2527
+```
+Shows whether a resting view is on the orbit grid, which pose, the scene
+key, and whether it was pre-rendered, to diagnose cache misses.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_017Ab2hkxqewaQMNmu7NNe2A
+```
+vercel
+Bot
+deployed
+to
+Preview
+October 16, 2026 02:01
+View deployment
+Read an unmoved camera as exactly still
+…
+5eabf4a
+```
+motionPixels measured rotation as acos(q·q'), and a unit quaternion's
+dot with itself can round to just under 1. For about a third of resting
+orientations a camera that had not moved read as a tiny motion every
+frame: the orbit snap never started (the view rested off the grid, so
+its pre-rendered neighbours were never used), and settleGlide kept
+requesting frames at rest.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_017Ab2hkxqewaQMNmu7NNe2A
+```
+vercel
+Bot
+deployed
+to
+Preview
+October 16, 2026 02:06
+View deployment
+Log how long a pre-rendered view takes to show; record the browser check
+…
+678ed92
+```
+With ?traceStats=1, each pre-rendered view logs its time from rest to
+on screen, split into decoding and the exposure match. The decision
+record now has the full-app check: an arrow-key step landed on an
+already rendered orbit view and showed it with no render request.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_017Ab2hkxqewaQMNmu7NNe2A
+```
+vercel
+Bot
+deployed
+to
+Preview
+October 16, 2026 02:09
+View deployment
+Record the measured time to show a pre-rendered view
+…
+72c7858
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_017Ab2hkxqewaQMNmu7NNe2A
+```
+vercel
+Bot
+deployed
+to
+Preview
+October 16, 2026 02:11
+View deployment
+Say when the PIN gateway can't be reached, and let visitors continue
+…
+f6d54ee
+```
+The preview build points at a Modal gateway that no longer exists: it
+answers 404 "modal-http: invalid function call" without CORS headers, so
+the browser's fetch fails and the PIN screen showed "Failed to fetch".
+That read as a wrong PIN, and the whole configurator stayed locked.
+
+- A network failure now reads "Can't reach the cloud renderer, so the
+  PIN couldn't be checked", distinct from an incorrect PIN.
+- It also offers "Continue without cloud rendering" (?cloud=0).
+- The render-server README explains each PIN message and how to check
+  the gateway, its secrets, and its allowed origins.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_017Ab2hkxqewaQMNmu7NNe2A
+```
+vercel
+Bot
+deployed
+to
+Preview
+October 16, 2026 02:39
+View deployment
+Revert "Say when the PIN gateway can't be reached, and let visitors c…
+…
+f9008af
+```
+…ontinue"
+
+This reverts commit f6d54ee, at the
+owner's request: the PIN screen goes back to how it was.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_017Ab2hkxqewaQMNmu7NNe2A
+```
+vercel
+Bot
+deployed
+to
+Preview
+October 16, 2026 03:12
+View deployment
+Remove the PIN page and PIN check; the configurator always opens
+…
+c49a8a6
+```
+At the owner's request. The PIN screen, the browser's session token, and
+the gateway's /auth endpoint and bearer check are gone, along with the
+fury-render-auth Modal secret. The configurator now opens straight away.
+With a cloud renderer configured, views render there without a PIN; if
+it can't be reached, the browser traces on its own GPU as before.
+
+The gateway keeps CORS to the configured origins, request validation,
+the 15 s render cap, and global rate limits. The Modal workspace
+spending limit is the hard cost cap.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_017Ab2hkxqewaQMNmu7NNe2A
+```
+vercel
+Bot
+deployed
+to
+Preview
+October 16, 2026 03:33
+View deployment
+Show a quick preview first; let waiting views go ahead of pre-renders
+…
+7e03d4d
+```
+Measured on the deployed L40S: the default 1200x827 view takes 14 s
+to render at the current quality, and loosening the noise threshold
+costs measurable quality. A first visit also uploaded 24.5 MB of scene
+data again after every cold start.
+
+- Each new view also asks for a 64-sample preview (about 1.5 s on the
+  L40S), shown at once; the full image crossfades over it. Exports and
+  the "Path traced" badge wait for the final image.
+- The renderer queues waiting renders by kind: preview, then view,
+  then orbit pre-render.
+- Scene blobs live on the Modal volume, so cold starts keep them; the
+  store no longer lists its directory on every upload.
+- Concurrent renders share uploads of the same blob.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_017Ab2hkxqewaQMNmu7NNe2A
+```
+vercel
+Bot
+deployed
+to
+Preview
+October 16, 2026 04:21
+View deployment
+Path-traced spin: every view path traced, behind a loading screen
+…
+66d3d4d
+```
+With a cloud renderer, the real-time image is no longer shown once a view
+is rendered. The exterior steps through a ring of 72 path-traced frames
+(every 5 degrees) at three distances, and the interior is a 360-degree
+panorama, so the traced look holds while moving and switching views.
+
+- A loading screen covers the scene until the visitor's view is final and
+  its ring is ready as previews, or a minute has passed. Frames wait for
+  the scanned textures so a design renders once, complete.
+- The server finishes frames (exposure, bloom, AgX, dither), sends them as
+  WebP, and caches them by content hash with their exposure reading.
+- One Blender process per GPU renders whole frames side by side behind
+  the shared priority queue; Modal runs eight L40S with a one-minute idle.
+- Exposure is metered once per look and view against the real-time
+  frame, at the same camera and size, and then held.
+- Thin glass now reflects alike from both sides: Cycles' Fresnel node
+  made windows dark mirrors from inside (a 3 cm pane passed 8% of light).
+- The spin pauses while the tab is hidden, backs off when the server is
+  busy, and stays off for the page after three failures. ?spin=0 keeps
+  the previous one-view-at-a-time behaviour.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_017Ab2hkxqewaQMNmu7NNe2A
+```
+vercel
+Bot
+deployed
+to
+Preview
+October 16, 2026 06:24
+View deployment
+Merge the base branch (contact shadows and local reflections)
+…
+ff3eb86
+```
+Brings in 25947a3 and 9258809 from claude/configurator-design-impl-2a8tt0.
+The one conflict, the README's list of URL parameters, keeps both sides:
+this branch's ?cloud and ?spin parameters and the base's new
+?debug=contact and ?debug=reflections buffers.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_017Ab2hkxqewaQMNmu7NNe2A
+```
+vercel
+Bot
+deployed
+to
+Preview
+October 16, 2026 06:38
+View deployment
+Fall back at once when the render server predates the spin
+…
+1ba645d
+```
+The preview site already serves the spin, but its render server still runs
+the previous code, which ignores the frame fields and answers with a view's
+half-float image. The browser could not decode those, kept the loading
+screen up for a minute, and left the GPU rendering every frame of the spin.
+
+A frame answer that is not an image now fails the spin straight away (from
+the exposure meter or any frame), as does a frame that will not decode. The
+page then renders resting views one at a time, as with ?spin=0, which the
+older server supports. Checked in the browser against the previous server
+code: two requests, then the fallback rendered the view.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_017Ab2hkxqewaQMNmu7NNe2A
+```
+vercel
+Bot
+deployed
+to
+Preview
+October 16, 2026 06:47
+View deployment
+Default the renderer to two L40S GPUs: eight never scheduled
+…
+8100849
+```
+Deployed with L40S:8, the renderer container stayed "scheduling" on Modal
+for over ten minutes with frame requests pending, so nothing rendered.
+Modal places a container's GPUs on one machine and warns that more than
+two per container usually means longer waits. Two GPUs, each with its own
+Blender process, schedule like a single one; FURY_GPU still asks for more.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_017Ab2hkxqewaQMNmu7NNe2A
+```
+vercel
+Bot
+deployed
+to
+Preview
+October 16, 2026 07:26
+View deployment
+Cancel GPU calls the gateway stops waiting for
+…
+896a6a3
+```
+While the renderer container sat "scheduling" on Modal, frame requests
+from minutes earlier were still pending: the gateway gives up after 180
+seconds and answers 503, but a `.remote()` call stays queued, and the
+browser asks again after every 503. Once a GPU started, it would render
+each of them for no one.
+
+The gateway now spawns the call and cancels it when the wait ends
+without an answer (timeout or disconnect). Cancelling reaches the
+renderer, so a request still waiting in its priority queue is dropped.
+A render already handed to Blender can't be interrupted: it now finishes
+before its request ends, keeping the worker's turn and output file until
+then (released sooner, the next render would share the worker's pipe),
+and a finished spin frame still goes into the frame cache.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01CFrgvtYoN4oXoSVsSq4z3M
+```
+Backpacked333
+mentioned this pull request
+Oct 16, 2026
+Cancel GPU calls the gateway stops waiting for
+#12
+Merged
+claude
+and others
+added 2 commits
+October 16, 2026 07:45
+Cache frames cancelled mid-render; cancel calls cancelled while spawning
+…
+a90f3b7
+```
+Review of the previous commit found two gaps:
+
+- A spin frame cancelled while Blender rendered it was never finished:
+  the cancellation was raised as soon as Blender answered, so the frame
+  never reached the cache and the browser's retry rendered it again. Now
+  everything from getting a worker to caching the frame runs as one
+  piece of work that a cancelled request still sees through. Waiting for
+  a worker stays cancellable, and the worker is given back as soon as
+  Blender answers, as before.
+- A wait that ended while Modal was still accepting the spawn left that
+  call queued, since there was no handle to cancel yet. The spawn is now
+  shielded and the call cancelled once it exists.
+
+A real CPU render cancelled mid-frame is now tested: the frame is cached
+and asking again is a cache hit (it failed three times out of three
+before this change).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01CFrgvtYoN4oXoSVsSq4z3M
+```
+Merge pull request #12 from Backpacked333/claude/new-session-i09ppp
+…
+1ac7a85
+```
+Cancel GPU calls the gateway stops waiting for
+```
+vercel
+Bot
+deployed
+to
+Preview
+October 16, 2026 07:46
+View deployment
+Keep the cancelled-frame test's render running when it is cancelled
+…
+19ba5c1
+```
+At 16 samples the 64x48 render finished in about 40 ms on CI, before the
+test's 50 ms wait ended, so nothing was left to cancel.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_017Ab2hkxqewaQMNmu7NNe2A
+```
+vercel
+Bot
+deployed
+to
+Preview
+October 16, 2026 07:56
+View deployment
+Merge base: fingerprint every transform element, share pending exports
+…
+e926b3f
+```
+Conflicts: the per-element transform hash goes into sceneParts' transforms
+part; both pathtrace tests kept; the spin's and the no-tracer export paths
+also use the shared deliver().
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_017Ab2hkxqewaQMNmu7NNe2A
+```
+vercel
+Bot
+deployed
+to
+Preview
+October 16, 2026 08:20
+View deployment
+Backpacked333
+mentioned this pull request
+Oct 16, 2026
+One GPU per visitor, and a spin planned around where they look
+#13
+Draft
+Hide environments
+Show environments
+This branch was successfully deployed
+1 active
+deployment
+Preview
+—
+e926b3ff
+Deployed
+Oct 16, 2026 by
+vercel[bot]
+View deployment
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

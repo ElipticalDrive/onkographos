@@ -1,0 +1,140 @@
+--- v002.md
++++ v003.md
+@@ -8,9 +8,9 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Ground truth images, camera parameters, a neural SDF model (typically an MLP with positional encoding), and a 3D bounding box for sampling.
++*   **Inputs:** Ground truth images, camera parameters, a neural SDF model (typically an MLP with positional encoding), and a 3D bounding box for sampling [S1, S2, unofficial].
+ *   **Outputs:** Optimized SDF model parameters that minimize the combined loss.
+ 
+ **Data Structures:**
+-*   **Neural SDF Model:** An MLP that takes 3D coordinates $\mathbf{x}$ and outputs a scalar SDF value $d(\mathbf{x})$ and optionally color features. The model often uses Harmonic Embedding for input coordinates [S1, unofficial].
++*   **Neural SDF Model:** An MLP that takes 3D coordinates $\mathbf{x}$ and outputs a scalar SDF value $d(\mathbf{x})$ and optionally color features [S1, unofficial]. The model often uses Harmonic Embedding for input coordinates [S1, unofficial]. Exact bit packing and layer sizes are Not given in the sources.
+ *   **Ray Bundle:** Contains origin $\mathbf{o}$ and direction $\mathbf{d}$ for each pixel, generated from pixel coordinates and camera intrinsics/extrinsics [S1, S2, unofficial].
+ *   **Training Batch:** Contains image tensor, camera object, and iteration index [S1, unofficial].
+@@ -28,6 +28,5 @@
+     *   Generate a ray bundle $\{\mathbf{o}_i, \mathbf{d}_i\}$ for these pixels using the camera parameters [S1, unofficial].
+     *   Sample ground truth RGB values $\mathbf{c}_{gt}$ at these pixel coordinates [S1, unofficial].
+-6.  **Volume/Surface Rendering:**
+-    *   Render the scene along the rays using the current SDF model. This typically involves sphere tracing or volumetric integration to compute the predicted RGB color $\mathbf{c}_{pred}$ [S1, S2, unofficial].
++6.  **Volume/Surface Rendering:** Render the scene along the rays using the current SDF model. This typically involves sphere tracing or volumetric integration to compute the predicted RGB color $\mathbf{c}_{pred}$ [S1, S2, unofficial].
+ 7.  **Compute Image Reconstruction Loss:** Calculate the Mean Squared Error (MSE) between predicted and ground truth colors: $\mathcal{L}_{image} = \frac{1}{M} \sum_{i=1}^{M} ||\mathbf{c}_{pred}^{(i)} - \mathbf{c}_{gt}^{(i)}||^2$ [S1, S2, unofficial].
+ 8.  **Total Loss Calculation:** Combine the losses:
+@@ -64,4 +63,5 @@
+ *   `checkpoint_interval`: Number of epochs between model checkpoints [S1, unofficial].
+ *   `render_interval`: Number of epochs between visualization renders [S1, unofficial].
++*   Typical values: Not given in the sources.
+ 
+ **Pseudocode:**
+@@ -75,11 +75,4 @@
+     """
+     Train a neural SDF using image reconstruction, Eikonal, and boundary regularization.
+-    
+-    Args:
+-        model: Neural SDF model (outputs SDF and optionally color)
+-        dataloader: Iterator yielding batches of (image, camera)
+-        optimizer: Optimizer (e.g., Adam)
+-        scheduler: Learning rate scheduler
+-        cfg: Configuration dictionary containing hyperparameters
+     """
+     device = cfg.device
+@@ -91,5 +84,13 @@
+     # Optional: Pretrain SDF with sphere loss if configured
+     if cfg.training.pretrain_sphere:
+-        pretrain_sdf_with_sphere_loss(model, cfg)
++        # Standard operation: optimize SDF to match a ground-truth sphere SDF
++        for _ in range(cfg.training.pretrain_epochs):
++            sphere_points = get_random_points(batch_size, bounds, device)
++            sphere_sdf = compute_sphere_sdf(sphere_points, cfg.sphere_cfg)
++            pred_sdf = model.get_distance(sphere_points)
++            loss = torch.mean(torch.square(pred_sdf - sphere_sdf))
++            optimizer.zero_grad()
++            loss.backward()
++            optimizer.step()
+ 
+     for epoch in range(cfg.training.epochs):
+@@ -141,7 +142,11 @@
+         # Optional: Save checkpoints or render visualizations
+         if epoch % cfg.training.checkpoint_interval == 0:
+-            save_checkpoint(model, optimizer, epoch, cfg)
++            # Standard operation: serialize model and optimizer state to disk
++            torch.save({'model': model.state_dict(), 'optimizer': optimizer.state_dict(), 'epoch': epoch}, cfg.checkpoint_path)
+         if epoch % cfg.training.render_interval == 0:
+-            render_visualization(model, camera, cfg)
++            # Standard operation: render a test image and save to disk
++            test_ray_bundle = generate_test_rays(camera, cfg.data.image_size)
++            test_out = model(test_ray_bundle)
++            torch.save(test_out['color'], cfg.render_path)
+ 
+ def get_random_points(batch_size, bounds, device):
+@@ -153,4 +158,10 @@
+     return points
+ 
++def compute_sphere_sdf(points, cfg):
++    """Compute ground-truth SDF for a sphere centered at cfg.center with radius cfg.radius."""
++    diff = torch.abs(points - cfg.center) - cfg.radius
++    signed_distance = torch.linalg.norm(torch.maximum(diff, torch.zeros_like(diff)), dim=-1) + torch.minimum(torch.max(diff, dim=-1)[0], torch.zeros_like(diff[..., 0]))
++    return signed_distance.unsqueeze(-1)
++
+ def get_random_pixels_from_image(batch_size, image_size, camera):
+     """Sample random pixel coordinates (u, v)."""
+@@ -164,29 +175,28 @@
+     h, w = image_size
+     u, v = xy_grid[:, 0], xy_grid[:, 1]
+-    
+-    # Convert pixel coordinates to normalized device coordinates or camera space
+-    # This depends on the specific camera model implementation
+     origins, directions = camera.generate_rays(u, v)
+-    
+     return {'origins': origins, 'directions': directions}
+ 
+ def sample_images_at_xy(image, xy_grid):
+     """Sample RGB values from the image tensor at given pixel coordinates."""
+-    # Implementation depends on image tensor layout (e.g., NHWC or NCHW)
+-    # Assuming image is [1, H, W, 3]
+     h, w = image.shape[1], image.shape[2]
+     u = xy_grid[:, 0].long().clamp(0, w-1)
+     v = xy_grid[:, 1].long().clamp(0, h-1)
+-    
+-    # Gather RGB values
+     rgb_gt = image[0, v, u, :]
+     return rgb_gt
++
++def generate_test_rays(camera, image_size):
++    """Generate rays for the full image for visualization."""
++    h, w = image_size
++    u, v = torch.meshgrid(torch.arange(w), torch.arange(h), indexing='ij')
++    xy_grid = torch.cat([u.unsqueeze(-1), v.unsqueeze(-1)], dim=-1).float()
++    return get_rays_from_pixels(xy_grid, image_size, camera)
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** The boundary loss uses an exponential term $\exp(-100 \cdot |d|)$. If $|d|$ is large, this term underflows to zero. If $|d|$ is very small, it approaches 1. Ensure numerical stability [S2, unofficial].
+-*   **Boundary Definition:** The `bounds` for random point sampling must encompass the object of interest. Sampling too far from the surface may lead to inefficient gradient updates for the SDF [S2, unofficial].
++*   **Precision:** The boundary loss uses an exponential term $\exp(-100 \cdot |d|)$. If $|d|$ is large, this term underflows to zero [G]. If $|d|$ is very small, it approaches 1. Ensure numerical stability [S2, unofficial].
++*   **Boundary Definition:** The `bounds` for random point sampling must encompass the object of interest [S2, unofficial].
+ *   **Gradient Computation:** Computing gradients of the SDF with respect to input coordinates requires `torch.autograd.grad` with `create_graph=True` if higher-order derivatives are needed, or standard backward pass if only first-order gradients are used for the Eikonal loss [S2, unofficial].
+-*   **Loss Balancing:** The weights `eikonal_weight` and `inter_weight` are critical. Imbalanced weights can lead to poor geometric reconstruction or blurry surfaces [S2, unofficial].
++*   **Loss Balancing:** The weights `eikonal_weight` and `inter_weight` control the regularization strength [S2, unofficial].
+ 
+ ## Subtopics
+@@ -196,15 +206,14 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Training time depends on the number of epochs, batch size, and the cost of rendering (ray marching/sphere tracing) and gradient computation. The Eikonal and boundary losses add overhead for random point sampling and gradient evaluation [S1, S2, unofficial].
+-*   **Memory Complexity:** Memory usage is dominated by the neural network parameters and the intermediate activations during backpropagation. Random point sampling requires storing $N$ points and their gradients [S1, S2, unofficial].
+-*   **Measured Performance:** Surf²f, which uses this training approach, outperforms NDS, UNISURF, and NeuS in geometric accuracy and rendering speed [S1, unofficial].
++*   **Time Complexity:** Training time depends on the number of epochs, batch size, and the cost of rendering (ray marching/sphere tracing) and gradient computation [G]. The Eikonal and boundary losses add overhead for random point sampling and gradient evaluation [S1, S2, unofficial].
++*   **Memory Complexity:** Memory usage is dominated by the neural network parameters and the intermediate activations during backpropagation [G].
+ *   **Scaling:** The method scales with the resolution of the input images and the complexity of the neural network. Larger bounding boxes require more random points for effective regularization [S1, S2, unofficial].
+ *   **Strengths:** Enforces geometric priors (Eikonal equation) leading to cleaner surfaces and better generalization. Boundary regularization helps in defining the surface location more precisely [S1, S2, unofficial].
+-*   **Limitations:** Requires careful tuning of loss weights. Pretraining may be necessary for complex shapes [S1, unofficial].
++*   **Limitations:** Requires careful tuning of loss weights.
+ *   **When to Use:** When high-quality geometric reconstruction is required, and the input data allows for volume rendering or sphere tracing [S1, S2, unofficial].
+ *   **When Not to Use:** When real-time inference is the primary constraint and the overhead of training with regularization is prohibitive, or when the input data is sparse and volume rendering is not feasible [S1, unofficial].
+ 
+ ## Background
+-This method originates from the field of neural implicit surface reconstruction and differentiable rendering. It builds upon the principles of Neural Radiance Fields (NeRF) but focuses on explicit surface representation via SDFs. The use of Eikonal regularization for SDFs was popularized by works such as "NeuS" and "UNISURF", which demonstrated that enforcing the Eikonal equation improves surface quality. The specific implementation details provided here are from unofficial repositories [S1, S2, unofficial].
++This method originates from the field of neural implicit surface reconstruction and differentiable rendering [G]. It builds upon the principles of Neural Radiance Fields (NeRF) but focuses on explicit surface representation via SDFs [G]. The use of Eikonal regularization for SDFs was popularized by works such as "NeuS" and "UNISURF", which demonstrated that enforcing the Eikonal equation improves surface quality [G].
+ 
+ ## Sources

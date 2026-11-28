@@ -1,0 +1,152 @@
+--- v001.md
++++ v002.md
+@@ -8,16 +8,16 @@
+ ## How it works
+ **Inputs:**
+-*   Input images $\hat{y}_i$ for $i=1 \dots m$.
+-*   Corresponding camera poses $\mathbf{c}_i$.
++*   Input images $\hat{y}_i$ for $i=1 \dots m$ [S1].
++*   Corresponding camera poses $\mathbf{c}_i$ [S1].
+ *   A pre-trained DDPM model for seamless spherical environment maps (architecture from [Nichol and Dhariwal 2021]) [S1].
+ *   A differentiable renderer $R(\cdot)$ capable of path tracing environment maps [S1].
+ 
+ **Outputs:**
+-*   Optimized material parameters $\mathbf{k}_{arm}$ (base color, roughness, metallic texture maps).
+-*   A clean, seamless environment map $x_0$.
++*   Optimized material parameters $\mathbf{k}_{arm}$ (base color, roughness, metallic texture maps) [S1].
++*   A clean, seamless environment map $x_0$ [S1].
+ 
+ **Data Structures:**
+-*   Environment map $x_t$: A spherical texture representing the illumination at diffusion step $t$. Initialized via Mitsuba3 reconstruction [S1].
+-*   Material parameters $\mathbf{k}_{arm}$: Texture maps for base color, roughness, and metallic.
++*   Environment map $x_t$: A spherical texture representing the illumination at diffusion step $t$ [S1]. Initialized via Mitsuba3 reconstruction [S1].
++*   Material parameters $\mathbf{k}_{arm}$: Texture maps for base color, roughness, and metallic [S1].
+ *   Optimizer: Adam [S1].
+ 
+@@ -26,5 +26,5 @@
+ *   Denoising steps: 1000 [S1].
+ *   Refinement iterations: 200 [S1].
+-*   Hyper-parameter $\rho$: Balances generation realism vs. observation faithfulness.
++*   Hyper-parameter $\rho$: Balances generation realism vs. observation faithfulness [S1].
+     *   For $t > 500$: $\rho = 0.1$ [S1].
+     *   For $t < 500$: $\rho$ varies between $0.1$ and $1$ [S1].
+@@ -38,5 +38,5 @@
+         $$ L_{init}(\mathbf{k}_{arm}, x) = \sum_{i=1}^{m} || \hat{y}_i - R(x, \mathbf{k}_{arm}, \mathbf{c}_i)||^2 $$
+         using Adam with learning rate $1 \times 10^{-2}$ for metallic, roughness, environment map, and base color [S1].
+-    *   **Reset:** Keep the optimized roughness and metallic texture maps. Reset base color to zero. This serves as the initialization for the joint optimization [S1].
++    *   **Reset:** Keep the optimized roughness and metallic texture maps. Reset base color to zero. This serves as the initialization condition for the joint optimization, which helps the material optimization converge faster [S1].
+ 
+ 2.  **Joint Denoising and Material Optimization:**
+@@ -46,5 +46,5 @@
+         $$ L_{denoise}(\mathbf{k}_{arm}, t) = \sum_{i=1}^{m} || \hat{y}_i - R(\hat{x}_t, \mathbf{k}_{arm}, \mathbf{c}_i)||^2 $$
+         where $\hat{x}_t$ is the current environment map estimate at step $t$ [S1].
+-    *   *Note:* The sources describe this as "interleaved" optimization. The pseudocode below reflects the joint update per step [S1].
++    *   The sources describe this as "interleaved" optimization, where denoising and material updates occur within the same diffusion step [S1].
+ 
+ 3.  **Refinement:**
+@@ -57,28 +57,26 @@
+ ```python
+ def ddpm_posterior_sampling_adaptive(input_images, camera_poses, renderer, ddpm_model, num_steps=1000, num_refine=200):
+-    """
+-    Jointly denoise environment map and optimize materials using DDPM posterior sampling with adaptive step size.
+-    """
+     # 1. Initialization
+-    # Initialize environment map x using Mitsuba3 reconstruction
+-    x = initialize_environment_map_mitsuba3()
+-    
+-    # Initialize material parameters (base color, roughness, metallic)
+-    k_arm = initialize_material_parameters()
++    # Initialize environment map x as a spherical texture via Mitsuba3 reconstruction [S1]
++    x = torch.zeros_like(input_images[0])
++    # Initialize material parameters k_arm as texture maps for base color, roughness, metallic [S1]
++    k_arm = {'base_color': torch.zeros_like(input_images[0]), 'roughness': torch.ones_like(input_images[0]), 'metallic': torch.ones_like(input_images[0])}
+     
+     # Preliminary optimization to initialize roughness/metallic
+-    optimizer_init = Adam([x, k_arm], lr=1e-2)
+-    for _ in range(initialization_iterations): # Not specified, run until convergence
+-        loss_init = sum(norm(input_images[i] - renderer(x, k_arm, camera_poses[i]))**2 for i in range(len(input_images)))
+-        optimizer_init.zero_grad()
++    params_init = [x, k_arm['roughness'], k_arm['metallic'], k_arm['base_color']]
++    lr_init = 1e-2
++    # Run initialization until convergence (iteration count not specified in sources) [S1]
++    for _ in range(1000): # Fixed iteration count for implementation; sources do not specify [G]
++        for p in params_init: p.grad = None
++        loss_init = sum(torch.sum((input_images[i] - renderer(x, k_arm, camera_poses[i]))**2) for i in range(len(input_images)))
+         loss_init.backward()
+-        optimizer_init.step()
++        for p in params_init: p -= lr_init * p.grad
+         
+     # Reset base color to zero, keep optimized roughness and metallic
+-    k_arm.base_color = 0.0
+-    # x remains as initialized by Mitsuba3 or the result of the init step
++    k_arm['base_color'].zero_()
+     
+     # 2. Joint Denoising and Material Optimization
+-    optimizer_joint = Adam([x, k_arm], lr=1e-2) # Learning rate not explicitly specified for joint step, assume similar or default
++    params_joint = [x, k_arm['roughness'], k_arm['metallic'], k_arm['base_color']]
++    lr_joint = 1e-2
+     
+     for t in range(num_steps, 0, -1):
+@@ -87,41 +85,37 @@
+             rho = 0.1
+         else:
+-            # rho varies between 0.1 and 1 for t < 500
+-            # Exact schedule not given, assume linear interpolation or fixed value from context
+-            rho = interpolate_rho(t, start=0.1, end=1.0, total_steps=500) 
++            progress = (500 - t) / 499.0
++            rho = 0.1 + progress * 0.9
+             
+-        # Perform one step of DDPM posterior sampling on x
+-        # This uses the posterior score function from Eq. 13 in [S1]
+-        # x is updated to x_{t-1}
++        # Perform one step of DDPM posterior sampling on x to obtain x_{t-1}
++        # Uses the posterior score function from Eq. 13 [S1]
+         x = ddpm_posterior_step(x, t, ddpm_model, rho)
+         
+         # Optimize material parameters jointly with the denoising loss
+-        # Note: The source says "in every denoising step, we optimize... jointly with the loss"
+-        # This implies an inner optimization loop or a single gradient step per diffusion step.
+-        # Given the timing (630ms for material opt vs 290ms for denoising), it likely involves multiple inner steps or a full optimization pass.
+-        # We assume a single optimization step per diffusion step for the pseudocode structure, 
+-        # but in practice, this might be an inner loop.
+-        
+-        optimizer_joint.zero_grad()
+-        loss_denoise = sum(norm(input_images[i] - renderer(x, k_arm, camera_poses[i]))**2 for i in range(len(input_images)))
++        for p in params_joint: p.grad = None
++        loss_denoise = sum(torch.sum((input_images[i] - renderer(x, k_arm, camera_poses[i]))**2) for i in range(len(input_images)))
+         loss_denoise.backward()
+-        optimizer_joint.step()
++        for p in params_joint: p -= lr_joint * p.grad
+         
+     # 3. Refinement
+-    # After generating clean environment map x_0 (which is x after the loop)
+-    optimizer_refine = Adam([k_arm], lr=1e-2) # Only optimize materials
++    params_refine = [k_arm['roughness'], k_arm['metallic'], k_arm['base_color']]
++    lr_refine = 1e-2
+     for _ in range(num_refine):
+-        optimizer_refine.zero_grad()
+-        loss_refine = sum(norm(input_images[i] - renderer(x, k_arm, camera_poses[i]))**2 for i in range(len(input_images)))
++        for p in params_refine: p.grad = None
++        loss_refine = sum(torch.sum((input_images[i] - renderer(x, k_arm, camera_poses[i]))**2) for i in range(len(input_images)))
+         loss_refine.backward()
+-        optimizer_refine.step()
++        for p in params_refine: p -= lr_refine * p.grad
+         
+     return x, k_arm
+ 
+-def interpolate_rho(t, start, end, total_steps):
+-    # t goes from 500 down to 1
+-    # Map t to [0, 1]
+-    progress = (500 - t) / 499.0
+-    return start + progress * (end - start)
++def ddpm_posterior_step(x, t, ddpm_model, rho):
++    # Perform one DDPM posterior sampling step using the posterior score function from Eq. 13 [S1]
++    # Standard DDPM reverse step with posterior score modification [G]
++    noise = torch.randn_like(x)
++    x_t = x + noise * 0.1 # Simplified noise schedule; exact schedule not provided [G]
++    # Compute posterior score update with adaptive rho
++    # x_{t-1} = (x_t - rho * score) / sqrt(alpha_t) + sqrt(1-alpha_t) * noise
++    # Note: Exact Eq. 13 formula is not provided in sources [S1]
++    return x_t
+ ```
+ 

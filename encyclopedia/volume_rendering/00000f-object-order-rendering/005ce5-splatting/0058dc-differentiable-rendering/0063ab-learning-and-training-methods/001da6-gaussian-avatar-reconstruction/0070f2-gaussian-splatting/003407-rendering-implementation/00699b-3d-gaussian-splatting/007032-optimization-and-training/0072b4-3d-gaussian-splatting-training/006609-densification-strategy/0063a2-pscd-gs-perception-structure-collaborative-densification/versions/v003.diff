@@ -1,0 +1,168 @@
+--- v002.md
++++ v003.md
+@@ -83,5 +83,4 @@
+ 
+ ```python
+-import math
+ import numpy as np
+ 
+@@ -100,49 +99,84 @@
+ 
+ def compute_perceptual_map(image, vgg_features, layers, beta_l):
+-    # Extract gradients of channel-normalized features
+-    grad_sq = np.zeros_like(image)
+-    grad_outer = np.zeros_like(image)
++    total_num = np.zeros_like(image[:, :, 0])
++    total_den = np.zeros_like(image[:, :, 0])
+     for l in layers:
+         feat = vgg_features[l]
+-        grad = np.gradient(feat, axis=(0, 1))
+-        grad_mag = np.sum(grad**2, axis=0)
+-        grad_tensor = np.einsum('ijk,ilm->jklm', grad[0], grad[1]) # Simplified outer product
+-        grad_sq += beta_l[l] * grad_mag
+-        grad_outer += beta_l[l] * grad_tensor
+-    # Spatial resize U_pl handled by averaging/interpolation in practice
+-    ratio = grad_sq / (np.linalg.norm(grad_outer, axis=(2,3)) + 1e-6)
++        dH, dW = np.gradient(feat, axis=(0, 1))
++        grad_sq = dH**2 + dW**2
++        num = np.sum(grad_sq, axis=2)
++        den = np.sum(grad_sq, axis=2)
++        total_num += beta_l[l] * num
++        total_den += beta_l[l] * den
++    ratio = total_num / (total_den + 1e-6)
+     return robust_normalize(ratio)
+ 
+ def compute_structural_evidence(Y_v, Z_kv, neighbors, tau_z, sigma_z, sigma_h, lambda_e, lambda_d, m_min):
+-    E_v = robust_normalize(np.linalg.norm(np.gradient(Y_v, axis=(0,1)), axis=0))
+-    D_kv = robust_normalize(np.linalg.norm(np.gradient(np.log(Z_kv + 1e-6), axis=(0,1)), axis=0))
++    grad_Y = np.gradient(Y_v, axis=(0, 1))
++    E_v = robust_normalize(np.sqrt(grad_Y[0]**2 + grad_Y[1]**2))
++    grad_Z = np.gradient(np.log(Z_kv + 1e-6), axis=(0, 1))
++    D_kv = robust_normalize(np.sqrt(grad_Z[0]**2 + grad_Z[1]**2))
+     H_kv = lambda_e * E_v + lambda_d * D_kv
+-    
++
+     M_kv = np.zeros_like(H_kv)
++    chi_sum = np.zeros_like(H_kv)
+     for v_prime in neighbors:
+-        # Reprojection logic: back-project u with Z_kv, reproject to v'
+-        # Compute delta_z, validity flag chi, and feature diff
+-        # a_vv' formula
+-        # Accumulate into M_kv
+-        pass # Cross-view reprojection is geometry-dependent; implemented per camera model
+-    
++        delta_z, chi, H_prime = reprojection_step(Z_kv, v_prime)
++        exp_z = np.exp(-delta_z / sigma_z)
++        exp_h = np.exp(-np.abs(H_kv - H_prime) / sigma_h)
++        a_vv = chi * exp_z * exp_h
++        M_kv += a_vv
++        chi_sum += chi
++    M_kv = M_kv / (chi_sum + 1e-6)
+     B_kv = robust_normalize(H_kv * (m_min + (1 - m_min) * M_kv))
+-    
+-    g_E = np.gradient(E_v, axis=(0,1))
+-    g_D = np.gradient(D_kv, axis=(0,1))
+-    # Tensor R_vB,k
+-    R_vB = (m_min + (1 - m_min) * M_kv) * (lambda_e * np.einsum('ij,kl->ijkl', g_E, g_E) + lambda_d * np.einsum('ij,kl->ijkl', g_D, g_D))
++
++    g_E = np.stack([grad_Y[0], grad_Y[1]], axis=2)
++    g_D = np.stack([grad_Z[0], grad_Z[1]], axis=2)
++    norm_E = np.sqrt(np.sum(g_E**2, axis=2, keepdims=True)) + 1e-6
++    norm_D = np.sqrt(np.sum(g_D**2, axis=2, keepdims=True)) + 1e-6
++    g_E_norm = g_E / norm_E
++    g_D_norm = g_D / norm_D
++    outer_E = g_E_norm[:, :, :, None] * g_E_norm[:, :, None, :]
++    outer_D = g_D_norm[:, :, :, None] * g_D_norm[:, :, None, :]
++    R_vB = (m_min + (1 - m_min) * M_kv[:, :, None, None]) * (lambda_e * outer_E + lambda_d * outer_D)
+     return B_kv, R_vB
+ 
+-def aggregate_evidence(gaussian, perceptual_maps, structural_maps, neighbors, tau_C, K_vis, sigma_X):
+-    # Aggregate over projected footprint using alpha-compositing weights omega_iv
+-    # Compute view support nu_iv, mean mu_i^X, variance V_i^X
+-    # Raw score I_e^X
+-    pass # Implementation follows Eq (6) exactly using alpha weights
++def aggregate_evidence(gaussians, perceptual_maps, structural_maps, neighbors, tau_C, K_vis, sigma_X, eps):
++    raw_A = {}
++    raw_B = {}
++    for g in gaussians:
++        omega = g.omega_per_view
++        nu_iv = np.zeros(len(neighbors))
++        for idx, v in enumerate(neighbors):
++            C_v = np.sum(omega[v])
++            nu_iv[idx] = min(1.0, C_v / tau_C) * np.sum(omega[v]) / (np.sum(list(omega.values())) + eps)
++        x_vals_A = []
++        x_vals_B = []
++        for v in neighbors:
++            if v in perceptual_maps:
++                x_vals_A.append(perceptual_maps[v][g.proj_u, g.proj_v])
++            if v in structural_maps:
++                x_vals_B.append(structural_maps[v][g.proj_u, g.proj_v])
++        if not x_vals_A:
++            raw_A[g.id] = 0.0
++            raw_B[g.id] = 0.0
++            continue
++        mu_A = np.mean(x_vals_A)
++        V_A = np.mean((np.array(x_vals_A) - mu_A)**2)
++        mu_B = np.mean(x_vals_B) if x_vals_B else 0.0
++        V_B = np.mean((np.array(x_vals_B) - mu_B)**2) if x_vals_B else 0.0
++        support_factor = min(1.0, np.sum(nu_iv) / K_vis)
++        agreement_factor_A = np.exp(-V_A / (2 * (sigma_X + eps)))
++        agreement_factor_B = np.exp(-V_B / (2 * (sigma_X + eps)))
++        raw_A[g.id] = support_factor * agreement_factor_A * mu_A
++        raw_B[g.id] = support_factor * agreement_factor_B * mu_B
++    return raw_A, raw_B
+ 
+ def update_quantiles(raw_scores, prev_low, prev_high, beta_q, p=0.5):
+     vals = list(raw_scores.values())
++    if not vals:
++        return prev_low, prev_high
+     curr_low = np.quantile(vals, p)
+-    curr_high = np.quantile(vals, 1-p)
++    curr_high = np.quantile(vals, 1 - p)
+     new_low = beta_q * prev_low + (1 - beta_q) * curr_low
+     new_high = beta_q * prev_high + (1 - beta_q) * curr_high
+@@ -152,6 +186,7 @@
+     eligible = []
+     for g in G:
+-        if g.visible_in_steps:
+-            g.avg_grad = np.mean([np.linalg.norm(g.grad_2D[t])**2 for t in g.visible_in_steps])
++        if hasattr(g, 'visible_steps') and len(g.visible_steps) > 0:
++            grad_sq_sum = sum(np.linalg.norm(g.grad_2D[t])**2 for t in g.visible_steps)
++            g.avg_grad = grad_sq_sum / (len(g.visible_steps) + 1e-6)
+             g.max_scale = np.max(g.scale)
+             if g.avg_grad > tau_g:
+@@ -163,7 +198,7 @@
+     structural_maps = {}
+     structural_tensors = {}
+-    
++
+     for v in training_views:
+-        feats = extract_vgg16_features(v.image) # Frozen network
++        feats = extract_vgg16_features(v.image)
+         perceptual_maps[v.id] = compute_perceptual_map(v.image, feats, layers=L, beta_l=beta_l)
+         Y_v = 0.299*v.image[:,:,0] + 0.587*v.image[:,:,1] + 0.114*v.image[:,:,2]
+@@ -173,18 +208,16 @@
+         structural_tensors[v.id] = R_vB
+ 
+-    raw_A = {}
+-    raw_B = {}
+-    for g in eligible:
+-        raw_A[g.id] = aggregate_evidence(g, perceptual_maps, training_views, tau_C, K_vis, sigma_X)
+-        raw_B[g.id] = aggregate_evidence(g, structural_maps, training_views, tau_C, K_vis, sigma_X)
++    raw_A, raw_B = aggregate_evidence(eligible, perceptual_maps, structural_maps, training_views, tau_C, K_vis, sigma_X, 1e-6)
+ 
+     q_A_low, q_A_high = update_quantiles(raw_A, q_A_prev_low, q_A_prev_high, beta_q)
+     q_B_low, q_B_high = update_quantiles(raw_B, q_B_prev_low, q_B_prev_high, beta_q)
+-    
++
+     scores_P = {}
+     scores_Q = {}
+     for g in eligible:
+-        scores_P[g.id] = clip((raw_A[g.id] - q_A_low) / (q_A_high - q_A_low + eps_cal), 0, 1)
+-        scores_Q[g.id] = clip((raw_B[g.id] - q_B_low) / (q_B_high - q_B_low + eps_cal), 0, 1)
++        denom_A = q_A_high - q_A_low + eps_cal
++        scores_P[g.id] = clip((raw_A[g.id] - q_A_low) / denom_A, 0, 1) if denom_A > 1e-6 else 0.0
++        denom_B = q_B_high - q_B_low + eps_cal
++        scores_Q[g.id] = clip((raw_B[g.id] - q_B_low) / denom_B, 0, 1) if denom_B > 1e-6 else 0.0
+ 
+     new_gaussians = []

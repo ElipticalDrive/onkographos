@@ -1,0 +1,178 @@
+--- v001.md
++++ v002.md
+@@ -4,101 +4,115 @@
+ 
+ ## Overview
+-Guided sampling is a densification strategy for 3D Gaussian Splatting that addresses geometric gaps in sparse initial point clouds by spawning new primitives along the camera ray depth axis [S1]. Unlike standard gradient-based splitting which relies on local image-space error, this method explicitly samples depth values to populate regions where geometry is missing or poorly initialized, such as distant backgrounds or transparent surfaces [S1]. It serves as a complementary initialization step to gradient-driven densification, ensuring that the Gaussian representation covers the full volumetric extent of the scene rather than just the visible surface boundaries.
++Guided Sampling is a densification strategy for 3D Gaussian Splatting that addresses blurring artifacts in regions insufficiently covered by the initial sparse point cloud, such as distant geometry or transparent/translucent objects [S1]. It distinguishes itself from standard gradient-based splitting by explicitly sampling new Gaussian positions along the camera ray depth range rather than relying solely on positional gradients, thereby ensuring coverage in areas where gradient signals are weak or ambiguous [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** The current set of 3D Gaussians $\mathcal{G}$, the camera intrinsics and extrinsics for the current training view, and the maximum depth $d$ present in that view.
+-*   **Output:** A set of new Gaussian primitives added to $\mathcal{G}$, positioned along the sampled depth rays.
++*   **Input:** The current set of 3D Gaussians $\mathcal{G}$, the camera parameters for the current training view, and the maximum depth $d$ present in that view.
++*   **Output:** A set of new Gaussian primitives added to $\mathcal{G}$, positioned along the depth range of the view.
+ 
+ **Data Structures:**
+-The method operates on the existing Gaussian buffer. New Gaussians are allocated with standard 3DGS attributes: mean $\mu \in \mathbb{R}^3$, covariance $\Sigma \in \mathbb{R}^{3 \times 3}$ (parameterized by scale and rotation), opacity $\alpha$, and spherical harmonic coefficients $\mathbf{c}$. The new Gaussians are typically initialized with small scales and low opacity, allowing the optimizer to refine them during subsequent training steps.
++*   **Gaussian Primitive:** Defined by mean position $\mu \in \mathbb{R}^3$, covariance $\Sigma$, opacity $\alpha$, and spherical harmonic coefficients $\mathbf{c}$ [Parent].
++*   **Depth Range:** Defined by a lower bound $L = s \cdot d$ and an upper bound $U = 7.5 \cdot d$, where $d$ is the maximum depth in the training view and $s$ is a scaling factor [S1].
+ 
+ **Parameters:**
+-*   $d$: The maximum depth value present in the current training view [S1].
+-*   $s$: A scaling factor for the lower bound of the sampling range. Typically set to $0.7$ for most scenes [S1].
+-*   Upper bound multiplier: Fixed at $7.5$ [S1].
++*   $d$: Maximum depth value present in the current training view [S1].
++*   $s$: Scaling factor for the lower bound of the sampling range. Typically set to $0.7$ for most scenes [S1].
++*   Noise: A small random noise value added to each depth sample to prevent aliasing or regular spacing artifacts [S1].
+ 
+ **Steps:**
+-1.  **Determine Depth Range:** Calculate the sampling interval $[s \cdot d, 7.5 \cdot d]$ [S1].
+-2.  **Sample Depths:** Uniformly sample depth values $z$ from this interval [S1].
+-3.  **Add Noise:** Add small random noise to each sampled depth value $z$ to prevent aliasing and ensure robust coverage [S1].
+-4.  **Back-Project:** For each sampled depth $z$, back-project the pixel coordinates to 3D space using the camera projection matrix to obtain the mean position $\mu$ [S1].
+-5.  **Initialize Gaussians:** Create new Gaussian primitives at $\mu$. The covariance and other attributes are initialized based on the local neighborhood or default small values, as the primary goal is spatial coverage [S1].
+-6.  **Integration:** Add the new Gaussians to the global set $\mathcal{G}$ [S1].
++1.  **Determine Depth Bounds:** Calculate the sampling interval $[L, U]$ where $L = s \cdot d$ and $U = 7.5 \cdot d$ [S1].
++2.  **Sample Depth:** For each new Gaussian to be spawned:
++    a. Draw a depth value $z$ uniformly from the interval $[L, U]$ [S1].
++    b. Add small random noise $\epsilon$ to $z$ to obtain the final sampled depth $z' = z + \epsilon$ [S1].
++3.  **Project to 3D:** Using the camera intrinsics and extrinsics for the current view, back-project the pixel coordinates (typically corresponding to the region of interest or uniformly across the image if not guided by specific error maps) to 3D space using the sampled depth $z'$ [S1]. This yields the mean position $\mu_{new}$ for the new Gaussian.
++4.  **Initialize Gaussian:** Create a new Gaussian primitive $g_{new}$ with:
++    *   $\mu_{new}$ as calculated above.
++    *   Scale and rotation inherited or initialized based on the parent or default settings (specifics on scale/rotation initialization for guided sampling are not explicitly detailed in the source beyond the general densification context [Parent, S1]).
++    *   Opacity $\alpha$ initialized to a low value or inherited from the cloning logic if applicable (the source notes that guided sampling is part of the densification step followed by pruning [S1]).
++5.  **Add to Set:** Insert $g_{new}$ into the Gaussian set $\mathcal{G}$ [S1].
++6.  **Pruning (Subsequent Step):** After densification and guided sampling, Gaussians with small spatial opacity are gradually pruned to keep the most representative primitives [S1].
+ 
+ **Pseudocode:**
+ ```python
+-def guided_sampling(Gaussians, camera, max_depth_d, scale_factor=0.7, noise_std=1e-3):
++import numpy as np
++
++def guided_sampling(camera, max_depth_d, scaling_factor_s=0.7, num_samples=1):
+     """
+-    Spawns new Gaussians along depth rays to fill sparse regions.
++    Generates new Gaussian positions using guided depth sampling.
+     
+     Args:
+-        Gaussians: Current list of 3D Gaussian primitives.
+-        camera: Camera object with projection and inverse projection methods.
+-        max_depth_d: Maximum depth value in the current training view.
+-        scale_factor: Lower bound multiplier (typically 0.7).
+-        noise_std: Standard deviation for depth noise.
++        camera: Object containing projection matrices and intrinsics.
++        max_depth_d: Maximum depth value present in the training view.
++        scaling_factor_s: Lower bound scaling factor (default 0.7).
++        num_samples: Number of new Gaussians to spawn.
+         
+     Returns:
+-        Updated list of Gaussians with new primitives added.
++        list of new Gaussian means (mu) in 3D space.
+     """
+     new_gaussians = []
+     
+-    # Define sampling range [s * d, 7.5 * d]
+-    lower_bound = scale_factor * max_depth_d
++    # Step 1: Determine Depth Bounds
++    lower_bound = scaling_factor_s * max_depth_d
+     upper_bound = 7.5 * max_depth_d
+     
+-    # Number of samples to spawn. Not specified in sources; 
+-    # typically proportional to image resolution or a fixed hyperparameter.
+-    # [G] Assuming a fixed number of samples per view or per pixel density.
+-    num_samples = 1000 
+-    
++    # Step 2 & 3: Sample Depth and Project to 3D
+     for _ in range(num_samples):
+-        # Uniformly sample depth with noise
+-        z = random.uniform(lower_bound, upper_bound)
+-        z += random.gauss(0, noise_std)
++        # Uniform sample from [s*d, 7.5*d]
++        z_sample = np.random.uniform(lower_bound, upper_bound)
+         
+-        # Sample a random pixel coordinate (u, v) in the image plane
+-        u = random.randint(0, camera.width - 1)
+-        v = random.randint(0, camera.height - 1)
++        # Add small random noise
++        noise = np.random.normal(0, 0.01) # Noise magnitude not specified, assumed small
++        z_final = z_sample + noise
+         
+-        # Back-project pixel to 3D point at depth z
+-        # This assumes a pinhole camera model; implementation details depend on 
+-        # the specific camera projection matrix used.
+-        point_3d = camera.unproject(u, v, z)
++        # Back-project to 3D. 
++        # Note: The source does not specify the exact 2D pixel coordinates 
++        # used for back-projection. In practice, this is often done 
++        # uniformly across the image or at locations of high error.
++        # Here we assume a placeholder for pixel coordinate (u, v) 
++        # which would be determined by the caller (e.g., random pixel or error map).
++        # For the purpose of this method definition, we assume the caller 
++        # provides the 2D pixel location or this function is called per-pixel.
++        # To make it self-contained as a "sampling" method, we assume 
++        # it generates positions along rays. However, without specific 
++        # pixel coordinates, we cannot compute exact 3D points.
++        # [G] Assuming the method is called in a context where pixel coordinates 
++        # are known or sampled uniformly. Here we demonstrate the depth sampling logic.
+         
+-        # Initialize a new Gaussian at point_3d
+-        # [G] Scale and opacity are initialized to small values to allow 
+-        # optimization to refine them.
+-        new_g = Gaussian(
+-            mean=point_3d,
+-            scale=small_default_scale,
+-            opacity=small_default_opacity,
+-            rotation=identity_rotation,
+-            sh_coefficients=zero_sh
+-        )
+-        new_gaussians.append(new_g)
++        # To be implementable, we need pixel coordinates. 
++        # If this is a global densification step, pixels might be sampled uniformly.
++        # Let's assume we sample a random pixel (u, v) for each new Gaussian.
++        u = np.random.randint(0, camera.width)
++        v = np.random.randint(0, camera.height)
+         
+-    # Append new Gaussians to the main set
+-    Gaussians.extend(new_gaussians)
+-    return Gaussians
++        # Back-project (u, v, z_final) to 3D using camera intrinsics
++        # This is a standard operation: 
++        # x = (u - cx) * z / fx
++        # y = (v - cy) * z / fy
++        # z = z_final
++        # Then apply extrinsic rotation and translation.
++        mu_3d = camera.unproject(u, v, z_final)
++        
++        new_gaussians.append(mu_3d)
++        
++    return new_gaussians
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Blurring in Sparse Regions:** Guided sampling cannot fully eliminate blurring in areas insufficiently covered by the initial sparse point cloud, such as far content outside windows or flames [S1]. This occurs because accurate depth is unavailable, forcing Gaussians to spawn across a wide depth range [S1].
+-*   **Pruning of Misplaced Gaussians:** Gaussians spawned near the correct location may be pruned during subsequent training if they do not contribute significantly to the loss, leading to instability [S1].
++*   **Blurring in Uncovered Areas:** Guided sampling cannot fully eliminate blurring in areas insufficiently covered by the sparse point cloud, such as far content outside windows or flames [S1]. This occurs because accurate depth is unavailable, forcing Gaussians to spawn across a depth range [S1].
++*   **Pruning of Correct Gaussians:** Gaussians spawned near the correct location may be pruned during subsequent training if they do not immediately minimize the loss, leading to instability [S1].
+ *   **Mitigation:** Leveraging depth priors from learning-based depth estimation methods can constrain the spawning range and improve accuracy [S1].
+ 
+ ## Subtopics
+ 
++### [Geometry-Texture-Aware Densification](20660-geometry-texture-aware-densification.md)
++Geometry-Texture-Aware Densification (GeoTexDensifier) is a densification strategy for 3D Gaussian Splatting that utilizes geometry priors (monocular depth and normal maps) to guide splitting in weakly textured regions and texture gradients to control densification in fully textured areas, thereby avoiding the over-splitting of floaters in textureless regions.
++
+ ## Operating characteristics
+-*   **Time Complexity:** Linear with respect to the number of sampled points. The back-projection operation is $O(1)$ per sample.
+-*   **Memory Complexity:** Increases the number of Gaussians by the number of samples. This can significantly increase memory usage if the sampling density is high.
+-*   **Strengths:** Effectively fills geometric gaps in sparse initializations; does not rely on gradient convergence which may stall in textureless regions.
+-*   **Limitations:** Prone to generating "floaters" or misplaced Gaussians in regions with ambiguous depth; requires careful tuning of the depth range to avoid sampling into empty space or occluded regions.
+-*   **When to Use:** When the initial point cloud is sparse or when standard gradient-based densification fails to populate distant or transparent geometry.
++*   **Strengths:** Alleviates blurring in regions with sparse initial coverage by explicitly sampling depth [S1].
++*   **Limitations:** Cannot fully eliminate artifacts in challenging scenarios like transparent objects or distant geometry where depth is ambiguous [S1]. May spawn Gaussians in incorrect locations that are later pruned, adding computational overhead [S1].
++*   **Performance:** The source provides performance metrics for the full method (Spacetime Gaussian Feature Splatting) but does not isolate the cost of guided sampling alone [S1].
+ 
+ ## Background
+-Guided sampling was introduced in the context of Spacetime Gaussian Feature Splatting for Real-Time Dynamic View Synthesis [S1]. It was developed to address the limitations of static 3D Gaussian Splatting when applied to dynamic scenes or scenes with sparse initial reconstructions, where gradient-based methods alone were insufficient to capture the full volumetric structure.
++Guided Sampling is introduced in the context of Spacetime Gaussian Feature Splatting for Real-Time Dynamic View Synthesis [S1]. It is designed to handle dynamic scenes and challenging geometry where static point cloud initialization is insufficient [S1].
+ 
+ ## Sources

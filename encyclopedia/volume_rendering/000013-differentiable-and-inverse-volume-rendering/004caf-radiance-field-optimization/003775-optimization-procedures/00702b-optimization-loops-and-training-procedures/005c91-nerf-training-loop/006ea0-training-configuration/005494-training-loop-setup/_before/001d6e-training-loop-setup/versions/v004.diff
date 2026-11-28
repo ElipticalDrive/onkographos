@@ -1,0 +1,104 @@
+--- v003.md
++++ v004.md
+@@ -15,25 +15,25 @@
+ - `means`: Float32 array of shape `(numPoints, 3)`.
+ - `scales`: Float32 array of shape `(numPoints, 3)`.
+-- `glob_scale`: Float32 scalar (default 1.0f).
+-- `quats`: Float32 array of shape `(numPoints, 4)` (quaternions).
+-- `viewMat`, `projViewMat`: Float32 matrices for camera projection.
+-- `fx`, `fy`, `cx`, `cy`: Float32 camera intrinsics.
+-- `height`, `width`: Integer image dimensions.
+-- `tileBounds`: Integer array defining tile boundaries for rasterization.
+-- `near plane`: Float32 (default 0.01f).
+-- `degree`, `degreesToUse`: Integers for spherical harmonic degrees.
+-- `cam_pos`: Float32 array `(3,)`.
+-- `featuresDc`: Float32 array of DC color features.
+-- `featuresRest`: Float32 array of SH rest coefficients.
+-- `opacities`: Float32 array of per-point opacities.
+-- `backgroundColor`: Float32 array `(3,)`.
+-- `gt`: Float32 array `(batch_size, height, width, 3)` ground truth images.
+-- `SSIM window`: Float32 array for structural similarity calculation.
+-- `ssimWeight`: Float32 scalar.
++- `glob_scale`: Float32 scalar (default 1.0f) [S1, unofficial].
++- `quats`: Float32 array of shape `(numPoints, 4)` (quaternions) [S1, unofficial].
++- `viewMat`, `projViewMat`: Float32 matrices for camera projection [S1, unofficial].
++- `fx`, `fy`, `cx`, `cy`: Float32 camera intrinsics [S1, unofficial].
++- `height`, `width`: Integer image dimensions [S1, unofficial].
++- `tileBounds`: Integer array defining tile boundaries for rasterization [S1, unofficial].
++- `near plane`: Float32 (default 0.01f) [S1, unofficial].
++- `degree`, `degreesToUse`: Integers for spherical harmonic degrees [S1, unofficial].
++- `cam_pos`: Float32 array `(3,)` [S1, unofficial].
++- `featuresDc`: Float32 array of DC color features [S1, unofficial].
++- `featuresRest`: Float32 array of SH rest coefficients [S1, unofficial].
++- `opacities`: Float32 array of per-point opacities [S1, unofficial].
++- `backgroundColor`: Float32 array `(3,)` [S1, unofficial].
++- `gt`: Float32 array `(batch_size, height, width, 3)` ground truth images [S1, unofficial].
++- `SSIM window`: Float32 array for structural similarity calculation [S1, unofficial].
++- `ssimWeight`: Float32 scalar [S1, unofficial].
+ - `lossInvN`: Float32 scalar, normalized as $1.0f / (height \times width \times 3)$ [S1, unofficial].
+-- `featuresRest stride`: Integer stride for feature memory layout.
+-- `N_ADAM_GROUPS`: Integer for optimizer partitioning.
+-- `Adam params`: Float32 arrays for `exp_avg`, `exp_avg_sq`, `scaled lr`, `sqrt(bc2)`.
+-- `Adam beta1`, `beta2`, `eps`: Float32 scalars.
++- `featuresRest stride`: Integer stride for feature memory layout [S1, unofficial].
++- `N_ADAM_GROUPS`: Integer for optimizer partitioning [S1, unofficial].
++- `Adam params`: Float32 arrays for `exp_avg`, `exp_avg_sq`, `scaled lr`, `sqrt(bc2)` [S1, unofficial].
++- `Adam beta1`, `beta2`, `eps`: Float32 scalars [S1, unofficial].
+ - `visCounts`, `xysGradNorm`, `max2DSize`, `invMaxDim`: Float32/Integer auxiliary buffers for gradient normalization and visibility tracking. `invMaxDim` is calculated as $1.0f / \max(height, width)$ [S1, unofficial].
+ 
+@@ -60,5 +60,5 @@
+ ):
+     # 1. Forward Rendering: [G] Standard differentiable rasterization projects 3D Gaussians to 2D, sorts by depth, and alpha-composites.
+-    rendered_image = forward_render(
++    rendered_image = differentiable_rasterize(
+         means=means, scales=scales, glob_scale=glob_scale, quats=quats,
+         viewMat=viewMat, projViewMat=projViewMat, fx=fx, fy=fy,
+@@ -71,5 +71,5 @@
+ 
+     # 2. Loss Computation: MSE normalized by lossInvN, optionally add SSIM
+-    mse_loss = sum(sum((rendered_image[i][j] - gt[i][j]) ** 2 for j in range(width)) for i in range(height)) / (height * width * 3) * lossInvN
++    mse_loss = sum((rendered_image[i][j][k] - gt[i][j][k]) ** 2 for i in range(height) for j in range(width) for k in range(3)) * lossInvN
+     ssim_loss = 1.0 - compute_ssim(rendered_image, gt, ssim_window)
+     total_loss = mse_loss + ssimWeight * ssim_loss
+@@ -77,21 +77,12 @@
+     # 3. Backward Pass: [G] Standard automatic differentiation computes gradients w.r.t. trainable parameters.
+     # 4. Optimizer Update: Standard Adam step with adaptive scaling
+-    # [G] Standard Adam update: m = beta1*m + (1-beta1)*g; v = beta2*v + (1-beta2)*g^2; p = p - lr * m / (sqrt(v) + eps)
+-    update_adam_step(
+-        params=[means, scales, quats, featuresDc, featuresRest, opacities],
+-        grads=[p.grad for p in [means, scales, quats, featuresDc, featuresRest, opacities]],
+-        exp_avg=adam_exp_avg,
+-        exp_avg_sq=adam_exp_avg_sq,
+-        scaled_lr=adam_scaled_lr,
+-        sqrt_bc2=adam_sqrt_bc2,
+-        beta1=adam_beta1,
+-        beta2=adam_beta2,
+-        eps=adam_eps,
+-        visCounts=visCounts,
+-        xysGradNorm=xysGradNorm,
+-        max2DSize=max2DSize,
+-        invMaxDim=invMaxDim,
+-        N_ADAM_GROUPS=N_ADAM_GROUPS
+-    )
++    for p in [means, scales, quats, featuresDc, featuresRest, opacities]:
++        g = p.grad
++        m = adam_beta1 * adam_exp_avg[p] + (1.0 - adam_beta1) * g
++        v = adam_beta2 * adam_exp_avg_sq[p] + (1.0 - adam_beta2) * g ** 2
++        adam_exp_avg[p] = m
++        adam_exp_avg_sq[p] = v
++        p = p - adam_scaled_lr * m / (adam_sqrt_bc2 * v ** 0.5 + adam_eps)
++        # [G] visCounts, xysGradNorm, max2DSize, invMaxDim, N_ADAM_GROUPS are used for gradient normalization and visibility tracking in the Adam update
+ 
+     return rendered_image, total_loss
+@@ -125,10 +116,7 @@
+ - **Time Complexity:** Not given in the sources.
+ - **Memory Complexity:** Not given in the sources.
+-- **Performance:** Highly dependent on GPU memory bandwidth and compute capabilities.
+-- **Strengths:** Modular design allows for easy integration of different loss functions and optimizers.
+-- **Limitations:** Memory usage can still be high for large scenes or high-resolution images if batching is not efficient.
+ 
+ ## Background
+-The concept of a training loop setup is fundamental to differentiable rendering and neural radiance fields. The `msplat_train_step` implementation is associated with the Msplat project [S1, unofficial]. The `Plenoxels` project also utilizes similar training loop structures for voxel-based radiance fields [S2, unofficial]. The `relaxed-boundary` project demonstrates a configuration-based approach for SDF optimization [S4, unofficial].
++The `msplat_train_step` implementation is associated with the Msplat project [S1, unofficial]. The `Plenoxels` project also utilizes similar training loop structures for voxel-based radiance fields [S2, unofficial]. The `relaxed-boundary` project demonstrates a configuration-based approach for SDF optimization [S4, unofficial].
+ 
+ ## Sources

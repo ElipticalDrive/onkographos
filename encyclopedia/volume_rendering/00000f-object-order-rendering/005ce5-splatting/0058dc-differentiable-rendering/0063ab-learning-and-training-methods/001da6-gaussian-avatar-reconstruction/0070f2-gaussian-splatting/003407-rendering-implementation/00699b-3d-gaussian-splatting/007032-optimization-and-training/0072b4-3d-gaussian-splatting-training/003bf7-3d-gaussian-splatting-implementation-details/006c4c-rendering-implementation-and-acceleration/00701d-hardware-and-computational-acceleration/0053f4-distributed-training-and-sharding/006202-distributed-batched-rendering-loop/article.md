@@ -1,0 +1,174 @@
+# Distributed Batched Rendering Loop
+
+Also called: Distributed 3DGS Rendering Loop
+
+## Overview
+A distributed rendering pipeline that processes camera views in batches, divides workload across multiple GPUs, preprocesses 3D Gaussian Splatting data, performs all-to-all communication, renders, and aggregates results across ranks [S1, unofficial]. It enables high-resolution and large-scale 3D reconstruction by overcoming single-GPU memory limits through parallel computation and increased batch sizes [S1, unofficial]. Unlike systems that process one camera view at a time, this method supports batched training using multiple views to better utilize distributed GPU resources [S1, unofficial].
+
+## How it works
+**Inputs:**
+- A dataset of camera poses and intrinsics.
+- 3D Gaussian primitives (positions, covariances, opacities, spherical harmonics coefficients).
+- Pipeline configuration (projection matrices, background color).
+- Distributed training parameters (`args.bsz`, `args.sample_freq`, `args.generate_num`).
+
+**Outputs:**
+- Rendered images for the batched cameras.
+- Aggregated gradients (implicit in training context, though the loop description focuses on rendering/evaluation steps).
+
+**Data Structures:**
+- `batched_cameras`: List of camera parameters for the current batch.
+- `batched_strategies`: Mapping of camera views to GPU tasks.
+- `gpuid2tasks`: Dictionary mapping GPU IDs to specific rendering tasks/cameras.
+- `batched_screenspace_pkg`: Data structure holding preprocessed 3DGS data and screenspace packages for distributed rendering.
+- `strategy_history`: History of previous scheduling decisions (used for load balancing).
+
+**Steps:**
+1.  **Batch Iteration:** Iterate over the total number of cameras in steps of `args.bsz`.
+2.  **Camera Fetch:** Retrieve the next batch of cameras. If the remaining cameras are fewer than `args.bsz`, fetch only the remaining ones.
+3.  **Strategy Calculation:** Compute the workload division and GPU-to-task mapping based on the current batch and `strategy_history`. This determines which GPU handles which camera view.
+4.  **Data Transfer:** Transfer camera data from CPU memory to all GPUs according to the calculated strategy.
+5.  **Preprocessing and Communication:** Preprocess the 3DGS data for the batch and execute an all-to-all communication step across GPUs. This distributes the relevant Gaussian primitives to the GPUs responsible for rendering the specific camera views in the batch.
+6.  **Rendering:** Execute the rendering kernel for each GPU on its assigned portion of the batch.
+7.  **Aggregation:** If distributed across multiple ranks, aggregate the rendered images using a sum reduction operation.
+8.  **Post-processing:** Clamp pixel values to the valid range $[0.0, 1.0]$ and save the images if the sampling frequency condition is met.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.distributed as dist
+import torchvision.utils
+
+def distributed_batched_rendering_loop(dataset, gaussians, pipeline, background, args, utils):
+    """
+    Main loop for distributed batched rendering/training.
+    
+    Args:
+        dataset: Dataset object providing camera poses.
+        gaussians: 3D Gaussian primitive data.
+        pipeline: Rendering pipeline configuration.
+        background: Background color tensor.
+        args: Argument namespace containing bsz, sample_freq, generate_num.
+        utils: Utility module containing DEFAULT_GROUP.
+    """
+    num_cameras = len(dataset)
+    strategy_history = [] # Initialize history for load balancing
+    
+    # Limit generation if generate_num is specified
+    max_iterations = (args.generate_num + args.bsz - 1) // args.bsz if args.generate_num > 0 else (num_cameras + args.bsz - 1) // args.bsz
+    
+    for idx in range(1, num_cameras + 1, args.bsz):
+        # Calculate number of cameras to load in this batch
+        num_camera_to_load = min(args.bsz, num_cameras - idx + 1)
+        
+        # Fetch batched cameras
+        batched_cameras = dataset.get_batched_cameras(num_camera_to_load)
+        
+        # Compute workload division and GPU-to-task mapping
+        # This function likely uses strategy_history to balance load
+        batched_strategies, gpuid2tasks = start_strategy_final(batched_cameras, strategy_history)
+        
+        # Transfer camera data from CPU to all GPUs
+        load_camera_from_cpu_to_all_gpu_for_eval(batched_cameras, batched_strategies, gpuid2tasks)
+        
+        # Preprocess 3DGS data and execute all-to-all communication
+        # Distributes Gaussians to GPUs based on which cameras they affect
+        batched_screenspace_pkg = distributed_preprocess3dgs_and_all2all_final(
+            batched_cameras, 
+            gaussians, 
+            pipeline, 
+            background, 
+            batched_strategies=batched_strategies, 
+            mode="test"
+        )
+        
+        # Render the batched images
+        batched_image, _ = render_final(batched_screenspace_pkg, batched_strategies)
+        
+        # Aggregate rendered images across distributed ranks using sum reduction
+        if utils.DEFAULT_GROUP.size() > 1:
+            # Note: In a training loop, this would typically be backward pass aggregation.
+            # In an evaluation/inference loop, sum reduction might be used for specific metrics
+            # or if overlapping tiles are rendered. For standard independent camera rendering,
+            # this step might be conditional or used for gradient accumulation in training.
+            # Based on source [S1, unofficial], it is explicitly present.
+            torch.distributed.all_reduce(batched_image, op=dist.ReduceOp.SUM, group=utils.DEFAULT_GROUP)
+        
+        # Clamp pixel values to valid range
+        image = torch.clamp(batched_image, 0.0, 1.0)
+        
+        # Save images if sampling frequency allows
+        if args.sample_freq != -1 and (idx % args.sample_freq == 0 or idx == num_cameras):
+            torchvision.utils.save_image(image, f"render_{idx}.png")
+            
+        # Update strategy history for next iteration (implementation detail inferred from source context)
+        strategy_history.append(batched_strategies)
+
+def start_strategy_final(batched_cameras, strategy_history):
+    """
+    Computes the distribution strategy for the current batch.
+    Returns:
+        batched_strategies: Mapping of cameras to GPUs.
+        gpuid2tasks: Mapping of GPU IDs to tasks.
+    """
+    # Implementation details depend on the specific load balancing algorithm.
+    # Typically involves analyzing camera frustums and Gaussian distribution.
+    # [G] Placeholder for specific load balancing logic not fully detailed in source.
+    pass
+
+def load_camera_from_cpu_to_all_gpu_for_eval(batched_cameras, batched_strategies, gpuid2tasks):
+    """
+    Transfers camera parameters to the appropriate GPUs.
+    """
+    # [G] Implementation involves torch.cuda.set_device and tensor copying.
+    pass
+
+def distributed_preprocess3dgs_and_all2all_final(batched_cameras, gaussians, pipeline, background, batched_strategies, mode):
+    """
+    Preprocesses Gaussians and performs all-to-all communication.
+    """
+    # [G] Implementation involves computing bounding boxes, sorting, and 
+    # torch.distributed.all_to_all_single calls.
+    pass
+
+def render_final(batched_screenspace_pkg, batched_strategies):
+    """
+    Executes the rendering kernel.
+    """
+    # [G] Implementation involves the standard 3DGS rasterization pipeline.
+    pass
+```
+
+**Parameters:**
+- `args.bsz`: Batch size for camera processing. Controls how many views are processed per iteration. Typical values depend on GPU memory and scene complexity [S1, unofficial].
+- `args.sample_freq`: Sampling frequency for saving renders. If `!= -1`, only saves every `args.sample_freq`-th image [S1, unofficial].
+- `args.generate_num`: Maximum number of images to generate before breaking the loop [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Memory Limits:** The primary motivation is overcoming single-GPU memory limits. If `args.bsz` is too large for the collective memory bandwidth or communication overhead, performance may degrade [S1, unofficial].
+- **Load Imbalance:** Uneven distribution of Gaussians across camera views can lead to stragglers. The `start_strategy_final` function attempts to mitigate this using `strategy_history` [S1, unofficial].
+- **Communication Overhead:** The all-to-all communication step can become a bottleneck if the number of Gaussians is very large or the network bandwidth is limited [S1, unofficial].
+
+## Subtopics
+
+### Pixel Block Scheduling
+A load balancing strategy for distributed 3D Gaussian Splatting training that groups pixels into 16x16 blocks to reduce scheduler overhead while maintaining workload balance across GPUs [S2]. Instead of scheduling individual pixels, it organizes all pixels from all images in a batch into a single row, divides this row into 16x16 pixel blocks, and allocates these blocks to GPUs [S2]. This trades off scheduler overhead against uneven workloads due to additional blocks [S2]. After scheduling, a 2D boolean array `compute_locally[i][j]` is generated, indicating whether the pixel block at the i-th row and j-th column should be computed by the local GPU. Rendering is then performed only for pixels within blocks where `compute_locally` is true [S2]. The block size is fixed at 16x16 pixels [S2].
+
+## Operating characteristics
+- **Time Complexity:** Dominated by the preprocessing, all-to-all communication, and rendering steps. The communication cost scales with the number of Gaussians and the number of GPUs. The rendering cost scales with the number of pixels and the number of Gaussians per pixel [S1, unofficial][S2].
+- **Memory Complexity:** Scales with the number of Gaussians and the batch size. By distributing Gaussians and pixels, it allows for larger scenes than a single GPU can handle [S1, unofficial].
+- **Measured Performance:** On the "Rubble" dataset, distributing 40.4 million Gaussians across 16 GPUs achieved a test PSNR of 27.28, compared to 26.28 PSNR with 11.2 million Gaussians on a single GPU [S1, unofficial].
+- **Strengths:** Enables training on high-resolution and large-scale scenes that exceed single-GPU memory capacity. Supports batched training for better GPU utilization [S1, unofficial].
+- **Limitations:** Communication overhead can be significant. Load balancing is non-trivial due to the sparse and dynamic nature of Gaussian visibility [S1, unofficial][S2].
+- **When to Use:** Large-scale 3D reconstruction tasks requiring high resolution and large numbers of Gaussians [S1, unofficial].
+- **When Not to Use:** Small scenes that fit comfortably on a single GPU, where the overhead of distributed communication may outweigh the benefits [S1, unofficial].
+
+## Background
+3D Gaussian Splatting (3DGS) was introduced by Kerbl et al. in 2023, offering real-time radiance field rendering with superior visual quality [S1, unofficial]. However, initial implementations were limited to single-GPU training, restricting the scale of reconstructable scenes [S1, unofficial]. Grendel, introduced by the NYU Systems group, addresses this by partitioning 3DGS parameters and parallelizing computation across multiple GPUs [S1, unofficial]. It relies on sparse all-to-all communication and dynamic load balancing to handle the changing subset of pixels affected by each Gaussian [S1, unofficial]. The method explores learning rate scaling strategies, identifying a simple sqrt(batch size) rule as effective [S1, unofficial].
+
+## Sources
+[S1] Grendel: Distributed 3D Gaussian Splatting Training, https://github.com/nyu-systems/Grendel-GS, fetched 2026-10-27 (unofficial)
+[S2] On Scaling Up 3D Gaussian Splatting Training, https://doi.org/10.1007/978-3-031-91989-3_2, fetched 2026-10-26

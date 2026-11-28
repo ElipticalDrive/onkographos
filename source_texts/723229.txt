@@ -1,0 +1,179 @@
+Problem / Request xrtoolz.interpolate has regrid_like (xr.interp, not conservative), coarsen_conservative (integer factors only, cos-lat weights) and reproject_match (rioxarray; conservative only through rasterio's sum/average resampling...
+
+feat(interpolate): regrid_conservative — area-weighted regrid onto an arbitrary rectilinear target · Issue #300 · jejjohnson/xrtoolz · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+feat(interpolate): regrid_conservative — area-weighted regrid onto an arbitrary rectilinear target #300
+New issue
+Copy link
+New issue
+Copy link
+Closed
+#305
+Closed
+feat(interpolate): regrid_conservative — area-weighted regrid onto an arbitrary rectilinear target#300
+#305
+Copy link
+Labels
+area:codeenhancementNew feature or requestNew feature or request
+Description
+jejjohnson
+opened on Sep 18, 2026
+Issue body actions
+Problem / Request
+xrtoolz.interpolate has regrid_like (xr.interp, not conservative), coarsen_conservative (integer factors only, cos-lat weights) and reproject_match (rioxarray; conservative only through rasterio's sum/average resampling, raster-only). There is no conservative regrid from one rectilinear grid to an arbitrary other rectilinear grid — the operation every flux / inventory / emission field needs so that basin totals are preserved. The design roadmap lists it ("v0.4+ — additional regridding methods (conservative approximation)").
+User Story
+As a user rasterising a 0.1° emission inventory onto a 1 km analysis grid (or coarsening model output onto a satellite grid), I want regrid_conservative(ds, target) to preserve the integral of every extensive field to floating-point precision, so that the regridded prior sums to the published basin total.
+Motivation
+plumax#81 (EDGAR / GFEI / EPA inventory prior) has "integrating the regridded fixture over a known basin matches the published total within 1 %" as its definition of done, and per the plumax xrtoolz boundary rule it will call xrtoolz for the regrid. reproject_match(resampling="sum") is the v1 stand-in; this issue is the proper primitive, also useful for coarsen_conservative's non-integer case and for the WRF-vs-ERA5 parity check.
+Proposed API
+```
+# packages/xrtoolz/src/xrtoolz/interpolate/_src/grid_to_grid.py
+
+def regrid_conservative(
+    ds: xr.Dataset | xr.DataArray,
+    target: xr.Dataset | xr.DataArray | Mapping[str, np.ndarray],
+    *,
+    dims: tuple[str, str] = ("lat", "lon"),
+    geometry: Literal["spherical", "planar"] = "spherical",
+    bounds: Mapping[str, xr.DataArray | np.ndarray] | None = None,
+    target_bounds: Mapping[str, xr.DataArray | np.ndarray] | None = None,
+    mode: Literal["mean", "sum"] = "mean",
+    normalize: Literal["destarea", "fracarea"] = "fracarea",
+    skipna: bool = True,
+) -> xr.Dataset | xr.DataArray:
+    """First-order conservative regrid along two rectilinear dims.
+
+    ``mode="mean"`` preserves intensive fields (concentration, mixing ratio):
+    ``out = Σ_ij w_ij f_ij / Σ_ij w_ij``. ``mode="sum"`` preserves extensive
+    fields (mass, flux × area): ``out = Σ_ij w_ij f_ij``. ``w_ij`` is the
+    overlap area between source cell ``i`` and target cell ``j``; on a
+    ``"spherical"`` geometry areas are ``R² Δλ (sin φ₊ − sin φ₋)``, on
+    ``"planar"`` they are ``Δx Δy``. Cell bounds default to midpoints between
+    centres (CF ``bounds`` variables used when present or passed explicitly).
+    ``normalize="fracarea"`` renormalises by the *valid* (non-NaN) overlap so
+    partially masked targets keep the mean of their valid part;
+    ``"destarea"`` divides by the full target area (ESMF/xESMF naming).
+    """
+
+def overlap_weights_1d(
+    src_bounds: Float[np.ndarray, "n+1"], tgt_bounds: Float[np.ndarray, "m+1"]
+) -> Float[np.ndarray, "m n"]:
+    """Length (or sin-lat) overlap of each source interval with each target interval."""
+
+# packages/xrtoolz/src/xrtoolz/interpolate/operators.py
+class RegridConservative(Operator):
+    def __init__(self, target: xr.Dataset | Mapping[str, list], *, dims=("lat","lon"),
+                 geometry="spherical", mode="mean", normalize="fracarea", skipna=True): ...
+```
+An optional backend="xesmf" path (behind _require_optional(..., extra="xesmf")) is acceptable for curvilinear inputs later; the numpy path is the deliverable here.
+Design Snapshot
+Separable weight construction — the whole algorithm for rectilinear grids:
+```
+W_lat = overlap_weights_1d(sin(src_lat_bounds), sin(tgt_lat_bounds))   # (m_lat, n_lat), spherical
+W_lon = overlap_weights_1d(src_lon_bounds, tgt_lon_bounds)             # (m_lon, n_lon), radians
+# planar: use the raw bounds for both axes
+valid = np.isfinite(f)                                                  # (n_lat, n_lon)
+num = einsum("ai,bj,ij->ab", W_lat, W_lon, np.where(valid, f, 0.0))
+den = einsum("ai,bj,ij->ab", W_lat, W_lon, valid.astype(float))       # fracarea
+out = num / den            # mode="mean";  mode="sum": out = num * R**2 (spherical)
+```
+overlap_weights_1d is clip(min(b_hi_src, b_hi_tgt) - max(b_lo_src, b_lo_tgt), 0) on the outer product; sort/flip descending latitude first and flip back. Longitude wrap: unwrap target bounds into the source's periodic range before overlap (document the lon_wrap=360.0 assumption; lon_180_to_360 / lon_360_to_180 from xrtoolz.transforms already exist). Apply through xr.apply_ufunc(..., input_core_dims=[dims], output_core_dims=[dims], vectorize=False, dask="allowed") so extra dims (time, level) broadcast and dask chunks along non-regridded dims stay lazy; regridded dims must be single-chunk (same rule as sample_at_points, _check_dask_chunks).
+Existing function this generalises (grid_to_grid.py):
+```
+def coarsen_conservative(ds, factor, *, lat="lat", boundary="trim"):
+    """Area-weighted coarsen using cosine-of-latitude weights ... integer coarsening ..."""
+```
+For an integer factor with aligned bounds, regrid_conservative must equal coarsen_conservative to round-off — that is the regression test.
+Mathematical Notes
+Source cells $i$ with area $a_i$ and values $f_i$; target cells $j$; overlap areas $w_{ij} = |c_i \cap c_j|$ with $\sum_j w_{ij} = a_i$ (interior) and $\sum_i w_{ij} = a_j$.
+$$\text{mean: } \bar f_j = \frac{\sum_i w_{ij} f_i}{\sum_i w_{ij},[f_i \text{ valid}]},\qquad
+\text{sum: } F_j = \sum_i w_{ij} f_i$$
+Spherical cell area with bounds $(\lambda_-, \lambda_+)\times(\varphi_-, \varphi_+)$: $a = R^2(\lambda_+-\lambda_-)(\sin\varphi_+ - \sin\varphi_-)$, so overlaps factorise into a longitude length times a $\sin\varphi$ length.
+Invariants for tests:
+Conservation: $\sum_j a_j \bar f_j = \sum_i a_i f_i$ when the target covers the source (mean mode, no NaN); $\sum_j F_j = \sum_i f_i$ (sum mode).
+Constant preservation: $f \equiv c \Rightarrow \bar f_j = c$ for every target cell with non-zero overlap, including partially covered edge cells (fracarea).
+Identity: target grid = source grid $\Rightarrow$ output equals input to round-off.
+Coarsen consistency: aligned integer factor $\Rightarrow$ equals coarsen_conservative.
+Linearity and non-negativity of weights.
+References & Existing Code
+Design doc: plumax 00a_xrtoolz_boundary.md § gaps, item 7; plumax#81
+Existing code: packages/xrtoolz/src/xrtoolz/interpolate/_src/grid_to_grid.py (coarsen_conservative, regrid_like), interpolate/_src/grid_to_points.py::_check_dask_chunks, xrgrad.grid_metrics_from_coords (cell widths / areas), docs/design/boundaries.md roadmap line "conservative approximation"
+Prior art: xESMF conservative / conservative_normed (Regridder), ESMF first-order conservative, xarray-regrid (conservative via xr.dot on 1-D weight matrices — the closest reference implementation), iris area_weighted
+Related: feat(grad): CF-bounds-aware grid_metrics_from_coords + validation and bias docs #272 (CF-bounds-aware grid metrics — reuse its bounds inference), design(grad): curvilinear 2-D-coord geometry — decide in-scope vs xgcm boundary #268 (curvilinear scope)
+Implementation Steps
+Add overlap_weights_1d and regrid_conservative to interpolate/_src/grid_to_grid.py; reuse _validate_lat_chunks / bounds helpers and _finite_mask_da
+Add RegridConservative to interpolate/operators.py (get_config() serialises the target coordinates as lists, like RemapAxis)
+Export both from xrtoolz/interpolate/__init__.py
+Cross-reference from coarsen_conservative and regrid_like docstrings (when to use which)
+docs/api/interpolate.md regrid section
+Definition of Done
+Code lands at packages/xrtoolz/src/xrtoolz/interpolate/_src/grid_to_grid.py and interpolate/operators.py
+Public API exported via xrtoolz/interpolate/__init__.py
+Tests pass: make test
+Lint + typecheck pass: make lint && make typecheck
+Docstrings (Google-style) with the equations and an Example: block
+Testing
+Unit test: overlap_weights_1d on hand-computed intervals (nested, staggered, disjoint, descending)
+Property test: conservation of the area integral (mean mode) and of the sum (sum mode) for random fields, spherical and planar, target coarser and finer than source
+Unit test: constant field preserved on every target cell including edge cells; identity target returns the input
+Regression test: aligned integer factor equals coarsen_conservative to 1e-12
+Unit test: NaN handling — fracarea keeps the mean of the valid part, destarea scales it down; all-NaN target cell → NaN
+Unit test: longitude wrap (source on 0–360, target on −180–180) conserves the integral
+Unit test: extra dims (time) broadcast; dask-chunked along time stays lazy and matches eager
+Operator test: RegridConservative round-trips get_config() and a 2-leaf DataTree
+Documentation
+API reference: docs/api/interpolate.md
+Docstrings (covered by Definition of Done)
+Relationships
+Parent (theme epic): [EPIC] plumax integration — pre/post-processing gaps upstream of the JAX boundary #293
+Blocked by: — (feat(grad): CF-bounds-aware grid_metrics_from_coords + validation and bias docs #272 would simplify bounds inference but is not required)
+Blocks: plumax#81 (v2; v1 uses reproject_match)
+Related: feat(grad): CF-bounds-aware grid_metrics_from_coords + validation and bias docs #272, design(grad): curvilinear 2-D-coord geometry — decide in-scope vs xgcm boundary #268, epic: dask compatibility audit + remediation roadmap #158 (dask compatibility)
+Activity
+jejjohnson
+added
+enhancementNew feature or requestNew feature or request
+on Sep 18, 2026
+jejjohnson
+added a parent issue on Sep 18, 2026
+[EPIC] plumax integration — pre/post-processing gaps upstream of the JAX boundary #293
+jejjohnson
+added
+area:code
+on Sep 18, 2026
+jejjohnson
+added a commit that references this issue on Sep 18, 2026
+feat(interpolate): regrid_conservative — area-weighted regrid onto an…
+...
+This issue will close once commit 888647d is merged into the 'main' branch.
+888647d
+jejjohnson
+closed this as completedin #305on Sep 18, 2026
+jejjohnson
+added a commit that references this issue on Sep 18, 2026
+feat(interpolate): regrid_conservative — area-weighted regrid onto an…
+...
+This issue will close once commit 201230b is merged into the 'main' branch.
+201230b
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+area:codeenhancementNew feature or requestNew feature or request
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

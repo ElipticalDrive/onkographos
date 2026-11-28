@@ -1,0 +1,67 @@
+# Octree Traversal and Subdivision
+
+
+## Overview
+Octree Traversal and Subdivision manages the hierarchical navigation and structural refinement of volumetric data, solving the problem of efficiently accessing sparse or multi-resolution datasets during rendering. It sets itself apart from sibling methods by focusing on the fundamental mechanics of hierarchical descent (traversal) and spatial partitioning refinement (subdivision), whereas siblings like [JIT Type Specialization](7740-jit-type-specialization.md) focus on shader optimization, [Topology-Caching for Dynamic Particle Volume Raycasting](9341-topology-caching-for-dynamic-particle-volume-raycasting.md) handles dynamic particle updates, and [Hierarchical Tree Node Traversal](12213-hierarchical-tree-node-traversal.md) generalizes to other tree structures.
+
+## Shared principles
+All methods in this family share the core mechanism of hierarchical descent and ascent [G]. The traversal begins at the root of the octree and determines which of the eight children (octants) the ray intersects. This is typically done by comparing the ray's position relative to the center of the current node's bounding box [S1, unofficial][S2][G].
+
+1.  **Child Selection:** For a node with center $\mathbf{c}$ and half-extent $s$, the ray position $\mathbf{p}$ determines the child index $k \in \{0, \dots, 7\}$:
+    $$
+    k = 4 \cdot \mathbb{I}(p_x \ge c_x) + 2 \cdot \mathbb{I}(p_y \ge c_y) + 1 \cdot \mathbb{I}(p_z \ge c_z)
+    $$
+    where $\mathbb{I}(\cdot)$ is the indicator function [S1, unofficial][S2][G].
+
+2.  **Empty Space Skipping:** If the selected child is marked as empty (or uniform), the traversal skips the subtree [G]. This is achieved by advancing the ray parameter $t$ to the exit of the current node or using neighbor pointers to jump to the next potentially occupied node [S1, unofficial][G].
+
+3.  **Leaf Handling:** Upon reaching a leaf node, the method typically switches to a fixed-step traversal (like DDA) within the leaf's voxel grid to sample the volume data [S1, unofficial][G].
+
+4.  **Backtracking:** Because octrees are sparse and irregular, traversal often requires backtracking to the parent node when a ray exits a subtree or encounters an empty branch [G]. This is implemented using an explicit stack (on GPU) or recursion (on CPU) [G].
+
+## Subtopics
+
+### [GPU Octree Volume Rasterization with Shadow Mapping](5209-gpu-octree-volume-rasterization-with-shadow-mapping.md)
+This method implements high-performance GPU volume rendering by decoupling the branch-intensive octree traversal from the raycasting loop, using a rasterization pass to identify active volume regions and a shadow mapping pass for lighting. It solves the performance bottleneck of traditional raycasting on sparse data by moving empty-space culling into a graphics pipeline stage, achieving 2 to 4 times faster rendering speeds than state-of-the-art algorithms on large out-of-core datasets. Unlike sibling methods that rely on pure ray-tracing traversal or fixed-step DDA, this approach uses view-dependent proxy geometry rasterization to generate a per-pixel list of penetrated bricks, ensuring front-to-back processing and tighter ray segments. It builds on [Octree and Tree Traversal](4134-octree-and-tree-traversal.md) and relates to [Stackless Traversal](5202-stackless-traversal.md) and [DDA Tree Traversal with Mini-Stack](5244-dda-tree-traversal-with-mini-stack.md).
+
+### [Tile-based Octree Traversal](6483-tile-based-octree-traversal.md)
+Tile-based Octree Traversal accelerates volume rendering by grouping rays into image tiles and pre-computing the set of octree nodes intersecting each tile. Unlike standard per-ray traversal, it reduces redundant node visits by sharing traversal state across rays within a tile, leveraging spatial coherence. It builds on [Octree and Tree Traversal](4134-octree-and-tree-traversal.md) by batching the hierarchical descent.
+
+### [Camera-Driven Octree Subdivision](7636-camera-driven-octree-subdivision.md)
+Camera-Driven Octree Subdivision constructs a hierarchical spatial partitioning for scene representation by subdividing space based on camera visibility and distance thresholds. It sets itself apart from sibling methods by driving the octree construction directly from camera positions and view frustums rather than geometric occupancy or traversal.
+
+### [Octree-based Isosurface and Geometry Extraction](15494-octree-based-isosurface-and-geometry-extraction.md)
+This family extracts manifold isosurfaces from sparse, adaptive octree data structures by leveraging the hierarchy to skip empty space and refine geometry only where necessary [G]. It solves the problem of efficiently rendering or meshing high-resolution implicit fields that would be prohibitive to store or process as dense grids [G]. It differs from its siblings by focusing on the geometric extraction phase (computing intersections, dual vertices, or Hermite data) rather than just traversal efficiency or rasterization [G]. For example, [Tree Marcher](7534-tree-marcher.md) provides the traversal engine, while [Hermite Data Computation via Bisection](822-hermite-data-computation-via-bisection.md) and [Tetrahedralization of Octree Cells](9049-tetrahedralization-of-octree-cells.md) define how the geometry is constructed from the visited nodes [G].
+
+### Sparse Occupancy Tree Operations
+- **Pitfall:** `occupiedCount()` walks the whole tree twice, taking about 1 second each at a resolution of 0.01, and `validate()` runs three times on the final volume [S1, unofficial].
+
+### Multi-Resolution Octree Rendering
+- **Definition:** Rendering large data using multi-resolution octree structures, often based on texture-slicing, to reduce aliasing artifacts from undersampling and improve rendering speed [S2].
+- **Steps:**
+    1.  Select Level of Detail (LOD) or scale for bricks using one of the following methods:
+        1.  Focus point oracle based on distance from brick center to user-defined focus point [S2].
+        2.  Estimating screen-space error [S2].
+        3.  Using a combined factor of data homogeneity and importance [S2].
+        4.  Using predicted visual significance of a brick [S2].
+        5.  Estimating projected screen space size of the corresponding voxel/brick [S2].
+        6.  Per-sample LOD selection for finer granularity [S2].
+    2.  Refine data resolution using a 'greedy' approach: iteratively load the next higher-resolution brick until the desired resolution is reached. Alternatively, load the highest resolution directly, skipping intermediate resolutions [S2].
+- **Pitfall:** Interpolation between bricks of two different resolution levels must be handled correctly [S2].
+
+### Unlimited Detail (UD) Traversal
+- **Definition:** A rendering technique for point cloud/voxel data that uses an object-order front-to-back octree traversal combined with a non-visible subtree rejection technique [S3, unofficial].
+- **Steps:**
+    1.  Traverse the octree in object-order front-to-back [S3, unofficial].
+    2.  Apply a non-visible subtree rejection technique during traversal, which differs from Meagher's original method and may combine R. Yagel's object-order raycasting with S. Teller's frustum casting [S3, unofficial].
+    3.  Execute the traversal as a greedy algorithm, processing nodes sequentially without lookahead or parallel scheduling [S3, unofficial].
+- **Complexity:** Inherently non-parallel due to its greedy sequential nature; typically implemented on the CPU [S3, unofficial].
+- **Comparison:** Contrasted with image-order approaches like raycasting, which are deemed impractical except on parallel hardware [S3, unofficial].
+
+## Background
+The concept of octrees for spatial partitioning was introduced by Meagher in the early 1980s [S3, unofficial]. Early methods focused on object-order traversal and visibility culling [S3, unofficial]. With the advent of GPUs, research shifted towards image-order raycasting and hierarchical traversal optimizations to handle large-scale volumetric data [S2]. Multi-resolution rendering techniques based on texture-slicing became prominent for handling large datasets [S2]. More recently, GPU-specific optimizations like rasterization-based traversal and tile-based processing have been developed to address the branch divergence and memory access patterns inherent in traditional octree raycasting [S1, unofficial][S2]. Camera-driven subdivision methods have also emerged for specific applications like view-dependent level-of-detail [S1, unofficial][S2].
+
+## Sources
+[S1] feat(collision): add compact GPU voxelization and pair export, https://github.com/MrNeRF/LichtFeld-Studio/pull/3789, fetched 2026-10-26 (unofficial)
+[S2] State-of-the-Art in GPU-Based Large-Scale Volume Visualization, https://vcg.seas.harvard.edu/publications/20150513-stateof-the-art-in-gpu-based-large-scale-volume-visualization/paper, fetched 2026-10-24
+[S3] Procedural World: Euclideon Geoverse 2013, https://procworld.blogspot.com/2013/05/euclideon-geoverse-2013.html, fetched 2026-10-30 (unofficial)

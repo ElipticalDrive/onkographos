@@ -1,0 +1,102 @@
+# Normal Smoothness Loss
+Also called: Normal Continuity Loss, Normal Smoothness
+## Overview
+Normal Smoothness Loss is a regularization term for differentiable volume rendering that encourages geometric consistency by penalizing discontinuities in surface normals along a viewing ray [S1, unofficial]. It differs from sibling methods like [Surface Curvature Regularization](6510-surface-curvature-regularization.md) by operating directly on the dot product of consecutive normals rather than higher-order differential operators, and from [Normal Regularization Loss](13456-normal-regularization-loss.md) by relying solely on internal spatial coherence rather than external monocular depth/normal estimates [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A sequence of surface normals $\mathbf{n}_i$ computed at sample points along a ray, and a scalar weight $w$ [S1, unofficial].
+*   **Outputs:** A scalar loss value $L$ representing the smoothness penalty [S1, unofficial].
+
+**Data Structures:**
+*   **Normals Array:** A list or tensor of 3D vectors $\mathbf{n}_i \in \mathbb{R}^3$, where each vector is normalized ($\|\mathbf{n}_i\| = 1$) [G]. The order corresponds to the sampling order along the ray (e.g., from near to far) [S1, unofficial].
+
+**Steps:**
+1. Iterate through the sequence of normals along the ray [S1, unofficial].
+2. For each sample point $i$ (where $i > 0$), compute the dot product between the current normal $\mathbf{n}_i$ and the previous normal $\mathbf{n}_{i-1}$ [S1, unofficial].
+3. Calculate the per-pair loss as $1.0 - (\mathbf{n}_i \cdot \mathbf{n}_{i-1})$ [S1, unofficial].
+4. Aggregate the loss by summing over all pairs along the ray [G].
+5. Scale the aggregated loss by the weight $w$ [S1, unofficial].
+
+**Formula:**
+$$L = w \cdot (1 - \mathbf{n}_p \cdot \mathbf{n}_{prev})$$
+Where:
+*   $L$ is the loss contribution for a pair of adjacent samples [S1, unofficial].
+*   $w$ is the weight scalar [S1, unofficial].
+*   $\mathbf{n}_p$ is the normal at the current sample point [S1, unofficial].
+*   $\mathbf{n}_{prev}$ is the normal at the previous sample point along the ray [S1, unofficial].
+
+**Parameters:**
+*   **Weight ($w$):** Float scalar multiplying the loss term. Typical value: 1.0 [S1, unofficial].
+
+**Pitfalls and Edge Cases:**
+*   **Ray Tracking:** The method requires tracking adjacent sample normals along a ray [S1, unofficial]. This is not natively supported by all standard volume renderers, which may process samples independently or in parallel batches without maintaining ray-wise history [S1, unofficial].
+*   **Implementation Status:** In some codebases, this is currently a placeholder for future implementation due to the difficulty of integrating ray-wise state into the integrator [S1, unofficial].
+*   **Normalization:** Normals must be normalized before computing the dot product to ensure the metric accurately reflects angular difference [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def normal_smoothness_loss(normals: list, weight: float = 1.0) -> float:
+    """
+    Computes the Normal Smoothness Loss for a single ray.
+    
+    Args:
+        normals: List of normalized 3D vectors representing surface normals 
+                 at consecutive sample points along the ray, ordered from near to far.
+        weight: Scalar weight for the loss term.
+        
+    Returns:
+        Scalar loss value.
+    """
+    if len(normals) < 2:
+        return 0.0
+    
+    total_loss = 0.0
+    
+    for i in range(1, len(normals)):
+        n_p = normals[i]
+        n_prev = normals[i-1]
+        
+        # Compute dot product
+        dot_product = sum(a * b for a, b in zip(n_p, n_prev))
+        
+        # Clamp to [-1, 1] to handle floating point errors [G]
+        dot_product = max(-1.0, min(1.0, dot_product))
+        
+        # Calculate loss for this pair: 1.0 - dot_product
+        pair_loss = 1.0 - dot_product
+        total_loss += pair_loss
+        
+    # Scale the aggregated loss by the weight
+    return weight * total_loss
+```
+
+## Subtopics
+
+### Jacobian-based Normal Regularization
+A regularization term that uses the Jacobian of the map of normals to regularize scene geometry, derived from differential geometry principles [S2, unofficial]. It differs from the basic smoothness loss by considering the spatial variation of the normal field across the image plane (or ray bundle) rather than just along a single ray [S2, unofficial]. It is significantly slower to compute, processing approximately 1100 rays/s compared to ~5000 rays/s for depth regularization on an NVIDIA V100 [S2, unofficial].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+*   **Time:** $O(N)$ where $N$ is the number of samples per ray [G]. The Jacobian-based variant is much slower than depth regularization, with measured performance of ~1100 rays/s vs ~5000 rays/s on NVIDIA V100 [S2, unofficial].
+*   **Memory:** Requires storing normals for adjacent samples along the ray, or recomputing them [S1, unofficial]. The basic implementation requires minimal extra memory beyond the normal field itself [G].
+
+**Measured Performance:**
+*   On NVIDIA V100, normals regularization (Jacobian-based) processes ~1100 rays/s, while depth regularization processes ~5000 rays/s [S2, unofficial].
+
+**Strengths and Limitations:**
+*   **Strengths:** Encourages geometric smoothness by penalizing normal discontinuities [S1, unofficial].
+*   **Limitations:** Requires ray-wise state tracking which may not be supported by all integrators; slower than depth-based regularization if using Jacobian variants; may oversmooth fine geometric details if weight is too high [S1, unofficial][S2, unofficial].
+
+**When to Use:**
+*   Use when normal consistency is critical and computational budget allows for ray-wise processing [S1, unofficial].
+*   Avoid when high throughput is required and depth regularization suffices [S2, unofficial].
+
+## Background
+The concept of normal smoothness as a regularization term in differentiable rendering is discussed in the context of Total Light Inverse Rendering (TLIR) [S1, unofficial]. The specific formula $L = w \cdot (1 - \mathbf{n}_p \cdot \mathbf{n}_{prev})$ is documented in the TLIR codebase [S1, unofficial]. Differential geometry-based normal regularization, including Jacobian approaches, is detailed in "Regularization of NeRFs using differential geometry" [S2, unofficial].
+
+## Sources
+[S1] JackZhouSz/tlir, https://github.com/JackZhouSz/tlir, fetched 2026-10-27 (unofficial)
+[S2] Regularization of NeRFs using differential geometry, https://doi.org/10.48550/arxiv.2206.14938, fetched 2026-10-29 (unofficial)

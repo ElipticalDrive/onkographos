@@ -1,0 +1,98 @@
+# Random Large-Variance Initialization
+Also called: RAIN-GS Initialization, Sparse-Large-Variance Init
+## Overview
+Random Large-Variance Initialization is a method for initializing 3D Gaussian primitives that relaxes the assumption of using only Structure-from-Motion (SfM) point cloud data. It addresses the problem of generating a geometrically plausible starting configuration when SfM data is sparse or absent by sampling Gaussians randomly with large variance. It sets itself apart from [SfM-Based Triangle Initialization](9766-sfm-based-triangle-initialization.md) by relying on stochastic sampling rather than deterministic SfM-derived positions and local density scaling.
+## How it works
+Inputs: A scene bounding box or volume definition; a target number of Gaussians $N$.
+Outputs: A set of $N$ 3D Gaussians with initial parameters.
+
+Data Structures:
+Each Gaussian $i$ is defined by:
+- Position $\mu_i \in \mathbb{R}^3$
+- Covariance $\Sigma_i \in \mathbb{R}^{3 \times 3}$ (parameterized via scale $s_i \in \mathbb{R}^3$ and rotation $q_i \in \mathbb{R}^4$)
+- Opacity $\alpha_i \in [0, 1]$
+- Spherical Harmonics coefficients $c_{i, l}$ for color features.
+
+Steps:
+1. Define the spatial bounds of the scene (e.g., the bounding box of the available sparse point cloud or the camera frustum).
+2. Sample $N$ positions $\mu_i$ uniformly at random within these bounds.
+3. Initialize scales $s_i$ to large values. The "large-variance" aspect implies that the initial Gaussians are significantly larger than the typical final converged size, covering a broad area of the scene to ensure coverage.
+4. Initialize rotations $q_i$ to identity or random unit quaternions.
+5. Initialize opacities $\alpha_i$ to a small constant (e.g., 0.1) or derived from the initial coverage.
+6. Initialize SH coefficients $c_{i, l}$ to zero or average color values if RGB is available.
+
+Parameters:
+- $N$: Number of Gaussians. Not given in the sources.
+- Scale magnitude: Large relative to the average inter-point distance in SfM data. Not given in the sources.
+
+Edge cases:
+- If the scene bounds are undefined, the initialization may place Gaussians in empty space, wasting compute. [G]
+- Large initial variances may lead to slow convergence or require careful learning rate scheduling to avoid instability. [G]
+
+Pseudocode:
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def random_large_variance_init(num_gaussians, scene_bounds):
+    """
+    Initialize Gaussians with random positions and large variances.
+    
+    Args:
+        num_gaussians (int): Number of Gaussians to create.
+        scene_bounds (tuple): (min_xyz, max_xyz) defining the bounding box.
+        
+    Returns:
+        dict: Dictionary containing initialized Gaussian parameters.
+    """
+    min_xyz, max_xyz = scene_bounds
+    bounds_size = max_xyz - min_xyz
+    
+    # Sample positions uniformly within bounds
+    positions = np.random.uniform(min_xyz, max_xyz, size=(num_gaussians, 3))
+    
+    # Initialize scales to large values
+    # The exact magnitude of "large" is not specified in sources [S1, unofficial]
+    # [G] A heuristic is to use a fraction of the scene diagonal or a fixed large value
+    scale_magnitude = np.linalg.norm(bounds_size) / 10.0 
+    scales = np.full((num_gaussians, 3), scale_magnitude)
+    
+    # Initialize rotations to identity (or random)
+    # [G] Using identity for simplicity, though random is also valid
+    rotations = np.tile([1.0, 0.0, 0.0, 0.0], (num_gaussians, 1))
+    
+    # Initialize opacities to a small value
+    opacities = np.full(num_gaussians, 0.1)
+    
+    # Initialize SH coefficients to zero
+    # [G] Assuming degree 0 for simplicity, or average color if available
+    sh_coeffs = np.zeros((num_gaussians, 3)) 
+    
+    return {
+        'positions': positions,
+        'scales': scales,
+        'rotations': rotations,
+        'opacities': opacities,
+        'sh_coeffs': sh_coeffs
+    }
+```
+## Subtopics
+
+### [SfM-Based Triangle Initialization](9766-sfm-based-triangle-initialization.md)
+Uses deterministic SfM data for position and local density for scale, rather than purely random sampling with large variance. Choose when high-quality SfM data is available and geometric accuracy is prioritized over robustness to sparse input.
+
+## Operating characteristics
+Time and memory complexity: $O(N)$ for initialization, where $N$ is the number of Gaussians.
+Measured performance: Not given in the sources.
+Scaling: Linear with the number of Gaussians.
+Strengths: Robust to sparse or missing SfM data; ensures broad coverage of the scene.
+Limitations: May require more optimization steps to converge to fine details compared to SfM-based initialization; initial Gaussians are large and may blur fine structures.
+When to use: When SfM data is sparse, noisy, or unavailable.
+When not: When high-precision geometric initialization is critical and dense SfM data is available.
+## Background
+Origin: Introduced in the context of RAIN-GS, as cited in [S1, unofficial].
+History: It relaxes the traditional assumption that initialization must be strictly based on SfM point clouds, allowing for more flexible initialization strategies.
+Usage: Used in differentiable Gaussian splatting pipelines where robust initialization is needed.
+## Sources
+[S1] Gaussian Splatting — All Variants Cheat Sheet, https://www.chengjianglong.com/ml/3D-Gaussian_Splatting_SOTA_Updated.html, fetched 2026-10-27 (unofficial)

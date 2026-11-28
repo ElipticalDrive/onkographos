@@ -1,0 +1,1316 @@
+Differentiable implicit CAD in the browser: edit via GUI or code, solve constraints, render with WebGPU raymarching, optimize shapes end-to-end. - cadjoint: differentiable CAD from sketch constraints to multi-solver FEM, in one app by andrinr · Pull Request #19 · andrinr/cadjoint
+
+cadjoint: differentiable CAD from sketch constraints to multi-solver FEM, in one app by andrinr · Pull Request #19 · andrinr/cadjoint · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+andrinr
+commented
+Aug 15, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Restarts differentiable meshing bottom-up from the inputs, replacing the post-hoc MeshSDF-style gradient bridge from the archived feature/adaptive-sdf-meshing spike. Nothing carries over; the old branch remains the only archive.
+The pipeline (cadjoint/meshing)
+Five tested stages (design ledger: research/differentiable-meshing-pipeline.md). Gradients ride through the input coordinates of every field evaluation — sample points move with the parameters — never through output values at frozen points.
+Differentiable Hermite edge detection (edge_detection.py) — frozen crossing-edge sets, bisection + secant + implicit-function-theorem Newton correction; degenerate root gradients (roots land bit-exactly on flat walls) re-evaluate on the adjacent smooth branch.
+Sharp-feature classification (features.py) — face/crease/corner from mean-centered normal spread, exact min/max CSG seam detection, and feature-chain linking for display.
+Dual contouring (dual_contouring.py) — differentiable Tikhonov QEF for gradients; rank-revealing sharp placement for the forward mesh (box corners exact to 2.5e-8); deterministic start_inside-wound connectivity.
+Octree-pruned detection (adaptive.py) — bit-identical to dense detection, 6–15% of the evaluations; lipschitz is the caller's contract.
+Export (export.py) — planar-patch merging into sparse polygon meshes (a box collapses to its 6 faces), OBJ with native n-gons, binary STL, and a deterministic, structurally valid STEP AP214 faceted B-rep (not yet validated against a CAD kernel).
+Report
+Screenshots (example scene, WebGPU)
+Feature edges over the solid — creases, corners, rims, CSG seams:
+Pure edge view (Hide solid + feature edges + quad wireframe):
+Detail: exact rim circles and clean corner junctions after sharp placement + feature-chain grouping:
+CSG stress scenes (tests/meshing/test_scenes.py)
+7 hard-CSG scenes (jnp.minimum/jnp.maximum lambdas) x {watertight, Euler, signed volume vs reference, max |sdf(vertex)|, determinism}, plus sparse-detection equivalence (lipschitz=1.0) for scenes 1/4/6. 38 passed, 1 xfailed (known bug, see below).
+Scene
+Grid res
+V / F
+χ (exp)
+Volume (ref, err)
+max|sdf|
+Sparse == dense
+1. Two-sphere union
+32·26·26
+2442 / 4880
+2 (2)
+6.584 (6.568, 0.2%)
+0.012
+✓ identical
+2. Three-sphere union
+30·28·22
+2314 / 4624
+2 (2)
+3.671 (3.659*, 0.3%)
+0.012
+—
+3. Sphere∩sphere lens
+20·26·26
+1532 / 3060
+2 (2)
+1.814 (1.810, 0.2%)
+0.005
+—
+4. Box∩sphere
+24³
+1352 / 2700
+2 (2)
+0.897 (0.896, 0.1%)
+0.005
+✓ identical
+5. Box−cylinder hole
+24³
+1708 / 3416
+0 (0)
+0.803 (0.804, 0.1%)
+0.003
+—
+6. Box−box flush (lattice-aligned planes)
+24³
+1728 / 3456
+0 (0)
+0.750 (0.750, 0.0%)
+0.000
+✓ identical
+7. Box∪grazing sphere (0.02 overlap)
+34·24·24
+1976 / 3948
+2 (2)
+0.626 (0.625, 0.2%)
+0.003
+—
+*numerically integrated (128³ cell-center sampling); others analytic. All meshes watertight (every undirected edge in exactly 2 triangles), positively oriented, deterministic. Scene 6's exactly-lattice-aligned coincident face planes extract perfectly (zero residual, exact 0.75 volume) thanks to the "exact zero counts as outside" convention.
+Suspected module bug (strict xfail test_grazing_crease_stays_manifold_known_bug): with grid (30,28,20), the three-sphere union's seam circles graze lattice plane z=0.568 and dual_faces emits 5 nonmanifold edges (4 triangles each) with vertex residuals up to 0.033 — one QEF vertex per cell can't represent two sheets crossing one cell face. Grid-alignment dependent, unaffected by sharp; wants manifold DC / cell disambiguation.
+Benchmarks (Apple Silicon CPU, warm)
+Dual contouring quality and timing
+shape
+res
+tris
+extract (ms)
+sparse (ms)
+watertight
+volume rel err
+min angle p5 (deg)
+corner err
+MC corner err
+MC (ms)
+grad (ms)
+sphere
+16
+1452
+65.8
+67.8
+True
+6.39e-03
+25.3
+nan
+nan
+nan
+61.1
+sphere
+32
+5772
+94.8
+97.2
+True
+1.48e-03
+30.0
+nan
+nan
+nan
+63.4
+sphere
+64
+22812
+199.6
+219.0
+True
+3.69e-04
+30.7
+nan
+nan
+nan
+69.5
+box
+16
+828
+84.1
+84.9
+True
+5.46e-08
+32.7
+2.46e-08
+8.39e-02
+3.0
+nan
+box
+32
+3452
+99.2
+104.0
+True
+5.46e-08
+38.5
+2.46e-08
+3.00e-02
+0.6
+nan
+box
+64
+13564
+162.9
+175.1
+True
+5.46e-08
+33.7
+2.46e-08
+2.00e-02
+2.9
+nan
+Stage timings (best of repeats, warm; milliseconds)
+shape
+res
+edges
+sample (ms)
+find (ms)
+hermite (ms)
+hermite compile (ms)
+hermite edges/s
+sphere
+16
+726
+14.97
+0.10
+36.51
+422.22
+1.99e+04
+sphere
+32
+2886
+15.72
+0.38
+37.05
+417.64
+7.79e+04
+sphere
+64
+11406
+16.16
+2.56
+37.82
+436.89
+3.02e+05
+box
+16
+478
+21.35
+0.09
+51.54
+859.19
+9.27e+03
+box
+32
+2134
+22.14
+0.38
+51.37
+818.97
+4.15e+04
+box
+64
+8998
+24.09
+2.46
+53.60
+819.21
+1.68e+05
+union
+16
+422
+23.90
+0.09
+44.95
+550.25
+9.39e+03
+union
+32
+1830
+23.78
+0.38
+47.40
+537.47
+3.86e+04
+union
+64
+7558
+25.51
+2.49
+47.25
+544.44
+1.6e+05
+Compile column is the first (cold) edge_hermite_data call, which includes jit tracing and compilation; warm columns time later calls.
+Fidelity
+shape
+res
+max abs residual
+max sphere error
+grad dt/dr max rel err
+Gradient correctness: autodiff dt/dr matches the analytic implicit derivative to 4e-7 across all sphere edges; box FD-vs-autodiff parameter gradients agree to 0.02%; the corner vertex Jacobian w.r.t. box half-extents is the identity to 0.2% — full tangential motion, which a normal-only backward pass structurally cannot produce.
+Viewer edge view
+wire = native quad edges; sharp = feature chains: cells grouped by feature identity (owning operand for creases, full operand set for seams — no X-lattices between nearby distinct curves), corner-shortcut links dropped, seam vertices Newton-projected onto the exact common zero set of every operand meeting there (triple junctions included), transversality-guarded for tangent/coincident surfaces. Two display switches ("Feature edges", "Mesh wireframe"), depth-nudged under coincident construction lines.
+Hardening history
+A 14-agent adversarial review confirmed 7 findings in stage 1-2 (all fixed + regression-tested). The edge view then served as a live diagnostic that exposed and fixed: dead surface subgradients in Box/Cylinder/polygon primitives (separate commits; FD said ~192 where autodiff said 0), float32-underflowing Gram regularization (NaN on parallel gradients), per-cell seam pairing (surfaces that never meet), and mass-point QEF bias (the feature-curve wiggle).
+Known limitations (documented, tested)
+Strict xfail: when a CSG seam grazes a lattice plane, uniform DC can emit nonmanifold edges (one vertex per cell cannot represent two sheets crossing a cell face) — grid-alignment dependent; wants manifold DC / cell disambiguation (roadmap).
+STEP output is structurally valid but unvalidated against a CAD kernel.
+Polygon 2D SDF boundary points within ~1e-9 of the profile fall to a zero-gradient branch (caught by the pipeline's nudged-gradient fallback).
+Cleanliness follow-ups: shared masked-gather/lattice-stride helpers, vectorizing dual_faces' Python loops, skipping the redundant Tikhonov solve when sharp=True.
+Tests
+606 passed, 1 xfailed across the repo: 141 meshing-pipeline tests (analytic roots, closed-form + FD gradient checks, hard CSG, manifoldness, corner Jacobians, seam detection, sparse-dense equivalence, 7 stress scenes, export round-trips), plus the pre-existing suites. Pre-existing on main, unrelated: tests/sdf/primitives/test_common.py imports a nonexistent Cone.
+CAD system: constraints, sketch editing, and construction tooling
+Constraints — seven new types (horizontal, vertical, coincident, equal-length, point-on-line, edge-based parallel/perpendicular) join fixed/distance/angle as plain differentiable residuals, flowing through both solve_constraints (Levenberg–Marquardt, exact-DOF) and satisfy_constraints (under-constrained projection) unchanged. 32 solver/residual/gradient tests.
+Sketch editing — the payload serializes every constraint kind with a stable statement-ordinal index (subscript and bare-name statement forms both recognized), and the source-surgery layer gains delete_constraint, set_constraint_value (follows named-Scalar indirection so wall_width edits propagate everywhere), extended add_constraint, and add_revolution. In the viewer: removable constraint chips with click-to-edit distance values, vertex-pair tools (Horiz/Vert/Coinc) and edge-pair tools (∥/⊥) generalizing the two-click distance flow, and a Revolve button.
+Construction tooling — loft(profile_a, profile_b, height) via a new LoftedPolygon primitive (per-slice-exact interpolated polygon distance, guarded cap combine, shared vertex Parameters so constraints and gradients act on the lofted solid); extrude(..., draft=, twist=) (bit-identical at zero; twist documented non-1-Lipschitz); jaxcad.sdf.operations with Shell, Offset, Mirror, LinearPattern, PolarPattern. Everything compiles to WGSL for the live viewer and differentiates w.r.t. profile vertices; verified through the meshing pipeline (lofts and patterns extract as watertight manifolds with correct topology). 83 construction/operation tests + 15 patch-layer tests.
+From CAD kernel to CAD application
+App shell & modes — menu bar (File with a server-side scenes workspace, Edit undo/redo, Window, Help), draggable/collapsible layout, a read-only ObjectTree, and a model/sketch/simulate mode system driving a regrouped tool rail with hover-expandable flyout clusters (last-used child parents). Sketch placement gains XY/YZ/ZX plane picks and sketch-on-face from the surface hit normal. /compile dropped 4.7s → 1.9s by moving mesh edges to a lazy /api/mesh.
+Differentiable simulation (cadjoint.fem) — SDF → HEX8 voxelization with differentiable boundary-vertex snapping; SolverBackend plugin ABI with jax-fem direct (adjoint gradient path, FD-validated) and a packaged Tesseract proving the contract (bit-identical gradients, ~0.14s/roundtrip); end-to-end compliance gradient matches finite differences to 1.2e-4. In the viewer: simulate mode assigns boundary conditions by clicking hex-boundary face groups, runs thermal/elastic solves, and renders per-vertex fields through a new indexed-triangle WebGPU pipeline with a viridis ramp and clip-plane slicing.
+Engineering demo — scenes/bracket.py (parameterized genus-2 mounting bracket) + examples/fem_bracket_optimization.py: monotone compliance+mass descent over web thickness and rib height, adjoint vs FD at 1e-5, before/after VTK.
+Edge-view hardening, concluded — the artifact taxonomy closed with exact seam tangents, tangential-contact suppression, and finally degree-2 chain tracing, which makes X-lattices structurally impossible rather than threshold-suppressed.
+Patch-layer line stability — imports extend in place or land beside constraint blocks, constraint indices equal creation order, typed values round-trip exactly: repeated line-addressed API calls work without intermediate recompiles.
+Suite: 801 passed in one process (fem's x64 scoped by fixture). Pre-existing Cone collection failure on main unchanged.
+Feature edges, closed with a metric suite
+The artifact hunt is over and pinned down: four root causes (mutual-veto chain ties broken by float noise, on-surface degenerate subgradients faking creases, phantom seams between disjoint surfaces, junction shortcuts severing straight rails) fixed in one pass, and tests/viewer/test_edge_artifacts.py now asserts crossings 0, debris 0, and 1.000 per-curve chain coverage across 11 scene configurations (six ring heights through tangential contact, box, box∪sphere, cylinder, thin and staggered slabs) so every regression fails a test instead of waiting for a screenshot.
+Meshing completeness: patch fields, simplification, STEP validation
+Per-primitive patch fields — every primitive reports its smooth surface patches as exact frame-local fields (Box: six face half-spaces, Cylinder: side+caps, extruded polygons: edge half-planes+caps), forwarded through affine transforms; cadjoint.meshing.patch_fields compiles a scene into pure JAX (leaf, patch) signature functions whose sign changes mark feature edges exactly (vmap/jit-composable, validated against analytic profile edges to within one lattice cell).
+simplify_mesh — deterministic half-edge collapse under a QEF + SDF re-sampling error bound with link-condition manifoldness and pinned features: sphere res-32 drops 5772→472 triangles (92%) within tolerance; box corners, creases, and CSG seams are preserved bitwise.
+STEP validated against a real kernel — a cadquery-ocp (OCCT 7.9) suite round-trips exports as BRepCheck-valid closed solids with matching face counts and volumes (±1%), which caught and fixed a real bug: sharp QEF placing adjacent crease vertices ~3e-17 apart produced zero-length edges OCCT rejects; save_step now welds below the file's declared uncertainty.
+Simulation as a first-class code citizen
+Vertex-selection boundary conditions replace face groups outright: Nodes.box / sphere / halfspace / side / predicate compose with & | ~ into serializable surface-node selections, and every BC takes one — Dirichlet/Fixed on the nodes directly, HeatFlux/Traction deriving their integration faces from the selection internally. HeatFlux went from NotImplementedError to a jax-fem Neumann surface integral validated against the analytic linear profile. Dirichlet values are differentiable end-to-end via a lifted formulation (FD rel. err. 8e-9). Also fixed en route: the backend enabled x64 globally without restoring it, order-poisoning later float32 tests — now scoped per call.
+Studies live in the scene program: ThermalStudy / ElasticStudy declare BCs on those selections, solve from scripts and optimizers, and register via capture_studies(). The compile payload reports them with per-BC source spans, and five patch operations (add_study, add_study_bc, set_study_value, delete_study_bc, delete_study) edit them as literal source — rendering selections back to Nodes.* calls after round-trip validation, exact repr(float) values, line-stable imports. /api/simulate runs a declared study by name.
+The Simulate panel is now a pure patch layer over those declarations: study cards with editable literals, a BC builder writing real Nodes.box([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]) source, predicate selections read-only with an edit-in-code hint, solve-by-name rendering through the viridis/slice pipeline. E2e drives the whole lifecycle and asserts the generated source at each step.
+A Fortran solver in the differentiable loop: CalculiX
+backend="calculix" runs CalculiX 2.23 (conda-forge arm64) behind a subprocess Tesseract: C3D8 decks written 1:1 from our hex meshes (VTK corner order = Abaqus), consistent 2×2-Gauss traction loads matching jax-fem's surface integration, forward parity 1.5e-7 relative. Gradients use ccx's native *SENSITIVITY adjoint plus a derived correction — ccx 2.23's shipped strain-energy sensitivity omits the Jacobian-variation term (a non-constant 1.4–4.5× error vs FD); adding w·d(detJ) in post-processing brings the adjoint to 2e-4 of finite differences, and the three gradient paths (ccx adjoint / jax-fem adjoint / FD) agree to 4.5e-5 of gradient scale over 228 design nodes. Live tests skip cleanly without a binary (CADJOINT_CCX).
+research/simulator-ecosystem.md surveys 31 further candidates (every differentiability claim verified against shipped code) and ranks the next integrations: jwave (acoustics, JAX-native) and JAX-Fluids (its levelset immersed-boundary input is our SDF).
+Four explicit editing modes
+Model / Sketch / Simulate / Render are now a labeled segmented switcher with per-mode accent colors threaded through the tool rail, dock headers, and hint bar; each mode owns its dock content, and Render graduated from the eye-icon popover to a full panel (preset cards + shading/shadows/quality/effects editor). Verified by a scripted geometry audit (nothing overlapping or off-screen at 1440×900 and 1280×800).
+jaxcad → cadjoint
+The project is renamed cadjoint (CAD + adjoint — the differentiator stated in one word, with "joint" as a free mechanical pun; picked from a collision-checked shortlist: clean on PyPI, GitHub, and against commercial CAD products). Package, entry point (cadjoint-viewer), npm package, token header, wordmark, docs, and CADJOINT_CCX all moved together; the repo is renamed with GitHub redirects intact.
+Tests
+1017 passed, 12 skipped (Python; skips are ccx/OCP live tests without their binaries) · 147 unit · 32 e2e, all in one process with x64 scoped by fixture. Pre-existing on main, unrelated: tests/sdf/primitives/test_common.py imports a nonexistent Cone.
+Follow-ups
+jwave and JAX-Fluids integrations (survey has concrete first steps); surface handles + drag solve; hover-highlighting a BC's selected nodes on the preview mesh; fluxes in the thermal Tesseract schema; wiring patch-field signatures into the viewer edge extractor for known trees; multi-size octree leaves.
+🤖 Generated with Claude Code
+andrinr
+and others
+added 4 commits
+August 15, 2026 13:00
+Give Box and Cylinder valid subgradients on their surfaces
+…
+6a1dc1b
+```
+The epsilon inside sqrt(sum(d*d) + 1e-20) creates an exact stationary
+point on every face plane: a point exactly on the surface gets zero
+derivatives with respect to both position and parameters, even though
+the one-sided subgradient there is well defined. Root finding converges
+bit-exactly onto faces, so differentiable meshing hit this on every
+box edge and received identically-zero parameter gradients (finite
+differences reported the true sensitivity).
+
+Branch on inside/outside instead: on-or-inside points differentiate
+through the max(q) branch and receive the correct one-sided
+subgradient, while the outside norm keeps a double-where guard so its
+unselected branch cannot NaN reverse-mode gradients. Values are
+unchanged except for removing the fake 1e-10 offset. Cylinder keeps
+the radial epsilon: its degenerate point is the axis, which is
+interior. The polygon primitives share the old pattern and are left
+for a follow-up.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Add differentiable edge detection, the first stage of the meshing pip…
+…
+6ed62a1
+```
+…eline
+
+New jaxcad.meshing package, built bottom-up from the inputs in pure JAX.
+Stage 1a finds sign-changing grid edges host-side and refines each
+crossing with bisection + secant + a differentiable Newton correction,
+so root positions, parameters, and gradients carry exact
+implicit-function-theorem derivatives with respect to design parameters
+without unrolling the solver. Stage 1b classifies active cells into
+face/crease/corner from the mean-centered spread of incident Hermite
+normals, and detects hard-CSG seams exactly from min/max active-branch
+changes.
+
+Robustness rules an adversarial review forced in: detection freezes each
+edge's inside/outside orientation so lattice vertices exactly on the
+surface cannot flip the bracket under float32 re-evaluation; refinement
+derives endpoints in float64 with detection's expressions so both
+evaluate the field at bit-identical coordinates; Newton steps are
+accepted only if they do not worsen the frozen residual, which caps
+tangency-degenerate edges (grids far from the origin) at 6e-5 instead
+of 5e-3; and every sqrt/normalize is double-where-guarded so degenerate
+cells get zero subgradients instead of NaN-poisoning every parameter.
+
+48 tests cover analytic roots, gradient checks against closed forms and
+finite differences, hard-CSG unions/intersections, feature
+classification on box/sphere/cylinder, and seam detection.
+benchmarks/edge_detection_bench.py tracks fidelity, gradient error, and
+stage timings. The plan and stage ledger live in
+research/differentiable-meshing-pipeline.md.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Add differentiable dual-contour mesh generation
+…
+ff9ce64
+```
+One vertex per active cell from a Tikhonov-regularized QEF over the
+stage-1 Hermite data: batched 3x3 solves with no SVD or
+eigendecomposition in the gradient path, so the planar cells every CAD
+model is full of cannot produce degenerate derivatives. Connectivity is
+deterministic: each crossing edge's frozen start_inside orientation
+winds its quad, with no dependence on computed normals.
+
+Sphere and box extractions are watertight manifolds (Euler 2, every
+edge shared by exactly two triangles) with outward orientation. Box
+corners land within 8e-5 at resolution 32 versus 3e-2 for marching
+cubes on the same volume. The corner vertex's Jacobian with respect to
+the box half-extents is the identity to 0.2 percent - full tangential
+motion, which the archived normal-only backward pass structurally
+could not produce.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Add a mesh-edges view mode to the playground viewer
+…
+0dae3c0
+```
+The compile worker extracts the dual-contour mesh over the raymarch
+view volume and ships its edges in the compile payload, split into
+wire and sharp (dihedral above 30 degrees: creases, corners, CSG
+seams). Extraction failures print a note into the compile output and
+never fail the compile.
+
+The viewer gains a "Mesh edges" display switch that draws both sets
+through the existing overlay edge pipeline - dim slate wire, bright
+cyan creases - depth-tested against the raymarched surface. Stored
+render presets revalidate against the new field and fall back to
+defaults, as designed.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+andrinr
+changed the title
+Differentiable meshing pipeline, stage 1: edge detection
+Differentiable meshing pipeline: edge detection, dual contouring, and a viewer edge mode
+Aug 15, 2026
+andrinr
+and others
+added 7 commits
+August 15, 2026 13:30
+Make the edge view read like a technical drawing
+…
+4bc4d53
+```
+The first cut drew every triangle edge of a coarse mesh with an angular
+threshold below the faceting angle of curved features, so smooth
+surfaces sprouted false creases and the ground plane flooded the view.
+
+Sharp edges now combine two signals: quad-normal dihedrals above 45
+degrees (quad edges only - triangulation diagonals carry no surface
+information - with normals from the diagonal cross product, which is
+less noisy than triangle pairs) and exact structural CSG seams, marking
+edges whose endpoints are owned by different world-frame min/max
+operands, with no angular threshold at all. Resolution rises to 48 so
+even a 0.18-radius tube facets below the threshold.
+
+The single toggle splits in two: "Feature edges" shows only creases,
+corners, and seams - the technical-drawing look - while "Mesh
+wireframe" shows the full quad wireframe for mesh debugging, both drawn
+from one instance buffer via separate draw ranges. Verified visually
+against the example scene over WebGPU: silhouette edges, cylinder rims,
+and washer rims trace exactly; sphere and torus surfaces stay clean.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Land vertices exactly on features and prune detection with an octree
+…
+47cf3d8
+```
+The wiggle along feature curves was the Tikhonov QEF's mass-point bias,
+which varies with how the grid slices the surface in each cell.
+extract_mesh now defaults to sharp_qef_vertices for the forward mesh: a
+rank-revealing truncated pseudo-inverse that projects planar cells onto
+their face, crease cells onto the crease line, and corners onto the
+corner - box corner error drops from 1.7e-4 to exactly 0, and cylinder
+rim vertices sit on the cap plane to the last bit. Gradients keep the
+smooth Tikhonov path; the two differ by the regularization bias.
+
+jaxcad.meshing.adaptive adds octree-pruned detection: blocks where
+|f(center) - level| > half_diagonal * L cannot contain the level set
+and are discarded, then only surviving cells' corners are evaluated,
+through one fixed-size chunked evaluator so the field compiles once.
+The octree adapts the search, not the mesh - leaves stay at uniform
+depth - so the edge set is bit-identical to dense detection (tested as
+exact equality on sphere/box/union/plane) and every downstream stage
+works unchanged. Evaluations drop to 6-15 percent of the dense lattice
+at resolutions 64-96. extract_mesh exposes it via lipschitz=; the bound
+is the caller's contract, and over-claiming only weakens pruning while
+under-claiming can lose cells (both tested).
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Raise the viewer edge extraction to resolution 64
+…
+8ada39a
+```
+Sharp vertex placement removed the feature-curve wiggle; the finer grid
+shrinks the remaining curvature-chord offset quadratically. Detection
+stays dense rather than Lipschitz-pruned: user-written fields can
+exceed any assumed gradient bound, and a hole in the viewer is worse
+than the ~100 ms this costs. Verified over WebGPU: washer rims render
+as clean circles, house feature edges as straight lines.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Give polygon primitives valid surface subgradients, with a pipeline net
+…
+d8bddd0
+```
+ExtrudedPolygon and RevolvedPolygon shared Box's old epsilon-smoothed
+sqrt pattern, deadening gradients on every side wall and cap - 14
+percent of all Hermite samples on the example scene carried zero
+normals, which poisoned feature classification. The polygon boundary
+distance now uses a double-where sqrt guard and the extrusion combine
+branches on inside/outside like Box.
+
+Because piecewise-linear walls let the secant land bit-exactly on the
+surface, edge_hermite_data additionally re-evaluates any degenerate
+root gradient a fraction of an edge toward the inside endpoint - the
+same smooth branch, off the measure-zero dead point. Dead normals on
+the example scene drop from 1011 to 10 samples.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Draw feature curves as chords between feature cells, not mesh edges
+…
+7ba861f
+```
+A feature curve crosses grid cells diagonally, so consecutive feature
+cells are usually not mesh-adjacent: classifying sharp mesh edges
+traced a staircase around every circular rim. feature_cell_links
+connects feature cells across the full 26-neighborhood instead, and
+since feature-aware placement puts their vertices exactly on the
+curve, the links are chords of the true curve - rims render as clean
+circles.
+
+Two artifact killers ride along: links that shortcut around a corner
+cell are dropped (the true path runs through the corner), and CSG-seam
+vertices are Newton-projected onto the exact intersection curve
+f_a = f_b = 0 of their two owning operands, so shallow seams no longer
+zigzag between face-projected vertices.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Stop mesh edges z-fighting coincident construction lines
+…
+05333e9
+```
+Sharp placement puts feature edges exactly where the construction
+wireframe draws, and equal depth nudges interleaved the two into
+dashes. Mesh edges get their own overlay uniform buffer with a smaller
+nudge, so coincident construction lines consistently win.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Add mesh export, CSG stress scenes, and feature-chain hardening
+…
+d5cd582
+```
+jaxcad.meshing.export turns dual-contour meshes into sparse polygon
+meshes: merge_planar_faces region-grows coplanar quads into n-gons (a
+box collapses to its 6 faces), save_obj writes them as native OBJ
+n-gons, save_stl writes binary/ASCII STL, and save_step emits a
+deterministic, structurally valid STEP AP214 faceted B-rep (not yet
+validated against a CAD kernel).
+
+tests/meshing/test_scenes.py stresses hard CSG: overlapping and triple
+unions, lens intersections, holed differences (Euler 0) including
+exactly-flush coincident faces, and near-tangent contact - watertight,
+correctly-oriented, volume-accurate meshes everywhere, with one strict
+xfail documenting the known uniform-DC limit (nonmanifold edges when a
+seam grazes a lattice plane; wants manifold DC).
+
+Viewer feature chains harden against intersecting solids: cells group
+by feature identity (owning operand for creases, full operand set for
+seams) so nearby distinct curves cannot cross-link into X-lattices;
+seam vertices Newton-project onto the common zero set of every operand
+meeting there (triple junctions included, each vertex projected exactly
+once); the Gram regularization is float32-scaled (1e-9 underflowed and
+NaN'd parallel-gradient pairs) with a transversality guard for tangent
+surfaces. Report screenshots land in research/edge-view.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+andrinr
+changed the title
+Differentiable meshing pipeline: edge detection, dual contouring, and a viewer edge mode
+Differentiable meshing pipeline: edge detection → dual contouring → export, with a viewer edge view
+Aug 15, 2026
+andrinr
+and others
+added 17 commits
+August 15, 2026 19:23
+Filter feature links by crease tangent and tidy the meshing internals
+…
+117ca9c
+```
+Two parallel creases of a thin face share an operand, so identity
+grouping alone let rail-to-rail links weave an X-band between them. A
+link now must align with the local crease tangent at both non-junction
+endpoints; the tangent is cross(mean normal, principal spread
+direction), since a straight crease's centered covariance is rank one
+and its nullspace alone cannot name the tangent. Thin-slab cross-rail
+links drop from 156 to 4, with the example scenes unchanged.
+
+Housekeeping from the cleanliness review: shared _safe_normalize and
+_lattice stride/flatten helpers replace three hand-rolled copies each,
+extract_mesh skips the redundant Tikhonov solve when sharp placement is
+active, and the worker payload gains a slab regression test.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Require positive tangent confirmation for long feature links
+…
+69204d1
+```
+Sub-resolution strips classify whole rows of cells as corners or leave
+tangents undefined, and such endpoints bypassed the alignment test -
+mixed junction/undefined links could still weave X-diagonals. A link
+now keeps its full Chebyshev reach only when at least one endpoint's
+crease tangent positively confirms it; unconfirmed links are capped at
+one cell. Diagonal chords of real curves confirm and keep their reach;
+the thin-strip stress case drops from a woven lattice to the short
+rungs of two genuinely adjacent edges - the honest resolution floor.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Add sketch constraints, loft, extrude options, and SDF tooling ops
+…
+3682bf1
+```
+Seven new constraint types (horizontal, vertical, coincident, equal
+length, point-on-line, and edge-based parallel/perpendicular) follow
+the existing dataclass-residual pattern, so they flow through both the
+exact-DOF Levenberg-Marquardt solver and the under-constrained
+projection path unchanged.
+
+loft(profile_a, profile_b, height) interpolates two equal-count vertex
+loops along the sketch normal through a new LoftedPolygon primitive -
+per-slice-exact polygon distance, Box-style guarded cap combine, shared
+vertex Parameters so constraints and gradients act on the lofted solid.
+extrude() gains draft and twist (bit-identical to the plain path at
+zero; twist documented non-1-Lipschitz). jaxcad.sdf.operations adds
+Shell, Offset, Mirror, LinearPattern, and PolarPattern wrappers.
+
+All of it traces to WGSL for the viewer and differentiates with respect
+to profile vertices; 83 new tests cover residuals and solver behavior,
+loft equivalence/meshing/gradients, draft and twist semantics, and
+every operation through the meshing pipeline.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Make sketches fully editable from the viewer
+…
+5a17c15
+```
+The compile payload serializes every constraint kind with a stable
+statement-ordinal index, and locate_constraint_statements recognizes
+both the profile.vertices[i] subscript and bare-parameter-name forms so
+the payload builder and patch operations agree on identity.
+
+New patch operations: add_constraint covers the relational kinds,
+delete_constraint removes a chip's exact statement, set_constraint_value
+rewrites a numeric target through named-Scalar indirection so every use
+of the name stays consistent, and add_revolution mirrors add_extrusion.
+
+The sketch panel gains removable constraint chips with click-to-edit
+distance values, vertex-pair tools (horizontal, vertical, coincident)
+and edge-pair tools (parallel, perpendicular) generalizing the distance
+two-click flow, and a Revolve button. Screenshot in research/edge-view.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Give cells one vertex per surface sheet, and add mesh diagnostics
+…
+eaaa4f0
+```
+Uniform dual contouring's single vertex per cell emitted nonmanifold
+edges wherever two surface sheets crossed one cell (the documented
+xfail: seam circles grazing a lattice plane). manifold_cell_incidence
+now emits one incidence row per connected component of a cell's inside
+corners, dual_faces routes each quad corner through a (cell, edge) map
+so every sheet reaches its own vertex, and the sparse detection path
+returns the inside flags it already evaluated. The xfail is now a
+passing test; two staggered thin slabs sharing one cell column extract
+watertight with the correct two components. sharp_qef_vertices also
+compares clamped candidates at rank 3/2/1 and keeps the smallest QEF
+error, so marginal third singular values no longer fling a vertex to
+the cell clamp.
+
+jaxcad.meshing.diagnostics adds surface_deviation (area-uniform mesh
+sampling), sampled self_intersections, triangle_quality, and a bundled
+mesh_report - wired into the dual-contouring benchmark - and the STEP
+exporter gains structural-graph validation tests (entity reference
+closure, shell/face topology, counts). The patch layer gains add_loft
+with equal-vertex-count and single-operator validation, and loft
+operator chips appear on both source sketches.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Modernize the playground shell and make patch lines stable
+…
+26c44b6
+```
+Menu bar (File with a server-side scenes workspace - list/load/save,
+token-gated, traversal-proof - plus Save As and blob download; Edit
+undo/redo over a bounded source history; Window panel toggles; Help
+shortcut reference), draggable editor/viewport splitter with a
+collapsible code rail, and a read-only ObjectTree showing scene
+composition with selection/hover wired to the viewport.
+
+Mesh edges leave /compile for a lazy /api/mesh endpoint fetched only
+while an edge overlay is on: compile drops from 4.7s to 1.9s measured.
+
+The patch layer becomes line-stable and creation-ordered: imports
+extend an existing from-import in place or land beside the constraint
+block instead of shifting the file, constraints append after the last
+existing statement so payload indices equal creation order, typed
+constraint values round-trip exactly instead of %.4g truncation, and
+solve_sketch's anchor walk treats adjacent imports as part of the
+block. Repeated line-addressed API calls now work without recompiling
+in between - previously the second call missed its target.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Bridge jaxcad to jax-fem behind a Tesseract-ready solver ABI
+…
+e6b97d8
+```
+jaxcad.fem: sdf_to_hex_mesh voxelizes the SDF interior into VTK-ordered
+HEX8 elements with a differentiable Newton snap of boundary vertices
+onto the zero set (inversion-guarded), gradient-axis boundary face
+groups, and predicate face selection. SolverBackend defines the plugin
+contract; jax-fem runs direct in-process by default (its forward solve
+is not jax-traceable - the adjoint ad_wrapper is the gradient path,
+FD-validated) and a packaged thermal tesseract proves the ABI with
+bit-identical gradients at ~0.14s per boundary roundtrip.
+
+End to end: cantilever compliance dJ/dh through frozen-topology remesh
+and the elastic adjoint matches finite differences to 1.2e-4. The fem
+and tesseract extras carry python>=3.11 markers so uv's universal
+resolution keeps working for the project's 3.9 floor; jax-fem's
+undeclared runtime dependencies are listed explicitly.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Use exact seam tangents for feature-link filtering
+…
+348dffc
+```
+Where two seam curves of the same operand pair converge (a ring wall
+meeting a roof near-tangentially), the covariance tangent estimate
+degrades and cross-links weave an X-band. Seam cells now take the
+exact tangent cross(grad_a, grad_b) of their owning operands, lose the
+junction exemption (a seam is a curve, not a corner fan), and fall
+back to short-links-only where the cross product marks tangential
+contact.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Draw nothing where CSG operands touch tangentially
+…
+7a310fc
+```
+A tangential contact has no seam curve - the operands meet over a
+region - so the short-link fallback painted X-rungs across flat faces
+under a grazing solid. Seam cells whose exact tangent is unreliable
+(tiny cross product) now suppress their links entirely instead of
+falling back to short rungs; sub-resolution geometric creases keep the
+rung fallback, where a thin band is the honest picture.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Tighten feature-link alignment to reject shallow rail diagonals
+…
+9f318c9
+```
+Diagonals between two shallow-angle seam rails align with the rail
+tangent at ~0.8 and slipped past the 0.75 threshold. On-curve chords
+align above ~0.98 even on tightly turning rims, so 0.9 separates the
+two populations cleanly.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Trace feature chains at degree two
+…
+6ad4783
+```
+Ever-thinner double rails eventually defeat any alignment threshold, so
+the link graph is now pruned structurally: each non-junction vertex
+keeps at most one link per tangent side (best-aligned, then shortest),
+and a link survives only when both endpoints keep it. Chains of degree
+two cannot form X-lattices regardless of rail spacing; corner cells
+stay exempt because several chains legitimately meet there.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Add the L-bracket demo scene and end-to-end FEM optimization example
+…
+c40a612
+```
+scenes/bracket.py: a parameterized mounting bracket - sketch-extruded
+plate, tapered web, gusset rib, bolt holes as cylinder differences with
+fixed/distance constraints - compiling in the playground and meshing
+watertight at genus 2. examples/fem_bracket_optimization.py descends
+compliance plus a mass penalty over web thickness and rib height
+through frozen-topology remeshing and the elastic adjoint (monotone
+objective, adjoint vs finite differences at 1e-5), exporting before and
+after VTK. The FEM suite now scopes jax x64 to itself via a package
+fixture instead of poisoning every float32 test that follows in the
+same process.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Add CAD editing modes, grouped tool flyouts, and in-viewer simulation
+…
+63718c6
+```
+Model/sketch/simulate modes drive the tool rail (auto-entering sketch
+mode on selection, cancelable, persisted), tools regroup into
+hover-expandable flyout clusters that remember their last-used child,
+and sketch placement gains XY/YZ/ZX plane picks plus sketch-on-face
+from the surface hit normal (set_value planeNormal edits an existing
+SketchPlane in place).
+
+Simulate mode runs FEM without leaving the viewer: /api/simulate probes
+the hex-mesh boundary (face-group catalog for clickable boundary
+conditions), solves thermal or elastic cases via jaxcad.fem, and
+returns a render-ready surface with per-vertex scalars; a new indexed
+triangle pipeline draws it through a viridis ramp with a clip-plane
+slicing slider, hover-tinted face groups, and a graceful 501 when the
+fem extra is absent.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Add per-primitive patch fields, mesh simplification, and a validated …
+…
+51f475d
+```
+…STEP kernel
+
+Every primitive now reports its smooth surface patches as frame-local
+callables (Box: six face half-spaces, Cylinder: side plus caps, extruded
+polygons: edge half-planes plus caps), forwarded exactly through affine
+transforms. jaxcad.meshing.patch_fields turns a scene into pure JAX
+signature functions whose (leaf, patch) changes mark feature edges
+exactly. simplify_mesh collapses half-edges under a QEF plus sdf
+re-sampling error bound while preserving corners, creases, and CSG seams
+bitwise. save_step now welds degenerate crease edges below the declared
+uncertainty, and a cadquery-ocp test suite (dev extra "stepcheck")
+round-trips exports as BRepCheck-valid closed solids with matching face
+counts and volumes.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Declare simulation studies in code and finish the Tesseract solver layer
+…
+73bf104
+```
+jaxcad.fem.study makes simulation a first-class scene citizen:
+ThermalStudy and ElasticStudy declare boundary conditions on serializable
+face selectors, solve directly from scripts or optimizers, and register
+with capture_studies() for viewer parity. The elastic solver ships as a
+second Tesseract with an adjoint-backed VJP matching the direct backend
+bit-for-bit, and TesseractBackend routes both kinds. Dirichlet values are
+now differentiable end to end via a lifted formulation (T = u0 + g with
+the lift entering as an internal quad-point field), FD-validated.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Fix the four remaining edge-overlay artifact classes, with a metric s…
+…
+f02ba57
+```
+…uite
+
+Dashed chains came from mutual-veto slot competition (ties broken by
+float noise killed both links) — replaced with greedy best-first
+matching. Tick debris came from refined crossings landing exactly on
+surfaces where the polygon subgradient degenerates — feature cells are
+now re-verified with off-surface gradients. Phantom seams between
+disjoint surfaces suppressed real rims — the seam residual tightened to
+0.1h with failed rows reverted. Junction shortcuts severed straight
+rails passing a neighboring corner — the drop is now alignment-aware.
+tests/viewer/test_edge_artifacts.py pins crossings 0, debris 0, and
+1.000 per-curve chain coverage across 11 scene configurations.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Restructure the right side of the viewport into a single dock
+…
+71e1c3a
+```
+A stale absolute-position rule pushed the Simulate panel off-screen and
+its face-group rows collapsed to zero height; the display-options
+popover could run past the viewport; Escape cleared the selection behind
+open dialogs instead of closing them. Objects, Sketch properties,
+Materials, and Simulate now live in one 292px dock between the ViewCube
+and the hint bar with shared shrink and internal scroll, the popover is
+height-clamped, and Escape closes overlays in capture phase before the
+viewer backs out editing state. Verified by a scripted geometry audit
+at 1440x900 and 1280x800 with zero findings.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+andrinr
+and others
+added 8 commits
+August 16, 2026 15:06
+Select boundary-condition nodes programmatically instead of by face g…
+…
+ad3e9ee
+```
+…roup
+
+Nodes.box / sphere / halfspace / side / predicate compose with & | ~
+into serializable surface-node selections, and every BC now takes one:
+Dirichlet and Fixed apply to the selected nodes directly, while HeatFlux
+and Traction derive their integration faces from the selection
+internally. HeatFlux actually solves now, as a jax-fem Neumann surface
+integral validated against the analytic linear profile. Also fixes a
+global-state leak: the backend enabled x64 without restoring it (and the
+first jax_fem import flips it again), poisoning later float32 tests —
+x64 is now scoped to each backend call.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Give studies the same code parity as constraints in the viewer
+…
+ee4908a
+```
+Compiled scenes now report declared ThermalStudy/ElasticStudy objects
+(via capture_studies) with per-BC selection descriptions and source
+spans, and five patch operations — add_study, delete_study,
+add_study_bc, delete_study_bc, set_study_value — edit them as literal
+source, rendering selections back to Nodes.* constructor calls after
+round-trip validation. Predicate selections are readable but refuse
+viewer edits with a pointer to the code. /api/simulate can run a
+declared study by name, with the ad-hoc BC body kept as a preview path.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Survey the simulator ecosystem for the next Tesseract integrations
+…
+9d453cf
+```
+31 candidates across five domains (JAX-native, CFD adjoints, wave/EM/
+acoustics, multibody, Fortran/legacy FEA), each verified against shipped
+code rather than papers, cross-ranked into a packaging plan: CalculiX as
+the native-adjoint Fortran story mapping 1:1 onto our HEX8 meshes, jwave
+as the smallest new-physics integration, JAX-Fluids as the flagship CFD
+whose levelset input is literally our SDF. Includes the cross-cutting
+integration doctrine (indicator fields for grid solvers, surface-node
+VJPs for mesh solvers, Tesseract FD fallback) and a verified rejects
+table.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Run a Fortran solver in the differentiable loop: CalculiX behind a Te…
+…
+33fb76c
+```
+…sseract
+
+CalculixBackend writes C3D8 decks one-to-one from our hex meshes (VTK
+corner order matches Abaqus), applies consistent 2x2-Gauss traction
+loads matching jax-fem's surface integration, and parses displacements
+back at 1.5e-7 relative forward parity. Gradients use ccx's native
+*SENSITIVITY adjoint — plus a derived correction, because ccx 2.23's
+shipped strain-energy sensitivity omits the Jacobian-variation term
+(non-constant 1.4-4.5x error vs FD); adding w*d(detJ) in
+post-processing brings the adjoint to 2e-4 of finite differences, and
+ccx / jax-fem / FD gradients agree to 4.5e-5 of gradient scale over 228
+design nodes. elastic_solve and ElasticStudy accept backend="calculix";
+live tests skip cleanly when no ccx binary is present.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Make the four editing modes explicit, each with its own accent and panel
+…
+acba17c
+```
+Model, Sketch, Simulate, and Render are now a labeled segmented switcher
+in the top bar instead of three unlabeled rail icons, each with a
+distinct accent color threaded through the switcher, tool rail, dock
+headers, and hint-bar chip. Render becomes a first-class mode: the
+display-options popover is gone and its preset library and
+shading/shadows/quality/effects editor live in a dedicated dock panel
+with preview-thumbnail preset cards. The dock shows per-mode content,
+and M-cycling/Escape behavior extends to all four modes.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Rebuild the Simulate panel as a patch layer over declared studies
+…
+bc713fd
+```
+The panel no longer owns any simulation state: it lists the
+ThermalStudy/ElasticStudy declarations from the compile payload and edits
+them purely through source patches — adding studies, editing resolution
+and material literals, and building boundary conditions from vertex
+selections (side, box, sphere, half-space) that land in the program as
+Nodes.* calls. Face-group assignment UI is gone along with its
+client-side BC model. Solving posts the study name; the server re-derives
+mesh and BCs from the declaration and the field renders through the
+existing viridis/slice pipeline. Predicate selections show read-only with
+an edit-in-code hint. E2e covers the whole lifecycle: add study, box BC,
+value edit, deletions — asserting the generated source each step.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Rename the project: jaxcad becomes cadjoint
+…
+db829d7
+```
+CAD + adjoint — the name now states the differentiator (reverse-mode
+sensitivities from design parameters through geometry, meshing, and
+multi-solver simulation) instead of coupling the brand to one backend.
+Package directory, imports, pyproject (cadjoint-viewer entry point),
+lockfile, npm package, session-token header, UI wordmark, docs, and the
+CADJOINT_CCX env var all move together; the frontend is rebuilt and the
+full matrix verified: 1017 Python tests, 147 unit, 32 e2e, and the 20
+CalculiX tests live against a ccx binary relocated to
+~/.local/share/cadjoint.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Add app-state screenshots for the PR report
+…
+1c47c38
+```
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+andrinr
+changed the title
+Differentiable meshing pipeline: edge detection → dual contouring → export, with a viewer edge view
+cadjoint: differentiable CAD from sketch constraints to multi-solver FEM, in one app
+Sep 1, 2026
+andrinr
+and others
+added 18 commits
+September 1, 2026 09:43
+Remove legacy backends, dead render paths, and compat shims
+…
+c61171a
+```
+The GLSL backend, its StableHLO emitter, and the one-implementation
+ShaderBackend class hierarchy are gone — the viewer and docs only ever
+used the functional WGSL API, which absorbed the two shared helpers.
+Marching cubes (superseded by dual contouring), the Rectangle primitive
+and its extrude compat path (superseded by PolygonProfile, and
+documented as breaking parameter sharing), and never-used constraint
+aliases are removed too. The perpetually-ignored Cone import in
+test_common.py is fixed, so plain `pytest tests/` works again and CI
+drops the ignore flag. The docs WebGPU demo was silently dead after the
+rename (stale jaxcad-* CSS hooks) and is rewired. Net -1695 lines.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Rewrite the mesher's heavy stages in Rust, integrated via tesseract-jax
+…
+31cc7ef
+```
+Profiling showed the movable numeric stages (crossing sweep, manifold
+cell incidence, sharp/Tikhonov QEF, dual faces) are up to 78% of steady
+extraction, with the batched-SVD sharp QEF the largest. Those now run in
+a rayon-parallel Rust cdylib with bit-identical topology and winding;
+the SDF-touching stages (sampling, bisection+Newton Hermite refinement,
+octree detection) stay in JAX so the implicit-differentiation gradient
+contract is untouched. QEF solves are exposed through a Tesseract with a
+hand-derived linear-solve VJP that matches JAX autodiff to ~4e-14 and
+composes under jax.grad and jax.jit. Per-stage speedups 6-107x
+(sharp QEF 97-107x); end-to-end extraction 3.7x on the sphere and
+bounded by the retained JAX stages elsewhere; first-call gradient
+latency drops up to 28x. extract_mesh_native mirrors extract_mesh and
+everything skips cleanly when the cdylib is absent.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Make meshes and results first-class objects with user control
+…
+8358638
+```
+SimMesh declares meshing intent by name (resolution, bounds or
+auto-bounds with padding, domain) and is captured from scene programs
+like studies; it caches its HexMesh, reports per-element quality
+(scaled Jacobian, aspect ratio), and serves one meshing path — studies
+without an explicit mesh wrap an anonymous one. domain= chooses which
+objects participate (the bracket now simulates without its display
+slab). solve() returns a SimulationResult carrying the fields,
+differentiable objectives, VTK export, and a JSON-ready summary, kept
+on the study for re-inspection without re-solving. Gradients through
+the named-mesh path (build -> BC selection -> solve) match finite
+differences to 8e-5 on all three bracket parameters. Also fixes the ccx
+deck writer to respect CalculiX's 20-character free-format field limit
+(blind .17g overflowed on float-noise coordinates and 17-digit
+negatives, silently truncating decks).
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Ship the end-to-end optimization showcase and a heat-sink starter scene
+…
+4c36350
+```
+The bracket example is now the flagship chain demonstration: named CAD
+parameters through constraints, SDF, frozen-topology differentiable
+meshing, an elastic solve (jax-fem or CalculiX), and a compliance+mass
+objective driven by optax Adam under box projection with periodic
+topology re-extraction. A real 30-step run drops the objective 73%
+(compliance -81%) with adjoint-vs-FD checks at 2e-5, convergence CSV+PNG
+and before/after VTK saved, and a sub-minute pytest smoke asserting
+descent and gradient agreement. scenes/starter.py is the new default
+scene awaiting viewer wiring: a parametric power-module heat sink
+(constraint-driven fin comb, revolved copper slug, press-fit bushings)
+with a declared thermal study and a live AD block — verified to compile,
+capture, mesh watertight, and solve. README gains the end-to-end
+optimization chapter with the convergence figure.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Document the Tesseract architecture in the README
+…
+cf521d8
+```
+A dedicated chapter inventories the five Tesseracts (jax-fem thermal and
+elastic adjoints, the CalculiX Fortran discrete adjoint with our derived
+correction, the Rust QEF kernels, and the experimental black-box-mesher
+Tesseract with its surface-interpolation VJP), diagrams the end-to-end
+composition from CAD parameters to objective gradient, and makes the
+case for the boundary: four differentiation strategies, three languages,
+one jax.grad call. Also sweeps stale content: the jaxCAD title, the
+removed GLSL extra and backend-class example, and the missing
+fem/tesseract/stepcheck extras in the install table.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Relicense under Apache 2.0
+…
+ad19f59
+```
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Wire meshes and results into the viewer, adopt the native mesher, swa…
+…
+a9b8bc4
+```
+…p the starter
+
+Compiled scenes report declared SimMesh objects with source spans; new
+patch ops (add_mesh, delete_mesh, set_mesh_value, plus mesh/domain
+targets on set_study_value) edit them as literal source. /api/mesh_inspect
+builds a named mesh and returns its quality heatmap (per-vertex min
+scaled Jacobian) so meshes can be looked at before solving; /api/simulate
+study responses carry the SimulationResult summary and mesh info, with
+honest per-worker caching semantics. The edge overlay now runs the Rust
+stage kernels when the cdylib is present (bit-identical, flagged in the
+payload). The legacy face-group simulate path is gone, and the default
+scene is the parametric heat sink with its declared thermal study.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Add the hackathon submission writeup
+…
+b78e290
+```
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Prove the black-box mesher Tesseract with a surface-interpolation VJP
+…
+de98213
+```
+The whole mesher (SDF lattice samples -> projected DC surface -> TetGen
+or hex voxelization) now runs behind a Tesseract whose VJP is the
+implicit-function-theorem map at the boundary: a vertex on the zero set
+of the trilinear interpolant has d(v)/d(f_i) = -w_i(v) * grad f/|grad f|^2,
+so the interpolation weights at frozen vertices are the derivative rows
+— exact to 1.4e-11 against full autodiff of the same map, with interior
+sensitivities measured 15-26x below boundary. Composed with the
+unmodified elastic_jaxfem Tesseract in one jax.grad, it descends the
+bracket objective 36% in five steps, auto-refreezing when the frozen
+topology promise breaks. The honest limit is sampling, not the VJP:
+trilinear interpolation smears creases and flips the crease-dominated
+web gradient at coarse grids. Measured verdicts on the original
+questions: TET4 locks (20-47% overstiff, rejected); TET10 is accurate
+but 8-60x hex cost; HEX8 stays default, though it nearly aliases away
+the inclined rib's sensitivity where the tet path resolves it;
+QEF-informed hex vertex placement buys under 1% (the staircase is the
+faces, not the vertices). Full tables in research/tet-vs-hex.md.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Replace the AD-live demo with declarable in-viewer optimization
+…
+d273374
+```
+Optimization(name, objective, of, steps=, learning_rate=) is captured
+from scene programs like studies and meshes; the starter now declares
+minimize_aluminum over its material_volume objective instead of the
+demo dict, and the differentiability payload is gone. /api/optimize
+runs optax over the free parameters via the differentiable path and
+returns the program with the optimized literals written back — the
+optimizer is a patch layer, so results are visible in code and
+undoable — plus the full step trajectory (initial included, capped at
+100 entries) for viewport replay. Study simulate responses now carry
+per-vertex field arrays, ranges, and displacement vectors to power
+field switching and deformed-shape views. New patch ops edit steps and
+learning rate in place; set_mesh_value learns the method enum.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+State the submission's code provenance explicitly
+…
+39f74b8
+```
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Prune research notes and assets that shipped, fix the notebooks
+…
+5ef5439
+```
+Three exploration docs whose every recommendation is now code are gone
+(GPU-rendering plans superseded by the WebGPU compiler, Jupyter-widget
+UI approaches superseded by the browser app, constraint-AD analysis
+shipped in constraints/solve.py); four more are trimmed from build logs
+to final-state references with pointers into git history, and
+research/README.md is rewritten as an accurate index. Nine orphaned
+2025-era rendering assets (~3.8 MB) and the pyproject-redundant
+requirements.txt are deleted, with every PR/README/SUBMISSION/docs
+reference verified present afterward. All six notebooks now execute
+end-to-end on the current API (rename sweep plus one import fix).
+Net -2,271 markdown lines; full suite 1208 passed after deletion.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Drop the CLA in favor of plain Apache-2.0 inbound=outbound
+…
+907ecce
+```
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Fold the hackathon entry into the README, freeze the entry branch
+…
+fb70069
+```
+SUBMISSION.md gives way to a dedicated README section naming the track,
+pointing at the permanently kept tesseract-hackathon-2026 branch as the
+frozen entry state, and highlighting the headline workflow: the
+surface-interpolation VJP that makes a black-box mesher Tesseract
+differentiable from its boundary alone, composed with the unmodified
+solver Tesseract in a single jax.grad call. Provenance statement kept.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Ship the full simulation workbench UI: optimize, animate, inspect, se…
+…
+9015c6a
+```
+…e BCs
+
+The Simulate panel becomes four tabs. Meshes: cards with hex/tet4/tet10
+method control, Generate mesh with a magma quality heatmap (distinct
+from the viridis field ramp by design), stats and histogram. Studies:
+BC rows with hover highlighting and a color-coded Show-BCs overlay,
+selections evaluated client-side from their serialized form, plus
+viewport picking — click for a sphere proposal, shift-drag for a box —
+pre-filling the builder. Results: field picker, deformed view with
+scale slider, click probe, auto-switch on solve. The Optimize panel
+replaces the AD-live demo: declared optimizations run server-side,
+adopt the patched source, and replay their trajectory with play/scrub
+while the geometry morphs. A Scene|Mesh view switch ends the mesh
+hijacking the viewport, element edges render as real hex/tet face
+edges, and simColors.ts owns every color role with numerically tested
+contrast. Fixed en route: elastic field data was read from the wrong
+payload level, hiding the deformed view entirely.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Land the tet-backed simulation-optimization playground
+…
+e6b7031
+```
+The starter now runs the full end-to-end story as its single demo: a
+constraint-driven heat sink (driving dimensions, pinned BC surfaces,
+fin_depth genuinely free) with a declared tet SimMesh, the cool-sink
+study-backed optimization descending mean temperature plus a volume
+penalty through the differentiable path, streamed progress, and the
+solved field on the optimized design. SimMesh gains hex/tet4/tet10
+methods with study routing; the mesher Tesseract gains the TET10 mode
+with midside-node cotangent splitting on the surface-interpolation VJP.
+Verified live in the running playground.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Drop stray solver side-output files
+…
+cb8c79a
+```
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Sync the playground starter with the constraint-manifold scene
+…
+191198b
+```
+The embedded EXAMPLE_SOURCE lagged behind scenes/starter.py: it still
+pinned every driving dimension, leaving fin_depth as the optimizer's
+only lever — so optimization could only flatten the part. The live
+scene is the projection-based design where four sketch freedoms survive
+the constraint relations (deck thickness, shared fin width, mirrored
+outer-fin spacing, shared tip height) plus fin_depth, and descent steps
+project back onto the constraint manifold.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Hide details
+View details
+andrinr
+merged commit 055609c
+into
+main
+Sep 1, 2026
+3 of 4 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

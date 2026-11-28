@@ -1,0 +1,160 @@
+# Linear Blending Integration
+
+Also called: Integration function, Multi-modality Integration via Linear Blending, Weighted sample integration
+
+## Overview
+Linear Blending Integration is a multi-modal rendering technique that combines samples from multiple volume datasets (e.g., CT and MRI) into a single integrated sample value at each ray position before final color and opacity computation [S1]. It differs from pre-processing integration by performing the blend dynamically during the rendering stage, allowing for flexible, intensity-dependent weighting of different anatomical structures without storing redundant volume data [S1]. This method is specifically designed for illumination model level intermixing, where the integration occurs prior to the application of lighting models [S1].
+
+## How it works
+**Inputs:**
+*   Two volume datasets, $A$ and $B$, sampled at the same virtual ray position.
+*   Sample values $S_A$ and $S_B$ from datasets $A$ and $B$, respectively.
+*   An integration factor lookup table mapping intensity values to weights.
+
+**Outputs:**
+*   A single integrated sample value $S_I$.
+
+**Data Structures:**
+*   **Integration Factor Lookup Table:** A table mapping an integer 'Intensity value' to two floating-point values, $\alpha$ and $\beta$.
+    *   Structure: `Table[Intensity] -> (alpha: float, beta: float)`
+    *   Example entries:
+        *   Intensity 1 -> $\alpha=0.6, \beta=0.7$
+        *   Intensity 2 -> $\alpha=0.2, \beta=0.5$
+    *   [S1]
+
+**Steps:**
+1.  **Sample Acquisition:** Draw sample values $S_A$ and $S_B$ from volume datasets $A$ and $B$ at the same virtual position along the ray [S1].
+2.  **Factor Determination:** Determine integration factors $\alpha$ and $\beta$ based on the intensity values of the samples. This is typically done by querying the integration factor lookup table using the intensity values as keys [S1].
+3.  **Weighted Summation:** Compute the final integrated sample value $S_I$ using the linear blending formula:
+    $$S_I = \alpha \cdot S_A + \beta \cdot S_B$$
+    where:
+    *   $S_A$ is the sample from volume dataset $A$.
+    *   $S_B$ is the sample from volume dataset $B$.
+    *   $S_I$ is the final integrated sample value.
+    *   $\alpha$ and $\beta$ are the integration factors (weights) [S1].
+4.  **Boundary Check:** Perform a boundary check to ensure $S_I$ does not exceed the permitted maximum value for the output data type or rendering pipeline [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def linear_blending_integration(sample_A, sample_B, intensity_A, intensity_B, lookup_table):
+    """
+    Integrates two volume modalities using linear blending.
+    
+    Args:
+        sample_A (float): Sample value from volume dataset A.
+        sample_B (float): Sample value from volume dataset B.
+        intensity_A (int): Intensity value of sample A, used as lookup key.
+        intensity_B (int): Intensity value of sample B, used as lookup key.
+        lookup_table (dict): Mapping from intensity (int) to (alpha, beta) tuple.
+        
+    Returns:
+        float: The integrated sample value S_I, clamped to max_value.
+    """
+    # Step 2: Determine integration factors from lookup table
+    # Note: The source implies a lookup table exists. 
+    # Implementation detail: How to handle multiple intensities (A and B) 
+    # is not explicitly defined in the source. We assume the lookup table 
+    # might be indexed by a combined key or the source implies a single 
+    # intensity context. Based on "Different samples according to their 
+    # intensity values are weighted differently", we assume the lookup 
+    # provides alpha/beta for the specific context. 
+    # Since the source table shows single intensity keys, we assume 
+    # the factors are retrieved based on the relevant intensity metric.
+    # For this implementation, we assume the lookup table is queried 
+    # with the intensity values. If the table maps single intensity to 
+    # a pair, we need a strategy. The source says "Intensity value" 
+    # (singular) maps to alpha/beta. It is ambiguous if alpha/beta 
+    # are global or per-sample. Given S_I = alpha*S_A + beta*S_B, 
+    # alpha and beta are scalars for the blend. 
+    # We assume the lookup table is indexed by a representative intensity 
+    # or that the table provides the weights for the current voxel context.
+    # To be safe and self-contained, we assume the lookup table returns 
+    # weights based on the input intensity. If two intensities exist, 
+    # the source does not specify how to combine them into one lookup.
+    # [G] Assumption: The lookup table is indexed by a single intensity 
+    # value derived from the pair, or the factors are constant for the 
+    # blend operation. However, the table example shows Intensity 1 -> 
+    # alpha, beta. This suggests alpha and beta are tied to one intensity.
+    # A common interpretation in such contexts is that alpha and beta 
+    # are determined by the intensity of the *dominant* modality or a 
+    # combined metric. Without explicit guidance, we assume the lookup 
+    # is performed using a specific intensity value provided by the 
+    # caller or a default. 
+    # Alternative interpretation: The table maps Intensity -> (alpha, beta) 
+    # where alpha is weight for A and beta for B. But which intensity?
+    # The source says "Different samples according to their intensity 
+    # values are weighted differently". This implies intensity determines 
+    # the weights. 
+    # [G] To make the code runnable, we assume the lookup table is 
+    # queried with a single intensity value `intensity` that represents 
+    # the current voxel's classification or a combined metric. 
+    # If the source implies separate lookups, it would need two keys.
+    # Given the ambiguity, we implement a lookup using a single intensity 
+    # key, assuming the caller provides the appropriate key.
+    
+    # Let's assume the lookup table is indexed by intensity.
+    # We need to decide which intensity to use. The source doesn't say.
+    # We will use intensity_A as the key for demonstration, or require 
+    # a combined key. 
+    # Actually, looking at the formula S_I = alpha * S_A + beta * S_B,
+    # alpha and beta are scalars. The table maps Intensity -> alpha, beta.
+    # This implies alpha and beta are functions of intensity.
+    # If we have two intensities, we might need two pairs? No, the formula 
+    # uses single alpha and beta.
+    # [G] We assume the integration factors are determined by a single 
+    # intensity value associated with the voxel, or that the table 
+    # provides global weights. 
+    # To avoid guessing, we will assume the lookup table is queried 
+    # with a specific intensity value `intensity_key`.
+    
+    intensity_key = intensity_A # [G] Placeholder for how intensity is selected.
+    
+    if intensity_key not in lookup_table:
+        # Default weights if not found
+        alpha = 0.5
+        beta = 0.5
+    else:
+        alpha, beta = lookup_table[intensity_key]
+        
+    # Step 3: Compute final sample
+    S_I = alpha * sample_A + beta * sample_B
+    
+    # Step 4: Boundary check
+    # [G] Max value is not specified. Assuming standard 8-bit or float range.
+    # We clamp to a generic max_value.
+    max_value = 1.0 # [G] Assumption for normalized data.
+    if S_I > max_value:
+        S_I = max_value
+    elif S_I < 0.0: # Assuming non-negative volumes
+        S_I = 0.0
+        
+    return S_I
+```
+
+**Parameters:**
+*   **Integration factors $\alpha$ and $\beta$:** Weights applied to samples from modalities $A$ and $B$. Values are determined by an integration function based on intensity values [S1].
+*   **Lookup Table:** Maps intensity values to $\alpha$ and $\beta$. Example: Intensity 1 -> $\alpha=0.6, \beta=0.7$ [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Boundary Overflow:** The integrated sample value $S_I$ may exceed the permitted maximum value, requiring a boundary check (clamping) [S1].
+*   **Intensity Mapping:** The method relies on a lookup table. If the intensity values fall outside the mapped range, behavior is undefined unless handled by the implementation [G].
+
+## Subtopics
+
+### Multimodal Illumination Model
+A sibling technique that also performs illumination model level intermixing. It differs in how it handles the lighting computation after integration. Choose Linear Blending Integration when memory saving is critical and simple weighted averaging of modalities is sufficient. [Link](16316-multimodal-illumination-model.md)
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of samples per ray, as it involves a constant number of lookups and arithmetic operations per sample [S1].
+*   **Memory Complexity:** Low. The method saves memory compared to pre-processing integration because it does not require storing additional combined volume modalities. Only the lookup table is stored, which is small [S1].
+*   **Performance:** The LLO-based ray-casting renderer using this method achieved an average 3.8 times speed acceleration compared to conventional ray-casting methods with comparable image quality [S1].
+*   **Strengths:** Memory efficient; flexible classification of structures from different modalities; simple implementation.
+*   **Limitations:** Requires careful tuning of the lookup table; potential for value overflow; limited to two modalities in the basic description [S1].
+
+## Background
+Linear Blending Integration was introduced in the context of medical simulation and volume rendering, specifically using Linear Level Octree (LLO) for PC-based rendering [S1]. It was developed to allow the visualization of multiple modalities (e.g., CT and MRI) in a single output without the memory overhead of storing combined volumes [S1]. The method is part of a broader approach to multi-pass and compositing techniques in direct volume ray casting [S1].
+
+## Sources
+[S1] Shear-Warp Volume Rendering Algorithms Using Linear Level Octree for PC-Based Medical Simulation, https://doi.org/10.1007/3-540-45787-9_76, fetched 2026-10-26

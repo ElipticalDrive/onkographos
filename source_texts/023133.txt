@@ -1,0 +1,129 @@
+Rendering volumetric clouds using signed distance fields – UHawk VR Development Blog
+Skip to content
+Frustration-born
+Volumetric cloud rendering has really exploded in recent years. This can largely be attributed to GPUs being fast enough to utilize ray marching techniques in real-time, something which previously was limited mostly to the demo scene. However, care still needs to be taken when rendering volumetrics, as cranking the sample count way up will slay the mightiest of GPUs.
+The problem is we want to do just that. Crank the sample count way up. If we don’t, we’ll either have to make do with soft, undefined volumes, or try to deal with horrible banding/noisy output and smear it over time, which looks absolutely terrible in VR.
+About a year ago, I was observing some sparse but dense cumulus cloud formations, similar to this image (but even denser):
+Source: Textures.com
+Thinking about how to recreate it in UHawk really frustrated me because I knew that to get those kind of well-defined shapes, a lot of samples would be needed. Worse still, most of the samples wouldn’t even contribute to the final image because of how much empty space there was:
+All that red is your GPU calculating the value 0 in very expensive ways
+Ideally, we’d want to spend our ray samples only where there are clouds. Instead, we end up spending a ton of them just to check and be able to say “Yep, no clouds here!”. We end up spending only a fraction of the sample count on something actually visible = bad visuals for worse performance.
+I started thinking “If only there was a way for the ray to advance really quickly to the first cloud intersection. Then you could spend your ray budget where it really matters!”. Then I realized this was a technique I already knew and had experience with.
+Enter signed distance
+Animated visualization of a distance field. Source in the link below.
+If you want a full overview of what a signed distance field is, I recommend checking out this great article by Jamie Wong. Basically, you construct a data structure (field) which, for each entry, contains the distance to the nearest point of some surface. This works for 2D and 3D (and presumably other dimensions as well).
+In 2D it is used to render text, but since we’re working in 3D we’ll use it to represent a volume. More specifically, we are going to use it to skip through empty space as quickly as we can by taking large steps forward, with each step size being equal to the value of the signed distance at the current ray march position. Because the SDF guarantees that no surface is closer than that value, it is safe to skip forward by that amount.
+Visualization of how empty space can be skipped when rendering with a signed distance field. The blue points represent the ray march positions and the yellow circles represent the value of the distance field.
+Source: GPU Gems 2: Chapter 8.
+Because our SDF is a volume containing arbitrary distances, the data structure we’ll be using is a signed, half-precision floating point 3D texture. Each pixel in the texture represents the signed distance to the shell of our cloud volume. The signed part means that if the pixel is inside the volume, the value will be negative (we won’t use this for the ray-marching, but it can be used to increase the sample density the further into the cloud we get).
+The texture will have to be quite low res, as ray-marching a high-resolution 3D texture is very expensive. I’m using a 128x32x128 texture which is sampled non-uniformly (stretched by a factor of 6 horizontally) to cover a larger area. The texture should also tile horizontally so we get an infinitely extending cloud plane.
+Before we can calulate the SDF, we need a volume representing our clouds. I use a layered system where a compute shader is run for each cloud layer and adds it to an RG16 3D texture of the same resolution as our SDF. The method for generating the cloud shapes is similar to the method described here by Sébastien Hillaire. The red channel contains the coverage and the green channel contains the density (used by the ray-marcher, adding support for varying density).
+Recalculating the distance field texture is expensive (takes about 200ms using a 3-pass compute shader on my GTX1070), so we’ll have to limit the system to having a static cloud volume. This might be a deal breaker for some, but for my game I’ll gladly take non-dynamic clouds if it means increasing the visual fidelity and performance. What we can do instead is scroll the volume itself, which will at least give us some movement.
+The bipolar ray marcher
+Now that we’ve got a SDF representing our clouds, it’s time to ray march it. Our ray marcher has two modes:
+SDF – Used when outside the cloud volume. Step size is determined by the SDF value. Visualized in blue in the figure below.
+Regular – Used when inside the cloud volume. Step size is fixed. Visualized in cyan in the figure below.
+Additionally, we skip areas outside of the cloud volume entirely, visualized in red in the figure below.
+How you do the ray marching depends on your setup and code style, but here’s a basic copy of what my code is doing (with implementation-specific optimizations stripped):
+// The fixed step size of the inner ray marching
+uniform float _StepSize;
+float DensityFunction (float sdf)
+{
+&nbspreturn max(-sdf, 0);
+}
+float4 Raymarch (float3 rayStart, float3 rayDir)
+{
+// Scattering in RGB, transmission in A
+&nbspfloat4 intScattTrans = float4(0, 0, 0, 1);
+// Current distance along ray
+&nbspfloat t = 0;
+&nbspUNITY_LOOP
+&nbspfor (int u = 0; u < RAY_MAX_STEPS; u++)
+{
+// Current ray position
+&nbspfloat3 rayPos = rayStart + rayDir * t;
+// Evaluate our signed distance field at the current ray position
+&nbspfloat sdf = MapVolume(rayPos);
+// Only evaluate the cloud color if we're inside the volume
+&nbspif (sdf < 0)
+{
+&nbsphalf extinction = DensityFunction(sdf);
+&nbsphalf transmittance = exp(-extinction * _StepSize);
+// Get the luminance for the current ray position
+&nbsphalf3 luminance = Luminance(rayPos);
+// Integrate scattering
+&nbsphalf3 integScatt = luminance - luminance * transmittance;
+&nbspintScattTrans.rgb += integScatt * intScattTrans.a;
+&nbspintScattTrans.a *= transmittance;
+// Opaque check
+&nbspif (intScattTrans.a < 0.003)
+{
+&nbspintScattTrans.a = 0.0;
+&nbspbreak
+}
+}
+// March forward; step size depends on if we're inside the volume or not
+&nbspt += sdf < 0 ? _StepSize : max(sdf, _StepSize);
+}
+&nbspreturn float4(intScattTrans.rgb, 1-intScattTrans.a);
+}
+The ray marcher code itself is really simple now that I look at it with all the details stripped. Here’s what it looks like when ray marching the base volume only:
+And here’s with two 3D detail passes added (perlin-worley):
+Finally, here’s a video of it in action in my game:
+Static advantages
+But wait, there’s more! Since we’ve limited the system to working with static data, why not bake some more? In addition to the SDF, we can pre-march a shadow + ambient ray.
+Here’s with just the realtime shadow ray (4 shadow samples per cloud sample):
+And here’s with the pre-marched shadow ray added:
+Here’s with no ambient attenuation:
+And here’s with the pre-marched ambient occlusion added:
+Because the volume resolution is so low, the baked directional shadow ray can actually be calculated in real time. This allows us to freely change the time of day while still having far extending shadows.
+Also, the baked shadow ray can be used to get a (volumetric) cloud shadow perfectly matching the clouds, with a single tex3D lookup:
+Wrapping up
+That’s the gist of using signed distance fields to accelerate volumetric rendering. Additionally, I’ve got some other tricks going on which speeds up the rendering and stabilizes it for VR, which I’d like to share in another post.
+If you made it this far, thanks for reading and I hope you found it interesting!
+22 thoughts on “Rendering volumetric clouds using signed distance fields”
+Awesome blogpost, simply maesterpiece i would say. Which pattern do you use for raymarching? Is it blue noise?
+Reply
+I go back on forth on this. I like blue noise because the pattern itself doesn’t draw much attention, but it tends to lead to more noticeable contrast than Bayer noise. Blue noise is probably more useful overall, though.
+Reply
+Blue noise is amazing when accumulated temporally, it’s much more organic and natural overall, best at error diffusion. Don’t know about contrast it might give, never noticed. If you’ll give it a shot – please make a comparison screenshot 🙂
+Reply
+Also if recalculating the distance field texture takes about 200ms why not calculate it by chunks in background and make a smooth transition upon being ready?
+Reply
+I did consider this and it’s not an impossibility. Right now I haven’t given it a shot just because I’ve been working on other things, and my game is structured around missions anyway, which lessens the need for dynamic weather.
+Reply
+Yet i think it’s an interesting challenge to overcome, cuz these clouds are too damn good to remain static
+Reply
+Felix this is incredible.
+Reply
+Pingback: Rendering volumetric clouds using signed distance fields - MYBOOAM
+Are you making this open source?
+Reply
+I don’t have any plans to, as I’m using it for the game I am working on.
+Reply
+It looks incredible! Are the static advantages going to make their way into Overcloud?
+Reply
+No, OverCloud works in an entirely different way and is fully dynamic. As such it wouldn’t make much sense trying to cram static data into it.
+Reply
+Hey Felix, really nice post!
+A quick question: you said that the technique is skipping the areas outside the volume, but how do you do that?
+Been thinking about how to do that efficiently with many sparse cloud volumes instead of a single big volume, and hope you can help me with a new light on this 🙂
+Reply
+This is where the SDF comes in. Because it contains the distance to the nearest surface point, we can use that same value as the step size, allowing us to march through “empty” space as quickly as possible while still not missing any part of the volume. I didn’t really go over this in the original post (it is explained in the article by James Wong though) so I’ve edited it and added some text and an image which hopefully better explains it. Thanks!
+Reply
+How to calculate the cloud’s ambient occlusion? Is it need to consider the transparency of cloud or just consider cloud as opaque?
+Reply
+volumetric cloud shadow is sample the bottom of the baked 3d shadow texture according the sun light direction? The sun light is paralleled, but the sun shaft seem to be radial in the picture.
+Reply
+Any news on the development?
+Reply
+Can you template this out on shadertoy?
+Reply
+Could you share some detail about the sdf generation by cloud volume
+Reply
+Could you share the 3d density texture? i try many method, but can’t generate beautiful cloud like yours. Thanks.
+Reply
+Hi, can you email me directly please. Could not find your contact info anywhere. Thanks
+Reply
+Pingback: No Clouds here! Your nearest cloud is 5.248km away. - Simul
+Leave a Reply Cancel reply

@@ -1,0 +1,338 @@
+--- v006.md
++++ v007.md
+@@ -4,107 +4,263 @@
+ 
+ ## Overview
+-FlipNeRF is a regularization framework for few-shot novel view synthesis that generates auxiliary "flipped reflection rays" from original input rays and estimated surface normals to improve rendering quality and surface normal accuracy with sparse inputs [S1]. Unlike Ref-NeRF, which reparameterizes the radiance field by replacing the viewing direction with a reflection direction, FlipNeRF generates additional training rays without modifying the original representation, allowing it to leverage reflection geometry as extra supervision [S1]. It distinguishes itself from pre-training methods by optimizing per-scene without large-scale priors, and from heuristic unseen-view sampling strategies by deriving rays deterministically from estimated normals [S1].
++FlipNeRF is a regularization method for few-shot novel view synthesis that generates auxiliary "flipped reflection rays" from original input rays and estimated surface normals to improve rendering quality and surface normal accuracy with sparse inputs [S1]. Unlike existing methods that focus on depth estimation or require pre-training, FlipNeRF is trained per scene without pre-training and derives rays from estimated normals without heuristic factors, distinguishing it from unseen viewpoint sampling strategies and Ref-NeRF [S1]. It builds on [Model Architecture Modifications](11313-model-architecture-modifications.md).
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** A sparse set of $N$ input images with known camera poses, defining a set of original input rays $\mathcal{R} = \{\mathbf{r}\}$ [S1]. Each ray $\mathbf{r}$ is defined by origin $\mathbf{o}$ and direction $\mathbf{d}$ [S1].
+-*   **Outputs:** A trained radiance field model $F_\Theta$ (built upon MixNeRF) that predicts density and color distributions, and synthesized novel views [S1].
++*   **Inputs:** Original input rays $\mathcal{R}$, ground truth colors $\mathbf{c}^{\text{GT}}$, and a NeRF model (built upon MixNeRF) that outputs mixture density parameters for each sample along a ray.
++*   **Outputs:** Rendered colors $\hat{\mathbf{c}}$, estimated surface normals $\hat{\mathbf{n}}$, and flipped reflection rays $\mathcal{R}'$.
+ 
+ **Data Structures:**
+-The method builds upon MixNeRF, which models the color distribution of a ray as a mixture of Gaussians [S1]. For a ray with $M$ samples:
+-*   Blending weights: $\mathbf{w} = [w_1, \dots, w_M]$, where $w_i$ is the weight of the $i$-th sample [S1].
+-*   Mixture parameters per sample $i$: Mean color $\boldsymbol{\mu}_i^{\mathbf{c}}$ and scale parameters $\boldsymbol{\beta}_i^c$ for each color channel $c \in \{r, g, b\}$ [S1].
+-*   Bottleneck features: Intermediate feature vectors $\mathbf{b}$ output by the spatial MLP of the NeRF architecture [S1].
+-*   Estimated surface normals: $\hat{\mathbf{n}}$, computed as the weighted sum of sample normals $\mathbf{n}_i$ along the ray: $\hat{\mathbf{n}} = \sum_{i=1}^M w_i \mathbf{n}_i$ [S1]. The sample normals $\mathbf{n}_i$ are derived from the gradient of the volume density $\sigma$ [S1].
++*   **Ray:** Defined by origin $\mathbf{o}$ and direction $\mathbf{d}$.
++*   **Sample:** Along a ray, samples have position $\mathbf{r}(t)$, blending weight $w_i$, and mixture parameters (mean $\mu_i^{\mathbf{c}}$, scale $\beta_i^{\mathbf{c}}$ for RGB).
++*   **Bottleneck Feature:** Intermediate feature vector $\mathbf{b}$ from the spatial MLP of NeRF.
+ 
+ **Numbered Steps:**
+ 
+-1.  **Compute Estimated Surface Normal:**
+-    For each original input ray $\mathbf{r}$, calculate the estimated surface normal $\hat{\mathbf{n}}$ using the blending weights $w_i$ and the density gradient normals $\mathbf{n}_i$ of the $M$ samples along the ray:
++1.  **Estimate Surface Normal:**
++    Calculate the estimated surface normal $\hat{\mathbf{n}}$ for a ray as the weighted sum of blending weights $w_i$ and estimated normal vectors $\mathbf{n}_i$ along the ray [S1]:
+     $$ \hat{\mathbf{n}} = \sum_{i=1}^{M} w_i \mathbf{n}_i $$
+-    Note: Explicit normalization of $\hat{\mathbf{n}}$ is avoided to prevent training instability; the model learns unit-length normals via regularization [S1].
+-
+-2.  **Identify Peak Blending Weight Sample:**
+-    Find the index $s$ of the sample with the highest blending weight along the original ray $\mathbf{r}$ [S1]. Calculate the position of this peak sample $\mathbf{p}_s$:
++    The estimated normal vectors $\mathbf{n}_i$ are derived from the gradient of volume density [S1]. Note that $\hat{\mathbf{n}}$ is not explicitly normalized during training; it is trained to approximate a unit vector naturally [S1].
++
++2.  **Find Peak Blending Weight Sample:**
++    Identify the sample index $s$ with the highest blending weight along the original ray $\mathbf{r}$. Calculate the position of this peak sample $\mathbf{p}_s$ [S1]:
+     $$ \mathbf{p}_s = \mathbf{o} + t_s \mathbf{d} $$
+     where $t_s$ is the distance to the $s$-th sample [S1].
+ 
+ 3.  **Derive Flipped Reflection Direction:**
+-    Calculate the flipped reflection direction $\mathbf{d}'$ using the original direction $\mathbf{d}$ and the estimated normal $\hat{\mathbf{n}}$:
++    Calculate the flipped reflection direction $\mathbf{d}'$ using the original direction $\mathbf{d}$ and the estimated normal $\hat{\mathbf{n}}$ [S1]:
+     $$ \mathbf{d}' = 2(\mathbf{d} \cdot \hat{\mathbf{n}})\hat{\mathbf{n}} - \mathbf{d} $$
+-    [S1]
+ 
+ 4.  **Calculate Flipped Ray Origin:**
+-    Determine the origin $\mathbf{o}'$ for the flipped reflection ray such that the peak sample of the flipped ray coincides with $\mathbf{p}_s$:
++    Determine the origin $\mathbf{o}'$ of the flipped reflection ray such that the peak sample of the flipped ray coincides with $\mathbf{p}_s$ [S1]:
+     $$ \mathbf{o}' = \mathbf{p}_s - t_s \mathbf{d}' $$
+-    The flipped reflection ray is then defined as $\mathbf{r}'(t) = \mathbf{o}' + t \mathbf{d}'$ [S1].
+-
+-5.  **Apply Masking Strategy:**
+-    Filter out ineffective flipped rays using a masking function $M(\mathbf{r}')$ based on the angle between the estimated normal $\hat{\mathbf{n}}$ and the negative original direction $-\hat{\mathbf{d}}$ [S1]. The mask is 1 if the angle is within threshold $\tau$, and 0 otherwise:
++
++5.  **Construct Flipped Reflection Ray:**
++    Define the flipped reflection ray $\mathbf{r}'$ as [S1]:
++    $$ \mathbf{r}'(t) = \mathbf{o}' + t \mathbf{d}' $$
++    Cast $\mathbf{r}'$ toward the identical target pixel as the original input ray $\mathbf{r}$ [S1].
++
++6.  **Apply Masking Strategy:**
++    Filter out ineffective flipped rays using a masking function $M(\mathbf{r}')$ based on the angle between the normal and the negative original direction [S1]:
+     $$ M(\mathbf{r}') = \begin{cases} 1 & \text{if } \arccos(-(\hat{\mathbf{d}} \cdot \hat{\mathbf{n}})) < \tau \\ 0 & \text{otherwise} \end{cases} $$
+-    Typical values for $\tau$ are $90^\circ$ for DTU and Realistic Synthetic 360°, and $30^\circ$ for LLFF [S1]. Only rays with $M(\mathbf{r}') = 1$ are used for regularization losses [S1].
+-
+-6.  **Compute Losses:**
+-    Calculate the following loss terms for the batch of original rays $\mathcal{R}$ and valid flipped rays $\mathcal{R}'$:
+-
+-    *   **MSE Loss ($\mathcal{L}_{\text{MSE}}$):** Standard pixel-wise reconstruction error between rendered color $\hat{\mathbf{c}}(\mathbf{r})$ and ground truth $\mathbf{c}^{\text{GT}}(\mathbf{r})$ [S1]:
+-        $$ \mathcal{L}_{\text{MSE}} = \sum_{\mathbf{r} \in \mathcal{R}} || \hat{\mathbf{c}}(\mathbf{r}) - \mathbf{c}^{\text{GT}}(\mathbf{r}) ||_2^2 $$
+-        [S1]
+-
+-    *   **Negative Log-Likelihood Loss ($\mathcal{L}_{\text{NLL}}$ and $\mathcal{L}_{\text{NLL}}'$):** NLL for original rays $\mathbf{r}$ and flipped rays $\mathbf{r}'$ respectively, modeling color distributions as mixtures [S1].
+-
+-    *   **Uncertainty-aware Emptiness Loss ($\mathcal{L}_{\text{UE}}$ and $\mathcal{L}_{\text{UE}}'$):** Reduces floating artifacts by penalizing blending weights based on ray uncertainty $\rho$ [S1]. For a ray $\mathbf{r}$:
+-        $$ l_{\text{UE}}(\mathbf{r}) = \frac{1}{M} \sum_{i=1}^{M} \log (1 + \rho \cdot \eta \cdot w_i) $$
+-        where $\rho = \frac {1}{3} \sum _{c}^{\{r,g,b\}} \sum _{i=1}^{M} \beta _i^c$ is the uncertainty derived from the scale parameters, and $\eta$ is a scaling factor [S1].
+-
+-    *   **Orientation Loss ($\mathcal{L}_{\text{Ori.}}$):** Penalizes backward-facing normal vectors using the underlying density gradient normal $\mathbf{n}_i$ (not the predicted normal) to ensure accurate surface normals:
+-        $$ l_{\text{Ori.}}(\mathbf{r}) = \sum_{i=1}^{M} w_i \max (0, \mathbf{n}_{i} \cdot \hat{\mathbf{d}})^2 $$
+-        [S1]
+-
+-    *   **Bottleneck Feature Consistency Loss ($\mathcal{L}_{\text{BFC}}$):** Encourages consistency between bottleneck features $\mathbf{b}$ of original rays and $\mathbf{b}'$ of flipped rays using Jensen-Shannon Divergence (JSD), where $\psi$ is the softmax function:
+-        $$ l_{\text{BFC}}(\mathbf{r}, \mathbf{r}') = \text{JSD}(\psi (\mathbf {b}), \psi (\mathbf {b}')) $$
+-        [S1]
+-
+-7.  **Minimize Total Loss:**
+-    Update model parameters $\Theta$ by minimizing the weighted sum of all losses:
+-    $$ \mathcal{L}_\text{Total} = \mathcal{L}_\text{MSE} + \lambda _{1}\mathcal{L}_\text{NLL} + \lambda _{2}\mathcal{L}_\text{NLL}' + \lambda _{3}\mathcal{L}_\text{UE} + \lambda _{4}\mathcal{L}_\text{UE}' + \lambda _{5}\mathcal{L}_\text{BFC} + \lambda _{6}\mathcal{L}_\text{Ori.} $$
+-    [S1]
++    where $\hat{\mathbf{d}}$ is the normalized original direction, $\hat{\mathbf{n}}$ is the normalized estimated normal, and $\tau$ is the threshold [S1]. Only rays with $M(\mathbf{r}')=1$ are used in subsequent losses [S1].
++
++7.  **Compute Uncertainty-aware Emptiness Loss (UE Loss):**
++    Calculate the uncertainty $\rho$ for a ray as the average of the sum of estimated scale parameters $\beta_i^c$ for RGB channels $c \in \{r,g,b\}$ [S1]:
++    $$ \rho = \frac{1}{3} \sum_{c}^{\{r,g,b\}} \sum_{i=1}^{M} \beta_i^c $$
++    The UE Loss for a ray $\mathbf{r}$ is [S1]:
++    $$ l_{\text{UE}}(\mathbf{r}) = \frac{1}{M} \sum_{i=1}^{M} \log(1 + \rho \cdot \eta \cdot w_i) $$
++    where $\eta$ is a scaling parameter [S1]. This loss is applied to both original rays $\mathcal{R}$ and valid flipped rays $\mathcal{R}'$ [S1].
++
++8.  **Compute Bottleneck Feature Consistency Loss (BFC Loss):**
++    Calculate the Jensen-Shannon Divergence (JSD) between the softmax-normalized bottleneck features $\mathbf{b}$ of the original ray and $\mathbf{b}'$ of the flipped ray [S1]:
++    $$ l_{\text{BFC}}(\mathbf{r}, \mathbf{r}') = \text{JSD}(\psi(\mathbf{b}), \psi(\mathbf{b}')) $$
++    where $\psi(\cdot)$ is the softmax function [S1].
++
++9.  **Compute Orientation Loss:**
++    Penalize backward-facing normal vectors using the underlying density gradient normal $\mathbf{n}_i$ (not the predicted normal) [S1]:
++    $$ l_{\text{Ori.}}(\mathbf{r}) = \sum_{i=1}^{M} w_i \max(0, \mathbf{n}_i \cdot \hat{\mathbf{d}})^2 $$
++
++10. **Minimize Total Loss:**
++    Train the model by minimizing the total loss [S1]:
++    $$ \mathcal{L}_\text{Total} = \mathcal{L}_\text{MSE} + \lambda_1 \mathcal{L}_\text{NLL} + \lambda_2 \mathcal{L}_\text{NLL}' + \lambda_3 \mathcal{L}_\text{UE} + \lambda_4 \mathcal{L}_\text{UE}' + \lambda_5 \mathcal{L}_\text{BFC} + \lambda_6 \mathcal{L}_\text{Ori.} $$
++    where $\mathcal{L}_\text{MSE}$ is the mean squared error between rendered and ground truth colors, $\mathcal{L}_\text{NLL}$ and $\mathcal{L}_\text{NLL}'$ are negative log-likelihood losses for original and flipped rays respectively, and $\lambda_i$ are balancing weights [S1].
++
++**Pseudocode:**
++
++```python
++def flip_nerf_step(rays, gt_colors, model, hyperparams):
++    """
++    Performs one training step for FlipNeRF.
++    
++    Args:
++        rays: List of Ray objects with origin o, direction d, and target pixel.
++        gt_colors: Ground truth colors for the rays.
++        model: NeRF model (MixNeRF-based) with methods:
++               - render_ray(ray): Returns mixture params (means, scales, weights) and bottleneck features.
++               - get_density_gradient(ray): Returns normal vectors n_i for each sample.
++        hyperparams: Dict containing thresholds, weights, and optimizer settings.
++    
++    Returns:
++        total_loss: Scalar loss value.
++    """
++    mse_loss = 0.0
++    nll_loss = 0.0
++    nll_prime_loss = 0.0
++    ue_loss = 0.0
++    ue_prime_loss = 0.0
++    bfc_loss = 0.0
++    ori_loss = 0.0
++    
++    for ray in rays:
++        # 1. Render original ray
++        orig_result = model.render_ray(ray)
++        orig_means = orig_result.means
++        orig_scales = orig_result.scales
++        orig_weights = orig_result.weights
++        orig_bottleneck = orig_result.bottleneck_features
++        
++        # 2. Estimate surface normal for original ray
++        # n_i are density gradient normals from model.get_density_gradient
++        density_normals = model.get_density_gradient(ray)
++        est_normal = sum(w * n for w, n in zip(orig_weights, density_normals))
++        
++        # 3. Find peak blending weight sample index s
++        s = argmax(orig_weights)
++        t_s = ray.sample_distances[s]
++        p_s = ray.origin + t_s * ray.direction
++        
++        # 4. Derive flipped direction
++        d_prime = 2 * dot(ray.direction, est_normal) * est_normal - ray.direction
++        
++        # 5. Calculate flipped origin
++        o_prime = p_s - t_s * d_prime
++        
++        # 6. Construct flipped ray
++        flipped_ray = Ray(origin=o_prime, direction=d_prime, target_pixel=ray.target_pixel)
++        
++        # 7. Apply masking
++        # theta = arccos(-dot(normalized_d, normalized_n))
++        # Note: est_normal is not normalized explicitly in FlipNeRF, but dot product uses it directly
++        # The formula uses normalized vectors for the angle check.
++        # However, the source formula uses hat{d} and hat{n}.
++        # We must normalize est_normal for the mask check.
++        est_normal_norm = normalize(est_normal)
++        d_hat = normalize(ray.direction)
++        angle = acos(dot(-d_hat, est_normal_norm))
++        
++        if angle < hyperparams.mask_threshold:
++            # Ray is valid
++            flipped_result = model.render_ray(flipped_ray)
++            flipped_means = flipped_result.means
++            flipped_scales = flipped_result.scales
++            flipped_weights = flipped_result.weights
++            flipped_bottleneck = flipped_result.bottleneck_features
++            
++            # Compute NLL for flipped ray
++            nll_prime_loss += compute_nll(flipped_means, flipped_scales, gt_colors[ray.target_pixel])
++            
++            # Compute UE Loss for flipped ray
++            rho_prime = compute_uncertainty(flipped_scales)
++            ue_prime_loss += compute_ue_loss(flipped_weights, rho_prime, hyperparams.eta)
++            
++            # Compute BFC Loss
++            bfc_loss += compute_jsd(flipped_bottleneck, orig_bottleneck)
++        else:
++            # Ray is masked out, do not add flipped losses
++            pass
++            
++        # Compute MSE for original ray
++        mse_loss += compute_mse(orig_means, orig_scales, gt_colors[ray.target_pixel])
++        
++        # Compute NLL for original ray
++        nll_loss += compute_nll(orig_means, orig_scales, gt_colors[ray.target_pixel])
++        
++        # Compute UE Loss for original ray
++        rho = compute_uncertainty(orig_scales)
++        ue_loss += compute_ue_loss(orig_weights, rho, hyperparams.eta)
++        
++        # Compute Orientation Loss
++        ori_loss += compute_orientation_loss(orig_weights, density_normals, ray.direction)
++        
++    # Aggregate losses with weights
++    total_loss = (
++        hyperparams.lambda_mse * mse_loss +
++        hyperparams.lambda_1 * nll_loss +
++        hyperparams.lambda_2 * nll_prime_loss +
++        hyperparams.lambda_3 * ue_loss +
++        hyperparams.lambda_4 * ue_prime_loss +
++        hyperparams.lambda_5 * bfc_loss +
++        hyperparams.lambda_6 * ori_loss
++    )
++    
++    return total_loss
++
++def compute_uncertainty(scales):
++    # rho = 1/3 * sum_c sum_i beta_i^c
++    # scales is a tensor of shape (M, 3) for RGB
++    return (1.0 / 3.0) * sum(sum(scales[:, c]) for c in range(3))
++
++def compute_ue_loss(weights, rho, eta):
++    # l_UE = 1/M * sum_i log(1 + rho * eta * w_i)
++    M = len(weights)
++    return (1.0 / M) * sum(log(1 + rho * eta * w) for w in weights)
++
++def compute_orientation_loss(weights, normals, direction):
++    # l_Ori = sum_i w_i * max(0, n_i . d_hat)^2
++    d_hat = normalize(direction)
++    return sum(w * max(0, dot(n, d_hat))**2 for w, n in zip(weights, normals))
++
++def compute_jsd(b1, b2):
++    # JSD(P || Q) = 0.5 * KL(P || M) + 0.5 * KL(Q || M)
++    # where M = 0.5 * (P + Q)
++    # P and Q are softmax(b1) and softmax(b2)
++    p = softmax(b1)
++    q = softmax(b2)
++    m = 0.5 * (p + q)
++    return 0.5 * kl_divergence(p, m) + 0.5 * kl_divergence(q, m)
++```
+ 
+ **Parameters:**
+-*   **Masking Threshold $\tau$:** $90^\circ$ for Realistic Synthetic 360° and DTU; $30^\circ$ for LLFF [S1].
++*   **Masking Threshold ($\tau$):** $90^\circ$ for Realistic Synthetic 360° and DTU; $30^\circ$ for LLFF [S1].
+ *   **Training Duration:** 500 pixel epochs [S1].
+ *   **Batch Size:** 4,096 [S1].
++*   **Hardware:** 4 NVIDIA RTX 3090 GPUs [S1].
+ *   **Optimizer:** Adam with gradient clipping by value at 0.1 and norm at 0.1 [S1].
+ *   **Learning Rate Annealing:**
+-    *   Realistic Synthetic 360°: $[10^{-3}, 10^{-5}]$ [S1]
+-    *   DTU: $[2 \times 10^{-3}, 2 \times 10^{-5}]$ [S1]
+-    *   LLFF: $[2 \times 10^{-3}, 2 \times 10^{-5}]$ [S1]
+-*   **Warm-up Steps:** 512 (Real.Syn. 360°), 1024 (DTU), 512 (LLFF) [S1].
+-*   **Delay Multiplier:** $10^{-2}$ (Real.Syn. 360°), $10^{-3}$ (DTU), $10^{-3}$ (LLFF) [S1].
++    *   Real.Syn. 360°: $[10^{-3}, 10^{-5}]$ [S1].
++    *   DTU: $[2 \times 10^{-3}, 2 \times 10^{-5}]$ [S1].
++    *   LLFF: $[2 \times 10^{-3}, 2 \times 10^{-5}]$ [S1].
++*   **Warm-up Steps:**
++    *   Real.Syn. 360°: 512 [S1].
++    *   DTU: 1024 [S1].
++    *   LLFF: 512 [S1].
++*   **Delay Multiplier:**
++    *   Real.Syn. 360°: $10^{-2}$ [S1].
++    *   DTU: $10^{-3}$ [S1].
++    *   LLFF: $10^{-3}$ [S1].
+ *   **Loss Balancing Weights ($\lambda$):**
+-    *   $\lambda_1$ (for $\mathcal{L}_{\text{NLL}}$): Annealed from $[4.0, 10^{-3}]$ (Real.Syn. 360°), $[0.4, 10^{-4}]$ (DTU), $[0.04, 10^{-5}]$ (LLFF) [S1].
+-    *   $\lambda_2$ (for $\mathcal{L}_{\text{NLL}}'$): Annealed from $[0.4, 10^{-4}]$ (Real.Syn. 360°), $[0.04, 10^{-5}]$ (DTU), $[0.004, 10^{-6}]$ (LLFF) [S1].
+-    *   $\lambda_3$ (for $\mathcal{L}_{\text{UE}}$): Annealed from $[10^{-4}, 0.1]$ (Real.Syn. 360°), $[10^{-5}, 0.01]$ (DTU), $[10^{-4}, 0.1]$ (LLFF) [S1].
+-    *   $\lambda_4$ (for $\mathcal{L}_{\text{UE}}'$): Annealed from $[10^{-5}, 0.01]$ (Real.Syn. 360°), $[10^{-6}, 0.001]$ (DTU), $[10^{-6}, 0.001]$ (LLFF) [S1].
+-    *   $\lambda_5$ (for $\mathcal{L}_{\text{BFC}}$): $0.01$ (Real.Syn. 360°), $0.001$ (DTU), $0.00001$ (LLFF) [S1].
+-    *   $\lambda_6$ (for $\mathcal{L}_{\text{Ori.}}$): $0.1$ (Real.Syn. 360°), $0.01$ (DTU), $0.001$ (LLFF) [S1].
+-    [S1]
++    *   $\lambda_1$ (for $\mathcal{L}_\text{NLL}$):
++        *   Real.Syn. 360°: $[4.0, 10^{-3}]$ [S1].
++        *   DTU: $[4 \times 10^{-1}, 10^{-4}]$ [S1].
++        *   LLFF: $[4 \times 10^{-2}, 10^{-5}]$ [S1].
++    *   $\lambda_2$ (for $\mathcal{L}_\text{NLL}'$):
++        *   Real.Syn. 360°: $[4 \times 10^{-1}, 10^{-4}]$ [S1].
++        *   DTU: $[4 \times 10^{-2}, 10^{-5}]$ [S1].
++        *   LLFF: $[4 \times 10^{-3}, 10^{-6}]$ [S1].
++    *   $\lambda_3$ (for $\mathcal{L}_\text{UE}$):
++        *   Real.Syn. 360°: $[10^{-4}, 10^{-1}]$ [S1].
++        *   DTU: $[10^{-5}, 10^{-2}]$ [S1].
++        *   LLFF: $[10^{-4}, 10^{-1}]$ [S1].
++    *   $\lambda_4$ (for $\mathcal{L}_\text{UE}'$):
++        *   Real.Syn. 360°: $[10^{-5}, 10^{-2}]$ [S1].
++        *   DTU: $[10^{-6}, 10^{-3}]$ [S1].
++        *   LLFF: $[10^{-6}, 10^{-3}]$ [S1].
++    *   $\lambda_5$ (for $\mathcal{L}_\text{BFC}$):
++        *   Real.Syn. 360°: $10^{-2}$ [S1].
++        *   DTU: $10^{-3}$ [S1].
++        *   LLFF: $10^{-5}$ [S1].
++    *   $\lambda_6$ (for $\mathcal{L}_\text{Ori.}$):
++        *   Real.Syn. 360°: $10^{-1}$ [S1].
++        *   DTU: $10^{-2}$ [S1].
++        *   LLFF: $10^{-3}$ [S1].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Explicit Normalization:** Using explicitly normalized surface normals ($\hat{\mathbf{n}} / ||\hat{\mathbf{n}}||$) causes training instability and degenerate results (PSNR 16.72 vs 22.24) [S1]. The model relies on regularization to approximate unit vectors naturally [S1].
+-*   **Initial Normal Quality:** In the initial training stage, estimated normals are not unit vectors ($||\hat{\mathbf{n}}||^2$ far from 1) [S1]. The masking strategy and orientation loss help concentrate $||\hat{\mathbf{n}}||^2$ close to 1 over time [S1].
+-*   **Ineffective Rays:** Flipped rays that do not satisfy the masking condition (angle $\theta > \tau$) provide misleading training cues and must be masked out [S1].
++*   **Explicit Normalization:** Using explicitly normalized surface normals ($\hat{\mathbf{n}}$) causes training instability and degenerate results (PSNR 16.72) compared to not using explicit normalization (PSNR 22.24) [S1]. The estimated normals are not unit vectors in the initial training stage, with most $\|\hat{\mathbf{n}}\|^2$ far from 1 [S1]. The method relies on regularization and masking to naturally concentrate $\|\hat{\mathbf{n}}\|^2$ close to 1 after training [S1].
++*   **Masking Threshold:** Using an inappropriate threshold (e.g., $180^\circ$ with no masking) degrades performance. For example, on the evaluation dataset, $\tau=90^\circ$ achieved PSNR 19.55, SSIM 0.767, LPIPS 0.180, and Average Error 0.101, outperforming no masking ($\tau=180^\circ$) which had PSNR 18.76 [S1].
+ 
+ ## Operating characteristics
+-*   **Time and Memory Complexity:** Not given in the sources [S1].
+-*   **Measured Performance:** Achieves state-of-the-art performance on Realistic Synthetic 360°, DTU, and LLFF benchmarks, outperforming baselines by a large margin in 3/4-view settings [S1]. On the evaluation dataset, masking with $\tau=90^\circ$ achieved PSNR 19.55, SSIM 0.767, LPIPS 0.180, and Average Error 0.101, outperforming no masking ($\tau=180^\circ$) which had PSNR 18.76 [S1].
+-*   **Scaling:** The method is designed for few-shot settings (e.g., 3, 4, 6, 9 views) and scales by adjusting loss weights $\lambda$ to prevent over-regularization as the number of training views increases [S1].
+-*   **Strengths:** Does not require pre-training on large datasets; does not rely on heuristic factors for unseen view sampling; improves surface normal accuracy which aids depth estimation; reduces floating artifacts via uncertainty-aware regularization [S1].
+-*   **Limitations:** Relies on estimated surface normals derived from density gradients; initial estimates are not unit vectors [S1].
+-*   **When to use:** Sparse view novel view synthesis where accurate geometry and surface normals are beneficial [S1].
+-*   **When not to use:** Not given in the sources [S1].
++*   **Time and Memory Complexity:** Not given in the sources.
++*   **Measured Performance:** FlipNeRF achieves state-of-the-art performance on multiple benchmarks, outperforming baselines by a large margin in 3/4-view settings [S1]. Evaluated on Realistic Synthetic 360°, DTU, and LLFF benchmarks [S1].
++*   **Scaling:** Not given in the sources.
++*   **Strengths:** Reduces floating artifacts, improves surface normal estimation, and does not require pre-training or heuristic factors for unseen view generation [S1].
++*   **Limitations:** Relies on accurate initial surface normal estimation, which can be challenging in very sparse settings without regularization [S1].
++*   **When to use:** Few-shot novel view synthesis with sparse input views [S1].
++*   **When not to use:** When dense input views are available, or when pre-training on large datasets is feasible and preferred [S1].
+ 
+ ## Background
+-FlipNeRF was proposed in 2023 by researchers supported by NRF, IITP, and Samsung Electronics [S1]. It is built upon MixNeRF, which leverages mixture density models to represent input rays [S1]. The method addresses the limitation of existing regularization methods that focus on depth estimation or require heuristic sampling factors, by instead focusing on accurate surface normal reconstruction through flipped reflection rays [S1]. It is evaluated on Realistic Synthetic 360°, DTU, and LLFF benchmarks [S1].
++*   **Origin:** FlipNeRF was proposed in the paper "FlipNeRF: Flipped Reflection Rays for Few-shot Novel View Synthesis" [S1].
++*   **History and Development:** It is built upon MixNeRF, which leverages a mixture model framework [S1]. The method addresses the limitation of existing regularization methods that focus on depth estimation by instead focusing on accurate surface normal reconstruction [S1].
++*   **Usage:** Evaluated on Realistic Synthetic 360°, DTU, and LLFF benchmarks [S1].
+ 
+ ## Sources

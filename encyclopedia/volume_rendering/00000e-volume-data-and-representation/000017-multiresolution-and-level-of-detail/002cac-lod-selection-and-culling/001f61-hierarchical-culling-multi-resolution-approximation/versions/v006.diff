@@ -1,0 +1,170 @@
+--- v005.md
++++ v006.md
+@@ -4,10 +4,10 @@
+ 
+ ## Overview
+-Hierarchical Culling & Multi-resolution Approximation accelerates volume rendering by organizing data into a spatial hierarchy (such as an octree) to discard invisible regions and approximate visible regions at lower resolutions [S1]. It distinguishes itself from sibling methods by combining explicit frustum culling of subregions with hardware-assisted cell projection for exploration, rather than relying solely on error metrics or temporal coherence [S1, S3].
++Hierarchical Culling & Multi-resolution Approximation accelerates volume rendering by organizing data into a spatial hierarchy to discard invisible regions and approximate visible regions at lower resolutions [S1]. It distinguishes itself from sibling methods by combining explicit frustum culling of subregions with hardware-assisted cell projection for exploration, rather than relying solely on error metrics or temporal coherence [S1, S3].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A volume dataset, a camera position and orientation (view frustum), and a scale factor $s$ controlling the zoom level [S1].
+-*   **Output:** A rendered image using the appropriate resolution level for each visible region [S1].
++* **Input:** A precomputed spatial hierarchy of the volume data, a camera position and orientation defining the view frustum, a scale factor $s$ controlling the zoom level, and a target frame time $t_{\text{target}}$ [S1, S3].
++* **Output:** A rendered image using full resolution for final output or hardware-assisted cell projection for exploration [S1].
+ 
+ **Data Structures:**
+@@ -15,54 +15,50 @@
+ 
+ **Steps:**
+-1.  **Build Hierarchy:** Construct a hierarchy of the volume data [S1].
+-2.  **Frustum Culling:** Test the bounding volumes of subregions against the view frustum [S1].
+-    *   If a subregion is fully invisible, discard it entirely [S1].
+-    *   If visible, proceed to resolution selection [S1].
+-3.  **Resolution Selection & Rendering:**
+-    *   For final image quality, render using the full resolution of the visible cells [S1].
+-    *   For exploration, render using an approximated version via hardware-assisted cell projection [S1].
+-    *   Alternatively, for surface-based hierarchical rendering, compute an estimated projected size for each cell [S3].
+-        *   If the projected size is smaller than a pixel, avoid visiting children and draw the surface element of the current cell instead [S3].
+-        *   Stop hierarchy exploration when the projection of the current cell becomes too small [S3].
++1. **Build Hierarchy:** Construct a hierarchy of the volume data [S1].
++2. **Frustum Culling:** Test the bounding volumes of subregions against the view frustum [S1].
++    * If a subregion is fully invisible, discard it entirely [S1].
++    * If visible, proceed to resolution selection [S1].
++3. **Resolution Selection & Rendering:**
++    * For final image quality, render using the full resolution of the visible cells [S1].
++    * For exploration, render using an approximated version via hardware-assisted cell projection [S1].
++    * Alternatively, for surface-based hierarchical rendering, compute an estimated projected size for each cell [S3].
++        * If the projected size is smaller than a pixel, avoid visiting children and draw the surface element of the current cell instead [S3].
++        * Stop hierarchy exploration when the projection of the current cell becomes too small [S3].
+ 
+ **Parameters:**
+-*   **Scale Factor ($s$):** Controls the zoom level. Tested range is 1.0 to 5.16. Scales of 256 and larger are required to view these volumes effectively [S1].
+-*   **Minimum Projected Size:** A global minimum projected size that can be edited by the user to control the number of displayed cells at each frame [S3].
++* **Scale Factor ($s$):** Controls the zoom level. Tested range is 1.0 to 5.16. Scales of 256 and larger are required to view these volumes effectively [S1].
++* **Minimum Projected Size:** A global minimum projected size that can be edited by the user to control the number of displayed cells at each frame [S3].
+ 
+ **Edge Cases and Pitfalls:**
+-*   At low scales (e.g., scale 1), the hierarchy overhead may make rendering slightly slower than non-hierarchical rendering [S1].
+-*   Significant speedups are only achieved when zoomed in considerably (e.g., scale 256), where it can be about twice as fast [S1].
+-*   For large volumes, gains may be more significant even at lower scales, but the hierarchy must be robust enough to handle the data size [S1].
++* At low scales (e.g., scale 1), the hierarchy overhead may make rendering slightly slower than non-hierarchical rendering [S1].
++* Significant speedups are only achieved when zoomed in considerably (e.g., scale 256), where it can be about twice as fast [S1].
++* For large volumes, gains may be more significant even at lower scales, but the hierarchy must be robust enough to handle the data size [S1].
+ 
+ **Pseudocode:**
+ ```python
+-def render_hierarchical_volume(volume_data, camera, scale_factor):
+-    # Build hierarchy if not already built
+-    hierarchy = build_hierarchy(volume_data)
+-    
+-    # Determine effective scale for culling thresholds
+-    # Note: Scale factor influences the zoom level and thus the projected size calculations
+-    effective_scale = scale_factor
+-    
++def render_hierarchical_volume(hierarchy, camera, scale_factor, t_target):
++    # Precomputed hierarchy is passed in as per [S1]
++    min_proj = 1.0  # Global minimum projected size in screen pixels [S3]
+     render_list = []
+-    
+-    # Recursive traversal of the hierarchy
++
+     def traverse_node(node):
+         # Step 2: Frustum Culling
+-        if not is_inside_frustum(node.bounding_box, camera):
+-            return  # Discard invisible subregion
+-        
++        if not is_aabb_frustum_test(node.bounding_box, camera.frustum_planes):
++            return  # Discard invisible subregion [S1]
++
+         # Step 3: Resolution Selection
+-        # Calculate projected size for LOD selection
+-        projected_size = estimate_projected_size(node, camera)
+-        
+-        # If projected size is too small, use approximation or stop recursion
+-        if projected_size < MIN_PIXEL_SIZE:
+-            # Use hardware-assisted cell projection for exploration
+-            # or draw surface element if using surface-based hierarchy
++        # Projected size estimation from cell size and distance to screen plane [S3]
++        cell_size = node.bounding_box.diagonal_length()
++        dist_to_screen = camera.distance_to_projection_plane(node.center)
++        projected_size = (cell_size * dist_to_screen) / camera.focal_length
++
++        # LOD selection: stop exploration when projection is too small [S3]
++        if projected_size < min_proj:
++            # Use hardware-assisted cell projection for exploration [S1]
++            # or draw surface element if using surface-based hierarchy [S3]
+             render_list.append((node, 'approximated'))
+             return
+-        
+-        # If leaf node or full resolution required
++
++        # If leaf node or full resolution required [S1]
+         if node.is_leaf():
+             render_list.append((node, 'full'))
+@@ -73,11 +69,40 @@
+ 
+     traverse_node(hierarchy.root)
+-    
++
+     # Render the collected list
+     for node, resolution in render_list:
+         if resolution == 'full':
++            # Standard volume raycasting or scanline on full resolution data [S1]
+             render_full_resolution(node)
+         else:
+-            render_approximated(node)
++            # Hardware-assisted cell projection for exploration [S1]
++            render_projected_approximation(node)
++
++    # Dynamic adjustment of minimum projected size to maintain framerate [S3]
++    t_frame = get_current_frame_time()
++    delta_t = t_frame - t_target
++    # Use third power of difference to minimize influence near goal, emphasize when far, keeping sign [S3]
++    growth_factor = 1.0 + (delta_t ** 3) * 0.01
++    min_proj *= growth_factor
++    # When idle, reduce limit projected size close to zero [S3]
++    if abs(delta_t) < 0.001:
++        min_proj *= 0.9
++
++def is_aabb_frustum_test(aabb, frustum_planes):
++    # Standard axis-aligned bounding box vs frustum plane test [G]
++    for plane in frustum_planes:
++        if aabb.min.x > plane.d and aabb.min.y > plane.d and aabb.min.z > plane.d:
++            return False
++        if aabb.max.x < plane.d and aabb.max.y < plane.d and aabb.max.z < plane.d:
++            return False
++    return True
++
++def render_full_resolution(node):
++    # Standard volume raycasting or scanline on full resolution data [S1]
++    pass
++
++def render_projected_approximation(node):
++    # Hardware-assisted cell projection for exploration [S1]
++    pass
+ ```
+ 
+@@ -91,14 +116,14 @@
+ 
+ ### Projected Size LOD with Frustum Culling
+-This variant uses projected size estimation to dynamically adjust LOD. It computes an estimated projected size for each cell based on its size and distance to the screen projection plane [S3]. Hierarchy exploration stops when the projected size becomes too small (e.g., smaller than a pixel), avoiding child visits and drawing the current cell's surface element instead [S3]. It dynamically adjusts the minimum projected size from frame to frame to maintain a given framerate, using the third power of the time difference to weight the growing factor, keeping its sign, and reducing the limit close to zero when idle [S3].
++Projected Size LOD with Frustum Culling dynamically adjusts level-of-detail based on screen-space footprint rather than fixed distance thresholds [S3]. It is chosen when interactive frame rates must be maintained during user interaction, as it automatically scales displayed complexity to match available rendering time [S3].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The hierarchy provides significant speedups only when zoomed in considerably [S1]. At scale 1, the hierarchy is slightly slower than non-hierarchical rendering; at scale 256, it is about twice as fast [S1].
+-*   **Memory Complexity:** The hierarchy itself adds overhead, but culling reduces the amount of data transferred and processed [S2, unofficial].
+-*   **Measured Performance:** On the Lockheed fighter dataset, rendering every cell with the scanline algorithm took over 3 minutes. Using the hierarchy to draw an approximated version took less than 3 seconds [S1].
+-*   **Strengths:** Significant performance gains for large volumes when zoomed in; effective for exploration via approximation [S1].
+-*   **Limitations:** Overhead at low zoom levels; approximation quality may be lower than full resolution [S1].
+-*   **When to Use:** Large-scale volume exploration where interactive frame rates are needed for approximation, or final rendering at high zoom levels [S1].
+-*   **When Not to Use:** Low zoom levels where the hierarchy overhead outweighs culling benefits [S1].
++* **Time Complexity:** The hierarchy provides significant speedups only when zoomed in considerably [S1]. At scale 1, the hierarchy is slightly slower than non-hierarchical rendering; at scale 256, it is about twice as fast [S1].
++* **Memory Complexity:** The hierarchy itself adds overhead, but culling reduces the amount of data transferred and processed [S2, unofficial].
++* **Measured Performance:** On the Lockheed fighter dataset, rendering every cell with the scanline algorithm took over 3 minutes. Using the hierarchy to draw an approximated version took less than 3 seconds [S1].
++* **Strengths:** Significant performance gains for large volumes when zoomed in; effective for exploration via approximation [S1].
++* **Limitations:** Overhead at low zoom levels; approximation quality may be lower than full resolution [S1].
++* **When to Use:** Large-scale volume exploration where interactive frame rates are needed for approximation, or final rendering at high zoom levels [S1].
++* **When Not to Use:** Low zoom levels where the hierarchy overhead outweighs culling benefits [S1].
+ 
+ ## Background

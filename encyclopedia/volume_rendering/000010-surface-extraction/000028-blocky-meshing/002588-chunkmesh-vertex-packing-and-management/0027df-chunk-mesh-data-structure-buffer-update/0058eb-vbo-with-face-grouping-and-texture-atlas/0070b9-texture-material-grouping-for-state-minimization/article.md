@@ -1,0 +1,74 @@
+# Texture/Material Grouping for State Minimization
+Also called: Grouping by Texture/Material, Texture Atlas Grouping
+
+## Overview
+Texture/Material Grouping is an optimization strategy that groups objects sharing the same shader parameters and textures to minimize state changes [S1, unofficial]. It solves the performance bottleneck caused by frequent driver overhead from binding new textures and uniforms per object [S1, unofficial]. It sets itself apart from [Instanced Rendering](16287-instanced-rendering.md) by not requiring geometry reuse or transformation matrix buffers, and from [VBO with Face Grouping and Texture Atlas](16286-vbo-with-face-grouping-and-texture-atlas.md) by focusing on shader/uniform state rather than just vertex buffer layout.
+
+## How it works
+**Inputs and Outputs:**
+- Input: A list of renderable objects (e.g., voxels, chunks) with associated material IDs, texture bindings, and uniform values.
+- Output: A sorted list of draw calls grouped by material state.
+
+**Data Structures:**
+- `Object`: Contains `material_id`, `texture_binding`, `uniforms` (struct or map).
+- `MaterialGroup`: Contains `material_id`, `texture_binding`, `uniforms`, and a list of `Object` indices.
+
+**Steps:**
+1. **Identify Groups:** Iterate through all objects. Group objects that share identical shader parameters (uniforms) and textures [S1, unofficial].
+2. **Bind State:** For each unique material group, bind the shared textures and upload the uniform values to the GPU [S1, unofficial].
+3. **Draw Batch:** Render all objects within the current group [S1, unofficial].
+4. **Repeat:** Move to the next group and repeat steps 2-3.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_grouped(objects):
+    # Step 1: Group objects by material state
+    groups = {}
+    for obj in objects:
+        key = (obj.material_id, obj.texture_binding, obj.uniforms_hash)
+        if key not in groups:
+            groups[key] = []
+        groups[key].append(obj)
+
+    # Step 2 & 3: Bind state and draw each group
+    for key, group_objects in groups.items():
+        material_id, texture_binding, uniforms_hash = key
+        
+        # Bind shared state
+        bind_texture(texture_binding)
+        set_uniforms(uniforms_hash)
+        
+        # Draw all objects in this group
+        for obj in group_objects:
+            draw_object(obj)
+```
+
+**Parameters:**
+- Grouping Key: Defined by the combination of material ID, texture binding, and uniform values [S1, unofficial].
+
+**Edge Cases:**
+- If no objects share the same state, no grouping benefit is realized [S1, unofficial].
+- High variance in material usage reduces effectiveness [S1, unofficial].
+
+## Subtopics
+
+### Material/State Grouping
+A technique to improve rendering performance by grouping primitives that share the same rendering state attributes (e.g., material) to avoid context switches [S2, unofficial]. It identifies primitives sharing the same attributes and renders them together in a single batch to minimize context switch overhead [S2, unofficial]. It is chosen when primitives have distinct material properties but can be batched to reduce driver overhead [S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** Sorting objects by material state takes $O(N \log N)$ or $O(N)$ with hash maps, where $N$ is the number of objects [S1, unofficial].
+- **Memory Complexity:** $O(N)$ to store the groups [S1, unofficial].
+- **Performance:** Reduces the number of state changes from $N$ to the number of unique materials [S1, unofficial].
+- **Strengths:** Simple to implement, effective when many objects share materials [S1, unofficial].
+- **Limitations:** Does not address geometry duplication or transformation matrix uploads [S1, unofficial].
+- **When to Use:** When objects share materials but have different positions/scales [S1, unofficial].
+- **When Not to Use:** When every object has a unique material [S1, unofficial].
+
+## Background
+Originated in OpenGL optimization practices for voxel-based worlds [S1, unofficial]. It is a standard technique in rendering engines to minimize context switches [S2, unofficial].
+
+## Sources
+[S1] OpenGL How to render a voxel based world scene with many objects, https://stackoverflow.com/questions/31256095/opengl-how-to-render-a-voxel-based-world-scene-with-many-objects, fetched 2026-10-27 (unofficial)
+[S2] New Techniques for Out-Of-Core Visualization of Large Datasets, https://ctsilva.github.io/thesis/wagner-correa-thesis.pdf, fetched 2026-10-30 (unofficial)

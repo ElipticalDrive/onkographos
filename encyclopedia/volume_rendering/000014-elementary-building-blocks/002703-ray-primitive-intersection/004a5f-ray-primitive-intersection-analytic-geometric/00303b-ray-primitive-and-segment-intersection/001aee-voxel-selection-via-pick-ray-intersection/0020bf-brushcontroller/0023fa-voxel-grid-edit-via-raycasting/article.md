@@ -1,0 +1,148 @@
+# Voxel Grid Edit via Raycasting
+
+Also called: Raycasting Sphere Brush, Raycasting for voxel interaction (build/break)
+
+## Overview
+This method enables real-time modification of a voxel grid by casting rays from screen-space mouse coordinates into the 3D world to determine interaction points [S2, S3, unofficial]. It solves the problem of translating 2D user input into precise 3D spatial edits (addition or removal of voxels) within a discrete volumetric representation [S1, S2, unofficial].
+
+## How it works
+**Inputs:**
+*   `rayOrigin`: World-space origin of the pick ray, derived from camera position and screen coordinates [S1, S2, S3, unofficial].
+*   `rayDirection`: Direction vector of the pick ray [S1, S2, S3, unofficial].
+*   `brush_size`: Radius of the spherical brush mask in voxel units [S2, unofficial].
+*   `brush_voxel`: The voxel type/color to place; `0` indicates break/destroy mode [S2, unofficial].
+*   `add`: Boolean flag; `true` for adding voxels, `false` for removing them [S3, unofficial].
+
+**Outputs:**
+*   Modified voxel grid state (voxels added or removed) [S1, S2, S3, unofficial].
+*   Updated hover state for visual feedback [S3, unofficial].
+
+**Data Structures:**
+*   **Chunk:** A block of voxels. Contains `locX, locY, locZ` (chunk coordinates) and `CHUNK_SIZE` (dimension) [S1, unofficial].
+*   **Voxel Data:** Accessed via a 3D array within a chunk: `voxelData[x][y][z]` [S1, unofficial].
+*   **Hit Info:** `hitPosition` (world coordinates of intersection), `hitNormal` (surface normal at intersection) [S2, S3, unofficial].
+
+**Steps:**
+
+1.  **Ray Generation:** Compute `rayOrigin` and `rayDirection` from the current mouse position and camera projection/view matrices [S2, unofficial].
+2.  **Raycasting for Hit:** Cast the ray into the voxel world to find the first solid voxel or surface [S2, S3, unofficial].
+    *   If `add` is `true`, the raycast seeks an empty space adjacent to a solid voxel [S3, unofficial].
+    *   If `add` is `false`, the raycast seeks an existing solid voxel to remove [S3, unofficial].
+    *   The raycast returns `hitPosition` and `hitNormal` [S2, S3, unofficial].
+3.  **Hit Adjustment:** If `add` is `true`, offset `hitPosition` by the `hitNormal` to ensure the new voxel is placed outside the existing geometry (e.g., `hitPosition += hitNormal * 0.01f`) [S3, unofficial].
+4.  **Brush Application:** Apply a spherical brush mask centered at `hitPosition` with radius `brush_size` [S2, unofficial].
+    *   Iterate over voxels within the bounding box of the sphere.
+    *   For each voxel, check if it lies within the sphere distance from `hitPosition`.
+    *   If `brush_voxel` is non-zero, set the voxel to `brush_voxel` [S2, unofficial].
+    *   If `brush_voxel` is zero, destroy the voxel [S2, unofficial].
+5.  **State Update:** Refresh the hover state to reflect the modification [S3, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def voxel_grid_edit(ray_origin, ray_direction, add, brush_size, brush_voxel, voxel_grid, chunks):
+    """
+    Edit voxel grid using raycasting and spherical brush.
+    
+    Args:
+        ray_origin: vec3, world space origin of the ray
+        ray_direction: vec3, direction of the ray
+        add: bool, True to add voxels, False to remove
+        brush_size: float, radius of the brush in voxel units
+        brush_voxel: int, voxel type to place (0 for break)
+        voxel_grid: 3D array of voxel states
+        chunks: list of chunk objects with locX, locY, locZ, CHUNK_SIZE
+    """
+    hit_position, hit_normal = raycast_voxel_grid(ray_origin, ray_direction, add, voxel_grid, chunks)
+    
+    if hit_position is None:
+        return
+
+    if add:
+        hit_position = hit_position + hit_normal * 0.01
+
+    min_x = int(hit_position.x - brush_size)
+    max_x = int(hit_position.x + brush_size)
+    min_y = int(hit_position.y - brush_size)
+    max_y = int(hit_position.y + brush_size)
+    min_z = int(hit_position.z - brush_size)
+    max_z = int(hit_position.z + brush_size)
+    
+    for x in range(min_x, max_x + 1):
+        for y in range(min_y, max_y + 1):
+            for z in range(min_z, max_z + 1):
+                dist_sq = (x - hit_position.x)**2 + (y - hit_position.y)**2 + (z - hit_position.z)**2
+                if dist_sq <= brush_size**2:
+                    if brush_voxel != 0:
+                        voxel_grid[x][y][z] = brush_voxel
+                    else:
+                        voxel_grid[x][y][z] = 0
+
+    update_hovered_voxel(ray_origin, ray_direction)
+
+def raycast_voxel_grid(ray_origin, ray_direction, add, voxel_grid, chunks):
+    """
+    March ray to find hit position and normal.
+    Uses fixed-step advancement to avoid division by zero on axis-aligned rays.
+    """
+    last_pos = None
+    for _ in range(100):
+        ray_origin = ray_origin + ray_direction * 0.2
+        chunk = chunks[int(ray_origin.x / 16)][int(ray_origin.y / 16)][int(ray_origin.z / 16)]
+        local_pos = vec3(
+            ray_origin.x - chunk.locX * chunk.CHUNK_SIZE,
+            ray_origin.y - chunk.locY * chunk.CHUNK_SIZE,
+            ray_origin.z - chunk.locZ * chunk.CHUNK_SIZE
+        )
+        
+        if local_pos == last_pos:
+            continue
+        last_pos = local_pos
+        
+        if -1 < local_pos.x < chunk.CHUNK_SIZE and \
+           -1 < local_pos.y < chunk.CHUNK_SIZE and \
+           -1 < local_pos.z < chunk.CHUNK_SIZE:
+            voxel = voxel_grid[local_pos.x][local_pos.y][local_pos.z]
+            if voxel and not add:
+                return local_pos, vec3(0, 1, 0)
+            if not voxel and add:
+                return local_pos, vec3(0, 1, 0)
+    return None, None
+
+def update_hovered_voxel(origin, direction):
+    """Refreshes hover state after modification [S3, unofficial]."""
+    pass
+```
+
+**Parameters:**
+*   `brush_size`: Radius of the brush [S2, unofficial].
+*   `brush_voxel`: Voxel type to place; `0` for break [S2, unofficial].
+*   `add`: Boolean flag equivalent to `BuildOrBreak` [S1, S3, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Floating-point inaccuracies in raycasting may cause missed voxels or incorrect normals. Using a small offset (`0.01f`) when adding helps avoid placing voxels inside existing geometry [S3, unofficial].
+*   **Boundaries:** Ensure voxel coordinates are within valid chunk bounds before access [S1, unofficial].
+*   **Degenerate Input:** If the ray does not hit any voxel, the edit operation should be skipped [S2, unofficial].
+
+## Subtopics
+
+### [Raycast-based Voxel Editing](5211-raycast-based-voxel-editing.md)
+Modifies voxel density values in a local radius around a raycast hit point and triggers chunk regeneration.
+
+### [Voxel Grid Editing (Add/Remove)](5982-voxel-grid-editing-add-remove.md)
+Enables dynamic modification of a voxel grid by adding or removing individual voxels at specific positions determined by raycasting from screen-space mouse input. It solves the problem of translating 2D user interaction into 3D spatial edits within a discrete volumetric representation. Unlike static voxelization, this approach supports real-time editing where the user selects a target face on an existing voxel, and the system computes the adjacent empty voxel position for addition or the current voxel position for removal.
+
+## Operating characteristics
+*   **Performance:** Real-time editing is feasible with efficient raycasting and spatial partitioning (e.g., chunks, octrees) [S1, S2, S3, unofficial].
+*   **Strengths:** Intuitive user interaction and real-time feedback [S1, S2, S3, unofficial].
+*   **Limitations:** Performance may degrade with very large brush sizes or complex scenes without spatial acceleration structures [S1, S2, S3, unofficial].
+
+## Background
+Originating from implementations in open-source voxel engines and educational projects, this method leverages standard raycasting techniques adapted for discrete voxel grids [S1, S2, S3, unofficial]. It is commonly used in voxel-based games and modeling tools where user interaction is key [S1, S2, S3, unofficial].
+
+## Sources
+[S1] Dean904/Senior-Project-Volumetric-Rendering, https://github.com/Dean904/Senior-Project-Volumetric-Rendering, fetched 2026-10-26 (unofficial)
+[S2] kosshi-net/voxplat, https://github.com/kosshi-net/voxplat, fetched 2026-10-27 (unofficial)
+[S3] GitHub - saurlax/model_voxelizer: A 3D model voxelization tool that ..., https://github.com/saurlax/model_voxelizer, fetched 2026-10-30 (unofficial)

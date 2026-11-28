@@ -1,0 +1,32 @@
+# Polyhedral Primitives
+Also called: Polyhedral SDFs, Polyhedron Signed Distance Functions
+## Overview
+This family defines Signed Distance Functions (SDFs) for convex polyhedra and prisms, enabling ray marching of complex geometric shapes without mesh intersection tests. It differs from [Basic Primitive Definitions](5346-basic-primitive-definitions.md) by handling shapes with flat faces and sharp edges (prisms, octahedra, dodecahedra) rather than smooth surfaces or simple quadratic forms.
+## Shared principles
+All primitives in this family compute the Euclidean signed distance $d$ from a query point $p$ to the surface of a polyhedron. The sign is negative inside and positive outside. The core mechanism involves exploiting geometric symmetries to fold the query point into a "fundamental domain" (a reduced region of space where the closest feature is unique and simple to calculate), or using direct analytical formulas for specific cross-sections. The final distance is often composed from a 2D cross-section distance and a 1D height distance using the extrusion formula: $d = \min(\max(d_{2D}, d_{cap}), 0.0) + \sqrt{\max(d_{2D}, 0.0)^2 + \max(d_{cap}, 0.0)^2}$.
+## Subtopics
+
+### [Octahedron Signed Distance Function](2339-octahedron-signed-distance-function.md)
+Computes the distance to a regular octahedron. It exploits symmetry to fold the point into the first octant and uses conditional branching to identify the closest face, avoiding iterative methods. Choose this for regular eight-faced solids.
+
+### [Hexagonal Prism Signed Distance Function](2348-hexagonal-prism-signed-distance-function.md)
+Computes the distance to a hexagonal prism. It differs by using either a direct analytical approximation for flat-topped hexagons or a fundamental domain folding method for exact distances. Choose this for hexagonal columns or crystals.
+
+### [Triangular Prism Signed Distance Function](2865-triangular-prism-signed-distance-function.md)
+Computes the distance to a triangular prism. It exploits the symmetry of an equilateral triangle cross-section to provide a closed-form solution. Choose this for triangular columns or tent-like structures.
+
+### [Dodecahedron Modulo](3737-dodecahedron-modulo.md)
+Computes the distance to a regular dodecahedron. It sets itself apart by using a complex sequence of rotations and reflections to fold 3D space into a fundamental wedge, where the distance is calculated to a single face. Choose this for complex 12-faced polyhedra.
+
+### Pyramid Signed Distance Function
+- **definition**: Computes the signed distance for a pyramid with height $h$ [S1, unofficial].
+- **step**: Calculate $m_2 = h^2 + 0.25$. Take the absolute value of the XZ components of $p$. Swap X and Z if $Z > X$ to fold the pyramid into a fundamental domain. Subtract 0.5 from X and Z. Calculate $q = (p_z, h p_y - 0.5 p_x, h p_x + 0.5 p_y)$. Calculate $s = \max(-q_x, 0.0)$. Calculate $t = \text{clamp}((q_y - 0.5 p_z) / (m_2 + 0.25), 0.0, 1.0)$. Calculate $a = m_2(q_x + s)^2 + q_y^2$. Calculate $b = m_2(q_x + 0.5 t)^2 + (q_y - m_2 t)^2$. Calculate $d_2 = \min(a, b)$ or 0 if inside. Return the final signed distance [S1, unofficial].
+
+### Rhombus Signed Distance Function
+- **definition**: Computes the signed distance for a rhombus with semi-axes $s$ and height $h$ [S1, unofficial].
+- **step**: Calculate $f = \text{clamp}(\text{dot}(s, s - 2 p_{xz}) / \text{dot}(s, s), -1.0, 1.0)$. Calculate $q_x = \text{length}(p_{xz} - 0.5 s (1-f, 1+f)) \cdot \text{sign}(p_x s_y + p_z s_x - s_x s_y) - r_a$. Calculate $q_y = p_y - h$. Return $\min(\max(q_x, q_y), 0.0) + \text{length}(\max(q_x, q_y, 0.0))$ [S1, unofficial].
+
+## Background
+Polyhedral SDFs are widely used in procedural geometry and ray marching for real-time rendering, allowing for the creation of complex, sharp-edged objects without the overhead of mesh data structures. The methods rely on geometric symmetries and fundamental domains, a concept popularized in the demoscene and shader programming communities.
+## Sources
+[S1] skmhrk1209/Torch-Sphere-Tracer, https://github.com/skmhrk1209/Torch-Sphere-Tracer, fetched 2026-10-26 (unofficial)

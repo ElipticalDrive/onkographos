@@ -1,0 +1,1511 @@
+SVRecon: Sparse Voxel Rasterization for Surface Reconstruction
+arXiv:2511.17364v1 [cs.CV] 21 Nov 2025
+Seunghun Oh1
+Jaesung Choe2
+Dongjae Lee1
+Daeun Lee1
+Yu-Chiang Frank Wang2
+Jaesik Park1
+1
+Seoul National University 2 NVIDIA
+(a) SVRaster
+(b) SVRaster + SDF
+Seunghoon Jeong1 ,
+(c) Ours
+Figure 1. SVRecon. This paper introduces Signed Distance Function (SDF) on top of the recent sparse voxel rasterization framework
+(SVRaster) for surface reconstruction. From left to right, the figure shows results from SVRaster [25], a naive combination of SVRaster
+and NeuS [28], and our method, SVRecon. While the naive extension exhibits significant high-frequency artifacts, our approach produces
+smooth and continuous surfaces. This improvement stems from addressing the lack of voxel-wise coherence in SVRaster.
+view images. Since the introduction of Neural Radiance Fields (NeRF) [20], learning-based scene representations have advanced toward more efficient, compact,
+and high-quality 3D primitives. Notably, explicit representations such as 3D Gaussian Splatting (3DGS) [14]
+have demonstrated state-of-the-art performance in real-time
+novel view synthesis, revealing the potential of structured
+primitives in neural rendering pipelines. More recently,
+Sparse Voxel Rasterization (SVRaster) [25] has been proposed as an alternative representation that directly operates
+on sparse voxel elements and enables differentiable rasterization without the heavy reliance on neural networks. This
+line of work envisions the possibility of leveraging sparse
+voxel structures as a powerful, lightweight representation
+for neural rendering tasks.
+Abstract
+We extend the recently proposed sparse voxel rasterization
+paradigm to the task of high-fidelity surface reconstruction by integrating Signed Distance Function (SDF), named
+SVRecon. Unlike 3D Gaussians, sparse voxels are spatially
+disentangled from their neighbors and have sharp boundaries, which makes them prone to local minima during optimization. Although SDF values provide a naturally smooth
+and continuous geometric field, preserving this smoothness
+across independently parameterized sparse voxels is nontrivial. To address this challenge, we promote coherent
+and smooth voxel-wise structure through (1) robust geometric initialization using a visual geometry model and (2) a
+spatial smoothness loss that enforces coherent relationships
+across parent-child and sibling voxel groups. Extensive experiments across various benchmarks show that our method
+achieves strong reconstruction accuracy while having consistently speedy convergence. The code will be made public.
+The original SVRaster framework employs ‘density’ as
+the underlying geometric quantity for representing the 3D
+scenes. While density fields offer compatibility with volumetric rendering, they are not inherently designed to capture sharp surfaces or precise geometry. Density values tend
+to blur object boundaries and require delicate regularization
+to avoid over-smoothed reconstructions. In contrast, Signed
+Distance Function (SDF) is a widely adopted representation
+1. Introduction
+Neural rendering has rapidly evolved as a central paradigm
+for reconstructing and synthesizing 3D scenes from multi1
+for surface reconstruction, as it encodes geometry in a continuous, metric-consistent manner where the zero-level set
+defines the target surface. SDF naturally promotes smoothness and spatial coherence [9, 22, 28, 35], making them an
+appealing alternative to density-based geometry modeling.
+However, we observe that a naive extension of
+SVRaster [25] to SDF-based reconstruction [28] often falls
+into severe local minima during optimization as shown in
+Fig. 1. A key factor behind this instability is the hierarchical
+subdivision strategy of the original SVRaster, which rapidly
+refines coarse voxels into fine-grained level-of-detail (LoD)
+voxels. This progressive voxel subdivision magnifies inconsistencies when learning SDF across independently parameterized voxel units. More importantly, sparse voxels
+possess distinct and isolated boundaries: each voxel maintains its own parameters without explicit constraints linking
+it to spatially adjacent voxels. This property sharply contrasts with 3D Gaussians, whose kernels overlap smoothly,
+or neural field methods, where MLPs naturally enforce spatial continuity. As a result, SDF values in sparse voxels can
+become discontinuous across boundaries, causing the optimization to converge to degenerate or fragmented reconstructions results as shown in Fig. 1-(b).
+To address these issues, we propose SVRecon, a robust
+SDF-based extension of sparse voxel rasterization designed
+specifically for high-fidelity surface reconstruction. Our
+key observation is that spatial coherence is crucial for representing SDFs within the sparse voxel framework. First,
+we initialize the voxel geometry using point maps predicted
+by recent visual geometry models [2, 12, 27, 29, 30] that
+provide superior geometry priors and significantly reduce
+ambiguity in early optimization. Second, we introduce a
+spatial smoothness loss that explicitly enforces consistent
+relationships among parent-child and sibling voxel groups,
+encouraging neighboring voxels to share compatible SDF
+values and preventing discontinuities at voxel boundaries.
+Unlike the original SVRaster, which treats voxels as independent rendering units, our approach leverages cross-voxel
+coherence as a fundamental requirement for accurate SDF
+modeling. Through this combination of informed initialization and structured smoothness constraints, our method
+achieves high-quality surface reconstruction results. The
+contributions of this paper are summarized as below:
+• Introduce Signed Distance Function into the sparse voxel
+rasterization, enabling accurate surface reconstruction.
+• Address an inherent discontinuity issue in sparse voxels
+and introduce two key components to maintain coherent
+SDF values across voxel boundaries: (1) Voxel initialization via visual geometry models. (2) A spatial smoothness loss on parent-child and child-child voxel groups.
+• Achieve fast, high-quality, and accurate surface reconstruction on DTU in under 5 minutes and on Tanks-andTemples in under 15 minutes.
+2. Related works
+3D Primitives for Neural fields. Neural rendering has
+evolved through a wide range of 3D representations, each
+offering distinct trade-offs between fidelity, efficiency, and
+scalability. Early approaches such as NeRF model scenes
+implicitly through MLPs, enabling photorealistic novel
+view synthesis but requiring slow volumetric integration
+and expensive per-scene optimization. To address this issue, researchers have explored more explicit 3D primitives, including point clouds [34], voxel grids [17, 24, 37],
+meshes [23, 31, 36] or hashgrid [7, 9, 21] to represent geometry in a structured manner. Recently, Gaussian representations [11, 14] have shown remarkable rendering accuracy
+by representing scenes as anisotropic Gaussians with learnable attributes, enabling real-time rendering operation. 3D
+Gaussians benefit from spatial overlap and smooth blending, which naturally provide geometric continuity.
+On the other hand, a series of works [8, 16, 28, 35, 38]
+leverage SDF for the surface reconstruction task by modeling geometry as a continuous field whose zero-level set defines the surface. SDF-based methods are widely used for
+accurate geometry recovery due to their metric consistency
+and ability to represent sharp boundaries [28]. Despite advancements, a key challenge remains: identifying a representation that is both computationally efficient and capable
+of expressing fine geometric detail.
+Sparse voxel representation. Voxel-based methods offer
+a natural discretization of 3D space and have been widely
+used in classical graphics and more recent neural rendering pipelines. Dense voxel grids, however, suffer from cubic memory growth and limited scalability [24]. Sparse
+voxel structures mitigate these issues by allocating voxels only where needed, allowing high-resolution modeling with manageable computational cost [5, 6, 19, 25, 33].
+SVRaster [25] has been recently introduced as an explicit
+neural rendering framework that uses sparse voxels as its
+fundamental 3D primitive. By enabling efficient differentiable rasterization with hierarchical structure, SVRaster
+provides an alternative to implicit radiance fields and Gaussian Splatting for representing the 3D scenes. However,
+SVRaster originally relies on density as measurements,
+which can lead to ambiguous geometry encoding.
+3. Preliminary
+SVRaster [25] introduce a tile-based rasterization algorithm into the sparse voxel representation for the novel
+view synthesis task. Voxels are hierarchically subdivided
+to have different LoD. Each voxel v consists of 8 corners geov ∈ R2×2×2 where each corner involves a density
+value. Then geov is interpolated and interpreted as an α to
+be used in the volumetric rendering [20] as in Eq. (1) where
+Nray is the number of transmitted voxels along the ray, and
+2
+ci is the color of i-th voxel on the ray.
+Nray
+C=
+X
+i=1
+Ti αi ci where Ti =
+i−1
+Y
+(1 − αj ).
+When SDF values are assigned per voxel, the absence of
+cross-voxel coherence hinders smooth geometric transitions
+and makes the optimization highly prone to local minima.
+To address this issue, we introduce spatial coherence mechanisms and structured initialization strategies that enable
+SDF-involving sparse voxels to act as reliable and highfidelity geometric primitives.
+(1)
+j=1
+NeuS [28] proposes SDF-based α-blending into the neural
+surface reconstruction task unlike NeRF [20] that utilizes
+density as a geometry measurements. Given an SDF field
+f (x) from a query point x, NeuS transforms the SDF value
+f into an opacity value αi along a ray using a logistic cumulative density function Φs (f ) = 1+e1−sf as:
+
+
+Φs (f (ti )) − Φs (f (ti+1 ))
+αi = max
+, 0 ,
+(2)
+Φs (f (ti ))
+4. Methodology
+Given multi-view images and the corresponding camera
+poses, we aim to reconstruct 3D scenes using sparse voxel
+representation with SDF. Our method proposes ways of
+imposing the surface smoothness by voxel initialization
+(Sec. 4.1), voxel-wise association (Sec. 4.2). Finally, our
+method is trained to minimize the losses to represent the
+surface geometry (Sec. 4.3).
+where s is a reciprocal of standard deviation of density function ϕs (f ) and ti is the i-th sampled point along the ray.
+This closed-form α formulation produces accurate and consistent surface supervision, leading to high-fidelity meshes.
+Then, this method is trained to minimize the rendering loss
+Lrender = |C − C̃|2 as well as the Eikonal loss Leik [10]
+2
+which is computed as Leik = ∥▽x f ∥2 − 1 where
+▽x f (x) is the partial differential of a SDF value f (x) over
+query point x, which is the same as the surface normal at
+x. Despite the superior results, NeuS suffers from slow
+training convergence. NeuS2 [9] mitigates this issue by incorporating a hash-grid representation, yet it remains unexplored how the sparse voxel structure of SVRaster [25] can
+be combined with NeuS-style SDF modeling.
+Naive combination of SVRaster and NeuS. We first modify SVRaster to repurpose the voxel-corner storage geov to
+store SDF values instead of densities. The SDF value f (p)
+at any continuous 3D point p inside a voxel v is then obtained by trilinear interpolation over its geov :
+f (p) = interp(geov , q) where q =
+p − vmin
+,
+vl
+4.1. Voxel initialization
+Geometry initialization plays a crucial role in optimizing
+neural fields, especially when employing explicit representations such as 3D Gaussians [14] or sparse voxels [25].
+While density-based methods like SVRaster typically start
+from an empty or near-zero space, our SDF-based formulation enables faster and more efficient convergence by directly utilizing rich geometric priors from the beginning. To
+achieve this stable and physically meaningful initialization,
+we leverage PI3 [30], a visual geometry model that estimates 3D points in world coordinates from unposed images.
+We transform the point maps from PI3 [30] into points at
+ground truth camera poses using Umeyama’s method [26].
+Then, we allocate the voxels at the transformed points and
+compute the SDF of each voxel by computing the minimum
+distance from the transformed points. An example of the resulting initialized SDF field is shown as part of our pipeline
+in Fig. 2. Details are included in the supplementary material.
+(3)
+where vmin denotes the voxel corner closest to the world
+origin, vl is the voxel side length, and q is the local coordinate of p within v.
+Given sparse voxels parameterized by corner SDF values as in Eq. (3), a straightforward extension for learning
+surfaces from multi-view images is to adopt the NeuS SDFbased α-blending formulation Eq. (2) and evaluate f (·) at
+the ray-voxel entry and exit points ti and ti+1 . However,
+as shown in Fig. 1, we empirically found that such an approach demonstrates high-frequency noise, fragmented surfaces, and inconsistent level-set structures in results.
+We observe that a key limitation of this naive extension
+stems from its independently parameterized sparse voxels
+in SVRaster [25], both across spatial neighbors and hierarchical levels. Unlike implicit neural fields [10, 28, 35]
+or Gaussian-based primitives [11, 14], these voxels possess hard boundaries and lack any built-in spatial coupling.
+4.2. Voxel Association
+To consistently apply spatial regularizers (e.g., Eikonal,
+smoothness, Laplacian) on SVRaster’s multi-resolution
+sparse voxel structure, we introduce a novel voxel association mechanism. This is challenging because, unlike
+hashmap-based approaches [6, 33] that assume a uniform
+grid, SVRaster’s voxels are multi-resolution with different
+LoD. We resolve this by reasoning on a single conceptual finest lattice at the G = 2L resolution, indexed by
+dL where dL =(i, j, k)∈{0, . . . , G−1}3 indicates a dense
+coordinate in the finest lattice (level L). We define a
+‘cell’ c(i, j, k) as the unit cube volume associated with
+a dense coordinate dL = (i, j, k) in this lattice, covering the continuous 3D region: c(i, j, k)={(x, y, z)∈R3 |
+i≤x≤i+1, j≤y≤j+1, k≤z≤k+1}. All neighborhood regularizers use this cell as a fundamental unit. Note that we
+3
++
+PI 3
+PI3 point maps
+with estimated pose
+Cell
+Voxel association
+(Sec.4.2)
+RGB images
+Cam pose 7DoF Alignment
++
++
+Parent-Child
+- -
+SDF learning
+(Sec.4.3)
+Progressive voxel allocation
+(Sec.4.4)
+GT cam poses
+Coarse-to-fine
+Input
+a) Initialization Step
+Aligned point maps
+Voxel initialization
+(Sec.4.1)
+Reconstructed mesh
+b) Optimization Step
+Figure 2. Our pipeline consists of two main stages: (a) Initialization and (b) Optimization. In (a), we initialize a coarse SDF from
+multi-view images by aligning PI3 point maps [30] at estimated camera poses into points at ground truth camera poses (Sec. 4.1). In
+(b), we impose spatial coherence to ensure voxel continuity via inter-voxel association (Sec. 4.2), parent-child Eikonal/smoothness losses
+(Sec. 4.3), and progressive voxel allocation (Sec. 4.3). Finally, our model yields a clean final mesh in minutes.
+the same permutation to (C), producing the final lookup tables. This update procedure is efficient: although it operates
+at fine-grid resolution, it processes only occupied cells and
+is fully parallelized.
+Neighboring-Voxel Search. For a query point q, we first
+locate its containing grid cell c(x, y, z) and index idx. We
+then examine the six face-adjacent grid cells 6-connected
+neighbors): (x±1, y, z), (x, y±1, z), and (x, y, z±1). Neighbor lookup proceeds as follows:
+1. Neighbor index: Compute idx for each of the six faceadjacent neighbors.
+2. Occupancy lookup: Use the occupancy bitmask (A) to
+check whether each neighbor is active. This requires a
+single O(1) bitwise access per neighbor.
+3. Index lookup: If A[idx] = true, the neighbor is occupied. Locate its position i in the index table (B), which
+stores all occupied indices in sorted order. This step uses
+binary search and takes O(log M ) time, where M is the
+number of occupied grids.
+4. Voxel retrieval: Using index i, retrieve the corresponding voxel via C[i] in O(1) time.
+These processes are batched across many query points on
+the GPU. We will simplify this lookup process with the
+following notation as v = NVS[idx] where idx is the
+dense cell index being queried, and Neighboring Voxel
+Search (NVS) is the function that returns the index v of the
+SVRaster voxel that occupies the given dense cell, implemented by the steps above.
+do not store per-cell data for the entire G3 lattice. Instead,
+we keep a bit-level occupancy map to compact and track
+only those cells that are actually covered by any voxel. In
+effect, the fine grid is a conceptual scaffold; computations
+and memory scale with the occupied region, not with G3 .
+Data structures. To manage sparse voxels across different LoDs, we assume the conceptual voxel grid at the finest
+LoD and introduce three lightweight data structures that
+link it to the sparse voxels:
+1. Occupancy bitmask (A): A bitmask of length G3 with
+G=2L . Entry idx(x, y, z)=x·G2 +y·G+z is linearized
+dense index for a coordinate [i, j, k], which marks
+whether the corresponding cell c(x, y, z) is occupied by
+an active voxel v. This enables constant-time queries and
+a single parallel scan to list all occupied grids.
+2. Index table (B): A sorted lookup table of length M
+(M ≪ G3 ) that holds the indices idx of occupied grids.
+3. Grid→Voxel map (C): A lookup table of length M ,
+aligned with (B), that links each occupied grid cell to its
+enclosing voxel. Via (B)+(C), we locate the corresponding grid and voxel for any query point, collision-free.
+With (A)-(C), we achieve fine-grid behavior while storing
+only M occupied grid cells, which keeps memory and compute scale with M , not G3 . The data structures are updated
+only when the LoD hierarchy changes.
+Hierarchy updates. When the LoD hierarchy changes due
+to voxel subdivision, we rebuild the data structures in a simple, parallel fashion. Each thread group processes a single active voxel, iterating over its covered fine-grid cells to
+compute their indices. These indices are marked in the occupancy bitmask (A), and corresponding entries are added
+to the temporary buffers for the index table (B) and voxel
+map (C), both initially unsorted. We then sort (B) and apply
+4.3. SDF Learning in Sparse Voxels
+After the voxel initialization, our method follows the SDFbased alpha blending by NeuS [28] and rasterization by
+SVRaster [25]. Our method is trained to minimize the ren4
+Dense cell
+idx
+Parent unit
+Child unit
+v
+v = NVS[idx]
+Bitmask
+& Lookup table
+(a) Child-Child Reg
+(b) Parent-Child Smoothness
+(c) Local Eikonal
+Figure 3. Coherent voxel structure. (a) illustrates child-child voxel regularization using fine cell unit. After 29 resolution, all voxel corners
+are efficiently connected due to hierarchical regularization (b) and (c). Red voxel corners (•) are associated through the continuity loss.
+constant across coarse→fine refinements by monotonically increasing log s. Concretely, within each octree
+level L we ramp as log s(τ )= log sL +0.07·rL (τ ), rL :0→1,
+and when moving to the next level we update the base
+log sL+1 = log sL + ln hL /hL+1 (so if h halves, log s rises
+by ln 2). This keeps the 99%-mass band ℓ(s) proportional
+to the minimum voxel size, yielding stable early training
+(thick bands) and progressively sharper surfaces.
+In conclusion, our method is trained to minimize the
+training loss that is computed as Ltotal = Lphoto +
+λn Lnormal + λe Leik + λs Lsmooth + λm Lmask . Note that
+mask loss Lmask is only applied to DTU dataset following [13] More detailed descriptions about losses is in the
+supplementary material.
+dering loss, but we additionally introduce hierarchical regularization loss and sharpness scheduling in SDF learning.
+Hierarchical regularization for fine LoD. The Voxel association mechanism described in Sec. 4.2 relies on data
+structures (A, B, C) that scale with the dense grid resolution
+G. At resolutions finer than L = 9 (e.g., G = 512), the G3
+dense grid becomes prohibitively large, making the global
+occupancy bitmask (A) and lookup tables (B, C) intractable.
+To resolve this, we introduce a hierarchical regularization
+strategy.
+For parent-child smoothness, we cap the global association lattice and its data structures at a maximum level,
+Lcap = 9. When SVRaster subdivides voxels beyond this
+level (e.g., to L = 10), we no longer update the global data
+structures. While rendering operates on the fine child voxels, the smoothness loss (Laplacian) is instead accumulated
+at the L = 9 parent level (where NVS is still valid) and then
+propagated to its descendants. Thus, the parent-level data
+structure needs not be subdivided beyond L = 9, yet it still
+enforces cross-child consistency at finer levels. Moreover,
+for levels L ≥ 9 we impose a local per-voxel Eikonal loss
+on all active voxels in the tree. When refining from L = 10
+to L = 11, the L = 10 voxels also remain as internal parents and continue to receive this local regularization, so both
+parent and child cells are stabilized without any global NVS
+lookup, which is infeasible at these resolutions.
+The combination of (i) parent-child smoothness and (ii)
+local Eikonal yields a hierarchical, memory-efficient regularizer. It allows subdivision to L = 10 and L = 11 resolution without losing continuity across split faces, while
+keeping the primary compute and memory cost bounded to
+the L = 9 association lattice and local stencils.
+Scheduling sharpness. With the NeuS logistic CDF
+Φs (f )= 1+e1−sf we define the learning thickness ℓ(s)
+as the surface band that captures 99% of weight as
+ℓ(s)≈ 2 lns199 , ℓ̃(s)= ℓ(s)
+hL Where hL is the minimum voxel
+size in the scene resolution 2L . We keep ℓ̃(s) roughly
+4.4. Progressive Voxel Allocation
+To dynamically adapt the sparse voxel structure during
+training, we employ a loop of pruning and subdivision steps.
+Pruning. Every 1000 iterations, we prune voxels that are
+unlikely to contribute to the surface. A voxel v is removed
+if it meets two conditions: (1) all eight of its corner SDF
+values (geov ) share the same sign (i.e., it contains no zerocrossing), and (2) all corner SDF magnitudes lie outside the
+current learning thickness band ℓ(s) (defined in Sec. 4.3).
+As training progresses, s increases, this band narrows, and
+pruning becomes more aggressive. To avoid over-pruning
+at coarse stages, we keep a small safety margin tied to the
+current voxel size hv .
+Subdivision. Conversely, we subdivide voxels every 250
+iterations to add geometric detail where needed. We only
+split voxels that (1) are likely on the surface (either containing mixed corner signs or having corners within the learning thickness band) and (2) are not yet at the finest allowed
+level. To cap memory growth, this process is modified when
+refining from L = 9 to L = 10. Instead of splitting all eligible voxels, we select only the highest-loss fraction (top
+q%) and refine them. This keeps refinement focused where
+it matters most while controlling the memory.
+5
+Table 1. Quantitative comparison on the DTU Dataset [1]. We measure the Chamfer Distance for evaluation, which is lower the better.
+Method
+24
+37
+40
+55
+63
+65
+69
+83
+97
+105
+106
+110
+114
+118
+122
+Mean
+Time
+Implicit Representation.
+VolSDF [35]
+1.14
+NeuS [28]
+1.00
+Neuralangelo [18] 0.37
+GeoNeuS [8]
+0.38
+MonoSDF [38]
+0.66
+1.26
+1.37
+0.72
+0.54
+0.88
+0.81
+0.93
+0.35
+0.34
+0.43
+0.49
+0.43
+0.35
+0.36
+0.40
+1.25
+1.10
+0.87
+0.80
+0.87
+0.70
+0.65
+0.54
+0.45
+0.78
+0.72
+0.57
+0.53
+0.41
+0.81
+1.29
+1.48
+1.29
+1.03
+1.23
+1.18
+1.09
+0.97
+0.84
+1.18
+0.70
+0.83
+0.73
+0.55
+0.66
+0.66
+0.52
+0.47
+0.46
+0.66
+1.08
+1.20
+0.74
+0.47
+0.96
+0.42
+0.35
+0.32
+0.29
+0.41
+0.61
+0.49
+0.41
+0.36
+0.57
+0.55
+0.54
+0.43
+0.35
+0.51
+0.86
+0.84
+0.61
+0.51
+0.73
+> 12h
+> 12h
+> 128h
+> 12h
+6h
+Explicit Representation (Gaussian).
+2DGS [11]
+0.48 0.91 0.39
+0.50 0.82 0.37
+GOF [39]
+GS2Mesh [32]
+0.59 0.79 0.70
+0.55 0.91 0.40
+VCR-GauS [4]
+MonoGSDF [16]
+0.45 0.65 0.36
+PGSR [3]
+0.36 0.57 0.38
+0.39
+0.37
+0.38
+0.43
+0.36
+0.33
+1.01
+1.12
+0.78
+0.97
+0.94
+0.78
+0.83
+0.74
+1.00
+0.95
+0.70
+0.58
+0.81
+0.73
+0.69
+0.84
+0.67
+0.50
+1.36
+1.18
+1.25
+1.39
+1.27
+1.08
+1.27
+1.29
+0.96
+1.30
+0.99
+0.63
+0.76
+0.68
+0.59
+0.90
+0.63
+0.59
+0.70
+0.77
+0.50
+0.76
+0.49
+0.46
+1.40
+0.90
+0.68
+0.92
+0.84
+0.54
+0.40
+0.42
+0.37
+0.44
+0.39
+0.30
+0.76
+0.66
+0.50
+0.75
+0.53
+0.38
+0.52
+0.49
+0.46
+0.54
+0.47
+0.34
+0.80
+0.74
+0.68
+0.80
+0.65
+0.52
+0.2h
+1h
+0.3h
+∼1h
+hrs
+0.5h
+Explicit Representation (Sparse Voxel).
+SVRaster [25]
+0.61 0.74 0.41
+0.40 0.67 0.31
+SVRecon (ours)
+0.36
+0.37
+0.93
+0.93
+0.75
+0.72
+0.94
+0.68
+1.33
+1.32
+1.40
+1.21
+0.61
+0.69
+0.63
+0.51
+1.19
+0.85
+0.43
+0.40
+0.57
+0.55
+0.44
+0.51
+0.76
+0.67
+5min
+5min
+Input
+2DGS
+SVRaster
+SVRaster + SDF
+Ours
+Figure 4. Reconstructed mesh comparison on DTU. Four scenes (rows) and four methods (columns). From top to bottom, we show scans
+40, 63, 65, and 114. Our method converges to cleaner and more complete geometry while preserving details (best viewed with zoom).
+5. Experiments
+5.2. Evaluation
+5.1. Implementation
+Datasets. We evaluate on the DTU benchmark using
+the NeuS-preprocessed split [28] and on the Tanks-andTemples dataset (TnT) using the 2DGS-preprocessed release [11]. All images are downsampled by ×2. We
+compare against 2DGS [11], SVRaster [25], and our full
+model (Ours). Additionally, we measure the performance
+of a naive combination of two baselines ‘SVRaster+SDF’
+since, as far as our understanding, there is no official paper that deals with Signed Distance Function on top of the
+Our implementation uses PyTorch with custom CUDA kernels on top of SVRaster [25]. We train for 8K iterations on
+the DTU dataset [13] and 10K on the Tanks-and-Temples
+(TnT) dataset [15]. Because TnT covers larger scenes, we
+add one additional level (DTU: 210 ; TnT: 211 ) and allocate 2K extra iterations to stabilize optimization at the finest
+level. All experiments are done by a NVIDIA RTX 4090.
+6
+Table 2. Quantitative results on the Tanks-and-Temples Dataset [15]. We employ the F1 score for evaluation, the higher the better.
+Method
+Barn
+Caterpillar
+Courthouse
+Ignatius
+Meetingroom
+Truck
+Mean
+Time
+0.29
+0.36
+0.26
+0.31
+0.17
+0.28
+0.12
+0.12
+0.83
+0.89
+0.72
+0.78
+0.24
+0.32
+0.20
+0.23
+0.45
+0.48
+0.45
+0.42
+0.38
+0.50
+0.35
+0.39
+> 24h
+> 128h
+> 12h
+6h
+Explicit Representation (Gaussian).
+0.41
+0.23
+2DGS [11]
+GOF [39]
+0.51
+0.41
+VCR-GauS [4]
+0.62
+0.26
+0.56
+0.38
+MonoGSDF [16]
+PGSR [3]
+0.66
+0.44
+0.16
+0.28
+0.19
+0.29
+0.20
+0.51
+0.68
+0.61
+0.72
+0.81
+0.17
+0.28
+0.19
+0.25
+0.33
+0.45
+0.59
+0.52
+0.62
+0.66
+0.30
+0.46
+0.40
+0.47
+0.52
+16m
+24m
+53m
+3h
+45m
+Explicit Representation (Sparse Voxel).
+SVRaster [25]
+0.35
+0.33
+0.43
+0.36
+SVRecon (ours)
+0.29
+0.32
+0.69
+0.70
+0.19
+0.21
+0.54
+0.57
+0.40
+0.43
+10m
+12m
+Implicit Representation.
+NeuS [28]
+0.29
+0.70
+Neuralangelo [18]
+GeoNeuS [8]
+0.33
+0.49
+MonoSDF [38]
+Input
+SVRaster
+SVRaster + SDF
+Ours
+Figure 5. Qualitative comparison on Tanks-and-Temples. Two scenes (rows) and three methods (columns). From top to bottom, we
+show scene Barn and Truck. Our method reconstructs clean geometry even in large-scale outdoor scenes. (best viewed with zoom).
+Sparse voxel rasterization. This naive variant follows the
+same training strategy as SVRaster, but stores SDF values
+at the voxel corners and renders using Eq. (2). It also applies a per-voxel, ray-directional Eikonal loss, similar to
+NeuS [28].
+Analysis. For mesh extraction, we employ TSDF fusion
+for the DTU dataset and direct marching cubes for the TnT
+dataset, which we found to produce reliable meshes in practice. To incorporate the background in the TnT dataset, we
+define an outer voxel area and initialize it as a large spherical shell to represent the sky. Qualitatively, as shown in
+Fig. 4 and Fig. 5, our reconstructions are typically smoother
+and less noisy than those of the baselines, owing to the
+proposed smoothness terms and our coarse-to-fine learning schedule. Furthermore, our method consistently produces hole-free meshes. This contrasts sharply with a naive
+SVRaster+SDF implementation, which often falls into severe geometric local minima and exhibits significant artifacts on challenging scenes such as DTU scan 65 and the
+TnT Barn. These failures demonstrate that geometric initialization is critically important when applying SDFs to
+sparse voxels, especially as the scene’s underlying structure
+deviates from the simple spherical initialization. Quantitatively, as shown in Tab. 1 and Tab. 2, our method provides a favorable accuracy-efficiency trade-off and clearly
+improves over vanilla SVRaster, although it does not always
+achieve the lowest Chamfer Distance (CD) compared to the
+strongest baselines using Gaussian representation [3, 16].
+5.3. Ablation Study
+We ablate each component to verify that the proposed design is both effective and necessary when combining an
+SDF with SVRaster. We report one representative scene per
+dataset; quantitative results are summarized in Tab. 3.
+Variants 1-3: Before continuity (ray-Eikonal only). We
+first train for 20k iterations using the SVRaster pruning
+strategy, without any continuity term. V1, a naive SDF
+swap with only the Eikonal loss, struggled to converge as
+we initialized the SDF as a central sphere. Consequently,
+complex scenes like TnT failed to converge properly, yielding a very low F1 score and requiring nearly an hour of
+training. Adding the PI3 initialization (V2) reduces train7
+Table 3. Ablations of components. Lower CD is better; higher F1
+is better. CD is for DTU scan 24, F1 score for TnT Barn
+SDF
+Step (NeuS)
+PI prior
+3
+Continuity loss
+DTU
+CD (↓) comparison
+Point recon
+Init. Norm Child(2 ) Parent Time Voxels CD↓ F1↑
+9
+V1
+V2
+V3
+✓
+✓
+✓
+✓
+✓
+✓
+V4
+V5
+✓
+✓
+✓
+✓
+✓
+✓
+6.8m 0.8M 1.00 0.03
+4.5m 0.6M 1.13 0.20
+8.2m 1.1M 0.66 0.23
+✓
+✓
+✓
+3.8m 1.7M 0.43 0.19
+5.6m 4.3M 0.40 0.43
+(1) w/o Continuity
+(2) w/ ray-Eikonal
+(3) Ours
+0.46
+0.57
+0.51
+0.46
+0.63
+0.53
+0.52
+0.63
+0.57
+Ours
+DTU24
+DTU37
+DTU69
+DTU83
+DTU105
+0.47
+0.81
+0.75
+1.37
+0.84
+0.40
+0.67
+0.68
+1.32
+0.69
+Normal
+0.8
+Chamfer Distance (log scale)
+Precision (↑)
+Recall (↑)
+F1 Score (↑)
+Normal (till last)
+Figure 6. Normals vs. accuracy. Left: A visualization of the
+noisy normal prior derived from the point map. Right: Chamfer
+Distance (CD↓) comparison. Persisting the normal loss until the
+final iteration (using a noisy prior) degrades performance, demonstrating the importance of our annealing strategy.
+Table 4. Effectiveness of parent-level continuity on the TNT Truck
+scene at high resolutions (≥ 210 ). Our parent-level term (Ours) is
+crucial for high-fidelity refinement compared to baselines.
+Metric
+Scene
+ing time, but brings little accuracy gain in DTU and is more
+effective in TnT, indicating initialization is a critical step
+in outdoor complex scene reconstruction. With the normal
+cue (V3) active for 18k iterations, accuracy improves noticeably, especially for DTU, showing that normals provide
+useful geometric guidance despite noise. However, it does
+not provide significant changes for TnT.
+Variants 4-5: Introducing continuity. We introduce continuity under a coarse-to-fine schedule with log s density
+scheduling. V4 trains only up to the 29 resolution level,
+applying child-level continuity and stopping at 6000 iterations. This substantially stabilizes surfaces, and we found
+this intermediate stage critical for large scenes like TnT. Finally, our full model (V5) extends this process. It trains
+to final resolutions (210 for DTU, 211 for TnT) and total
+iterations (8k for DTU, 10k for TnT). Crucially, after the
+initial 6000 iterations (which use child-only continuity), we
+switch to parent-child continuity for the remaining refinement. This preserves smooth transitions across fine voxels without the cost blow-up of full child propagation and
+yields the best overall quality.
+Effect of normal cue from point maps. We observe that
+enforcing the normal loss until the end of training can hinder convergence. As shown in Fig. 6, the surface normal
+maps tend to have repetitive error, which is also addressed
+in the official repository. So in our framework, we use
+this noisy surface normal during the early phase of training,
+which still provides a meaningful signal for stable optimization of individual voxels as stated in V2 and V3 of Tab. 3
+SVRaster
+Ours
+0.6
+0.4
+0.2
+0.0
+−0.2
+−0.4
+0
+2500
+5000
+7500
+10000
+Iteration
+12500
+15000
+17500
+20000
+Figure 7. Convergence on DTU scan 24. Our method converges
+significantly faster and achieves a lower final Chamfer Distance
+(CD↓) than baseline. Notably, our model surpasses the final reconstruction quality of SVRaster after only 2,200 training iterations.
+one that uses only the ray-Eikonal loss at these fine levels. As summarized in Tab. 4, the ’w/o Continuity’ baseline (1) expectedly yields the lowest F1 score (0.51). While
+adding the ’ray-Eikonal’ loss (2) provides a slight improvement (F1 0.53), our full model (3) with parent-level continuity achieves the best results across Precision, Recall, and
+F1 score (0.57). This confirms our approach is an effective
+and efficient solution for high-resolution refinement.
+Convergence speed. With PI3 initialization and our coarseto-fine surface-aware training, our method converges faster
+per iteration than SVRaster. This is also reflected in the
+iteration vs. CD curves in Fig. 7.
+6. Conclusion
+We propose SVRecon integrates Signed Distance Functions into sparse voxel rasterization to achieve fast, smooth,
+and accurate 3D surface reconstruction. By leveraging
+geometry-informed initialization and spatial coherence
+in LoD, our method overcomes the discontinuity and
+local minima issues that arise when applying SDFs
+to independently parameterized voxels. Despite these
+benefits, the approach remains limited by the resolution–memory trade-off inherent to sparse voxel structures,
+and its performance can still be affected by imperfect
+geometric priors, leaving room for improved initialization and more robust continuity mechanisms in future work.
+Effectiveness of parent-level continuity. To demonstrate
+the necessity of our parent-level continuity at high resolutions (≥ 210 ), we compare our full model (Ours) against
+two baselines: (1) one without any continuity term, and (2)
+8
+[13] Rasmus Jensen, Anders Dahl, George Vogiatzis, Engin Tola,
+and Henrik Aanæs. Large scale multi-view stereopsis evaluation. In CVPR, pages 406–413, 2014. 5, 6
+[14] Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler,
+and George Drettakis. 3d gaussian splatting for real-time
+radiance field rendering. In ACM TOG, pages 1–14, 2023. 1,
+2, 3
+[15] Arno Knapitsch, Jaesik Park, Qian-Yi Zhou, and Vladlen
+Koltun. Tanks and temples: Benchmarking large-scale scene
+reconstruction. ACM Transactions on Graphics (ToG), 36
+(4):1–13, 2017. 6, 7
+[16] Kunyi Li, Michael Niemeyer, Zeyu Chen, Nassir Navab, and
+Federico Tombari. Monogsdf: Exploring monocular geometric cues for gaussian splatting–guided implicit surface reconstruction. arXiv preprint arXiv:2411.16898, 2024. 2, 6,
+7
+[17] Ruilong Li, Hang Gao, Matthew Tancik, and Angjoo
+Kanazawa. Nerfacc: Efficient sampling accelerates nerfs. In
+Proceedings of the IEEE/CVF international conference on
+computer vision, pages 18537–18546, 2023. 2
+[18] Zhaoshuo Li, Thomas Müller, Alex Evans, Russell H Taylor, Mathias Unberath, Ming-Yu Liu, and Chen-Hsuan Lin.
+Neuralangelo: High-fidelity neural surface reconstruction. In
+CVPR, 2023. 6, 7
+[19] Baoyuan Liu, Min Wang, Hassan Foroosh, Marshall Tappen,
+and Marianna Pensky. Sparse convolutional neural networks.
+In Proceedings of the IEEE conference on computer vision
+and pattern recognition, pages 806–814, 2015. 2
+[20] Ben Mildenhall, Pratul P. Srinivasan, Matthew Tancik,
+Jonathan T. Barron, Ravi Ramamoorthi, and Ren Ng. Nerf:
+Representing scenes as neural radiance fields for view synthesis. In ECCV, pages 405–421, 2020. 1, 2, 3
+[21] Thomas Müller, Alex Evans, Christoph Schied, and Alexander Keller. Instant neural graphics primitives with a multiresolution hash encoding. In ACM TOG, pages 1–15, 2022.
+2
+[22] Jeong Joon Park, Peter Florence, Julian Straub, Richard
+Newcombe, and Steven Lovegrove. Deepsdf: Learning continuous signed distance functions for shape representation.
+In Proceedings of the IEEE/CVF conference on computer vision and pattern recognition, pages 165–174, 2019. 2
+[23] Christian Reiser, Stephan Garbin, Pratul Srinivasan, Dor
+Verbin, Richard Szeliski, Ben Mildenhall, Jonathan Barron,
+Peter Hedman, and Andreas Geiger. Binary opacity grids:
+Capturing fine geometric detail for mesh-based view synthesis. ACM Transactions on Graphics (TOG), 43(4):1–14,
+2024. 2
+[24] Cheng Sun, Min Sun, and Hwann-Tzong Chen. Direct voxel
+grid optimization: Super-fast convergence for radiance fields
+reconstruction. In Proceedings of the IEEE/CVF conference
+on computer vision and pattern recognition, pages 5459–
+5469, 2022. 2
+[25] Cheng Sun, Jaesung Choe, Charles Loop, Wei-Chiu Ma, and
+Yu-Chiang Frank Wang. Sparse voxels rasterization: Realtime high-fidelity radiance field rendering. In CVPR, pages
+16187–16196, 2025. 1, 2, 3, 4, 6, 7
+[26] Shinji Umeyama. An eigendecomposition approach to
+weighted graph matching problems. IEEE transactions on
+References
+[1] Henrik Aanæs, Rasmus Ramsbøl Jensen, George Vogiatzis,
+Engin Tola, and Anders Bjorholm Dahl. Large-scale data for
+multiple-view stereopsis. International Journal of Computer
+Vision, 120(2):153–168, 2016. 6
+[2] Yohann Cabon, Lucas Stoffl, Leonid Antsfeld, Gabriela
+Csurka, Boris Chidlovskii, Jerome Revaud, and Vincent
+Leroy. Must3r: Multi-view network for stereo 3d reconstruction. In Proceedings of the Computer Vision and Pattern
+Recognition Conference, pages 1050–1060, 2025. 2
+[3] Danpeng Chen, Hai Li, Weicai Ye, Yifan Wang, Weijian
+Xie, Shangjin Zhai, Nan Wang, Haomin Liu, Hujun Bao,
+and Guofeng Zhang. Pgsr: Planar-based gaussian splatting
+for efficient and high-fidelity surface reconstruction. IEEE
+TVCG, 2024. 6, 7
+[4] Hanlin Chen, Fangyin Wei, Chen Li, Tianxin Huang, Yunsong Wang, and Gim Hee Lee. Vcr-gaus: View consistent
+depth-normal regularizer for gaussian surface reconstruction.
+Advances in Neural Information Processing Systems, 37:
+139725–139750, 2024. 6, 7
+[5] Jaesung Choe, Byeongin Joung, Francois Rameau, Jaesik
+Park, and In So Kweon. Deep point cloud reconstruction.
+arXiv preprint arXiv:2111.11704, 2021. 2
+[6] Christopher Choy, JunYoung Gwak, and Silvio Savarese. 4d
+spatio-temporal convnets: Minkowski convolutional neural
+networks. In Proceedings of the IEEE/CVF conference on
+computer vision and pattern recognition, pages 3075–3084,
+2019. 2, 3
+[7] Wei Dong, Christopher Choy, Charles Loop, Or Litany, Yuke
+Zhu, and Anima Anandkumar. Fast monocular scene reconstruction with global-sparse local-dense grids. In Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition, pages 4263–4272, 2023. 2
+[8] Qiancheng Fu, Qingshan Xu, Yew Soon Ong, and Wenbing
+Tao. Geo-neus: Geometry-consistent neural implicit surfaces
+learning for multi-view reconstruction. Advances in Neural
+Information Processing Systems, 35:3403–3416, 2022. 2, 6,
+7
+[9] Qianyi Fu, Songyou Peng, Anpei Chen, Yinda Zhang, and
+Marc Pollefeys. Neus2: Fast learning of neural implicit surfaces for multi-view reconstruction. In CVPR, pages 12654–
+12663, 2023. 2, 3
+[10] Amos Gropp, Lior Yariv, Niv Haim, Matan Atzmon, and
+Yaron Lipman. Implicit geometric regularization for learning
+shapes. arXiv preprint arXiv:2002.10099, 2020. 3
+[11] Binbin Huang, Zehao Yu, Anpei Chen, Andreas Geiger, and
+Shenghua Gao. 2d gaussian splatting for geometrically accurate radiance fields. In ACM TOG. ACM, 2024. 2, 3, 6,
+7
+[12] Jiahui Huang, Qunjie Zhou, Hesam Rabeti, Aleksandr Korovko, Huan Ling, Xuanchi Ren, Tianchang Shen, Jun Gao,
+Dmitry Slepichev, Chen-Hsuan Lin, et al. Vipe: Video
+pose engine for 3d geometric perception. arXiv preprint
+arXiv:2508.10934, 2025. 2
+9
+[39] Zehao Yu, Torsten Sattler, and Andreas Geiger. Gaussian
+opacity fields: Efficient adaptive surface reconstruction in
+unbounded scenes. ACM Transactions on Graphics (ToG),
+43(6):1–13, 2024. 6, 7
+pattern analysis and machine intelligence, 10(5):695–703,
+2002. 3
+[27] Jianyuan Wang, Minghao Chen, Nikita Karaev, Andrea
+Vedaldi, Christian Rupprecht, and David Novotny. Vggt:
+Visual geometry grounded transformer. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, 2025. 2
+[28] Peng Wang, Lingjie Liu, Yuan Liu, Christian Theobalt, Taku
+Komura, and Wenping Wang. Neus: Learning neural implicit
+surfaces by volume rendering for multi-view reconstruction.
+In NeurIPS, pages 27171–27183, 2021. 1, 2, 3, 4, 6, 7
+[29] Shuzhe Wang, Vincent Leroy, Yohann Cabon, Boris
+Chidlovskii, and Jerome Revaud. Dust3r: Geometric 3d vision made easy. In Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition, pages 20697–
+20709, 2024. 2
+[30] Yifan Wang, Jianjun Zhou, Haoyi Zhu, Wenzheng Chang,
+Yang Zhou, Zizun Li, Junyi Chen, Jiangmiao Pang, Chunhua
+Shen, and Tong He. π 3 : Scalable permutation-equivariant
+visual geometry learning, 2025. 2, 3, 4, 1
+[31] Zian Wang, Tianchang Shen, Merlin Nimier-David, Nicholas
+Sharp, Jun Gao, Alexander Keller, Sanja Fidler, Thomas
+Müller, and Zan Gojcic. Adaptive shells for efficient neural
+radiance field rendering. arXiv preprint arXiv:2311.10091,
+2023. 2
+[32] Yaniv Wolf, Amit Bracha, and Ron Kimmel. Gs2mesh: Surface reconstruction from gaussian splatting via novel stereo
+views. In European Conference on Computer Vision, pages
+207–224. Springer, 2024. 6
+[33] Xiaoyang Wu, Li Jiang, Peng-Shuai Wang, Zhijian Liu, Xihui Liu, Yu Qiao, Wanli Ouyang, Tong He, and Hengshuang
+Zhao. Point transformer v3: Simpler faster stronger. In Proceedings of the IEEE/CVF conference on computer vision
+and pattern recognition, pages 4840–4851, 2024. 2, 3
+[34] Qiangeng Xu, Zexiang Xu, Julien Philip, Sai Bi, Zhixin
+Shu, Kalyan Sunkavalli, and Ulrich Neumann. Pointnerf: Point-based neural radiance fields. In Proceedings of
+the IEEE/CVF conference on computer vision and pattern
+recognition, pages 5438–5448, 2022. 2
+[35] Lior Yariv, Jiatao Gu, Yoni Kasten, and Yaron Lipman. Volume rendering of neural implicit surfaces. In NeurIPS, 2021.
+2, 3, 6
+[36] Lior Yariv, Peter Hedman, Christian Reiser, Dor Verbin,
+Pratul P Srinivasan, Richard Szeliski, Jonathan T Barron,
+and Ben Mildenhall. Bakedsdf: Meshing neural sdfs for realtime view synthesis. In ACM SIGGRAPH 2023 conference
+proceedings, pages 1–9, 2023. 2
+[37] Alex Yu, Ruilong Li, Matthew Tancik, Hao Li, Ren Ng,
+and Angjoo Kanazawa. Plenoctrees for real-time rendering
+of neural radiance fields. In Proceedings of the IEEE/CVF
+international conference on computer vision, pages 5752–
+5761, 2021. 2
+[38] Zehao Yu, Songyou Peng, Michael Niemeyer, Torsten Sattler, and Andreas Geiger. Monosdf: Exploring monocular geometric cues for neural implicit surface reconstruction. Advances in neural information processing systems,
+35:25018–25032, 2022. 2, 6, 7
+10
+SVRecon: Sparse Voxel Rasterization for Surface Reconstruction
+Supplementary Material
+In this supplement, we describe the details of our method
+that are not included in the the main paper: We describe the
+voxel initialization (Sec. A), training losses (Sec. B), implementation details (Sec. C), ablation study (Sec. D), and
+qualitative results (Sec. E).
+Voxel Allocation with Negative Distances. Our process
+begins by defining a uniform dense grid at L = 6 (G = 26 )
+within the predefined cube region. The next step is to allocate individual SDF values inside all voxel corner points.
+Before allocation, it is unknown which corner points are inside or outside the surface. We adopt a robust strategy by
+first assuming all voxel corners are inside the object, initializing them with a negative SDF value. The subsequent
+sign-flipping step will then ’carve out’ the visible ’outside’
+(positive) space from this initial negative volume. This provides a more stable starting point than initializing with ambiguous unsigned distances.
+To assign initial SDF magnitudes to all (2L + 1)3 corner
+nodes pgeo of this dense L = 6 grid, we first build a KDsub
+tree over the subsampled aligned points Pworld
+for efficient
+nearest-neighbor queries. For each corner node pgeo , we
+sub
+find the nearest point ppgeo ∈ Pworld
+using the KD-tree and
+assign its negative distance:
+A. Voxel Initialization
+Geometry initialization plays a crucial role in optimizing
+neural fields, especially when employing explicit representations such as 3D Gaussians [14] or sparse voxels [25].
+While density-based methods like SVRaster typically start
+from an empty or near-zero space, our SDF-based formulation enables faster and more efficient convergence by directly utilizing rich geometric priors from the beginning. To
+achieve this stable and physically meaningful initialization,
+we leverage PI3 [30], a visual geometry model that estimates 3D points in world coordinates from unposed images.
+Nimg
+Given a set of input images I = {Ii }i=1
+, where Nimg
+is the number of images, the model infers a set of camera
+Nimg
+poses {[Ri |ti ]}i=1
+([R|t] ∈ R3×4 ) together with per-view
+Nimg
+3D point maps {Pi }i=1 (in estimated world coordinates)
+Nimg
+and confidence maps {Ci }i=1
+. Note that the camera pose
+[Ri |ti ] warps a point at the world coordinate into the camera
+coordinate corresponding to the i-th image Ii .
+
+f˜(pgeo ) = −
+s̃,R̃,t̃
+i=1
+2
+s R Ci + t − Cgt
+i 2.
+(5)
+Voxels with Initial Signed Distance. Unsigned distance
+alone does not indicate whether a point is inside or outside
+the surface. To initialize a sign for each voxel, we determine
+if its corners are ”visible” and flip their signs accordingly
+(e.g., to positive/outside). We check visibility using two
+conditions. First, we project all voxel corners and the point
+map Pworld onto low-resolution camera pixels. A corner’s
+sign is flipped if its distance to the camera is less than the
+distance of the nearest Pworld point projecting to the same
+pixel (implying it is not occluded by the point map). Second, any voxel corner that is never projected to any camera
+(i.e., it is outside all camera frustums) is also flipped.
+Nimg
+X
+sub
+ppgeo ∈Pworld
+
+|pgeo − ppgeo |2 ,
+where f˜(pgeo ) function denotes the initial SDF value in
+pgeo . This value provides the initial ’inside’ magnitude, and
+in the next step, we flip the sign for visible corners.
+Camera Pose Alignment. Because the predicted point
+maps are expressed in the coordinate system defined by the
+model’s predicted camera parameters, they are not immediately consistent with the ground-truth world coordinate
+Nimg
+system assumed by prior methods. Given {[Ri | ti ]}i=1
+gt
+gt Nimg
+and {[Ri | ti ]}i=1 , we estimate a 7-DoF similarity
+(s, R, t) by aligning camera centers by Ci =−R⊤i ti and
+gt ⊤ gt
+Cgt
+ti where Ci and Cgt
+i denote camera posii =− Ri
+tions in world coordinates. Then, we optimize s̃, R̃, t̃ by:
+arg min
+min
+(4)
+B. Loss Details
+With the optimized (s, R, t), we warp point maps into
+the ground truth world coordinate system as pworld =
+s R p + t where p is a point in point maps and pworld is
+a warped point. As a result, we obtain the warped point
+maps Pworld at the ground truth world coordinate, which
+will be used for voxel allocation and SDF initialization in
+the following steps.
+In this section, we describe the loss terms that regularize our
+signed distance field. We first explain how we sample query
+points in the dense coordinate space shared by the Eikonal
+and smoothness losses, and then define the global Eikonal,
+local Eikonal, second-order smoothness, normal prior, and
+ray-Eikonal losses. The way these terms are weighted and
+scheduled during training is detailed in Sec. C.
+1
+Random Sampling for Losses. Several of our continuity losses (the Eikonal and smoothness terms) are evaluated at randomly sampled positions in the dense grid. We
+first choose a dense cell coordinate pi = (xi , yi , zi ) ∈
+{0, . . . , G − 1}3 and add a random uniform offset δ ∼
+U(0, 1)3 . Then we can get a query point p′i = pi + δ in
+the unit cube volume cell c(xi , yi , zi ). This random point
+p′i serves as the root for loss propagation. To compute the
+numerical gradient at this location, we subsequently sample the six adjacent points (e.g., p′i + (1, 0, 0)) in the dense
+coordinate space. These samples allow us to approximate
+the gradient across unit cell boundaries, enforcing geometric consistency.
+p′i by querying the f (·) function at its neighbors, again normalizing by the world-space step size hL :
+Eikonal Loss. To ensure the learned function f behaves
+as a valid Signed Distance Function, we enforce the Eikonal
+constraint, ∥∇x f ∥2 ≈ 1, in world coordinates. We compute the gradient ∇x f at the perturbed dense coordinate
+p′i = (x′i , yi′ , zi′ ). Crucially, the SDF value f (p) at any
+dense coordinate p is not stored directly, but must be computed using our voxel association mechanism and trilinear
+interpolation. This involves:
+1. Finding the dense cell index: k = idx(⌊p⌋)
+2. Retrieving the enclosing voxel: v = NVS[k] (Sec. 4.2 of
+the manuscript).
+3. Interpolating the geometry: f (p) = interp(geov , δ),
+min
+is the local offset and x(p) is a
+where δ = x(p)−v
+vl
+world coordinate of dense coordinate p.
+To compute the gradient with respect to world coordinates
+(x) while sampling in dense coordinates (p), we use the
+central difference approximation with the correct worldspace step size, hL . The partial derivative ∂x f is:
+Local Eikonal Loss. Whereas the Eikonal loss operates
+on randomly sampled dense coordinates, we replace it with
+a local Eikonal constraint at voxel centers after L > 9. For
+each active voxel v with center cv , we analytically compute the gradient ∇x f (cv ) by differentiating the trilinear
+interpolation function of its eight corner SDF values (geov ).
+Specifically, the x-component of the gradient is computed
+by averaging the differences along the x-edges:
+∂x f (p′i ) =
+f (x′i + 1, yi′ , zi′ ) − f (x′i − 1, yi′ , zi′ )
+,
+2hL
+f (x′i + 1, yi′ , zi′ ) − 2f (p′i ) + f (x′i − 1, yi′ , zi′ )
+,
+h2L
+(8)
+where ∂yy f and ∂zz f are computed similarly. This term
+computes the curvature in metric units, where the value for
+each neighbor is found via NVS and interpolation. The final
+smoothness loss is:
+∂xx f (p′i ) ≈
+Nsamples
+Lsmooth =
+1
+∂f
+≈
+∂x
+4hv
+Leik =
+X
+i=1
+∥∇x f (p′i )∥2 − 1
+2
+,
+i=1
+X
+j,k∈{0,1}
+∇2 f (p′i )
+1
+.
+(f1,j,k − f0,j,k )
+(9)
+(10)
+where fi,j,k ∈ geov are the corner SDF values and hv is
+the voxel size. We enforce ∥∇x f (cv )∥2 ≈ 1 at the voxel
+center:
+N
+vox 
+2
+X
+Lle =
+∥∇x f (cv )∥2 − 1 ,
+(11)
+i
+where Nvox is the number of voxels including all parents
+and children. For efficiency, this term is evaluated only on
+a random subset of active voxels, as described in the implementation details.
+(6)
+where ∂y f and ∂z f are computed similarly. Here, the numerator f (x′i + 1, . . . ) − f (x′i − 1, . . . ) queries the SDF
+values (in metric units) from the voxels enclosing the adjacent dense cells (found via NVS). The denominator 2hL is
+the true world-space distance between these two sampling
+locations, ensuring the gradient is in metric units. The final
+Eikonal loss is:
+Nsamples 
+X
+Normal Loss with Geometric Prior. In addition to the
+internal consistency losses (Leik , Lsmooth ), we leverage the
+explicit geometric priors from the PI3 point maps (introduced in Sec. 4.1) to guide the surface orientation. For each
+camera view i, we compute a 2D prior normal map Nprior
+from the per-view point map Pi .
+To compare against this prior, we must render our
+model’s normals to the image plane. We first define the
+normal vector nv for a voxel v by taking the analytical gradient of the trilinear interpolation function (with respect to
+the local voxel coordinates q) and evaluating it at the voxel
+center qc = (0.5, 0.5, 0.5):
+
+nv = normalize ∇q interp(geov , qc ) ,
+(12)
+(7)
+where Nsamples is the number of dense cell that have all six
+neighbor cells to calculate the loss.
+Second-order (Laplacian) Smoothness Loss. We apply
+a Laplacian loss in world coordinates to encourage smoothness. We approximate the Laplacian ∇2 f at the query point
+where normalize(·) denotes the operation of scaling the input vector to unit length (i.e., L2 normalization).
+2
+We then render the expected normal map by accumulating these per-voxel normals. For a ray corresponding to a
+pixel u, we use the same volumetric rendering equation as
+the color pass Eq. (1), simply replacing the per-voxel color
+ci with the per-voxel normal ni :
+where lambda is specified as below.
+The photometric term Lphoto follows SVRaster [25] and
+combines the rendered RGB reconstruction loss, SSIM loss,
+and the LR color concentration loss. All weights for these
+components are kept identical to SVRaster. The mask term
+Lmask enforces the transmittance of pixels outside the mask
+to be 1 (transparent) and those inside the mask to be 0
+(opaque). This term is included to improve quantitative reconstruction results, with the weight set to λm = 1.0.
+Nray
+Nrendered (u) =
+X
+Ti αi ni .
+(13)
+i=1
+The final normal loss Lnormal is a robust cosine distance
+loss between the rendered normal map and the prior normal
+map, computed on all valid pixels u in the image:
+
+1 X
+1 − Nrendered (u) · Nprior (u) , (14)
+Lnormal =
+|M|
+Normal Supervision. The normal loss Lnormal is applied
+with
+
+ 0.10 : 0 ≤ τ < 4000
+0.01 : 4000 ≤ τ < 6000 ,
+λn =
+(18)
+
+0.00 : else
+u∈M
+where M is the set of valid pixels and |M| denotes the number of such pixels.
+While this loss provides a valuable geometric guide, the
+Nprior map is derived from imperfect point maps and can
+be noisy. Therefore, we apply a weight decay schedule,
+annealing the loss to zero in the final fine-tuning stages, allowing the high-fidelity internal losses to define the final
+geometry.
+where τ denotes iterations.
+Global Eikonal Loss. The dense Eikonal term Leik is
+weighted by λe = 10−8 . Since this loss is evaluated on
+dense grid cells, the number of samples roughly quadruples
+whenever the dense resolution increases by one level. To
+keep the overall contribution of this loss balanced, we decay its weight by a factor of 0.25 every 2,000 iterations, and
+we apply it only up to the 29 resolution level, that is, until
+τ = 6,000.
+Ray-Eikonal Loss. Ray-eikonal loss Lre is a ray-based
+Eikonal regularizer, which is implemented only for the
+naive baseline: SVRaster+SDF. For each ray segment that
+intersects a voxel, we determine the entry and exit coordinates, pin and pout , and evaluate the SDF values f (pin )
+and f (pout ) via trilinear interpolation of the voxel’s corner
+SDFs. Let s = ∥pout − pin ∥2 be the segment length. We
+approximate the directional gradient along the ray as:
+Local Eikonal Loss. We additionally use a local Eikonal
+regularizer Lle at the centers of parent and child cells to encourage unit gradient magnitude near the surface. For DTU
+scenes, we set λle = 10−11 and activate this term only in
+the fine stages, for iterations 6,000 ≤ τ ≤ 8,000. For stability, we evaluate Lle on each eligible cell with probability
+0.5 and scale the weight accordingly so that the expected
+contribution matches λle .
+f (pout ) − f (pin )
+.
+(15)
+s
+We then penalize deviations from the expected SDF slope
+(assuming the ray traverses free space or enters the surface):
+g=
+Nray
+Lre =
+X
+2
+wi gi + 1 ,
+Smoothness Loss. The smoothness term Lsmooth uses
+λs = 10−10 . As with the dense Eikonal loss, the number of
+samples increases with the dense resolution, so we decay λs
+by a factor of 0.25 every 2,000 iterations during the coarse
+levels. After the 29 level (from τ = 6,000 to 8,000), we
+stop decaying and keep λs fixed while applying the loss in
+the parent–child hierarchy.
+(16)
+i=1
+where wi = Ti αi is the standard visibility weight for the
+segment, and Nray is the number of intersected voxels. This
+loss encourages a consistent signed gradient (g ≈ −1, decreasing SDF along the ray) along occupied segments.
+C. Implementation Details
+Additional Regularizers. Following SVRaster [25], we
+also include the Ln-dmean and Ln-dmed regularizers with
+Overall Loss Functions and Schedules. We first draw
+the overall optimization strategy in Fig. 8. For DTU scenes
+we train for 8,000 iterations with the following objective:
+λn-dmean = 0.001,
+Ltotal = Lphoto + λn Lnormal + λe Leik
++ λle Lle + λs Lsmooth + λm Lmask
++ λn-dmean Ln-dmean + λn-dmed Ln-dmed ,
+λn-dmed = 0.001.
+We start applying Ln-dmed from iteration τ = 1,000 and
+Ln-dmean from τ = 2,000. Their definitions are identical
+to those in SVRaster [25].
+(17)
+3
+0
+Pi3 point maps
+initialization
+~27 resolution
+2000
+~28 resolution
+4000
+~29 resolution
+6000
+~210 resolution
+8000
+iters
+Local Eikonal: 𝐿le
+Child-Child Eikonal: 𝐿eik & Normal: 𝐿normal
+Photometric: 𝐿photo & Mask: 𝐿mask & Smoothness : 𝐿smooth
+Figure 8. Optimization strategy.
+Table 5. Effect of outside-scene initialization on TnT Truck.
+Adding an outside bounding region and further initializing a sky
+sphere improves both precision and F1.
+Tanks-and-Temples Training. For Tanks-and-Temples
+scenes, we train for 10,000 iterations with the same loss
+terms and base coefficients as in Eq. (17) except using
+Lmask . The only difference is the schedule of the regularizers. We use
+
+ 0.01 : 0 ≤ τ < 4000
+0.005 : 4000 ≤ τ < 8000 .
+λn =
+(19)
+
+0.00 : else
+Metric
+Precision (↑)
+Recall (↑)
+F1 Score (↑)
+The local Eikonal term Lle is enabled for 6,000 ≤ τ ≤
+10,000, and the smoothness loss Lsmooth is kept active until
+τ = 10,000 without further decay. All other settings follow
+the DTU configuration described above.
++ λn-dmean Ln-dmean + λn-dmed Ln-dmed ,
+(2) w/ outside box only
+(3) Ours
+0.33
+0.45
+0.42
+0.46
+0.61
+0.52
+0.52
+0.63
+0.57
+learned with SDF values, background regions that should
+carry non-negligible density can be initialized with very
+large SDF magnitudes. In that case, it becomes difficult for
+density to emerge there during optimization, and parts of
+the background are instead explained as extensions of the
+target mesh.
+Implementation of Baseline. For a fair comparison, we
+implement a voxel-based SDF baseline within our framework. The initialization is deliberately simple: we first define a uniform dense grid at L = 6 (G = 26 ) within the
+predefined cube region. We then assign SDF values to the
+voxel corners by measuring the Euclidean distance from the
+center of this cube region to each corner and subtracting
+one-fifth of the cube edge length. This produces an approximate spherical zero-level set inside the volume, without using any external geometric priors.
+Following SVRaster [25], we train this baseline for
+20,000 iterations, applying pruning and subdivision every
+1,000 iterations. The loss function is defined as:
+Ltotal = Lphoto + λre Lre
+(1) w/o outside box
+For the Tanks-and-Temples Truck scene, we conduct an
+ablation over three settings: (1) training without any outside
+box, (2) extending the PI3 -based initialization to the outside
+box, and (3) additionally adding a spherical shell that encloses the sky (ours); see Tab. 5. However, our approach
+still has failure cases. For example, in the TnT Caterpillar
+scene (see Fig. 11), the sky color varies significantly across
+the image, and parts of the sky are still reconstructed as geometry attached to the caterpillar mesh. This is a limitation
+of our current design.
+Handling Reflective Objects. Reflective objects in DTU
+(e.g., scan 110) reveal a limitation of our method: the network can overfit to specular highlights, leading to noisy geometry. As shown in Fig. 9, we address this by simply
+extending the normal loss until the end of training. This extended normal supervision better constrains the surface orientation within reflective regions, reduces floating artifacts,
+and yields cleaner reconstructions. On scan 110, the Chamfer Distance improves from 0.84 to 0.79, and the resulting
+mesh is visually smoother and more stable on reflective surfaces.
+(20)
+where Lphoto (photometric loss), Ln-dmean , and Ln-dmed follow the same weights as in our method (Eq. (17)), and we
+set λre = 10−3 .
+D. Ablation Study
+Initialization in Outdoor Scenes. We find that, for outdoor scenes, initializing the region outside the inner reconstruction box is critical for mesh quality. When the scene is
+4
+CD↓
+(a) reflective images & normal
+0.84
+(b) normal loss early stop
+0.79
+(c) normal loss until end
+Figure 9. (a) Reflective views and corresponding normal cue from DTU scan 110. (b) Our original normal-loss scheduling. (c) Extending
+the normal loss until the last iteration. Extending the normal-loss schedule enables our model to better handle reflective surfaces, improving
+the Chamfer Distance from 0.84 to 0.79 and yielding visually cleaner reconstructions.
+(a) Input images
+(b) SVRaster
+(c) SVRecon
+Figure 10. Real-world reconstruction on an indoor drawer scene. (a) Input images, (b) reconstruction by SVRaster, and (c) reconstruction by our SVRecon, which yields a cleaner and more coherent mesh with fewer artifacts.
+handheld RGB images focusing on a drawer, as shown in
+Fig. 10. Compared to SVRaster, which produces a highly
+noisy and fragmented reconstruction in this setting, our
+method recovers a clean and coherent mesh that faithfully
+represents both the drawer and the surrounding structures,
+indicating improved robustness to real-world noise and
+calibration imperfections.
+Qualitative Result of DTU & TnT For completeness,
+we provide full qualitative visualizations of our reconstructed meshes on all DTU and Tanks-and-Temples scenes
+in Fig. 12 and Fig. 13.
+Across both indoor (DTU) and outdoor (Tanks-andTemples) scenes, the reconstructions exhibit largely holefree, high-fidelity surfaces, thanks to the SDF-based representation and our regularization losses. Fine geometric
+details such as thin structures and concave regions are preserved, while spurious floaters and fragmented components
+are largely suppressed.
+Figure 11. Failure case in outdoor initialization. From left to
+right, we show the rendered RGB image, rendered depth, and extracted mesh. In the TnT Caterpillar scene, parts of the sky are
+incorrectly reconstructed as geometry attached to the object due to
+incomplete initialization of the outer (background) region.
+E. Qualitative Results
+Real-world Reconstruction We also evaluate our
+method on a real-world indoor scene captured with 36
+5
+Figure 12. Qualitative results of the reconstructed mesh on DTU. We show 15 representative DTU scenes, where our method produces
+clean, watertight surfaces while preserving fine geometric details and sharp structures.
+Figure 13. Qualitative results of the reconstructed mesh on Tanks-and-Temples. Our method scales to large, complex indoor and
+outdoor scenes (Barn, Truck, Ignatius, Courthouse, Caterpillar, Meetingroom), producing detailed and structurally consistent meshes.
+6

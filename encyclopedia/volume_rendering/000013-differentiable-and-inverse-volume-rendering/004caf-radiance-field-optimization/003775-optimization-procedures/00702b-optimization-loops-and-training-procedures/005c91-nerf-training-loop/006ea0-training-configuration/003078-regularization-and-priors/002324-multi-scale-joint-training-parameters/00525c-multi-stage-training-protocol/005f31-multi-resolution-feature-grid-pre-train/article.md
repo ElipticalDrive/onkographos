@@ -1,0 +1,167 @@
+# Multi-resolution Feature Grid Pre-train
+Also called: Grid Branch Pre-training, Stage 1 Training
+
+## Overview
+Multi-resolution Feature Grid Pre-train is a method that constructs a multi-resolution ground feature plane representation for large urban scenes, capturing density and appearance separately to reduce memory footprint and guide subsequent NeRF sampling [S1]. It differs from standard NeRF training by decoupling the initial scene representation into a compact, low-rank tensor factorization (the grid branch) that is pre-trained before joint optimization with a full 3D NeRF branch [S1]. This approach leverages the planar nature of urban environments to achieve robust performance with sparse view data [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A set of calibrated images of a large urban scene; camera poses.
+*   **Outputs:** Pre-trained multi-resolution density and appearance feature grids ($\mathcal{G}_\sigma, \mathcal{G}_c$) used to initialize the joint training stage.
+
+**Data Structures:**
+The method uses a multi-resolution feature grid composed of density and appearance tensors at various resolutions $n$. For a specific resolution $n$, the tensors are constructed from low-rank components:
+*   $\mathbf{v}_{\sigma, r}^{z}$: A vector along the z-axis for density component $r$.
+*   $\mathbf{M}_{\sigma, r}^{xy}$: A matrix in the xy-plane for density component $r$.
+*   $\mathbf{v}_{c, r}^{z}$: A vector along the z-axis for appearance component $r$.
+*   $\mathbf{M}_{c, r}^{xy}$: A matrix in the xy-plane for appearance component $r$.
+*   $R_\sigma$: Number of density components.
+*   $R_c$: Number of appearance components.
+
+**Formulas:**
+The density and appearance tensors at resolution $n$ are obtained by concatenating outer products of z-axis vectors and xy-plane matrices [S1]:
+
+$$
+\mathcal {G}_{\sigma }^n = \oplus [ (\mathbf {v}_{\sigma , r}^{z} \circ \mathbf {M}_{\sigma ,r}^{xy})]_{R_\sigma }, \quad \mathcal {G}_{c}^n = \oplus [\mathbf {v}_{c, r}^{z} \circ \mathbf {M}_{c,r}^{xy})]_{R_c}
+$$
+
+where $\circ$ denotes the outer product and $\oplus$ denotes concatenation over the $R_\sigma$ and $R_c$ dimensions [S1].
+
+Positional Encoding (PE) uses Fourier features [S1]:
+$$
+\text{PE}(x) = (\sin(x), \cos(x), \dots, \sin(2^{L-1}x), \cos(2^{L-1}x))
+$$
+
+**Parameters:**
+*   **Positional Encoding Frequency:** The highest frequency is set to $2^{15}$ [S1].
+*   **Components:** 8 components for density and 16 for appearance [S1].
+*   **Resolutions:** The method uses a highest resolution feature plane plus downsampled resolutions at $\times 4$ and $\times 16$ [S1].
+*   **MLP Head:** A small MLP with 2 fully connected layers of 128 hidden units and ReLU activation is used as the output head for the grid branch [S1].
+*   **Optimizer:** Adam [S1].
+*   **Learning Rate:** Initial learning rate of 0.02 for tensor factors and 0.01 for MLP layers [S1].
+*   **Batch Size:** 4096 rays [S1].
+*   **Pre-training Iterations:** 10,000 iterations [S1].
+
+**Steps:**
+1.  **Scene Capture:** Capture the scene with a pyramid of feature planes at the pre-train stage [S1].
+2.  **Coarse Sampling:** Perform a coarse sampling of ray points (e.g., 64 coarse samples per ray) [S1].
+3.  **Feature Interpolation:** For each sampled point, interpolate features from the multi-resolution feature grids [S1].
+4.  **Prediction:** Predict radiance values (density $\sigma$ and color $c$) through a shallow MLP renderer (grid branch) using the interpolated features and positional encoding [S1].
+5.  **Loss Calculation:** Compute the Mean Squared Error (MSE) loss between the predicted volumetrically integrated pixel colors and the ground truth [S1].
+6.  **Optimization:** Update the tensor factors ($\mathbf{v}, \mathbf{M}$) and MLP weights to minimize the loss [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def pretrain_grid_branch(images, poses, num_iterations=10000):
+    # Initialize multi-resolution feature grids
+    # Resolutions: base, base/4, base/16
+    # Density components: 8, Appearance components: 16
+    G_sigma = initialize_multi_resolution_grid(resolutions=[1, 0.25, 0.0625], num_components=8, type='density')
+    G_c = initialize_multi_resolution_grid(resolutions=[1, 0.25, 0.0625], num_components=16, type='appearance')
+    
+    # Initialize shallow MLP for grid branch
+    grid_mlp = ShallowMLP(hidden_size=128, num_layers=2)
+    
+    optimizer = Adam([G_sigma, G_c, grid_mlp.parameters()], lr=0.02)
+    # Note: MLP layers might have different lr, handled by optimizer groups in practice
+    
+    for iteration in range(num_iterations):
+        # Sample rays from images
+        rays = sample_rays(images, poses, num_rays=4096, coarse_samples=64)
+        
+        # Get 3D coordinates for sampled points
+        points = rays.origin + rays.direction * rays.sample_distances
+        
+        # Interpolate features from multi-resolution grids
+        # This involves selecting the appropriate resolution and bilinear interpolation
+        features_sigma = interpolate_features(G_sigma, points)
+        features_c = interpolate_features(G_c, points)
+        
+        # Apply Positional Encoding to positions
+        # Highest frequency 2^15
+        pe_pos = fourier_positional_encoding(points, max_freq=15)
+        
+        # Concatenate features and PE
+        # F_sigma and F_c are fusing functions (small MLPs)
+        # In the grid branch, features are concatenated with PE and fed to MLP
+        input_to_mlp = concatenate(features_sigma, features_c, pe_pos)
+        
+        # Predict density and color
+        # The grid branch outputs sigma and c
+        sigma_pred, c_pred = grid_mlp(input_to_mlp)
+        
+        # Volumetric rendering to get pixel color
+        # Alpha compositing using predicted sigma and c
+        color_pred = volumetric_render(rays, sigma_pred, c_pred)
+        
+        # Calculate MSE loss against ground truth image colors
+        gt_colors = get_pixel_colors(rays, images)
+        loss = mse_loss(color_pred, gt_colors)
+        
+        # Backpropagate and update
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        
+    return G_sigma, G_c
+
+def initialize_multi_resolution_grid(resolutions, num_components, type):
+    # Initialize tensor factors for each resolution
+    # For density: v_z (N, 1, D), M_xy (N, H, W, D)
+    # For appearance: v_z (N, 1, D), M_xy (N, H, W, D)
+    # D is the component dimension (e.g., 128)
+    grids = []
+    for res in resolutions:
+        if type == 'density':
+            # Initialize v_sigma and M_sigma
+            v = torch.randn(num_components, 1, 128)
+            M = torch.randn(num_components, 1, 1, 128) # Placeholder for spatial dims
+            grids.append({'v': v, 'M': M})
+        else:
+            # Initialize v_c and M_c
+            v = torch.randn(num_components, 1, 128)
+            M = torch.randn(num_components, 1, 1, 128)
+            grids.append({'v': v, 'M': M})
+    return grids
+
+def interpolate_features(grid, points):
+    # For each point, find the closest resolution and interpolate
+    # This is a placeholder for the actual interpolation logic
+    # which involves mapping 3D points to 2D planes and z-axis vectors
+    features = []
+    for g in grid:
+        # Interpolate M_xy at (x,y) and v_z at z
+        # Outer product to get 3D feature
+        # Concatenate over components
+        pass
+    return concatenated_features
+```
+
+**Edge Cases and Pitfalls:**
+*   **Sparse View Data:** The method is designed to be robust to sparse view training data, but extremely sparse data may still lead to poor feature plane initialization [S1].
+*   **Urban Scene Assumption:** The method relies on the assumption that large urban scenes are grounded on the xy-plane. Scenes with significant vertical structures or non-planar layouts may not benefit as much [S1].
+*   **Precision:** The use of Fourier features with high frequencies ($2^{15}$) requires careful handling of numerical precision during optimization [S1].
+
+## Subtopics
+
+### [MobileNeRF Staged Training](15503-mobilenerf-staged-training.md)
+A staged training approach for mobile devices, focusing on efficiency and quantization, whereas Multi-resolution Feature Grid Pre-train focuses on large-scale urban scenes and tensor factorization.
+
+### [Multi-stage Training Protocol](14692-multi-stage-training-protocol.md)
+The parent method that encompasses Multi-resolution Feature Grid Pre-train as its first stage.
+
+## Operating characteristics
+*   **Time Complexity:** The pre-training stage takes approximately 10,000 iterations, which is roughly 1/5 of the total training time (100k iterations for joint optimization) [S1].
+*   **Memory Complexity:** The low-rank tensor factorization significantly reduces the memory footprint compared to full 3D grids [S1]. For example, using 8/16 components for density/appearance with multi-resolution planes is more compact than the 16/48 components used in the TensoRF baseline [S1].
+*   **Performance:** The method achieves robust performance on large urban scenes with sparse view data [S1].
+*   **Strengths:** Reduced memory footprint, robustness to sparse views, suitability for large urban scenes.
+*   **Limitations:** Assumption of planar scene structure, potential sensitivity to sparse view data quality.
+
+## Background
+The method was introduced in "Grid-guided Neural Radiance Fields for Large Urban Scenes" [S1]. It builds on the observation that large urban scenes are primarily grounded on the xy-plane, allowing for efficient representation using 2D feature planes and 1D vectors [S1]. The approach is inspired by tensor factorization techniques like those used in TensoRF [S1].
+
+## Sources
+[S1] Grid-guided Neural Radiance Fields for Large Urban Scenes, https://doi.org/10.1109/cvpr52729.2023.00802, fetched 2026-10-26

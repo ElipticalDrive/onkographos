@@ -1,0 +1,171 @@
+--- v001.md
++++ v002.md
+@@ -1,129 +1,64 @@
+ # Parallelization for Backpropagation
+-
+ Also called: Per-splat Backpropagation
+ 
+ ## Overview
+-Parallelization for Backpropagation is an optimization strategy for 3D Gaussian Splatting training that shifts the computational granularity of the backward pass from per-pixel to per-splat (per-Gaussian) [S1][S2, unofficial]. It solves the bottleneck of atomic contention and false sharing inherent in the standard per-pixel approach, where multiple Gaussians writing gradients to the same pixel require serialized atomic operations [S2, unofficial]. By parallelizing over Gaussians, it reduces the number of required atomic operations by a factor equal to the number of pixels in a tile (typically 256 for 16×16 tiles) [S2, unofficial].
++Parallelization for Backpropagation is a strategy for computing gradients in 3D Gaussian Splatting that shifts the computational granularity from per-pixel to per-splat (per-Gaussian) [S1]. It solves the high atomic contention and false sharing inherent in standard per-pixel backpropagation, where thousands of threads simultaneously attempt to update the same Gaussian parameters [S1]. By restructuring the backward pass, it significantly accelerates training time while maintaining numerical equivalence to the standard approach [S1].
+ 
+ ## How it works
+-The method restructures the gradient computation to iterate over the Gaussian list rather than the pixel buffer, fundamentally changing how gradients are accumulated and stored.
++The method replaces the standard pixel-parallel gradient accumulation with a per-splat iteration order.
+ 
+-**Inputs and Outputs:**
+-*   **Input:** The set of 3D Gaussians $\mathcal{G}$, the camera parameters, the forward pass intermediate states (specifically alpha blending states), and the loss gradient $\frac{\partial \mathcal{L}}{\partial \mathbf{c}}$ with respect to the rendered pixel colors.
+-*   **Output:** Gradients $\frac{\partial \mathcal{L}}{\partial \theta}$ for all Gaussian parameters $\theta$ (position, covariance, opacity, color, SH coefficients).
++**Inputs:**
++- Set of 3D Gaussians $\mathcal{G}$ with parameters $\theta_i$ (position, covariance, opacity, color, SH coefficients).
++- Camera parameters for the current view.
++- Loss function $\mathcal{L}$ and its gradient with respect to the rendered image $\frac{\partial \mathcal{L}}{\partial \mathbf{c}}$.
++
++**Outputs:**
++- Gradients $\frac{\partial \mathcal{L}}{\partial \theta_i}$ for all Gaussians $i \in \mathcal{G}$.
+ 
+ **Data Structures:**
+-*   **Alpha Blending State Buffer:** A buffer storing the transmittance $T$ and accumulated color $C$ at specific intervals during the forward pass. In the standard per-pixel approach, this is implicit or stored per-pixel. In the per-splat approach, to enable efficient backward propagation without storing full history for every splat, the state is sampled. Specifically, the alpha blending state is stored at each non-empty pixel after every $k$-th splat in the tile list (typically $k=32$) [S2, unofficial].
+-*   **Gradient Accumulators:** Per-Gaussian buffers for storing gradients. Since each Gaussian contributes to multiple pixels, gradients must be accumulated across all pixels the Gaussian affects.
++- A list of Gaussians, each containing its current parameters and an accumulator for gradients.
++- A list of pixels or tiles, storing the gradient of the loss with respect to the pixel color.
+ 
+-**Numbered Steps:**
+-1.  **Forward Pass with Sampling:** During the forward rasterization pass, for each tile, iterate through the sorted list of Gaussians. Compute the alpha blending contribution. After every $k$-th Gaussian (e.g., 32nd), store the current accumulated transmittance $T$ and color $C$ for all non-empty pixels in that tile into the **Alpha Blending State Buffer** [S2, unofficial].
+-2.  **Per-Gaussian Gradient Initialization:** Initialize gradient accumulators for each Gaussian to zero.
+-3.  **Per-Gaussian Backward Pass:** Iterate through each Gaussian $i$ in the scene:
+-    a. Identify all pixels $p$ that Gaussian $i$ contributes to (those where the Gaussian's screen-space footprint overlaps and $T_{p, i} > \epsilon$).
+-    b. For each contributing pixel $p$, retrieve the necessary alpha blending state from the buffer. If the exact state at the moment Gaussian $i$ was processed is not stored, use the nearest stored state (after every 32nd splat) to approximate the transmittance $T_{p, i}$ and the accumulated color from preceding Gaussians [S2, unofficial].
+-    c. Compute the local gradient $\frac{\partial \mathcal{L}}{\partial \mathbf{c}_p}$ for pixel $p$.
+-    d. Propagate this gradient back through the alpha blending equation to compute the gradient with respect to Gaussian $i$'s parameters. The contribution of Gaussian $i$ to pixel $p$ is $\alpha_i \cdot T_{p, i} \cdot \mathbf{c}_i$. The gradient flow involves $\frac{\partial \mathcal{L}}{\partial \mathbf{c}_p} \cdot \alpha_i \cdot T_{p, i}$ for color/SH, and additional terms for opacity and position via the Jacobian of the projection and blending [S1][S2, unofficial].
+-    e. Accumulate these gradients into Gaussian $i$'s accumulator. Since this is done per-Gaussian, and each Gaussian is processed by a distinct thread/block, atomic operations for cross-Gaussian accumulation are eliminated. Atomic operations are only needed if multiple threads update the same Gaussian (which is avoided by the per-Gaussian parallelization) or for global statistics.
+-4.  **Parameter Update:** Apply the accumulated gradients to the Gaussian parameters using the optimizer (e.g., Adam) [S1][S2, unofficial].
++**Steps:**
++1. **Forward Pass:** Render the image using the standard alpha-blending rasterizer to produce pixel colors $\mathbf{c}_j$ and transmittance values $T_j$ for each pixel $j$. Store the depth-sorted list of splats contributing to each pixel [S1].
++2. **Pixel Gradient Computation:** Compute the gradient of the loss with respect to the pixel colors, $\frac{\partial \mathcal{L}}{\partial \mathbf{c}_j}$, using the standard loss function (e.g., L1 or SSIM) [S1].
++3. **Per-Splat Gradient Accumulation:** Iterate over each Gaussian $i$ in the scene:
++    a. Identify the set of pixels $\mathcal{P}_i$ that the Gaussian $i$ contributes to (i.e., pixels where Gaussian $i$ is within the tile and depth-sorted correctly).
++    b. For each pixel $j \in \mathcal{P}_i$, compute the local gradient contribution. This involves backpropagating through the alpha-blending equation for pixel $j$ to find $\frac{\partial \mathcal{L}}{\partial \mathbf{c}_i}$, the gradient of the loss with respect to the color contribution of Gaussian $i$ at pixel $j$.
++    c. Compute the gradient of the loss with respect to the Gaussian parameters $\theta_i$ using the chain rule: $\frac{\partial \mathcal{L}}{\partial \theta_i} += \sum_{j \in \mathcal{P}_i} \frac{\partial \mathcal{L}}{\partial \mathbf{c}_i} \frac{\partial \mathbf{c}_i}{\partial \theta_i}$.
++    d. Accumulate these gradients into the Gaussian's gradient buffer. Since each Gaussian is processed by a single thread (or a small group), atomic operations are minimized or eliminated if the accumulation is done locally before a final reduction [S1].
++4. **Parameter Update:** Apply the accumulated gradients to update the Gaussian parameters using an optimizer (e.g., Adam) [S1].
+ 
+-**Pseudocode:**
+-```python
+-def per_splat_backward(Gaussians, Camera, LossGradient, TileSize=16, SampleInterval=32):
+-    # Gaussians: List of Gaussian objects with attributes (pos, cov, alpha, color, SH)
+-    # Camera: Camera parameters
+-    # LossGradient: Gradient of loss w.r.t. rendered image pixels
+-    
+-    # 1. Forward pass with state sampling
+-    # This is typically fused with the forward rasterization kernel
+-    # We assume a function that returns sampled states for backward use
+-    ForwardState = forward_rasterize_with_sampling(Gaussians, Camera, SampleInterval)
+-    
+-    # 2. Initialize per-Gaussian gradient accumulators
+-    # In GPU implementation, this is a buffer allocated per Gaussian
+-    Grads = [ZeroGradient() for _ in Gaussians]
+-    
+-    # 3. Parallel loop over Gaussians
+-    # Each thread/block handles one Gaussian
+-    for i, Gaussian in enumerate(Gaussians):
+-        # Find pixels affected by this Gaussian
+-        AffectedPixels = get_screen_footprint(Gaussian, Camera)
+-        
+-        LocalGrad = ZeroGradient()
+-        
+-        for p in AffectedPixels:
+-            # Retrieve sampled state for pixel p
+-            # State includes transmittance T and accumulated color C from previous Gaussians
+-            State = ForwardState.get_pixel_state(p, Gaussian.id)
+-            
+-            if State is None:
+-                continue
+-                
+-            T_prev = State.transmittance
+-            C_prev = State.accumulated_color
+-            
+-            # Compute Gaussian's contribution to pixel color
+-            # c_i = color(Gaussian, SH, view_dir)
+-            c_i = compute_color(Gaussian, Camera)
+-            
+-            # Rendered color c_p = C_prev + T_prev * alpha_i * c_i
+-            # Loss gradient dL/dc_p is given
+-            dL_dc_p = LossGradient[p]
+-            
+-            # Gradient w.r.t. Gaussian's color/SH
+-            # dL/dc_i = dL/dc_p * T_prev * alpha_i
+-            alpha_i = Gaussian.opacity
+-            dL_dc_i = dL_dc_p * T_prev * alpha_i
+-            
+-            # Accumulate color gradient
+-            LocalGrad.color += dL_dc_i
+-            
+-            # Gradient w.r.t. opacity alpha_i
+-            # dL/dalpha_i = dL/dc_p * T_prev * c_i
+-            dL_dalpha = dL_dc_p * T_prev * c_i
+-            LocalGrad.opacity += dL_dalpha
+-            
+-            # Gradient w.r.t. position and covariance requires Jacobian of projection
+-            # and the blending function. This is computed using the chain rule
+-            # involving dL_dc_p, T_prev, alpha_i, and c_i.
+-            # dL/dpos = dL/dc_p * (dT_prev/dpos * alpha_i * c_i + T_prev * dalpha_i/dpos * c_i + T_prev * alpha_i * dc_i/dpos)
+-            # Note: T_prev depends on previous Gaussians' positions, but in per-splat,
+-            # we often approximate or use the sampled T_prev which is fixed for this step.
+-            # The exact Jacobian computation is detailed in [S1][S2, unofficial].
+-            LocalGrad.position += compute_position_gradient(dL_dc_p, T_prev, alpha_i, c_i, Gaussian, Camera)
+-            LocalGrad.covariance += compute_covariance_gradient(dL_dc_p, T_prev, alpha_i, c_i, Gaussian, Camera)
+-            
+-        # 4. Store accumulated gradients for this Gaussian
+-        Grads[i] = LocalGrad
+-        
+-    return Grads
+-```
++**Formulas:**
++The alpha-blending equation for pixel $j$ is:
++$$ \mathbf{c}_j = \sum_{i \in \mathcal{S}_j} \alpha_{i,j} T_{i,j} \mathbf{c}_i $$
++where $\mathcal{S}_j$ is the set of splats contributing to pixel $j$, $\alpha_{i,j}$ is the opacity of Gaussian $i$ at pixel $j$, $T_{i,j}$ is the transmittance before Gaussian $i$, and $\mathbf{c}_i$ is the color of Gaussian $i$.
++
++The gradient with respect to Gaussian $i$'s parameters is:
++$$ \frac{\partial \mathcal{L}}{\partial \theta_i} = \sum_{j \in \mathcal{P}_i} \frac{\partial \mathcal{L}}{\partial \mathbf{c}_j} \frac{\partial \mathbf{c}_j}{\partial \mathbf{c}_i} \frac{\partial \mathbf{c}_i}{\partial \theta_i} $$
++where $\frac{\partial \mathbf{c}_j}{\partial \mathbf{c}_i} = \alpha_{i,j} T_{i,j}$ [S1].
+ 
+ **Parameters:**
+-*   `SampleInterval` ($k$): The number of splats between stored alpha blending states. Typical value: 32 [S2, unofficial]. Lower values increase accuracy but memory usage; higher values save memory but may reduce gradient accuracy.
+-*   `TileSize`: Size of the rasterization tile. Typical value: 16x16 pixels [S2, unofficial].
++- Tile size: Typically 16x16 pixels, leading to a reduction in atomic operations by a factor of 256 [S1].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **VRAM Usage:** Storing alpha blending states for every 32nd splat increases VRAM usage compared to the standard per-pixel approach [S2, unofficial]. This can be mitigated by exploiting shared memory to reduce memory costs and overall VRAM allocations [S2, unofficial].
+-*   **Approximation Error:** Using sampled states instead of exact states introduces approximation errors in the gradient computation. This may affect convergence or final quality, though sources claim it is numerically equivalent or negligible in practice [S1][S2, unofficial].
+-*   **Atomic Contention:** While reduced, atomic contention is not entirely eliminated if multiple Gaussians update the same global statistics or if the implementation falls back to per-pixel updates for certain parameters.
++- **Memory Usage:** The per-splat approach requires storing the list of contributing pixels for each Gaussian, which increases VRAM usage compared to the per-pixel approach [S1].
++- **Numerical Equivalence:** The method must be implemented carefully to ensure numerical equivalence with the standard approach, avoiding precision errors from different accumulation orders [S1].
+ 
+ ## Subtopics
+ 
+-### Per-Gaussian Backward Pass
+-A specific implementation of the per-splat backpropagation strategy that parallelizes the backward pass over Gaussians instead of pixels [S2, unofficial]. It reduces the number of required atomic operations by a factor equal to the number of pixels in each tile (256 for 16x16 tiles) [S2, unofficial]. It computes the backward pass per Gaussian rather than per tile, reducing false sharing and atomic contention during z-order sorting [S2, unofficial]. During the forward pass, it stores the alpha blending state at each non-empty pixel after every 32nd splat in the respective tile list [S2, unofficial]. This approach increases VRAM usage, which is mitigated by exploiting shared memory [S2, unofficial]. On Mip-NeRF360 outdoor scenes (RTX 4090), it increases training time from 16m56s to 14m14s (1.20x speedup over base), but increases VRAM from 6.33GiB to 7.69GiB (1.20x increase) and Gaussian count from 3.87M to 3.89M [S2, unofficial].
++### [Per-Gaussian Backward Pass](9590-per-gaussian-backward-pass.md)
++A specific implementation of the per-splat strategy that iterates over Gaussians to compute gradients, reducing atomic contention.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The backward pass complexity is proportional to the number of Gaussians times the average number of pixels each Gaussian affects. By eliminating atomic operations for pixel accumulation, the constant factor is significantly reduced. On RTX 4090, it provides a 1.20x speedup over the base per-pixel approach for Mip-NeRF360 outdoor scenes [S2, unofficial]. On newer hardware (RTX 5090), it achieves a 5x improvement over the original implementation [S2, unofficial].
+-*   **Memory Complexity:** Increases VRAM usage due to the storage of intermediate alpha blending states. The increase is approximately 1.20x compared to the base implementation (6.33GiB to 7.69GiB on Mip-NeRF360) [S2, unofficial]. This can be mitigated by shared memory optimization [S2, unofficial].
+-*   **Strengths:** Significantly reduces atomic contention and false sharing, leading to faster training times, especially on modern GPUs.
+-*   **Limitations:** Higher VRAM consumption. Potential approximation errors if the sampling interval is too large.
+-*   **When to use:** When training speed is critical and sufficient VRAM is available. Particularly effective on GPUs with high memory bandwidth and many cores.
+-*   **When not to use:** When VRAM is severely constrained and cannot be mitigated by shared memory optimizations.
++- **Time Complexity:** Reduces training time by 4–5× compared to standard per-pixel backpropagation in budgeted settings [S1].
++- **Memory Complexity:** Increases VRAM usage due to the need to store pixel contributions for each Gaussian [S1].
++- **Strengths:** Eliminates atomic contention and false sharing, leading to significant speedups on GPU hardware [S1].
++- **Limitations:** Higher memory footprint may limit the scene size that can be processed on a single GPU [S1].
++- **When to Use:** When training speed is critical and sufficient VRAM is available [S1].
+ 
+ ## Background
+-The standard 3D Gaussian Splatting training pipeline uses a per-pixel backward pass, which suffers from atomic contention bottlenecks [S1][S2, unofficial]. Mallick et al. [56] (cited in [S2, unofficial]) first proposed parallelizing the backward pass over Gaussians to reduce atomic operations. Durvasula et al. [13] (cited in [S2, unofficial]) also addressed this by using custom atomic functions. The "Parallelization for Backpropagation" method, as described in "Taming 3DGS" [S1] and "Faster-GS" [S2, unofficial], builds on these ideas, refining the sampling strategy and memory management to achieve significant speedups while maintaining quality.
++The method was introduced in "Taming 3DGS: High-Quality Radiance Fields with Limited Resources" as part of a broader effort to optimize the 3D Gaussian Splatting training pipeline [S1]. It addresses the scalability issues of the original 3DGS implementation by rethinking the parallelization strategy of the backward pass [S1].
+ 
+ ## Sources
+-[S1] Taming 3DGS: High-Quality Radiance Fields with Limited Resources, https://doi.org/10.1145/3680528.3687694, fetched 2026-10-30
+-[S2] Faster-GS: Analyzing and Improving Gaussian Splatting Optimization, https://arxiv.org/abs/2602.09999v1, fetched 2026-10-26 (unofficial)+[S1] Taming 3DGS: High-Quality Radiance Fields with Limited Resources, https://doi.org/10.1145/3680528.3687694, fetched 2026-10-30

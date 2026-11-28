@@ -1,0 +1,79 @@
+--- v001.md
++++ v002.md
+@@ -1,25 +1,36 @@
+ # Masked and Weighted Losses
+ 
++Also called: Area Loss Scaling, Density-based Loss for Shape Addition, Bayer Masking for Loss Supervision, Edge Loss Regularization
+ 
+ ## Overview
+-Masked and Weighted Losses modify standard photometric error metrics (such as MSE or Huber loss) by excluding irrelevant regions from the error calculation or adjusting the contribution of individual pixels based on geometric properties. This solves the problem of optimization bias caused by empty background, invalid rays, or multiscale resolution discrepancies, ensuring the model focuses only on meaningful signal [S1, S1, S2, S2]. It sets itself apart from standard MSE by dynamically defining a Region of Interest (ROI) based on active radiance or ray validity, and by weighting losses to account for pixel footprint area [S1, S1, S2, S2].
++Masked and Weighted Losses is a family of techniques that modify the standard photometric error computation in differentiable volume rendering by applying spatial masks or per-pixel weights to the loss function. It solves the problem of training instability and evaluation bias caused by invalid background regions, sensor artifacts, multiscale resolution disparities, or structural inconsistencies. It sets itself apart from its sibling [MSE Loss and PSNR Conversion](1651-mse-loss-and-psnr-conversion.md) by introducing selective suppression or amplification of error terms rather than computing a global average, and from [Masked Volume Metrics](1927-masked-volume-metrics.md) by focusing on training-time gradient correction rather than evaluation-time metric definition.
+ 
+ ## Shared principles
+-The family shares the mechanism of applying a binary mask $M$ or a scalar weight $W$ to the per-pixel or per-ray loss term $L_{pixel}$ before aggregation. The total loss $L$ is computed as:
+-$$ L = \frac{1}{N_{valid}} \sum_{i} M_i \cdot W_i \cdot L_{pixel}(y_i, \hat{y}_i) $$
+-where $y_i$ is the ground truth, $\hat{y}_i$ is the prediction, and $N_{valid}$ is the count of valid elements (either valid rays or non-masked pixels) to prevent division by zero or bias from empty regions [S1, S1, S2, S2].
++The core mechanism involves computing a base loss $L_{base}$ (typically MSE or Huber) between the rendered prediction $P$ and the ground truth $G$, then applying a mask $M$ or weight $W$ before aggregation.
+ 
+-Key shared terms:
+-- **Mask ($M$):** A binary indicator (0 or 1) determining if a sample contributes to the loss. Sources define masks based on ray validity (intersection with scene geometry) [S1, S1] or spatial ROI (union of active radiance and ground truth data) [S1, S1].
+-- **Weight ($W$):** A scalar multiplier adjusting the influence of a sample. In multiscale contexts, this is the area scaling factor [S1]. In density editing, this is implicit in the cross-entropy formulation over specific ray sets [S2].
+-- **Valid Ray/Region:** A sample is considered valid if it carries meaningful signal. For training, this excludes background-only rays [S1, S1]. For evaluation, it excludes empty froxels [S1, S1].
++For masking, the loss is computed as:
++$$ L = \frac{1}{N_{valid}} \sum_{i} M_i \cdot L_{base}(P_i, G_i) $$
++where $M_i \in \{0, 1\}$ is a binary mask indicating whether ray $i$ or froxel $i$ contributes to the loss, and $N_{valid}$ is the count of valid elements (where $M_i=1$) [S1].
++
++For weighting, the loss is computed as:
++$$ L = \frac{1}{N} \sum_{i} W_i \cdot L_{base}(P_i, G_i) $$
++where $W_i$ is a scalar weight for element $i$ [S1, S2, S3, S4].
++
++Common masking strategies include:
++1.  **Validity Masks:** Excluding rays that do not intersect scene geometry or froxels that are empty in both the rendered volume and ground truth [S1, 1927-masked-volume-metrics.md].
++2.  **Sensor Masks:** Applying one-hot masks to match Bayer filter patterns or removing saturated border pixels [S3].
++3.  **Temporal/Scenario Masks:** Defining a Region of Interest (ROI) based on non-zero radiance in the test scenario [1927-masked-volume-metrics.md].
++
++Common weighting strategies include:
++1.  **Area Scaling:** Scaling loss by the inverse of downsampling factors to balance multiscale contributions [S1].
++2.  **Structural Weighting:** Applying edge-aware weights or density-based cross-entropy weights for specific editing tasks [S2, S4].
+ 
+ ## Subtopics
+ 
+ ### [Masked Volume Metrics](1927-masked-volume-metrics.md)
+-Computes evaluation metrics (MSE, PSNR) by excluding empty or irrelevant froxels. It sets itself apart by defining the Region of Interest (ROI) as the union of the rendered scenario's active radiance and the ground truth's active data, ensuring only froxels participating in light transport are evaluated. Choose this for volumetric evaluation to prevent skew from empty space.
++[Masked Volume Metrics](1927-masked-volume-metrics.md) computes evaluation metrics (MSE, PSNR) by excluding empty froxels. It defines the effective ROI as the union of froxels with non-zero radiance in the rendered scenario and non-zero values in the ground truth. It is chosen for evaluation to prevent empty background regions from skewing performance scores.
+ 
+ ### [Training Loss Computation with Huber and Masking](4765-training-loss-computation-with-huber-and-masking.md)
+-Computes photometric training loss using Huber loss, masked by ray validity flags. It differs from standard MSE by being more robust to outliers while maintaining differentiability [G]. Choose this for differentiable volume rendering training to handle outliers and exclude background rays.
++[Training Loss Computation with Huber and Masking](4765-training-loss-computation-with-huber-and-masking.md) defines the training-time pipeline using Huber loss ($\delta=0.1$) and binary ray validity masks. It differs from Masked Volume Metrics by operating on rays during training rather than froxels during evaluation, and from this family's general definition by specifying the Huber function and JAX-based implementation details.
+ 
+ ### Area Loss Scaling
+@@ -28,5 +39,5 @@
+ 
+ ### Density-based Loss for Shape Addition
+-**Definition:** A method for shape addition using a density-based loss which is faster but less effective than composite image reconstruction [S2]. The loss encourages predicted densities to match target densities for edited regions and be unchanged for unedited regions [S2].
++**Definition:** A method for shape addition using a density-based loss which is faster but less effective than composite image reconstruction. The loss encourages predicted densities to match target densities for edited regions and be unchanged for unedited regions [S2].
+ **Step:** Let $y_f = \{(r, \sigma_f)\}$ be the set of rays and densities in the foreground mask, and $y_b = \{(r, \sigma_b)\}$ be the set of rays and densities in the background mask. $\sigma_f$ are density values of the rays copied from the new object instance, and $\sigma_b$ represent density values of the rays from the original instance. Let $\sigma_r$ be the densities predicted by the model for ray $r$. Densities are normalized to sum to one [S2].
+ **Formula:**
+@@ -34,8 +45,21 @@
+ [S2]
+ 
++### Bayer Masking for Loss Supervision
++**Step:** Render all three colors for every training ray, then apply a one-hot mask to select the desired output color corresponding to the measured raw pixel for that ray. Apply a second mask to remove a 4 pixel border from all training images to handle saturated pixels often found on the edges of iPhone raw images [S3].
++**Pitfall:** Using bilinearly demosaicked raw images for supervision causes distracting color noise artifacts, particularly in extremely high noise areas, due to broken 'hot' pixels being dispersed to neighboring pixels [S3].
++
++### Edge Loss Regularization
++**Definition:** A regularization term added to the training loss to enforce edge detail consistency between the current rendering and the target image, alleviating washed-out details caused by noisy 2D-to-3D feature correspondences [S4].
++**Formula:**
++$$ L_{edge} = \| (I_{Current} * G_{\sigma1}) - (I_{Target} * G_{\sigma2}) \|_1 $$
++where $*$ denotes convolution and $G_\sigma$ is a Gaussian kernel with standard deviation $\sigma$ [S4].
++**Parameter:** Standard deviation $\sigma_1$ for the current image Gaussian filter is 1.0. Standard deviation $\sigma_2$ for the target image Gaussian filter is 1.6. Weighting factor $\lambda$ for the edge loss is 0 for the first 15% of training, then increased to 50 [S4].
++
+ ## Background
+-Originating from the analysis of multiscale rendering and neural radiance field editing, these methods address specific failure modes of standard L2 losses. Area loss scaling was introduced in Mip-NeRF to handle aliasing and scale-space reasoning in multiscale datasets, ensuring that downscaled images do not disproportionately affect the gradient updates [S1]. Masked volume metrics and ray-validity masking were developed to handle the sparsity of volumetric data and the prevalence of background rays in training, preventing the model from optimizing for static background colors [S1, S1, S2, S2]. Density-based losses were proposed in Editing Conditional Radiance Fields to facilitate faster shape editing by directly optimizing the density field rather than composite image reconstruction [S2].
++The concept of masking losses to exclude invalid background rays is standard in differentiable volume rendering to prevent biased gradient updates from empty regions [S1]. Area loss scaling was introduced in Mip-NeRF to handle multiscale datasets where low-resolution images have larger pixel footprints [S1]. Density-based losses for shape editing were proposed in Editing Conditional Radiance Fields to facilitate faster object manipulation [S2]. Bayer masking was introduced in RawNeRF to correctly supervise neural radiance fields using raw sensor data, avoiding artifacts from demosaicking [S3]. Edge loss regularization was added in NeRF Analogies to preserve high-frequency details during appearance transfer [S4].
+ 
+ ## Sources
+ [S1] Mip-NeRF: A Multiscale Representation for Anti-Aliasing Neural Radiance Fields, https://doi.org/10.1109/iccv48922.2021.00580, fetched 2026-10-26
+-[S2] Editing Conditional Radiance Fields, https://doi.org/10.1109/iccv48922.2021.00572, fetched 2026-10-26+[S2] Editing Conditional Radiance Fields, https://doi.org/10.1109/iccv48922.2021.00572, fetched 2026-10-26
++[S3] NeRF in the Dark: High Dynamic Range View Synthesis from Noisy Raw Images, https://doi.org/10.1109/cvpr52688.2022.01571, fetched 2026-10-26
++[S4] NeRF Analogies: Example-Based Visual Attribute Transfer for NeRFs, https://doi.org/10.1109/cvpr52733.2024.00444, fetched 2026-10-26

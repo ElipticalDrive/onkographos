@@ -1,0 +1,206 @@
+# Blocky Volumetric Clouds
+
+Also called: Blocky Cloud Density
+
+## Overview
+Blocky Volumetric Clouds is a procedural rendering technique that generates cartoon-style cloud densities by sampling a 2D texture at the cloud layer's Y-coordinate, creating a distinct "blocky" appearance compared to noise-based realistic clouds [S1, unofficial]. It solves the problem of rendering volumetric clouds in a style consistent with voxel-based games while providing simplified lighting calculations [S1, unofficial]. It differs from its sibling [Cartoon Cloud Density Generation](8309-cartoon-cloud-density-generation.md) by relying on a static 2D density map rather than multi-octave noise functions for the base structure [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** `playerPos` (ray direction vector), `cameraPosition` (world position of the camera), `frameTimeCounter` (time uniform), `frameCounter` (integer frame counter), `fragCoord` (fragment screen coordinates), `cloudsShadowcasterDir` (direction vector for shadow casting) [S1, unofficial].
+*   **Output:** A tuple `(invThickness, invBrightness)` containing transmittance and lighting contribution [S1, unofficial].
+
+**Data Structures:**
+*   `BLOCKY_CLOUD_TEXTURE`: A 2D texture containing the cloud density map. The alpha channel is sampled for density [S1, unofficial].
+*   Constants: `CLOUD_BOTTOM_Y`, `CLOUD_TOP_Y` (defined as `CLOUD_BOTTOM_Y + 12.0`), `CLOUDS_QUALITY` (number of steps) [S1, unofficial].
+
+**Steps:**
+
+1.  **Sample Density for Ray Limiting:**
+    Calculate the player's direction length in the XZ plane: `playerLen = length(playerPos.xz)` [S1, unofficial]. Normalize `playerPos` by `playerLen` [S1, unofficial]. Sample the cloud density at a position 20 units ahead of the camera: `distSample = sampleBlockyCloud(cameraPosition + normalize(playerPos) * 20.0)` [S1, unofficial]. Compute `distLimitAmount = 1.0 - pow3(1.0 - distSample)` [S1, unofficial]. Scale the ray direction length: `playerPos *= min(playerLen, mix(128.0 * 16.0, 20.0 * 16.0, distLimitAmount))` [S1, unofficial].
+
+2.  **Normalize Step Vector:**
+    Create a step vector `stepVec` equal to `playerPos` [S1, unofficial]. Normalize the XZ components relative to the Y component: `stepVec.xz /= abs(stepVec.y)` [S1, unofficial]. Set the Y component to the sign of the original Y: `stepVec.y = sign(stepVec.y)` [S1, unofficial]. This ensures the ray moves exactly ±1 unit in Y per step in the XZ plane [S1, unofficial].
+
+3.  **Determine Y Bounds:**
+    Start at the camera's Y position. Clamp the start Y to the cloud layer: `posStartY = clamp(cameraPosition.y, CLOUD_BOTTOM_Y, CLOUD_TOP_Y)` [S1, unofficial]. Calculate the end Y by moving 1000 units in the direction of `stepVec.y`: `posEndY = clamp(posStartY + sign(stepVec.y) * 1000.0, CLOUD_BOTTOM_Y, CLOUD_TOP_Y)` [S1, unofficial]. If `posStartY == posEndY`, return `vec2(1.0, 0.0)` (no intersection) [S1, unofficial].
+
+4.  **Clamp to Foreground:**
+    Calculate `maxY = abs(playerPos.y)` [S1, unofficial]. Clamp the start and end Y positions relative to the camera to prevent marching through the ground/foreground: `posStartY = clamp(posStartY - cameraPosition.y, -maxY, maxY) + cameraPosition.y` and `posEndY = clamp(posEndY - cameraPosition.y, -maxY, maxY) + cameraPosition.y` [S1, unofficial]. If `posStartY == posEndY`, return `vec2(1.0, 0.0)` [S1, unofficial].
+
+5.  **Calculate Step Vector and Density Multiplier:**
+    Calculate the 3D start position: `pos = cameraPosition + stepVec * abs(posStartY - cameraPosition.y)` [S1, unofficial]. Calculate the 3D end position: `endPos = pos + stepVec * abs(posEndY - posStartY)` [S1, unofficial]. Compute the step vector for the loop: `stepVec = pos - endPos` [S1, unofficial]. Divide by quality: `stepVec /= CLOUDS_QUALITY` [S1, unofficial]. Compute density multiplier: `densityMult = length(stepVec) * -0.25` [S1, unofficial]. Set current position to `endPos` [S1, unofficial].
+
+6.  **Apply Dithering:**
+    Calculate Bayer dither: `dither = bayer64(gl_FragCoord.xy)` [S1, unofficial]. Offset dither for temporal stability: `dither = fract(dither + 1.61803398875 * mod(float(frameCounter), 3600.0))` [S1, unofficial]. Offset position: `pos += stepVec * (dither - 0.5)` [S1, unofficial].
+
+7.  **Ray March Loop:**
+    Initialize `invThickness = 1.0` and `invBrightness = 0.0` [S1, unofficial]. Loop `i` from 0 to `CLOUDS_QUALITY - 1`: Sample density: `density = sampleBlockyCloud(pos)` [S1, unofficial]. Calculate inverse density factor: `invDensity = exp(density * densityMult)` [S1, unofficial]. Update thickness: `invThickness *= invDensity` [S1, unofficial]. Sample shadow/light: `sampleUp = sampleBlockyCloud(pos + cloudsShadowcasterDir)` [S1, unofficial]. Update brightness: `invBrightness = mix(invBrightness, sampleUp, 1.0 - sqrt(invDensity))` [S1, unofficial]. Advance position: `pos += stepVec` [S1, unofficial].
+
+8.  **Return Results:**
+    Return `vec2(invThickness, invBrightness)` [S1, unofficial].
+
+**Helper Function: `sampleBlockyCloud`**
+Input: `pos` (vec3).
+1.  If `pos.y < CLOUD_BOTTOM_Y` or `pos.y > CLOUD_BOTTOM_Y + 12.0`, return `0.0` [S1, unofficial].
+2.  Calculate texture coordinates: `texPos = pos.xz` [S1, unofficial].
+3.  Offset X by time: `texPos.x -= frameTimeCounter * 3` [S1, unofficial].
+4.  Scale: `texPos *= 0.00025` [S1, unofficial].
+5.  Sample texture: `return texture2D(BLOCKY_CLOUD_TEXTURE, texPos, 0).a` [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def vec3(x, y, z):
+    return (x, y, z)
+
+def length(v):
+    return math.sqrt(v[0]**2 + v[1]**2 + v[2]**2)
+
+def sign(v):
+    return 1.0 if v > 0 else (-1.0 if v < 0 else 0.0)
+
+def clamp(val, min_val, max_val):
+    return max(min_val, min(max_val, val))
+
+def mix(a, b, t):
+    return a + t * (b - a)
+
+def fract(x):
+    return x - math.floor(x)
+
+def mod(x, y):
+    return x - y * math.floor(x / y)
+
+def sample_blocky_cloud(pos, cloud_bottom_y, blocky_cloud_texture, frame_time_counter):
+    if pos[1] < cloud_bottom_y or pos[1] > cloud_bottom_y + 12.0:
+        return 0.0
+    tex_pos = (pos[0], pos[2])
+    tex_pos = (tex_pos[0] - frame_time_counter * 3.0, tex_pos[1])
+    tex_pos = (tex_pos[0] * 0.00025, tex_pos[1] * 0.00025)
+    # Assuming texture2D returns a tuple (r, g, b, a)
+    return blocky_cloud_texture.sample(tex_pos)[3]
+
+def compute_clouds(player_pos, camera_position, cloud_bottom_y, cloud_top_y, 
+                   clouds_quality, blocky_cloud_texture, frame_time_counter, frame_counter, 
+                   clouds_shadowcaster_dir, frag_coord):
+    # Step 1
+    player_len = math.sqrt(player_pos[0]**2 + player_pos[2]**2)
+    if player_len == 0.0:
+        return (1.0, 0.0)
+    
+    # Normalize playerPos by XZ length
+    player_pos = (player_pos[0] / player_len, player_pos[1] / player_len, player_pos[2] / player_len)
+    
+    # Sample density 20 units ahead
+    dir_20 = (player_pos[0] * 20.0, player_pos[1] * 20.0, player_pos[2] * 20.0)
+    dist_sample = sample_blocky_cloud((camera_position[0] + dir_20[0], camera_position[1] + dir_20[1], camera_position[2] + dir_20[2]), cloud_bottom_y, blocky_cloud_texture, frame_time_counter)
+    
+    # pow3 is just x*x*x
+    dist_limit_amount = 1.0 - (1.0 - dist_sample)**3
+    
+    max_len = mix(128.0 * 16.0, 20.0 * 16.0, dist_limit_amount)
+    scale = min(player_len, max_len)
+    player_pos = (player_pos[0] * scale, player_pos[1] * scale, player_pos[2] * scale)
+    
+    # Step 2
+    step_vec = player_pos
+    abs_y = abs(step_vec[1])
+    if abs_y == 0.0:
+        return (1.0, 0.0)
+    step_vec = (step_vec[0] / abs_y, step_vec[1], step_vec[2] / abs_y)
+    step_vec = (step_vec[0], sign(step_vec[1]), step_vec[2])
+    
+    # Step 3
+    pos = camera_position
+    pos_start_y = clamp(pos[1], cloud_bottom_y, cloud_top_y)
+    pos_end_y = clamp(pos_start_y + sign(step_vec[1]) * 1000.0, cloud_bottom_y, cloud_top_y)
+    
+    if pos_start_y == pos_end_y:
+        return (1.0, 0.0)
+        
+    # Step 4
+    max_y = abs(player_pos[1])
+    pos_start_y = clamp(pos_start_y - pos[1], -max_y, max_y) + pos[1]
+    pos_end_y = clamp(pos_end_y - pos[1], -max_y, max_y) + pos[1]
+    
+    if pos_start_y == pos_end_y:
+        return (1.0, 0.0)
+        
+    # Step 5
+    pos = (pos[0] + step_vec[0] * abs(pos_start_y - pos[1]), pos[1], pos[2] + step_vec[2] * abs(pos_start_y - pos[1]))
+    end_pos = (pos[0] + step_vec[0] * abs(pos_end_y - pos_start_y), pos[1], pos[2] + step_vec[2] * abs(pos_end_y - pos_start_y))
+    
+    step_vec = (pos[0] - end_pos[0], pos[1] - end_pos[1], pos[2] - end_pos[2])
+    step_vec = (step_vec[0] / clouds_quality, step_vec[1] / clouds_quality, step_vec[2] / clouds_quality)
+    density_mult = math.sqrt(step_vec[0]**2 + step_vec[1]**2 + step_vec[2]**2) * -0.25
+    pos = end_pos
+    
+    # Step 6
+    # bayer64 is a standard 64x64 dither matrix lookup.
+    bayer_matrix = [
+        [0, 32, 8, 40, 2, 34, 10, 42],
+        [48, 16, 56, 24, 50, 18, 58, 26],
+        [12, 44, 4, 36, 14, 46, 6, 38],
+        [60, 28, 52, 20, 62, 30, 54, 22],
+        [3, 35, 11, 43, 1, 33, 9, 41],
+        [51, 19, 59, 27, 49, 17, 57, 25],
+        [15, 47, 7, 39, 13, 45, 5, 37],
+        [63, 31, 55, 23, 61, 29, 53, 21]
+    ]
+    def bayer64(x, y):
+        return bayer_matrix[y & 7][x & 7] / 64.0
+    
+    dither = bayer64(frag_coord[0], frag_coord[1])
+    dither = fract(dither + 1.61803398875 * mod(float(frame_counter), 3600.0))
+    pos = (pos[0] + step_vec[0] * (dither - 0.5), pos[1] + step_vec[1] * (dither - 0.5), pos[2] + step_vec[2] * (dither - 0.5))
+    
+    # Step 7
+    inv_thickness = 1.0
+    inv_brightness = 0.0
+    
+    for i in range(clouds_quality):
+        density = sample_blocky_cloud(pos, cloud_bottom_y, blocky_cloud_texture, frame_time_counter)
+        inv_density = math.exp(density * density_mult)
+        inv_thickness *= inv_density
+        
+        sample_up = sample_blocky_cloud((pos[0] + clouds_shadowcaster_dir[0], pos[1] + clouds_shadowcaster_dir[1], pos[2] + clouds_shadowcaster_dir[2]), cloud_bottom_y, blocky_cloud_texture, frame_time_counter)
+        inv_brightness = mix(inv_brightness, sample_up, 1.0 - math.sqrt(inv_density))
+        
+        pos = (pos[0] + step_vec[0], pos[1] + step_vec[1], pos[2] + step_vec[2])
+        
+    return (inv_thickness, inv_brightness)
+```
+
+**Formulas:**
+*   **Inverse Thickness:** $invThickness = \prod_{i=0}^{N-1} e^{d_i \cdot L \cdot -0.25}$ where $d_i$ is density at step $i$, $L$ is step length [S1, unofficial].
+*   **Inverse Brightness:** $invBrightness = mix(invBrightness, sampleUp, 1.0 - \sqrt{e^{d \cdot L \cdot -0.25}})$ [S1, unofficial].
+*   **Step Vector Y:** $stepVec.y = \pm 1$, $stepVec.xz = stepVec.xz / |stepVec.y|$ [S1, unofficial].
+
+**Parameters:**
+*   `CLOUD_BOTTOM_Y`: Lower Y-boundary of the cloud layer [S1, unofficial].
+*   `CLOUD_TOP_Y`: Upper Y-boundary, calculated as `CLOUD_BOTTOM_Y + 12.0` [S1, unofficial].
+*   `BLOCKY_CLOUD_TEXTURE`: 2D texture containing the cloud density map [S1, unofficial].
+*   `frameTimeCounter`: Time uniform used to animate the cloud texture horizontally [S1, unofficial].
+*   `CLOUDS_QUALITY`: Number of ray-marching steps [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Ray Vanishing:** The ray length shrinking mechanism (Step 1) reduces artifacts when inside clouds but relies on a cloud being nearby. If no cloud is nearby, the optimization may fail or behave unexpectedly [S1, unofficial].
+*   **No Intersection:** If the ray's Y-start and Y-end are identical after clamping (e.g., looking away from clouds or inside a solid block), the function returns `vec2(1.0, 0.0)` [S1, unofficial].
+*   **Division by Zero:** If `stepVec.y` is 0, normalization fails. The source implies this is handled by the bail-out conditions or input constraints [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ where $N$ is `CLOUDS_QUALITY`. Each step involves two texture samples and basic arithmetic [S1, unofficial].
+*   **Performance:** The method is lightweight compared to full volumetric noise generation, relying on a single 2D texture lookup per step [S1, unofficial].
+*   **Strengths:** Simple implementation, consistent "blocky" aesthetic, low computational cost [S1, unofficial].
+*   **Limitations:** Lacks the organic detail of noise-based clouds; lighting is simplified; the ray limiting optimization is noted as not working very well for this specific blocky style [S1, unofficial].
+
+## Background
+The method originates from a feature request for a Minecraft shader mod (I-Like-Vanilla) by user The0x539, with feedback from the mod author What42Pizza [S1, unofficial]. It was developed to provide a vanilla-esque blocky cloud appearance with improved lighting, compatible with the Iris shader loader [S1, unofficial].
+
+## Sources
+[S1] Feature request: Blocky volumetric clouds, https://github.com/What42Pizza/I-Like-Vanilla/issues/86, fetched 2026-10-28 (unofficial)

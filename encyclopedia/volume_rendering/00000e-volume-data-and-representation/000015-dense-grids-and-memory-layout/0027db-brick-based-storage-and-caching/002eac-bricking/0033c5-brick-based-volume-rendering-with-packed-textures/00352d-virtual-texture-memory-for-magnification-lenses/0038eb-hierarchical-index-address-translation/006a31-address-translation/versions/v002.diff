@@ -1,0 +1,126 @@
+--- v001.md
++++ v002.md
+@@ -16,14 +16,11 @@
+ 
+ **Steps:**
+-1.  **Brick the Volume:** The original volume data is divided into bricks for out-of-core rendering [S1].
+-2.  **Store Page Table:** Construct the page table (index texture) where each entry maps a virtual brick identifier to its current physical storage location (texture coordinates) [S1].
+-3.  **Translate Coordinates:** For each sample along a viewing ray:
+-    a. Identify the virtual brick containing the sample based on the virtual volume coordinates [S1].
+-    b. Perform a lookup in the page table using the virtual brick identifier to retrieve the physical storage information [S1].
+-    c. Compute the physical texture coordinates by combining the offset within the brick and the physical location retrieved from the page table [S1].
++1.  **Specify Sample Locations:** Define sample locations in a space covering the whole bounding box of the volume, independent of individual bricks, such as normalized coordinates in a $[0,1]^3$ unit cube [S1].
++2.  **Translate Coordinates:** Translate the volume coordinates of a given sample to actual texture coordinates, taking the physical storage of the brick's data into account [S1].
++3.  **Lookup and Compute:** Identify the target brick, perform a page table lookup to retrieve its physical storage metadata, and compute the final texture coordinates by combining the brick-local offset with the retrieved base coordinates [S1].
+ 
+ **Pseudocode:**
+ ```python
+-def address_translation(virtual_coords, page_table):
++def address_translation(virtual_coords, brick_size, grid_dims, page_table):
+     """
+     Translates virtual volume coordinates to physical texture coordinates.
+@@ -31,57 +28,48 @@
+     Args:
+         virtual_coords: Tuple (u, v, w) in normalized [0,1]^3 space.
+-        page_table: A lookup structure (e.g., texture) mapping virtual brick IDs 
+-                    to physical storage metadata (e.g., base texture coordinates, 
+-                    brick dimensions).
++        brick_size: Tuple (bx, by, bz) normalized size of one brick.
++        grid_dims: Tuple (gx, gy, gz) number of bricks per dimension.
++        page_table: List/array mapping brick_id -> (base_u, base_v, base_w, phys_w, phys_h, phys_d).
+     
+     Returns:
+-        Tuple (u_phys, v_phys, w_phys) representing the physical texture coordinates.
++        Tuple (u_phys, v_phys, w_phys) representing the physical texture coordinates, or None.
+     """
+-    # 1. Determine which brick contains the virtual sample
+-    # Assuming bricks are arranged in a regular grid covering [0,1]^3
+-    # brick_size is the normalized size of one brick in each dimension
+-    brick_id = get_brick_id(virtual_coords, brick_size)
+-    
+-    # 2. Lookup physical storage info from the page table
+-    # page_table[brick_id] returns metadata such as:
+-    # - base_u, base_v, base_w: The starting coordinates of this brick in the physical texture
+-    # - brick_dims: The physical dimensions of the brick in the texture
+-    physical_info = page_table.lookup(brick_id)
+-    
++    # 1. Determine brick ID from virtual coordinates
++    bx = int(virtual_coords[0] / brick_size[0])
++    by = int(virtual_coords[1] / brick_size[1])
++    bz = int(virtual_coords[2] / brick_size[2])
++    # Clamp to valid range to handle boundary cases
++    bx = min(bx, grid_dims[0] - 1)
++    by = min(by, grid_dims[1] - 1)
++    bz = min(bz, grid_dims[2] - 1)
++    brick_id = bx + by * grid_dims[0] + bz * grid_dims[0] * grid_dims[1]
++
++    # 2. Lookup physical storage info
++    physical_info = page_table[brick_id]
+     if physical_info is None:
+-        # Handle case where brick is not currently resident in physical memory
+-        return None
+-        
+-    # 3. Calculate offset within the brick
+-    # Normalize virtual_coords to [0,1] relative to the brick's local space
+-    local_coords = (virtual_coords - brick_id * brick_size) / brick_size
+-    
+-    # 4. Compute final physical texture coordinates
+-    # Scale local coordinates by the brick's physical dimensions and add base offset
+-    u_phys = physical_info.base_u + local_coords.x * physical_info.brick_dims.x
+-    v_phys = physical_info.base_v + local_coords.y * physical_info.brick_dims.y
+-    w_phys = physical_info.base_w + local_coords.z * physical_info.brick_dims.z
+-    
++        return None  # Brick not resident
++
++    base_u, base_v, base_w = physical_info[0], physical_info[1], physical_info[2]
++    phys_w, phys_h, phys_d = physical_info[3], physical_info[4], physical_info[5]
++
++    # 3. Compute local offset within the brick
++    local_u = (virtual_coords[0] - bx * brick_size[0]) / brick_size[0]
++    local_v = (virtual_coords[1] - by * brick_size[1]) / brick_size[1]
++    local_w = (virtual_coords[2] - bz * brick_size[2]) / brick_size[2]
++
++    # 4. Map to physical texture coordinates
++    u_phys = base_u + local_u * phys_w
++    v_phys = base_v + local_v * phys_h
++    w_phys = base_w + local_w * phys_d
++
+     return (u_phys, v_phys, w_phys)
+-
+-def get_brick_id(virtual_coords, brick_size):
+-    """
+-    Determines the brick ID for a given virtual coordinate.
+-    """
+-    # Integer division to find the brick index in each dimension
+-    bx = int(virtual_coords.x / brick_size.x)
+-    by = int(virtual_coords.y / brick_size.y)
+-    bz = int(virtual_coords.z / brick_size.z)
+-    # Flatten 3D brick index to 1D ID if needed by the page table structure
+-    # Assuming row-major order for brick grid
+-    return bx + by * grid_size_x + bz * grid_size_x * grid_size_y
+ ```
+ 
+ **Parameters:**
+ *   **Brick Size:** The dimensions of each brick in the virtual volume space. Not given in the sources.
+-*   **Grid Size:** The number of bricks in each dimension of the virtual volume grid. Not given in the sources.
++*   **Grid Dimensions:** The number of bricks in each dimension of the virtual volume grid. Not given in the sources.
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Out-of-Core Access:** If the brick corresponding to the virtual address is not currently loaded into physical memory, the page table lookup may return no valid physical address. The renderer must handle this, potentially by triggering a load request or skipping the sample [S1].
++*   **Out-of-Core Access:** If the brick corresponding to the virtual address is not currently loaded into physical memory, the page table lookup returns no valid physical address, requiring the renderer to handle the missing data [S1].
+ *   **Dynamic Management:** In early dynamically managed page table approaches, the working set of active bricks was determined independently of view-dependent occlusions, which could lead to inefficient memory usage [S1].
+ 
+@@ -89,5 +77,5 @@
+ 
+ ### Single-Level, Single-Resolution Page Tables
+-Address translation for bricked, single-resolution volumes using a single page table look-up per sample [S1]. The page table is stored in a linear texture (index texture) with one entry per brick [S1]. This approach allows for out-of-core volume rendering but only with volume bricks from the original resolution and no down-sampling [S1]. It is suitable when multi-resolution rendering is not required and scalability is limited [S1]. A key pitfall in early implementations was that the working set of active bricks was determined independently of view-dependent occlusions [S1].
++Address translation for bricked, single-resolution volumes using a single page table look-up per sample [S1]. The page table is stored in a linear texture (index texture) with one entry per brick [S1]. This approach allows for out-of-core volume rendering, but only with volume bricks from the original resolution and no down-sampling [S1]. Multi-resolution rendering is not possible with this approach, hence scalability is very limited [S1]. A key pitfall in early implementations was that the working set of active bricks was determined independently of view-dependent occlusions [S1].
+ 
+ ## Operating characteristics
+@@ -97,5 +85,5 @@
+ *   **Limitations:** Limited scalability for multi-resolution rendering as it does not support down-sampling [S1]. Early dynamic management approaches did not account for view-dependent occlusions, potentially leading to suboptimal memory usage [S1].
+ *   **When to Use:** When rendering large, single-resolution volumes that do not fit in memory, and multi-resolution rendering is not required [S1].
+-*   **When Not to Use:** When multi-resolution rendering or hierarchical culling based on view-dependent occlusions is needed [S1].
++*   **When Not to Use:** When multi-resolution rendering is required, as this method only supports bricks from the original resolution without down-sampling [S1].
+ 
+ ## Background

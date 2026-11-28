@@ -1,0 +1,162 @@
+# Gradient-guided single scattering approximation
+
+Also called: GPU Based On-the-fly Light Emission-absorption Approximation, On-the-fly scatter approximation
+
+## Overview
+A GPU-based direct volume rendering method that approximates single scattering and shadowing on-the-fly for multiple intersecting volumetric datasets [S1, unofficial]. It improves visual quality over local illumination models by using local gradients to guide scatter sample positions and in-scatter coefficients, while maintaining interactive frame rates [S1, unofficial]. It differs from pre-computed ambient occlusion methods by requiring no parameter buffers and performing all computations on-the-fly [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** Multiple registered volumetric datasets, transfer functions defining opacity/scattering ratios, a view ray, and a light intensity parameter [S1, unofficial].
+*   **Output:** Final radiance $L_o$ for each pixel [S1, unofficial].
+
+**Data Structures**
+*   **Voxel Grid:** Standard 3D texture or volume grid storing density/extinction coefficients [S1, unofficial].
+*   **Gradient Field:** Not pre-computed; approximated on-the-fly from the voxel grid neighborhood [S1, unofficial].
+
+**Parameters**
+*   $g$: Average cosine of the scattering angle, ranging from $-1$ to $1$ [S1, unofficial].
+*   $N_{max}$: Maximum number of scatter sample positions, set to 15 [S1, unofficial].
+*   $\epsilon$: Numerical stability constant, typically $10^{-6}$ [G].
+
+**Algorithm Steps**
+1.  **Ray Marching:** Cast a ray through the volume and step through each voxel position $\mathbf{p}$ [S1, unofficial].
+2.  **Gradient Approximation:** Compute the gradient $\nabla V(\mathbf{p})$ of the volume data at the current sampling point [S1, unofficial].
+3.  **Determine Scatter Samples:** Select up to $N_{max} = 15$ scatter sample positions $\mathbf{s}_i$ in the local neighborhood of $\mathbf{p}$ [S1, unofficial]. The selection depends on the strength of the gradient at $\mathbf{p}$ [S1, unofficial]. A strong gradient indicates a less scattering, more reflecting surface, and points in the direction of less dense, more scattering media [S1, unofficial].
+4.  **Calculate Scattering Angle:** For each scatter sample $\mathbf{s}_i$, compute its gradient $\nabla V(\mathbf{s}_i)$ [S1, unofficial]. Calculate the cosine of the scattering angle $\theta$ between $\nabla V(\mathbf{p})$ and $\nabla V(\mathbf{s}_i)$ [S1, unofficial]. The source notes the cosine is zero only if the gradient directions are identical, though standard vector geometry yields a cosine of 1 for identical directions; the implementation uses the standard dot product [S1, unofficial].
+5.  **Weighting:** Weight the influence of each scatter sample position by the distance to the actual sampling point $\mathbf{p}$ and the gradient magnitude at the given scatter sampling position $\|\nabla V(\mathbf{s}_i)\|$ [S1, unofficial].
+6.  **Phase Function:** Compute the phase function $p(\theta)$ using the Henyey-Greenstein function [S1, unofficial]:
+    $$ p(\theta) = \frac{1-g^2}{4\pi (1+g^2 +2g \cos\theta)^{3/2}} $$
+    Where $g < 0$ indicates backward scattering, $g > 0$ indicates forward scattering, and $g = 0$ results in isotropic scattering [S1, unofficial].
+7.  **Light Transfer:** Calculate light transfer through the volumes using the standard emission-absorption calculation as described in [Max95] [S1, unofficial]. Combine the in-scattered light (weighted by $p(\theta)$ and sample weights) with direct illumination and absorption [S1, unofficial].
+8.  **Compositing:** Accumulate the result along the ray using standard volume rendering integration [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+class Vector3:
+    def __init__(self, x, y, z):
+        self.x, self.y, self.z = x, y, z
+    def __add__(self, other): return Vector3(self.x + other.x, self.y + other.y, self.z + other.z)
+    def __sub__(self, other): return Vector3(self.x - other.x, self.y - other.y, self.z - other.z)
+    def __mul__(self, s): return Vector3(self.x * s, self.y * s, self.z * s)
+    def __rmul__(self, s): return self.__mul__(s)
+    def __neg__(self): return Vector3(-self.x, -self.y, -self.z)
+
+def dot_product(a, b): return a.x * b.x + a.y * b.y + a.z * b.z
+def magnitude(v): return math.sqrt(v.x**2 + v.y**2 + v.z**2)
+def normalize(v):
+    m = magnitude(v)
+    if m < 1e-6: return Vector3(0, 0, 0)
+    return Vector3(v.x / m, v.y / m, v.z / m)
+def distance(a, b): return magnitude(a - b)
+
+def sample_volume(grid, pos, dims):
+    """Trilinear interpolation with boundary clamping."""
+    x, y, z = pos.x, pos.y, pos.z
+    x = max(0, min(dims[0] - 1, x))
+    y = max(0, min(dims[1] - 1, y))
+    z = max(0, min(dims[2] - 1, z))
+    ix, fx = int(x), x - int(x)
+    iy, fy = int(y), y - int(y)
+    iz, fz = int(z), z - int(z)
+    def v(dx, dy, dz): return grid[ix + dx][iy + dy][iz + dz]
+    return (v(0,0,0)*(1-fx)*(1-fy)*(1-fz) + v(1,0,0)*fx*(1-fy)*(1-fz) +
+            v(0,1,0)*(1-fx)*fy*(1-fz) + v(1,1,0)*fx*fy*(1-fz) +
+            v(0,0,1)*(1-fx)*(1-fy)*fz + v(1,0,1)*fx*(1-fy)*fz +
+            v(0,1,1)*(1-fx)*fy*fz + v(1,1,1)*fx*fy*fz)
+
+def compute_gradient(grid, pos, dims):
+    """Central difference gradient approximation."""
+    dx = sample_volume(grid, pos + Vector3(1,0,0), dims) - sample_volume(grid, pos + Vector3(-1,0,0), dims)
+    dy = sample_volume(grid, pos + Vector3(0,1,0), dims) - sample_volume(grid, pos + Vector3(0,-1,0), dims)
+    dz = sample_volume(grid, pos + Vector3(0,0,1), dims) - sample_volume(grid, pos + Vector3(0,0,-1), dims)
+    return Vector3(dx, dy, dz)
+
+def select_scatter_samples(pos, grad, grid, dims, max_samples=15):
+    """Select up to max_samples neighbors guided by gradient direction."""
+    samples = []
+    grad_norm = normalize(grad)
+    step = 0.5
+    # Sample along gradient direction and opposite
+    offsets = [Vector3(1,0,0), Vector3(-1,0,0), Vector3(0,1,0), Vector3(0,-1,0), Vector3(0,0,1), Vector3(0,0,-1)]
+    for i in range(max_samples):
+        if i < 6:
+            offset = offsets[i]
+        else:
+            # Interpolate along gradient for additional points
+            t = (i - 5) / 10.0
+            offset = Vector3(grad_norm.x * t, grad_norm.y * t, grad_norm.z * t)
+        samples.append(pos + offset * step)
+    return samples[:max_samples]
+
+def heney_greenstein(cos_theta, g):
+    numerator = 1.0 - g**2
+    denominator = 4.0 * math.pi * (1.0 + g**2 + 2.0 * g * cos_theta)**1.5
+    return numerator / denominator if denominator > 1e-6 else 0.0
+
+def gradient_guided_single_scattering(ray_origin, ray_direction, volume_data, dims, g_param, light_intensity):
+    total_transmittance = 1.0
+    accumulated_radiance = 0.0
+    step_size = 0.1
+    max_steps = 1000
+    epsilon = 1e-6
+    
+    for step in range(max_steps):
+        current_pos = ray_origin + ray_direction * step * step_size
+        if not (0 <= current_pos.x < dims[0] and 0 <= current_pos.y < dims[1] and 0 <= current_pos.z < dims[2]):
+            break
+            
+        sigma_t = sample_volume(volume_data, current_pos, dims)
+        T = math.exp(-sigma_t * step_size)
+        
+        # Direct illumination (Max95 emission-absorption)
+        L_direct = light_intensity * (1.0 - T) / max(sigma_t, epsilon)
+        
+        # Gradient-guided scattering
+        grad_p = compute_gradient(volume_data, current_pos, dims)
+        scatter_samples = select_scatter_samples(current_pos, grad_p, volume_data, dims)
+        L_scatter = 0.0
+        
+        for s in scatter_samples:
+            grad_s = compute_gradient(volume_data, s, dims)
+            cos_theta = dot_product(normalize(grad_p), normalize(grad_s))
+            phase = heney_greenstein(cos_theta, g_param)
+            dist = distance(current_pos, s)
+            sigma_t_s = sample_volume(volume_data, s, dims)
+            T_s = math.exp(-sigma_t_s * dist)
+            weight = (1.0 / (dist + epsilon)) * magnitude(grad_s)
+            L_scatter += phase * weight * T_s
+            
+        # Volume rendering accumulation
+        accumulated_radiance += (L_direct + L_scatter) * total_transmittance
+        total_transmittance *= T
+        
+        if total_transmittance < epsilon:
+            break
+            
+    return accumulated_radiance
+```
+
+## Operating characteristics
+*   **Time Complexity:** Interactive. Performance depends on the number of scatter samples (up to 15) and the per-voxel gradient approximation [S1, unofficial].
+*   **Memory Complexity:** Low. No pre-computed parameter buffers or ambient occlusion maps are required; computations are performed on-the-fly [S1, unofficial].
+*   **Measured Performance:** Tested on Intel QuadCore 3.16 GHz and two Nvidia Geforce 480 GPUs rendering two registered $256^3$ datasets in a $1024 \times 768$ viewport [S1, unofficial].
+    *   T1 (both opaque): L1 (no scattering) 45 fps, L2 (with scattering) 21 fps.
+    *   T2 (1 opaque, 1 translucent): L1 11 fps, L2 9 fps.
+    *   T3 (both half-opaque/half-scattering): L1 41 fps, L2 19 fps.
+    *   T4 (both translucent): L1 41 fps, L2 11 fps.
+    *   L1 = light transport only; L2 = light transport including scattering [S1, unofficial].
+*   **Strengths:** Improves visual quality over local illumination models (e.g., Phong) by capturing single scattering effects; maintains interactive frame rates; suitable for multi-volume rendering [S1, unofficial].
+*   **Limitations:** Approximation; relies on gradient direction which may not always accurately represent light transport paths; performance degrades with higher scattering ratios and translucent datasets [S1, unofficial].
+
+## Background
+*   **Origin:** Presented by Rostislav Khlebnikov, Bernhard Kainz, Bernhard Roth, Judith Muehl, and Dieter Schmalstieg at EUROGRAPHICS 2011 [S1, unofficial].
+*   **History:** The method builds on the emission-absorption model from Max [Max95] and uses the Henyey-Greenstein phase function from [HG41] [S1, unofficial]. It was influenced by algorithms from Ropinski et al. [RDRS10] and Šoltészová et al. [ŠPBV10], which were not directly applicable to multi-volume rendering due to memory requirements or pre-computation needs [S1, unofficial].
+*   **Usage:** Used for direct multi-volume rendering of intersecting datasets, such as registered MRI and DTI-MRI of the brain [S1, unofficial].
+
+## Sources
+[S1] GPU Based On-the-fly Light Emission-absorption Approximation for Direct Multi-volume Rendering, https://doi.org/10.2312/eg2011/posters/011-012, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,73 @@
+# Uncertainty Rendering
+
+Also called: Uncertainty Estimation in Ray Compositing, UncertaintyRenderer
+
+## Overview
+Uncertainty Rendering aggregates per-sample uncertainty metrics along a ray to quantify confidence in volume rendering results [S2, unofficial]. It outputs an additional uncertainty channel alongside RGB by weighting local uncertainty estimates ($\beta$) with ray compositing weights [S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: `weights` (tensor of shape $[N_{rays}, N_{samples}]$), `betas` (tensor of shape $[N_{rays}, N_{samples}]$ representing per-sample uncertainty) [S2, unofficial].
+- Output: `uncertainty` (tensor of shape $[N_{rays}]$) [S2, unofficial].
+
+**Data Structures:**
+- `weights`: Transmittance/compositing weights $w_i$ for each sample $i$ along the ray [S2, unofficial].
+- `betas`: Per-sample uncertainty values $\beta_i$ [S2, unofficial].
+
+**Steps:**
+1. For each ray, compute the element-wise product of `weights` and `betas`.
+2. Sum the products across all samples along the ray to obtain the final uncertainty.
+
+**Formula:**
+$$
+\text{uncertainty} = \sum_{i=1}^{N} w_i \cdot \beta_i
+$$
+Where:
+- $N$ is the number of samples along the ray.
+- $w_i$ is the weight of sample $i$.
+- $\beta_i$ is the uncertainty of sample $i$.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_uncertainty(weights: list[list[float]], betas: list[list[float]]) -> list[float]:
+    """
+    Compute ray-wise uncertainty by weighting per-sample uncertainties by transmittance weights.
+    
+    Args:
+        weights: 2D list of shape (num_rays, num_samples) containing ray compositing weights.
+        betas: 2D list of shape (num_rays, num_samples) containing per-sample uncertainty values.
+        
+    Returns:
+        1D list of shape (num_rays,) containing the aggregated uncertainty for each ray.
+    """
+    uncertainty = []
+    for ray_idx in range(len(weights)):
+        ray_uncertainty = 0.0
+        for sample_idx in range(len(weights[ray_idx])):
+            ray_uncertainty += weights[ray_idx][sample_idx] * betas[ray_idx][sample_idx]
+        uncertainty.append(ray_uncertainty)
+    return uncertainty
+```
+
+**Edge Cases and Pitfalls:**
+- If inputs contain NaN values, the output will propagate NaN [G].
+- The magnitude of the uncertainty depends on the scale of `betas` and `weights` [G].
+
+## Subtopics
+
+## Operating characteristics
+- **Time Complexity:** $O(N_{rays} \times N_{samples})$ for the element-wise multiplication and summation [G].
+- **Memory Complexity:** $O(N_{rays} \times N_{samples})$ to store intermediate products if not fused, or $O(N_{rays})$ if computed in-place [G].
+- **Strengths:** Not given in the sources.
+- **Limitations:** Not given in the sources.
+- **When to use:** Not given in the sources.
+- **When not to use:** Not given in the sources.
+
+## Background
+Uncertainty rendering in this context originates from the SDFStudio framework, which integrates uncertainty estimation into NeRF-based training pipelines [S2, unofficial]. The method composites per-sample uncertainty values ($\beta$) along rays using the same transmittance weights applied to RGB and density [S2, unofficial].
+
+## Sources
+[S1] nerfstudio-project/nerfstudio, https://github.com/nerfstudio-project/nerfstudio, fetched 2026-10-26 (unofficial)
+[S2] autonomousvision/sdfstudio, https://github.com/autonomousvision/sdfstudio, fetched 2026-10-26 (unofficial)

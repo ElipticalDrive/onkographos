@@ -1,0 +1,206 @@
+Descripción Implementar almacenamiento sparse para SDFs volumétricos. #38 (SDF caching) no cubre sparse subgrid storage. Un SDF denso de 256³ = 64MB. Con sparse subgrids (solo subgrids con superficie), ahorro de 80-95% de VRAM. Crítico p...
+
+feat(sdf): Sparse SDF Storage · Issue #136 · lobinuxsoft/kooch · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+feat(sdf): Sparse SDF Storage #136
+New issue
+Copy link
+New issue
+Copy link
+Closed
+Closed
+feat(sdf): Sparse SDF Storage#136
+Copy link
+Labels
+area:sdfSDF — composición CSG, primitivas, sparse storage, ray-marchSDF — composición CSG, primitivas, sparse storage, ray-marchdifficulty:mediumComplejidad moderadaComplejidad moderadaenhancementNew feature or requestNew feature or requestpriority:mediumPrioridad mediaPrioridad media
+Milestone
+M5: Mesh to SDF Pipeline
+Description
+lobinuxsoft
+opened on Mar 2, 2026
+Issue body actions
+Descripción
+Implementar almacenamiento sparse para SDFs volumétricos. #38 (SDF caching) no cubre sparse subgrid storage. Un SDF denso de 256³ = 64MB. Con sparse subgrids (solo subgrids con superficie), ahorro de 80-95% de VRAM. Crítico para escalar a mundos grandes.
+Estructura
+```
+Root Grid (16³ = 4096 cells)
+  └── Subgrid (16³ = 4096 values each)
+       └── Solo allocated si contiene superficie (|SDF| < threshold)
+```
+Total teórico: 256³ = 16.7M values
+Real típico: 5-20% de subgrids activos = 0.8M-3.3M values
+Tareas
+SparseGrid struct: root grid con indices a subgrids
+Allocation pool para subgrids (GPU storage buffer)
+Free list para reciclar subgrids (objetos que desaparecen)
+Classify pass (compute): determinar qué subgrids necesitan allocation
+Populate pass (compute): evaluar SDF solo en subgrids activos
+Lookup function en WGSL: root → subgrid → value (con trilinear interpolation)
+Compact representation en GPU (indirection buffer + data buffer)
+LOD: subgrids lejanos a resolución menor
+Metrics: VRAM usage, active subgrids, allocation/free count
+Criterios de Aceptación
+SDF de 256³ usa < 15MB VRAM para escena típica (vs 64MB denso)
+Lookup no más de 2x más lento que acceso directo a array
+Allocation/free sin stalls (no CPU roundtrip)
+Escalable a 512³ sin exceder 100MB VRAM
+Ejemplo de Código
+```
+// crates/ome_sdf/src/sparse_grid.rs
+
+pub struct SparseGrid {
+    pub root_dim: u32,        // e.g., 16
+    pub subgrid_dim: u32,     // e.g., 16
+    pub root_indices: GpuBuffer,  // root_dim³ × u32 (index into subgrid pool, 0xFFFFFFFF = empty)
+    pub subgrid_pool: GpuBuffer,  // max_subgrids × subgrid_dim³ × f32
+    pub free_list: GpuBuffer,     // stack of free subgrid indices
+    pub active_count: u32,
+    pub max_subgrids: u32,
+}
+```
+```
+// Sparse SDF lookup
+fn sparse_sdf_lookup(grid: SparseGrid, world_pos: vec3<f32>) -> f32 {
+    let grid_pos = world_to_grid(world_pos, grid.bounds, grid.total_dim);
+    let root_cell = vec3<u32>(grid_pos) / grid.subgrid_dim;
+    let root_idx = root_cell.x + root_cell.y * grid.root_dim + root_cell.z * grid.root_dim * grid.root_dim;
+    
+    let subgrid_idx = root_indices[root_idx];
+    if subgrid_idx == 0xFFFFFFFFu {
+        return 1.0; // empty cell = far from surface
+    }
+    
+    let local_pos = fract(grid_pos / f32(grid.subgrid_dim)) * f32(grid.subgrid_dim);
+    return trilinear_sample(subgrid_pool, subgrid_idx, local_pos, grid.subgrid_dim);
+}
+```
+Documentación de Referencia
+📚 OpenVDB — Sparse Volume Data Structure
+📚 GVDB — GPU Sparse Volumes (NVIDIA)
+📚 Sparse SDF for Real-Time Rendering
+Dependencias
+Bloqueado por: SDF caching y management #38 (SDF caching base), Buffer management system #8 (buffer management — completado)
+Bloquea: Escalar a mundos grandes, LOD system para SDFs
+Relacionado: epic(render): Phase 1 — Mesh GPU-driven Pipeline (Nanite-style) #117 (Virtual Geometry — conceptos similares de sparse storage)
+Update — input pipeline (added 2026-04-26 alongside #211 / #307)
+This sparse storage is piece 4 of 5 in the destructible terrain + planet-scale rendering roadmap (see docs/research/sdf-csg-composition.md and #307).
+Per-chunk data model unifies this with #54 (world streaming) and #115 (BVH):
+```
+ChunkData {
+    sparse_sdf_baseline:  SparseSubgrid,      // THIS issue (#136) — heavy, slowly-changing
+    rpn_delta_tree:       Vec<Token>,         // #307 — recent edits, light, fast-changing
+    bvh_aabb:             Aabb,               // #115 — culling
+    lod_level:            u8,                 // #54 — streaming / LOD
+    last_baked_at:        Frame,              // Edit Baker — TTL for re-bake
+}
+```
+eval_scene_chunk(p) evaluates min(sparse_sdf_baseline.sample(p), eval_rpn(rpn_delta_tree, p)) — the baseline is the union floor; RPN deltas carve or add on top. The Edit Baker pipeline (filed as a separate issue) is responsible for: when rpn_delta_tree.len() > BAKE_THRESHOLD or the chunk is unloaded, rasterise the delta into the sparse baseline (allocate / classify / populate subgrids covered by the edits) and clear the delta tree.
+What this issue stays responsible for
+The sparse subgrid storage data structure itself (root grid + subgrid pool + free list + LOD).
+Allocation / free / lookup primitives.
+The sample-time sparse_sdf_baseline.sample(p) shader function.
+What is delegated to other issues
+Building the input SDF (was: voxelise a mesh; now also: rasterise an RPN delta tree). The "classify pass" / "populate pass" tasks listed above stay in this issue, but their inputs can come from either path. Tagged in the implementation as a strategy parameter.
+Streaming / chunking decisions: World streaming básico #54.
+Spatial culling of which chunks to even sample: feat(core): Spatial Acceleration Structure — BVH/Octree compartido #115.
+The bake trigger logic (when to rasterise, what TTL, how to invalidate BVH): Edit Baker issue.
+No structural change to this issue's design — just clarifies that the populate path now has two callers, not one.
+Update — planet-scale + GPU-driven hardening (2026-04-26 ter)
+Position in roadmap reaffirmed as piece 4 of 5. Post-#307 research clarifies the persistence story (which is what makes planet-scale "remember player edits across sessions"):
+Disk persistence is delegated to #312 (persistent edit log per chunk). This issue stays responsible for the in-memory sparse subgrid storage. The lifecycle is:
+Chunk load: regenerate baseline procedurally from world seed → apply persisted edits from feat(streaming,assets): persistent edit log per chunk — disk-backed delta history #312's log via feat(render): postfix RPN CSG tree (Approach D from sdf-csg-composition.md) #307's RPN tree → min(baseline.sample(p), eval_rpn(delta_tree, p)).
+Chunk runtime: Edit Baker (feat(render): RPN edit baker — bridge runtime CSG edits into sparse SDF chunks #309) periodically rasterises the delta tree into the baseline to keep eval cost bounded.
+Chunk eviction: Edit Baker force-runs (delta tree → baseline), and feat(streaming,assets): persistent edit log per chunk — disk-backed delta history #312 commits the edit log to disk before the chunk pages out.
+PhysicsActiveRegion (#311) extends the lifecycle: chunks inside an active region (even if not rendered) receive edits, which take the same persistence path — applied to in-memory baseline if loaded, written to #312's log if not.
+No structural change to this issue. Just confirms the boundaries: this issue owns "in-memory sparse SDF storage and lookup primitives", #312 owns "disk persistence of the edits that built the in-memory state", #309 is the bridge between them.
+Activity
+lobinuxsoft
+added this to the M5: Mesh to SDF Pipeline milestone on Mar 2, 2026
+lobinuxsoft
+added
+enhancementNew feature or requestNew feature or request
+priority:mediumPrioridad mediaPrioridad media
+difficulty:mediumComplejidad moderadaComplejidad moderada
+on Mar 2, 2026
+lobinuxsoft
+added a commit that references this issue on Apr 26, 2026
+docs(research): pivot recommendation to postfix RPN tree (Approach D)
+...
+a18b2cb
+lobinuxsoft
+added
+area:sdfSDF — composición CSG, primitivas, sparse storage, ray-marchSDF — composición CSG, primitivas, sparse storage, ray-march
+on Apr 26, 2026
+lobinuxsoft
+added 11 commits that reference this issue on Apr 26, 2026
+feat(world): ChunkId + ChunkState + ChunkData types
+...
+5766710
+feat(sdf): SparseGrid skeleton — root indices + pool + free list buff…
+...
+608096d
+feat(sdf): atomic free-list init + pop/push WGSL helpers (S2 of #136)
+...
+c9b6869
+feat(sdf): GPU-driven sparse classify pass + opaque SdfSampler trait …
+...
+b3a6c99
+feat(sdf): GPU-driven sparse populate pass + indirect dispatch (S4 of #…
+...
+bb078be
+feat(sdf): GPU sparse SDF lookup WGSL + parametric layout (S5 of #136)
+...
+7f7ac43
+refactor(sdf): split lookup/tests.rs into harness/wgsl/sampling submo…
+...
+3055f9c
+feat(sdf): compact subgrid pool via texture_3d<r16float> atlas + HW t…
+...
+590e277
+feat(sdf): GPU-driven LOD with per-level atlas + downsample cascade (…
+...
+385fdc7
+fix(sdf): drop redundant per-LOD classify/populate in cascade (S7 fol…
+...
+b18f4aa
+feat(sdf): metrics pass + readback API (S8 of #136)
+...
+acb16d5
+lobinuxsoft commented on Apr 29, 2026
+lobinuxsoft
+on Apr 29, 2026
+OwnerAuthor
+More actions
+Closed via PR #349 merged to development.
+lobinuxsoft
+closed this as completedon Apr 29, 2026
+lobinuxsoft
+added 2 commits that reference this issue on Apr 30, 2026
+feat(sdf): scale sparse SDF root grid to 32³ via large-root-grid feature
+...
+11c86dc
+Merge pull request #359 from lobinuxsoft/347-sdf-scale-sparse-storage…
+...
+b47c91a
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+area:sdfSDF — composición CSG, primitivas, sparse storage, ray-marchSDF — composición CSG, primitivas, sparse storage, ray-marchdifficulty:mediumComplejidad moderadaComplejidad moderadaenhancementNew feature or requestNew feature or requestpriority:mediumPrioridad mediaPrioridad media
+Projects
+No projects
+Milestone
+M5: Mesh to SDF PipelineNo due date
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

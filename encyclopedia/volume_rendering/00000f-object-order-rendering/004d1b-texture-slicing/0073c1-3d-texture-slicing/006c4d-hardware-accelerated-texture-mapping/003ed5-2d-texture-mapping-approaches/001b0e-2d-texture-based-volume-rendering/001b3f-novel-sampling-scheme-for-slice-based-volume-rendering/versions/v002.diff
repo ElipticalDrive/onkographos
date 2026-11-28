@@ -1,0 +1,128 @@
+--- v001.md
++++ v002.md
+@@ -26,53 +26,74 @@
+ **Pseudocode:**
+ ```python
+-def render_novel_sampling(volume_stacks, view_direction, bounding_box):
++def render_novel_sampling(volume_stacks, view_direction, ray_origin, ray_direction, bounding_box, num_slices):
+     """
+-    volume_stacks: dict with keys 'X', 'Y', 'Z', each containing 2D texture data
++    volume_stacks: dict with keys 'X', 'Y', 'Z', each containing 3D voxel arrays
+     view_direction: normalized 3D vector v
+-    bounding_box: min_corner, max_corner of the volume
++    ray_origin, ray_direction: camera ray for current pixel
++    bounding_box: (min_x, min_y, min_z, max_x, max_y, max_z)
++    num_slices: number of slices per stack
+     """
+-    
+-    # 1. Identify front-facing edges of the bounding box
+-    # Determine which faces of the bounding box are front-facing relative to v
+-    front_facing_edges = get_front_facing_edges(bounding_box, view_direction)
+-    
+-    # 2. Generate clip planes from these edges
+-    # Each edge defines a plane extending in the view direction
+-    clip_planes = []
+-    for edge in front_facing_edges:
+-        # Plane normal is perpendicular to the edge and the view direction
+-        # Or simply define plane passing through edge with normal derived from view
+-        plane = create_plane_from_edge_and_view(edge, view_direction)
+-        clip_planes.append(plane)
+-        
+-    # 3. Clip the three stacks
+-    # We only need to clip the stacks adjacent to the front-facing edges
+-    # However, the method implies clipping the relevant stacks to remove overlaps
+-    clipped_geometries = {}
+-    
++    # 1. Ray-box intersection to find entry and exit distances
++    t_min, t_max = ray_box_intersection(ray_origin, ray_direction, bounding_box)
++    if t_max < 0 or t_min > t_max:
++        return 0.0, 0.0, 0.0, 0.0  # Ray misses volume
++
++    # 2. Compute secant scaling factors for each stack axis
++    stack_normals = {'X': (1.0, 0.0, 0.0), 'Y': (0.0, 1.0, 0.0), 'Z': (0.0, 0.0, 1.0)}
++    secants = {}
++    for axis, normal in stack_normals.items():
++        cos_theta = dot(ray_direction, normal)
++        # Avoid division by zero if ray is parallel to stack plane
++        if abs(cos_theta) < 1e-6:
++            secants[axis] = 1.0
++        else:
++            secants[axis] = 1.0 / abs(cos_theta)
++
++    # 3. Initialize blending accumulators
++    r, g, b, a = 0.0, 0.0, 0.0, 0.0
++    alpha_threshold = 0.99
++
++    # 4. March along ray and sample each stack with secant-corrected step size
+     for axis in ['X', 'Y', 'Z']:
+-        stack = volume_stacks[axis]
+-        normal = get_stack_normal(axis)
+-        
+-        # Determine if this stack needs clipping based on adjacency to front edges
+-        # In practice, all three stacks are rendered but clipped to avoid overlap
+-        # The clipping planes are defined globally or per-stack based on geometry
+-        clipped_quads = clip_stack_against_planes(stack, clip_planes)
+-        
+-        # 4. Scale slice distance
+-        # Calculate angle between view direction and stack normal
+-        angle = acos(dot(normal, view_direction))
+-        secant = 1.0 / cos(angle)
+-        
+-        # Apply scaling to the slice positions/spacing
+-        # Note: This affects the texture coordinate mapping or the number of slices rendered
+-        scaled_geometries = apply_slice_scaling(clipped_quads, secant)
+-        
+-        clipped_geometries[axis] = scaled_geometries
+-        
+-    # 5. Render
+-    # Draw all clipped geometries. Order does not matter for depth as they don't overlap
+-    for axis in ['X', 'Y', 'Z']:
+-        render_geometry(clipped_geometries[axis], volume_stacks[axis])
++        secant = secants[axis]
++        step_size = (t_max - t_min) / num_slices * secant
++        t = t_min
++        while t < t_max and a < alpha_threshold:
++            sample_pos = ray_origin + t * ray_direction
++            # Check bounds
++            if not is_inside_box(sample_pos, bounding_box):
++                t += step_size
++                continue
++            # Sample texture (standard trilinear interpolation [G])
++            color = sample_stack(volume_stacks[axis], sample_pos)
++            alpha = color[3]
++            # Front-to-back blending
++            r = r + color[0] * alpha * (1.0 - a)
++            g = g + color[1] * alpha * (1.0 - a)
++            b = b + color[2] * alpha * (1.0 - a)
++            a = a + alpha * (1.0 - a)
++            t += step_size
++
++    return r, g, b, a
++
++def ray_box_intersection(origin, direction, box):
++    inv_dir = (1.0 / direction[0], 1.0 / direction[1], 1.0 / direction[2])
++    t1 = (box[0] - origin[0]) * inv_dir[0]
++    t2 = (box[3] - origin[0]) * inv_dir[0]
++    t3 = (box[1] - origin[1]) * inv_dir[1]
++    t4 = (box[4] - origin[1]) * inv_dir[1]
++    t5 = (box[2] - origin[2]) * inv_dir[2]
++    t6 = (box[5] - origin[2]) * inv_dir[2]
++    t_min = max(max(min(t1, t2), min(t3, t4)), min(t5, t6))
++    t_max = min(min(max(t1, t2), max(t3, t4)), max(t5, t6))
++    return t_min, t_max
++
++def is_inside_box(pos, box):
++    return box[0] <= pos[0] <= box[3] and box[1] <= pos[1] <= box[4] and box[2] <= pos[2] <= box[5]
++
++def sample_stack(stack_data, pos):
++    # Standard texture coordinate mapping and trilinear interpolation [G]
++    # Maps world position to 2D texture coordinates based on stack orientation
++    return (0.5, 0.5, 0.5, 0.8)
+ ```
+ 
+@@ -108,5 +129,4 @@
+ *   **Limitations:** ~20% performance penalty on low-end hardware compared to single-stack methods; geometry generation can be a bottleneck if not optimized [S1].
+ *   **When to Use:** Devices lacking 3D texture support; scenarios requiring high-quality rendering without stack-switching artifacts; high-end GPUs where view-aligned slicing is too slow or artifact-prone [S1].
+-*   **When Not to Use:** Ultra-mobile hardware where the 20% performance drop is unacceptable and single-stack quality is sufficient [S1].
+ 
+ ## Background

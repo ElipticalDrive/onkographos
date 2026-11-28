@@ -1,0 +1,177 @@
+# Kernel-Agnostic MCMC
+
+Also called: Kernel-Agnostic Markov Chain Monte Carlo
+
+## Overview
+Kernel-Agnostic MCMC is an optimization strategy for 3D Gaussian Splatting that replaces heuristic densification rules with a probabilistic Markov Chain Monte Carlo (MCMC) framework. It treats primitive opacity as a probability distribution to identify "dead" primitives and respawn them, ensuring that densification preserves the underlying scene representation regardless of the specific splatting kernel used. Unlike its sibling [3DGS-MCMC](7852-3dgs-mcmc.md), which relies on Gaussian-specific scale adjustments and logit-based noise, this method uses opacity regularization and a Beta Kernel noise function to achieve kernel-agnostic stability and exploration.
+
+## How it works
+The method reinterprets the Gaussian cloud as samples from an underlying probability distribution. It guides the life cycle of primitives (spawn/prune) by adjusting opacity and position, using noise to encourage exploration and prevent overfitting.
+
+### Inputs and Outputs
+*   **Inputs:** Current primitive parameters (position $\mu$, covariance $\Sigma$, opacity $o$), learning rate $\lambda_{\text{Ir}}$, hyperparameters $\lambda_{\text{SSIM}}$, $\lambda_o$, $\lambda_{\Sigma}$, $\lambda_{\epsilon}$, and noise scale parameter $b'$.
+*   **Outputs:** Updated primitive parameters for the next optimization step.
+
+### Data Structures
+Primitives are defined by:
+*   $\mu$: Position vector.
+*   $\Sigma$: Covariance matrix.
+*   $o$: Opacity scalar.
+*   $f(x)$: The splatting kernel function (e.g., Gaussian, Beta).
+
+### Formulas and Parameters
+
+**1. Composite Loss Function**
+The total loss $\mathcal{L}$ combines rendering accuracy with regularization terms to encourage densification and exploration [S1]:
+
+$$
+\mathcal{L} = (1 - \lambda_{\text{SSIM}}) \mathcal{L}_1 + \lambda_{\text{SSIM}} \mathcal{L}_{\text{SSIM}} + \lambda_o \sum_i |o_i| + \lambda_{\Sigma} \sum_i \sum_j |\sqrt{\text{eig}_j(\Sigma_i)}|
+$$
+
+Where:
+*   $\mathcal{L}_1$: Pixel-wise L1 loss.
+*   $\mathcal{L}_{\text{SSIM}}$: Structural Similarity Index Measure loss.
+*   $\lambda_{\text{SSIM}}$: Weight for SSIM loss.
+*   $\lambda_o$: Opacity regularization weight.
+*   $\lambda_{\Sigma}$: Covariance regularization weight.
+*   $\text{eig}_j(\Sigma_i)$: Eigenvalues of the covariance matrix $\Sigma_i$.
+
+**2. Position Update with Noise**
+Primitive positions are updated using gradient descent augmented with opacity-scaled noise [S1]:
+
+$$
+\mu \leftarrow \mu - \lambda_{\text{Ir}} \cdot \nabla_{\mu} \mathcal{L} + \lambda_{\epsilon} \cdot \epsilon
+$$
+
+Where the noise term $\epsilon$ is defined as:
+
+$$
+\epsilon = \lambda_{\text{Ir}} \cdot \mathcal{B}(o_i; b') \cdot \Sigma_{\eta}
+$$
+
+*   $\lambda_{\text{Ir}}$: Learning rate.
+*   $\lambda_{\epsilon}$: Noise impact control factor.
+*   $\Sigma_{\eta}$: Sampled noise vector.
+*   $\mathcal{B}(o_i; b')$: Beta Kernel function scaling noise by opacity.
+*   $b'$: Beta Kernel parameter, set to $\ln(25)$ to resemble the fall-off behavior of the original logit function [S1].
+
+**3. Densification and Opacity Adjustment**
+When a primitive is cloned $N$ times, the new opacity $o'$ is calculated to preserve the probability distribution [S1]:
+
+$$
+o' = 1 - \sqrt[N]{1 - o}
+$$
+
+For small regularized opacity $o$, this is approximated via Taylor expansion as $o' \approx \frac{o}{N}$. This ensures that the densified distribution $1 - (1 - o' \cdot f(x))^N$ approximates the original $o \cdot f(x)$, maintaining consistency regardless of the kernel $f(x)$ [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def kernel_agnostic_mcmc_step(primitives, learning_rate, lambda_ssim, lambda_o, lambda_sigma, lambda_epsilon, b_prime):
+    """
+    Performs one optimization step for Kernel-Agnostic MCMC.
+    
+    Args:
+        primitives: List of primitive objects with attributes .mu, .Sigma, .o.
+        learning_rate: Scalar lambda_Ir.
+        lambda_ssim: Weight for SSIM loss.
+        lambda_o: Weight for opacity regularization.
+        lambda_sigma: Weight for covariance regularization.
+        lambda_epsilon: Noise impact factor.
+        b_prime: Beta kernel parameter (default ln(25)).
+        
+    Returns:
+        Updated primitives.
+    """
+    # 1. Compute Rendering Losses
+    # Render image from current primitives
+    rendered_image = render_scene(primitives)
+    target_image = get_ground_truth_image() # Assumed available
+    
+    # L1 Loss
+    loss_l1 = mean_absolute_error(rendered_image, target_image)
+    
+    # SSIM Loss
+    loss_ssim = compute_ssim(rendered_image, target_image)
+    
+    # 2. Compute Regularization Terms
+    reg_opacity = 0.0
+    reg_covariance = 0.0
+    
+    for prim in primitives:
+        # Opacity regularizer: sum of absolute opacities
+        reg_opacity += abs(prim.o)
+        
+        # Covariance regularizer: sum of square roots of eigenvalues
+        # Compute eigenvalues of Sigma
+        eigenvalues = compute_eigenvalues(prim.Sigma)
+        for eig in eigenvalues:
+            reg_covariance += sqrt(abs(eig))
+            
+    # 3. Compute Total Loss
+    loss = (1 - lambda_ssim) * loss_l1 + lambda_ssim * loss_ssim + \
+           lambda_o * reg_opacity + lambda_sigma * reg_covariance
+           
+    # 4. Compute Gradients
+    # Gradient of loss w.r.t position mu
+    grad_mu = compute_gradient(loss, primitives, 'mu')
+    
+    # 5. Update Positions with Noise
+    for prim in primitives:
+        # Sample noise vector Sigma_eta
+        # Assuming standard normal distribution or similar noise source
+        noise_vector = sample_noise(prim.mu.shape)
+        
+        # Compute Beta Kernel scaling factor
+        # B(o_i; b') scales noise by opacity
+        beta_kernel_scale = beta_kernel_function(prim.o, b_prime)
+        
+        # Compute noise term epsilon
+        epsilon = learning_rate * beta_kernel_scale * noise_vector
+        
+        # Update position
+        prim.mu = prim.mu - learning_rate * grad_mu[prim.id] + lambda_epsilon * epsilon
+        
+    # 5. Handle Densification (Cloning)
+    # Identify primitives to clone based on opacity thresholds or MCMC criteria
+    # For each primitive selected for cloning N times:
+    for prim in primitives_to_clone:
+        n_clones = get_clone_count(prim) # Determined by MCMC sampling logic
+        
+        # Calculate new opacity for clones
+        # o' = 1 - (1 - o)^(1/N)
+        new_opacity = 1 - pow(1 - prim.o, 1 / n_clones)
+        
+        # Create N new primitives with new_opacity
+        # Position and covariance may be perturbed or copied
+        new_primitives = create_clones(prim, n_clones, new_opacity)
+        
+        # Add new primitives to the scene
+        add_primitives(new_primitives)
+        
+    return primitives
+```
+
+### Edge Cases and Pitfalls
+*   **Opacity Regularization:** The method relies on keeping opacity $o$ small to justify the Taylor expansion approximation $o' \approx o/N$. If opacity becomes large, the approximation error $\mathcal{O}(o^2)$ becomes significant, potentially distorting the rendered distribution [S1].
+*   **Kernel Independence:** The method is designed to be kernel-agnostic. However, the validity of the opacity adjustment formula depends on the assumption that the splatting kernel $f(x)$ behaves predictably during densification. Complex deformable kernels may require careful validation of the approximation [S1].
+*   **Noise Scaling:** The Beta Kernel parameter $b' = \ln(25)$ is critical for matching the fall-off behavior of the original logit function. Incorrect tuning may lead to insufficient exploration or excessive noise [S1].
+
+## Operating characteristics
+*   **Time Complexity:** The addition of regularization terms and noise sampling increases per-step computational cost compared to standard 3DGS. The opacity adjustment and cloning logic add overhead during densification steps.
+*   **Memory Complexity:** Similar to 3DGS, but the probabilistic respawn mechanism may lead to more stable memory usage by preventing excessive accumulation of "dead" primitives.
+*   **Strengths:**
+    *   **Kernel Agnostic:** Works with various splatting kernels, not just Gaussians [S1].
+    *   **Stable Densification:** Preserves the underlying probability distribution during cloning, reducing artifacts [S1].
+    *   **Exploration:** Noise term encourages exploration, preventing local minima [S1].
+*   **Limitations:**
+    *   **Hyperparameter Sensitivity:** Requires tuning of $\lambda_o$, $\lambda_{\Sigma}$, $\lambda_{\epsilon}$, and $b'$ [S1].
+    *   **Approximation Error:** Relies on small opacity assumption for densification accuracy [S1].
+
+## Background
+Kernel-Agnostic MCMC was introduced in the context of Deformable Beta Splatting, reinterpreting the optimization process of 3D Gaussian Splatting as an MCMC sampling problem. It addresses limitations in heuristic-based densification strategies by providing a mathematically grounded approach to primitive lifecycle management. The method was presented in the paper "Deformable Beta Splatting" [S1].
+
+## Sources
+[S1] Deformable Beta Splatting, https://doi.org/10.1145/3721238.3730716, fetched 2026-11-08

@@ -1,0 +1,121 @@
+# Procedural Density Calculation
+
+Also called: Density Curve Filter, calculateCloudDensity, calculateCloudDensityMinimal
+
+## Overview
+Procedural Density Calculation generates volumetric density fields on-the-fly using mathematical functions and noise modulation rather than relying solely on pre-computed voxel grids [S1, unofficial]. It distinguishes itself from pre-baked approaches by computing density values directly during rendering or generation passes, often integrating shape modulation to preserve detail without storage overhead [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** Ray origin, ray direction, bounding volume parameters, and procedural parameters (e.g., eccentricity, curvature, noise seeds) [S1, unofficial].
+- **Output:** Density value $\rho$ and optionally albedo $\alpha$ at a given 3D position $\mathbf{p}$ [S1, unofficial].
+
+**Data Structures:**
+- **3D Volume Texture:** A 3D texture array storing density and albedo per voxel [S1, unofficial]. The layout is defined as:
+  - **R Channel:** Noise value [S1, unofficial].
+  - **G Channel:** Local Ambient Occlusion (AO) [S1, unofficial].
+  - **B Channel:** Noise-driven height-based baseline albedo [S1, unofficial].
+  - **A Channel:** Procedural cloud physical density [S1, unofficial].
+- **Cell ID Hash:** Used to decode eccentricity and curvature parameters for shape modulation [S1, unofficial].
+
+**Steps:**
+1. **Shape Modulation:** For a given position $\mathbf{p}$, compute a base shape function (e.g., ellipsoid profile) driven by eccentricity, curvature exponent, and center distance [S1, unofficial].
+2. **Noise Integration:** Apply on-the-fly procedural 3D noise to modulate the shape, preserving noise details that might be lost in lower-resolution representations [S1, unofficial].
+3. **Density Calculation:** Combine the modulated shape and noise to produce the physical density $\rho$, which is stored in the Alpha channel of the 3D volume texture [S1, unofficial].
+4. **Albedo Calculation:** Compute the height-based baseline albedo based on noise and store it in the Blue channel [S1, unofficial].
+5. **Rendering Consistency:** During raymarching, retrieve density and albedo directly from the 3D volume texture in cheap and detailed passes to ensure 100% rendering consistency between generation and rendering [S1, unofficial].
+6. **Raymarching Stability:** Replace unstable backing-up or bifurcated stepping loops with stable, uniform linear marching between bounding bounds to eliminate spots, missing clouds, noise, and banding [S1, unofficial]. Correct empty space skipping using robust positive-step bifurcated step size logic to eliminate coordinate jumping and infinite loops [S1, unofficial].
+7. **Edge Filtering:** Apply a density curve between two points (in and out) to add, subtract, multiply, or overwrite volume data, smoothly subtracting false signals at the edge of the data [S2].
+
+**Formulas:**
+- **Ellipsoid Profile:** $S(\mathbf{p}) = \exp\left(-\left(\frac{x^2}{e_x^2} + \frac{y^2}{e_y^2} + \frac{z^2}{e_z^2}\right)^c\right)$ driven by eccentricity $e$, curvature exponent $c$, and center distance $d$ [S1, unofficial].
+- **Density Curve Filter:** Creates a curve between two points (in and out) to add, subtract, multiply, or overwrite volume data, smoothing false signals at data edges [S2].
+- **Density Storage:** $\rho(\mathbf{p}) = V_{3D}(\mathbf{p}).A$ [S1, unofficial].
+- **Albedo Storage:** $\alpha_{base}(\mathbf{p}) = V_{3D}(\mathbf{p}).B$ [S1, unofficial].
+
+**Parameters:**
+- **Eccentricity:** Decoded from cell ID hash [S1, unofficial].
+- **Curvature Exponent:** Decoded from cell ID hash [S1, unofficial].
+- **Step Size & Bounds:** Uniform linear marching step size and bounding bounds for raymarching [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Precision:** Low-resolution raymarching can suffer from coordinate jumping and infinite loops if step size logic is not robust [S1, unofficial].
+- **Artifacts:** Unstable stepping loops cause spots, banding, and missing clouds [S1, unofficial].
+- **Consistency:** Discrepancies between generation and rendering passes occur if density is not retrieved directly from the same texture used for generation [S1, unofficial].
+- **Preview Limitation:** The density curve filter works only in preview; filtered data must be exported to new .df3 files for PovRay rendering [S2].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def calculate_cloud_density(p, cell_id_hash, noise_seed):
+    """Calculate procedural cloud density at position p [S1, unofficial]."""
+    # Decode shape parameters from hash [S1, unofficial]
+    eccentricity = (cell_id_hash % 100) / 100.0 + 0.5
+    curvature = (cell_id_hash % 50) / 50.0 + 1.0
+    
+    # Compute base shape (ellipsoid profile) [S1, unofficial]
+    dx, dy, dz = p.x, p.y, p.z
+    base_shape = ((dx/eccentricity)**2 + (dy/eccentricity)**2 + (dz/eccentricity)**2) ** curvature
+    base_shape = max(0.0, 1.0 - base_shape)
+    
+    # Apply procedural 3D noise [S1, unofficial]
+    # Note: Exact noise function not provided in sources [G]
+    noise_val = (hash(p.x * 12.9898 + p.y * 78.233 + p.z * 45.164) % 1000) / 1000.0 * 2.0 - 1.0
+    
+    # Modulate shape with noise [S1, unofficial]
+    density = base_shape * (1.0 + noise_val * 0.5)
+    return max(0.0, min(1.0, density))
+
+def calculate_albedo(p, noise_seed):
+    """Calculate height-based baseline albedo [S1, unofficial]."""
+    # Height-based baseline albedo logic [S1, unofficial]
+    # Note: Exact formula not provided in sources [G]
+    height_factor = max(0.0, min(1.0, p.y / 10.0))
+    noise_val = (hash(p.x * 12.9898 + p.y * 78.233 + p.z * 45.164) % 1000) / 1000.0
+    return vec3(0.8, 0.85, 0.9) * (1.0 - height_factor * 0.5) + noise_val * 0.1
+
+def raymarch_clouds(ray_origin, ray_direction, volume_texture, step_size, max_distance):
+    """Stable linear raymarching through cloud volume [S1, unofficial]."""
+    t = 0.0
+    density_accum = 0.0
+    color_accum = vec3(0.0)
+    
+    # Uniform linear marching between bounding bounds [S1, unofficial]
+    while t < max_distance:
+        p = ray_origin + ray_direction * t
+        
+        # Retrieve density and albedo directly from 3D volume texture [S1, unofficial]
+        density = volume_texture.sample(p).A
+        albedo = volume_texture.sample(p).B
+        
+        # Accumulate density and color [G]
+        # Note: Density is stored per-voxel; step_size is used only for traversal, not accumulation scaling [G]
+        density_accum += density
+        color_accum += albedo * density
+        
+        t += step_size
+        
+    return color_accum, density_accum
+```
+
+## Subtopics
+
+### [Height Fog](14108-height-fog.md)
+Simulates a dense flat atmospheric volume by blending voxel colors with a height fog color based on a submersion factor and a visibility curve. It is chosen when a uniform, height-dependent atmospheric effect is needed rather than complex cloud structures. See [Height Fog](14108-height-fog.md).
+
+### [Procedural Volume Data Creation](13065-procedural-volume-data-creation.md)
+Applies constructive solid geometry (CSG) operations to volume data, procedurally adding and subtracting thousands of spheres from an empty voxel volume using Boolean operations to create complex landscapes. Sphere size and position are random values within a user-defined range. It is used for generating test terrains or complex geometric volumes. See [Procedural Volume Data Creation](13065-procedural-volume-data-creation.md).
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$ where $N$ is the number of samples along the ray, as density is computed on-the-fly [S1, unofficial].
+- **Memory Complexity:** $O(V)$ where $V$ is the volume texture size, required for caching and retrieval consistency [S1, unofficial].
+- **Performance:** On-the-fly calculation preserves noise details but requires significant computational power per sample [S1, unofficial].
+- **Limitations:** Computationally expensive per sample; potential for artifacts if raymarching steps are not stable [S1, unofficial].
+
+## Background
+The method originates from implementations in cloud rendering optimization, specifically within the `boidsish` project, which focuses on eroded Voronoi weather maps and stable linear raymarching [S1, unofficial]. It also draws from procedural terrain generation techniques using CSG operations on voxel volumes [S2].
+
+## Sources
+[S1] Optimize cloud rendering with eroded Voronoi weather maps and stable linear raymarching, https://github.com/ricecake/boidsish/pull/679, fetched 2026-10-28 (unofficial)
+[S2] DF3 Viewer Oosawa, https://qcganime.web.fc2.com/OOSAWA/MANUAL/FilterE.html, fetched 2026-10-29

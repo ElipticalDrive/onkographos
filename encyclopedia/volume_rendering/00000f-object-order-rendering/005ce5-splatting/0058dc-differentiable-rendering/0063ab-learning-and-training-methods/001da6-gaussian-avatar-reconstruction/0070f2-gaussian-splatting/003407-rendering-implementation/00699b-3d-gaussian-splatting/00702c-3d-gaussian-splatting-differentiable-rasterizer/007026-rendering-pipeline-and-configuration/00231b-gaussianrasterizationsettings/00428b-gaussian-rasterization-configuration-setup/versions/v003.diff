@@ -1,0 +1,165 @@
+--- v002.md
++++ v003.md
+@@ -4,41 +4,33 @@
+ 
+ ## Overview
+-This method initializes the `GaussianRasterizationSettings` object and prepares auxiliary state tensors required to invoke the differentiable Gaussian rasterizer. It solves the problem of translating high-level camera parameters (Field of View) and scene constraints into the specific numerical formats expected by the CUDA kernel. It differs from the rasterizer itself by handling the setup of state and memory layout rather than the pixel-wise projection and blending logic [S1, unofficial].
++This method initializes the `GaussianRasterizationSettings` configuration object and prepares auxiliary state tensors required to invoke the differentiable Gaussian rasterizer [S1, unofficial]. It translates high-level camera parameters and scene constraints into the numerical formats expected by the rendering kernel [S1, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- `viewpoint_camera`: An object containing camera properties, specifically `FoVx` and `FoVy` (in radians), `world_view_transform`, and potentially other metadata.
+-- `pc`: A point cloud or Gaussian object providing `get_xyz()` to determine device and data type.
+-- `image_height`, `image_width`: Integer dimensions of the target render.
++- `viewpoint_camera`: Object containing `FoVx`, `FoVy`, and `world_view_transform`.
++- `pc`: Object providing `get_xyz()` to determine tensor device and data type.
++- `image_height`, `image_width`: Target render dimensions.
+ - `bg_color`: Background color tensor.
+-- `scale_modifier`: Float multiplier for Gaussian scales.
+-- `return_depth`: Boolean flag.
++- `scale_modifier`: Multiplier for Gaussian scales.
++- `return_depth`: Boolean flag for depth output.
+ 
+ **Outputs:**
+-- `settings`: An instance of `GaussianRasterizationSettings`.
+-- `screenspace_points`: A tensor initialized to zero, used for gradient accumulation during rasterization.
++- `settings`: Initialized configuration object.
++- `screenspace_points`: Zero-initialized tensor for gradient accumulation.
+ 
+ **Data Structures:**
+-1.  **`GaussianRasterizationSettings`**: A configuration object holding:
+-    -   `image_height`: `int`
+-    -   `image_width`: `int`
+-    -   `tanfovx`: `float` ($\tan(\text{FoV}_x / 2)$)
+-    -   `tanfovy`: `float` ($\tan(\text{FoV}_y / 2)$)
+-    -   `bg_color`: Tensor
+-    -   `scale_modifier`: `float`
+-    -   `world_view_transform`: Tensor (4x4 matrix)
+-    -   `return_depth`: `bool`
+-2.  **`screenspace_points`**: A tensor with shape matching the number of Gaussians, dtype and device matching `pc.get_xyz()`, initialized to zeros. `requires_grad` is set to `True`.
++1. `GaussianRasterizationSettings`: Holds `image_height` (int), `image_width` (int), `tanfovx` (float), `tanfovy` (float), `bg_color` (tensor), `scale_modifier` (float), `world_view_transform` (tensor), and `return_depth` (bool).
++2. `screenspace_points`: Tensor matching the shape, dtype, and device of `pc.get_xyz()`, initialized to zeros, with `requires_grad=True`.
+ 
+ **Steps:**
+-1.  Compute the tangent of half the horizontal and vertical fields of view:
+-    $$ \text{tanfovx} = \tan\left(\frac{\text{FoV}_x}{2}\right) $$
+-    $$ \text{tanfovy} = \tan\left(\frac{\text{FoV}_y}{2}\right) $$
+-2.  Cast `image_height` and `image_width` to integers.
+-3.  Initialize the `GaussianRasterizationSettings` object with the computed tangents, dimensions, background color, scale modifier, and world view transform.
+-4.  Retrieve the device and data type from the Gaussian positions (`pc.get_xyz()`).
+-5.  Create a `screenspace_points` tensor of zeros with the same shape, dtype, and device.
+-6.  Set `requires_grad=True` on `screenspace_points`.
+-7.  Attempt to call `screenspace_points.retain_grad()`. If this fails (e.g., older PyTorch versions), pass silently [G].
++1. Compute the tangent of half the horizontal and vertical fields of view:
++   $$ \text{tanfovx} = \tan\left(\frac{\text{FoV}_x}{2}\right) $$
++   $$ \text{tanfovy} = \tan\left(\frac{\text{FoV}_y}{2}\right) $$
++2. Cast `image_height` and `image_width` to integers.
++3. Initialize the `GaussianRasterizationSettings` object with the computed tangents, dimensions, background color, scale modifier, and world view transform.
++4. Retrieve the device and data type from the Gaussian positions via `pc.get_xyz()`.
++5. Create a `screenspace_points` tensor of zeros with the same shape, dtype, and device.
++6. Set `requires_grad=True` on `screenspace_points`.
++7. Attempt to call `screenspace_points.retain_grad()`. If unavailable (e.g., older PyTorch versions), pass silently [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -47,13 +39,16 @@
+ import torch
+ 
+-def setup_gaussian_rasterization(
+-    viewpoint_camera,
+-    pc,
+-    image_height,
+-    image_width,
+-    bg_color,
+-    scale_modifier=1.0,
+-    return_depth=False
+-):
++class GaussianRasterizationSettings:
++    def __init__(self, image_height, image_width, tanfovx, tanfovy, bg_color, scale_modifier, world_view_transform, return_depth=False):
++        self.image_height = int(image_height)
++        self.image_width = int(image_width)
++        self.tanfovx = tanfovx
++        self.tanfovy = tanfovy
++        self.bg_color = bg_color
++        self.scale_modifier = scale_modifier
++        self.world_view_transform = world_view_transform
++        self.return_depth = return_depth
++
++def setup_gaussian_rasterization(viewpoint_camera, pc, image_height, image_width, bg_color, scale_modifier=1.0, return_depth=False):
+     # 1. Compute tan(fov/2)
+     tanfovx = math.tan(viewpoint_camera.FoVx * 0.5)
+@@ -62,33 +57,17 @@
+     # 2. Initialize Settings Object
+     settings = GaussianRasterizationSettings(
+-        image_height=int(image_height),
+-        image_width=int(image_width),
++        image_height=image_height,
++        image_width=image_width,
+         tanfovx=tanfovx,
+         tanfovy=tanfovy,
+-        bg=bg_color,
++        bg_color=bg_color,
+         scale_modifier=scale_modifier,
+-        viewmatrix=viewpoint_camera.world_view_transform,
+-        projmatrix=viewpoint_camera.full_proj_transform, # Assumed available for completeness, though not explicitly in notes [S1, unofficial]
+-        sh_degree=pc.active_sh_degree, # Assumed available [G]
+-        campos=viewpoint_camera.camera_center, # Assumed available [G]
+-        prefiltered=False, # Assumed default [G]
+-        debug=False,
++        world_view_transform=viewpoint_camera.world_view_transform,
+         return_depth=return_depth
+     )
+ 
+     # 3. Prepare screenspace_points tensor
+-    # Get device and dtype from the Gaussian positions
+     xyz = pc.get_xyz()
+-    device = xyz.device
+-    dtype = xyz.dtype
+-
+-    # Initialize to zeros
+-    screenspace_points = torch.zeros(
+-        xyz.size(0),
+-        3, # Assuming 3D coordinates for screenspace points
+-        device=device,
+-        dtype=dtype,
+-        requires_grad=True
+-    )
++    screenspace_points = torch.zeros_like(xyz, dtype=xyz.dtype, device=xyz.device, requires_grad=True)
+ 
+     # 4. Retain gradients for backward pass
+@@ -96,5 +75,4 @@
+         screenspace_points.retain_grad()
+     except AttributeError:
+-        # Fallback for older PyTorch versions where retain_grad might not be available or necessary in the same way
+         pass
+ 
+@@ -103,21 +81,21 @@
+ 
+ **Parameters:**
+--   `scale_modifier`: Multiplier applied to Gaussian scales during rasterization. Default value is 1.0 [S1, unofficial].
+--   `return_depth`: Boolean flag controlling whether depth information is returned alongside the color render [S1, unofficial].
++- `scale_modifier`: Multiplier applied to Gaussian scales during rasterization. Default value is 1.0 [S1, unofficial].
++- `return_depth`: Boolean flag controlling whether depth information is returned alongside the color render [S1, unofficial].
+ 
+ **Edge Cases:**
+--   **PyTorch Version Compatibility**: `retain_grad()` may not be available or behave differently in older PyTorch versions. A try-except block is required [S1, unofficial].
+--   **Device Mismatch**: Ensure `bg_color` and other tensors are on the same device as the Gaussian positions to avoid CUDA errors.
++- PyTorch Version Compatibility: `retain_grad()` may not be available in older PyTorch versions; a try-except fallback handles this [S1, unofficial].
++- Device Mismatch: Ensure `bg_color` and other tensors are on the same device as the Gaussian positions to avoid CUDA errors [G].
+ 
+ ## Subtopics
+ 
++### [Gaussian Rasterization Setup](13929-gaussian-rasterization-setup.md)
++This step prepares the scene data and computational buffers required to invoke the differentiable Gaussian rasterizer.
++
+ ## Operating characteristics
+--   **Time Complexity**: $O(1)$ relative to the number of Gaussians, as it only involves computing tangents and allocating a tensor of size $N$ (number of Gaussians).
+--   **Memory Complexity**: $O(N)$ for the `screenspace_points` tensor, where $N$ is the number of Gaussians.
+--   **Strengths**: Minimal overhead; prepares necessary state for the heavy rasterization kernel.
+--   **Limitations**: Requires careful handling of PyTorch version differences for gradient retention.
++Not given in the sources.
+ 
+ ## Background
+-This configuration setup is part of the rendering pipeline for 3D Gaussian Splatting, specifically within the differentiable rasterizer implementation. It bridges the gap between scene/camera data and the CUDA kernel execution.
++This configuration setup is part of the rendering pipeline for 3D Gaussian Splatting, specifically within the differentiable rasterizer implementation [S1, unofficial].
+ 
+ ## Sources

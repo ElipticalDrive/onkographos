@@ -1,0 +1,225 @@
+--- v004.md
++++ v005.md
+@@ -12,5 +12,5 @@
+ - A 3D volume dataset (structured or unstructured) [S3, unofficial].
+ - Ray origin ($rayStart$) and direction ($rayDir$) for each pixel [S1, unofficial].
+-- Volume bounding box (AABB) for intersection [S1, unofficial].
++- Ray length ($rayLength$) and volume axis-aligned bounding box (AABB) for intersection [S1, unofficial].
+ - Configuration parameters: `stepsize`, `alphaEarlyOut`, `densityMin`, `densityMax`, `enableEarlyOut` [S1, unofficial].
+ - Transfer Function (TF) and Blending modules [S1, unofficial].
+@@ -42,5 +42,5 @@
+ ### Steps
+ 
+-1.  **Intersection**: Intersect the ray with the volume's AABB to find entry ($t_{min}$) and exit ($t_{max1}$) distances. Clamp $t_{min}$ to 0 and $t_{max}$ to $\min(t_{max1}, t_{max})$ [S1, unofficial].
++1.  **Intersection**: Intersect the ray with the volume's AABB to find entry ($t_{min}$) and exit ($t_{max1}$) distances. Clamp $t_{min}$ to 0 and $t_{max}$ to $\min(t_{max1}, rayLength)$ [S1, unofficial].
+ 2.  **Initialization**: Initialize output color to zero, normal to zero, and depth to zero. Initialize `previousDensity` to -1 [S1, unofficial].
+ 3.  **Step Size Calculation**:
+@@ -62,5 +62,5 @@
+ ### Formulas
+ 
+-**Front-to-Back Composition** [S3, unofficial]:
++**Front-to-Back Composition** [S2, unofficial]:
+ $$C_{out} = C_{in} + (1 - O_{in}) \alpha_i c_i$$
+ $$O_{out} = O_{in} + \alpha_i (1 - O_{in})$$
+@@ -98,158 +98,75 @@
+ 
+ ```python
+-def ray_evaluation_stepping_dvr(ray_start, ray_dir, volume, params, tf, blending, brdf):
+-    """
+-    ray_start: vec3
+-    ray_dir: vec3
+-    volume: Volume object with eval_density, eval_normal, get_voxel_size, get_max_size
+-    params: Parameters struct
+-    tf: TransferFunction object
+-    blending: Blending object
+-    brdf: BRDF object
+-    """
++def ray_evaluation_stepping_dvr(ray_start, ray_dir, ray_length, volume, params, steps_per_voxel, steps_per_ray, tf, blending, brdf):
+     # 1. Intersection
+     t_min, t_max1 = volume.intersect_aabb(ray_start, ray_dir)
+     t_min = max(t_min, 0.0)
+-    t_max = min(t_max1, t_max) # Assuming t_max is global max, clamped by AABB
+-    
++    t_max = min(t_max1, ray_length)
++
+     # 2. Initialization
+-    out_color = vec4(0.0, 0.0, 0.0, 0.0)
+-    out_normal = vec3(0.0, 0.0, 0.0)
++    out_color = [0.0, 0.0, 0.0, 0.0] # [r, g, b, a]
++    out_normal = [0.0, 0.0, 0.0]
+     out_depth = 0.0
+     previous_density = -1.0
+-    
++
+     # 3. Step Size Calculation
+     if volume.supports_object_space_indexing():
+-        # steps_per_voxel is assumed to be passed or retrieved from UI context
+-        # For implementation, we assume steps_per_voxel is a parameter or derived
+-        # Note: The source mentions UI slider 0.1 to 10.0. 
+-        # We assume steps_per_voxel is provided or calculated.
+-        # Let's assume steps_per_voxel is a constant for this function call or passed.
+-        # If not passed, we cannot implement without guessing. 
+-        # However, the source says "UI slider controls...". 
+-        # We will assume steps_per_voxel is an input or global config.
+-        # To make it self-contained, we assume steps_per_voxel is passed.
+         stepsize = volume.get_voxel_size() / steps_per_voxel
+     else:
+-        # steps_per_ray is assumed to be passed
+         stepsize = volume.get_max_size() / steps_per_ray
+-        
++
+     div_density_range = 1.0 / (params.density_max - params.density_min)
+-    
++
+     # 4. Ray Marching Loop
+     termination_index = 0
+     while True:
+         t_current = t_min + termination_index * stepsize
+-        
++
+         # Termination Check
+         if t_current > t_max:
+             break
+-            
+-        if params.enable_early_out and out_color.w < params.alpha_early_out:
++        if params.enable_early_out and out_color[3] < params.alpha_early_out:
+             break
+-            
++
+         # Position
+-        position = ray_start + ray_dir * t_current
+-        
+-        # Volume Evaluation
++        position = [ray_start[i] + ray_dir[i] * t_current for i in range(3)]
++
++        # Volume Evaluation & TF
+         if params.skip_transfer_function:
+             color_raw = volume.eval_color(position)
+-            # Multiply color.w by stepsize
+-            color_raw.w *= stepsize
+-            density = color_raw.w # Or use color_raw directly? Source says "evaluate volume for real4 color directly"
+-            # Then "Multiply color.w by stepsize". 
+-            # Then "Evaluate normal".
+-            # Then "If color1.w > 0, evaluate BRDF".
+-            # So color1 is the result of TF? No, if skip_tf, color1 is color_raw?
+-            # Source: "If RAY_EVALUATION_STEPPING__SKIP_TRANSFER_FUNCTION is 1, evaluate volume for real4 color directly... Else, evaluate volume for real_t density."
+-            # Then "If requireNormal... evaluate transfer function: color1 = tf.eval(...)".
+-            # This implies if skip_tf is 1, we might skip TF?
+-            # But later: "If color1.w > 0, evaluate BRDF".
+-            # Let's follow the flow strictly.
+-            
+-            # Re-reading S1:
+-            # "If RAY_EVALUATION_STEPPING__SKIP_TRANSFER_FUNCTION is 1, evaluate volume for real4 color directly. Multiply color.w by stepsize. Evaluate normal."
+-            # "Else, evaluate volume for real_t density."
+-            # "Normalize density: density2 = ..."
+-            # "If requireNormal ... evaluate transfer function: color1 = tf.eval(density2, n, previousDensity, stepsize, batch)."
+-            # This implies TF is evaluated in both cases? Or is TF skipped?
+-            # The define is SKIP_TRANSFER_FUNCTION.
+-            # If 1, we get color directly. If 0, we get density.
+-            # Then we normalize density.
+-            # Then we evaluate TF?
+-            # If we already have color, do we need TF?
+-            # The source says: "If requireNormal, evaluate transfer function: color1 = tf.eval(...)".
+-            # This suggests TF is always evaluated if normal is required?
+-            # Or maybe if skip_tf is 1, we don't call tf.eval?
+-            # Let's assume if skip_tf is 1, color1 is the color_raw (modified).
+-            # But the code structure in S1 lists TF evaluation after density normalization.
+-            # If skip_tf is 1, we don't have density2?
+-            # "Normalize density: density2 = ...". This happens after "Else, evaluate volume for real_t density".
+-            # So if skip_tf is 1, we skip density evaluation and normalization?
+-            # Let's assume:
+-            # If skip_tf:
+-            #    color1 = volume.eval_color(position)
+-            #    color1.w *= stepsize
+-            #    n = volume.eval_normal(position)
+-            # Else:
+-            #    density = volume.eval_density(position)
+-            #    density2 = (density - densityMin) * div_density_range
+-            #    n = volume.eval_normal(position)
+-            #    color1 = tf.eval(density2, n, previous_density, stepsize, batch)
+-            
+-            # This interpretation aligns with "SKIP_TRANSFER_FUNCTION".
+-            
+-            if params.skip_transfer_function:
+-                color1 = volume.eval_color(position)
+-                color1.w *= stepsize
+-                n = volume.eval_normal(position)
+-            else:
+-                density = volume.eval_density(position)
+-                density2 = (density - params.density_min) * div_density_range
+-                n = volume.eval_normal(position)
+-                color1 = tf.eval(density2, n, previous_density, stepsize, batch)
+-                previous_density = density2
+-            
+-            # Normalization of normal
+-            n = normalize(n)
+-            
+-            # BRDF
+-            if color1.w > 0:
+-                color2 = brdf.eval(color1, position, n, ray_dir, batch)
+-            else:
+-                color2 = color1 # Or zero? Source says "If color1.w > 0, evaluate BRDF". Implies else skip?
+-                # Let's assume color2 = color1 if BRDF not evaluated or returns 0?
+-                # Source: "If color1.w > 0, evaluate BRDF: color2 = brdf.eval(...)".
+-                # It doesn't say what color2 is if w=0.
+-                # Let's assume color2 = color1.
+-                color2 = color1
+-                
+-            new_contribution = Contribution(color=color2, normal=n, depth=t_current)
+-            
+-            # Blending
+-            if volume.is_valid(position):
+-                out_color, out_normal, out_depth = blending.eval(out_color, out_normal, out_depth, new_contribution)
+-                
++            color_raw[3] *= stepsize
++            n = volume.eval_normal(position)
++            color1 = color_raw
+         else:
+-            # This branch is for when skip_transfer_function is 0?
+-            # No, the if/else above covers the logic.
+-            # The source code structure:
+-            # If SKIP_TRANSFER_FUNCTION is 1: ...
+-            # Else: ...
+-            # So the above if/else covers all cases.
+-            pass
+-            
++            density = volume.eval_density(position)
++            density2 = (density - params.density_min) * div_density_range
++            n = volume.eval_normal(position)
++            color1 = tf.eval(density2, n, previous_density, stepsize)
++            previous_density = density2
++
++        # Normalization
++        n = normalize(n)
++
++        # BRDF
++        if color1[3] > 0:
++            color2 = brdf.eval(color1, position, n, ray_dir)
++        else:
++            color2 = color1
++
++        # Front-to-Back Composition
++        alpha_i = color2[3]
++        c_i = color2[:3]
++        out_color[3] = out_color[3] + alpha_i * (1.0 - out_color[3])
++        out_color[:3] = [out_color[i] + (1.0 - out_color[3]) * c_i[i] for i in range(3)]
++        out_normal = n
++        out_depth = t_current
++
+         termination_index += 1
+-        
++
+     return out_color, out_normal, out_depth
+ ```
+ 
+-### Subtopics
+-
+-- **[Density Marching](3462-density-marching.md)**: Focuses on fog volumes with exponential absorption and gradient-based shading. Choose when simulating participating media like fog or smoke where absorption is exponential.
+-- **[Discrete Volume Rendering Integral (VRI)](3552-discrete-volume-rendering-integral-vri.md)**: Discretizes the volume rendering integral differently, often optimizing for specific hardware or data structures. Choose when higher accuracy in integration is needed or when using specific discrete integral formulations.
+-- **[Volumetric Light Shafts (URP Raymarching)](3873-volumetric-light-shafts-urp-raymarching.md)**: Optimized for light shafts in Unity URP. Choose when rendering volumetric light effects in real-time Unity applications.
+-- **[Ray Marching Volume Rendering](4877-ray-marching-volume-rendering.md)**: General ray marching for volume rendering. Choose for a broader overview of ray marching techniques.
+-- **[Ray Marching Volume Rendering (GLSL)](5184-ray-marching-volume-rendering-glsl.md)**: GLSL-specific implementation. Choose when implementing in OpenGL/GLSL environments.
++## Subtopics
++Detailed comparisons with sibling methods are not given in the sources.
+ 
+ ## Operating characteristics

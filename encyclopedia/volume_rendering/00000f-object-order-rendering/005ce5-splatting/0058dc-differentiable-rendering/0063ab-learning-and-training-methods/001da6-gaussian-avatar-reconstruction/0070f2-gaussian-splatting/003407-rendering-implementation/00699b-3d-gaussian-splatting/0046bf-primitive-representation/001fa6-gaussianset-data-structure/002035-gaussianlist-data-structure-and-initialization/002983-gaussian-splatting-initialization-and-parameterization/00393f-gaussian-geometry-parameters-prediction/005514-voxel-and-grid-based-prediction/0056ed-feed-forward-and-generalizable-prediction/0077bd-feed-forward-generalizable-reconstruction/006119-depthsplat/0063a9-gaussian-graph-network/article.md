@@ -1,0 +1,282 @@
+# Gaussian Graph Network
+
+
+## Overview
+Gaussian Graph Network (GGN) is a feed-forward method that generates efficient and generalizable 3D Gaussian representations from multi-view images by modeling relations between Gaussian groups from different views using a Gaussian Graph structure [S1]. It solves the problem of artifacts and excessive memory costs caused by previous methods that simply combine pixel-aligned Gaussians from multiple views without capturing their inter-view relations [S1]. Unlike sibling methods that treat multi-view Gaussians as independent sets, GGN performs message passing and aggregation at the Gaussian level, allowing each Gaussian to benefit from connected groups in other views [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A set of $N$ input images $I = \{I_i\} \in \mathbb{R}^{N \times H \times W \times 3}$ and their corresponding camera parameters $C = \{c_i\}$ [S1].
+*   **Outputs:** Gaussian parameters $(\mu, \Sigma, \alpha, c)$, where $\mu$ is the mean position, $\Sigma$ is the covariance matrix, $\alpha$ is opacity, and $c$ is color [S1].
+
+**Data Structures:**
+*   **Node $v_i$:** Represents a group of pixel-aligned Gaussians for view $i$. It consists of a mean position vector $\mu_i \in \mathbb{R}^{HW \times 3}$ and a feature vector $f_i \in \mathbb{R}^{HW \times D}$ [S1].
+*   **Edge Weight Matrix $E_{s \to k}$:** A matrix of size $HW \times HW$ containing binary values (0 or 1) indicating pixel correspondence between Gaussians in group $s$ and group $k$ [S1]. Specifically, $e_{ij}^{s \to k} = 1$ if $\psi_{proj}(\mu_{s,i}, c_s) = \psi_{proj}(\mu_{k,j}, c_s)$, and 0 otherwise, where $\psi_{proj}$ projects the Gaussian center to the image plane [S1].
+*   **Adjacency Matrix $A$:** A matrix of size $N \times N$ where $a_{ij} = 1$ if $i=j$, and $a_{ij} = \psi_{overlap}(v_i, v_j)$ if $i \neq j$, where $\psi_{overlap}$ computes the overlap ratio between views [S1].
+*   **Degree Matrix $D$:** A diagonal matrix where $d_{ii} = \sum_j a_{ij}$ [S1].
+
+**Parameters:**
+*   $N$: Number of input images [S1].
+*   $h$: Number of graph layers in the Gaussian Graph Network [S1].
+*   $n$: Number of top edges to preserve during graph pruning [S1].
+*   $W$: Learnable weight matrix of size $C \times D$ used in the linear operation [S1].
+*   $\lambda$: Threshold for the similarity function in the merge operation [S1].
+*   $P_h$: Number of iterations or hidden layers for the Gaussian Graph linear operation [S1].
+
+**Steps:**
+1.  **Feature Extraction:** Extract image features $F$ from input images $I$ using a 2D backbone $\Phi_{image}$:
+    $$F = \Phi_{image}(I)$$
+    where $F \in \mathbb{R}^{N \times H/4 \times W/4 \times C}$ [S1].
+2.  **Initial Gaussian Prediction:** For each view $i$, predict mean positions $\mu_i$ and features $f_i$:
+    $$\mu_i = \psi_{unproj}(\Phi_{depth}(F_i), c_i) \in \mathbb{R}^{HW \times 3}$$
+    $$f_i = \Phi_{feat}(F_i) \in \mathbb{R}^{HW \times D}$$
+    where $\Phi_{depth}$ and $\Phi_{feat}$ are neural networks predicting depth maps and Gaussian features, and $\psi_{unproj}$ is the unprojection operation [S1].
+3.  **Graph Construction:** Construct a Gaussian Graph $G$ with nodes $V = \{v_i\} = \{(\mu_i, f_i)\}$ for $i=1$ to $N$ [S1].
+4.  **Graph Pruning:** Prune the graph by preserving edges with the top $n$ weights and ignoring others to limit computational complexity [S1].
+5.  **Adjacency Scaling:** Compute the degree matrix $D$ and calculate the scaled adjacency matrix $\tilde{A}$:
+    $$\tilde{A} = D^{-1}A \quad \text{or} \quad \tilde{A} = D^{-1/2}AD^{-1/2}$$
+    where $\tilde{A} = [\tilde{a}_{ij}]^{N \times N}$ [S1].
+6.  **Feature Aggregation (Message Passing):** For each graph layer $k$ from 1 to $h$, update features $f_i$ for each node $i=1$ to $N$:
+    $$f_i \leftarrow \sigma\left( \sum_{j=1}^{N} \tilde{a}_{ij} E_{j \to i} f_j W \right)$$
+    where $\sigma$ is a non-linearity (e.g., ReLU or GeLU) [S1].
+7.  **Gaussian Pooling:** Aggregate Gaussians from connected subgraphs $G_s$ to reduce redundancy:
+    $$(\mu, f) \leftarrow \bigcup_{s=1}^{l} \phi_{pooling}(G_s)$$
+    If a subgraph $G_s$ has one node $v_s$, $\phi_{pooling}(G_s) = v_s$. If $G_s$ has multiple nodes, the pooling operation merges them step-by-step using a similarity function $\psi_{similarity}$ and a merge function $\psi_{merge}$ controlled by threshold $\lambda$ [S1].
+8.  **Parameter Prediction:** Predict remaining Gaussian parameters from the pooled features $f$:
+    $$R = \psi_R(f), \quad S = \psi_S(f), \quad \alpha = \psi_\alpha(f), \quad c = \psi_c(f)$$
+    Compute the covariance matrix:
+    $$\Sigma = R S S^T R^T$$
+    where $\psi_R, \psi_S, \psi_\alpha, \psi_c$ are prediction heads [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def gaussian_graph_network(I, C, h, n, W, lambda_threshold):
+    """
+    I: List of N images, shape (H, W, 3)
+    C: List of N camera parameters
+    h: Number of graph layers
+    n: Number of top edges to preserve
+    W: Learnable weight matrix (C, D)
+    lambda_threshold: Similarity threshold for pooling
+    """
+    # 1. Feature Extraction
+    # Phi_image is a 2D backbone
+    F = phi_image(I) # Shape: (N, H/4, W/4, C)
+    
+    # 2. Initial Gaussian Prediction
+    mu_list = []
+    f_list = []
+    for i in range(len(I)):
+        # Phi_depth predicts depth, psi_unproj unprojects to 3D
+        mu_i = psi_unproj(phi_depth(F[i]), C[i]) # Shape: (HW, 3)
+        # Phi_feat predicts features
+        f_i = phi_feat(F[i]) # Shape: (HW, D)
+        mu_list.append(mu_i)
+        f_list.append(f_i)
+        
+    # 3. Graph Construction
+    # Nodes are (mu, f) pairs
+    nodes = [(mu_list[i], f_list[i]) for i in range(len(I))]
+    
+    # 4. Adjacency Matrix Calculation
+    # psi_overlap computes overlap ratio between views
+    A = compute_adjacency_matrix(nodes, psi_overlap) # Shape: (N, N)
+    
+    # 5. Graph Pruning
+    # Preserve top n edges per node or globally? 
+    # Source says "preserving edges with the top n weights", implying global or per-node top-k.
+    # Assuming global top-n for simplicity as per source description "top n weights".
+    A = prune_graph(A, n)
+    
+    # 6. Degree and Scaled Adjacency
+    D = compute_degree_matrix(A) # Diagonal matrix
+    # Option 1: Random Walk Normalization
+    # A_tilde = solve(D, A) # D^-1 A
+    # Option 2: Symmetric Normalization
+    D_inv_sqrt = inverse_sqrt(D)
+    A_tilde = D_inv_sqrt @ A @ D_inv_sqrt
+    
+    # 7. Gaussian Graph Linear Layers (Message Passing)
+    for k in range(h):
+        new_f_list = []
+        for i in range(len(nodes)):
+            mu_i, f_i = nodes[i]
+            aggregated = 0
+            for j in range(len(nodes)):
+                mu_j, f_j = nodes[j]
+                # Compute edge weight matrix E_{j->i}
+                # psi_proj projects Gaussian center to image plane
+                E_ji = compute_edge_matrix(mu_j, mu_i, C[j], psi_proj) # Shape: (HW, HW)
+                
+                # Linear operation: a_tilde_ij * E_ji * f_j * W
+                # Note: E_ji is (HW, HW), f_j is (HW, D), W is (C, D)
+                # f_j needs to be compatible with W. 
+                # Source implies f_j is transformed by W first or E acts on it.
+                # Formula: sum( a_tilde_ij * E_ji * f_j * W )
+                # Assuming f_j is (HW, D) and W is (D, D) or similar. 
+                # Source says W is CxD. f_i is HWxD. 
+                # Let's assume f_j is reshaped or W applies to the feature dimension.
+                # Standard GNN: (A @ F) @ W. Here A is replaced by weighted E.
+                
+                term = A_tilde[i, j] * (E_ji @ f_j) @ W
+                aggregated += term
+            f_i_new = activation(aggregated) # sigma is non-linearity
+            new_f_list.append(f_i_new)
+        f_list = new_f_list
+        
+    # 8. Gaussian Pooling
+    # Identify connected subgraphs G_s
+    subgraphs = find_connected_components(A)
+    pooled_mu = []
+    pooled_f = []
+    
+    for s in subgraphs:
+        G_s = [nodes[idx] for idx in s]
+        if len(G_s) == 1:
+            pooled_mu.append(G_s[0][0])
+            pooled_f.append(G_s[0][1])
+        else:
+            # Pooling operation
+            mu_p, f_p = gaussian_pool(G_s, lambda_threshold)
+            pooled_mu.append(mu_p)
+            pooled_f.append(f_p)
+            
+    # 9. Parameter Prediction
+    # Concatenate pooled features if necessary, or process individually
+    # Source implies predicting from pooled features f
+    # Assuming we predict for each pooled node
+    final_mu = []
+    final_sigma = []
+    final_alpha = []
+    final_color = []
+    
+    for i in range(len(pooled_f)):
+        f = pooled_f[i]
+        R = psi_R(f)
+        S = psi_S(f)
+        alpha = psi_alpha(f)
+        c = psi_c(f)
+        
+        # Covariance
+        Sigma = R @ S @ S.T @ R.T
+        final_mu.append(pooled_mu[i])
+        final_sigma.append(Sigma)
+        final_alpha.append(alpha)
+        final_color.append(c)
+        
+    return final_mu, final_sigma, final_alpha, final_color
+
+def compute_edge_matrix(mu_j, mu_i, c_j, psi_proj):
+    """
+    Computes binary matrix E_{j->i} of size HW x HW.
+    e_{mn} = 1 if proj(mu_j[m], c_j) == proj(mu_i[n], c_j)
+    """
+    HW = mu_i.shape[0]
+    E = zeros((HW, HW))
+    for m in range(HW):
+        for n in range(HW):
+            # Project centers to image coordinates
+            coord_j = psi_proj(mu_j[m], c_j)
+            coord_i = psi_proj(mu_i[n], c_j)
+            if coord_j == coord_i:
+                E[m, n] = 1
+    return E
+
+def gaussian_pool(G_s, lambda_threshold):
+    """
+    Aggregates a connected subgraph G_s into a single node.
+    """
+    if len(G_s) == 1:
+        return G_s[0]
+    
+    # Start with a random node
+    current_node = random.choice(G_s)
+    remaining_nodes = [n for n in G_s if n != current_node]
+    
+    while remaining_nodes:
+        # Pick a random neighbor from remaining
+        neighbor = random.choice(remaining_nodes)
+        
+        # Compute similarity
+        # psi_similarity returns max distance or infinity
+        sim_val = psi_similarity(neighbor, current_node)
+        
+        if sim_val < lambda_threshold:
+            # Merge
+            current_node = psi_merge(neighbor, current_node)
+        else:
+            # If not similar, maybe keep separate? 
+            # Source says "aggregate... step by step to one node".
+            # It implies merging if similar, but how to handle non-similar?
+            # The source description is slightly ambiguous on non-merging cases in a connected graph.
+            # However, it says "aggregate a connected graph Gs step by step to one node".
+            # This implies we must merge. The threshold likely filters *which* neighbors to merge with
+            # or acts as a stop condition. 
+            # Given "degraded case... simple combination", pooling is key.
+            # Let's assume we merge if similar, otherwise we might need to merge anyway 
+            # or the graph structure ensures similarity.
+            # For implementation completeness, if not similar, we might still merge 
+            # or treat as separate component (but G_s is connected).
+            # Let's assume merge happens regardless if it's the only way to reduce to 1 node,
+            # but the threshold controls the *quality* or *selection* of merge.
+            # Re-reading: "psi_similarity ... < lambda ... merge".
+            # If not < lambda, do we merge? The source doesn't explicitly say "do not merge".
+            # It says "aggregate... to one node".
+            # Let's assume we merge if similar, and if not, we might pick another neighbor.
+            # To ensure termination, we merge if no other neighbors are similar?
+            # Or perhaps the threshold is for *which* neighbor to pick?
+            # "randomly pick up its neighbor... define psi_similarity... merge if < lambda"
+            # If not < lambda, the loop continues?
+            # Let's assume we try to find a mergeable neighbor.
+            found_merge = False
+            for other in remaining_nodes:
+                sim = psi_similarity(other, current_node)
+                if sim < lambda_threshold:
+                    current_node = psi_merge(other, current_node)
+                    remaining_nodes.remove(other)
+                    found_merge = True
+                    break
+            if not found_merge:
+                # Fallback: merge with the most similar one or just merge
+                # Source doesn't specify fallback. 
+                # [G] Assuming we merge with the closest neighbor to ensure reduction to 1 node.
+                best_sim = infinity
+                best_node = None
+                for other in remaining_nodes:
+                    sim = psi_similarity(other, current_node)
+                    if sim < best_sim:
+                        best_sim = sim
+                        best_node = other
+                current_node = psi_merge(best_node, current_node)
+                remaining_nodes.remove(best_node)
+                
+    return current_node
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The binary edge matrix $E_{j \to i}$ relies on exact pixel coordinate matching via $\psi_{proj}$. Floating-point inaccuracies in projection or unprojection may lead to missed connections. [G] A small tolerance threshold for coordinate comparison might be necessary in implementation.
+*   **Boundaries:** The unprojection $\psi_{unproj}$ may produce invalid 3D points for pixels with unreliable depth. [G] Invalid points should be filtered or masked out before graph construction.
+*   **Degenerate Input:** If input views have minimal overlap, the graph may become disconnected, leading to isolated components that do not benefit from message passing. [S1]
+
+## Subtopics
+
+### Gaussian Graph Pooling
+An aggregation operation that combines connected subgraphs (Gaussian groups) into a single node to reduce redundancy and prevent artifacts [S1]. It improves rendering quality by 4.9dB on PSNR and reduces the number of Gaussians to nearly one-fourth compared to the model without it [S1]. Previous methods can be seen as a degraded Gaussian Graph without edges, where pooling degenerates to a simple union of nodes [S1]. It uses a similarity function $\psi_{similarity}$ and a merge function $\psi_{merge}$ controlled by a threshold $\lambda$ [S1].
+
+### Gaussian Graph Linear Layer
+A feature fusion block that enables Gaussian Graph nodes to learn from their neighbor nodes by performing a linear operation on the graph structure [S1]. It computes aggregated features by summing transformed features of neighbors weighted by the scaled adjacency matrix and edge matrices [S1]. Removing this layer leads to a performance drop of 0.43 dB on PSNR, indicating its importance for feature fusion [S1]. It uses a learnable weight matrix $W$ and a non-linear activation $\sigma$ [S1].
+
+## Operating characteristics
+*   **Time Complexity:** The method involves graph construction, pruning, and $h$ layers of message passing. The complexity depends on the number of nodes $N$ and the number of edges preserved after pruning. The edge matrix computation is $O(N^2 \cdot HW^2)$ if done naively, but pruning limits this. [S1]
+*   **Memory Complexity:** Stores Gaussian parameters for each node. Pooling reduces the number of Gaussians to nearly one-fourth, significantly lowering memory usage compared to non-pooled methods [S1].
+*   **Measured Performance:** Outperforms previous methods under different input settings with higher rendering quality and fewer Gaussian representations on RealEstate10K and ACID datasets [S1]. Performance improves with more input views, unlike previous methods [S1].
+*   **Strengths:** Efficient and generalizable representations; reduces artifacts and floaters; benefits from more input views [S1].
+*   **Limitations:** Computational complexity of graph operations; requires careful tuning of pruning and pooling parameters [S1].
+
+## Background
+Gaussian Graph Network (GGN) was proposed to address the limitations of previous methods that simply combine pixel-aligned Gaussians from multiple views without modeling relations [S1]. It was introduced in the paper "Gaussian Graph Network: Learning Efficient and Generalizable Gaussian Representations from Multi-view Images" [S1]. The method builds on the concept of pixelSplat and MVSplat but extends them by introducing Gaussian Graphs and specific layers for message passing and pooling [S1].
+
+## Sources
+[S1] Gaussian Graph Network: Learning Efficient and Generalizable Gaussian Representations from Multi-view Images, https://doi.org/10.48550/arXiv.2503.16338, fetched 2026-10-29

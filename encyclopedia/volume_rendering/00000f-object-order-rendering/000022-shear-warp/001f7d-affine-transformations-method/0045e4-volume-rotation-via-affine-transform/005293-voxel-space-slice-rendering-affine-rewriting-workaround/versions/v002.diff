@@ -1,0 +1,126 @@
+--- v001.md
++++ v002.md
+@@ -8,54 +8,71 @@
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: A volume object containing `originalAffine` (immutable, stored at load) and `hdr.affine` (mutable header affine).
+-- Output: A modified `hdr.affine` that is axis-aligned, resulting in 2D slices being drawn on the native voxel grid.
++- Input: A volume object containing `originalAffine` (immutable, stored at load) and `hdr.affine` (mutable header affine) [S1, unofficial].
++- Output: A modified `hdr.affine` that is axis-aligned, resulting in 2D slices being drawn on the native voxel grid [S1, unofficial].
+ 
+ **Data Structures:**
+-- `volume.originalAffine`: 4x4 matrix (float32), immutable.
+-- `volume.hdr.affine`: 4x4 matrix (float32), mutable.
+-- `volume.obliqueRAS`: Derived 4x4 matrix, computed from affine.
+-- `volume.frac2mm`: Derived 3x3 matrix, computed from affine.
+-
+-**Parameters:**
+-- `worldSpace`: Boolean toggle for rendering mode. Default `false` (voxel grid). [S1, unofficial]
+-- Keyboard shortcut: `W` to toggle `worldSpace`. Rebindable in VS Code. [S1, unofficial]
++- `volume.originalAffine`: 4x4 matrix (float32), immutable [S1, unofficial].
++- `volume.hdr.affine`: 4x4 matrix (float32), mutable [S1, unofficial].
++- `volume.obliqueRAS`: Derived 4x4 matrix, computed from affine [S1, unofficial].
++- `volume.frac2mm`: Derived 3x3 matrix, computed from affine [S1, unofficial].
+ 
+ **Steps:**
+ 1. **Check Axis-Alignment:** Determine if the volume is already axis-aligned. If `volume.hdr.affine` is already axis-aligned (diagonal or permutation matrix with no shear), skip modification [S1, unofficial].
+-2. **Derive Axis-Aligned Affine:** Using the public affine API, replace `volume.hdr.affine` with its nearest axis-aligned equivalent derived from `volume.originalAffine` [S1, unofficial].
+-   - Preserve each voxel axis's dominant direction, sign, and length to prevent data permutation or mirroring [S1, unofficial].
+-   - Ensure the world origin remains on the same voxel to prevent crosshair jumps during toggling [S1, unofficial].
+-   - The core system then derives an identity `obliqueRAS` from the new affine, laying slices back on the voxel grid [S1, unofficial].
++2. **Derive Axis-Aligned Affine:** Using the public affine API, replace `volume.hdr.affine` with its nearest axis-aligned equivalent derived from `volume.originalAffine` [S1, unofficial]. Preserve each voxel axis's dominant direction, sign, and length to prevent data permutation or mirroring [S1, unofficial]. Ensure the world origin remains on the same voxel to prevent crosshair jumps during toggling [S1, unofficial]. The core system then derives an identity `obliqueRAS` from the new affine, laying slices back on the voxel grid [S1, unofficial].
+ 3. **Apply to Canvas:** The correction is derived from the background volume's `originalAffine` and applied to all volumes on the canvas to maintain registration [S1, unofficial].
+ 4. **Handle Overlays:** If overlays are added while in voxel-space mode, re-emit `nvArray` via the overlay message handler to ensure they use the corrected affine and stay registered [S1, unofficial].
+ 5. **Reset:** To restore world-space rendering, call `resetVolumeAffine` to restore the original `hdr.affine` exactly [S1, unofficial].
+ 
++**Formulas:**
++The axis-aligned affine $A_{aligned}$ is derived from the original affine $A$ by zeroing off-diagonal elements while preserving the diagonal scales/signs and the translation row:
++$$A_{aligned}[i][j] = \begin{cases} A[i][j] & \text{if } i = j \text{ or } i = 3 \\ 0 & \text{otherwise} \end{cases}$$
++where $i,j \in \{0,1,2,3\}$ and the matrix layout follows the library's row-major convention [S1, unofficial].
++
++**Parameters:**
++- `worldSpace`: Boolean toggle for rendering mode. Default `false` (voxel grid) [S1, unofficial].
++- Keyboard shortcut: `W` to toggle `worldSpace`. Rebindable in VS Code [S1, unofficial].
++
+ **Pseudocode:**
+ ```python
+-def apply_slice_space(volume, world_space: bool):
++def apply_slice_space(volumes, world_space: bool):
+     """
+     Modifies volume.hdr.affine to enforce voxel-space rendering if world_space is False.
+     Restores original affine if world_space is True.
++    Applies correction from background volume to all volumes on canvas.
+     """
+-    if world_space:
+-        # Restore world-space rendering exactly
+-        volume.hdr.affine = copy_matrix(volume.originalAffine)
+-        return
++    for vol in volumes:
++        if world_space:
++            vol.hdr.affine = copy_matrix(vol.originalAffine)
++            continue
+ 
+-    # Check if already axis-aligned
+-    if is_axis_aligned(volume.hdr.affine):
+-        return
++        if is_axis_aligned(vol.hdr.affine):
++            continue
+ 
+-    # Derive nearest axis-aligned equivalent from originalAffine
+-    # This preserves dominant direction, sign, and length of each voxel axis
+-    # and keeps the world origin on the same voxel
+-    new_affine = derive_axis_aligned_affine(volume.originalAffine)
+-    
+-    # Apply the new affine
+-    volume.hdr.affine = new_affine
+-    
+-    # The core system will recompute obliqueRAS, frac2mm, etc.
+-    # Ensure overlays are re-emitted if added during this mode
+-    # This is handled by the overlay message handler in the UI layer
++        new_affine = derive_axis_aligned_affine(vol.originalAffine)
++        vol.hdr.affine = new_affine
++
++def is_axis_aligned(matrix, tol=1e-6):
++    """Returns True if off-diagonal elements are near zero."""
++    for i in range(4):
++        for j in range(4):
++            if i != j and abs(matrix[i][j]) > tol:
++                return False
++    return True
++
++def derive_axis_aligned_affine(orig):
++    """
++    Returns nearest axis-aligned equivalent by zeroing off-diagonals.
++    Preserves diagonal (axis lengths/signs) and translation row (row 3).
++    """
++    new = [[0.0]*4 for _ in range(4)]
++    for i in range(4):
++        new[i][i] = orig[i][i]
++    for j in range(4):
++        new[3][j] = orig[3][j]
++    return new
++
++def copy_matrix(src):
++    """Deep copies a 4x4 matrix."""
++    return [row[:] for row in src]
+ ```
+ 
+@@ -67,11 +84,11 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(1)$ per volume for affine derivation and application, as it involves matrix operations on fixed-size 4x4 matrices.
+-- **Memory Complexity:** $O(1)$ additional memory, as no new data structures are created; the affine matrix is modified in place.
+-- **Measured Performance:** Verification on a ~19° oblique FLAIR.nii.gz showed that `obliqueRAS` max off-diagonal is 0 in voxel space vs 0.309 in world space [S1, unofficial].
+-- **Strengths:** Restores intuitive 2D slice viewing on the native voxel grid for oblique acquisitions without resampling or rotating the volume data.
+-- **Limitations:** Meshes do not align with the voxel grid; mm readouts are in voxel units, not scanner units; affine changes persist in saved files.
+-- **When to Use:** When viewing oblique acquisitions in 2D slice mode and the user expects the slices to align with the acquisition grid rather than world space.
+-- **When Not to Use:** When precise world-space alignment is required for meshes or when scanner-space mm coordinates are needed for readouts.
++- **Time Complexity:** Not given in the sources.
++- **Memory Complexity:** Not given in the sources.
++- **Measured Performance:** Verification on a ~19° oblique FLAIR.nii.gz showed that `obliqueRAS` max off-diagonal is 0 in voxel space vs 0.309 in world space [S1, unofficial]. Registration accuracy between background and overlay world-to-display maps matches to within $2 \times 10^{-14}$ in voxel space [S1, unofficial].
++- **Strengths:** Restores intuitive 2D slice viewing on the native voxel grid for oblique acquisitions without resampling or rotating the volume data [S1, unofficial].
++- **Limitations:** Meshes do not align with the voxel grid; mm readouts are in voxel units, not scanner units; affine changes persist in saved files [S1, unofficial].
++- **When to Use:** When viewing oblique acquisitions in 2D slice mode and the user expects the slices to align with the acquisition grid rather than world space [S1, unofficial].
++- **When Not to Use:** When precise world-space alignment is required for meshes or when scanner-space mm coordinates are needed for readouts [S1, unofficial].
+ 
+ ## Background

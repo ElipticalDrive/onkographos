@@ -1,0 +1,117 @@
+Contribute to OstappMelnykk/Solvix development by creating an account on GitHub.
+
+Feature/order independent transparency by OstappMelnykk · Pull Request #19 · OstappMelnykk/Solvix · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+OstappMelnykk
+commented
+Sep 12, 2026
+Copy link
+Copy Markdown
+Owner
+Weighted Blended Order-Independent Transparency for STL + voxel rendering
+Problem
+When the imported STL reference and the voxel fill are both translucent at the same time, ordinary WebGL alpha blending sorts whole objects back-to-front relative to the camera
+— not per pixel. With two overlapping translucent surfaces, that per-object sort is unstable: whichever one "wins" a given pixel depends on the camera angle and flips as you
+orbit, so the render visibly swaps which surface reads as in front.
+Merging the STL and voxel geometry into one combined mesh (considered as an alternative) does not fix this — the GPU still rasterizes and blends triangles in submission order,
+not depth order, regardless of whose geometry they came from.
+Solution: Weighted Blended OIT (McGuire & Bavoil, 2013)
+New module rendering/weighted-oit.ts — a WeightedOitRenderer class that replaces every direct renderer.render(scene, camera) call used to draw a scene containing the STL
+reference and/or the voxel preview.
+Core idea: every transparent fragment is accumulated into a weighted sum instead of blended one at a time in a specific order, so the result is independent of draw order and
+camera angle.
+Implementation shape — 4 passes instead of 1 MRT pass:
+Background — everything opaque (floor grid, axes, voxel edges/nodes/highlight, STL in wireframe mode) plus anything currently at opacity >= 1, even if tagged for OIT. Writes
+depth into a shared THREE.DepthTexture.
+Accum — only genuinely translucent tagged objects, additive weighted blend into an HDR target (HalfFloatType), depth-tested (not written) against the shared depth texture.
+Reveal — the same objects, same visibility, multiplicative blend (dst *= 1 - alpha) into a target pre-cleared to white, tracking how much of the background should still show
+through.
+Composite — a fullscreen quad blends background, accum/accum.a (weighted average), and reveal into the final image, with an explicit linear→sRGB encode (see bug list below).
+Chosen weight function: weight = 1 (every fragment counted equally, no per-fragment shader injection needed) — achievable purely via GL blend-function state, so the tagged
+materials (STL solid MeshStandardMaterial, voxel fill MeshStandardMaterial with vertex colors) keep their real lighting/vertex-color shader untouched. Trade-off: relative depth
+ordering within the transparent set is only approximate, not exact — acceptable since the actual complaint was camera-angle instability, not precise transparent-sorting.
+Visibility isolation uses plain .visible toggling on renderable leaf objects (Mesh/Line/Points), never THREE.Layers — the same live THREE.Scene is also rendered by other cameras
+(SixViewOverlayComponent, ZonePaintingComponent) that don't know about a dedicated OIT layer.
+Materials tagged via markForWeightedOit(): the STL reference's solid-mode material, and the voxel fill material. Edges/nodes/highlight/zone-overlay/STL-wireframe stay on the
+existing depthWrite:false + renderOrder scheme (thin, don't meaningfully self-overlap).
+Real bugs found and fixed during manual testing (each one verified against three.js source, not guessed)
+scene.background force-clear stomping accum/reveal. A plain THREE.Color background makes WebGLRenderer forcibly clear color+depth+stencil on every render() call, ignoring
+autoClear = false (WebGLBackground.js: a Color background sets forceClear = true). This was wiping the manually-cleared accum/reveal buffers and the shared depth texture
+every pass. Fix: scene.background is nulled only for the accum/reveal passes and restored right after.
+Fully-opaque objects still showing residual transparency. Weighted OIT never depth-sorts or occludes between the fragments it blends — feed it two overlapping opaque
+fragments (e.g. a voxel's front and back face) and it averages them instead of the front one hiding the back one. Fix: any tagged material currently at opacity >= 1 is routed
+to the ordinary opaque/background pass every frame instead of through accum/reveal, restoring correct occlusion (and skipping the whole 4-pass pipeline entirely when nothing
+is actually translucent).
+Offscreen resolution not matching devicePixelRatio. WebGLRenderTarget.setSize() takes literal device pixels, unlike WebGLRenderer.setSize() which multiplies by pixel ratio
+internally. On any HiDPI/Retina display this meant the 3 offscreen OIT targets rendered at half (or less) the canvas's real resolution, then got bilinearly upscaled — the
+reported "pixelated, rough, old-computer" look, worse the farther the camera or the more zoomed in. Fixed by scaling setSize()'s input by renderer.getPixelRatio().
+Missing linear→sRGB encode in the composite shader. Confirmed via UniformsUtils.js's getUnlitUniformColorSpace(): rendering to null (the canvas) converts colors to
+renderer.outputColorSpace (sRGB), but rendering to any other render target uses ColorManagement.workingColorSpace (linear) instead — by three.js's own design, intermediate
+passes are meant to carry linear data and something downstream must do the final encode. The composite shader wasn't doing that encode, which explained two symptoms that
+looked unrelated at the time: colors reading as too dark/contrasty in general, and the scene background specifically changing shade the instant anything became partially
+transparent (i.e. the instant the accum/reveal passes engaged instead of the single-pass direct-render fallback). Fixed by inlining three.js's own sRGBTransferOETF formula
+into the composite fragment shader.
+Scope extension
+Initially wired into WorldCanvasComponent only. Extended to the two other places that render the same live scene through their own separate WebGLRenderer instances:
+SixViewOverlayComponent (6-side orthographic view): one WeightedOitRenderer per panel (6 total). Added voxel-fill and STL-reference opacity sliders to the header, gated to
+only show when the source is the Ideal World (where voxels/STL actually exist — mirrors settings-panel.component.html's own *ngIf="isIdealWorld()" gating for the same pair of
+controls).
+ZonePaintingComponent (3 axis-aligned painting views + 1 free-orbit 3D result): one WeightedOitRenderer per panel (4 total). Same two opacity sliders added to the sidebar (no
+extra gating needed — this window only ever opens from the Ideal World already).
+OstapMelnyk
+added 5 commits
+September 12, 2026 16:12
+add weighted blended OIT to stabilize STL+voxel transparency
+5f6bf3c
+fix OIT accum/reveal passes getting stomped by scene.background force…
+…
+b37a28a
+```
+…-clear
+```
+fix OIT: route fully-opaque tagged materials to the opaque pass, matc…
+…
+019b4a5
+```
+…h offscreen resolution to devicePixelRatio
+```
+fix OIT composite missing linear-to-sRGB encode, causing background c…
+…
+46daf02
+```
+…olor shift on opacity change
+```
+extend weighted OIT + opacity sliders to the 6-view overlay and zone-…
+…
+987fea6
+```
+…painting panels
+```
+OstappMelnykk
+merged commit 4a6914a
+into
+dev
+Sep 12, 2026
+This was referenced Sep 12, 2026
+Feature/stl surface zone linking
+#21
+Closed
+STL surface zone linking
+#22
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

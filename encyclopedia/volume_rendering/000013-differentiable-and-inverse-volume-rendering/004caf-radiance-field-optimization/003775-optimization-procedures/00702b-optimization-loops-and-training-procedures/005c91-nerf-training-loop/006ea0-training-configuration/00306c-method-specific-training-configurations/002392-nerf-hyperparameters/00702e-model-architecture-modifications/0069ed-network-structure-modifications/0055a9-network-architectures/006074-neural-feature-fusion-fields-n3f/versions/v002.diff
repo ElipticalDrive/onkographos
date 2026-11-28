@@ -1,0 +1,156 @@
+--- v001.md
++++ v002.md
+@@ -8,14 +8,14 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** A set of input images $I_t \in \mathbb{R}^{3 \times H \times W}$ defined on lattice $\Omega = \{1, \dots, H\} \times \{1, \dots, W\}$ for $t=1 \dots T$, with known camera parameters. A pre-trained 2D feature extractor (teacher) $\Phi$ [S1].
++*   **Inputs:** A set of input images $I_t \in \mathbb{R}^{3 \times H \times W}$ defined on lattice $\Omega = \{1, \dots, H\} \times \{1, \dots, W\}$ for $t=1 \dots T$, with known camera parameters [S1]. A pre-trained 2D feature extractor (teacher) $\Phi$ [S1].
+ *   **Outputs:** A 3D neural feature field defined by occupancy $\sigma: \mathbb{R}^3 \to \mathbb{R}^+$ and a color/feature function $c: \mathbb{R}^3 \times \mathbb{R}^3 \to \mathbb{R}^{3+C}$, where $C$ is the number of feature channels [S1]. The rendered outputs are color images $\hat{I}_t$ and feature images $\hat{\Phi}_t \in \mathbb{R}^{C \times H \times W}$ [S1].
+ 
+ **Data Structures:**
+-The student network implements the pair $(\sigma, c)$. The function $c$ is decomposed into $c = (c_{rgb}, c_{\Phi})$, where $c_{rgb}$ outputs 3 color values and $c_{\Phi}$ outputs $C$ feature values [S1]. For dynamic scenes (e.g., using NeuralDiff), the architecture decomposes the scene into static, dynamic (time-dependent), and actor (camera-anchored) fields, each with its own feature prediction head (MLP followed by tanh) [S1].
++The student network implements the pair $(\sigma, c)$ [S1]. The function $c$ is decomposed into $c = (c_{rgb}, c_{\Phi})$, where $c_{rgb}$ outputs 3 color values and $c_{\Phi}$ outputs $C$ feature values [S1]. For dynamic scenes (e.g., using NeuralDiff), the architecture decomposes the scene into static, dynamic (time-dependent), and actor (camera-anchored) fields, each with its own feature prediction head (MLP followed by tanh) [S1].
+ 
+ **Preprocessing:**
+ 1.  Teacher features $\Phi(I_t)$ are pre-computed using public weights (e.g., DINO, MoCo-v3, DeiT) [S1].
+ 2.  Features are L2-normalized and reduced to 64 dimensions via Principal Component Analysis (PCA) before distillation [S1].
+-3.  Images are down-sampled to $480 \times 270$ pixels; 2D features are up-sampled to match using nearest-neighbor interpolation [S1].
++3.  For NeuralDiff experiments, images are down-sampled to $480 \times 270$ pixels and 2D features are up-sampled to match using nearest-neighbor interpolation [S1].
+ 
+ **Numbered Steps:**
+@@ -33,78 +33,66 @@
+ **Pseudocode:**
+ ```python
+-import torch
+-import torch.nn as nn
+-import torch.nn.functional as F
++import math
+ 
+-class N3FStudent(nn.Module):
++class NeuralField:
++    """Student network implementing (sigma, c) where c = (c_rgb, c_phi)."""
+     def __init__(self, feature_dim=64):
+-        super().__init__()
+-        # Student network implementing sigma and c = (c_rgb, c_phi)
+-        # c_rgb outputs 3 channels, c_phi outputs feature_dim channels
+-        self.network = NeuralFieldNetwork() 
++        # For vanilla NeRF baseline: single linear layer with tanh [S1]
++        # For NeuralDiff: MLPs followed by tanh per component [S1]
+         self.feature_dim = feature_dim
+ 
+-    def forward(self, rays_o, rays_d, t_near, t_far, num_samples):
+-        """
+-        rays_o: (B, 3) ray origins
+-        rays_d: (B, 3) ray directions (normalized)
+-        t_near, t_far: (B,) near and far clip distances
+-        num_samples: int, number of points per ray
+-        """
+-        # Sample points along rays
+-        t_vals = torch.linspace(0, 1, num_samples).to(rays_o.device)
+-        t_samples = t_near + t_vals * (t_far - t_near)
+-        points = rays_o.unsqueeze(1) + rays_d.unsqueeze(1) * t_samples.unsqueeze(2)
+-        
+-        # Query student network
+-        # points shape: (B, num_samples, 3)
+-        # directions shape: (B, num_samples, 3)
+-        sigma, color_and_features = self.network(points, rays_d.unsqueeze(1).expand_as(points))
+-        
+-        # Split output
+-        color = color_and_features[..., :3]
+-        features = color_and_features[..., 3:]
+-        
+-        # Compute weights for volume rendering
+-        # delta = t_samples[i+1] - t_samples[i]
+-        deltas = t_samples[:, 1:] - t_samples[:, :-1]
+-        # Add infinite delta for last point
+-        deltas = torch.cat([deltas, torch.tensor([1e10]).to(rays_o.device)], dim=1)
+-        
+-        alpha = 1.0 - torch.exp(-sigma * deltas)
+-        transmittance = torch.cumprod(torch.exp(-alpha), dim=1)
+-        transmittance = torch.cat([torch.ones_like(transmittance[:, :1]), 1.0 - transmittance[:, :-1]], dim=1)
+-        
+-        weights = alpha * transmittance
+-        
+-        # Render color and features
+-        rendered_color = torch.sum(weights.unsqueeze(-1) * color, dim=1)
+-        rendered_features = torch.sum(weights.unsqueeze(-1) * features, dim=1)
+-        
+-        return rendered_color, rendered_features, sigma
++    def forward(self, points, directions):
++        # points: (B, N, 3), directions: (B, N, 3)
++        # In practice, implemented as a neural network (MLP/Linear)
++        # Output shape: (B, N, 3 + feature_dim)
++        out = self.network(points, directions) 
++        sigma = math.relu(out[..., :1]) # Occupancy must be positive
++        rgb_features = out[..., 1:]
++        return sigma, rgb_features
++
++def volume_render(points, directions, sigma, rgb_features, t_near, t_far, num_samples):
++    """Standard differentiable volume rendering for color and features."""
++    # Sample points along rays
++    t_vals = torch.linspace(0, 1, num_samples)
++    t_samples = t_near + t_vals * (t_far - t_near)
++    
++    # Compute deltas between samples
++    deltas = t_samples[1:] - t_samples[:-1]
++    deltas = torch.cat([deltas, torch.tensor([1e10])])
++    
++    # Compute alpha (opacity) and transmittance
++    alpha = 1.0 - torch.exp(-sigma * deltas)
++    transmittance = torch.cumprod(torch.exp(-alpha), dim=1)
++    transmittance = torch.cat([torch.ones_like(transmittance[:, :1]), 1.0 - transmittance[:, :-1]], dim=1)
++    
++    # Compute weights
++    weights = alpha * transmittance
++    
++    # Split output
++    color = rgb_features[..., :3]
++    features = rgb_features[..., 3:]
++    
++    # Render color and features
++    rendered_color = torch.sum(weights.unsqueeze(-1) * color, dim=1)
++    rendered_features = torch.sum(weights.unsqueeze(-1) * features, dim=1)
++    
++    return rendered_color, rendered_features, sigma
+ 
+ def compute_loss(rendered_color, rendered_features, target_image, target_features, lambda_feat):
+-    """
+-    target_image: (B, 3, H, W)
+-    target_features: (B, C, H, W)
+-    """
+-    # Image reconstruction loss
+-    color_loss = F.mse_loss(rendered_color, target_image)
+-    
+-    # Feature reconstruction loss
+-    feature_loss = F.mse_loss(rendered_features, target_features)
+-    
++    """Compute total training loss."""
++    color_loss = torch.mse_loss(rendered_color, target_image)
++    feature_loss = torch.mse_loss(rendered_features, target_features)
+     total_loss = color_loss + lambda_feat * feature_loss
+     return total_loss
+ 
+ # Training Loop Snippet
+-# 1. Pre-compute teacher features Phi(I_t) and apply PCA normalization
+-# 2. Initialize student network
++# 1. Pre-compute teacher features Phi(I_t) and apply PCA normalization [S1]
++# 2. Initialize student network (NeuralField) [S1]
+ # 3. For each batch of images I_t:
+-#    - Get camera rays for I_t
+-#    - rendered_color, rendered_features, sigma = student(rays)
+-#    - loss = compute_loss(rendered_color, rendered_features, I_t, Phi(I_t), lambda=0.001)
++#    - Get camera rays for I_t [S1]
++#    - rendered_color, rendered_features, sigma = volume_render(...) [S1]
++#    - loss = compute_loss(rendered_color, rendered_features, I_t, Phi(I_t), lambda=0.001) [S1]
+ #    - loss.backward()
+-#    - optimizer.step()
++#    - optimizer.step() [S1]
+ ```
+ 
+@@ -135,5 +123,5 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Training time depends on the base neural rendering architecture. For NeuralDiff on EPIC-KITCHENS, single scene training takes ~24 hours for RGB reconstruction and ~2 hours for feature distillation (20 epochs, 500 iterations) on an NVIDIA Tesla P40 [S1].
++*   **Time Complexity:** Training time depends on the base neural rendering architecture. For NeuralDiff on EPIC-KITCHENS, single scene training takes ~24 hours for RGB reconstruction and ~2 hours for feature distillation (20 epochs, 500 iterations) [S1].
+ *   **Memory Complexity:** Requires storing the 3D neural field parameters and pre-computed 2D teacher features for all views [S1].
+ *   **Performance:** N3F consistently improves over 2D self-supervised baselines. On LLFF dataset, N3F with DINO [ViT-B/8] achieved mAP 76.26 vs teacher 64.35 (+11.91); with DINO [ViT-B/16] 78.84 vs 60.15 (+18.69); with MoCo-v3 76.15 vs 57.51 (+18.64); with DeiT 74.53 vs 47.51 (+26.82) [S1].

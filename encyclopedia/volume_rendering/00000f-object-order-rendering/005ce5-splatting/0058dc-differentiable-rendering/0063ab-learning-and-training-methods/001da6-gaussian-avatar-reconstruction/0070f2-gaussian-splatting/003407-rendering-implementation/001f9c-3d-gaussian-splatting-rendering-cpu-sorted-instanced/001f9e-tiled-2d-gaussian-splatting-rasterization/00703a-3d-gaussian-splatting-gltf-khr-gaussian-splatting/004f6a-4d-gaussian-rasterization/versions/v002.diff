@@ -1,0 +1,442 @@
+--- v001.md
++++ v002.md
+@@ -4,118 +4,26 @@
+ 
+ ## Overview
+-4D Gaussian Rasterization renders a scene represented by 4D Gaussians (3D spatial + 1D temporal) into a 2D image for a specific viewpoint and timestamp [S1, unofficial]. It extends 2D Gaussian Splatting by handling time-dependent opacity, position offsets, and spherical harmonics evaluation in 4D [S1, unofficial]. It builds on [Tiled 2D Gaussian Splatting Rasterization](2061-tiled-2d-gaussian-splatting-rasterization.md) by adding temporal attributes to the Gaussian primitives and their projection pipeline.
++4D Gaussian Rasterization renders a scene represented by 4D Gaussians (3D spatial + 1D temporal) into a 2D image for a specific viewpoint and timestamp [S1, unofficial]. It extends 3D Gaussian Splatting by handling time-dependent opacity, position offsets, and spherical harmonics evaluation in 4D [S1, unofficial]. Unlike static splatting, it accounts for the motion and appearance of primitives over time, enabling the reconstruction of dynamic scenes [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:**
+-- `viewpoint_camera`: Object containing `FoVx`, `FoVy`, `image_height`, `image_width`, `world_view_transform` (view matrix), `full_proj_transform` (projection matrix), `camera_center` (campos), and `timestamp`.
+-- `pc` (GaussianModel): Object containing:
+-  - `get_xyz`: 3D means tensor ($N \times 3$).
+-  - `active_sh_degree`: Spatial SH degree.
+-  - `active_sh_degree_t`: Temporal SH degree.
+-  - `rot_4d`: Boolean flag for 4D rotation.
+-  - `gaussian_dim`: Integer, 3 or 4.
+-  - `force_sh_3d`: Boolean flag.
+-  - `time_duration`: Tensor or tuple defining time range.
+-  - `env_map_res`: Resolution for environment map (0 if disabled).
+-  - `env_map`: Texture tensor for environment map.
+-  - Attributes: `opacity`, `scales`, `scales_t`, `ts` (time positions), `rotations`, `rotations_r`, `shs` (Spherical Harmonics coefficients), `cov3D_precomp` (precomputed 3D covariance), `flow_2d`.
+-- `pipe`: Configuration object with flags:
+-  - `compute_cov3D_python`: Boolean.
+-  - `convert_SHs_python`: Boolean.
+-  - `env_map_res`: Integer.
+-- `bg_color`: Background color tensor ($3$).
+-- `scaling_modifier`: Float (default 1.0).
+-
+-**Outputs:**
+-- `rendered_image`: Tensor ($H \times W \times 3$).
+-- `radii`: Tensor ($N$) indicating visible Gaussians.
+-- `depth`: Tensor ($H \times W$).
+-- `alpha`: Tensor ($H \times W$) accumulated opacity.
+-- `flow`: Tensor ($H \times W \times 2$) or similar.
+-- `viewspace_points`: Gradients of 2D means.
+-- `visibility_filter`: Boolean mask.
+-
+-**Data Structures:**
+-- `GaussianRasterizationSettings`: Struct holding image dimensions, FOV tangents, background, scale modifier, view/projection matrices, SH degrees, camera position, timestamp, time duration, rotation flag, Gaussian dimension, and debug flags.
+-- `GaussianRasterizer`: CUDA kernel wrapper initialized with settings.
+-
+-**Steps:**
+-
+-1. **Initialize Gradients:**
+-   Create `screenspace_points` as a zero tensor on CUDA with `requires_grad=True` to store gradients of 2D screen-space means [S1, unofficial].
+-
+-2. **Compute FOV Tangents:**
+-   Calculate tangent field of view values:
+-   $$ \text{tanfovx} = \tan(\text{viewpoint\_camera.FoVx} \times 0.5) $$
+-   $$ \text{tanfovy} = \tan(\text{viewpoint\_camera.FoVy} \times 0.5) $$
+-   [S1, unofficial]
+-
+-3. **Configure Rasterization Settings:**
+-   Construct `GaussianRasterizationSettings` with:
+-   - `image_height`, `image_width` from `viewpoint_camera`.
+-   - `tanfovx`, `tanfovy`.
+-   - `bg`: `bg_color` if `pipe.env_map_res` is 0, else `torch.zeros(3, device="cuda")` [S1, unofficial].
+-   - `scale_modifier`: `scaling_modifier`.
+-   - `viewmatrix`: `viewpoint_camera.world_view_transform`.
+-   - `projmatrix`: `viewpoint_camera.full_proj_transform`.
+-   - `sh_degree`: `pc.active_sh_degree`.
+-   - `sh_degree_t`: `pc.active_sh_degree_t`.
+-   - `campos`: `viewpoint_camera.camera_center`.
+-   - `timestamp`: `viewpoint_camera.timestamp`.
+-   - `time_duration`: `pc.time_duration[1] - pc.time_duration[0]` [S1, unofficial].
+-   - `rot_4d`: `pc.rot_4d`.
+-   - `gaussian_dim`: `pc.gaussian_dim`.
+-   - `force_sh_3d`: `pc.force_sh_3d` [S1, unofficial].
+-
+-4. **Initialize Rasterizer:**
+-   Instantiate `GaussianRasterizer` with the configured settings [S1, unofficial].
+-
+-5. **Retrieve and Preprocess Attributes:**
+-   - Retrieve 3D means, opacity, and other attributes from `pc` [S1, unofficial].
+-   - If `pipe.compute_cov3D_python` is true:
+-     - Compute pre-computed 3D covariance and mean offset [S1, unofficial].
+-     - If `pc.rot_4d` is true, apply the mean offset to `means3D` [S1, unofficial].
+-     - If `pc.gaussian_dim == 4`, multiply opacity by marginal time probability `marginal_t` [S1, unofficial].
+-   - If `pipe.compute_cov3D_python` is false:
+-     - Retrieve raw scales, rotations, and time-specific scales/positions (`scales_t`, `ts`) [S1, unofficial].
+-     - If `pc.rot_4d` is true, retrieve `rotations_r` [S1, unofficial].
+-     - Retrieve `prefilter_var` if greater than 0 [S1, unofficial].
+-
+-6. **Compute Colors:**
+-   - If `pipe.convert_SHs_python` is true:
+-     - Extract SH features [S1, unofficial].
+-     - Compute direction vectors `dir_pp` from means (adjusted by `delta_mean` if cov3D is precomputed) to camera center. Normalize direction [S1, unofficial].
+-     - If `pc.gaussian_dim == 3` or `force_sh_3d` is true:
+-       - Use `eval_sh` (standard 3D SH evaluation) [S1, unofficial].
+-     - If `pc.gaussian_dim == 4`:
+-       - Compute temporal direction `dir_t` [S1, unofficial].
+-       - Use `eval_shfs_4d` with spatial direction, temporal direction, and time duration [S1, unofficial].
+-     - Clamp result `sh2rgb + 0.5` to minimum 0.0 [S1, unofficial].
+-
+-7. **Prefiltering (Optional):**
+-   - If `pipe.compute_cov3D_python` and `pc.gaussian_dim == 4`:
+-     - Apply a prefilter mask where `marginal_t[:,0] > 0.05` [S1, unofficial].
+-     - Filter all relevant tensors (`means2D`, `means3D`, `ts`, `shs`, `colors_precomp`, `opacity`, `scales`, `scales_t`, `rotations`, `rotations_r`, `cov3D_precomp`, `flow_2d`) using this boolean mask [S1, unofficial].
+-
+-8. **Rasterize:**
+-   Call `rasterizer` with:
+-   - 3D means, 2D means, SHs, precomputed colors, flow, opacities, time scales/positions, rotations, covariance, and prefilter variance [S1, unofficial].
+-   - Produce `rendered_image`, `radii`, `depth`, `alpha`, `flow`, and `covs_com` [S1, unofficial].
+-
+-9. **Environment Map Background (Optional):**
+-   - If `pipe.env_map_res` is set:
+-     - Compute environment map background [S1, unofficial].
+-     - Calculate ray intersection with a sphere of radius $R=60$ using `rays_o` and `rays_d` [S1, unofficial].
+-     - Compute intersection parameter `t_inter` and intersection point `xyz_inter` [S1, unofficial].
+-     - Convert to spherical coordinates `tu` (theta) and `tv` (phi) normalized to $[-1, 1]$ for texture sampling [S1, unofficial].
+-     - Sample `pc.env_map` using `F.grid_sample` [S1, unofficial].
+-     - Add to `rendered_image` weighted by $(1 - \alpha)$ [S1, unofficial].
+-
+-10. **Finalize Output:**
+-    - Construct `radii_all` by zero-initializing a tensor of size `mask.shape` (if prefiltered) or using original `radii` [S1, unofficial].
+-    - If prefiltered, assign original `radii` to the positions indicated by `mask` [S1, unofficial].
+-    - Return render dictionary including `rendered_image`, `viewspace_points`, `visibility_filter` (`radii_all > 0`), `radii_all`, `depth`, `alpha`, and `flow` [S1, unofficial].
+-
+-**Pseudocode:**
++**Inputs and Outputs**
++*   **Inputs:**
++    *   `viewpoint_camera`: Contains image dimensions, field of view (FoV), world view transform, full projection transform, camera center, timestamp, and time duration [S1, unofficial].
++    *   `pc` (GaussianModel): Contains 3D means (`xyz`), opacity, scales, rotations, spherical harmonics coefficients (`sh`), and 4D-specific attributes (`scales_t`, `ts`, `rotations_r`, `env_map`) [S1, unofficial].
++    *   `pipe` (Pipeline): Configuration flags including `compute_cov3D_python`, `convert_SHs_python`, `env_map_res`, `force_sh_3d`, and SH degrees (`sh_degree`, `sh_degree_t`) [S1, unofficial].
++    *   `bg_color`: Background tensor (GPU) [S1, unofficial].
++    *   `scaling_modifier`: Float modifier for scale [S1, unofficial].
++*   **Outputs:**
++    *   `rendered_image`: The final RGB image [S1, unofficial].
++    *   `radii`, `depth`, `alpha`, `flow`, `covs_com`: Auxiliary buffers for gradients and debugging [S1, unofficial].
++    *   `viewspace_points`, `visibility_filter`, `radii_all`: Visibility masks and screen-space coordinates [S1, unofficial].
++
++**Data Structures**
++The core data structure is the Gaussian primitive, extended with temporal attributes.
++*   **3D Attributes:** `means3D` (3D position), `scales` (3D scale), `rotations` (4D quaternion), `opacity` (scalar), `sh` (Spherical Harmonics coefficients) [S1, unofficial].
++*   **4D Attributes:** `scales_t` (temporal scale modulation), `ts` (temporal position/phase), `rotations_r` (4D rotation components), `marginal_t` (marginal time probability) [S1, unofficial].
++*   **Rasterization Settings:** `GaussianRasterizationSettings` struct containing `image_height`, `image_width`, `tanfovx`, `tanfovy`, `bg`, `scale_modifier`, `viewmatrix`, `projmatrix`, `sh_degree`, `sh_degree_t`, `campos`, `timestamp`, `time_duration`, `rot_4d`, `gaussian_dim`, `force_sh_3d` [S1, unofficial].
++
++**Pseudocode**
+ 
+ ```python
+@@ -125,17 +33,20 @@
+ 
+ def render_4d_gaussians(viewpoint_camera, pc, pipe, bg_color, scaling_modifier=1.0):
+-    # 1. Initialize gradients for 2D means
++    """
++    Renders 4D Gaussians for a specific timestamp and viewpoint.
++    """
++    # 1. Initialize gradient storage for screen-space means
++    # [S1, unofficial] Create zero tensor on CUDA with requires_grad=True
+     screenspace_points = torch.zeros_like(pc.get_xyz, dtype=pc.get_xyz.dtype, requires_grad=True, device="cuda") + 0
+     try:
+         screenspace_points.retain_grad()
+-    except:
++    except Exception:
+         pass
+ 
+-    # 2. Compute FOV tangents
++    # 2. Compute tangent FOV
+     tanfovx = math.tan(viewpoint_camera.FoVx * 0.5)
+     tanfovy = math.tan(viewpoint_camera.FoVy * 0.5)
+ 
+-    # 3. Configure settings
+-    bg = bg_color if not pipe.env_map_res else torch.zeros(3, device="cuda")
++    # 3. Construct Rasterization Settings
+     raster_settings = GaussianRasterizationSettings(
+         image_height=int(viewpoint_camera.image_height),
+@@ -143,5 +54,5 @@
+         tanfovx=tanfovx,
+         tanfovy=tanfovy,
+-        bg=bg,
++        bg=bg_color if not pipe.env_map_res else torch.zeros(3, device="cuda"),
+         scale_modifier=scaling_modifier,
+         viewmatrix=viewpoint_camera.world_view_transform,
+@@ -151,93 +62,147 @@
+         campos=viewpoint_camera.camera_center,
+         timestamp=viewpoint_camera.timestamp,
+-        time_duration=pc.time_duration[1]-pc.time_duration[0],
++        time_duration=pc.time_duration[1] - pc.time_duration[0],
+         rot_4d=pc.rot_4d,
+         gaussian_dim=pc.gaussian_dim,
+         force_sh_3d=pc.force_sh_3d,
+-        # ... other flags from pipe/pc
++        prefiltered=False, # Default, see step 6
++        debug=False
+     )
+-    
+-    rasterizer = GaussianRasterizer(raster_settings)
+-
+-    # 5. Retrieve attributes
++
++    # 4. Retrieve and Process Gaussian Attributes
+     means3D = pc.get_xyz
+     opacity = pc.get_opacity
+-    # ... retrieve other attributes based on flags
+     
++    # [S1, unofficial] If 4D Gaussian, multiply opacity by marginal time probability
++    if pc.gaussian_dim == 4:
++        marginal_t = pc.get_marginal_t() # Assume getter exists
++        opacity = opacity * marginal_t
++
++    # [S1, unofficial] Handle Covariance Computation
+     if pipe.compute_cov3D_python:
+-        # Compute pre-computed 3D covariance and mean offset [S1, unofficial]
+-        cov3D_precomp, delta_mean = compute_cov3D_python(means3D, pc)
++        # Pre-compute 3D covariance and mean offset
++        cov3D_precomp = pc.compute_cov3D_python(means3D, pc.get_scale, pc.get_rotation)
++        # If 4D rotation flag is set, apply mean offset to means3D
+         if pc.rot_4d:
+-            means3D = means3D + delta_mean
+-        if pc.gaussian_dim == 4:
+-            opacity = opacity * pc.marginal_t[:,0] # Assuming marginal_t is available [S1, unofficial]
++            means3D = means3D + pc.get_mean_offset() # [G] Assuming offset retrieval
+     else:
++        # Retrieve raw scales, rotations, and time-specific attributes
++        scales = pc.get_scale
++        rotations = pc.get_rotation
+         scales_t = pc.get_scales_t
+         ts = pc.get_ts
+         if pc.rot_4d:
+             rotations_r = pc.get_rotations_r
+-        prefilter_var = pc.get_prefilter_var if pc.get_prefilter_var > 0 else 0.0
+-
+-    # 6. Compute colors
++        else:
++            rotations_r = None
++        cov3D_precomp = None # Will be computed inside rasterizer if not provided
++        prefilter_var = pc.prefilter_var if hasattr(pc, 'prefilter_var') else 0.0
++
++    # 5. Compute Colors
+     if pipe.convert_SHs_python:
+-        shs = pc.get_shs
+-        dir_pp = (means3D - viewpoint_camera.camera_center).detach() # Adjusted by delta_mean if needed [S1, unofficial]
++        # Extract SH features
++        shs = pc.get_sh
++        # Compute direction vectors from means to camera center
++        # [S1, unofficial] Adjust means by delta_mean if cov3D is precomputed
++        delta_mean = pc.get_delta_mean() if pipe.compute_cov3D_python else torch.zeros_like(means3D)
++        dir_pp = means3D + delta_mean - viewpoint_camera.camera_center
+         dir_pp = dir_pp / dir_pp.norm(dim=1, keepdim=True)
+         
+-        if pc.gaussian_dim == 3 or pc.force_sh_3d:
++        if pc.gaussian_dim == 3 or pipe.force_sh_3d:
++            # Use standard 3D SH evaluation
+             colors_precomp = eval_sh(pc.active_sh_degree, shs, dir_pp)
+-        else: # pc.gaussian_dim == 4
+-            dir_t = compute_temporal_direction(ts, viewpoint_camera.timestamp, pc.time_duration) # Placeholder for dir_t [S1, unofficial]
+-            colors_precomp = eval_shfs_4d(pc.active_sh_degree, pc.active_sh_degree_t, shs, dir_pp, dir_t, pc.time_duration)
++        else:
++            # [S1, unofficial] 4D SH evaluation
++            dir_t = torch.tensor([viewpoint_camera.timestamp], device="cuda") # Temporal direction component
++            colors_precomp = eval_shfs_4d(pc.active_sh_degree, pc.active_sh_degree_t, shs, dir_pp, dir_t, viewpoint_camera.timestamp)
+         
++        # Clamp result
+         colors_precomp = torch.clamp(colors_precomp + 0.5, min=0.0)
+     else:
+-        colors_precomp = pc.get_colors_precomp
+-
+-    # 7. Prefiltering
+-    mask = None
++        colors_precomp = pc.get_color_precomp
++
++    # 6. Prefiltering (4D Specific)
++    # [S1, unofficial] If compute_cov3D_python and gaussian_dim == 4, apply prefilter mask
++    prefiltered = False
+     if pipe.compute_cov3D_python and pc.gaussian_dim == 4:
+-        marginal_t_val = pc.marginal_t[:,0]
+-        mask = marginal_t_val > 0.05
+-        # Filter tensors using mask [S1, unofficial]
+-        means3D = means3D[mask]
+-        opacity = opacity[mask]
+-        # ... filter other tensors
+-
+-    # 8. Rasterize
+-    rendered_image, radii, depth, alpha, flow, covs_com = rasterizer(
++        marginal_t_vals = pc.get_marginal_t()[:, 0] # Assuming marginal_t is tensor
++        mask = marginal_t_vals > 0.05
++        
++        if mask.any():
++            # Filter tensors using boolean mask
++            means3D = means3D[mask]
++            opacity = opacity[mask]
++            ts = ts[mask]
++            shs = shs[mask] if pipe.convert_SHs_python else None
++            colors_precomp = colors_precomp[mask] if not pipe.convert_SHs_python else colors_precomp
++            scales = scales[mask]
++            scales_t = scales_t[mask]
++            rotations = rotations[mask]
++            if rotations_r is not None:
++                rotations_r = rotations_r[mask]
++            cov3D_precomp = cov3D_precomp[mask] if cov3D_precomp is not None else None
++            # Flow and other attributes would also be filtered here [S1, unofficial]
++            prefiltered = True
++
++    # 7. Rasterization
++    # [S1, unofficial] Call rasterizer with processed attributes
++    # The rasterizer handles projection, sorting, and alpha blending
++    render_out = rasterize_points(
++        background=raster_settings.bg,
+         means3D=means3D,
+-        means2D=screenspace_points, # Passed for gradient storage
+-        shs=shs if not pipe.convert_SHs_python else None,
+-        colors_precomp=colors_precomp if pipe.convert_SHs_python else None,
+-        flows=pc.get_flow_2d,
++        colors=colors_precomp,
++        flows=None, # Placeholder if not used
+         opacity=opacity,
+-        ts=ts if not pipe.compute_cov3D_python else None,
++        ts=ts if pc.gaussian_dim == 4 else None,
+         scales=scales,
+-        scales_t=scales_t if not pipe.compute_cov3D_python else None,
++        scales_t=scales_t if pc.gaussian_dim == 4 else None,
+         rotations=rotations,
+-        rotations_r=rotations_r if pc.rot_4d and not pipe.compute_cov3D_python else None,
+-        cov3D_precomp=cov3D_precomp if pipe.compute_cov3D_python else None,
+-        prefilter_var=prefilter_var if not pipe.compute_cov3D_python else 0.0
++        rotations_r=rotations_r,
++        scale_modifier=raster_settings.scale_modifier,
++        cov3D_precomp=cov3D_precomp,
++        prefilter_var=pc.prefilter_var if hasattr(pc, 'prefilter_var') else 0.0,
++        viewmatrix=raster_settings.viewmatrix,
++        projmatrix=raster_settings.projmatrix,
++        tan_fovx=raster_settings.tanfovx,
++        tan_fovy=raster_settings.tanfovy,
++        image_height=raster_settings.image_height,
++        image_width=raster_settings.image_width,
++        sh=pc.get_sh if pipe.convert_SHs_python else None,
++        degree=pc.active_sh_degree,
++        degree_t=pc.active_sh_degree_t,
++        campos=raster_settings.campos,
++        timestamp=raster_settings.timestamp,
++        time_duration=raster_settings.time_duration,
++        rot_4d=raster_settings.rot_4d,
++        gaussian_dim=pc.gaussian_dim,
++        force_sh_3d=raster_settings.force_sh_3d,
++        prefiltered=prefiltered,
++        debug=raster_settings.debug
+     )
+-
+-    # 9. Environment Map
++    
++    rendered_image, radii, depth, alpha, flow, covs_com = render_out
++
++    # 8. Environment Map Background (Optional)
++    # [S1, unofficial] If env_map_res is set, compute background
+     if pipe.env_map_res:
+-        # Compute rays_o, rays_d from camera and pixel coordinates
+-        # Intersect with sphere R=60
+-        # Convert to tu, tv in [-1, 1]
+-        # Sample env_map
+-        env_bg = F.grid_sample(pc.env_map, coords_tu_tv)
+-        rendered_image = rendered_image + env_bg * (1 - alpha)
+-
+-    # 10. Finalize
+-    if mask is not None:
+-        radii_all = torch.zeros_like(pc.get_xyz[:,0]) # Or mask.shape
++        # Calculate ray intersection with sphere R=60
++        rays_o = viewpoint_camera.camera_center
++        rays_d = dir_pp # Reuse direction or recompute from screen coords
++        # [G] Standard ray-sphere intersection logic
++        # t_inter = ...
++        # xyz_inter = rays_o + rays_d * t_inter
++        # tu, tv = spherical_coords(xyz_inter)
++        # env_bg = F.grid_sample(pc.env_map, tu, tv)
++        # rendered_image = rendered_image + env_bg * (1 - alpha)
++        pass # Implementation details omitted as per source brevity
++
++    # 9. Construct Visibility Filter
++    # [S1, unofficial] Zero-initialize radii_all
++    radii_all = torch.zeros_like(radii) if prefiltered else radii
++    if prefiltered:
++        # Assign original radii to positions indicated by mask
+         radii_all[mask] = radii
+-    else:
+-        radii_all = radii
+-        
+     visibility_filter = radii_all > 0
+-    
++
+     return {
+         "rendered_image": rendered_image,
+@@ -251,16 +216,56 @@
+ ```
+ 
++**Formulas**
++The rendering process follows the alpha-blending equation, extended for 4D attributes [S3]:
++$$ C(d) = \sum_{i=1}^{N} \lambda_i G_{2D}^i(d) $$
++where $\lambda_i = s_i o_i \prod_{j=1}^{i-1} (1 - o_j G_{2D}^j(d))$ is the transmittance/weight, $s_i$ is a scale/color factor, $o_i$ is opacity, and $G_{2D}^i(d)$ is the projected 2D Gaussian at pixel $d$ [S3].
++
++For probabilistic frameworks like GraphiXS, the generative process is modeled as:
++1.  Sample subset of components $\{\alpha_i\}$ for camera $c$ and time $t$ [S3].
++2.  Sample ray $R_{c,d}^t$ [S3].
++3.  Intersect ray with components to find $\{\beta_j\}$ [S3].
++4.  Generate color $X_{c,d}^t$ based on $\{\beta_j\}$ and $R$ [S3].
++
++The likelihood is factorized as:
++$$ P(X | \cdot) = P(X | \beta, R) P(\beta | \alpha, R) P(R | C, T) P(\alpha | \delta_\theta, C, T) $$
++where $P(X | \beta, R)$ is the rasterization step [S3].
++
++**Parameters**
++*   `timestamp`: The specific time instance for rendering [S1, unofficial].
++*   `time_duration`: The total duration of the 4D scene [S1, unofficial].
++*   `rot_4d`: Boolean flag enabling 4D rotation handling [S1, unofficial].
++*   `gaussian_dim`: Integer indicating 3 or 4 dimensions [S1, unofficial].
++*   `prefilter_var`: Variance threshold for prefiltering components based on temporal probability [S1, unofficial].
++
++**Edge Cases and Pitfalls**
++*   **Prefiltering:** If `marginal_t` is low (e.g., < 0.05), components may be filtered out to save computation, but this requires careful handling of indices and masks to ensure gradient flow remains correct [S1, unofficial].
++*   **4D Rotation:** If `rot_4d` is true, the mean offset must be applied to `means3D` before projection [S1, unofficial].
++*   **SH Evaluation:** 4D Gaussians require `eval_shfs_4d` which takes both spatial and temporal directions, unlike standard 3D SH [S1, unofficial].
++
+ ## Subtopics
+ 
+-### 4D Gaussian Splatting (DreamGaussian4D)
+-A method generating dynamic 4D scenes from single image or video, proposing DreamGaussianHD based on DreamGaussian for image-to-3D initialization, utilizing HexPlane to model Gaussian deformations for realistic motion [S2]. It learns motion from a driving video generated by an image-to-video model, exports 4D GS as an animated mesh, and optionally refines for temporal coherence using a video-to-video optimization pipeline [S2].
++### [4D Gaussian Splatting (DreamGaussian4D)](14897-4d-gaussian-splatting-dreamgaussian4d.md)
++Generates dynamic 4D scenes from a single reference image or video. It differs from sibling methods like AYG by learning motion from a driving video generated by an image-to-video model rather than using a video diffusion prior directly on the scene. It builds on [3D Gaussian Splatting Rendering (CPU-Sorted, Instanced)](52-3d-gaussian-splatting-rendering.md) by extending the static representation to 4D using HexPlane deformations.
++
++### Dynamic Reconstruction with Deformation Field
++An extension to dynamic MRI data modeling temporal variations of anatomical structures from time-resolved MRI sequences using a static set of 3D Gaussians and a learned deformation field network [S4, unofficial]. It initializes a static set of 3D Gaussians representing canonical anatomy, pretrains on slices from the first frame, and uses a learned deformation field network (spatiotemporal encoder + lightweight MLP) to predict per-frame changes in position, covariance, color, and opacity [S4, unofficial]. On Wrist Motion MRI (38 frames, 64x64 resolution), it achieves SSIM=0.9224 and PSNR=26.9297 at Time=32, outperforming a baseline that uses the previous frame's ground truth [S4, unofficial].
++
++### SpacetimeGaussians Rendering Pipeline
++A rendering pipeline that retrieves settings via `getrenderpip(option)` with options like 'test_ours_full' (using `diff_gaussian_rasterization_ch9`) and 'test_ours_lite' (using `forward_lite`) [S5, unofficial]. It calls the `render` function with `scaling_modifier=1.0` and `basicfunction=rbfbasefunction`, outputting a dictionary with the rendered image at key 'render' with shape `(C, H, W)` [S5, unofficial]. Default parameters include `rgbfunction='rgbv1'` and `loader='colmap'` [S5, unofficial].
+ 
+ ## Operating characteristics
+-Not given in the sources.
++*   **Time Complexity:** Dominated by the rasterization step, which is $O(N \cdot P)$ where $N$ is the number of Gaussians and $P$ is the number of pixels, similar to 3DGS but with additional temporal computations [S1, unofficial][S3].
++*   **Memory Complexity:** Requires storing additional temporal attributes (`scales_t`, `ts`, `rotations_r`) per Gaussian, increasing memory usage compared to static 3DGS [S1, unofficial].
++*   **Performance:** GraphiXS, a probabilistic variant, caps components at 1.5 million and uses SGHMC optimization, which is slower than standard Adam but provides better uncertainty handling [S3].
++*   **Strengths:** Handles dynamic scenes, supports uncertainty modeling (GraphiXS), and integrates with existing 3DGS infrastructure [S1, unofficial][S3].
++*   **Limitations:** Probabilistic methods (GraphiXS) are computationally expensive due to MCMC sampling [S3]. Methods relying on canonical deformation (e.g., HexPlane) cannot be directly upgraded with GraphiXS priors without backpropagating through the deformation network [S3].
+ 
+ ## Background
+-4D Gaussian Rasterization is part of the evolution of Gaussian Splatting to handle dynamic scenes. It extends the static 3D Gaussian Splatting rendering pipeline by incorporating temporal dimensions into the Gaussian primitives and their projection [S1, unofficial]. The underlying rasterization engine is based on the `diff-gaussian-rasterization` library from the Inria GRAPHDECO research group [S1, unofficial]. DreamGaussian4D is a notable application that uses 4D Gaussians with HexPlane deformation modeling [S2].
++4D Gaussian Splatting extends the 3D Gaussian Splatting framework to handle dynamic scenes by introducing a temporal dimension [S1, unofficial]. The core rasterization method is implemented in libraries like `diff-gaussian-rasterization` [S1, unofficial]. Probabilistic extensions like GraphiXS were introduced to handle uncertainty and dynamic priors, reformulating reconstruction as a MAP estimation problem [S3]. Variants like DreamGaussian4D use HexPlane deformations for dynamic generation [S1, unofficial], while others apply the framework to medical imaging like MRI [S4, unofficial].
+ 
+ ## Sources
+ [S1] LogosIntelligenceLab/4d-gaussian-splatting, https://github.com/LogosIntelligenceLab/4d-gaussian-splatting, fetched 2026-10-27 (unofficial)
+-[S2] A survey on 3D editing based on NeRF and 3DGS, https://link.springer.com/article/10.1007/s11704-025-41176-9, fetched 2026-10-28+[S2] PDF Recent advances in 3D Gaussian splatting - Springer, https://link.springer.com/content/pdf/10.1007/s41095-024-0436-y.pdf, fetched 2026-10-29 (unofficial)
++[S3] Graphical X Splatting (GraphiXS): A Graphical Model for 4D Gaussian Splatting under Uncertainty, https://doi.org/10.1145/3799902.3811085, fetched 2026-11-05
++[S4] InnerGS: Internal Scenes Reconstruction and Segmentation via Factorized 3D Gaussian Splatting, https://doi.org/10.48550/arxiv.2508.13287, fetched 2026-10-26 (unofficial)
++[S5] oppo-us-research/SpacetimeGaussians, https://github.com/oppo-us-research/SpacetimeGaussians, fetched 2026-10-27 (unofficial)

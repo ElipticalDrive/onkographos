@@ -1,0 +1,141 @@
+# Non-saturating GAN Loss with R1 Regularization
+
+Also called: Non-saturating GAN Loss, R1 Regularized GAN Loss
+
+## Overview
+This loss function defines the adversarial objective for training a generator and discriminator pair in a generative adversarial framework [S1]. It builds on [Discriminator Loss with Gradient Penalty](7695-discriminator-loss-with-gradient-penalty.md) by specifying the exact non-saturating formulation and the R1 regularization term [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:**
+    *   $\mathbf{z}$: Latent vector sampled from prior $p_{\theta}$ [S1].
+    *   $\xi$: Conditioning variable (e.g., camera pose) sampled from $p_{\xi}$ [S1].
+    *   $I$: Real image sampled from the training data distribution $p_{\theta D}$ [S1].
+    *   $G_{\theta G}$: Generator network with parameters $\theta_G$ [S1].
+    *   $D_{\theta D}$: Discriminator network with parameters $\theta_D$ [S1].
+    *   $\lambda$: Scalar hyperparameter for the R1 penalty weight [S1].
+*   **Outputs:**
+    *   $\mathcal{L}(\theta, \phi)$: The total loss value, where $\theta$ and $\phi$ represent the generator and discriminator parameters respectively [S1]. The generator minimizes $\mathcal{L}(\theta, \phi)$ and the discriminator maximizes $\mathcal{L}(\theta, \phi)$ [S1].
+
+**Data Structures:**
+*   The discriminator $D_{\theta D}$ takes an image tensor as input and outputs a scalar logit [S1].
+*   The generator $G_{\theta G}$ takes latent vector $\mathbf{z}$ and condition $\xi$ as input and outputs a synthetic image [S1].
+
+**Steps:**
+1.  Sample a batch of latent vectors $\mathbf{z}$ from $p_{\theta}$ and conditioning variables $\xi$ from $p_{\xi}$ [S1].
+2.  Generate synthetic images $G_{\theta G}(\mathbf{z}, \xi)$ using the generator [S1].
+3.  Sample a batch of real images $I$ from the training data distribution $p_{\theta D}$ [S1].
+4.  Compute the discriminator's output for synthetic images: $D_{fake} = D_{\theta D}(G_{\theta G}(\mathbf{z}, \xi))$ [S1].
+5.  Compute the discriminator's output for real images: $D_{real} = D_{\theta D}(I)$ [S1].
+6.  Compute the gradient of the discriminator's output with respect to the real images: $\nabla_I D_{\theta D}(I)$ [S1].
+7.  Compute the R1 penalty term: $\lambda |\nabla_I D_{\theta D}(I)|^2$ [S1].
+8.  Compute the non-saturating loss terms: $f(D_{fake})$ and $f(-D_{real})$ using $f(u) = -\log(1 + \exp(-u))$ [S1].
+9.  Combine terms to form the total loss $\mathcal{L}(\theta, \phi)$ as per the formula [S1].
+10. Update generator parameters to minimize $\mathcal{L}(\theta, \phi)$ [S1].
+11. Update discriminator parameters to maximize $\mathcal{L}(\theta, \phi)$ [S1].
+
+**Formulas:**
+The total loss is defined as [S1]:
+
+$$
+\mathcal{L}(\theta, \phi) = \mathbf{E}_{\mathbf{z} \sim p_{\theta}, \xi \sim p_{\xi}} [f(D_{\theta D}(G_{\theta G}(\mathbf{z}, \xi)))] + \mathbf{E}_{\mathbf{I} \sim p_{\theta D}} [f(-D_{\theta D}(I)) + \lambda |\nabla D_{\theta D}(I)|^2]
+$$
+
+where the activation function $f(u)$ is the non-saturating logistic loss [S1]:
+
+$$
+f(u) = -\log(1 + \exp(-u))
+$$
+
+The term $|\nabla D_{\theta D}(I)|^2$ denotes the squared Euclidean norm of the gradient of the discriminator's output with respect to the input image $I$ [S1]. Specifically, if $y = D_{\theta D}(I)$, then $\nabla D_{\theta D}(I) = \frac{\partial y}{\partial I}$ [S1].
+
+**Parameters:**
+*   $\lambda$: The weight for the R1 penalty. Not given in the sources [S1].
+*   Optimizer: Adam [S1].
+*   Adam hyperparameters: $\beta_1 = 0$, $\beta_2 = 0.9$ [S1].
+*   Initial learning rates: $5 \times 10^{-5}$ for the generator, $4 \times 10^{-4}$ for the discriminator [S1].
+*   Final learning rates (after decay): $1 \times 10^{-5}$ for the generator, $1 \times 10^{-4}$ for the discriminator [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Gradient Computation:** The R1 penalty requires computing second-order derivatives (gradient of the gradient) [G]. This can be computationally expensive and memory-intensive [G]. Ensure `create_graph=True` is used in `torch.autograd.grad` [G].
+*   **Numerical Stability:** The function $f(u) = -\log(1 + \exp(-u))$ can suffer from numerical instability for large positive or negative $u$ [G]. In practice, use `torch.nn.functional.softplus(-u)` or a stable log-sum-exp implementation [G].
+*   **Learning Rate Decay:** The sources specify a decay from initial to final learning rates but do not specify the decay schedule (e.g., linear, exponential, step) [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import torch.optim as optim
+
+def non_saturating_gan_loss_with_r1(
+    generator: nn.Module,
+    discriminator: nn.Module,
+    latent_sampler,
+    data_sampler,
+    lambda_r1: float,
+    optimizer_g: optim.Optimizer,
+    optimizer_d: optim.Optimizer,
+    num_steps: int = 1
+):
+    for _ in range(num_steps):
+        # 1. Sample inputs
+        z, xi = latent_sampler()
+        I_real = data_sampler()
+        
+        # 2. Generate fake images
+        I_fake = generator(z, xi)
+        
+        # 3. Compute discriminator outputs
+        D_fake = discriminator(I_fake)
+        D_real = discriminator(I_real)
+        
+        # 4. Compute R1 penalty (requires second-order derivatives) [G]
+        I_real.requires_grad_(True)
+        grad_output = torch.ones_like(D_real)
+        gradients = torch.autograd.grad(
+            outputs=D_real, inputs=I_real, grad_outputs=grad_output,
+            create_graph=True, retain_graph=True, only_inputs=True
+        )[0]
+        r1_penalty = torch.mean(torch.sum(gradients ** 2, dim=list(range(1, gradients.dim()))))
+        
+        # 5. Compute non-saturating loss terms
+        f = lambda u: -torch.log(1 + torch.exp(-u))
+        loss_fake = torch.mean(f(D_fake))
+        loss_real = torch.mean(f(-D_real))
+        
+        # 6. Combine into total loss L(theta, phi)
+        loss_total = loss_fake + loss_real + lambda_r1 * r1_penalty
+        
+        # 7. Update generator (minimize L)
+        optimizer_g.zero_grad()
+        loss_total.backward()
+        optimizer_g.step()
+        
+        # 8. Update discriminator (maximize L, implemented as minimize -L)
+        optimizer_d.zero_grad()
+        (-loss_total).backward()
+        optimizer_d.step()
+```
+
+## Subtopics
+
+### [GSN Training Loss](16715-gsn-training-loss.md)
+The total training loss for the GSN model, combining the non-saturating GAN loss, R1 gradient penalty, and discriminator reconstruction objective.
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources [S1].
+*   **Memory Complexity:** Not given in the sources [S1].
+*   **Performance:** Not given in the sources [S1].
+*   **Strengths:** Not given in the sources [S1].
+*   **Limitations:** Not given in the sources [S1].
+*   **When to use:** Not given in the sources [S1].
+*   **When not to use:** Not given in the sources [S1].
+
+## Background
+The non-saturating GAN loss with R1 regularization was introduced in the context of the $\pi$-GAN model by Karras et al. in 2021 [S1]. The R1 regularization technique itself was previously proposed by Mescheder et al. in "Which Training Methods for GANs do actually Works?" (ICML 2018) [S1]. The $\pi$-GAN paper applies this loss to train a periodic implicit generative adversarial network for 3D-aware image synthesis, demonstrating its effectiveness in learning 3D representations [S1].
+
+## Sources
+[S1] pi-GAN: Periodic Implicit Generative Adversarial Networks for 3D-Aware Image Synthesis, https://doi.org/10.1109/cvpr46437.2021.00574, fetched 2026-10-26

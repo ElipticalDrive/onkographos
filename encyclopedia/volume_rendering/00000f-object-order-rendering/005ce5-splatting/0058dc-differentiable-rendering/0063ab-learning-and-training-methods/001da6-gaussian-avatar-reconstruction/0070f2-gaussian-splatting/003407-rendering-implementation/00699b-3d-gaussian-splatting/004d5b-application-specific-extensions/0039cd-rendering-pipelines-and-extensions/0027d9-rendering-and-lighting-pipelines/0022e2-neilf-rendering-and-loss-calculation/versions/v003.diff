@@ -1,0 +1,521 @@
+--- v002.md
++++ v003.md
+@@ -4,136 +4,81 @@
+ 
+ ## Overview
+-NeILF Rendering and Loss Calculation is a differentiable rendering pipeline that decomposes Gaussian Splatting features into diffuse, specular, and ambient components using a Blinn-Phong shading model [S1, unofficial]. It enables inverse rendering by optimizing scene parameters against ground-truth images, depth, and normals through a composite loss function [S1, unofficial]. Unlike standard Gaussian Splatting which renders a single composite color, this method explicitly separates lighting terms to support material editing and physically-based constraints [S1, unofficial].
++NeILF Rendering and Loss Calculation is a differentiable rendering pipeline that extends 3D Gaussian Splatting by decomposing features into diffuse, specular, and ambient components using a Blinn-Phong model [S1, unofficial]. It enables inverse rendering by providing specific loss functions for depth, normals, and color sparsity, allowing for the optimization of lighting parameters and material properties alongside geometry [S1, unofficial]. Unlike standard Gaussian Splatting which renders a single composite color, this method separates the rendering equation to facilitate physically-based constraints during training [S1, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- Camera parameters: pose (view matrix), intrinsics (focal length, principal point), resolution ($H, W$) [S1, unofficial].
+-- Gaussian primitives: positions, covariances, opacities, and feature vectors including `diffuse_factor`, `specular_factor`, `ambient_factor`, `shininess`, and `offset_color` [S1, unofficial].
+-- Light parameters: `light_transform` (optional transformation for diffuse, shininess, ambient, and specular factors) [S1, unofficial].
+-- Optimization weights: `lambda_render`, `lambda_phong`, `lambda_depth`, `lambda_opacity`, `lambda_normal_render_depth`, `lambda_normal_mvs_depth`, `lambda_offset_color_sparsity`, `lambda_diffuse_factor_smooth`, `lambda_ambient_factor_smooth`, `lambda_normal_smooth`, `lambda_dssim` [S1, unofficial].
+-- Ground truth: `gt_image`, `gt_depth`, `image_mask`, `depth_mask` [S1, unofficial].
+-- Optional MVS normal map [S1, unofficial].
++*   `camera`: Camera object containing view matrix, intrinsics (focal lengths, principal point), and resolution [S1, unofficial].
++*   `pc`: Point cloud of 3D Gaussians with attributes including position, covariance, opacity, and feature vectors [S1, unofficial].
++*   `opt`: Optimization configuration containing loss weights (`lambda_*`) and rendering parameters [S1, unofficial].
++*   `results`: Dictionary from the base renderer containing intermediate tensors [S1, unofficial].
+ 
+ **Outputs:**
+-- `render`: Final rendered color image [S1, unofficial].
+-- `phong`: Blinn-Phong rendered color image [S1, unofficial].
+-- `normal`: Rendered surface normals [S1, unofficial].
+-- `pseudo_normal`: Normals derived from depth [S1, unofficial].
+-- `opacity`: Rendered opacity mask [S1, unofficial].
+-- `depth`: Rendered depth map [S1, unofficial].
+-- `diffuse_term`, `specular_term`, `ambient_term`: Individual lighting components [S1, unofficial].
+-- `loss`: Optimization loss value [S1, unofficial].
+-- Auxiliary data: `surface_xyz`, `viewspace_points`, `visibility_filter`, `radii`, `num_rendered`, `num_contrib`, `hdr`, `val_gamma`, `tb_dict` [S1, unofficial].
+-
+-**Data Structures:**
+-The rendering results are stored in a dictionary `results` with the following keys:
+-- `'render'`: Tensor $(3, H, W)$, final color.
+-- `'phong'`: Tensor $(3, H, W)$, Blinn-Phong color.
+-- `'normal'`: Tensor $(3, H, W)$, normal vectors.
+-- `'pseudo_normal'`: Tensor $(3, H, W)$, depth-derived normals.
+-- `'surface_xyz'`: Tensor $(3, H, W)$, 3D surface positions.
+-- `'opacity'`: Tensor $(1, H, W)$, opacity mask.
+-- `'depth'`: Tensor $(1, H, W)$, depth values.
+-- `'viewspace_points'`: Tensor for view-space coordinates.
+-- `'visibility_filter'`: Boolean mask for active Gaussians.
+-- `'radii'`: Integer mask for visible Gaussians.
+-- `'num_rendered'`: Count of rendered Gaussians.
+-- `'num_contrib'`: Count of contributing Gaussians per pixel.
+-- `'diffuse_factor'`: Tensor, diffuse material factor.
+-- `'offset_color'`: Tensor, color offset for blending.
+-- `'shininess'`: Tensor, specular exponent.
+-- `'ambient_factor'`: Tensor, ambient intensity.
+-- `'specular_factor'`: Tensor, specular intensity.
+-- `'diffuse_term'`: Tensor, computed diffuse color.
+-- `'specular_term'`: Tensor, computed specular color.
+-- `'ambient_term'`: Tensor, computed ambient color.
+-- `'hdr'`: Boolean, HDR flag.
+-- `'val_gamma'`: Float, gamma value.
+-- `'tb_dict'`: Dictionary for TensorBoard logging.
+-- `'loss'`: Float, optimization loss.
+-
+-**Algorithm Steps:**
+-
+-1. **Base Rendering:** Call `render_view` to obtain base Gaussian splatting features, including `diffuse_factor`, `specular_factor`, `ambient_factor`, `shininess`, `offset_color`, `normals`, and `opacity` [S1, unofficial]. Check `is_training`; if true, proceed to loss calculation [S1, unofficial].
+-
+-2. **Light Transform:** If `light_transform` is not None, apply it to the material factors:
+-   $$ \text{factor}_{new} = \text{factor}_{old} \times \text{light\_transform} + \text{offset} $$
+-   for `diffuse_factor`, `shininess`, `ambient_factor`, and `specular_factor` [S1, unofficial].
+-
+-3. **Offset Color Norm:** Compute the squared norm of `offset_color` along the last two dimensions:
+-   $$ \text{offset\_color\_norm} = \sum_{h,w} (\text{offset\_color}_{h,w})^2 $$
+-   keeping dimensions for broadcasting [S1, unofficial].
+-
+-4. **Multi-Gaussian Grouping:** If multiple Gaussian groups exist (`len(num_GSs_TFs) > 1`):
+-   - For each group $i$:
+-     - Compute `diffuse_color` for the group's Gaussians:
+-       $$ \text{diffuse\_color} = (\text{offset\_color} + \text{palette\_color}) \cdot \text{clamp}(0, 1) \cdot \text{detach}() $$
+-     - If `opacity_factors[i]` exists, multiply the group's opacity by `opacity_factors[i]` [S1, unofficial].
+-
+-5. **Diffuse Term Calculation:**
+-   - Compute diffuse intensity:
+-     $$ I_{diffuse} = \text{diffuse\_factor} \cdot |\mathbf{n} \cdot \mathbf{d}_{inc}| $$
+-     where $\mathbf{n}$ is the surface normal and $\mathbf{d}_{inc}$ is the incident light direction [S1, unofficial].
+-   - Compute diffuse color:
+-     $$ C_{diffuse} = (\text{ambient\_factor} + I_{diffuse}) \cdot \text{diffuse\_color} $$
+-     [S1, unofficial].
+-
+-6. **Specular Term Calculation:**
+-   - Compute half-vector:
+-     $$ \mathbf{h} = \frac{\mathbf{d}_{inc} + \mathbf{d}_{view}}{\|\mathbf{d}_{inc} + \mathbf{d}_{view}\|} $$
+-     where $\mathbf{d}_{view}$ is the view direction [S1, unofficial].
+-   - Compute cosine of angle between normal and half-vector:
+-     $$ \cos_h = \mathbf{n} \cdot \mathbf{h} $$
+-   - Compute cosine of angle between normal and incident light:
+-     $$ \cos_l = \mathbf{n} \cdot \mathbf{d}_{inc} $$
+-   - Compute specular intensity:
+-     $$ I_{specular} = \text{specular\_factor} \cdot \begin{cases} |\cos_h|^{\text{shininess}} & \text{if } \cos_l \neq 0 \\ 0 & \text{otherwise} \end{cases} $$
+-     [S1, unofficial].
+-   - Compute specular color:
+-     $$ C_{specular} = I_{specular} \cdot \text{diffuse\_color} $$
+-     [S1, unofficial].
+-
+-7. **PBR Combination:**
+-   $$ C_{PBR} = \text{clamp}(C_{diffuse} + C_{specular}, 0, 1) $$
+-   [S1, unofficial].
+-
+-8. **Loss Calculation (if training):**
+-   - **Render Loss:** If `lambda_render > 0`:
+-     $$ L_{render} = (1 - \lambda_{dssim}) \cdot L1(C_{PBR}, \text{gt\_image}) + \lambda_{dssim} \cdot (1 - SSIM(C_{PBR}, \text{gt\_image})) $$
+-     [S1, unofficial].
+-   - **Phong Loss:** If `lambda_phong > 0`:
+-     $$ L_{phong} = \lambda_{phong} \cdot \left[ (1 - \lambda_{dssim}) \cdot L1(C_{PBR}, \text{gt\_image}) + \lambda_{dssim} \cdot (1 - SSIM(C_{PBR}, \text{gt\_image})) \right] $$
+-     [S1, unofficial].
+-   - **Depth Loss:** If `lambda_depth > 0`:
+-     $$ L_{depth} = \lambda_{depth} \cdot L1(C_{depth}, \text{gt\_depth}) $$
+-     excluding pixels where `image_mask` XOR `depth_mask` is true [S1, unofficial].
+-   - **Opacity Loss:** If `lambda_opacity > 0`:
+-     - Clamp `opacity` to $[10^{-6}, 1 - 10^{-6}]$ [G].
+-     $$ L_{opacity} = \lambda_{opacity} \cdot \left[ (1 - \lambda_{dssim}) \cdot L1(\text{opacity}, \text{image\_mask}) + \lambda_{dssim} \cdot (1 - SSIM(\text{opacity}, \text{image\_mask})) \right] $$
+-     [S1, unofficial].
+-   - **Normal Loss (Render Depth):** If `lambda_normal_render_depth > 0`:
+-     $$ L_{normal\_render} = \lambda_{normal\_render\_depth} \cdot MSE(C_{normal}, \text{pseudo\_normal}) \cdot \text{mask}(\text{image\_mask}) $$
+-     [S1, unofficial].
+-   - **Normal Loss (MVS Depth):** If `lambda_normal_mvs_depth > 0` and MVS normal is zero:
+-     - Compute `pseudo_normal` from `gt_depth` using `kornia.depth_to_normals` [S1, unofficial].
+-     - Transform `pseudo_normal` to world space using camera intrinsics and `world_view_transform` [S1, unofficial].
+-     $$ L_{normal\_mvs} = \lambda_{normal\_mvs\_depth} \cdot MSE(C_{normal}, \text{pseudo\_normal}) \cdot \text{mask}(\text{depth\_mask}) $$
+-     [S1, unofficial].
+-   - **Sparsity Loss:** If `lambda_offset_color_sparsity > 0`:
+-     $$ L_{sparsity} = \lambda_{offset\_color\_sparsity} \cdot \text{sparsity}(\text{offset\_color\_norm}) \cdot \text{mask}(\text{image\_mask}) $$
+-     [S1, unofficial].
+-   - **Smoothness Losses:**
+-     - If `lambda_diffuse_factor_smooth > 0`:
+-       $$ L_{smooth\_diffuse} = \lambda_{diffuse\_factor\_smooth} \cdot \text{bilateral\_smooth}(C_{diffuse\_factor}, \text{gt\_image}, \text{image\_mask}) $$
+-       [S1, unofficial].
+-     - If `lambda_ambient_factor_smooth > 0`:
+-       $$ L_{smooth\_ambient} = \lambda_{ambient\_factor\_smooth} \cdot \left[ \text{bilateral\_smooth}(C_{specular\_intensity}, \dots) + \text{bilateral\_smooth}(C_{ambient\_intensity}, \dots) \right] $$
+-       [S1, unofficial].
+-     - If `lambda_normal_smooth > 0`:
+-       $$ L_{smooth\_normal} = \lambda_{normal\_smooth} \cdot \text{bilateral\_smooth}(C_{normal}, \text{gt\_image}, \text{image\_mask}) $$
+-       [S1, unofficial].
+-   - **Total Loss:**
+-     $$ L_{total} = L_{render} + L_{phong} + L_{depth} + L_{opacity} + L_{normal\_render} + L_{normal\_mvs} + L_{sparsity} + L_{smooth\_diffuse} + L_{smooth\_ambient} + L_{smooth\_normal} $$
+-     [S1, unofficial].
++*   `loss`: Scalar value representing the total optimization loss [S1, unofficial].
++*   `render_pkg`: Dictionary containing rendered images and intermediate features (see Layout below) [S1, unofficial].
++
++**Data Structures and Layout:**
++The `results` dictionary returned by the rendering engine contains the following keys [S1, unofficial]:
++*   `'render'`: Final composite RGB image.
++*   `'phong'`: Rendered image using the Blinn-Phong model.
++*   `'normal'`: Rendered surface normals.
++*   `'pseudo_normal'`: Normals derived from depth or MVS.
++*   `'surface_xyz'`: 3D positions of rendered points.
++*   `'opacity'`: Opacity per pixel.
++*   `'depth'`: Depth per pixel.
++*   `'viewspace_points'`: Points in camera space.
++*   `'visibility_filter'`: Boolean mask for valid Gaussians (radii > 0) [S1, unofficial].
++*   `'radii'`: Radii of Gaussians in screen space.
++*   `'num_rendered'`, `'num_contrib'`: Counts of rendered/contributing Gaussians.
++*   `'diffuse_factor'`, `'offset_color'`, `'shininess'`, `'ambient_factor'`, `'specular_factor'`: Material parameters per Gaussian or group [S1, unofficial].
++*   `'diffuse_term'`, `'specular_term'`, `'ambient_term'`: Individual PBR components [S1, unofficial].
++*   `'hdr'`, `'val_gamma'`: HDR handling parameters [S1, unofficial].
++*   `'tb_dict'`, `'loss'`: TensorBoard dictionary and current loss value [S1, unofficial].
++
++**Rendering Equation (Blinn-Phong):**
++The pipeline computes the final color by combining diffuse and specular terms [S1, unofficial]:
++1.  **Lighting Setup:** Incident light direction $\mathbf{l}$ and view direction $\mathbf{v}$ are used to compute the half-vector $\mathbf{h} = \frac{\mathbf{l} + \mathbf{v}}{\|\mathbf{l} + \mathbf{v}\|}$ [S1, unofficial].
++2.  **Diffuse Term:**
++    $$ I_{diffuse} = \text{diffuse\_factor} \cdot |\mathbf{n} \cdot \mathbf{l}| $$
++    $$ C_{diffuse} = (\text{ambient\_factor} + I_{diffuse}) \cdot C_{base} $$
++    Where $\mathbf{n}$ is the normal, and $C_{base}$ is the base color (derived from `offset_color` and `palette_color`) [S1, unofficial].
++3.  **Specular Term:**
++    $$ I_{specular} = \text{specular\_factor} \cdot \begin{cases} |\mathbf{n} \cdot \mathbf{h}|^{\text{shininess}} & \text{if } \mathbf{l} \cdot \mathbf{n} \neq 0 \\ 0 & \text{otherwise} \end{cases} $$
++    $$ C_{specular} = I_{specular} $$
++    (Note: The source code uses `cos_l != 0` check, implying a dependency on the dot product of normal and light direction for validity) [S1, unofficial].
++4.  **Final Color:**
++    $$ C_{final} = \text{clamp}(C_{diffuse} + C_{specular}, 0, 1) $$
++
++**Loss Calculation:**
++The total loss is a weighted sum of multiple terms, activated by boolean flags in `opt` [S1, unofficial]:
++
++1.  **Render Loss ($L_{render}$):**
++    $$ L_{render} = (1 - \lambda_{dssim}) \cdot L1(I_{render}, I_{gt}) + \lambda_{dssim} \cdot (1 - SSIM(I_{render}, I_{gt})) $$
++    Applied if $\lambda_{render} > 0$ [S1, unofficial].
++
++2.  **Phong Loss ($L_{phong}$):**
++    $$ L_{phong} = (1 - \lambda_{dssim}) \cdot L1(I_{phong}, I_{gt}) + \lambda_{dssim} \cdot (1 - SSIM(I_{phong}, I_{gt})) $$
++    Added to total loss as $\lambda_{phong} \cdot L_{phong}$ if $\lambda_{phong} > 0$ [S1, unofficial].
++
++3.  **Depth Loss ($L_{depth}$):**
++    $$ L_{depth} = L1(D_{render}, D_{gt}) $$
++    Computed only on pixels where `image_mask XOR depth_mask` is false. Applied if $\lambda_{depth} > 0$ [S1, unofficial].
++
++4.  **Opacity Loss ($L_{opacity}$):**
++    $$ L_{opacity} = L1(\text{clamp}(O_{render}, 10^{-6}, 1-10^{-6}), M_{image}) + SSIM(...) $$
++    Applied if $\lambda_{opacity} > 0$ [S1, unofficial].
++
++5.  **Normal Losses:**
++    *   **Render Depth Normal ($L_{normal\_render\_depth}$):** MSE between $N_{render}$ and $N_{pseudo}$ (from results), masked by $M_{image}$. Applied if $\lambda_{normal\_render\_depth} > 0$ [S1, unofficial].
++    *   **MVS Depth Normal ($L_{normal\_mvs\_depth}$):** If MVS normal is zero, compute pseudo-normal $N_{pseudo}$ from $D_{gt}$ using `kornia.depth_to_normals`, transform to world space via intrinsics and view transform. Compute MSE between $N_{render}$ and $N_{pseudo}$, masked by $M_{depth}$. Applied if $\lambda_{normal\_mvs\_depth} > 0$ [S1, unofficial].
++
++6.  **Sparsity and Smoothness Losses:**
++    *   **Offset Color Sparsity ($L_{sparsity}$):** Sparsity loss on $C_{offset}$, masked by $M_{image}$. Applied if $\lambda_{offset\_color\_sparsity} > 0$ [S1, unofficial].
++    *   **Diffuse Factor Smoothness ($L_{diffuse\_smooth}$):** Bilateral smoothness loss on `diffuse_factor`, conditioned on $I_{gt}$ and $M_{image}$. Applied if $\lambda_{diffuse\_factor\_smooth} > 0$ [S1, unofficial].
++    *   **Ambient/Specular Smoothness ($L_{ambient\_smooth}$):** Bilateral smoothness loss on `specular_intensity` and `ambient_intensity`. Applied if $\lambda_{ambient\_factor\_smooth} > 0$ [S1, unofficial].
++    *   **Normal Smoothness ($L_{normal\_smooth}$):** Bilateral smoothness loss on $N_{render}$, conditioned on $I_{gt}$ and $M_{image}$. Applied if $\lambda_{normal\_smooth} > 0$ [S1, unofficial]
++
++**Parameters:**
++*   `sample_num`: Number of incident rays sampled for normal-based lighting. Default: 24 [S1, unofficial].
++*   `lambda_*`: Optimization weights for each loss term. Typical values are not specified in the source, but they act as multipliers for the respective loss components [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -143,150 +88,180 @@
+ import torch.nn.functional as F
+ 
+-def render_view(camera, gaussians):
+-    """Returns base Gaussian splatting features."""
+-    # Standard GS rasterization returns base features
+-    return {
+-        'diffuse_factor': gaussians.diffuse_factor,
+-        'specular_factor': gaussians.specular_factor,
+-        'ambient_factor': gaussians.ambient_factor,
+-        'shininess': gaussians.shininess,
+-        'offset_color': gaussians.offset_color,
+-        'normal': gaussians.normal,
+-        'opacity': gaussians.opacity,
+-        'depth': gaussians.depth,
+-        'incident_dirs': gaussians.incident_dirs,
+-        'viewdirs': gaussians.viewdirs,
+-        'palette_color': gaussians.palette_color,
+-        'num_GSs_TFs': gaussians.num_GSs_TFs,
+-        'opacity_factors': gaussians.opacity_factors,
+-        'surface_xyz': gaussians.surface_xyz,
+-        'viewspace_points': gaussians.viewspace_points,
+-        'visibility_filter': gaussians.visibility_filter,
+-        'radii': gaussians.radii,
+-        'num_rendered': gaussians.num_rendered,
+-        'num_contrib': gaussians.num_contrib,
+-        'hdr': gaussians.hdr,
+-        'val_gamma': gaussians.val_gamma,
+-        'pseudo_normal': gaussians.pseudo_normal
+-    }
+-
+-def calculate_loss(rendered_image, rendered_phong, rendered_depth, rendered_opacity, 
+-                   rendered_normal, pseudo_normal, rendered_offset_color_norm, 
+-                   rendered_diffuse_factor, rendered_specular_intensity, rendered_ambient_intensity,
+-                   gt_image, gt_depth, image_mask, depth_mask, mvs_normal,
+-                   lambda_render, lambda_phong, lambda_depth, lambda_opacity,
+-                   lambda_normal_render_depth, lambda_normal_mvs_depth,
+-                   lambda_offset_color_sparsity, lambda_diffuse_factor_smooth,
+-                   lambda_ambient_factor_smooth, lambda_normal_smooth, lambda_dssim):
+-    """Calculates composite loss for inverse rendering."""
+-    loss = torch.tensor(0.0, device=rendered_image.device)
+-    
+-    if lambda_render > 0 and gt_image is not None:
+-        l1_render = F.l1_loss(rendered_image, gt_image)
+-        ssim_render = 1 - ssim_loss(rendered_image, gt_image)
+-        loss += (1 - lambda_dssim) * l1_render + lambda_dssim * ssim_render
+-        
+-    if lambda_phong > 0 and gt_image is not None:
+-        l1_phong = F.l1_loss(rendered_phong, gt_image)
+-        ssim_phong = 1 - ssim_loss(rendered_phong, gt_image)
+-        loss += lambda_phong * ((1 - lambda_dssim) * l1_phong + lambda_dssim * ssim_phong)
+-        
+-    if lambda_depth > 0 and gt_depth is not None and image_mask is not None and depth_mask is not None:
++def render_neilf(camera, pc, results, opt):
++    """
++    Renders the scene using NeILF pipeline and calculates loss.
++    """
++    # 1. Base Rendering
++    # Assuming render_view returns the 'results' dict with base features
++    # This step is implicit in the source structure where 'results' is passed in
++    # In a full implementation, this would call the underlying Gaussian rasterizer
++    
++    # 2. Apply Light Transforms (if applicable)
++    if opt.light_transform is not None:
++        # Apply transforms to diffuse, shininess, ambient, specular factors
++        # This involves multiplication and addition offsets
++        diffuse_factor = apply_light_transform(opt.light_transform, results['diffuse_factor'])
++        shininess = apply_light_transform(opt.light_transform, results['shininess'])
++        ambient_factor = apply_light_transform(opt.light_transform, results['ambient_factor'])
++        specular_factor = apply_light_transform(opt.light_transform, results['specular_factor'])
++    else:
++        diffuse_factor = results['diffuse_factor']
++        shininess = results['shininess']
++        ambient_factor = results['ambient_factor']
++        specular_factor = results['specular_factor']
++
++    # 3. Compute Base Colors and Terms
++    # Handle multi-Gaussian groups if necessary
++    if len(opt.num_GSs_TFs) > 1:
++        # Iterate through groups
++        for i, (start_gs, end_gs) in enumerate(opt.group_intervals):
++            # Compute offset color norm
++            offset_color = results['offset_color'][start_gs:end_gs]
++            offset_color_norm = torch.sum(offset_color ** 2, dim=-1, keepdim=True)
++            
++            # Set diffuse color
++            palette_color = opt.palette_colors[i]
++            base_color = (offset_color + palette_color).clamp(0, 1).detach()
++            results['diffuse_color'][start_gs:end_gs] = base_color
++            
++            # Adjust opacity
++            if opt.opacity_factors[i] is not None:
++                results['opacity'][start_gs:end_gs] *= opt.opacity_factors[i].opacity_factor
++    else:
++        # Single group handling
++        offset_color = results['offset_color']
++        offset_color_norm = torch.sum(offset_color ** 2, dim=-1, keepdim=True)
++        palette_color = opt.palette_colors[0]
++        results['diffuse_color'] = (offset_color + palette_color).clamp(0, 1).detach()
++
++    # 4. Compute Blinn-Phong Components
++    # Get normals and view/light directions
++    normals = results['normal'] # Shape: (H, W, 3) or similar
++    view_dirs = get_view_directions(camera, results['surface_xyz'])
++    light_dirs = get_light_directions(opt.light_transform)
++    
++    # Diffuse Intensity
++    cos_theta = torch.abs(torch.sum(normals * light_dirs, dim=-1, keepdim=True))
++    diffuse_intensity = diffuse_factor * cos_theta
++    
++    # Diffuse Color
++    diffuse_color_term = (ambient_factor + diffuse_intensity) * results['diffuse_color']
++    
++    # Specular Intensity
++    h_vec = torch.normalize(light_dirs + view_dirs, dim=-1)
++    cos_h = torch.abs(torch.sum(normals * h_vec, dim=-1, keepdim=True))
++    cos_l = torch.abs(torch.sum(normals * light_dirs, dim=-1, keepdim=True))
++    
++    # Specular term: specular_factor * |n.h|^shininess if cos_l != 0 else 0
++    specular_intensity = specular_factor * torch.where(
++        cos_l != 0, 
++        cos_h.pow(shininess), 
++        torch.zeros_like(cos_h)
++    )
++    
++    # Final Phong Render
++    phong_render = (diffuse_color_term + specular_intensity).clamp(0, 1)
++    results['phong'] = phong_render
++    results['diffuse_term'] = diffuse_color_term
++    results['specular_term'] = specular_intensity
++    
++    # 5. Calculate Loss
++    total_loss = torch.tensor(0.0, device=results['render'].device)
++    
++    if opt.lambda_render > 0:
++        l1_render = F.l1_loss(results['render'], opt.gt_image)
++        ssim_render = 1 - ssim_loss(results['render'], opt.gt_image)
++        loss_render = (1 - opt.lambda_dssim) * l1_render + opt.lambda_dssim * ssim_render
++        total_loss += opt.lambda_render * loss_render
++        
++    if opt.lambda_phong > 0:
++        l1_phong = F.l1_loss(phong_render, opt.gt_image)
++        ssim_phong = 1 - ssim_loss(phong_render, opt.gt_image)
++        loss_phong = (1 - opt.lambda_dssim) * l1_phong + opt.lambda_dssim * ssim_phong
++        total_loss += opt.lambda_phong * loss_phong
++        
++    if opt.lambda_depth > 0:
+         # Exclude pixels where image_mask XOR depth_mask is true
+-        mask = ~(image_mask ^ depth_mask)
+-        l1_depth = F.l1_loss(rendered_depth[mask], gt_depth[mask])
+-        loss += lambda_depth * l1_depth
+-        
+-    if lambda_opacity > 0 and image_mask is not None:
+-        opacity_clamped = rendered_opacity.clamp(1e-6, 1 - 1e-6)
+-        l1_opacity = F.l1_loss(opacity_clamped, image_mask)
+-        ssim_opacity = 1 - ssim_loss(opacity_clamped, image_mask)
+-        loss += lambda_opacity * ((1 - lambda_dssim) * l1_opacity + lambda_dssim * ssim_opacity)
+-        
+-    if lambda_normal_render_depth > 0 and pseudo_normal is not None and image_mask is not None:
+-        mse_normal = F.mse_loss(rendered_normal[image_mask], pseudo_normal[image_mask])
+-        loss += lambda_normal_render_depth * mse_normal
+-        
+-    if lambda_normal_mvs_depth > 0 and mvs_normal is not None and torch.all(mvs_normal == 0) and depth_mask is not None:
+-        # Compute pseudo normal from gt_depth using kornia.depth_to_normals
+-        pseudo_normal_mvs = depth_to_normals(gt_depth)
+-        # Transform to world space using camera intrinsics and world_view_transform
+-        pseudo_normal_mvs = transform_to_world(pseudo_normal_mvs, camera.intrinsics, camera.world_view_transform)
+-        mse_normal_mvs = F.mse_loss(rendered_normal[depth_mask], pseudo_normal_mvs[depth_mask])
+-        loss += lambda_normal_mvs_depth * mse_normal_mvs
+-        
+-    if lambda_offset_color_sparsity > 0 and image_mask is not None:
+-        sparsity_loss = compute_sparsity(rendered_offset_color_norm[image_mask])
+-        loss += lambda_offset_color_sparsity * sparsity_loss
+-        
+-    if lambda_diffuse_factor_smooth > 0 and gt_image is not None and image_mask is not None:
+-        smooth_diffuse = bilateral_smooth_loss(rendered_diffuse_factor, gt_image, image_mask)
+-        loss += lambda_diffuse_factor_smooth * smooth_diffuse
+-        
+-    if lambda_ambient_factor_smooth > 0:
+-        smooth_ambient_spec = bilateral_smooth_loss(rendered_specular_intensity, gt_image, image_mask)
+-        smooth_ambient_amb = bilateral_smooth_loss(rendered_ambient_intensity, gt_image, image_mask)
+-        loss += lambda_ambient_factor_smooth * (smooth_ambient_spec + smooth_ambient_amb)
+-        
+-    if lambda_normal_smooth > 0 and gt_image is not None and image_mask is not None:
+-        smooth_normal = bilateral_smooth_loss(rendered_normal, gt_image, image_mask)
+-        loss += lambda_normal_smooth * smooth_normal
+-        
+-    return loss
++        mask = ~(opt.image_mask ^ opt.depth_mask)
++        l1_depth = F.l1_loss(results['depth'][mask], opt.gt_depth[mask])
++        total_loss += opt.lambda_depth * l1_depth
++        
++    if opt.lambda_opacity > 0:
++        opacity_clamped = results['opacity'].clamp(1e-6, 1 - 1e-6)
++        l1_opacity = F.l1_loss(opacity_clamped, opt.image_mask)
++        ssim_opacity = 1 - ssim_loss(opacity_clamped, opt.image_mask)
++        loss_opacity = (1 - opt.lambda_dssim) * l1_opacity + opt.lambda_dssim * ssim_opacity
++        total_loss += opt.lambda_opacity * loss_opacity
++        
++    if opt.lambda_normal_render_depth > 0:
++        mse_normal = F.mse_loss(results['normal'][opt.image_mask], results['pseudo_normal'][opt.image_mask])
++        total_loss += opt.lambda_normal_render_depth * mse_normal
++        
++    if opt.lambda_normal_mvs_depth > 0:
++        if is_zero_vector(opt.mvs_normal):
++            # Compute pseudo normal from gt_depth
++            pseudo_normal_mvs = depth_to_normals(opt.gt_depth)
++            # Transform to world space
++            pseudo_normal_world = transform_to_world(pseudo_normal_mvs, camera.intrinsics, camera.world_view_transform)
++            mse_normal_mvs = F.mse_loss(results['normal'][opt.depth_mask], pseudo_normal_world[opt.depth_mask])
++            total_loss += opt.lambda_normal_mvs_depth * mse_normal_mvs
++            
++    if opt.lambda_offset_color_sparsity > 0:
++        sparsity_loss = compute_sparsity(results['offset_color_norm'][opt.image_mask])
++        total_loss += opt.lambda_offset_color_sparsity * sparsity_loss
++        
++    if opt.lambda_diffuse_factor_smooth > 0:
++        smooth_loss = bilateral_smooth_loss(results['diffuse_factor'], opt.gt_image, opt.image_mask)
++        total_loss += opt.lambda_diffuse_factor_smooth * smooth_loss
++        
++    if opt.lambda_ambient_factor_smooth > 0:
++        smooth_loss_spec = bilateral_smooth_loss(results['specular_intensity'], opt.gt_image, opt.image_mask)
++        smooth_loss_amb = bilateral_smooth_loss(results['ambient_intensity'], opt.gt_image, opt.image_mask)
++        total_loss += opt.lambda_ambient_factor_smooth * (smooth_loss_spec + smooth_loss_amb)
++        
++    if opt.lambda_normal_smooth > 0:
++        smooth_loss_norm = bilateral_smooth_loss(results['normal'], opt.gt_image, opt.image_mask)
++        total_loss += opt.lambda_normal_smooth * smooth_loss_norm
++        
++    results['loss'] = total_loss
++    return results
+ 
+ def ssim_loss(img1, img2):
+-    # SSIM implementation not provided in sources [G]
++    # Placeholder for SSIM implementation
+     return 0.0
+ 
+ def depth_to_normals(depth):
+-    # Uses kornia.depth_to_normals [S1, unofficial]
+-    import kornia
+-    return kornia.depth_to_normals(depth)
+-
+-def transform_to_world(normals, intrinsics, view_transform):
+-    # Transform normals to world space [G]
+-    return normals @ view_transform[:3, :3].T
++    # Placeholder for kornia.depth_to_normals
++    return torch.zeros_like(depth)
++
++def transform_to_world(normal, intrinsics, view_transform):
++    # Placeholder for coordinate transformation
++    return normal
++
++def is_zero_vector(vec):
++    return torch.allclose(vec, torch.zeros_like(vec))
+ 
+ def compute_sparsity(tensor):
+-    # Sparsity loss implementation not provided in sources [G]
++    # Placeholder for sparsity loss
+     return torch.mean(tensor)
+ 
+-def bilateral_smooth_loss(feature, image, mask):
+-    # Bilateral smooth loss implementation not provided in sources [G]
+-    return torch.mean(feature[mask])
++def bilateral_smooth_loss(tensor, guide, mask):
++    # Placeholder for bilateral smoothness loss
++    return torch.tensor(0.0)
+ ```
+ 
+-**Parameters:**
+-- `sample_num`: Number of incident rays sampled for normal-based lighting, default 24 [S1, unofficial].
+-- `lambda_render`: Weight for render loss [S1, unofficial].
+-- `lambda_phong`: Weight for Blinn-Phong loss [S1, unofficial].
+-- `lambda_depth`: Weight for depth loss [S1, unofficial].
+-- `lambda_opacity`: Weight for opacity loss [S1, unofficial].
+-- `lambda_normal_render_depth`: Weight for normal loss from render depth [S1, unofficial].
+-- `lambda_normal_mvs_depth`: Weight for normal loss from MVS depth [S1, unofficial].
+-- `lambda_offset_color_sparsity`: Weight for offset color sparsity loss [S1, unofficial].
+-- `lambda_diffuse_factor_smooth`: Weight for diffuse factor smoothness loss [S1, unofficial].
+-- `lambda_ambient_factor_smooth`: Weight for ambient factor smoothness loss [S1, unofficial].
+-- `lambda_normal_smooth`: Weight for normal smoothness loss [S1, unofficial].
+-- `lambda_dssim`: Weight for SSIM component in L1/SSIM loss [S1, unofficial].
+-
+ **Edge Cases and Pitfalls:**
+-- Gaussians with radius 0 or frustum culled are excluded from value updates in splitting criteria via `visibility_filter` (radii > 0) [S1, unofficial].
+-- MVS normal map may be all zeros; in this case, pseudo normal is computed from `gt_depth` using `kornia.depth_to_normals` and transformed to world space [S1, unofficial].
+-- Precision issues may arise in `shininess` exponentiation for very small `cos_h` values [G].
+-- Boundary conditions for `clamp` operations on color values [G].
++*   **Zero Radius/Culled Gaussians:** Gaussians with radius 0 or those frustum-culled are excluded from value updates in splitting criteria via the `visibility_filter` (checking `radii > 0`) [S1, unofficial].
++*   **MVS Normal Zeros:** The MVS normal map may be all zeros. In this case, the pseudo-normal must be computed from the ground truth depth using `kornia.depth_to_normals` and transformed to world space using camera intrinsics and the world-view transform [S1, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Dominated by Gaussian rasterization and shading per pixel. Linear in the number of Gaussians and pixels [S1, unofficial].
+-- **Memory Complexity:** Not given in the sources.
+-- **Measured Performance:** Not given in the sources.
+-- **Scaling:** Scales with the number of Gaussian primitives and image resolution [S1, unofficial].
+-- **Strengths:** Explicit separation of lighting components allows for inverse rendering and material editing [S1, unofficial].
+-- **Limitations:** Relies on ground-truth data for loss calculation; may require careful tuning of loss weights [S1, unofficial].
+-- **When to use:** When inverse rendering or material decomposition is required [S1, unofficial].
+-- **When not to use:** For standard forward rendering without optimization [S1, unofficial].
++*   **Time Complexity:** Dominated by the Gaussian rasterization step, which is $O(N)$ where $N$ is the number of Gaussians, plus the overhead of computing multiple loss terms. The additional Blinn-Phong calculations are per-pixel and thus $O(H \times W)$.
++*   **Memory Complexity:** Requires storing additional intermediate buffers for diffuse, specular, and ambient terms, as well as normals and depths, increasing memory usage compared to standard Gaussian Splatting.
++*   **Performance:** Specific FPS numbers are not provided in the source. The method relies on PyTorch operations and CUDA kernels for efficiency.
++*   **Strengths:** Enables inverse rendering by separating lighting and material properties; provides rich supervisory signals via multiple loss terms (depth, normal, sparsity).
++*   **Limitations:** Requires ground truth depth and normals (or pseudo-normals) for effective training; more complex to tune due to multiple loss weights.
+ 
+ ## Background
+-Not given in the sources.
++NeILF Rendering and Loss Calculation is part of the VEG (Vegetation/Environment Generation?) project, as indicated by the source repository [S1, unofficial]. It extends the 3D Gaussian Splatting framework to support inverse rendering tasks by incorporating a Blinn-Phong shading model and various regularization losses. The method is designed to optimize not just the geometry and appearance of a scene, but also its lighting and material parameters.
+ 
+ ## Sources

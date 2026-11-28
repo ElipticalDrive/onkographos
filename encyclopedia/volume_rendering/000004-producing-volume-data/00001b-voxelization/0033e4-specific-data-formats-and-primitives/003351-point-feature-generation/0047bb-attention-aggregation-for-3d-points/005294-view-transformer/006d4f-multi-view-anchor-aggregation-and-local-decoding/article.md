@@ -1,0 +1,92 @@
+# Multi-view Anchor Aggregation and Local Decoding
+
+Also called: Anchor-based Multi-view Aggregation with Local Gaussian Decoding
+
+## Overview
+This method aggregates multi-view visual features into a compact set of 3D Gaussian primitives using learnable spatial anchors, solving the problem of incomplete geometry reconstruction in occluded or unseen regions [S1, unofficial]. Unlike pixel-aligned methods that leave empty holes in unsupported areas, it allocates structure in global 3D space beyond observed surfaces [S1, unofficial]. It sets itself apart from sibling [Field-Aggregation Transformer](15112-field-aggregation-transformer.md) by using explicit 3D anchors sampled from a geometry scaffold rather than field-based aggregation, and builds on [View Transformer](14756-view-transformer.md) by refining point-based features into a set of 3D Gaussians via a query-based transformer architecture [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A set of uncalibrated multi-view images $I = \{I_v\}_{v=1}^V$ where $I_v \in \mathbb{R}^{H \times W \times 3}$; a predicted geometric scaffold consisting of camera parameters $C = \{C_v\}_{v=1}^V$ (extrinsics $E_v \in \mathbb{R}^{3 \times 4}$, intrinsics $K_v \in \mathbb{R}^{3 \times 3}$) and per-view depth maps $D = \{D_v\}_{v=1}^V$ where $D_v \in \mathbb{R}^{H \times W}$ [S1, unofficial].
+*   **Outputs:** A final set of Gaussian primitives $G = \{g_m\}_{m=1}^{NK}$ [S1, unofficial].
+
+**Data Structures:**
+*   **3D Anchors:** A fixed budget of $N$ points in 3D space. These are sampled from the unprojected scene points $P$ (derived from $D$ and $C$) using a combination of uniform sampling and entropy-guided sampling, concentrating anchors in regions of higher visual complexity [S1, unofficial].
+*   **Latent Tokens:** For each anchor $n$, a latent token $z_n$ is generated [S1, unofficial].
+*   **Gaussian Primitives:** Each anchor decodes into $K$ local Gaussian primitives [S1, unofficial].
+
+**Steps:**
+1.  **Geometry Initialization:** Use a VGGT-based backbone to predict $C$ and $D$ from $I$ [S1, unofficial]. Unproject each depth map $D_v$ using $C_v$ to obtain per-view 3D point maps $P_v \in \mathbb{R}^{H \times W \times 3}$, forming the scene point set $P$ [S1, unofficial].
+2.  **Anchor Sampling:** Sample $N$ 3D anchors from $P$ guided by local image entropy [S1, unofficial].
+3.  **Feature Aggregation:** For each anchor, project it back into all input views $v=1 \dots V$. Gather features from the input views using occlusion-aware aggregation [S1, unofficial].
+4.  **Cross-Anchor Interaction:** Encode the aggregated features into a latent token $z_n$ for each anchor $n$ through self-attention (cross-anchor interaction) [S1, unofficial].
+5.  **Local Decoding:** Decode each token $z_n$ into $K$ local Gaussian primitives [S1, unofficial].
+6.  **Final Output:** Yield the final Gaussian set $G = \{g_m\}_{m=1}^{NK}$ [S1, unofficial].
+
+**Parameters:**
+*   $K$: The number of local Gaussian primitives decoded from each anchor [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def multi_view_anchor_aggregation_and_local_decoding(images, geometry_backbone):
+    # Step 1: Geometry Initialization
+    # Predict cameras and depth maps using VGGT-based backbone
+    cameras = geometry_backbone.predict_cameras(images)
+    depth_maps = geometry_backbone.predict_depths(images)
+    
+    # Unproject depth maps to 3D points
+    scene_points = []
+    for v in range(len(images)):
+        # Unproject D_v using C_v (E_v, K_v)
+        points_v = unproject_depth(depth_maps[v], cameras[v])
+        scene_points.append(points_v)
+    
+    # Step 2: Anchor Sampling
+    # Sample N anchors from scene_points using entropy-guided sampling
+    anchors = sample_anchors(scene_points, num_anchors=N)
+    
+    # Step 3 & 4: Feature Aggregation and Cross-Anchor Interaction
+    latent_tokens = []
+    for anchor in anchors:
+        # Project anchor into all views
+        view_features = []
+        for v in range(len(images)):
+            # Project anchor to 2D coordinates in view v
+            coords_2d = project_3d_to_2d(anchor, cameras[v])
+            # Gather features from image v at coords_2d with occlusion-aware weighting
+            feat_v = gather_occlusion_aware_features(images[v], coords_2d)
+            view_features.append(feat_v)
+        
+        # Aggregate multi-view features
+        aggregated_feat = aggregate_features(view_features)
+        
+        # Encode into latent token via self-attention
+        z_n = encode_token(aggregated_feat)
+        latent_tokens.append(z_n)
+        
+    # Step 5: Local Decoding
+    gaussian_primitives = []
+    for z_n in latent_tokens:
+        # Decode token into K local Gaussians
+        k_gaussians = decode_gaussians(z_n, K)
+        gaussian_primitives.extend(k_gaussians)
+        
+    # Step 6: Final Output
+    return gaussian_primitives
+```
+
+## Subtopics
+
+### [UniQueR Training Pipeline](23016-uniquer-training-pipeline.md)
+The UniQueR training pipeline is a feedforward method for generating sparse 3D Gaussian representations from multi-view images, designed to solve the problem of incomplete geometry reconstruction in occluded or unseen regions. Unlike pixel-aligned methods that leave empty holes in unsupported areas, UniQueR uses learnable spatial anchors and held-out-view supervision to allocate structure in global 3D space beyond observed surfaces. It builds on [Multi-view Anchor Aggregation and Local Decoding](21319-multi-view-anchor-aggregation-and-local-decoding.md) by refining point-based features into a set of 3D Gaussians via a query-based transformer architecture.
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+The method originates from the Anchor3DGS paper, which proposes a feed-forward 3D Gaussian Splatting approach with a compact anchor-based representation [S1, unofficial]. It addresses the limitations of existing methods by using a compact representation that achieves state-of-the-art novel view synthesis quality while using an order of magnitude fewer Gaussian primitives [S1, unofficial]. The approach relies on a VGGT-based backbone for geometry initialization, leveraging multi-view geometry priors to lift uncalibrated input images into a consistent geometric space [S1, unofficial].
+
+## Sources
+[S1] Anchor3DGS: Feed-Forward 3D Gaussian Splatting with Compact Anchor-Based Representation, https://doi.org/10.48550/arxiv.2610.21634, fetched 2026-10-26 (unofficial)

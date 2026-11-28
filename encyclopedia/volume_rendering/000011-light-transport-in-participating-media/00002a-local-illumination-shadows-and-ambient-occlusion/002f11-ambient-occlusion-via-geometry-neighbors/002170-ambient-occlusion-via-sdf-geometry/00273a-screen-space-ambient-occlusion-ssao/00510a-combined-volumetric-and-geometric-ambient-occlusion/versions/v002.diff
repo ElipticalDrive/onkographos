@@ -1,0 +1,408 @@
+--- v001.md
++++ v002.md
+@@ -4,56 +4,61 @@
+ 
+ ## Overview
+-This method computes ambient occlusion for visualizations combining volumetric scalar fields and tube-shaped geometric primitives (e.g., streamlines, DTI fibers) by considering mutual occlusion between the volume and the geometry [S1]. It addresses the lack of depth discrimination in separate volumetric and geometric occlusion methods by integrating shadows cast by geometry into volume, volume onto geometry, and geometry onto geometry [S1]. Unlike screen-space ambient occlusion (SSAO) which approximates low-frequency occlusion with spheres, this method captures low-frequency occlusion effects in a volumetric occlusion buffer using Directional Occlusion Shading (DOS), while using a vicinity occlusion term based on geometry depths for high-frequency local geometric structures [S1].
++This method computes ambient occlusion for visualizations combining volumetric data (scalar fields) and tube-shaped geometric primitives (e.g., streamlines, DTI fiber tracts) by considering mutual occlusion between the volume and the geometry [S1]. It extends the Directional Occlusion Shading (DOS) model to integrate shadows cast by geometry into the volume, volume onto geometry, and geometry onto geometry, addressing the lack of depth discrimination in separate volumetric and geometric occlusion methods [S1]. Unlike naive methods that compute occlusion independently, this approach provides consistent shading across both data types, enhancing depth perception [S1]. It differs from Screen-Space Ambient Occlusion (SSAO) [3980-screen-space-ambient-occlusion-ssao.md] by capturing low-frequency occlusion in a volumetric buffer rather than approximating it with spheres, and from [Screen-Space Ambient Occlusion for Volumes](16107-screen-space-ambient-occlusion-for-volumes.md) by explicitly handling the interaction between distinct geometric and volumetric entities [S1].
+ 
+ ## How it works
+-The algorithm extends the Directional Occlusion Shading (DOS) model to allow rendering of geometric shapes in combination with a 3D volume context, considering mutual occlusion between structures represented by a volume or geometry [S1]. It is based on incremental filtering, used to approximate integration for computing advanced volumetric scattering and shading effects [S1]. The method integrates into a slice-based volume renderer [S1].
++The algorithm is integrated into a slice-based volume renderer. It uses incremental filtering to approximate integration for advanced volumetric scattering and shading effects [S1]. The method consists of preprocessing to create a G-Buffer, iterative slice traversal to update occlusion buffers, and a final compositing step.
+ 
+ ### Inputs and Outputs
+ **Inputs:**
+-*   3D scalar volume data.
+-*   Geometric structures (e.g., stream tubes, DTI fiber tracts) represented as triangle meshes.
+-*   Transfer function mapping scalar values and gradients to scattering ($\sigma_s$) and extinction ($\sigma_t$) coefficients.
+-*   Slice distance $d$.
+-*   DOS cone opening angle $\theta$.
+-*   User-specified `geometry_opacity` (high opacity value).
+-*   `depth_bias` offset for vicinity occlusion.
+-*   Vicinity occlusion extent $R_t$.
++*   **Volume Data:** 3D scalar field $V$.
++*   **Transfer Function:** Maps $(x, |\nabla x|)$ to scattering coefficient $\sigma_s$ and extinction coefficient $\sigma_t$ [S1].
++*   **Geometric Structures:** Tube-shaped primitives (e.g., streamlines) defined by triangles [S1].
++*   **Parameters:**
++    *   $d$: Slice distance (constant between slices) [S1].
++    *   $\theta$: Opening angle of the DOS cone [S1].
++    *   $R_t$: Vicinity occlusion extent radius [S1].
++    *   $depth\_bias$: Offset to avoid self-occlusion in vicinity term [S1].
++    *   $geometry\_opacity$: User-specified high opacity value for geometry [S1].
+ 
+ **Outputs:**
+-*   Final composited image in `eye_buffer`.
++*   **Eye Buffer:** Final composited color and alpha.
++*   **Occlusion Buffers:** Intermediate buffers for volumetric and partial occlusion.
+ 
+ ### Data Structures
+-*   **G-Buffer:** A set of 2D images storing per-pixel: color, view space position, view space normal, and view space distance (depth) [S1].
+-*   **volume_occl_buf:** A 2D buffer storing the volumetric occlusion factor. It is double-buffered (`volume_occl_bufprev` and `volume_occl_bufnext`) and swapped after each slice's volumetric occlusion update [S1].
+-*   **partial_occl_buffer:** A 2D buffer storing the shadows cast by the volume onto the geometry. It is updated by interpolating between volumetric occlusion values of adjacent slices based on the surface distance [S1].
+-*   **eye_buffer:** The final color buffer where the composited volume and occlusion effects are rendered [S1].
++*   **G-Buffer:** Set of 2D images storing per-pixel: color, view space position, view space normal, and view space distance (depth) [S1].
++*   **volume_occl_buf:** 2D buffer storing the volumetric occlusion factor. Double-buffered as `volume_occl_bufprev` and `volume_occl_bufnext` [S1].
++*   **partial_occl_buffer:** 2D buffer storing shadows cast by the volume onto the geometry [S1].
++*   **eye_buffer:** Final color buffer [S1].
++*   **geom_depth:** 2D texture storing the depth of geometric structures [S1].
++*   **geom_linear_depth:** 2D texture storing linearized depth of geometric structures [S1].
+ *   **Stencil Buffer:** Used to mask fragments covered by streamlines geometry to optimize partial occlusion buffer updates [S1].
+ 
+-### Parameters
+-*   `geometry_opacity`: A user-specified high opacity value used to replace the transfer function opacity when a volume sample is behind a geometric structure [S1].
+-*   `depth_bias`: An offset added to the surface depth value to avoid self-occlusion in the vicinity occlusion term [S1].
+-*   `slice_distance` ($d$): The distance between adjacent volume slices [S1].
+-*   $\theta$: The opening angle of the DOS cone [S1].
+-*   $R_t$: The vicinity occlusion extent [S1].
+-
+-### Steps
+-
+-1.  **Preprocessing (G-Buffer):** Render geometric structures before slice traversal to capture colors, positions, normals, and depth values into the G-Buffer. Use the stencil buffer to mask fragments covered by streamlines geometry [S1].
+-2.  **Initialization:** Initialize `eye_buffer` to background color. Initialize `volume_occl_bufprev` and `volume_occl_bufnext` to 1. Initialize `partial_occl_buffer` to 1 [S1].
+-3.  **Slice Loop:** For each slice $s$ in all slices:
+-    a.  Call `UpdateEyeBuffer(s)`.
+-    b.  Call `UpdatePartialOcclusionBuffer(s)`.
+-    c.  Call `UpdateVolumetricOcclusionBuffer(s)`.
+-4.  **Compositing:** Call `CompositeBuffers()` to combine the eye buffer, partial occlusion buffer, and G-Buffer for final shading [S1].
+-5.  **Vicinity Occlusion:** Compute the vicinity occlusion term using the depth buffer of the geometric structures to capture high-frequency occlusion effects [S1].
++### Numbered Steps
++
++1.  **Preprocessing (ComputeGBuffer):**
++    *   Render geometric structures to the G-Buffer to capture colors, positions, normals, and depth values [S1].
++    *   Use the stencil buffer to mark pixels covered by geometry (set to 1) to optimize subsequent updates [S1].
++    *   Initialize `volume_occl_bufprev` and `volume_occl_bufnext` to 1 (no occlusion) [S1].
++    *   Initialize `partial_occl_buffer` to 1 [S1].
++    *   Initialize `eye_buffer` to background color [S1].
++
++2.  **Slice Traversal Loop:**
++    For each slice $s$ in the volume:
++    *   **UpdateEyeBuffer(s):** Render the current slice to the `eye_buffer`, incorporating volumetric occlusion and geometric depth [S1].
++    *   **UpdatePartialOcclusionBuffer(s):** Compute shadows cast by the volume onto the geometry using the previous slice's data [S1].
++    *   **UpdateVolumetricOcclusionBuffer(s):** Compute volumetric occlusion for the current slice, considering geometry as occluders [S1].
++
++3.  **Compositing (CompositeBuffers):**
++    *   Combine the `eye_buffer`, `partial_occl_buffer`, and G-Buffer data to shade the geometric surfaces with the final combined occlusion term [S1].
++
++4.  **Vicinity Occlusion (Post-Processing):**
++    *   Compute high-frequency geometric occlusion using the G-Buffer depth [S1].
+ 
+ ### Pseudocode
+ 
+ ```python
+-def CombinedOcclusionShading(volume, geometry, transfer_function, slice_distance, theta, geometry_opacity, depth_bias, R_t):
+-    # 1. Preprocessing: Render G-Buffer
+-    G_buffer = ComputeGBuffer(geometry)
+-    
+-    # 2. Initialization
++def CombinedOcclusionShading(volume, transfer_function, geometry, slice_distance, theta, R_t, depth_bias, geometry_opacity):
++    # 1. Preprocessing
++    g_buffer = ComputeGBuffer(geometry)
+     eye_buffer = background_color
+     volume_occl_bufprev = 1.0
+@@ -61,6 +66,6 @@
+     partial_occl_buffer = 1.0
+     
+-    # 3. Slice Loop
+-    for s in all_slices:
++    # 2. Slice Traversal
++    for slice s in all_slices:
+         UpdateEyeBuffer(s, volume, transfer_function, volume_occl_bufprev, geometry, slice_distance)
+         UpdatePartialOcclusionBuffer(s, volume_occl_bufprev, volume_occl_bufnext, geometry, slice_distance)
+@@ -68,53 +73,34 @@
+         
+         # Swap buffers for next iteration
+-        volume_occl_bufprev, volume_occl_bufnext = volume_occl_bufnext, volume_occl_bufprev
+-        
+-    # 4. Compositing
+-    CompositeBuffers(eye_buffer, partial_occl_buffer, G_buffer)
+-    
+-    # 5. Vicinity Occlusion (can be done in parallel or after)
+-    vicinity_occl = VicinityOcclusion(geometry, depth_bias, R_t)
+-    
+-    return eye_buffer, vicinity_occl
+-
+-def ComputeGBuffer(geometry):
+-    """
+-    Renders geometry to store color, view space position, normal, and depth.
+-    Uses stencil buffer to mask fragments covered by geometry.
+-    """
+-    G_buffer = {
+-        'color': Image2D(),
+-        'position': Image2D(),
+-        'normal': Image2D(),
+-        'depth': Image2D(),
+-        'linear_depth': Image2D(),
+-        'stencil': StencilBuffer()
+-    }
+-    # Render geometry to G_buffer
+-    # Enable stencil test to mark pixels covered by geometry
+-    return G_buffer
++        volume_occl_bufprev = volume_occl_bufnext
++
++    # 3. Compositing
++    CompositeBuffers(eye_buffer, partial_occl_buffer, g_buffer)
++    
++    # 4. Vicinity Occlusion (Can be done in parallel or post-process)
++    vicinity_occlusion = VicinityOcclusion(geometry.linear_depth, R_t, depth_bias)
++    ApplyVicinityOcclusion(g_buffer, vicinity_occlusion)
+ 
+ def UpdateEyeBuffer(s, volume, transfer_function, volume_occl_bufprev, geometry, slice_distance):
+-    """
+-    Updates the eye buffer for the current slice, incorporating volumetric occlusion
+-    and geometric occlusion (if volume is behind geometry).
+-    """
+-    SetRenderTarget(eye_buffer, geometry.geom_depth_stencil)
+-    EnableDepthTest(PassIfLess, DoNotWriteDepth)
+-    EnableBlending(OneMinusDestinationAlpha, One)
+-    
+-    for fragment f of s:
+-        # Sample volume
+-        x, grad_mag = Texture3D(volume, f)
+-        sigma_s, sigma_t = Texture2D(transfer_function, (x, grad_mag))
+-        
+-        # Sample volumetric occlusion from previous buffer
+-        occlusion = Texture2D(volume_occl_bufprev, f.clip)
+-        
+-        # Check geometric occlusion
+-        # delta is the distance to the nearest geometric surface along the view ray
+-        delta = abs(f.viewz - Texture2D(geometry.geom_linear_depth, f.clip))
+-        
+-        # Sampling distance is limited by slice distance or distance to geometry
++    # Bind textures: volume_occl_bufprev, geom_linear_depth
++    # Set render target: eye_buffer
++    # Enable Depth Test: PassIfLess, DoNotWriteDepth
++    # Enable Blending: OneMinusDestinationAlpha, One
++    
++    for fragment f of slice s:
++        # Sample volume data
++        x, grad_magnitude = Texture3D(volume, f.position)
++        
++        # Sample transfer function
++        sigma_s, sigma_t = Texture2D(transfer_function, (x, grad_magnitude))
++        
++        # Sample previous volumetric occlusion
++        occlusion = Texture2D(volume_occl_bufprev, f.clip_coords)
++        
++        # Calculate distance to nearest geometry
++        geom_depth_val = Texture2D(geometry.linear_depth, f.clip_coords)
++        delta = abs(f.view_z - geom_depth_val)
++        
++        # Clamp sampling distance to slice distance
+         sampling_distance = min(slice_distance, delta)
+         
+@@ -123,122 +109,130 @@
+         
+         # Output color and alpha
+-        frame_buffer = (f.La * sigma_s * occlusion * alpha, alpha)
++        # La is ambient light, assumed constant or pre-calculated
++        frame_buffer_color = La * sigma_s * occlusion * alpha
++        frame_buffer_alpha = alpha
++        
++        WriteToRenderTarget(frame_buffer_color, frame_buffer_alpha)
+ 
+ def UpdateVolumetricOcclusionBuffer(s, volume, transfer_function, volume_occl_bufprev, geometry, geometry_opacity):
+-    """
+-    Computes the volumetric occlusion factor for the current slice.
+-    Incorporates occlusion from geometry into the volume.
+-    """
+-    SetRenderTarget(volume_occl_bufnext)
+-    DisableBlending()
+-    
+-    for fragment f of s:
+-        # Sample volume
+-        x, grad_mag = Texture3D(volume, f)
+-        sigma_t = Texture2D(transfer_function, (x, grad_mag))
+-        
+-        # Check if volume sample is behind geometric structure
+-        if f.depth < Texture2D(geometry.geom_depth, f.clip):
++    # Bind textures: volume_occl_bufprev, geom_depth
++    # Set render target: volume_occl_bufnext
++    # Disable Blending
++    
++    for fragment f of slice s:
++        # Sample volume data
++        x, grad_magnitude = Texture3D(volume, f.position)
++        
++        # Sample transfer function
++        sigma_t = Texture2D(transfer_function, (x, grad_magnitude))
++        
++        # Check if behind geometry
++        geom_depth_val = Texture2D(geometry.depth, f.clip_coords)
++        
++        if f.depth < geom_depth_val:
+             sigma_t = geometry_opacity
+             
+         # Compute DOS occlusion
++        # ComputeDOS performs incremental filtering based on sigma_t and previous buffer
+         occlusion = ComputeDOS(volume_occl_bufprev, sigma_t)
+         
+-        frame_buffer = occlusion
++        WriteToRenderTarget(occlusion)
++        
++    # Swap buffers
++    volume_occl_bufprev = volume_occl_bufnext
+ 
+ def UpdatePartialOcclusionBuffer(s, volume_occl_bufprev, volume_occl_bufnext, geometry, slice_distance):
+-    """
+-    Computes the partial occlusion buffer, storing shadows cast by volume onto geometry.
+-    Interpolates between volumetric occlusion of previous and current slices.
+-    """
+-    SetRenderTarget(partial_occl_buffer, geometry.geom_depth_stencil)
+-    DisableBlending()
+-    EnableDepthTest(PassIfLess, DoNotWriteDepth)
+-    EnableStencilTest(StencilFunc(Equal, 1, ~0), StencilOp(Keep, Decrease, Keep))
+-    
+-    # Render previous slice s-1 because current slice s is occluded by surface
+-    for fragment f of s-1:
+-        z_surface = Texture2D(geometry.geom_linear_depth, f.clip)
+-        z_slice = f.viewz
+-        z_delta = abs(z_surface - z_slice)
+-        
+-        # Clamp z_delta by slice distance
++    # Bind textures: volume_occl_bufprev, volume_occl_bufnext, geom_linear_depth
++    # Set render target: partial_occl_buffer
++    # Disable Blending
++    # Enable Depth Test: PassIfLess, DoNotWriteDepth
++    # Enable Stencil Test: StencilFunc(Equal, 1, ~0), StencilOp(Keep, Decrease, Keep)
++    
++    # Render previous slice s-1
++    for fragment f of slice (s-1):
++        z_surface = Texture2D(geometry.linear_depth, f.clip_coords)
++        z_slice = f.view_z
++        
++        # Calculate difference
++        z_delta = abs(z_slice - z_surface)
++        
++        # Clamp by slice distance
+         z_ratio = min(z_delta, slice_distance) / slice_distance
+         
+-        occl_prev = Texture2D(volume_occl_bufprev, f.clip)
+-        occl_next = Texture2D(volume_occl_bufnext, f.clip)
+-        
+-        # Interpolate occlusion
++        # Sample occlusion values
++        occl_prev = Texture2D(volume_occl_bufprev, f.clip_coords)
++        occl_next = Texture2D(volume_occl_bufnext, f.clip_coords)
++        
++        # Interpolate
+         partial_occl = occl_prev * (1.0 - z_ratio) + occl_next * z_ratio
+         
+-        frame_buffer = partial_occl
+-
+-def ComputeDOS(volume_occl_bufprev, sigma_t):
+-    """
+-    Computes Directional Occlusion Shading using incremental filtering.
+-    Reads and averages multiple samples from volume_occl_bufprev.
+-    """
+-    # Implementation details of DOS are in the parent article [Parent](3980-screen-space-ambient-occlusion-ssao.md)
+-    # This function approximates integration for volumetric scattering/shading
+-    return occlusion_factor
+-
+-def CompositeBuffers(eye_buffer, partial_occl_buffer, G_buffer):
+-    """
+-    Combines the eye buffer, partial occlusion buffer, and G-Buffer for final shading.
+-    """
+-    # Combine volumetric occlusion with partial occlusion (shadows on geometry)
+-    # and apply vicinity occlusion for geometric details
+-    pass
+-
+-def VicinityOcclusion(geometry, depth_bias, R_t):
+-    """
+-    Computes high-frequency geometric occlusion using screen-space depth sampling.
+-    """
+-    occlusion = 0
+-    z_surface = Texture2D(geometry.geom_linear_depth, f)
+-    biased_depth = z_surface + depth_bias
+-    
++        WriteToRenderTarget(partial_occl)
++
++def VicinityOcclusion(geom_linear_depth, R_t, depth_bias):
++    occlusion_count = 0
++    total_samples = 0
++    
++    # Render full screen quad
+     for sample p_i within vicinity occlusion extent R_t:
+-        # Project p_i into texture space
++        # Get surface depth at current pixel
++        z_surface = Texture2D(geom_linear_depth, p_i)
++        
++        # Apply bias to avoid self-occlusion
++        biased_depth = z_surface + depth_bias
++        
++        # Project sample into texture space
+         t_i = project(p_i, z_surface)
+-        depth_sample = Texture2D(geometry.geom_linear_depth, t_i)
+-        
++        
++        # Sample depth at neighbor
++        depth_sample = Texture2D(geom_linear_depth, t_i)
++        
++        # Count occluded neighbors
+         if depth_sample > 0 and depth_sample < biased_depth:
+-            occlusion += 1
++            occlusion_count += 1
+             
+-    return 1.0 - (occlusion / |t_i|)
++        total_samples += 1
++        
++    # Return approximate occlusion term
++    return 1.0 - (occlusion_count / total_samples)
+ ```
+ 
+ ### Formulas
+-*   $z_\Delta = |z_{slice} - z_{surface}|$ [S1]
+-*   $z_{ratio} = \frac{\min(z_\Delta, d)}{d}$, where $d$ is `slice_distance` [S1]
+-*   $partial\_occl_n = volumetric\_occl_{n-1} \cdot (1 - z_{ratio}) + volumetric\_occl_n \cdot z_{ratio}$ [S1]
++*   **Sampling Distance:** $\text{sampling\_distance} = \min(\text{slice\_distance}, \delta)$, where $\delta = |f_{\text{viewz}} - \text{Texture2D}(\text{geom\_linear\_depth}, f_{\text{clip}})|$ [S1].
++*   **Alpha:** $\alpha = 1 - e^{-\sigma_t \cdot \text{sampling\_distance}}$ [S1].
++*   **Partial Occlusion Difference:** $z_\Delta = |z_{\text{slice}} - z_{\text{surface}}|$ [S1].
++*   **Partial Occlusion Ratio:** $z_{\text{ratio}} = \frac{\min(z_\Delta, d)}{d}$, where $d$ is `slice_distance` [S1].
++*   **Partial Occlusion Value:** $\text{partial\_occl}_n = \text{volumetric\_occl}_{n-1} \cdot (1 - z_{\text{ratio}}) + \text{volumetric\_occl}_n \cdot z_{\text{ratio}}$ [S1].
+ 
+ ### Edge Cases and Pitfalls
+-*   **Partial Occlusion Buffer Update:** The current slice $s_n$ is discarded by the depth test because it is occluded by the surface. Therefore, the previous slice $s_{n-1}$ must be rendered to update the buffer for the surface located between $s_{n-1}$ and $s_n$ [S1].
++*   **Slice Discarding:** When computing the partial occlusion buffer, the current slice $s_n$ is discarded by the depth test because it is occluded by the surface. Therefore, the previous slice $s_{n-1}$ must be rendered to update the buffer for the surface located between $s_{n-1}$ and $s_n$ [S1].
+ *   **Clamping:** The difference $z_\Delta$ between surface and slice distance is clamped by the slice distance $d$ to correctly handle cases where there is no surface between two subsequent slices [S1].
+ *   **Self-Occlusion:** Self-occlusion in the vicinity occlusion term is avoided by offsetting the depth value with a `depth_bias` [S1].
+-*   **Performance Bottleneck:** The performance bottleneck is the incremental filtering inherent to the DOS method, not the vicinity occlusion term computation. The vicinity occlusion term alone performs at interactive frame rates despite high sample counts [S1].
+-*   **Scaling:** Performance scaling may be limited by internal memory layout of anisotropic 3D textures rather than triangle count. For example, the mixing pipe dataset did not scale on the GTX 580, likely due to the texture layout [S1].
++*   **Performance Bottleneck:** The performance bottleneck is the incremental filtering inherent to the DOS method, not the vicinity occlusion term computation [S1].
++*   **Texture Layout:** Performance scaling may be limited by the internal memory layout of anisotropic 3D textures rather than triangle count [S1].
+ 
+ ## Subtopics
+ 
+ ### [Vicinity Occlusion](14394-vicinity-occlusion.md)
+-An approximate geometric occlusion term for high-frequency geometric details, determined by rendering a full screen quad and comparing the depth of each pixel with neighboring pixels in the geometric depth buffer.
++Vicinity occlusion is an approximate geometric ambient occlusion term designed to capture high-frequency surface-to-surface occlusion effects on tubular geometric structures (such as DTI fiber tracts) within a volume rendering pipeline. It addresses the lack of depth discrimination in separate volumetric and geometric occlusion methods by integrating shadows cast by geometry onto itself, thereby enhancing depth perception. Unlike standard Screen-Space Ambient Occlusion (SSAO) techniques that cover the entire screen, this method is computed only for pixels containing geometric structures, leveraging the sparsity of the geometry to minimize performance impact.
+ 
+ ## Operating characteristics
+-*   **Time and Memory Complexity:** The method is integrated into a slice-based volume renderer. The performance bottleneck is the incremental filtering inherent to the DOS method [S1]. The vicinity occlusion term computation is not the limiting factor [S1].
++*   **Time Complexity:** The method is based on incremental filtering, which is efficient for slice-based rendering. The vicinity occlusion term performs at interactive frame rates despite high sample counts [S1]. The bottleneck is the DOS incremental filtering, not the vicinity term [S1].
++*   **Memory Complexity:** Requires storage for G-Buffer (color, position, normal, depth), double-buffered volumetric occlusion buffer, partial occlusion buffer, and depth textures [S1].
+ *   **Measured Performance:** On an NVIDIA GeForce GTX 580 GPU, the combined shading method is reduced by about 25% compared to volumetric occlusion shading alone, 86% compared to emission/absorption, and 71% compared to combined Phong shading [S1].
+-    *   Mixing pipe (137k triangles, 574 slices, 1800x121x121 resolution): 45° DOS angle, 2x2 volumetric samples, 118 vicinity samples, 768x128 image resolution.
+-    *   DTI fibers (720k triangles, 512 slices, 96x96x81 resolution): 45° DOS angle, 4x4 volumetric samples, 81 vicinity samples, 1153x256 image resolution.
+-    *   Astrophysical (7.9M triangles, 961 slices, 256x512x512 resolution): 65° DOS angle, 2x2 volumetric samples, 81 vicinity samples, 512x512 image resolution [S1].
+-*   **Strengths and Limitations:**
+-    *   **Strengths:** Captures mutual occlusion between volume and geometry (volume-to-volume, geometry-to-geometry, geometry-to-volume, volume-to-geometry). Independent of volumetric gradient, avoiding artifacts in homogeneous or noisy regions where gradient estimation is problematic [S1].
+-    *   **Limitations:** Performance scaling may be limited by internal memory layout of anisotropic 3D textures [S1].
+-*   **When to Use:** Interactive direct volume rendering of combined volumetric and geometric primitives where depth perception and context between the two data types are important [S1].
+-*   **When Not to Use:** When performance is critical and the scene has complex anisotropic 3D textures that do not scale well on the target hardware [S1].
++    *   Mixing pipe (137k triangles, 1800x121x121 volume): Interactive rates maintained [S1].
++    *   DTI fibers (720k triangles, 96x96x81 volume): Interactive rates maintained [S1].
++    *   Astrophysical (7.9M triangles, 256x512x512 volume): Renders at half speed compared to DTI, but still interactive [S1].
++*   **Strengths:**
++    *   Captures mutual occlusion between volume and geometry (volume-to-volume, geometry-to-geometry, geometry-to-volume, volume-to-geometry) [S1].
++    *   Independent of volumetric gradient estimation, avoiding artifacts in homogeneous or noisy regions [S1].
++    *   High-frequency geometric occlusion is captured efficiently via vicinity occlusion [S1].
++*   **Limitations:**
++    *   Performance may be limited by 3D texture memory layout (anisotropic textures) [S1].
++    *   Requires pre-computation of G-Buffer and stencil masks [S1].
++*   **When to Use:** Interactive visualization of combined volumetric and tubular geometric data (e.g., DTI fiber tracts in brain imaging, streamlines in fluid dynamics) where depth perception and mutual occlusion are critical [S1].
++*   **When Not to Use:** Scenes without geometric primitives, or where gradient-based shading is preferred and data is not noisy/homogeneous [S1].
+ 
+ ## Background
+-The method was presented by Schott et al. in 2012 [S1]. It extends the Directional Occlusion Shading (DOS) model presented by Schott et al. [24] and is based on incremental filtering, which has been successfully used in the past to approximate integration for computing advanced volumetric scattering and shading effects [11], [18], [23], [24], [31] [S1]. The method is based on work presented previously [22] and encompasses additions including more algorithmic details and an effective stream tube interpolation scheme [S1].
++The method extends the Directional Occlusion Shading (DOS) model presented by Schott et al. [S1]. It was developed to address the limitations of naive methods that compute volumetric and geometric occlusion independently, which miss interactions such as shadows cast from geometry into volume and volume onto geometry [S1]. The approach builds on incremental filtering techniques used for advanced volumetric scattering and shading [S1]. It is particularly relevant for scientific visualization involving DTI fiber tractography or streamline tracing [S1].
+ 
+ ## Sources

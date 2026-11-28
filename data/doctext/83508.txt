@@ -1,0 +1,1566 @@
+# GPU voxel mesh generation and drawing in Unity HDRP
+
+This is an experiment to generate a cubic voxel chunk mesh as efficiently as possible. This is insanely fast, meshing and drawing at around <b>650</b> FPS on my RTX 4090. The mesh generation itself is much faster than that, running at more than <b>1000</b> FPS with camera disabled.
+
+https://user-images.githubusercontent.com/14143603/231909731-d0047d10-7ccd-440d-8c25-6b64d07315ad.mp4
+
+This example uses a 3D noise library to generate voxel data. You can control frequency, amplitude, offset and speed of the noise via inspector in Unity.
+
+## What you can learn from it
+
+- How to create a mesh on gpu
+- How to use shader graph with a custom function to draw a mesh using Graphics.DrawProceduralIndirect. This was only recently made possible when Unity added VertexId node to shader graph.
+
+## How it works
+
+- generate voxels compute -> voxel data (0/1) is generated using 3d noise
+- feedback compute -> iterates all voxels and calculates the count of vertices and indices which will be required for the mesh
+- voxelizer compute -> iterates all voxels and writes vertex and index data into the buffers
+- the mesh is drawn with Graphics.DrawProceduralIndirect using data from index and vertex buffers
+
+The mesh is generated on the GPU and is never read back to the CPU to create a Mesh object, that would be very slow by comparison (5 FPS).
+
+## Credits
+
+- [OpenGL voxelizer compute shaders by Demurzasty](https://github.com/demurzasty/HolyGrail)
+- [GPU Noise by keijiro](https://github.com/keijiro/NoiseShader)
+
+### Assets/Compute/feedback.comp
+```
+#version 460 core
+
+#define CHUNK_SIZE 80
+
+layout (local_size_x = 8, local_size_y = 8, local_size_z = 8) in;
+
+struct GeometryData {
+    uint vertexCount;
+    uint indexCount;
+};
+
+struct ChunkFeedback {
+    uint vertexOffset;
+    uint vertexCount;
+    uint indexOffset;
+    uint indexCount;
+};
+
+layout (std430, binding = 1) readonly buffer VoxelBuffer {
+    int data[];
+} uVoxels;
+
+layout (std430, binding = 6) buffer FeedbackBuffer {
+    GeometryData data;
+} uFeedback;
+
+layout (std430, binding = 7) writeonly buffer ChunkFeedbackBuffer {
+    ChunkFeedback data[];
+} uChunkFeedback;
+
+shared uint sVertexCount;
+shared uint sIndexCount;
+
+uint to1D(in uvec3 pos) {
+    return pos.x + CHUNK_SIZE * (pos.y + CHUNK_SIZE * pos.z);
+}
+
+int to1D(in ivec3 pos) {
+    return pos.x + CHUNK_SIZE * (pos.y + CHUNK_SIZE * pos.z);
+}
+
+uvec3 to3D(in uint idx) {
+    uint x = idx % CHUNK_SIZE;
+    uint y = (idx / CHUNK_SIZE) % CHUNK_SIZE;
+    uint z = idx / (CHUNK_SIZE * CHUNK_SIZE);
+
+    // uint z = idx / (CHUNK_SIZE * CHUNK_SIZE);
+    // idx -= (z * CHUNK_SIZE * CHUNK_SIZE);
+    // uint y = idx / CHUNK_SIZE;
+    // uint x = idx % CHUNK_SIZE;
+    return uvec3(x, y, z);
+}
+
+bool hasVoxel(in ivec3 coord) {
+    if (coord.x < 0 || coord.x >= CHUNK_SIZE || 
+        coord.y < 0 || coord.y >= CHUNK_SIZE ||
+        coord.z < 0 || coord.z >= CHUNK_SIZE) {
+        return false;
+    }
+
+    int idx = to1D(coord);
+    return uVoxels.data[idx] > 0;
+}
+
+void main() {
+    if (gl_LocalInvocationIndex == 0) {
+        sVertexCount = 0;
+        sIndexCount = 0;
+    }
+
+    barrier();
+
+    uint globalVoxelIndex = to1D(gl_GlobalInvocationID);
+
+    if (uVoxels.data[globalVoxelIndex] > 0) {
+        ivec3 coord = ivec3(gl_GlobalInvocationID);
+
+        uint vertexCount = 0;
+        uint indexCount = 0;
+
+        if (!hasVoxel(coord + ivec3(1, 0, 0))) {
+            vertexCount += 4;
+            indexCount += 6;
+        }
+
+        if (!hasVoxel(coord + ivec3(-1, 0, 0))) {
+            vertexCount += 4;
+            indexCount += 6;
+        }
+
+        if (!hasVoxel(coord + ivec3(0, 1, 0))) {
+            vertexCount += 4;
+            indexCount += 6;
+        }
+
+        if (!hasVoxel(coord + ivec3(0, -1, 0))) {
+            vertexCount += 4;
+            indexCount += 6;
+        }
+
+        if (!hasVoxel(coord + ivec3(0, 0, 1))) {
+            vertexCount += 4;
+            indexCount += 6;
+        }
+
+        if (!hasVoxel(coord + ivec3(0, 0, -1))) {
+            vertexCount += 4;
+            indexCount += 6;
+        }
+
+        atomicAdd(sVertexCount, vertexCount);
+        atomicAdd(sIndexCount, indexCount);
+    }
+
+    barrier();
+
+    if (gl_LocalInvocationIndex == 0) {
+        uint vertexOffset = atomicAdd(uFeedback.data.vertexCount, sVertexCount);
+        uint indexOffset = atomicAdd(uFeedback.data.indexCount, sIndexCount);
+        
+        uint index = gl_WorkGroupID.x + 10 * (gl_WorkGroupID.y + 10 * gl_WorkGroupID.z);
+
+        uChunkFeedback.data[index].vertexOffset = vertexOffset;
+        uChunkFeedback.data[index].vertexCount = sVertexCount;
+        uChunkFeedback.data[index].indexOffset = indexOffset;
+        uChunkFeedback.data[index].indexCount = sIndexCount;
+    }
+}
+```
+
+### Assets/Compute/feedback.compute
+```
+﻿#pragma kernel CSMain
+#include "voxels.hlsl"
+
+RWStructuredBuffer<int> uVoxels;
+RWStructuredBuffer<uint> uIndirectArgs;
+RWStructuredBuffer<GeometryData> uFeedback;
+RWStructuredBuffer<ChunkFeedback> uChunkFeedback;
+
+groupshared uint sVertexCount;
+groupshared uint sIndexCount;
+
+bool hasVoxel(int3 coord) {
+    if (coord.x < 0 || coord.x >= CHUNK_SIZE || 
+        coord.y < 0 || coord.y >= CHUNK_SIZE ||
+        coord.z < 0 || coord.z >= CHUNK_SIZE) {
+        return false;
+    }
+
+    int idx = to1D(coord);
+    return uVoxels[idx] > 0;
+}
+
+[numthreads(8, 8, 8)]
+void CSMain (uint3 dispatchID : SV_DispatchThreadID, uint3 groupID : SV_GroupID, uint3 groupThreadID : SV_GroupThreadID)
+{
+    if (groupThreadID.x == 0 && groupThreadID.y == 0 && groupThreadID.z == 0) {
+        sVertexCount = 0;
+        sIndexCount = 0;
+    }
+
+    AllMemoryBarrierWithGroupSync();
+    
+    uint globalVoxelIndex = to1D(dispatchID);
+
+    if (uVoxels[globalVoxelIndex] > 0) {
+        int3 coord = int3(dispatchID);
+
+        uint vertexCount = 0;
+        uint indexCount = 0;
+
+        if (!hasVoxel(coord + int3(1, 0, 0))) {
+            vertexCount += 4;
+            indexCount += 6;
+        }
+
+        if (!hasVoxel(coord + int3(-1, 0, 0))) {
+            vertexCount += 4;
+            indexCount += 6;
+        }
+
+        if (!hasVoxel(coord + int3(0, 1, 0))) {
+            vertexCount += 4;
+            indexCount += 6;
+        }
+
+        if (!hasVoxel(coord + int3(0, -1, 0))) {
+            vertexCount += 4;
+            indexCount += 6;
+        }
+
+        if (!hasVoxel(coord + int3(0, 0, 1))) {
+            vertexCount += 4;
+            indexCount += 6;
+        }
+
+        if (!hasVoxel(coord + int3(0, 0, -1))) {
+            vertexCount += 4;
+            indexCount += 6;
+        }
+        
+        InterlockedAdd(sVertexCount, vertexCount);
+        InterlockedAdd(sIndexCount, indexCount);
+    }
+
+    AllMemoryBarrierWithGroupSync();
+
+    if (groupThreadID.x == 0 && groupThreadID.y == 0 && groupThreadID.z == 0)
+    {
+        uint vertexOffset = 0, indexOffset = 0;
+        
+        InterlockedAdd(uFeedback[0].vertexCount, sVertexCount, vertexOffset);
+        InterlockedAdd(uFeedback[0].indexCount, sIndexCount, indexOffset);
+        
+        uint index = groupID.x + 10 * (groupID.y + 10 * groupID.z);
+
+        uChunkFeedback[index].vertexOffset = vertexOffset;
+        uChunkFeedback[index].vertexCount = sVertexCount;
+        uChunkFeedback[index].indexOffset = indexOffset;
+        uChunkFeedback[index].indexCount = sIndexCount;
+
+        uIndirectArgs[0] = uFeedback[0].indexCount;
+    }
+}
+```
+
+### Assets/Compute/generate_voxels.compute
+```
+﻿#pragma kernel CSMain
+#include "voxels.hlsl"
+#include "Library\PackageCache\jp.keijiro.noiseshader@2.0.0/Shader/ClassicNoise3D.hlsl"
+
+RWStructuredBuffer<int> uVoxels;
+
+float3 uPosition = float3(0, 0, 0);
+float uFrequency = 0.1f;
+float uAmplitude = 0.5f;
+
+[numthreads(8, 8, 8)]
+void CSMain (uint3 dispatchID : SV_DispatchThreadID)
+{
+    const uint globalVoxelIndex = to1D(dispatchID);
+    
+    int3 coord = int3(dispatchID);
+    float3 position = float3(coord) + uPosition;
+
+    float noise = ClassicNoise(position * uFrequency) * uAmplitude;
+
+    if (noise > 0)
+    {
+        uVoxels[globalVoxelIndex] = 1;
+    } else
+    {
+        uVoxels[globalVoxelIndex] = 0;
+    }
+}
+```
+
+### Assets/Compute/voxelizer.comp
+```
+#version 460 core
+
+#define CHUNK_SIZE 80
+
+layout (local_size_x = 8, local_size_y = 8, local_size_z = 8) in;
+
+struct Vertex {
+    float px, py, pz;
+    float tx, ty;
+    float nx, ny, nz;
+};
+
+struct GeometryData {
+    uint vertexCount;
+    uint indexCount;
+};
+
+struct ChunkFeedback {
+    uint vertexOffset;
+    uint vertexCount;
+    uint indexOffset;
+    uint indexCount;
+};
+
+struct DrawCommandData {
+	uint indexCount;
+	uint instanceCount;
+	uint firstIndex;
+	int vertexOffset;
+	uint firstInstance;
+};
+
+layout (std430, binding = 1) readonly buffer VoxelBuffer {
+    int data[];
+} uVoxels;
+
+layout (std430, binding = 2) writeonly buffer VertexBuffer {
+    Vertex data[];
+} uVertices;
+
+layout (std430, binding = 3) writeonly buffer IndexBuffer {
+    uint data[];
+} uIndices;
+
+layout (std430, binding = 6) readonly buffer FeedbackBuffer {
+    GeometryData data;
+} uFeedback;
+
+layout (std430, binding = 7) readonly buffer ChunkFeedbackBuffer {
+    ChunkFeedback data[];
+} uChunkFeedback;
+
+shared uint sVertexOffset;
+shared uint sVertexCount;
+shared uint sIndexOffset;
+shared uint sIndexCount;
+shared uint sChunkIndex;
+
+uint to1D(in uvec3 pos) {
+    return pos.x + CHUNK_SIZE * (pos.y + CHUNK_SIZE * pos.z);
+}
+
+int to1D(in ivec3 pos) {
+    return pos.x + CHUNK_SIZE * (pos.y + CHUNK_SIZE * pos.z);
+}
+
+uvec3 to3D(in uint idx) {
+    uint x = idx % CHUNK_SIZE;
+    uint y = (idx / CHUNK_SIZE) % CHUNK_SIZE;
+    uint z = idx / (CHUNK_SIZE * CHUNK_SIZE);
+
+    // uint z = idx / (CHUNK_SIZE * CHUNK_SIZE);
+    // idx -= (z * CHUNK_SIZE * CHUNK_SIZE);
+    // uint y = idx / CHUNK_SIZE;
+    // uint x = idx % CHUNK_SIZE;
+    return uvec3(x, y, z);
+}
+
+bool hasVoxel(in ivec3 coord) {
+    if (coord.x < 0 || coord.x >= CHUNK_SIZE || 
+        coord.y < 0 || coord.y >= CHUNK_SIZE ||
+        coord.z < 0 || coord.z >= CHUNK_SIZE) {
+        return false;
+    }
+
+    int idx = to1D(coord);
+    return uVoxels.data[idx] > 0;
+}
+
+void setVertex(out Vertex vertex, in vec3 position, in vec2 texcoord, in vec3 normal) {
+    vertex.px = position.x; vertex.py = position.y; vertex.pz = position.z;
+    vertex.tx = texcoord.x; vertex.ty = texcoord.y;
+    vertex.nx = normal.x; vertex.ny = normal.y; vertex.nz = normal.z;
+}
+
+void main() {
+    if (gl_LocalInvocationIndex == 0) {
+        // sChunkIndex = uChunkIndices.data[gl_WorkGroupID.x + 10 * (gl_WorkGroupID.y + 10 * gl_WorkGroupID.z)];
+        sChunkIndex = gl_WorkGroupID.x + 10 * (gl_WorkGroupID.y + 10 * gl_WorkGroupID.z);
+        sVertexOffset = uChunkFeedback.data[sChunkIndex].vertexOffset;
+        sIndexOffset = uChunkFeedback.data[sChunkIndex].indexOffset;
+        sVertexCount = uChunkFeedback.data[sChunkIndex].vertexCount;
+        sIndexCount = uChunkFeedback.data[sChunkIndex].indexCount;
+    }
+
+    barrier();
+
+    uint globalVoxelIndex = to1D(gl_GlobalInvocationID);
+
+    if (uVoxels.data[globalVoxelIndex] > 0) {
+        ivec3 coord = ivec3(gl_GlobalInvocationID);
+        
+        uint vertexCount = 0;
+        uint indexCount = 0;
+
+        vec3 position = vec3(coord);
+        // +X
+        if (!hasVoxel(coord + ivec3(1, 0, 0))) {
+            uint vertexOffset = atomicAdd(sVertexOffset, 4);
+            uint indexOffset = atomicAdd(sIndexOffset, 6);
+            
+            setVertex(uVertices.data[vertexOffset + 0], position + vec3(0.5, 0.5, 0.5), vec2(0.0, 0.0), vec3(1.0, 0.0, 0.0));
+            setVertex(uVertices.data[vertexOffset + 1], position + vec3(0.5, -0.5, 0.5), vec2(0.0, 1.0), vec3(1.0, 0.0, 0.0));
+            setVertex(uVertices.data[vertexOffset + 2], position + vec3(0.5, -0.5, -0.5), vec2(1.0, 1.0), vec3(1.0, 0.0, 0.0));
+            setVertex(uVertices.data[vertexOffset + 3], position + vec3(0.5, 0.5, -0.5), vec2(1.0, 0.0), vec3(1.0, 0.0, 0.0));
+
+            uIndices.data[indexOffset + 0] = vertexOffset;
+            uIndices.data[indexOffset + 1] = vertexOffset + 1;
+            uIndices.data[indexOffset + 2] = vertexOffset + 2;
+
+            uIndices.data[indexOffset + 3] = vertexOffset + 2;
+            uIndices.data[indexOffset + 4] = vertexOffset + 3;
+            uIndices.data[indexOffset + 5] = vertexOffset;
+        }
+
+        // -X
+        if (!hasVoxel(coord + ivec3(-1, 0, 0))) {
+            uint vertexOffset = atomicAdd(sVertexOffset, 4);
+            uint indexOffset = atomicAdd(sIndexOffset, 6);
+            
+            setVertex(uVertices.data[vertexOffset + 0], position + vec3(-0.5, 0.5, -0.5), vec2(0.0, 0.0), vec3(-1.0, 0.0, 0.0));
+            setVertex(uVertices.data[vertexOffset + 1], position + vec3(-0.5, -0.5, -0.5), vec2(0.0, 1.0), vec3(-1.0, 0.0, 0.0));
+            setVertex(uVertices.data[vertexOffset + 2], position + vec3(-0.5, -0.5, 0.5), vec2(1.0, 1.0), vec3(-1.0, 0.0, 0.0));
+            setVertex(uVertices.data[vertexOffset + 3], position + vec3(-0.5, 0.5, 0.5), vec2(1.0, 0.0), vec3(-1.0, 0.0, 0.0));
+
+            uIndices.data[indexOffset + 0] = vertexOffset;
+            uIndices.data[indexOffset + 1] = vertexOffset + 1;
+            uIndices.data[indexOffset + 2] = vertexOffset + 2;
+
+            uIndices.data[indexOffset + 3] = vertexOffset + 2;
+            uIndices.data[indexOffset + 4] = vertexOffset + 3;
+            uIndices.data[indexOffset + 5] = vertexOffset;
+        }
+
+        // +Y
+        if (!hasVoxel(coord + ivec3(0, 1, 0))) {
+            uint vertexOffset = atomicAdd(sVertexOffset, 4);
+            uint indexOffset = atomicAdd(sIndexOffset, 6);
+            
+            setVertex(uVertices.data[vertexOffset + 0], position + vec3(-0.5, 0.5, -0.5), vec2(0.0, 0.0), vec3(0.0, 1.0, 0.0));
+            setVertex(uVertices.data[vertexOffset + 1], position + vec3(-0.5, 0.5, 0.5), vec2(0.0, 1.0), vec3(0.0, 1.0, 0.0));
+            setVertex(uVertices.data[vertexOffset + 2], position + vec3(0.5, 0.5, 0.5), vec2(1.0, 1.0), vec3(0.0, 1.0, 0.0));
+            setVertex(uVertices.data[vertexOffset + 3], position + vec3(0.5, 0.5, -0.5), vec2(1.0, 0.0), vec3(0.0, 1.0, 0.0));
+
+            uIndices.data[indexOffset + 0] = vertexOffset;
+            uIndices.data[indexOffset + 1] = vertexOffset + 1;
+            uIndices.data[indexOffset + 2] = vertexOffset + 2;
+
+            uIndices.data[indexOffset + 3] = vertexOffset + 2;
+            uIndices.data[indexOffset + 4] = vertexOffset + 3;
+            uIndices.data[indexOffset + 5] = vertexOffset;
+        }
+
+        // -Y
+        if (!hasVoxel(coord + ivec3(0, -1, 0))) {
+            uint vertexOffset = atomicAdd(sVertexOffset, 4);
+            uint indexOffset = atomicAdd(sIndexOffset, 6);
+            
+            setVertex(uVertices.data[vertexOffset + 0], position + vec3(-0.5, -0.5, 0.5), vec2(0.0, 0.0), vec3(0.0, -1.0, 0.0));
+            setVertex(uVertices.data[vertexOffset + 1], position + vec3(-0.5, -0.5, -0.5), vec2(0.0, 1.0), vec3(0.0, -1.0, 0.0));
+            setVertex(uVertices.data[vertexOffset + 2], position + vec3(0.5, -0.5, -0.5), vec2(1.0, 1.0), vec3(0.0, -1.0, 0.0));
+            setVertex(uVertices.data[vertexOffset + 3], position + vec3(0.5, -0.5, 0.5), vec2(1.0, 0.0), vec3(0.0, -1.0, 0.0));
+
+            uIndices.data[indexOffset + 0] = vertexOffset;
+            uIndices.data[indexOffset + 1] = vertexOffset + 1;
+            uIndices.data[indexOffset + 2] = vertexOffset + 2;
+
+            uIndices.data[indexOffset + 3] = vertexOffset + 2;
+            uIndices.data[indexOffset + 4] = vertexOffset + 3;
+            uIndices.data[indexOffset + 5] = vertexOffset;
+        }
+
+        // +Z
+        if (!hasVoxel(coord + ivec3(0, 0, 1))) {
+            uint vertexOffset = atomicAdd(sVertexOffset, 4);
+            uint indexOffset = atomicAdd(sIndexOffset, 6);
+            
+            setVertex(uVertices.data[vertexOffset + 0], position + vec3(-0.5, 0.5, 0.5), vec2(0.0, 0.0), vec3(0.0, 0.0, 1.0));
+            setVertex(uVertices.data[vertexOffset + 1], position + vec3(-0.5, -0.5, 0.5), vec2(0.0, 1.0), vec3(0.0, 0.0, 1.0));
+            setVertex(uVertices.data[vertexOffset + 2], position + vec3(0.5, -0.5, 0.5), vec2(1.0, 1.0), vec3(0.0, 0.0, 1.0));
+            setVertex(uVertices.data[vertexOffset + 3], position + vec3(0.5, 0.5, 0.5), vec2(1.0, 0.0), vec3(0.0, 0.0, 1.0));
+
+            uIndices.data[indexOffset + 0] = vertexOffset;
+            uIndices.data[indexOffset + 1] = vertexOffset + 1;
+            uIndices.data[indexOffset + 2] = vertexOffset + 2;
+
+            uIndices.data[indexOffset + 3] = vertexOffset + 2;
+            uIndices.data[indexOffset + 4] = vertexOffset + 3;
+            uIndices.data[indexOffset + 5] = vertexOffset;
+        }
+
+        // -Z
+        if (!hasVoxel(coord + ivec3(0, 0, -1))) {
+            uint vertexOffset = atomicAdd(sVertexOffset, 4);
+            uint indexOffset = atomicAdd(sIndexOffset, 6);
+            
+            setVertex(uVertices.data[vertexOffset + 0], position + vec3(0.5, 0.5, -0.5), vec2(0.0, 0.0), vec3(0.0, 0.0, -1.0));
+            setVertex(uVertices.data[vertexOffset + 1], position + vec3(0.5, -0.5, -0.5), vec2(0.0, 1.0), vec3(0.0, 0.0, -1.0));
+            setVertex(uVertices.data[vertexOffset + 2], position + vec3(-0.5, -0.5, -0.5), vec2(1.0, 1.0), vec3(0.0, 0.0, -1.0));
+            setVertex(uVertices.data[vertexOffset + 3], position + vec3(-0.5, 0.5, -0.5), vec2(1.0, 0.0), vec3(0.0, 0.0, -1.0));
+
+            uIndices.data[indexOffset + 0] = vertexOffset;
+            uIndices.data[indexOffset + 1] = vertexOffset + 1;
+            uIndices.data[indexOffset + 2] = vertexOffset + 2;
+
+            uIndices.data[indexOffset + 3] = vertexOffset + 2;
+            uIndices.data[indexOffset + 4] = vertexOffset + 3;
+            uIndices.data[indexOffset + 5] = vertexOffset;
+        }
+    }
+}
+```
+
+### Assets/Compute/voxelizer.compute
+```
+﻿#pragma kernel CSMain
+#include "voxels.hlsl"
+
+RWStructuredBuffer<Vertex> uVertices;
+RWStructuredBuffer<uint> uIndices;
+StructuredBuffer<int> uVoxels;
+StructuredBuffer<ChunkFeedback> uChunkFeedback;
+
+groupshared uint sVertexOffset;
+groupshared uint sVertexCount;
+groupshared uint sIndexOffset;
+groupshared uint sIndexCount;
+groupshared uint sChunkIndex;
+
+bool hasVoxel(int3 coord) {
+    if (coord.x < 0 || coord.x >= CHUNK_SIZE || 
+        coord.y < 0 || coord.y >= CHUNK_SIZE ||
+        coord.z < 0 || coord.z >= CHUNK_SIZE) {
+        return false;
+    }
+
+    int idx = to1D(coord);
+    return uVoxels[idx] > 0;
+}
+
+void setVertex(out Vertex vertex, in float3 position, in float2 texcoord, in float3 normal) {
+    vertex.position = position;
+    vertex.texcoord = texcoord;
+    vertex.normal = normal;
+}
+
+[numthreads(8, 8, 8)]
+void CSMain (uint3 dispatchID : SV_DispatchThreadID, uint3 groupID : SV_GroupID, uint3 groupThreadID : SV_GroupThreadID)
+{
+    if (groupThreadID.x == 0 && groupThreadID.y == 0 && groupThreadID.z == 0) {
+        sChunkIndex = groupID.x + 10 * (groupID.y + 10 * groupID.z);
+        sVertexOffset = uChunkFeedback[sChunkIndex].vertexOffset;
+        sIndexOffset = uChunkFeedback[sChunkIndex].indexOffset;
+        sVertexCount = uChunkFeedback[sChunkIndex].vertexCount;
+        sIndexCount = uChunkFeedback[sChunkIndex].indexCount;
+    }
+
+    AllMemoryBarrierWithGroupSync();
+    
+    uint globalVoxelIndex = to1D(dispatchID);
+
+    if (uVoxels[globalVoxelIndex] > 0)
+    {
+        int3 coord = int3(dispatchID);
+        float3 position = float3(coord);
+
+        uint vertexOffset = 0, indexOffset = 0;
+
+        // +X
+        if (!hasVoxel(coord + int3(1, 0, 0))) {
+            InterlockedAdd(sVertexOffset, 4, vertexOffset);
+            InterlockedAdd(sIndexOffset, 6, indexOffset);
+
+            setVertex(uVertices[vertexOffset + 0], position + float3(0.5, 0.5, 0.5), float2(0.0, 0.0), float3(1.0, 0.0, 0.0));
+            setVertex(uVertices[vertexOffset + 1], position + float3(0.5, -0.5, 0.5), float2(0.0, 1.0), float3(1.0, 0.0, 0.0));
+            setVertex(uVertices[vertexOffset + 2], position + float3(0.5, -0.5, -0.5), float2(1.0, 1.0), float3(1.0, 0.0, 0.0));
+            setVertex(uVertices[vertexOffset + 3], position + float3(0.5, 0.5, -0.5), float2(1.0, 0.0), float3(1.0, 0.0, 0.0));
+
+            uIndices[indexOffset + 0] = vertexOffset;
+            uIndices[indexOffset + 1] = vertexOffset + 1;
+            uIndices[indexOffset + 2] = vertexOffset + 2;
+
+            uIndices[indexOffset + 3] = vertexOffset + 2;
+            uIndices[indexOffset + 4] = vertexOffset + 3;
+            uIndices[indexOffset + 5] = vertexOffset;
+        }
+
+        // -X
+        if (!hasVoxel(coord + int3(-1, 0, 0))) {
+            InterlockedAdd(sVertexOffset, 4, vertexOffset);
+            InterlockedAdd(sIndexOffset, 6, indexOffset);
+
+            setVertex(uVertices[vertexOffset + 0], position + float3(-0.5, 0.5, -0.5), float2(0.0, 0.0), float3(-1.0, 0.0, 0.0));
+            setVertex(uVertices[vertexOffset + 1], position + float3(-0.5, -0.5, -0.5), float2(0.0, 1.0), float3(-1.0, 0.0, 0.0));
+            setVertex(uVertices[vertexOffset + 2], position + float3(-0.5, -0.5, 0.5), float2(1.0, 1.0), float3(-1.0, 0.0, 0.0));
+            setVertex(uVertices[vertexOffset + 3], position + float3(-0.5, 0.5, 0.5), float2(1.0, 0.0), float3(-1.0, 0.0, 0.0));
+
+            uIndices[indexOffset + 0] = vertexOffset;
+            uIndices[indexOffset + 1] = vertexOffset + 1;
+            uIndices[indexOffset + 2] = vertexOffset + 2;
+
+            uIndices[indexOffset + 3] = vertexOffset + 2;
+            uIndices[indexOffset + 4] = vertexOffset + 3;
+            uIndices[indexOffset + 5] = vertexOffset;
+        }
+
+        // +Y
+        if (!hasVoxel(coord + int3(0, 1, 0))) {
+            InterlockedAdd(sVertexOffset, 4, vertexOffset);
+            InterlockedAdd(sIndexOffset, 6, indexOffset);
+
+            setVertex(uVertices[vertexOffset + 0], position + float3(-0.5, 0.5, -0.5), float2(0.0, 0.0), float3(0.0, 1.0, 0.0));
+            setVertex(uVertices[vertexOffset + 1], position + float3(-0.5, 0.5, 0.5), float2(0.0, 1.0), float3(0.0, 1.0, 0.0));
+            setVertex(uVertices[vertexOffset + 2], position + float3(0.5, 0.5, 0.5), float2(1.0, 1.0), float3(0.0, 1.0, 0.0));
+            setVertex(uVertices[vertexOffset + 3], position + float3(0.5, 0.5, -0.5), float2(1.0, 0.0), float3(0.0, 1.0, 0.0));
+
+            uIndices[indexOffset + 0] = vertexOffset;
+            uIndices[indexOffset + 1] = vertexOffset + 1;
+            uIndices[indexOffset + 2] = vertexOffset + 2;
+
+            uIndices[indexOffset + 3] = vertexOffset + 2;
+            uIndices[indexOffset + 4] = vertexOffset + 3;
+            uIndices[indexOffset + 5] = vertexOffset;
+        }
+
+        // -Y
+        if (!hasVoxel(coord + int3(0, -1, 0))) {
+            InterlockedAdd(sVertexOffset, 4, vertexOffset);
+            InterlockedAdd(sIndexOffset, 6, indexOffset);
+
+            setVertex(uVertices[vertexOffset + 0], position + float3(-0.5, -0.5, 0.5), float2(0.0, 0.0), float3(0.0, -1.0, 0.0));
+            setVertex(uVertices[vertexOffset + 1], position + float3(-0.5, -0.5, -0.5), float2(0.0, 1.0), float3(0.0, -1.0, 0.0));
+            setVertex(uVertices[vertexOffset + 2], position + float3(0.5, -0.5, -0.5), float2(1.0, 1.0), float3(0.0, -1.0, 0.0));
+            setVertex(uVertices[vertexOffset + 3], position + float3(0.5, -0.5, 0.5), float2(1.0, 0.0), float3(0.0, -1.0, 0.0));
+
+            uIndices[indexOffset + 0] = vertexOffset;
+            uIndices[indexOffset + 1] = vertexOffset + 1;
+            uIndices[indexOffset + 2] = vertexOffset + 2;
+
+            uIndices[indexOffset + 3] = vertexOffset + 2;
+            uIndices[indexOffset + 4] = vertexOffset + 3;
+            uIndices[indexOffset + 5] = vertexOffset;
+        }
+
+        // +Z
+        if (!hasVoxel(coord + int3(0, 0, 1))) {
+            InterlockedAdd(sVertexOffset, 4, vertexOffset);
+            InterlockedAdd(sIndexOffset, 6, indexOffset);
+
+            setVertex(uVertices[vertexOffset + 0], position + float3(-0.5, 0.5, 0.5), float2(0.0, 0.0), float3(0.0, 0.0, 1.0));
+            setVertex(uVertices[vertexOffset + 1], position + float3(-0.5, -0.5, 0.5), float2(0.0, 1.0), float3(0.0, 0.0, 1.0));
+            setVertex(uVertices[vertexOffset + 2], position + float3(0.5, -0.5, 0.5), float2(1.0, 1.0), float3(0.0, 0.0, 1.0));
+            setVertex(uVertices[vertexOffset + 3], position + float3(0.5, 0.5, 0.5), float2(1.0, 0.0), float3(0.0, 0.0, 1.0));
+
+            uIndices[indexOffset + 0] = vertexOffset;
+            uIndices[indexOffset + 1] = vertexOffset + 1;
+            uIndices[indexOffset + 2] = vertexOffset + 2;
+
+            uIndices[indexOffset + 3] = vertexOffset + 2;
+            uIndices[indexOffset + 4] = vertexOffset + 3;
+            uIndices[indexOffset + 5] = vertexOffset;
+        }
+
+        // -Z
+        if (!hasVoxel(coord + int3(0, 0, -1))) {
+            InterlockedAdd(sVertexOffset, 4, vertexOffset);
+            InterlockedAdd(sIndexOffset, 6, indexOffset);
+
+            setVertex(uVertices[vertexOffset + 0], position + float3(0.5, 0.5, -0.5), float2(0.0, 0.0), float3(0.0, 0.0, -1.0));
+            setVertex(uVertices[vertexOffset + 1], position + float3(0.5, -0.5, -0.5), float2(0.0, 1.0), float3(0.0, 0.0, -1.0));
+            setVertex(uVertices[vertexOffset + 2], position + float3(-0.5, -0.5, -0.5), float2(1.0, 1.0), float3(0.0, 0.0, -1.0));
+            setVertex(uVertices[vertexOffset + 3], position + float3(-0.5, 0.5, -0.5), float2(1.0, 0.0), float3(0.0, 0.0, -1.0));
+
+            uIndices[indexOffset + 0] = vertexOffset;
+            uIndices[indexOffset + 1] = vertexOffset + 1;
+            uIndices[indexOffset + 2] = vertexOffset + 2;
+
+            uIndices[indexOffset + 3] = vertexOffset + 2;
+            uIndices[indexOffset + 4] = vertexOffset + 3;
+            uIndices[indexOffset + 5] = vertexOffset;
+        }
+    }
+}
+```
+
+### Assets/Compute/voxels.hlsl
+```
+﻿#define CHUNK_SIZE 80
+
+struct Vertex {
+    float3 position;
+    float2 texcoord;
+    float3 normal;
+};
+
+struct GeometryData {
+    uint vertexCount;
+    uint indexCount;
+};
+
+struct ChunkFeedback {
+    uint vertexOffset;
+    uint vertexCount;
+    uint indexOffset;
+    uint indexCount;
+};
+
+uint to1D(uint3 pos) {
+    return pos.x + CHUNK_SIZE * (pos.y + CHUNK_SIZE * pos.z);
+}
+
+int to1D(int3 pos) {
+    return pos.x + CHUNK_SIZE * (pos.y + CHUNK_SIZE * pos.z);
+}
+
+uint3 to3D(uint idx) {
+    uint x = idx % CHUNK_SIZE;
+    uint y = (idx / CHUNK_SIZE) % CHUNK_SIZE;
+    uint z = idx / (CHUNK_SIZE * CHUNK_SIZE);
+    
+    return uint3(x, y, z);
+}
+```
+
+### Assets/Scripts/CameraController.cs
+```
+using UnityEngine;
+
+public class CameraController : MonoBehaviour
+{
+    public float moveSpeed = 5;
+    public float sensitivity = 100.0f;
+
+    private float _rotationX;
+    private float _rotationY;
+
+    private void Awake()
+    {
+        // lock cursor
+        Cursor.lockState = CursorLockMode.Locked;
+    }
+    
+    void Update()
+    {
+        Move();
+        MouseLook();
+        UpdateMouseLock();
+    }
+
+    private void UpdateMouseLock()
+    {
+        if (Input.GetKeyDown(KeyCode.Escape))
+        {
+            Cursor.lockState = Cursor.lockState == CursorLockMode.None ? CursorLockMode.Locked : CursorLockMode.None;
+        }
+    }
+
+    private void OnApplicationFocus(bool hasFocus)
+    {
+        Cursor.lockState = CursorLockMode.Locked;
+    }
+
+    private void Move()
+    {
+        if (Input.GetKey(KeyCode.W))
+        {
+            transform.Translate(Vector3.forward * moveSpeed * Time.deltaTime);
+        }
+        if (Input.GetKey(KeyCode.S))
+        {
+            transform.Translate(Vector3.back * moveSpeed * Time.deltaTime);
+        }
+        if (Input.GetKey(KeyCode.A))
+        {
+            transform.Translate(Vector3.left * moveSpeed * Time.deltaTime);
+        }
+        if (Input.GetKey(KeyCode.D))
+        {
+            transform.Translate(Vector3.right * moveSpeed * Time.deltaTime);
+        }
+    }
+
+    private void MouseLook()
+    {
+        // only update if cursor is locked
+        if (Cursor.lockState != CursorLockMode.Locked)
+            return;
+        
+        var mouseX = Input.GetAxis("Mouse X") * sensitivity * Time.deltaTime;
+        var mouseY = -Input.GetAxis("Mouse Y") * sensitivity * Time.deltaTime;
+
+        _rotationX -= mouseY;
+        _rotationX = Mathf.Clamp(_rotationX, -90.0f, 90.0f);
+
+        _rotationY += mouseX;
+
+        transform.localEulerAngles = new Vector3(-_rotationX, _rotationY, 0.0f);
+    }
+}
+```
+
+### Assets/Scripts/VoxelChunkGenerator.cs
+```
+using System;
+using Data;
+using Native;
+using Unity.Collections;
+using Unity.Jobs;
+using UnityEngine;
+using UnityEngine.Rendering;
+
+[RequireComponent(typeof(MeshFilter), typeof(MeshRenderer))]
+public class VoxelChunkGenerator : MonoBehaviour
+{
+    private const int ChunkSize = 80;
+    private const int ChunkSize3 = ChunkSize * ChunkSize * ChunkSize;
+    private const int WorkGroupSize = 8;
+    private const int SubChunkSize = ChunkSize / WorkGroupSize;
+    private const int VoxelCount = ChunkSize * ChunkSize * ChunkSize;
+
+    public bool draw = true;
+    public float frequency = 0.1f;
+    public float amplitude = 1f;
+    public Vector3 position;
+    public Vector3 movementSpeed = new Vector3(5, 5, 5);
+    
+    public ComputeShader generateVoxelsComputeShader;
+    public ComputeShader voxelizerComputeShader;
+    public ComputeShader feedbackComputeShader;
+    public Material drawMaterial;
+
+    private ComputeBuffer _voxelBuffer;
+    private ComputeBuffer _chunkFeedbackBuffer;
+    private ComputeBuffer _subChunkFeedbackBuffer;
+    private ComputeBuffer _vertexBuffer;
+    private ComputeBuffer _indexBuffer;
+    private ComputeBuffer _indirectBuffer;
+    
+    private int _generateVoxelsKernelId;
+    private int _voxelizerKernelId;
+    private int _feedbackKernelId;
+    private Mesh _mesh;
+    private MeshFilter _meshFilter;
+
+    private readonly ChunkFeedback[] _chunkFeedback = new ChunkFeedback[1];
+
+    private unsafe void Start()
+    {
+        // get mesh filter
+        _meshFilter = GetComponent<MeshFilter>();
+        
+        // create mesh
+        _mesh = new Mesh
+        {
+            name = "Voxel Chunk",
+            indexFormat = IndexFormat.UInt32
+        };
+        _meshFilter.sharedMesh = _mesh;
+
+        // get kernel ids
+        _generateVoxelsKernelId = generateVoxelsComputeShader.FindKernel("CSMain");
+        _voxelizerKernelId = voxelizerComputeShader.FindKernel("CSMain");
+        _feedbackKernelId = feedbackComputeShader.FindKernel("CSMain");
+        
+        // create buffers
+        _voxelBuffer = new ComputeBuffer(ChunkSize3, sizeof(int));
+        _chunkFeedbackBuffer = new ComputeBuffer(1, sizeof(ChunkFeedback));
+        _chunkFeedbackBuffer.SetData(new []{ new ChunkFeedback() });
+        _subChunkFeedbackBuffer = new ComputeBuffer(SubChunkSize * SubChunkSize * SubChunkSize, sizeof(SubChunkFeedback));
+        _subChunkFeedbackBuffer.SetData(new SubChunkFeedback[SubChunkSize * SubChunkSize * SubChunkSize]);
+        // max voxels * 4 vertices per face * 6 faces per voxel
+        _vertexBuffer = new ComputeBuffer(VoxelCount * 4 * 6, sizeof(Vertex));
+        // max voxels * 6 faces per voxel * 6 indices per face
+        _indexBuffer = new ComputeBuffer(VoxelCount * 6 * 6, sizeof(int));
+        
+        _indirectBuffer = new ComputeBuffer(1, sizeof(uint) * 5, ComputeBufferType.IndirectArguments);
+        _indirectBuffer.SetData(new uint[] { 0, 1, 0, 0, 0 });
+        
+        // bind buffers
+        generateVoxelsComputeShader.SetBuffer(_generateVoxelsKernelId, "uVoxels", _voxelBuffer);
+        
+        voxelizerComputeShader.SetBuffer(_voxelizerKernelId, "uVertices", _vertexBuffer);
+        voxelizerComputeShader.SetBuffer(_voxelizerKernelId, "uIndices", _indexBuffer);
+        voxelizerComputeShader.SetBuffer(_voxelizerKernelId, "uVoxels", _voxelBuffer);
+        voxelizerComputeShader.SetBuffer(_voxelizerKernelId, "uChunkFeedback", _subChunkFeedbackBuffer);
+        
+        feedbackComputeShader.SetBuffer(_feedbackKernelId, "uVoxels", _voxelBuffer);
+        feedbackComputeShader.SetBuffer(_feedbackKernelId, "uFeedback", _chunkFeedbackBuffer);
+        feedbackComputeShader.SetBuffer(_feedbackKernelId, "uChunkFeedback", _subChunkFeedbackBuffer);
+        feedbackComputeShader.SetBuffer(_voxelizerKernelId, "uIndirectArgs", _indirectBuffer);
+
+        // copy material
+        drawMaterial = new Material(drawMaterial);
+        drawMaterial.SetBuffer("Vertices", _vertexBuffer);
+        drawMaterial.SetBuffer("Indices", _indexBuffer);
+    }
+
+    private void Update()
+    {
+        MoveNoiseOrigin();
+        
+        // generate voxels
+        generateVoxelsComputeShader.Dispatch(_generateVoxelsKernelId, SubChunkSize, SubChunkSize, SubChunkSize);
+        // gather index and vertex count
+        feedbackComputeShader.Dispatch(_feedbackKernelId, SubChunkSize, SubChunkSize, SubChunkSize);
+        // generate mesh
+        voxelizerComputeShader.Dispatch(_voxelizerKernelId, SubChunkSize, SubChunkSize, SubChunkSize);
+
+        if (draw)
+            DrawProcedural();
+        
+        Reset();
+    }
+
+    private void MoveNoiseOrigin()
+    {
+        position += movementSpeed * Time.deltaTime;
+        
+        generateVoxelsComputeShader.SetFloat("uFrequency", frequency);
+        generateVoxelsComputeShader.SetFloat("uAmplitude", amplitude);
+        generateVoxelsComputeShader.SetVector("uPosition", position);
+    }
+
+    private void DrawProcedural()
+    {
+        var bounds = new Bounds(Vector3.one * ChunkSize / 2f, Vector3.one * ChunkSize);
+        Graphics.DrawProceduralIndirect(drawMaterial, bounds, MeshTopology.Triangles, _indirectBuffer);
+    }
+
+    private void Reset()
+    {
+        _chunkFeedback[0] = new ChunkFeedback();
+        _chunkFeedbackBuffer.SetData(_chunkFeedback);
+    }
+
+    private void OnDestroy()
+    {
+        _voxelBuffer.Release();
+        _chunkFeedbackBuffer.Release();
+        _subChunkFeedbackBuffer.Release();
+        _vertexBuffer.Release();
+        _indexBuffer.Release();
+        _indirectBuffer.Release();
+        Destroy(_mesh);
+    }
+
+    #region Legacy examples
+    
+    /// <summary>
+    /// Create a mesh in the usual way, read data from buffers and assign to mesh
+    /// </summary>
+    private void VisualiseChunkMesh()
+    {
+        var chunkFeedback = _chunkFeedback[0];
+
+        // get vertices and indices
+        var vertices = new Vertex[chunkFeedback.vertexCount];
+        var indices = new int[chunkFeedback.indexCount];
+        
+        _vertexBuffer.GetData(vertices, 0, 0, (int) chunkFeedback.vertexCount);
+        _indexBuffer.GetData(indices, 0, 0, (int) chunkFeedback.indexCount);
+        
+        // create mesh data arrays 
+        var meshVertices = new Vector3[chunkFeedback.vertexCount];
+        var meshUVs = new Vector2[chunkFeedback.vertexCount];
+        var meshNormals = new Vector3[chunkFeedback.vertexCount];
+        
+        for (var i = 0; i < chunkFeedback.vertexCount; i++)
+        {
+            var vertex = vertices[i];
+            meshVertices[i] = vertex.Position;
+            meshUVs[i] = vertex.UV;
+            meshNormals[i] = vertex.Normal;
+        }
+        
+        // assign data to mesh
+        _mesh.Clear();
+        _mesh.vertices = meshVertices;
+        _mesh.uv = meshUVs;
+        _mesh.normals = meshNormals;
+        _mesh.SetIndices(indices, MeshTopology.Triangles, 0);
+    }
+    
+    /// <summary>
+    /// Fill the voxel buffer with random values
+    /// </summary>
+    private void GenerateRandomVoxelsCpu()
+    {
+        var voxels = new NativeArray<int>(ChunkSize * ChunkSize * ChunkSize, Allocator.Temp);
+    
+        var generateRandomVoxelsJob = new GenerateRandomVoxelsJob
+        {
+            Voxels = voxels
+        };
+        
+        generateRandomVoxelsJob.Schedule(voxels.Length, ChunkSize).Complete();
+        
+        // set buffer data
+        _voxelBuffer.SetData(voxels);
+
+        voxels.Dispose();
+    }
+
+    #endregion
+}
+```
+
+### Assets/Shaders/GetVertexData.hlsl
+```
+#ifndef VOXEL_MESH_INFO
+#define VOXEL_MESH_INFO
+
+#include <Assets/Compute/voxels.hlsl>
+
+StructuredBuffer<int> Indices;
+StructuredBuffer<Vertex> Vertices;
+ 
+void GetVertexData_float(float vertexId, out float3 position, out float2 texcoord, out float3 normal)
+{
+    const int index = Indices[round(vertexId)];
+    position = Vertices[index].position;
+    texcoord = Vertices[index].texcoord;
+    normal = Vertices[index].normal;
+}
+
+#endif
+```
+
+### Assets/Shaders/ShadowPass.hlsl
+```
+﻿
+    // Pragmas
+    #pragma target 4.5
+    #pragma vertex Vert
+    #pragma fragment Frag
+    #pragma only_renderers d3d11 playstation xboxone xboxseries vulkan metal switch
+    #pragma multi_compile_instancing
+    #pragma instancing_options renderinglayer
+
+        // Keywords
+        #pragma shader_feature _ _SURFACE_TYPE_TRANSPARENT
+    #pragma shader_feature_local _BLENDMODE_OFF _BLENDMODE_ALPHA _BLENDMODE_ADD _BLENDMODE_PRE_MULTIPLY
+    #pragma shader_feature_local _ _ADD_PRECOMPUTED_VELOCITY
+    #pragma shader_feature_local _ _TRANSPARENT_WRITES_MOTION_VEC
+    #pragma shader_feature_local _ _ENABLE_FOG_ON_TRANSPARENT
+    // GraphKeywords: <None>
+
+    #include "Packages/com.unity.render-pipelines.core/ShaderLibrary/Common.hlsl"
+    #include "Packages/com.unity.render-pipelines.core/ShaderLibrary/Texture.hlsl"
+    #include "Packages/com.unity.render-pipelines.high-definition/Runtime/ShaderLibrary/ShaderVariables.hlsl"
+    #include "Packages/com.unity.render-pipelines.high-definition/Runtime/RenderPipeline/ShaderPass/FragInputs.hlsl"
+    #include "Packages/com.unity.render-pipelines.high-definition/Runtime/RenderPipeline/ShaderPass/ShaderPass.cs.hlsl"
+    #include "Packages/com.unity.render-pipelines.core/ShaderLibrary/TextureStack.hlsl" // Required to be include before we include properties as it define DECLARE_STACK_CB
+    #include "Packages/com.unity.render-pipelines.high-definition/Runtime/ShaderLibrary/ShaderGraphHeader.hlsl" // Need to be here for Gradient struct definition
+
+    // --------------------------------------------------
+    // Defines
+
+    // Attribute
+    #define ATTRIBUTES_NEED_NORMAL
+    #define ATTRIBUTES_NEED_TANGENT
+
+    #define HAVE_MESH_MODIFICATION
+
+
+    #define SHADERPASS SHADERPASS_SHADOWS
+
+    // Following two define are a workaround introduce in 10.1.x for RaytracingQualityNode
+    // The ShaderGraph don't support correctly migration of this node as it serialize all the node data
+    // in the json file making it impossible to uprgrade. Until we get a fix, we do a workaround here
+    // to still allow us to rename the field and keyword of this node without breaking existing code.
+    #ifdef RAYTRACING_SHADER_GRAPH_DEFAULT 
+    #define RAYTRACING_SHADER_GRAPH_HIGH
+    #endif
+
+    #ifdef RAYTRACING_SHADER_GRAPH_RAYTRACED
+    #define RAYTRACING_SHADER_GRAPH_LOW
+    #endif
+    // end
+
+    #ifndef SHADER_UNLIT
+    // We need isFrontFace when using double sided - it is not required for unlit as in case of unlit double sided only drive the cullmode
+    // VARYINGS_NEED_CULLFACE can be define by VaryingsMeshToPS.FaceSign input if a IsFrontFace Node is included in the shader graph.
+    #if defined(_DOUBLESIDED_ON) && !defined(VARYINGS_NEED_CULLFACE)
+        #define VARYINGS_NEED_CULLFACE
+    #endif
+    #endif
+
+        // Specific Material Define
+    // Setup a define to say we are an unlit shader
+    #define SHADER_UNLIT
+
+    // Following Macro are only used by Unlit material
+    #if defined(_ENABLE_SHADOW_MATTE) && SHADERPASS == SHADERPASS_FORWARD_UNLIT
+    #define LIGHTLOOP_DISABLE_TILE_AND_CLUSTER
+    #define HAS_LIGHTLOOP
+    #endif
+    // Caution: we can use the define SHADER_UNLIT onlit after the above Material include as it is the Unlit template who define it
+
+    // To handle SSR on transparent correctly with a possibility to enable/disable it per framesettings
+    // we should have a code like this:
+    // if !defined(_DISABLE_SSR_TRANSPARENT)
+    // pragma multi_compile _ WRITE_NORMAL_BUFFER
+    // endif
+    // i.e we enable the multicompile only if we can receive SSR or not, and then C# code drive
+    // it based on if SSR transparent in frame settings and not (and stripper can strip it).
+    // this is currently not possible with our current preprocessor as _DISABLE_SSR_TRANSPARENT is a keyword not a define
+    // so instead we used this and chose to pay the extra cost of normal write even if SSR transaprent is disabled.
+    // Ideally the shader graph generator should handle it but condition below can't be handle correctly for now.
+    #if SHADERPASS == SHADERPASS_TRANSPARENT_DEPTH_PREPASS
+    #if !defined(_DISABLE_SSR_TRANSPARENT) && !defined(SHADER_UNLIT)
+        #define WRITE_NORMAL_BUFFER
+    #endif
+    #endif
+
+    // NOTE: disabling de exposure usage on unlit shader graphs (caused by virtual texture constant buffer binding).
+    // If we turn this on, in vulkan, virtual texture offsets are corrupted. It is likely caused by the stack
+    // textures constant buffers, which utilize arrays. Something is happening to the reflection data of vulkan which completely displaces
+    // the constant buffer. A bug is filed and is being looked at.
+    #if defined(SHADER_API_VULKAN)
+    #define DISABLE_UNLIT_DEEXPOSURE
+    #endif
+
+    #ifndef DEBUG_DISPLAY
+        // In case of opaque we don't want to perform the alpha test, it is done in depth prepass and we use depth equal for ztest (setup from UI)
+        // Don't do it with debug display mode as it is possible there is no depth prepass in this case
+        #if !defined(_SURFACE_TYPE_TRANSPARENT)
+            #if SHADERPASS == SHADERPASS_FORWARD
+            #define SHADERPASS_FORWARD_BYPASS_ALPHA_TEST
+            #elif SHADERPASS == SHADERPASS_GBUFFER
+            #define SHADERPASS_GBUFFER_BYPASS_ALPHA_TEST
+            #endif
+        #endif
+    #endif
+
+    // Translate transparent motion vector define
+    #if defined(_TRANSPARENT_WRITES_MOTION_VEC) && defined(_SURFACE_TYPE_TRANSPARENT)
+        #define _WRITE_TRANSPARENT_MOTION_VECTOR
+    #endif
+
+    // Dots Instancing
+    // DotsInstancingOptions: <None>
+
+    // Various properties
+
+    // HybridV1InjectedBuiltinProperties: <None>
+
+    // -- Graph Properties
+    CBUFFER_START(UnityPerMaterial)
+    float4 _EmissionColor;
+    float _UseShadowThreshold;
+    float4 _DoubleSidedConstants;
+    float _BlendMode;
+    float _EnableBlendModePreserveSpecularLighting;
+    CBUFFER_END
+
+        // Object and Global properties
+
+            // -- Property used by ScenePickingPass
+            #ifdef SCENEPICKINGPASS
+            float4 _SelectionID;
+            #endif
+
+    // -- Properties used by SceneSelectionPass
+    #ifdef SCENESELECTIONPASS
+    int _ObjectId;
+    int _PassValue;
+    #endif
+
+    // Includes
+    #include "Packages/com.unity.render-pipelines.high-definition/Runtime/Debug/DebugDisplay.hlsl"
+    #include "Packages/com.unity.render-pipelines.high-definition/Runtime/Material/Material.hlsl"
+    #include "Packages/com.unity.render-pipelines.high-definition/Runtime/Material/Unlit/Unlit.hlsl"
+    #include "Packages/com.unity.render-pipelines.high-definition/Runtime/Material/BuiltinUtilities.hlsl"
+    #include "Packages/com.unity.render-pipelines.high-definition/Runtime/Material/MaterialUtilities.hlsl"
+    #include "Packages/com.unity.render-pipelines.high-definition/Runtime/ShaderLibrary/ShaderGraphFunctions.hlsl"
+
+        // --------------------------------------------------
+        // Structs and Packing
+
+        struct AttributesMesh
+    {
+        float3 positionOS : POSITION;
+        float3 normalOS : NORMAL;
+        float4 tangentOS : TANGENT;
+        #if UNITY_ANY_INSTANCING_ENABLED
+        uint instanceID : INSTANCEID_SEMANTIC;
+        #endif
+    };
+    struct VaryingsMeshToPS
+    {
+        float4 positionCS : SV_POSITION;
+        #if UNITY_ANY_INSTANCING_ENABLED
+        uint instanceID : CUSTOM_INSTANCE_ID;
+        #endif
+    };
+    struct SurfaceDescriptionInputs
+    {
+    };
+    struct VertexDescriptionInputs
+    {
+        float3 ObjectSpaceNormal;
+        float3 ObjectSpaceTangent;
+        float3 ObjectSpacePosition;
+    };
+    struct PackedVaryingsMeshToPS
+    {
+        float4 positionCS : SV_POSITION;
+        #if UNITY_ANY_INSTANCING_ENABLED
+        uint instanceID : CUSTOM_INSTANCE_ID;
+        #endif
+    };
+
+        PackedVaryingsMeshToPS PackVaryingsMeshToPS(VaryingsMeshToPS input)
+    {
+        PackedVaryingsMeshToPS output;
+        output.positionCS = input.positionCS;
+        #if UNITY_ANY_INSTANCING_ENABLED
+        output.instanceID = input.instanceID;
+        #endif
+        return output;
+    }
+    VaryingsMeshToPS UnpackVaryingsMeshToPS(PackedVaryingsMeshToPS input)
+    {
+        VaryingsMeshToPS output;
+        output.positionCS = input.positionCS;
+        #if UNITY_ANY_INSTANCING_ENABLED
+        output.instanceID = input.instanceID;
+        #endif
+        return output;
+    }
+
+    // --------------------------------------------------
+    // Graph
+
+
+    // Graph Functions
+    // GraphFunctions: <None>
+
+    // Graph Vertex
+    struct VertexDescription
+    {
+        float3 Position;
+        float3 Normal;
+        float3 Tangent;
+    };
+
+    VertexDescription VertexDescriptionFunction(VertexDescriptionInputs IN)
+    {
+        VertexDescription description = (VertexDescription)0;
+        description.Position = IN.ObjectSpacePosition;
+        description.Normal = IN.ObjectSpaceNormal;
+        description.Tangent = IN.ObjectSpaceTangent;
+        return description;
+    }
+
+    // Graph Pixel
+    struct SurfaceDescription
+    {
+        float Alpha;
+    };
+
+    SurfaceDescription SurfaceDescriptionFunction(SurfaceDescriptionInputs IN)
+    {
+        SurfaceDescription surface = (SurfaceDescription)0;
+        surface.Alpha = 1;
+        return surface;
+    }
+
+    // --------------------------------------------------
+    // Build Graph Inputs
+
+
+    VertexDescriptionInputs AttributesMeshToVertexDescriptionInputs(AttributesMesh input)
+    {
+        VertexDescriptionInputs output;
+        ZERO_INITIALIZE(VertexDescriptionInputs, output);
+
+        output.ObjectSpaceNormal = input.normalOS;
+        output.ObjectSpaceTangent = input.tangentOS.xyz;
+        output.ObjectSpacePosition = input.positionOS;
+
+        return output;
+    }
+
+    AttributesMesh ApplyMeshModification(AttributesMesh input, float3 timeParameters)
+    {
+        // build graph inputs
+        VertexDescriptionInputs vertexDescriptionInputs = AttributesMeshToVertexDescriptionInputs(input);
+        // Override time paramters with used one (This is required to correctly handle motion vector for vertex animation based on time)
+
+        // evaluate vertex graph
+        VertexDescription vertexDescription = VertexDescriptionFunction(vertexDescriptionInputs);
+
+        // copy graph output to the results
+        input.positionOS = vertexDescription.Position;
+        input.normalOS = vertexDescription.Normal;
+        input.tangentOS.xyz = vertexDescription.Tangent;
+
+        return input;
+    }
+        FragInputs BuildFragInputs(VaryingsMeshToPS input)
+    {
+        FragInputs output;
+        ZERO_INITIALIZE(FragInputs, output);
+
+        // Init to some default value to make the computer quiet (else it output 'divide by zero' warning even if value is not used).
+        // TODO: this is a really poor workaround, but the variable is used in a bunch of places
+        // to compute normals which are then passed on elsewhere to compute other values...
+        output.tangentToWorld = k_identity3x3;
+        output.positionSS = input.positionCS;       // input.positionCS is SV_Position
+
+
+        return output;
+    }
+
+    SurfaceDescriptionInputs FragInputsToSurfaceDescriptionInputs(FragInputs input, float3 viewWS)
+    {
+        SurfaceDescriptionInputs output;
+        ZERO_INITIALIZE(SurfaceDescriptionInputs, output);
+
+        #if defined(SHADER_STAGE_RAY_TRACING)
+        #else
+        #endif
+
+        return output;
+    }
+
+    // existing HDRP code uses the combined function to go directly from packed to frag inputs
+    FragInputs UnpackVaryingsMeshToFragInputs(PackedVaryingsMeshToPS input)
+    {
+        UNITY_SETUP_INSTANCE_ID(input);
+        VaryingsMeshToPS unpacked = UnpackVaryingsMeshToPS(input);
+        return BuildFragInputs(unpacked);
+    }
+
+    // --------------------------------------------------
+    // Build Surface Data (Specific Material)
+
+    void BuildSurfaceData(FragInputs fragInputs, inout SurfaceDescription surfaceDescription, float3 V, PositionInputs posInput, out SurfaceData surfaceData)
+    {
+        // setup defaults -- these are used if the graph doesn't output a value
+        ZERO_INITIALIZE(SurfaceData, surfaceData);
+
+        // copy across graph values, if defined
+
+        #ifdef WRITE_NORMAL_BUFFER
+        // When we need to export the normal (in the depth prepass, we write the geometry one)
+        surfaceData.normalWS = fragInputs.tangentToWorld[2];
+        #endif
+
+        #if defined(DEBUG_DISPLAY)
+        if (_DebugMipMapMode != DEBUGMIPMAPMODE_NONE)
+        {
+            // TODO
+        }
+        #endif
+
+        #if defined(_ENABLE_SHADOW_MATTE) && SHADERPASS == SHADERPASS_FORWARD_UNLIT
+            HDShadowContext shadowContext = InitShadowContext();
+            float shadow;
+            float3 shadow3;
+            // We need to recompute some coordinate not computed by default for shadow matte
+            posInput = GetPositionInput(fragInputs.positionSS.xy, _ScreenSize.zw, fragInputs.positionSS.z, UNITY_MATRIX_I_VP, UNITY_MATRIX_V);
+            float3 upWS = normalize(fragInputs.tangentToWorld[1]);
+            uint renderingLayers = GetMeshRenderingLightLayer();
+            ShadowLoopMin(shadowContext, posInput, upWS, asuint(_ShadowMatteFilter), renderingLayers, shadow3);
+            shadow = dot(shadow3, float3(1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0));
+
+            float4 shadowColor = (1.0 - shadow) * surfaceDescription.ShadowTint.rgba;
+            float  localAlpha = saturate(shadowColor.a + surfaceDescription.Alpha);
+
+            // Keep the nested lerp
+            // With no Color (bsdfData.color.rgb, bsdfData.color.a == 0.0f), just use ShadowColor*Color to avoid a ring of "white" around the shadow
+            // And mix color to consider the Color & ShadowColor alpha (from texture or/and color picker)
+            #ifdef _SURFACE_TYPE_TRANSPARENT
+                surfaceData.color = lerp(shadowColor.rgb * surfaceData.color, lerp(lerp(shadowColor.rgb, surfaceData.color, 1.0 - surfaceDescription.ShadowTint.a), surfaceData.color, shadow), surfaceDescription.Alpha);
+            #else
+                surfaceData.color = lerp(lerp(shadowColor.rgb, surfaceData.color, 1.0 - surfaceDescription.ShadowTint.a), surfaceData.color, shadow);
+            #endif
+            localAlpha = ApplyBlendMode(surfaceData.color, localAlpha).a;
+
+            surfaceDescription.Alpha = localAlpha;
+        #endif
+    }
+
+    // --------------------------------------------------
+    // Get Surface And BuiltinData
+
+    void GetSurfaceAndBuiltinData(FragInputs fragInputs, float3 V, inout PositionInputs posInput, out SurfaceData surfaceData, out BuiltinData builtinData RAY_TRACING_OPTIONAL_PARAMETERS)
+    {
+        // Don't dither if displaced tessellation (we're fading out the displacement instead to match the next LOD)
+        #if !defined(SHADER_STAGE_RAY_TRACING) && !defined(_TESSELLATION_DISPLACEMENT)
+        #ifdef LOD_FADE_CROSSFADE // enable dithering LOD transition if user select CrossFade transition in LOD group
+        LODDitheringTransition(ComputeFadeMaskSeed(V, posInput.positionSS), unity_LODFade.x);
+        #endif
+        #endif
+
+        #ifndef SHADER_UNLIT
+        #ifdef _DOUBLESIDED_ON
+            float3 doubleSidedConstants = _DoubleSidedConstants.xyz;
+        #else
+            float3 doubleSidedConstants = float3(1.0, 1.0, 1.0);
+        #endif
+
+        ApplyDoubleSidedFlipOrMirror(fragInputs, doubleSidedConstants); // Apply double sided flip on the vertex normal
+        #endif // SHADER_UNLIT
+
+        SurfaceDescriptionInputs surfaceDescriptionInputs = FragInputsToSurfaceDescriptionInputs(fragInputs, V);
+        SurfaceDescription surfaceDescription = SurfaceDescriptionFunction(surfaceDescriptionInputs);
+
+        // Perform alpha test very early to save performance (a killed pixel will not sample textures)
+        // TODO: split graph evaluation to grab just alpha dependencies first? tricky..
+        #ifdef _ALPHATEST_ON
+            float alphaCutoff = surfaceDescription.AlphaClipThreshold;
+            #if SHADERPASS == SHADERPASS_TRANSPARENT_DEPTH_PREPASS
+            // The TransparentDepthPrepass is also used with SSR transparent.
+            // If an artists enable transaprent SSR but not the TransparentDepthPrepass itself, then we use AlphaClipThreshold
+            // otherwise if TransparentDepthPrepass is enabled we use AlphaClipThresholdDepthPrepass
+            #elif SHADERPASS == SHADERPASS_TRANSPARENT_DEPTH_POSTPASS
+            // DepthPostpass always use its own alpha threshold
+            alphaCutoff = surfaceDescription.AlphaClipThresholdDepthPostpass;
+            #elif (SHADERPASS == SHADERPASS_SHADOWS) || (SHADERPASS == SHADERPASS_RAYTRACING_VISIBILITY)
+            // If use shadow threshold isn't enable we don't allow any test
+            #endif
+
+            GENERIC_ALPHA_TEST(surfaceDescription.Alpha, alphaCutoff);
+        #endif
+
+        #if !defined(SHADER_STAGE_RAY_TRACING) && _DEPTHOFFSET_ON
+        ApplyDepthOffsetPositionInput(V, surfaceDescription.DepthOffset, GetViewForwardDir(), GetWorldToHClipMatrix(), posInput);
+        #endif
+
+        #ifndef SHADER_UNLIT
+        float3 bentNormalWS;
+        BuildSurfaceData(fragInputs, surfaceDescription, V, posInput, surfaceData, bentNormalWS);
+
+        // Builtin Data
+        // For back lighting we use the oposite vertex normal
+        InitBuiltinData(posInput, surfaceDescription.Alpha, bentNormalWS, -fragInputs.tangentToWorld[2], fragInputs.texCoord1, fragInputs.texCoord2, builtinData);
+
+        #else
+        BuildSurfaceData(fragInputs, surfaceDescription, V, posInput, surfaceData);
+
+        ZERO_INITIALIZE(BuiltinData, builtinData); // No call to InitBuiltinData as we don't have any lighting
+        builtinData.opacity = surfaceDescription.Alpha;
+
+        #if defined(DEBUG_DISPLAY)
+        // Light Layers are currently not used for the Unlit shader (because it is not lit)
+        // But Unlit objects do cast shadows according to their rendering layer mask, which is what we want to
+        // display in the light layers visualization mode, therefore we need the renderingLayers
+        builtinData.renderingLayers = GetMeshRenderingLightLayer();
+    #endif
+
+    #endif // SHADER_UNLIT
+
+    #ifdef _ALPHATEST_ON
+        // Used for sharpening by alpha to mask - Alpha to covertage is only used with depth only and forward pass (no shadow pass, no transparent pass)
+        builtinData.alphaClipTreshold = alphaCutoff;
+    #endif
+
+    // override sampleBakedGI - not used by Unlit
+
+
+    // Note this will not fully work on transparent surfaces (can check with _SURFACE_TYPE_TRANSPARENT define)
+    // We will always overwrite vt feeback with the nearest. So behind transparent surfaces vt will not be resolved
+    // This is a limitation of the current MRT approach.
+
+    #if _DEPTHOFFSET_ON
+    builtinData.depthOffset = surfaceDescription.DepthOffset;
+    #endif
+
+    // TODO: We should generate distortion / distortionBlur for non distortion pass
+    #if (SHADERPASS == SHADERPASS_DISTORTION)
+    builtinData.distortion = surfaceDescription.Distortion;
+    builtinData.distortionBlur = surfaceDescription.DistortionBlur;
+    #endif
+
+    #ifndef SHADER_UNLIT
+    // PostInitBuiltinData call ApplyDebugToBuiltinData
+    PostInitBuiltinData(V, posInput, surfaceData, builtinData);
+    #else
+    ApplyDebugToBuiltinData(builtinData);
+    #endif
+
+    RAY_TRACING_OPTIONAL_ALPHA_TEST_PASS
+}
+
+// --------------------------------------------------
+// Main
+
+#include "Packages/com.unity.render-pipelines.high-definition/Runtime/RenderPipeline/ShaderPass/ShaderPassDepthOnly.hlsl"
+```
+
+### Assets/Scripts/Data/ChunkFeedback.cs
+```
+﻿namespace Data
+{
+    public struct ChunkFeedback {
+        public uint vertexCount;
+        public uint indexCount;
+    }
+}
+```
+
+### Assets/Scripts/Data/SubChunkFeedback.cs
+```
+﻿namespace Data
+{
+    public struct SubChunkFeedback {
+        public uint vertexOffset;
+        public uint vertexCount;
+        public uint indexOffset;
+        public uint indexCount;
+    }
+}
+```
+
+### Assets/Scripts/Data/Vertex.cs
+```
+﻿using System.Runtime.InteropServices;
+using UnityEngine;
+
+namespace Data
+{
+    [StructLayout(LayoutKind.Sequential)]
+    public struct Vertex
+    {
+        public Vector3 Position; // 12
+        public Vector2 UV; // 8
+        public Vector3 Normal; // 12
+    }
+}
+```
+
+### Assets/Scripts/Native/GenerateRandomVoxelsJob.cs
+```
+﻿using Unity.Burst;
+using Unity.Collections;
+using Unity.Jobs;
+using Unity.Mathematics;
+
+namespace Native
+{
+    [BurstCompile]
+    public struct GenerateRandomVoxelsJob : IJobParallelFor
+    {
+        public NativeArray<int> Voxels;
+
+        public void Execute(int index)
+        {
+            Voxels[index] = Random.CreateFromIndex((uint)index).NextInt(0, 2);
+        }
+    }
+}
+```

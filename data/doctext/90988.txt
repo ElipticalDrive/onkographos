@@ -1,0 +1,262 @@
+I’ve been working on building a volume renderer the past few weeks. A book I bought, Real Time Volume Graphics  http://www.real-time-volume-graphics.org/  has been very helpful. Good read. 
+So far I’ve implemented a 2D s…
+
+volume renderer - gpu raycast - OpenGL: Advanced Coding - Khronos Forums
+volume renderer - gpu raycast
+OpenGL
+OpenGL: Advanced Coding
+seen
+December 13, 2006, 9:32pm
+1
+I’ve been working on building a volume renderer the past few weeks. A book I bought, Real Time Volume Graphics http://www.real-time-volume-graphics.org/ has been very helpful. Good read.
+So far I’ve implemented a 2D slice based object aligned renderer that supports tri-linear interpolation via a fragment shader and multi-texturing. Tonight I hacked up a version strictly based upon 3D textures. Both produce OK output, but I’m really interested in seeing how a raycaster would look here. Not too concerned about performance, I’ll be using fast hardware (nVidia 3400 and up) with small volumes (256^3). I’m interested in getting better visuals so I started to look into single pass raycasting.
+So I’m reading the chapter on raycasting and there’s a fragment shader provided that should implement most everything you’d need:
+http://www.real-time-volume-graphics.org/?page_id=14
+http://www.cg.informatik.uni-siegen.de/data/Tutorials/EG2006/RTVG04_GPU_Raycasting.pdf
+```
+// Cg fragment shader code for single-pass ray casting
+
+float4 main(float4 TexCoord0 : TEXCOORD0,
+            uniform sampler3D SamplerDataVolume,
+            uniform sampler1D SamplerTransferFunction,
+            uniform float3 camera,
+            uniform float stepsize,
+            uniform float3 volExtentMin,
+            uniform float3 volExtentMax
+            ) : COLOR
+{
+  float4 value;
+  float scalar;
+
+  //Initialize accumulated color and opacity
+  float4 dst = float4(0,0,0,0);
+  
+  //Determine volume entry position
+  float3 position = TexCoord0.xyz;
+
+  //Compute ray direction
+  float3 direction = TexCoord0.xyz - camera;
+  direction = normalize(direction);
+
+  //Loop for ray traversal
+  for(int i = 0;i < 200;i++) //Some large number
+  {
+    //Data access to scalare value in 3D volume texture
+    value = tex3D(SamplerDataVolume, position);
+    scalar = value.a;
+
+    //Apply transfer function
+    float4 src = tex1D(SamplerTransferFunction, scalar);
+
+    //Front-to-back compositing
+    dst = (1.0 - dst.a) * src + dst;
+
+    //Advance ray position along ray direction
+    position = position + direction * stepsize;
+
+    //Ray termination: Test if outside volume...
+    float3 temp1 = sign(position - volExtentMin);
+    float3 temp2 = sign(volExtentMax - position);
+    float inside = dot(temp1, temp2);
+
+    //... and exit loop
+    if(inside < 3.0)
+    {
+      break;
+    }
+  }
+
+  return dst;
+}
+
+  
+```
+Problem is, I’m stuck. I have absolutly no clue as to what the C++ code should look like to fire off this shader. I mean, I understand the concept, but I really don’t know how to implement the other half. I’ve written 2D and 3D texture based volume renderers. I understand those. This GPU based raycaster has me stumped. I google’d around for some sort of simple raycaster demo w/source but I came up empty.
+Can someone help me out here? I know the extents of the view volume. I’ve got a 3D texture. I have my transfer function texture defined. I understand (I think) what is meant by ‘camera’ referenced in the code, but how to fire off this shader…I’m stumped. What’s the C++ code suppose to look like?
+I’m not asking for hand-holding here. If anyone can point to some source I’ll plow through it on my own. The simpler the better.
+Powerangel
+December 14, 2006, 12:32am
+2
+You render the front faces of the bounding box of your volume to start the rendering. This is equivalent to the ray-setup phase of a CPU-based raycaster. By rendering the front-faces of the bounding box you generated a ray for each pixel covering the volume bounding box.
+Note that you have to provide texture coordinates to the vertices of the bounding box to get proper sampling coordinates.
+Then this line
+```
+  float3 position = TexCoord0.xyz;
+```
+sets the initial sampling position to the interpolated texture coordinate.
+Klaus
+k_szczech
+December 14, 2006, 12:54am
+3
+First of all - this is not GLSL shader - this is NVIDIA Cg shader or HLSL shader, so your starting point would be NVIDIA’s homepage or DirectX SDK.
+It’s a fragment shader - I believe no vertex shader was specified - that means you don’t use vertex shader (vertices are processed the standard way).
+That’s what you need to run this shader, now you need to specify geometry for it.
+From first look I see that you’ll need to render a cube. For each vertex you need to specify texture coordinates (these will be either 0 or 1 since all vertices are always at edges of volume).
+One more parameter you need to specify is camera position given in texture space. Doesn’t matter if it’s inside or outside volume extent.
+Other parameters are obvious.
+Note that this shader quite simple - you could probably make it work much faster.
+When using front-to-back composition you could exit loop after reaching some high dst.a value and for static volume data you could use distance functions and skip empty areas.
+speed
+December 14, 2006, 2:58am
+4
+I don’t know this exactly implementation, but a simple GPU raycasting can work as:
+The initial stage is to compute a texture that represents the direction of the ray for each pixel. It is done drawing the front and back faces of the bounding box of the volume dataset. This texture has the same size of the window. The texture stores for each pixel its initial position and its position of the ray.
+Then you need to render a quad with the same size of the window, and you need to use the texture computed in the initial stage. Then you have for each pixel, the interval to be sampled, compositing the final color like is done in the shader you provided.
+The render C++ code will be very short.
+CaseMillennium
+December 14, 2006, 5:06am
+5
+Originally posted by speed:
+The initial stage is to compute a texture that represents the direction of the ray for each pixel. It is done drawing the front and back faces of the bounding box of the volume dataset. This texture has the same size of the window. The texture stores for each pixel its initial position and its position of the ray.
+Ok, here is the question: Why??? Why is everybody using this approach of rendering the front and backfaces to a texture first and in a next pass using the results for a fullscreen quad? What is wrong with just rendering the bounding box with a shader and doing a ray/box intersection inside your fragment program? Ok, you would need to do some backface culling/flipping on the cubefaces inside the fragment program but that is not too difficult (only if you are inside the bounding box things get a little quirky). This way you donÂ´t need additional storage for the textures, you can use multisample framebuffers and you donÂ´t render useless pixel. The only problem maybe the combination with standard gl renderings where you need to make the depth-test yourself.
+So what is wrong with this approach that nobody is using it?
+Powerangel
+December 14, 2006, 5:39am
+6
+CaseMillennium: The original GPU raycasting papers by Westermann and Roettger did it that way.
+However you are right, there is no need to render front and back faces of the bounding box - just render the front faces to start the rays. Sampling position comes from the texture coordinates, ray direction comes from the vector from the camera in texture space to the initial sampling position (vector must be normalized and multiplied with sampling distance).
+Klaus
+seen
+December 14, 2006, 5:42am
+7
+Originally posted by Klaus:
+[b] You render the front faces of the bounding box of your volume to start the rendering. This is equivalent to the ray-setup phase of a CPU-based raycaster. By rendering the front-faces of the bounding box you generated a ray for each pixel covering the volume bounding box.
+[/b]
+Sounds like rendering object aligned slices (or viewport aligned) only with a different shader.
+Correct?
+k_szczech
+December 14, 2006, 5:46am
+8
+So what is wrong with this approach that nobody is using it?
+I’m using it. Aren’t you overreacting a bit?
+Powerangel
+December 14, 2006, 5:52am
+9
+seen: You can see it this way - with slicing you do the ray marching in the vertex stage (all rays at once), with raycasting you do the ray marching in the fragment stage (one ray at a time).
+Klaus
+CaseMillennium
+December 14, 2006, 5:55am
+10
+Originally posted by k_szczech:
+I’m using it. Aren’t you overreacting a bit? [/QB]
+Yes, sorry about that Just had a discussion about this topic and someone just said you canÂ´t do this because nobody does it. But he hadnÂ´t had a single good reason for it.
+seen
+December 14, 2006, 6:07am
+11
+Originally posted by k_szczech:
+[b]
+From first look I see that you’ll need to render a cube. For each vertex you need to specify texture coordinates (these will be either 0 or 1 since all vertices are always at edges of volume).
+One more parameter you need to specify is camera position given in texture space. Doesn’t matter if it’s inside or outside volume extent.
+Other parameters are obvious. [/b]
+OK, I think I see. Sounds like I just render 8 vertices with the proper texture coordinates…one coordinate for each corner of the cube. Right?
+Now, forgive me for asking what seems to be a simple question…but how do I go about calculating a proper camera vector?
+Klaus said:
+ray direction comes from the vector from the camera in texture space to the initial sampling position (vector must be normalized and multiplied with sampling distance).
+I know I’m reading that all wrong. Sounds like he’s talking about two coordinate systems, one local and texture. That doesn’t make sense to me. I’ll have to do more research here.
+Can anyone point me to code/tutorial/etc. on calculating the camera vector?
+k_szczech
+December 14, 2006, 6:40am
+12
+Can anyone point me to code/tutorial/etc. on calculating the camera vector?
+The shader above needs camera position, not a vector.
+From my previous post:
+One more parameter you need to specify is camera position given in texture space
+If every pixel on the cube’s face know it’s position in texture space (passed as texcoord0 to vertices and interpolated inside each face), and you know camera position in texture space, then shader can easily calculate such vector and that’s what this shader does (it’s called direction in this shader).
+Seems like people (including me ) went too far off topic and you got a bit confused. You can just stick to first 2 replies.
+Powerangel
+December 14, 2006, 7:40am
+13
+seen: The camera is at (0,0,0,1) in camera space (origin), so you can easily obtain the camera position in object/texture space from the 4th column of the inverse of the modelview matrix (if the texture matrix is the identity matrix).
+In GLSL:
+```
+ vec3 cameraPosition = gl_ModelViewMatrixInverse[3];
+    vec3 direction = normalize(TexCoord0.xyz - cameraPosition); 
+```
+In Cg:
+```
+  float3 cameraPosition = glstate.matrix.inverse.modelview[3];
+    float3 direction = normalize(TexCoord0.xyz - cameraPosition);
+ 
+```
+Klaus
+k_szczech
+December 14, 2006, 9:09am
+14
+Klaus - I’m afraid that’s not correct. TexCoord0 is in texture space and cameraPosition in your example is in world space.
+What that shader needs is just a camera position in texture space. This can be provided by application as constant:
+```
+cameraPosition = (worldCameraPosition - volumeExtentMin) / (volumeExtentMax - volumeExtentMin);
+```
+It’s as simple as that. If I’m wrong then you can kick my …, but let’s try not to confuse seen by discussing general approach when he asked for a solution for this exact shader.
+Cheers
+speed
+December 14, 2006, 1:18pm
+15
+I have one question about the shader. It does 200 steps, but if the dataset is 256^3, it is not enough.
+Is there any limitation for the number of steps for a loop?
+seen
+December 14, 2006, 3:04pm
+16
+Thanks for all the help guys. I’m getting closer. The raycast display looks very similar to my 3D or 2D slice version.
+I’ve noticed that the raycaster is very sensitive to volExtentMax and volExtentMin as well as stepsize. If I hardcode the following values the display looks better but there is…well a kind of warping @ the corners when I rotate the volume:
+```
+  
+  volExtentMax[0] = 1;
+  volExtentMax[1] = 1;
+  volExtentMax[2] = 1;
+
+  volExtentMin[0] = -1;
+  volExtentMin[1] = -1;
+  volExtentMin[2] = -1;
+
+  float3 camera = (worldCameraPosition - volExtentMin) / (volExtentMax - volExtentMin);
+
+  stepsize = 0.01;
+```
+What should volExtentMin/volExtentMax and stepsize be? I would think volExtenMin/Max should be coordinates in world space that represent min/max coordinates of the cube.
+k_szczech
+December 15, 2006, 1:26pm
+17
+Rotating volume could be done quite easily using texture matrix - you would just need to transform camera position by that matrix.
+To avoid the wrapping effect siply use the GL_CLAMP wrapping mode for all 3 coordinates your volume texture and make sure that you have one-pixel empty margin in your volume texture.
+alark
+December 22, 2006, 10:36am
+18
+Stegmaier et al have been generous enough to provide sample code for a gpu-based raycaster. Their shaders though are written in assembly language. It should be useful for your purpose of setting up shaders for gpu-based raycasting though.
+http://www.vis.uni-stuttgart.de/eng/research/fields/current/spvolren/
+A Simple and Flexible Volume Rendering Framework for Graphics-Hardware-based Raycasting
+Simon Stegmaier, Magnus Strengert, Thomas Klein
+toneburst
+June 15, 2009, 4:11am
+19
+Hi guys,
+sorry to dredge this old thread up from the mists of ancient time (well, 2006, anyway), but I’ve been trying to implement something similar myself, and have got a bit stuck, as you can see in my recent post on the OpenGL GLSL Forum.
+One of the things that really confuses me here is whether I should be applying the raycasting fragment/pixel shader to a cube (with backface-culling), or a quad. I’ve tried both approaches, but neither seem to work for me. I’ve been using a GLSL version of Peter Triers’ shader.
+One thing that I think might be causing problems for me is that the cube geometry I’ve been using has texture coordinates going from 0 > 1 across every face, rather than the texture coords being wrapped ‘around’ the cube in some way. I’m wondering if this means my shader is casting rays in the wrong directions.
+Does anyone know if this would break the raycasting shader?
+a|x
+http://machinesdontcare.wordpress.com
+lobbel
+June 15, 2009, 11:12am
+20
+Hello,
+i see you already know about the basics of this algorithm.
+Acutally you only need to save the backface in a texture that is
+as large as your current viewport.Then you setup another texture you can render too.
+Bind/enable your shader and draw the frontface cube.
+You dont need to assign texture coordinates to that cube because they are the same as the vertex coordinates of this cube.
+Inside your shader your multiply the vertexes with the modelviewprojection matrix. the fragment shader should get the
+transformed vertex coordinates and the not-transformed coordinates.
+your ray starts with the not-transformed vertex coordiantes.
+the get the exit ray you first have to compute the coordinates where to look in the backface texture you have rendered first.
+float2 coord = ((input.Position.xy / input.Position.w) + 1) / 2;
+float4 end = tex2D(backface, coord);
+float4 start = input.pos;
+flaot4 dir = end - start;
+Where Position is the transformed vertexcoordinates and pos the not transformed object coordinates.
+You see, you need at least a backface texture. You can render the frontface texture as well in a texture. then your start and endray would be
+float2 coord = ((input.Position.xy / input.Position.w) + 1) / 2;
+float4 start = tex2D(backface, coord);
+float4 end = tex2D(backface, coord);
+Hope that was it, where you were looking for.
+lobbel

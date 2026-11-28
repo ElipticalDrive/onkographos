@@ -1,0 +1,167 @@
+# Directional Filtering for Occlusion Reduction
+
+Also called: Directional transparency filtering, Eigenvector-based alpha modulation
+
+## Overview
+Directional filtering for occlusion reduction is a technique in direct volume ray casting that modulates voxel opacity based on the alignment between the local fiber direction (major eigenvector) and a user-defined direction vector [S1, book]. It solves the occlusion problem in Diffusion Tensor Imaging (DTI) by allowing users to selectively fade irrelevant fiber bundles while preserving the visual context of the surrounding tissue [S1, book]. Unlike methods that rely on isosurfaces of anisotropy values, which do not provide information concerning fiber bundle boundaries, this method uses directional tensor information to hide occluding structures and reveal specific bundles of interest [S1, book].
+
+## How it works
+
+### Inputs and Outputs
+*   **Inputs:**
+    *   Diffusion Tensor Data: A 3D grid of $3 \times 3$ symmetric positive-definite tensors [S1, book].
+    *   User Direction Vector: A normalized vector $\mathbf{v}$ defining the region of interest [S1, book].
+    *   Filtering Function: A monotonic function $f(x)$ mapping alignment scores to opacity modifiers (e.g., smoothstep or higher-order polynomial) [S1, book].
+*   **Outputs:**
+    *   Modified Opacity Values: For each voxel, a scalar $\alpha'$ derived from the base opacity and the directional filter [S1, book].
+    *   Rendered Image: The final 2D projection using the modified opacity during compositing [S1, book].
+
+### Data Structures
+The method operates on the GPU during ray casting [S1, book]. The primary data structure is the tensor field [S1, book].
+*   **Tensor Storage:** Each voxel stores a $3 \times 3$ symmetric matrix [G]. Due to symmetry, this can be stored as 6 floats per voxel ($T_{xx}, T_{xy}, T_{xz}, T_{yy}, T_{yz}, T_{zz}$) or decomposed into eigenvalues and eigenvectors [G].
+*   **Eigenvector Storage:** The major eigenvector $\mathbf{e} = (e_x, e_y, e_z)$ is required for each voxel [S1, book]. It is a normalized 3D vector [S1, book].
+
+### Steps
+
+1.  **Eigen-decomposition:**
+    Compute the eigenvalues and the major eigenvector for each voxel [S1, book]. The sources specify using the non-iterative approach by Hasan et al. [HBPA01] on the GPU [S1, book].
+    *   *Note:* While standard practice might interpolate tensor components and recompute eigenvectors, the sources explicitly state that interpolating eigenvalues/eigenvectors is not equivalent to interpolating tensors and recomputing [S1, book]. Therefore, the decomposition is performed per-voxel [S1, book].
+
+2.  **Vector Normalization and Hemispheric Mapping:**
+    *   Let $\mathbf{e}$ be the normalized major eigenvector of the current voxel [S1, book].
+    *   Let $\mathbf{v}$ be the user-defined normalized direction vector [S1, book].
+    *   To maintain symmetry with standard DTI color coding (which maps $|x|, |y|, |z|$ to RGB), the method must account for eigenvector orientation independence ($\mathbf{e}$ and $-\mathbf{e}$ represent the same fiber orientation) [S1, book].
+    *   The sources recommend restricting the comparison to one hemisphere to provide more information about local fiber direction [S1, book]. This is done by defining $\mathbf{v}$ in one hemisphere and mirroring it at a plane separating the brain's hemispheres [S1, book].
+    *   Ensure $\mathbf{e}$ and $\mathbf{v}$ are treated as directions in the same hemisphere for the dot product calculation [S1, book]. If $\mathbf{e} \cdot \mathbf{v} < 0$, negate $\mathbf{e}$ (or $\mathbf{v}$) to ensure the angle is acute [G].
+
+3.  **Alignment Calculation:**
+    Compute the dot product of the normalized eigenvector and the normalized direction vector:
+    $$ k = \langle \mathbf{e}, \mathbf{v} \rangle $$
+    Since both vectors are normalized and aligned to the same hemisphere, $k \in [0, 1]$ [S1, book].
+
+4.  **Filtering Function Application:**
+    Apply the filtering function $f(k)$ to determine the transparency modifier [S1, book]. The sources provide two specific implementations:
+
+    *   **GLSL Smoothstep:**
+        $$
+        f(x) = \begin{cases} 
+        0 & \text{when } x < 0 \\
+        3x^2 - 2x^3 & \text{when } 0 \le x \le 1 \\
+        1 & \text{when } x > 1 
+        \end{cases}
+        $$
+
+    *   **Higher-Order Polynomial:**
+        $$
+        f(x) = \begin{cases} 
+        0 & \text{when } x < 0 \\
+        (126 + (-420 + (540 + (-315 + 70x)x)x)x)x^5 & \text{when } 0 \le x \le 1 \\
+        1 & \text{when } x > 1 
+        \end{cases}
+        $$
+        *Note:* The polynomial can be evaluated using Horner's method for efficiency [G].
+
+5.  **Opacity Modulation:**
+    Modify the base opacity $\alpha_{base}$ (derived from Fractional Anisotropy or other transfer functions) using the filter result [S1, book]. The sources state:
+    $$ \alpha' \propto f(\langle \mathbf{e}, \mathbf{v} \rangle) $$
+    Specifically, the modified alpha is typically a product or weighted combination of the base opacity and the filter output [G]. The sources indicate that "hidden" areas can be made translucent rather than fully transparent to preserve context [S1, book]. A common implementation is:
+    $$ \alpha' = \alpha_{base} \times f(k) $$
+    Or, if a minimum opacity is desired for context:
+    $$ \alpha' = \alpha_{min} + (\alpha_{base} - \alpha_{min}) \times f(k) $$
+    where $\alpha_{min}$ is a user-defined transparency coefficient for occluded regions [S1, book].
+
+6.  **Compositing:**
+    Perform standard front-to-back volume ray casting using the modified opacity $\alpha'$ and the color derived from the tensor (e.g., $RGB = (|e_x|, |e_y|, |e_z|)$) [S1, book].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def dot(a, b):
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+
+def directional_filtering_eigenvector(eigenvector, user_direction, base_alpha, filter_type):
+    """
+    Computes the modulated alpha for a voxel based on directional filtering.
+    
+    Args:
+        eigenvector: Normalized major eigenvector (e_x, e_y, e_z) of the voxel tensor.
+        user_direction: Normalized user-defined direction vector.
+        base_alpha: Base opacity from transfer function (e.g., based on FA).
+        filter_type: 'smoothstep' or 'polynomial'.
+        
+    Returns:
+        Modulated alpha value.
+    """
+    # 1. Ensure vectors are in the same hemisphere to handle orientation independence
+    dot_product = dot(eigenvector, user_direction)
+    if dot_product < 0:
+        eigenvector = (-eigenvector[0], -eigenvector[1], -eigenvector[2])
+        dot_product = -dot_product
+    k = max(0.0, min(1.0, dot_product))
+    # 2. Apply filtering function
+    if filter_type == 'smoothstep':
+        f_k = smoothstep(k)
+    elif filter_type == 'polynomial':
+        f_k = polynomial_filter(k)
+    else:
+        f_k = k
+    # 3. Modulate alpha
+    modulated_alpha = base_alpha * f_k
+    return modulated_alpha
+
+def smoothstep(x):
+    """GLSL smoothstep function."""
+    if x < 0:
+        return 0.0
+    elif x > 1:
+        return 1.0
+    else:
+        return 3.0 * x * x - 2.0 * x * x * x
+
+def polynomial_filter(x):
+    """Higher-order polynomial filtering function."""
+    if x < 0:
+        return 0.0
+    elif x > 1:
+        return 1.0
+    else:
+        t1 = 70.0 * x
+        t2 = -315.0 + t1
+        t3 = 540.0 + t2 * x
+        t4 = -420.0 + t3 * x
+        t5 = 126.0 + t4 * x
+        return t5 * (x ** 5)
+```
+
+### Parameters and Edge Cases
+*   **Transparency Coefficients:** The selection of occlusion coefficients is critical. Painting too many semitransparent surfaces leads to visual clutter [S1, book].
+*   **Symmetry:** Filtering out single directions breaks the typical symmetry of DTI data sets provided by standard color coding (red/green/blue for cardinal directions) [S1, book]. To maintain symmetry, compare all directions that have the same color (up to eight vectors, or four due to eigenvector orientation independence) [S1, book].
+*   **Hemisphere Mirroring:** To restrict comparison to one direction on the hemisphere, define the vector in one hemisphere and mirror it at a plane separating both hemispheres of the brain [S1, book].
+*   **Context Preservation:** Completely removing large parts of the image may confuse the user. The system allows selecting an opacity for "hidden" areas to make them translucent, preserving context [S1, book].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources. [G]
+*   **Memory Complexity:** Not given in the sources. [G]
+*   **Strengths:**
+    *   Selectively hides occluding fiber bundles based on directional alignment [S1, book].
+    *   Preserves context by allowing translucent rendering of hidden areas [S1, book].
+    *   Interactive: Users can manipulate the direction vector to explore different bundles [S1, book].
+*   **Limitations:**
+    *   Requires accurate eigen-decomposition [G].
+    *   Interpolation of eigenvectors is non-trivial; the method recomputes eigenvectors per voxel to avoid interpolation artifacts [S1, book].
+    *   May produce unfamiliar images if symmetry is not maintained [S1, book].
+*   **When to Use:** When visualizing DTI data and the goal is to isolate specific fiber bundles that are occluded by others, particularly in medical contexts where doctors are interested in specific bundles rather than general anisotropy boundaries [S1, book].
+*   **When Not to Use:** Not given in the sources. [G]
+
+## Background
+
+*   **Origin:** The method was proposed by Hlawitschka et al. in the paper "Interactive Volume Rendering of Diffusion Tensor Data" [S1, book].
+*   **History:** It was developed to address the occlusion problem in DTI visualization, where standard volume rendering makes it difficult to see deep structures due to overlying fibers. Previous methods used isosurfaces of anisotropy values, which do not provide information about fiber bundle boundaries [S1, book].
+*   **Development:** The method builds on the standard color mapping of DTI data ($RGB = (|x|, |y|, |z|)$) and integrates directional filtering into the transfer function. It utilizes the non-iterative eigen-decomposition method by Hasan et al. [HBPA01] for efficient GPU computation [S1, book].
+*   **Usage:** It is used in neuroimaging for interactive exploration of white matter tracts, allowing clinicians to hide occluding bundles and reveal underlying structures [S1, book].
+
+## Sources
+
+[S1] Interactive Volume Rendering of Diffusion Tensor Data, https://doi.org/10.1007/978-3-540-88378-4_8, fetched 2026-10-26 (book)

@@ -1,0 +1,270 @@
+--- v003.md
++++ v004.md
+@@ -1,211 +1,86 @@
+ # Tricubic Interpolation
+-
+ Also called: Tricubic Hermite Interpolation
+ 
+ ## Overview
+-Tricubic interpolation is a higher-order method that employs cubic polynomials over a 4x4x4 neighborhood of 64 points to approximate smooth underlying functions with an accuracy of $O(h^4)$, where $h$ is the grid spacing [S1]. It is distinguished from its sibling [Trilinear Interpolation](12781-voxel-data-interpolation-and-sampling.md) by providing $C^1$ continuity, which reduces artifacts in gradient-sensitive tasks like volume rendering, at the cost of increased computational expense due to the larger support and coefficient count [S1].
++Tricubic interpolation is a higher-order method that employs cubic polynomials over a 4x4x4 neighborhood of 64 points to approximate smooth underlying functions with an accuracy of $O(h^4)$, where $h$ is the grid spacing [S1]. It provides $C^1$ continuity, reducing artifacts in gradient-sensitive tasks like volume rendering, whereas trilinear interpolation only achieves $C^0$ continuity and second-order accuracy $O(h^2)$ [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: A dense grid tensor $\mathbf{G}$ of shape $(D_x, D_y, D_z, C)$ containing scalar values and their first-order spatial derivatives (gradients) [S2, unofficial].
+-- Input: A query point $\mathbf{p} \in \mathbb{R}^3$.
+-- Output: The interpolated scalar value $f(\mathbf{p})$ and optionally its gradient $\nabla f(\mathbf{p})$.
++*   **Input:** A dense grid tensor $\mathbf{G}$ of shape $(D_x, D_y, D_z, C)$ containing scalar values and their spatial gradients (derivatives) at each voxel [S2, unofficial]. A query point $\mathbf{p} = (x, y, z) \in \mathbb{R}^3$.
++*   **Output:** An interpolated value $V$ and optionally its gradient $\nabla V$ at $\mathbf{p}$ [S2, unofficial].
+ 
+ **Data Structures:**
+-The grid $\mathbf{G}$ must store not only the value $V$ at each voxel but also the partial derivatives $\frac{\partial V}{\partial x}, \frac{\partial V}{\partial y}, \frac{\partial V}{\partial z}$ [S2, unofficial]. For a single channel, each voxel stores 4 floats: $[V, V_x, V_y, V_z]$.
++The grid stores, for each voxel $(i, j, k)$, the value $V_{i,j,k}$ and the partial derivatives $\frac{\partial V}{\partial x}, \frac{\partial V}{\partial y}, \frac{\partial V}{\partial z}$ [S2, unofficial].
+ 
+ **Numbered Steps:**
+-1.  **Index Mapping:** Determine the integer indices $(i, j, k)$ of the grid cell containing $\mathbf{p}$ such that $i \le p_x < i+1$, etc. Compute local coordinates $(u, v, w) \in [0, 1]^3$ where $u = p_x - i$, $v = p_y - j$, $w = p_z - k$ [S1][S2, unofficial].
+-2.  **Data Gathering:** Retrieve the 64 control points from the 4x4x4 neighborhood surrounding the cell $(i, j, k)$. For each corner $(i+\delta_x, j+\delta_y, k+\delta_z)$ where $\delta \in \{-1, 0\}$, gather the value and its three partial derivatives [S1][S2, unofficial].
+-3.  **Basis Evaluation:** Compute the 1D cubic Hermite basis functions for each dimension. The basis functions $H_0(t)$ and $H_1(t)$ map the local coordinate $t \in [0, 1]$ to weights for the value and the derivative, respectively [S2, unofficial].
+-4.  **Weighted Summation:** Compute the interpolated value using the tensor product of the basis functions and the gathered data.
+-
+-**Formulas:**
+-The 1D cubic Hermite basis functions are defined as [S2, unofficial]:
+-$$ H_0(t) = 2t^3 - 3t^2 + 1 $$
+-$$ H_1(t) = t^3 - 2t^2 + t $$
+-
+-The interpolated value $f(u, v, w)$ is calculated as:
+-$$ f(u, v, w) = \sum_{\delta_x=0}^{1} \sum_{\delta_y=0}^{1} \sum_{\delta_z=0}^{1} \left( H_{\delta_x}(u) H_{\delta_y}(v) H_{\delta_z}(w) \cdot V_{i+\delta_x, j+\delta_y, k+\delta_z} \right) + \dots $$
+-*Note: The full expansion includes cross-terms involving the derivatives. A more compact matrix form is often used:*
+-
+-$$ f(u, v, w) = \mathbf{H}(u)^T \mathbf{M} \mathbf{G}_{local} \mathbf{M}^T \mathbf{H}(v) \mathbf{M}^T \mathbf{H}(w) $$
+-Where $\mathbf{H}(t) = [1, t, t^2, t^3]^T$ is the monomial basis vector, $\mathbf{M}$ is the Hermite basis matrix, and $\mathbf{G}_{local}$ is the 4x4x4 tensor of values and derivatives.
+-
+-Alternatively, using the explicit scalar expansion for clarity in implementation [S2, unofficial]:
+-Let $H_0(t)$ and $H_1(t)$ be the basis functions defined above.
+-Let $V_{ijk}$ be the value at grid point $(i,j,k)$.
+-Let $Vx_{ijk}, Vy_{ijk}, Vz_{ijk}$ be the partial derivatives.
+-
+-The contribution of a single corner $(i+\delta_x, j+\delta_y, k+\delta_z)$ to the final sum is:
+-$$ \text{Term} = H_{\delta_x}(u) H_{\delta_y}(v) H_{\delta_z}(w) V_{i+\delta_x, j+\delta_y, k+\delta_z} $$
+-$$ + H_{\delta_x}(u) H_{\delta_y}(v) H_{\delta_z+1}(w) \Delta w \cdot Vz_{i+\delta_x, j+\delta_y, k+\delta_z} $$
+-$$ + H_{\delta_x}(u) H_{\delta_y+1}(v) H_{\delta_z}(w) \Delta v \cdot Vy_{i+\delta_x, j+\delta_y, k+\delta_z} $$
+-$$ + H_{\delta_x+1}(u) H_{\delta_y}(v) H_{\delta_z}(w) \Delta u \cdot Vx_{i+\delta_x, j+\delta_y, k+\delta_z} $$
+-*(Note: The indices for the derivative terms shift by 1 in the corresponding dimension to align with the Hermite basis definition where $H_1$ corresponds to the derivative weight. The $\Delta$ terms are typically 1 if the grid spacing is uniform and incorporated into the derivative storage or basis scaling.)*
+-
+-**Parameters:**
+-- Grid spacing $h$: Implicit in the derivative values. If derivatives are not pre-scaled by $h$, they must be multiplied by the local coordinate step size.
+-
+-**Edge Cases and Pitfalls:**
+-- **Boundary Handling:** Indices outside $[0, D_d-1]$ must be clamped or padded [S1][S2, unofficial].
+-- **Precision:** The 4x4x4 support requires careful handling of floating-point precision during the accumulation of 64 terms.
+-- **Derivative Availability:** This method requires pre-computed or analytically available gradients. If only values are available, finite differences must be used to estimate gradients, which may introduce noise [S2, unofficial].
++1.  **Locate Support:** Compute the integer indices $i = \lfloor x \rfloor, j = \lfloor y \rfloor, k = \lfloor z \rfloor$ and fractional coordinates $u = x - i, v = y - j, w = z - k$ [S1][S2, unofficial]. Clamp indices to $[0, D_d-1]$ if necessary [S1].
++2.  **Gather Data:** Retrieve the 64 control points from the $4 \times 4 \times 4$ neighborhood centered at $(i, j, k)$. For each neighbor $(i+dx, j+dy, k+dz)$ where $dx, dy, dz \in \{0, 1\}$, gather the value and the three partial derivatives [S1][S2, unofficial].
++3.  **Basis Evaluation:** Compute the 16 1D Hermite basis functions for each dimension using the fractional coordinates $u, v, w$. The basis functions $H_0(t)$ and $H_1(t)$ for a coordinate $t \in [0, 1]$ are:
++    $$ H_0(t) = 2t^3 - 3t^2 + 1 $$
++    $$ H_1(t) = t^3 - 2t^2 + t $$
++    [S2, unofficial]
++4.  **Weighted Summation:** Combine the gathered values and derivatives using the tensor product of the basis functions. For a scalar field, the interpolated value $V(u,v,w)$ is:
++    $$ V = \sum_{dx=0}^{1} \sum_{dy=0}^{1} \sum_{dz=0}^{1} \left( H_0(u)H_0(v)H_0(w) V_{i+dx,j+dy,k+dz} + H_1(u)H_0(v)H_0(w) \frac{\partial V}{\partial x} + H_0(u)H_1(v)H_0(w) \frac{\partial V}{\partial y} + H_0(u)H_0(v)H_1(w) \frac{\partial V}{\partial z} \right) $$
++    [S2, unofficial]
+ 
+ **Pseudocode:**
+ ```python
+-def tricubic_hermite_interpolate(grid, p):
+-    """
+-    grid: 4D array (Dx, Dy, Dz, 4) storing [value, dx, dy, dz]
+-    p: tuple (x, y, z) query point
+-    """
+-    # 1. Index Mapping
++def tricubic_interpolate(grid, p):
++    # p is (x, y, z)
+     x, y, z = p
+-    i = int(x)
+-    j = int(y)
+-    k = int(z)
+-    u = x - i
+-    v = y - j
+-    w = z - k
+-
+-    # Helper for Hermite basis
+-    def h0(t):
+-        return 2*t**3 - 3*t**2 + 1
++    i, j, k = floor(x), floor(y), floor(z)
++    u, v, w = x - i, y - j, z - k
+     
+-    def h1(t):
+-        return t**3 - 2*t**2 + t
+-
+-    # 2. Data Gathering and 3. Basis Evaluation
+-    # We iterate over the 4x4x4 neighborhood. 
+-    # Note: Standard tricubic Hermite uses the 4 points along each axis.
+-    # The indices for the "corner" values are i, i+1, i+2, i+3? 
+-    # No, for a single cell interpolation using Hermite, we typically use the 
+-    # 4 points along the axis: i-1, i, i+1, i+2? 
+-    # Actually, the standard 1D Hermite patch uses 2 points and their derivatives.
+-    # For 3D, the support is 4x4x4 points if we consider the derivatives at the 
+-    # corners of the 2x2x2 cell block? 
+-    # Let's stick to the definition: 4 control points and 4 tangents per axis.
+-    # This implies we need data at i-1, i, i+1, i+2 along each axis.
++    # Clamp indices to valid range [0, D-1]
++    i = clamp(i, 0, grid.Dx - 1)
++    j = clamp(j, 0, grid.Dy - 1)
++    k = clamp(k, 0, grid.Dz - 1)
+     
+-    # Gather the 4x4x4 block of data
+-    # Data layout: [val, dx, dy, dz]
++    # Hermite basis functions
++    def h0(t): return 2*t**3 - 3*t**2 + 1
++    def h1(t): return t**3 - 2*t**2 + t
+     
+     result = 0.0
+-    
+-    for dx_idx in range(4): # 0 to 3
+-        for dy_idx in range(4):
+-            for dz_idx in range(4):
+-                # Local indices relative to the start of the support
+-                # The support starts at i-1, j-1, k-1
+-                gi = i - 1 + dx_idx
+-                gj = j - 1 + dy_idx
+-                gk = k - 1 + dz_idx
++    for dx in [0, 1]:
++        for dy in [0, 1]:
++            for dz in [0, 1]:
++                # Gather data from grid
++                # Note: In a real implementation, gradients must be stored or computed
++                val = grid[i+dx, j+dy, k+dz].value
++                grad_x = grid[i+dx, j+dy, k+dz].grad_x
++                grad_y = grid[i+dx, j+dy, k+dz].grad_y
++                grad_z = grid[i+dx, j+dy, k+dz].grad_z
+                 
+-                # Boundary check [G]
+-                if not (0 <= gi < grid.shape[0] and 
+-                        0 <= gj < grid.shape[1] and 
+-                        0 <= gk < grid.shape[2]):
+-                    continue
++                # Compute weights
++                w_val = h0(u) * h0(v) * h0(w)
++                w_dx = h1(u) * h0(v) * h0(w)
++                w_dy = h0(u) * h1(v) * h0(w)
++                w_dz = h0(u) * h0(v) * h1(w)
+                 
+-                # Get data
+-                val = grid[gi, gj, gk, 0]
+-                dvx = grid[gi, gj, gk, 1]
+-                dvy = grid[gi, gj, gk, 2]
+-                dvz = grid[gi, gj, gk, 3]
+-                
+-                # Basis weights
+-                # The basis functions H0 and H1 are applied to the local coordinate
+-                # within the specific segment. However, in the global 4x4x4 formulation,
+-                # the weights are determined by the position of the point relative to 
+-                # the specific control point.
+-                # For a standard cubic Hermite spline defined on [0,1], 
+-                # the weight for the value at t=0 is H0(t) and at t=1 is H0(1-t)?
+-                # Actually, the standard matrix form handles this.
+-                # Let's use the explicit scalar form for the 2-point 1D case extended to 3D.
+-                
+-                # Weight for the VALUE at this grid point
+-                # This point is at local position (dx_idx, dy_idx, dz_idx) in the 4-point sequence?
+-                # No, the 4 points are i-1, i, i+1, i+2.
+-                # The query u is in [0,1] relative to i.
+-                # The basis functions for the 4 points are:
+-                # P0 (i-1): H0(u+1) ? No.
+-                
+-                # Correct approach: Use the 4x4x4 matrix multiplication or explicit basis.
+-                # Basis for x-axis:
+-                # Point i-1: weight is H0(u+1) if we shift? 
+-                # Standard Hermite on [0,1] for points 0 and 1:
+-                # f(t) = H0(t)f0 + H1(t)f'0 + H0(1-t)f1 + H1(1-t)f'1? 
+-                # No, H1(t) is for the derivative.
+-                
+-                # Let's use the standard 1D Hermite basis functions for the interval [0,1]
+-                # involving points 0 and 1.
+-                # For the 4x4x4 neighborhood, we are essentially doing a tensor product 
+-                # of 1D cubic interpolations.
+-                
+-                # Weight for value at index k in the 1D sequence of 4 points:
+-                # This is complex to write out explicitly without the matrix.
+-                # We will use the matrix form logic in code.
+-                
+-                pass
+-
+-    # Simplified implementation using the tensor product of 1D Hermite interpolators
+-    # 1D Hermite Interpolation function
+-    def hermite_1d(t, p0, p1, d0, d1):
+-        t2 = t * t
+-        t3 = t2 * t
+-        h00 = 2*t3 - 3*t2 + 1
+-        h10 = t3 - 2*t2 + t
+-        h01 = -2*t3 + 3*t2
+-        h11 = t3 - t
+-        return h00*p0 + h10*d0 + h01*p1 + h11*d1
+-
+-    # We need to interpolate along X, then Y, then Z.
+-    # However, we need derivatives at the intermediate points.
+-    # This requires a 4x4x4 grid of values AND derivatives.
+-    
+-    # Step 1: Interpolate along X for all Y, Z slices
+-    # We need to create a temporary 3D grid of interpolated values and derivatives?
+-    # No, we can just compute the final value.
+-    
+-    # Let's assume we have a function that gets the 4 points along an axis
+-    # and their derivatives.
+-    
+-    # This is computationally expensive to write out fully in pseudocode without 
+-    # helper functions. The key is the basis functions H0 and H1.
+-    
+-    # Final calculation using the basis functions defined in the formulas section
+-    # is the most accurate representation of the method.
+-    
+-    return result # Placeholder for the actual summation
++                result += (w_val * val + 
++                           w_dx * grad_x + 
++                           w_dy * grad_y + 
++                           w_dz * grad_z)
++    return result
+ ```
+ 
+-## Subtopics
++**Parameters:**
++*   Grid spacing $h$: Determines the accuracy order $O(h^4)$ [S1].
++*   Neighborhood size: Fixed at $4 \times 4 \times 4$ [S1].
+ 
+-### Grid Cell Collection via Corner Indices
+-Focuses on retrieving the 8 corner values for trilinear interpolation, which is the lower-order sibling. Choose this when performance is critical and $C^0$ continuity is sufficient. [1518-grid-cell-collection-via-corner-indices.md]
+-
+-### Piecewise Quadratic Hermite Interpolation
+-Uses quadratic polynomials, offering $C^1$ continuity with a smaller support than tricubic. Choose this for a balance between smoothness and computational cost. [4001-piecewise-quadratic-hermite-interpolation.md]
+-
+-### Hermite Interpolation of Scalar Fields
+-Generalizes the Hermite approach to 1D or 2D, or specific scalar field constraints. Choose this when the data is not strictly volumetric or requires specific boundary conditions. [9450-hermite-interpolation-of-scalar-fields.md]
+-
+-### B-spline Field Interpolation
+-Uses B-spline basis functions which have compact support and $C^{k-1}$ continuity for degree $k$. Choose this for smoother results with better numerical stability than Hermite, though it requires more points (e.g., 4x4x4 for cubic B-spline). [11066-b-spline-field-interpolation.md]
+-
+-### Voxel Data Interpolation and Sampling
+-Covers general sampling strategies including nearest-neighbor and trilinear. Choose this as a baseline or for discrete data where smoothness is not required. [12781-voxel-data-interpolation-and-sampling.md]
++**Edge Cases:**
++*   **Boundary Conditions:** Indices falling outside the grid domain must be clamped or handled via periodic/constant boundary conditions [S1].
++*   **Gradient Availability:** Standard voxel grids do not store gradients. If gradients are not pre-computed, they must be estimated (e.g., via finite differences), which may introduce noise or reduce accuracy [S2, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(1)$ per query, but with a significantly higher constant factor than trilinear due to 64 point accesses and cubic polynomial evaluations.
+-- **Memory Complexity:** Requires storing gradients alongside values, increasing memory usage by 4x for scalar fields (value + 3 derivatives).
+-- **Measured Performance:** Studies confirm tricubic's edge in accuracy over trilinear for upsampled 3D volumes, albeit with longer processing times [S1].
+-- **Strengths:** $C^1$ continuity reduces visual artifacts in gradient-sensitive tasks like volume rendering [S1]. High accuracy $O(h^4)$ for smooth functions [S1].
+-- **Limitations:** High computational cost. Requires gradient data, which may need to be estimated or pre-computed.
+-- **When to use:** When $C^1$ continuity is needed for differentiable outputs in visualization [S1].
+-- **When not to use:** When performance is critical and $C^0$ continuity is sufficient (use trilinear). When gradient data is unavailable and cannot be estimated reliably.
++*   **Time Complexity:** Higher than trilinear due to 64 points and derivative calculations. Processing times are longer [S1].
++*   **Memory Complexity:** Requires storage of gradients in addition to values, increasing memory footprint per voxel [S2, unofficial].
++*   **Strengths:** $C^1$ continuity reduces artifacts in gradient-sensitive tasks; superior accuracy $O(h^4)$ for smooth functions [S1].
++*   **Limitations:** Increased computational expense; requires gradient data [S1][S2, unofficial].
++*   **When to use:** When $C^1$ continuity is needed for differentiable outputs in visualization [S1].
++*   **When not to use:** For real-time applications with strict performance constraints where $C^0$ continuity is sufficient, or when gradient data is unavailable and expensive to compute [S1].
+ 
+ ## Background
+-Tricubic interpolation is a higher-order alternative to trilinear interpolation, developed to address the need for smoother approximations in scientific visualization and medical imaging. It is based on the cubic Hermite spline concept, which uses both function values and derivatives to construct smooth patches. The method has been applied in contexts such as irradiance volume computation for games and medical imaging upsampling [S1][S2, unofficial].
++Tricubic interpolation is a higher-order alternative to trilinear interpolation, chosen in medical imaging upsampling and volume rendering for its smoothness [S1]. It was discussed in the context of Irradiance Volumes for Games, where Hermite patches were used to construct cubic patches from samples and gradients [S2, unofficial].
+ 
+ ## Sources

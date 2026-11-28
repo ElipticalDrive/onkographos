@@ -1,0 +1,120 @@
+--- v001.md
++++ v002.md
+@@ -16,11 +16,11 @@
+ 
+ **Data Structures**
+-The encoder is a sequential stack of convolutional layers.
++The encoder is a sequential stack of convolutional layers [S1].
+ *   **Layer Layout:**
+-    1.  Convolutional Layer (Kernel size $D \times D \times 3 \to F$).
++    1.  Convolutional Layer (Kernel size $D \times D \times 3 \to F$) [S1].
+     2.  Group Normalization (GN) [S1].
+     3.  SiLU Activation [S1].
+-    4.  Max Pooling (2x2) [S1].
+-    *   This block repeats $d$ times.
++    4.  Max Pooling ($2 \times 2$) [S1].
++    *   This block repeats $d$ times [S1].
+     5.  Fully Connected (FC) layer mapping to output dimensions [S1].
+ *   **Parameters:**
+@@ -28,60 +28,61 @@
+     *   $F$: Number of features. Optimal value: 32 [S1].
+     *   $d$: Encoder depth (number of conv blocks). Optimal value: 4 layers [S1].
+-    *   $D$: Input resolution of the first conv layer (often equal to $L$ or derived from it; source notation $D \times D \times 3$ implies kernel size matches input spatial dimensions for the first layer or is a specific hyperparameter) [S1].
++    *   $D$: Kernel size for the first convolutional layer [S1].
+ 
+ **Algorithm**
+ 1.  Resize input image to $L \times L \times 3$ if necessary [S1].
+-2.  Apply initial Convolution layer with kernel size $D \times D \times 3$ producing $F$ channels [S1].
++2.  Apply initial Convolution layer with kernel size $D \times D$ producing $F$ channels [S1].
+ 3.  Apply Group Normalization [S1].
+ 4.  Apply SiLU activation [S1].
+-5.  Apply Max Pooling with 2x2 kernel [S1].
+-6.  Repeat steps 2-5 for $d-1$ additional blocks (total $d$ blocks) [S1].
+-7.  Flatten the resulting feature map.
+-8.  Pass through a Fully Connected layer to produce the output vector [S1].
+-9.  Map the first two output dimensions to spherical coordinates $(\theta, \phi)$ [S1].
+-10. If configured, map additional outputs to roll $\alpha$ and translation $T_i$ [S1].
++5.  Apply Max Pooling with $2 \times 2$ kernel [S1].
++6.  Repeat steps 2-5 exactly $d$ times [S1].
++7.  The resulting feature map has spatial dimensions $2 \times 2$ and $F$ channels [S1].
++8.  Flatten the resulting feature map to a 1D vector [S1].
++9.  Pass through a Fully Connected layer to produce the output vector [S1].
++10. Map three of the outputs of the encoder to an azimuth/elevation pair $(\theta, \phi)$ using spherical coordinates [S1].
++11. If configured, map additional outputs to roll $\alpha$ and translation $T_i$ [S1].
+ 
+ **Pseudocode**
+ ```python
+-def MELON_Encoder(image: Tensor, L: int, F: int, d: int, D: int) -> Tensor:
+-    """
+-    image: Input tensor of shape (H, W, 3).
+-    L: Target input resolution.
+-    F: Number of features.
+-    d: Depth of encoder.
+-    D: Kernel size for first conv layer.
+-    """
++def MELON_Encoder(image, L, F, d, D):
+     # Step 1: Resize to L x L
+-    x = Resize(image, size=(L, L))
++    x = interpolate(image, size=(L, L))
+     
+-    # Step 2: Initial Convolution
+-    # Note: Source specifies D x D kernel. Assuming stride 1 for first layer to preserve resolution before pooling
+-    x = Conv2d(x, in_channels=3, out_channels=F, kernel_size=(D, D), stride=1, padding=D//2)
++    # Step 2-5: Encoder Blocks (repeated d times)
++    for _ in range(d):
++        # Convolution: kernel DxD, in_channels=3, out_channels=F
++        x = conv2d(x, in_channels=3, out_channels=F, kernel_size=(D, D), stride=1, padding=D//2)
++        # Group Normalization
++        x = group_norm(x, num_groups=32)
++        # SiLU Activation
++        x = silu(x)
++        # Max Pooling: 2x2 kernel, stride 2
++        x = max_pool2d(x, kernel_size=2, stride=2)
++        
++    # Step 7: Flatten (spatial dimensions become 2x2, channels F)
++    x = flatten(x)
+     
+-    # Step 3-5: Encoder Blocks
+-    for i in range(d):
+-        x = GroupNorm(x)
+-        x = SiLU(x)
+-        if i < d - 1: # Pooling usually applied between blocks, not after the last one before FC
+-            x = MaxPool2d(x, kernel_size=2, stride=2)
+-            
+-    # Step 7: Flatten
+-    x = Flatten(x)
++    # Step 8: Fully Connected layer
++    # Output size depends on configuration: base 2 (theta, phi), +1 (alpha), +3 (Ti)
++    output = linear(x, out_features=6)
+     
+-    # Step 8: Fully Connected
+-    # Output dimension depends on optional predictions. 
+-    # Base: 2 (theta, phi). Optional: +1 (alpha), +3 (Ti). Total 6 if all optional.
+-    # Assuming standard config with optional roll and translation for completeness
+-    output = FC(x, out_features=6)
+-    
+-    # Step 9: Map to spherical coordinates
+-    theta = output[0]
+-    phi = output[1]
++    # Step 9: Map three outputs to spherical coordinates
++    theta, phi = spherical_map(output[0], output[1], output[2])
+     
+     # Step 10: Optional outputs
+-    alpha = output[2] # Only for real datasets
+-    Ti = output[3:6]  # Location of origin in camera reference frame
++    alpha = output[3]
++    Ti = output[4:7]
+     
+     return theta, phi, alpha, Ti
++
++# Standard operations
++def interpolate(x, size): return torch.nn.functional.interpolate(x, size=size, mode='bilinear')
++def conv2d(x, in_channels, out_channels, kernel_size, stride, padding): return torch.nn.functional.conv2d(x, weight, bias)
++def group_norm(x, num_groups): return torch.nn.functional.group_norm(x, num_groups, eps=1e-5)
++def silu(x): return x * torch.sigmoid(x)
++def max_pool2d(x, kernel_size, stride): return torch.nn.functional.max_pool2d(x, kernel_size, stride)
++def flatten(x): return x.view(x.size(0), -1)
++def linear(x, out_features): return torch.nn.functional.linear(x, weight, bias)
++def spherical_map(a, b, c): return (math.atan2(b, a), math.asin(c / math.sqrt(a**2 + b**2 + c**2)))
+ ```
+ 

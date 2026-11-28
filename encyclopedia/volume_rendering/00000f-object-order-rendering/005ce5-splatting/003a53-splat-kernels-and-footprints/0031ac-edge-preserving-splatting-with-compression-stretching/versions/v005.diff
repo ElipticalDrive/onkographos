@@ -1,0 +1,137 @@
+--- v004.md
++++ v005.md
+@@ -10,5 +10,5 @@
+ ### Inputs and Outputs
+ **Inputs:**
+-*   Volume dataset $V$.
++*   Volume dataset $V$ [S1].
+ *   Contour value (threshold) $T$ used for edge detection [S1].
+ *   Viewing direction vector $\mathbf{v}$ [S1].
+@@ -36,5 +36,5 @@
+ 
+ 1.  **Edge Detection and Attribute Extraction:**
+-    For each voxel, determine if it lies near an edge (within a certain distance of the threshold $T$). If so, compute the gradient $\nabla V$ and the normalized edge direction $\mathbf{d}$ [S1].
++    For each voxel, determine if it lies near an edge (within a certain distance of the threshold $T$) [S1]. If so, estimate the gradient using central differences and the edge position using trilinear interpolation [S1]. Store the normalized edge direction separately from the edge distance or position [S1].
+ 
+ 2.  **View-Dependent Projection:**
+@@ -48,5 +48,5 @@
+ 
+ 4.  **Kernel Application (Compression/Stretching):**
+-    Apply the selected footprint to the splat. The core of the method is the mapping function $map(x)$ which modifies the standard kernel $g(x)$ to preserve C1 continuity [S1].
++    Apply the selected footprint to the splat [S1]. The core of the method is the mapping function $map(x)$ which modifies the standard kernel $g(x)$ to preserve C1 continuity [S1].
+     
+     The mapping function $map(x)$ is defined such that its first derivative is 1 at the boundaries $x=0$ and $x=1$ [S1]. This ensures that the derivative of the resulting profile $h(x)$ matches the derivative of the original kernel $g(x)$ at the boundaries, preserving C1 continuity [S1]:
+@@ -78,14 +78,15 @@
+         volume: 3D array of voxel values.
+         threshold: Scalar value for edge detection.
+-        view_direction: 3D vector (normalized).
++        view_direction: 3D tuple (normalized).
+         precomputed_footprints: Dictionary mapping (edge_position, edge_strength) to footprint functions.
+         
+     Returns:
+-        Image buffer.
++        Image buffer (2D list of floats).
+     """
+-    image = initialize_image_buffer()
++    # [G] Standard image buffer initialization
++    width, height = 512, 512
++    image = [[0.0] * width for _ in range(height)]
+     
+     # Precompute gradients and edge attributes for all voxels
+-    # Note: In practice, this might be done on GPU or pre-stored
+     edge_attributes = []
+     for x, y, z in volume.indices():
+@@ -97,8 +98,8 @@
+         # Estimate distance to contour
+         # d = |V - T| / ||grad||
+-        dist = abs(val - threshold) / (norm(grad) + epsilon)
++        dist = abs(val - threshold) / (norm(grad) + 1e-6)
+         
+         # Store attributes if near edge
+-        if dist < MAX_EDGE_DISTANCE:
++        if dist < 1.0:  # [G] Threshold for edge proximity
+             edge_attributes.append({
+                 'pos': (x, y, z),
+@@ -123,6 +124,6 @@
+         
+         if not attr['is_edge']:
+-            # Standard splatting
+-            footprint = get_standard_footprint()
++            # [G] Standard kernel evaluation for non-edge voxels
++            footprint = standard_kernel
+             apply_splat(image, pos, footprint, val)
+             continue
+@@ -133,10 +134,10 @@
+         # If parallel to view, no special treatment
+         if is_parallel(grad_norm, view_direction):
+-            footprint = get_standard_footprint()
++            footprint = standard_kernel
+             apply_splat(image, pos, footprint, val)
+             continue
+             
+         projected_edge = project_vector_onto_plane(grad_norm, view_direction)
+-        edge_strength = compute_edge_strength(projected_edge)
++        edge_strength = norm(projected_edge)
+         edge_position = attr['dist']
+         
+@@ -148,5 +149,5 @@
+         
+         # Apply shading if it's an edge splat
+-        shade = is_primary or (not is_primary) # Always true for edge splats, but logic applies to lighting
++        shade = is_primary or (not is_primary)  # Always true for edge splats, but logic applies to lighting
+         
+         apply_splat(image, pos, footprint, val, shade=shade)
+@@ -159,15 +160,50 @@
+     dy = (volume[x, y+1, z] - volume[x, y-1, z]) / 2.0
+     dz = (volume[x, y, z+1] - volume[x, y, z-1]) / 2.0
+-    return Vector3(dx, dy, dz)
++    return (dx, dy, dz)
+ 
+ def project_vector_onto_plane(vector, plane_normal):
+     # [G] Project vector onto plane perpendicular to plane_normal
+     # proj = v - (v . n) * n
+-    dot = dot_product(vector, plane_normal)
+-    return vector - plane_normal * dot
++    dot_val = dot_product(vector, plane_normal)
++    return (vector[0] - plane_normal[0] * dot_val,
++            vector[1] - plane_normal[1] * dot_val,
++            vector[2] - plane_normal[2] * dot_val)
+ 
+ def compute_edge_strength(projected_edge):
+     # [G] Magnitude of the projected edge vector serves as strength indicator
+     return norm(projected_edge)
++
++def standard_kernel(x, y):
++    # [G] Standard Gaussian or box kernel for conventional splatting
++    return max(0.0, 1.0 - (x*x + y*y))
++
++def apply_splat(image, pos, footprint, value, shade=False):
++    # [G] Standard rasterization accumulation step
++    px, py, pz = pos
++    for dy in range(-2, 3):
++        for dx in range(-2, 3):
++            fx, fy = dx, dy
++            weight = footprint(fx, fy)
++            if weight > 0:
++                ix, iy = int(px + fx), int(py + fy)
++                if 0 <= ix < len(image[0]) and 0 <= iy < len(image):
++                    image[iy][ix] += weight * value * (1.0 if shade else 0.5)
++
++def dot_product(v1, v2):
++    return v1[0]*v2[0] + v1[1]*v2[1] + v1[2]*v2[2]
++
++def norm(v):
++    return (v[0]**2 + v[1]**2 + v[2]**2)**0.5
++
++def normalize(v):
++    n = norm(v)
++    return (v[0]/n, v[1]/n, v[2]/n) if n > 0 else (0.0, 0.0, 0.0)
++
++def is_parallel(v1, v2):
++    # [G] Check if vectors are parallel using cross product magnitude
++    cross_x = v1[1]*v2[2] - v1[2]*v2[1]
++    cross_y = v1[2]*v2[0] - v1[0]*v2[2]
++    cross_z = v1[0]*v2[1] - v1[1]*v2[0]
++    return norm((cross_x, cross_y, cross_z)) < 1e-6
+ ```
+ 

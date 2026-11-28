@@ -1,0 +1,190 @@
+# 3DGR-CT Gaussian Voxelization
+Also called: Gaussian Voxelization Backward Pass, Gaussian Voxelization Forward Pass
+## Overview
+3DGR-CT Gaussian Voxelization is a CUDA-based method for computing the contribution of 3D Gaussians to a voxel grid, specifically designed for sparse-view CT reconstruction [S1]. It solves the problem of efficiently mapping continuous Gaussian parameters to a discrete volume representation while maintaining differentiability for gradient-based optimization [S1]. Unlike standard volume rendering which may render to an image, this method explicitly constructs a volumetric density field $V$ that can be projected via a differentiable CT projector to compare against measured sinogram data [S1]. It sets itself apart from siblings like [Gaussian Kernel Interpolation](17203-gaussian-kernel-interpolation.md) by using a specialized work-stealing CUDA kernel with shared memory caching to handle variable-sized Gaussian influence regions and avoid race conditions via atomic operations [S1].
+## How it works
+### Inputs and Outputs
+**Inputs:**
+- A set of $N$ 3D Gaussians $G_i$, each defined by:
+  - Mean position $\mu_i \in \mathbb{R}^3$
+  - Inverse covariance matrix $\Sigma_i^{-1} \in \mathbb{R}^{3 \times 3}$ (symmetric positive definite)
+  - Intensity parameter $t_i \in \mathbb{R}$
+- A target voxel grid with resolution $R_x \times R_y \times R_z$.
+- (For Backward Pass) The gradient of the loss with respect to the volume output, $\nabla_{out} V$.
+
+**Outputs:**
+- (Forward Pass) A voxel grid $V$ where each voxel value is the sum of contributions from all overlapping Gaussians.
+- (Backward Pass) Gradients $\nabla_{t_i}$, $\nabla_{\mu_i}$, and $\nabla_{\Sigma_i^{-1}}$ for each Gaussian $G_i$.
+
+### Data Structures
+- **Gaussian Parameters:** Stored in global memory, loaded into shared memory per thread block for caching [S1].
+- **Voxel Grid:** A 3D array of floating-point values.
+- **Gradient Accumulators:** Separate 3D arrays or per-Gaussian buffers for accumulating gradients, requiring atomic operations for thread safety [S1].
+- **Work Queue:** A global counter for the work-stealing approach to distribute variable-sized influence regions among thread blocks [S1].
+
+### Algorithm Steps
+
+#### Forward Pass
+1. **Initialization:** Each thread block atomically fetches a Gaussian index from a global counter (work-stealing) [S1].
+2. **Load Parameters:** Load $\mu_i$, $\Sigma_i^{-1}$, and $t_i$ for the assigned Gaussian $G_i$ into shared memory [S1].
+3. **Compute Influence Region:** Determine the bounding box of grid cells affected by $G_i$. The region is defined by the truncation radius of $3\sigma_i$ in each dimension, where $\sigma_i$ is derived from the diagonal of $\Sigma_i$ (or the scale parameters) [S1].
+   - For each dimension $d \in \{x, y, z\}$, the range is $[\lfloor \mu_{i,d} - 3\sigma_{i,d} \rfloor, \lceil \mu_{i,d} + 3\sigma_{i,d} \rceil]$ [S1].
+4. **Iterate Grid Points:** For each grid point (voxel center) $x$ within the influence region:
+   a. Compute the distance vector $d = x - \mu_i$ [S1].
+   b. Compute the squared Mahalanobis distance $D^2 = d^T \Sigma_i^{-1} d$ [S1].
+   c. Compute the intensity contribution $t_i(x) = t_i \exp(-\frac{1}{2} D^2)$ [S1].
+   d. Atomically add the contribution to the voxel grid: $V(x) \leftarrow V(x) + t_i(x)$ using `atomicAdd` [S1].
+
+#### Backward Pass
+1. **Initialization:** Similar to forward pass, thread blocks fetch Gaussians via work-stealing [S1].
+2. **Load Parameters:** Load $\mu_i$, $\Sigma_i^{-1}$, and $t_i$ into shared memory [S1].
+3. **Compute Influence Region:** Compute the same $3\sigma_i$ bounding box as in the forward pass [S1].
+4. **Iterate Grid Points:** For each grid point $x$ within the influence region:
+   a. Compute $d = x - \mu_i$ [S1].
+   b. Compute $D^2 = d^T \Sigma_i^{-1} d$ [S1].
+   c. Compute $t_i(x) = t_i \exp(-\frac{1}{2} D^2)$ [S1].
+   d. Retrieve the gradient from the output volume $\nabla_{out} V(x)$ [S1].
+   e. Compute the gradient for intensity $t_i$:
+      $$ \nabla_{t_i}^{local} = \exp(-\frac{1}{2} D^2) \cdot \nabla_{out} V(x) $$
+      Atomically add to the accumulated gradient for $t_i$: `AtomicAdd(∇t_i, ∇t_i^{local})` [S1].
+   f. Compute the gradient for the mean $\mu_i$:
+      $$ \nabla_{\mu_i}^{local} = t_i(x) \cdot \nabla_{out} V(x) \cdot \Sigma_i^{-1} d $$
+      Atomically add to the accumulated gradient for $\mu_i$: `AtomicAdd(∇μ_i, ∇μ_i^{local})` [S1].
+   g. Compute the gradient for the inverse covariance $\Sigma_i^{-1}$:
+      $$ \nabla_{\Sigma_i^{-1}}^{local} = -0.5 \cdot t_i(x) \cdot \nabla_{out} V(x) \cdot d d^T $$
+      Atomically add to the accumulated gradient for $\Sigma_i^{-1}$: `AtomicAdd(∇Σ_inv_i, ∇Σ_inv_i^{local})` [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Forward Pass Kernel
+@cuda.jit
+def gaussian_voxelization_forward(gaussians, voxel_grid, grid_shape, sigma_scale):
+    # Work-stealing initialization
+    tid = cuda.threadIdx.x + cuda.blockIdx.x * cuda.blockDim.x
+    num_threads = cuda.blockDim.x * gridDim.x
+    
+    # Global counter for work stealing
+    global_counter = cuda.atomic.add(...) # Implementation detail for global counter
+    
+    while global_counter < N:
+        idx = cuda.atomic.add(global_counter, 1)
+        if idx >= N:
+            break
+            
+        # Load Gaussian parameters into shared memory
+        mu = gaussians[idx].mu
+        sigma_inv = gaussians[idx].sigma_inv
+        t = gaussians[idx].t
+        
+        # Compute influence region (3*sigma bounding box)
+        # sigma is derived from sigma_inv or stored separately
+        sigma = ... # Extract scale from sigma_inv
+        min_coords = floor(mu - 3 * sigma)
+        max_coords = ceil(mu + 3 * sigma)
+        
+        # Iterate over voxels in influence region
+        for x in range(min_coords[0], max_coords[0]):
+            for y in range(min_coords[1], max_coords[1]):
+                for z in range(min_coords[2], max_coords[2]):
+                    # Check bounds
+                    if not (0 <= x < grid_shape[0] and 0 <= y < grid_shape[1] and 0 <= z < grid_shape[2]):
+                        continue
+                    
+                    voxel_pos = float3(x, y, z)
+                    d = voxel_pos - mu
+                    D2 = dot(d, mat_vec_mul(sigma_inv, d))
+                    contribution = t * exp(-0.5 * D2)
+                    
+                    # Atomic add to voxel grid
+                    voxel_idx = x + y * grid_shape[0] + z * grid_shape[0] * grid_shape[1]
+                    cuda.atomic.add(voxel_grid, voxel_idx, contribution)
+
+# Backward Pass Kernel
+@cuda.jit
+def gaussian_voxelization_backward(gaussians, voxel_gradients, grad_t, grad_mu, grad_sigma_inv, grid_shape, sigma_scale):
+    tid = cuda.threadIdx.x + cuda.blockIdx.x * cuda.blockDim.x
+    num_threads = cuda.blockDim.x * gridDim.x
+    
+    global_counter = cuda.atomic.add(...) # Reuse or new counter
+    
+    while global_counter < N:
+        idx = cuda.atomic.add(global_counter, 1)
+        if idx >= N:
+            break
+            
+        mu = gaussians[idx].mu
+        sigma_inv = gaussians[idx].sigma_inv
+        t = gaussians[idx].t
+        
+        # Compute influence region
+        sigma = ... # Extract scale
+        min_coords = floor(mu - 3 * sigma)
+        max_coords = ceil(mu + 3 * sigma)
+        
+        for x in range(min_coords[0], max_coords[0]):
+            for y in range(min_coords[1], max_coords[1]):
+                for z in range(min_coords[2], max_coords[2]):
+                    if not (0 <= x < grid_shape[0] and 0 <= y < grid_shape[1] and 0 <= z < grid_shape[2]):
+                        continue
+                    
+                    voxel_pos = float3(x, y, z)
+                    d = voxel_pos - mu
+                    D2 = dot(d, mat_vec_mul(sigma_inv, d))
+                    t_x = t * exp(-0.5 * D2)
+                    
+                    # Get gradient from output volume
+                    voxel_idx = x + y * grid_shape[0] + z * grid_shape[0] * grid_shape[1]
+                    grad_out = voxel_gradients[voxel_idx]
+                    
+                    # Gradient for intensity t
+                    grad_t_local = exp(-0.5 * D2) * grad_out
+                    cuda.atomic.add(grad_t, idx, grad_t_local)
+                    
+                    # Gradient for mean mu
+                    # grad_mu = t(x) * grad_out * Sigma_inv * d
+                    sigma_inv_d = mat_vec_mul(sigma_inv, d)
+                    grad_mu_local = t_x * grad_out * sigma_inv_d
+                    cuda.atomic.add(grad_mu, idx, grad_mu_local)
+                    
+                    # Gradient for inverse covariance Sigma_inv
+                    # grad_Sigma_inv = -0.5 * t(x) * grad_out * d * d^T
+                    outer_dd = outer_product(d, d)
+                    grad_sigma_inv_local = -0.5 * t_x * grad_out * outer_dd
+                    cuda.atomic.add(grad_sigma_inv, idx, grad_sigma_inv_local)
+```
+
+### Parameters
+- **Truncation Radius:** $3\sigma_i$ for each Gaussian $i$. This is based on the statistical principle that 99.7% of a Gaussian’s mass lies within this range [S1].
+- **Sigma Scale:** The standard deviation $\sigma_i$ is derived from the Gaussian's covariance matrix $\Sigma_i$ [S1].
+
+### Edge Cases and Pitfalls
+- **Race Conditions:** Multiple Gaussians may contribute to the same voxel, and multiple threads may update the same Gaussian's gradient parameters. This is handled by using `atomicAdd` for accumulating intensity contributions and gradients [S1].
+- **Variable Patch Sizes:** PyTorch does not natively support slicing a batch of patches with different sizes. This is handled by developing a specialized CUDA kernel that dynamically computes each Gaussian's influence area [S1].
+- **Precision:** The use of shared memory for caching Gaussian parameters reduces global memory traffic and accelerates computation, but requires careful management of shared memory size per block [S1].
+
+## Subtopics
+
+### Differentiable CT Projector
+A differentiable projection operator that simulates the forward X-ray projection process [S1]. It uses the ODL library for the forward projection and propagates gradients through the operator using the chain rule to optimize Gaussian parameters directly from measured projection data [S1]. Unlike standard volume rendering which might render to an image, this projector simulates X-ray projection (line integrals) to compare against measured CT sinogram data [S1]. The projection is defined as $p_\theta = \mathcal{P}(V_\theta)$, where $\mathcal{P}$ is the forward projection operator [S1]. Gradients are propagated via $\frac{\partial \mathcal{L}}{\partial \theta} = \frac{\partial \mathcal{L}}{\partial p_\theta} \frac{\partial p_\theta}{\partial V_\theta} \frac{\partial V_\theta}{\partial \theta}$ [S1]. The derivatives of the reconstructed intensity $V_\theta$ with respect to Gaussian parameters are explicitly derived as:
+$$ \frac{\partial V_\theta}{\partial t_i} = \exp(-\frac{1}{2} D^2) $$
+$$ \frac{\partial V_\theta}{\partial \mu_i} = t_i \exp(-\frac{1}{2} D^2) \Sigma_i^{-1} (x - \mu_i) $$
+$$ \frac{\partial V_\theta}{\partial \Sigma_i^{-1}} = -\frac{1}{2} t_i \exp(-\frac{1}{2} D^2) (x - \mu_i)(x - \mu_i)^T $$
+[S1]. The projection operator $\mathcal{P}$ is implemented using the ODL library [S1].
+
+## Operating characteristics
+- **Time Complexity:** The forward and backward passes are $O(N \cdot V_{avg})$, where $N$ is the number of Gaussians and $V_{avg}$ is the average number of voxels in the $3\sigma$ bounding box [S1]. The work-stealing approach ensures balanced workload distribution among thread blocks [S1].
+- **Memory Complexity:** $O(V)$ for the voxel grid and $O(N)$ for Gaussian parameters and gradients [S1]. Shared memory is used to cache Gaussian parameters, reducing global memory traffic [S1].
+- **Performance:** Achieves a 10x speedup for optimization and an order of magnitude reduction in memory consumption compared to baseline methods [S1].
+- **Strengths:** Efficient handling of variable-sized Gaussian influence regions; thread-safe accumulation via atomic operations; differentiable for end-to-end optimization [S1].
+- **Limitations:** Requires custom CUDA kernel implementation; performance depends on the density and spread of Gaussians [S1].
+- **When to Use:** Sparse-view CT reconstruction where efficient volumetric representation and differentiable optimization are required [S1].
+- **When Not to Use:** When hardware does not support CUDA or when the number of Gaussians is very small, making the overhead of the custom kernel unjustified [S1].
+
+## Background
+3DGR-CT was introduced in the paper "3DGR-CT: Sparse-view CT reconstruction with a 3D Gaussian representation" [S1]. The method builds on the concept of using 3D Gaussians for volumetric representation, adapting it for CT reconstruction by incorporating a differentiable CT projector and a specialized voxelization kernel [S1]. The approach uses a two-stage optimization process: low-resolution optimization followed by full-resolution refinement [S1]. The Gaussian parameters are physically motivated, with truncation at $3\sigma$ and splitting parameters (scale factor 0.8, intensity halving) chosen for statistical soundness [S1].
+
+## Sources
+[S1] 3DGR-CT: Sparse-view CT reconstruction with a 3D Gaussian representation, https://doi.org/10.1016/j.media.2025.103585, fetched 2026-10-26

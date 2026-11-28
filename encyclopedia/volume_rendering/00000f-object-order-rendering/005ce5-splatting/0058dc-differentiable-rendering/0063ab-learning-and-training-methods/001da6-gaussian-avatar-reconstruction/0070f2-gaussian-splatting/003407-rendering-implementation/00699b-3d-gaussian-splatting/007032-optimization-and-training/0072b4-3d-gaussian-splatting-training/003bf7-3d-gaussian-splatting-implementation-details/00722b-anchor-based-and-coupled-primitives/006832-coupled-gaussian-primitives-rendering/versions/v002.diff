@@ -1,0 +1,396 @@
+--- v001.md
++++ v002.md
+@@ -4,198 +4,220 @@
+ 
+ ## Overview
+-Coupled Gaussian Primitives Rendering is a compact scene representation method that decomposes Gaussian primitives into anchor primitives and coupled primitives derived from them, enabling efficient storage and rendering via a custom rasterizer [S1, unofficial]. It distinguishes itself from standard 3D Gaussian Splatting by introducing a hierarchical primitive structure where coupled primitives are predicted from anchor primitives, reducing the parameter count and facilitating compression [S1, unofficial].
++Coupled Gaussian Primitives Rendering is a differentiable rendering method that represents scenes using a compact set of anchor primitives and a larger set of coupled primitives derived from them [S1, unofficial]. It solves the problem of high memory consumption and bandwidth in standard 3D Gaussian Splatting by decoupling the storage of base geometry (anchors) from the detailed variations (coupled primitives) [S1, unofficial]. Unlike sibling methods that use statistical augmentation or contextual aggregation to refine anchors, this method explicitly predicts residual features and offsets to generate coupled primitives, enabling efficient compression and rendering via a custom rasterizer [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-The method takes a set of anchor primitives (defined by mean, scale, rotation, and features) and a camera view as input. It outputs a rendered image, along with metadata including projected means, visibility masks, and bit-per-pixel (bpp) statistics for compression [S1, unofficial].
++The method takes a set of anchor primitives and camera parameters as input. It outputs a rendered image and metadata including projected means, visibility masks, and bit-per-pixel (bpp) statistics for compression [S1, unofficial].
+ 
+ **Data Structures:**
+-The core state is held in a `GaussianParameters` object (or `self.gaussian_params` in the implementation), which contains:
+-- `num_anchor_primitive`: Integer count of anchor primitives.
+-- `num_coupled_primitive`: Integer count of coupled primitives.
+-- `derive_factor`: Integer, the number of coupled primitives derived from each anchor primitive.
+-- `res_feats_dim`: Integer, dimension of residual features.
+-- `means`: Tensor of shape `(N, 3)`, dtype float32, representing 3D positions.
+-- `scales_before_exp`: Tensor of shape `(N, 6)`, dtype float32. The first 3 components are log-scales for the anchor primitives; the remaining 3 are log-scales for the coupled primitives (or shared/derived depending on specific implementation, but typically coupled scales are derived or stored separately). *Note: The source notes specify `scales_before_exp` shape `(N, 6)` and `res_feats` shape `(N, K, D)` where K is likely `derive_factor`.*
+-- `rotations`: Tensor of shape `(N, 4)`, dtype float32, unit quaternions.
+-- `ref_feats`: Tensor of shape `(N, C)`, reference features for anchor primitives.
+-- `res_feats`: Tensor of shape `(N, K, D)`, residual features for coupled primitives, where $K$ is `derive_factor` and $D$ is `res_feats_dim`.
+-- `coupled_denorm`: Tensor of shape `(N*K, 1)`, normalization factors for coupled primitives.
+-- `anchor_denorm`: Tensor of shape `(N, 1)`, normalization factors for anchor primitives.
+-- `accumulated_grads`: Tensor of shape `(N, 1)`.
+-- `accumulated_opacities`: Tensor of shape `(N, 1)`.
+-
+-The `RenderSettings` object includes:
+-- `image_height`, `image_width`: Integers.
+-- `tanfovx`, `tanfovy`: Floats.
+-- `viewmatrix`: Tensor `(4, 4)`.
+-- `projmatrix`: Tensor `(4, 4)`.
+-- `campos`: Tensor `(3,)`.
+-- `background_color`: Tensor `(3,)`, default black `[0, 0, 0]`.
++The core state is held in `GaussianParameters` [S1, unofficial]:
++*   `means`: `torch.Tensor`, shape `(N, 3)`, float32. Anchor positions.
++*   `scales_before_exp`: `torch.Tensor`, shape `(N, 6)`, float32. Pre-exponential scaling factors. The first 3 components are log-scales for the anchor; the next 3 are unused or reserved for coupled derivation logic in the network input [S1, unofficial].
++*   `rotations`: `torch.Tensor`, shape `(N, 4)`, float32. Anchor rotation quaternions.
++*   `ref_feats`: `torch.Tensor`, shape `(N, C)`, float32. Reference features for anchors, where $C = \text{ref\_feats\_dim}$ [S1, unofficial].
++*   `res_feats`: `torch.Tensor`, shape `(N, K, D)`, float32. Residual features for coupled primitives, where $K = \text{derive\_factor}$ and $D = \text{res\_feats\_dim}$ [S1, unofficial].
++*   `coupled_denorm`: `torch.Tensor`, shape `(N*K, 1)`, float32. Denormalization factors for coupled primitives [S1, unofficial].
++*   `anchor_denorm`: `torch.Tensor`, shape `(N, 1)`, float32. Denormalization factors for anchors [S1, unofficial].
++*   `accumulated_grads`: `torch.Tensor`, shape `(N, 1)`, float32. Gradient accumulation for anchors [S1, unofficial].
++*   `accumulated_opacities`: `torch.Tensor`, shape `(N, 1)`, float32. Opacity accumulation [S1, unofficial].
++
++The `RenderSettings` object [S1, unofficial] contains:
++*   `image_height`, `image_width`: int.
++*   `tanfovx`, `tanfovy`: float.
++*   `viewmatrix`: `torch.Tensor`, shape `(4, 4)`.
++*   `projmatrix`: `torch.Tensor`, shape `(4, 4)`.
++*   `campos`: `torch.Tensor`, shape `(3,)`.
++*   `background_color`: `torch.Tensor`, shape `(3,)`, default black `[0, 0, 0]` [S1, unofficial].
+ 
+ **Parameters:**
+-- `voxel_size`: Size of voxels used for initialization and quantization of means [S1, unofficial].
+-- `derive_factor`: Number of coupled primitives derived from each anchor primitive [S1, unofficial].
+-- `ref_feats_dim`: Dimension of reference features [S1, unofficial].
+-- `ref_hyper_dim`: Dimension of hyper-priors for reference features [S1, unofficial].
+-- `res_feats_dim`: Dimension of residual features [S1, unofficial].
+-- `res_hyper_dim`: Dimension of hyper-priors for residual features [S1, unofficial].
++*   `derive_factor` ($K$): Number of coupled primitives derived from each anchor [S1, unofficial].
++*   `ref_feats_dim` ($C$): Dimension of reference features [S1, unofficial].
++*   `res_feats_dim` ($D$): Dimension of residual features [S1, unofficial].
++*   `voxel_size`: Size of voxels used for initialization and quantization of means [S1, unofficial].
+ 
+ **Steps:**
+-1.  **Initialize Rasterizer:** Create a `GaussianRasterizationSettings` object with `image_height`, `image_width`, `tanfovx`, `tanfovy`, `background_color`, `scale_modifier`, `viewmatrix`, `projmatrix`, `sh_degree=1`, `campos`, `prefiltered=False`, and `debug=False` [S1, unofficial].
+-2.  **Prefilter Anchors:** Call `rasterizer.visible_filter` with `means3D=self.means`, `scales=torch.exp(self.scaling_factors_before_exp[:, :3])`, `rotations=self.rotations`, and `cov3D_precomp=None`. This returns `radii_pure` [S1, unofficial].
+-3.  **Create Mask:** Define `anchor_primitive_visible_mask` where `radii_pure > 0` [S1, unofficial].
+-4.  **Filter Data:** Filter `means`, `scaling_factors_before_exp`, `ref_feats`, and `res_feats` using `anchor_primitive_visible_mask` to keep only visible anchors [S1, unofficial].
+-5.  **Predict Coupled Primitives:** Pass the filtered `means`, `scaling_factors_before_exp`, `ref_feats`, `res_feats`, `cam_center`, and `skip_quant` into the prediction network `self.network`. This returns `gaussian_primitives` (containing means, scales, rotations, colors for all primitives), `pred_opacities`, `coupled_primitive_mask`, and `bpp` [S1, unofficial].
+-6.  **Initialize Projected Means:** Create `projected_means` as a zero tensor with `requires_grad=True` (or `retain_grad=True`) to store 2D projections [S1, unofficial].
+-7.  **Render:** Call the rasterizer with:
+-    - `means3D=gaussian_primitives.means`
+-    - `means2D=projected_means`
+-    - `scales=gaussian_primitives.scales`
+-    - `rotations=gaussian_primitives.rotations`
+-    - `cov3D_precomp=None`
+-    - `shs=None`
+-    - `colors_precomp=gaussian_primitives.colors`
+-    - `opacities=gaussian_primitives.opacities`
++1.  **Initialization:** Initialize `GaussianRasterizationSettings` with `image_height`, `image_width`, `tanfovx`, `tanfovy`, `background_color`, `scale_modifier`, `viewmatrix`, `projmatrix`, `sh_degree=1`, `campos`, `prefiltered=False`, `debug=False` [S1, unofficial].
++2.  **Visibility Filtering:** Call `rasterizer.visible_filter` with `means3D=self.means`, `scales=torch.exp(self.scaling_factors_before_exp[:, :3])`, `rotations=self.rotations`, and `cov3D_precomp=None`. This returns `radii_pure` [S1, unofficial].
++3.  **Mask Creation:** Create `anchor_primitive_visible_mask` where `radii_pure > 0` [S1, unofficial].
++4.  **Filtering:** Filter `means`, `scaling_factors_before_exp`, `ref_feats`, and `res_feats` using `anchor_primitive_visible_mask` to remove invisible anchors [S1, unofficial].
++5.  **Primitive Prediction:** Call `self.network` with inputs `means`, `scaling_factors_before_exp`, `ref_feats`, `res_feats`, `cam_center`, and `skip_quant`. The network returns `gaussian_primitives`, `pred_opacities`, `coupled_primitive_mask`, and `bpp` [S1, unofficial].
++    *   `gaussian_primitives` contains the final means, scales, rotations, and colors for all primitives (anchors + coupled) [S1, unofficial].
++    *   `coupled_primitive_mask` indicates which primitives are coupled [S1, unofficial].
++6.  **Projection Initialization:** Initialize `projected_means` as a zero tensor with `requires_grad=True` (or `retain_grad=True` if specified) [S1, unofficial].
++7.  **Rendering:** Call `rasterizer` with:
++    *   `means3D`: `gaussian_primitives.means`
++    *   `means2D`: `projected_means`
++    *   `scales`: `gaussian_primitives.scales`
++    *   `rotations`: `gaussian_primitives.rotations`
++    *   `cov3D_precomp`: `None`
++    *   `shs`: `None`
++    *   `colors_precomp`: `gaussian_primitives.colors`
++    *   `opacities`: `gaussian_primitives.opacities`
+     [S1, unofficial].
+-8.  **Clamp:** Clamp the `rendered_img` to the range $[0, 1]$ [S1, unofficial].
+-9.  **Return Results:** Return a `RenderResults` object containing `rendered_img`, `projected_means`, `visibility_mask` (where radii > 0), `pred_opacities`, `scales`, `anchor_primitive_visible_mask`, `coupled_primitive_mask`, and `bpp` [S1, unofficial].
+-10. **Inference Timing:** For inference, synchronize CUDA, record start time, perform prediction and rendering, synchronize CUDA, record end time, and calculate `predict_time` (seconds) and `render_time` (milliseconds) [S1, unofficial].
++8.  **Clamping:** Clamp `rendered_img` to $[0, 1]$ [S1, unofficial].
++9.  **Result Assembly:** Return `RenderResults` containing `rendered_img`, `projected_means`, `visibility_mask` (where radii > 0), `pred_opacities`, `scales`, `anchor_primitive_visible_mask`, `coupled_primitive_mask`, and `bpp` [S1, unofficial].
+ 
+ **Pseudocode:**
+-
+ ```python
+ import torch
+-import torch.nn as nn
+-
+-class CoupledGaussianRenderer:
+-    def __init__(self, rasterizer, network, voxel_size, derive_factor, 
+-                 ref_feats_dim, res_feats_dim, background_color=0.0):
+-        self.rasterizer = rasterizer
+-        self.network = network
+-        self.voxel_size = voxel_size
+-        self.derive_factor = derive_factor
+-        self.ref_feats_dim = ref_feats_dim
+-        self.res_feats_dim = res_feats_dim
+-        self.background_colors = torch.tensor([background_color, background_color, background_color], dtype=torch.float32)
++
++def coupled_gaussian_render(
++    self,
++    rasterizer,
++    means: torch.Tensor,
++    scaling_factors_before_exp: torch.Tensor,
++    ref_feats: torch.Tensor,
++    res_feats: torch.Tensor,
++    cam_center: torch.Tensor,
++    skip_quant: bool = False
++) -> dict:
++    """
++    Renders the scene using coupled Gaussian primitives.
++    
++    Args:
++        self: The model instance containing network and parameters.
++        rasterizer: The custom Gaussian rasterizer.
++        means: Anchor means, shape (N, 3).
++        scaling_factors_before_exp: Pre-exp scales, shape (N, 6).
++        ref_feats: Reference features, shape (N, C).
++        res_feats: Residual features, shape (N, K, D).
++        cam_center: Camera center in world space, shape (3,).
++        skip_quant: Whether to skip quantization during prediction.
+         
+-        # Initialize parameters
+-        self.gaussian_params = GaussianParameters(
+-            num_anchor_primitive=0,
+-            num_coupled_primitive=0,
+-            derive_factor=derive_factor,
+-            res_feats_dim=res_feats_dim,
+-            means=None,
+-            scales_before_exp=None,
+-            rotations=None,
+-            ref_feats=None,
+-            res_feats=None,
+-            accumulated_grads=None,
+-            coupled_denorm=None,
+-            accumulated_opacities=None,
+-            anchor_denorm=None
+-        )
+-
+-    def render(self, sample: Sample) -> RenderResults:
+-        # 1. Initialize Rasterizer Settings
+-        raster_settings = GaussianRasterizationSettings(
+-            image_height=sample.image_height,
+-            image_width=sample.image_width,
+-            tanfovx=sample.tan_half_fov_x,
+-            tanfovy=sample.tan_half_fov_y,
+-            background=self.background_colors,
+-            scale_modifier=1.0, # Default, adjust if needed
+-            viewmatrix=sample.world_to_view_proj_mat,
+-            projmatrix=sample.world_to_image_proj_mat,
+-            sh_degree=1,
+-            campos=sample.camera_center,
+-            prefiltered=False,
+-            debug=False
+-        )
+-
+-        # 2. Prefilter invisible anchor primitives
+-        # Extract anchor scales (first 3 components of scales_before_exp)
+-        anchor_scales = torch.exp(self.gaussian_params.scales_before_exp[:, :3])
+-        
+-        radii_pure = self.rasterizer.visible_filter(
+-            means3D=self.gaussian_params.means,
+-            scales=anchor_scales,
+-            rotations=self.gaussian_params.rotations,
+-            cov3D_precomp=None,
+-            raster_settings=raster_settings
+-        )
+-
+-        # 3. Create anchor primitive visible mask
+-        anchor_primitive_visible_mask = radii_pure > 0
+-
+-        # 4. Filter data structures
+-        means = self.gaussian_params.means[anchor_primitive_visible_mask]
+-        scaling_factors_before_exp = self.gaussian_params.scales_before_exp[anchor_primitive_visible_mask]
+-        ref_feats = self.gaussian_params.ref_feats[anchor_primitive_visible_mask]
+-        res_feats = self.gaussian_params.res_feats[anchor_primitive_visible_mask]
+-
+-        # 5. Predict Gaussian primitives (anchors + coupled)
+-        # cam_center is sample.camera_center
+-        gaussian_primitives, pred_opacities, coupled_primitive_mask, bpp = self.network(
+-            means=means,
+-            scaling_factors_before_exp=scaling_factors_before_exp,
+-            ref_feats=ref_feats,
+-            res_feats=res_feats,
+-            cam_center=sample.camera_center,
+-            skip_quant=False # Or based on inference/training flag
+-        )
+-
+-        # 6. Initialize projected means
+-        projected_means = torch.zeros_like(gaussian_primitives.means[:, :2], requires_grad=True)
+-
+-        # 7. Render image
+-        # Note: The rasterizer call in the source uses specific arguments.
+-        # We assume gaussian_primitives has .means, .scales, .rotations, .colors
+-        rendered_img = self.rasterizer(
+-            means3D=gaussian_primitives.means,
+-            means2D=projected_means,
+-            scales=gaussian_primitives.scales,
+-            rotations=gaussian_primitives.rotations,
+-            cov3D_precomp=None,
+-            shs=None,
+-            colors_precomp=gaussian_primitives.colors,
+-            opacities=gaussian_primitives.opacities,
+-            raster_settings=raster_settings
+-        )
+-
+-        # 8. Clamp rendered image
+-        rendered_img = torch.clamp(rendered_img, 0.0, 1.0)
+-
+-        # 9. Return results
+-        # Visibility mask for all primitives (radii > 0)
+-        # Note: radii_pure was for anchors. For full visibility, we might need to recompute or use the rasterizer's internal mask.
+-        # The source says "visibility_mask (radii > 0)". Assuming this refers to the final rendered primitives' visibility.
+-        # For simplicity, we return the anchor mask and coupled mask as per source.
+-        return RenderResults(
+-            rendered_img=rendered_img,
+-            projected_means=projected_means,
+-            visibility_mask=radii_pure > 0, # Simplified, source implies this is the mask
+-            pred_opacities=pred_opacities,
+-            scales=gaussian_primitives.scales,
+-            anchor_primitive_visible_mask=anchor_primitive_visible_mask,
+-            coupled_primitive_mask=coupled_primitive_mask,
+-            bpp=bpp
+-        )
++    Returns:
++        RenderResults dictionary.
++    """
++    # 1. Initialize Rasterization Settings
++    # Note: In implementation, these are typically set in __init__ or passed explicitly.
++    # Here we assume rasterizer.settings is configured or passed.
++    # For clarity, we assume rasterizer handles settings internally or they are passed.
++    # Based on notes: rasterizer.visible_filter and rasterizer() are called.
++    
++    # 2. Prefilter invisible anchor primitives
++    # scales for visibility check are exp of first 3 components
++    scales_vis = torch.exp(scaling_factors_before_exp[:, :3])
++    
++    # visible_filter returns radii for each anchor
++    radii_pure = rasterizer.visible_filter(
++        means3D=means,
++        scales=scales_vis,
++        rotations=self.rotations,
++        cov3D_precomp=None
++    )
++    
++    # 3. Create visibility mask
++    anchor_primitive_visible_mask = radii_pure > 0
++    
++    # 4. Filter data structures
++    means = means[anchor_primitive_visible_mask]
++    scaling_factors_before_exp = scaling_factors_before_exp[anchor_primitive_visible_mask]
++    ref_feats = ref_feats[anchor_primitive_visible_mask]
++    res_feats = res_feats[anchor_primitive_visible_mask]
++    
++    # 5. Predict Gaussian primitives
++    # Network outputs: gaussian_primitives, pred_opacities, coupled_primitive_mask, bpp
++    gaussian_primitives, pred_opacities, coupled_primitive_mask, bpp = self.network(
++        means=means,
++        scaling_factors_before_exp=scaling_factors_before_exp,
++        ref_feats=ref_feats,
++        res_feats=res_feats,
++        cam_center=cam_center,
++        skip_quant=skip_quant
++    )
++    
++    # 6. Initialize projected means
++    # Shape matches gaussian_primitives.means
++    projected_means = torch.zeros_like(gaussian_primitives.means, requires_grad=True)
++    
++    # 7. Render image
++    rendered_img = rasterizer(
++        means3D=gaussian_primitives.means,
++        means2D=projected_means,
++        scales=gaussian_primitives.scales,
++        rotations=gaussian_primitives.rotations,
++        cov3D_precomp=None,
++        shs=None,
++        colors_precomp=gaussian_primitives.colors,
++        opacities=gaussian_primitives.opacities,
++        # Additional settings like viewmatrix, projmatrix, etc. are assumed 
++        # to be handled by the rasterizer instance or passed in __init__
++    )
++    
++    # 8. Clamp image
++    rendered_img = torch.clamp(rendered_img, 0.0, 1.0)
++    
++    # 9. Reconstruct full visibility mask for all primitives (anchors + coupled)
++    # Note: radii_pure was only for anchors. 
++    # The rasterizer usually returns radii for all primitives if requested, 
++    # or we infer visibility from the rendering process.
++    # Based on notes: visibility_mask is radii > 0.
++    # We assume rasterizer returns radii for all primitives in the render call 
++    # or we re-calculate. For strict adherence to notes:
++    # "visibility_mask (radii > 0)" is returned.
++    # Let's assume we get radii from the rasterizer call or re-run visible_filter 
++    # on the full set. The notes say "radii > 0" for the mask.
++    # Since gaussian_primitives contains all primitives, we need their radii.
++    # If rasterizer doesn't return radii, we might need to compute them.
++    # However, the note says "RenderResults containing ... visibility_mask (radii > 0)".
++    # We will assume the rasterizer provides this or we compute it.
++    # To be safe and self-contained, we assume the rasterizer returns radii 
++    # or we use the projected means to infer. 
++    # Given the constraint "no placeholders", and the note explicitly mentions 
++    # "radii > 0", we assume the rasterizer or a helper provides this.
++    # If not, we must compute it. Let's assume a helper `get_radii` exists 
++    # or the rasterizer returns it. 
++    # Since I cannot call undefined helpers, I will assume the rasterizer 
++    # returns a tuple or the radii are computed via a standard formula.
++    # Standard 2D radius for a Gaussian is approx 3 * sqrt(eigenvalues).
++    # But the note says "radii_pure" for anchors. 
++    # Let's assume the rasterizer returns `radii` for all primitives.
++    
++    # Re-evaluating based on "Pseudocode has no placeholders":
++    # The note says: "RenderResults containing ... visibility_mask (radii > 0)".
++    # It does not explicitly say the rasterizer returns radii.
++    # However, `visible_filter` returns radii.
++    # We can call `visible_filter` on the full `gaussian_primitives` set.
++    
++    full_scales = gaussian_primitives.scales
++    full_rotations = gaussian_primitives.rotations
++    full_means = gaussian_primitives.means
++    
++    full_radii = rasterizer.visible_filter(
++        means3D=full_means,
++        scales=full_scales,
++        rotations=full_rotations,
++        cov3D_precomp=None
++    )
++    
++    visibility_mask = full_radii > 0
++    
++    # 10. Return Results
++    return {
++        "rendered_img": rendered_img,
++        "projected_means": projected_means,
++        "visibility_mask": visibility_mask,
++        "pred_opacities": pred_opacities,
++        "scales": gaussian_primitives.scales,
++        "anchor_primitive_visible_mask": anchor_primitive_visible_mask,
++        "coupled_primitive_mask": coupled_primitive_mask,
++        "bpp": bpp
++    }
+ ```
+ 
++**Edge Cases and Pitfalls:**
++*   **Precision:** Quantization of means and features is used for compression. The `voxel_size` parameter controls the granularity. Small voxel sizes may lead to quantization artifacts [S1, unofficial].
++*   **Boundaries:** The visibility filter prunes invisible anchors. If an anchor is invisible, its coupled primitives are not predicted, saving computation [S1, unofficial].
++*   **Degenerate Input:** If `derive_factor` is 0, no coupled primitives are generated, falling back to anchor-only rendering [S1, unofficial].
++
+ ## Operating characteristics
+-**Time and Memory Complexity:**
+-The method reduces memory usage by deriving coupled primitives from anchors, lowering the number of stored parameters compared to independent Gaussians. The rendering complexity is proportional to the total number of primitives (anchors + coupled). The prediction step adds computational overhead during training/inference to generate coupled primitives [S1, unofficial].
+-
+-**Strengths and Limitations:**
+-- **Strengths:** Compact representation, efficient storage via compression (GPCC), and fast rendering due to fewer primitives [S1, unofficial].
+-- **Limitations:** Requires a custom network to predict coupled primitives, adding complexity to the training pipeline. Precision issues may arise from quantization and compression [S1, unofficial].
+-
+-**When to Use:**
+-Use when storage and bandwidth are constrained, or when real-time rendering of large scenes is required with limited memory [S1, unofficial].
++*   **Time Complexity:** Rendering time is dominated by the rasterization of $M$ primitives, where $M = N \times (1 + \text{derive\_factor})$. Prediction time depends on the network depth and the number of anchors $N$.
++*   **Memory Complexity:** Memory usage is proportional to $N$ (anchors) plus the compressed representation of coupled primitives. The `bpp` metric indicates the compression efficiency [S1, unofficial].
++*   **Performance:** The method achieves high compression ratios while maintaining rendering quality. Inference involves synchronizing CUDA, performing prediction and rendering, and timing the steps [S1, unofficial].
++*   **Strengths:** Compact representation, efficient rendering, differentiable training.
++*   **Limitations:** Requires a neural network for primitive prediction, which adds complexity to the training pipeline.
+ 
+ ## Background
+-Coupled Gaussian Primitives Rendering, also known as CompGS, was introduced by Liu Xiangrui et al. in the "CompGS" repository [S1, unofficial]. It builds upon 3D Gaussian Splatting by introducing a coupled primitive structure to enhance compression and efficiency [S1, unofficial].
++Coupled Gaussian Primitives Rendering is part of the CompGS (Compressed Gaussian Splatting) framework [S1, unofficial]. It was developed to address the high memory and bandwidth requirements of 3D Gaussian Splatting by introducing a coupled primitive structure. The method uses a custom rasterizer and compression techniques like GPCC for geometry encoding [S1, unofficial].
+ 
+ ## Sources
+-[S1] LiuXiangrui/CompGS, https://github.com/LiuXiangrui/CompGS, fetched 2026-10-27 (unofficial)+[S1] CompGS, https://github.com/LiuXiangrui/CompGS, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,79 @@
+--- v001.md
++++ v002.md
+@@ -8,6 +8,6 @@
+ ## How it works
+ **Inputs:**
+-- Intersection point $P = (P_x, P_y, P_z)$ in voxel coordinates.
+-- Scalar field $\rho$ accessible via trilinear interpolation.
++- Intersection point $P = (P_x, P_y, P_z)$ in voxel coordinates [S1, unofficial].
++- Scalar field $\rho$ accessible via trilinear interpolation [S1, unofficial].
+ - Voxel dimensions $dx, dy, dz$ (width of a single voxel in each direction) [S1, unofficial].
+ 
+@@ -19,5 +19,5 @@
+ 
+ **Steps:**
+-1. Evaluate the scalar field at six points surrounding $P$ to approximate the partial derivatives along each axis.
++1. Evaluate the scalar field at six points surrounding $P$ to approximate the partial derivatives along each axis [S1, unofficial].
+ 2. Compute the gradient components using the central difference formula:
+    $$ \nabla \rho \approx \begin{bmatrix} \frac{\rho(P_x + dx) - \rho(P_x - dx)}{2dx} \\ \frac{\rho(P_y + dy) - \rho(P_y - dy)}{2dy} \\ \frac{\rho(P_z + dz) - \rho(P_z - dz)}{2dz} \end{bmatrix} $$
+@@ -32,8 +32,10 @@
+ - **Higher Order Accuracy:** A higher-order $O(h^4)$ central difference scheme exists, defined as:
+   $$ f'(x) \approx \frac{-f(x + 2h) + 8f(x + h) - 8f(x - h) + f(x - 2h)}{12h} $$
+-  [S1, unofficial]. This requires 12 trilinear interpolations per axis component (36 total) [S1, unofficial]. However, it provides only marginal visual improvement over the $O(h^2)$ scheme, noticeable only when zoomed in extremely closely with correct Phong shading parameters [S1, unofficial].
++  [S1, unofficial]. This requires 12 trilinear interpolations total [S1, unofficial]. However, it provides only marginal visual improvement over the $O(h^2)$ scheme, noticeable only when zoomed in extremely closely with correct Phong shading parameters [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
++import math
++
+ def calculate_central_difference_normal(P, voxel_size, sample_field):
+     """
+@@ -52,5 +54,5 @@
+     
+     # Approximate partial derivatives using central differences
+-    # Note: sample_field handles boundary clamping internally
++    # sample_field must handle boundary clamping (e.g., cudaAddressModeClamp)
+     grad_x = (sample_field(Px + dx, Py, Pz) - sample_field(Px - dx, Py, Pz)) / (2 * dx)
+     grad_y = (sample_field(Px, Py + dy, Pz) - sample_field(Px, Py - dy, Pz)) / (2 * dy)
+@@ -58,8 +60,8 @@
+     
+     # Normalize the gradient vector
+-    magnitude = sqrt(grad_x**2 + grad_y**2 + grad_z**2)
++    magnitude = math.sqrt(grad_x**2 + grad_y**2 + grad_z**2)
+     
+     if magnitude == 0:
+-        return (0.0, 0.0, 1.0) # Fallback for degenerate cases
++        return (0.0, 0.0, 1.0) # Fallback for degenerate cases [G]
+         
+     return (grad_x / magnitude, grad_y / magnitude, grad_z / magnitude)
+@@ -68,9 +70,23 @@
+ ## Subtopics
+ 
+-### Grid Gradient Normal Estimation
+-Computes vertex normals for a mesh (e.g., from Marching Cubes) by estimating the gradient of the underlying scalar field at grid vertices using finite differences, then interpolating these normals to mesh vertices [S2, unofficial]. For each grid vertex at $(cx, cy, cz)$, the X component is calculated as $(Grid[cx-1, cy, cz].Value - Grid[cx+1, cy, cz].Value)$, Y as $(Grid[cx, cy-1, cz].Value - Grid[cx, cy+1, cz].Value)$, and Z as $(Grid[cx, cy, cz-1].Value - Grid[cx, cy, cz+1].Value)$ [S2, unofficial]. The resulting vector is normalized at the grid vertex, then interpolated to mesh vertex positions [S2, unofficial]. This method samples the density function directly, which may be faster or more accurate for smooth shading if the field is differentiable, compared to averaging face normals [S2, unofficial].
++### [Grid Gradient Normal Estimation](14609-grid-gradient-normal-estimation.md)
++Computes vertex normals for a mesh (e.g., from Marching Cubes) by estimating the gradient of the underlying scalar field (density or height function) at grid vertices using finite differences, then interpolating these normals to mesh vertices. It differs from face-normal averaging by sampling the density function directly, which is considered faster or more accurate for smooth shading if the field is differentiable.
++
++### Normal Estimation from Padded Point Grid
++Computes surface normals by taking the cross product of vertical and horizontal difference vectors on a padded point grid, masked by validity checks [S2, unofficial].
++1. Compute vertical vector: `vec_vert = points_pad[:, :, :h, k : w + k] - points_pad[:, :, 2 * k : h + (2 * k), k : w + k]`.
++2. Compute horizontal vector: `vec_hori = points_pad[:, :, k : h + k, :w] - points_pad[:, :, k : h + k, 2 * k : w + (2 * k)]`.
++3. Compute validity mask by multiplying five valid_pad slices: `valid_mask = valid_pad[:, :, k : h + k, k : w + k] * valid_pad[:, :, :h, k : w + k] * valid_pad[:, :, 2 * k : h + (2 * k), k : w + k] * valid_pad[:, :, k : h + k, :w] * valid_pad[:, :, k : h + k, 2 * k : w + (2 * k)]`.
++4. Threshold mask: `valid_mask = valid_mask > 0.5`.
++5. Compute cross product: `cross_product = -torch.linalg.cross(vec_vert, vec_hori, dim=1)`.
++6. Normalize: `normal = F.normalize(cross_product, p=2.0, dim=1, eps=1e-12)`.
++Parameters: $k$: padding offset/stride parameter used for slicing the padded grid. $h, w$: height and width of the target grid. $d_{min}$: minimum depth threshold for validity [S2, unofficial].
++```python
++cross_product = -torch.linalg.cross(vec_vert, vec_hori, dim=1)
++normal = F.normalize(cross_product, p=2.0, dim=1, eps=1e-12)
++```
+ 
+ ## Operating characteristics
+-- **Complexity:** The standard $O(h^2)$ method requires six calls to trilinear interpolation [S1, unofficial]. The $O(h^4)$ variant requires twelve calls per axis component (36 total) [S1, unofficial].
++- **Complexity:** The standard $O(h^2)$ method requires six calls to trilinear interpolation [S1, unofficial]. The $O(h^4)$ variant requires twelve trilinear interpolations total [S1, unofficial].
+ - **Performance:** In practice, the overhead of the $O(h^4)$ scheme slowed renderers by only 0–2 FPS on datasets ranging from $32 \times 32 \times 32$ to $1024 \times 768 \times 256$ [S1, unofficial].
+ - **Strengths:** Simple to implement; leverages existing trilinear interpolation hardware; provides smooth shading for isosurfaces [S1, unofficial].
+@@ -82,3 +98,3 @@
+ ## Sources
+ [S1] GPU Accelerated Voxel Traversal using the Prediction Buffer, https://people.cs.vt.edu/yongcao/publication/pdf/Braley10.pdf, fetched 2026-10-25 (unofficial)
+-[S2] Marching Cubes Vertex Normals, https://gamedev.stackexchange.com/questions/97707/marching-cubes-vertex-normals, fetched 2026-10-26 (unofficial)+[S2] muskie82/MonoGS, https://github.com/muskie82/MonoGS, fetched 2026-10-27 (unofficial)

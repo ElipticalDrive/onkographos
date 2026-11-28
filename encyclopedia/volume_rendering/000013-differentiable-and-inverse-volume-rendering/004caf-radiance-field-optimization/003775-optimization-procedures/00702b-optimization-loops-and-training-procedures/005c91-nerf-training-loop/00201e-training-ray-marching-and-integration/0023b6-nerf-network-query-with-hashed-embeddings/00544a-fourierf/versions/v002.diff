@@ -1,0 +1,211 @@
+--- v001.md
++++ v002.md
+@@ -7,54 +7,48 @@
+ 
+ ## How it works
+-**Inputs:** A set of $V$ sparse input images (typically 3–9 views) with known camera poses; a grid-based NeRF representation (CP or VM decomposition) initialized with feature tensors.
+-**Outputs:** A trained radiance field model capable of novel view synthesis.
++**Inputs and Outputs**
++*   **Inputs:** A set of $V$ sparse input images (typically 3–9 views) with known camera poses; a grid-based NeRF representation initialized with feature tensors [S1].
++*   **Outputs:** A trained radiance field model capable of novel view synthesis [S1].
+ 
+-**Data Structures:**
+-The scene is represented by a 3D feature tensor $\mathbf{T} \in \mathbb{R}^{I \times J \times K}$. FourieRF operates on the factorized components of this tensor.
+-1.  **CP Decomposition:** $\mathbf{T}$ is decomposed into a sum of rank-1 tensors. The method applies frequency control to the 1D feature vectors $\mathbf{v} \in \mathbb{R}^d$.
+-2.  **VM Decomposition:** $\mathbf{T}$ is decomposed into a sum of outer products of a vector and a matrix (e.g., $\mathbf{v}_{r1} \circ \mathbf{M}_{r2,3}$). The method applies frequency control to:
+-    *   1D feature vectors $\mathbf{v} \in \mathbb{R}^d$.
+-    *   2D feature matrices $\mathbf{w} \in \mathbb{R}^{d_1 \times d_2}$ [S1].
++**Data Structures**
++The scene is represented by a 3D feature tensor $\mathbf{T} \in \mathbb{R}^{I \times J \times K}$ [S1]. FourieRF operates on the factorized components of this tensor [S1].
++1.  **CP Decomposition:** $\mathbf{T}$ is decomposed into a sum of rank-1 tensors [S1]. The method applies frequency control to the 1D feature vectors $\mathbf{v} \in \mathbb{R}^d$ [S1].
++2.  **VM Decomposition:** $\mathbf{T}$ is decomposed into a sum of outer products of a vector and a matrix (e.g., $\mathbf{v}_{r1} \circ \mathbf{M}_{r2,3}$) [S1]. The method applies frequency control to 1D feature vectors $\mathbf{v} \in \mathbb{R}^d$ and 2D feature matrices $\mathbf{w} \in \mathbb{R}^{d_1 \times d_2}$ [S1].
++*   Bit packing and exact memory layout details are Not given in the sources.
+ 
+-**Parameters:**
+-*   $N$: Total number of training iterations (typically 10,000) [S1].
+-*   $f_0$: Initial clipping threshold, representing the percentage of Fourier coefficients allowed. Default: $0.01\%$ ($0.0001$) for real scenes, $0.3\%$ for synthetic scenes [S1].
+-*   $\Delta$: Increment per iteration, calculated as $\Delta = \frac{1 - f_0}{N}$ [S1].
+-*   $f_t$: Clipping threshold at iteration $t$ [S1].
+-*   Optimizer: AdamW with $\beta_1 = 0.9, \beta_2 = 0.98$ [S1].
++**Algorithm Steps**
++1.  **Initialization:** Initialize feature vectors and matrices in the spatial domain [S1]. Set the initial clipping threshold $f_0$ and calculate the increment $\Delta$ [S1].
++2.  **Threshold Update:** At the start of iteration $t$, update the clipping threshold $f_t$ using the linear schedule [S1].
++3.  **Feature Transformation:** For each feature component in the grid decomposition, project into the Fourier domain, apply the frequency mask, and transform back to the spatial domain [S1].
++4.  **Network Forward Pass:** Use the smoothed features to query the NeRF network for density and color [S1].
++5.  **Loss Computation:** Compute the photometric loss between rendered and input images, and add regularization losses (Total Variation, L1 density, weight decay) [S1].
++6.  **Backward Pass:** Compute gradients and update parameters using the AdamW optimizer [S1].
++
++**Formulas**
++*   **Threshold Schedule:** $f_t = f_{t-1} + \Delta$, where $\Delta = \frac{1 - f_0}{N}$ and $N$ is the total number of iterations [S1].
++*   **1D Mask $\alpha(f_t)$:** For a 1D feature of dimension $d_f$, let $t_\alpha(f_t) = d_f \times f_t$. The mask is defined as:
++    $$ \alpha_i(f_t) = \begin{cases} 1 & \text{if } i < t_\alpha(f_t) \\ t_\alpha(f_t) - \lfloor t_\alpha(f_t) \rfloor & \text{if } i = \lfloor t_\alpha(f_t) \rfloor \\ 0 & \text{otherwise} \end{cases} $$
++    The transformed feature is $\hat{\mathbf{v}} = \text{IFFT}(\text{FFT}(\mathbf{v}) \odot \alpha(f_t))$ [S1].
++*   **2D Mask $\beta(f_t)$:** For a 2D feature of size $d_1 \times d_2$, the mask is a circle centered at $c = (\lfloor d_1/2 \rfloor, \lfloor d_2/2 \rfloor)$ with radius $r = f_t \sqrt{\frac{\max(d_1, d_2)^2}{2}}$ [S1]. Coefficients outside the circle are set to $0$ [S1]. The transformed feature is $\hat{\mathbf{w}} = \text{IFFT}(\text{FFT}(\mathbf{w}) \odot \beta(f_t))$ [S1].
++
++**Parameters**
++*   $N$: Total number of training iterations. Typical value: $10,000$ [S1].
++*   $f_0$: Initial clipping threshold (fraction of coefficients). Value: $0.3$ for synthetic scenes, $0.01$ for real scenes [S1].
++*   $\Delta$: Increment per iteration. Calculated as $\frac{1 - f_0}{N}$; for real scenes, the supplementary material specifies $\Delta = 10^{-4}$ [S1].
++*   Optimizer: AdamW with $\beta_1 = 0.9$, $\beta_2 = 0.98$ [S1].
+ *   Weight Decay: $0.2$ for synthetic scenes, $0$ for real scenes [S1].
+ *   $w_{TV}$: Total Variation loss weight for appearance and density features. Value: $1.0$ [S1].
+ *   $w_{L1}$: L1 loss weight for density features (real scenes only). Value: $10^{-4}$ [S1].
+ 
+-**Algorithm:**
+-The core mechanism is a progressive Fourier frequency control loop applied at the start of every training iteration, before gradient accumulation [S1].
++**Edge Cases and Pitfalls**
++*   **Differentiability:** The threshold update $f_t$ must be applied at the start of every iteration, before any gradient is accumulated, to avoid differentiability problems [S1].
++*   **Overfitting to Views:** In few-shot settings, the model may overfit to directional information [S1]. This is mitigated by using a simplified decoder that does not use positional encodings for features or view directions [S1].
++*   **Occlusion:** In real scenes, matter appearing in front of the camera causes overfitting [S1]. FourieRF applies FreeNeRF's occlusion regularization without modification [S1].
++*   **Under-constrained Scenes:** In severely under-constrained scenarios with significant view occlusion, FourieRF may still produce reconstruction errors [S1].
++*   **Synthetic vs. Real Scenes:** Synthetic scenes with solid white backgrounds alter the method's behavior, requiring a higher initial $f_0$ ($0.3$) compared to real scenes ($0.01$) [S1]. Synthetic scenes use weight decay ($0.2$) for floater removal, while real scenes use L1 density loss ($10^{-4}$) [S1].
+ 
+-1.  **Initialization:** Initialize feature vectors and matrices in the spatial domain. Set $f_0$ and calculate $\Delta$ [S1].
+-2.  **Threshold Update:** At the start of iteration $t$, update the clipping threshold:
+-    $$ f_t = f_{t-1} + \Delta $$
+-    This update must occur before any gradients are computed to maintain differentiability [S1].
+-3.  **Feature Transformation:** For each feature component in the grid decomposition, apply the Fourier clipping:
+-    *   **1D Features ($\mathbf{v} \in \mathbb{R}^d$):**
+-        Compute the mask $\alpha(f_t)$ of length $d_f$ (dimension of FFT). The mask is defined as:
+-        $$ \alpha_i(f_t) = \begin{cases} 1 & \text{if } i < t_\alpha(f_t) \\ t_\alpha(f_t) - \lfloor t_\alpha(f_t) \rfloor & \text{if } i = t_\alpha(f_t) \\ 0 & \text{otherwise} \end{cases} $$
+-        where $t_\alpha(f_t) = d_f \times f_t$.
+-        Transform the feature:
+-        $$ \hat{\mathbf{v}} = \text{IFFT}(\text{FFT}(\mathbf{v}) \odot \alpha(f_t)) $$
+-    *   **2D Features ($\mathbf{w} \in \mathbb{R}^{d_1 \times d_2}$):** (Used only in VM decomposition)
+-        Compute the circular mask $\beta(f_t)$. The mask is a circle centered at $c = (\lfloor d_1/2 \rfloor, \lfloor d_2/2 \rfloor)$ with radius $r = f_t \sqrt{\frac{\max(d_1, d_2)^2}{2}}$. Coefficients outside the circle are set to 0.
+-        Transform the feature:
+-        $$ \hat{\mathbf{w}} = \text{IFFT}(\text{FFT}(\mathbf{w}) \odot \beta(f_t)) $$
+-4.  **Network Forward Pass:** Use the smoothed features $\hat{\mathbf{v}}$ and $\hat{\mathbf{w}}$ to query the NeRF network for density and color.
+-5.  **Loss Computation:** Compute the photometric loss (L2 or L1) between rendered and input images. Add regularization losses:
+-    *   Total Variation loss on features with weight $w_{TV} = 1.0$ [S1].
+-    *   L1 loss on density features ($w_{L1} = 10^{-4}$) for real scenes [S1].
+-    *   Weight decay (synthetic scenes) or L1 density loss (real scenes) to remove floaters [S1].
+-6.  **Backward Pass:** Compute gradients and update parameters using AdamW [S1].
+-
+-**Pseudocode:**
+-
++**Pseudocode**
+ ```python
+ import torch
+-import torch.nn.functional as F
+ 
+ def fourie_rf_step(features_1d, features_2d, iteration, total_iterations, f0):
+@@ -67,5 +61,5 @@
+         iteration: Current training iteration t.
+         total_iterations: Total number of iterations N.
+-        f0: Initial clipping threshold percentage (e.g., 0.0001 for 0.01%).
++        f0: Initial clipping threshold fraction (0.3 synthetic, 0.01 real).
+         
+     Returns:
+@@ -73,5 +67,4 @@
+     """
+     # 1. Update clipping threshold
+-    # Delta is the linear increment per iteration
+     delta = (1.0 - f0) / total_iterations
+     f_t = f0 + iteration * delta
+@@ -82,19 +75,16 @@
+         # FFT along the feature dimension (last dim)
+         v_fft = torch.fft.fft(v, dim=-1)
++        d_f = v_fft.shape[-1]
++        t_alpha = d_f * f_t
++        floor_t = torch.floor(t_alpha)
+         
+         # Create 1D mask alpha(f_t)
+-        d_f = v_fft.shape[-1]
+-        t_alpha = d_f * f_t
++        indices = torch.arange(d_f, device=v.device)
++        mask = torch.zeros(d_f, device=v.device)
++        mask[indices < t_alpha] = 1.0
++        mask[indices == floor_t] = t_alpha - floor_t
+         
+-        # Create indices array
+-        indices = torch.arange(d_f, device=v.device)
+-        
+-        # Apply mask definition: 1 if i < t_alpha, fractional if i == t_alpha, 0 otherwise
+-        mask = torch.zeros_like(v_fft.real)
+-        mask[indices < t_alpha] = 1.0
+-        mask[indices == t_alpha] = t_alpha - torch.floor(t_alpha)
+-        
+-        # Apply mask and IFFT
+-        v_smoothed_fft = v_fft * mask.unsqueeze(-1) # Ensure broadcasting works if mask is 1D
++        # Apply mask and IFFT (broadcast mask over batch dim)
++        v_smoothed_fft = v_fft * mask.unsqueeze(0)
+         v_smoothed = torch.fft.ifft(v_smoothed_fft, dim=-1).real
+         smoothed_1d.append(v_smoothed)
+@@ -105,6 +95,6 @@
+         # FFT along spatial feature dimensions (last two dims)
+         w_fft = torch.fft.fft2(w)
++        d1, d2 = w.shape[-2], w.shape[-1]
+         
+-        d1, d2 = w.shape[-2], w.shape[-1]
+         center_c1 = torch.floor(d1 / 2).to(w.device)
+         center_c2 = torch.floor(d2 / 2).to(w.device)
+@@ -125,6 +115,6 @@
+         mask_2d = (dist <= radius).float()
+         
+-        # Apply mask and IFFT
+-        w_smoothed_fft = w_fft * mask_2d.unsqueeze(-1).unsqueeze(-1)
++        # Apply mask and IFFT (broadcast mask over batch and channel dims)
++        w_smoothed_fft = w_fft * mask_2d.unsqueeze(0).unsqueeze(0)
+         w_smoothed = torch.fft.ifft2(w_smoothed_fft).real
+         smoothed_2d.append(w_smoothed)
+@@ -132,5 +122,5 @@
+     return smoothed_1d, smoothed_2d
+ 
+-def train_fourie_rf(input_images, camera_poses, grid_features, optimizer, total_iterations=10000, f0=0.0001):
++def train_fourie_rf(input_images, camera_poses, grid_features, optimizer, total_iterations=10000, f0=0.01):
+     """
+     Main training loop for FourieRF.
+@@ -143,20 +133,19 @@
+         
+         # Step 2: Forward pass through NeRF using smoothed features
+-        # (Assuming a standard NeRF query function that takes feature tensors)
+-        # This step depends on the specific grid-based NeRF implementation (e.g., TensoRF)
+-        rendered_colors, densities = query_nerf(features_1d, features_2d, camera_poses, input_images)
++        # Query NeRF network with smoothed features to render images and densities [S1].
++        rendered_colors, densities = # query_nerf(features_1d, features_2d, camera_poses, input_images)
+         
+         # Step 3: Compute Loss
+         # Photometric loss (e.g., L2)
+-        photometric_loss = F.mse_loss(rendered_colors, input_images)
++        photometric_loss = torch.nn.functional.mse_loss(rendered_colors, input_images)
+         
+         # Regularization
+-        tv_loss = compute_total_variation_loss(features_1d + features_2d)
++        # Compute Total Variation loss on features [S1].
++        tv_loss = # compute_total_variation_loss(features_1d + features_2d)
+         tv_loss = tv_loss * 1.0 # w_TV = 1.0
+         
+         l1_density_loss = torch.tensor(0.0)
+-        # Apply L1 on density for real scenes (not synthetic)
+-        # This check depends on dataset type, assumed handled externally or via flag
+-        # l1_density_loss = F.l1_loss(densities, target) * 1e-4 
++        # Apply L1 on density for real scenes (not synthetic) [S1].
++        # l1_density_loss = torch.nn.functional.l1_loss(densities, target) * 1e-4 
+         
+         total_loss = photometric_loss + tv_loss + l1_density_loss
+@@ -169,21 +158,14 @@
+         optimizer.step()
+         
+-        # Note: Weight decay is handled by the optimizer configuration (0.2 for synthetic, 0 for real)
++        # Note: Weight decay is handled by the optimizer configuration (0.2 for synthetic, 0 for real) [S1].
+ ```
+-
+-**Edge Cases and Pitfalls:**
+-*   **Differentiability:** The threshold update $f_t$ must be applied at the start of the iteration, before any gradient is accumulated. Applying it during the backward pass or after gradient computation breaks differentiability [S1].
+-*   **Overfitting to Views:** In few-shot settings, models may overfit to directional information. FourieRF mitigates this by using a simplified decoder that does not use positional encodings for features or view directions [S1].
+-*   **Occlusion:** In real scenes, matter appearing in front of the camera can cause overfitting. FourieRF applies FreeNeRF's occlusion regularization without modification [S1].
+-*   **Under-constrained Scenes:** In severely under-constrained scenarios with significant view occlusion, FourieRF may still produce reconstruction errors [S1].
+-*   **Synthetic vs. Real Scenes:** Synthetic scenes (white background) require a higher initial $f_0$ ($0.3\%$) compared to real scenes ($0.01\%$) [S1]. Synthetic scenes use weight decay ($0.2$) for floater removal, while real scenes use L1 density loss ($10^{-4}$) [S1].
+ 
+ ## Operating characteristics
+ *   **Time Complexity:** Training time is approximately 10 minutes for convergence on the Blender dataset (6 views, 10k iterations) [S1].
+ *   **Speed Comparison:** FourieRF achieves $0.93\times$ the training time of TensoRF, $5.181\times$ faster than ZeroRF, and $35.71\times$ faster than FreeNeRF on the Blender dataset [S1]. It is slightly faster than vanilla TensoRF because it does not predict "useless" floaters [S1].
+-*   **Memory Complexity:** Inherits the memory complexity of the underlying grid decomposition (CP or VM). VM decomposition reduces space complexity from $O(n^3)$ to $O(n^2)$ compared to CP [S1].
++*   **Memory Complexity:** Inherits the memory complexity of the underlying grid decomposition (CP or VM) [S1]. VM decomposition reduces space complexity from $O(n^3)$ to $O(n^2)$ compared to CP [S1].
+ *   **Strengths:** Fast convergence, robust on both synthetic and real scenes, no computational overhead per iteration, avoids complex occlusion regularization required by FreeNeRF [S1].
+ *   **Limitations:** May fail in severely under-constrained scenarios with heavy occlusion [S1]. Performance depends on the choice of $\Delta$ (increment speed), though the linear schedule is generally robust [S1].
+-*   **When to use:** Few-shot novel view synthesis (3–9 views) where training speed is critical and external data priors (depth, diffusion) are unavailable.
++*   **When to use:** Few-shot novel view synthesis (3–9 views) where training speed is critical and external data priors (depth, diffusion) are unavailable [S1].
+ *   **When not to use:** Dense-view settings where standard NeRFs perform adequately, or scenarios with severe unobserved geometry where even frequency control cannot resolve ambiguities [S1].
+ 

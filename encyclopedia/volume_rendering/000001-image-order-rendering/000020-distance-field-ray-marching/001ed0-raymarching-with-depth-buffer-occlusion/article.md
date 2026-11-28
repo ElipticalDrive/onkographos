@@ -1,0 +1,139 @@
+# Raymarching with Depth Buffer Occlusion
+
+Also called: Depth-buffered Raymarching, Raymarching with Mesh Interaction, Z-Buffer Occlusion
+
+## Overview
+Raymarching with Depth Buffer Occlusion is a technique that allows raymarched Signed Distance Field (SDF) objects to correctly occlude and be occluded by standard mesh-based geometry in a scene [S2, unofficial]. It solves the problem where raymarched objects typically float on top of all other geometry because the raymarching loop ignores the depth of existing meshes [S2, unofficial]. By sampling the scene's depth buffer to determine the distance to the nearest mesh surface, the raymarcher can terminate early if it passes that distance, ensuring proper layering [S2, unofficial].
+
+## How it works
+The method integrates the scene's depth buffer into the sphere tracing loop defined in [Distance-field ray marching](21-distance-field-ray-marching.md) [S2, unofficial]. It requires access to the camera's view matrix, inverse view matrix, and the rendered depth texture [S2, unofficial].
+
+### Inputs and Outputs
+*   **Inputs**:
+    *   Ray origin $\mathbf{o}$ (camera position in world space) [S2, unofficial].
+    *   Ray direction $\mathbf{d}$ (normalized direction in world space) [S2, unofficial].
+    *   Depth buffer texture $\mathcal{D}$ (e.g., `_CameraDepthTexture`) [S2, unofficial].
+    *   View matrix $V$ and Inverse View Matrix $V^{-1}$ [S2, unofficial].
+    *   SDF function $f(\mathbf{p})$ [G].
+*   **Outputs**:
+    *   Final color $C$ for the pixel, blending the raymarched SDF result with the background mesh color [S2, unofficial].
+
+### Data Structures
+1.  **Depth Buffer**: A 2D texture storing depth values, accessed via `_CameraDepthTexture` [S2, unofficial]. The values are typically non-linear and must be converted to linear eyespace depth [S2, unofficial].
+2.  **Vertex Shader Output**: A structure containing the world-space ray direction, normalized in the Z-axis [S2, unofficial].
+
+### Algorithm Steps
+
+1.  **Ray Direction Normalization (Vertex Shader)**:
+    The ray direction $\mathbf{r}_d$ is computed in eyespace (view space) [S2, unofficial]. In eyespace, $z < 0$ is forward [S2, unofficial]. To calculate the true distance from the depth buffer, the ray direction is normalized such that its Z-component magnitude is $1.0$ [S2, unofficial].
+    
+    Let $\mathbf{r}_n$ be the Z-normalized ray direction in eyespace:
+    $$ \mathbf{r}_n = \frac{\mathbf{r}_d}{|r_d.z|} $$
+    The absolute value $|r_d.z|$ is used to prevent flipping the ray direction if $r_d.z$ is negative [S2, unofficial].
+    
+    Transform $\mathbf{r}_n$ from eyespace to worldspace using the inverse view matrix $V^{-1}$:
+    $$ \mathbf{r}_{world} = V^{-1} \cdot \begin{bmatrix} \mathbf{r}_n \\ 0 \end{bmatrix} $$
+    (Treating $\mathbf{r}_n$ as a direction vector, the w-component is $0$) [S2, unofficial].
+
+2.  **Depth Sampling (Fragment Shader)**:
+    Sample the depth buffer at the current pixel's UV coordinates to get the non-linear depth value $d_{nl}$ [S2, unofficial]. Convert this to linear eyespace depth $d_{eye}$ [S2, unofficial].
+    
+    Calculate the true Euclidean distance $s$ from the camera origin to the mesh surface along the ray. Using similar triangles, the ratio of the true distance $|r|$ to the eyespace depth $d_{eye}$ is equal to the ratio of the length of the Z-normalized ray $|\mathbf{r}_n|$ to $1$:
+    $$ s = d_{eye} \times |\mathbf{r}_n| $$
+    where $|\mathbf{r}_n| = \sqrt{r_{n,x}^2 + r_{n,y}^2 + r_{n,z}^2}$ [S2, unofficial].
+
+3.  **Raymarching Loop**:
+    Perform standard sphere tracing starting from the camera origin $\mathbf{o}$ with direction $\mathbf{r}_{world}$ [S2, unofficial].
+    
+    For each step $i$:
+    *   Current position $\mathbf{p} = \mathbf{o} + t \cdot \mathbf{r}_{world}$ [G].
+    *   Evaluate SDF: $dist = f(\mathbf{p})$ [G].
+    *   **Occlusion Check**: If the accumulated distance $t \ge s$, the ray has passed the mesh surface. Terminate the loop and return a transparent color to allow the mesh to show through [S2, unofficial].
+    *   **Surface Hit Check**: If $dist < \epsilon$ (convergence threshold), the ray hit the SDF surface. Compute shading and return the color [G].
+    *   **Step**: Advance $t \leftarrow t + dist$ [G].
+    *   **Max Steps**: If $i$ exceeds a maximum step count, terminate [S2, unofficial].
+
+4.  **Blending**:
+    The final pixel color is a blend of the background mesh color and the raymarched SDF color [S2, unofficial]. If the raymarcher returns transparent (due to occlusion), the background mesh color is used [S2, unofficial]. If it returns an opaque SDF color, it is composited over the background [S2, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def vertex_shader(vertex_pos, inv_view_matrix):
+    # Ray direction in eyespace (view space)
+    rd_eyespace = normalize(vertex_pos)
+    # Normalize Z-component magnitude to 1.0 to prevent flip
+    rn_eyespace = rd_eyespace / abs(rd_eyespace.z)
+    # Transform to worldspace (direction vector, w=0)
+    ray_world = inv_view_matrix @ vec4(rn_eyespace, 0.0)
+    return ray_world.xyz
+
+def fragment_shader(uv, ro_world, rd_world, ray_world, depth_texture, color_texture, near_plane):
+    # Sample depth buffer
+    depth_nl = depth_texture.sample(uv).r
+    # Convert to linear eyespace depth (standard projection math) [G]
+    depth_eye = 1.0 / (depth_nl * (1.0 - near_plane) + near_plane)
+    # Calculate true distance to mesh surface
+    scale_factor = length(ray_world)
+    s = depth_eye * scale_factor
+
+    # Sample background mesh color
+    bg_color = color_texture.sample(uv).rgb
+
+    # Raymarch loop
+    t = 0.0
+    max_steps = 64
+    hit_color = vec4(0.0, 0.0, 0.0, 0.0)
+    for i in range(max_steps):
+        if t >= s:
+            break
+        p = ro_world + t * rd_world
+        dist = f(p) # Scene SDF evaluation
+        if dist < 0.001:
+            normal = compute_sdf_normal(f, p)
+            hit_color = vec4(shade_surface(p, normal), 1.0)
+            break
+        t += dist
+
+    # Alpha blend with background
+    final_color = bg_color * (1.0 - hit_color.a) + hit_color.rgb * hit_color.a
+    return final_color
+```
+
+### Parameters
+*   **Max Steps**: Typically $64$ [S2, unofficial].
+*   **Convergence Threshold ($\epsilon$)**: Typically $0.001$ [G].
+*   **Near Plane**: Standard camera parameter [G].
+*   **Depth Texture**: Platform-specific sampler (e.g., `_CameraDepthTexture`) [S2, unofficial].
+
+### Edge Cases and Pitfalls
+*   **Ray Direction Flip**: In eyespace, $z < 0$ is forward. Dividing the ray direction by $r_d.z$ without taking the absolute value will flip the ray direction if $r_d.z$ is negative, causing the raymarched scene to appear inverted [S2, unofficial].
+*   **Depth Precision**: The depth buffer may have limited precision. Using linear conversion is crucial to convert non-linear depth values to linear distances for accurate comparison [S2, unofficial].
+*   **Near Plane Clipping**: The depth buffer only contains information for pixels within the view frustum and beyond the near plane [G].
+*   **Transparency**: If the mesh in the depth buffer is transparent, the depth value may not represent the true front-most surface. This method assumes the depth buffer contains the front-most opaque geometry [G].
+
+## Subtopics
+
+### Radii Scaling for Sphere-Cone Occlusion
+This variant addresses the occlusion of scale-invariant integral surfaces (like skeleton-based sphere-cones) in the depth buffer [S3]. It computes a scaling factor for the radii of sphere-cone primitives to guarantee correct occlusion [S3]. The worst-case configuration for this scaling is two segment primitives aligned with the viewing direction $-\mathbf{v}$, both having radius $\tau$ at point $q$ [S3]. Due to surface scale invariance, the scaling factor is computed numerically for a unit radius case, representing the distance from $q$ to the isosurface in direction $\mathbf{v}$ [S3]. This worst-case configuration is independent of the actual skeleton layout, requiring no additional skeleton processing [S3].
+
+### Multipass Depth-Based Ray Marching
+This variant extends the Holistic UOI pipeline to support 3D object intersections and LOD management by using multipass rendering instead of single-pass [S4]. Each scene SDF component is defined as an independent virtual scene equation and rendered in a separate pass [S4]. A custom floating-point depth buffer stores the minimum distance values from previous passes [S4]. During subsequent passes, the depth buffer acts as another SDF component, and an additional check terminates the raymarch if the traveled distance is smaller than the stored depth buffer value [S4]. This solves the original single-pass limitation where occlusion algorithms could not handle intersections between SDF components [S4].
+
+## Operating characteristics
+*   **Time Complexity**: Adds $O(1)$ overhead per pixel for depth sampling and distance calculation. The raymarching loop may terminate earlier, potentially reducing the number of SDF evaluations if the mesh is closer than the SDF surface [S2, unofficial].
+*   **Memory Complexity**: Requires storage for the depth buffer texture, which is typically already present in the rendering pipeline [S2, unofficial].
+*   **Performance**: The method is efficient as it leverages existing hardware depth buffers. The primary cost is the additional arithmetic for depth conversion and the early exit check [S2, unofficial].
+*   **Strengths**: Enables seamless integration of raymarched SDF objects with traditional mesh-based geometry, allowing for correct occlusion and interaction [S2, unofficial].
+*   **Limitations**: Only works with opaque mesh geometry in the depth buffer. Transparent meshes or SDF objects rendered after the depth pass may not occlude correctly [G]. Requires access to the depth buffer, which may not be available in all rendering contexts (e.g., deferred rendering without depth pre-pass) [G].
+
+## Background
+The technique was popularized by Adrian Booth in a blog post detailing the implementation of raymarched distance fields in Unity [S2, unofficial]. It addresses a common issue in hybrid rendering pipelines where raymarched objects fail to interact with rasterized geometry [S2, unofficial]. The method relies on standard graphics API features (depth buffers, view matrices) and does not require specialized hardware beyond standard GPU capabilities [S2, unofficial].
+
+## Sources
+[S1] Как Я Заставил Esp8266 Рисовать 3d, Стрелять И Летать: Полный ..., https://habr.com/ru/articles/1097380/, fetched 2026-10-26 (unofficial)
+[S2] Raymarching Distance Fields: Concepts and Implementation ..., https://adrianb.io/2016/10/01/raymarching.html, fetched 2026-10-27 (unofficial)
+[S3] Fast Ray Tracing of Scale‐Invariant Integral Surfaces, https://doi.org/10.1111/cgf.14208, fetched 2026-10-26
+[S4] Real-time visualization of Dynamic Unlimited Objects Instancing, https://doi.org/10.24132/csrn.2018.2802.4, fetched 2026-10-26

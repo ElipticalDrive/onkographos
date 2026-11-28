@@ -1,0 +1,224 @@
+--- v001.md
++++ v002.md
+@@ -8,27 +8,20 @@
+ ## How it works
+ **Inputs and Outputs**
+-*   **Inputs:** Camera parameters (perspective, orthographic, or infinite-far), scene depth buffer, up to 16 local volume definitions (transformed boxes), scene light list (directional, point, spot), and HDR color buffer.
+-*   **Outputs:** Accumulated fog color and opacity per pixel, integrated into the HDR buffer.
++*   **Inputs:** Camera parameters (perspective, orthographic, or infinite-far), up to 16 local volume definitions (transformed boxes), scene light list (directional, point, spot), and HDR color buffer [S1, unofficial].
++*   **Outputs:** Accumulated fog color and opacity per pixel, integrated into the HDR buffer [G].
+ 
+ **Data Structures**
+-*   **Local Volume:** A transformed box defined by a $4 \times 4$ affine transformation matrix and volume properties (extinction coefficient, albedo, scattering phase function parameters). The implementation rejects invalid volume transforms [S1, unofficial].
++*   **Local Volume:** A transformed box defined by a $4 \times 4$ affine transformation matrix and volume properties (extinction coefficient, albedo, scattering phase function parameters) [G]. The implementation rejects invalid volume transforms [S1, unofficial].
+ *   **Light List:** Contains directional, point, and spot lights sharing the scene’s attenuation and shadow maps [S1, unofficial].
+ 
+ **Algorithm Steps**
+-1.  **Ray Generation:** For each pixel, generate a ray based on the camera type (perspective, orthographic, or infinite-far). Determine the ray's near and far bounds using the scene depth [S1, unofficial].
+-2.  **Ray Marching:** Discretize the ray into fixed steps. The number of steps is configurable (e.g., 48 steps in reference measurements) [S1, unofficial].
+-3.  **Sample Point Calculation:** For each step, calculate the sample position at the **segment midpoint** between the current and next step boundary [S1, unofficial].
+-4.  **Height Density Integration:** Evaluate the exponential height density at the sample point. This contributes to the base extinction along the ray [S1, unofficial].
+-5.  **Local Volume Intersection:** Check the sample point against all active local volumes (up to 16).
+-    *   Use ray–box interval tests to determine if the sample lies within a volume.
+-    *   Preserve thin-volume extinction between march samples by integrating over the ray segment length inside the volume [S1, unofficial].
+-    *   If the sample is inside a volume, compute the additive extinction and scattering contribution using the volume's properties.
+-6.  **Lighting Evaluation:** For each light in the scene:
+-    *   Calculate the light direction and distance to the sample point.
+-    *   Apply light attenuation.
+-    *   **Shadow Lookup:** Perform a hardware PCF shadow lookup using the shadow map associated with the light. Crucially, sample the shadow map at the **actual 3D sample point** projected into light space, without applying surface-normal or depth offsets [S1, unofficial]. This prevents light leakage through nearby blockers [S1, unofficial].
+-    *   Apply the Henyey–Greenstein phase function for scattering towards the camera [S1, unofficial].
++1.  **Ray Generation:** For each pixel, generate a ray based on the camera type (perspective, orthographic, or infinite-far) [S1, unofficial]. Determine the ray's near and far bounds using depth-bounded integration [S1, unofficial].
++2.  **Ray Marching:** Discretize the ray into fixed steps [S1, unofficial].
++3.  **Sample Point Calculation:** For each step, calculate the sample position at the segment midpoint between the current and next step boundary [S1, unofficial].
++4.  **Height Density Integration:** Evaluate the exponential height density at the sample point [S1, unofficial].
++5.  **Local Volume Intersection:** Check the sample point against all active local volumes (up to 16) [S1, unofficial]. Use ray–box interval tests to determine if the sample lies within a volume [S1, unofficial]. Preserve thin-volume extinction between march samples by integrating over the ray segment length inside the volume [S1, unofficial]. If the sample is inside a volume, compute the additive extinction and scattering contribution using the volume's properties [S1, unofficial].
++6.  **Lighting Evaluation:** For each light in the scene, calculate the light direction and distance to the sample point [S1, unofficial]. Apply light attenuation [S1, unofficial]. Perform a hardware PCF shadow lookup using the shadow map associated with the light [S1, unofficial]. Sample the shadow map at the actual 3D sample point projected into light space, without applying surface-normal or depth offsets [S1, unofficial]. This prevents light leakage through nearby blockers [S1, unofficial]. Apply the Henyey–Greenstein phase function for scattering towards the camera [S1, unofficial].
+ 7.  **Sanitization:** Ensure all color and albedo values are finite; sanitize non-finite values [S1, unofficial].
+-8.  **Accumulation:** Integrate the scattered light and accumulated extinction along the ray. The result is added to the HDR buffer [S1, unofficial].
++8.  **Accumulation:** Integrate the scattered light and accumulated extinction along the ray [S1, unofficial].
+ 
+ **Formulas**
+@@ -43,91 +36,97 @@
+ 
+ **Edge Cases and Pitfalls**
+-*   **Light Leakage:** Surface-biased shadow lookups cause light leakage through nearby blockers. This is mitigated by using volume shadow lookups at the actual sample point [S1, unofficial].
++*   **Light Leakage:** Surface-biased shadow lookups cause light leakage through nearby blockers [S1, unofficial].
+ *   **Invalid Transforms:** Invalid volume transforms must be rejected to prevent artifacts [S1, unofficial].
+ *   **Non-Finite Values:** Non-finite colors or albedos must be sanitized [S1, unofficial].
+-*   **TAA History:** Fog has no dedicated history buffer for TAA; it relies on the accumulated scene history, which may cause artifacts if not handled carefully [S1, unofficial].
+-*   **Blended Surfaces:** Blended surfaces use opaque depth rather than separate per-layer fog distances, which may affect depth-based fog culling [S1, unofficial].
+-*   **Soft Shadows:** Wide raster soft-shadow filtering does not apply to the fog pass; hardware PCF is used instead [S1, unofficial].
++*   **TAA History:** Fog has no dedicated history buffer for TAA [S1, unofficial].
++*   **Blended Surfaces:** Blended surfaces use opaque depth rather than separate per-layer fog distances [S1, unofficial].
++*   **Soft Shadows:** Wide raster soft-shadow filtering does not apply to the fog pass [S1, unofficial].
+ 
+ **Pseudocode**
+ ```python
+-def render_fog_pass(camera, depth_buffer, local_volumes, lights, hdr_buffer):
++def render_fog_pass(camera, local_volumes, lights, hdr_buffer):
+     # Initialize output buffer
+-    output = zeros_like(hdr_buffer)
++    output = [[vec3(0.0), 0.0] for _ in range(hdr_buffer.width * hdr_buffer.height)]
+     
+-    # Iterate over all pixels
+-    for y, x in pixels():
+-        # Generate ray based on camera type
+-        ray = camera.generate_ray(x, y)
+-        
+-        # Determine depth bounds
+-        near_z = depth_buffer[x, y]
+-        far_z = camera.far_plane
+-        
+-        # Initialize accumulated color and opacity
+-        acc_color = vec3(0.0)
+-        acc_opacity = 0.0
+-        
+-        # Ray marching loop
+-        for step in range(num_steps):
+-            # Calculate segment start and end in world space
+-            t_start = ray.origin + ray.direction * (step * step_size)
+-            t_end = ray.origin + ray.direction * ((step + 1) * step_size)
++    for y in range(hdr_buffer.height):
++        for x in range(hdr_buffer.width):
++            ray = camera.generate_ray(x, y)
++            near_t = camera.near_plane
++            far_t = camera.far_plane
++            num_steps = 48
++            step_size = (far_t - near_t) / num_steps
+             
+-            # Sample at midpoint
+-            t_mid = (t_start + t_end) / 2.0
+-            sample_pos = ray.origin + ray.direction * t_mid
++            acc_color = vec3(0.0)
++            acc_opacity = 0.0
+             
+-            # Check if sample is within depth bounds
+-            if sample_pos.z < near_z or sample_pos.z > far_z:
+-                break
++            for step in range(num_steps):
++                t_start = near_t + step * step_size
++                t_end = near_t + (step + 1) * step_size
++                t_mid = (t_start + t_end) / 2.0
++                sample_pos = ray.origin + ray.direction * t_mid
+                 
+-            # Calculate extinction for this segment
+-            extinction = 0.0
+-            
+-            # 1. Height Fog Extinction
+-            height_density = exponential_height_density(sample_pos.y)
+-            segment_length = length(t_end - t_start)
+-            extinction += height_density * segment_length
+-            
+-            # 2. Local Volume Extinction
+-            for volume in local_volumes:
+-                if ray_box_intersection(ray, t_start, t_end, volume.transform):
+-                    # Calculate intersection interval length within volume
+-                    interval_length = get_intersection_length(ray, t_start, t_end, volume.transform)
+-                    extinction += volume.extinction_coefficient * interval_length
+-            
+-            # Calculate transmission for this segment
+-            transmission = exp(-extinction)
+-            
+-            # Calculate scattered light
+-            scattered_light = vec3(0.0)
+-            for light in lights:
+-                # Light direction and distance
+-                light_dir = normalize(light.position - sample_pos)
+-                light_dist = length(light.position - sample_pos)
++                if t_mid > far_t:
++                    break
++                    
++                extinction = 0.0
+                 
+-                # Attenuation
+-                attenuation = light.attenuation(light_dist)
++                # 1. Height Fog Extinction
++                height_density = exp(-sample_pos.y / 10.0) # [G] standard exponential height falloff
++                segment_length = step_size
++                extinction += height_density * segment_length
+                 
+-                # Shadow Lookup (Volume-based)
+-                # Project sample point to light space
+-                light_space_pos = light.view_matrix * sample_pos
+-                shadow = hardware_pcf_shadow_lookup(light.shadow_map, light_space_pos)
++                # 2. Local Volume Extinction
++                for volume in local_volumes:
++                    t_min, t_max = ray_box_interval(ray, t_start, t_end, volume.transform)
++                    if t_min < t_max:
++                        interval_length = t_max - t_min
++                        extinction += volume.extinction_coefficient * interval_length
+                 
+-                # Phase function
+-                phase = heney_greenstein_phase(ray.direction, light_dir, light.anisotropy)
++                transmission = exp(-extinction)
+                 
+-                # Add scattered light
+-                scattered_light += light.color * attenuation * shadow * phase * volume_albedo
++                scattered_light = vec3(0.0)
++                for light in lights:
++                    light_dir = normalize(light.position - sample_pos)
++                    light_dist = length(light.position - sample_pos)
++                    attenuation = light.attenuation(light_dist)
++                    
++                    light_space_pos = light.view_matrix * sample_pos
++                    shadow = hardware_pcf_shadow_lookup(light.shadow_map, light_space_pos)
++                    
++                    phase = heney_greenstein_phase(ray.direction, light_dir, light.anisotropy)
++                    
++                    scattered_light += light.color * attenuation * shadow * phase * volume.albedo
++                    
++                acc_color += scattered_light * transmission * (1.0 - acc_opacity)
++                acc_opacity += (1.0 - transmission) * (1.0 - acc_opacity)
+                 
+-            # Accumulate
+-            # Note: This is a simplified single-scattering accumulation
+-            # In practice, this might be integrated more carefully with Beer-Lambert
+-            acc_color += scattered_light * transmission
+-            acc_opacity += (1.0 - transmission) * (1.0 - acc_opacity)
+-            
+-        # Write result
+-        output[x, y] = acc_color
++            output[y * hdr_buffer.width + x] = [acc_color, acc_opacity]
++    return output
++
++def ray_box_interval(ray, t_min, t_max, transform):
++    # [G] Standard slab method for ray-box intersection
++    inv_dir = vec3(1.0) / ray.direction
++    box_min = transform[0:3, 3]
++    box_max = transform[0:3, 3] + transform[0:3, 0:3]
++    t1 = (box_min.x - ray.origin.x) * inv_dir.x
++    t2 = (box_max.x - ray.origin.x) * inv_dir.x
++    tmin = min(t1, t2); tmax = max(t1, t2)
++    t1 = (box_min.y - ray.origin.y) * inv_dir.y
++    t2 = (box_max.y - ray.origin.y) * inv_dir.y
++    tmin = max(tmin, min(t1, t2)); tmax = min(tmax, max(t1, t2))
++    t1 = (box_min.z - ray.origin.z) * inv_dir.z
++    t2 = (box_max.z - ray.origin.z) * inv_dir.z
++    tmin = max(tmin, min(t1, t2)); tmax = min(tmax, max(t1, t2))
++    if tmax < tmin or tmax < t_min or tmin > t_max:
++        return -1.0, -1.0
++    return max(t_min, tmin), min(t_max, tmax)
++
++def hardware_pcf_shadow_lookup(shadow_map, light_space_pos):
++    # [G] Standard hardware PCF sampling
++    return shadow_map.sample_pcf(light_space_pos.xy / light_space_pos.w, light_space_pos.z)
++
++def heney_greenstein_phase(view_dir, light_dir, g):
++    cos_theta = dot(view_dir, light_dir)
++    return (1.0 - g**2) / (4.0 * 3.14159 * (1.0 + g**2 - 2.0 * g * cos_theta)**1.5)
+ ```
+ 
+@@ -141,11 +140,10 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(P \cdot S \cdot (L + V))$, where $P$ is pixels, $S$ is steps, $L$ is lights, and $V$ is local volumes. Direct-light evaluation visits every light at each step without clustered culling [S1, unofficial].
+-*   **Memory Complexity:** $O(V)$ for storing local volume data, plus standard shadow map memory [S1, unofficial].
++*   **Time Complexity:** Scales with pixels, steps, lights, and volumes. Direct-light evaluation visits every uploaded scene light at each occupied march step without clustered culling [S1, unofficial].
++*   **Memory Complexity:** Not given in the sources.
+ *   **Performance:** On Apple M3 Max, 640×480 resolution, 48 steps, 60 timed frames: 4.18 ms/frame with fog, 2.68 ms disabled [S1, unofficial]. The previous surface-shadow lookup measured 8.36 ms with fog, showing a significant performance improvement [S1, unofficial].
+ *   **Strengths:** Eliminates light leakage from nearby blockers; removes the cost of repeating raster soft-shadow filters; supports various camera types and HDR post-processing [S1, unofficial].
+ *   **Limitations:** Single scattering only; no dedicated TAA history for fog; scaling with lights and volumes can be expensive without culling; wide raster soft-shadow filtering is not applicable [S1, unofficial].
+ *   **When to Use:** When high-quality, artifact-free volumetric shadows are needed for local fog volumes and height fog, and performance is acceptable for the target resolution and light count [S1, unofficial].
+-*   **When Not to Use:** When multiple scattering is required; when the scene has a very large number of lights and volumes without culling; when raster soft-shadow filtering is preferred for performance [S1, unofficial].
+ 
+ ## Background

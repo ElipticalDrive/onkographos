@@ -1,0 +1,195 @@
+--- v006.md
++++ v007.md
+@@ -4,99 +4,128 @@
+ 
+ ## Overview
+-The Tree Marcher is a hierarchical ray traversal algorithm that steps a ray through a sparse, hierarchical grid structure (such as an OpenVDB tree) to identify intersections with active nodes [S1, S2]. It differs from its siblings by operating directly on the tree topology using a Digital Differential Analyzer (DDA) to skip empty space, rather than converting the grid to a mesh or tetrahedral volume [S1, S2]. It serves as the core traversal engine for [Hermite Data Computation via Bisection](822-hermite-data-computation-via-bisection.md) and [Tetrahedralization of Octree Cells](9049-tetrahedralization-of-octree-cells.md).
++The Tree Marcher is a hierarchical ray traversal algorithm that steps a ray through a generic adaptive grid structure (such as an OpenVDB tree) to identify intersections with active nodes [S1, S2]. It solves the problem of efficiently locating the first or subsequent node boundaries along a ray without visiting every leaf cell, leveraging the tree's hierarchy to skip empty or inactive subtrees. It differs from its siblings, [Hermite Data Computation via Bisection](822-hermite-data-computation-via-bisection.md) and [Tetrahedralization of Octree Cells](9049-tetrahedralization-of-octree-cells.md), by operating at the node-boundary level rather than computing dual vertices or tetrahedral intersections directly; it provides the geometric intervals ($t_0, t_1$) and node pointers required for subsequent isosurface extraction or volume sampling [S1].
+ 
+ ## How it works
+-The Tree Marcher uses a hierarchical DDA (HDDA) to traverse the tree. It does not compute voxel-level intersections directly; instead, it identifies which nodes in the hierarchy the ray intersects and provides the parametric interval $[t_0, t_1]$ of that intersection [S1, S2].
++The method implements a Digital Differential Analyzer (DDA) specialized for hierarchical data structures. It relies on the parent's empty-space skipping logic to traverse only relevant parts of the tree [Parent](15494-octree-based-isosurface-and-geometry-extraction.md).
+ 
+-**Inputs and Outputs:**
+-*   **Input:** An accessor (`AccT`) providing access to the grid data, and a ray (`RayT`) defined in index space.
+-*   **Output:** A pointer to the intersected node (`NodeT**`), and the intersection interval start (`t0`) and end (`t1`) in ray parameter space.
++### Inputs and Outputs
++*   **Input:** An accessor object (`AccT`) providing access to the grid data; a ray definition (`RayT`) in index space.
++*   **Output:** A pointer to the intersected node (`NodeT**`), and the parametric start (`t0`) and end (`t1`) of the intersection interval along the ray.
+ 
+-**Data Structures:**
+-The class is a template with the following parameters [S1]:
+-*   `NodeT`: The node type being traversed.
+-*   `RayT`: The ray type, containing direction, origin, and inverse direction components.
+-*   `AccT`: The accessor type for grid access.
+-*   `CoordT`: The coordinate type (default `Coord`).
++### Data Structures
++The `TreeMarcher` is a class template with the following layout [S1]:
++*   **Template Parameters:**
++    *   `NodeT`: The node type being traversed.
++    *   `RayT`: The ray type, containing position, direction, and inverse direction.
++    *   `AccT`: The accessor type used for grid access.
++    *   `CoordT`: The coordinate type (default `Coord`).
++*   **Internal Typedefs:**
++    *   `ChildT`: `typename NodeT::ChildNodeType`
++    *   `RealType`: `typename RayT::RealType`
++    *   `RealT`: Alias for `RealType`
++    *   `CoordType`: Alias for `CoordT`
+ 
+-Internal typedefs include `ChildT` (derived from `NodeT::ChildNodeType`), `RealType` (derived from `RayT::RealType`), and `CoordType` [S1].
++### Algorithm Steps
++The traversal is controlled by two primary functions: `init` and `step` [S1].
+ 
+-**Algorithm Steps:**
+-1.  **Construction:** Initialize the `TreeMarcher` with a reference to the grid accessor `acc`. This binds the traverser to the specific grid structure [S1].
+-2.  **Initialization:** Call `init(indexRay)` with the ray in index space. This sets up the internal DDA state for the ray [S1].
+-3.  **Stepping:** Repeatedly call `step(&node, t0, t1)`.
+-    *   The method advances the ray through the hierarchy.
+-    *   If an active node of type `NodeT` is intersected, it returns `true`, populates `node` with the pointer to that node, and sets `t0` and `t1` to the entry and exit parameters of the node along the ray [S1].
+-    *   If the ray exits the grid or hits no more active nodes, it returns `false` [S1].
++1.  **Initialization:**
++    *   Construct the `TreeMarcher` with the grid accessor: `TreeMarcher(AccT &acc)`.
++    *   Call `init(const RayT &indexRay)` to initialize the internal state with the index-space ray. This sets up the DDA state for stepping through the grid coordinates [S1].
+ 
+-**Pseudocode:**
++2.  **Stepping:**
++    *   Call `step(const NodeT **node, float &t0, float &t1)`.
++    *   The algorithm advances the ray through the tree hierarchy.
++    *   If the ray intersects a node of type `NodeT`:
++        *   Populate `*node` with a pointer to the intersected node.
++        *   Populate `t0` with the start parameter of the intersection interval.
++        *   Populate `t1` with the end parameter of the intersection interval.
++        *   Return `true`.
++    *   If the ray does not hit a node of type `NodeT` (e.g., it passes through empty space or hits a different node type):
++        *   Return `false`.
++    *   Repeat `step` until the ray exits the grid or a specific condition is met [S1].
++
++### Pseudocode
++The following Python-like pseudocode demonstrates the usage pattern derived from the OpenVDB API [S1, S2]. Note that the internal DDA logic is encapsulated within the `step` method.
++
+ ```python
+ class TreeMarcher:
+-    def __init__(self, acc: AccT):
+-        """Initialize with grid accessor."""
++    def __init__(self, acc):
++        """
++        Initialize the Tree Marcher with a grid accessor.
++        :param acc: Accessor object for the grid.
++        """
+         self.acc = acc
+         self.ray = None
+-        self.dda_state = None # Internal HDDA state, details not given in sources [G]
+ 
+-    def init(self, index_ray: RayT):
+-        """Initialize the TreeMarcher with an index-space ray."""
++    def init(self, index_ray):
++        """
++        Initialize the Tree Marcher with an index-space ray.
++        :param index_ray: Ray object containing position and direction in index space.
++        """
+         self.ray = index_ray
+-        # Initialize DDA state based on ray and grid bounds [G]
+-        # The specific DDA logic is encapsulated in the HDDA implementation [S2]
++        # Internal DDA initialization happens here [S1]
+ 
+-    def step(self) -> tuple[bool, NodeT, float, float]:
++    def step(self):
+         """
+-        Step the ray through the tree.
+-        Returns (hit, node, t0, t1).
+-        hit: True if a node of type NodeT is intersected.
+-        node: Pointer to the intersected node (if hit).
+-        t0: Start of intersection interval.
+-        t1: End of intersection interval.
++        Step the ray through the tree to find the next node intersection.
++        :return: Tuple (hit, node, t0, t1). 
++                hit is True if a node of type NodeT is intersected.
++                node is the pointer to the intersected node (or None).
++                t0, t1 are the parametric start and end of the intersection.
+         """
+-        if self.ray is None:
+-            return False, None, 0.0, 0.0
++        node = None
++        t0 = 0.0
++        t1 = 0.0
+         
+-        # Advance DDA to next node boundary or leaf
+-        # If an active node is found:
+-        #   t0 = entry parameter
+-        #   t1 = exit parameter
+-        #   node = pointer to node
+-        #   return True
+-        # Else:
+-        #   return False
++        # The actual hierarchical traversal and DDA stepping logic is implemented
++        # in the C++ backend. This function calls the native step method.
++        # Returns True if a node is hit, False otherwise.
++        hit = self._native_step(node, t0, t1)
+         
+-        # Implementation details of the DDA stepping logic are not provided 
+-        # in the class reference, only that it uses HDDA [S2].
+-        # [G] Placeholder for actual DDA step logic.
+-        hit, node, t0, t1 = self._advance_dda()
+         return hit, node, t0, t1
+ 
+-    def _advance_dda(self) -> tuple[bool, NodeT, float, float]:
+-        """Internal DDA advancement. Details not given in sources [G]."""
+-        # This function implements the logic described in HDDA.h [S2]
+-        # It handles coordinate system conversions and node traversal.
++    def _native_step(self, node, t0, t1):
++        """
++        Placeholder for the native C++ implementation of step().
++        In a real implementation, this would invoke the HDDA logic
++        specialized for the grid structure [S2].
++        """
++        # Pseudocode representation of the C++ call:
++        # return step(&node, t0, t1)
+         pass
++
++# Usage Example
++def march_ray(grid_accessor, ray):
++    marcher = TreeMarcher(grid_accessor)
++    marcher.init(ray)
++    
++    while True:
++        hit, node, t0, t1 = marcher.step()
++        if not hit:
++            break
++        # Process the intersection interval [t0, t1] at node
++        process_intersection(node, t0, t1)
+ ```
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Coordinate Systems:** The ray is defined in index space. For point grids, a mismatch exists between bucketed data (centered on voxels) and DDA operations (coincident with voxel corners). This is handled by specialized variants like `PointTreeMarcher` [S2].
+-*   **Empty Space:** The HDDA efficiently skips empty regions. If the grid is entirely empty, `step` will return `false` immediately after initialization [S1].
+-*   **Precision:** Floating-point precision in `t0` and `t1` depends on the `RealType` of the ray. Degenerate rays (zero length or direction) are not explicitly handled in the provided interface [S1].
++### Parameters and Edge Cases
++*   **Ray Type (`RayT`):** Must be defined in index space. The coordinates correspond to the grid's voxel corners or nodes, not world space [S1].
++*   **Precision:** The method uses `float` for `t0` and `t1` [S1]. Precision issues may arise in deep trees or with very small intersection intervals.
++*   **Empty Space:** The method relies on the underlying HDDA (Hierarchical DDA) to skip empty subtrees. If the grid has no active nodes along the ray, `step` will return `false` [S2].
++*   **Node Type Matching:** The `step` function only returns `true` for nodes of the specific template type `NodeT`. If the ray passes through nodes of other types, it continues stepping [S1].
+ 
+ ## Subtopics
+ 
+ ### [PointTreeMarcher](7535-pointtreemarcher.md)
+-A specialized tree traversal algorithm for point grids. It differs from the generic `TreeMarcher` by handling the coordinate system mismatch inherent in point grids, where data is bucketed into grid cells centered on voxels, while the underlying DDA operates on grid nodes coincident with voxel corners. Choose this when working with point-based volume representations in OpenVDB.
++A specialized variant for point grids that handles the coordinate system mismatch between bucketed voxel centers and DDA node coordinates.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Proportional to the number of nodes traversed. The HDDA allows skipping empty space, making it efficient for sparse grids. The exact complexity depends on the tree depth and sparsity.
+-*   **Memory Complexity:** Low. The `TreeMarcher` itself holds minimal state (ray and DDA state). It does not allocate memory for the grid structure, which is managed by the accessor [S1].
+-*   **Strengths:** Efficient traversal of sparse hierarchical data; generic interface supporting various node types; integrates with OpenVDB's accessor model.
+-*   **Limitations:** Requires the grid to be accessible via an `AccT` interface; does not compute voxel-level values directly (requires further processing like bisection or tetrahedralization); specific to OpenVDB's tree structure.
+-*   **When to Use:** When traversing sparse volumetric data stored in an OpenVDB tree to find node intersections for further processing (e.g., isosurface extraction).
+-*   **When Not to Use:** For dense grids where linear traversal might be simpler; for non-OpenVDB hierarchical structures; when voxel-level values are needed directly without further processing.
++*   **Time Complexity:** Proportional to the number of active nodes intersected by the ray, logarithmic in the depth of the tree for traversal overhead. It skips empty regions, making it significantly faster than linear traversal for sparse data [S1, S2].
++*   **Memory Complexity:** $O(1)$ auxiliary memory per ray, as the traversal state is contained within the `TreeMarcher` object and the ray structure [S1].
++*   **Strengths:** Generic applicability to any grid type supported by the accessor; efficient empty-space skipping; low memory footprint.
++*   **Limitations:** Requires the ray to be in index space; does not compute geometric primitives (vertices/edges) directly, only node intervals [S1].
++*   **When to use:** When you need to traverse a hierarchical grid to find active regions or sample data at node boundaries, particularly in sparse volumes [S1].
+ 
+ ## Background
+-The `TreeMarcher` class is part of the `nanovdb` library within OpenVDB, developed by the Academy Software Foundation [S1, S2]. It was designed to provide a generic, efficient ray traversal mechanism for hierarchical grid data structures, leveraging the Hierarchical Digital Differential Analyzer (HDDA) for space skipping [S2]. It is a core component for advanced volume rendering and geometry extraction techniques in OpenVDB.
++The `TreeMarcher` class is part of the OpenVDB library, specifically within the `nanovdb` namespace, which provides a compact, cache-friendly representation of VDB grids for GPU and CPU rendering [S1, S2]. It was developed to support efficient ray tracing and volume rendering on adaptive grids by providing a generic interface for hierarchical traversal [S1]. The implementation relies on the `HDDA` (Hierarchical Digital Differential Analyzer) for the underlying stepping logic [S2].
+ 
+ ## Sources

@@ -1,0 +1,191 @@
+# Early Ray Termination
+
+Also called: ERT, Opacity threshold termination, Transmittance-based Early Termination
+
+## Overview
+Early Ray Termination (ERT) is an acceleration technique for image-order volume rendering that halts the front-to-back ray integration loop when the accumulated opacity exceeds a predefined threshold, thereby skipping the computation of voxels that are occluded by the foreground [S1][S5, S12, unofficial]. Unlike sibling methods such as [Low Opacity Skipping](3608-low-opacity-skipping.md), which culls samples based on low local density, ERT culls based on global occlusion, exploiting the fact that once a ray becomes sufficiently opaque, subsequent samples contribute negligibly to the final pixel color [S1][S6, unofficial]. This method reduces memory bandwidth by avoiding unnecessary traversal through the background or occluded regions of the volume [S15, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A volume dataset (voxel grid or implicit field), a transfer function mapping data values to color $c$ and opacity $\alpha$, camera parameters (ray origin $\mathbf{o}$ and direction $\mathbf{d}$), and a termination threshold $\tau$ (typically $0.95 \le \tau < 1.0$) [S8][S23, unofficial].
+*   **Output:** The final pixel color $C_{final}$ and accumulated opacity $\alpha_{final}$ [S2].
+
+**Data Structures:**
+*   **Ray State:** Accumulated color $C_{acc}$ (RGB, float), accumulated opacity $\alpha_{acc}$ (float, range $[0, 1]$), and current ray position $\mathbf{p}$ [S13].
+*   **Volume Data:** Voxel values accessed via equidistant sampling [S16].
+
+**Algorithm:**
+The method modifies the standard front-to-back compositing loop [S23, unofficial]. For each pixel, a ray is cast through the volume [S15, unofficial]. In each step $i$, the sample color $c_i$ and opacity $\alpha_i$ are computed [G]. The state is updated as follows:
+
+$$ C_{acc} \leftarrow C_{acc} + c_i \cdot \alpha_i \cdot (1 - \alpha_{acc}) $$
+$$ \alpha_{acc} \leftarrow \alpha_{acc} + \alpha_i \cdot (1 - \alpha_{acc}) $$
+
+After the update, the termination condition is checked [S1]. If $\alpha_{acc} \ge \tau$, the loop breaks immediately [S1, S13]. The final color is then composited with the background color $C_{bg}$:
+
+$$ C_{final} = C_{acc} + C_{bg} \cdot (1 - \alpha_{acc}) $$
+
+**Parameters:**
+*   **Threshold ($\tau$):** The opacity value at which termination occurs. Common values are $0.95$ [S23, unofficial], $0.98$ [S14, unofficial], $0.99$ [S8, S39], or $1.0$ [S9, unofficial][S13]. Higher thresholds reduce rendering time but increase image artifacts; lower thresholds reduce artifacts and produce higher quality images [S22, unofficial].
+*   **Step Size:** The distance between samples. Equidistant sampling is common, e.g., $0.5$ voxels [S16].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def early_ray_termination(ray_origin, ray_direction, volume_bounds, volume_data, transfer_function, threshold=0.99, step_size=0.5):
+    """
+    Renders a single ray using Early Ray Termination.
+    
+    Args:
+        ray_origin: vec3, start of the ray.
+        ray_direction: vec3, normalized direction of the ray.
+        volume_bounds: tuple of (min_corner, max_corner), AABB of the volume.
+        volume_data: Object providing sample_density(pos) method.
+        transfer_function: Function mapping density to (color, opacity).
+        threshold: float, opacity threshold for termination (default 0.99).
+        step_size: float, distance between samples (default 0.5).
+        
+    Returns:
+        color: vec3, final pixel color.
+        alpha: float, final accumulated opacity.
+    """
+    # Initialize accumulators
+    acc_color = vec3(0.0)
+    acc_alpha = 0.0
+    
+    # Compute ray-AABB intersection [G]
+    t_min, t_max = compute_ray_aabb_intersection(ray_origin, ray_direction, volume_bounds)
+    if t_max < 0.0:
+        return vec3(0.0), 0.0 # Ray misses volume
+        
+    t = t_min
+    while t < t_max:
+        # 1. Sample the volume at current position
+        pos = ray_origin + ray_direction * t
+        density = volume_data.sample_density(pos)
+        
+        # 2. Apply transfer function
+        color, opacity = transfer_function(density)
+        
+        # 3. Front-to-back compositing
+        contribution = color * opacity * (1.0 - acc_alpha)
+        acc_color += contribution
+        acc_alpha += opacity * (1.0 - acc_alpha)
+        
+        # 4. Termination Check
+        if acc_alpha >= threshold:
+            break
+            
+        # 5. Advance ray
+        t += step_size
+        
+    # 6. Composite with background (assuming white background for simplicity)
+    bg_color = vec3(1.0)
+    final_color = acc_color + bg_color * (1.0 - acc_alpha)
+    
+    return final_color, acc_alpha
+
+def compute_ray_aabb_intersection(origin, direction, bounds):
+    """Standard ray-AABB intersection [G]. Returns (t_min, t_max)."""
+    min_corner, max_corner = bounds
+    t_min = -float('inf')
+    t_max = float('inf')
+    for i in range(3):
+        if direction[i] == 0.0:
+            if origin[i] < min_corner[i] or origin[i] > max_corner[i]:
+                return -1.0, -1.0 # Parallel and outside
+        else:
+            t1 = (min_corner[i] - origin[i]) / direction[i]
+            t2 = (max_corner[i] - origin[i]) / direction[i]
+            t_min = max(t_min, min(t1, t2))
+            t_max = min(t_max, max(t1, t2))
+    if t_max < 0.0 or t_min > t_max:
+        return -1.0, -1.0
+    return t_min, t_max
+```
+
+**Edge Cases and Pitfalls:**
+*   **Bias:** The use of a predefined threshold introduces a systematic bias in the rendered image [S12, S32, unofficial]. The rendered image may appear slightly darker or less detailed in semi-transparent regions compared to full integration [S12, unofficial].
+*   **Divergence:** On GPUs, divergent execution occurs when some threads in a warp terminate early while others continue [S36, unofficial][S44, unofficial].
+*   **MIP Incompatibility:** ERT cannot be used with Maximum Intensity Projection (MIP) because MIP requires scanning the entire ray path to find the maximum value, regardless of opacity [S47, unofficial].
+*   **Additive Compositing:** In additive models, opacity changes after reaching maximum opacity are ignored, which is physically incorrect for some light transport simulations [S26, unofficial].
+
+## Subtopics
+
+### [Conservative Early Ray Termination](1949-conservative-early-ray-termination.md)
+An optimization that prunes scan conversion during rasterization using an ERT-table, trading exactness for parallelizability.
+
+### [Early Termination for Gaussian Splatting](4764-early-termination-for-gaussian-splatting.md)
+Applies opacity/transmittance thresholds to 3D Gaussian Splatting, allowing order-independent or sort-free variants to skip distant Gaussians.
+
+### [Early Ray Termination with Binary Mask](6641-early-ray-termination-with-binary-mask.md)
+Combines ERT with a binary mask to skip empty cells via bit manipulation before applying the opacity threshold.
+
+### [Hybrid Surface-Volume Rendering with Masking and Early Ray Termination](8155-hybrid-surface-volume-rendering-with-masking-and-early-ray-t.md)
+Accelerates hybrid rendering by tracking instrument motion in 2D sheared space to limit ERT recomputation.
+
+## Operating characteristics
+**Time and Memory Complexity:**
+*   **Time:** The complexity is $O(N \cdot K)$ in the worst case (no termination), where $N$ is the number of pixels and $K$ is the number of samples per ray [G]. With ERT, the average number of samples per ray is reduced to $K_{eff} \le K$ [G]. The speedup is proportional to the area of the volume intersected by opaque objects and their proximity to the camera [S13].
+*   **Memory:** Memory overhead is minimal, requiring only standard ray state accumulators [G].
+
+**Measured Performance:**
+*   On a dataset of $320 \times 320 \times 280$ voxels rendered at $1129 \times 1098$ resolution, ERT (threshold 0.99) improved frame rates from 78.7 fps to 111.9 fps (a ~42% increase) on an NVIDIA GeForce GTX 670 [S8].
+*   In another study, ERT reduced integration steps by 10-15% and runtime by 10-15% for a specific transfer function, and by 19.7% steps / 19.1% runtime for a "shallower" transfer function [S36, unofficial].
+*   Performance gains are highly variable; for semi-transparent volumes with low depth complexity, ERT may provide no benefit and even incur a 30% penalty due to conditional overhead [S36, unofficial].
+
+**Strengths and Limitations:**
+*   **Strengths:** Significant speedup for scenes with opaque or semi-transparent surfaces where background voxels have zero opacity [S1]. Simple to implement in shaders [S13].
+*   **Limitations:** Introduces visual bias [S12, unofficial]. Not suitable for MIP [S47, unofficial]. Performance can degrade on highly transparent volumes due to branch divergence [S36, unofficial]. Requires front-to-back rendering order [S34, unofficial].
+
+## Background
+Early Ray Termination was introduced by Krüger and Westermann in 2003 [S13]. The concept of adaptively terminating ray tracing was first proposed by Whitfield in 1980 [S1][S17, unofficial]. Prior to GPU Shader Model 3, ERT required multi-pass rendering with early-z testing; modern GPUs support direct loop breaks [S7, unofficial][S13]. It is widely used in medical visualization and real-time volume rendering to handle large datasets [S14, S32, unofficial].
+
+## Sources
+[S1] Efficient ray tracing of volume data, https://doi.org/10.1145/78964.78965, fetched 2026-10-25
+[S2] Different Ray-Casting Algorithm Implementations for Volume Rendering, https://doi.org/10.35940/ijitee.g1011.0597s20, fetched 2026-10-24
+[S3] Yosshi999/faster-occgrid, https://github.com/Yosshi999/faster-occgrid, fetched 2026-10-24 (unofficial)
+[S4] Volume Rendering FPGA Hardware, https://doi.org/10.5753/sbac-pad.1999.19799, fetched 2026-10-24
+[S5] Direct Volume Rendering Techniques, https://www.scribd.com/document/853597780/VIS-Modules-06-Direct-Volume-Rendering, fetched 2026-10-25 (unofficial)
+[S6] Direct Volume Rendering Data, https://www.scribd.com/document/1050958395/Direct-Volume-Rendering-Data, fetched 2026-10-25 (unofficial)
+[S7] GPU-Based Volume Ray-Casting with Advanced Illumination, https://doi.org/10.2312/egt.20091069, fetched 2026-10-26 (unofficial)
+[S8] PRISM: An open source framework for the interactive design of GPU volume rendering shaders., https://doi.org/10.1371/journal.pone.0193636, fetched 2026-10-26
+[S9] DTIC ADA301855: Parallel Volume Ray-Casting for Unstructured-Grid Data on Distributed-Memory Architectures., https://archive.org/details/DTIC_ADA301855, fetched 2026-10-26 (unofficial)
+[S10] Neural Radiance Fields in 3D Vision: A Comprehensive Review, https://doi.org/10.26599/cvm.2026.9450535, fetched 2026-10-28
+[S11] GPU volume rendering, http://www.slideserve.com/hilliard/volume-rendering-using-graphics-hardware, fetched 2026-10-26 (unofficial)
+[S12] Interactive Volume-Rendering Techniques for Medical Data Visualization, https://doi.org/10.2312/diss.20018138, fetched 2026-10-26 (unofficial)
+[S13] Deployment of Volume Rendering Interactive Visualizations in Web Platforms With Intersected 3D Geometry, https://doi.org/10.2312/ceig.20161312, fetched 2026-10-26
+[S14] NASA Technical Reports Server (NTRS) 19990040407: Time-Critical Volume Rendering, https://archive.org/details/NASA_NTRS_Archive_19990040407, fetched 2026-10-26 (unofficial)
+[S15] A Tile-Based Approach for Photo-Realistic Volume Rendering, http://hdl.handle.net/1794/23836, fetched 2026-10-26 (unofficial)
+[S16] VoxGRAF: Fast 3D-Aware Image Synthesis with Sparse Voxel Grids, https://doi.org/10.52202/068431-2464, fetched 2026-10-26
+[S17] DTIC ADA208091: Interactive Visualization of 3D Medical Data, https://archive.org/details/DTIC_ADA208091, fetched 2026-10-26 (unofficial)
+[S18] DTIC ADA208085: Rendering Mixtures of Geometric and Volumetric Data, https://archive.org/details/DTIC_ADA208085, fetched 2026-10-26 (unofficial)
+[S19] NASA Technical Reports Server (NTRS) 19960003512: Parallel volume ray-casting for unstructured-grid data on distributed-memory architectures, https://archive.org/details/NASA_NTRS_Archive_19960003512, fetched 2026-10-26 (unofficial)
+[S20] Massive Data Management for Distributed Volume Visualization, http://hdl.handle.net/1951/47671, fetched 2026-10-26 (unofficial)
+[S21] Exploratory Performance Analysis and Tuning of Parallel Interactive Volume Visualization on Large Displays, https://doi.org/10.2312/eurovisshort.20151118, fetched 2026-10-26
+[S22] Volume Rendering With Ray Casting - WPI, https://web.cs.wpi.edu/~matt/courses/cs563/talks/powwie/p1/ray-cast.htm, fetched 2026-10-26 (unofficial)
+[S23] volume rendering, https://grokipedia.com/page/Volume_rendering, fetched 2026-10-26 (unofficial)
+[S24] ray casting, https://grokipedia.com/page/Ray_casting, fetched 2026-10-26
+[S25] [PDF] Direct Volume Rendering | CGL @ ETHZ, https://cgl.ethz.ch/teaching/former/scivis_07/Notes/stuff/StuttgartCourse/VIS-Modules-06-Direct_Volume_Rendering.pdf, fetched 2026-10-26 (unofficial)
+[S26] Volume Visualization and Compositing on Large-Scale Displays Using Handheld Touchscreen Interaction, https://doi.org/10.25781/kaust-d5m7l, fetched 2026-10-26 (unofficial)
+[S27] Overview of Volume Rendering - Stony Brook Computer Science, https://www3.cs.stonybrook.edu/~mueller/papers/volvisOverview.pdf, fetched 2026-10-27 (unofficial)
+[S28] Volume Ray Casting Techniques and Applications using ..., https://halogenica.net/bin/graphics/volume-rendering-using-gpgpu/Thesis.pdf, fetched 2026-10-27 (unofficial)
+[S29] Hardware-Accelerated Volume Rendering, https://vcg.seas.harvard.edu/publications/20040101-hardware-accelerated-volume-rendering/paper, fetched 2026-10-27 (unofficial)
+[S30] PDF Direct Volume Rendering, https://www.sci.utah.edu/~stevec/classes/cs5630/dvr.pdf, fetched 2026-10-27 (book)
+[S31] PDF Direct Volume Rendering - KTH, https://www.kth.se/social/files/565e35dff27654457fb84363/08_VolumeRendering.pdf, fetched 2026-10-27 (unofficial)
+[S32] Medical Volume Rendering Techniques, https://arxiv.org/pdf/1802.07710v1, fetched 2026-10-27 (unofficial)
+[S33] High-Quality Volume Rendering Using Texture Mapping ..., https://cfcs.pku.edu.cn/baoquan/docs/20180622110034067331.pdf, fetched 2026-10-27
+[S34] Volume ray casting techniques and applications using general purpose computations on graphics processing units, https://repository.rit.edu/cgi/viewcontent.cgi?article=6466&context=theses, fetched 2026-10-28 (unofficial)
+[S35] PDF Volume Rendering - Isenberg, https://tobias.isenberg.cc/graphics/uploads/Class/07-volume-rendering.pdf, fetched 2026-10-28 (unofficial)
+[S36] Multi-core and Many-core Shared-memory Parallel Raycasting Volume Rendering Optimization and Tuning, https://digital.library.unt.edu/ark:/67531/metadc829701/?q=empty space skipping volume rendering, fetched 2026-10-28 (unofficial)
+[S37] Qwen version of Ct Volume Rendering, https://www.flyriver.com/q/ct-volume-rendering, fetched 2026-10-29 (unofficial)
+[S38] Llama version of Ct Volume Rendering, https://www.flyriver.com/l/ct-volume-rendering, fetched 2026-10-29 (unofficial)
+[S39] Volume Rendering and Medical Imaging - DeepWiki, https://deepwiki.com/NVIDIA/cuda-samples/11.3-volume-rendering-and-medical-imaging, fetched 2026-10-29
+[S40] Volume Rendering using GPGPU - Halogenica, https://halogenica.net/graphics/volume-rendering-using-gpgpu/, fetched 2026-10-29 (unofficial)
+[S41] A Survey of GPU-Based Volume Rendering of ..., https://www.sci.utah.edu/~csilva/papers/rita2005.pdf, fetched 2026-10-29 (unofficial)
+[S42] A Practical Evaluation of Popular Volume Rendering ..., https://courses.cs.duke.edu/spring03/cps296.8/papers/PracticalEvaluationofVolumeRenderingAlgorithms.pdf, fetched 2026-10-29
+[S43] The Implementation of a WebGPU-Based Volume Rendering Framework ... - MDPI, https://www.mdpi.com/2076-3417/15/5/2782, fetched 2026-10-29 (unofficial)
+[S44] GPU-Based Volume Ray-Casting with Advanced Illumination, https://www.uni-ulm.de/fileadmin/website_uni_ulm/iui.inst.100/institut/Papers/viscom/2008/advanced_illumination.pdf, fetched 2026-10-29 (unofficial)
+[S45] Implementation of Importance-Driven Volume Rendering, https://www.cg.tuwien.ac.at/research/publications/2005/Thurner-2005-IVR/Thurner-2005-IVR-paper.pdf, fetched 2026-10-29 (unofficial)
+[S46] Faster Neural Radiance Fields Inference — Chris Choy, https://chrischoy.org/posts/nerfs/, fetched 2026-10-29 (unofficial)
+[S47] GENERAL IMPLEMENTATION ASPECTS OF THE GPU- ..., http://sv-journal.org/2011-1/02/, fetched 2026-10-30 (unofficial)

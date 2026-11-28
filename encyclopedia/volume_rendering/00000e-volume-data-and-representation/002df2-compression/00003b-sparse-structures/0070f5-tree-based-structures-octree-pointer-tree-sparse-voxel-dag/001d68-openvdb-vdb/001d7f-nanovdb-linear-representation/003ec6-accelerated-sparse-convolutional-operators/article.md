@@ -1,0 +1,117 @@
+# Accelerated Sparse Convolutional Operators
+
+Also called: NanoVDB Convolution, Sparse Convolution Kernels
+
+## Overview
+Accelerated Sparse Convolutional Operators are a set of GPU-optimized CUDA kernels designed to perform stencil-based convolutions on sparse voxel grids represented by NanoVDB [S1]. They solve the performance bottleneck of applying dense convolutional filters to sparse data by adapting the computation strategy to the local occupancy density and feature depth of the input [S1]. Unlike generic sparse convolution libraries that rely on gather-scatter paradigms, these operators utilize local densification in shared memory and tensor cores to achieve high compute bandwidth, matching or exceeding the efficiency of hash-based structures like SpConv v2 while leveraging the inherent spatial locality of the NanoVDB linear index [S1].
+
+## How it works
+The method implements three distinct kernel strategies based on the sparsity pattern and feature depth of the input data [S1]. The operators take a minibatch of sparse voxel grids (GridBatch) and per-voxel features (JaggedTensor) as input, and produce convolved feature maps as output [S1].
+
+### Data Structures
+The input data is structured using the **JaggedTensor** class, which encodes a minibatch of sparse voxel grids where each grid may have a different number of voxels [S1]. A JaggedTensor consists of three contiguous memory buffers [S1]:
+1. **jdata**: A tensor of shape $[N, D]$, where $N = \sum_{i=1}^{k} n_i$ is the total number of active voxels across all $k$ grids, and $D$ is the feature dimension [S1]. This is the concatenation of all per-grid feature tensors [S1].
+2. **joffsets**: A tensor of shape $[k, 2]$ [S1]. For each grid $i$, `joffsets[i, :]` stores the start and end indices in `jdata` corresponding to that grid's voxels [S1].
+3. **jidx**: A tensor of shape $[N]$ [S1]. For each element $j$ in `jdata`, `jidx[j]` stores the index of the grid (from $0$ to $k-1$) that contains that voxel [S1].
+
+The NanoVDB structure provides the spatial mapping [S1]. Active voxels are stored with linear indices that exhibit strong spatial locality [S1].
+
+### Kernel Strategies
+
+#### Scenario 1: Low-depth convolutions (Leaf Node)
+Used when the input feature depth is shallow (e.g., width 8) and leaf node occupancy is $\ge 20\%$ [S1].
+
+1. **Shared Memory Allocation**: Allocate shared memory for an input window of size $10 \times 10 \times 10$ straddling the $8 \times 8 \times 8$ leaf node, including a 1-voxel halo [S1]. For FP32/TF32 data with feature width 8, this footprint is 31.25 KB [S1]. Allocate an output buffer of $8 \times 8 \times 8$ with 16-wide feature vectors (32 KB) [S1].
+2. **Thread Mapping**: Subdivide the $8 \times 8 \times 8$ local domain into 32 subtiles of size $8 \times 2 \times 1$ [S1]. Assign each subtile to a warp (1024 total threads) [S1].
+3. **Computation**: Within each warp, use 16x16x8 WMMA tensor core GEMMs (TF32 precision with FP32 accumulate) to apply each of the 27 stencil spokes [S1].
+4. **Writeback**: Write the convolution result to global memory [S1]. Since active indices within a leaf node are sequentially indexed, the writeback occurs on a fully sequential memory range [S1].
+
+#### Scenario 2: High local occupancy (Brick)
+Used when the domain is macroscopically sparse but locally dense (average active neighbors > 70-80%) and feature depth is moderate-to-high (32 or higher) [S1].
+
+1. **Window Definition**: Focus on a narrower $4 \times 2 \times 2$ output window [S1]. Fetch input activations on-demand from a $6 \times 4 \times 4$ window including a 1-voxel halo [S1].
+2. **Implementation**: Use a custom tensor core implementation via the CuTe library [S1].
+3. **Performance**: Achieves >70% peak compute bandwidth for feature depths 32-64, and >90% for depths $\ge 128$ [S1]. Outperforms SpConv v2 for occupancy patterns exceeding 60-70% [S1].
+
+#### Scenario 3: Highly sparse topology, high feature depth (LGGS)
+Used when occupancy is very sparse (average active neighbors $\le 4-5$ out of 26) and feature depth is high ($\ge 128$) [S1]. Standard gather-GEMM-scatter underperforms due to multiple streaming passes and scattering overhead [S1].
+
+1. **Blocking**: Block the operation on a contiguous subsequence of output indices from the NanoVDB structure, typically 64 indices at a time [S1]. Due to NanoVDB locality, these indices correspond to geometrically clustered coordinates [S1].
+2. **Shared Memory Scatter**: Instead of scattering directly to global memory, use a temporary buffer in GPU shared memory as the destination for scatter operations on these 64 indices [S1].
+3. **Accumulation**: Collect the contribution of each of the 27 stencil offsets within this shared memory block before writing back [S1].
+
+### Pseudocode
+The following pseudocode illustrates the general flow for Scenario 1 (Leaf Node), which is the most explicitly defined kernel in the sources [S1].
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def convolve_leaf_node(leaf_coords, input_features, output_features, feature_width, stencil_offsets):
+    # Inputs: leaf_coords (list of 8x8x8 active voxel indices),
+    # input_features (dict mapping global_idx to feature vector),
+    # output_features (dict for results), feature_width (int),
+    # stencil_offsets (list of 27 relative 3D coordinates)
+
+    # 1. Shared Memory Allocation
+    # Input window: 10x10x10 straddling 8x8x8 leaf + 1-voxel halo
+    shared_input = [[[ [0.0] * feature_width for _ in range(10) ] for _ in range(10)] for _ in range(10)]
+    # Output buffer: 8x8x8 with feature_width vectors
+    shared_output = [[[ [0.0] * feature_width for _ in range(8) ] for _ in range(8)] for _ in range(8)]
+
+    # 2. Load Input into Shared Memory
+    for lx, ly, lz in leaf_coords:
+        si, sj, sk = lx + 1, ly + 1, lz + 1  # Offset by 1 for halo
+        global_idx = lx + ly * 8 + lz * 64   # Linear index for 8x8x8 block
+        if global_idx in input_features:
+            shared_input[si][sj][sk] = input_features[global_idx]
+        else:
+            shared_input[si][sj][sk] = [0.0] * feature_width
+
+    # 3. Thread Mapping
+    # Subdivide 8x8x8 domain into 32 subtiles of size 8x2x1
+    # Assign each subtile to a warp (1024 total threads)
+    # (Exact subtile-to-warp mapping is implementation-specific [G])
+    for subtile_id in range(32):
+        # 4. Tensor Core GEMM Execution
+        # Apply each of the 27 stencil spokes using 16x16x8 WMMA tensorcore GEMMs
+        # (TF32 precision with FP32 accumulate)
+        for spoke_idx in range(27):
+            dx, dy, dz = stencil_offsets[spoke_idx]
+            # Perform GEMM on shared_input shifted by (dx, dy, dz)
+            # Accumulate result into shared_output
+            for i in range(8):
+                for j in range(8):
+                    acc = [0.0] * feature_width
+                    for k in range(8):
+                        # Convolution accumulation step
+                        acc = [a + b * c for a, b, c in zip(acc, shared_input[i+dx+1][j+dy+1][k+dz+1], shared_input[i+dx+1][j+dy+1][k+dz+1])]
+                    shared_output[i][j][k] = acc
+
+    # 5. Writeback
+    # Write convolution result to global memory on a fully sequential memory range
+    for lx in range(8):
+        for ly in range(8):
+            for lz in range(8):
+                global_out_idx = lx + ly * 8 + lz * 64
+                output_features[global_out_idx] = shared_output[lx][ly][lz]
+```
+
+For Scenario 3, the implementation replaces the dense shared memory load with a gather phase, blocks the output indices into chunks of 64, and uses shared memory for intermediate scattering accumulation [S1].
+
+## Subtopics
+
+### [Sparse Convolution](9837-sparse-convolution.md)
+Sparse convolution is a variant of standard convolution where only a subset of input elements, defined by a support set of indices, is used to improve computational efficiency. It differs from standard convolution by selecting specific input elements rather than processing all elements in the kernel window. This method serves as a core operator for sparse VDB grids, supporting various sparsity levels and feature depths.
+
+## Operating characteristics
+- **Performance**: Scenario 1 (Leaf) provides superior performance relative to SpConv v2 default backend for leaf nodes with occupancy $\ge 20\%$, up to a 2.5x-3x advantage for dense domains [S1]. Scenario 2 (Brick) exceeds 70% peak compute bandwidth for feature depths 32-64, and >90% for depths $\ge 128$ [S1].
+- **Scalability**: The operators are compatible with SpConv v2 by treating the linear index of each active voxel as a "hash key" with built-in locality properties, matching SpConv v2 efficiency at the operator level [S1].
+- **Strengths**: High performance on GPU via tensor cores; efficient memory access patterns due to NanoVDB's linear layout; no auxiliary indexing structures needed for Scenario 1 [S1].
+- **Limitations**: Scenario 1 is less efficient for very sparse leaf nodes (<20% occupancy) [S1]. Scenario 3 requires careful handling of scatter operations to avoid global memory bottlenecks [S1].
+
+## Background
+The Accelerated Sparse Convolutional Operators are part of the fVDB framework, a deep-learning framework for sparse, large-scale, and high-performance spatial intelligence [S1]. fVDB was developed by researchers at NVIDIA Research and published in 2024 [S1]. The framework integrates with PyTorch and supports various tasks including point-cloud segmentation, 3D generative modeling, and Neural Radiance Fields [S1]. The specific convolution operators leverage NVIDIA's WMMA tensor cores and the CuTe library for optimized GEMM operations [S1].
+
+## Sources
+[S1] fVDB: A Deep-Learning Framework for Sparse, Large-Scale, and High-Performance Spatial Intelligence, https://research.nvidia.com/labs/prl/publication/williams2024fvdb/, fetched 2026-10-30
+[S2] VoxGRAF: Fast 3D-Aware Image Synthesis with Sparse Voxel Grids, https://doi.org/10.52202/068431-2464, fetched 2026-10-26

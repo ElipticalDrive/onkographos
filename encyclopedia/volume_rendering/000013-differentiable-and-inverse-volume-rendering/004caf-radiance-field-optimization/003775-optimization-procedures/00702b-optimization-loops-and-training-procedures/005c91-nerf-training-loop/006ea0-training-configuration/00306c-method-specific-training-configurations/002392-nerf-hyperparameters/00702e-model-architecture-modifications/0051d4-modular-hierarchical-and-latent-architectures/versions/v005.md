@@ -1,0 +1,49 @@
+# Modular, Hierarchical, and Latent Architectures
+
+Also called: Conditional NeRFs, Latent NeRFs, Hierarchical NeRFs
+
+## Overview
+This family extends the baseline NeRF architecture [Parent](11313-model-architecture-modifications.md) by introducing modularity, hierarchical structures, and latent conditioning to handle complex scene properties such as non-rigid deformation, topological changes, and multi-level stratification. Unlike monolithic NeRFs, these methods decouple scene representation into specialized components (e.g., deformation fields, latent routers, or ambient slicing surfaces) or condition the radiance field on external latent codes, enabling the modeling of dynamic, stratified, or semantically rich environments that standard continuous implicit functions cannot capture [S1][S2, unofficial][S3].
+
+## Shared principles
+The baseline NeRF architecture [Parent](3065-nerf-hyperparameters.md) defines a continuous volumetric scene representation $F_\Theta: (\mathbf{x}, \mathbf{d}) \rightarrow (\sigma, \mathbf{c})$, where $\mathbf{x} \in \mathbb{R}^3$ is the spatial position, $\mathbf{d} \in \mathbb{R}^3$ is the viewing direction, $\sigma$ is the volume density, and $\mathbf{c} \in \mathbb{R}^3$ is the view-dependent color [G]. The rendering process integrates these outputs along rays using standard volume rendering equations [G].
+
+Most modifications in this family retain the core volume rendering equation but alter one or more of the following components:
+1.  **Input Space:** Augmenting $\mathbf{x}$ and $\mathbf{d}$ with additional signals such as latent codes $\mathbf{z}$, time $t$, illumination embeddings $\mathbf{z}_l$, or external feature vectors $\mathbf{f}$ from vision models [S1][S2, unofficial][S3].
+2.  **Network Topology:** Replacing the monolithic MLP with specialized branches (e.g., separate density and color networks), modular experts, or hybrid structures combining MLPs with convolutional or transformer backbones [S1][S2, unofficial].
+3.  **Output Space:** Extending the output tuple $(\sigma, \mathbf{c})$ to include additional fields such as surface normals $\mathbf{n}$, semantic logits $\mathbf{s}$, uncertainty variance $\nu$, or blend weights $\Delta w$ [S1][S2, unofficial].
+4.  **Representation Basis:** Substituting the coordinate-based implicit function with explicit structures like voxel grids, hash tables, Gaussian primitives, or planar surfaces, which change how features are stored and interpolated [S1][S2, unofficial].
+
+## Subtopics
+
+### [HyperNeRF](13906-hypernerf.md)
+HyperNeRF models non-rigidly deforming scenes with topological variations by embedding the scene in a higher-dimensional ambient space. It treats each observation frame as a non-planar slice through a hyperdimensional "template" NeRF, allowing it to capture topology changes (e.g., openings/closings) that continuous deformation fields cannot. It combines deformation with latent conditioning in higher dimensions, sacrificing hard spatial correspondences for topological flexibility. See [HyperNeRF](13906-hypernerf.md) for implementation details.
+
+### [Strata-NeRF](14015-strata-nerf.md)
+Strata-NeRF models "stratified scenes" with distinct hierarchical levels (e.g., building exterior/interior) using Vector Quantized (VQ) latent representations. It conditions a single radiance field network on discrete latent codes generated from 3D positions, enabling seamless switching between levels and avoiding the cloudy artifacts of standard NeRFs trained jointly on hierarchical data. See [Strata-NeRF](14015-strata-nerf.md) for implementation details.
+
+### Strata-NeRF Architecture
+*   **Comparison:** Using two parallel dense layers in the Latent Router outperforms individual dense layers. The full Latent Router architecture is superior to direct concatenation or VAE substitution [S1].
+*   **Ablation:** Disabling the second router (D1), disabling the first router (D2), removing the Latent Router to directly concatenate embeddings (D3), or replacing VQ-VAE with VAE (D4) all result in inferior performance compared to the full design [S1].
+
+### MoFaNeRF
+*   **Definition:** A generalized model representing faces under different views, expressions, and illumination by conditioning the NeRF MLP on parameters controlling shape, expression, albedo, and illumination [S2, unofficial].
+*   **Step:** Requires a refinement network (2D network) to improve the coarse results of volumetric rendering based on the conditioned NeRF MLP [S2, unofficial].
+
+### AE-NeRF
+*   **Step:** Introduces a global-local attribute consistency loss and a swapped-attribute classification loss to enhance disentanglement [S3].
+*   **Step:** Applies a GAN-based stage-wise training approach to elevate performance [S3].
+
+## Background
+The baseline NeRF architecture [Parent](3065-nerf-hyperparameters.md) defines a continuous volumetric scene representation $F_\Theta: (\mathbf{x}, \mathbf{d}) \rightarrow (\sigma, \mathbf{c})$, where $\mathbf{x} \in \mathbb{R}^3$ is the spatial position, $\mathbf{d} \in \mathbb{R}^3$ is the viewing direction, $\sigma$ is the volume density, and $\mathbf{c} \in \mathbb{R}^3$ is the view-dependent color [G]. The rendering process integrates these outputs along rays using standard volume rendering equations [G].
+
+Most modifications in this family retain the core volume rendering equation but alter one or more of the following components:
+1.  **Input Space:** Augmenting $\mathbf{x}$ and $\mathbf{d}$ with additional signals such as latent codes $\mathbf{z}$, time $t$, illumination embeddings $\mathbf{z}_l$, or external feature vectors $\mathbf{f}$ from vision models [S1][S2, unofficial][S3].
+2.  **Network Topology:** Replacing the monolithic MLP with specialized branches (e.g., separate density and color networks), modular experts, or hybrid structures combining MLPs with convolutional or transformer backbones [S1][S2, unofficial].
+3.  **Output Space:** Extending the output tuple $(\sigma, \mathbf{c})$ to include additional fields such as surface normals $\mathbf{n}$, semantic logits $\mathbf{s}$, uncertainty variance $\nu$, or blend weights $\Delta w$ [S1][S2, unofficial].
+4.  **Representation Basis:** Substituting the coordinate-based implicit function with explicit structures like voxel grids, hash tables, Gaussian primitives, or planar surfaces, which change how features are stored and interpolated [S1][S2, unofficial].
+
+## Sources
+[S1] Strata-NeRF : Neural Radiance Fields for Stratified Scenes, https://arxiv.org/abs/2308.10337v1, fetched 2026-10-26
+[S2] Advances in Neural Rendering, https://doi.org/10.48550/arxiv.2111.05849, fetched 2026-10-26 (unofficial)
+[S3] Semantically-aware Neural Radiance Fields for Visual Scene Understanding: A Comprehensive Review, https://link.springer.com/article/10.1007/s11263-025-02663-5, fetched 2026-10-27

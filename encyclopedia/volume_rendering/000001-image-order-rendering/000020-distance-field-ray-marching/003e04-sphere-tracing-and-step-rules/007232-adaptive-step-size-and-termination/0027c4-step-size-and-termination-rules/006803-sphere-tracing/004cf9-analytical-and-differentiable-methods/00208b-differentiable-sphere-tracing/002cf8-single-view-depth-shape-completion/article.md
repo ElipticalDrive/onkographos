@@ -1,0 +1,156 @@
+# Single-View Depth Shape Completion
+
+Also called: DeepSDF Optimization with Adaptive Sampling
+
+## Overview
+Recovers a complete 3D shape from a single depth image by optimizing a latent code through a differentiable renderer, requiring no additional training of the shape generator [S1, S2]. It sets itself apart from its sibling [DeepSDF](link) by replacing fixed-distance sampling with adaptive sampling via differentiable sphere tracing, which better captures boundaries and thin structures [S1]. It differs from [Differentiable Sphere Tracing](2316-differentiable-sphere-tracing.md) by explicitly combining a Directional Distance Function (DDF) for ray intersection with a Signed Distance Function (SDF) for loss computation, avoiding standard sphere tracing iterations [S2].
+
+## How it works
+**Inputs:**
+- A single depth map $I_d$ with an associated binary object mask $m$ [S1, S2].
+- Camera pose and projection matrix $P$ [S2].
+- A pre-trained neural network decoder $f$ (encoding shape priors) with fixed parameters [S1, S2].
+- A latent code $z$ to be optimized [S1, S2].
+
+**Outputs:**
+- Optimized latent code $z$ representing the reconstructed 3D shape [S1, S2].
+- Rendered depth $\tilde{I}_d$ and silhouette $\tilde{I}_s$ for loss computation [S1, S2].
+
+**Data Structures:**
+- **Latent Code $z$**: A vector of fixed dimension (size not given in sources) [S1, S2].
+- **DDF Model $f_d$**: Takes $(p, r)$, feature grid $f_{pd}(p,r)$, and $z$; outputs directional distance $d$ and ray hit probability $\sigma$ [S2].
+- **SDF Model $f_s$**: Takes 3D point $x$, feature grid $f_{ps}(x)$, and $z$; outputs signed distance $s$ [S2].
+- **Feature Grids**: $f_{pd}$ and $f_{ps}$ are pre-computed or fixed feature grids associated with the decoder [S2].
+
+**Parameters:**
+- $w_S, w_D, w_l$: Weights for silhouette, depth, and latent regularizer losses [S2].
+- $\tau$: Truncation distance for the SDF model [S2].
+- Typical values: Not given in the sources.
+
+**Steps:**
+1. **Initialization**: Initialize latent code $z_0$ as the mean shape [S1]. Fix parameters of the pre-trained decoder $f$ [S1, S2].
+2. **Ray Setup**: For each pixel in the depth map, obtain the ray origin $p$ (intersection of ray $r$ from camera with unit sphere) and direction $r$ [S2].
+3. **Directional Distance Evaluation**: Evaluate the DDF model to get the directional distance $d$ and ray hit probability $\sigma$:
+   $$ d, \sigma = f_d((p, r), f_{pd}(p, r), z) $$
+   [S2]
+4. **3D Point Computation**: Compute the 3D point $x$ inside the sphere predicted by the DDF model:
+   $$ x = p + d \cdot r $$
+   [S2]
+5. **SDF Evaluation**: Evaluate the SDF model at point $x$:
+   $$ s = f_s(x, f_{ps}(x), z) $$
+   [S2]
+6. **Depth Projection**: Compute the predicted depth $\lambda_u$ for image coordinate $u$:
+   $$ \lambda_u = P \cdot x $$
+   where $P$ is the projection matrix [S2].
+7. **Loss Computation**: Compute the total loss $\mathcal{L}_{rec}$ [S2]:
+   $$ \mathcal{L}_{rec} = w_S \mathcal{L}_S + w_D \mathcal{L}_D + w_l \mathcal{L}_l $$
+   [S2]
+   - **Silhouette Loss $\mathcal{L}_S$**:
+     $$ \mathcal{L}_S = \mathcal{L}_{S_{s_+}} + \mathcal{L}_{S_{s_-}} + \mathcal{L}_\sigma $$
+     [S2]
+     - $\mathcal{L}_{S_{s_+}}(m) = \| \langle s, m \rangle \|_1$ [S2]
+     - $\mathcal{L}_{S_{s_-}}(m) = \| |\langle s, 1-m \rangle| - \tau \|_1$ [S2]
+     - $\mathcal{L}_\sigma$ is the DDF silhouette loss (Eq. 8 in [S2], details not provided in notes) [S2].
+   - **Depth Loss $\mathcal{L}_D$**: L1 loss between rendered depth $\tilde{I}_d$ and observed depth $I_d$ [S1].
+   - **Latent Regularizer $\mathcal{L}_l$**: Regularizer for learning the latent code (Eq. 11 in [S2], details not provided in notes) [S2].
+8. **Optimization**: Backpropagate through the differentiable renderer to optimize $z$ [S1, S2].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def optimize_latent_code(z, depth_map, mask, camera_pose, projection_matrix, 
+                         ddf_model, sdf_model, f_pd, f_ps, w_S, w_D, w_l, tau, 
+                         num_iterations):
+    """
+    Optimizes latent code z to fit single-view depth map.
+    """
+    # Initialize z if not provided
+    if z is None:
+        z = get_mean_shape()
+    
+    # Fix decoder parameters (implicit in pre-trained model usage)
+    
+    for i in range(num_iterations):
+        z.requires_grad_(True)
+        
+        # 1. Ray Setup
+        rays = get_rays_from_depth(depth_map, mask, camera_pose)
+        # rays: list of (p, r) tuples
+        
+        # 2. DDF Evaluation
+        ddf_inputs = [(p, r) for p, r in rays]
+        feature_grids_pd = [f_pd(p, r) for p, r in rays]
+        d, sigma = ddf_model(ddf_inputs, feature_grids_pd, z)
+        
+        # 3. 3D Point Computation
+        points_3d = [p + d_j * r for (p, r), d_j in zip(rays, d)]
+        
+        # 4. SDF Evaluation
+        feature_grids_ps = [f_ps(x) for x in points_3d]
+        s = sdf_model(points_3d, feature_grids_ps, z)
+        
+        # 5. Depth Projection
+        projected_depths = [projection_matrix @ x for x in points_3d]
+        
+        # 6. Loss Computation
+        # Silhouette Loss
+        l_s_pos = sum(abs(s_j * m_j) for s_j, m_j in zip(s, mask.flatten()))
+        l_s_neg = sum(abs(abs(s_j * (1 - m_j)) - tau) for s_j, m_j in zip(s, mask.flatten()))
+        l_sigma = compute_ddf_silhouette_loss(sigma, mask) # Details not in sources [G]
+        l_S = l_s_pos + l_s_neg + l_sigma
+        
+        # Depth Loss (L1)
+        l_D = sum(abs(proj_d - true_d) for proj_d, true_d in zip(projected_depths, depth_map.flatten()) if mask.flatten())
+        
+        # Latent Regularizer
+        l_l = compute_latent_regularizer(z) # Details not in sources [G]
+        
+        total_loss = w_S * l_S + w_D * l_D + w_l * l_l
+        
+        # 7. Optimization Step
+        total_loss.backward()
+        z = z - learning_rate * z.grad
+        z.grad.zero_()
+        
+    return z
+```
+
+**Edge Cases and Pitfalls:**
+- **Sparse Depth**: The method is robust to sparse depth, but performance may degrade if the mask is inaccurate [S1].
+- **Thin Structures**: Adaptive sampling helps avoid missing thin structures compared to fixed-distance sampling [S1].
+- **Precision**: Not given in the sources.
+
+## Subtopics
+
+### Instant-NSR-PL Forward Pass
+Uses neural implicit representations for fast rendering; differs by using a differentiable forward pass without explicit latent code optimization per view [2540-instant-nsr-pl-forward-pass.md].
+
+### Differentiable Silhouette Rendering
+Focuses on silhouette loss for shape optimization; differs by not using DDF for adaptive sampling [4322-differentiable-silhouette-rendering.md].
+
+### SDF Direct Diffuse Integrator
+Integrates SDF for diffuse shading; differs by not focusing on single-view depth completion [4467-sdf-direct-diffuse-integrator.md].
+
+### Multi-View Photometric Shape Prediction
+Uses multiple views for shape prediction; differs by requiring multi-view input [5427-multi-view-photometric-shape-prediction.md].
+
+### Camera Pose Optimization via Depth and Silhouette
+Optimizes camera pose along with shape; differs by jointly optimizing pose [5667-camera-pose-optimization-via-depth-and-silhouette.md].
+
+## Operating characteristics
+- **Time Complexity**: Depends on the number of optimization iterations and the cost of evaluating the DDF and SDF models [S1, S2].
+- **Memory Complexity**: Depends on the size of the latent code and the feature grids [S2].
+- **Measured Performance**: Outperforms DeepSDF on dense depth images (e.g., 4.12 vs 5.37 for sofa, lower is better) [S1].
+- **Scaling**: Not given in the sources.
+- **Strengths**: Adaptive sampling captures boundaries and thin structures better than fixed-distance sampling [S1]. No additional training required [S1, S2].
+- **Limitations**: Requires a pre-trained decoder [S1, S2]. Performance may vary with sparse depth [S1].
+- **When to use**: Single-view 3D shape reconstruction from depth maps [S1, S2].
+- **When not to use**: Multi-view reconstruction or when a pre-trained decoder is not available [S1, S2].
+
+## Background
+Originated from the DIST paper (CVPR 2020) [S1] and FIRe paper (2020) [S2]. It builds on DeepSDF [S1] by introducing differentiable sphere tracing for adaptive sampling [S1]. It is used for 3D shape prediction from single depth images [S1].
+
+## Sources
+[S1] DIST: Rendering Deep Implicit Signed Distance Function With Differentiable Sphere Tracing, https://doi.org/10.1109/cvpr42600.2020.00209, fetched 2026-10-26
+[S2] FIRe: Fast Inverse Rendering Using Directional and Signed Distance Functions, https://www.youtube.com/watch?v=Qj0ymDlRYZs, fetched 2026-10-30

@@ -1,0 +1,120 @@
+# Segment Signed Distance Function
+
+Also called: Segment SDF, sdSegment, Distance to line segment
+
+## Overview
+The Segment Signed Distance Function computes the shortest Euclidean distance from a query point $p$ to a finite line segment defined by endpoints $a$ and $b$. It solves the problem of defining a 1D geometric primitive in 3D space for ray marching, ensuring the distance field correctly accounts for the segment's finite bounds rather than treating it as an infinite line. It differs from infinite line distance functions by clamping the projection parameter to the segment's extent, and from point-to-segment distance by returning a scalar signed distance value suitable for marching [S1, unofficial][S3, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   Input: Query point $p$ (vector), segment endpoints $a$ and $b$ (vectors).
+*   Output: Scalar signed distance $d$. Note: For a simple line segment (zero thickness), the "signed" aspect is often treated as unsigned distance in practice, or the sign is determined by a separate containment check. However, standard implementations return the non-negative Euclidean distance. The parent article defines sign for volumes; for a 1D curve, $d \ge 0$ always. If a signed field is required for a capsule (see Subtopics), the radius is subtracted.
+
+**Data Structures:**
+*   Vectors $p, a, b$ are typically 3D floats (`vec3`) or 2D floats (`vec2`) depending on the dimensionality of the scene.
+
+**Steps:**
+1.  Compute the segment vector: $ab = b - a$.
+2.  Compute the vector from the start point to the query point: $ap = p - a$.
+3.  Compute the squared length of the segment: $len\_sq = ab \cdot ab$.
+4.  Handle degenerate segments (where $len\_sq$ is near zero):
+    *   If $len\_sq < \epsilon$ (e.g., $10^{-12}$), the segment is effectively a point. The closest point is $a$. Return $\|p - a\|$ [S3, unofficial][S4, unofficial].
+5.  Compute the projection parameter $t$ (or $h$):
+    *   $t = \frac{ap \cdot ab}{len\_sq}$
+    *   Clamp $t$ to the range $[0, 1]$: $t = \text{clamp}(t, 0.0, 1.0)$ [S1, unofficial][S3, unofficial].
+6.  Compute the closest point on the segment: $closest = a + ab \cdot t$ [S1, unofficial].
+7.  Compute the distance vector: $diff = p - closest$.
+8.  Return the Euclidean distance: $d = \|diff\|$ [S1, unofficial][S3, unofficial].
+
+**Formula:**
+$$ d(p) = \| p - (a + \text{clamp}(\frac{(p-a)\cdot(b-a)}{\|b-a\|^2}, 0, 1) \cdot (b-a)) \| $$
+
+**Parameters:**
+*   $\epsilon$: Threshold for degenerate segment length. Typical value: $10^{-12}$ or $10^{-8}$ depending on precision [S3, unofficial][S4, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Degenerate Segment:** If $a = b$, division by zero occurs in step 5. Must check $len\_sq$ against a small epsilon [S4, unofficial].
+*   **Precision:** In floating-point arithmetic, very short segments may suffer from precision loss. Using squared lengths avoids square roots until the final step [S3, unofficial].
+*   **Sign:** For a pure line segment, the distance is always non-negative. To obtain a signed distance for a volume (like a capsule), subtract the radius [S3, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def sd_segment(p, a, b, epsilon=1e-12):
+    """
+    Computes the Euclidean distance from point p to the line segment [a, b].
+    
+    Args:
+        p: Query point (vec3 or vec2)
+        a: Segment start point (vec3 or vec2)
+        b: Segment end point (vec3 or vec2)
+        epsilon: Threshold for degenerate segment check
+        
+    Returns:
+        float: Distance from p to the segment
+    """
+    # Step 1: Segment vector
+    ab = b - a
+    
+    # Step 2: Vector from a to p
+    ap = p - a
+    
+    # Step 3: Squared length of segment
+    len_sq = dot(ab, ab)
+    
+    # Step 4: Handle degenerate segment
+    if len_sq < epsilon:
+        return length(p - a)
+    
+    # Step 5: Projection parameter
+    t = dot(ap, ab) / len_sq
+    
+    # Clamp t to [0, 1]
+    t = max(0.0, min(1.0, t))
+    
+    # Step 6: Closest point on segment
+    closest = a + ab * t
+    
+    # Step 7 & 8: Distance
+    return length(p - closest)
+```
+
+## Subtopics
+
+### [Line Segment Distance](3058-line-segment-distance.md)
+Computes the Euclidean distance from a query point `p` to a line segment defined by endpoints `l0` and `l1`. It differs from infinite line distance by checking projection bounds before computing the final distance, ensuring the result correctly handles points outside the segment endpoints. This method is used as a signed distance field (SDF) primitive in ray marching [G].
+
+### [Point on Segment Check](3967-point-on-segment-check.md)
+The Point on Segment Check determines whether a query point $Q$ lies exactly on the line segment defined by endpoints $P_i$ and $P_j$. It solves the geometric containment problem for 1D segments embedded in 2D or 3D space. It is distinguished from [Line Segment Distance](3058-line-segment-distance.md) and [Point-to-Segment Distance](4205-point-to-segment-distance.md) by returning a binary boolean result rather than a scalar distance value, serving as a primitive predicate within the [Segment Signed Distance Function](2679-segment-signed-distance-function.md).
+
+### [Point-to-Segment Distance](4205-point-to-segment-distance.md)
+Computes the closest point on a line segment `[a, b]` to a query point `p`. It differs from infinite line projection by clamping the projection parameter to `[0, 1]`, ensuring the output lies on the closed segment.
+
+### Capsule Signed Distance Function — 2D Capsule SDF
+Signed distance to a 2D capsule (stadium) between points `a` and `b` with radius `r`. Formula: $\text{segment}(p, a, b) - r$.
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```rust
+pub fn capsule2d(p: Vec2, a: Vec2, b: Vec2, r: f32) -> f32 {
+    segment(p, a, b) - r
+}
+```
+[S3, unofficial]
+
+## Operating characteristics
+*   **Time Complexity:** $O(1)$. The computation involves a constant number of vector operations (subtraction, dot product, clamp, length).
+*   **Memory Complexity:** $O(1)$. No auxiliary data structures are required.
+*   **Strengths:** Extremely fast evaluation, making it suitable for real-time ray marching. Handles arbitrary segment orientations and lengths.
+*   **Limitations:** The distance is zero on the segment surface and increases linearly away from it. For rendering, this primitive represents a line with zero thickness. To render a visible object, it must be combined with a radius (e.g., Capsule SDF) or used as a component in more complex shapes.
+*   **When to use:** When defining thin wires, edges, or as a building block for capsules and other extruded shapes.
+*   **When not to use:** When a thick object is required without additional logic (use Capsule SDF instead).
+
+## Background
+The Segment SDF is a fundamental primitive in procedural modeling and ray marching, popularized by Inigo Quilez's articles on distance functions [S3, unofficial]. It is widely used in real-time graphics for rendering thin structures, wireframes, and as a component of more complex CSG operations. The method relies on basic vector algebra and projection geometry.
+
+## Sources
+[S1] TakTikFR/Volumetric-Path-Tracing, https://github.com/TakTikFR/Volumetric-Path-Tracing, fetched 2026-10-26 (unofficial)
+[S2] erbenpeter/sdf, https://github.com/erbenpeter/sdf, fetched 2026-10-26 (unofficial)
+[S3] bhubbard/sdf-math-rs, https://github.com/bhubbard/sdf-math-rs, fetched 2026-10-27 (unofficial)
+[S4] jacklv123/Volumetric-photon-mapping, https://github.com/jacklv123/Volumetric-photon-mapping, fetched 2026-10-27 (unofficial)

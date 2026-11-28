@@ -1,0 +1,52 @@
+--- v005.md
++++ v006.md
+@@ -1,17 +1,28 @@
+ # Pruning and Sparsification
++
++Also called: Gaussian Pruning, Sparsification, Opacity Management
++
+ ## Overview
+-Pruning and sparsification methods reduce the memory footprint and rendering latency of 3D Gaussian Splatting by removing redundant or low-significance primitives from the Gaussian set $\mathcal{G}$. Unlike densification strategies which add primitives to resolve high-frequency details, this family focuses on elimination, often relying on opacity thresholds, accumulated rendering significance, or uncertainty metrics to identify candidates for removal.
++Pruning and Sparsification are training-time strategies that dynamically modify the population of 3D Gaussian primitives to control memory usage, prevent overfitting, and eliminate artifacts such as floaters [S1, unofficial][S2]. It solves the problem of unbounded primitive growth and the accumulation of insignificant or erroneous primitives during differentiable rendering optimization. It sets itself apart from static initialization or fixed-density methods by periodically evaluating per-primitive metrics (opacity, gradient magnitude, or sensitivity) and removing or resampling primitives based on these dynamic signals [S1, unofficial][S2].
++
+ ## Shared principles
+-The core mechanism involves periodically evaluating the contribution or error associated with each primitive $g_k \in \mathcal{G}$ and modifying the population $\mathcal{G}$ accordingly [S1, unofficial][S2]. Common principles include:
++All pruning and sparsification strategies in this family operate on a set of 3D Gaussian primitives $\mathcal{G} = \{g_1, \dots, g_N\}$, where each $g_k$ is defined by a mean position $\mu_k \in \mathbb{R}^3$, a covariance matrix $\Sigma_k$ (parameterized by scale $s_k$ and rotation $q_k$), opacity $\alpha_k$, and spherical harmonic coefficients $\mathbf{c}_k$ [S8, unofficial].
+ 
+-1.  **Gradient/Error Tracking:** Most methods track a scalar metric per Gaussian, such as the magnitude of the 2D positional gradient $\tau_k = \frac{1}{N_{\text{views}}} \sum_{v} \| \frac{\partial L}{\partial \mu_v^k} \|_2$ [S4, S8, unofficial] or rendering error $E_k$ [S1, unofficial].
+-2.  **Periodic Execution:** Densification and pruning are not performed at every optimization step to allow the optimizer to stabilize. They are executed every $N$ iterations (e.g., `refineEvery` = 100) [S5, S8, unofficial].
+-3.  **Splitting and Cloning:** When a Gaussian exceeds a threshold, it is replaced by children. Splitting typically involves sampling new means from a normal distribution scaled by the parent's covariance, while cloning duplicates the parent [S8, unofficial].
+-4.  **Pruning:** Gaussians with low opacity $\alpha_k < \alpha_{\min}$ or low significance are removed to reduce memory footprint and prevent floaters [S1, unofficial][S2].
+-5.  **Buffer Management:** Pruned or split Gaussians require buffer compaction or flag-based marking to maintain contiguous memory access for rasterization [Parent].
++The core mechanism involves periodic evaluation of a metric per Gaussian to determine if the current representation is insufficient in a specific region. Common metrics include:
++1.  **Gradient Magnitude:** The accumulated 2D positional gradient $\tau_k = \frac{1}{N_{\text{views}}} \sum_{v} \| \frac{\partial L}{\partial \mu_v^k} \|_2$ [S4, S8, unofficial]. High gradients indicate that the Gaussian's position is not adequately minimizing the loss, suggesting a need for refinement or replacement.
++2.  **Opacity:** Low opacity $\alpha_k < \alpha_{\min}$ indicates a primitive contributes negligibly to the rendered image and is a candidate for pruning [S1, unofficial][S2].
++3.  **Scale:** Excessively large scales $max(s_k)$ relative to the scene extent $e_{scene}$ indicate coarse approximations that may blur details or occlude nearby geometry [S8, unofficial].
++
++Densification operations are typically triggered every $N$ iterations (e.g., `refineEvery` = 100) to allow the optimizer to stabilize [S5, S8, unofficial]. The primary operations are:
++*   **Splitting:** Replacing a parent Gaussian $g_k$ with $N_{children}$ children. The children's means $\mu_{child}$ are sampled from a normal distribution $\mathcal{N}(\mu_k, \Sigma_k)$ [S8, unofficial]. The scale is typically reduced, e.g., $s_{child} = s_k \cdot \frac{5}{4} \cdot \frac{1}{\sqrt{N_{children}}}$, to increase local density [S8, unofficial].
++*   **Cloning:** Creating an exact copy of $g_k$ (same $\mu, \Sigma, \alpha, \mathbf{c}$) to increase sampling frequency in high-error regions without changing the spatial footprint [S8, unofficial].
++*   **Pruning:** Removing Gaussians that fail to meet opacity or significance thresholds [S1, unofficial][S2].
++
++Buffer management is critical: pruned or split Gaussians require buffer compaction or flag-based marking to maintain contiguous memory access for rasterization [Parent].
++
+ ## Subtopics
+ 
+ ### [Pruning and Opacity Management](9314-pruning-and-opacity-management.md)
+-Pruning and Opacity Management refers to the set of techniques used during the training of 3D Gaussian Splatting (and related radiance field representations) to remove low-significance primitives and manage opacity values to prevent unbounded growth, reduce memory footprint, and eliminate artifacts such as floaters. It distinguishes itself from densification strategies by focusing on the removal or reassignment of existing primitives rather than the creation of new ones, often relying on opacity thresholds, gradient-based sensitivity scores, or contribution metrics to determine which primitives are redundant.
++Pruning and Opacity Management is a family of training-time strategies that dynamically modify the population of primitives (Gaussians, splats, or triangles) to control memory usage, prevent overfitting, and eliminate artifacts such as floaters. It solves the problem of unbounded primitive growth and the accumulation of insignificant or erroneous primitives during differentiable rendering optimization. It sets itself apart from static initialization or fixed-density methods by periodically evaluating per-primitive metrics (opacity, gradient magnitude, or sensitivity) and removing or resampling primitives based on these dynamic signals.
+ 
+ ### [Significance-Aware Pruning](9676-significance-aware-pruning.md)
+@@ -29,9 +40,10 @@
+ - [S2] Determine the relative depth for each 3D Gaussian based on its z-axis value.
+ - [S2] Scale the base pruning threshold $t_p$ by a multiplier $w_p$ determined by the relative depth. The lowest threshold is applied to the farthest point.
+-- [S2] $t_p$: The base 3D Gaussian pruning threshold. Value: 5e-3 for real defocus blur dataset; 1e-2 for real camera motion blur dataset.
++- [S2] $t_p$: The base 3D Gaussian pruning threshold. Value: $5 \times 10^{-3}$ for real defocus blur dataset; $1 \times 10^{-2}$ for real camera motion blur dataset.
+ - [S2] $w_p$: The pruning threshold multiplier based on depth. Value: 3.
+ 
+ ## Background
+-The concept of pruning 3D Gaussians was introduced in the original 3D Gaussian Splatting paper [14], which effectively manages the number of 3D Gaussians through periodic adaptive density control, densifying and pruning 3D Gaussians [S2]. Subsequent work has expanded on this foundation. For instance, [S2] introduced depth-based pruning to compensate for the sparsity of 3D Gaussians lying on the far end of the scene in forward-facing scenarios, such as those found in the DeblurNeRF dataset [22]. Other approaches like GaussianSPA [86] propose interleaving standard training with sparsification operators to remove redundancy while boosting the influence of remaining primitives [S1, unofficial].
++The concept of adaptive density control, including pruning, was introduced in the original 3D Gaussian Splatting paper [14] (cited in [S2]). The method manages the number of 3D Gaussians through periodic adaptive density control, densifying and pruning 3D Gaussians [S2]. Subsequent works have refined this approach. GaussianSPA [86] (cited in [S1, unofficial]) proposes an optimizing-sparsifying loop. Depth-based pruning was introduced in Deblurring 3D Gaussian Splatting [22] (cited in [S2]) to compensate for the sparsity of 3D Gaussians lying on the far end of the scene in forward-facing scenes. Principled Uncertainty Pruning is a more recent development focusing on post-hoc compression using Fisher Information [S1, unofficial].
++
+ ## Sources
+ [S1] 3D Gaussian Splatting Rasterization: A Survey, https://doi.org/10.20944/preprints202607.0776.v2, fetched 2026-10-26 (unofficial)

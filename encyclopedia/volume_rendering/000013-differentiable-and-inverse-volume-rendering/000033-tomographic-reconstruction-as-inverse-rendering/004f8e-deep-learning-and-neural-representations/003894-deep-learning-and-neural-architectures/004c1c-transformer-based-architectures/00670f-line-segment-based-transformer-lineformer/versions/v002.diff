@@ -1,0 +1,191 @@
+--- v001.md
++++ v002.md
+@@ -7,12 +7,12 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A batch of X-ray rays. For each ray, $N$ points are sampled along the ray path. Each point is represented by its 3D position $\mathbf{P} \in \mathbb{R}^3$. The input to the attention module is the point feature matrix $\mathbf{X} \in \mathbb{R}^{N \times C}$, where $C$ is the channel dimension.
++*   **Input:** A batch of X-ray rays. For each ray, $N$ points are sampled along the ray path [S1]. Each point is represented by its 3D position $\mathbf{P} \in \mathbb{R}^3$ [S1]. The input to the attention module is the point feature matrix $\mathbf{X} \in \mathbb{R}^{N \times C}$, where $C$ is the channel dimension [S1].
+ *   **Output:** A refined feature representation $\mathbf{Y} \in \mathbb{R}^{N \times C}$ and, subsequently, a predicted radiodensity value $D \in \mathbb{R}^N$ for each point [S1].
+ 
+ **Data Structures:**
+-*   **Point Features ($\mathbf{X}$):** A matrix of shape $N \times C$.
+-*   **Segmented Features ($\mathbf{X}_i$):** Sub-matrices of shape $\frac{N}{M} \times C$, where $M$ is the number of line segments.
+-*   **Attention Heads ($\mathbf{Q}_i^j, \mathbf{K}_i^j, \mathbf{V}_i^j$):** Matrices of shape $\frac{N}{M} \times d_h$, where $d_h = C/k$.
+-*   **Learnable Scale ($\alpha_i^j$):** A scalar parameter for each head and segment.
++*   **Point Features ($\mathbf{X}$):** A matrix of shape $N \times C$ [S1].
++*   **Segmented Features ($\mathbf{X}_i$):** Sub-matrices of shape $\frac{N}{M} \times C$, where $M$ is the number of line segments [S1].
++*   **Attention Heads ($\mathbf{Q}_i^j, \mathbf{K}_i^j, \mathbf{V}_i^j$):** Matrices of shape $\frac{N}{M} \times d_h$, where $d_h = C/k$ [S1].
++*   **Learnable Scale ($\alpha_i^j$):** A scalar parameter for each head and segment [S1].
+ 
+ **Parameters:**
+@@ -40,5 +40,5 @@
+ 6.  **Concatenation and Output:** The outputs from all $k$ heads for segment $i$ are concatenated along the channel dimension, passed through a final linear layer, and added with a positional embedding $\mathbf{E}_i \in \mathbb{R}^{\frac{N}{M} \times C}$ to produce the output segment $\mathbf{Y}_i$:
+     $$ \mathbf{Y}_i = \text{Linear}(\text{Concat}(\mathbf{H}_i^1, \dots, \mathbf{H}_i^k)) + \mathbf{E}_i $$
+-    [S1]. The final output $\mathbf{Y}$ is the concatenation of all $\mathbf{Y}_i$.
++    [S1]. The final output $\mathbf{Y}$ is the concatenation of all $\mathbf{Y}_i$ [S1].
+ 7.  **Radiodensity Prediction:** The output features $\mathbf{Y}$ pass through two fully connected layers to derive the point radiodensity $D \in \mathbb{R}^N$ [S1].
+ 
+@@ -71,5 +71,6 @@
+         self.out_linear = nn.Linear(C, C)
+         
+-        # Positional embedding (simplified as learnable per segment)
++        # Positional embedding per segment
++        # Shape: [M, N/M, C]
+         self.pos_embed = nn.Parameter(torch.randn(M, self.segment_size, C))
+ 
+@@ -80,117 +81,43 @@
+         """
+         # 1. Partition X into M segments
+-        # X shape: [N, C] -> reshape to [M, N/M, C]
+         X_seg = X.view(self.M, self.segment_size, self.C)
+         
+         # 2. Linear Projections for each segment
+-        Q_seg = self.W_Q(X_seg) # [M, N/M, C]
+-        K_seg = self.W_K(X_seg) # [M, N/M, C]
+-        V_seg = self.W_V(X_seg) # [M, N/M, C]
++        Q_seg = self.W_Q(X_seg)
++        K_seg = self.W_K(X_seg)
++        V_seg = self.W_V(X_seg)
+         
+-        # 3. Split into k heads
+-        # Reshape to [M, N/M, k, d_h] then permute to [M, k, N/M, d_h]
++        # 3. Split into k heads: [M, N/M, C] -> [M, N/M, k, d_h] -> [M, k, N/M, d_h]
+         Q_heads = Q_seg.view(self.M, self.segment_size, self.k, self.d_h).permute(0, 2, 1, 3)
+         K_heads = K_seg.view(self.M, self.segment_size, self.k, self.d_h).permute(0, 2, 1, 3)
+         V_heads = V_seg.view(self.M, self.segment_size, self.k, self.d_h).permute(0, 2, 1, 3)
+         
+-        # 4. Compute Attention for each head and segment
+-        # Q: [M, k, N/M, d_h], K: [M, k, N/M, d_h]
+-        # K^T Q: [M, k, d_h, N/M] x [M, k, N/M, d_h] -> [M, k, d_h, d_h] ? 
+-        # Wait, standard attention is (Q K^T) / sqrt(d). 
+-        # Source says: V * softmax(K^T Q / alpha). 
+-        # K^T is [M, k, d_h, N/M]. Q is [M, k, N/M, d_h].
+-        # K^T Q results in [M, k, d_h, d_h]. This is not standard attention.
+-        # Let's re-read source Eq 9: V_i^j softmax(K_i^j^T Q_i^j / alpha).
+-        # V is [N/M, d_h]. K^T is [d_h, N/M]. Q is [N/M, d_h].
+-        # K^T Q is [d_h, d_h]. This is a constant matrix per head/segment?
+-        # That seems odd for attention. Usually it's Q K^T [N/M, N/M].
+-        # Let's check the text: "computing self-attention within each line segment".
+-        # Standard MSA: Attention(Q,K,V) = softmax(QK^T/sqrt(d))V.
+-        # Source Eq 9: V softmax(K^T Q / alpha).
+-        # If K^T is [d_h, N/M] and Q is [N/M, d_h], then K^T Q is [d_h, d_h].
+-        # Then softmax is applied to [d_h, d_h]. Then V ([N/M, d_h]) is multiplied by this [d_h, d_h] matrix?
+-        # V @ softmax(...) -> [N/M, d_h].
+-        # This implies the attention weights are over the *channels* (d_h), not the points (N/M).
+-        # This is a channel-wise attention mechanism, not spatial.
+-        # However, the complexity analysis says O(N). 
+-        # Let's stick strictly to the formula provided in [S1].
++        # 4. Compute Attention: K^T Q / alpha
++        # K_heads: [M, k, N/M, d_h] -> transpose last two dims -> [M, k, d_h, N/M]
++        K_T = K_heads.transpose(-2, -1)
+         
+-        # K_heads: [M, k, N/M, d_h]
+-        # Q_heads: [M, k, N/M, d_h]
+-        # We need K^T Q. 
+-        # Transpose the last two dims of K: [M, k, d_h, N/M]
+-        # Matmul with Q: [M, k, d_h, N/M] @ [M, k, N/M, d_h] -> [M, k, d_h, d_h]
++        # Inner product: [M, k, d_h, N/M] @ [M, k, N/M, d_h] -> [M, k, d_h, d_h]
++        inner_prod = torch.matmul(K_T, Q_heads)
+         
+-        K_T = K_heads.transpose(-2, -1) # [M, k, d_h, N/M]
+-        # Scale by alpha. alpha is [M, k]. Need to broadcast.
+-        # alpha shape [M, k, 1, 1]
+-        alpha_scaled = self.alpha.unsqueeze(-1).unsqueeze(-1) # [M, k, 1, 1]
++        # Scale by alpha: [M, k, 1, 1]
++        alpha_scaled = self.alpha.unsqueeze(-1).unsqueeze(-1)
++        scaled = inner_prod / alpha_scaled
+         
+-        # Inner product
+-        # matmul(K_T, Q) -> [M, k, d_h, d_h]
+-        inner_prod = torch.matmul(K_T, Q_heads) # [M, k, d_h, d_h]
++        # Softmax over the channel dimension (d_h) to normalize weights
++        attn_weights = F.softmax(scaled, dim=-1)
+         
+-        # Divide by alpha
+-        scaled = inner_prod / alpha_scaled # [M, k, d_h, d_h]
++        # Multiply by V: [M, k, N/M, d_h] @ [M, k, d_h, d_h] -> [M, k, N/M, d_h]
++        # Flatten batch dims for standard matmul
++        V_flat = V_heads.view(-1, self.segment_size, self.d_h)
++        Attn_flat = attn_weights.view(-1, self.d_h, self.d_h)
++        H_flat = torch.matmul(V_flat, Attn_flat)
+         
+-        # Softmax. Over which dimension? 
+-        # Usually softmax is over the "key" dimension in QK^T. 
+-        # Here the result is d_h x d_h. 
+-        # The source doesn't specify the softmax axis. 
+-        # Given it's "self-attention", and the result is multiplied by V, 
+-        # and V is [N/M, d_h], the softmax output must be compatible with V.
+-        # If softmax is over the last dim (d_h), then V @ softmax -> [N/M, d_h].
+-        # This makes sense as a channel-mixing attention.
+-        attn_weights = F.softmax(scaled, dim=-1) # [M, k, d_h, d_h]
+-        
+-        # Multiply by V
+-        # V_heads: [M, k, N/M, d_h]
+-        # attn_weights: [M, k, d_h, d_h]
+-        # We need to multiply V by attn_weights.
+-        # V @ attn_weights? 
+-        # V is [N/M, d_h]. attn_weights is [d_h, d_h].
+-        # Result [N/M, d_h].
+-        # In batched form: [M, k, N/M, d_h] @ [M, k, d_h, d_h] -> [M, k, N/M, d_h]
+-        # But torch.matmul does last two dims.
+-        # We need to transpose V to put d_h last? No, V is [N/M, d_h].
+-        # We need to permute V to [M, k, d_h, N/M] to match?
+-        # Let's look at dimensions:
+-        # V: [M, k, N/M, d_h]
+-        # Attn: [M, k, d_h, d_h]
+-        # We want: Sum over d_h of V[..., :, d] * Attn[..., d, :].
+-        # This is einsum('mknd, mkde -> mkne', V, Attn).
+-        # Or permute V to [M, k, d_h, N/M], matmul with Attn [M, k, d_h, d_h]?
+-        # No, Attn is [d_h, d_h]. 
+-        # Let's assume standard matrix multiplication logic from source: V * Softmax(K^T Q).
+-        # If K^T Q is [d_h, d_h], and V is [N/M, d_h].
+-        # The operation is likely V @ Softmax(K^T Q)^T or similar.
+-        # Let's use einsum for clarity and correctness based on dims.
+-        # V: [M, k, N/M, d_h]
+-        # Attn: [M, k, d_h, d_h]
+-        # Output: [M, k, N/M, d_h]
+-        # H = einsum('mknd, mkde -> mkne', V_heads, attn_weights)
+-        # Wait, if Attn is [d_h, d_h], and we multiply V [N/M, d_h] by it...
+-        # If we do V @ Attn, V is [N/M, d_h], Attn is [d_h, d_h]. Result [N/M, d_h].
+-        # So we need to align the last dim of V with the first dim of Attn?
+-        # V: [..., d_h]. Attn: [d_h, d_h].
+-        # Yes, V @ Attn works if Attn is [d_h, d_h].
+-        
+-        # Reshape V_heads to [M*k, N/M, d_h]
+-        V_flat = V_heads.view(-1, self.segment_size, self.d_h)
+-        # Reshape Attn to [M*k, d_h, d_h]
+-        Attn_flat = attn_weights.view(-1, self.d_h, self.d_h)
+-        
+-        # Matrix multiply
+-        H_flat = torch.matmul(V_flat, Attn_flat) # [M*k, N/M, d_h]
+-        
+-        # Reshape back
++        # Reshape back to [M, k, N/M, d_h]
+         H = H_flat.view(self.M, self.k, self.segment_size, self.d_h)
+         
+-        # 5. Concatenate heads
+-        # H: [M, k, N/M, d_h] -> [M, N/M, k*d_h] = [M, N/M, C]
++        # 5. Concatenate heads: [M, k, N/M, d_h] -> [M, N/M, k*d_h] = [M, N/M, C]
+         H_concat = H.permute(0, 2, 1, 3).contiguous().view(self.M, self.segment_size, self.C)
+         
+         # 6. Final Linear + Pos Embed
+-        # H_concat: [M, N/M, C]
+         Y_seg = self.out_linear(H_concat) + self.pos_embed
+         
+@@ -202,7 +129,7 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Division by Zero:** The learnable parameter $\alpha_i^j$ must be initialized or constrained to avoid zero values, which would cause division by zero in the attention scaling [S1].
++*   **Division by Zero:** The learnable parameter $\alpha_i^j$ must be initialized to positive values and constrained during training to avoid zero values, which would cause division by zero in the attention scaling [G].
+ *   **Segment Size:** $N$ must be divisible by $M$ to ensure uniform segment sizes. If not, padding or irregular segmentation is required, which is not described in the source [G].
+-*   **Channel Dimension:** $C$ must be divisible by $k$ to ensure integer head dimensions $d_h$ [S1].
++*   **Channel Dimension:** $C$ must be divisible by $k$ to ensure integer head dimensions $d_h$ [G].
+ 
+ ## Operating characteristics
+@@ -222,5 +149,5 @@
+ 
+ ## Background
+-The Line Segment-based Transformer was proposed in the paper "Structure-Aware Sparse-View X-Ray 3D Reconstruction" (SAX-NeRF) by Cai Yuanhao et al., presented at CVPR 2024 [S1]. It was developed to address the limitations of existing NeRF algorithms in capturing structural contents of imaged objects in sparse-view X-ray tomography. The method is part of a framework that also includes a Masked Local-Global (MLG) ray sampling strategy and utilizes the X3D dataset [S1].
++The Line Segment-based Transformer was proposed in the paper "Structure-Aware Sparse-View X-Ray 3D Reconstruction" (SAX-NeRF) by Cai Yuanhao et al., presented at CVPR 2024 [S1]. It was developed to address the limitations of existing NeRF algorithms in capturing structural contents of imaged objects in sparse-view X-ray tomography [S1]. The method is part of a framework that also includes a Masked Local-Global (MLG) ray sampling strategy and utilizes the X3D dataset [S1].
+ 
+ ## Sources

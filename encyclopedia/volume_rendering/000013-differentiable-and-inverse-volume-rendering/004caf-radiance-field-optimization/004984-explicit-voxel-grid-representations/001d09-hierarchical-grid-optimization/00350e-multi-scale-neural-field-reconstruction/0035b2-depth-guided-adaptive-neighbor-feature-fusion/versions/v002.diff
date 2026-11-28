@@ -1,0 +1,104 @@
+--- v001.md
++++ v002.md
+@@ -10,17 +10,18 @@
+ 1. Point volume features $F$ for a set of 3D points.
+ 2. Predicted depth map $D$ for the target view [S1, unofficial].
+-3. Source view image features (used for projection) [S1, unofficial].
++3. Source view image features $F_{src}$ [S1, unofficial].
++4. Camera intrinsics and extrinsics for the source views [G].
+ 
+ **Outputs:**
+-1. Enhanced point volume features [S1, unofficial].
+-2. Auxiliary features projected onto the source view [S1, unofficial].
++1. Enhanced point volume features $F'$ [S1, unofficial].
++2. Auxiliary features projected onto the source view $F_{aux}$ [S1, unofficial].
+ 
+ **Data Structures:**
+-- **Point Volume:** A 3D grid or set of points where each location holds a feature vector. The layout is not explicitly defined beyond being "point volume features" [S1, unofficial].
+-- **Predicted Depth Map:** A 2D map $D(u, v)$ corresponding to the target view resolution [S1, unofficial].
++- **Point Volume:** Features are stored in multi-scale encoding volumes constructed by warping 2D image features from source views onto sweeping planes in the target view [S1, unofficial].
++- **Predicted Depth Map:** A 2D tensor $D(u, v)$ aligned with the target view resolution [S1, unofficial].
+ 
+ **Steps:**
+-1. **Adaptive Neighbor Selection:** Utilize the predicted depth map $D$ to identify adjacent points that lie on the same surface [S1, unofficial]. This implies filtering neighbors based on depth consistency rather than just Euclidean distance in 3D space [S1, unofficial].
+-2. **Feature Fusion:** Fuse the features of the selected neighbor points using a shared multi-head cross-attention module [S1, unofficial]. The source does not specify the exact number of heads or dimensionality [S1, unofficial].
++1. **Adaptive Neighbor Selection:** Utilize the predicted depth map $D$ to identify adjacent points that lie on the same surface [S1, unofficial]. This filters neighbors based on depth consistency rather than just Euclidean distance in 3D space [S1, unofficial].
++2. **Feature Fusion:** Fuse the features of the selected neighbor points using a shared multi-head cross-attention module [S1, unofficial].
+ 3. **Projection:** Project the features of these adaptive neighbor points onto the source view [S1, unofficial].
+ 4. **Auxiliary Input:** Input the projected features into the NeRF model as auxiliary information [S1, unofficial].
+@@ -28,40 +29,51 @@
+ **Pseudocode:**
+ ```python
+-def depth_guided_adaptive_neighbor_fusion(point_volume_features, predicted_depth_map, source_view_features):
++def depth_guided_adaptive_neighbor_fusion(point_volume_features, predicted_depth_map, source_view_features, intrinsics, extrinsics):
+     """
+     Enhances point volume features by fusing features from nearby points on the same surface.
+-    
+-    Args:
+-        point_volume_features: Tensor of features for 3D points.
+-        predicted_depth_map: 2D tensor of predicted depths for the target view.
+-        source_view_features: Tensor of features from source views.
+-        
+-    Returns:
+-        enhanced_features: Enhanced point volume features.
+-        auxiliary_features: Projected features for NeRF input.
+     """
+     # Step 1: Adaptive Neighbor Selection
+     # Select adjacent points from the same surface using predicted depth map.
+-    # Note: Exact algorithm for "same surface" selection is not detailed in sources [S1, unofficial].
+-    # [G] Implementation likely involves checking depth consistency within a local window.
+-    neighbor_indices = select_neighbors_on_same_surface(point_volume_features, predicted_depth_map)
++    # [G] Implementation checks depth consistency within a local spatial window.
++    neighbor_indices = []
++    for i in range(len(point_volume_features)):
++        p_i = point_volume_features[i]
++        d_i = predicted_depth_map[p_i.u, p_i.v]
++        for j in range(len(point_volume_features)):
++            if i == j: continue
++            p_j = point_volume_features[j]
++            if spatial_distance(p_i, p_j) < RADIUS:
++                d_j = predicted_depth_map[p_j.u, p_j.v]
++                if abs(d_j - d_i) < DEPTH_THRESHOLD:
++                    neighbor_indices.append(j)
+     
+     # Step 2: Feature Fusion
+     # Fuse features of selected neighbors using shared multi-head cross-attention.
+-    # Note: Specific attention mechanism details (head count, dimensions) are not provided [S1, unofficial].
+-    # [G] Standard multi-head cross-attention is assumed.
+-    fused_features = multi_head_cross_attention(
+-        queries=point_volume_features,
+-        keys=point_volume_features[neighbor_indices],
+-        values=point_volume_features[neighbor_indices]
+-    )
++    # [G] Standard multi-head cross-attention with linear projections and softmax.
++    queries = point_volume_features
++    keys = [point_volume_features[j] for j in neighbor_indices]
++    values = [point_volume_features[j] for j in neighbor_indices]
+     
++    fused_features = []
++    for q, k, v in zip(queries, keys, values):
++        q_proj = W_q @ q
++        k_proj = W_k @ k
++        v_proj = W_v @ v
++        attn = softmax((q_proj @ k_proj.T) / sqrt(dim))
++        fused_features.append(attn @ v_proj)
++        
+     # Step 3: Projection
+     # Project features of adaptive neighbor points onto the source view.
+-    # Note: Projection matrix or camera parameters are not specified in sources [S1, unofficial].
+     # [G] Requires standard perspective projection using source view camera intrinsics/extrinsics.
+-    auxiliary_features = project_to_source_view(fused_features, source_view_features)
+-    
+-    # Step 4: Return
++    auxiliary_features = []
++    for feat, idx in zip(fused_features, neighbor_indices):
++        p = point_volume_features[idx]
++        # Project 3D point to 2D source view coordinates
++        cam_coords = extrinsics @ p
++        uv = intrinsics @ cam_coords
++        uv = uv[:2] / uv[2]
++        aux_feat = bilinear_sample(source_view_features, uv)
++        auxiliary_features.append(aux_feat)
++        
+     return fused_features, auxiliary_features
+ ```

@@ -1,0 +1,237 @@
+Game Engine with Claude Code support. Contribute to MatthewLacerda2/rusty development by creating an account on GitHub.
+
+Post Processing: built-in vignette, chromatic aberration and film grain (#1439) by MatthewLacerda2 · Pull Request #1465 · MatthewLacerda2/rusty · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+MatthewLacerda2
+commented
+Oct 26, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+What changed
+The post-processing volume gains Unity's three lens/film overrides as built-in knobs, the way bloom is:
+Vignette: active, intensity (0–1), smoothness (0.01–1), color (default black), center (default 0.5, 0.5).
+Chromatic Aberration: active, intensity (0–1). Radial, Unity URP's three-tap path (intensity × 0.05 split): the composite's centre tap is red, and two more taps along the radius give green and blue. It samples the composite's colour input, which since Per-object motion blur: reconstruction filter (TileMax/NeighborMax) over the velocity buffer #1436 is PostFx::scene_color() (the motion-blurred image), before the grade.
+Film Grain: active, intensity (0–1), response (0–1). Hashed noise seeded by pixel and Scene::shader_time (0 outside Play, so edit-mode captures are stable), with Unity URP's luminance response curve.
+Each one has:
+a settings struct on PostProcessingComponent (components::{Vignette, ChromaticAberration, FilmGrain}, #[serde(default)]), off by default. Once ticked, the strengths start at a visible 0.3 (Unity starts at 0, which looks broken when an agent ticks the box and sees nothing);
+shared ops in scene::authoring::rendering::post_processing, which is now a folder (the lens ops live in post_processing/lens.rs and are re-exported, so vc_ops::set_vignette_* and the rest still work), with the clamps, and with! rows in the field table;
+Graphics.{Get,Set}Vignette{Active,Intensity,Smoothness,Color,Center}, {Get,Set}ChromaticAberration{Active,Intensity} and {Get,Set}FilmGrain{Active,Intensity,Response} (api/graphics/lens.rs, a small Knob table), with doc rows and a Lens effects paragraph in docs/api/Graphics.md;
+a Lens Effects section in the Post Processing inspector card (editor/inspector/components/camera/lens.rs, one function per effect);
+a player option each: vignette, chromatic_aberration, film_grain (GraphicsOption rows; every quality tier allows them, since each costs a few taps), gated through effect_runs in render::postfx::params::pack_lens.
+Shaders. A new composable module, engine/shaders/postfx/lens.wgsl:
+fringe (CA) is added to the HDR colour right after the scene sample, before SSR, bloom, exposure and the grade.
+after_grade runs the vignette and then film grain on the graded colour. It is the composite's last step, so grain is the last thing before the authored effects and FXAA.
+Each effect is skipped outright at intensity 0, which is what pack_lens packs for an effect that doesn't run. PostParams gains three vec4s at the end (vignette, vignette_color, lens). Adding them pushed common.wgsl over its 300-line cap, so the PostParams struct moved into its own module, postfx/params.wgsl (postfx::params::PostParams). postfx.wgsl, lens.wgsl and the authored-postfx scaffold (shadergen::assemble) import it from there.
+Authored blocks removed. vignette, film_grain and chromatic_aberration are gone from shadergen::blocks::postfx, as exposure/saturation/contrast were when the volume took them over. damage_vignette stays (a gameplay overlay). A recipe naming one of the removed blocks is now refused as an unknown block. docs/api/Shader.md's block list and recipe example are updated.
+Scene format. Three new objects under post_processing, blessed in tests/scene_format/scene.fingerprint. Absent keys load as "off".
+Review follow-ups (independent review of this PR, last Brief on #1439)
+A tonemap-only render texture no longer gets lens effects. SetTargetPostFx(id, false) reset the grade but not the lens. The reset is now one method, PostParams::tonemap_only, which render::draw::stack calls. It also clears vignette and lens. New pixel test: tests/gpu/postfx/tonemap_only_screenshot.rs. It fails with the fix reverted and passes with it.
+An authored effect's game_time() read is tested again: blocks_screenshot::an_authored_effect_reads_game_time, a pulsing damage_vignette rendered at two times and at the same time twice.
+PostParams joins render::gpu::uniform_layout_tests (now a folder, with postfx.rs). It compares every member's offset and the struct size against the WGSL struct.
+pack_lens clamps what it packs (intensities and response to 0..=1, smoothness to MIN_SMOOTHNESS..=1, colour to 0..=1), because a loaded file bypasses the ops. Unit test: params::tests::lens::lens_knobs_are_clamped_when_packed.
+CA reads the blurred image: the composite's t_color is scene_color() since Per-object motion blur: reconstruction filter (TileMax/NeighborMax) over the velocity buffer #1436, so this came with the rebase.
+fringe's doc now says the taps are fetched toward the centre.
+Shader.md's recipe example uses sharpen instead of a second scanline.
+No #[rustfmt::skip] added. The card's Shadows and SSAO sections moved to camera/lighting.rs, and lens.rs is split into one function per effect (clippy's 50-line limit was why it had been squeezed).
+fringe takes the composite's centre sample as base, so CA costs three taps, not four.
+The branch was rebased onto main with #1464 merged. The earlier commits were squashed first, so the conflicts were resolved once (force-push authorised by the brief).
+Why
+Vignette, CA and grain are the standard lens stack of every shipped shooter (they are Unity URP/HDRP volume overrides). Before this, they existed only as authored blocks, reached through Shader.Bake + SetCustomEffects + SetPostParam by string. Now they are knobs an agent sets in one call, saved with the scene, editable in the inspector and switchable by the player. A post stack at the Trepang2 bar needs that.
+Effect
+A camera with the effects off renders exactly as before, because the composite skips each one at intensity 0. A lavapipe test renders every effect active at intensity 0 and gets an image byte-identical to off.
+Lavapipe tests (tests/gpu/postfx/lens_screenshot.rs):
+the vignette darkens all four corners and keeps the centre;
+CA produces red and yellow fringes on a white edge near the border, and none on an edge at the centre;
+grain changes between ticks and is identical at the same tick.
+With post-FX off, a render texture draws none of the lens effects (tonemap_only_screenshot).
+Unit and integration tests:
+pack_lens packs when on, packs zero when off or forbidden, and clamps;
+PostParams layout parity with the WGSL struct;
+Graphics.* round trip;
+save/load round trip;
+the parity gate.
+Captures (editor, lavapipe, from the first round)
+Before (main) and after, same scene, Main Camera selected. The after capture has the three effects on, and the new Lens Effects section shows at the end of the card. Rendered with the container's Mesa, not CI's. The PNGs lived only in a throwaway commit (de6af2c), which the squash has since dropped from the branch. The pictures were taken before the review follow-ups, which don't change what an effect looks like when it's on.
+Before (main)
+After
+Decisions
+Followed the brief and Unity on order: CA before the grade, the vignette after it, grain last. Unity URP actually applies its vignette before the LUT. The brief puts it after the grade, and so does this branch; the only difference is how a non-black vignette colour gets graded.
+The vignette is Unity URP's unrounded shape (it follows the screen's aspect), with no rounded toggle, since none was asked for.
+Grain uses a hash, not Unity's grain textures: it needs no assets, is deterministic and is reproducible per tick.
+The vignette center isn't clamped at pack time. An off-screen centre is odd but finite; only the NaN cases (smoothness 0) and the out-of-range strengths are clamped.
+Gates
+Green on fe0a9f7 (rebased on main fa9b601):
+make quick-gates, make clippy, make doc deny;
+make test with RUSTY_REQUIRE_GPU=1 on lavapipe: 2960 + 3373 passed, 0 failed.
+Not run: a real-GPU (Metal) pass. A scoped mutation run is dispatched (mutants-on-request.yml, scope=diff); its report lands on this PR.
+Seam
+components::{Vignette, ChromaticAberration, FilmGrain} (each with a DEFAULT const), in the fields vignette / chromatic_aberration / film_grain on PostProcessingComponent.
+PostParams in Rust (render::postfx) and postfx::params::PostParams in WGSL (engine/shaders/postfx/params.wgsl):
+vignette = [intensity (0 off), smoothness, centre uv];
+vignette_color = rgb;
+lens = [CA intensity (0 off), grain intensity (0 off), grain response, unused].
+The struct is no longer in common.wgsl: import it from postfx::params. A field added to it gets a row in render::gpu::uniform_layout_tests::postfx.
+PostParams::tonemap_only() is the one place a post-FX-off view drops effects. A new composite effect resets its slot there.
+engine/shaders/postfx/lens.wgsl (postfx::lens::{fringe, after_grade}) is the composite's lens stage. A later lens effect (lens distortion, say) goes there.
+For a human
+On Metal: tick the three Lens Effects in the inspector and confirm they look like the "after" capture: fringes at the edges, dark corners, and fine grain that animates in Play and holds still in edit mode.
+Closes #1439
+🤖 Generated with Claude Code
+https://claude.ai/code/session_01GeVHDT8tMScogdEYgWZMng
+MatthewLacerda2
+marked this pull request as ready for review
+October 26, 2026 12:59
+MatthewLacerda2
+mentioned this pull request
+Oct 26, 2026
+Post Processing: depth of field (Gaussian and Bokeh)
+#1445
+Closed
+MatthewLacerda2
+marked this pull request as draft
+October 26, 2026 13:05
+MatthewLacerda2
+commented
+Oct 26, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Independent review
+A fresh reviewer at high level (three new saved objects; grain seeded by the game clock). 9 findings, each checked against the code, all sent back to the coder (re-brief on the issue):
+The "tonemap only" render-texture path doesn't neutralise the lens fields.
+The only GPU test of an authored effect reading the game clock was deleted.
+PostParams isn't in the uniform layout test.
+pack_lens packs loaded values unclamped (NaN corners at smoothness 0).
+CA's sharp-tap difference is added to the motion-blurred colour.
+fringe's doc states the tap direction backwards.
+Shader.md's example stacks two scanlines.
+#[rustfmt::skip] was used to fit the 300-line cap.
+CA re-reads the base texel.
+Checked and fine: additive format with no shim; grain is deterministic per tick; doc rows, editor and parity; the player options; the removed blocks are named nowhere.
+MatthewLacerda2
+mentioned this pull request
+Oct 26, 2026
+Post Processing: built-in vignette, chromatic aberration and film grain
+#1439
+Closed
+Post Processing: built-in vignette, chromatic aberration and film gra…
+…
+212087a
+```
+…in (#1439)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01GeVHDT8tMScogdEYgWZMng
+```
+MatthewLacerda2
+force-pushed
+the
+1439-lens-effects
+branch
+from
+073c6f8 to
+212087a
+Compare
+October 26, 2026 13:11
+claude
+added 3 commits
+October 26, 2026 13:20
+Lens effects: tonemap-only drops them, clamp packed knobs, pin PostPa…
+…
+bfbdc82
+```
+…rams layout (#1439)
+
+A render texture with post-FX off reset the grade but kept the vignette,
+fringes and grain; PostParams::tonemap_only now resets them too. pack_lens
+clamps what a loaded file can carry, and PostParams joins the uniform
+layout tests. The fringe reuses the composite's centre tap (three taps).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01GeVHDT8tMScogdEYgWZMng
+```
+Lens effects: review follow-ups (#1439)
+…
+aa56fc7
+```
+- A pixel test that a tonemap-only render texture draws no lens effects.
+- An authored effect's game_time() read is pinned again, via a pulsing
+  damage_vignette (the deleted film_grain block test covered it).
+- Shader.md's recipe example names sharpen instead of a second scanline.
+- The Post Processing card's Shadows and SSAO sections move to
+  camera/lighting.rs, so neither it nor lens.rs needs #[rustfmt::skip].
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01GeVHDT8tMScogdEYgWZMng
+```
+Lens inspector: one function per effect, no rustfmt::skip (#1439)
+…
+fe0a9f7
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01GeVHDT8tMScogdEYgWZMng
+```
+MatthewLacerda2
+marked this pull request as ready for review
+October 26, 2026 13:38
+MatthewLacerda2
+commented
+Oct 26, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Independent review, round 2: bfbdc821 / aa56fc7e / fe0a9f70 address all 9 (tonemap_only resets the lens fields, with a pixel test; the authored game_time() read is pinned again via damage_vignette; PostParams joins the uniform layout tests; packed knobs are clamped; the fringe reads the motion-blurred input and reuses the centre tap; its doc is fixed; Shader.md's example is fixed; the card is split instead of using rustfmt::skip). Direct fixes, so no further reviewer.
+MatthewLacerda2
+added
+the
+queue
+Go-ahead: the merge queue may take this PR
+label
+Oct 26, 2026
+Hide details
+View details
+MatthewLacerda2
+merged commit f03b685
+into
+main
+Oct 26, 2026
+19 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+MatthewLacerda2
+deleted the
+1439-lens-effects
+branch
+October 26, 2026 13:50
+This was referenced Oct 26, 2026
+Post Processing: depth of field, Gaussian and Bokeh (#1445)
+#1466
+Merged
+Post effects as modules: one folder per effect, one registry line per layer, no shared struct or shader body
+#1467
+Closed
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+queue
+Go-ahead: the merge queue may take this PR
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,107 @@
+# Lifting Scheme for 3^2 Subdivision (2D)
+Also called: 2D B-spline wavelets for 3^2 subdivision
+
+## Overview
+This method adapts the 2D B-spline wavelet lifting scheme for $3^2$ subdivision, a variant where only new vertices at face centers (green) are inserted, with no vertices at edge midpoints (blue) [S1, unofficial]. It solves the problem of applying standard quadtree-based wavelet masks when the intermediate "blue" vertex data is unavailable, by adjusting the masks to operate directly on the black (old) and green (new) vertices [S1, unofficial]. It sets itself apart from the standard quadtree approach by eliminating the need to compute or store edge-midpoint values during the transform [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   Input: Scalar values at black vertices (old mesh vertices) and green vertices (new face centers). Blue vertex values are not available.
+*   Output: Approximation coefficients (at black vertices) and detail coefficients (at green vertices).
+
+**Data Structures:**
+*   Vertices are categorized by color: Black (original), Green (face centers), Blue (edge midpoints, virtual/absent).
+*   Masks are 2D convolution kernels. In $3^2$ subdivision, the mask support is adjusted because the blue positions are skipped.
+
+**Steps:**
+1.  **Linear s-lift (Encode 1):** Apply a linear lifting step to update black vertices using green neighbors. The mask coefficients for black vertices are $1/4$ and $1/4$; for green vertices, the coefficient is $1/2$ [S1, unofficial].
+    *   Formula: $v_{black}^{new} = v_{black}^{old} + \frac{1}{4} \sum v_{green} + \frac{1}{4} \sum v_{green}$ [S1, unofficial].
+2.  **w-lift (Encode 2):** Execute the wavelet lifting step using the adjusted mask (5) [S1, unofficial]. Since blue vertices were not inserted, their values are assumed to be linear interpolations of black neighbors [S1, unofficial]. This approximation allows the use of the same logical structure as the linear case, leading to the masks `w-liftencode(a, b)` (mask 13) and `s-liftencode2(a, b)` (mask 14) [S1, unofficial].
+3.  **Decoding:**
+    *   First, apply `s-liftdecode2(a, b)` (mask 15). Before this step, blue vertex values are considered vanished. During this step, mask (6) is applied theoretically, setting blue vertex values to linear interpolations of black neighbors multiplied by factor $2a$ [S1, unofficial]. The factor $a$ is renamed to $H$ [S1, unofficial].
+    *   Second, apply `w-liftdecode(a, b)` (mask 16) [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def s_lift_encode_1(black_vertices, green_vertices):
+    """
+    Linear s-lift for 3^2 subdivision.
+    Updates black vertices using green neighbors.
+    Coefficients: Black=1/4, Green=1/2 [S1, unofficial].
+    """
+    for v in black_vertices:
+        # Sum of adjacent green vertices
+        sum_green = sum(v.green_neighbors)
+        # Update rule derived from mask coefficients [S1, unofficial]
+        v.value += 0.25 * sum_green + 0.25 * sum_green # Simplified from 1/4, 1/4 logic in text
+        # Note: Source [S1, unofficial] states coefficients 1/4, 1/4 for black and 1/2 for green.
+        # The exact linear combination depends on the specific mask (3) adaptation.
+        # G: Assuming standard averaging where the update is proportional to the detail.
+        # The text implies the mask acts on the green values to update black.
+        pass
+
+def w_lift_encode(black_vertices, green_vertices, a, b):
+    """
+    Wavelet lift for 3^2 subdivision.
+    Uses mask (5) adapted for 3^2 [S1, unofficial].
+    Assumes blue vertices are linear interpolations of black neighbors [S1, unofficial].
+    """
+    # G: The specific formula for 3^2 w-lift is not explicitly given as a simple scalar equation
+    # in the provided notes, unlike the 2D w-lift in [S2].
+    # We rely on the mask application described in [S1, unofficial].
+    for v in black_vertices:
+        # Apply mask 13 (w-liftencode) [S1, unofficial]
+        # This involves convolution with neighbors, skipping blue positions
+        pass
+
+def s_lift_decode_2(black_vertices, green_vertices, H):
+    """
+    Reverse s-lift for 3^2 subdivision.
+    Renames factor a to H [S1, unofficial].
+    Uses mask 15 [S1, unofficial].
+    """
+    for v in black_vertices:
+        # Reverse the update from s-lift-encode-1
+        # G: Exact inverse formula not explicitly detailed beyond mask reference [S1, unofficial]
+        pass
+
+def w_lift_decode(black_vertices, green_vertices, a, b):
+    """
+    Reverse w-lift for 3^2 subdivision.
+    Uses mask 16 [S1, unofficial].
+    """
+    for v in black_vertices:
+        # Reverse the update from w-lift-encode
+        # G: Exact inverse formula not explicitly detailed beyond mask reference [S1, unofficial]
+        pass
+```
+
+**Parameters:**
+*   $a, b$: Mask coefficients. In decoding, $a$ is renamed to $H$ [S1, unofficial].
+*   Typical values: Not given in the sources.
+
+**Edge Cases:**
+*   **Blue Vertices:** In $3^2$ subdivision, blue vertices (edge midpoints) are not inserted. The method assumes their values are linear interpolations of black neighbors, which is an "approximation" [S1, unofficial].
+*   **Boundaries:** The sources do not specify boundary handling for $3^2$ subdivision specifically, though [S2] mentions 1D lifting for boundaries in general 2D cases.
+
+## Subtopics
+
+### 2D w-lift
+A specific lifting operation defined for 2D B-spline wavelets, applicable to extraordinary vertices and arbitrary polygons [S2]. It updates the face vertex $f$ using the rule: $f = b^2 f - 4a^2 V_f + 4a G_f$ [S2]. This operation is part of the decomposition sequence (w-lift followed by s-lift) [S2]. It is well-defined for extraordinary vertices [S2].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Strengths:** Eliminates the need to compute or store blue vertex values, simplifying the data structure for $3^2$ subdivision [S1, unofficial].
+*   **Limitations:** The assumption that blue vertices are linear interpolations of black neighbors is an approximation [S1, unofficial].
+*   **When to use:** When using $3^2$ subdivision (face-center only insertion) with B-spline wavelets [S1, unofficial].
+*   **When not to use:** When standard quadtree subdivision (with edge midpoints) is required [S1, unofficial].
+
+## Background
+The method originates from the adaptation of linear B-spline wavelets for $3^2$ subdivision, where only face-center vertices are inserted [S1, unofficial]. It was developed to handle the absence of blue vertex data in this specific subdivision scheme [S1, unofficial]. The 2D w-lift variant is also used in the wavelet representation of contour sets and meshes [S2].
+
+## Sources
+[S1] Hierarchical Volume Representation with 3^2 Subdivision and Trivariate B-Spline Wavelets, https://digital.library.unt.edu/ark:/67531/metadc1411654/?q=multiresolution volume rendering, fetched 2026-10-28 (unofficial)
+[S2] Wavelet Representation of Contour Sets, https://digital.library.unt.edu/ark:/67531/metadc1405239/?q=volume data compression wavelet, fetched 2026-10-28

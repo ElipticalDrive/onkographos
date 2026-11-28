@@ -1,0 +1,146 @@
+--- v010.md
++++ v011.md
+@@ -4,15 +4,15 @@
+ 
+ ## Overview
+-Hybrid Ray Tracing is a method for mixing geometric and volumetric data by casting rays through the ensemble of both, drawing samples of each, and compositing them in depth-sorted order [S1, unofficial][S2, unofficial]. It solves the problem of rendering scenes containing both scalar fields (volumes) and polygonal boundaries (surfaces) simultaneously. Unlike pure volume rendering which ignores geometry, or pure ray tracing which ignores volumetric density, this method treats polygons as opaque or translucent obstacles within the volume, handling the "hidden-volume" problem locally within slabs [S2, unofficial]. It sets itself apart from [3D Scan-conversion](#hybrid-ray-tracing-with-volume-data) by maintaining the continuous nature of the volume and the sharpness of the geometry, at the cost of higher computational complexity due to ray-polygon intersection testing and adaptive supersampling.
++Hybrid Ray Tracing is a method for mixing geometric and volumetric data by casting rays through the ensemble of both, drawing samples of each, and compositing them in depth-sorted order [S1, unofficial][S2, unofficial]. It solves the problem of rendering scenes containing both scalar fields (volumes) and polygonal boundaries (surfaces) simultaneously [S1, unofficial][S2, unofficial]. Unlike pure volume rendering which ignores geometry, or pure ray tracing which ignores volumetric density, this method treats polygons as opaque or translucent obstacles within the volume, handling the "hidden-volume" problem locally within slabs [S2, unofficial]. It sets itself apart from [3D Scan-conversion](#hybrid-ray-tracing-with-volume-data) by maintaining the continuous nature of the volume and the sharpness of the geometry, at the cost of higher computational complexity due to ray-polygon intersection testing and adaptive supersampling [S2, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** A 3D voxel array of scalar values (density), a set of embedded polygons (geometry), a camera position, and a viewing direction.
+-*   **Outputs:** A 2D image with color and opacity per pixel.
++*   **Inputs:** A 3D voxel array of scalar values (density), a set of embedded polygons (geometry), a camera position, and a viewing direction [S2, unofficial].
++*   **Outputs:** A 2D image with color and opacity per pixel [S1, unofficial].
+ 
+ **Data Structures:**
+-*   **Volumetric Data:** Stored as a 3D texture or array. Each voxel $v$ has an associated color $c_v$ and opacity $o_v$ derived from classification/shading of the scalar value.
+-*   **Geometric Data:** A list of polygons (triangles/quads) with surface color $c_p$ and opacity $o_p$.
+-*   **Ray Representation:** A ray is defined by an origin $O$ and a direction $D$.
++*   **Volumetric Data:** Stored as a 3D texture or array. Each voxel $v$ has an associated color $c_v$ and opacity $o_v$ derived from classification/shading of the scalar value [S2, unofficial].
++*   **Geometric Data:** A list of polygons (triangles/quads) with surface color $c_p$ and opacity $o_p$ [S2, unofficial].
++*   **Ray Representation:** A ray is defined by an origin $O$ and a direction $D$ [G].
+ 
+ **Parameters:**
+@@ -64,18 +64,14 @@
+ 
+ ```python
+-def hybrid_ray_trace(ray_origin, ray_direction, volume_data, polygons, threshold_theta):
+-    # 1. Precompute voxel colors/opacities (c_v, o_v) and polygon colors/opacities (c_p, o_p)
+-    # This is typically done in a preprocessing step or fragment shader context
+-    
+-    # 2. Collect Events
++def hybrid_ray_trace(ray_origin, ray_direction, volume_data, polygons, max_distance, slab_thickness, threshold_theta):
++    # 1. Collect Events
+     events = []
+     
+     # Add volumetric sample points along the ray
+-    # Assuming slab thickness t_v is known
+-    t = 0
++    t = 0.0
+     while t < max_distance:
+         pos = ray_origin + ray_direction * t
+-        # Tri-linear interpolation to get c_v, o_v at pos
+-        c_v, o_v = sample_volume(volume_data, pos)
++        # Tri-linear interpolation to get c_v, o_v at pos [G]
++        c_v, o_v = tri_linear_sample(volume_data, pos)
+         events.append({
+             'type': 'volume',
+@@ -88,8 +84,8 @@
+     # Add polygon intersections
+     for poly in polygons:
+-        t_intersect = intersect_ray_polygon(ray_origin, ray_direction, poly)
++        t_intersect = ray_triangle_intersect(ray_origin, ray_direction, poly)
+         if t_intersect is not None and t_intersect > 0:
+-            # Shade polygon to get c_p, o_p
+-            c_p, o_p = shade_polygon(poly, ray_origin, ray_direction)
++            # Shade polygon to get c_p, o_p [G]
++            c_p, o_p = shade_triangle(poly, ray_origin, ray_direction)
+             events.append({
+                 'type': 'polygon',
+@@ -100,17 +96,14 @@
+             })
+             
+-    # 3. Sort Events by t (front-to-back)
++    # 2. Sort Events by t (front-to-back)
+     events.sort(key=lambda e: e['t'])
+     
+-    # 4. Composite
+-    accumulated_color = (0, 0, 0)
+-    accumulated_opacity = 0
++    # 3. Composite
++    accumulated_color = (0.0, 0.0, 0.0)
++    accumulated_opacity = 0.0
+     
+     for event in events:
+         if event['type'] == 'volume':
+-            # Standard volume compositing
+-            # C_out = C_in + (1 - A_in) * c_v * o_v
+-            # A_out = A_in + (1 - A_in) * o_v
+-            # Note: o_v here is the opacity of the slab segment
++            # Standard front-to-back compositing
+             accumulated_color = accumulated_color + (1 - accumulated_opacity) * event['c'] * event['o']
+             accumulated_opacity = accumulated_opacity + (1 - accumulated_opacity) * event['o']
+@@ -119,6 +112,5 @@
+             # Handle polygon interaction with surrounding volume slabs
+             # Find the slab this polygon intersects
+-            # Calculate t_f and t_b relative to the slab boundaries
+-            slab_start_t = floor(event['t'] / slab_thickness) * slab_thickness
++            slab_start_t = (event['t'] // slab_thickness) * slab_thickness
+             slab_end_t = slab_start_t + slab_thickness
+             
+@@ -127,6 +119,5 @@
+             
+             # Get the slab's volumetric properties (c_v, o_v)
+-            # For simplicity, assume the slab properties are constant or averaged
+-            c_v_slab, o_v_slab = get_slab_properties(volume_data, slab_start_t, slab_end_t)
++            c_v_slab, o_v_slab = get_slab_avg(volume_data, slab_start_t, slab_end_t)
+             
+             # Calculate sliver opacities
+@@ -148,15 +139,15 @@
+     return accumulated_color
+ 
+-def adaptive_supersample(ray_origin, ray_direction, volume_data, polygons, threshold_theta):
++def adaptive_supersample(ray_origin, ray_direction, volume_data, polygons, max_distance, slab_thickness, threshold_theta):
+     # Compute C_x (polygons only, no volume opacity)
+-    c_x = composite_polygons_only(ray_origin, ray_direction, volume_data, polygons, set_volume_opacity_to_zero=True)
++    c_x = composite_polygons_only(ray_origin, ray_direction, volume_data, polygons, max_distance, slab_thickness, volume_opacity=0.0)
+     
+     # Compute C_q (polygons only, but attenuated by volume)
+-    c_q = composite_polygons_attenuated(ray_origin, ray_direction, volume_data, polygons, set_volume_opacity_to_zero=True, apply_volume_attenuation=True)
++    c_q = composite_polygons_attenuated(ray_origin, ray_direction, volume_data, polygons, max_distance, slab_thickness, volume_opacity=0.0, apply_attenuation=True)
+     
+     # In a real implementation, these would be computed over a region (pixel)
+     # and the range (max - min) would be calculated
+-    range_x = compute_range(c_x)
+-    range_q = compute_range(c_q)
++    range_x = max(c_x) - min(c_x)
++    range_q = max(c_q) - min(c_q)
+     
+     if range_x > threshold_theta and range_q <= threshold_theta:
+@@ -168,4 +159,12 @@
+     else:
+         return False
++
++# Helper definitions [G]
++def tri_linear_sample(volume, pos): ...
++def ray_triangle_intersect(origin, dir, tri): ...
++def shade_triangle(tri, origin, dir): ...
++def get_slab_avg(volume, t_start, t_end): ...
++def composite_polygons_only(...): ...
++def composite_polygons_attenuated(...): ...
+ ```
+ 
+@@ -177,11 +176,6 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(R \cdot (N + P))$, where $R$ is the number of rays, $N$ is the number of volumetric samples per ray, and $P$ is the number of polygons. The adaptive supersampling step adds overhead proportional to the number of geometric events [S2, unofficial].
+-*   **Memory Complexity:** $O(V + P)$, where $V$ is the size of the volumetric data and $P$ is the size of the polygonal database [S2, unofficial].
+-*   **Performance:** The method is computationally expensive due to the need for ray-polygon intersection tests and the sorting of events [S2, unofficial]. It is generally slower than pure volume rendering or pure ray tracing for homogeneous scenes but provides higher quality for mixed scenes [S2, unofficial].
++*   **Time Complexity:** The method is computationally expensive due to the need for ray-polygon intersection tests and the sorting of events [S2, unofficial]. The adaptive supersampling step adds overhead proportional to the number of geometric events [S2, unofficial].
+ *   **Strengths:** Handles complex mixtures of geometry and volume accurately; avoids aliasing at polygon edges via supersampling; handles transparency in both domains [S2, unofficial].
+-*   **Limitations:** High computational cost; complex implementation; requires careful handling of polygon-volume intersections [S2, unofficial].
+-*   **When to Use:** When high-quality visualization of mixed geometric and volumetric data is required, and computational resources are sufficient [S2, unofficial].
+-*   **When Not to Use:** For real-time applications with large polygon counts or very large volumes, where performance is critical [S2, unofficial].
+ 
+ ## Background

@@ -1,0 +1,133 @@
+# Differentiable Volume Rendering Pipeline
+## Overview
+The Differentiable Volume Rendering Pipeline orchestrates the training loop for Neural Radiance Fields by generating rays, sampling points through an implicit volume, evaluating the neural network, and aggregating results via differentiable alpha compositing [S1, unofficial]. It solves the problem of optimizing 3D scene representations from 2D images by computing gradients of the rendered image loss with respect to network parameters [S1, unofficial]. It differs from standard volume rendering by explicitly maintaining the computational graph through the sampling and integration steps to enable end-to-end backpropagation [G].
+## How it works
+**Inputs:**
+*   Camera parameters (intrinsics, extrinsics) for a batch of views [G].
+*   Ground truth images $C_i$ for the corresponding pixel coordinates [G].
+*   Neural network model (implicit volume representation) with parameters $\theta$ [G].
+*   Sampler configuration (number of samples per ray, hierarchical sampling settings) [G].
+*   Training configuration `cfg.training.batch_size` ($N$), defining the number of random pixels sampled per iteration [S1, unofficial].
+
+**Outputs:**
+*   Rendered feature/color images $\hat{C}_i$ [S1, unofficial].
+*   Rendered depth maps [S1, unofficial].
+
+**Data Structures:**
+*   **Ray Bundle:** A tensor of shape $(N, 3)$ containing the origin and direction for each ray in the batch [G].
+*   **Sample Points:** A tensor of shape $(N, K, 3)$ containing the 3D coordinates of $K$ samples along each ray [G].
+*   **Network Outputs:** Tensors of shape $(N, K, 4)$ containing the predicted color (RGB) and density ($\sigma$) for each sample [G].
+
+**Steps:**
+1.  **Ray Generation:** Loop over cameras, generate NDC grids, and create ray bundles [S1, unofficial].
+2.  **Sampling:** Pass the ray bundle through `model.sampler` to generate sample points [S1, unofficial].
+3.  **Network Evaluation:** Call `model(ray_bundle)` to evaluate the implicit volume and aggregate results [S1, unofficial].
+4.  **Alpha Compositing:** Compute transmittance $T_k$ and weight $w_k$ for each sample [G]:
+    $$ \delta_k = t_{k+1} - t_k $$
+    $$ \hat{\sigma}_k = \sigma_k \delta_k $$
+    $$ \alpha_k = 1 - \exp(-\hat{\sigma}_k) $$
+    $$ T_k = \exp\left(-\sum_{j=1}^{k-1} \hat{\sigma}_j\right) $$
+    $$ w_k = \alpha_k T_k $$
+    The rendered color $\hat{C}$ is the weighted sum:
+    $$ \hat{C} = \sum_{k=1}^{K} w_k \mathbf{c}_k $$
+5.  **Loss Calculation:** Compute the loss between the rendered color $\hat{C}_i$ and the ground truth color $C_i$ for the batch of $N$ pixels [S1, unofficial]:
+    $$ \mathcal{L} = \frac{1}{N} \sum_{i=1}^{N} (\hat{C}_i - C_i)^2 $$
+6.  **Reshape & Return:** Extract rendered features and depth, reshape to image dimensions, and save/return them [S1, unofficial].
+
+**Parameters:**
+*   `cfg.training.batch_size` ($N$): Number of random pixels sampled per training iteration. Controls memory usage and gradient noise [S1, unofficial].
+*   Number of samples per ray ($K$): Not given in the sources.
+*   Learning rate: Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Overfitting:** If the network is too expressive or view-dependence is not handled carefully, it may overfit to training images [S1, unofficial].
+*   **Precision:** Floating-point precision in transmittance calculation can lead to artifacts if not handled correctly [G] (Standard practice: clamp $\hat{\sigma}_k$ or use log-space accumulation).
+*   **Boundaries:** Rays intersecting the bounding box of the scene must be clipped [G] (Standard practice: use near/far planes or AABB intersection).
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_images(model, cameras, gt_images, cfg):
+    """
+    Orchestrates the differentiable volume rendering pipeline.
+    
+    Args:
+        model: Neural network model with 'sampler' and forward pass.
+        cameras: List of camera parameters (intrinsics, extrinsics).
+        gt_images: Ground truth images tensor.
+        cfg: Configuration object containing training parameters.
+        
+    Returns:
+        rendered_images: Rendered images tensor.
+        depth_maps: Rendered depth maps tensor.
+        loss: Scalar loss value.
+    """
+    batch_size = cfg.training.batch_size
+    rendered_images = []
+    depth_maps = []
+    total_loss = 0.0
+
+    for cam in cameras:
+        # 1. Ray Generation: generate NDC grids and ray bundles [S1, unofficial]
+        ray_bundle = generate_ray_bundle(cam, batch_size) # [G]
+
+        # 2. Sampling: pass through sampler [S1, unofficial]
+        sample_points = model.sampler(ray_bundle) # [G]
+
+        # 3. Network Evaluation: evaluate implicit volume [S1, unofficial]
+        colors, densities = model(sample_points) # [G]
+
+        # 4. Alpha Compositing (differentiable) [G]
+        deltas = []
+        for i in range(len(sample_points) - 1):
+            d = sample_points[i+1] - sample_points[i]
+            deltas.append(d)
+        deltas.append(deltas[-1])
+        deltas = [d if all(d) == 0 else d for d in deltas] # [G] fix vector comparison bug
+        deltas = [abs(d) for d in deltas]
+        sigma_deltas = [densities[i] * deltas[i] for i in range(len(deltas))]
+        alphas = [1.0 - __import__('math').exp(-s) for s in sigma_deltas]
+        transmittances = []
+        t = 1.0
+        for a in alphas:
+            transmittances.append(t)
+            t *= (1.0 - a)
+        weights = [a * t for a, t in zip(alphas, transmittances)]
+        rendered_colors = sum([w * c for w, c in zip(weights, colors)])
+        rendered_depth = sum([w * p[2] for w, p in zip(weights, sample_points)])
+
+        # 5. Loss Calculation [S1, unofficial]
+        gt_colors = sample_gt_colors(gt_images, ray_bundle) # [G]
+        loss = sum([(rc - gc) ** 2 for rc, gc in zip(rendered_colors, gt_colors)]) / len(gt_colors)
+        total_loss += loss
+
+        rendered_images.append(rendered_colors)
+        depth_maps.append(rendered_depth)
+
+    # 6. Reshape & Return [S1, unofficial]
+    rendered_images = reshape_to_image(rendered_images, cameras) # [G]
+    depth_maps = reshape_to_image(depth_maps, cameras) # [G]
+    return rendered_images, depth_maps, total_loss / len(cameras)
+```
+## Subtopics
+
+### Event-Driven Bundle Adjustment (EBAD)
+A method to optimize camera poses and NeRF parameters jointly by using event data as a constraint to model non-uniform camera motion during exposure [S2]. It differs from standard NeRF training by incorporating event cameras and motion blur constraints [S2]. Choose this method when dealing with scenes captured with event cameras or significant motion blur [S2]. It renders virtual sharp images, converts them to grayscale, transforms to log domain, and computes event loss and blur loss [S2]. The event loss compares simulated events with real events, and the blur loss compares simulated blurry images with input blurry images [S2]. The final loss is a weighted sum of event and blur losses [S2].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** Not given in the sources.
+*   **Scaling:** Scales with `cfg.training.batch_size` (number of random pixels sampled per iteration) [S1, unofficial].
+*   **Strengths:** End-to-end differentiable rendering pipeline [S1, unofficial].
+*   **Limitations:** Computationally expensive, prone to overfitting if not regularized [S1, unofficial].
+*   **When to use:** Training NeRF from images, handling motion blur with event data [S1, unofficial][S2].
+*   **When not to use:** Not given in the sources.
+
+## Background
+The Differentiable Volume Rendering Pipeline is based on the NeRF (Neural Radiance Fields) method proposed by Mildenhall et al. in 2020 [S1, unofficial]. It has been extended to handle event cameras and motion blur through methods like Event-Driven Bundle Adjustment (EBAD) [S2]. It is widely used in 3D reconstruction and novel view synthesis [S1, unofficial][S2].
+
+## Sources
+[S1] samirangode/Volume-Rendering-and-Neural-Radiance-Fields, https://github.com/samirangode/Volume-Rendering-and-Neural-Radiance-Fields, fetched 2026-10-26 (unofficial)
+[S2] Deblurring Neural Radiance Fields with Event-driven Bundle Adjustment, https://doi.org/10.1145/3664647.3680569, fetched 2026-10-27

@@ -1,0 +1,120 @@
+# HexPlaneField
+Also called: Voxel Plane
+## Overview
+HexPlaneField is a neural field representation for dynamic scenes that encodes features using multi-scale 2D and 3D planes indexed by coordinate combinations [S1, S2, unofficial]. It builds on [Hash Grid Neural Fields](3855-hash-grid-neural-fields.md) and distinguishes itself from standard hash grid methods by explicitly decomposing the input space (e.g., 3D spatial coordinates plus time) into lower-dimensional planar and volumetric features, enabling efficient real-time rendering of dynamic content [S1, S2, unofficial].
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A batch of 3D spatial points $\mathbf{pts} \in \mathbb{R}^{N \times 3}$ and corresponding timestamps $\mathbf{t} \in \mathbb{R}^{N}$ [S1, S2, unofficial].
+*   **Output:** A feature vector $\mathbf{f} \in \mathbb{R}^{N \times D}$, where $D$ is the output dimension defined by `output_coordinate_dim` [S1, S2, unofficial].
+
+**Data Structures:**
+The core data structure is `self.grids`, a `ModuleList` of `ParameterList`s [S1, S2, unofficial].
+*   **Structure:** `self.grids[scale][plane_index]` stores the learnable parameters [S1, S2, unofficial].
+*   **Layout:** For 2D planes (e.g., $xy, xt$): Shape is $[1, \text{out\_dim}, \text{reso}_x, \text{reso}_y]$ [S1, S2, unofficial]. For 3D cubes (e.g., $xyz$): Shape is $[1, \text{out\_dim}, \text{reso}_x, \text{reso}_y, \text{reso}_z]$ [S1, S2, unofficial].
+*   **Coordinate Combinations:** For 4D input $(x,y,z,t)$, grids correspond to combinations such as $xy, xz, yz, xt, yt, zt$ and potentially $xyz$ [S1, S2, unofficial].
+
+**Parameters:**
+*   `bounds`: Defines the Axis-Aligned Bounding Box (AABB) as $[[\text{bounds}, \text{bounds}, \text{bounds}], [-\text{bounds}, -\text{bounds}, -\text{bounds}]]$ [S1, S2, unofficial].
+*   `planeconfig`: Dictionary containing `grid_dimensions`, `input_coordinate_dim`, `output_coordinate_dim`, and `resolution` [S1, S2, unofficial].
+*   `multires`: List of multi-scale resolution multipliers applied to spatial planes [S1, S2, unofficial].
+*   `concat_features`: Boolean flag. If True, features from different scales are concatenated along the feature dimension. If False, they are summed [S1, S2, unofficial].
+
+**Algorithm Steps:**
+1.  **Normalization:** Normalize input points $\mathbf{pts}$ to $[-1, 1]$ range using the AABB:
+    $$ \mathbf{pts}_{\text{norm}} = \frac{2.0 (\mathbf{pts} - \text{aabb}[0])}{\text{aabb}[1] - \text{aabb}[0]} - 1.0 $$
+    where $\text{aabb}[0]$ is the minimum corner and $\text{aabb}[1]$ is the maximum corner [S1, S2, unofficial].
+2.  **Concatenation:** Concatenate the normalized spatial coordinates with the timestamps along the last dimension:
+    $$ \mathbf{pts}_{\text{cat}} = \text{concat}(\mathbf{pts}_{\text{norm}}, \mathbf{t}) $$
+    [S1, S2, unofficial].
+3.  **Grid Sampling:** For each scale and each plane/cube combination:
+    *   Extract the relevant 2D or 3D coordinates from $\mathbf{pts}_{\text{cat}}$ [S1, S2, unofficial].
+    *   Use bilinear or trilinear interpolation to sample features from the corresponding grid parameter [S1, S2, unofficial].
+    *   *Note:* The underlying `grid_sampler` only supports grid dimensions 2 or 3 [S1, S2, unofficial].
+4.  **Product over Planes:** Multiply the interpolated features across all coordinate combinations for the current scale to form the scale-specific feature vector [S1, S2, unofficial].
+5.  **Combine Scales:** If `concat_features` is True, append the scale feature to a list. Otherwise, add it to the accumulated sum [S1, S2, unofficial].
+6.  **Final Aggregation:** If concatenating, cat all scale features along the feature dimension. Return the final feature tensor [S1, S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn.functional as F
+
+def hex_plane_field_forward(pts, timestamps, grids, bounds, concat_features=True):
+    """
+    pts: (N, 3) spatial coordinates
+    timestamps: (N,) time values
+    grids: ModuleList of ParameterList, shape [scale][plane] -> [1, out_dim, res_x, res_y, ...]
+    bounds: float, half-extent of the scene
+    concat_features: bool, whether to concatenate or sum features across scales
+    """
+    # 1. Normalize points to [-1, 1]
+    aabb_min = torch.tensor([-bounds, -bounds, -bounds], device=pts.device)
+    aabb_max = torch.tensor([bounds, bounds, bounds], device=pts.device)
+    pts_norm = 2.0 * (pts - aabb_min) / (aabb_max - aabb_min) - 1.0
+    
+    # 2. Concatenate timestamps
+    pts_cat = torch.cat([pts_norm, timestamps.unsqueeze(1)], dim=-1) # (N, 4)
+    
+    all_scale_features = []
+    accumulated_sum = None
+    
+    # 3. Iterate through scales
+    for scale_grids in grids:
+        scale_features = []
+        
+        # 4. Iterate through coordinate combinations (planes/cubes)
+        for grid in scale_grids:
+            # Determine dimensions from grid shape [1, out_dim, *reso]
+            grid_dims = grid.ndim - 2 # e.g., 2 for 2D plane, 3 for 3D cube
+            # Extract corresponding coordinates from pts_cat
+            coords = pts_cat[:, :grid_dims] # (N, grid_dims)
+            
+            # Reshape for grid_sample: (N, 1, 1, grid_dims)
+            grid_input = coords.unsqueeze(1).unsqueeze(1)
+            
+            # Interpolate using bilinear/trilinear sampling
+            feat = F.grid_sample(grid, grid_input, mode='bilinear' if grid_dims == 2 else 'trilinear', 
+                                 padding_mode='border', align_corners=True)
+            feat = feat.squeeze(-1).squeeze(-1) # (N, out_dim)
+            scale_features.append(feat)
+            
+        # 5. Product over planes
+        if len(scale_features) == 0:
+            scale_feat = torch.zeros((pts.shape[0], 1), device=pts.device)
+        else:
+            scale_feat = torch.prod(torch.stack(scale_features, dim=-1), dim=-1) # (N, out_dim)
+            
+        # 6. Combine scales
+        if concat_features:
+            all_scale_features.append(scale_feat)
+        else:
+            if accumulated_sum is None:
+                accumulated_sum = scale_feat
+            else:
+                accumulated_sum = accumulated_sum + scale_feat
+                
+    # 7. Final aggregation
+    if concat_features:
+        if not all_scale_features:
+            return torch.zeros((pts.shape[0], 1), device=pts.device)
+        return torch.cat(all_scale_features, dim=-1)
+    else:
+        return accumulated_sum if accumulated_sum is not None else torch.zeros((pts.shape[0], 1), device=pts.device)
+```
+
+**Edge Cases and Pitfalls:**
+*   **Grid Dimension Mismatch:** The underlying `grid_sampler` only supports 2D and 3D data. If a grid dimension other than 2 or 3 is requested, a `NotImplementedError` is raised [S1, S2, unofficial].
+*   **Empty Features:** If the interpolated features tensor is empty (length < 1), the function returns a zero tensor of shape $(0, 1)$ to prevent downstream errors [S1, S2, unofficial].
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of points $N$ and the number of planes/scales [G]. Interpolation is $O(1)$ per point per plane [G].
+*   **Memory Complexity:** Proportional to the sum of the sizes of all 2D and 3D grids across all scales [G].
+*   **Performance:** Reported to converge quickly and achieve real-time rendering speeds [S2, unofficial]. Training time is reported as 8 minutes for D-NeRF datasets and 30 minutes for HyperNeRF datasets on corrected configurations [S2, unofficial].
+*   **Strengths:** Efficient representation for dynamic scenes; real-time rendering capability [S2, unofficial].
+*   **Limitations:** Limited to 2D and 3D grid sampling; requires careful configuration of plane combinations [S1, S2, unofficial].
+## Background
+HexPlaneField was developed by researchers from HUST and Huawei Inc. [S2, unofficial]. The method was accepted by CVPR 2024 [S2, unofficial]. The implementation was released in early 2024, with code cleaned and parameter explanations added in June 2024 [S1, unofficial].
+## Sources
+[S1] yuyouxixi/x2-gaussian, https://github.com/yuyouxixi/x2-gaussian, fetched 2026-10-26 (unofficial)
+[S2] ElenaViewSynthesis/4dgs, https://github.com/ElenaViewSynthesis/4dgs, fetched 2026-10-28 (unofficial)

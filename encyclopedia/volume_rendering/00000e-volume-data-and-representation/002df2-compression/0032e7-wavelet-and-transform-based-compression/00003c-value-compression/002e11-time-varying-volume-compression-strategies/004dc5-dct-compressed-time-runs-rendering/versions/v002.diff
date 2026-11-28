@@ -1,0 +1,157 @@
+--- v001.md
++++ v002.md
+@@ -7,30 +7,32 @@
+ 
+ ## How it works
+-**Inputs:** A time-varying volumetric dataset $V$ with dimensions $W \times H \times D$ and $T$ time steps.
+-**Outputs:** A set of texture maps (one per spatial slice) containing compressed scalar indices, and a mechanism for time-varying palette updates.
++**Inputs:** A time-varying volumetric dataset $V$ with dimensions $W \times H \times D$ and $T$ time steps [S1][S2, unofficial].
++**Outputs:** A set of texture maps (one per spatial slice) containing compressed scalar indices, and a mechanism for time-varying palette updates [S2, unofficial].
+ 
+ **Data Structures:**
+-1.  **Texture Maps:** One 2D texture map per spatial slice (e.g., $Z$-slice). Each texel stores a single scalar index $I$. The size of the index depends on the quantization precision (e.g., 8-bit).
+-2.  **Color Palette:** A lookup table mapping scalar indices to RGBA colors. This palette is updated dynamically per time step.
++1. **Texture Maps:** One 2D texture map per spatial slice (e.g., $Z$-slice) [S2, unofficial]. Each texel stores a single scalar index $I$ [S2, unofficial]. The size of the index depends on the quantization precision (e.g., 8-bit) [S1].
++2. **Color Palette:** A lookup table mapping scalar indices to RGBA colors [G]. This palette is updated dynamically per time step [S1].
+ 
+ **Encoding Process:**
+-1.  **Temporal Grouping:** For each spatial voxel position $(x, y, z)$, extract the sequence of scalar values $S = [v_0, v_1, \dots, v_{N-1}]$ across $N$ consecutive time steps. The window size $N$ is a parameter (e.g., $N=4$) [S1].
+-2.  **DCT Transformation:** Apply a 1D Discrete Cosine Transform to the sequence $S$ to obtain coefficients $C = [c_0, c_1, \dots, c_{N-1}]$ [S1].
+-    $$ c_k = \alpha_k \sum_{n=0}^{N-1} v_n \cos\left(\frac{\pi(2n+1)k}{2N}\right) $$
+-    where $\alpha_0 = \sqrt{1/N}$ and $\alpha_k = \sqrt{2/N}$ for $k > 0$.
+-3.  **Quantization and Truncation:** Retain only the first $M$ coefficients (typically $M < N$, e.g., $M=3$) which contain the majority of the energy. Quantize these coefficients to fit into a smaller bit-depth (e.g., 8-bit integer) [S1].
+-4.  **Index Mapping:** The quantized coefficients are mapped to a single scalar index $I$. This index serves as a placeholder for the temporal sequence.
+-5.  **Optimal Reconstruction Mapping:** Instead of using the standard Inverse DCT to recover values, calculate the optimal mapping for each index $I$ for each time frame $t$. This mapping minimizes the mean square error (MSE) between the decoded value and the original scalar value $v_t$ [S1]. This pre-computed mapping is stored implicitly or explicitly to allow fast decoding.
+-6.  **Texture Population:** Store the index $I$ in the corresponding texel of the texture map for the voxel's spatial location.
++1. **Temporal Grouping:** For each spatial voxel position $(x, y, z)$, extract the sequence of scalar values $S = [v_0, v_1, \dots, v_{N-1}]$ across $N$ consecutive time steps [S1]. The window size $N$ is a parameter (e.g., $N=4$) [S1].
++2. **DCT Transformation:** Apply a 1D Discrete Cosine Transform to the sequence $S$ to obtain coefficients $C = [c_0, c_1, \dots, c_{N-1}]$ [S1].
++   $$ c_k = \alpha_k \sum_{n=0}^{N-1} v_n \cos\left(\frac{\pi(2n+1)k}{2N}\right) $$
++   where $\alpha_0 = \sqrt{1/N}$ and $\alpha_k = \sqrt{2/N}$ for $k > 0$ [G].
++3. **Quantization and Truncation:** Retain only the first $M$ coefficients (typically $M < N$, e.g., $M=3$) which contain the majority of the energy [S1]. Quantize these coefficients to fit into a smaller bit-depth (e.g., store the three retained coefficients into a single 8-bit value) [S1].
++4. **Index Mapping:** The quantized coefficients are mapped to a single scalar index $I$ [S1]. This index serves as a placeholder for the temporal sequence [S1].
++5. **Optimal Reconstruction Mapping:** Instead of using the standard Inverse DCT to recover values, calculate the optimal mapping for each index $I$ for each time frame $t$ [S1]. This mapping minimizes the mean square error (MSE) between the decoded value and the original scalar value $v_t$ [S1]. This pre-computed mapping is stored implicitly or explicitly to allow fast decoding [S1].
++6. **Texture Population:** Store the index $I$ in the corresponding texel of the texture map for the voxel's spatial location [S2, unofficial].
+ 
+ **Decoding and Rendering Process:**
+-1.  **Texture Sampling:** During rendering, sample the texture map to retrieve the scalar index $I$ for each voxel [S2, unofficial].
+-2.  **Palette Update:** Before rendering a specific time step $t$, update the color palette such that the entry for index $I$ maps to the color corresponding to the reconstructed value for time $t$ [S1].
+-3.  **Hardware Decoding:** Use an extension of OpenGL (or equivalent graphics API) that allows the color palette of all loaded textures to be changed simultaneously without reloading the texture data [S1].
+-4.  **Rendering:** Perform standard volume rendering (e.g., ray casting or texture-based slicing) using the updated palettes. The hardware automatically maps the sampled indices to the correct time-step colors [S2, unofficial].
++1. **Texture Sampling:** During rendering, sample the texture map to retrieve the scalar index $I$ for each voxel [S2, unofficial].
++2. **Palette Update:** Before rendering a specific time step $t$, update the color palette such that the entry for index $I$ maps to the color corresponding to the reconstructed value for time $t$ [S1].
++3. **Hardware Decoding:** Use an extension of OpenGL (or equivalent graphics API) that allows the color palette of all loaded textures to be changed simultaneously without reloading the texture data [S1].
++4. **Rendering:** Perform standard volume rendering (e.g., ray casting or texture-based slicing) using the updated palettes [S1]. The graphics hardware maps the sampled indices to the correct time-step colors via the updated palette [S1][S2, unofficial].
+ 
+ **Pseudocode:**
+ 
+ ```python
++import math
++
+ def encode_time_runs(volume_data, window_size=4, num_coeffs=3):
+     """
+@@ -39,42 +41,36 @@
+     Returns: texture_maps (list of 2D arrays), reconstruction_map
+     """
+-    W, H, D, T = volume_data.shape
++    W, H, D, T = len(volume_data), len(volume_data[0]), len(volume_data[0][0]), len(volume_data[0][0][0])
+     texture_maps = []
+-    # reconstruction_map[t][index] = optimal_value
+     reconstruction_map = {} 
+     
+-    # Precompute optimal mappings for all possible indices if feasible,
+-    # or compute on-the-fly if the index space is small.
+-    # For simplicity, we assume a direct mapping is derived from the 
+-    # quantized coefficients.
+-    
+     for z in range(D):
+-        slice_map = np.zeros((W, H), dtype=np.uint8)
++        slice_map = [[0] * W for _ in range(H)]
+         for x in range(W):
+             for y in range(H):
+-                # Extract temporal sequence for voxel (x,y,z)
+-                # Handle boundary cases where T < window_size
+-                seq = volume_data[x, y, z, :window_size]
++                seq = [volume_data[x][y][z][t] for t in range(window_size)]
+                 
+                 # 1. DCT
+-                dct_coeffs = dct_1d(seq)
++                dct_coeffs = [0.0] * window_size
++                for k in range(window_size):
++                    s = sum(seq[n] * math.cos(math.pi * (2*n + 1) * k / (2 * window_size)) for n in range(window_size))
++                    alpha = math.sqrt(1.0 / window_size) if k == 0 else math.sqrt(2.0 / window_size)
++                    dct_coeffs[k] = alpha * s
+                 
+                 # 2. Quantize and truncate
+-                # Keep first num_coeffs, quantize to 8-bit range
+-                quantized = quantize_and_truncate(dct_coeffs[:num_coeffs], bits=8)
++                quantized = [0] * num_coeffs
++                for i in range(num_coeffs):
++                    # Map to 0-255 range for 8-bit storage
++                    quantized[i] = int(max(0, min(255, round(dct_coeffs[i] + 128))) & 0xFF)
+                 
+-                # 3. Map to index
+-                # Simple linear mapping or hash of quantized coeffs to index
+-                index = coeffs_to_index(quantized)
++                # 3. Map to index (pack 3 bytes into one integer)
++                index = (quantized[0] << 16) | (quantized[1] << 8) | quantized[2]
+                 
+-                slice_map[x, y] = index
++                slice_map[y][x] = index
+                 
+                 # 4. Calculate optimal reconstruction values for each time step
+-                # This minimizes MSE between original seq[t] and reconstructed value
+                 for t in range(window_size):
+                     if t not in reconstruction_map:
+                         reconstruction_map[t] = {}
+-                    # Store the optimal value for this index at time t
+-                    # In practice, this might be a lookup table entry
+                     reconstruction_map[t][index] = seq[t]
+                     
+@@ -83,23 +79,36 @@
+     return texture_maps, reconstruction_map
+ 
+-def render_time_step(texture_maps, reconstruction_map, time_step, palette_size=256):
++def render_time_step(texture_maps, reconstruction_map, time_step, transfer_function):
+     """
+     Render a specific time step using palette manipulation.
++    transfer_function: callable mapping scalar value to RGBA color
+     """
+-    # 1. Update palette
+-    # Create a palette where each entry 'i' maps to the color of the 
+-    # reconstructed value for index 'i' at 'time_step'
+-    current_palette = np.zeros((palette_size, 4))
++    palette_size = 256 * 256 * 256
++    current_palette = [[0, 0, 0, 0] for _ in range(palette_size)]
++    
+     for index, value in reconstruction_map[time_step].items():
+-        # Map scalar value to color using transfer function
+-        color = scalar_to_color(value)
++        color = transfer_function(value)
+         current_palette[index] = color
+         
+-    # 2. Set hardware palette
+-    set_opengl_palette(current_palette)
++    # Update hardware palette for all textures simultaneously
++    # (Conceptual API: glPixelMapfv(GL_PIXEL_MAP_I_TO_R, ...), etc.)
++    update_hardware_palette(current_palette)
+     
+-    # 3. Render using texture maps
++    # Render each slice texture
+     for slice_map in texture_maps:
+-        render_texture(slice_map)
++        draw_textured_geometry(slice_map)
++
++def update_hardware_palette(palette):
++    """
++    Updates the color palette of all loaded textures simultaneously.
++    Implements the OpenGL extension described in [S1] to avoid reloading textures.
++    """
++    pass  # Hardware API call to bind palette to all active texture units
++
++def draw_textured_geometry(slice_map):
++    """
++    Renders a 2D slice using the texture map and current palette.
++    """
++    pass  # Hardware API call to draw textured polygons using the updated palette
+ ```
+ 

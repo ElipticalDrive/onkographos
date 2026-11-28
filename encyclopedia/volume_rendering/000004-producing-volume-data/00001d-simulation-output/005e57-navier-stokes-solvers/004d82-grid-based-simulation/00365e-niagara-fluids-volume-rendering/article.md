@@ -1,0 +1,90 @@
+# Niagara Fluids Volume Rendering
+
+Also called: Grid-based simulation rendering, Niagara Fluids Plugin, Niagara Fluids Plugin adaptation
+
+## Overview
+Niagara Fluids Volume Rendering is a method for rendering volumetric data in Unreal Engine 5 by repurposing the engine's built-in grid-based fluid simulation and rendering pipeline [S1, S2, S3, unofficial]. It ignores the simulation aspect ("do nothing" simulation) and utilizes only the rendering subsystem to display volume textures [S2, S3, unofficial]. This approach offers native engine integration and flexibility via the material system but is distinguished from its siblings by its reliance on the simulation grid's memory architecture, which imposes severe VRAM constraints and limits effective resolution [S1, S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** Volume textures (e.g., imported via MHD loader) containing scalar density data [S2, S3, unofficial].
+- **Output:** Rendered 2D image with lighting and transfer function application [S2, S3, unofficial].
+
+**Data Structures:**
+- **Volume Texture:** Stores the voxel data. The underlying simulation grid allocates memory for simulation fields *in addition* to the texture data, even if unused [S2, unofficial].
+- **Niagara System:** Manages the rendering instances. Each chunk of the volume dataset is typically assigned to a distinct Niagara System [S2, S3, unofficial].
+- **Transfer Function (TF):** Implemented as a 1D RGBA texture or via material parameter collections [S2, S4, unofficial].
+
+**Steps:**
+1. **Import Data:** Load volume data into the engine. Note that UE5's standard 3D textures are limited to $2048^3$ voxels, necessitating chunking for larger datasets [S4, unofficial].
+2. **Configure Niagara System:** Create a Niagara System to handle the volume. Since no native Niagara Module Script existed for volume texture sampling at the time of the survey, a custom script was required [S2, S3, unofficial].
+3. **Sample Volume Data:** In the custom Niagara Module Script or material, sample the volume texture at the current position [S4, unofficial].
+   - The density value is extracted from the red channel of the sampled volume texture [S4, unofficial].
+   - The transfer function is applied by sampling a 1D texture using the density value as the coordinate [S4, unofficial].
+4. **Render:** The Niagara system renders the volume. If chunking is used, each chunk is rendered independently [S2, S3, unofficial].
+
+**Pseudocode:**
+The core sampling logic, as implemented in the material or custom script, is as follows [S4, unofficial]:
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Inputs:
+# VolTextureSampler: Sampler state for the volume texture
+# VolTexture: The volume texture resource
+# TFSampler: Sampler state for the transfer function texture
+# TF_Texture: The 1D transfer function texture
+# UVW: 3D coordinate in volume space (normalized 0-1)
+# MipLevel: Mipmap level (typically 0)
+
+# Step 1: Sample density from volume texture
+# The volume texture stores scalar data, typically in the red channel
+density_value = VolTexture.SampleLevel(VolTextureSampler, UVW, MipLevel).r
+
+# Step 2: Sample color and alpha from transfer function
+# The transfer function is a 1D texture where the x-axis represents density
+# The y-axis is typically 0.0
+tf_color = TF_Texture.SampleLevel(TFSampler, float2(density_value, 0.0), 0)
+
+# Output: tf_color contains the final RGBA color for the voxel
+```
+
+**Parameters:**
+- **Internal Resolution:** Must be significantly smaller than the actual data resolution to avoid VRAM crashes [S2, unofficial]. For example, a per-chunk resolution of 384 was used [S2, unofficial].
+- **Max Size:** Approximately 0.45 gigavoxels at low resolution [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **VRAM Exhaustion:** The simulation grid allocation overhead causes heavy VRAM consumption. Even with "do nothing" simulation, the grid data is allocated on top of the texture data [S2, unofficial]. This leads to out-of-VRAM crashes if the internal resolution is too high or too many chunks are rendered simultaneously [S2, unofficial].
+- **Lighting Artifacts:** Chunking the dataset into multiple Niagara Systems results in lighting artifacts at chunk borders because each chunk's lighting is computed independently [S2, S3, unofficial].
+- **Transfer Function Limitations:** Authoring transfer functions is restricted to Editor mode and does not officially support Game mode or NDisplay devices for large textures [S2, unofficial]. Using per-voxel evaluation for color/alpha curves is inefficient; a 4-channel RGBA-1D lookup texture is preferred [S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** Not explicitly defined, but performance is limited by resolution and VRAM availability [S1, S2, unofficial].
+- **Memory Complexity:** High. The method suffers from excessive VRAM consumption due to the underlying simulation grid allocation, even when the simulation is inactive [S1, S2, unofficial].
+- **Measured Performance:**
+  - On an RTX 3050: 10-15 FPS on $512^3$ data [S4, unofficial].
+  - On an RTX 5000: 15-20 FPS on $512^3$ data [S4, unofficial].
+  - Visual quality is limited by the low effective rendering resolution required to avoid crashes [S1, S2, unofficial].
+- **Strengths:** Native engine integration, flexibility via the material system, and interactive authoring of simple transfer functions in the Editor [S2, S3, unofficial].
+- **Limitations:** Severe VRAM overhead, low effective resolution, lighting artifacts at chunk borders, and lack of runtime transfer function authoring [S1, S2, S3, unofficial].
+- **When to use:** When native integration is prioritized and dataset sizes are small enough to fit within VRAM constraints without excessive chunking [S2, unofficial].
+- **When not to use:** For large datasets requiring high resolution or seamless full rendering, as the VRAM overhead and chunking artifacts make it impractical [S1, S2, unofficial].
+
+## Background
+- **Origin:** This approach was explored as part of an investigation into rendering large volume datasets (e.g., the Kolumbo seismic dataset) in Unreal Engine 5 [S1, S2, unofficial]. It was identified as a potential solution due to its native integration but was ultimately deemed impractical for large-scale scientific visualization due to memory constraints [S1, S2, unofficial].
+- **History:** The method relies on UE5's Niagara Fluids plugin, which was in beta at the time of the survey, with sparse documentation [S2, S3, unofficial]. The need for a custom Niagara Module Script arose because no built-in support for volume texture sampling existed [S2, S3, unofficial].
+- **Usage:** It was used to render volume textures imported by the MHD loader of the TBRayMarcher plugin, providing qualitatively comparable results to TBRayMarcher but with significant performance and memory trade-offs [S2, S3, unofficial].
+
+## Subtopics
+
+### Sparse Volume Textures (SVT) / Heterogeneous Volumes
+An experimental UE5 feature using OpenVDB files, storing data sparsely with a tile-based page table. It offers better memory efficiency and seamless full rendering compared to Niagara Fluids, making it the preferred solution for large datasets [S1, unofficial]. [Link](52-sparse-volume-textures.md)
+
+### TBRayMarcher Plugin
+A plugin providing dedicated nodes for volume rendering, supporting real-time manipulation of transfer functions and rendering parameters. It suffers from lighting artifacts at chunk borders similar to Niagara Fluids but offers more structured control [S4, unofficial]. [Link](53-tbraymarcher-plugin.md)
+
+## Sources
+[S1] Rendering Large Volume Datasets in Unreal Engine 5: A Survey, https://www.emergentmind.com/papers/2504.07485, fetched 2026-10-26 (unofficial)
+[S2] Rendering Large Volume Datasets in Unreal Engine 5: A Survey, https://arxiv.org/abs/2504.07485, fetched 2026-10-27 (unofficial)
+[S3] Rendering Large Volume Datasets in Unreal Engine 5: A Survey, https://www.researchgate.net/publication/390671564_Rendering_Large_Volume_Datasets_in_Unreal_Engine_5_A_Survey, fetched 2026-10-28 (unofficial)
+[S4] 在虚幻引擎5中渲染大型体积数据集：一项调查, https://www.alphaxiv.org/zh/abs/2504.07485, fetched 2026-10-30 (unofficial)

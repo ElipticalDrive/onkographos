@@ -1,0 +1,92 @@
+# Splat Depth Pass
+
+Also called: Front-Face Depth Pass, Visibility Pass
+
+## Overview
+The Splat Depth Pass computes the depth of the front surface of a point sprite (splat) for each fragment, enabling correct occlusion handling during surface splatting. It differs from standard binary depth testing by applying a small epsilon shift to the calculated depth, which prevents z-fighting and gaps between overlapping splats by ensuring consistent blending at surface boundaries [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Input**: Fragment shader context including `gl_FragCoord` (window-space coordinates), `gl_PointCoord` (normalized texture coordinates within the point sprite, range [0,1]), and vertex attributes `i.radius` (splat radius in world space) and `i.depth` (or equivalent linear depth of the point center).
+*   **Output**: `gl_FragDepth` (window-space depth value written to the depth buffer).
+
+**Data Structures**
+No explicit data structures are required; the method operates on per-fragment state provided by the graphics API.
+
+**Steps**
+1.  **Calculate offset from center**: Compute the 2D vector from the center of the point sprite to the current fragment.
+    $$ \mathbf{v}_{center} = \text{gl\_PointCoord} - [0.5, 0.5] $$
+2.  **Check circular boundary**: Calculate the squared magnitude of $\mathbf{v}_{center}$. If $|\mathbf{v}_{center}|^2 > 0.25$, the fragment lies outside the unit circle and is discarded.
+3.  **Compute world-space offset**: Scale the normalized offset by the splat's radius to get the world-space 2D offset vector.
+    $$ \mathbf{v}_{world} = \mathbf{v}_{center} \times 2 \times i.radius $$
+4.  **Calculate depth offset**: Determine the z-offset from the center of the sphere to the front surface at the current 2D position using the Pythagorean theorem.
+    $$ d_{offset} = \sqrt{i.radius^2 - \mathbf{v}_{world} \cdot \mathbf{v}_{world}} $$
+5.  **Compute final depth**: Subtract the depth offset from the center's linear depth and add an epsilon value to shift the depth slightly towards the camera.
+    $$ d_{final} = \text{linearDepth}(\text{gl\_FragCoord}.z) - d_{offset} + \epsilon $$
+6.  **Write depth**: Assign $d_{final}$ to `gl_FragDepth`.
+
+**Formulas**
+*   **Boundary Check**: $|\mathbf{v}_{center}|^2 \le 0.25$
+*   **Depth Offset**: $d_{offset} = \sqrt{r^2 - |\mathbf{v}_{world}|^2}$
+*   **Final Depth**: $z_{frag} = z_{center} - d_{offset} + \epsilon$
+
+**Parameters**
+*   **epsilon ($\epsilon$)**: A small constant added to the depth to blend splats close to the surface. Value: $0.25$ (derived from `_epsilonMultiplier` in the source implementation) [S1, unofficial].
+
+**Edge Cases and Pitfalls**
+*   **Z-fighting and Gaps**: Without the epsilon shift, overlapping splats at the same depth may cause z-fighting or visible gaps due to precision errors. The epsilon ensures splats near the surface are blended correctly [S1, unofficial].
+*   **Precision**: The calculation assumes linear depth. If non-linear depth is used, `linearDepth()` must convert window-space Z to linear eye-space Z before subtraction.
+*   **Radius Zero**: If $i.radius$ is zero, the depth offset is zero, and the depth equals the center depth minus epsilon.
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Inputs: gl_FragCoord (vec4), gl_PointCoord (vec2), i.radius (float), i.linear_depth (float)
+# Constants: epsilon = 0.25
+
+# 1. Calculate offset from center
+v_center = gl_PointCoord - vec2(0.5, 0.5)
+
+# 2. Check circular boundary
+mag_sq = dot(v_center, v_center)
+if mag_sq > 0.25:
+    discard_fragment()
+
+# 3. Compute world-space offset
+v_world = v_center * 2.0 * i.radius
+
+# 4. Calculate depth offset
+# Ensure non-negative argument for sqrt due to floating point errors
+dot_val = dot(v_world, v_world)
+radius_sq = i.radius * i.radius
+depth_offset = sqrt(max(radius_sq - dot_val, 0.0))
+
+# 5. Compute final depth
+# Assuming gl_FragCoord.z is window-space depth, convert to linear if necessary.
+# The source implies linearDepth() handles this conversion or gl_FragCoord.z is already linear.
+linear_center_depth = linearDepth(gl_FragCoord.z)
+final_depth = linear_center_depth - depth_offset + epsilon
+
+# 6. Write depth
+gl_FragDepth = final_depth
+```
+
+## Subtopics
+
+### [Single-Layer Ternary Depth Test](4509-single-layer-ternary-depth-test.md)
+A technique that maintains exactly one surface layer per pixel using a depth band to decide blending, replacing, or discarding fragments. It differs from the standard Splat Depth Pass by accommodating depth uncertainty, though it may cause occlusion artifacts in complex geometry.
+
+## Operating characteristics
+*   **Time Complexity**: $O(1)$ per fragment. The calculation involves basic arithmetic operations and a square root.
+*   **Memory Complexity**: $O(1)$ auxiliary memory. No additional buffers are allocated; it writes directly to the depth buffer.
+*   **Strengths**: Simple to implement in the fragment shader; effectively handles occlusion for point-based surface rendering; prevents z-fighting via epsilon adjustment.
+*   **Limitations**: Relies on the assumption that splats are spherical and uniformly sized. Does not handle transparency or volume accumulation directly (handled by subsequent passes).
+*   **When to use**: When rendering point clouds as surfaces where correct occlusion is required before color accumulation.
+*   **When not to use**: For volume rendering where depth is integrated along rays, or when splats are not spherical.
+
+## Background
+The method is derived from implementations of point cloud surface rendering, specifically those using spherical splats to approximate surfaces. The specific epsilon adjustment technique is documented in the `PointCloudRendering` repository [S1, unofficial].
+
+## Sources
+[S1] arminkz/PointCloudRendering, https://github.com/arminkz/PointCloudRendering, fetched 2026-10-28 (unofficial)

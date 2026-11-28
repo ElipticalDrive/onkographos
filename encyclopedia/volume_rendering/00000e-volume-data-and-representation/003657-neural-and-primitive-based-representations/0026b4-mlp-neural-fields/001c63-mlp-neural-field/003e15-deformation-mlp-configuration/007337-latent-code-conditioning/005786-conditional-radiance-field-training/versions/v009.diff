@@ -1,0 +1,190 @@
+--- v008.md
++++ v009.md
+@@ -1,5 +1,5 @@
+ # Conditional Radiance Field Training
+ 
+-Also called: Conditional NeRF, Instance-conditioned NeRF
++Also called: Instance-conditioned NeRF
+ 
+ ## Overview
+@@ -8,6 +8,6 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A dataset of $K$ instances, where each instance $k$ has a set of training rays $R_k$. Each ray $r$ consists of origin, direction, and ground truth color $C(r)$.
+-*   **Output:** A conditional radiance field model consisting of two networks ($F_{coarse}, F_{fine}$) and $K$ pairs of latent codes ($\mathbf{z}_k^{(s)}, \mathbf{z}_k^{(c)}$).
++*   **Input:** A dataset of $K$ instances, where each instance $k$ has a set of training rays $R_k$. Each ray $r$ consists of origin, direction, and ground truth color $C(r)$ [S1].
++*   **Output:** A conditional radiance field model consisting of two networks ($F_{coarse}, F_{fine}$) and $K$ pairs of latent codes ($\mathbf{z}_k^{(s)}, \mathbf{z}_k^{(c)}$) [S1].
+ 
+ **Data Structures:**
+@@ -23,5 +23,5 @@
+ **Numbered Steps:**
+ 
+-1.  **Initialization:** Initialize $F_{coarse}$, $F_{fine}$, and the latent codes $\mathbf{z}_k^{(s)}, \mathbf{z}_k^{(c)}$ for all $k=1 \dots K$.
++1.  **Initialization:** Initialize $F_{coarse}$, $F_{fine}$, and the latent codes $\mathbf{z}_k^{(s)}, \mathbf{z}_k^{(c)}$ for all $k=1 \dots K$ [S1].
+ 2.  **Iteration Loop:** Repeat until convergence (average 1M iterations) [S1]:
+     1.  **Sample Instance:** Randomly select an instance index $k \in \{1, \dots, K\}$ [S1].
+@@ -30,5 +30,5 @@
+     4.  **Coarse Rendering:**
+         *   For each ray $r$, use stratified sampling to generate points [S1].
+-        *   Compute positional encodings for the points.
++        *   Compute positional encodings for the points [G].
+         *   Concatenate the shape code $\mathbf{z}_k^{(s)}$ and color code $\mathbf{z}_k^{(c)}$ with the encoded position and viewing direction $\mathbf{d}$ [S1].
+         *   Pass through $F_{coarse}$ to get density $\sigma$ and color $\mathbf{c}$ [S1].
+@@ -61,76 +61,93 @@
+ import numpy as np
+ 
+-def train_conditional_nerf(instances, rays_per_instance, num_iterations=1000000):
+-    """
+-    instances: List of K instance objects.
+-    rays_per_instance: Function or list providing rays R_k for each instance k.
+-    """
+-    K = len(instances)
+-    
+-    # Initialize networks (4 layers, 256 channels, ReLU, skip connections)
+-    F_coarse = initialize_mlp(4, 256)
+-    F_fine = initialize_mlp(4, 256)
+-    
+-    # Initialize latent codes (32-dim each)
++def positional_encoding(x, num_freqs=10):
++    """Standard NeRF positional encoding [G]."""
++    scales = np.array([2**i for i in range(num_freqs)])
++    xb = np.reshape((x - 0.5) * np.pi * scales, (x.shape[0], -1, x.shape[1]))
++    return np.concatenate([np.sin(xb), np.cos(xb)], axis=-1).reshape(x.shape[0], -1)
++
++def stratified_sample(origin, direction, num_samples=64, near=2.0, far=6.0):
++    """Uniform stratified sampling along ray [G]."""
++    t = np.linspace(near, far, num_samples + 1)
++    dt = t[1] - t[0]
++    sample_t = t[:-1] + np.random.uniform(0, dt, num_samples)
++    return origin + direction * sample_t[:, np.newaxis]
++
++def volume_render(points, sigma, color):
++    """Alpha compositing volume rendering [G]."""
++    dists = np.linalg.norm(np.diff(points, axis=0), axis=1)
++    alpha = 1.0 - np.exp(-sigma * dists)
++    transmittance = np.cumprod(1.0 - alpha)
++    transmittance = np.concatenate([[1.0], transmittance[:-1]])
++    return np.sum(alpha * transmittance * color, axis=0)
++
++def hierarchical_sample(origin, direction, coarse_sigma, num_fine=48, near=2.0, far=6.0):
++    """Importance sampling based on coarse density [G]."""
++    pdf = coarse_sigma / (np.sum(coarse_sigma) + 1e-8)
++    indices = np.random.choice(len(pdf), size=num_fine, p=pdf)
++    t_fine = np.linspace(near, far, len(pdf) + 1)
++    t_fine = t_fine[indices] + np.random.uniform(0, t_fine[1]-t_fine[0], num_fine)
++    return origin + direction * t_fine[:, np.newaxis]
++
++def train_conditional_nerf(K, rays_per_instance, num_iterations=1000000):
++    # Initialize networks (4 layers, 256 channels, ReLU hidden, skip connections) [S1]
++    F_coarse = MLP(4, 256, skip=True)
++    F_fine = MLP(4, 256, skip=True)
++
++    # Initialize latent codes (32-dim each) [S1]
+     z_shape = np.random.randn(K, 32)
+     z_color = np.random.randn(K, 32)
+-    
+-    # Optimizer state for Adam
+-    optimizer = Adam(F_coarse.parameters(), lr=1e-4, beta1=0.9, beta2=0.999, eps=1e-8)
+-    optimizer.add_parameters(F_fine.parameters())
+-    optimizer.add_parameters(z_shape)
+-    optimizer.add_parameters(z_color)
+-    
++
++    # Optimizer state (Adam) [S1]
++    params = list(F_coarse.parameters()) + list(F_fine.parameters()) + [z_shape, z_color]
++    m = [np.zeros_like(p) for p in params]
++    v = [np.zeros_like(p) for p in params]
++    t = 0
++    lr = 1e-4
++    beta1, beta2, eps = 0.9, 0.999, 1e-8
++
+     for iteration in range(num_iterations):
+-        # 1. Sample instance
+-        k = np.random.randint(0, K)
+-        
+-        # 2. Retrieve codes
++        k = np.random.randint(K)
+         zk_s = z_shape[k]
+         zk_c = z_color[k]
+-        
+-        # 3. Sample rays for instance k
+-        batch_rays = sample_rays(rays_per_instance[k])
+-        
++        batch_rays = rays_per_instance[k]
++
+         total_loss = 0.0
+-        
+-        for r in batch_rays:
+-            # 4. Coarse Rendering
+-            # Stratified sampling for coarse points
+-            coarse_points = stratified_sample_ray(r)
+-            
+-            # Encode position and direction
+-            pos_enc = positional_encoding(coarse_points)
+-            dir_enc = directional_encoding(r.direction)
+-            
+-            # Condition with latent codes
+-            # Concatenate shape code with pos_enc, color code with dir_enc/pos_enc as per standard NeRF injection
+-            # Note: Source says "injected wherever positional or directional embeddings are injected"
+-            input_coarse = concatenate(pos_enc, zk_s, dir_enc, zk_c)
+-            
+-            sigma_coarse, c_coarse = F_coarse(input_coarse)
+-            C_hat_coarse = volume_rendering(coarse_points, sigma_coarse, c_coarse)
+-            
+-            # 5. Hierarchical Sampling
+-            # Use sigma_coarse to sample fine points
+-            fine_points = hierarchical_sample(r, sigma_coarse)
+-            
+-            # 6. Fine Rendering
+-            pos_enc_fine = positional_encoding(fine_points)
+-            input_fine = concatenate(pos_enc_fine, zk_s, dir_enc, zk_c)
+-            
+-            sigma_fine, c_fine = F_fine(input_fine)
+-            C_hat_fine = volume_rendering(fine_points, sigma_fine, c_fine)
+-            
+-            # 7. Loss
+-            gt_color = r.color
++        grads = [np.zeros_like(p) for p in params]
++
++        for origin, direction, gt_color in batch_rays:
++            # Coarse rendering
++            coarse_pts = stratified_sample(origin, direction)
++            pos_enc = positional_encoding(coarse_pts)
++            dir_enc = positional_encoding(direction[np.newaxis, :])
++
++            # Inject codes wherever positional or directional embeddings are injected [S1]
++            input_coarse = np.concatenate([pos_enc, zk_s, dir_enc, zk_c], axis=-1)
++            sigma_coarse, c_coarse = F_coarse.forward(input_coarse)
++            C_hat_coarse = volume_render(coarse_pts, sigma_coarse, c_coarse)
++
++            # Hierarchical sampling
++            fine_pts = hierarchical_sample(origin, direction, sigma_coarse)
++
++            # Fine rendering
++            pos_enc_fine = positional_encoding(fine_pts)
++            input_fine = np.concatenate([pos_enc_fine, zk_s, dir_enc, zk_c], axis=-1)
++            sigma_fine, c_fine = F_fine.forward(input_fine)
++            C_hat_fine = volume_render(fine_pts, sigma_fine, c_fine)
++
++            # Loss calculation
+             loss = np.sum((C_hat_coarse - gt_color)**2) + np.sum((C_hat_fine - gt_color)**2)
+             total_loss += loss
+-            
+-        # 8. Optimization
+-        optimizer.zero_grad()
+-        total_loss.backward()
+-        optimizer.step()
+-        
++
++        # Optimization step (Adam update) [S1]
++        t += 1
++        for i, p in enumerate(params):
++            grad = compute_gradient(p, total_loss) # Standard autograd
++            m[i] = beta1 * m[i] + (1 - beta1) * grad
++            v[i] = beta2 * v[i] + (1 - beta2) * grad**2
++            m_hat = m[i] / (1 - beta1**t)
++            v_hat = v[i] / (1 - beta2**t)
++            params[i] -= lr * m_hat / (np.sqrt(v_hat) + eps)
++
+     return F_coarse, F_fine, z_shape, z_color
+ ```

@@ -1,0 +1,141 @@
+# Block-based Data Partitioning
+
+Also called: Block-based Indexing
+
+## Overview
+Block-based Data Partitioning is a chunk-based spatial partitioning method that uses 3D rectangular slabs of adjacent cells (blocks) as the atomic unit for data indexing and I/O, rather than individual cells. It solves the problem of excessive storage overhead in external index structures caused by data duplication at the cell level. It sets itself apart from cell-level indexing by trading a small amount of redundant data loading for significant reductions in index size and improved I/O efficiency [S1].
+
+## How it works
+**Inputs and outputs:**
+- Input: A 3D volumetric dataset defined on a regular grid of cells.
+- Output: A partitioned dataset structure where data is organized into blocks, enabling efficient external indexing and progressive isosurface extraction.
+
+**Data structures:**
+The external index structure is built using blocks as the atomic unit. Each block is a 3D rectangular slab of adjacent cells. The layout is defined by the block dimensions in voxels/cells. The specific bit-packing or field layout of the external index is not detailed in the sources, but the key structural choice is the granularity of the index entries [S1].
+
+**Steps:**
+1. **Define Block Granularity:** Determine the dimensions of a block. The sources specify that the block size is chosen to match the disk block size in the implementation [S1]. This ensures that one block can be loaded in a single I/O operation [S1].
+2. **Partition Data:** Divide the global volume domain into 3D rectangular slabs of adjacent cells. Each slab constitutes one block [S1].
+3. **Build External Index:** Construct the external index structure using the blocks as the atomic unit. This avoids the high overhead of data duplication associated with cell-level indexing [S1].
+4. **Access Data:** When querying or rendering, load entire blocks. This may result in loading extra cells that are not strictly necessary for a specific query, but this redundancy is accepted as a trade-off for I/O efficiency and reduced index storage [S1].
+5. **Progressive Extraction:** Use the block-based structure to extract isosurfaces progressively at different resolutions, providing the user with the basic shape of the surface with minimum delay [S1].
+
+**Parameters:**
+- **Block Size:** Chosen as the disk block size [S1]. Typical value: Not given in the sources.
+
+**Edge cases and pitfalls:**
+- **Storage Inefficiency of Cell-Level Indexing:** Using cells as the unit for the external index data structure is very storage inefficient due to high overhead of data duplication among cells [S1].
+- **Redundant Data Loading:** Because the block granularity is coarser than the cell granularity, some extra cells may be loaded because of the larger granularity [S1]. This is a known trade-off, not a bug.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Pseudocode for Block-based Data Partitioning setup and access
+# Note: This is a high-level representation based on the description in [S1].
+# The actual implementation details of the external index structure are not provided.
+
+class BlockBasedPartition:
+    def __init__(self, dataset, disk_block_size):
+        """
+        Initialize the partitioning scheme.
+        
+        Args:
+            dataset: The 3D volumetric dataset (grid of cells).
+            disk_block_size: The size of a block, chosen to match the disk block size.
+        """
+        self.dataset = dataset
+        self.block_size = disk_block_size
+        self.blocks = self._partition_into_blocks()
+        self.external_index = self._build_external_index(self.blocks)
+
+    def _partition_into_blocks(self):
+        """
+        Partition the dataset into 3D rectangular slabs of adjacent cells.
+        
+        Returns:
+            A list of blocks, where each block is a 3D rectangular slab.
+        """
+        # Implementation detail: Divide the dataset into chunks of size block_size.
+        # The exact algorithm for dividing the grid into slabs is not specified.
+        # [G] Assuming a regular grid division.
+        blocks = []
+        # ... (Implementation of grid division into blocks) ...
+        return blocks
+
+    def _build_external_index(self, blocks):
+        """
+        Build an external index structure using blocks as the atomic unit.
+        
+        Args:
+            blocks: List of blocks.
+            
+        Returns:
+            An external index structure.
+        """
+        # Implementation detail: Create an index where each entry corresponds to a block.
+        # This avoids the high overhead of cell-level indexing.
+        # [G] The specific data structure (e.g., B-tree, hash table) is not specified.
+        index = {}
+        for i, block in enumerate(blocks):
+            # ... (Indexing logic) ...
+            index[i] = block
+        return index
+
+    def load_block(self, block_id):
+        """
+        Load a specific block from disk.
+        
+        Args:
+            block_id: The ID of the block to load.
+            
+        Returns:
+            The data for the specified block.
+        """
+        # Implementation detail: Load the block in a single I/O operation.
+        # This is possible because the block size matches the disk block size.
+        # [G] Actual I/O operations are not specified.
+        block_data = self.blocks[block_id]
+        return block_data
+
+    def extract_isosurface(self, isovalue, resolution):
+        """
+        Extract an isosurface progressively at a given resolution.
+        
+        Args:
+            isovalue: The isovalue for extraction.
+            resolution: The resolution for extraction.
+            
+        Returns:
+            The extracted isosurface.
+        """
+        # Implementation detail: Use the block-based structure to extract the surface.
+        # This allows for progressive extraction with minimum delay.
+        # [G] The specific extraction algorithm is not specified.
+        surface = []
+        for block in self.blocks:
+            # ... (Isosurface extraction logic) ...
+            pass
+        return surface
+```
+
+## Subtopics
+
+### [Streaming Ghost Data Generation](18790-streaming-ghost-data-generation.md)
+Streaming Ghost Data Generation is an algorithm for generating ghost data (boundary values) for structured grids partitioned into blocks, enabling out-of-core processing where only one block plus edge data from previous blocks resides in memory at any time. Unlike standard approaches that require the entire dataset or all blocks to be in memory simultaneously, this method processes blocks one by one, allowing ghost data generation and downstream computation (e.g., isocontouring) to run on far fewer processors than available for simulation. It sets itself apart from non-streaming methods by maintaining a constant memory footprint per processor, scaling efficiently to large datasets by interleaving loading, communication, and computation.
+
+## Operating characteristics
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Not given in the sources.
+- **Measured Performance:** Not given in the sources.
+- **Scaling:** Not given in the sources.
+- **Strengths:** Reduces storage overhead of the external index structure compared to cell-level indexing [S1]. Enables one block to be loaded in one I/O operation, improving I/O efficiency [S1]. Allows for progressive isosurface extraction at different resolutions with minimum delay [S1].
+- **Limitations:** May load extra cells due to the larger granularity of blocks compared to cells [S1].
+- **When to use:** When storage efficiency of the external index is a concern and I/O operations can be optimized by aligning data blocks with disk block sizes [S1].
+- **When not to use:** When cell-level precision is required for indexing and storage overhead is not a constraint [S1].
+
+## Background
+Block-based Data Partitioning was introduced in the context of scalable isosurface visualization of massive datasets on commodity off-the-shelf clusters [S1]. The method addresses the limitations of cell-level indexing, which is storage inefficient due to high overhead of data duplication among cells [S1]. The approach is based on the idea that using blocks as the atomic unit for data partitioning and accessing provides a trade-off between disk space and I/O efficiency [S1].
+
+## Sources
+[S1] Scalable isosurface visualization of massive datasets on commodity off-the-shelf clusters., https://doi.org/10.1016/j.jpdc.2008.07.006, fetched 2026-11-08

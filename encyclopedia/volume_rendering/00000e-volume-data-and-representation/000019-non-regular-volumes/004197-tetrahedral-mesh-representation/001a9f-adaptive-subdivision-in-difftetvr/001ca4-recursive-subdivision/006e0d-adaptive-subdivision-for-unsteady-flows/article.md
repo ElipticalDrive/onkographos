@@ -1,0 +1,126 @@
+# Adaptive Subdivision for Unsteady Flows
+
+Also called: Temporal Subdivision, Adaptive Stepping for Unsteady Flows
+
+## Overview
+This method extends tetrahedral mesh subdivision to unsteady flow volumes by handling adaptation in both spatial (cross-sectional) and temporal (time-direction) domains [S1, unofficial]. Unlike static flow methods that only subdivide at the flow front, this approach allows subdivision and deletion anywhere in the volume to maintain constant spacing between particle layers [S1, unofficial]. It trades absolute accuracy for real-time performance by avoiding the costly re-interpolation of Shaffer et al. [S1, unofficial].
+
+## How it works
+**Inputs:** Unsteady flow field data; initial particle layers at time steps $t_0, t_1, \dots$; spatial tolerance $\tau_{space}$; temporal tolerance $\tau_{time}$; maximum subdivision depth $D_{max}$.
+**Outputs:** A tetrahedral mesh representing the flow volume with adaptive vertex density.
+
+**Data Structures:**
+*   **Particle Layers:** A list of lists, where `Layer[t]` contains vertices advected to time $t$.
+*   **Segments:** For each pair of adjacent layers $t_i, t_{i+1}$, store segments connecting corresponding vertices.
+*   **Midpoint List:** A list of midpoints for every segment in the volume, maintained to allow insertion without re-advecting from $t_0$ [S1, unofficial].
+
+**Steps:**
+1.  **Initialize Subdivision Depth:** Set the subdivision depth to $D_{max}$ immediately for all layers [S1, unofficial]. This prevents missing features at the base of turbulent flows, which often reach maximum subdivision requirements instantly [S1, unofficial].
+2.  **Spatial Subdivision (Cross-Sectional):** For each segment in the current time step, calculate the length. If the length exceeds $\tau_{space}$, insert a new vertex at the midpoint of the segment. The new vertex is advected from its current position rather than from $t_0$ [S1, unofficial].
+3.  **Temporal Subdivision (Deletion):** For each pair of adjacent time layers $t_i$ and $t_{i+1}$:
+    *   Calculate the average distance $d_{avg}$ between all paired points (corresponding vertices) in the two layers.
+    *   If $d_{avg} < \tau_{time}$, delete the intermediate layer of vertices (if one exists) or merge the structure. Specifically, if a layer exists between two denser layers, remove it. The tetrahedra connecting the remaining levels are re-tessellated to have double the density/accuracy relative to the removed layer's contribution [S1, unofficial].
+    *   If $d_{avg} > \tau_{time}$ and no intermediate layer exists, insert a new layer of vertices at the midpoint time $t_{mid} = (t_i + t_{i+1})/2$. These vertices are interpolated or advected to $t_{mid}$ [S1, unofficial].
+4.  **Re-tessellation:** Reconstruct the tetrahedral mesh connecting the vertices in adjacent layers.
+
+**Parameters:**
+*   $\tau_{space}$: Spatial tolerance for segment length. Not given in the sources.
+*   $\tau_{time}$: Temporal tolerance for average distance between paired points. Not given in the sources.
+*   $D_{max}$: Maximum subdivision depth. Fixed at start [S1, unofficial].
+
+**Pitfalls:**
+*   **Vertex Deletion Instability:** Deleting vertices may cause remaining neighbors to spread apart in future time steps, requiring re-subdivision. It is theoretically impossible to determine future field behavior to prevent this [S1, unofficial]. However, deletion is allowed to prevent prohibitively many vertices [S1, unofficial].
+*   **Accuracy Loss:** Vertices inserted at midpoints are not true streaklines because they are not advected from $t_0$. They are an approximation [S1, unofficial].
+*   **Feature Missing:** Without fixing subdivision to $D_{max}$ at the start, features at the base of the flow may be missed [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def adapt_unsteady_flow(layers, tau_space, tau_time, d_max):
+    # Step 1: Fix max subdivision
+    for layer in layers:
+        layer.subdivision_depth = d_max
+
+    # Step 2: Spatial Subdivision
+    for t in range(len(layers) - 1):
+        layer_curr = layers[t]
+        layer_next = layers[t + 1]
+        for i in range(len(layer_curr)):
+            seg = Segment(layer_curr[i], layer_next[i])
+            if seg.length > tau_space:
+                mid = seg.midpoint()
+                # Advect from current position, not t0
+                mid.advect_to_current_time()
+                layer_curr.insert_vertex(mid)
+                layer_next.insert_vertex(mid)
+
+    # Step 3: Temporal Subdivision (Deletion/Insertion)
+    for t in range(len(layers) - 1):
+        layer_curr = layers[t]
+        layer_next = layers[t + 1]
+        
+        # Calculate average distance between paired points
+        distances = []
+        for i in range(min(len(layer_curr), len(layer_next))):
+            dist = distance(layer_curr[i], layer_next[i])
+            distances.append(dist)
+        
+        if not distances:
+            continue
+            
+        avg_dist = sum(distances) / len(distances)
+        
+        if avg_dist < tau_time:
+            # Delete intermediate layer if it exists
+            # Note: The text implies deleting a layer of points between two levels
+            # If layers are adjacent in the list, this logic applies to 
+            # removing a redundant intermediate layer.
+            # Implementation detail: If there is a layer between t and t+1, remove it.
+            # For simplicity, assuming layers are contiguous in time:
+            # If the gap is too small, we might merge or delete a redundant layer.
+            # The text says "delete that layer of points and replace the two levels... with one having double the..."
+            # This implies merging two dense layers into one coarser representation? 
+            # Or removing a sparse layer? 
+            # "If the average distance... is below some tolerance, delete that layer of points"
+            # This likely refers to an intermediate layer that has become too dense/redundant.
+            pass # Specific implementation of "delete that layer" depends on data structure of intermediate layers.
+            
+        elif avg_dist > tau_time:
+            # Insert intermediate layer
+            mid_time = (layer_curr.time + layer_next.time) / 2
+            new_layer = Layer(mid_time)
+            for i in range(len(layer_curr)):
+                # Interpolate or advect to mid_time
+                v = layer_curr[i].advect_to(mid_time)
+                new_layer.add_vertex(v)
+            layers.insert(t + 1, new_layer)
+
+    # Step 4: Re-tessellate
+    for t in range(len(layers) - 1):
+        re_tessellate(layers[t], layers[t + 1])
+```
+
+## Subtopics
+
+### Longest Edge Bisection (LEB) Tetrahedral Hierarchy
+A spatial subdivision method for static volumes. Use when only spatial adaptation is needed. [2486-longest-edge-bisection-leb-tetrahedral-hierarchy.md]
+
+### Slow Growing Subdivision Connectivity
+A connectivity-preserving subdivision scheme. Use when maintaining mesh connectivity is critical. [7646-slow-growing-subdivision-connectivity.md]
+
+### fi-subdivision scheme
+A specific subdivision algorithm. Use for general volume subdivision. [19089-fi-subdivision-scheme.md]
+
+## Operating characteristics
+*   **Time Complexity:** Real-time capable, but slower than static methods. Less time-consuming than Shaffer et al.'s re-interpolation method [S1, unofficial].
+*   **Memory Complexity:** Can grow prohibitively large if deletion is not allowed [S1, unofficial].
+*   **Accuracy:** Less accurate than Shaffer et al. [14] because vertices are not advected from $t_0$ [S1, unofficial]. Less accurate than a full preprocess Nn [S1, unofficial].
+*   **Strengths:** Allows real-time operation; handles unsteady flows by adapting in time and space.
+*   **Limitations:** Approximate streaklines; potential instability from vertex deletion; may miss features if max subdivision is not fixed at start.
+
+## Background
+Originated in the context of unsteady flow volume rendering, extending the static subdivision scheme of [1] or [13] [S1, unofficial]. It addresses the difficulty of extending static schemes to unsteady flows where adaptation is required anywhere in the volume, not just at the front [S1, unofficial].
+
+## Sources
+[S1] Unsteady flow volumes, https://digital.library.unt.edu/ark:/67531/metadc628169/?q=flow visualization volume rendering, fetched 2026-10-29 (unofficial)

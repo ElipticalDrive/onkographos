@@ -1,0 +1,153 @@
+--- v004.md
++++ v005.md
+@@ -4,12 +4,12 @@
+ 
+ ## Overview
+-Conservative rasterization is a technique used during voxelization to prevent artifacts where small triangles (smaller than the voxel grid resolution) are ignored completely, resulting in holes in the voxelized geometry [S3, unofficial]. It ensures that all voxels potentially intersected by a triangle are covered by rasterization [S4, unofficial]. Two primary implementations exist: **Geometric Dilatation**, which explicitly enlarges triangles in clip space within the geometry shader [S1, S4, unofficial], and **MSAA Approximation**, which leverages Multi-Sample Anti-Aliasing to invoke the pixel shader if any subsample is covered, approximating conservative behavior without explicit edge expansion [S2, unofficial]. The MSAA approach is often preferred for its simplicity and lack of redundant voxels compared to edge extension [S2, unofficial].
++Conservative rasterization is a technique used during voxelization to prevent artifacts where small triangles (smaller than the voxel grid resolution) are ignored completely, resulting in holes in the voxelized geometry [S3, unofficial]. It ensures that all voxels potentially intersected by a triangle are covered by rasterization [S4, unofficial]. Two primary implementations exist: Geometric Dilatation, which explicitly enlarges triangles in clip space within the geometry shader [S1, unofficial][S4, unofficial], and MSAA Approximation, which leverages Multi-Sample Anti-Aliasing to invoke the pixel shader if any subsample is covered, approximating conservative behavior without explicit edge expansion [S2, unofficial]. The MSAA approach is often preferred for its simplicity and lack of redundant voxels compared to edge extension [S2, unofficial].
+ 
+ ## How it works
+-This section details the **Geometric Dilatation** method, as it provides a deterministic, algorithmic definition. The MSAA method is described as a parameterized alternative in Operating characteristics.
++This section details the Geometric Dilatation method, as it provides a deterministic, algorithmic definition [S4, unofficial]. The MSAA method is described as a parameterized alternative in Operating characteristics [S2, unofficial].
+ 
+ ### Inputs and Outputs
+-*   **Input:** A triangle defined by three vertices $P_0, P_1, P_2$ in clip space (or view space, depending on pipeline stage).
+-*   **Output:** A dilated triangle with vertices $P'_0, P'_1, P'_2$ in clip space, which is then transformed to world space for voxelization.
++*   **Input:** A triangle defined by three vertices $P_0, P_1, P_2$ in clip space (or view space, depending on pipeline stage) [S4, unofficial].
++*   **Output:** A dilated triangle with vertices $P'_0, P'_1, P'_2$ in clip space, which is then transformed to world space for voxelization [S4, unofficial].
+ *   **Uniforms:**
+     *   `halfPixel[3]`: Array of `vec2` representing half the pixel size in clip space, indexed by the selected view projection [S4, unofficial].
+@@ -18,7 +18,7 @@
+ 
+ ### Data Structures
+-*   **Edge Planes:** Three `vec3` values representing the homogeneous plane equations for the triangle edges.
+-*   **Triangle Plane:** One `vec4` representing the plane equation of the original triangle.
+-*   **Intersection Lines:** Three `vec3` values representing the direction vectors of the intersection lines between offset edge planes.
++*   **Edge Planes:** Three `vec3` values representing the homogeneous plane equations for the triangle edges [S4, unofficial].
++*   **Triangle Plane:** One `vec4` representing the plane equation of the original triangle [S4, unofficial].
++*   **Intersection Lines:** Three `vec3` values representing the direction vectors of the intersection lines between offset edge planes [S4, unofficial].
+ *   **Bounding Box:** `vec4` containing min/max x/y coordinates in clip space, used in the fragment shader for culling [S4, unofficial].
+ 
+@@ -52,8 +52,9 @@
+ 
+ ```python
+-# Inputs: gl_in[3] (vec4 positions in clip space)
+-# Uniforms: halfPixel[3] (vec2), viewProjectInverse[3] (mat4)
+-
+-def conservative_rasterization_geometry_shader(gl_in):
++def conservative_rasterization_geometry_shader(gl_in, halfPixel, viewProjectInverse):
++    # gl_in: list of 3 vec4 clip-space vertices
++    # halfPixel: list of 3 vec2
++    # viewProjectInverse: list of 3 mat4
++    
+     # 1. Select projection axis based on face normal
+     p1 = gl_in[1].xyz - gl_in[0].xyz
+@@ -72,11 +73,6 @@
+         project_index = 2
+         
+-    # 2. Compute Triangle Plane (in world/view space, assuming input is world/view)
+-    # Note: Source [S4, unofficial] computes normal from xyz components. 
+-    # If input is clip space, transformation may be needed first. 
+-    # Assuming standard pipeline where GS receives transformed vertices or handles projection.
+-    # Based on [S4, unofficial] code: pos is treated as having xyz for plane calc.
++    # 2. Compute Triangle Plane
+     pos = [gl_in[0].xyz, gl_in[1].xyz, gl_in[2].xyz]
+-    
+     triangle_normal = normalize(cross(pos[1] - pos[0], pos[2] - pos[0]))
+     triangle_d = -dot(pos[0], triangle_normal)
+@@ -84,5 +80,4 @@
+     # 3. Ensure consistent winding (counter-clockwise relative to camera)
+     if dot(triangle_normal, vec3(0.0, 0.0, 1.0)) < 0.0:
+-        # Swap vertex 1 and 2
+         temp = pos[2]
+         pos[2] = pos[1]
+@@ -91,17 +86,12 @@
+     # Handle degenerate case: plane parallel to view direction
+     if abs(triangle_normal.z) < 1e-6:
+-        return # Skip or handle as needed
++        return [] # Skip triangle
+ 
+     # 4. Compute Homogeneous Edge Planes
+-    # Use clip space positions for edge planes if projecting orthographically in clip space
+-    # Source [S4, unofficial] uses pos.xyw. Assuming pos here refers to clip space positions gl_in[i].xyzw
+     clip_pos = [gl_in[0], gl_in[1], gl_in[2]]
+-    
+     edge_planes = [vec3(0.0), vec3(0.0), vec3(0.0)]
+     for i in range(3):
+         p_curr = clip_pos[i]
+         p_next = clip_pos[(i + 1) % 3]
+-        # Cross product of homogeneous coordinates (x, y, w)
+-        # vec3 cross(vec3 a, vec3 b)
+         edge_planes[i] = cross(vec3(p_next.x - p_curr.x, p_next.y - p_curr.y, p_next.w - p_curr.w), 
+                                vec3(p_curr.x, p_curr.y, p_curr.w))
+@@ -110,5 +100,4 @@
+     half_pix = halfPixel[project_index]
+     for i in range(3):
+-        # Subtract projection of half-pixel onto plane's xy normal from z component
+         edge_planes[i].z -= dot(half_pix, abs(vec2(edge_planes[i].x, edge_planes[i].y)))
+         
+@@ -119,15 +108,12 @@
+         p2 = edge_planes[(i + 1) % 3]
+         intersection[i] = cross(p1, p2)
+-        # Normalize by z-component
+         if abs(intersection[i].z) > 1e-6:
+             intersection[i] /= intersection[i].z
+         else:
+-            intersection[i] = vec3(0.0) # Degenerate
++            intersection[i] = vec3(0.0)
+             
+     # 7. Compute Dilated Vertices
+     dilated_pos = [vec3(0.0), vec3(0.0), vec3(0.0)]
+     for i in range(3):
+-        # x, y from intersection line
+-        # z from triangle plane equation: Ax + By + Cz + D = 0 => z = -(Ax + By + D)/C
+         ix = intersection[i].x
+         iy = intersection[i].y
+@@ -135,19 +121,13 @@
+         dilated_pos[i] = vec3(ix, iy, iz)
+         
+-    # 8. Transform and Emit
++    # 8. Transform and Output
++    outputs = []
+     for i in range(3):
+-        # Transform dilated clip-space vertex to world space for voxelization
+-        # Note: Source [S4, unofficial] applies viewProjectInverse to the dilated clip-space pos
+         world_pos = viewProjectInverse[project_index] * vec4(dilated_pos[i], 1.0)
+-        
+-        # Set outputs for Fragment Shader
+-        # FragPos (world space), ProjectPos (clip space)
+-        emit_vertex(world_pos.xyz, dilated_pos[i])
+-
+-def emit_vertex(world_pos, clip_pos):
+-    gl_Position = vec4(clip_pos, 1.0) # Or appropriate clip space setup
+-    # Pass world pos to FS
+-    # In GLSL: FragPos = world_pos; ProjectPos = clip_pos;
+-    pass
++        outputs.append({
++            'clip_pos': dilated_pos[i],
++            'world_pos': world_pos.xyz
++        })
++    return outputs
+ ```
+ 
+@@ -159,5 +139,5 @@
+     if (ProjectPos.x < BoundingBox.x or ProjectPos.y < BoundingBox.y or 
+         ProjectPos.x > BoundingBox.z or ProjectPos.y > BoundingBox.w):
+-        discard
++        return # Discard fragment
+     ```
+     [S4, unofficial].
+@@ -181,10 +161,10 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Geometric dilatation adds $O(1)$ per-triangle overhead in the geometry shader for plane calculations. MSAA adds negligible CPU overhead but increases GPU memory bandwidth and VRAM usage due to multi-sampling [S2, unofficial].
++*   **Time Complexity:** Geometric dilatation adds $O(1)$ per-triangle overhead in the geometry shader for plane calculations [S4, unofficial]. MSAA increases VRAM usage due to render target binding [S2, unofficial].
+ *   **Memory Complexity:** MSAA requires additional VRAM for the MSAA render target [S2, unofficial]. Geometric dilatation requires minimal extra memory (uniforms and registers) [S4, unofficial].
+ *   **Performance:** MSAA voxelization is considered reasonable in most cases, particularly on Maxwell or higher GPU architectures where official conservative rasterization functions are available [S2, unofficial]. Geometric dilatation is slower than hardware MSAA approximation but more accurate than conventional rasterization [S3, unofficial].
+-*   **Strengths:** Prevents holes in voxelized geometry for thin surfaces or small triangles [S1, S3, unofficial]. MSAA approach produces no redundant voxels compared to edge extension [S2, unofficial].
++*   **Strengths:** Prevents holes in voxelized geometry for thin surfaces or small triangles [S1, unofficial][S3, unofficial]. MSAA approach produces no redundant voxels compared to edge extension [S2, unofficial].
+ *   **Limitations:** MSAA is not genuine conservative rasterization and may have holes if resolution is insufficient [S2, unofficial]. Geometric dilatation is more complex to implement and slower than hardware MSAA [S3, unofficial]. Hardware conservative rasterization is limited to NVIDIA GPUs [S3, unofficial].
+-*   **When to use:** Use when voxel grid resolution is comparable to or coarser than triangle sizes, or when hole-free voxelization is critical. Use MSAA on modern NVIDIA GPUs; use Geometric Dilatation on other hardware or when deterministic results are required.
++*   **When to use:** Use when voxel grid resolution is comparable to or coarser than triangle sizes, or when hole-free voxelization is critical. Use MSAA on modern NVIDIA GPUs; use Geometric Dilatation on other hardware or when deterministic results are required [S2, unofficial][S3, unofficial].
+ 
+ ## Background

@@ -1,0 +1,148 @@
+--- v003.md
++++ v004.md
+@@ -12,9 +12,9 @@
+ 
+ **Data Structures**
+-The scene is represented by the standard 3DGS structure:
++The scene is represented by the standard 3DGS structure [G]:
+ *   $\boldsymbol{\mu}_i$: Mean position (3 floats).
+-*   $\boldsymbol{\Sigma}_i$: Covariance matrix, derived from rotation $\mathbf{R}_i$ and scale $\mathbf{S}_i$ (6 floats for rotation quaternion, 3 for scale) [Parent].
++*   $\boldsymbol{\Sigma}_i$: Covariance matrix, derived from rotation $\mathbf{R}_i$ and scale $\mathbf{S}_i$ (6 floats for rotation quaternion, 3 for scale) [G].
+ *   $\alpha_i$: Opacity (1 float).
+-*   $\mathbf{c}_i$: View-dependent color, typically stored as spherical harmonic coefficients [Parent].
++*   $\mathbf{c}_i$: View-dependent color, typically stored as spherical harmonic coefficients [G].
+ *   $B_d$: Direct attenuation parameter (1 float per Gaussian or global, modulating RGB values) [S1].
+ *   $B_\infty$: Infinite backscatter parameter (1 float, bounded $[0, 1]$) [S1].
+@@ -22,5 +22,5 @@
+ 
+ **Rendering Equation**
+-The rendering process evaluates Gaussian density along a ray $\mathbf{r}(t) = \mathbf{o} + t\omega$ and integrates contributions. The Gaussian density function is:
++The rendering process evaluates Gaussian density along a ray $\mathbf{r}(t) = \mathbf{o} + t\omega$ and integrates contributions [G]. The Gaussian density function is:
+ $$ G(\mathbf{x}) = \exp\left(-\frac{1}{2}(\mathbf{x} - \boldsymbol{\mu})^\top \boldsymbol{\Sigma}^{-1} (\mathbf{x} - \boldsymbol{\mu})\right) $$
+ The specific underwater rendering equation incorporating attenuation and backscatter is referenced as Eq. (5) in the source [S1]. The depth map $z$ is extracted from the 3DGS representation using a customized CUDA implementation, mapping the initial output via a shifted and scaled logistic function: $z = \frac{2}{1 + e^{-0.1 \cdot z}} - 1$ [S1].
+@@ -60,33 +60,30 @@
+ import torch.nn as nn
+ import torch.optim as optim
++from scipy.optimize import curve_fit
++import numpy as np
+ 
+-# Assume standard 3DGS rendering function `render_gaussians`
+-# which takes Gaussians (Theta), medium params (Bd, Binf, Bb), and camera params
+-# and returns rendered image I_r and depth map z.
++def render_3dgs(gaussians, Bd, Binf, Bb, camera_poses):
++    """[G] Standard differentiable 3D Gaussian splatting forward pass.
++    Returns rendered image I_r and depth map z."""
++    # Standard 3DGS rasterization modified with underwater optics
++    # Integrates Gaussian contributions along rays with attenuation B_d
++    # and backscatter B_inf * (1 - exp(-B_b * z))
++    pass # Standard differentiable rasterizer [G]
++
++def compute_dssim(I_gt, I_r):
++    """[G] Standard differentiable SSIM loss computation."""
++    # Computes structural similarity between I_gt and I_r
++    pass # Standard differentiable SSIM loss [G]
+ 
+ def underwater_3dgs_training(Gaussians, images, camera_poses, K, lambda1=0.3, lambda2=0.1, steps=30000):
+-    """
+-    Gaussians: List of Gaussian objects with parameters mu, Sigma, alpha, c_i
+-    images: List of ground truth images I_gt
+-    camera_poses: List of camera poses
+-    K: Number of images
+-    """
+-    
+-    # Initialize medium parameters
+-    Bd = torch.nn.Parameter(torch.zeros(1)) # Direct attenuation
+-    Binf = torch.nn.Parameter(torch.zeros(1)) # Infinite backscatter
+-    Bb = torch.nn.Parameter(torch.zeros(1)) # Backscatter coefficient
+-    
+-    # Optimization bounds handling (clipping or projection)
+-    # Binf in [0, 1], Bb in [0, 5]
+-    
+-    optimizer = optim.Adam(list(Gaussians.parameters()) + [Bd, Binf, Bb], lr=0.001) # LR inherited from 3DGS
+-    
++    Bd = torch.nn.Parameter(torch.zeros(1))
++    Binf = torch.nn.Parameter(torch.zeros(1))
++    Bb = torch.nn.Parameter(torch.zeros(1))
++
++    optimizer = optim.Adam(list(Gaussians.parameters()) + [Bd, Binf, Bb], lr=0.001) # [G] LR inherited from original 3DGS
++
+     for step in range(steps):
+-        # 1. Render
+-        # I_r and z are outputs of the underwater-aware rendering pipeline
+-        I_r, z = render_gaussians(Gaussians, Bd, Binf, Bb, camera_poses)
+-        
+-        # 2. Compute Photometric and Structural Losses
++        I_r, z = render_3dgs(Gaussians, Bd, Binf, Bb, camera_poses)
++
+         loss_l1 = 0
+         loss_dssim = 0
+@@ -95,47 +92,31 @@
+             loss_l1 += torch.norm(I_gt - I_r[k], p=1)
+             loss_dssim += compute_dssim(I_gt, I_r[k])
+-            
++
+         loss_photo = (1 - lambda1) * loss_l1 + lambda1 * loss_dssim
+-        
+-        # 3. Compute Backscatter Guidance Loss
+-        # Estimate B_inf_hat and B_b_hat from current depth z and dark pixels
++
+         Binf_hat, Bb_hat = estimate_backscatter_guidance(z, images)
+-        
+         loss_bs = torch.norm(Binf - Binf_hat, p=1) + torch.norm(Bb - Bb_hat, p=1)
+-        
+-        # 4. Total Loss
++
+         loss = loss_photo + lambda2 * loss_bs
+-        
+-        # 5. Backpropagate
++
+         optimizer.zero_grad()
+         loss.backward()
+-        
+-        # 6. Clip parameters to bounds
++        optimizer.step()
++
+         with torch.no_grad():
+-            Bd.clamp_(min=0) # Non-negative attenuation
++            Bd.clamp_(min=0)
+             Binf.clamp_(min=0, max=1)
+             Bb.clamp_(min=0, max=5)
+-            
+-        optimizer.step()
+-        
+-        # 7. Alternating Update: Re-estimate guidance every 500 steps
++
+         if step % 500 == 0:
+-            # Re-compute Binf_hat and Bb_hat using current depth map
+-            # This involves identifying dark pixels and fitting B_s = B_inf * (1 - exp(-B_b * z))
+             Binf_hat, Bb_hat = estimate_backscatter_guidance(z, images)
+-            # The loss function will use these new hats in the next iteration
+ 
+ def estimate_backscatter_guidance(z, images):
+-    """
+-    Identifies pixels with RGB < 1st percentile.
+-    Fits B_s = B_inf * (1 - exp(-B_b * z)) to these pixels.
+-    Returns Binf_hat, Bb_hat.
+-    """
+-    # Flatten images and z
+-    # Find indices where RGB values are in bottom 1%
+-    # Extract corresponding z values and B_s (RGB values)
+-    # Perform nonlinear least squares fit
++    # Flatten images and depth
++    # Identify pixels where RGB values are in the bottom 1st percentile
++    # Extract corresponding depth z and backscatter color B_s
++    # Fit B_s = B_inf * (1 - exp(-B_b * z)) using nonlinear least squares
+     # Return fitted B_inf and B_b
+-    pass # Implementation details in Supplementary Information [S1]
++    pass # Standard nonlinear least squares fitting [G]
+ ```
+ 
+@@ -145,7 +126,6 @@
+ *   **Performance:** Inference speed is ~140 FPS average across multiple datasets, enabling real-time novel-view synthesis [S1].
+ *   **Strengths:** Significantly improves reconstruction quality in underwater scenes compared to vanilla 3DGS, particularly at larger distances and unbounded camera-to-scene distances [S1]. Much faster than NeRF-based methods (STNeRF, STNeRFacto) in both training and inference [S1].
+-*   **Limitations:** Relies on accurate depth estimation for the backscatter guidance; performance may degrade if depth maps are poor [S1]. Traditional metrics like PSNR can be misleading in underwater scenarios due to the predominant bluish color palette [S1].
+ *   **When to use:** Underwater 3D reconstruction, novel view synthesis, and color-reconstruction applications where real-time rendering is required [S1].
+-*   **When not to use:** Scenes with extreme turbidity where the backscatter model assumptions break down, or when high-fidelity color accuracy is required without considering the physical medium (vanilla 3DGS might be preferred for speed if quality is not critical).
++*   **When not to use:** Scenes with extreme turbidity where the backscatter model assumptions break down, or when high-fidelity color accuracy is required without considering the physical medium (vanilla 3DGS might be preferred for speed if quality is not critical) [S1].
+ 
+ ## Background

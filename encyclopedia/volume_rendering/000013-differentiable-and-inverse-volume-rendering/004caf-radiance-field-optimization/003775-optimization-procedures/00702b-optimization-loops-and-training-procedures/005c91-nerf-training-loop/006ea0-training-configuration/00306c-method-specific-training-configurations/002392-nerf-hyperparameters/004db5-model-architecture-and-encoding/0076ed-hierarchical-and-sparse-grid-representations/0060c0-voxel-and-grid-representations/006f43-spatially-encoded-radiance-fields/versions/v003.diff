@@ -1,0 +1,174 @@
+--- v002.md
++++ v003.md
+@@ -4,138 +4,54 @@
+ 
+ ## Overview
+-Spatially Encoded Radiance Fields (SERF) simplify the implicit radiance function by spatially decomposing it into smaller functions to reduce the computational complexity load on the Multi-Layer Perceptron (MLP) [S1]. By storing feature vectors in a 3D voxel grid, the method divides volumetric model information into local batches, allowing equal or higher rendering quality than standard NeRF with a significantly smaller MLP architecture [S1]. This approach accelerates both optimization and inference compared to purely coordinate-based MLPs [S2].
++Spatially Encoded Radiance Fields (SERF) simplify the implicit radiance function by spatially decomposing it into smaller functions to reduce the computational complexity load on the Multi-Layer Perceptron (MLP) [S1]. By storing feature vectors in a 3D voxel grid, the method divides volumetric model information into local batches, allowing equal or higher rendering quality than coordinate-based NeRF with a smaller or faster-decoding MLP [S1]. It sets itself apart from standard NeRF by replacing the heavy coordinate-to-color mapping with a lookup-and-decode pipeline, and from sibling sparse methods by explicitly defining the grid-based feature storage mechanism that enables this acceleration [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A set of camera poses $(\mathbf{c}_i, \mathbf{K}_i)$ and corresponding 2D images $\mathbf{I}_i$.
+-*   **Output:** A rendered image $\hat{\mathbf{I}}$ for a given camera pose, and optimized grid parameters.
++*   **Input:** A set of calibrated images with known camera poses; optionally, time $t$ for dynamic scenes.
++*   **Output:** A rendered image (color $\mathbf{c}$) and depth, derived from the radiance field parameters.
+ 
+ **Data Structures:**
+-The scene is represented by two explicit voxel grids [S1, S2]:
+-1.  **Density Grid ($\mathbf{V}_\sigma$):** A tensor storing volume density $\sigma$. Dimensions are $\mathbb{R}^{H \times W \times D}$ [S1, S2].
+-2.  **Feature Grid ($\mathbf{V}_a$):** A tensor storing latent appearance features per voxel. Dimensions are $\mathbb{R}^{H \times W \times D \times P}$, where $P$ is the feature dimension [S1, S2].
++1.  **Density Volume Grid ($\mathbf{V}_\sigma$):** A 3D tensor $\mathbb{R}^{H \times W \times D}$ storing volume density $\sigma$ [S2]. In sparse implementations, this may be stored in a hash table or octree structure to save memory [S1].
++2.  **Feature Volume Grid ($\mathbf{V}_a$):** A 3D tensor $\mathbb{R}^{H \times W \times D \times F}$ storing latent feature vectors $f$ of dimension $F$ [S2]. These features encode appearance and geometry information [S1].
++3.  **Decoder Network ($S_\Theta$):** A small MLP that takes the interpolated feature vector as input and outputs the final color $\mathbf{c}$ [S2].
+ 
+-**Query Mechanism:**
+-For a query point $\mathbf{x}$ in world space, grid values are retrieved via differentiable interpolation (e.g., trilinear) [S1, S2]:
+-$$ f(\mathbf{x}) = \text{interp}(\mathbf{x}, \mathbf{V}_a) $$
+-This operation allows gradients to flow back to the grid values during optimization [S1].
++**Steps:**
++1.  **Grid Initialization:** Initialize $\mathbf{V}_\sigma$ and $\mathbf{V}_a$ with learnable parameters. For sparse variants, initialize the hash map or octree structure [S1].
++2.  **Query Point Sampling:** For a ray passing through the scene, sample points $\mathbf{x}$ along the ray [S1].
++3.  **Feature Interpolation:** Retrieve the feature vector $f$ and density $\sigma$ at $\mathbf{x}$ from the grids using trilinear interpolation [S2]:
++    $$ f(\mathbf{x}) = \text{interp}(\mathbf{x}, \mathbf{V}_a) $$
++    $$ \sigma(\mathbf{x}) = \text{interp}(\mathbf{x}, \mathbf{V}_\sigma) $$
++    [S2].
++4.  **Color Decoding:** Pass the interpolated feature vector $f(\mathbf{x})$ through the decoder MLP $S_\Theta$ to predict the view-dependent color $\mathbf{c}$ [S2]:
++    $$ \mathbf{c}(\mathbf{x}) = S_\Theta(f(\mathbf{x})) $$
++    [S2].
++5.  **Volume Rendering:** Compute the final pixel color using standard volume rendering integration over the sampled points, combining $\sigma(\mathbf{x})$ and $\mathbf{c}(\mathbf{x})$ [S1].
++6.  **Optimization:** Update $\mathbf{V}_\sigma$, $\mathbf{V}_a$, and $S_\Theta$ parameters via gradient descent to minimize the difference between rendered and ground-truth images [S1].
+ 
+-**Decoding:**
+-The interpolated feature vector is passed to a decoding function $S_\Theta$ (typically a small MLP) to predict color $\mathbf{c}$ [S1, S2]:
+-$$ \mathbf{c}(\mathbf{x}) = S_\Theta(\text{interp}(\mathbf{x}, \mathbf{V}_a)) $$
+-The density $\sigma(\mathbf{x})$ is retrieved directly from $\mathbf{V}_\sigma$ via interpolation [S1].
+-
+-**Optimization:**
+-Grid parameters ($\mathbf{V}_\sigma, \mathbf{V}_a$) and decoder parameters $\Theta$ are updated via gradient descent to minimize the difference between rendered images and ground truth observations [S1].
+-
+-**Pseudocode:**
+-```python
+-import torch
+-import torch.nn as nn
+-
+-class SpatiallyEncodedRadianceField:
+-    def __init__(self, grid_size, feature_dim):
+-        """
+-        Initialize the spatially encoded radiance field.
+-        :param grid_size: Tuple (H, W, D) defining the voxel grid resolution.
+-        :param feature_dim: Integer P, the dimension of the feature vector.
+-        """
+-        self.H, self.W, self.D = grid_size
+-        self.P = feature_dim
+-        
+-        # Initialize density grid [S1, S2]
+-        # Values typically initialized to small positive numbers for density
+-        self.V_sigma = nn.Parameter(torch.zeros(self.H, self.W, self.D))
+-        
+-        # Initialize feature grid [S1, S2]
+-        # Values typically initialized from a normal distribution
+-        self.V_a = nn.Parameter(torch.randn(self.H, self.W, self.D, self.P))
+-        
+-        # Decoder MLP [S1]
+-        # Takes features and optionally viewing direction to predict color
+-        self.decoder_S = nn.Sequential(
+-            nn.Linear(self.P, 128),
+-            nn.ReLU(),
+-            nn.Linear(128, 3) # Output RGB
+-        )
+-
+-    def query(self, points):
+-        """
+-        Query density and features at given 3D points.
+-        :param points: Tensor of shape (N, 3), coordinates in world space.
+-        :return: density (N,), features (N, P)
+-        """
+-        # Normalize points to [0, 1] range for grid_sample if necessary
+-        # Assuming points are already normalized or grid_sample handles coordinates
+-        
+-        # Interpolate density [S1]
+-        # grid_sample expects input (N, C, H, W, D) and coordinates (N, H_out, W_out, D_out, 3)
+-        # For a single batch of points, we reshape accordingly.
+-        # Note: Standard grid_sample in PyTorch expects coordinates in [-1, 1]
+-        # or [0, 1] depending on alignment. Here we assume a helper normalizes.
+-        
+-        density_grid = self.V_sigma.unsqueeze(0).unsqueeze(0) # (1, 1, H, W, D)
+-        points_norm = (points - 0.5) * 2.0 # Map [0,1] to [-1,1] for grid_sample
+-        
+-        density = torch.nn.functional.grid_sample(
+-            density_grid, 
+-            points_norm.unsqueeze(0).unsqueeze(0), 
+-            mode='trilinear', 
+-            padding_mode='zeros'
+-        ).squeeze() # (N,)
+-        
+-        # Interpolate features [S1]
+-        feature_grid = self.V_a.permute(0, 3, 1, 2).unsqueeze(0) # (1, P, H, W, D)
+-        
+-        features = torch.nn.functional.grid_sample(
+-            feature_grid, 
+-            points_norm.unsqueeze(0).unsqueeze(0), 
+-            mode='trilinear', 
+-            padding_mode='zeros'
+-        ).squeeze().permute(0, 2, 1) # (N, P)
+-        
+-        return density, features
+-
+-    def forward(self, points, directions=None):
+-        """
+-        Forward pass: query grid and decode color.
+-        :param points: Query points (N, 3)
+-        :param directions: Viewing directions (N, 3), optional [S1]
+-        :return: color (N, 3)
+-        """
+-        _, features = self.query(points)
+-        
+-        # Decoder combines features (and optionally directions) to predict color [S1]
+-        # If directions are used, they are concatenated with features
+-        if directions is not None:
+-            input_to_decoder = torch.cat([features, directions], dim=-1)
+-        else:
+-            input_to_decoder = features
+-            
+-        color = self.decoder_S(input_to_decoder)
+-        return color
+-```
++**Parameters:**
++*   Grid Resolution ($H, W, D$): Not given in the sources.
++*   Feature Dimension ($F$): Not given in the sources.
++*   Decoder Size: Typically smaller than standard NeRF MLPs due to the pre-computed features [S1].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Boundary Conditions:** Points outside the voxel grid bounds must be handled. The pseudocode uses `padding_mode='zeros'`, which effectively sets density and features to zero outside the grid, preventing artifacts but requiring careful culling of rays [G].
+-*   **Precision:** Trilinear interpolation is differentiable but introduces smoothing. High-frequency details may require higher grid resolutions or multi-resolution grids (e.g., Instant-NeRF) [S1].
++*   **Memory Usage:** Dense grids scale cubically with resolution. Sparse representations (e.g., hash grids) are required for high resolutions to avoid out-of-memory errors [S1].
++*   **Interpolation Artifacts:** Trilinear interpolation may introduce blurring compared to nearest-neighbor or higher-order methods, potentially affecting high-frequency detail [S1].
++*   **Boundary Conditions:** Points outside the grid bounds must be handled (e.g., clamping or treating as transparent) [G].
+ 
+ ## Subtopics
+ 
+-### [Coarse-Fine Dynamic Radiance Field](21720-coarse-fine-dynamic-radiance-field.md)
+-The Coarse-Fine Dynamic Radiance Field is a method for novel view synthesis of dynamic human heads that combines a discrete 3D voxel grid for efficient geometry estimation with a continuous MLP for high-frequency radiance modeling. It differs from standard NeRF by conditioning the continuous scene function on spatially-varying local animation codes retrieved from the voxel grid, and from Neural Volumes by using a hybrid coarse-fine representation to avoid the cubic memory complexity of a single high-resolution warped voxel grid.
+-
+ ### Efficient EndoNeRF scene representation
+-Efficient EndoNeRF is a voxel-grids-based scene representation that replaces coordinate-based MLPs with explicit density and feature volume grids to accelerate optimization, combined with a canonical field and time-dependent deformation field for dynamic surgical scenes [S2]. The dynamic scene at time $t$ is modeled by warping a canonical radiance field (represented by $\mathbf{V}_\sigma$ and $\mathbf{V}_a$) with a time-dependent deformation field [S2]. The deformation field is modeled using decomposed 4D motion fields and a 3-layer MLP that maps a spatial-temporal coordinate $(\mathbf{x}, t)$ to a deformation offset $\Delta \mathbf{x}$ [S2].
++A voxel-grids-based scene representation that replaces coordinate-based MLPs with explicit density and feature volume grids to accelerate optimization, combined with a canonical field and time-dependent deformation field for dynamic surgical scenes [S2]. It differs from static SERF by modeling dynamic scenes via warping a canonical radiance field with a time-dependent deformation field [S2]. Choose this for dynamic endoscopic/surgical video reconstruction.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Faster optimization and inference than standard NeRF because the MLP is smaller and receives pre-computed features from the grid, reducing the number of MLP inferences required per pixel [S1].
+-*   **Memory Complexity:** Scales with the voxel grid resolution ($H \times W \times D \times P$). Can be mitigated by using sparse voxel grids [S1].
+-*   **Strengths:** Accelerates optimization convergence; allows for smaller MLPs; suitable for dynamic scenes when combined with deformation fields [S1, S2].
+-*   **Limitations:** Resolution is limited by grid size; high-frequency details may be lost without multi-resolution approaches; memory usage can be high for very fine grids [S1].
+-*   **When to use:** When training speed is critical, or when deploying on hardware with limited MLP compute power but sufficient memory for grid storage [S1].
++*   **Time Complexity:** Faster inference and optimization than coordinate-based NeRF because the MLP is smaller and operates on lower-dimensional feature vectors rather than raw coordinates [S1].
++*   **Memory Complexity:** Scales with the number of voxels. Dense grids are $O(H \times W \times D)$, while sparse grids reduce this significantly [S1].
++*   **Strengths:** Faster optimization convergence; reduced MLP complexity; suitable for real-time or near-real-time rendering with sufficient grid resolution [S1].
++*   **Limitations:** Memory intensive for high-resolution dense grids; interpolation may smooth out fine details compared to pure MLP representations [S1].
++*   **When to use:** When training speed and inference latency are critical, and the scene can be adequately represented by a voxel grid [S1].
++*   **When not to use:** For scenes with extremely high-frequency details that cannot be captured by the grid resolution, or when memory is severely constrained and sparse structures are not feasible [S1].
+ 
+ ## Background
+-NeRF represents a significant advance in computer vision but is slow due to the MLP inference cost [S1]. Spatially Encoded Radiance Fields emerged as a major advance to simplify the implicit radiance function by spatial decomposition [S1]. Yu et al. demonstrated reducing the radiance function to a simple MLP-free representation [8, 56]. Müller et al. developed Instant-NeRF, a multi-resolution feature voxel grid approach [59]. The concept is also applied in dynamic surgical scenes via Efficient EndoNeRF [S2].
++The concept of spatially decomposing the radiance function to reduce MLP complexity was demonstrated by Yu et al. [S1]. Müller et al. developed Instant-NeRF, a multi-resolution feature voxel grid implementation [S1]. The approach addresses the slow inference speed of standard NeRF MLPs [S1]. Efficient EndoNeRF extends this to dynamic surgical scenes using canonical fields and deformation fields [S2].
+ 
+ ## Sources

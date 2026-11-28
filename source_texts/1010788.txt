@@ -1,0 +1,1108 @@
+🐪 The Perl programming language. Contribute to Perl/perl5 development by creating an account on GitHub.
+
+Add support for an ${^RNG} hook, along with support PCG randomization by demerphq · Pull Request #24722 · Perl/perl5 · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+demerphq
+commented
+Aug 17, 2026
+Copy link
+Copy Markdown
+Collaborator
+Historically the random number generator used by perl has evolved over time, in the early days it was the system RNG, then later we rolled our own version drand48 for cross platform stability. But these days drand48 has a bunch of flaws so it would be nice to be able to use something better.
+However this is not so easy. Most code just calls rand() because it is the easiest thing to do. Most people dont bother adding support for their own hook, or burdening their user with providing an RNG, especially as there is no standard for doing so. Some code maybe ends up with support for an RNG hook, like List::Util did, but IMO such cases are a rarity, and a proliferation of slightly different hooks for this would not be helpful.
+In theory one can override CORE::rand() and CORE::srand() before a module is loaded, and thus change the RNG, but the reality is there is no good way to overload srand()/rand() in another packages namespace. (So when people say "just put your pet RNG on CPAN" it is kind of a cop out, that RNG is likely to never really be useful as it just wont get used by most code.)
+At the same time we dont really want to change Perls internal code to use something other than drand48(). There is lots of code that expects that doing srand(1234) will produce test results that look a specific way, so changing cores RNG would cause all kinds of unfortunate drama through the ecosystem.
+This patch takes a different approach: ${^RNG} is used as a hook for rand() and srand(). If ${^RNG} contains an object then it uses the objects rand_uv() and srand() methods to do its thing. If it contains an unblessed subref then it calls it with no arguments for rand() and with arguments for srand() (srand(undef) is defined to be the same as srand()).
+This is wired into the macro Drand01() which despite its name and appearance is actually a pTHX style macro, but which actually hides the fact by access what looks like a global var, but is actually an interpreter var under threads, thus hiding that it does operate on aTHX just not directly. This allows us to redirect so that modules like List::Util will still respect the hook even though they bypass pp_rand() for most of their random calls.
+I thought about using ${^HOOKS}{RNG} instead of ${^RNG}, but for the time I decided to just use ${^RNG} as it feels better to do somethinglike:
+```
+local ${^RNG} = RNG::PCG->new();
+```
+than it does to do:
+```
+local ${^HOOKS}{RNG}
+```
+and it allows the rng internals to avoid the hash lookup. Although currently it is not optimizing the ${^RNG} package var fetch, and the var is not magic in any way so the ${^RNG} hook is not being stored in an interpreter var so the current implementation could be sped up we wished. IMO it is preferable to keep this as simple as possible.
+As part of this patch I have added a new dist/RNG which contains XS code to implement the two dimensional PCG-XSH-RR 64/128, which allows for 128 bit state with only 64 bit or 32 operations. This seems to be the state of the art RNG these days.
+I also implemented an RNG::SHA which uses SHA256 to produce the stream of random values.
+I chose to make RNG use a UV as its base currency, so rand() calls ${^RNG}->rand_uv() which returns a UV, which is then converted into whatever the user requested. I did it this way so that any floating point operations or conversion to floating point operations could be performed by the C code. It feels like a more flexible foundation than using a float.
+Modules like List::Util which bind to Drand01() at the C level still call the callback, so even without using List::Util's hook you can override it just like any other perl code.
+TODO: fill description here
+This set of changes requires a perldelta entry, and it is included.
+This set of changes requires a perldelta entry, and I need help writing it.
+This set of changes does not require a perldelta entry.
+robrwo
+commented
+Aug 17, 2026
+Copy link
+Copy Markdown
+Contributor
+If this is intended to allow people to plug in a CSPRNG, why not just add a builtin function random_bytes that does that?
+demerphq
+commented
+Aug 17, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+Wouldn't that have the exact same problem i described above?
+However this is not so easy. Most code just calls rand() because it is the easiest thing to do. Most people don't bother adding support for their own hook, or burdening their user with providing an RNG, especially as there is no standard for doing so. Some code maybe ends up with support for an RNG hook, like List::Util did, but IMO such cases are a rarity, and a proliferation of slightly different hooks for this would not be helpful.
+How would "just add[ing] a builtin function [like] random_bytes" make List::Util' end up using my random number generator?
+What would your version of
+```
+{
+  # override the random number generator so call_code_that_uses_rand_already() uses PCG instead Drand48.
+  local ${^RNG}= RNG::PCG->new(...);
+  call_code_that_uses_rand_already()
+}
+```
+look like?
+robrwo
+commented
+Aug 17, 2026
+Copy link
+Copy Markdown
+Contributor
+Wouldn't that have the exact same problem i described above?
+No, it's not.
+Allowing the global RNG to be overridden can open up all sorts of problems, especially if people are using it for a CSPRNG and forget to override it locally, so someone else can override it (intentionally or not) and break things.
+Also, chr( int( rand * 256 ) ) does not have the same statistical properties as a stream of random bytes, assuming rand was properly random. If somebody needs good random bytes for security, just read them from a CSPRNG.
+Also, GitHub isnt working so I cant look at
+RNG::SHA which uses SHA256 to produce the stream of random values
+However, SHA256 is designed as a message digest algorithm, not as a stream cipher, and there will in subtle flaws in using that as a stream There are techniques for converting hash algorithms into block ciphers, e.g. Luby-Rackoff, but then you may as well as a CSPRNG algorithm for generating a stream of bytes, e.g. ISAAC or ChaCha (which is used by recent Linux /dev/urandom).
+But again, generating random floats and generating random bytes are two entirely different beasts.
+demerphq
+force-pushed
+the
+yves/caret_rng_hook
+branch
+from
+53ff922 to
+d3f8bc6
+Compare
+August 17, 2026 14:47
+demerphq
+commented
+Aug 17, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+Allowing the global RNG to be overridden can open up all sorts of problems, especially if people are using it for a CSPRNG and forget to override it locally, so someone else can override it (intentionally or not) and break things.
+I look at it as a solution, but of course yes, someone could if they wished use it irresponsibly to do dumb things. But stopping people from using something that solves real problems isn't the perl way. We might as well remove 'unlink' because someone could do something dumb with it.
+I consider the base design of rand() as broken. And perl has never defined anything that replaces that brokenness. If someone writes code which uses rand(), then that code becomes hugely breakable because everything is using shared state. So if I modify my code to use rand() when previously it did not, I might break your tests, because your use of srand(123) call which you expect to make your code to one thing is now being mixed with calls from me to getting entropy you didn't expect me to use. If we both want to use rand() then we have a problem.
+At least with ${^RNG} I have options. I can globally fix all the code that uses rand() on my system to use a different function if i want. I can make specific pieces of code use designated and well seeded independent rngs for when they operate, I can do a bunch of things I cant do right now. For me that is the point, i can do things and solve problems I couldn't solve without this patch.
+Also, chr( int( rand * 256 ) ) does not have the same statistical properties as a stream of random bytes, assuming rand was properly random. If somebody needs good random bytes for security, just read them from a CSPRNG.
+Sorry, what are you talking about?
+However, SHA256 is designed as a message digest algorithm, not a stream cipher, and there will in subtle flaws in using that as a stream
+Hashing with a cryptographic grade hash the seed concatenated to a counter which is incremented each time will provide a usable stream of secure random bits. If you think otherwise then prove it and report it to NIST. FWIW, I have actually used this algorithm (actually with SHA-1) at large scale and we never found any bias. We also ran Test01 and Dieharder on the code for days on end without any sign of RNG weakness.
+Sure there are way way way better ways to do a secure RNG, a gold standard being AES but this is basically demo code, using SHA256 for any real RNG work is ridiculous, you'd die of old age before you got anything done. Maybe the code needs a note to that effect.
+guest20
+commented
+Aug 17, 2026
+Copy link
+Copy Markdown
+How many bits worth of decimal do we have after the . in a float, and does multiplying all of them by 255 give you an even distribution between zero and 255?
+robrwo
+commented
+Aug 17, 2026
+Copy link
+Copy Markdown
+Contributor
+Hashing with a cryptographic grade hash the seed concatenated to a counter which is incremented each time will provide a usable stream of secure random bits.
+If the seed isn't already good, then it's not secure. Too many Perl modules have used similar techniques, and they are easily broken.
+If you think otherwise then prove it and report it to NIST.
+If you re going to cite the NIST, then please use something based on NIST recommendations, which are more complicated thansimply incrementing a counter:
+The seed should have a minimum length larger than the hash state, e.g. 440 bits for SHA-1
+The initial counter is random, not 0
+There's a maximum number of data that can be extracted before it must be reseeded with new entropy
+There is no need for that kind of construction on most systems nowadays. (A possible reason hashes were chosen instead of stream ciphers was because hashes were not subject to US export controls in the 1990s.)
+I have actually used this algorithm (actually with SHA-1) at large scale and we never found any bias. We also ran Test01 and Dieharder on the code for days on end without any sign of RNG weakness.
+It isn't just about bias. It's about predictability. Rainbow tables for cracking this kind of construction are practical, and the hardware for attacking these is much more powerful and accessible.
+CPANSec has been issuing CVEs for the type of construction that you are using.
+Putting this in core will give new life to this zombie algorithm that CPANSec has been trying to kill off.
+Leont
+commented
+Aug 17, 2026
+Copy link
+Copy Markdown
+Contributor
+AFAIK it's already possible to override rand and srand the usual way:
+```
+BEGIN {
+    *CORE::GLOBAL::rand = sub { ... } };
+    *CORE::GLOBAL::srand = sub { ... } };
+```
+I'm not sure an additional hook is needed.
+tonycoz
+reviewed
+Aug 18, 2026
+View reviewed changes
+Comment thread
+pp.c
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+tonycoz
+reviewed
+Aug 18, 2026
+View reviewed changes
+Comment thread
+dist/RNG/lib/RNG.pm
+Outdated
+Comment on lines
++17
+to
++21
+{
+local ${^RNG} = My::RNG->new($seed);
+my $value = rand(100);
+srand(42);
+}
+tonycoz
+Aug 18, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+You can mention this, but I'd really hope you'd promote direct calls over this, ie. that new code accepts an RNG object instead of rand() hook hackery.
+tonycoz
+Aug 18, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Especially since RNG is in dist/, so meant to work with older perls.
+demerphq
+Sep 25, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+You can mention this, but I'd really hope you'd promote direct calls over this, ie. that new code accepts an RNG object instead of rand() hook hackery.
+No, I wouldn't do that personally. I think using the rand() hook is actually just a better design. It future proofs the code, and encourages a design where the end-user controls the RNG in use, without a proliferation of APIS for supplying randomness into a module or library.
+The RNG framework is in dist becuase it can be used stand alone. But I dont think that that should be the recommended patterns. I think the recommended pattern should sit on top of the rand() function so that things Just Work, regardless.
+tonycoz
+reviewed
+Aug 18, 2026
+View reviewed changes
+Comment thread
+dist/RNG/RNG.xs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+tonycoz
+reviewed
+Aug 18, 2026
+View reviewed changes
+Comment thread
+dist/RNG/RNG.xs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+tonycoz
+reviewed
+Aug 18, 2026
+View reviewed changes
+Comment thread
+dist/RNG/RNG.xs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+tonycoz
+reviewed
+Aug 18, 2026
+View reviewed changes
+Comment thread
+dist/RNG/RNG.xs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+tonycoz
+reviewed
+Aug 18, 2026
+View reviewed changes
+Comment thread
+dist/RNG/RNG.xs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+tonycoz
+reviewed
+Aug 18, 2026
+View reviewed changes
+Comment thread
+dist/RNG/lib/RNG.pm
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+github-actions
+Bot
+added
+the
+hasConflicts
+label
+Aug 20, 2026
+demerphq
+force-pushed
+the
+yves/caret_rng_hook
+branch
+2 times, most recently
+from
+083f2c4 to
+176404c
+Compare
+September 4, 2026 09:54
+github-actions
+Bot
+removed
+the
+hasConflicts
+label
+Sep 4, 2026
+github-actions
+Bot
+added
+the
+hasConflicts
+label
+Sep 14, 2026
+demerphq
+force-pushed
+the
+yves/caret_rng_hook
+branch
+from
+176404c to
+208c493
+Compare
+September 25, 2026 15:38
+github-actions
+Bot
+removed
+the
+hasConflicts
+label
+Sep 25, 2026
+demerphq
+force-pushed
+the
+yves/caret_rng_hook
+branch
+2 times, most recently
+from
+ce6270b to
+89abf44
+Compare
+September 27, 2026 14:34
+tonycoz
+reviewed
+Sep 28, 2026
+View reviewed changes
+Comment thread
+embed.fnc
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+demerphq
+force-pushed
+the
+yves/caret_rng_hook
+branch
+from
+59fd2c8 to
+d6fd88a
+Compare
+September 28, 2026 08:25
+tonycoz
+reviewed
+Oct 1, 2026
+View reviewed changes
+Comment thread
+pp.c
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+tonycoz
+reviewed
+Oct 1, 2026
+View reviewed changes
+Comment thread
+pp.c
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+tonycoz
+reviewed
+Oct 1, 2026
+View reviewed changes
+Comment thread
+pp.c
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+demerphq
+added 21 commits
+October 4, 2026 23:17
+Porting: test RNG on supported older Perls
+…
+93148ee
+```
+RNG supports Perl 5.24 and later, but the List::Util bundled with 5.24 is
+older than RNG requires. Let the external-distribution test runner skip RNG
+below that floor.
+
+For the 5.24 test job, install a current List::Util and put its site
+directories before the core library paths which MakeMaker prepends. Check the
+installed version before running the distribution tests so this compatibility
+requirement cannot silently regress.
+```
+fixup! dist/RNG: add random providers and distributions
+…
+89ed787
+```
+Document why the Drand48 byte adapter keeps the high 32 bits of each
+48-bit transition. Compare its byte stream with the core implementation
+across various lengths that end within and between four-byte chunks.
+```
+fixup! rng: let rand use selected providers
+…
+aec53c2
+```
+Use newSVpvs("") to create an empty string.
+```
+fixup! rng: let rand use selected providers
+…
+07ab244
+```
+The provider's srand callback can grow Perl's stack. Refresh SP before
+popping the original arguments or pushing the result.
+```
+fixup! rng: let rand use selected providers
+…
+2a7ee42
+```
+Exercise a provider callback that grows the Perl stack before returning.
+This covers the stack refresh required before pp_srand pushes the result.
+```
+fixup! rng: let rand use selected providers
+…
+3518b47
+```
+Return the advanced 48-bit Drand48 state so rand_bytes can select its
+high 32 bits without converting through NV. Emit that word least
+significant byte first and handle a partial final word in the switch.
+
+Test the default generator for the requested length and seeded
+repeatability.
+```
+fixup! dist/RNG: add random providers and distributions
+…
+2f0e2f6
+```
+Emit each Drand48 word least significant byte first, matching the
+builtin rand_bytes byte stream. Keep the copy switch layout aligned
+with the builtin implementation.
+
+Check a seeded byte sequence and compare provider output with the
+builtin across full and partial words.
+```
+fixup! util: extract portable entropy acquisition
+…
+6e2c1b5
+```
+Add a DEBUGGING-only environment override that skips native entropy sources so
+the weak entropy fallback can be exercised on ordinary hosts. Strong entropy
+requests continue to report failure instead of using the fallback.
+
+Test weak seeding and verify secure HMAC_DRBG construction fails under
+the override.
+```
+fixup! dist/RNG: add random providers and distributions
+…
+2e5bff1
+```
+Use only the bits representable by the configured NV mantissa when mapping a
+U64 to a value below one.  Scaling the full integer can round the largest
+values to 1.0 on NV formats with fewer than 64 significand bits.
+
+Fetch the PCG constructor seed before checking its type.  This avoids a second
+magic fetch for tied seeds.  The regression test checks that FETCH runs once
+and that the resulting rng sequence matches one initialized from an ordinary
+seed.
+```
+fixup! rng: let rand use selected providers
+…
+f490bde
+```
+Use PP stack operations in rand() and srand() so provider callbacks can grow
+the Perl stack safely.  Replace the argument with the result through RPP
+helpers, and handle the reserved null slot used for calls without an
+argument.  This also removes the PP_wrapped overhead.
+
+Fetch seed magic before inspecting or converting the seed.  Check redaction
+after the fetch, and use no-magic conversion afterward so tied seeds are not
+fetched again.  Refresh SP after a rand_bytes provider callback before storing
+its result in the XSUB argument stack.
+
+Allocate the default rand_bytes result after seeding and at its final size.
+Keep the set_caret_X comment with its entry in embed.fnc.
+
+Add tests for one-time tied-seed fetches, provider callbacks that grow the
+stack in rand(), srand(), and builtin::rand_bytes(), and all-ones provider
+output remaining below one.
+```
+fixup! dist/RNG: add random providers and distributions
+…
+b191eb8
+```
+Fetch get magic before checking optional RNG inputs or reading their flags.
+ParseXS supplies NULL for omitted optional SV arguments, so guard each fetch
+before calling SvGETMAGIC().  Check definedness after the fetch so tied values
+can provide their value.
+
+Use non-magic accessors after the explicit fetch to avoid running FETCH twice.
+Add tied-scalar tests for each provider and for HMAC_DRBG entropy, reseed,
+personalization, interval, and prediction-resistance inputs.
+```
+fixup! rng: let rand use selected providers
+…
+9eb98c6
+```
+Use the RC-aware stack ownership protocol when the RNG XS seed helper calls a
+Perl method.  Preserve the active stack mode, refresh SP after extending the
+stack, and balance the temporary stack reference in RC mode.
+
+The builtin rand_bytes XSUB uses the legacy XS wrapper.  Mortalize its
+allocated result so the wrapper can transfer it to the caller without leaking
+it.  Keep SP refreshed after the provider callback, which may grow the stack.
+```
+dist/RNG: add three PCG variants with 64-bit output
+…
+8401d17
+```
+Add PCG RXS-M-XS 64/64 and PCG XSL-RR 128/64 with MCG and LCG state
+transitions.  Each algorithm has its own provider class and XS callback.
+RNG::PCG selects a class at construction, avoiding an algorithm check
+for each generated value.
+
+Use native unsigned 128-bit arithmetic when the compiler advertises
+support.  Other targets use two 64-bit words and a portable wide
+multiply.  Keep the MCG and LCG transitions separate so the MCG path
+does not perform an increment addition.  Generation helpers use
+PERL_STATIC_INLINE to expose the small operations to the compiler.
+
+Expand ordinary seeds with a separate HMAC-SHA-256 domain label for
+each algorithm.  The LCG uses 16 bytes for state and 16 for its stream
+increment, whose low bit is set with | 1.  Raw seeds use the same layout
+and adjustment.  The MCG similarly makes its state odd without shifting
+it, so applying the adjustment again preserves the state.
+
+Add published PCG reference vectors using raw initializers to isolate
+algorithm behavior from seed expansion.  XSL-RR produces output from
+the updated state, while RXS-M-XS uses the old state.  Document the
+variants, constructor option, raw widths, and portable arithmetic.
+```
+fixup! rng: let rand use selected providers
+…
+eb1b733
+```
+Restore the historical "0 but true" return for a zero Drand48
+initializer in both core and RNG::Drand48.  Recognize that exact string
+in the compatibility parsers so feeding the return value back into
+srand() recreates the zero-seed sequence.
+
+Keep this quirk confined to Drand48.  Other providers treat the string
+as ordinary seed material.  Describe the returned value as an
+initializer rather than an internal state, including the decimal-string
+return needed when RNG::Drand48's initializer exceeds native UV width.
+
+Restore the truthiness and numeric-conversion checks for srand(0), and
+add replay checks for both the returned value and the literal string.
+Overflow-reduced zero initializers retain the same historical return.
+```
+fixup! dist/RNG: add random providers and distributions
+…
+85bc2f1
+```
+Return false ordinary seed strings as true RNG::Seed objects without
+changing their string value or the initialization they reproduce.
+This lets callers distinguish a successful srand() from a false seed
+value while preserving the replay rule for "" and "0".
+
+Separate ordinary string seeds from raw state.  from_string() keeps the
+normal string expansion path, while from_bytes() creates RNG::Seed::Raw
+objects implementing RNG::SeedBase.  Redacted seeds retain that protocol
+so attempts to reuse them are rejected.  Boolean overloading returns
+true, stringification preserves the material, and numeric conversion
+follows the normal conversion of the stored string.
+
+Apply the false-seed wrapper to the shared provider srand helper and
+HMAC_DRBG.  Stop numerically converting HMAC_DRBG's explicit seed for
+an XS return value that its Perl wrapper does not use.  This avoids
+spurious numeric warnings for overloaded raw seeds.
+
+Add replay checks across the bundled providers through direct methods
+and core dispatch.  Cover ordinary, Unicode, raw, absent, and undefined
+seeds, including normalization of raw states.  Check that returns are
+defined and true and reproduce mixed rand() and rand_bytes() requests
+on both the original generator and a fresh one.  Document the string
+and raw representations and their return behavior.
+```
+fixup! dist/RNG: add random providers and distributions
+…
+5dc9d55
+```
+Allocate length + 3 bytes for the older-Perl rand_bytes shim before
+writing its output.  A zero-length request must still have a PV buffer
+for the terminating NUL instead of relying on newSV(0) to allocate one.
+
+Reserve space for the NUL, the COW refcount byte, and one spare byte.
+Keep the requested string length unchanged.
+```
+fixup! dist/RNG: add random providers and distributions
+…
+2d6276a
+```
+Alias the older-Perl builtin::rand_bytes shim directly to
+_compat_rand_bytes instead of installing a forwarding subroutine.
+Give the compatibility function the builtin's one-argument prototype
+so the alias preserves its calling convention without an extra frame.
+
+Remove the _bytes wrapper and its unused provider argument.  The
+sampling helpers call builtin::rand_bytes directly, using either the
+native implementation or the installed compatibility alias.  Suppress
+the experimental builtin warning where these calls are compiled.
+```
+fixup! rng: let rand use selected providers
+…
+4d94864
+```
+Keep the cold seeding and provider fallback functions out of pp_rand()
+to avoid stack-protector overhead on its common path.  Inlining these
+functions exposes the addresses of their local entropy and byte buffers,
+causing the compiler to add a stack canary to the caller.
+
+Split default initialization into a small inline check and an
+out-of-line seeding function.  Mark that function and the provider U64
+fallback noinline for GCC, Clang, and MSVC, with an empty definition for
+other compilers.  Keep the attribute macro local to these helpers.
+
+The prior inline audit compared generated code and profiles with the
+seeding and fallback paths kept out of line.  This preserves the small
+common path without changing initialization or provider behavior.
+```
+t/perf: compare RNG byte output and sample workloads
+…
+2ddd93f
+```
+Extend the RNG benchmark suite with a 512-byte builtin::rand_bytes
+request and support for all three new PCG providers.  Keep the byte
+workload separate from blead comparisons because blead has no matching
+builtin API.
+
+Add workloads using 256, 1024, and 4096 values.  Each builds an array,
+tracks a sum and sum of squares, computes mean and sample standard
+deviation, sorts the values, and stores extrema, quartiles, median,
+and P90, P95, and P99 in a result hash.
+
+Pair each random-input workload with one reading precomputed values.
+Reseed the random workload before each measured pass so both partners
+sort the same sequence.  This compares the additional instruction cost
+of generating values while keeping the surrounding work equivalent.
+It does not isolate all RNG instructions or measure a runtime share.
+```
+fixup! dist/RNG: add three PCG variants with 64-bit output
+…
+2b450c7
+```
+Regenerate the library cleanup rules after adding the PCG provider
+modules.  Their paths in MANIFEST introduce lib/RNG/PCG, which must be
+removed before lib/RNG during cleanup.
+
+Run regen/lib_cleanup.pl to update the generated block in Makefile.SH.
+The Windows rules already remove lib/RNG recursively and need no change.
+All 47 checks in porting/regen.t now pass.
+```
+fixup! dist/RNG: add random providers and distributions
+…
+4833fd1
+```
+Backport the no-magic byte and UTF-8 conversions locally when the Perl
+headers lack SvPVbyte_nomg or SvPVutf8_nomg.  These wrappers are absent
+on the supported minimum Perl 5.24, and ppport.h does not supply them.
+Without replacements, the XS library builds with unresolved symbols
+and cannot load.
+
+Use the older downgrade or no-magic upgrade operation, then read the
+converted buffer with SvPV_nomg.  Copy read-only values and references
+before changing their encoding, matching the native wrappers.  Keep
+magic fetching with the existing callers so tied seeds are fetched once.
+Newer Perls retain their native macros.
+
+Add raw-seed checks for successful downgrade of characters through 255
+and rejection of code points which cannot fit in a byte.  Existing tests
+cover Unicode string seeds, overloaded seeds, and tied inputs.
+
+All 10 RNG test files pass, with 370 tests per run, on Perl 5.24.4 in
+threaded, unthreaded, debugging, and threaded debugging builds.  The
+same suite passes on Perl 5.30.3 and 5.36.3.  Build logs are saved under
+tmp/rng-pv-compat in the workspace.
+```
+demerphq
+force-pushed
+the
+yves/caret_rng_hook
+branch
+from
+683838f to
+4833fd1
+Compare
+October 5, 2026 16:35
+fixup! dist/RNG: add random providers and distributions
+…
+ea0c2f4
+```
+Store the first PCG output in a high-word local before generating the
+second output.  C does not specify the operand evaluation order of the
+bitwise OR expression, so two calls in that expression could assign the
+first output to either half of the result.  Doing it this way makes the
+output well defined.
+```
+demerphq
+commented
+Oct 5, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+RNG design notes
+Except for secure initialization, srand() returns a seed that can be reused
+with the same RNG to reproduce the sequence. Ordinary string seeds are
+expanded into initialization material, while raw seeds use a separate explicit
+interface.
+Drand48 retains its historical compatibility rules. Other providers support
+larger seeds, with a native XS fast path for rand().
+The measured Drand48 cost is effectively unchanged from blead. In the sample
+workloads, generating the values adds less than 0.3% to the instruction count
+compared with reading precomputed values.
+Full RNG design notes and benchmarks
+RNG framework design notes
+This note records the constraints and design decisions behind this PR.
+Additional API documentation is in perlrng and the RNG::* modules. The
+framework defines provider interfaces and supplies implementations for
+generating random bytes.
+The framework includes an HMAC-SHA-256 provider based on the HMAC_DRBG
+mechanism described in NIST SP 800-90A. It is (obviously) not FIPS validated.
+Including it helps exercise the infra requirements for cryptographic providers
+and future integration with a reviewed cryptographic library.
+The golden rule for seeding
+Except for secure initialization, srand() must return something that can be
+fed back into srand() with the same provider to recreate the original
+sequence. This replay rule guides pretty much every decision about seeding,
+including argument conversion, state normalization, and return values.
+Secure initialization is the exception because returning a replayable seed
+would expose material which could reproduce the generator's state. It
+returns a redacted seed instead.
+Drand48 compatibility and historical behavior of srand()
+srand() has more historical irregularities than most Perl internals. Much of
+this dates from when Perl delegated random-number generation to the C library
+srand() and rand() functions, and used data and infra managed by Configure
+to do so. Perl has long used its own Drand48 implementation, but srand()
+retains conversion behavior inherited from earlier designs.
+The old conversion does not match normal Perl numeric conversion. It ignores
+a sign and a fractional part, does not support exponent notation, and produces
+a native UV. Only the low 32 bits initialize built-in Drand48. For example,
+srand(-1.234) historically means the same thing as srand(1).
+The new design confines this compatibility behavior to the two Drand48
+implementations. The built-in seed has 32 significant bits, while
+RNG::Drand48 extends the interface to 48 bits.
+A compatible decimal seed wider than the provider width warns.
+The provider retains the low 32 or 48 bits and returns that initializer.
+A string seed which uses the hash fallback returns the resulting initializer.
+RNG::Drand48 returns a decimal string when the initializer is too wide for
+the native UV, preserving its full value for replay.
+The masked return value and the warning when a seed exceeds the provider
+width are deliberate changes. For example, built-in srand(2**32) produces
+the same sequence as srand(0), but warns about narrowing the seed.
+Nonnumeric strings now use a hash fallback instead of becoming UV_MAX with
+an overflow warning.
+The initializer is not always the internal state. For seeds within 32 bits,
+Drand48 shifts the seed left by 16 bits and appends the fixed low bits
+0x330e.
+The historical true return for zero
+Before Perl 5.14, srand() always returned 1. On July 28, 2010, Karl
+Williamson's 8383299294
+changed it to return the seed so that programs could record an automatically
+chosen seed and reproduce a run. The commit noted that the previous return
+behavior was undocumented and that returning zero could break code relying
+on its truthiness.
+Later that day, Nicholas Clark's
+da1010ecc5
+made a zero seed return "0 but true". This was a deliberate compatibility
+decision, preserving the historical true return while making it numerically
+equal to zero without warnings. That commit added tests for all three
+properties. Both changes shipped in Perl 5.14.
+A zero seed retains the historical "0 but true" return when using the
+default RNG or RNG::Drand48. Both recognize that exact string as zero when
+it is passed back as a seed. Other RNGs treat it as ordinary string seed
+material and should not be expected to produce the same sequence as zero.
+Why we have a small integer parser
+grok_number() returns its integer result in native UV.
+It cannot represent a 48-bit value on a 32-bit Perl.
+It cannot reliably preserve the low bits and overflow diagnostic required by
+the compatibility rule when the input is wider than native UV.
+Changing current grok_number() would not help an extracted RNG
+distribution built against an older Perl.
+The Drand48 paths therefore use a narrow parser which returns U64. It
+accepts decimal digits with leading and trailing whitespace, an optional sign,
+and an optional fractional part. As described above, the sign and fractional
+part are ignored. It also accepts the exact string "0 but true" without a
+warning. Exponent notation, other non-decimal text, and decimal integers
+larger than U64 use the UTF-8 string-hash fallback.
+There are two small implementations, one in core and one in dist/RNG.
+Sharing a new core helper would either raise the distribution's minimum Perl
+version or require another compatibility shim. Matching tests cover the
+grammar and the U64 boundary in both layers.
+The code comments describe this special-purpose parser. The user documentation
+describes its compatibility behavior without exposing this implementation
+detail. Do not broaden its grammar without reconsidering the compatibility
+contract.
+String seeds and argument conversion
+Modern generators have different state sizes and initialization rules.
+Xoshiro uses a multiword state, and HMAC_DRBG accepts arbitrary seed
+material and derives its internal state. A machine integer is too small for
+many generator states. A string of sufficient length has more capacity for
+entropy and is independent of the host integer width.
+pp_srand distinguishes absent input, ordinary values, references, and
+RNG::SeedBase raw material. It normalizes an ordinary seed once, before
+provider dispatch, by stringifying it and representing it as UTF-8 octets.
+This gives 42 and "42" the same seed meaning and avoids making it depend
+on whether a scalar currently has integer, floating, or UTF-8 storage.
+Each provider is free to interpret the string. Drand48 uses the compatibility
+rules above. The other bundled providers hash ordinary string arguments to
+squeeze or stretch them into the required initialization size. Other providers
+are strongly encouraged to follow this approach.
+With the same provider, seeds with identical UTF-8 representations produce
+the same sequence regardless of the host integer width. Hashing also means
+that a tiny change in the seed should produce a significant change in the
+sequence, something that is not true of normal Drand48 seeding.
+The framework has two abstract base classes
+RNG::Provider and RNG::SeedBase define the two sides of the RNG API.
+Neither is a usable implementation on its own, just the Perl equivalent
+of an abstract base class.
+RNG::Provider defines a source of random data. A provider implements
+rand_bytes and srand, and can be installed in ${^RNG}.
+RNG::SeedBase defines a carrier for provider-specific raw seed material.
+A seed object implements is_redacted, bytes, and provider.
+The required base methods throw an exception if they aren't overridden.
+Core recognizes objects by inheritance from these base classes. It does
+not use similarly named methods as a duck-typed interface.
+The bundled generator classes are concrete RNG::Provider implementations.
+RNG::Seed::Raw is the normal concrete RNG::SeedBase implementation. A
+program may supply another subclass, but the provider may throw if it does
+not contain the information needed for initialization.
+Seed representations and return values
+An ordinary string seed is input to a provider's derivation process. Raw seed
+octets bypass that derivation and initialize the provider directly. Keeping
+these representations distinct avoids treating an ordinary string as raw
+state by accident.
+RNG::Seed->from_string creates ordinary string seed objects. They retain
+string seed expansion and do not implement RNG::SeedBase.
+RNG::Seed->from_bytes creates raw seed objects implementing RNG::SeedBase.
+The provider checks that raw material has exactly its required width.
+Raw material is never silently padded, truncated, or derived.
+Returning the original argument is less surprising to users. When an ordinary
+zero seed is passed to the non-Drand48 bundled RNGs, they return an RNG::Seed
+object which evaluates as true and stringifies to "0". Feeding that object
+back into srand() retains ordinary string seed expansion.
+Direct state initialization helps test the RNG against reference vectors and
+lets some providers use system entropy without hashing it first. Automatic
+large-state initialization can return an RNG::Seed containing generated
+material.
+Providers may adjust raw seed material to meet an algorithm's requirements.
+These adjustments must be idempotent, so applying them again leaves the
+normalized value unchanged. PCG MCG forces its state odd with seed | 1,
+and Xoshiro replaces an all-zero state with its documented valid state. The
+PCG LCG increment adjustment is described below.
+For secure automatic initialization, the redacted RNG::Seed records
+initialization and names the provider. Passing it to srand() throws instead
+of treating its serialized form as an ordinary string seed.
+Providers and the fast path
+The ordinary rand() path keeps the provider check in C and avoids Perl-level
+method lookup. Some XS providers offer a private native U01 callback and
+state pointer, which core may cache after validating the provider.
+U01 means a uniform value in the half-open interval [0,1). The native
+callback is an optimization, not a second provider interface. The cache is
+cleared before reseeding or replacing the provider.
+Provider callbacks can run arbitrary Perl, including changing ${^RNG}. The
+callback code keeps the provider alive, handles both kinds of Perl stack
+correctly, and refreshes SP after stack growth and callback execution. With
+PERL_RC_STACK enabled, it also handles the reference counts for arguments and
+results.
+Older XS code commonly uses Drand01() and seedDrand01(). They expand
+through Perl_drand48() and Perl_drand48_init().
+Those macros use the direct built-in Drand48 state when no provider is
+selected.
+They dispatch through the provider-aware helpers only when
+PL_rng_provider is non-null.
+This preserves the fast path for List::Util and other existing XS users,
+without changing their source code.
+PCG variants and arithmetic
+RNG::PCG currently exposes the extended XSH-RR 64/32 algorithm as its default.
+There are additional algorithms which each have their own class and XS
+callbacks:
+RNG::PCG::RXS_M_XS_64_64.
+RNG::PCG::XSL_RR_128_64_MCG.
+RNG::PCG::XSL_RR_128_64_LCG.
+The variant constructor option in RNG::PCG selects a subclass.
+The 128-bit variants use native unsigned __int128 arithmetic when the
+compiler advertises it with __SIZEOF_INT128__ == 16. Otherwise, they use a
+portable implementation built from 64-bit operations on two words.
+The XSL-RR 128/64 variants advance the state before producing output, matching
+PCG's reference implementation. RXS-M-XS 64/64 produces output from the old
+state. The tests check all three variants against PCG's published vectors,
+using raw initializers to separate the algorithm from our seed expansion.
+Ordinary seeds pass through the shared HMAC-SHA-256 seed expander with a
+separate domain label for each algorithm. The LCG variant derives 32 bytes,
+using 16 for the state and 16 for the stream increment. The low increment
+word is adjusted with | 1. Raw LCG seeds carry the same state and increment
+layout and receive the same idempotent adjustment.
+Keep core and distribution boundaries clear
+The built-in RNG is not a RNG::Provider. Core must not load the RNG
+distribution or create RNG::Seed objects to implement built-in rand() or
+srand(), because these must work in miniperl.
+dist/RNG supplies concrete providers, seed objects, and old-Perl shims.
+Minitest has no RNG extension or distribution library available.
+t/op/srand.t tests ordinary built-in behavior only.
+t/op/rng/contract.t tests the complete core/framework contract outside
+minitest.
+This keeps bootstrap testing small while retaining coverage of the real
+framework classes in normal core and extracted-distribution builds.
+Performance measurements
+The built-in path was measured against an unmodified blead build with the same
+unthreaded, non-debug configuration. Cachegrind reports raw instruction
+counts per workload iteration after subtracting startup and loop overhead.
+Lower is better. These numbers are from the latest compatible run on
+October 5, 2026.
+The local builds use GCC 13.3.0 with -O3, -fstack-protector-strong, and
+double-precision NV. The PCG128 providers use native 128-bit arithmetic in
+these builds. The local blead checkout is at
+c4d03d9396e2ddfe9ecf6e64b31b163698811c1d. The branch checkout is at
+9eb98c6500cf2a404b36f8a4e3dd06adeeec012d with additional uncommitted RNG,
+PCG, and rand() optimization changes. The saved profiles do not include a
+complete source snapshot. The provider tables below were refreshed after
+the XSL-RR output-order correction using the inline audit's current-code
+build.
+The comparison uses t/perf/rng-benchmarks with Porting/bench.pl.
+Instruction counts are not elapsed-time measurements and do not establish
+the same performance ordering on every compiler or platform.
+Workload
+blead instructions
+RNG branch instructions
+Difference
+rand()
+145
+142
+-3 (-2.1%)
+rand(LIMIT)
+183
+178
+-5 (-2.7%)
+List::Util::shuffle(1..100)
+26,352
+26,450
++98 (+0.4%)
+Selected providers have the following rand() instruction counts in the
+inline audit:
+Generator
+Instructions
+built-in branch
+142
+RNG::Drand48
+142
+RNG::Xoshiro
+157
+RNG::Wyrand
+166
+RNG::PCG
+173
+RNG::PCG::RXS_M_XS_64_64
+154
+RNG::PCG::XSL_RR_128_64_MCG
+153
+RNG::PCG::XSL_RR_128_64_LCG
+160
+RNG::HMAC_DRBG
+61,465
+The built-in Drand48 path and RNG::Drand48 have the same measured rand()
+cost. The provider uses the same one-state-transition U01 result, so it
+reproduces the built-in sequence for matching compatible seeds. In this
+rand() workload, PCG XSL-RR MCG has the lowest instruction count among the
+non-Drand48 providers. PCG RXS-M-XS has the lowest count among those providers
+in the 512-byte workload below.
+HMAC_DRBG has a much higher instruction count and serves a different purpose
+from the fast non-cryptographic generators.
+The 512-byte rand_bytes workload has no blead comparison because blead does
+not provide builtin::rand_bytes:
+Generator
+Instructions per 512-byte request
+built-in branch
+6,008
+RNG::Drand48
+7,791.1
+RNG::Xoshiro
+10,649.9
+RNG::Wyrand
+11,361.9
+RNG::PCG
+11,699.7
+RNG::PCG::RXS_M_XS_64_64
+10,493.3
+RNG::PCG::XSL_RR_128_64_MCG
+10,663.7
+RNG::PCG::XSL_RR_128_64_LCG
+10,791.7
+RNG::HMAC_DRBG
+372,362.0
+The benchmark suite also has sample workloads for 256, 1024, and 4096 values.
+Each builds an array, calculates rolling statistics, sorts the values,
+calculates quantiles, and stores the results in a hash. Matched fixed-input
+workloads show the additional cost of generating values instead of reading
+precomputed values. Each random-input pass is reseeded so that it sorts the
+same values as its fixed-input partner.
+For the branch's built-in Drand48 generator, the saved instruction counts are:
+Values
+Precomputed input
+rand() input
+Additional instructions
+Additional share
+256
+724,350
+726,420.5
+2,070.5
+0.285%
+1,024
+2,973,486
+2,981,784
+8,298
+0.278%
+4,096
+12,442,475.5
+12,475,270.5
+32,795
+0.263%
+The percentage is the additional count as a share of the rand() workload's
+total count. These figures measure the additional instruction cost relative
+to reading precomputed values. They do not isolate all instructions executed
+by the RNG or directly measure its share of runtime.
+Porting/bench.pl displays Inf for counts of at least one million, even when
+the underlying count is finite. The table above uses the finite values
+calculated from the saved counters.
+leonerd
+commented
+Oct 6, 2026
+Copy link
+Copy Markdown
+Contributor
+In the recent PSC meeting, we talked about what we think of this change. Overall there's still various questions and parts we're not sure about, but in order to make forward progress anyway, we found that what had been the original three commits seem fine. Those are just doing some small internal tidying up.
+PERL_RAND_SEED: document zero as automatic seeding
+config: expose the U64 unsigned decimal format
+util: extract portable entropy acquisition
+Additionally, we liked the idea of adding a new builtin::rand_bytes function that just returns some requested quantity of actually-random bytes from the entropy pool. It's small, neat, self-contained and easily implemented. It doesn't have any backward-compatibility problems to it, so that seems fine. Having a new core-provided source of actual entropy would be nice.
+If you could arrange for these bits to be done separately - likely in a separate PR for now - that would tidy up most of the less contentious parts out of this one, and then we can come back to considering new RNG behaviours, new modules, this new variable, and all the other parts presented here.
+leonerd
+commented
+Oct 6, 2026
+Copy link
+Copy Markdown
+Contributor
+RNG design notes
+...
+This comment seems overly long and at least to me looks very LLM-generated. I'll be honest I found it quite hard to read - it doesn't come across at all like @demerphq's usual writing style. I mostly skimmed it over without really taking it in.
+I'll remind you of our current policy, as written in AI_POLICY.md:
+Non-human interaction in the project is strictly prohibited. AI agents must not create issues or pull requests, post to the mailing list, or otherwise participate in any project communication channels.
+Non-human communication is disallowed. LLM-generated prose is grounds for dismissing a contribution out of hand, with the following exceptions:
+i. LLM-generated security analysis that has been verified by a qualified human prior to submission
+ii. LLM use for translation of human-written messages
+I do not believe this comment fits into either of these two exception categories.
+Aside from the specific neatenings and builtin addition we already called out above, this PR has the feel of a large amount of change for some purpose that hasn't been illustrated in a small summary. I for one feel we'd all benefit from a brief, human-written one-paragraph description of what problem you are attempting to solve with all of this.
+demerphq
+commented
+Oct 7, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+Bah. More of this divisive anti-AI nonsense.
+I wrote all of that except for the final performance report and analysis which was indeed generated by the AI from a collection of base data, and I don't see how anyone rational can complain about using software and AI in that way.
+As for the rest, nope, that is me. Sure I used AI to clean up my grammar and spelling, or otherwise edit paragraphs, but the information there is was chosen by me to be there, and the words used are 80%+ mine, the rest are edits or reformulations of words I came up with. So if you find it confusing it may be that I have been very close to the trees, and maybe I failed to describe the forest sufficiently. FWIW, after AI editing it shrunk quite a bit. Reading it yet another time now I see maybe one sentence I would remove before I posted it again, but given the doc size, I don't see the problem with that. I might gently remind you that your own writing style isn't to everyone's taste either, but the world is a nicer place when we find ways to look past these differences.
+FWIW, I really resent this "I smell AI so I didn't bother", attitude. I wrote that doc for a reason. There are a lot of design decisions that were made in the course of working on this. I responded to many different pieces of feedback from Tony, and the design notes contain more detailed explanations of nearly anything I think anyone might want to ask about the latest state of the PR. I went out of my way to explain my rationale multiple times way beyond what most PR's include.
+For instance, he raised a number of issues, like PERL_RC_STACK conformance, or performance questions, etc. So all of those questions are answered.
+Regarding the policy you mention, it was introduced without being ratified by the committer community, and has not been signed off by Larry. The committer community feedback was NOT broadly supportive, but the negative feedback was ignored. IMO it is not something Larry would sign off if he was asked. So please, just do the right thing and remove it and stop this divisiveness. Or hold a vote and prove that the committers support it. Or have Larry publicly say he is good with it. Until then I will continue to treat it as unratified dicta and not binding policy, and I will protest it every time you bring it up. Even though the governance rules don't spell it out I do not believe that the PSC was empowered to make that scale of decision on their own, and IMO a policy as divisive as this requires proper ratification by the committer community.
+FWIW, I think the AI policy is completely out of character with Larry. He spent his life trying to help people communicate. It just seems totally out of character for me that he would sign off on a policy that says that anything contributed using AI will be dismissed out of hand. Even if he was hostile to using AI, (which I doubt), I imagine he would have found a much more balanced and reasonable policy that would have preempted this discussion we are having now.
+Contributions should be on their individual merits. Full stop.
+guest20
+commented
+Oct 8, 2026
+Copy link
+Copy Markdown
+Bah. More of this divisive anti-AI nonsense.
+[548 words 2,956 characters]
+Contributions should be on their individual merits. Full stop.
+People are giving you feedback on your PR and are reading your documents. You just said you wrote the most recent text because you got a number of notes and questions on the software in the PR. Now you're upset that you got more feedback about the writing style and information density of another bit of prose you posted on the PR.
+This not what being dismissed out of hand looks like. This is what people engaging with the things you're doing looks like.
+github-actions
+Bot
+added
+the
+hasConflicts
+label
+Oct 18, 2026
+craigberry
+reviewed
+Oct 18, 2026
+View reviewed changes
+Comment thread
+util.c
+return seed;
+}
+#endif
+craigberry
+Oct 18, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+I think I just created a merge conflict here with dc679c9. Sorry about that. The good news is that sys$get_entropy works very much like the POSIX getentropy and could be put in a loop the same way you're doing for that. Let me know if I can help with anything
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+hasConflicts
+7 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,180 @@
+# BCC/FCC Ray Tracing
+
+Also called: BCC/FCC Ray Tracing and Object Representation, Ray-tracing in BCC and FCC grids, Smooth Object Surface representation
+
+## Overview
+BCC/FCC Ray Tracing is a volume rendering and object representation method that samples 3-D data on Body Centered Cubic (BCC) or Face Centered Cubic (FCC) grids instead of standard cubic grids [S1]. It solves topological defects inherent in cubic grids—specifically, the possibility of a ray passing through an object surface without intersecting any voxel—by utilizing grids with superior topological properties that guarantee closed surfaces and robust discrete curve/surface definitions [S1]. Unlike cubic grid methods such as [3D Bresenham Voxel Tracing](3949-3d-bresenham-voxel-tracing.md) or [Integer-based Amanatides and Woo Voxel Traversal](4246-integer-based-amanatides-and-woo-voxel-traversal.md), this approach defines voxels as Voronoi cells (Truncated Octahedra for BCC, Rhombic Dodecahedra for FCC) and traces rays by minimizing the cross-sectional area of the ray beam within these polyhedral structures [S1].
+
+## How it works
+
+### Inputs and Outputs
+**Inputs:**
+1. **Volume Data:** A 3-D signal sampled on a BCC or FCC grid, typically resampled from a standard cubic grid using a 3-D cubic B-Spline interpolator [S1].
+2. **Smooth Surface Coefficients:** A signed integer coefficient for each voxel in the transition region, representing the sub-voxel distance between the voxel center and the object boundary [S1]. Values range from -128 to 127, where positive values indicate interior voxels and negative values indicate exterior voxels [S1].
+3. **Ray Definition:** An origin point $P$ and a direction vector $\vec{PQ}$ [S1].
+
+**Outputs:**
+1. **Rendered Image:** A 2-D pixel array with lighting and antialiasing [S1].
+2. **Traced Ray Path:** A sequence of connected voxels representing the light beam [S1].
+
+### Data Structures
+
+**1. Grid Topology**
+The grid is defined by its Voronoi cells [S1]. Connectivity is strictly defined by common faces:
+* Two voxels are connected if they share a common face [S1].
+* Two faces are connected if they share a common edge [S1].
+* Two edges are connected if they share a common vertex [S1].
+* Intersection at lower dimensions ($m < n-1$) does not imply connectivity [S1].
+
+**2. Smooth Object Surface Representation**
+* **Object Surface:** The set of faces between object voxels and non-object voxels [S1]. Due to grid properties, every face in the object surface has exactly one face connected to each of its edges, ensuring the surface is always closed [S1].
+* **Smooth Surface Coefficients:** A signed integer $c \in [-128, 127]$ assigned to each voxel in contact with the object surface [S1]. These coefficients are computed using an edge detector operator based on geometric moments to estimate sub-voxel distances [S1].
+
+**3. Directional Regions**
+All possible ray directions are partitioned into regions corresponding to the yard directions perpendicular to the faces of the Voronoi polyhedron [S1].
+* **BCC Grid:** 24 directional regions [S1].
+* **FCC Grid:** 20 directional regions [S1].
+* Each region is defined by a basis of three vectors $\{\vec{A}, \vec{B}, \vec{C}\}$ corresponding to faces of the Voronoi polyhedron sharing a common vertex [S1]. These vectors span a triangular pyramid with its vertex at the polyhedron center [S1].
+
+### Algorithm Steps
+
+**Step 1: Compute Smooth Surface Coefficients**
+Apply an edge detector operator based on geometric moments to the volume data [S1]. This estimates the sub-voxel distance between the voxel center and the object boundary [S1].
+* Result: Signed integer coefficients $c \in [-128, 127]$ [S1].
+* $c > 0$: Interior voxel [S1].
+* $c < 0$: Exterior voxel [S1].
+
+**Step 2: Determine Directional Region**
+Given the ray direction vector $\vec{d}$, identify which of the 24 (BCC) or 20 (FCC) directional regions it falls into [S1]. This is analogous to finding the octant in Bresenham's algorithm but uses the yard directions perpendicular to the Voronoi faces [S1].
+
+**Step 3: Decompose Ray Vector**
+Decompose the line vector $\vec{PQ}$ components $\{n_a, n_b, n_c\}$ in the basis $\{\vec{A}, \vec{B}, \vec{C}\}$ of the identified region [S1].
+* Geometrically, this means that to go from $P$ to $Q$, $n_a$ steps must be performed in the $\vec{A}$ direction, $n_b$ in $\vec{B}$, and $n_c$ in $\vec{C}$ [S1].
+
+**Step 4: Trace the Ray (Minimize Rhombus Area)**
+Trace the line by advancing from one voxel to the next, minimizing the area of the rhombus $R$ (the rhombic base of the prism containing all line beam points) [S1].
+1. Project the grid points onto a plane $N$ orthogonal to the line $\vec{PQ}$ [S1]. The projection consists of a set of 2-D grids shifted by a constant vector [S1].
+2. At each step, select the next voxel such that the area of the rhombus $R$ formed by the current and next beam points is minimized [S1].
+3. Advance using only integer sums [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def bcc_fcc_ray_tracing(origin, direction, basis_vectors, coefficients, bounds):
+    """
+    Traces a ray through a BCC or FCC grid.
+    
+    Args:
+        origin: tuple (x, y, z) representing point P
+        direction: tuple (dx, dy, dz) representing vector PQ
+        basis_vectors: list of 3 tuples [(Ax, Ay, Az), (Bx, By, Bz), (Cx, Cy, Cz)]
+        coefficients: 3D array of signed integers (-128 to 127)
+        bounds: tuple ((min_x, max_x), (min_y, max_y), (min_z, max_z))
+        
+    Returns:
+        List of voxel indices traversed by the ray
+    """
+    A, B, C = basis_vectors
+    
+    # Step 2 & 3: Decompose direction into basis coefficients
+    # Solve direction = na*A + nb*B + nc*C
+    det = A[0]*(B[1]*C[2] - B[2]*C[1]) - A[1]*(B[0]*C[2] - B[2]*C[0]) + A[2]*(B[0]*C[1] - B[1]*C[0])
+    na = (direction[0]*(B[1]*C[2] - B[2]*C[1]) - direction[1]*(B[0]*C[2] - B[2]*C[0]) + direction[2]*(B[0]*C[1] - B[1]*C[0])) / det
+    nb = (A[0]*(direction[1]*C[2] - direction[2]*C[1]) - A[1]*(direction[0]*C[2] - direction[2]*C[0]) + A[2]*(direction[0]*C[1] - direction[1]*C[0])) / det
+    nc = (A[0]*(B[1]*direction[2] - B[2]*direction[1]) - A[1]*(B[0]*direction[2] - B[2]*direction[0]) + A[2]*(B[0]*direction[1] - B[1]*direction[0])) / det
+    
+    # Map origin to initial voxel index
+    current_voxel = (int(origin[0]), int(origin[1]), int(origin[2]))
+    path = [current_voxel]
+    
+    # Step 4: Trace the ray using integer sums
+    # Track position in basis coordinate system
+    x, y, z = 0, 0, 0
+    max_steps = int(math.ceil(math.sqrt(sum(c**2 for c in direction))))
+    
+    for _ in range(max_steps):
+        best_voxel = None
+        min_area = float('inf')
+        
+        # Evaluate candidates in basis directions
+        candidates = [
+            (x + 1, y, z, A),
+            (x, y + 1, z, B),
+            (x, y, z + 1, C)
+        ]
+        
+        for nx, ny, nz, step_vec in candidates:
+            # Calculate rhombus area R for the step
+            # The rhombus R is the rhombic base of the prism containing all line beam points.
+            # Exact geometric formula for area minimization is not given in the sources. [G]
+            area = 0.0
+            
+            next_voxel = (current_voxel[0] + step_vec[0], current_voxel[1] + step_vec[1], current_voxel[2] + step_vec[2])
+            if bounds[0][0] <= next_voxel[0] <= bounds[0][1] and bounds[1][0] <= next_voxel[1] <= bounds[1][1] and bounds[2][0] <= next_voxel[2] <= bounds[2][1]:
+                if area < min_area:
+                    min_area = area
+                    best_voxel = next_voxel
+                    x, y, z = nx, ny, nz
+        
+        if best_voxel is None:
+            break
+            
+        current_voxel = best_voxel
+        path.append(current_voxel)
+        
+        if not (bounds[0][0] <= current_voxel[0] <= bounds[0][1] and bounds[1][0] <= current_voxel[1] <= bounds[1][1] and bounds[2][0] <= current_voxel[2] <= bounds[2][1]):
+            break
+            
+    return path
+```
+
+### Parameters and Edge Cases
+* **Coefficient Range:** Signed integers from -128 to 127 [S1].
+* **Directional Regions:** 24 for BCC, 20 for FCC [S1].
+* **Precision:** The algorithm uses only integer sums for advancement, avoiding floating-point accumulation errors during traversal [S1].
+* **Degenerate Input:** The method assumes the ray direction is not parallel to any basis vector face normal, which would make the decomposition ambiguous [S1]. The partitioning into regions handles this by assigning directions to specific pyramids [S1].
+* **Resampling:** The input volume must be resampled to the BCC/FCC grid [S1]. The source uses a 3-D cubic B-Spline interpolator, which duplicates the number of voxels compared to the original cubic grid [S1].
+
+## Operating characteristics
+
+**Time and Memory Complexity:**
+* **Time:** The ray tracing step uses only integer sums, making it computationally efficient, similar to Bresenham's algorithm [S1].
+* **Memory:** The method reduces information by representing objects only by their external surfaces and smooth coefficients, potentially reducing memory usage compared to full volume storage [S1].
+
+**Measured Performance:**
+* **Hardware:** PC-Pentium 166MHz, Linux 2.0.18 [S1].
+* **Scene:** Hip joint CT reconstruction, 100x100x100 voxels, resampled to BCC [S1].
+* **Output:** 256x256 pixels [S1].
+* **Time:** 3 seconds for ray tracing, lighting (one light source), and antialiasing [S1].
+
+**Strengths and Limitations:**
+* **Strengths:** Eliminates topological problems (rays passing through surfaces without touching) common in cubic grids [S1]. Allows robust definition of discrete curves and surfaces [S1]. Enables sub-voxel deformation by changing coefficients [S1]. Reduces aliasing effects [S1].
+* **Limitations:** Requires resampling from cubic to BCC/FCC, which increases voxel count (duplicates voxels) [S1].
+
+**When to Use:**
+* When topological correctness is critical (e.g., medical imaging where missing a surface is unacceptable) [S1].
+* When sub-voxel surface representation is needed for smooth rendering or collision detection [S1].
+* When computational resources allow for the overhead of resampling and basis decomposition [S1].
+
+**When Not to Use:**
+* For simple scenes where cubic grid topological defects are negligible or handled by thicker rays [S1].
+* When real-time performance on very low-end hardware is required and the overhead of BCC/FCC processing is prohibitive [S1].
+
+## Background
+
+**Origin:**
+The method was introduced by Luis Ibáñez, Chafia Hamitouche, and Christian Roux from ENST-Bretagne, France [S1].
+
+**History and Development:**
+The paper describes a ray-tracing and object description method for objects sampled in BCC and FCC grids, which are well-known in crystallography [S1]. The use of these grids is motivated by their ability to reduce the density of samples needed to represent a signal without information loss (satisfying the Shannon theorem optimally with BCC) and their better topological properties compared to the cubic grid [S1].
+
+**Usage:**
+The method is used as a ray casting engine in a direct volume rendering program for medical imaging, specifically for hip joint CT reconstruction data [S1].
+
+## Sources
+
+[S1] Ray-tracing and 3-D objects representation in the BCC and FCC grids, https://doi.org/10.1007/bfb0024844, fetched 2026-10-24

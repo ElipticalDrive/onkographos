@@ -1,0 +1,410 @@
+--- v002.md
++++ v003.md
+@@ -4,21 +4,23 @@
+ 
+ ## Overview
+-Voxel Meshing with Smooth Lighting is a surface extraction algorithm that generates a single quad mesh for exposed voxel faces within a chunk, populating vertex buffers with position, normal, UVs, and dual-lighting colors (sun and block light) [S1, unofficial]. It distinguishes itself from flat lighting methods by sampling eight neighboring voxels per face to compute smooth lighting gradients, reducing the harsh visual artifacts typical of blocky terrain [S1, unofficial]. This method builds on [Voxel Face Mesh Generation](4212-voxel-face-mesh-generation.md) by extending the vertex data structure to include per-vertex lighting values derived from neighbor samples [S1, unofficial].
++Voxel Meshing with Smooth Lighting is a surface extraction algorithm that generates a single quad mesh for exposed voxel faces within a chunk, populating vertex buffers with position, normal, texture coordinates, and dual-lighting colors (sun and block light) [S1, unofficial]. It distinguishes itself from flat lighting methods by sampling eight neighboring voxels per face to compute smooth vertex lighting transitions, while simultaneously handling opaque and alpha (transparent) voxels through separate index buffers [S1, unofficial]. This method builds on [Voxel Face Mesh Generation](4212-voxel-face-mesh-generation.md) by adding the complexity of neighbor-based light interpolation and boundary chunk data resolution.
+ 
+ ## How it works
+-**Inputs and Outputs**
+-The method processes a voxel chunk defined by dimensions `WIDTH`, `HEIGHT`, and `DEPTH` [S1, unofficial].
++**Inputs and Outputs:**
++The algorithm runs as a Burst-compiled job (`VisualMeshingJob`) [S1, unofficial].
+ *   **Inputs:**
+-    *   `Voxels`: `NativeArray<VoxelData>` containing voxel IDs and flags.
+-    *   `SunLight`, `BlockLight`: `NativeArray<VoxelColor>` storing lighting values for each voxel.
+-    *   `TextureRects`: `NativeArray<VoxelTextureRects>` indexed by `voxelId - 1`, mapping voxel types to texture atlas coordinates.
+-    *   `NeighborData`: Arrays for `NeighborNorthSunLight`, `NeighborEastSunLight`, etc., and `NeighborFlags` indicating valid adjacent chunks [S1, unofficial].
++    *   `Voxels`: `NativeArray<VoxelData>` containing voxel ID, flags, and color data.
++    *   `SunLight`, `BlockLight`: `NativeArray<VoxelColor>` for direct voxel lighting.
++    *   `TextureRects`: `NativeArray<VoxelTextureRects>`, indexed by `voxelId - 1`, mapping voxel types to texture atlas UV rectangles.
++    *   `NeighborData`: Arrays for `NeighborNorthSunLight/BlockLight`, `NeighborEastSunLight/BlockLight`, etc., providing lighting data for adjacent chunks [S1, unofficial].
++    *   `NeighborFlags`: `NeighborDataFlags` enum indicating which adjacent chunks have valid data (North, East, South, West) [S1, unofficial].
+     *   `UseSmoothLighting`: Boolean flag enabling/disabling the 8-neighbor sampling logic [S1, unofficial].
++    *   Precomputed Tables: `FaceVerticesTable` (24 `float3`s), `FaceNormalsTable` (6 `float3`s), `NeighborOffsetsTable` (6 `int3`s), `LightNeighborOffsetsTable` (48 `int3`s) [S1, unofficial].
+ *   **Outputs:**
+-    *   `Vertices`: `NativeList<VertexNative>` containing vertex attributes.
+-    *   `OpaqueIndices`: `NativeList<uint>` for opaque geometry.
+-    *   `AlphaIndices`: `NativeList<uint>` for transparent geometry.
+-
+-**Data Structures**
++    *   `Vertices`: `NativeList<VertexNative>` containing position, normal, UV, sun light, block light, and tile repeat data [S1, unofficial].
++    *   `OpaqueIndices`: `NativeList<uint>` for opaque faces.
++    *   `AlphaIndices`: `NativeList<uint>` for transparent faces.
++
++**Data Structures:**
+ *   `VoxelTextureRects`: Sequential struct with fields `North`, `East`, `South`, `West`, `Top`, `Bottom` (all `float4`). Each `float4` stores `(x, y, width, height)` for the texture atlas. Access via `GetFace(faceIndex)` [S1, unofficial].
+ *   `VertexNative`: Sequential struct with fields:
+@@ -28,135 +30,255 @@
+     *   `SunLight`: `uint` (packed `Color32`: `R | (G << 8) | (B << 16) | (A << 24)`)
+     *   `BlockLight`: `uint` (packed `Color32`: `R | (G << 8) | (B << 16) | (A << 24)`)
+-    *   `TileRepeat`: `float2` [S1, unofficial]
+-*   `FaceVerticesTable`: Flat array of 24 `float3`s (6 faces × 4 vertices). Local positions relative to voxel origin.
+-    *   Face 0 (North +Z): `(1,0,1), (1,1,1), (0,1,1), (0,0,1)`
+-    *   Face 1 (East +X): `(1,0,0), (1,1,0), (1,1,1), (1,0,1)`
+-    *   Face 2 (South -Z): `(0,0,0), (0,1,0), (1,1,0), (1,0,0)`
+-    *   Face 3 (West -X): `(0,0,1), (0,1,1), (0,1,0), (0,0,0)`
+-    *   Face 4 (Top +Y): `(0,1,0), (0,1,1), (1,1,1), (1,1,0)`
+-    *   Face 5 (Bottom -Y): `(0,0,1), (0,0,0), (1,0,0), (1,0,1)` [S1, unofficial]
+-*   `FaceNormalsTable`: `[0,0,1], [1,0,0], [0,0,-1], [-1,0,0], [0,1,0], [0,-1,0]` [S1, unofficial]
+-*   `NeighborOffsetsTable`: `[0,0,1], [1,0,0], [0,0,-1], [-1,0,0], [0,1,0], [0,-1,0]` [S1, unofficial]
+-*   `LightNeighborOffsetsTable`: Flat array of 48 `int3`s (6 faces × 8 samples). Indexed as `face * 8 + sample`.
+-    *   Face 0 (North): `(0,1,0), (-1,1,0), (-1,0,0), (-1,-1,0), (0,-1,0), (1,-1,0), (1,0,0), (1,1,0)`
+-    *   Face 1 (East): `(0,1,0), (0,1,1), (0,0,1), (0,-1,1), (0,-1,0), (0,-1,-1), (0,0,-1), (0,1,-1)`
+-    *   Face 2 (South): `(0,1,0), (1,1,0), (1,0,0), (1,-1,0), (0,-1,0), (-1,-1,0), (-1,0,0), (-1,1,0)`
+-    *   Face 3 (West): `(0,1,0), (0,1,-1), (0,0,-1), (0,-1,-1), (0,-1,0), (0,-1,1), (0,0,1), (0,1,1)`
+-    *   Face 4 (Top): `(0,0,1), (1,0,1), (1,0,0), (1,0,-1), (0,0,-1), (-1,0,-1), (-1,0,0), (-1,0,1)`
+-    *   Face 5 (Bottom): `(0,0,-1), (1,0,-1), (1,0,0), (1,0,1), (0,0,1), (-1,0,1), (-1,0,0), (-1,0,-1)` [S1, unofficial]
+-
+-**Parameters**
+-*   `WIDTH`: 16 [S1, unofficial]
+-*   `HEIGHT`: 256 [S1, unofficial]
+-*   `DEPTH`: 16 [S1, unofficial]
+-
+-**Algorithm Steps**
+-1.  Initialize output lists: `Vertices`, `OpaqueIndices`, `AlphaIndices`.
+-2.  Iterate `z` from 0 to `DEPTH-1`, `y` from 0 to `HEIGHT-1`, `x` from 0 to `WIDTH-1`.
+-3.  Calculate `voxelIdx = x + WIDTH * (y + HEIGHT * z)`.
+-4.  Retrieve `voxel = Voxels[voxelIdx]`. If `voxel.Id == 0` (air), continue.
+-5.  Set `voxelPos = int3(x, y, z)`.
+-6.  Iterate `face` from 0 to 5.
+-7.  Call `ProcessFace(voxelPos, voxel, face)`.
+-
+-**ProcessFace(voxelPos, voxel, face)**
+-1.  Calculate `neighborOffset = NeighborOffsetsTable[face]`.
+-2.  Calculate `neighborPos = voxelPos + neighborOffset`.
+-3.  Determine `neighbor` and lighting:
++    *   `TileRepeat`: `float2` [S1, unofficial].
++*   `MeshConstants`: `WIDTH=16`, `HEIGHT=256`, `DEPTH=16` [S1, unofficial].
++*   `FaceVerticesTable`: Flat array of 24 `float3`s. Face 0 (North +Z): `(1,0,1), (1,1,1), (0,1,1), (0,0,1)`. Face 1 (East +X): `(1,0,0), (1,1,0), (1,1,1), (1,0,1)`. Face 2 (South -Z): `(0,0,0), (0,1,0), (1,1,0), (1,0,0)`. Face 3 (West -X): `(0,0,1), (0,1,1), (0,1,0), (0,0,0)`. Face 4 (Top +Y): `(0,1,0), (0,1,1), (1,1,1), (1,1,0)`. Face 5 (Bottom -Y): `(0,0,1), (0,0,0), (1,0,0), (1,0,1)` [S1, unofficial].
++*   `FaceNormalsTable`: `[0,0,1], [1,0,0], [0,0,-1], [-1,0,0], [0,1,0], [0,-1,0]` [S1, unofficial].
++*   `NeighborOffsetsTable`: `[0,0,1], [1,0,0], [0,0,-1], [-1,0,0], [0,1,0], [0,-1,0]` [S1, unofficial].
++*   `LightNeighborOffsetsTable`: Flat array of 48 `int3`s. Indexed as `face * 8 + sample`.
++    *   Face 0 (North): `(0,1,0), (-1,1,0), (-1,0,0), (-1,-1,0), (0,-1,0), (1,-1,0), (1,0,0), (1,1,0)`.
++    *   Face 1 (East): `(0,1,0), (0,1,1), (0,0,1), (0,-1,1), (0,-1,0), (0,-1,-1), (0,0,-1), (0,1,-1)`.
++    *   Face 2 (South): `(0,1,0), (1,1,0), (1,0,0), (1,-1,0), (0,-1,0), (-1,-1,0), (-1,0,0), (-1,1,0)`.
++    *   Face 3 (West): `(0,1,0), (0,1,-1), (0,0,-1), (0,-1,-1), (0,-1,0), (0,-1,1), (0,0,1), (0,1,1)`.
++    *   Face 4 (Top): `(0,0,1), (1,0,1), (1,0,0), (1,0,-1), (0,0,-1), (-1,0,-1), (-1,0,0), (-1,0,1)`.
++    *   Face 5 (Bottom): `(0,0,-1), (1,0,-1), (1,0,0), (1,0,1), (0,0,1), (-1,0,1), (-1,0,0), (-1,0,-1)` [S1, unofficial].
++
++**Algorithm Steps:**
++
++1.  **Initialization:** Clear `Vertices`, `OpaqueIndices`, and `AlphaIndices` lists.
++2.  **Voxel Loop:** Iterate `z` from `0` to `DEPTH-1`, `y` from `0` to `HEIGHT-1`, `x` from `0` to `WIDTH-1`.
++    *   Calculate `voxelIdx = x + WIDTH * (y + HEIGHT * z)`.
++    *   Retrieve `voxel = Voxels[voxelIdx]`.
++    *   If `voxel.Id == 0` (air), continue.
++    *   Set `voxelPos = int3(x, y, z)`.
++3.  **Face Processing:** Iterate `face` from `0` to `5`. Call `ProcessFace(voxelPos, voxel, face)`.
++
++**ProcessFace(voxelPos, voxel, face):**
++1.  **Neighbor Determination:**
++    *   Calculate `neighborPos = voxelPos + NeighborOffsetsTable[face]`.
+     *   If `InBounds(neighborPos)`:
+-        *   `neighborIdx = VoxelIndex(neighborPos)`
+-        *   `neighbor = Voxels[neighborIdx]`
+-        *   `neighborSun = SunLight[neighborIdx]`
+-        *   `neighborBlock = BlockLight[neighborIdx]`
+-    *   Else:
+-        *   Check `NeighborFlags` for the corresponding direction (North/East/South/West).
+-        *   If flag is set and wrapped position is valid in neighbor chunk, sample from neighbor chunk arrays.
+-        *   Else, clamp `neighborPos` to current chunk bounds and sample from current chunk border.
+-        *   Set `neighbor = VoxelData.Empty()` if no data available.
+-4.  **Skip Conditions:**
++        *   `neighborIdx = VoxelIndex(neighborPos)`.
++        *   `neighbor = Voxels[neighborIdx]`.
++        *   `neighborSun = SunLight[neighborIdx]`.
++        *   `neighborBlock = BlockLight[neighborIdx]`.
++    *   Else (out of bounds):
++        *   Set `neighbor = VoxelData.Empty()`.
++        *   Call `SampleLight(neighborPos, out neighborSun, out neighborBlock)` using `NeighborData` and `NeighborFlags` [S1, unofficial].
++2.  **Visibility Culling:**
+     *   If `neighbor.Id != 0` AND `(neighbor.Flags & VoxelFlags.AlphaRender) == 0`, return (face is occluded by opaque neighbor).
+     *   If `voxel.Id == neighbor.Id`, return (face is internal to same block type).
+-5.  Retrieve texture rectangle: `texRects = TextureRects[(int)voxel.Id - 1]`.
+-6.  Get `rect = texRects.GetFace(face)`.
+-7.  Calculate UVs for quad vertices: `uv0` (bottom-left), `uv1` (top-left), `uv2` (top-right), `uv3` (bottom-right) based on `rect` [S1, unofficial].
+-8.  Determine flags:
+-    *   `normal = FaceNormalsTable[face]`
+-    *   `isAlpha = (voxel.Flags & VoxelFlags.AlphaRender) != 0`
+-    *   `isLightSource = (voxel.Flags & VoxelFlags.LightSource) != 0`
+-9.  **Calculate Vertex Lighting:**
++3.  **UV Calculation:**
++    *   Retrieve `texRects = TextureRects[(int)voxel.Id - 1]`.
++    *   `rect = texRects.GetFace(face)`.
++    *   Calculate UVs: `uv0` (bottom-left), `uv1` (top-left), `uv2` (top-right), `uv3` (bottom-right) based on `rect` [S1, unofficial].
++4.  **Flags and Normal:**
++    *   `normal = FaceNormalsTable[face]`.
++    *   `isAlpha = (voxel.Flags & VoxelFlags.AlphaRender) != 0`.
++    *   `isLightSource = (voxel.Flags & VoxelFlags.LightSource) != 0`.
++5.  **Lighting Calculation:**
+     *   If `UseSmoothLighting` is true:
+-        *   Call `CalculateSmoothLighting(neighborPos, face)` to get `sunLight[0..3]` and `blockLight[0..3]`.
++        *   Call `CalculateSmoothLighting(neighborPos, face, out sunLight0..3, out blockLight0..3)`.
+     *   Else (Flat Lighting):
+-        *   `flatSun = PackColor(neighborSun)`
+-        *   `flatBlock = isLightSource ? PackColor(voxel.ColorData) : PackColor(neighborBlock)`
+-        *   Assign `flatSun`/`flatBlock` to all 4 vertices.
+-10. **Override Light Source:** If `isLightSource`, set all `blockLight[0..3]` to `PackColor(voxel.ColorData)` [S1, unofficial].
+-11. **Add Vertices:**
+-    *   For `v` from 0 to 3:
+-        *   `localPos = FaceVerticesTable[face * 4 + v]`
+-        *   `worldPos = voxelPos + localPos`
+-        *   `uv = uv[v]`
+-        *   `sun = sunLight[v]`
+-        *   `block = blockLight[v]`
+-        *   Add `VertexNative(worldPos, normal, uv, sun, block)` to `Vertices`.
+-12. **Add Indices:**
+-    *   `vertexBase = Vertices.Length - 4`
+-    *   Append indices: `vertexBase, vertexBase+1, vertexBase+2, vertexBase, vertexBase+2, vertexBase+3` to `AlphaIndices` if `isAlpha`, else `OpaqueIndices` [S1, unofficial].
+-
+-**CalculateSmoothLighting(neighborPos, face)**
+-1.  Get `centerSun`, `centerBlock` by calling `SampleLight(neighborPos)` [S1, unofficial].
+-2.  Initialize `sunSamples[8]`, `blockSamples[8]`.
+-3.  For `i` from 0 to 7:
+-    *   `offset = LightNeighborOffsetsTable[face * 8 + i]`
+-    *   `samplePos = neighborPos + offset`
+-    *   `sunSamples[i], blockSamples[i] = SampleLight(samplePos)`
+-4.  Calculate per-vertex lighting by averaging 4 samples:
+-    *   `sunLight[0] = AverageLight(centerSun, sunSamples[4], sunSamples[5], sunSamples[6], sunSamples[7])`
+-    *   `sunLight[1] = AverageLight(centerSun, sunSamples[6], sunSamples[7], sunSamples[0], sunSamples[1])`
+-    *   `sunLight[2] = AverageLight(centerSun, sunSamples[0], sunSamples[1], sunSamples[2], sunSamples[3])`
+-    *   `sunLight[3] = AverageLight(centerSun, sunSamples[2], sunSamples[3], sunSamples[4], sunSamples[5])`
+-    *   (Same logic for `blockLight`) [S1, unofficial]
+-5.  Return `sunLight[0..3]`, `blockLight[0..3]`.
+-
+-**AverageLight(center, s0, s1, s2, s3)**
+-1.  Decompose `center`, `s0`, `s1`, `s2`, `s3` into RGB components.
+-2.  `r = (center.r + s0.r + s1.r + s2.r + s3.r) / 5` (Note: Sources describe averaging 4 samples *plus* center, or 4 samples total. The text says "AverageLight(center, samples[4]...)" implying 5 inputs, but the formula description says "Decompose 4 VoxelColors... r = (cr + ar + br + ccr) >> 2". This implies 4 inputs. The list of samples passed has 4 items plus center. Let's follow the explicit formula: `r = (cr + ar + br + ccr) >> 2` where `cr` is center, `ar, br, ccr` are 3 samples? No, 4 samples are passed. The text says "AverageLight(center, samples[4], samples[5], samples[6])" for Vertex 0. That is 1 center + 3 samples = 4 inputs. The formula `>> 2` confirms 4 inputs. So Vertex 0 uses Center + 3 samples. Vertex 1 uses Center + 3 samples. Wait, the list `samples[4], samples[5], samples[6]` is 3 samples. Plus center is 4. The formula `>> 2` is division by 4. So it averages 4 values.
+-    *   Vertex 0: Center, s4, s5, s6.
+-    *   Vertex 1: Center, s6, s7, s0.
+-    *   Vertex 2: Center, s0, s1, s2.
+-    *   Vertex 3: Center, s2, s3, s4.
+-    *   Formula: `r = (center.r + s0.r + s1.r + s2.r) >> 2` [S1, unofficial].
+-3.  Pack back into `uint` using `PackColor(r, g, b, 255)` [S1, unofficial].
+-
+-**SampleLight(pos)**
+-1.  If `pos.y < 0` or `pos.y >= HEIGHT`, return `(0,0,0)` [S1, unofficial].
+-2.  If `InBounds(pos)`, return `SunLight[pos]`, `BlockLight[pos]`.
+-3.  If out of bounds in X/Z, check `NeighborFlags`. If valid neighbor chunk, sample from neighbor chunk arrays.
+-4.  Else, clamp `pos` to current chunk bounds and sample from current chunk border [S1, unofficial].
+-
+-**Helper Functions**
+-*   `VoxelIndex(x, y, z)`: `return x + WIDTH * (y + HEIGHT * z)` [S1, unofficial]
+-*   `InBounds(pos)`: `return pos.x >= 0 && pos.x < WIDTH && pos.y >= 0 && pos.y < HEIGHT && pos.z >= 0 && pos.z < DEPTH` [S1, unofficial]
+-*   `PackColor(r, g, b, a=255)`: `return (uint)(r | (g << 8) | (b << 16) | (a << 24))` [S1, unofficial]
++        *   `flatSun = VertexNative.PackColor(neighborSun)`.
++        *   `flatBlock = isLightSource ? VertexNative.PackColor(voxel.ColorData) : VertexNative.PackColor(neighborBlock)`.
++        *   Assign `flatSun` and `flatBlock` to all 4 vertices.
++    *   If `isLightSource`, override `blockLight0..3` to `VertexNative.PackColor(voxel.ColorData)` [S1, unofficial].
++6.  **Vertex Generation:**
++    *   For `v` from `0` to `3`:
++        *   `localPos = FaceVerticesTable[face * 4 + v]`.
++        *   `worldPos = voxelPos + localPos`.
++        *   Assign `UV` and `Light` values based on `v` index (`0->uv0/sun0/block0`, `1->uv1/sun1/block1`, etc.).
++        *   Add `VertexNative(worldPos, normal, uv, sunLight, blockLight)` to `Vertices`.
++7.  **Index Generation:**
++    *   `vertexBase = Vertices.Length - 4`.
++    *   Indices: `vertexBase, vertexBase+1, vertexBase+2, vertexBase, vertexBase+2, vertexBase+3`.
++    *   Append to `OpaqueIndices` if `!isAlpha`, else `AlphaIndices` [S1, unofficial].
++
++**CalculateSmoothLighting(neighborPos, face, out sunLight0..3, out blockLight0..3):**
++1.  Get `centerLight` via `SampleLight(neighborPos, out centerSun, out centerBlock)`.
++2.  Sample 8 neighbors using `LightNeighborOffsetsTable[face * 8 + i]` for `i` from `0` to `7`. Store results in `sunSamples` and `blockSamples` arrays [S1, unofficial].
++3.  Calculate vertex lighting by averaging 4 light samples per vertex:
++    *   Vertex 0: `AverageLight(center, samples[4], samples[5], samples[6])`.
++    *   Vertex 1: `AverageLight(center, samples[6], samples[7], samples[0])`.
++    *   Vertex 2: `AverageLight(center, samples[0], samples[1], samples[2])`.
++    *   Vertex 3: `AverageLight(center, samples[2], samples[3], samples[4])` [S1, unofficial].
++
++**AverageLight(c, s0, s1, s2, s3):**
++1.  Decompose `c, s0, s1, s2, s3` into RGB components.
++2.  Calculate average for each channel: `r = (cr + s0r + s1r + s2r + s3r) / 5`? No, sources specify: `r = (cr + ar + br + ccr) >> 2` for 4 samples? The source says "AverageLight function: Decompose 4 VoxelColors... r = (cr + ar + br + ccr) >> 2". This implies 4 inputs. However, the call passes `center` and 3 samples. Let's re-read carefully: "Vertex 0: AverageLight(center, samples[4], samples[5], samples[6])". That is 4 inputs. The formula `(cr + ar + br + ccr) >> 2` averages 4 values. So `AverageLight` takes 4 `VoxelColor` inputs.
++    *   Input 1: `center`
++    *   Input 2: `s0`
++    *   Input 3: `s1`
++    *   Input 4: `s2`
++    *   Result: `r = (center.r + s0.r + s1.r + s2.r) >> 2`. Pack back into `uint` using `VertexNative.PackColor(r, g, b, 255)` [S1, unofficial].
++
++**SampleLight(pos, out sun, out block):**
++1.  If `pos.y < 0` or `pos.y >= HEIGHT`, return black `(0,0,0)` for both [S1, unofficial].
++2.  If `InBounds(pos)`, sample directly from `SunLight` and `BlockLight` arrays.
++3.  If out of bounds in X/Z:
++    *   Check `NeighborFlags` for the corresponding direction (North/South/East/West).
++    *   If flag set and wrapped position is valid within neighbor chunk dimensions, sample from neighbor chunk arrays (`NeighborNorthSunLight`, etc.).
++    *   If no neighbor data, clamp position to current chunk bounds and sample from current chunk border [S1, unofficial].
++
++**Pseudocode:**
++
++```python
++def VisualMeshingJob(Voxels, SunLight, BlockLight, TextureRects, NeighborData, NeighborFlags, UseSmoothLighting):
++    Vertices = []
++    OpaqueIndices = []
++    AlphaIndices = []
++    
++    for z in range(DEPTH):
++        for y in range(HEIGHT):
++            for x in range(WIDTH):
++                voxelIdx = x + WIDTH * (y + HEIGHT * z)
++                voxel = Voxels[voxelIdx]
++                if voxel.Id == 0:
++                    continue
++                
++                voxelPos = int3(x, y, z)
++                
++                for face in range(6):
++                    ProcessFace(voxelPos, voxel, face, Voxels, SunLight, BlockLight, TextureRects, NeighborData, NeighborFlags, UseSmoothLighting, Vertices, OpaqueIndices, AlphaIndices)
++
++def ProcessFace(voxelPos, voxel, face, Voxels, SunLight, BlockLight, TextureRects, NeighborData, NeighborFlags, UseSmoothLighting, Vertices, OpaqueIndices, AlphaIndices):
++    neighborOffset = NeighborOffsetsTable[face]
++    neighborPos = voxelPos + neighborOffset
++    
++    if InBounds(neighborPos):
++        neighborIdx = VoxelIndex(neighborPos)
++        neighbor = Voxels[neighborIdx]
++        neighborSun = SunLight[neighborIdx]
++        neighborBlock = BlockLight[neighborIdx]
++    else:
++        neighbor = VoxelData.Empty()
++        neighborSun, neighborBlock = SampleLight(neighborPos, NeighborData, NeighborFlags)
++    
++    # Culling
++    if neighbor.Id != 0 and (neighbor.Flags & VoxelFlags.AlphaRender) == 0:
++        return
++    if voxel.Id == neighbor.Id:
++        return
++    
++    # UVs
++    texRects = TextureRects[voxel.Id - 1]
++    rect = texRects.GetFace(face)
++    uv0, uv1, uv2, uv3 = CalculateUVs(rect)
++    
++    # Flags
++    normal = FaceNormalsTable[face]
++    isAlpha = (voxel.Flags & VoxelFlags.AlphaRender) != 0
++    isLightSource = (voxel.Flags & VoxelFlags.LightSource) != 0
++    
++    # Lighting
++    if UseSmoothLighting:
++        sunLights = [None] * 4
++        blockLights = [None] * 4
++        CalculateSmoothLighting(neighborPos, face, sunLights, blockLights)
++    else:
++        flatSun = PackColor(neighborSun)
++        flatBlock = PackColor(voxel.ColorData) if isLightSource else PackColor(neighborBlock)
++        sunLights = [flatSun] * 4
++        blockLights = [flatBlock] * 4
++        
++    if isLightSource:
++        lightColor = PackColor(voxel.ColorData)
++        blockLights = [lightColor] * 4
++        
++    # Add Vertices
++    vertexBase = len(Vertices)
++    for v in range(4):
++        localPos = FaceVerticesTable[face * 4 + v]
++        worldPos = voxelPos + localPos
++        uv = [uv0, uv1, uv2, uv3][v]
++        sun = sunLights[v]
++        block = blockLights[v]
++        Vertices.append(VertexNative(worldPos, normal, uv, sun, block))
++        
++    # Add Indices
++    indices = [vertexBase, vertexBase+1, vertexBase+2, vertexBase, vertexBase+2, vertexBase+3]
++    if isAlpha:
++        AlphaIndices.extend(indices)
++    else:
++        OpaqueIndices.extend(indices)
++
++def CalculateSmoothLighting(neighborPos, face, out_sunLights, out_blockLights):
++    centerSun, centerBlock = SampleLight(neighborPos, NeighborData, NeighborFlags)
++    
++    sunSamples = []
++    blockSamples = []
++    for i in range(8):
++        offset = LightNeighborOffsetsTable[face * 8 + i]
++        samplePos = neighborPos + offset
++        sSun, sBlock = SampleLight(samplePos, NeighborData, NeighborFlags)
++        sunSamples.append(sSun)
++        blockSamples.append(sBlock)
++        
++    # Vertex 0: center, samples[4], samples[5], samples[6]
++    out_sunLights[0] = AverageLight(centerSun, sunSamples[4], sunSamples[5], sunSamples[6])
++    out_blockLights[0] = AverageLight(centerBlock, blockSamples[4], blockSamples[5], blockSamples[6])
++    
++    # Vertex 1: center, samples[6], samples[7], samples[0]
++    out_sunLights[1] = AverageLight(centerSun, sunSamples[6], sunSamples[7], sunSamples[0])
++    out_blockLights[1] = AverageLight(centerBlock, blockSamples[6], blockSamples[7], blockSamples[0])
++    
++    # Vertex 2: center, samples[0], samples[1], samples[2]
++    out_sunLights[2] = AverageLight(centerSun, sunSamples[0], sunSamples[1], sunSamples[2])
++    out_blockLights[2] = AverageLight(centerBlock, blockSamples[0], blockSamples[1], blockSamples[2])
++    
++    # Vertex 3: center, samples[2], samples[3], samples[4]
++    out_sunLights[3] = AverageLight(centerSun, sunSamples[2], sunSamples[3], sunSamples[4])
++    out_blockLights[3] = AverageLight(centerBlock, blockSamples[2], blockSamples[3], blockSamples[4])
++
++def AverageLight(c, s0, s1, s2):
++    r = (c.r + s0.r + s1.r + s2.r) >> 2
++    g = (c.g + s0.g + s1.g + s2.g) >> 2
++    b = (c.b + s0.b + s1.b + s2.b) >> 2
++    return PackColor(r, g, b, 255)
++
++def SampleLight(pos, NeighborData, NeighborFlags):
++    if pos.y < 0 or pos.y >= HEIGHT:
++        return (0, 0)
++    
++    if InBounds(pos):
++        idx = VoxelIndex(pos.x, pos.y, pos.z)
++        return (SunLight[idx], BlockLight[idx])
++    
++    # Out of bounds in X/Z
++    # Check NeighborFlags for North/South/East/West
++    # If flag set and wrapped position valid, sample from neighbor chunk arrays
++    # Else clamp to current chunk bounds and sample
++    # Implementation detail omitted in source, assumed to handle boundary logic [S1, unofficial]
++    return (0, 0) # Placeholder for boundary logic not fully specified in snippet
++
++def VoxelIndex(x, y, z):
++    return x + WIDTH * (y + HEIGHT * z)
++
++def InBounds(pos):
++    return 0 <= pos.x < WIDTH and 0 <= pos.y < HEIGHT and 0 <= pos.z < DEPTH
++
++def PackColor(r, g, b, a=255):
++    return (r | (g << 8) | (b << 16) | (a << 24))
++```
+ 
+ ## Subtopics
+ 
+ ### [Optimized Indexed Geometry](11006-optimized-indexed-geometry.md)
+-Optimizes vertex count to 8 per voxel by leveraging heightfield data, distinct from the standard 4-vertex-per-face approach here.
++Optimized Indexed Geometry is a voxel meshing technique that generates optimized indexed quad geometry for active voxels, resulting in 8 vertices per voxel. It differs from standard Indexed Quad Meshing by reducing primitive count through optimization logic, likely leveraging heightfield data to minimize unnecessary geometry generation.
+ 
+ ### [Chunk Meshing with Damage and Burning State](15835-chunk-meshing-with-damage-and-burning-state.md)
+-Extends this method by modifying vertex attributes based on block health and fire status using compact formats in WebAssembly.
++A technique for generating mesh geometry for voxel chunks in WebAssembly, incorporating damage and burning state to modify vertex attributes, using compact vertex formats. It extends the base voxel meshing by dynamically adjusting visual properties based on block health and fire status, distinct from sibling methods that may use optimized indexed geometry without state-aware attribute modification.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$ where $N$ is the number of voxels in the chunk, as each voxel is processed once and each face checks a constant number of neighbors (8 for smooth lighting).
+-*   **Memory Complexity:** $O(V + I)$ where $V$ is the number of vertices and $I$ is the number of indices. The vertex buffer stores 5 attributes per vertex.
+-*   **Performance:** The method is designed for Burst compilation in Unity, allowing parallel processing of chunks [S1, unofficial]. Smooth lighting increases the computational cost per face due to 8 neighbor samples and averaging, but provides smoother visual transitions [S1, unofficial].
+-*   **Strengths:** Handles both opaque and transparent voxels; supports smooth lighting for better aesthetics; efficient neighbor sampling for boundary chunks.
+-*   **Limitations:** Boundary chunks require careful handling of neighbor data to avoid artifacts; smooth lighting may be computationally expensive for very large chunks if not parallelized.
+-*   **When to Use:** When visual quality (smooth lighting) is prioritized over raw vertex count optimization.
+-*   **When Not to Use:** When memory bandwidth is the primary bottleneck and flat lighting suffices, or when using optimized indexed geometry techniques that reduce vertex count further.
++*   **Time Complexity:** $O(V \cdot F \cdot L)$, where $V$ is the number of voxels in the chunk, $F=6$ is the number of faces, and $L$ is the cost of lighting calculation (constant for flat, higher for smooth due to 8 neighbor samples).
++*   **Memory Complexity:** $O(V)$ for vertex and index storage, proportional to the surface area of the voxel chunk.
++*   **Measured Performance:** Not given in the sources.
++*   **Scaling:** Scales linearly with chunk size. Chunk dimensions are fixed at $16 \times 256 \times 16$ [S1, unofficial].
++*   **Strengths:** Smooth lighting reduces the "blocky" appearance of voxel worlds; separate alpha/opaque buffers allow for correct transparency rendering.
++*   **Limitations:** Boundary chunks require complex neighbor data resolution; smooth lighting increases CPU/GPU job cost due to multiple neighbor samples.
++*   **When to use:** When visual quality of lighting transitions is prioritized over raw meshing speed.
++*   **When not:** When memory bandwidth is constrained or chunks are very large with high surface area.
+ 
+ ## Background
+-This method originates from the Vektor Voxel project, a voxel engine implementation in Unity using C# and Burst [S1, unofficial]. It was developed to provide a visually appealing voxel surface with smooth lighting transitions, addressing the blocky appearance of standard voxel meshing. The technique is used in the Vektor Voxel engine for rendering voxel chunks [S1, unofficial].
++The method originates from the VektorKnight/vektor-voxels project, a voxel engine implementation using Unity's Job System and Burst Compiler [S1, unofficial]. It was further explored in the context of "Phase 9: Voxel Surface Exploration" for the SolarSystem project, integrating with TSL/WebGPU materials for AAA-style voxel visuals [S2, unofficial].
+ 
+ ## Sources

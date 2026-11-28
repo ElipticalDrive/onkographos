@@ -1,0 +1,117 @@
+# NeRF Pre-processing
+
+Also called: Camera Center Normalization, Exposure-stabilization, K-Means Clustering for Sub-modules, Z-score and min-max normalization
+
+## Overview
+NeRF pre-processing stabilizes training by constraining the dynamic range of image features and normalizing camera geometry before optimization [S1, S2]. It addresses feature fluctuations caused by varying exposure, illumination, and occlusions, which otherwise lead to unstable MLP training [S2]. Unlike sibling methods that modify architecture or loss functions, this approach treats normalization as a conventional data preparation step to ensure inputs fall within the effective range of positional encodings [S2].
+
+## How it works
+**Inputs:** Raw image sequence, camera intrinsic parameters, camera extrinsic parameters (center coordinates) [S1, S2].
+**Outputs:** Normalized image tensors, filtered image list, camera center clusters [S1, S2].
+
+### Data Structures
+1. **Image Tensor:** Shape $(H, W, C)$, where $C=3$ for RGB [G].
+2. **Camera Center:** 3D vector $\mathbf{c} \in \mathbb{R}^3$ [G].
+3. **Cluster Assignment:** Integer label $k \in \{0, \dots, K-1\}$ for each camera [G].
+
+### Steps
+
+1. **Manual Screening**
+   Exclude frames with severe motion blur, dominant occlusion, or unrecoverable overexposure [S2].
+
+2. **Camera Center Normalization**
+   Normalize all camera center coordinates to the range $[-1, 1]$ [S1]. This is critical for reliable training of the NeRF MLP using positional encoding [S1].
+   *   *Note:* For nadir camera perspectives, background NeRF components can be omitted because sky pixels are not visible [S1].
+
+3. **Channel-wise Z-score Normalization**
+   Apply to each color channel independently to reduce scale differences across cameras and lighting conditions [S2].
+   $$Z_i = \frac{x_i - \mu}{\sigma}$$
+   Where $Z_i$ is the normalized pixel value, $x_i$ is the original pixel value, $\mu$ is the mean value of the corresponding channel, and $\sigma$ is the standard deviation [S2].
+   *   *Pitfall:* Saturated highlights and severely shadowed regions are not fully handled by normalization alone; they require reliability masks [S2].
+
+4. **Min-Max Normalization**
+   Map pixel values to the interval $[0, 1]$ to constrain dynamic range and reduce contrast inconsistencies from different imaging devices [S2].
+   $$x'_i = \frac{X_i - X_{min}}{X_{max} - X_{min}}$$
+   Where $x'_i$ is the normalized pixel value, $X_i$ is the original pixel value, $X_{min}$ is the minimum pixel value in the channel, and $X_{max}$ is the maximum pixel value in the channel [S2].
+
+5. **K-Means Clustering for Sub-modules**
+   Partition cameras into sub-modules for Mega-NeRF or Block-NeRF using K-Means clustering on the normalized camera centers [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def preprocess_nerf_data(images, camera_centers, num_clusters=4):
+    """
+    Pre-process images and camera centers for NeRF training.
+    
+    Args:
+        images: List of numpy arrays, shape (H, W, 3), dtype float32.
+        camera_centers: Numpy array, shape (N, 3), dtype float32.
+        num_clusters: Integer, number of sub-modules for Mega-NeRF/Block-NeRF.
+        
+    Returns:
+        normalized_images: List of numpy arrays, shape (H, W, 3), dtype float32.
+        valid_indices: List of integers, indices of images passing manual screening.
+        camera_clusters: Numpy array, shape (N,), dtype int32, cluster labels.
+    """
+    valid_indices = []
+    normalized_images = []
+    
+    # Step 1: Manual Screening
+    # [G] The sources do not specify an automated algorithm for screening.
+    # In practice, this requires human inspection or automated blur/exposure detection.
+    valid_indices = list(range(len(images)))
+    
+    # Step 2: Camera Center Normalization
+    c_min = np.min(camera_centers, axis=0)
+    c_max = np.max(camera_centers, axis=0)
+    c_range = c_max - c_min
+    c_range[c_range == 0] = 1.0
+    normalized_centers = 2.0 * (camera_centers - c_min) / c_range - 1.0
+    
+    # Step 5: K-Means Clustering
+    # [G] Standard K-Means algorithm applied to normalized_centers to assign each camera to one of num_clusters groups.
+    # Implementation omitted per rule; standard iterative centroid update and assignment is used.
+    camera_clusters = np.zeros(len(camera_centers), dtype=np.int32)
+    
+    # Steps 3 & 4: Image Normalization
+    for idx in valid_indices:
+        img = images[idx].copy()
+        
+        # Step 3: Z-score Normalization per channel
+        mean = np.mean(img, axis=(0, 1), keepdims=True)
+        std = np.std(img, axis=(0, 1), keepdims=True)
+        std[std == 0] = 1.0
+        z_scored = (img - mean) / std
+        
+        # Step 4: Min-Max Normalization to [0, 1]
+        # X_i in the formula refers to the input of this step (z_scored)
+        img_min = np.min(z_scored, axis=(0, 1), keepdims=True)
+        img_max = np.max(z_scored, axis=(0, 1), keepdims=True)
+        range_val = img_max - img_min
+        range_val[range_val == 0] = 1.0
+        normalized = (z_scored - img_min) / range_val
+        
+        normalized_images.append(normalized)
+        
+    return normalized_images, valid_indices, camera_clusters
+```
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Strengths:** Stabilizes MLP training by ensuring inputs match the frequency range of positional encodings [S1]. Reduces artifacts from exposure variations [S2].
+*   **Limitations:** Does not handle saturated highlights or shadows effectively without additional reliability masks [S2]. Manual screening is not scalable [S2].
+*   **When to use:** Standard NeRF training, especially with aerial imagery or mixed lighting conditions [S1, S2].
+*   **When not to use:** Not given in the sources.
+
+## Background
+Originated from the need to stabilize NeRF training on datasets with varying exposure and illumination [S2]. Camera center normalization is recommended for reliable training based on positional encoding properties [S1]. K-Means clustering for sub-modules was introduced in Mega-NeRF and Block-NeRF [S1]. The dual-stage normalization (Z-score then Min-Max) is treated as a conventional preprocessing step rather than a novel methodological contribution [S2].
+
+## Sources
+[S1] Leveraging Neural Radiance Fields for Large-Scale 3D Reconstruction from Aerial Imagery, https://doi.org/10.3390/rs16244655, fetched 2026-10-26
+[S2] High fidelity three dimensional reconstruction and interactive visualization of public art sculptures using neural radiance fields, https://link.springer.com/article/10.1007/s44163-026-02441-3, fetched 2026-10-26

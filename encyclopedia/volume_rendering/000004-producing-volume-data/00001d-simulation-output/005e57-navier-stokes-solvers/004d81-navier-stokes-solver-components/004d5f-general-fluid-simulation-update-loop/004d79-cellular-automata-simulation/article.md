@@ -1,0 +1,156 @@
+# Cellular Automata Simulation
+Also called: Elementary Cellular Automata, Rule 110, Rule 90, Voxel-based Cellular Automata
+
+## Overview
+Cellular automata simulation generates volume data by evolving discrete grid states through local interaction rules, producing emergent patterns such as fluid flow or geological structures [S1, unofficial]. Unlike physics-based Navier-Stokes solvers, this method relies on deterministic or pseudo-random state transitions rather than differential equations, making it computationally lightweight and suitable for real-time procedural generation [S1, S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A 3D voxel grid representing the current state (e.g., air, water, lava, sand, stone) and a simulation time step $t$ [S1, unofficial].
+- Output: A 3D voxel grid representing the state at time step $t+1$ [S1, unofficial].
+
+**Data Structures:**
+- `current_grid` and `next_grid`: 3D arrays used for double-buffering to prevent race conditions during parallel GPU updates [S1, unofficial].
+- `persistent_direction`: A 3D buffer storing the horizontal movement direction for water voxels [S1, unofficial].
+
+**Steps:**
+1. **Initialize Buffers:** Copy `current_grid` to `next_grid` or allocate fresh buffers to prevent race conditions during parallel updates [S1, unofficial].
+2. **Process Water:** For each water voxel at $(x, y, z)$: check the voxel directly underneath $(x, y-1, z)$; if air, move the water voxel there [S1, unofficial]. If obstructed, compute a pseudo-random direction using a hash of the position and frame number [S1, unofficial]. Move the voxel in that axis-aligned direction if the target voxel is not solid [S1, unofficial]. Store the first successful horizontal direction in `persistent_direction` and continue moving in it until a wall is hit, then randomly select a new direction [S1, unofficial]. Apply a small probability to change direction sideways for natural appearance [S1, unofficial].
+3. **Process Lava:** Apply the same movement logic as water [S1, unofficial]. In a second pass, check the von Neumann neighborhood (up, down, left, right) of each lava voxel for water [S1, unofficial]. If found, convert the lava voxel to stone [S1, unofficial].
+4. **Process Sand:** For each sand voxel at $(x, y, z)$: check $(x, y-1, z)$; if air, move down directly [S1, unofficial]. If obstructed, fall down diagonally [S1, unofficial]. If sand falls onto a liquid, push the liquid voxel up to $(x, y+1, z)$ if it is air [S1, unofficial].
+5. **Swap Buffers:** Assign `next_grid` to `current_grid` for the next iteration [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def update_cellular_automata(current_grid, next_grid, persistent_direction, t, p_change, grid_dims):
+    # Initialize next_grid as a copy of current_grid
+    next_grid = [row[:] for row in current_grid]
+    
+    depth, width, height = grid_dims
+    
+    for z in range(height):
+        for y in range(width):
+            for x in range(depth):
+                voxel_type = current_grid[x][y][z]
+                
+                if voxel_type == WATER:
+                    # Gravity
+                    if y > 0 and current_grid[x][y-1][z] == AIR:
+                        next_grid[x][y-1][z] = WATER
+                        next_grid[x][y][z] = AIR
+                        continue
+                    
+                    # Sideways Movement with Persistence
+                    dir = persistent_direction[x][y][z]
+                    
+                    # If no direction stored or hit wall, pick new one
+                    if dir == 0:
+                        hash_val = hash((x, y, z, t))
+                        dir = 1 if (hash_val % 2 == 0) else -1
+                        persistent_direction[x][y][z] = dir
+                    
+                    # Try to move in dir
+                    target_x = x + dir
+                    if 0 <= target_x < depth and current_grid[target_x][y][z] == AIR:
+                        next_grid[target_x][y][z] = WATER
+                        next_grid[x][y][z] = AIR
+                        # Small probability to change direction for natural look
+                        if random.random() < p_change:
+                            persistent_direction[x][y][z] = -dir
+                    else:
+                        # Hit wall, reset direction for next frame
+                        persistent_direction[x][y][z] = 0
+                        
+                elif voxel_type == LAVA:
+                    # Same movement as water (identical logic applied here)
+                    dir = persistent_direction[x][y][z]
+                    if dir == 0:
+                        hash_val = hash((x, y, z, t))
+                        dir = 1 if (hash_val % 2 == 0) else -1
+                        persistent_direction[x][y][z] = dir
+                    target_x = x + dir
+                    if 0 <= target_x < depth and current_grid[target_x][y][z] == AIR:
+                        next_grid[target_x][y][z] = LAVA
+                        next_grid[x][y][z] = AIR
+                        if random.random() < p_change:
+                            persistent_direction[x][y][z] = -dir
+                    else:
+                        persistent_direction[x][y][z] = 0
+                    
+                    # Reaction Pass: Check von Neumann neighborhood for water
+                    neighbors = [
+                        (x+1, y, z), (x-1, y, z),
+                        (x, y+1, z), (x, y-1, z)
+                    ]
+                    for nx, ny, nz in neighbors:
+                        if 0 <= nx < depth and 0 <= ny < width and 0 <= nz < height:
+                            if current_grid[nx][ny][nz] == WATER:
+                                next_grid[x][y][z] = STONE
+                                break
+                                
+                elif voxel_type == SAND:
+                    # Fall down
+                    if y > 0 and current_grid[x][y-1][z] == AIR:
+                        next_grid[x][y-1][z] = SAND
+                        next_grid[x][y][z] = AIR
+                    elif y > 0 and current_grid[x][y-1][z] in [WATER, LAVA]:
+                        # Push liquid up
+                        if y + 1 < width and current_grid[x][y+1][z] == AIR:
+                            next_grid[x][y+1][z] = current_grid[x][y-1][z]
+                            next_grid[x][y][z] = SAND
+                            next_grid[x][y-1][z] = AIR
+                    else:
+                        # Check diagonals
+                        if y > 0:
+                            if x > 0 and current_grid[x-1][y-1][z] == AIR:
+                                next_grid[x-1][y-1][z] = SAND
+                                next_grid[x][y][z] = AIR
+                            elif x + 1 < depth and current_grid[x+1][y-1][z] == AIR:
+                                next_grid[x+1][y-1][z] = SAND
+                                next_grid[x][y][z] = AIR
+```
+
+**Parameters:**
+- $p_{change}$: Probability of changing horizontal direction for water. Value not given in the sources [G: typical value 0.01-0.1].
+- Hash function: Any deterministic hash mapping position and time to a binary direction [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Concurrency:** Writing to neighboring voxels simultaneously on the GPU causes race conditions. Using double-buffered textures (current/next) is required for correctness [S1, unofficial].
+- **Solid Obstacles:** Movement rules must check for non-air, non-liquid solids to prevent voxels from passing through walls [S1, unofficial].
+- **Sand Stacking:** Sand logic must handle diagonal falling to create natural pyramid shapes rather than flat piles [S1, unofficial].
+
+## Subtopics
+
+### Conway's Game of Life
+An archetypal 2D cellular automaton where each cell’s next state depends on its eight neighbors according to four rules [S2, unofficial]. It is set apart by its binary state and discrete topological neighborhood [S2, unofficial]. Choose it for procedural art and music synchronization, where stable patterns and gliders are treated as triggers [S2, unofficial]. Pre-compute a timeline of cell births aligned with BPM markers to drive particle emission or color shifts [S2, unofficial]. It runs efficiently on the GPU via double-buffered textures in GLSL [S2, unofficial].
+
+### Elementary Cellular Automata (Rule 110, Rule 90)
+One-dimensional cellular automata that generate complex patterns from a single seed row [S2, unofficial]. Choose them for generating 1D history volumes that can be extruded into 3D [S2, unofficial]. They are computed using bitwise operations from a single seed row, keeping executable size minimal for 64k intros [S2, unofficial].
+
+### 3D Sandpile Model
+A 3D discrete dynamical system where cells accumulate value and topple when exceeding a threshold, distributing value to neighbors [S3, unofficial]. Choose it for simulating granular flow and self-organized criticality [S3, unofficial]. If $n > 5$, set $n = n - 6$ [S3, unofficial]. Check 6 neighbors (up, down, left, right, forward, back); if neighbor.$n > 5$, increment current $n$ by 1 [S3, unofficial]. If the cell is at the center (row=9, col=11, lev=8), increment $n$ by 1 [S3, unofficial]. Topple threshold is 5 [S3, unofficial]. Value colors map $n$ values to an array of 12 RGB tuples, e.g., [0,0,0], [0.267,0.005,0.329], ..., [1.0,0.0,0.8] [S3, unofficial]. Cell state layout is `{ n: number, color: [r,g,b] }` [S3, unofficial].
+
+### 3D Game of Life
+A 3D cellular automaton where cells are either alive or dead, updated based on neighbor counts in a 3x3x3 neighborhood [S3, unofficial]. Choose it for volumetric pattern generation in 3D space [S3, unofficial]. Count living neighbors by iterating `nrow` in `[row-1, row, row+1]`, `ncol` in `[col-1, col, col+1]`, `nlev` in `[lev-1, lev, lev+1]`, skipping out-of-bounds, and incrementing `n_living_neighbors` if `grid[idx].alive` [S3, unofficial]. Update rule: `alive_new = (n_living_neighbors < 4) and ((is_alive and n_living_neighbors > 1) or n_living_neighbors > 2)` [S3, unofficial]. Initial alive probability is 0.01 [S3, unofficial]. Cell state layout is `{ alive: boolean, color: [r,g,b] }` [S3, unofficial]. Neighbor counting includes the cell itself, so the rule implicitly handles this by requiring >1 or >2 neighbors [S3, unofficial].
+
+### 3D Rock-Paper-Scissors Automaton
+A 3D cyclic cellular automaton with 3 states (1, 2, 3) that convert based on neighbor counts [S3, unofficial]. Choose it for simulating cyclic competition and pattern formation in 3D [S3, unofficial]. Initialize counts: `count_1=0, count_2=0, count_3=0` [S3, unofficial]. Iterate 3D neighbors with toroidal wrapping: `nrow = (nrow + num_rows) % num_rows`, `ncol = (ncol + num_cols) % num_cols`, `nlev = (nlev + num_levs) % num_levs` [S3, unofficial]. Increment counts based on neighbor state [S3, unofficial]. Update state: if `old_state==1` and `count_2 > THRESHOLD`, `new_state=2`; if `old_state==2` and `count_3 > THRESHOLD`, `new_state=3`; if `old_state==3` and `count_1 > THRESHOLD`, `new_state=1` [S3, unofficial]. States are 1, 2, 3 with colors 1=[1,0,0], 2=[0,1,0], 3=[0,0,1] [S3, unofficial]. THRESHOLD is 8 [S3, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Not given in the sources.
+- **Performance:** Elementary CAs can run at high frame rates on CPUs (e.g., Processing 4.3 updates a 512×512 grid at 200 fps) and even higher on GPUs (4K resolution in fragment shaders) [S2, unofficial].
+- **Strengths:** Extremely low code size (suitable for 64k intros), no need for complex physics solvers, emergent complexity from simple rules [S1, S2, unofficial].
+- **Limitations:** Lacks physical accuracy compared to Navier-Stokes; patterns are discrete and grid-aligned; requires careful handling of concurrency on parallel hardware [S1, S2, unofficial].
+- **When to use:** Procedural art and demoscene productions where physical accuracy is not critical [S1, S2, unofficial].
+- **When not to use:** Realistic fluid dynamics or scientific simulation requiring continuous fields [S2, unofficial].
+
+## Background
+Cellular automata were popularized by John Conway’s Game of Life in 1970 [S2, unofficial]. Elementary cellular automata, particularly Rule 110 and Rule 90, have been used in creative coding and the demoscene for generating procedural graphics [S2, unofficial]. The technique is favored in size-constrained environments like 64k intros due to its minimal computational requirements and bitwise optimization potential [S2, unofficial]. It is often compared to L-systems and reaction-diffusion systems in procedural art contexts [S2, unofficial].
+
+## Sources
+[S1] Ray-Marched Voxel Simulation - Joris Rijsdijk, https://www.jorisar.nl/blog/VoxelPlayground/, fetched 2026-10-25 (unofficial)
+[S2] Procedural Graphics: Noise, Fractals and Mathematical Art, https://www.mattcurrent.org/procedural-graphics-guide/, fetched 2026-10-27 (unofficial)
+[S3] JeremyIV/volumetric-display, https://github.com/JeremyIV/volumetric-display, fetched 2026-10-26 (unofficial)

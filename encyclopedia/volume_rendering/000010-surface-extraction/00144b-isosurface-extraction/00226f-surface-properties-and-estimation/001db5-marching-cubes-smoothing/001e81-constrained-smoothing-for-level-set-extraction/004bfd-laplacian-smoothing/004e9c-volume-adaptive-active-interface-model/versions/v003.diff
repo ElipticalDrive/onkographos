@@ -1,0 +1,247 @@
+--- v002.md
++++ v003.md
+@@ -7,20 +7,20 @@
+ 
+ ## How it works
+-The method operates on a control point mesh defining the interface within a background grid of volume fraction data. It iteratively updates control point positions to minimize the discrepancy between reconstructed and known material volumes while maintaining surface smoothness.
++The method operates on a control point mesh defining the interface within a background grid of volume fraction data [S1, unofficial]. It iteratively updates control point positions to minimize the discrepancy between reconstructed and known material volumes while maintaining surface smoothness [S1, unofficial].
+ 
+ ### Inputs and Outputs
+ - **Inputs**:
+-  - A set of control points $P = \{p_i\}$ defining the piecewise linear interface (edges in 2D, triangles in 3D).
+-  - Volume fraction data for $M$ materials in a background grid.
+-  - Parameters: $\alpha$ (internal force weight), $\beta$ (external force weight), $\sigma$ (subdivision threshold).
++  - A set of control points $P = \{p_i\}$ defining the piecewise linear interface (edges in 2D, triangles in 3D) [S1, unofficial].
++  - Volume fraction data for $M$ materials in a background grid [S1, unofficial].
++  - Parameters: $\alpha$ (internal force weight), $\beta$ (external force weight), $\sigma$ (subdivision threshold) [S1, unofficial].
+ - **Outputs**:
+-  - Updated control point positions $P'$ representing the reconstructed interface.
+-  - Updated reconstruction error $\epsilon$ for each material in each cell.
++  - Updated control point positions $P'$ representing the reconstructed interface [S1, unofficial].
++  - Updated reconstruction error $\epsilon$ for each material in each cell [S1, unofficial].
+ 
+ ### Data Structures
+-- **Control Point**: Stores 3D position $p_i$.
+-- **Neighbor List**: For each $p_i$, a list of indices of neighboring control points (1-ring).
+-- **Face Material Marking**: Each face $f$ in the mesh is marked with the material ID $A$ it bounds or separates. In multi-material junctions, faces surrounding $p_i$ may be associated with different materials.
+-- **Volume Error**: $\epsilon(c, A)$, the signed difference between the known volume fraction of material $A$ in cell $c$ and the reconstructed volume.
++- **Control Point**: Stores 3D position $p_i$ [G].
++- **Neighbor List**: For each $p_i$, a list of indices of neighboring control points (1-ring) [G].
++- **Face Material Marking**: Each face $f$ in the mesh is marked with the material ID $A$ it bounds or separates [S1, unofficial]. In multi-material junctions, faces surrounding $p_i$ may be associated with different materials [S1, unofficial].
++- **Volume Error**: $\epsilon(c, A)$, the signed difference between the known volume fraction of material $A$ in cell $c$ and the reconstructed volume [S1, unofficial].
+ 
+ ### Algorithm Steps
+@@ -56,20 +56,8 @@
+ 
+ ### Pseudocode
+-
+ ```python
+ def volume_adaptive_active_interface_model(control_points, volume_fractions, alpha, beta, sigma, max_iterations):
+     """
+     Reconstructs piecewise linear material interfaces from volume fraction data.
+-    
+-    Args:
+-        control_points: List of control point objects with position p_i and neighbor indices.
+-        volume_fractions: Grid of volume fractions for M materials.
+-        alpha: Weight for internal smoothing force.
+-        beta: Weight for external volume-adaptive force.
+-        sigma: Threshold for face subdivision (max length/area).
+-        max_iterations: Maximum number of iterations.
+-        
+-    Returns:
+-        Updated control_points.
+     """
+     # Initialize reconstruction error epsilon for each cell and material
+@@ -86,5 +74,5 @@
+                 continue
+             d = average_position(neighbors)
+-            F_int = d - p_i.position
++            F_int = subtract_vectors(d, p_i.position)
+             
+             # 2. Identify materials in neighborhood
+@@ -98,16 +86,19 @@
+             # 4. Compute External Force for selected material
+             R_xi = get_faces_around(p_i, material=xi)
+-            sum_normals = sum(face_normal(f, material=xi) for f in R_xi)
++            sum_normals = zero_vector()
++            for f in R_xi:
++                sum_normals = add_vectors(sum_normals, face_normal(f, material=xi))
+             epsilon_c_xi = epsilon[p_i.cell_id][xi]
+-            F_ext = epsilon_c_xi * sum_normals
++            F_ext = scale_vector(sum_normals, epsilon_c_xi)
+             
+             # 5. Compute Total Force
+-            F = alpha * F_int + beta * F_ext
++            F = add_vectors(scale_vector(F_int, alpha), scale_vector(F_ext, beta))
+             
+             # 6. Update Position
+-            p_i.position += F
++            old_pos = p_i.position
++            p_i.position = add_vectors(p_i.position, F)
+             
+             # 7. Update Volume Error Incrementally
+-            swept_volumes = compute_swept_volumes(p_i, p_i.position) # Old pos to new pos
++            swept_volumes = compute_swept_volumes(p_i, old_pos, p_i.position)
+             update_epsilon(epsilon, swept_volumes, p_i.cell_id)
+             
+@@ -135,5 +126,56 @@
+     return epsilon
+ 
+-def compute_swept_volumes(p_i, new_pos):
++def adjust_weights(alpha, beta, epsilon):
++    """
++    [G] Monotonically decrease alpha and beta proportional to the change in error magnitude.
++    """
++    error_magnitude = sum(abs(v) for cell_eps in epsilon.values() for v in cell_eps.values())
++    decay_factor = 1.0 / (1.0 + error_magnitude)
++    return alpha * decay_factor, beta * decay_factor
++
++def get_neighbors(p_i):
++    """Returns list of control point indices connected to p_i in the 1-ring."""
++    return p_i.neighbors
++
++def average_position(neighbors):
++    """Returns arithmetic mean of positions in neighbor list."""
++    if not neighbors:
++        return zero_vector()
++    total = zero_vector()
++    for idx in neighbors:
++        total = add_vectors(total, idx.position)
++    return scale_vector(total, 1.0 / len(neighbors))
++
++def get_materials_around(p_i, volume_fractions):
++    """Returns set of material IDs present in cells adjacent to p_i's 1-ring."""
++    materials = set()
++    for idx in get_neighbors(p_i):
++        for mat in volume_fractions.cells[idx.cell_id].materials:
++            materials.add(mat)
++    return materials
++
++def get_faces_around(p_i, material):
++    """Returns list of faces in the 1-ring marked with the given material."""
++    faces = []
++    for idx in get_neighbors(p_i):
++        for f in idx.faces:
++            if f.material_mark == material:
++                faces.append(f)
++    return faces
++
++def face_normal(face, material):
++    """Returns unit normal vector of face oriented into the specified material."""
++    # [G] Standard cross product of two edge vectors, normalized.
++    # Orientation is flipped if dot product with material centroid direction is negative.
++    v1 = subtract_vectors(face.vertex2.position, face.vertex1.position)
++    v2 = subtract_vectors(face.vertex3.position, face.vertex1.position)
++    n = cross_vectors(v1, v2)
++    n = scale_vector(n, 1.0 / magnitude(n))
++    # Ensure orientation points into material
++    if dot_product(n, subtract_vectors(face.centroid, material_centroid(material))) < 0:
++        n = scale_vector(n, -1.0)
++    return n
++
++def compute_swept_volumes(p_i, old_pos, new_pos):
+     """
+     Computes the oriented volume swept by the 1-ring of p_i moving to new_pos.
+@@ -145,11 +187,35 @@
+     if is_2d():
+         for edge in get_edges_around(p_i, neighbors):
+-            triangle = sweep_edge_to_triangle(edge, p_i.position, new_pos)
++            triangle = sweep_edge_to_triangle(edge, old_pos, new_pos)
+             clip_and_accumulate(swept, triangle)
+     else:
+-        for face in get_faces_around(p_i, neighbors):
+-            tet = sweep_face_to_tetrahedron(face, p_i.position, new_pos)
++        for face in get_faces_around(p_i, None): # All faces in 1-ring
++            tet = sweep_face_to_tetrahedron(face, old_pos, new_pos)
+             clip_and_accumulate(swept, tet)
+     return swept
++
++def is_2d():
++    """Returns True if the mesh is 2D (edges), False if 3D (triangles)."""
++    return p_i.dimension == 2 # [G] Assumed attribute on control points
++
++def get_edges_around(p_i, neighbors):
++    """Returns list of edge objects connecting p_i to its neighbors."""
++    edges = []
++    for idx in neighbors:
++        edges.append(p_i.find_edge_to(idx))
++    return edges
++
++def sweep_edge_to_triangle(edge, old_pos, new_pos):
++    """Creates a triangle from an edge swept along a displacement vector."""
++    v1 = add_vectors(edge.v1.position, subtract_vectors(new_pos, old_pos))
++    v2 = add_vectors(edge.v2.position, subtract_vectors(new_pos, old_pos))
++    return Triangle(edge.v1.position, edge.v2.position, v1) # Simplified sweep geometry
++
++def sweep_face_to_tetrahedron(face, old_pos, new_pos):
++    """Creates a tetrahedron from a face swept along a displacement vector."""
++    v1 = add_vectors(face.v1.position, subtract_vectors(new_pos, old_pos))
++    v2 = add_vectors(face.v2.position, subtract_vectors(new_pos, old_pos))
++    v3 = add_vectors(face.v3.position, subtract_vectors(new_pos, old_pos))
++    return Tetrahedron(face.v1.position, face.v2.position, face.v3.position, v1) # Simplified sweep geometry
+ 
+ def clip_and_accumulate(swept, swept_geom):
+@@ -163,5 +229,53 @@
+         material = get_material_for_intersection(swept_geom, cell)
+         if material is not None:
++            if cell.id not in swept:
++                swept[cell.id] = {}
++            if material not in swept[cell.id]:
++                swept[cell.id][material] = 0.0
+             swept[cell.id][material] += vol
++
++def intersecting_cells(swept_geom):
++    """Returns list of cells whose bounding boxes intersect swept_geom."""
++    return [c for c in volume_fractions.cells if bounding_box_intersects(c.bbox, swept_geom.bbox)]
++
++def oriented_volume_of_intersection(swept_geom, cell):
++    """Computes the signed volume of intersection between swept geometry and a cell."""
++    # [G] Standard Sutherland-Hodgman or BSP clipping to compute intersection polyhedron volume
++    intersection = clip_polyhedron(swept_geom, cell.bbox)
++    return compute_polyhedron_volume(intersection)
++
++def get_material_for_intersection(swept_geom, cell):
++    """Determines which material the swept volume primarily affects in the cell."""
++    # [G] Based on face material markings in the 1-ring that generated the sweep
++    return swept_geom.associated_material
++
++def update_epsilon(epsilon, swept_volumes, cell_id):
++    """Adds oriented volume to epsilon[cell_id][material]."""
++    if cell_id in swept_volumes:
++        for mat, vol in swept_volumes[cell_id].items():
++            epsilon[cell_id][mat] -= vol # Subtract swept volume from error
++
++def subdivide_faces(control_points, sigma):
++    """Splits faces exceeding sigma (length in 2D, area in 3D) by inserting midpoints."""
++    for p_i in control_points:
++        for f in p_i.faces:
++            size = f.length if is_2d() else f.area
++            if size > sigma:
++                mid = scale_vector(add_vectors(f.v1.position, f.v2.position), 0.5)
++                # [G] Insert new control point and redistribute topology
++                insert_control_point(mid, f)
++
++def is_converged(epsilon, alpha, beta):
++    """Returns true if max change in epsilon or alpha/beta falls below threshold."""
++    max_error = max(abs(v) for cell_eps in epsilon.values() for v in cell_eps.values())
++    return max_error < 1e-4 or alpha < 1e-5 or beta < 1e-5
++
++def zero_vector(): return [0.0, 0.0, 0.0]
++def add_vectors(a, b): return [a[i]+b[i] for i in range(3)]
++def subtract_vectors(a, b): return [a[i]-b[i] for i in range(3)]
++def scale_vector(v, s): return [v[i]*s for i in range(3)]
++def cross_vectors(a, b): return [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]]
++def dot_product(a, b): return sum(a[i]*b[i] for i in range(3))
++def magnitude(v): return sum(x*x for x in v)**0.5
+ ```
+ 
+@@ -190,7 +304,7 @@
+   - On the Swirler dataset (128^3 grid, lower 64^3 octant), the rule-based marching method generated topology for 71% of mixed cells, while the discrete boundary method handled the swirler blades and central screen [S1, unofficial].
+ - **Strengths**: Handles multi-material junctions and complex topologies better than PLIC; captures volume accuracy and smoothness better than Meredith's method; captures fine details like swirler blades [S1, unofficial].
+-- **Limitations**: Stochastic selection may lead to non-deterministic results; requires careful tuning of $\alpha$ and $\beta$; subdivision may be needed for large faces [S1, unofficial].
++- **Limitations**: Stochastic selection handles multi-material junctions; requires careful tuning of $\alpha$ and $\beta$; subdivision may be needed for large faces [S1, unofficial].
+ - **When to use**: When accurate volume preservation and smooth interfaces are required for multi-material VOF or embedded boundary simulations, especially in the presence of complex junctions [S1, unofficial].
+-- **When not to use**: When deterministic topology generation is strictly required without stochastic elements; when computational speed is critical and incremental volume updates are too slow for the specific hardware [S1, unofficial].
++- **When not to use**: Not given in the sources.
+ 
+ ## Background

@@ -1,0 +1,207 @@
+Hi, Firstly this project is great, really excellent work! I have a problem I am trying to solve, and currently have a solution using POVRay, however, the solution is slow and bulky and I think visionaray could help speed it up but I'm a ...
+
+Obtaining all hits · Issue #17 · szellmann/visionaray · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Obtaining all hits #17
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Obtaining all hits#17
+Copy link
+Description
+system123
+opened on Jan 30, 2018
+Issue body actions
+Hi,
+Firstly this project is great, really excellent work!
+I have a problem I am trying to solve, and currently have a solution using POVRay, however, the solution is slow and bulky and I think visionaray could help speed it up but I'm a bit lost on the approach to take.
+Basically, I have a very low-resolution point cloud, made up of spheres, and I need to know to which x-y image coordinates each sphere gets projects to, as well as whether the sphere is occluded by other parts of the scene. Is there a way to get the intersection with a sphere, but then allow the ray to pass through that sphere, as well as reflect off of it (so I can get which pixels in the image plane are combinations of which scene pixels?)
+My current POVRay approach is to raytrace each sphere independently of the others, and then apply a lot of post-processing and additional simulations to get all the information required. However, even when running on 40 cores, it can take weeks for the 3million points I have.
+Thanks :)
+Reactions are currently unavailable
+Activity
+szellmann commented on Jan 30, 2018
+szellmann
+on Jan 30, 2018
+Owner
+More actions
+Hi,
+thanks, I'm happy you like the project!
+yes, it is possible to let the ray pass through spheres, but not with basic_sphere, that one only returns hit information for the first hit.
+You need to write a new geometric primitive type. Untested and partly copied from an older project:
+```
+struct solid_sphere : basic_sphere<float> {};
+
+template <typename T>
+struct solid_hit_record : hit_record<basic_ray, primitive<unsigned>> {
+    T t1, t2;
+};
+
+template <typename T>
+solid_hit_record<T> intersect(
+        basic_ray<T> const& ray,
+        solid_sphere const& sphere
+        )   
+{
+    typedef basic_ray<T> ray_type;
+    typedef vector<3, T> vec_type;
+
+    ray_type r = ray;
+    r.ori -= vec_type( sphere.center );
+
+    auto A = dot(r.dir, r.dir);
+    auto B = dot(r.dir, r.ori) * T(2.0);
+    auto C = dot(r.ori, r.ori) - sphere.radius * sphere.radius;
+
+    // solve Ax**2 + Bx + C
+    auto disc = B * B - T(4.0) * A * C;
+    auto valid = disc >= S(0.0);
+
+    auto root_disc = select(valid, sqrt(disc), disc);
+
+    auto q = select( B < T(0.0), T(-0.5) * (B - root_disc), T(-0.5) * (B + root_disc) );
+
+    auto tnear = q / A;
+    auto tfar = C / q;
+
+    auto mask = tnear > tfar;
+    auto tmp = select(mask, tnear, T(0.0));
+    tnear = select(mask, tfar, tnear);
+    tfar = select(mask, tmp, tfar);
+
+    valid &= tnear > T(0.0);
+
+    solid_hit_record<T> result;
+    result.hit = valid;
+    result.prim_id = sphere.prim_id;
+    result.geom_id = sphere.geom_id;
+    result.t1 = select( valid, tnear, S(-1.0) );
+    result.t2 = select( valid, tfar, S(-1.0) );
+
+    return result;
+}
+```
+If you in addition want to use BVHs, the primitive type needs to implement split_primitive() (then an SBVH can be built from it):
+```
+void split_primitive(aabb& L, aabb& R, float plane, int axis, solid_sphere const& prim)
+{
+    split_primitive(L, R, plane, axis, static_cast<basic_sphere<float>>(prim));
+}
+```
+With that code solid_sphere inherits from basic_sphere, but you could also write your own new type. But since basic_sphere is a first-class citizen, I found it easier to just inherit from it.
+How secondary rays are spawned is described in a kernel. Check here: https://github.com/hlrs-vis/covise/tree/master/src/OpenCOVER/plugins/ukoeln/PointRayTracer and specifically that file: https://github.com/hlrs-vis/covise/blob/master/src/OpenCOVER/plugins/ukoeln/PointRayTracer/PointRayTracerKernel.h for code where ray tracing for point clouds (only primary visibility, no shading) is implemented. You could adapt this kernel and e.g. spawn new rays with reflect() or refract(). It would be helpful to know if you need shading etc. - then you could maybe use one of the builtin kernels.
+Hope this helps, please let me know if you need more examples or help with a specific task.
+szellmann commented on Jan 30, 2018
+szellmann
+on Jan 30, 2018
+Last edited by szellmann
+Owner
+More actions
+May however be that I slightly misread your question.
+a.) in order to get the 0,1, or 2 possible intersections of the ray with the sphere, you need something like the solid_sphere from above.
+b.) another way to get the 2nd intersection (the one where the ray travels through the sphere and hits the far side of the surface) can however also be obtained by calculating the refracted ray that goes from the first hitpoint into the material, like e.g. the specular_transmission bsdf does: https://github.com/szellmann/visionaray/blob/master/include/visionaray/brdf.h#L289. With a refractive index equal to 1.0, the ray will go straight through the sphere.
+Maybe you can provide a slightly more detailed description of your use case. Do you e.g. need shading at the surfaces? If so, only perfect specular phenomena (mirror reflection, perfect refraction)? If so, maybe the glass<T> material is already what you're searching for? And do you want to generate an image? Or is it some type of statistical measure you want to calculate? If I understand better what you want to do, I can maybe assemble an example that you can add to.
+Cheers,
+Stefan
+system123 commented on Jan 30, 2018
+system123
+on Jan 30, 2018
+Last edited by system123
+Author
+More actions
+Thanks for the detailed response.
+Basically the spheres are "irrelevant" in terms of shading and material properties. They are just used to the ray tracer has something to intersect. I am looking for the ray to intersect the sphere (so I can derive the x-y image coordinates of this sphere in the image), I then want the ray to pass-through the sphere and intersect any co-linear sphere in the model which would map to the same pixel should the first sphere not have been there.
+Having this information I can then mark the spheres in the model which were occluded by different parts of the model. So for instance, if a tree occluded some ground points, I can then go and colour these ground points in the model. Then if I take a second view of the scene I can assess which ground points now become visible in the new view of the scene, that weren't visible in the first view.
+In my application different types of occlusions have different properties to understanding the image. Thus I need to have the ray continue through the sphere (only intersect the front surface of the sphere, and then move onto the next sphere in the model if one exists.
+In the more advanced case I'd like to say if the ray intersects the sphere, the above-explained occurs, but a second ray is also propagated which is a reflection off the sphere. But I think I'd be able to solve this once I have a better grip on how to solve the first part.
+Reflection would be mirror reflection
+I want to generate an image. (multiple images)
+Image 1: Direct simulation of the scene with no reflections just single intersection
+Image 2: Image of all the 1st level occluded points (so not the initial intersection, but the second one)
+Image 3: Reflected points only, not 1st intersection just the 1st mirror intersection.
+szellmann commented on Jan 30, 2018
+szellmann
+on Jan 30, 2018
+Owner
+More actions
+This sounds pretty much as if the multi_hit intersection routine is your friend! https://github.com/szellmann/visionaray/wiki/Ray-Object-Traversal
+The gist of it (TL;DR):
+```
+auto hits = multi_hit<16>(ray, primitives.begin(), primitives.end());
+```
+gives you an array with the 16 first hits along the ray. You need to figure out an upper bound for N (can be large, template parameter is size_t). You then get a sorted list of all the hits, sorted by ray parameter t. The spheres you hit twice will also occur twice in the list, but I think your application could figure this out.
+multi_hit also has the benefit that you don't spawn secondary rays but use a single ray. Therefore you don't have to care for the self-intersection problem (which you usually take care of by adding a tiny offset to the origin of the 2nd ray), so less worries about floating point (im)precision.
+Details
+Maybe your code can look like the following (basically pseudo) code. See the smallpt example (https://github.com/szellmann/visionaray/tree/master/src/examples/smallpt) for dealing with spheres, and the multi-hit example (https://github.com/szellmann/visionaray/tree/master/src/examples/multi_hit) for multi-hit and for using BVHs. (Please use BVHs. Ray tracing millions of spheres will take forever otherwise.)
+You can go with basic_sphere (e.g. basic_sphere<float> or basic_sphere<double>). Set up a list with all your spheres:
+```
+vector<basic_sphere<float>> spheres;
+basic_sphere<float> s(center, radius);
+s.prim_id = ..; // Unique, unsigned int
+s.geom_id = ..; // Index into material list, so probably irrelevant in your case (so e.g. set to prim_id).
+spheres.push_back(s);
+```
+Then build a bvh from that, e.g. like that:
+```
+typedef index_bvh<basic_sphere<float>> bvh_type;
+struct application_state {
+    //...
+    bvh_type the_bvh;
+};
+
+state.the_bvh = build<bvh_type>(spheres.data(), spheres.size(), useSpatialSplits);
+```
+The thing with Visionaray is that BVHs are actually (compound) primitives, too. This gives flexibility. So rather than traversing a list of sphere primitives with multi-hit, you traverse a list of BVHs (only your list has only size one). You should construct the list like so (i.e. use bvh-refs, basically POD pointers to BVHs):
+```
+vector<bvh_type::bvh_ref> bvh_refs;
+bvh_refs.push_back(state.the_bvh.ref());
+```
+See also: https://github.com/szellmann/visionaray/wiki/Acceleration-data-structures-and-traversal for details and rationale.
+I assume your application generates the rays on its own (probably from the surfaces of some other geometry present in the scene), right? So you can, somewhere in your C++ code, come up with a list of rays:
+```
+vector<basic_ray<float>> rays; // or basic_ray<[double|simd::float4|simd::float8],...>
+rays.push_back(basic_ray<float>(origin, normalize(direction)));
+```
+Then write a loop over all rays. Try to isolate this part so that you can have this loop over all rays, rather than tracing individual rays from within your app (the latter is of course possible, but looping over the ray list is faster for certain):
+```
+#pragma omp parallel for // or however you like to parallelize this..
+for (size_t i=0; i<rays.size(); ++i)
+{
+    auto hits = multi_hit<N>(rays[i], bvh_refs.begin(), bvh_refs.end());
+    // Do things with hits, spawn secondary rays, etc.
+    // Lots of functions, e.g. reflect(), refract() are implemented in math/math.h
+    // You can identify the sphere by hits[n].prim_id
+}
+```
+When you iterate over the list, using index i you know which ray you are dealing with, and so you should be able to do anything you like in the loop, like getting back to image-x-y, update sphere lists, etc.
+Remarks
+With that you have a CPU implementation. Going from there to the GPU with CUDA is straightforward and can be done within 30min or so. You basically use thrust::device_vector, another bvh type on the device, and the loop is a CUDA kernel. Feel free to ask me if you need help.
+Your workload sounds rather coherent. If you opt for using CPU, consider using basic_ray<simd::floatN> for coherent packet traversal, may bring some speedup. If you use simd packets, in the code above, replace vector with visionaray::aligned_vector, SSE et al. require memory to be aligned.
+If you have really large workloads (like billions of spheres), it may actually be better not to make a copy of all the spheres, but rather promote your own sphere type (which your C++ application has for sure) to be compatible with Visionaray. But that's probably something to consider in the future.
+Not sure if your application should exactly look like this, but from my understanding this should at least give you lots of pointers. Please feel free to ask if there's more questions, problems, or you need help!
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

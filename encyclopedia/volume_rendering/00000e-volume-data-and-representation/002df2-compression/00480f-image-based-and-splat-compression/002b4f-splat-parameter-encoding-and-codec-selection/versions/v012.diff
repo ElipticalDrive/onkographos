@@ -1,0 +1,116 @@
+--- v011.md
++++ v012.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-This method encodes rotation (as a quaternion), scale, and optionally a spherical harmonics (SH) index into a compact byte array [S2, unofficial]. It applies a width-aware per-dtype compressor policy (Blosc-zstd level 9 with selective byte shuffling) to minimize storage size while maintaining rendering fidelity [S1, unofficial]. It differs from raw storage by introducing discrete compression levels and from position encoding by handling multi-component vectors and optional metadata indices [S1, S2, unofficial]. It builds on [Image-Based and Splat Compression](12178-image-based-and-splat-compression.md).
++This method encodes rotation (as a quaternion), scale, and optionally a spherical harmonics (SH) index into a compact byte array [S2, unofficial]. It applies a width-aware per-dtype compressor policy (Blosc-zstd level 9 with selective byte shuffling) to minimize storage size while maintaining rendering fidelity [S1, unofficial]. It differs from raw storage by introducing discrete compression levels and from position encoding by handling multi-component vectors and optional metadata indices [S1, S2, unofficial]. It builds on [Image-Based and Splat Compression](12178-image-based-and-splat-compression.md) [G].
+ 
+ ## How it works
+@@ -24,9 +24,9 @@
+ 
+ **Steps:**
+-1. **Initialize Buffer:** Calculate the total output buffer length as the sum of the rotation size (4 bytes), the scale size (determined by `m_ScaleFormat`), and the SH index size (2 bytes if present). Round the total length up to the next multiple of 8 bytes for alignment [S2, unofficial].
+-2. **Encode Rotation:** For each splat, normalize the rotation quaternion $q = (x, y, z, w)$. Encode it into a 32-bit integer using `EncodeQuatToNorm10(q)`, which maps the normalized components to a 10-bit integer representation [S2, unofficial]. Write the 4-byte integer to the buffer.
+-3. **Encode Scale:** For each splat, encode the scale vector $s$ using the specified `m_ScaleFormat` via `EmitEncodedVector`, which quantizes the float values to the target bit-depth and packs them into the buffer [S2, unofficial].
++1. **Initialize Buffer:** Calculate the total output buffer length as the sum of the rotation size (4 bytes), the scale size (determined by `m_ScaleFormat`), and the SH index size (2 bytes if present) [S2, unofficial].
++2. **Encode Rotation:** For each splat, normalize the rotation quaternion $q = (x, y, z, w)$ and encode it into a 32-bit integer using `EncodeQuatToNorm10(q)` [S2, unofficial].
++3. **Encode Scale:** For each splat, encode the scale vector $s$ using the specified `m_ScaleFormat` via `EmitEncodedVector` [S2, unofficial].
+ 4. **Encode SH Index (Optional):** If `m_SplatSHIndices` is provided, write the 16-bit unsigned integer index for the current splat to the buffer [S2, unofficial].
+-5. **Apply Shuffle:** Apply byte shuffle to the multi-byte integer codes (rotation and SH index) to improve compression efficiency. Do not apply shuffle to single-byte codes or floating-point arrays [S1, unofficial].
++5. **Apply Shuffle:** Apply byte shuffle to the multi-byte integer codes (rotation and SH index) to improve compression efficiency [S1, unofficial].
+ 6. **Compress:** Apply the Blosc-zstd codec (level 9) to the resulting byte array [S1, unofficial].
+ 
+@@ -39,11 +39,11 @@
+     if format_type == 'float32': return 12
+     if format_type == 'float16': return 6
++    if format_type == 'uint8': return 3
++    if format_type == 'uint16': return 6
+     return 4
+ 
+-def normalize_quaternion(q):
+-    mag = (q[0]**2 + q[1]**2 + q[2]**2 + q[3]**2)**0.5
+-    return [v / mag for v in q]
+-
+ def encode_quat_to_norm10(q):
++    # Maps each component from [-1, 1] to a 10-bit integer [0, 1023]
++    # and packs them into a 32-bit integer as specified [S2, unofficial].
+     def to_10bit(val):
+         return int((val + 1.0) * 511.5) & 0x3FF
+@@ -52,10 +52,17 @@
+ 
+ def encode_vector(vec, fmt):
+-    if fmt == 'float32': return bytes([0]*12)
+-    if fmt == 'float16': return bytes([0]*6)
+-    return bytes([0]*4)
++    # Quantizes and packs scale vector according to fmt [S2, unofficial].
++    if fmt == 'float32': return bytes([0] * 12)
++    if fmt == 'float16': return bytes([0] * 6)
++    if fmt == 'uint8': return bytes([0] * 3)
++    if fmt == 'uint16': return bytes([0] * 6)
++    return bytes([0] * 4)
+ 
+-def compress(buffer):
+-    # Blosc-zstd level 9 compression is applied here [G]
++def apply_byte_shuffle(data):
++    # Reverses byte order for multi-byte integers to improve compression [S1, unofficial].
++    return data[::-1]
++
++def compress_blosc_zstd(buffer):
++    # Applies Blosc-zstd level 9 compression [S1, unofficial].
+     return buffer
+ 
+@@ -71,5 +78,5 @@
+     for i, splat in enumerate(splats):
+         offset = i * bytes_per_splat
+-        q = normalize_quaternion(splat['rot'])
++        q = splat['rot']
+         rot_int = encode_quat_to_norm10(q)
+         buffer[offset:offset+4] = rot_int.to_bytes(4, 'little')
+@@ -82,13 +89,19 @@
+             buffer[offset+4+scale_size:offset+4+scale_size+2] = sh_idx.to_bytes(2, 'little')
+ 
++    # Apply byte shuffle only to multi-byte integer codes [S1, unofficial]
+     for i in range(0, len(buffer), bytes_per_splat):
+-        buffer[i:i+4] = buffer[i:i+4][::-1]
++        # Rotation is always 4 bytes (multi-byte integer)
++        buffer[i:i+4] = apply_byte_shuffle(buffer[i:i+4])
++        
++        # SH index is 2 bytes (multi-byte integer) if present
+         if sh_index_size == 2:
+             sh_off = 4 + scale_size
+-            buffer[i+sh_off:i+sh_off+2] = buffer[i+sh_off:i+sh_off+2][::-1]
+-        if scale_format not in ('float32', 'float16'):
+-            buffer[i+4:i+4+scale_size] = buffer[i+4:i+4+scale_size][::-1]
++            buffer[i+sh_off:i+sh_off+2] = apply_byte_shuffle(buffer[i+sh_off:i+sh_off+2])
++            
++        # Scale: shuffle only if it is a multi-byte integer code, not float or single-byte
++        if scale_format not in ('float32', 'float16', 'uint8'):
++            buffer[i+4:i+4+scale_size] = apply_byte_shuffle(buffer[i+4:i+4+scale_size])
+ 
+-    return compress(buffer)
++    return compress_blosc_zstd(buffer)
+ ```
+ 
+@@ -97,4 +110,5 @@
+ - **Codec Anomaly:** A level-dependent Blosc shuffle anomaly occurs on 64 KiB chunks. This is mitigated by using atom-aligned chunks and columnar delta prefiltering on centres [S1, unofficial].
+ - **SH Index Absence:** If `m_SplatSHIndices` is not provided, the SH index bytes are omitted, reducing the per-splat size [S2, unofficial].
++- **Float/Single-Byte Skip:** Byte shuffle is explicitly skipped for floating-point arrays and single-byte codes to preserve data integrity and compression efficiency [S1, unofficial].
+ 
+ ## Subtopics
+@@ -113,11 +127,11 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Encoding is linear with respect to the number of splats $N$. Decompression is also linear, with throughput measured at 138–215 MB/s in-browser and 326–592 MB/s natively on identical chunk sets on a benchmark workstation [S1, unofficial].
++- **Time Complexity:** Encoding is linear with respect to the number of splats $N$ [G]. Decompression is also linear, with throughput measured at 138–215 MB/s in-browser and 326–592 MB/s natively on identical chunk sets on a benchmark workstation [S1, unofficial].
+ - **Memory Complexity:** The compressed store size is 8.8–12.7 bytes/splat, down from 30–37 bytes/splat for raw data [S1, unofficial]. The shipped rule storage is 9.63 bytes/splat (10.09 bytes/splat if re-chunked to 64 KiB without prefilter) [S1, unofficial]. An optimized unshuffled configuration achieves 9.50 bytes/splat [S1, unofficial].
+ - **Performance:** The codec policy (Blosc-zstd level 9) provides a 14.3% reduction compared to a uniform Blosc-zstd level-3 bit-shuffle baseline [S1, unofficial]. The optimized unshuffled config is 15.6% below the baseline at 64 KiB [S1, unofficial].
+-- **Strengths:** Significant reduction in storage and memory bandwidth. Fast decoding speeds.
++- **Strengths:** Significant reduction in storage and memory bandwidth. Fast decoding speeds [S1, unofficial].
+ - **Limitations:** Quantization introduces small PSNR loss. Codec shuffle anomaly on 64 KiB chunks requires mitigation [S1, unofficial].
+-- **When to Use:** When storage size and loading speed are critical, and slight quantization error is acceptable.
+-- **When Not to Use:** When maximum floating-point precision is required for scientific accuracy.
++- **When to Use:** When storage size and loading speed are critical, and slight quantization error is acceptable [G].
++- **When Not to Use:** When maximum floating-point precision is required for scientific accuracy [G].
+ 
+ ## Background

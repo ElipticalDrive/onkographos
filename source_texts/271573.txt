@@ -1,0 +1,445 @@
+A minimalist, high-performance C++ app for real-time 3-axes DICOM viewing, multi-threaded segmentation, and instant STL mesh extraction. Built with Sokol and Dear ImGui for ultra-fast compile times and a tiny binary footprint on Windows and macOS. - feat: segmentation + 3D slicing (marching cubes) + tabbed workspace by yashs33244 · Pull Request #2 · C-NikhilKarthik/LumenSlice
+
+feat: segmentation + 3D slicing (marching cubes) + tabbed workspace by yashs33244 · Pull Request #2 · C-NikhilKarthik/LumenSlice · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+yashs33244
+commented
+Jun 17, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Collaborator
+What
+Adds the segmentation + 3D slicing workflow behind a new 4-tab workspace shell (Visualize / Segment / 3D / Export). Activates the deferred roadmap items: threshold/region-grow segmentation, marching-cubes surface reconstruction, and binary STL export.
+Stacked on #1 (feature/yash-visualization-patient-library). Until #1 merges, this PR also shows its 2 commits (window/level drag + metadata inspector, notarized DMG). Merge #1 first; this then reduces to the 4 commits below.
+My commits
+feat(core): segmentation primitives + plane_map + bridge API — geometry/plane_map (single source of truth for slice↔voxel mapping incl. the coronal/sagittal flip, used by slice render + overlay + picking), label_volume, segment (threshold, region-grow BFS, paint), mask_view; pure-C bridge API.
+feat(app): tabbed workspace shell + Segment tab with mask overlay — AppShell with a left tab rail; ContentView extracted into SliceBoard/SlicePane/VisualizeControls; SegmentationModel + Segment tab (threshold live, click-to-region-grow, colored overlay, clear).
+feat(core): marching cubes + binary STL + mesh bridge — canonical Lorensen tables, welded vertices + smooth normals, mm coordinates, snapshot-then-generate so meshing runs off the main thread without racing the live mask.
+feat(app): 3D tab (SceneKit) + Export tab (STL/PNG) — MeshModel/MeshBuilder/MeshSceneView (orbit viewport), 3D controls (smoothing/resolution/Generate), Export tab (STL in mm + axial PNG).
+Verification
+C++ SegTest (run swift run SegTest): plane_map round-trip, threshold, region-grow connectivity, paint, overlay, marching-cubes closed 2-manifold + outward normals, STL size law (84 + 50·tris). All pass.
+MeshShot end-to-end on real DICOM: phantom → bone threshold → 89,984 triangles → STL of exactly 4,499,284 bytes.
+Slice rendering is byte-identical to before the plane_map refactor (SliceShot regression). App builds clean and launches without crashing.
+Note: swift test (XCTest) runs in CI — this dev machine has Command Line Tools only, so the Swift unit tests (coordinate mapping etc.) were validated via a standalone script locally.
+Not in this PR (follow-ups)
+Paint/erase brush + diff-based undo/redo (the C++ paint_disk is already built + tested; this is the gesture + undo-stack wiring).
+Screenshots + a fresh DMG.
+yashs33244
+and others
+added 4 commits
+June 17, 2026 18:37
+feat(core): segmentation primitives + plane_map + bridge API
+…
+74e7fd9
+```
+Add the C++ segmentation core behind the existing pure-C bridge:
+
+- geometry/plane_map: the single source of truth for slice<->voxel
+  mapping (incl. the coronal/sagittal vertical flip). ExtractSlice now
+  uses it too, so HU slices, mask overlays, and click-to-voxel picking
+  can never disagree. SliceShot output is byte-identical to before.
+- segmentation/label_volume: uint8 mask aligned to the HU buffer.
+- segmentation/segment: threshold_fill, region_grow (6-connected BFS,
+  bounded), paint_disk (per-slice, via plane_map; wired in P1b).
+- segmentation/mask_view: colored premultiplied-RGBA overlay slice.
+- bridge: lumen_seg_threshold/region_grow/paint/clear/count,
+  lumen_extract_mask_slice, lumen_slice_pixel_to_voxel. The handle now
+  owns the mask + an overlay scratch buffer; the mask resets on load.
+- SegTest: plane_map round-trip (the silent-failure path), threshold,
+  region-grow connectivity, paint, and overlay. All pass.
+
+Plan + eng-review: yashdocs/segmentation-3d/PLAN.md (local).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+```
+feat(app): tabbed workspace shell + Segment tab with mask overlay
+…
+d07e777
+```
+Retire the single-window ContentView for a 4-tab workspace and wire up
+the segmentation UI on top of the new bridge API.
+
+- Shell: AppShell (left icon rail + per-tab control panel + adaptive
+  canvas), TabRail, WorkspaceTab. Selecting a tab swaps only its
+  controls; the canvas adapts (slices vs 3D/export placeholders).
+- Viewer: SliceBoard + SlicePane extracted from ContentView (slice
+  render unchanged), plus a mask overlay layer and a Segment-tab seed
+  gesture. SliceCoordinates: pure tap->image-pixel mapping (Swift half
+  of the silent-failure path), validated against the C++ plane_map.
+- Tabs: VisualizeControls (W/L + metadata, moved out of ContentView),
+  SegmentControls (threshold live, region-grow, clear, voxel count).
+- Model: SegmentationModel drives the mask via the bridge and
+  republishes overlay CGImages, refreshing only while the Segment tab
+  is active. VolumeModel exposes its handle (read-only) to it.
+- SliceCoordinatesTests cover the letterbox math for square + non-square
+  aspects (XCTest runs in CI; full Xcode not installed locally).
+
+3D (marching cubes + SceneKit + STL) and paint/undo are the next phases.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+```
+feat(core): marching cubes + binary STL + mesh bridge
+…
+8ee7035
+```
+Turn the segmentation mask into a 3D surface:
+
+- marching_cubes (+ canonical Lorensen/Bourke tables): binary mask ->
+  indexed mesh with welded vertices and smooth normals; isolevel 0.5,
+  optional field smoothing, integer downsample to cap triangles.
+  Vertices in physical mm. Winding reversed so normals face outward.
+- stl_export: binary STL writer (84 + 50*tris bytes), per-facet normals.
+- bridge: snapshot/generate split so generation runs off the main thread
+  without racing the live mask (eng-review decision), plus mesh buffer
+  accessors and lumen_mesh_write_stl.
+- SegTest: closed-2-manifold + outward-normal + STL-size checks (a wrong
+  table can't form a closed manifold). MeshShot: headless end-to-end
+  check (load -> threshold -> marching cubes -> STL) on real DICOM; the
+  phantom yields 89984 tris and a byte-exact STL.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+```
+feat(app): 3D tab (SceneKit) + Export tab (STL/PNG)
+…
+e4cef13
+```
+Wire the marching-cubes surface into the workspace:
+
+- ThreeD/MeshModel: snapshot-then-generate on a background task, holds the
+  SCNGeometry, tri/vertex counts; resets on a new volume.
+- ThreeD/MeshBuilder: bridge mesh buffers -> SCNGeometry (bone material).
+- ThreeD/MeshSceneView + MeshCanvas: orbit/zoom SceneKit viewport, framed
+  to the mesh, with an empty/generating placeholder.
+- Tabs/ThreeDControls: smoothing + resolution + Generate, mesh stats.
+- Tabs/ExportControls: save STL (NSSavePanel) and axial-slice PNG.
+- AppShell now wires all four tabs; placeholders removed. App injects the
+  MeshModel alongside the volume + segmentation models.
+
+Completes the segmentation + 3D-slicing feature (P1a). Paint/erase + undo
+(P1b) and screenshots + DMG (P2) remain.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+```
+Copilot
+AI
+review requested due to automatic review settings
+June 17, 2026 16:04
+Copilot
+AI
+reviewed
+Jun 17, 2026
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Copilot was unable to review this pull request because the user who requested the review has reached their quota limit.
+yashs33244
+and others
+added 11 commits
+June 17, 2026 21:42
+fix(app): avoid non-Sendable OpaquePointer capture in mesh generation
+…
+e12728e
+```
+Hop back to the main actor with the Sendable bit pattern only and
+re-read the model's own handle there, matching VolumeModel.load. Clears
+a Swift 6 concurrency warning (capture of OpaquePointer in a @sendable
+closure).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+```
+feat(nav): 3D-Slicer-style linked navigation (crosshair + click-to-lo…
+…
+b18aed6
+```
+…cate + wheel)
+
+Make the three panes feel like one instrument:
+
+- VolumeModel: a shared focus voxel (x,y,z) is now the source of truth; the
+  three slice indices derive from it (sliceIndex kept as an accessor so
+  existing call sites/sliders keep working). jump(to:) recenters all panes.
+- Click-to-locate: tap a point in any Visualize pane -> map to a voxel ->
+  all three panes recenter through it (linked navigation). Left-drag still
+  does window/level (tap vs drag, no conflict).
+- Crosshair / slice-intersection overlay: the focus point projected into
+  each pane as two colored lines (Red=Axial, Green=Coronal, Yellow=Sagittal),
+  each line colored by the plane it represents.
+- Mouse-wheel / two-finger scroll changes slices (ScrollCatcher: an NSView
+  local scroll monitor that's transparent to clicks, so taps/drags still
+  reach SwiftUI).
+- Geometry seam: voxel<->pane mapping is isolated in two VolumeModel methods
+  (delegating to the C++ plane_map) so an oblique/RAS model swaps in there.
+- bridge: lumen_voxel_to_slice_pixel (inverse of pixel_to_voxel).
+
+Verified: builds clean, coordinate pixel<->point round-trips exactly, app
+launches no-crash. Part of the Slicer-parity rework (Phase A).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+```
+feat(nav): radiological orientation labels (R/L/A/P/S/I) on slice panes
+…
+e78aa29
+```
+Draw orientation letters at each pane's edges (axial A/P/R/L, coronal
+S/I/R/L, sagittal S/I/A/P). HFS-convention approximation for now; reading
+ImageOrientationPatient per series is a TODO. Completes Phase A navigation
+polish; full zoom/pan deferred.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+```
+feat: multi-segment editor (paint/erase, Otsu, islands, undo) + per-s…
+…
+a621589
+```
+…egment 3D
+
+Phase B (Segment Editor) and Phase C (3D polish) of the 3D-Slicer-parity rework.
+
+C++ core (all covered by SegTest, 12 groups passing):
+- SegmentTable: multi-segment registry (id 1..255, colour, visibility, active);
+  fast 256-entry colour/visibility LUTs for the per-voxel overlay loop.
+- segment ops now target an active label: threshold owns its segment (never
+  steals from others), region-grow fills background, paint overwrites, erase
+  clears only the active segment.
+- analysis: Otsu auto-threshold over the HU histogram; islands keep-largest /
+  remove-small via 6-connected components.
+- undo_stack: RLE-compressed mask snapshots, depth-capped at 10 (bounded memory).
+- mask_view renders each voxel in its segment's colour, skipping hidden segments.
+- bridge: segment CRUD, active selection, colour/visibility, per-segment voxel
+  counts, Otsu, islands, push/undo/redo, and per-label mesh snapshot.
+
+Swift app:
+- SegmentationModel: segment list mirror, active segment, paint/erase brush,
+  live threshold + Otsu, islands, coalesced-undo capture points, undo/redo.
+- SegmentControls: segment list (eye / colour well / editable name / voxels /
+  active / delete), tool picker (threshold/grow/paint/erase), brush radius,
+  Otsu, islands, undo/redo, clear-active.
+- SlicePane: paint/erase drag gesture with a cursor brush ring; region-grow
+  seed on click; threshold has no canvas action.
+- MeshModel/MeshSceneView: one colored marching-cubes surface per visible
+  segment (sequential snapshot->generate->read off the live mask) + an R/A/S
+  orientation gnomon; STL export unions all segments.
+
+Deferred (noted for a later pass): 3D slice planes, 3D scissors, zoom/pan.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+```
+fix: avoid capturing mutable var across actor hop in mesh generation
+…
+aabaeca
+```
+Copy the per-segment results into an immutable let before the final
+MainActor.run, silencing the Swift 6 'reference to captured var in
+concurrently-executing code' warning. No runtime behavior change.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+```
+feat: pane maximize, fluid brushing, overlay toggles, margin/smooth +…
+…
+f986152
+```
+… 3D fixes
+
+Addresses a batch of usability/perf issues plus more segment effects.
+
+Slice viewport:
+- Maximize any pane to fill the viewport (header expand/restore button);
+  tri-pane grid <-> single-pane focus.
+- Brush cursor ring now reliably visible: pointer is tracked via an NSEvent
+  local monitor (mouseMoved/dragged) instead of SwiftUI hover under the
+  scroll-catcher, with a flipped coordinate space so it lines up exactly.
+- Crosshair lines and orientation labels each have an on/off toggle
+  (Visualize > Overlays), persisted in UserDefaults across launches.
+
+Brushing performance:
+- Mask overlay images moved into a dedicated OverlayStore so a stroke
+  republishes only the slice panes, not the whole segment-control panel
+  (the main source of lag).
+- Strokes interpolate between drag samples (overlapping stamps) so fast
+  drags are gap-free and feel responsive; one undo entry per stroke.
+
+Segment effects (new):
+- Margin grow/shrink (dilate/erode by voxel layers) and Smooth (26-neighbour
+  majority filter), all on the active segment, never overwriting other
+  segments. C++ in analysis.{hpp,cpp}, covered by SegTest (now 13 groups).
+
+Color picker:
+- Replaced SwiftUI ColorPicker (which drives the shared NSColorPanel that
+  lingered and re-opened every launch) with a popover palette of swatches.
+
+3D viewport:
+- Fixed orbit/zoom flicker: an explicit camera with wide near/far clip planes
+  (the default planes clipped mm-scale meshes during zoom), and a Coordinator
+  that only rebuilds nodes / reframes the camera when the geometry set
+  actually changes (no reframe thrash on every SwiftUI update).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+```
+refactor: class-based segmentation core (Facade + Strategy) + newcome…
+…
+1f5241a
+```
+…r docs
+
+Restructures the segmentation core around OOP and design patterns, and adds
+newcomer-oriented engineering docs. Behaviour is identical (SegTest 15 groups
+pass; MeshShot end-to-end output unchanged: 109528 voxels -> 89984 triangles).
+
+OOP / patterns:
+- SegmentEditor (Facade): one class owns the mask + segment table + undo stack
+  and a non-owning pointer to the loaded volume. All segmentation domain logic
+  (active label, "remove clears voxels", undo capture) now lives here instead of
+  leaking into the C bridge. Encapsulation + Single Responsibility.
+- SegmentationEffect (Strategy): every editing operation is a polymorphic class
+  (ThresholdEffect, PaintEffect, RegionGrowEffect, ClearEffect, KeepLargestEffect,
+  RemoveSmallEffect, GrowMarginEffect, ShrinkMarginEffect, SmoothEffect) behind a
+  single apply(). The editor dispatches any of them through one method; adding a
+  tool is a new subclass, not an edit to existing code (Open/Closed). The pure
+  numeric kernels stay as free functions the effects delegate to.
+- Bridge split by concern into lumen_bridge_volume/segment/mesh.cpp sharing a
+  private lumen_handle.hpp; the 410-line monolith (over the 400 cap) is gone and
+  every file is now well under the limit. The bridge is pure marshalling again.
+
+Tests:
+- New SegTest groups for the Strategy effects (polymorphic apply through the base
+  interface) and the SegmentEditor facade (undo round-trip, remove-clears-voxels).
+
+Docs (new docs/engineering/, linked from README):
+- ARCHITECTURE.md  - three layers, data flow, module map, "where do I fix X?".
+- CPP_ONBOARDING.md - C++ idioms (RAII, smart pointers, headers, the bridge)
+  explained for developers who do not write C++ daily.
+- DESIGN_PATTERNS.md - the patterns in the code and a recipe for adding a new
+  segmentation tool without touching existing logic.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+```
+Merge remote-tracking branch 'origin/main' into pr-2
+…
+810906a
+```
+# Conflicts:
+#	src/bridge/lumen_bridge_volume.cpp
+```
+fix: review findings on PR C-NikhilKarthik#2 (UAF, STL race, W/L rang…
+…
+33c73b3
+```
+…e, segment color, double-threshold)
+
+- MeshModel: pin the volume handle across background marching cubes so loading
+  a new volume mid-generation defers the free instead of a use-after-free; discard
+  a stale mesh if the volume was swapped.
+- MeshModel/ExportControls: refuse STL export while a generate is in flight (both
+  write the one shared C++ mesh buffer) and disable the button.
+- VisualizeControls: widen W/L slider/stepper ranges to always contain the current
+  value so presets outside the volume's HU span aren't snapped on first touch.
+- SegmentationModel: pick new-segment colour from a monotonic cursor so deleting a
+  middle segment no longer makes the next add reuse an on-screen colour.
+- SegmentationModel: suppress the debounced threshold re-apply after Otsu so it
+  runs one full-volume pass instead of two.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+```
+feat(io): decode compressed DICOM + select largest series per folder
+…
+9fc8d83
+```
+Real-world series (e.g. clinical CT) ship JPEG/JPEG-LS/RLE-compressed pixel
+data, which the loader previously rejected wholesale ('compressed or unsupported
+pixel format'). Register DCMTK's JPEG/JPEG-LS/RLE decoders and decompress
+encapsulated datasets to native LE before reading pixels; link the codec libs
+(dcmjpeg/dcmjpls/charls/ijg) statically.
+
+A folder also commonly holds more than one series (the CT plus a scout/dose
+report at the same 512x512 dims), which the dimension lock can't separate and
+which corrupts spacing/Z-order when merged. Group parsed slices by Series
+Instance UID and keep only the largest series; guard against absent in-plane
+spacing.
+
+Verified on a 2668-file JPEG-Lossless CT: was unusable, now loads 1774 slices,
+spacing 0.91/0.91/0.70 mm, HU [-1024, 3071]. Phantom + Meta/Seg/unit tests pass.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+```
+fix(app): mark commitName() @mainactor for older Swift toolchains
+…
+e69c560
+```
+CI's Swift (macos-14 runner) doesn't infer MainActor isolation for a View's
+non-body method, so commitName()'s call to the @mainactor SegmentationModel.rename
+failed to build there. Annotate it explicitly; no-op on newer toolchains.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+```
+Hide details
+View details
+C-NikhilKarthik
+merged commit 52aa777
+into
+C-NikhilKarthik:main
+Jun 24, 2026
+1 check passed
+Uh oh!
+There was an error while loading. Please reload this page.
+C-NikhilKarthik
+added a commit
+that referenced
+this pull request
+Jul 9, 2026
+fix: review findings on PR #2 (UAF, STL race, W/L range, segment colo…
+…
+86ff826
+```
+…r, double-threshold)
+
+- MeshModel: pin the volume handle across background marching cubes so loading
+  a new volume mid-generation defers the free instead of a use-after-free; discard
+  a stale mesh if the volume was swapped.
+- MeshModel/ExportControls: refuse STL export while a generate is in flight (both
+  write the one shared C++ mesh buffer) and disable the button.
+- VisualizeControls: widen W/L slider/stepper ranges to always contain the current
+  value so presets outside the volume's HU span aren't snapped on first touch.
+- SegmentationModel: pick new-segment colour from a monotonic cursor so deleting a
+  middle segment no longer makes the next add reuse an on-screen colour.
+- SegmentationModel: suppress the debounced threshold re-apply after Otsu so it
+  runs one full-volume pass instead of two.
+```
+C-NikhilKarthik
+added a commit
+that referenced
+this pull request
+Jul 9, 2026
+Merge pull request #2 from yashs33244/feature/yash-segmentation-3d-sl…
+…
+c9403b7
+```
+…icing
+
+feat: segmentation + 3D slicing (marching cubes) + tabbed workspace
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+3 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

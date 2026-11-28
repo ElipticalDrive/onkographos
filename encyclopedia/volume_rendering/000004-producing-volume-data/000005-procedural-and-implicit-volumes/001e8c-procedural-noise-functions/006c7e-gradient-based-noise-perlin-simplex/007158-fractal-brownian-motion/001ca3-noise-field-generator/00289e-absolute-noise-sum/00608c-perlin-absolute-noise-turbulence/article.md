@@ -1,0 +1,113 @@
+# Perlin Absolute Noise (Turbulence)
+Also called: Fractal Abs Sum, Ken Perlin’s trick, Perlin Turbulence
+
+## Overview
+Perlin Absolute Noise, commonly known as Turbulence, is a procedural noise technique that modifies Fractal Brownian Motion (fBm) by taking the absolute value of the noise function at each octave before summing [S3, unofficial]. This operation creates a range of non-negative values and introduces discontinuities in the derivative, resulting in a 'billowy' or 'cloudy' appearance distinct from the smoother signed sums of standard fBm [S1, S3, unofficial]. It builds on [Absolute Noise Sum](4319-absolute-noise-sum.md) by specifically utilizing Perlin's gradient noise as the base generator [S1, S3, unofficial].
+
+## How it works
+**Inputs and Outputs**
+- **Input**: A 3D position vector $p$ (float3) [S3, unofficial].
+- **Parameters**:
+  - `octaves`: Integer number of noise layers to sum [S3, unofficial].
+  - `lacunarity`: Float multiplier for frequency increase between octaves (typically 2.0) [S3, unofficial].
+  - `gain`: Float multiplier for amplitude decrease between octaves [S3, unofficial].
+- **Output**: A scalar float representing the accumulated turbulence value [S3, unofficial].
+
+**Data Structures**
+The method relies on a base Perlin gradient noise implementation, which typically uses permutation and gradient lookup tables [S3, unofficial]. No additional data structures are required for the turbulence summation itself [S3, unofficial].
+
+**Steps**
+1. Initialize `sum` to 0.0 and `amp` (amplitude) to 1.0 [S3, unofficial].
+2. Loop for $i$ from 0 to `octaves` - 1:
+   a. Evaluate the base Perlin noise function at the current position $p$: $n = \text{noise}(p)$ [S3, unofficial].
+   b. Take the absolute value of the noise: $|n|$ [S3, unofficial].
+   c. Add the weighted absolute noise to the sum: $\text{sum} \leftarrow \text{sum} + \text{amp} \times |n|$ [S3, unofficial].
+   d. Update the position for the next octave: $p \leftarrow p \times \text{lacunarity}$ [S3, unofficial].
+   e. Update the amplitude for the next octave: $\text{amp} \leftarrow \text{amp} \times \text{gain}$ [S3, unofficial].
+3. Return `sum` [S3, unofficial].
+
+**Formulas**
+The final value $T(p)$ is calculated as:
+$$ T(p) = \sum_{i=0}^{N-1} \text{gain}^i \cdot | \text{noise}( \text{lacunarity}^i \cdot p ) | $$
+Where:
+- $N$ is the number of `octaves` [S3, unofficial].
+- $\text{noise}(\cdot)$ is the underlying Perlin gradient noise function [S3, unofficial].
+- $|\cdot|$ denotes the absolute value operation [S3, unofficial].
+
+**Parameters**
+- `lacunarity`: Typically 2.0, causing the frequency to double each octave [S3, unofficial].
+- `gain`: Typically 0.5, halving the amplitude each octave to ensure convergence [S3, unofficial].
+- `octaves`: Integer controlling the number of frequency layers [S3, unofficial].
+
+**Edge Cases and Pitfalls**
+- **Discontinuities**: Taking the absolute value introduces discontinuities in the first derivative at points where the noise crosses zero [S3, unofficial]. This is intentional for the "billowy" effect but may cause artifacts in applications requiring smooth gradients [S3, unofficial].
+- **Range**: The output range is $[0, \sum \text{gain}^i]$. If `gain` < 1, the sum converges to a finite maximum less than 2.0 (specifically $1/(1-\text{gain})$ if `amp` starts at 1) [G]. The sources do not specify a normalization step to map this back to $[0, 1]$ or $[-1, 1]$ within the core turbulence function itself, though one source mentions a `mapToSigned` function for other contexts [S1, S3, unofficial]. Implementers should be aware that the raw output is not bounded to $[-1, 1]$ [S3, unofficial].
+- **Alternative Scaling**: Some implementations scale the amplitude by $1/f$ instead of using a separate `gain` parameter, which diminishes higher frequency contributions while keeping values within the original noise range [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def turbulence(p, octaves, lacunarity, gain):
+    """
+    Calculates Perlin Turbulence.
+    
+    Args:
+        p (Vector3): Input 3D position.
+        octaves (int): Number of noise octaves.
+        lacunarity (float): Frequency multiplier per octave.
+        gain (float): Amplitude multiplier per octave.
+        
+    Returns:
+        float: The accumulated turbulence value.
+    """
+    sum_val = 0.0
+    amp = 1.0
+    
+    for i in range(octaves):
+        # Evaluate base Perlin gradient noise at current position
+        # Returns a signed scalar in [-1, 1]
+        n = noise(p)
+        
+        # Take absolute value (Ken Perlin's trick)
+        abs_n = abs(n)
+        
+        # Add weighted absolute noise to sum
+        sum_val += amp * abs_n
+        
+        # Update position and amplitude for next octave
+        p = p * lacunarity
+        amp = amp * gain
+        
+    return sum_val
+
+def noise(p):
+    """Standard Perlin gradient noise evaluation.
+    Uses permutation and gradient lookup tables to return a signed scalar in [-1, 1]."""
+    # Implementation details for base Perlin noise are omitted;
+    # this function represents the standard gradient noise operation.
+    pass
+```
+
+## Subtopics
+
+### Standard fBm (Fractal Sum)
+Sums signed noise values directly without absolute value, resulting in smoother, continuous derivatives [S3, unofficial]. Choose when smooth gradients are required [G].
+
+### Absolute Noise Sum
+A broader category including any noise function (not just Perlin) where absolute values are summed [G]. Perlin Turbulence is a specific instance using Perlin noise [S1, S3, unofficial].
+
+## Operating characteristics
+- **Time Complexity**: $O(N)$, where $N$ is the number of octaves [G].
+- **Memory Complexity**: Auxiliary space is $O(1)$, but the base Perlin noise implementation requires permutation and gradient lookup tables [S3, unofficial].
+- **Performance**: The base Perlin noise implementation compiles to approximately 40 instructions in a pixel shader [S3, unofficial]. The turbulence function adds minimal overhead per octave (multiplications and an absolute value) [S3, unofficial].
+- **Strengths**: Creates visually appealing "cloudy" or "billowy" textures with visibly sharper edges and doubled peaks compared to standard fBm [S1, S3, unofficial].
+- **Limitations**: The absolute value operation introduces derivative discontinuities, which may be undesirable for applications requiring smooth shading or physical simulation [S3, unofficial]. The output range is not automatically normalized to $[-1, 1]$ [S3, unofficial].
+
+## Background
+Perlin Absolute Noise, or Turbulence, was introduced by Ken Perlin as a variant of fractal Brownian motion [S3, unofficial]. Perlin's original algorithm is Academy Award-winning and uses gradient noise over $\mathbb{R}^3$ with a scalar output [S3, unofficial]. The technique is widely used in procedural texture generation for creating natural-looking surfaces like clouds, smoke, and marble [S3, unofficial]. It differs from standard fBm by the application of the absolute value function, which was described as "Ken Perlin's trick" [S3, unofficial].
+
+## Sources
+[S1] Terrain synthesis using noise, https://trepo.tuni.fi/handle/10024/101043, fetched 2026-10-26 (unofficial)
+[S2] Russoul/voxelized3d, https://github.com/Russoul/voxelized3d, fetched 2026-10-26 (unofficial)
+[S3] PDF Noise and Procedural Techniques - NVIDIA, https://www.nvidia.com/docs/IO/8228/GDC2003_OGL_ProceduralNoise.pdf, fetched 2026-10-27 (unofficial)

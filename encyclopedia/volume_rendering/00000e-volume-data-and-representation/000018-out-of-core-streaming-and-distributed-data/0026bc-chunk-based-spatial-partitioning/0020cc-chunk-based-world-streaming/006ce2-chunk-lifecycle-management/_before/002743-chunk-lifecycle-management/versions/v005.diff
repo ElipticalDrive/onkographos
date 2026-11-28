@@ -1,0 +1,160 @@
+--- v004.md
++++ v005.md
+@@ -4,71 +4,73 @@
+ 
+ ## Overview
+-Chunk Lifecycle Management is the core algorithm for maintaining the set of active volume data chunks in memory during streaming. It solves the problem of keeping only relevant spatial regions resident by computing the set difference between the desired visible region and the currently loaded region [S1, unofficial]. It differs from [Synchronous Chunk Loading](3904-synchronous-chunk-loading.md) by decoupling the decision of *which* chunks to load from the actual I/O operation, and from [Chunk-Based World Management & Asynchronous Loading](6440-chunk-based-world-management-asynchronous-loading.md) by providing the fundamental logic that asynchronous schedulers execute [S1, unofficial].
++Chunk Lifecycle Management maintains the set of active volume data chunks during streaming by computing which chunks to spawn and despawn based on camera proximity [S1, unofficial]. It differs from [Synchronous Chunk Loading](3904-synchronous-chunk-loading.md) by explicitly separating the residency decision logic from I/O scheduling, and from [Chunk-Based World Management & Asynchronous Loading](6440-chunk-based-world-management-asynchronous-loading.md) by providing the deterministic core logic that asynchronous schedulers execute [G].
+ 
+ ## How it works
+ **Inputs:**
++- `camera_position`: The current world position of the viewer [S1, unofficial].
+ - `render_distance`: The radius (in chunk units) defining the desired visible area [S1, unofficial].
+-- `camera_position`: The current world position of the viewer [S1, unofficial].
+-- `chunks`: A hash map (dictionary) mapping `ChunkPosition` (tuple of integers) to `Chunk` objects [S1, unofficial].
++- `chunk_size`: The physical size of a single chunk [G].
++- `chunks`: A hash map mapping chunk positions to existing chunk objects [S1, unofficial].
+ 
+ **Outputs:**
+-- `new_chunks`: A list of newly instantiated `Chunk` objects ready for terrain generation [S1, unofficial].
+-- `chunks_to_delete`: A list of `ChunkPosition` identifiers for chunks removed from memory [S1, unofficial].
++- `newChunks`: A list of newly instantiated chunk objects ready for terrain generation [S1, unofficial].
++- `chunksToDelete`: A list of chunk positions for chunks removed from memory [S1, unofficial].
+ 
+ **Data Structures:**
+-- `ChunkPosition`: A 3-tuple of integers $(x, y, z)$ representing the grid coordinates of a chunk [S1, unofficial].
+-- `Chunk`: An object containing the voxel data and rendering state for a specific chunk [S1, unofficial].
+-- `chunks`: A hash map where keys are `ChunkPosition` and values are `Chunk` references [S1, unofficial].
++- `ChunkPosition`: A 3-tuple of integers representing grid coordinates [G].
++- `Chunk`: An object containing voxel data and rendering state for a specific chunk [G].
+ 
+ **Algorithm Steps:**
+-1.  **Identify Desired Region:** Compute the set of all chunk positions within the render distance from the camera. Let this set be $P_{nearby}$. This is typically done using a function `ChunkPositionsWithinRenderDistance(camera_position, render_distance)` [S1, unofficial].
+-2.  **Identify Existing Region:** Extract the set of positions currently held in the `chunks` hash map. Let this set be $P_{existing}$ [S1, unofficial].
+-3.  **Determine Unloads:** Iterate through $P_{existing}$. For each position $p \in P_{existing}$, if $p \notin P_{nearby}$, the chunk is no longer needed.
+-    -   Remove the chunk object from the `chunks` map.
+-    -   Remove the chunk from frame draw calls.
+-    -   Add $p$ to the list `chunks_to_delete` [S1, unofficial].
+-4.  **Determine Loads:** Iterate through $P_{nearby}$. For each position $p \in P_{nearby}$, if $p \notin P_{existing}$, the chunk is missing.
+-    -   Create a new `Chunk` object.
+-    -   Insert the new object into the `chunks` map with key $p$.
+-    -   Add the new object to the list `new_chunks` [S1, unofficial].
+-5.  **Generate Content:** For every chunk in `new_chunks`, trigger the terrain generation process (e.g., `Chunk::MultithreadGenerateTerrain`) [S1, unofficial].
++1. **Identify Desired Region:** Compute the set of all chunk positions within the render distance from the camera. Let this set be `_nearbyPositionsSet` [S1, unofficial].
++2. **Identify Existing Region:** Extract the set of positions currently held in the `chunks` hash map. Let this set be `_chunksAlreadyExist` [S1, unofficial].
++3. **Determine Unloads:** Iterate through `_chunksAlreadyExist`. For each position $p \in \_chunksAlreadyExist$, if $p \notin \_nearbyPositionsSet$, the chunk is no longer needed. Remove the chunk object from the `chunks` map, remove it from frame draw calls, and add $p$ to `chunksToDelete` [S1, unofficial].
++4. **Determine Loads:** Iterate through `_nearbyPositionsSet`. For each position $p \in \_nearbyPositionsSet$, if $p \notin \_chunksAlreadyExist$, the chunk is missing. Create a new `Chunk` object, insert it into the `chunks` map with key $p$, and add the new object to `newChunks` [S1, unofficial].
++5. **Generate Content:** Generate terrain for all chunks in `newChunks` using `Chunk::MultithreadGenerateTerrain` [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def manage_chunk_lifecycle(camera_position, render_distance, chunks):
++class Chunk:
++    def __init__(self, pos):
++        self.pos = pos
++    def remove_from_draw_calls(self):
++        pass
++    def multithread_generate_terrain(self):
++        pass
++
++def manage_chunk_lifecycle(camera_pos, render_dist, chunk_size, chunks):
+     # Step 1: Identify desired region
+-    nearby_positions = ChunkPositionsWithinRenderDistance(camera_position, render_distance)
+-    
++    _nearbyPositionsSet = set()
++    center = (camera_pos[0] / chunk_size, camera_pos[1] / chunk_size, camera_pos[2] / chunk_size)
++    for x in range(int(center[0]) - render_dist, int(center[0]) + render_dist + 1):
++        for y in range(int(center[1]) - render_dist, int(center[1]) + render_dist + 1):
++            for z in range(int(center[2]) - render_dist, int(center[2]) + render_dist + 1):
++                if (x - center[0])**2 + (y - center[1])**2 + (z - center[2])**2 <= render_dist**2:
++                    _nearbyPositionsSet.add((x, y, z))
++
+     # Step 2: Identify existing region
+-    existing_positions = set(chunks.keys())
+-    
+-    new_chunks = []
+-    chunks_to_delete = []
+-    
++    _chunksAlreadyExist = set(chunks.keys())
++
++    newChunks = []
++    chunksToDelete = []
++
+     # Step 3: Determine Unloads
+-    for pos in existing_positions:
+-        if pos not in nearby_positions:
+-            # Remove from draw calls (implementation detail)
++    for pos in _chunksAlreadyExist:
++        if pos not in _nearbyPositionsSet:
+             chunks[pos].remove_from_draw_calls()
+-            # Remove from map
+             del chunks[pos]
+-            # Record for deletion
+-            chunks_to_delete.append(pos)
+-            
++            chunksToDelete.append(pos)
++
+     # Step 4: Determine Loads
+-    for pos in nearby_positions:
+-        if pos not in existing_positions:
+-            # Create new chunk
++    for pos in _nearbyPositionsSet:
++        if pos not in _chunksAlreadyExist:
+             new_chunk = Chunk(pos)
+-            # Insert into map
+             chunks[pos] = new_chunk
+-            # Record for generation
+-            new_chunks.append(new_chunk)
+-            
++            newChunks.append(new_chunk)
++
+     # Step 5: Generate Content
+-    for chunk in new_chunks:
+-        chunk.multithread_generate_terrain()
+-        
+-    return new_chunks, chunks_to_delete
++    for chunk in newChunks:
++        chunk.multithread_generate_terrain() # Not given in the sources.
++
++    return newChunks, chunksToDelete
+ ```
+ 
+@@ -78,27 +80,27 @@
+ 
+ **Edge Cases:**
+--   **Precision:** The sources do not specify floating-point handling for `camera_position` relative to integer chunk grids. [G] Typically, the camera position is converted to chunk coordinates via floor division by chunk size before distance calculation.
+--   **Boundaries:** The sources do not specify behavior at world boundaries (e.g., negative coordinates). [G] Standard integer arithmetic applies unless a specific world origin offset is defined.
++- **Precision:** The sources do not specify floating-point handling for `camera_position` relative to integer chunk grids. [G] Typically, the camera position is converted to chunk coordinates via floor division by chunk size before distance calculation.
++- **Boundaries:** The sources do not specify behavior at world boundaries (e.g., negative coordinates). [G] Standard integer arithmetic applies unless a specific world origin offset is defined.
+ 
+ ## Subtopics
+ 
+ ### [Dynamic Chunk Generation with Radius](4002-dynamic-chunk-generation-with-radius.md)
+-Manages chunk instantiation and removal based on a spherical render distance around the player, using set difference operations to determine which chunks to load or unload. It builds on [Chunk Lifecycle Management](3987-chunk-lifecycle-management.md) by replacing static or scanner-based triggers with a continuous distance check against the player's current position [G]. Unlike [Chunk Loading/Unloading Scanner](4404-chunk-loading-unloading-scanner.md), which scans discrete regions, this method evaluates every chunk within a calculated bounding box relative to the player to maintain a consistent spherical visibility volume [G].
++Manages chunk instantiation and removal based on a spherical render distance around the player, using set difference operations to determine which chunks to load or unload. It builds on [Chunk Lifecycle Management](3987-chunk-lifecycle-management.md) by replacing static triggers with a continuous distance check against the player's current position [G]. Unlike [Chunk Loading/Unloading Scanner](4404-chunk-loading-unloading-scanner.md), which scans discrete regions, this method evaluates every chunk within a calculated bounding box relative to the player to maintain a consistent spherical visibility volume [G].
+ 
+ ### [Chunk Loading/Unloading Scanner](4404-chunk-loading-unloading-scanner.md)
+-The Chunk Loading/Unloading Scanner is a spatial management technique that determines which chunks of a volume dataset need to be loaded into memory or unloaded based on the camera's current and previous positions. It solves the problem of efficiently streaming large voxel worlds by identifying a load area and an unload area using offset grids, then computing the symmetric difference between these areas to generate precise queue updates. It differs from [Chunk Visibility Culling](5031-chunk-visibility-culling.md) by operating on loaded chunks and using distance thresholds rather than frustum intersection tests.
++Determines which chunks of a volume dataset need to be loaded or unloaded based on the camera's current and previous positions. It solves the problem of efficiently streaming large voxel worlds by identifying load and unload areas using offset grids, then computing the symmetric difference between these areas to generate precise queue updates. It differs from [Chunk Visibility Culling](5031-chunk-visibility-culling.md) by operating on loaded chunks and using distance thresholds rather than frustum intersection tests.
+ 
+ ### [Budget Plans](5497-budget-plans.md)
+-Budget Plans manage chunk loading policies for chunked volume rendering, replacing the single octree-focused policy with presets for exploration, whole-volume figures, and frame-rate holding. It solves the problem of rigid streaming behavior by allowing mid-session switching and re-folding of load options based on user intent. Unlike siblings that focus on geometric generation or scanner mechanics, Budget Plans shape the octree structure and residency targets to balance detail and performance.
++Manages chunk loading policies for chunked volume rendering, replacing the single octree-focused policy with presets for exploration, whole-volume figures, and frame-rate holding. It solves the problem of rigid streaming behavior by allowing mid-session switching and re-folding of load options based on user intent. Unlike siblings that focus on geometric generation or scanner mechanics, Budget Plans shape the octree structure and residency targets to balance detail and performance.
+ 
+ ## Operating characteristics
+--   **Time Complexity:** $O(N + M)$, where $N$ is the number of chunks in the render distance and $M$ is the number of currently loaded chunks. Set lookups are $O(1)$ on average [S1, unofficial].
+--   **Memory Complexity:** Proportional to the number of loaded chunks. The algorithm itself uses $O(N + M)$ auxiliary space for the position sets [S1, unofficial].
+--   **Strengths:** Simple, deterministic, and easy to implement. It guarantees that no chunk within the render distance is missing and no chunk outside is present [S1, unofficial].
+--   **Limitations:** It does not handle asynchronous I/O scheduling or priority. It assumes that `ChunkPositionsWithinRenderDistance` and `Chunk::MultithreadGenerateTerrain` are implemented elsewhere [S1, unofficial].
+--   **When to use:** When a simple, synchronous determination of chunk residency is required, or as the logical core for more complex asynchronous schedulers [S1, unofficial].
++- **Time Complexity:** Not given in the sources. [G] The algorithm performs $O(N + M)$ set operations and allocations, where $N$ is the number of chunks in the render distance and $M$ is the number of currently loaded chunks.
++- **Memory Complexity:** Not given in the sources. [G] Auxiliary space is $O(N + M)$ for the position sets, plus proportional to the number of loaded chunks.
++- **Strengths:** Simple, deterministic, and easy to implement. It guarantees that no chunk within the render distance is missing and no chunk outside is present [S1, unofficial].
++- **Limitations:** It does not handle asynchronous I/O scheduling or priority. It assumes that chunk generation and draw call management are implemented elsewhere [S1, unofficial].
++- **When to use:** When a simple, synchronous determination of chunk residency is required, or as the logical core for more complex asynchronous schedulers [G].
+ 
+ ## Background
+-The method originates from the `Cube` project by gabkhanfig, which implements a voxel engine with chunk-based streaming [S1, unofficial]. The specific algorithm for identifying nearby positions and managing the hash map of chunks is documented in the project's source code [S1, unofficial].
++Not given in the sources. The specific algorithm for identifying nearby positions and managing the hash map of chunks is documented in the `Cube` voxel engine repository [S1, unofficial].
+ 
+ ## Sources

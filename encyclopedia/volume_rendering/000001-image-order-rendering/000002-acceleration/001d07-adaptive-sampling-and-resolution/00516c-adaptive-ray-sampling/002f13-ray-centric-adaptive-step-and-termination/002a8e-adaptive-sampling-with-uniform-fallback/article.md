@@ -1,0 +1,152 @@
+# Adaptive Sampling with Uniform Fallback
+
+
+## Overview
+Adaptive Sampling with Uniform Fallback combines adaptive ray sampling with a deterministic uniform backup to prevent insufficient sample coverage in sparse or empty volume regions [S1, unofficial]. It distinguishes itself from pure adaptive methods by guaranteeing a minimum sampling density through a fallback mechanism, ensuring robustness at the cost of increased computation in empty space [S1, unofficial].
+
+## How it works
+The method operates in two phases: an adaptive sampling phase using an estimator, followed by a uniform fallback phase for rays that did not receive sufficient samples [S1, unofficial].
+
+**Inputs:**
+*   Ray origins $\mathbf{o}$ and directions $\mathbf{d}$ for $N$ rays [S1, unofficial].
+*   Volume bounds defined by intersection intervals $[t_{near}, t_{far}]$ for each ray [S1, unofficial].
+*   Adaptive sampling parameters: `step_size` (or max step size), `fallback_when_samples` (minimum sample count threshold) [S1, unofficial].
+*   Fallback parameters: `enable_fallback` (boolean), $K$ (number of uniform samples for fallback) [S1, unofficial].
+
+**Outputs:**
+*   Sample start positions $t_s$ and end positions $t_e$ for all accepted samples [S1, unofficial].
+*   Ray indices $ray\_idx$ mapping each sample to its source ray [S1, unofficial].
+
+**Data Structures:**
+*   Tensors for $t_s, t_e, ray\_idx$ of shape $(N_{samples},)$ and $(N_{rays},)$ respectively [S1, unofficial].
+*   Integer counters for samples per ray [S1, unofficial].
+
+**Steps:**
+
+1.  **Ray-Volume Intersection:**
+    Compute $t_{near}$ and $t_{far}$ for each ray against the volume bounding box (AABB) [S1, unofficial]. Filter rays where $t_{far} > t_{near}$ [S1, unofficial]. If no valid rays exist, return empty tensors [S1, unofficial].
+
+2.  **Adaptive Sampling:**
+    Pass valid ray origins, directions, $t_{near}$, $t_{far}$, and `step_size` to the adaptive estimator [S1, unofficial]. The estimator returns indices $ray\_idx_{adv}$ and sample intervals $t_{s, adv}, t_{e, adv}$ [S1, unofficial]. Convert $ray\_idx_{adv}$ to long integers [S1, unofficial].
+
+3.  **Sample Counting:**
+    Count the number of adaptive samples assigned to each ray using binning:
+    $$
+    counts[i] = \text{bincount}(ray\_idx_{adv}, \text{minlength}=N_{valid})
+    $$
+    where $counts[i]$ is the number of samples for the $i$-th valid ray [S1, unofficial].
+
+4.  **Fallback Identification:**
+    Identify rays with sample counts below the threshold:
+    $$
+    low\_ids = \{ i \mid counts[i] < \text{fallback\_when\_samples} \}
+    $$
+    [S1, unofficial].
+
+5.  **Uniform Fallback Generation:**
+    For each ray in $low\_ids$:
+    *   Compute uniform step size: $\Delta t = \frac{t_{far} - t_{near}}{K}$ [S1, unofficial].
+    *   Generate sample start times: $t_{s, fb}[k] = t_{near} + k \cdot \Delta t$ for $k \in \{0, \dots, K-1\}$ [S1, unofficial].
+    *   Generate sample end times: $t_{e, fb}[k] = t_{s, fb}[k] + \Delta t$ [S1, unofficial].
+    *   Clamp the final $t_{e, fb}$ to $t_{far}$ to prevent overflow [S1, unofficial].
+    *   Assign ray indices $ray\_idx_{fb}$ corresponding to the fallback ray [S1, unofficial].
+
+6.  **Concatenation:**
+    Combine the adaptive and fallback samples:
+    $$
+    t_s = \text{concat}(t_{s, adv}, t_{s, fb})
+    $$
+    $$
+    t_e = \text{concat}(t_{e, adv}, t_{e, fb})
+    $$
+    $$
+    ray\_idx = \text{concat}(ray\_idx_{adv}, ray\_idx_{fb})
+    $$
+    [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def adaptive_sampling_with_uniform_fallback(rays_o, rays_d, t_near, t_far, 
+                                            step_size, fallback_when_samples, 
+                                            K, enable_fallback):
+    # Step 1: Filter valid rays
+    valid_mask = t_far > t_near
+    rays_o_valid = rays_o[valid_mask]
+    rays_d_valid = rays_d[valid_mask]
+    t_near_valid = t_near[valid_mask]
+    t_far_valid = t_far[valid_mask]
+    
+    if len(rays_o_valid) == 0:
+        return torch.tensor([], dtype=torch.float32), torch.tensor([], dtype=torch.float32), torch.tensor([], dtype=torch.long)
+
+    # Step 2: Adaptive Sampling
+    # Adaptive estimator call (implementation not provided in sources) [G]
+    ray_idx_adv, t_s_adv, t_e_adv = torch.empty(0, dtype=torch.long), torch.empty(0, dtype=torch.float32), torch.empty(0, dtype=torch.float32)
+
+    # Step 3: Count samples per ray
+    N_valid = len(rays_o_valid)
+    counts = torch.bincount(ray_idx_adv, minlength=N_valid)
+
+    # Step 4: Identify low-sample rays
+    if enable_fallback:
+        low_ids = torch.where(counts < fallback_when_samples)[0]
+        
+        if len(low_ids) > 0:
+            # Step 5: Uniform Fallback
+            t_near_fb = t_near_valid[low_ids]
+            t_far_fb = t_far_valid[low_ids]
+            
+            # Compute uniform steps
+            dt = (t_far_fb - t_near_fb) / K
+            
+            # Generate K samples per low ray
+            k_indices = torch.arange(K, device=rays_o.device)
+            # Broadcast: (N_low, 1) + (1, K) -> (N_low, K)
+            t_s_fb = t_near_fb[:, None] + k_indices[None, :] * dt[:, None]
+            t_e_fb = t_s_fb + dt[:, None]
+            
+            # Clamp last sample end to t_far
+            t_e_fb[:, -1] = t_far_fb
+            
+            # Reshape to 1D for concatenation
+            t_s_fb = t_s_fb.flatten()
+            t_e_fb = t_e_fb.flatten()
+            
+            # Create ray indices for fallback
+            ray_idx_fb = low_ids[:, None].expand(-1, K).flatten()
+            
+            # Step 6: Concatenate
+            t_s = torch.cat([t_s_adv, t_s_fb])
+            t_e = torch.cat([t_e_adv, t_e_fb])
+            ray_idx = torch.cat([ray_idx_adv, ray_idx_fb])
+        else:
+            t_s, t_e, ray_idx = t_s_adv, t_e_adv, ray_idx_adv
+    else:
+        t_s, t_e, ray_idx = t_s_adv, t_e_adv, ray_idx_adv
+
+    return t_s, t_e, ray_idx
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Clamping $t_{e, fb}$ to $t_{far}$ is critical to avoid sampling outside the volume bounds, which may cause out-of-bounds memory access or invalid density queries [S1, unofficial].
+*   **Degenerate Input:** If $t_{near} \approx t_{far}$, $\Delta t$ becomes negligible; the fallback should handle this by ensuring $K \ge 1$ and checking for zero-length intervals [G].
+*   **Performance:** The fallback adds overhead for rays that are already well-sampled if not properly gated by `enable_fallback` and `low_ids` [G].
+
+## Subtopics
+
+## Operating characteristics
+*   **Time Complexity:** $O(N_{rays} + N_{samples})$ [G]. The adaptive phase depends on the estimator's efficiency [S1, unofficial]. The fallback phase is $O(N_{low} \cdot K)$, where $N_{low}$ is the number of rays needing fallback [S1, unofficial].
+*   **Memory Complexity:** $O(N_{samples} + N_{low} \cdot K)$ to store the combined sample set [G].
+*   **Strengths:** Guarantees minimum coverage; robust against estimator failures or sparse regions; simple to implement [G].
+*   **Limitations:** Increased computational cost in empty space compared to pure adaptive methods; potential redundancy if adaptive samples already cover the ray well [G].
+*   **When to Use:** When visual completeness is critical and adaptive estimators may miss sparse structures; in scenes with large empty regions where uniform sampling is cheap [G].
+*   **When Not to Use:** When computational budget is extremely tight and empty space can be skipped entirely; when adaptive sampling is known to be highly accurate and consistent [G].
+
+## Background
+Not given in the sources. [G]
+
+## Sources
+[S1] AlanHsu314/CoroNeRF_public, https://github.com/AlanHsu314/CoroNeRF_public, fetched 2026-10-27 (unofficial)

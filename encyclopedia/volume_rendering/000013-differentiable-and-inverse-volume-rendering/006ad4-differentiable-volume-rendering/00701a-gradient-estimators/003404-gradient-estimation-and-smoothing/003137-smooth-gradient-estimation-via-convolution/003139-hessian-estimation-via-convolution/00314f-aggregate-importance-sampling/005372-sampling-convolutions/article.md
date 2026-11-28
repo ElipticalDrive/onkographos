@@ -1,0 +1,84 @@
+# Sampling Convolutions
+
+
+## Overview
+Sampling Convolutions is a technique to compute accurate gradients in integrands with large support using spherical convolutions, specifically addressing the mismatch between standard hemispherical sampling and the full-sphere support of a convolution [S1]. It differs from naive convolution sampling by introducing a precomputed correction factor that compensates for the energy loss incurred when the sampling distribution is restricted to a hemisphere while the convolution kernel extends over the full sphere [S1].
+
+## How it works
+**Inputs:**
+- The integrand function $f(\mu)$, typically a product of a BSDF and incident illumination [S1].
+- The convolution kernel $k(\mu, \omega)$, defined on the unit sphere $S^2$ [S1].
+- The default sampling strategy PDF used by the renderer for $f$, denoted $p_f(\mu)$ [S1].
+
+**Outputs:**
+- An unbiased estimate of the integral $\int_{S^2} f(\mu) d\mu$ [S1].
+
+**Data Structures:**
+- **Correction Lookup Table:** A precomputed array or function mapping direction $\mu \in \mathcal{H}$ to the scalar correction factor $C(\mu)$ [S1].
+
+**Parameters:**
+- **Kernel Width:** The method assumes $k$ is a narrowly peaked convolution kernel [S1].
+- **Correction Factor Values:** $C(\mu) = 1/2$ at grazing angles and $C(\mu) \approx 1$ for directions inside the hemisphere [S1].
+
+**Steps:**
+1. **Precompute Correction Factor:** Calculate $C(\mu) = \int_{\mathcal{H}} k(\mu, \omega) d\omega$ for the chosen kernel $k$ [S1].
+2. **Sample Direction:** Sample a direction $\mu$ from the hemisphere $\mathcal{H}$ using the renderer's default sampling strategy for $f$ [S1].
+3. **Evaluate Integrand and Correction:** Compute $f(\mu)$ and retrieve $C(\mu)$ from the lookup table [S1].
+4. **Compute Weight:** Calculate the sample weight as $\frac{f(\mu)}{C(\mu) p_f(\mu)} \int_{S^2} k(\mu, \omega) d\omega$ [S1]. If the kernel is normalized over $S^2$, the inner integral equals $1$ [G].
+5. **Accumulate:** Accumulate the weight to estimate $\int_{S^2} f(\mu) d\mu$ [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def sample_convolutions(f, kernel_k, p_f, C_lookup):
+    """
+    Estimates the integral of f using convolution sampling with hemispherical correction.
+    
+    Args:
+        f: Function evaluating the integrand f(mu).
+        kernel_k: Convolution kernel function k(mu, omega).
+        p_f: PDF function for the default sampling strategy of f.
+        C_lookup: Function or lookup table for C(mu).
+        
+    Returns:
+        unbiased_estimate: Float, the unbiased estimate of the integral.
+    """
+    # Step 2: Sample direction from hemisphere using default strategy
+    mu, pdf_value = p_f.sample()
+    
+    # Guard: ensure sample is valid and correction factor is non-zero
+    if mu.z <= 0 or C_lookup(mu) == 0:
+        return 0.0
+        
+    # Step 3: Retrieve correction factor and evaluate integrand
+    C_mu = C_lookup(mu)
+    f_val = f(mu)
+    
+    # Step 4: Compute weight
+    # The estimator derives from Eq. 35-37: f(mu) / (C(mu) * p_f(mu)) * integral(k) over S^2
+    # Assuming kernel_k is normalized over S^2, the integral equals 1.0 [G]
+    kernel_integral = 1.0 
+    
+    weight = (f_val / (C_mu * pdf_value)) * kernel_integral
+    
+    return weight
+```
+
+**Edge Cases and Pitfalls:**
+- **Hemispherical Mismatch:** Standard BRDF sampling only covers the hemisphere $\mathcal{H}$, but the support of $f \otimes k$ is the full sphere $S^2$, causing energy loss [S1].
+- **Grazing Angles:** At grazing angles, $C(\mu) = 1/2$, which halves the effective sampling weight if uncorrected [S1].
+- **Kernel Width:** The method relies on $f \otimes k$ being similar to $f$, which holds when $k$ is narrowly peaked [S1].
+
+## Operating characteristics
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Not given in the sources.
+- **Strengths:** Provides an unbiased estimate of the convolution integral using existing hemispherical sampling strategies [S1].
+- **Limitations:** Relies on the assumption that the default sampling strategy for $f$ is a good approximation for $f \otimes k$, which holds best for narrowly peaked kernels [S1].
+- **When to use:** When differentiating integrands involving spherical convolutions with large support, particularly in differentiable rendering contexts where accurate gradients are needed [S1].
+
+## Background
+The method originates from work on computing accurate gradients in integrands with large support using spherical convolutions [S1]. It addresses a specific issue in differentiable volume and path rendering where spherical convolutions are used to smooth integrands for gradient estimation, identifying hemispherical sampling mismatch as a source of bias [S1].
+
+## Sources
+[S1] Reparameterizing discontinuous integrands for differentiable rendering, https://doi.org/10.1145/3355089.3356510, fetched 2026-10-26

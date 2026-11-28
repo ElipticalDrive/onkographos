@@ -1,0 +1,125 @@
+# Feature-Aware Trivariate Spline Reconstruction
+
+Also called: Feature-Aware Reconstruction via Trivariate Splines, T-spline Volumetric Reconstruction, Trivariate Spline Representation
+
+## Overview
+Feature-Aware Trivariate Spline Reconstruction transforms discrete volumetric data into a continuous, tensor-product spline representation with a regular structure, solving storage and rendering costs while enabling physical analysis [S1, unofficial]. It sets itself apart from standard AMR basis filters by explicitly constructing a feature-aligned frame field and a globally smooth parameterization to remesh the data into regular volumetric patches, rather than relying on hierarchical basis functions on irregular cells [S1, unofficial]. Unlike time-varying frameworks, it focuses on static geometric and density approximation using trivariate T-splines [S1, unofficial].
+
+## How it works
+**Inputs:** Discrete volumetric data (voxels with spatial coordinates and intensity/density values).
+**Outputs:** A set of trivariate T-spline patches, each defined by control points, weights, and blending functions, representing the continuous shape and density.
+
+**Data Structures:**
+1.  **Voxel Grid:** Each voxel $v_i$ has spatial coordinates $(x_i, y_i, z_i)$ and intensity $I_i$.
+2.  **Frame Field:** For each voxel $v_i$, a local frame consisting of three orthogonal direction vectors $\mathbf{u}_i, \mathbf{v}_i, \mathbf{w}_i$. Each frame has 6 end positions $\{P(v_i)\} = \{p_0, \dots, p_5\}$ corresponding to the tips of the 3 vectors.
+3.  **Parameterization:** Scalar fields $u(x,y,z), v(x,y,z), w(x,y,z)$ assigned to each voxel.
+4.  **T-Spline Patch:** Defined by a set of control points $p_i = (X_i, Y_i, Z_i, I_i)$, weights $w_i$, and cubic B-spline basis functions $B_i(u,v,w)$.
+
+**Steps:**
+
+1.  **Feature Constraint Extraction:**
+    *   Extract the boundary of the segmentation.
+    *   Use texture-based classification (k-means clustering on normalized statistical attributes [HSD73]) to differentiate structures with similar density/gradient.
+    *   Take normal directions of the boundary surfaces as initial direction constraints.
+    *   Manually construct cube domains to approximate boundary shapes. Choose 8 corners for each cube domain on boundary surfaces.
+    *   Partition boundary surfaces into patches via shortest paths between corners.
+    *   Align direction constraints orthogonal to the iso-parameter on boundary edges.
+
+2.  **Frame Field Optimization:**
+    *   Initialize local frames at each voxel.
+    *   Iterate until smooth:
+        *   For each local frame $v_i$, get the union of all frame end positions on neighboring voxels: $\{S_2\} = \bigcup_{v_j \in N(v_i)} P(v_j)$.
+        *   The original point set is $\{S_1\} = \{P(v_i)\}$.
+        *   Compute an ICP-based registration matrix $T$ transforming $\{S_1\}$ to $\{S_2\}$ [BM92].
+        *   Decompose $T$ into rotation $R$ and shear $S$ via polar decomposition.
+        *   Update the frame of $v_i$ by adding rotation $R$.
+        *   For constrained frames, apply the algorithm without constraints first, then search for the closest direction $\vec{d}$ in the updated frame and rotate the frame to project $\vec{d}$ onto the direction constraint.
+
+3.  **Volumetric Parameterization:**
+    *   Assign local parameters $(u_0, v_0, w_0)$ to the center voxel $v_i$.
+    *   For adjacent $k$-ring neighbor voxels $v_j \in N(v_i)$, set local parameters $(u_j, v_j, w_j) = (u_0 + x_j - x_i, v_0 + y_j - y_i, w_0 + z_j - z_i)$.
+    *   Fit a cubic polynomial $I_H(u,v,w) = \sum_{i,j,k \ge 0, i+j+k \le 3} c_m u^i v^j w^k = P(u,v,w)C^T$ to approximate the gradient operator, where $C$ is the vector of unknown coefficients and $P$ is the vector of $u^i v^j w^k$.
+    *   Derivatives are formulated similarly, e.g., $I^u_H(u,v,w) = \sum_{i,j,k \ge 0, i+j+k \le 3} c_m i u^{i-1} v^j w^k = P_u(u,v,w)C^T$.
+    *   Minimize the energy function:
+        $$ E = \sum_{v_i \in V} \|\nabla u_i - \mathbf{u}_{if}\|_{(\epsilon,1,1)} + \|\nabla v_i - \mathbf{v}_{if}\|_{(1,\epsilon,1)} + \|\nabla w_i - \mathbf{w}_{if}\|_{(1,1,\epsilon)} $$
+        where $\mathbf{u}_{if}, \mathbf{v}_{if}, \mathbf{w}_{if}$ are the frame field directions, and the norm $\|(u,v,w)\|_{(\alpha,\beta,\gamma)} = \alpha u^2 + \beta v^2 + \gamma w^2$ penalizes deviation along major directions with weight $\epsilon \le 1$.
+    *   Apply parameter constraints to ensure nodes on each isoparametric patch have the same parameter on $u, v,$ or $w$.
+
+4.  **Remeshing:**
+    *   Trace iso-parametric lines guided by the generated parameters to generate a small set of volumetric patches.
+
+5.  **Trivariate T-Spline Approximation:**
+    *   On each patch, construct a trivariate T-spline to approximate shape and density.
+    *   The spline is defined as:
+        $$ F(u, v, w) = \frac{\sum w_i p_i B_i(u, v, w)}{\sum w_i B_i(u, v, w)} $$
+    *   The blending function is $B_i(u, v, w) = N^3_{i0}(u)N^3_{i1}(v)N^3_{i2}(w)$, where $N^3$ are cubic B-spline basis functions.
+    *   Control points $p_i$ contain spatial coordinates $(X_i, Y_i, Z_i)$ and intensity $I_i$.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def feature_aware_trivariate_spline_reconstruction(voxels):
+    # Step 1: Feature Constraints
+    boundary = extract_boundary(voxels)
+    constraints = get_normal_directions(boundary)
+    # Texture-based classification for similar structures
+    clusters = k_means_cluster(voxels, attributes=normalized_stats)
+    # Manual cube domain construction and corner selection
+    cube_domains = manual_cube_approximation(boundary)
+    corners = select_8_corners_per_cube(cube_domains)
+    patches_2d = partition_boundary_via_shortest_paths(corners)
+    
+    # Step 2: Frame Field Optimization
+    frames = initialize_frames(voxels)
+    for voxel in voxels:
+        neighbors = get_k_ring_neighbors(voxel, k=1) # Or appropriate k
+        S2 = union_frame_ends(neighbors)
+        S1 = get_frame_ends(voxel)
+        T = icp_registration(S1, S2)
+        R, S = polar_decompose(T)
+        update_frame(voxel, R)
+        if voxel.has_constraint():
+            d = find_closest_direction(voxel.frame, voxel.constraint)
+            rotate_to_project(voxel.frame, d)
+    frames = iterate_smooth(frames)
+
+    # Step 3: Parameterization
+    # Solve energy minimization for u, v, w fields
+    # Using local polynomial fitting for gradient approximation
+    params = minimize_energy(frames, constraints)
+    
+    # Step 4: Remeshing
+    volumetric_patches = trace_iso_parametric_lines(params)
+    
+    # Step 5: Spline Approximation
+    splines = []
+    for patch in volumetric_patches:
+        control_points = []
+        weights = []
+        # Fit T-spline to patch data
+        # F(u,v,w) = sum(w_i * p_i * B_i) / sum(w_i * B_i)
+        spline = fit_trivariate_t_spline(patch, control_points, weights)
+        splines.append(spline)
+        
+    return splines
+```
+
+## Subtopics
+
+### Trivariate T-Spline Approximation
+A high-order representation used to approximate the shape and density function of parametric patches in volume reconstruction, formulated as a rational trivariate spline [S1, unofficial]. It is chosen when a smooth, continuous representation with tensor-product structure is required for rendering or physical analysis, offering geometric continuity between patches [S1, unofficial]. It differs from standard B-splines by allowing T-junctions, enabling local refinement without global knot insertion.
+
+## Operating characteristics
+**Time and Memory Complexity:** Not given in the sources. The method involves iterative frame field smoothing, energy minimization for parameterization, and spline fitting, which are computationally intensive.
+**Measured Performance:** Not given in the sources.
+**Scaling:** The method generates a "small set of volumetric patches," suggesting it is efficient for scenes with distinct, separable features. However, the complexity of frame field optimization and ICP registration may scale poorly with very large, unstructured datasets.
+**Strengths:** Preserves density, feature alignment, compactness, structured regularity, homogeneity, and continuity [S1, unofficial]. Guarantees geometric continuity between cube patches [S1, unofficial].
+**Limitations:** Requires manual interaction for cube domain construction and corner selection [S1, unofficial]. Relies on texture-based classification which may be sensitive to noise.
+
+## Background
+Originated by B. Li and H. Qin in 2011, presented at the Pacific Graphics conference [S1, unofficial]. The method addresses the challenge of transforming discrete scanned volumetric data into a continuous, regular spline representation suitable for texturing and physical attributes modeling. It builds on prior work in frame fields [BM92] and T-splines [SCF*04, WLL*11].
+
+## Sources
+[S1] Feature-Aware Reconstruction of Volume Data via Trivariate Splines, https://doi.org/10.2312/pe/pg/pg2011short/049-054, fetched 2026-10-28 (unofficial)

@@ -1,0 +1,89 @@
+# Scale Decay
+
+
+## Overview
+Scale Decay is a regularization technique used during the optimization of 3D Gaussian Splatting to balance rendering quality and computational speed by gradually reducing the scale of Gaussians [S1]. It addresses the problem of excessive Gaussian counts and large average scales, which degrade performance, by encouraging the pruning of occluded or out-of-view Gaussians and controlling final Gaussian sizes [S1]. It sets itself apart from sibling methods like [Scale-Opacity Classification](9871-scale-opacity-classification.md) by actively modifying the geometry during training rather than just analyzing or classifying it post-training.
+
+## How it works
+**Inputs and Outputs:**
+- Input: The set of $N$ 3D Gaussians $\{G_i\}$, each defined by position $\mathbf{x}_i$, covariance matrix $\Sigma_i$ (or rotation $\mathbf{R}_i$ and scale vector $\mathbf{s}_i$), opacity $\alpha_i$, and spherical harmonics coefficients.
+- Output: The updated set of Gaussians with reduced scales, leading to a smaller final count and higher rendering FPS.
+
+**Data Structures:**
+- Gaussian Scale Vector: $\mathbf{s}_i = [s_{i,x}, s_{i,y}, s_{i,z}]^T$. The decay is applied uniformly to all components of the scale vector.
+
+**Parameters:**
+- Decay Factor ($\eta_{decay}$): The multiplicative factor applied to Gaussian scales at each iteration.
+  - Typical value: $0.999875$ [S1].
+  - Tested values: $0.999875, 0.999900, 0.999925, 0.999950$, and disabled (NoDecay) [S1].
+
+**Steps:**
+1. **Initialization:** Initialize Gaussians with standard 3D Gaussian Splatting parameters.
+2. **Iteration Loop:** For each training iteration $t$:
+   a. Perform rasterization and loss computation.
+   b. Update Gaussian parameters (position, rotation, opacity, scale) via gradient descent.
+   c. **Apply Scale Decay:** Multiply the scale vector of every Gaussian by $\eta_{decay}$.
+      $$ \mathbf{s}_i^{(t+1)} = \eta_{decay} \cdot \mathbf{s}_i^{(t)} $$
+      [G] Note: This operation is typically applied after the gradient update step to ensure the decay acts as a regularizer on the optimized scales.
+3. **Pruning:** Standard 3D Gaussian Splatting pruning steps (removing low-opacity or redundant Gaussians) are performed. The reduced scales make Gaussians more susceptible to pruning if they do not contribute significantly to the image, further reducing the count.
+
+**Edge Cases and Pitfalls:**
+- **Precision:** The decay factor is very close to 1.0. Using floating-point precision (float32) is sufficient, but care should be taken to avoid underflow if training for an extremely large number of iterations, though typical training (15k-30k iterations) does not cause underflow with $\eta_{decay} \ge 0.999875$ [S1].
+- **Degenerate Input:** If $\eta_{decay} \le 0$, the method is invalid. If $\eta_{decay} = 1$, no decay occurs (equivalent to NoDecay) [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def apply_scale_decay(gaussians, eta_decay):
+    """
+    Applies scale decay to a list of Gaussians.
+    
+    Args:
+        gaussians: List of Gaussian objects, each having a 'scale' attribute 
+                   which is a tensor of shape (3,) representing [sx, sy, sz].
+        eta_decay: Float, the decay factor (e.g., 0.999875).
+    """
+    for g in gaussians:
+        # Multiply each component of the scale vector by the decay factor
+        g.scale = g.scale * eta_decay
+```
+
+## Subtopics
+
+### Scale-Opacity Classification
+A post-training analysis method that classifies Gaussians into four groups based on scale and opacity to visualize their spatial distribution [S2]. It uses the 95th percentile (P95) of the mean-scale distribution to define "large" Gaussians and the median opacity to define "high" opacity [S2]. This method is used for evaluation and visualization, not for modifying the training process like Scale Decay [S2].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+- Time: The decay operation itself is $O(N)$ per iteration, where $N$ is the number of Gaussians. This is negligible compared to rasterization and gradient updates.
+- Memory: No additional memory is required.
+
+**Measured Performance:**
+- Hardware/Scene: Not specified in sources, but results are from the GRay paper [S1].
+- Resolution: Not specified.
+- Metrics (from [S1]):
+  - With Decay ($\eta_{decay}=0.999875$): PSNR 26.47, LPIPS 0.236, FPS 248, Final Gaussians 1.52M, Final Avg Scale 0.016.
+  - Without Decay: PSNR 26.00, LPIPS 0.231, FPS 157, Final Gaussians 1.73M, Final Avg Scale 0.0211.
+  - Note: There is a slight discrepancy in the text regarding the "Without Decay" PSNR (26.00 vs 26.60 in Table 16 context). Table 7 explicitly lists GRayNoDecay PSNR as 26.00 [S1]. Table 16 lists GRAYNoDecay PSNR as 26.60. The text states "decay also worsens quality slightly" when comparing GRay (26.47) to GRayNoDecay (26.00 in Table 7). However, Table 16 shows GRAYNoDecay with higher PSNR (26.60) than GRay (26.47). This suggests that the "NoDecay" baseline in Table 7 might be a different variant or there is a contradiction. The text explicitly states: "Increasing decay improved FPS... However, decay also worsens quality slightly" [S1]. We cite the explicit comparison in the text and Table 7 for the primary claim, noting the Table 16 discrepancy.
+  - Scaling: Increasing $\eta_{decay}$ (closer to 1.0) consistently improves FPS but degrades quality metrics (PSNR/LPIPS) [S1].
+
+**Strengths and Limitations:**
+- Strengths: Significantly increases FPS (157 to 248 in [S1]) by reducing Gaussian count and average scale. Effective regularizer for controlling Gaussian sizes.
+- Limitations: Slightly degrades rendering quality (PSNR/LPIPS) [S1].
+
+**When to use:**
+- Use when rendering speed is a priority and a slight drop in quality is acceptable.
+- Use when the scene has many redundant or occluded Gaussians that can be pruned.
+
+**When not to use:**
+- Use when maximum visual quality is required and performance is not a constraint.
+
+## Background
+Origin: Introduced in the GRay paper (2024) [S1].
+History: Scale Decay was proposed as a simple yet effective regularizer to encourage smaller Gaussians and improve pruning efficiency. It was found to be highly effective at balancing quality and speed [S1].
+Usage: Used in 3D Gaussian Splatting training pipelines, particularly in variants like GRay, to optimize for real-time rendering performance.
+
+## Sources
+[S1] GRay: Ray Tracing 3D Gaussians Near the Speed of Splats, https://doi.org/10.1145/3804496, fetched 2026-10-29
+[S2] Practical Evaluation of Standard 3D Gaussian Splatting for Real-World Scene Reconstruction., https://doi.org/10.3390/s26185754, fetched 2026-10-26

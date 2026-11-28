@@ -1,0 +1,238 @@
+--- v001.md
++++ v002.md
+@@ -1,156 +1,109 @@
+ # 3D Gaussian Smoothing
+ 
+-Also called: Gaussian smoothing, Tap-filter algorithm
++Also called: 3D Gaussian filter, 9-tap Gaussian smoothing, 9-tap filter algorithm, Gaussian Smoothing, N-tap Gaussian kernel, Tap-filter algorithm, binomial filter
+ 
+ ## Overview
+-3D Gaussian Smoothing is a voxel operation that convolves volume data with a 3D Gaussian distribution to reduce high-frequency noise and aliasing artifacts during rendering [S1]. Unlike box smoothing, which assigns uniform weights to neighbors, this method uses weights that follow a Gaussian distribution, providing a smoother transition between values [S1]. It is distinguished from its sibling, the [Bilateral Filter](8983-bilateral-filter.md), by its reliance on spatial distance alone for weighting, ignoring intensity differences, making it a linear smoothing operation suitable for pre-filtering or real-time volume visualization [S1].
++3D Gaussian Smoothing is a voxelization post-processing technique that convolves a spectral cube with a 3D Gaussian distribution to reduce noise and provide smoother transitions than box filters [S1]. It is distinguished from its sibling, the [Bilateral Filter](8983-bilateral-filter.md), by its reliance on spatial proximity for weighting rather than intensity differences, and from its parent, the [Separable 3D Gaussian Filter](8956-separable-3d-gaussian-filter.md), by its specific implementation using a binomial approximation via bilinear texture sampling to minimize texture fetches [S1].
+ 
+ ## How it works
+-**Inputs and Outputs**
+-*   **Input:** A 3D volume grid of scalar values.
+-*   **Output:** A smoothed 3D volume grid where each voxel value is a weighted average of its neighbors.
+-*   **Parameters:** The Full Width at Half Maximum (FWHM) for each axis ($FWHM_x, FWHM_y, FWHM_z$) or the standard deviation $\sigma$. The algorithm typically assumes isotropic kernels where $\sigma_x = \sigma_y = \sigma_z = \sigma$ [S1].
++**Inputs and Outputs:**
++*   **Input:** A 3D spectral cube (texture), the current voxel location `loc`, the original voxel value `oVal` (before convolution), the cube resolution `resolution` (dimensions), and a `direction` vector/matrix defining the axis of lookup [S1].
++*   **Output:** The smoothed value `val` (RGBA) [S1].
+ 
+-**Data Structures**
+-*   **Kernel Coefficients:** A 1D array of floating-point numbers representing the binomial coefficients for the chosen filter order $n$. For a 9-tap filter ($n=8$), this array has 9 elements. These are precomputed using Pascal's triangle [S1].
++**Data Structures:**
++The method operates on standard 3D array indices and floating-point offsets. The kernel coefficients are precomputed constants derived from the binomial series [S1].
+ 
+-**Formulas**
+-The 3D Gaussian kernel function is defined as [S1]:
+-$$G(x, y, z) = A \cdot \exp\left(-\left(\frac{(x-x_0)^2}{2\sigma_x^2} + \frac{(y-y_0)^2}{2\sigma_y^2} + \frac{(z-z_0)^2}{2\sigma_z^2}\right)\right)$$
+-where $A$ is the amplitude, $(x_0, y_0, z_0)$ is the center of the kernel, and $\sigma_i$ is the standard deviation for axis $i$. The relationship between the standard deviation and the Full Width at Half Maximum (FWHM) is [S1]:
++**Mathematical Foundation:**
++The continuous Gaussian distribution is defined as [S1]:
++$$G(x, y, z) = A \exp \left( - \left( \frac{(x-x_0)^2}{2\sigma_x^2} + \frac{(y-y_0)^2}{2\sigma_y^2} + \frac{(z-z_0)^2}{2\sigma_z^2} \right) \right)$$
++where $\sigma_i$ is linked to the Full Width at Half Maximum (FWHM) [S1]:
+ $$FWHM_i = 2\sqrt{\ln(2)}\sigma_i$$
+-Note: One source passage contains a conflicting formula $FWHM_i = 2\sqrt{2\ln(2)}\sigma_i$ [S1]. The standard definition $FWHM_i = 2\sqrt{\ln(2)}\sigma_i$ is used here.
++*(Note: Source [S1] also lists $FWHM_i = 2\sqrt{2\ln(2)}\sigma_i$; the standard definition is cited first [S1]).*
+ 
+-The fast approximation uses cascaded convolution of a kernel filter composed of $[1, 1]$ [S1]. The coefficients for the $n$-th filter in the series, $b_n(m)$, are defined by [S1]:
++To approximate this efficiently, the method uses a discrete binomial filter obtained by cascaded convolution of a kernel $[1, 1]$ [S1]. The coefficients for the $n$-th filter in the series, $b_n(m)$, are defined by [S1]:
+ $$b_n(m) = [1, 1]^{*n}$$
+-where the exponent $*n$ denotes $n$ autoconvolutions. These coefficients correspond to the binomial series and can be precomputed using Pascal's triangle [S1]. Common isotropic kernel sizes include:
+-*   $b_4(n)$: 5-tap filter
+-*   $b_8(n)$: 9-tap filter
+-*   $b_{12}(n)$: 13-tap filter
+-These names refer to the total number of voxel lookups required for each filtered voxel [S1].
++where $*n$ denotes $n$ autoconvolutions. These coefficients correspond to the binomial series and can be precomputed using Pascal's triangle [S1]. Common isotropic kernel sizes are 5-tap ($b_4$), 9-tap ($b_8$), and 13-tap ($b_{12}$) [S1].
+ 
+-**Steps**
+-1.  **Precompute Coefficients:** Generate the 1D kernel coefficients $b_n$ for the desired tap count (e.g., 9-tap) using Pascal's triangle. Normalize the coefficients so they sum to 1.0 [S1].
+-2.  **Apply 1D Convolution along X:** Convolve the input volume with the 1D kernel $b_n$ along the X-axis. For each voxel, compute the weighted sum of neighbors in the X-direction.
+-3.  **Apply 1D Convolution along Y:** Convolve the result from Step 2 with the 1D kernel $b_n$ along the Y-axis.
+-4.  **Apply 1D Convolution along Z:** Convolve the result from Step 3 with the 1D kernel $b_n$ along the Z-axis.
+-    *   *Note:* The separability of the Gaussian allows the 3D convolution to be decomposed into three consecutive 1D convolutions [S1].
++**Algorithm (9-tap case):**
++The 9-tap filter is implemented as a fragment shader kernel that leverages bilinear texture filtering to fetch two voxels at once by sampling at non-center positions, reducing the total number of texture fetches [S1]. The number of texture fetches for an N-tap kernel is $3 \times \frac{N-1}{2} + 1$ [S1].
+ 
+-**Pseudocode**
++For the 9-tap filter, the specific coefficients and offsets are [S1]:
++*   `coef0` = 0.2270270270
++*   `coef1` = 0.3162162162
++*   `coef2` = 0.0702702703
++*   `off1` = $\vec{3}(1/3.846153846) \times \text{direction}$
++*   `off2` = $\vec{3}(3/2.307692308) \times \text{direction}$
++
++**Pseudocode:**
+ ```python
+-def precompute_binomial_coefficients(tap_count):
++def smooth_9tap(cube, oVal, loc, resolution, direction):
+     """
+-    Computes binomial coefficients for a Gaussian approximation using Pascal's triangle.
+-    tap_count: The number of taps (e.g., 9 for b_8).
+-    Returns: Normalized 1D array of coefficients.
++    Performs 9-tap Gaussian smoothing on a 3D spectral cube.
++    
++    Args:
++        cube: 3D array or texture object supporting bilinear sampling.
++        oVal: Original voxel value (RGBA) at loc.
++        loc: Current voxel location (vec3).
++        resolution: Spectral cube resolution dimensions (vec3).
++        direction: Rotation matrix or vector to select the axis for lookups.
++        
++    Returns:
++        val: Smoothed RGBA value.
+     """
+-    # The order n is tap_count - 1. For 9-tap, n=8.
+-    n = tap_count - 1
++    # Initialize accumulator
++    val = (0.0, 0.0, 0.0, 0.0)
+     
+-    # Compute binomial coefficients C(n, k) for k = 0 to n
+-    coefficients = []
+-    for k in range(tap_count):
+-        # C(n, k) = n! / (k! * (n-k)!)
+-        coeff = factorial(n) / (factorial(k) * factorial(n - k))
+-        coefficients.append(coeff)
++    # Precomputed constants for 9-tap binomial filter
++    coef0 = 0.2270270270
++    coef1 = 0.3162162162
++    coef2 = 0.0702702703
+     
+-    # Normalize coefficients so they sum to 1.0
+-    total = sum(coefficients)
+-    normalized_coefficients = [c / total for c in coefficients]
++    # Calculate offsets using bilinear sampling strategy
++    # The source uses vec3(1/3.846153846) which is approx 0.26
++    # and vec3(3/2.307692308) which is approx 1.3
++    # These offsets allow fetching two voxels per texture lookup via interpolation
++    off1 = vec3(1.0 / 3.846153846) * direction
++    off2 = vec3(3.0 / 2.307692308) * direction
+     
+-    return normalized_coefficients
+-
+-def apply_1d_convolution(volume, coefficients, axis):
+-    """
+-    Applies 1D convolution along a specific axis.
+-    volume: 3D array of voxel values.
+-    coefficients: 1D array of kernel weights.
+-    axis: 0 for X, 1 for Y, 2 for Z.
+-    Returns: Smoothed 3D array.
+-    """
+-    # Determine dimensions based on axis
+-    if axis == 0:
+-        dim_size = volume.shape[0]
+-        stride = 1
+-        # For X-axis, neighbors are along the first dimension
+-        # Implementation detail: Iterate over all voxels and compute weighted sum along X
+-        smoothed = empty_like(volume)
+-        half_kernel = len(coefficients) // 2
+-        
+-        for x in range(volume.shape[0]):
+-            for y in range(volume.shape[1]):
+-                for z in range(volume.shape[2]):
+-                    sum_val = 0.0
+-                    for i in range(len(coefficients)):
+-                        neighbor_x = x - half_kernel + i
+-                        # Handle boundary conditions (e.g., clamp or wrap)
+-                        if neighbor_x < 0: neighbor_x = 0
+-                        if neighbor_x >= volume.shape[0]: neighbor_x = volume.shape[0] - 1
+-                        sum_val += volume[neighbor_x, y, z] * coefficients[i]
+-                    smoothed[x, y, z] = sum_val
+-        return smoothed
+-    elif axis == 1:
+-        # Similar logic for Y-axis
+-        smoothed = empty_like(volume)
+-        half_kernel = len(coefficients) // 2
+-        for x in range(volume.shape[0]):
+-            for y in range(volume.shape[1]):
+-                for z in range(volume.shape[2]):
+-                    sum_val = 0.0
+-                    for i in range(len(coefficients)):
+-                        neighbor_y = y - half_kernel + i
+-                        if neighbor_y < 0: neighbor_y = 0
+-                        if neighbor_y >= volume.shape[1]: neighbor_y = volume.shape[1] - 1
+-                        sum_val += volume[x, neighbor_y, z] * coefficients[i]
+-                    smoothed[x, y, z] = sum_val
+-        return smoothed
+-    elif axis == 2:
+-        # Similar logic for Z-axis
+-        smoothed = empty_like(volume)
+-        half_kernel = len(coefficients) // 2
+-        for x in range(volume.shape[0]):
+-            for y in range(volume.shape[1]):
+-                for z in range(volume.shape[2]):
+-                    sum_val = 0.0
+-                    for i in range(len(coefficients)):
+-                        neighbor_z = z - half_kernel + i
+-                        if neighbor_z < 0: neighbor_z = 0
+-                        if neighbor_z >= volume.shape[2]: neighbor_z = volume.shape[2] - 1
+-                        sum_val += volume[x, y, neighbor_z] * coefficients[i]
+-                    smoothed[x, y, z] = sum_val
+-        return smoothed
+-
+-def gaussian_smoothing_3d(volume, tap_count=9):
+-    """
+-    Performs 3D Gaussian smoothing using separable 1D convolutions.
+-    """
+-    coefficients = precompute_binomial_coefficients(tap_count)
++    # Step 1: Add center contribution
++    val = val + oVal * coef0
+     
+-    # Apply 1D convolution along each axis sequentially
+-    # Order of axes does not matter for separable filters
+-    temp_x = apply_1d_convolution(volume, coefficients, axis=0)
+-    temp_y = apply_1d_convolution(temp_x, coefficients, axis=1)
+-    result = apply_1d_convolution(temp_y, coefficients, axis=2)
++    # Step 2: Add contributions from off1 positions
++    # Fetch voxel at loc + off1
++    tempVal = cube.sample_bilinear(loc + off1, resolution)
++    val = val + tempVal * coef1
+     
+-    return result
++    # Fetch voxel at loc - off1
++    tempVal = cube.sample_bilinear(loc - off1, resolution)
++    val = val + tempVal * coef1
++    
++    # Step 3: Add contributions from off2 positions
++    # Fetch voxel at loc + off2
++    tempVal = cube.sample_bilinear(loc + off2, resolution)
++    val = val + tempVal * coef2
++    
++    # Fetch voxel at loc - off2
++    tempVal = cube.sample_bilinear(loc - off2, resolution)
++    val = val + tempVal * coef2
++    
++    return val
+ ```
+ 
+-**Edge Cases and Pitfalls**
+-*   **Boundary Conditions:** The pseudocode clamps coordinates to the volume bounds. Alternative methods include wrapping or mirroring, which may affect the visual result near edges [G].
+-*   **Precision:** Using floating-point arithmetic for the convolution is recommended to avoid quantization artifacts [G].
+-*   **Kernel Size:** Larger tap counts (e.g., 13-tap) provide a better Gaussian approximation but increase computational cost [S1].
++**Edge Cases and Pitfalls:**
++*   **Boundary Conditions:** The source does not specify boundary handling (e.g., clamping, wrapping, or reflection) for lookups outside the cube bounds [S1]. Implementers must define this behavior [G].
++*   **Precision:** The coefficients are given to high precision; standard floating-point precision is assumed sufficient [S1].
++*   **Anisotropy:** The source notes that while isotropic kernels are considered for simplicity, anisotropic kernels could use a similar solution [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The tap-filter algorithm has a complexity of $O(N)$, where $N$ is the number of lookups (voxels processed) [S1]. In conjunction with ray-tracing, the total algorithm complexity becomes $O(NMD)$, where $M$ is the number of voxels visited by a ray, $N$ is the number of lookups, and $D$ is the dimensionality of the convolution kernel (1-D, 2-D, 3-D, ..., N-D) [S1].
+-*   **Memory Complexity:** $O(V)$, where $V$ is the number of voxels in the volume, as intermediate results are stored for each axis pass [G].
+-*   **Performance:** The method is suitable for real-time rendering. Tests showed a minor slowdown in frame rate when using this technique compared to non-smoothed rendering, but it remains efficient due to the separability of the filter [S1].
+-*   **Strengths:** Provides smooth, artifact-free results; computationally efficient due to separability; easy to implement in shaders [S1].
+-*   **Limitations:** Blurs edges and fine details; not suitable for preserving sharp boundaries (unlike Bilateral Filter) [S1].
+-*   **When to Use:** When smooth visualization of volumetric data is required and edge preservation is not critical.
+-*   **When Not to Use:** When sharp boundaries or high-frequency details must be preserved.
++*   **Complexity:** The tap-filter algorithm has a complexity of $O(N)$, where $N$ is the number of lookups [S1]. In conjunction with ray-tracing, the total algorithm complexity becomes $O(NMD)$, where $M$ is the number of voxels visited by a ray, $N$ is the number of lookups, and $D$ is the dimensionality of the convolution kernel [S1].
++*   **Texture Fetches:** For an N-tap 3D Gaussian kernel, the number of texture fetches per step is $3 \times \frac{N-1}{2} + 1$ [S1].
++*   **Performance:** Kernel size (e.g., 9-tap) affects rendering speed, but because $M$ and $D$ are small in typical implementations, the slowdown is minor and manageable by modern graphics hardware [S1]. Benchmarks on a 1024³ cube showed that without smoothing, frame rates were ~2 fps on some GPUs, while smoothing added a minor slowdown [S1].
++*   **Strengths:** Provides smoother transitions than box filters and effectively denoises spectral cubes, especially when rays traverse the cube at an angle [S1].
++*   **Limitations:** The smoothing effect is purely spatial; it does not preserve edges based on intensity values like the Bilateral Filter [S1].
+ 
+ ## Background
+-3D Gaussian Smoothing using the tap-filter algorithm was introduced in the context of real-time volume rendering with graphics shaders [S1]. The method leverages the approximation of Gaussian distributions by cascaded convolution of box filters, a technique attributed to Crowley et al. (2002) [S1]. The calculation of coefficients and lookup coordinates for the binomial filter is based on formulas presented by Daniel Rákos [S1]. This approach is particularly useful in medical imaging and scientific visualization where real-time performance is essential [S1].
++The method is described in the context of real-time colouring and filtering of astronomical spectral cubes using graphics shaders [S1]. It builds on the work of Crowley et al. (2002) regarding cascaded convolution of $[1,1]$ kernels and Daniel Rákos's blog post on efficient Gaussian blur with linear sampling, which proposed using bilinear texture filtering to reduce fetch counts [S1]. It is used in radio astronomy visualization (e.g., Antennae cube) to improve the visual quality of Maximum Intensity Projection (MIP) and Average Intensity Volume Projection (AVIP) renderings [S1].
+ 
+ ## Sources
++
+ [S1] Real-time colouring and filtering with graphics shaders, https://doi.org/10.1093/mnras/stx1676, fetched 2026-10-26

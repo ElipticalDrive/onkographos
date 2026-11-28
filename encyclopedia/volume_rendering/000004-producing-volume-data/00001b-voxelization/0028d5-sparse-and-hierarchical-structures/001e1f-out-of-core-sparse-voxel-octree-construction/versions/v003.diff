@@ -1,0 +1,157 @@
+--- v002.md
++++ v003.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-This method constructs a sparse voxel octree (SVO) from a triangle mesh while keeping memory usage logarithmic in the size of the SVO, by processing an intermediate high-resolution 3D voxel grid in Morton order in a streaming manner [S1]. It differs from in-core methods like [Laine and Karras 2010a] because the input is consumed and output is produced in a streaming manner with logarithmic memory usage [S1]. It builds on [Sparse and Hierarchical Structures](4391-sparse-and-hierarchical-structures.md).
++This method constructs a sparse voxel octree (SVO) from a triangle mesh while keeping memory usage logarithmic in the size of the SVO, by processing an intermediate high-resolution 3D voxel grid in Morton order in a streaming manner [S1]. It differs from in-core methods like [Laine and Karras 2010a] because the input is consumed and output is produced in a streaming manner with logarithmic memory usage [S1]. It builds on [Sparse and Hierarchical Structures](4391-sparse-and-hierarchical-structures.md) [G].
+ 
+ ## How it works
+@@ -10,13 +10,13 @@
+ 
+ ### Inputs and Outputs
+-- **Input**: A triangle mesh (with or without bounding box) and available memory size.
+-- **Output**: A sparse voxel octree written to disk/stream.
+-- **Intermediate**: A high-resolution 3D voxel grid in Morton order, stored on disk.
++- **Input**: A triangle mesh (with or without bounding box) and available memory size [S1].
++- **Output**: A sparse voxel octree written to disk/stream [S1].
++- **Intermediate**: A high-resolution 3D voxel grid in Morton order, stored on disk [S1].
+ 
+ ### Data Structures
+ 1. **Subgrid Partition**: A temporary file on disk storing the subset of triangles intersecting a specific subgrid [S1].
+ 2. **Morton Code Stream**: A sequence of integers representing the Morton codes of non-empty cells in the intermediate voxel grid [S1].
+-3. **Level Queues**: An array of queues, one for each level of the octree. Each queue holds at most $2^d$ nodes (where $d=3$ for 3D, so max 8 nodes per level) [S1].
+-4. **SVO Node**: Represents a voxel or internal node. Contains the Morton code and child pointers/flags [S1].
++3. **Level Queues**: An array of queues, one for each level of the octree [S1]. Each queue holds at most $2^d$ nodes (where $d=3$ for 3D, so max 8 nodes per level) [S1].
++4. **SVO Node**: Represents a voxel or internal node, containing the Morton code and child pointers/flags [S1].
+ 
+ ### Parameters
+@@ -29,5 +29,5 @@
+ #### 1. Voxelization Subprocess
+ 1. **Partitioning**: Partition the triangle mesh according to subgrids of the high-resolution 3D voxel grid in a streaming manner by testing each triangle against the bounding box of every subgrid. Store the resulting triangle mesh partitions temporarily on disk [S1].
+-2. **Subgrid Sizing**: Determine subgrid size by regularly subdividing the high-resolution voxel grid until a subgrid fits in available memory. Use only power-of-two resolutions for the high-resolution 3D voxel grid to ensure subgrids correspond to contiguous ranges in Morton order [S1].
++2. **Subgrid Sizing**: Determine subgrid size by regularly subdividing the high-resolution 3D voxel grid until a subgrid fits in available memory. Use only power-of-two resolutions for the high-resolution 3D voxel grid to ensure subgrids correspond to contiguous ranges in Morton order [S1].
+ 3. **Actual Voxelization**: Sequentially process each subgrid. For each subgrid, consume its corresponding triangle mesh partition in a streaming manner. Voxelize triangles using the 6-separability surface voxelization variant of Huang et al. [1998]. Output only the Morton codes of non-empty cells, not boolean values for all cells [S1].
+ 4. **Output Order**: Ensure subgrids are processed in Morton order so that the output of the voxelization subprocess is the intermediate high-resolution 3D voxel grid in Morton order [S1].
+@@ -36,5 +36,5 @@
+ The construction process reads the Morton code stream and builds the octree bottom-up using queues [S1].
+ 
+-1. **Initialize**: Create an array of empty queues, one for each level of the octree (from leaf level up to root level).
++1. **Initialize**: Create an array of empty queues, one for each level of the octree (from leaf level up to root level) [S1].
+ 2. **Read Leaf Nodes**: Read cells with Morton codes corresponding to the current level's leaf nodes from the input and store them in the queue for that level [S1].
+ 3. **Create Parent Nodes**: When a parent node's children (all nodes in the current level's queue) are processed, create an internal node with the parent's Morton code. Store this internal node in the queue of the parent's level. Record the parent-child relation. Write all non-empty nodes currently in the child's queue to the output. Clear the child's queue [S1].
+@@ -59,76 +59,39 @@
+     queues = [deque() for _ in range(num_levels)]
+     current_level = num_levels - 1
+-    
+-    # Process leaf level
+-    current_children = []
+-    current_parent_morton = None
+-    
++
+     for morton_code in morton_code_stream:
+-        # Determine parent Morton code for the leaf level
+-        # In 3D, each octree level adds 3 bits to the Morton code.
+-        parent_morton = morton_code >> 3
+-        
+-        if current_parent_morton is None:
+-            current_parent_morton = parent_morton
+-            
+-        if parent_morton != current_parent_morton:
+-            # Parent is complete; create internal node and push to next level queue
+-            _process_queue(current_parent_morton, current_children, queues, current_level)
+-            current_parent_morton = parent_morton
+-            current_children = []
+-            
+-        current_children.append(morton_code)
+-        
+-    # Handle the last parent in the stream
+-    if current_children:
+-        _process_queue(current_parent_morton, current_children, queues, current_level)
+-        
+-    # Process higher levels until root is written
+-    level = current_level - 1
++        queues[current_level].append(morton_code)
++        if len(queues[current_level]) == 8:
++            children = [queues[current_level].popleft() for _ in range(8)]
++            parent_code = children[0] >> 3
++            # Output children to disk/stream [G]
++            # write_node_to_output(children)
++            if current_level > 0:
++                queues[current_level - 1].append(parent_code)
++            else:
++                # Root node reached
++                # write_node_to_output(parent_code, is_leaf=False) [G]
++                pass
++            current_level -= 1
++
++    # Drain remaining queues (handles incomplete parents or final root)
++    level = current_level
+     while level >= 0:
+         while queues[level]:
+-            node = queues[level].popleft()
+-            children = node['children']
+-            if not children:
+-                continue
+-                
+-            current_parent_morton = children[0] >> 3
+-            current_children = [children[0]]
+-            
+-            for child_morton in children[1:]:
+-                p_morton = child_morton >> 3
+-                if p_morton != current_parent_morton:
+-                    _process_queue(current_parent_morton, current_children, queues, level)
+-                    current_parent_morton = p_morton
+-                    current_children = []
+-                current_children.append(child_morton)
+-                
+-            if current_children:
+-                _process_queue(current_parent_morton, current_children, queues, level)
++            children = [queues[level].popleft() for _ in range(len(queues[level]))]
++            if len(children) == 8:
++                parent_code = children[0] >> 3
++                # write_node_to_output(children) [G]
++                if level > 0:
++                    queues[level - 1].append(parent_code)
++                else:
++                    # write_node_to_output(parent_code, is_leaf=False) [G]
++                    pass
++                level -= 1
++            else:
++                # Incomplete parent (empty octants); write remaining as leaves [G]
++                # write_node_to_output(children) [G]
++                level -= 1
+         level -= 1
+-
+-def _process_queue(parent_morton, children, queues, current_level):
+-    """
+-    Creates an internal SVO node, writes its children to output, 
+-    and pushes the new internal node to the parent's level queue.
+-    """
+-    # Write children to output (sibling locality)
+-    for child_morton in children:
+-        write_node_to_output(child_morton, is_leaf=True)
+-        
+-    # Create internal node
+-    internal_node = {
+-        'morton_code': parent_morton,
+-        'children': children,
+-        'is_leaf': False
+-    }
+-    
+-    # Push to parent's level queue
+-    parent_level = current_level - 1
+-    if parent_level >= 0:
+-        queues[parent_level].append(internal_node)
+-    else:
+-        # Root node
+-        write_node_to_output(parent_morton, is_leaf=False)
+ ```
+ 
+@@ -143,5 +106,5 @@
+ ## Operating characteristics
+ - **Space Complexity**: The SVO construction process has a space complexity that is logarithmic in the size of the sparse voxel octree [S1].
+-- **Time Complexity**: Not given in the sources.
++- **Time Complexity**: Not given in the sources [S1].
+ - **Measured Performance**: Implemented in C++ requiring approximately 1000 lines of code. Tested on a Dell Precision T7500 workstation (Intel Xeon X5650 CPU, 7200 RPM SATA II disk). A grid resolution of $2048^3$ requires 8 GB of memory for the intermediate voxel grid using a 1-byte-per-cell representation [S1].
+ - **Scaling**: Handles extremely large triangle meshes larger than available memory by streaming input and output [S1].

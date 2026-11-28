@@ -1,0 +1,208 @@
+# Tiled 2D Texture Volume Representation
+
+Also called: 2D texture tiling for 3D data, Channel tiling
+
+## Overview
+Tiled 2D Texture Volume Representation is a technique for storing and sampling 3D volumetric data within a 2D texture by tiling the spatial dimensions (x, y) across the texture's width and height, and mapping the depth dimension (z) to the RGB color channels [S1, unofficial]. It solves the problem of rendering 3D volumes on hardware or APIs that lack native 3D texture support by flattening the volume into a 2D format [S1, unofficial].
+
+## How it works
+**Inputs:**
+*   `dataTexture`: A 2D RGBA texture containing the tiled 3D volume data [S1, unofficial].
+*   `firstPassTexture`: A 2D texture storing the back-face depth/position of the volume bounding box for ray casting [S1, unofficial].
+*   `dataShape`: A `vec3` representing the dimensions of the original 3D volume $(N_x, N_y, N_z)$ [S1, unofficial].
+*   `textureShape`: A `vec2` representing the dimensions of the 2D texture tiles $(T_x, T_y)$ [S1, unofficial].
+*   `alphaCorrection`: A scalar uniform to convert raw data values to alpha [S1, unofficial].
+*   `steps`: The number of ray marching steps [S1, unofficial].
+
+**Outputs:**
+*   Final composited color and alpha for each pixel [S1, unofficial].
+
+**Data Structures:**
+The 2D texture is organized into tiles. Each tile covers a sub-region of the $x$ and $y$ dimensions [S1, unofficial]. The $z$ dimension is mapped to the RGB channels [S1, unofficial]. Specifically, z-slice 0 is in the Red channel, z-slice 1 is in the Green channel, and z-slice 2 is in the Blue channel [S1, unofficial]. The source code implies a specific tiling order: column-major for x, then row-major for y, then channel [S1, unofficial].
+
+**Parameters:**
+*   `MAX_STEPS`: 512 [S1, unofficial].
+*   `dataShape`: Example `vec3(99, 93, 330)` [S1, unofficial].
+*   `textureShape`: Example `vec2(1024, 1024)` [S1, unofficial].
+
+**Algorithm:**
+
+1.  **Calculate Tile Grid:**
+    Determine the number of tiles in x and y:
+    $$ nTiles.x = \lfloor T_x / N_x \rfloor $$
+    $$ nTiles.y = \lfloor T_y / N_y \rfloor $$
+    Calculate tiles per layer (z-slice group):
+    $$ tilesPerLayer = nTiles.x \times nTiles.y $$
+    Calculate tile dimensions in texture space (normalized 0-1):
+    $$ tileDim.x = 1.0 / (T_x / N_x) $$
+    $$ tileDim.y = 1.0 / (T_y / N_y) $$
+
+2.  **Determine Z-Tile Index:**
+    For a normalized position $pos.z \in [0, 1]$, calculate the index of the z-tile group:
+    $$ thisTileN = \lfloor (N_z - 1.0) \times pos.z \rfloor $$
+    $$ thisTileNp1 = \min(thisTileN + 1.0, N_z) $$
+
+3.  **Calculate Spatial Tile Indices:**
+    For a given `thisTileN`, calculate the x and y tile indices within the 2D texture grid:
+    $$ zTile = \lfloor thisTileN / tilesPerLayer \rfloor $$
+    $$ yTile = \lfloor (thisTileN - (zTile \times tilesPerLayer)) / nTiles.x \rfloor $$
+    $$ xTile = \text{mod}(thisTileN - (zTile \times tilesPerLayer), nTiles.x) $$
+
+4.  **Calculate Texture Coordinates:**
+    Calculate the 2D texture coordinates for the current spatial position within the identified tile:
+    $$ thisPoint.x = (xTile + pos.x) \times tileDim.x $$
+    $$ thisPoint.y = (yTile + pos.y) \times tileDim.y $$
+
+5.  **Sample Z-Slices:**
+    Retrieve the data values from the Red, Green, and Blue channels of the tile at `thisPoint` [S1, unofficial]. Note: The source code only handles $zTile \in \{0, 1, 2\}$ explicitly, implying a limitation or specific implementation for small z-depths or multi-texture handling not fully detailed in the snippet [S1, unofficial].
+    $$ datumN = \text{Channel}(texture2D(dataTexture, thisPoint), zTile) $$
+    $$ datumNp1 = \text{Channel}(texture2D(dataTexture, thisPoint), zTile + 1) $$
+    Where $\text{Channel}(tex, 0) = R$, $\text{Channel}(tex, 1) = G$, $\text{Channel}(tex, 2) = B$ [S1, unofficial].
+
+6.  **Interpolate Z:**
+    Calculate the fractional distance within the z-tile:
+    $$ zDiff = \text{mod}((N_z - 1.0) \times pos.z, 1.0) $$
+    Interpolate the value:
+    $$ value = (1.0 - zDiff) \times datumN + zDiff \times datumNp1 $$
+
+7.  **Ray Marching:**
+    *   Transform projected coordinates to texture space:
+        $$ firstPassTexCoord.x = \frac{(projectedCoords.x / projectedCoords.w) + 1.0}{2.0} $$
+        $$ firstPassTexCoord.y = \frac{(projectedCoords.y / projectedCoords.w) + 1.0}{2.0} $$
+    *   Get back position:
+        $$ backPos = texture2D(firstPassTexture, firstPassTexCoord).xyz $$
+    *   Get front position from vertex shader:
+        $$ frontPos = worldSpaceCoords $$
+    *   Calculate ray direction and length:
+        $$ dir = backPos - frontPos $$
+        $$ rayLength = \text{length}(dir) $$
+    *   Initialize state:
+        $$ currentPosition = frontPos $$
+        $$ accumulatedColor = (0, 0, 0) $$
+        $$ accumulatedAlpha = 0.0 $$
+    *   Loop for $i$ from 0 to `steps`:
+        *   Sample data:
+            $$ sample = getRGBAfromDataTex(dataTexture, currentPosition, dataShape, textureShape) $$
+        *   Composite:
+            $$ accumulatedColor += (1.0 - accumulatedAlpha) \times sample.rgb \times sample.a $$
+            $$ accumulatedAlpha += sample.a $$
+        *   Advance:
+            $$ delta = 1.0 / steps $$
+            $$ deltaDirection = \text{normalize}(dir) \times delta $$
+            $$ currentPosition += deltaDirection $$
+        *   Break if $accumulatedAlpha \ge 1.0$ or ray length exceeded [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def ray_aabb_intersect(origin, direction, box_min, box_max):
+    """Standard ray-AABB intersection [G]. Returns (t_min, t_max) or None."""
+    t_min = (box_min - origin) / direction
+    t_max = (box_max - origin) / direction
+    t1 = min(t_min, t_max)
+    t2 = max(t_min, t_max)
+    t_enter = max(t1.x, t1.y, t1.z)
+    t_exit = min(t2.x, t2.y, t2.z)
+    if t_enter > t_exit or t_exit < 0:
+        return None
+    return (t_enter, t_exit)
+
+def sample_tiled_2d_texture(data_texture, pos, data_shape, texture_shape, alpha_correction):
+    Nx, Ny, Nz = data_shape
+    Tx, Ty = texture_shape
+    n_tiles_x = floor(Tx / Nx)
+    n_tiles_y = floor(Ty / Ny)
+    tiles_per_layer = n_tiles_x * n_tiles_y
+    tile_dim_x = 1.0 / n_tiles_x
+    tile_dim_y = 1.0 / n_tiles_y
+
+    this_tile_n = floor((Nz - 1.0) * pos.z)
+    this_tile_n_p1 = min(this_tile_n + 1.0, float(Nz))
+
+    z_tile = floor(this_tile_n / tiles_per_layer)
+    y_tile = floor((this_tile_n - (z_tile * tiles_per_layer)) / n_tiles_x)
+    x_tile = mod(this_tile_n - (z_tile * tiles_per_layer), n_tiles_x)
+
+    tex_x = (x_tile + pos.x) * tile_dim_x
+    tex_y = (y_tile + pos.y) * tile_dim_y
+
+    tile_sample = texture2D(data_texture, vec2(tex_x, tex_y))
+
+    if z_tile == 0:
+        datum_n = tile_sample.r
+        datum_n_p1 = tile_sample.g
+    elif z_tile == 1:
+        datum_n = tile_sample.g
+        datum_n_p1 = tile_sample.b
+    elif z_tile == 2:
+        datum_n = tile_sample.b
+        datum_n_p1 = 0.0
+    else:
+        datum_n = 0.0
+        datum_n_p1 = 0.0
+
+    z_diff = mod((Nz - 1.0) * pos.z, 1.0)
+    value = (1.0 - z_diff) * datum_n + z_diff * datum_n_p1
+
+    if value == 9999.9999:
+        color = vec3(1.0, 0.0, 0.0)
+    else:
+        color = vec3(1.0, 1.0, 1.0)
+    alpha = value * alpha_correction
+    return vec4(color, alpha)
+
+def render_tiled_volume(data_texture, first_pass_texture, front_pos, back_pos, data_shape, texture_shape, alpha_correction, steps):
+    dir = back_pos - front_pos
+    ray_length = length(dir)
+    if ray_length == 0:
+        return vec4(0.0, 0.0, 0.0, 0.0)
+
+    # Ray marching state
+    current_pos = front_pos
+    accumulated_color = vec3(0.0)
+    accumulated_alpha = 0.0
+    accumulated_length = 0.0
+    delta = 1.0 / steps
+    delta_direction = normalize(dir) * delta
+    delta_direction_length = length(delta_direction)
+
+    for i in range(steps):
+        sample = sample_tiled_2d_texture(data_texture, current_pos, data_shape, texture_shape, alpha_correction)
+        accumulated_color += (1.0 - accumulated_alpha) * sample.rgb * sample.a
+        accumulated_alpha += sample.a
+        current_pos += delta_direction
+        accumulated_length += delta_direction_length
+        if accumulated_alpha >= 1.0 or accumulated_length >= ray_length:
+            break
+
+    return vec4(accumulated_color, accumulated_alpha)
+```
+
+**Edge Cases and Pitfalls:**
+*   **Z-Depth Limitation:** The method maps z-slices to RGB channels. A single 2D texture tile can only represent 3 z-slices. If the volume depth $N_z$ is large, this method as described requires either multiple 2D textures or a different indexing scheme not detailed in the source [S1, unofficial]. The source code explicitly checks for `zTile` 0, 1, 2, suggesting it is designed for very shallow volumes or a specific multi-texture setup [S1, unofficial].
+*   **Viewing Artifacts:** Viewing rays entering from sides other than the face-on x,y planes cause a "weird haze effect" that blocks the volume [S1, unofficial]. Looking directly along the z-planes (edge-on to tiles) causes rendering to become "really messed up" [S1, unofficial].
+
+## Subtopics
+
+### Channel Tiling
+A specific variant where the z-dimension is mapped directly to color channels (R, G, B, A) of a 2D texture [S1, unofficial]. It is chosen when hardware lacks 3D texture support and the volume depth is small (<=4 slices per tile) [S1, unofficial]. It differs from spatial tiling by packing depth into color rather than spatial coordinates [S1, unofficial]. Link: [Tiled 2D Texture Volume Representation](52-tiled-2d-texture-volume-representation.md).
+
+### Spatial Tiling (Bricking)
+A method where the 3D volume is divided into 3D bricks, which are then flattened into 2D textures or stored in a hierarchy [S1, unofficial]. It is chosen for larger volumes where channel mapping is insufficient [S1, unofficial]. It differs from channel tiling by using spatial coordinates for all dimensions [S1, unofficial]. Link: [Window/Level Volume Raycasting with Bricking](2775-window-level-volume-rendering-with-bricking.md).
+
+## Operating characteristics
+*   **Time Complexity:** Sampling is $O(1)$ per ray step, but requires multiple texture lookups and arithmetic operations to calculate tile indices and interpolate [S1, unofficial]. Ray marching is $O(N)$ where $N$ is the number of steps [S1, unofficial].
+*   **Memory Complexity:** $O(N_x \times N_y \times N_z)$ for the raw data, but stored in 2D textures [S1, unofficial]. The source uses `vec2(1024, 1024)` tiles, which may pad the data [S1, unofficial].
+*   **Performance:** The source does not provide measured performance metrics. The method is limited by the maximum 2D texture size (e.g., 4096x4096) and the number of available textures if multi-texturing is used for deeper volumes [S1, unofficial].
+*   **Strengths:** Compatible with 2D-only texture hardware. Simple indexing logic [S1, unofficial].
+*   **Limitations:** Severe artifacts when viewing from non-face-on angles. Limited depth per tile (3 slices) without complex extensions [S1, unofficial]. Hardcoded dimensions in the source example suggest poor generalizability without modification [S1, unofficial].
+*   **When to use:** Legacy WebGL environments or hardware without 3D texture support, for small-depth volumes [S1, unofficial].
+*   **When not to use:** High-performance rendering, large volumes, or when view-independent quality is required [S1, unofficial].
+
+## Background
+The method originates from a Stack Overflow question discussing WebGL volume rendering artifacts [S1, unofficial]. The author describes tiling 3D data to a 2D texture by tiling laterally and along RGB channels to render a synthetic sphere. The technique is a workaround for the lack of 3D texture support in WebGL 1.0. The source code is provided as a complete shader implementation [S1, unofficial].
+
+## Sources
+[S1] Volume rendering artefacts when looking along the z-plane, https://stackoverflow.com/questions/28604226/volume-rendering-artefacts-when-looking-along-the-z-plane, fetched 2026-10-27 (unofficial)

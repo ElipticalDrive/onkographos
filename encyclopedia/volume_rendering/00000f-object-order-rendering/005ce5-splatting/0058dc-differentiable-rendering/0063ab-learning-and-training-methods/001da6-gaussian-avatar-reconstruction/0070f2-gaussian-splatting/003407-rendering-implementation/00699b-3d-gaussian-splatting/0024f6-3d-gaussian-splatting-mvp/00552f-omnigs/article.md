@@ -1,0 +1,182 @@
+# OmniGS
+
+Also called: Equirectangular Projection, OmniGS Forward Rendering, OmniGS, Omnidirectional Gaussian Splatting, Omnidirectional Rasterization
+
+## Overview
+OmniGS is a method for fast radiance field reconstruction and real-time omnidirectional novel view synthesis using calibrated monocular 360-degree images and sparse SfM point clouds [S1]. It replaces the standard perspective camera model with an omnidirectional equirectangular projection model, allowing 3D Gaussians to be splatted directly onto the equirectangular screen space [S1]. Unlike sibling methods such as 360-GS, which rely on tangent-plane approximations and two-stage projection, OmniGS uses direct screen-space splatting without requiring scene assumptions or deep networks [S1].
+
+## How it works
+**Inputs:**
+- A set of calibrated monocular 360-degree images [S1].
+- A sparse SfM point cloud [S1].
+- Camera poses and intrinsic parameters (focal lengths $f_x, f_y$, principal points $c_x, c_y$) [S1].
+
+**Outputs:**
+- A reconstructed scene model represented by 3D Gaussians [S1].
+- Rendered omnidirectional images [S1].
+
+**Data Structures:**
+- **3D Gaussian:** Defined by a mean position $\mathbf{m}$, a rotation matrix $\mathbf{W}$, a scaling vector, and an opacity $o_i$ [S1]. The covariance in world space is derived from these parameters [S1].
+- **Camera Space Point:** $\mathbf{t} = [t_x, t_y, t_z]^T$, obtained by transforming the world position $\mathbf{m}$ using the world-to-camera transformation matrix $\mathbf{T}_{cw}$ [S1].
+- **Tile Grid:** The equirectangular image is partitioned into a grid of tiles [S1].
+
+**Coordinate Systems:**
+- **Camera Coordinate System:** Follows the SLAM convention: +X is right, +Y is down, and +Z is forward [S1].
+- **Latitude-Longitude:** Intermediate spherical coordinates [S1].
+- **Uniform Screen-Space:** Normalized coordinates $s_x, s_y \in [-1, 1)$ [S1].
+- **Pixel Coordinates:** Integer pixel positions $p_x, p_y$ on an image of width $W$ and height $H$ [S1].
+
+**Forward Rendering Steps:**
+
+1.  **Transform to Camera Space:**
+    For each 3D Gaussian with world position $\mathbf{m}$, compute its position in camera space $\mathbf{t}$:
+    $$ \mathbf{t} = \mathbf{T}_{cw} \mathbf{m} $$
+    where $\mathbf{T}_{cw}$ is the 4x4 transformation matrix from world to camera space [S1].
+
+2.  **Project to Spherical Coordinates:**
+    Compute the distance $t_r$ and spherical coordinates (longitude $lon$, latitude $lat$) from $\mathbf{t}$:
+    $$ t_r = \sqrt{t_x^2 + t_y^2 + t_z^2} $$
+    $$ \begin{bmatrix} lon \\ lat \end{bmatrix} = \begin{bmatrix} \mathrm{arctan2}(t_x / t_z) \\ \arcsin (t_y / t_r) \end{bmatrix} $$
+    The ranges are $-\pi \le lon < \pi$ and $-\pi/2 \le lat < \pi/2$ [S1].
+
+3.  **Map to Uniform Screen-Space:**
+    Transform spherical coordinates to uniform screen-space coordinates $s_x, s_y$:
+    $$ \begin{bmatrix} s_x \\ s_y \end{bmatrix} = \begin{bmatrix} lon / \pi \\ 2lat / \pi \end{bmatrix} $$
+    This results in $-1 \le s_x, s_y < 1$ [S1].
+
+4.  **Map to Pixel Coordinates:**
+    Transform uniform screen-space coordinates to pixel positions $p_x, p_y$:
+    $$ \begin{bmatrix} p_x \\ p_y \end{bmatrix} = \begin{bmatrix} (s_x + 1) W / 2 \\ (s_y + 1) H / 2 \end{bmatrix} $$
+    where $W$ is the image width and $H$ is the image height [S1].
+
+5.  **Compute 2D Covariance and Alpha:**
+    The 2D covariance matrix in screen space is computed using the Jacobian of the projection and the 3D covariance [S1]. The alpha value for the $i$-th Gaussian at pixel $p$ is:
+    $$ \alpha_i = o_i G_i(\Delta \mathbf{p}_i) $$
+    where $G_i$ is the 2D Gaussian distribution and $\Delta \mathbf{p}_i$ is the distance from the pixel to the Gaussian center [S1].
+
+6.  **Sort Gaussians:**
+    Sort the Gaussians contributing to a pixel by their distance from the camera center to the Gaussian kernel center, $t_r$, from nearest to farthest [S1]. Note: Perspective cameras sort by $t_z$ [S1].
+
+7.  **Tile-Based Rasterization:**
+    - Partition the equirectangular image into tiles [S1].
+    - For each tile, identify 2D Gaussians whose radius of influence covers the tile [S1].
+    - Render all pixels in the tile simultaneously, assigning one thread per pixel [S1].
+    - Threads cooperatively retrieve Gaussian attributes and accumulate alpha-blending results [S1].
+    - Stop accumulation when pixel alpha reaches 0.9999 for numerical stability [S1].
+
+8.  **Alpha Blending:**
+    The final color $C$ is computed as:
+    $$ C = \sum_{i=1}^N c_i \alpha_i \prod_{j=1}^{i-1}(1-\alpha_j) $$
+    where $c_i$ is the color of the $i$-th Gaussian and $N$ is the number of Gaussians near the pixel [S1].
+
+**Jacobian for Backpropagation:**
+The derivatives of pixel coordinates with respect to camera-space points are required for optimization [S1]:
+$$ \frac{\partial p_x}{\partial t_x} = +\frac{W}{2\pi} \cdot \frac{t_z}{t_x^2 + t_z^2}, \quad \frac{\partial p_x}{\partial t_y} = 0, \quad \frac{\partial p_x}{\partial t_z} = -\frac{W}{2\pi} \cdot \frac{t_x}{t_x^2 + t_z^2} $$
+$$ \frac{\partial p_y}{\partial t_x} = -\frac{H}{\pi} \cdot \frac{t_x t_y}{t_r^2 \sqrt{t_x^2 + t_z^2}}, \quad \frac{\partial p_y}{\partial t_y} = +\frac{H}{\pi} \cdot \frac{\sqrt{t_x^2 + t_z^2}}{t_r^2}, \quad \frac{\partial p_y}{\partial t_z} = -\frac{H}{\pi} \cdot \frac{t_z t_y}{t_r^2 \sqrt{t_x^2 + t_z^2}} $$
+where $t_r^2 = t_x^2 + t_y^2 + t_z^2$ [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import torch
+
+def project_omnidirectional(t_x, t_y, t_z, W, H):
+    """
+    Projects a 3D point in camera space to equirectangular pixel coordinates.
+    t_x, t_y, t_z: Tensor of shape (N,)
+    W, H: int
+    Returns: p_x, p_y tensors of shape (N,)
+    """
+    t_r = torch.sqrt(t_x**2 + t_y**2 + t_z**2)
+    lon = torch.atan2(t_x, t_z)
+    lat = torch.asin(t_y / t_r)
+    s_x = lon / math.pi
+    s_y = 2 * lat / math.pi
+    p_x = (s_x + 1) * W / 2
+    p_y = (s_y + 1) * H / 2
+    return p_x, p_y
+
+def evaluate_2d_gaussian(delta_p, cov_2d):
+    """
+    Evaluates the 2D Gaussian PDF at offset delta_p with covariance cov_2d.
+    delta_p: Tensor of shape (2,)
+    cov_2d: Tensor of shape (2, 2)
+    Returns: float
+    """
+    det = cov_2d[0, 0] * cov_2d[1, 1] - cov_2d[0, 1] * cov_2d[1, 0]
+    inv_det = 1.0 / det
+    inv_cov = torch.tensor([
+        [cov_2d[1, 1] * inv_det, -cov_2d[0, 1] * inv_det],
+        [-cov_2d[1, 0] * inv_det, cov_2d[0, 0] * inv_det]
+    ])
+    quad = delta_p @ inv_cov @ delta_p
+    return torch.exp(-0.5 * quad) / (2 * math.pi * torch.sqrt(det))
+
+def render_tile(tile_gaussians, tile_pixels, W, H):
+    """
+    Renders a single tile.
+    tile_gaussians: List of dicts with keys: 'p_x', 'p_y', 'opacity', 'color', 'covariance_2d'
+    tile_pixels: List of tuples (p_x, p_y)
+    """
+    # Sort Gaussians by t_r (distance from camera center)
+    # t_r is precomputed or derived from camera-space position
+    sorted_gaussians = sorted(tile_gaussians, key=lambda g: g['t_r'])
+    
+    results = []
+    for p_x, p_y in tile_pixels:
+        alpha_acc = 0.0
+        color_acc = torch.zeros(3)
+        
+        for g in sorted_gaussians:
+            delta_p = torch.tensor([p_x - g['p_x'], p_y - g['p_y']])
+            alpha_i = g['opacity'] * evaluate_2d_gaussian(delta_p, g['covariance_2d'])
+            
+            if alpha_acc >= 0.9999:
+                break
+                
+            weight = alpha_i * (1.0 - alpha_acc)
+            color_acc = color_acc * (1.0 - alpha_i) + g['color'] * weight
+            alpha_acc += weight
+            
+        results.append(color_acc)
+        
+    return results
+
+def compute_jacobian(t_x, t_y, t_z, W, H):
+    """
+    Computes the Jacobian of pixel coordinates w.r.t camera space points.
+    """
+    t_r_sq = t_x**2 + t_y**2 + t_z**2
+    t_r = torch.sqrt(t_r_sq)
+    denom_xz = t_x**2 + t_z**2
+    sqrt_xz = torch.sqrt(t_x**2 + t_z**2)
+    
+    dp_x_dt_x = (W / (2 * math.pi)) * (t_z / denom_xz)
+    dp_x_dt_y = torch.zeros_like(t_x)
+    dp_x_dt_z = -(W / (2 * math.pi)) * (t_x / denom_xz)
+    
+    dp_y_dt_x = -(H / math.pi) * (t_x * t_y) / (t_r_sq * sqrt_xz)
+    dp_y_dt_y = (H / math.pi) * sqrt_xz / t_r_sq
+    dp_y_dt_z = -(H / math.pi) * (t_z * t_y) / (t_r_sq * sqrt_xz)
+    
+    return {
+        'dp_x_dt_x': dp_x_dt_x, 'dp_x_dt_y': dp_x_dt_y, 'dp_x_dt_z': dp_x_dt_z,
+        'dp_y_dt_x': dp_y_dt_x, 'dp_y_dt_y': dp_y_dt_y, 'dp_y_dt_z': dp_y_dt_z
+    }
+```
+
+## Operating characteristics
+- **Time Complexity:** Real-time rendering speed is achieved through GPU acceleration and tile-based rasterization [S1].
+- **Memory Complexity:** Not given in the sources.
+- **Strengths:** Direct screen-space splatting avoids the suboptimal two-stage projection of tangent-plane methods [S1]. It does not rely on scene assumptions or deep networks, enabling application in diverse indoor and outdoor scenes [S1].
+- **Limitations:** Not given in the sources.
+- **When to use:** When omnidirectional novel view synthesis is required from monocular 360-degree images [S1].
+
+## Background
+OmniGS was introduced by Longwei Li, Huajian Huang, Sai-Kit Yeung, and Hui Cheng from Sun Yat-sen University and The Hong Kong University of Science and Technology [S1]. The paper was published on arXiv in April 2024 (v5 in November 2024) [S1]. It addresses the limitation of standard 3D Gaussian Splatting, which only supports perspective images, by extending it to omnidirectional images [S1].
+
+## Sources
+[S1] OmniGS: Fast Radiance Field Reconstruction using Omnidirectional Gaussian Splatting, https://arxiv.org/abs/2404.03202v5, fetched 2026-10-26

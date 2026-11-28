@@ -1,0 +1,266 @@
+Psynder-GX — GPU-accelerated competitive FPS engine. Vulkan + native Metal, C++23, MIT or Apache-2.0 dual-license. Sister to Psynder (CPU engine). v1.0 design handoff, 25-lane parallel build in progress. - world-outdoor: SIMD heightfield fast-path + spline track editor by havokentity · Pull Request #31 · havokentity/psynder-gx
+
+world-outdoor: SIMD heightfield fast-path + spline track editor by havokentity · Pull Request #31 · havokentity/psynder-gx · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+havokentity
+commented
+May 20, 2026
+Copy link
+Copy Markdown
+Owner
+Summary
+Lane 13 (world-outdoor) Wave B / M2–M3 (DESIGN.md §9.2, ADR-008). Two deliverables, both as header-only internal kernels with a single new Catch2 test TU.
+1. SIMD fast-path for heightfield sampling / traversal — engine/world/outdoor/HeightfieldSimd_internal.h
+sample_bilinear_x8 — 8-wide bilinear height sampler.
+march_packet8 / march_rays — 8-wide ray-vs-heightfield packet intersection (+ a JobSystem batch driver).
+lod_for_distance / select_lods_x8 / select_chunk_lods — CDLOD chunk LOD selection, vectorised, with a JobSystem driver.
+Every kernel reproduces its scalar reference per lane (same op order — mul+add, never fused multiply-add — so packed lanes match the scalar path to fp tolerance; LOD selection matches exactly).
+Per ADR-008 this is the sampler / intersection fast-path for the existing CDLOD heightfield (the kernel the §8.2 hybrid shadow path and heightfield physics raycasts use), not a reintroduced raymarcher backend.
+2. Spline track editor — engine/world/outdoor/SplineEditor_internal.h
+Control-point insert / move / remove (+ append).
+to_segments — uniform Catmull-Rom → cubic Bézier, emitting the already-public SplineRoadSegment; interpolates the knots, C1 across joins, supports closed loops.
+Arc-length parameterisation: build_arc_table + sample_at_arc_length (constant-speed sampling for even road-texture spacing / AI line / physics waypoints).
+Banking: per-knot, interpolated smoothly along each segment in the sampled frame, plus auto_bank (bank-into-corners from local curvature).
+Ownership / cross-lane notes (for the orchestrator)
+All edits are within engine/world/outdoor/ plus the one allowed new test file tests/unit/world_outdoor_waveb_simd_spline.cpp. tests/unit/CMakeLists.txt is untouched (it GLOBs with CONFIGURE_DEPENDS). No public header changed.
+Cross-lane include (no action needed): the SIMD kernels consume lane 03's inline back-end via simd/Simd_internal.h (cmp/blend/min/max/sqrt/f32x8 aren't on the frozen Simd.h surface, which only exposes the f32x4 arithmetic set). This is header-only and compile-time-resolved — psynder_simd is already a PUBLIC dependency of this lane, so there is no new link edge. Precedent: the SIMD unit tests include the same header. If you'd prefer these kernels promoted onto the frozen public Simd.h, that's a lane-03 public-header change to coordinate.
+Frozen-header handling: the editor state types (SplineTrack / TrackControlPoint) live in detail because Terrain.h is frozen. The editor's output is the public SplineRoadSegment, so the public contract is unchanged. If lane 22 (editor) later needs these types public, that's a coordinated Terrain.h change.
+The two new headers are #included from Terrain.cpp so they get lib-level compile coverage on all five CI jobs (incl. Windows clang-cl + the dedicated build, where tests are OFF) — matching the existing pattern (Terrain.cpp already includes Scatter_internal.h / Raymarch_internal.h without calling them directly).
+Test plan
+macOS · Metal · arm64 (NEON) — build + ctest
+Linux · Vulkan · x86_64 (SSE/AVX) — build + ctest
+Linux · Dedicated · headless — build (tests OFF; header compile coverage via the lib)
+Windows · Vulkan · clang-cl — build (tests OFF; header compile coverage via the lib)
+clang-format check
+New cases in world_outdoor_waveb_simd_spline.cpp: SIMD-vs-scalar parity (bilinear, ray packet, LOD), the JobSystem batch drivers vs a per-element scalar loop, and the spline editor ops / Catmull-Rom interpolation / arc-length constant-speed sampling / banking. Headers + test verified to compile locally under MSVC /W4 /permissive-; runtime parity is validated by the macOS + Linux CI test jobs.
+world-outdoor: SIMD heightfield fast-path + spline track editor
+…
+cf1708c
+```
+M2/M3 Wave B for lane 13 (world-outdoor).
+
+SIMD fast-path (HeightfieldSimd_internal.h): 8-wide bilinear sampler,
+ray-vs-heightfield packet intersection, and CDLOD chunk LOD selection,
+each reproducing its scalar reference per lane (same op order; mul+add,
+not fma). Per ADR-008 this is the sampler / intersection path for the
+existing CDLOD heightfield -- used by the hybrid shadow path and
+heightfield raycasts -- NOT a second raymarcher backend. Per-element
+batches dispatch through psynder::jobs::JobSystem.
+
+Spline track editor (SplineEditor_internal.h): control-point
+insert/move/remove, Catmull-Rom -> cubic Bezier emit (the public
+SplineRoadSegment), arc-length parameterisation with constant-speed
+sampling, and banking (per-knot + auto-from-curvature).
+
+Cross-lane notes:
+- Consumes lane 03's inline SIMD kernels via simd/Simd_internal.h
+  (header-only, compile-time-resolved; psynder_simd is already a PUBLIC
+  dependency of this lane, so no new link edge).
+- Editor state types (SplineTrack / TrackControlPoint) live in `detail`
+  because Terrain.h is frozen; the editor's output is the public
+  SplineRoadSegment, so the frozen public contract is unchanged.
+
+Tests: tests/unit/world_outdoor_waveb_simd_spline.cpp pins SIMD-vs-scalar
+parity, the JobSystem batch drivers, and the editor ops / arc-length /
+banking.
+```
+havokentity
+requested a review
+from Copilot
+May 20, 2026 16:15
+Copilot started reviewing on behalf of
+havokentity
+May 20, 2026 16:15
+View session
+Copilot
+AI
+reviewed
+May 20, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Pull request overview
+This PR adds two new header-only internal subsystems under engine/world/outdoor/ for Wave B: an 8-wide SIMD fast-path for heightfield sampling/ray traversal/CDLOD LOD selection, and a spline track editor that can mutate control points and derive road segments with arc-length parameterized sampling and banking. It also adds a single Catch2 unit-test TU to validate SIMD-vs-scalar parity and spline editor behavior, and wires the new headers into Terrain.cpp for compile coverage.
+Changes:
+Add HeightfieldSimd_internal.h: 8-wide SIMD bilinear sampling, ray-vs-heightfield packet intersection (+ JobSystem driver), and SIMD CDLOD chunk LOD selection (+ JobSystem driver).
+Add SplineEditor_internal.h: spline track editing ops, Catmull-Rom→Bezier derivation, arc-length table + constant-speed sampling, and curvature-based auto-banking.
+Add tests/unit/world_outdoor_waveb_simd_spline.cpp to validate SIMD parity, batch drivers, and spline editor functionality; include new headers from Terrain.cpp for non-test builds.
+Reviewed changes
+Copilot reviewed 4 out of 4 changed files in this pull request and generated 5 comments.
+File
+Description
+tests/unit/world_outdoor_waveb_simd_spline.cpp
+New unit tests covering SIMD-vs-scalar parity and spline editor operations/sampling/banking.
+engine/world/outdoor/Terrain.cpp
+Adds includes for the new internal headers to ensure library-level compile coverage.
+engine/world/outdoor/SplineEditor_internal.h
+New header-only spline editor with segment derivation, arc-length sampling, and banking helpers.
+engine/world/outdoor/HeightfieldSimd_internal.h
+New header-only SIMD kernels for heightfield sampling, ray traversal, and chunk LOD selection.
+💡 Add Copilot custom instructions for smarter, more guided reviews. Learn how to get started.
+Comment thread
+engine/world/outdoor/SplineEditor_internal.h
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+engine/world/outdoor/SplineEditor_internal.h
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+engine/world/outdoor/SplineEditor_internal.h
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+engine/world/outdoor/HeightfieldSimd_internal.h
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+tests/unit/world_outdoor_waveb_simd_spline.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+review: address Copilot feedback (arc joins, XZ bank, parity, tail)
+…
+2afd995
+```
+- build_arc_table: emit each segment's t==0 sample (including the join);
+  sample_at_arc_length now brackets inside the owning segment, and the
+  cross-segment fallback interpolates 0 -> b.t instead of dropping frac.
+- auto_bank: project chords onto the XZ ground plane before normalising,
+  so elevation changes no longer skew the curvature-based turn measure.
+- HeightfieldSimd: correct the parity claim — the packet uses mul+add but
+  the scalar reference may be FMA-contracted, so lanes match to fp
+  tolerance (LOD selection is integer/exact), as the test already asserts.
+- world_outdoor_waveb test: the partial-count case now asserts lanes
+  >= count keep their poison sentinel (kernel never writes past count).
+```
+Copilot started work on behalf of
+havokentity
+May 20, 2026 16:29
+View session
+Copilot finished work on behalf of
+havokentity
+May 20, 2026 16:30
+Copilot started work on behalf of
+havokentity
+May 20, 2026 16:30
+View session
+Copilot finished work on behalf of
+havokentity
+May 20, 2026 16:32
+havokentity
+requested a review
+from Copilot
+May 20, 2026 16:34
+Copilot started reviewing on behalf of
+havokentity
+May 20, 2026 16:35
+View session
+Copilot
+AI
+reviewed
+May 20, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Pull request overview
+Copilot reviewed 4 out of 4 changed files in this pull request and generated 2 comments.
+Comment thread
+engine/world/outdoor/SplineEditor_internal.h
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+engine/world/outdoor/HeightfieldSimd_internal.h
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+review: address Copilot — fix stale arc-table + lerp comments
+…
+939b4d8
+```
+Comment-only follow-ups to the round-1 fixes:
+- build_arc_table doc now states each segment emits its own t==0 sample
+  (so the join appears twice, adding zero length), matching the impl.
+- sample_bilinear_x8 lerp comment no longer implies bitwise parity;
+  it mirrors the scalar op order, parity is tolerance-based (header note).
+```
+Copilot started work on behalf of
+havokentity
+May 20, 2026 16:44
+View session
+havokentity
+requested a review
+from Copilot
+May 20, 2026 16:44
+Copilot started reviewing on behalf of
+havokentity
+May 20, 2026 16:45
+View session
+Copilot
+AI
+reviewed
+May 20, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Pull request overview
+Copilot reviewed 4 out of 4 changed files in this pull request and generated no new comments.
+Copilot finished work on behalf of
+havokentity
+May 20, 2026 16:49
+Copilot started work on behalf of
+havokentity
+May 20, 2026 16:49
+View session
+Copilot finished work on behalf of
+havokentity
+May 20, 2026 16:55
+Hide details
+View details
+havokentity
+merged commit e67bb80
+into
+main
+May 20, 2026
+8 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

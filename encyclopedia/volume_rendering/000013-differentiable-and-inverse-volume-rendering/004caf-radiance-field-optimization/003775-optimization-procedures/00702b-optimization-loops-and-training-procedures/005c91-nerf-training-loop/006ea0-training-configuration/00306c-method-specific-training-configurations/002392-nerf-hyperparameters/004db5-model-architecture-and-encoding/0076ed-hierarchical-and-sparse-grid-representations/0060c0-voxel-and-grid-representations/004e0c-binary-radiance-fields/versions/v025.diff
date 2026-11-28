@@ -1,0 +1,509 @@
+--- v024.md
++++ v025.md
+@@ -4,36 +4,28 @@
+ 
+ ## Overview
+-Binary Radiance Fields (BiRF) is a storage-efficient radiance field representation that constrains feature grid parameters to binary values (+1 or -1) to achieve compact storage without post-processing compression [S1]. Unlike methods that compress pre-trained models or use real-valued floating-point grids, BiRF performs binarization during training using a straight-through estimator, maintaining reconstruction quality via a 2D-3D hybrid multi-resolution architecture [S1].
++Binary Radiance Fields (BiRF) is a storage-efficient radiance field representation that constrains feature grid parameters to binary values (+1 or -1) to achieve compact storage without post-processing compression [S1]. Unlike methods that compress pre-trained models or use real-valued floating-point grids, BiRF performs binarization during training using a straight-through estimator, enabling a dramatic reduction in storage overhead (e.g., < 0.5 MB) while maintaining reconstruction quality via a 2D-3D hybrid multi-resolution architecture [S1].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** 3D position $\mathbf{x} \in \mathbb{R}^3$, viewing direction $\mathbf{d} \in S^2$.
+-*   **Output:** Volume density $\sigma \in \mathbb{R}$, color $\mathbf{c} \in \mathbb{R}^3$.
++**Inputs:** 3D coordinates $\mathbf{x} \in \mathbb{R}^3$, viewing directions $\mathbf{d} \in S^2$, and ground truth images.
++**Outputs:** Volume density $\sigma$, color $\mathbf{c}$, and rendered pixel values $\hat{C}(\mathbf{r})$.
+ 
+ **Data Structures:**
+-The model consists of four multi-resolution feature grids implemented using hash encoding [S1]:
+-1.  One 3D voxel grid $\Phi_{\theta_{xyz}}$ with $L$ levels.
+-2.  Three 2D plane grids $\Phi_{\theta_{xy}}, \Phi_{\theta_{xz}}, \Phi_{\theta_{yz}}$ with $M$ levels each [S1].
+-*   **Hash Encoding:** All grids use hash encoding [S1].
+-*   **Resolution Levels:**
+-    *   3D Grid: $L$ levels, resolutions from 16 to 1024 [S1].
+-    *   2D Grids: $M$ levels, resolutions from 64 to 512 [S1].
+-*   **Feature Vectors:**
+-    *   3D Grid: Maximum $T_{3D}$ feature vectors per level [S1].
+-    *   2D Grids: Maximum $T_{2D}$ feature vectors per level [S1].
+-*   **Feature Dimension:** $F$ features per level. Variants use $F \in \{2, 4, 8\}$ [S1].
+-*   **Parameter Storage:** Parameters are binary ($\pm 1$), stored as 1-bit values [S1].
++The feature representation consists of a multi-resolution 2D-3D hybrid grid implemented using hash encoding [S1].
++1.  **3D Voxel Grid ($\Phi_{\theta_{xyz}}$):** Contains $L$ levels with resolutions ranging from 16 to 1024. Each level stores up to $T_{3D}$ feature vectors.
++2.  **2D Plane Grids ($\Phi_{\theta_{xy}}, \Phi_{\theta_{xz}}, \Phi_{\theta_{yz}}$):** Three orthogonal planes. Each contains $M$ levels with resolutions ranging from 64 to 512. Each level stores up to $T_{2D}$ feature vectors.
++3.  **Feature Values:** All grid parameters are binary, constrained to $\{-1, +1\}$. The feature dimension per level is $F \in \{2, 4, 8\}$ [S1].
++4.  **MLPs:**
++    *   Density MLP: 1 hidden layer, 128 channels, ReLU activation.
++    *   Color MLP: 2 hidden layers, 128 channels, ReLU activation.
++    *   Directional Encoding: Spherical Harmonics basis functions [S1].
+ 
+ **Parameters:**
++*   $L$: Number of 3D grid levels.
++*   $M$: Number of 2D grid levels.
++*   $T_{3D}$: Max feature vectors per 3D level. Small model (Ours-S): $\log_2(T_{3D}) = 17$. Base model (Ours-B): $\log_2(T_{3D}) = 19$ [S1].
++*   $T_{2D}$: Max feature vectors per 2D level. Small model (Ours-S): $\log_2(T_{2D}) = 15$. Base model (Ours-B): $\log_2(T_{2D}) = 17$ [S1].
++*   $F$: Feature dimension per level.
+ *   $\lambda_{\text{sparsity}}$: Sparsity loss weight. Value: $2.0 \times 10^{-5}$ [S1].
+-*   Model Sizes:
+-    *   Small (Ours-S): $\log_2(T_{3D}) = 17$, $\log_2(T_{2D}) = 15$ [S1].
+-    *   Base (Ours-B): $\log_2(T_{3D}) = 19$, $\log_2(T_{2D}) = 17$ [S1].
+-*   MLPs: 128-channel hidden layers, ReLU activation [S1].
+-    *   Density MLP: 1 hidden layer [S1].
+-    *   Color MLP: 2 hidden layers [S1].
+-*   Directional Encoding: Spherical harmonics basis functions [S1].
+ *   Optimizer: Adam, initial learning rate 0.01, decayed by 0.33 at 15K and 18K iterations [S1].
+-*   Warm-up: First 1K iterations [S1].
+ 
+ **Steps:**
+@@ -41,37 +33,32 @@
+ 1.  **Binarization:** Transform real-valued grid parameters $\theta$ to binary $\theta'$ using the sign function:
+     $$ \theta' = \text{sign}(\theta) = \begin{cases} +1 & \text{if } \theta \ge 0 \\ -1 & \text{otherwise} \end{cases} $$
+-    Gradients are propagated using the Straight-Through Estimator (STE):
+-    $$ \frac{\partial L}{\partial \theta} = \frac{\partial L}{\partial \theta'} \cdot \mathbb{I}(|\theta| \le 1) $$
+-    This constrains values to $\{-1, 1\}$ and prevents scale divergence [S1].
+-
+-2.  **Feature Extraction (3D):** For input coordinate $\mathbf{x}$, compute features from the 3D grid by tri-linearly interpolating binary parameters across $L$ resolution levels and concatenating them:
+-    $$ \mathbf{f}_{xyz} = \left\{ \text{interp}(\mathbf{x}, \text{sign}(\Phi^l_{\theta_{xyz}})) \right\}_{l=1}^L $$
+-    where $\text{interp}$ denotes tri-linear interpolation [S1].
+-
+-3.  **Feature Extraction (2D):** Project $\mathbf{x}=(x,y,z)$ to 2D coordinates: $\mathbf{x}_{xy}=(x,y)$, $\mathbf{x}_{xz}=(x,z)$, $\mathbf{x}_{yz}=(y,z)$. For each axis, bi-linearly interpolate binary parameters across $M$ resolution levels and concatenate:
+-    $$ \mathbf{f}_{xy} = \left\{ \text{interp}(\mathbf{x}_{xy}, \text{sign}(\Phi^m_{\theta_{xy}})) \right\}_{m=1}^M $$
+-    Repeat for $\mathbf{f}_{xz}$ and $\mathbf{f}_{yz}$ [S1].
+-
+-4.  **Feature Concatenation:** Combine all encoded features:
++    Gradients are propagated using the Straight-Through Estimator (STE). The gradient is passed if $|\theta| \le 1$, otherwise it is zeroed to prevent scale divergence [S1]:
++    $$ \frac{\partial L}{\partial \theta} = \begin{cases} \frac{\partial L}{\partial \theta'} & \text{if } |\theta| \le 1 \\ 0 & \text{otherwise} \end{cases} $$
++
++2.  **Feature Encoding:**
++    *   **3D Encoding:** For input $\mathbf{x}$, compute features from the 3D grid by tri-linearly interpolating binary parameters across $L$ levels and concatenating:
++        $$ \mathbf{f}_{xyz} = \left\{ \text{interp}(\mathbf{x}, \text{sign}(\Phi^l_{\theta_{xyz}})) \right\}_{l=1}^L $$
++    *   **2D Encoding:** Project $\mathbf{x}=(x,y,z)$ to 2D coordinates: $\mathbf{x}_{xy}=(x,y)$, $\mathbf{x}_{xz}=(x,z)$, $\mathbf{x}_{yz}=(y,z)$. For each axis, bi-linearly interpolate binary parameters across $M$ levels and concatenate:
++        $$ \mathbf{f}_{xy} = \left\{ \text{interp}(\mathbf{x}_{xy}, \text{sign}(\Phi^m_{\theta_{xy}})) \right\}_{m=1}^M $$
++        Repeat for $\mathbf{f}_{xz}$ and $\mathbf{f}_{yz}$ [S1].
++
++3.  **Feature Concatenation:** Combine all encoded features:
+     $$ \mathbf{f} = \{ \mathbf{f}_{xyz}, \mathbf{f}_{xy}, \mathbf{f}_{xz}, \mathbf{f}_{yz} \} $$
+-    [S1].
+-
+-5.  **Positional Encoding:** Apply sinusoidal positional encoding $\gamma(\mathbf{x})$ to the input 3D coordinate [S1].
+-
+-6.  **Density Prediction:** Feed $\gamma(\mathbf{x})$ and $\mathbf{f}$ into the density MLP:
++
++4.  **Positional Encoding:** Apply sinusoidal positional encoding $\gamma(\mathbf{x})$ to the input 3D coordinate [S1].
++
++5.  **Density Prediction:** Feed $\gamma(\mathbf{x})$ and $\mathbf{f}$ into the density MLP:
+     $$ (\sigma, \mathbf{e}) = \text{MLP}_{\text{density}}(\gamma(\mathbf{x}), \mathbf{f}) $$
+-    where $\sigma$ is density and $\mathbf{e}$ is the embedded feature [S1].
+-
+-7.  **Color Prediction:** Feed $\mathbf{e}$ and directional encoding $\mathbf{d}$ (spherical harmonics) into the color MLP:
++    where $\sigma$ is volume density and $\mathbf{e}$ is the embedded feature [S1].
++
++6.  **Color Prediction:** Feed $\mathbf{e}$ and directional encoding $\mathbf{d}$ (using spherical harmonics) into the color MLP:
+     $$ \mathbf{c} = \text{MLP}_{\text{color}}(\mathbf{e}, \mathbf{d}) $$
+-    [S1].
+-
+-8.  **Rendering:** Compute pixel color $\hat{C}(\mathbf{r})$ using volumetric rendering:
+-    $$ \hat{C}(\mathbf{r}) = \sum_{i=1}^{N} T_i \alpha_i \mathbf{c}_i $$
+-    where $T_i = \prod_{j=1}^{i-1} (1 - \alpha_j)$, $\alpha_i = 1 - \exp(-\sigma_i \delta_i)$, and $\delta_i$ is the distance between samples [S1].
+-
+-9.  **Loss Calculation:**
+-    *   Reconstruction Loss: $L_{\text{recon}} = \sum_{\mathbf{r} \in \mathcal{R}} ||\hat{C}(\mathbf{r}) - C(\mathbf{r})||_2^2$ [S1].
+-    *   Sparsity Loss: $L_{\text{sparsity}} = \sum_{i,k} \log(1 + 2\sigma(\mathbf{r}_i(t_k))^2)$ using Cauchy loss [S1].
++
++7.  **Rendering:** Compute radiance $\hat{C}(\mathbf{r})$ using standard volumetric rendering (see Parent [13550-model-architecture-and-encoding.md]) [S1].
++
++8.  **Loss Calculation:**
++    *   Reconstruction Loss: $L_{\text{recon}} = \sum_{\mathbf{r} \in \mathcal{R}} ||\hat{C}(\mathbf{r}) - C(\mathbf{r})||_2^2$.
++    *   Sparsity Loss: Regularize sparsity using Cauchy loss to accelerate rendering by skipping empty areas:
++        $$ L_{\text{sparsity}} = \sum_{i,k} \log(1 + 2\sigma(\mathbf{r}_i(t_k))^2) $$
+     *   Total Loss: $L = L_{\text{recon}} + \lambda_{\text{sparsity}} L_{\text{sparsity}}$ [S1].
+ 
+@@ -79,143 +66,232 @@
+ 
+ ```python
+-import math
+-
+-def sign(x):
+-    """Binary sign function: +1 if x >= 0, -1 otherwise."""
+-    return 1.0 if x >= 0.0 else -1.0
+-
+-def ste_gradient(loss, theta, theta_prime):
+-    """
+-    Straight-Through Estimator for binarization.
+-    Gradients pass through only if |theta| <= 1.
+-    """
+-    if abs(theta) <= 1.0:
+-        return loss
+-    else:
+-        return 0.0
+-
+-def tri_linear_interpolate(grid, x, y, z, level_res):
+-    """
+-    Tri-linear interpolation of binary grid parameters.
+-    grid: 3D array of binary values (+1/-1).
+-    x, y, z: continuous coordinates normalized to [0, level_res].
+-    level_res: resolution of the current grid level.
+-    """
+-    # Implementation details of hash-based tri-linear interpolation
+-    # 1. Map continuous coords to grid indices
+-    # 2. Retrieve 8 corner values from grid
+-    # 3. Interpolate
+-    pass
+-
+-def bi_linear_interpolate(grid, u, v, level_res):
+-    """
+-    Bi-linear interpolation of binary grid parameters.
+-    grid: 2D array of binary values (+1/-1).
+-    u, v: continuous coordinates normalized to [0, level_res].
+-    level_res: resolution of the current grid level.
+-    """
+-    # Implementation details of hash-based bi-linear interpolation
+-    pass
+-
+-def get_3d_features(x, y, z, grids_3d, levels_3d, max_vectors_3d, feature_dim):
+-    """
+-    Extract features from 3D voxel grid.
+-    grids_3d: List of 3D hash grids for each level.
+-    levels_3d: List of resolutions for each level.
+-    """
+-    features = []
+-    for l in range(levels_3d):
+-        res = levels_3d[l]
+-        grid = grids_3d[l]
+-        # Interpolate and binarize
+-        # Note: The grid stores real values during training, binarized via sign()
+-        # interp returns real values, then sign() is applied
+-        val = tri_linear_interpolate(grid, x, y, z, res)
+-        bin_val = sign(val)
+-        # Extract feature vector of size feature_dim
+-        # In hash encoding, multiple hash entries might map to the same feature vector
+-        # This is a simplified representation of the concatenation
+-        features.append(bin_val) # Simplified: assuming scalar for brevity, 
+-                                 # in reality it's a vector of size F
+-    return features
+-
+-def get_2d_features(x, y, z, grids_2d, levels_2d, max_vectors_2d, feature_dim):
+-    """
+-    Extract features from 2D plane grids.
+-    grids_2d: Dict of 2D hash grids for xy, xz, yz planes.
+-    levels_2d: List of resolutions for each level.
+-    """
+-    features = []
+-    
+-    # XY Plane
+-    for l in range(levels_2d):
+-        res = levels_2d[l]
+-        grid = grids_2d['xy'][l]
+-        val = bi_linear_interpolate(grid, x, y, res)
+-        bin_val = sign(val)
+-        features.append(bin_val)
+-        
+-    # XZ Plane
+-    for l in range(levels_2d):
+-        res = levels_2d[l]
+-        grid = grids_2d['xz'][l]
+-        val = bi_linear_interpolate(grid, x, z, res)
+-        bin_val = sign(val)
+-        features.append(bin_val)
+-        
+-    # YZ Plane
+-    for l in range(levels_2d):
+-        res = levels_2d[l]
+-        grid = grids_2d['yz'][l]
+-        val = bi_linear_interpolate(grid, y, z, res)
+-        bin_val = sign(val)
+-        features.append(bin_val)
+-        
+-    return features
+-
+-def positional_encoding(x, num_frequencies=10):
+-    """Sinusoidal positional encoding."""
+-    # Standard NeRF positional encoding
+-    pass
+-
+-def spherical_harmonics(direction, degree=3):
+-    """Spherical harmonics encoding for direction."""
+-    # Standard SH encoding
+-    pass
+-
+-def train_step(x, d, target_color, grids_3d, grids_2d, mlp_density, mlp_color, lambda_sparsity):
+-    """
+-    One training step for BiRF.
+-    """
+-    # 1. Feature Extraction
+-    f_xyz = get_3d_features(x[0], x[1], x[2], grids_3d, levels_3d, T_3D, F)
+-    f_2d = get_2d_features(x[0], x[1], x[2], grids_2d, levels_2d, T_2D, F)
+-    f = f_xyz + f_2d # Concatenation
+-    
+-    # 2. Positional Encoding
+-    gamma_x = positional_encoding(x)
+-    
+-    # 3. Density Prediction
+-    sigma, e = mlp_density(gamma_x, f)
+-    
+-    # 4. Color Prediction
+-    d_sh = spherical_harmonics(d)
+-    c = mlp_color(e, d_sh)
+-    
+-    # 5. Loss Calculation
+-    # L_recon
+-    loss_recon = (c - target_color) ** 2
+-    
+-    # L_sparsity
+-    loss_sparsity = math.log(1 + 2 * sigma ** 2)
+-    
+-    total_loss = loss_recon + lambda_sparsity * loss_sparsity
+-    
+-    # 6. Backpropagation with STE
+-    # Gradients for MLPs are standard
+-    # Gradients for grids use STE
+-    # dL/d_theta = dL/d_theta_prime * I(|theta| <= 1)
+-    
+-    return total_loss, c, sigma
++import torch
++import torch.nn as nn
++import numpy as np
++
++class BinaryRadianceField:
++    def __init__(self, L=4, M=4, T_3D=131072, T_2D=32768, F=2, device='cpu'):
++        """
++        Initialize BiRF.
++        L: Number of 3D grid levels.
++        M: Number of 2D grid levels.
++        T_3D: Max feature vectors per 3D level.
++        T_2D: Max feature vectors per 2D level.
++        F: Feature dimension per level.
++        """
++        self.device = device
++        self.L = L
++        self.M = M
++        self.F = F
++        
++        # Initialize hash grids with real-valued parameters
++        # 3D Grid: L levels
++        self.grid_3d = nn.ModuleList([
++            nn.Embedding(T_3D, F) for _ in range(L)
++        ])
++        # 2D Grids: 3 axes, M levels each
++        self.grid_xy = nn.ModuleList([
++            nn.Embedding(T_2D, F) for _ in range(M)
++        ])
++        self.grid_xz = nn.ModuleList([
++            nn.Embedding(T_2D, F) for _ in range(M)
++        ])
++        self.grid_yz = nn.ModuleList([
++            nn.Embedding(T_2D, F) for _ in range(M)
++        ])
++        
++        # Initialize MLPs
++        # Density MLP: 1 hidden layer, 128 channels
++        self.mlp_density = nn.Sequential(
++            nn.Linear(F * (L + 3 * M) + 10, 128), # +10 for positional encoding
++            nn.ReLU(),
++            nn.Linear(128, 1 + F) # Output: sigma (1) + embedding (F)
++        )
++        # Color MLP: 2 hidden layers, 128 channels
++        self.mlp_color = nn.Sequential(
++            nn.Linear(F + 10, 128), # +10 for directional encoding
++            nn.ReLU(),
++            nn.Linear(128, 128),
++            nn.ReLU(),
++            nn.Linear(128, 3) # Output: color (RGB)
++        )
++        
++        # Initialize embeddings with small random values
++        for grid in self.grid_3d + self.grid_xy + self.grid_xz + self.grid_yz:
++            for emb in grid:
++                nn.init.uniform_(emb.weight, -1e-4, 1e-4)
++
++    def binarize(self, grid):
++        """
++        Apply binarization to grid parameters using STE.
++        Returns binary values for forward pass, gradients pass through if |val| <= 1.
++        """
++        # Forward: sign function
++        binary_weights = torch.sign(grid.weight.data)
++        
++        # Backward: Straight-Through Estimator
++        # We replace the gradient with the gradient of the binary weights
++        # if the original weight was within [-1, 1].
++        # Note: In PyTorch, this is typically implemented via a custom autograd function.
++        # Here we simulate the logic for clarity.
++        
++        # Create a mask for valid gradients
++        mask = (grid.weight.data.abs() <= 1.0).float()
++        
++        # Return binary weights for forward computation
++        # The gradient handling is implicit in the custom autograd function logic
++        # which would look like:
++        # grad_input = grad_output * mask
++        return binary_weights
++
++    def get_binary_features(self, x, grid_list, is_3d=True):
++        """
++        Extract binary features from a grid list.
++        x: Tensor of shape (N, 3)
++        grid_list: List of nn.Embedding layers
++        is_3d: If True, use tri-linear interpolation. If False, bi-linear on projected coords.
++        """
++        features = []
++        for i, grid in enumerate(grid_list):
++            # Get hash indices for the current resolution level
++            # This requires a hash function implementation specific to Instant-NGP style
++            # For this pseudocode, we assume a helper `get_hash_indices` exists
++            # which maps coordinates to integer indices in [0, T)
++            
++            if is_3d:
++                indices = get_hash_indices_3d(x, resolution=16 * (2**i))
++                # Tri-linear interpolation of binary weights
++                # Since weights are binary (+1/-1), interpolation is linear combination
++                # of corner values.
++                # Simplified: assume `interpolate_3d` handles the corner lookup and weighting
++                # using the binary weights retrieved via `binarize`
++                # Note: In practice, one looks up the 8 corners, binarizes them, 
++                # and interpolates.
++                
++                # Retrieve real weights to binarize
++                # We need to handle the STE logic here. 
++                # For implementation, we assume `grid.weight` holds real values.
++                # We compute binary values for interpolation.
++                
++                # Get 8 corner indices
++                corners = get_3d_corners(x, resolution=16 * (2**i))
++                # Flatten corners for embedding lookup
++                flat_corners = corners.view(-1, 8)
++                
++                # Lookup embeddings
++                # shape: (N, 8, F)
++                emb_weights = grid(flat_corners) 
++                
++                # Binarize
++                # Apply STE: The forward pass uses sign, backward passes gradient if |w|<=1
++                # We create a custom tensor for this
++                binary_emb = BinarizeFunction.apply(emb_weights, grid.weight)
++                
++                # Interpolate
++                # Weights are binary, so we just interpolate the binary values
++                interp_feat = interpolate_3d(x, binary_emb, resolution=16 * (2**i))
++                features.append(interp_feat)
++            else:
++                # 2D projection
++                # Project x to 2D
++                if grid == self.grid_xy[0]:
++                    x_2d = x[:, :2]
++                elif grid == self.grid_xz[0]:
++                    x_2d = x[:, [0, 2]]
++                else:
++                    x_2d = x[:, 1:]
++                    
++                indices = get_hash_indices_2d(x_2d, resolution=64 * (2**i))
++                # Bi-linear interpolation
++                # Similar logic to 3D but with 4 corners
++                corners = get_2d_corners(x_2d, resolution=64 * (2**i))
++                flat_corners = corners.view(-1, 4)
++                emb_weights = grid(flat_corners)
++                binary_emb = BinarizeFunction.apply(emb_weights, grid.weight)
++                interp_feat = interpolate_2d(x_2d, binary_emb, resolution=64 * (2**i))
++                features.append(interp_feat)
++                
++        return torch.cat(features, dim=-1)
++
++    def forward(self, x, d):
++        """
++        Forward pass.
++        x: (N, 3) coordinates
++        d: (N, 3) directions
++        """
++        # 1. Feature Encoding
++        f_xyz = self.get_binary_features(x, self.grid_3d, is_3d=True)
++        f_xy = self.get_binary_features(x, self.grid_xy, is_3d=False)
++        f_xz = self.get_binary_features(x, self.grid_xz, is_3d=False)
++        f_yz = self.get_binary_features(x, self.grid_yz, is_3d=False)
++        
++        f = torch.cat([f_xyz, f_xy, f_xz, f_yz], dim=-1)
++        
++        # 2. Positional Encoding
++        gamma_x = positional_encoding(x, num_levels=10)
++        
++        # 3. Density Prediction
++        density_input = torch.cat([gamma_x, f], dim=-1)
++        density_out = self.mlp_density(density_input)
++        sigma = density_out[:, :1]
++        e = density_out[:, 1:]
++        
++        # 4. Color Prediction
++        # Directional encoding (Spherical Harmonics)
++        d_sh = spherical_harmonics_encoding(d, degree=4)
++        color_input = torch.cat([e, d_sh], dim=-1)
++        c = self.mlp_color(color_input)
++        
++        return sigma, c
++
++class BinarizeFunction(torch.autograd.Function):
++    @staticmethod
++    def forward(ctx, input, real_weights):
++        # Forward: sign function
++        ctx.save_for_backward(real_weights)
++        return torch.sign(input)
++
++    @staticmethod
++    def backward(ctx, grad_output):
++        # Backward: STE
++        real_weights = ctx.saved_tensors[0]
++        mask = (real_weights.abs() <= 1.0).float()
++        grad_input = grad_output * mask
++        return grad_input, None
++
++def get_hash_indices_3d(x, resolution):
++    # Placeholder for Instant-NGP hash grid index calculation
++    # Returns integer indices for the 8 corners of the voxel containing x
++    pass
++
++def get_hash_indices_2d(x, resolution):
++    # Placeholder for Instant-NGP hash grid index calculation
++    pass
++
++def get_3d_corners(x, resolution):
++    # Returns 8 corner coordinates
++    pass
++
++def get_2d_corners(x, resolution):
++    # Returns 4 corner coordinates
++    pass
++
++def interpolate_3d(x, binary_emb, resolution):
++    # Tri-linear interpolation of binary embeddings
++    # binary_emb shape: (N, 8, F)
++    # Weights are +1 or -1
++    pass
++
++def interpolate_2d(x, binary_emb, resolution):
++    # Bi-linear interpolation of binary embeddings
++    pass
++
++def positional_encoding(x, num_levels):
++    # Sinusoidal positional encoding
++    pass
++
++def spherical_harmonics_encoding(d, degree):
++    # Spherical harmonics encoding
++    pass
+ ```
+ 
+@@ -223,12 +299,12 @@
+ *   **Storage:** Extremely compact. Ours-S2 requires < 0.5 MB, outperforming TensoRF-CP (3.7 MB) and Instant-NGP (24.5 MB) on the mic scene [S1].
+ *   **Performance:** PSNR of 32.03 dB on Synthetic-NeRF, 34.48 dB on Synthetic-NSVF, and 28.20 dB on Tanks and Temples [S1].
+-*   **Training Time:** Approximately 6, 9, and 14 minutes for Synthetic-NeRF scenes for Ours-B2 to Ours-B8 models on a single NVIDIA RTX A6000 [S1].
+-*   **Strengths:** Storage efficiency without post-optimization; superior reconstruction quality compared to prior efficient methods with smaller storage [S1].
+-*   **Limitations:** Hash collisions in 3D grids at higher resolutions (mitigated by 2D grids) [S1]. Gradient vanishing due to sign function (mitigated by STE) [S1].
+-*   **When to use:** Static scene reconstruction where storage is a bottleneck [S1].
+-*   **When not to use:** Dynamic scenes or scenarios requiring post-training compression [S1].
++*   **Training Time:** Approximately 6, 9, and 14 minutes for Synthetic-NeRF scenes using Ours-B2 to Ours-B8 models on a single NVIDIA RTX A6000 [S1].
++*   **Strengths:** Storage efficiency without post-processing; competitive reconstruction quality; fast training.
++*   **Limitations:** Hash collisions in 3D grids at high resolutions are mitigated by 2D grids but remain a factor; binary quantization may limit representational capacity compared to full-precision models [S1].
++*   **When to use:** When storage is a critical bottleneck and real-time or near-real-time training is desired.
++*   **When not to use:** When maximum possible reconstruction quality is required regardless of storage size.
+ 
+ ## Background
+-Binary Radiance Fields were proposed by Seungjoo Shin and Jaesik Park from POSTECH and Seoul National University, published in arXiv:2306.07581v2 on December 4, 2023 [S1]. The method builds on Instant-NGP and NerfAcc, optimizing for 20K iterations on an NVIDIA RTX A6000 [S1]. It addresses the storage bottleneck of neural radiance fields by replacing real-valued parameters with binary ones during training [S1].
++Binary Radiance Fields (BiRF) was proposed by Seungjoo Shin and Jaesik Park from POSTECH and Seoul National University, published in arXiv:2306.07581v2 on December 4, 2023 [S1]. The method addresses the storage bottleneck of neural radiance fields by introducing binary feature encoding. It builds on the multi-resolution hash encoding architecture of Instant-NGP [S1].
+ 
+ ## Sources

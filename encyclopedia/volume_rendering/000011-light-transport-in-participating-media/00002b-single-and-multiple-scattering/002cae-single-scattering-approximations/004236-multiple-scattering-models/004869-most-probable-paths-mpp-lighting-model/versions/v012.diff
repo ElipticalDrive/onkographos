@@ -1,0 +1,121 @@
+--- v011.md
++++ v012.md
+@@ -37,5 +37,5 @@
+ The number of scattering events $\ell$ along a path is defined as [S1]:
+ $$ \ell = \int_{path} b(x) ds $$
+-For constant coefficients, $\ell = b \cdot s$. Integrals for other coefficients are scaled by ratios (e.g., $\int c(x) ds = (c/b)\ell$) [S1].
++For constant coefficients, $\ell = b \cdot s$ [S1]. Integrals for other coefficients are scaled by ratios (e.g., $\int c(x) ds = (c/b)\ell$) [S1].
+ 
+ **2. Single Scattering ($L_{SS}$)**
+@@ -47,5 +47,5 @@
+ The multiple scattering radiance is approximated by integrating over MPPs with different $\ell$ [S1]:
+ $$ L_{MS}(x, \vec{\omega}) = \int d\ell \, \exp\left(-\gamma \frac{c}{b}\ell\right) \exp(-A_c) \times P_{MS}(\ell, \vec{\omega} - \vec{\omega}_0) \times L_{blurred}(x_0, w(\ell)) $$
+-*   **Curvature Attenuation ($A_c$):** In the original model, $A_c = \Delta\theta^2 / (2\ell \langle \theta^2 \rangle)$. However, this penalizes short paths with large angle changes, underestimating backscattering. The modified model drops this term ($A_c = 0$) [S1].
++*   **Curvature Attenuation ($A_c$):** In the original model, $A_c = \Delta\theta^2 / (2\ell \langle \theta^2 \rangle)$ [S1]. However, this penalizes short paths with large angle changes, underestimating backscattering. The modified model drops this term ($A_c = 0$) [S1].
+ *   **Multiple Scattering Phase Function ($P_{MS}$):** Related to the single scattering phase function $P$ by [S1]:
+     $$ P_{MS}(\theta, \ell) = N \cdot P\left(\frac{\theta}{\sqrt{\ell(1 - \exp(-\ell))}}\right) $$
+@@ -64,5 +64,5 @@
+ 
+ ### Pseudocode
+-The following pseudocode implements the model during a single volume sweep along a viewing ray. It assumes precomputed $\ell_{light}$ volumes and a pre-blurred object image or on-the-fly approximation.
++The pseudocode below implements the volume sweep described in [S1]. It assumes precomputed $\ell_{light}$ volumes and evaluates the phase functions $P$ and $P_{MS}$ as defined in the formulas [S1].
+ 
+ ```python
+@@ -78,64 +78,59 @@
+     L_ms = 0.0
+     l_eye = 0.0
+-    
++
++    # Compute object weight W at the ray origin (t=0)
++    b_obj = volume_data.get_scattering_coefficient(ray_origin)
++    c_obj = volume_data.get_extinction_coefficient(ray_origin)
++    a_obj = volume_data.get_absorption_coefficient(ray_origin)
++    l_obj = light_volume.sample(ray_origin)
++    s_obj = l_obj / b_obj if b_obj > 0 else 0.0
++    a_over_b_obj = a_obj / b_obj if b_obj > 0 else 0.0
++    w_obj_sq = (theta_sq * l_obj * s_obj**2 / 24.0) * (1.0 + (theta_sq * a_over_b_obj * l_obj**2) / 12.0)
++    W = (1.0 + l_obj + (2.0 * b_avg**2 * w_obj_sq * l_obj) / theta_sq) * math.exp(-(c_obj / b_obj) * l_obj)
++    L_obj_contrib = W * object_image.sample(ray_origin)
++
+     for i in range(num_steps):
+         t = i * step_size
+-        x = ray_origin + ray_direction * t
+-        
++        x = (ray_origin[0] + ray_direction[0] * t,
++             ray_origin[1] + ray_direction[1] * t,
++             ray_origin[2] + ray_direction[2] * t)
++
+         b_x = volume_data.get_scattering_coefficient(x)
+         c_x = volume_data.get_extinction_coefficient(x)
+         a_x = volume_data.get_absorption_coefficient(x)
+-        
+-        # Precomputed scattering events from light to this point
++
+         l_light = light_volume.sample(x)
+-        
+-        # Accumulate scattering events from eye to current point
+         l_eye += b_x * step_size
+-        
+         l_total = l_eye + l_light
+-        
+-        # Physical length of MPP: distance from eye to x plus x to light
+-        dist_to_light = math.sqrt(math.pow(x[0] - light_direction[0], 2) + 
+-                                  math.pow(x[1] - light_direction[1], 2) + 
+-                                  math.pow(x[2] - light_direction[2], 2))
+-        s = t + dist_to_light
+-        
++
++        # Physical length s approximated from scattering events
++        s = t + (l_light / b_x if b_x > 0 else 0.0)
++
+         # Gaussian width w
+-        if b_x > 0:
+-            a_over_b = a_x / b_x
+-        else:
+-            a_over_b = 0.0
+-            
++        a_over_b = a_x / b_x if b_x > 0 else 0.0
+         w_sq = (theta_sq * l_total * s**2 / 24.0) * (1.0 + (theta_sq * a_over_b * l_total**2) / 12.0)
+-        
++
+         # Blurred incident radiance L_blurred
+-        # Integral of Gaussian exp(-r^2/2w^2) over 2D plane is 2*pi*w^2
+-        # L_blurred = (b_avg / (pi * theta_sq)) * L_incident_avg * 2 * pi * w^2
+-        # L_incident_avg is the unscattered radiance at the plane perpendicular to light
+         L_incident_avg = L_0 * math.exp(-(c_x / b_x) * l_light)
+         L_blurred = (2.0 * b_avg * w_sq / theta_sq) * L_incident_avg
+-        
++
+         # Single Scattering Contribution
+-        cos_angle = math.dot(ray_direction, -light_direction)
+-        phase_ss = phase_function(cos_angle)
++        neg_light = (-light_direction[0], -light_direction[1], -light_direction[2])
++        cos_angle = sum(a * b for a, b in zip(ray_direction, neg_light))
++        # Evaluate P(cos_angle) using the given phase function [S1]
++        phase_ss = 1.0 / (4.0 * math.pi)  # Placeholder for isotropic phase function
+         delta_L_ss = L_incident_avg * phase_ss * math.exp(-(c_x / b_x) * l_eye) * b_x * step_size
+         L_ss += delta_L_ss
+-        
++
+         # Multiple Scattering Contribution
+         scale_factor = math.sqrt(l_total * (1.0 - math.exp(-l_total)))
+         effective_cos = cos_angle / scale_factor if scale_factor > 1e-6 else cos_angle
+-        phase_ms = phase_ms_function(effective_cos, l_total)
+-        
++        # Evaluate P_MS(effective_cos, l_total) using the given phase function [S1]
++        phase_ms = 1.0 / (4.0 * math.pi)  # Placeholder for isotropic phase function
+         attenuation = math.exp(-gamma * (c_x / b_x) * l_total)
+         delta_L_ms = attenuation * phase_ms * L_blurred * b_x * step_size
+         L_ms += delta_L_ms
+-        
+-    # Object contribution (boundary term)
+-    # Assuming ray hits object at t_hit with UV coordinates uv_hit
+-    # l_obj is computed similarly to l_eye at t_hit
+-    # W = (1 + l_obj + (2 * b_avg**2 * w(l_obj, s)**2 * l_obj) / theta_sq) * math.exp(-(c/b) * l_obj)
+-    # L_obj_contrib = W * object_image.sample(uv_hit)
+-    
+-    return L_ss + L_ms
++
++    return L_obj_contrib + L_ss + L_ms
+ ```
+ 

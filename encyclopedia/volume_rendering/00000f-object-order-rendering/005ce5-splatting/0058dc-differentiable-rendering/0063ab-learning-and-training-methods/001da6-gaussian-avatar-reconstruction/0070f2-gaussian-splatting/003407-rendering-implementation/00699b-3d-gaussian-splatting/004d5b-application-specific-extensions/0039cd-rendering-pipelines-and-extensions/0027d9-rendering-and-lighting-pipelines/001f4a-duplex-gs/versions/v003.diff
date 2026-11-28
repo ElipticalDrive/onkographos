@@ -1,0 +1,346 @@
+--- v002.md
++++ v003.md
+@@ -4,204 +4,160 @@
+ 
+ ## Overview
+-Duplex-GS is a dual-hierarchy framework for real-time order-independent Gaussian Splatting that combines alpha-blending with reformulated Weighted-Sum Rendering (WSR) to eliminate popping and transparency artifacts while reducing sorting overhead [S1]. Unlike vanilla OIT-based Gaussian Splatting which lacks physical constraints and causes transparency artifacts, Duplex-GS reintroduces physical constraints via cell-level transmittance decay, eliminating transparency artifacts and enabling early termination [S1]. It differs from Sort-free Gaussian Splatting by using cell-level sorting to compute a physically grounded transmittance that decays rapidly upon encountering opaque objects, rather than using linear depth decay [S1].
++Duplex-GS is a dual-hierarchy rendering framework for real-time order-independent Gaussian Splatting that combines alpha-blending with a reformulated Weighted-Sum Rendering (WSR) strategy [S1]. It solves the transparency artifacts and lack of early termination inherent in vanilla Order-Independent Transparency (OIT) methods, while reducing the sorting overhead of standard alpha-blending [S1]. Unlike Sort-free Gaussian Splatting which uses linear depth decay, Duplex-GS uses ellipsoidal cell proxies to establish a coarse spatial order, enabling physically grounded transmittance decay and early termination [S1].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** A set of 3D Gaussian primitives organized into ellipsoidal cells (proxies), camera parameters (viewing direction $\mathbf{r}_n$, viewing distance $\delta_n$), and scene latent features [S1].
+-*   **Output:** A final rendered color image $\mathcal{C}$ [S1].
++**Inputs:** Scene represented by $N$ ellipsoidal cells (proxies) and camera parameters. Each cell $n$ has a latent feature vector $f_n$, position $x_n$, scale $S_n$, quaternion $Q_n$, and calibration scalar $v_n$.
++**Outputs:** Final rendered color $\mathcal{C}$ for each pixel.
+ 
+ **Data Structures:**
+-1.  **Cell (Proxy):**
+-    *   Position: $x_n \in \mathbb{R}^3$
+-    *   Scales: $S_n \in \mathbb{R}^3$
+-    *   Quaternion: $Q_n \in \mathbb{R}^4$ (normalized)
+-    *   Calibration Scalar: $v_n$ (parameterized by spherical harmonic coefficients for directional variation) [S1]
+-    *   Latent Feature Vector: $f_n$ [S1]
+-2.  **Neural Gaussian (emitted by cell $n$, index $k$):**
+-    *   Center: $\mu_{n,k} \in \mathbb{R}^3$
+-    *   Opacity: $\sigma_{n,k} \in [0, 1]$
+-    *   Color: $\mathcal{C}_{n,k} \in \mathbb{R}^3$
+-    *   Scale: $s_{n,k} \in \mathbb{R}^3$
+-    *   Quaternion: $\mathbf{q}_{n,k} \in \mathbb{R}^4$ (normalized)
+-    *   Learned Offset: $\mathcal{O}_{n,k}^{\text{pos}} \in [-1, 1]^3$ [S1]
+-    *   Scale Ratio: $\mathcal{O}_{n,k}^{\text{scale}} \in (0, 1)$ [S1]
++*   **Cell Proxy:** Parameterized by $(x_n, S_n, Q_n, v_n, f_n)$.
++*   **Neural Gaussian:** Emitted by cell $n$, indexed by $k \in \{1, \dots, K\}$. Attributes: center $\mu_{n,k}$, opacity $\sigma_{n,k}$, color $\mathcal{C}_{n,k}$, scale $s_{n,k}$, quaternion $q_{n,k}$.
++*   **MLPs:** Shared scene-wise MLPs $F_\sigma, F_c, F_s, F_q$ decode Gaussian attributes from $f_n$, viewing distance $\delta_n$, and viewing direction $d_n$ (or $\mathbf{r}_n$).
++
++**Numbered Steps:**
++
++1.  **Cell Initialization and Gaussian Emission:**
++    *   Initialize cells from SfM points.
++    *   For each cell $n$ and emitted Gaussian $k$:
++        *   Compute Gaussian center: $\mu_{n,k} = x_n + \mathcal{O}_{n,k}^{\text{pos}} \cdot S_n$, where $\mathcal{O}_{n,k}^{\text{pos}} \in [-1, 1]$ is a learned offset [S1].
++        *   Decode opacity: $\{\sigma_{n,1}, \dots, \sigma_{n,K}\} = F_\sigma(f_n, \delta_n, \mathbf{r}_n)$, activated by Tanh [S1].
++        *   Decode color: $\{c^{n,1}, \dots, c^{n,K}\} = F_c(f_n, \delta_n, d_n)$ [S1].
++        *   Decode scale ratio: $\{\mathcal{O}_{n,1}^{\text{state}}, \dots, \mathcal{O}_{n,K}^{\text{state}}\} = F_s(f_n, \delta_n, d_n)$, activated by sigmoid [S1].
++        *   Compute Gaussian scale: $s_{n,k} = \mathcal{O}_{n,k}^{\text{scale}} * S_n$ [S1].
++        *   Clamp scale ratio to ensure Gaussian stays inside cell: $\mathcal{O}_{n,k}^{\text{scale}} = \min \left( \mathcal{O}_{n,k}^{\text{scale}}, 1 - \|\mathcal{O}_{n,k}^{\text{pos}}\| \right)$ [S1].
++        *   Decode quaternion: $\{\mathbf{q}_{n,1}, \dots, \mathbf{q}_{n,K}\} = F_q(f_n, \delta_n, d_n)$ [S1].
++        *   Update cell quaternion as weighted average: $Q_n = \text{norm}\left(\sum_k^K q_{n,k} * \sigma_{n,k}\right)$ [S1].
++
++2.  **Layer I: Cell Rasterization (Coarse Sorting):**
++    *   Project cells to screen space.
++    *   Assign visible cells to tiles.
++    *   Apply radix sort to the cell sequence based on depth [S1]. This establishes a coarse spatial order.
++
++3.  **Layer II: Physical OIT Blending (Local Order-Independent Rendering):**
++    *   For each tile, iterate through sorted cells $n=1 \dots N$.
++    *   Compute cell-level transmittance $T_n^{\text{cell}}$ from preceding cells:
++        $$T_n^{\text{cell}} = \prod_{i=1}^{n-1} \prod_{k=1}^{n-1} (1 - v_i \cdot \alpha_{i,k})$$
++        where $v_i$ is the learnable calibration scalar for cell $i$, and $\alpha_{i,k}$ is the opacity of the $k$-th Gaussian in cell $i$ (derived from $\sigma_{i,k}$ and 2D Gaussian kernel) [S1].
++    *   **Early Termination:** If $T_n^{\text{cell}} < \epsilon$ (predefined threshold), stop processing further cells for this pixel/tile [S1].
++    *   Compute cell weight: $w_n = v_n \cdot T_n^{\text{cell}}$ [S1].
++    *   Decode Gaussian attributes for intersected cells using MLPs [S1].
++    *   Aggregate Gaussians inside each cell using Weighted-Sum Rendering (WSR). The final color $\mathcal{C}$ is:
++        $$\mathcal{C} = \frac{\sum_{n=1}^N w_n \sum_{k=1}^K \alpha_{n,k} \mathcal{C}_{n,k}}{\sum_{n=1}^N w_n \sum_{k=1}^K \alpha_{n,k}}$$
++        where $\mathcal{C}_{n,k}$ is the color of the $k$-th Gaussian in cell $n$ [S1].
+ 
+ **Parameters:**
+ *   $K$: Predefined number of neural Gaussians emitted per anchor/cell [S1].
+-*   $\epsilon$: Predefined threshold for early termination. Cell-level blending halts when $T_n^{\text{cell}} < \epsilon$ [S1].
++*   $v_n$: Learnable calibration scalar for cell $n$, parameterized using spherical harmonic coefficients to capture directional variation [S1].
++*   $\epsilon$: Predefined threshold for early termination [S1].
+ 
+-**Method Steps:**
+-
+-1.  **Initialization:** Initialize cells from Structure-from-Motion (SfM) points. Each cell is centered according to the SfM point [S1].
+-2.  **Gaussian Decoding (Layer I):** For each cell $n$ and each of its $K$ emitted Gaussians $k$:
+-    *   Compute Gaussian center:
+-        $$ \mu_{n,k} = x_n + \mathcal{O}_{n,k}^{\text{pos}} \cdot S_n $$
+-        where $\mathcal{O}_{n,k}^{\text{pos}}$ is the learned offset and $S_n$ is the cell scaling factor [S1].
+-    *   Decode Opacity:
+-        $$ \{\sigma_{n,1}, \dots, \sigma_{n,K}\} = F_\sigma(\mathbf{f}_n, \delta_n, \mathbf{r}_n) $$
+-        where $F_\sigma$ is a scene-wise MLP activated by Tanh [S1].
+-    *   Decode Color:
+-        $$ \{c^{n,1}, \dots, c^{n,K}\} = F_c(f_n, \delta_n, d_n) $$
+-        where $F_c$ is a scene-wise MLP [S1].
+-    *   Decode Scale State:
+-        $$ \{\mathcal{O}_{n,1}^{\text{state}}, \dots, \mathcal{O}_{n,K}^{\text{state}}\} = F_s(f_n, \delta_n, d_n) $$
+-        where $F_s$ is a scene-wise MLP activated by sigmoid [S1].
+-    *   Decode Quaternion:
+-        $$ \{\mathbf{q}_{n,1}, \dots, \mathbf{q}_{n,K}\} = F_q(f_n, \delta_n, d_n) $$
+-        where $F_q$ is a scene-wise MLP [S1].
+-    *   Compute Gaussian Scale:
+-        $$ s_{n,k} = \mathcal{O}_{n,k}^{\text{scale}} * S_n $$
+-        where $\mathcal{O}_{n,k}^{\text{scale}}$ is the output of $F_s$ [S1].
+-    *   Clamp Scale Ratio to ensure Gaussian regions stay inside the cell:
+-        $$ \mathcal{O}_{n,k}^{\text{scale}} = \min \left( \mathcal{O}_{n,k}^{\text{scale}}, 1 - \|\mathcal{O}_{n,k}^{\text{pos}}\| \right) $$
+-        [S1].
+-    *   Update Cell Quaternion as the normalized weighted average of associated Gaussians' orientations:
+-        $$ Q_n = \text{norm}\left(\sum_k^K q_{n,k} * \sigma_{n,k}\right) $$
+-        [S1].
+-3.  **Cell Rasterization (Layer I):** Assign visible cells to tiles [S1]. Apply radix sort to the cell sequence based on depth. This establishes a coarse spatial order for patches of Gaussians [S1].
+-4.  **Physical OIT Blending (Layer II):**
+-    *   Compute Cell-Level Transmittance: For each sorted cell $n$, compute the transmittance from preceding cells:
+-        $$ T_n^{\text{cell}} = \prod_{i=1}^{n-1} \prod_{k=1}^{K} (1 - v_i \cdot \alpha_{i,k}) $$
+-        where $v_i$ is the learnable calibration scalar for cell $i$ and $\alpha_{i,k}$ is the opacity of the $k$-th Gaussian in cell $i$ [S1]. (Note: The source formula indices for the product upper bound are written as $n-1$ in the notes, but logically refer to preceding cells $i < n$ and Gaussians $k \le K$.)
+-    *   Compute Cell Weight:
+-        $$ w_n = v_n \cdot T_n^{\text{cell}} $$
+-        [S1].
+-    *   **Early Termination:** If $T_n^{\text{cell}} < \epsilon$, stop processing further cells for this ray/tile [S1].
+-    *   Compute Final Rendered Color:
+-        $$ \mathcal{C} = \frac{\sum_{n=1}^N w_n \sum_{k=1}^K \alpha_{n,k} \mathcal{C}_{n,k}}{\sum_{n=1}^N w_n \sum_{k=1}^K \alpha_{n,k}} $$
+-        where $\mathcal{C}_{n,k}$ is the color of the $k$-th Gaussian in cell $n$ [S1].
+-
+-**Pseudocode:**
++**Pitfalls:**
++*   Order confusion caused by overlap among cells is addressed by the calibration scalar $v_n$ and the physically grounded transmittance model [S1].
++*   Vanilla OIT-based Gaussian Splatting suffers from transparency artifacts and lack of early termination; Duplex-GS handles this by ensuring transmittance decays rapidly for opaque objects [S1].
+ 
+ ```python
+-# Constants
+-K = 4  # Predefined number of neural Gaussians per cell
+-EPSILON = 1e-4  # Early termination threshold
++def duplex_gs_render(cells, camera, epsilon=1e-4):
++    H, W = camera['height'], camera['width']
++    tiles = [(y, x) for y in range(0, H, 16) for x in range(0, W, 16)]
++    tile_cells = {t: [] for t in tiles}
++    
++    # Layer I: Cell Projection and Assignment
++    for cell in cells:
++        # Project cell center and compute 2D bounding box
++        cell_cam = transform_to_camera(cell['pos'], camera['view_matrix'])
++        # Approximate cell extent based on scale S_n and quaternion Q_n
++        # [G] Simplified projection for ellipsoidal proxy
++        sigma_2d = project_covariance(cell['Sigma'], camera['view_matrix'], cell_cam['z'])
++        bbox = compute_2d_bbox(cell_cam['xy'], sigma_2d)
++        
++        for t in tiles:
++            if intersects_bbox(bbox, t, 16):
++                tile_cells[t].append(cell)
++    
++    # Layer I: Coarse Sorting of Cells
++    for t in tiles:
++        tile_cells[t].sort(key=lambda c: transform_to_camera(c['pos'], camera['view_matrix'])['z'])
++    
++    image = zeros((H, W, 3))
++    
++    # Layer II: Physical OIT Blending
++    for t in tiles:
++        sorted_cells = tile_cells[t]
++        for y in range(t[0], min(t[0] + 16, H)):
++            for x in range(t[1], min(t[1] + 16, W)):
++                pixel_pos = vec2(x, y)
++                accumulated_color = zeros(3)
++                accumulated_weight = 0.0
++                T_cell = 1.0
++                
++                for cell in sorted_cells:
++                    # Early Termination
++                    if T_cell < epsilon:
++                        break
++                    
++                    # Decode Gaussian attributes for this cell
++                    # [G] MLPs F_sigma, F_c, F_s, F_q are assumed defined elsewhere
++                    # Inputs: cell['f_n'], viewing distance, viewing direction
++                    gaussians = decode_neural_gaussians(cell, camera)
++                    
++                    # Compute cell weight w_n = v_n * T_cell
++                    # v_n is learned scalar, possibly direction-dependent
++                    v_n = cell['v_n']
++                    w_n = v_n * T_cell
++                    
++                    cell_contribution = zeros(3)
++                    cell_alpha_sum = 0.0
++                    
++                    for g in gaussians:
++                        # Compute 2D Gaussian value alpha_{n,k}
++                        diff = pixel_pos - g['center_2d']
++                        inv_sig = inverse_2x2(g['sigma_2d'])
++                        g_val = exp(-0.5 * dot(diff, inv_sig @ diff))
++                        alpha = g['opacity'] * g_val
++                        
++                        # Accumulate for WSR
++                        cell_contribution += alpha * g['color']
++                        cell_alpha_sum += alpha
++                    
++                    # Update transmittance for next cell
++                    # T_{n+1} = T_n * product(1 - v_i * alpha_{i,k})
++                    # [G] Simplified: T_cell decays by the total opacity of current cell weighted by v_n
++                    # Exact formula: T_n^{cell} = prod_{i=1}^{n-1} prod_{k=1}^{n-1} (1 - v_i * alpha_{i,k})
++                    # We update T_cell for the NEXT iteration
++                    total_cell_alpha = cell_alpha_sum
++                    T_cell *= (1.0 - v_n * total_cell_alpha)
++                    
++                    # Add to final color
++                    accumulated_color += w_n * cell_contribution
++                    accumulated_weight += w_n * cell_alpha_sum
++                
++                if accumulated_weight > 0:
++                    image[y, x] = accumulated_color / accumulated_weight
++                else:
++                    image[y, x] = zeros(3)
++                    
++    return image
+ 
+-class Gaussian:
+-    def __init__(self, center, opacity, color, scale, quaternion):
+-        self.center = center
+-        self.opacity = opacity
+-        self.color = color
+-        self.scale = scale
+-        self.quaternion = quaternion
+-
+-class Cell:
+-    def __init__(self, position, scales, quaternion, calibration_scalar, latent_feature, offsets, is_visible, depth):
+-        self.position = position
+-        self.scales = scales
+-        self.quaternion = quaternion
+-        self.calibration_scalar = calibration_scalar
+-        self.latent_feature = latent_feature
+-        self.offsets = offsets
+-        self.is_visible = is_visible
+-        self.depth = depth
+-
+-def vector_norm(v, dim=-1, keepdim=False):
+-    return (v ** 2).sum(dim=dim, keepdim=keepdim) ** 0.5
+-
+-def normalize(v):
+-    return v / (vector_norm(v, keepdim=True) + 1e-8)
+-
+-def tanh(x):
+-    return (2.0 / (1.0 + (-x).exp()) - 1.0)
+-
+-def min(a, b):
+-    return a if a < b else b
+-
+-def F_sigma(f, delta, r):
+-    return f * delta * r  # Placeholder for learned MLP
+-
+-def F_c(f, delta, d):
+-    return f * delta * d  # Placeholder for learned MLP
+-
+-def F_s(f, delta, d):
+-    return f * delta * d  # Placeholder for learned MLP
+-
+-def F_q(f, delta, d):
+-    return f * delta * d  # Placeholder for learned MLP
+-
+-def decode_gaussians(cell, camera_params):
+-    f_n = cell.latent_feature
+-    delta_n = camera_params.viewing_distance
+-    r_n = camera_params.viewing_direction
+-    d_n = camera_params.viewing_direction 
+-    
+-    sigmas = tanh(F_sigma(f_n, delta_n, r_n))
+-    colors = F_c(f_n, delta_n, d_n)
+-    scale_ratios_raw = F_s(f_n, delta_n, d_n)
+-    quaternions_raw = F_q(f_n, delta_n, d_n)
+-    
+-    offsets = cell.offsets
+-    centers = cell.position + offsets * cell.scales
+-    
+-    gaussian_scales = scale_ratios_raw * cell.scales
+-    
+-    offset_norms = vector_norm(offsets, dim=-1, keepdim=True)
+-    scale_ratios_clamped = min(scale_ratios_raw, 1.0 - offset_norms)
+-    gaussian_scales = scale_ratios_clamped * cell.scales
+-    
+-    quaternions = normalize(quaternions_raw)
+-    
+-    gaussians = []
+-    for k in range(K):
+-        gaussians.append(Gaussian(
+-            center=centers[k],
+-            opacity=sigmas[k],
+-            color=colors[k],
+-            scale=gaussian_scales[k],
+-            quaternion=quaternions[k]
+-        ))
+-    return gaussians
+-
+-def duplex_gs_render(cells, camera_params):
+-    visible_cells = [c for c in cells if c.is_visible]
+-    sorted_cells = sorted(visible_cells, key=lambda c: c.depth)
+-    
+-    color_accumulator = 0.0
+-    weight_accumulator = 0.0
+-    
+-    for n, cell in enumerate(sorted_cells):
+-        transmittance = 1.0
+-        for i in range(n):
+-            prev_cell = sorted_cells[i]
+-            prev_gaussians = decode_gaussians(prev_cell, camera_params)
+-            for g in prev_gaussians:
+-                transmittance *= (1.0 - prev_cell.calibration_scalar * g.opacity)
+-        
+-        if transmittance < EPSILON:
+-            break
+-            
+-        cell_weight = cell.calibration_scalar * transmittance
+-        current_gaussians = decode_gaussians(cell, camera_params)
+-        
+-        local_color_sum = 0.0
+-        local_weight_sum = 0.0
+-        
+-        for g in current_gaussians:
+-            alpha = g.opacity
+-            color = g.color
+-            local_color_sum += cell_weight * alpha * color
+-            local_weight_sum += cell_weight * alpha
+-            
+-        color_accumulator += local_color_sum
+-        weight_accumulator += local_weight_sum
+-        
+-    if weight_accumulator > 0:
+-        return color_accumulator / weight_accumulator
+-    return 0.0
++def decode_neural_gaussians(cell, camera):
++    # [G] Placeholder for MLP decoding logic described in [S1]
++    # Returns list of K Gaussians with centers, opacities, colors, scales, quaternions
++    pass
+ ```
+ 
++## Subtopics
++
++### AAA-Gaussians
++A method that eliminates sorting analytically by pre-integrating the alpha blending equation to compute an equivalent order-independent transparency through a rational polynomial approximation of the visibility term, suppressing popping artifacts without per-pixel depth sorting [S2, unofficial].
++
+ ## Operating characteristics
+-*   **Time Complexity:** Drastically reduces the overhead of global radix sorting compared to vanilla 3DGS because sorting is performed on the smaller population of cell proxies rather than individual Gaussians [S1].
+-*   **Memory Complexity:** Reduced memory consumption due to the smaller number of cells compared to Gaussians [S1].
+-*   **Performance:** Enables real-time performance on diverse real-world datasets [S1].
+-*   **Strengths:** Eliminates popping artifacts (locally order-independent) and transparency artifacts (physically grounded transmittance) [S1]. Allows early termination for acceleration [S1].
+-*   **Limitations:** Order confusion caused by overlap among cells is a potential issue, addressed by the calibration scalar $v_n$ [S1].
+-*   **When to use:** When real-time rendering of Gaussian Splatting is required with high visual fidelity, specifically avoiding transparency and popping artifacts common in sort-free OIT methods [S1].
++*   **Time Complexity:** Reduced sorting overhead compared to standard 3DGS because sorting is performed on $N$ cells rather than $M$ Gaussians ($N \ll M$) [S1]. Early termination further accelerates rendering in opaque regions [S1].
++*   **Memory Complexity:** Lower memory consumption for sorting buffers due to the smaller number of cell proxies [S1].
++*   **Strengths:** Eliminates transparency artifacts and popping artifacts common in vanilla OIT and sort-free methods [S1]. Enables real-time performance on resource-constrained devices [S1].
++*   **Limitations:** Requires additional MLPs for decoding Gaussian attributes from cell features [S1]. Calibration scalar $v_n$ adds learnable parameters [S1].
++*   **When to use:** When real-time order-independent rendering is required with high visual fidelity, avoiding transparency artifacts [S1].
+ 
+ ## Background
+-Duplex-GS was introduced in the paper "Duplex-GS: Proxy-Guided Weighted Blending for Real-Time Order-Independent Gaussian Splatting" [S1]. It builds upon Scaffold-GS which introduced anchors as local encoding proxies [S1]. Duplex-GS replaces point anchors with ellipsoidal cells to provide explicit geometric structure [S1]. It addresses limitations of vanilla OIT-based Gaussian Splatting which lacks physical constraints and causes transparency artifacts [S1].
++Duplex-GS was introduced as a dual-hierarchy framework to address limitations in neural Gaussian frameworks and vanilla OIT-based Gaussian Splatting [S1]. It builds on Scaffold-GS, which uses anchors to emit neural Gaussians [S1]. The method was submitted to IEEE for publication in 2026 [S1].
+ 
+ ## Sources
+-[S1] Duplex-GS: Proxy-Guided Weighted Blending for Real-Time Order-Independent Gaussian Splatting, https://doi.org/10.1109/tcsvt.2026.3666188, fetched 2026-10-30+[S1] Duplex-GS: Proxy-Guided Weighted Blending for Real-Time Order-Independent Gaussian Splatting, https://doi.org/10.1109/tcsvt.2026.3666188, fetched 2026-10-30
++[S2] 3D Gaussian Splatting Rasterization: A Survey, https://doi.org/10.20944/preprints202607.0776.v2, fetched 2026-10-26 (unofficial)

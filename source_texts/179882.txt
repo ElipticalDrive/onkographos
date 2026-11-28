@@ -1,0 +1,1081 @@
+
+
+## Otto-von-Guericke University Magdeburg
+
+Faculty of Computer Science
+
+Master Thesis
+
+# Real-Time Smoke Volume Rendering
+
+Adam A. Sowinski
+
+Supervisor: Prof. Holger Theisel Filing date: April 28th, 2012
+
+
+
+## Statement of Authorship
+
+I hereby declare that this document, submitted as a thesis for the degree of Master of Science, is the result of my own work and all references to the ideas and work of others have been acknowledged.
+
+I certify that the work embodied in this thesis has not already been accepted in substance for any degree and is not being currently submitted in candidature for any other degree.
+
+All software components used within the framework of this thesis are created by myself if not declared otherwise.
+
+
+
+# Contents
+
+| 1.   | Introduction          | 1  |
+|------|-----------------------|----|
+| 1.1. | Outline               | 2  |
+| 1.2. | Notation              | 3  |
+| 2.   | Assessment            | 5  |
+| 2.1. | Ray Tracing           | 6  |
+|      | 2.1.1. Traversal      | 6  |
+|      | 2.1.2. Intersection   | 7  |
+| 2.2. | Splatting             | 8  |
+| 2.3. | Volume Texture        | 8  |
+|      | 2.3.1. Experiment     | 9  |
+|      | 2.3.2. Results        | 10 |
+| 2.4. | Fragment Buffer       | 12 |
+| 3.   | Smoke Metaphor        | 15 |
+| 3.1. | Surface               | 15 |
+|      | 3.1.1. Prism Model    | 16 |
+| 3.2. | Volume                | 17 |
+|      | 3.2.1. Shape Operator | 18 |
+|      | 3.2.2. Seeding        | 19 |
+| 4.   | Integration           | 23 |
+| 4.1. | Runge-Kutta Method    | 24 |
+| 4.2. | Analytical            | 25 |
+|      | 4.2.1. Examples       | 25 |
+| 4.3. | Regular Mesh          | 28 |
+|      | 4.3.1. Interpolation  | 28 |
+|      | 4.3.2. Streaming      | 30 |
+|      | 4.3.3. Examples       | 33 |
+| 5.   | Implementation        | 35 |
+| 5.1. | Program Model         | 35 |
+| 5.2. | Timing                | 36 |
+| 5.3. | OpenGL                | 38 |
+|      | 5.3.1. Shader         | 39 |
+|      | 5.3.2. Buffer Objects | 41 |
+|      | 5.3.3. Transfer       | 43 |
+| 5.4. | CUDA                  | 44 |
+|      | 5.4.1. Driver API     | 44 |
+
+#### Contents
+
+| 5.4.2.             | Compiler              | 47 |
+|--------------------|-----------------------|----|
+| 5.5. Interaction   |                       | 48 |
+| 5.5.1.             | Seeding Gadget        | 49 |
+| 5.5.2.             | User Interface        | 51 |
+| 6. Rendering       |                       | 53 |
+| 6.1. Stages        |                       | 53 |
+| 6.1.1.             | Atomics               | 54 |
+| 6.1.2.             | Synchronization       | 55 |
+| 6.2. Static        | Storage               | 56 |
+| 6.2.1.             | Buffer Objects        | 57 |
+| 6.3. Dynamic       | Linked List           | 58 |
+| 6.3.1.             | Buffer Objects        | 59 |
+| 6.3.2.             | Sorting               | 61 |
+| 6.3.3.             | Paging                | 62 |
+| 6.4. Dynamic       | Fragment Tree         | 63 |
+| 6.4.1.             | Buffer Objects        | 63 |
+| 6.4.2.             | Insertion             | 64 |
+| 6.4.3.             | Traversal             | 67 |
+| 6.5. Blending      |                       | 68 |
+| 6.6. Basic         |                       | 69 |
+| 6.6.1.             | Insertion             | 69 |
+| 6.6.2.             | Evaluation            | 73 |
+| 6.7. Interpolating |                       | 75 |
+| 6.7.1.             | Insertion             | 75 |
+| 6.7.2.             | Evaluation            | 76 |
+| 7. Results         |                       | 79 |
+| 7.1. Quality       |                       | 79 |
+| 7.2. Performance   |                       | 85 |
+| 8. Conclusion      |                       | 89 |
+| Appendix           |                       | 91 |
+| A. Technical       | Specification         | 91 |
+| B. Memory          |                       | 91 |
+| B.1.               | Static Storage        | 91 |
+| B.2.               | Linked List (Paged)   | 92 |
+| B.3.               | Fragment Tree (Paged) | 92 |
+
+# 1. Introduction
+
+The visualization of vector fields is an important discipline in industry and science. Understanding the characteristics of a vector field is necessary for further analysis and may lead to problem-specific insight by revealing unknown flow features. One possible field of application is the optimization of aerodynamic shapes. The knowledge gained from the visualization of the underlying vector field can be used to improve shape characteristics, e.g., reduce the amount of turbulences caused by an object. Generally, the purpose of flow visualization is the analysis and exploration of flow data using expressive images rather than a purely mathematical evaluation. Common solutions implement flow visualization by seeding objects (e.g., particles) into the flow and tracing their movement. Those approaches are inspired by the dye advection metaphor, since particles can be interpreted as massless ink molecules injected into a fluid. Classic techniques like streamlines or surfaces are usually limited to 1-dimensional seeding structures (e.g., the seeding structure of a surface is a line). This leads to problems with regard to the exploration capabilities of the method. Since it is unknown where interesting flow features are, it is advisable to use a seeding strategy that covers as much space as possible without cluttering the result. Of course, this could be achieved by applying several surfaces in a row with a small offset. However, the result would still lack a topological relation between surfaces.
+
+#### Volume
+
+The logical consequence is to consider a volumetric approach, which is the origin of the conceptually similar smoke metaphor [11]. The advection of volume data can be represented explicitly (e.g., by storing vertex data) or implicitly. Cuntz et al. [4] use level sets on regular grids to describe the volume advection. However, the approach is highly dependable on the grid resolution. In order to achieve high precision, an explicit volume representation
+
+based on tetrahedral meshes is favored. Although there is a variety of different strategies for volume rendering, only few are compatible with the requirements of a tetrahedral smoke volume model. Most problems arise from the fact that standard volume rendering methods are usually not applied to dynamic meshes.
+
+#### Unsteady Flow
+
+A smoke volume is dynamic not only with regard to the previously described effects of advection, but also due to the fact that a flow field may be unsteady over time. Mathematically this means that smoke volumes can be classified as streak objects. As opposed to steam objects (i.e., using a static vector field), the topology of a streak volume may experience a special kind of deformation artifacts (i.e., mesh intersection) which need to be handled by the applied rendering approach. Integration and the flow field's time dependency must be coupled in a way that enhances real-time usability.
+
+## 1.1. Outline
+
+Within the scope of this thesis, the following list of tasks can be summarized. Each item is further examined in its respective chapter:
+
+#### • Assessment
+
+The first chapter is focused on existing approaches in the field of volume rendering. Potentially suitable approaches are considered and evaluated with regard to their applicability to the smoke metaphor.
+
+#### • Smoke Metaphor
+
+The next chapter offers a mathematical description of the smoke metaphor by extending its 2-dimensional predecessor. It also provides details about the smoke's topological structure, which are needed for the implementation.
+
+#### • Integration
+
+The resulting test application utilizes two categories of flow data (i.e., analytical and discrete). This chapter offers a mathematical introduction as well as conceptual details for both data types.
+
+#### • Implementation
+
+The next chapter illustrates the components of the application, the usage of different APIs, interactive tools and the graphical user interface.
+
+#### • Rendering
+
+Continuing implementation related aspects, this chapter is focused on the rendering part of the program. Also, different variations of the rendering pipeline are illustrated and discussed.
+
+#### • Analysis
+
+Finally, the performance of the developed approach is examined. This includes the demonstration of previously described aspects in different situations. In particular, the chapter will address the method's runtime with different workloads, the handling of artifacts and other undesired effects and its applicability in the field of flow visualization.
+
+## 1.2. Notation
+
+Several aspects of this thesis will be conceptually very close to the actual implementation. Since this pseudocode-like representation is more efficient than a purely mathematical definition, many equations will often be mixed with program-related variables or functions. Items which constitute a program-relevant object can be identified easily, since they make use of the typewriter font, mostly applied to a variable's subscript. Furthermore, critical objects or program components will be referred to using a unique Identifier, in order to avoid ambiguities. Frequently occurring subscripts are the following:
+
+| Subscripts | Description         |
+|------------|---------------------|
+| frag       | Fragment            |
+| pixel      | Pixel               |
+| fpp        | Fragments per Pixel |
+| page       | Page                |
+| fpP        | Fragments per Page  |
+| func       | Function Time       |
+| app        | Application Time    |
+| real       | Real-Time           |
+| ID         | Identifier          |
+
+Table 1.1.: Subscripts
+
+#### Symbols
+
+In order to enhance readability, this thesis will stick to a coherent list of symbol definitions, if possible. Symbols are often used in subscripts to point out a certain attribute (e.g., NT referring to the number of tetrahedra). The following table displays the most important ones:
+
+| Symbol | Description                                    |
+|--------|------------------------------------------------|
+| B      | Bandwidth (Byte/s), Block (CUDA)               |
+| C      | Cube (Regular Mesh Cell)                       |
+| ∆      | Difference, Interval                           |
+| E      | Extent                                         |
+| F      | Frame                                          |
+| H      | Histogram                                      |
+| M      | Mesh (cf. M T , M R )                          |
+| N      | Number (e.g., N x , N y , N z )                |
+| P      | Page                                           |
+| R      | Regular (e.g., T R for a regular tetreahedron) |
+| S      | Slice                                          |
+| T      | Tetrahedron, Thread (CUDA)                     |
+| V      | Volume                                         |
+| α      | Opacity                                        |
+| δ      | Integration Step (cf. δ ips )                  |
+| f      | Fragment                                       |
+| ν      | Vector Field                                   |
+| p      | Point, Pixel                                   |
+| σ      | Density (cf. σ χ , constant in χ )             |
+| t      | Time, Triangle                                 |
+| τ      | Transmissivity                                 |
+| v      | Vector                                         |
+| χ      | Arbitrary Object                               |
+
+Table 1.2.: Symbols
+
+# 2. Assessment
+
+As the title suggests, the thesis is focused on the implementation of a volume-based rendering approach for tetrahedral data. Therefore, it is necessary to evaluate the performance of existing techniques and assert how far they are compatible with this task. In many cases, volume rendering utilizes the optical model of William et al. [13] by calculating the volume rendering integral in order to determine the color of a pixel.
+
+Definition 2.0.1 (Volume Rendering Integral). Let r(t) = t p1 + (1 − t) p0 be the ray intersecting a volume V at r(0) = p0 (entry) and r(1) = p1 (exit). Furthermore, σ(x) defines the density value for a point x inside V , while κ(x) determines the emitted color. The volume rendering integral IV can be calculated by accumulating all color values κ(x), weighted by the local density and multiplied by the transmission coefficient along the ray r with the parameter t ∈ [0, 1].
+
+$$I_V = \int_0^1 \kappa(r(t)) \sigma(r(t)) e^{-\int_0^t \sigma(r(u)) \, du} \, dt \quad (2.1)$$
+
+Volume rendering can be applied to all sorts of data and varies in terms of topology (e.g., regular, rectilinear, tetrahedral) and available attributes. Consequently, Definition 2.0.1 is only one possible variation and can be simplified or extended to meet application-specific requirements. Several approaches [5][6] illustrate volume rendering on simple scalar fields where color and density is calculated using precomputed transfer functions. The smoke metaphor (cf. Chapter 3\) does not need any additional scalar attributes (with the exception of an optional color array) since the density can be derived directly from the smoke's structure.
+
+## 2.1. Ray Tracing
+
+One of the most prominent techniques to implement a volume renderer is ray tracing. Weiler et al. [12] present GPU-based ray tracing on tetrahedral meshes, making it a promising concept and possible basis for a smoke volume rendering approach. The authors introduce fast ray traversal, which is executed on the graphics adapter by storing vertex and adjacency data in texture memory. Enabling memory access on shader level, concurrent mesh traversal becomes possible. Global random access memory is of major importance with regard to the actual implementation of a smoke renderer for reasons that will be explained later.
+
+### 2.1.1. Traversal
+
+The second key aspect of the presented method is the actual mesh traversal. Ray traversal is executed in a single render pass and concurrently for all pixels. Basically, the procedure looks as follows for every ray:
+
+- 1. Find entry point p0 of convex hull.
+- 2. Find exit point p1 of current cell and calculate density values.
+- 3. Blend new fragment using the cell density and the point distance.
+- 4. Use p1 as p0 for the next step.
+- 5. Go to step 2.
+
+Note that the presented method also supports non-convex meshes. However, in order to achieve convexity, imaginary cells need to be added to avoid re-entry. Unfortunately, the approach suffers from two critical drawbacks with regard to smoke volume rendering. The first drawback concerns the precomputed lookup table used in step 3, which assumes a static mesh. Obviously, pre-calculation is not feasible, since the smoke volume is a highly dynamic object. This leads to the second problem. The composition of the final pixel color requires correct fragment calculation and, more importantly, completeness. Although being initialized in a regular way (cf. Chapter 3.2.2\), the initial volume can (and generally will) experience arbitrary distortion over time. This is the nature of streak objects and a useful characteristic, since the goal is to visualize flow features not to maintain a pretty mesh. However, the fact remains that this behavior poses a critical problem to the presented method by producing two types of artifacts.
+
+## 2.1.2. Intersection
+
+The previously mentioned term completeness refers to the inability of a ray traversal approach to determine which tetrahedra intersect with the viewing ray under certain conditions. The first condition is the local, or self-intersection.
+
+#### Local Intersection
+
+The greatest bottleneck of ray tracing is the high number of possible intersections with the scene. The illustrated algorithm tries to circumvent this problem by taking advantage of neighborhood information. In other words, the algorithm jumps from one cell to the other without looking at other cells. Local intersections occur when a tetrahedron is flipped and cuts into another tetrahedron's volume (cf. Figure 2.1\). Since the algorithm is not aware of that, nor does it provide means to analyze the neighborhood, the intersecting tetrahedron will fail to contribute to a particular viewing ray. This would result in an invalid pixel color since it the list of fragments is incomplete.
+
+
+
+Figure 2.1.: Local and Global Intersection
+
+#### Global Intersection
+
+Self-intersections could be dealt with using local re-meshing or additional data structures. However, the problem gets even more complicated if global intersections are taken into account. While local intersections occur among adjacent tetrahedra (making some sort of local search potentially feasible), global intersections allow the penetration of volume by any other section thereof. Generally speaking, any suitable rendering approach must permit the overlapping of any two tetrahedra and still output the correct volume integral. Note that the problems arising from local or global intersections are not an issue for most volume rendering approaches when the shape of the volume is static.
+
+## 2.2. Splatting
+
+Another approach that is focused on the real-time rendering of large tetrahedral meshes uses Splatting (TetSplat) [9]. The authors present a point-based technique which renders tetrahedra with the help of a spherical or ellipsoid splat representation. To increase performance, the approach makes use of hierarchical data structures, which allow efficient culling (e.g., back faces and occlusion). However, the partitioning of the volume requires a preprocessing step which needs to be executed once before the actual real-time rendering. The partitioning step assumes a static mesh, making the illustrated method unsuitable for dynamic objects in its current implementation.
+
+Disregarding the need for some sort of space partitioning, Tetrahedral splatting is prone to further quality-related problems. TetSplat introduces a preprocessing step which eliminates degenerated tetrahedra (i.e., needles, spindles, slivers and caps), using edge collapse. This is necessary since degenerated tetrahedra are difficult to represent using splats. The problem is that the elimination of tetrahedra is generally not compatible with the idea of a smoke volume since the goal is to maintain topology. Furthermore, it is safe to assume that a large number of tetrahedra will be close to a degenerated state during integration. Other drawbacks arise from the fact that a tetrahedron is represented using exactly one splat. Even after adapting the shape (e.g., ellipsoid vs. spherical) for small meshes, the individual splats will become visible, revealing unpleasant gaps.
+
+## 2.3. Volume Texture
+
+To achieve a reasonable trade-off between performance and accuracy, many volume rendering strategies use a multi-layer, or voxel representation (e.g., slicing or depth peeling). Such data structures can be rendered using ray tracing on regular grids or directly using modern hardware capabilities (e.g., 3D textures). Naturally, such a strategy makes the precision of the visualization highly dependable on the resolution of the applied structures. In order to investigate the applicability of a texture-based approach for smoke volumes, a 2-dimensional test application, named Sm2D, is implemented.
+
+### 2.3.1. Experiment
+
+For simplicity, Sm2D is implemented as a 2-dimensional ray tracer. This means that tetrahedra (i.e., the smoke volume) are represented by triangles while the viewport simplifies to a 1-dimensional function. The program consists of the following components.
+
+
+
+Figure 2.2.: Sm2D
+
+#### 1. Grid
+
+The grid G is the equivalent of a camera-aligned, 3-dimensional texture. The example shows a grid of 16 × 16 cells. In the ray tracing stage, each viewing ray intersects with the grid cells and accumulates the absorption coefficient αi for a pixel pi .
+
+#### 2. Triangle
+
+In order to simulate the smoke volume, one or multiple triangles can be placed on top of G. Since topological issues do not matter in this experiment, there is no neighborhood information between triangles. The density σk of a triangle tk is calculated as
+
+$$\sigma(t_k) = \sigma_k = \frac{1}{\text{area}(t_k)} \quad (2.2)$$
+
+with area(t) returning the area of a triangle t. The example shows t spanning over the entire grid. The color of the cells of G illustrate the accumulated density scaled to the maximum value. The contribution of a triangle's density to a particular cell ci is
+
+determined by calculating the overlapping area. This needs to be done for all triangles tk, or more formally
+
+$$\sigma(c_i) = \sum_{k=0}^{N_t-1} \frac{\text{overlap}(c_i, t_k)}{\text{area}(c_i)} \sigma(t_k) \quad (2.3)$$
+
+with overlap(χ0, χ1) returning the common area (or length) of two objects χ0 and χ1, σ(χ0) returning the density assigned to an object χ0 and Nt being the number of triangles on the grid. In this context, objects can be triangles, grid cells or rays.
+
+#### 3. Camera
+
+The view frustum of the camera is set so that the viewport and the bottom edge of the grid coincide. The example shows 64 rays entering the grid from below at equallyspaced points along the viewport edge. For every ray ri , the densities σ(ci) of grid cells are summed up after being multiplied by the interval length (i.e., distance between entry and exit point of ri in ci). This yields the absorption coefficient
+
+$$\alpha(r_j) = \sum_{i=0}^{N_c-1} \sigma(c_i) \cdot \text{overlap}(r_j, c_i) \quad (2.4)$$
+
+with Nc being the number of grid cells.
+
+#### 4. Output
+
+The results α(rj ) of the ray tracing are visualized in the output box. The box can be interpreted as a the viewport edge with the Y-axis denoting the accumulated values.
+
+### 2.3.2. Results
+
+The output box contains two graphs. The red graph shows the values as acquired using the previously described method (i.e., projecting triangle densities onto the grid). The alternative approach ignores the grid and evaluates the scene by explicitly calculating intersections between triangles and rays. Those results are illustrated by the blue graph. Comparing the results of the texture-based approximation with the mathematically correct representation allows one to conclude whether this approach might be suitable for smoke volume rendering. Even without going into detail, it is obvious that a texture-based approach will never get close to the precision of an explicit calculation without considerably increasing the number of grid cells. Although Figure 2.2 may look like it produces acceptable results, it is easy to construct examples with unpleasant spikes across the viewport (cf. Figure 2.3\). Such unwanted effects are very likely to occur for degenerated triangles and can be limited by increasing texture resolution. However, under certain conditions (i.e., unfortunately chosen ray angle), these artifacts are unavoidable regardless of the number of grid cells.
+
+
+
+Figure 2.3.: Sm2D 162 vs. 322 Grid Cells
+
+
+
+
+
+Figure 2.4.: Sm2D Volume Rotation
+
+Ignoring the drawbacks of a static view on the rendered volume, an even more problematic situation arises if a certain degree of interaction is considered. As mentioned earlier, the occurrence of artifacts depends on the angles of the viewing rays (or generally, the orientation of the volume relative to the camera). Since the goal of this thesis is the implementation of an interactive solution, the next step is to analyze the differences between the two methods in a dynamic environment. This task is implemented in Sm2D by simply rotating the volume around the grid center. To visualize the real-time results in static medium, like this thesis, the rendering of the output boxes is extended so that intermediate results remain visible for a few seconds using transparency. Figure 2.4 illustrates the rotation of a single triangle as depicted in Figure 2.3. Each snapshot represents the situation for about 0◦ , 90◦ , 180◦ and 270◦ . It is evident that the texture-based approach (i.e., red graph) produces unstable and faulty results throughout the entire rotation, while an explicit calculation allows smooth transitions at all times. This conclusion is in accordance with other results since it is a common observation that many texture-based approaches produce rotational artifacts. All graphs in Figure 2.4 are scaled with regard to the current frame. This explains why some of the examples seem to contain values outside the scale.
+
+## 2.4. Fragment Buffer
+
+None of the illustrated approaches appear to be compatible with the stated requirements. Fortunately, there is one last candidate showing promising characteristics. Revealing the conclusion of this section beforehand, the smoke volume renderer will be implemented as a fragment storage type. The following examples belong to this very category and can be considered the historical backbone of this thesis' attempt to construct a fragment-based smoke volume renderer.
+
+#### Z-Buffer
+
+The Z-Buffer is the oldest and simplest approach in the library of fragment manipulating techniques. With enough storage for exactly one fragment per pixel, it stores the Z-value of the fragment that is currently closest to the camera. That information is used to determine whether a subsequently rendered fragment can be discarded. Although being quick and efficient, the method has major problems with transparency. In fact, it requires the rendering of primitives from back to front, defying its very purpose since fragments that are closer to the camera are always accepted.
+
+
+
+Figure 2.5.: Inconclusive Configuration of Triangles
+
+Sorting primitives of tetrahedral or triangle type is a non-trivial task since different sections of the primitive may have different Z-values (cf. Figure 2.5\). In order to circumvent this problem, the thesis will focus on the utilization of a fragment-based sorting strategy.
+
+#### A-Buffer
+
+The A-Buffer (anti-aliased, area-averaged, accumulation buffer) presented by Carpenter [2], introduces a new concept to resolve visibility and aliasing problems using multiple fragments per pixel. Once the rendering stage is complete, those fragment lists are evaluated to reduced vertical and horizontal aliasing. The idea of Carpenter's pointer-based fragment lists has been extended in numerous ways and is the basis of many other approaches.
+
+### R-Buffer
+
+One of those extensions is the R-Buffer (recirculating) as proposed by King et al. [8]. The authors introduce a single FIFO-based (first in, first out) buffer for the entire screen, instead of using fixed-sized buffers for every pixel. In order to apply per-pixel operations, every fragment must additionally store its original position on the screen. This drawback can be avoided by using linked lists [14], a concept closer to the original A-Buffer. The implementation of a dynamic fragment storage will be of crucial importance within the framework of this thesis, in order to increase memory efficiency with regard to the smoke volume's non-uniform distribution in screen space.
+
+#### k-Buffer
+
+The k-Buffer can be interpreted as a generalized version of the Z-Buffer, allowing a limited number of fragments per pixel. The classic Z and also the Z3 buffer [7] by Joupi et al. are concrete implementations for k = 1 and k = 3. Since the number of fragments is limited, variants of the k-Buffer have different strategies for fragments combination and layer composition, depending on the desired effect.
+
+# 3. Smoke Metaphor
+
+A common strategy to visualize (unsteady) vector fields is the injection of particles into a flow field while following their paths. Such particles can be independent entities or the basis for more complex structures, e.g., lines, surfaces and, of course, volumes. While the library of visualization techniques offers countless solutions to render types of the first two categories, the concept of using an advected volume to visualize flow data is still relatively unexplored territory. The idea of a smoke metaphor is rooted in real-life observations, since it is an elegant and lightweight medium which makes turbulences visible while applying minimal self-occlusion. This makes smoke volume a powerful tool for the exploration and analysis of unknown vector fields.
+
+## 3.1. Surface
+
+The conceptual predecessor of the smoke volume rendering approach is the smoke surface, as presented by Funck et al. [11]. The authors suggest a surface-based model, which simulates a thin volume by adding an approximated depth to each triangle depending on its orientation to the camera. The mathematical foundation is the optical model for smoke.
+
+Definition 3.1.1 (Optical Model). Let r(t) = t p1 + (1 − t) p0 be the ray intersecting an object χ in the points r(0) = p0 and r(1) = p1. Furthermore, σ(x) defines the density value for a point x inside χ. The absorption coefficient α of χ can be calculated by integrating σ along r with the parameter t ∈ [0, 1].
+
+$$\alpha = 1 - e^{-\int_0^1 \sigma(r(t)) \, dt} \qquad (3.1)$$
+
+Since σ(x) is assumed to be constant inside the object, the expression can be simplified by replacing σ(x) with σχ.
+
+$$\alpha = 1 - e^{-|p_1 - p_0| \cdot \sigma_x} \quad (3.2)$$
+
+## 3.1.1. Prism Model
+
+Since triangles are non-volumetric objects, the optical model is modified by interpreting triangles as thin prisms. The penetration depth is approximated using the angle between face normal and viewing ray, while the density becomes the reciprocal of the triangle area.
+
+Definition 3.1.2 (Prism Model). Let t be a triangle, γ the angle between its face normal and r, and area(t) the area function of t then the absorption coefficient for t is
+
+
+$$\alpha(t) = 1 - e^{-\frac{k}{\cos(\gamma) \operatorname{area}(t)}} \quad (3.3)$$
+
+with k being a design parameter steering the initial density.
+
+Another important property must be addressed with regard to the topology of the triangle mesh. After being constructed once, given the number of points in width and length, the topology is maintained during the entire visualization process. This is accomplished with the help of a ring buffer by removing the last (i.e., oldest) row of vertices from the visualization and reusing it as the new first (i.e., newest) row. This leads to a number of problems.
+
+#### 1. Fade In/Out
+
+The sudden removal of vertices causes an entire row of triangles to disappear at the end of the surface and spawn at its seeding line, which leads to a jagged behavior. In order to avoid this unpleasant effect, α(t) must be modified using an opacity multiplier which allows triangles to gently fade out before they disappear.
+
+#### 2. Shape
+
+Equation 3.3 represents a triangle's opacity insufficiently due to the static topology of the smoke surface. Triangles change their shape over time which may lead to degenerated sections, or generally, triangles of arbitrary quality (i.e., with regard to their suitability to represent the flow). Since re-meshing is not an option in such cases, a shape modifier is introduced, which decreases a triangle's contribution to a pixel depending on its level of degeneration.
+
+## 3.2. Volume
+
+Smoke volume rendering borrows from its 2-dimensional predecessor in several ways. The most significant difference is that there is no need to approximate volume information anymore since smoke volume is made of volumetric primitives by definition. The volume of a tetrahedron, the 3-dimensional counterpart of a triangle, is calculated as follows.
+
+Definition 3.2.1 (Tetrahedral Volume). Let T be a tetrahedron and Ta, Tb, Tc and Td its vertices, then its volume can be calculated using the signed volume function vol(T).
+
+| $\text{vol}(T) = \frac{1}{6}(T_a - T_d) \cdot ((T_b - T_d) \times (T_c - T_d))$ | (3.4) |
+|---------------------------------------------------------------------------------|-------|
+|---------------------------------------------------------------------------------|-------|
+
+The definition allows negative values, which is necessary for the next step. Also, the vertices of T are sorted in a way that vol(T) is either positive, or negative for all T if the tetrahedral mesh MT remains in its initial state. Any deviation from this assumption means that T is inverted with regard to the rest of MT . This information is necessary to handle local intersections. The second property that can be derived from a tetrahedron is its density. All tetrahedra are subject to a uniform seeding and, according to the smoke metaphor, carry a fixed amount of smoke. If a tetrahedron is deformed over time, the smoke inside is either stretched or compressed. The calculation of a tetrahedron's density is similar to smoke surfaces.
+
+Definition 3.2.2 (Tetrahedral Density). Let T be a tetrahedron, Ts its individual scaling and k the density multiplier then the density of T can be calculated as follows.
+
+$$\sigma(T) = \frac{1}{|\text{vol}(T)|} \cdot T_s \cdot k \quad (3.5)$$
+
+Tetrahedra are always clustered in groups of five, forming a cubic cell. Those five tetrahedra are not identical. In fact, assuming the mesh is still in its initial and undistorted state, the tetrahedron in the cube center is twice as big as the four corner ones. This discrepancy is corrected using Ts. The density multiplier k serves the same purpose as in the prism model.
+
+### 3.2.1. Shape Operator
+
+Just like a triangle mesh, smoke volume may experience distortion during advection, causing similar unwanted artifacts. Those can be limited with the help of shape operator. Its design is based on the assumption that the best tetrahedron is a regular one. Any deviation from that condition will decrease a tetrahedron's contribution to the smoke volume.
+
+Definition 3.2.3 (Shape Operator). Let TR be a regular tetrahedron and a the length of its longest edge. The shape operator compares the volume of T with the volume of TR (i.e., vol(TR) = √ 2 a 3 12 ) and weights the result with an exponent s.
+
+$$\text{shape}(T) = \left( \frac{12}{\sqrt{2}} \frac{\text{vol}(T)}{a^3} \frac{T_s}{T_s} \right)^s \quad (3.6)$$
+
+$$\sigma(T) = \frac{1}{|\text{vol}(T)|} \cdot T_s \cdot k \cdot \text{shape}(T) \quad (3.7)$$
+
+With the help of the shape operator, a tetrahedron's effective density can be modified in order to suppress degenerated tetrahedra. Note how, once again, the result must be corrected using Ts in order to account for different initial volumes. The exponent is a design parameter and controls the strength of the operation. Usually, a value around 0.5 is sufficient.
+
+## 3.2.2. Seeding
+
+While smoke surfaces use a 1-dimensional structure for seeding, the vertices of a smoke volumes are emitted from a seeding surface. The topology of those vertices is always a structured grid. As mentioned earlier, tetrahedra are grouped in packs of five, each forming a cubic cell (i.e., one element of the grid). Figure 3.1 shows the indexing of the eight corner vertices for a single grid cell.
+
+
+
+Figure 3.1.: Cubic Cell Indexing
+
+Due to the fact that the decomposition of a cube into tetrahedra is ambiguous, two different schemes are defined which will be the basis for the entire seeding procedure, as well as the rendering. Both schemes split the cell into four corner tetrahedra and a center one. The difference is the orientation of the center tetrahedron and the indices of the corners. Figure 3.2 illustrates the problem, using a 2-dimensional analogy.
+
+Figure 3.2.: Alternating Decomposition Scheme
+
+Using the same pattern will lead to T-junctions (or other discontinuities) between adjacent cells (cf. red circle). Similarly, the quads of adjacent cells would show mismatching diagonals, destroying the topology of the tetrahedral mesh.
+
+#### Decomposition Schemes
+
+In order to the avoid this problem, the approach uses two alternating decomposition schemes, namely Ceven (i.e., building the corner tetrahedra at vertex IDs 1, 2, 4 and 7) and Codd (i.e., 0, 3, 5 and 6, respectively). The fifth tetrahedron in both schemes is the one in the cell center. Every cell Ci can be indexed and classified using its coordinates in the grid, Cx, Cy and Cz. Depending on the cell coordinates in the smoke volume, the seeding pattern switches between Ceven and Codd according to Table 3.1.
+
+|                                 | Scheme            |
+|---------------------------------|-------------------|
+| $(C_x + C_y + C_z) \bmod 2 = 0$ | $C_{\text{even}}$ |
+| $(C_x + C_y + C_z) \bmod 2 = 1$ | $C_{\text{odd}}$  |
+
+Table 3.1.: Decomposition Schemes
+
+#### Rendering Pattern
+
+Using alternating decomposition schemes for grid cells maintains topological consistency. However, there is another aspect that needs to be addressed. A consequence of the illustrated seeding pattern is that each pair of two adjacent cells shares two common faces (i.e., one cell quad). Furthermore, every center tetrahedron shares faces with its four corner tetrahedra. This observation can be used to reduce the number of faces per cell down to ten (from originally 20), using only 12 vertices and a single triangle strip. However, this idea requires a slightly modified drawing scheme. Instead of drawing all five tetrahedra, a single cell's workload is reduced to only two corner tetrahedra. Using alternating corner indices (cf. Table 3.2\), all cells are rendered in a way that the next layer completes the previous one. Since the underlying buffer is cyclic in seeding direction, the smoke volume is complete and redundancy is eliminated.
+
+
+
+|                       |     |       |     |         |     | Z-case |           |
+|-----------------------|-----|-------|-----|---------|-----|--------|-----------|
+|                       |     |       | C z | mod 2   | = 0 | C z    | mod 2 = 1 |
+| ( C x + C y ) XY-case | mod | 2 = 0 |     | C 1 , 2 |     |        | C 0 , 3   |
+| ( C x + C y )         | mod | 2 = 1 |     | C 5 , 6 |     |        | C 4 , 7   |
+
+Table 3.2.: Modified Rendering Pattern
+
+#### Stripification
+
+Table 3.2 provides a way to ensure that every face is rendered only once, while reducing the number of faces that need to be rendered for each cell. The method can be further improved by exploiting the topology of the four rendering patterns C1,2, C4,7, C0,3 and C5,6. The approach is illustrated using C1,2 as an example.
+
+
+
+Figure 3.3.: C1,2 Triangle Strip
+
+Figure 3.3 shows the corner tetrahedra with the indices 1 and 2 of a cubic cell. Technically, all triangles could be rendered separately. However, after a closer inspection, it becomes apparent that C1,2 can be unfolded elegantly, forming a single triangle strip. This triangle strip can be taken care of with a single drawing instruction using the respective index list (i.e, in this case (0, 6, 2, 3, 0, 1, 5, 3, 0, 6, 5, 3), cf. the blue polyline). Such lists exist for all four rendering patterns, since they can be reduced to this case using 90◦ rotations.
+
+### Cyclic Buffer
+
+The cell definition (including the associated decomposition and rendering schemes) is the building block for the actual smoke volume. Figure 3.4 shows a 2-dimensional representation illustrating the buffer's behavior in memory. The example consists of five points vertically (i.e., seeding surface, UV-plane) and five point layers horizontally (i.e., the volume flow, W-direction). The cyclic property of the buffer is depicted by duplicating the first layer (i.e., Index 0) to the end.
+
+
+
+Figure 3.4.: Cyclic Buffer at ti
+
+Every layer has an age relative to the point in time it has been seeded into the flow, while the little arrow indicates the layer of points which will be overwritten next. Naturally, this is the oldest layer. Figure 3.5 shows the next step. The layer at index 4 has been overwritten (and is now the youngest of the smoke volume), while the seeding indicator is moved one step forward.
+
+
+
+Figure 3.5.: Cyclic Buffer at ti+1
+
+To enable smooth transitions at the seeding step, the volumes of the cubic cells in between two layers are multiplied by a fade-in/out modifier. The strength of this value depends on the age of a cell.
+
+# 4. Integration
+
+An important instrument in numerical analysis to approximate ordinary differential equations is the Runge-Kutta (RK) method family. In the scope of this thesis, the differentials are given by vector fields, either as the immediate result of a mathematical function or after the interpolation between vertices, as described in the next sections. Generally the visualized meshes are the result of a numerical simulation and consist of a vertex array of arbitrary topology (e.g., regular, cubic, tetrahedral) and additional data for each vertex and time slice. In this context, the term slice expresses the representation of a continuous flow using discrete 3-dimensional snapshots in time. For simplicity, the range of possible data types is limited to static regular meshes along with a vector array for each slice, equally spaced over time.
+
+Although this representation has nothing to do with a precise mathematical description (cf. Section 4.2\), hybrid data types are created for development and testing purposes. By defining extent and resolution, an empty mesh is generated in a first step. After that, all vertices of the mesh are passed to an analytical flow function, attaching the returned vectors to each vertex. The procedure is repeated for as many slices as required. Using this transformation, any function can be treated as if it was the result of a simulation (e.g., to analyze the error between a function and its discrete counterpart). For the direct evaluation of a vector, the following definition is used throughout this thesis.
+
+Definition 4.0.4 (Unsteady vector field). Let x ∈ R 3 be a point and tfunc ∈ R the function time, then the unsteady vector field
+
+$$\nu(x, t_{\text{func}}) : \mathbb{R}^4 \rightarrow \mathbb{R}^3 \quad (4.1)$$
+
+## 4.1. Runge-Kutta Method
+
+There are several RK variants which differ in precision, accumulated error and complexity. However, without any special requirements, all components use the classic Runke-Kutta (RK4) method on unsteady vector fields. The step size is dynamic only with regard to the application speed to maintain a real-time behavior (cf. Section 5.2\). There is no additional implementation for steady fields, but that can be achieved by simply ignoring the argument tfunc or setting it to a fixed value. The chosen approach solves the initial value problem for a point xi by taking four samples from the underlying vector field in the neighborhood of xi and calculating xi+1 using xi as the starting point and a weighted sum of the samples as the step direction.
+
+Definition 4.1.1 (Fourth-order Runge-Kutta). Let x(ti) be the unknown function describing the position of a point xi in an unsteady vector field ν(x, t), at a given time tfunc. In order to estimate the position of the point at x(tfunc + δ), we compute xi+1 using the the RK4 formula
+
+| $x_{i+1} = x_i + \frac{1}{6} \delta (v_0 + 2v_1 + 2v_2 + v_3)$ | (4.2) |
+|----------------------------------------------------------------|-------|
+|----------------------------------------------------------------|-------|
+
+with a step size of δ and the sample values v0, ..., v3 defined as
+
+| $v_0 = \nu(x_i, t_{\text{func}})$ | $(4.3)$ |
+|-----------------------------------|---------|
+|                                   |         |
+
+| $v_1 = \nu(x_i + \frac{1}{2} \delta v_0, t_{\text{func}})$ | (4.4) |
+|------------------------------------------------------------|-------|
+|------------------------------------------------------------|-------|
+
+| $v_2 = \nu(x_i + \frac{1}{2} \delta v_1, t_{\text{func}})$ | (4.5) |
+|------------------------------------------------------------|-------|
+|------------------------------------------------------------|-------|
+
+$$v_3 = \nu(x_i + \delta v_2, t_{\text{func}}) \quad (4.6)$$
+
+for an arbitrary function time tfunc. Note that in order to achieve real-time behavior, the function time tfunc and the integration step size δ must be synchronized.
+
+## 4.2. Analytical
+
+Conceptually, the core application is designed to handle different types of data. With regard to vector fields, the most straightforward approach is to simply construct an interesting one using a mathematical description. Any vector can then be obtained by passing the position and the time to the vector field function. Although this strategy does produce visually appealing results, it is not applicable to actual simulation data.
+
+## 4.2.1. Examples
+
+The following analytical vector fields are used to test the smoke volume renderer. To get a first impression, each example will provide a snapshot of the flow, represented by a point emitter. Each point represents a vertex of the smoke volume. Note that the following definitions are only minimal descriptions. In the actual implementation the flow fields must be modified with additional parameters in order to compensate for their individual scalings in space and time.
+
+#### Linear
+
+The linear vector field returns only one direction, i.e., ν(v) = (1, 1, 1)T for all input vectors v. It is used to visualize basic aspects of the volume since it is free of any deformation if the seeding surface is aligned as shown in Figure 4.1.
+
+
+
+Figure 4.1.: Linear Vector Field
+
+#### ABC-Flow
+
+The Arnold-Beltrami-Childress (ABC)-Flow is a common turbulence generator, often used to evaluate new approaches which require vector field data. The flow vector sampled at a location v is defined as follows
+
+$$\nu(v) = \begin{pmatrix} A \sin(v_z) + C \cos(v_y) \\ B \sin(v_x) + A \cos(v_z) \\ C \sin(v_y) + B \cos(v_x) \end{pmatrix} \quad (4.7)$$
+
+with A, B, C and D being design parameters. By definition, the flow is intended to be static. However, in order to exploit all features of the implementation, the ABC-Flow is modified so that its design parameters are time dependent (e.g., A = sin(t)).
+
+
+
+
+
+Figure 4.2.: ABC-Flow
+
+#### N-Force
+
+The N-Force field is designed in order to obtain a turbulent and unsteady vector field while all flow features are known a-priori. Its design is based on a single rotating core, spinning around the center of the scene (XZ-plane) . Conceptually, the definition supports an arbitrary number of cores, which can be merged. The final flow vector vout is the average of all core contributions. In order to create depth, an upward drift in Y-direction is added to the flow on the XZ-plane based on the distance of v to a core. Figure 4.3 illustrated the flow while looking down the Y-Axis.
+
+
+
+Figure 4.3.: N-Force Field
+
+Definition 4.2.1 (N-Force Field). Let Nrps be the number of rounds per minute, Ncore the number of cores and i the index i-th core of the field. The angle γi between the i-th core and the X-axis can be calculated as
+
+$$\gamma_i = 2\pi \left( \frac{t_{\text{func}}}{N_{\text{rps}}} + \frac{i}{N_{\text{core}}} \right) \quad (4.8)$$
+
+for a function time tfunc. The field is sampled at position v by determining the distance between v and a rotated core ci . All of this is done after being projected onto the XZ plane (hence the zeros in the second line).
+
+$$f_i = \text{rot}_Y(\pm 90^\circ) \left[ \begin{pmatrix} \cos(\gamma_i) \\ 0 \\ \sin(\gamma_i) \end{pmatrix} - \begin{pmatrix} v_x \\ 0 \\ v_z \end{pmatrix} \right] \quad (4.9)$$
+
+$$v_{\text{out}} = \frac{1}{N_{\text{core}}} \sum_{i=0}^{N_{\text{core}}-1} \left[ f_i + \left( \frac{0}{e^{-|f_i|^2}} \right) \right] \quad (4.10)$$
+
+The sign of the 90◦ rotation determines whether the cores spin with or against the global orientation γ. Additional design parameters can be applied, e.g., the core distance to the center or the rotation speed. Figure 4.4 shows examples for different core numbers.
+
+
+
+Figure 4.4.: N-Force Field with N = 2, N = 6 and N = 4
+
+## 4.3. Regular Mesh
+
+For a regular mesh MR the topology is implicitly given by the number of points in every dimension Nx, Ny and Nz in combination with the respective extent E. Changing one of the values that define the extent rescales the entire data set, which is convenient for loading external data. The behavior of the flow is represented by a sequence of time slices S = {S0, ..., SNS−1}. For simplicity, the application only supports regularly spaced time slices.
+
+## 4.3.1. Interpolation
+
+In the case of a regular mesh MR, the sampling of the function νR(x, t), represented by MR, will never provide a precise result for any x and t. In fact, interpolation is necessary in both space and time. The following paragraphs will describe how to locate a cell in MR and how to implement the necessary interpolations.
+
+
+
+
+
+Figure 4.5.: Trilinear Interpolation
+
+#### Cell Location
+
+Let νR(v, t) be the function representing the flow of an unsteady vector field at a position v = (vx, vy, vz) T and time t. Since the underlying data is discrete, the flow vector must be interpolated using the cell corners of a cell C(v) = (Cx(v), Cy(v), Cz(v))T that v lies in. To determine the cell coordinates of C(v), the following formula is applied in every dimension d ∈ {x, y, z}.
+
+| $C_d(v) = \frac{v_d - E_{\min}^d}{E_{\max}^d - E_{\min}^d} \cdot (N_d - 1)$ | $C_d(v) \in [0, N_d - 1]$ | (4.11) |
+|-----------------------------------------------------------------------------|---------------------------|--------|
+|                                                                             |                           |        |
+
+The ratios R(v) = (Rx(v), Ry(v), Rz(v))T are be calculated additionally to C(v) by simply rounding its value down to the next natural number and considering the difference. The values of C(v) and R(v) now define the cell index and offset of v to the cell borders. This information can be used to interpolate flow data of a single time step. In the framework of this thesis, interpolation on regular meshes is achieved by interpolating linearly in XYZ order.
+
+| $R_d(v) = C_d(v) - [C_d(v)]$ | $R_d(v) \in [0, 1]$ | (4.12) |
+|------------------------------|---------------------|--------|
+|                              |                     |        |
+
+#### Trilinear Interpolation
+
+Let E x i,j = {E x 0,1 , Ex 2,3 , Ex 4,5 , Ex 6,7} be the four edges in X-direction using the indexing scheme for cubic cells (cf. Figure 3.1\). Each cell corner is associated with a flow vector v. Using the interpolation value Rx, each edge yields a new interpolated vector v x i,j . The four results are labeled v x k = {v x 0 , ..., vx 3 }.
+
+$$v_{ij}^x = (1 - R_x)v_i + R_xv_j \quad (4.13)$$
+
+Let E y i,j = {E y 0,1 , E y 2,3} be the two edges in Y -direction, each consisting of the previously interpolated vectors v x k . Using the interpolation value Ry, each edge yields a new interpolated vector v y i,j . The two results are labeled v y k = {v y 0 , v y 1 }.
+
+$$v_{ij}^y = (1 - R_y)v_i^x + R_yv_j^x \quad (4.14)$$
+
+Let E z i,j = {E z 0,1} be the final edge in Z-direction consisting of the previously interpolated vectors v y k . Using the interpolation value Rz, the edge yields the final interpolated vector v z i,j , labeled v z k = {v z 0}.
+
+$$v_{i,j}^z = (1 - R_z)v_i^y + R_zv_j^y \quad (4.15)$$
+
+In order to extend the trilinear interpolation to dynamic vector fields, it is necessary to apply another vector interpolation, namely between two sampled flow vectors of different time steps.
+
+#### Slice Interpolation
+
+Let tfunc be the function time ∈ [t0, t1], with a total of NS discrete time slices and a time spacing of tS = t1 − t0 NS − 1 . Furthermore, let Si(v) and Sj (v) be two vector field slices. For a value k ∈ R, the interpolated vector can be calculated using the ratio t.
+
+$$t = \frac{k-i}{j-i} \quad (4.16)$$
+
+$$M_R(v, t) = (1 - t)S_i(v) + tS_j(v) \quad (4.17)$$
+
+Usually, k should be ∈ [i, j] to ensure interpolating behavior. Otherwise the equation may yield an extrapolation. Also, note that this approach is index-based. The actual function time tk for a value k is
+
+$$t_k = t_0 + kt_S \quad (4.18)$$
+
+with k ∈ [0, NS − 1]. In theory this step is straightforward. However, since the actual implementation poses a number of difficulties with regard to real-time behavior, a more detailed approach is illustrated in the next section.
+
+### 4.3.2. Streaming
+
+For the integration on regular mesh data, it is crucial to consider the maximum bandwidth of the underlying system. Since linear interpolation is executed on the graphics card, at least two time steps must be present on the GPU at the function time tfunc. Furthermore, those two time steps should represent the flow before and after tfunc to maximize the quality and precision of the integration. The most straightforward and possibly fastest approach is to just upload the entire simulation output onto the graphics card and select whichever time step is needed in real-time. The major drawback of this approach is that it would render the application highly dependable on system specifications. Consider a set of 100 time slices, each 1283 points in size (i.e., 2,500 MB). Even modern cards will hardly be able to handle that amount of data, especially since data transfer is only one aspect of the visualization process and GPU memory must be shared. Evidently, large simulations will easily exceed the capacity of both GPU memory and RAM.
+
+#### Bandwidth Calculation
+
+Let BHDD→RAM be the system specific throughput from hard disc to RAM (1.2 GB/s) and BRAM→GPU (1.6 GB/s) the subsequent step from there to GPU memory. Since both operations need to be performed in real-time, the component with the lower bandwidth will be the reference value. Knowing the size of a single time slice S, we can now calculate the minimum time interval t∆, which determines how frequently the system is able to fetch new slices.
+
+$$B_{\min} = \min(B_{\text{HDD} \rightarrow \text{RAM}}, B_{\text{RAM} \rightarrow \text{GPU}}) \quad (4.19)$$
+
+$$t_\Delta = \frac{\text{size}(\mathcal{S})}{B_{\min}} \quad (4.20)$$
+
+The final required variable is the time spacing tS = t1 − t0 NS − 1 of the data, with t0 and t1 being the start and end time of the simulation and NS being the number of slices. Assuming the application is running in real-time, the following value indicates how many slices need to be skipped in order to give the data loader enough time to finish all ongoing transfers. Nskip is a floating point value because it is modified by the application and function time multipliers mapp and mfunc.
+
+$$N_{\text{skip}} = \frac{t_\Delta}{t_S} \cdot m_{\text{app}} \cdot m_{\text{func}} \quad N_{\text{skip}} \in \mathbb{R} \quad (4.21)$$
+
+Note how Nskip is defined using the interval t∆ although the actual transfer of a single time slice would roughly take twice that much time. The reason behind this is a multi-layered streaming approach.
+
+#### Host layer
+
+The host layer consists of a ring buffer of six items, each capable of storing one flow slice in heap memory. The buffer is timed so that the two items in its center (i.e., item IDs 2 and 4) always contain the time slices before and after the current function time tfunc. Should tfunc leave the currently valid interval between items 2 and 3 in positive time direction, item 0 is automatically popped from the left and pushed back into the ring buffer from the right. This operation is managed by a queue that can hold more than just six items to maintain smooth buffering. Upon insertion, the new item (ID 5) is scheduled to load a future time
+
+slice from the hard disk. The ID of this time slice is determined by Nskip. The situation right after the insertion step is illustrated in figure 4.6. It is now clear that using t∆ does not pose a problem, since tfunc is at least two items away from that point, giving it enough time to complete.
+
+
+
+Figure 4.6.: Host Buffer
+
+#### Device layer
+
+On top of the host layer lies the device layer (cf. Figure 4.7\). This layer holds a second ring buffer with four items, each being a composition of one existing host-layer item and a chunk of allocated device memory, managed by another queue (CUDA queue). Just like the host buffer, it is timed so that the two items in its center (item ID 1 and 2) always correspond to time slices around tfunc. Upon insertion of a new item into the ring buffer (on host level), one item is popped from the left (on device level) and the associated memory chunk is sent back to the CUDA queue. After that, a copy of the previously last (and fully loaded) host-buffer item is copied (by reference) to the device layer, combined with a CUDA memory object and scheduled for asynchronous memory transfer. Once again, this step does not affect tfunc and the two time slices surrounding it.
+
+
+
+#### Synchronization
+
+The presented streaming approach offers asynchronous and continuous data transfer from the hard disk to the GPU, taking into account individual system capabilities. However, although the above calculations appear to be a good predicting scheme, they are based on a number of assumptions, i.e., a constant transfer rate and a constant function time. These values can be altered or disturbed by the user or the system at any time, hence a number of synchronization rules is applied to maintain a more stable performance:
+
+#### 1. Host Layer
+
+After popping a new item from the host buffer queue, the host thread must block if the associated host memory is still subject to either device or host layer transfer.
+
+#### 2. Device Layer
+
+After popping a new item from the device buffer queue, the host thread must block if the associated host memory is still subject to host layer transfer. Device layer transfers are automatically synchronized by assigning a unique CUDA stream object to every device layer item.
+
+#### 3. CUDA
+
+After performing all tasks on both layers the device layer items with the IDs 1 and 2 are synchronized before launching CUDA. Synchronizing the associated CUDA stream objects asserts that the time slices are fully loaded when accessed.
+
+Both host and device layers manage their memory items with the help of queues. However, it is important to keep in mind that every object represents actually allocated memory. Even unused objects waiting in the queue take up memory, so its a good idea to keep the number of items to a minimum, especially on device level where memory is a scarce resource.
+
+## 4.3.3. Examples
+
+With the help of streamed data loading and discrete interpolation, the application gains the ability to evaluate rendering techniques on authentic simulation data of arbitrary size (with regard to the number of slices). Two data sets will be referenced in the following chapters. To get a first understanding of the behavior of the flow fields, illustrations are provided in combination with a particle emitter.
+
+#### Square Cylinder
+
+The Square Cylinder data set [1] illustrates the behavior of flow behind a rigid object. The observable effect is the so-called K´arm´an vortex street. Based on 102 slices, the mesh displays an extent of E = (−12, 20, −4, 4, 0, 6) with a resolution of 192 × 64 × 48 vertices. The time spacing is re-interpreted to 0.39 seconds between two slices.
+
+Figure 4.8.: Square Cylinder Flow
+
+Figure 4.8 shows 2-dimensional slices (XY-plane) through the flow field as the vertex street begins to build up. The examples use seeding dimensions of 1 × 64 and 1 × 4 points.
+
+#### Borromean
+
+The Borromean data set offers interesting flow behavior along the main diagonal. With an extent of E = (−3.9, −2.3, −3.9, −2.3, −3.9, −2.3), 90 slices and a grid resolution of 643 vertices, it will be examined extensively in the last chapter. Figure 4.9 shows two characteristic flow features.
+
+
+
+Figure 4.9.: Borromean Flow
+
+# 5. Implementation
+
+All concepts concerning the smoke volume metaphor, including different seeding and rendering strategies, as well as various classic approaches (e.g., point- or line-based) are implemented in a single application with the working title Smoker. The purpose of the application is to facilitate comparison, exploration and performance analysis. The following sections will focus on hardware related aspects, various APIs and the interaction between different components.
+
+## 5.1. Program Model
+
+Smoker utilizes the functionality of several interfaces, which are categorized into three groups depending on the associated type of memory. Figure 5.1 illustrates the basic layout of the program model.
+
+
+
+#### • Hard Disk Drive (HDD)
+
+The hard disk offers the largest but slowest memory, making it a difficult component for real-time purposes. In order to reduce the workload on host level, an asynchronous streaming approach is implemented. Furthermore, all long-term data (e.g., shader and CUDA code, binaries or flow data) is stored on the HDD.
+
+#### • Central Processor Unit (CPU)
+
+The CPU is responsible for random access memory (RAM) and for managing memory transactions between HDD and GPU. Due to its critical role, the CPU process is also called host.
+
+#### • Graphics Processor Unit (GPU)
+
+GPU memory is shared between two APIs, i.e., OpenGL and CUDA. It is mostly used for the execution of rendering algorithms. This chapter will cover how interoperability between the GPU and the host is achieved.
+
+## 5.2. Timing
+
+In order to enable real-time support, all components are frame independent. Time-related calculations are based on three consecutive steps, while every intermediate result steers different components of the application.
+
+#### Real-Time
+
+The top most layer is the real-time as measured by OS specific timers. In a first step the length of the current frame t∆ is calculated using the real-time difference between the current and the previous frame Fi and Fi−1.
+
+$$t_\Delta = t_{\text{real}}(F_i) - t_{\text{real}}(F_{i-1}) \quad (5.1)$$
+
+Real-time is used to manually schedule frame buffer swaps (at 60Hz) and certain updates of the graphical user interface. This allows integration and rendering at maximum speed, which is crucial for a refresh rate independent comparison.
+
+#### Application Time
+
+Using t∆ and applying a multiplier mapp, yields the application time tapp. Detaching tapp from real-time enhances exploration by giving the user more freedom (e.g., replay interesting intervals that would normally be too fast at slower pace). The application time is updated in every frame.
+
+| $t_{\text{app}} = t_{\text{app}} + t_{\Delta} \cdot t_{\text{mapp}}$ | $t_{\text{mapp}} \in [0, 1]$ | (5.2) |
+|----------------------------------------------------------------------|------------------------------|-------|
+|----------------------------------------------------------------------|------------------------------|-------|
+
+Theoretically, mapp can be in R. However, it seems reasonable to use the given interval. The most important utilization of tapp is the implementation of the integration step size δ (cf. section 4.1\). In the application, the step size is entered as δips, i.e., the integration distance per second with regard to tapp. This means that the value for a single integration step δ depends on mapp and the current frame length.
+
+$$\delta = \delta_{\text{ips}} \cdot m_{app} \cdot t_{\Delta} \quad (5.3)$$
+
+#### Function Time
+
+The last value that needs synchronization is the function time tfunc, which is necessary to sample any time-dependent vector fields ν(x, tfunc). Although it would be sufficient for most applications to simply use the application time here, tfunc is detached from tapp for compatibility reason. Smoker interprets time in seconds. Since this may be different for external flow data, the problem-specific time must be adapter to the local application time. With its own multiplier mfunc, the function time can be slowed down, accelerated or even inverted, relatively to tapp. The function time is updated in every frame.
+
+| $t_{\text{func}} = t_{\text{func}} + t_{\Delta} \cdot m_{\text{app}} \cdot m_{\text{func}}$ | $m_{\text{func}} \in \mathbb{R}$ | (5.4) |
+|---------------------------------------------------------------------------------------------|----------------------------------|-------|
+|                                                                                             |                                  |       |
+
+It is reasonable to allow mfunc to be of any value since potentially imported flow data may have been produced with arbitrary specifications.
+
+## 5.3. OpenGL
+
+The application uses OpenGL 4.2.0 as the graphics library and takes advantage of several extensions. Furthermore, interoperability with CUDA (cf. Section 5.4\) is supported. Figure 5.2 illustrates a simplified rendering pipeline showing all objects and stages that are relevant for the application. Note that this diagram represents a single rendering pass of the standard rendering pipeline as documented in the OpenGL API. Smoker uses up to three rendering passes, each of which may use or ignore several components.
+
+
+
+Figure 5.2.: OpenGL Rendering Pipeline
+
+The following components will be of critical importance for the implementation:
+
+#### 1. Vertex Data
+
+An array of vertex data is the starting point for the rendering of any primitive type. As input serves a list of vertex positions and indices, which determine which vertices belong to the same primitive. The numbering of vertices determines the orientation of the face normal, as well as its topological location in the smoke volume. This information is necessary to reconstruct neighborhood information.
+
+#### 2. Host
+
+The host represents the CPU thread and is responsible for the instantiation and management of buffer objects. It is also the connection between OpenGL and CUDA functionality. The host may read or write data to buffer objects in between rendering stages, e.g., to fetch values from a buffer, which need to be modified for the next stage.
+
+#### 3. Rasterization
+
+The rasterizer is one of the key components and the backbone of the entire rendering strategy. Given a triangle, the rasterizer divides it into discrete fragments according to the applied projection matrix and viewport settings. This avoids ray/triangle intersections by simply dragging a fragment's Z-value through the pipeline until it is needed.
+
+#### 4. Frame
+
+The termination of a fragment shader usually ends with the output of the rendered scene. However, this is only true for the last stage. All intermediate stages use buffer objects as input and output.
+
+Buffer objects and shaders are of major importance and will be explained in detail in the next two sections. Furthermore, the actual content of a shader throughout different rendering stages depends on the visualization type. Shader implementation will be addressed in the next chapter.
+
+## 5.3.1. Shader
+
+Shaders allow the application to replace certain parts of the static rendering pipeline with problem-specific code. For this purpose, OpenGL provides the shader programming language GLSL (OpenGL Shading Language). The latest hardware generation comes with a total of five different shader types of which the classic three, i.e., vertex (v), geometry (g), and fragment (f) shader, are utilized in Smoker. Shaders of different types can be combined into a shader program. A single shader program is the core of a rendering stage and is executed once for any OpenGL drawing method. Typically, the application needs three stages, i.e., Clear (C), Render (R) and Display (D), to render a single frame. Due to its extensiveness, the Render stage will be refined in the next chapter. The following paragraphs illustrate the functionality of the three shader types by outlining their purpose in the application and giving actual examples.
+
+#### Vertex Shader
+
+Vertex shaders allow vertex-based manipulation. This includes not only the geometry but also the preprocessing of any attached attributes. Every vertex has a unique ID which can be used to determine its topological position. These are the most important vertex shaders:
+
+#### 1. sms vCD pass
+
+Every vertex is sent through the pipeline as defined on host level, disregarding any perspective- or viewport-related transformation. The shader is used for initiating Clear or Display stages.
+
+#### 2. sms vR tf basic
+
+Every vertex is modified by applying the current transformation and perspective matrix. No further attributes are processed.
+
+#### 3. sms vR tf tangent
+
+Applying basic transformation with an additional attribute for vector-field tangents (e.g., for the implementation of illuminated streamlines or points).
+
+#### 4. sms vR tf volume
+
+Applying basic transformation with an additional attribute for volume information.
+
+Each vertex shader (with the exception of sms vCD pass) is usually combined with one of the following geometry shaders.
+
+#### Geometry Shader
+
+Geometry shaders use vertex shader output and offer additional primitive-based manipulation. The geometry shader is capable of discarding, reconstructing or creating primitives dynamically and the preprocessing of triangle-related attributes for subsequent steps.
+
+#### 1. sms gR basic
+
+Used in combination with the sms vR tf basic vertex shader. Volume information is obtained by inspecting the topological neighborhood (cf. Definition 6.6.3\).
+
+#### 2. sms gR smooth
+
+Used in combination with the sms vR tf volume vertex shader. Volume information is forwarded on vertex basis. (cf. Definition 6.7.1\).
+
+#### Fragment Shader
+
+Fragment shaders operate on screen space and are responsible for fragment-based manipulation, e.g., determining the color of a pixel. Shaders of the Clear or Render stages do not produce any visible output.
+
+- 1. sms fC clear Responsible for the reset of buffer objects.
+- 2. sms fR basic Insertion of fragments into a storage structure for later evaluation.
+- 3. sms fR smooth Insertion of fragments into a storage structure using interpolation.
+- 4. sms fD basic Evaluation of fragments in order to determine a final pixel color.
+- 5. sms fD smooth Evaluation of fragments using a different evaluation scheme to enable interpolation.
+
+A more detailed description will follow in the next chapter.
+
+## 5.3.2. Buffer Objects
+
+The OpenGL buffer object (BO) is the core element in the application's rendering pipeline. With the help of shader extensions and other interfaces, the usability of a BO can be extended to a wider field of application. Within the scope of this thesis, three types of application can be outlined:
+
+#### 1. OpenGL Draw
+
+The simplest application of a BO is the ordinary draw method. Most rendering types (cf. Chapter 6\) make use of the OpenGL call glDrawElements() (e.g., referencing primitive indices and vertex data). Note that this call is synchronized with the integration routine due to the fact that OpenGL and CUDA share buffers.
+
+#### 2. Global Shader Buffers
+
+Memory management is always a delicate issue when GPU-based rendering techniques are considered, especially with regard to volume rendering where the entire volume
+
+data must fit in GPU memory. One common way to accomplish this is the use of texture memory, which requires some sort of conversion scheme between the payload and texture coordinates. An alternative is provided by the shader buffer load extension, which is used for all shader-relevant objects in the implementation. Using the extension's functionality, a BO can be declared as resident, making it accessible on shader level but unavailable for CUDA or host-level modification. Consequently, a resident BO must be made non-resident again before those operations can be applied. After declaring a buffer as resident, its pointer can be retrieved and passed to the rendering pipeline as a uniform variable.
+
+### 3. OpenGL/CUDA Shared Objects
+
+To reduce redundancy and data transfer, certain BOs can be registered with CUDA to enable mapping between CUDA and OpenGL. While a buffer is mapped, it cannot be used for rendering or host-level modification. Note that the mapping process implicitly synchronizes CUDA and OpenGL threads so integration and rendering are always coupled.
+
+
+
+Figure 5.3.: Buffer Object Life Cycle
+
+Figure 5.3 illustrates the usage of a BO using CUDA and OpenGL interoperability. After allocation in OpenGL, the buffer is registered with CUDA and enters its life cycle, alternating its accessibility for either integration or rendering.
+
+## 5.3.3. Transfer
+
+With regard to buffer objects, one last issue needs to be addressed, i.e., the Transfer stage. During program execution, the application constantly fetches values from all sorts of buffer objects. Those can be of mandatory nature (i.e., filling status of storage buffers or error codes), a periodically scheduled measure or the result of a user-initiated action. In this context, the construction of real-time histograms is the most important feature. Histograms are a useful instrument to enhance the expressivity of an image and are the basis for the implementation of color maps. The histogram-based update of a color map is executed with the help of an opacity buffers which contains accumulated α values for each pixel. The following list outlines the procedure:
+
+#### 1. Download
+
+If scheduled or triggered manually, the procedures fetches the opacity buffer. Its content is read once in order to determine the maximum value αmax.
+
+#### 2. Initialization of the Histogram
+
+The opacity values αi are added to the histogram H, while bin(αi) = αi αmax Nbin determines the index of a value's bin in H. The accuracy of the next step increases with a higher number of bins.
+
+### 3. Equalization (optional)
+
+Knowing the probabilities of occurrence, the user can activate the optional histogram equalization. This generates a lookup table (i.e., the transfer function), which maps old opacity values to new ones, following the optimized distribution. If equalization is disabled, the transfer function is a simple linear mapping.
+
+#### 4. Color Map Sampling
+
+In order to generate the colors for the next frame, the lookup table is sampled with respect to a user defined color map. Those colors are inserted into a Color buffer object of Ncolor Nbin values.
+
+#### 5. Upload
+
+The Color buffer is uploaded to the GPU and serves as a lookup table on fragment shader level in order to determine a pixel's color.
+
+## 5.4. CUDA
+
+CUDA (Compute Unified Device Architecture) is NVIDIA's general purpose parallel computing architecture, supported by many NVIDIA graphics cards. Parallel computing allows the efficient calculation of problems that can be broken down into independent tasks. Independence means that all tasks can be executed concurrently, resulting in a (potentially) vast increase of performance over classic sequential processing. Many aspects of the presented smoke volume rendering approach happen to fall exactly into this category, making parallel computing the obvious choice. CUDA comes with its own high-level programming language called CUDA C including the necessary instruction set to access CUDA functionality. In this context, NVIDIA offers two interfaces, namely the Runtime API and Driver API. Both APIs provide methods to allocate and free memory, transfer data, manage device contexts and many other operations. Since the complete instruction set is too large to be illustrated in detail, the next section is limited to the most important elements. Basically, the main difference between the two APIs is that the Runtime API is easier to use, while the Driver API requires more code but allows lower-level interaction [10].
+
+## 5.4.1. Driver API
+
+All CUDA-related functionality is implemented using the Driver API, ultimately because of its ability to load CUDA code dynamically. The purpose of this feature is explained in the next section. The following lines provide a brief outline of the APIs most important capabilities.
+
+#### Memory Layout
+
+CUDA memory is organized in grids, blocks and threads. The grid layer (cf. Figure 5.4\) corresponds to global memory, which is the slowest but largest type of memory. Due to the memory-hungry nature of smoke volume rendering, this is where all mesh-related data is stored. Below the grid layer lies the block layer, which contains all instantiated threads (cf. Figure 5.5\). The associated memory for the block layer is called shared memory and is shared among all threads of the same block. In order to match problem-related characteristics, the dimension of block and grid layer can be adjusted. This determines the way block and thread elements are indexed. Smoker uses 1-dimensional indexing on both layers, which means that the index of an element χi (e.g., a single point or volume) can be indexed as
+
+$$\chi_{\text{ID}} = N_B \cdot T_{\text{BID}} + T_{\text{ID}} \quad (5.5)$$
+
+where TBID is the current thread's block ID inside the grid, TID its local ID inside the block, and NB the number of threads in a block. These values are created automatically every time CUDA is launched.
+
+
+
+Figure 5.4.: Grid of Blocks
+
+
+
+| Thread (0,0) | Thread (1,0) |
+|--------------|--------------|
+| Thread (0,1) | Thread (1,1) |
+
+Figure 5.5.: Block of Threads
+
+#### Allocation
+
+The following list addresses three types of CUDA memory allocation that are of major importance for the application:
+
+#### 1. cuMemAlloc
+
+This function allocates global memory directly on the GPU and can be accessed by passing the returned pointer to a CUDA function. Transfer from host to device and back is always synchronous. This type of memory is used for all objects that do not require OpenGL interoperability.
+
+#### 2. cuMemHostAlloc
+
+In order to enable asynchronous transfers, so called pinned memory is needed. The function allocates host memory whose pointer can be mapped into CUDA space and used accordingly. These functions are asynchronous and require manual synchronization. Pinned memory is used to implement real-time streaming of mesh data (cf. Section 4.3.2\).
+
+#### 3. cuGLMapBufferObject
+
+CUDA supports OpenGL interoperability, which means that buffer objects can be mapped into CUDA space similarly to host memory. This reduces unnecessary transfers because both OpenGL and CUDA use GPU memory. Mapped buffer objects are mainly used for shared vertex arrays, which are integrated using CUDA and rendered with OpenGL.
+
+#### Modules
+
+With the help of the Driver API, it is possible to load so-called modules dynamically. A module is similar to a dynamic link library (DLL) and contains compiled CUDA code. For this purpose, the API provides the function cuModuleLoad(), which can be used to load modules in the form of CUBIN-files (CUDA Binary). The compilation process of CUBINfiles is explained in the next section.
+
+#### Functions
+
+Basically, there are two types of CUDA function which can be declared as such by applying the respective modifier. The first modifier, called device , makes a function accessible by other CUDA functions on the GPU. The other one, called global , declares a function as a CUDA-kernel, the interface between CUDA and ordinary application code. A kernel-function can be extracted from a CUBIN-file using cuModuleGetFunction() and then used for a function launch. More precisely, a kernel-function is launched in-parallel, once for every thread. The number of threads is determined by the product of block and grid size. Kernel-functions are launched synchronous (with the exception of pinned-memory) using cuLaunchGrid(). Asynchronous launches are possible but without effect in the current implementation because CUDA and OpenGL share most of the processed data.
+
+## 5.4.2. Compiler
+
+Numerous device and kernel functions are implemented and categorized inside Smoker (i.e., binary resources containing textual CUDA code) in different component files. Each file contains a device (d) or kernel (k) function and, optionally, local auxiliary functions, macros or definitions. With one exception, none of the CUDA code can be altered by the user, to protect it from accidental modification. The one exception is the SMC-file (Smoker CUDA), essentially containing a single ordinary device function. This function (cf. Listing 5.1, showing a trivial example) can be used to design any unsteady vector field, which is then dynamically inserted into the compilation process.
+
+ \_\_device\_\_ int smc\_sample\_function\_t ( const float \* \_vIn , float \* \_vOut , float \_t ){ return 0; 6 }
+
+Listing 5.1: Empty SMC-File
+
+#### Assembly
+
+The following component files are necessary for the compilation process:
+
+#### 1. smc d0 basic
+
+Contains global definitions and auxiliary functions (e.g., vector geometry), that are used by subsequent components.
+
+#### 2. smc dA rk4t
+
+Time-dependent RK4 integration for a single point, based on a selected SMC-file.
+
+#### 3. smc kA p
+
+Kernel function for the integration of point arrays.
+
+#### 4. smc kA pt
+
+Same as component 3 but with another output for tangent data (e.g., to be used in combination with an illumination shader)
+
+#### 5. smc kM inject
+
+Using the SMC-file to inject the vertices of a mesh with flow information to create artificial simulation data (e.g., debugging purposes).
+
+#### 6. smc dM rk4t
+
+Integration of a single point, based on the trilinear interpolation of mesh data.
+
+#### 7. smc kM p
+
+Kernel-function for the integration of point arrays using discrete meshes.
+
+#### 8. smc kM pt
+
+Same as component 7, but with another output for tangent data.
+
+After selecting a valid SMC-file, a CU-file is assembled in a predefined order (cf. Figure 5.6\) and compiled into a CUBIN-file, which is loaded dynamically into the program. Naturally, these CUBIN-files can be compiled, altered, stored and re-used at will, which enhances the work with analytical vector fields.
+
+
+
+Figure 5.6.: CUDA Compiler Dependencies
+
+All items in the last row (i.e., components 3, 4, 5, 7 and 8) contain kernel functions. These are the only ones that can be launched from within the application. Component 5 is the only one that does not require RK4 integration, while components 7 and 8 do not need the SMC-file due to mesh-based integration.
+
+## 5.5. Interaction
+
+The last pages of this chapter offer details concerning user interaction and interactivity. The chapter will conclude with a short outline of the most important panels of the application's front-end.
+
+## 5.5.1. Seeding Gadget
+
+To enhance exploration and usability, Smoker uses a fully interactive and scalable coordinate system called the Seeding Gadget (SG). Essentially, the SG is a composite object of three interactive planes with identical functionality.
+
+
+
+Figure 5.7.: Smoker Seeding Gadget
+
+The features of the SG are illustrated using the emitter surface (XY-plane) as an example:
+
+#### 1. Axis Translation
+
+Every SG plane provides four Axis Translation Handles (ATH), two for each direction in the SG's local coordinate system. The handle is triggered if the intersection point p (i.e., the point where the picking ray hits the plane) is further away than the plane orbit O (cf. the dark ring in Figure 5.7\) but close to one of the ATH.
+
+#### 2. Edge Resizing
+
+Edge Resizing Handles (ERH) are used to resize the plane rectangular R in one direction. This happens symmetrically for opposite edges so that the SG's center remains at the same location. The handle is triggered if p is close to one of R's edges.
+
+#### 3. Corner Resizing
+
+Similar to the ERH, R can be resized by dragging one of its corners. In order to maintain symmetry, the modification of one Corner Resizing Handle (CRH) modifies all four. The handle is triggered if p is close to one of R's corners.
+
+#### 4. Plane Translation
+
+If p is inside R without triggering any resizing handles, R itself is triggered and allows the SG to be translated on the respective plane.
+
+#### 5. Plane Rotation
+
+Furthermore, if p is close to O without triggering the CRH, the Plane Rotation Handle (PRH) is triggered. This allows the rotation and/or resizing of the SG by dragging p.
+
+Naturally, p does not only intersect with just one plane but all three. To determine which plane's handle is actually selected by the user, all potentially triggered handles are sorted according to their Z-value first. Also, a plane is deactivated if its normal is collinear with the viewport to avoid p ending up at infinity.
+
+#### Emitter
+
+The key component of the SG is the XY-plane, which is responsible for emitting the smokevolume. The purpose of the other two planes and respective handles is to position the emitting surface in the vector field so that interesting sections can be explored comfortably. The shape of the emitting surface represents the UV-directions of the smoke volume and is therefore responsible for the initial deformation.
+
+
+
+Figure 5.8.: 8 × 2 and 2 × 8 Point Emitter
+
+Figure 5.8 shows a stretched emitting surface with an activated particle emitter of different seeding dimensions.
+
+## 5.5.2. User Interface
+
+The graphical user interface (GUI) can be split into several parts:
+
+#### • Runtime
+
+In the Runtime panel (cf. Figure 5.9\), the values of tapp and tfunc can be modified. Another design parameter is the integration step size δips, which is denoted frame independently (integration per second).
+
+
+
+Figure 5.9.: Mesh and Runtime Panel
+
+#### • Color Transfer
+
+This panel deals with the configuration, storage, load, update and equalization of color maps. The updating step can be set to automatic execution according to a given time interval.
+
+
+
+Figure 5.10.: Transfer Panel
+
+#### • Data Loading
+
+Data loading components deal with the import (and export) of data. This includes the scanning for SMC-files (with an auto-compilation feature by comparing the modification times of CUBIN and SMC), saved color maps, the loading of header files and the streamed data upload.
+
+#### • Seeding
+
+In order to reposition the smoke volume in interesting section of the flow, the Seeding Gadget is used. With the help of the seeding panel, the smoke resolution can be controlled, as well as the timeout interval (i.e., number of seeds per second).
+
+#### • Statistics
+
+Since Smoker is a test application, statistical information concerning runtime behavior is necessary for evaluation. In the Statistics Panel, the application outputs information with regard to the current frame (e.g., FPS, grid and block dimension (CUDA), number of fragments, used GPU memory etc.).
+
+#### • Visualization
+
+In the next chapter, several rendering strategies will be presented. Some of those strategies are implemented in different variations. This panel allows to switch between rendering methods during runtime, without the re-initialization of the smoke volume. This feature allows to compare different approaches using identical configurations.
+
+# 6. Rendering
+
+To maintain the best possible accuracy and to circumvent the problems that arise from raytracing and self or global intersections, a fragment list-based technique is chosen as the basis for smoke volume rendering. This chapter will illustrate a number of different strategies to store and evaluate fragments and discuss general improvements to increase performance. Most steps described on the following pages make heavy use of shader application, memory transactions and other GPU related functionality. As an overview, the next section provides a rough outline of the most important steps which all rendering variations have in common.
+
+## 6.1. Stages
+
+The rendering pipeline of Smoker can be generalized using four stages, executed by three shader programs, i.e., Clear, Render and Display (cf. Section 5.3.1\). Since some shaders are not of interest, while others are extensively packed, the following 4-stage classification will be the reference for the rest of this thesis. The following list offers a brief overview:
+
+#### 1. Clear
+
+The rendering of a single frame involves the smoke volume to be sent through the pipeline, followed by some sort of post-processing and pixel evaluation. The procedure makes use of a variety of different OpenGL buffer objects, some of which need to be reset for the subsequent frame. The associated fragment shader threads are launched by simply rendering a single screen-filling quad.
+
+#### 2. Construction
+
+This stage deals with the assembly of primitives on geometry shader level, which requires the transformation of vertices in a preceding vertex shader stage. After perspective transformation and the assignment of additional vertex data (e.g., density or flow
+
+tangents), the results are forwarded to the Insertion stage. The Construction stage is also responsible for processing additional triangle-related data (e.g., orientation, topology, volume information).
+
+#### 3. Insertion
+
+After being constructed in the previous stage, the primitives are pushed through the pipeline, rasterized and forwarded to the fragment shader where the Insertion stage takes place. Depending on the applied visualization method, this stage may processes incoming fragments in different ways. This can be anything from a simple pixel counter to the insertion of fragments into a complicated storage data structure (hence the name of the stage). The only restriction is, that the type of fragment processing must be compatible with the Evaluation step. The Construction and Insertion stages belong to the same shader program (i.e., the Render stage).
+
+#### 4. Evaluation
+
+Just like the Clear stage, fragment evaluation is initiated by rendering a single screenfilling quad. The purpose of the Evaluation stage is the interpretation and visualization of per-pixel information, as prepared by the Insertion stage.
+
+The details of a particular method may deviate from this summary and will be explained later.
+
+## 6.1.1. Atomics
+
+Concurrent modification of shared memory is a problem in both CUDA and OpenGL routines. While all CUDA components only need to deal with a static topology, a fixed number of objects and separated input and output, the number of concurrently executed objects is undefined and highly varying in OpenGL. In particular, it is the Insertion step which is the greatest bottleneck of the entire rendering pipeline due to the simultaneous access to shared indexing mechanisms. Throughout the next sections, several approaches are discussed that help to alleviate the drawbacks of this circumstance. Critical sections like the Insertion stage must be treated with caution, since unmanaged access may leave shared memory in an inconsistent state. This is true for write and read operations since a shader thread cannot check whether a shared address is in the process of being modified. OpenGL provides a

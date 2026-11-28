@@ -1,0 +1,110 @@
+--- v001.md
++++ v002.md
+@@ -4,66 +4,43 @@
+ 
+ ## Overview
+-This method generates anisotropic mipmaps from the leaf nodes of a sparse octree to support efficient cone tracing. It solves the problem of directional lighting blur by filtering voxel data anisotropically along the positive and negative XYZ axes, storing six directional values per voxel. It sets itself apart from isotropic filtering by preserving directional information required for accurate cone tracing, building on the node map structure of [Sparse Octree Filtering with Node Map](2337-sparse-octree-filtering-with-node-map.md) to reduce thread launch overhead.
++This method filters lighting data at the leaf nodes of an octree anisotropically along the positive and negative XYZ directions to prepare for cone tracing [S1, unofficial]. It stores six directional values per voxel to preserve directional information [S1, unofficial]. It builds on the node map structure of [Sparse Octree Filtering with Node Map](2337-sparse-octree-filtering-with-node-map.md) to reduce thread launch overhead.
+ 
+ ## How it works
+-**Inputs:** Leaf node lighting data in a 3D texture (lower mip level).
+-**Outputs:** Filtered lighting data in a 3D texture (upper mip level) with anisotropic directional storage.
++**Inputs:** Leaf node lighting data in a 3D texture (lower mip level) [S1, unofficial].
++**Outputs:** Filtered lighting data in a 3D texture (upper mip level) with anisotropic directional storage [S1, unofficial].
+ 
+ **Data Structures:**
+-*   **Lower Mip Level:** A 3D texture containing leaf node voxels. For a 2D explanation, a node tile is $5 \times 5$ voxels.
+-*   **Upper Mip Level:** A 3D texture containing filtered voxels. For a 2D explanation, a node tile is $3 \times 3$ voxels.
+-*   **Anisotropic Storage:** Each voxel in the upper mip level stores 6 directional values (positive/negative X, Y, Z).
++*   **Lower Mip Level:** A 3D texture containing leaf node voxels. For a 2D explanation, a node tile is $5 \times 5$ voxels [S1, unofficial].
++*   **Upper Mip Level:** A 3D texture containing filtered voxels. For a 2D explanation, a node tile is $3 \times 3$ voxels [S1, unofficial].
++*   **Anisotropic Storage:** Each voxel in the upper mip level stores 6 directional values (positive/negative X, Y, Z) [S1, unofficial].
+ 
+ **Algorithm Steps:**
+ 
+-1.  **Group Definition:** To filter a center voxel (e.g., texel E) in the upper mip level along the +X direction, consider the 9 texels in the lower level that influence it (e.g., texels g, h, i, l, m, n, q, r, s in a 2D projection). Divide these 9 texels into 4 groups based on their Y and Z positions relative to the center.
+-2.  **Intra-Group Filtering:** For each of the 4 groups, filter along the +X direction. This involves alpha blending the values in the +X direction within the group, then averaging the results to obtain a single group value.
+-3.  **Inter-Group Filtering:** Compute the final filtered center voxel value by repeating the filtering process for the 4 group values.
+-4.  **Boundary Handling (Corner Cases):** For corner values in a node tile (e.g., texels a, b, f, g), not all 9 influencing texels are available within the same node tile; some reside in neighbor tiles.
+-    *   Partially compute group values and store them in the 3D texture.
+-    *   Rely on the transfer step (from the cone tracing paper) to complete the calculation.
+-    *   During transfer, some filtered values are computed by alpha blending neighbor group values followed by averaging, while others are computed by averaging first followed by alpha blending. Although these operations are not commutative, this approach reduces the number of dispatch passes with a similar result [S1, unofficial].
+-5.  **Sampling:** To sample the anisotropic filtered voxel for a specific direction, use a method similar to ambient cube sampling, requiring 3 texture reads.
++1.  **Group Definition:** To filter a center voxel (e.g., texel E) in the upper mip level along the +X direction, consider the 9 texels in the lower level that influence it (e.g., texels g, h, i, l, m, n, q, r, s in a 2D projection). Divide these 9 texels into 4 groups based on their Y and Z positions relative to the center [S1, unofficial].
++2.  **Intra-Group Filtering:** For each of the 4 groups, filter along the +X direction. This involves alpha blending the values in the +X direction within the group, then averaging the results to obtain a single group value [S1, unofficial].
++3.  **Inter-Group Filtering:** Compute the final filtered center voxel value by repeating the filtering process for the 4 group values [S1, unofficial].
++4.  **Boundary Handling (Corner Cases):** For corner values in a node tile (e.g., texels a, b, f, g), not all 9 influencing texels are available within the same node tile; some reside in neighbor tiles. Partially compute group values and store them in the 3D texture. Rely on the transfer step (from the cone tracing paper) to complete the calculation. During transfer, some filtered values are computed by alpha blending neighbor group values followed by averaging, while others are computed by averaging first followed by alpha blending. Although these operations are not commutative, this approach reduces the number of dispatch passes with a similar result [S1, unofficial].
++5.  **Sampling:** To sample the anisotropic filtered voxel for a specific direction, use a method similar to ambient cube sampling, requiring 3 texture reads [S1, unofficial].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def sample_anisotropic(direction: float3) -> float3:
++def sample_anisotropic(direction: tuple[float, float, float], brick_values: tuple[float, float, float, float, float, float]) -> tuple[float, float, float]:
+     """
+     Samples the anisotropic filtered voxel for a given direction.
+-    Assumes anisotropicFilteredBrickValue is a 3D texture array or 
+-    structured texture containing 6 directional values per voxel.
+-    Layout:
+-    Index 0: -X
+-    Index 1: +X
+-    Index 2: -Y
+-    Index 3: +Y
+-    Index 4: -Z
+-    Index 5: +Z
++    brick_values layout: (neg_x, pos_x, neg_y, pos_y, neg_z, pos_z)
+     """
+-    # Calculate squared direction components for weighting
+-    n_squared = direction * direction
+-    
+-    # Determine sign of each component
+-    is_negative_x = direction.x < 0.0
+-    is_negative_y = direction.y < 0.0
+-    is_negative_z = direction.z < 0.0
+-    
+-    # Select directional values based on sign
+-    # If direction.x >= 0, use index 1 (+X), else index 0 (-X)
+-    # If direction.y >= 0, use index 3 (+Y), else index 2 (-Y)
+-    # If direction.z >= 0, use index 5 (+Z), else index 4 (-Z)
+-    
+-    val_x = anisotropicFilteredBrickValue[is_negative_x] # 0 or 1
+-    val_y = anisotropicFilteredBrickValue[is_negative_y + 2] # 2 or 3
+-    val_z = anisotropicFilteredBrickValue[is_negative_z + 4] # 4 or 5
+-    
+-    # Weighted sum
+-    filtered_color = (
+-        n_squared.x * val_x +
+-        n_squared.y * val_y +
+-        n_squared.z * val_z
+-    )
+-    
++    n_squared = (direction[0]**2, direction[1]**2, direction[2]**2)
++    is_negative = (1 if direction[0] < 0.0 else 0,
++                   1 if direction[1] < 0.0 else 0,
++                   1 if direction[2] < 0.0 else 0)
++
++    val_x = brick_values[is_negative[0]]
++    val_y = brick_values[is_negative[1] + 2]
++    val_z = brick_values[is_negative[2] + 4]
++
++    filtered_color = (n_squared[0] * val_x,
++                      n_squared[1] * val_y,
++                      n_squared[2] * val_z)
+     return filtered_color
+ ```
+@@ -71,5 +48,5 @@
+ **Parameters:**
+ *   **Tile Size:** The example uses a $5 \times 5$ lower level to $3 \times 3$ upper level reduction in 2D. The 3D case is described as "very similar" but exact dimensions are not specified [S1, unofficial].
+-*   **Directional Weights:** The sampling function uses the squared direction components ($n^2$) as weights.
++*   **Directional Weights:** The sampling function uses the squared direction components ($n^2$) as weights [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+@@ -81,6 +58,6 @@
+ *   **Memory Complexity:** Not given in the sources.
+ *   **Performance:** The method reduces the number of dispatch passes required to compute filtered values by partially computing group values and deferring completion to the transfer step [S1, unofficial].
+-*   **Strengths:** Preserves directional lighting information for cone tracing; reduces computational overhead via partial computation and transfer step integration.
+-*   **Limitations:** Approximation due to non-commutative operations at boundaries; specific tile dimensions for 3D are not detailed.
++*   **Strengths:** Preserves directional lighting information for cone tracing; reduces computational overhead via partial computation and transfer step integration [S1, unofficial].
++*   **Limitations:** Approximation due to non-commutative operations at boundaries; specific tile dimensions for 3D are not detailed [S1, unofficial].
+ 
+ ## Background

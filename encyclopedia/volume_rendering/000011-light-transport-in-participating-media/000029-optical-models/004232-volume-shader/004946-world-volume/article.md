@@ -1,0 +1,85 @@
+# World Volume
+
+
+## Overview
+A World Volume applies a volume shader to the entire scene space, filling it with participating media [S1]. It differs from bounded volume objects by assuming the background is infinitely far away [S1]. This assumption is accurate for distant light sources like the sun but makes it unsuitable for effects like fog or atmospheric scattering, where most distance between light sources and objects is empty space [S1]. It is primarily useful for night-time or other dark scenes [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A volume shader definition applied to the world context [S1].
+*   **Output:** The final rendered image where the entire space is treated as a participating medium [S1].
+
+**Data Structures:**
+The implementation relies on the standard Volume Shader data structures defined in the parent article [Volume Shader](10695-volume-shader.md) [G]. No additional global data structures are specified for the World Volume itself beyond the shader parameters [S1].
+
+**Steps:**
+1. Initialize the view ray for each pixel.
+2. Treat the entire ray length as traversing the volume, ignoring world boundaries or background planes [S1].
+3. Evaluate the volume shader along the ray to compute transmittance and accumulated color [S1].
+4. Assume the background is at infinite distance [S1].
+
+**Formulas:**
+The rendering follows standard front-to-back volume integration [G]:
+$$T(t) = \exp\left(-\int_0^t (\sigma_a(\tau) + \sigma_s(\tau)) d\tau\right)$$
+$$C = \int_0^{\infty} \sigma_e(t) T(t) dt$$
+where $\sigma_a$ is absorption, $\sigma_s$ is scattering, and $\sigma_e$ is emission [G].
+
+**Parameters:**
+*   **Volume Shader:** Contains scattering, absorption, and emission properties [S1].
+*   **Background Distance:** Assumed to be infinite [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Infinite Background Assumption:** The method assumes the background is infinitely far away [S1]. This is accurate for distant light sources like the sun but inaccurate for effects like fog or atmospheric scattering, where most distance between light sources and objects is empty space [S1].
+*   **Scene Darkness:** Because the world background is assumed to be infinitely far away, using a World Volume causes the world surface shader or sun lights to have no effect if a volume shader is used [S1].
+*   **Geometry Holes:** If scene geometry has holes or normals point in the wrong direction, the renderer is unable to decide what is the inside or outside of the volume, following the same rules as rendering glass refraction correctly [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_world_volume(ray_origin, ray_direction, volume_shader, step_size):
+    # World volume fills entire space; background is infinitely far away [S1].
+    # Standard front-to-back volume rendering integration [G].
+    accumulated_color = vec3(0.0)
+    transmittance = 1.0
+    t = 0.0
+    max_dist = 1e6  # Represents infinite background assumption [S1]
+
+    while t < max_dist:
+        pos = ray_origin + ray_direction * t
+        sigma_a = volume_shader.absorption(pos)
+        sigma_s = volume_shader.scattering(pos)
+        emission = volume_shader.emission(pos)
+
+        delta_t = step_size
+        optical_depth = (sigma_a + sigma_s) * delta_t
+        step_transmittance = exp(-optical_depth)
+
+        accumulated_color += emission * transmittance * (1.0 - step_transmittance)
+        transmittance *= step_transmittance
+
+        t += delta_t
+
+    return accumulated_color
+```
+
+## Subtopics
+
+### Front-to-Back Blending
+A technique used in conjunction with World Volume rendering to composite the final image [S2, unofficial]. It samples front-to-back (f2b) and back-to-front (b2f) accumulated volume textures at normalized screen coordinates ($u\_screen\_size$) [S2, unofficial]. The colors are blended using the formula $color = f2b + b2f \times (1.0 - f2b.a)$ [S2, unofficial]. Finally, a transfer function is applied to the resulting color: $gl\_FragmentColor = texture(u\_transfer, vec2(color.r, 0.0))$ [S2, unofficial]. This method requires three `sampler2D` inputs: `u_f2b` for the front-to-back accumulated volume texture, `u_b2f` for the back-to-front accumulated volume texture, and `u_transfer` for the transfer function texture [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:** Not given in the sources.
+*   **Strengths:** Useful for night-time or dark scenes where global atmospheric effects are desired without explicit geometry [S1].
+*   **Limitations:** Inaccurate for modeling fog or atmospheric scattering due to the infinite background assumption, which ignores the empty space between light sources and objects [S1]. Can cause scenes to become dark if it overrides world surface shaders or sun lights [S1].
+*   **When to use:** Night-time scenes or dark environments [S1].
+*   **When not to use:** Fog or atmospheric scattering effects where the distance between light sources and objects is significant [S1].
+
+## Background
+The World Volume concept is documented in the Blender Manual [S1]. It is part of the volume shader system, which allows materials to occupy space and interact with light through scattering, absorption, and emission [S1]. The specific pitfall regarding the infinite background assumption highlights the distinction between global volumes and bounded volume objects [S1].
+
+## Sources
+[S1] Volumes — Blender Manual, https://www.blender.org/manual/nb/3.6/render/materials/components/volume.html, fetched 2026-10-26
+[S2] Pointifix/Vis2_Schott2010, https://github.com/Pointifix/Vis2_Schott2010, fetched 2026-10-26 (unofficial)

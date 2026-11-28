@@ -1,0 +1,152 @@
+# Ray Grouping
+
+Also called: Ray grouping approach for Visualization of Medical Data
+
+## Overview
+Ray grouping is an optimization technique for distance-field ray marching that reduces computational complexity by grouping rays originating from similar successive voxels into a single representative ray [S1]. It solves the problem of excessive interpolation and ray casting costs in high-resolution volume rendering by lowering the total number of initial rays [S2, unofficial]. Unlike [Beam Optimization](932-beam-optimization.md), which optimizes the traversal path, or [Block Culling](5431-block-culling.md), which discards empty space, ray grouping merges active rays based on local variance [S1]. It is distinct from [Bounding Shape Optimization](7750-bounding-shape-optimization.md) as it operates on the ray origin distribution rather than scene geometry bounds [S2, unofficial].
+
+## How it works
+**Inputs:** A 2D input slice (image plane) of resolution $W \times H$, a user-defined variance threshold $T$, and a maximum group size $G_{max}$ [S1][S2, unofficial].
+**Outputs:** A rendered image where rays are cast from grouped or individual voxels based on variance [S1].
+
+**Data Structures:**
+The input slice is conceptually divided into non-overlapping blocks of size $B \times B$. For each block, the algorithm computes the intra-block variance of the ray origins or associated scalar field values [S1].
+
+**Parameters:**
+- $T$: User-defined threshold for variance [S1].
+- $G_{max}$: Maximum group size. In practice, implementations tested group sizes of 2, 4, and 8 [S2, unofficial]. A group size of 1 implies no grouping [S2, unofficial].
+
+**Steps:**
+1. **Block Division:** Divide the input slice into smaller blocks of the same size [S1].
+2. **Variance Measurement:** Measure the intra-block variance for each block [S1]. Let $V_b$ be the variance of block $b$.
+3. **Threshold Comparison:** Compare $V_b$ to the threshold $T$ [S1].
+4. **Grouping Decision:**
+   - If $V_b \le T$ (variance lies within the threshold range), group every voxel in the block into a single unit [S1]. Cast only one representative ray for the group [S1].
+   - If $V_b > T$ (deviation found), ungroup the voxels. Cast rays from individual voxels in the block [S1].
+5. **Rendering:** During rendering, consider information from both grouped and non-grouped voxels to ensure no information is lost [S1]. For grouped rays, the representative ray's result is applied to the group members [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def ray_grouping_render(input_slice, threshold, group_size):
+    """
+    Renders a volume slice using ray grouping optimization.
+    
+    Args:
+        input_slice: 2D array of ray origins or scalar values.
+        threshold: Variance threshold T.
+        group_size: Block dimension B x B.
+        
+    Returns:
+        rendered_image: 2D array of final colors.
+    """
+    height, width = input_slice.shape
+    rendered_image = zeros_like(input_slice)
+    
+    # Iterate over blocks
+    for y in range(0, height, group_size):
+        for x in range(0, width, group_size):
+            # Extract block
+            y_end = min(y + group_size, height)
+            x_end = min(x + group_size, width)
+            block = input_slice[y:y_end, x:x_end]
+            
+            # Calculate intra-block variance
+            # Note: Variance calculation details (mean subtraction, squaring) are standard
+            # but not explicitly defined in sources beyond "intra-block variance mechanism" [S1]
+            variance = calculate_variance(block)
+            
+            if variance <= threshold:
+                # Grouped: Cast one representative ray
+                # The representative is typically the center or first voxel of the block [S1]
+                rep_x, rep_y = x + group_size // 2, y + group_size // 2
+                # Handle edge cases for block center if group_size is even
+                if group_size % 2 == 0:
+                    rep_x = x + group_size // 2 - 1
+                    rep_y = y + group_size // 2 - 1
+                
+                # Get ray from representative voxel
+                ray = get_ray(input_slice, rep_y, rep_x)
+                color = cast_ray(ray)
+                
+                # Apply color to all voxels in the block
+                for by in range(y, y_end):
+                    for bx in range(x, x_end):
+                        rendered_image[by, bx] = color
+            else:
+                # Ungrouped: Cast individual rays
+                for by in range(y, y_end):
+                    for bx in range(x, x_end):
+                        ray = get_ray(input_slice, by, bx)
+                        rendered_image[by, bx] = cast_ray(ray)
+                        
+    return rendered_image
+
+def calculate_variance(block):
+    """Calculates the variance of the values in the block."""
+    mean = sum(block.flatten()) / len(block.flatten())
+    variance = sum((x - mean) ** 2 for x in block.flatten()) / len(block.flatten())
+    return variance
+
+def get_ray(slice_data, y, x):
+    """Retrieves the ray origin/direction for a specific voxel."""
+    # Implementation depends on the specific ray casting setup (e.g., perspective projection)
+    # This is a placeholder for the standard ray generation logic [G]
+    return Ray(origin=slice_data[y, x], direction=...)
+
+def cast_ray(ray):
+    """Performs the actual ray marching and compositing."""
+    # Standard distance-field ray marching loop [G]
+    # Uses the formula: C ≈ Σ (Π (1 - α_j)) α_i c_i [S1]
+    color = 0.0
+    alpha_accum = 1.0
+    # Marching steps...
+    return color
+```
+
+**Edge Cases and Pitfalls:**
+- **Precision:** The variance calculation must be robust to floating-point errors, especially for uniform regions [S1].
+- **Boundary Conditions:** Blocks at the image edges may be smaller than $B \times B$. The variance calculation must handle these partial blocks correctly [S1].
+- **Over-splitting:** Implementations may be "slightly too eager to split groups," leading to suboptimal performance [S2, unofficial]. This suggests the threshold $T$ or variance metric may need tuning to avoid unnecessary ungrouping [S2, unofficial].
+- **Information Loss:** While grouping reduces rays, care must be taken to ensure that grouping does not obscure fine details. The sources state that information from grouped and non-grouped voxels is considered to prevent loss [S1].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+The method reduces computational complexity by minimizing the number of interpolations and ray casts [S1]. The absolute number of interpolations would otherwise be $m \times n \times s$ (where $m, n$ are dimensions and $s$ is steps), but grouping reduces the number of initial rays [S1]. The exact formula for the reduced complexity is not provided [S1]. The cost at each step for a given group is not dependent on the number of rays in the group, making it efficient for high resolutions [S2, unofficial].
+
+**Measured Performance:**
+Tests were conducted on 64x64 and 128x128 pixel displays with a scene containing 3 spheres at varying distances [S2, unofficial].
+- **Group Size 2:** Lowered execution time significantly.
+- **Group Size 4 and 8:** Did not decrease execution time significantly further compared to size 2 [S2, unofficial].
+- **Resolution Scaling:** Improvements were more significant for higher resolutions (128x128) [S2, unofficial].
+
+| Group Size | 64x64 Display (Clock Cycles) | 128x128 Display (Clock Cycles) |
+| :--- | :--- | :--- |
+| 1 (No Grouping) | 128k | 512k |
+| 2 | 84k | 328k |
+| 4 | 80k | 312k |
+| 8 | 82k | 313k |
+
+*Table 5.2 from [S2, unofficial]*
+
+**Strengths and Limitations:**
+- **Strengths:** Reduces total number of marching steps; effective on high-resolution displays; works well on GPUs with dynamic thread creation [S2, unofficial].
+- **Limitations:** Significant overhead from splitting groups; diminishing returns for large group sizes; less effective on traditional lockstepped GPU architectures compared to custom GPUs [S2, unofficial]. The implementation's eagerness to split groups can reduce potential gains [S2, unofficial].
+
+**When to Use:**
+Use when rendering high-resolution volumes where ray casting is the bottleneck and the scene has regions of low variance (smooth or uniform areas). Avoid on hardware with strict lockstep execution if the variance metric causes frequent group splitting [S2, unofficial].
+
+## Background
+**Origin:**
+The technique was introduced in the context of medical data visualization [S1]. It is described as a method to reduce computational complexity in ray casting by grouping rays based on intra-block variance [S1].
+
+**History and Development:**
+The method was implemented and evaluated in a study on sphere tracing on a custom GPU [S2, unofficial]. The implementation was done in GLSL shaders [S2, unofficial]. The authors noted that while the optimization improved performance, the gains were less than expected due to overhead and implementation specifics [S2, unofficial].
+
+**Usage:**
+Used in volume rendering of medical data and 3D geospatial information [S1][S2, unofficial]. It is particularly relevant for distance-field ray marching where many rays traverse similar paths [S1].
+
+## Sources
+[S1] Different Ray-Casting Algorithm Implementations for Volume Rendering, https://doi.org/10.35940/ijitee.g1011.0597s20, fetched 2026-10-24
+[S2] Sphere Tracing GPU An evaluation of the Sphere Tracing algorithm and a GPU designed to run it, https://odr.chalmers.se/items/37b0e53f-fc76-4b0e-96d8-8e864573ada9/full, fetched 2026-10-29 (unofficial)

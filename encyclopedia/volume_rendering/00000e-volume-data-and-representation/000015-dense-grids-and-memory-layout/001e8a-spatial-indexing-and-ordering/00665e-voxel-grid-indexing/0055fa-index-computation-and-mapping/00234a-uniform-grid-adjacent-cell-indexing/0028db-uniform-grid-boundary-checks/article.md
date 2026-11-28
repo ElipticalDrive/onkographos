@@ -1,0 +1,200 @@
+# Uniform Grid Boundary Checks
+
+Also called: UniformGrid Face and Cell Boundary Checks, isCellInGrid, isCellOnBorder, isFaceInGrid
+
+## Overview
+Uniform Grid Boundary Checks determine whether a specified face or cell coordinate lies within the valid bounds of a uniform voxel grid or resides on its boundary [S1, unofficial]. This method prevents invalid memory access during spatial indexing by validating coordinates before they are used to compute linear indices or fetch data [G]. It is distinct from [Uniform Grid Adjacent Cell Indexing](2992-uniform-grid-adjacent-cell-indexing.md), which computes neighbor indices and returns a sentinel value (`kBadIndex`) for out-of-bounds neighbors, whereas boundary checks explicitly validate the input coordinate itself [G].
+
+## How it works
+The method operates on a uniform grid defined by a half-size parameter $m_{halfSize}$ [S1, unofficial]. The grid spans the range $[-m_{halfSize}, m_{halfSize})$ for cells and $[-m_{halfSize}, m_{halfSize}]$ for faces, depending on the specific topology [S1, unofficial].
+
+### Inputs and Outputs
+*   **Inputs**:
+    *   `cellPos`: A 3D integer vector $(x, y, z)$ representing the cell index [S1, unofficial].
+    *   `facePos`: A 3D integer vector $(x, y, z)$ representing the face index [S1, unofficial].
+    *   `faceType`: An integer (0, 1, or 2) indicating the normal axis of the face (0=X, 1=Y, 2=Z) [S1, unofficial].
+    *   `m_halfSize`: The half-dimension of the grid [S1, unofficial].
+*   **Outputs**:
+    *   Boolean flags: `isCellInGrid`, `isCellOnBorder`, `isFaceInGrid`, `isFaceOnBorder` [S1, unofficial].
+
+### Data Structures
+The grid is assumed to be stored in a contiguous memory layout [G]. The coordinate system is centered at the origin, with indices ranging from $-m_{halfSize}$ to $m_{halfSize}-1$ for cells [S1, unofficial].
+
+### Steps and Formulas
+
+#### 1. Cell Boundary Checks
+These checks determine if a cell index is valid or on the boundary [S1, unofficial].
+
+**`isCellInGrid(cellPos, m_halfSize)`**
+Returns `true` if the cell is strictly inside the grid bounds [S1, unofficial].
+$$
+\text{if } (cellPos.x < -m_{halfSize}) \lor (cellPos.y < -m_{halfSize}) \lor (cellPos.z < -m_{halfSize}) \text{ return false}
+$$
+$$
+\text{if } (cellPos.x \ge m_{halfSize}) \lor (cellPos.y \ge m_{halfSize}) \lor (cellPos.z \ge m_{halfSize}) \text{ return false}
+$$
+$$
+\text{return true}
+$$
+
+**`isCellOnBorder(cellPos, m_halfSize)`**
+Returns `true` if the cell is on the outer boundary of the grid [S1, unofficial].
+$$
+\text{if } (cellPos.x == -m_{halfSize}) \lor (cellPos.y == -m_{halfSize}) \lor (cellPos.z == -m_{halfSize}) \text{ return true}
+$$
+$$
+\text{if } (cellPos.x == m_{halfSize} - 1) \lor (cellPos.y == m_{halfSize} - 1) \lor (cellPos.z == m_{halfSize} - 1) \text{ return true}
+$$
+$$
+\text{return false}
+$$
+
+#### 2. Face Boundary Checks
+These checks determine if a face index is valid or on the boundary [S1, unofficial]. Face indices are associated with the interfaces between cells [G].
+
+**`isFaceInGrid(facePos, faceType, m_halfSize)`**
+Returns `true` if the face is inside the grid [S1, unofficial]. The condition for the axis corresponding to `faceType` is inclusive of the boundary, while the other two axes are exclusive [S1, unofficial].
+*   If `faceType == 0` (Normal X):
+    $$
+    |facePos.x| \le m_{halfSize} \land -m_{halfSize} \le facePos.y < m_{halfSize} \land -m_{halfSize} \le facePos.z < m_{halfSize}
+    $$
+*   If `faceType == 1` (Normal Y):
+    $$
+    -m_{halfSize} \le facePos.x < m_{halfSize} \land |facePos.y| \le m_{halfSize} \land -m_{halfSize} \le facePos.z < m_{halfSize}
+    $$
+*   If `faceType == 2` (Normal Z):
+    $$
+    -m_{halfSize} \le facePos.x < m_{halfSize} \land -m_{halfSize} \le facePos.y < m_{halfSize} \land |facePos.z| \le m_{halfSize}
+    $$
+
+**`isFaceOnBorder(facePos, faceType, m_halfSize)`**
+Returns `true` if the face is on the grid boundary [S1, unofficial]. This is true if the coordinate along the face's normal axis is exactly at the limit [S1, unofficial].
+*   If `faceType == 0`:
+    $$
+    |facePos.x| == m_{halfSize}
+    $$
+*   If `faceType == 1`:
+    $$
+    |facePos.y| == m_{halfSize}
+    $$
+*   If `faceType == 2`:
+    $$
+    |facePos.z| == m_{halfSize}
+    $$
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def is_cell_in_grid(cell_pos, m_half_size):
+    """
+    Returns True if cell_pos is strictly inside the grid bounds.
+    """
+    if cell_pos.x < -m_half_size:
+        return False
+    if cell_pos.y < -m_half_size:
+        return False
+    if cell_pos.z < -m_half_size:
+        return False
+    if cell_pos.x >= m_half_size:
+        return False
+    if cell_pos.y >= m_half_size:
+        return False
+    if cell_pos.z >= m_half_size:
+        return False
+    return True
+
+def is_cell_on_border(cell_pos, m_half_size):
+    """
+    Returns True if cell_pos is on the outer boundary of the grid.
+    """
+    if cell_pos.x == -m_half_size:
+        return True
+    if cell_pos.y == -m_half_size:
+        return True
+    if cell_pos.z == -m_half_size:
+        return True
+    if cell_pos.x == m_half_size - 1:
+        return True
+    if cell_pos.y == m_half_size - 1:
+        return True
+    if cell_pos.z == m_half_size - 1:
+        return True
+    return False
+
+def is_face_in_grid(face_pos, face_type, m_half_size):
+    """
+    Returns True if face_pos is inside the grid for the given face_type.
+    face_type: 0=X, 1=Y, 2=Z
+    """
+    if face_type == 0:
+        if abs(face_pos.x) > m_half_size:
+            return False
+        if face_pos.y < -m_half_size or face_pos.y >= m_half_size:
+            return False
+        if face_pos.z < -m_half_size or face_pos.z >= m_half_size:
+            return False
+        return True
+    elif face_type == 1:
+        if face_pos.x < -m_half_size or face_pos.x >= m_half_size:
+            return False
+        if abs(face_pos.y) > m_half_size:
+            return False
+        if face_pos.z < -m_half_size or face_pos.z >= m_half_size:
+            return False
+        return True
+    elif face_type == 2:
+        if face_pos.x < -m_half_size or face_pos.x >= m_half_size:
+            return False
+        if face_pos.y < -m_half_size or face_pos.y >= m_half_size:
+            return False
+        if abs(face_pos.z) > m_half_size:
+            return False
+        return True
+    return False
+
+def is_face_on_border(face_pos, face_type, m_half_size):
+    """
+    Returns True if face_pos is on the boundary of the grid.
+    """
+    if face_type == 0:
+        return abs(face_pos.x) == m_half_size
+    elif face_type == 1:
+        return abs(face_pos.y) == m_half_size
+    elif face_type == 2:
+        return abs(face_pos.z) == m_half_size
+    return False
+```
+
+### Edge Cases and Pitfalls
+*   **Precision**: The checks rely on integer arithmetic; floating-point coordinates must be converted to integer indices before calling these functions [G].
+*   **Boundary Definition**: The cell grid is half-open $[-m_{halfSize}, m_{halfSize})$, while the face grid is closed $[-m_{halfSize}, m_{halfSize}]$ along the normal axis [S1, unofficial]. Mixing these up leads to off-by-one errors [G].
+*   **Rect-Grid Validation**: If the underlying grid is a rectilinear grid, the bounds must be monotonically increasing and sized `dims + 1` [S2, unofficial]. This must be validated in preflight and documented as an error [S2, unofficial].
+
+## Subtopics
+
+### Rect-Grid Bounds Validation
+Validates that the bounds array of a rectilinear grid is monotonically increasing and has a size of `dims + 1` [S2, unofficial]. This is a prerequisite for using uniform grid boundary checks on non-uniform grids, ensuring that index mapping remains valid [S2, unofficial]. It must be checked during preflight and treated as an error if violated [S2, unofficial].
+
+### Probe Grid Boundary Check
+Checks if a given point $P$ lies within the bounds of the probe grid box [S3, unofficial]. It converts the point to probe space via $SamplePoint = (P - u\_ProbeBoxOrigin) / u\_ProbeBoxSize$, then $SamplePoint = SamplePoint \times 0.5 + 0.5$ [S3, unofficial]. It returns true if $SamplePoint$ equals its clamped value to $[0.0f, 1.0f]$, and false otherwise [S3, unofficial].
+
+### Boundary Handling
+Uses open boundaries for both density and velocity, meaning velocities at the boundaries are not constrained [S4]. In advection, look-ups falling outside the volume are clamped to the boundary values, and gradients are accumulated at the boundaries accordingly [S4].
+
+## Operating characteristics
+*   **Time Complexity**: $O(1)$ for all checks, consisting of a fixed number of comparisons [G].
+*   **Memory Complexity**: $O(1)$, no additional memory allocated [G].
+*   **Strengths**: Extremely fast, branch-predictable if bounds are consistent, and essential for preventing segmentation faults in volume rendering pipelines [G].
+*   **Limitations**: Does not handle non-uniform grids directly without prior validation [S2, unofficial].
+*   **When to use**: Always before accessing voxel data or computing adjacent cell indices [G].
+
+## Background
+The specific implementation logic is documented in [S1, unofficial] and [S2, unofficial]. Not given in the sources.
+
+## Sources
+[S1] Svenny/isomesh, https://github.com/Svenny/isomesh, fetched 2026-10-27 (unofficial)
+[S2] FILT: Voxelize Point Cloud, https://github.com/BlueQuartzSoftware/simplnx/pull/1724, fetched 2026-10-27 (unofficial)
+[S3] swr06/VolumetricDisplay, https://github.com/swr06/VolumetricDisplay, fetched 2026-10-26 (unofficial)
+[S4] Global Transport for Fluid Reconstruction with Learned Self-Supervision, https://doi.org/10.1109/cvpr46437.2021.00168, fetched 2026-10-30

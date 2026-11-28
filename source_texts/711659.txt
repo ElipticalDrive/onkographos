@@ -1,0 +1,541 @@
+Foveated Path Tracing with Configurable Sampling and
+Block-Based Rendering
+arXiv:2406.07981v3 [cs.GR] 28 Aug 2025
+Bipul Mohanto
+1 , Sven Kluge
+1 , Martin Weier
+2 , and Oliver Staadt
+1
+Abstract: Path tracing offers high-fidelity rendering but remains impractical for real-time applications
+due to slow convergence and noise. We present a dynamic foveated path tracing technique that
+leverages visual perception by reducing sampling towards peripheral regions. Our system achieves up
+to 25-fold performance gains on complex scenes at 4𝐾 resolution with minimal perceptual degradation.
+We validate its effectiveness using structured error maps across varying sampling rates and foveated
+region sizes, establishing a foundation for future research in perceptual photorealistic rendering.
+Keywords: Foveated rendering, Foveated path tracing, Foveated photorealistic rendering, Foveated
+global illumination
+1
+Introduction
+Path tracing is a Monte Carlo-based rendering algorithm that accurately simulates global
+illumination by tracing the light paths as they interact with surfaces in a virtual scene.
+It enables photorealistic effects, such as soft shadows, caustics, diffuse interreflections,
+reflections, and refractions [Ka86], which are challenging with traditional rasterization.
+Consequently, path tracing has become the de facto standard in offline rendering for visual
+effects, architectural visualization, and product design. However, path tracing suffers from
+slow convergence [Ro15]. Halving the noise requires quadrupling the sample count [Ko18],
+making the method impractical for real-time applications on consumer-grade hardware.
+While recent advances in GPU technology have opened the door to real-time path tracing
+research, most optimizations are tightly coupled to hardware architecture specifications. In
+contrast, foveated rendering offers a hardware-agnostic solution that exploits the non-uniform
+sensitivity of human vision to reduce rendering load without compromising perceived visual
+quality. It has traditionally utilized rasterization technology, which has been the predominant
+approach in real-time computer graphics. Nonetheless, there has been a gradual transition
+towards a physically accurate path tracer. Unlike rasterization, path tracing offers better
+flexibility for per-pixel manipulation in foveated rendering [Ko18]. Furthermore, Koskela
+et al. [Ko16] demonstrated that approximately 94% of rays may be omitted in foveated
+rendering, offering substantial potential for accelerating path tracing.
+1
+2
+University of Rostock, Institute for Visual and Analytic Computing, Albert-Einstein-Str. 22, 18059 Rostock,
+Germany, bipul.mohanto@uni-rostock.de, https://orcid.org/0000-0001-9913-0013;
+sven.kluge@uni-rostock.de, https://orcid.org/0009-0008-3670-7098;
+oliver.staadt@uni-rostock.de, https://orcid.org/0000-0002-3074-943X
+RheinMain University of Applied Sciences, Applied Computer Science and Visual Computing, 65195
+Wiesbaden, Germany, martin.weier@hs-rm.de, https://orcid.org/0000-0001-9685-5238
+Fig. 1: Foveated path tracing on the Rungholt scene (6.7M triangles, 4K). Left: Uniform 32 spp
+yields 0.37 fps. Middle/Right: Foveated sampling (32/16/8 spp) achieves 8.52 fps with more than 22×
+speed-up. Fixations (red) are center and top-left.
+1
+Although foveated rendering is particularly effective in single-view displays with a wide
+field of view (FoV), it is also applicable to display walls, single desktops, or even smartphones [KS21]. For instance, at a 60 cm viewing distance, the human fovea subtends only
+1.5◦ − 2◦ , covering roughly 3% of a 21-inch display [DD17]. The slow convergence of
+real-time further worsens with the increasing demand for higher pixel density, refresh rate,
+and FoV, especially in the immersive head-mounted displays (HMDs). Contemporary virtual
+reality (VR) headsets achieve angular resolutions around 35 cycles/degree and refresh rates
+near 90 Hz [Ta18], whereas the human fovea can resolve up to 60 cycles/degree [Si19].
+Achieving perceptual parity would require 6˘10× more pixels and 10˘20× faster refresh
+rates [CCK18], posing significant challenges for real-time path tracing.
+In this study, we make the following contributions. We introduce a block-based foveated
+path tracing method that partitions the image into three perceptual regions: a high-fidelity
+foveal zone rendered per-pixel, and intermediate and peripheral zones rendered using
+configurable (𝑛 × 𝑛) and (𝑚 × 𝑚) pixel blocks, respectively. The sampling rates and block
+sizes are user-adjustable, enabling flexible control over the quality–performance trade-off. To
+address undersampling artifacts, missing pixels are reconstructed using linear interpolation.
+Compared to uniform sampling, our method achieves over 25× performance improvement
+with minimal perceptual loss.
+2
+Related Work
+Foveated rendering has historically relied on the raster-based pipeline, which dominated the
+field for over three decades [Mo22]. However, recent advances in hardware-accelerated ray
+tracing have sparked a shift towards ray-based approaches. Fujita and Harada [FH14] were
+among the first to propose foveated sampling in ray tracing using a K-nearest neighbor filter.
+Nonetheless, the proposed method did not follow the accurate human contrast sensitivity
+function. Weier et al. [We16] introduced a temporal foveated ray tracing method, while
+Siekawa et al. [Si19] implemented sparse sampling masks to reduce the number of primary
+rays based on gaze. Viitanen et al. [Vi18] and Peuhkurinen and Mikkonen [PM21] explored
+sampling in log-polar space to reduce ray counts further. Yang et al. [YLC20] proposed
+variable-rate sampling, and Kim et al. [KKI21] introduced adaptive supersampling guided
+by perceptual importance. Dahlin and Sundstedt [DS21] demonstrated a hybrid approach
+combining variable-rate shading with inline ray tracing, enabling perceptually plausible
+reflections at a fraction of the native resolution.
+Foveated path tracing, a more recent and less explored extension of ray tracing, remains
+a challenging area of research. Koskela et al. [Ko18; Ko19] made notable advances by
+introducing foveated path tracing for HMDs. Their contributions include the first real-time
+foveated path tracing preview system [Ko18] and a log-polar ray mapping scheme for efficient
+sampling [Ko19]. Lotvonen et al. [LKJ20] extended this work by applying machine learning
+techniques for foveated denoising. Kim and Sung [KS21] developed a lightweight foveated
+path tracing pipeline designed specifically for mobile VR platforms. Polychronakis et
+al. [PKM21] studied eccentricity-based sampling thresholds where foveated path tracing has
+been employed on the G-buffer. Compared to their study, which used post-process emulation,
+our method operates directly in the path tracing pipeline and supports real-time sampling.
+Similarly, Calla et al. [Ro23] proposed a peripheral sample reducing technique. While
+their approach focused solely on shading reduction using per-pixel sampling, our technique
+jointly reduces both shading load and rendering resolution. This work is an expansion of
+the poster abstract presented at STAG 2023 [MKS23], incorporating improved environment
+lighting that elevates perceptual quality without incurring additional computational expense.
+3
+Human Eye and Vision
+Human vision is arguably the most complex of all biological senses that begins with the
+eye and ends at the visual cortex. The pupil allows light from the environment to enter
+the eye, which is then focused by the cornea and lens to the retina [GC21]. The retina is
+packed with photoreceptors like rods and cones. However, the non-uniform distribution
+does not allow humans to retain the identical level of perception throughout the entire FoV.
+Among the approximate 6 million cones, most of them are densely packed in the central
+foveal region, about 5.2◦ from the visual axis [GC21]. Due to these dense cone cells, foveal
+vision is fine-grained with the highest visual acuity. Through the parafovea (5.2◦ − 9◦ ) and
+perifovea (9◦ −17◦ ), cone density decreases rapidly, and rod density increases greatly [An02].
+Although there are around 20 times more rods than the cones, the maximum density is close
+to 20◦ from the visual axis [Os35]. Due to their luminance sensitivity, peripheral rods make
+the foveated rendering flicker-prone [Kw19].
+Area of
+Interest (a)
+Visual Acuity Fall-Off Model (b)
+Scene Data
+Ray Generation
+Pixel Fill Size
+Bounds
+Rays
+Bound Check (c)
+Path Tracing
+Pixel Filling (d)
+Post-Processing
+For Each Ray
+Fig. 2: Overview of the proposed foveated path tracing pipeline. (a) The fixation defines the area of
+interest; (b) a visual acuity fall-off model determines sample distribution; (c) a bound check filters
+rays outside foveated regions; (d) missing pixels are reconstructed with pixel filling, followed by
+post-processing and final image display.
+4
+Methodology
+We present a desktop-based foveated path tracing technique to enhance rendering performance for complex scenes. The proposed foveated pipeline (Figure 2) offers flexible control
+over performance and quality.
+4.1
+Region Partitioning and Eccentricity Mapping
+At runtime, the image plane is partitioned into three regions: fovea, intermediate, and
+peripheral, centered around the gaze position (Figure 2. a). This multi-region structure strikes
+a balance between perceptual plausibility and computational cost, as finer subdivisions, while
+perceptually accurate [GP98], introduce additional overhead [PKM21]. The eccentricity
+angle 𝑒 (in degrees) is converted to a screen-space radius 𝑟 (in pixels) using a geometric
+mapping adapted from [Ma97]:
+𝑟=
+2𝑑 𝑒 · 𝑅 · 𝑡𝑎𝑛(𝑒/2)
+,
+𝑆
+(1)
+Here, 𝑑 𝑒 is the viewing distance, 𝑆 is the physical display size, and 𝑅 is the resolution, all
+measured along the same axis. We employed a 4𝐾 monitor of size (70.848 × 39.852) 𝑐𝑚 2
+placed at a standard 60 𝑐𝑚 viewing distance.
+4.2
+Sample Distribution Model
+Sample allocation across regions follows a piecewise linear fall-off inspired by prior
+work [Gu12], chosen for its implementation simplicity and tunable behavior. Due to the
+slow convergence, the large sample size is one of the main constraints of real-time path
+tracing. Conversely, the visual quality is highly sample-dependent. In previous studies,
+Weier et al., [We16] quoted that more than 16 samples could be appropriate for real-time ray
+tracing. Likewise, Fujita and Harada [FH14] suggested 32 samples to avoid distracting visual
+artifacts. Therefore, we adopt a baseline of 32 spp in the foveal region, with progressively
+fewer samples in the outer zones:
+𝜏 /𝑝𝑥,
+𝑖𝑓, 𝑒 ≤ 𝑒𝑓,
+
+
+ 1
+
+𝑒𝑙𝑠𝑒 𝑖 𝑓 , 𝑒 𝑓 < 𝑒 ≤ 𝑒 𝑖 ,
+𝑓 (𝑒) = 𝜏2 /(𝑛 × 𝑛) 𝑝𝑥,
+
+
+𝜏
+/(𝑚
+×
+𝑚)
+𝑝𝑥,
+𝑜𝑡ℎ𝑒𝑟𝑤𝑖𝑠𝑒.
+ 3
+(3a)
+(3b)
+(3c)
+Here, 𝜏1 = 32, 𝜏2 = 16, 𝜏3 = 8 denote the sampling rates applied to foveal, intermediate,
+and peripheral regions, respectively. 𝑒 𝑓 is the foveated (5.2◦ [Gu12; Pa16]) and 𝑒 𝑖 is the
+intermediate (17◦ [Ro17]) visual angle. Pixel blocks of size 𝑛 = 2 and 𝑚 = 4 are used for
+downsampling in intermediate and peripheral zones, respectively. This configuration can be
+adjusted to explore quality and performance trade-offs. The three regions are seamlessly
+blended within a single render pass (Figure 2. b).
+4.3
+Bound Check and Reconstruction
+Before ray generation, each screen-space pixel undergoes a binary region classification
+(Figure 2. c). Rays falling outside their designated region are discarded early. The remaining
+rays proceed through the full path tracing pipeline. Since fewer rays are cast than pixels
+in block-sampled regions, missing values are reconstructed via linear interpolation within
+each pixel block (Figure 2. d).
+Kajiya-style path tracing [Ka86] is the backbone of our foveated path tracing. Additionally,
+we employed Disney Bidirectional Reflectance Distribution Function (BRDF) [BS12],
+multiple importance sampling [Ve98], and environmental light sampling. We limited the
+recursion depth to three bounces to avoid further computation load; however, we maintain
+full global illumination by supporting indirect bounces, albeit limited to three. Besides, we
+applied subpixel jitter, heuristic exposure compensation, and Reinhard tone mapping [Sa12]
+as post-processing for a mellow output. Our implementation supports temporal accumulation.
+Nevertheless, there is little scope for temporal accumulation in real-time applications, e.g.,
+VR rendering with frequent eye movements. Therefore, we presented the scenes (Figure 1, 3)
+in this study without temporal accumulation.
+Software and Apparatus
+The implementation is based on the OptiX 7.5 Graphics API with CUDA 12.1. The rendering
+computations were performed on an Intel Core i9-12900KS CPU and 128 GB of DDR5
+system memory, NVidia GeForce RTX 3090 GPU featuring 24 GB of VRAM, and Studio
+Fig. 3: Visual comparison of uniform (top) and foveated (bottom) path tracing. The uniform mode
+uses 32 spp/pixel, while the foveated mode applies 32 spp/pixel in the fovea, 16 spp/(2 × 2) pixel block
+in the intermediate, and 8 spp/(4 × 4) pixel block in the periphery. Fixation points are marked in red.
+Scenes: San Miguel (left), Crytek Sponza (center), and Lost Empire (right).
+Driver 536.99. For visual inspection and evaluation, we employed a Dell G3223Q 32-inch
+4K UHD display, offering a pixel density of 54 pixels/cm and a nominal field of view of
+approximately (175 × 175) ◦ .
+5
+Results and Discussion
+We evaluated our dynamic foveated path tracing framework on three geometry-intensive
+scenes: Crytek Sponza, Lost Empire, and San Miguel (Figure 3). Although our system
+currently lacks a physical eye tracker, we emulate gaze behavior using predefined pseudofixations. Table 1 summarizes the triangle count, average frame rates (fps), and speed-up
+achieved with uniform and foveated sampling configurations, measured on the hardware
+setup described above. The rendering time comparisons are further visualized in Figure 4.
+Scene
+Triangles
+average fps (uniform)
+average fps (foveated)
+Speed-up (×)
+Lost Empire
+Crytek Sponza
+San Miguel
+224,998
+262,267
+9,980,699
+0.42
+0.24
+0.23
+10.20
+7.48
+5.71
+23.29
+30.17
+23.83
+Tab. 1: Average rendering performance across three scenes. Columns report triangle counts, frame
+rates under uniform (32 spp) and foveated sampling (32/16/8), and overall speed-up.
+Without foveation, the scenes achieve average frame rates below 0.5 fps, leads to noninteractive frame rates at 4𝐾 resolution. Our foveated approach yields substantial improvements: over 10 fps for Lost Empire, 7.5 fps for Crytek Sponza, and 5.7 fps for San Miguel,
+corresponding to an average speed-up of more than 25×. As shown in Figure 4, rendering
+time scales proportionally with scene complexity, but is consistently reduced under foveated
+sampling.
+Rendering Time (ms) Comparison
+6000
+Sponza32
+Sponza32,16,8
+Lost32
+Lost32,16,8
+San32
+San32,16,8
+5000
+Rendering Time (ms)
+4000
+3000
+2000
+1000
+0
+0
+20
+40
+60
+80
+100
+120
+140
+160
+180
+200
+Frame Number
+Fig. 4: Rendering time for each scene, Crytek Sponza (Sponza), Lost Empire (Lost), and San Miguel
+(San). Solid lines denote uniform sampling (32 spp); dashed lines indicate foveated sampling (32/16/8).
+Visual outputs are illustrated in Figure 3. As expected, due to lower sample counts, the
+foveated results exhibit increased noise in the peripheral regions. However, the resulting
+artifacts are largely imperceptible during fixation.
+5.1
+Effect of Sampling Strategy
+To further investigate the trade-off between sample count and performance, we evaluated
+multiple sampling configurations on the Crytek Sponza scene. As shown in Table 2, reducing
+sample counts in the intermediate and peripheral regions significantly improves frame rates.
+The most aggressive configuration (32/2/1 spp) achieves a 56× speed-up over uniform
+rendering, with frame rates exceeding 17 fps. While performance improves linearly with
+reduced sample counts, aggressive foveation leads to perceptual artifacts in the periphery.
+Therefore, an optimal configuration must consider the task, scene complexity, and perceptual
+thresholds.
+To assess visual degradation, we employed the FLIP metric [An20], which approximates
+perceptual differences between the rendered and reference image. Figure 6 presents FLIP
+Scene
+Crytek Sponza
+Different Sample Configurations
+Fovea Intermediate Periphery
+32
+–
+–
+32
+16
+8
+32
+8
+4
+32
+2
+1
+average fps
+0.30
+7.48
+10.90
+17.14
+Speed-up (×)
+–
+23.93
+35.33
+56.13
+Tab. 2: Rendering performance for Crytek Sponza under different sampling configurations in the
+intermediate and Periphery.
+error maps for various sampling strategies. FLIP values close to zero in foveal regions
+indicate perceptual fidelity, while increasing values in peripheral areas reflect controlled
+degradation under low-sample conditions.
+Sample Number vs. Rendering Time (ms) Comparison
+4500
+full32
+fov32,16,8
+fov32,8,4
+fov32,2,1
+4000
+3500
+Rendering Time (ms)
+3000
+2500
+2000
+1500
+1000
+500
+0
+0
+20
+40
+60
+80
+100
+120
+140
+160
+180
+200
+Frame Number
+Fig. 5: Rendering time for different sampling combinations on Crytek Sponza scene. The sampling
+combinations are in Table 2.
+5.2
+Limitations
+This study presents several avenues for future improvement. First, due to the absence of
+a physical eye tracker, we relied on pseudo-gaze input; however, the system is readily
+compatible with a desktop-based eye tracker. Second, under dynamic viewing conditions,
+linear interpolation may fail to fully reconstruct missing pixels. We plan to explore more
+(a)
+(b)
+(c)
+(d)
+(e)
+(f)
+(g)
+Fig. 6: FLIP perceptual error maps ((e)-(g)) for different sample combinations. Figure (a) is the
+reference, (b)-(d) are the sample combinations mentioned from Table 2. Black = no error; yellow =
+increased perceptual deviation.
+robust reconstruction techniques. Additionally, no denoising was applied in this workintegrating modern real-time denoisers is expected to further enhance perceptual quality.
+Building on these improvements, we aim to conduct a user study to determine perceptual
+thresholds for sampling versus visual fidelity.
+6
+Conclusion and Future Work
+In this work, we presented a dynamic foveated path tracing technique that combines
+perceptually guided sampling with block-based rendering to accelerate performance on
+pixel-intensive displays. By allocating samples based on visual eccentricity and employing
+configurable block sizes in non-foveal regions, our method achieves over 25× speed-up
+compared to uniform sampling at 4𝐾 resolution. These results demonstrate the effectiveness
+of foveated path tracing as a practical and scalable solution for real-time photorealistic
+rendering.
+While effective, the current implementation has limitations. Integration with a real-time
+eye tracker and denoiser is anticipated to further enhance graphics fidelity. The bound
+check discards rays outside circular regions post-generation, leading to inefficiencies due
+to GPU workload subdivision. Future work will focus on optimizing ray generation to
+avoid off-bound rays entirely. We also aim to extend the current piecewise linear acuity
+fall-off model by an alternative quadric fall-off to refine sample allocation. Based on these
+observations, future work will also include a user study to evaluate perceptual thresholds
+and guide adaptive sampling strategies for foveated path tracing.
+Acknowledgments
+The authors would like to thank the 3D scene creators, Frank Meinl (Crytek Sponza),
+Morgan McGuire (Lost Empire), Guillermo M. Leal Llaguno (San Miguel 2.0), Kescha
+(Rungholt), and Poly Heaven for generously providing their HDRI lighting assets.
+References
+[An02]
+Andersen, S. R.: The history of the Ophthalmological Society of Copenhagen
+1900–50. Acta Ophthalmologica Scandinavica 80/, pp. 6–17, 2002.
+[An20]
+Andersson, P.; Nilsson, J.; Akenine-Möller, T.; Oskarsson, M.; Åström, K.;
+Fairchild, M. D.: FLIP: A Difference Evaluator for Alternating Images. Proc.
+ACM Comput. Graph. Interact. Tech. 3/2, 2020, url: https://doi.org/10.1145/
+3406183.
+[BS12]
+Burley, B.; Studios, W. D. A.: Physically-based shading at disney. In: Acm
+Siggraph. Vol. 2012, vol. 2012, pp. 1–7, 2012.
+[CCK18]
+Cuervo, E.; Chintalapudi, K.; Kotaru, M.: Creating the Perfect Illusion: What
+Will It Take to Create Life-Like Virtual Reality Headsets? In: Proceedings of the
+19th International Workshop on Mobile Computing Systems & Applications.
+HotMobile ’18, Association for Computing Machinery, Tempe, Arizona, USA,
+pp. 7–12, 2018, isbn: 9781450356305, url: https://doi.org/10.1145/3177102.
+3177115.
+[DD17]
+Duchowski, A. T.; Duchowski, A. T.: Eye tracking methodology: Theory and
+practice. Springer, 2017.
+[DS21]
+Dahlin, A.; Sundstedt, V.: Improving Ray Tracing Performance with Variable
+Rate Shading. In (Xu, K.; Turner, M., eds.): Computer Graphics and Visual
+Computing (CGVC). The Eurographics Association, 2021, isbn: 978-3-03868158-8.
+[FH14]
+Fujita, M.; Harada, T.: Foveated real-time ray tracing for virtual reality headset.
+Light Transport Entertainment Research/, 2014.
+[GC21]
+Goldstein, E. B.; Cacciamani, L.: Sensation and perception. Cengage Learning,
+2021.
+[GP98]
+Geisler, W. S.; Perry, J. S.: A real-Time foveated multiresolution system for
+low-bandwidth video communication. In. Vol. 3299, Cited by: 334, pp. 294–
+305, 1998, url: https : / / www. scopus . com / inward / record . uri ? eid = 2 s2.0- 85026149763&doi=10.1117%2f12.320120&partnerID=40&md5=
+f709ec2b0c08b8310c566d2286550dcd.
+[Gu12]
+Guenter, B.; Finch, M.; Drucker, S.; Tan, D.; Snyder, J.: Foveated 3D Graphics.
+ACM Trans. Graph. 31/6, 2012, issn: 0730-0301, url: https://doi.org/10.1145/
+2366145.2366183.
+[Ka86]
+Kajiya, J. T.: The Rendering Equation. SIGGRAPH Comput. Graph. 20/4,
+pp. 143–150, 1986, issn: 0097-8930, url: https://doi.org/10.1145/15886.
+15902.
+[KKI21]
+Kim, Y.; Ko, Y.; Ihm, I.: Selective Foveated Ray Tracing for Head-Mounted
+Displays. In: 2021 IEEE International Symposium on Mixed and Augmented
+Reality (ISMAR). Pp. 413–421, 2021.
+[Ko16]
+Koskela, M.; Viitanen, T.; Jääskeläinen, P.; Takala, J.: Foveated Path Tracing. In
+(Bebis, G.; Boyle, R.; Parvin, B.; Koracin, D.; Porikli, F.; Skaff, S.; Entezari, A.;
+Min, J.; Iwai, D.; Sadagic, A.; Scheidegger, C.; Isenberg, T., eds.): Advances
+in Visual Computing. Springer International Publishing, Cham, pp. 723–732,
+2016, isbn: 978-3-319-50835-1.
+[Ko18]
+Koskela, M. K.; Immonen, K. V.; Viitanen, T. T.; Jääskeläinen, P. O.; Multanen, J. I.; Takala, J. H.: Instantaneous foveated preview for progressive Monte
+Carlo rendering. Computational Visual Media 4/3, pp. 267–276, 2018, url:
+https://www.sciopen.com/article/10.1007/s41095-018-0113-0.
+[Ko19]
+Koskela, M.; Lotvonen, A.; Mäkitalo, M.; Kivi, P.; Viitanen, T.; Jääskeläinen, P.:
+Foveated Real-Time Path Tracing in Visual-Polar Space. In (Boubekeur, T.;
+Sen, P., eds.): Eurographics Symposium on Rendering - DL-only and Industry
+Track. The Eurographics Association, 2019, isbn: 978-3-03868-095-6.
+[KS21]
+Kim, S. K.; Sung, M. K.: Efficient Path Tracer for the Presence of Mobile Virtual
+Reality. Hum.-Cent. Comput. Inf. Sci 11/, pp. 1–14, 2021.
+[Kw19]
+KwonOh-Seok; parkKeon-kuk; YoonJoseph; KimYoung-Bong: Fast Ray Reordering and Approximate Sibson Interpolation for Foveated Rendering on
+GPU. Journal of Korea Multimedia Society 22/2, pp. 311–321, 2019.
+[LKJ20]
+Lotvonen., A.; Koskela., M.; Jääskeläinen., P.: Machine Learning is the Solution
+Also for Foveated Path Tracing Reconstruction. In: Proceedings of the 15th
+International Joint Conference on Computer Vision, Imaging and Computer
+Graphics Theory and Applications (VISIGRAPP 2020) - GRAPP. INSTICC,
+SciTePress, pp. 361–367, 2020, isbn: 978-989-758-402-2.
+[Ma97]
+Matkovic, K.: Tone mapping techniques and color image difference in global
+illumination, PhD thesis, Matkovic, 1997.
+[MKS23] Mohanto, B.; Kluge, S.; Staadt, O.: A Foveated Framework to Accelerate
+Real-time Path Tracing. In (Banterle, F.; Caggianese, G.; Capece, N.; Erra, U.;
+Lupinetti, K.; Manfredi, G., eds.): Smart Tools and Applications in Graphics Eurographics Italian Chapter Conference. The Eurographics Association, 2023,
+isbn: 978-3-03868-235-6.
+[Mo22]
+Mohanto, B.; Islam, A. T.; Gobbetti, E.; Staadt, O.: An integrative view of
+foveated rendering. Computers & Graphics 102/, pp. 474–501, 2022, issn:
+0097-8493, url: https : / / www . sciencedirect . com / science / article / pii /
+S0097849321002211.
+[Os35]
+Osterberg, G. A.: Topography of the layer of rods and cones in the human retina.
+Acta ophthalmologica/, 1935.
+[Pa16]
+Patney, A.; Salvi, M.; Kim, J.; Kaplanyan, A.; Wyman, C.; Benty, N.; Luebke, D.;
+Lefohn, A.: Towards Foveated Rendering for Gaze-Tracked Virtual Reality.
+ACM Trans. Graph. 35/6, 2016, issn: 0730-0301, url: https://doi.org/10.1145/
+2980179.2980246.
+[PKM21] Polychronakis, A.; Koulieris, G. A.; Mania, K.: Emulating Foveated Path
+Tracing. In: Proceedings of the 14th ACM SIGGRAPH Conference on Motion,
+Interaction and Games. MIG ’21, Association for Computing Machinery, Virtual
+Event, Switzerland, 2021, isbn: 9781450391313, url: https://doi.org/10.1145/
+3487983.3488295.
+[PM21]
+Peuhkurinen., A.; Mikkonen., T.: Real-time Human Eye Resolution Ray Tracing
+in Mixed Reality. In: Proceedings of the 16th International Joint Conference on
+Computer Vision, Imaging and Computer Graphics Theory and Applications
+(VISIGRAPP 2021) - GRAPP. INSTICC, SciTePress, pp. 169–176, 2021, isbn:
+978-989-758-488-6.
+[Ro15]
+Roth, T.; Weier, M.; Maiero, J.; Hinkenjann, A.; Li, Y.: Guided High-Quality
+Rendering. In (Bebis, G.; Boyle, R.; Parvin, B.; Koracin, D.; Pavlidis, I.;
+Feris, R.; McGraw, T.; Elendt, M.; Kopper, R.; Ragan, E.; Ye, Z.; Weber, G.,
+eds.): Advances in Visual Computing. Springer International Publishing, Cham,
+pp. 115–125, 2015, isbn: 978-3-319-27863-6.
+[Ro17]
+Roth, T.; Weier, M.; Hinkenjann, A.; Li, Y.; Slusallek, P.: An analysis
+of eye-Tracking data in foveated ray tracing. In. Cited by: 12, pp. 69–73,
+2017, url: https : / / www. scopus . com / inward / record . uri ? eid = 2 - s2 . 0 85015997302&doi=10.1109%2fETVIS.2016.7851170&partnerID=40&
+md5=e74b98273c37d0a91f09634b3edf30e4.
+[Ro23]
+Romero Calla, L. A.; Mohanto, B.; Pajarola, R.; Staadt, O.: Multi-Display Ray
+Tracing Framework. In (Singh, G.; Chu, M. (, eds.): Eurographics 2023 - Posters.
+The Eurographics Association, 2023, isbn: 978-3-03868-211-0.
+[Sa12]
+Salih, Y.; bt. Md-Esa, W.; Malik, A. S.; Saad, N.: Tone mapping of HDR images:
+A review. In: 2012 4th International Conference on Intelligent and Advanced
+Systems (ICIAS2012). Vol. 1, pp. 368–373, 2012.
+[Si19]
+Siekawa, A.; Chwesiuk, M.; Mantiuk, R.; Piórkowski, R.: Foveated Ray Tracing
+for VR Headsets. In (Kompatsiaris, I.; Huet, B.; Mezaris, V.; Gurrin, C.;
+Cheng, W.-H.; Vrochidis, S., eds.): MultiMedia Modeling. Springer International
+Publishing, Cham, pp. 106–117, 2019, isbn: 978-3-030-05710-7.
+[Ta18]
+Tan, G.; Lee, Y.-H.; Zhan, T.; Yang, J.; Liu, S.; Zhao, D.; Wu, S.-T.: Foveated
+imaging for near-eye displays. Opt. Express 26/19, pp. 25076–25085, 2018,
+url: https://opg.optica.org/oe/abstract.cfm?URI=oe-26-19-25076.
+[Ve98]
+Veach, E.: Robust Monte Carlo Methods for Light Transport Simulation,
+AAI9837162, PhD thesis, Stanford, CA, USA, 1998, isbn: 0591907801.
+[Vi18]
+Viitanen, T.; Koskela, M.; Immonen, K.; Mäkitalo, M.; Jääskeläinen, P.;
+Takala, J.: Sparse sampling for real-time ray tracing. In: VISIGRAPP 2018 Proceedings of the 13th International Joint Conference on Computer Vision,
+Imaging and Computer Graphics Theory and Applications. Vol. 1, INTERNATIONAL CONFERENCE ON COMPUTER GRAPHICS THEORY AND
+APPLICATIONS ; Conference date: 01-01-1900, SCITEPRESS, pp. 295–302,
+2018.
+[We16]
+Weier, M.; Roth, T.; Kruĳff, E.; Hinkenjann, A.; Pérard-Gayot, A.; Slusallek, P.;
+Li, Y.: Foveated Real-Time Ray Tracing for Head-Mounted Displays. Comput.
+Graph. Forum 35/7, pp. 289–298, 2016, issn: 0167-7055.
+[YLC20]
+Yang, J.; Li, X.; Campbell, A. G.: Variable Rate Ray Tracing for Virtual
+Reality. In: SIGGRAPH Asia 2020 Posters. SA ’20, Association for Computing
+Machinery, Virtual Event, Republic of Korea, 2020, isbn: 9781450381130,
+url: https://doi.org/10.1145/3415264.3425451.

@@ -1,0 +1,123 @@
+# Projected Depth Refining
+
+Also called: Diffusion-based iterative depth refinement, Generative Depth Refinement Module, Scale-consistent depth integration
+
+## Overview
+Projected Depth Refining is a post-processing technique that enhances the geometric fidelity of depth maps projected from a 3D point cloud, addressing the loss of fine details and scale ambiguity inherent in initial projections [S2]. It sets itself apart from sibling methods like [Depth-Guided Optimization](14749-depth-guided-optimization.md) by explicitly integrating high-resolution RGB priors via diffusion models to recover high-frequency geometric details, rather than relying solely on geometric consistency or optimization constraints [S1].
+
+## How it works
+The method operates in two primary contexts: a generative refinement for high-fidelity reconstruction [S1] and a computational refinement for efficient surface sampling [S2]. The core algorithm described in [S1] follows these steps:
+
+1. **Initial Projection**: The dense 3D point cloud (obtained from a prior step such as Neural Bundle Adjustment) is projected into a 2D depth map $D_0$ for a target view [S1]. This initial map is limited by the resolution of the source geometry estimator (e.g., DUSt3R) and lacks fine details [S1].
+2. **Latent Encoding**: The initial depth map $D_0$ and the corresponding RGB image $I$ are encoded into latent representations $z^{(D)}$ and $z^{(I)}$ using separate latent encoders [S1].
+3. **Diffusion-Based Refinement**: The latent depth representation $z^{(D)}$ is refined iteratively in the latent code space using a diffusion model [S1].
+    * **Forward Process**: Gaussian noise is added to the initial latent $z_0^{(D)}$ over $T$ steps [S1]. At step $t$, the noisy latent $z_t^{(D)}$ is computed as:
+      $$ z_t^{(D)} = \sqrt{\bar{\alpha}_t} z_0^{(D)} + \sqrt{1 - \bar{\alpha}_t} \epsilon $$
+      where $\epsilon \sim \mathcal{N}(0, I)$, and $\bar{\alpha}_t = \prod_{s=1}^{t} (1 - \beta_s)$, with $\{\beta_1, \dots, \beta_T\}$ being the noise variance schedule [S1].
+    * **Reverse Process**: The noise is progressively removed to recover the refined latent representation [S1]. This process is guided by the RGB latent $z^{(I)}$ to ensure texture-consistent geometric details [S1].
+4. **Scale-Consistent Integration**: To prevent scale drift during diffusion, a scale-consistent integration path constrains the depth scale at each iteration [S1].
+5. **Output**: The result is a scale-consistent, detail-rich depth map (and optionally normal maps) [S1].
+
+In the context of [S2], the refinement focuses on computational efficiency for NeRF sampling:
+1. **Projection**: Project the saved 3D point cloud onto a novel view to generate a rough depth image [S2].
+2. **Point Removal**: Remove unnecessary 3D points from the point cloud to reduce noise and ambiguity in the depth estimation [S2].
+3. **Hole Filling**: Fill holes in the projected depth image using computationally efficient methods [S2].
+4. **Usage**: The refined depth image is used for surface-based sampling during novel view rendering, restricting 3D sampling to the vicinity of the estimated surface [S2].
+
+### Pseudocode (Generative Variant [S1])
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import random
+
+def cumprod(values):
+    result = [1.0]
+    for v in values:
+        result.append(result[-1] * v)
+    return result[1:]
+
+def project_point_cloud_to_depth(point_cloud, camera_params):
+    H, W = camera_params['image_size']
+    depth_map = [[float('inf')] * W for _ in range(H)]
+    K = camera_params['intrinsics']
+    R, t_vec = camera_params['extrinsics']
+    for p in point_cloud:
+        p_cam = [0.0, 0.0, 0.0]
+        for i in range(3):
+            p_cam[i] = sum(R[i][j] * p[j] for j in range(3)) + t_vec[i]
+        if p_cam[2] <= 0.0:
+            continue
+        u = K[0][0] * (p_cam[0] / p_cam[2]) + K[0][2]
+        v = K[1][1] * (p_cam[1] / p_cam[2]) + K[1][2]
+        if 0 <= u < W and 0 <= v < H:
+            if p_cam[2] < depth_map[int(v)][int(u)]:
+                depth_map[int(v)][int(u)] = p_cam[2]
+    return depth_map
+
+def generate_gaussian_noise_like(tensor):
+    return [[random.gauss(0.0, 1.0) for _ in row] for row in tensor]
+
+def apply_scale_consistency(latent, initial_depth):
+    depths = [d for row in initial_depth for d in row if d != float('inf')]
+    scale_factor = sum(depths) / len(depths) if depths else 1.0
+    return [[latent[i][j] * scale_factor for j in range(len(latent[0]))] for i in range(len(latent))]
+
+def projected_depth_refining(point_cloud, rgb_image, camera_params, diffusion_model, latent_encoder_depth, latent_encoder_rgb, noise_schedule):
+    T = len(noise_schedule)
+    D0 = project_point_cloud_to_depth(point_cloud, camera_params)
+    z_D = latent_encoder_depth(D0)
+    z_I = latent_encoder_rgb(rgb_image)
+    
+    alpha_bar = cumprod([1.0 - beta for beta in noise_schedule])
+    
+    epsilon = generate_gaussian_noise_like(z_D)
+    alpha_bar_T = alpha_bar[T-1]
+    z_T = math.sqrt(alpha_bar_T) * z_D + math.sqrt(1.0 - alpha_bar_T) * epsilon
+    z_current = z_T
+    
+    for t in range(T, 0, -1):
+        beta_t = noise_schedule[t-1]
+        alpha_t = 1.0 - beta_t
+        alpha_bar_t = alpha_bar[t-1]
+        alpha_bar_prev = alpha_bar[t-2] if t > 1 else 1.0
+        
+        predicted_noise = diffusion_model.predict_noise(z_current, t, z_I)
+        
+        coeff1 = math.sqrt(alpha_bar_prev) * (1.0 - alpha_t) / (1.0 - alpha_bar_t)
+        coeff2 = math.sqrt(alpha_t) * (1.0 - alpha_bar_prev) / (1.0 - alpha_bar_t)
+        z_prev = coeff1 * z_current + coeff2 * predicted_noise
+        
+        if t > 1:
+            sigma_t = math.sqrt((1.0 - alpha_bar_prev) / (1.0 - alpha_bar_t) * (1.0 - alpha_t))
+            epsilon_t = generate_gaussian_noise_like(z_current)
+            z_prev = z_prev + sigma_t * epsilon_t
+            
+        z_current = apply_scale_consistency(z_prev, D0)
+        
+    refined_depth_map = latent_encoder_depth.decode(z_current)
+    return refined_depth_map
+```
+
+## Subtopics
+
+### Generative Depth Refinement
+A module that employs a diffusion model to integrate high-resolution RGB information into the point cloud, enhancing geometric details and smoothness [S1]. It is chosen when high-fidelity mesh reconstruction is required [S1]. It differs from standard hole-filling by using generative priors to hallucinate plausible geometric details consistent with the RGB texture [S1]. It includes a diffusion model for iterative refinement and a scale-consistent integration path to constrain the depth scale for each iteration [S1].
+
+### Computational Depth Refinement
+A method focused on efficiency for NeRF-based rendering [S2]. It involves removing unnecessary 3D points and filling holes in the projected depth image [S2]. It is chosen when the goal is to enable surface-based sampling for novel view synthesis rather than explicit mesh generation [S2]. It sets itself apart by prioritizing computational speed and robustness for sampling over high-frequency detail recovery [S2].
+
+## Operating characteristics
+- **Time Complexity**: The generative variant [S1] is computationally expensive due to the iterative diffusion process ($T$ steps) and latent encoding/decoding. The computational variant [S2] is efficient, relying on simple projection and hole-filling.
+- **Memory Complexity**: Requires storing the 3D point cloud, RGB images, and latent representations. Not given in the sources.
+- **Strengths**: The generative variant produces scale-consistent, detail-rich depth and normal maps, overcoming the resolution limits of initial geometry estimators like DUSt3R [S1]. The computational variant enables efficient surface-based sampling, improving NeRF rendering quality with minimal overhead [S2].
+- **Limitations**: The generative variant depends on the quality of the RGB prior and the diffusion model's training data. It may hallucinate details not present in the scene. The computational variant may leave artifacts if the point cloud is sparse or noisy [S2].
+- **When to use**: Use the generative variant for high-fidelity 3D reconstruction and mesh extraction. Use the computational variant for efficient novel view synthesis with NeRF [S1, S2].
+
+## Background
+The concept of refining projected depth maps originated from the need to improve NeRF rendering by restricting sampling to the object surface [S2]. The generative approach was introduced in GBR (Generative Bundle Refinement) to address geometry accuracy challenges in Gaussian Splatting by integrating diffusion models with neural bundle adjustment [S1].
+
+## Sources
+[S1] GBR: Generative Bundle Refinement for High-Fidelity Gaussian Splatting With Enhanced Mesh Reconstruction, https://doi.org/10.1109/tcsvt.2025.3596613, fetched 2026-10-29
+[S2] Improving Neural Radiance Fields Using Near-Surface Sampling with Point Cloud Generation, https://link.springer.com/article/10.1007/s11063-024-11654-5, fetched 2026-10-30

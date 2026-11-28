@@ -1,0 +1,76 @@
+--- v003.md
++++ v004.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Packed Tensor Representation is a data structure used in volume rendering to store ray samples where rays have varying numbers of valid samples, avoiding the memory inefficiency of fixed-size tensors with masks when large portions of space are empty [S1]. It packs per-sample ray indices into per-ray chunk information (start index and count) for flattened tensors [S2, unofficial]. Unlike fixed-size storage or mask-based approaches, it replaces a sequence of $N$ samples with a compact representation, which is particularly effective when large portions of the ray consist of transparent or empty space [S1]. It is similar to approaches used in Instant-NGP and PyTorch3D but explicitly described as a solution to the memory inefficiency of $(n\_rays, n\_samples, ...)$ with a mask [S1].
++Packed Tensor Representation is a data structure used in volume rendering to store ray samples where rays have varying numbers of valid samples, avoiding the memory inefficiency of fixed-size tensors with masks when large portions of space are empty [S1]. It packs per-sample ray indices into per-ray chunk information (start index and count) for flattened tensors [S2, unofficial]. It stores valid samples in a contiguous data tensor and uses an integer index tensor to track per-ray start positions and counts, which is particularly effective when large portions of the ray consist of transparent or empty space [S1]. It is similar to approaches used in Instant-NGP and PyTorch3D but explicitly described as a solution to the memory inefficiency of $(n\_rays, n\_samples, ...)$ with a mask [S1].
+ 
+ ## How it works
+@@ -16,5 +16,5 @@
+ 1.  **Data Tensor**: A flattened tensor containing only the valid samples for all rays. Its first dimension size is the total number of valid samples across all rays [S1].
+ 2.  **Packed Info Tensor**: An integer tensor of shape $(n\_rays, 2)$ [S2, unofficial].
+-    -   Column 0: Start index in the Data Tensor for each ray.
++    -   Column 0: Start index in the Data Tensor for each ray [S2, unofficial].
+     -   Column 1: Count of valid samples for each ray [S2, unofficial].
+ 
+@@ -35,12 +35,12 @@
+     
+     Args:
+-        ray_indices: 1D LongTensor of shape (n_samples) containing ray indices.
++        ray_indices: 1D array of shape (n_samples) containing ray indices.
+         n_rays: Optional int. If None, inferred from ray_indices.
+         
+     Returns:
+-        packed_info: Tensor of shape (n_rays, 2).
++        packed_info: 2D array of shape (n_rays, 2).
+     """
+     # Assert 1D
+-    assert ray_indices.dim() == 1, "ray_indices must be 1D"
++    assert len(ray_indices.shape) == 1, "ray_indices must be 1D"
+     
+     # Determine device and dtype
+@@ -50,19 +50,22 @@
+     # Infer n_rays if not provided
+     if n_rays is None:
+-        n_rays = ray_indices.max().item() + 1
++        n_rays = int(ray_indices.max()) + 1
+         
+     # Initialize counts tensor
+-    chunk_cnts = torch.zeros(n_rays, device=device, dtype=dtype)
++    chunk_cnts = [0] * n_rays
+     
+     # Accumulate counts: add 1 for each occurrence of a ray index
+-    # Equivalent to: for i in range(len(ray_indices)): chunk_cnts[ray_indices[i]] += 1
+-    chunk_cnts.index_add_(0, ray_indices, torch.ones_like(ray_indices))
+-    
++    for i in range(len(ray_indices)):
++        chunk_cnts[ray_indices[i]] += 1
++        
+     # Compute start indices using cumulative sum
+-    # chunk_starts[i] = sum(chunk_cnts[0...i-1])
+-    chunk_starts = chunk_cnts.cumsum(dim=0, dtype=dtype) - chunk_cnts
+-    
++    chunk_starts = [0] * n_rays
++    current_sum = 0
++    for i in range(n_rays):
++        chunk_starts[i] = current_sum
++        current_sum += chunk_cnts[i]
++        
+     # Stack start and count
+-    packed_info = torch.stack([chunk_starts, chunk_cnts], dim=-1)
++    packed_info = [[chunk_starts[i], chunk_cnts[i]] for i in range(n_rays)]
+     
+     return packed_info
+@@ -76,5 +79,4 @@
+ -   Only CUDA inputs are supported; CPU inputs raise `NotImplementedError` [S2, unofficial].
+ -   The function is not differentiable [S2, unofficial].
+--   Precision issues may arise if `ray_indices` contains large values, though standard integer types are used [S2, unofficial].
+ -   The method assumes `ray_indices` are contiguous and valid (i.e., $0 \le ray\_indices[i] < n\_rays$) [G].
+ 
+@@ -91,5 +93,4 @@
+ -   **Limitations**: Not differentiable; CPU support is not available in the reference implementation [S2, unofficial].
+ -   **When to use**: When rays have highly variable numbers of valid samples, especially in sparse scenes or with spatial skipping [S1].
+--   **When not to use**: When all rays have the same number of samples, or when differentiability through the packing step is required [S2, unofficial].
+ 
+ ## Background

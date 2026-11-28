@@ -1,0 +1,137 @@
+--- v002.md
++++ v003.md
+@@ -1,50 +1,108 @@
+ # Dense Depth Estimation via Plane Sweep
+ 
+-Also called: GPU Plane Sweep Depth Estimation, Live Image Capturing and Dense Depth Estimation (Woetzel and Koch), WoeKoch04, Woetzel and Koch
++Also called: GPU Plane Sweep Depth Estimation, Live Image Capturing and Dense Depth Estimation, WoeKoch04, Woetzel and Koch
+ 
+ ## Overview
+-Dense Depth Estimation via Plane Sweep reconstructs a dense depth map by projecting a series of depth planes into multiple camera views and evaluating photo-consistency. It solves the problem of recovering per-pixel depth from multi-view imagery by combining rendering and reconstruction into a single step, producing no explicit volume [S1, unofficial]. Unlike [Triangulation for Closest Point](9933-triangulation-for-closest-point.md), which finds the closest consistent point, this method aggregates evidence across a depth range to handle textureless regions and occlusions more robustly.
++Dense Depth Estimation via Plane Sweep estimates per-pixel depth by projecting a series of depth planes into multiple camera views and evaluating photometric consistency across views. It solves the problem of recovering dense 3D geometry from multi-view imagery by replacing explicit volumetric storage with a single-pass rendering approach. Unlike [Triangulation for Closest Point](9933-triangulation-for-closest-point.md), which computes depth from point correspondences, this method operates directly on image pixels and is distinct from [Binocular Depth Estimation (Stereo Matching)](15014-binocular-depth-estimation-stereo-matching.md) by generalizing the cost-volume concept to arbitrary numbers of views (though practical implementations may limit this) and combining rendering with reconstruction in a single step without producing an explicit intermediate volume [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:** $N$ calibrated images (typically $N \le 4$ [S1, unofficial]), camera matrices, and a depth range $[d_{min}, d_{max}]$.
+-**Outputs:** A dense depth map $D(u,v)$ for the reference view.
++**Inputs and Outputs:**
++- Inputs: A set of $N$ rectified images $I_1, \dots, I_N$ with known camera projection matrices.
++- Outputs: A dense depth map $D$ for a reference view (typically the first camera).
+ 
+ **Data Structures:**
+-- `photo_cost`: A 2D texture or buffer of size $W \times H$, initialized to infinity.
+-- `depth_plane`: A 3D texture or buffer representing the current sweep plane at depth $d$.
++- Depth planes: Defined by a minimum depth $d_{min}$, maximum depth $d_{max}$, and step size $\Delta d$.
++- Cost Volume: Implicitly computed per pixel during the sweep; no explicit 3D texture is stored [S1, unofficial].
+ 
+ **Steps:**
+-1. **Initialization:** Set `photo_cost` to $\infty$ for all pixels $(u,v)$.
+-2. **Depth Sweep:** Iterate through discrete depth samples $d$ from $d_{min}$ to $d_{max}$ with step $\Delta d$.
+-3. **Projection:** For each depth $d$, construct a plane $P_d$ in the reference camera coordinate system. Project $P_d$ into all other $N-1$ camera views using their respective projection matrices $M_i$.
+-4. **Sampling:** For each pixel $(u,v)$ in the reference view, sample the intensity $I_i(u_i, v_i)$ from each auxiliary view $i$ at the projected coordinates $(u_i, v_i)$.
+-5. **Photo-Consistency Check:** Compute a consistency metric (e.g., sum of absolute differences or variance) across the sampled intensities. Let $C(d, u, v)$ be this cost.
+-6. **Aggregation:** Update the cost volume:
+-   $$ \text{photo\_cost}(u,v) = \min(\text{photo\_cost}(u,v), C(d, u, v)) $$
+-   [S1, unofficial] Note: The source indicates the check is performed on each fragment regardless of silhouette/background test rejection.
+-7. **Depth Extraction:** After all depths are swept, the depth for each pixel is the $d$ that minimized `photo_cost`.
++1. **Initialization**: For each pixel $(u, v)$ in the reference image, initialize a consistency score $C(u, v) = 0$.
++2. **Plane Sweep**: Iterate through depth values $d$ from $d_{min}$ to $d_{max}$ with step $\Delta d$:
++   a. Construct a depth plane at distance $d$ in the reference camera coordinate system.
++   b. For each other camera $k \in \{2, \dots, N\}$:
++      i. Project the 3D point corresponding to $(u, v, d)$ from the reference view into camera $k$'s image plane to obtain coordinates $(u_k, v_k)$.
++      ii. Sample the intensity or color value $I_k(u_k, v_k)$ from image $k$.
++      iii. Compare $I_k(u_k, v_k)$ with the reference pixel value $I_1(u, v)$.
++      iv. Accumulate a photometric consistency cost (e.g., sum of absolute differences or gradient correlation) into $C(u, v)$ for this depth hypothesis.
++3. **Silhouette/Background Test**: Optionally, reject depth hypotheses that project outside the image boundaries or fail a background consistency check. Note that in the GPU-accelerated implementation, the photo-consistency check is performed on each fragment regardless of rejection by silhouette tests [S1, unofficial].
++4. **Depth Selection**: For each pixel $(u, v)$, select the depth $d$ that minimizes the accumulated cost $C(u, v)$.
++5. **Refinement**: Apply local smoothing or winner-takes-all selection to produce the final depth map.
++
++**Formulas:**
++- Projection: $\mathbf{x}_k = P_k \mathbf{X}_1$, where $\mathbf{X}_1$ is the 3D point at depth $d$ for pixel $(u,v)$ in camera 1, and $P_k$ is the projection matrix of camera $k$.
++- Cost: $C(u, v) = \sum_{d} \sum_{k=2}^{N} \text{Cost}(I_1(u, v), I_k(u_k, v_k))$.
+ 
+ **Parameters:**
+-- $\Delta d$: Depth sampling step. Not given in the sources.
+-- $N$: Number of views. Limited to 4 [S1, unofficial].
++- $d_{min}, d_{max}$: Depth range.
++- $\Delta d$: Depth resolution.
++- $N$: Number of views.
+ 
+ **Edge Cases:**
+-- **Occlusions:** Pixels occluded in auxiliary views will have high cost. The method assumes visibility or uses robust metrics.
+-- **Textureless Regions:** Low gradient areas yield ambiguous costs. Not given in the sources.
++- **Occlusions**: Points visible in the reference view may be occluded in other views, leading to inconsistent costs.
++- **Textureless Regions**: Lack of distinctive features causes ambiguous minima in the cost function.
++- **Precision**: Floating-point precision in projection calculations can cause sampling errors at large depths.
++
++**Pseudocode:**
++```python
++def plane_sweep_depth_estimation(images, cameras, d_min, d_max, d_step):
++    """
++    images: list of N images (reference is images[0])
++    cameras: list of N camera projection matrices
++    d_min, d_max, d_step: depth range parameters
++    """
++    height, width = images[0].shape[:2]
++    depth_map = np.zeros((height, width))
++    
++    # Initialize cost volume implicitly
++    # In GPU implementation, this is done in a shader loop
++    
++    for d in np.arange(d_min, d_max, d_step):
++        for y in range(height):
++            for x in range(width):
++                # Get 3D point in reference camera
++                X_ref = unproject(x, y, d, cameras[0])
++                
++                cost = 0
++                for k in range(1, len(images)):
++                    # Project to other camera
++                    X_k = cameras[k] @ X_ref
++                    u_k, v_k = X_k[0]/X_k[2], X_k[1]/X_k[2]
++                    
++                    # Check bounds
++                    if not (0 <= u_k < width and 0 <= v_k < height):
++                        continue
++                        
++                    # Sample intensity
++                    I_ref = images[0][y, x]
++                    I_k = images[k][int(v_k), int(u_k)]
++                    
++                    # Accumulate cost
++                    cost += abs(I_ref - I_k)
++                
++                # Store cost for this depth
++                # In practice, keep track of min cost and corresponding depth
++                if d == d_min or cost < min_cost[y, x]:
++                    min_cost[y, x] = cost
++                    depth_map[y, x] = d
++                    
++    return depth_map
++```
++*Note: The above pseudocode is a simplified CPU version. The GPU implementation processes these steps in parallel shaders [S1, unofficial].*
+ 
+ ## Subtopics
+ 
+ ### [Binocular Depth Estimation (Stereo Matching)](15014-binocular-depth-estimation-stereo-matching.md)
+-Binocular depth estimation estimates the depth of a scene by analyzing the geometric correspondence between a pair of images (typically left and right) captured from slightly different viewpoints. It solves the problem of recovering 3D structure from 2D imagery by computing a disparity map, which is then converted to depth. Unlike monocular depth estimation, which relies on learned priors from a single image, this method leverages explicit geometric constraints (epipolar geometry) to provide metrically consistent depth estimates. It serves as a foundational step for dense depth estimation and 3D reconstruction, often feeding into subsequent volume rendering or plane-sweep algorithms.
++Binocular depth estimation estimates scene depth from a pair of rectified left and right images by computing a disparity map, which is inversely proportional to depth. It solves the problem of recovering 3D structure from 2D imagery using geometric constraints between two viewpoints. Unlike monocular depth estimation, which relies on learned priors from single images, this method leverages explicit pairwise multi-view consistency, making it more effective for scenes with weak texture or repetitive patterns where local photometric costs are ambiguous. It builds on [Dense Depth Estimation via Plane Sweep](10850-dense-depth-estimation-via-plane-sweep.md) by providing the foundational cost-volume-based approach that plane sweep generalizes to multiple views.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(W \cdot H \cdot N \cdot D)$, where $W,H$ are image dimensions, $N$ is views, $D$ is depth samples.
+-- **Memory Complexity:** $O(W \cdot H \cdot D)$ for the cost volume, or $O(W \cdot H)$ if aggregated on-the-fly.
+-- **Performance:** Dense depth maps computed with up to 20 frames per second [S1, unofficial].
+-- **Strengths:** Runs almost entirely on the GPU, leaving the CPU free for other tasks [S1, unofficial]. No explicit volume is produced, saving memory.
+-- **Limitations:** Limited to only four camera views [S1, unofficial].
++- **Time Complexity**: $O(H \cdot W \cdot N \cdot D)$, where $H, W$ are image dimensions, $N$ is number of views, and $D$ is number of depth planes.
++- **Memory Complexity**: $O(H \cdot W)$ for the cost accumulation per pixel, as no explicit 3D volume is stored [S1, unofficial].
++- **Performance**: Dense depth maps can be computed with up to 20 frames per second on GPU hardware [S1, unofficial].
++- **Strengths**: High speed due to GPU acceleration; no explicit volume storage reduces memory footprint; works with uncalibrated views if projection matrices are known.
++- **Limitations**: Limited to only four camera views in the original implementation [S1, unofficial]; sensitive to occlusions and textureless regions; requires rectified images or known camera poses.
++- **When to use**: Real-time dense reconstruction with limited views and GPU resources.
++- **When not to use**: Scenes with significant occlusions, very large depth ranges, or when more than four views are available and CPU resources are abundant.
+ 
+ ## Background
+-Woetzel and Koch proposed a live system for image capturing and dense depth estimation in [WoeKoch04]. Their plane-sweep algorithm runs almost entirely on the GPU, leaving the main CPU free for other tasks such as image capture and higher level recognition. Dense depth maps are computed with up to 20 frames per second; however, their system is limited to only four camera views [S1, unofficial].
++Woetzel and Koch proposed a live system for image capturing and dense depth estimation in [WoeKoch04]. Their plane-sweep algorithm runs almost entirely on the GPU, leaving the main CPU free for other tasks such as image capture and higher level recognition. This approach was developed to address the computational bottlenecks of traditional volumetric reconstruction methods.
+ 
+ ## Sources

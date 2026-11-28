@@ -1,0 +1,199 @@
+--- v008.md
++++ v009.md
+@@ -1,73 +1,140 @@
+ # Unified Volumetric Avatar (UVA)
+ 
++
+ ## Overview
+-Unified Volumetric Avatar (UVA) is a neural representation for dynamic human avatars that enables local and independent editing of both geometry and texture while supporting novel view synthesis and novel pose rendering [S1, unofficial]. It distinguishes itself from UV-mapping-based methods by anchoring structured latent codes to a deformable mesh in canonical space, allowing direct 3D-to-3D manipulation, and from two-stage distillation methods by being end-to-end trainable from scratch [S1, unofficial].
++Unified Volumetric Avatar (UVA) is a neural volumetric representation for human avatars that enables local and independent editing of both geometry and texture while supporting novel view and pose synthesis [S1, unofficial]. It distinguishes itself from methods relying on pre-defined UV mapping or two-stage distillation by anchoring separate neural fields for geometry and appearance to a deformable mesh in canonical space, allowing direct manipulation of latent codes and end-to-end training from scratch [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:**
+-- Target observation points $x_t$ sampled from camera rays in a specific pose.
+-- A deformable canonical mesh $M$ with anchor nodes.
+-- Skeleton pose parameters $\theta_t$ for the target frame.
+-- Top-K parameter for nearest-neighbor interpolation.
+-
+-**Outputs:**
+-- Final color $c(r)$ for each ray $r$.
+-- Volume density $\sigma$ for volume rendering.
++**Inputs and Outputs:**
++*   **Inputs:** A target observation point $\mathbf{x}_t$ in the current pose space, a deformable canonical mesh $\mathcal{M}$ with anchor nodes, and a set of structured latent codes $\{\mathbf{l}_{geo}\}$ and $\{\mathbf{l}_{rgb}\}$ anchored to the mesh nodes.
++*   **Outputs:** Volume density $\sigma$ and base color $\mathbf{c}_0$ for the point, which are integrated along rays to produce the final pixel color $\mathbf{c}(\mathbf{r})$ [S1, unofficial].
+ 
+ **Data Structures:**
+-1.  **Deformable Canonical Mesh $M$**: A mesh in canonical space with $N$ anchor nodes. Each node $i$ stores:
+-    -   Position $p_i$ in canonical space.
+-    -   Geometry latent code $l_{geo}^i \in \mathbb{R}^{d_{geo}}$.
+-    -   Appearance latent code $l_{rgb}^i \in \mathbb{R}^{d_{rgb}}$.
+-    -   UV coordinates $(u_i, v_i)$ associated with the node's position on the mesh surface.
+-2.  **Neural Deformation Field**: An MLP $\phi_{def}$ that predicts a non-rigid displacement $\Delta$ given a canonical point and pose.
+-3.  **Geometry/Texture MLPs**: Two separate MLPs, $\phi_{geo}$ and $\phi_{rgb}$ (or a joint MLP as depicted in Figure 2 of [S1, unofficial]), that predict density $\sigma$ and base color $c_0$ given latent codes and a signed height indicator.
+-4.  **Shading Factor Predictor**: An MLP $\phi_{shade}$ that predicts a pose-dependent shading factor $s$ given pose parameters.
+-
+-**Numbered Steps:**
+-
+-1.  **LBS Weight Calculation**: Given a sampled point $x_t$ in the target (observation) space, find its Top-K nearest neighbors on the current posed mesh. Interpolate the Linear Blending Skinning (LBS) weights $w_b$ of these neighbors to determine the skinning weights for $x_t$ [S1, unofficial].
+-    $$ w_b = \text{InterpolateLBS}(x_t, \text{Top-K Neighbors}) $$
+-
+-2.  **Canonical Space Transformation**: Transform the target point $x_t$ to the canonical space $x_c$. This is achieved by inverting the LBS transformation using the computed weights $w_b$ and applying a neural deformation field to account for non-rigid motion [S1, unofficial].
+-    $$ x_c = \text{LBS}^{-1}(x_t, w_b) + \phi_{def}(x_c, \theta_t) $$
+-    *Note: The exact inversion formula involves solving for the canonical position that maps to $x_t$ under the skinning field. The source indicates a combination of NN motion field inversion and a neural deformation field $\Delta$ [S1, unofficial].*
+-
+-3.  **Latent Code Interpolation**: For the canonical point $x_c$, find its Top-K nearest neighbors on the canonical mesh $M$. Interpolate the geometry latent codes $l_{geo}$ and appearance latent codes $l_{rgb}$ from these anchor nodes [S1, unofficial].
+-    $$ l_{geo} = \text{NNInterpolate}(x_c, \{l_{geo}^i\}, K) $$
+-    $$ l_{rgb} = \text{NNInterpolate}(x_c, \{l_{rgb}^i\}, K) $$
+-
+-4.  **Signed Height Indicator Calculation**: Compute the local signed height indicator $\tilde{h}$ for $x_c$. This consists of the UV coordinates $(u, v)$ of the nearest mesh node and the point-to-surface distance $\bar{d}$ relative to the anchored mesh [S1, unofficial].
+-    $$ \tilde{h} = [u, v, \bar{d}] $$
+-    This indicator resolves spatial ambiguity caused by discrete latent codes [S1, unofficial].
+-
+-5.  **Density and Base Color Prediction**: Pass the interpolated latent codes and the signed height indicator through an MLP to predict volume density $\sigma$ and base color $c_0$ [S1, unofficial].
+-    $$ \sigma, c_0 = \text{MLP}([l_{geo}, l_{rgb}, \tilde{h}]) $$
+-
+-6.  **Shading Modulation**: Predict a pose-dependent shading factor $s$ using the current pose parameters $\theta_t$. Modulate the base color $c_0$ with $s$ to represent surface illumination changes across poses [S1, unofficial].
+-    $$ s = \phi_{shade}(\theta_t) $$
+-    $$ c_{modulated} = c_0 \otimes s $$
+-
+-7.  **Volume Rendering**: Integrate the modulated colors and densities along the target ray $r$ using standard volume rendering integration to produce the final color $c(r)$ [S1, unofficial].
+-    $$ c(r) = \int_{t_n}^{t_f} T(t) \sigma(t) c_{modulated}(t) dt $$
+-    where $T(t) = \exp(-\int_{t_n}^t \sigma(s) ds)$.
++1.  **Deformable Canonical Mesh $\mathcal{M}$:** A mesh defined in canonical space. Each node $i$ holds:
++    *   Position $\mathbf{v}_i$ in canonical space.
++    *   Geometry latent code $\mathbf{l}_{geo}^i \in \mathbb{R}^{d_{geo}}$.
++    *   Appearance latent code $\mathbf{l}_{rgb}^i \in \mathbb{R}^{d_{rgb}}$.
++    *   UV coordinates $(u_i, v_i)$ on the mesh surface.
++2.  **Neural Deformation Field:** An MLP $\phi_{def}$ that predicts non-rigid deformation offsets.
++3.  **Geometry/Color MLPs:** Two separate MLPs, $\phi_{geo}$ and $\phi_{rgb}$, that decode latent codes and signed height indicators into density and color.
+ 
+ **Parameters:**
+--   **Top-K**: The number of nearest neighbors used for interpolating LBS weights and latent codes. Typical values are not explicitly stated in the notes, but Table 1 in [S1, unofficial] lists configurations for "Local Tex." and "Local Geo." with values like 4, 8, suggesting K is a hyperparameter tuned per component.
++*   **Top-K:** The number of nearest neighbors used for interpolating LBS weights and latent codes. Typical values are not specified in the source, but the method relies on this hyperparameter for spatial interpolation [S1, unofficial].
++
++**Steps:**
++
++1.  **Determine LBS Weights:**
++    Given a sampled point $\mathbf{x}_t$ in the target space, find the Top-K nearest neighbors on the current posed mesh. Interpolate the Linear Blending Skinning (LBS) weights $\mathbf{w}_b$ from the weights of these neighbors [S1, unofficial].
++
++2.  **Transform to Canonical Space:**
++    Combine the LBS transformation with a neural non-rigid deformation field to transform $\mathbf{x}_t$ into the canonical space $\mathbf{x}_c$. The transformation is effectively the inverse of the forward skinning motion. Let $\mathbf{w}_b$ be the interpolated LBS weights. The canonical position $\mathbf{x}_c$ is derived by applying the inverse skinning motion defined by $\mathbf{w}_b$ and the neural deformation offset [S1, unofficial].
++
++3.  **Interpolate Latent Codes:**
++    For the canonical point $\mathbf{x}_c$, find the Top-K nearest neighbors on the *canonical* mesh $\mathcal{M}$. Interpolate the geometry latent code $\mathbf{l}_{geo}$ and appearance latent code $\mathbf{l}_{rgb}$ from the anchored codes of these neighbors using nearest-neighbor (NN) interpolation [S1, unofficial].
++
++4.  **Compute Signed Height Indicator:**
++    Calculate a local signed height indicator $\tilde{\mathbf{h}}$ for $\mathbf{x}_c$. This indicator comprises the UV coordinates $(u, v)$ of the closest point on the canonical mesh surface and the point-to-surface distance $\bar{d}$ relative to the anchored mesh [S1, unofficial].
++    $$ \tilde{\mathbf{h}} = [u, v, \bar{d}] $$
++    This step addresses spatial ambiguity (indistinguishability) that arises when using discrete latent codes diffused via NN interpolation [S1, unofficial].
++
++5.  **Predict Density and Base Color:**
++    Use an MLP $\phi_{geo}$ to predict volume density $\sigma$ given $\mathbf{l}_{geo}$ and $\tilde{\mathbf{h}}$. Use an MLP $\phi_{rgb}$ to predict base color $\mathbf{c}_0$ given $\mathbf{l}_{rgb}$ and $\tilde{\mathbf{h}}$ [S1, unofficial].
++    $$ \sigma = \phi_{geo}(\mathbf{l}_{geo}, \tilde{\mathbf{h}}) $$
++    $$ \mathbf{c}_0 = \phi_{rgb}(\mathbf{l}_{rgb}, \tilde{\mathbf{h}}) $$
++
++6.  **Modulate Color with Shading Factor:**
++    Compute a pose-dependent shading factor $s$ to represent surface illumination variations across different poses. Modulate the base color $\mathbf{c}_0$ with $s$ to get the final radiance color $\mathbf{c}$ [S1, unofficial].
++    $$ \mathbf{c} = \mathbf{c}_0 \otimes s $$
++    Note: The source describes replacing view-dependent radiance with this pose-dependent shading factor [S1, unofficial].
++
++7.  **Volume Rendering:**
++    Integrate the modulated colors $\mathbf{c}$ and densities $\sigma$ along the target ray $\mathbf{r}$ using standard volume rendering equations to produce the final color $\mathbf{c}(\mathbf{r})$ [S1, unofficial].
++
++**Pseudocode:**
++
++```python
++def uva_render(ray, mesh, l_geo_anchors, l_rgb_anchors, k_nn, 
++               mlp_geo, mlp_rgb, mlp_shading, mlp_deform):
++    """
++    ray: Ray origin and direction.
++    mesh: Deformable canonical mesh with nodes having positions, uv, l_geo, l_rgb.
++    l_geo_anchors: List of geometry latent codes for mesh nodes.
++    l_rgb_anchors: List of appearance latent codes for mesh nodes.
++    k_nn: Number of nearest neighbors for interpolation.
++    """
++    # 1. Sample points along ray in target space
++    points_t = sample_points_along_ray(ray)
++    
++    final_color = 0.0
++    accumulated_alpha = 0.0
++    
++    for x_t in points_t:
++        # 2. Determine LBS weights in target space
++        # Find k_nn nearest neighbors of x_t on the CURRENT posed mesh
++        neighbors_posed = find_k_nearest_neighbors(x_t, posed_mesh, k_nn)
++        w_b = interpolate_lbs_weights(neighbors_posed)
++        
++        # 3. Transform to canonical space
++        # Apply inverse skinning + neural deformation
++        # Note: Exact inverse formula depends on specific LBS implementation.
++        # General form: x_c = InverseLBS(x_t, w_b) + DeformField(x_t, w_b)
++        x_c = transform_to_canonical(x_t, w_b, mlp_deform)
++        
++        # 4. Interpolate latent codes in canonical space
++        # Find k_nn nearest neighbors of x_c on the CANONICAL mesh
++        neighbors_canonical = find_k_nearest_neighbors(x_c, mesh, k_nn)
++        
++        l_geo = interpolate_latents(neighbors_canonical, l_geo_anchors)
++        l_rgb = interpolate_latents(neighbors_canonical, l_rgb_anchors)
++        
++        # 5. Compute signed height indicator
++        # Find closest point on canonical mesh surface to x_c
++        closest_point, uv_coords = find_closest_surface_point(x_c, mesh)
++        d_bar = distance(x_c, closest_point)
++        h_tilde = [uv_coords[0], uv_coords[1], d_bar]
++        
++        # 6. Predict density and base color
++        sigma = mlp_geo(l_geo, h_tilde)
++        c_0 = mlp_rgb(l_rgb, h_tilde)
++        
++        # 7. Modulate with pose-dependent shading
++        # Shading factor depends on pose and view direction
++        s = mlp_shading(w_b, ray.direction)
++        c = c_0 * s
++        
++        # 8. Volume rendering step (accumulation)
++        alpha = 1.0 - torch.exp(-sigma * dist) # dist is step size
++        weight = alpha * (1.0 - accumulated_alpha)
++        final_color += weight * c
++        accumulated_alpha += weight
++        
++        if accumulated_alpha > 0.99:
++            break
++            
++    return final_color
++```
+ 
+ **Edge Cases and Pitfalls:**
+--   **Spatial Ambiguity**: Using discrete latent codes defined on mesh nodes diffused via nearest-neighbor interpolation leads to spatial query indistinguishability [S1, unofficial]. This is mitigated by the signed height indicator $\tilde{h}$, which provides continuous local context [S1, unofficial].
+--   **Boundary Conditions**: The LBS weight interpolation assumes the point $x_t$ is within the influence of the mesh vertices. Points far from the mesh may have undefined weights.
++*   **Spatial Ambiguity:** Using discrete latent codes defined on mesh nodes and diffusing them via nearest-neighbor interpolation leads to spatial query indistinguishability. This is mitigated by the signed height indicator $\tilde{\mathbf{h}}$, which provides continuous local context [S1, unofficial].
++*   **Boundary Conditions:** The accuracy of the LBS weight interpolation and canonical transformation depends on the quality of the posed mesh. Degenerate poses or extreme deformations may cause interpolation errors [S1, unofficial].
++
++## Subtopics
++
++### Local Geometry Editing
++UVA allows independent editing of geometry by modifying the $\mathbf{l}_{geo}$ latent codes anchored to specific mesh nodes. This is set apart from methods that bake geometry into coordinate-based networks, which are harder to edit locally [S1, unofficial].
++
++### Local Texture Editing
++Texture is edited by modifying $\mathbf{l}_{rgb}$ codes. Unlike UV-mapping methods where 3D-to-2D mapping is fixed and hard to reverse for 3D editing, UVA's mesh-anchored codes allow direct 3D-local manipulation [S1, unofficial].
+ 
+ ## Operating characteristics
+--   **Time Complexity**: Depends on the cost of finding Top-K nearest neighbors (typically $O(N \log N)$ or $O(N)$ with spatial hashing) and the MLP evaluations. Rendering requires ray marching, adding a factor proportional to the number of samples per ray.
+--   **Memory Complexity**: Proportional to the number of mesh nodes $N$ times the dimensionality of latent codes ($d_{geo} + d_{rgb}$).
+--   **Strengths**: Enables local and independent editing of geometry and texture [S1, unofficial]. End-to-end trainable without manual parameter tuning [S1, unofficial]. Supports novel view and pose synthesis [S1, unofficial].
+--   **Limitations**: Performance depends on the quality of the canonical mesh and LBS weights. Spatial ambiguity requires careful handling via the signed height indicator [S1, unofficial].
+--   **When to use**: When local editing of dynamic human avatars is required alongside high-quality rendering.
+--   **When not to use**: For static objects where simpler methods suffice, or if real-time performance is critical and the overhead of neural deformation and latent interpolation is too high.
++*   **Time Complexity:** Rendering requires finding nearest neighbors in both posed and canonical spaces for every sample point, which adds overhead compared to pure coordinate-based NeRFs. Interpolation and MLP evaluation are performed per sample.
++*   **Memory Complexity:** Memory usage is dominated by the storage of latent codes for each mesh node ($N_{nodes} \times (d_{geo} + d_{rgb})$) and the mesh structure itself. This is generally more compact than storing a dense voxel grid or large coordinate-based MLPs for high-resolution details, but requires maintaining the mesh topology [S1, unofficial].
++*   **Strengths:** Enables local and independent editing of geometry and texture; end-to-end trainable; handles dynamic avatars without manual parameter tuning [S1, unofficial].
++*   **Limitations:** Relies on the quality of the initial mesh and LBS weights; spatial ambiguity requires careful handling via signed height indicators; editing is constrained to the mesh topology [S1, unofficial].
++*   **When to use:** When local editing of human avatar geometry and texture is required alongside novel view/pose synthesis.
++*   **When not to use:** For static scenes or objects where mesh-based representation is not appropriate or where real-time performance is critical and neighbor search overhead is prohibitive [S1, unofficial].
+ 
+ ## Background
+-UVA was proposed in the paper "UVA: Towards Unified Volumetric Avatar for View Synthesis, Pose rendering, Geometry and Texture Editing" [S1, unofficial]. It addresses the limitations of previous methods that either relied on pre-defined UV mapping (making local texture editing difficult) or used two-stage distilling methods (requiring manual tuning and suitable only for static objects) [S1, unofficial]. The method builds on the concept of neural radiance fields (NeRF) [26] and dynamic neural fields [33, 27, 28], adapting them for human avatars with explicit mesh-based editing capabilities [S1, unofficial].
++Unified Volumetric Avatar (UVA) was proposed to address the challenges of editing dynamic human avatars. Previous methods either used pre-defined UV mapping (limiting 3D editing) or two-stage distillation (requiring manual tuning and limited to static objects) [S1, unofficial]. UVA introduces a mesh-guided neural field representation where geometry and texture are separated and anchored to a deformable mesh, enabling an all-in-one solution for view synthesis, pose rendering, and local editing [S1, unofficial].
+ 
+ ## Sources

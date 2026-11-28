@@ -1,0 +1,147 @@
+--- v001.md
++++ v002.md
+@@ -4,25 +4,42 @@
+ 
+ ## Overview
+-A learning rate schedule that eases slowly using a cosine function to transition between an initial value and a final value [S1, unofficial]. It builds on [Linear Learning Rate Schedule](11850-linear-learning-rate-schedule.md) by replacing linear interpolation with a smooth cosine curve, reducing oscillation during the decay phase [S1, unofficial].
++A learning rate schedule that transitions from an initial value to a final value using a cosine function to ease the change [S1, unofficial]. It differs from the parent [Linear Learning Rate Schedule](11850-linear-learning-rate-schedule.md) by providing a non-linear, smooth decay curve rather than a linear interpolation, which can help stabilize optimization in radiance-field training by reducing the learning rate more gradually in the later stages [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:**
++**Inputs and Outputs:**
+ - `step`: Current training step (integer).
+ - `num_steps`: Total number of training steps (integer).
+ - `initial_value`: Starting learning rate (float).
+ - `final_value`: Target learning rate at `num_steps` (float).
++- Output: The computed learning rate for the current step (float).
+ 
+ **Data Structures:**
+-None required; stateless computation.
++No complex data structures are required; the calculation is stateless and depends only on the current step and configuration parameters.
+ 
+ **Steps:**
+-1. Compute the normalized progress: $\alpha = \min(\frac{step}{num\_steps}, 1.0)$.
+-2. Clamp $\alpha$ to $[0.0, 1.0]$ to handle edge cases: $x = \min(\max(\alpha, 0.0), 1.0)$.
+-3. Compute the scale factor: $scale = final\_value - initial\_value$.
+-4. Apply the cosine interpolation: $value = initial\_value + scale \cdot 0.5 \cdot (1 + \cos(\pi x + \pi))$.
++1. Calculate the normalized progress `alpha` as the ratio of `step` to `num_steps`, clamped to a maximum of 1.0.
++2. Calculate the total scale of change as `final_value - initial_value`.
++3. Clamp `alpha` to the range [0.0, 1.0] to handle edge cases where `step` might be negative or exceed `num_steps` due to implementation details.
++4. Compute the cosine factor using the formula: $0.5 \cdot (1 + \cos(\pi x + \pi))$, where $x$ is the clamped `alpha`.
++5. Return the result: `initial_value + scale * cosine_factor`.
+ 
+ **Formula:**
+-$$ v = v_{init} + (v_{final} - v_{init}) \cdot 0.5 \cdot (1 + \cos(\pi x + \pi)) $$
+-where $x = \min(\max(step/num\_steps, 0), 1)$.
++$$v = v_{init} + (v_{final} - v_{init}) \cdot 0.5 \cdot (1 + \cos(\pi x + \pi))$$
++
++Where:
++- $v$ is the resulting learning rate.
++- $v_{init}$ is `initial_value`.
++- $v_{final}$ is `final_value`.
++- $x = \min(\max(step/num\_steps, 0), 1)$.
++
++**Parameters:**
++- `initial_value`: Typically the peak learning rate used in the training setup.
++- `final_value`: Often set to a small value (e.g., $10^{-6}$) or zero to converge the model.
++- `num_steps`: The total duration of the training loop.
++
++**Edge Cases and Pitfalls:**
++- If `step` is negative, the clamping ensures $x=0$, returning `initial_value`.
++- If `step` exceeds `num_steps`, the clamping ensures $x=1$, returning `final_value`.
++- Precision issues with floating-point arithmetic in the cosine calculation are generally negligible for standard training scales.
+ 
+ **Pseudocode:**
+@@ -30,68 +47,40 @@
+ import math
+ 
+-def cosine_schedule(step, num_steps, initial_value, final_value):
+-    # Step 1: Normalize progress
+-    alpha = min(step / num_steps, 1.0)
++def cosine_learning_rate(step, num_steps, initial_value, final_value):
++    # Calculate normalized progress
++    alpha = step / num_steps if num_steps > 0 else 0.0
+     
+-    # Step 2: Clamp to [0.0, 1.0]
+-    x = min(max(alpha, 0.0), 1.0)
+-    
+-    # Step 3: Compute scale
++    # Clamp alpha to [0.0, 1.0]
++    if alpha < 0.0:
++        alpha = 0.0
++    elif alpha > 1.0:
++        alpha = 1.0
++        
++    # Calculate scale
+     scale = final_value - initial_value
+     
+-    # Step 4: Cosine interpolation
++    # Compute cosine factor
+     # Note: cos(pi * x + pi) is equivalent to -cos(pi * x)
+-    # At x=0: cos(pi) = -1 -> factor = 0.5 * (1 - 1) = 0 -> v = v_init
+-    # At x=1: cos(2*pi) = 1 -> factor = 0.5 * (1 + 1) = 1 -> v = v_init + scale = v_final
+-    return initial_value + scale * 0.5 * (1 + math.cos(math.pi * x + math.pi))
++    cosine_factor = 0.5 * (1 + math.cos(math.pi * alpha + math.pi))
++    
++    # Return final learning rate
++    return initial_value + scale * cosine_factor
+ ```
+-
+-**Parameters:**
+-- `num_steps`: Total training duration. Typical values depend on the dataset size and batch size; not given in the sources.
+-- `initial_value`: Starting LR. Not given in the sources.
+-- `final_value`: Ending LR. Often set to a small value like $10^{-6}$ or $0$. Not given in the sources.
+-
+-**Edge Cases and Pitfalls:**
+-- If `num_steps` is 0, division by zero occurs. Guard against this by checking `num_steps > 0` [G].
+-- If `step` exceeds `num_steps`, the clamping ensures the value stays at `final_value` [S1, unofficial].
+-- Precision issues with `cos` near boundaries are negligible due to the smoothness of the function [G].
+ 
+ ## Subtopics
+ 
+-### Delayed Cosine Schedule
+-A schedule wrapper that delays the start of a base schedule using a sinusoidal rate multiplier [S1, unofficial]. It is chosen when a warm-up or delay period is desired before the primary schedule begins [S1, unofficial].
+-- **Definition:** Computes a delay rate and multiplies it by the base schedule's output [S1, unofficial].
+-- **Formula:** $delay\_rate = delay\_mult + (1 - delay\_mult) \cdot \sin(0.5 \cdot \pi \cdot \text{clip}(\frac{step}{delay\_steps}, 0, 1))$. The final value is $delay\_rate \cdot base\_schedule(step)$ [S1, unofficial].
+-- **Parameters:**
+-  - `base_schedule`: The underlying Schedule object (e.g., CosineEasingSchedule) [S1, unofficial].
+-  - `delay_steps`: Number of steps over which the delay rate transitions [S1, unofficial].
+-  - `delay_mult`: Minimum multiplier applied during the delay period [S1, unofficial].
+-- **Pseudocode:**
+-```python
+-def delayed_cosine_schedule(step, base_schedule, delay_steps, delay_mult):
+-    # Clip step/delay_steps to [0, 1]
+-    ratio = min(max(step / delay_steps, 0.0), 1.0)
+-    
+-    # Compute delay rate
+-    delay_rate = (
+-        delay_mult
+-        + (1 - delay_mult)
+-        * math.sin(0.5 * math.pi * ratio)
+-    )
+-    
+-    # Apply to base schedule
+-    return delay_rate * base_schedule(step)
+-```
++### [Delayed Cosine Schedule](11854-delayed-cosine-schedule.md)
++A schedule wrapper that delays the start of a base learning rate schedule using a sinusoidal rate multiplier. It sets apart from standard cosine schedules by introducing a warm-up phase where the learning rate is suppressed, easing into the base schedule's trajectory. This prevents early instability in radiance-field optimization by avoiding large gradient updates during the initial training steps.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(1)$ per step.
+-- **Memory Complexity:** $O(1)$.
+-- **Strengths:** Smooth decay reduces oscillation compared to linear schedules; easy to implement.
+-- **Limitations:** Requires knowing `num_steps` in advance; less flexible than adaptive schedules.
+-- **When to use:** Standard for NeRF training where smooth convergence is preferred [S1, unofficial].
+-- **When not to use:** When the optimal training duration is unknown or dynamic.
++- **Time Complexity:** $O(1)$ per step, as it involves basic arithmetic and a single trigonometric function evaluation.
++- **Memory Complexity:** $O(1)$, requiring no additional storage beyond the current step and configuration values.
++- **Strengths:** Provides a smooth, non-linear decay that can help the optimizer settle into minima more effectively than linear schedules. The cosine shape naturally slows down the learning rate as training progresses.
++- **Limitations:** May converge slower than aggressive schedules if the initial learning rate is not well-tuned. The smooth decay might not be optimal for all types of loss landscapes in radiance-field optimization.
++- **When to use:** Suitable for stable training scenarios where a gradual reduction in learning rate is beneficial. Often used in conjunction with warm-up phases (e.g., [Delayed Cosine Schedule](11854-delayed-cosine-schedule.md)).
++- **When not to use:** If rapid convergence is required in the early stages, a linear or step schedule might be more appropriate.
+ 
+ ## Background
+-Originated in the context of NeRFies training scripts, which use JAX and Flax for differentiable volume rendering optimization [S1, unofficial]. It is part of the `nerfies.schedules` module [S1, unofficial].
++The cosine learning rate schedule is implemented in the Nerfies project, a JAX-based framework for neural radiance fields [S1, unofficial]. It is part of the training configuration for optimizing radiance fields, providing a smooth transition in learning rates during the training loop.
+ 
+ ## Sources

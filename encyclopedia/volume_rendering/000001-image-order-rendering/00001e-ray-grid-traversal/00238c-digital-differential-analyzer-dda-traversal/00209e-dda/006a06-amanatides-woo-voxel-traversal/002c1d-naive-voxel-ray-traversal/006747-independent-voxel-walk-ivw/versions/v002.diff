@@ -1,0 +1,82 @@
+--- v001.md
++++ v002.md
+@@ -1,23 +1,19 @@
+ # Independent Voxel Walk (IVW)
+-
+-
+ ## Overview
+ Independent Voxel Walk (IVW) is a GPU-based ray traversal method where each ray is assigned to an independent thread that walks through a uniform grid, loading triangle data for the current voxel and checking for intersections until the first hit is found [S1]. It differs from sibling methods like Enforced Coherence (EC) by assuming no coherence between rays, relying instead on modern GPU memory hierarchies (L1/L2 caches) to handle the resulting memory access patterns, whereas EC explicitly reorders rays to exploit spatial coherence [S1].
+-
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A set of rays (primary and/or reflection), a uniform grid data structure containing triangles, and the ray origins and directions.
+-*   **Output:** The first intersection point (or null) for each ray.
++*   **Input:** A set of rays and a uniform grid containing triangles [S1].
++*   **Output:** The first intersection point for each ray [S1].
+ 
+ **Data Structures:**
+-*   **Uniform Grid:** A 3D array or hash map mapping voxel coordinates to a list of triangle indices contained within that voxel. The grid is constructed per frame or per stage [S1].
+-*   **Ray Data:** Origin ($O$) and Direction ($D$) for each ray.
++*   **Uniform Grid:** A 3D array mapping voxel coordinates to a list of triangle indices contained within that voxel [S1]. The grid is constructed in each frame [S1]. Exact field layouts, sizes, and bit packing are not given in the sources.
+ 
+ **Algorithm Steps:**
+ 1.  **Parallel Assignment:** Assign each ray to an independent GPU thread [S1].
+ 2.  **Traversal Loop:** For each thread (ray), execute the following loop until an intersection is found or the ray exits the scene:
+-    a.  **Determine Current Voxel:** Compute the voxel coordinates containing the current ray position. This is typically done using the ray's origin (for the first step) or the current position along the ray [S1].
+-    b.  **Load Triangles:** Retrieve the list of triangle indices associated with the current voxel from global memory [S1].
+-    c.  **Serial Intersection Check:** Iterate through the triangles in the current voxel in serial order. For each triangle, perform a ray-triangle intersection test [S1].
++    a.  **Determine Current Voxel:** Compute the voxel coordinates containing the current ray position, starting from the ray's origin [S1].
++    b.  **Load Triangles:** Retrieve the list of triangle indices associated with the current voxel [S1].
++    c.  **Serial Intersection Check:** Iterate through the triangles in the current voxel in serial order and perform a ray-triangle intersection test [S1].
+     d.  **Termination:** If an intersection is found, record the hit and terminate the ray's traversal [S1]. If no intersection is found, advance the ray to the next voxel along its path and repeat [S1].
+ 
+@@ -25,15 +21,13 @@
+ ```python
+ # Algorithm 2: Independent Voxel Walk [S1]
+-# Assumes a global function determineVoxel(ray) that returns the voxel ID
+-# containing the ray's current position.
+-# Assumes a global function getTriangles(voxel_id) that returns a list of triangle indices.
+-# Assumes a function checkIntersection(ray, triangle) that returns true if hit.
+-
+-for ray in all_rays in parallel do:
++# Each ray is processed by an independent GPU thread.
++# determineVoxel(ray) computes the next voxel along the ray path; exact stepping logic not given in sources [G].
++# getTriangles(voxel_id) returns the list of triangle indices for a voxel.
++# checkIntersection(ray, triangle) performs a ray-triangle test.
++for ray in all_rays:  # Executed in parallel across GPU threads [S1]
+     while not ray.has_intersection:
+         voxel_id = determineVoxel(ray)
+         triangles = getTriangles(voxel_id)
+-        
+-        for triangle in triangles in serial do:
++        for triangle in triangles:  # Processed in serial per thread [S1]
+             if checkIntersection(ray, triangle):
+                 ray.record_intersection(triangle)
+@@ -47,23 +41,13 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Lack of Coherence:** On older GPUs with large SIMD width and no caching (e.g., GTX280), the lack of coherence between rays can incur a heavy performance penalty due to redundant memory loads [S1].
+-*   **Cache Dependency:** Performance is heavily dependent on the presence of L1 and L2 caches. If multiple rays check the same voxel simultaneously or close in time, the cache can mitigate the lack of coherence [S1].
+-*   **Empty Voxels:** Models with a lot of empty space create many ray-voxel pairs, which can affect performance if the grid is not optimized, though IVW avoids the sorting overhead of EC [S1].
+-
+-## Subtopics
+-
+-### Enforced Coherence (EC)
+-A method that reorders rays to process all rays passing through a voxel together, exploiting shared memory. It is faster on older, cache-less GPUs but slower or comparable on modern cached GPUs [S1]. [Enforced Coherence](5193-enforced-coherence.md)
+-
+-### Uniform Grid Traversal
+-The underlying spatial partitioning structure used by IVW. It provides simple voxel lookup but may have high memory overhead for sparse scenes [S1]. [Uniform Grid](5191-uniform-grid.md)
++*   **Lack of Coherence:** On older GPUs with large SIMD width and no caching (e.g., GTX280), the lack of coherence between rays can incur a heavy performance penalty [S1].
++*   **Cache Dependency:** Performance benefits from L1 and L2 caches; if multiple rays check the same voxel simultaneously or close in time, caching mitigates the lack of coherence [S1].
++*   **Empty Voxels:** Models with a lot of empty space create many ray-voxel pairs, which affects performance but IVW avoids the sorting overhead of EC [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear in the number of rays and the average number of voxels traversed per ray, multiplied by the average number of triangles per voxel. The serial intersection check within a voxel adds a constant factor per voxel [S1].
+-*   **Memory Complexity:** Depends on the grid structure and the number of triangles. The grid is rebuilt per frame or stage [S1].
+ *   **Measured Performance:** On an Nvidia GTX480, IVW achieved 14 fps on the Conference model with one light source and one reflection bounce, compared to 8 fps for the Enforced Coherence method [S1].
+ *   **Scaling:** Expected to benefit from future GPUs and manycore architectures as cores become more independent and caching mechanisms become more flexible [S1].
+ *   **Strengths:** Simple implementation; no need for ray sorting or reordering; exploits L1/L2 caches effectively on modern GPUs [S1].
+-*   **Limitations:** Poor performance on older GPUs without caches; performance degrades with high triangle density per voxel [S1].
++*   **Limitations:** Poor performance on older GPUs without caches; intersection checking may dominate tracing time when voxel triangle counts are high [S1].
+ *   **When to Use:** Modern GPUs with L1/L2 caches (e.g., Fermi and later); scenes where ray coherence is low or unpredictable [S1].
+ *   **When Not to Use:** Older GPUs without caches (e.g., GTX280); scenes with high spatial coherence where Enforced Coherence can exploit shared memory more effectively [S1].

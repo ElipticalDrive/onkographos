@@ -1,0 +1,195 @@
+# Diffusion Tensor Reconstruction via Spherical Harmonics
+
+Also called: Least square fitting of gradient magnitudes, Spherical harmonic transform for DTI
+
+## Overview
+This method reconstructs higher-order symmetric second-order tensors from Diffusion Tensor Imaging (DTI) data by fitting measured gradient magnitudes to a spherical harmonic basis using least squares [S1]. It addresses the limitation of standard second-order tensor reconstruction by allowing the representation of complex, multi-fiber diffusion patterns through higher-order spherical harmonics (e.g., order 4 or 6) [S1]. Unlike standard DTI which yields a single 3x3 symmetric tensor per voxel, this approach models the angular dependency of the apparent diffusion coefficient (ADC) more flexibly, enabling the definition of higher-order tensor lines for visualization [S1]. It differs from [Apparent Diffusion Coefficient (ADC)](12151-apparent-diffusion-coefficient-adc.md) by capturing directional complexity beyond the principal eigenvector [G], and from standard [Diffusion Tensor Imaging (DTI) Visualization](5713-diffusion-tensor-imaging-dti-visualization.md) by utilizing spherical harmonics rather than direct tensor eigen-decomposition for the reconstruction step [G].
+
+## How it works
+
+### Inputs and Outputs
+**Inputs:**
+1.  $S_0$ image: The non-diffusion-weighted baseline image ($b=0$) [S1].
+2.  Diffusion-weighted images: A set of $N$ images acquired with gradient directions $\mathbf{g}_m = (\theta_m, \phi_m)$ and corresponding b-values [S1].
+3.  Gradient directions: A set of unit vectors on the sphere [S1]. The sources cite two specific sets: a standard set of 36 directions provided by the scanner, and a set of 30 directions described by Jones, enabling reconstruction of symmetric tensors of order four and order six respectively [S1].
+4.  Target tensor order $r$: The method supports arbitrary even orders $r$ (e.g., $r=4, 6$) [S1].
+
+**Outputs:**
+*   Spherical harmonic coefficients $a_{lm}$ for the diffusion function $f_\sigma(p)$ at each voxel [S1].
+*   Reconstructed higher-order symmetric second-order tensors $D_{i_0 \dots i_r}$ derived from these coefficients [S1].
+
+### Data Structures
+The core data structure is the set of spherical harmonic coefficients [S1]. For a given voxel $p$, the diffusion function $f_\sigma(p): S^2 \to \mathbb{R}$ is represented by coefficients $a_{lm}$ [S1].
+*   **Symmetry Constraint:** Due to the nature of diffusion measurement (motion along gradients, not direction), the reconstructed data must be symmetric on the sphere [S1]. This implies only even-order information is present [S1].
+*   **Positive Definiteness:** The condition $f_\sigma(p) > 0$ must hold [S1]. This requires the zeroth-order coefficient $a_{00}$ to be large enough to compensate for the sum of oscillations of all higher-order spherical harmonics [S1].
+
+### Formulas
+The reconstruction is based on the Stejskal-Tanner formula for diffusive attenuation [S1]:
+$$ S = S_0 e^{-bD} $$
+Where:
+*   $S$ is the measured signal intensity [S1].
+*   $S_0$ is the baseline signal intensity [S1].
+*   $b$ is the b-value, defined as $b = \gamma^2 \sigma^2 (\Delta - \delta/3)$, where $\gamma$ is the gyromagnetic ratio, $\sigma$ is the gradient amplitude, $\Delta$ is the diffusion time, and $\delta$ is the gradient pulse duration [S1].
+*   $D$ is the apparent diffusion coefficient (ADC) in the direction of the gradient [S1].
+
+The ADC $D$ is modeled as a function on the sphere, approximated by a spherical harmonic expansion [S1]. The measured signal magnitudes are fitted to this basis [S1].
+
+### Parameters
+*   **Gradient Directions:** Critical for conditioning the fitting matrix [S1]. The sources recommend using a higher number of directions (80 to 120+) to ensure stability, though this increases measurement time or reduces resolution [S1]. The specific sets used in the source experiments were 36 directions (scanner standard) and 30 directions (Jones) [S1].
+*   **Tensor Order:** The method supports orders $r=4$ and $r=6$ using the Jones 30-direction set [S1].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def reconstruct_tensor_sh(S0, signals, b_values, gradient_directions, target_order):
+    """
+    Reconstructs higher-order symmetric second-order tensors using spherical harmonics.
+    S0: baseline signal intensity
+    signals: list of measured signal intensities S_m
+    b_values: list of b-values for each direction
+    gradient_directions: list of (theta, phi) tuples
+    target_order: maximum even order r
+    """
+    num_directions = len(signals)
+    # Linearize Stejskal-Tanner: D_m = -ln(S_m / S0) / b_m
+    adcs = [-math.log(signals[m] / S0) / b_values[m] for m in range(num_directions)]
+
+    # Map (l, m) to coefficient index
+    coeff_map = {}
+    idx = 0
+    for l in range(0, target_order + 1, 2):
+        for m in range(-l, l + 1):
+            coeff_map[(l, m)] = idx
+            idx += 1
+    num_coefficients = idx
+
+    # Build design matrix A where A[m, k] = Y_{lm}(theta_m, phi_m)
+    A = [[0.0] * num_coefficients for _ in range(num_directions)]
+    for dir_idx, (theta, phi) in enumerate(gradient_directions):
+        for l in range(0, target_order + 1, 2):
+            for m in range(-l, l + 1):
+                A[dir_idx][coeff_map[(l, m)]] = evaluate_sh_basis(l, m, theta, phi)
+
+    # Solve least squares: min ||A * coeffs - adcs||^2
+    coeffs = solve_lstsq(A, adcs)
+    return coeffs
+
+def evaluate_sh_basis(l, m, theta, phi):
+    """Evaluate real spherical harmonic Y_{lm} for given l, m, theta, phi."""
+    if m == 0:
+        return math.sqrt((2 * l + 1) / (4 * math.pi)) * associated_legendre(l, 0, math.cos(theta))
+    elif m > 0:
+        norm = math.sqrt((2 * l + 1) * math.factorial(l - m) / (math.factorial(l + m) * 4 * math.pi))
+        return norm * associated_legendre(l, m, math.cos(theta)) * math.cos(m * phi)
+    else:
+        norm = math.sqrt((2 * l + 1) * math.factorial(l + m) / (math.factorial(l - m) * 4 * math.pi))
+        return norm * associated_legendre(l, -m, math.cos(theta)) * math.sin(-m * phi)
+
+def associated_legendre(l, m, x):
+    """Compute associated Legendre polynomial P_l^m(x) using recurrence."""
+    if m > l: return 0.0
+    plmm = 1.0
+    if m > 0:
+        somx2 = math.sqrt((1.0 - x) * (1.0 + x))
+        fact = 1.0
+        for i in range(1, m + 1):
+            plmm *= -fact * somx2
+            fact += 2.0
+    if l == m: return plmm
+    pln1 = x * (2 * m + 1) * plmm
+    if l == m + 1: return pln1
+    pln2 = 1.0
+    for i in range(m + 2, l + 1):
+        pln2 = (x * (2 * i - 1) * pln1 - (i + m - 1) * plmm) / (i - m)
+        plmm = pln1
+        pln1 = pln2
+    return pln2
+
+def solve_lstsq(A, b):
+    """Solve min ||Ax - b||^2 using normal equations and Gaussian elimination with partial pivoting."""
+    n = len(A)
+    m = len(A[0])
+    # Compute A^T A and A^T b
+    ATA = [[sum(A[i][j] * A[i][k] for i in range(n)) for k in range(m)] for j in range(m)]
+    ATb = [sum(A[i][j] * b[i] for i in range(n)) for j in range(m)]
+    # Solve ATA x = ATb via Gaussian elimination with partial pivoting
+    aug = [ATA[i] + [ATb[i]] for i in range(m)]
+    for i in range(m):
+        max_row = i
+        for k in range(i + 1, m):
+            if abs(aug[k][i]) > abs(aug[max_row][i]):
+                max_row = k
+        aug[i], aug[max_row] = aug[max_row], aug[i]
+        pivot = aug[i][i]
+        if abs(pivot) < 1e-12: continue
+        for j in range(i, m + 1):
+            aug[i][j] /= pivot
+        for k in range(m):
+            if k != i:
+                factor = aug[k][i]
+                for j in range(i + 1, m + 1):
+                    aug[k][j] -= factor * aug[i][j]
+    return [aug[i][m] for i in range(m)]
+```
+
+### Edge Cases and Pitfalls
+1.  **Ill-conditioned Matrix:** If gradient directions are not chosen thoughtfully, the matrix describing the relation between tensor coefficients and measured ADCs may be ill-conditioned [S1]. This leads to unstable reconstruction and tensor value overshoot [S1].
+    *   *Mitigation:* Use a higher number of gradient directions (80–120+), though this trades off with measurement time or resolution [S1].
+2.  **Noise and Positive Definiteness:** Noise in measured data may violate the condition that $a_{00}$ compensates for higher harmonics, potentially resulting in non-positive definite tensors ($f_\sigma \le 0$) [S1].
+    *   *Observation:* The source authors did not experience this problem in the valid part of their data sets (inside the measured head) [S1].
+3.  **Hardware Constraints:** Fast spherical harmonic transformations require special sets of sampling points which may not be available in standard MRI scanner hardware/software [S1]. Therefore, least squares fitting is preferred over fast transforms for compatibility [S1].
+4.  **Outliers:** While least squares is sensitive to outliers, the source authors did not notice such problems in their data sets [S1]. However, robust methods (e.g., Mangin et al.) are available if outliers are present [S1].
+
+## Operating characteristics
+
+### Time and Memory Complexity
+*   **Time:** The method uses least squares fitting, which is computationally more intensive than fast spherical harmonic transforms due to the lack of special sampling points in standard MRI hardware [S1]. The complexity depends on the number of gradient directions $N$ and the number of coefficients $K$ (which grows with order $r$) [S1]. Solving the linear system is $O(N K^2)$ or $O(N K)$ depending on the solver [G].
+*   **Memory:** Requires storing the gradient directions, b-values, and the resulting coefficients for each voxel [S1]. Higher orders require more coefficients per voxel [S1].
+
+### Measured Performance
+*   The source compares fractional anisotropy, number of tracking directions, and multi-fiber index for tensors of order 4 [S1].
+*   Specific quantitative performance metrics (e.g., reconstruction error, runtime in seconds) are not provided in the sources [S1].
+
+### Scaling
+*   Increasing the number of gradient directions improves stability but increases measurement time or reduces resolution [S1].
+*   Increasing the tensor order $r$ allows for more complex fiber representations (e.g., crossing fibers) but increases the number of coefficients and the risk of ill-conditioning if gradient directions are insufficient [S1].
+
+### Strengths and Limitations
+*   **Strengths:**
+    *   Allows reconstruction of higher-order tensors (order 4, 6) for better modeling of complex diffusion [S1].
+    *   Compatible with standard MRI hardware that does not support special sampling points for fast SH transforms [S1].
+    *   Enables the definition of higher-order tensor lines for visualization [S1].
+*   **Limitations:**
+    *   Requires careful selection of gradient directions to avoid ill-conditioning [S1].
+    *   Higher measurement times or reduced resolution if many directions are used [S1].
+    *   Assumes Gaussian diffusion for second-order tensors; higher orders require more work for validation [S1].
+
+### When to Use
+*   Use when single-fiber models (standard DTI) are insufficient to describe the diffusion in a voxel (e.g., crossing fibers) [S1].
+*   Use when the MRI hardware does not support the special sampling patterns required for fast spherical harmonic transforms [S1].
+
+### When Not to Use
+*   Use standard DTI if computational resources are limited and single-fiber approximation is sufficient [S1].
+*   Use Q-Space or Q-Ball imaging if the goal is to compute the Orientation Distribution Function (ODF) directly, as these methods are specifically developed for that purpose [S1].
+
+## Background
+
+### Origin
+The method is described in the paper "HOT- Lines: Tracking Lines in Higher Order Tensor Fields" [S1]. The authors reference Frank [6] for the use of spherical harmonic transforms in deriving coefficients and Jones et al. [13] for the analysis of gradient direction sets [S1].
+
+### History and Development
+*   The use of spherical harmonics for DTI reconstruction was previously described by Frank [6] [S1].
+*   The authors chose least squares fitting over fast SH transforms due to hardware limitations in MRI scanners [S1].
+*   Jones et al. [13] provided specific gradient direction sets (e.g., 30 directions) optimized for higher-order tensor reconstruction [S1].
+*   The method is part of a broader effort to move beyond second-order tensors to visualize complex line structures in tensor fields [S1].
+
+### Applications
+*   Visualization of higher-order tensor lines in medical imaging [S1].
+*   Analysis of fractional anisotropy, tracking directions, and multi-fiber index in MRI scans [S1].
+
+## Sources
+
+[S1] HOT- Lines: Tracking Lines in Higher Order Tensor Fields, https://doi.org/10.1109/vis.2005.48, fetched 2026-10-27

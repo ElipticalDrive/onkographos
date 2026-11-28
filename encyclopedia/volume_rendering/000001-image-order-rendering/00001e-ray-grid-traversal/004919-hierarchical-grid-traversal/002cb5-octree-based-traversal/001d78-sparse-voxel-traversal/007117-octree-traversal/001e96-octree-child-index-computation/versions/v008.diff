@@ -1,0 +1,124 @@
+--- v007.md
++++ v008.md
+@@ -1,12 +1,10 @@
+ # Octree Child Index Computation
+ 
+-Also called: Octant Index Computation, Child Offset Calculation
+ 
+ ## Overview
+-Octree Child Index Computation determines the 0–7 octant offset (and thus the child index) of a specific child node relative to its parent, given the parent's current depth and the target destination coordinates. It solves the problem of efficiently mapping a 3D spatial query to a local child slot in a sparse voxel octree without performing expensive arbitrary bit shifts or full top-down traversals [S1, S2, unofficial]. Unlike [Point Location](2076-point-location.md), which finds the absolute leaf node containing a point, this method yields only the relative offset of a child within a specific parent node [S1, S2, unofficial]. It is distinct from [Voxel Child Address Calculation](2495-voxel-child-address-calculation.md) by operating on precomputed depth masks rather than geometric bounds, and from [Direction-dependent Morton Order Mapping](2662-direction-dependent-morton-order-mapping.md) by focusing on local indexing rather than global sorting [S1, S2, unofficial].
++Octree Child Index Computation determines the 0–7 octant offset (and thus the child index) of a specific child node relative to its parent, given the parent's current depth and the target destination coordinates [S1, unofficial]. It solves the problem of efficiently mapping a 3D spatial query to a local child slot in a sparse voxel octree without performing expensive arbitrary bit shifts [S1, unofficial]. Unlike [Point Location](2076-point-location.md), which finds the absolute leaf node containing a point, this method yields only the relative offset of a child within a specific parent node [S1, unofficial]. It is distinct from [Voxel Child Address Calculation](2495-voxel-child-address-calculation.md) by operating on precomputed depth masks rather than geometric bounds, and from [Direction-dependent Morton Order Mapping](2662-direction-dependent-morton-order-mapping.md) by focusing on local indexing rather than global sorting [S1, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- `origin`: The 3D coordinate of the ray origin or query point.
+ - `destination`: The 3D coordinate of the target point or ray end.
+ - `depth`: The current depth level of the parent node in the octree.
+@@ -14,26 +12,18 @@
+ 
+ **Outputs:**
+-- `child_index`: An integer in the range [0, 7] representing the octant offset of the child containing the destination relative to the parent.
++- `child_index`: An integer in the range [0, 7] representing the octant offset of the child containing the destination relative to the parent [S1, unofficial].
+ 
+ **Data Structures:**
+-- `child_bit_depth`: A precomputed array of integers where `child_bit_depth[d] = 1 << (max_depth - d - 1)` for each depth `d` from 0 to `max_depth` [S1, unofficial]. This array replaces arbitrary left-shifts with constant shifts [S1, unofficial].
++- `child_bit_depth`: A precomputed array of integers where `child_bit_depth[d] = 1 << (max_depth - d - 1)` for each depth `d` [S1, unofficial]. This array replaces arbitrary left-shifts with constant shifts [S1, unofficial].
+ 
+ **Steps:**
+-1. **Precompute Masks:** Calculate `child_bit_depth[d]` for all relevant depths $d$. This value represents the spatial resolution (step size) of the grid at depth $d$ [S1, unofficial].
+-2. **Mask Coordinates:** Apply the depth mask to both `origin` and `destination` coordinates. For each component $c \in \{x, y, z\}$, compute:
+-   $$ \text{masked}_c = \lfloor c / \text{child\_bit\_depth}[depth] \rfloor $$
+-   This effectively quantizes the coordinates to the grid cells at the current depth [S1, unofficial].
+-3. **Compute Octant Offset:** Determine the relative position of the destination within the parent's 2x2x2 subdivision. The octant index is derived by comparing the masked destination coordinates to the masked origin (or parent center) coordinates. Specifically, for each axis, if the destination's masked coordinate is greater than or equal to the origin's (or the parent's lower bound), the corresponding bit is set [S1, S2, unofficial].
+-   - Bit 0 (X): Set if `masked_x >= origin_x` (or parent min x)
+-   - Bit 1 (Y): Set if `masked_y >= origin_y` (or parent min y)
+-   - Bit 2 (Z): Set if `masked_z >= origin_z` (or parent min z)
+-   The final index is:
+-   $$ \text{child\_index} = (\text{bit}_0) + 2 \cdot (\text{bit}_1) + 4 \cdot (\text{bit}_2) $$
+-   This yields the 0–7 octant offset [S1, unofficial].
+-4. **Return:** Return `child_index`. If the node is a leaf, this index may be used to retrieve a scalar value or a voxel within a cap node [S1, unofficial].
++1. **Precompute Masks:** Calculate `child_bit_depth[d]` for all relevant depths $d$ [S1, unofficial].
++2. **Compute Octant Offset:** Determine the target child octant using binary `&` and integer inequality operations [S1, unofficial].
++3. **Mask and Shift:** `&-mask` the precomputed value with the destination coordinates and bit-shift by constants corresponding to the X, Y, and Z components [S1, unofficial].
++4. **Return:** Return the scalar value when encountering a leaf; either a scalar leaf in an interior node, or a voxel within a cap node [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def compute_child_index(origin, destination, depth, max_depth, child_bit_depth):
++def compute_child_index(destination, depth, max_depth, child_bit_depth):
+     """
+     Computes the 0-7 octant offset of the child containing destination
+@@ -41,6 +31,5 @@
+     
+     Args:
+-        origin: tuple (ox, oy, oz) - Parent origin or ray origin
+-        destination: tuple (dx, dy, dz) - Target point
++        destination: tuple (dx, dy, dz) - Target point coordinates
+         depth: int - Current octree depth
+         max_depth: int - Maximum octree depth
+@@ -50,27 +39,16 @@
+         int: Child index (0-7)
+     """
+-    # Step 1: Get the bit depth mask for the current depth
+-    step = child_bit_depth[depth]
++    # Step 1: Retrieve the precomputed mask for the current depth
++    m = child_bit_depth[depth]
+     
+-    # Step 2: Quantize coordinates to the current grid level
+-    # Using integer division to simulate the floor operation for positive coordinates
+-    # Note: For negative coordinates, floor division behavior must match the grid definition
+-    ox = origin[0] // step
+-    oy = origin[1] // step
+-    oz = origin[2] // step
++    # Step 2 & 3: &-mask destination coordinates and bit-shift by constants
++    # The shift amount corresponds to the bit position of the current subdivision level
++    k = max_depth - depth - 1
++    bit_x = (destination[0] & m) >> k
++    bit_y = (destination[1] & m) >> k
++    bit_z = (destination[2] & m) >> k
+     
+-    dx = destination[0] // step
+-    dy = destination[1] // step
+-    dz = destination[2] // step
+-    
+-    # Step 3: Compute octant bits
+-    # Bit 0 corresponds to X, Bit 1 to Y, Bit 2 to Z
+-    # If the destination cell index is >= the origin cell index, the bit is set
+-    bit_x = 1 if dx >= ox else 0
+-    bit_y = 1 if dy >= oy else 0
+-    bit_z = 1 if dz >= oz else 0
+-    
+-    # Step 4: Combine bits to form the child index
+-    child_index = bit_x + (bit_y << 1) + (bit_z << 2)
++    # Step 4: Combine bits to form the 0-7 octant offset
++    child_index = bit_x | (bit_y << 1) | (bit_z << 2)
+     
+     return child_index
+@@ -82,7 +60,7 @@
+ 
+ **Edge Cases and Pitfalls:**
+-- **Precision:** Integer division must handle negative coordinates correctly if the octree spans negative space. The sources assume positive coordinates or a specific grid alignment [S1, unofficial].
+-- **Boundaries:** If the destination is exactly on a boundary, the inequality `>=` determines the octant. This must be consistent with the grid definition [S1, unofficial].
+-- **Leaf Nodes:** If the current depth is `max_depth`, the child index may be used to index into a leaf payload (e.g., a scalar or voxel data) [S1, unofficial].
++- **Precision:** The algorithm relies on integer coordinate representation and bitwise operations; floating-point coordinates must be quantized to the grid first [G].
++- **Boundaries:** The method assumes a regular octree structure aligned to powers of two [S1, unofficial].
++- **Leaf Detection:** The method itself only computes the offset; traversal logic must handle leaf termination and payload retrieval (scalar or voxel within a cap node) [S1, unofficial].
+ 
+ ## Subtopics
+@@ -108,13 +86,13 @@
+ ## Operating characteristics
+ - **Time Complexity:** $O(1)$ per node visit, assuming precomputed `child_bit_depth` array. The operations involve constant-time bitwise shifts and comparisons [S1, unofficial].
+-- **Memory Complexity:** $O(\text{max\_depth})$ for the precomputed `child_bit_depth` array [S1, unofficial].
+ - **Performance:** Precomputing `child_bit_depth` avoids expensive arbitrary left-shifts, resulting in noticeably better performance on hardware where variable-shift instructions are costly [S1, unofficial].
+ - **Strengths:** Efficient, branch-minimal computation of child indices; suitable for GPU and CPU implementations [S1, unofficial].
+-- **Limitations:** Requires precomputation of depth masks; assumes a regular octree structure [S1, unofficial].
++- **Limitations:** Requires precomputation of depth masks [S1, unofficial].
+ 
+ ## Background
+-The method was introduced in the context of interactive isosurface ray tracing of large octree volumes [S1, unofficial]. It addresses the performance bottleneck of neighbor finding and child traversal in sparse voxel octrees by replacing arbitrary bit shifts with precomputed constants [S1, unofficial]. The approach is detailed in Appendix B.1 of the source paper [S1, unofficial].
++The method is described in the context of octree traversal and neighbor finding for sparse voxel volumes [S1, unofficial]. It addresses the performance bottleneck of arbitrary bit shifts by using precomputed constants [S1, unofficial]. Details are in Appendix B.1 of the source [S1, unofficial].
+ 
+ ## Sources
+ [S1] Interactive Isosurface Ray Tracing of Large Octree Volumes, https://www.researchgate.net/publication/261082346_Interactive_Isosurface_Ray_Tracing_of_Large_Octree_Volumes, fetched 2026-10-29 (unofficial)
+-[S2] hectorpiteau/sparse-voxels, https://github.com/hectorpiteau/sparse-voxels, fetched 2026-10-24 (unofficial)+[S2] hectorpiteau/sparse-voxels, https://github.com/hectorpiteau/sparse-voxels, fetched 2026-10-24 (unofficial)
++[S3] Eine adaptive, hybride Datenstruktur für Volumen Datensätze auf der GPU, https://doi.org/10.34726/hss.2016.26562, fetched 2026-10-26 (unofficial)

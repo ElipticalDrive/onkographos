@@ -1,0 +1,176 @@
+# Gaussian Partitioning (Count-Then-Fill Binning)
+
+Also called: Count-Then-Fill Binning, HiGS Binning, Two-pass CUDA binning for Gaussians
+
+## Overview
+Gaussian Partitioning is a two-pass CUDA binning algorithm that assigns 3D Gaussians to macro-tiles by constructing per-macro-tile, depth-keyed lists during the binning pass itself. It solves the parallel write-conflict problem of building variable-length lists without resorting to a global composite-key sort, which is required by methods like Kerbl et al.'s original Gaussian Splatting [S1, unofficial]. By using batch-local atomics and hierarchical prefix scans, it eliminates the need for global sorting, leaving only in-segment ordering for downstream processing [S1, unofficial].
+
+## How it works
+**Inputs:**
+*   A batch of $B_p = 8,192$ Gaussians [S1, unofficial].
+*   Per-warp visibility bitmask from the projection front-end, used to cull invisible Gaussians before intersection tests [S1, unofficial].
+*   Macro-tile geometry (64×32 pixels) and frame dimensions [S1, unofficial].
+
+**Outputs:**
+*   A segmented structure of per-macro-tile lists containing $(depth, gaussian-id)$ pairs, ready for in-segment sorting [S1, unofficial].
+
+**Data Structures:**
+1.  **Histogram Matrix:** An $N_{batch} \times N_{macro}$ matrix stored in DRAM as packed `uint16` pairs (two cells per 32-bit word). Size: $2 N_{batch} N_{macro}$ bytes [S1, unofficial].
+    *   $N_{batch} = \lceil N_{gs} / B_p \rceil$
+    *   $N_{macro}$: Number of macro-tiles in the frame (~1,000 at 1080p, ~4,000 at 4K) [S1, unofficial].
+2.  **Output Pair List:** Occupies $8 N_{macro}$ bytes per batch. Each entry is a 4-byte depth key + 4-byte gaussian-id [S1, unofficial].
+3.  **Local Histogram:** Private shared memory in the CUDA work group, with one counter per macro-tile [S1, unofficial].
+
+**Steps:**
+
+1.  **Batch Processing:** The Gaussian set is divided into fixed-size batches of $B_p = 8,192$ Gaussians. Each batch is processed cooperatively by one CUDA work group (CTA) [S1, unofficial].
+
+2.  **Count Pass (Local Histogramming):**
+    *   The work group initializes a private shared-memory histogram with zeros, one counter per macro-tile [S1, unofficial].
+    *   For each Gaussian in the batch:
+        *   Check the per-warp visibility bitmask. If culled, skip [S1, unofficial].
+        *   Perform a conservative per-row ellipse-contour intersection test against macro-tiles using Cholesky factors of the inverse covariance (AccuTile-style, but at macro-tile granularity) [S1, unofficial].
+        *   For each intersected macro-tile, increment the corresponding counter in the local histogram using local atomics [S1, unofficial].
+    *   Flush the local histogram to DRAM as packed `uint16` pairs into the Histogram Matrix [S1, unofficial].
+
+3.  **Prefix Sum (Offset Calculation):**
+    *   Perform a two-level hierarchical prefix scan over the DRAM Histogram Matrix [S1, unofficial].
+    *   **Level 1:** Aggregate batch-local counts to compute per-macro-tile total counts (widening 16-bit to 32-bit) [S1, unofficial].
+    *   **Level 2:** Compute global write offsets for each batch, determining the starting write position for each macro-tile's list in the output buffer [S1, unofficial].
+
+4.  **Fill Pass:**
+    *   Replay the per-batch intersection logic (same visibility check and AccuTile intersection test) [S1, unofficial].
+    *   For each intersected macro-tile:
+        *   Use the precomputed global write offset for that macro-tile and batch.
+        *   Write a record consisting of a 4-byte depth key and a 4-byte gaussian-id to the output buffer [S1, unofficial].
+        *   The depth key is stored as raw IEEE 754 float bits reinterpreted as `int32` to exploit unsigned integer comparison sorting properties [S1, unofficial].
+        *   Increment the write offset for that macro-tile (using local atomics or atomic add on the output buffer if necessary, though the hierarchical scan ensures disjoint ranges per batch if implemented correctly; the source implies direct writing into precomputed ranges) [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Constants
+B_p = 8192  # Partition batch size
+MACRO_TILE_WIDTH = 64
+MACRO_TILE_HEIGHT = 32
+
+def gaussian_partitioning(gaussians, visibility_masks, macro_tile_bounds, output_buffer):
+    """
+    gaussians: List of Gaussian objects
+    visibility_masks: Per-warp bitmask array
+    macro_tile_bounds: Array of macro-tile bounding boxes
+    output_buffer: Pre-allocated buffer for (depth, id) pairs
+    """
+    N_gs = len(gaussians)
+    N_batch = (N_gs + B_p - 1) // B_p
+    N_macro = len(macro_tile_bounds)
+    
+    # Histogram Matrix: N_batch x N_macro, stored as packed uint16
+    # Flattened to 1D array for simplicity in pseudocode
+    histogram = [0] * (N_batch * N_macro)
+    
+    # --- Count Pass ---
+    for batch_idx in range(N_batch):
+        start = batch_idx * B_p
+        end = min(start + B_p, N_gs)
+        
+        # Local histogram for this batch
+        local_hist = [0] * N_macro
+        
+        for i in range(start, end):
+            g = gaussians[i]
+            
+            # Check visibility
+            if not is_visible(g, visibility_masks):
+                continue
+                
+            # Intersection test
+            intersected_tiles = accu_tile_intersection(g, macro_tile_bounds)
+            
+            # Accumulate to local histogram
+            for tile_id in intersected_tiles:
+                local_hist[tile_id] += 1
+                
+        # Flush local histogram to DRAM
+        for tile_id in range(N_macro):
+            histogram[batch_idx * N_macro + tile_id] = local_hist[tile_id]
+            
+    # --- Prefix Sum ---
+    # Compute global offsets for each batch-tile pair
+    # This produces the starting write index for each macro-tile in each batch's segment
+    offsets = compute_hierarchical_prefix_sum(histogram, N_batch, N_macro)
+    
+    # --- Fill Pass ---
+    for batch_idx in range(N_batch):
+        start = batch_idx * B_p
+        end = min(start + B_p, N_gs)
+        
+        # Current write pointer for each macro-tile within this batch's segment
+        # Initialized to the base offset for this batch
+        current_write_ptrs = [offsets[batch_idx * N_macro + t] for t in range(N_macro)]
+        
+        for i in range(start, end):
+            g = gaussians[i]
+            
+            # Check visibility
+            if not is_visible(g, visibility_masks):
+                continue
+                
+            # Intersection test
+            intersected_tiles = accu_tile_intersection(g, macro_tile_bounds)
+            
+            # Write to output buffer
+            for tile_id in intersected_tiles:
+                depth_key = float_to_int32_bits(g.depth)
+                record = (depth_key, i)
+                output_buffer[current_write_ptrs[tile_id]] = record
+                current_write_ptrs[tile_id] += 1
+                
+    return output_buffer
+
+def float_to_int32_bits(f):
+    """Reinterpret IEEE 754 float bits as int32 for sorting."""
+    import struct
+    return struct.unpack('i', struct.pack('f', f))[0]
+
+def is_visible(g, masks):
+    """Check if Gaussian is visible based on precomputed bitmask."""
+    # Implementation depends on specific warp mask layout
+    return True # Placeholder for actual bitmask check
+
+def accu_tile_intersection(g, bounds):
+    """
+    Conservative per-row ellipse-contour intersection test.
+    Returns list of intersected macro-tile IDs.
+    """
+    # Uses Cholesky factors of inverse covariance
+    # Returns tile IDs where the Gaussian overlaps
+    return [] # Placeholder for actual intersection logic
+```
+
+**Parameters:**
+*   $B_p$: Partition batch size, set to 8,192 Gaussians [S1, unofficial].
+*   Macro-tile size: 64×32 pixels [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Local Storage Capacity:** A render-tile histogram would require 30,000–130,000 entries at 1080p/4K, exceeding commodity GPU local storage. Macro-tile histograms (~1,000 at 1080p, ~4,000 at 4K) fit comfortably [S1, unofficial].
+*   **Depth Sorting:** Depth must be stored as raw IEEE 754 float bits reinterpreted as `int32` to ensure correct unsigned integer comparison sorting [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Dominated by the two passes over the Gaussian set and the hierarchical prefix scan. The prefix scan is $O(N_{batch} \cdot N_{macro})$ [S1, unofficial].
+*   **Memory Complexity:** Histogram matrix size is $2 N_{batch} N_{macro}$ bytes. Output buffer size is proportional to the number of tile-Gaussian pairs [S1, unofficial].
+*   **Performance:** Reduces tile-Gaussian pair counts by 85–94% compared to gsplat (opacity-aware AABB) and AccuTile at render-tile granularity [S1, unofficial].
+    *   1080p: 10.1M pairs (gsplat) -> 1.51M pairs (HiGS) [S1, unofficial].
+    *   4K: 29.3M pairs (gsplat) -> 2.21M pairs (HiGS) [S1, unofficial].
+*   **Strengths:** Eliminates global composite-key sort; reduces data movement; fits in local storage.
+*   **Limitations:** Requires hierarchical prefix scan; dependent on AccuTile intersection accuracy [S1, unofficial].
+
+## Background
+*   **Origin:** HiGS (Hierarchical Rendering Architecture for Real-Time 3D Gaussian Splatting) [S1, unofficial].
+*   **History:** Developed as an alternative to Kerbl et al.'s global sort approach, addressing the scalability issues of global composite-key sorts for large Gaussian scenes [S1, unofficial].
+*   **Usage:** Used in real-time 3D Gaussian Splatting rendering pipelines, particularly for CPU-sorted, instanced rendering and tiled rasterization [S1, unofficial].
+
+## Sources
+[S1] HiGS: A Hierarchical Rendering Architecture for Real-Time 3D Gaussian Splatting, https://doi.org/10.48550/arXiv.2606.00352, fetched 2026-10-29 (unofficial)

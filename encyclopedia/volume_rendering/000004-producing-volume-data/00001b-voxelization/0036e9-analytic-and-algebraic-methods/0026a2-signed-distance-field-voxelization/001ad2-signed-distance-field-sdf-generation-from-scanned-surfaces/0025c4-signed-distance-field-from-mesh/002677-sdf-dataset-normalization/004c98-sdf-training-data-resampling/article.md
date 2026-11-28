@@ -1,0 +1,140 @@
+# SDF Training Data Resampling
+
+Also called: Point cloud sampling for SDF, volume/surface resampling
+
+## Overview
+Generates a balanced set of training points (surface, uniform, volume) with ground-truth Signed Distance Field (SDF) values for neural network training [S1, unofficial].
+
+## How it works
+**Inputs:** A triangular mesh (vertices $\mathbf{V}$, faces $\mathbf{F}$), total sample count $N$, surface ratio $r_s$, uniform ratio $r_u$, perturbation range $d$, target radius $R_{\text{target}}$ [S1, unofficial].
+**Outputs:** Tensor of points $\mathbf{P} \in \mathbb{R}^{N \times 3}$, Tensor of SDF values $\mathbf{D} \in \mathbb{R}^{N}$ [S1, unofficial].
+
+**Data Structures:**
+*   `cuBVH`: A CUDA-accelerated bounding volume hierarchy storing mesh vertices and faces, supporting nearest-point and distance queries [S1, unofficial].
+*   `points_list`, `distances_list`: Lists of tensors to be concatenated [S1, unofficial].
+
+**Parameters:**
+*   $r_s$: Surface ratio. Default $0.0$ [S1, unofficial].
+*   $r_u$: Uniform ratio. Default $0.05$ [S1, unofficial].
+*   $d$: Perturbation range for volume points. Fixed at $0.2$ [S1, unofficial].
+*   $R_{\text{target}}$: Normalization radius. Fixed at $1.0 / 1.03 \approx 0.9709$ [S1, unofficial].
+*   $\sigma$: Perturbation standard deviation. $\sigma = d / 6.0$ [S1, unofficial].
+
+**Steps:**
+1.  **Normalize Mesh:** Compute vertex center $\mathbf{C} = \frac{1}{M}\sum \mathbf{V}_i$ [S1, unofficial]. Center vertices: $\mathbf{V}'_i = \mathbf{V}_i - \mathbf{C}$ [S1, unofficial]. Compute max norm $r_{\text{max}} = \max_i \|\mathbf{V}'_i\|$ clamped to $\epsilon$ if zero [S1, unofficial]. Scale vertices: $\mathbf{V}''_i = \mathbf{V}'_i \times \frac{R_{\text{target}}}{r_{\text{max}}}$ [S1, unofficial].
+2.  **Build BVH:** Construct `cuBVH` from $\mathbf{V}''$ and $\mathbf{F}$ [S1, unofficial].
+3.  **Calculate Counts:** $N_s = \lfloor N \times r_s \rfloor$, $N_u = \lfloor N \times r_u \rfloor$, $N_v = N - N_s - N_u$ [S1, unofficial].
+4.  **Surface Points:** If $N_s > 0$, repeat vertices cyclically to get $N_s$ points, shuffle, and query BVH for SDF values [S1, unofficial].
+5.  **Uniform Points:** If $N_u > 0$, sample $N_u$ points uniformly from $[-1, 1]^3$ and query BVH for SDF values [S1, unofficial].
+6.  **Volume Points:** If $N_v > 0$, select $N_v$ anchor points from mesh vertices, generate Gaussian noise $\mathbf{\Delta} \sim \mathcal{N}(0, \sigma^2 I)$, clip perturbation magnitude to $d$, compute perturbed points $\mathbf{P}_v = \text{Anchors} + \mathbf{\Delta}$, and query BVH for SDF values [S1, unofficial].
+7.  **Concatenate:** Combine surface, uniform, and volume points and their distances, then shuffle the final dataset [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def build_cubvh(verts, faces):
+    # External: cubvh.cuBVH(verts, faces)
+    raise NotImplementedError("External library cubvh required for BVH construction")
+
+def query_bvh_sdf(bvh, pts):
+    # External: bvh.signed_distance(pts)
+    raise NotImplementedError("External library cubvh required for SDF queries")
+
+def resample_sdf(mesh_vertices, mesh_faces, total_samples, surface_ratio=0.0, uniform_ratio=0.05, d=0.2):
+    # 1. Normalize Mesh
+    center = mesh_vertices.mean(axis=0)
+    centered_verts = mesh_vertices - center
+    r_max = np.linalg.norm(centered_verts, axis=1).max()
+    if r_max < 1e-8:
+        r_max = 1e-8
+    target_radius = 1.0 / 1.03
+    scale = target_radius / r_max
+    normalized_verts = centered_verts * scale
+    
+    # 2. Build BVH
+    bvh = build_cubvh(normalized_verts, mesh_faces)
+    
+    # 3. Calculate Counts
+    num_surface = int(total_samples * surface_ratio)
+    num_uniform = int(total_samples * uniform_ratio)
+    num_volume = total_samples - num_surface - num_uniform
+    
+    points_list = []
+    dists_list = []
+    
+    # 4. Surface Points
+    if num_surface > 0:
+        n_verts = normalized_verts.shape[0]
+        repeat_factor = (num_surface + n_verts - 1) // n_verts
+        surf_pts = np.tile(normalized_verts, (repeat_factor, 1))[:num_surface]
+        idx = np.random.permutation(num_surface)
+        surf_pts = surf_pts[idx]
+        surf_dists = query_bvh_sdf(bvh, surf_pts)
+        points_list.append(surf_pts)
+        dists_list.append(surf_dists)
+        
+    # 5. Uniform Points
+    if num_uniform > 0:
+        unif_pts = np.random.uniform(-1, 1, size=(num_uniform, 3))
+        unif_dists = query_bvh_sdf(bvh, unif_pts)
+        points_list.append(unif_pts)
+        dists_list.append(unif_dists)
+        
+    # 6. Volume Points
+    if num_volume > 0:
+        anchor_indices = np.random.choice(normalized_verts.shape[0], num_volume, replace=True)
+        anchors = normalized_verts[anchor_indices]
+        
+        sigma = d / 6.0
+        delta = np.random.normal(0, sigma, size=(num_volume, 3))
+        
+        norms = np.linalg.norm(delta, axis=1, keepdims=True)
+        mask = norms > d
+        if mask.any():
+            delta[mask] = delta[mask] * (d / norms[mask])
+            
+        vol_pts = anchors + delta
+        vol_dists = query_bvh_sdf(bvh, vol_pts)
+        points_list.append(vol_pts)
+        dists_list.append(vol_dists)
+        
+    # 7. Concatenate and Shuffle
+    all_points = np.concatenate(points_list, axis=0)
+    all_dists = np.concatenate(dists_list, axis=0)
+    
+    shuffle_idx = np.random.permutation(len(all_points))
+    return all_points[shuffle_idx], all_dists[shuffle_idx]
+```
+
+**Edge Cases:**
+*   $r_{\text{max}} = 0$: Clamped to $\epsilon$ to avoid division by zero [S1, unofficial].
+*   $N_v < 0$: If $r_s + r_u > 1$, $N_v$ becomes negative and the logic fails [G]. Guard: ensure $r_s + r_u \le 1$.
+*   Mesh with no vertices: Handled by the $r_{\text{max}}$ clamp [S1, unofficial].
+
+## Subtopics
+
+### SDF Dataset Normalization
+Normalizes vertex coordinates to $[-1, 1]$ before resampling. [SDF Dataset Normalization](3787-sdf-dataset-normalization.md)
+
+### SDF Grid Resampling from File
+Resamples an existing SDF grid from a file, not from a mesh. [SDF Grid Resampling from File](4878-sdf-grid-resampling-from-file.md)
+
+### Mesh Normalization
+Normalizes mesh scale and position. [Mesh Normalization](3796-mesh-normalization.md)
+
+## Operating characteristics
+*   **Time Complexity:** Dominated by BVH construction $O(M \log M)$ and $N$ queries $O(N \log M)$, where $M$ is face count [G].
+*   **Memory Complexity:** $O(N + M)$ for storing points and BVH [G].
+*   **Strengths:** Provides explicit control over surface vs. volume point distribution, crucial for training SDF networks to converge correctly [S1, unofficial].
+*   **Limitations:** Requires a watertight or nearly watertight mesh for accurate SDF queries via BVH [G]. Noise clipping is heuristic [G].
+*   **When to use:** When training neural SDFs from mesh data and a balanced point cloud is required [S1, unofficial].
+*   **When not to use:** When a pre-computed voxel grid is available [S1, unofficial].
+
+## Background
+The method uses `cubvh` for fast CUDA-based SDF queries and `trimesh` for mesh loading, with a perturbation strategy ($d=0.2, \sigma=d/6$) to ensure volume points are close to the surface but not exactly on it, helping the network learn the transition zone [S1, unofficial].
+
+## Sources
+[S1] naver-ai/TetraSDF, https://github.com/naver-ai/TetraSDF, fetched 2026-10-27 (unofficial)

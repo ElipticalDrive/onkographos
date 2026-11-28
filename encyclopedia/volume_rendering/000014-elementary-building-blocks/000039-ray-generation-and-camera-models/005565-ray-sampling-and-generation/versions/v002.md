@@ -1,0 +1,55 @@
+# Ray Sampling and Generation
+
+Also called: Primary Ray Generation, Ray Bundle Construction
+
+## Overview
+Ray Sampling and Generation constructs the geometric primitives (origins $\mathbf{o}$ and directions $\mathbf{d}$) required for volume rendering, mapping 2D pixel coordinates to 3D world-space rays [G]. It solves the initialization problem for volumetric integration by providing structured sampling points along the viewing frustum [G]. It differs from its siblings by focusing on the geometric transformation from pixel indices to ray vectors, whereas methods like [Near-Far Linear Ray Generation](6841-near-far-linear-ray-generation.md) focus on depth discretization along those rays, and [Refined Ray Generation via PDF Sampling](6837-refined-ray-generation-via-pdf-sampling.md) focuses on adaptive depth sampling based on prior weights [G].
+
+## Shared principles
+The shared principles of this family are the geometric definition of rays and the parallel execution model [G].
+
+**Ray Definition**
+Rays are defined by an origin $\mathbf{o}$ and a direction $\mathbf{d}$ [G]. The direction is typically normalized. The origin is often the camera eye position, but can vary based on the camera model [G].
+
+**Parallel Execution**
+Computations are mapped to parallel threads [G]. Each thread typically processes one or more pixels or samples [G]. Memory access patterns are optimized for coalescing [G]. Synchronization is used to manage data dependencies between threads [G].
+
+## Subtopics
+
+### [Uniform Sphere Sampling](1669-uniform-sphere-sampling.md)
+Generates a random direction vector uniformly distributed over the surface of a unit sphere. It solves the problem of casting rays or sampling scattering directions in volume rendering where no preferred orientation exists, ensuring that every point on the sphere has an equal probability of being selected. It sets itself apart from [Random Hemisphere Sampling](2034-random-hemisphere-sampling.md) by covering the full $4\pi$ steradians rather than restricting samples to a half-space, and from [Rejection Sampling for Uniform Sphere Sampling](3286-rejection-sampling-for-uniform-sphere-sampling.md) by using direct spherical coordinate transformation which avoids the computational cost and variance of rejection loops [G]. Choose this method when isotropic scattering or full-sphere illumination sampling is required.
+
+### [Grid Ray Sampler](3930-grid-ray-sampler.md)
+Generates a set of 3D camera rays by mapping pixel coordinates from an image grid to world space using camera intrinsics and extrinsics. It solves the problem of sampling primary rays for a sensor, optionally applying a reparameterization function to the image-space positions to enable differentiable rendering with respect to camera or scene parameters. It differs from its siblings by focusing on the geometric transformation from 2D pixel indices to 3D ray vectors, whereas methods like [Near-Far Linear Ray Generation](6841-near-far-linear-ray-generation.md) focus on depth discretization along those rays, and [Refined Ray Generation via PDF Sampling](6837-refined-ray-generation-via-pdf-sampling.md) focuses on adaptive depth sampling based on prior weights. Choose this method when structured or random subsets of an image grid are needed for training or rendering.
+
+### [Ray Casting](6080-ray-casting.md)
+Determines the color of each pixel by casting primary rays from a camera through the image plane into the scene and computing the first intersection with visible geometry. It differs from full ray tracing by excluding secondary rays for shadows, reflections, or refractions, serving as the base visibility computation upon which advanced effects are built. In volume rendering, it specifically refers to ray casting and compositing of even-spaced samples along primary viewing rays. Choose this method for basic visibility computation or when secondary bounces are unnecessary.
+
+### [Camera Ray Generation](7456-camera-ray-generation.md)
+Computes the 3D world-space origin and direction vectors for viewing rays corresponding to each pixel in a raster image, given explicit camera intrinsic and extrinsic parameters. It solves the problem of mapping 2D screen coordinates to 3D world-space rays for volume rendering or ray tracing. Unlike [Pinhole Camera Ray Generation](5058-pinhole-camera-ray-generation.md), which often derives rays directly from geometric primitives such as field of view (FOV) and camera basis vectors, this method relies on explicit intrinsic ($K$) and extrinsic ($c2w$) matrices to define the projection geometry. Choose this method when precise control over camera calibration matrices is required.
+
+### [Ray Sample Generation](12271-ray-sample-generation.md)
+Constructs `RaySamples` from a `RayBundle` and bin boundaries, projecting points along ray directions to create frustums for volume rendering. It serves as the bridge between camera geometry and volumetric integration, defining the spatial extent and sampling intervals for each ray. Unlike sibling methods that define ray origins or directions (e.g., [Camera Ray Generation](7456-camera-ray-generation.md)), this method focuses on the discretization of the ray path into manageable segments (frustums) with associated geometric properties. Choose this method when volumetric integration requires explicit frustum geometry and delta distances.
+
+### [RaySamples](20122-raysamples.md)
+Data structure holding the geometric representation of sampled frustums, including camera indices, deltas, spacing starts/ends, and metadata. It standardizes the output format for downstream volumetric integration and density/color accumulation. Choose this structure when passing discretized ray data between rendering modules.
+
+### [Abstract Light Source Interface](21359-abstract-light-source-interface.md)
+An abstract base class defining the interface for light sources, requiring a bounding shape for backward ray tracing and methods for sampling rays and plotting. It standardizes light source interactions within the rendering pipeline. Choose this interface when implementing custom or modular light sources that require backward tracing support.
+
+### Interaction-Aware Language Embedding
+A method to efficiently store language features in lightweight planes by indexing them according to maximum probability sampling, adapting to interactive variable changes via bilinear interpolation [S1, unofficial]. For any sampling point p, it projects it onto pu = [x|κ(u)], retrieves a local language feature group by index d, and performs bilinear interpolation using κu to obtain a language embedding that adapts to interactive variable changes from surrounding clip features [S1, unofficial]. Storage complexity is O(C × α × dim), where C is feature dimension, α is number of interactable objects, and dim is CLIP feature dimension [S1, unofficial]. Choose this approach when integrating interactive language features into ray sampling pipelines [S1, unofficial].
+
+### Training Ray Sampling
+During training, foreground objects are rendered by uniformly sampling 5000 rays for the object center alone on a 320x180 canvas, while background shadows use a 160x90 resolution shadow map with 50 rays per scene pixel aggregated with 8-neighbors to obtain 450 rays total [S2]. Inference samples rays for each object pixel using per-pixel importance sampling, with 1024 rays for the diffuse component and 256 rays for the specular component [S2]. The ray-mesh query function is a CPU implementation using trimesh, which is the efficiency bottleneck [S2]. Average rendering times are 0.2s for foreground objects and 2s for background shadows, with 12G GPU memory consumption during training [S2]. Choose this scheme when optimizing training throughput for interactive scenes with complex shadows [S2].
+
+### DepthSamples Data Structure
+Inherits all fields from RaySamples and adds three torch::Tensor fields: xyz, depth, and ray_sdf [S3, unofficial]. It reuses RaySamples' index, index_select, slice, cat, to, contiguous, and clone methods while applying the same numel() > 0 guards to the additional fields [S3, unofficial]. Choose this structure when depth and signed distance field (SDF) data must be propagated alongside standard ray samples [S3, unofficial].
+
+## Background
+The geometric definition of rays originates from classical ray tracing [G]. The specific application to Neural Radiance Fields (NeRF) popularized the grid-based sampling of rays from intrinsic/extrinsic matrices for training [G]. The construction of `RaySamples` with frustum geometry is a later development in differentiable volumetric rendering to enable accurate density and color integration [12271-ray-sample-generation.md].
+
+## Sources
+[S1] LiveScene: Language Embedding Interactive Radiance Fields for Physical Scene Rendering and Control, https://doi.org/10.48550/arXiv.2406.16038, fetched 2026-10-29 (unofficial)
+[S2] Neural Light Field Estimation for Street Scenes with Differentiable Virtual Object Insertion, https://doi.org/10.1007/978-3-031-20086-1_22, fetched 2026-10-30
+[S3] hku-mars/GS-SDF, https://github.com/hku-mars/GS-SDF, fetched 2026-10-27 (unofficial)

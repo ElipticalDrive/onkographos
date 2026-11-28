@@ -1,0 +1,119 @@
+# Two-Stage Vector Quantization (VQ) for SH-AC
+Also called: Two-Stage VQ for SH-AC
+## Overview
+Two-Stage VQ for SH-AC is a compression method for Spherical Harmonic (SH) coefficients in 3D Gaussian Splatting (3DGS) that reduces bitrate by separating coarse shape approximation from fine residual detail. It builds on [KNN-based Grouping for SH-AC Residuals](19531-knn-based-grouping-for-sh-ac-residuals.md) by applying vector quantization to grouped residual sub-vectors rather than the original coefficients. Unlike its parent method which only groups residuals, this method explicitly quantizes both the coarse vector and the grouped residuals using separate codebooks, enabling efficient entropy coding of the resulting indices [S1].
+## How it works
+**Inputs and Outputs:**
+- Input: 45-dimensional SH-AC coefficient vector $\mathbf{c}$ for each Gaussian.
+- Output: One coarse index $i_c$ and $G$ residual indices $\{i_{r,1}, \dots, i_{r,G}\}$, where $G$ is the number of groups.
+
+**Data Structures:**
+- Codebook $C_{coarse}$: Size $N=1024$, containing 45-dimensional vectors.
+- Codebook $C_{residual}$: Size $N=1024$, containing $D_{sub}$-dimensional vectors, where $D_{sub} = 45/G$.
+- Grouping Map: A permutation or partitioning scheme defining which dimensions belong to which of the $G$ groups.
+- Indices: 10-bit integers ($\log_2(1024)$) for each codeword entry.
+
+**Steps:**
+1. **Normalization:** Normalize the input SH-AC vector $\mathbf{c}$ using pre-computed normalization parameters (mean and standard deviation) to produce $\mathbf{c}_{norm}$ [S1].
+2. **Stage 1 (Coarse Quantization):** Find the codeword $\mathbf{w}_c \in C_{coarse}$ that minimizes the Euclidean distance to $\mathbf{c}_{norm}$. Record the index $i_c$.
+   $$ i_c = \arg \min_{j} \| \mathbf{c}_{norm} - \mathbf{w}_{c,j} \|^2 $$
+3. **Residual Calculation:** Compute the residual vector $\mathbf{r} = \mathbf{c}_{norm} - \mathbf{w}_c$ [S1].
+4. **Grouping:** Partition $\mathbf{r}$ into $G$ non-overlapping sub-vectors $\mathbf{r}_1, \dots, \mathbf{r}_G$ based on the grouping map. Each $\mathbf{r}_g$ has dimension $45/G$ [S1].
+5. **Stage 2 (Residual Quantization):** For each group $g \in \{1, \dots, G\}$, find the codeword $\mathbf{w}_{r,g} \in C_{residual}$ that minimizes the distance to $\mathbf{r}_g$. Record the index $i_{r,g}$.
+   $$ i_{r,g} = \arg \min_{j} \| \mathbf{r}_g - \mathbf{w}_{r,j} \|^2 $$
+6. **Reconstruction (Decoder):**
+   - Retrieve $\mathbf{w}_c$ using $i_c$.
+   - Retrieve $\mathbf{w}_{r,g}$ for each $g$ using $i_{r,g}$.
+   - Reorder $\mathbf{w}_{r,g}$ according to the grouping map to form the full residual vector $\mathbf{r}_{rec}$.
+   - Compute $\mathbf{c}_{rec} = \mathbf{w}_c + \mathbf{r}_{rec}$.
+   - Apply inverse normalization to $\mathbf{c}_{rec}$ to recover the final SH-AC coefficients [S1].
+
+**Parameters:**
+- Codebook size: 1024 entries for both stages [S1].
+- Index bit depth: 10 bits per index [S1].
+- Number of groups ($G$): Variable. Common configurations include $G=1$ (no residual grouping), $G=3$ (15-dim sub-vectors), $G=5$ (9-dim sub-vectors), and $G=9$ (5-dim sub-vectors) [S1]. The bitrate is controlled by varying $G$ [S1].
+
+**Edge Cases and Pitfalls:**
+- Precision: Use standard floating-point arithmetic for distance calculations. The indices are integers.
+- Boundary: Ensure the grouping map covers all 45 dimensions exactly once [S1].
+- Degenerate Input: If the residual is zero, the optimal index is the one corresponding to the zero vector in the codebook (if present) or the closest codeword [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def encode_sh_ac(c, coarse_codebook, residual_codebook, grouping_map, norm_params):
+    """
+    c: numpy array of shape (45,)
+    coarse_codebook: numpy array of shape (1024, 45)
+    residual_codebook: numpy array of shape (1024, 45//G)
+    grouping_map: list of lists, e.g., [[0,1,...], [2,3,...], ...]
+    norm_params: tuple (mean, std)
+    """
+    # 1. Normalize
+    mean, std = norm_params
+    c_norm = (c - mean) / std
+    
+    # 2. Stage 1: Coarse VQ
+    # Compute distances to all coarse codewords
+    diffs = coarse_codebook - c_norm
+    dists = np.sum(diffs**2, axis=1)
+    i_c = np.argmin(dists)
+    w_c = coarse_codebook[i_c]
+    
+    # 3. Residual
+    r = c_norm - w_c
+    
+    # 4. Grouping and Stage 2: Residual VQ
+    indices_r = []
+    for group_indices in grouping_map:
+        r_sub = r[group_indices]
+        # Compute distances to all residual codewords
+        diffs_sub = residual_codebook - r_sub
+        dists_sub = np.sum(diffs_sub**2, axis=1)
+        i_r = np.argmin(dists_sub)
+        indices_r.append(i_r)
+        
+    return i_c, indices_r
+
+def decode_sh_ac(i_c, indices_r, coarse_codebook, residual_codebook, grouping_map, norm_params):
+    """
+    i_c: int
+    indices_r: list of ints
+    """
+    mean, std = norm_params
+    
+    # 1. Retrieve coarse codeword
+    w_c = coarse_codebook[i_c]
+    
+    # 2. Retrieve and reorder residual codewords
+    r_rec = np.zeros(45)
+    for g, group_indices in enumerate(grouping_map):
+        w_r = residual_codebook[indices_r[g]]
+        r_rec[group_indices] = w_r
+        
+    # 3. Reconstruct
+    c_norm_rec = w_c + r_rec
+    c_rec = c_norm_rec * std + mean
+    
+    return c_rec
+```
+## Subtopics
+
+### [Zero-Masked Residual VQ](19633-zero-masked-residual-vq.md)
+A variant that maps small-magnitude residual sub-vectors to a zero index to increase sparsity. It builds on [Two-Stage Vector Quantization (VQ) for SH-AC](19632-two-stage-vector-quantization-vq-for-sh-ac.md) by adding a masking step. Unlike the base method which quantizes all residuals, this method increases sparsity in the second-stage index maps, allowing for significantly higher compression ratios at the cost of increased quantization error.
+
+## Operating characteristics
+- Time Complexity: Dominated by the distance calculations in VQ stages. For $N=1024$ codebook size and $D=45$ dimensions, Stage 1 is $O(N \cdot D)$. Stage 2 is $O(G \cdot N \cdot D_{sub}) = O(N \cdot D)$. Total encoding is linear in the number of Gaussians.
+- Memory Complexity: Requires storing two codebooks of size 1024. The residual codebook size depends on $G$, but the dimension is $45/G$. Total codebook memory is $1024 \times 45 \times 4$ bytes (float32) $\times 2 \approx 360$ KB, plus metadata.
+- Measured Performance: Evaluated on GSC Common Test Conditions datasets (Bartender, Cinema) [S1]. The method controls bitrate by varying the number of residual groups $G$ [S1].
+- Strengths: Efficient compression of SH-AC coefficients. Compatible with HEVC lossless coding of indices [S1].
+- Limitations: Quantization error increases with higher compression (more groups). Requires transmission of codebooks and grouping metadata [S1].
+- When to use: When high compression ratios are needed for SH-AC coefficients in 3DGS models.
+- When not to use: When low quantization error is critical and bitrate is not a constraint.
+## Background
+Originated in the context of Hybrid Compression Method for Trained 3D Gaussian Splatting Models Based on VQ and HEVC [S1]. The method is part of the MPEG GSC (Geometry-based Compression) standardization efforts, specifically for the compression of trained 3DGS models [S1].
+## Sources
+[S1] Hybrid Compression Method for Trained 3D Gaussian Splatting Models Based on VQ and HEVC., https://doi.org/10.3390/s26134125, fetched 2026-10-27

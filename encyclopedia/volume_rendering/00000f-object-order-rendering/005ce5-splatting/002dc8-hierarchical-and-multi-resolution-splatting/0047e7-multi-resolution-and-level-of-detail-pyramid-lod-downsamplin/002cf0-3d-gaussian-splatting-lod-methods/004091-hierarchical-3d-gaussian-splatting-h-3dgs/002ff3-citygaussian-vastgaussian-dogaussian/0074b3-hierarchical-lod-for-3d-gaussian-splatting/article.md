@@ -1,0 +1,334 @@
+# Hierarchical LOD for 3D Gaussian Splatting
+
+Also called: 3DGS Hierarchy, 3DGS LOD, Hierarchical LOD for 3D Gaussian Splitting
+
+## Overview
+Hierarchical LOD for 3D Gaussian Splatting (H-3DGS) is a method that constructs a tree-based hierarchy of 3D Gaussian primitives to enable real-time rendering of large-scale scenes by providing Level-of-Detail (LOD) solutions [S1, S2]. It differs from flat rasterization by merging child Gaussians into intermediate nodes that retain the full attribute set of a primitive (mean, covariance, SH coefficients, and a modified opacity/falloff), allowing the renderer to swap high-resolution leaf nodes for lower-resolution interior nodes based on screen-space granularity [S1, S2].
+
+## How it works
+
+### Inputs and Outputs
+**Inputs:**
+*   A set of optimized 3D Gaussian primitives $\mathcal{G} = \{g_i\}$, where each $g_i$ has mean $\mu_i$, covariance $\Sigma_i$, spherical harmonic coefficients $SH_i$, and opacity $o_i$ [S1, S2].
+*   A camera view $V$ defined by projection matrices [S1, S2].
+
+**Outputs:**
+*   A Bounding Volume Hierarchy (BVH) tree where every node (leaf or interior) is associated with a 3D Gaussian [S1, S2].
+*   A set of active nodes (the "cut") for the current view $V$ [S1, S2].
+
+### Data Structures
+
+**Node Structure:**
+Each node in the hierarchy stores the attributes of a single 3D Gaussian:
+*   `mean`: 3D vector $\mu \in \mathbb{R}^3$ [S1, S2].
+*   `covariance`: 3x3 symmetric matrix $\Sigma \in \mathbb{R}^{3 \times 3}$ [S1, S2].
+*   `sh_coeffs`: Spherical Harmonic coefficients [S1, S2].
+*   `falloff`: A scalar value replacing standard opacity for interior nodes [S1, S2].
+*   `children`: List of child nodes (empty for leaves) [S1, S2].
+*   `aabb`: Axis-Aligned Bounding Box enclosing the node's spatial extent [S1, S2].
+
+**Leaf Nodes:**
+*   Correspond directly to the original optimized Gaussians from the training process [S1, S2].
+*   `falloff` equals the original opacity $o_i$ [S1, S2].
+
+**Interior Nodes:**
+*   Created by merging children [S1, S2].
+*   `falloff` is computed as $\frac{\sum w'_i}{S_p}$, where $S_p$ is the surface area of the parent's ellipsoid [S1, S2]. This value may exceed 1 [S1, S2].
+
+### Steps
+
+1.  **Hierarchy Generation (BVH Construction):**
+    1.  Compute the initial root AABB enclosing all primitives. The extent is calculated as 3 times the stored size of the Gaussians to capture their projected cutoff [S1, S2].
+    2.  Recursively split nodes using a binary median split:
+        *   Identify the longest axis of the current node's AABB [S1, S2].
+        *   Project the means $\mu_i$ of all Gaussians in the node onto this axis [S1, S2].
+        *   Partition the primitives into two groups based on the median of these projections [S1, S2].
+    3.  Repeat until leaf nodes contain a minimal number of primitives (implementation detail: typically 1 or a small constant, though exact leaf count threshold is not specified in sources) [S1, S2].
+
+2.  **Merging Attributes (Bottom-Up):**
+    For each interior node, compute its Gaussian attributes from its children $i=1 \dots N$ starting from the leaves [S1, S2].
+
+    2.1. **Compute Unnormalized Weights:**
+    Calculate the contribution weight $w'_i$ for each child. The sources derive this from the integral of the projected 2D Gaussian, assuming isotropy and low overlap [S1, S2]:
+    $$ w'_i = o_i \sqrt{|\Sigma'_i|} $$
+    where $\Sigma'_i$ is the projected 2D covariance matrix [S1, S2]. In practice, the surface area $S_i$ of the 3D ellipsoid is used instead of $\sqrt{|\Sigma'_i|}$ [S1, S2]:
+    $$ w'_i = o_i S_i $$
+    [S1, S2]
+
+    2.2. **Normalize Weights:**
+    $$ w_i = \frac{w'_i}{\sum_{j=1}^N w'_j} $$
+    [S1, S2]
+
+    2.3. **Merge Mean:**
+    $$ \mu^{(parent)} = \sum_{i=1}^N w_i \mu_i^{(child)} $$
+    [S1, S2]
+
+    2.4. **Merge Covariance:**
+    $$ \Sigma^{(parent)} = \sum_{i=1}^N w_i \left( \Sigma_i^{(child)} + (\mu_i^{(child)} - \mu^{(parent)})(\mu_i^{(child)} - \mu^{(parent)})^T \right) $$
+    [S1, S2]
+
+    2.5. **Merge SH Coefficients:**
+    $$ SH^{(parent)} = \sum_{i=1}^N w_i SH_i^{(child)} $$
+    [S1, S2]
+
+    2.6. **Compute Falloff:**
+    Calculate the surface area $S_p$ of the parent's merged ellipsoid (derived from $\Sigma^{(parent)}$) [S1, S2].
+    $$ \text{falloff} = \frac{\sum_{i=1}^N w'_i}{S_p} $$
+    [S1, S2]
+
+3.  **Hierarchy Cut Selection:**
+    Given a view $V$, select a set of nodes to render such that screen-space detail is preserved while minimizing draw calls [S1, S2].
+
+    3.1. **Define Granularity:**
+    For a node $n$, compute its projected screen-space bounding box. The granularity $\epsilon(n)$ is defined as the largest dimension (length) of this projected bounding box [S1, S2].
+
+    3.2. **Select Cut:**
+    Identify all nodes $n$ such that $\epsilon(n) \le \tau_\epsilon$, where $\tau_\epsilon$ is the target granularity threshold (typically 1 pixel or less) [S1, S2].
+    *   If a node satisfies the condition, it is included in the cut.
+    *   If a node does not satisfy the condition, its children are evaluated [S1, S2].
+    *   The cut is the set of nodes that satisfy the condition but whose parents do not (or are not included) [S1, S2].
+
+4.  **Smooth Transition (Interpolation):**
+    To avoid popping artifacts when switching between LOD levels, interpolate between the selected node $n$ and its parent $p$ (or children) [S1, S2].
+
+    4.1. **Calculate Interpolation Weight:**
+    Evaluate $\epsilon(n)$ and $\epsilon(p)$ [S1, S2]. The interpolation weight $t_n$ is derived from the ratio of these granularities [S1, S2]. (Exact formula for $t_n$ is not fully explicit in the provided text snippets, but it depends on $\epsilon(n)$ and $\epsilon(p)$) [S1, S2].
+
+    4.2. **Handle Rotation Ambiguity:**
+    When interpolating, directly interpolating rotation matrices can cause undesired rotations [S2]. The method renders the two children with the same parameters as the parent and progressively interpolates towards their separate values [S2].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def compute_ellipsoid_surface(cov_matrix):
+    """
+    Computes the surface area of a 3D ellipsoid defined by covariance matrix Sigma.
+    Approximation using the determinant for isotropic case or standard formula.
+    Note: Exact surface area of an ellipsoid has no closed form, but sources
+    indicate using sqrt(det(Sigma)) or surface Si is proportional to it.
+    We use the determinant-based metric as per source derivation w'_i = o_i * sqrt(|Sigma'|).
+    For 3D, we approximate surface S_i proportional to det(Sigma)^(1/2) or similar.
+    Source [S1, S2] states: "square root of the determinant of a Gaussian's 2D covariance 
+    is proportional to the (projected) surface of the corresponding 3D ellipsoid".
+    We will use det(Sigma)^(1/2) as the proxy for surface area S_i.
+    """
+    det = np.linalg.det(cov_matrix)
+    # Clamp to avoid negative determinants due to numerical error
+    det = max(det, 1e-10)
+    return np.sqrt(det)
+
+def merge_gaussians(children):
+    """
+    Merges a list of child Gaussians into a single parent Gaussian.
+    Returns: (mean, cov, sh_coeffs, falloff)
+    """
+    if not children:
+        return None, None, None, 0.0
+    
+    # 1. Compute unnormalized weights w'_i
+    # w'_i = o_i * S_i
+    unnormalized_weights = []
+    for child in children:
+        S_i = compute_ellipsoid_surface(child['cov'])
+        w_prime_i = child['opacity'] * S_i
+        unnormalized_weights.append(w_prime_i)
+    
+    sum_w_prime = sum(unnormalized_weights)
+    if sum_w_prime == 0:
+        # Fallback if all weights are zero
+        return children[0]['mean'], children[0]['cov'], children[0]['sh'], 0.0
+
+    # 2. Normalize weights w_i
+    weights = [w / sum_w_prime for w in unnormalized_weights]
+    
+    # 3. Merge Mean
+    # mu_parent = sum(w_i * mu_i)
+    merged_mean = np.zeros(3)
+    for i, child in enumerate(children):
+        merged_mean += weights[i] * child['mean']
+        
+    # 4. Merge Covariance
+    # Sigma_parent = sum(w_i * (Sigma_i + (mu_i - mu_parent)(mu_i - mu_parent)^T))
+    merged_cov = np.zeros((3, 3))
+    for i, child in enumerate(children):
+        diff = child['mean'] - merged_mean
+        outer_prod = np.outer(diff, diff)
+        merged_cov += weights[i] * (child['cov'] + outer_prod)
+        
+    # 5. Merge SH Coefficients
+    # SH_parent = sum(w_i * SH_i)
+    # Assuming SH is a flat array or list of coefficients
+    merged_sh = np.zeros_like(children[0]['sh'])
+    for i, child in enumerate(children):
+        merged_sh += weights[i] * child['sh']
+        
+    # 6. Compute Falloff
+    # falloff = (sum(w'_i)) / S_p
+    # S_p is the surface of the parent ellipsoid
+    S_p = compute_ellipsoid_surface(merged_cov)
+    if S_p == 0:
+        falloff = 0.0
+    else:
+        falloff = sum_w_prime / S_p
+        
+    return merged_mean, merged_cov, merged_sh, falloff
+
+def build_bvh(gaussians, max_depth=None):
+    """
+    Builds a BVH hierarchy top-down.
+    """
+    # 1. Create Root
+    # AABB enclosing all primitives, 3x stored size
+    # Assuming gaussians have 'aabb' or we compute it from means and covs
+    # For simplicity, we assume a function to get AABB from a list of gaussians
+    root_aabb = compute_global_aabb(gaussians)
+    root = Node(aabb=root_aabb, children=[])
+    
+    # 2. Recursive Split
+    split_node(root, gaussians)
+    return root
+
+def split_node(node, gaussians):
+    """
+    Recursively splits a node.
+    """
+    # Base case: if leaf condition met (e.g., 1 gaussian or max depth)
+    if len(gaussians) <= 1: # Or some threshold
+        node.is_leaf = True
+        node.gaussian = gaussians[0] if gaussians else None
+        return
+    
+    # 1. Project means onto longest axis of AABB
+    longest_axis = get_longest_axis(node.aabb)
+    projections = [project_onto_axis(g['mean'], longest_axis) for g in gaussians]
+    
+    # 2. Find median
+    median_val = np.median(projections)
+    
+    # 3. Partition
+    left_gaussians = []
+    right_gaussians = []
+    for i, g in enumerate(gaussians):
+        if projections[i] < median_val:
+            left_gaussians.append(g)
+        else:
+            right_gaussians.append(g)
+            
+    # 4. Create Children
+    left_child = Node(aabb=compute_aabb(left_gaussians), children=[])
+    right_child = Node(aabb=compute_aabb(right_gaussians), children=[])
+    
+    node.children = [left_child, right_child]
+    
+    # 5. Recurse
+    split_node(left_child, left_gaussians)
+    split_node(right_child, right_gaussians)
+    
+    # 6. Merge Attributes (Bottom-Up)
+    # This must be done after children are fully built
+    left_g = left_child.gaussian if left_child.is_leaf else merge_gaussians_from_node(left_child)
+    right_g = right_child.gaussian if right_child.is_leaf else merge_gaussians_from_node(right_child)
+    
+    # If children are not leaves, we need to get their merged gaussians
+    # This implies a post-order traversal or storing the merged gaussian in the node
+    # For pseudocode clarity, we assume merge_gaussians_from_node retrieves the 
+    # pre-computed merged gaussian from children
+    
+    if left_child.is_leaf and right_child.is_leaf:
+        merged_mean, merged_cov, merged_sh, falloff = merge_gaussians([left_child.gaussian, right_child.gaussian])
+    else:
+        # Get merged gaussians from children
+        left_merged = left_child.gaussian # Assuming this is populated after recursion
+        right_merged = right_child.gaussian
+        merged_mean, merged_cov, merged_sh, falloff = merge_gaussians([left_merged, right_merged])
+        
+    node.gaussian = {
+        'mean': merged_mean,
+        'cov': merged_cov,
+        'sh': merged_sh,
+        'opacity': falloff # Falloff replaces opacity
+    }
+
+def get_hierarchy_cut(root, camera, target_granularity=1.0):
+    """
+    Selects the cut for the current view.
+    Returns a list of nodes to render.
+    """
+    active_nodes = []
+    traverse_for_cut(root, camera, target_granularity, active_nodes)
+    return active_nodes
+
+def traverse_for_cut(node, camera, target_granularity, active_nodes):
+    """
+    Recursively determines if a node should be included in the cut.
+    """
+    # 1. Compute projected bounding box of the node
+    projected_bbox = project_aabb_to_screen(node.aabb, camera)
+    
+    # 2. Compute granularity epsilon(n)
+    # Largest dimension of the projected bounding box
+    width = projected_bbox.max_x - projected_bbox.min_x
+    height = projected_bbox.max_y - projected_bbox.min_y
+    epsilon_n = max(width, height)
+    
+    # 3. Check condition
+    if epsilon_n <= target_granularity:
+        # Node is small enough, include it
+        active_nodes.append(node)
+        # Do not traverse children
+        return
+    else:
+        # Node is too large, traverse children
+        if node.children:
+            for child in node.children:
+                traverse_for_cut(child, camera, target_granularity, active_nodes)
+        else:
+            # Leaf node but still too large? 
+            # This implies the leaf itself is larger than target granularity.
+            # In this case, we must render the leaf.
+            active_nodes.append(node)
+
+def render_node(node, camera):
+    """
+    Renders a single Gaussian node.
+    """
+    g = node.gaussian
+    # Standard 3DGS rasterization
+    # Note: g['opacity'] is actually 'falloff' for interior nodes
+    # Alpha blending clamps alpha to 1 if falloff > 1
+    alpha = rasterize_gaussian(g, camera)
+    alpha = min(alpha, 1.0) # Clamp alpha to 1
+    return alpha
+```
+
+### Parameters
+*   **Bounding Box Expansion Factor:** 3x the stored size of Gaussians [S1, S2].
+*   **Target Granularity ($\tau_\epsilon$):** Threshold for projected AABB axis lengths, typically 1 pixel or less [S1, S2].
+
+### Edge Cases and Pitfalls
+*   **Falloff > 1:** The calculated falloff value for intermediate nodes can exceed 1. This is handled by clamping the resulting $\alpha$ values to 1 during $\alpha$-blending [S1, S2].
+*   **Rotation Ambiguity:** Interpolating between nodes with different rotation axes can cause undesired rotations. The method handles this by rendering the two children with the same parameters as the parent and progressively interpolating towards their separate values [S2].
+*   **Isotropy Assumption:** The weight derivation assumes Gaussians are nearly isotropic with little overlap and low perspective distortion. Typical scenes may violate this, requiring additional measures (not detailed in the provided snippets) to improve quality at higher LOD levels [S1, S2].
+
+## Operating characteristics
+
+*   **Time Complexity:** Hierarchy construction is $O(N \log N)$ for $N$ Gaussians due to the BVH build [S1, S2]. Cut selection is linear time or constant time per node in a massively parallel setting [S2].
+*   **Memory Complexity:** Requires storing the full hierarchy tree. Each node stores a full Gaussian, so memory usage increases compared to flat 3DGS, proportional to the number of nodes in the hierarchy [S1, S2].
+*   **Performance:** Enables real-time rendering of very large scenes by reducing the number of primitives rendered at a distance [S1, S2].
+*   **Strengths:** Maintains visual quality at high LODs by accurately merging attributes; supports smooth transitions [S1, S2].
+*   **Limitations:** Increased memory overhead; potential artifacts if isotropy assumption is violated [S1, S2].
+
+## Background
+
+*   **Origin:** The method was introduced in the paper "A Hierarchical 3D Gaussian Representation for Real-Time Rendering of Very Large Datasets" [S1, S2].
+*   **History:** It builds upon the original 3D Gaussian Splatting method [Kerbl et al. 2023] by adding a hierarchical structure to handle large-scale scenes [S1, S2].
+*   **Usage:** Used for real-time rendering of large-scale 3D scenes, particularly in the context of CityGaussian, VastGaussian, and DoGaussian [S1, S2].
+
+## Sources
+
+[S1] A Hierarchical 3D Gaussian Representation for Real-Time Rendering of Very Large Datasets, https://inria.hal.science/hal-04568786v1, fetched 2026-10-27
+[S2] A Hierarchical 3D Gaussian Representation for Real-Time Rendering of Very Large Datasets, https://www.youtube.com/watch?v=p-mb2TzVJZk, fetched 2026-10-31

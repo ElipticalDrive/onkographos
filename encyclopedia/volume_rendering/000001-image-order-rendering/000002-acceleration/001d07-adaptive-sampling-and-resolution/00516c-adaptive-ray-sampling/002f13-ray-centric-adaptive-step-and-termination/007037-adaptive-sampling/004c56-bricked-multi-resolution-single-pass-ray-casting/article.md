@@ -1,0 +1,155 @@
+# Bricked Multi-Resolution Single-Pass Ray-Casting
+
+Also called: Adaptive Sampling with Bricking
+
+## Overview
+Bricked Multi-Resolution Single-Pass Ray-Casting is a GPU-based volume rendering technique that combines hierarchical data storage (bricking) with adaptive sampling to render large-scale multi-resolution volumes [S1, unofficial][S2]. It sets itself apart from its siblings by executing a single-pass fragment program that performs adaptive object-space sampling along the ray and adaptive image-space sampling based on screen tile statistics [S1, unofficial]. The method uses transfer function-based Level of Detail (LOD) selection to fetch correct neighborhood samples for interpolation directly in the shader [S1, unofficial].
+
+## How it works
+The method operates on a multi-resolution grid stored in bricks [S1, unofficial]. The rendering pipeline executes a single-pass fragment program [S1, unofficial].
+
+**Inputs:**
+*   Multi-resolution volume data (bricks) [S1, unofficial].
+*   Transfer function (for LOD selection and color/opacity) [S1, unofficial].
+*   View parameters (camera, ray origin, direction) [G].
+*   Screen tile statistics (for adaptive image-space sampling) [S1, unofficial].
+
+**Outputs:**
+*   Final pixel color and opacity [G].
+
+**Data Structures:**
+*   **Bricks:** Blocks of volume data at various resolution levels [S1, unofficial].
+*   **Page Tables:** Hierarchical structures mapping virtual coordinates to brick locations [S2].
+*   **Tile Statistics:** Metadata per screen tile indicating required sampling density [S1, unofficial].
+
+**Steps:**
+1.  **Ray Initialization:** For each pixel, compute the ray origin and direction [G].
+2.  **Adaptive Image-Space Sampling:** Determine the sampling rate for the current screen tile based on pre-computed statistics [S1, unofficial].
+3.  **Ray Marching Loop:**
+    a.  **Position Calculation:** Determine the current sample position $p$ in normalized virtual volume space along the ray [S2].
+    b.  **LOD Selection:** Compute a floating-point Level of Detail value $lod(p)$ for the current sample, typically by estimating the projected screen-space size of the corresponding voxel [S2].
+    c.  **Resolution Level Determination:** Convert $lod(p)$ to an integer resolution level $l$ by rounding to the nearest integer [S2].
+    d.  **Address Translation:** Perform hierarchical address translation to find the brick containing the sample at level $l$ [S2]. Exploit spatial coherence by tracking the last used page directory and page table indices to reduce lookup overhead [S2].
+    e.  **Data Fetching & Interpolation:** Fetch the voxel data from the identified brick and ensure correct neighborhood samples are fetched for interpolation [S1, unofficial]. Sample the data at position $p$ using tri-linear interpolation at level $l$ [S2]. Alternatively, compute the two adjacent resolution levels, sample both, and interpolate linearly in-between [S2].
+    f.  **Transfer Function Application:** Use the transfer function to determine color and opacity based on the sampled value, leveraging transfer function-based LOD selection [S1, unofficial].
+    g.  **Accumulation:** Composite the color and opacity into the final pixel value using front-to-back compositing [G].
+    h.  **Step Advancement:** Advance the ray position using an adaptive step size based on sampling density requirements [S1, unofficial].
+4.  **Termination:** Stop when the ray exits the volume or the accumulated opacity reaches a threshold [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_pixel(ray_origin, ray_direction, volume_bounds, tile_stats):
+    # Compute entry and exit distances for the volume [G]
+    t_min = max((volume_bounds.min - ray_origin) / ray_direction)
+    t_max = min((volume_bounds.max - ray_origin) / ray_direction)
+    if t_min > t_max:
+        return (0.0, 0.0, 0.0, 0.0)
+    
+    accumulated_color = (0.0, 0.0, 0.0, 0.0)
+    accumulated_opacity = 0.0
+    t = t_min
+    last_page_dir_idx = -1
+    last_page_table_idx = -1
+    
+    while t < t_max and accumulated_opacity < 1.0:
+        # Position Calculation: sample position in normalized virtual volume space [S2]
+        p = ray_origin + ray_direction * t
+        
+        # LOD Selection: estimate projected screen space size of the voxel [S2]
+        lod_p = compute_lod(p, ray_direction)
+        
+        # Resolution Level Determination: round to nearest integer [S2]
+        l = round(lod_p)
+        
+        # Address Translation: hierarchical lookup with coherence optimization [S2]
+        page_dir_idx, page_table_idx, brick_offset = translate_address(p, l, last_page_dir_idx, last_page_table_idx)
+        last_page_dir_idx = page_dir_idx
+        last_page_table_idx = page_table_idx
+        
+        # Data Fetching & Interpolation: fetch neighborhood samples and interpolate [S1, unofficial][S2]
+        voxel_value = fetch_voxel(brick_offset, p)
+        interpolated_value = tri_linear_interpolate(voxel_value, p)
+        
+        # Transfer Function Application: determine color and opacity [S1, unofficial]
+        color, opacity = apply_transfer_function(interpolated_value, l)
+        
+        # Accumulation: front-to-back compositing [G]
+        alpha = opacity * (1.0 - accumulated_opacity)
+        accumulated_color = (
+            accumulated_color[0] + color[0] * alpha,
+            accumulated_color[1] + color[1] * alpha,
+            accumulated_color[2] + color[2] * alpha,
+            accumulated_color[3] + alpha
+        )
+        accumulated_opacity += alpha
+        
+        # Step Advancement: adaptive step size [S1, unofficial]
+        step = compute_adaptive_step(p, l, tile_stats)
+        t += step
+        
+    return accumulated_color
+
+def compute_lod(p, ray_direction):
+    # Estimate projected screen space size of the corresponding voxel [S2]
+    return 1.0 / max(abs(ray_direction[0]), abs(ray_direction[1]), abs(ray_direction[2]))  # [G]
+
+def translate_address(p, l, last_page_dir_idx, last_page_table_idx):
+    # Hierarchical address translation exploiting spatial coherence [S2]
+    # Compute virtual multi-resolution address (l, p)
+    dir_idx = int(p[0] * (1 << l)) & 0x3FF
+    table_idx = int(p[1] * (1 << l)) & 0x3FF
+    if dir_idx == last_page_dir_idx and table_idx == last_page_table_idx:
+        return last_page_dir_idx, last_page_table_idx, 0
+    return dir_idx, table_idx, 0
+
+def fetch_voxel(brick_offset, p):
+    # Fetch voxel data from the identified brick [S2]
+    # Sources do not specify the exact memory access pattern for brick fetching.
+    return 1.0  # [G] Standard memory access
+
+def tri_linear_interpolate(voxel_value, p):
+    # Tri-linear interpolation at the selected resolution level [S2]
+    # Sources do not specify the exact interpolation weights.
+    return voxel_value  # [G] Standard interpolation
+
+def apply_transfer_function(value, l):
+    # Use transfer function for color, opacity, and LOD selection [S1, unofficial]
+    # Sources do not specify the exact transfer function mapping.
+    return (value, value * 0.5)  # [G] Standard mapping
+
+def compute_adaptive_step(p, l, tile_stats):
+    # Adaptive step size based on sampling density requirements [S1, unofficial]
+    # Sources do not specify the exact step calculation formula.
+    return 0.5  # [G] Standard step calculation
+```
+
+**Parameters:**
+*   $lod(p)$: Level of detail function. Typical implementation: estimate projected screen space size of the voxel [S2].
+*   $l$: Integer resolution level. Derived from $lod(p)$ by rounding [S2].
+*   $b_{pt}, b_{vox}$: Page table and voxel block sizes. Example: $b_{pt} = b_{vox} = 32$, $t = 2$ [S2].
+
+**Edge Cases:**
+*   **Precision:** Floating-point precision in $lod(p)$ calculation may affect LOD selection stability.
+*   **Boundaries:** Ray exit conditions must be handled correctly via volume bounds checking.
+*   **Degenerate Input:** Rays parallel to axes may have specific coherence patterns (e.g., page table accessed every 32 voxels, page directory every 1024 voxels for $b_{pt}=32, t=2$) [S2].
+
+## Subtopics
+
+### Ray-Casting Virtual Multi-Resolution Volumes
+This variant focuses on the hierarchical address translation mechanism for virtual multi-resolution volumes. It emphasizes the computation of $lod(p)$ and the choice between sampling a single resolution level with tri-linear interpolation or sampling two adjacent levels and interpolating linearly in-between. It highlights the exploitation of spatial coherence in page table look-ups to reduce overhead [S2].
+
+## Operating characteristics
+*   **Time Complexity:** Depends on the number of samples per ray, which is adaptive. Address translation overhead is reduced by spatial coherence [S2].
+*   **Memory Complexity:** Proportional to the size of the multi-resolution grid and page tables. Bricking allows for efficient memory management and streaming [S1, unofficial].
+*   **Performance:** Efficient for large-scale volumes due to adaptive sampling and bricking. Single-pass execution reduces overhead [S1, unofficial].
+*   **Strengths:** Handles large datasets, adaptive resolution, efficient memory usage [S1, unofficial][S2].
+*   **Limitations:** Complexity of implementation, potential artifacts from LOD transitions [S1, unofficial][S2].
+
+## Background
+Bricked Multi-Resolution Single-Pass Ray-Casting was introduced by Ljung et al. in 2006, Beyer et al. in 2008, and Jeong et al. in 2009 [S1, unofficial]. It builds on earlier work in bricked single-pass ray-casting [S1, unofficial]. The method is part of the evolution of GPU-based large-scale scientific visualization, aiming to handle huge data volumes efficiently [S1, unofficial].
+
+## Sources
+[S1] GPU-Based Large-Scale Scientific Visualization, https://johanna-b.github.io/LargeSciVis2018/slides/LargeScaleVisualization_Architectures.pdf, fetched 2026-10-29 (unofficial)
+[S2] PDF Interactive Volume Exploration of Petascale Microscopy Data Streams ..., https://vccvisualization.org/publications/2012_hadwiger_petascale.pdf, fetched 2026-10-28

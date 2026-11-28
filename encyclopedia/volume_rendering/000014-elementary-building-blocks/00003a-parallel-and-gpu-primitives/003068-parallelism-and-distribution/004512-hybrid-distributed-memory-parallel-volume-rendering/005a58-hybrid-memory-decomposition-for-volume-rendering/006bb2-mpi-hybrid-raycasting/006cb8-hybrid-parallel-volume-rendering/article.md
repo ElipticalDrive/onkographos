@@ -1,0 +1,228 @@
+# Hybrid Parallel Volume Rendering
+
+Also called: Hybrid-parallel implementation, MPI+OpenMP, MPI+pthreads, hybrid parallelism for volume rendering, hybrid-memory implementation
+
+## Overview
+Hybrid Parallel Volume Rendering is a parallel programming model that combines distributed-memory parallelism (MPI) for inter-node communication with shared-memory parallelism (threads) for intra-node computation [S1, S2]. It solves the problem of diminishing returns and high communication costs associated with extreme concurrency in pure MPI implementations by reducing the number of MPI participants [S1, S2]. Unlike pure MPI approaches where raycasting runs serially on each task, this method multi-threads the raycasting step within each task using image-parallel decomposition, significantly improving performance, reducing memory footprint, and lowering communication bandwidth requirements [S1, S2].
+
+## How it works
+The method partitions the source data volume $S$ among $n$ parallel tasks (MPI PEs), where each PE reads $1/n$ of $S$ [S1, S2]. The process consists of three main phases: Raycasting, Compositing, and Gathering [S1, S2].
+
+### Inputs and Outputs
+*   **Input:** Source data volume $S$ (structured rectilinear grid), camera parameters, transfer function [S1, S2].
+*   **Output:** Final composited image gathered at PE 0 [S1, S2].
+
+### Data Structures
+**Image Fragment:**
+Each fragment generated during raycasting contains the following fields [S2]:
+*   `x`: Pixel x-coordinate.
+*   `y`: Pixel y-coordinate.
+*   `R, G, B`: Color components.
+*   $\alpha$: Opacity.
+*   `z`: Eye-coordinate depth where the ray penetrates the data block [S2].
+
+**Ghost Data:**
+Two layers of ghost data are required around each data subdomain [S2]:
+1.  First layer: For trilinear interpolation of sampled values [S2].
+2.  Second layer: For computing the gradient field using central differences [S2].
+
+### Parameters
+*   $n$: Total number of MPI ranks [S1].
+*   $T$: Number of threads per MPI PE. In the reference implementation on six-core AMD Opteron processors, $T=6$ [S2].
+*   Image Tile Size: $32 \times 32$ pixels. This size was found to produce consistently better performance than other tile sizes [S2].
+*   Interpolation: Trilinear interpolation [S2].
+*   Shading: Phong-style shader [S2].
+*   Compositing PE Ratio: The number of PEs receiving fragments is restricted to a subset of total PEs (e.g., no more than 2,000) to solve scaling difficulties reported by Peterka et al. [S2, S3].
+
+### Steps
+1.  **Data Partitioning:** Distribute source data volume $S$ across $n$ MPI PEs. Each PE loads a disjoint block of data [S1, S2]. In the hybrid case, a data block is shared among $T$ threads, using $1/T$ as many MPI PEs as the MPI-only case [S2].
+2.  **Raycasting (Multi-threaded):**
+    *   Each MPI PE launches $T$ threads [S2].
+    *   The image is divided into small tiles (e.g., $32 \times 32$ pixels) distributed among the $T$ threads [S2].
+    *   Tiles are assigned dynamically to threads to minimize load imbalance [S2].
+    *   Each thread performs raycasting on its assigned tiles:
+        *   Test for ray-triangle intersections along the data block's bounding box [S2].
+        *   If a hit occurs, integrate the ray by sampling data values at a fixed interval [S2].
+        *   Apply the transfer function to sampled values [S2].
+        *   Aggregate color and opacity into a fragment using the "over" operator (see Formula) [S2].
+        *   Store the fragment with the fragment's $z$-coordinate (entry point into the block) [S2].
+    *   *Note:* Early ray termination adds a 5% overhead due to conditional checks; it may be disabled if the dataset/transfer function ensures at least one block has no early terminations [S2].
+3.  **Compositing (Hybrid):**
+    *   Partition the pixels of the final image amongst the PEs [S2].
+    *   **Intra-node Gathering:** Only one thread per socket participates in compositing. This thread gathers fragments from all other threads in the same socket, packs them into a single buffer [S2].
+    *   **Inter-node Exchange:** Execute an all-to-all communication step using `MPI_Alltoallv` to exchange each packed fragment from the generating PE to the PE owning the region of the image where the fragment lies [S2].
+    *   **Final Composition:** Each PE performs final compositing for each pixel in its region using the "over" operator [S2].
+4.  **Gathering:** Gather the completed image to PE 0 for display or I/O to storage [S1, S2].
+
+### Formula
+The integration uses the "over" operator [S2]:
+$$
+C_o = C_s + (1 - \alpha_s) C_b
+$$
+$$
+\alpha_o = \alpha_s + (1 - \alpha_s) \alpha_b
+$$
+Where:
+*   $C_o, \alpha_o$: Output color and opacity.
+*   $C_s, \alpha_s$: Source (sampled) color and opacity.
+*   $C_b, \alpha_b$: Background (accumulated) color and opacity [S2].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import threading
+
+class Fragment:
+    def __init__(self, x, y, r, g, b, alpha, z):
+        self.x = x
+        self.y = y
+        self.r = r
+        self.g = g
+        self.b = b
+        self.alpha = alpha
+        self.z = z
+
+def intersect_box(origin, direction, bounds):
+    # Returns (hit, t_min, t_max) for axis-aligned box intersection
+    t_min = -float('inf')
+    t_max = float('inf')
+    for i in range(3):
+        if direction[i] == 0:
+            if origin[i] < bounds[2*i] or origin[i] > bounds[2*i+1]:
+                return False, 0, 0
+        else:
+            t1 = (bounds[2*i] - origin[i]) / direction[i]
+            t2 = (bounds[2*i+1] - origin[i]) / direction[i]
+            t_min = max(t_min, min(t1, t2))
+            t_max = min(t_max, max(t1, t2))
+    if t_min > t_max:
+        return False, 0, 0
+    return True, t_min, t_max
+
+def trilinear_interpolation(data, pos, ghost_layers):
+    # Standard trilinear interpolation with ghost layer padding [G]
+    pass
+
+def transfer_function(value):
+    # Returns (color_tuple, alpha_float) based on scalar value [S2]
+    pass
+
+def compute_ray(x, y, camera_params):
+    # Returns (origin_vector, direction_vector) for pixel (x, y) [G]
+    pass
+
+def pixel_to_pe(x, y, num_ranks, image_width, image_height):
+    # Maps pixel coordinates to PE rank based on image partitioning [G]
+    pass
+
+def hybrid_volume_rendering(rank, num_ranks, data_block, ghost_layers, image_width, image_height, transfer_function, step_size):
+    # 1. Thread Configuration
+    T = 6  # Threads per PE on six-core AMD Opteron [S2]
+    num_cores_per_socket = 6
+    local_fragments = []
+
+    # 2. Raycasting Phase (Shared Memory)
+    tile_size = 32
+    tiles = [(x, y, min(x + tile_size, image_width), min(y + tile_size, image_height)) 
+             for y in range(0, image_height, tile_size) for x in range(0, image_width, tile_size)]
+    
+    def raycast_thread(thread_id):
+        thread_frags = []
+        for tile in tiles:
+            x_start, y_start, x_end, y_end = tile
+            for y in range(y_start, y_end):
+                for x in range(x_start, x_end):
+                    ray_origin, ray_direction = compute_ray(x, y, camera_params)
+                    hit, t_entry, t_exit = intersect_box(ray_origin, ray_direction, data_block.bounds)
+                    if not hit:
+                        continue
+                    
+                    alpha_acc = 0.0
+                    color_acc = (0.0, 0.0, 0.0)
+                    t = t_entry
+                    while t < t_exit:
+                        pos = ray_origin + t * ray_direction
+                        value = trilinear_interpolation(data_block, pos, ghost_layers)
+                        color_s, alpha_s = transfer_function(value)
+                        color_acc = (color_s[0] + (1.0 - alpha_s) * color_acc[0],
+                                     color_s[1] + (1.0 - alpha_s) * color_acc[1],
+                                     color_s[2] + (1.0 - alpha_s) * color_acc[2])
+                        alpha_acc = alpha_s + (1.0 - alpha_s) * alpha_acc
+                        t += step_size
+                    
+                    z_coord = t_entry  # Entry point depth in eye coordinates [S2]
+                    thread_frags.append(Fragment(x, y, color_acc[0], color_acc[1], color_acc[2], alpha_acc, z_coord))
+        return thread_frags
+
+    # Launch threads
+    threads = []
+    for i in range(T):
+        t = threading.Thread(target=lambda: local_fragments.extend(raycast_thread(i)))
+        threads.append(t)
+        t.start()
+    for t in threads:
+        t.join()
+
+    # 3. Compositing Phase
+    # Intra-node gathering: one thread per socket packs fragments
+    if rank % num_cores_per_socket == 0:
+        packed_buffer = local_fragments
+        
+        # Inter-node exchange: MPI Alltoallv simulation
+        # Group fragments by destination PE
+        send_buffers = {i: [] for i in range(num_ranks)}
+        for frag in packed_buffer:
+            dest_pe = pixel_to_pe(frag.x, frag.y, num_ranks, image_width, image_height)
+            send_buffers[dest_pe].append(frag)
+        
+        # Exchange buffers (conceptual MPI_Alltoallv)
+        received_buffers = exchange_buffers(send_buffers)
+        
+        # Final compositing for pixels in my region
+        final_image = {}
+        for frag in received_buffers.get(rank, []):
+            if pixel_to_pe(frag.x, frag.y, num_ranks, image_width, image_height) == rank:
+                c_s, a_s = (frag.r, frag.g, frag.b), frag.alpha
+                if (frag.x, frag.y) in final_image:
+                    c_b, a_b = final_image[(frag.x, frag.y)]
+                else:
+                    c_b, a_b = (0.0, 0.0, 0.0), 0.0
+                c_o = (c_s[0] + (1.0 - a_s) * c_b[0],
+                       c_s[1] + (1.0 - a_s) * c_b[1],
+                       c_s[2] + (1.0 - a_s) * c_b[2])
+                a_o = a_s + (1.0 - a_s) * a_b
+                final_image[(frag.x, frag.y)] = (c_o, a_o)
+        return final_image
+    return None
+
+def exchange_buffers(send_buffers):
+    # Simulates MPI_Alltoallv by collecting buffers from all ranks [G]
+    pass
+
+def display_or_save(image):
+    # Renders or writes the final image to disk [G]
+    pass
+```
+
+### Edge Cases and Pitfalls
+*   **NUMA Penalties:** Sharing data across sockets results in non-uniform memory access (NUMA) penalties (estimated 5-10% of raycasting time) [S2].
+*   **Early Ray Termination:** Adds a 5% overhead due to conditional statements [S2].
+*   **Communication Dominance:** At high concurrency, compositing becomes the dominant cost [S1, S2].
+*   **Memory Complexity:** MPI-hybrid uses significantly less memory than MPI-only [S2].
+
+## Operating characteristics
+*   **Time Complexity:** Raycasting scales nearly linearly as it involves no inter-processor communication [S2]. Compositing involves `MPI_Alltoallv` communication, which is reduced in hybrid mode by aggregating messages per socket [S2].
+*   **Memory Complexity:** MPI-hybrid uses significantly less memory than MPI-only [S2]. At 216,000 cores, MPI-only used 37,023MB aggregate memory, while MPI-hybrid used 2,892MB (nearly 12x less) [S2]. Per-PE runtime overhead was 82MB for hybrid vs 176MB for MPI-only [S2].
+*   **Communication:** Ghost data storage and exchange are reduced by roughly 40% in hybrid implementations due to fewer, larger blocks [S2].
+*   **Strengths:** Improved performance at high concurrency, reduced memory footprint, lower communication bandwidth usage [S2].
+*   **Limitations:** Complexity of implementation (managing both MPI and threads); load imbalance in raycasting if tiles are not distributed dynamically [S2].
+*   **When to use:** Large-scale volume rendering on multi-core clusters where communication overhead in pure MPI becomes a bottleneck [S1, S2].
+
+## Background
+Hybrid Parallel Volume Rendering was developed to address the challenges of scaling volume rendering on multi- and many-core systems [S1, S2]. Traditional MPI-only implementations faced diminishing returns and high communication costs as core counts increased [S1]. The method was demonstrated on the JaguarPF supercomputer at Oak Ridge National Laboratory, achieving weak and strong scaling studies up to 216,000 cores and datasets as large as 12.2 trillion cells [S1, S2]. It builds on Levoy's raycasting method [S1, S2] and previous distributed-memory implementations [S1].
+
+## Sources
+[S1] Hybrid Parallelism for Volume Rendering on Large, Multi- and Many-core Systems, https://digital.library.unt.edu/ark:/67531/metadc840908/?q=out-of-core volume rendering, fetched 2026-10-28
+[S2] Hybrid Parallelism for Volume Rendering on Large, Multi-core Systems, https://digital.library.unt.edu/ark:/67531/metadc1014417/?q=scientific volume visualization, fetched 2026-10-28
+[S3] Hybrid Parallelism for Volume Rendering on Large, Multi-core Systems, https://digital.library.unt.edu/ark:/67531/metadc1014428/?q=scientific volume visualization, fetched 2026-10-28

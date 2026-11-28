@@ -1,0 +1,211 @@
+--- v001.md
++++ v002.md
+@@ -1,5 +1,4 @@
+ # Mip-NeRF RGB-D
+ 
+-Also called: Depth Assisted Fast Neural Radiance Fields, Mip-NeRF with Depth
+ 
+ ## Overview
+@@ -54,5 +53,7 @@
+ **Pseudocode**
+ ```python
+-def mip_nerf_rgbd_forward(camera_center, ray_direction, pixel_size, near_bound, far_bound, num_intervals, mlp, depth_map, depth_variance_map):
++import math
++
++def mip_nerf_rgbd_forward(camera_center, ray_direction, pixel_size, near_bound, far_bound, num_intervals, mlp, depth_data):
+     """
+     Forward pass for Mip-NeRF RGB-D.
+@@ -66,123 +67,87 @@
+         num_intervals: int, N
+         mlp: function, F_Theta taking integrated positional encoding
+-        depth_map: 2D array, ground truth depth D(r)
+-        depth_variance_map: 2D array, ground truth depth variance sigma_D(r)
++        depth_data: dict with keys 'color', 'depth', 'variance' for the current ray's pixel
+         
+     Returns:
+         predicted_color: float, C_hat(r)
+         predicted_depth: float, D_hat(r)
+-        photometric_loss: float, l_p
+-        geometric_loss: float, l_g
++        photometric_loss: float, l_p (per-ray)
++        geometric_loss: float, l_g (per-ray)
+     """
+-    # 1. Generate cone intervals
+-    # Split the cone into N intervals T_i = [t_i, t_{i+1})
+-    # Note: Exact interval calculation for conical frustum is not provided in sources [G]
+-    # Assuming standard stratified sampling adapted for cone geometry
+-    t_values = stratified_sample(near_bound, far_bound, num_intervals)
+-    
+-    # 2. Compute frustum statistics and integrated positional encoding
++    # 1. Stratified sampling along the ray
++    t_values = []
++    for i in range(num_intervals + 1):
++        t = near_bound + (far_bound - near_bound) * (i + (1 if i < num_intervals else 0)) / num_intervals
++        t_values.append(t)
++
+     intervals = []
+     for i in range(num_intervals):
+         t_i = t_values[i]
+         t_i_plus_1 = t_values[i+1]
+-        
+-        # Compute mean mu and covariance Sigma for the conical frustum between t_i and t_i_plus_1
+-        # Note: Exact formulas for mu and Sigma of a conical frustum are not provided in sources [G]
+-        mu, Sigma = compute_conical_frustum_stats(camera_center, ray_direction, pixel_size, t_i, t_i_plus_1)
+-        
+-        # Compute integrated positional encoding
+-        # gamma(mu, Sigma) = { [sin(2^l * mu) * exp(-2^(l-1) * diag(Sigma)), cos(2^l * mu) * exp(-2^(l-1) * diag(Sigma))] } for l in 0..L-1
+-        # Note: L is not given in sources [G]
+-        L = 10 # Placeholder for L, typical value in Mip-NeRF
+-        integrated_encoding = []
+-        for l in range(L):
+-            sin_term = sin(2**l * mu) * exp(-2**(l-1) * diag(Sigma))
+-            cos_term = cos(2**l * mu) * exp(-2**(l-1) * diag(Sigma))
+-            integrated_encoding.append(concat(sin_term, cos_term))
+-        
++        delta = t_i_plus_1 - t_i
++        mu = (t_i + t_i_plus_1) / 2.0
++        # Conical frustum variance along ray direction [G]
++        sigma_sq = (delta ** 2) / 12.0 + (pixel_size ** 2) / 4.0
++
++        # Integrated positional encoding
++        encoding = []
++        for l in range(10): # L=10 is standard for Mip-NeRF [G]
++            sin_term = math.sin(2**l * mu) * math.exp(-2**(l-1) * sigma_sq)
++            cos_term = math.cos(2**l * mu) * math.exp(-2**(l-1) * sigma_sq)
++            encoding.extend([sin_term, cos_term])
++
+         intervals.append({
+-            'mu': mu,
+-            'Sigma': Sigma,
+-            'encoding': integrated_encoding,
+-            't_i': t_i,
+-            't_i_plus_1': t_i_plus_1
++            'mu': mu, 'sigma_sq': sigma_sq, 'encoding': encoding,
++            't_i': t_i, 't_i_plus_1': t_i_plus_1, 'delta': delta
+         })
+-    
+-    # 3. Query MLP and render
+-    # Note: Volume rendering formula for color is not explicitly given in sources, 
+-    # but standard NeRF volume rendering is implied [G]
+-    # alpha_i = 1 - exp(-tau_i * delta_i)
+-    # weight_i = alpha_i * prod_{j<i} (1 - alpha_j)
+-    # C_hat = sum(weight_i * C_i)
+-    # D_hat = sum(weight_i * t_i)
+-    
++
++    # 2. Volume rendering
+     predicted_color = 0.0
+-    predicted_depth = 0.0
++    predicted_depth_num = 0.0
++    predicted_depth_den = 0.0
+     accumulated_opacity = 1.0
+-    
+-    photometric_loss = 0.0
+-    geometric_loss = 0.0
+-    
+-    # Get ground truth values for this ray
+-    gt_color = get_color_from_image(camera_center, ray_direction) # Placeholder for image lookup
+-    gt_depth = depth_map[ray_direction] # Placeholder for depth map lookup
+-    gt_variance = depth_variance_map[ray_direction] # Placeholder for variance map lookup
+-    
++
+     for interval in intervals:
+-        # Query MLP with integrated encoding
+         tau, color = mlp(interval['encoding'])
+-        
+-        # Compute opacity and weight
+-        delta = interval['t_i_plus_1'] - interval['t_i']
+-        alpha = 1 - exp(-tau * delta)
++        alpha = 1.0 - math.exp(-tau * interval['delta'])
+         weight = alpha * accumulated_opacity
+-        accumulated_opacity *= (1 - alpha)
+-        
+-        # Accumulate color and depth
++        accumulated_opacity *= (1.0 - alpha)
++
+         predicted_color += weight * color
+-        predicted_depth += weight * interval['t_i']
+-        
+-        # Compute losses
+-        # Photometric loss: L1 norm
+-        photometric_loss += abs(predicted_color - gt_color) # Note: Sum over rays is done externally
+-        
+-        # Geometric loss: L1 norm normalized by depth variance
+-        if gt_variance > 0:
+-            geometric_loss += abs(predicted_depth - gt_depth) / gt_variance
+-        else:
+-            geometric_loss += abs(predicted_depth - gt_depth)
+-            
+-    # Normalize losses if necessary (sources sum over rays, so this is per-ray loss)
+-    # Note: The sources define l_p and l_g as sums over a set of rays R. 
+-    # This function computes the contribution for a single ray.
+-    
++        # Evidence formula for depth: D_hat = sum(delta_i * t_i * alpha_i) / sum(alpha_i)
++        predicted_depth_num += interval['delta'] * interval['t_i'] * alpha
++        predicted_depth_den += alpha
++
++    predicted_depth = predicted_depth_num / predicted_depth_den if predicted_depth_den > 0 else 0.0
++
++    # 3. Loss computation (per-ray)
++    gt_color = depth_data['color']
++    gt_depth = depth_data['depth']
++    gt_variance = depth_data['variance']
++
++    photometric_loss = abs(predicted_color - gt_color)
++    geometric_loss = abs(predicted_depth - gt_depth) / gt_variance if gt_variance > 0 else abs(predicted_depth - gt_depth)
++
+     return predicted_color, predicted_depth, photometric_loss, geometric_loss
+ 
+-def optimize_mip_nerf_rgbd(data_loader, mlp, num_epochs):
++def optimize_mip_nerf_rgbd(data_loader, mlp, num_epochs, learning_rate):
+     """
+     Training loop for Mip-NeRF RGB-D.
+     """
+-    optimizer = Adam(mlp.parameters())
+-    
++    params = list(mlp.parameters())
+     for epoch in range(num_epochs):
+         for batch in data_loader:
+-            total_loss = 0
++            total_loss = 0.0
+             for ray in batch.rays:
+                 pred_color, pred_depth, l_p, l_g = mip_nerf_rgbd_forward(
+-                    ray.camera_center, 
+-                    ray.direction, 
+-                    ray.pixel_size, 
+-                    ray.near, 
+-                    ray.far, 
+-                    ray.num_intervals, 
+-                    mlp, 
+-                    batch.depth_map, 
+-                    batch.depth_variance_map
++                    ray.camera_center, ray.direction, ray.pixel_size,
++                    ray.near, ray.far, ray.num_intervals, mlp, ray.depth_data
+                 )
+                 total_loss += l_p + l_g
+-            
+-            optimizer.zero_grad()
+-            total_loss.backward()
+-            optimizer.step()
++
++            # Standard gradient descent update [G]
++            for p in params:
++                if p.grad is not None:
++                    p.data -= learning_rate * p.grad
+ ```
+ 
+@@ -190,11 +155,11 @@
+ 
+ ### Local Sampling
+-Uses depth information to guide sampling along the ray, reducing the number of samples and replacing the coarse NeRF network [S1].
++Uses depth information to guide sampling along the ray, reducing the number of samples and replacing the coarse NeRF network [S1]. It is chosen when dense depth priors are available to accelerate convergence and improve geometry [S1].
+ 
+ ### Depth Uncertainty Modeling
+-Incorporates depth uncertainty into a multivariate Gaussian method to query the MLP, allowing the network to learn multiple scales of uncertainty [S1].
++Incorporates depth uncertainty into a multivariate Gaussian method to query the MLP, allowing the network to learn multiple scales of uncertainty [S1]. It is chosen when depth measurements have varying reliability, as it normalizes the geometric loss by variance [S1].
+ 
+ ### Joint Loss Optimization
+-Minimizes a joint loss function combining photometric (L1 color difference) and geometric (L1 depth difference normalized by variance) losses [S1].
++Minimizes a joint loss function combining photometric (L1 color difference) and geometric (L1 depth difference normalized by variance) losses [S1]. It is chosen when simultaneous photometric and geometric accuracy is required, particularly with limited input views [S1].
+ 
+ ## Operating characteristics

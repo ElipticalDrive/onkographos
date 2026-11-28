@@ -1,0 +1,80 @@
+# 3D Cell Picking with Trackball Camera
+
+Also called: VTK Trackball 3D Picking
+
+## Overview
+An interaction method extending VTK's trackball camera to allow 3D coordinate picking via left mouse button click [S1, unofficial]. It maps 2D screen events to 3D world coordinates by querying a `vtkCellPicker` against the default renderer, distinct from image-plane selection which operates strictly in 2D [S1, unofficial].
+
+## How it works
+**Inputs and outputs:**
+- Input: 2D screen coordinates $(x, y)$ from a left mouse button down event.
+- Output: 3D world coordinates $(X, Y, Z)$ and a formatted string representation.
+
+**Data structures:**
+- `m_pnClickedPos`: Array of two integers representing screen pixel coordinates.
+- `picker`: Instance of `vtkCellPicker`.
+- `pos`: Pointer to double array of size 3 containing world coordinates.
+
+**Steps:**
+1. On `OnLeftButtonDown`, capture the 2D screen coordinates using the interactor's event position:
+   $$ \text{m\_pnClickedPos} = \text{GetInteractor()->GetEventPosition()} $$
+2. Instantiate `vtkCellPicker` and execute the pick at $z=0$ against the default renderer:
+   $$ \text{picker->Pick}(m\_pnClickedPos[0], m\_pnClickedPos[1], 0, \text{this->GetDefaultRenderer()}) $$
+3. Retrieve the 3D world coordinates from the picker:
+   $$ \text{pos} = \text{picker->GetPickPosition()} $$
+4. Format the coordinates to 2 decimal places and display in the window title:
+   $$ \text{str} = \text{Format}("%.2lf,%.2lf,%.2lf", \text{pos}[0], \text{pos}[1], \text{pos}[2]) $$
+   $$ \text{g\_pMainDlg->SetWindowText(str)} $$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def on_left_button_down(interactor, main_dlg):
+    # Step 1: Capture 2D screen coordinates
+    clicked_pos = interactor.get_event_position()
+    x = clicked_pos[0]
+    y = clicked_pos[1]
+
+    # Step 2: Instantiate picker and execute pick
+    # Note: z is fixed at 0, renderer is the default one
+    picker = vtk_cell_picker()
+    picker.pick(x, y, 0, interactor.get_default_renderer())
+
+    # Step 3: Retrieve 3D world coordinates
+    pos = picker.get_pick_position()
+    # pos is an array of 3 doubles: [X, Y, Z]
+
+    # Step 4: Format and display
+    # Format to 2 decimal places
+    formatted_str = "%.2lf,%.2lf,%.2lf" % (pos[0], pos[1], pos[2])
+    main_dlg.set_window_text(formatted_str)
+```
+
+**Parameters:**
+- $z$ coordinate for pick: $0$ [S1, unofficial].
+- Decimal precision: $2$ [S1, unofficial].
+
+**Edge cases and pitfalls:**
+- The pick is performed at $z=0$ in normalized device coordinates or screen space depending on VTK's internal mapping, which may not correspond to the actual depth of the clicked object if the camera is not orthographic or if the object is far from the near plane [S1, unofficial].
+- If no cell is picked, `GetPickPosition()` may return undefined or zero values; the source does not specify error handling for this case [S1, unofficial].
+
+## Subtopics
+
+### 3D Spatial Picking via VTK CellPicker
+A variant that uses `vtkCellPicker` specifically for 3D spatial picking within VTK [S1, unofficial]. It sets itself apart by leveraging VTK's built-in cell picking mechanism rather than manual ray casting. Choose it when working within the VTK framework and needing to pick against existing VTK actors or volumes. Link: [VTK CellPicker](https://www.vtk.org/doc/nightly/html/classvtkCellPicker.html).
+
+## Operating characteristics
+- **Time complexity:** $O(1)$ for the pick operation assuming the renderer's picking data structures are pre-computed, but depends on the complexity of the scene graph traversal within VTK.
+- **Memory complexity:** $O(1)$ additional memory for the picker instance and coordinate storage.
+- **Measured performance:** Not given in the sources.
+- **Strengths:** Simple integration with VTK's event system; provides direct 3D world coordinates.
+- **Limitations:** Relies on VTK's internal picking logic; may be inaccurate if the pick ray does not intersect any cell; fixed $z=0$ may lead to incorrect depth interpretation in non-orthographic views.
+- **When to use:** When using VTK and needing quick 3D coordinate extraction from mouse clicks.
+- **When not:** When high precision depth picking is required or when not using VTK.
+
+## Background
+Originated in the VTK (Visualization Toolkit) framework, specifically in the IGS (Image Guided Surgery) application context [S1, unofficial]. It is used in medical imaging applications where 3D spatial coordinates from mouse clicks are needed for further processing or display [S1, unofficial].
+
+## Sources
+[S1] TechCloud-x/IGS, https://github.com/TechCloud-x/IGS, fetched 2026-10-26 (unofficial)

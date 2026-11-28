@@ -1,0 +1,111 @@
+--- v003.md
++++ v004.md
+@@ -8,10 +8,10 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A source volumetric dataset (e.g., 16-bit raw, OME-Zarr) and a camera view (position, orientation, field of view).
+-*   **Output:** A rendered 2D image (framebuffer) and a fixed-size GPU page cache containing active bricks.
++*   **Input:** A source volumetric dataset (e.g., 16-bit raw, OME-Zarr) and a camera view (position, orientation, field of view) [S1, unofficial].
++*   **Output:** A rendered 2D image (framebuffer) and a fixed-size GPU page cache containing active bricks [S1, unofficial].
+ 
+ **Data Structures:**
+-1.  **Brick Pyramid:** A multi-resolution hierarchy. The finest level contains the full-resolution data. Coarser levels are downsampled versions of the previous level. All levels are split into fixed-size chunks called bricks [S1, unofficial].
+-    *   **Logical Brick Size:** $64^3$ voxels.
++1.  **Brick Pyramid:** A multi-resolution hierarchy where each level is a downsampled version of the previous one, with all levels split into fixed-size chunks called bricks [S1, unofficial].
++    *   **Logical Brick Size:** $64^3$ voxels [S1, unofficial].
+     *   **Physical Brick Size:** $66^3$ voxels (to facilitate interpolation during sampling) [S1, unofficial].
+     *   **Storage:** Compressed, stored server-side in structured binary blobs [S1, unofficial].
+@@ -23,36 +23,34 @@
+ 
+ **Algorithm Steps:**
+-
+ 1.  **Pre-processing:**
+-    *   Split the source dataset into fixed-size bricks ($64^3$ logical, $66^3$ physical).
+-    *   Generate downsampled LOD levels to create the brick pyramid.
+-    *   Compress the bricks.
+-    *   Store the pyramid server-side [S1, unofficial].
+-
++    *   Split the source dataset into fixed-size bricks ($64^3$ logical, $66^3$ physical) [S1, unofficial].
++    *   Generate downsampled LOD levels to create the brick pyramid [S1, unofficial].
++    *   Compress the bricks and store the pyramid server-side [S1, unofficial].
+ 2.  **Runtime Initialization:**
+-    *   Initialize the GPU page cache with empty slots.
++    *   Initialize the GPU page cache with empty slots [S1, unofficial].
+     *   Initialize the indirection texture (mapping logical coordinates to cache slots, initially invalid/null) [S1, unofficial].
+-
+ 3.  **View Update and Fetching:**
+-    *   Identify bricks relevant to the current camera view.
++    *   Identify bricks relevant to the current camera view [S1, unofficial].
+     *   For each relevant brick not currently in the cache:
+         *   Fetch the compressed brick data from the server using HTTP range reads [S1, unofficial].
+         *   Decompress the brick asynchronously in dedicated worker threads [S1, unofficial].
+-        *   Upload the decompressed brick to the GPU page cache.
++        *   Upload the decompressed brick to the GPU page cache [S1, unofficial].
+         *   Update the indirection texture: map the logical brick coordinate to the new cache slot index [S1, unofficial].
+-    *   **Cache Eviction:** If the cache is full, evict the Least Recently Used (LRU) brick. Update the indirection texture to mark the old logical coordinate as unmapped or pointing to a new slot if re-fetched [S1, unofficial].
++    *   **Cache Eviction:** If the cache is full, evict the Least Recently Used (LRU) brick and update the indirection texture to mark the old logical coordinate as unmapped or pointing to a new slot if re-fetched [S1, unofficial].
++4.  **Rendering (Compute Shader Ray Marching):**
++    *   For each pixel in the output image, cast a ray through the volume [S1, unofficial].
++    *   For each sample point along the ray:
++        *   Calculate the logical brick coordinate $(B_x, B_y, B_z)$ containing the sample point [S1, unofficial].
++        *   Sample the **Indirection Texture** at $(B_x, B_y, B_z)$ to retrieve the cache slot index $S$ [S1, unofficial].
++        *   If $S$ is valid:
++            *   Calculate the local coordinates $(L_x, L_y, L_z)$ within the brick [S1, unofficial].
++            *   Perform density lookup and compositing using the data in cache slot $S$ at local coordinates $(L_x, L_y, L_z)$ [S1, unofficial].
++        *   If $S$ is invalid (brick not in cache), skip compositing for this sample or use a coarse proxy value [G].
++    *   Composite the accumulated color and opacity for the pixel [S1, unofficial].
+ 
+-4.  **Rendering (Compute Shader Ray Marching):**
+-    *   For each pixel in the output image:
+-        *   Cast a ray through the volume.
+-        *   For each sample point along the ray:
+-            *   Calculate the logical brick coordinate $(B_x, B_y, B_z)$ containing the sample point.
+-            *   Sample the **Indirection Texture** at $(B_x, B_y, B_z)$ to retrieve the cache slot index $S$ [S1, unofficial].
+-            *   If $S$ is valid:
+-                *   Calculate the local coordinates $(L_x, L_y, L_z)$ within the brick.
+-                *   Perform density lookup and compositing using the data in cache slot $S$ at local coordinates $(L_x, L_y, L_z)$ [S1, unofficial].
+-            *   If $S$ is invalid (brick not in cache):
+-                *   Trigger a fetch for the brick (if not already pending) and skip compositing for this sample or use a placeholder/coarse LOD value [G]. *Note: The source implies the system handles availability, but does not specify the exact fallback for a cache miss during the critical path other than the indirection lookup. A robust implementation would stall or use a coarse proxy.*
+-        *   Composite the accumulated color and opacity for the pixel [S1, unofficial].
++**Formulas:**
++*   Logical brick coordinate: $B = \lfloor P / 64 \rfloor$, where $P$ is the world-space voxel coordinate.
++*   Local brick coordinate: $L = P \mod 64$.
++*   Physical interpolation padding: Bricks are stored as $66^3$ to provide a 1-voxel halo for trilinear interpolation at brick boundaries [S1, unofficial].
+ 
+ **Parameters:**
+@@ -67,4 +65,35 @@
+ *   **Network Dependency:** User experience is tied to internet connection quality. Lack of smart prefetching or offline capabilities means performance degrades with poor connectivity [S1, unofficial].
+ *   **Scalability Limit:** Tested up to ~$2048^3$ voxels. Larger datasets require manual adjustment of indirection table dimensions and page cache size [S1, unofficial].
++
++**Pseudocode:**
++```python
++def render(out_of_core_volume, camera):
++    # 1. View Update & Cache Management
++    relevant_bricks = identify_bricks_in_view(camera, out_of_core_volume.brick_pyramid)
++    for brick_coord in relevant_bricks:
++        slot = out_of_core_volume.indirection_texture[brick_coord]
++        if slot is None or slot >= out_of_core_volume.cache_size:
++            compressed_data = fetch_http_range_read(out_of_core_volume.server, brick_coord)
++            decompressed = decompress(compressed_data)
++            slot = evict_lru_if_full(out_of_core_volume.cache)
++            out_of_core_volume.cache[slot] = decompressed
++            out_of_core_volume.indirection_texture[brick_coord] = slot
++
++    # 2. Compute Shader Ray Marching
++    for y, x in framebuffer_dimensions:
++        ray = cast_ray(camera, x, y)
++        accumulated_color = vec3(0.0)
++        accumulated_opacity = 0.0
++        t = ray.origin
++        while t < ray.far_plane and accumulated_opacity < 1.0:
++            brick_coord = world_to_brick(ray.origin + t * ray.direction)
++            slot = out_of_core_volume.indirection_texture[brick_coord]
++            if slot is not None and slot < out_of_core_volume.cache_size:
++                local_coord = world_to_local_brick(ray.origin + t * ray.direction, brick_coord)
++                density = out_of_core_volume.cache[slot].sample(local_coord)
++                accumulated_color, accumulated_opacity = composite(accumulated_color, accumulated_opacity, density)
++            t += ray.step_size
++        framebuffer[x, y] = accumulated_color
++```
+ 
+ ## Subtopics

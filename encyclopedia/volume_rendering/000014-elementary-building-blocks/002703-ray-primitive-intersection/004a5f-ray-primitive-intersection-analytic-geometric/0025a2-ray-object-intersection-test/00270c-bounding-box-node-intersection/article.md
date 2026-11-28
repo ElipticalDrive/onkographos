@@ -1,0 +1,101 @@
+# Bounding Box Node Intersection
+
+Also called: BBNode::intersect
+
+## Overview
+Bounding Box Node Intersection is a recursive ray traversal algorithm for a binary bounding box tree that determines the closest surface intersection by testing the node's bounding box, then recursing into left and right children, and finally comparing hit distances [S2, unofficial][S3]. It solves the problem of efficiently finding the nearest primitive in a hierarchical scene structure by pruning branches whose bounding volumes do not intersect the ray [S3]. Unlike [Ray-Object Intersection Test](3604-ray-object-intersection-test.md) which tests a single object, this method navigates a tree structure to find the global minimum intersection distance among all contained primitives [G].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A ray $R$ (origin $O$, direction $D$), a reference to the current `BBNode`, and a mutable best-hit tracker `best` initialized to $(\infty, \text{None})$ [S3].
+- Output: Updates `best` with the closest intersection distance $t$ and corresponding primitive, or leaves it unchanged if no intersection is found within the subtree [S3].
+
+**Data Structures:**
+The `BBNode` (or `BVH` node) structure contains the following fields [S2, unofficial][S3]:
+- `min` / `low`: A 3D vector representing the minimum corner of the axis-aligned bounding box (AABB).
+- `max` / `high`: A 3D vector representing the maximum corner of the AABB.
+- `left` / `child_l`: A reference to the left child node.
+- `right` / `child_r`: A reference to the right child node.
+- `nprims`: A 16-bit unsigned integer storing the number of primitives in a leaf node [S3].
+- `data`: An array of primitives (e.g., triangles) stored in a leaf node [S3].
+- `getType()` / type tag: Indicates if the node is an `Interior` (internal) or `Leaf` type [S2, unofficial][S3].
+
+**Algorithm Steps:**
+1. **Bounding Box Test:** Test if the ray intersects the current node's AABB defined by `min` and `max`. If the ray does not intersect the AABB, return immediately without updating `best` [S3].
+2. **Node Type Check:** Determine if the current node is an `Interior` or a `Leaf` [S3].
+3. **Interior Recursion:** If the node is `Interior`, recursively call the intersection function on the left child, then on the right child [S3].
+4. **Leaf Primitive Test:** If the node is `Leaf`, iterate over each primitive $t$ in `data`. Test if the ray intersects $t$ and if the intersection distance is less than `best[0]`. If both conditions hold, update `best` to $(\text{distmin}(R, t), t)$ [S3].
+5. **Precision Handling:** When comparing hit distances, add a small epsilon constant $\epsilon = 0.001f$ to the left hit distance before comparison to mitigate floating-point precision errors [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def bbnode_intersect(ray, node, best):
+    # 1. Bounding Box Test
+    t_min, t_max = ray_aabb_intersect(ray, node.min, node.max)
+    if t_min is None:
+        return
+
+    # 2. Node Type Check
+    if node.is_interior():
+        # 3. Interior Recursion
+        bbnode_intersect(ray, node.left, best)
+        bbnode_intersect(ray, node.right, best)
+    else:
+        # 4. Leaf Primitive Test
+        for prim in node.data:
+            t_hit = ray_primitive_intersect(ray, prim)
+            if t_hit is not None and t_hit < best[0]:
+                best[0] = t_hit
+                best[1] = prim
+
+def ray_aabb_intersect(ray, min_v, max_v):
+    # Standard slab intersection test
+    t_min = -float('inf')
+    t_max = float('inf')
+    for i in range(3):
+        if ray.d[i] == 0.0:
+            # Ray parallel to slab; must lie within bounds
+            if ray.o[i] < min_v[i] or ray.o[i] > max_v[i]:
+                return None, None
+        else:
+            t1 = (min_v[i] - ray.o[i]) / ray.d[i]
+            t2 = (max_v[i] - ray.o[i]) / ray.d[i]
+            if t1 > t2:
+                t1, t2 = t2, t1
+            t_min = max(t_min, t1)
+            t_max = min(t_max, t2)
+    if t_min > t_max:
+        return None, None
+    return t_min, t_max
+
+def ray_primitive_intersect(ray, prim):
+    # Standard ray-primitive intersection (e.g., Möller–Trumbore for triangles)
+    # Returns distance t or None. Implementation details omitted as sources do not specify the exact primitive formula. [G]
+    pass
+```
+
+**Edge Cases and Pitfalls:**
+- **Floating-Point Precision:** Direct comparison of hit distances can lead to incorrect pruning due to precision errors. The algorithm explicitly adds $\epsilon = 0.001f$ to the left hit distance before comparison to mitigate this [S2, unofficial].
+- **Grazing Rays / Parallel Slabs:** When a ray direction component is zero, the ray is parallel to the slab faces. The intersection test must verify the ray origin lies within the slab bounds along that axis; otherwise, it returns no intersection [G].
+- **Empty Children / Leaf Nodes:** The algorithm checks the node type and primitive count before recursion or iteration, handling leaf nodes or incomplete trees gracefully [S2, unofficial][S3].
+
+## Subtopics
+
+### [Hierarchical Bounding Volumes (HBV)](13475-hierarchical-bounding-volumes-hbv.md)
+Generalizes this node intersection test to arbitrary bounding volumes and hierarchical traversal, adapting to spatial distribution rather than uniform grids. It is chosen when scene geometry is highly non-uniform or when dynamic updates require frequent tree rebuilds, trading off traversal simplicity for better spatial coherence.
+
+## Operating characteristics
+- **Time Complexity:** $O(\log N)$ on average for balanced trees, where $N$ is the number of primitives, but degrades to $O(N)$ in worst-case scenarios (e.g., highly unbalanced trees or rays intersecting many nodes) [G].
+- **Memory Complexity:** $O(N)$ to store the tree structure and bounding boxes [G].
+- **Strengths:** Significantly reduces the number of primitive intersection tests compared to brute-force linear search by pruning non-intersecting branches [G].
+- **Limitations:** Performance depends heavily on the quality of the bounding volume hierarchy construction and the spatial distribution of primitives [G].
+- **When to use:** Ideal for scenes with many static primitives where acceleration structures can be precomputed, or when ray traversal overhead must be minimized [G].
+
+## Background
+The method originates from standard ray tracing acceleration techniques and is formally specified in logical BVH specifications [S3]. Early implementations detailed recursive traversal logic for binary bounding box trees with explicit epsilon handling for precision [S2, unofficial]. It builds on the concept of [Ray-Object Intersection Test](3604-ray-object-intersection-test.md) by applying it recursively within a tree hierarchy [G].
+
+## Sources
+[S2] cgibson/Mr-Voxel, https://github.com/cgibson/Mr-Voxel, fetched 2026-10-27 (unofficial)
+[S3] Decoupling Data Layouts from Bounding Volume Hierarchies, https://arxiv.org/pdf/2511.15028, fetched 2026-10-29

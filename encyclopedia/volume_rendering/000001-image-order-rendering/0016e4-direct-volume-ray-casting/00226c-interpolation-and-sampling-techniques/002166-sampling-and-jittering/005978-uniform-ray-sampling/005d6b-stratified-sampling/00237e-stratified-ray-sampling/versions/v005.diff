@@ -1,0 +1,295 @@
+--- v004.md
++++ v005.md
+@@ -4,155 +4,130 @@
+ 
+ ## Overview
+-Stratified Ray Sampling is a technique that generates sample points along a camera ray by dividing the ray's depth interval into equal-sized bins and drawing one random sample uniformly from each bin. It solves the problem of aliasing and high variance inherent in pure uniform sampling by ensuring that the entire depth range is covered without gaps, while the random jitter within bins breaks up regular patterns [S4, unofficial][S5]. Unlike [Uniform Ray Sampling](1261-uniform-ray-sampling.md), which places points at fixed intervals, this method introduces controlled noise to improve the statistical properties of the integral estimate [S2, unofficial].
++Stratified Ray Sampling is a technique for distributing sample points along a camera ray in volume rendering by partitioning the ray's depth interval into equal-sized bins and drawing one sample uniformly at random from each bin. It solves the problem of aliasing and clustering inherent in pure uniform random sampling by guaranteeing one sample per spatial segment of the ray. It differs from [Stratified Monte Carlo Radiance Estimate](1373-stratified-monte-carlo-radiance-estimate.md) by focusing specifically on the geometric placement of samples along the ray depth rather than the statistical estimation of radiance integrals, and from [Batch Stratified Sampling](2730-batch-stratified-sampling.md) by operating on individual rays rather than optimizing batch-level variance reduction.
+ 
+ ## How it works
+ **Inputs:**
+-*   `origins`: Ray origins, shape $[N_{rays}, 3]$.
+-*   `directions`: Ray directions, shape $[N_{rays}, 3]$.
+-*   `min_depth` ($u_n$): Near plane distance.
+-*   `max_depth` ($u_f$): Far plane distance.
+-*   `n_pts_per_ray` ($N$): Number of samples per ray.
+-*   `lindisp` (bool): If True, sample linearly in disparity ($1/u$) instead of depth [S4, unofficial].
+-*   `perturb` (bool): If True, add uniform noise within each bin [S4, unofficial].
++*   Ray origin $\mathbf{o}$ (3D vector).
++*   Ray direction $\mathbf{d}$ (normalized 3D vector).
++*   Near depth $t_n$ (scalar).
++*   Far depth $t_f$ (scalar).
++*   Number of samples $k$ (integer).
++*   Perturbation flag `perturb` (boolean, default True).
++*   Linear disparity flag `lindisp` (boolean, default False).
+ 
+ **Outputs:**
+-*   `z_vals`: Sample depths, shape $[N_{rays}, N]$.
+-*   `sample_points`: 3D coordinates, shape $[N_{rays}, N, 3]$.
++*   Array of sample depths $\boldsymbol{\tau}$ of size $k$.
++*   Array of 3D sample positions $\mathbf{P}$ of size $k \times 3$.
+ 
+ **Data Structures:**
+-*   `z_vals`: A tensor of floating-point values representing the distance from the camera origin along the ray direction for each sample point.
++*   `z_vals`: Tensor of shape $(k)$ storing the depth values.
++*   `t_rand`: Tensor of shape $(k)$ storing uniform random numbers $u_i \sim U[0, 1]$.
+ 
+ **Steps:**
+ 
+-1.  **Compute Linear Spacing:**
+-    Generate $N$ evenly spaced values between 0 and 1.
+-    $$t_{vals} = \text{linspace}(0.0, 1.0, N)$$
+-    [S4, unofficial]
++1.  **Bin Boundary Calculation**:
++    Compute the boundaries of the $k$ bins. If `lindisp` is False, the bins are uniform in depth. If `lindisp` is True, the bins are uniform in disparity ($1/t$).
++    
++    If `lindisp` is False:
++    $$ t_i = t_n + i \cdot \frac{t_f - t_n}{k}, \quad \text{for } i = 0, \dots, k $$
++    
++    If `lindisp` is True:
++    $$ \frac{1}{t_i} = \frac{1}{t_n} + i \cdot \left( \frac{1}{t_f} - \frac{1}{t_n} \right) \cdot \frac{1}{k} \implies t_i = \left( \frac{1}{t_n} + i \cdot \frac{1}{k} \left( \frac{1}{t_f} - \frac{1}{t_n} \right) \right)^{-1} $$
++    
++    *Note: The source [S4, unofficial] defines $t\_vals$ linearly in $[0, 1]$ and maps them to disparity or depth.*
+ 
+-2.  **Map to Depth Interval:**
+-    Calculate the depth values $z_{vals}$ based on the `lindisp` flag.
++2.  **Random Number Generation**:
++    Generate $k$ independent random numbers $u_i \sim U[0, 1]$ for $i = 1, \dots, k$.
++
++3.  **Sample Placement (Stratification)**:
++    For each bin $i$ (where $i$ ranges from $1$ to $k$), calculate the sample depth $\tau_i$.
+     
+-    If `lindisp` is False (linear depth):
+-    $$z_{vals} = u_n (1 - t_{vals}) + u_f t_{vals}$$
+-    [S4, unofficial]
++    If `perturb` is True:
++    The sample is drawn uniformly from within the bin boundaries $[t_{i-1}, t_i]$.
++    $$ \tau_i = t_{i-1} + u_i \cdot (t_i - t_{i-1}) $$
+     
+-    If `lindisp` is True (linear disparity):
+-    $$z_{vals} = \frac{1}{\frac{1}{u_n}(1 - t_{vals}) + \frac{1}{u_f}t_{vals}}$$
+-    [S4, unofficial]
++    If `perturb` is False (Deterministic/Midpoint):
++    The sample is placed at the center of the bin.
++    $$ \tau_i = \frac{t_{i-1} + t_i}{2} $$
+     
+-    *Note: In the context of acoustic volume rendering, points are sampled directly in the parameter $u$ along the ray direction $\omega$ starting from $p_l$ [S1]. The position of the $m$-th point is:*
+-    $$p(u_m) = p_l + \left( (u_f - u_n)\frac{m}{N} + u_n \right)\omega$$
+-    [S1]
++    *Note: Source [S5] describes the bin boundaries for index $i$ as $t_n + \frac{i-1}{N}(t_f - t_n)$ and $t_n + \frac{i}{N}(t_f - t_n)$.*
+ 
+-3.  **Apply Stratification (Perturbation):**
+-    If `perturb` is True, add uniform noise to break the regular grid structure. This is done by defining bins and sampling uniformly within them.
+-    
+-    a. Compute midpoints between adjacent samples:
+-    $$mids = 0.5 \times (z_{vals}[:, 1:] + z_{vals}[:, :-1])$$
+-    [S4, unofficial]
+-    
+-    b. Define bin boundaries. The upper bound of the last bin is `max_depth`, and the lower bound of the first bin is `min_depth`.
+-    $$upper = \text{concat}(mids, z_{vals}[:, -1:])$$
+-    $$lower = \text{concat}(z_{vals}[:, :1], mids)$$
+-    [S4, unofficial]
+-    
+-    c. Generate random numbers $t_{rand}$ uniformly distributed in $[0, 1]$ with the same shape as $z_{vals}$.
+-    $$z_{vals} = lower + (upper - lower) \times t_{rand}$$
+-    [S4, unofficial]
+-    
+-    Alternatively, described as partitioning the interval $[t_n, t_f]$ into $N$ evenly-spaced bins and drawing one sample $t_i$ uniformly at random from within the bin boundaries defined by $t_n + \frac{i-1}{N}(t_f - t_n)$ and $t_n + \frac{i}{N}(t_f - t_n)$ [S5].
+-
+-4.  **Compute 3D Positions:**
+-    Expand $z_{vals}$ to shape $[N_{rays}, N, 1]$ and multiply by directions, then add origins.
+-    $$sample\_points = origins + z_{vals} \times directions$$
+-    [S4, unofficial]
+-    Or explicitly for the $m$-th point on ray $i$:
+-    $$P_{i,m} = O_i + z_{i,m} \cdot D_i$$
+-    [S3, unofficial]
++4.  **Position Calculation**:
++    Convert the depth samples $\tau_i$ to 3D positions $\mathbf{p}_i$.
++    $$ \mathbf{p}_i = \mathbf{o} + \tau_i \mathbf{d} $$
+ 
+ **Parameters:**
+-*   `n_pts_per_ray` ($N$): Typically 64 for coarse network training [S5].
+-*   `min_depth`, `max_depth`: Scene-dependent near and far clipping planes.
+-*   `lindisp`: Often set to True in NeRF implementations to better sample distant objects [S4, unofficial].
+-*   `perturb`: Typically True during training to improve generalization and reduce overfitting to the grid [S4, unofficial].
++*   $k$ (or $N$): Number of samples per ray. Typical values: 64 for coarse networks, 128 for fine networks [S4, unofficial][S5].
++*   $t_n, t_f$: Near and far clipping planes. Typical values depend on scene scale (e.g., 2.0 to 6.0 for normalized scenes) [S4, unofficial][S5].
++*   `lindisp`: Boolean. If True, samples are distributed linearly in disparity space ($1/t$) rather than depth space. This is useful for scenes with large depth variations [S4, unofficial].
++*   `perturb`: Boolean. If True, adds uniform noise to break symmetry and reduce aliasing. If False, uses midpoint sampling [S4, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** When `min_depth` is very small or zero, disparity sampling (`lindisp=True`) avoids division by zero issues inherent in $1/u$ if handled carefully, but standard linear depth is safer if near plane is 0.
+-*   **Boundary Conditions:** The perturbation step must ensure that the final sample does not exceed `max_depth` or fall below `min_depth`. The concatenation logic in step 3b ensures the outer bins are bounded by the actual min/max depths.
+-*   **Degenerate Input:** If `min_depth` == `max_depth`, the interval has zero width, resulting in all samples being identical.
++*   **Division by Zero**: When `lindisp` is True, if $t_n$ or $t_f$ is 0, the disparity calculation involves division by zero. Ensure $t_n > 0$.
++*   **Precision**: When $t_f - t_n$ is very small, floating-point precision may cause $t_i - t_{i-1}$ to be zero or negative.
++*   **Degenerate Input**: If $k=0$, no samples are generated. If $k=1$, the bin is $[t_n, t_f]$ and the sample is either uniform in $[t_n, t_f]$ or at the midpoint.
+ 
+ **Pseudocode:**
+ 
+ ```python
+-import torch
++import numpy as np
+ 
+-def stratified_ray_sampling(origins, directions, min_depth, max_depth, n_pts_per_ray, lindisp=False, perturb=True):
++def stratified_ray_sampling(o, d, t_n, t_f, k, perturb=True, lindisp=False):
+     """
+-    Generates stratified samples along rays.
++    Generates stratified samples along a ray.
+     
+     Args:
+-        origins: Tensor of shape [N_rays, 3]
+-        directions: Tensor of shape [N_rays, 3]
+-        min_depth: Float, near plane
+-        max_depth: Float, far plane
+-        n_pts_per_ray: Int, number of samples
+-        lindisp: Bool, sample in disparity space
+-        perturb: Bool, add uniform noise within bins
++        o: Ray origin (3,) array.
++        d: Ray direction (3,) array.
++        t_n: Near depth (scalar).
++        t_f: Far depth (scalar).
++        k: Number of samples (int).
++        perturb: Whether to add uniform noise within bins (bool).
++        lindisp: Whether to sample in disparity space (bool).
+         
+     Returns:
+-        z_vals: Tensor of shape [N_rays, n_pts_per_ray]
+-        sample_points: Tensor of shape [N_rays, n_pts_per_ray, 3]
++        positions: (k, 3) array of 3D sample positions.
++        depths: (k,) array of sample depths.
+     """
+-    # Step 1: Linear spacing in [0, 1]
+-    t_vals = torch.linspace(0.0, 1.0, n_pts_per_ray, device=origins.device)
++    if k <= 0:
++        return np.empty((0, 3)), np.empty((0,))
+     
+-    # Expand for broadcasting: [1, N]
+-    t_vals = t_vals.unsqueeze(0)
++    # Step 1: Calculate bin boundaries
++    # t_vals will store the k+1 boundaries: t_0, t_1, ..., t_k
++    if lindisp:
++        # Sample linearly in disparity (1/t)
++        # 1/t_i = 1/t_n + i/k * (1/t_f - 1/t_n)
++        inv_t_n = 1.0 / t_n
++        inv_t_f = 1.0 / t_f
++        inv_t_vals = inv_t_n + np.linspace(0.0, 1.0, k + 1) * (inv_t_f - inv_t_n)
++        t_vals = 1.0 / inv_t_vals
++    else:
++        # Sample linearly in depth
++        t_vals = np.linspace(t_n, t_f, k + 1)
++        
++    # Step 2: Generate random numbers
++    # u_i ~ U[0, 1] for i = 1 to k
++    u = np.random.uniform(0.0, 1.0, k)
+     
+-    # Step 2: Map to depth interval
+-    if lindisp:
+-        # Linear in disparity: 1/z = (1-near)*(1-t) + (1-far)*t
+-        # z = 1 / ((1-t)/near + t/far)
+-        # Handle potential division by zero if near/far are 0? 
+-        # Standard NeRF assumes near > 0.
+-        inv_near = 1.0 / min_depth
+-        inv_far = 1.0 / max_depth
+-        inv_z_vals = inv_near * (1.0 - t_vals) + inv_far * t_vals
+-        z_vals = 1.0 / inv_z_vals
++    # Step 3: Calculate sample depths
++    if perturb:
++        # Draw uniformly from each bin [t_{i-1}, t_i]
++        # Bin i corresponds to index i-1 in 0-indexed arrays for boundaries
++        # t_vals has length k+1: indices 0 to k
++        # Bin i (1-based) is between t_vals[i-1] and t_vals[i]
++        lower = t_vals[:-1] # t_0 to t_{k-1}
++        upper = t_vals[1:]  # t_1 to t_k
++        depths = lower + u * (upper - lower)
+     else:
+-        # Linear in depth
+-        z_vals = min_depth * (1.0 - t_vals) + max_depth * t_vals
++        # Midpoint sampling
++        # Center of bin i is (t_{i-1} + t_i) / 2
++        mids = 0.5 * (t_vals[:-1] + t_vals[1:])
++        depths = mids
+         
+-    # Expand z_vals to [N_rays, N]
+-    z_vals = z_vals.expand(origins.shape[0], -1)
++    # Step 4: Calculate 3D positions
++    # p_i = o + depth_i * d
++    positions = o + depths[:, np.newaxis] * d
+     
+-    # Step 3: Perturbation (Stratification)
+-    if perturb:
+-        # Get midpoints between adjacent samples
+-        # z_vals shape: [N_rays, N]
+-        # mids shape: [N_rays, N-1]
+-        mids = 0.5 * (z_vals[:, 1:] + z_vals[:, :-1])
+-        
+-        # Define bin boundaries
+-        # upper: [N_rays, N] -> last element is max_depth
+-        # lower: [N_rays, N] -> first element is min_depth
+-        upper = torch.cat([mids, z_vals[:, -1:]], dim=1)
+-        lower = torch.cat([z_vals[:, :1], mids], dim=1)
+-        
+-        # Random uniform in [0, 1]
+-        t_rand = torch.rand_like(z_vals)
+-        
+-        # Sample uniformly within bins
+-        z_vals = lower + (upper - lower) * t_rand
+-        
+-    # Step 4: Compute 3D points
+-    # directions: [N_rays, 3], z_vals: [N_rays, N]
+-    # Expand z_vals to [N_rays, N, 1]
+-    z_vals_expanded = z_vals.unsqueeze(2)
+-    directions_expanded = directions.unsqueeze(1) # [N_rays, 1, 3]
+-    
+-    sample_points = origins.unsqueeze(1) + z_vals_expanded * directions_expanded
+-    
+-    return z_vals, sample_points
++    return positions, depths
+ ```
+ 
+@@ -160,32 +135,23 @@
+ 
+ ### [Hierarchical Stratified Sampling](10554-hierarchical-stratified-sampling.md)
+-Adds an adaptive refinement layer on top of stratified sampling, using initial samples to guide density in subsequent passes.
++Uses stratified sampling for a coarse pass to estimate density, then adaptively refines sampling in high-density regions for a fine pass. Choose when scene complexity varies significantly along rays.
++
++### [Stratified Monte Carlo Radiance Estimate](1373-stratified-monte-carlo-radiance-estimate.md)
++Focuses on the statistical estimation of the integral using stratified samples, often combined with importance sampling. Choose when variance reduction in the final pixel color is the primary goal.
+ 
+ ### [Batch Stratified Sampling](2730-batch-stratified-sampling.md)
+-Optimizes the stratified sampling process for batched ray processing on GPUs.
+-
+-### [Local Sampling](5532-local-sampling.md)
+-Focuses sampling within a local neighborhood rather than the full ray interval.
+-
+-### [Non-linear (Logarithmic) Sampling](5814-non-linear-logarithmic-sampling.md)
+-Uses non-linear spacing (e.g., logarithmic) instead of uniform bins, often combined with stratification.
+-
+-### [Pixel-guided ray sampling](7551-pixel-guided-ray-sampling.md)
+-Uses pixel-level information to guide the stratification or sampling distribution.
+-
+-### [Context-based Probability Ray Sampling](7561-context-based-probability-ray-sampling.md)
+-Uses context to determine probability densities for sampling, potentially replacing uniform bin stratification.
++Extends stratification to multiple rays simultaneously to optimize memory access and variance across a batch. Choose when rendering many rays in parallel on a GPU.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$ per ray, where $N$ is the number of samples. Generating random numbers and linear interpolation are constant time operations per sample.
+-*   **Memory Complexity:** $O(N)$ per ray to store the sample depths and coordinates.
+-*   **Performance:** Significantly reduces variance compared to pure uniform sampling, leading to faster convergence in Monte Carlo integration [S4, unofficial][S5]. It is computationally cheap and easy to parallelize.
+-*   **Strengths:** Eliminates aliasing artifacts from regular grids; simple to implement; robust.
+-*   **Limitations:** Does not adapt to scene complexity (unlike hierarchical methods); still requires a fixed number of samples per ray, which may be wasteful in empty space or insufficient in dense regions if $N$ is low.
+-*   **When to use:** Standard baseline for volume rendering and NeRF training; when computational budget is fixed and scene geometry is unknown or uniform.
+-*   **When not to use:** When high-frequency details require adaptive sampling (use Hierarchical Stratified Sampling) or when the scene has large empty regions (use Non-linear Sampling).
++*   **Time Complexity**: $O(k)$ per ray, where $k$ is the number of samples. Generating random numbers and arithmetic operations are linear in $k$.
++*   **Memory Complexity**: $O(k)$ per ray to store sample depths and positions.
++*   **Performance**: Significantly reduces aliasing artifacts compared to pure uniform sampling [S4, unofficial]. It is computationally cheap and easy to implement.
++*   **Strengths**: Simple to implement, unbiased (if perturb=True), effective at reducing high-frequency aliasing.
++*   **Limitations**: Does not adapt to scene content; samples are uniformly distributed regardless of where detail or density exists. Can be inefficient in sparse regions [S1].
++*   **When to use**: As a baseline sampling strategy, particularly in the coarse stage of hierarchical rendering [S4, unofficial][S5].
++*   **When not to use**: In scenes with highly non-uniform density where importance sampling would be more efficient.
+ 
+ ## Background
+-Stratified sampling is a fundamental technique in Monte Carlo integration, widely used in computer graphics to reduce variance. In the context of neural volume rendering, it was popularized by the original NeRF paper and subsequent implementations [S4, unofficial]. It is also used in acoustic volume rendering to approximate integrals over ray directions and depths [S1]. The method is a standard component in many volume rendering pipelines, often serving as the "coarse" pass in hierarchical sampling strategies [S5].
++Stratified sampling is a fundamental variance reduction technique in Monte Carlo integration. In the context of volume rendering and neural radiance fields (NeRFs), it was popularized by the original NeRF paper [S4, unofficial] as a standard method for generating sample points along rays. It is used in various forms in acoustic volume rendering [S1], neural surface reconstruction [S3, unofficial], and collaborative NeRF training [S5]. The method ensures that the ray is sampled evenly, preventing the gaps and clusters that can occur with purely random sampling.
+ 
+ ## Sources

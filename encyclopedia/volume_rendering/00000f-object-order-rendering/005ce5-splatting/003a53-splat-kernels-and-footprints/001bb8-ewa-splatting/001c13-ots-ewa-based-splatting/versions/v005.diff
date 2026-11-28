@@ -1,0 +1,165 @@
+--- v004.md
++++ v005.md
+@@ -2,23 +2,23 @@
+ Also called: EWA-Based Splatting
+ ## Overview
+-OTS (EWA-Based Splatting) is a volumetric rendering method that adapts the standard EWA splatting framework to support accurate volumetric integration by correcting the primitive weight for perspective projection effects [S1]. It solves the problem of incorrect opacity accumulation in standard EWA splatting, where the projected 2D Gaussian's integral is distorted by perspective division, leading to visual inaccuracies in depth-dependent attenuation [S1]. It sets itself apart from standard EWA Splatting by explicitly multiplying the splat weight by the determinant of the projection Jacobian, and from 3DGS by retaining the exact volumetric integration model rather than approximating it with affine assumptions [S1].
++OTS (EWA-Based Splatting) is a volumetric rendering method that adapts the standard EWA splatting framework to correct primitive weights for perspective projection effects [S1]. It solves the problem of distorted integrals in the projected 2D Gaussian caused by perspective division, ensuring the extinction coefficient's integral is preserved [S1]. It differs from standard EWA splatting by explicitly multiplying the splat weight by the determinant of the projection Jacobian, and from 3D Gaussian Splatting (3DGS) by avoiding the first-order Taylor approximation for attenuation [S1].
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: A set of 3D Gaussian primitives, each defined by position $\mathbf{p}$, covariance $\Sigma$, color $\mathbf{c}$, and base weight $a$.
+-- Output: A 2D image with accumulated color and opacity.
++- Input: A set of 3D Gaussian primitives, each defined by position $\mathbf{p}$, covariance $\Sigma$, color $\mathbf{c}$, and base weight $a$ [G].
++- Output: A 2D image with accumulated color and opacity [G].
+ 
+ **Data Structures:**
+-- Primitive: Contains $\mathbf{p} \in \mathbb{R}^3$, $\Sigma \in \mathbb{R}^{3 \times 3}$ (symmetric positive definite), $\mathbf{c} \in \mathbb{R}^3$, and scalar $a$.
+-- Screen-space Primitive: Contains projected center $\mathbf{p}'$, projected covariance $\Sigma'$, and corrected weight $a'$.
++- Primitive: Contains $\mathbf{p} \in \mathbb{R}^3$, $\Sigma \in \mathbb{R}^{3 \times 3}$ (symmetric positive definite), $\mathbf{c} \in \mathbb{R}^3$, and scalar $a$ [G].
++- Screen-space Primitive: Contains projected center $\mathbf{p}'$, projected covariance $\Sigma'$, and corrected weight $a'$ [G].
+ 
+ **Steps:**
+ 1. **Projection and Covariance Transformation:**
+-   For each primitive, compute the screen-space center $\mathbf{p}'$ and the projected 2D covariance matrix $\Sigma'$ using the standard EWA projection pipeline [S1]. This involves projecting the 3D covariance into screen space, accounting for the view and projection matrices.
++   For each primitive, compute the screen-space center $\mu'$ and projected 2D covariance $\Sigma'$ as defined in 3DGS [S1]. This involves projecting the 3D covariance into screen space using the view and projection matrices [S1].
+ 
+ 2. **Jacobian Determinant Calculation:**
+-   Compute the determinant of the Jacobian of the perspective projection, denoted as $J$. This value represents the scaling factor of the area element due to perspective division [S1].
++   Compute the determinant of the Jacobian of the perspective projection, denoted as $\det(J)$ [S1]. This value represents the scaling factor of the area element due to perspective division [S1].
+ 
+ 3. **Weight Correction:**
+-   Calculate the corrected weight $a'$ by multiplying the original weight $a$ by the Jacobian determinant $J$:
++   Calculate the corrected weight $a'$ by multiplying the original weight $a$ by the Jacobian determinant $\det(J)$, following Eq. 20 [S1]:
+    $$ a' = a \cdot \det(J) $$
+    This step preserves the integral of the extinction coefficient under perspective projection, correcting the distortion introduced by $\Sigma'$ [S1].
+@@ -26,47 +26,69 @@
+ 4. **Rendering Kernel Execution:**
+    For each pixel covered by a primitive's footprint:
+-   a. Evaluate the 2D Gaussian function $f_i(\mathbf{x})$ at the pixel's screen-space coordinates $\mathbf{x}$ using $\Sigma'$ and $\mathbf{p}'$.
+-   b. **Clamp** the value of $f_i(\mathbf{x})$ to a maximum of 1.0. This is required for correctness in the OTS model because the perspective-corrected 2D Gaussians can produce values greater than 1, which would violate the physical interpretation of the extinction coefficient in the volumetric integration [S1].
+-   c. Accumulate the color and opacity using the corrected weight $a'$ and the clamped $f_i(\mathbf{x})$.
++   a. Evaluate the 2D Gaussian function $f_i(\mathbf{x})$ at the pixel's screen-space coordinates $\mathbf{x}$ using $\Sigma'$ and $\mathbf{p}'$ [S1].
++   b. **Clamp** the value of $f_i(\mathbf{x})$ to a maximum of 1.0 [S1]. This is required for correctness in the OTS model because the perspective-corrected 2D Gaussians can produce values greater than 1, which would violate the physical interpretation of the extinction coefficient in the volumetric integration [S1].
++   c. Accumulate the color and opacity using the corrected weight $a'$ and the clamped $f_i(\mathbf{x})$ [S1].
+ 
+ **Pseudocode:**
+ ```python
+-def render_ots_primitives(primitives, camera_matrix, projection_matrix):
+-    """
+-    Renders primitives using OTS (EWA-Based Splatting) with perspective correction.
+-    """
+-    image = zeros_like(output_shape)
+-    
+-    # Sort primitives back-to-front for correct alpha blending
+-    sorted_primitives = sort_by_depth(primitives, camera_matrix)
+-    
++import math
++
++def render_ots_primitives(primitives, view_proj_matrix, image_shape):
++    # Initialize output buffers
++    color_out = [[0.0, 0.0, 0.0] for _ in range(image_shape[0])]
++    opacity_out = [0.0 for _ in range(image_shape[0])]
++    for i in range(image_shape[0]):
++        color_out[i] = [0.0, 0.0, 0.0]
++        opacity_out[i] = 0.0
++
++    # Sort primitives back-to-front by depth
++    sorted_primitives = sorted(primitives, key=lambda p: p['p'][2], reverse=True)
++
+     for prim in sorted_primitives:
+-        # 1. Project primitive to screen space
+-        p_prime, sigma_prime = project_ewa(prim.p, prim.sigma, camera_matrix, projection_matrix)
+-        
++        p = prim['p']
++        sigma = prim['sigma']
++        c = prim['c']
++        a = prim['a']
++
++        # 1. Project to screen space
++        p_h = [p[0], p[1], p[2], 1.0]
++        p_clip = [sum(view_proj_matrix[r][c] * p_h[c] for c in range(4)) for r in range(4)]
++        p_prime = [p_clip[0] / p_clip[3], p_clip[1] / p_clip[3]]
++
+         # 2. Compute Jacobian determinant for perspective correction
+-        # The Jacobian determinant accounts for the change in area due to perspective division
+-        jacobian_det = compute_jacobian_determinant(prim.p, camera_matrix, projection_matrix)
+-        
+-        # 3. Correct the weight
+-        a_prime = prim.a * jacobian_det
+-        
+-        # 4. Rasterize the primitive
+-        footprint = get_footprint(sigma_prime)
+-        for x in footprint:
+-            # Evaluate 2D Gaussian
+-            f_x = evaluate_2d_gaussian(x, p_prime, sigma_prime)
+-            
+-            # Clamp f_x to 1.0 for correctness in OTS model
+-            f_x = min(f_x, 1.0)
+-            
+-            # Accumulate color and opacity
+-            # Assuming standard volumetric integration: C = C * (1 - alpha) + c * alpha
+-            # where alpha is derived from a' and f_x
+-            alpha = compute_alpha(a_prime, f_x)
+-            color = prim.c
+-            image[x] = image[x] * (1 - alpha) + color * alpha
+-            
+-    return image
++        z = p[2]
++        clip_w = view_proj_matrix[2][2] * z + view_proj_matrix[3][2]
++        j_det = (z ** 2) / (clip_w ** 2)
++
++        # 3. Correct weight
++        a_prime = a * j_det
++
++        # 4. Rasterize footprint
++        sigma_2d = [sigma[0][:2], sigma[1][:2]]
++        det_sigma = sigma_2d[0][0] * sigma_2d[1][1] - sigma_2d[0][1] * sigma_2d[1][0]
++        inv_sigma = [[sigma_2d[1][1] / det_sigma, -sigma_2d[0][1] / det_sigma],
++                     [-sigma_2d[0][1] / det_sigma, sigma_2d[0][0] / det_sigma]]
++
++        radius = int(math.ceil(2.0 * math.sqrt(max(sigma_2d[0][0], sigma_2d[1][1]))))
++        min_x, max_x = max(0, int(p_prime[0]) - radius), min(image_shape[1], int(p_prime[0]) + radius)
++        min_y, max_y = max(0, int(p_prime[1]) - radius), min(image_shape[0], int(p_prime[1]) + radius)
++
++        for y in range(min_y, max_y):
++            for x in range(min_x, max_x):
++                dx = x - p_prime[0]
++                dy = y - p_prime[1]
++                # Evaluate 2D Gaussian
++                f_x = math.exp(-0.5 * (inv_sigma[0][0] * dx * dx + 2 * inv_sigma[0][1] * dx * dy + inv_sigma[1][1] * dy * dy))
++                # Clamp for correctness
++                f_x = min(f_x, 1.0)
++                # Accumulate
++                alpha = a_prime * f_x
++                alpha = min(alpha, 1.0)
++                color_out[y][x][0] = color_out[y][x][0] * (1.0 - alpha) + c[0] * alpha
++                color_out[y][x][1] = color_out[y][x][1] * (1.0 - alpha) + c[1] * alpha
++                color_out[y][x][2] = color_out[y][x][2] * (1.0 - alpha) + c[2] * alpha
++                opacity_out[y][x] = opacity_out[y][x] + alpha * (1.0 - opacity_out[y][x])
++
++    return color_out, opacity_out
+ ```
+ 
+@@ -76,5 +98,4 @@
+ **Edge Cases and Pitfalls:**
+ - **Values > 1:** Without clamping, $f_i(\mathbf{x})$ can exceed 1, leading to incorrect opacity values in the volumetric integration [S1].
+-- **Perspective Distortion:** Ignoring the Jacobian determinant leads to incorrect weight scaling, especially for primitives far from the camera or at oblique angles [S1].
+ - **Numerical Stability:** The clamp was originally present in 3DGS for numerical stability but is now required for correctness in the OTS model [S1].
+ ## Subtopics
+@@ -87,10 +108,10 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Dominated by rasterization of splats. The Jacobian calculation adds a constant overhead per primitive.
+-- **Memory Complexity:** Linear in the number of primitives.
+-- **Strengths:** Correctly handles perspective distortion in volumetric integration, leading to more accurate opacity accumulation.
+-- **Limitations:** Requires computation of the Jacobian determinant. The clamping step is a heuristic that may affect visual quality if not carefully tuned.
+-- **When to use:** When accurate volumetric rendering under perspective projection is required, and the scene contains primitives at varying depths or oblique angles.
+-- **When not to use:** For orthographic projections where perspective distortion is negligible, or when real-time performance is critical and the approximation error is acceptable.
++- **Time Complexity:** Dominated by rasterization of splats [G].
++- **Memory Complexity:** Linear in the number of primitives [G].
++- **Strengths:** Correctly handles perspective distortion in volumetric integration [S1].
++- **Limitations:** Requires computation of the Jacobian determinant [S1].
++- **When to use:** When accurate volumetric rendering under perspective projection is required [S1].
++- **When not to use:** For orthographic projections where perspective distortion is negligible [G].
+ ## Background
+ OTS (EWA-Based Splatting) is described in the context of comparing different splatting methods for 3D Gaussian Splatting [S1]. It builds on the EWA splatting framework [ZPVBG02] and is discussed as a baseline for evaluating the impact of accurate volumetric rendering in 3DGS [S1].

@@ -1,0 +1,105 @@
+# Laplacian Smooth Loss
+
+Also called: Mesh smoothing loss, Laplacian regularization
+
+## Overview
+Laplacian Smooth Loss is a regularization term used during mesh optimization to reduce geometric distortion, such as intersecting triangles or noisy surfaces, by penalizing the deviation of each vertex from the centroid of its immediate neighbors [S1]. It sets itself apart from error-minimization methods like QEF or Position Error Minimized Marching Cubes by focusing on local smoothness and topology preservation rather than fitting a specific implicit field or minimizing distance to input points [S1]. It is typically applied alongside normal consistency loss to prevent face flipping during joint optimization with other representations [S1].
+
+## How it works
+**Inputs and Outputs**
+- **Input**: A mesh defined by a set of vertices $V$ and a connectivity graph where $N(i)$ is the set of neighbor vertices for vertex $v_i$.
+- **Output**: A scalar loss value $L_{lap}$ representing the average squared distance of vertices from their local neighborhood mean.
+
+**Data Structures**
+- $V$: List of vertex positions, where $v_i \in \mathbb{R}^3$.
+- $N(i)$: List of indices or pointers to vertices adjacent to $v_i$ in the mesh graph.
+- $|V|$: Total number of vertices.
+- $|N(i)|$: Number of neighbors for vertex $i$.
+
+**Formula**
+The loss is defined as the mean squared Euclidean distance between each vertex and the average position of its neighbors [S1]:
+
+$$
+L_{lap} = \frac{1}{|V|} \sum_{i \in V} \left\| v_i - \frac{1}{|N(i)|} \sum_{j \in N(i)} v_j \right\|^2
+$$
+
+Where:
+- $v_i$ is the position of vertex $i$.
+- $N(i)$ is the set of neighbor vertices of $v_i$.
+- $\| \cdot \|$ denotes the Euclidean norm.
+
+**Parameters**
+- $\lambda_{lap}$: The weight of the Laplacian smooth loss in the total training objective. It controls the strength of the smoothing constraint relative to other losses (e.g., image reconstruction loss) [S1]. Typical values are not specified in the source but are treated as hyperparameters in the joint optimization objective [S1].
+
+**Steps**
+1. For each vertex $v_i$ in the mesh:
+   a. Identify the set of neighbor vertices $N(i)$.
+   b. Compute the centroid of the neighbors: $c_i = \frac{1}{|N(i)|} \sum_{j \in N(i)} v_j$.
+   c. Compute the squared distance: $d_i^2 = \| v_i - c_i \|^2$.
+2. Sum all squared distances $d_i^2$ for all $i \in V$.
+3. Divide the sum by the total number of vertices $|V|$ to obtain $L_{lap}$.
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def laplacian_smooth_loss(vertices, neighbors):
+    """
+    Calculate Laplacian Smooth Loss.
+    
+    Args:
+        vertices: List of numpy arrays or tensors, shape (N, 3), where N is |V|.
+        neighbors: List of lists, where neighbors[i] contains indices of neighbors of vertex i.
+        
+    Returns:
+        Scalar loss value.
+    """
+    total_loss = 0.0
+    num_vertices = len(vertices)
+    
+    for i in range(num_vertices):
+        v_i = vertices[i]
+        neighbor_indices = neighbors[i]
+        
+        # Guard against empty neighbor list to avoid division by zero
+        if len(neighbor_indices) == 0:
+            continue
+            
+        # Calculate centroid of neighbors
+        neighbor_positions = [vertices[j] for j in neighbor_indices]
+        centroid = sum(neighbor_positions) / len(neighbor_indices)
+        
+        # Calculate squared distance
+        diff = v_i - centroid
+        dist_sq = dot_product(diff, diff)
+        
+        total_loss += dist_sq
+        
+    # Average over all vertices
+    loss = total_loss / num_vertices
+    return loss
+```
+
+**Edge Cases and Pitfalls**
+- **Boundary Vertices**: Vertices on the boundary of a mesh may have fewer neighbors, potentially leading to less smoothing or numerical instability if $|N(i)| = 0$. The pseudocode includes a guard for this [G].
+- **Topology Errors**: If the mesh topology becomes disordered (e.g., intersecting triangles) during optimization, the neighbor relationships may become invalid or misleading, reducing the effectiveness of the loss [S1].
+- **Over-smoothing**: Excessive weight $\lambda_{lap}$ may cause the mesh to lose high-frequency details [S1].
+
+## Subtopics
+
+### [Equilateral Edge Length Regularization](22804-equilateral-edge-length-regularization.md)
+A technique that penalizes variance in edge lengths to encourage equilateral triangles. Unlike Laplacian Smooth Loss which focuses on vertex position relative to neighbors, this focuses on edge length uniformity. It is particularly effective in flexible representations like FlexiCubes but can degrade rigid methods like Marching Cubes.
+
+## Operating characteristics
+- **Time Complexity**: $O(|V|)$, as it requires iterating over each vertex and its neighbors once.
+- **Memory Complexity**: $O(|V|)$ to store the neighbor lists and intermediate calculations.
+- **Strengths**: Effective at reducing local mesh distortion and noise during optimization [S1]. Simple to implement and compute [S1].
+- **Limitations**: Does not enforce global shape fidelity; primarily a local smoothness prior [S1]. Can be ineffective if the initial mesh topology is severely distorted [S1].
+- **When to Use**: During joint optimization of explicit meshes with other representations (e.g., Gaussian Splatting) to prevent topological errors and intersecting triangles [S1].
+- **When Not to Use**: When preserving sharp features is critical and over-smoothing is undesirable, or when the mesh topology is already coherent and stable.
+
+## Background
+The Laplacian Smooth Loss originates from conventional mesh optimization techniques [S1]. It was adapted for use in joint optimization frameworks, such as OMeGa, which combines explicit meshes with Gaussian Splats for scene-level surface reconstruction [S1]. The method draws inspiration from previous works on mesh optimization [8, 22] and is often used in conjunction with normal consistency loss [S1].
+
+## Sources
+[S1] OMeGa: Joint Optimization of Explicit Meshes and Gaussian Splats for Robust Scene-Level Surface Reconstruction, https://doi.org/10.1109/WACV61042.2026.00427, fetched 2026-10-30

@@ -1,0 +1,3113 @@
+# first_voxel_engine
+This is my first ever voxel engine written for Rust, using [wgpu-rs](https://github.com/gfx-rs/wgpu-rs) as rendering backend.
+
+I will not accept pull requests as I want people watching my video about creating this (here: https://youtu.be/96ht7rd3Y5I)
+
+to have easy access to the source code at this projects initial state.
+
+so what is the initial state?
+Working endless voxel generation, but not optimized!
+Only one form of world generation is provided, endless grass cave one.
+![preview](preview.png)
+
+### build.rs
+```
+use anyhow::*;
+use std::path::PathBuf;
+
+use fs_extra::copy_items;
+use fs_extra::dir::CopyOptions;
+use std::env;
+
+// copy resource folder to OUT_DIR
+fn copy_res() -> Result<()> {
+    // This tells cargo to rerun this script if something in /res/ changes.
+    println!("cargo:rerun-if-changed=res/*");
+
+    let out_dir = env::var("OUT_DIR")?;
+    let out_dir = PathBuf::from(out_dir);
+    let out_dir = out_dir
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
+    println!("out dir: {:?}", out_dir);
+    let mut copy_options = CopyOptions::new();
+    copy_options.overwrite = true;
+    let mut paths_to_copy = Vec::new();
+    paths_to_copy.push("res/");
+    copy_items(&paths_to_copy, out_dir, &copy_options)?;
+    Ok(())
+}
+
+fn main() -> Result<()> {
+    copy_res()?;
+    Ok(())
+}
+```
+
+### src/camera.rs
+```
+use cgmath::{Angle, InnerSpace, Rad, Vector3};
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct Uniform {
+    view_position: [f32; 4],
+    view_proj: [[f32; 4]; 4],
+}
+
+impl Uniform {
+    fn new() -> Self {
+        // needed to access ::identity()
+        use cgmath::SquareMatrix;
+        Self {
+            view_position: [0.0; 4],
+            view_proj: cgmath::Matrix4::identity().into(),
+        }
+    }
+
+    pub fn update(&mut self, eye: &cgmath::Point3<f32>, view_proj: cgmath::Matrix4<f32>) {
+        // We don't specifically need homogeneous coordinates since we're just using
+        // a vec3 in the shader. We're using Point3 for the camera.eye, and this is
+        // the easiest way to convert to Vector4. We're using Vector4 because of
+        // the uniforms 16 byte spacing requirement
+        self.view_position = eye.to_homogeneous().into();
+        self.view_proj = view_proj.into();
+    }
+}
+
+#[rustfmt::skip]
+pub const OPENGL_TO_WGPU_MATRIX: cgmath::Matrix4<f32> = cgmath::Matrix4::new(
+    1.0, 0.0, 0.0, 0.0,
+    0.0, 1.0, 0.0, 0.0,
+    0.0, 0.0, 0.5, 0.0,
+    0.0, 0.0, 0.5, 1.0,
+);
+
+pub struct Camera {
+    pub position: cgmath::Point3<f32>,
+    pub yaw: Rad<f32>,
+    pub pitch: Rad<f32>,
+    pub aspect: f32,
+    pub fovy: f32,
+    pub z_near: f32,
+    pub z_far: f32,
+    pub uniform: Uniform,
+}
+
+impl Camera {
+    pub fn new(aspect: f32) -> Self {
+        Self {
+            position: (0., 1., 2.).into(),
+            yaw: Rad::<f32>(-90f32),
+            pitch: Rad::<f32>(-20f32),
+            aspect,
+            fovy: 45.0,
+            z_near: 0.1,
+            z_far: 500.0,
+            uniform: Uniform::new(),
+        }
+    }
+
+    pub fn update_uniform(&mut self) {
+        self.uniform
+            .update(&self.position, self.build_view_projection_matrix());
+    }
+
+    pub fn build_view_projection_matrix(&self) -> cgmath::Matrix4<f32> {
+        let view = cgmath::Matrix4::look_to_rh(
+            self.position,
+            Vector3::new(self.yaw.0.cos(), self.pitch.0.sin(), self.yaw.sin()).normalize(),
+            Vector3::unit_y(),
+        );
+        let proj =
+            cgmath::perspective(cgmath::Deg(self.fovy), self.aspect, self.z_near, self.z_far);
+        OPENGL_TO_WGPU_MATRIX * proj * view
+    }
+}
+```
+
+### src/camera_controller.rs
+```
+use std::{f32::consts::FRAC_PI_2, time::Duration};
+
+use cgmath::{InnerSpace, Rad, Vector3};
+use winit::{
+    dpi::PhysicalPosition,
+    event::{ElementState, MouseScrollDelta, VirtualKeyCode},
+};
+
+use crate::camera::Camera;
+
+#[derive(Debug)]
+pub struct CameraController {
+    amount_left: f32,
+    amount_right: f32,
+    amount_forward: f32,
+    amount_backward: f32,
+    amount_up: f32,
+    amount_down: f32,
+    rotate_horizontal: f32,
+    rotate_vertical: f32,
+    scroll: f32,
+    speed: f32,
+    sensitivity: f32,
+}
+
+impl CameraController {
+    pub fn new(speed: f32, sensitivity: f32) -> Self {
+        Self {
+            amount_left: 0.0,
+            amount_right: 0.0,
+            amount_forward: 0.0,
+            amount_backward: 0.0,
+            amount_up: 0.0,
+            amount_down: 0.0,
+            rotate_horizontal: 0.0,
+            rotate_vertical: 0.0,
+            scroll: 0.0,
+            speed,
+            sensitivity,
+        }
+    }
+
+    pub fn process_keyboard(&mut self, key: VirtualKeyCode, state: ElementState) -> bool {
+        let amount = if state == ElementState::Pressed {
+            1.0
+        } else {
+            0.0
+        };
+        match key {
+            VirtualKeyCode::W | VirtualKeyCode::Up => {
+                self.amount_forward = amount;
+                true
+            }
+            VirtualKeyCode::S | VirtualKeyCode::Down => {
+                self.amount_backward = amount;
+                true
+            }
+            VirtualKeyCode::A | VirtualKeyCode::Left => {
+                self.amount_left = amount;
+                true
+            }
+            VirtualKeyCode::D | VirtualKeyCode::Right => {
+                self.amount_right = amount;
+                true
+            }
+            VirtualKeyCode::Space => {
+                self.amount_up = amount;
+                true
+            }
+            VirtualKeyCode::LShift => {
+                self.amount_down = amount;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    pub fn process_mouse(&mut self, mouse_dx: f64, mouse_dy: f64) {
+        self.rotate_horizontal = mouse_dx as f32;
+        self.rotate_vertical = mouse_dy as f32;
+    }
+
+    pub fn process_scroll(&mut self, delta: &MouseScrollDelta) {
+        self.scroll = -match delta {
+            // I'm assuming a line is about 100 pixels
+            MouseScrollDelta::LineDelta(_, scroll) => scroll * 100.0,
+            MouseScrollDelta::PixelDelta(PhysicalPosition { y: scroll, .. }) => *scroll as f32,
+        };
+    }
+
+    pub fn update_camera(&mut self, camera: &mut Camera, dt: Duration) {
+        let dt = dt.as_secs_f32();
+
+        // Move forward/backward and left/right
+        let (yaw_sin, yaw_cos) = camera.yaw.0.sin_cos();
+        let forward = Vector3::new(yaw_cos, 0.0, yaw_sin).normalize();
+        let right = Vector3::new(-yaw_sin, 0.0, yaw_cos).normalize();
+        camera.position += forward * (self.amount_forward - self.amount_backward) * self.speed * dt;
+        camera.position += right * (self.amount_right - self.amount_left) * self.speed * dt;
+
+        // Move in/out (aka. "zoom")
+        // Note: this isn't an actual zoom. The camera's position
+        // changes when zooming. I've added this to make it easier
+        // to get closer to an object you want to focus on.
+        let (pitch_sin, pitch_cos) = camera.pitch.0.sin_cos();
+        let scrollward =
+            Vector3::new(pitch_cos * yaw_cos, pitch_sin, pitch_cos * yaw_sin).normalize();
+        camera.position += scrollward * self.scroll * self.speed * self.sensitivity * dt;
+        self.scroll = 0.0;
+
+        // Move up/down. Since we don't use roll, we can just
+        // modify the y coordinate directly.
+        camera.position.y += (self.amount_up - self.amount_down) * self.speed * dt;
+
+        // Rotate
+        camera.yaw += Rad(self.rotate_horizontal) * self.sensitivity * dt;
+        camera.pitch += Rad(-self.rotate_vertical) * self.sensitivity * dt;
+
+        // If process_mouse isn't called every frame, these values
+        // will not get set to zero, and the camera will rotate
+        // when moving in a non cardinal direction.
+        self.rotate_horizontal = 0.0;
+        self.rotate_vertical = 0.0;
+
+        // Keep the camera's angle from going too high/low.
+        if camera.pitch < -Rad(FRAC_PI_2) {
+            camera.pitch = -Rad(FRAC_PI_2);
+        } else if camera.pitch > Rad(FRAC_PI_2) {
+            camera.pitch = Rad(FRAC_PI_2);
+        }
+    }
+}
+```
+
+### src/color.rs
+```
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Color(pub [u8; 4]);
+
+impl Into<[f32; 4]> for Color {
+    fn into(self) -> [f32; 4] {
+        [
+            self.0[0] as f32 / 255.,
+            self.0[1] as f32 / 255.,
+            self.0[2] as f32 / 255.,
+            self.0[3] as f32 / 255.,
+        ]
+    }
+}
+
+impl Into<[u8; 4]> for Color {
+    fn into(self) -> [u8; 4] {
+        self.0
+    }
+}
+
+impl Into<[f32; 3]> for Color {
+    fn into(self) -> [f32; 3] {
+        [
+            self.0[0] as f32 / 255.,
+            self.0[1] as f32 / 255.,
+            self.0[2] as f32 / 255.,
+        ]
+    }
+}
+
+impl From<[u8; 3]> for Color {
+    fn from(rgb: [u8; 3]) -> Self {
+        Color([rgb[0], rgb[1], rgb[2], 255u8])
+    }
+}
+
+impl From<[f32; 3]> for Color {
+    fn from(rgb: [f32; 3]) -> Self {
+        Color::new(rgb[0], rgb[1], rgb[2], 1f32)
+    }
+}
+
+impl Color {
+    pub fn new(r: f32, g: f32, b: f32, a: f32) -> Color {
+        Color([
+            (r.min(1.).max(0.) * 255.) as u8,
+            (g.min(1.).max(0.) * 255.) as u8,
+            (b.min(1.).max(0.) * 255.) as u8,
+            (a.min(1.).max(0.) * 255.) as u8,
+        ])
+    }
+}
+
+#[allow(dead_code)]
+pub mod colors {
+    use super::Color;
+    pub const LIGHTGRAY: Color = Color([200, 200, 200, 255]);
+    pub const GRAY: Color = Color([130, 130, 130, 255]);
+    pub const DARKGRAY: Color = Color([80, 80, 80, 255]);
+    pub const YELLOW: Color = Color([253, 249, 0, 255]);
+    pub const GOLD: Color = Color([255, 203, 0, 255]);
+    pub const ORANGE: Color = Color([255, 161, 0, 255]);
+    pub const PINK: Color = Color([255, 109, 194, 255]);
+    pub const RED: Color = Color([230, 41, 55, 255]);
+    pub const MAROON: Color = Color([190, 33, 55, 255]);
+    pub const GREEN: Color = Color([0, 228, 48, 255]);
+    pub const LIME: Color = Color([0, 158, 47, 255]);
+    pub const DARKGREEN: Color = Color([0, 117, 44, 255]);
+    pub const SKYBLUE: Color = Color([102, 191, 255, 255]);
+    pub const BLUE: Color = Color([0, 121, 241, 255]);
+    pub const DARKBLUE: Color = Color([0, 82, 172, 255]);
+    pub const PURPLE: Color = Color([200, 122, 255, 255]);
+    pub const VIOLET: Color = Color([135, 60, 190, 255]);
+    pub const DARKPURPLE: Color = Color([112, 31, 126, 255]);
+    pub const BEIGE: Color = Color([211, 176, 131, 255]);
+    pub const BROWN: Color = Color([127, 106, 79, 255]);
+    pub const DARKBROWN: Color = Color([76, 63, 47, 255]);
+    pub const WHITE: Color = Color([255, 255, 255, 255]);
+    pub const BLACK: Color = Color([0, 0, 0, 255]);
+    pub const BLANK: Color = Color([0, 0, 0, 0]);
+    pub const MAGENTA: Color = Color([255, 0, 255, 255]);
+}
+```
+
+### src/depth_pass.rs
+```
+use wgpu::util::DeviceExt;
+
+use crate::{model::ModelVertex, rendering::vertex_desc::VertexDesc, texture::Texture, Vertex};
+
+pub struct DepthPass {
+    pipeline: wgpu::RenderPipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+    bind_group: wgpu::BindGroup,
+    pub texture: Texture,
+    index_buffer: wgpu::Buffer,
+    vertex_buffer: wgpu::Buffer,
+    num_indices: u32,
+}
+
+pub const DEPTH_VERTICES: &[Vertex] = &[
+    Vertex {
+        position: [0.0, 0.0, 0.0],
+        tex_coords: [0.0, 1.0],
+    },
+    Vertex {
+        position: [1.0, 0.0, 0.0],
+        tex_coords: [1.0, 1.0],
+    },
+    Vertex {
+        position: [1.0, 1.0, 0.0],
+        tex_coords: [1.0, 0.0],
+    },
+    Vertex {
+        position: [0.0, 1.0, 0.0],
+        tex_coords: [0.0, 0.0],
+    },
+];
+
+pub const DEPTH_INDICES: &[u16] = &[0, 1, 2, 0, 2, 3];
+
+impl DepthPass {
+    pub fn new(device: &wgpu::Device, sc_desc: &wgpu::SwapChainDescriptor) -> Self {
+        let texture = Texture::create_depth_texture(&device, &sc_desc, "depth_texture");
+        let shader_module = crate::rendering::render_utils::create_shader_module(
+            device,
+            include_str!("depth_pass.wgsl"),
+            "depth pass",
+        );
+
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("depth_pass.bind_group_layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStage::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStage::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler {
+                        filtering: true,
+                        comparison: true,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("depth_pass.bind_group"),
+            layout: &bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&texture.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&texture.sampler),
+                },
+            ],
+        });
+
+        let depth_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("depth_pass.layout"),
+                bind_group_layouts: &[&bind_group_layout],
+                push_constant_ranges: &[],
+            });
+
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("depth_pass.pipeline"),
+            layout: Some(&depth_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader_module,
+                entry_point: "vs_main",
+                buffers: &[ModelVertex::desc()],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: Some(wgpu::Face::Back),
+                clamp_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader_module,
+                entry_point: "fs_main",
+                targets: &[wgpu::ColorTargetState {
+                    format: sc_desc.format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrite::ALL,
+                }],
+            }),
+        });
+
+        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("depth_pass.vertex_buffer"),
+            contents: bytemuck::cast_slice(DEPTH_VERTICES),
+            usage: wgpu::BufferUsage::VERTEX,
+        });
+        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("depth_pass.index_buffer"),
+            contents: bytemuck::cast_slice(DEPTH_INDICES),
+            usage: wgpu::BufferUsage::INDEX,
+        });
+        let num_indices = DEPTH_INDICES.len() as u32;
+
+        Self {
+            pipeline,
+            texture,
+            bind_group,
+            bind_group_layout,
+            vertex_buffer,
+            index_buffer,
+            num_indices,
+        }
+    }
+
+    pub fn resize(&mut self, device: &wgpu::Device, sc_desc: &wgpu::SwapChainDescriptor) {
+        self.texture = Texture::create_depth_texture(device, sc_desc, "depth_texture");
+        self.bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("depth_pass.bind_group"),
+            layout: &self.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&self.texture.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.texture.sampler),
+                },
+            ],
+        });
+    }
+
+    pub fn render(&self, frame: &wgpu::SwapChainTexture, encoder: &mut wgpu::CommandEncoder) {
+        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("render_pass.depth_visual"),
+            color_attachments: &[wgpu::RenderPassColorAttachment {
+                view: &frame.view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: true,
+                },
+            }],
+            depth_stencil_attachment: None,
+        });
+        render_pass.set_pipeline(&self.pipeline);
+        render_pass.set_bind_group(0, &self.bind_group, &[]);
+        render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+        render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+        render_pass.draw_indexed(0..self.num_indices, 0, 0..1);
+    }
+}
+```
+
+### src/depth_pass.wgsl
+```
+struct VertexOutput {
+    [[builtin(position)]] builtin_position: vec4<f32>;
+    [[location(0)]] tex_coords: vec2<f32>;
+};
+
+[[stage(vertex)]]
+fn vs_main(
+    [[location(0)]] position: vec3<f32>,
+    [[location(1)]] tex_coords: vec2<f32>,
+) -> VertexOutput {
+    var out: VertexOutput;
+    out.tex_coords = tex_coords;
+    out.builtin_position = vec4<f32>(position, 1.0);
+    return out;
+}
+
+[[group(0), binding(0)]]
+var t_depth: texture_depth_2d;
+
+[[group(0), binding(1)]]
+var s_depth: sampler_comparison;
+
+[[stage(fragment), early_depth_test]]
+fn fs_main(
+    in: VertexOutput,
+) -> [[location(0)]] vec4<f32> {
+    let near = 0.1;
+    let far = 100.0;
+    let depth = textureSampleCompare(t_depth, s_depth, in.tex_coords, 1.0);
+    let r = (2.0 * near * far) / (far + near - depth * (far - near));
+    return vec4<f32>(vec3<f32>(r), 1.0);
+}
+```
+
+### src/light.rs
+```
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct Light {
+    pub position: [f32; 3],
+    // due to uniforms requireing 16 byte (4 float) spacing, we need to use a padding field here
+    pub _padding: u32,
+    pub color: [f32; 3],
+}
+
+pub fn create_light_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("light_bind_group_layout"),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStage::VERTEX | wgpu::ShaderStage::FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        }],
+    })
+}
+```
+
+### src/light.wgsl
+```
+[[block]]
+struct CameraUniform {
+    position: vec3<f32>;
+    projection_view: mat4x4<f32>;
+};
+
+[[group(0), binding(0)]]
+var<uniform> u_camera: CameraUniform;
+
+struct VertexOutput {
+    [[builtin(position)]] builtin_position: vec4<f32>;
+    [[location(0)]] color: vec2<f32>;
+};
+
+
+[[block]]
+struct LightUniform {
+    position: vec3<f32>;
+    color: vec3<f32>;
+};
+
+[[group(1), binding(0)]]
+var<uniform> u_light: LightUniform;
+
+[[stage(vertex)]]
+fn vs_main(
+    [[location(0)]] position: vec3<f32>,
+    [[location(1)]] tex_coords: vec2<f32>,
+    [[location(2)]] normal: vec3<f32>,
+    [[location(3)]] diffuse_color: vec3<f32>,
+) -> VertexOutput {
+    var out: VertexOutput;
+    let scale = 0.25;
+    let scaled_position = position * scale + u_light.position;
+    out.builtin_position = u_camera.projection_view * vec4<f32>(scaled_position, 1.0);
+    return out;
+}
+
+[[stage(fragment), early_depth_test]]
+fn fs_main(
+    in: VertexOutput,
+) -> [[location(0)]] vec4<f32> {
+    return vec4<f32>(u_light.color, 1.0);
+}
+```
+
+### src/main.rs
+```
+use camera::Camera;
+use camera_controller::*;
+use cgmath::{InnerSpace, Zero};
+use futures::executor::block_on;
+use model::Model;
+use rendering::gpu_resources::GpuResources;
+use voxel_tools::chunks::Chunks;
+use wgpu::util::DeviceExt;
+use winit::{
+    event::*,
+    event_loop::{ControlFlow, EventLoop},
+    window::{Window, WindowBuilder},
+};
+
+use crate::{
+    depth_pass::DepthPass,
+    light::Light,
+    rendering::{
+        render_utils::create_render_pipeline, vertex_desc::VertexDesc, vertex_instance::*,
+    },
+    voxel_tools::{
+        rendering::voxel_pipeline::create_voxel_pipeline,
+    },
+};
+
+mod camera;
+mod camera_controller;
+mod color;
+mod depth_pass;
+mod light;
+mod model;
+mod rendering;
+mod texture;
+mod voxel_tools;
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct Vertex {
+    pub position: [f32; 3],
+    //color: [f32; 3],
+    pub tex_coords: [f32; 2],
+}
+
+pub const NUM_INSTANCES_PER_ROW: u32 = 100;
+pub const NUM_INSTANCES: u32 = NUM_INSTANCES_PER_ROW * NUM_INSTANCES_PER_ROW;
+pub const INSTANCE_DISPLACEMENT: cgmath::Vector3<f32> = cgmath::Vector3::new(
+    NUM_INSTANCES_PER_ROW as f32 * 0.5f32,
+    0.0,
+    NUM_INSTANCES_PER_ROW as f32 * 0.5f32,
+);
+
+struct State {
+    gpu_resources: GpuResources,
+    instance_buffer: wgpu::Buffer,
+    rotation: f32,
+    surface: wgpu::Surface,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    sc_desc: wgpu::SwapChainDescriptor,
+    swap_chain: wgpu::SwapChain,
+    render_pipeline: wgpu::RenderPipeline,
+    size: winit::dpi::PhysicalSize<u32>,
+    clear_color: wgpu::Color,
+    camera_uniform_buffer: wgpu::Buffer,
+    camera_bind_group: wgpu::BindGroup,
+    camera: Camera,
+    camera_controller: CameraController,
+    depth_pass: depth_pass::DepthPass,
+    obj_model: Model,
+
+    light_render_pipeline: wgpu::RenderPipeline,
+    light_bind_group: wgpu::BindGroup,
+    light: Light,
+    light_buffer: wgpu::Buffer,
+
+    voxel_render_pipeline: wgpu::RenderPipeline,
+    mouse_pressed: bool,
+
+    chunks: Chunks,
+}
+
+impl State {
+    async fn new(window: &Window) -> Self {
+        let size = window.inner_size();
+
+        // handler for our gpu
+        let instance = wgpu::Instance::new(wgpu::BackendBit::DX12);
+        let surface = unsafe { instance.create_surface(window) };
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::default(),
+                compatible_surface: Some(&surface),
+            })
+            .await
+            .unwrap();
+        let (device, queue) = adapter
+            .request_device(
+                &wgpu::DeviceDescriptor {
+                    //features: wgpu::Features::empty(),
+                    features: wgpu::Features::NON_FILL_POLYGON_MODE,
+                    limits: wgpu::Limits::default(),
+                    label: None,
+                },
+                None, // trace path
+            )
+            .await
+            .unwrap();
+        let sc_desc = wgpu::SwapChainDescriptor {
+            usage: wgpu::TextureUsage::RENDER_ATTACHMENT,
+            format: adapter
+                .get_swap_chain_preferred_format(&surface)
+                .unwrap_or(wgpu::TextureFormat::Rgba8UnormSrgb),
+            width: size.width,
+            height: size.height,
+            present_mode: wgpu::PresentMode::Fifo,
+        };
+        let swap_chain = device.create_swap_chain(&surface, &sc_desc);
+
+        let texture_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStage::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            multisampled: false,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStage::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler {
+                            comparison: false,
+                            filtering: true,
+                        },
+                        count: None,
+                    },
+                ],
+                label: Some("texture_bind_group_layout"),
+            });
+
+        let light = Light {
+            position: [50.0, 2.0, 50.0],
+            _padding: 0,
+            color: [1.0, 1.0, 1.0],
+        };
+
+        let light_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("light buffer"),
+            contents: bytemuck::cast_slice(&[light]),
+            usage: wgpu::BufferUsage::UNIFORM | wgpu::BufferUsage::COPY_DST,
+        });
+
+        let light_bind_group_layout = light::create_light_bind_group_layout(&device);
+
+        let light_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("light bind group"),
+            layout: &light_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: light_buffer.as_entire_binding(),
+            }],
+        });
+
+        let clear_color = wgpu::Color {
+            r: 0.1,
+            g: 0.2,
+            b: 0.3,
+            a: 1.0,
+        };
+        let aspect = sc_desc.width as f32 / sc_desc.height as f32;
+        let mut camera = Camera::new(aspect);
+
+        let offset = 8f32;
+        let instances = (0..NUM_INSTANCES_PER_ROW)
+            .flat_map(|z| {
+                (0..NUM_INSTANCES_PER_ROW).map(move |x| {
+                    let position = cgmath::Vector3::new(x as f32 * offset, 0f32, z as f32 * offset)
+                        - INSTANCE_DISPLACEMENT;
+                    let rotation = if position.is_zero() {
+                        cgmath::Quaternion::from_axis_angle(
+                            cgmath::Vector3::unit_z(),
+                            cgmath::Deg(0.0),
+                        )
+                    } else {
+                        cgmath::Quaternion::from_axis_angle(
+                            position.clone().normalize(),
+                            cgmath::Deg(45.0),
+                        )
+                    };
+                    //let rotation = cgmath::Quaternion::from_axis_angle(cgmath::Vector3::unit_z(), cgmath::Deg(0.0));
+                    VertexInstance { position, rotation }
+                })
+            })
+            .collect::<Vec<_>>();
+        use cgmath::Rotation3;
+
+        let instance_data = instances
+            .iter()
+            .map(VertexInstance::to_raw)
+            .collect::<Vec<_>>();
+        let instance_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("instance_buffer"),
+            contents: bytemuck::cast_slice(&instance_data),
+            usage: wgpu::BufferUsage::VERTEX,
+        });
+
+        camera.update_uniform();
+        let camera_uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("uniform buffer"),
+            contents: bytemuck::cast_slice(&[camera.uniform]),
+            usage: wgpu::BufferUsage::UNIFORM | wgpu::BufferUsage::COPY_DST,
+        });
+
+        let camera_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("uniform_bind_group_layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStage::VERTEX | wgpu::ShaderStage::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+
+        let uniform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &camera_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: camera_uniform_buffer.as_entire_binding(),
+            }],
+            label: Some("uniform_bind_group"),
+        });
+
+        let shader_flags = wgpu::ShaderFlags::empty();
+        use std::borrow::Cow;
+        let shader_module = device.create_shader_module(&wgpu::ShaderModuleDescriptor {
+            label: Some("shader"),
+            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(include_str!("shader.wgsl"))),
+            flags: shader_flags,
+        });
+
+        let render_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Render Pipeline Layout"),
+                bind_group_layouts: &[
+                    &camera_bind_group_layout,
+                    &texture_bind_group_layout,
+                    &light_bind_group_layout,
+                ],
+                push_constant_ranges: &[],
+            });
+
+        println!("creating pipeline");
+        let render_pipeline = create_render_pipeline(
+            &device,
+            &render_pipeline_layout,
+            sc_desc.format,
+            Some(texture::Texture::DEPTH_FORMAT),
+            &[model::ModelVertex::desc(), VertexInstanceRaw::desc()],
+            shader_module,
+            "render_pipeline",
+        );
+
+        let shader_module = device.create_shader_module(&wgpu::ShaderModuleDescriptor {
+            label: Some("light-shader"),
+            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(include_str!("light.wgsl"))),
+            flags: shader_flags,
+        });
+
+        let light_render_pipeline = {
+            let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("light_pipeline_layout"),
+                bind_group_layouts: &[&camera_bind_group_layout, &light_bind_group_layout],
+                push_constant_ranges: &[],
+            });
+            create_render_pipeline(
+                &device,
+                &layout,
+                sc_desc.format,
+                Some(texture::Texture::DEPTH_FORMAT),
+                &[model::ModelVertex::desc()],
+                shader_module,
+                "light_render_pipeline",
+            )
+        };
+
+        let camera_controller = CameraController::new(10.2, 1.0);
+        let depth_pass = DepthPass::new(&device, &sc_desc);
+
+        let obj_model = model::Model::load(
+            &device,
+            &queue,
+            &texture_bind_group_layout,
+            std::path::Path::new("res/turkey.obj"),
+        )
+        .unwrap();
+
+        let voxel_render_pipeline =
+            create_voxel_pipeline(&device, sc_desc.format, &light_bind_group_layout);
+
+        let mut gpu_resources = GpuResources::new();
+
+        let mut chunks = Chunks::new();
+        // find what chunks needs to be loaded
+        chunks.update_load_data_queue();
+        chunks.update_load_mesh_queue();
+
+        // load voxel data in chunks
+        chunks.build_chunk_data_in_queue();
+
+        // load meshes based on voxel data in chunk
+        chunks.build_chunk_meshes_in_queue(&device, &mut gpu_resources);
+
+        Self {
+            gpu_resources,
+            chunks,
+            rotation: 0f32,
+            surface,
+            camera,
+            camera_controller,
+            camera_uniform_buffer,
+            camera_bind_group: uniform_bind_group,
+            device,
+            queue,
+            depth_pass,
+            sc_desc,
+            swap_chain,
+            size,
+            clear_color,
+            render_pipeline,
+            instance_buffer,
+            obj_model,
+            light_bind_group,
+            light,
+            light_buffer,
+            light_render_pipeline,
+            voxel_render_pipeline,
+            mouse_pressed: false,
+        }
+    }
+
+    fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
+        self.size = new_size;
+        self.sc_desc.width = new_size.width;
+        self.sc_desc.height = new_size.height;
+        self.camera.aspect = new_size.width as f32 / new_size.height as f32;
+        self.swap_chain = self.device.create_swap_chain(&self.surface, &self.sc_desc);
+        self.depth_pass.resize(&self.device, &self.sc_desc);
+    }
+
+    fn input(&mut self, event: &DeviceEvent) -> bool {
+        match event {
+            DeviceEvent::MouseMotion { delta } => {
+                if self.mouse_pressed {
+                    self.camera_controller.process_mouse(delta.0, delta.1);
+                }
+                true
+            }
+            DeviceEvent::MouseWheel { delta } => {
+                self.camera_controller.process_scroll(delta);
+                true
+            }
+            DeviceEvent::Button { button: 1, state } => {
+                self.mouse_pressed = *state == ElementState::Pressed;
+                true
+            }
+            DeviceEvent::Key(KeyboardInput {
+                virtual_keycode: Some(key),
+                state,
+                ..
+            }) => self.camera_controller.process_keyboard(*key, *state),
+            _ => false,
+        }
+    }
+
+    fn update(&mut self, dt: std::time::Duration) {
+        use cgmath::Rotation3;
+        let old_position: cgmath::Vector3<_> = self.light.position.into();
+        self.light.position =
+            (cgmath::Quaternion::from_axis_angle((0.0, 1.0, 0.0).into(), cgmath::Deg(1.0))
+                * old_position)
+                .into();
+        self.queue
+            .write_buffer(&self.light_buffer, 0, bytemuck::cast_slice(&[self.light]));
+
+        self.camera_controller.update_camera(&mut self.camera, dt);
+        self.camera.update_uniform();
+        self.rotation += 3f32;
+        self.queue.write_buffer(
+            &self.camera_uniform_buffer,
+            0,
+            bytemuck::cast_slice(&[self.camera.uniform]),
+        );
+
+        self.chunks.position = (
+            self.camera.position.x,
+            self.camera.position.y,
+            self.camera.position.z,
+        )
+            .into();
+
+        use rand::*;
+        if rand::thread_rng().gen_range(0..5) == 0 {
+            self.chunks.update_load_data_queue();
+            self.chunks.update_load_mesh_queue();
+
+            self.chunks.update_unload_mesh_queue();
+            self.chunks.update_unload_data_queue();
+        }
+        self.chunks
+            .build_chunk_data_in_queue();
+        self.chunks
+            .build_chunk_meshes_in_queue(&self.device, &mut self.gpu_resources);
+        self.chunks.unload_data_queue();
+        self.chunks.unload_mesh_queue(&mut self.gpu_resources);
+    }
+
+    fn render(&mut self) -> Result<(), wgpu::SwapChainError> {
+        let frame = self.swap_chain.get_current_frame()?.output;
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Render encoder"),
+            });
+
+        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("main render pass"),
+            color_attachments: &[wgpu::RenderPassColorAttachment {
+                //attachment: &frame.view,
+                view: &frame.view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(self.clear_color),
+                    store: true,
+                },
+            }],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &self.depth_pass.texture.view,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.0),
+                    store: true,
+                }),
+                stencil_ops: None,
+            }),
+        });
+
+        render_pass.set_pipeline(&self.voxel_render_pipeline);
+
+        let _ = self.chunks.draw(
+            &mut render_pass,
+            &self.camera_bind_group,
+            &self.light_bind_group,
+            &self.gpu_resources,
+        );
+
+        let pipeline = &self.render_pipeline;
+        use crate::model::DrawLight;
+        render_pass.set_pipeline(&self.light_render_pipeline);
+        render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
+        render_pass.draw_light_model(
+            &self.obj_model,
+            &self.camera_bind_group,
+            &self.light_bind_group,
+        );
+
+        render_pass.set_pipeline(pipeline);
+
+        // encoder.finish needs ownership of encoder, render_pass is not needed any more and holds a ref, so drop it
+        drop(render_pass);
+        self.depth_pass.render(&frame, &mut encoder);
+        self.queue.submit(std::iter::once(encoder.finish()));
+        Ok(())
+    }
+}
+
+fn main() {
+    env_logger::init();
+    let event_loop = EventLoop::new();
+    let window = WindowBuilder::new().build(&event_loop).unwrap();
+    let mut state = block_on(State::new(&window));
+
+    let mut last_render_time = std::time::Instant::now();
+    event_loop.run(move |event, _, control_flow| match event {
+        Event::RedrawRequested(_window_id) => {
+            let now = std::time::Instant::now();
+            let dt = now - last_render_time;
+            last_render_time = now;
+            state.update(dt);
+            match state.render() {
+                Ok(_) => {}
+                // recreate swap_chain if lost
+                Err(wgpu::SwapChainError::Lost) => state.resize(state.size),
+                Err(wgpu::SwapChainError::OutOfMemory) => *control_flow = ControlFlow::Exit,
+                // all other errors (Outdated, Timeout) should be resolved by the next frame
+                Err(e) => println!("{:?}", e),
+            }
+        }
+        Event::DeviceEvent { ref event, .. } => {
+            state.input(event);
+        }
+        Event::MainEventsCleared => {
+            // all events have been handled
+            window.request_redraw();
+        }
+        Event::WindowEvent {
+            ref event,
+            window_id,
+        } if window_id == window.id() => {
+            match event {
+                WindowEvent::CloseRequested => *control_flow = ControlFlow::Exit,
+                WindowEvent::KeyboardInput { input, .. } => match input {
+                    KeyboardInput {
+                        state: ElementState::Pressed,
+                        virtual_keycode: Some(VirtualKeyCode::Escape),
+                        ..
+                    } => *control_flow = ControlFlow::Exit,
+                    _ => {}
+                },
+                WindowEvent::Resized(physical_size) => {
+                    state.resize(*physical_size);
+                }
+                WindowEvent::ScaleFactorChanged { new_inner_size, .. } => {
+                    // new_inner_size is &&mut so we have to dereference twice
+                    state.resize(**new_inner_size);
+                }
+                _ => {}
+            }
+        }
+        _ => {}
+    });
+}
+```
+
+### src/model.rs
+```
+use anyhow::*;
+use std::{ops::Range, path::Path};
+use tobj::LoadOptions;
+use wgpu::util::DeviceExt;
+
+use crate::{
+    color::{self, Color},
+    rendering::vertex_desc::VertexDesc,
+    texture::Texture,
+};
+pub trait DrawModel<'a, 'b>
+where
+    'b: 'a,
+{
+    fn draw_mesh(
+        &mut self,
+        mesh: &'b Mesh,
+        material: &'b Material,
+        uniform: &'b wgpu::BindGroup,
+        light: &'b wgpu::BindGroup,
+    );
+    fn draw_mesh_instanced(
+        &mut self,
+        mesh: &'b Mesh,
+        material: &'b Material,
+        instances: Range<u32>,
+        uniform: &'b wgpu::BindGroup,
+        light: &'b wgpu::BindGroup,
+    );
+    fn draw_model(
+        &mut self,
+        model: &'b Model,
+        uniform: &'b wgpu::BindGroup,
+        light: &'b wgpu::BindGroup,
+    );
+    fn draw_model_instanced(
+        &mut self,
+        model: &'b Model,
+        instances: Range<u32>,
+        uniform: &'b wgpu::BindGroup,
+        light: &'b wgpu::BindGroup,
+    );
+}
+
+impl<'a, 'b> DrawModel<'a, 'b> for wgpu::RenderPass<'a>
+where
+    'b: 'a,
+{
+    fn draw_mesh(
+        &mut self,
+        mesh: &'b Mesh,
+        material: &'b Material,
+        uniforms: &'b wgpu::BindGroup,
+        light: &'b wgpu::BindGroup,
+    ) {
+        self.draw_mesh_instanced(mesh, material, 0..1, uniforms, light);
+    }
+
+    fn draw_mesh_instanced(
+        &mut self,
+        mesh: &'b Mesh,
+        material: &'b Material,
+        instances: Range<u32>,
+        uniforms: &'b wgpu::BindGroup,
+        light: &'b wgpu::BindGroup,
+    ) {
+        self.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+        self.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+        self.set_bind_group(0, &uniforms, &[]);
+        self.set_bind_group(1, &material.bind_group, &[]);
+        self.set_bind_group(2, &light, &[]);
+        self.draw_indexed(0..mesh.num_indices, 0, instances);
+    }
+
+    fn draw_model(
+        &mut self,
+        model: &'b Model,
+        uniform: &'b wgpu::BindGroup,
+        light: &'b wgpu::BindGroup,
+    ) {
+        self.draw_model_instanced(model, 0..1, uniform, light);
+    }
+
+    fn draw_model_instanced(
+        &mut self,
+        model: &'b Model,
+        instances: Range<u32>,
+        uniform: &'b wgpu::BindGroup,
+        light: &'b wgpu::BindGroup,
+    ) {
+        for mesh in model.meshes.iter() {
+            let material = &model.materials[mesh.material_id];
+            self.draw_mesh_instanced(mesh, material, instances.clone(), uniform, light);
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct ModelVertex {
+    position: [f32; 3],
+    tex_coords: [f32; 2],
+    normal: [f32; 3],
+    color_diffuse: [f32; 3],
+}
+
+impl VertexDesc for ModelVertex {
+    fn desc<'a>() -> wgpu::VertexBufferLayout<'a> {
+        use std::mem;
+        wgpu::VertexBufferLayout {
+            array_stride: mem::size_of::<ModelVertex>() as wgpu::BufferAddress,
+            step_mode: wgpu::InputStepMode::Vertex,
+            attributes: &[
+                // position
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x3,
+                    offset: 0,
+                    shader_location: 0,
+                },
+                // tex coord
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x2,
+                    offset: mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
+                    shader_location: 1,
+                },
+                // normal
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x3,
+                    offset: mem::size_of::<[f32; 5]>() as wgpu::BufferAddress,
+                    shader_location: 2,
+                },
+                // diffuse color
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x3,
+                    offset: mem::size_of::<[f32; 8]>() as wgpu::BufferAddress,
+                    shader_location: 3,
+                },
+            ],
+        }
+    }
+}
+
+pub struct Material {
+    pub name: String,
+    pub diffuse_texture: Texture,
+    pub diffuse_color: Color,
+    pub bind_group: wgpu::BindGroup,
+}
+
+pub struct Mesh {
+    pub name: String,
+    pub vertex_buffer: wgpu::Buffer,
+    pub index_buffer: wgpu::Buffer,
+    pub num_indices: u32,
+    pub material_id: usize,
+}
+
+pub struct Model {
+    pub meshes: Vec<Mesh>,
+    pub materials: Vec<Material>,
+}
+
+impl Model {
+    pub fn load<P: AsRef<Path>>(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        layout: &wgpu::BindGroupLayout,
+        path: P,
+    ) -> Result<Self> {
+        let (obj_models, obj_materials) = tobj::load_obj(
+            path.as_ref(),
+            &LoadOptions {
+                single_index: true,
+                triangulate: true,
+                ..Default::default()
+            },
+        )?;
+        let obj_materials = obj_materials?;
+
+        // assuming texture files are stored with the obj file
+        let containing_folder = path.as_ref().parent().context("Directory has no parent")?;
+
+        let mut materials = Vec::new();
+        for mat in obj_materials {
+            println!("mat data: {:?}", mat);
+            let diffuse_path = mat.diffuse_texture;
+            // no diffuse texture
+            let diffuse_texture = if diffuse_path.len() != 0 {
+                Texture::load(device, queue, containing_folder.join(diffuse_path.clone())).unwrap()
+            } else {
+                use color::colors::*;
+                Texture::from_color(device, queue, WHITE, 128, 128).unwrap()
+            };
+            //} else {
+            //    None
+            //};
+            let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some(&diffuse_path),
+                layout: layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&diffuse_texture.view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&diffuse_texture.sampler),
+                    },
+                ],
+            });
+            let diffuse_color = Color::from(mat.diffuse);
+            materials.push(Material {
+                name: mat.name,
+                diffuse_texture: diffuse_texture,
+                bind_group,
+                diffuse_color: diffuse_color,
+            });
+        }
+
+        let mut meshes = Vec::new();
+        for m in obj_models {
+            let mut vertices = Vec::new();
+            println!("mesh indices: {:?}", m.mesh.indices.len());
+            println!("mesh postiions: {:?}", m.mesh.positions.len());
+            println!("mesh normals: {:?}", m.mesh.normals.len());
+            for i in 0..m.mesh.positions.len() / 3 {
+                vertices.push(ModelVertex {
+                    position: [
+                        m.mesh.positions[i * 3],
+                        m.mesh.positions[i * 3 + 1],
+                        m.mesh.positions[i * 3 + 2],
+                    ],
+                    tex_coords: [m.mesh.texcoords[i * 2], m.mesh.texcoords[i * 2 + 1]],
+                    normal: [
+                        m.mesh.normals[i * 3],
+                        m.mesh.normals[i * 3 + 1],
+                        m.mesh.normals[i * 3 + 2],
+                    ],
+                    color_diffuse: materials[m.mesh.material_id.unwrap()].diffuse_color.into(),
+                });
+            }
+            let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(&format!("{:?} vertex_buffer", path.as_ref())),
+                contents: bytemuck::cast_slice(&vertices),
+                usage: wgpu::BufferUsage::VERTEX,
+            });
+            let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(&format!("{:?} index_buffer", path.as_ref())),
+                contents: bytemuck::cast_slice(&m.mesh.indices),
+                usage: wgpu::BufferUsage::INDEX,
+            });
+            meshes.push(Mesh {
+                name: m.name,
+                vertex_buffer,
+                index_buffer,
+                num_indices: m.mesh.indices.len() as u32,
+                material_id: m.mesh.material_id.unwrap_or(0),
+            });
+        }
+        Ok(Self { meshes, materials })
+    }
+}
+
+pub trait DrawLight<'a, 'b>
+where
+    'b: 'a,
+{
+    fn draw_light_mesh(
+        &mut self,
+        mesh: &'b Mesh,
+        uniforms: &'b wgpu::BindGroup,
+        light: &'b wgpu::BindGroup,
+    );
+    fn draw_light_mesh_instanced(
+        &mut self,
+        mesh: &'b Mesh,
+        instances: Range<u32>,
+        uniforms: &'b wgpu::BindGroup,
+        light: &'b wgpu::BindGroup,
+    ) where
+        'b: 'a;
+
+    fn draw_light_model(
+        &mut self,
+        model: &'b Model,
+        uniforms: &'b wgpu::BindGroup,
+        light: &'b wgpu::BindGroup,
+    );
+    fn draw_light_model_instanced(
+        &mut self,
+        model: &'b Model,
+        instances: Range<u32>,
+        uniforms: &'b wgpu::BindGroup,
+        light: &'b wgpu::BindGroup,
+    );
+}
+
+impl<'a, 'b> DrawLight<'a, 'b> for wgpu::RenderPass<'a>
+where
+    'b: 'a,
+{
+    fn draw_light_mesh(
+        &mut self,
+        mesh: &'b Mesh,
+        uniforms: &'b wgpu::BindGroup,
+        light: &'b wgpu::BindGroup,
+    ) {
+        self.draw_light_mesh_instanced(mesh, 0..1, uniforms, light);
+    }
+
+    fn draw_light_mesh_instanced(
+        &mut self,
+        mesh: &'b Mesh,
+        instances: Range<u32>,
+        uniforms: &'b wgpu::BindGroup,
+        light: &'b wgpu::BindGroup,
+    ) {
+        self.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+        self.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+        self.set_bind_group(0, uniforms, &[]);
+        self.set_bind_group(1, light, &[]);
+        self.draw_indexed(0..mesh.num_indices, 0, instances);
+    }
+
+    fn draw_light_model(
+        &mut self,
+        model: &'b Model,
+        uniforms: &'b wgpu::BindGroup,
+        light: &'b wgpu::BindGroup,
+    ) {
+        self.draw_light_model_instanced(model, 0..1, uniforms, light);
+    }
+    fn draw_light_model_instanced(
+        &mut self,
+        model: &'b Model,
+        instances: Range<u32>,
+        uniforms: &'b wgpu::BindGroup,
+        light: &'b wgpu::BindGroup,
+    ) {
+        for mesh in &model.meshes {
+            self.draw_light_mesh_instanced(mesh, instances.clone(), uniforms, light);
+        }
+    }
+}
+```
+
+### src/rendering.rs
+```
+pub mod gpu_resources;
+pub mod render_utils;
+pub mod vertex_desc;
+pub mod vertex_instance;
+```
+
+### src/shader.wgsl
+```
+[[block]]
+struct CameraUniform {
+    position: vec3<f32>;
+    projection_view: mat4x4<f32>;
+};
+
+[[group(0), binding(0)]]
+var<uniform> u_camera: CameraUniform;
+
+struct VertexOutput {
+    [[builtin(position)]] builtin_position: vec4<f32>;
+    [[location(0)]] vex_coords: vec2<f32>;
+    [[location(1)]] diffuse_color: vec3<f32>;
+    [[location(2)]] normal: vec3<f32>;
+    [[location(3)]] position: vec3<f32>;
+};
+
+[[stage(vertex)]]
+fn vs_main(
+    [[location(0)]] position: vec3<f32>,
+    [[location(1)]] tex_coords: vec2<f32>,
+    [[location(2)]] normal: vec3<f32>,
+    [[location(3)]] diffuse_color: vec3<f32>,
+
+    [[location(5)]] model_matrix_0: vec4<f32>,
+    [[location(6)]] model_matrix_1: vec4<f32>,
+    [[location(7)]] model_matrix_2: vec4<f32>,
+    [[location(8)]] model_matrix_3: vec4<f32>,
+
+    [[location(9)]]  normal_matrix_0: vec4<f32>,
+    [[location(10)]] normal_matrix_1: vec4<f32>,
+    [[location(11)]] normal_matrix_2: vec4<f32>,
+    [[location(12)]] normal_matrix_3: vec4<f32>,
+) -> VertexOutput {
+    var out: VertexOutput;
+    let model_matrix = mat4x4<f32>(model_matrix_0, model_matrix_1, model_matrix_2, model_matrix_3);
+    out.vex_coords = tex_coords;
+
+    let normal_matrix = mat3x3<f32>(normal_matrix_0.xyz, normal_matrix_1.xyz, normal_matrix_2.xyz);
+
+    //let normal_matrix = transpose(mat3x3<f32>(model_matrix.x.xyz, model_matrix.y.xyz, model_matrix.z.xyz));
+    //let normal_matrix = mat3x3<f32>(u_camera.projection_view.x.xyz, u_camera.projection_view.y.xyz, u_camera.projection_view.z.xyz);
+    out.normal = normal_matrix * normal;
+    let model_space = model_matrix * vec4<f32>(position, 1.0);
+    out.position = model_space.xyz;
+    out.diffuse_color = diffuse_color;
+
+    out.builtin_position = u_camera.projection_view * model_space;
+    return out;
+}
+
+
+[[block]]
+struct LightUniform {
+    position: vec3<f32>;
+    color: vec3<f32>;
+};
+
+[[group(2), binding(0)]]
+var<uniform> u_light: LightUniform;
+
+[[group(1), binding(0)]] var t_diffuse: texture_2d<f32>;
+[[group(1), binding(1)]] var s_diffuse: sampler;
+
+[[stage(fragment), early_depth_test]]
+fn fs_main(
+    in: VertexOutput,
+) -> [[location(0)]] vec4<f32> {
+    let ambient_strength = 0.01;
+    let ambient_color = u_light.color * ambient_strength;
+
+    let normal = normalize(in.normal);
+    let light_dir = normalize(u_light.position - in.position);
+    let diffuse_strength = max(dot(normal, light_dir), 0.0);
+    let diffuse_color = u_light.color * diffuse_strength;
+
+    //let view_dir = normalize(u_camera.position - vec3<f32>(in.builtin_position.xyz));
+    let view_dir = normalize(u_camera.position - in.position);
+    let half_dir = normalize(view_dir + light_dir);
+
+    let specular_strength = pow(max(dot(normal, half_dir), 0.0), 32.0);
+    let specular_color = specular_strength * u_light.color;
+    //let specular_color = 0.0;
+
+    var surface_color: vec4<f32> = textureSample(t_diffuse, s_diffuse, in.vex_coords);
+    surface_color = surface_color * vec4<f32>(in.diffuse_color, 1.0);
+
+    let result = (diffuse_color) * surface_color.xyz;
+
+    return vec4<f32>(result, surface_color.a);
+    //return surface_color * vec4<f32>(light_ambient_color, 1.0);
+}
+```
+
+### src/texture.rs
+```
+use anyhow::*;
+use image::GenericImageView;
+use std::path::Path;
+use wgpu::util::DeviceExt;
+
+use crate::color::Color;
+
+pub struct Texture {
+    pub texture: wgpu::Texture,
+    pub view: wgpu::TextureView,
+    pub sampler: wgpu::Sampler,
+}
+
+impl Texture {
+    #[allow(dead_code)]
+    pub fn from_bytes_to_image(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        bytes: &[u8],
+        label: &str,
+    ) -> Result<Self> {
+        let img = image::load_from_memory(bytes)?;
+        Self::from_image(device, queue, &img, Some(label))
+    }
+
+    pub fn from_color(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        color: Color,
+        width: u32,
+        height: u32,
+    ) -> Result<Self> {
+        let mut bytes = Vec::with_capacity((width * height) as usize);
+        for _y in 0..height {
+            for _x in 0..width {
+                let colors: [u8; 4] = color.into();
+                bytes.push(colors[0]);
+                bytes.push(colors[1]);
+                bytes.push(colors[2]);
+                bytes.push(colors[3]);
+            }
+        }
+        let bytes: &[u8] = bytes.as_ref();
+        Self::from_bytes(device, queue, &bytes, width, height, Some("color texture"))
+    }
+
+    pub fn from_bytes(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        bytes: &[u8],
+        width: u32,
+        height: u32,
+        label: Option<&str>,
+    ) -> Result<Self> {
+        let texture_size = wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        };
+
+        let texture_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label,
+            contents: bytes,
+            usage: wgpu::BufferUsage::COPY_SRC,
+        });
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("temp texture encoder"),
+        });
+
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            size: texture_size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            // sampled: use in shader
+            // copy dst, we want to copy data to this texture
+            usage: wgpu::TextureUsage::SAMPLED | wgpu::TextureUsage::COPY_DST,
+            label: Some("my texture"),
+        });
+        encoder.copy_buffer_to_texture(
+            wgpu::ImageCopyBuffer {
+                buffer: &texture_buffer,
+                layout: wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: std::num::NonZeroU32::new(4 * width),
+                    rows_per_image: std::num::NonZeroU32::new(height),
+                },
+            },
+            wgpu::ImageCopyTexture {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+            },
+            texture_size,
+        );
+        queue.submit(std::iter::once(encoder.finish()));
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let address_mode = wgpu::AddressMode::ClampToEdge;
+        let filter_mode = wgpu::FilterMode::Nearest;
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            address_mode_u: address_mode,
+            address_mode_v: address_mode,
+            address_mode_w: address_mode,
+            mag_filter: filter_mode,
+            min_filter: filter_mode,
+            mipmap_filter: filter_mode,
+            ..Default::default()
+        });
+        Ok(Self {
+            texture,
+            view,
+            sampler,
+        })
+    }
+
+    pub fn from_image(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        image: &image::DynamicImage,
+        label: Option<&str>,
+    ) -> Result<Self> {
+        let diffuse_rgba = image.to_rgba8();
+        let dimensions = image.dimensions();
+        Self::from_bytes(
+            device,
+            queue,
+            &diffuse_rgba,
+            dimensions.0,
+            dimensions.1,
+            label,
+        )
+    }
+
+    pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+    pub fn create_depth_texture(
+        device: &wgpu::Device,
+        sc_desc: &wgpu::SwapChainDescriptor,
+        label: &str,
+    ) -> Self {
+        let size = wgpu::Extent3d {
+            width: sc_desc.width,
+            height: sc_desc.height,
+            depth_or_array_layers: 1,
+        };
+        let desc = wgpu::TextureDescriptor {
+            label: Some(label),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: Self::DEPTH_FORMAT,
+            usage: wgpu::TextureUsage::RENDER_ATTACHMENT | wgpu::TextureUsage::SAMPLED,
+        };
+        let texture = device.create_texture(&desc);
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            compare: Some(wgpu::CompareFunction::LessEqual),
+            lod_min_clamp: -100.0,
+            lod_max_clamp: 100.0,
+            ..Default::default()
+        });
+        Self {
+            texture,
+            view,
+            sampler,
+        }
+    }
+
+    pub fn load<P: AsRef<Path>>(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        path: P,
+    ) -> Result<Self> {
+        // uuh borrow checker pls...
+        let path_copy = path.as_ref().to_path_buf();
+        let label = path_copy.to_str();
+        println!("loading image from: {:?}", label);
+        let img = image::open(path)?;
+        Self::from_image(device, queue, &img, label)
+        //let path_copy =
+    }
+}
+```
+
+### src/voxel_tools.rs
+```
+pub mod chunk;
+pub mod chunks;
+pub mod direction;
+pub mod mesh_builder;
+pub mod quad;
+pub mod rendering;
+pub mod voxel;
+```
+
+### src/rendering/gpu_resources.rs
+```
+use generational_arena::*;
+pub struct GpuResources {
+    pub buffer_arena: Arena<wgpu::Buffer>,
+}
+
+impl GpuResources {
+    pub fn new() -> Self {
+        Self {
+            buffer_arena: Arena::with_capacity(32),
+        }
+    }
+}
+```
+
+### src/rendering/render_utils.rs
+```
+use wgpu::{BindGroupLayout, ShaderModule};
+
+pub fn create_render_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    color_format: wgpu::TextureFormat,
+    depth_format: Option<wgpu::TextureFormat>,
+    vertex_layouts: &[wgpu::VertexBufferLayout],
+    shader_module: wgpu::ShaderModule,
+    label: &str,
+) -> wgpu::RenderPipeline {
+    let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(label),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: &shader_module,
+            entry_point: "vs_main",
+            buffers: vertex_layouts,
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader_module,
+            entry_point: "fs_main",
+            targets: &[wgpu::ColorTargetState {
+                format: color_format,
+                blend: Some(wgpu::BlendState::REPLACE),
+                write_mask: wgpu::ColorWrite::ALL,
+            }],
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            clamp_depth: false,
+            cull_mode: Some(wgpu::Face::Back),
+            conservative: false,
+            // Setting this to anything other than Fill requires Features::NON_FILL_POLYGON_MODE
+            polygon_mode: wgpu::PolygonMode::Fill,
+        },
+        depth_stencil: depth_format.map(|format| wgpu::DepthStencilState {
+            format: format,
+            depth_write_enabled: true,
+            depth_compare: wgpu::CompareFunction::Less,
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState {
+            count: 1,
+            mask: !0,
+            alpha_to_coverage_enabled: false,
+        },
+    });
+    render_pipeline
+}
+
+// less params exposed resulting in shorter code
+use std::borrow::Cow;
+pub fn create_shader_module(device: &wgpu::Device, shader_str: &str, label: &str) -> ShaderModule {
+    device.create_shader_module(&wgpu::ShaderModuleDescriptor {
+        label: Some(label),
+        source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(shader_str)),
+        flags: wgpu::ShaderFlags::empty(),
+    })
+}
+
+// less params exposed resulting in shorter code
+pub fn create_bind_group_layout(
+    device: &wgpu::Device,
+    label: &str,
+    binding_location: u32,
+    visibility: wgpu::ShaderStage,
+) -> BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some(label),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: binding_location,
+            visibility,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        }],
+    })
+}
+
+// less params exposed resulting in shorter code
+pub fn create_pipeline_layout(
+    device: &wgpu::Device,
+    label: &str,
+    bind_group_layouts: &[&BindGroupLayout],
+) -> wgpu::PipelineLayout {
+    device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some(label),
+        bind_group_layouts,
+        push_constant_ranges: &[],
+    })
+}
+```
+
+### src/rendering/vertex_desc.rs
+```
+pub trait VertexDesc {
+    fn desc<'a>() -> wgpu::VertexBufferLayout<'a>;
+}
+```
+
+### src/rendering/vertex_instance.rs
+```
+use super::vertex_desc::VertexDesc;
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct VertexInstanceRaw {
+    pub model: [[f32; 4]; 4],
+    pub normal_matrix: [[f32; 4]; 4],
+}
+
+impl VertexDesc for VertexInstanceRaw {
+    fn desc<'a>() -> wgpu::VertexBufferLayout<'a> {
+        use std::mem;
+        wgpu::VertexBufferLayout {
+            array_stride: mem::size_of::<VertexInstanceRaw>() as wgpu::BufferAddress,
+            step_mode: wgpu::InputStepMode::Instance,
+            attributes: &[
+                // model
+                wgpu::VertexAttribute {
+                    offset: 0,
+                    shader_location: 5,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+                wgpu::VertexAttribute {
+                    offset: mem::size_of::<[f32; 4]>() as wgpu::BufferAddress,
+                    shader_location: 6,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+                wgpu::VertexAttribute {
+                    offset: mem::size_of::<[f32; 8]>() as wgpu::BufferAddress,
+                    shader_location: 7,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+                wgpu::VertexAttribute {
+                    offset: mem::size_of::<[f32; 12]>() as wgpu::BufferAddress,
+                    shader_location: 8,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+                // normal matrix
+                wgpu::VertexAttribute {
+                    offset: mem::size_of::<[f32; 16]>() as wgpu::BufferAddress,
+                    shader_location: 9,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+                wgpu::VertexAttribute {
+                    offset: mem::size_of::<[f32; 20]>() as wgpu::BufferAddress,
+                    shader_location: 10,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+                wgpu::VertexAttribute {
+                    offset: mem::size_of::<[f32; 24]>() as wgpu::BufferAddress,
+                    shader_location: 11,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+                wgpu::VertexAttribute {
+                    offset: mem::size_of::<[f32; 28]>() as wgpu::BufferAddress,
+                    shader_location: 12,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+            ],
+        }
+    }
+}
+
+pub struct VertexInstance {
+    pub position: cgmath::Vector3<f32>,
+    pub rotation: cgmath::Quaternion<f32>,
+}
+
+impl VertexInstance {
+    pub fn to_raw(&self) -> VertexInstanceRaw {
+        // needed to make invert() and transpose() available
+        use cgmath::{Matrix, SquareMatrix};
+        let model =
+            cgmath::Matrix4::from_translation(self.position) * cgmath::Matrix4::from(self.rotation);
+        let normal_matrix = model
+            .invert()
+            .expect("can't inverse model matrix")
+            .transpose();
+        VertexInstanceRaw {
+            model: model.into(),
+            normal_matrix: normal_matrix.into(),
+        }
+    }
+}
+```
+
+### src/voxel_tools/chunk.rs
+```
+use super::voxel::Voxel;
+
+// argument-flavor struct
+#[derive(Debug, Clone, Copy)]
+pub struct LocalCoordinate(pub i32, pub i32, pub i32);
+
+// dimension size
+pub const SIZE: usize = 16;
+// chunk size in bits (5 = 32) (4 = 16)
+//pub const BIT_SIZE: i32 = 4;
+use lazy_static::*;
+lazy_static! {
+    // when SIZE 16, BIT_SIZE is 4
+    // by shifting 16 << 4 we get 1
+    // we with this get indexes from the collapsed array
+    pub static ref BIT_SIZE: i32 = (SIZE as f32).log2() as i32;
+}
+
+pub struct ChunkMesh {
+    pub vertex_buffer: Option<generational_arena::Index>,
+    pub index_buffer: Option<generational_arena::Index>,
+    pub num_indices: u32,
+    // debug info
+    pub num_vertices: u32,
+}
+
+impl ChunkMesh {
+    pub fn new() -> Self {
+        Self {
+            vertex_buffer: None,
+            index_buffer: None,
+            num_indices: 0,
+            num_vertices: 0,
+        }
+    }
+
+    pub fn update_vertex_buffers(
+        &mut self,
+        vertex_buffer: generational_arena::Index,
+        index_buffer: generational_arena::Index,
+        num_indices: u32,
+        num_vertices: u32,
+    ) {
+        self.vertex_buffer = Some(vertex_buffer);
+        self.index_buffer = Some(index_buffer);
+        self.num_indices = num_indices;
+        self.num_vertices = num_vertices;
+    }
+}
+
+impl lifeguard::Recycleable for ChunkMesh {
+    fn new() -> Self {
+        ChunkMesh::new()
+    }
+
+    fn reset(&mut self) {
+        self.vertex_buffer = None;
+        self.index_buffer = None;
+        self.num_indices = 0u32;
+    }
+}
+
+pub struct Chunk {
+    pub voxels: [Voxel; SIZE * SIZE * SIZE],
+}
+
+impl lifeguard::Recycleable for Chunk {
+    fn new() -> Self {
+        Chunk::new()
+    }
+
+    fn reset(&mut self) {
+        for voxel in self.voxels.iter_mut() {
+            voxel.set_density_fraciton(0f32);
+        }
+    }
+}
+
+impl Chunk {
+    // convert 3d coordinate to array index
+    pub fn get_index(coordinate: LocalCoordinate) -> usize {
+        (coordinate.2 | (coordinate.1 << *BIT_SIZE) | (coordinate.0 << (*BIT_SIZE * 2))) as usize
+    }
+
+    pub fn get_local_coordinate(index: i32) -> LocalCoordinate {
+        LocalCoordinate(
+            (index as f32 / (SIZE * SIZE) as f32) as i32,
+            ((index as f32 / SIZE as f32) % SIZE as f32) as i32,
+            (index as f32 % SIZE as f32) as i32,
+        )
+    }
+
+    pub fn get_voxel(&self, coordinate: LocalCoordinate) -> Option<&Voxel> {
+        let index = Self::get_index(coordinate);
+        self.get_voxel_from_index(index)
+    }
+
+    #[allow(dead_code)]
+    pub fn get_voxel_from_index_mut(&mut self, index: usize) -> Option<&mut Voxel> {
+        self.voxels.get_mut(index).map_or(None, |v| Some(v))
+    }
+
+    pub fn get_voxel_from_index(&self, index: usize) -> Option<&Voxel> {
+        //self.voxels.get(index).map_or(Voxel::new_empty(), |v| *v)
+        self.voxels.get(index)
+    }
+
+    pub fn new() -> Self {
+        let chunk = Self {
+            voxels: [Voxel::new_empty(); SIZE * SIZE * SIZE],
+        };
+        chunk
+    }
+
+    pub fn build_voxel_data(&mut self, chunk_world_pos: &cgmath::Vector3<f32>) {
+        use noise::{NoiseFn, Perlin, Seedable};
+        let perlin = Perlin::new();
+        perlin.set_seed(484);
+        for (index, voxel) in self.voxels.iter_mut().enumerate() {
+            let local_coord = Self::get_local_coordinate(index as i32);
+            let (l_x, l_y, l_z) = (local_coord.0, local_coord.1, local_coord.2);
+
+            // convert noise to world
+            let down_scale = 0.027f64;
+            let x = (chunk_world_pos.x as f64 + l_x as f64) * down_scale;
+            let y = (chunk_world_pos.y as f64 + l_y as f64) * down_scale;
+            let z = (chunk_world_pos.z as f64 + l_z as f64) * down_scale;
+            let density = perlin.get([x, y, z]);
+            if density > 0.3f64 {
+                voxel.set_density_fraciton(1f32);
+            }
+        }
+    }
+}
+```
+
+### src/voxel_tools/chunks.rs
+```
+use anyhow::Context;
+use anyhow::*;
+use cgmath::InnerSpace;
+use lifeguard::*;
+use std::{
+    collections::{HashMap, VecDeque},
+};
+
+use crate::rendering::gpu_resources::GpuResources;
+
+use super::mesh_builder;
+use super::{
+    chunk::Chunk,
+    rendering::voxel_rendering::{self},
+};
+use super::{
+    chunk::{ChunkMesh, LocalCoordinate, SIZE},
+    voxel::Voxel,
+};
+
+// max amount of per-chunk data we can load
+pub const DEFAULT_MAX_CHUNK_DATAS: usize = 10000;
+// max amount of per-chunk meshes we can load
+pub const DEFAULT_MAX_MESH_DATAS: usize = 10000;
+pub const RENDER_DIST_RADIUS: i32 = 8;
+
+pub const MAX_DATA_QUEUE: usize = 16;
+pub const MAX_MESH_QUEUE: usize = 16;
+
+pub const MAX_DATA_UNLOAD_QUEUE: usize = 16;
+pub const MAX_MESH_UNLOAD_QUEUE: usize = 16;
+
+pub struct Chunks {
+    // chunk_map owns the current chunks, but when unloaded puts them back to chunk_pool
+    chunk_data_map: HashMap<cgmath::Vector3<i32>, Chunk>,
+    chunk_mesh_map: HashMap<cgmath::Vector3<i32>, ChunkMesh>,
+
+    // chunk data is recycled from these pools
+    chunk_pool: Pool<Chunk>,
+    chunk_mesh_pool: Pool<ChunkMesh>,
+
+    // chunk data are put in queue due to heavy data processing
+    chunk_data_load_queue: VecDeque<cgmath::Vector3<i32>>,
+    chunk_mesh_load_queue: VecDeque<cgmath::Vector3<i32>>,
+
+    chunk_data_unload_queue: VecDeque<cgmath::Vector3<i32>>,
+    chunk_mesh_unload_queue: VecDeque<cgmath::Vector3<i32>>,
+
+    pub position: cgmath::Vector3<f32>,
+
+    render_distance: i32,
+}
+
+impl Chunks {
+    pub fn new() -> Self {
+        let chunks = Self {
+            chunk_data_map: HashMap::with_capacity(DEFAULT_MAX_CHUNK_DATAS),
+            chunk_mesh_map: HashMap::with_capacity(DEFAULT_MAX_MESH_DATAS),
+            chunk_pool: pool().with(StartingSize(DEFAULT_MAX_CHUNK_DATAS)).build(),
+            chunk_mesh_pool: pool().with(StartingSize(DEFAULT_MAX_MESH_DATAS)).build(),
+            // position of chunks to load in
+            chunk_data_load_queue: VecDeque::with_capacity(MAX_DATA_QUEUE),
+            chunk_mesh_load_queue: VecDeque::with_capacity(MAX_MESH_QUEUE),
+            chunk_data_unload_queue: VecDeque::with_capacity(MAX_DATA_QUEUE),
+            chunk_mesh_unload_queue: VecDeque::with_capacity(MAX_MESH_QUEUE),
+            position: cgmath::Vector3::<f32>::new(0., 0., 0.),
+            render_distance: RENDER_DIST_RADIUS,
+        };
+        chunks
+    }
+
+    pub fn build_chunk_data_in_queue(
+        &mut self,
+    ) {
+        while let Some(chunk_pos) = self.chunk_data_load_queue.pop_front() {
+            self.build_chunk_data(chunk_pos);
+        }
+    }
+
+    pub fn make_coords_valid(
+        chunk_pos: &mut cgmath::Vector3<i32>,
+        local_pos: &mut LocalCoordinate,
+    ) {
+        let chunk_size = SIZE as i32;
+        while local_pos.0 < 0 {
+            local_pos.0 += chunk_size;
+            chunk_pos.x -= 1;
+        }
+        while local_pos.0 > chunk_size {
+            local_pos.0 -= chunk_size;
+            chunk_pos.x += 1;
+        }
+        while local_pos.1 < 0 {
+            local_pos.1 += chunk_size;
+            chunk_pos.y -= 1;
+        }
+        while local_pos.1 > chunk_size {
+            local_pos.1 -= chunk_size;
+            chunk_pos.y += 1;
+        }
+        while local_pos.2 < 0 {
+            local_pos.2 += chunk_size;
+            chunk_pos.z -= 1;
+        }
+        while local_pos.2 > chunk_size {
+            local_pos.2 -= chunk_size;
+            chunk_pos.z += 1;
+        }
+    }
+
+    // if the local coordinate goes outside bounds, the adjacent chunk will be checked instead
+    pub fn try_get_voxel(
+        &self,
+        chunk_pos: &cgmath::Vector3<i32>,
+        local_pos: &LocalCoordinate,
+    ) -> Result<&Voxel> {
+        let mut chunk_pos = *chunk_pos;
+        let mut local_pos = *local_pos;
+        Self::make_coords_valid(&mut chunk_pos, &mut local_pos);
+
+        let chunk = self.chunk_data_map.get(&chunk_pos).context("")?;
+        chunk.get_voxel(local_pos).context("")
+    }
+
+    pub fn get_chunk_mesh_mut(
+        &mut self,
+        chunk_pos: &cgmath::Vector3<i32>,
+    ) -> Option<&mut ChunkMesh> {
+        self.chunk_mesh_map.get_mut(chunk_pos)
+    }
+
+    pub fn build_chunk_data(
+        &mut self,
+        chunk_pos: cgmath::Vector3<i32>,
+    ) {
+        let mut chunk = self.chunk_pool.detached();
+        let chunk_world_pos = Self::chunk_to_world(chunk_pos);
+
+        chunk.build_voxel_data(&chunk_world_pos);
+        println!("loaded chunk data at world pos: {:?}", chunk_world_pos);
+        self.chunk_data_map.insert(chunk_pos, chunk);
+    }
+
+    pub fn build_chunk_meshes_in_queue(
+        &mut self,
+        device: &wgpu::Device,
+        gpu_resources: &mut GpuResources,
+    ) {
+        while let Some(chunk_pos) = self.chunk_mesh_load_queue.pop_front() {
+            if self.chunk_mesh_map.len() >= DEFAULT_MAX_CHUNK_DATAS {
+                return;
+            }
+            let chunk_mesh = self.chunk_mesh_pool.detached();
+            self.chunk_mesh_map.insert(chunk_pos, chunk_mesh);
+
+            println!("building chunk mesh at: {:?}", chunk_pos);
+            let chunk_world_pos = Self::chunk_to_world(chunk_pos);
+            if mesh_builder::build_chunk_mesh(
+                self,
+                device,
+                gpu_resources,
+                &chunk_pos,
+                &chunk_world_pos,
+            ) {
+                // successfully built return for now, 'only one per frame'
+                return;
+            }
+        }
+    }
+
+    pub fn is_chunk_processing(&self, chunk_pos: &cgmath::Vector3<i32>) -> bool {
+        self.chunk_data_map.contains_key(chunk_pos)
+            || self.chunk_data_load_queue.contains(chunk_pos)
+    }
+
+    pub fn is_mesh_processing(&self, chunk_pos: &cgmath::Vector3<i32>) -> bool {
+        self.chunk_mesh_map.contains_key(chunk_pos)
+            || self.chunk_mesh_load_queue.contains(chunk_pos)
+    }
+
+    pub fn chunk_to_world(chunk_pos: cgmath::Vector3<i32>) -> cgmath::Vector3<f32> {
+        cgmath::Vector3::<f32>::new(
+            chunk_pos.x as f32 * SIZE as f32,
+            chunk_pos.y as f32 * SIZE as f32,
+            chunk_pos.z as f32 * SIZE as f32,
+        )
+    }
+
+    pub fn in_range(&self, chunk_pos: cgmath::Vector3<i32>) -> bool {
+        // convert from i32 postion to world f32 pos
+        let chunk_real_pos = Self::chunk_to_world(chunk_pos);
+        let delta = self.position - chunk_real_pos;
+        let distance_sq: f32 = delta.magnitude2().into();
+        let render_dist = (self.render_distance as f32) * SIZE as f32;
+        let render_distance_sq = render_dist * render_dist;
+        distance_sq < render_distance_sq
+    }
+
+    // based on current position load all meshes
+    pub fn update_load_mesh_queue(&mut self) {
+        if self.chunk_mesh_map.len() >= DEFAULT_MAX_MESH_DATAS
+            || self.chunk_mesh_load_queue.len() >= MAX_MESH_QUEUE
+        {
+            return;
+        }
+        for y in -self.render_distance..self.render_distance {
+            //for y in 0..1 {
+            for z in -self.render_distance..self.render_distance {
+                for x in -self.render_distance..self.render_distance {
+                    let current_chunk_pos = cgmath::Vector3::<i32>::new(
+                        (self.position.x / SIZE as f32) as i32,
+                        (self.position.y / SIZE as f32) as i32,
+                        (self.position.z / SIZE as f32) as i32,
+                    );
+                    let chunk_pos = current_chunk_pos + cgmath::Vector3::<i32>::new(x, y, z);
+
+                    // chunk is already being loaded, or is loaded
+                    let is_mesh_proccessing = self.is_mesh_processing(&chunk_pos);
+                    if is_mesh_proccessing {
+                        continue;
+                    }
+
+                    let in_range = self.in_range(current_chunk_pos);
+                    // check if adjacent chunks are loaded
+
+                    use cgmath::Vector3 as vec;
+                    // check if all adjacent chunks data are loaded
+                    let adj_chunk_data_bad = [
+                        -vec::<i32>::unit_x(),
+                        vec::<i32>::unit_x(),
+                        -vec::<i32>::unit_y(),
+                        vec::<i32>::unit_y(),
+                        -vec::<i32>::unit_z(),
+                        vec::<i32>::unit_z(),
+                    ]
+                    .iter_mut()
+                    .map(|v| *v + chunk_pos)
+                    .any(|v| !self.chunk_data_map.contains_key(&v));
+
+                    // queue chunk for mesh creation
+                    if in_range && !adj_chunk_data_bad {
+                        self.chunk_mesh_load_queue.push_back(chunk_pos);
+                        if self.chunk_mesh_load_queue.len() >= MAX_MESH_QUEUE {
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn update_unload_data_queue(&mut self) {
+        let current_chunk_pos = cgmath::Vector3::<i32>::new(
+            (self.position.x / SIZE as f32) as i32,
+            (self.position.y / SIZE as f32) as i32,
+            (self.position.z / SIZE as f32) as i32,
+        );
+        // find currently loaded meshes positions not contained in range
+        // BOX BOUND CHECK IS FAST
+        let outside = self
+            .chunk_mesh_map
+            .iter()
+            .filter(|(p, _m)| {
+                p.x < current_chunk_pos.x - self.render_distance
+                    || p.x > current_chunk_pos.x + self.render_distance
+                    || p.y < current_chunk_pos.y - self.render_distance
+                    || p.y > current_chunk_pos.y + self.render_distance
+                    || p.z < current_chunk_pos.z - self.render_distance
+                    || p.z > current_chunk_pos.z + self.render_distance
+            })
+            .map(|(p, _m)| p)
+            .collect::<Vec<_>>();
+
+        for chunk_pos in outside {
+            // already proccessing skip
+            if self.chunk_data_unload_queue.contains(chunk_pos) {
+                continue;
+            }
+            println!("queueing chunk for data unload: {:?}", chunk_pos);
+            self.chunk_data_unload_queue.push_back(*chunk_pos);
+            if self.chunk_data_unload_queue.len() >= MAX_DATA_UNLOAD_QUEUE {
+                return;
+            }
+        }
+    }
+
+    // based on current position load all meshes
+    pub fn update_unload_mesh_queue(&mut self) {
+        let current_chunk_pos = cgmath::Vector3::<i32>::new(
+            (self.position.x / SIZE as f32) as i32,
+            (self.position.y / SIZE as f32) as i32,
+            (self.position.z / SIZE as f32) as i32,
+        );
+        // find currently loaded meshes positions not contained in range
+        // BOX BOUND CHECK IS FAST
+        let outside = self
+            .chunk_mesh_map
+            .iter()
+            .filter(|(p, _m)| {
+                p.x < current_chunk_pos.x - self.render_distance
+                    || p.x > current_chunk_pos.x + self.render_distance
+                    || p.y < current_chunk_pos.y - self.render_distance
+                    || p.y > current_chunk_pos.y + self.render_distance
+                    || p.z < current_chunk_pos.z - self.render_distance
+                    || p.z > current_chunk_pos.z + self.render_distance
+            })
+            .map(|(p, _m)| p)
+            .collect::<Vec<_>>();
+
+        for chunk_pos in outside {
+            // already proccessing skip
+            if self.chunk_mesh_unload_queue.contains(chunk_pos) {
+                continue;
+            }
+            self.chunk_mesh_unload_queue.push_back(*chunk_pos);
+            println!("queueing chunk for mesh unload: {:?}", chunk_pos);
+            if self.chunk_mesh_unload_queue.len() >= MAX_MESH_UNLOAD_QUEUE {
+                return;
+            }
+        }
+    }
+
+    pub fn unload_data_queue(&mut self) {
+        while let Some(chunk_pos) = self.chunk_data_unload_queue.pop_front() {
+            // detach chunk data
+            if let Some(chunk_data) = self.chunk_data_map.remove(&chunk_pos) {
+                println!("unloading data at: {:?}", chunk_pos);
+                self.chunk_pool.attach(chunk_data);
+            }
+        }
+    }
+
+    // generate meshes queued up
+    pub fn unload_mesh_queue(&mut self, gpu_resources: &mut GpuResources) {
+        while let Some(chunk_pos) = self.chunk_mesh_unload_queue.pop_front() {
+            // detach mesh data
+            if let Some(chunk_mesh) = self.chunk_mesh_map.remove(&chunk_pos) {
+                println!("unloading mesh at: {:?}", chunk_pos);
+                if let Some(v_buf_key) = chunk_mesh.vertex_buffer {
+                    if let Some(v_buffer) = gpu_resources.buffer_arena.get_mut(v_buf_key) {
+                        v_buffer.destroy();
+                    }
+                    gpu_resources.buffer_arena.remove(v_buf_key);
+                }
+                if let Some(i_buf_key) = chunk_mesh.index_buffer {
+                    if let Some(i_buffer) = gpu_resources.buffer_arena.get_mut(i_buf_key) {
+                        i_buffer.destroy();
+                    }
+                    gpu_resources.buffer_arena.remove(i_buf_key);
+                }
+                self.chunk_mesh_pool.attach(chunk_mesh);
+            }
+        }
+    }
+
+    // based on current position load all meshes
+    pub fn update_load_data_queue(&mut self) {
+        if self.chunk_data_map.len() >= DEFAULT_MAX_CHUNK_DATAS
+            || self.chunk_data_load_queue.len() >= MAX_DATA_QUEUE
+        {
+            return;
+        }
+        for y in -self.render_distance..self.render_distance {
+            //for y in 0..1 {
+            for z in -self.render_distance..self.render_distance {
+                for x in -self.render_distance..self.render_distance {
+                    let current_chunk_pos = cgmath::Vector3::<i32>::new(
+                        (self.position.x / SIZE as f32) as i32,
+                        (self.position.y / SIZE as f32) as i32,
+                        (self.position.z / SIZE as f32) as i32,
+                    );
+                    let chunk_pos = current_chunk_pos + cgmath::Vector3::<i32>::new(x, y, z);
+
+                    // chunk is already being loaded, or is loaded
+                    let is_chunk_proccessing = self.is_chunk_processing(&chunk_pos);
+                    if is_chunk_proccessing {
+                        continue;
+                    }
+
+                    let in_range = self.in_range(current_chunk_pos);
+                    if in_range {
+                        // load chunk
+                        self.chunk_data_load_queue.push_back(chunk_pos);
+                    }
+                    // check if we don't wan to load any more
+                    if self.chunk_data_load_queue.len() >= MAX_DATA_QUEUE {
+                        println!("done");
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn draw<'a, '_b>(
+        &mut self,
+        render_pass: &mut wgpu::RenderPass<'a>,
+        camera_bind_group: &'a wgpu::BindGroup,
+        light_bind_group: &'a wgpu::BindGroup,
+        gpu_resources: &'a GpuResources,
+    ) -> anyhow::Result<()> {
+        for (_pos, chunk_mesh) in self.chunk_mesh_map.iter() {
+            let vertex_buffer_index = chunk_mesh.vertex_buffer.as_ref().context("no vertices")?;
+            let index_buffer_index = chunk_mesh.index_buffer.as_ref().context("no indices")?;
+            let num_indices = chunk_mesh.num_indices;
+            let vertex_buffer = gpu_resources
+                .buffer_arena
+                .get(*vertex_buffer_index)
+                .context("no vertex buf")?;
+            let index_buffer = gpu_resources
+                .buffer_arena
+                .get(*index_buffer_index)
+                .context("no vertex buf")?;
+            let _ = voxel_rendering::draw_chunk(
+                render_pass,
+                num_indices,
+                camera_bind_group,
+                light_bind_group,
+                vertex_buffer,
+                index_buffer,
+            );
+        }
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    pub fn get_vertex_count(&self) -> u32 {
+        self.chunk_mesh_map
+            .iter()
+            .map(|(_i, m)| m.num_vertices)
+            .sum()
+    }
+}
+pub fn adjacent_voxels<'a>(
+    chunks: &'a mut Chunks,
+    local_pos: (i32, i32, i32),
+    chunk_pos: &cgmath::Vector3<i32>,
+) -> Result<(&'a Voxel, &'a Voxel, &'a Voxel, &'a Voxel)> {
+    let (x, y, z) = (local_pos.0, local_pos.1, local_pos.2);
+    let voxel = chunks
+        .try_get_voxel(chunk_pos, &LocalCoordinate(x, y, z))
+        .context("no voxel")?;
+    let back = chunks
+        .try_get_voxel(chunk_pos, &LocalCoordinate(x, y, z - 1))
+        .context("no back voxel")?;
+    let left = chunks
+        .try_get_voxel(chunk_pos, &LocalCoordinate(x - 1, y, z))
+        .context("no left voxel")?;
+    let down = chunks
+        .try_get_voxel(chunk_pos, &LocalCoordinate(x, y - 1, z))
+        .context("no down voxel")?;
+    Ok((voxel, back, left, down))
+}
+```
+
+### src/voxel_tools/direction.rs
+```
+pub enum Direction {
+    Left,
+    Right,
+    Down,
+    Up,
+    Back,
+    Forward,
+}
+
+impl Direction {
+    pub fn get_normal(&self) -> cgmath::Vector3<f32> {
+        match self {
+            Direction::Left => -cgmath::Vector3::<f32>::unit_x(),
+            Direction::Right => cgmath::Vector3::<f32>::unit_x(),
+            Direction::Down => -cgmath::Vector3::<f32>::unit_y(),
+            Direction::Up => cgmath::Vector3::<f32>::unit_y(),
+            Direction::Back => -cgmath::Vector3::<f32>::unit_z(),
+            Direction::Forward => cgmath::Vector3::<f32>::unit_z(),
+        }
+    }
+}
+```
+
+### src/voxel_tools/mesh_builder.rs
+```
+use crate::rendering::gpu_resources::GpuResources;
+
+use super::{
+    chunk,
+    chunks::{adjacent_voxels, Chunks},
+};
+use super::{
+    direction::Direction,
+    quad::Quad,
+    rendering::voxel_vertex::VoxelVertex,
+    voxel::Voxel,
+};
+use wgpu::util::DeviceExt;
+
+pub fn build_chunk_mesh(
+    chunks: &mut Chunks,
+    //chunk: &mut Chunk,
+    device: &wgpu::Device,
+    gpu_resources: &mut GpuResources,
+    chunk_pos: &cgmath::Vector3<i32>,
+    chunk_world_pos: &cgmath::Vector3<f32>,
+) -> bool {
+    let chunk_size = chunk::SIZE as i32;
+    let mut quads = Vec::<Quad>::new();
+    for x in 0..chunk_size {
+        for y in 0..chunk_size {
+            for z in 0..chunk_size {
+                let voxel_pos_local = cgmath::Vector3::<f32>::new(x as f32, y as f32, z as f32);
+                let voxel_pos_world = chunk_world_pos + voxel_pos_local;
+                if let Ok((voxel, back, left, down)) = adjacent_voxels(chunks, (x, y, z), chunk_pos)
+                {
+                    process_voxel(&voxel, voxel_pos_world, &left, &down, &back, &mut quads);
+                }
+            }
+        }
+    }
+    if quads.is_empty() {
+        //panic!("ouuuuh woops");
+    }
+    let mut voxel_vertices = Vec::<VoxelVertex>::new();
+    let mut indices = Vec::<u32>::new();
+    let mut vert_index = 0;
+    for quad in quads {
+        let normal = quad.direction.get_normal();
+        (0..4).for_each(|index| {
+            voxel_vertices.push(VoxelVertex {
+                position: quad.corners[index].into(),
+                normal: normal.into(),
+                color_diffuse: quad.color.into(),
+            });
+        });
+        indices.push(vert_index);
+        indices.push(vert_index + 1);
+        indices.push(vert_index + 2);
+        indices.push(vert_index);
+        indices.push(vert_index + 2);
+        indices.push(vert_index + 3);
+        vert_index += 4;
+    }
+    if let Some(chunk_mesh) = chunks.get_chunk_mesh_mut(chunk_pos) {
+        let num_indices = indices.len() as u32;
+        let num_vertices = voxel_vertices.len() as u32;
+        let (v_buf, i_buf) = construct_buffers(device, voxel_vertices, indices);
+        let v_buf = gpu_resources.buffer_arena.insert(v_buf);
+        let i_buf = gpu_resources.buffer_arena.insert(i_buf);
+        chunk_mesh.update_vertex_buffers(v_buf, i_buf, num_indices, num_vertices);
+        return num_vertices != 0;
+    }
+    false
+}
+
+fn process_voxel(
+    voxel: &Voxel,
+    voxel_pos: cgmath::Vector3<f32>,
+    left: &Voxel,
+    down: &Voxel,
+    back: &Voxel,
+    quads: &mut Vec<Quad>,
+) {
+    match voxel.is_solid() {
+        true => {
+            // voxel is solid
+            if !left.is_solid() {
+                quads.push(Quad::from_direction(Direction::Left, voxel_pos));
+            }
+            if !down.is_solid() {
+                quads.push(Quad::from_direction(Direction::Down, voxel_pos));
+            }
+            if !back.is_solid() {
+                quads.push(Quad::from_direction(Direction::Back, voxel_pos));
+            }
+        }
+        false => {
+            // voxel is not solid
+            if left.is_solid() {
+                quads.push(Quad::from_direction(Direction::Right, voxel_pos));
+            }
+            if down.is_solid() {
+                quads.push(Quad::from_direction(Direction::Up, voxel_pos));
+            }
+            if back.is_solid() {
+                quads.push(Quad::from_direction(Direction::Forward, voxel_pos));
+            }
+        }
+    }
+}
+
+fn construct_buffers(
+    device: &wgpu::Device,
+    vertices: Vec<VoxelVertex>,
+    indices: Vec<u32>,
+) -> (wgpu::Buffer, wgpu::Buffer) {
+    let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("voxel_chunk_vertices"),
+        contents: bytemuck::cast_slice(&vertices),
+        usage: wgpu::BufferUsage::VERTEX,
+    });
+    let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("voxel_chunk_indices"),
+        contents: bytemuck::cast_slice(&indices),
+        usage: wgpu::BufferUsage::INDEX,
+    });
+    (vertex_buffer, index_buffer)
+}
+```
+
+### src/voxel_tools/quad.rs
+```
+use super::direction::Direction;
+use crate::color::Color;
+use cgmath::Vector3;
+use rand::Rng;
+
+pub struct Quad {
+    pub color: Color,
+    pub direction: Direction,
+    // in world position
+    pub corners: [Vector3<f32>; 4],
+}
+
+const HALF_SIZE: f32 = 0.5f32;
+
+impl Quad {
+    pub fn from_direction(direction: Direction, pos: Vector3<f32>) -> Self {
+        let corners = match direction {
+            Direction::Left => [
+                Vector3::new(pos.x - HALF_SIZE, pos.y - HALF_SIZE, pos.z - HALF_SIZE),
+                Vector3::new(pos.x - HALF_SIZE, pos.y - HALF_SIZE, pos.z + HALF_SIZE),
+                Vector3::new(pos.x - HALF_SIZE, pos.y + HALF_SIZE, pos.z + HALF_SIZE),
+                Vector3::new(pos.x - HALF_SIZE, pos.y + HALF_SIZE, pos.z - HALF_SIZE),
+            ],
+            Direction::Right => [
+                Vector3::new(pos.x - HALF_SIZE, pos.y + HALF_SIZE, pos.z - HALF_SIZE),
+                Vector3::new(pos.x - HALF_SIZE, pos.y + HALF_SIZE, pos.z + HALF_SIZE),
+                Vector3::new(pos.x - HALF_SIZE, pos.y - HALF_SIZE, pos.z + HALF_SIZE),
+                Vector3::new(pos.x - HALF_SIZE, pos.y - HALF_SIZE, pos.z - HALF_SIZE),
+            ],
+            // assuming it's correct this is under i believe
+            Direction::Down => [
+                Vector3::new(pos.x - HALF_SIZE, pos.y - HALF_SIZE, pos.z - HALF_SIZE),
+                Vector3::new(pos.x + HALF_SIZE, pos.y - HALF_SIZE, pos.z - HALF_SIZE),
+                Vector3::new(pos.x + HALF_SIZE, pos.y - HALF_SIZE, pos.z + HALF_SIZE),
+                Vector3::new(pos.x - HALF_SIZE, pos.y - HALF_SIZE, pos.z + HALF_SIZE),
+            ],
+            Direction::Up => [
+                Vector3::new(pos.x - HALF_SIZE, pos.y - HALF_SIZE, pos.z + HALF_SIZE),
+                Vector3::new(pos.x + HALF_SIZE, pos.y - HALF_SIZE, pos.z + HALF_SIZE),
+                Vector3::new(pos.x + HALF_SIZE, pos.y - HALF_SIZE, pos.z - HALF_SIZE),
+                Vector3::new(pos.x - HALF_SIZE, pos.y - HALF_SIZE, pos.z - HALF_SIZE),
+            ],
+            Direction::Back => [
+                Vector3::new(pos.x - HALF_SIZE, pos.y - HALF_SIZE, pos.z - HALF_SIZE),
+                Vector3::new(pos.x - HALF_SIZE, pos.y + HALF_SIZE, pos.z - HALF_SIZE),
+                Vector3::new(pos.x + HALF_SIZE, pos.y + HALF_SIZE, pos.z - HALF_SIZE),
+                Vector3::new(pos.x + HALF_SIZE, pos.y - HALF_SIZE, pos.z - HALF_SIZE),
+            ],
+            Direction::Forward => [
+                Vector3::new(pos.x + HALF_SIZE, pos.y - HALF_SIZE, pos.z - HALF_SIZE),
+                Vector3::new(pos.x + HALF_SIZE, pos.y + HALF_SIZE, pos.z - HALF_SIZE),
+                Vector3::new(pos.x - HALF_SIZE, pos.y + HALF_SIZE, pos.z - HALF_SIZE),
+                Vector3::new(pos.x - HALF_SIZE, pos.y - HALF_SIZE, pos.z - HALF_SIZE),
+            ],
+        };
+
+        let green_range = 0.4f32;
+        Self {
+            corners,
+            //color: color::colors::GREEN,
+            //color: Color::new(0.7f32, (1.-green_range) + rand::thread_rng().gen_range(0f32..green_range), 0.3f32, 1.),
+            color: Color::new(
+                rand::thread_rng().gen_range(0f32..0.1f32),
+                (1. - green_range) + rand::thread_rng().gen_range(0f32..green_range),
+                rand::thread_rng().gen_range(0f32..0.1f32),
+                1.,
+            ),
+            direction,
+        }
+    }
+}
+```
+
+### src/voxel_tools/rendering.rs
+```
+pub mod voxel_pipeline;
+pub mod voxel_rendering;
+pub mod voxel_vertex;
+```
+
+### src/voxel_tools/voxel.rs
+```
+#[derive(Copy, Clone, Debug)]
+pub struct Voxel {
+    density: u8,
+}
+
+// decorative argument type
+pub struct Density(u8);
+
+impl Voxel {
+    pub fn new(density: Density) -> Self {
+        Self { density: density.0 }
+    }
+
+    pub fn new_empty() -> Self {
+        Self::new(Density(0u8))
+    }
+
+    #[allow(dead_code)]
+    pub fn new_solid() -> Self {
+        Self::new(Density(255u8))
+    }
+
+    pub fn is_solid(&self) -> bool {
+        self.density > 0u8
+    }
+
+    #[allow(dead_code)]
+    pub fn density_fraction(&self) -> f32 {
+        self.density as f32 / 255f32
+    }
+
+    pub fn set_density_fraciton(&mut self, fraction: f32) {
+        self.density = (fraction * 255f32) as u8;
+    }
+}
+```
+
+### src/voxel_tools/rendering/voxel.wgsl
+```
+[[block]]
+struct CameraUniform {
+    position: vec3<f32>;
+    projection_view: mat4x4<f32>;
+};
+
+[[group(0), binding(0)]]
+var<uniform> u_camera: CameraUniform;
+
+struct VertexOutput {
+    [[builtin(position)]] builtin_position: vec4<f32>;
+    [[location(1)]] diffuse_color: vec3<f32>;
+    [[location(2)]] normal: vec3<f32>;
+    [[location(3)]] position: vec3<f32>;
+};
+
+[[stage(vertex)]]
+fn vs_main(
+    [[location(0)]] position: vec3<f32>,
+    [[location(1)]] normal: vec3<f32>,
+    [[location(2)]] diffuse_color: vec3<f32>,
+) -> VertexOutput {
+    var out: VertexOutput;
+    out.normal = normal;
+    let model_space = vec4<f32>(position, 1.0);
+    out.position = model_space.xyz;
+    out.diffuse_color = diffuse_color;
+
+    out.builtin_position = u_camera.projection_view * model_space;
+    return out;
+}
+
+
+[[block]]
+struct LightUniform {
+    position: vec3<f32>;
+    color: vec3<f32>;
+};
+
+[[group(1), binding(0)]]
+var<uniform> u_light: LightUniform;
+
+[[stage(fragment), early_depth_test]]
+fn fs_main(
+    in: VertexOutput,
+) -> [[location(0)]] vec4<f32> {
+    let ambient_strength = 0.2;
+    let ambient_color = u_light.color * ambient_strength;
+
+    let normal = normalize(in.normal);
+    let light_dir = normalize(u_light.position - in.position);
+    let diffuse_strength = max(dot(normal, light_dir), 0.0);
+    let diffuse_color = u_light.color * diffuse_strength;
+
+    let view_dir = normalize(u_camera.position - in.position);
+    let half_dir = normalize(view_dir + light_dir);
+
+    let specular_strength = pow(max(dot(normal, half_dir), 0.0), 32.0);
+    let specular_color = specular_strength * u_light.color;
+
+    let surface_color = vec4<f32>(in.diffuse_color, 1.0);
+
+    let result = (diffuse_color + ambient_color + specular_color) * surface_color.xyz;
+
+    return vec4<f32>(result, surface_color.a);
+}
+```
+
+### src/voxel_tools/rendering/voxel_pipeline.rs
+```
+use crate::{
+    create_render_pipeline,
+    rendering::{render_utils, vertex_desc::VertexDesc},
+    texture,
+    voxel_tools::rendering::voxel_vertex::VoxelVertex,
+};
+
+pub fn create_voxel_pipeline(
+    device: &wgpu::Device,
+    texture_format: wgpu::TextureFormat,
+    light_bind_group_layout: &wgpu::BindGroupLayout,
+) -> wgpu::RenderPipeline {
+    let visibility = wgpu::ShaderStage::VERTEX | wgpu::ShaderStage::FRAGMENT;
+    let camera_bind_group_layout =
+        render_utils::create_bind_group_layout(&device, "camera_bind_layout", 0, visibility);
+
+    let shader_module = render_utils::create_shader_module(
+        &device,
+        include_str!("voxel.wgsl"),
+        "voxel_shader_module",
+    );
+
+    let bind_group_layouts = &[&camera_bind_group_layout, &light_bind_group_layout];
+    let pipeline_layout =
+        render_utils::create_pipeline_layout(&device, "voxel_pipeline", bind_group_layouts);
+
+    println!("creating pipeline");
+    let render_pipeline = create_render_pipeline(
+        &device,
+        &pipeline_layout,
+        texture_format,
+        Some(texture::Texture::DEPTH_FORMAT),
+        &[VoxelVertex::desc()],
+        shader_module,
+        "voxel_pipeline",
+    );
+    render_pipeline
+}
+```
+
+### src/voxel_tools/rendering/voxel_rendering.rs
+```
+use anyhow::*;
+
+pub fn draw_chunk<'a, 'b>(
+    render_pass: &mut wgpu::RenderPass<'a>,
+    num_indices: u32,
+    camera_u: &'a wgpu::BindGroup,
+    light_u: &'a wgpu::BindGroup,
+    vertex_buffer: &'a wgpu::Buffer,
+    index_buffer: &'a wgpu::Buffer,
+) -> Result<()> {
+    render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+    render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+    render_pass.set_bind_group(0, &camera_u, &[]);
+    render_pass.set_bind_group(1, &light_u, &[]);
+    render_pass.draw_indexed(0..num_indices, 0, 0..1);
+    Ok(())
+}
+```
+
+### src/voxel_tools/rendering/voxel_vertex.rs
+```
+use crate::rendering::vertex_desc::VertexDesc;
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct VoxelVertex {
+    pub position: [f32; 3],
+    pub normal: [f32; 3],
+    pub color_diffuse: [f32; 3],
+}
+
+impl VertexDesc for VoxelVertex {
+    fn desc<'a>() -> wgpu::VertexBufferLayout<'a> {
+        use std::mem;
+        wgpu::VertexBufferLayout {
+            array_stride: mem::size_of::<VoxelVertex>() as wgpu::BufferAddress,
+            step_mode: wgpu::InputStepMode::Vertex,
+            attributes: &[
+                // position
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x3,
+                    offset: 0,
+                    shader_location: 0,
+                },
+                // normal
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x3,
+                    offset: mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
+                    shader_location: 1,
+                },
+                // diffuse color
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x3,
+                    offset: mem::size_of::<[f32; 6]>() as wgpu::BufferAddress,
+                    shader_location: 2,
+                },
+            ],
+        }
+    }
+}
+```

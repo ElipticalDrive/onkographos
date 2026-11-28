@@ -1,0 +1,348 @@
+--- v009.md
++++ v010.md
+@@ -4,45 +4,38 @@
+ 
+ ## Overview
+-Bézier-boundary gradient approximation is a technique for approximating the gradients of a discontinuous indicator function $g(\cdot)$ with respect to Bézier curve control point coordinates, enabling backpropagation in Gaussian Splatting despite the function being piecewise constant and non-differentiable [S1]. It sets itself apart from standard differentiable rendering by explicitly handling discontinuities introduced by modified $\alpha$-blending, whereas standard Gaussian Splatting [3D Gaussian Splatting](52-3d-gaussian-splatting.md) does not natively handle such discontinuities [S1].
++A gradient modification technique for 3D Gaussian Splatting that approximates the gradients of a discontinuous indicator function $g(\cdot)$ with respect to Bézier curve control points, enabling backpropagation through non-differentiable rendering operations [S1]. It solves the problem where standard automatic differentiation yields zero gradients for piecewise constant functions, preventing the optimization of geometric parameters that define scene discontinuities [S1]. It sets itself apart from standard Gaussian Splatting by explicitly handling discontinuities via Bézier curves, and from [Truncated Gradient Updates for 3D Gaussian Splatting](18661-truncated-gradient-updates-for-3d-gaussian-splatting.md) by focusing on geometric boundary approximation rather than magnitude truncation [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** The gradient of the loss with respect to the Bézier curve function output, $\frac{\partial \mathcal{L}}{\partial g_{sc}}(p)$; the current control point coordinates $c_{curve}$; the query point $p=(x_p, y_p)$; and the hyperparameter $M$ (number of control points per Gaussian, typically 3) [S1].
+-*   **Output:** The approximated partial derivative $\frac{\partial g}{\partial c_{curve}[0,0]}$ (and similarly for other coordinates) [S1].
++*   **Input:** The current control point coordinates $c_{\text{curve}}$, the target point $p=(x_p, y_p)$ in 2D space (or 3D for 3D GS), the current output of the Bézier curve function $g_{sc}(p)$, the gradient of the loss with respect to the curve output $\frac{\partial \mathcal{L}}{\partial g_{sc}}$, and the hyperparameter $M$ (number of control points per Gaussian, typically 3) [S1].
++*   **Output:** The approximated gradient $\frac{\partial g}{\partial c_{\text{curve}}[0,0]}$ (and similarly for other coordinates) to be passed to the optimizer [S1].
+ 
+ **Data Structures:**
+-*   $c_{curve}$: Attribute storing control point coordinates. For 2D Gaussian Splatting, shape is $\mathbb{R}^{4M \times 2}$. For 3D Gaussian Splatting, shape is $\mathbb{R}^{4M \times 3}$ [S1].
+-*   $g_{sc}(p)$: The cubic Bézier curve function evaluated at point $p$, dependent on control points $c_{curve}[0], c_{curve}[1], c_{curve}[2], c_{curve}[3]$ [S1].
+-*   $g(\cdot)$: The discontinuous indicator function, which is piecewise constant [S1].
++*   $c_{\text{curve}}$: Attribute storing control point coordinates. For 2D GS, shape is $\mathbb{R}^{4M \times 2}$. For 3D GS, shape is $\mathbb{R}^{4M \times 3}$ [S1].
++*   $S_\phi$: A set of real number solutions for the target control point value $\phi$ [S1].
+ 
+-**Definitions:**
+-*   $c_{curve}[i, j]$: The $j$-th coordinate of the $i$-th control point.
+-*   $\phi$: The target value for a control point coordinate such that the Bézier curve passes through point $p$.
+-*   $\hat{g}_{sc}(p)$: The target state of the indicator function. Defined as $1$ if $g_{sc}(p)=0$ (targeting a change from 0 to 1) and $0$ if $g_{sc}(p)=1$ (targeting a change from 1 to 0) [S1].
+-*   $\epsilon$: A small epsilon value to prevent gradient explosion. $\epsilon = 10^{-5}$ if the target $\phi$ is greater than the current coordinate, otherwise $\epsilon = -10^{-5}$ [S1].
++**Method Steps:**
++The strategy approximates $\frac{\partial g}{\partial c_{\text{curve}}[0,0]}$ using the chain rule:
++$$ \frac{\partial g}{\partial c_{\text{curve}}[0,0]} = \frac{\partial g}{\partial g_{sc}} \times \frac{\partial g_{sc}}{\partial c_{\text{curve}}[0,0]} $$
++Since $g(\cdot)$ is differentiable with respect to $g_{sc}(\cdot)$, the core task is approximating $\frac{\partial g_{sc}}{\partial c_{\text{curve}}[0,0]}$ [S1].
+ 
+-**Steps:**
+-1.  **Chain Rule Decomposition:** Apply the chain rule to decompose the gradient approximation problem. The goal is to approximate $\frac{\partial g}{\partial c_{curve}[0,0]}$. Since $g(\cdot)$ is differentiable with respect to $g_{sc}(\cdot)$, the problem reduces to approximating $\frac{\partial g_{sc}}{\partial c_{curve}[0,0]}$ [S1]:
+-    $$ \frac{\partial g}{\partial c_{curve}[0,0]} = \frac{\partial g}{\partial g_{sc}(p)} \times \frac{\partial g_{sc}(p)}{\partial c_{curve}[0,0]} $$
+-    Note: The application to other coordinates in $c_{curve}$ follows a similar process [S1].
+-
+-2.  **Determine Modification Necessity:** Check if $g_{sc}(p)$ needs modification. If any of the following conditions are met, set $\frac{\partial g_{sc}}{\partial c_{curve}[0,0]} = 0$ and terminate:
+-    *   $\frac{\partial \mathcal{L}}{\partial g_{sc}} = 0$ (optimal state).
+-    *   $\frac{\partial \mathcal{L}}{\partial g_{sc}} > 0$ and $g_{sc}(p) = 0$ (already at minimum).
++1.  **Check Modification Necessity:** Determine if $g_{sc}(p)$ needs modification. If any of the following conditions are met, set $\frac{\partial g_{sc}}{\partial c_{\text{curve}}[0,0]} = 0$ and terminate:
++    *   $\frac{\partial \mathcal{L}}{\partial g_{sc}} = 0$ (optimal state) [S1].
++    *   $\frac{\partial \mathcal{L}}{\partial g_{sc}} > 0$ and $g_{sc}(p) = 0$ (already at minimum) [S1].
+     *   $\frac{\partial \mathcal{L}}{\partial g_{sc}} < 0$ and $g_{sc}(p) = 1$ (already at maximum) [S1].
+ 
+-3.  **Solve for Target $\phi$:** If modification is needed, identify the target value $\phi$ for $c_{curve}[0,0]$ such that the Bézier curve passes through $p=(x_p, y_p)$. Solve the system of equations derived from the cubic Bézier definition for $t$ and $\phi$ in $O(1)$ time [S1]:
+-    $$ x_p = (1-t)^3 \phi + 3(1-t)^2 t c_{curve}[1,0] + 3(1-t)t^2 c_{curve}[2,0] + t^3 c_{curve}[3,0] $$
+-    $$ y_p = (1-t)^3 c_{curve}[0,1] + 3(1-t)^2 t c_{curve}[1,1] + 3(1-t)t^2 c_{curve}[2,1] + t^3 c_{curve}[3,1] $$
+-    Collect all real number solutions for $\phi$ into a set $S_\phi$ [S1].
++2.  **Solve for Target $\phi$:** If modification is needed, identify the target value $\phi$ for $c_{\text{curve}}[0,0]$ such that the cubic Bézier curve passes through $p=(x_p, y_p)$. Solve the system of equations derived from the cubic Bézier definition for parameter $t$ and value $\phi$ in $O(1)$ time [S1]:
++    $$ x_p = (1-t)^3 \phi + 3(1-t)^2 t c[1,0] + 3(1-t)t^2 c[2,0] + t^3 c[3,0] $$
++    $$ y_p = (1-t)^3 c[0,1] + 3(1-t)^2 t c[1,1] + 3(1-t)t^2 c[2,1] + t^3 c[3,1] $$
++    Collect all real number solutions for $\phi$ into the set $S_\phi$ [S1].
+ 
+-4.  **Approximate Gradient Based on $S_\phi$:**
+-    *   **No Side:** If $S_\phi$ is empty, set $\frac{\partial g_{sc}}{\partial c_{curve}[0,0]} = 0$. This implies no real value of $c_{curve}[0,0]$ can cause the curve to pass through $p$ [S1].
+-    *   **Single Side:** If all solutions in $S_\phi$ lie on the same side of $c_{curve}[0,0]$, let $\phi_e$ be the solution nearest to $c_{curve}[0,0]$. Approximate the gradient via linear interpolation:
+-        $$ \frac{\partial g_{sc}}{\partial c_{curve}[0,0]} = \frac{g_{sc}(p) - \hat{g}_{sc}(p)}{\phi_e - c_{curve}[0,0] + \epsilon} $$
+-        where $\epsilon = 10^{-5}$ if $\phi_e > c_{curve}[0,0]$ else $-10^{-5}$ [S1].
+-    *   **Both Sides:** If solutions exist on both left and right sides of $c_{curve}[0,0]$, let $\phi_1$ be the nearest solution from the left and $\phi_2$ be the nearest from the right. Approximate the gradient as the sum of two interpolation terms:
+-        $$ \frac{\partial g_{sc}}{\partial c_{curve}[0,0]} = \frac{g_{sc}(p) - \hat{g}_{sc}(p)}{\phi_1 - c_{curve}[0,0] + \epsilon_1} + \frac{g_{sc}(p) - \hat{g}_{sc}(p)}{\phi_2 - c_{curve}[0,0] + \epsilon_2} $$
+-        where $\epsilon_1$ and $\epsilon_2$ are determined by the sign of $(\phi_1 - c_{curve}[0,0])$ and $(\phi_2 - c_{curve}[0,0])$ respectively, following the rule in the Single Side case [S1].
++3.  **Approximate Gradient based on $S_\phi$:**
++    *   **No Side:** If $S_\phi$ is empty, set $\frac{\partial g_{sc}}{\partial c_{\text{curve}}[0,0]} = 0$. This implies no real value of $c_{\text{curve}}[0,0]$ can cause the curve to pass through $p$ [S1].
++    *   **Single Side:** If all solutions in $S_\phi$ lie on the same side of $c_{\text{curve}}[0,0]$, let $\phi_e$ be the solution nearest to $c_{\text{curve}}[0,0]$. Approximate the gradient via linear interpolation:
++        $$ \frac{\partial g_{sc}}{\partial c_{\text{curve}}[0,0]} = \frac{g_{sc}(p) - \hat{g}_{sc}(p)}{\phi_e - c_{\text{curve}}[0,0] + \epsilon} $$
++        where $\hat{g}_{sc}(p) = 1$ if $g_{sc}(p)=0$ else $0$, and $\epsilon = 10^{-5}$ if $\phi_e > c_{\text{curve}}[0,0]$ else $-10^{-5}$ [S1].
++    *   **Both Sides:** If solutions exist on both left and right sides of $c_{\text{curve}}[0,0]$, let $\phi_1$ be the nearest solution from the left and $\phi_2$ be the nearest from the right. Approximate the gradient as the sum of two interpolation terms:
++        $$ \frac{\partial g_{sc}}{\partial c_{\text{curve}}[0,0]} = \frac{g_{sc}(p) - \hat{g}_{sc}(p)}{\phi_1 - c_{\text{curve}}[0,0] + \epsilon_1} + \frac{g_{sc}(p) - \hat{g}_{sc}(p)}{\phi_2 - c_{\text{curve}}[0,0] + \epsilon_2} $$
++        where $\epsilon_1$ and $\epsilon_2$ follow the same sign rule as $\epsilon$ above [S1].
+ 
+ **Pseudocode:**
+@@ -51,34 +44,24 @@
+ 
+ def bezier_boundary_gradient_approximation(
+-    dL_dg_sc: float,
+-    g_sc_p: float,
+-    c_curve: np.ndarray,
+-    p: np.ndarray,
+-    M: int = 3
++    c_curve: np.ndarray,  # Shape (4*M, 2) or (4*M, 3)
++    p: np.ndarray,        # Target point (x, y)
++    g_sc_val: float,      # Current output of Bézier curve at p
++    dL_dg_sc: float,      # Gradient of loss w.r.t. g_sc
++    M: int = 3            # Hyperparameter: number of control points per Gaussian
+ ) -> float:
+     """
+     Approximates the gradient of the discontinuous indicator function g(.)
+-    with respect to the first control point's x-coordinate (c_curve[0,0]).
+-    
+-    Args:
+-        dL_dg_sc: Gradient of loss w.r.t. g_sc(p).
+-        g_sc_p: Current value of g_sc(p).
+-        c_curve: Control points array of shape (4*M, 2) for 2D or (4*M, 3) for 3D.
+-        p: Query point (x_p, y_p).
+-        M: Number of control points per Gaussian (default 3).
+-        
+-    Returns:
+-        Approximated gradient dL/dc_curve[0,0].
++    with respect to the first control point's x-coordinate c_curve[0,0].
+     """
+-    # Step 2: Determine if modification is needed
++    # Step 1: Check if modification is needed
+     if dL_dg_sc == 0:
+         return 0.0
+-    if dL_dg_sc > 0 and g_sc_p == 0:
++    if dL_dg_sc > 0 and g_sc_val == 0:
+         return 0.0
+-    if dL_dg_sc < 0 and g_sc_p == 1:
++    if dL_dg_sc < 0 and g_sc_val == 1:
+         return 0.0
+ 
+-    # Extract relevant control points for the first segment (indices 0 to 3)
+-    # Note: The source implies solving for the curve defined by c_curve[0]...c_curve[3]
++    # Step 2: Solve for target phi
++    # Extract control points
+     c0 = c_curve[0]
+     c1 = c_curve[1]
+@@ -86,132 +69,107 @@
+     c3 = c_curve[3]
+     
+-    xp, yp = p[0], p[1]
++    # We need to solve for t and phi such that the curve passes through p.
++    # The y-coordinate equation does not depend on phi (c_curve[0,0]):
++    # y_p = (1-t)^3 * c0[1] + 3(1-t)^2 * t * c1[1] + 3(1-t) * t^2 * c2[1] + t^3 * c3[1]
++    # This is a cubic equation in t.
+     
+-    # Step 3: Solve for t and phi
+-    # The system is:
+-    # xp = (1-t)^3 * phi + 3*(1-t)^2 * t * c1[0] + 3*(1-t) * t^2 * c2[0] + t^3 * c3[0]
+-    # yp = (1-t)^3 * c0[1] + 3*(1-t)^2 * t * c1[1] + 3*(1-t) * t^2 * c2[1] + t^3 * c3[1]
++    # Coefficients for cubic equation in t: At^3 + Bt^2 + Ct + D = 0
++    # y_p = c0[1]*(1-3t+3t^2-t^3) + 3c1[1]*(t-2t^2+t^3) + 3c2[1]*(t^2-t^3) + c3[1]*t^3
++    # Expanding and grouping by powers of t:
++    # t^3: -c0[1] + 3c1[1] - 3c2[1] + c3[1]
++    # t^2: 3c0[1] - 6c1[1] + 3c2[1]
++    # t^1: -3c0[1] + 3c1[1]
++    # t^0: c0[1]
+     
+-    # First, solve the y-equation for t. This is a cubic equation in t.
+-    # yp = c0[1]*(1-t)^3 + c1[1]*3*(1-t)^2*t + c2[1]*3*(1-t)*t^2 + c3[1]*t^3
+-    # This can be rewritten as a standard cubic polynomial in t.
+-    # Let's expand:
+-    # (1-t)^3 = 1 - 3t + 3t^2 - t^3
+-    # 3(1-t)^2 t = 3t - 6t^2 + 3t^3
+-    # 3(1-t)t^2 = 3t^2 - 3t^3
+-    # t^3 = t^3
++    A = -c0[1] + 3*c1[1] - 3*c2[1] + c3[1]
++    B = 3*c0[1] - 6*c1[1] + 3*c2[1]
++    C = -3*c0[1] + 3*c1[1]
++    D = c0[1] - p[1]
+     
+-    # Coefficients for t^3, t^2, t^1, t^0
+-    # y(t) = c0[1]*(1 - 3t + 3t^2 - t^3) + c1[1]*(3t - 6t^2 + 3t^3) + c2[1]*(3t^2 - 3t^3) + c3[1]*t^3
+-    # y(t) = t^3 * (-c0[1] + 3*c1[1] - 3*c2[1] + c3[1]) + t^2 * (3*c0[1] - 6*c1[1] + 3*c2[1]) + t * (-3*c0[1] + 3*c1[1]) + c0[1]
+-    
+-    a_t = -c0[1] + 3*c1[1] - 3*c2[1] + c3[1]
+-    b_t = 3*c0[1] - 6*c1[1] + 3*c2[1]
+-    c_t = -3*c0[1] + 3*c1[1]
+-    d_t = c0[1] - yp
+-    
+-    # Solve a_t * t^3 + b_t * t^2 + c_t * t + d_t = 0
+-    # Use numpy roots for robustness, though O(1) cubic formula exists
+-    coeffs_t = [a_t, b_t, c_t, d_t]
+-    t_roots = np.roots(coeffs_t)
++    # Solve cubic equation for t
++    # Using numpy's roots for robustness, though O(1) analytical solution exists
++    coeffs = [A, B, C, D]
++    t_roots = np.roots(coeffs)
+     
+     # Filter for real t in [0, 1]
+-    valid_t = t_roots[np.isreal(t_roots) & (t_roots.real >= 0) & (t_roots.real <= 1)]
++    valid_t = []
++    for t in t_roots:
++        if np.isreal(t):
++            t_val = np.real(t)
++            if 0.0 <= t_val <= 1.0:
++                valid_t.append(t_val)
++    
++    # For each valid t, solve for phi using the x-coordinate equation:
++    # x_p = (1-t)^3 * phi + 3(1-t)^2 * t * c1[0] + 3(1-t) * t^2 * c2[0] + t^3 * c3[0]
++    # phi = (x_p - 3(1-t)^2 * t * c1[0] - 3(1-t) * t^2 * c2[0] - t^3 * c3[0]) / (1-t)^3
+     
+     S_phi = []
+-    
+-    for t in valid_t:
+-        t_val = t.real
+-        # Solve for phi using the x-equation:
+-        # xp = (1-t)^3 * phi + 3*(1-t)^2 * t * c1[0] + 3*(1-t) * t^2 * c2[0] + t^3 * c3[0]
+-        # phi = (xp - (3*(1-t)^2 * t * c1[0] + 3*(1-t) * t^2 * c2[0] + t^3 * c3[0])) / (1-t)^3
+-        
++    for t_val in valid_t:
+         denom = (1 - t_val)**3
+         if abs(denom) < 1e-9:
+-            # Degenerate case where t=1, (1-t)^3=0. 
+-            # If t=1, xp should equal c3[0]. If not, no solution for phi in this form.
+-            # However, if t=1, the curve is at c3. If p.x != c3[0], no solution.
+-            continue
+-            
+-        term_x = 3*(1-t_val)**2 * t_val * c1[0] + 3*(1-t_val) * t_val**2 * c2[0] + t_val**3 * c3[0]
+-        phi = (xp - term_x) / denom
++            continue # Avoid division by zero, though t=1 implies denom=0
++        term1 = 3 * (1 - t_val)**2 * t_val * c1[0]
++        term2 = 3 * (1 - t_val) * t_val**2 * c2[0]
++        term3 = t_val**3 * c3[0]
++        phi = (p[0] - term1 - term2 - term3) / denom
+         S_phi.append(phi)
+         
+-    # Step 4: Approximate gradient based on S_phi
++    # Step 3: Approximate gradient based on S_phi
++    current_c0_x = c_curve[0, 0]
++    g_hat = 1.0 if g_sc_val == 0 else 0.0
++    numerator = g_sc_val - g_hat
++    
+     if len(S_phi) == 0:
+-        # No side situation
++        # No Side situation
+         return 0.0
+-        
+-    # Determine target state
+-    if g_sc_p == 0:
+-        g_hat_sc_p = 1
+-    else:
+-        g_hat_sc_p = 0
+-        
+-    current_c0_0 = c_curve[0, 0]
+     
+     # Separate solutions into left and right
+-    left_solutions = [phi for phi in S_phi if phi < current_c0_0]
+-    right_solutions = [phi for phi in S_phi if phi > current_c0_0]
++    left_solutions = [phi for phi in S_phi if phi < current_c0_x]
++    right_solutions = [phi for phi in S_phi if phi > current_c0_x]
+     
+-    # Handle equality cases (phi == current_c0_0) - technically not left or right
+-    # If phi == current, the curve already passes through p with current control point.
+-    # This implies g_sc(p) is already consistent with the geometry.
+-    # The source doesn't explicitly handle phi == current, but "single side" and "both sides"
+-    # imply strict inequality. If phi == current, the denominator becomes 0.
+-    # We can treat these as negligible or exclude them. 
+-    # Given the epsilon logic, we assume strict separation for the main cases.
++    grad = 0.0
+     
+-    grad_sc = 0.0
+-    
+-    if len(left_solutions) > 0 and len(right_solutions) > 0:
+-        # Both sides situation
++    if len(left_solutions) == 0 and len(right_solutions) > 0:
++        # Single Side (Right)
++        phi_e = min(right_solutions)
++        epsilon = 1e-5 if (phi_e - current_c0_x) > 0 else -1e-5
++        grad = numerator / (phi_e - current_c0_x + epsilon)
++    elif len(right_solutions) == 0 and len(left_solutions) > 0:
++        # Single Side (Left)
++        phi_e = max(left_solutions)
++        epsilon = 1e-5 if (phi_e - current_c0_x) > 0 else -1e-5
++        grad = numerator / (phi_e - current_c0_x + epsilon)
++    elif len(left_solutions) > 0 and len(right_solutions) > 0:
++        # Both Sides
+         phi_1 = max(left_solutions) # Nearest from left
+         phi_2 = min(right_solutions) # Nearest from right
+         
+-        # Calculate epsilons
+-        eps_1 = 1e-5 if (phi_1 - current_c0_0) > 0 else -1e-5
+-        eps_2 = 1e-5 if (phi_2 - current_c0_0) > 0 else -1e-5
++        epsilon_1 = 1e-5 if (phi_1 - current_c0_x) > 0 else -1e-5
++        epsilon_2 = 1e-5 if (phi_2 - current_c0_x) > 0 else -1e-5
+         
+-        term1 = (g_sc_p - g_hat_sc_p) / (phi_1 - current_c0_0 + eps_1)
+-        term2 = (g_sc_p - g_hat_sc_p) / (phi_2 - current_c0_0 + eps_2)
+-        
+-        grad_sc = term1 + term2
+-        
+-    elif len(left_solutions) > 0:
+-        # Single side (left)
+-        phi_e = max(left_solutions)
+-        eps_e = 1e-5 if (phi_e - current_c0_0) > 0 else -1e-5
+-        grad_sc = (g_sc_p - g_hat_sc_p) / (phi_e - current_c0_0 + eps_e)
+-        
+-    elif len(right_solutions) > 0:
+-        # Single side (right)
+-        phi_e = min(right_solutions)
+-        eps_e = 1e-5 if (phi_e - current_c0_0) > 0 else -1e-5
+-        grad_sc = (g_sc_p - g_hat_sc_p) / (phi_e - current_c0_0 + eps_e)
+-        
++        grad = numerator / (phi_1 - current_c0_x + epsilon_1) + \
++               numerator / (phi_2 - current_c0_x + epsilon_2)
+     else:
+-        # All solutions are equal to current_c0_0? Or empty after filtering?
+-        # If S_phi was not empty but all were equal, we might have division by zero.
+-        # Assuming this case is covered by "No side" or handled by epsilon in single side if we included equality.
+-        # Based on source, if S_phi is empty, return 0. If not empty, it falls into single/both.
+-        # If all phi == current, the gradient is undefined or zero. 
+-        # Let's assume this leads to 0 or is handled by the "No side" logic if we consider strict inequality.
+-        # For safety, if no strict left/right, return 0.
+-        grad_sc = 0.0
+-        
++        # All solutions are exactly equal to current_c0_x? Or empty after filtering?
++        # If S_phi is not empty but all are equal to current, denominator is 0.
++        # The source implies "lie on the same side", so strict inequality.
++        # If no strict sides, treat as no side or handle edge case.
++        # Given the logic, if S_phi exists but none are strictly left/right, 
++        # it might be a degenerate case. We assume standard cases cover this.
++        grad = 0.0
++
+     # Apply chain rule
+-    return dL_dg_sc * grad_sc
++    return dL_dg_sc * grad
+ ```
+ 
+ **Parameters:**
+-*   $\epsilon$: Small epsilon value to prevent gradient explosion. Value: $10^{-5}$ if target $\phi$ > current coordinate, $-10^{-5}$ otherwise [S1].
++*   $\epsilon$: Small value to prevent gradient explosion. Value: $10^{-5}$ if target $>$ current, $-10^{-5}$ otherwise [S1].
+ *   $M$: Hyperparameter for the number of control points per Gaussian. Value: 3 [S1].
+-*   Initial learning rate for $c_{curve}$: $2 \times 10^{-4}$ [S1].
++*   Initial learning rate for $c_{\text{curve}}$: $2 \times 10^{-4}$ [S1].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **No Side:** If $S_\phi$ is empty, the gradient is set to 0. This occurs when no real value of the control point can make the curve pass through $p$ [S1].
+-*   **Gradient Explosion:** The epsilon term $\epsilon$ prevents division by zero or near-zero denominators when the target $\phi$ is very close to the current control point coordinate [S1].
+-*   **Cloning/Splitting:** When a Gaussian is cloned or split, the new Gaussians inherit the same $c_{curve}$ attribute as the original [S1].
++*   **No Real Solutions:** If $S_\phi$ is empty, the gradient is set to 0. This occurs when no real value of the control point can make the curve pass through $p$ [S1].
++*   **Division by Zero:** The epsilon term prevents division by zero when the distance between $\phi_e$ and $c_{\text{curve}}[0,0]$ is very small [S1].
++*   **Cloning/Splitting:** When a Gaussian is cloned or split, the new Gaussians inherit the same $c_{\text{curve}}$ attribute as the original [S1].
+ 
+ ## Subtopics
+@@ -221,15 +179,13 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The core approximation step (solving for $t$ and $\phi$) is $O(1)$ [S1].
+-*   **Memory Complexity:** Not given in the sources.
+-*   **Strengths:** Enables backpropagation through discontinuous indicator functions in Gaussian Splatting, allowing the learning of discontinuities (e.g., edges, boundaries) that standard differentiable rendering cannot handle [S1].
+-*   **Limitations:** Relies on approximations for non-differentiable functions, which may introduce artifacts if the approximation is poor. The method is specific to the Bézier curve representation used in DisC-GS [S1].
+-*   **When to use:** When rendering scenes with sharp discontinuities or boundaries that require a discontinuous indicator function $g(\cdot)$ in the rendering pipeline [S1].
+-*   **When not to use:** For standard Gaussian Splatting without discontinuity-aware rendering, as the standard method is already differentiable [S1].
++*   **Time Complexity:** The core approximation step involves solving a cubic equation for $t$ and then solving for $\phi$, both performed in $O(1)$ time [S1].
++*   **Memory Complexity:** Requires storing the control point attributes $c_{\text{curve}}$ with shape $\mathbb{R}^{4M \times 2}$ (2D) or $\mathbb{R}^{4M \times 3}$ (3D) per Gaussian [S1].
++*   **Strengths:** Enables the learning of discontinuities in 3D scenes by providing non-zero gradients for piecewise constant indicator functions, which standard differentiable rendering cannot handle [S1]. Consistently outperforms existing methods on PSNR, SSIM, and LPIPS metrics on novel view synthesis tasks [S1].
++*   **Limitations:** Relies on the approximation strategy which may introduce artifacts if the geometric assumptions (e.g., cubic Bézier shape) do not match the actual discontinuity structure. The method is specific to the DisC-GS framework and may not be directly transferable to other Gaussian Splatting variants without modification [S1].
++*   **When to Use:** When rendering scenes with sharp discontinuities (e.g., edges, boundaries) that cause artifacts in standard Gaussian Splatting due to non-differentiable rendering operations [S1].
++*   **When Not to Use:** For smooth scenes without significant discontinuities, where standard differentiable Gaussian Splatting is sufficient and simpler [S1].
+ 
+ ## Background
+-*   **Origin:** Proposed in DisC-GS: Discontinuity-aware Gaussian Splatting [S1].
+-*   **History:** The method addresses the non-differentiability of the discontinuous indicator function $g(\cdot)$ introduced in modified $\alpha$-blending [S1]. It is inspired by prior work [28] (cited in [S1]) regarding gradient approximation for discontinuities.
+-*   **Usage:** Used in the DisC-GS framework for 2D and 3D Gaussian Splatting to improve novel view synthesis on scenes with discontinuities [S1].
++The method was introduced in **DisC-GS: Discontinuity-aware Gaussian Splatting** by the authors of [S1] in 2024. It addresses the limitation of standard 3D Gaussian Splatting, which relies on differentiable rendering, by incorporating a discontinuous indicator function $g(\cdot)$ into the $\alpha$-blending process. Since $g(\cdot)$ is piecewise constant, its gradients are zero, preventing the optimization of the control points $c_{\text{curve}}$ that define the discontinuities. The Bézier-boundary gradient approximation strategy was proposed to approximate these gradients, enabling the learning of 3D scene representations with discontinuities [S1]. The approach builds on inspiration from [28] (referenced in [S1]) and uses LPIPS loss during training [S1].
+ 
+ ## Sources

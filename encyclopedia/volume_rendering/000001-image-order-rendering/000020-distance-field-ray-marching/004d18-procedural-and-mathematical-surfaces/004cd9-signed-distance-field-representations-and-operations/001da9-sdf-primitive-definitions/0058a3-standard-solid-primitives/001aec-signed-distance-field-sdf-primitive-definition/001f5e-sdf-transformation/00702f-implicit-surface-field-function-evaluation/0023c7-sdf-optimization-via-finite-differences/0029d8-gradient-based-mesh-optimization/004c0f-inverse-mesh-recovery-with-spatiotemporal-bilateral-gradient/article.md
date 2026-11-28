@@ -1,0 +1,131 @@
+# Inverse Mesh Recovery with Spatiotemporal Bilateral Gradient Filtering
+
+Also called: Edge-aware cross-bilateral filter for mesh recovery, Spatiotemporal optimizer for inverse recovery
+
+## Overview
+This method reconstructs unknown mesh geometry by optimizing vertex positions to minimize geometric differences between rendered multi-view images and a reference mesh. It sets itself apart from its sibling [Gradient-Based Mesh Optimization](4628-gradient-based-mesh-optimization.md) by replacing the standard Laplacian postfilter with a mesh cross-bilateral filter, which preserves sharp edges and silhouettes better than Laplacian smoothing, leading to faster convergence on thin structures [S1].
+
+## How it works
+**Inputs:**
+- A reference mesh (e.g., a cube or dragon model).
+- A set of $N$ camera views (10 views for the cube, 25 views for the dragon).
+- Initial mesh geometry (sphere with ~10k vertices).
+
+**Outputs:**
+- Optimized mesh vertex positions.
+
+**Data Structures:**
+- **Mesh:** Defined by vertices $V$ and connectivity.
+- **Intermediate Variables:** $m_t$ (current parameter state), $v_t$ (intermediate variable for filtering).
+- **Gradients:** $\nabla L$ computed via differentiable rendering.
+
+**Parameters:**
+- Learning rate $\alpha$: $1 \cdot 10^{-2}$ for cube, $3 \cdot 10^{-2}$ for dragon [S1].
+- Adam momentum $\beta_1 = 0.9$, $\beta_2 = 0.99$ [S1].
+- Regularization weight $\lambda = 19$ [S1].
+- Cross-bilateral filter range parameter $\sigma_\phi = 0.4$ [S1].
+- Cross-bilateral filter spatial distance parameter $\sigma_d = 0.5$ [S1].
+- Learning rate scheduler: Exponential reduction to factor 0.6 at the end of optimization [S1].
+
+**Steps:**
+1. **Initialization:** Initialize the mesh as a sphere with approximately 10,000 vertices [S1].
+2. **Iteration Loop:** For each optimization iteration $t$:
+    a. **Upsampling (Conditional):** If optimizing the dragon model, upsample the mesh at iterations 10, 30, and 60 by remeshing to reduce the average edge length by a factor of 2. The cube does not require remeshing [S1].
+    b. **Rendering:** Render all $N$ views. Use 16 samples per pixel for forward rendering and 1 sample per pixel for gradient computation [S1].
+    c. **Loss Computation:** Compute the loss $L$ using the L1 norm between the rendered images and the reference images [S1].
+    d. **Gradient Computation:** Compute the gradient $\nabla L$ with respect to vertex positions [S1].
+    e. **Optimizer Step:** Update parameters using the UniformAdam optimizer with the infinity norm, using $\alpha$, $\beta_1$, and $\beta_2$ [S1].
+    f. **Filtering:** Apply the spatiotemporal bilateral filtering to the gradients/parameters as described below.
+3. **Termination:** Stop when the learning rate scheduler completes or convergence criteria are met.
+
+**Filtering Procedure (Spatiotemporal Bilateral Gradient Filtering):**
+The method follows the Large Steps framework (Algorithm 3) but replaces the postfilter on $m_t$ with a mesh cross-bilateral filter [S1]. The optimal configuration identified is a Laplacian prefilter and a bilateral postfilter on $m_t$, while keeping the UniformAdam infinity norm [S1].
+
+1. **Prefiltering (Laplacian):** Apply a Laplacian prefilter to the gradient or intermediate state to provide initial smoothing. This step is crucial as a bilateral prefilter alone is not sufficient to diffuse silhouette gradients [S1].
+2. **Postfiltering (Cross-Bilateral):** Apply the mesh cross-bilateral filter to $m_t$. This filter uses vertex normals to guide smoothing, preserving sharp edges and silhouettes [S1].
+   - The filter weights are determined by the photometric difference (range parameter $\sigma_\phi = 0.4$) and the spatial distance (distance parameter $\sigma_d = 0.5$) [S1].
+   - Unlike Laplacian smoothing, which dilutes silhouette gradients, this edge-aware filter retains values on silhouettes, interpolating gradients in the interior using values on the silhouettes [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def inverse_mesh_recovery(reference_mesh, camera_views, initial_sphere_vertices, num_iterations):
+    # Initialize mesh
+    mesh = Mesh(initial_sphere_vertices, connectivity=get_default_connectivity(10000))
+    
+    # Optimizer setup
+    optimizer = UniformAdam(mesh.vertices, lr=alpha, beta1=0.9, beta2=0.99, norm='infinity')
+    
+    # Learning rate scheduler
+    scheduler = ExponentialLR(optimizer, gamma=0.6)
+    
+    for t in range(num_iterations):
+        # Conditional upsampling for dragon model
+        if is_dragon_model and t in [10, 30, 60]:
+            mesh = remesh(mesh, target_edge_reduction_factor=2)
+        
+        # Rendering
+        rendered_images = []
+        for view in camera_views:
+            # Forward render with 16 samples
+            img_forward = render(mesh, view, samples_per_pixel=16)
+            rendered_images.append(img_forward)
+        
+        # Loss computation (L1 norm)
+        loss = 0
+        for rendered, reference in zip(rendered_images, reference_mesh.images):
+            loss += L1_norm(rendered, reference)
+        loss = loss / len(camera_views)
+        
+        # Gradient computation (1 sample per pixel for gradient)
+        gradients = compute_gradients(mesh, camera_views, samples_per_pixel=1)
+        
+        # Optimizer step
+        optimizer.step(gradients)
+        
+        # Spatiotemporal Filtering
+        # 1. Laplacian Prefilter (crucial for diffusion)
+        m_t_prefiltered = laplacian_filter(mesh.vertices)
+        
+        # 2. Cross-Bilateral Postfilter on m_t
+        # Uses sigma_phi=0.4 and sigma_d=0.5
+        mesh.vertices = cross_bilateral_filter(
+            m_t_prefiltered, 
+            mesh.vertices, 
+            mesh.normals, 
+            sigma_phi=0.4, 
+            sigma_d=0.5
+        )
+        
+        # Update scheduler
+        scheduler.step()
+        
+    return mesh
+```
+
+**Edge Cases and Pitfalls:**
+- **Silhouette Gradient Dilution:** Laplacian preconditioning smooths gradients at silhouettes, causing them to be diluted. This is problematic for models with thin structures and many silhouettes (e.g., dragon), as vertices near but not on silhouettes receive no silhouette gradients, and Laplacian smoothing dilutes the values on the silhouette vertices [S1].
+- **Cracks with Bilateral on $v_t$:** Using a bilateral filter on $v_t$ (intermediate variable) can cause small cracks in the edges due to aggressive updates, although it provides comparable convergence to the proposed method on cubes [S1].
+- **Spatial Coherence Assumption:** The method assumes that parameters exhibit piecewise smoothness spatially. It is unclear whether the method is helpful when parameters lack obvious spatial coherence [S1].
+
+## Subtopics
+
+### [Bilateral gradient filtering for meshes](13142-bilateral-gradient-filtering-for-meshes.md)
+This method replaces the standard Laplacian postfilter in inverse mesh recovery with a cross-bilateral filter that preserves sharp edges and silhouettes. It sets itself apart from its sibling [Inverse Mesh Recovery with Spatiotemporal Bilateral Gradient Filtering](13136-inverse-mesh-recovery-with-spatiotemporal-bilateral-gradient.md) by using vertex normals to guide the smoothing, preventing the over-smoothing of thin structures and leading to faster convergence.
+
+## Operating characteristics
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** No extra storage is required beyond the mesh and intermediate variables [S1].
+- **Measured Performance:** The method enables faster convergence and improves recovery, especially at low sample counts, compared to Large Steps [S1]. It performs best on models with thin structures and many silhouettes (e.g., dragon) and sharp edges (e.g., cube) [S1].
+- **Scaling:** The method introduces two new hyperparameters ($\sigma_\phi$ and $\sigma_d$) that require tuning, which can be tedious [S1].
+- **Strengths:** Preserves sharp edges and silhouettes; faster convergence on thin structures; no extra storage; very little overhead [S1].
+- **Limitations:** Assumes spatial coherence of parameters; hyperparameter tuning is tedious; bilateral filtering on $v_t$ can cause cracks [S1].
+- **When to use:** When recovering meshes with thin structures, many silhouettes, or sharp edges where Laplacian smoothing would dilute gradients.
+- **When not to use:** When parameters lack obvious spatial coherence.
+
+## Background
+The method was presented in the paper "Spatiotemporal Bilateral Gradient Filtering for Inverse Rendering" [S1]. It builds on the Large Steps framework [S1]. The work was supported by NSF grants and gifts from Adobe, Qualcomm, and Google [S1]. The method is implemented in the paper's framework and compared against Large Steps using the Mitsuba 3 renderer [S1].
+
+## Sources
+[S1] Spatiotemporal Bilateral Gradient Filtering for Inverse Rendering, https://doi.org/10.1145/3680528.3687606, fetched 2026-10-29

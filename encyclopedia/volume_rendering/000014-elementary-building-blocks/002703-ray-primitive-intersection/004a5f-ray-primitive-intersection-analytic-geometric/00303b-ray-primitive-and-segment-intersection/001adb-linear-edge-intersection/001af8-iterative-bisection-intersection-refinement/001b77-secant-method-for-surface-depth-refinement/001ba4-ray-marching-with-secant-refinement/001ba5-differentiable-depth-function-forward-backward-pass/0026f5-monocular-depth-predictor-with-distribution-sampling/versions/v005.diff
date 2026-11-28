@@ -1,0 +1,158 @@
+--- v004.md
++++ v005.md
+@@ -4,9 +4,9 @@
+ 
+ ## Overview
+-A neural network module that predicts a depth distribution for each ray from image features by discretizing the depth range into buckets, predicting a probability density function (PDF) and intra-bucket offsets, and sampling from this distribution to determine depth values [S1, unofficial]. It differs from the sibling [DepthPredictor](4097-depthpredictor.md) by explicitly modeling the depth uncertainty via a discrete probability distribution over sampled buckets rather than predicting a single deterministic depth value [S1, unofficial]. This method builds on [Differentiable Depth Function Forward/Backward Pass](1047-differentiable-depth-function-forward-backward-pass.md) to allow gradients to flow through the sampling process to the decoder parameters [S1, unofficial].
++A neural network module that predicts a depth distribution for each ray from image features by discretizing the depth range into buckets, predicting a probability density function (PDF) and intra-bucket offsets, and sampling from this distribution to determine depth values [S1, unofficial]. It differs from the sibling [DepthPredictor](4097-depthpredictor.md) by explicitly modeling the depth uncertainty via a discrete probability distribution over sampled buckets rather than predicting a single deterministic depth value [S1, unofficial]. This method is implemented as a PyTorch Autograd Function wrapper that builds on [Differentiable Depth Function Forward/Backward Pass](1047-differentiable-depth-function-forward-backward-pass.md) [G].
+ 
+ ## How it works
+ **Inputs:**
+-- `features`: Tensor of shape `(batch, view, ray, surface, depth, 2)` containing projected features. The last dimension has 2 channels: raw PDF logits and raw offset logits [S1, unofficial].
++- `features`: Tensor of shape `(batch, view, ray, surface, depth, 2)` containing projected features, where the last dimension holds raw PDF logits and raw offset logits [S1, unofficial].
+ - `near`: Tensor of shape `(batch, view)` specifying the near plane distance [S1, unofficial].
+ - `far`: Tensor of shape `(batch, view)` specifying the far plane distance [S1, unofficial].
+@@ -81,7 +81,5 @@
+         self.to_offset = nn.Sigmoid()
+         
+-        # Sampler instance (assumed to be defined elsewhere or as a helper class)
+-        # For implementation completeness, we assume DistributionSampler exists
+-        # with methods sample(pdf, deterministic, gaussians_per_pixel) and gather(index, tensor)
++        # Sampler instance
+         self.sampler = DistributionSampler()
+ 
+@@ -112,13 +110,14 @@
+         
+         # Step 2: Rearrange to separate PDF and Offset
+-        # Rearrange from "... (dpt srf c) -> c ... srf dpt"
+-        # projected shape: (batch, view, ray, surface, depth, 2)
+-        # We need to move the last dim (2) to the front, and reshape depth/surf
+-        # Note: The source describes rearranging "... (dpt srf c) -> c ... srf dpt"
+-        # Assuming the input to projection was flattened depth/surf, we reverse it.
+-        # Let's assume the standard rearrange operation handles the dimensions.
+-        # c=2, srf=num_surfaces, dpt=num_samples
+-        # Output shape: (2, batch, view, ray, num_surfaces, num_samples)
+-        pdf_raw, offset_raw = rearrange(projected, "... (dpt srf c) -> c ... srf dpt", c=2, srf=self.num_surfaces)
++        # projected shape: (batch, view, ray, surface, depth, 2 * num_samples * num_surfaces)
++        # Reshape last dimension into (num_samples, num_surfaces, 2)
++        B, V, R, S, D, C = projected.shape
++        projected = projected.view(B, V, R, S, D, self.num_samples, self.num_surfaces, 2)
++        # Permute to (2, batch, view, ray, surface, num_samples)
++        projected = projected.permute(7, 0, 1, 2, 3, 4, 6, 5)
++        projected = projected.reshape(2, B, V, R, S, D)
++        
++        pdf_raw = projected[0]
++        offset_raw = projected[1]
+         
+         # Step 3: Normalize PDF
+@@ -149,20 +148,6 @@
+         # Step 9: Compute opacity
+         if self.use_transmittance:
+-            # Cumulative sum along the depth dimension (dim=-1 of pdf_raw/pdf)
++            # Cumulative sum along the depth dimension (dim=-1 of pdf)
+             # pdf shape: (2, batch, view, ray, num_surfaces, num_samples)
+-            # We need to cumsum along the last dimension (num_samples)
+-            # But pdf is shape (2, ...). We need to handle the first dim.
+-            # Actually, pdf_raw was (2, ...). pdf is (2, ...).
+-            # The cumsum should be over the depth dimension which is now the last dim.
+-            # However, the first dim is 'c' (2). We need to cumsum over the last dim.
+-            # Let's assume pdf is treated as (batch, view, ray, surface, depth) for cumsum logic
+-            # But here pdf has shape (2, batch, view, ray, num_surfaces, num_samples).
+-            # We need to permute or handle the 'c' dim.
+-            # The source says: `partial = pdf.cumsum(dim=-1)`
+-            # This implies pdf might be reshaped or the cumsum is applied correctly.
+-            # Let's assume pdf is reshaped to (batch, view, ray, surface, num_samples) for the calculation
+-            # or the cumsum is applied along the last axis of the current tensor.
+-            # Given the shape (2, ...), cumsum(dim=-1) works on the last dim (num_samples).
+-            
+             partial = pdf.cumsum(dim=-1)
+             
+@@ -193,47 +178,15 @@
+             opacity = pdf_i
+             
+-        return depth, opacity, pdf
+-
+-def rearrange(tensor: torch.Tensor, pattern: str, **kwargs) -> Tuple[torch.Tensor, torch.Tensor]:
+-    """
+-    Simplified rearrange operation for the specific pattern described.
+-    Input: (batch, view, ray, surface, depth, 2)
+-    Pattern: "... (dpt srf c) -> c ... srf dpt"
+-    """
+-    # This is a placeholder for einops.rearrange logic
+-    # Input shape: (B, V, R, S, D, 2)
+-    # We want to split the last dim (2) into c=2, and reshape D, S into the pattern
+-    # Actually, the input to projection was likely flattened.
+-    # Let's assume the input `features` to forward is already in the right shape.
+-    # The source says: `features = self.projection(features)`
+-    # And then `pdf_raw, offset_raw = rearrange(features, "... (dpt srf c) -> c ... srf dpt", c=2, srf=self.num_surfaces)`
+-    # This implies `features` has shape `(batch, view, ray, surface * depth, 2)`?
+-    # No, the input `features` to the class is `(batch, view, ray, surface, depth, 2)`.
+-    # The projection linear layer acts on the last dim.
+-    # So `projected` is `(batch, view, ray, surface, depth, 2 * num_samples * num_surfaces)`?
+-    # No, `d_in` is the input dim. The output dim is `2 * num_samples * num_surfaces`.
+-    # So `projected` is `(batch, view, ray, surface, depth, 2 * num_samples * num_surfaces)`.
+-    # We need to reshape the last dim into `(num_samples, num_surfaces, 2)`.
+-    # Then rearrange to `(2, batch, view, ray, num_surfaces, num_samples)`.
+-    
+-    B, V, R, S, D, C_out = projected.shape
+-    # C_out = 2 * num_samples * num_surfaces
+-    # Reshape last dim to (num_samples, num_surfaces, 2)
+-    # Note: The order of dimensions in the linear output depends on how the input was flattened.
+-    # Assuming the standard flattening order.
+-    projected = projected.view(B, V, R, S, D, self.num_samples, self.num_surfaces, 2)
+-    # Move 2 to front, and rearrange S, D, num_samples, num_surfaces
+-    # We want: c=2, then ..., then srf=num_surfaces, then dpt=num_samples
+-    # Current: B, V, R, S, D, num_samples, num_surfaces, 2
+-    # Permute to: 2, B, V, R, S, D, num_surfaces, num_samples
+-    projected = projected.permute(7, 0, 1, 2, 3, 4, 6, 5)
+-    # Reshape to (2, B, V, R, num_surfaces, num_samples)
+-    # Wait, the pattern is "... (dpt srf c) -> c ... srf dpt"
+-    # This implies the input to rearrange has the last 3 dims as (dpt, srf, c).
+-    # So we need to reshape the last 3 dims of `projected` to (num_samples, num_surfaces, 2).
+-    # But `projected` is (B, V, R, S, D, C_out).
+-    # We need to reshape (S, D, C_out) to (S, D, num_samples, num_surfaces, 2)?
+-    # This is getting complex. Let's stick to the source's high-level description.
+-    pass
++        return depth, opacity, pdf_i
++
++def rearrange_projected(projected, num_surfaces):
++    # projected: (B, V, R, S, D, 2*D*S)
++    B, V, R, S, D, C = projected.shape
++    # Reshape last dim to (D, S, 2)
++    # Note: depth dimension in input is assumed to equal num_samples
++    projected = projected.view(B, V, R, S, D, num_surfaces, 2)
++    # Permute to (2, B, V, R, S, D)
++    projected = projected.permute(5, 0, 1, 2, 3, 4, 6)
++    return projected
+ 
+ def relative_disparity_to_depth(relative_disparity: torch.Tensor, near: torch.Tensor, far: torch.Tensor) -> torch.Tensor:
+@@ -295,17 +248,21 @@
+ 
+ ### DepthPredictor
+-Predicts a single deterministic depth value per ray. Choose when uncertainty modeling is not required. [Link](4097-depthpredictor.md)
++Predicts a single deterministic depth value per ray [S1, unofficial]. Choose when uncertainty modeling is not required [G].
++
++### Depth Probability Volume Estimation
++A 3D CNN converts the cost volume $V_c$ into a depth probability volume $V_p$ and a 3D feature volume $F_{cv}$ [S2]. $V_p$ is used to calculate estimated depth $D$ and confidence interval $S$ [S2]. The number of layers $L$ in the depth probability volume typically equals 16 [S2].
+ 
+ ## Operating characteristics
+-- **Time Complexity**: Dominated by the linear projection and the sampling/gathering operations. The sampling step is $O(N \cdot G)$ where $N$ is the number of buckets and $G$ is `gaussians_per_pixel`.
+-- **Memory Complexity**: Stores the full PDF distribution for all buckets, $O(N \cdot B \cdot V \cdot R \cdot S)$.
+-- **Strengths**: Provides a probabilistic estimate of depth, allowing for uncertainty quantification and multi-modal surface prediction (via `num_surfaces`).
+-- **Limitations**: Requires careful tuning of `num_samples` and `gaussians_per_pixel`. Numerical stability must be handled in opacity calculation.
+-- **When to use**: When depth uncertainty is important or when multiple surfaces need to be predicted per ray.
+-- **When not to use**: When a single deterministic depth estimate is sufficient and computational efficiency is critical.
++- **Time Complexity**: Not given in the sources.
++- **Memory Complexity**: Not given in the sources.
++- **Strengths**: Provides a probabilistic estimate of depth, allowing for uncertainty quantification and multi-modal surface prediction via `num_surfaces` [S1, unofficial].
++- **Limitations**: Numerical stability must be handled in opacity calculation [S1, unofficial].
++- **When to use**: Not given in the sources.
++- **When not to use**: Not given in the sources.
+ 
+ ## Background
+-The method originates from the PixelSplat project, which uses monocular depth prediction for novel view synthesis [S1, unofficial]. It was developed to handle the ambiguity in monocular depth estimation by modeling depth as a distribution rather than a point estimate.
++The method originates from the PixelSplat project, which uses monocular depth prediction for novel view synthesis [S1, unofficial]. It was developed to handle the ambiguity in monocular depth estimation by modeling depth as a distribution rather than a point estimate [G].
+ 
+ ## Sources
+-[S1] dcharatan/pixelsplat, https://github.com/dcharatan/pixelsplat, fetched 2026-10-27 (unofficial)+[S1] dcharatan/pixelsplat, https://github.com/dcharatan/pixelsplat, fetched 2026-10-27 (unofficial)
++[S2] NeRF-SDP: Efficient Generalizable Neural Radiance Field with Scene Depth Perception, https://doi.org/10.1145/3595916.3626380, fetched 2026-10-30

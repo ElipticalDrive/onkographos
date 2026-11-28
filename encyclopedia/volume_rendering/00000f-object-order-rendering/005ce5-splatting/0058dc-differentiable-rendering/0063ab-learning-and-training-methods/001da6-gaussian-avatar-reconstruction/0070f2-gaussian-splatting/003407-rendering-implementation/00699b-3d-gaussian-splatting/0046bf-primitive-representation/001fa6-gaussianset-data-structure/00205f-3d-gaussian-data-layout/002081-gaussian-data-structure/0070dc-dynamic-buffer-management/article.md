@@ -1,0 +1,120 @@
+# Dynamic Buffer Management
+
+Also called: Capacity Growth
+
+## Overview
+Dynamic Buffer Management (DBM) is the runtime strategy for resizing the GPU memory buffers that store 3D Gaussian primitives during training and inference. It solves the problem of unpredictable Gaussian population sizes caused by densification (splitting/cloning) and pruning operations, ensuring that the renderer always has sufficient contiguous memory to store the active set without excessive fragmentation or frequent reallocation overhead [S1, S2, unofficial]. It is distinguished from static allocation methods by its ability to grow and shrink buffers on-the-fly, and from pure memory optimization techniques (like [VastGaussian](6000-vastgaussian.md)) by focusing on the mechanics of buffer expansion and data migration rather than compression [S1, S2, unofficial].
+
+## How it works
+The method manages the lifecycle of GPU buffers (Vertex Buffer Objects or equivalent linear memory) holding Gaussian attributes (position, covariance, opacity, SH coefficients). It triggers resizing when the number of active Gaussians exceeds the current buffer capacity.
+
+### Inputs and Outputs
+*   **Input:** Current number of active Gaussians ($N_{active}$), current buffer capacity ($C_{curr}$), stride size of the Gaussian data structure ($S_{stride}$), and data type size ($B_{type}$).
+*   **Output:** Updated buffer pointers, updated capacity ($C_{new}$), and migrated Gaussian data.
+
+### Data Structures
+The primary data structure is a contiguous linear buffer (e.g., `float*` or `uint8_t*`) allocated on the GPU.
+*   **Layout:** The buffer stores $N$ Gaussians in a Structure of Arrays (SoA) or Array of Structures (AoS) layout. The total byte size is $N \times S_{stride} \times B_{type}$.
+*   **Metadata:** A counter tracks $N_{active}$. A capacity tracker stores $C_{curr}$.
+
+### Steps
+1.  **Check Capacity:** Compare $N_{active}$ with $C_{curr}$.
+2.  **Calculate New Capacity:**
+    *   If $N_{active} > C_{curr}$, determine $C_{new}$.
+    *   Strategy A (Doubling): $C_{new} = \max(2 \times C_{curr}, N_{active})$ [S1, unofficial].
+    *   Strategy B (Over-allocation Factor): $C_{new} = \lceil N_{active} \times 1.25 \rceil$ [S2, unofficial].
+    *   If $N_{active} \le C_{curr}$, no action is taken (or shrink if explicitly supported, though shrinking is less common in training due to fragmentation risks).
+3.  **Allocate New Buffer:** Allocate a new GPU memory block of size $C_{new} \times S_{stride} \times B_{type}$, initialized to zero.
+4.  **Copy Data:** Copy the existing $N_{active}$ Gaussians from the old buffer to the new buffer.
+    *   Bytes to copy: $Bytes_{copy} = N_{active} \times S_{stride} \times B_{type}$.
+    *   Operation: `cudaMemcpy` or equivalent GPU memory copy.
+5.  **Update Pointers:** Swap the old buffer pointer with the new buffer pointer.
+6.  **Update Metadata:** Set $C_{curr} = C_{new}$ and reset any densification flags or scratch buffers associated with the new capacity [S1, unofficial].
+7.  **Free Old Buffer:** Deallocate the previous buffer to release memory.
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def dynamic_buffer_management(active_count, current_capacity, stride_bytes, type_size):
+    """
+    Manages buffer resizing for 3D Gaussians.
+    """
+    if active_count <= current_capacity:
+        return current_capacity, None, False
+
+    # Calculate new capacity
+    # Strategy: Double capacity or meet exact need, whichever is larger
+    new_capacity = max(current_capacity * 2, active_count)
+    
+    # Optional: Over-allocation factor to reduce future reallocations
+    # new_capacity = ceil(active_count * 1.25) 
+    
+    old_buffer = get_current_buffer_pointer()
+    new_buffer = allocate_gpu_memory(new_capacity * stride_bytes * type_size)
+    
+    # Copy existing data
+    bytes_to_copy = active_count * stride_bytes * type_size
+    gpu_memcpy(new_buffer, old_buffer, bytes_to_copy)
+    
+    # Update views/pointers
+    set_current_buffer_pointer(new_buffer)
+    set_current_capacity(new_capacity)
+    
+    # Reset auxiliary flags if necessary
+    reset_densification_flags(new_capacity)
+    
+    # Free old buffer
+    free_gpu_memory(old_buffer)
+    
+    return new_capacity, new_buffer, True
+```
+
+### Parameters
+*   **Over-Capacity Increase Factor:** A constant multiplier (e.g., 1.25) used to over-allocate buffer capacity to reduce the frequency of reallocations [S2, unofficial].
+*   **Stride Size:** The number of bytes per Gaussian, determined by the chosen data layout (e.g., [Gaussian Data Structure](2273-gaussian-data-structure.md)).
+
+### Edge Cases and Pitfalls
+*   **Memory Fragmentation:** Frequent small allocations can fragment GPU memory. Over-allocation factors help mitigate this [S2, unofficial].
+*   **Data Copy Overhead:** Copying large buffers during densification spikes can cause training pauses. Asynchronous copies or double-buffering can hide this latency.
+*   **Zero Initialization:** New buffer slots must be zero-initialized to prevent garbage data from affecting rendering or gradients [S1, unofficial].
+*   **Scratch Buffer Synchronization:** Scratch buffers used for sorting or merging must be resized in sync with the main Gaussian buffer to avoid out-of-bounds access [S1, unofficial].
+
+## Subtopics
+
+### [Dynamic Buffer Management via CUDA Virtual Memory](4119-dynamic-buffer-management-via-cuda-virtual-memory.md)
+This variant uses CUDA Virtual Memory Management (VMM) to manage buffer sizes. Instead of allocating new physical memory and copying data, it maps additional physical pages to an existing virtual address range. This allows the buffer to grow or shrink within a single consecutive virtual address space without data copying, significantly reducing the overhead of merging buffers. It is chosen when minimizing copy latency is critical and the hardware supports CUDA VMM.
+
+### Global Buffer Management and Dirty Flagging
+A mechanism to detect asynchronous changes in active renderer splat counts (e.g., in streaming scenarios). It maintains an array `m_builtSplatCounts` storing the splat counts at the time of the last buffer build. If the current active count differs from this array, or if any individual renderer's count has changed, the global buffers are marked dirty and rebuilt [S3, unofficial]. Active-set size changes (adding/removing renderers) are handled separately via `MarkGlobalBuffersDirty` [S3, unofficial].
+
+### Global Buffer Lifecycle Management
+Handles the disposal of global buffers (packed data, SH bands, order, renderer offsets, transforms, params) and scratch buffers. When the number of active renderers decreases, scratch buffers must be explicitly disposed to prevent memory leaks, as they are rebuilt upon the next global buffer rebuild [S3, unofficial]. The `m_builtSplatCounts` array is nullified to force recapture of splat counts from scratch on the next `EnsureGlobalBuffers` call [S3, unofficial].
+
+### Key-Value Global Prefetch Buffer
+A buffering mechanism designed to handle high variability in Gaussian counts per scene, tile, and pixel. It prefetches Gaussian data into a global key-value buffer to decouple unpredictable Gaussian counts from pipeline stages, reducing latency and improving local memory utilization in hardware implementations [S4].
+
+### Per-Pixel Linked List Replay Buffers
+A collection strategy that stores intersected Gaussian IDs, hit distances, and alpha values in per-pixel linked lists. This avoids register spilling and multiple BVH traversals required by fixed-size batch processing. PPLLs increase FPS from 175 to 248 compared to multiple traversal methods [S5]. Lightweight implementations store only IDs, distances, and alphas, recomputing other attributes if needed, which is lighter than EPBRR's implementation [S5].
+
+### Z-buffer Management
+A data structure storing indices of intersecting Gaussians for each pixel, acting as the switch between View-dependent Gaussian Transformation and Pixel Render. Since a single Gaussian can project onto multiple pixels, the total size of all pixels' Z-buffers exceeds both the count of 3D Gaussians and the number of pixels. This structure, along with auxiliary sorting buffers, consumes significant activation memory, leading to Out-Of-Memory (OOM) errors if resolution, scene size, or batch size is increased [S6].
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ for copying data during buffer resize, where $N$ is the number of active Gaussians. The frequency of resizes depends on the densification rate and the over-allocation factor.
+*   **Memory Complexity:** $O(C_{new})$ where $C_{new}$ is the new capacity. Temporary memory usage peaks at $2 \times N_{active} \times S_{stride}$ during the copy operation.
+*   **Performance:** Buffer resizing is a major source of latency during training. Over-allocation factors (e.g., 1.25) reduce the frequency of resizes but increase peak memory usage [S2, unofficial]. VMM-based approaches reduce copy overhead but require specific hardware support [S1, unofficial].
+*   **Strengths:** Adapts to dynamic scene complexity; prevents OOM errors during densification.
+*   **Limitations:** Copy overhead can stall training; memory fragmentation if not managed carefully; Z-buffer memory usage scales quadratically with resolution and scene density [S6].
+*   **When to use:** Essential for training with densification. For inference, static buffers or VMM are preferred if the scene is static.
+
+## Background
+Dynamic Buffer Management is a fundamental component of 3D Gaussian Splatting implementations, particularly those involving adaptive densification and pruning. It evolved alongside the 3DGS algorithm to handle the non-stationary nature of the Gaussian set during optimization. Early implementations used fixed-size buffers, which limited the number of Gaussians that could be rendered. Subsequent works introduced dynamic resizing, and more recent hardware-oriented designs have explored VMM and prefetch buffers to optimize this process [S1, unofficial][S4, S6].
+
+## Sources
+[S1] Show HN: Msplat – 3D Gaussian Splatting training in ~90s on M4 Max, native Metal, https://github.com/rayanht/msplat, fetched 2026-10-26 (unofficial)
+[S2] gabkhanfig/Cube, https://github.com/gabkhanfig/Cube, fetched 2026-10-27 (unofficial)
+[S3] wuyize25/gsplat-unity, https://github.com/wuyize25/gsplat-unity, fetched 2026-10-27 (unofficial)
+[S4] A 129 FPS Full HD Real-Time Accelerator for 3D Gaussian Splatting., https://doi.org/10.1109/tvcg.2026.3683714, fetched 2026-10-27
+[S5] GRay: Ray Tracing 3D Gaussians Near the Speed of Splats, https://doi.org/10.1145/3804496, fetched 2026-10-29
+[S6] On Scaling Up 3D Gaussian Splatting Training, https://doi.org/10.1007/978-3-031-91989-3_2, fetched 2026-10-26

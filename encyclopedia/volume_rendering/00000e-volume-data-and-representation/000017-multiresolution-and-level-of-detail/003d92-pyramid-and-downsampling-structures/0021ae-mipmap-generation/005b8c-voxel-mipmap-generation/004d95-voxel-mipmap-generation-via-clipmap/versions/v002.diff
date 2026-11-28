@@ -1,0 +1,231 @@
+--- v001.md
++++ v002.md
+@@ -1,131 +1,110 @@
+ # Voxel Mipmap Generation via Clipmap
+ 
+-Also called: Clipmap Voxel Mipmap Generation
++Also called: Clipmap Voxel Mipmap Generation, Clipmap Voxel Storage, Hierarchical Voxel Grid, Voxel Clipmap
+ 
+ ## Overview
+-This method generates a voxel mipmap pyramid from a clipmap-based volume representation using GPU compute shaders. It solves the problem of efficiently downsampling high-resolution voxel data into lower-resolution levels for rendering or lighting calculations, specifically tailored for clipmap architectures where data is organized in circular buffers or layered structures. It differs from standard texture downsampling by explicitly managing the transition from the clipmap's specific memory layout (involving `LayoutSize` and `ClipMapCount`) to a linear mipmap array, requiring intermediate textures to avoid read-write conflicts.
++This method generates a voxel mipmap pyramid from a clipmap-based volume representation using GPU compute shaders [S2, unofficial]. It solves the problem of efficiently downsampling high-resolution voxel data into lower-resolution levels for rendering or lighting calculations, specifically tailored for clipmap architectures where data is organized in layered structures [S2, unofficial]. It differs from standard texture downsampling by explicitly managing the transition from the clipmap's specific memory layout (involving `LayoutSize` and `ClipMapCount`) to a linear mipmap array, requiring intermediate textures to avoid read-write conflicts [S1, unofficial]. Unlike [Adaptive Rendering](18776-adaptive-rendering.md) or [JPEG-Clear for 3D voxmaps](20067-jpeg-clear-for-3d-voxmaps.md), it relies on fixed geometric downsampling across clipmap layers rather than content-aware or compression-based LOD selection.
+ 
+ ## How it works
+ **Inputs:**
+ - `ClipMaps`: The source clipmap volume data.
+-- `ClipMapResolution`: The resolution of the base clipmap layer.
+-- `ClipMapCount`: The number of clipmap layers.
+-- `LayoutSize`: A multiplier determining the Y-dimension scaling for the internal layout.
++- `ClipMapResolution`: A 3D vector (`Int3`) specifying the resolution of the base clipmap layer.
++- `ClipMapCount`: An integer specifying the number of clipmap layers.
++- `LayoutSize`: A multiplier determining the Y-dimension scaling for the internal memory layout.
++- `TempMipMaps`: An array of temporary textures used as intermediates during generation.
+ - `MipMaps`: The destination array for the final mipmap levels.
+ 
+ **Outputs:**
+-- `MipMaps`: An array of textures representing the mipmap pyramid.
++- `MipMaps`: An array of textures representing the generated mipmap pyramid.
+ 
+ **Data Structures:**
+-- `TempMipMaps`: An array of temporary textures used as intermediates. The size is `TempMipMaps.Length`.
+-- `resolution`: A 3D vector (`Int3`) tracking the current mipmap resolution dimensions.
++- `resolution`: A 3D vector tracking the current mipmap resolution dimensions.
+ - `threadGroupCounts`: A 3D vector defining the compute shader's thread group size.
+ - `threadNumbers`: A 3D vector defining the number of thread groups to dispatch.
+ 
+ **Parameters:**
+-- `LayoutSize`: Multiplier for Y-resolution during setup. [S1, unofficial]
+-- `ClipMapCount`: Number of clipmaps. [S1, unofficial]
++- `LayoutSize`: Multiplier for Y-resolution during setup [S1, unofficial].
++- `ClipMapCount`: Number of clipmaps [S1, unofficial].
++- `ClipResolution`: Voxels along the longest axis of the finest clipmap. Typical values: 64, 128, or 256 [S2, unofficial].
++- `UpdatesPerFrame`: Update strategy. Options: `SingleClipmap` updates one clipmap per frame; `AllClipmapsMultipleRenders` re-voxelizes every clipmap every frame [S2, unofficial].
++- `DownsampleFinerClipMaps`: Boolean flag to downsample finer clipmaps. Default: `true` [S2, unofficial].
+ 
+ **Steps:**
+-
+-1.  **Initialize Thread Group Counts:**
+-    Set the initial thread group counts based on the largest clipmap resolution. The counts are derived by dividing the resolution dimensions by 4.
+-    $$ \text{threadGroupCounts} = \left\lfloor \frac{\text{ClipMapResolution}}{4} \right\rfloor $$
+-    Specifically:
+-    ```python
+-    threadGroupCounts = Int3(
+-        int(ClipMapResolution.X) // 4,
+-        int(ClipMapResolution.Y) // 4,
+-        int(ClipMapResolution.Z) // 4
+-    )
+-    ```
+-    [S1, unofficial]
+-
+-2.  **Adjust Y-Resolution:**
+-    Scale the Y-resolution by `LayoutSize` to match the internal memory layout.
+-    ```python
+-    resolution = Int3(int(ClipMapResolution.X), int(ClipMapResolution.Y) * LayoutSize, int(ClipMapResolution.Z))
+-    ```
+-    [S1, unofficial]
+-
+-3.  **Iterate Through Mipmaps:**
+-    Loop from mipmap index `i = 0` to `TempMipMaps.Length - 2`.
+-
+-    a.  **Halve Resolution:**
+-        Divide the current resolution by 2 for each dimension.
+-        ```python
+-        resolution = resolution // 2
+-        ```
+-        [S1, unofficial]
+-
+-    b.  **Clamp Resolution:**
+-        Ensure no dimension falls below 1.
+-        ```python
+-        if resolution.X < 1: resolution.X = 1
+-        if resolution.Y < 1: resolution.Y = 1
+-        if resolution.Z < 1: resolution.Z = 1
+-        ```
+-        [S1, unofficial]
+-
+-    c.  **Adjust Thread Group Counts:**
+-        If any resolution dimension is smaller than the corresponding `threadGroupCounts` dimension, divide `threadGroupCounts` by 4 and clamp to a minimum of 1.
+-        ```python
+-        if resolution.X < threadGroupCounts.X or resolution.Y < threadGroupCounts.Y or resolution.Z < threadGroupCounts.Z:
+-            threadGroupCounts = Int3(
+-                max(1, threadGroupCounts.X // 4),
+-                max(1, threadGroupCounts.Y // 4),
+-                max(1, threadGroupCounts.Z // 4)
+-            )
+-        ```
+-        [S1, unofficial]
+-
+-    d.  **Set Shader Configuration:**
+-        Assign the thread group counts to the mipmap shader.
+-        ```python
+-        mipmapShader.ThreadGroupCounts = threadGroupCounts
+-        ```
+-        [S1, unofficial]
+-
+-    e.  **Calculate Dispatch Count:**
+-        Compute the number of thread groups to dispatch based on the current resolution and thread group counts.
+-        ```python
+-        threadNumbers = Int3(
+-            int(resolution.X) // threadGroupCounts.X,
+-            int(resolution.Y) // threadGroupCounts.Y,
+-            int(resolution.Z) // threadGroupCounts.Z
+-        )
+-        mipmapShader.ThreadNumbers = threadNumbers
+-        ```
+-        [S1, unofficial]
+-
+-    f.  **Set Textures and Offsets:**
+-        - **For i = 0 (First Mipmap):**
+-          Set the read texture to `ClipMaps`.
+-          Calculate the read offset. The Y-offset accounts for the layout size and the position of the last clipmap layer.
+-          $$ \text{readOffset} = (0, \text{ClipMapResolution.Y} \times \text{LayoutSize} \times (\text{ClipMapCount} - 1), 0) $$
+-          Set the write texture to `TempMipMaps[0]`.
+-          [S1, unofficial]
+-        - **For i > 0 (Subsequent Mipmaps):**
+-          Set the read texture to the previous mipmap `TempMipMaps[i - 1]`.
+-          Set the read offset to `(0, 0, 0)`.
+-          Set the write texture to `TempMipMaps[i]`.
+-          [S1, unofficial]
+-
+-    g.  **Execute Shader:**
+-        Dispatch the compute shader.
+-        ```python
+-        mipmapShader.Draw(drawContext)
+-        ```
+-        [S1, unofficial]
+-
+-    h.  **Copy to Final Array:**
+-        Copy the generated region from the temporary texture to the final mipmap array to prevent read/write conflicts.
+-        ```python
+-        drawContext.CommandList.CopyRegion(TempMipMaps[i], 0, null, MipMaps, i)
+-        ```
+-        [S1, unofficial]
++1. **Initialize Thread Group Counts:** Set the initial thread group counts based on the largest clipmap resolution by dividing the resolution dimensions by 4 [S1, unofficial].
++2. **Adjust Y-Resolution:** Scale the Y-resolution by `LayoutSize` to match the internal memory layout [S1, unofficial].
++3. **Iterate Through Mipmaps:** Loop from mipmap index `i = 0` to `TempMipMaps.Length - 2` [S1, unofficial].
++   a. **Halve Resolution:** Divide the current resolution by 2 for each dimension [S1, unofficial].
++   b. **Clamp Resolution:** Ensure no dimension falls below 1 [S1, unofficial].
++   c. **Adjust Thread Group Counts:** If any resolution dimension is smaller than the corresponding `threadGroupCounts` dimension, divide `threadGroupCounts` by 4 and clamp to a minimum of 1 [S1, unofficial].
++   d. **Set Shader Configuration:** Assign the thread group counts to the mipmap shader [S1, unofficial].
++   e. **Calculate Dispatch Count:** Compute the number of thread groups to dispatch based on the current resolution and thread group counts [S1, unofficial].
++   f. **Set Textures and Offsets:** For `i = 0`, set the read texture to `ClipMaps` and the read offset to `(0, ClipMapResolution.Y * LayoutSize * (ClipMapCount - 1), 0)` [S1, unofficial]. For `i > 0`, set the read texture to the previous mipmap `TempMipMaps[i - 1]` and the read offset to `(0, 0, 0)` [S1, unofficial]. Set the write texture to `TempMipMaps[i]` [S1, unofficial].
++   g. **Execute Shader:** Dispatch the compute shader [S1, unofficial].
++   h. **Copy to Final Array:** Copy the generated region from the temporary texture to the final mipmap array to prevent read/write conflicts [S1, unofficial].
+ 
+ **Pitfalls:**
+-- **Read-Write Conflicts:** The GPU cannot read from and write to the same texture resource simultaneously, even if views point to different miplevels. This necessitates the use of `TempMipMaps` and the `CopyRegion` step. [S1, unofficial]
++- **Read-Write Conflicts:** The GPU cannot read from and write to the same texture resource simultaneously, even if views point to different miplevels. This necessitates the use of `TempMipMaps` and the `CopyRegion` step [S1, unofficial].
++
++**Pseudocode:**
++```python
++# Standard operations defined for self-containment
++def dispatch_compute_shader(shader, group_counts, num_groups):
++    """Dispatches the compute shader with the specified group size and count."""
++    pass
++
++def copy_texture_region(source, dest, dest_mip_level):
++    """Copies a texture region from source to dest at the specified mip level."""
++    pass
++
++# Inputs: ClipMaps, ClipMapResolution (Int3), ClipMapCount (int), LayoutSize (int), TempMipMaps (list), MipMaps (list)
++# Outputs: MipMaps (populated)
++
++# 1. Initialize thread group counts based on the largest clipmap resolution [S1, unofficial]
++threadGroupCounts = (ClipMapResolution.X // 4, ClipMapResolution.Y // 4, ClipMapResolution.Z // 4)
++
++# 2. Adjust Y-resolution for layout size [S1, unofficial]
++resolution = (ClipMapResolution.X, ClipMapResolution.Y * LayoutSize, ClipMapResolution.Z)
++
++# 3. Iterate through mipmaps from index 0 to TempMipMaps.Length - 2 [S1, unofficial]
++for i in range(len(TempMipMaps) - 1):
++    # Halve the resolution for each dimension [S1, unofficial]
++    resolution = (resolution.X // 2, resolution.Y // 2, resolution.Z // 2)
++
++    # Clamp resolution dimensions to a minimum of 1 [S1, unofficial]
++    resolution = (max(1, resolution.X), max(1, resolution.Y), max(1, resolution.Z))
++
++    # Adjust thread group counts if resolution is smaller than thread group count [S1, unofficial]
++    if resolution.X < threadGroupCounts[0] or resolution.Y < threadGroupCounts[1] or resolution.Z < threadGroupCounts[2]:
++        threadGroupCounts = (max(1, threadGroupCounts[0] // 4), max(1, threadGroupCounts[1] // 4), max(1, threadGroupCounts[2] // 4))
++
++    # Set the shader's thread group counts [S1, unofficial]
++    mipmapShader.ThreadGroupCounts = threadGroupCounts
++
++    # Calculate and set the number of thread groups (dispatch count) [S1, unofficial]
++    threadNumbers = (resolution.X // threadGroupCounts[0], resolution.Y // threadGroupCounts[1], resolution.Z // threadGroupCounts[2])
++    mipmapShader.ThreadNumbers = threadNumbers
++
++    # Set read texture and offset
++    if i == 0:
++        readTexture = ClipMaps
++        readOffset = (0, int(ClipMapResolution.Y) * LayoutSize * (ClipMapCount - 1), 0)
++    else:
++        readTexture = TempMipMaps[i - 1]
++        readOffset = (0, 0, 0)
++
++    # Set write texture [S1, unofficial]
++    writeTexture = TempMipMaps[i]
++
++    # Execute the shader draw call [S1, unofficial]
++    dispatch_compute_shader(mipmapShader, threadGroupCounts, threadNumbers)
++
++    # Copy the generated mipmap region from the temporary texture to the final mipmap array [S1, unofficial]
++    copy_texture_region(TempMipMaps[i], MipMaps, i)
++```
++
++## Subtopics
++
++### Voxel Mipmap Generation via Compute Shader
++This variant generates mipmaps using a dedicated compute shader kernel that supports configurable 3D filter shapes [S3, unofficial]. It initializes a kernel index based on the filter mode (`_kernelFilter = 2 * mipmapFilterMode`), incrementing it by 1 if D3D11 is unsupported [S3, unofficial]. It iterates through mip levels from 1 to `radiances.Length - 1`, setting the resolution to `radiances[i].volumeDepth` and dispatching the kernel with thread group counts calculated as `ceil(resolution / threads.x/y/z)` [S3, unofficial]. It binds the source texture to `radiances[i-1]` and the target to `radiances[i]` [S3, unofficial]. For displacement shifts, it sets the resolution to `_vxgi.resolution`, configures the displacement vector via `ShaderIDs.Displacement`, dispatches the `CSShift` kernel to `_vxgi.radiances[0]`, and immediately calls `Filter` to recompute subsequent mipmaps [S3, unofficial]. The `mipmapFilterMode` parameter accepts `Box = 0`, `Gaussian3x3x3 = 1`, or `Gaussian4x4x4 = 2` [S3, unofficial].
+ 
+ ## Operating characteristics
+@@ -133,6 +112,8 @@
+ 
+ ## Background
+-This method is implemented in the Xenko VoxelGI project, an unofficial extension or fork related to the Xenko game engine. It is designed for voxel-based global illumination (GI) systems that utilize clipmaps for efficient memory management of large voxel worlds.
++This method is implemented in the Xenko VoxelGI project, an unofficial extension or fork related to the Xenko game engine [S1, unofficial]. It is designed for voxel-based global illumination (GI) systems that utilize clipmaps for efficient memory management of large voxel worlds [S2, unofficial].
+ 
+ ## Sources
+-[S1] WhyPenguins/XenkoVoxelGI, https://github.com/WhyPenguins/XenkoVoxelGI, fetched 2026-10-26 (unofficial)+[S1] WhyPenguins/XenkoVoxelGI, https://github.com/WhyPenguins/XenkoVoxelGI, fetched 2026-10-26 (unofficial)
++[S2] Nicogo1705/StrideVoxelGI, https://github.com/Nicogo1705/StrideVoxelGI, fetched 2026-10-26 (unofficial)
++[S3] Looooong/Unity-SRP-VXGI, https://github.com/Looooong/Unity-SRP-VXGI, fetched 2026-10-28 (unofficial)

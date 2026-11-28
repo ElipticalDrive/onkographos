@@ -1,0 +1,92 @@
+# Auto Max Depth Calculation
+
+
+## Overview
+Calculates the maximum octree depth for 3D Tiles tiling based on the input splat count and a target splat density per leaf node [S1, unofficial]. It ensures that the tiling hierarchy does not become excessively deep by capping the refinement level based on a global density heuristic, preventing over-refinement in the parent [Auto Tile Refinement Calculation](20583-auto-tile-refinement-calculation.md).
+
+## How it works
+**Inputs:**
+- $N$: The total input splat count (integer).
+- $r$: The sampling rate per level (float, $0 < r < 1.0$).
+- `AUTO_MAX_DEPTH_TARGET_SPLATS`: The target number of splats per leaf tile (integer, default 160000) [S1, unofficial].
+
+**Outputs:**
+- $d$: The calculated maximum octree depth (integer).
+
+**Data Structures:**
+None. The method uses scalar values.
+
+**Steps:**
+1. Validate inputs. If $N$ is not finite or $N \le 160000$, return 0 [S1, unofficial].
+2. If $r$ is not finite or $r \ge 1.0$, return 0 [S1, unofficial].
+3. Compute the raw depth using the formula:
+   $$ d_{raw} = \frac{\log(160000 / N)}{\log(r)} $$
+   where $N$ is the input splat count and $r$ is the sampling rate per level [S1, unofficial].
+4. If $d_{raw}$ is not finite or $d_{raw} \le 0.0$, return 0 [S1, unofficial].
+5. Return $\lceil d_{raw} \rceil$ [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def calculate_auto_max_depth(splat_count: int, sampling_rate_per_level: float) -> int:
+    # Parameter: AUTO_MAX_DEPTH_TARGET_SPLATS
+    TARGET_SPLATS = 160000
+    
+    # Step 1: Validate N
+    if not math.isfinite(splat_count) or splat_count <= TARGET_SPLATS:
+        return 0
+        
+    # Step 2: Validate r
+    if not math.isfinite(sampling_rate_per_level) or sampling_rate_per_level >= 1.0:
+        return 0
+        
+    # Step 3: Compute raw depth
+    # Formula: d = log(TARGET_SPLATS / N) / log(r)
+    numerator = math.log(TARGET_SPLATS / splat_count)
+    denominator = math.log(sampling_rate_per_level)
+    
+    raw_depth = numerator / denominator
+    
+    # Step 4: Validate raw depth
+    if not math.isfinite(raw_depth) or raw_depth <= 0.0:
+        return 0
+        
+    # Step 5: Return ceiling
+    return math.ceil(raw_depth)
+```
+
+**Parameters:**
+- `AUTO_MAX_DEPTH_TARGET_SPLATS`: Default value is 160000 [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- If $N$ is very large (close to or exceeding the target), the numerator becomes negative or zero. Since $r < 1.0$, $\log(r)$ is negative. A negative numerator divided by a negative denominator yields a positive result. However, if $N > 160000$, the numerator is negative, resulting in a positive $d_{raw}$. The check $N \le 160000$ in Step 1 actually returns 0 for small $N$. Wait, the source says: "If $N$ is not finite or $N \le 160000$, return 0." This implies the formula is only valid for $N > 160000$. If $N > 160000$, then $160000/N < 1$, so $\log(160000/N)$ is negative. $\log(r)$ is negative. The ratio is positive.
+- If $N$ is extremely large, $160000/N$ approaches 0, $\log$ approaches $-\infty$, and $d_{raw}$ approaches $+\infty$. The finiteness check handles this.
+- If $r$ is very close to 0, $\log(r)$ is large negative, making $d_{raw}$ small.
+- If $r$ is close to 1.0, $\log(r)$ is close to 0 (negative), making $d_{raw}$ large. The check $r \ge 1.0$ prevents division by zero or positive log.
+
+## Subtopics
+
+### Node Content Target Resolution
+Calculates the target splat count for a specific node based on its depth and the global splat count [S1, unofficial].
+- **Steps:**
+  1. Check for override: if `node.contentTargetOverride` is finite and $> 0$, return `normalizeSplatTargetCount(node.contentTargetOverride, inputSplatCount)` [S1, unofficial].
+  2. Calculate sampling divisor: `const divisor = samplingDivisorForDepth(depth, lodMaxDepth, samplingRatePerLevel)` [S1, unofficial].
+  3. Calculate raw target: `const targetRaw = Math.max(1, Math.min(splatCount, Math.ceil(splatCount / divisor)))` [S1, unofficial].
+  4. Constrain target: return `constrainTargetSplatCount(targetRaw, inputSplatCount, occupiedChildCount)` [S1, unofficial].
+- **Details:** This variant is used for per-node resolution rather than global max depth. It uses a divisor based on depth to estimate how many splats should reside in a node at that level.
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ per call.
+- **Memory Complexity:** $O(1)$.
+- **Strengths:** Simple, deterministic calculation that prevents excessive tree depth for large datasets.
+- **Limitations:** Only applies to cases where $N > 160000$. Does not account for spatial distribution of splats, only count.
+- **When to use:** When converting 3D Gaussian Splatting PLY files to 3D Tiles and a global cap on octree depth is desired based on density.
+
+## Background
+Originated in the `3DGS-PLY-3DTiles-Converter` project by lzy-0618 [S1, unofficial]. It is part of the tiling logic for converting 3D Gaussian Splatting data into the 3D Tiles format, specifically handling the hierarchical tiling refinement.
+
+## Sources
+[S1] lzy-0618/3DGS-PLY-3DTiles-Converter, https://github.com/lzy-0618/3DGS-PLY-3DTiles-Converter, fetched 2026-10-27 (unofficial)

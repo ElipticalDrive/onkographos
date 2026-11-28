@@ -1,0 +1,17 @@
+# SDF NSVF Models
+## Overview
+SDF NSVF models are neural volume rendering architectures that represent geometry using a signed distance field (SDF) radiance field, registered as 'sdf_nsvf' and 'sdf_nsvf_sfx' [S1, unofficial]. They build on the Disco NSVF family by integrating SDF-based geometry representation with radiance fields [Parent](11063-disco-nsvf-models.md).
+## Shared principles
+The family uses an `sdf_radiance_field` structure that separates geometry and appearance networks [S1, unofficial]. The geometry network maps 3D positions to a signed distance value ($sdf$), its gradient ($sdf\_grad$), and intermediate features ($feature$) [G]. The surface normal is computed as $normal = sdf\_grad / \|sdf\_grad\|_2$ [G]. Opacity ($\alpha$) is derived from the SDF value, normal, ray direction, and distance intervals using a sigmoid-like function [G]. Ray weights are computed as $w_i = \alpha_i \prod_{j<i} (1-\alpha_j)$ [G]. Composite fields are accumulated along rays: $opacity = \sum w_i$, $depth = \sum w_i \cdot midpoints_i$, $comp\_rgb = \sum w_i \cdot rgb_i$, and $comp\_normal = \sum w_i \cdot normal_i$ [G]. The composite normal is normalized: $comp\_normal = comp\_normal / \|comp\_normal\|_2$ [G]. Background compositing combines foreground and background: $comp\_rgb\_full = comp\_rgb + comp\_rgb\_bg \cdot (1.0 - opacity)$ [G]. The MLP architecture is configured with `nerf2nope_architecture` [S1, unofficial].
+## Subtopics
+
+### sdf_nsvf
+Configured with `feature_layers=6`, `feature_field_skip_connect=3`, `no_layernorm_mlp=True`, and `nerf2nope_architecture`. Choose this for standard SDF-based volume rendering with these MLP settings. See [sdf_nsvf](11064-sdf-nsvf.md).
+
+### sdf_nsvf_sfx
+Uses the `surface_volume_rendering` raymarcher. Choose this when surface-aware volume rendering is preferred. See [sdf_nsvf_sfx](11065-sdf-nsvf-sfx.md).
+
+## Background
+The models are registered implementations within the NSVF codebase [S1, unofficial]. Configuration details such as layer counts and skip connections are defined in the model registration logic [S1, unofficial].
+## Sources
+[S1] facebookresearch/NSVF, https://github.com/facebookresearch/NSVF, fetched 2026-10-27 (unofficial)

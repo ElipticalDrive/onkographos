@@ -1,0 +1,103 @@
+--- v002.md
++++ v003.md
+@@ -4,26 +4,26 @@
+ 
+ ## Overview
+-This method renders ground-truth normal maps by interpolating per-vertex normals across rasterized faces using barycentric coordinates, then blending overlapping faces per pixel via a softmax function [S1, unofficial].
++This method renders ground-truth normal maps by interpolating per-vertex normals across rasterized faces using barycentric coordinates, then blending overlapping faces per pixel via a softmax function [S1, unofficial]. It differs from hard-edge rasterization by providing smooth, differentiable normal fields suitable for gradient-based optimization [G].
+ 
+ ## How it works
+ **Inputs:**
+-*   `vertex_normals`: Tensor of shape $(V, 3)$ containing per-vertex normals, where $V$ is the number of vertices.
+-*   `faces_packed`: Tensor of shape $(F, 3)$ containing face indices, where $F$ is the number of triangles.
++*   `vertex_normals`: Tensor of shape $(V, 3)$ containing per-vertex normal vectors, where $V$ is the number of vertices [S1, unofficial].
++*   `faces_packed`: Tensor of shape $(F, 3)$ containing face indices, where $F$ is the number of triangles [S1, unofficial].
+ *   `fragments`: Rasterization output containing `pix_to_face` (indices of faces overlapping each pixel) and `barycentric_coords` (barycentric coordinates of each pixel relative to overlapping faces) [S1, unofficial].
+-*   `blend_params`: Configuration for the blending process, including `blur_radius`, `faces_per_pixel`, and `perspective_correct` [S1, unofficial].
++*   `blend_params`: Configuration object containing `blur_radius`, `faces_per_pixel`, and `perspective_correct` [S1, unofficial].
+ 
+ **Outputs:**
+-*   `images`: Tensor of shape $(H, W, 3)$ containing the blended normal map.
++*   `images`: Tensor of shape $(H, W, 3)$ containing the blended normal map [S1, unofficial].
+ 
+ **Data Structures:**
+-*   **Vertex Textures**: Stored as RGB values. Before interpolation, normals are encoded into this texture space [S1, unofficial].
+-*   **Face Textures**: Derived from vertex textures using face indices [S1, unofficial].
++*   **Vertex Textures**: Stored as RGB values representing the encoded normal vectors [S1, unofficial].
++*   **Face Textures**: Derived from vertex textures using face indices, with shape $(F, 3, 3)$ [S1, unofficial].
+ *   **Fragments**: Contains the mapping from pixel coordinates to triangle indices and the interpolation weights (barycentric coordinates) [S1, unofficial].
+ 
+ **Steps:**
+-1.  **Encode and Normalize Vertex Normals**: Transform the raw normal vectors $(n_x, n_y, n_z)$ by adding 1 to X/Y and dividing by 2, adding 3 to Z and dividing by 4, then L2-normalize across the channel dimension [S1, unofficial].
++1.  **Encode and Normalize Vertex Normals**: Transform raw normal vectors $(n_x, n_y, n_z)$ by applying $n_{x,y} \leftarrow (n_{x,y} + 1) / 2$ and $n_z \leftarrow (n_z + 3) / 4$, then L2-normalize across the channel dimension [S1, unofficial].
+ 2.  **Map to Face Textures**: Index the normalized vertex textures using packed face indices: `faces_textures = vertex_textures[faces_packed]` [S1, unofficial].
+ 3.  **Interpolate Attributes**: For each pixel, interpolate the face textures across the overlapping faces using the provided barycentric coordinates [S1, unofficial].
+-4.  **Softmax Blending**: Blend the contributions of overlapping faces per pixel using a softmax function over the RGB channels [S1, unofficial]. The `blur_radius` parameter in `blend_params` controls the soft edge blending radius; set to $0.0$ for hard edges [S1, unofficial].
++4.  **Softmax Blending**: Blend the contributions of overlapping faces per pixel using a softmax function over the face dimension [S1, unofficial]. The `blur_radius` parameter in `blend_params` controls the soft edge blending radius; set to $0.0$ for hard edges [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -44,8 +44,9 @@
+     # Step 3: Interpolate face attributes
+     # fragments.pix_to_face: (H, W, K), fragments.barycentric_coords: (H, W, K, 3)
+-    texels = torch.zeros(fragments.pix_to_face.shape[:-1] + (3,), device=vertex_textures.device)
+-    for h in range(texels.shape[0]):
+-        for w in range(texels.shape[1]):
+-            for k in range(texels.shape[2]):
++    H, W, K = fragments.pix_to_face.shape
++    texels = torch.zeros(H, W, K, 3, device=vertex_textures.device)
++    for h in range(H):
++        for w in range(W):
++            for k in range(K):
+                 face_idx = fragments.pix_to_face[h, w, k]
+                 bary = fragments.barycentric_coords[h, w, k]
+@@ -54,17 +55,18 @@
+ 
+     # Step 4: Softmax blend
+-    # Blend overlapping face contributions per pixel using softmax over RGB channels
+-    # Sources do not specify exact weighting for softmax blending [G]
+-    images = softmax_rgb_blend(texels, blend_params)
++    # Blend overlapping face contributions per pixel using softmax blending [S1, unofficial]
++    # Map blur_radius to a temperature parameter for the softmax function [G]
++    temperature = 1.0 / (blend_params.blur_radius + 1e-6)
++    images = softmax_rgb_blend(texels, temperature)
+     return images
+ 
+-def softmax_rgb_blend(texels, blend_params):
++def softmax_rgb_blend(texels, temperature):
+     # texels: (H, W, K, 3)
+-    # Apply softmax over the channel dimension (dim=-1) for each pixel and face
+-    # Then sum across faces (dim=-2) to blend
+-    exp_vals = torch.exp(texels)
++    # Apply softmax over the face dimension (K) to blend overlapping faces [G]
++    exp_vals = torch.exp(texels / temperature)
+     sum_exp = torch.sum(exp_vals, dim=-2, keepdim=True)
+     sum_exp = torch.clamp(sum_exp, min=1e-8)
+-    images = torch.sum(exp_vals / sum_exp * texels, dim=-2)
++    weights = exp_vals / sum_exp
++    images = torch.sum(weights * texels, dim=-2)
+     return images
+ ```
+@@ -81,6 +83,6 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: Not given in the sources.
+-*   **Memory Complexity**: Not given in the sources.
++*   **Time Complexity**: Not given in the sources [G].
++*   **Memory Complexity**: Not given in the sources [G].
+ *   **Strengths**: Provides smooth, differentiable normal maps suitable for training neural rendering models [S1, unofficial].
+ *   **Limitations**: Softmax blending can blur sharp edges if `blur_radius` is large.
+@@ -91,11 +93,11 @@
+ 
+ ### Hard-Edge Rasterization
+-Uses nearest-face or first-hit logic without blending. Choose when performance is critical and normal continuity is not required. Link to [Mesh Rasterization and Triangle Intersection](11783-mesh-rasterization-and-triangle-intersection.md). [G]
++Uses nearest-face or first-hit logic without blending [G]. Choose when performance is critical and normal continuity is not required [G]. Link to [Mesh Rasterization and Triangle Intersection](11783-mesh-rasterization-and-triangle-intersection.md).
+ 
+ ### Depth-Based Normal Estimation
+-Computes normals from depth gradients. Choose when mesh geometry is unavailable but depth maps are present. Link to [Triangle Rendering with Thickness](12908-triangle-rendering-with-thickness.md). [G]
++Computes normals from depth gradients [G]. Choose when mesh geometry is unavailable but depth maps are present [G]. Link to [Triangle Rendering with Thickness](12908-triangle-rendering-with-thickness.md).
+ 
+ ## Background
+-This method is used in the `dn-splatter` project for differentiable normal splatting [S1, unofficial]. It builds on standard rasterization techniques but adapts them for differentiable training by using softmax blending to handle overlapping geometry smoothly.
++This method is used in the `dn-splatter` project for differentiable normal splatting [S1, unofficial]. It builds on standard rasterization techniques but adapts them for differentiable training by using softmax blending to handle overlapping geometry smoothly [G].
+ 
+ ## Sources

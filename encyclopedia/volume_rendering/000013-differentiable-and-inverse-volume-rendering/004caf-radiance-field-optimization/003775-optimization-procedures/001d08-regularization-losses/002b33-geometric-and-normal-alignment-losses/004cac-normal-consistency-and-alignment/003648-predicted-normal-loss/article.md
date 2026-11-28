@@ -1,0 +1,74 @@
+# Predicted Normal Loss
+Also called: Predicted Normal Consistency Loss
+## Overview
+Predicted Normal Loss is a regularization term that supervises predicted surface normals using rendered normals to ensure consistency between the two [S1, unofficial]. It differs from [Normal Ray Alignment Loss](4202-normal-ray-alignment-loss.md) by comparing two network outputs rather than aligning with ray directions, and from [Normal Ground Truth Alignment Loss](4232-normal-ground-truth-alignment-loss.md) by not requiring external ground-truth annotations [G].
+## How it works
+**Inputs and Outputs:**
+- Inputs: Predicted surface normals $\mathbf{n}_{pred}$, rendered surface normals $\mathbf{n}_{render}$, and a scalar weight multiplier $\lambda_{pred}$ [S1, unofficial].
+- Output: A scalar loss value $L_{pred}$ [S1, unofficial].
+**Data Structures:**
+- $\mathbf{n}_{pred}$: Array of shape $(H, W, 3)$ containing unit normal vectors for each pixel [G].
+- $\mathbf{n}_{render}$: Array of shape $(H, W, 3)$ containing unit normal vectors derived from the volume rendering equation [G].
+- $\lambda_{pred}$: Scalar float, typically denoted as `pred_normal_loss_mult` in implementation [S1, unofficial].
+**Steps:**
+1. Compute the rendered normals $\mathbf{n}_{render}$ for each ray from the volume field [G].
+2. Compute the predicted normal loss using the weights, rendered normals, and predicted normals [S1, unofficial].
+3. Multiply the computed discrepancy by the multiplier $\lambda_{pred}$ and accumulate it into the total loss [S1, unofficial].
+**Formula:**
+Not given in the sources.
+**Parameters:**
+- `pred_normal_loss_mult` ($\lambda_{pred}$): The multiplier for the predicted normal loss in the total loss computation [S1, unofficial]. Typical values are not specified in the sources.
+**Edge Cases and Pitfalls:**
+Not given in the sources.
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def predicted_normal_loss(n_pred, n_render, lambda_pred):
+    """
+    Computes the predicted normal loss.
+    Args:
+        n_pred: Array of shape (H, W, 3) containing predicted normals.
+        n_render: Array of shape (H, W, 3) containing rendered normals.
+        lambda_pred: Scalar multiplier for the loss.
+    Returns:
+        Scalar loss value.
+    """
+    loss_per_pixel = []
+    for row_pred, row_render in zip(n_pred, n_render):
+        for pixel_pred, pixel_render in zip(row_pred, row_render):
+            dot = sum(p * r for p, r in zip(pixel_pred, pixel_render))
+            loss_per_pixel.append(1.0 - dot)
+    mean_loss = sum(loss_per_pixel) / len(loss_per_pixel)
+    return lambda_pred * mean_loss
+```
+## Subtopics
+
+### [Density Gradient Normal Loss](9575-density-gradient-normal-loss.md)
+The Density Gradient Normal Loss is a regularization term used in differentiable volume rendering and inverse rendering to enforce geometric consistency between predicted surface normals and the underlying density or signed distance function (SDF) field. It constrains the network's explicit normal predictions to align with the negative gradient of the scalar field, ensuring that the predicted normals are consistent with the implicit geometry defined by the field. It differs from sibling methods like [Monocular Normal Regularization](13425-monocular-normal-regularization.md) by deriving the target normal directly from the learned field's gradient rather than relying solely on external monocular cues or rendered normal maps without field consistency checks. [G]
+
+### [Monocular Normal Regularization](13425-monocular-normal-regularization.md)
+Monocular Normal Regularization is a geometric supervision technique that constrains the predicted surface normals of a volume rendering or radiance field optimization by comparing them against smooth normal estimates derived from a pretrained monocular vision model. Unlike methods that derive ground-truth normals from the gradients of rendered depth maps—which are often noisy and artifact-prone in complex scenes—this method leverages the semantic and geometric priors of foundation models to provide stable, smooth normal cues. It sets itself apart from sibling methods like [Predicted Normal Loss](7713-predicted-normal-loss.md) by replacing the rendered normal (which may be inconsistent with the underlying geometry) with an external monocular prediction, thereby decoupling the supervision signal from the noisy differentiable rendering pipeline. [G]
+
+## Operating characteristics
+**Time and Memory Complexity:**
+Not given in the sources.
+**Measured Performance:**
+Not given in the sources.
+**Scaling:**
+Not given in the sources.
+**Strengths and Limitations:**
+Not given in the sources.
+**When to Use:**
+Not given in the sources.
+**When Not to Use:**
+Not given in the sources.
+## Background
+**Origin:**
+Not given in the sources.
+**History and Development:**
+Not given in the sources.
+**Where it is Used:**
+Not given in the sources.
+## Sources
+[S1] barbararoessle/ganerf, https://github.com/barbararoessle/ganerf, fetched 2026-10-27 (unofficial)

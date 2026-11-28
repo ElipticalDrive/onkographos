@@ -1,0 +1,76 @@
+# Line Coverage Anti-Aliasing
+
+Also called: Anti-Aliasing Factor for Line Coverage, Coverage approach, Coverage-based Anti-Aliasing (Line), Sub-pixel averaging for lines
+
+## Overview
+Line Coverage Anti-Aliasing reduces jagged edges (aliasing) in rasterized lines by calculating the ratio of a line's occupancy within a pixel and mixing the pixel's original color with the line's color based on that ratio [S2, book]. It differs from the "all or nothing" (winner-take-all) strategy where a pixel is set to the line's color if the line passes through it, and unchanged otherwise [S2, book]. This approach produces smoother edges, especially for wireframe models [S2, book].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Fragment position in world space ($\mathbf{p}$), line segment endpoints in world space ($\mathbf{l}_0, \mathbf{l}_1$), viewport height in pixels ($u_{\text{ViewportSize}.y}$), and vertical field of view ($u_{\text{FovY}}$) [S1, unofficial].
+*   **Output:** An anti-aliasing factor $\alpha \in [0, 1]$ used to blend the line color with the background [S1, unofficial].
+
+**Data Structures:**
+No specific complex data structures are required; the method operates on standard vertex/fragment shader uniforms and temporary scalar/vector variables [S1, unofficial].
+
+**Steps:**
+1.  Compute the Euclidean distance $d$ from the fragment's world position to the line segment defined by endpoints $\mathbf{l}_0$ and $\mathbf{l}_1$ [S1, unofficial].
+2.  Calculate the anti-aliasing factor $\alpha$ using the formula:
+    $$ \alpha = \frac{d}{u_{\text{ViewportSize}.y} \cdot u_{\text{FovY}}} $$
+    [S1, unofficial]
+3.  The factor $\alpha$ represents the pixel size relative to the distance; smaller projected distance results in smaller anti-aliasing influence [S1, unofficial].
+4.  Blend the final pixel color $C_{\text{final}}$ with the line color $C_{\text{line}}$ and the original background color $C_{\text{bg}}$ using $\alpha$ as the background weight:
+    $$ C_{\text{final}} = (1 - \alpha) \cdot C_{\text{line}} + \alpha \cdot C_{\text{bg}} $$
+    [S1, unofficial][S2, book]
+
+**Parameters:**
+*   $u_{\text{FovY}}$: Vertical field of view [S1, unofficial].
+*   $u_{\text{ViewportSize}.y}$: Viewport height in pixels [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Degenerate Input:** If $\mathbf{l}_0 = \mathbf{l}_1$, the line segment has zero length. The distance calculation $c_2 = \text{dot}(\mathbf{v}, \mathbf{v})$ becomes $0$, causing division by zero in $b = c_1 / c_2$. The implementation must check if the segment length is near zero before division [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_line_coverage_aa(fragment_world_pos, line_start, line_end, viewport_height, fov_y):
+    v = line_end - line_start
+    w = fragment_world_pos - line_start
+    c1 = dot(v, w)
+    c2 = dot(v, v)
+    if c2 == 0:
+        distance = length(fragment_world_pos - line_start)
+    else:
+        b = c1 / c2
+        b = max(0.0, min(1.0, b))
+        closest_point = line_start + b * v
+        distance = length(fragment_world_pos - closest_point)
+    alpha = distance / (viewport_height * fov_y)
+    return alpha
+
+def blend_line_color(alpha, line_color, background_color):
+    return (1.0 - alpha) * line_color + alpha * background_color
+```
+
+## Subtopics
+
+### Sub-pixel Averaging
+Breaks each pixel into smaller sub-pixels (e.g., 10×10), renders with an all-or-nothing strategy, and averages the results [S2, book]. It differs from direct coverage by using discrete sub-pixel sampling rather than continuous distance projection [S2, book]. Choose it when hardware supports sub-pixel rendering and maximum edge smoothness is required [S2, book]. Link: Not given in the sources.
+
+### Large Image Scaling
+Renders a large image (e.g., 6000×6000) and scales it down using bilinear interpolation to approximate sub-pixel coverage [S2, book]. It differs from direct coverage by avoiding per-fragment distance calculations in favor of post-rendering downsampling [S2, book]. Choose it when hardware sub-pixel rendering is unavailable but high-quality results are needed [S2, book]. Link: Not given in the sources.
+
+## Operating characteristics
+*   **Measured Performance:** The sub-pixel averaging variant requires approximately 10 times the memory and rendering time for a 10×10 sub-pixel grid [S2, book].
+*   **Strengths:** Produces smoother edges for wireframe models compared to all-or-nothing rasterization [S2, book].
+*   **Limitations:** The sub-pixel variant is computationally expensive [S2, book]. The direct coverage method relies on accurate distance calculations and proper scaling factors [S1, unofficial].
+*   **When to Use:** Rendering wireframe models or lines where jagged edges are prominent and hardware sub-pixel rendering is unavailable or costly [S2, book].
+*   **When Not to Use:** When performance is critical and the visual improvement of anti-aliasing is not worth the cost [S2, book].
+
+## Background
+The technique is described in the context of advanced computer graphics, specifically addressing aliasing problems in rasterization [S2, book]. It is presented as an alternative to the "all or nothing" rasterization strategy [S2, book]. The implementation details are found in an unofficial GitHub repository simulating graphics primitives [S1, unofficial].
+
+## Sources
+[S1] Amory0709/geresim-spike, https://github.com/Amory0709/geresim-spike, fetched 2026-10-27 (unofficial)
+[S2] Chapter 7 - Advanced Computer Graphics - VTK, https://examples.vtk.org/site/VTKBook/07Chapter7/, fetched 2026-10-29 (book)

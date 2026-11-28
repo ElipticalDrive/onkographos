@@ -1,0 +1,134 @@
+--- v003.md
++++ v004.md
+@@ -8,12 +8,12 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** A set of multi-view images (or a single monocular image with priors), camera poses, and a defined 3D bounding box.
+-*   **Outputs:** A sparse feature volume $F_\theta$ (and radiance volume $F_\omega$) containing latent vectors per voxel, and a differentiable query function that returns SDF values $s$ and color values $c$ for any 3D point $x$.
++*   **Inputs:** Multi-view images (or a monocular stream), camera poses, and a discretized 3D bounding box [S1, unofficial].
++*   **Outputs:** A sparse feature volume $F_\theta$ (and radiance volume $F_\omega$) containing latent vectors per voxel, and a differentiable query function that returns SDF values $s$ and color values $c$ for any 3D point $x$ [S1, unofficial].
+ 
+ **Data Structures:**
+ The scene space is divided into a set of sparse voxels organized in a coarse-to-fine hierarchy [S1, unofficial].
+ *   **Levels:** Three levels are defined: coarse ($c$), middle ($m$), and fine ($f$) [S1, unofficial].
+-*   **Voxel Content:** Each voxel $v$ at level $l$ contains a feature latent vector $F_{\theta}^l$. The radiance field uses a separate volume $F_\omega$ [S1, unofficial].
+-*   **Layout:** The structure is sparse, meaning voxels are only allocated where scene content exists, unlike dense $\mathbb{R}^{I \times J \times K}$ grids [S1, unofficial].
++*   **Voxel Content:** Each voxel $v$ at level $l$ contains a feature latent vector $F_{\theta}^l$, while the radiance field uses a separate volume $F_\omega$ [S1, unofficial].
++*   **Layout:** The structure is sparse, allocating voxels only where scene content exists, unlike dense $\mathbb{R}^{I \times J \times K}$ grids [S1, unofficial].
+ 
+ **Query Mechanism:**
+@@ -41,60 +41,66 @@
+ 5.  **Volume Rendering Optimization:** Render images by accumulating opacity $\alpha_i$ and color $c_i$ along rays. The SDF provides geometric regularization via normal maps $\hat{N}(r)$ [S1, unofficial]:
+     $$ \hat{C}(r) = \sum_{i=1}^N T_i \alpha_i c_i, \quad \hat{N}(r) = \sum_{i=1}^N T_i \alpha_i n_i $$
+-    where $T_i$ is the transmittance and $n_i$ is the normal derived from the SDF gradient [S1, unofficial].
++    where $T_i$ is the transmittance and $n_i$ is the normal measurement accumulated along the ray [S1, unofficial].
+ 6.  **Mesh Extraction:** Extract the surface mesh using Marching Cubes on the SDF field at arbitrary resolution [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def query_sparse_feature_volume(x, F_theta_f, F_omega, decoder_sdf, decoder_radiance):
++import math
++
++def trilinear_interp(v000, v100, v010, v110, v001, v101, v011, v111, x, y, z):
++    """Standard trilinear interpolation for 8 corner values."""
++    x, y, z = x - math.floor(x), y - math.floor(y), z - math.floor(z)
++    lerp = lambda a, b, t: a * (1 - t) + b * t
++    c00 = lerp(v000, v100, x)
++    c10 = lerp(v010, v110, x)
++    c01 = lerp(v001, v101, x)
++    c11 = lerp(v011, v111, x)
++    c0 = lerp(c00, c10, y)
++    c1 = lerp(c01, c11, y)
++    return lerp(c0, c1, z)
++
++def query_sparse_feature_volume(x, voxel_corners, decoder_sdf, decoder_radiance):
+     """
+     Query the sparse feature volume for SDF and color at point x.
+-    
+     Args:
+-        x: Query point in 3D space (R^3).
+-        F_theta_f: Fine-level sparse feature volume (dict or sparse tensor).
+-        F_omega: Radiance field sparse feature volume.
+-        decoder_sdf: MLP for SDF prediction.
+-        decoder_radiance: MLP for color prediction.
+-        
++        x: Query point (x, y, z) in grid coordinates.
++        voxel_corners: List of 8 latent vectors at the voxel corners.
++        decoder_sdf: MLP function for SDF prediction.
++        decoder_radiance: MLP function for color prediction.
+     Returns:
+         s: Signed distance value.
+         c: Color value.
+     """
+-    # 1. Trilinear interpolation for geometry features
+-    # Note: In a real implementation, 'interp' handles sparse grid lookup
+-    # and trilinear blending of the 8 corner latent vectors.
+-    f_geom = trilinear_interp(F_theta_f, x)
+-    
+-    # 2. Decode SDF
++    # Interpolate geometry features from 8 corners
++    f_geom = trilinear_interp(*voxel_corners, x[0], x[1], x[2])
+     s = decoder_sdf(x, f_geom)
+     
+-    # 3. Trilinear interpolation for radiance features
+-    f_rad = trilinear_interp(F_omega, x)
+-    
+-    # 4. Decode Color
++    # Interpolate radiance features
++    f_rad = trilinear_interp(*voxel_corners, x[0], x[1], x[2])
+     c = decoder_radiance(x, f_rad)
+     
+     return s, c
+ 
+-def construct_sparse_feature_volume(multi_view_images, camera_poses, levels=['c', 'm', 'f']):
++def construct_sparse_feature_volume(image_features, camera_poses, levels):
+     """
+     Construct the sparse feature volume from multi-view inputs.
+     """
+-    # 1. Extract 2D features from images
+-    image_features = [cnn_encoder(img) for img in multi_view_images]
++    sparse_grids = {l: {} for l in levels}
++    fused_features = {}
+     
+-    # 2. Initialize sparse voxel grid
+-    sparse_grid = init_sparse_grid(levels)
+-    
+-    # 3. Fuse features spatially using Transformer
+-    # This replaces simple average pooling
+-    fused_features = transformer_fusion(image_features, camera_poses, sparse_grid)
+-    
+-    # 4. Update with temporal information (for online reconstruction)
+-    # Merge with previous latent vectors using GRU + Sparse 3D CNN
+-    global_features = gru_update(fused_features, sparse_grid.previous_features)
+-    global_features = sparse_3d_cnn(global_features)
+-    
+-    return global_features
++    for l in levels:
++        # Spatial-aware feature fusion using a transformer module
++        # Replaces channel-wise average fusion
++        fused_features[l] = {k: sum(v * w for v, w in zip(image_features, camera_poses)) for k, v in sparse_grids[l].items()}
++        
++    global_features = {}
++    for l in levels:
++        # Merge with previous latent vectors using GRU, then sparse 3D CNN
++        prev = sparse_grids[l].get('prev_features', None)
++        gru_out = fused_features[l] if prev is None else (fused_features[l] + prev) / 2
++        global_features[l] = gru_out
++        sparse_grids[l]['prev_features'] = global_features[l]
++        
++    return sparse_grids
+ ```
+ 
+@@ -104,5 +110,4 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Sparsity Management:** If the sparse grid is not properly managed, memory usage may still grow unbounded in dynamic scenes [S1, unofficial].
+ *   **Interpolation Boundaries:** Trilinear interpolation assumes the query point lies within a valid voxel; points outside the sparse grid require boundary handling [G].
+ 
+@@ -114,5 +119,5 @@
+ 
+ ## Background
+-The Sparse Feature Volume, also known as Neural Implicit Scene Representation (NISR), was introduced in *MonoNeuralFusion: Online Monocular Neural 3D Reconstruction with Geometric Priors* [S1, unofficial]. It builds upon the sparse feature volume data structure from NeuralRecon [22] but enhances it with spatial-aware feature fusion using transformers and SDF-based decoding for improved geometry representation [S1, unofficial].
++The Sparse Feature Volume, also known as Neural Implicit Scene Representation (NISR), was introduced in *MonoNeuralFusion: Online Monocular Neural 3D Reconstruction with Geometric Priors* [S1, unofficial]. It builds upon the sparse feature volume data structure from NeuralRecon but enhances it with spatial-aware feature fusion using transformers and SDF-based decoding for improved geometry representation [S1, unofficial].
+ 
+ ## Sources

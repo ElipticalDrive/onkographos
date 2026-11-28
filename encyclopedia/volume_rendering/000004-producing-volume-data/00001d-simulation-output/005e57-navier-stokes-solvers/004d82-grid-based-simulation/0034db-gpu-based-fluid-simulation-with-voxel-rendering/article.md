@@ -1,0 +1,133 @@
+# GPU-based Fluid Simulation with Voxel Rendering
+
+Also called: Integrating Real-Time Fluid Simulation with a Voxel Engine, Poxels Fluid Integration
+
+## Overview
+This method integrates real-time incompressible fluid simulation with sparse voxel-based rasterization on graphics hardware, specifically using Direct3D geometry shaders for rendering and compute shaders for simulation [S1]. It solves the problem of efficiently mapping the continuous velocity and pressure fields of a Navier–Stokes solver to a discrete voxel grid for rendering, avoiding the performance bottleneck of copying simulation data back to the CPU [S1]. It sets itself apart from its siblings by moving the voxel activation and color ramp logic entirely into the geometry shader, utilizing stream-out for deterministic primitive ordering, and relying on the Jacobi method for pressure projection due to its GPU efficiency [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D simulation domain (chunk) defined by grid dimensions (e.g., $N \times N \times N$). External forces (static or dynamic bodies) and initial velocity/pressure fields [S1].
+*   **Output:** A rendered voxel scene representing the fluid, where active voxels are determined by non-zero velocity/pressure values, colored via a ramp function [S1].
+
+**Data Structures:**
+*   **Velocity Textures:** Three 3D textures of type `float4` (single precision) storing velocity components and temporary values for advection and diffusion [S1].
+*   **Pressure Textures:** Two 3D textures of type `float4` storing pressure values and temporary values for the projection step [S1].
+*   **Speed Grid Texture:** The final 3D texture filled with single-precision floats representing the updated velocity field, which serves as the source for the voxel engine [S1].
+*   **Activation Texture:** A 3D texture containing only non-zero values from the simulation, used by the geometry shader to determine voxel presence [S1].
+*   **Staging Texture (CPU Approach only):** A texture used to transfer data from GPU memory to CPU memory [S1].
+*   **Vertex Buffer:** A cached buffer storing generated vertex data via stream-out [S1].
+
+**Numbered Steps:**
+
+1.  **Simulation Initialization:** Define the processing stages for the Navier–Stokes equations: advection of the velocity field, acceleration caused by pressure, diffusion of momentum, and application of external forces [S1].
+2.  **Velocity Update (Advection, Diffusion, Forces):** Perform three computations to update the velocity at each time step:
+    *   **Advection:** Advect the velocity field.
+    *   **Diffusion:** Diffuse the momentum resulting from fluid resistance.
+    *   **Forces:** Apply external forces from static or dynamic bodies [S1].
+3.  **Pressure Projection:**
+    *   Compute the pressure field. The source specifies the use of the Jacobi method for the pressure-Poisson system [S1].
+    *   Calculate the speed divergence.
+    *   Subtract the pressure gradient from the velocity field to enforce incompressibility [S1].
+4.  **Output Generation:** The final result of the five GPU compute stages is output in a 3D speed grid texture filled with single precision floats [S1].
+5.  **Voxel Activation and Rendering (GPU-Optimized Approach):**
+    *   **Activation Texture Creation:** In the fluid simulation compute shader, populate a texture with only non-zero values from the simulation data [S1].
+    *   **Geometry Shader Dispatch:** Dispatch to the geometry shader for stream amplification. The geometry shader reads the activation texture to determine which voxels are active [S1].
+    *   **Stream-Out:** Continuously output vertex data from the geometry shader stage using stream-out to a cached vertex buffer. This guarantees deterministic ordering of rendered primitives [S1].
+    *   **Color Ramp:** Apply a color ramp function directly in the geometry shader. The function takes a float value (representing concentration or magnitude, typically between 0 and 1) and returns an RGB color [S1].
+    *   **Rasterization:** Perform regular triangle geometry rasterization using the generated vertex buffer [S1].
+
+**Pseudocode (GPU-Optimized Approach):**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Parameters
+dt = 0.016  # Time step
+viscosity = 0.0001  # Kinematic viscosity
+max_magnitude = 1.0  # Normalization factor for color ramp
+jacobi_iterations = 20  # Pressure solver iterations
+
+# Compute Shader: Fluid Simulation
+def compute_fluid_step(velocity_textures, pressure_textures, forces):
+    # Step 2: Velocity Update (Advection, Diffusion, Forces)
+    # Advection: Semi-Lagrangian backtrace
+    advected_velocity = lerp(velocity_textures, velocity_textures - velocity_textures * dt)
+    # Diffusion: Implicit Euler
+    diffused_velocity = advected_velocity / (1.0 + viscosity * dt * laplacian(advected_velocity))
+    # Forces
+    updated_velocity = diffused_velocity + forces * dt
+
+    # Step 3: Pressure Projection
+    # Compute Divergence
+    divergence = divergence_field(updated_velocity)
+
+    # Solve Pressure (Jacobi Iteration)
+    pressure = pressure_textures[0]
+    for i in range(jacobi_iterations):
+        pressure = jacobi_update(pressure, divergence)
+
+    # Subtract Pressure Gradient
+    final_velocity = updated_velocity - gradient(pressure)
+
+    # Step 4: Output
+    # Write final velocity to speed grid texture
+    speed_grid_texture[:] = final_velocity
+
+    # Create activation texture (non-zero values only)
+    activation_texture[:] = where(final_velocity != 0, final_velocity, 0)
+
+# Geometry Shader: Voxel Rendering
+def geometry_shader_render(activation_texture, speed_grid_texture):
+    vertex_buffer = []
+    for voxel_pos in activation_texture.nonzero_indices():
+        voxel_value = speed_grid_texture[voxel_pos]
+        # Apply Color Ramp
+        normalized_val = clamp(abs(voxel_value) / max_magnitude, 0.0, 1.0)
+        color = apply_color_ramp(normalized_val)
+        # Generate Vertex Data for the voxel (e.g., cube corners)
+        vertices = generate_cube_vertices(voxel_pos)
+        # Stream-out to vertex buffer
+        vertex_buffer.append(vertices, color)
+    return vertex_buffer
+
+# Rasterization
+def rasterize(vertex_buffer):
+    draw_triangles(vertex_buffer)
+```
+
+**Parameters:**
+*   **Simulation Grid Size:** Must match the size of the 3D voxel staging texture (if using CPU approach) [S1]. Typical tested size: $64 \times 64 \times 64$ (262,144 blocks) [S1].
+*   **Jacobi Iterations:** Not given in the sources.
+*   **Color Ramp Input:** A float between 0 and 1 [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Obstacle Detection:** The described simulation does not detect or respond to obstacles [S1].
+*   **Memory Alignment:** If using the CPU approach, the CPU memory buffer requires appropriate memory address alignment [S1].
+*   **Precision:** Uses single-precision floats for textures [S1].
+
+## Subtopics
+
+### [Stable Fluids (GPU Implementation)](7906-stable-fluids-gpu-implementation.md)
+A method for computing fluid velocity by discretizing the momentum equation on a fixed Eulerian grid and solving for velocity via advection, external forces, and pressure projection. It solves the problem of real-time incompressible fluid simulation on graphics hardware by leveraging 3D textures and slice-based rendering to map grid cells directly to voxels. It sets itself apart from its siblings by using the Jacobi method for the pressure-Poisson system due to its GPU efficiency, and Semi-Lagrangian advection for unconditional stability, distinguishing it from [Free-Slip Boundary Condition Enforcement](7908-free-slip-boundary-condition-enforcement.md) which handles dynamic obstacles, and [GPU-based Eulerian Fluid Solver](14187-gpu-based-eulerian-fluid-solver.md) which uses half-precision textures and multigrid.
+
+## Operating characteristics
+*   **Time Complexity:** The simulation steps (advection, diffusion, pressure) are performed on the GPU [S1]. The CPU approach adds significant overhead due to data transfer [S1].
+*   **Memory Complexity:** Requires storage for three velocity textures, two pressure textures, and the final speed grid texture, all of type `float4` [S1].
+*   **Measured Performance:**
+    *   **CPU Approach (NVIDIA GeForce GTX 950M, 64x64x64 chunk):** 100 FPS (10.000 ms frame time) [S1].
+        *   Copy from staging texture to CPU: 23,088,969 ns [S1].
+        *   Activate voxels and render: 976,276 ns [S1].
+    *   **GPU-Only Approach (NVIDIA GeForce GT540M, 64x64x64 chunk):** 180 FPS (5.556 ms frame time) [S1].
+    *   **Performance Improvement:** The GPU-only method improves performance from 30 FPS (original method) to 1100 FPS on the tested hardware [S1].
+*   **Scaling:** Frame time scales linearly with the number of voxels [S1].
+*   **Strengths:** High performance due to GPU-only processing; deterministic ordering of primitives via stream-out; efficient integration with voxel engines like Poxels [S1].
+*   **Limitations:** Does not handle obstacles; limited to single chunk (without extension); requires Direct3D geometry shaders and compute shaders [S1].
+*   **When to Use:** When real-time fluid visualization in a voxel engine is required and obstacle interaction is not needed [S1].
+*   **When Not to Use:** When obstacle collision detection is required or when running on hardware without support for geometry shader stream-out or compute shaders [S1].
+
+## Background
+This method was proposed by integrating recent results in GPU-accelerated fluid simulation (Crane et al. 2007 and Harris 2004) with voxel-based rendering (Miller et al. 2014) [S1]. It is based on the Navier–Stokes differential equations (Stam 2003) [S1]. The work addresses the specific hurdles of integrating these two technologies efficiently, noting that no prior work had been reported on this particular integration [S1]. It was published in the *Computational Games Journal* in 2016 [S1].
+
+## Sources
+[S1] Integrating Real-Time Fluid Simulation with a Voxel Engine, https://doi.org/10.1007/s40869-016-0020-5, fetched 2026-10-26

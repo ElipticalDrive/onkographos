@@ -1,0 +1,402 @@
+# Neural 3D Mesh Renderer
+
+* Kato et al.(2017)
+    * 本記事はarxiv版
+        * https://arxiv.org/abs/1711.07566
+    * CVPR2018版
+        * https://zpascal.net/cvpr2018/Kato_Neural_3D_Mesh_CVPR_2018_paper.pdf
+* 3Dモデルのレンダリング操作は通常，2Dの画面座標に落とす段階で位置による色の変化が不連続になり微分不可能．本手法では不連続な(急激な)変化をなめらかな変化に置き換えて微分可能にしている
+* 提案手法を用いて単一画像から3D形状の再構成を行う．シルエットの2D画像を教師データとし，再構成した3D形状のレンダリング結果とシルエットとの誤差を最小化する
+    * モデリング手法はmeshベースであり，テンプレート(球)の変形を用いる
+    * 同様の手法でvoxelベースのものよりもかなり高精度(IoU)
+* style transferおよびDeepDreamの3D版への適用を行っている．(3Dモデルにテクスチャを付加する)
+
+* 図表は省略．
+
+
+## abst
+
+* 3D形状の再構成手法として，polygon meshは良い候補となる
+* 3D meshから画像に変換するときに，NNを使うとrenderingが不連続なラスタライゼーションという操作を伴うので，back propを妨げ，困難である
+    * そこで本論文ではラスタライゼーションのための近似勾配を提案し，レンダリングをNNに統合させる
+* また，勾配ベースの3Dメッシュ編集手法，つまり2D->3Dのスタイルトランスファーと，3D Deep Dreamを２Dの教師を使用して初めて提案する．
+    * これらの応用はmesh rendererのNNへの組み込みの潜在能力を示し，提案rendererの効率性を示す．
+
+
+## 6. conclusion
+
+* レンダリングのための近似勾配を提案することで3Dメッシュのレンダリングをニューラルネットワークに組み込むことを可能にした．
+    * このレンダラをつかって，一枚の画像から3Dmeshを再構成する手法を提案したが，voxel IoU metricならびに視覚的な良さも既存のvoxel vase手法[36]より優れている
+* また画像の誤差関数ととgradient descentを使って3D形状に基づいて3Dmeshの頂点やテクスチャを編集する手法を提案した
+
+
+
+## 1. intro
+
+* 人間は網膜上の画像を使って脳で3D空間をモデリングし，そのモデルを使って日常生活を送る
+    * 機械も2D画像から3Dモデリングを行うことでもっと知的に行動できる．
+* 3D世界から画像を生成する処理はレンダリングと呼ぶ．
+    * 2Dと3Dの境界に位置するのでComputerVisionでは重要
+* 近年CNNは２D画像理解について非常に成功している[7,13]ので，レンダリングをneural networkに組み込めば3D理解に対して高いポテンシャルがある
+* どんな3D表現3D空間のモデリングに適しているのか？
+    * voxels
+        * CNNで扱われるので機械学習でもっとも広く使われる[2, 17, 20, 24, 30, 31, 34, 35, 36]
+        * メモリ効率の悪さのせいで高解像度の処理ができない
+    * point clouds 
+        * 点群はイレギュラーサンプリングするのでスケーラビリティーが割と高い
+        * 面がないのでテクスチャとライティングが適用できない
+    * polygon mesh
+        * 頂点と面の集合からなる
+        * スケーラブルであり，面もあるので有望．本論文ではこれを使う．
+        * polygon meshのメリット
+            * コンパクトさ
+                * 大きな三角形を表すのに３つの点と１つの面だけで良い．他の手法では面から多くのサンプル点が必要になる
+                    * パラメタ数が少ないので3D理解に使うデータサイズが小さい
+            * 幾何変形に適している
+                * 回転，移動，スケーリングがシンプルな頂点の操作でできる
+* レンダリングを含んだニューラルネットワークの訓練は難しい問題．
+    * レンダリングはmeshの頂点をスクリーン座標に射影し，regular grid sampling[16]で画像を生成する．
+        * 前者は微分可能．ラスタライゼーションと呼ばれる後者は，離散の操作なのでback-propagationが難しい
+            * そこでレンダリングのback-propagationを可能にするためにニューラルネットワーク特有のレンダリングのための近似勾配を提案する
+                * レンダリングも含めてエンドツーエンドで訓練できる
+                * 勾配を物体だけでなくテクスチャ，ライティング，カメラにも流すことができる
+                    * だから広い範囲の応用が可能
+                * Neural Rendererと呼ぶ．
+* computer visionの生成アプローチでは，データ生成のプロセスをモデリングしてそれを逆にすることで問題を解決する
+    * 画像は3D空間からレンダリングされ，polygon meshは効率的で，リッチで直感的な3D表現なので，mesh renderersの逆向きパスは非常に重要
+* ２つの応用を扱う(figure 1)
+    * シルエット画像教師ありでの3Dメッシュ再構成
+        * 3D再構成はcomputer visoinのメイン問題なのに一枚の画像からmeshを再構成する研究は少ない
+    * 勾配ベースの2D教師ありの3D mesh editing
+        * style transfer[6]の3D版とDeepDream[18]のそれを含む
+            * meshを扱う本研究のdifferentiable mesh rendererでなければできない
+* contributions
+    * メッシュのレンダリングのための近似勾配を提案した
+    * 単一画像からの，3D教師を必要としない3D mesh reconstructionを行い，voxel 手法より優れていることを示した
+    * 勾配ベースの3D mesh editingを2D教師ありで初めて行った
+    * Neural Rendererのソースコードはリリース予定
+
+## 2. related work
+
+* 3D表現をneural netに組み込む方法と，応用に関連する研究を述べる
+
+### 2.1. neural networks における3D表現
+
+* 3D表現は2つに分かれる
+    * **ラスタライズド**はCNNで処理できるので人気
+        * voxels
+            * voxelは分類[17, 20, 24, 34, 35], 3D再構成と生成[2, 30, 31, 34, 36]で使われている
+                * voxelのメモリ効率が悪いのでもっと効率的な表現を使っているものもある[24, 30, 32]
+        * multi-view RGB(D)画像
+            * Multi-view RGB(D)画像は3Dシーンを画像の集合で表現するが，認識[20, 27]やview合成[29]で使われる
+    * **ジオメトリックフォーム**はneural netに組み込むには修正が必要
+        * 点群，
+            * これを扱うシステムは点の順序に対して不変でなければならない
+            * 認識[12, 19, 21], 再構成[5]で使用されている
+        * polygon mesh
+            * 頂点と麺の集合で3D物体を表現．
+            * メモリ効率が良いので幾何変形に適しており，面があるのでcomputer graphics(CG)とcomputer-aided design(CAD)のデファクトスタンダード．
+            * データ構造が複雑なグラフなので，neural netに組み込むのが難しい
+                * 認識とセグメンテーションが調査されている[10, 38]が，生成タスクはもっと難しい．
+                    * Rezende et al.[23]はOpenGLレンダラを3D再構成のためにneural networkに組み込んだ
+                        * black-box rendererの勾配はREINFORCE[33]で推定される
+                            * 対照的に本研究のレンダラはgeometry-groundedであり，もっと正確．
+                            * OpenDR[15]は微分可能な汎用レンダラであるが，本手法の勾配はneural networkのために設計されている
+        * プリミティブの集合
+            * cubioidsのようなプリミティブの集合で3D物体を表現．[14, 39]で調査されている
+
+    
+### 2.2 Single-image 3D reconstruction
+
+* 画像からの3D再構成の推定は古くからの問題である
+    * 多くの手法は2D to 3Dのマッピングを正解3Dモデルを使って学習する．
+        * depth 予測[4,5]を使うものや3D形状を直接推定するもの[2,5,30,31, 34]もある
+    * 単一画像3D最高性は3D教師なしでできる
+        * Perspective transformer nets(PTN)[36]は3D構造を複数の視点からの影画像で学習する
+            * 本論文の提案手法も影画像に基づいている
+                * 彼らはvoxelだが，本提案はmesh
+
+### 2.3 Image editing via gradient descent
+
+* differentiable feature extractorと誤差関数を使って，back propagationとgradient descentで誤差を最小化する画像が生成できる
+    * Deep Dream[18]はそのような手法の初期のもの．
+        * 最初の画像は画像特徴の強度が大きくなるように繰り返し更新される
+            * この手続で，犬や猫のような物体が次第に画像に現れる
+    * Image style transfer[6]は最も有名で実践的な例．
+        * 内容画像とスタイル画像を入力して，特定の内容とスタイルを持った画像が生成される
+            * 本提案のレンダラはメッシュの頂点とテクスチャに関して画像の勾配を提供する
+                * ゆえに，2D画像上の誤差関数を使ってmeshのDeep Dreamとstyle transferができる
+
+## 3. Approximate gradient for rendering
+
+* 本節では，勾配フローを持った3DレンダラであるNeural Rendererを説明する
+
+### 3.1. Rendering pipeline and its derivative
+
+* 3D meshは頂点$\{ v_1^o, v_2^o, ..., v_{N_v}^o\}$と面$\{ f_1, f_2, ..., f_{N_f}\}$の集合からなる
+    * 物体は$N_v$個の頂点と$N_f$個の面をもつ．
+        * $v_o \in \mathbb{R}^3$は3D物体空間のi番目の頂点の位置を示し，$f_i \in \mathbb{R}^3$はj番目の三角形面に対応する３つの頂点を示す
+    * この物体をレンダリングするために，物体空間の頂点$\{ v_i^o\}$は頂点$\{ v_i^s\}$へと変換される, $v_i^s \in \mathbb{R}^2$はスクリーン空間にある．
+        * この変換は微分可能変換の組み合わせで表現される[16]
+    * 画像はサンプリングによって$\{ v_i^s\}$と$\{ f^j\}$から生成される
+        * この過程はrasterizationと呼ばれる
+        * 図２aは１個の三角形についてラスタライゼーションを示している
+            * ピクセル$P_j$の中心が面の中にあれば，ピクセル$P_j$の色$I_j$は重複する面$I_{ij}$の色になる
+                * これは離散の操作なので，$I_{ij}$が$v_i$と独立だと仮定すると，$\frac{\partial{I_{j}}}{\partial{v_{i}}}$ ほとんどいたるところゼロになる(図２b-c)
+                    * これは誤差信号が誤差関数からピクセル$P_j$にback-propagateされ，vertex $v_i$には流れないことを意味している
+
+### 3.2. Rasterization of a single face
+
+* スクリーン空間にある単一の頂点$v_i = v_{i}^s$と灰色のピクセル$P_j$のｘ座標$x_i$を使って本手法を説明する．
+    * $P_j$の色は$x_i$の関数$I_j(x_i)$で，$x_i$以外のすべての変数は固定している
+        * まず$P_j$は面の外にあると仮定する(figure 2(a))
+            * $x_i$の現在の位置が$x_0$であるとき$P_j$の色は$I(x_0)$．
+                * $x_i$が右に動いて点$x_1$に到達したとき，面の端が$P_j$の中央と衝突し，$I_j(x_i)$は突然あたった点$I_{ij}$の色に変わる
+                    * $\delta_i^x$が$x_i$の移動距離だとして，$\delta_i^x = x_1 - x_0$とする．また$\delta_j^I$が色の変化$\delta_j^I = I(x_1) - I(x_0)$を表すとする
+                        * 偏微分$\frac{\partial{I_j(x_i)}}{\partial{x_i}}$はほとんどいたるところゼロである(figure 2 b-c)
+* 勾配が０なので，$x_i$を$\delta_i^x$だけ右に動かすと，$I_j(x_0)$が$\delta_j^I$によって変化するという情報は$x_i$には伝播されない
+    * これは$I_j(x_i)$が突然変わるから．
+        * だから$x_0$から$x_1$への線形補間を用いて突然の変化をゆっくりな変化に変更する
+            * その後，$\frac{\partial{I_{j}}}{\partial{x_i}}$は$x_0$と$x_1$のあいだの$\frac{\partial{\delta_j^I}}{\delta_{i^x}}$になる(figure 2 d-e)
+* $I_j(x_i)$は$x_0$の左右で異なる
+    * $x_i = x_0$の微分をどうやって定義するか．
+        * 誤差シグナル$P_j$に逆伝播される$\delta_j^P$ を使って値をスイッチすることを提案する
+            * $\delta_j^P$の符号は$P_j$が明るいかくらいかを示すべきである
+                * この誤差を最小化するために，$\delta_j^P > 0$なら，$P_j$はより暗い必要がある
+                    * $\delta_j^I >0$なら$P_j$は$x_i$を引き込むことで明るくなるが，$P_j$は$x_i$を動かしても暗くなってはならない．
+                        * 故に，勾配は$\delta_j^P > 0$かつ$\delta_j^I >0$なら流れてはならない．
+                            * (? $\delta_j^I$は色の変化を表していたはず．$\delta_j^P$が何を表すのかよくわからない)
+                            * この観点で
+                                * $\frac{\partial{I_j(x_i)}}{\partial{x_i}} | x_i = x_0$ を次のように定義する
+
+                                    ```math
+                                        \frac{\partial{I_j(x_i)}}{\partial{x_i}} | x_i = x_0 = \begin{cases} 
+                                        \frac{\partial{\delta_j^I}}{\partial{\delta_i^x}}; \quad \delta_j^P \delta_j^I <0 \\
+                                        0; \quad \delta_j^P \delta_j^I \gt 0     
+                                        \end{cases}
+                                    ```
+
+                                * 時々，$x_i$がどこを動いても面が$P_j$と重ならないことがある(?)
+                                    * これは$x_1$が存在しないことを示しており，このケースでは$\frac{\partial{I_j(x_i)}}{\partial{x_i}} | x_i = x_0 =0$を定義する．
+                            * forward passにはfigure 2(b)を使った．もし(d)を使うと色が面の外に漏れるため．
+                                * ゆえに，本ラスタライザは標準的なラスタライザと同じ画像を生成し，しかもnon-zeroの勾配を実現できた．
+                            * $y_i$に関する微分は上記の議論でx軸とy軸を入れ替えれば良い
+        * 次に，図3(a)のように$P_j$が面の内部にある場合を考える．
+            * このケースでは$x_i$が右または左に動けば$I(x_i)$が変化する
+                * 標準的なラスタライゼーションとその微分，補間関数とその微分はfig3(b-e)に示している
+                    * $x_0$の左右両脇での微分を最初に計算し，それらの和が$x_0$での微分になるようにする
+                        * とくに，fig3の記法を使うと$\delta_j^{I^a} = I(x_1^a), \delta_j^{I^b} = I(x_1^b) - I(x_0), \delta_x^a = x_1^a - x_0$また$\delta_x^b = x_1^b - x_0$であり，誤差関数は次のように定義する
+
+```math
+\frac{\partial{I_j}(x_i)}{\partial{x_i}} |_{x_i = x_0} = \frac{\partial{I_j}(x_i)}{\partial{x_i}} |^a_{x_i = x_0} + \frac{\partial{I_j}(x_i)}{\partial{x_i}} |^b_{x_i = x_0} \tag{2} 
+```
+
+```math
+\frac{\partial{I_j}(x_i)}{\partial{x_i}}|^a_{x_i = x_0} = \begin{cases} \frac{\delta_j^{I^a}}{\delta_x^a}; \quad \delta_j^P \delta_j^{I^a} <0  \\
+0; \quad \delta_j^P \delta_j^{I^a} \gt 0 \end{cases} \tag{3}
+```
+
+```math
+\frac{\partial{I_j}(x_i)}{\partial{x_i}}  {|^b_{x_i = x_0}} = \begin{cases} \frac{\delta_j^{I^b}}{\delta_x^b}; \quad \delta_j^P \delta_j^{I^b} <0  \\
+0; \quad \delta_j^P \delta_j^{I^a} \gt 0     
+\end{cases} \tag{4}
+```
+
+### 3.3 Rasterization of multiple faces
+
+* 複数の面があるとき，本ラスタライザは通常のもの[16]と同様に最も全面にある面だけを描画する．
+    * backward passにおいては，クロスポイント$I_{ij}, I_{ij}^a, I_{ij}^b$が描画されているかどうかを最初にチェックし，$v_i$を含まない表面によって隠されているときはgradientsを流さない
+
+### 3.4 texture
+
+* 面にはテクスチャを張ることができる．本実装では各面はそれ自身のテクスチャ画像をサイズ$s_t \prod s_t \prod s_t$で保持している
+    * 重心座標系を使って三角形$\{ \boldsymbol{v_1}, \boldsymbol{v_2}, \boldsymbol{v_3} \}$上の位置$\boldsymbol{p}$に対応するテクスチャ空間において座標を決定する
+        * つまりpが$\boldsymbol{p} = w_1 \boldsymbol{v_1} + w_2 \boldsymbol{v_2} + w_3 \boldsymbol{v_3}$で表されるなら，$(w_1, w_2, w_3)$はテクスチャ空間の対応する座標である
+            * テクスチャ画像からのサンプリングはbilinear補間
+
+### 3.5 Lighting
+
+* voxelやpoint cloudsとは異なり，meshにはライティングを直接適用できる
+    * 本研究ではシンプルな環境光と影なしの方向光を使う
+        * $l^a$と$l^d$が環境光と方向光の強度として，$\boldsymbol{n}^d$は方向光の方向を示す単位ベクトル．$\boldsymbol{n}_ j$は面の法線
+    * 次に面上のピクセル$I_j^l$を$I_j^l  = (l^a + (\boldsymbol{n}^d \cdot \boldsymbol{n}_j) l^d) I_j$と定義する
+        * この式で，勾配は強度$l^a$と$l^d$へも流れる．方向光の方向$\boldsymbol{n}_d$にも
+            * ゆえに，光源も最適化ターゲットに含んで構わない
+
+## 4. Applications of Neural Renderer 
+
+* 提案したレンダラを次に適用した
+    * (a) シルエット画像教師ありの単一画像3D再構成
+    * (b) 勾配ベース3Dメッシュ編集，style transfer[6]とDeepDream[18]の3D版を含む
+* mesh mをviewpoint $\phi_i$からみた画像を$R(m, \phi_i)$と書く
+
+
+### 4.1. Single image 3D reconstruction 
+
+* Yanら[36]は3D再構成が3D訓練データなしでもできることをしめした
+    * 彼らの設定では，画像xに関する3D生成関数G(x)は推定された3D形状$\hat{s_i} = R(G(x), \phi_i)$が正解シルエット画像$\{ s_i \}$とマッチするように訓練する．視点$\{ \phi_ i \}$は既知と仮定する 
+        * これはfig1に示す
+    * 彼らはvoxelを使ったが，本研究はメッシュを使う
+* voxcel は既存の画像生成器[8, 22]で３D形状を生成できるがmeshはかんたんではない
+    * 本研究ではfrom scratchでmeshを生成する代わりに，事前に定義されたmeshを新しいmeshへと変形する
+        * 特に，642個の頂点を持つ等方性球の各頂点を，local bias vector $\boldsymbol{b}_ i$とglobal bias vector $\boldsymbol{c}$で$\boldsymbol{v_i} + \boldsymbol{b_i} + \boldsymbol{c}$ で動かす．
+            * 加えて，拡張点の可動範囲は元の球での4分義の中に制限する
+                * 面$\{ \boldsymbol{f_i}\}$は不変
+                    * ゆえにG(x)の中間出力は$\boldsymbol{b} \in \mathbb{R}^{642 \prod 3}$と$\boldsymbol{c} \in \mathbb{R}^{1 \prod 3}$
+                        * 使用するmeshは642 x 3のパラメタで特定されるが，これは典型的な$32^3$ のvoxel 表現よりはるかにすくない
+                            * この次元の低さは形状推定に有利に働く
+* 生成関数G(x)はシルエット誤差$L_{sl}$とsmoothness 誤差$L_{sm}$で訓練される
+    * シルエット誤差は再構成されたシルエット$\{ \hat{s_i}\}$がどれくらい正しいシルエット$\{s_{i} \}$と異なるかを示す
+    * smoothness 誤差はどのくらいmeshの表面がなめらかであるかを示し，regularizerとして働く
+    * 目的関数はこれらの重み付き和$L = \lambda_{sl}L_{sl} + \lambda_{sm}L_{sm}$ である
+* $\{s_i \}$ と$\{\hat{s_i}\}$を二値マスクとして，$\theta_{i}$をG(x)内のi番目のエッジを含む２つの面の間の角とする(G(x)は再構成された3D形状)
+    * $\epsilon$がG(x)の全てのエッジの集合，$\odot$が要素ごとの積とする．誤差関数は次のように定義される
+
+
+    * $L_{sl}$は真のシルエットと再構成シルエット間の負のintersection over union(IoU)．
+    * $L_{sm}$は全ての面のintersection anglesが180°に近くなることを保証する．
+* 画像中の物体領域 は既存手法[5, 31, 36]で共通にセグメンテーションの前処理を施すことを仮定している
+    * RGB画像のチャネルに物体領域のマスクを追加して，generatorに入力する
+
+
+```math
+L_{sl}(x | \phi_{i}, s_{i}) = -\frac{|\hat{s_{i}} \odot s_{i}|_{1}}{\hat{s_i} + s_{i} - \hat{s_i} \odot s_{i}}_{1} \tag{5} \\
+```
+
+```math
+L_{sm}(x) = \sum_{\theta_{i} \in \epsilon}{(\cos{\theta_{i}} + 1)^2} \tag{6}
+```
+
+
+
+#### 4.2.1 2D-to-3D style transfer 
+
+* このセクションでは画像$x^s$からmesh $m^c$へのスタイルトランスファーを提案する
+    * 2D画像については，style transferはcontent lossとstyle lossを同時に最小化することで達成される[6]
+        * content lossはfeature extractor $f_{c}(x)$と内容画像$x^c$を使って$L_{c}(x|x^c) = |f_{c}(x) - f_{c}(x^c)|^2_{2}$のように定義される
+        * style lossはもう一つのfeature extractor $f_{s}(x)$とスタイル画像$x^s$で$L_{s}(x | x^c) = |M(f_{s}(x)) - M(f_{s}(x^s))|^2_{F}$
+            * M(x)はベクトルをグラム行列に変換する
+* 2D-to-3D style transferではcontentは3D mesh $m^c$として特定される．
+    * 生成メッシュの形状が$m^c$と類似するために，頂点-面間の関係$\boldsymbol{f_i}$が両方のメッシュで同じだと仮定して，content 誤差を次のように再定義する $L_c(m|m^c) = \sum_{\boldsymbol{v_i}, \boldsymbol{v_{i}^c} \in (m, n^c)} |\boldsymbol{v_i} - \boldsymbol{v_i}^c|^2_2$
+    * 2Dの応用と同じstyle loss を使う．
+        * 特に$L_{s}(m| x^s, \phi) = |M(f_{s}(R(m, \phi))) - M(f_{s}(x_s))|^2_F$
+    * また，ノイズ削減のためにregularizerを使う
+        * Pを画像$R(m,  \phi)$における隣接するピクセルのすべてのペアの色集合とする
+            * この誤差を$L_t(m|\phi) = \sum_{\boldsymbol{p_a}, \boldsymbol{p_b} \in P}{|\boldsymbol{p_a} -\boldsymbol{p_b}|}^2_2$とする
+    * 目的関数は$L = \lambda_c L_c + \lambda_s L_s + \lambda_t L_t$
+        * mの初期の解を$m^c$とし，Lを$\{\boldsymbol{v_i} \}$と$\{\boldsymbol{t_i} \}$について最小化する
+
+#### 4.2.2 3D DeepDream
+
+* f(x)を画像xのfeature mapを出力する関数とする
+    * 2D画像については画像$x_0$のDeepDreamは$-|f(x)|^2_F$を$x = x_0$から開始してgradient descentで最小化することで達成される
+        * 最適化は数イテレーションで停止する
+    * 類似のプロセスで，本研究は$-|f(R(m,\phi))|^2_F$を$\{\boldsymbol{v_i} \}$と$\{\boldsymbol{t_i} \}$について最小化する
+
+## 5. Experiments 
+
+* 本レンダラの効率性について2つの応用で評価する
+
+### 5.1. single image 3D reconstruction
+
+#### 5.1.1 Experimental settings
+
+* Yanら[36]のvoxel base 手法と比較するためにほとんど同じデータセットを使った
+    * ShapeNetCore[1]データセットから13カテゴリの3D物体を使った
+    * 画像は24の方位角から固定の仰角で，同じカメラ設定・ライティングで，Blenderを使ってレンダリングされた．
+        * レンダーサイズは64x64 pixel
+    * かれら[36]と同じtraining, validation, test setsをつかった
+* voxel base, および retrieval base[36]と精度を比較した
+    * voxel based手法では，G(x)はconvolutional encoderとdeconvolutional decoderで構成される
+        * 彼らのencoderはYangら[37]の方法で事前訓練されているが，本手法はそれなしでも十分に動作する
+    * retrieval based手法では事前訓練されたVGGネットワーク[26]のfc6特徴を使ってnearestな画像が取り出される
+        * 対応するvoxelは予測された形状とみなされる
+        * retrieval basedはvoxelを教師として使っている
+* 再構成の性能を量的に評価するため，真のmeshと生成メッシュ両方をvoxel化し，ボクセル間のIoUを計算した．
+    * voxelのサイズは$32^3$
+    * test setの各物体について，24個の視点からの画像を用いて3D再構成を行い，IoUを計算，平均スコアを報告した．
+* generator G(x)にはencoder-decoder構造を用いた．
+    * encoderはほとんど[36]のものと同じで，入力画像を512D ベクトルにencodeする
+    * decoderは３つの全結合レイヤからなる
+        * 隠れ層のサイズは1024と2048
+* 本レンダラのレンダーサイズは128x128で，64x64にダウンサンプルされる．
+    * 物体の影だけを，テクスチャとライティングなしでレンダリングした
+        * 5.1.2では$\lambda_{sl} =1$および$\lambda_{sm} = 0.001$とし，5.1.3では$\lambda_{sm} = 0$とした
+* generatorは$\alpha = 0.0001, \beta_1 = 0.9, \beta_2 = 0.999$のAdam[11]で訓練した
+    * バッチサイズは64, 
+        * 各ミニバッチで入力画像ごとに２つの視点からのシルエットを含めた
+
+#### 5.1.2 Qualitative evaluation
+
+* 各クラスからの画像で13のモデルを訓練した．
+    * fig4は本手法とvoxel base手法[36]のテストセットの結果を示す
+        * 本手法では単一の画像から正しくmeshが再構成されている
+        * voxel base手法と比較して，2つの点で本手法のほうが視覚的に訴求力がある
+            * meshが小さい部分も表現できる．高解像度な飛行機の羽など
+            * meshにはキューブ状のアーチファクトがない
+        * 低解像度やアーチファクトはロボットのピッキングタスクには問題ないかもしれないが，computer graphics, computational photography, data augmentationでは不利益となる
+* smooothness誤差を使わない場合，本モデルは時々非常に粗い表面を生成する
+    * 面のsmoothnessがシルエットには小さい影響しか及ぼさないから．
+        * smoothness regularizerがあれば，表面はなめらかになりもっと自然になる
+            * figure 5はregularizerの効果を示す
+                * regularizerを使った場合でも，データセット全体についてのvoxel IoUは少し下がる
+
+#### 5.1.3 Quantitative evaluation 
+
+* 全てのクラスの画像で一つのモデルを訓練した
+    * 再構成の精度はtable1. 
+    * 本手法はvoxel baseの手法[36]を13カテゴリ中10で上回る．
+        * airplane, chair, display, loudspeaker, sofaのカテゴリについては本手法が大きく上回る
+            * loudspeakerとdisplayのカテゴリはシンプルだが，サイズと位置は物体によってことなる
+                * meshがscalingとtranslationに適していることがこれらのカテゴリでの性能改善につながったはずである
+                    * airplane, chair, sofaカテゴリの形状の変化は比較的小さい
+        * car, lamp, tableについてはあまり良くない
+            * これらの物体は比較的複雑であり，球の変形で再構成するのは難しい
+
+#### 5.1.4 Limitation 
+
+* 本手法はすでに視覚的に，またIoUでvoxel手法よりすぐれているが，　明らかなデメリットもある
+    * 色々なトポロジを生成できないこと
+        * この制限を克服するためには，faces-to-verticesの関係 $\boldsymbol{f_i}$を動的に生成する必要がある
+            * 本論文の範囲を超えるが，将来の方向としては興味深い
+
+
+### 5.2. Gradient-based 3D editing via 2D loss
+
+#### 5.2.1 experimental settings
+
+* 2D-to-3D スタイル変換と3D DeepDreamをfig6に示す物体に適用した．
+    * 最適化は$\beta_1 = 0.9, \beta_2 = 0.999$のAdam[11]
+        * サイズ448x448の画像をレンダリングして，エイリアスをなくすために244x244にダウンサンプルした
+            * batch sizeは4
+                * 最適化中に，画像はrandomな仰角と方位角でレンダリングされる
+                    * テクスチャサイズは$s_t = 4$
+* style transferについては，使用したスタイル画像は[3, 9]から選んだ
+    * $\lambda_c, \lambda_s, \lambda_t$は各入力について手動でチューンされた
+        * style lossについての特徴抽出器$f_s$はVGG16[26]のconv1 2, conv2 3, conv3 3, conv4 3 から使用．
+            * ライトの強さは$l^a = 0.5, l^d = 0.5$，光の方向は最適化中にランダムに設定された
+                * Adamの$\alpha$は$\{\boldsymbol{v_i} \}$と$\{\boldsymbol{t_i} \}$について2.5e-4, 5e-2
+                    * パラメタ更新の数は5,000
+* DeepDreamでは画像はライティングなしでレンダリングされた
+    * feature extractorはGoogLeNet[28]のinception_4cレイヤ
+        * Adamの$\alpha$は$\{\boldsymbol{v_i} \}$と$\{\boldsymbol{t_i} \}$について5e-5, 1e-2
+            * 1000イテレーションで最適化は停止する
+
+#### 5.2.2 2D-to-3D style transfer
+
+* fig7は結果を示す．
+* paintingのスタイルは正確に形状のテクスチャにtransferしている
+    * うさぎの形状とティーポットの蓋から，CouplandとGrisのストレートなスタイルを見ることができる
+    * Munchのうねったスタイルはteapotの側面にtrasferしている
+        * バベルの塔の側面はうさぎの側面のみにtransferしており，上面にはしていない
+* 提案手法は3Dモデルを直感的に素早く編集する方法を提供した
+    * これは高速なプロダクトデザインのプロトタイピングやアートプロダクションに便利である
+
+#### 5.2.3 3D Deep Dream
+
+* fig8が結果
+* 鼻，目がうさぎの顔に現れている
+    * teapotの注ぎ口が拡張されて鳥の顔になっている．
+        * bodyはバスのように見える
+* これらの変形は物体の3D形状にマッチしている
+

@@ -1,0 +1,68 @@
+# Point-to-Segment Distance
+Also called: Closest Point on Line Segment, Distance to line segment, closestPointOnSegment, closestPointOnSegmentToPoint
+
+## Overview
+Computes the closest point on a line segment `[a, b]` to a query point `p` [S1][S2, unofficial]. It differs from infinite line projection by clamping the projection parameter to `[0, 1]`, ensuring the output lies on the closed segment [S1][S2, unofficial].
+
+## How it works
+**Inputs:**
+- `a`: First endpoint of the segment (vector) [S2, unofficial].
+- `b`: Second endpoint of the segment (vector) [S2, unofficial].
+- `p`: Query point (vector) [S1].
+
+**Outputs:**
+- `closest`: The point on the segment `[a, b]` closest to `p` (vector) [S1][S2, unofficial].
+
+**Data Structures:**
+- Vectors must support arithmetic operations (`+`, `-`, `* scalar`) and dot product (`dot(u, v)`) [S1].
+
+**Steps:**
+1. Calculate the segment vector: `segVec = b - a` [S2, unofficial].
+2. Calculate the projection parameter `t` using the dot product:
+   $$ t = \frac{\text{dot}(p - a, \text{segVec})}{\text{dot}(\text{segVec}, \text{segVec})} $$ [S2, unofficial].
+3. Clamp `t` to the range `[0, 1]` to ensure the point lies on the segment rather than the infinite line passing through it [S1][S2, unofficial].
+4. Calculate the destination point: `closest = a + segVec * t` [S2, unofficial].
+5. Return `closest` [S1][S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def closestPointOnSegment(a, b, p):
+    segVec = b - a
+    segLenSq = dot(segVec, segVec)
+    
+    # Handle degenerate segment (zero length) [G]
+    if segLenSq == 0:
+        return a
+        
+    t = dot(p - a, segVec) / segLenSq
+    
+    # Clamp t to [0, 1]
+    if t < 0.0:
+        t = 0.0
+    elif t > 1.0:
+        t = 1.0
+        
+    return a + segVec * t
+```
+
+**Parameters:**
+- `Vec3T`: Any vector type supporting arithmetic and dot product [S1].
+
+**Edge Cases:**
+- **Degenerate Segment:** If `a == b`, `segLenSq` is zero. Division by zero must be handled, typically by returning `a` [G].
+- **Precision:** Floating-point inaccuracies may cause `t` to slightly exceed `[0, 1]` before clamping, but explicit clamping handles this [G].
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ constant time operations (vector subtractions, dot products, division, clamping) [G].
+- **Memory Complexity:** $O(1)$ auxiliary space [G].
+- **Strengths:** Extremely fast and numerically stable for non-degenerate segments [G].
+- **Limitations:** Requires special handling for zero-length segments to avoid division by zero [G].
+
+## Background
+Implemented in OpenVDB's `nanovdb::math` namespace [S1]. Not given in the sources regarding its broader history, origin, or usage in other libraries.
+
+## Sources
+[S1] OpenVDB: nanovdb::math Namespace Reference, https://openvdb.org/documentation/doxygen/namespacenanovdb_1_1math.html, fetched 2026-10-24
+[S2] Hunternif/VoxelArchitecture, https://github.com/Hunternif/VoxelArchitecture, fetched 2026-10-27 (unofficial)

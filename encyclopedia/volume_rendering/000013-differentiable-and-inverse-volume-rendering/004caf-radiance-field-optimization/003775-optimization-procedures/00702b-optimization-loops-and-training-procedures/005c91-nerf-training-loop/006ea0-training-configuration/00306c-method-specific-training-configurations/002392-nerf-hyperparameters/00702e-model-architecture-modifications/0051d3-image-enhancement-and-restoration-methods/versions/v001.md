@@ -1,0 +1,47 @@
+# Image Enhancement and Restoration Methods
+
+Also called: Deblurring NeRF, Sharp NeRF, Super-Resolution NeRF
+
+## Overview
+Image Enhancement and Restoration Methods modify the standard NeRF training pipeline to reconstruct sharp, high-frequency scene details from blurry, low-resolution, or degraded input images [S1]. They differ from sibling methods like [DoF-NeRF](9432-dof-nerf.md) or [NeRF-VPT](11770-nerf-vpt.md) by explicitly modeling the degradation process (e.g., defocus blur) during rendering, rather than treating blur as noise or ignoring it. Unlike [Deceptive-NeRF/3DGS](11859-deceptive-nerf-3dgs.md) which may use adversarial or consistency losses for general robustness, these methods use analysis-by-synthesis or discrete kernel indexing to invert the blur [S1].
+
+## Shared principles
+The core mechanism involves modifying the rendering equation to account for input degradation. Instead of comparing the rendered pixel $\hat{C}$ directly to the ground truth $I_{gt}$, the method synthesizes a degraded version of the rendered output $\hat{I}_{degraded}$ and compares it to the input $I_{input}$.
+
+$$
+L = \| \hat{I}_{degraded} - I_{input} \|^2
+$$
+
+The degradation model $\mathcal{D}$ varies by method:
+1.  **Ray Deformation:** Rays are perturbed in 3D space or on the image plane to simulate spatially varying blur [S1].
+2.  **Kernel Convolution:** A sharp rendered patch is convolved with a learned or indexed blur kernel [S1].
+3.  **Upsampling:** Low-resolution features are rendered and then upsampled by a CNN [S1].
+
+## Subtopics
+
+### [DeblurNeRF](11964-deblurnerf.md)
+DeblurNeRF reconstructs a sharp NeRF from blurry inputs by learning a Deformable Sparse Kernel (DSK). It differs from [Sharp-NeRF](14270-sharp-nerf.md) by using an MLP to predict pixel-wise ray deformations (origin and direction shifts) rather than discrete kernels. It is chosen when blur is spatially varying and complex, though it may introduce 3D geometric inconsistency due to independent pixel transformations.
+
+### [Sharp-NeRF](14270-sharp-nerf.md)
+Sharp-NeRF renders sharp images from blurry inputs using a grid-based representation and discrete learnable blur kernels. It differs from [DeblurNeRF](11964-deblurnerf.md) by replacing neural kernel generators with a sharpness prior that indexes into a set of $N_k$ fixed kernels. It is chosen for faster training (approx. 30 mins) and efficiency, as it avoids per-pixel MLP inference.
+
+### FastSR-NeRF
+FastSR-NeRF introduces a super-resolution CNN into the NeRF pipeline to upscale low-resolution 3D consistent features [S1]. It uses random patch sampling to improve SR performance [S1]. Unlike prior methods, it requires no architectural changes or heavy computing, making it suitable for consumer-grade hardware [S1].
+
+## Background
+The standard NeRF architecture [S6, unofficial] consists of two Multi-Layer Perceptrons (MLPs): a coarse network and a fine network. The coarse network takes positional encoded position $\gamma(\mathbf{x})$ and outputs a latent feature vector $\mathbf{h}$ and volume density $\sigma$. The fine network takes $\mathbf{h}$, positional encoded position $\gamma(\mathbf{x})$, and positional encoded view direction $\gamma(\mathbf{d})$ to output color $\mathbf{c}$.
+
+$$
+\gamma(\mathbf{x}, d_1, d_2) = [\mathbf{x}, \sin(2^{d_1}\pi\mathbf{x}), \cos(2^{d_1}\pi\mathbf{x}), \dots, \sin(2^{d_2-1}\pi\mathbf{x}), \cos(2^{d_2-1}\pi\mathbf{x})]
+$$
+
+Modifications generally fall into three categories:
+1.  **Input Expansion:** Adding new conditioning vectors (e.g., appearance embeddings $\mathbf{z}_i$, fluid volume $v$, or previous stage RGB) to the input concatenation.
+2.  **Output Expansion:** Adding auxiliary heads to predict values other than $\sigma$ and $\mathbf{c}$, such as semantic labels $y_{aux}$, object codes $o$, or area encoding probabilities $p$. These are rendered using the same transmittance weights $T_i$ and opacity $\alpha_i$ as color:
+    $$
+    \hat{Y}(r) = \sum_{i=1}^{N} T_i \alpha_i y_{aux}(x_i)
+    $$
+3.  **Representation Substitution:** Replacing the continuous MLP function with discrete structures (voxel grids, hash tables) or different implicit surfaces (SDFs).
+
+## Sources
+[S1] Neural Radiance Fields in 3D Vision: A Comprehensive Review, https://doi.org/10.26599/cvm.2026.9450535, fetched 2026-10-28

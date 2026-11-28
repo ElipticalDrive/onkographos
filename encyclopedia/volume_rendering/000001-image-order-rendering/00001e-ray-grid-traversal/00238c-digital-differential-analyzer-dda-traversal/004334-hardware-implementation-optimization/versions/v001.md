@@ -1,0 +1,53 @@
+# Hardware/Implementation Optimization
+
+Also called: GPU Optimization for DDA, Shader Occupancy Optimization
+
+## Overview
+Hardware/Implementation Optimization refers to the specific techniques used to adapt Digital Differential Analyzer (DDA) ray traversal algorithms for execution on parallel hardware, primarily GPUs. It addresses the performance bottlenecks of sequential ray stepping by leveraging Single Instruction, Multiple Data (SIMD) parallelism, shared memory caching, and register management. Unlike its siblings, which focus on traversal logic or grid structure, this family focuses on the execution efficiency of the traversal kernel itself, prioritizing throughput and occupancy over single-ray precision control [S1, unofficial].
+
+## Shared principles
+The core mechanism involves mapping the logical ray traversal steps to hardware execution units (warps/threads) while minimizing memory latency and divergent branching.
+
+1.  **Parallelization Granularity:** Rays are distributed across GPU warps (typically 32 threads). Each thread handles one or more rays, processing them in lock-step where possible to maintain SIMD efficiency [S1, unofficial].
+2.  **Memory Hierarchy Utilization:** Global memory bandwidth is a primary bottleneck. Techniques include:
+    *   **Shared Memory Caching:** Loading tiles of voxel data (e.g., $16 \times 16 \times 16$) into warp-local shared memory to serve multiple threads accessing nearby voxels [S1, unofficial].
+    *   **Structure of Arrays (SoA):** Storing ray data (origins, directions, current $t$) in SoA layouts to ensure coalesced global memory access patterns [S1, unofficial].
+3.  **Branch Divergence Mitigation:** Classic DDA implementations suffer from divergent execution due to varying entry/exit points or quadrant handling. Optimizations include:
+    *   **Masking:** Using masks to skip inactive rays within a warp [G].
+    *   **Case Unification:** Permuting axes to unify DDA cases (e.g., always iterating along the x-axis) to avoid divergent branches for different quadrants [S1, unofficial].
+4.  **Register and Occupancy Management:** High register pressure reduces the number of concurrent warps (occupancy), leading to memory stalls. Optimizations focus on reducing variables carried across loops and deduplicating calculations [S1, unofficial].
+
+## Subtopics
+
+### [Parallel 3D-DDA](6247-parallel-3d-dda.md)
+Parallel 3D-DDA is a GPU-accelerated implementation of the DDA algorithm designed to process large sets of rays simultaneously. It solves the performance bottleneck of sequential stepping by distributing rays across GPU warps and leveraging shared memory to mitigate global memory latency. Unlike the sequential parent, it prioritizes throughput over single-ray precision control, making it suitable for real-time applications involving millions of rays.
+
+### [GPU Screen-Space Ray Tracing via DDA](10121-gpu-screen-space-ray-tracing-via-dda.md)
+This method provides an efficient GPU solution for screen-space 3D ray tracing against a depth buffer by adapting the perspective-correct DDA line rasterization algorithm. It solves the inefficiency and missing intersections inherent in linear 3D marching by ensuring that sampled pixels form a contiguous set with no oversampling. Unlike linear 3D ray marching, which projects 3D points to screen space and can skip pixels or oversample the same pixel multiple times, this method places each sampled pixel adjacent (in x, y, or diagonally) to the previous one and samples each pixel at most once.
+
+### Shader Occupancy Optimization for DDA
+Shader Occupancy Optimization for DDA focuses on increasing GPU occupancy by reducing register allocation and minimizing state carried across loops in the 2-level DDA shader [S1, unofficial].
+
+**Definition:**
+The optimization targets the 2-level DDA shader, which previously suffered from low occupancy (35.43%) and high register allocation (92), causing memory stalls despite high ALU usage [S1, unofficial].
+
+**Steps:**
+1.  **Variable Reduction:** Replace separate `min_cell` and `max_cell` variables with a single `local_cell` variable in nested loops. Check bounds using `if (any((uint3)local_cell >= (uint)VX_BRICK_EXT))` instead of complex comparisons [S1, unofficial].
+2.  **Deduplication:** Deduplicate `tdelta` calculations and remove unnecessary work in intermediate commits to reduce register pressure [S1, unofficial].
+
+**Pitfalls:**
+*   **Low Occupancy:** The unoptimized shader had an FS occupancy counter of 35.43% and register allocation of 92, which negatively impacted performance [S1, unofficial].
+*   **Register Pressure:** Carrying more state over loops in registers reduces the number of concurrent warps [S1, unofficial].
+
+**Results:**
+*   FS occupancy increased from 35.43% to 42.37%.
+*   Register allocation decreased from 92 to 72 [S1, unofficial].
+*   Performance on `monu2-1`: FPS 143.20 -> 144.00 (+0.56%), Walltime 6.58 ms -> 5.37 ms (-18.32%) [S1, unofficial].
+*   Performance on `sponza-256-1`: FPS 59.78 -> 72.83 (+21.83%), Walltime 28.39 ms -> 22.51 ms (-20.71%) [S1, unofficial].
+*   Performance on `sponza-256-2`: FPS 109.53 -> 143.94 (+31.42%), Walltime 13.40 ms -> 7.32 ms (-45.33%) [S1, unofficial] [S1, unofficial].
+
+## Background
+The optimization techniques described are derived from practical implementations of voxel raytracers, specifically those developed for real-time rendering on modern GPUs. The specific data regarding shader occupancy and register allocation comes from a development log of a voxel raytracer, detailing optimizations applied to a 2-level DDA shader [S1, unofficial]. The screen-space DDA approach is also documented in the same repository, highlighting the adaptation of rasterization techniques for ray tracing [S1, unofficial].
+
+## Sources
+[S1] Voxel Raytracer Devlog // My thought repository, https://nelari.us/post/voxel-ray-tracing/, fetched 2026-10-24 (unofficial)

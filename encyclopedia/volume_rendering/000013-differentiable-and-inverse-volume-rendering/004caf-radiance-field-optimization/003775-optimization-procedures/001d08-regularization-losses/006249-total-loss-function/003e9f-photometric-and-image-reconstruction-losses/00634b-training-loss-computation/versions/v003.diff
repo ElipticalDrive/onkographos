@@ -1,0 +1,116 @@
+--- v002.md
++++ v003.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-This method computes the scalar training loss $\mathcal{L}$ for differentiable volume rendering by combining a photometric image reconstruction term with auxiliary regularization losses [S2]. It solves the optimization problem by penalizing deviations between the rendered color $\hat{\mathbf{C}}(\mathbf{r})$ and the ground-truth image $\mathbf{C}(\mathbf{r})$, while enforcing smoothness on material properties (albedo/BRDF) and spatial coherence on light sources [S1, unofficial]. It is distinguished from sibling methods by its specific inclusion of Total Variation (TV) penalties for light sources and jitter-based smoothness losses for albedo/BRDF, in addition to the standard composite image loss [S1, 9355-composite-photometric-and-regularization-loss.md, unofficial].
++This method computes the scalar training loss $\mathcal{L}$ for differentiable volume rendering by combining a photometric image reconstruction term with auxiliary regularization losses [S2]. It solves the optimization problem by penalizing deviations between the rendered color $\hat{\mathbf{C}}(\mathbf{r})$ and the ground-truth image $\mathbf{C}(\mathbf{r})$, while enforcing smoothness on material properties (albedo/BRDF) and spatial coherence on light sources [S1, unofficial]. It is distinguished from sibling methods by its specific inclusion of Total Variation (TV) penalties for light sources and jitter-based smoothness losses for albedo/BRDF, in addition to the standard composite image loss [S1, unofficial][9355-composite-photometric-and-regularization-loss.md].
+ 
+ ## How it works
+@@ -24,6 +24,6 @@
+ 1.  **Image Reconstruction Loss:** Compute the Mean Squared Error (MSE) between the rendered RGB $\hat{\mathbf{C}}$ and target RGB $\mathbf{C}$, masked by the hit mask [S1, unofficial]. The mask is clamped to $[1e-3, 1-1e-3]$ to prevent exploding gradients when the predicted mask is close to 1 but the ground truth is 0 [S1, unofficial].
+ 2.  **Albedo/BRDF Smoothness Loss:** If noise is enabled, compute the smoothness loss using L1 (or MSE) between albedo/BRDF and their jittered versions, weighted by `albedo_smooth_weight` and `brdf_smooth_weight` respectively [S1, unofficial].
+-3.  **Light Source Spatial TV:** If `light_tv_weight > 0`, compute the spatial TV penalty for the light source. This is the sum of squared differences in the x and y directions [S1, unofficial].
+-4.  **Light Source Achromatic TV:** If `light_achro_weight > 0`, compute the cross-channel TV penalty for the light source. This is the sum of squared differences in the channel direction [S1, unofficial].
++3.  **Light Source Spatial TV:** If `light_tv_weight > 0`, compute the spatial TV penalty for the light source [S1, unofficial]. This is the sum of squared differences in the x and y directions [S1, unofficial].
++4.  **Light Source Achromatic TV:** If `light_achro_weight > 0`, compute the cross-channel TV penalty for the light source [S1, unofficial]. This is the sum of squared differences in the channel direction [S1, unofficial].
+ 5.  **Aggregation:** Average the image loss and apply training loss scale factors to all loss terms to compute the final total loss $\mathcal{L}$ [S1, unofficial].
+ 
+@@ -41,10 +41,11 @@
+                           albedo_smooth_weight, brdf_smooth_weight, 
+                           light_tv_weight, light_achro_weight, 
+-                          mask_volume_clipped=1e-3, noise_enabled=False):
++                          mask_volume_clipped=1e-3, noise_enabled=False, 
++                          scale_factors=None):
+     # Step 1: Image Reconstruction Loss
+     # Clamp mask to prevent exploding gradients
+-    clamped_mask = max(mask_volume_clipped, min(1.0 - mask_volume_clipped, hit_mask))
++    clamped_mask = [max(mask_volume_clipped, min(1.0 - mask_volume_clipped, m)) for m in hit_mask]
+     # MSE between rendered and GT, masked
+-    img_loss = sum(clamped_mask * (rendered_color - gt_color)**2) / count(clamped_mask)
++    img_loss = sum(c * (r - g)**2 for c, r, g in zip(clamped_mask, rendered_color, gt_color)) / len(clamped_mask)
+     
+     # Step 2: Albedo/BRDF Smoothness Loss
+@@ -53,10 +54,11 @@
+     
+     if noise_enabled:
+-        albedo_jittered = apply_jitter(albedo)
+-        brdf_jittered = apply_jitter(brdf)
++        # Add small Gaussian noise to tensor [G]
++        albedo_jittered = [a + random.gauss(0, 0.01) for a in albedo]
++        brdf_jittered = [b + random.gauss(0, 0.01) for b in brdf]
+         
+         # L1 between original and jittered
+-        albedo_smooth_loss = sum(abs(albedo - albedo_jittered)) / count(albedo)
+-        brdf_smooth_loss = sum(abs(brdf - brdf_jittered)) / count(brdf)
++        albedo_smooth_loss = sum(abs(a - aj) for a, aj in zip(albedo, albedo_jittered)) / len(albedo)
++        brdf_smooth_loss = sum(abs(b - bj) for b, bj in zip(brdf, brdf_jittered)) / len(brdf)
+         
+     smooth_loss = albedo_smooth_weight * albedo_smooth_loss + brdf_smooth_weight * brdf_smooth_loss
+@@ -66,8 +68,12 @@
+     if light_tv_weight > 0:
+         # Sum of squared differences in x and y directions
+-        # Assuming light_source is a tensor [H, W, C] or [H, W]
+-        dx = light_source[:, 1:, :] - light_source[:, :-1, :]
+-        dy = light_source[1:, :, :] - light_source[:-1, :, :]
+-        light_tv_loss = sum(dx**2) + sum(dy**2)
++        # Assuming light_source is a flattened list representing [H, W, C]
++        H = int(len(light_source)**0.5)
++        W = H
++        C = len(light_source) // (H * W)
++        # Reshape logic omitted for brevity; operations assume proper indexing
++        dx = sum((light_source[i*W + j + 1] - light_source[i*W + j])**2 for i in range(H) for j in range(W-1))
++        dy = sum((light_source[(i+1)*W + j] - light_source[i*W + j])**2 for i in range(H-1) for j in range(W))
++        light_tv_loss = dx + dy
+         
+     # Step 4: Light Source Achromatic TV
+@@ -75,17 +81,17 @@
+     if light_achro_weight > 0:
+         # Sum of squared differences in channel direction
+-        # Assuming channels are the last dimension
+-        dc = light_source[:, :, 1:] - light_source[:, :, :-1]
+-        light_achro_loss = sum(dc**2)
++        dc = sum((light_source[i*(W*C) + j*C + k + 1] - light_source[i*(W*C) + j*C + k])**2 
++                 for i in range(H) for j in range(W) for k in range(C-1))
++        light_achro_loss = dc
+         
+     # Step 5: Aggregation
+-    # Apply scale factors (not specified in sources) [G]
+-    total_loss = img_loss + smooth_loss + light_tv_weight * light_tv_loss + light_achro_weight * light_achro_loss
++    # Apply scale factors to all loss terms [G]
++    sf = scale_factors if scale_factors else {'img': 1.0, 'smooth': 1.0, 'tv': 1.0, 'achro': 1.0}
++    total_loss = (sf['img'] * img_loss + 
++                  sf['smooth'] * smooth_loss + 
++                  sf['tv'] * light_tv_weight * light_tv_loss + 
++                  sf['achro'] * light_achro_weight * light_achro_loss)
+     
+     return total_loss
+-
+-def apply_jitter(tensor):
+-    # Add small random noise to tensor [G]
+-    return tensor + random_noise_like(tensor)
+ ```
+ 
+@@ -97,6 +103,6 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Exploding Gradients:** If the hit mask is 0 or 1, gradients can explode. The mask must be clamped [S1, unofficial].
+-*   **Light Source Dimensions:** TV calculations assume specific tensor layouts (spatial vs channel dimensions). Incorrect axis selection leads to wrong penalties [S1, unofficial].
++*   **Exploding Gradients:** If the hit mask is 0 or 1, gradients can explode [S1, unofficial].
++*   **Light Source Dimensions:** TV calculations assume specific tensor layouts (spatial vs channel dimensions) [S1, unofficial].
+ *   **Noise Enablement:** Smoothness losses are only calculated if noise is enabled [S1, unofficial].
+ 
+@@ -116,10 +122,10 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** Not given in the sources.
++*   **Time Complexity:** Not given in the sources [S1, unofficial][S2].
++*   **Memory Complexity:** Not given in the sources [S1, unofficial][S2].
+ *   **Strengths:** Explicitly regularizes light sources and material properties, which can improve stability during optimization [S1, unofficial][S2].
+ *   **Limitations:** Requires careful tuning of multiple weights (`albedo_smooth_weight`, etc.) [S1, unofficial]. The jitter-based smoothness loss requires noise injection [S1, unofficial].
+ *   **When to Use:** When optimizing radiance fields with explicit light source and material parameterization [S1, unofficial][S2].
+-*   **When Not to Use:** Not given in the sources.
++*   **When Not to Use:** Not given in the sources [S1, unofficial][S2].
+ 
+ ## Background

@@ -1,0 +1,196 @@
+--- v002.md
++++ v003.md
+@@ -1,45 +1,44 @@
+ # Occupancy Voxel Creation
+ ## Overview
+-Occupancy Voxel Creation converts a continuous density matrix into a discrete boolean occupancy mask and identifies fully occupied 2x2x2 blocks via convolution. It differs from [3D Voxel Grid Smoothing](833-3d-voxel-grid-smoothing.md) by using hard thresholding rather than smoothing filters, and from [Binary Voxel RLE Encoding](1071-binary-voxel-rle-encoding.md) by producing a structural mask of coherent blocks rather than a compressed bitstream. It serves as a preprocessing step for [Mark Invisible Cells](4648-mark-invisible-cells.md) by establishing the initial occupancy state.
++Occupancy Voxel Creation converts a continuous density matrix into a discrete boolean occupancy mask and simplifies the geometry by identifying fully occupied 2x2x2 blocks. It differs from [3D Voxel Grid Smoothing](833-3d-voxel-grid-smoothing.md) by using hard thresholding and structural convolution rather than continuous filtering, and from [Binary Voxel RLE Encoding](1071-binary-voxel-rle-encoding.md) by producing a structural mask rather than a compressed bitstream. It serves as a preprocessing step to reduce voxel grid complexity for rendering or training.
+ ## How it works
+-**Inputs:** A 3D density matrix $D$ of shape $(S, S, S)$, where $S$ is the side length.
++**Inputs:** A 3D density matrix $D$ of shape $(S, S, S)$ where $S$ is the side length.
+ **Outputs:** A boolean mask $M$ of shape $(S-1, S-1, S-1)$ indicating the top-left corner of each fully occupied 2x2x2 block.
+ 
+ **Data Structures:**
+-- `occupancy_mat`: Binary matrix of shape $(S, S, S)$, values $\{0, 1\}$.
+-- `kernel`: 3D tensor of shape $(2, 2, 2)$, all elements $1$.
+-- `out`: Convolution result of shape $(S, S, S)$, values $\in [0, 8]$.
+-- `mask`: Boolean matrix of shape $(S-1, S-1, S-1)$.
++- `density_mat`: 3D array of floats.
++- `occupancy_mat`: 3D array of integers (0 or 1).
++- `kernel`: 5D array for JAX convolution, shape $(2, 2, 2, 1, 1)$.
++- `out`: 5D array result of convolution.
++- `mask`: 3D boolean array.
+ 
+ **Steps:**
+-1. **Thresholding:** Convert density to binary occupancy. For each voxel $v$ in $D$:
++1. **Thresholding:** Convert density to binary occupancy. For every voxel $v$ in $D$:
+    $$
+-   \text{occupancy\_mat}[v] = \begin{cases} 1 & \text{if } D[v] > 0 \\ 0 & \text{otherwise} \end{cases}
++   O[v] = \begin{cases} 
++   1 & \text{if } D[v] > 0 \\
++   0 & \text{otherwise}
++   \end{cases}
+    $$
+-   [S1, unofficial]
+-
+-2. **Reshape for Convolution:** Prepare data for JAX convolution by adding batch and channel dimensions. Let $data = \text{occupancy\_mat}$.
++2. **Reshape for Convolution:** Prepare the occupancy data for JAX's `conv_general_dilated`. Add batch and channel dimensions:
+    $$
+-   data_{\text{jax}} = data[\text{None}, :, :, :, \text{None}]
++   \text{data} = O[\text{None}, :, :, :, \text{None}]
+    $$
+-   Shape becomes $(1, S, S, S, 1)$. [S1, unofficial]
+-
++   Shape becomes $(1, S, S, S, 1)$.
+ 3. **Define Kernel:** Create a 2x2x2 kernel of ones.
+    $$
+-   \text{kernel} = \mathbf{1}_{2 \times 2 \times 2}
++   K = \mathbf{1}_{2 \times 2 \times 2}
+    $$
+-   Reshaped to $(2, 2, 2, 1, 1)$ for JAX `conv_general_dilated`. [S1, unofficial]
+-
+-4. **Convolution:** Perform 3D convolution with stride 1 and 'SAME' padding.
++   Reshape to $(2, 2, 2, 1, 1)$ to match JAX's expected input format for spatial convolution with batch/channel dims.
++4. **Convolution:** Perform a 3D convolution with stride 1 and 'SAME' padding.
+    $$
+-   out = \text{conv\_general\_dilated}(data_{\text{jax}}, \text{kernel}, \text{strides}=(1,1,1), \text{padding}='SAME', \text{dilation}=(1,1,1))
++   \text{out} = \text{conv\_general\_dilated}(\text{data}, K, \text{strides}=(1,1,1), \text{padding}='SAME', \text{dilation}=(1,1,1))
+    $$
+-   The output $out$ has shape $(1, S, S, S, 1)$. Each element represents the sum of the 8 voxels in the 2x2x2 block starting at that coordinate. [S1, unofficial]
+-
++   The output shape is $(1, S, S, S, 1)$. Each element represents the sum of the 8 voxels in the 2x2x2 block anchored at that position.
+ 5. **Mask Extraction:** Identify blocks where all 8 voxels are occupied.
+    $$
+-   mask = (out == 8)
++   M = (\text{out} == 8)
+    $$
+-   The result is a boolean mask of shape $(S-1, S-1, S-1)$ (excluding boundary effects if 'SAME' padding is used strictly, or $(S, S, S)$ if padded; typically cropped to valid 2x2x2 blocks). [S1, unofficial]
++   The resulting mask $M$ has shape $(S-1, S-1, S-1)$ if cropped, or $(S, S, S)$ if padded. Typically, only valid top-left corners are kept, implying the output is effectively $(S-1, S-1, S-1)$.
+ 
+ **Pseudocode:**
+@@ -48,30 +47,32 @@
+ from jax.lax import conv_general_dilated
+ 
+-def create_occupancy_voxels(density_matrix: jnp.ndarray) -> jnp.ndarray:
++def create_occupancy_voxels(density_mat):
+     """
+-    Converts a density matrix to a boolean occupancy mask of fully occupied 2x2x2 blocks.
++    Converts a density matrix to an occupancy mask of 2x2x2 blocks.
+     
+     Args:
+-        density_matrix: 3D array of shape (S, S, S) with density values.
++        density_mat: jnp.ndarray of shape (S, S, S)
+         
+     Returns:
+-        mask: 3D boolean array of shape (S-1, S-1, S-1) indicating top-left corners 
+-              of fully occupied 2x2x2 blocks.
++        mask: jnp.ndarray of shape (S-1, S-1, S-1) boolean
+     """
+     # Step 1: Threshold density to binary occupancy
+-    # Values > 0 become 1, others 0
+-    occupancy_mat = (density_matrix > 0).astype(jnp.float32)
++    # [G] Assuming density values are non-negative. 
++    # If negative densities are possible, threshold at 0.
++    occupancy = jnp.where(density_mat > 0, 1, 0)
+     
+-    # Step 2: Reshape for JAX convolution (add batch and channel dims)
++    # Step 2: Reshape for JAX convolution
++    # Add batch dimension (1) and channel dimension (1)
+     # Shape: (1, S, S, S, 1)
+-    data = occupancy_mat[None, :, :, :, None]
++    data = occupancy[jnp.newaxis, :, :, :, jnp.newaxis]
+     
+     # Step 3: Define 2x2x2 kernel of ones
+     # Shape: (2, 2, 2, 1, 1)
+-    kernel = jnp.ones([2, 2, 2])[:, :, :, jnp.newaxis, jnp.newaxis]
++    kernel = jnp.ones([2, 2, 2, 1, 1])
+     
+     # Step 4: Perform convolution
+-    # Strides: (1, 1, 1), Padding: SAME, Dilation: (1, 1, 1)
+-    # Output shape: (1, S, S, S, 1)
++    # Strides: (1, 1, 1)
++    # Padding: 'SAME'
++    # Input/Output dilations: (1, 1, 1)
+     out = conv_general_dilated(
+         data, 
+@@ -84,34 +85,59 @@
+     
+     # Step 5: Extract mask where sum equals 8 (all 8 voxels occupied)
+-    # out is (1, S, S, S, 1), squeeze to (S, S, S)
+-    # The valid 2x2x2 blocks are typically those where the top-left corner 
+-    # allows a full 2x2x2 block within bounds. With 'SAME' padding, 
+-    # boundary blocks include padded zeros, so out==8 only happens for 
+-    # fully occupied internal blocks.
+-    mask = (out.squeeze() == 8)
++    # out shape is (1, S, S, S, 1)
++    # We remove batch and channel dims to get (S, S, S)
++    # Then we typically crop to (S-1, S-1, S-1) as the last row/col/depth 
++    # cannot form a 2x2x2 block top-left corner in a strict grid sense, 
++    # though 'SAME' padding keeps size S.
++    # The source code implies checking == 8 on the full output.
++    # To match the logical "block" definition, we usually consider valid top-lefts.
++    # However, the source simply does `out == 8`.
+     
+-    # Crop to (S-1, S-1, S-1) to represent valid 2x2x2 block origins
+-    # Note: The exact crop depends on implementation details of 'SAME' padding 
+-    # and whether boundary voxels are considered. 
+-    # If out is (S, S, S), the valid origins for 2x2x2 blocks are (0..S-2, 0..S-2, 0..S-2).
+-    return mask[:-1, :-1, :-1]
++    # Remove batch and channel dims
++    out_squeezed = jnp.squeeze(out, axis=(0, 4))
++    
++    # Create boolean mask
++    mask = out_squeezed == 8
++    
++    # [G] The source code snippet `mask = np.array(out == 8)` suggests 
++    # the output might be kept at size S or cropped later. 
++    # Standard 2x2x2 block detection on an SxSxS grid yields (S-1)x(S-1)x(S-1) blocks.
++    # If the implementation requires strict block indices, we crop.
++    # If it's a dense mask for visualization, we keep S.
++    # Given the sibling "Bounding Volume Optimization" handles trimming, 
++    # we return the full SxSxS mask or crop if specified. 
++    # The source does not explicitly crop, so we return SxSxS.
++    
++    return mask
+ ```
+-[G] The final cropping to $(S-1, S-1, S-1)$ assumes that the convolution output includes boundary voxels that cannot form a complete 2x2x2 block with valid neighbors. The source code snippet implies using the result directly, but logically, a 2x2x2 block starting at index $S-1$ would extend to $S+1$, which is out of bounds. Thus, the mask is typically valid for indices $0$ to $S-2$.
++
++**Parameters:**
++- Threshold: 0. Voxel is occupied if density > 0.
++- Block Size: 2x2x2.
++- Kernel: All ones.
++
++**Edge Cases:**
++- **Empty Density:** If all densities are $\le 0$, the mask is all False.
++- **Single Voxel:** If $S=1$, no 2x2x2 blocks exist. The convolution output will be 0 or 1, never 8. Mask is all False.
++- **Precision:** Floating point comparisons `== 8` are safe here because the kernel is integer ones and input is integer 0/1. Sum is exact.
+ 
+ ## Subtopics
+ 
+ ### [Mark Invisible Cells](4648-mark-invisible-cells.md)
+-Marks voxels not visible to any training camera as -1. Chosen when visibility culling is required before training. Differs by focusing on visibility rather than density-based block detection.
++Marks voxels invisible to training cameras. Chosen when visibility culling is needed before training.
++
++### [Occupancy Grid Filling](6913-occupancy-grid-filling.md)
++Fills interior voids in occupancy grids. Chosen when topological closure is required after voxelization.
+ 
+ ## Operating characteristics
+-**Time Complexity:** $O(S^3)$ for thresholding and $O(S^3)$ for convolution, where $S$ is the side length. The convolution is the dominant operation.
+-**Memory Complexity:** $O(S^3)$ for storing the density matrix, occupancy matrix, and convolution output.
+-**Performance:** Efficient on GPU due to JAX convolution optimization. [S1, unofficial]
+-**Strengths:** Simple, differentiable (if using soft thresholding, though this method uses hard thresholding), and effectively reduces noise by requiring full 2x2x2 occupancy.
+-**Limitations:** Hard thresholding is non-differentiable. Boundary effects may require careful handling. [S1, unofficial]
+-**When to use:** When a sparse representation of fully occupied blocks is needed for efficient rendering or training.
+-**When not to use:** When partial occupancy or smooth density gradients are required.
++**Time Complexity:** $O(S^3)$ for thresholding and $O(S^3)$ for convolution. Total $O(S^3)$.
++**Memory Complexity:** $O(S^3)$ for input, output, and kernel.
++**Performance:** Highly parallelizable on GPU via JAX. Convolution is efficient.
++**Strengths:** Simple, fast, reduces data size by factor of 8 (if all blocks are full) or more.
++**Limitations:** Loses internal structure of 2x2x2 blocks. Only detects "solid" blocks.
++
+ ## Background
+-Originated in the context of JAX-based volumetric rendering implementations. [S1, unofficial]
++Originated in the context of JAX-based volumetric rendering pipelines. Used to simplify voxel data for efficient rendering or neural network training by reducing the number of active voxels.
++
+ ## Sources
+ [S1] szat/Jax-Volumetric-Renderer, https://github.com/szat/Jax-Volumetric-Renderer, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,107 @@
+--- v001.md
++++ v002.md
+@@ -4,9 +4,9 @@
+ 
+ ## Overview
+-A Sparse Voxel Octree (SVO) is a hierarchical data structure for representing 3D space that eliminates sparse memory by not storing empty volumes [S1, S4, S5, unofficial]. It enables efficient storage and traversal of voxel data, particularly for indirect illumination calculations at geometry-independent costs [S2]. Unlike dense grids or chunk-based structures, it adapts resolution to content density, trading traversal performance for memory efficiency [S4, S5, unofficial].
++A Sparse Voxel Octree (SVO) is a hierarchical data structure for representing 3D space that eliminates sparse memory by not storing empty volumes [S1, S4, S5, unofficial]. It enables efficient storage and traversal of voxel data, particularly for indirect illumination calculations at geometry-independent costs [S2]. It trades traversal performance for memory efficiency by collapsing empty nodes into sparse storage [S4, S5, unofficial].
+ 
+ ## How it works
+-**Inputs:** 3D coordinates $(x, y, z)$, voxel data, and a maximum depth $D$.
+-**Outputs:** Voxel reference or null.
++**Inputs:** 3D coordinates $(x, y, z)$, voxel data, and a maximum depth $D$ [S1, unofficial].
++**Outputs:** Voxel reference or null [S1, unofficial].
+ 
+ **Data Structures:**
+@@ -18,31 +18,37 @@
+ 
+ **Initialization:**
+-The tree is initialized with a specific depth $D$. A `Node::new(depth)` recursively creates a full tree where depth 0 results in a `Leaf(Some(Voxel::new()))` and depth > 0 results in a `Branch` with 8 children of depth-1 [S1, unofficial].
++The tree is initialized with a specific depth $D$ [S1, unofficial]. A `Node::new(depth)` recursively creates a full tree where depth 0 results in a `Leaf(Some(Voxel::new()))` and depth > 0 results in a `Branch` with 8 children of depth-1 [S1, unofficial].
+ 
+-**Lookup (Iterative):**
+-1.  Start with `this = self`, coordinates $x, y, z$, and size $s = 2^{D-1}$ [S1, unofficial].
+-2.  Loop:
+-    *   If `this` is `Leaf`, return the voxel reference [S1, unofficial].
+-    *   If `this` is `Branch`, calculate child index:
+-        $$ index = ((x \ge s) \text{ as usize}) \ll 0 \mid ((y \ge s) \text{ as usize}) \ll 1 \mid ((z \ge s) \text{ as usize}) \ll 2 $$
+-    *   Update `this` to `children[index]` [S1, unofficial].
+-    *   Update coordinates: $x \%= s, y \%= s, z \%= s$ [S1, unofficial].
+-    *   Update size: $s /= 2$ [S1, unofficial].
++**Lookup and Insertion Pseudocode:**
++```python
++def get(self, x: int, y: int, z: int, size: int) -> Optional[Voxel]:
++    node = self.root
++    while True:
++        if isinstance(node, Leaf):
++            return node.voxel
++        index = ((x >= size) << 0) | ((y >= size) << 1) | ((z >= size) << 2)
++        node = node.children[index]
++        x %= size
++        y %= size
++        z %= size
++        size //= 2
+ 
+-**Lookup (Recursive):**
+-1.  If `self` is `Leaf`, return `voxel.as_ref()` [S1, unofficial].
+-2.  If `self` is `Branch`, calculate index:
+-    $$ index = ((x \ge size) \text{ as usize}) \ll 0 \mid ((y \ge size) \text{ as usize}) \ll 1 \mid ((z \ge size) \text{ as usize}) \ll 2 $$
+-3.  Recursively call `children[index].get(x % size, y % size, z % size, size / 2)` [S1, unofficial].
+-
+-**Insertion:**
+-1.  If `depth` is 0, replace `self` with the new node [S1, unofficial].
+-2.  If `self` is `Branch`, calculate index:
+-    $$ index = ((x \ge size) \text{ as usize}) \ll 0 \mid ((y \ge size) \text{ as usize}) \ll 1 \mid ((z \ge size) \text{ as usize}) \ll 2 $$
+-3.  Recursively insert into `children[index]` with $x \% size, y \% size, z \% size, size / 2$, and $depth - 1$ [S1, unofficial].
+-4.  **Leaf to Branch Conversion:** If `self` is `Leaf`, clone the existing voxel. Replace `self` with a new `Branch` node where all 8 children are `Leaves` containing the cloned voxel. Then recursively call `insert` on the new `Branch` node with the same $x, y, z$, node, size, and depth [S1, unofficial]. This ensures no data is lost during the split [S1, unofficial].
++def insert(self, x: int, y: int, z: int, node: Node, size: int, depth: int):
++    if depth == 0:
++        self.root = node
++        return
++    if isinstance(self.root, Branch):
++        index = ((x >= size) << 0) | ((y >= size) << 1) | ((z >= size) << 2)
++        self.root.children[index].insert(x % size, y % size, z % size, node, size // 2, depth - 1)
++    elif isinstance(self.root, Leaf):
++        cloned_voxel = self.root.voxel.clone()
++        new_branch = Branch(children=[Leaf(cloned_voxel) for _ in range(8)])
++        self.root = new_branch
++        self.insert(x, y, z, node, size, depth)
++```
++*Note: `size` is initialized to $2^{D-1}$. The loop terminates because the tree depth guarantees reaching a `Leaf` before `size` reaches 0 [S1, unofficial].*
+ 
+ **GPU Representation (Crassin [S2]):**
+-*   Nodes are stored in linear GPU memory, grouped into $2 \times 2 \times 2$ tiles. A single pointer stores all 8 children [S2].
++*   Nodes are stored in linear GPU memory, grouped into $2 \times 2 \times 2$ tiles [S2]. A single pointer stores all 8 children [S2].
+ *   Each node contains a pointer to a $3 \times 3 \times 3$ voxel brick in texture memory [S2].
+ *   Voxel centers are located at node corners, not centers, allowing interpolated values to be computed inside a brick covering $2 \times 2 \times 2$ nodes [S2].
+@@ -68,14 +74,14 @@
+ 
+ ### [Sparse Voxel Octree with Bricks](2354-sparse-voxel-octree-with-bricks.md)
+-Stores filtered scene information (energy intensity, direction, occlusion, NDFs) with increasing precision by descending the hierarchy. Chosen for efficient indirect illumination.
++Stores filtered lighting data in 3x3x3 voxel volumes attached to nodes. Sets itself apart by positioning voxel centers at node corners to enable hardware trilinear interpolation across 2x2x2 nodes without expensive borders. Choose for real-time indirect illumination.
+ 
+ ### [Naive Octree Node Representation](2445-naive-octree-node-representation.md)
+-Direct memory representation using pointers for children and separate fields for leaf status and color. Chosen for simplicity.
++Direct memory layout where internal nodes store 8 child pointers and leaves store a single data value. Sets itself apart by lacking structural compression, allocating memory for all 8 children regardless of sparsity. Choose for straightforward pointer-chased traversal.
+ 
+ ### [SVRaster](2464-svraster.md)
+-Real-time, high-fidelity novel-view synthesis using explicit, neural-free sparse voxels and a custom rasterizer. Chosen for real-time rendering without neural networks.
++Real-time novel-view synthesis framework rendering adaptive sparse voxels via a custom rasterizer. Sets itself apart by using ray direction-dependent Morton ordering for depth sorting, eliminating popping artifacts common in Gaussian splatting. Choose for high-fidelity rendering without neural networks.
+ 
+ ### [Dynamic Update Optimization](4120-dynamic-update-optimization.md)
+-Optimizes the dynamic update of the sparse voxel structure. Chosen for scenes with moving parts.
++Heuristics and structure modifications for Voxel Cone Tracing. Sets itself apart by isolating dynamic updates to affected regions while caching static geometry. Choose for scenes with mixed static and dynamic geometry.
+ 
+ ## Operating characteristics
+@@ -86,9 +92,9 @@
+ *   **Limitations:** Poor mapping to GPU memory model in basic implementations [S4, unofficial]. Less compression for grey-level data [S3, unofficial].
+ *   **When to use:** Scenes with large empty spaces or varying density where memory is a constraint [S5, unofficial].
+-*   **When not to use:** When direct texture access performance is critical and memory is not [S4, unofficial].
++*   **When not to use:** When direct texture access performance is critical, as octree traversal is significantly slower than direct index access [S4, unofficial].
+ 
+ ## Background
+ *   **Origin:** The concept extends the quadtree representation of 2D images to 3D [S3, unofficial].
+-*   **History:** Crassin presented a GPU implementation in his paper on voxel cone tracing global illumination [S4, S5, unofficial]. The structure is used in [LK10] and [CNLE09] [S2].
++*   **History:** Used in [LK10] and [CNLE09] [S2]. Crassin presented a GPU implementation in his paper on voxel cone tracing global illumination [S4, S5, unofficial].
+ *   **Usage:** Used for indirect illumination, global illumination, and novel-view synthesis [S2][S4, S5, unofficial].
+ 

@@ -1,0 +1,413 @@
+CUDA accelerated rasterization of gaussian splatting - PngCompression: builtin weighted K-means backend for the SH coefficients (no TorchPQ required) by Daceyyreal · Pull Request #1063 · nerfstudio-project/gsplat
+
+PngCompression: builtin weighted K-means backend for the SH coefficients (no TorchPQ required) by Daceyyreal · Pull Request #1063 · nerfstudio-project/gsplat · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Daceyyreal
+commented
+Sep 18, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Summary
+PngCompression compresses the higher-order SH coefficients (shN) with K-means into 65,536 centroids.
+This PR adds gsplat/compression/kmeans.py with weighted_kmeans(), a plain-PyTorch Lloyd's algorithm
+with per-splat weights, and exposes it through three options:
+```
+PngCompression(kmeans_backend="builtin", kmeans_weighting="opacity_area", kmeans_chunk_size=4096)
+```
+With these settings, mean PSNR improves by +0.111 dB on MipNeRF360 and +0.052 dB on
+Tanks & Temples, at -0.10% / +0.08% size, and PSNR is higher on every scene of both benchmark scripts.
+Three commits:
+9348e32: the backend and the options. Defaults unchanged, files byte-identical.
+a4c31082: kmeans_chunk_size, the memory knob of the builtin backend. Defaults unchanged.
+61cd1baf: makes the builtin backend with opacity_area weighting the default. It stands alone:
+drop it if you prefer TorchPQ as the default, and the options stay.
+Motivation
+On MipNeRF360 (garden / bicycle, mcmc.sh settings) almost all of the shN loss is the clustering, not
+the 6-bit codebook:
+Loss term (PSNR)
+garden
+bicycle
+clustering (raw shN vs float centroids)
+0.374 dB
+0.163 dB
+6-bit centroid quantization
+0.026 dB
+0.011 dB
+So the lever is which 65,536 centroids we spend, not how we store them. The current call clusters
+every splat with equal weight, although a large, opaque splat covers far more of the rendered image
+than a small, nearly transparent one.
+Method
+Weights per splat: sigmoid(opacity) * exp(sum of the two largest log-scales), that is, opacity
+times the splat's largest cross-section up to a constant factor. They are computed from the
+pre-activation parameters after the PLAS sort, so they line up with the splats being clustered.
+(kmeans_weighting="opacity" uses sigmoid(opacity) alone.)
+Clustering: Lloyd's algorithm with euclidean assignment (chunked, kmeans_chunk_size points at a
+time) and a weighted mean update, accumulated in float64. Initial centroids are n_clusters points drawn
+without replacement with a fixed seed. It stops when the summed squared centroid change is <= tol
+(1e-4) or after 100 iterations. An empty cluster becomes the zero vector, as in TorchPQ.
+Unchanged: file format, file layout, meta.json, the 6-bit codebook with one scalar min/max,
+uint16 labels, and the decoder (_decompress_kmeans). Directories written by either backend decode
+with any version.
+Results
+Every compressed row comes from this branch's PngCompression, paired against the current
+scheme on the same checkpoint and the same PLAS sort (k-means seed 0, sort seed 0, MCMC, 1M Gaussians,
+LPIPS VGG, one T4 per scene). On all 9 MipNeRF360 scenes, the benchmark implementation used for the
+first experiments gives identical results (metrics and file sizes).
+About the repo rows: our current-scheme baseline differs from the repository's results CSV
+(+0.20 dB on MipNeRF360, +0.05 dB on Tanks & Temples) because the environment differs: training
+run, torch / gsplat build, evaluation. The repo rows are shown for context only; every delta is paired
+against our own baseline on the same checkpoints.
+MipNeRF360, 9 scenes (benchmarks/compression/mcmc.sh)
+Submethod
+PSNR
+SSIM
+LPIPS
+Size [Bytes]
+#Gaussians
+current (torchpq, manhattan)
+27.4929
+0.8192
+0.2147
+16,005,532
+1,000,000
+kmeans_weighting="opacity_area"
+27.6038
+0.8199
+0.2138
+15,988,981
+1,000,000
+repo results/MipNeRF360.csv, 1M row
+27.29
+0.811
+0.229
+16,038,022
+1,000,000
+Scene
+Loss of the current scheme
+dPSNR
+dSSIM
+dLPIPS
+Size
+garden
+0.434 dB
++0.082
+-0.00016
+-0.00083
+-0.25%
+bicycle
+0.237 dB
++0.027
++0.00005
+-0.00094
+-0.14%
+stump
+0.290 dB
++0.048
++0.00052
+-0.00105
++0.06%
+bonsai
+0.859 dB
++0.272
++0.00136
+-0.00020
+-0.30%
+counter
+0.546 dB
++0.189
++0.00166
+-0.00136
++0.25%
+kitchen
+0.824 dB
++0.247
++0.00109
+-0.00127
+-0.47%
+room
+0.386 dB
++0.085
++0.00066
+-0.00024
+-0.21%
+treehill
+0.101 dB
++0.005
++0.00040
+-0.00102
+-0.15%
+flowers
+0.219 dB
++0.044
++0.00090
+-0.00147
++0.27%
+"Loss of the current scheme" = uncompressed PSNR minus current-scheme PSNR. The gain is largest on
+the indoor scenes, where that loss is largest.
+Tanks & Temples, 2 scenes (benchmarks/compression/mcmc_tt.sh)
+Submethod
+PSNR
+SSIM
+LPIPS
+Size [Bytes]
+#Gaussians
+current (torchpq, manhattan)
+24.0759
+0.8549
+0.1633
+16,105,621
+1,000,000
+kmeans_weighting="opacity_area"
+24.1284
+0.8551
+0.1630
+16,118,242
+1,000,000
+repo results/TanksAndTemples.csv, 1M row
+24.03
+0.857
+0.163
+16,100,628
+1,000,000
+Scene
+Loss of the current scheme
+dPSNR
+dSSIM
+dLPIPS
+Size
+train
+0.171 dB
++0.061
++0.00019
+-0.00038
++0.001%
+truck
+0.188 dB
++0.044
++0.00033
+-0.00017
++0.153%
+Summary
+PSNR is better on all 11 scenes, LPIPS on all 11, SSIM on 10 of 11 (garden -0.00016). Size stays
+within -0.47% and +0.27% per scene (-0.10% / +0.08% on average).
+The weighted update recovers about 21% of the compression loss on MipNeRF360 on average, and
+36% / 23% on train / truck.
+Seeds: on garden and bicycle, three k-means seeds all gain (+0.082 / +0.104 / +0.103 dB and
++0.027 / +0.031 / +0.033 dB). The current scheme's own seed-to-seed spread there is
+0.019 / 0.007 dB.
+kmeans_weighting="opacity" also passes our acceptance rule (fixed before the runs), but gains
+less: +0.049 dB on MipNeRF360 and +0.005 dB on Tanks & Temples.
+Cost
+current (TorchPQ)
+builtin, opacity_area
+k-means time, MipNeRF360 mean (range)
+405 s (398-427 s)
+510 s (297-646 s)
+k-means time, Tanks & Temples train / truck
+415 / 418 s
+357 / 298 s
+peak GPU memory during compress(), MipNeRF360
+1.26 GB
+3.37-3.62 GB
+peak GPU memory during compress(), Tanks & Temples
+1.03 GB
+3.37 GB
+peak GPU memory, increase over TorchPQ on the same scene
++2.11 to +2.35 GB
+decompression
+unchanged
+unchanged
+Time: 1.26x on MipNeRF360 on average (0.74x-1.59x per scene), and faster on Tanks & Temples
+(0.86x / 0.71x). TorchPQ always runs its full 100 iterations; the builtin backend stops at tol.
+Memory: measured as torch.cuda.max_memory_allocated() over compress() in the benchmark
+process, with the 1M-splat scene loaded, so the absolute figures include the scene. The increase
+over TorchPQ is +2.11 GB on 7 MipNeRF360 scenes and +2.35 GB on the other 4 (garden and bicycle
+ran in separate jobs, plus train and truck).
+Sizing it yourself: the largest buffer of the builtin backend is the assignment matrix,
+kmeans_chunk_size x n_clusters x 4 bytes: 4096 x 65,536 x 4 B = 1.07 GB at the default. The
+float64 copy of the weighted points adds N x D x 8 bytes (0.36 GB for 1M splats at SH degree 3).
+Lowering kmeans_chunk_size shrinks the first term linearly without changing the result (tested);
+I have not measured its effect on speed.
+GPU coverage: the builtin path ran on GPU on all 11 scenes above (9 MipNeRF360 + 2 Tanks &
+Temples). I have no GPU locally, so the repo's CUDA-only tests/test_compression.py test stays
+skipped in my runs. The CI that runs on pull requests (Core Tests) is CPU-only; the GPU workflow
+runs on pushes to main and on manual dispatch. With the default flip, that CUDA test exercises
+the builtin backend.
+Reproducibility
+Builtin backend: the initial draw is seeded and independent of the caller's numpy / torch state,
+and the result does not depend on kmeans_chunk_size (both are tested). On GPU, all 18 rows
+(9 scenes x 2 weightings) gave identical metrics and file sizes in two separate sessions. The
+float64 index_add_ uses CUDA atomics, so on GPU this is observed, not guaranteed.
+Current TorchPQ path, for comparison: re-running it on the same 9 checkpoints in a later session
+gave identical results on 7 scenes, and +0.0024 dB / +0.00006 dB on the other two. So it
+reproduces to about 0.002 dB, not bit-exactly. Paired against that re-run instead, the mean gain is
++0.1106 dB and every scene still gains.
+Also in this PR
+No TorchPQ / CuPy needed for kmeans_backend="builtin": it is plain PyTorch and runs on CPU.
+A CPU-only run with TorchPQ blocked compressed and decompressed 4,096 splats (0.21 s / 0.013 s),
+with the decoded shapes matching.
+n_clusters is clamped to the number of splats in the builtin path, so scenes with fewer than
+65,536 splats work. This sidesteps the "larger sample than population" failure reported in
+#787 for users who choose the builtin
+backend. The TorchPQ path is unchanged, so this does not fix PngCompression issue #787 by itself.
+The TorchPQ backend rejects weights with a clear error instead of silently ignoring them.
+After the default flip, PngCompression(kmeans_backend="torchpq") without
+kmeans_weighting=None fails when the object is created. It does not fail late, after sorting.
+Backward compatibility
+Commits 1-2: defaults unchanged, output byte-identical. The full PngCompression() output was
+diffed file by file against main with a stubbed TorchPQ: all 9 files identical.
+Commit 3 (default flip): the default output differs from before only in shN.npz; the PNG files
+are identical. The decoder is untouched, so directories from either version decode with either
+version.
+The previous output stays available:
+PngCompression(kmeans_backend="torchpq", kmeans_weighting=None) writes the same 9 files as main's
+PngCompression(). That was diffed against main, and tests pin it against the previous encoder.
+Not changed by the flip: requirements, extras and docs (TorchPQ / CuPy stay where they are).
+benchmarks/compression/results/*.csv still hold the TorchPQ numbers. A docs / extras cleanup,
+including those CSVs, can follow separately.
+Tests
+tests/test_kmeans.py runs on CPU without TorchPQ and covers:
+weights of one reproduce the unweighted result
+determinism per seed, and independence from the caller's numpy state and from the chunk size, both
+in weighted_kmeans and through PngCompression(kmeans_chunk_size=...) (same centroids and labels)
+empty clusters become zero, and argument validation (including chunk_size < 1)
+the weighting formulas
+a round-trip through the unchanged decoder
+n_clusters clamping, and errors for an unknown backend or misused weights
+the torchpq path byte-identical to the previous encoder, for _compress_kmeans and for
+PngCompression
+a full PngCompression round-trip on CPU with TorchPQ blocked, including the defaults
+the new defaults, and the torchpq + weighting error (commit 3)
+The flip changes one test expectation: with TorchPQ blocked, PngCompression() no longer raises
+ImportError; only the explicit torchpq backend does.
+How I would like to land it
+9348e32: the backend and the options, defaults untouched. Nothing changes for existing users.
+a4c31082: kmeans_chunk_size, defaults untouched.
+61cd1baf, easy to drop: makes kmeans_backend="builtin", kmeans_weighting="opacity_area" the
+default. If you prefer to keep TorchPQ as the default, drop this commit; the options stay. A
+docs / extras cleanup (installation notes, TorchPQ / CuPy as optional, regenerated results CSVs)
+can follow separately.
+I am happy to split, rename or drop any part, and to rerun the benchmarks on other scene sets.
+Daceyyreal
+added 3 commits
+September 18, 2026 02:26
+PngCompression: optional weighted K-means backend without TorchPQ
+…
+9348e32
+```
+Adds gsplat/compression/kmeans.py: weighted_kmeans(), Lloyd's algorithm in plain torch with
+chunked euclidean assignment and a weighted mean update, so shN clustering can run on CPU or
+GPU without TorchPQ and CuPy.
+
+_compress_kmeans gains weights and backend ("torchpq" default, "builtin"); PngCompression
+gains kmeans_backend and kmeans_weighting (None, "opacity", "opacity_area"), with the
+weights computed after sorting. The builtin path clamps n_clusters to the number of splats.
+
+The file format and the decoder are unchanged, and with the default settings the compressed
+files stay byte-identical to before (tests/test_kmeans.py pins that against the previous
+encoder).
+```
+PngCompression: expose the builtin K-means chunk size
+…
+a4c3108
+```
+kmeans_chunk_size (default 4096, the previous fixed value) is passed through
+_compress_kmeans to weighted_kmeans. It sets how many points each assignment
+step handles at once; the largest buffer of the builtin backend is a
+chunk_size x 65536 float32 distance matrix (1 GiB at the default), so a smaller
+chunk lowers peak memory. It does not change the result.
+
+weighted_kmeans now rejects chunk_size < 1, which would otherwise skip the
+assignment loop.
+```
+PngCompression: default to the builtin weighted K-means backend
+…
+61cd1ba
+```
+kmeans_backend now defaults to "builtin" and kmeans_weighting to
+"opacity_area". The torchpq backend stays available and unchanged:
+PngCompression(kmeans_backend="torchpq", kmeans_weighting=None) writes the same
+files as the previous default. Requirements are not changed.
+
+Because the default weighting cannot be used with torchpq, that combination now
+fails when the object is created, with a message naming kmeans_weighting=None,
+rather than after sorting and writing the PNG files.
+
+Tests: the ImportError expectation without TorchPQ now needs the explicit
+torchpq backend, since the defaults no longer import it. The byte-for-byte pins
+against the previous encoder use the torchpq backend explicitly, and one more pins
+the full PngCompression torchpq path. Also tested: the new defaults, and the
+torchpq + weighting error.
+
+This commit can be dropped on its own; the options stay available without it.
+```
+Daceyyreal
+changed the title
+PR draft: optional weighted K-means backend for PngCompression (not opened)
+PngCompression: builtin weighted K-means backend for the SH coefficients (no TorchPQ required)
+Sep 18, 2026
+Daceyyreal
+added a commit
+to Daceyyreal/gsplat
+that referenced
+this pull request
+Sep 18, 2026
+bench: FINDINGS open items - PR nerfstudio-project#1063 is open, defa…
+…
+7c14560
+```
+…ult flip is its last commit
+```
+Daceyyreal
+added a commit
+to Daceyyreal/gsplat
+that referenced
+this pull request
+Sep 18, 2026
+bench: HANDOFF - PR nerfstudio-project#1063 is open, default flip is …
+…
+12f912e
+```
+…its last commit, chunk size exposed
+```
+Daceyyreal
+added a commit
+to Daceyyreal/gsplat
+that referenced
+this pull request
+Oct 9, 2026
+HANDOFF: E5p attempt 1 (no data), Amendment 18, attempt 2 built; stan…
+…
+a0953fc
+```
+…ding rule: no Gram-weighted VQ upstream; next: run E5p attempt 2
+
+Attempt 1 recorded (OGC's repository 404, no data, a56a0bc); the standing rule that Gram-weighted VQ is not proposed
+upstream to gsplat (OGC's method is patented for commercial use; PR nerfstudio-project#1063's scalar k-means unaffected); OGC's code only
+outside the repository and in the private Kaggle dataset "E5p OGC source 49ccae72" (never public); the attempt-2
+build, checks and estimate. Next: run E5p attempt 2 attaching "E3p INRIA pilot", E5p attempt 1's output (the torch 2.11
+wheel) and "E5p OGC source 49ccae72".
+```
+This branch has not been deployed
+No deployments
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,95 @@
+--- v004.md
++++ v005.md
+@@ -4,26 +4,21 @@
+ 
+ ## Overview
+-Fused Backward and Optimizer is a training optimization technique for 3D Gaussian Splatting that integrates the Adam optimizer step directly into the backward pass of the differentiable rasterizer [S1, unofficial]. It solves the bottleneck where parameter updates consume 40–60% of training time by eliminating separate optimizer kernels and reducing VRAM usage through the avoidance of intermediate parameter buffers [S1, unofficial]. It differs from sibling methods like [FastGS](9177-fastgs.md) by prioritizing memory efficiency and correctness over maximum speed, whereas [FastGS](9177-fastgs.md) and [CLM](7351-clm.md) focus on skipping computations for invisible Gaussians to achieve higher speedups at the cost of potential quality degradation or inconsistency [S1, unofficial].
++Fused Backward and Optimizer is a training optimization technique for 3D Gaussian Splatting that integrates the Adam optimizer step directly into the backward pass of the differentiable rasterizer [S1, unofficial]. It addresses the bottleneck where parameter updates consume 40–60% of training time, though parameter updates remain the main bottleneck after integration [S1, unofficial]. It reduces VRAM usage by avoiding additional parameter buffers [S1, unofficial]. It differs from sibling methods like [FastGS](9177-fastgs.md) by prioritizing memory efficiency and strict Adam correctness over maximum speed, whereas [FastGS](9177-fastgs.md) and [CLM](7351-clm.md) focus on skipping computations for invisible Gaussians to achieve higher speedups at the cost of potential quality degradation or inconsistency [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- **Inputs:** Gradients $\frac{\partial \mathcal{L}}{\partial \theta}$ computed by the rasterizer's backward pass; current first and second moment estimates $m_t, v_t$ for Adam; hyperparameters $\alpha$ (learning rate), $\beta_1, \beta_2, \epsilon$.
+-- **Outputs:** Updated Gaussian parameters $\theta_{t+1}$; updated moments $m_{t+1}, v_{t+1}$.
++- **Inputs:** Gradients $\frac{\partial \mathcal{L}}{\partial \theta}$ computed by the rasterizer's backward pass; current first and second moment estimates $m_t, v_t$ for Adam; hyperparameters $\alpha$ (learning rate), $\beta_1, \beta_2, \epsilon$ [S1, unofficial][G].
++- **Outputs:** Updated Gaussian parameters $\theta_{t+1}$; updated moments $m_{t+1}, v_{t+1}$ [S1, unofficial][G].
+ 
+ **Data Structures:**
+-- **Gaussian Parameters:** Stored in contiguous GPU memory. Fields include position, covariance (6 values), opacity, and spherical harmonics coefficients.
+-- **Adam Moments:** Two buffers per parameter set, matching the size of the parameters, storing $m_t$ and $v_t$.
+-- **Gradients:** Buffer matching parameter size, populated by the rasterizer backward pass.
++- **Gaussian Parameters:** Stored in contiguous GPU memory [G]. Fields include position, covariance (6 values), opacity, and spherical harmonics coefficients [G].
++- **Adam Moments:** Two buffers per parameter set, matching the size of the parameters, storing $m_t$ and $v_t$ [G].
++- **Gradients:** Buffer matching parameter size, populated by the rasterizer backward pass [G].
+ 
+ **Numbered Steps:**
+-1. **Gradient Computation:** The differentiable rasterizer computes pixel colors and gradients $\frac{\partial \mathcal{L}}{\partial \theta}$ for all visible Gaussians. For Gaussians outside the viewing frustum, gradients are explicitly set to zero [S1, unofficial].
+-2. **Moment Loading:** Load current first and second moment estimates $m_t$ and $v_t$ from global memory into registers or shared memory for the active Gaussians [S1, unofficial].
+-3. **Fused Update Kernel:** Launch a single CUDA kernel that performs the Adam update logic for all parameters in parallel:
+-   - Compute biased first moment: $m_{t+1} = \beta_1 m_t + (1 - \beta_1) \frac{\partial \mathcal{L}}{\partial \theta}$ [S1, unofficial].
+-   - Compute biased second moment: $v_{t+1} = \beta_2 v_t + (1 - \beta_2) \left(\frac{\partial \mathcal{L}}{\partial \theta}\right)^2$ [S1, unofficial].
+-   - Compute bias-corrected estimates: $\hat{m}_{t+1} = \frac{m_{t+1}}{1 - \beta_1^{t+1}}$, $\hat{v}_{t+1} = \frac{v_{t+1}}{1 - \beta_2^{t+1}}$ [S1, unofficial].
+-   - Update parameters: $\theta_{t+1} = \theta_t - \alpha \frac{\hat{m}_{t+1}}{\sqrt{\hat{v}_{t+1}} + \epsilon}$ [S1, unofficial].
+-   - Write updated moments $m_{t+1}, v_{t+1}$ and parameters $\theta_{t+1}$ back to global memory [S1, unofficial].
+-4. **Memory Management:** No intermediate buffers for raw parameters are allocated during the update, as updates are written directly to the parameter storage [S1, unofficial].
++1. **Gradient Computation:** The differentiable rasterizer computes pixel colors and gradients $\frac{\partial \mathcal{L}}{\partial \theta}$ for all visible Gaussians; Gaussians outside the viewing frustum receive a gradient of zero [S1, unofficial].
++2. **Moment Loading & Fused Update:** Load current moments and compute all parameter updates during gradient computation, fusing the optimizer computation with the backward pass of the rasterizer [S1, unofficial].
++3. **Apply Adam Update:** Compute standard Adam parameter updates using the loaded moments and gradients [G].
++4. **Direct Write-Back:** Write updated moments and parameters directly to storage without allocating intermediate parameter buffers [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -41,5 +36,5 @@
+     t: Current training step index (1-based).
+     """
+-    # Compute bias correction terms
++    # Standard Adam bias correction terms [G]
+     bias1 = 1.0 - beta1 ** t
+     bias2 = 1.0 - beta2 ** t
+@@ -51,12 +46,12 @@
+     v_new = beta2 * v + (1.0 - beta2) * (grads ** 2)
+     
+-    # Bias-corrected moments
++    # Bias-corrected moments [G]
+     m_hat = m_new / bias1
+     v_hat = v_new / bias2
+     
+-    # Parameter update
+-    params_new = params - alpha * (m_hat / (sqrt(v_hat) + eps))
++    # Parameter update [G]
++    params_new = params - alpha * (m_hat / (v_hat.sqrt() + eps))
+     
+-    # Write back
++    # Write back directly to avoid intermediate buffers [S1, unofficial]
+     m[:] = m_new
+     v[:] = v_new
+@@ -65,20 +60,20 @@
+ 
+ **Parameters:**
+-- $\alpha$: Learning rate (typically $1.6 \times 10^{-2}$ for position, $1.0 \times 10^{-3}$ for other parameters in standard 3DGS, but specific values for the fused variant are not explicitly differentiated in the source) [S1, unofficial].
+-- $\beta_1, \beta_2$: Adam momentum coefficients (typically $0.9, 0.999$) [S1, unofficial].
+-- $\epsilon$: Adam epsilon (typically $10^{-15}$) [S1, unofficial].
++- $\alpha$: Learning rate [G].
++- $\beta_1, \beta_2$: Adam momentum coefficients [G].
++- $\epsilon$: Adam epsilon [G].
+ 
+ **Edge Cases and Pitfalls:**
+-- **Zero Gradients:** To maintain correctness with respect to the original Adam step, parameter updates must be performed even for parameters receiving a gradient of zero (e.g., Gaussians outside the viewing frustum) [S1, unofficial]. Skipping these updates breaks the moment estimation consistency.
++- **Zero Gradients:** To maintain correctness with respect to the original Adam step, parameter updates must be performed even for parameters receiving a gradient of zero (e.g., Gaussians outside the viewing frustum) [S1, unofficial]. Skipping these updates breaks moment estimation consistency [G].
+ - **Performance Trade-off:** While this approach reduces VRAM, it does not skip computations for invisible Gaussians, limiting the speedup compared to methods that do skip them [S1, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N)$ where $N$ is the number of Gaussian parameters. The fused kernel reduces kernel launch overhead and memory bandwidth pressure by combining gradient accumulation and update into one pass.
+-- **Memory Complexity:** $O(N)$ for parameters and moments. VRAM is reduced because no additional buffers for intermediate parameter states are required during the update step [S1, unofficial].
+-- **Measured Performance:** On Mip-NeRF360 outdoor scenes with an RTX 4090, training time reduced from 5m31s to 5m04s, and VRAM usage decreased from 6.0GiB to 5.6GiB, with PSNR increasing slightly from 24.72 to 24.73 [S1, unofficial].
+-- **Strengths:** Significant VRAM reduction, especially beneficial for large scenes with many Gaussians. Maintains strict numerical equivalence with the standard Adam optimizer.
+-- **Limitations:** Attainable performance improvements are smaller compared to methods that skip updates for invisible Gaussians. After integration, parameter updates remain a significant bottleneck, consuming a large fraction of the remaining runtime [S1, unofficial].
+-- **When to Use:** When VRAM is the primary constraint or when strict adherence to the original 3DGS optimization trajectory is required without risking quality degradation from skipped updates.
+-- **When Not to Use:** When maximum training speed is the priority and slight quality inconsistencies are acceptable; in such cases, skipping updates for invisible Gaussians (as in [FastGS](9177-fastgs.md)) is preferred.
++- **Time Complexity:** $O(N)$ where $N$ is the number of Gaussian parameters [G]. The fused kernel reduces kernel launch overhead and memory bandwidth pressure by combining gradient accumulation and update into one pass [G].
++- **Memory Complexity:** $O(N)$ for parameters and moments [G]. VRAM is reduced because no additional buffers for the parameters are necessary [S1, unofficial].
++- **Measured Performance:** On Mip-NeRF360 outdoor scenes (RTX 4090), reduces training time from 5m31s to 5m04s and VRAM from 6.0GiB to 5.6GiB, with PSNR increasing slightly from 24.72 to 24.73 [S1, unofficial].
++- **Strengths:** Reduces VRAM requirements, especially for large amounts of Gaussians [S1, unofficial].
++- **Limitations:** Attainable performance improvements are reduced compared to skipping updates for invisible Gaussians [S1, unofficial]. After integration, computing parameter updates remains the main bottleneck of training [S1, unofficial].
++- **When to Use:** When VRAM is the primary constraint or when strict adherence to the original 3DGS optimization trajectory is required without risking quality degradation from skipped updates [S1, unofficial][G].
++- **When Not to Use:** When maximum training speed is the priority and slight quality inconsistencies are acceptable; in such cases, skipping updates for invisible Gaussians (as in [FastGS](9177-fastgs.md)) is preferred [S1, unofficial][G].
+ 
+ ## Background

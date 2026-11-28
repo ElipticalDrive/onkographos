@@ -1,0 +1,153 @@
+# Tile-based SDF Rendering with RPN Interpreter
+
+Also called: Chunked SDF rendering, SDF interpreter with command buffers
+
+## Overview
+This method renders large worlds composed of Signed Distance Functions (SDFs) by partitioning the scene into tiles, pruning irrelevant primitives per tile, and evaluating the remaining SDF expression in the fragment shader using a Reverse Polish Notation (RPN) interpreter. It solves the problem of shader compilation latency and memory constraints when dealing with complex, large-scale SDF scenes. Unlike [SDFPerf Raymarching Shader](16929-sdfperf-raymarching-shader.md), which generates static shader code, this approach uses a dynamic interpreter pattern with command and operand buffers, allowing for on-the-fly simplification and avoiding the prohibitive cost of recompiling shaders for every tile.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A world defined by a set of SDF primitives and their transformations.
+*   **Output:** A rendered image where each tile displays the SDF evaluation for that region.
+
+**Data Structures:**
+The shader requires two input buffers, one for each tile:
+1.  **Command Buffer:** An integer array containing opcodes (e.g., `union`, `add`, `multiply`, `point_primitive`, `segment_primitive`).
+2.  **Operand Buffer:** A float array containing numerical values, such as primitive parameters and transformation matrices, consumed by the commands.
+
+**Algorithm Steps:**
+
+1.  **Define Usefulness Bounds:**
+    Assign each primitive a "usefulness bound," a finite distance beyond which its contribution to the SDF is considered zero. This requires selecting or modifying the distance-to-height mapping curve so it reaches zero at a finite distance [S1, unofficial].
+
+2.  **Tile Partitioning:**
+    Split the world into tiles (chunks) small enough to fit within the shader's memory constraints for the command and operand buffers [S1, unofficial].
+
+3.  **Pruning:**
+    For each tile, identify primitives whose usefulness bounds do not intersect the tile. Remove these primitives from the local SDF expression [S1, unofficial].
+
+4.  **Tree Simplification:**
+    Simplify the remaining operation tree by applying algebraic identities to eliminate zero contributions. Specifically:
+    *   Replace $x \times 0$ with $0$.
+    *   Replace $x + 0$ with $x$.
+    Repeat until no further simplification is possible. This step reduces the number of operations required [S1, unofficial].
+
+5.  **RPN Conversion (CPU):**
+    Rewrite the simplified SDF expression into Reverse Polish Notation (RPN). Generate the corresponding integer command buffer and float operand buffer for the tile [S1, unofficial].
+
+6.  **Shader Execution (GPU):**
+    In the fragment shader, execute a loop over the command buffer. Maintain a stack of float values. For each command:
+    *   Pop the required number of operands from the operand buffer.
+    *   Perform the operation using the stack.
+    *   Push the result back onto the stack.
+    The final value on the stack is the SDF value for the fragment [S1, unofficial].
+
+**Parameters:**
+*   **Stack Size:** The maximum depth of the evaluation stack must be determined during the simplification phase and fixed in the shader implementation. It must be reasonably small to fit within shader memory limits [S1, unofficial].
+
+**Pitfalls:**
+*   **Shader Compilation Time:** Generating unique shader code for each tile (e.g., via string concatenation) is prohibitively slow for large unions (e.g., thousands of primitives can take 30+ seconds to compile) [S1, unofficial]. The RPN interpreter approach avoids this by using a single generic shader program.
+*   **Stack Overflow:** If the simplification step is insufficient, the stack depth may exceed the fixed size allocated in the shader, leading to incorrect results or crashes [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# CPU Side: Tile Processing
+def process_tile(primitives, tile_bounds):
+    # Step 1 & 3: Prune primitives based on usefulness bounds
+    active_primitives = []
+    for prim in primitives:
+        if intersects_bounds(prim.usefulness_bounds, tile_bounds):
+            active_primitives.append(prim)
+    
+    # Step 4: Simplify the operation tree
+    # This function returns a simplified expression tree
+    simplified_tree = simplify_tree(build_sdf_tree(active_primitives))
+    
+    # Step 5: Convert to RPN and generate buffers
+    rpn_commands, operands = convert_to_rpn(simplified_tree)
+    
+    return rpn_commands, operands
+
+# GPU Side: Fragment Shader Interpreter
+# Globals: command_buffer (int[]), operand_buffer (float[]), stack (float[])
+# Globals: command_ptr (int), operand_ptr (int), stack_ptr (int)
+
+def evaluate_sdf():
+    # Initialize stack pointer
+    stack_ptr = 0
+    
+    # Loop through all commands in the buffer
+    while command_ptr < len(command_buffer):
+        cmd = command_buffer[command_ptr]
+        command_ptr += 1
+        
+        if cmd == UNION:
+            b = stack[stack_ptr - 1]
+            a = stack[stack_ptr - 2]
+            stack[stack_ptr - 2] = min(a, b)
+            stack_ptr -= 1
+        elif cmd == ADD:
+            b = stack[stack_ptr - 1]
+            a = stack[stack_ptr - 2]
+            stack[stack_ptr - 2] = a + b
+            stack_ptr -= 1
+        elif cmd == MULTIPLY:
+            b = stack[stack_ptr - 1]
+            a = stack[stack_ptr - 2]
+            stack[stack_ptr - 2] = a * b
+            stack_ptr -= 1
+        elif cmd == POINT_PRIMITIVE:
+            # Pop parameters from operand buffer
+            center = read_operands(3) # x, y, z
+            radius = read_operand(1)  # r
+            # Push result onto stack
+            stack[stack_ptr] = distance(center, current_fragment_pos) - radius
+            stack_ptr += 1
+        elif cmd == SEGMENT_PRIMITIVE:
+            # Pop parameters from operand buffer
+            p1 = read_operands(3)
+            p2 = read_operands(3)
+            radius = read_operand(1)
+            # Push result onto stack
+            stack[stack_ptr] = distance_to_segment(current_fragment_pos, p1, p2) - radius
+            stack_ptr += 1
+        else:
+            # Unknown command or placeholder for other operations
+            pass
+            
+    return stack[0]
+
+def read_operand(count):
+    val = operand_buffer[operand_ptr]
+    operand_ptr += count
+    return val
+
+def read_operands(count):
+    # Returns a vector of size count
+    return [operand_buffer[operand_ptr + i] for i in range(count)]
+```
+
+## Subtopics
+
+### One-Quad-Per-Primitive Rendering
+Renders each SDF object as a separate quad. It is simpler to implement and optimal in terms of primitive evaluation count but may struggle to keep GPU cores busy due to overdraw and state changes. It is preferred when overlapping per pixel is low [S1, unofficial].
+
+### Static Shader Generation
+Generates a unique shader string for the entire scene or large chunks. It is simple but suffers from extreme compilation times for complex scenes (thousands of primitives) [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** The CPU side complexity depends on the pruning and simplification algorithms. For millions of primitives, spatial hierarchies (e.g., BVH, Octree) are required to scale the pruning process efficiently [S1, unofficial]. The GPU side complexity is linear with respect to the number of commands in the RPN buffer for the tile.
+*   **Memory Complexity:** The shader memory usage is fixed per tile, determined by the size of the command buffer, operand buffer, and the maximum stack depth. This allows rendering of large worlds by tiling, as only a subset of primitives is loaded per tile [S1, unofficial].
+*   **Strengths:** Avoids shader compilation overhead; allows dynamic simplification; scales to large worlds via tiling.
+*   **Limitations:** Requires a fixed stack size; simplification logic can be complex; tiling introduces boundary artifacts if not handled carefully (not detailed in sources).
+*   **When to Use:** Large worlds with many overlapping SDF primitives where static shader generation is too slow.
+*   **When Not to Use:** Scenes with very few primitives where the overhead of tiling and interpretation outweighs the benefits; scenes where dynamic stack depth is unpredictable and cannot be bounded.
+
+## Background
+This method was proposed in a 2020 discussion on Computer Graphics Stack Exchange as a solution to the problem of rendering large SDF worlds without incurring the high cost of on-the-fly shader compilation. It builds on the concept of tile-based rendering to manage local complexity and applies the interpreter pattern with RPN to decouple the SDF expression structure from the shader code.
+
+## Sources
+[S1] SDF rendering for large world, https://computergraphics.stackexchange.com/questions/9708/sdf-rendering-for-large-world, fetched 2026-10-27 (unofficial)

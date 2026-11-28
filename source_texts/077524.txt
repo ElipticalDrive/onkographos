@@ -1,0 +1,170 @@
+Problem Non-traditional data types (e.g., Gaussian splats and voxels) require rendering techniques that aggregate data into one place on the GPU. However, these systems are at odds with cesium-native's own systems for tile selection and ...
+
+Address potential desyncs between tile selection and runtime rendering · Issue #1345 · CesiumGS/cesium-native · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Address potential desyncs between tile selection and runtime rendering #1345
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Address potential desyncs between tile selection and runtime rendering#1345
+Copy link
+Labels
+enhancementNew feature or requestNew feature or request
+Description
+j9liu
+opened on Apr 15, 2026
+Issue body actions
+Problem
+Non-traditional data types (e.g., Gaussian splats and voxels) require rendering techniques that aggregate data into one place on the GPU. However, these systems are at odds with cesium-native's own systems for tile selection and resource preparation.
+The assumption is that after prepareInMainThread, a model will have fully initialized on the runtime side and the tile will be ready to render. This is not true for splats or voxels, because there is an extra latency between when the game components/objects are created vs. when their data actually makes it into their respective rendering systems.
+For voxels in Unreal (CesiumGS/cesium-unreal#1685), this is mitigated because of the custom VoxelOctree class which maintains its own traversal history. For splats, many tiles are hidden too early before the intended level of detail appears, leading to large incorrect gaps.
+Possible Solutions
+One idea is to have some overridable isReady function on the render resources. This way, native won't choose to hide a tile if the contents of its children aren't actually "ready" according to some runtime metric. I'm not sure how this would work API wise, though I think it's possible and perhaps the easiest solution.
+There is also the possibility to bring parts of the splat/voxel systems in Unreal into cesium-native; they both use a "registering"/"unregistering" system for their respective rendering techniques. But maybe that would be too heavy handed?
+Reactions are currently unavailable
+Activity
+j9liu
+added
+enhancementNew feature or requestNew feature or request
+on Apr 15, 2026
+j9liu commented on Apr 16, 2026
+j9liu
+on Apr 16, 2026
+CollaboratorAuthor
+More actions
+Thinking more seriously about this..
+Renderer resources are represented as void* throughout cesium-native. What if instead we had an interface called IRendererResources with a virtual bool canRender() function? Then,
+void* could be changed to IRendererResources*
+Our clients could have their existing implementation inherit from this class.
+canRender() can be easily factored into Tile::isRenderable() as well:
+cesium-native/Cesium3DTilesSelection/src/Tile.cpp
+Lines 218 to 239
+in
+495c1dc
+bool Tile::isRenderable() const noexcept {
+if (getState() == TileLoadState::Failed) {
+// Explicitly treat failed tiles as "renderable" - we just treat them like
+// empty tiles.
+return true;
+}
+if (getState() == TileLoadState::Done) {
+// An unconditionally-refined tile is never renderable... UNLESS it has no
+// children, in which case waiting longer will be futile.
+if (!getUnconditionallyRefine() || this->_children.empty()) {
+return std::all_of(
+this->_rasterTiles.begin(),
+this->_rasterTiles.end(),
+[](const RasterMappedTo3DTile& rasterTile) noexcept {
+return rasterTile.getReadyTile() != nullptr;
+});
+}
+}
+return false;
+}
+I'm curious if people have any thoughts or objections?
+kring commented on Apr 16, 2026
+kring
+on Apr 16, 2026
+Member
+More actions
+One possible way to handle this without any architectural changes is to hook into the prepareInLoadThread portion of the load (which is asynchronous) instead of the prepareInMainThread portion (which is synchronous). prepareInLoadThread can do main thread work if it needs to. There's an example of this in cesium-unity.
+Making prepareInMainThread asynchronous (e.g., via polling as you've proposed above) is possible, too. At one point that would have been a scary change, but today I think it already ends up being asynchronous in some cases anyway, such as:
+When there's a TilesetOptions::mainThreadLoadingTimeLimit.
+When the GltfModifier needs to run.
+👍React with 👍1Reacted by Janine Liu
+kring commented on Apr 16, 2026
+kring
+on Apr 16, 2026
+Member
+More actions
+Rather than a polling-based system (canRender), you could also consider making prepareInMainThread return a Future. In most cases it will return a Future that is already resolved, so the overhead should be minimal. When calling that method starts up async work, though, you may need some way to throttle it so that you don't end up with too many jobs in flight at the same time. Even if those jobs are queued on the Unreal side, throttling is still important, because otherwise we could easily end up filling Unreal's queue with a bunch of jobs that are now irrelevant because the camera moved elsewhere.
+👀React with 👀1Reacted by Janine Liu
+j9liu commented on Apr 17, 2026
+j9liu
+on Apr 17, 2026
+CollaboratorAuthor
+More actions
+Thanks for the comments @kring! I was actually thinking about the solutions you proposed but didn't think they would work for this case. I realize I should have explained the problem in more detail...
+For both voxels/splats, the glTF components are created as follows:
+Component created in prepareInMainThread
+Register component with a greater system in Unreal
+Deploy a render-thread command on the Unreal side to copy data to the GPU
+Poll a render fence for when that command is finished
+Only after no. 4 would we want the render content to be considered renderable. If there's a way to somehow "tick" a future or prevent it from resolving until this fence is complete, that would make things easier! But I'm not sure how to implement a then continuation that wouldn't fire until then, unless I'm missing something obvious?
+azrogers commented on Apr 17, 2026
+azrogers
+on Apr 17, 2026
+Contributor
+More actions
+Perhaps we should look into uploading the data to the GPU in prepareInLoadThread. But you can create a Future that can resolve on any timeline you need it to using a Promise.
+j9liu commented on Apr 17, 2026
+j9liu
+on Apr 17, 2026
+CollaboratorAuthor
+More actions
+you could also consider making prepareInMainThread return a Future.
+I'm leaning towards this TBH. I could make prepareInLoadThread work, but we'd be ripping all of the game thread construction logic and putting it in a thenInMainThread call, on top of waiting for a promise() to resolve. It's doable, just ugly. But I also think that having a Future will give prepareInMainThread a bit more flexibility that could help in the future, even if most of the time the returned future is resolved.
+Will have to look into throttling as @kring mentioned, though.
+kring commented on Apr 20, 2026
+kring
+on Apr 20, 2026
+Member
+More actions
+If there's a way to somehow "tick" a future or prevent it from resolving until this fence is complete, that would make things easier!
+Yeah, like Ashley said, that's the purpose of Promise. See here:
+https://cesium.com/learn/cesium-native/ref-doc/async-system.html#promise
+Let me know if it's unclear, because that part should be pretty easy to deal with.
+For both voxels/splats, the glTF components are created as follows...
+In the steps you listed, ideally, we'd be able to do (3) and (4) in a worker thread (perhaps dispatching to the render thread as necessary) in prepareInLoadThread, and only later do steps (1) and (2) in prepareInMainThread. This is how we load textures, for example, but it may or may not be possible in this case.
+If that's not possible, you could consider adding a runInMainThread section to the prepareInLoadThread callback to create and register the component. That's kind of how cesium-unity works (out of necessity), though it's "weird" in the Unreal context so far.
+But I also think that having a Future will give prepareInMainThread a bit more flexibility that could help in the future, even if most of the time the returned future is resolved.
+It's a good change, but there are definitely some gotchas. One that comes immediately to mind is that the mainThreadLoadingTimeLimit gets tricky. The idea behind that property is to avoid doing too much main thread work at once, because that will tank the frame rate. Better to slow down loading than to ruin interactivity. But if the main thread work is asynchronous, it becomes very hard to measure it.
+j9liu commented on Apr 23, 2026
+j9liu
+on Apr 23, 2026
+CollaboratorAuthor
+More actions
+I tried to get the .thenInWorkerThread.thenInMainThread chaining to work on this branch in Unreal: https://github.com/CesiumGS/cesium-unreal/tree/splat-thread-chaining
+But I'm messing something up somehow, because I get situations where tiles don't get properly cleaned up and linger even after a tileset refresh. I have also seen the NewObject<> call in .thenInMainThread trigger a breakpoint while exiting the editor. So I think there's lifetime ramifications that I haven't fully thought through yet.
+In any case, I'm pausing this for now as it's becoming a bit of a time sink :')
+kring commented on Apr 26, 2026
+kring
+on Apr 26, 2026
+Member
+More actions
+I took a quick look at that branch. Some things I noticed:
+In CesiumGltfComponent.cpp:
+There's a comment that says "Not safe to capture asyncSystem here." Why? I can't think of any reason it would be unsafe.
+bool requiresMainThreadContinuation = false; looks unused?
+loadModelAnyThreadPart has a structure like return CesiumGltfTextures::createInWorkerThread(...).thenInWorkerThread(...).thenInMainThread(...). But in most cases there's no need to do any main thread work, yet it will still wait to dispatch a task to the main thread, wasting time. A better pattern is: return CesiumGltfTextures::createInWorkerThread(...).thenInWorkerThread((...) => { ...; if (necessary) return runInMainThread(...) else return createResolvedFuture(...); }) Hope my sketchy pseudocode makes sense.
+The thenInWorkerThread at the end of loadModelAnyThreadPart doesn't look like it does anything useful.
+Just above that, there's a .all(...).thenInWorkerThread(...) that is a little inefficient. I think that loop should be very low cost, so a thenImmediately would probably be more appropriate.
+Also, if a tile is unloaded before its UnrealPrepareRendererResources::prepareInMainThread is called, I don't think the UCesiumGltfComponent created in the prepareInLoadThread portion will be destroyed. There's a small chance this could be the cause of the "lingering" you see, but I'm not entirely sure why it would happen, considering that the UCesiumGltfComponent is initially hidden.
+So maybe a few things to try cleaning up, but I'm not sure if it will help.
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+enhancementNew feature or requestNew feature or request
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

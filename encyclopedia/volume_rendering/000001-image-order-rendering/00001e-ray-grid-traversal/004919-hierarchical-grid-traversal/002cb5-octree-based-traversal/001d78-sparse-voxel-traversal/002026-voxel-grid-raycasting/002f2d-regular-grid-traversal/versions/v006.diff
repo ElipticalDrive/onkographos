@@ -1,0 +1,136 @@
+--- v005.md
++++ v006.md
+@@ -1,97 +1,57 @@
+ # Regular Grid Traversal
+ 
+-Also called: Grid Traversal Algorithm
++Also called: Grid Traversal Algorithm, Uniform Grid Traversal, 3D-DDA
+ 
+ ## Overview
+-Regular Grid Traversal is a ray-grid traversal method that accelerates ray-primitive intersection tests by mapping primitives to a uniform 3D voxel grid and stepping through occupied cells using 3D-DDA [S1]. It solves the problem of testing every object for every ray by storing primitives in the cells they overlap, allowing rays to skip empty cells and only test primitives within intersected cells [S1]. Unlike [Voxel Grid Raycasting](2218-voxel-grid-raycasting.md) which typically renders volumetric density, this method accelerates geometric ray tracing by storing primitive pointers in voxels [S1]. It differs from [Hierarchical Grid Traversal](52-name.md) by using a flat, uniform structure without hierarchical levels, and from [Sparse Voxel Traversal](5228-sparse-voxel-tracing.md) by not using sparse data structures like octrees [S1].
++Regular Grid Traversal is a ray-scene intersection acceleration technique that partitions the scene's Axis-Aligned Bounding Box (AABB) into a fixed-size 3D grid of uniform cells (voxels) [S1]. It solves the problem of $O(N)$ ray-primitive intersection tests by allowing rays to skip empty cells, testing only primitives stored in intersected voxels . Unlike hierarchical structures (e.g., BVH, Octree) that partition primitives into disjoint sets, the Regular Grid partitions space into disjoint sub-blocks, meaning a single primitive can belong to multiple cells . It is distinguished by its constant-time cell access, simple traversal logic, and suitability for dynamic scenes due to its linear build time, though it suffers from high memory overhead in sparse scenes .
+ 
+ ## Shared principles
+-The family shares the mechanism of 3D Digital Differential Analyzer (3D-DDA) traversal to step through a uniform 3D grid [G]. The grid partitions the scene's Axis-Aligned Bounding Box (AABB) into $N_x \times N_y \times N_z$ uniform cells [S1]. Rays are advanced by calculating the distance to the next cell boundary along each axis, advancing the coordinate with the smallest distance [S1]. The traversal stops when the ray exits the grid bounds or finds a primitive intersection [S1].
++The method relies on a uniform 3D grid where each cell corresponds to a fixed volume in world space. The grid is defined by its resolution $(N_x, N_y, N_z)$ and the scene bounding box $[p_1, p_2]$.
+ 
+-### Algorithm
+-Given a parametric ray $r(t) = o + t \cdot d$ and a grid spanning $[p_1, p_2]$ with resolution $(N_x, N_y, N_z)$, the cell dimensions are $dx = (p_2.x - p_1.x)/N_x$, $dy = (p_2.y - p_1.y)/N_y$, $dz = (p_2.z - p_1.z)/N_z$. The algorithm computes the starting cell $(X, Y, Z)$, step directions, and initial distances to cell boundaries ($tMax$), then iteratively advances through cells until a hit is found or bounds are exceeded [S1].
++**Grid Construction:**
++1.  **Cell Dimensions:** The size of each voxel is calculated as:
++    $$dx = \frac{p_2.x - p_1.x}{N_x}, \quad dy = \frac{p_2.y - p_1.y}{N_y}, \quad dz = \frac{p_2.z - p_1.z}{N_z}$$
++    [S1]
++2.  **Primitive Assignment:** For each primitive $P$, its AABB $[b_{min}, b_{max}]$ is computed. The range of grid cells overlapping this AABB is determined by clamping the floor of the normalized coordinates to the grid bounds:
++    $$x_1 = \max(0, \lfloor \frac{b_{min}.x - p_1.x}{dx} \rfloor), \quad x_2 = \min(N_x - 1, \lfloor \frac{b_{max}.x - p_1.x}{dx} \rfloor + 1)$$
++    (Similarly for $y$ and $z$) [S1].
++3.  **Storage:** Each cell stores a list of primitives that overlap it. This mapping must be conservative; it may include more primitives than strictly necessary but never fewer .
+ 
+-```python
+-def regular_grid_traversal(ray_origin, ray_direction, grid_min, grid_max, grid_res):
+-    Nx, Ny, Nz = grid_res
+-    dx = (grid_max.x - grid_min.x) / Nx
+-    dy = (grid_max.y - grid_min.y) / Ny
+-    dz = (grid_max.z - grid_min.z) / Nz
++**Ray Traversal (3D-DDA):**
++The traversal identifies the sequence of cells intersected by a ray $r(t) = o + t \cdot d$.
++1.  **Ray-Grid Intersection:** The ray is first intersected with the grid's bounding box to find entry $t_{enter}$ and exit $t_{exit}$ parameters [S1]. If $t_{exit} < 0$ or $t_{enter} > t_{exit}$, the ray misses the grid [S1].
++2.  **Initialization:** The starting cell $(X, Y, Z)$ is determined by the ray origin (clamped to $t_{enter}$):
++    $$X = \lfloor \frac{(o + d \cdot \max(t_{enter}, 0.0)).x - p_1.x}{dx} \rfloor$$
++    (Similarly for $Y, Z$) [S1].
++3.  **Step Parameters:**
++    *   **Step Direction:** $stepX = \text{sign}(d.x)$ (1, -1, or 0) [S1].
++    *   **Delta Distance:** The distance along the ray to cross one full cell:
++        $$tDeltaX = \frac{dx}{|d.x|} \text{ if } d.x \neq 0 \text{ else } \infty$$
++        (Similarly for $Y, Z$) [S1].
++    *   **Initial Boundary Distance ($tMax$):** The distance to the next cell boundary in the current direction. For $d.x > 0$:
++        $$tMaxX = \frac{(X + 1) \cdot dx + p_1.x - start\_point.x}{d.x}$$
++        For $d.x < 0$:
++        $$tMaxX = \frac{X \cdot dx + p_1.x - start\_point.x}{d.x}$$
++        (Similarly for $Y, Z$) [S1].
++4.  **Loop:** The algorithm advances to the nearest boundary by comparing $tMaxX, tMaxY, tMaxZ$. The axis with the minimum $tMax$ is incremented by its step direction, and its $tMax$ is increased by $tDelta$ [S1]. This continues until the ray exits the grid or a hit is found.
+ 
+-    # Intersect ray with grid AABB to handle origins outside bounds [G]
+-    t_min, t_max = ray_aabb_intersect(ray_origin, ray_direction, grid_min, grid_max)
+-    if t_max < 0 or t_min > t_max:
+-        return None
+-    start_point = ray_origin + ray_direction * max(t_min, 0.0)
+-
+-    X = int((start_point.x - grid_min.x) / dx)
+-    Y = int((start_point.y - grid_min.y) / dy)
+-    Z = int((start_point.z - grid_min.z) / dz)
+-
+-    stepX = 1 if ray_direction.x > 0 else -1
+-    stepY = 1 if ray_direction.y > 0 else -1
+-    stepZ = 1 if ray_direction.z > 0 else -1
+-
+-    if ray_direction.x > 0:
+-        tMaxX = ((X + 1) * dx + grid_min.x - start_point.x) / ray_direction.x
+-    elif ray_direction.x < 0:
+-        tMaxX = (X * dx + grid_min.x - start_point.x) / ray_direction.x
+-    else:
+-        tMaxX = float('inf')
+-
+-    if ray_direction.y > 0:
+-        tMaxY = ((Y + 1) * dy + grid_min.y - start_point.y) / ray_direction.y
+-    elif ray_direction.y < 0:
+-        tMaxY = (Y * dy + grid_min.y - start_point.y) / ray_direction.y
+-    else:
+-        tMaxY = float('inf')
+-
+-    if ray_direction.z > 0:
+-        tMaxZ = ((Z + 1) * dz + grid_min.z - start_point.z) / ray_direction.z
+-    elif ray_direction.z < 0:
+-        tMaxZ = (Z * dz + grid_min.z - start_point.z) / ray_direction.z
+-    else:
+-        tMaxZ = float('inf')
+-
+-    tDeltaX = dx / abs(ray_direction.x) if ray_direction.x != 0 else float('inf')
+-    tDeltaY = dy / abs(ray_direction.y) if ray_direction.y != 0 else float('inf')
+-    tDeltaZ = dz / abs(ray_direction.z) if ray_direction.z != 0 else float('inf')
+-
+-    while 0 <= X < Nx and 0 <= Y < Ny and 0 <= Z < Nz:
+-        # Process cell: test primitives stored in this cell [S1]
+-        if test_primitives_in_cell(X, Y, Z):
+-            return (X, Y, Z)
+-
+-        if tMaxX < tMaxY:
+-            if tMaxX < tMaxZ:
+-                X += stepX
+-                tMaxX += tDeltaX
+-            else:
+-                Z += stepZ
+-                tMaxZ += tDeltaZ
+-        else:
+-            if tMaxY < tMaxZ:
+-                Y += stepY
+-                tMaxY += tDeltaY
+-            else:
+-                Z += stepZ
+-                tMaxZ += tDeltaZ
+-
+-    return None
+-```
++**Performance Metrics:**
++Traversal cost is modeled by two constants [S1]:
++*   $T_{setup}$: Time to initialize traversal variables. Lower is better for low-resolution grids.
++*   $T_{step}$: Time to advance from one cell to a neighbor. High $T_{step}$ degrades performance in large grids.
+ 
+ ## Subtopics
+ 
+ ### [Regular Grid](3950-regular-grid.md)
+-A standard implementation using a flat 1D array of primitive lists. It is optimal for uniform data distribution on GPUs due to cache efficiency [3950-regular-grid]. Choose it for general-purpose ray tracing where scene density is uniform.
++The standard implementation using a 1D array of linked lists for primitive storage. It handles primitives spanning multiple cells via a "Mailbox" system (ray ID caching) to avoid redundant intersection tests. It is suitable for general-purpose ray tracing where dynamic updates are frequent.
+ 
+ ### [Voxel-based Ray Tracing for GI and Specular Reflections](4091-voxel-based-ray-tracing-for-gi-and-specular-reflections.md)
+-Uses a 128³ occupancy grid to sample Light Propagation Volumes (LPV) for indirect lighting and reflection fallbacks [4091-voxel-based-ray-tracing-for-gi-and-specular-reflections]. Choose it for global illumination and screen-space reflection fallbacks.
++Adapts the traversal for real-time global illumination (GI) and specular reflections. It uses a binary occupancy grid combined with Light Propagation Volumes (LPV) data, serving as a fallback for Screen-Space Ray Tracing (SSRT) and Screen-Space Reflections (SSR). It samples LPV data at hit positions to retrieve indirect lighting.
+ 
+ ### [Optimised Voxel Ray Marching](4240-optimised-voxel-ray-marching.md)
+-Optimizes traversal by caching chunk references and using bit-shifts for indexing, avoiding repeated calculations [4240-optimised-voxel-ray-marching]. Choose it for sparse voxel worlds with fixed chunk sizes to reduce computational overhead.
++A CPU-oriented variant for large voxel worlds (e.g., Minecraft-like). It organizes voxels into fixed-size "chunks" (e.g., $32^3$) to skip empty space efficiently. It maintains a reference to the current chunk and updates it only upon crossing chunk boundaries, minimizing arithmetic operations compared to pure grid traversal.
+ 
+ ## Background
+-The method originates from early ray tracing research, where grid traversal algorithms were developed to determine cells traversed by a ray [S1]. The algorithm is similar to rasterization but must find all traversed cells, unlike Bresenham's line algorithm which produces visually acceptable lines without finding all pixels [S1]. The performance is modeled by two constants: $T_{setup}$ (setup time) and $T_{step}$ (time to advance between cells) [S1]. Low $T_{setup}$ benefits low-resolution grids, while high $T_{step}$ hurts performance in larger grids [S1].
++The Regular Grid is one of the earliest acceleration structures for ray tracing. The traversal algorithm is closely related to 3D line rasterization algorithms, specifically noting that a naive 3D extension of Bresenham's algorithm is unsuitable because it does not find all traversed pixels/cells [S1]. The survey by [S1] categorizes these algorithms and highlights the trade-off between setup time and step time. The method is widely used in voxel-based rendering, real-time GI, and as a baseline for more complex hierarchical structures.
+ 
+ ## Sources

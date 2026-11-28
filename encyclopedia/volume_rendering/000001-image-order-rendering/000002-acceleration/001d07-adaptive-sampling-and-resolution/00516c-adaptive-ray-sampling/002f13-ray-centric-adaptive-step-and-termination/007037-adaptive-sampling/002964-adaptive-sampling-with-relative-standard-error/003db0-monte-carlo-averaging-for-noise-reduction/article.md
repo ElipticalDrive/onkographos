@@ -1,0 +1,92 @@
+# Monte Carlo Averaging for Noise Reduction
+
+Also called: Evaluation Procedure, Multi-sample Averaging
+
+## Overview
+Monte Carlo Averaging for Noise Reduction is a post-processing or evaluation-phase technique that reduces stochastic noise in volume rendering by rendering the same scene multiple times with independent random samples and computing the arithmetic mean of the results. It addresses the graininess inherent in low-sample Monte Carlo integration, particularly in transparent volumes and global illumination scenarios. Unlike its parent method, which adapts sample counts based on relative standard error during rendering, this method applies a fixed, high-cost averaging strategy primarily during evaluation or final production passes to achieve maximum visual fidelity.
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** A rendering engine capable of independent stochastic sampling per pass; scene parameters including light sample counts (e.g., `Volume Num Samples`) and Global Illumination (GI) ray counts.
+- **Output:** A single noise-reduced color image.
+
+**Data Structures:**
+- Accumulator buffer: A floating-point image buffer of size $W \times H \times 3$ (RGB) initialized to zero.
+- Sample counter: An integer $N$ representing the number of averaged passes.
+
+**Parameters:**
+- **Number of passes ($N$):** The number of independent renderings to average. Typical values range from 32 to 64 [S2].
+- **Light Volume Samples:** Controls lighting quality on the volume. Higher values (e.g., 512) reduce noise compared to lower values (e.g., 1) [S1].
+- **GI Rays:** Number of brute-force GI rays. Higher counts (e.g., 512) reduce noise from indirect lighting [S1].
+
+**Steps:**
+1. Initialize an accumulator buffer $A$ of size $W \times H \times 3$ with zeros.
+2. Set the pass counter $i = 0$.
+3. While $i < N$:
+    a. Render the scene using independent random seeds for all stochastic processes (light sampling, GI rays, etc.).
+    b. Let $I_i$ be the resulting color image.
+    c. Update the accumulator: $A \leftarrow A + I_i$.
+    d. Increment $i$.
+4. Compute the final image $I_{final}$ by dividing the accumulator by $N$:
+   $$ I_{final}(x, y) = \frac{1}{N} \sum_{i=0}^{N-1} I_i(x, y) $$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def monte_carlo_averaging(width, height, num_passes, light_volume_samples, gi_rays):
+    # Initialize accumulator buffer
+    accumulator = [[0.0, 0.0, 0.0] for _ in range(width * height)]
+    
+    for pass_idx in range(num_passes):
+        # Render scene with independent stochastic samples
+        # The renderer uses light_volume_samples for direct lighting
+        # and gi_rays for global illumination
+        current_image = render_scene(
+            width=width,
+            height=height,
+            light_volume_samples=light_volume_samples,
+            gi_rays=gi_rays,
+            seed=pass_idx # Independent seed per pass
+        )
+        
+        # Accumulate results
+        for y in range(height):
+            for x in range(width):
+                pixel = current_image[y][x]
+                accumulator[y * width + x][0] += pixel[0]
+                accumulator[y * width + x][1] += pixel[1]
+                accumulator[y * width + x][2] += pixel[2]
+                
+    # Average the accumulated results
+    final_image = [[0.0, 0.0, 0.0] for _ in range(width * height)]
+    for y in range(height):
+        for x in range(width):
+            idx = y * width + x
+            final_image[idx][0] = accumulator[idx][0] / num_passes
+            final_image[idx][1] = accumulator[idx][1] / num_passes
+            final_image[idx][2] = accumulator[idx][2] / num_passes
+            
+    return final_image
+```
+
+**Edge Cases and Pitfalls:**
+- **Transparent Volumes:** Transparent volumes require significantly more samples to render cleanly than opaque volumes [S1]. Failure to increase sample counts leads to persistent noise.
+- **Residual Noise:** Even with averaging, residual noise may remain if the underlying importance sampling scheme is suboptimal or if sample counts are insufficient for the scene complexity [S2].
+- **Computational Cost:** This method is computationally expensive as it requires $N$ full render passes.
+
+## Operating characteristics
+- **Time Complexity:** $O(N \cdot R)$, where $N$ is the number of passes and $R$ is the cost of a single render pass. This is significantly slower than single-pass rendering.
+- **Memory Complexity:** $O(W \cdot H)$ for the accumulator buffer.
+- **Performance:** Rendering the predicted color image 32 times and averaging reduces Monte Carlo noise effectively [S2]. However, it does not eliminate bias from other sources (e.g., low-resolution caches).
+- **Strengths:** Simple to implement; effectively reduces high-frequency stochastic noise; improves visual quality for final frames.
+- **Limitations:** High computational cost; does not adapt to local variance; residual noise may persist if base sample counts are too low.
+- **When to use:** Final production renders; evaluation of algorithms where visual quality is prioritized over speed; scenes with high transparency or complex global illumination.
+- **When not to use:** Real-time applications; interactive previews; scenes where noise is dominated by bias rather than variance.
+
+## Background
+This technique is commonly used in offline rendering and evaluation phases of volume rendering systems. It is referenced in the context of evaluating inverse rendering methods like TensoIR, where multiple render passes are averaged to reduce noise for fair comparison [S2]. It is also a standard practice in commercial renderers like Redshift, where users are advised to increase light volume samples and GI rays to mitigate noise in volumes [S1].
+
+## Sources
+[S1] Volume Rendering - Maxon, https://help.maxon.net/c4d/s26/en-us/Content/_REDSHIFT_/html/Volume%2BRendering.html, fetched 2026-10-26
+[S2] Flash Cache: Reducing Bias in Radiance Cache Based Inverse Rendering, https://doi.org/10.1007/978-3-031-73390-1_2, fetched 2026-10-27

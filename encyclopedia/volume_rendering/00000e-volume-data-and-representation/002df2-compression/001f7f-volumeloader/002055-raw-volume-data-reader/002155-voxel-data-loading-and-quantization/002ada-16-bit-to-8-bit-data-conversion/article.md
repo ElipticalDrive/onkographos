@@ -1,0 +1,113 @@
+# 16-bit to 8-bit Data Conversion
+
+Also called: convert16bitTo8bit
+
+## Overview
+Converts 16-bit VDB volume data to 8-bit format for efficient GPU consumption by rounding resolution to multiples of 8 and compressing coordinate and density values [S1, unofficial]. It differs from sibling methods like [HDF5 JSON (H5J) File Parsing](2922-hdf5-json-h5j-file-parsing.md) by performing direct binary quantization and layout transformation rather than parsing structured metadata, and builds on [Voxel data loading and quantization](2478-voxel-data-loading-and-quantization.md) by handling the specific bit-depth reduction step.
+
+## How it works
+**Inputs:** Raw binary volume data containing a header, 32-bit integer coordinates, and 16-bit unsigned integer density values.
+**Outputs:** A compressed `Uint8Array` containing 8-bit density values and a coordinate structure compatible with GPU tile-based rendering.
+
+**Data Structures:**
+1.  **Header:** 16-bit unsigned integers at offsets 0, 2, and 4 define the resolution dimensions $R_x, R_y, R_z$. A 32-bit unsigned integer at offset 12 defines `nodeCount`.
+2.  **Coordinates:** Stored as an `Int32Array` starting at byte offset 32. For storage in the compressed format, these are cast to `Uint16Array`.
+3.  **Node Data:** Stored as a `Uint16Array` immediately following the coordinates.
+4.  **Compressed Data:** A `Uint8Array` allocated with the same length as the `nodeData` array.
+
+**Steps:**
+1.  **Parse Header:** Read resolution dimensions from the header. Round each dimension to the nearest multiple of 8 to align with 8x8x8 voxel tiles:
+    $$ R'_x = 8 \cdot \lceil R_x / 8 \rceil, \quad R'_y = 8 \cdot \lceil R_y / 8 \rceil, \quad R'_z = 8 \cdot \lceil R_z / 8 \rceil $$
+    Read `nodeCount` from offset 12 [S1, unofficial].
+2.  **Parse Coordinates:** Read coordinates from offset 32 as `Int32Array`. Cast the buffer view to `Uint16Array` for storage [S1, unofficial].
+3.  **Parse Node Data:** Read density values from offset $32 + \text{coords.byteLength}$ as `Uint16Array` [S1, unofficial].
+4.  **Quantize and Compress:** Iterate through each element $i$ of `nodeData`. If `nodeData[i]` is greater than 0, compute the 8-bit value $x$ using the formula:
+    $$ x = 255 \cdot \frac{\text{nodeData}[i]}{65535} $$
+    Assign $x$ to `compressedData[i]` [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def convert_16bit_to_8bit(raw_bytes):
+    # 1. Parse Header
+    # Assuming little-endian Uint16 for resolution, Uint32 for nodeCount
+    resolution_x = raw_bytes.get_uint16(0)
+    resolution_y = raw_bytes.get_uint16(2)
+    resolution_z = raw_bytes.get_uint16(4)
+    node_count = raw_bytes.get_uint32(12)
+
+    # Round resolution to multiples of 8 for tile alignment
+    # Note: This alignment is for metadata; the actual data compression
+    # operates on the node list provided.
+    aligned_x = 8 * math.ceil(resolution_x / 8)
+    aligned_y = 8 * math.ceil(resolution_y / 8)
+    aligned_z = 8 * math.ceil(resolution_z / 8)
+
+    # 2. Parse Coordinates
+    # Coordinates start at offset 32
+    coord_offset = 32
+    # Determine coordinate array size based on node_count
+    # Assuming one coordinate triplet (3 ints) per node? 
+    # The source notes say "Parse coordinates from offset 32 as Int32Array" 
+    # and "Cast to Uint16Array". It implies the coordinate data 
+    # is stored in a way that fits in Uint16 after casting, 
+    # or simply that the buffer is reinterpreted.
+    # We assume the coordinate data length is derived from node_count * 3 * 4 bytes
+    # However, the source does not explicitly state the stride or count of coordinates.
+    # We assume the coordinate block ends where nodeData begins.
+    # Let's assume the source provides the byte length of coordinates or we calculate it.
+    # Given "nodeData from offset 32+coords.byteLength", we need coords.byteLength.
+    # Standard VDB sparse coordinates are often 3 ints per node.
+    coord_byte_length = node_count * 3 * 4 
+    
+    # Read coordinates as Int32
+    coords_int32 = raw_bytes.slice(coord_offset, coord_offset + coord_byte_length)
+    # Cast to Uint16 for storage (reinterpretation)
+    coords_uint16 = coords_int32.view_as_uint16()
+
+    # 3. Parse Node Data
+    node_data_offset = coord_offset + coord_byte_length
+    node_data_uint16 = raw_bytes.slice(node_data_offset).view_as_uint16()
+
+    # 4. Compress
+    compressed_data = Uint8Array(node_data_uint16.length)
+    
+    for i in range(node_data_uint16.length):
+        val = node_data_uint16[i]
+        if val > 0:
+            # Formula: x = 255 * (val / 65535)
+            # Using floating point division then casting to uint8
+            x = int(255 * (val / 65535.0))
+            compressed_data[i] = x
+        else:
+            compressed_data[i] = 0
+            
+    return compressed_data, coords_uint16
+```
+
+**Parameters:**
+*   **Tile Alignment:** Dimensions are rounded to multiples of 8 to support 8x8x8 voxel tiles [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Coordinate Overflow:** Coordinates are stored as `Int32` in the source but cast to `Uint16` for storage. Values exceeding 65535 will wrap around or clamp, potentially corrupting sparse coordinates [S1, unofficial].
+*   **Precision Loss:** The linear quantization $x = 255 \cdot (v / 65535)$ discards low-order bits of the 16-bit value.
+
+## Subtopics
+
+### Pseudo 16-bit Scheme
+A compromise scheme to enhance reconstruction quality of 8-bit rasterization without losing speed, by separating 16-bit words into high and low 8-bit bytes [S2, unofficial]. It is chosen when higher precision is needed than standard 8-bit allows, but full floating-point is too slow. It differs from standard 16-to-8 conversion by using a two-pass backprojection strategy. The method compresses 32-bit dynamic range into 16-bit integer words, separates each word into higher and lower 8-bit bytes, and performs two backprojection passes to generate two accumulation sheets. During accumulation, the sheet from the higher byte is shifted left and added to the lower byte sheet [S2, unofficial]. It takes twice as long as one-pass 8-bit reconstruction but is 5 times faster than full floating-point reconstruction [S2, unofficial]. Pitfall: It loses information of the lower 8-bit of the higher 8-bit texture during interpolation [S2, unofficial].
+
+## Operating characteristics
+**Time Complexity:** Linear with respect to the number of nodes for the conversion step [S1, unofficial]. The pseudo-variant doubles the backprojection time compared to standard 8-bit [S2, unofficial].
+**Memory Complexity:** Reduces memory footprint by 50% (16-bit to 8-bit) [S1, unofficial].
+**Performance:** The pseudo-16-bit scheme is 5 times faster than full floating-point reconstruction [S2, unofficial].
+**Strengths:** Efficient GPU consumption; aligns with tile-based rendering requirements [S1, unofficial].
+**Limitations:** Precision loss in quantization; coordinate overflow risk if sparse coordinates exceed 16-bit range [S1, unofficial]. Not sufficient for high-precision volume rendering, suitable mainly for previewing [S2, unofficial].
+
+## Background
+The standard 16-to-8 conversion is implemented in the `al-ro/volumetrics` repository [S1, unofficial]. The "Pseudo 16-bit" scheme was proposed in the context of GPU-Accelerated D2VR (Direct Volume Rendering) to balance quality and speed, specifically tested on the Shepp-Logan phantom [S2, unofficial].
+
+## Sources
+[S1] al-ro/volumetrics, https://github.com/al-ro/volumetrics, fetched 2026-10-27 (unofficial)
+[S2] GPU-Accelerated D2VR, https://doi.org/10.2312/vg/vg06/023-030, fetched 2026-10-26 (unofficial)

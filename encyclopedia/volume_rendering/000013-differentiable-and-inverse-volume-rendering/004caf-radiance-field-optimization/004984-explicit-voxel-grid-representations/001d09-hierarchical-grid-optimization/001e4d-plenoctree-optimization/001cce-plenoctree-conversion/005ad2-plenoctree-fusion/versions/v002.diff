@@ -1,0 +1,190 @@
+--- v001.md
++++ v002.md
+@@ -10,5 +10,5 @@
+ - Multi-view images and silhouettes (extracted via chroma key segmentation and background subtraction) [S1].
+ - A neural network $\Psi$ capable of predicting images, densities, and colors given positions and directions [S1].
+-- Parameters: Number of sparse views $N_{sparse}=6$, number of dense views $N_{dense}=100$, transmittance threshold $T_{thresh}=10^{-3}$, density threshold $\sigma_{thresh}=10^{-3}$, and initial voxel grid size $N^3$ [S1].
++- Parameters: Number of sparse views $N_{\text{sparse}}=6$, number of dense views $N_{\text{dense}}=100$, transmittance threshold $T_{\text{thresh}}=10^{-3}$, density threshold $\sigma_{\text{thresh}}=10^{-3}$, and initial voxel grid size $N^3$ [S1].
+ 
+ **Outputs:**
+@@ -26,11 +26,7 @@
+ 
+ 1. **Initialization:** Initialize a coarse PlenOctree with $N^3$ voxel grids as tree leaves [S1].
+-
+ 2. **Sparse View Prediction:** Given multi-view images and silhouettes, use network $\Psi$ to predict images for 6 sparse views uniformly distributed around the object [S1].
+-
+ 3. **Coarse Geometry Estimation:** Apply Shape-From-Silhouette (SFS) to generate a coarse visual hull from the silhouettes of the 6 sparse views [S1].
+-
+-4. **Coarse PlenOctree Construction:**
+-   For each leaf node inside the visual hull:
++4. **Coarse PlenOctree Construction:** For each leaf node inside the visual hull:
+    a. Uniformly sample directions $\theta, \phi \in [0, 2\pi]$ [S1].
+    b. Feed positions and directions to $\Psi$ to predict view-dependent densities $\sigma(\theta, \phi)$ and colors $c(\theta, \phi)$ [S1].
+@@ -39,11 +35,9 @@
+       $$ z = E(SH(\theta, \phi) \cdot c(\theta, \phi)) $$
+       where $E(\cdot)$ is the expectation operator and $SH(\theta, \phi)$ calculates SH from a direction [S1].
+-
+-5. **Refinement Setup:** Render 100 dense view images using the coarse PlenOctree [S1]. Identify query points where the transmittance $T_i > 10^{-3}$ from $\Psi$ [S1]. Note: The 6 sparse views are used to initialize because they query all points, whereas the 100 dense views query only about 1% of points, making them faster for refinement [S1].
+-
++5. **Refinement Setup:** Render 100 dense view images using the coarse PlenOctree [S1]. Query the points where the transmittance in volume rendering $T_i > 10^{-3}$ from $\Psi$ [S1]. The 6 sparse views are used to initialize because they query all points, whereas the 100 dense views query only about 1% of points, making them faster for refinement [S1].
+ 6. **Fusion and Refinement:** For each of the 100 dense viewpoints $i$:
+    a. Query points from $\Psi$ where transmittance $T_i > 10^{-3}$ [S1].
+    b. Update density $\sigma_i$ and SH coefficients $z$ at the $i$-th viewpoint using previous values $(\sigma_{i-1}, z_{i-1})$, current transmittance $T_i$, and previous weight $W_{i-1}$ [S1]:
+-      $$ \sigma_i = \frac{W_{i-1}\sigma_{i-1} + T_i\sigma_i}{W_{i-1} + T_i} $$
++      $$ \sigma_i = \frac{W_{i-1}\sigma_{i-1} + T_i\sigma_{\text{pred}}}{W_{i-1} + T_i} $$
+       $$ z = \frac{W_{i-1}z_{i-1} + T_i \cdot SH(\theta_i, \phi_i) \cdot c(\theta_i, \phi_i)}{W_{i-1} + T_i} $$
+    c. Calculate updated weight $W_i$ and update count $C_i$ [S1]:
+@@ -51,5 +45,4 @@
+       $$ C_i = C_{i-1} + 1 $$
+       where $C_i$ represents the number of times the leaf has been updated [S1].
+-
+ 7. **Filtering:** Filter out leaves with density $\sigma < 10^{-3}$ to save storage and computational costs [S1].
+ 
+@@ -57,88 +50,86 @@
+ 
+ ```python
+-def plenoctree_fusion(multi_view_images, silhouettes, network_psi, N_sparse=6, N_dense=100, T_thresh=1e-3, sigma_thresh=1e-3):
+-    # Step 1: Initialize coarse PlenOctree
+-    plen_octree = initialize_plen_octree(N=10) # N^3 voxel grids, size N not specified in sources [G]
+-    
++def plenoctree_fusion(multi_view_images, silhouettes, network_psi, N_sparse=6, N_dense=100, T_thresh=1e-3, sigma_thresh=1e-3, N_init=10):
++    # Step 1: Initialize coarse PlenOctree with N^3 voxel grids as leaves
++    plen_octree = []
++    for x in range(N_init):
++        for y in range(N_init):
++            for z in range(N_init):
++                plen_octree.append(Leaf(pos=(x, y, z), sigma=0.0, z=[], W=0.0, C=0))
++
+     # Step 2: Predict sparse views
+-    sparse_view_images = []
++    sparse_silhouettes = []
+     for i in range(N_sparse):
+-        # Predict image for uniformly distributed view
+         img = network_psi.predict_image(multi_view_images, view_index=i)
+-        sparse_view_images.append(img)
+-        
++        sil = extract_silhouette(img)
++        sparse_silhouettes.append(sil)
++
+     # Step 3: Generate visual hull
+-    visual_hull = shape_from_silhouette(silhouettes)
+-    
++    visual_hull = shape_from_silhouette(sparse_silhouettes)
++
+     # Step 4: Construct coarse PlenOctree
+-    for leaf in plen_octree.leaves:
+-        if leaf.position in visual_hull:
+-            # Sample directions
+-            directions = uniform_sample_sphere(num_samples=100) # Number of samples not specified [G]
+-            sigma_vals = []
+-            z_vals = []
+-            
++    for leaf in plen_octree:
++        if leaf.pos in visual_hull:
++            directions = uniform_sample_sphere(num_samples=32)
++            sigma_samples = []
++            z_samples = []
+             for theta, phi in directions:
+-                # Predict view-dependent values
+-                sigma_theta_phi = network_psi.predict_density(leaf.position, theta, phi)
+-                c_theta_phi = network_psi.predict_color(leaf.position, theta, phi)
+-                
+-                # Convert to view-independent
+-                sigma_vals.append(sigma_theta_phi)
+-                # SH evaluation function SH(theta, phi) applied to color
++                sigma_pred = network_psi.predict_density(leaf.pos, theta, phi)
++                c_pred = network_psi.predict_color(leaf.pos, theta, phi)
++                sigma_samples.append(sigma_pred)
+                 sh_basis = evaluate_sh(theta, phi)
+-                z_vals.append(sh_basis * c_theta_phi)
+-            
+-            # Expectation
+-            leaf.sigma = mean(sigma_vals)
+-            leaf.z = mean(z_vals)
++                z_samples.append(sh_basis * c_pred)
++            leaf.sigma = mean(sigma_samples)
++            leaf.z = mean(z_samples)
+             leaf.W = 0.0
+             leaf.C = 0
+-            
++
+     # Step 5 & 6: Refine with dense views
+     for i in range(N_dense):
+-        # Render to find points with high transmittance
+-        # Note: The source says "query the points that the transmittance ... Ti > 1e-3 from Psi"
+-        # This implies querying Psi at locations relevant to the dense view rendering
+-        query_points = get_query_points(plen_octree, network_psi, T_thresh)
+-        
++        query_points = get_query_points(plen_octree, network_psi, view_index=i, T_thresh=T_thresh)
+         for point in query_points:
+-            # Get current leaf for this point
+-            leaf = plen_octree.get_leaf(point.position)
+-            
+-            # Predict view-dependent values for current view i
++            leaf = plen_octree.get_leaf(point.pos)
+             theta_i, phi_i = get_view_direction(i)
+-            sigma_i = network_psi.predict_density(point.position, theta_i, phi_i)
+-            c_i = network_psi.predict_color(point.position, theta_i, phi_i)
+-            T_i = network_psi.get_transmittance(point.position, theta_i, phi_i)
+-            
+-            # Update density and SH coefficients
+-            new_sigma = (leaf.W * leaf.sigma + T_i * sigma_i) / (leaf.W + T_i)
++            sigma_pred = network_psi.predict_density(point.pos, theta_i, phi_i)
++            c_pred = network_psi.predict_color(point.pos, theta_i, phi_i)
++            T_i = network_psi.get_transmittance(point.pos, theta_i, phi_i)
++
++            new_sigma = (leaf.W * leaf.sigma + T_i * sigma_pred) / (leaf.W + T_i)
+             sh_basis_i = evaluate_sh(theta_i, phi_i)
+-            new_z = (leaf.W * leaf.z + T_i * sh_basis_i * c_i) / (leaf.W + T_i)
+-            
+-            # Update weight and count
++            new_z = (leaf.W * leaf.z + T_i * sh_basis_i * c_pred) / (leaf.W + T_i)
++
+             new_C = leaf.C + 1
+             new_W = ((new_C - 1) / new_C) * leaf.W + T_i / new_C
+-            
+-            # Apply updates
++
+             leaf.sigma = new_sigma
+             leaf.z = new_z
+             leaf.W = new_W
+             leaf.C = new_C
+-            
++
+     # Step 7: Filter leaves
+-    plen_octree.filter_leaves(sigma_thresh)
+-    
++    plen_octree = [leaf for leaf in plen_octree if leaf.sigma >= sigma_thresh]
+     return plen_octree
++
++# Helper definitions
++def extract_silhouette(image): return chroma_key_segment(image) [S1]
++def shape_from_silhouette(silhouettes): return compute_visual_hull(silhouettes) [S1]
++def uniform_sample_sphere(num_samples): return standard_uniform_sphere_sampling(num_samples) [G]
++def mean(values): return sum(values) / len(values) [G]
++def evaluate_sh(theta, phi): return spherical_harmonics_basis(theta, phi) [G]
++def get_query_points(octree, psi, view_index, T_thresh): return ray_march_query(octree, psi, view_index, T_thresh) [G]
++def get_view_direction(view_index): return uniform_view_direction(view_index) [G]
+ ```
+ 
++## Subtopics
++
++### Topology-Aligned Octree Fusion
++A two-stage fusion process (topology alignment and feature aggregation) to merge per-view octrees into a single global octree $V_{\text{fusion}}$ with a compatible hierarchy [S2, unofficial]. Topology alignment constructs the finest common refinement by iterating levels from $L_{\min}$ to $L_{\max}-1$, detecting regions where some octrees are coarser, and recursively subdividing voxels into eight children at $L+1$ when another octree has finer voxels with coinciding Morton prefixes [S2, unofficial]. Feature aggregation groups voxels by their Morton path and level, then averages zero-degree SH coefficients (colors) and higher-degree coefficients: $\bar{h}_{0p,\ell} = \frac{1}{|V_{p,\ell}|} \sum h_{0i,k}$ and $\bar{h}_{\text{sh}p,\ell} = \frac{1}{|V_{p,\ell}|} \sum h_{\text{sh}i,k}$ for $v_{i,k} \in V_{p,\ell}$ [S2, unofficial]. The fused octree is defined by unique cells $\{(p, \ell)\}$ and aggregated attributes $\{\bar{h}_{0p,\ell}, \bar{h}_{\text{sh}p,\ell}\}$ [S2, unofficial].
++
+ ## Operating characteristics
+-- **Time Complexity:** The method is significantly faster than naive gradient descent optimization. Generation time for a static scene PlenOctree is approximately 60 seconds [S1].
+-- **Memory Complexity:** Depends on the sparsity of the final PlenOctree after filtering. Filtering leaves with $\sigma < 10^{-3}$ reduces storage and computational costs [S1].
++- **Time Complexity:** The method is significantly faster than naive gradient descent optimization [S1]. Generation time for a static scene PlenOctree is approximately 60 seconds [S1].
++- **Memory Complexity:** Depends on the sparsity of the final PlenOctree after filtering [S1]. Filtering leaves with $\sigma < 10^{-3}$ reduces storage and computational costs [S1].
+ - **Strengths:** Accelerates refinement by avoiding a tremendous amount of optimization iterations; generates a completed PlenOctree quickly [S1].
+ - **Limitations:** Relies on the accuracy of the initial coarse PlenOctree and the network $\Psi$ for predictions; requires multi-view images and silhouettes [S1].
+ - **When to use:** When fast generation of a PlenOctree for real-time rendering is required, especially for static scenes [S1].
+-- **When not to use:** When high-fidelity view-dependent effects are critical and the coarse initialization is insufficient, or when multi-view data is not available [S1].
+ 
+ ## Background
+@@ -146,3 +137,4 @@
+ 
+ ## Sources
+-[S1] Fourier PlenOctrees for Dynamic Radiance Field Rendering in Real-time, https://doi.org/10.1109/cvpr52688.2022.01316, fetched 2026-10-26+[S1] Fourier PlenOctrees for Dynamic Radiance Field Rendering in Real-time, https://doi.org/10.1109/cvpr52688.2022.01316, fetched 2026-10-26
++[S2] Advancing Structured Priors for Sparse-Voxel Surface Reconstruction, https://doi.org/10.48550/arxiv.2601.17720, fetched 2026-10-26 (unofficial)

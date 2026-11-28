@@ -1,0 +1,288 @@
+# Discrete Inverse Radon Transform
+
+Also called: Inverse Radon Transform, R^-1
+
+## Overview
+The Discrete Inverse Radon Transform reconstructs a 2D image from its Radon transform (sinogram) by summing projection values into image pixels, assuming parallel beam geometry [S3, unofficial]. It is conventionally implemented via Filtered Back-Projection (FBP), which applies a frequency-domain filter to the sinogram before backprojecting to correct for the blurring inherent in simple summation [S1, unofficial]. Unlike iterative methods, it provides a direct, closed-form solution but requires projections over a full hemisphere and can produce negative values in the presence of inconsistent data [S2].
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** A sinogram tensor $S$ of shape $(B, C, N_\rho, N_\theta)$, where $B$ is batch size, $C$ is channels, $N_\rho$ is the number of radial samples, and $N_\theta$ is the number of projection angles [S1, unofficial]. A tensor of angles $\theta$ in degrees of length $N_\theta$ [S1, unofficial].
+- **Output:** A reconstructed image tensor of shape $(B, C, H, W)$.
+
+**Data Structures:**
+- **Sinogram:** 4D tensor. Radial axis corresponds to detector positions [S3, unofficial].
+- **Angles:** 1D tensor of floats.
+- **Image Grid:** 2D meshgrid of coordinates centered at $(0,0)$ [S1, unofficial].
+
+**Parameters:**
+- `filter_name`: String specifying the frequency filter. Options: `'ramp'`, `'shepp-logan'`, `'cosine'`, `'hamming'`, `'hann'`, or `None`. Default: `'ramp'` [S1, unofficial].
+- `interpolation`: String for backprojection interpolation. Options: `'linear'`, `'nearest'`, `'cubic'` [S1, unofficial].
+- `circle`: Boolean. If `True`, assumes the image is zero outside the inscribed circle, adjusting output size and masking [S1, unofficial].
+- `output_size`: Integer or `None`. If `None`, calculated based on `img_shape` and `circle` [S1, unofficial].
+
+**Steps:**
+
+1. **Validation and Type Conversion:**
+   - Ensure input sinogram is 4-D. If not, raise error [S1, unofficial].
+   - Convert sinogram to floating point. If `preserve_range` is false, scale integer types to $[0, 1]$ or $[-1, 1]$ as appropriate [S1, unofficial].
+
+2. **Angle Handling:**
+   - If $\theta$ is `None`, set $\theta = \text{linspace}(0, 180, N_\theta + 1)[:-1]$ [S1, unofficial].
+   - Verify `len(theta) == N_\theta` [S1, unofficial].
+
+3. **Output Size and Geometry Setup:**
+   - Let $img\_shape$ be the radial dimension of the sinogram ($N_\rho$) [S1, unofficial].
+   - If `circle` is `True`, convert the sinogram from circular to square geometry (padding zeros to match the diameter) and update $img\_shape$ [S1, unofficial].
+   - Determine `output_size`:
+     - If `circle` is `True`, `output_size = img_shape` [S1, unofficial].
+     - Else, `output_size = floor(sqrt(img_shape^2 / 2))` [S1, unofficial].
+   - Calculate `radius = output_size // 2` [S1, unofficial].
+
+4. **Filtering (Frequency Domain):**
+   - Pad the sinogram along the radial axis (dim 2) to `projection_size_padded` [S1, unofficial].
+     - `projection_size_padded = max(64, 2^ceil(log2(2 * img_shape)))` [S1, unofficial].
+     - Pad with zeros to this size [S1, unofficial].
+   - Compute the 1D FFT along the radial axis: $P = \text{FFT}(S_{padded})$ [S1, unofficial].
+   - Construct the filter kernel $F$ in the frequency domain:
+     - **Ramp:** $f[0] = 0.25$, $f[1::2] = -1/(\pi n)^2$ for odd $n$. Final filter is $2 \cdot \text{real}(\text{FFT}(f))$ [S1, unofficial].
+     - **Shepp-Logan:** Multiply Ramp filter by $\text{sinc}(\omega) = \sin(\omega)/\omega$, where $\omega = \pi \cdot \text{fftfreq}$ [S1, unofficial].
+     - **Cosine:** Multiply by $\text{FFTshift}(\sin(\text{linspace}(0, \pi, size+1)[:-1]))$ [S1, unofficial].
+     - **Hamming/Hann:** Multiply by the respective window function shifted to center [S1, unofficial].
+     - **None:** Identity filter (all ones) [S1, unofficial].
+   - Apply filter: $P_{filtered} = P \cdot F$ [S1, unofficial].
+   - Inverse FFT and take real part, truncating to original $img\_shape$: $S_{filtered} = \text{real}(\text{IFFT}(P_{filtered}))[:, :, :img\_shape, :]$ [S1, unofficial].
+
+5. **Backprojection:**
+   - Initialize `reconstructed` tensor of zeros with shape $(B, C, output\_size, output\_size)$ [S1, unofficial].
+   - Create meshgrids $x_{pr}, y_{pr}$ of size $output\_size \times output\_size$, centered at 0:
+     - $x_{pr}, y_{pr} = \text{meshgrid}(\text{arange}(output\_size) - radius, \text{arange}(output\_size) - radius)$ [S1, unofficial].
+   - For each angle index $i$ and angle $\theta_i$ (converted to radians):
+     - Extract column $col = S_{filtered}[:, :, :, i]$ [S1, unofficial].
+     - Calculate projection coordinates $t$ for all pixels:
+       - $t = y_{pr} \cos(\theta_i) - x_{pr} \sin(\theta_i)$ [S1, unofficial].
+     - Flatten $t$ to $t_{flat}$ and repeat for batch size [S1, unofficial].
+     - Interpolate $col$ at $t_{flat}$ using the specified `interpolation` method. Mask values outside the original detector range $[-img\_shape/2, img\_shape/2 - 1]$ to match standard behavior [S1, unofficial].
+     - Add interpolated values to `reconstructed` [S1, unofficial].
+
+6. **Finalization:**
+   - If `circle` is `True`, set pixels outside the reconstruction circle ($x_{pr}^2 + y_{pr}^2 > radius^2$) to 0 [S1, unofficial].
+   - Scale the result by $\frac{\pi}{2 N_\theta}$ [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn.functional as F
+
+def discrete_inverse_radon(sinogram, theta=None, filter_name='ramp', interpolation='linear', circle=True):
+    """
+    Reconstructs an image from a sinogram using Filtered Back-Projection.
+    
+    Args:
+        sinogram (torch.Tensor): Shape (B, C, N_rho, N_theta).
+        theta (torch.Tensor): Projection angles in degrees, shape (N_theta,).
+        filter_name (str): Filter type ('ramp', 'shepp-logan', 'cosine', 'hamming', 'hann', None).
+        interpolation (str): Interpolation mode ('linear', 'nearest', 'cubic').
+        circle (bool): If True, assumes image is zero outside inscribed circle.
+        
+    Returns:
+        torch.Tensor: Reconstructed image (B, C, H, W).
+    """
+    # 1. Validation and Type Conversion
+    if sinogram.ndim != 4:
+        raise ValueError("Input must be 4-D (B, C, N_rho, N_theta)")
+    
+    device = sinogram.device
+    dtype = sinogram.dtype
+    
+    # Convert to float (simplified logic from convert_to_float)
+    if not dtype.is_floating_point:
+        sinogram = sinogram.double()
+        if dtype in [torch.uint8]:
+            sinogram = sinogram / torch.iinfo(dtype).max
+        elif dtype in [torch.int8, torch.int16, torch.int32, torch.int64]:
+            sinogram = sinogram / torch.iinfo(dtype).max
+            sinogram = torch.clamp(sinogram, min=-1.0)
+        else:
+            sinogram = (sinogram + 0.5) * 2 / (torch.iinfo(dtype).max - torch.iinfo(dtype).min)
+            sinogram = sinogram.double()
+    else:
+        sinogram = sinogram.double()
+
+    # 2. Angle Handling
+    N_theta = sinogram.size(3)
+    if theta is None:
+        theta = torch.linspace(0, 180, N_theta + 1, dtype=dtype, device=device)[:-1]
+    else:
+        theta = theta.detach().clone().to(device=device, dtype=dtype)
+    
+    if len(theta) != N_theta:
+        raise ValueError("Theta length must match number of projections")
+
+    angles_rad = torch.deg2rad(theta)
+    N_angles = len(theta)
+
+    # 3. Output Size and Geometry
+    img_shape = sinogram.size(2) # N_rho
+    
+    if circle:
+        # sinogram_circle_to_square pads/interpolates the sinogram to square geometry.
+        # Not given in the sources. [G]
+        output_size = img_shape
+    else:
+        output_size = int(torch.floor(torch.sqrt(torch.tensor(img_shape)**2 / 2.0)).item())
+        
+    radius = output_size // 2
+    
+    # 4. Filtering
+    # Pad for FFT
+    projection_size_padded = max(64, int(2 ** torch.ceil(torch.log2(torch.tensor(2 * img_shape)))).item())
+    pad_width = (0, projection_size_padded - img_shape)
+    sinogram_padded = F.pad(sinogram, (0, 0, pad_width[0], pad_width[1]), mode="constant", value=0)
+    
+    # Get Filter
+    fourier_filter = get_fourier_filter(projection_size_padded, filter_name, device)
+    
+    # FFT, Multiply, IFFT
+    projection_fft = torch.fft.fft(sinogram_padded, dim=2)
+    projection_filtered_fft = projection_fft * fourier_filter[None, None, :, :]
+    sinogram_filtered = torch.real(torch.fft.ifft(projection_filtered_fft, dim=2)[:, :, :img_shape, :])
+
+    # 5. Backprojection
+    reconstructed = torch.zeros((sinogram.size(0), sinogram.size(1), output_size, output_size), device=device, dtype=dtype)
+    
+    # Create meshgrid
+    xpr, ypr = torch.meshgrid(
+        torch.arange(output_size, device=device) - radius,
+        torch.arange(output_size, device=device) - radius,
+        indexing="ij"
+    )
+    
+    for i, angle in enumerate(angles_rad):
+        col = sinogram_filtered[:, :, :, i]
+        # Calculate projection coordinates t
+        t = ypr * torch.cos(angle) - xpr * torch.sin(angle)
+        
+        # Flatten and repeat for batch
+        t_flat = t.flatten().unsqueeze(0).unsqueeze(0)
+        t_flat = torch.repeat_interleave(t_flat, sinogram.size(0), dim=0)
+        
+        # Interpolate
+        col_interp = interp(t_flat, img_shape, col, mode=interpolation)
+        
+        reconstructed += col_interp.view(sinogram.size(0), sinogram.size(1), output_size, output_size)
+
+    # 6. Finalization
+    if circle:
+        out_reconstruction_circle = (xpr**2 + ypr**2) > radius**2
+        reconstructed[:, :, out_reconstruction_circle] = 0.0
+        
+    return reconstructed * (torch.pi / (2 * N_angles))
+
+def get_fourier_filter(size, filter_name, device):
+    """Helper to generate frequency domain filters."""
+    if filter_name is None:
+        return torch.ones(size, device=device)
+    
+    # Standard frequency array
+    f = torch.fft.fftfreq(size, d=1.0).to(device)
+    f_shifted = torch.fft.fftshift(f)
+    
+    if filter_name == 'ramp':
+        # S1 specific construction
+        n = torch.arange(1, size, 2, device=device).float()
+        filt = torch.zeros(size, device=device)
+        filt[0] = 0.25
+        filt[1::2] = -1.0 / (torch.pi * n) ** 2
+        filt = 2.0 * torch.real(torch.fft.fft(filt))
+        return filt
+    elif filter_name == 'shepp-logan':
+        omega = torch.pi * f_shifted
+        sinc_val = torch.ones_like(omega)
+        nonzero = torch.abs(omega) > 1e-6
+        sinc_val[nonzero] = torch.sin(omega[nonzero]) / omega[nonzero]
+        # Reconstruct ramp for multiplication
+        n = torch.arange(1, size, 2, device=device).float()
+        ramp = torch.zeros(size, device=device)
+        ramp[0] = 0.25
+        ramp[1::2] = -1.0 / (torch.pi * n) ** 2
+        ramp = 2.0 * torch.real(torch.fft.fft(ramp))
+        return ramp * sinc_val
+    elif filter_name == 'cosine':
+        window = torch.sin(torch.linspace(0, torch.pi, size + 1, device=device)[:-1])
+        window = torch.fft.fftshift(window)
+        n = torch.arange(1, size, 2, device=device).float()
+        ramp = torch.zeros(size, device=device)
+        ramp[0] = 0.25
+        ramp[1::2] = -1.0 / (torch.pi * n) ** 2
+        ramp = 2.0 * torch.real(torch.fft.fft(ramp))
+        return ramp * window
+    elif filter_name in ['hamming', 'hann']:
+        if filter_name == 'hamming':
+            window = 0.54 - 0.46 * torch.cos(2 * torch.pi * torch.arange(size, device=device) / (size - 1))
+        else: # hann
+            window = 0.5 - 0.5 * torch.cos(2 * torch.pi * torch.arange(size, device=device) / (size - 1))
+        window = torch.fft.fftshift(window)
+        n = torch.arange(1, size, 2, device=device).float()
+        ramp = torch.zeros(size, device=device)
+        ramp[0] = 0.25
+        ramp[1::2] = -1.0 / (torch.pi * n) ** 2
+        ramp = 2.0 * torch.real(torch.fft.fft(ramp))
+        return ramp * window
+    else:
+        raise ValueError(f"Unknown filter: {filter_name}")
+
+def interp(x, img_shape, data, mode='linear'):
+    """
+    1D linear interpolation with out-of-bounds masking.
+    x: (B, 1, H, W) coordinates in detector space
+    data: (B, C, N_rho) sinogram values
+    """
+    half = img_shape / 2.0
+    x_clamped = torch.clamp(x, -half, half - 1.0)
+    idx0 = torch.floor(x_clamped).long()
+    idx1 = idx0 + 1
+    w1 = x_clamped - idx0.float()
+    w0 = 1.0 - w1
+    
+    idx0_exp = idx0.unsqueeze(1).expand(-1, data.size(1), -1, -1)
+    idx1_exp = idx1.unsqueeze(1).expand(-1, data.size(1), -1, -1)
+    w0_exp = w0.unsqueeze(1).expand(-1, data.size(1), -1, -1)
+    w1_exp = w1.unsqueeze(1).expand(-1, data.size(1), -1, -1)
+    
+    val0 = torch.gather(data, 2, idx0_exp)
+    val1 = torch.gather(data, 2, idx1_exp)
+    
+    result = w0_exp * val0 + w1_exp * val1
+    
+    mask = (x < -half) | (x > half - 1)
+    result = torch.where(mask, torch.zeros_like(result), result)
+    return result
+```
+
+## Subtopics
+
+### [Filtered Back-Projection (FBP)](11308-filtered-back-projection-fbp.md)
+The specific algorithmic framework that uses the Discrete Inverse Radon Transform as its backprojection step, preceded by frequency-domain filtering.
+
+### [Iterative Reconstruction with Basis Expansion](16502-iterative-reconstruction-with-basis-expansion.md)
+An alternative method that models the image as a linear combination of basis functions and solves for coefficients using optimization, handling inconsistent projections better than FBP.
+
+## Operating characteristics
+- **Time Complexity:** The naive summation approach is $O(N N_\theta N_\rho)$, which simplifies to $O(N^2)$ if $N_\theta, N_\rho \propto \sqrt{N}$ [S3, unofficial]. With optimized mapping of pixels to contributing projection lines, it can reach $O(N \log N)$ [S3, unofficial]. The FFT-based filtering adds $O(N_\rho \log N_\rho)$ per angle [G].
+- **Memory Complexity:** Requires storage for the sinogram, the filtered sinogram, and the output image [G]. The FFT padding increases the radial dimension slightly [G].
+- **Strengths:** Fast, direct solution; well-understood; efficient implementation using FFTs.
+- **Limitations:** Requires projections over a full hemisphere ($180^\circ$); sensitive to noise (high-pass filter amplifies it); can produce negative values in the reconstructed image if the input data is inconsistent or incomplete [S2].
+- **When to use:** When full angular coverage is available and speed is critical [S2].
+- **When not to use:** With limited-angle data, inconsistent projections, or when non-negativity constraints are strict [S2].
+
+## Background
+The Discrete Inverse Radon Transform is the mathematical foundation of computed tomography (CT) reconstruction [S2]. It is derived from the Fourier Slice Theorem, which states that the 1D Fourier transform of a projection at angle $\theta$ is a slice of the 2D Fourier transform of the image at that angle [S1, unofficial]. The method was formalized in the context of computerized tomography in the 1970s, with seminal work by Kak and Slaney [S1, unofficial]. It is widely used in medical imaging, industrial CT, and light field synthesis [S2].
+
+## Sources
+[S1] tomluetjen/torchskradon, https://github.com/tomluetjen/torchskradon, fetched 2026-10-27 (unofficial)
+[S2] Layered 3D: Tomographic Image Synthesis for Attenuation-based Light Field and High Dynamic Range Displays, https://vccimaging.org/Publications/Wetzstein2011TIG/Wetzstein2011TIG.pdf, fetched 2026-10-29
+[S3] Précision et qualité en reconstruction tomographique : algorithmes et applications, https://doi.org/10.70675/d2bc4875z6a5az46afz9289z2fe16b3a43f3, fetched 2026-10-30 (unofficial)

@@ -1,0 +1,199 @@
+--- v001.md
++++ v002.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Smoothness Regularization is a training-time loss term applied to 3D Gaussian Splatting (3DGS) to enforce local smoothness on the 2D attribute grids of sorted Gaussians, thereby improving compressibility without significantly degrading rendering quality [S1]. Unlike post-processing compression methods that apply sorting and encoding after training, this method integrates smoothing during the optimization process, encouraging the renderer to prefer Gaussian configurations that exhibit spatial coherence in their 2D grid representation [S1]. It distinguishes itself from sibling methods like Adaptive Gaussian Refinement and Selective Densification by focusing on the statistical properties of the attribute distribution rather than geometric density or pruning thresholds [S1].
++Smoothness Regularization is a training-time loss term applied to 3D Gaussian Splatting (3DGS) to enforce local smoothness on the 2D attribute grids of sorted Gaussians, thereby improving compressibility without significantly degrading rendering quality [S1]. Unlike post-processing compression methods that apply sorting and encoding after training, this method integrates smoothing during the optimization process, encouraging the renderer to prefer Gaussian configurations that exhibit spatial coherence in their 2D grid representation [S1].
+ 
+ ## How it works
+@@ -10,21 +10,17 @@
+ 
+ ### Inputs and Outputs
+-*   **Inputs**:
+-    *   The current 2D attribute grids for all active Gaussians. The grids contain five attribute channels: position, color (spherical harmonics coefficients), opacity, scaling, and rotation [S1].
+-    *   Hyperparameters: Overall multiplier $\lambda$, per-grid multipliers, blur kernel size $K$, and blur standard deviation $\sigma$ [S1].
+-*   **Outputs**:
+-    *   A scalar loss value $L_{smooth}$ added to the total training loss.
+-    *   Gradients propagated back through the Gaussian renderer to update the 3D Gaussian parameters [S1].
++*   **Inputs**: The current 2D attribute grids for all active Gaussians, containing five attribute channels: position, color (spherical harmonics coefficients), opacity, scaling, and rotation [S1]. Hyperparameters: overall multiplier $\lambda$, per-grid multipliers, blur kernel size $K$, and blur standard deviation $\sigma$ [S1].
++*   **Outputs**: A scalar loss value $L_{smooth}$ added to the total training loss, and gradients propagated back through the Gaussian renderer to update the 3D Gaussian parameters [S1].
+ 
+ ### Data Structures
+-The method assumes the existence of 2D grids for each attribute type. Let $G_{attr}$ denote the 2D grid for a specific attribute (e.g., color). The grid dimensions are determined by the number of Gaussians and their sorting order [S1]. The exact layout is a 2D array where each cell corresponds to a Gaussian's attribute value at its sorted position [S1].
++The method operates on 2D grids for each attribute type, where each cell corresponds to a Gaussian's attribute value at its sorted position [S1]. The grid dimensions are fixed per scene (e.g., a side length of 2091 for the Garden scene with 4.37M Gaussians) [S1].
+ 
+ ### Steps
+-1.  **Blurring**: Apply a 2D Gaussian filter to each of the five attribute grids ($G_{pos}, G_{color}, G_{opacity}, G_{scale}, G_{rot}$) to create smoothed versions $G'_{attr}$ [S1].
+-2.  **Error Calculation**: Compute the element-wise difference between the original grid $G_{attr}$ and the smoothed grid $G'_{attr}$ for each attribute channel [S1].
+-3.  **Loss Computation**: Calculate the Huber loss for the error term of each attribute grid [S1].
+-4.  **Aggregation**: Scale the Huber loss for each grid by its respective separate multiplier and sum them up. Scale the total by the overall multiplier $\lambda$ [S1].
+-5.  **Integration**: Add the resulting smoothness loss to the standard 3DGS training loss (typically a combination of L1 and DSSIM losses) [S1].
+-6.  **Backpropagation**: Propagate the gradient of the smoothness loss through the Gaussian renderer to update the 3D Gaussian parameters during optimization [S1].
++1. Apply a 2D Gaussian filter to each of the five attribute grids to create smoothed versions [S1].
++2. Compute the element-wise difference between the original grid and the smoothed grid for each attribute channel [S1].
++3. Calculate the Huber loss for the error term of each attribute grid [S1].
++4. Scale the Huber loss for each grid by its respective separate multiplier, sum them, and scale the total by the overall multiplier $\lambda$ [S1].
++5. Add the resulting smoothness loss to the standard 3DGS training loss [S1].
++6. Propagate the gradient of the smoothness loss through the Gaussian renderer to update the 3D Gaussian parameters during optimization [S1].
+ 
+ ### Formulas
+@@ -39,5 +35,5 @@
+ *   $w_i$ is the separate multiplier for attribute $i$ [S1].
+ *   $\text{Mean}(\cdot)$ computes the average loss over all elements in the grid [S1].
+-*   $\delta$ is the Huber threshold (not explicitly defined in sources, but standard for Huber loss) [G].
++*   $\delta$ is the Huber threshold (Not given in the sources.)
+ 
+ ### Parameters
+@@ -49,17 +45,19 @@
+ 
+ ### Edge Cases and Pitfalls
+-*   **Precision**: The method relies on the differentiability of the Gaussian blur and the Huber loss. Standard automatic differentiation frameworks handle this [S1].
+-*   **Boundaries**: The 2D grid may have empty cells or boundaries where sorting is incomplete. The sources do not specify handling for these cases [G].
++*   **Precision**: The method relies on the differentiability of the Gaussian blur and the Huber loss [S1].
++*   **Boundaries**: The 2D grid may have empty cells or boundaries where sorting is incomplete [G].
+ *   **Degenerate Input**: If the grid is too small or the blur kernel is too large relative to the grid size, the smoothing may over-smooth, leading to significant loss of detail [S1].
+ 
+ ### Pseudocode
+ ```python
++import math
++
+ def smoothness_regularization_loss(
+-    grids: Dict[str, Tensor], 
++    grids: dict, 
+     lambda_val: float, 
+-    multipliers: Dict[str, float], 
++    multipliers: dict, 
+     kernel_size: int, 
+     sigma: float
+-) -> Tensor:
++) -> float:
+     """
+     Computes the smoothness regularization loss for 3D Gaussian Splatting.
+@@ -67,5 +65,5 @@
+     Args:
+         grids: Dictionary mapping attribute names ('pos', 'color', 'opacity', 'scale', 'rot') 
+-               to 2D Tensor grids of shape (H, W, C).
++               to 2D list of lists representing the grid values.
+         lambda_val: Overall multiplier for the smoothness loss.
+         multipliers: Dictionary mapping attribute names to their specific loss multipliers.
+@@ -74,5 +72,5 @@
+         
+     Returns:
+-        Scalar Tensor representing the smoothness loss.
++        Scalar float representing the smoothness loss.
+     """
+     total_loss = 0.0
+@@ -80,18 +78,16 @@
+     for attr_name, grid in grids.items():
+         # Step 1: Apply 2D Gaussian filter to blur the grid
+-        # Note: In practice, this might be done per-channel or on the whole grid depending on implementation.
+-        # Assuming grid is (H, W, C), we apply blur to each channel.
+         blurred_grid = gaussian_blur_2d(grid, kernel_size, sigma)
+         
+         # Step 2: Compute error term
+-        error = grid - blurred_grid
++        error = [[grid[i][j] - blurred_grid[i][j] for j in range(len(grid[0]))] for i in range(len(grid))]
+         
+         # Step 3: Calculate Huber loss
+-        # Huber loss threshold delta is not specified in sources, using a standard default or [G]
+-        # Here we assume a standard implementation of Huber loss
+-        huber_loss = huber_loss(error, delta=1.0) # delta is a hyperparameter not given in sources
++        # Huber loss threshold delta is not given in the sources [G]
++        delta = 1.0 
++        huber_loss_grid = huber_loss(error, delta)
+         
+         # Step 4: Average the loss over the grid
+-        mean_loss = torch.mean(huber_loss)
++        mean_loss = sum(sum(row) for row in huber_loss_grid) / (len(grid) * len(grid[0]))
+         
+         # Step 5: Scale by separate multiplier
+@@ -105,37 +101,52 @@
+     return final_loss
+ 
+-def gaussian_blur_2d(input_tensor: Tensor, kernel_size: int, sigma: float) -> Tensor:
++def gaussian_blur_2d(grid: list, kernel_size: int, sigma: float) -> list:
+     """
+-    Applies a 2D Gaussian blur to a tensor.
++    Applies a 2D Gaussian blur to a grid.
+     """
+-    # Create Gaussian kernel
+-    # Kernel size is odd, centered at 0
+-    coords = torch.arange(kernel_size) - kernel_size // 2
+-    x, y = torch.meshgrid(coords, coords, indexing='ij')
+-    kernel = torch.exp(-(x**2 + y**2) / (2 * sigma**2))
+-    kernel = kernel / kernel.sum()
++    h = len(grid)
++    w = len(grid[0])
++    half_k = kernel_size // 2
++    blurred = [[0.0] * w for _ in range(h)]
+     
+-    # Apply convolution
+-    # Assuming input_tensor is (H, W, C)
+-    # We need to convolve each channel
+-    output = torch.zeros_like(input_tensor)
+-    for c in range(input_tensor.shape[2]):
+-        channel = input_tensor[:, :, c]
+-        # Pad for convolution
+-        padded = torch.nn.functional.pad(channel, (kernel_size//2, kernel_size//2, kernel_size//2, kernel_size//2))
+-        # Convolve
+-        blurred_channel = torch.nn.functional.conv2d(padded.unsqueeze(0).unsqueeze(0), kernel.unsqueeze(0).unsqueeze(0), padding=0).squeeze()
+-        output[:, :, c] = blurred_channel
+-    return output
++    # Precompute kernel
++    kernel = []
++    for i in range(kernel_size):
++        row = []
++        for j in range(kernel_size):
++            x = i - half_k
++            y = j - half_k
++            row.append(math.exp(-(x**2 + y**2) / (2 * sigma**2)))
++        kernel.append(row)
++    kernel_sum = sum(sum(row) for row in kernel)
++    kernel = [[k / kernel_sum for k in row] for row in kernel]
++    
++    for i in range(h):
++        for j in range(w):
++            acc = 0.0
++            for ki in range(kernel_size):
++                for kj in range(kernel_size):
++                    ni = i + ki - half_k
++                    nj = j + kj - half_k
++                    if 0 <= ni < h and 0 <= nj < w:
++                        acc += grid[ni][nj] * kernel[ki][kj]
++            blurred[i][j] = acc
++    return blurred
+ 
+-def huber_loss(error: Tensor, delta: float) -> Tensor:
++def huber_loss(error_grid: list, delta: float) -> list:
+     """
+-    Computes Huber loss.
++    Computes Huber loss element-wise.
+     """
+-    abs_error = torch.abs(error)
+-    quadratic = torch.min(abs_error, torch.tensor(delta))
+-    linear = abs_error - quadratic
+-    loss = 0.5 * quadratic**2 + delta * linear
+-    return loss
++    loss_grid = []
++    for row in error_grid:
++        loss_row = []
++        for e in row:
++            abs_e = abs(e)
++            if abs_e <= delta:
++                loss_row.append(0.5 * e**2)
++            else:
++                loss_row.append(delta * (abs_e - 0.5 * delta))
++        loss_grid.append(loss_row)
++    return loss_grid
+ ```
+ 
+@@ -149,6 +160,6 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: The blurring step adds a convolutional cost proportional to the number of Gaussians and the kernel size. Sorting is performed periodically (e.g., after densification), and smoothing is applied every training step. The sources do not provide exact time complexity formulas [S1].
+-*   **Memory Complexity**: Requires storing the 2D attribute grids and their blurred versions during the forward pass. The grid size depends on the number of Gaussians, which can be up to millions (e.g., 4.37M Gaussians for the Garden scene) [S1].
++*   **Time Complexity**: The blurring step adds a convolutional cost proportional to the number of Gaussians and the kernel size [S1]. Sorting is performed periodically after densification, and smoothing is applied every training step [S1].
++*   **Memory Complexity**: Requires storing the 2D attribute grids and their blurred versions during the forward pass [S1].
+ *   **Measured Performance**: On the Truck dataset, $\lambda=0.01$ yields PSNR 24.39 and Size 18.02 MB, while $\lambda=1.5$ yields PSNR 24.02 and Size 10.73 MB [S1]. The method achieves significantly higher PSNR compared to compressing vanilla 3DGS after training (e.g., 25.37 PSNR vs 21.98 PSNR for compressed vanilla 3DGS on the Truck scene) [S1].
+ *   **Strengths**: Improves compressibility by creating local smoothness in attribute grids, allowing for better performance with standard image compression algorithms [S1].

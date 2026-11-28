@@ -1,0 +1,106 @@
+# ply_to_colmap.py
+
+Many 3DGS research projects propose an alternative scene representation and need multi-view training data to fit it. Capturing and calibrating real scenes for every experiment sometimes is hard, while trained 3DGS models are abundant and freely shareable. This repo tries to mitigate the gap: it takes any trained standard 3DGS `.ply` and turns it into a ready-to-use multi-view training dataset, so you can fit your own representation to established scenes without touching a camera or running COLMAP yourself. Because the ground truth is a rendered model rather than a physical capture, the resulting views are perfectly posed and noise-free, which makes the datasets well suited for controlled comparisons in downstream research.
+
+Concretely, the script generates camera poses around (or inside) the splats, renders each view with the `gsplatcu` CUDA rasterizer at full degree-3 SH, and writes either a Blender-style dataset (`transforms_*.json` plus RGBA PNGs) or a COLMAP-style one (`sparse/0/` plus RGB PNGs).
+
+## Requirements
+
+- A CUDA GPU. The renderer calls `.cuda()` unconditionally, so there is no CPU fallback.
+- Python 3.9, PyTorch, numpy, and Pillow. The included `environment.yml` sets these up as a conda environment (see Setup), but any environment with these packages works.
+- The `gsplatcu` extension built and importable. Its CUDA sources live in the `gsplatcu/` folder of this repo, adapted from [EasyGaussianSplatting](https://github.com/scomup/EasyGaussianSplatting) by scomup (Liu Yang), and compile as a PyTorch C++/CUDA extension.
+
+## Setup
+
+```bash
+conda env create -f environment.yml
+conda activate colorfulgaussians
+pip3 install gsplatcu/.
+python -c "import torch, gsplatcu; print('ok')"
+```
+
+## Usage
+
+Basic run with auto-detected format and up axis:
+
+```bash
+python ply_to_colmap.py --ply models/scene/scene.ply --out data/scene/
+```
+
+Object-centric statue, NeRF-synthetic-style Blender output at 800x800, wider orbit:
+
+```bash
+python ply_to_colmap.py \
+    --ply models/cth_statue/scene.ply --out data/cth_statue/ \
+    --format blender --n_views 200 --square 800 \
+    --radius_pad 3.5 --n_points 100000
+```
+
+Indoor scene (room scan), COLMAP output with cameras placed inside the volume:
+
+```bash
+python ply_to_colmap.py \
+    --ply models/room/scene.ply --out data/room/ \
+    --format colmap --indoor --n_centers 5 --n_views 200 --fov_deg 70
+```
+
+Quick low-res preview before a full render:
+
+```bash
+python ply_to_colmap.py --ply scene.ply --out /tmp/preview/ \
+    --resize_rate 0.25 --n_views 20 --format colmap
+```
+
+## Key flags
+
+| Flag | Meaning |
+|---|---|
+| `--format` | `auto` (default), `blender`, or `colmap`. Auto guesses from splat spread. |
+| `--n_views` | Total cameras. Blender mode needs at least train + val + test (default 100 + 13 + 25 = 138) and will bump the count if lower. |
+| `--square N` | Sets width and height to N (overrides `--width`/`--height`). |
+| `--resize_rate` | Multiplier on resolution, e.g. 0.25 for quick previews. |
+| `--radius_pad` | Orbit radius as a multiple of the p95 extent. Default 2.5. Raise it if views look zoomed in. |
+| `--radius_mults` | Comma list like `0.8,1.2` for mixed close and wide framings. |
+| `--hemisphere` | Upper hemisphere only, no views from below. |
+| `--up_axis` | `auto` (PCA detection), a cardinal like `+y`, or an explicit `x,y,z`. |
+| `--indoor` | Tripod spots inside the scene instead of an exterior orbit. Pair with `--n_centers`, `--outward_fraction`. |
+| `--n_points` | Subsample the points3D warm-start (COLMAP files or the bonus `points3D.npy`). Does not affect rendered images. |
+| `--rot_order` | Quaternion order in `points3D.npy`, `wxyz` (default) or `xyzw`. |
+
+## Output layout
+
+Blender format:
+
+```
+out/
+  transforms_train.json  transforms_val.json  transforms_test.json
+  train/r_0000.png ...   val/ ...   test/ ...   points3D.npy
+```
+
+PNGs are RGBA with straight alpha. `points3D.npy` holds activated splat parameters (normalized rotations, exp scales, sigmoid opacities, DC color in the first SH slot) for warm-starting training.
+
+COLMAP format:
+
+```
+out/
+  images/view_0000.png ...
+  sparse/0/cameras.{bin,txt}  images.{bin,txt}  points3D.{bin,txt}
+```
+
+PINHOLE intrinsics, world-to-camera wxyz quaternions, one point per gaussian center with DC color.
+
+## Example models
+
+`models/stitch.ply` is the "Stitch Doll" scene by [qjayo](https://superspl.at/user?id=qjayo), released under CC BY 4.0, downloaded from https://superspl.at/scene/ea6c724e
+
+More downloadable 3DGS scenes can be found on [SuperSplat](https://superspl.at/). Check each scene's license and credit the original artist when using their work.
+
+## Notes
+
+- On a shared cluster, write outputs to scratch rather than home. PNG encoding and disk I/O dominate runtime, not the GPU.
+- SLURM example: `srun --gres=gpu:1 --mem=32G python ply_to_colmap.py --ply scene.ply --out data/scene/`
+- The input PLY must use standard 3DGS field names (`f_dc_*`, `f_rest_*`, `scale_*`, `rot_*`, `opacity`). Missing fields raise a clear error. Missing `f_rest_*` is fine, rendering falls back to DC-only color.
+
+## Acknowledgements
+
+The CUDA rasterizer in `gsplatcu/` is adapted from [EasyGaussianSplatting](https://github.com/scomup/EasyGaussianSplatting) by scomup (Liu Yang). See the license header in those source files for details.

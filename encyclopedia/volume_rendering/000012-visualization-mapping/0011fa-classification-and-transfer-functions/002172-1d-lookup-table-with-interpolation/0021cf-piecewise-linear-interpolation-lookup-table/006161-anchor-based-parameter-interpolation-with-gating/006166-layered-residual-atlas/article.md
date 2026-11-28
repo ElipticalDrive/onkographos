@@ -1,0 +1,234 @@
+# Layered Residual Atlas
+
+
+## Overview
+The Layered Residual Atlas is an encoding scheme for anchor-based parameter interpolation in 3D Gaussian Splatting that stores anchor changes relative to a full reference model, organized by member layer and parameter field [S1, unofficial]. It solves the problem of efficiently storing and decoding specific anchor endpoints by decomposing the parameter space into layers of newly introduced members and applying orthogonal transforms to share residual bases across anchors [S1, unofficial]. Unlike standard anchor storage which might duplicate full parameter sets, this method leverages the fact that most parameters are shared with the full model, storing only the residuals for members present at specific anchors [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A set of anchors $K_0, K_1, \dots, K_M$ where $K_0=0$ and $K_M=N$ (Full), and the full parameter matrix $\Theta_N$ ordered by global member sequence.
+*   **Output:** A compressed residual atlas containing shared bases, anchor coefficients, and metadata, allowing reconstruction of any anchor endpoint $\Theta_{K_j}$ [S1, unofficial].
+
+**Data Structures**
+1.  **Layer Definition:** Members are grouped into layers $s$ based on their first appearance at an anchor.
+2.  **Residual Matrix ($D_{sf}$):** For each field $f$ and layer $s < M$, a matrix where rows correspond to anchors $K_s \dots K_{M-1}$ and columns correspond to member components in layer $s$.
+3.  **Bases ($B_{sf}$) and Coefficients ($C_{sf}$):** Result of an orthogonal transform on $D_{sf}$. $B_{sf}$ contains shared residual bases (rows are bases), and $C_{sf}$ contains anchor coefficients (rows are coefficients) [S1, unofficial].
+4.  **SH Approximation:** For higher-order spherical harmonic (SH) coefficients, a Gaussian-by-channel matrix is approximated along the channel axis, yielding per-Gaussian coefficients and a shared channel basis [S1, unofficial].
+5.  **Precision:** Anchor coefficients, channel bases, and quantization scales use half precision (FP16). Bases and other fields are block-quantized [S1, unofficial].
+
+**Steps**
+1.  **Define Layers:** Identify the set of members $B_s$ first present at anchor $K_s$:
+    $$ B_s = S(K_s) \setminus S(K_{s-1}) $$
+    where $S(K)$ is the set of members present at anchor $K$, $K_0=0$, and $S(K_0)=\emptyset$ [S1, unofficial].
+2.  **Compute Residuals:** For each anchor $K_j$ ($j < M$), compute the residual $\Delta_j$ relative to the full model $\Theta_N$:
+    $$ \Theta_{K_j} = \Theta_N [1 : K_j] + \Delta_j $$
+    The full anchor ($K_M$) has zero residual and requires no additional state [S1, unofficial]. Members present only at the Full anchor require no residual storage [S1, unofficial].
+3.  **Stack Residuals:** For each field $f$ and layer $s < M$, flatten and stack the residuals $\Delta_j$ for all anchors $K_j$ where $j \ge s$ to form the matrix $D_{sf}$. The rows of $D_{sf}$ are anchors, and columns are member components [S1, unofficial].
+4.  **Orthogonal Transform:** Apply an orthogonal transform to $D_{sf}$ to obtain shared bases and coefficients:
+    $$ D_{sf} = C_{sf} B_{sf} $$
+    Rows of $B_{sf}$ are the shared residual bases, and rows of $C_{sf}$ are the anchor coefficients [S1, unofficial].
+5.  **SH Compression:** For higher-order SH coefficients, approximate the Gaussian-by-channel matrix along the channel axis. This saves per-Gaussian coefficients and a shared channel basis that reconstructs every channel [S1, unofficial].
+6.  **Quantization:** Block-quantize the coefficients and other fields' bases. Use half precision for anchor coefficients, channel bases, and quantization scales [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def build_layered_residual_atlas(full_model_theta, anchor_members, anchors):
+    """
+    full_model_theta: NxP matrix of full model parameters (N members, P params)
+    anchor_members: dict mapping anchor index to set of member indices present
+    anchors: list of anchor indices [K0, K1, ..., KM]
+    """
+    N = full_model_theta.shape[0]
+    M = len(anchors)
+    atlas = {}
+
+    # Step 1: Define Layers
+    layers = {}
+    for s in range(M):
+        Ks = anchors[s]
+        Ks_prev = anchors[s-1] if s > 0 else 0
+        members_Ks = anchor_members[Ks]
+        members_Ks_prev = anchor_members[Ks_prev] if s > 0 else set()
+        # Members first present at anchor Ks
+        layer_members = members_Ks - members_Ks_prev
+        layers[s] = layer_members
+
+    # Step 2 & 3: Compute and Stack Residuals
+    # For each field f (simplified here as a single field for demonstration)
+    for s in range(M - 1): # s < M
+        layer_members = layers[s]
+        if not layer_members:
+            continue
+        
+        # Identify anchors that include this layer
+        # Residuals are stored for anchors Kj where j >= s
+        anchor_indices = [j for j in range(s, M-1)] # Up to KM-1
+        
+        # Initialize D_sf
+        # Rows: anchors Kj (j >= s), Cols: members in layer s
+        # Note: Only members in layer s are considered for this layer's residual matrix
+        # But the residual Delta_j is defined for all members in Kj relative to N[1:Kj]
+        # The text says "flattening and stacking residuals from Ks through KM-1"
+        # and "D_sf ... with anchors as rows and member components as columns"
+        # It implies D_sf only contains columns for members in Bs
+        
+        D_sf = []
+        for j in anchor_indices:
+            Kj = anchors[j]
+            # Theta_Kj is Kj x P
+            # Theta_N[1:Kj] is Kj x P
+            # Delta_j = Theta_Kj - Theta_N[1:Kj]
+            # We only care about columns corresponding to layer_members
+            # However, layer_members are a subset of Kj.
+            # We need to map global member indices to local column indices for D_sf
+            
+            # Get parameters for this anchor
+            theta_Kj = full_model_theta[:Kj, :]
+            theta_N_partial = full_model_theta[:Kj, :] # Assuming full model is reference
+            
+            # Residual for this anchor
+            delta_j = theta_Kj - theta_N_partial # Zero for shared members? 
+            # The formula is Theta_Kj = Theta_N[1:Kj] + Delta_j
+            # So Delta_j = Theta_Kj - Theta_N[1:Kj]
+            # For members in layer s, they are NOT in Theta_N[1:K_{s-1}] but ARE in Theta_N[1:Kj] if Kj > Ks?
+            # Actually, Theta_N is the FULL model. Theta_N[1:Kj] are the first Kj members of the full model.
+            # If a member is in layer s, it is in Kj for all j >= s.
+            # Its value in Theta_N[1:Kj] is its value in the full model.
+            # Its value in Theta_Kj is its value in the anchor.
+            # So Delta_j for this member is Anchor_Value - Full_Value.
+            
+            # Extract columns for layer_members
+            member_indices = list(layer_members)
+            # Ensure member_indices are within Kj
+            valid_members = [m for m in member_indices if m < Kj]
+            
+            if not valid_members:
+                continue
+                
+            # Get residual values for these members
+            # delta_j is Kj x P. We want rows corresponding to valid_members?
+            # No, delta_j is the difference for the whole anchor.
+            # We need the residual for specific members.
+            # The residual Delta_j is a matrix of size Kj x P.
+            # We want the rows corresponding to the members in layer s.
+            
+            layer_residuals = delta_j[valid_members, :]
+            D_sf.append(layer_residuals)
+            
+        if not D_sf:
+            continue
+            
+        D_sf = np.stack(D_sf) # Shape: (num_anchors, num_members_in_layer, P)
+        
+        # Step 4: Orthogonal Transform
+        # D_sf = C_sf B_sf
+        # This is likely a PCA or SVD-like decomposition along the member dimension?
+        # "An orthogonal transform along the state dimension"
+        # State dimension usually refers to the parameter dimension P?
+        # Or the member dimension?
+        # "Rows of B_sf are bases, and rows of C_sf are anchor coefficients"
+        # If D_sf is (A, M, P), and we want to share bases across anchors...
+        # The text says "approximate Gaussian-by-channel matrix along the channel axis" for SH.
+        # For general fields, it says "D_sf = C_sf B_sf".
+        # If B_sf are bases, they should be small.
+        # Let's assume a rank-R approximation.
+        # This step is complex to pseudocode without specific transform details (e.g., SVD).
+        # We will note the decomposition.
+        
+        # Placeholder for orthogonal transform (e.g., SVD)
+        # U, S, Vt = np.linalg.svd(D_sf.reshape(-1, P), full_matrices=False)
+        # This doesn't match the structure D = C B.
+        # If D is (A, M, P), maybe we treat it as (A, M*P)?
+        # Or maybe the transform is per member?
+        # "Rows of B_sf are bases" -> B_sf shape (R, P)
+        # "Rows of C_sf are coefficients" -> C_sf shape (A, M, R)
+        # So D_sf (A, M, P) = C_sf (A, M, R) @ B_sf (R, P)
+        # This implies a low-rank approximation across the parameter space for each anchor-member pair?
+        # Or shared across anchors?
+        # "shared residual bases" implies B_sf is shared across anchors.
+        # So we flatten D_sf to (A*M, P) and find bases B_sf (R, P) and coefficients C_sf (A*M, R).
+        
+        D_flat = D_sf.reshape(-1, D_sf.shape[2])
+        # Perform low-rank approximation (e.g., truncated SVD)
+        # U, S, Vt = np.linalg.svd(D_flat, full_matrices=False)
+        # B_sf = Vt[:R, :]
+        # C_sf = (U * S)[:R, :] # Reshape to (A, M, R)
+        # This is a simplification. The text mentions "orthogonal transform".
+        
+        # Store in atlas
+        atlas[(s, 'B')] = B_sf
+        atlas[(s, 'C')] = C_sf
+
+    return atlas
+
+def decode_anchor(atlas, full_model_theta, anchor_index, anchors):
+    """
+    Reconstruct the parameter matrix for a specific anchor.
+    """
+    # Find which layers contribute to this anchor
+    # Anchor Kj includes all layers s where Ks <= Kj
+    # Actually, layer s is defined by Ks.
+    # Members in layer s are present in Kj if Kj >= Ks.
+    
+    reconstructed_theta = np.zeros_like(full_model_theta)
+    
+    # Copy full model up to anchor index
+    K = anchors[anchor_index]
+    reconstructed_theta[:K, :] = full_model_theta[:K, :]
+    
+    # Add residuals
+    for s in range(anchor_index): # Layers s < anchor_index?
+        # Layer s is defined by Ks.
+        # If Kj >= Ks, then members in layer s are in Kj.
+        # We need to add the residual for these members.
+        
+        # Retrieve B_sf and C_sf
+        B_sf = atlas[(s, 'B')]
+        C_sf = atlas[(s, 'C')]
+        
+        # C_sf is (A, M, R) where A is number of anchors in this layer's range?
+        # The atlas stores C_sf for all anchors j >= s.
+        # We need the coefficients for the current anchor j.
+        
+        # Find the index of the current anchor in the list of anchors >= s
+        # This requires mapping anchor index to position in the layer's anchor list.
+        
+        # Reconstruct residual for this anchor
+        # Delta_j_layer_s = C_sf[j, :, :] @ B_sf
+        # This gives a matrix of shape (M_s, P) where M_s is number of members in layer s.
+        
+        # Add to reconstructed_theta
+        # Members in layer s are at specific global indices.
+        # We need to map the local indices in C_sf to global member indices.
+        
+        # This mapping is part of the "member-order metadata" mentioned in the text.
+        pass
+        
+    return reconstructed_theta
+```
+
+**Parameters**
+*   **Anchor Schedule:** The sequence of anchors $K_j$. The sum of anchor indices $\sum_{j<M} K_j \approx 1.023N$, meaning the raw parameters of all non-full anchors approach one full parameter tensor before encoding [S1, unofficial].
+*   **Precision:** Half precision (FP16) for anchor coefficients, channel bases, and quantization scales [S1, unofficial].
+
+**Edge Cases and Pitfalls**
+*   **Full Anchor:** The full anchor has zero residual and requires no additional state in the atlas [S1, unofficial].
+*   **Members Only at Full:** Members present only at the Full anchor require no residual storage [S1, unofficial].
+*   **Precision:** Calibration uses FP16 residual anchor states; deployment restores compressed endpoints with the same exponents [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** The anchor schedule bounds the state to encode such that the sum of anchor indices is approximately $1.023N$ [S1, unofficial]. This suggests the raw parameter storage before encoding is close to one full parameter tensor. The encoding reduces this via shared bases and quantization.
+*   **Measured Performance:** Not given in the sources.
+*   **Strengths:** Allows decoding of neighboring endpoints efficiently by storing only residuals relative to a full model. Shared bases reduce storage for higher-order SH coefficients.
+*   **Limitations:** Encoding error is incurred for anchor requests, but no interval state-estimation error [S1, unofficial].
+*   **When to Use:** When continuous budget adaptation is required in 3D Gaussian Splatting, and efficient storage of multiple anchor states is needed.
+*   **When Not to Use:** When only a single anchor (e.g., the full model) is needed, as the overhead of the atlas may not be justified.
+
+## Background
+The Layered Residual Atlas was introduced in the paper "ParetoGS: High-Quality Continuous-Budget 3D Gaussian Splatting with Sparse Adapted Anchors" by ParetoGS authors [S1, unofficial]. It is part of the ParetoGS method, which uses sparse adapted anchors to manage the trade-off between quality and budget in 3D Gaussian Splatting. The method builds on anchor-based parameter interpolation with gating [18367-anchor-based-parameter-interpolation-with-gating.md].
+
+## Sources
+[S1] ParetoGS: High-Quality Continuous-Budget 3D Gaussian Splatting with Sparse Adapted Anchors, https://arxiv.org/abs/2610.34235, fetched 2026-10-29 (unofficial)

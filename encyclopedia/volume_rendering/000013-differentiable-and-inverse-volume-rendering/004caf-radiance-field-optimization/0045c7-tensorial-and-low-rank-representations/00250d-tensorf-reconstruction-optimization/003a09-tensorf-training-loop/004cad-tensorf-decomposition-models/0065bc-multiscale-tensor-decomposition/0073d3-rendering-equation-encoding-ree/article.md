@@ -1,0 +1,249 @@
+# Rendering Equation Encoding (REE)
+
+Also called: Anisotropic Spherical Gaussian (ASG) Encoding, encode the rendering equation in the feature space
+
+## Overview
+Rendering Equation Encoding (REE) is a technique for modeling view-dependent effects by encoding the rendering equation directly into the feature space using predicted Anisotropic Spherical Gaussian (ASG) mixture parameters, rather than encoding view directions [S1]. Unlike standard NeRF approaches that use frequency or spherical harmonic encoding for view directions, REE allows the subsequent MLP to be aware of the underlying rendering physics, facilitating the learning of complex specular reflections [S1]. It builds on [Multiscale Tensor Decomposition](19444-multiscale-tensor-decomposition.md) by using the multiscale features to predict the physical parameters required for this encoding.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Spatial bottleneck feature vector $b$ (size 128) and a comprehensive feature vector $g$ formed by concatenating encoded feature vectors from $N$ samples.
+*   **Output:** Final color $c$.
+
+**Data Structures:**
+*   **Spatial Bottleneck Feature ($b$):** A vector of size 128 [S1].
+*   **Feature Vector ($a_i$):** A vector of size 2 [S1].
+*   **Parameters ($P$):** Predicted by the spatial MLP. Includes diffuse color $c_d$, specular weight $s$, surface normal $n$, spatial bottleneck $b$, ASG feature vectors $a_i$, and ASG bandwidths $\lambda_i, \mu_i$ for $i \in [0, N-1]$ [S1].
+
+**Numbered Steps:**
+
+1.  **Feature Aggregation:** Obtain the spatial bottleneck feature vector $b$ and the comprehensive feature vector $g$ from the multiscale tensor decomposition [S1]. The vector $g$ is formed by concatenating encoded feature vectors $g_i$ for all $N$ samples: $g = [g_0, g_1, ..., g_{N-1}]$ [S1].
+2.  **Parameter Prediction:** Feed $b$ and $g$ into a spatial MLP to predict the parameter set $P = \{c_d, s, n, b, a_i, \lambda_i, \mu_i\}$ [S1]. The spatial MLP has 3 layers with 256 hidden units and ReLU activation [S1].
+3.  **View Direction Reparameterization:** Reparameterize the view direction $\omega_o$ to align with the reflective direction. Let $d$ be the camera direction and $n$ be the surface normal predicted in Step 2. Compute:
+    $$ \omega_o = 2(d \cdot n)n - d $$
+    This ensures $\omega_o$ aligns with the lobe direction $\omega_i$ for specular reflection [S1].
+4.  **Sample Lobes:** Sample $N$ lobes on a unit sphere. In experiments, $N = 128$ (specifically $8 \times 16$) [S1]. For each sample $i$, define the primary axis $\omega_i = (\theta, \phi)$.
+5.  **Define Orthonormal Axes:** For each $\omega_i$, define the tangent axis $\omega_{i\lambda} = (\theta + \pi/2)$. Rotate $\omega_{i\lambda}$ around $\omega_i$ by $\pi/2$ using a quaternion operation to obtain the bi-tangent axis $\omega_{i\mu}$ [S1]. The axes $[\omega_i, \omega_{i\lambda}, \omega_{i\mu}]$ are predefined orthonormal axes satisfying $\omega_i \cdot \omega_{i\lambda} = \omega_i \cdot \omega_{i\mu} = \omega_{i\lambda} \cdot \omega_{i\mu} = 0$ [S1].
+6.  **Compute Specular Feature Representation:** Calculate the feature representation of the specular integral $c'_s(\omega_o; x)$ using the ASG mixture model:
+    $$ c'_s(\omega_o; x) = \sum_{i=0}^{N-1} a_i S(\omega_o; \omega_i) \exp\left(-\lambda_i (\omega_o \cdot \omega_{i\lambda})^2 - \mu_i (\omega_o \cdot \omega_{i\mu})^2\right) $$
+    where $S(\omega_o; \omega_i) = \max(\omega_o \cdot \omega_i, 0)$, $a_i$ is the feature vector, and $\lambda_i, \mu_i > 0$ are the bandwidths [S1].
+7.  **Predict Final Color:** Apply a directional MLP (6 layers, 256 hidden units, ReLU) to predict the specular color $c_s$ using the inputs $g$ and $b$ [S1]. The final color $c$ is computed as:
+    $$ c = \text{Sigmoid}(c_d + s \odot c_s) $$
+    where $\odot$ denotes element-wise multiplication [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import math
+
+class REE:
+    def __init__(self, N=128):
+        self.N = N
+        # Spatial MLP: 3 layers, 256 hidden units, ReLU
+        self.spatial_mlp = nn.Sequential(
+            nn.Linear(128 + N * 2, 256), # b (128) + g (N*2)
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU()
+        )
+        # Directional MLP: 6 layers, 256 hidden units, ReLU
+        self.directional_mlp = nn.Sequential(
+            nn.Linear(128 + N * 2, 256),
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU(),
+            nn.Linear(256, 3) # Output color
+        )
+        
+    def sample_lobes(self, N):
+        """
+        Sample N points on a unit sphere and compute orthonormal axes.
+        Returns: omega_i, omega_i_lambda, omega_i_mu
+        """
+        # Simple uniform sampling on sphere for demonstration
+        # In practice, specific sampling patterns might be used
+        phi = torch.rand(N) * 2 * math.pi
+        cos_theta = torch.rand(N) * 2 - 1
+        theta = torch.acos(cos_theta)
+        
+        omega_i = torch.stack([
+            torch.sin(theta) * torch.cos(phi),
+            torch.sin(theta) * torch.sin(phi),
+            cos_theta
+        ], dim=1)
+        
+        # Define tangent axis omega_i_lambda = (theta + pi/2)
+        # Note: The source defines omega_i_lambda in spherical coordinates as (theta + pi/2)
+        # This implies a shift in the polar angle. We must convert back to Cartesian.
+        # However, the source says "define omega_i_lambda = (theta + pi/2)" and then 
+        # "rotate omega_i_lambda around omega_i by pi/2". 
+        # A simpler interpretation consistent with "orthonormal axes" is constructing a local frame.
+        # Let's follow the source's explicit quaternion rotation instruction.
+        
+        # 1. Create a vector representing (theta + pi/2) in the same phi plane?
+        # The source says: "For a sampled omega_i = (theta, phi)... define omega_i_lambda = (theta + pi/2)"
+        # This likely means a vector with polar angle theta + pi/2 and same phi.
+        cos_theta_lambda = torch.cos(theta + math.pi/2)
+        sin_theta_lambda = torch.sin(theta + math.pi/2)
+        omega_i_lambda = torch.stack([
+            sin_theta_lambda * torch.cos(phi),
+            sin_theta_lambda * torch.sin(phi),
+            cos_theta_lambda
+        ], dim=1)
+        
+        # 2. Rotate omega_i_lambda around omega_i by pi/2 to get omega_i_mu
+        # Quaternion rotation of vector v around axis k by angle alpha:
+        # v_rot = v*cos(alpha) + (k x v)*sin(alpha) + k*(k.v)*(1-cos(alpha))
+        # Here k = omega_i, alpha = pi/2, v = omega_i_lambda
+        # cos(pi/2) = 0, sin(pi/2) = 1
+        # v_rot = (k x v) + k*(k.v)
+        # Since omega_i_lambda is in the same phi plane, it is orthogonal to omega_i?
+        # omega_i . omega_i_lambda = sin(theta)sin(theta+pi/2)cos^2(phi) + ... + cos(theta)cos(theta+pi/2)
+        # = sin(theta)cos(theta) - cos(theta)sin(theta) = 0. Yes, they are orthogonal.
+        # So k.v = 0.
+        # v_rot = k x v
+        
+        omega_i_mu = torch.cross(omega_i, omega_i_lambda, dim=1)
+        
+        return omega_i, omega_i_lambda, omega_i_mu
+
+    def encode_rendering_equation(self, b, g, omega_i, omega_i_lambda, omega_i_mu, P):
+        """
+        Compute c'_s using ASG mixture.
+        b: (128,)
+        g: (N*2,) - concatenated feature vectors
+        omega_i, omega_i_lambda, omega_i_mu: (N, 3)
+        P: dict containing a_i, lambda_i, mu_i
+        """
+        # Extract parameters from P
+        # P is predicted by spatial MLP. 
+        # Structure of P output needs to be defined. 
+        # P includes {cd, s, n, b, ai, lambda_i, mu_i}
+        # We assume the spatial MLP outputs these in a specific order.
+        # For this pseudocode, we assume P is pre-extracted or the MLP output is unpacked.
+        
+        a_i = P['a_i'] # (N, 2)
+        lambda_i = P['lambda_i'] # (N,)
+        mu_i = P['mu_i'] # (N,)
+        
+        # Reparameterize view direction
+        # d is camera direction, n is normal from P
+        d = P['d'] # (3,)
+        n = P['n'] # (3,)
+        omega_o = 2 * torch.dot(d, n) * n - d
+        
+        # Compute S(omega_o; omega_i) = max(omega_o . omega_i, 0)
+        # omega_o is (3,), omega_i is (N, 3)
+        dot_products = torch.sum(omega_o.unsqueeze(0) * omega_i, dim=1) # (N,)
+        S = torch.clamp(dot_products, min=0.0) # (N,)
+        
+        # Compute exponents
+        # lambda_i * (omega_o . omega_i_lambda)^2
+        dot_lambda = torch.sum(omega_o.unsqueeze(0) * omega_i_lambda, dim=1) # (N,)
+        exp_lambda = torch.exp(-lambda_i * dot_lambda**2) # (N,)
+        
+        # mu_i * (omega_o . omega_i_mu)^2
+        dot_mu = torch.sum(omega_o.unsqueeze(0) * omega_i_mu, dim=1) # (N,)
+        exp_mu = torch.exp(-mu_i * dot_mu**2) # (N,)
+        
+        # Combine
+        # c'_s = sum_i a_i * S * exp_lambda * exp_mu
+        # a_i is (N, 2). S, exp_lambda, exp_mu are (N,)
+        weights = S * exp_lambda * exp_mu # (N,)
+        c_prime_s = torch.sum(weights.unsqueeze(1) * a_i, dim=0) # (2,)
+        
+        return c_prime_s
+
+    def forward(self, b, g, d, n):
+        # 1. Sample lobes
+        omega_i, omega_i_lambda, omega_i_mu = self.sample_lobes(self.N)
+        
+        # 2. Predict parameters P
+        # Concatenate b and g for spatial MLP input
+        spatial_input = torch.cat([b, g], dim=0)
+        spatial_out = self.spatial_mlp(spatial_input)
+        
+        # Unpack P from spatial_out
+        # Assuming a fixed layout for P in the output vector
+        # This layout is not explicitly defined in the source, so we define a plausible one [G]
+        # P = {cd: 3, s: 3, n: 3, b: 128, a_i: N*2, lambda_i: N, mu_i: N}
+        # Total size = 3 + 3 + 3 + 128 + 128*2 + 128 + 128 = 6 + 3 + 128 + 256 + 256 = 649?
+        # Source says b size 128, a_i size 2. N=128.
+        # Let's assume the spatial MLP output is structured to provide these.
+        # For the sake of the algorithm, we assume P is available.
+        P = {}
+        P['n'] = n # Normal is also predicted or provided? Source says "predicted by spatial MLP".
+                   # So n is part of P.
+        # We need to extract n, cd, s, a_i, lambda_i, mu_i from spatial_out.
+        # Since the exact mapping is not given, we will assume a helper function [G]
+        P = self.unpack_parameters(spatial_out)
+        
+        # 3. Compute c'_s
+        c_prime_s = self.encode_rendering_equation(b, g, omega_i, omega_i_lambda, omega_i_mu, P)
+        
+        # 4. Predict final color
+        # Directional MLP takes b and g? Source says "Together with a spatial bottleneck feature vector b, 
+        # we apply a directional MLP to predict the specular color cs".
+        # It does not explicitly say c'_s is input to directional MLP.
+        # It says "The required parameters for the ASG encoding are from P... 
+        # Finally, we apply the sigmoid function to obtain the final color: c = Sigmoid(cd + s . cs)".
+        # This implies cs is predicted by directional MLP.
+        # But how is cs related to c'_s?
+        # Source: "c'_s is a feature representation of the specular integral... 
+        # Simply solving Eq. 6 by computing the sum of encoded feature vectors greatly reduces the channels... 
+        # Instead, ... we form a comprehensive feature vector g... 
+        # Together with b, we apply a directional MLP to predict the specular color cs."
+        # It seems c'_s is an intermediate representation, but the directional MLP predicts cs directly from b and g?
+        # Or does it use c'_s?
+        # "The color of the considered point is obtained by the method described in Sec 3.2."
+        # Sec 3.2 describes REE.
+        # "We propose to encode the rendering equation in the feature space... 
+        # Next, we apply the proposed REE and then use a directional MLP to predict the final color."
+        # This suggests the REE (c'_s) is part of the process, but the directional MLP takes b and g.
+        # However, c'_s is derived from g and P.
+        # Let's assume the directional MLP takes b and g as input, as stated.
+        directional_input = torch.cat([b, g], dim=0)
+        cs = self.directional_mlp(directional_input)
+        
+        # 5. Final Color
+        cd = P['cd']
+        s = P['s']
+        c = torch.sigmoid(cd + s * cs)
+        
+        return c
+
+    def unpack_parameters(self, spatial_out):
+        # Placeholder for unpacking logic [G]
+        # In a real implementation, this would slice spatial_out
+        return {}
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The exponential terms in the ASG encoding can underflow if bandwidths $\lambda_i, \mu_i$ are large and dot products are small. [G] Ensure numerical stability in the exponential calculation.
+*   **Boundary Conditions:** The reparameterization $\omega_o = 2(d \cdot n)n - d$ assumes $n$ is a unit vector. [G] Normalize $n$ if necessary.
+*   **Degenerate Input:** If $d$ and $n$ are parallel, the reflection is straightforward. If they are orthogonal, the reflection direction is perpendicular to both. The quaternion rotation for $\omega_{i\mu}$ requires $\omega_i$ and $\omega_{i\lambda}$ to be non-parallel. Since $\omega_{i\lambda}$ is defined as $(\theta + \pi/2)$, it is orthogonal to $\omega_i$ on the sphere, so the cross product is well-defined.
+
+## Operating characteristics
+*   **Time Complexity:** The method involves sampling $N$ lobes and computing dot products and exponentials for each. With $N=128$, this is a constant overhead per point. The MLPs have fixed sizes (3 and 6 layers, 256 units).
+*   **Memory Complexity:** The feature vectors $a_i$ (size 2) and bandwidths $\lambda_i, \mu_i$ (size 1) are stored for each lobe. The bottleneck $b$ is size 128.
+*   **Performance:** The method uses 16 levels of multiscale tensor decomposition, with base resolution 16 and max resolution 512. The number of feature channels is 4 for appearance and 2 for density. The spatial MLP has 3 layers, and the directional MLP has 6 layers, all with 256 hidden units.
+*   **Strengths:** Encodes the rendering equation in the feature space, making the MLP aware of rendering physics. Reduces the channels of the feature representation compared to direct color prediction.
+*   **Limitations:** Requires predicting additional parameters ($n, a_i, \lambda_i, \mu_i$). The reparameterization of view direction depends on the accuracy of the predicted normal $n$.
+
+## Background
+Rendering Equation Encoding (REE) was proposed in the paper "Multiscale Tensor Decomposition and Rendering Equation Encoding for View Synthesis" (CVPR 2023) [S1]. It is part of the Neural Radiance Feature Field (NRFF) method, which combines multiscale tensor decomposition with learnable feature representations. The method addresses the limitation of standard NeRF approaches that encode view directions but neglect the rich information in the rendering equation. By encoding the rendering equation in the feature space, the method aims to better model complex view-dependent effects.
+
+## Sources
+[S1] Multiscale Tensor Decomposition and Rendering Equation Encoding for View Synthesis, https://doi.org/10.1109/CVPR52729.2023.00412, fetched 2026-10-27

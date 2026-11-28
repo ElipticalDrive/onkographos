@@ -1,0 +1,133 @@
+# Adversarial Content-Aware Quantization (A-CAQ)
+Also called: A-CAQ, Adaptive Content-Aware Quantization
+
+## Overview
+Adversarial Content-Aware Quantization (A-CAQ) is a multi-task learning algorithm for mixed-precision quantization of radiance fields that simultaneously optimizes model parameters and soft bitwidths to balance rendering accuracy and memory efficiency [S1]. It distinguishes itself from direct bitwidth search in Quantization-Aware Training (QAT) space by using an adversarial formulation to mitigate the performance gap between Post-Training Quantization (PTQ) and QAT, which typically widens at lower bitwidths [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A fully trained full-precision radiance field model with initial quantization parameters $Q_{0,0} = \{\Omega_{0,0}, v_{max}^{0,0}, r_{v}^{0,0}\}$, initial soft bitwidths $b_{0,0}$, a training dataset $\mathcal{D}$, a hyper-defined metric $\mathcal{L}^{\text{metric}}$ representing the minimal accuracy requirement, and a learning rate $\beta$ [S1].
+*   **Output:** Convergent model parameters $Q_{E-1,I}$ and bitwidths $b_{E-1,I}$ [S1].
+
+**Data Structures:**
+*   **Quantization Parameters ($Q$):** A set containing the radiance field weights $\Omega$, the maximum value $v_{max}$, and the resolution parameter $r_v$ [S1].
+*   **Soft Bitwidths ($b$):** A vector of continuous variables representing the bitwidth for each layer or component $i \in \mathcal{M}$ [S1].
+*   **Loss Metrics:**
+    *   $\mathcal{L}^{\text{NeRF}}$: Mean Squared Error (MSE) between rendered color $\hat{C}(\ell)$ and ground truth $C(\ell)$ for rays $\ell \in \mathcal{R}$ [S1].
+    *   $\mathcal{L}^{\text{bit}}$: Bitwidth learning loss defined as $\sqrt{||\mathcal{L}^{\text{NeRF}} - \mathcal{L}^{\text{metric}}||} + \sum_{i \in \mathcal{M}} \epsilon_i B_i$, where $\epsilon_i$ is the penalty weight for component $i$ and $B_i$ is the bitwidth [S1].
+
+**Algorithm Steps:**
+The optimization solves the adversarial objective by alternatively optimizing the NeRF loss and the bitwidth loss [S1].
+
+1.  Initialize the model with $Q_{0,0}$ and $b_{0,0}$ [S1].
+2.  For each epoch $i$ from $0$ to $E-1$:
+3.  For each iteration $j$ from $1$ to $I$:
+    a.  Sample a batch $B_j$ from the training set $\mathcal{D}$ using ray-marching [S1].
+    b.  **Forward Pass:** For all rays $(x, d) \in B_j$, compute density $\sigma$ and color $c$ using the radiance field function $F$ with current parameters $Q_{i,j-1}$ and bitwidths $b_{i,j-1}$ [S1]. Perform volume rendering to obtain rendered images $\hat{C}(\ell)$ for all rays $\ell \in \mathcal{R}$ [S1].
+    c.  **Compute NeRF Gradient:** Calculate the gradient of the NeRF loss with respect to the model parameters:
+        $$ \nabla_j^Q \leftarrow \nabla_{Q_{i,j-1}} \mathcal{L}^{\text{NeRF}}(\hat{C}(\ell) \mid Q_{i,j-1}, b_{i,j-1}) $$
+        where $\mathcal{L}^{\text{NeRF}} = \sum_{\ell \in \mathcal{R}} ||\hat{C}(\ell) - C(\ell)||_{\text{F}}^{2}$ [S1].
+    d.  **Compute Bitwidth Gradient:** Calculate the gradient of the bitwidth loss with respect to the bitwidths:
+        $$ \nabla_j^b \leftarrow \nabla_{b_{i,j-1}} \mathcal{L}^{\text{bit}}(\hat{C}(\ell) \mid Q_{i,j-1}, b_{i,j-1}) $$
+        where $\mathcal{L}^{\text{bit}} = \sqrt{||\mathcal{L}^{\text{NeRF}} - \mathcal{L}^{\text{metric}}||} + \sum_{i \in \mathcal{M}} \epsilon_i B_i$ [S1].
+    e.  **Update Model Parameters:** Update $Q$ using the averaged gradient over the batch size $|B_j|$:
+        $$ Q_{i,j} \leftarrow Q_{i,j-1} - \frac{\beta}{|B_j|} \nabla_j^Q $$
+    f.  **Update Bitwidths:** Update $b$ using the averaged gradient over the batch size $|B_j|$:
+        $$ b_{i,j} \leftarrow b_{i,j-1} - \frac{\beta}{|B_j|} \nabla_j^b $$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def A_CAQ(model, initial_Q, initial_b, dataset, L_metric, beta, E, I):
+    """
+    Adversarial Content-Aware Quantization.
+    
+    Args:
+        model: Fully trained full-precision radiance field model.
+        initial_Q: Initial quantization parameters {Omega, v_max, r_v}.
+        initial_b: Initial soft bitwidths.
+        dataset: Training dataset D.
+        L_metric: Hyper-defined metric for minimal accuracy requirement.
+        beta: Learning rate.
+        E: Total number of epochs.
+        I: Iterations per epoch.
+        
+    Returns:
+        Q_final: Convergent model parameters.
+        b_final: Convergent bitwidths.
+    """
+    Q = copy.deepcopy(initial_Q)
+    b = copy.deepcopy(initial_b)
+    
+    for epoch in range(E):
+        for iteration in range(1, I + 1):
+            # Get batch using ray-marching
+            batch = sample_batch(dataset)
+            
+            # Forward pass: Compute density and color
+            # F computes (sigma, c) for rays in batch using current Q and b
+            sigma_c = model.forward(batch, Q, b)
+            
+            # Volume rendering to get rendered images C_hat
+            C_hat = volume_rendering(sigma_c, batch.rays)
+            
+            # Ground truth colors for the batch
+            C_gt = batch.ground_truth_colors
+            
+            # Compute NeRF Loss (MSE)
+            # L_NeRF = sum(||C_hat - C_gt||_F^2) over rays in batch
+            L_NeRF = compute_mse_loss(C_hat, C_gt)
+            
+            # Compute Bitwidth Loss
+            # L_bit = sqrt(||L_NeRF - L_metric||) + sum(epsilon_i * B_i)
+            # Note: epsilon_i and B_i are derived from b and model structure
+            L_bit = compute_bitwidth_loss(L_NeRF, L_metric, b)
+            
+            # Compute gradients
+            # Gradient for model parameters Q
+            grad_Q = compute_gradient(L_NeRF, Q)
+            
+            # Gradient for bitwidths b
+            grad_b = compute_gradient(L_bit, b)
+            
+            # Update parameters
+            # Gradients are averaged on batch size |B_j|
+            batch_size = len(batch)
+            Q = Q - (beta / batch_size) * grad_Q
+            b = b - (beta / batch_size) * grad_b
+            
+    return Q, b
+```
+
+**Parameters:**
+*   **$\mathcal{L}^{\text{metric}}$:** A hyper-defined metric representing the minimal accuracy requirement. It controls the trade-off between quality and efficiency [S1].
+*   **$\epsilon_i$:** Weight for the bitwidth penalty of component $i$. Higher values allocate higher penalty to reduce bitwidth (e.g., for memory efficiency) [S1].
+*   **Initial bitwidth learning rate:** $1 \times 10^{-2}$ [S1].
+*   **Learning rate for other parameters (weights, etc.):** $1 \times 10^{-3}$ [S1].
+*   **Summation of bitwidth penalties $\sum_i \epsilon_i$:** Fixed to $1 \times 10^{-3}$ [S1].
+*   **Total training iterations:** 3000 [S1].
+
+**Edge Cases and Pitfalls:**
+*   Optimizing the bitwidth loss equation alone results in learning bitwidth in a Post-Training Quantization (PTQ) manner, which suffers from accuracy degradation compared to QAT, especially at lower bitwidths [S1].
+*   Directly searching for bitwidth in the QAT space is impractical because QAT accuracy can only be obtained through trial and error [S1].
+
+## Subtopics
+
+### Metric-Guided Bitwidth Learning Scenarios
+*   **Minimal Degradation bitwidth Learning (MDL):** A scenario for high-fidelity applications where the metric is set to the full precision loss to maintain accuracy while minimizing bitwidth. The metric is defined as $\mathcal{L}^{\text{metric}} = \mathcal{L}^{\text{NeRF}}_{\text{fp}}$, where $\mathcal{L}^{\text{NeRF}}_{\text{fp}}$ is the average full precision loss among the training set [S1].
+*   **Metric-Guided bitwidth Learning (MGL):** A scenario for resource-constrained applications where the metric is set higher than full precision loss to trade surplus accuracy for efficiency (lower bitwidth). The metric is defined as $\mathcal{L}^{\text{metric}} > \mathcal{L}^{\text{NeRF}}_{\text{fp}}$ [S1].
+
+## Operating characteristics
+*   **Complexity:** The method involves alternating optimization of model parameters and soft bitwidths, requiring multiple forward and backward passes per iteration [S1].
+*   **Performance:** A-CAQ outperforms LSQ+ in both accuracy and efficiency [S1].
+*   **Strengths:** It effectively mitigates the performance gap between PTQ and QAT at lower bitwidths and allows for flexible control of compression rate via the metric and penalty weights [S1].
+*   **Limitations:** The adversarial formulation requires careful tuning of the metric and penalty weights to balance accuracy and efficiency [S1].
+*   **When to use:** When mixed-precision quantization is needed for radiance fields with specific accuracy or memory constraints [S1].
+*   **When not to use:** When full precision is required or when the overhead of training the quantization parameters is prohibitive [S1].
+
+## Background
+A-CAQ was proposed in the paper "Content-Aware Radiance Fields: Aligning Model Complexity with Scene Intricacy Through Learned Bitwidth Quantization" [S1]. It builds on the concept of Learned Bitwidth Quantization (LBQ) and addresses the limitations of direct bitwidth search in QAT space by introducing an adversarial multi-task learning framework [S1].
+
+## Sources
+[S1] Content-Aware Radiance Fields: Aligning Model Complexity with Scene Intricacy Through Learned Bitwidth Quantization, https://doi.org/10.1007/978-3-031-72775-7_14, fetched 2026-10-26

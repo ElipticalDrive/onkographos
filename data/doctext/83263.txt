@@ -1,0 +1,1161 @@
+A short test project in efficient voxel rendering
+
+Main.cpp contains two different macro defines: ``MODE_QUAD``, and ``MODE_CUBE``
+
+``MODE_QUAD``: Uses the ray-box intersection method described in https://jcgt.org/published/0007/03/04/. Each voxel is represented by a single uvec2 in a large vertex array with one vertex per voxel. Voxels are rendered with a single ``glDrawArrays`` call using the ``GL_POINTS`` primitive. The point primitive is placed and given a size to cover the area of the cube and is then ray-traced in the fragment shader using an optimized ray-box intersection test.
+
+``MODE_CUBE``: rasterizes cubes by drawing 3 cube faces per voxel as described by Sebastian Aaltonen: https://twitter.com/SebAaltonen/status/1315982782439591938?s=20&t=OT9EAP_VgMDqngheDqBcbA. A single large index buffer that contains 18 indices for each instance is created and bound at startup, then the actual data used for drawing the voxels is put into a large SSBO (1 uvec2 per voxel). 
+
+## Relative Performance
+
+Testing on Intel Integrated graphics, the two techniques are able to render approximately the same number of cubes. Using a dedicated graphics card however results in ``MODE_QUAD`` being about twice as fast as ``MODE_CUBE``.
+
+
+Build instructions:
+
+Only made for linux right now, just ``make`` and run. Relies on GLAD (bundled), GLM (bundled), GLFW (install with ``apt``)
+
+### main.cpp
+```
+#include <stdio.h>
+#include <stdlib.h>
+#include <iostream>
+#include <sstream>
+#include <fstream>
+#include <cstdlib>
+
+#include "glad/glad.h"
+
+#include <GLFW/glfw3.h>
+#include <glm/glm.hpp>
+
+#include "camera.h"
+
+using namespace glm;
+
+#define GLSL(src) #src
+#define MODE_CUBE
+//#define MODE_QUAD
+
+static void error_callback(int error, const char *description) {
+  fputs(description, stderr);
+}
+ 
+void GLAPIENTRY
+MessageCallback( GLenum source,
+                 GLenum type,
+                 GLuint id,
+                 GLenum severity,
+                 GLsizei length,
+                 const GLchar* message,
+                 const void* userParam )
+{
+  fprintf( stderr, "GL CALLBACK: %s type = 0x%x, severity = 0x%x, message = %s\n",
+           ( type == GL_DEBUG_TYPE_ERROR ? "** GL ERROR **" : "" ),
+            type, severity, message );
+}
+
+std::stringstream get_file(std::string path){
+    std::stringstream result;
+    std::ifstream stream(path);
+    std::string line;
+    while(getline(stream,line))
+        result << line << "\n";
+    return result;
+}
+
+GLuint createShader(std::string& shader,GLenum type){
+    GLuint id = glCreateShader(type);
+    const char* shader_c_string = shader.c_str();
+    glShaderSource(id,1,&shader_c_string,nullptr);
+    glCompileShader(id);
+
+    GLint result;
+    glGetShaderiv(id,GL_COMPILE_STATUS,&result);
+    if(result == GL_FALSE){
+        GLint length;
+        glGetShaderiv(id,GL_INFO_LOG_LENGTH,&length);
+        char *message = (char*)alloca(sizeof(char)*length);
+        glGetShaderInfoLog(id,length,&length,message);
+        std::cout << "Failed to compile "<<(type == GL_VERTEX_SHADER ? "vertex" : "fragment") << "shader"<<std::endl;
+        std::cout << message << std::endl;
+    }
+
+    return id;
+}
+
+// camera
+Camera camera(glm::vec3(0.0f, 0.0f, -30.0f));
+float lastX = 2.0f;
+float lastY = 2.0f;
+bool firstMouse = true;
+
+// timing
+float deltaTime = 0.0f;	// time between current frame and last frame
+float lastFrame = 0.0f;
+int frame = 0;
+
+int SCREEN_WIDTH = 1024;
+int SCREEN_HEIGHT = 600;
+
+// process all input: query GLFW whether relevant keys are pressed/released this frame and react accordingly
+// ---------------------------------------------------------------------------------------------------------
+void processInput(GLFWwindow *window)
+{
+    if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS) {
+      glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+      glfwSetWindowShouldClose(window, true);
+    }
+        
+    float speed = 2.0;
+    if (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS)
+        camera.MovementSpeed = 10.0;;
+
+    if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS)
+        camera.ProcessKeyboard(FORWARD, deltaTime * speed);
+    if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS)
+        camera.ProcessKeyboard(BACKWARD, deltaTime * speed);
+    if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS)
+        camera.ProcessKeyboard(LEFT, deltaTime * speed);
+    if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS)
+        camera.ProcessKeyboard(RIGHT, deltaTime * speed);
+}
+
+// glfw: whenever the window size changed (by OS or user resize) this callback function executes
+// ---------------------------------------------------------------------------------------------
+void framebuffer_size_callback(GLFWwindow* window, int width, int height)
+{
+    // make sure the viewport matches the new window dimensions; note that width and 
+    // height will be significantly larger than specified on retina displays.
+    glViewport(0, 0, width, height);
+    SCREEN_WIDTH = width;
+    SCREEN_HEIGHT = height;
+}
+
+
+// glfw: whenever the mouse moves, this callback is called
+// -------------------------------------------------------
+void mouse_callback(GLFWwindow* window, double xposIn, double yposIn)
+{
+    float xpos = static_cast<float>(xposIn);
+    float ypos = static_cast<float>(yposIn);
+
+    if (firstMouse)
+    {
+        lastX = xpos;
+        lastY = ypos;
+        firstMouse = false;
+    }
+
+    float xoffset = xpos - lastX;
+    float yoffset = lastY - ypos; // reversed since y-coordinates go from bottom to top
+
+    lastX = xpos;
+    lastY = ypos;
+
+    camera.ProcessMouseMovement(xoffset, yoffset);
+}
+
+// glfw: whenever the mouse scroll wheel scrolls, this callback is called
+// ----------------------------------------------------------------------
+void scroll_callback(GLFWwindow* window, double xoffset, double yoffset)
+{
+    camera.ProcessMouseScroll(static_cast<float>(yoffset));
+}
+
+int main(void) {
+  GLFWwindow *window;
+
+
+
+  glfwSetErrorCallback(error_callback);
+
+  if (!glfwInit())
+    exit(EXIT_FAILURE);
+
+  glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
+  glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 6);
+  glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+  glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
+  glfwWindowHint(GLFW_RESIZABLE, GL_TRUE);
+
+  window = glfwCreateWindow(SCREEN_WIDTH, SCREEN_HEIGHT, "Voxel-Renderer", NULL, NULL);
+  if (!window) {
+    glfwTerminate();
+    exit(EXIT_FAILURE);
+  }
+
+  glfwMakeContextCurrent(window);
+  glfwSetFramebufferSizeCallback(window, framebuffer_size_callback);
+  glfwSetCursorPosCallback(window, mouse_callback);
+  glfwSetScrollCallback(window, scroll_callback);
+
+  // tell GLFW to capture our mouse
+  glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+
+  if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) {
+    std::cout << "Failed to initialize GLAD" << std::endl;
+    return -1;
+  }
+
+  glEnable( GL_DEBUG_OUTPUT );
+  glDebugMessageCallback( MessageCallback, 0 );
+
+  glEnable(GL_DEPTH_TEST);
+
+    const int width = 200;
+    const int height = 50;
+    const int depth = 200;
+
+#ifdef MODE_QUAD
+  glEnable(GL_PROGRAM_POINT_SIZE);
+  
+    // Create a vertex buffer for rendering point primitives
+    const uint32_t no_of_vertices = width*height*depth;
+    uint32_t *vertices = new uint32_t[no_of_vertices * 2];
+
+    for (int i=0; i < no_of_vertices; i++) {
+
+      uint32_t x = (i%width);
+      uint32_t y = ((i/(width*depth))) << 11;
+      uint32_t z = ((i/width)%depth) << 21;
+      uint32_t pos = x|y|z;
+
+      uint32_t r = uint32_t(float(std::rand()) / float(RAND_MAX) * 32.0); // 5 bits 0-31
+      uint32_t g = uint32_t(float(std::rand()) / float(RAND_MAX) * 64.0) << 5; // 6 bits 0-63
+      uint32_t b = uint32_t(float(std::rand()) / float(RAND_MAX) * 32.0) <<11; // 5 bits 0-31
+      uint32_t albedo = r|g|b;
+
+      vertices[i*2] = pos;
+      vertices[i*2+1] = albedo;
+    }
+
+
+    GLuint vertex_array;
+    GLuint vertex_buffer; //Use the vertex buffer for all drawing
+    glCreateVertexArrays(1, &vertex_array);
+    glBindVertexArray(vertex_array);
+    glCreateBuffers(1, &vertex_buffer);
+    glBindBuffer(GL_ARRAY_BUFFER, vertex_buffer);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(uint32_t) * 2 * no_of_vertices, vertices, GL_STATIC_DRAW);
+    glVertexAttribIPointer(0, 2, GL_INT, 2 * sizeof(uint32_t), (void *)0);
+    glEnableVertexAttribArray(0);
+    //create and attach shaders
+    std::string vs_source = get_file("./shaders/quad.vert").str(),
+    fs_source = get_file("./shaders/quad.frag").str();
+#endif
+
+#ifdef MODE_CUBE
+    const uint32_t no_of_instances = width*height*depth;
+
+    std::cout<<"drawing " << no_of_instances << " cubes"<<std::endl;
+
+    //Create a vertex array object that won't be used
+    // OpenGL forces us to bind a vertex array object if we want to draw anything
+    float vertices[3] = {0.0, 0.0, 0.0};
+    GLuint vertex_array;
+    GLuint vertex_buffer; //Use the vertex buffer for all drawing
+    glCreateVertexArrays(1, &vertex_array);
+    glBindVertexArray(vertex_array);
+    glCreateBuffers(1, &vertex_buffer);
+    glBindBuffer(GL_ARRAY_BUFFER, vertex_buffer);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(float) * 3, &vertices, GL_STATIC_DRAW);
+
+    std::cout <<"vertex buffer done"<<std::endl;
+
+    //Create instance buffer
+    // Index Buffer from Seb Aaltonen: https://twitter.com/SebAaltonen/status/1322819025047605248/photo/2
+    const uint32_t num_cube_indices = 3 * 2 * 3; //3 faces, 2 tris per face, 3 verts per tri
+    const uint32_t num_cube_vertices = 8;
+    const uint32_t cube_indices[num_cube_indices] = {
+        0, 2, 1, 2, 3, 1,
+        5, 4, 1, 1, 4, 0,
+        0, 4, 6, 0, 6, 2, 
+    };
+
+    const uint32_t cube_num_indices = no_of_instances * num_cube_indices;
+    uint32_t *indices = new uint32_t[cube_num_indices];
+    for (uint32_t i = 0; i < cube_num_indices; i++) {
+      uint32_t cube = i / num_cube_indices;
+      uint32_t cube_local = i % num_cube_indices;
+      indices[i] = cube_indices[cube_local] + cube * num_cube_vertices;
+    }
+
+    GLuint index_buffer;
+    glCreateBuffers(1, &index_buffer);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, index_buffer);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(uint32_t) * cube_num_indices, indices, GL_STATIC_DRAW);
+
+    std::cout <<"index buffer done"<<std::endl;
+
+    // Create a storagebuffer for rendering point primitives
+    uint32_t *instances = new uint32_t[no_of_instances * 2];
+
+    for (int i = 0; i < no_of_instances; i++) {
+
+      uint32_t x = (i%width);
+      uint32_t y = ((i/(width*depth))) << 11;
+      uint32_t z = ((i/width)%depth) << 21;
+      uint32_t pos = x|y|z;
+
+      uint32_t r = uint32_t(float(std::rand()) / float(RAND_MAX) * 32.0); // 5 bits 0-31
+      uint32_t g = uint32_t(float(std::rand()) / float(RAND_MAX) * 64.0) << 5; // 6 bits 0-63
+      uint32_t b = uint32_t(float(std::rand()) / float(RAND_MAX) * 32.0) <<11; // 5 bits 0-31
+      uint32_t albedo = r|g|b;
+
+      instances[i*2] = pos;
+      instances[i*2+1] = albedo;
+    }
+
+
+    GLuint voxel_buffer;
+    glCreateBuffers(1, &voxel_buffer);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, voxel_buffer);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(uint32_t) * 2 * no_of_instances, instances, GL_STATIC_DRAW);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, voxel_buffer);
+
+    std::cout <<"storage buffer done"<<std::endl;
+
+  
+    //create and attach shaders
+    std::string vs_source = get_file("./shaders/cube.vert").str(),
+    fs_source = get_file("./shaders/cube.frag").str();
+#endif
+    GLuint program = glCreateProgram();
+    GLuint vs = createShader(vs_source,GL_VERTEX_SHADER);
+    GLuint fs = createShader(fs_source,GL_FRAGMENT_SHADER);
+
+    glAttachShader(program,vs);
+    glAttachShader(program,fs);
+    glLinkProgram(program);
+    glUseProgram(program);
+    
+    GLuint screen_size_location = glGetUniformLocation(program,"screen_size");
+    GLuint camera_location = glGetUniformLocation(program,"view_projection_matrix");
+    GLuint camera_origin = glGetUniformLocation(program,"camera_origin");
+    GLuint inv_proj = glGetUniformLocation(program,"inv_projection");
+    GLuint proj = glGetUniformLocation(program,"projection");
+    GLuint viewport_location = glGetUniformLocation(program,"viewport");
+
+    glClearColor(0.3f, 0.6f, 0.99f, 1.0f);
+    
+    while (!glfwWindowShouldClose(window))
+    {
+
+        float currentFrame = static_cast<float>(glfwGetTime());
+        deltaTime = currentFrame - lastFrame;
+        lastFrame = currentFrame;
+
+        processInput(window);
+
+        glm::mat4 projection = glm::perspective(glm::radians(camera.Zoom), (float)SCREEN_WIDTH / (float)SCREEN_HEIGHT, 0.1f, 500.0f);
+        glm::mat4 view = camera.GetViewMatrix();
+        projection = projection*view;
+        glUniformMatrix4fv(camera_location, 1, GL_FALSE, &projection[0][0]);
+        glUniformMatrix4fv(proj, 1, GL_FALSE, &projection[0][0]);
+        projection = glm::inverse(projection);
+        glUniformMatrix4fv(inv_proj, 1, GL_FALSE, &projection[0][0]);
+        glUniform3fv(camera_origin, 1, &camera.Position[0]);
+        glUniform2f(screen_size_location, float(SCREEN_WIDTH), float(SCREEN_HEIGHT));
+        glUniform4f(viewport_location, 0.0, 0.0, float(SCREEN_WIDTH), float(SCREEN_HEIGHT));
+        /* Render here */
+        glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
+#ifdef MODE_QUAD
+        glDrawArrays(GL_POINTS, 0, no_of_vertices);
+#endif
+
+#ifdef MODE_CUBE
+        glDrawElements(GL_TRIANGLES, cube_num_indices, GL_UNSIGNED_INT, 0);
+#endif
+
+        /* Swap front and back buffers */
+        glfwSwapBuffers(window);
+
+        /* Poll for and process events */
+        glfwPollEvents();
+        frame++;
+        if (frame %60 == 0) {
+          std::cout<< deltaTime * 1000.0 <<std::endl; //in microseconds
+        }
+    }
+    glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+    glfwTerminate();
+#ifdef MODE_QUAD
+  delete vertices;
+#endif
+#ifdef MODE_CUBE
+  delete indices;
+#endif
+
+  exit(EXIT_SUCCESS);
+}
+```
+
+### include/camera.h
+```
+#ifndef CAMERA_H
+#define CAMERA_H
+
+#include <glad/glad.h>
+#include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+
+#include <vector>
+
+// Defines several possible options for camera movement. Used as abstraction to stay away from window-system specific input methods
+enum Camera_Movement {
+    FORWARD,
+    BACKWARD,
+    LEFT,
+    RIGHT
+};
+
+// Default camera values
+const float YAW         = -90.0f;
+const float PITCH       =  0.0f;
+const float SPEED       =  2.5f;
+const float SENSITIVITY =  0.1f;
+const float ZOOM        =  45.0f;
+
+
+// An abstract camera class that processes input and calculates the corresponding Euler Angles, Vectors and Matrices for use in OpenGL
+class Camera
+{
+public:
+    // camera Attributes
+    glm::vec3 Position;
+    glm::vec3 Front;
+    glm::vec3 Up;
+    glm::vec3 Right;
+    glm::vec3 WorldUp;
+    // euler Angles
+    float Yaw;
+    float Pitch;
+    // camera options
+    float MovementSpeed;
+    float MouseSensitivity;
+    float Zoom;
+
+    // constructor with vectors
+    Camera(glm::vec3 position = glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3 up = glm::vec3(0.0f, 1.0f, 0.0f), float yaw = YAW, float pitch = PITCH) : Front(glm::vec3(0.0f, 0.0f, -1.0f)), MovementSpeed(SPEED), MouseSensitivity(SENSITIVITY), Zoom(ZOOM)
+    {
+        Position = position;
+        WorldUp = up;
+        Yaw = yaw;
+        Pitch = pitch;
+        updateCameraVectors();
+    }
+    // constructor with scalar values
+    Camera(float posX, float posY, float posZ, float upX, float upY, float upZ, float yaw, float pitch) : Front(glm::vec3(0.0f, 0.0f, -1.0f)), MovementSpeed(SPEED), MouseSensitivity(SENSITIVITY), Zoom(ZOOM)
+    {
+        Position = glm::vec3(posX, posY, posZ);
+        WorldUp = glm::vec3(upX, upY, upZ);
+        Yaw = yaw;
+        Pitch = pitch;
+        updateCameraVectors();
+    }
+
+    // returns the view matrix calculated using Euler Angles and the LookAt Matrix
+    glm::mat4 GetViewMatrix()
+    {
+        return glm::lookAt(Position, Position + Front, Up);
+    }
+
+    // processes input received from any keyboard-like input system. Accepts input parameter in the form of camera defined ENUM (to abstract it from windowing systems)
+    void ProcessKeyboard(Camera_Movement direction, float deltaTime)
+    {
+        float velocity = MovementSpeed * deltaTime;
+        if (direction == FORWARD)
+            Position += Front * velocity;
+        if (direction == BACKWARD)
+            Position -= Front * velocity;
+        if (direction == LEFT)
+            Position -= Right * velocity;
+        if (direction == RIGHT)
+            Position += Right * velocity;
+    }
+
+    // processes input received from a mouse input system. Expects the offset value in both the x and y direction.
+    void ProcessMouseMovement(float xoffset, float yoffset, GLboolean constrainPitch = true)
+    {
+        xoffset *= MouseSensitivity;
+        yoffset *= MouseSensitivity;
+
+        Yaw   += xoffset;
+        Pitch += yoffset;
+
+        // make sure that when pitch is out of bounds, screen doesn't get flipped
+        if (constrainPitch)
+        {
+            if (Pitch > 89.0f)
+                Pitch = 89.0f;
+            if (Pitch < -89.0f)
+                Pitch = -89.0f;
+        }
+
+        // update Front, Right and Up Vectors using the updated Euler angles
+        updateCameraVectors();
+    }
+
+    // processes input received from a mouse scroll-wheel event. Only requires input on the vertical wheel-axis
+    void ProcessMouseScroll(float yoffset)
+    {
+        Zoom -= (float)yoffset;
+        if (Zoom < 1.0f)
+            Zoom = 1.0f;
+        if (Zoom > 45.0f)
+            Zoom = 45.0f; 
+    }
+
+private:
+    // calculates the front vector from the Camera's (updated) Euler Angles
+    void updateCameraVectors()
+    {
+        // calculate the new Front vector
+        glm::vec3 front;
+        front.x = cos(glm::radians(Yaw)) * cos(glm::radians(Pitch));
+        front.y = sin(glm::radians(Pitch));
+        front.z = sin(glm::radians(Yaw)) * cos(glm::radians(Pitch));
+        Front = glm::normalize(front);
+        // also re-calculate the Right and Up vector
+        Right = glm::normalize(glm::cross(Front, WorldUp));  // normalize the vectors, because their length gets closer to 0 the more you look up or down which results in slower movement.
+        Up    = glm::normalize(glm::cross(Right, Front));
+    }
+};
+#endif
+```
+
+### shaders/cube.frag
+```
+#version 460
+
+in vec3 color;
+out vec4 frag_color;
+
+void main() {
+    frag_color = vec4(color, 1.0);
+}
+```
+
+### shaders/cube.vert
+```
+#version 460
+
+layout(std430, binding = 0) restrict readonly buffer Instances {
+    // .x = X:11, Y:10, Z:11
+    // .y = 
+    //  ALBEDO: 16 // R5G6B5
+    //  METAL: 4
+    //  ROUGH: 4
+    //  INTENSITY: 4
+    //  TYPE: 4 - 
+    uvec2 data[];
+};
+
+
+
+uniform vec3 camera_origin;
+uniform mat4 view_projection_matrix;
+
+out vec3 color;
+out vec3 world_pos;
+out vec3 clip_pos;
+
+void main(){
+    uint instance = (gl_VertexID >> uint(3));
+    uint u_x = data[instance].x & uint(2047); // 11 bits
+    uint u_y = (data[instance].x & uint(2095104)) >> uint(11); // 10 bits
+    uint u_z = (data[instance].x & (uint(2047) << uint(21))) >> uint(21); // 11 bits
+    vec3 world_position = vec3(float(u_x), float(u_y), float(u_z))*0.1;
+    uint u_albedo = data[instance].y & uint(65535);
+    uint u_red = u_albedo & uint(31);
+    uint u_green = (u_albedo & uint(2016))>>uint(5);
+    uint u_blue = (u_albedo & uint(63488))>>uint(11);
+    vec3 albedo = vec3(float(u_red)/32.0, float(u_green)/64.0, float(u_blue)/32.0);
+
+    vec3 local_camera_pos= camera_origin - world_position;
+    uvec3 xyz = uvec3(gl_VertexID & 0x1, (gl_VertexID & 0x2) >> 1, (gl_VertexID & 0x4) >> 2);
+    if (local_camera_pos.x > 0.0) {
+        xyz.x = 1 - xyz.x;
+    }
+    if (local_camera_pos.y > 0.0) {
+        xyz.y = 1 - xyz.y;
+    }
+    if (local_camera_pos.z > 0.0) {
+        xyz.z = 1 - xyz.z;
+    }
+    vec3 uvw = vec3(xyz);
+    vec4 position = vec4(uvw * vec3(2.0) - vec3(1.0), 1.0);
+    position = view_projection_matrix * vec4(position.xyz * 0.05 + world_position, 1.0);
+
+    clip_pos = position.xyz;
+    world_pos = world_position;
+    gl_Position = position;
+    color = albedo;
+}
+```
+
+### shaders/quad.frag
+```
+#version 460
+
+
+struct Box {
+    vec3 center;
+    vec3 radius;
+    vec3 invRadius;
+    mat3 rotation;
+};
+
+struct Ray {
+    vec3 origin;
+    vec3 direction;
+};
+
+float maxComponent(vec3 v) {
+  return max(max(v.x, v.y), v.z);
+}
+
+// vec3 box.radius:       independent half-length along the X, Y, and Z axes
+// mat3 box.rotation:     box-to-world rotation (orthonormal 3x3 matrix) transformation
+// bool rayCanStartInBox: if true, assume the origin is never in a box. GLSL optimizes this at compile time
+// bool oriented:         if false, ignore box.rotation
+bool ourIntersectBoxCommon(Box box, Ray ray, out float dist, out vec3 normal, const bool rayCanStartInBox, const in bool oriented, in vec3 _invRayDirection) {
+
+    // Move to the box's reference frame. This is unavoidable and un-optimizable.
+    ray.origin = box.rotation * (ray.origin - box.center);
+    if (oriented) {
+        ray.direction = ray.direction * box.rotation;
+    }
+    
+    // This "rayCanStartInBox" branch is evaluated at compile time because `const` in GLSL
+    // means compile-time constant. The multiplication by 1.0 will likewise be compiled out
+    // when rayCanStartInBox = false.
+    float winding;
+    if (rayCanStartInBox) {
+        // Winding direction: -1 if the ray starts inside of the box (i.e., and is leaving), +1 if it is starting outside of the box
+        winding = (maxComponent(abs(ray.origin) * box.invRadius) < 1.0) ? -1.0 : 1.0;
+    } else {
+        winding = 1.0;
+    }
+
+    // We'll use the negated sign of the ray direction in several places, so precompute it.
+    // The sign() instruction is fast...but surprisingly not so fast that storing the result
+    // temporarily isn't an advantage.
+    vec3 sgn = -sign(ray.direction);
+
+	// Ray-plane intersection. For each pair of planes, choose the one that is front-facing
+    // to the ray and compute the distance to it.
+    vec3 distanceToPlane = box.radius * winding * sgn - ray.origin;
+    if (oriented) {
+        distanceToPlane /= ray.direction;
+    } else {
+        distanceToPlane *= _invRayDirection;
+    }
+
+    // Perform all three ray-box tests and cast to 0 or 1 on each axis. 
+    // Use a macro to eliminate the redundant code (no efficiency boost from doing so, of course!)
+    // Could be written with 
+#   define TEST(U, VW)\
+         /* Is there a hit on this axis in front of the origin? Use multiplication instead of && for a small speedup */\
+         (distanceToPlane.U >= 0.0) && \
+         /* Is that hit within the face of the box? */\
+         all(lessThan(abs(ray.origin.VW + ray.direction.VW * distanceToPlane.U), box.radius.VW))
+
+    bvec3 test = bvec3(TEST(x, yz), TEST(y, zx), TEST(z, xy));
+
+    // CMOV chain that guarantees exactly one element of sgn is preserved and that the value has the right sign
+    sgn = test.x ? vec3(sgn.x, 0.0, 0.0) : (test.y ? vec3(0.0, sgn.y, 0.0) : vec3(0.0, 0.0, test.z ? sgn.z : 0.0));    
+#   undef TEST
+        
+    // At most one element of sgn is non-zero now. That element carries the negative sign of the 
+    // ray direction as well. Notice that we were able to drop storage of the test vector from registers,
+    // because it will never be used again.
+
+    // Mask the distance by the non-zero axis
+    // Dot product is faster than this CMOV chain, but doesn't work when distanceToPlane contains nans or infs. 
+    //
+    dist = (sgn.x != 0.0) ? distanceToPlane.x : ((sgn.y != 0.0) ? distanceToPlane.y : distanceToPlane.z);
+
+    // Normal must face back along the ray. If you need
+    // to know whether we're entering or leaving the box, 
+    // then just look at the value of winding. If you need
+    // texture coordinates, then use box.invDirection * hitPoint.
+    
+    if (oriented) {
+        normal = box.rotation * sgn;
+    } else {
+        normal = sgn;
+    }
+    
+    return (sgn.x != 0) || (sgn.y != 0) || (sgn.z != 0);
+}
+
+
+// Just determines whether the ray hits the axis-aligned box.
+// invRayDirection is guaranteed to be finite for all elements.
+bool ourHitAABox(vec3 boxCenter, vec3 boxRadius, vec3 rayOrigin, vec3 rayDirection, vec3 invRayDirection) {
+    rayOrigin -= boxCenter;
+    vec3 distanceToPlane = (-boxRadius * sign(rayDirection) - rayOrigin) * invRayDirection;    
+
+#   define TEST(U, V,W)\
+         (float(distanceToPlane.U >= 0.0) * \
+          float(abs(rayOrigin.V + rayDirection.V * distanceToPlane.U) < boxRadius.V) *\
+          float(abs(rayOrigin.W + rayDirection.W * distanceToPlane.U) < boxRadius.W))
+
+    // If the ray is in the box or there is a hit along any axis, then there is a hit
+    return bool(float(abs(rayOrigin.x) < boxRadius.x) * 
+                float(abs(rayOrigin.y) < boxRadius.y) * 
+                float(abs(rayOrigin.z) < boxRadius.z) + 
+                TEST(x, y, z) + 
+                TEST(y, z, x) + 
+                TEST(z, x, y));
+#   undef TEST
+}
+
+
+// There isn't really much application for ray-AABB where we don't check if the ray is in the box, so we
+// just give a dummy implementation here to allow the test harness to compile.
+bool ourOutsideHitAABox(vec3 boxCenter, vec3 boxRadius, vec3 rayOrigin, vec3 rayDirection, vec3 invRayDirection) {
+    return ourHitAABox(boxCenter, boxRadius, rayOrigin, rayDirection, invRayDirection);
+}
+
+// Ray is always outside of the box
+bool ourOutsideIntersectBox(Box box, Ray ray, out float distance, out vec3 normal, const in bool oriented, in vec3 _invRayDirection) {
+    return ourIntersectBoxCommon(box, ray, distance, normal, false, oriented, _invRayDirection);
+}
+
+bool ourIntersectBox(Box box, Ray ray, out float distance, out vec3 normal, const in bool oriented, in vec3 _invRayDirection) {
+    return ourIntersectBoxCommon(box, ray, distance, normal, true, oriented, _invRayDirection);
+}
+
+uniform vec3 camera_origin;
+uniform mat4 inv_projection;
+uniform mat4 projection;
+uniform vec4 viewport;
+
+in vec3 color;
+in vec3 world_pos;
+in vec3 clip_pos;
+
+out vec4 frag_color;
+
+void main() {
+    vec4 ndcPos;
+    ndcPos.xy = ((2.0 * gl_FragCoord.xy)) / (viewport.zw) - 1;
+    ndcPos.z = (2.0 * gl_FragCoord.z - 1.0);
+    ndcPos.w = 1.0;
+
+    vec4 clipPos = ndcPos / gl_FragCoord.w;
+    vec4 eyePos = inv_projection * clipPos;
+
+
+    Ray ray;
+    ray.origin = camera_origin;
+    ray.direction = -normalize(camera_origin - (eyePos.xyz/eyePos.w));
+    Box box;
+    box.center = world_pos;
+    box.radius = vec3(0.05);
+    box.invRadius = vec3(20.0);
+    box.rotation =  mat3(1.0);
+    vec3 normal;
+    float dist;
+    vec3 col = color;
+    if (!ourIntersectBoxCommon(box, ray, dist, normal, false, false, 1.0 / ray.direction)) {
+        col = vec3(0.0);
+        discard;
+    } else {
+        col = normal*0.5+0.5;
+    }
+    
+    vec4 d4 = (projection * vec4(dist * ray.direction + ray.origin, 1.0));
+    gl_FragDepth = d4.z/d4.w;
+    frag_color = vec4(col*color, 1.0);
+}
+```
+
+### shaders/quad.vert
+```
+#version 460
+
+layout (location = 0) in uvec2 data;
+
+uniform vec2 screen_size;
+uniform mat4 view_projection_matrix;
+
+//Fast Quadric Proj: "GPU-Based Ray-Casting of Quadratic Surfaces" http://dl.acm.org/citation.cfm?id=2386396
+void quadricProj(in vec3 osPosition, in float voxelSize, in mat4 objectToScreenMatrix, in vec2 halfScreenSize,
+                    inout vec4 position, inout float pointSize) {
+    const vec4 quadricMat = vec4(1.0, 1.0, 1.0, -1.0);
+    float sphereRadius = voxelSize * 1.732051;
+    vec4 sphereCenter = vec4(osPosition.xyz, 1.0);
+    mat4 modelViewProj = transpose(objectToScreenMatrix);
+    mat3x4 matT = mat3x4( mat3(modelViewProj[0].xyz, modelViewProj[1].xyz, modelViewProj[3].xyz) * sphereRadius);
+    matT[0].w = dot(sphereCenter, modelViewProj[0]);
+    matT[1].w = dot(sphereCenter, modelViewProj[1]);
+    matT[2].w = dot(sphereCenter, modelViewProj[3]);
+    mat3x4 matD = mat3x4(matT[0] * quadricMat, matT[1] * quadricMat, matT[2] * quadricMat);
+    vec4 eqCoefs = vec4(dot(matD[0], matT[2]), dot(matD[1], matT[2]), dot(matD[0], matT[0]), dot(matD[1], matT[1]))
+                    / dot(matD[2], matT[2]);
+    vec4 outPosition = vec4(eqCoefs.x, eqCoefs.y, 0.0, 1.0);
+    vec2 AABB = sqrt(eqCoefs.xy*eqCoefs.xy - eqCoefs.zw);
+    AABB *= halfScreenSize * 2.0f;
+    position.xy = outPosition.xy * position.w;
+    pointSize = max(AABB.x, AABB.y);
+}
+
+out vec3 color;
+out vec3 world_pos;
+out vec3 clip_pos;
+
+void main(){
+    uint u_x = data.x & uint(2047); // 11 bits
+    uint u_y = (data.x & uint(2095104)) >> uint(11); // 10 bits
+    uint u_z = (data.x & (uint(2047) << uint(21))) >> uint(21); // 11 bits
+    vec3 world_position = vec3(float(u_x), float(u_y), float(u_z))*0.1;
+    uint u_albedo = data.y & uint(65535);
+    uint u_red = u_albedo & uint(31);
+    uint u_green = (u_albedo & uint(2016))>>uint(5);
+    uint u_blue = (u_albedo & uint(63488))>>uint(11);
+    vec3 albedo = vec3(float(u_red)/32.0, float(u_green)/64.0, float(u_blue)/32.0);
+
+    vec4 position = (view_projection_matrix * vec4(world_position, 1.0));
+    float point_size = 100.0;
+    if (position.z > 0.0) {
+        quadricProj(world_position, 0.05, view_projection_matrix, screen_size * 0.5, position, point_size);
+
+        // Square area
+        float stochasticCoverage = point_size * point_size;
+        if ((stochasticCoverage < 0.8) && ((gl_VertexID & 0xffff) > stochasticCoverage * (0xffff / 0.8))) {
+            // "Cull" small voxels in a stable, stochastic way by moving past the z = 0 plane.
+            // Assumes voxels are in randomized order.
+            position = vec4(-1,-1,-1,-1);
+            point_size = 0.0;
+        }
+    } else {
+        position = vec4(-1,-1,-1,-1);
+        point_size = 0.0;
+    }
+
+    clip_pos = position.xyz;
+    world_pos = world_position;
+    gl_Position = position;
+    gl_PointSize = point_size;
+    color = albedo;
+}
+```
+
+### include/KHR/khrplatform.h
+```
+#ifndef __khrplatform_h_
+#define __khrplatform_h_
+
+/*
+** Copyright (c) 2008-2018 The Khronos Group Inc.
+**
+** Permission is hereby granted, free of charge, to any person obtaining a
+** copy of this software and/or associated documentation files (the
+** "Materials"), to deal in the Materials without restriction, including
+** without limitation the rights to use, copy, modify, merge, publish,
+** distribute, sublicense, and/or sell copies of the Materials, and to
+** permit persons to whom the Materials are furnished to do so, subject to
+** the following conditions:
+**
+** The above copyright notice and this permission notice shall be included
+** in all copies or substantial portions of the Materials.
+**
+** THE MATERIALS ARE PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+** EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+** MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+** IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+** CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+** TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+** MATERIALS OR THE USE OR OTHER DEALINGS IN THE MATERIALS.
+*/
+
+/* Khronos platform-specific types and definitions.
+ *
+ * The master copy of khrplatform.h is maintained in the Khronos EGL
+ * Registry repository at https://github.com/KhronosGroup/EGL-Registry
+ * The last semantic modification to khrplatform.h was at commit ID:
+ *      67a3e0864c2d75ea5287b9f3d2eb74a745936692
+ *
+ * Adopters may modify this file to suit their platform. Adopters are
+ * encouraged to submit platform specific modifications to the Khronos
+ * group so that they can be included in future versions of this file.
+ * Please submit changes by filing pull requests or issues on
+ * the EGL Registry repository linked above.
+ *
+ *
+ * See the Implementer's Guidelines for information about where this file
+ * should be located on your system and for more details of its use:
+ *    http://www.khronos.org/registry/implementers_guide.pdf
+ *
+ * This file should be included as
+ *        #include <KHR/khrplatform.h>
+ * by Khronos client API header files that use its types and defines.
+ *
+ * The types in khrplatform.h should only be used to define API-specific types.
+ *
+ * Types defined in khrplatform.h:
+ *    khronos_int8_t              signed   8  bit
+ *    khronos_uint8_t             unsigned 8  bit
+ *    khronos_int16_t             signed   16 bit
+ *    khronos_uint16_t            unsigned 16 bit
+ *    khronos_int32_t             signed   32 bit
+ *    khronos_uint32_t            unsigned 32 bit
+ *    khronos_int64_t             signed   64 bit
+ *    khronos_uint64_t            unsigned 64 bit
+ *    khronos_intptr_t            signed   same number of bits as a pointer
+ *    khronos_uintptr_t           unsigned same number of bits as a pointer
+ *    khronos_ssize_t             signed   size
+ *    khronos_usize_t             unsigned size
+ *    khronos_float_t             signed   32 bit floating point
+ *    khronos_time_ns_t           unsigned 64 bit time in nanoseconds
+ *    khronos_utime_nanoseconds_t unsigned time interval or absolute time in
+ *                                         nanoseconds
+ *    khronos_stime_nanoseconds_t signed time interval in nanoseconds
+ *    khronos_boolean_enum_t      enumerated boolean type. This should
+ *      only be used as a base type when a client API's boolean type is
+ *      an enum. Client APIs which use an integer or other type for
+ *      booleans cannot use this as the base type for their boolean.
+ *
+ * Tokens defined in khrplatform.h:
+ *
+ *    KHRONOS_FALSE, KHRONOS_TRUE Enumerated boolean false/true values.
+ *
+ *    KHRONOS_SUPPORT_INT64 is 1 if 64 bit integers are supported; otherwise 0.
+ *    KHRONOS_SUPPORT_FLOAT is 1 if floats are supported; otherwise 0.
+ *
+ * Calling convention macros defined in this file:
+ *    KHRONOS_APICALL
+ *    KHRONOS_APIENTRY
+ *    KHRONOS_APIATTRIBUTES
+ *
+ * These may be used in function prototypes as:
+ *
+ *      KHRONOS_APICALL void KHRONOS_APIENTRY funcname(
+ *                                  int arg1,
+ *                                  int arg2) KHRONOS_APIATTRIBUTES;
+ */
+
+#if defined(__SCITECH_SNAP__) && !defined(KHRONOS_STATIC)
+#   define KHRONOS_STATIC 1
+#endif
+
+/*-------------------------------------------------------------------------
+ * Definition of KHRONOS_APICALL
+ *-------------------------------------------------------------------------
+ * This precedes the return type of the function in the function prototype.
+ */
+#if defined(KHRONOS_STATIC)
+    /* If the preprocessor constant KHRONOS_STATIC is defined, make the
+     * header compatible with static linking. */
+#   define KHRONOS_APICALL
+#elif defined(_WIN32)
+#   define KHRONOS_APICALL __declspec(dllimport)
+#elif defined (__SYMBIAN32__)
+#   define KHRONOS_APICALL IMPORT_C
+#elif defined(__ANDROID__)
+#   define KHRONOS_APICALL __attribute__((visibility("default")))
+#else
+#   define KHRONOS_APICALL
+#endif
+
+/*-------------------------------------------------------------------------
+ * Definition of KHRONOS_APIENTRY
+ *-------------------------------------------------------------------------
+ * This follows the return type of the function  and precedes the function
+ * name in the function prototype.
+ */
+#if defined(_WIN32) && !defined(_WIN32_WCE) && !defined(__SCITECH_SNAP__)
+    /* Win32 but not WinCE */
+#   define KHRONOS_APIENTRY __stdcall
+#else
+#   define KHRONOS_APIENTRY
+#endif
+
+/*-------------------------------------------------------------------------
+ * Definition of KHRONOS_APIATTRIBUTES
+ *-------------------------------------------------------------------------
+ * This follows the closing parenthesis of the function prototype arguments.
+ */
+#if defined (__ARMCC_2__)
+#define KHRONOS_APIATTRIBUTES __softfp
+#else
+#define KHRONOS_APIATTRIBUTES
+#endif
+
+/*-------------------------------------------------------------------------
+ * basic type definitions
+ *-----------------------------------------------------------------------*/
+#if (defined(__STDC_VERSION__) && __STDC_VERSION__ >= 199901L) || defined(__GNUC__) || defined(__SCO__) || defined(__USLC__)
+
+
+/*
+ * Using <stdint.h>
+ */
+#include <stdint.h>
+typedef int32_t                 khronos_int32_t;
+typedef uint32_t                khronos_uint32_t;
+typedef int64_t                 khronos_int64_t;
+typedef uint64_t                khronos_uint64_t;
+#define KHRONOS_SUPPORT_INT64   1
+#define KHRONOS_SUPPORT_FLOAT   1
+/*
+ * To support platform where unsigned long cannot be used interchangeably with
+ * inptr_t (e.g. CHERI-extended ISAs), we can use the stdint.h intptr_t.
+ * Ideally, we could just use (u)intptr_t everywhere, but this could result in
+ * ABI breakage if khronos_uintptr_t is changed from unsigned long to
+ * unsigned long long or similar (this results in different C++ name mangling).
+ * To avoid changes for existing platforms, we restrict usage of intptr_t to
+ * platforms where the size of a pointer is larger than the size of long.
+ */
+#if defined(__SIZEOF_LONG__) && defined(__SIZEOF_POINTER__)
+#if __SIZEOF_POINTER__ > __SIZEOF_LONG__
+#define KHRONOS_USE_INTPTR_T
+#endif
+#endif
+
+#elif defined(__VMS ) || defined(__sgi)
+
+/*
+ * Using <inttypes.h>
+ */
+#include <inttypes.h>
+typedef int32_t                 khronos_int32_t;
+typedef uint32_t                khronos_uint32_t;
+typedef int64_t                 khronos_int64_t;
+typedef uint64_t                khronos_uint64_t;
+#define KHRONOS_SUPPORT_INT64   1
+#define KHRONOS_SUPPORT_FLOAT   1
+
+#elif defined(_WIN32) && !defined(__SCITECH_SNAP__)
+
+/*
+ * Win32
+ */
+typedef __int32                 khronos_int32_t;
+typedef unsigned __int32        khronos_uint32_t;
+typedef __int64                 khronos_int64_t;
+typedef unsigned __int64        khronos_uint64_t;
+#define KHRONOS_SUPPORT_INT64   1
+#define KHRONOS_SUPPORT_FLOAT   1
+
+#elif defined(__sun__) || defined(__digital__)
+
+/*
+ * Sun or Digital
+ */
+typedef int                     khronos_int32_t;
+typedef unsigned int            khronos_uint32_t;
+#if defined(__arch64__) || defined(_LP64)
+typedef long int                khronos_int64_t;
+typedef unsigned long int       khronos_uint64_t;
+#else
+typedef long long int           khronos_int64_t;
+typedef unsigned long long int  khronos_uint64_t;
+#endif /* __arch64__ */
+#define KHRONOS_SUPPORT_INT64   1
+#define KHRONOS_SUPPORT_FLOAT   1
+
+#elif 0
+
+/*
+ * Hypothetical platform with no float or int64 support
+ */
+typedef int                     khronos_int32_t;
+typedef unsigned int            khronos_uint32_t;
+#define KHRONOS_SUPPORT_INT64   0
+#define KHRONOS_SUPPORT_FLOAT   0
+
+#else
+
+/*
+ * Generic fallback
+ */
+#include <stdint.h>
+typedef int32_t                 khronos_int32_t;
+typedef uint32_t                khronos_uint32_t;
+typedef int64_t                 khronos_int64_t;
+typedef uint64_t                khronos_uint64_t;
+#define KHRONOS_SUPPORT_INT64   1
+#define KHRONOS_SUPPORT_FLOAT   1
+
+#endif
+
+
+/*
+ * Types that are (so far) the same on all platforms
+ */
+typedef signed   char          khronos_int8_t;
+typedef unsigned char          khronos_uint8_t;
+typedef signed   short int     khronos_int16_t;
+typedef unsigned short int     khronos_uint16_t;
+
+/*
+ * Types that differ between LLP64 and LP64 architectures - in LLP64,
+ * pointers are 64 bits, but 'long' is still 32 bits. Win64 appears
+ * to be the only LLP64 architecture in current use.
+ */
+#ifdef KHRONOS_USE_INTPTR_T
+typedef intptr_t               khronos_intptr_t;
+typedef uintptr_t              khronos_uintptr_t;
+#elif defined(_WIN64)
+typedef signed   long long int khronos_intptr_t;
+typedef unsigned long long int khronos_uintptr_t;
+#else
+typedef signed   long  int     khronos_intptr_t;
+typedef unsigned long  int     khronos_uintptr_t;
+#endif
+
+#if defined(_WIN64)
+typedef signed   long long int khronos_ssize_t;
+typedef unsigned long long int khronos_usize_t;
+#else
+typedef signed   long  int     khronos_ssize_t;
+typedef unsigned long  int     khronos_usize_t;
+#endif
+
+#if KHRONOS_SUPPORT_FLOAT
+/*
+ * Float type
+ */
+typedef          float         khronos_float_t;
+#endif
+
+#if KHRONOS_SUPPORT_INT64
+/* Time types
+ *
+ * These types can be used to represent a time interval in nanoseconds or
+ * an absolute Unadjusted System Time.  Unadjusted System Time is the number
+ * of nanoseconds since some arbitrary system event (e.g. since the last
+ * time the system booted).  The Unadjusted System Time is an unsigned
+ * 64 bit value that wraps back to 0 every 584 years.  Time intervals
+ * may be either signed or unsigned.
+ */
+typedef khronos_uint64_t       khronos_utime_nanoseconds_t;
+typedef khronos_int64_t        khronos_stime_nanoseconds_t;
+#endif
+
+/*
+ * Dummy value used to pad enum types to 32 bits.
+ */
+#ifndef KHRONOS_MAX_ENUM
+#define KHRONOS_MAX_ENUM 0x7FFFFFFF
+#endif
+
+/*
+ * Enumerated boolean type
+ *
+ * Values other than zero should be considered to be true.  Therefore
+ * comparisons should not be made against KHRONOS_TRUE.
+ */
+typedef enum {
+    KHRONOS_FALSE = 0,
+    KHRONOS_TRUE  = 1,
+    KHRONOS_BOOLEAN_ENUM_FORCE_SIZE = KHRONOS_MAX_ENUM
+} khronos_boolean_enum_t;
+
+#endif /* __khrplatform_h_ */
+```

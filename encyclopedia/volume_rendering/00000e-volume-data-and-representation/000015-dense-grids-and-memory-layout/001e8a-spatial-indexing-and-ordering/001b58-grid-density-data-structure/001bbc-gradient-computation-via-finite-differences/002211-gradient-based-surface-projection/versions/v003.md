@@ -1,0 +1,44 @@
+# Gradient-based Surface Projection
+
+Also called: Refractive index-only image, Surface projections
+
+## Overview
+Gradient-based surface projection visualizes interfaces between regions of different density by projecting through a matrix of gradient magnitude values derived from voxel density [S1, unofficial]. It differs from standard volume rendering by treating the volume as a collection of internal surfaces defined by normals and strengths, rather than a continuous medium with absorption and emission [S1, unofficial]. This method allows for the visualization of diffuse transitions and sub-voxel surface accuracy that binary representations cannot achieve [S1, unofficial].
+
+## How it works
+**Inputs:**
+*   Scalar volume data $V$ containing density values [S1, unofficial].
+*   Pre-computed 3D gradient vectors $N = (N_x, N_y, N_z)$ for each voxel, derived from finite differences of neighboring densities [S1, unofficial].
+*   Optional color information associated with the volume [S1, unofficial].
+
+**Outputs:**
+*   A 2D image representing the projected surface magnitudes (refractive index-only image) or shaded colored surface projections [S1, unofficial].
+
+**Data Structures:**
+*   A 3D array storing the surface normal vectors $N$ at each voxel, approximated via finite differences of neighboring densities [S1, unofficial].
+*   A 3D array storing the surface strength $|N|$ as floats at each voxel [S1, unofficial].
+
+**Steps:**
+1. **Compute Surface Normal and Strength:** For each voxel, approximate the surface normal $N$ using finite differences of neighboring densities [S1, unofficial]. Calculate the surface strength (magnitude) $|N|$ as the L2-norm of $N$:
+   $$ |N| = \sqrt{N_x^2 + N_y^2 + N_z^2} $$
+   [S1, unofficial]
+2. **Project Surface Magnitude:** Generate a refractive index-only image by projecting directly through the surface magnitude values $|N|$ along the view ray [S1, unofficial]. Because surfaces are defined by fractional values at each voxel, this projection visualizes diffuse transitions that binary representations cannot [S1, unofficial]. Surfaces may appear to lie at sub-voxel accuracy [S1, unofficial].
+3. **Shaded Surface Projection:** Enhance depth perception by applying 3D lighting cues to the dataset [S1, unofficial]. Use the finite difference gradient $N$ as the surface normal direction for the lighting model [S1, unofficial]. Light enters the voxel from the back with intensity $I$ and exits with intensity $I'$ [S1, unofficial]. Modulate the intensity and color of the light by three voxel-dependent effects: translucency, luminosity, and refraction [S1, unofficial]. Use the surface normal direction to modulate the intensity of the transmitted light refracted to the next voxel [S1, unofficial]. Render a shaded colored refractive index image by using color information modulated by the gradient with a shading model in the projection pipeline [S1, unofficial].
+
+**Edge cases and pitfalls:** Surfaces may appear to lie at sub-voxel accuracy because they are defined by fractional values at each voxel [S1, unofficial]. This enables visualization of diffuse transitions but may mislead if precise geometric location is required [S1, unofficial].
+
+## Subtopics
+
+### Shaded Surface Projection
+An enhancement of depth perception by applying 3D lighting cues to the data set [S1, unofficial]. It modulates transmitted light intensity by translucency, luminosity, and refraction [S1, unofficial]. It uses the finite difference gradient as the surface normal direction for the lighting model, where light enters from the back and is modulated by voxel-dependent effects before being refracted to the next voxel [S1, unofficial].
+
+## Operating characteristics
+*   **Strengths:** Visualizes interfaces between regions of different density [S1, unofficial]. Allows visualization of diffuse transitions not possible with binary representation [S1, unofficial]. Provides sub-voxel accuracy perception [S1, unofficial].
+*   **Limitations:** Relies on gradient magnitude derived from voxel density [S1, unofficial].
+*   **When to use:** When the goal is to visualize internal interfaces and boundaries within a volume, especially for medical data where tissue boundaries are of interest [S1, unofficial].
+
+## Background
+Originated in the context of volumetric rendering of medical data, specifically for stereotactic neurosurgery planning [S1, unofficial]. The method is based on the concept that visualizing interfaces between regions of different density yields sufficient information about the volume [S1, unofficial]. It builds on [Gradient Computation via Finite Differences](1077-gradient-computation-via-finite-differences.md) to identify these interfaces [S1, unofficial].
+
+## Sources
+[S1] Volumetric rendering of medical data : applications to stereotactic neurosurgery planning, https://doi.org/10.82308/10070, fetched 2026-10-26 (unofficial)

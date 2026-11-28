@@ -1,0 +1,121 @@
+# Graph-Based Distributed Partitioning
+
+Also called: METIS Bipartite Graph Partitioning, METIS graph partitioning, Offline METIS Bipartite Graph Partitioning, Offline Point Placement via Bipartite Graph Partitioning, Offline graph partitioning, Point placement
+
+## Overview
+Graph-Based Distributed Partitioning is an offline strategy for assigning 3D points (e.g., Gaussian splats) to distributed GPUs or machines by modeling data access patterns as a bipartite graph and partitioning it to minimize cross-partition communication edges while balancing memory usage [S1, unofficial]. Unlike geometric proximity methods (e.g., KD-trees, k-means) that ignore camera view dependency, this method explicitly accounts for the fact that points far apart in 3D space may be visible to the same camera, thereby reducing the need for inter-GPU communication during rendering [S1, unofficial]. It serves as the core locality-aware distribution framework for point assignment in large-scale distributed rendering systems [S1, unofficial]. Builds on [Chunk-based spatial partitioning](3862-chunk-based-spatial-partitioning.md) and differs from [MPI-based Volume Partitioning](1093-mpi-based-volume-partitioning.md), [Object-space decomposition with local clustering](4156-object-space-decomposition-with-local-clustering.md), [ShardedVolume](12593-shardedvolume.md), [One-Phase Remapping Model](16393-one-phase-remapping-model.md), [Slice-Based Data-Space Parallel Distribution](20355-slice-based-data-space-parallel-distribution.md), and [Direct Send](20759-direct-send.md) by optimizing explicitly for camera-view frustum overlap rather than pure spatial or object proximity.
+
+## How it works
+The method assigns points to compute devices by constructing a bipartite graph representing the relationship between points and camera views (images), then using a graph partitioning library (METIS) to solve the assignment problem [S1, unofficial].
+
+### Inputs and Outputs
+*   **Inputs**: A set of $N$ 3D points [S1, unofficial]. A set of $D$ camera views (images or patches) with defined frustums [S1, unofficial]. The number of target partitions (machines/GPUs), $P$ [S1, unofficial]. A coarsening parameter $G$ (points per group) [S1, unofficial].
+*   **Outputs**: An assignment map mapping each point group to a specific partition index $p \in \{0, \dots, P-1\}$ [S1, unofficial].
+
+### Data Structures
+1.  **Point Groups**: The raw points are grouped into larger units to reduce graph size [S1, unofficial]. Each group contains exactly $G$ points [S1, unofficial].
+2.  **Bipartite Graph $G_{bip} = (V, E)$**:
+    *   **Vertices $V$**: $V_P$ is the set of point group vertices with size $|V_P| = \lceil N/G \rceil$ [S1, unofficial]. $V_I$ is the set of image/view vertices with size $|V_I| = D$ [S1, unofficial]. Total vertices $|V| = \lceil N/G \rceil + D$, typically reduced to tens of thousands after coarsening [S1, unofficial].
+    *   **Edges $E$**: An edge exists between point group vertex $i$ and image vertex $j$ if any point in group $i$ lies within the frustum of image $j$ [S1, unofficial].
+    *   **Vertex Weights**: Weights are assigned to point group vertices to enforce load balancing (equal memory usage across partitions) [S1, unofficial].
+
+### Steps
+1.  **Sort Points**: Sort all $N$ points in the point cloud using Z-order curves (Morton order) to preserve spatial locality, ensuring points close in 3D space remain close in the linear ordering [S1, unofficial].
+2.  **Coarsen (Grouping)**: Group each contiguous block of $G$ points along the Z-ordered list into a single point group [S1, unofficial]. Each group is represented by a single vertex in the bipartite graph [S1, unofficial].
+3.  **Construct Bipartite Graph**: Create vertices for each point group and each image/view [S1, unofficial]. For each image $j$, determine which point groups fall within its frustum [S1, unofficial]. Add edges between the corresponding point group vertices and image vertex $j$ [S1, unofficial].
+4.  **Assign Weights**: Assign weights to the point group vertices [S1, unofficial]. These weights incorporate load balancing constraints to ensure that each partition receives roughly equal memory/compute load [S1, unofficial].
+5.  **Partition Graph**: Use the METIS library to partition the bipartite graph into $P$ partitions [S1, unofficial]. Partitioning is performed hierarchically to account for non-uniform communication costs (inter-node vs. intra-node) [S1, unofficial]. First, partition the point cloud across machines (one partition per machine) [S1, unofficial]. Then, partition each machine’s assigned points among its local GPUs [S1, unofficial]. The objective is to minimize the number of cut edges (cross-partition edges) while maintaining balanced partition sizes [S1, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def graph_based_distributed_partitioning(points, images, num_partitions, G):
+    # Step 1: Sort points using Z-order curve to preserve spatial locality [S1, unofficial]
+    sorted_indices = compute_z_order_sort(points)
+    sorted_points = [points[i] for i in sorted_indices]
+
+    # Step 2: Coarsen into groups of G points [S1, unofficial]
+    num_groups = len(sorted_points) // G
+    point_groups = []
+    for i in range(num_groups):
+        point_groups.append(sorted_points[i * G : (i + 1) * G])
+
+    # Step 3: Construct bipartite graph [S1, unofficial]
+    # Vertices: point groups (0 to num_groups-1) and images (num_groups to num_groups + len(images)-1)
+    adj = [[] for _ in range(num_groups + len(images))]
+    weights = [G] * num_groups + [1] * len(images) # Weights for load balancing [S1, unofficial]
+
+    for j, image in enumerate(images):
+        image_vertex = num_groups + j
+        for i, group in enumerate(point_groups):
+            if any(point_in_frustum(p, image.frustum) for p in group):
+                adj[i].append(image_vertex)
+                adj[image_vertex].append(i)
+
+    # Step 4: Partition graph using METIS [S1, unofficial]
+    # Call METIS_PartGraphKway to minimize edge cuts while balancing vertex weights [S1, unofficial]
+    # Hierarchical partitioning is handled by calling METIS twice: first across machines, then intra-node [S1, unofficial]
+    partition_map = metis_partition(adj, weights, num_groups, num_partitions)
+
+    # Step 5: Map back to individual points [S1, unofficial]
+    assignment = {}
+    for i, group in enumerate(point_groups):
+        partition_id = partition_map[i]
+        for point in group:
+            original_idx = sorted_indices[i * G + group.index(point)]
+            assignment[original_idx] = partition_id
+    return assignment
+
+def compute_z_order_sort(points):
+    codes = []
+    for i, p in enumerate(points):
+        codes.append((z_order_encode(p.x, p.y, p.z), i))
+    codes.sort(key=lambda x: x[0])
+    return [idx for _, idx in codes]
+
+def z_order_encode(x, y, z):
+    # Interleave bits of coordinates to form a Morton code [G]
+    code = 0
+    for bit in range(32):
+        code |= ((x >> bit) & 1) << (3 * bit)
+        code |= ((y >> bit) & 1) << (3 * bit + 1)
+        code |= ((z >> bit) & 1) << (3 * bit + 2)
+    return code
+
+def point_in_frustum(point, frustum):
+    # Transform point to camera space and check against near/far planes and FOV bounds [G]
+    return frustum.contains(point)
+
+def metis_partition(adj, weights, num_point_groups, num_partitions):
+    # Standard METIS call: METIS_PartGraphKway(&num_point_groups, &num_images, adj, weights, NULL, NULL, NULL, &num_partitions, NULL, NULL, NULL, partition_map) [S1, unofficial]
+    # Returns an array where index i holds the partition ID for vertex i [G]
+    partition_map = [0] * (num_point_groups + len(adj) - num_point_groups)
+    # Actual METIS library invocation [G]
+    return partition_map
+```
+
+### Parameters
+*   **$G$ (Group Size)**: The number of points per group for coarsening [S1, unofficial]. Typical value: 1024–4096 [S1, unofficial].
+    *   **Trade-off**: Coarser grouping (higher $G$) reduces graph size and speeds up partitioning but compromises placement quality (spatial locality) [S1, unofficial].
+*   **METIS Parameters**: Standard METIS partitioning parameters (e.g., number of partitions, balance factor) are used [S1, unofficial]. The graph size after coarsening is typically tens of thousands of vertices ($N/G + D$) [S1, unofficial].
+
+### Edge Cases and Pitfalls
+*   **Partitioning Time**: Partitioning time varies by scene complexity [S1, unofficial]. Scenes with complex topologies and large view frustums (e.g., Campus, BigCity Street) take longer to partition [S1, unofficial].
+*   **Graph Construction Cost**: Determining frustum intersections for all point groups and images can be expensive if not optimized, though the coarsening step mitigates this [S1, unofficial].
+*   **Hierarchical Overhead**: Performing partitioning in two stages (inter-node then intra-node) adds complexity but is necessary to minimize slow inter-node communication [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity**: The graph partitioning step using METIS is efficient due to coarsening [S1, unofficial]. The graph size is reduced to $N/G + D$ vertices, typically tens of thousands [S1, unofficial].
+*   **Measured Performance**: METIS partitioning time ranges from 3.4s to 46.9s across various scenes, which is less than 1% of total training time [S1, unofficial].
+*   **Memory Complexity**: The bipartite graph requires memory proportional to the number of point groups and images [S1, unofficial]. With $G=1024-4096$, the graph is small enough to fit in CPU memory easily [S1, unofficial].
+*   **Strengths**: Minimizes cross-partition communication by accounting for camera view dependency [S1, unofficial]. Outperforms geometric proximity methods (KD-trees, k-means) and manual heuristics for irregular point clouds [S1, unofficial]. Scalable to large-scale scenes with hundreds of millions of points due to coarsening [S1, unofficial].
+*   **Limitations**: Offline process requires prior knowledge of camera views or an iterative approach [S1, unofficial]. Sensitive to scene topology: complex scenes with large frustums increase partitioning time [S1, unofficial].
+*   **When to Use**: Large-scale distributed volume rendering or 3D Gaussian splatting where communication overhead is a bottleneck and camera views are known or predictable [S1, unofficial].
+*   **When Not to Use**: Real-time online partitioning without pre-computation, or scenes with very few points where overhead dominates [S1, unofficial].
+
+## Background
+Graph-Based Distributed Partitioning was introduced in the context of scaling point-based differentiable rendering (specifically 3D Gaussian Splatting) for large-scale reconstruction [S1, unofficial]. The method is a core component of the "Gaian" system, which uses offline METIS bipartite graph partitioning combined with online linear sum assignment to reduce communication overhead [S1, unofficial]. It addresses the limitations of prior partitioning techniques (manual heuristics, KD-trees, k-means) that fail to account for camera view dependency in irregular point cloud structures [S1, unofficial].
+
+## Sources
+[S1] Scaling Point-based Differentiable Rendering for Large-scale Reconstruction, https://doi.org/10.48550/arxiv.2512.20017, fetched 2026-10-26 (unofficial)

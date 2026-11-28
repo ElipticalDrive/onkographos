@@ -1,0 +1,110 @@
+--- v003.md
++++ v004.md
+@@ -6,14 +6,14 @@
+ 
+ ## How it works
+-The method takes coarse sample positions and weights as input and outputs a refined set of sample positions along the ray [S1, unofficial]. It operates on batches of rays, where each ray has a set of coarse z-values (depths) and corresponding weights [S1, unofficial].
++The method processes batched inputs of coarse sample depths and corresponding importance weights [S1, unofficial]. It outputs a refined set of sample positions along each ray [S1, unofficial].
+ 
+ **Inputs:**
+-- `coarse_z_vals`: Tensor of shape `(num_rays, num_coarse_samples)` containing the depth positions of coarse samples [S1, unofficial].
+-- `coarse_weights`: Tensor of shape `(num_rays, num_coarse_samples)` containing the importance weights for each coarse sample [S1, unofficial].
++- `coarse_z_vals`: Tensor of shape `(num_rays, num_coarse)` containing the depth positions of coarse samples [S1, unofficial].
++- `coarse_weights`: Tensor of shape `(num_rays, num_coarse)` containing the importance weights for each coarse sample [S1, unofficial].
+ - `near`: Float, the near plane distance of the ray [S1, unofficial].
+ - `far`: Float, the far plane distance of the ray [S1, unofficial].
+-- `max_samples`: Integer, the maximum total number of samples allowed per ray [S1, unofficial].
+-- `N_samples`: Integer, the number of fine samples to generate around the peak [S1, unofficial].
+-- `range`: Float, the total width of the interval around the max weight z-value where uniform samples are placed. Default is 0.5 [S1, unofficial].
++- `max_samples`: Integer, the maximum number of fine samples allowed per ray [S1, unofficial].
++- `N_samples`: Integer, the target number of fine samples to generate around the peak [S1, unofficial].
++- `range`: Float, the width parameter controlling the interval around the max weight z-value (default 0.5) [S1, unofficial].
+ - `deterministic`: Boolean, whether to use stratified sampling or pure random jittering [S1, unofficial].
+ 
+@@ -39,5 +39,5 @@
+ 
+ 4.  **Generate Uniform Samples Around Peak:**
+-    Create a uniform grid of $N_{fine}$ samples centered around `max_z_vals` [S1, unofficial]. The source defines `range` as the total width, but the code formula uses `2 * range`, effectively making `range` a half-width in implementation [S1, unofficial]. The formula distributes points evenly across this interval [S1, unofficial].
++    Create a uniform grid of $N_{fine}$ samples centered around `max_z_vals` [S1, unofficial]. The source documentation defines `range` as the total width, but the implementation formula uses `2 * range`, effectively treating it as a half-width [S1, unofficial]. The formula distributes points evenly across this interval [S1, unofficial].
+     $$ z_{fine} = \text{max\_z\_vals}[:, \text{None}] - \text{range} + \frac{2 \cdot \text{range}}{N_{fine} - 1} \cdot \text{arange}(N_{fine}) $$ [S1, unofficial]
+ 
+@@ -61,14 +61,14 @@
+ 7.  **Combine and Sort (Global):**
+     Concatenate the original coarse samples with the random samples $z_{add}$ and sort them [S1, unofficial].
+-    $$ z_{base} = \text{sort}(\text{concat}([\text{coarse\_z\_vals}, z_{add}], \text{dim}=-1), \text{dim}=-1) $$ [S1, unofficial]
++    $$ z_{vals\_ret} = \text{sort}(\text{concat}([\text{coarse\_z\_vals}, z_{add}], \text{dim}=-1), \text{dim}=-1)[0] $$ [S1, unofficial]
+ 
+ 8.  **Inject Fine Samples for Non-Edge Rays:**
+     For rays where the peak index is not at the very beginning (index > 0), concatenate the structured fine samples $z_{fine}$ with the coarse samples and sort [S1, unofficial].
+     $$ \text{mask} = \text{max\_indices} > 0 $$ [S1, unofficial]
+-    $$ z_{ret}[\text{mask}] = \text{sort}(\text{concat}([\text{coarse\_z\_vals}[\text{mask}], z_{fine}[\text{mask}]], \text{dim}=-1), \text{dim}=-1) $$ [S1, unofficial]
+-    For rays where `max_indices == 0`, the sorted combination of coarse and random samples ($z_{base}$) is used [S1, unofficial].
++    $$ z_{vals\_ret}[\text{mask}] = \text{sort}(\text{concat}([\text{coarse\_z\_vals}[\text{mask}], z_{fine}[\text{mask}]], \text{dim}=-1), \text{dim}=-1)[0] $$ [S1, unofficial]
++    For rays where `max_indices == 0`, the sorted combination of coarse and random samples ($z_{vals\_ret}$) is retained [S1, unofficial].
+ 
+ 9.  **Return Result:**
+-    The final tensor $z_{ret}$ contains the sorted sample positions [S1, unofficial].
++    The final tensor $z_{vals\_ret}$ contains the sorted sample positions [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -86,7 +86,7 @@
+         near: Float, near plane.
+         far: Float, far plane.
+-        max_samples: Int, max total samples.
+-        N_samples: Int, number of fine samples to generate around peak.
+-        range_val: Float, width of interval around peak.
++        max_samples: Int, max fine samples per ray.
++        N_samples: Int, target number of fine samples around peak.
++        range_val: Float, width parameter around peak.
+         deterministic: Bool, use stratified sampling.
+         
+@@ -95,4 +95,5 @@
+     """
+     num_rays, num_coarse = coarse_z_vals.shape
++    device = coarse_z_vals.device
+     
+     # Step 1: Determine effective sample count
+@@ -103,5 +104,5 @@
+     
+     # Step 3: Retrieve peak z-values
+-    arange_rays = torch.arange(num_rays).to(coarse_z_vals.device)
++    arange_rays = torch.arange(num_rays, device=device)
+     max_z_vals = coarse_z_vals[arange_rays, max_indices]
+     
+@@ -111,5 +112,5 @@
+         z_fine = max_z_vals.unsqueeze(1)
+     else:
+-        arange_fine = torch.arange(N_fine).to(coarse_z_vals.device)
++        arange_fine = torch.arange(N_fine, device=device)
+         z_fine = max_z_vals.unsqueeze(1) - range_val + (2 * range_val / (N_fine - 1)) * arange_fine.unsqueeze(0)
+         
+@@ -119,9 +120,9 @@
+         lower = torch.cat([z_fine[:, :1], mids], dim=-1)
+         upper = torch.cat([mids, z_fine[:, -1:]], dim=-1)
+-        t_rand = torch.rand(z_fine.shape, device=coarse_z_vals.device)
++        t_rand = torch.rand(z_fine.shape, device=device)
+         z_fine = lower + (upper - lower) * t_rand
+         
+     # Step 6: Generate random samples across full range
+-    z_add = torch.rand((num_rays, N_fine), device=coarse_z_vals.device) * (far - near) + near
++    z_add = torch.rand((num_rays, N_fine), device=device) * (far - near) + near
+     
+     # Step 7: Combine coarse and random, sort
+@@ -138,12 +139,12 @@
+ 
+ **Parameters:**
+-- `range`: Float, default 0.5. The total width of the interval around the max weight z-value [S1, unofficial].
+-- `N_samples`: Integer. Number of fine samples to generate [S1, unofficial].
+-- `max_samples`: Integer. Global cap on total samples [S1, unofficial].
++- `range`: Float, default 0.5. The width parameter controlling the interval around the max weight z-value [S1, unofficial].
++- `N_samples`: Integer. Target number of fine samples to generate [S1, unofficial].
++- `max_samples`: Integer. Cap on the number of fine samples generated per ray [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+ - **Division by Zero:** If `N_fine` is 1, the uniform spacing formula divides by zero. The implementation must handle this by returning the single peak value [G].
+-- **Boundary Conditions:** The random samples `z_add` are strictly within `[near, far]` [S1, unofficial]. The uniform samples `z_fine` are centered on `max_z_vals` with width `range` [S1, unofficial]. If `max_z_vals` is close to `near` or `far`, `z_fine` may extend outside the valid ray bounds [G].
+-- **Index 0 Peak:** When `max_indices == 0`, the fine samples are not injected [S1, unofficial]. This may lead to lower resolution near the start of the ray if the peak is at the beginning [S1, unofficial].
++- **Boundary Conditions:** The random samples `z_add` are strictly within `[near, far]` [S1, unofficial]. The uniform samples `z_fine` are centered on `max_z_vals` with width controlled by `range` [S1, unofficial]. If `max_z_vals` is close to `near` or `far`, `z_fine` may extend outside the valid ray bounds [G].
++- **Index 0 Peak:** When `max_indices == 0`, the fine samples are not injected into the final array [S1, unofficial]. This may lead to lower resolution near the start of the ray if the peak is at the beginning [S1, unofficial].
+ 
+ ## Operating characteristics

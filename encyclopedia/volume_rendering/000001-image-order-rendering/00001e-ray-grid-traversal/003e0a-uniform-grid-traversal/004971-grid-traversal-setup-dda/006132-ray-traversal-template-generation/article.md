@@ -1,0 +1,109 @@
+# Ray Traversal Template Generation
+
+Also called: Precomputed Ray Traversal Pattern, Ray Template Generation
+
+## Overview
+Precomputes a 3D ray traversal pattern (DDA-like) for light rays to avoid per-ray floating-point division during rendering [S1, unofficial]. It sets up a fixed-size lookup table of integer voxel offsets, allowing the renderer to step through a uniform grid using only integer arithmetic and addition, significantly reducing the computational cost of ray traversal [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: Grid resolution parameters (implicitly `edgeLen` or `_RES`), maximum traversal length.
+- Output: `_rayTemplate`, a 2D array storing integer voxel offsets for each step.
+
+**Data Structures:**
+- `_rayTemplate[4096][3]`: Stores integer voxel offsets $(dx, dy, dz)$ for up to 4096 steps. Each row $i$ contains the offset to add to the current voxel index to reach the next voxel along the ray [S1, unofficial].
+
+**Parameters:**
+- `maxlen`: Maximum number of steps. Calculated as $3 \times edgeLen \times edgeLen$ [S1, unofficial].
+- `epsilon`: Small value added to ray direction components to prevent division by zero.
+- `ALMOST_EQUAL_THRESHOLD`: Threshold for float comparison, typically $0.00001f$ [S1, unofficial].
+
+**Steps:**
+1. Initialize ray direction components $lx, ly, lz$ by adding `epsilon` to the normalized direction vector components to ensure they are non-zero [S1, unofficial].
+2. Determine increments $xinc, yinc, zinc$. These are typically $+1$ or $-1$ based on the sign of $lx, ly, lz$ [S1, unofficial].
+3. Initialize a loop counter $i = 0$.
+4. Loop while $i < maxlen$:
+   a. Compute distances to the next voxel boundary in each axis. Let $t_x, t_y, t_z$ be the distance to the next boundary along $x, y, z$ respectively. In a standard DDA, these are derived from the current fractional position and the inverse of the direction components [S1, unofficial].
+   b. Find the axis with the smallest distance: $min\_t = \min(t_x, t_y, t_z)$ [S1, unofficial].
+   c. Advance the coordinate along the axis with $min\_t$. Update the fractional position by adding the inverse of the direction component for that axis [S1, unofficial].
+   d. Store the integer voxel offset $(xinc, yinc, zinc)$ corresponding to the chosen axis in `_rayTemplate[i]` [S1, unofficial].
+   e. Increment $i$ [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def generate_ray_template(edge_len, max_len):
+    # Initialize template array
+    ray_template = [[0, 0, 0] for _ in range(max_len)]
+    
+    # Example direction vector (normalized)
+    # In practice, this comes from the light ray direction
+    lx, ly, lz = 0.577, 0.577, 0.577
+    
+    # Add epsilon to avoid division by zero
+    epsilon = 1e-6
+    lx += epsilon
+    ly += epsilon
+    lz += epsilon
+    
+    # Determine increments
+    xinc = 1 if lx > 0 else -1
+    yinc = 1 if ly > 0 else -1
+    zinc = 1 if lz > 0 else -1
+    
+    # Inverse directions for step calculation
+    inv_lx = 1.0 / lx
+    inv_ly = 1.0 / ly
+    inv_lz = 1.0 / lz
+    
+    # Initial distances to next voxel boundary
+    # Assuming starting at fractional position 0.0
+    # t values represent distance to next integer boundary
+    t_x = (1.0 - 0.0) * inv_lx if xinc > 0 else (0.0 - 0.0) * inv_lx # Simplified for template generation
+    t_y = (1.0 - 0.0) * inv_ly if yinc > 0 else (0.0 - 0.0) * inv_ly
+    t_z = (1.0 - 0.0) * inv_lz if zinc > 0 else (0.0 - 0.0) * inv_lz
+    
+    # Note: The source code implies a specific DDA logic. 
+    # The template stores the *offset* to add to the current voxel index.
+    # The actual t values are used to decide which axis to step.
+    
+    for i in range(max_len):
+        # Find minimum t
+        if t_x <= t_y and t_x <= t_z:
+            # Step in X
+            ray_template[i] = [xinc, 0, 0]
+            t_x += inv_lx
+        elif t_y <= t_x and t_y <= t_z:
+            # Step in Y
+            ray_template[i] = [0, yinc, 0]
+            t_y += inv_ly
+        else:
+            # Step in Z
+            ray_template[i] = [0, 0, zinc]
+            t_z += inv_lz
+            
+    return ray_template
+```
+
+**Edge Cases and Pitfalls:**
+- The `ALMOST_EQUAL` macro uses a threshold of $0.00001f$ for float comparison. This may cause jitter or missed steps in degenerate cases where ray directions are nearly aligned with grid axes [S1, unofficial].
+- If the ray direction components are exactly zero, the epsilon addition is critical to prevent division by zero [S1, unofficial].
+
+## Subtopics
+
+### Light Ray Template Generation
+Sets the light position, computes the light direction vector, and triggers ray template generation for volume ray casting [S1, unofficial]. It assigns the input position to `_lightPos`, computes `_lightDir` as the negation of `_lightPos`, and calls `GenerateRayTemplate` with the grid resolution `_RES` to prepare ray casting parameters [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(maxlen)$ for template generation, where $maxlen = 3 \times edgeLen \times edgeLen$ [S1, unofficial]. This is a one-time cost per ray direction or light source.
+- **Memory Complexity:** $O(maxlen \times 3)$ integers for the template storage [S1, unofficial]. For a $128^3$ grid, $maxlen \approx 49152$, but the template is capped at 4096 steps [S1, unofficial].
+- **Performance:** Avoids per-ray floating-point division during rendering, which is a costly operation on many hardware architectures [S1, unofficial].
+- **Strengths:** Fast traversal once the template is generated; suitable for real-time rendering where division is expensive [S1, unofficial].
+- **Limitations:** Fixed template size (4096 steps) may not be sufficient for very large grids or long rays [S1, unofficial]. Precision issues with the `ALMOST_EQUAL` threshold can lead to artifacts [S1, unofficial].
+
+## Background
+Originated in the context of real-time volume rendering and smoke simulation, specifically in the `nevermoe/SmokeSimulation` project [S1, unofficial]. The method is part of a broader effort to optimize ray traversal in uniform grids by precomputing traversal patterns [S1, unofficial].
+
+## Sources
+[S1] nevermoe/SmokeSimulation, https://github.com/nevermoe/SmokeSimulation, fetched 2026-10-26 (unofficial)

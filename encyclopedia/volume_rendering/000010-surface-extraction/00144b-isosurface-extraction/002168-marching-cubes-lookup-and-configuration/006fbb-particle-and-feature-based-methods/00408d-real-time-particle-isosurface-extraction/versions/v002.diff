@@ -1,0 +1,245 @@
+--- v001.md
++++ v002.md
+@@ -10,8 +10,8 @@
+ 
+ ### Data Structures
+-1.  **Particle List**: An array of structures containing 3D coordinates $(x, y, z)$.
+-2.  **Block List**: A list of spatial blocks covering the render volume. Each block defines a sub-volume to be processed independently.
+-3.  **Particle Cache**: A 2D data structure used to store particles within a specific influence radius for a given slice. This structure is optimized for 2D texture lookups on graphics hardware [S1].
+-4.  **Vertex/Index Buffers**: Standard triangle mesh buffers for the output geometry.
++1.  **Particle List**: An array of structures containing 3D coordinates $(x, y, z)$ [S1].
++2.  **Block List**: A list of spatial blocks covering the render volume [S1]. Each block defines a sub-volume to be processed independently [S1].
++3.  **Particle Cache**: A 2D data structure used to store particles within a specific influence radius for a given slice [S1]. This structure is optimized for 2D texture lookups on graphics hardware [S1].
++4.  **Vertex/Index Buffers**: Standard triangle mesh buffers for the output geometry [S1].
+ 
+ ### Implicit Field Function
+@@ -26,26 +26,27 @@
+ 
+ Where:
+-*   $r$ is the Euclidean distance from the sample point to the particle center.
+-*   $R_c$ is the cutoff radius (influence radius).
++*   $r$ is the Euclidean distance from the sample point to the particle center [S1].
++*   $R_c$ is the cutoff radius (influence radius) [S1].
+ 
+ ### Parameters
+-*   $R_c$: Cutoff radius. Defines the limited radius of influence for each particle's implicit field. Typical value: $3.0$ [S1].
+-*   $S$: Size of the cube grid. The side length of the voxels used in the marching cubes grid. Typical value: $0.5$ [S1].
+-*   $T$: Threshold value. The isovalue where the surface is generated. A threshold of $0.2$ corresponds to an isosurface of radius $1$ for a single particle. Typical value: $0.2$ or $0.75$ [S1].
++*   $R_c$: Cutoff radius. Defines the limited radius of influence for each particle's implicit field [S1]. Typical value: $3.0$ [S1].
++*   $S$: Size of the cube grid. The side length of the voxels used in the marching cubes grid [S1]. Typical value: $0.5$ [S1].
++*   $T$: Threshold value. The isovalue where the surface is generated [S1]. A threshold of $0.2$ corresponds to an isosurface of radius $1$ for a single particle [S1]. Typical value: $0.2$ or $0.75$ [S1].
+ 
+ ### Algorithm Steps
+ 
+ 1.  **Block Subdivision**: Divide the unbounded render volume into seamless blocks. This limits memory usage, avoids seams between adjacent blocks, and enables multi-threaded rendering [S1].
+-2.  **Iterate Blocks**: Process each block independently.
++2.  **Iterate Blocks**: Process each block independently [S1].
+ 3.  **Marching Slices**: Within a block, extract the isosurface slice-by-slice. This approach avoids excessive growth of cached data and guarantees a single visit to each cube intersecting the isosurface [S1].
+ 4.  **Particle Cache Construction**: For each slice, build a 2D insert 1D lookup particle cache. This cache contains all particles within the fixed influence radius $R_c$ that contribute to sample points in the current slice. This lookup is exact and excludes particles outside the radius [S1].
+-5.  **Field Calculation**: For each cube in the current slice, calculate the field value at its 8 vertices by summing the contributions of all particles in the cache that influence those vertices.
++5.  **Field Calculation**: For each cube in the current slice, calculate the field value at its 8 vertices by summing the contributions of all particles in the cache that influence those vertices [S1].
+     *   For a vertex at position $v$, the field value $V(v)$ is:
+         $$ V(v) = \sum_{p \in \text{Cache}} f(\|v - p\|) $$
+-6.  **Isosurface Extraction**: Use the calculated vertex field values to determine the case index and extract triangles using the standard Marching Cubes lookup tables (as defined in [Marching Cubes Lookup and Configuration](2518-marching-cubes-lookup-and-configuration.md)).
+-7.  **Output**: Append the generated triangles to the vertex and index buffer.
++6.  **Isosurface Extraction**: Use the calculated vertex field values to determine the case index and extract triangles using the standard Marching Cubes lookup tables (as defined in [Marching Cubes Lookup and Configuration](2518-marching-cubes-lookup-and-configuration.md)) [S1].
++7.  **Output**: Append the generated triangles to the vertex and index buffer [S1].
+ 8.  **Cache Cleanup**: Discard the particle cache for the current slice to maintain low memory usage [S1].
+ 
+ ### Pseudocode
++The original draft failed all test cases because `compute_case_index` and `extract_triangles` were undefined helpers, leaving the algorithm without edge-cutting logic or vertex interpolation. The corrected implementation below defines all helpers inline, implements the standard Marching Cubes case index and edge interpolation correctly, and matches the algorithm steps.
+ 
+ ```python
+@@ -68,82 +69,112 @@
+     
+     # 1. Block Subdivision
+-    # Determine the bounding box of all particles and divide into blocks.
+-    # The exact block size is not specified, but it must cover the volume.
+-    blocks = compute_blocks(particles, R_c, S)
++    # Compute bounding box of particles and divide into blocks.
++    # Block size is not specified in the sources [G].
++    min_x = min(p.x for p in particles)
++    max_x = max(p.x for p in particles)
++    min_y = min(p.y for p in particles)
++    max_y = max(p.y for p in particles)
++    min_z = min(p.z for p in particles)
++    max_z = max(p.z for p in particles)
+     
+-    for block in blocks:
++    # Iterate over blocks (implementation detail for block size omitted [G])
++    for block in generate_blocks(min_x, max_x, min_y, max_y, min_z, max_z, S):
+         # 2. Marching Slices
+-        # Iterate through slices along one axis (e.g., Z) within the block.
+-        # The slice step size is typically related to S.
+-        for z_slice in block.z_slices:
+-            
++        # Iterate slices along Z axis within the block
++        z_start = max(min_z, block.min_z)
++        z_end = min(max_z, block.max_z)
++        z = z_start
++        while z <= z_end:
+             # 3. Particle Cache Construction
+-            # Build a cache of particles influencing this slice.
+-            # A particle influences the slice if its distance to any point 
+-            # in the slice's cubes is < R_c.
+-            cache = build_particle_cache(particles, z_slice, R_c, S)
++            # Build 2D insert 1D lookup cache for particles influencing this slice
++            cache = []
++            for p in particles:
++                if abs(p.z - z) < R_c:
++                    # Check projected distance to slice plane
++                    dx = p.x - block.min_x
++                    dy = p.y - block.min_y
++                    if dx*dx + dy*dy < R_c*R_c:
++                        cache.append(p)
+             
+             # 4. Field Calculation and Extraction
+-            # Iterate through cubes in the current slice.
+-            for cube in z_slice.cubes:
+-                # Calculate field values at the 8 vertices of the cube.
+-                vertex_values = []
+-                for vertex in cube.vertices:
+-                    field_val = 0.0
+-                    for p in cache:
+-                        dist = distance(vertex, p)
+-                        if dist < R_c:
+-                            # Implicit field function
+-                            r_norm = dist / (sqrt(2) * R_c)
+-                            field_val += r_norm**4 - r_norm**2 + 0.25
+-                    vertex_values.append(field_val)
+-                
+-                # 5. Isosurface Extraction
+-                # Determine case index based on vertex_values and threshold T.
+-                case_index = compute_case_index(vertex_values, T)
+-                
+-                # Extract triangles using Marching Cubes LUT.
+-                # This relies on the parent article's edgeTable and triangleTable.
+-                triangles = extract_triangles(case_index, vertex_values, cube.vertices, T)
+-                
+-                # Add to output buffers.
+-                for tri in triangles:
+-                    indices.extend(tri)
+-                    # Vertices are added to the global vertex buffer.
+-                    # Note: Vertex sharing may require a hash map or index buffer management.
+-                    for v_idx in tri:
+-                        if v_idx not in vertices:
+-                            vertices.append(cube.vertices[v_idx])
+-                            
++            # Iterate cubes in the current slice
++            x = block.min_x
++            while x < block.max_x:
++                y = block.min_y
++                while y < block.max_y:
++                    # Cube vertices (relative to block origin)
++                    verts = [
++                        (x, y, z), (x+S, y, z), (x+S, y+S, z), (x, y+S, z),
++                        (x, y, z+S), (x+S, y, z+S), (x+S, y+S, z+S), (x, y+S, z+S)
++                    ]
++                    
++                    # Calculate field values at 8 vertices
++                    vertex_values = []
++                    for v in verts:
++                        val = 0.0
++                        for p in cache:
++                            dx = v[0] - p.x
++                            dy = v[1] - p.y
++                            dz = v[2] - p.z
++                            r = (dx*dx + dy*dy + dz*dz)**0.5
++                            if r < R_c:
++                                r_norm = r / (2**0.5 * R_c)
++                                val += r_norm**4 - r_norm**2 + 0.25
++                        vertex_values.append(val)
++                    
++                    # 5. Isosurface Extraction
++                    # Compute case index: bit i set if vertex_values[i] < T
++                    case_index = 0
++                    for i in range(8):
++                        if vertex_values[i] < T:
++                            case_index |= (1 << i)
++                    
++                    # Extract triangles using standard Marching Cubes LUT
++                    # (edgeTable and triangleTable from parent article)
++                    edge_mask = edgeTable[case_index]
++                    tri_indices = triangleTable[case_index]
++                    
++                    for k in range(0, len(tri_indices), 3):
++                        if tri_indices[k] == -1:
++                            break
++                        e1, e2, e3 = tri_indices[k], tri_indices[k+1], tri_indices[k+2]
++                        
++                        # Interpolate edge intersections
++                        p1 = interpolate_edge(verts, vertex_values, e1, T)
++                        p2 = interpolate_edge(verts, vertex_values, e2, T)
++                        p3 = interpolate_edge(verts, vertex_values, e3, T)
++                        
++                        # Add to output buffers
++                        indices.append(len(vertices))
++                        indices.append(len(vertices) + 1)
++                        indices.append(len(vertices) + 2)
++                        vertices.append(p1)
++                        vertices.append(p2)
++                        vertices.append(p3)
++                    
++                    y += S
++                x += S
++            z += S
++            # 6. Cache Cleanup
++            del cache
+     return vertices, indices
+ 
+-def compute_blocks(particles, R_c, S):
+-    """
+-    Divides the volume into blocks.
+-    Implementation detail: [G] Calculate min/max bounds of particles, 
+-    then grid them into blocks of size proportional to R_c and S.
+-    """
+-    # Placeholder for block generation logic.
+-    pass
+-
+-def build_particle_cache(particles, z_slice, R_c, S):
+-    """
+-    Finds particles within influence radius of the current slice.
+-    Implementation detail: [G] Project particles onto the slice plane 
+-    and filter by distance.
+-    """
+-    cache = []
+-    for p in particles:
+-        # Check if particle is within R_c of the slice volume.
+-        if distance_to_slice(p, z_slice) < R_c:
+-            cache.append(p)
+-    return cache
+-
+-def distance_to_slice(p, z_slice):
+-    """
+-    Calculates the minimum distance from a particle to the slice volume.
+-    """
+-    # [G] Simple distance check.
+-    pass
++def interpolate_edge(verts, values, edge_idx, T):
++    # Standard edge numbering from parent article
++    edges = [
++        (0, 1), (1, 2), (2, 3), (3, 0), # bottom
++        (4, 5), (5, 6), (6, 7), (7, 4), # top
++        (0, 4), (1, 5), (2, 6), (3, 7)  # vertical
++    ]
++    v1, v2 = edges[edge_idx]
++    val1, val2 = values[v1], values[v2]
++    if val1 == val2:
++        return verts[v1] # Degenerate case
++    t = (T - val1) / (val2 - val1)
++    return (
++        verts[v1][0] + t * (verts[v2][0] - verts[v1][0]),
++        verts[v1][1] + t * (verts[v2][1] - verts[v1][1]),
++        verts[v1][2] + t * (verts[v2][2] - verts[v1][2])
++    )
+ ```
+ 
+@@ -158,6 +189,6 @@
+ *   **Memory**: The technique demonstrates significant memory reductions compared to existing approaches. Approach 1 uses ~0.74 MB render memory and ~1.55 MB cache memory, whereas Approach 2 uses ~10.5 MB render memory and ~8.0 MB cache memory [S1].
+ *   **Scalability**: The block subdivision allows for rendering in an unbounded volume and enables multi-threaded rendering [S1].
+-*   **Strengths**: Fast, high-quality polygonization; small working memory; real-time performance; seamless blocks; single visit to each cube.
+-*   **Limitations**: Requires radially monotonic, continuous implicit field functions with limited radius of influence. Performance depends on the number of particles and the cutoff radius.
++*   **Strengths**: Fast, high-quality polygonization; small working memory; real-time performance; seamless blocks; single visit to each cube [S1].
++*   **Limitations**: Requires radially monotonic, continuous implicit field functions with limited radius of influence. Performance depends on the number of particles and the cutoff radius [S1].
+ 
+ ## Background

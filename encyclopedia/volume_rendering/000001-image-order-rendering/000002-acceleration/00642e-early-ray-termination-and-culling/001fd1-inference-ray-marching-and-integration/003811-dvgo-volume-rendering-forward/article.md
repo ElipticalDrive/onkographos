@@ -1,0 +1,250 @@
+# DVGO Volume Rendering Forward
+## Overview
+Performs volume rendering for a batch of rays, including sampling, density/alpha computation, transmittance calculation, color estimation, and ray marching [S1, S2, unofficial]. It computes the final rendered color, distance, accumulation, and weights from RGB, density, t_vals, directions, and background color assumption [S2, unofficial]. It differs from [NeRF Volume Rendering](12442-nerf-volume-rendering.md) by using a pre-allocated 3D voxel grid for density and color storage, enabling faster training and inference via direct memory access, while maintaining the volume rendering integral formulation [S2, unofficial].
+
+## How it works
+**Inputs:**
+- `ray_pts`: Ray origins and directions (or sampled points along rays).
+- `t_vals`: Sample positions along the ray.
+- `dirs`: Ray directions.
+- `density`: Density values from the density network/grid.
+- `rgb`: RGB color values associated with samples.
+- `mask_cache`: Optional mask for known free space.
+- `use_fourier_grid`: Boolean flag for Fourier grid usage.
+- `fast_color_thres`: Threshold for early filtering.
+- `rgbnet`: Optional network for view-dependent color.
+- `rgbnet_direct`: Boolean flag for direct RGB output.
+- `rgbnet_full_implicit`: Boolean flag for implicit RGB features.
+- `white_bkgd`: Boolean flag for white background assumption.
+- `render_depth`: Boolean flag for depth output.
+- `bg`: Background color.
+- `N`: Total number of samples.
+
+**Outputs:**
+- `comp_rgb`: Computed RGB color.
+- `distance`: Accumulated distance/depth.
+- `acc`: Accumulated alpha/opacity.
+- `weights`: Rendering weights.
+
+**Data Structures:**
+- `t_mids`: Midpoint distances between samples. Layout: `(batch, num_samples-1)`.
+- `t_dists`: Distances between consecutive samples. Layout: `(batch, num_samples-1)`.
+- `delta`: Segment lengths scaled by direction norm. Layout: `(batch, num_samples-1)`.
+- `density_delta`: Product of density and delta. Layout: `(batch, num_samples-1)`.
+- `trans`: Transmittance values. Layout: `(batch, num_samples)`.
+- `weights`: Rendering weights. Layout: `(batch, num_samples)`.
+
+**Steps:**
+
+1.  **Sample Points:** Sample points on rays using `self.sample_ray` [S1, unofficial].
+2.  **Compute Midpoints:** Compute $t_{mids}$ as $0.5 \times (t_{vals}[\dots, :-1] + t_{vals}[\dots, 1:])$ [S2, unofficial].
+3.  **Free Space Masking:** If `mask_cache` exists and `use_fourier_grid` is false, filter `ray_pts`, `ray_id`, and `step_id` by the mask [S1, unofficial].
+4.  **Compute Distances:** Compute $t_{dists}$ as $t_{vals}[\dots, 1:] - t_{vals}[\dots, :-1]$ [S2, unofficial].
+5.  **Query Density:** Query density from the density network/grid [S1, unofficial].
+6.  **Compute Delta:** Compute $\delta$ as $t_{dists}$ multiplied by the norm of `dirs` [S2, unofficial].
+7.  **Activate Density:** Activate density to alpha using `self.activate_density` [S1, unofficial].
+8.  **Compute Density Delta:** Compute `density_delta` as `density[\dots, 0] * delta` [S2, unofficial].
+9.  **Fast Color Filtering:** If `fast_color_thres > 0` and `use_fourier_grid` is false, filter points where `alpha > fast_color_thres` [S1, unofficial].
+10. **Compute Transmittance:** Compute `trans` by concatenating zeros with cumsum of `density_delta[\dots, :-1]`, then exp of the negative [S2, unofficial].
+    $$ trans = \exp(-\text{cumsum}(\text{density\_delta}[\dots, :-1])) $$
+    The sources specify concatenating zeros before the cumulative sum [S2, unofficial].
+11. **Compute Weights:** Compute accumulated transmittance weights using `Alphas2Weights.apply` with `alpha`, `ray_id`, and `N` [S1, unofficial].
+    $$ weights = \alpha \times trans $$
+12. **Compute RGB:** Compute `comp_rgb` as sum of `weights[\dots, None] * rgb` along axis -2 [S2, unofficial].
+13. **Fast Color Filtering (Weights):** If `fast_color_thres > 0` and `use_fourier_grid` is false, filter points where `weights > fast_color_thres` [S1, unofficial].
+14. **Compute Accumulation:** Compute `acc` as sum of `weights` along axis -1 [S2, unofficial].
+15. **Query Color Feature:** Query color feature `k0` from the `k0` network if `rgbnet_full_implicit` is false [S1, unofficial].
+16. **Compute Distance:** Compute `distance` as sum of `weights * t_mids` along axis -1, divided by `acc` [S2, unofficial].
+17. **View-Dependent Color:** If `rgbnet` exists, compute view-dependent color. If `rgbnet_direct` is true, use `k0` as view feature; otherwise split `k0` into diffuse (first 3 channels) and view (remaining channels) [S1, unofficial].
+18. **Clip Distance:** Clip `distance` using `nan_to_num` (replacing inf with inf) and clipping to $[t_{vals}[\dots, 0], t_{vals}[\dots, -1]]$ [S2, unofficial].
+19. **View Direction Embedding:** Compute positional embedding for `viewdirs`: flatten `viewdirs`, multiply by `viewfreq`, concatenate sin/cos embeddings, then flatten and index by `ray_id` [S1, unofficial].
+20. **Background Addition:** If `white_bkgd` is True, add $(1. - acc[\dots, None])$ to `comp_rgb` [S2, unofficial].
+21. **RGB Network:** Concatenate `k0_view` and `viewdirs_emb`, pass through `rgbnet` to get `rgb_logit` [S1, unofficial].
+22. **Final RGB:** Compute final RGB: if `rgbnet_direct`, $\text{sigmoid}(rgb\_logit)$; else $\text{sigmoid}(rgb\_logit + k0\_diffuse)$ [S1, unofficial].
+23. **Marched RGB:** Compute marched RGB using `segment_coo`: sum of $(weights \times rgb)$ grouped by `ray_id`, plus background contribution ($alphainv\_last \times bg$) [S1, unofficial].
+24. **Depth Output:** If `render_depth` is true, compute depth using `segment_coo`: sum of $(weights \times step\_id)$ grouped by `ray_id` [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+
+def dvgo_volume_rendering_forward(
+    ray_pts, t_vals, dirs, density, rgb, mask_cache=None, use_fourier_grid=False,
+    fast_color_thres=0.0, rgbnet=None, rgbnet_direct=False, rgbnet_full_implicit=False,
+    white_bkgd=False, render_depth=False, bg=None, N=None, viewfreq=1
+):
+    """
+    Performs volume rendering for a batch of rays.
+    
+    Args:
+        ray_pts: Tensor of ray points.
+        t_vals: Tensor of sample positions along rays. Shape: (batch, num_samples).
+        dirs: Tensor of ray directions. Shape: (batch, num_samples, 3).
+        density: Tensor of density values. Shape: (batch, num_samples, 1).
+        rgb: Tensor of RGB values. Shape: (batch, num_samples, 3).
+        mask_cache: Optional mask for free space.
+        use_fourier_grid: Boolean flag.
+        fast_color_thres: Threshold for early filtering.
+        rgbnet: Optional network for view-dependent color.
+        rgbnet_direct: Boolean flag for direct RGB output.
+        rgbnet_full_implicit: Boolean flag for implicit RGB features.
+        white_bkgd: Boolean flag for white background.
+        render_depth: Boolean flag for depth output.
+        bg: Background color.
+        N: Total number of samples.
+        viewfreq: Frequency for positional embedding.
+        
+    Returns:
+        comp_rgb: Computed RGB color.
+        distance: Accumulated distance/depth.
+        acc: Accumulated alpha/opacity.
+        weights: Rendering weights.
+    """
+    # Step 2: Compute Midpoints
+    t_mids = 0.5 * (t_vals[..., :-1] + t_vals[..., 1:])
+    
+    # Step 3: Free Space Masking
+    if mask_cache is not None and not use_fourier_grid:
+        # Filter ray_pts, ray_id, step_id by mask. Sources do not specify exact mask application logic.
+        pass
+        
+    # Step 4: Compute Distances
+    t_dists = t_vals[..., 1:] - t_vals[..., :-1]
+    
+    # Step 6: Compute Delta
+    delta = t_dists * torch.norm(dirs, dim=-1)
+    
+    # Step 7: Activate Density
+    # self.activate_density is called here. Sources do not specify exact activation function.
+    # density = self.activate_density(density)
+    
+    # Step 8: Compute Density Delta
+    density_delta = density[..., 0] * delta
+    
+    # Step 9: Fast Color Filtering
+    if fast_color_thres > 0 and not use_fourier_grid:
+        alpha = 1.0 - torch.exp(-density_delta)
+        mask = alpha > fast_color_thres
+        # Filter tensors by mask. Sources do not specify exact filtering implementation.
+        pass
+        
+    # Step 10: Compute Transmittance
+    # Concatenate zeros with cumsum of density_delta[..., :-1], then exp of the negative [S2, unofficial]
+    cumsum_density = torch.cat([torch.zeros_like(density_delta[..., :1]), 
+                                torch.cumsum(density_delta[..., :-1], dim=-1)], dim=-1)
+    trans = torch.exp(-cumsum_density)
+    
+    # Step 11: Compute Weights
+    alpha = 1.0 - torch.exp(-density_delta)
+    # Alphas2Weights.apply with alpha, ray_id, and N [S1, unofficial]
+    # weights = alpha * trans
+    weights = alpha * trans
+    
+    # Step 12: Compute RGB
+    comp_rgb = torch.sum(weights[..., None] * rgb[..., :-1], dim=-2)
+    
+    # Step 13: Fast Color Filtering (Weights)
+    if fast_color_thres > 0 and not use_fourier_grid:
+        mask = weights > fast_color_thres
+        # Filter tensors by mask. Sources do not specify exact filtering implementation.
+        pass
+        
+    # Step 14: Compute Accumulation
+    acc = torch.sum(weights, dim=-1)
+    
+    # Step 15: Query Color Feature
+    k0 = None
+    if not rgbnet_full_implicit:
+        # k0 = k0_network(...)
+        pass
+        
+    # Step 16: Compute Distance
+    distance = torch.sum(weights * t_mids, dim=-1) / (acc + 1e-8) # [G] epsilon added to prevent division by zero
+    
+    # Step 17: View-Dependent Color
+    if rgbnet is not None:
+        if rgbnet_direct:
+            k0_view = k0
+            k0_diffuse = None
+        else:
+            k0_diffuse = k0[..., :3]
+            k0_view = k0[..., 3:]
+            
+        # Step 19: View Direction Embedding
+        viewdirs = dirs[..., 0, :] # Example: use first direction or mean
+        viewdirs_flat = viewdirs.view(-1, 3)
+        freq_bands = 2 ** torch.arange(viewfreq).to(viewdirs.device)
+        viewdirs_emb = torch.cat([torch.sin(viewdirs_flat * freq_bands), 
+                                  torch.cos(viewdirs_flat * freq_bands)], dim=-1)
+        viewdirs_emb = viewdirs_emb.view(viewdirs.shape[0], -1)
+        
+        # Step 21: RGB Network
+        if k0_view is not None:
+            rgb_input = torch.cat([k0_view, viewdirs_emb], dim=-1)
+        else:
+            rgb_input = viewdirs_emb
+        rgb_logit = rgbnet(rgb_input)
+        
+        # Step 22: Final RGB
+        if rgbnet_direct:
+            rgb_final = torch.sigmoid(rgb_logit)
+        else:
+            rgb_final = torch.sigmoid(rgb_logit + k0_diffuse)
+            
+        # Recompute comp_rgb with final RGB
+        comp_rgb = torch.sum(weights[..., None] * rgb_final[..., :-1], dim=-2)
+        
+    # Step 20: Background Addition
+    if white_bkgd:
+        comp_rgb = comp_rgb + (1.0 - acc[..., None])
+        
+    # Step 18: Clip Distance
+    distance = torch.clamp(distance, min=t_vals[..., 0], max=t_vals[..., -1])
+    distance = torch.nan_to_num(distance, nan=float('inf'))
+    
+    # Step 23: Marched RGB
+    # segment_coo: sum of (weights * rgb) grouped by ray_id, plus background contribution [S1, unofficial]
+    # comp_rgb = segment_coo(weights * rgb, ray_id) + alphainv_last * bg
+    pass
+    
+    # Step 24: Depth Output
+    if render_depth:
+        # depth = segment_coo(weights * step_id, ray_id)
+        pass
+        
+    return comp_rgb, distance, acc, weights
+```
+
+**Parameters:**
+- `interval`: Calculated as `render_kwargs['stepsize'] * self.voxel_size_ratio` [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- Division by zero in distance calculation when `acc` is zero. Mitigated by adding a small epsilon or handling zero accumulation separately [G].
+- Precision issues with cumulative sums and exponentials for transmittance [G].
+- Boundary conditions for ray sampling and masking [G].
+
+## Subtopics
+
+### [NeRF Volume Rendering](12442-nerf-volume-rendering.md)
+NeRF Volume Rendering is a differentiable method for synthesizing photorealistic novel views of a scene by estimating volume density and RGB color along camera rays using a neural network. It solves the problem of continuous 3D scene representation and rendering by parameterizing the scene as an implicit function, typically implemented via Multi-Layer Perceptrons (MLPs). Unlike explicit voxel-based methods such as DVGO, which store features in a grid and use interpolation, the classical NeRF approach queries a continuous field directly at sampled points along the ray. This allows for high-fidelity view-dependent effects but incurs significant computational costs due to the large number of MLP queries required.
+
+### [DVGO Ray Sampling and Rendering](15597-dvgo-ray-sampling-and-rendering.md)
+This method performs the forward pass for Direct Voxel Grid Optimization (DVGO), computing the final RGB color, depth, and optional segmentation masks for a batch of rays by marching through a dense voxel grid. It differs from NeRF Volume Rendering by using a pre-allocated 3D voxel grid for density and color storage, enabling faster training and inference via direct memory access, while maintaining the volume rendering integral formulation. It builds on [DVGO Volume Rendering Forward](8157-dvgo-volume-rendering-forward.md).
+
+### Optimized CUDA Ray Traversal with Early Termination
+A CUDA kernel that traverses rays through a data structure, accumulating color and transmittance with early ray marching termination when transmittance drops below a threshold [S3, unofficial]. It launches a kernel with one thread per ray, exits if thread index exceeds num_rays, loads ray origin and direction, initializes color to zero and transmittance T to 1.0, loops over a fixed number of samples (e.g., 100), looks up density sigma from shared memory, computes segment length delta (e.g., 0.01f), computes alpha using the Beer-Lambert law approximation, computes sample color (placeholder spherical harmonics), accumulates color using standard volumetric integration, updates transmittance, checks early termination condition and breaks loop if met, and writes final accumulated color to output buffer [S3, unofficial]. Parameters include `earlyThreshold` (transmittance threshold, e.g., 0.01f), `num_samples` (fixed number of traversal steps, e.g., 100), and `delta` (dummy segment length, e.g., 0.01f) [S3, unofficial]. The layout uses a `struct float3 { float x, y, z; }` for rays_origin, rays_direction, and output_colors [S3, unofficial].
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+Not given in the sources.
+
+## Sources
+[S1] sjtuytc/UnboundedNeRFPytorch, https://github.com/sjtuytc/UnboundedNeRFPytorch, fetched 2026-10-26 (unofficial)
+[S2] https://github.com/CPREgroup/CaSE-NeRF, https://github.com/CPREgroup/CaSE-NeRF, fetched 2026-10-30 (unofficial)
+[S3] mdmubarak/OctaNeRF, https://github.com/mdmubarak/OctaNeRF, fetched 2026-10-27 (unofficial)
+[S4] OSHMOS/IPRF, https://github.com/OSHMOS/IPRF, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,252 @@
+--- v002.md
++++ v003.md
+@@ -4,137 +4,134 @@
+ 
+ ## Overview
+-Volume Raycasting with MRT Endpoints is a two-pass GPU technique for determining the entry and exit points of rays into a volume by rendering the volume's bounding box to multiple render targets (MRT), followed by a second pass to sample the volume along those rays [S1, unofficial][S2, unofficial]. It builds on [Back-Face Culling for Ray Casting](1236-back-face-culling-for-ray-casting.md) by explicitly separating front-face and back-face coordinates into distinct textures to avoid analytical ray-cube intersection calculations [S1, unofficial][S2, unofficial]. Unlike single-pass methods that compute intersections in the fragment shader, this approach offloads geometry processing to the rasterizer, simplifying the raycasting shader at the cost of an additional rendering pass and texture lookups [S1, unofficial].
++Volume Raycasting with MRT Endpoints is a technique to determine the entry and exit points of rays into a volume by rendering the volume's bounding box to two separate color attachments in a single GPU pass, avoiding analytical ray-cube intersection calculations. It sets itself apart from analytical intersection methods by leveraging the graphics pipeline's face culling and multiple render target (MRT) capabilities to store object-space coordinates directly, building on the back-face culling logic of [Back-Face Culling for Ray Casting](1236-back-face-culling-for-ray-casting.md).
+ 
+ ## How it works
+-**Inputs:**
+-- A 3D volume texture (typically single-channel density) [S1, unofficial][S2, unofficial].
+-- A model-view-projection matrix for the volume bounding box [S1, unofficial][S2, unofficial].
+-- A step length parameter defining sample spacing [S1, unofficial][S2, unofficial].
+-- Optional: A jitter texture for stochastic sampling [S1, unofficial].
+-
+-**Outputs:**
+-- A 2D color buffer containing the final composited image [S1, unofficial][S2, unofficial].
++**Inputs and Outputs:**
++*   **Input:** A 3D volume texture, a bounding box geometry (typically a two-unit cube centered at the origin), and a viewport.
++*   **Output:** Two textures (RayStart, RayStop) containing the entry and exit points for each pixel, and a final 2D image with the composited volume.
+ 
+ **Data Structures:**
+-- Framebuffer Object (FBO) with two color attachments (`GL_COLOR_ATTACHMENT0` and `GL_COLOR_ATTACHMENT1`) [S1, unofficial][S2, unofficial].
+-- Two 2D floating-point RGB textures bound to the FBO attachments to store ray start and stop coordinates [S1, unofficial][S2, unofficial].
+-- 3D texture for volume data [S1, unofficial][S2, unofficial].
++*   **Bounding Box:** A cube with vertices in object space ranging from $[-1, 1]$ on all axes.
++*   **Frame Buffer Objects (FBO):** Must support two color attachments (e.g., `GL_COLOR_ATTACHMENT0` and `GL_COLOR_ATTACHMENT1`).
++*   **Textures:** Two 2D floating-point RGB textures (e.g., `GL_RGBA32F`) to store the 3D coordinates. Initialized to black (zero).
+ 
+ **Steps:**
+ 
+-1. **Pass 1: Compute Ray Endpoints**
+-   - Clear the two color attachments to black (zero) [S2, unofficial].
+-   - Enable blending with `GL_ONE, GL_ONE` (additive blending) [S1, unofficial][S2, unofficial].
+-   - Bind the FBO with two color attachments and set draw buffers:
+-     ```cpp
+-     GLenum renderTargets[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
+-     glDrawBuffers(2, &renderTargets[0]);
+-     ```
+-   - Render a two-unit cube (vertices in range `[-1, 1]`) representing the volume bounding box [S1, unofficial][S2, unofficial].
+-   - In the vertex shader, apply the model-view-projection transform to `gl_Position` and pass the original object-space position `vPosition` to the fragment shader [S1, unofficial][S2, unofficial].
+-   - In the fragment shader, determine if the current face is front-facing using `gl_FrontFacing` [S1, unofficial][S2, unofficial].
+-     - If front-facing: write `0.5 * (vPosition + 1.0)` to `FragData[0]` (start point) and `vec3(0)` to `FragData[1]` (stop point) [S1, unofficial][S2, unofficial].
+-     - If back-facing: write `vec3(0)` to `FragData[0]` and `0.5 * (vPosition + 1.0)` to `FragData[1]` [S1, unofficial][S2, unofficial].
+-   - The additive blending ensures that only one value (start or stop) is written per pixel, as the other is zero [S1, unofficial][S2, unofficial].
++1.  **Pass 1: Compute Endpoints**
++    1.  Bind an FBO with two color attachments.
++    2.  Enable blending with additive mode: `glBlendFunc(GL_ONE, GL_ONE)`.
++    3.  Set draw buffers to both attachments: `glDrawBuffers(2, {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1})`.
++    4.  Render the bounding box cube.
++    5.  The vertex shader transforms vertices to clip space using the Model-View-Projection matrix but passes the original object-space position to the fragment shader.
++    6.  The fragment shader writes the object-space position to one attachment if the face is front-facing, and to the other if back-facing.
++    7.  Convert coordinates from $[-1, 1]$ to $[0, 1]$ range: $coord = 0.5 \times (position + 1.0)$.
+ 
+-2. **Pass 2: Volume Raycasting**
+-   - Render a full-screen quad covering the viewport [S1, unofficial][S2, unofficial].
+-   - Bind the two endpoint textures (RayStart, RayStop) and the volume texture [S1, unofficial][S2, unofficial].
+-   - For each fragment, sample the start and stop points using screen coordinates `coord = 0.5 * (vPosition.xy + 1.0)` [S1, unofficial][S2, unofficial].
+-   - If `rayStart == rayStop`, discard the fragment (no intersection) [S1, unofficial][S2, unofficial].
+-   - Compute the ray vector, length, and step vector:
+-     $$
+-     \text{ray} = \text{rayStop} - \text{rayStart}
+-     $$
+-     $$
+-     \text{rayLength} = \|\text{ray}\|
+-     $$
+-     $$
+-     \text{stepVector} = \text{StepLength} \times \frac{\text{ray}}{\text{rayLength}}
+-     $$
+-   - Apply stochastic jitter to the start position if a jitter texture is available:
+-     $$
+-     \text{rayStart} += \text{stepVector} \times \text{jitter}(\text{coord}).r
+-     $$
+-     [S1, unofficial]
+-   - Initialize `position = rayStart` and destination color `dst = vec4(0)` [S1, unofficial][S2, unofficial].
+-   - Loop while `rayLength > 0` (and optionally `dst.a < 1` for early termination) [S1, unofficial][S2, unofficial]:
+-     - Sample the volume: `density = texture(Volume, position).r` (or `.x`) [S1, unofficial][S2, unofficial].
+-     - Perform front-to-back blending:
+-       $$
+-       \text{src} = \text{vec4}(\text{density})
+-       $$
+-       $$
+-       \text{src}.rgb \times= \text{src}.a
+-       $$
+-       $$
+-       \text{dst} = (1.0 - \text{dst}.a) \times \text{src} + \text{dst}
+-       $$
+-       [S2, unofficial]
+-     - Advance position: `position += stepVector` [S1, unofficial][S2, unofficial].
+-     - Decrement length: `rayLength -= StepLength` [S1, unofficial][S2, unofficial].
+-   - Output `dst` as the fragment color [S2, unofficial].
++2.  **Pass 2: Raycasting and Compositing**
++    1.  Bind the RayStart and RayStop textures to texture units.
++    2.  Render a full-screen quad.
++    3.  For each fragment, sample the entry point $P_{start}$ from RayStart and exit point $P_{stop}$ from RayStop using screen coordinates.
++    4.  If $P_{start} == P_{stop}$, discard the fragment (no intersection).
++    5.  Compute ray vector $\vec{R} = P_{stop} - P_{start}$ and length $L = \|\vec{R}\|$.
++    6.  Compute step vector $\vec{S} = \text{StepLength} \times \frac{\vec{R}}{L}$.
++    7.  Apply stochastic jitter to $P_{start}$ using a jitter texture to reduce aliasing: $P_{start} \leftarrow P_{start} + \vec{S} \times \text{jitter}$.
++    8.  Initialize current position $P = P_{start}$ and destination color $C_{dst} = (0, 0, 0, 0)$.
++    9.  Loop while $L > 0$ and $C_{dst}.a < 1.0$:
++        *   Sample volume density $d = \text{texture}(\text{Volume}, P).r$.
++        *   Create source color $C_{src} = (d, d, d, d)$ (assuming grayscale density maps to RGB).
++        *   Apply front-to-back blending: $C_{dst} = (1.0 - C_{dst}.a) \times C_{src} + C_{dst}$.
++        *   Advance position: $P \leftarrow P + \vec{S}$.
++        *   Decrease remaining length: $L \leftarrow L - \text{StepLength}$.
++    10. Output $C_{dst}$ as the fragment color.
++
++**Pseudocode:**
++
++```python
++# Pass 1: Vertex Shader
++def vertex_shader(position: vec3, mvp_matrix: mat4) -> (vec4, vec3):
++    gl_Position = mvp_matrix * vec4(position, 1.0)
++    return gl_Position, position
++
++# Pass 1: Fragment Shader
++def fragment_shader(position: vec3, is_front_facing: bool) -> vec3:
++    # Convert from [-1, 1] to [0, 1]
++    coord = 0.5 * (position + 1.0)
++    if is_front_facing:
++        return coord  # Written to Attachment 0 (RayStart)
++    else:
++        return vec3(0.0)  # Written to Attachment 0 (RayStart)
++
++def fragment_shader_back(position: vec3, is_front_facing: bool) -> vec3:
++    coord = 0.5 * (position + 1.0)
++    if is_front_facing:
++        return vec3(0.0)  # Written to Attachment 1 (RayStop)
++    else:
++        return coord  # Written to Attachment 1 (RayStop)
++
++# Pass 2: Fragment Shader
++def raycasting_fragment_shader(screen_uv: vec2, 
++                               ray_start_tex: sampler2D, 
++                               ray_stop_tex: sampler2D, 
++                               volume_tex: sampler3D, 
++                               jitter_tex: sampler2D, 
++                               step_length: float) -> vec4:
++    
++    # Sample endpoints
++    ray_start = texture(ray_start_tex, screen_uv).xyz
++    ray_stop = texture(ray_stop_tex, screen_uv).xyz
++    
++    # Discard if no intersection
++    if ray_start == ray_stop:
++        discard()
++        
++    # Compute ray properties
++    ray_vec = ray_stop - ray_start
++    ray_length = length(ray_vec)
++    step_vec = step_length * (ray_vec / ray_length)
++    
++    # Apply jitter
++    jitter_val = texture(jitter_tex, screen_uv).r
++    current_pos = ray_start + step_vec * jitter_val
++    
++    # Initialize compositing
++    dst_color = vec4(0.0)
++    
++    # Raymarching loop
++    while ray_length > 0.0 and dst_color.a < 1.0:
++        # Sample volume
++        density = texture(volume_tex, current_pos).r
++        
++        # Create source color (assuming density maps to intensity)
++        src_color = vec4(density, density, density, density)
++        
++        # Front-to-back blending
++        dst_color = (1.0 - dst_color.a) * src_color + dst_color
++        
++        # Advance
++        current_pos += step_vec
++        ray_length -= step_length
++        
++    return dst_color
++```
+ 
+ **Parameters:**
+-- `StepLength`: Distance between samples. Typical value: 0.01 [S2, unofficial]. Balances quality and speed; larger values are faster but lower quality, smaller values are slower but higher quality [S1, unofficial].
++*   `step_length`: Distance between samples. Typical value: 0.01 [S2, unofficial]. Smaller values increase quality but cost; larger values increase speed but reduce quality [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-- **Non-intersecting rays:** Handled by discarding fragments where `rayStart == rayStop` [S1, unofficial][S2, unofficial].
+-- **Jitter:** Stochastic jitter helps reduce aliasing artifacts (e.g., wood grain) but requires a pre-computed jitter texture [S1, unofficial].
+-
+-**Pseudocode (Fragment Shader for Pass 2):**
+-```python
+-def raycast_pass2(ray_start_tex, ray_stop_tex, volume_tex, step_length, jitter_tex=None):
+-    # Screen coordinate conversion
+-    coord = 0.5 * (v_position.xy + 1.0)
+-    
+-    # Sample endpoints
+-    ray_start = ray_start_tex.sample(coord).xyz
+-    ray_stop = ray_stop_tex.sample(coord).xyz
+-    
+-    # Discard non-intersecting rays
+-    if ray_start == ray_stop:
+-        return  # Fragment discarded
+-    
+-    # Compute ray properties
+-    ray = ray_stop - ray_start
+-    ray_length = length(ray)
+-    step_vector = step_length * ray / ray_length
+-    
+-    # Optional stochastic jitter
+-    if jitter_tex is not None:
+-        ray_start += step_vector * jitter_tex.sample(coord).r
+-        
+-    pos = ray_start
+-    dst = vec4(0.0)
+-    
+-    # Raymarching loop
+-    while ray_length > 0 and dst.a < 1.0:
+-        density = volume_tex.sample(pos).r
+-        src = vec4(density)
+-        src.rgb *= src.a
+-        dst = (1.0 - dst.a) * src + dst
+-        pos += step_vector
+-        ray_length -= step_length
+-        
+-    return dst
+-```
++*   **Non-intersecting rays:** Handled by checking if `ray_start == ray_stop`. If the ray misses the volume, both textures return zero (or the cleared value), resulting in a zero vector.
++*   **Precision:** Using floating-point textures for endpoints is critical to avoid quantization errors in start/stop positions, which would cause gaps or overlaps in the raymarching.
++*   **Jitter Texture:** Requires a pre-generated texture of random values on the CPU to be passed to the GPU. Without jitter, regular sampling can cause moiré patterns or "wood grain" artifacts [S1, unofficial].
+ 
+ ## Subtopics
+ 
+-### Volumetric Lighting via Gradient Normals
+-A variant that computes lighting normals in volume data by approximating the gradient vector, which points in the direction of greatest change and whose magnitude indicates surface intersection [S2, unofficial]. It computes the gradient at position `P` using central differences with step size `L`: `grad.x = texture(P + vec3(L,0,0)) - texture(P)`, `grad.y = texture(P + vec3(0,L,0)) - texture(P)`, `grad.z = texture(P + vec3(0,0,L)) - texture(P)` [S2, unofficial]. The gradient is only computed if the current voxel value `V` is above a `Threshold` (typical value: 0.45) to avoid excessive texture lookups [S2, unofficial]. When the threshold is met, the gradient is normalized, diffuse lighting is computed (`df = abs(dot(normal, light))`, `color = df * DiffuseMaterial`), `src = vec4(color, 1.0)`, front-to-back blending is applied, and the loop breaks [S2, unofficial].
+-
+ ## Operating characteristics
+-- **Time Complexity:** Two rendering passes. The second pass performs one texture lookup per sample along the ray. Total work is proportional to the number of pixels times the average ray length in samples [S1, unofficial].
+-- **Memory Complexity:** Requires two additional 2D textures for ray endpoints, plus the volume texture [S1, unofficial][S2, unofficial].
+-- **Performance:** Simpler fragment shader than analytical intersection methods, but incurs overhead from the first pass and two extra texture samples in the second pass (RayStart, RayStop) [S1, unofficial].
+-- **Strengths:** Easy to implement; leverages GPU rasterization for intersection; supports early termination with front-to-back blending [S1, unofficial][S2, unofficial].
+-- **Limitations:** Two-pass overhead; extra texture lookups make it suboptimal for performance-critical applications; requires MRT support [S1, unofficial][S2, unofficial].
+-- **When to use:** Simple volume rendering where bounding box is axis-aligned or easily transformed; when implementation simplicity is prioritized over performance [S1, unofficial].
+-- **When not to use:** When single-pass performance is critical due to pass overhead and texture sampling cost [S1, unofficial].
++*   **Time Complexity:** $O(N \cdot M)$ where $N$ is the number of pixels and $M$ is the number of samples per ray. The first pass is $O(1)$ relative to resolution (fixed cube rendering).
++*   **Memory Complexity:** $O(N)$ for the two endpoint textures (2 floats per pixel) plus the volume texture.
++*   **Strengths:** Simple to implement; leverages standard GPU rasterization; avoids complex analytical intersection math in shaders.
++*   **Limitations:** Requires two rendering passes; requires additional memory for endpoint textures; less efficient than hierarchical traversal methods for large sparse volumes because it samples every voxel along the ray regardless of emptiness.
++*   **When to use:** Small to medium volumes; educational purposes; simple implementations where hierarchical structures are too complex.
++*   **When not to use:** Large sparse volumes (use [Sparse Voxel Traversal](link) or [Octree Traversal](link)); real-time applications requiring high performance on large datasets.
+ 
+ ## Background
+-Originated as a simple technique for volumetric raycasting on the GPU, described in blog posts and tutorials around 2018 [S1, unofficial][S2, unofficial]. It is often referred to as "two-pass raycasting" due to its structure [S1, unofficial]. The method is used in educational contexts and simple volume renderers where ease of implementation is key [S1, unofficial][S2, unofficial].
++The technique is described in blog posts and unofficial guides on GPU-accelerated volumetric raycasting. It is attributed to Martin Opilia [S1, unofficial] and Prideout [S2, unofficial]. It represents a basic, brute-force approach to volume rendering that predates more advanced hierarchical methods.
+ 
+ ## Sources

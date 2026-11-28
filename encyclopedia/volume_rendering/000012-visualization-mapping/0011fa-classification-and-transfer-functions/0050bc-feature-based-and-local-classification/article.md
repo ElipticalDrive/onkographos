@@ -1,0 +1,22 @@
+# Feature-Based and Local Classification
+## Overview
+Feature-Based and Local Classification extends the classification domain beyond scalar intensity to include derived geometric, topological, or spatial features, solving the ambiguity where distinct materials share similar scalar values [G]. Unlike scalar-only methods, this family leverages local derivatives, global structural context, or neighborhood statistics to separate structures [G]. It differs from [Boundary-Enhanced Opacity](795-boundary-enhanced-opacity.md) by focusing on gradient magnitude for boundary emphasis, and from [Data Feature-Based Classification](5934-data-feature-based-classification.md) by encompassing a broader range of feature types including texture and distance [G].
+## Shared principles
+All methods in this family share the core mechanism of evaluating a classification function $C(\mathbf{x})$ for each sample point $\mathbf{x}$ in the volume to produce optical properties [G].
+## Subtopics
+
+### [Boundary-Enhanced Opacity](795-boundary-enhanced-opacity.md)
+Modulates opacity based on local gradient magnitude to emphasize material boundaries while rendering constant-density regions transparent. Sets it apart from [Silhouette Enhancement](796-silhouette-enhancement.md) by being view-independent and scaling opacity solely on gradient strength. Chosen when visualizing interfaces between disparate materials is the primary goal.
+
+### [Data Feature-Based Classification](5934-data-feature-based-classification.md)
+Determines optical properties by evaluating a classification function on a feature vector derived from scalar data. Sets it apart from [Feature-Based Transfer Functions](13183-feature-based-transfer-functions.md) by explicitly constructing multi-dimensional transfer functions from derived attributes. Chosen when distinct materials share similar intensity values but differ in other feature domains.
+
+### [Boundary-structure-aware transfer function](6333-boundary-structure-aware-transfer-function.md)
+Classifies data by combining boundary-based and structure-based advantages using the standard deviation of ambient occlusion ($O_{std}$). Sets it apart from sibling methods that rely on local gradients or simple occlusion sums by using $O_{std}$ computed over a global field. Chosen to separate materials with similar average intensities but different global structures.
+
+### [Feature-Based Transfer Functions](13183-feature-based-transfer-functions.md)
+Extends the classification domain to derived feature vectors to distinguish volumetric structures sharing similar intensity values. Sets it apart by leveraging local context to enable segmentation of complex structures. Chosen when different structures share similar scalar values but differ in physical or geometric properties.
+
+## Background
+The concept of using features beyond scalar intensity to resolve classification ambiguity has evolved from simple gradient-based shading to complex multi-dimensional transfer functions [G]. Early work focused on gradient magnitude for boundary enhancement [G]. Later developments introduced ambient occlusion and structural statistics to handle global context [G]. The integration of diverse feature domains allows for the separation of structures that are indistinguishable by scalar value alone [G].
+## Sources

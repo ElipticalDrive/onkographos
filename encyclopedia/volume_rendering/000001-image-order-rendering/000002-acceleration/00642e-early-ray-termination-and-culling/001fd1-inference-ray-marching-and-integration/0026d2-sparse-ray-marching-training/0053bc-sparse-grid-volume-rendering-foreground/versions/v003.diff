@@ -1,0 +1,221 @@
+--- v002.md
++++ v003.md
+@@ -1,8 +1,8 @@
+ # Sparse Grid Volume Rendering (Foreground)
+ 
+-Also called: Plenoxel Ray Tracing (Forward)
++Also called: Fused Sparse Voxel Volume Rendering (CuVol), JNeRF volume rendering, Plenoxel Ray Tracing (Forward)
+ 
+ ## Overview
+-Sparse Grid Volume Rendering (Foreground) is a CUDA-based volume rendering method that traces rays through a sparse voxel grid to compute final color and log-transmittance using volume rendering with spherical harmonics (SH) coefficients [S1, S2, unofficial]. It differs from its siblings by explicitly managing warp-level parallelism for SH basis evaluation and accumulation, utilizing shared memory for warp-local data to minimize global memory traffic, and employing early termination based on transmission thresholds [S2, unofficial]. Unlike [CUDA Ray Marching (IDDR-NGP Backend)](5788-cuda-ray-marching-iddr-ngp-backend.md) which uses hash encoding, or [Sparse Packed Radiance Field Tracer](13126-sparse-packed-radiance-field-tracer.md) which may use different interpolation schemes, this method relies on trilinear interpolation over a sparse connectivity structure [S1, S2, unofficial].
++Sparse Grid Volume Rendering (Foreground) is a CUDA-based volume rendering method that traces rays through a sparse voxel grid to compute final color and log-transmittance using volume rendering with spherical harmonics (SH) coefficients [S1, unofficial]. It differs from its siblings by explicitly managing warp-level parallelism for SH basis evaluation and accumulation, utilizing shared memory for warp-local data to minimize global memory traffic, and employing early termination based on transmission thresholds [S3, unofficial]. Unlike [CUDA Ray Marching (IDDR-NGP Backend)](5788-cuda-ray-marching-iddr-ngp-backend.md) which uses hash encoding, or [Sparse Packed Radiance Field Tracer](13126-sparse-packed-radiance-field-tracer.md) which may use different interpolation schemes, this method relies on trilinear interpolation over a sparse connectivity structure [S1, unofficial].
+ 
+ ## How it works
+@@ -50,81 +50,81 @@
+ 
+ ### Algorithm Steps
+-The kernel launches with `TRACE_RAY_CUDA_THREADS = 128` threads per block, processing `TRACE_RAY_CUDA_RAYS_PER_BLOCK = 4` rays per block (since `WARP_SIZE = 32`) [S2, unofficial].
++The kernel launches with `TRACE_RAY_CUDA_THREADS = 128` threads per block, processing `TRACE_RAY_CUDA_RAYS_PER_BLOCK = 4` rays per block (since `WARP_SIZE = 32`) [S3, unofficial].
+ 
+ 1. **Initialization:**
+-   - Compute thread ID `tid = blockIdx.x * blockDim.x + threadIdx.x`.
+-   - Compute `ray_id = tid >> 5` (integer division by 32).
+-   - Compute `lane_id = threadIdx.x & 0x1F` (modulo 32).
+-   - If `lane_id >= grid.sh_data_dim`, return early [S2, unofficial].
+-   - Copy `rays.origins[ray_id]` and `rays.dirs[ray_id]` into shared memory `ray_spec[ray_blk_id]` where `ray_blk_id = tid / 32` [S2, unofficial].
+-   - Compute ray bounds `tmin` and `tmax` using `ray_find_bounds(ray_spec[ray_blk_id], grid, opt, ray_id)` [S2, unofficial].
+-   - If `tmin > tmax`, the ray is outside the grid. Output `background_brightness` if `grid.background_nlayers == 0`, else 0. Set `log_transmit = 0` if `out_log_transmit` is not null [S2, unofficial].
++   - Compute thread ID `tid = blockIdx.x * blockDim.x + threadIdx.x` [G].
++   - Compute `ray_id = tid // 32` (integer division by 32) [G].
++   - Compute `lane_id = threadIdx.x % 32` (modulo 32) [G].
++   - If `lane_id >= grid.sh_data_dim`, return early [S3, unofficial].
++   - Copy `rays.origins[ray_id]` and `rays.dirs[ray_id]` into shared memory `ray_spec[ray_blk_id]` where `ray_blk_id = tid // 32` [S3, unofficial].
++   - Compute ray bounds `tmin` and `tmax` for the ray intersecting the grid [G].
++   - If `tmin > tmax`, the ray is outside the grid. Output `background_brightness` if `grid.background_nlayers == 0`, else 0. Set `log_transmit` to 0 if `out_log_transmit` is not null [S2, unofficial].
+ 
+ 2. **Shared Memory Allocation:**
+-   - `__shared__ float sphfunc_val[4][9]` for SH basis values [S2, unofficial].
+-   - `__shared__ SingleRaySpec ray_spec[4]` for ray data [S2, unofficial].
+-   - `__shared__ typename WarpReducef::TempStorage temp_storage[4]` for warp reductions [S2, unofficial].
++   - `__shared__ float sphfunc_val[4][9]` for SH basis values [S3, unofficial].
++   - `__shared__ SingleRaySpec ray_spec[4]` for ray data [S3, unofficial].
++   - `__shared__ WarpReducef::TempStorage temp_storage[4]` for warp reductions [S3, unofficial].
+ 
+ 3. **Spherical Harmonics Evaluation:**
+-   - Compute SH basis values for the ray direction `ray_spec[ray_blk_id].dir` using `calc_sphfunc(grid, lane_id, ray_id, ray_spec[ray_blk_id].dir, sphfunc_val[ray_blk_id])` [S2, unofficial].
+-   - This fills `sphfunc_val[ray_blk_id]` with 9 values (assuming 3rd order SH) [S2, unofficial].
+-   - Synchronize warp: `__syncwarp((1U << grid.sh_data_dim) - 1)` to ensure all lanes have computed SH values [S2, unofficial].
++   - Compute SH basis values for the ray direction `ray_spec[ray_blk_id].dir` using `calc_sphfunc(grid, lane_id, ray_id, ray_spec[ray_blk_id].dir, sphfunc_val[ray_blk_id])` [S3, unofficial].
++   - This fills `sphfunc_val[ray_blk_id]` with 9 values (assuming 3rd order SH) [S3, unofficial].
++   - Synchronize warp: `__syncwarp((1 << grid.sh_data_dim) - 1)` to ensure all lanes have computed SH values [S3, unofficial].
+ 
+ 4. **Ray Marching Loop:**
+-   - Initialize `t = ray_spec[ray_blk_id].tmin` [S2, unofficial].
++   - Initialize `t = ray_spec[ray_blk_id].tmin` [S3, unofficial].
+    - While `t <= ray_spec[ray_blk_id].tmax`:
+      a. **Position Computation:**
+-        - `ray.pos[j] = fmaf(t, ray_spec[ray_blk_id].dir[j], ray_spec[ray_blk_id].origin[j])` for $j=0,1,2$ [S2, unofficial].
+-        - Clamp `ray.pos[j]` to `[0, grid.size[j] - 1]` [S2, unofficial].
+-        - Compute integer voxel coordinates: `ray.l[j] = min(static_cast<int32_t>(ray.pos[j]), grid.size[j] - 2)` [S2, unofficial].
+-        - Compute fractional part: `ray.pos[j] -= static_cast<float>(ray.l[j])` [S2, unofficial].
++        - `ray.pos[j] = fmaf(t, ray_spec[ray_blk_id].dir[j], ray_spec[ray_blk_id].origin[j])` for $j=0,1,2$ [S3, unofficial].
++        - Clamp `ray.pos[j]` to `[0, grid.size[j] - 1]` [S3, unofficial].
++        - Compute integer voxel coordinates: `ray.l[j] = min(static_cast<int32_t>(ray.pos[j]), grid.size[j] - 2)` [S3, unofficial].
++        - Compute fractional part: `ray.pos[j] -= static_cast<float>(ray.l[j])` [S3, unofficial].
+ 
+      b. **Density Sampling:**
+         - Sample density $\sigma$ using trilinear interpolation:
+           $$ \sigma = \text{trilerp\_cuvol\_one}(grid.links, grid.density_data, grid.stride_x, grid.size[2], 1, ray.l, ray.pos, 0) $$
+-          [S2, unofficial].
++          [S3, unofficial].
+ 
+      c. **Threshold Check:**
+-        - If $\sigma \le opt.sigma\_thresh$, skip sampling and continue to next step (advance `t`) [S2, unofficial].
++        - If $\sigma \le opt.sigma\_thresh$, skip sampling and continue to next step (advance `t`) [S3, unofficial].
+ 
+      d. **Color Sampling:**
+         - Sample SH color coefficients:
+           $$ lane\_color = \text{trilerp\_cuvol\_one}(grid.links, grid.sh_data, grid.stride_x, grid.size[2], grid.sh\_data\_dim, ray.l, ray.pos, lane\_id) $$
+-          [S2, unofficial].
++          [S3, unofficial].
+         - Multiply by SH basis value:
+           $$ lane\_color *= sphfunc\_val[ray\_blk\_id][lane\_id] $$
+-          [S2, unofficial].
++          [S3, unofficial].
+ 
+      e. **Weight Computation:**
+-        - Compute optical depth increment: $pcnt = ray\_spec[ray\_blk\_id].world\_step \times \sigma$ [S2, unofficial].
++        - Compute optical depth increment: $pcnt = ray\_spec[ray\_blk\_id].world\_step \times \sigma$ [S3, unofficial].
+         - Compute weight:
+           $$ weight = \exp(log\_transmit) \times (1 - \exp(-pcnt)) $$
+-          [S2, unofficial].
++          [S3, unofficial].
+         - Update log-transmittance:
+           $$ log\_transmit -= pcnt $$
+-          [S2, unofficial].
++          [S3, unofficial].
+ 
+      f. **Accumulation:**
+-        - Reduce `lane_color` across the warp using `WarpReducef::HeadSegmentedSum` with mask `lane_colorgrp_id == 0` (where `lane_colorgrp_id` groups lanes by SH basis index) [S2, unofficial]. Let result be `lane_color_total` [S2, unofficial].
++        - Reduce `lane_color` across the warp using `WarpReducef::HeadSegmentedSum` with mask `lane_colorgrp_id == 0` (where `lane_colorgrp_id` groups lanes by SH basis index) [S3, unofficial]. Let result be `lane_color_total` [S3, unofficial].
+         - Add to output:
+           $$ outv += weight \times \max(lane\_color\_total + 0.5f, 0.f) $$
+-          [S2, unofficial]. This clamps the color to non-negative values [S2, unofficial].
++          [S3, unofficial]. This clamps the color to non-negative values [S3, unofficial].
+ 
+      g. **Last Sample Handling:**
+-        - If $opt.last\_sample\_opaque$ is true and $t + opt.step\_size > ray\_spec[ray\_blk\_id].tmax$, set $ray\_spec[ray\_blk\_id].world\_step = 10^9$ to make the last sample fully opaque [S2, unofficial].
++        - If $opt.last\_sample\_opaque$ is true and $t + opt.step\_size > ray\_spec[ray\_blk\_id].tmax$, set $ray\_spec[ray\_blk\_id].world\_step = 10^9$ to make the last sample fully opaque [S3, unofficial].
+ 
+      h. **Step Advancement:**
+-        - $t += opt.step\_size$ [S2, unofficial].
++        - $t += opt.step\_size$ [S3, unofficial].
+ 
+      i. **Early Termination:**
+-        - If $\exp(log\_transmit) < opt.stop\_thresh$, set $log\_transmit = -1000.0f$ and break the loop [S2, unofficial].
++        - If $\exp(log\_transmit) < opt.stop\_thresh$, set $log\_transmit = -1000.0f$ and break the loop [S3, unofficial].
+ 
+ 5. **Background Addition:**
+    - If $grid.background\_nlayers == 0$, add background contribution:
+      $$ outv += \exp(log\_transmit) \times opt.background\_brightness $$
+-     [S2, unofficial].
++     [S3, unofficial].
+ 
+ 6. **Output:**
+-   - If `lane_id == 0`, write `out[lane_id] = outv` and if `out_log_transmit` is not null, write `*out_log_transmit = log_transmit` [S2, unofficial].
++   - If `lane_id == 0`, write `out[lane_id] = outv` and if `out_log_transmit` is not null, write `*out_log_transmit = log_transmit` [S3, unofficial].
+ 
+ ### Pseudocode
+@@ -134,15 +134,25 @@
+ # Constants: TRACE_RAY_CUDA_THREADS = 128, WARP_SIZE = 32, TRACE_RAY_CUDA_RAYS_PER_BLOCK = 4
+ 
++def compute_ray_bounds(ray, grid):
++    # Standard AABB ray-box intersection [G]
++    tmin, tmax = -float('inf'), float('inf')
++    for j in range(3):
++        inv_dir = 1.0 / ray.dir[j] if ray.dir[j] != 0 else float('inf')
++        t0 = (0.0 - ray.origin[j]) * inv_dir
++        t1 = (grid.size[j] - 1.0 - ray.origin[j]) * inv_dir
++        tmin = max(tmin, min(t0, t1))
++        tmax = min(tmax, max(t0, t1))
++    return tmin, tmax
++
+ def render_ray_kernel(rays, grid, opt, outv, out_log_transmit):
+     tid = blockIdx.x * blockDim.x + threadIdx.x
+     ray_id = tid // 32
+     lane_id = threadIdx.x % 32
+-    ray_blk_id = threadIdx.x // 32  # 0 to 3
+-
+-    # Early exit if lane_id exceeds SH dimensions
++    ray_blk_id = tid // 32  # 0 to 3
++
+     if lane_id >= grid.sh_data_dim:
+         return
+ 
+-    # Shared memory for ray data and SH basis
++    # Shared memory allocation
+     shared_ray_spec = __shared__ SingleRaySpec[4]
+     shared_sphfunc_val = __shared__ float[4][9]
+@@ -154,5 +164,5 @@
+ 
+     # Compute ray bounds
+-    tmin, tmax = ray_find_bounds(shared_ray_spec[ray_blk_id], grid, opt, ray_id)
++    tmin, tmax = compute_ray_bounds(shared_ray_spec[ray_blk_id], grid)
+ 
+     # Handle rays outside grid
+@@ -178,12 +188,16 @@
+     while t <= tmax:
+         # Position computation
+-        pos = shared_ray_spec[ray_blk_id].origin + t * shared_ray_spec[ray_blk_id].dir
+-        pos = clamp(pos, 0.0, grid.size - 1.0)
+-        l = floor(pos)
+-        frac = pos - l
+-        l = min(l, grid.size - 2)
++        pos = [0.0, 0.0, 0.0]
++        for j in range(3):
++            pos[j] = t * shared_ray_spec[ray_blk_id].dir[j] + shared_ray_spec[ray_blk_id].origin[j]
++            pos[j] = max(0.0, min(pos[j], grid.size[j] - 1.0))
++        
++        l = [int(pos[j]) for j in range(3)]
++        for j in range(3):
++            l[j] = min(l[j], grid.size[j] - 2)
++            pos[j] -= l[j]
+ 
+         # Density sampling
+-        sigma = trilerp_cuvol_one(grid.links, grid.density_data, grid.stride_x, grid.size[2], 1, l, frac, 0)
++        sigma = trilerp_cuvol_one(grid.links, grid.density_data, grid.stride_x, grid.size[2], 1, l, pos, 0)
+ 
+         # Threshold check
+@@ -193,5 +207,5 @@
+ 
+         # Color sampling
+-        lane_color = trilerp_cuvol_one(grid.links, grid.sh_data, grid.stride_x, grid.size[2], grid.sh_data_dim, l, frac, lane_id)
++        lane_color = trilerp_cuvol_one(grid.links, grid.sh_data, grid.stride_x, grid.size[2], grid.sh_data_dim, l, pos, lane_id)
+         lane_color *= shared_sphfunc_val[ray_blk_id][lane_id]
+ 
+@@ -242,17 +256,17 @@
+ - The SH basis evaluation must be synchronized across the warp before color accumulation to ensure correct reduction [S2, unofficial].
+ 
++## Subtopics
++
++### Forward Volume Rendering with Spherical Harmonics
++Launches the kernel with blocks = `CUDA_N_BLOCKS_NEEDED(Q * WARP_SIZE, cuda_n_threads)`, where Q is the number of rays and `cuda_n_threads = TRACE_RAY_CUDA_THREADS` [S2, unofficial]. Each thread block processes `TRACE_RAY_CUDA_RAYS_PER_BLOCK` rays. Thread index `tid` maps to `ray_id = tid >> 5`, `ray_blk_id = threadIdx.x >> 5`, `lane_id = threadIdx.x & 0x1F` [S2, unofficial]. Loads ray origin and direction into `ray_spec[ray_blk_id]`, computes direction vector `vdir[3]` [S2, unofficial]. Evaluates spherical harmonics basis values per lane: `calc_sphfunc(grid, lane_id, ray_id, vdir, sphfunc_val[ray_blk_id])` [S2, unofficial]. Computes ray traversal bounds: `ray_find_bounds(ray_spec[ray_blk_id], grid, opt, ray_id)` [S2, unofficial]. Traces ray through grid and accumulates color/transmittance: `trace_ray_cuvol(grid, ray_spec[ray_blk_id], opt, lane_id, sphfunc_val[ray_blk_id], temp_storage[ray_blk_id], out + ray_id * 3, log_transmit_out)` [S2, unofficial]. If `grid.background_links` is defined and non-empty, allocates `log_transmit` tensor and launches `render_background_kernel` to composite background using `log_transmit` [S2, unofficial]. Input: `PackedSparseGridSpec grid`, `PackedRaysSpec rays`, `RenderOptions opt`. Output: `torch::Tensor results` of shape `[Q, 3]` (float, RGB) [S2, unofficial].
++
+ ## Operating characteristics
+-- **Time Complexity:** $O(N \cdot M)$ where $N$ is the number of rays and $M$ is the number of steps per ray. The number of steps is determined by the grid size and `step_size`.
+-- **Memory Complexity:** $O(V)$ where $V$ is the number of voxels in the sparse grid. Shared memory usage is constant per block ($4 \times 9$ floats for SH basis, $4 \times$ ray spec, $4 \times$ temp storage).
+-- **Measured Performance:** On RTX 3090, Instant-NGP implemented in JNeRF achieves about 133 iterations per second for the lego dataset [S2, unofficial].
+-- **Strengths:** Efficient use of shared memory and warp-level parallelism for SH evaluation. Early termination reduces computation for transparent regions.
+-- **Limitations:** Fixed step size may lead to aliasing or slow convergence in complex scenes. Sparse grid lookup overhead may dominate for very sparse grids.
+-- **When to Use:** Real-time rendering of sparse voxel-based radiance fields.
+-- **When Not to Use:** Scenes requiring high-frequency details that cannot be captured by fixed step size or SH basis.
++- **Measured Performance:** On RTX 3090, Instant-NGP implemented in JNeRF achieves about 133 iterations per second for the lego dataset [S3, unofficial].
+ 
+ ## Background
+-Sparse Grid Volume Rendering (Foreground) is derived from Plenoxels, which introduced the use of sparse voxel grids with spherical harmonics for radiance field representation [S1, unofficial]. The implementation in NeRF-Factory and JNeRF adapts this for efficient CUDA execution, leveraging warp-level operations for SH evaluation [S1, S2, unofficial]. The method is part of the broader effort to accelerate NeRF rendering through sparse representations and efficient memory access patterns.
++Sparse Grid Volume Rendering (Foreground) is derived from Plenoxels, which introduced the use of sparse voxel grids with spherical harmonics for radiance field representation [S1, unofficial]. The implementation in NeRF-Factory and JNeRF adapts this for efficient CUDA execution, leveraging warp-level operations for SH evaluation [S1, unofficial].
+ 
+ ## Sources
+ [S1] kakaobrain/nerf-factory, https://github.com/kakaobrain/nerf-factory, fetched 2026-10-26 (unofficial)
+-[S2] Jittor/JNeRF, https://github.com/Jittor/JNeRF, fetched 2026-10-27 (unofficial)+[S2] OSHMOS/IPRF, https://github.com/OSHMOS/IPRF, fetched 2026-10-27 (unofficial)
++[S3] Jittor/JNeRF, https://github.com/Jittor/JNeRF, fetched 2026-10-27 (unofficial)

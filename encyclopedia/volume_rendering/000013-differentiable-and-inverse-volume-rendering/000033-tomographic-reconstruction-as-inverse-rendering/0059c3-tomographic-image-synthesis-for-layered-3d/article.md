@@ -1,0 +1,155 @@
+# Tomographic Image Synthesis for Layered 3D
+
+Also called: Attenuation-based Light Field Synthesis, Layered 3D, Tomographic Image Synthesis for Multi-Layer HDR Displays, Tomographic Optimization, Tomographic reconstruction for attenuation displays
+
+## Overview
+Tomographic Image Synthesis for Layered 3D is a method to optimally construct volumetric or layered attenuators to emit a target light field by minimizing the difference between emitted and target light fields subject to physical constraints on attenuation, using iterative tomographic reconstruction [S1]. It solves the inverse problem of determining the attenuation map $\mu(x,y)$ that, when backlit, produces a desired 4D light field $l(u,a)$ [S1]. Unlike heuristic methods that blur target images to rear layer resolution, this method formulates the synthesis as a constrained linear least-squares optimization problem, proving that existing dual-layer architectures are near-optimal in the least-squares sense [S1]. It extends conventional parallax barriers to multiple disjoint layers, increasing spatial resolution, depth of field, and brightness for 3D displays, and enabling high dynamic range (HDR) for 2D displays [S1].
+
+## How it works
+### Inputs and Outputs
+**Inputs:**
+*   Target light field $l(u, a)$, parameterized on a relative two-plane system where $u$ is the spatial coordinate on the slab bisector and $a$ is the ray orientation slope [S1].
+*   Display geometry: number of layers $N_l$, layer thickness/separation, and spatial resolution (e.g., 384x512 pixels per layer) [S1].
+*   Physical constraints: limited layer contrast (attenuation bounds) [S1].
+
+**Outputs:**
+*   Attenuation maps $\mu_n(x, y)$ for each layer $n \in \{1, \dots, N_l\}$, where each map is a continuously-varying function nonzero only within the slab dimensions $|x| < w/2, |y| < h/2$ [S1].
+
+### Data Structures
+*   **Light Field:** Stored as a 4D array $l(u, a)$ with spatial resolution (e.g., 384x512) and angular resolution (e.g., 7x7 views) [S1].
+*   **Attenuation Map:** Represented using a series expansion into a set of normalized linear basis functions rather than a discrete voxel grid to ensure smoother reconstructions and mitigate discrete ray sampling artifacts [S1].
+*   **Projection Matrix:** A sparse matrix $A$ mapping the basis function coefficients to the light field samples, stored directly in memory, limiting maximum display dimensions and layer count by available system RAM [S1].
+
+### Mathematical Formulation
+The forward model is based on the Beer-Lambert law [S1]. For a single slab, the transmitted intensity $I$ of a ray along path $C$ is:
+$$
+I = I_0 e^{-\int_C \mu(\mathbf{r}) d\mathbf{r}}
+$$
+where $I_0$ is incident intensity and $\mu(\mathbf{r})$ is the attenuation map [S1]. The logarithm of the normalized intensity $\bar{l}$ is defined as:
+$$
+\bar{l} = \ln\left(\frac{I}{I_0}\right) = -\int_C \mu(\mathbf{r}) d\mathbf{r}
+$$
+This integral is the Radon transform $p(u, a)$ of the attenuation map [S1]. Thus, the emitted light field is:
+$$
+l(u, a) = -p(u, a)
+$$
+For layered displays, the total attenuation is the sum of the attenuations of individual layers (assuming negligible scattering and reflection between layers) [S1]. The inverse problem is to find $\mu$ such that the emitted light field matches the target [S1]. This is solved as a constrained linear least-squares optimization:
+$$
+\min_{\mathbf{x}} \| A \mathbf{x} - \mathbf{b} \|^2 \quad \text{subject to} \quad \mathbf{x}_{min} \le \mathbf{x} \le \mathbf{x}_{max}
+$$
+where $\mathbf{x}$ represents the coefficients of the basis functions for the attenuation maps, $A$ is the projection matrix (Radon transform), and $\mathbf{b}$ is the target light field (log-intensity) [S1]. The constraints $\mathbf{x}_{min}, \mathbf{x}_{max}$ enforce physical limits on layer contrast (attenuation values) [S1].
+
+### Parameters
+*   **Light Field Resolution:** 384x512 spatial pixels by 7x7 angular views [S1].
+*   **Layer Count ($N_l$):** Five layers in the demonstrated prototype [S1].
+*   **Field of View:** ±5 degrees [S1].
+*   **Basis Functions:** Normalized linear basis functions [S1].
+
+### Steps
+1.  **Preprocessing:** Convert the target light field $l_{target}(u, a)$ to log-intensity space: $\mathbf{b} = \ln(l_{target})$ [S1]. Evaluate color channels independently [S1].
+2.  **Matrix Construction:** Construct the sparse projection matrix $A$ that maps the chosen basis function coefficients to the light field samples [S1].
+3.  **Optimization:** Solve the constrained linear least-squares problem using a sparse, constrained, large-scale trust region method (e.g., Coleman and Li 1996) [S1]. Initialize $\mathbf{x}$ to zero [G]. Iterate until convergence (typically 8-14 iterations) [S1]. Enforce constraints $\mathbf{x}_{min} \le \mathbf{x} \le \mathbf{x}_{max}$ at each step [S1].
+4.  **Post-processing:** Convert the optimized coefficients $\mathbf{x}$ back to attenuation maps $\mu_n(x, y)$ for each layer [S1].
+5.  **Rendering (Verification):** Render the synthesized light field using POV-Ray as 7x7 oblique projections [S1]. Apply a depth-dependent 4D antialiasing filter by rendering each view with a limited depth of field (finite aperture camera) to approximate combined anti-aliasing and display prefiltering [S1].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+from typing import List, Tuple, Dict
+
+class SparseMatrix:
+    def __init__(self, rows: int, cols: int):
+        self.rows = rows
+        self.cols = cols
+        self.data: Dict[Tuple[int, int], float] = {}
+
+    def set(self, i: int, j: int, val: float):
+        self.data[(i, j)] = val
+
+    def get(self, i: int, j: int) -> float:
+        return self.data.get((i, j), 0.0)
+
+def compute_line_integral(basis_func, ray_u: float, ray_a: float, path_length: float, num_samples: int = 100) -> float:
+    integral = 0.0
+    step = path_length / num_samples
+    for k in range(num_samples):
+        t = (k + 0.5) * step
+        x = ray_u + t * ray_a
+        integral += basis_func(x) * step
+    return integral
+
+def reconstruct_from_basis(coeffs: List[float], basis_funcs: List[callable], grid_x: List[float]) -> List[float]:
+    return [sum(c * phi(x) for c, phi in zip(coeffs, basis_funcs)) for x in grid_x]
+
+def solve_constrained_lsqr(A: SparseMatrix, b: List[float], x_min: float, x_max: float, max_iter: int = 14) -> List[float]:
+    cols = A.cols
+    x = [0.0] * cols
+    lr = 1e-3
+    for _ in range(max_iter):
+        r = [0.0] * A.rows
+        for i in range(A.rows):
+            for (j, val) in A.data.items():
+                if i == j[0]:
+                    r[i] += val * x[j[1]]
+            r[i] -= b[i]
+        g = [0.0] * cols
+        for (i, j), val in A.data.items():
+            g[j] += val * r[i]
+        for k in range(cols):
+            x[k] -= lr * g[k]
+            x[k] = max(x_min, min(x_max, x[k]))
+    return x
+
+def tomographic_synthesis(target_lf: List[float], num_layers: int, spatial_res: Tuple[int, int],
+                          angular_res: Tuple[int, int], basis_funcs: List[callable],
+                          x_min: float, x_max: float) -> List[List[float]]:
+    b = [math.log(val) for val in target_lf]
+    rays = []
+    for u in range(angular_res[0]):
+        for a in range(angular_res[1]):
+            rays.append((u, a))
+    num_rays = len(rays)
+    num_basis = len(basis_funcs) * num_layers
+    A = SparseMatrix(num_rays, num_basis)
+    for i, (u, a) in enumerate(rays):
+        for layer in range(num_layers):
+            for j, phi in enumerate(basis_funcs):
+                col_idx = layer * len(basis_funcs) + j
+                integral = compute_line_integral(phi, u, a, path_length=1.0)
+                A.set(i, col_idx, integral)
+    x_opt = solve_constrained_lsqr(A, b, x_min, x_max, max_iter=14)
+    maps = []
+    grid_x = [i / spatial_res[0] for i in range(spatial_res[0])]
+    for layer in range(num_layers):
+        start = layer * len(basis_funcs)
+        end = start + len(basis_funcs)
+        coeffs = x_opt[start:end]
+        mu = reconstruct_from_basis(coeffs, basis_funcs, grid_x)
+        maps.append(mu)
+    return maps
+```
+
+### Edge Cases and Pitfalls
+*   **Color Crosstalk:** The standard implementation evaluates color channels independently, neglecting color crosstalk between layers [S1]. Incorporating crosstalk increases memory requirements and computation time significantly [S1].
+*   **Flip Animations:** For uncorrelated multi-view imagery (flip animations), direct application of the optimization leads to significant crosstalk [S1]. A spatial downsampling constraint must be added to yield accurate results with enhanced contrast [S1].
+*   **Filtering Artifacts:** Linear reconstruction filters applied to the logarithm of the light field do not correspond to the same filters applied to the light field directly [S1].
+*   **Memory Limits:** Storing the sparse projection matrix directly in memory limits the maximum display dimensions, image resolution, and number of layers by system capacity [S1]. Matrix-free optimization can mitigate this but may increase computation time [S1].
+*   **Physical Assumptions:** Scattering and reflection losses are assumed negligible [S1]. Interreflections between layers are ignored, though in practice they may not lead to visual artifacts if ambient lighting is controlled [S1].
+
+## Operating characteristics
+*   **Time Complexity:** The optimization requires solving a large, sparse system of equations [S1]. It is not real-time; typical optimization takes 12 minutes for 5 layers on a 2.4 GHz Intel Core 2 workstation with 8 GB RAM [S1]. Convergence is typically achieved in 8-14 iterations [S1].
+*   **Memory Complexity:** Proportional to the size of the sparse projection matrix, which depends on the number of light field samples and basis functions [S1]. Limited by system RAM [S1].
+*   **Strengths:** Produces qualitatively optimal decompositions for dual-layer HDR displays, confirming existing heuristics [S1]. Extends naturally to multiple disjoint layers, increasing spatial resolution, depth of field, and brightness compared to parallax barriers [S1].
+*   **Limitations:** Computationally expensive; not suitable for dynamic content without significant acceleration (e.g., GPU, precomputed inverses) [S1]. Limited by physical constraints of layer contrast and separation [S1].
+*   **When to Use:** Static images or pre-rendered content for multi-layer HDR or 3D attenuation displays [S1].
+*   **When Not to Use:** Real-time dynamic applications without hardware acceleration; scenes with significant inter-layer scattering or reflection that cannot be neglected [S1].
+
+## Background
+*   **Origin:** Proposed by Wetzstein et al. in 2011 [S1].
+*   **History:** The method builds on tomographic reconstruction principles [Herman 1995] and light field parameterization [Chai et al. 2000] [S1]. It was developed to address the limitations of heuristic image synthesis methods for layered displays, such as parallax barriers and integral imaging, by providing a mathematically optimal solution in the least-squares sense [S1].
+*   **Usage:** Demonstrated on hardware prototypes consisting of five printed transparency layers separated by clear acrylic sheets (0.3175 cm thick), illuminated by a backlight [S1]. Layers were printed on transparencies at 300 dots per inch using an Epson Stylus 2200 inkjet printer with six color primaries [S1].
+
+## Sources
+[S1] Layered 3D: Tomographic Image Synthesis for Attenuation-based Light Field and High Dynamic Range Displays, https://vccimaging.org/Publications/Wetzstein2011TIG/Wetzstein2011TIG.pdf, fetched 2026-10-29

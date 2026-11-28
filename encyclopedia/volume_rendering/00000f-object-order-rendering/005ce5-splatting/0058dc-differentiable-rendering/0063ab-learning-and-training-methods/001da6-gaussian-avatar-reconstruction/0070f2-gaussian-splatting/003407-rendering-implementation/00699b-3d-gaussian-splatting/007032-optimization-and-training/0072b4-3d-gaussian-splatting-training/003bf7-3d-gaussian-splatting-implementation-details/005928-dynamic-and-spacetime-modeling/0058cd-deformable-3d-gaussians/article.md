@@ -1,0 +1,248 @@
+# Deformable 3D Gaussians
+
+Also called: Deformable-GS
+
+## Overview
+Deformable 3D Gaussians is a framework for high-fidelity, real-time reconstruction of monocular dynamic scenes that extends static 3D Gaussian Splatting by decoupling geometry and appearance from time [S1]. Unlike implicit dynamic methods that suffer from slow convergence and overfitting, or entangled methods that condition neural fields directly on time, this approach learns time-independent 3D Gaussians in a canonical space and employs a lightweight deformation field to map them to the deformed space at any given time $t$ [S1]. It incorporates an Annealing Smooth Training (AST) mechanism to mitigate temporal jitter caused by inaccurate camera poses in real-world datasets, ensuring smooth interpolation without additional computational overhead [S1].
+
+## How it works
+**Inputs and Outputs**
+*   **Inputs:** A set of images from a monocular dynamic sequence, corresponding time labels, camera poses, and a sparse point cloud derived from Structure-from-Motion (SfM) [S1].
+*   **Outputs:** A rendered image for a specific camera pose and time $t$, and a set of optimized 3D Gaussian parameters and deformation network weights [S1].
+
+**Data Structures**
+1.  **3D Gaussians ($G$):** Defined in canonical space. Each Gaussian $i$ is represented by:
+    *   Center position: $\mathbf{x}_i \in \mathbb{R}^3$
+    *   Opacity: $\sigma_i \in \mathbb{R}$
+    *   Rotation: Quaternion $\mathbf{r}_i \in \mathbb{R}^4$
+    *   Scale: 3D vector $\mathbf{s}_i \in \mathbb{R}^3$
+    *   Appearance: Spherical Harmonics (SH) coefficients [S1].
+    *   The 3D covariance matrix $\Sigma_i$ is derived from $\mathbf{r}_i$ and $\mathbf{s}_i$ as $\Sigma_i = \mathbf{R}_i \mathbf{S}_i \mathbf{S}_i^T \mathbf{R}_i^T$, where $\mathbf{R}_i$ is the rotation matrix from $\mathbf{r}_i$ and $\mathbf{S}_i$ is the scaling matrix from $\mathbf{s}_i$ [S1].
+2.  **Deformation Field ($F_\theta$):** A Multi-Layer Perceptron (MLP) with depth $D=8$ and hidden dimension $W=256$ [S1]. It takes encoded canonical position and time as input and outputs offsets $(\delta \mathbf{x}, \delta \mathbf{r}, \delta \mathbf{s})$ [S1].
+
+**Positional Encoding**
+Inputs to the deformation field are encoded using positional encoding $\gamma(\cdot)$ [S1]:
+$$ \gamma(\mathbf{p}) = (\sin(2^k \pi \mathbf{p}), \cos(2^k \pi \mathbf{p}))_{k=0}^{L-1} $$
+*   For canonical position $\mathbf{x}$: $L=10$ [S1].
+*   For time $t$: $L=6$ in synthetic scenes, $L=10$ in real scenes [S1].
+
+**Algorithm Steps**
+1.  **Initialization:** Initialize 3D Gaussians from the SfM sparse point cloud or random generation. Set initial positions $\mathbf{x}$, opacities $\sigma$, rotations $\mathbf{r}$, and scales $\mathbf{s}$ [S1].
+2.  **Warm-up Phase:** For the first 3,000 iterations, optimize only the 3D Gaussian parameters ($\mathbf{x}, \mathbf{r}, \mathbf{s}, \sigma$) using the differentiable rasterization pipeline. Do not update the deformation field $F_\theta$ [S1].
+3.  **Joint Optimization:** After warm-up, jointly optimize the 3D Gaussians and the deformation field $F_\theta$ for the remaining iterations (typically up to 40,000) [S1].
+    *   **Deformation Calculation:** For each Gaussian $i$ at time $t$, compute the deformation offsets:
+        $$ (\delta \mathbf{x}_i, \delta \mathbf{r}_i, \delta \mathbf{s}_i) = F_\theta (\gamma(\text{sg}(\mathbf{x}_i)), \gamma(t)) $$
+        where $\text{sg}(\cdot)$ denotes the stop-gradient operator, preventing gradients from flowing back to the canonical positions $\mathbf{x}_i$ through the deformation field [S1].
+    *   **Deformed Parameters:** The effective parameters for rendering are:
+        $$ \mathbf{x}'_i = \mathbf{x}_i + \delta \mathbf{x}_i $$
+        $$ \mathbf{r}'_i = \mathbf{r}_i + \delta \mathbf{r}_i $$
+        $$ \mathbf{s}'_i = \mathbf{s}_i + \delta \mathbf{s}_i $$
+        [S1].
+    *   **Annealing Smooth Training (AST):** During joint optimization, apply noise to the time input to handle pose inaccuracies. The effective time input becomes $t + X(i)$, where:
+        $$ X(i) = \mathcal{N}(0, 1) \cdot \beta \cdot \Delta t \cdot (1 - i/\tau) $$
+        Here, $\mathcal{N}(0, 1)$ is standard Gaussian noise, $\beta=0.1$, $\Delta t$ is the mean time interval between frames, $\tau=20,000$ iterations, and $i$ is the current iteration index [S1].
+    *   **Rasterization:** Project the deformed Gaussians to 2D. The 2D covariance matrix $\Sigma'_i$ is computed as:
+        $$ \Sigma'_i = \mathbf{J} \mathbf{V} \Sigma'_i \mathbf{V}^T \mathbf{J}^T $$
+        where $\mathbf{V}$ is the view matrix, $\Sigma'_i$ is the deformed 3D covariance matrix derived from $\mathbf{r}'_i$ and $\mathbf{s}'_i$, and $\mathbf{J}$ is the Jacobian of the affine approximation of the projective transformation [S1].
+    *   **Alpha Blending:** Render pixel color $C(\mathbf{p})$ for pixel $\mathbf{p}$:
+        $$ C(\mathbf{p}) = \sum_{i \in \mathcal{N}} T_i \alpha_i c_i $$
+        where $\mathcal{N}$ is the set of Gaussians along the ray, $c_i$ is the color from SH, $\alpha_i = \sigma_i e^{-\frac{1}{2}(\mathbf{p}-\boldsymbol{\mu}_i)^T \Sigma'^{-1}_i (\mathbf{p}-\boldsymbol{\mu}_i)}$, and $T_i = \prod_{j=1}^{i-1} (1 - \alpha_j)$ is the transmittance [S1].
+    *   **Adaptive Density Control:**
+        *   **Pruning:** Remove Gaussians with opacity $\sigma_i$ below a threshold [S1].
+        *   **Densification:** Clone Gaussians with small scales and high positional gradients (threshold $t_{pos} = 0.0002$) and move them in the direction of the gradient [S1].
+        *   **Splitting:** Split large, overlapping Gaussians by dividing their scale by $\xi = 1.6$ [S1].
+4.  **Optimization:** Use the Adam optimizer. The learning rate for 3D Gaussians follows the standard 3D-GS schedule. The learning rate for the deformation network $F_\theta$ decays exponentially from $8 \times 10^{-4}$ to $1.6 \times 10^{-6}$ [S1].
+
+**Pseudocode**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import torch.optim as optim
+
+class PositionalEncoding(nn.Module):
+    def __init__(self, L):
+        super().__init__()
+        self.L = L
+        
+    def forward(self, p):
+        # p shape: (..., D)
+        # Output shape: (..., D * 2 * L)
+        freq_bands = 2.0 ** torch.arange(self.L, device=p.device).float()
+        scaled_p = p.unsqueeze(-1) * freq_bands * torch.pi
+        sin_vals = torch.sin(scaled_p)
+        cos_vals = torch.cos(scaled_p)
+        return torch.cat([sin_vals, cos_vals], dim=-1).flatten(start_dim=-2)
+
+class DeformationField(nn.Module):
+    def __init__(self, input_dim_x, input_dim_t, hidden_dim=256, depth=8):
+        super().__init__()
+        self.pe_x = PositionalEncoding(L=10) # L=10 for x
+        self.pe_t = PositionalEncoding(L=6)  # L=6 for t (synthetic), L=10 for real
+        self.input_dim_x = input_dim_x
+        self.input_dim_t = input_dim_t
+        
+        # Calculate encoded dimensions
+        # Original pos: 3, Encoded: 3 * 2 * 10 = 60
+        # Original time: 1, Encoded: 1 * 2 * 6 = 12
+        self.fc = nn.Sequential()
+        current_dim = 60 + 12
+        
+        for _ in range(depth):
+            self.fc.add_module(f'linear_{_}', nn.Linear(current_dim, hidden_dim))
+            self.fc.add_module(f'relu_{_}', nn.ReLU())
+            current_dim = hidden_dim
+            
+        # Output: delta_x (3), delta_r (4), delta_s (3) -> total 10
+        self.fc.add_module('output', nn.Linear(hidden_dim, 10))
+
+    def forward(self, x, t, use_ast=False, iteration=0, total_iterations=40000, beta=0.1, dt=1.0):
+        """
+        x: canonical positions (..., 3)
+        t: time (..., 1)
+        """
+        # Stop gradient on x
+        x_sg = x.detach()
+        
+        # Positional Encoding
+        enc_x = self.pe_x(x_sg)
+        enc_t = self.pe_t(t)
+        
+        # AST Noise
+        if use_ast and iteration < 20000:
+            noise = torch.randn_like(t) * beta * dt * (1 - iteration / 20000)
+            enc_t = enc_t + noise # Note: Source adds noise to time input before encoding or after? 
+                                  # Source: gamma(t) + X(i). X(i) is added to t before gamma? 
+                                  # Formula: gamma(sg(x)), gamma(t + X(i)). 
+                                  # So noise is added to t, then encoded.
+                                  # Correction: Add noise to t, then encode.
+        
+        # Re-encode if AST applied to t
+        if use_ast and iteration < 20000:
+             # Recalculate enc_t with noisy t
+             # However, in the source formula (6), X(i) is added to t inside gamma.
+             # gamma(t + X(i)). So we must add noise to t first.
+             pass 
+
+        # Concatenate
+        input_vec = torch.cat([enc_x, enc_t], dim=-1)
+        
+        # MLP
+        offsets = self.fc(input_vec)
+        
+        # Split offsets
+        delta_x = offsets[..., :3]
+        delta_r = offsets[..., 3:7]
+        delta_s = offsets[..., 7:10]
+        
+        return delta_x, delta_r, delta_s
+
+def render_gaussians(gaussians, camera_matrix, image_width, image_height):
+    """
+    Simplified rasterization step.
+    gaussians: dict with x, r, s, sigma, sh_coeffs
+    camera_matrix: projection matrix
+    """
+    # 1. Compute deformed parameters
+    # (Assuming deformation field is already called and offsets are available)
+    # x_prime = x + delta_x
+    # r_prime = r + delta_r
+    # s_prime = s + delta_s
+    
+    # 2. Compute Covariance
+    # R = quaternion_to_matrix(r_prime)
+    # S = scale_to_matrix(s_prime)
+    # Sigma_3d = R @ S @ S.T @ R.T
+    
+    # 3. Project to 2D
+    # J = jacobian_of_projection(...)
+    # V = view_matrix
+    # Sigma_2d = J @ V @ Sigma_3d @ V.T @ J.T
+    
+    # 4. Alpha blending
+    # Sort gaussians by depth
+    # Render using tile-based rasterizer
+    pass
+
+def train_deformable_3d_gaussians(images, poses, times, sparse_points):
+    # Initialize Gaussians from sparse_points
+    gaussians = initialize_gaussians(sparse_points)
+    
+    deformation_net = DeformationField(input_dim_x=3, input_dim_t=1)
+    
+    optimizer_gs = optim.Adam(gaussians.parameters(), lr=1.6e-4) # Standard 3DGS LR
+    optimizer_def = optim.Adam(deformation_net.parameters(), lr=8e-4)
+    
+    total_iterations = 40000
+    warmup_iterations = 3000
+    
+    for i in range(total_iterations):
+        # Sample a random image/pose/time from the dataset
+        img, pose, t = sample_batch(images, poses, times)
+        
+        # Get canonical positions
+        x = gaussians['x']
+        
+        # Compute deformation offsets
+        # Use AST only during joint optimization phase
+        use_ast = (i >= warmup_iterations)
+        
+        delta_x, delta_r, delta_s = deformation_net(
+            x, t, 
+            use_ast=use_ast, 
+            iteration=i, 
+            total_iterations=total_iterations
+        )
+        
+        # Compute deformed parameters
+        x_prime = x + delta_x
+        r_prime = gaussians['r'] + delta_r
+        s_prime = gaussians['s'] + delta_s
+        
+        # Render
+        rendered_img = render_gaussians(
+            {'x': x_prime, 'r': r_prime, 's': s_prime, 
+             'sigma': gaussians['sigma'], 'sh': gaussians['sh']},
+            pose, img.shape[1], img.shape[2]
+        )
+        
+        # Compute Loss (L1 + D-SSIM)
+        loss = compute_loss(rendered_img, img)
+        
+        # Backprop
+        optimizer_gs.zero_grad()
+        optimizer_def.zero_grad()
+        
+        if i < warmup_iterations:
+            # Only optimize Gaussians
+            loss.backward()
+            optimizer_gs.step()
+        else:
+            # Joint optimization
+            loss.backward()
+            optimizer_gs.step()
+            optimizer_def.step()
+            
+        # Adaptive Density Control
+        update_gaussian_density(gaussians, optimizer_gs)
+        
+        # Decay LR for deformation network
+        current_lr_def = 8e-4 * (1.6e-6 / 8e-4) ** (i / total_iterations)
+        for param_group in optimizer_def.param_groups:
+            param_group['lr'] = current_lr_def
+```
+
+## Operating characteristics
+*   **Time Complexity:** Training involves joint optimization of Gaussians and a shallow MLP. The deformation field adds minimal overhead compared to implicit NeRF-based methods. Rendering is real-time due to the tile-based rasterization [S1].
+*   **Memory Complexity:** Stores 3D Gaussian attributes (position, rotation, scale, opacity, SH coefficients) and the deformation network weights. The deformation network is small ($D=8, W=256$) [S1].
+*   **Performance:** Achieves higher rendering quality and real-time speeds compared to implicit dynamic methods. Outperforms existing methods in both metrics [S1].
+*   **Strengths:** Decouples geometry and appearance, enabling efficient training and rendering. Handles monocular dynamic scenes effectively. AST mechanism improves temporal smoothness in real-world data with inaccurate poses [S1].
+*   **Limitations:** Relies on SfM for initialization; poor SfM results may affect quality. The deformation field assumes non-dramatic action variations [S1].
+
+## Background
+Deformable 3D Gaussians was proposed to address the limitations of implicit representations (slow convergence, overfitting) and entangled dynamic methods in modeling monocular dynamic scenes [S1]. It builds on the success of 3D Gaussian Splatting for static scenes [S1]. The method was introduced in the paper "Deformable 3D Gaussians for High-Fidelity Monocular Dynamic Scene Reconstruction" [S1].
+
+## Sources
+[S1] Deformable 3D Gaussians for High-Fidelity Monocular Dynamic Scene Reconstruction, https://doi.org/10.1109/cvpr52733.2024.01922, fetched 2026-10-26

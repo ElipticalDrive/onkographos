@@ -1,0 +1,70 @@
+--- v008.md
++++ v009.md
+@@ -16,7 +16,7 @@
+ 
+ **Steps:**
+-1.  **Feature Extraction:** Pass both the rendered image $\hat{I}$ and the ground truth image $I_g$ through the pre-trained network $\Phi$. Extract feature maps from a set of layers $L$ [S2, S5, S6].
++1.  **Feature Extraction:** Pass both the rendered image $\hat{I}$ and the ground truth image $I_g$ through the pre-trained network $\Phi$ [S5]. Extract feature maps from a set of layers $L$ [S2, S5, S6].
+     $$ \mathbf{F}_{\hat{I}}^l = \Phi_l(\hat{I}), \quad \mathbf{F}_{I_g}^l = \Phi_l(I_g) \quad \forall l \in L $$
+-2.  **Distance Calculation:** Compute the distance between the feature maps of the prediction and the ground truth. The L1 norm is commonly used [S2, S5, S6].
++2.  **Distance Calculation:** Compute the distance between the feature maps of the prediction and the ground truth [S5]. The L1 norm is commonly used [S2, S5, S6].
+     $$ D^l = \| \mathbf{F}_{\hat{I}}^l - \mathbf{F}_{I_g}^l \|_1 $$
+ 3.  **Aggregation:** Sum the distances weighted by layer-specific coefficients $\lambda_l$ [S2, S5, S6].
+@@ -26,5 +26,7 @@
+ The general perceptual loss is defined as [S2, S5]:
+ $$ L(P_f, \theta) = \sum_l \lambda_l \| \Phi_l(I_g) - \Phi_l(f(P_f; \theta)) \|_1 $$
+-where $P_f$ represents the scene parameters (e.g., point features), $\theta$ are the network parameters, $f$ is the rendering function, and $\Phi_l$ are the VGG-19 layers [S2, S5].
++where $P_f$ represents the scene parameters (e.g., point features), $\theta$ are the network parameters, $f$ is the rendering function, and $\Phi_l$ are the VGG-19 layers [S2, S5]. Some formulations normalize the distance by the total number of features $N_l$ in layer $l$ [S3, unofficial]:
++$$ L_{\text{perc}}(G) = \mathbb{E}_{x,y} \sum_{t=1}^{T} \lambda_t \frac{1}{N_t} \| F^{(t)}(G(x)) - F^{(t)}(y) \|_1 $$
++where $F^{(t)}$ is the feature extractor in the $t$-th layer of the pretrained network $F$ with $T$ layers total [S3, unofficial].
+ 
+ In the context of Gaussian Splatting (PIPS), the total loss combines L1, SSIM, and Perceptual (PIPS) terms [S4]:
+@@ -38,6 +40,6 @@
+ **Parameters:**
+ *   **VGG-19 Layers:** Commonly used layers include 'input', 'conv1-2', 'conv2-2', 'conv3-2', 'conv4-2', and 'conv5-2' [S2, S5].
+-*   **Weights ($\lambda_l$):** Balancing weights for each layer. Specific values follow the scheme in Chen et al. [S2, S5].
+-*   **Weights ($\lambda_1, \lambda_2$):** In the PIPS formulation, $\lambda_1$ weights the SSIM term and $\lambda_2$ weights the perceptual term. Exact values are not given [S4].
++*   **Weights ($\lambda_l$):** Balancing weights for each layer [S2, S5]. Specific values follow the scheme in Chen et al. [S5].
++*   **Weights ($\lambda_1, \lambda_2$):** In the PIPS formulation, $\lambda_1$ weights the SSIM term and $\lambda_2$ weights the perceptual term [S4]. Exact values are not given [S4].
+ *   **Optimization:** Adam optimizer is typically used [S2, S5, S7].
+     *   Learning rate initialized at 0.01, decreased every 7 epochs: $0.01 \to 0.005 \to 0.001$ [S2, S5].
+@@ -45,5 +47,5 @@
+ 
+ **Pitfalls:**
+-*   **Computational Overhead:** CNN-based perceptual loss computation is expensive. It is recommended to compute it every 20 training iterations to alleviate overhead without significantly impacting quality [S4].
++*   **Computational Overhead:** CNN-based perceptual loss computation is expensive [S4]. It is recommended to compute it every 20 training iterations to alleviate overhead without significantly impacting quality [S4].
+ *   **Color Shifts:** Perceptual loss can introduce color shifts in the rendered output [S7]. This may require auxiliary terms like Anti-Bias Loss to correct [S7].
+ *   **Visual Quality Degradation:** Omitting perceptual loss increases LPIPS distance, indicating degraded visual quality even if pixel-wise metrics (PSNR/SSIM) remain acceptable [S6]. The learned generator using $L_p$ norm tends to synthesize blurry images or average results over multiple plausible outputs [S6].
+@@ -53,11 +55,18 @@
+ def compute_perceptual_loss(rendered, ground_truth, vgg_layers, weights):
+     # [G] Standard VGG preprocessing: normalize inputs by ImageNet mean and std.
+-    features_pred = {layer: extract_features(rendered, layer) for layer in vgg_layers}
+-    features_gt = {layer: extract_features(ground_truth, layer) for layer in vgg_layers}
+     loss = 0.0
+     for layer in vgg_layers:
+-        # Mean L1 distance between feature maps
+-        diff = [features_pred[layer][i] - features_gt[layer][i] for i in range(len(features_pred[layer]))]
+-        l1_dist = sum(abs(d) for d in diff) / len(diff)
++        # [G] Standard VGG forward pass to extract layer activations
++        feat_pred = get_vgg_features(rendered, layer)
++        feat_gt = get_vgg_features(ground_truth, layer)
++        # Compute mean L1 distance over all spatial and channel dimensions
++        diff_sum = 0.0
++        count = 0
++        for c in range(feat_pred.shape[0]):
++            for h in range(feat_pred.shape[1]):
++                for w in range(feat_pred.shape[2]):
++                    diff_sum += abs(feat_pred[c, h, w] - feat_gt[c, h, w])
++                    count += 1
++        l1_dist = diff_sum / count
+         loss += weights[layer] * l1_dist
+     return loss
+@@ -96,6 +105,6 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** High. Perceptual loss requires forward passes through a deep CNN (VGG-19) for both the rendered and ground truth images [S4]. Computing it every 20 iterations is necessary to alleviate this overhead [S4]. Training takes on average 41.5 hours per scene on one GeForce 1080 Ti [S5].
+-*   **Memory Complexity:** Moderate to High. Requires storing intermediate feature maps from the VGG network for the backpropagation step [S6].
++*   **Time Complexity:** High [G]. Perceptual loss requires forward passes through a deep CNN (VGG-19) for both the rendered and ground truth images [S4]. Computing it every 20 iterations is necessary to alleviate this overhead [S4]. Training takes on average 41.5 hours per scene on one GeForce 1080 Ti [S5].
++*   **Memory Complexity:** Not given in the sources.
+ *   **Performance:** Improves perceptual quality (LPIPS) significantly compared to pixel-wise losses [S6]. However, it may introduce color shifts if not regularized (e.g., with Anti-Bias Loss) [S7].
+ *   **Strengths:** Better visual fidelity, recovers high-frequency details, reduces structural artifacts [S1, S6].

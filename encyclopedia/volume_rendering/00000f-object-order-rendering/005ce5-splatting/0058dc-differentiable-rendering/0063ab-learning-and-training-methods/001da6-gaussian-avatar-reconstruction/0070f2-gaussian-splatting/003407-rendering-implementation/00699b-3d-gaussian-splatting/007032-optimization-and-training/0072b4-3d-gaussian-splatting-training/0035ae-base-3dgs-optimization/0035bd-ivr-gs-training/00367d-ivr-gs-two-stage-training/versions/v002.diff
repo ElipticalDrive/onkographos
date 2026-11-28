@@ -1,0 +1,134 @@
+--- v001.md
++++ v002.md
+@@ -4,70 +4,88 @@
+ 
+ ## Overview
+-iVR-GS Two-Stage Training is a training strategy for Inverse Volume Rendering with Gaussian Splatting (iVR-GS) that decouples the reconstruction of static scene geometry from the optimization of editable primitives [S1]. It solves the problem of slow convergence and excessive memory usage when optimizing editable Gaussian primitives from scratch [S1]. By first establishing a base 3D Gaussian Splatting (3DGS) model, it accelerates optimization and reduces the number of required primitives compared to one-stage training, while maintaining similar reconstruction quality [S1].
++iVR-GS Two-Stage Training is a training pipeline for the iVR-GS method that decouples the reconstruction of static scene geometry from the optimization of deformation-aware primitives. It solves the problem of inefficient and unstable joint optimization of base geometry and editable deformation fields in 3D Gaussian Splatting. Unlike one-stage training which optimizes all parameters from scratch, this method first establishes a robust base 3DGS model and then refines editable Gaussian primitives on top of it, accelerating convergence and reducing memory footprint while maintaining reconstruction quality [S1].
+ 
+ ## How it works
+ The method consists of two sequential optimization phases.
+ 
+-**Inputs and Outputs:**
+-*   **Input:** A set of multi-view images of the target scene.
+-*   **Output:** A composed model consisting of a base 3DGS representation and a set of editable Gaussian primitives [S1].
++**Inputs:**
++- Initial 3D Gaussian point cloud (typically from COLMAP or similar structure-from-motion).
++- Set of training images with camera poses.
++- Target volume rendering configuration (transfer functions, etc.).
++
++**Outputs:**
++- A base 3DGS model with optimized positions, rotations, scales, colors (SH coefficients), and opacities.
++- An optimized set of editable Gaussian primitives with deformation parameters.
+ 
+ **Data Structures:**
+-1.  **Base 3DGS Model:** Standard 3D Gaussian primitives defined by position, covariance, opacity, and spherical harmonics coefficients for view-dependent color [S1].
+-2.  **Editable Gaussian Primitives:** Additional Gaussian primitives optimized to enable scene editing capabilities [S1].
++1. **Base 3DGS Model:** Standard 3DGS attributes: position $\mathbf{p}$, rotation quaternion $\mathbf{q}$, scale $\mathbf{s}$, spherical harmonics coefficients $\mathbf{c}$, and opacity $\alpha$.
++2. **Editable Gaussian Primitives:** A subset or distinct set of Gaussians associated with deformation fields. These include the standard 3DGS attributes plus additional parameters for deformation (e.g., weights for radial features or deformation graph influences) as defined in the parent [iVR-GS Training](7578-ivr-gs-training.md).
+ 
+ **Steps:**
+ 
+-1.  **Base 3DGS Training:**
+-    *   Initialize a standard 3DGS model.
+-    *   Optimize the base 3DGS parameters to capture the basic scene geometry.
+-    *   Run for 30,000 iterations [S1].
+-    *   *Note:* This step establishes the foundational radiance field and geometry without the complexity of editability constraints [S1].
++1. **Stage I: Base 3DGS Training**
++   - Optimize the base 3DGS model to capture the basic scene geometry.
++   - Loss function: Standard differentiable rendering loss (e.g., L1 + D-SSIM) between rendered images and ground truth.
++   - Iterations: 30,000 [S1].
++   - Goal: Produce a stable, high-fidelity representation of the static scene structure.
+ 
+-2.  **Editable Gaussian Optimization:**
+-    *   Initialize editable Gaussian primitives on top of the converged base 3DGS geometry [S1].
+-    *   Optimize the parameters of these editable primitives to enable scene editing.
+-    *   Run for 10,000 iterations [S1].
+-    *   *Note:* This step fine-tunes the representation specifically for editability, leveraging the stable geometry from Stage I [S1].
+-
+-**Parameters:**
+-*   Base 3DGS iterations: 30,000 [S1].
+-*   Editable Gaussian iterations: 10,000 [S1].
+-*   Total iterations: 40,000 [S1].
+-
+-**Edge Cases and Pitfalls:**
+-*   **Initialization:** The editable primitives must be initialized on the base 3DGS geometry. Initializing from scratch (one-stage) leads to slower convergence [S1].
+-*   **Precision:** Standard 3DGS optimization precision applies to Stage I. Stage II focuses on the delta required for editability [S1].
++2. **Stage II: Editable Gaussian Optimization**
++   - Initialize editable Gaussian primitives using the geometry from Stage I.
++   - Optimize the deformation-related parameters of these primitives to enable scene editing.
++   - Loss function: Standard rendering loss plus any specific deformation consistency losses defined in the iVR-GS framework.
++   - Iterations: 10,000 [S1].
++   - Goal: Align the deformed 3D Gaussians with the deformed radiance field, ensuring faithful capture of field-wise deformation [S1].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def ivr_gs_two_stage_training(images):
+-    # Stage I: Train base 3DGS
+-    base_gaussians = initialize_3dgs(images)
+-    for iteration in range(30000):
+-        # Standard 3DGS optimization step
+-        base_gaussians = optimize_3dgs_step(base_gaussians, images, iteration)
++def ivr_gs_two_stage_training(initial_points, training_images, num_iterations_stage1=30000, num_iterations_stage2=10000):
++    # Stage I: Train Base 3DGS
++    base_gaussians = initialize_3dgs(initial_points)
++    for i in range(num_iterations_stage1):
++        # Sample a random camera pose and render
++        image = render(base_gaussians, training_images[i % len(training_images)])
++        # Compute loss (L1 + D-SSIM)
++        loss = compute_rendering_loss(image, training_images[i % len(training_images)].gt)
++        # Backpropagate and update base gaussians
++        base_gaussians.backward(loss)
++        base_gaussians.step()
+     
+-    # Stage II: Optimize editable primitives
+-    editable_gaussians = initialize_editable_primitives(base_gaussians)
+-    for iteration in range(10000):
+-        # Optimization step for editability
+-        editable_gaussians = optimize_editable_step(editable_gaussians, base_gaussians, images, iteration)
++    # Stage II: Optimize Editable Gaussians
++    # Initialize editable primitives based on base geometry
++    editable_gaussians = initialize_editable_gaussians(base_gaussians)
++    
++    for i in range(num_iterations_stage2):
++        # Sample a random camera pose and render deformed scene
++        # Note: Deformation parameters are optimized here
++        image = render_deformed(editable_gaussians, training_images[i % len(training_images)])
++        # Compute loss including deformation consistency
++        loss = compute_rendering_loss(image, training_images[i % len(training_images)].gt)
++        # Backpropagate and update editable gaussians
++        editable_gaussians.backward(loss)
++        editable_gaussians.step()
+         
+-    return composed_model(base_gaussians, editable_gaussians)
++    return base_gaussians, editable_gaussians
+ ```
++
++**Edge Cases and Pitfalls:**
++- **Initialization:** Poor initialization in Stage II can lead to suboptimal deformation fields. Using the converged base model from Stage I is critical [S1].
++- **Iteration Count:** The specified iteration counts (30k and 10k) are tuned for the reported datasets. Deviations may require re-tuning [S1].
++- **Primitive Count:** One-stage training tends to use more primitives to achieve similar quality. Two-stage training achieves similar quality with fewer primitives [S1].
+ 
+ ## Subtopics
+ 
++### [Stage II: Align 3DGS with Radiance Field](20015-stage-ii-align-3dgs-with-radiance-field.md)
++This method is the second stage of the iVR-GS training pipeline, designed to minimize the discrepancy between the rendering of deformed 3D Gaussian Splatting (3DGS) and the rendering of the deformed radiance field defined by radial features.
++
+ ## Operating characteristics
+-*   **Time Complexity:** Two-stage training takes 40,000 iterations total (30,000 + 10,000) [S1]. One-stage training takes 40,000 iterations from scratch [S1]. However, two-stage training is over 2× faster in wall-clock time than one-stage training [S1].
+-*   **Memory Complexity:** Two-stage training uses fewer primitives and results in smaller file sizes compared to one-stage training [S1]. For example, on the VolVis scene, two-stage training used 375,352 primitives (8.8 MB) versus 711,169 primitives (16.7 MB) for one-stage [S1].
+-*   **Quality:** Both methods achieve similar reconstruction quality (PSNR and LPIPS) [S1].
+-*   **Strengths:** Faster optimization, smaller model size, fewer primitives [S1].
+-*   **Limitations:** Requires two distinct phases; initial base model must be sufficiently converged before Stage II [S1].
++- **Time Complexity:** Two-stage training uses 40,000 total iterations (30k + 10k), which is comparable to one-stage training (40,000 iterations). However, due to better initialization and separation of concerns, two-stage training reduces actual training time by over 2× compared to one-stage training [S1].
++- **Memory Complexity:** Two-stage training uses fewer primitives to represent the scene, resulting in smaller file sizes (e.g., 8.8 MB vs 16.7 MB for VolVis scene in one source example) [S1].
++- **Quality:** Maintains similar reconstruction quality (PSNR, LPIPS) to one-stage training [S1].
++- **Strengths:** Faster optimization, smaller model size, better stability.
++- **Limitations:** Requires two distinct training phases, potentially increasing implementation complexity.
+ 
+ ## Background
+-The method was introduced in the iVR-GS paper [S1]. It addresses the inefficiencies of optimizing editable Gaussian primitives directly from scratch, which was found to be slow and resource-intensive [S1]. The two-stage approach was validated on datasets like five-jet and supernova [S1].
++The iVR-GS method was introduced in "iVR-GS: Inverse Volume Rendering for Explorable Visualization via Editable 3D Gaussian Splatting" [S1]. The two-stage training strategy was proposed to address the inefficiencies of optimizing editable Gaussian primitives from scratch, leveraging the established geometry of a base 3DGS model to accelerate convergence and reduce resource usage [S1].
+ 
+ ## Sources

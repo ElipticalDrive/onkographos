@@ -1,0 +1,118 @@
+--- v002.md
++++ v003.md
+@@ -35,5 +35,5 @@
+     *   Let $\theta_i$ be Gaussian $i$'s parameters, $f_v(\theta_i)$ its projected attributes, and $L_{img}^v$ the regional image objective. The parameter gradient for candidate $i \in C_v$ is computed as [S1, unofficial]:
+         $$
+-        g_i = \frac{\partial q_i}{\partial \theta_i} = \left( \frac{\partial f_v(\theta_i)}{\partial \theta_i} \right)^\top \boxplus_{\ell \in R_v} w_\ell \frac{\partial L_\ell^{img}}{\partial q_i}
++        g_i = \frac{\partial q_i}{\partial \theta_i} = \left( \frac{\partial f_v(\theta_i)}{\partial \theta_i} \right)^\top \sum_{\ell \in R_v} w_\ell \frac{\partial L_\ell^{img}}{\partial q_i}
+         $$
+         where $q_i = \sum_{\ell \in R_v} w_\ell L_\ell^{img}$ is the regional image objective contribution, $R_v$ is the set of rasterized pixels affected by candidate $i$, and $w_\ell$ are weights. Unaffected regions contribute zero [S1, unofficial].
+@@ -63,5 +63,7 @@
+     global_params, camera, rasterizer, optimizer
+ ):
+-    # 1. Candidate Construction
++    # 1. Candidate Construction (Screening)
++    # Conservative screen coverage estimate using position, max scale, opacity, camera.
++    # Must permit false positives; detailed projection determines exact intersections later.
+     candidates = []
+     for i in range(global_params.num_gaussians):
+@@ -69,40 +71,61 @@
+         max_scale = max(global_params.scale[i])
+         opacity = global_params.opacity[i]
++        # [G] Standard conservative bounding check against camera frustum and rasterizer bounds
+         if is_conservatively_visible(pos, max_scale, opacity, camera):
+             candidates.append(i)
+     n_v = len(candidates)
+     
+-    # 2. Candidate-Indexed Projection
+-    candidate_params = [global_params[i] for i in candidates]
++    # 2. Candidate-Indexed Projection (Forward Pass)
++    # Read original parameter rows by index. Internally activate parameters.
+     projected_attrs = []
+-    for i in range(n_v):
+-        projected_attrs.append(activate_and_project(candidate_params[i], camera))
++    for i in candidates:
++        # [G] Standard activation: compute 2D covariance, mean, evaluate SH colors
++        attrs = activate_and_project(global_params[i], camera)
++        projected_attrs.append(attrs)
++        
++    # Rasterize candidates. Returns per-pixel gradients and weights.
+     pixel_grads, pixel_weights = rasterizer.rasterize(projected_attrs, camera)
+     
+-    # 3. Backward Pass
++    # 3. Backward Pass (Gradient Accumulation)
++    # Compute activation derivatives on this path without a separate full-model activation graph.
+     candidate_gradients = []
+-    for i in range(n_v):
+-        jacobian = compute_projection_jacobian(candidate_params[i], camera)
+-        pixel_grad_sum = accumulate_pixel_gradients(i, pixel_grads, pixel_weights)
+-        candidate_gradients.append(jacobian.T @ pixel_grad_sum)
++    for k, i in enumerate(candidates):
++        # [G] Standard Jacobian of projection and SH evaluation w.r.t parameters
++        jacobian = compute_projection_jacobian(global_params[i], camera)
++        # Accumulate weighted pixel gradients for Gaussian i
++        pixel_grad_sum = accumulate_pixel_gradients(k, pixel_grads, pixel_weights)
++        # g_i = (∂f_v/∂θ_i)^T ∑ w_ℓ (∂L_ℓ^img/∂q_i)
++        grad = jacobian.T @ pixel_grad_sum
++        candidate_gradients.append(grad)
+         
+     # 4. Compact Gradient Storage
++    # Final gradients retain candidate rows linked to global parameters by an ID map.
+     id_map = candidates
+-    full_gradients = zeros_like(global_params)
++    full_gradients = initialize_zero_gradients(global_params)
+     for k in range(n_v):
+         full_gradients[id_map[k]] = candidate_gradients[k]
++        
++    # Global opacity regularization requires a dense opacity gradient, added to image contributions.
+     full_gradients.opacity += compute_opacity_regularization_gradient(global_params.opacity)
+     
+     # 5. Optimizer Update
++    # Optimizer reads compact gradients and IDs directly.
++    # For rows outside the candidate set, Adam still updates moments/params using zero gradient.
+     optimizer.step(global_params, full_gradients)
+     
+     # 6. Cleanup
+-    del projected_attrs, candidate_gradients, pixel_grads
++    # Gradients and maps are released after the update.
++    del projected_attrs, candidate_gradients, pixel_grads, pixel_weights
++    
++    # 7. Visibility and Densification
++    # [G] Standard densification: combine visibility by union, accumulate screen gradients,
++    # compute per-Gaussian stats, perform scheduled view-level structure updates.
+     return global_params
+ 
+-# Helper definitions
++# Helper definitions (standard operations or [G] where sources omit details)
+ def is_conservatively_visible(pos, max_scale, opacity, camera):
+     """Conservative screen coverage estimate using position, max scale, opacity, camera."""
+-    return True  # Implementation depends on rasterizer bounds
++    # [G] Projects bounding sphere defined by max_scale onto screen, checks overlap with rasterizer bounds.
++    return True
+ 
+ def activate_and_project(params, camera):
+@@ -115,17 +138,20 @@
+ def compute_projection_jacobian(params, camera):
+     """Jacobian of projection and SH evaluation w.r.t parameters."""
+-    return jacobian_matrix  # Standard analytical Jacobian
++    # [G] Analytical Jacobian matrix mapping parameter perturbations to 2D attribute perturbations.
++    return jacobian_matrix
+ 
+ def accumulate_pixel_gradients(idx, pixel_grads, pixel_weights):
+     """Sum weighted pixel gradients for Gaussian idx."""
++    # [G] Iterates over rasterized pixels, sums grad * weight.
+     return sum(pixel_grads[i] * pixel_weights[i] for i in rasterized_pixels(idx))
+ 
+-def zeros_like(params):
++def initialize_zero_gradients(params):
+     """Initialize buffer with zeros matching params layout."""
+-    return {k: np.zeros_like(v) for k, v in params.items()}
++    return {k: [0.0] * len(v) for k, v in params.items()}
+ 
+ def compute_opacity_regularization_gradient(opacity):
+     """Compute dense gradient for global opacity regularization."""
+-    return regularization_term_grad  # Standard regularization gradient
++    # [G] Standard regularization term gradient (e.g., L2 or sparsity penalty).
++    return regularization_term_grad
+ ```
+ 

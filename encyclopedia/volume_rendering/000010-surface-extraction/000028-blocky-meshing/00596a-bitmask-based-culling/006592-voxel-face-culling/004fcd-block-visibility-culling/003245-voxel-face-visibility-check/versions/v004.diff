@@ -1,0 +1,201 @@
+--- v003.md
++++ v004.md
+@@ -4,142 +4,78 @@
+ 
+ ## Overview
+-Voxel Face Visibility Check is a geometric optimization that determines which of the six faces of a voxel block are visible to the camera, allowing the renderer to skip generating or uploading geometry for faces pointing away from the viewer [S1, S3, S4, unofficial]. It differs from [Block Visibility Culling](5334-block-visibility-culling.md) by operating at the individual face level within a block rather than discarding entire blocks, providing finer-grained culling for blocks near the camera or at viewing angles where only specific sides are occluded or back-facing [S2, unofficial].
++Voxel Face Visibility Check is a geometric optimization that determines which of the six faces of a voxel block are visible to the camera, allowing the renderer to skip generating or uploading geometry for faces pointing away from the viewer [S1, S3, S4, unofficial]. It operates at the individual face level within a block, providing finer-grained culling than methods that discard entire blocks [S1, S3, unofficial].
+ 
+ ## How it works
+-The method computes a visibility mask for the six faces of a cube based on the relative position of the camera (eye) to the block.
++The method computes a visibility mask or list for the six faces of a cube based on the relative position of the camera to the block [S1, S3, unofficial].
+ 
+ **Inputs:**
+-- `eyePt`: Camera position in world space (float3).
+-- `worldI`: Inverse of the block's world transformation matrix (4x4).
+-- `cube_center`: Center of the voxel block in world space (float3).
+-- `cube_size`: Side length of the voxel block (float).
++- `eyePt`: Camera position in world space (float3) [S1, unofficial].
++- `worldI`: Inverse of the block's world transformation matrix (4x4) [S1, unofficial].
++- `cube_size`: Side length of the voxel block (float) [S3, unofficial].
+ 
+ **Outputs:**
+-- `visible_mask`: An integer bitmask where bit $i$ is set if face $i$ is visible.
+-- OR `face_list`: A list of indices of visible faces.
++- `visible_mask`: A 6-bit integer where bit $i$ is set if face $i$ is visible [S1, unofficial].
++- OR `face_list`: A list of indices of visible faces [S1, unofficial].
+ 
+ **Data Structures:**
+-- Face indices are typically mapped as: 0=Front, 1=Back, 2=Right, 3=Left, 4=Top, 5=Bottom.
+-- The visibility mask is a 6-bit integer.
++- Face indices are mapped as: 0=X−, 1=X+, 2=Y−, 3=Y+, 4=Z−, 5=Z+ [S1, unofficial].
++- The visibility mask is a 6-bit integer [S1, unofficial].
+ 
+ **Steps:**
++1. **Transform Eye Position:** Convert the camera position from world space to the block's local space: $\mathbf{e}_{local} = \text{Transform}(\mathbf{e}_{world}, \mathbf{M}_{world}^{-1})$ [S1, unofficial].
++2. **Define Face Properties:** Define the outward normal $\mathbf{n}_i$ and center offset $\mathbf{o}_i = \mathbf{n}_i \times (cube\_size / 2)$ for each face [S3, unofficial].
++3. **Compute Visibility:** For each face $i$, check if the camera lies in the half-space outside the face plane: $v_i = (\mathbf{e}_{local} - \mathbf{o}_i) \cdot \mathbf{n}_i > 0$ [S3, unofficial]. This is geometrically equivalent to checking if the camera is on the "outside" of the face plane [S3, unofficial].
++4. **Collect Results:** Set bit $i$ in `visible_mask` if $v_i$ is true, or append $i$ to `face_list` [S1, unofficial].
+ 
+-1.  **Transform Eye Position:** Convert the camera position from world space to the block's local space.
+-    $$ \mathbf{e}_{local} = \text{Transform}(\mathbf{e}_{world}, \mathbf{M}_{world}^{-1}) $$
+-    Where $\mathbf{e}_{world}$ is `eyePt` and $\mathbf{M}_{world}^{-1}$ is `worldI` [S1, unofficial].
+-
+-2.  **Define Face Properties:** Define the outward normal $\mathbf{n}_i$ and center offset for each of the six faces. Let $h = \text{cube\_size} / 2$.
+-    - Front: $\mathbf{n}_0 = (0, 0, 1)$, offset $(0, 0, h)$
+-    - Back: $\mathbf{n}_1 = (0, 0, -1)$, offset $(0, 0, -h)$
+-    - Right: $\mathbf{n}_2 = (-1, 0, 0)$, offset $(-h, 0, 0)$
+-    - Left: $\mathbf{n}_3 = (1, 0, 0)$, offset $(h, 0, 0)$
+-    - Top: $\mathbf{n}_4 = (0, 1, 0)$, offset $(0, h, 0)$
+-    - Bottom: $\mathbf{n}_5 = (0, -1, 0)$, offset $(0, -h, 0)$
+-    *(Note: Normal directions depend on the coordinate system convention. The above assumes a right-handed system where +Z is forward, consistent with [S3, unofficial]. [S1, unofficial] uses a bit-shifting logic that implies a specific axis mapping.)*
+-
+-3.  **Compute Face Centers:** Calculate the world-space center of each face.
+-    $$ \mathbf{c}_i = \mathbf{e}_{local} + \text{offset}_i $$
+-    *Correction:* The visibility test should be based on the vector from the face center to the camera, or equivalently, the dot product of the face normal and the vector from the camera to the face center. However, [S3, unofficial] explicitly states the test uses the dot product between the face center and its outward normal, which is geometrically equivalent to checking if the camera is in the half-space defined by the face plane *if* the origin is the camera. But [S3, unofficial] notes a pitfall: using the world origin (0,0,0) as the reference point for the dot product is incorrect for arbitrary camera positions [S3, unofficial]. The correct approach, implied by [S1, unofficial] and standard graphics practice [S4, unofficial], is to use the local eye position.
+-
+-    The correct visibility condition for face $i$ is:
+-    $$ v_i = (\mathbf{c}_i - \mathbf{e}_{local}) \cdot \mathbf{n}_i > 0 $$
+-    Since $\mathbf{c}_i - \mathbf{e}_{local}$ is just the offset vector, this simplifies to checking if the camera is on the "outside" of the face. However, a more robust method used in [S1, unofficial] checks the sign of the eye position component relative to the face's axis.
+-
+-    **Implementation from [S1, unofficial]:**
+-    The code in [S1, unofficial] uses a bit-manipulation approach on the local eye position:
+-    ```python
+-    # localSpaceEyePt is the eye position transformed to local space
+-    # face is an integer 0..5
+-    def is_face_visible(localSpaceEyePt, face):
+-        # Determine which axis and direction the face corresponds to
+-        # Mapping based on typical cube face bit packing:
+-        # 0: Front (+Z), 1: Back (-Z), 2: Right (-X), 3: Left (+X), 4: Top (+Y), 5: Bottom (-Y)
+-        # Note: The exact mapping depends on the engine's coordinate system.
++**Pseudocode:**
++```python
++def compute_face_visibility(eye_world, world_inv, cube_size):
++    half_size = cube_size / 2.0
++    # Transform eye to block-local space (standard matrix-vector multiplication)
++    eye_local = transform_vector(eye_world, world_inv)
++    
++    visible_mask = 0
++    for face in range(6):
++        # Map face index to axis and direction
++        axis_idx = face >> 1  # 0=X, 1=Y, 2=Z
++        direction = face & 1  # 0=negative axis, 1=positive axis
+         
+-        # Extract the relevant component of the eye position
+-        # face >> 1 gives the axis index (0=X, 1=Y, 2=Z)
+-        axis_index = face >> 1
+-        view_comp = localSpaceEyePt[axis_index]
++        # Get the relevant component of the local eye position
++        view_comp = eye_local[axis_idx]
+         
+-        # face & 0x1 determines the sign/direction
+-        # If bit 0 is 1, we check if view_comp > -1.0f (or < 1.0f depending on convention)
+-        # If bit 0 is 0, we check the opposite.
+-        # This logic effectively checks if the camera is "behind" the face plane relative to the block center.
+-        
+-        if (face & 0x1):
+-            return view_comp > -1.0f
++        # Check if the camera is outside the block's extent on this axis
++        # Face is visible if the camera is on the outside of the face plane
++        if direction:
++            visible = view_comp > -half_size
+         else:
+-            return view_comp < 1.0f
+-    ```
+-    *Note:* The thresholds `-1.0f` and `1.0f` in [S1, unofficial] suggest the block is centered at the origin with size 2 (i.e., $h=1$). For a general `cube_size`, the thresholds should be $\pm h$.
+-
+-    **Implementation from [S3, unofficial]:**
+-    ```python
+-    half_size = cube_size / 2
+-    normals = [
+-        (0, 0, 1),   # Front
+-        (0, 0, -1),  # Back
+-        (-1, 0, 0),  # Right
+-        (1, 0, 0),   # Left
+-        (0, 1, 0),   # Top
+-        (0, -1, 0)   # Bottom
+-    ]
+-    
+-    visible_faces = []
+-    for i, normal in enumerate(normals):
+-        # Face center in local space relative to block center
+-        # The vector from the camera (local origin) to the face center is:
+-        # offset = normal * half_size
+-        # The dot product of the face center (relative to camera) and normal determines visibility
+-        # If the camera is outside the face, the vector from camera to face center should have a positive projection onto the normal?
+-        # Actually, [S3, unofficial] formula: v_i = c_i . n_i > 0
+-        # If c_i is the face center in local space (where camera is at 0,0,0), then c_i = offset.
+-        # So we check if offset . normal > 0.
+-        # Since offset = normal * half_size, this is always half_size * (normal . normal) = half_size > 0.
+-        # This implies ALL faces are visible, which is incorrect.
+-        
+-        # Correction based on [S3, unofficial] pitfall: The source [S3, unofficial] notes that using the world origin as reference is incorrect.
+-        # The correct logic is to check if the camera is on the negative side of the face plane.
+-        # Plane equation: (P - c_i) . n_i = 0
+-        # Camera is at 0. So: (0 - c_i) . n_i < 0  =>  -c_i . n_i < 0  =>  c_i . n_i > 0
+-        # This again leads to all faces being visible if c_i is the face center.
+-        
+-        # The standard back-face culling for a block centered at origin with camera at E:
+-        # A face with normal N and center C is visible if (E - C) . N < 0
+-        # i.e., the camera is on the "inside" of the normal? No, the camera is on the "outside" if the dot product is negative?
+-        # Let's use the standard: Face is visible if the camera is in the half-space defined by the normal.
+-        # Vector from Face Center to Camera: V = E - C
+-        # If V . N > 0, the camera is in front of the face.
+-        
+-        # Let's stick to the [S1, unofficial] logic which is proven to work in a renderer.
+-        pass
+-    ```
+-
+-    **Unified Algorithm:**
+-    1. Transform eye position to local space: $\mathbf{e}_{local}$.
+-    2. For each face $i$ with normal $\mathbf{n}_i$ and center offset $\mathbf{o}_i$ (where $\mathbf{o}_i = \mathbf{n}_i \times \text{half\_size}$):
+-       - Compute vector from face center to camera: $\mathbf{v} = \mathbf{e}_{local} - \mathbf{o}_i$.
+-       - If $\mathbf{v} \cdot \mathbf{n}_i > 0$, the face is visible.
+-    3. Set bit $i$ in `visible_mask` if visible.
++            visible = view_comp < half_size
++            
++        if visible:
++            visible_mask |= (1 << face)
++    return visible_mask
++```
+ 
+ **Parameters:**
+ - `_CPU_CUBE_FACE_CULL_`: Compile-time macro controlling culling mode. 0 = disabled, 1 = mask, 2 = list [S1, unofficial].
+-- `GL_CULL_FACE`: OpenGL flag that can enable hardware back-face culling, but this method is a software pre-culling step [S4, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-- **Coordinate System Mismatch:** The definition of face normals and axis mapping must match the rendering engine's coordinate system. [S1, unofficial] and [S3, unofficial] use different conventions [S1, S3, unofficial].
+-- **Camera Inside Block:** If the camera is inside the block, all faces may be considered visible or none, depending on the implementation. The dot product test $\mathbf{v} \cdot \mathbf{n}_i > 0$ will correctly identify faces where the camera is "outside" the plane. If the camera is inside, $\mathbf{v}$ will point inwards, so $\mathbf{v} \cdot \mathbf{n}_i < 0$ for all faces, meaning no faces are visible. This is a known issue in voxel rendering; usually, the camera is assumed to be outside the voxel grid or the block is treated as solid.
+-- **Precision:** Floating-point precision errors near the block boundaries can cause flickering. Using a small epsilon in the comparison is recommended [G].
+-- **Incorrect Reference Point:** Using the world origin instead of the camera position for the dot product is a common bug, as noted in [S3, unofficial] [S3, unofficial].
++- **Coordinate System Mismatch:** The definition of face normals and axis mapping must match the rendering engine's coordinate system [S1, S3, unofficial].
++- **Camera Inside Block:** If the camera is inside the block, the dot product test $\mathbf{v} \cdot \mathbf{n}_i > 0$ will correctly identify faces where the camera is "outside" the plane. If the camera is strictly inside, $\mathbf{v}$ points inwards for all faces, so $\mathbf{v} \cdot \mathbf{n}_i < 0$ and no faces are marked visible [G]. This is a known issue in voxel rendering; usually, the camera is assumed to be outside the voxel grid or the block is treated as solid [G].
++- **Incorrect Reference Point:** Using the world origin $(0,0,0)$ as the reference point for the dot product instead of the camera position is a common bug that incorrectly marks faces visible only if they point away from the world origin [S3, unofficial].
++- **Precision:** Floating-point precision errors near block boundaries can cause flickering. Using a small epsilon in the comparison is recommended [G].
++
++## Subtopics
++
++### Chunk Face Visibility Culling
++Determines visible directions for a chunk of voxels by comparing the player's position against the chunk's bounding box [S5, unofficial]. It initializes six axis-aligned unit vectors representing outward directions [S5, unofficial]. If the player is inside the chunk bounds, all directions remain visible [S5, unofficial]. Otherwise, it removes directions pointing away from the player by comparing player coordinates to chunk bounds (e.g., removes $(1,0,0)$ if `player.x ≤ chunk.position.x`) and applies symmetric checks for the Y and Z axes [S5, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(1)$ per block, as it involves a fixed number of dot products (6) and vector transformations.
+-- **Memory Complexity:** $O(1)$, storing only a few temporary vectors and a bitmask.
+-- **Performance:** Reduces the number of triangles sent to the GPU by up to 50% for blocks viewed from the side, and up to 83% for blocks viewed from a corner (only 2 faces visible). The overhead of the calculation is negligible compared to the cost of vertex processing and rasterization [S2, S4, unofficial].
+-- **Strengths:** Simple to implement, effective for large voxel worlds, reduces GPU load.
+-- **Limitations:** Does not handle occlusion from other blocks (only back-face culling). Requires accurate camera position and block transformation.
++- **Time Complexity:** $O(1)$ per block, as it involves a fixed number of dot products (6) and vector transformations [S1, S3, unofficial].
++- **Memory Complexity:** $O(1)$, storing only a few temporary vectors and a bitmask [S1, unofficial].
++- **Strengths:** Simple to implement, effective for large voxel worlds, reduces GPU load by skipping back-facing geometry [S2, S4, unofficial].
++- **Limitations:** Does not handle occlusion from other blocks (only back-face culling) [S4, unofficial]. Requires accurate camera position and block transformation [S1, unofficial].
+ 
+ ## Background
+-Back-face culling is a fundamental technique in computer graphics, dating back to the early days of 3D rendering [S4, unofficial]. In the context of voxel rendering, it was adopted to optimize the high triangle counts associated with naive voxel meshing. It is commonly implemented in voxel games and engines, often in conjunction with frustum culling and greedy meshing [S2, unofficial]. The specific implementation details in [S1, unofficial] are from a DirectX 12 fluid simulation project, while [S3, unofficial] provides a Python-based educational implementation.
++Back-face culling is a fundamental technique in computer graphics used to avoid rendering geometry facing away from the user [S4, unofficial]. In the context of voxel rendering, it was adopted to optimize the high triangle counts associated with naive voxel meshing [S2, unofficial]. The specific implementation details in [S1, unofficial] are from a DirectX 12 fluid simulation project, while [S3, unofficial] provides a Python-based educational implementation and [S5, unofficial] extends the concept to chunk-level culling.
+ 
+ ## Sources
+@@ -147,3 +83,4 @@
+ [S2] Optimising Voxel World Rendering, https://gamedev.stackexchange.com/questions/117398/optimising-voxel-world-rendering, fetched 2026-10-27 (unofficial)
+ [S3] anb2473/Python-Voxel-Rendering-Engine, https://github.com/anb2473/Python-Voxel-Rendering-Engine, fetched 2026-10-27 (unofficial)
+-[S4] New Techniques for Out-Of-Core Visualization of Large Datasets, https://ctsilva.github.io/thesis/wagner-correa-thesis.pdf, fetched 2026-10-30 (unofficial)+[S4] New Techniques for Out-Of-Core Visualization of Large Datasets, https://ctsilva.github.io/thesis/wagner-correa-thesis.pdf, fetched 2026-10-30 (unofficial)
++[S5] edgorman/Voxel-Engine, https://github.com/edgorman/Voxel-Engine, fetched 2026-10-27 (unofficial)

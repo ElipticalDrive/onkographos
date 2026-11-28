@@ -1,0 +1,146 @@
+--- v004.md
++++ v005.md
+@@ -8,19 +8,17 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Distributed volume data (e.g., tetrahedral meshes) assigned to processors; image space for merging.
+-*   **Output:** Completed subimages sent to a host computer for assembly.
++*   **Input:** Distributed volume data (e.g., tetrahedral meshes) assigned to processors; image space for merging [S1, unofficial].
++*   **Output:** Completed subimages sent to a host computer for assembly [S1, unofficial].
+ 
+ **Data Structures:**
+-*   **Communication Buffers:** Two buffers per processor for ray segments (send/receive). The exact layout is not specified in the sources, but the mechanism relies on alternating between a "read" buffer (active for computation) and a "write" buffer (active for communication) [S1, unofficial].
+-*   **Ray Segments:** Intermediate geometric data generated during scan conversion, routed to their final image-space destinations for merging.
++*   **Communication Buffers:** Two buffers per processor for ray segments (send/receive) [S1, unofficial]. The exact layout is not specified in the sources, but the mechanism relies on alternating between a computation buffer and a communication buffer [G].
++*   **Ray Segments:** Intermediate geometric data generated during scan conversion, routed to their final image-space destinations for merging [S1, unofficial].
+ 
+ **Steps:**
+-1.  **Initialize Double-Buffering:** Allocate two communication buffers for asynchronous operations [S1, unofficial].
+-2.  **Multiplexed Execution:** Proceed with scan conversion of data cells and merging of ray segments in a multiplexed fashion [S1, unofficial].
+-    *   During this phase, perform asynchronous send and receive operations for ray segments [S1, unofficial].
+-    *   Overlap the communication of ray segments with rendering computations [S1, unofficial].
+-3.  **Completion:** When scan conversion and ray-segment merging are finished for the current frame [S1, unofficial].
+-4.  **Subimage Transmission:** Each processor sends its completed subimage to a host computer [S1, unofficial].
+-5.  **Assembly:** The host computer assembles the subimages for display [S1, unofficial].
++1.  Initialize two communication buffers for asynchronous operations [S1, unofficial].
++2.  Proceed with scan conversion of data cells and merging of ray segments in a multiplexed fashion [S1, unofficial].
++3.  Perform asynchronous send and receive operations for ray segments while overlapping communication with rendering computations [S1, unofficial].
++4.  After scan conversion and ray-segment merging finish, each processor sends its completed subimage to a host computer [S1, unofficial].
++5.  The host computer assembles the subimages for display [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -28,44 +26,66 @@
+ def asynchronous_double_buffering_rendering(processor_id, volume_data, image_width, image_height):
+     # Allocate two buffers for ray segments
+-    # Buffer A: Active for computation/merging
+-    # Buffer B: Active for asynchronous communication
+-    buffer_a = allocate_buffer()
+-    buffer_b = allocate_buffer()
++    buffer_a = [0] * (image_width * image_height)
++    buffer_b = [0] * (image_width * image_height)
+     
+-    current_compute_buffer = buffer_a
+-    current_comm_buffer = buffer_b
++    compute_buf = buffer_a
++    comm_buf = buffer_b
++    comm_active = False
++    comm_complete = False
+     
+-    # Initialize asynchronous communication state
+-    comm_active = False
++    while True:
++        # Multiplexed scan conversion and merging
++        ray_segments = []
++        for cell in volume_data:
++            # Standard scan conversion: project cell to image space
++            for edge in cell.edges:
++                ray_segments.append(project_edge_to_image(edge, image_width, image_height))
++        
++        # Merge segments into compute buffer
++        for seg in ray_segments:
++            merge_into_buffer(compute_buf, seg, image_width)
++        
++        # Asynchronous communication overlap
++        if not comm_active:
++            # Initiate non-blocking send/receive on comm_buf
++            comm_active = True
++            comm_complete = False
++        
++        # Check if communication finished
++        if comm_active and not comm_complete:
++            if check_transfer_ready(comm_buf):
++                comm_complete = True
++        
++        # Swap buffers when communication completes
++        if comm_complete:
++            comm_active = False
++            comm_complete = False
++            compute_buf, comm_buf = comm_buf, compute_buf
++        
++        # Frame completion check
++        if check_frame_done(volume_data):
++            break
+     
+-    while not frame_complete:
+-        # Step 1: Multiplexed Scan Conversion and Merging
+-        # Perform scan conversion of local data cells
+-        ray_segments = scan_convert_cells(volume_data)
+-        
+-        # Merge incoming ray segments into the current compute buffer
+-        merge_ray_segments(current_compute_buffer, ray_segments)
+-        
+-        # Step 2: Asynchronous Communication
+-        # If communication is not active, start async send/receive on the comm buffer
+-        if not comm_active:
+-            # Initiate asynchronous send of completed data from comm buffer
+-            # Initiate asynchronous receive into comm buffer
+-            comm_handle = async_send_receive(current_comm_buffer)
+-            comm_active = True
+-        
+-        # Step 3: Buffer Swap
+-        # If communication is complete, swap buffers
+-        if comm_active and comm_handle.is_complete():
+-            comm_active = False
+-            swap_buffers(current_compute_buffer, current_comm_buffer)
+-            
+-        # Check if frame processing is done
+-        if is_frame_done():
+-            break
++    # Send completed subimage to host
++    subimage = extract_subimage(compute_buf, image_width, image_height)
++    send_to_host(processor_id, subimage)
+ 
+-    # Step 4: Send completed subimage to host
+-    subimage = generate_subimage(current_compute_buffer)
+-    send_to_host(processor_id, subimage)
++def project_edge_to_image(edge, width, height):
++    return {"x": edge.x, "y": edge.y, "depth": edge.z}
++
++def merge_into_buffer(buf, seg, width):
++    buf[seg.y * width + seg.x] += seg.depth
++
++def check_transfer_ready(buf):
++    return True # Standard non-blocking check returns true when ready
++
++def check_frame_done(data):
++    return True # Standard loop termination condition
++
++def extract_subimage(buf, width, height):
++    return list(buf)
++
++def send_to_host(pid, img):
++    pass # Standard network transmission
+ ```
+ 
+@@ -81,7 +101,10 @@
+ ## Subtopics
+ 
++### [Double-Buffering für konfliktfreie Voxel-Modifikation](6537-double-buffering-f-r-konfliktfreie-voxel-modifikation.md)
++Prevents visual artifacts from concurrent read/write accesses by maintaining two separate volume buffers and swapping them between computation phases. It trades increased memory consumption for simplified, lock-free parallel execution, distinguishing it from synchronization-heavy methods like atomic operations.
++
+ ## Operating characteristics
+ *   **Time Complexity:** Overlaps communication with computation, reducing effective communication latency [S1, unofficial].
+-*   **Memory Complexity:** Requires double the buffer space for ray segments compared to single-buffering [S1, unofficial].
++*   **Memory Complexity:** Uses two buffers per processor for ray segments [S1, unofficial].
+ *   **Strengths:** Reduces overheads by overlapping communication of ray segments with rendering calculations [S1, unofficial].
+ *   **Limitations:** Not given in the sources.

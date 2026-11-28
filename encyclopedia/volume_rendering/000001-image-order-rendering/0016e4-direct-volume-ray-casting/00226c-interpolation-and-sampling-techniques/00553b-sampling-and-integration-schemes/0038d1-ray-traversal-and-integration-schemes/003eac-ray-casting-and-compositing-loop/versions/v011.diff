@@ -1,0 +1,203 @@
+--- v010.md
++++ v011.md
+@@ -4,122 +4,118 @@
+ 
+ ## Overview
+-Ray Casting and Compositing Loop is the fundamental image-order rendering technique for direct volume rendering, where scalar volume data is sampled along rays and composited directly to the screen without intermediate surface extraction [S1, unofficial]. It differs from iso-surface methods by mapping scalar values directly to color and opacity via a transfer function, and from advanced traversal schemes by typically using a fixed-step or simple adaptive integration loop [S1, S2, unofficial].
++Ray Casting and Compositing Loop is a single-pass GPU method that renders volume data using front-to-back compositing by sampling scalar values and mapping them directly to color and opacity without explicit surface extraction [S1, unofficial]. It solves the problem of direct visualization of volumetric data by integrating light transport along rays, differing from [IsoSurface Ray Marching](2788-ray-marching-and-discretization.md) which detects zero crossings and computes normals, and from [Monte Carlo Path Tracing for Volume Rendering](4980-monte-carlo-path-tracing-for-volume-rendering.md) which handles complex light transport stochastically [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A 3D texture volume (`u_Volume3DSampler`), camera position (`u_cameraPosition`), step size (`u_stepSize`), and interpolated 3D texture coordinates for the pixel (`oTexCoords`) [S1, unofficial].
+-*   **Output:** A `vec4` fragment color (`FragColor`) containing the accumulated RGB color and opacity [S1, unofficial].
++*   **Inputs:** `oTexCoords` (smooth `vec3` texture coordinates for the ray origin), `u_Volume3DSampler` (`sampler3D` for the volume texture), `u_cameraPosition` (`vec3`), `u_stepSize` (`vec3` or scalar step size).
++*   **Outputs:** `FragColor` (`vec4` representing the final RGBA color).
+ 
+ **Data Structures:**
+-*   `oTexCoords`: `vec3`, smooth interpolated texture coordinates representing the ray origin in texture space [S1, unofficial].
+-*   `u_Volume3DSampler`: `sampler3D`, the volume data texture [S1, unofficial].
+-*   `u_cameraPosition`: `vec3`, the camera's position in world/texture space [S1, unofficial].
+-*   `u_stepSize`: `vec3`, the uniform step vector for ray marching [S1, unofficial].
+-*   `FragColor`: `vec4`, the output buffer storing accumulated color (RGB) and opacity (A) [S1, unofficial].
++*   `FragColor`: Accumulates the final color and opacity. Initialized to `(0.0, 0.0, 0.0, 0.0)`.
++*   `dataPosition`: Current position along the ray in texture coordinate space.
++*   `directionStep`: The vector increment for each step.
++
++**Steps:**
++1.  **Initialize Ray Origin:** Set `dataPosition` to `oTexCoords` [S1, unofficial].
++2.  **Calculate Ray Direction:** Compute `geometryDirection` by subtracting 0.5 from `oTexCoords`, subtracting `u_cameraPosition`, and normalizing the result [S1, unofficial].
++3.  **Calculate Step Vector:** Compute `directionStep` by multiplying `geometryDirection` with the uniform `u_stepSize` [S1, unofficial].
++4.  **Iterate Samples:** Loop `i` from 0 to `MAX_SAMPLES` (typically 300) [S1, unofficial]:
++    a.  **Sample Volume:** Read the scalar value `fSample` from `u_Volume3DSampler` at `dataPosition` [S1, unofficial].
++    b.  **Calculate Contribution:** Compute `prev_alpha = fSample * (1.0 - FragColor.a)` [S1, unofficial]. *Note: The source notes state `prev_alpha = fSample - (fSample * FragColor.a)`, which is algebraically equivalent to `fSample * (1.0 - FragColor.a)` assuming `fSample` represents the opacity $\alpha$ at the sample point.*
++    c.  **Update Color:** Update `FragColor.rgb` using the front-to-back blending equation:
++        $$ \text{FragColor.rgb} = \text{prev\_alpha} \times \text{vec3}(fSample) + \text{FragColor.rgb} \times (1.0 - \text{prev\_alpha}) $$
++        *Note: The source notes state `FragColor.rgb = prev_alpha * vec3(fSample) + FragColor.rgb`. This implies `fSample` is mapped to color before this step or `vec3(fSample)` is a placeholder for the color contribution $C_i$. Standard front-to-back compositing uses $C_{out} = C_i \alpha_i (1 - \alpha_{acc}) + C_{acc} (1 - \alpha_i)$. The source formula `prev_alpha * vec3(fSample) + FragColor.rgb` is incomplete as it lacks the attenuation of the accumulated color by the new sample's opacity. However, adhering strictly to the source note [S1, unofficial], the update is:*
++        $$ \text{FragColor.rgb} = \text{prev\_alpha} \times \text{Color}(fSample) + \text{FragColor.rgb} $$
++        *And Alpha:*
++        $$ \text{FragColor.a} = \text{FragColor.a} + \text{prev\_alpha} $$
++        *Wait, the source note says: `Update RGB: FragColor.rgb = prev_alpha * vec3(fSample) + FragColor.rgb`. Update Alpha: `FragColor.a += prev_alpha`. This is not standard compositing. Standard compositing is $C_{out} = C_{in} + C_{sample} \alpha_{sample} (1 - \alpha_{in})$. The source note's alpha update `FragColor.a += prev_alpha` is also non-standard if `prev_alpha` is derived from `fSample`. Let's look closer at [S1, unofficial]: `prev_alpha = fSample - (fSample * FragColor.a)`. This simplifies to `fSample * (1 - FragColor.a)`. If `fSample` is the opacity $\alpha_i$, then `prev_alpha` is the contribution to opacity. The color update `FragColor.rgb = prev_alpha * vec3(fSample) + FragColor.rgb` suggests `vec3(fSample)` is the color. This is a simplified or potentially erroneous implementation in the source. I will write the pseudocode exactly as the source describes, noting the deviation from standard physics if necessary, but the prompt requires implementing from the article. I will follow the source's explicit steps.*
++    d.  **Advance Position:** Update `dataPosition += directionStep` [S1, unofficial].
++    e.  **Check Boundary Exit:** If `dot(sign(dataPosition - texMin), sign(texMax - dataPosition)) < 3.0`, break loop [S1, unofficial]. This checks if the ray has exited the volume bounds.
++    f.  **Check Opacity Termination:** If `FragColor.a > 0.99`, break loop [S1, unofficial].
+ 
+ **Parameters:**
+-*   `MAX_SAMPLES`: Integer constant defining the maximum number of ray march steps. Value: 300 [S1, unofficial].
+-*   Early Ray Termination (ERT) Threshold: Float value for opacity. Value: 0.99 [S2, unofficial].
+-
+-**Algorithm Steps:**
+-1.  **Ray Initialization:** Calculate the ray direction by subtracting 0.5 from `oTexCoords`, subtracting `u_cameraPosition`, and normalizing the result [S1, unofficial]. Initialize the current position `dataPosition` to `oTexCoords` [S1, unofficial].
+-2.  **Loop:** Iterate `i` from 0 to `MAX_SAMPLES` [S1, unofficial].
+-3.  **Boundary Check:** Before sampling, check if `dataPosition` has exited the volume boundary. A common implementation checks if the dot product of the signs of the distance to min/max bounds is less than 3.0: `if dot(sign(dataPosition - texMin), sign(texMax - dataPosition)) < 3.0, break` [S1, unofficial].
+-4.  **Sampling:** Sample the volume at `dataPosition` to get the scalar value `fSample` [S1, unofficial].
+-5.  **Classification:** Map `fSample` to color and opacity. In the basic single-pass GPU implementation described, the scalar value is often used directly as the color contribution if no explicit transfer function is applied in the shader, or mapped via a texture lookup [S1, unofficial]. The opacity contribution is calculated as `prev_alpha = fSample * (1 - FragColor.a)` [S1, unofficial]. *Note: Source [S1, unofficial] code snippet shows `prev_alpha = fSample - (fSample * FragColor.a)`, which simplifies to `fSample * (1 - FragColor.a)`.*
+-6.  **Compositing:** Update the accumulated color and opacity using front-to-back compositing [S1, unofficial]:
+-    *   `FragColor.rgb = prev_alpha * vec3(fSample) + FragColor.rgb` [S1, unofficial].
+-    *   `FragColor.a += prev_alpha` [S1, unofficial].
+-7.  **Termination Check:** If `FragColor.a > 0.99`, break the loop [S1, unofficial].
+-8.  **Advancement:** Advance `dataPosition` by `directionStep` (calculated as `geomatryDirection * u_stepSize`) [S1, unofficial].
++*   `MAX_SAMPLES`: Integer, default 300 [S1, unofficial].
++*   Early ray termination threshold: 0.99 [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def ray_casting_loop(oTexCoords, u_cameraPosition, u_Volume3DSampler, u_stepSize, texMin, texMax):
+-    # 1. Initialize Ray
+-    # Calculate geometry direction
+-    raw_dir = oTexCoords - 0.5
+-    geometry_direction = normalize(raw_dir - u_cameraPosition)
++def ray_casting_loop(oTexCoords, u_cameraPosition, u_stepSize, u_Volume3DSampler, texMin, texMax, MAX_SAMPLES=300):
++    # Initialize output
++    FragColor = vec4(0.0, 0.0, 0.0, 0.0)
+     
+-    # Calculate step vector
+-    direction_step = geometry_direction * u_stepSize
++    # 1. Initialize Ray Origin
++    dataPosition = oTexCoords
+     
+-    # Initialize position
+-    data_position = oTexCoords
++    # 2. Calculate Ray Direction
++    # Note: Source says subtract 0.5 from oTexCoords, then subtract camera pos, then normalize
++    raw_dir = oTexCoords - vec3(0.5) - u_cameraPosition
++    geometryDirection = normalize(raw_dir)
+     
+-    # Initialize output
+-    frag_color = vec4(0.0, 0.0, 0.0, 0.0)
++    # 3. Calculate Step Vector
++    directionStep = geometryDirection * u_stepSize
+     
+-    # 2. Loop
+-    for i in range(300): # MAX_SAMPLES
+-        # 3. Boundary Check
+-        # Check if inside volume bounds
+-        dist_min = data_position - texMin
+-        dist_max = texMax - data_position
++    # 4. Loop
++    for i in range(MAX_SAMPLES):
++        # a. Sample Volume
++        # fSample is the scalar value at dataPosition
++        fSample = texture(u_Volume3DSampler, dataPosition).r
+         
+-        # If any component is negative, we are outside
+-        # Using the dot product of signs method from source
+-        sign_min = sign(dist_min)
+-        sign_max = sign(dist_max)
++        # b. Calculate Contribution
++        # Source: prev_alpha = fSample - (fSample * FragColor.a)
++        prev_alpha = fSample * (1.0 - FragColor.a)
+         
++        # c. Update RGB
++        # Source: FragColor.rgb = prev_alpha * vec3(fSample) + FragColor.rgb
++        # Note: This assumes fSample is also used as color intensity or mapped previously.
++        # Standard compositing would be: FragColor.rgb += prev_alpha * color_sample * (1.0 - FragColor.a)
++        # We follow the source note strictly.
++        FragColor.rgb = prev_alpha * vec3(fSample) + FragColor.rgb
++        
++        # d. Update Alpha
++        # Source: FragColor.a += prev_alpha
++        FragColor.a = FragColor.a + prev_alpha
++        
++        # e. Advance Position
++        dataPosition = dataPosition + directionStep
++        
++        # f. Check Boundary Exit
++        # Source: dot(sign(dataPosition - texMin), sign(texMax - dataPosition)) < 3.0
++        sign_min = sign(dataPosition - texMin)
++        sign_max = sign(texMax - dataPosition)
+         if dot(sign_min, sign_max) < 3.0:
+             break
+             
+-        # 4. Sampling
+-        f_sample = texture(u_Volume3DSampler, data_position).r # Assuming scalar volume
+-        
+-        # 5. Classification & Compositing
+-        # Calculate contribution based on current accumulated opacity
+-        prev_alpha = f_sample * (1.0 - frag_color.a)
+-        
+-        # Update RGB
+-        frag_color.rgb = prev_alpha * vec3(f_sample) + frag_color.rgb
+-        
+-        # Update Alpha
+-        frag_color.a += prev_alpha
+-        
+-        # 6. Termination Check
+-        if frag_color.a > 0.99:
++        # g. Check Opacity Termination
++        if FragColor.a > 0.99:
+             break
+             
+-        # 7. Advancement
+-        data_position += direction_step
+-        
+-    return frag_color
++    return FragColor
+ ```
+-
+-**Edge Cases and Pitfalls:**
+-*   **Boundary Intersection:** The method relies on simple bounding box checks. For non-convex volumes, this may include empty space or exclude valid data if the bounding box is not tight [S2, unofficial].
+-*   **Precision:** Floating-point precision in texture coordinate calculations can lead to sampling artifacts if not handled carefully [G].
+-*   **Step Size:** A fixed `u_stepSize` may lead to aliasing if too large or excessive computation if too small [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Wavelet-Assisted Volume Ray Casting](10893-wavelet-assisted-volume-ray-casting.md)
+-Uses wavelet coefficients to determine adaptive sampling distances, solving the cost of standard ray casting by skipping samples via an index volume.
++Wavelet-Assisted Volume Ray Casting is an acceleration technique for direct volume rendering that uses wavelet coefficients to detect local frequency content and determine an adaptive sampling distance along each ray. It solves the problem of excessive computational cost in standard ray casting by avoiding on-the-fly reconstruction from the wavelet domain; instead, it pre-computes an "index volume" that guides the traversal of the original spatial volume. Unlike Westermann's method, which traverses wavelet coefficients directly, this approach uses a flat index volume to skip samples, combining spatial domain rendering with wavelet-based frequency analysis. [Wavelet-Assisted Volume Ray Casting](10893-wavelet-assisted-volume-ray-casting.md)
+ 
+ ### [Accumulative Rendering](14504-accumulative-rendering.md)
+-Combines previous rendering output with new slices for incremental data, solving latency in live imaging.
++Accumulative rendering is a specialized rendering mode designed for scenarios where the input dataset is acquired incrementally, such as in live microscopy or intraoperative imaging. It solves the latency problem of conventional volume rendering by allowing immediate visualization of new data without reprocessing the entire volume. Unlike standard ray casting which requires the full dataset to be present before rendering can begin, accumulative rendering combines the previous rendering output directly with a newly acquired slice, limiting computational load to only two slices regardless of the total dataset size. [Accumulative Rendering](14504-accumulative-rendering.md)
+ 
+ ### [Template-based Ray-Casting](14511-template-based-ray-casting.md)
+-Hardware-accelerated technique processing voxels in planar slices, eliminating view-dependent artifacts.
++Template-based Ray-Casting is a hardware-accelerated direct volume rendering technique that optimizes memory access patterns by processing voxels in planar slices parallel to the image plane. It distinguishes itself from shear-warp methods by performing full tri-linear interpolation and supporting sub-pixel ray origins, thereby eliminating view-dependent artifacts during base-plane switches. [Template-based Ray-Casting](14511-template-based-ray-casting.md)
+ 
+ ### [Resampling Point Shading](14923-resampling-point-shading.md)
+-Improves shading accuracy by applying lighting at resampling points, avoiding Mach band artifacts.
+-
+-### Multi-Cast / Super-Sampling Ray Casting
+-Instead of sampling one ray per pixel, this variant samples 4 rays per pixel to improve image quality by reducing aliasing [S3, unofficial]. It produces better image quality but takes four times longer to render [S3, unofficial].
++Resampling Point Shading is a volume rendering technique that improves shading accuracy by applying the lighting model directly to resampling points using interpolated normal vectors and opacity-weighted color interpolation, thereby avoiding Mach band artifacts and interface color confusion. It sets itself apart from its sibling [Accumulative Rendering](14504-accumulative-rendering.md) and [Template-based Ray-Casting](14511-template-based-ray-casting.md) by calculating normals and lighting at the resampling point itself rather than interpolating pre-shaded vertex colors or lighting results, which preserves microstructure details and physical color consistency at media interfaces. [Resampling Point Shading](14923-resampling-point-shading.md)
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear with respect to the number of samples per ray and the number of pixels. $O(N \cdot P)$ where $N$ is samples per ray and $P$ is pixel count [S1, unofficial].
+-*   **Memory Complexity:** Low, primarily storing the volume texture and frame buffer [S1, unofficial].
+-*   **Performance:** The basic loop is efficient on GPUs due to its simplicity and parallelizability [S1, unofficial]. However, fixed step sizes can lead to over-sampling in transparent regions or under-sampling in dense regions [S1, unofficial].
+-*   **Strengths:** Simple to implement, hardware-friendly, supports direct scalar-to-color mapping [S1, unofficial].
+-*   **Limitations:** Fixed step sizes may not adapt to data density; boundary checks are simplistic [S1, S2, unofficial].
+-*   **When to Use:** Real-time visualization of scalar volumes where performance is critical and data density is relatively uniform [S1, unofficial].
+-*   **When Not to Use:** When high accuracy in complex, non-convex boundaries is required, or when significant performance optimization via adaptive sampling is needed [S2, unofficial].
++*   **Time Complexity:** $O(N \cdot R)$, where $N$ is the number of pixels and $R$ is the number of samples per ray (bounded by `MAX_SAMPLES` or early termination).
++*   **Memory Complexity:** $O(V)$ for the volume texture, where $V$ is the number of voxels.
++*   **Performance:** Single-pass GPU implementation allows for real-time rendering on modern hardware. Early ray termination (threshold 0.99) significantly reduces average sample count for opaque regions [S1, unofficial].
++*   **Strengths:** Simple implementation, direct scalar-to-color mapping, no need for surface extraction, efficient on GPUs.
++*   **Limitations:** Fixed step size can lead to aliasing or missed features if not adaptive; early termination may cause artifacts in transparent regions; standard compositing assumes homogeneous media.
++*   **When to use:** Real-time visualization of scalar volumes where surface extraction is not required.
++*   **When not to use:** When high-fidelity surface rendering is needed (use [IsoSurface Ray Marching](2788-ray-marching-and-discretization.md)) or when complex light transport (subsurface scattering, caustics) is required (use [Monte Carlo Path Tracing for Volume Rendering](4980-monte-carlo-path-tracing-for-volume-rendering.md)).
+ 
+ ## Background
+-The method originates from early direct volume rendering techniques, popularized by GPU implementations in the mid-2000s [S1, unofficial]. It is a foundational technique in computer graphics, often taught as the basic approach to volume rendering before introducing more complex traversal or shading methods [S3, unofficial].
++The method originates from standard direct volume rendering techniques implemented on GPUs. The specific implementation details, including the boundary check logic and early termination threshold, are documented in the "Volumetric Render Engine" GitHub repository [S1, unofficial]. The use of preintegration tables and MLS (Moving Least Squares) for robust evaluation is discussed in "Volume MLS Ray Casting" [S2, unofficial]. The concept of multi-cast/super-sampling for quality improvement is noted in "Introduction to volume rendering" [S3, unofficial].
+ 
+ ## Sources

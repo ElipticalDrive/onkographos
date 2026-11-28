@@ -1,0 +1,213 @@
+--- v001.md
++++ v002.md
+@@ -4,8 +4,8 @@
+ 
+ ## Overview
+-This method denoises Monte Carlo volume rendering images by combining temporal reprojection with a learned kernel prediction network and fusing the result with the background using an alpha map. It addresses the specific challenge of preserving semi-transparent structures and sharp edges in volumetric data while maintaining real-time performance. Unlike direct prediction methods (e.g., FDAE) that rely solely on pixel-wise regression, this approach generates weighted combinations of neighboring samples, offering better structural preservation at the cost of struggling with extreme high-intensity outliers [S1, unofficial].
++This method denoises Monte Carlo volume rendering images by combining temporal reprojection with a learned kernel prediction network and fusing the result with the background using an alpha map [S1, unofficial]. It addresses the specific challenge of preserving semi-transparent structures and sharp edges in volumetric data while maintaining real-time performance [S1, unofficial]. Unlike direct prediction methods (e.g., FDAE) that rely solely on pixel-wise regression, this approach generates weighted combinations of neighboring samples, offering better structural preservation at the cost of struggling with extreme high-intensity outliers [S1, unofficial].
+ 
+ ## How it works
+-The method operates on image-order rendering outputs. It takes the current noisy frame, the previous frame's denoised data, and the background color as inputs, producing a final denoised radiance image.
++The method operates on image-order rendering outputs [S1, unofficial]. It takes the current noisy frame, the previous frame's denoised data, and the background color as inputs, producing a final denoised radiance image [S1, unofficial].
+ 
+ ### Data Structures and Layout
+@@ -29,5 +29,5 @@
+ 
+ **Training Loss Functions:**
+-The model is trained using a weighted sum of gradient loss and Mean Squared Error (MSE) loss.
++The model is trained using a weighted sum of gradient loss and Mean Squared Error (MSE) loss [S1, unofficial].
+ 
+ Gradient Loss $L_{grad}(I,R)$:
+@@ -75,4 +75,70 @@
+ ### Pseudocode
+ ```python
++import math
++
++class Image:
++    def __init__(self, width, height, channels=3):
++        self.width = width
++        self.height = height
++        self.channels = channels
++        self.data = [[[0.0] * channels for _ in range(width)] for _ in range(height)]
++    def get(self, x, y):
++        return self.data[y][x]
++    def set(self, x, y, val):
++        self.data[y][x] = val
++
++def reproject(src_img, camera_transform, depth_map):
++    # [G] Standard inverse reprojection: maps each target pixel to source coordinates
++    # using the camera projection matrix and depth buffer, then samples with clamping.
++    dst = Image(src_img.width, src_img.height, src_img.channels)
++    for y in range(dst.height):
++        for x in range(dst.width):
++            # 1. Unproject (x, y, depth) to world space using inverse camera matrix
++            # 2. Transform to previous frame's camera space
++            # 3. Project to previous frame's 2D coordinates (u, v)
++            # 4. Clamp (u, v) to [0, width-1] x [0, height-1]
++            # 5. Bilinear interpolation from src_img
++            u, v = 0.0, 0.0 # Placeholder for exact matrix math [G]
++            u = max(0, min(dst.width - 1, u))
++            v = max(0, min(dst.height - 1, v))
++            dst.set(x, y, src_img.get(int(u), int(v)))
++    return dst
++
++def predict_kernels(current_frame, historical_frame):
++    # [G] The source describes a learned kernel prediction network trained end-to-end.
++    # The exact architecture is not provided, so we model it as a function that
++    # outputs a weight tensor for a 3x3 neighborhood based on input features.
++    kernel_size = 3
++    weights = [[[0.0] * current_frame.channels for _ in range(kernel_size)] for _ in range(kernel_size)]
++    # In practice, a convolutional neural network processes current_frame and historical_frame
++    # to generate these weights. Here we return a uniform kernel as a structural placeholder.
++    return weights
++
++def weighted_filter(current_frame, historical_frame, kernels):
++    # Pixel-wise weighted filtering on historical reprojection and current frame
++    result = Image(current_frame.width, current_frame.height, current_frame.channels)
++    kernel_size = len(kernels)
++    half = kernel_size // 2
++    for y in range(current_frame.height):
++        for x in range(current_frame.width):
++            acc = [0.0] * current_frame.channels
++            total_weight = 0.0
++            for ky in range(kernel_size):
++                for kx in range(kernel_size):
++                    sy = y + ky - half
++                    sx = x + kx - half
++                    sy = max(0, min(current_frame.height - 1, sy))
++                    sx = max(0, min(current_frame.width - 1, sx))
++                    w = kernels[ky][kx][0] # Use first channel weight as scalar
++                    c_curr = current_frame.get(sx, sy)
++                    c_hist = historical_frame.get(sx, sy)
++                    # Blend current and historical based on kernel weights
++                    for c in range(current_frame.channels):
++                        acc[c] += w * (0.5 * c_curr[c] + 0.5 * c_hist[c])
++                    total_weight += w
++            for c in range(current_frame.channels):
++                result.set(x, y, acc[c] / total_weight if total_weight > 0 else 0.0)
++    return result
++
+ def spatiotemporal_denoising_with_background_fusion(
+     current_noisy_frame: Image,
+@@ -80,83 +146,34 @@
+     alpha_map: Image,
+     background: Image,
+-    camera_transform: Matrix,
++    camera_transform: list,
+     depth_map: Image
+ ) -> Image:
+-    """
+-    Denoises a volume rendering frame using spatiotemporal reprojection and background fusion.
+-    
+-    Args:
+-        current_noisy_frame: The current noisy rendered image.
+-        previous_denoised_frame: The denoised image from the previous frame.
+-        alpha_map: Transparency map for the volume data.
+-        background: Background color/image.
+-        camera_transform: Transformation matrix for reprojection.
+-        depth_map: Depth information for reprojection.
+-        
+-    Returns:
+-        The final denoised image.
+-    """
+-    
+     # Step 1: Reprojection
+-    # Reproject previous denoised frame to current frame coordinates
+-    # This involves transforming pixels using camera_transform and depth_map
+     reprojected_frame = reproject(previous_denoised_frame, camera_transform, depth_map)
+-    
++
+     # Step 2: Kernel Prediction
+-    # Predict spatial and temporal weight kernels using a neural network
+-    # Inputs: current_noisy_frame, reprojected_frame
+-    # Output: weight_kernels (spatial and temporal weights)
+     weight_kernels = predict_kernels(current_noisy_frame, reprojected_frame)
+-    
++
+     # Step 3: Weighted Filtering
+-    # Apply predicted kernels to blend current and historical data
+-    intermediate_denoised = weighted_filter(
+-        current_noisy_frame, 
+-        reprojected_frame, 
+-        weight_kernels
+-    )
+-    
+-    # Step 4: Failure Handling (Optional/Implicit in some implementations)
+-    # Check for rapid motion or high transparency failure rates
+-    # If failure detected, replace intermediate_denoised with current_noisy_frame
+-    # For this implementation, we assume the kernel prediction handles 
+-    # or the user handles the fallback logic described in the source.
+-    # [G] Guard: Ensure reprojection validity before filtering.
+-    
++    intermediate_denoised = weighted_filter(current_noisy_frame, reprojected_frame, weight_kernels)
++
++    # Step 4: Failure Handling
++    # If rapid motion, illumination change, or high transparency detected,
++    # copy current frame to replace historical frame value.
++    # [G] Implementation: Check temporal correlation or transparency threshold.
++    # For this pseudocode, we assume the kernel prediction or a guard handles it.
++    # If failure: intermediate_denoised = current_noisy_frame
++
+     # Step 5: Background Fusion
+-    # Blend intermediate denoised data with background using alpha map
+-    final_denoised = alpha_map * intermediate_denoised + (1 - alpha_map) * background
+-    
++    final_denoised = Image(current_noisy_frame.width, current_noisy_frame.height, current_noisy_frame.channels)
++    for y in range(current_noisy_frame.height):
++        for x in range(current_noisy_frame.width):
++            a = alpha_map.get(x, y)[0]
++            curr = intermediate_denoised.get(x, y)
++            bg = background.get(x, y)
++            final_val = [a * curr[c] + (1 - a) * bg[c] for c in range(current_noisy_frame.channels)]
++            final_denoised.set(x, y, final_val)
++
+     return final_denoised
+-
+-def weighted_filter(current: Image, historical: Image, kernels: dict) -> Image:
+-    """
+-    Applies weighted filtering using predicted kernels.
+-    """
+-    # [G] Implementation detail: This function performs the pixel-wise 
+-    # weighted combination of neighboring samples as described in the source.
+-    # The exact kernel application depends on the specific network architecture 
+-    # (e.g., separable convolutions or explicit weighted sums).
+-    # Since the source describes it as "pixel-wise weighted filtering" 
+-    # on "historical frame reprojection result and the current frame result",
+-    # we assume a standard weighted sum operation.
+-    
+-    result = Image(current.width, current.height)
+-    for y in range(current.height):
+-        for x in range(current.width):
+-            # Get neighborhood samples from current and historical frames
+-            # Apply weights from kernels
+-            # Sum weighted samples
+-            result[y, x] = compute_weighted_sum(current, historical, x, y, kernels)
+-    return result
+-
+-def compute_weighted_sum(current, historical, x, y, kernels):
+-    # [G] Placeholder for the specific kernel application logic.
+-    # The source states: "pixel-wise weighted filtering is performed on 
+-    # the historical frame reprojection result and the current frame result".
+-    # This implies a convolution-like operation or weighted average.
+-    # Without the exact network architecture details, we represent the 
+-    # conceptual operation.
+-    pass
+ ```
+ 
+@@ -177,11 +194,11 @@
+ *   **Performance:** Prediction time is below 30 ms per frame across multiple test sets, comparable to WRLS, achieving real-time performance [S1, unofficial].
+ *   **Hardware:** Tested on NVIDIA GeForce RTX 4080 Ti GPU (12 GB VRAM) and Intel i7-12700KF CPU (32 GB RAM) [S1, unofficial].
+-*   **Strengths:** Preserves sharp features and reduces blurring; handles semi-transparent structures well; real-time performance.
+-*   **Limitations:** Struggles with highlighted outliers (e.g., channel values > 200); sensitive to rapid camera motion or illumination changes; historical frames can fail in transparent regions.
+-*   **When to Use:** Real-time volume rendering with semi-transparent structures where edge preservation is critical.
+-*   **When Not to Use:** Scenes with extreme high-intensity outliers or rapid, unpredictable camera/illumination changes.
++*   **Strengths:** Preserves sharp features and reduces blurring; handles semi-transparent structures well; real-time performance [S1, unofficial].
++*   **Limitations:** Struggles with highlighted outliers (e.g., channel values > 200); sensitive to rapid camera motion or illumination changes; historical frames can fail in transparent regions [S1, unofficial].
++*   **When to Use:** Real-time volume rendering with semi-transparent structures where edge preservation is critical [S1, unofficial].
++*   **When Not to Use:** Scenes with extreme high-intensity outliers or rapid, unpredictable camera/illumination changes [S1, unofficial].
+ 
+ ## Background
+-The method was proposed in a study on real-time volume-rendering image denoising based on kernel prediction. It was developed to address the noise in Monte Carlo volume rendering while preserving the complex translucent structures (smoke, blood vessels, soft tissues) and dynamic shadows typical in volume data. The approach combines temporal coherence (reprojection) with a learned kernel prediction network and a final background fusion step. The training dataset consisted of 65 rendered image sequences from eight different volume data sets, including CT scans, with a resolution of 1024x1024. The model was trained using PyTorch on an NVIDIA RTX 4080 Ti GPU, converging after 300 epochs [S1, unofficial].
++The method was proposed in a study on real-time volume-rendering image denoising based on kernel prediction [S1, unofficial]. It was developed to address the noise in Monte Carlo volume rendering while preserving the complex translucent structures (smoke, blood vessels, soft tissues) and dynamic shadows typical in volume data [S1, unofficial]. The approach combines temporal coherence (reprojection) with a learned kernel prediction network and a final background fusion step [S1, unofficial]. The training dataset consisted of 65 rendered image sequences from eight different volume data sets, including CT scans, with a resolution of 1024x1024 [S1, unofficial]. The model was trained using PyTorch on an NVIDIA RTX 4080 Ti GPU, converging after 300 epochs [S1, unofficial].
+ 
+ ## Sources

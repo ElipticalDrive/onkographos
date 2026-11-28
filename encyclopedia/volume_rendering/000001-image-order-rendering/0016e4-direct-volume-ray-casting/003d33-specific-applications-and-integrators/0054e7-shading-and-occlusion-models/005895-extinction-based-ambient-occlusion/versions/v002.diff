@@ -1,0 +1,259 @@
+--- v001.md
++++ v002.md
+@@ -4,156 +4,137 @@
+ 
+ ## Overview
+-Extinction-based Ambient Occlusion (AO) approximates the attenuation of diffusely reflected ambient light through local volume occlusion by summing extinction coefficients, avoiding the computational cost of shadow ray tracing [S1, unofficial]. It sets itself apart from standard Direct Volume Ray Casting (DVR) by replacing the constant ambient term with a spatially varying occlusion factor derived from a local neighborhood integral, and from full global illumination methods by relying on a simplified inverse-square distance attenuation model rather than solving the full rendering equation [S1, unofficial].
++Extinction-based Ambient Occlusion (AO) approximates the attenuation of diffusely reflected ambient light through local volume occlusion by summing extinction coefficients rather than tracing shadow rays [S1, unofficial]. It differs from standard DVR by replacing the constant ambient term with a spatially varying occlusion factor derived from a local neighborhood integral, and from full global illumination by ignoring multi-bounce scattering and relying on a precomputed aggregate structure for speed [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A 3D volume dataset containing extinction coefficients $\tau(t)$ and color values $C_{RGB}(t)$ for each voxel $t$. A local neighborhood definition $N(s)$ (typically a sphere or box) around a sample point $s$.
+-*   **Output:** The final pixel color with ambient occlusion applied, specifically the reflected light term $E_i$ for each sample.
++*   **Input:** Volume dataset with extinction coefficients $\tau(t)$ and color $C_{RGB}(t)$; ambient light intensity $I_A$; local neighborhood definition $N(s)$ (typically a sphere or box centered at sample point $s$).
++*   **Output:** Occluded ambient intensity $I_{AO}(s)$ and final reflected light $E_i$ for each sample point.
+ 
+ **Data Structures:**
+-*   **3D Summed Area Table (SAT):** A precomputed data structure storing the cumulative sum of extinction coefficients. This allows for $O(1)$ retrieval of the sum of $\tau(t)$ over any axis-aligned rectangular region [S1, unofficial].
+-*   **Voxel Data:** Standard 3D grid storing $\tau$ and $C_{RGB}$.
++*   **3D Summed Area Table (SAT):** A precomputed 3D array storing the cumulative sum of extinction coefficients. Let $SAT[x][y][z]$ store the sum of $\tau$ values in the box from $(0,0,0)$ to $(x,y,z)$. This allows $O(1)$ retrieval of the sum of $\tau$ over any axis-aligned bounding box [S1, unofficial].
++*   **Weighted SAT (Optional):** If the weighting function $w(t)$ varies spatially (e.g., $1/|s-t|^2$), a separate SAT for weighted extinction may be required, or the distance weighting must be applied post-aggregation if the SAT only stores raw sums [S1, unofficial]. The source notes use a weighting function $w_{A,L}$ for the aggregate query, implying the SAT stores raw $\tau$, and weights are applied during the query or via a specific weighted aggregation strategy. Given the formula involves $1/|s-t|^2$, a simple box-sum SAT is insufficient for exact integration unless the neighborhood is discretized into weighted bins or the approximation assumes constant weight over the aggregate query volume. The source states $w_{A,L} = r^{-2}$ is the inverse square of the radius of the aggregate query, suggesting a simplified approximation where the distance is approximated by the query radius [S1, unofficial].
+ 
+-**Steps:**
+-1.  **Precompute SAT:** Construct a 3D Summed Area Table from the volume's extinction coefficients $\tau$. This enables fast aggregation queries [S1, unofficial].
+-2.  **Sample Volume:** For each sample point $s$ along the viewing ray, determine its local neighborhood $N(s)$ (denoted as $\Omega_A$ in the formula context) [S1, unofficial].
+-3.  **Aggregate Extinction:** Compute the weighted sum of extinction coefficients within $N(s)$. Using the SAT, this is done efficiently. The aggregation accounts for the inverse-square distance attenuation [S1, unofficial].
+-4.  **Compute Occlusion Factor:** Calculate the local ambient occlusion intensity $I_{AO}(s)$ using the aggregated extinction sum [S1, unofficial].
+-5.  **Compute Reflected Light:** Combine the occlusion factor with ambient light intensity and voxel color to determine the final reflected light contribution $E_i$ [S1, unofficial].
++**Numbered Steps:**
++1.  **Precompute SAT:** Construct a 3D Summed Area Table from the volume's extinction coefficient field $\tau$. For each voxel $(x,y,z)$, $SAT[x][y][z] = \tau(x,y,z) + SAT[x-1][y][z] + SAT[x][y-1][z] + SAT[x][y][z-1] - SAT[x-1][y-1][z] - SAT[x-1][y][z-1] - SAT[x][y-1][z-1] + SAT[x-1][y-1][z-1]$ [S1, unofficial].
++2.  **Define Neighborhood:** For a sample point $s$, define the local neighborhood $N(s)$. In the implementation described, this is approximated by an aggregate query volume $\Omega_{A,L}$ (e.g., a sphere or box) [S1, unofficial].
++3.  **Aggregate Extinction:** Query the SAT to compute the sum of extinction coefficients $\sum_{\Omega_{A,L}} \Delta^\tau_j$ over the neighborhood $\Omega_{A,L}$ [S1, unofficial].
++4.  **Compute Occlusion Factor:** Calculate the local ambient occlusion intensity $I_{AO}(s)$ using the exponential attenuation model:
++    $$I_{AO}(s) \approx I_A \cdot e^{-\int_{t \in \mathbb{N}(s)} \frac{\tau(t)}{|s-t|^2} dt}$$
++    The source approximates the integral $\int_{t \in \mathbb{N}(s)} \frac{\tau(t)}{|s-t|^2} dt$ using the aggregated sum. Specifically, it uses a weighting factor $w_{A,L} = r^{-2}$ (inverse square of the radius of the aggregate query) applied to the sum:
++    $$\text{Exponent} = w_{A,L} \cdot \sum_{\Omega_{A,L}} \Delta^\tau_j \cdot k$$
++    where $k$ is a normal/gradient-dependent local illumination model factor [S1, unofficial]. Note: The source formula (8) combines this with color and light intensity.
++5.  **Compute Reflected Light:** Calculate the final reflected light $E_i$ for the voxel:
++    $$E_i = I_{A,L} \cdot e^{-w_{A,L} \sum_{\Omega_{A,L}} \Delta^\tau_j \cdot k} \cdot C_{RGB}$$
++    where $I_{A,L}$ is the ambient or light intensity, and $C_{RGB}$ is the voxel color [S1, unofficial].
+ 
+ **Formulas:**
+-The local ambient occlusion intensity $I_{AO}(s)$ is modeled as:
+-$$I_{AO}(s) \approx I_A \cdot e^{-\int_{t \in \mathbb{N}(s)} \frac{\tau(t)}{|s-t|^2} dt} \quad (4)$$
+-Where:
+-*   $I_{AO}(s)$: Local ambient occlusion intensity at sample $s$.
+-*   $I_A$: Constant ambient light intensity incident over the boundary $\partial N(s)$.
+-*   $\tau(t)$: Extinction coefficient at position $t$.
+-*   $|s-t|$: Euclidean distance from sample $s$ to position $t$.
+-*   The term $\frac{1}{|s-t|^2}$ accounts for radial distance-based light attenuation [S1, unofficial].
++*   **Local AO Intensity:** $I_{AO}(s) \approx I_A \cdot e^{-\int_{t \in \mathbb{N}(s)} \frac{\tau(t)}{|s-t|^2} dt}$ [S1, unofficial].
++*   **Reflected Light:** $E_i = I_{A,L} \cdot e^{-w_{A,L} \sum_{\Omega_{A,L}} \Delta^\tau_j \cdot k} \cdot C_{RGB}$ [S1, unofficial].
++*   **Weighting Function:** $w_{A,L} = r^{-2}$, where $r$ is the radius of the aggregate query [S1, unofficial].
+ 
+-The reflected light term $E_i$ for a voxel is calculated as:
+-$$E_i = I_{A,L} \cdot e^{-w_{A,L} \sum_{\Omega_{A,L}} \Delta^{\tau_j} \cdot k} \cdot C_{RGB} \quad (8)$$
+-Where:
+-*   $E_i$: Reflected light at the voxel.
+-*   $I_{A,L}$: Ambient or light intensity.
+-*   $w_{A,L}$: Weight factor. For AO, $w_A = r^{-2}$ (inverse square of the radius of the aggregate query) [S1, unofficial].
+-*   $\sum_{\Omega_{A,L}} \Delta^{\tau_j} \cdot k$: Aggregated sum of extinction coefficients over the neighborhood $\Omega_A = N(s)$ for AO. $\Delta^{\tau_j}$ represents the extinction contribution, and $k$ is a normal/gradient-dependent local illumination model factor [S1, unofficial].
+-*   $C_{RGB}$: Voxel color [S1, unofficial].
++**Parameters:**
++*   **Neighborhood Size ($r$):** The radius of the aggregate query $\Omega_{A,L}$. Not given in the sources.
++*   **Ambient Intensity ($I_A$):** Proportional to the sum of all lights. Not given in the sources.
++*   **Illumination Factor ($k$):** Normal/gradient dependent. Not given in the sources.
++
++**Edge Cases and Pitfalls:**
++*   **Precision:** The exponential function can underflow if the extinction sum is large, resulting in black pixels. [G] Clamp the exponent or use log-space arithmetic if necessary.
++*   **Boundary Conditions:** The SAT query must handle cases where the neighborhood extends beyond the volume bounds. [G] Clamp the SAT query coordinates to the volume dimensions.
++*   **Approximation Error:** The use of a constant weight $r^{-2}$ for the entire neighborhood introduces error, especially for large neighborhoods or non-spherical shapes. The source notes "virtually no difference in image quality" compared to individual sampling, but this is a specific trade-off [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def compute_extinction_ao(s, volume, sat, neighborhood_radius):
++def compute_extinction_ao(volume, sat, s, r, I_A, k):
+     """
+-    Computes extinction-based ambient occlusion for a sample point s.
++    Compute extinction-based ambient occlusion for sample point s.
+     
+     Args:
+-        s: 3D coordinates of the sample point.
+         volume: 3D array of extinction coefficients tau.
+-        sat: 3D Summed Area Table of extinction coefficients.
+-        neighborhood_radius: Radius defining the local neighborhood N(s).
++        sat: 3D Summed Area Table of tau.
++        s: Sample point (x, y, z).
++        r: Radius of the aggregate query neighborhood.
++        I_A: Ambient light intensity.
++        k: Illumination factor.
+         
+     Returns:
+-        I_AO: The local ambient occlusion intensity factor.
++        E_i: Reflected light intensity.
+     """
+-    # Define the bounding box of the neighborhood N(s)
+-    # Note: The integral in Eq. 4 is approximated by the aggregate query.
+-    # The SAT allows O(1) retrieval of the sum of tau over a region.
++    # Define the bounding box of the neighborhood Omega_A,L
++    # Assuming a spherical neighborhood approximated by a bounding box for SAT query
++    x_min, x_max = max(0, s.x - r), min(volume.width - 1, s.x + r)
++    y_min, y_max = max(0, s.y - r), min(volume.height - 1, s.y + r)
++    z_min, z_max = max(0, s.z - r), min(volume.depth - 1, s.z + r)
+     
+-    # 1. Get the sum of extinction coefficients in the neighborhood
+-    # The SAT query returns sum(tau) for the region.
+-    # We must approximate the integral of tau(t)/|s-t|^2.
+-    # The source indicates using a weighted sum via the SAT.
+-    # For a spherical neighborhood, we might approximate with a box or use
+-    # multiple SAT queries for shells. The source simplifies this to an
+-    # aggregate query with weight w_A = r^-2.
++    # Query SAT to get sum of tau in the box
++    # SAT query function for 3D box sum
++    sum_tau = query_sat_3d(sat, x_min, y_min, z_min, x_max, y_max, z_max)
+     
+-    # Approximation: Sum of tau in neighborhood, weighted by inverse square distance.
+-    # Since SAT gives sum(tau), and the source mentions w_A = r^-2 for the aggregate query,
+-    # we apply this weight to the aggregated sum.
++    # Calculate weighting factor w_A,L = r^-2
++    # Note: If r is 0, handle division by zero. [G]
++    if r == 0:
++        w_A_L = 0.0
++    else:
++        w_A_L = 1.0 / (r * r)
++        
++    # Calculate exponent
++    exponent = w_A_L * sum_tau * k
+     
+-    # Get sum of tau in the bounding box of the neighborhood
+-    sum_tau = sat.query_box(s - neighborhood_radius, s + neighborhood_radius)
++    # Calculate reflected light E_i
++    # I_A,L is assumed to be I_A for ambient occlusion
++    I_A_L = I_A
++    C_RGB = volume[s.x, s.y, s.z] # Voxel color
+     
+-    # Apply the inverse square distance weight as per Eq. 8 and source description
+-    # w_A = r^-2
+-    weight = 1.0 / (neighborhood_radius ** 2)
+-    
+-    # Weighted sum of extinction
+-    weighted_extinction_sum = weight * sum_tau
+-    
+-    # Constant ambient light intensity (assumed known or passed in)
+-    I_A = 1.0 # Placeholder for constant ambient intensity
+-    
+-    # Compute I_AO using Eq. 4: I_A * exp(-integral)
+-    # The integral is approximated by the weighted sum
+-    I_AO = I_A * math.exp(-weighted_extinction_sum)
+-    
+-    return I_AO
+-
+-def compute_reflected_light(s, volume, sat, neighborhood_radius, I_A_L, k):
+-    """
+-    Computes the reflected light term E_i with AO.
+-    
+-    Args:
+-        s: 3D coordinates of the sample point.
+-        volume: 3D array of extinction coefficients and colors.
+-        sat: 3D Summed Area Table of extinction coefficients.
+-        neighborhood_radius: Radius for AO neighborhood.
+-        I_A_L: Ambient or light intensity.
+-        k: Normal/gradient-dependent local illumination factor.
+-        
+-    Returns:
+-        E_i: Reflected light value.
+-    """
+-    # Get the voxel color at s
+-    C_RGB = volume.get_color(s)
+-    
+-    # Compute the AO factor
+-    I_AO = compute_extinction_ao(s, volume, sat, neighborhood_radius)
+-    
+-    # The source Eq. 8 combines I_A,L, the exponential term, and C_RGB.
+-    # Note: I_AO in Eq. 4 is I_A * exp(-...). 
+-    # Eq. 8 uses I_A,L * exp(-w * sum) * C_RGB.
+-    # We can reuse the weighted_extinction_sum from compute_extinction_ao logic.
+-    
+-    # Re-calculate weighted sum for clarity in Eq. 8 context
+-    sum_tau = sat.query_box(s - neighborhood_radius, s + neighborhood_radius)
+-    weight = 1.0 / (neighborhood_radius ** 2)
+-    weighted_extinction_sum = weight * sum_tau
+-    
+-    # Compute E_i using Eq. 8
+-    # E_i = I_A,L * exp(-w_A,L * sum(tau) * k) * C_RGB
+-    # Note: The source writes sum(Delta^tau_j * k). If k is constant per sample,
+-    # it can be pulled out. If k varies, it must be summed. 
+-    # The source says "k simply represents a normal, gradient dependent local illumination model factor".
+-    # Assuming k is evaluated at s for the sample point.
+-    
+-    exponent = -weight * sum_tau * k
+-    E_i = I_A_L * math.exp(exponent) * C_RGB
++    E_i = I_A_L * math.exp(-exponent) * C_RGB
+     
+     return E_i
++
++def query_sat_3d(sat, x_min, y_min, z_min, x_max, y_max, z_max):
++    """
++    Compute sum of elements in 3D box using SAT.
++    """
++    def get_val(x, y, z):
++        # Handle boundary conditions
++        x = max(0, min(x, sat.width - 1))
++        y = max(0, min(y, sat.height - 1))
++        z = max(0, min(z, sat.depth - 1))
++        return sat[x, y, z]
++        
++    sum_box = (get_val(x_max, y_max, z_max) 
++               - get_val(x_min - 1, y_max, z_max) 
++               - get_val(x_max, y_min - 1, z_max) 
++               - get_val(x_max, y_max, z_min - 1) 
++               + get_val(x_min - 1, y_min - 1, z_max) 
++               + get_val(x_min - 1, y_max, z_min - 1) 
++               + get_val(x_max, y_min - 1, z_min - 1) 
++               - get_val(x_min - 1, y_min - 1, z_min - 1))
++    return sum_box
+ ```
+ 
+-**Parameters:**
+-*   **Neighborhood Radius:** Defines the size of $N(s)$. Typical values are not explicitly given, but the SAT approach allows efficient querying for various radii [S1, unofficial].
+-*   **Ambient Intensity ($I_A$):** Proportional to the sum of all lights [S1, unofficial].
++## Subtopics
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Boundary Conditions:** The neighborhood $N(s)$ may extend outside the volume. The SAT query should handle out-of-bounds accesses by clamping or returning zero [G].
+-*   **Precision:** The exponential decay can lead to very small values for highly occluded regions. Standard floating-point precision is assumed sufficient based on the source's performance claims [S1, unofficial].
+-*   **Degenerate Input:** If $\tau(t) = 0$ everywhere, $I_{AO}(s) = I_A$, resulting in no occlusion [S1, unofficial].
++### TVAM Integrator
++Uses a different integration strategy for volume rendering, focusing on texture-based volume accumulation. [TVAM Integrator](6814-tvam-integrator.md)
++
++### Cinematic Rendering
++Focuses on high-fidelity global illumination and soft shadows, often using path tracing, which is more expensive than extinction-based AO. [Cinematic Rendering](9473-cinematic-rendering.md)
++
++### Compositional Rendering
++Renders distinct material styles into separate layers and composites them post-hoc, rather than integrating lighting during ray casting. [Compositional Rendering](11182-compositional-rendering.md)
++
++### Shading and Occlusion Models
++A broader category that includes extinction-based AO, cone-traced shadows, and other local illumination approximations. [Shading and Occlusion Models](15337-shading-and-occlusion-models.md)
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The use of the 3D SAT allows the aggregation query to be performed in $O(1)$ time per sample, regardless of the neighborhood size [S1, unofficial].
+-*   **Memory Complexity:** Requires $O(N)$ additional memory for the SAT, where $N$ is the number of voxels in the volume [S1, unofficial].
+-*   **Measured Performance:** Aggregate sampling using the SAT is over 45 times faster than individually sampled neighborhoods (0.22s vs 10s) with virtually no difference in image quality [S1, unofficial].
+-*   **Strengths:** Significantly faster than shadow ray tracing methods; effective approximation of local occlusion; easy to integrate into existing DVR pipelines.
+-*   **Limitations:** Approximation of ambient occlusion; not physically accurate for global illumination effects; relies on the assumption of constant ambient light at the neighborhood boundary [S1, unofficial].
+-*   **When to Use:** When interactive performance is required and local occlusion effects are desired, but full global illumination is too expensive [S1, unofficial].
+-*   **When Not to Use:** When physically accurate global illumination or color bleeding (which requires color-aware aggregation) is needed [S1, unofficial].
++*   **Time Complexity:** $O(1)$ per sample point for the AO calculation after $O(N)$ precomputation of the SAT, where $N$ is the number of voxels. Aggregate sampling is over 45 times faster than individually sampled neighborhoods (0.22s vs 10s) [S1, unofficial].
++*   **Memory Complexity:** $O(N)$ for the SAT, where $N$ is the number of voxels.
++*   **Measured Performance:** On the tested hardware and resolution, aggregate sampling took 0.22s compared to 10s for individual sampling, with virtually no difference in image quality [S1, unofficial].
++*   **Strengths:** Fast approximation of local occlusion; suitable for interactive volume rendering; simple to implement with SAT.
++*   **Limitations:** Approximation error due to constant weight assumption; does not account for multi-bounce scattering or complex light transport; quality depends on neighborhood size and shape approximation.
++*   **When to use:** When interactive performance is required and local occlusion effects are desired without the cost of full global illumination.
++*   **When not to use:** When physical accuracy is required, or when global illumination effects like color bleeding (beyond local approximation) are critical.
+ 
+ ## Background
+-Extinction-based AO was introduced as a fast approximation for ambient occlusion in volume rendering, addressing the high cost of shadow ray tracing [S1, unofficial]. It builds on the concept that light attenuation in a volume is governed by the extinction coefficient [S1, unofficial]. The method was developed to provide a useful approximation of the effect of occlusion on diffusely reflected ambient light without the computational burden of full global illumination models [S1, unofficial].
++Extinction-based Ambient Occlusion was introduced as a fast approximation for local illumination in volume rendering, avoiding the cost of shadow ray tracing [S1, unofficial]. It builds on the concept of ambient occlusion in surface rendering but adapts it to volumes by using extinction coefficients as a proxy for opacity. The method was developed to provide a useful approximation of the effect of occlusion on diffusely reflected ambient light, which is otherwise computationally expensive to simulate with full global illumination models [S1, unofficial].
+ 
+ ## Sources
+-[S1] Extinction-based Shading and Illumination in GPU Volume Ray-Casting - UZH, https://www.ifi.uzh.ch/dam/jcr:ffffffff-9e7f-2af5-ffff-ffffcf9259bb/FastShadows.pdf, fetched 2026-10-30 (unofficial)+[S1] PDF Extinction-based Shading and Illumination in GPU Volume Ray-Casting - UZH, https://www.ifi.uzh.ch/dam/jcr:ffffffff-9e7f-2af5-ffff-ffffcf9259bb/FastShadows.pdf, fetched 2026-10-30 (unofficial)

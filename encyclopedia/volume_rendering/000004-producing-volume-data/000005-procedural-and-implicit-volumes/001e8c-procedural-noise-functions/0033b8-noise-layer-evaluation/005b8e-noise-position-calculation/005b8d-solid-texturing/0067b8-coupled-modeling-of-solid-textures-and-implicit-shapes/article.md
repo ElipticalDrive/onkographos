@@ -1,0 +1,129 @@
+# Coupled Modeling of Solid Textures and Implicit Shapes
+
+Also called: Constructive Soft Geometry, Functional Shape Operations
+
+## Overview
+Coupled Modeling of Solid Textures and Implicit Shapes is a technique for texturing implicit surfaces by using similar functions for both implicit surfaces and solid textures, ensuring uniform textures that conform to any orientable 2-manifold shapes with no obvious stretch [S1, unofficial]. It sets itself apart from general implicit modeling by guaranteeing interactivity regardless of shape complexity, as function computation during construction does not depend on shape complexity [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Unit gradient length affine functions (defining basic loci like points, lines, or circles) and a parameter $p$ (typically a high value).
+*   **Outputs:** Bounded gradient length functions (for shape and texture layering) and opacity values.
+
+**Data Structures:**
+*   **Function Tree:** A tree structure where nodes represent functions and edges represent the application of the `wp` operation. Each node stores the function definition and its gradient length properties.
+*   **Opacity Representation:** A combination of two bounded gradient length functions $f_0$ and $f_1$, with coefficients $a_j$ and frequencies $w_j$.
+
+**Key Concepts:**
+*   **Unit Gradient Length Functions:** Functions whose gradient length is exactly 1. These are used to effectively control layer thickness and obtain regular layer thickness [S1, unofficial].
+*   **Almost Unit Gradient Length Functions:** Functions whose gradient length is less than but almost equal to 1. These are required to construct uniform solid textures [S1, unofficial].
+*   **Bounded Gradient Length Functions:** Functions whose gradient length is not larger than 1. These yield fast rendering with the Lipschitz condition and high quality rendering with accurate sampling of volumes [S1, unofficial].
+
+**Steps:**
+1.  **Construct Building Blocks:** Apply a functional set operation to unit gradient length affine functions to create building block functions that give equal Euclidean distance (loci) to points, lines, or circles. This creates a large family of shapes [S1, unofficial].
+2.  **Apply `wp` Operation:** Use the `wp` operation to combine functions. This operation is closed over the set of bounded gradient length functions and can describe approximate and exact set operations [S1, unofficial].
+3.  **Generate Texture Layers:** Use the `wp` operation in a tree structure to construct several closely related functions. If one function describes the shape of the objects, other functions can be used to describe layers that conform well to the shape [S1, unofficial].
+4.  **Calculate Opacity:** Compute opacity using the formula involving $f_0$ and $f_1$ [S1, unofficial].
+
+**Formulas:**
+*   **`wp` Operation:**
+    $$ wp(f_1, f_2) = \frac{\log(\exp(p \cdot f_1) + \exp(p \cdot f_2))}{p} $$
+    Where $p$ is a high value. For high values of $p$, `wp` over functions whose gradient length is almost equal to 1 creates new functions with almost unit length gradient functions [S1, unofficial].
+*   **Opacity:**
+    $$ \text{Opacity} = f_0 + \sum_{i=1}^{m} a_j \cdot \cos(w_j \cdot f_1) + 1 $$
+    Where $f_0$ and $f_1$ are bounded gradient length functions, $a_j$ are positive real numbers, and $w_j$ are frequencies [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def wp(f1, f2, p):
+    """
+    Computes the wp operation on two functions f1 and f2 with parameter p.
+    f1 and f2 are callable functions that take a 3D point (x, y, z) and return a float.
+    p is a high value parameter.
+    """
+    # Evaluate functions at the given point
+    val1 = f1(x, y, z)
+    val2 = f2(x, y, z)
+    
+    # Compute wp formula
+    # Note: exp(p * val) can overflow for large p or val. 
+    # In practice, a stable log-sum-exp implementation might be needed.
+    # However, based on the source, we use the direct formula.
+    result = math.log(math.exp(p * val1) + math.exp(p * val2)) / p
+    return result
+
+def create_affine_unit_gradient_function(point, line=None, circle=None):
+    """
+    Creates a unit gradient length affine function based on loci.
+    This is a placeholder for the specific construction of building block functions
+    that give equal Euclidean distance to points, lines, or circles.
+    The source states these are constructed by applying a functional set operation 
+    to unit gradient length affine functions, but does not provide the exact formula 
+    for the affine function itself. [G]
+    """
+    # [G] Assuming a simple distance function for a point as an example of a unit gradient length function.
+    # The gradient of distance to a point is a unit vector.
+    if point is not None:
+        def f(x, y, z):
+            dx = x - point[0]
+            dy = y - point[1]
+            dz = z - point[2]
+            return math.sqrt(dx*dx + dy*dy + dz*dz)
+        return f
+    # [G] Other loci (lines, circles) would require specific distance functions.
+    return None
+
+def calculate_opacity(f0, f1, coefficients, frequencies, x, y, z):
+    """
+    Calculates opacity using the combination of two bounded gradient length functions.
+    """
+    val_f0 = f0(x, y, z)
+    val_f1 = f1(x, y, z)
+    
+    sum_term = 0.0
+    for i in range(len(coefficients)):
+        a_j = coefficients[i]
+        w_j = frequencies[i]
+        sum_term += a_j * math.cos(w_j * val_f1)
+        
+    opacity = val_f0 + sum_term + 1.0
+    return opacity
+```
+
+**Parameters:**
+*   $p$: A high value parameter in the `wp` operation. Typical values are not specified in the sources, but it must be "high" to ensure the resulting function has almost unit length gradient [S1, unofficial].
+*   $a_j$: Positive real numbers for opacity coefficients.
+*   $w_j$: Frequencies for opacity calculation.
+
+**Edge Cases and Pitfalls:**
+*   **Overflow:** The `wp` operation involves exponentials. For large $p$ or large function values, $\exp(p \cdot f)$ can overflow. A stable implementation of log-sum-exp should be used in practice [G].
+*   **Gradient Length:** The method relies on functions having specific gradient lengths. If the building block functions do not have unit gradient length, the properties of the resulting functions may not hold [S1, unofficial].
+
+## Subtopics
+
+### Constructive Soft Geometry
+A technique similar to this method for modeling both implicit surfaces and solid textures using functional set operations. It is the broader category under which this method falls [S1, unofficial].
+
+### Functional Shape Operations
+The set of binary operations (like `wp`) that are closed over almost unit gradient length functions, allowing intuitive construction of desired functions [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** The `wp` operation is constant time updateable. A large set of functions based on `wp` can be updated in constant time, regardless of shape complexity [S1, unofficial]. This contrasts with general implicit modeling where function evaluation complexity increases with shape complexity [S1, unofficial].
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:** Guarantees interactivity regardless of shape complexity because function computation during construction does not depend on shape complexity [S1, unofficial].
+*   **Strengths:** Uniform textures that conform well to varied terrain with no obvious stretch; regular layer thickness; fast rendering with the Lipschitz condition; high quality rendering with accurate sampling of volumes [S1, unofficial].
+*   **Limitations:** Requires careful construction of building block functions with unit gradient length; potential numerical instability in `wp` operation for large $p$ [G].
+*   **When to Use:** When uniform solid textures on complex implicit surfaces are required, and interactivity is critical regardless of shape complexity [S1, unofficial].
+*   **When Not to Use:** When simple shapes are sufficient and the overhead of constructing the function tree is not justified; when numerical stability is a major concern without careful implementation [G].
+
+## Background
+*   **Origin:** Introduced by Ergun Akleman and Jianer Chen in the paper "Implicit Volume Modeling" [S1, unofficial].
+*   **History:** The technique was developed to solve the problem of effective texturing of implicit surfaces, ensuring uniform textures that conform to any orientable 2-manifold shapes with no obvious stretch [S1, unofficial].
+*   **Usage:** Used in implicit volume modeling for texturing implicit surfaces [S1, unofficial].
+
+## Sources
+[S1] Implicit Volume Modeling, https://people.tamu.edu/~ergun/research/implicitmodeling/abstracts/is99b/index.html, fetched 2026-10-29 (unofficial)

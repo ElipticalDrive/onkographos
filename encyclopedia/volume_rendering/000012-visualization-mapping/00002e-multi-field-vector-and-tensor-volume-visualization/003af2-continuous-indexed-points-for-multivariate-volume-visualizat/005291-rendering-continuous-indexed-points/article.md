@@ -1,0 +1,83 @@
+# Rendering Continuous Indexed Points
+
+Also called: Indexed points rendering, Parallel coordinates visualization
+
+## Overview
+Rendering Continuous Indexed Points is a visualization technique that represents linear structures in parallel coordinates using continuous indexed points to visualize multivariate volumes [S1]. It improves multivariate volume visualization by providing directional occlusion shading for good spatial perception and allowing users to classify features based on density patterns [S1]. It differs from its sibling, [Multivariate Indexed Points Transfer Function](14772-multivariate-indexed-points-transfer-function.md), by focusing on the rendering of the indexed point layer within the parallel coordinate space rather than defining transfer functions for volume raycasting [S1].
+
+## How it works
+The method maps multivariate data to parallel coordinates, computes density in subspaces, and renders these densities as a continuous indexed point layer overlaid on the parallel axes [S1].
+
+**Inputs and Outputs:**
+*   **Input:** Multivariate volume data; parallel coordinate axes definitions; user-defined parameters (gamma contrast, blending weight) [S1].
+*   **Output:** Composite image containing the parallel coordinate plot with the alpha-blended indexed point layer [S1].
+
+**Data Structures:**
+*   **High Dynamic Range (HDR) Image Buffer:** A floating-point buffer storing the density $\rho(\eta)$ for each pixel in the parallel coordinate subspace [S1].
+*   **Discrete Categorical Colormap:** A lookup table mapping subspace indices to specific colors, visually positioned below the label of the parallel axes [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_continuous_indexed_points(subspaces, axes, gamma, alpha):
+    # 1. Store continuous indexed points for each subspace in an HDR image buffer
+    hdr_buffer = allocate_hdr_buffer(axes.resolution)
+    for subspace in subspaces:
+        compute_density(subspace, hdr_buffer)  # Stores ρ(η)
+    
+    # 2. Logarithmic transformation and normalization
+    v_min = min(hdr_buffer)
+    v_max = max(hdr_buffer)
+    normalized_buffer = empty_like(hdr_buffer)
+    for pixel in hdr_buffer:
+        v_log = log(pixel.value)  # ρ(η)
+        normalized_buffer[pixel] = (v_log - v_min) / (v_max - v_min)
+    
+    # 3. Color mapping
+    indexed_point_layer = empty_like(normalized_buffer, dtype=color)
+    for pixel in normalized_buffer:
+        subspace_idx = get_subspace_index(pixel)
+        indexed_point_layer[pixel] = discrete_categorical_colormap[subspace_idx][normalized_buffer[pixel]]
+    
+    # 4. Gamma correction
+    gamma_corrected_layer = indexed_point_layer ** (1.0 / gamma)
+    
+    # 5. Alpha blending
+    original_plot = load_parallel_coordinates_plot()
+    composite = alpha * gamma_corrected_layer + (1.0 - alpha) * original_plot
+    return composite
+```
+
+**Formulas:**
+*   Logarithmic transformation: $v' = \log(\rho(\eta))$ [G].
+*   Normalization: $v_{\text{norm}} = \frac{v' - v_{\min}}{v_{\max} - v_{\min}}$ [G].
+*   Gamma correction: $v_{\text{final}} = v_{\text{norm}}^{1/\gamma}$ [G].
+*   Alpha blending: $C_{\text{out}} = \alpha C_{\text{indexed}} + (1 - \alpha) C_{\text{original}}$ [G].
+
+**Parameters:**
+*   **Gamma ($\gamma$):** User-controlled slider to change contrast [S1].
+*   **Blending Weight ($\alpha$):** User-changeable weight for alpha blending [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Zero Density:** If $\rho(\eta) = 0$, the logarithm is undefined [G]. The implementation must clamp to a small epsilon or treat as zero density before applying the logarithm [G].
+*   **Dynamic Range:** The use of an HDR buffer is critical to preserve density information before normalization [S1]. Using a low dynamic range buffer would lose detail in high-density regions [S1].
+
+## Subtopics
+
+### Flat and Indexed Point Visualization
+This variant uses lasso widgets to classify features in the volume based on the patterns of continuous indexed points [S1]. The classification links to scatterplots via brushing-and-linking to verify feature separation [S1]. It allows users to interactively select regions in the parallel coordinate space and see the corresponding volume features [S1]. Data domain computation yields more spread-out signatures than spatial domain computation, but may select noisy samples that act as false positives [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources [S1].
+*   **Memory Complexity:** Requires an HDR image buffer proportional to the resolution of the parallel coordinate plot [S1].
+*   **Strengths:** Provides directional occlusion shading for spatial perception; enables interactive feature classification with lasso widgets; supports verification via brushing-and-linking with scatterplots [S1].
+*   **Limitations:** Not given in the sources [S1].
+*   **When to use:** Visualizing multivariate volume data to identify local linear correlations and directional patterns [S1].
+*   **When not to use:** When spatial domain computation is preferred, as data domain computation may introduce noise and false positives [S1].
+
+## Background
+The method was introduced by L. Zhou, X. Gou, and D. Weiskopf in the paper "Continuous Indexed Points for Multivariate Volume Visualization" [S1]. It is used in the context of multivariate volume visualization to enhance the understanding of local linear information and directional occlusion shading [S1].
+
+## Sources
+[S1] Continuous Indexed Points for Multivariate Volume Visualization, https://doi.org/10.26599/cvm.2025.9450496, fetched 2026-10-26

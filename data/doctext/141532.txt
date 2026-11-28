@@ -1,0 +1,1078 @@
+Distilled Low Rank Neural Radiance Field with Quantization for Light
+Field Compression
+Jinglei Shi, Christine Guillemot
+arXiv:2208.00164v3 [cs.CV] 21 Sep 2023
+Institut National de Recherche en Informatique et en Automatique (INRIA), 263 Av. Général Leclerc, Rennes, 35042, France
+ARTICLE INFO
+ABSTRACT
+Keywords:
+Light field
+compression
+low rank approximation
+ADMM
+network distillation
+quantization
+We propose in this paper a Quantized Distilled Low-Rank Neural Radiance Field (QDLR-NeRF)
+representation for the task of light field compression. While existing compression methods encode
+the set of light field sub-aperture images, our proposed method learns an implicit scene representation
+in the form of a Neural Radiance Field (NeRF), which also enables view synthesis. To reduce its size,
+the model is first learned under a Low-Rank (LR) constraint using a Tensor Train (TT) decomposition
+within an Alternating Direction Method of Multipliers (ADMM) optimization framework. To further
+reduce the model’s size, the components of the tensor train decomposition need to be quantized.
+However, simultaneously considering the optimization of the NeRF model with both the lowrank constraint and rate-constrained weight quantization is challenging. To address this difficulty,
+we introduce a network distillation operation that separates the low-rank approximation and the
+weight quantization during network training. The information from the initial LR-constrained NeRF
+(LR-NeRF) is distilled into a model of much smaller dimension (DLR-NeRF) based on the TT
+decomposition of the LR-NeRF. We then learn an optimized global codebook to quantize all TT
+components, producing the final QDLR-NeRF. Experimental results show that our proposed method
+yields better compression efficiency compared to state-of-the-art methods, and it additionally has the
+advantage of allowing the synthesis of any light field view with high quality.
+1. Introduction
+Light field imaging has garnered significant attention in
+recent years, driven by its immense potential for applications in computer vision and computational photography.
+Nevertheless, light fields inherently entail vast amounts of
+data, necessitating the development of compact representations and efficient compression algorithms. To address
+this challenge, numerous solutions have been devised for
+compressing light fields. Some solutions encode the input
+views using video compression techniques such as HEVC
+(High-Efficiency Video Coding), or variations of this standard [1, 2]. Light field views are rearranged into a pseudo
+video sequence (PVS) before being processed by the video
+codec. Generally, a predetermined scanning pattern, such
+as raster or spiral [3, 4], is employed to create the PVS.
+Approaches based on low rank models [5, 6] or 4D steered
+Gaussian mixture of experts [7] have also been proposed
+for light field compression. One notable technique is the
+Multidimensional Light field Encoder (MuLE) [8], which
+has been incorporated into the JPEG Pleno Coding standard
+as a transform-based coding approach. MuLE leverages the
+4D redundancy of light field images by segmenting them into
+4D blocks and subsequently applying a 4D-DCT transform
+to exploit this redundancy [9]. Additionally, research has
+delved into the use of 6D transforms for plenoptic point
+cloud compression, as explored in [10]. In a related study,
+Liu et al. [11] presented a prediction method that utilizes
+Gaussian Process Regression, applied to various classes of
+jinglei.shi@inria.fr (J. Shi); christine.guillemot@inria.fr (C.
+Guillemot)
+ORCID (s): 0000-0003-2926-0415 (J. Shi); 0000-0003-1604-967X (C.
+Guillemot)
+J. Shi et al.: Preprint submitted to Elsevier
+light field textures. Other approaches involve synthesizing
+the complete light field from a subset of input views, aided
+by estimated disparity maps [12, 13, 14, 15].
+Here, we present a novel approach centered on Neural
+Radiance Fields (NeRF), a concept introduced recently for
+scene representation and light field view synthesis [16].
+NeRF operates as an implicit Multi-Layer Perceptron-based
+model, mapping 5D vectors—comprising 3D coordinates
+and 2D viewing directions—to opacity and color values.
+After being trained on a set of input images, NeRF will become capable of generating views observed from any desired
+perspectives by applying the volume rendering techniques.
+Various adaptations of NeRF have emerged later, aimed at
+reducing the number of required input views, as seen in
+[17], or enhancing rendering efficiency, as demonstrated in
+[18]. A generalizable radiance field reconstruction is also
+proposed in [19] which can reconstruct radiance fields from
+only three nearby input views via fast network inference,
+and which can be used for rendering scenes different from
+those on which the network has been trained. An end-to-end
+framework, called NeRF–, is proposed in [20] for training
+NeRF models without pre-computed camera parameters.
+The authors in [21] generalize the usage of implicit neural
+representation to solve the problem of time, light and view
+interpolation. The authors in [22] consider more complex
+non-linear camera models and propose a new geometric loss
+function to jointly learn the geometry of the scene and the
+camera parameters.
+NeRF can thus be seen as a neural representation of a
+scene which is learned from a set of input views. While
+existing light field compression solutions usually consider
+encoding and transmitting a subset of light field views which
+are then used at the decoder to synthesize and render the
+Page 1 of 13
+arXiv
+entire light field, we consider an alternative approach which
+optimizes and compresses the NeRF on the sender side, so
+that the network itself is transmitted to the receiver. The light
+field compression problem is thus cast into a problem of
+neural network compression. However, unlike compressing
+networks used in image classification or recognition tasks
+[23], compressing a view synthesis network is more challenging, due to the fact that the light field reconstruction
+quality is sensitive to network weight changes. The model
+should not only be compact, but should also preserve as
+much as possible high reconstruction quality.
+In this paper, we first consider a simplified NeRF model
+based on only one Multi-Layer Perception (MLP) for rendering instead of the coarse and fine MLP in [16], which halves
+the number of parameters of the network. We optimize the
+network under a low rank constraint. The learning problem is formulated as a tensor rank optimization problem,
+solved using the Alternating Direction Method of Multipliers (ADMM) iterative optimization method. This low
+rank constraint allows us, following principles of network
+distillation [24], to transfer knowledge from this initial NeRF
+to a model of a much smaller dimension based on a Tensor
+Train (TT) decomposition. In other words, the weights of
+NeRF are decomposed into TT components using a distillation network, to decrease the number of parameters to be
+encoded. The TT parameters are further quantized using
+an optimized codebook. The knowledge transfer is made
+possible thanks to the low rank constrained optimization of
+the large NeRF model.
+We evaluated the compression efficiency of our proposed Quantized Distilled Low Rank Neural Radiance Field
+(QDLR-NeRF) for light fields by comparing it against several benchmarks. Specifically, we assessed its performance
+against a HEVC-based method [25, 26] and the Jpeg-pleno
+standard [27] in the 4D Prediction Mode. Moreover, we conducted comparative analyses with recent deep learning video
+compression techniques, including Hierarchical Learned
+Video Compression (HLVC) [28], Recurrent Learned Video
+Compression (RLVC) [29], and OpenDVC [30], which is
+based on Deep Video Compression (DVC) [31]. These
+video compression methods were applied to the sequence
+of light field views. Although motion estimation-based deep
+compression networks achieve impressive rate-distortion
+performance, their intricate architectures can pose training
+challenges and require pre-trained optical flow estimators.
+Our experimental results demonstrate that our approach
+outperforms recent deep video compression methods, even
+those trained on extensive datasets. Additionally, our method
+competes effectively with established HEVC video compression tools and Jpeg-Pleno, a dedicated compression tool
+designed explicitly for light fields.
+This manuscript serves as both an extension and a complement to our shorter conference paper [32], providing indepth technical details, elaborating on our design philosophy, and presenting comprehensive experimental results. In
+summary, along with [32], our work contributes to the field
+in the following ways:
+J. Shi et al.: Preprint submitted to Elsevier
+• A low rank constrained simplified NeRF for compact
+light field representation.
+• A network distillation operation that transfers knowledge from the LR-NeRF to a more compact scene
+light field representation model DLR-NeRF via Tensor Train decomposition.
+• An efficient quantization operation guided by a global
+codebook, which tremendously reduces the total size
+of the representation with a limited distortion.
+• A complete light field compression algorithm that
+integrates ADMM-based low rank optimization, network distillation and optimized quantization, giving
+superior performances when compared with light field
+reference compression methods.
+Note that the proposed approach can be used beyond light
+field compression, in particular to reduce the memory footprint of NeRF, which can be critical for devices with low
+memory resources.
+2. Workflow and notations
+We consider a light field represented by a 4D function
+𝐿(𝑥, 𝑦, 𝑢, 𝑣) [33], with (𝑥, 𝑦) ∈ J1, 𝑋K × J1, 𝑌 K and (𝑢, 𝑣) ∈
+J1, 𝑈 K × J1, 𝑉 K respectively its angular and spatial coordinates.
+The overall workflow of our method is shown in Fig 1.
+The workflow is divided into three phases: 1) The low rankconstrained neural radiance field (LR-NeRF) optimization
+for scene reconstruction. 2) The network distillation for
+transferring knowledge from the LR-NeRF to a smaller
+model DLR-NeRF based on the Tensor Train decomposition. 3) The quantization of the TT components with an
+optimized codebook.
+In the first step, a simplified NeRF with one MLP having
+weight matrices 𝑾 𝑖 and bias vectors 𝒃𝑖 in the layer indexed
+by 𝑖 is trained as an implicit scene representation, with the
+goal of having the best scene reconstruction given the set
+of input views. For the sake of simplicity, we abuse the
+term of ‘weight’ to indicate both 𝑾 𝑖 and 𝒃𝑖 in the rest
+of the paper. The obtained NeRF is finetuned under a low
+rank constraint by applying Alternating Direction Method
+of Multipliers (ADMM) optimization. The tensor of the
+finetuned weights of LR-NeRF {𝑾 𝑟𝑖 , 𝒃𝑖 } becomes low-rank
+after this step, where 𝑟 is the target rank. In the network
+distillation step, the weights of LR-NeRF are decomposed
+into a Tensor Train (TT) format as 𝑾 𝑟𝑖 = 𝑸1𝑖 ⋅ 𝑸2𝑖 , and we
+use {𝑸1𝑖 , 𝑸2𝑖 , 𝒃𝑖 } to initialize a distilled version of LR-NeRF
+noted DLR-NeRF. This step bonds the low rank optimization
+in previous step and the quantization in the next step. It
+can, on one hand, guarantee low rank property of 𝑾 𝑟𝑖 , on
+the other hand, allow quantifying 𝑸1𝑖 , 𝑸2𝑖 without degrading
+the final compression performance. The last quantization
+step aims at reducing the model size by quantifying the
+network weights. A global codebook 𝐶 with 𝑁 centroids
+Page 2 of 13
+arXiv
+Figure 1: Overall workflow of our proposed QDLR-NeRF method. A simplified NeRF (formed by only one MLP) is first trained
+from the set of input views, under a low rank (LR) constraint. The information from this LR-NeRF is distilled to a model of a
+much smaller dimension DLR-NeRF via the Tensor Train decomposition. The weight distillation is used to transfer knowledge in
+parameters of the large LR-NeRF to a smaller DLR-NeRF while keeping high performance. A codebook 𝐶 with 𝑁 centroids is
+learned to quantize DLR-NeRF to obtain the final compact QDLR-NeRF.
+is learned from 𝑸1𝑖 , 𝑸2𝑖 to quantify the values within the
+interval [-1,1] of DLR-NeRF, from the first layer to the last
+layer gradually. Larger values outside the interval [-1,1] are
+quantized with a uniform 16-bit quantizer. Thereafter, both
+sets of values inside and outside the interval [-1,1] are coded
+using Huffman coding for optimal bitrate. The biases of the
+network 𝒃𝑖 are converted to 16 bits for further compacting
+the model size. We denote the quantized weights of QDLR̂ 1, 𝑸
+̂ 2 , 𝒃̂ 𝑖 }
+NeRF as {𝑸
+𝑖
+𝑖
+3. Method
+3.1. Simplified Neural Radiance Field
+In our method, we adopt NeRF to implicitly represent the
+scene, where 5D coordinates (location and view direction)
+of light rays (𝑥, 𝑦, 𝑧, 𝜃, 𝜙) are fed into an MLP to produce a
+color and volume density (𝑅𝐺𝐵, 𝜎) for volumetric rendering. This procedure can be formulated as:
+(𝑅𝐺𝐵, 𝜎) = 𝐹Θ (𝑥, 𝑦, 𝑧, 𝜃, 𝜙),
+(1)
+with Θ = {𝑾 𝑖 , 𝒃𝑖 } being weights and biases of the MLP.
+Let us note that the original version of NeRF uses two
+MLPs to respectively coarsely and densely sample rays (i.e.
+performing a hierarchical volume sampling). The camera
+pose parameters are estimated from given views using the
+COLMAP structure-from-motion package [34]. We instead
+adopt one unique MLP for rendering, which halves the
+number of parameters of the network. Since COLMAP may
+struggle to estimate camera pose parameters, particularly
+in cases of narrow-baseline light fields, we adopt the idea
+of treating camera pose parameters as trainable variables,
+as seen in [20]. Fortunately, when dealing with structured
+light fields, the necessary camera pose parameters are greatly
+simplified. Only the focal length 𝑓 and a parallax offset Δ,
+proportional to the angular distance, are required for ray
+tracing in NeRF. In this step, the rendering error is used as
+the loss function to supervise the initialization of NeRF and
+the update of its parameters {𝑾 𝑖 , 𝒃𝑖 , 𝑓 , Δ} as:
+𝑎𝑟𝑔𝑚𝑖𝑛{𝑾 𝑖 ,𝒃𝑖 ,𝑓 ,Δ} ||𝑐 ′ − 𝑐𝑔𝑡 ||22 ,
+J. Shi et al.: Preprint submitted to Elsevier
+(2)
+where 𝑐 ′ is the rendered pixel value and 𝑐𝑔𝑡 is ground-truth
+pixel value.
+3.2. Low Rank NeRF approximation with ADMM
+Although the initial NeRF [16] gives a good scene reconstruction and could be used for light field compression,
+its model size makes transmitting such a network less efficient than transmitting the compressed light field views.
+We therefore further reduce the model size by applying a
+TT decomposition [35] to the learned NeRF. The network
+weights 𝑾 𝑖 ∈ ℝ𝑛1 ×𝑛2 , ∀𝑖 are decomposed into the TT
+format as
+𝑾 𝑖 = 𝑸1𝑖 ⋅ 𝑸2𝑖 ,
+(3)
+where 𝑸1𝑖 ∈ ℝ1×𝑛1 ×𝑟 and 𝑸2𝑖 ∈ ℝ𝑟×𝑛2 ×1 are the TT cores,
+𝑟 is the target rank controlling the compression ratio, 𝑛1
+and 𝑛2 represent respectively the input and output channel numbers of the fully connected layer. Straightforwardly
+decomposing the full-rank tensor 𝑾 𝑖 into a low-rank TT
+format inevitably causes a large approximation error, which
+degrades the light field reconstruction quality and the compression efficiency. To guarantee the low rank property of
+the tensor 𝑾 𝑖 without performance degradation, the authors
+in [36] formulate the model compression as a tensor rank
+optimization problem, and leverage Alternating Direction
+Method of Multipliers(ADMM) to solve this optimization
+problem in an iterative manner. In this section, we adopt
+this ADMM-based low rank approximation to finetune the
+learned NeRF. This optimization can be formulated as
+𝑎𝑟𝑔𝑚𝑖𝑛{𝑾 𝑖 ,𝒃𝑖 } ||𝑐 ′ − 𝑐𝑔𝑡 ||22
+(4)
+𝑠.𝑡. 𝑟𝑎𝑛𝑘(𝑾 𝑖 ) < 𝑟,
+(5)
+where 𝑟 is the desired rank of 𝑾 𝑖 .
+This non-convex optimization with constraints can be
+solved using the ADMM optimization method, after introducing an auxiliary variable 𝒁 𝒊 and an indicator function
+𝑔(⋅), as
+{
+0, 𝑟𝑎𝑛𝑘(𝑾 𝑖 ) < 𝑟
+𝑔(𝑾 𝑖 ) =
+(6)
++∞, 𝑜𝑡ℎ𝑒𝑟𝑤𝑖𝑠𝑒.
+Page 3 of 13
+arXiv
+The original optimization problem can then be rewritten as:
+𝑎𝑟𝑔𝑚𝑖𝑛{𝑾 𝑖 ,𝒁 𝑖 } ||𝑐 ′ − 𝑐𝑔𝑡 ||22 + 𝑔(𝒁 𝑖 )
+(7)
+𝑠.𝑡. 𝑾 𝑖 = 𝒁 𝑖
+(8)
+and the corresponding augmented Lagrangian in the scaled
+dual form of such an optimization problem is defined as
+𝜌
+𝜌
+(𝑾 𝑖 , 𝒁 𝑖 , 𝑼 𝑖 ) = 𝑙(𝑾 𝑖 )+𝑔(𝒁 𝑖 )+ ||𝑾 𝑖 −𝒁 𝑖 +𝑼 𝑖 ||2𝐹 + ||𝑼 𝑖 ||2𝐹 ,
+2
+2
+(9)
+where 𝜌 is a positive penalty parameter, 𝑼 𝑖 is the dual
+multiplier, and 𝑙 = ||𝑐 ′ − 𝑐𝑔𝑡 ||22 is the reconstruction error.
+The optimization of this Lagrangian term can be performed
+in an alternative way, as
+𝑾 𝑡+1
+= 𝑎𝑟𝑔𝑚𝑖𝑛{𝑾 𝑖 } (𝑾 𝑡𝑖 , 𝒁 𝑡𝑖 , 𝑼 𝑡𝑖 ),
+𝑖
+(10)
+𝑡
+𝑡
+𝒁 𝑡+1
+= 𝑎𝑟𝑔𝑚𝑖𝑛{𝒁 𝑖 } (𝑾 𝑡+1
+𝑖
+𝑖 , 𝒁 𝑖 , 𝑼 𝑖 ),
+(11)
+− 𝒁 𝑡+1
+= 𝑼 𝑡𝑖 + 𝑾 𝑡+1
+𝑼 𝑡+1
+𝑖
+𝑖
+𝑖
+(12)
+(a) Weight distribution before applying rate-constrained
+quantization.
+Eq.10 corresponding to the updates of 𝑾 𝑖 can be solved
+using gradient descent. Eq.11 can be solved according to
+[37] as
++ 𝑼 𝑡𝑖 ),
+= Π𝑟 (𝑾 𝑡+1
+𝒁 𝑡+1
+𝑖
+𝑖
+(13)
+here, Π𝑟 represents the operation that decomposes the matrix
+into the TT format, truncated to the desired rank 𝑟. One can
+refer to [36] for more details on the ADMM procedure.
+After this ADMM-based optimization procedure, the
+weights of the network 𝑾 𝑟𝑖 are low rank, hence can be
+decomposed into the TT format as in Eq. 3, with a small
+approximation error. For sake of simplicity, in the following,
+we neglect the first dimension of 𝑸1𝑖 and the last dimension
+of 𝑸2𝑖 , hence 𝑸1𝑖 and 𝑸2𝑖 are respectively with size 𝑛1 × 𝑟
+and 𝑟 × 𝑛2 . As the vector of bias parameters of each layer 𝒃𝑖
+is of rank 1, they are not considered in this optimization. In
+summary, after this low-rank optimization step, the parameters of the layers {𝑾 𝑟𝑖 , 𝒃𝑖 } are approximated by their TT
+components {𝑸1𝑖 , 𝑸2𝑖 , 𝒃𝑖 } for the following processing steps.
+(b) Weight distribution after adopting rate-constrained quantization, with the number of centroid 𝑁 = 256.
+Figure 2: The weight distribution of coefficients of {𝑸1𝑖 , 𝑸2𝑖 }
+before&after applying rate-constrained quantization, we take
+light field scene ‘sideboard ’ as an example, the target rank
+𝑟 = 40 and number of centroid for quantization is 𝑁 = 256.
+3.3. Rate-Constrained Quantization
+3.3.1. Quantization strategies
+To further compact the learned model, we employ different quantization strategies for the parameters in 𝑸1𝑖 , 𝑸2𝑖
+and 𝒃𝑖 . Given that the number of parameters in the bias
+vectors 𝒃𝑖 is significantly smaller than that in the matrices
+𝑸1𝑖 , 𝑸2𝑖 , we opt for a simple uniform 16-bit quantization (half
+precision in PyTorch) for the parameters in 𝒃𝑖 . However, for
+the parameters in 𝑸1𝑖 , 𝑸2𝑖 , we utilize a training-aware nonuniform quantization to minimize the required bit number.
+The quantization strategy for {𝑸1𝑖 , 𝑸2𝑖 } is based on
+the characteristics of their parameter distribution. Fig. 2(a)
+shows the distribution of parameters of {𝑸1𝑖 , 𝑸2𝑖 }, where
+one can observe that most of the parameters are within
+the interval [−1, 1], while quite few (less than 0.5% of
+the total number) parameters are coarsely located outside
+J. Shi et al.: Preprint submitted to Elsevier
+Figure 3: Reconstructed views (‘boxes(5,5)’) using network
+weights quantized in uniform 16 bit, without (left) and with
+(right) truncation by the interval [-1,1].
+the interval [-1,1]. Although these parameters occupy only
+a small portion of the total network parameters, they are
+essential for a good light field reconstruction. As shown in
+Fig. 3, the truncation of parameters outside the interval [-1,
+1] causes severe image degradation, hence these parameters
+are of great importance and should retain in high precision.
+One the other hand, considering the small portion of these
+Page 4 of 13
+arXiv
+all previous layers, denoted as 𝕃𝑖 for 𝑖 ≤ 𝑖′ , and continue
+training the subsequent layers 𝕃𝑖 ∀𝑖 > 𝑖′ as follows:
+𝑎𝑟𝑔𝑚𝑖𝑛{𝑾 𝑖 ,𝒃𝑖 } ||𝑐 ′ − 𝑐𝑔𝑡 ||22 , ∀𝑖 > 𝑖′ ,
+1
+2
+̂ ,𝑸
+̂ } are fixed, ∀𝑖 ≤ 𝑖′
+𝑠.𝑡. {𝑸
+𝑖
+𝑖
+Figure 4: PSNR evolution after quantizing each layer. We
+take the light field scene ‘sideboard ’ with diffrent ranks 𝑟 =
+{40, 50, 70, 90} as an example.
+parameters, we carry out 16-bit uniform quantization (half
+precision in Pytorch) on them, which barely increases the
+final average bitrate.
+The quantization strategy for 𝑸1𝑖 , 𝑸2𝑖 is derived from the
+characteristics of their parameter distribution. In Fig. 2(a),
+we can observe that the majority of these parameters fall
+within the interval [−1, 1], while a small fraction (less than
+0.5% of the total) are located outside this range. Despite
+occupying only a minor portion of the total network parameters, these parameters play a crucial role in achieving
+high quality light field reconstruction. As demonstrated in
+Fig. 3, truncating parameters outside the interval [-1, 1] leads
+to severe image degradation, underscoring the significance
+of preserving these parameters with high precision. Given
+their relatively small number, we implement 16-bit uniform
+quantization (half precision in PyTorch) for these parameters, resulting in a negligible increase in the final average
+bitrate.
+While for parameters within the interval [-1, 1], we
+employ a non-uniform quantization approach using an optimized quantizer. Specifically, given a target centroid number
+𝑁, we apply the k-means algorithm to cluster these parameters into 𝑁 centroids, resulting in a global codebook denoted
+as 𝐶. It’s worth noting that, unlike the approach taken in
+[38], where authors develop individual local codebooks for
+each layer of the network, we utilize a single codebook
+for all layers, and the differences of their performance are
+discussed in Sec. 5.3.2. Once we have the codebook 𝐶,
+we quantize the parameters within the interval [-1, 1] by
+mapping their values to the nearest centroids. However, due
+to the interdependencies between layers in the network (the
+input of the current layer is the output of the precedent layer),
+quantizing parameters simultaneously across all layers could
+lead to quantization error accumulation, primarily affecting
+the quality of the output. To address this issue, we implement
+a ‘quantization-aware training’ strategy, wherein network
+layers are quantized one by one. Specifically, after quantizing 𝑸1𝑖′ , 𝑸2𝑖′ of a certain layer 𝕃𝑖′ , we freeze the weights of
+J. Shi et al.: Preprint submitted to Elsevier
+(14)
+(15)
+̂ 1, 𝑸
+̂ 2 } are non-uniformly quantized parameters.
+where {𝑸
+𝑖
+𝑖
+In this manner, our quantization approach allows for the
+compensation of quantization errors through the updates of
+network weights. Fig. 2(b) displays the weight distribution
+after rate-constrained quantization with 256 centroids. In
+Fig. 4, we present the observed performance evoluton as
+we sequentially quantize layers from the first to the last. It’s
+important to note that our quantization-aware training procedure effectively minimizes PSNR loss in the initial layers.
+The primary source of performance degradation arises from
+the quantization of specific layers and remains relatively
+limited.
+3.3.2. Huffman coding
+In addition to the quantization operation performed with
+an optimized quantizer, further reductions in bitrate can be
+achieved by employing Huffman coding [39]. However, a
+challenge arises due to the differing quantization schemes
+applied to parameters within the interval [-1, 1] and those
+outside this range. Specifically, parameters within the interval are non-uniformly quantized, while those outside are
+quantized using 16-bit fixed-point scalars. If we were to
+apply Huffman coding to these two sets of parameters separately, an additional flag bit would be required to signal
+to which set a transmitted parameter belongs. The combined entropy of these two sets can be roughly estimated
+as (𝑆1 ) + (𝑆2 ) + 1, where  represents the entropy
+of the parameter set, and 𝑆1 and 𝑆2 represent the sets of
+quantized parameters inside and outside [-1,1], respectively.
+It is evident that the inclusion of the extra flag bit would
+significantly impact the final bitrate.
+To save on the expense of using a flag bit, we’ve adopted
+a streamlined approach. Instead of creating separate Huffman code tables for parameters within and outside the [-1, 1]
+interval, we’ve created a single code table that covers both
+sets. The length of this combined table is the sum of the
+centroid count 𝑁, and the number of parameters outside [-1,
+1]. While encoding both sets together theoretically increases
+entropy as ({𝑆1 , 𝑆2 }) > (𝑆1 )+(𝑆2 ), it’s more efficient
+in terms of bitrate as it eliminates the need for the flag bit,
+leading to ({𝑆1 , 𝑆2 }) < (𝑆1 ) + (𝑆2 ) + 1.
+3.4. Network Distillation
+3.4.1. Conflict between low rank approximation and
+quantization
+As previously mentioned, both low-rank approximation
+and rate-constrained quantization serve the purpose of compacting the NeRF representation, but they target different
+aspects—parameter count and per-parameter bit count. It
+might seem intuitive to incorporate both low-rank approximation and quantization within the ADMM framework,
+Page 5 of 13
+arXiv
+(𝑟 = 40, 𝑁 = 32)
+PSNR = 24.60dB
+(𝑟 = 40, 𝑁 = 64)
+PSNR = 27.17dB
+(𝑟 = 40, 𝑁 = 256)
+PSNR = 31.10dB
+(𝑟 = 70, 𝑁 = 256)
+PSNR = 34.71dB
+(𝑟 = 90, 𝑁 = 256)
+PSNR = 35.22dB
+Figure 5: We show in the first row the central view of the light field ‘sideboard ’ reconstructed by quantized DLR-NeRF with
+different rank&centroid settings. The second row shows the weight distribution of each quantized DLR-NeRF. Larger is the rank
+of the model and higher is the number of centroids, better will be the reconstructed view.
+constraining both rank and bit count. However, due to the
+non-convex nature of these functions, attempting to optimize
+them simultaneously within the ADMM framework can lead
+to convergence challenges.
+An alternative approach involves performing low-rank
+approximation and quantization consecutively. First, we
+fine-tune the network with a low-rank constraint to obtain
+𝑾 𝑟𝑖 . Next, we decompose 𝑾 𝑟𝑖 into TT components, denoted
+as {𝑸1𝑖 , 𝑸2𝑖 }, and subsequently quantize them to obtain
+̂ 2 }. This sequence of operations can be summarized
+̂ 1, 𝑸
+{𝑸
+𝑖
+𝑖
+̂ 2 }. However,
+̂ 1, 𝑸
+as: 𝑾 𝑖 → 𝑾 𝑟𝑖 → {𝑸1𝑖 , 𝑸2𝑖 } → {𝑸
+𝑖
+𝑖
+this approach faces a challenge. During the rate-constrained
+quantization step, we freeze the weights of certain layers
+and update the weights 𝑾 𝑟𝑖 in all consecutive layers to
+compensate for quantization errors. Unfortunately, these
+updated weights may no longer adhere to the low-rank
+property. Therefore, one of the challenges in our pipeline
+design is to achieve quantization while preserving the lowrank characteristics of the network weights.
+3.4.2. Construction of DLR-NeRF
+To tackle this challenge, we insert a network distillation
+step between the low-rank approximation and quantization
+stages. This step involves creating a slimmer network, DLRNeRF, from the original LR-NeRF network.
+More specifically, after the low-rank approximation step,
+we decompose the weights 𝑾 𝑟𝑖 in each layer 𝕃𝑖 of LRNeRF into TT components {𝑸1𝑖 , 𝑸2𝑖 }. If {𝑸1𝑖 , 𝑸2𝑖 } has fewer
+parameters than 𝑾 𝑟𝑖 , i.e., (𝑛1 + 𝑛2 ) × 𝑟 < (𝑛1 × 𝑛2 ), we
+′
+′
+initialize two cascaded fully-connected layers 𝕃𝑖1 and 𝕃𝑖2 in
+DLR-NeRF with 𝑸1𝑖 and {𝑸2𝑖 , 𝒃𝑖 }. Otherwise, we initialize
+′
+one layer 𝕃𝑖 in DLR-NeRF with {𝑾 𝑟𝑖 , 𝒃𝑖 }. Consequently,
+DLR-NeRF can be seen as a deeper version of LR-NeRF
+with fewer layer parameters.
+J. Shi et al.: Preprint submitted to Elsevier
+We borrow the term ‘distillation’ from network compression field to describe the process, as initializing DLR-NeRF
+with TT components from LR-NeRF is akin to creating a
+student network (DLR-NeRF) from a teacher network (LRNeRF). The student network produces similar outputs but
+has fewer parameters. Importantly, the layer 𝕃′ of DLRNeRF not only stores scene information from LR-NeRF
+but also maintains its low-rank shape (𝑛1 × 𝑟 or 𝑟 × 𝑛2 ),
+unaffected by subsequent quantization. The fine-tuning of
+DLR-NeRF employs the same loss function as Eq. 2 to
+update its parameters.
+The network distillation serves as a bridge between lowrank approximation and quantization. The distilled DLRNeRF can undergo further quantization, as detailed in Sec. 3.3,
+without compromising the low-rank property of its weights.
+It’s worth noting that one could choose to skip the NeRF initialization and low-rank finetuning steps and train a distilled
+NeRF from scratch. However, as discussed in Sec. 5.3.1,
+weights trained from scratch follow a different distribution
+from low-rank weights and may not produce high-quality
+scene reconstructions.
+After applying the quantization operation on this DLRNeRF, the obtained QDLR-NeRF can be used to represent a
+light field in the compression context. One can indeed tranŝ 1, 𝑸
+̂ 2 (after Huffman
+mit the quantized network weights 𝑸
+𝑖
+𝑖
+Coding), ̂𝒃𝑖 (16 bits), the codewords (32 bits) and the camera
+parameters 𝑓 , Δ (32 bits) from the sender to the receiver.
+4. Training schedule and hyperparameters
+The training of such a workflow has four phases, as
+follows.
+a).Training the simplified NeRF: We simplified the
+architecture of NeRF by adopting one single MLP for inference. The depth of the adopted MLP is 8 and the number
+Page 6 of 13
+arXiv
+Figure 6: Rate-distortion curves of different compression methods, with tested light fields from the HCI synthetic dataset [40]
+and the EPFL real-world dataset [41].
+J. Shi et al.: Preprint submitted to Elsevier
+Page 7 of 13
+arXiv
+of channels is 256. We set the same query point number
+128 along each camera ray as in [16], and the camera pose
+parameters (𝑓 , Δ) are initialized to 𝑓 = 0.01𝑊 (𝑊 is the
+width of the light field views), Δ = 10. We adopt normalized
+depth for rendering. When training such a network, we
+followed the default configuration in [16], with the initial
+learning rate set to 5 × 10−4 and the exponential decay rate
+to 0.1. We finally trained the network for 3 × 105 iterations.
+b).Finetuning LR-NeRF: We finetuned LR-NeRF following the same configuration as in the previous step, except
+that in this step, the camera pose parameters are no longer
+updated. We finetune LF-NeRF for 3 × 105 iterations. The
+penalty factor 𝜌 for ADMM is set to 10.
+c).Finetuning DLR-NeRF: After the TT decomposition
+of the LR-NeRF weights and the initialization of DLRNeRF, we continued to finetune DLR-NeRF for 2 × 105
+iterations, during which the camera pose parameters are kept
+fixed.
+d).Quantizing DLR-NeRF: The quantization of the layers of DLR-NeRF is gradually carried out from the first to
+the last layer. We train the other layers for 3 × 104 iterations
+after quantizing each layer. The initial codebook for the
+interval [−1, 1] is obtained after 20 iterations of clustering
+in the k-means algorithm. Our proposed workflow has been
+implemented using pytorch and has been trained on a GPU
+of type GeForce RTX 2080 Ti with 11 GB memory.
+5. Compression performance analysis
+5.1. Settings
+We first trained a simplified NeRF with full rank. This
+initial model is then finetuned and distilled using four different ranks 𝑟 = {150, 90, 70, 40}, and we finally quantized
+the distilled models with 𝑁 = 256 centroids. The quantized
+models having a lower rank have fewer parameters, hence
+give a lower bitrate. We found that, when the target rank
+𝑟 is lower than 40, the light field reconstructed with the
+distilled Low-Rank NeRF (DLR-NeRF) is prone to artifacts.
+Therefore, we do not decrease the rank below 40, and to
+decrease the bitrate, we reduce the number of centroids to
+further reduce the model size. More precisely, we set 𝑁 =
+{256, 64, 32} when 𝑟 = 40.
+To test the effectiveness of our method, we carry out
+experiments using both synthetic and real-world light fields.
+Both of them are from widely used light field benchmark.
+For synthetic light fields, we took four scenes from the HCI
+dataset [40], i.e. boxes, sideboard, cotton, dino, each of them
+has an angular resolution (𝑈 , 𝑉 ) = (9, 9) and a spatial
+resolution (𝑋, 𝑌 ) = (512, 512). While for real-world light
+fields, we took four scenes Bikes, Danger, StonePillarsOutside, FountainVincent2 from the EPFL light field dataset
+[41], which have been captured using a plenoptic Lytro Illum
+camera. We took the central 9 × 9 views, each view having
+a spatial resolution of 432 × 624. Although ground truth
+camera poses are already available for synthetic data, we
+J. Shi et al.: Preprint submitted to Elsevier
+estimated the camera poses for both the synthetic and realworld data to show that our workflow is not limited by the
+availability of the camera pose parameters.
+5.2. Rate-Distortion Performance
+Fig. 5 shows the central view reconstructed using the
+QDLR-NeRF with different (𝑟, 𝑁) settings, and their corresponding weight probability distributions. One can easily
+notice that, larger is the rank of the DLR-NeRF model or
+higher is the number of centroids better is the reconstructed
+view. This is quite intuitive, as a larger rank means more
+parameters a model has, and more centroid means less
+quantization noise.
+However, in the compression context, besides the quality
+of the ‘compressed views’, we also need to take bitrate
+into account, i.e. the rate-distortion performance. To investigate the compression performance of our proposed method,
+we measure the rate-distortion performances with different rank&centroid settings, and compare them with those
+obtained when applying State-Of-The-Art (SOTA) video
+compression methods to light fields, by encoding the views
+as a pseudo video sequence. The codecs that we consider
+are the HEVC-Lozenge [42], the Jpeg-pleno VM2.0 standard designed specifically for light field compression, and
+learning-based RLVC [29], HLVC [28] and OpenDVC [30]
+compression methods. OpenDVC is an open implementation
+of the DVC [31].
+For the settings of each reference method, we use the
+HEVC HM-16.10 implementation in our test, with a GOP
+size equal to 4. The Jpeg-pleno standard needs an input
+disparity map that we estimated using the technique in
+[43]. When considering the RLVC, HLVC and OpenDVC
+methods, we directly used the authors’ codes with the recommended configurations, i.e., for the RLVC method, we set
+the P-frames number to 6 for both the forward and backward
+directions, which means a GOP size of 13, while for the
+HLVC and OpenDVC methods, we used the default setting
+of GOP size equal to 10. When testing the reference methods
+RLVC, HLVC and OpenDVC, we used their trained models.
+There are four pre-trained models for each method, with an
+optional hyper-parameter 𝜆 = {256, 512, 1024, 2048} that
+controls the trade-off between distortion and bitrate. Higher
+𝜆 means less distortion but larger bitrate.
+Since our method is based on NeRF, originally designed
+for view synthesis, we use PSNR on RGB channels to
+measure reconstruction quality instead of YUV. Fig. 6 shows
+the PSNR-Rate curves of each method with different light
+fields. The bitrate is evaluated by bit per pixel (bpp). One can
+observe from the figures that our proposed method outperforms the reference methods on synthetic data at moderate
+bitrate by a margin about 1dB in most of the tested scenes.
+While on real-world light fields, though the margin is smaller
+than that of synthetic data, our method still shows superiority
+than other referenced methods in most of cases. Let us note
+that, compared to synthetic light fields, real-world light fields
+captured by Lytro Illum exhibit more noise and various
+artifacts, including vignetting and blurriness. These factors
+Page 8 of 13
+arXiv
+GT view(5,5)
+RLVC
+HLVC
+HEVC
+JPL
+Ours
+boxes
+PSNR=35.49dB
+bpp=0.110
+PSNR=34.68dB
+bpp=0.094
+PSNR=35.73dB
+bpp=0.099
+PSNR=36.51
+bpp=0.100
+PSNR=38.19dB
+bpp=0.105
+sideboard
+PSNR=30.36dB
+bpp=0.156
+PSNR=28.52dB
+bpp=0.139
+PSNR=30.21dB
+bpp=0.133
+PSNR=32.02
+bpp=0.130
+PSNR=34.18dB
+bpp=0.128
+Danger
+PSNR=31.50dB
+bpp=0.104
+PSNR= 31.86dB
+bpp=0.141
+PSNR=31.39dB
+bpp=0.110
+PSNR=32.79
+bpp=0.100
+PSNR=33.04dB
+bpp=0.110
+FountainVincent
+PSNR=30.48dB
+bpp=0.110
+PSNR= 30.51dB
+bpp=0.090
+PSNR=30.25dB
+bpp=0.110
+PSNR=30.62
+bpp=0.100
+PSNR=30.96dB
+bpp=0.103
+Figure 7: Averaged reconstruction error maps of decompressed light fields, when using the RLVC, HLVC, HEVC, Jpeg-pleno
+methods and our method, along with the corresponding PSNR and bitrate values.
+introduce inconsistencies between views, which can hinder
+our method’s ability to learn accurate scene information and
+result in lower-quality reconstructed views.
+Figure 7 shows the averaged error maps for the different
+methods. Note that the error maps are averaged over all the
+views, to account for the fact that some methods, such as
+Jpeg-Pleno, RLVC, OpenDVC, lead to strong variations in
+quality on the different views (see Fig. 8). We can observe
+that our method yields lower error and better compression
+results than other methods on synthetic data (boxes, sideboard). When using real-world Lytro light fields suffering
+from color inconsistency between angular views, our method
+may learn inaccurate scene information and hence generate
+some errors (like the windows in scene FountainVincent).
+However, it can still well capture scene geometry information and better reconstruct the object contours (like the
+contours of the person in the scene).
+Compared with the referenced methods that compress
+each input frame, our method focuses on retrieving the entire
+J. Shi et al.: Preprint submitted to Elsevier
+scene with as fewer parameters as possible. This distinct
+design endows our method with two advantages:
+1). Better consistency across views. Fig. 8 displays
+PSNR variations based on viewpoints. We can observe that
+methods like RLVC, HLVC, and OpenDVC initially intracode key frames and then compress other frames within the
+GOP using motion-compensated inter-coding. In contrast,
+Jpeg-pleno employs the central view as the reference for
+subsequent processes. Views used as key frames or reference
+tend to have better quality than other decompressed views,
+resulting in significant quality differences among viewpoints. Unlike methods relying on inter-coding and reference
+views, our method eliminates the need for a reference view,
+resulting in more consistent decompression quality across
+rendered views.
+2). Capacity of rendering views in any angular position.
+Different from other methods that compress a set of input
+views, our method, thanks to NeRF, encodes the scene
+information. Hence the scene can be flexibly reconstructed
+Page 9 of 13
+arXiv
+Table 1
+Average PSNR of views generated by NeRF initialized with
+random weights and with low-rank weights (with 𝑟 = 40). Both
+variants have fully converged.
+Variants
+boxes
+sideboard
+dino
+cotton
+average
+NeRF-rand
+25.18dB
+19.88dB
+23.27dB
+32.56dB
+25.22dB
+NeRF-lr
+37.85dB
+30.93dB
+40.90dB
+45.18dB
+38.72dB
+Table 2
+Average PSNR and Bitrate obtained when using different quantization options: with fixed-point scalar quantization (DLRNeRF-fpQuant), with one codebook for each layer (DLRNeRF-localQuant), and when using a shared codebook for all
+layers (DLR-NeRF-globalQuant).
+Figure 8: PSNR variation along the viewpoints for the light
+field ‘boxes’. All views have been compressed at a similar
+bitrate.
+by rendering the light field in any angular position on the
+decoder side.
+5.3. Ablation Study
+In this section, we evaluate different aspects of the proposed method.
+5.3.1. Random initialization vs Low-rank initialization
+As aforementioned in Sec. 3.4, instead of the proposed
+NeRF initialization and finetuning steps, one could directly
+train a distilled NeRF with randomly initialized weights. Although this variant has a simpler training schedule, we show
+that it severely degrades the quality of the reconstruction. To
+evaluate the interest of the proposed distillation approach,
+we adopted the architecture of the distilled NeRF with rank
+40, and respectively initialized it using low-rank weights
+(noted as NeRF-lr) and random initialized weights drawn
+from Kaiming uniform distribution [44] (noted as NeRFrand). We then trained the two models until convergence.
+To guarantee the same experimental conditions, the two
+variants share the same camera pose and are trained without
+quantization. Table 1 shows the PSNR of the light fields
+generated by NeRF-rand and NeRF-ft, with the same camera
+pose. The distilled NeRF trained with randomly initialized
+weights yields poor reconstruction quality. While NeRF
+trained with low-rank weights gives a good reconstruction
+quality. Fig. 9 shows views reconstructed when using the
+two variants, and an example of weight distribution (for
+the light field ‘boxes’). From the figure, we can observe
+that the weights of NeRF-rand and NeRF-lr follow different
+distributions. NeRF-lr has more values around 0 and long
+tails, NeRF-rand has fewer values around 0. Most weights
+are within the interval [−0.25, 0.25] and the distribution does
+not have long tails. In terms of reconstruction quality, NeRFrand produces views with severe blurriness, while NeRFlr gives views with subtle details, which means that it is
+better to use the low-rank NeRF to initialize the distilled
+J. Shi et al.: Preprint submitted to Elsevier
+Quantization options
+PSNR
+Bitrate
+DLR-NeRF-fpQuant
+38.72dB
+0.30bpp
+DLR-NeRF-localQuant
+38.70dB
+0.12bpp
+DLR-NeRF-globalQuant
+38.18dB
+0.06bpp
+version. The difference in terms of performance between
+NeRF-lr and NeRF-rand can be explained by the fact that,
+due to its low number of parameters of the distilled network,
+the optimization of the distilled network from scratch (with
+random initialization) may fall in local minima, giving a
+lower performance compared to the use of weights resulting
+from the low rank approximation of the large network.
+5.3.2. Quantization strategy analysis
+Local quantization vs global quantization Instead of
+using a global codebook of 𝑁 centroids for quantizing all
+layers, one can also utilize one codebook optimized for each
+layer. Table 5.3.2 shows the average PSNR and bitrate obtained when using the different quantization options: 1). with
+32-bit fixed-point scalar quantization, i.e. saving weights in
+32-bit float type (DLR-NeRF-fpQuant); 2). with a quantizer
+optimized for each layer (DLR-NeRF-localQuant) and 3).
+a global codebook for all layers (DLR-NeRF-globalQuant).
+The local quantization suffers less from distortion but increases significantly the bitrate compared with the global
+quantization. While global quantization brings more distortion, its compression ratio is higher. Therefore, we adopted
+a global quantizer as it gives a lower bitrate with acceptable
+performance loss. Moreover, learning one codebook is much
+easier than learning several codebooks per layer.
+5.3.3. Contribution of each block of the architecture
+To justify the contribution of each building block of the
+workflow, we measure the averaged PSNR and the model
+size after each step of our algorithm, and set original NeRF
+[16] (NeRF-org) as our baseline, with whose size being
+100%. The original NeRF has coarse and fine MLPs, and
+uses grund truth camera poses for synthesis. In our workflow,
+we instead adopt a simplified NeRF with only one MLP to
+learn scene information, and optimize it with a low rank
+Page 10 of 13
+arXiv
+Weight distribution
+boxes(5,5)
+sideboard(5,5)
+cotton(5,5)
+dino(5,5)
+Figure 9: Weight distribution and views reconstructed using NeRF-rand (1st row) and NeRF-lr (2nd row), with several scenes.
+constraint (LR-NeRF). The camera poses are estimated during the optimization of the LR-NeRF. Then this LR-NeRF
+is distilled into the DLR-NeRF with respect to the desired
+rank, here, we set desired the rank to 𝑟 = 40 for LR-NeRF
+and DLR-NeRF. DLR-NeRF is finally quantized with the
+number of centroids set to 𝑁 = 256 to obtain QDLR-NeRF.
+Table 5.3.3 gives the PSNR and the model size evolution
+after each step of our workflow. The PSNR and size values
+are averaged over four synthetic scenes. We can observe
+from the table that, the transition from NeRF-org to LRNeRF brings about 3dB PSNR loss. The loss is due to two
+factors: 1.) The camera poses are estimated instead of being
+ground truth camera poses, which introduces some errors
+2.) The low rank constraint slightly decreases the synthesis
+performance. One could also think that this loss is caused
+by using only one MLP for synthesis. However, with most
+of light fields, the default sampling rate of 128 along light
+rays is enough for one single MLP to yield high quality
+reconstruction. The replacement of two MLPs by one barely
+bring any performance loss.
+From LR-NeRF to DLR-NeRF, by distilling the network
+with the desired rank 𝑟 = 40, we reduce the model size by
+a factor of 3 with only a 0.1dB PSNR loss. This small loss
+means, that the target rank of 40 (the full rank being 256) can
+already store most of scene information for reconstruction,
+which also proves the effectiveness of our low rank approximation. From DLR-NeRF to QDLR-NeRF, the network is
+quantized from the first to the last layer, this gradual quantization step effectively reduces the model size to 1/5, with
+a limited performance loss of 0.6dB. In summary, thanks
+to the proposed low rank optimization, network distillation
+and quantization operations, we ultimately reduce the model
+size from 100% (the reference being the bit number of the
+original NeRF) to 3.3%, which is crucial in a context of
+J. Shi et al.: Preprint submitted to Elsevier
+Table 3
+PSNR averaged on the 8 test light fields at the different steps of
+the proposed workflow: Original NERF (NeRF-org), NERF with
+the low rank constraint (LR-NeRF), Distilled low-rank NeRF
+(DLR-NeRF) and after quantization of DLR-NeRF (QDLRNeRF).
+Metrics
+NeRF-org
+LR-NeRF
+DLR-NeRF
+QDLR-NeRF
+PSNR
+41.98dB
+38.83dB
+38.72dB
+38.18dB
+Size
+100%
+50%
+16.7%
+3.3%
+light field compression, but also simply in terms of storage
+requirement for the NeRF model.
+6. Discussion
+Although our proposed method is able to effectively
+compress light fields, due to the fact that, it is based on the
+NeRF method, factors that limit the performance of NeRF
+will consequently become limitations of our method. For
+example, when applying NeRF to learn light fields captured
+by Lytro, blurriness and vignetting in each sub-aperture view
+may prevent the network from reconstructing precise scenes.
+As a result, the compression performance of our QDLRNeRF is limited by these artifacts. While better performance
+is obtained on synthetic data, as they do not include these
+artifacts. That also explains why the gaps between the ratedistortion curves of our method and those of the reference
+methods on synthetic light fields are larger than those on
+Lytro-captured light fields.
+Finally, please note that, even if we have chosen the
+original NeRF to demonstrate the interest of the proposed
+method, the method can obviously apply to different variants
+of NeRF implementations, e.g., SIREN[45], PlenOctrees[46],
+including to the recent SIGNET solution [47].
+Page 11 of 13
+arXiv
+7. Conclusion
+In this paper, we have proposed a Quantized Distilled
+Low Rank Neural Radiance Field (QDLR-NeRF) representation for light field compression. The method optimizes
+a NeRF with a low rank constraint using an ADMM optimization framework to obtain the so-called LR-NeRF,
+the weights in LR-NeRF are low-rank, hence can be decomposed into a Tensor Train format. The decomposed
+weights are then used to initialize a distilled version of NeRF
+named DLR-NeRF, which has fewer parameters. Finally,
+we gradually quantize the layers of DLR-NeRF from the
+first layer to the last one using a global codebook learned
+by k-means, to get QDLR-NeRF. The distillation operation
+avoids tackling the rank-constrained optimization and the
+rate-constrained quantization simultaneously, making the
+entire pipeline work stably to compress a light field. The low
+rank optimization and quantization operations effectively
+reduce the size of the model without significantly degrading
+the reconstruction performance. Experimental results, using
+both synthetic and real-world light fields, show that our
+method outperforms the reference methods with a large
+margin. Furthermore, due to the fact that our method is based
+on synthesis method, it also has the advantage of generating
+novel views as densely as possible.
+References
+[1] C. Conti, P. Nunes, L. Soares, HEVC-based light field image coding
+with bi-predicted self-similarity compensation, in: IEEE Int. Conf.
+on Multimedia Expo. Workshops (ICMEW), 2016, pp. 1–4.
+[2] W. Ahmad, M. Ghafoor, S. A. Tariq, A. Hassan, M. Sjostrom, R. Olsson, Computationally efficient light field image compression using a
+multiview HEVC framework, IEEE Access 7 (2019).
+[3] F. Dai, J. Zhang, Y. Ma, Y. Zhang, Lenselet image compression
+scheme based on subaperture images streaming, in: IEEE Int. Conf.
+on Image Processing (ICIP), 2015, pp. 4733–4737.
+[4] H. Amirpour, M. Pereira, A. Pinheiro, High efficient snake order
+pseudo-sequence based light field image compression, in: IEEE Data
+Compression Conf. (DCC), 2018, pp. 397–397.
+[5] E. Dib, M. L. Pendu, C. Guillemot, Light field compression using
+fourier disparity layers, in: IEEE Int. Conf. on Image Processing
+(ICIP), 2019, pp. 3751–3755.
+[6] X. Jiang, M. L. Pendu, R. Farrugia, C. Guillemot, Light field
+compression with homography-based low-rank approximation, IEEE
+J. Sel. Topics Signal Process. (JSTSP) 11 (2017) 1132–1145.
+[7] R. Verhack, T. Sikora, G. V. Wallendael, P. Lambert, Steered mixtureof-experts for light field images and video: Representation and coding,
+IEEE Trans. on Multimedia (TMM) 22 (2020) 579–593.
+[8] M. de Carvalho, M. Pereira, G. Alves, E. da Silva, C. Pagliari,
+F. Pereira, V. Testoni, A 4D DCT-based lenslet light field codec, in:
+IEEE Int. Conf. on Image Processing (ICIP), 2018, pp. 435–439.
+[9] M. Magnor, A. Endmann, B. Girod, Progressive compression and
+rendering of light fields, Conf. on Vision, Modeling & Visualization
+(VMV) (2000).
+[10] M. Krivokuca, E. Miandji, C. Guillemot, P. Chou, Compression
+of plenoptic point cloud attributes using 6-d point clouds and 6-d
+transforms, IEEE Trans. on Multimedia (TMM) (2021).
+[11] D. Liu, P. An, R. Ma, W. Zhan, X. Huang, A. Yahya, Contentbased light field image compression method with gaussian process
+regression, IEEE Trans. on Multimedia (TMM) 22 (2019) 846–859.
+[12] W. Ahmad, S. Vagharshakyan, M. Sjöström, A. Gotchev, R. Bregovic,
+R. Olsson, Shearlet transform based prediction scheme for light field
+compression, in: Data Compression Conf. (DCC), 2018, pp. 396–396.
+J. Shi et al.: Preprint submitted to Elsevier
+[13] X. Jiang, M. L. Pendu, C. Guillemot, Light field compression using
+depth image based view synthesis, in: IEEE Int. Conf. on Multimedia
+Expo Workshops (ICMEW), 2017, pp. 19–24.
+[14] Y. Zhang, W. Dai, Y. Li, C. Li, J. Hou, J. Zou, H. Xiong, Light
+field compression with graph learning and dictionary-guided sparse
+coding, IEEE Trans. on Multimedia (TMM) (2022).
+[15] X. Huang, P. An, Y. Chen, D. Liu, L. Shen, Low bitrate light field
+compression with geometry and content consistency, IEEE Trans. on
+Multimedia (TMM) 24 (2022) 152–165.
+[16] B. Mildenhall, P. Srinivasan, M. Tancik, J. Barron, R. Ramamoorthi,
+R. Ng, NeRF: Representing scenes as neural radiance fields for view
+synthesis, in: Eur. Conf. on Computer Vision (ECCV), 2020, pp. 405–
+421.
+[17] A. Yu, V. Ye, M. Tancik, A. Kanazawa, pixelneRF: Neural radiance
+fields from one or few images, IEEE. Int. Conf. on Computer Vision
+and Pattern Recognition (CVPR) (2021) 4576–4585.
+[18] L. Liu, J. Gu, K. Lin, T. Chua, C. Theobalt, Neural sparse voxel fields,
+Advances in Neural Information Processing Systems (NIPS) (2020).
+[19] A. Chen, Z. Xu, F. Zhao, X. Zhang, F. Xiang, J. Yu, H. Su, MVSNeRF: Fast generalizable radiance field reconstruction from multiview stereo, in: IEEE Int. Conf. on Computer Vision (ICCV), 2021.
+[20] Z. Wang, S. Wu, W. Xie, M. Chen, V. Prisacariu, NeRF−−: Neural
+radiance fields without known camera parameters, arXiv preprint
+arXiv:2102.07064 (2021).
+[21] M. Bemana, K. Myszkowski, H. Seidel, T. Ritschel, X-Fields: Implicit
+neural view-, light- and time-image interpolation, ACM Trans. on
+Graphics (TOG) 39 (2020).
+[22] Y. Jeong, S. Ahn, C. Choy, A. Anandkumar, M. Cho, J. Park, Selfcalibrating neural radiance fields, in: IEEE Int. Conf. on Computer
+Vision (ICCV), 2021, pp. 5846–5854.
+[23] S. Han, H. Mao, W. J. Dally, Deep compression: Compressing
+deep neural networks with pruning, trained quantization and huffman
+coding, Int. Conf. on Learning Representations (ICLR) (2016).
+[24] G. Hinton, O. Vinyals, J. Dean, Distilling the knowledge in a neural
+network, ArXiv abs/1503.02531 (2015).
+[25] G. Sullivan, J. Ohm, W. Han, T. Wiegand, Overview of the high
+efficiency video coding (HEVC) standard, EEE Trans. Circuits Syst.
+Video Technol. (TCSVT) 22 (2012) 1649–1668.
+[26] ISO/IEC JTC 1/SC29, High Efficiency Coding and Media Delivery in
+Heterogeneous Environments – Part 2: High Efficiency Video Coding.
+ISO/IEC 23008-2:2017, Technical Report, 2017.
+[27] Jpeg pleno, https://jpeg.org/jpegpleno/, 2022.
+[28] R. Yang, F. Mentzer, L. V. Gool, R. Timofte, Learning for video
+compression with hierarchical quality and recurrent enhancement,
+in: IEEE. Int. Conf. on Computer Vision and Pattern Recognition
+(CVPR), 2020.
+[29] R. Yang, F. Mentzer, L. V. Gool, R. Timofte, Learning for video
+compression with recurrent auto-encoder and recurrent probability
+model, IEEE J. Sel. Topics Signal Process. (JSTSP) 15 (2021) 388–
+401.
+[30] R. Yang, L. V. Gool, R. Timofte, OpenDVC: An open source
+implementation of the DVC video compression method, CoRR
+abs/2006.15862 (2020).
+[31] G. Lu, W. Ouyang, D. Xu, X. Zhang, C. Cai, Z. Gao, DVC: An endto-end deep video compression framework, in: IEEE. Int. Conf. on
+Computer Vision and Pattern Recognition (CVPR), 2019, pp. 10998–
+11007.
+[32] J. Shi, C. Guillemot, Light field compression via compact neural scene
+representation, in: IEEE Int. Conf. on Acoustics, Speech and Signal
+Processing (ICASSP), IEEE, 2023, pp. 1–5.
+[33] M. Levoy, P. Hanrahan, Light field rendering, in: Proc. 23rd Annu.
+Conf. Comput. Graph. Interact. Techn.(CCGIT), 1996, pp. 31–42.
+[34] J. Schonberger, J. Frahm, Structure-from-motion revisited, in: IEEE.
+Int. Conf. on Computer Vision and Pattern Recognition (CVPR),
+2016, pp. 4104–4113.
+[35] I. Oseledets, Tensor-train decomposition, SIAM Journal on Scientific
+Computing 33 (2011) 2295–2317.
+Page 12 of 13
+arXiv
+[36] M. Yin, Y. Sui, S. Liao, B. Yuan,
+Towards efficient tensor
+decomposition-based dnn model compression with optimization
+framework, in: IEEE. Int. Conf. on Computer Vision and Pattern
+Recognition (CVPR), 2021, pp. 10674–10683.
+[37] S. Boyd, N. Parikh, E. Chu, Distributed optimization and statistical
+learning via the alternating direction method of multipliers, Now
+Publishers Inc., 2011.
+[38] A. Fan, P. Stock, B. Graham, E. Grave, R. Gribonval, H. Jegou,
+A. Joulin, Training with quantization noise for extreme model
+compression, Int. Conf. on Learning Representations (ICLR) (2020).
+[39] D. Huffman, A method for the construction of minimum-redundancy
+codes, Proceedings of the IRE 40 (1952) 1098–1101.
+[40] K. Honauer, O. Johannsen, D. Kondermann, B. Goldluecke, A dataset
+and evaluation methodology for depth estimation on 4D light fields,
+in: Asian Conf. on Computer Vision (ACCV), 2016, pp. 19–34.
+[41] M. Rerabek, T. Ebrahimi, New light field image dataset, in: Int.
+Conf. on Quality of Multimedia Experience (QoMEX), EPFL-CONF218363, 2016.
+[42] M. Rizkallah, T. Maugey, C. Yaacoub, C. Guillemot, Impact of light
+field compression on focus stack and extended focus images, in: IEEE
+Eur. Signal Process. Conf. (EUSIPCO), 2016, pp. 898–902.
+[43] J. Shi, X. Jiang, C. Guillemot, A framework for learning depth from
+a flexible subset of dense and sparse light field views, IEEE Trans.
+Image Process. (TIP) 28 (2019) 5867–5880.
+[44] K. He, X. Zhang, S. Ren, J. Sun, Delving deep into rectifiers:
+Surpassing human-level performance on imagenet classification, in:
+IEEE Int. Conf. on Computer Vision (ICCV), 2015, pp. 1026–1034.
+[45] V. Sitzmann, J. Martel, A. Bergman, D. Lindell, G. Wetzstein, Implicit neural representations with periodic activation functions, in:
+Advances in Neural Information Processing Systems (NIPS), 2020.
+[46] A. Yu, R. Li, M. Tancik, H. Li, R. Ng, A. Kanazawa, Plenoctrees for
+real-time rendering of neural radiance fields, in: IEEE Int. Conf. on
+Computer Vision (ICCV), 2021, pp. 5752–5761.
+[47] B. Y. Feng, A. Varshney, SIGNET: Efficient neural representation for
+light fields, in: IEEE Int. Conf. on Computer Vision (ICCV), 2021,
+pp. 14224–14233.
+J. Shi et al.: Preprint submitted to Elsevier
+Page 13 of 13

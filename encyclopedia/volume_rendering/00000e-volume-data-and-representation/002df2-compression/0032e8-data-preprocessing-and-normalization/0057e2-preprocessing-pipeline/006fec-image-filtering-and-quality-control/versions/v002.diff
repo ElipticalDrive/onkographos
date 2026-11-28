@@ -1,0 +1,102 @@
+--- v001.md
++++ v002.md
+@@ -4,12 +4,12 @@
+ 
+ ## Overview
+-Image filtering and quality control removes unwanted artifacts, distortions, and noise from acquired data to improve the accuracy of downstream 3D reconstruction and volume rendering [S1, unofficial]. It solves the problem of degraded reconstruction quality caused by transient objects, motion blur, or sensor noise in input imagery. It differs from sibling pipelines by focusing specifically on the removal of visual artifacts and normalization of intensity values rather than semantic segmentation, partitioning, or format conversion.
++Image filtering and quality control removes unwanted artifacts, distortions, and noise from acquired data to improve the accuracy of downstream 3D reconstruction and volume rendering [S1, unofficial]. It solves the problem of degraded reconstruction quality caused by artifacts and distortions in input imagery [S1, unofficial]. It differs from sibling pipelines by focusing specifically on the removal of visual artifacts and normalization of intensity values rather than semantic segmentation, partitioning, or format conversion [G].
+ 
+ ## Shared principles
+-The family relies on two core mechanisms: normalization and filtering.
++The family relies on two core mechanisms: normalization and filtering [G].
+ 
+-**Normalization** scales scalar values into a standard range, typically $[0, 1]$, to mitigate variations across different acquisitions and sensors [S3, unofficial]. This ensures that intensity differences are preserved numerically, which is critical for the stability of deep learning models [S1, unofficial].
++**Normalization** scales scalar values into a standard range, typically $[0, 1]$, to mitigate variations across different acquisitions and sensors [S3, unofficial].
+ 
+-**Filtering** applies low-pass kernels, such as Gaussian or sinc functions, to suppress high-frequency noise and aliasing while preserving essential frequencies as defined by the Nyquist theorem [S3, unofficial]. Median filtering is also employed to remove specific artifacts like salt-and-pepper noise without blurring edges [S1, unofficial].
++**Filtering** applies low-pass kernels, such as Gaussian or sinc functions, to suppress high-frequency noise and aliasing while preserving essential frequencies as defined by the Nyquist theorem [S3, unofficial].
+ 
+ ## Subtopics
+@@ -18,6 +18,75 @@
+ A coarse pre-filtering pipeline to remove low-quality images dominated by transient objects from unconstrained photo collections, ensuring robust training and evaluation for view synthesis systems. It differs from standard LDR preprocessing by explicitly reconstructing linear radiance values and preserving relative intensity differences through uniform scaling rather than quantization, ensuring numerical stability during deep learning training. Choose this when dealing with unconstrained, "wild" photo collections where transient objects (people, vehicles) and varying focus levels are prevalent. See [Wild Scene Preprocessing & Test Set Selection](13103-wild-scene-preprocessing-test-set-selection.md).
+ 
++```python
++def preprocess_wild_scene(images, nima_scores, deeplab_segmentations, mask_rcnn_masks, sfm_points, sharpness_mean, sharpness_std, sfm_point_threshold=100):
++    training_images = []
++    test_candidates = []
++    for i, img in enumerate(images):
++        sharpness = compute_variance_of_laplacians(img)
++        if sharpness < sharpness_mean - 1.5 * sharpness_std:
++            continue
++        people_animal_mask = mask_rcnn_masks[i]['people'] | mask_rcnn_masks[i]['animals']
++        vehicle_mask = mask_rcnn_masks[i]['vehicles']
++        img.apply_mask(people_animal_mask)
++        if vehicle_mask.any():
++            sfm_points_under_vehicle = [p for p in sfm_points if point_in_mask(p, vehicle_mask)]
++            if len(sfm_points_under_vehicle) < sfm_point_threshold: # [G] threshold not given in sources
++                continue
++        img = apply_egoblur(img, vehicle_mask)
++        nima = nima_scores[i]
++        seg = deeplab_segmentations[i]
++        transient_pixels = count_class_pixels(seg, 'transient')
++        total_pixels = img.size[0] * img.size[1]
++        transient_ratio = transient_pixels / total_pixels
++        if nima >= 3.0 and transient_ratio <= 0.8:
++            training_images.append(img)
++            test_candidates.append({'image': img, 'nima': nima, 'ratio': transient_ratio})
++    if not test_candidates:
++        return training_images, []
++    nima_vals = sorted([c['nima'] for c in test_candidates])
++    ratio_vals = sorted([c['ratio'] for c in test_candidates])
++    nima_threshold = nima_vals[int(0.7 * len(nima_vals))]
++    ratio_threshold = ratio_vals[int(0.25 * len(ratio_vals))]
++    final_test_set = [
++        c['image'] for c in test_candidates
++        if c['nima'] >= nima_threshold and c['ratio'] <= ratio_threshold
++    ]
++    return training_images, final_test_set
++
++def compute_variance_of_laplacians(img): # [G] standard variance of Laplacian kernel response
++    return standard_variance(apply_laplacian_kernel(img))
++
++def count_class_pixels(seg, class_name):
++    return sum(1 for pixel in seg if pixel.label == class_name)
++
++def point_in_mask(point, mask):
++    return mask[point.y, point.x]
++
++def apply_egoblur(img, mask): # [G] implementation not provided
++    return img
++```
++
+ ### [TripoSR Image Preprocessing](16289-triposr-image-preprocessing.md)
+ This method prepares single-view images for the TripoSR 3D reconstruction model by removing backgrounds, centering the subject, and converting the image to a normalized 50% gray background format. It solves the problem of inconsistent object scales and distracting backgrounds that degrade the performance of diffusion-based inverse rendering models. Choose this when using the TripoSR model which requires a consistent, centered subject on a neutral background. See [TripoSR Image Preprocessing](16289-triposr-image-preprocessing.md).
++
++```python
++def preprocess_for_triposr(image, foreground_ratio=0.85):
++    rembg_session = new_session()
++    image = remove(image, session=rembg_session)
++    w, h = image.size
++    scale = foreground_ratio / max(w, h)
++    new_w, new_h = int(w * scale), int(h * scale)
++    image = image.resize((new_w, new_h), Image.LANCZOS)
++    gray_val = int(0.5 * 255)
++    background = Image.new("RGBA", (new_w, new_h), (gray_val, gray_val, gray_val, 255))
++    offset_x = (new_w - image.width) // 2
++    offset_y = (new_h - image.height) // 2
++    background.paste(image, (offset_x, offset_y), image)
++    image_array = np.array(background).astype(np.float32) / 255.0
++    rgb = image_array[:, :, :3]
++    alpha = image_array[:, :, 3:4]
++    composite = rgb * alpha + (1 - alpha) * 0.5
++    return Image.fromarray((composite * 255.0).astype(np.uint8))
++```
+ 
+ ### Dataset Preprocessing (Denoising & Background Prior)
+@@ -28,5 +97,5 @@
+ 
+ ## Background
+-The concept of removing artifacts to improve 3D reconstruction accuracy is foundational to volume scanning and rendering [S1, unofficial]. Techniques like Gaussian and median filtering have long been used for noise reduction in acquired data [S1, unofficial]. In medical contexts, preprocessing is essential for converting DICOM files (CT/MRI) into normalized arrays for analysis [S3, unofficial]. Scientific applications include filtering confocal microscopy volumes and normalizing CFD outputs to ensure artifact-free input for visualization pipelines [S3, unofficial].
++Techniques like Gaussian and median filtering have long been used for noise reduction in acquired data [S1, unofficial]. In medical contexts, preprocessing is essential for converting DICOM files (CT/MRI) into normalized arrays for analysis [S3, unofficial]. Scientific applications include filtering confocal microscopy volumes and normalizing CFD outputs to ensure artifact-free input for visualization pipelines [S3, unofficial].
+ 
+ ## Sources

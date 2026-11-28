@@ -1,0 +1,154 @@
+# Neural Field Derivatives via Autograd
+
+Also called: Differential Operators (Gradient, Divergence, Laplace), Gradient, Laplace via Autograd, autograd operators, neural field derivatives
+
+## Overview
+This method computes spatial differential operators (gradient, divergence, Laplacian) of neural field outputs with respect to their spatial inputs using automatic differentiation (autograd) [S1, unofficial]. It enables supervision on gradient targets, such as Eikonal loss or surface smoothness constraints, by leveraging the computational graph built during the forward pass [S1, unofficial]. It builds on [Automatic Differentiation (Reverse/Adjoint Mode)](7151-automatic-differentiation-reverse-adjoint-mode.md) [G].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A differentiable neural field model $f: \mathbb{R}^d \to \mathbb{R}^k$ and a batch of input points $X \in \mathbb{R}^{N \times d}$ [S1, unofficial].
+- Outputs: The computed derivative field (gradient, divergence, or Laplacian) with the same spatial shape as $X$ [S1, unofficial].
+
+**Data Structures:**
+- The neural field is implemented as a differentiable module where weights are tracked parameters [S1, unofficial].
+- Inputs $X$ must be leaf tensors with `requires_grad=True` to enable gradient computation with respect to spatial coordinates [G].
+
+**Steps:**
+
+1. **Forward Pass:** Compute the field output $Y = f(X)$ [S1, unofficial].
+2. **Gradient Computation:** To compute the gradient $\nabla_X Y \in \mathbb{R}^{N \times d \times k}$:
+   - If $k=1$ (scalar field), compute $\nabla_X Y = \frac{\partial Y}{\partial X}$ directly [S1, unofficial].
+   - If $k>1$ (vector field), compute the Jacobian matrix $J \in \mathbb{R}^{N \times k \times d}$ where $J_{n,i,j} = \frac{\partial Y_{n,i}}{\partial X_{n,j}}$ [S1, unofficial].
+   - In PyTorch, this is done using `torch.autograd.grad` with `create_graph=True` to allow higher-order derivatives [S1, unofficial].
+3. **Divergence Computation:** For a vector field $Y \in \mathbb{R}^{N \times d}$, the divergence $\nabla \cdot Y \in \mathbb{R}^N$ is the trace of the Jacobian [S1, unofficial]. This is computed by summing the diagonal elements of the Jacobian for each sample point [S1, unofficial].
+4. **Laplacian Computation:** The Laplacian $\Delta Y = \nabla \cdot (\nabla Y)$ is computed as the divergence of the gradient [S1, unofficial]. For a scalar field, this is the trace of the Hessian matrix [G].
+
+**Formulas:**
+- Gradient: $\nabla_X Y = \frac{\partial Y}{\partial X}$ [S1, unofficial]
+- Divergence: $\nabla \cdot Y = \text{Tr}\left(\frac{\partial Y}{\partial X}\right) = \sum_{j=1}^d \frac{\partial Y_j}{\partial X_j}$ [S1, unofficial]
+- Laplacian: $\Delta Y = \nabla \cdot (\nabla Y) = \sum_{j=1}^d \frac{\partial^2 Y}{\partial X_j^2}$ [S1, unofficial]
+
+**Parameters:**
+- `create_graph=True`: A boolean flag in `torch.autograd.grad` that keeps the gradient computation in the computational graph, allowing for higher-order derivatives (e.g., Laplacian) [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+
+def compute_gradient(model, x, create_graph=True):
+    """
+    Compute the gradient of model output with respect to input x.
+    
+    Args:
+        model: Differentiable neural field model.
+        x: Input points [N, d], requires_grad=True.
+        create_graph: Whether to create a computation graph for higher-order derivatives.
+        
+    Returns:
+        grad: Gradient [N, d] for scalar output, or [N, d, k] for vector output.
+    """
+    y = model(x)  # [N, k]
+    if y.shape[-1] == 1:
+        grad = torch.autograd.grad(
+            y.sum(), x, create_graph=create_graph, retain_graph=True
+        )[0]  # [N, d]
+    else:
+        grad = []
+        for i in range(y.shape[1]):
+            grad_i = torch.autograd.grad(
+                y[:, i].sum(), x, create_graph=create_graph, retain_graph=True
+            )[0]  # [N, d]
+            grad.append(grad_i)
+        grad = torch.stack(grad, dim=-1)  # [N, d, k]
+    return grad
+
+def compute_divergence(model, x, create_graph=True):
+    """
+    Compute the divergence of a vector field output by the model.
+    
+    Args:
+        model: Differentiable neural field model outputting a vector field [N, d].
+        x: Input points [N, d], requires_grad=True.
+        create_graph: Whether to create a computation graph for higher-order derivatives.
+        
+    Returns:
+        div: Divergence [N].
+    """
+    y = model(x)  # [N, d]
+    grads = []
+    for i in range(y.shape[1]):
+        grad_i = torch.autograd.grad(
+            y[:, i].sum(), x, create_graph=create_graph, retain_graph=True
+        )[0]  # [N, d]
+        grads.append(grad_i)
+    grads = torch.stack(grads, dim=1)  # [N, d, d]
+    d = grads.shape[1]
+    div = grads[:, torch.arange(d), torch.arange(d)].sum(dim=1)  # [N]
+    return div
+
+def compute_laplacian(model, x, create_graph=True):
+    """
+    Compute the Laplacian of a scalar field output by the model.
+    
+    Args:
+        model: Differentiable neural field model outputting a scalar field [N].
+        x: Input points [N, d], requires_grad=True.
+        create_graph: Whether to create a computation graph for higher-order derivatives.
+        
+    Returns:
+        laplacian: Laplacian [N].
+    """
+    y = model(x)  # [N]
+    grad = torch.autograd.grad(
+        y.sum(), x, create_graph=create_graph, retain_graph=True
+    )[0]  # [N, d]
+    laplacian = 0.0
+    for i in range(grad.shape[1]):
+        laplacian += torch.autograd.grad(
+            grad[:, i].sum(), x, create_graph=create_graph, retain_graph=True
+        )[0][:, i]  # [N]
+    return laplacian
+```
+
+**Edge Cases and Pitfalls:**
+- **Precision:** Autograd provides exact derivatives, but numerical stability depends on the model's architecture and input scaling [G].
+- **Boundaries:** For fields defined on bounded domains, derivatives at boundaries may be inaccurate if the model is not trained to respect boundary conditions [G].
+- **Degenerate Input:** If input points are identical, gradients may be undefined or noisy [G].
+
+## Subtopics
+
+### [Implicit Differentiation for Sphere Tracing](2012-implicit-differentiation-for-sphere-tracing.md)
+This method computes the gradients of the sphere tracing output with respect to input parameters (such as SDF parameters) using implicit differentiation, avoiding the need to backpropagate through the iterative sphere tracing loop. It differs from naive backpropagation by treating the converged ray positions as fixed points and computing gradients via the chain rule on the SDF evaluation, while explicitly handling the convergence mask. Choose this when sphere tracing is part of the differentiable pipeline and memory efficiency is critical [G]. See [Implicit Differentiation for Sphere Tracing](2012-implicit-differentiation-for-sphere-tracing.md) [G].
+
+### SDF Laplacian Estimation
+A numerical estimation of the Laplacian $\Delta f$ of an SDF $f$ at a point $p$, using the average value of $f$ over a small sphere centered at $p$ [S2, unofficial]. The formula is:
+$$ \overline{f}(p, h) \approx f(p) - \frac{(\Delta f)(p)}{2n}h^2 $$
+$$ \overline{f}(p, \epsilon) \approx \frac{1}{4}\sum_{i=0}^3f(p+\epsilon v_i) $$
+$$ (\Delta f)(p) \approx \frac{6}{\epsilon^2} \left( f(p) - \frac{1}{4}\sum_{i=0}^3f(p+\epsilon v_i) \right) $$
+Parameters: $n$ is the dimension of the space (3 for 3D SDFs), $\epsilon$ is the radius of the small sphere, and $v_i$ are vectors defining the points on the sphere for averaging ($i=0$ to 3) [S2, unofficial]. Pitfall: The sign convention for the Laplacian is positive-definite [S2, unofficial].
+
+### Jacobian-Free Reparameterization
+In Jax, compute the Jacobian $J_f(\mu)$ application without explicit matrix construction by using the `linearize` operator, applying it twice in sequence to $\Sigma$, with dimensions of the covariance matrix transposed after each application [S3]. This reduces memory overhead compared to explicit Jacobian computation [S3].
+
+### Efficient Second-Order Derivatives for ReLU MLPs
+A technique to compute second-order derivatives of ReLU-based MLPs efficiently by exploiting the property that the second derivative of the MLP output with respect to its input is zero, simplifying the chain rule calculations for backpropagation of Eikonal loss [S4]. Define $P_l^j$ as the product of matrices $G_l, H_{l-1}, ..., G_2, H_1^{(-j)}$ where $H_1^{(-j)}$ is the $j$-th column of $H_1$ [S4]. Define $S_l^i$ as the product of matrices $H_L^{(i,-)}, G_L, ..., H_{l+1}, G_{l+1}$ where $H_L^{(i,-)}$ is the $i$-th row of $H_L$ [S4]. Define $G_l$ as a diagonal matrix with 1s where $H_{l-1} ... g(H_1 x) > 0$ and 0 otherwise [S4]. Use Theorem 1 to determine that $\partial^2 e/\partial e^2 = 0$ because $e$ is computed by a ReLU-based MLP [S4]. Formulas:
+$$ P_l^j = G_l H_{l-1} ... G_2 H_1^{(-j)} $$
+$$ S_l^i = H_L^{(i,-)} G_L ... H_{l+1} G_{l+1} $$
+$$ G_l = \begin{cases} 1, & H_{l-1} ... g(H_1 x) > 0 \\ 0, & \text{otherwise} \end{cases} $$
+$$ \frac{\partial^2 y}{\partial x^2} = 0 $$
+Parameters: $L$ is the number of hidden layers in the ReLU-based MLP, $H_l$ is the weight matrix for layer $l$ with dimensions $\mathbb{R}^{n_l \times \mathbb{R}^{n_{l-1}}}$, $n_l$ is the number of neurons in layer $l$, $P_l^j$ is a matrix in $\mathbb{R}^{n_{l-1} \times 1}$ used in second-order derivative calculation, and $S_l^i$ is a matrix in $\mathbb{R}^{1 \times n_l}$ used in second-order derivative calculation [S4].
+
+## Operating characteristics
+Not given in the sources. [G]
+
+## Background
+Originating from the rise of differentiable rendering and neural implicit representations, this method leverages automatic differentiation frameworks (e.g., PyTorch, Jax) to compute spatial derivatives of neural fields [S1, unofficial][S4]. The method is widely used in neural radiance fields (NeRF), signed distance fields (SDF), and other neural implicit representations for 3D reconstruction and rendering [S4].
+
+## Sources
+[S1] Yonghao-Lee/differentiable-rendering, https://github.com/Yonghao-Lee/differentiable-rendering, fetched 2026-10-26 (unofficial)
+[S2] kyle-rosa/ray_marching, https://github.com/kyle-rosa/ray_marching, fetched 2026-10-26 (unofficial)
+[S3] Mip-NeRF 360: Unbounded Anti-Aliased Neural Radiance Fields, https://doi.org/10.1109/cvpr52688.2022.00539, fetched 2026-10-26
+[S4] NeuS2: Fast Learning of Neural Implicit Surfaces for Multi-view Reconstruction, https://doi.org/10.1109/iccv51070.2023.00305, fetched 2026-10-26

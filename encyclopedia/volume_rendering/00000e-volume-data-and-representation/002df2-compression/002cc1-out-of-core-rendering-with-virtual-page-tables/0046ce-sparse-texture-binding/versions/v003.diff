@@ -1,0 +1,136 @@
+--- v002.md
++++ v003.md
+@@ -8,10 +8,10 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A virtual volume texture defined by its full logical dimensions ($W \times H \times D$) and a set of physical memory pages containing the actual voxel data bricks [S1].
++*   **Input:** A virtual volume texture defined by its full logical dimensions and a set of physical memory pages containing the actual voxel data bricks [S1].
+ *   **Output:** A bound texture resource that behaves like a standard 3D texture to the shader, but transparently handles missing data via hardware page faults [S1].
+ 
+ **Data Structures:**
+ The hardware maintains an internal page table structure [S1]. The exact layout is opaque to the application, but logically it maps virtual page indices to physical page pointers [G].
+-*   **Virtual Address:** The coordinate $(x, y, z)$ in the virtual volume space.
++*   **Virtual Address:** The coordinate $(x, y, z)$ in the virtual volume space [S2, unofficial].
+ *   **Page Size:** The granularity of allocation, typically matching the brick size used in the parent method (e.g., $64^3$ or $128^3$ voxels) [G].
+ *   **Page Table Entry (PTE):** Contains a valid bit, a physical page base address, and residency status flags [G].
+@@ -21,14 +21,14 @@
+ 2.  **Physical Allocation:** The application allocates physical memory pages and binds them to specific regions of the virtual texture using API-specific binding commands [S1]. Only the pages required for the current view or dataset subset are bound [S1].
+ 3.  **Hardware Translation:** When the fragment shader samples the texture at a virtual coordinate $(x, y, z)$:
+-    *   The hardware calculates the virtual page index: $P_{idx} = \lfloor V_{coord} / S_{page} \rfloor$.
+-    *   The hardware looks up $P_{idx}$ in the internal page table.
+-    *   If the page is resident (bound), the hardware computes the physical address: $A_{phys} = P_{base} + (V_{coord} \pmod{S_{page}}) \times S_{voxel}$.
++    *   The hardware calculates the virtual page index: $P_{idx} = \lfloor V_{coord} / S_{brick} \rfloor$ [S2, unofficial].
++    *   The hardware looks up $P_{idx}$ in the internal page table [S2, unofficial].
++    *   If the page is resident (bound), the hardware computes the physical address: $A_{phys} = P_{base} + (V_{coord} \pmod{S_{brick}})$ [S2, unofficial].
+     *   If the page is not resident, the hardware triggers a page fault or returns a default value, and the fragment shader decides how to handle the missing page [S2, unofficial].
+ 4.  **Page Fault Handling:** The driver or application loads the required brick from disk or CPU memory into a physical page and binds it to the virtual page index [S1].
+ 
+ **Formulas:**
+-*   Virtual Page Index: $P_{idx} = \lfloor V_{coord} / S_{page} \rfloor$
+-*   Physical Address: $A_{phys} = P_{base} + (V_{coord} \pmod{S_{page}}) \times S_{voxel}$
+-    *   Where $V_{coord}$ is the sample coordinate, $S_{page}$ is the page size in voxels, $P_{base}$ is the base address of the physical page, and $S_{voxel}$ is the size of a single voxel in bytes [S2, unofficial].
++*   Virtual Page Index: $P_{idx} = \lfloor V_{coord} / S_{brick} \rfloor$
++*   Physical Address: $A_{phys} = P_{base} + (V_{coord} \pmod{S_{brick}})$
++    *   Where $V_{coord}$ is the sample coordinate, $S_{brick}$ is the brick/page size in voxels, and $P_{base}$ is the base address of the physical page [S2, unofficial].
+ 
+ **Parameters:**
+@@ -38,13 +38,48 @@
+ **Edge Cases and Pitfalls:**
+ *   **Maximum Size Limitations:** The virtual volume dimensions cannot exceed hardware limits (e.g., 16k for 3D) [S2, unofficial].
+-*   **Page Fault Overhead:** Frequent page faults can stall the GPU pipeline. The application must ensure that the working set fits in physical memory or that page loading is asynchronous and overlapped with rendering [G].
++*   **Page Fault Overhead:** Frequent page faults can stall the GPU pipeline. Missing bricks act as cache misses, requiring the application to ensure the working set fits in physical memory or that page loading is asynchronous and overlapped with rendering [S2, unofficial][G].
+ 
+ **Pseudocode:**
+ ```python
+-# Standard operations defined for self-containment
+-def create_sparse_texture(dims, format):
+-    return {"dims": dims, "format": format, "pages": {}}
++# Data structures
++class PageTableEntry:
++    def __init__(self, valid, base_address):
++        self.valid = valid
++        self.base_address = base_address
+ 
+-def get_bricks_in_view(dims, camera):
++class SparseVolume:
++    def __init__(self, virtual_dims, brick_size, voxel_size_bytes):
++        self.virtual_dims = virtual_dims
++        self.brick_size = brick_size
++        self.voxel_size_bytes = voxel_size_bytes
++        self.page_table = {}  # Maps virtual page index to PageTableEntry
++
++    def bind_physical_page(self, virtual_page_index, base_address):
++        self.page_table[virtual_page_index] = PageTableEntry(valid=True, base_address=base_address)
++
++    def sample(self, coord):
++        # Hardware translation logic
++        page_idx = coord // self.brick_size
++        offset = coord % self.brick_size
++        if page_idx in self.page_table and self.page_table[page_idx].valid:
++            base = self.page_table[page_idx].base_address
++            phys_offset = offset * self.voxel_size_bytes
++            return read_memory(base + phys_offset)
++        else:
++            # Page fault: missing brick
++            return handle_page_fault(page_idx)
++
++# Application setup
++def setup_sparse_volume(virtual_dims, brick_size, voxel_size_bytes, data_source):
++    volume = SparseVolume(virtual_dims, brick_size, voxel_size_bytes)
++    # Identify bricks needed for the current view/frustum
++    required_bricks = get_bricks_in_view(virtual_dims, camera)
++    for brick in required_bricks:
++        phys_page = allocate_physical_memory(brick_size ** 3 * voxel_size_bytes)
++        load_data_from_source(brick, phys_page)
++        volume.bind_physical_page(brick["virtual_index"], phys_page)
++    return volume
++
++def get_bricks_in_view(virtual_dims, camera):
+     # Standard frustum culling operation
+     return [{"virtual_index": i, "data": None} for i in range(10)]
+@@ -56,32 +91,11 @@
+     brick["data"] = phys_page
+ 
+-def bind_physical_page(texture, index, phys_page):
+-    texture["pages"][index] = phys_page
++def read_memory(address):
++    # Simulates hardware memory read
++    return 0.0
+ 
+-def texture3D(texture, uv, z):
+-    # Hardware handles page fault if brick is not resident
+-    # Fragment shader queries residency and handles missing pages
+-    return [0.0, 0.0, 0.0, 1.0]
+-
+-# Application-side setup
+-def setup_sparse_volume(virtual_dims, brick_size, data_source):
+-    # 1. Create sparse texture resource with residency flags
+-    texture = create_sparse_texture(virtual_dims, format="RGBA32F")
+-    # 2. Identify bricks needed for the current view/frustum
+-    required_bricks = get_bricks_in_view(virtual_dims, camera)
+-    for brick in required_bricks:
+-        # Allocate physical memory for this brick
+-        phys_page = allocate_physical_memory(brick_size * 16) # 16 bytes per RGBA32F voxel
+-        # Load data into physical page
+-        load_data_from_source(brick, phys_page)
+-        # Bind physical page to virtual brick index
+-        bind_physical_page(texture, brick["virtual_index"], phys_page)
+-    return texture
+-
+-def fragment_shader_sample(texture, uv, z):
+-    # Hardware handles page fault if brick is not resident
+-    # Fragment shader queries residency and handles missing pages
+-    color = texture3D(texture, uv, z)
+-    return color
++def handle_page_fault(page_idx):
++    # Driver or application loads the required brick
++    return 0.0
+ ```
+ 
+@@ -95,5 +109,5 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Address translation is $O(1)$ in hardware. Page fault handling latency depends on the data source [G].
++*   **Time Complexity:** Address translation is $O(1)$ in hardware [G]. Page fault handling latency depends on the data source [G].
+ *   **Memory Complexity:** Physical memory usage scales with the number of resident pages, not the total volume size [S1].
+ *   **Strengths:** Lossless quality, hardware-managed translation, simple shader code [S1].

@@ -1,0 +1,132 @@
+--- v003.md
++++ v004.md
+@@ -29,6 +29,6 @@
+ where $R$ is the number of Gaussians along the ray, and $w_{k,p,v}$ is the alpha blending weight for Gaussian $k$ at pixel $p$ in view $v$:
+ $$ w_{i,p,v} = \alpha_i \prod_{j=1}^{i-1} (1 - \alpha_j) $$
+-The log-likelihood to maximize is:
+-$$ \log p(F_{2D} | f) = \arg \max_f -\frac{1}{2\sigma^2} \sum_{v,p} \| f_{p,v}^{2D} - \sum_{k=1}^R w_{k,p,v} f_k \|^2 + \text{const} $$
++To maximize the likelihood, we transform to the log-likelihood domain:
++$$ \log p(F_{2D} | f) = -\frac{1}{2\sigma^2} \sum_{v,p} \| f_{p,v}^{2D} - \sum_{k=1}^R w_{k,p,v} f_k \|^2 + \text{const} $$
+ Taking the derivative with respect to the 3D language feature $f_i$ of Gaussian $i$ and setting to zero yields:
+ $$ \frac{1}{\sigma^2} \sum_{v,p} w_{i,p,v} (f_{p,v}^{2D} - \sum_{k=1}^R w_{k,p,v} f_k) = 0 $$
+@@ -38,8 +38,8 @@
+ 
+ **Practical Simplification:**
+-The method assumes sparse influence: for most views/pixels, one dominant Gaussian has weight close to 1, leading to negligible cross-talk where $w_{i,p,v} w_{k,p,v} \approx 0$ for $i \neq k$. This eliminates cross-Gaussian terms, allowing the closed-form solution above [S1, unofficial].
++The method assumes sparse influence: for most views/pixels, one dominant Gaussian has weight close to 1, leading to negligible cross-talk where $w_{i,p,v} w_{k,p,v} \approx 0$ for $i \neq k$ [S1, unofficial]. This eliminates cross-Gaussian terms, allowing the closed-form solution above [S1, unofficial].
+ 
+ **Parameters:**
+-*   **Feature Dimension ($d$):** The dimensionality of the CLIP language features. Evaluated at 16, 32, 64, 128, 256, 512 dimensions [S1, unofficial].
++*   **Feature Dimension ($d$):** The dimensionality of the CLIP language features [S1, unofficial]. Evaluated at 16, 32, 64, 128, 256, 512 dimensions [S1, unofficial].
+ *   **Training Iterations:** 30,000 iterations using common Gaussian Splatting parameters [S1, unofficial].
+ *   **Average Number of Gaussians:** ~2,500,000 Gaussians for RGB representation across scenes [S1, unofficial].
+@@ -67,52 +67,53 @@
+     """
+     d = feature_maps[0].shape[2]
++    # Initialize accumulated features and weights
+     for g in gaussians:
+         g['f'] = [0.0] * d
+         g['w'] = 0.0
++        
+     for view in views:
+         fm = view['feature_map']
++        # [G] Standard view frustum culling
+         visible = [g for g in gaussians if is_in_frustum(g['mu'], view['pose'])]
+         for g in visible:
++            # [G] Standard perspective projection
+             x_prime = project_2d(g['mu'], view['pose'])
+             psi = (int(x_prime[0]), int(x_prime[1]))
+-            w_is = compute_alpha_blending_weight(g, psi, view, gaussians)
++            
++            # [G] Standard alpha blending calculation along ray
++            covering = [g2 for g2 in gaussians if covers_pixel(g2, psi, view)]
++            covering.sort(key=lambda g2: depth(g2['mu'], view['pose']))
++            try:
++                idx = covering.index(g)
++            except ValueError:
++                continue
++            weight = g['alpha']
++            for j in range(idx):
++                weight *= (1 - covering[j]['alpha'])
++            w_is = weight
++            
++            # Extract 2D feature at projected pixel
+             f_is = fm[psi[1], psi[0], :]
+-            g['f'] = [g['f'][k] + w_is * f_is[k] for k in range(d)]
++            
++            # Update accumulated feature and weight
++            for k in range(d):
++                g['f'][k] += w_is * f_is[k]
+             g['w'] += w_is
++            
+     semantic_gaussians = []
+     for g in gaussians:
+         if g['w'] > 0:
+-            g['f'] = [g['f'][k] / g['w'] for k in range(d)]
++            # Normalize feature
++            for k in range(d):
++                g['f'][k] /= g['w']
+             semantic_gaussians.append(g)
++        # Gaussians with w_i = 0 are filtered out
+     return semantic_gaussians
+ 
+-def is_in_frustum(mu, pose):
+-    # [G] Standard view frustum culling check
+-    return True
+-
+-def project_2d(mu, pose):
+-    # [G] Standard perspective projection
+-    return [mu[0], mu[1]]
+-
+-def compute_alpha_blending_weight(g, pixel, view, all_gaussians):
+-    # [G] Standard alpha blending calculation along ray
+-    covering = [g2 for g2 in all_gaussians if covers_pixel(g2, pixel, view)]
+-    covering.sort(key=lambda g2: depth(g2['mu'], view['pose']))
+-    try:
+-        idx = covering.index(g)
+-    except ValueError:
+-        return 0.0
+-    weight = g['alpha']
+-    for j in range(idx):
+-        weight *= (1 - covering[j]['alpha'])
+-    return weight
+-
+-def covers_pixel(g, pixel, view):
+-    # [G] Standard rasterization coverage check
+-    return True
+-
+-def depth(mu, pose):
+-    # [G] Standard depth projection
+-    return mu[2]
++# [G] Standard graphics helper functions
++def is_in_frustum(mu, pose): return True
++def project_2d(mu, pose): return [mu[0], mu[1]]
++def covers_pixel(g, pixel, view): return True
++def depth(mu, pose): return mu[2]
+ ```
+ 
+@@ -121,5 +122,5 @@
+ *   **Localization Accuracy:** Localization accuracy metric is prone to noise because it only measures the closest matching pixel, ignoring feature distribution and object shape [S1, unofficial].
+ *   **No Contribution:** Gaussians with no contributions across all views are filtered out to reduce noise and the number of Gaussians significantly [S1, unofficial].
+-*   **Dynamic Thresholding:** For 3D-OVS, dynamic thresholding is used. For each query, evaluate threshold values with step size 0.01. Create binary mask where relevancy score > threshold. Compute average relevancy score within masked area. Identify stable region: Find region where absolute gradient of average relevancy score (rate of change w.r.t threshold) is below a chosen stability threshold. Select the middle value from the stable range as the final threshold. If multiple stable regions exist, select the highest confidence prediction [S1, unofficial].
++*   **Dynamic Thresholding:** For 3D-OVS, dynamic thresholding is used [S1, unofficial]. For each query, evaluate threshold values with step size 0.01 [S1, unofficial]. Create binary mask where relevancy score > threshold [S1, unofficial]. Compute average relevancy score within masked area [S1, unofficial]. Identify stable region: Find region where absolute gradient of average relevancy score (rate of change w.r.t threshold) is below a chosen stability threshold [S1, unofficial]. Select the middle value from the stable range as the final threshold [S1, unofficial].
+ 
+ ## Operating characteristics
+@@ -128,12 +129,12 @@
+ *   **Speed:** Uplifts features in 16.4 seconds (no setup) or 31.9 seconds (with setup) vs 60-67 minutes for others (LangSplat, GOI, 3DVLM) [S1, unofficial].
+ *   **Hardware:** Single NVIDIA A6000 GPU [S1, unofficial].
+-*   **Strengths:** Computationally efficient (single forward pass), handles occlusions via frustum culling, establishes precise correspondence, avoids iterative optimization.
+-*   **Limitations:** High dimensionality causes cache issues, localization metric is noisy, requires pre-trained Gaussian Splat.
+-*   **When to use:** When efficient, accurate 3D language feature lifting is needed from a pre-trained 3D Gaussian Splat model.
+-*   **When not to use:** When iterative optimization is acceptable and higher dimensional features are required without compression.
++*   **Strengths:** Computationally efficient (single forward pass), handles occlusions via frustum culling, establishes precise correspondence, avoids iterative optimization [S1, unofficial].
++*   **Limitations:** High dimensionality causes cache issues, localization metric is noisy, requires pre-trained Gaussian Splat [S1, unofficial].
++*   **When to use:** When efficient, accurate 3D language feature lifting is needed from a pre-trained 3D Gaussian Splat model [S1, unofficial].
++*   **When not to use:** When iterative optimization is acceptable and higher dimensional features are required without compression [S1, unofficial].
+ 
+ ## Background
+ *   **Origin:** The method is introduced in "Occam's LGS: An Efficient Approach for Language Gaussian Splatting" [S1, unofficial].
+-*   **History:** It builds on the principles of 3DGS and probabilistic modeling, formulating feature uplifting as a MAP estimation problem. It differs from conventional semantic feature learning methods that rely on back-projection [S1, unofficial].
++*   **History:** It builds on the principles of 3DGS and probabilistic modeling, formulating feature uplifting as a MAP estimation problem [S1, unofficial]. It differs from conventional semantic feature learning methods that rely on back-projection [S1, unofficial].
+ *   **Usage:** Used for open vocabulary semantic segmentation and 3D scene understanding, evaluated on LERF and 3D-OVS datasets [S1, unofficial].
+ 

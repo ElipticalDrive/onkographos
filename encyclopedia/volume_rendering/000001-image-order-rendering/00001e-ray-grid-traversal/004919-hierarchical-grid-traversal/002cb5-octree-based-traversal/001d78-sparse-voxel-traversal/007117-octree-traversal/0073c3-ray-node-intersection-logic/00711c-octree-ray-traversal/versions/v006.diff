@@ -1,0 +1,79 @@
+--- v005.md
++++ v006.md
+@@ -24,11 +24,11 @@
+     [S1, unofficial].
+ 3.  **Determine Entry Octant:** Compute the first child octant index $k \in \{0, \dots, 7\}$ using constant shifting and binary-or operations based on the ray's position relative to the node center: $k = (tx_0 > tx_m ? 4 : 0) \mid (ty_0 > ty_m ? 2 : 0) \mid (tz_0 > tz_m ? 1 : 0)$ [S3, S5][S7, unofficial].
+-4.  **Sort Mid-Plane Intersections:** Compute the $t$-values where the ray crosses the X, Y, and Z mid-planes ($tx_m, ty_m, tz_m$). Sort these distances in a separate array `axis_isects[]` to sequentially march across the child octants in the correct traversal order [S5][S7, unofficial].
+-5.  **Traverse Octants:** Loop through octants starting from $k$. For each octant, compute child slab bounds based on the crossed mid-planes, recurse, and update $k$ by inverting the corresponding bit in the traversal bitmask along the axis of the crossed mid-plane [S3, S5][S7, unofficial].
+-6.  **Terminate:** Octant 7 (far top right) is the last possible octant reachable from the entry point in this traversal order. After processing octant 7, the loop terminates by setting `current_octant = 8` [S4, unofficial].
++4.  **Sort Mid-Plane Intersections:** Compute the $t$-values where the ray crosses the X, Y, and Z mid-planes ($tx_m, ty_m, tz_m$) and sort these distances in a separate array `axis_isects[]` to sequentially march across the child octants in the correct traversal order [S5][S7, unofficial].
++5.  **Traverse Octants:** Loop through octants starting from $k$ [S3]. For each octant, compute child slab bounds based on the crossed mid-planes, recurse, and update $k$ by inverting the corresponding bit in the traversal bitmask along the axis of the crossed mid-plane [S3, S5][S7, unofficial].
++6.  **Terminate:** Octant 7 (far top right) is the last possible octant reachable from the entry point in this traversal order [S4, unofficial]. After processing octant 7, the loop terminates by setting `current_octant = 8` [S4, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def traverse_octree(node, tx0, ty0, tz0, tx1, ty1, tz1, result):
++def traverse_octree(node, tx0, ty0, tz0, tx1, ty1, tz1, result, flags=0):
+     # Validate traversal bounds: ray must extend forward and intersect the slab
+     if tx1 < 0.0 or ty1 < 0.0 or tz1 < 0.0:
+@@ -47,11 +47,13 @@
+     # Compute and sort mid-plane intersections to determine traversal order
+     # Stores (t_value, axis_index) where axis_index: 0=X, 1=Y, 2=Z
+-    axis_isects = sorted([(tx_m, 0), (ty_m, 1), (tz_m, 2)], key=lambda x: x[0])
++    mid_planes = sorted([(tx_m, 0), (ty_m, 1), (tz_m, 2)], key=lambda x: x[0])
++    crossed = [False, False, False]
++    t_current = max(tx0, ty0, tz0)
+ 
+     while current_octant < 8:
+         # Access child node with RaycastingFlags mask for reordering/symmetry
+-        child = node.children[f ^ current_octant] if node.children else None
+-        if child:
+-            # Compute child bounds based on octant position relative to mid-planes
++        child_idx = flags ^ current_octant
++        if node.children and node.children[child_idx]:
++            # Compute child slab bounds based on octant position relative to mid-planes
+             c_tx0, c_ty0, c_tz0 = tx0, ty0, tz0
+             c_tx1, c_ty1, c_tz1 = tx1, ty1, tz1
+@@ -62,16 +64,19 @@
+             if current_octant & 1: c_tz0 = tz_m
+             else: c_tz1 = tz_m
+-            traverse_octree(child, c_tx0, c_ty0, c_tz0, c_tx1, c_ty1, c_tz1, result)
++            traverse_octree(node.children[child_idx], c_tx0, c_ty0, c_tz0, c_tx1, c_ty1, c_tz1, result, flags)
+ 
+-        # Move to next octant by inverting bitmask along corresponding mid-plane axes
+-        for t_val, axis in axis_isects:
+-            if t_val > min(tx1, ty1, tz1):
++        # Move to next octant by inverting bitmask along corresponding mid-plane axes traversed
++        next_axis = -1
++        for t_val, axis in mid_planes:
++            if t_val > t_current and not crossed[axis]:
++                next_axis = axis
+                 break
+-            if axis == 0: current_octant ^= 4
+-            elif axis == 1: current_octant ^= 2
+-            elif axis == 2: current_octant ^= 1
++
++        if next_axis == -1:
+             break
+-        else:
+-            current_octant = 8
++
++        crossed[next_axis] = True
++        current_octant ^= (4 if next_axis == 0 else 2 if next_axis == 1 else 1)
++        t_current = mid_planes[[0, 1, 2].index(next_axis)][0]
+ ```
+ 
+@@ -83,5 +88,5 @@
+ *   **Zero-Length Rays:** Cause division by zero during normalization; handled by returning a zero vector or safe default [S1, unofficial].
+ *   **Ambiguous Impact Normals:** At node faces, resolved by selecting the axis with the maximum absolute distance between impact point and node center, ensuring a single dominant normal direction [S1, unofficial].
+-*   **Cap Node Neighbor Finding:** For cap nodes, skip the isovalue min/max range check and recursive child traversal. Determine the values of eight forward-neighbor voxels. Check if the neighbor lies within the same cap node using the bitwise AND of the current child octant index (`child`) and the neighbor direction (`dir`): `if (child & dir)`. If false, retrieve the value directly from `cap.scalars[dir idx]`. If true, proceed with neighbor-finding logic [S3]. Between 1 and 8 voxels in the neighborhood of a ray-intersected voxel may lie within the same cap node, requiring efficient local access [S3].
++*   **Cap Node Neighbor Finding:** For cap nodes, skip the isovalue min/max range check and recursive child traversal [S3]. Determine the values of eight forward-neighbor voxels [S3]. Check if the neighbor lies within the same cap node using the bitwise AND of the current child octant index (`child`) and the neighbor direction (`dir`): `if (child & dir)` [S3]. If false, retrieve the value directly from `cap.scalars[dir idx]` [S3]. If true, proceed with neighbor-finding logic [S3]. Between 1 and 8 voxels in the neighborhood of a ray-intersected voxel may lie within the same cap node, requiring efficient local access [S3].
+ 
+ ## Subtopics
+@@ -106,5 +111,5 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Proportional to the number of intersected octants. The algorithm has moderate initial cost for computing and sorting mid-plane intersections, but subsequent traversal is trivial [S3, S5]. In the worst case (ray passing through all occupied nodes), it is $O(N)$ where $N$ is the number of nodes [G].
++*   **Time Complexity:** Proportional to the number of intersected octants [S3]. The algorithm has moderate initial cost for computing and sorting mid-plane intersections, but subsequent traversal is trivial [S3]. In the worst case (ray passing through all occupied nodes), it is $O(N)$ where $N$ is the number of nodes [G].
+ *   **Memory Complexity:** $O(D)$ where $D$ is the depth of the octree, due to recursion stack [G].
+ *   **Strengths:** Efficient for sparse data; avoids sampling empty space; returns intersected octants in sorted order (closest first) [S4, unofficial]. It is faster on average than sphere marching because it utilizes empty octree nodes with smaller average depth, despite requiring more iterations [S2].

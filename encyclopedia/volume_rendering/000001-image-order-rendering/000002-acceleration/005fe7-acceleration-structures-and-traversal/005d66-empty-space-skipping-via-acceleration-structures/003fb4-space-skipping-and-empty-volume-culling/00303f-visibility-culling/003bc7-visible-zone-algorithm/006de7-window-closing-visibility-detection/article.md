@@ -1,0 +1,137 @@
+# Window-Closing Visibility Detection
+
+Also called: ACW algorithm, Aggregate Cull Window, Window Closing for Virtual Colonoscopy
+
+## Overview
+Window-Closing Visibility Detection is a conservative visibility culling method designed for perspective navigation within large, tubular datasets, specifically virtual colonoscopy [S1, unofficial]. It solves the problem of efficiently identifying which subvolumes (represented as boxes) lie within the current viewing frustum without performing expensive per-box frustum intersection tests for all candidates [S1, unofficial]. It sets itself apart from its parent, the [Visible Zone Algorithm](9086-visible-zone-algorithm.md), by utilizing a 2D screen-space projection approach that iteratively shrinks a culling window, and from its sibling, the [Approximate Visibility Algorithm](13128-approximate-visibility-algorithm.md), by relying on the geometric "twisted" nature of the colon to guarantee that occlusion is handled via window degeneration rather than approximate distance bounds [S1, unofficial].
+
+## How it works
+The algorithm operates on a preprocessed representation of the volume where the colon shape is approximated by a sequence of piecewise boxes [S1, unofficial]. It determines visibility by projecting these boxes onto the screen and maintaining an Aggregate Cull Window (ACW) that represents the visible portion of the screen through which subsequent boxes can be seen [S1, unofficial].
+
+**Inputs and Outputs:**
+*   **Input:** A sequence of boxes $B_1, B_2, \dots, B_n$ approximating the colon, ordered by proximity to the viewer (or along the colon path) [S1, unofficial]. The current camera view parameters (projection matrix, viewport) [S1, unofficial].
+*   **Output:** A subset of visible boxes to be sent to the volume rendering hardware (e.g., Cube-4/VolumePro) [S1, unofficial].
+
+**Data Structures:**
+*   **Box:** A 3D axis-aligned bounding box (AABB) or a portal defined by its vertices [S1, unofficial].
+*   **Current Cull Window (CCW):** A 2D axis-aligned bounding rectangle in screen space, defined by $(x_{min}, y_{min}, x_{max}, y_{max})$ [S1, unofficial].
+*   **Aggregate Cull Window (ACW):** A 2D axis-aligned bounding rectangle in screen space, initialized as the CCW of the first box and updated iteratively [S1, unofficial].
+
+**Steps:**
+1.  **Preprocessing:** Approximate the colon geometry with a sequence of piecewise boxes [S1, unofficial]. Order these boxes such that the algorithm begins with the closest box to the view point [S1, unofficial].
+2.  **Initialization:** Identify the first box $B_{start}$ closest to the view point [S1, unofficial].
+3.  **Project Initial Portal:** Project the vertices of the initial portal (the boundary of $B_{start}$ facing the viewer) onto the 2D screen plane [S1, unofficial].
+4.  **Compute Initial CCW:** Calculate the 2D axis-aligned bounding rectangle of the projected vertices [S1, unofficial]. This rectangle is the Current Cull Window (CCW) for the first box [S1, unofficial].
+5.  **Initialize ACW:** Set the Aggregate Cull Window (ACW) equal to the initial CCW [S1, unofficial]. The ACW represents the conservative bound of the visible area through the current box [S1, unofficial].
+6.  **Iterate Through Boxes:** For each subsequent adjacent box $B_{next}$ in the sequence:
+    a.  **Project Next Portal:** Project the vertices of $B_{next}$'s portal onto the screen [S1, unofficial].
+    b.  **Compute Next CCW:** Calculate the 2D axis-aligned bounding rectangle of these projected vertices [S1, unofficial].
+    c.  **Update ACW:** Compute the intersection of the new CCW and the previous ACW:
+        $$ ACW_{new} = ACW_{old} \cap CCW_{next} $$
+        Where the intersection of two rectangles $R_1=(x_{1min}, y_{1min}, x_{1max}, y_{1max})$ and $R_2=(x_{2min}, y_{2min}, x_{2max}, y_{2max})$ is:
+        $$ x_{min} = \max(x_{1min}, x_{2min}) $$
+        $$ y_{min} = \max(y_{1min}, y_{2min}) $$
+        $$ x_{max} = \min(x_{1max}, x_{2max}) $$
+        $$ y_{max} = \min(y_{1max}, y_{2max}) $$
+    d.  **Check Degeneration:** If the ACW is degenerate (i.e., $x_{min} \ge x_{max}$ or $y_{min} \ge y_{max}$, resulting in an empty or invalid area), stop the iteration [S1, unofficial]. The current box and all subsequent boxes are considered occluded or outside the visible frustum.
+    e.  **Mark Visible:** If the ACW is valid, mark $B_{next}$ as visible and continue to the next box.
+7.  **Rendering:** Send all marked visible boxes to the volume rendering hardware for perspective rendering [S1, unofficial].
+
+**Parameters:**
+*   **Box Approximation:** The granularity of the piecewise box approximation affects accuracy and performance. Not given in the sources.
+*   **Portal Definition:** The specific vertices used to define the "portal" of a box. Typically the face of the box facing the camera or the interface between adjacent boxes. Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Degenerate ACW:** The algorithm relies on the ACW becoming empty to terminate. If the colon geometry is not sufficiently "twisted" or occluded, the ACW may remain valid for many boxes, reducing culling efficiency [S1, unofficial].
+*   **Perspective Projection:** The method is designed for perspective projection [S1, unofficial].
+*   **Ordering:** Boxes must be processed in an order that respects occlusion (closest to furthest). Incorrect ordering can lead to incorrect visibility determination [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def window_closing_visibility_detection(boxes, camera):
+    """
+    boxes: List of Box objects, ordered from closest to furthest.
+    camera: Object with project_vertices() and get_viewport() methods.
+    Returns: List of visible boxes.
+    """
+    visible_boxes = []
+    
+    if not boxes:
+        return visible_boxes
+
+    # Step 1: Get the first box (closest)
+    current_box = boxes[0]
+    
+    # Step 2: Project initial portal and compute CCW
+    projected_vertices = camera.project_vertices(current_box.portal_vertices)
+    ccw = compute_2d_aabb(projected_vertices)
+    
+    # Step 3: Initialize ACW
+    acw = ccw
+    
+    # Step 4: Mark first box as visible
+    visible_boxes.append(current_box)
+    
+    # Step 5: Iterate through remaining boxes
+    for next_box in boxes[1:]:
+        # Project next portal
+        projected_vertices_next = camera.project_vertices(next_box.portal_vertices)
+        ccw_next = compute_2d_aabb(projected_vertices_next)
+        
+        # Update ACW by intersection
+        acw = intersect_rectangles(acw, ccw_next)
+        
+        # Check for degeneration
+        if is_degenerate(acw):
+            break
+            
+        # Mark as visible
+        visible_boxes.append(next_box)
+        
+    return visible_boxes
+
+def compute_2d_aabb(vertices):
+    """Compute 2D axis-aligned bounding box from a list of 2D points."""
+    xs = [v.x for v in vertices]
+    ys = [v.y for v in vertices]
+    return {
+        'x_min': min(xs),
+        'y_min': min(ys),
+        'x_max': max(xs),
+        'y_max': max(ys)
+    }
+
+def intersect_rectangles(r1, r2):
+    """Compute intersection of two 2D AABBs."""
+    return {
+        'x_min': max(r1['x_min'], r2['x_min']),
+        'y_min': max(r1['y_min'], r2['y_min']),
+        'x_max': min(r1['x_max'], r2['x_max']),
+        'y_max': min(r1['y_max'], r2['y_max'])
+    }
+
+def is_degenerate(rect):
+    """Check if a rectangle is empty or invalid."""
+    return rect['x_min'] >= rect['x_max'] or rect['y_min'] >= rect['y_max']
+```
+
+## Subtopics
+
+### [Aggregate Cull Window (ACW) Reduction](21511-aggregate-cull-window-acw-reduction.md)
+A technique to decrease the size of the ACW so that rendering terminates earlier. It sets itself apart from standard spatial culling by incorporating image-based feedback and geometric refinement to dynamically shrink the culling bounds.
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of boxes until the ACW degenerates. Each box requires projection and a constant-time rectangle intersection [S1, unofficial].
+*   **Memory Complexity:** Constant space for the ACW and CCW, plus storage for the box sequence [S1, unofficial].
+*   **Strengths:** Efficient for tubular structures with significant self-occlusion (like the colon). Avoids expensive 3D frustum intersection tests [S1, unofficial].
+*   **Limitations:** Relies on the assumption that the structure is "twisted" enough to cause occlusion. Performance degrades if the ACW does not degenerate quickly [S1, unofficial]. Limited to perspective projection as described [S1, unofficial].
+*   **When to Use:** Interactive navigation in large, tubular volume datasets (e.g., virtual colonoscopy) where occlusion is frequent [S1, unofficial].
+*   **When Not to Use:** Non-tubular structures, parallel projection, or scenes with low self-occlusion [S1, unofficial].
+
+## Background
+The Window-Closing Visibility Detection algorithm was developed for virtual colonoscopy applications to enable interactive navigation within large human colon datasets [S1, unofficial]. It was presented in the context of real-time volume rendering, leveraging the twisted nature of the colon to optimize visibility culling [S1, unofficial]. The work was supported by NSF, ONR, NIH, and Mitsubishi Electric grants [S1, unofficial].
+
+## Sources
+[S1] Real-Time Volume Rendering, https://cfcs.pku.edu.cn/baoquan/docs/20180622110335231616.pdf, fetched 2026-10-30 (unofficial)

@@ -1,0 +1,175 @@
+--- v003.md
++++ v004.md
+@@ -4,17 +4,17 @@
+ 
+ ## Overview
+-Voxel Representation with Gaussian Lobes is a method for compactly encoding directional scattering properties and occlusion within dense voxel grids, replacing single-value averages with isotropic Gaussian distributions to improve rendering accuracy [S1]. It solves the problem of directional aliasing and loss of anisotropic detail in standard voxel cone tracing by storing the mean direction and spread of light transport or surface normals [S1]. Unlike [Voxel Data Volume Storage and Access](4453-voxel-data-volume-storage-and-access.md) which typically stores scalar density or color, this method stores vector-valued directional statistics, and unlike [Voxel Renderer with Top-Level Grid and Bricks](8114-voxel-renderer-with-top-level-grid-and-bricks.md) which focuses on hierarchical traversal, this method defines the fundamental data layout for the leaf-level directional information [S1].
++Voxel Representation with Gaussian Lobes compactly encodes directional scattering properties and occlusion within dense voxel grids by replacing single-value averages with isotropic Gaussian distributions [S1]. It solves directional aliasing and loss of anisotropic detail in standard voxel cone tracing by storing the mean direction and spread of light transport or surface normals [S1]. Unlike [Voxel Data Volume Storage and Access](4453-voxel-data-volume-storage-and-access.md) which stores scalar density or color, this method stores vector-valued directional statistics [S1].
+ 
+ ## How it works
+-**Inputs:** Raw voxel data containing directional information (e.g., normals, light directions) and scalar properties (e.g., color, occlusion).
+-**Outputs:** A compact voxel buffer where each voxel stores a Gaussian lobe representation.
++**Inputs:** Raw voxel data containing directional vectors (normals or light directions), material colors, opacities, and visibility counts [S1].
++**Outputs:** A compact voxel buffer where each voxel stores a Gaussian lobe representation [S1].
+ 
+ **Data Structures:**
+-Each voxel stores the following fields in a fixed layout:
+-1.  **Average Vector $D$**: A 3D vector representing the mean direction.
+-2.  **Standard Deviation $\sigma$**: Encoded implicitly via the norm of $D$ to ease interpolation.
+-3.  **Visibility/Occlusion**: A single scalar value representing the average percentage of blocked rays.
+-4.  **Material Color**: Opacity-weighted, alpha-premultiplied color.
+-5.  **Normal**: Pre-multiplied by opacity.
++Each voxel stores the following fields in a fixed layout [S1]:
++1. Average vector $D$ (direction).
++2. Standard deviation $\sigma$ (encoded via $|D|$).
++3. Visibility/Occlusion (single average value).
++4. Material color (opacity-weighted, alpha pre-multiplied).
++5. Normal (pre-multiplied by opacity).
+ 
+ **Formulas:**
+@@ -24,57 +24,32 @@
+ 
+ **Steps:**
+-1.  **Accumulate Directions:** For each voxel, accumulate all relevant directional vectors (e.g., surface normals or incoming light directions) from the underlying geometry or simulation.
+-2.  **Compute Average Vector $D$:** Calculate the arithmetic mean of the accumulated directional vectors.
+-3.  **Encode Variance:** Compute $|D|$ and derive $\sigma$ using the formula above. [G] Note: If $|D| = 0$, the direction is undefined; a default isotropic distribution or zero vector should be used.
+-4.  **Compute Occlusion:** Calculate the average visibility (fraction of unblocked rays) for the voxel.
+-5.  **Compute Color:** Average the material colors, weighted by opacity.
+-6.  **Compute Normal:** Average the normals, weighted by opacity.
++1. **Accumulate Directions:** For each voxel, accumulate all relevant directional vectors (e.g., surface normals or incoming light directions) from the underlying geometry or simulation [S1].
++2. **Compute Average Vector $D$:** Calculate the arithmetic mean of the accumulated directional vectors [S1].
++3. **Encode Variance:** Compute $|D|$ and derive $\sigma$ using the formula above [S1]. If $|D| = 0$, the direction is undefined; a default isotropic distribution or zero vector is used [G].
++4. **Compute Occlusion:** Calculate the average visibility (fraction of unblocked rays) for the voxel [S1].
++5. **Compute Color:** Average the material colors, weighted by opacity [S1].
++6. **Compute Normal:** Average the normals, weighted by opacity [S1].
+ 
+ **Pseudocode:**
+ ```python
+-def encode_voxel_gaussian_lobe(directions, colors, opacities, visibility_counts, total_rays):
+-    """
+-    Encodes a single voxel's data into Gaussian lobe representation.
+-    
+-    Args:
+-        directions: List of 3D vectors (normals or light directions).
+-        colors: List of 3D color vectors.
+-        opacities: List of scalar opacity values.
+-        visibility_counts: List of scalar visibility counts (unblocked rays).
+-        total_rays: Total number of rays cast for this voxel.
+-        
+-    Returns:
+-        dict: Encoded voxel data.
+-    """
+-    if not directions:
+-        return {
+-            "D": [0.0, 0.0, 0.0],
+-            "sigma_squared": 1.0, # Default isotropic
+-            "visibility": 0.0,
+-            "color": [0.0, 0.0, 0.0],
+-            "normal": [0.0, 0.0, 0.0]
+-        }
++def encode_voxel_gaussian_lobe(directions, normals, colors, opacities, visibility_counts, total_rays):
++    """Encodes a single voxel's data into Gaussian lobe representation."""
++    n = len(directions)
++    if n == 0:
++        return {"D": [0.0, 0.0, 0.0], "sigma_squared": 1.0, "visibility": 0.0, "color": [0.0, 0.0, 0.0], "normal": [0.0, 0.0, 0.0]}
+ 
+     # 1. Compute Average Vector D
+     sum_D = [0.0, 0.0, 0.0]
+     for d in directions:
+-        sum_D[0] += d[0]
+-        sum_D[1] += d[1]
+-        sum_D[2] += d[2]
+-    
+-    n = len(directions)
+-    D = [sum_D[i] / n for i in range(3)]
+-    
++        sum_D[0] += d[0]; sum_D[1] += d[1]; sum_D[2] += d[2]
++    D = [s / n for s in sum_D]
++
+     # 2. Encode Variance
+-    norm_D = math.sqrt(D[0]**2 + D[1]**2 + D[2]**2)
+-    if norm_D < 1e-6:
+-        sigma_squared = 1.0 # Fallback for undefined direction
+-    else:
+-        sigma_squared = (1.0 - norm_D) / norm_D
+-        
++    norm_D = (D[0]**2 + D[1]**2 + D[2]**2)**0.5
++    sigma_squared = 1.0 if norm_D < 1e-6 else (1.0 - norm_D) / norm_D
++
+     # 3. Compute Visibility
+-    sum_visibility = sum(visibility_counts)
+-    visibility = sum_visibility / total_rays if total_rays > 0 else 0.0
+-    
++    visibility = sum(visibility_counts) / total_rays if total_rays > 0 else 0.0
++
+     # 4. Compute Opacity-Weighted Color
+     sum_color = [0.0, 0.0, 0.0]
+@@ -86,39 +61,21 @@
+         sum_color[2] += colors[i][2] * alpha
+         total_opacity += alpha
+-        
+-    if total_opacity > 0:
+-        color = [sum_color[i] / total_opacity for i in range(3)]
+-    else:
+-        color = [0.0, 0.0, 0.0]
+-        
++    color = [c / total_opacity for c in sum_color] if total_opacity > 0 else [0.0, 0.0, 0.0]
++
+     # 5. Compute Normal (Pre-multiplied by opacity)
+-    # Note: The source states "Normal (pre-multiplied by opacity)".
+-    # This implies the stored normal is the average normal weighted by opacity.
+     sum_normal = [0.0, 0.0, 0.0]
+     for i in range(n):
+         alpha = opacities[i]
+-        # Assuming directions here are normals for this step
+-        sum_normal[0] += directions[i][0] * alpha
+-        sum_normal[1] += directions[i][1] * alpha
+-        sum_normal[2] += directions[i][2] * alpha
+-        
+-    if total_opacity > 0:
+-        normal = [sum_normal[i] / total_opacity for i in range(3)]
+-    else:
+-        normal = [0.0, 0.0, 0.0]
+-        
+-    return {
+-        "D": D,
+-        "sigma_squared": sigma_squared,
+-        "visibility": visibility,
+-        "color": color,
+-        "normal": normal
+-    }
++        sum_normal[0] += normals[i][0] * alpha
++        sum_normal[1] += normals[i][1] * alpha
++        sum_normal[2] += normals[i][2] * alpha
++    normal = [n / total_opacity for n in sum_normal] if total_opacity > 0 else [0.0, 0.0, 0.0]
++
++    return {"D": D, "sigma_squared": sigma_squared, "visibility": visibility, "color": color, "normal": normal}
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Zero Norm:** If the average vector $D$ has a norm of zero, the variance formula divides by zero. A fallback isotropic distribution ($\sigma^2 = 1$) or a zero vector must be handled [G].
+-*   **View-Dependency:** Storing a single average visibility value lacks view-dependency, which is a disadvantage for large thin objects [S1].
+-*   **Precision:** The encoding $\sigma^2 = (1 - |D|) / |D|$ is sensitive to small changes in $|D|$ near 1. High precision in $D$ is required to maintain accurate spread information [S1].
++* **Zero Norm:** If the average vector $D$ has a norm of zero, the variance formula divides by zero. A fallback isotropic distribution ($\sigma^2 = 1$) or a zero vector must be handled [G].
++* **View-Dependency:** Storing a single average visibility value lacks view-dependency, which is a disadvantage for large thin objects [S1].
+ 
+ ## Subtopics
+@@ -133,11 +90,11 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Encoding is linear in the number of directions per voxel. Lobe reordering is $O(K \cdot m!)$ where $K$ is the number of voxels and $m$ is the number of lobes, but $m$ is small enough for brute force [S2].
+-*   **Memory Complexity:** Each voxel stores a fixed-size structure (3D vector $D$, scalar $\sigma$, scalar visibility, 3D color, 3D normal). This is more memory-intensive than scalar voxel storage but less than storing full directional distributions [S1].
+-*   **Performance:** Improves rendering accuracy for anisotropic media compared to scalar averaging [S1, S2].
+-*   **Strengths:** Compact representation of directional data; enables efficient interpolation of Gaussian lobes [S1].
+-*   **Limitations:** Lacks view-dependency in occlusion; isotropic assumption may not capture all anisotropic effects perfectly [S1].
+-*   **When to use:** When directional information (normals, light directions) is important for rendering quality and memory is constrained.
+-*   **When not to use:** For highly view-dependent thin structures where single-value visibility is insufficient [S1].
++* **Time Complexity:** Encoding is linear in the number of directions per voxel [S1]. Lobe reordering is $O(K \cdot m!)$ where $K$ is the number of voxels and $m$ is the number of lobes, but $m$ is small enough for brute force [S2].
++* **Memory Complexity:** Each voxel stores a fixed-size structure (3D vector $D$, scalar $\sigma$, scalar visibility, 3D color, 3D normal) [S1]. This is more memory-intensive than scalar voxel storage but less than storing full directional distributions [S1].
++* **Performance:** Using distributions is more accurate than single values [S1].
++* **Strengths:** Compact representation of directional data; enables efficient interpolation of Gaussian lobes [S1].
++* **Limitations:** Lacks view-dependency in occlusion; isotropic assumption may not capture all anisotropic effects perfectly [S1].
++* **When to use:** When directional information (normals, light directions) is important for rendering quality and memory is constrained [S1].
++* **When not to use:** For highly view-dependent thin structures where single-value visibility is insufficient [S1].
+ 
+ ## Background

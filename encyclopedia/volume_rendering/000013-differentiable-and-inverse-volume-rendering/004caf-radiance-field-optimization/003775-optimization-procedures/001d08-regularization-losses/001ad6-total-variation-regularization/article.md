@@ -1,0 +1,167 @@
+# Total Variation Regularization
+
+Also called: Efficient Total Variation (TV) Loss, TV Loss
+
+## Overview
+Total Variation (TV) regularization is a loss function applied to explicit radiance field representations (such as voxel grids) to suppress visual artifacts like "floaters" (spurious geometry in empty space) and "holes" (missing geometry) [S1, unofficial]. It enforces spatial smoothness and piecewise-constant structures by penalizing the magnitude of gradients between neighboring voxels [S2]. Unlike implicit MLPs, explicit representations are more prone to these artifacts due to the lack of inherent smoothness constraints, making TV regularization critical for unbounded real-world scenes [S1, unofficial]. It distinguishes itself from sibling methods like [Distortion Loss](2755-distortion-loss.md) (which penalizes depth variance along rays) and [Output Noise Regularization](928-output-noise-regularization.md) (which targets high-frequency noise) by operating directly on the 3D spatial gradient of the density or opacity fields [S1, unofficial][S2].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A 3D tensor of scene parameters (density $\sigma$ or opacity $\alpha$) with shape $[X, Y, Z, C]$, where $C$ is the channel dimension (e.g., 1 for density, 4 for RGBA) [S3, unofficial].
+- Output: A scalar loss value $L_{TV}$ and gradients with respect to the input tensor [S1, unofficial].
+
+**Parameters:**
+- $\lambda_{TV}$: The weight of the TV loss. Typical value: $10^{-5}$ [S2].
+- $\delta$: The transition parameter for Huber loss, controlling the transition between $\ell_2$ and $\ell_1$ segments [S7].
+- $V$: The set of voxels included in the loss computation. Can be all voxels or a stochastic subset [S2].
+
+**Steps:**
+1. **Gradient Computation:** Compute the spatial gradients along the x, y, and z axes by subtracting adjacent slices: $\Delta_x T = T[:, :-1, :, :] - T[:, 1:, :, :]$, and analogously for y and z [S3, unofficial].
+2. **Norm Calculation:**
+   - **Isotropic TV (L2):** Compute the Euclidean norm of the gradient vector at each voxel: $\|\nabla T\|_2 = \sqrt{\Delta_x^2 T + \Delta_y^2 T + \Delta_z^2 T}$ [S2].
+   - **Huber Loss:** Use a Huber penalty to reduce sensitivity to large gradients (floaters) while maintaining smoothness: $H(x) = \begin{cases} \frac{1}{2}x^2 & \text{if } |x| \le \delta \\ \delta(|x| - \frac{1}{2}\delta) & \text{if } |x| > \delta \end{cases}$ [S1, unofficial][S7].
+3. **Aggregation:** Average the computed norms over the set of voxels $V$: $L_{TV} = \lambda_{TV} \frac{1}{|V|} \sum_{v \in V} \|\nabla T(v)\|$ [S2].
+4. **Gradient Injection:** To avoid the memory overhead of storing intermediate gradient tensors for backpropagation, the gradients are often computed in a custom CUDA kernel and added directly to the parameter tensors' gradient buffers after the standard backward pass [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_tv_loss(tensor, lambda_tv, use_huber=False, delta=1.0, dense_mode=True):
+    """
+    Compute Total Variation loss for a 3D tensor.
+    
+    Args:
+        tensor: Array of shape (X, Y, Z, C)
+        lambda_tv: float, weight of the TV loss
+        use_huber: bool, whether to use Huber loss instead of L2/L1
+        delta: float, Huber threshold
+        dense_mode: bool, if True, compute for all voxels; if False, compute only for voxels with non-zero gradients
+        
+    Returns:
+        loss: scalar
+    """
+    if not dense_mode:
+        # In practice, compute only for voxels where the gradient magnitude exceeds a threshold
+        # Sources do not provide the exact filtering implementation [G].
+        pass
+
+    # Compute gradients along x, y, z axes using forward differences
+    grad_x = tensor[:, :-1, :, :] - tensor[:, 1:, :, :]
+    grad_y = tensor[:, :, :-1, :] - tensor[:, :, 1:, :]
+    grad_z = tensor[:, :, :, :-1] - tensor[:, :, :, 1:]
+
+    # Compute squared gradients
+    grad_x_sq = grad_x ** 2
+    grad_y_sq = grad_y ** 2
+    grad_z_sq = grad_z ** 2
+
+    if use_huber:
+        # Huber loss on each gradient component
+        abs_grad_x = abs(grad_x)
+        huber_x = where(abs_grad_x <= delta, 0.5 * grad_x_sq, delta * (abs_grad_x - 0.5 * delta))
+        abs_grad_y = abs(grad_y)
+        huber_y = where(abs_grad_y <= delta, 0.5 * grad_y_sq, delta * (abs_grad_y - 0.5 * delta))
+        abs_grad_z = abs(grad_z)
+        huber_z = where(abs_grad_z <= delta, 0.5 * grad_z_sq, delta * (abs_grad_z - 0.5 * delta))
+        tv_sum = huber_x + huber_y + huber_z
+    else:
+        # Isotropic L2 norm (Euclidean)
+        tv_sum = sqrt(grad_x_sq + grad_y_sq + grad_z_sq + 1e-8)
+
+    # Average over all voxels in the set V
+    num_voxels = tensor.shape[0] * tensor.shape[1] * tensor.shape[2]
+    loss = lambda_tv * (tv_sum.sum() / num_voxels)
+    return loss
+
+def add_tv_gradients(model, tv_weight, dense_mode):
+    """
+    Custom kernel to add TV gradients directly to model parameters.
+    Called after model.backward() and before optimizer.step().
+    Sources do not provide the CUDA kernel implementation [G].
+    """
+    # Computes gradients of the TV loss w.r.t. the density/opacity grid
+    # and adds them to the .grad attribute of the grid tensor.
+    pass
+```
+
+**Edge Cases and Pitfalls:**
+- **Computational Cost:** Computing TV loss densely for all grid points is time-consuming [S1, unofficial]. It is recommended to compute it densely only for the first 10,000 iterations and then switch to a sparse mode (computing only for voxels with non-zero gradients) [S1, unofficial].
+- **Precision:** When computing the L2 norm, add a small epsilon to avoid division by zero or NaN gradients when gradients are zero [S3, unofficial].
+
+## Subtopics
+
+### [Plenoxels regularization ablation](901-plenoxels-regularization-ablation.md)
+This article documents the regularization strategies used in the Plenoxels framework to stabilize the optimization of sparse voxel-based radiance fields. It addresses the problem of visual artifacts (floaters, holes) and memory inefficiency inherent in high-dimensional, non-convex optimization of explicit representations. It distinguishes itself from sibling methods by combining Total Variation (TV) regularization on both voxel opacities and spherical harmonic coefficients with scene-specific sparsity and beta losses, rather than relying solely on geometric constraints or tomographic projections.
+
+### [Space-Time Tomographic Projection (STP) Regularizer](3265-space-time-tomographic-projection-stp-regularizer.md)
+The Space-Time Tomographic Projection (STP) regularizer is a non-local regularization term for tomographic reconstruction that encourages the volume to exhibit low-rank structure tensors, effectively recovering thin 1D and 2D manifolds (surfaces, tubes, filaments) at resolutions below the Nyquist limit. It differs from standard Total Variation (TV) by aggregating gradient information from a local neighborhood (patch) of voxels using a structure tensor, rather than just the gradient at a single voxel, thereby allowing anisotropic regularization based on local geometry.
+
+### [Anisotropic Total Variation](3273-anisotropic-total-variation.md)
+Anisotropic Total Variation (ATV) is a regularization prior used in tomographic reconstruction and radiance field optimization to enforce piecewise constant solutions with axis-aligned edges. It minimizes the sum of absolute differences between a voxel and its immediate neighbors along the three principal axes (x, y, z). Unlike Isotropic Total Variation, which computes the Euclidean norm of the gradient vector at each voxel, ATV treats each axis independently, making it computationally cheaper and favoring structures aligned with the grid axes. It builds on [Total Variation Regularization](860-total-variation-regularization.md) by using the $L_1$ norm specifically along principal directions rather than a general Huber loss or isotropic magnitude.
+
+### [Isotropic Total Variation](3276-isotropic-total-variation.md)
+Isotropic Total Variation (ITV) is a regularization prior used in volume rendering and tomographic reconstruction to enforce piecewise constant solutions while preserving isotropic edge structures. Unlike Anisotropic Total Variation (ATV), which sums the absolute values of individual gradient components, ITV sums the Euclidean magnitude of the full 3D gradient vector at each voxel, treating the gradient components as a coupled group. This distinction makes ITV particularly effective for preventing overfitting and artifacts like floaters in explicit radiance field representations, especially when using rendering methods that do not inherently smooth across voxel boundaries.
+
+### Total Variation Prior on Log Opacity
+**Definition:** A regularization term that enforces sparse spatial gradients on the log of voxel opacities to recover sharp boundaries between opaque and transparent regions and reduce smoke-like artifacts [S4].
+**Formula:**
+$$ J_{\text{tv}}(\mathbf{V}_\alpha) = \frac{1}{N} \sum_{\mathbf{x}} \lambda_{\text{tv}} \left\| \frac{\partial}{\partial \mathbf{x}} \log \mathbf{V}_\alpha(\mathbf{x}) \right\| $$
+where $\mathbf{V}_\alpha(\mathbf{x})$ is the voxel opacity at center $\mathbf{x}$, $N$ is the number of voxels, and $\lambda_{\text{tv}}$ is the weight [S4].
+**Implementation:** The derivative is discretized using the rectangle rule twice with samples on the right of each step interval and backwards differences [S4].
+**Pitfall:** Artifacts tend to be mostly transparent; applying the prior in log space increases sensitivity to small $\alpha$ values [S4].
+
+### R2-Gaussian Optimization
+**Definition:** Optimization of radiative Gaussians using stochastic gradient descent with photometric losses and 3D total variation regularization [S5].
+**Steps:**
+1. Randomly query a tiny density volume $V_{tv} \in \mathbb{R}^{D \times D \times D}$ (same spacing as target output) and minimize its total variation [S5].
+2. Remove empty Gaussians and densify (clone or split) those with large loss gradients [S5].
+3. Do not prune large Gaussians to handle homogeneous areas like human organs [S5].
+4. When densifying, halve the densities of both original and replicated Gaussians to mitigate sudden performance drops [S5].
+**Formula:**
+$$ L_{total} = L_1(I_r, I_m) + \lambda_{ssim} L_{ssim}(I_r, I_m) + \lambda_{tv} L_{tv}(V_{tv}) $$
+where $L_1$ is photometric loss, $L_{ssim}$ is D-SSIM loss, and $L_{tv}$ is 3D total variation regularization [S5].
+**Parameters:** $\lambda_{ssim} = 0.25$, $\lambda_{tv} = 0.05$ [S5].
+
+### TV Minimization
+**Definition:** A recovery method that minimizes the Total Variation (TV) seminorm of the image, suitable for images that are smooth or sparse in the gradient domain. It is formulated as an image restoration problem akin to inpainting [S6].
+**Steps:**
+1. Formulate the optimization problem minimizing TV norm subject to data fidelity constraint [S6].
+2. Solve using fast algorithms such as Split Bregman or NESTA [S6].
+**Formula:**
+$$ \|\mathbf{x}\|_{TV} := \sum_{i,j} |x_{i+1,j} - x_{i,j}| + |x_{i,j+1} - x_{i,j}| $$
+where the sum is over all pixels $(i,j)$. This is the sum of $\ell_1$ norms of horizontal and vertical forward differences [S6].
+**Constraint:**
+$$ \min \|\mathbf{x}\|_{TV} \quad \text{subject to} \quad \|S\mathbf{x} - \mathbf{y}\|_2 \le \varepsilon $$
+where $S$ is the sensing matrix and $\mathbf{y}$ is the measurement vector [S6].
+**Parameters:** Tolerance and stopping criteria for the NESTA solver: $10^{-2}$ [S6].
+
+### Huber Penalty Proximal Operator
+**Definition:** A regularizer applied on the volume gradient to reduce total variation, avoiding sparse gradients produced by the $\ell_1$ norm. It is a piecewise function composed of $\ell_2$ and $\ell_1$ segments. The proximal operator is a soft-thresholding operation applied to each element of the volume gradient [S7].
+**Formula:**
+$$ G_{\text{Huber}} = \begin{cases} \frac{1}{2} x^2 & \text{if } |x| \le \delta \\ \delta(|x| - \frac{1}{2} \delta) & \text{if } |x| > \delta \end{cases} $$
+The proximal operator is:
+$$ \text{prox}_{\rho_2} G_{\text{Huber}} (u_{ni}) = \begin{cases} \frac{u_{ni}}{1+\rho_2} & \text{if } |u_{ni}| \le \delta + \delta\rho_2 \\ u_{ni} + \rho_2 \delta & \text{if } u_{ni} < -(\delta + \delta\rho_2) \\ u_{ni} - \rho_2 \delta & \text{if } u_{ni} > \delta + \delta\rho_2 \end{cases} $$
+[S7].
+**Parameters:** $\rho_2$ controls how fast the gradient shrinks. $\delta$ controls the transition point between the linear and quadratic segments in $G_{\text{Huber}}$ [S7].
+
+## Operating characteristics
+- **Time Complexity:** Computing TV loss densely is $O(N)$ where $N$ is the number of voxels, but the constant factor is high due to multiple memory accesses and kernel launches if not fused [S1, unofficial]. Using a fused CUDA kernel reduces overhead [S1, unofficial]. Stochastic evaluation on random contiguous segments reduces overhead [S2].
+- **Memory Complexity:** Standard AD requires storing intermediate gradients, leading to high memory usage [G]. The efficient implementation adds gradients directly to the parameter buffers, keeping memory usage low [S1, unofficial].
+- **Performance:** TV regularization is effective at removing floaters and holes in explicit radiance fields [S1, unofficial]. It is particularly useful in the early stages of training (e.g., first 10,000 iterations) to stabilize the optimization [S1, unofficial].
+- **Strengths:** Prevents overfitting to noise, enforces spatial smoothness, and reduces artifacts in unbounded scenes [S1, unofficial][S2].
+- **Limitations:** Computationally expensive for large dense grids [S1, unofficial]. May oversmooth fine details if the weight $\lambda_{TV}$ is too high [S2].
+- **When to use:** Explicit radiance field representations (voxel grids) where floaters and holes are prevalent [S1, unofficial]. Tomographic reconstruction where piecewise constant structures are expected [S6].
+- **When not to use:** Implicit MLPs where smoothness is inherent [S1, unofficial]. When computational resources are extremely limited and dense TV computation is not feasible [S1, unofficial].
+
+## Background
+Total Variation regularization was originally proposed by Rudin, Osher, and Fatemi for image denoising and inpainting [S6]. It has since been adapted for volume rendering and tomographic reconstruction to enforce compact, smooth geometry in explicit representations [S2]. In the context of radiance fields, it was introduced to address the specific artifacts (floaters, holes) that arise in explicit voxel-based models, which lack the inherent smoothness of implicit MLPs [S1, unofficial]. The "Efficient Total Variation" implementation was developed to make TV regularization practical for large-scale radiance field optimization by fusing computations into a single CUDA kernel and skipping the forward pass [S1, unofficial].
+
+## Sources
+[S1] Improved Direct Voxel Grid Optimization for Radiance Fields Reconstruction, https://doi.org/10.48550/arxiv.2206.05085, fetched 2026-10-26 (unofficial)
+[S2] VoxGRAF: Fast 3D-Aware Image Synthesis with Sparse Voxel Grids, https://doi.org/10.52202/068431-2464, fetched 2026-10-26
+[S3] DanJbk/Plenoxels, https://github.com/DanJbk/Plenoxels, fetched 2026-10-27 (unofficial)
+[S4] Neural Volumes: Learning Dynamic Renderable Volumes from Images, https://arxiv.org/abs/1906.07751, fetched 2026-10-26
+[S5] R$^2$-Gaussian: Rectifying Radiative Gaussian Splatting for Tomographic Reconstruction, https://arxiv.org/abs/2405.20693v2, fetched 2026-10-26
+[S6] Compressive Volume Rendering, https://doi.org/10.1111/cgf.12622, fetched 2026-10-26
+[S7] GPU Accelerated 3D Tomographic Reconstruction and Visualization From Noisy Electron Microscopy Tilt-Series., https://doi.org/10.1109/tvcg.2022.3230445, fetched 2026-10-28

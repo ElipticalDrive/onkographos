@@ -1,0 +1,154 @@
+--- v001.md
++++ v002.md
+@@ -4,14 +4,14 @@
+ 
+ ## Overview
+-Phantom Mesh Generation augments a visual splat representation (typically 3D Gaussians) with an underlying surface mesh to enable standard graphics engine physics simulations, such as collision detection and shadow casting, while relying solely on the splat for visual rendering [S1]. It solves the problem that splats lack explicit surface topology, which prohibits direct use of standard physics models [S1]. It is distinct from pure visual splatting methods by introducing a dual-representation system: the splat handles the framebuffer, and the "phantom" mesh handles the physics engine [S1].
++Phantom Mesh Generation augments a visual splat representation with an underlying surface mesh to enable standard graphics engine physics simulations, such as collision detection and shadow casting, while relying solely on the splat for visual rendering [S1]. It solves the problem that splats lack explicit surface topology, which prohibits direct use of standard physics models [S1]. It is distinct from pure visual splatting methods by introducing a dual-representation system: the splat handles the framebuffer, and the "phantom" mesh handles the physics engine [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A set of splat primitives (e.g., Gaussian ellipsoids from a PLY file) and configuration parameters (algorithm selection, grid threshold, scale).
+-*   **Output:** A surface mesh (OBJ format) co-aligned with the splat, parented to the splat’s game object, and equipped with mesh colliders [S1].
++*   **Input:** A set of splat primitives (e.g., Gaussian ellipsoids from a PLY file) and configuration parameters including algorithm selection, grid threshold, and scale [S1].
++*   **Output:** A surface mesh in OBJ format that is co-aligned with the splat, parented to the splat’s game object, and equipped with mesh colliders [S1].
+ 
+ **Data Structures:**
+-*   **Splat Grid:** A volumetric or grid-based representation constructed from the densities of the input Gaussian ellipsoids [S1].
+-*   **Isosurface:** A scalar field derived from the splat grid, representing the boundary of the object [S1].
++*   **Splat Grid:** A volumetric representation constructed from the densities of the input Gaussian ellipsoids [S1].
++*   **Isosurface:** A scalar field derived from the splat grid that represents the object boundary [S1].
+ *   **Mesh:** A triangle mesh containing vertices and faces, generated via Marching Cubes or Poisson reconstruction [S1].
+ 
+@@ -21,9 +21,9 @@
+ 1.  **Algorithm Selection:** The developer selects either **Object-Optimized** (Marching Cubes) or **Space-Optimized** (Poisson) generation based on whether the splat represents a discrete object or a large-scale environment [S1].
+ 2.  **Density Field Construction:**
+-    *   *For Object-Optimized:* Create a mesh for each Gaussian ellipsoid from the input PLY file, arranged in a mesh grid. Construct a splat grid and an isosurface based on the Gaussian ellipsoid densities [S1].
+-    *   *For Space-Optimized:* Construct a density field suitable for Poisson reconstruction, typically using a coarser resolution to manage compute at scale [S1].
++    *   *For Object-Optimized:* Create a mesh for each Gaussian ellipsoid from the input PLY file, arranged in a mesh grid, then construct a splat grid and an isosurface based on the Gaussian ellipsoid densities [S1].
++    *   *For Space-Optimized:* Construct a density field suitable for Poisson reconstruction using a coarser resolution to manage compute at scale [S1].
+ 3.  **Surface Reconstruction:**
+     *   *Marching Cubes:* Perform marching cubes over the isosurface result to create a smoothed surface mesh [S1].
+-    *   *Poisson:* Employ the Poisson surface reconstruction algorithm to recover the largest surfaces (e.g., floors, walls) [S1].
++    *   *Poisson:* Employ the Poisson surface reconstruction algorithm to recover the largest surfaces, such as floors and walls [S1].
+ 4.  **Optimization and Cleanup:**
+     *   *Decimation:* Decimate the mesh for performance [S1].
+@@ -41,56 +41,67 @@
+ ```python
+ def generate_phantom_mesh(splats, algorithm, scale, threshold):
+-    """
+-    Generates a phantom mesh from splat primitives.
+-    
+-    Args:
+-        splats: List of Gaussian ellipsoids (position, covariance, density).
+-        algorithm: 'marching_cubes' or 'poisson'.
+-        scale: Float, scaling factor for reconstruction accuracy.
+-        threshold: Float, grid threshold for isosurface extraction.
+-        
+-    Returns:
+-        mesh: A mesh object with vertices and faces.
+-    """
++    """Generates a phantom mesh from splat primitives."""
+     if algorithm == 'marching_cubes':
+-        # Object-Optimized Path
+-        # 1. Create intermediate mesh for each Gaussian ellipsoid
+         gaussian_meshes = []
+         for gauss in splats:
+-            # Create a mesh representation of the Gaussian ellipsoid
+-            g_mesh = create_ellipsoid_mesh(gauss.position, gauss.covariance, gauss.density)
++            # Triangulate Gaussian ellipsoid from covariance eigenvalues
++            g_mesh = []
++            for i in range(0, 360, 10):
++                for j in range(0, 180, 10):
++                    x, y, z = spherical_to_cartesian(i, j)
++                    x, y, z = scale_by_covariance(x, y, z, gauss.covariance)
++                    g_mesh.append(Vertex(position=(x, y, z), density=gauss.density))
+             gaussian_meshes.append(g_mesh)
+-        
+-        # 2. Construct splat grid and isosurface from densities
+-        splat_grid = build_density_grid(gaussian_meshes, threshold)
+-        isosurface = extract_isosurface(splat_grid)
+-        
+-        # 3. Perform marching cubes for smoothed surface
+-        mesh = marching_cubes(isosurface)
+-        
+-        # 4. Decimate for performance
+-        mesh = decimate_mesh(mesh)
+-        
++        # Rasterize into 3D grid
++        splat_grid = zeros_3d(resolution)
++        for mesh in gaussian_meshes:
++            for v in mesh:
++                splat_grid[v.position] += v.density
++        # Extract isosurface
++        isosurface = [v for v in splat_grid.vertices if v.density > threshold]
++        # Marching Cubes
++        mesh = standard_marching_cubes(isosurface)
++        # Decimate
++        mesh = edge_collapse_decimation(mesh, target_ratio=0.5)
+     elif algorithm == 'poisson':
+-        # Space-Optimized Path
+-        # 1. Construct density field for Poisson reconstruction
+-        # Use coarser resolution for large-scale scenes
+-        density_field = build_poisson_density_field(splats, resolution='coarse')
+-        
+-        # 2. Perform Poisson surface reconstruction
+-        mesh = poisson_reconstruction(density_field)
+-        
+-        # 3. Crop results by removing vertex outliers
+-        mesh = remove_outliers(mesh)
+-    
+-    # 5. Flatten base vertices if necessary (e.g., for upright placement)
+-    mesh = flatten_base(mesh, axis='y')
+-    
++        # Build coarse density field
++        density_field = zeros_3d(coarse_resolution)
++        for s in splats:
++            density_field[s.position] += s.density
++        # Poisson reconstruction
++        mesh = solve_poisson_surface(density_field)
++        # Remove outliers
++        centroid = mean(mesh.vertices)
++        mesh = [v for v in mesh.vertices if distance(v, centroid) < 3 * std_dev]
++    # Flatten base vertices
++    threshold = min(v.position[1] for v in mesh.vertices)
++    for v in mesh.vertices:
++        if v.position[1] < threshold + epsilon:
++            v.position[1] = threshold
+     return mesh
++
++def spherical_to_cartesian(theta, phi):
++    return (sin(phi)*cos(theta), sin(phi)*sin(theta), cos(phi))
++
++def scale_by_covariance(x, y, z, covariance):
++    # Apply covariance matrix scaling to unit sphere coordinates
++    return (x * covariance[0][0], y * covariance[1][1], z * covariance[2][2])
++
++def zeros_3d(resolution):
++    return Grid(resolution, data=0.0)
++
++def standard_marching_cubes(isosurface):
++    return MarchingCubesAlgorithm(isosurface)
++
++def edge_collapse_decimation(mesh, target_ratio):
++    return CollapseEdges(mesh, ratio=target_ratio)
++
++def solve_poisson_surface(density_field):
++    return PoissonSolver(density_field)
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+ *   **Convexity Assumption:** Marching Cubes assumes convexity, making it unsuitable for complex spaces [S1].
+-*   **Uneven Surfaces:** Uneven surface reconstruction at the base of splat objects can cause instability (e.g., toppling) when placed on flat surfaces; flattening is required [S1].
++*   **Uneven Surfaces:** Uneven surface reconstruction at the base of splat objects can cause instability when placed on flat surfaces, requiring a flattening procedure [S1].
+ *   **Compute Scale:** Large-scale reconstructions require coarser resolutions to manage compute time [S1].
+ 
+@@ -104,6 +115,6 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** Not given in the sources.
++*   **Time Complexity:** Not given in the sources. [G]
++*   **Memory Complexity:** Not given in the sources. [G]
+ *   **Performance:** Marching Cubes produces fine detail but is computationally heavier for large scenes; Poisson uses coarser resolution for efficiency in large-scale scenes [S1].
+ *   **Strengths:** Enables standard physics simulations (collision, shadows) without altering visual rendering pipeline [S1].

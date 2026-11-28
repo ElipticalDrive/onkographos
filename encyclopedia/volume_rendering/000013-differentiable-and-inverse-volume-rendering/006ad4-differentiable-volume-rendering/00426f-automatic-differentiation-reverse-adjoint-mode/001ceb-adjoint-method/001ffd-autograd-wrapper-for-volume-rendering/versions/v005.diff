@@ -1,0 +1,144 @@
+--- v004.md
++++ v005.md
+@@ -4,15 +4,13 @@
+ 
+ ## Overview
+-The Autograd Wrapper for Volume Rendering is a Python `torch.autograd.Function` implementation that serves as the interface between PyTorch's automatic differentiation engine and the underlying C++/CUDA volume rendering kernels. It solves the problem of integrating differentiable volume rendering into deep learning pipelines by routing execution to either a backward-aware CUDA kernel (when gradients are required) or an inference-optimized forward-only kernel (when they are not) [S2, unofficial]. It replaces the previous C++-based autograd layer, moving the gradient management logic into Python to reduce compilation overhead and improve maintainability [S2, unofficial].
++The Autograd Wrapper for Volume Rendering is a Python `torch.autograd.Function` implementation that routes differentiable volume rendering execution to either a backward-aware CUDA kernel or an inference-optimized forward-only kernel [S2, unofficial]. It solves the problem of integrating differentiable projection and rendering operations into deep learning pipelines by replacing a previous C++-based autograd layer with a Python wrapper that matches the pattern of other functional operations [S2, unofficial].
+ 
+ ## How it works
+-The wrapper implements the `torch.autograd.Function` interface, defining `forward` and `backward` static methods. It interacts with the C++ library `fvdb` via Python bindings (`_fvdb_cpp`) exposed in `src/python/Bindings.cpp` [S2, unofficial].
++The wrapper implements the `torch.autograd.Function` interface, defining `forward` and `backward` static methods [S2, unofficial]. It interacts with the C++ library `fvdb` via Python bindings (`_fvdb_cpp`) exposed in `src/python/Bindings.cpp` [S2, unofficial].
+ 
+ ### Inputs and Outputs
+-**Inputs:**
+-The specific inputs depend on the rendering equation variant. For the PBR (Physically Based Rendering) equation, inputs include `base_color`, `roughness`, `metallic`, `normals`, `viewdirs`, `incidents_shs`, `direct_shs`, `visibility_shs`, `sample_num`, `is_training`, and `debug` [S1, unofficial]. For the general volume rendering, inputs are the density/TF parameters and camera/ray parameters required by the C++ `fvdb::volumeRenderForward` function [S2, unofficial].
++**Inputs:** The specific inputs depend on the rendering equation variant [S1, unofficial]. For the PBR (Physically Based Rendering) equation, inputs include `base_color`, `roughness`, `metallic`, `normals`, `viewdirs`, `incidents_shs`, `direct_shs`, `visibility_shs`, `sample_num`, `is_training`, and `debug` [S1, unofficial]. For general volume rendering, inputs are the density/TF parameters and camera/ray parameters required by the C++ `fvdb::volumeRenderForward` function [S2, unofficial].
+ 
+-**Outputs:**
+-The forward pass returns the rendered image tensor (e.g., `pbr` or `rgb`), `incident_dirs`, and `diffuse_light` (for PBR) or `depth`, `ws` (weight), and `total_samples` (for general volume rendering) [S1, S2, unofficial].
++**Outputs:** The forward pass returns `pbr`, `incident_dirs`, and `diffuse_light` for the PBR variant [S1, unofficial]. For general volume rendering, it returns `rgb`, `opacity`, `depth`, `ws` (weight), and `total_samples` [S2, unofficial].
+ 
+ ### Data Structures
+@@ -23,18 +21,11 @@
+ 1.  **Gradient Check:** In the `forward` method, check if gradients are enabled and if at least one input tensor has `requires_grad=True` [S2, unofficial].
+ 2.  **Dispatch:**
+-    *   **If gradients are required:** Call `_VolumeRenderFn.apply` (or the internal logic) which invokes the CUDA forward pass with `needsBackward=true`. This path saves necessary intermediate variables (e.g., `sample_num`, `debug`, input tensors excluding `diffuse_light`) to `ctx` for the backward pass [S1, S2, unofficial].
+-    *   **If gradients are NOT required (Inference Fast Path):** Call `_fvdb_cpp.volume_render_fwd(..., needs_backward=False)` directly. This path skips saving intermediates and kernel launch overhead associated with backward tracking [S2, unofficial].
+-3.  **Forward Computation:**
+-    *   The C++ kernel `fvdb::volumeRenderForward` performs the volume rendering. It uses per-ray register accumulation for `rgb`, `depth`, and `opacity` to minimize memory writes [S2, unofficial].
+-    *   It includes an early-termination condition where ray marching stops if the transmittance $T$ drops below a threshold `transmittanceThresh` [S2, unofficial].
++    *   **If gradients are required:** Call `_VolumeRenderFn.apply`, which invokes the CUDA forward pass with `needsBackward=true` [S2, unofficial]. This path saves necessary intermediate variables (e.g., `sample_num`, `debug`, input tensors excluding `diffuse_light`) to `ctx` for the backward pass [S1, unofficial].
++    *   **If gradients are NOT required (Inference Fast Path):** Call `_fvdb_cpp.volume_render_fwd(..., needs_backward=False)` directly [S2, unofficial].
++3.  **Forward Computation:** The C++ kernel `fvdb::volumeRenderForward` performs the volume rendering using per-ray register accumulation for `rgb`, `depth`, and `opacity` to minimize memory writes [S2, unofficial]. It includes an early-termination condition where ray marching stops if the transmittance $T$ drops below a threshold `transmittanceThresh` [S2, unofficial].
+ 4.  **Output Handling:**
+     *   **Gradient Path:** Return the full output tensors (`rgb`, `opacity`, `depth`, `ws`, `total_samples`) [S2, unofficial].
+-    *   **Inference Path:** Return the primary outputs (e.g., `rgb`, `opacity`). For `depth`, `ws`, and `total_samples`, return size-0 placeholder tensors with matching `dtype` and `device` [S2, unofficial].
+-5.  **Backward Pass:**
+-    *   If the forward pass used the gradient path, the `backward` method is invoked.
+-    *   Retrieve saved tensors from `ctx` [S1, unofficial].
+-    *   Handle `None` gradients for outputs by coercing them into zero tensors with matching shape, dtype, and device [S2, unofficial].
+-    *   Call `_C.render_equation_backward` (or `_fvdb_cpp.volume_render_bwd`) to compute gradients with respect to the inputs [S1, S2, unofficial].
+-    *   Return a tuple of gradients matching the forward inputs, padding with `None` for unused inputs [S1, unofficial].
++    *   **Inference Path:** Return the primary outputs (`rgb`, `opacity`). For `depth`, `ws`, and `total_samples`, return size-0 placeholder tensors with matching `dtype` and `device` [S2, unofficial].
++5.  **Backward Pass:** If the forward pass used the gradient path, the `backward` method is invoked [S2, unofficial]. It retrieves saved tensors from `ctx` [S1, unofficial]. It handles `None` gradients for outputs by coercing them into zero tensors with matching shape, dtype, and device [S2, unofficial]. It calls `_C.render_equation_backward` (or `_fvdb_cpp.volume_render_bwd`) to compute gradients with respect to the inputs [S1, S2, unofficial]. It returns a tuple of gradients matching the forward inputs, padding with `None` for unused inputs [S1, unofficial].
+ 
+ ### Pseudocode
+@@ -46,64 +37,48 @@
+ class _VolumeRenderFn(torch.autograd.Function):
+     @staticmethod
+-    def forward(ctx, *args):
+-        # Determine if backward is needed
+-        # args[0] is assumed to be the first differentiable input
++    def forward(ctx, *inputs):
++        # Check if backward is needed: grad enabled and at least one input requires grad
+         needs_backward = torch.is_grad_enabled() and any(
+-            hasattr(arg, 'requires_grad') and arg.requires_grad for arg in args
++            hasattr(x, 'requires_grad') and x.requires_grad for x in inputs
+         )
+-
++        
+         if needs_backward:
+-            # Save tensors for backward pass
+-            # Specific saved tensors depend on the variant (e.g., sample_num, debug, inputs)
+-            ctx.save_for_backward(*args)
+-            
++            # Save tensors for backward pass (excluding diffuse_light if present, per [S1, unofficial])
++            ctx.save_for_backward(*inputs)
+             # Call C++ forward with needsBackward=true
+-            # The exact signature depends on the specific rendering equation
+-            # For PBR:
+-            # pbr, incident_dirs, diffuse_light = _fvdb_cpp.volume_render_fwd(
+-            #     base_color, roughness, metallic, normals, viewdirs, 
+-            #     incidents_shs, direct_shs, visibility_shs, sample_num, 
+-            #     is_training, debug, needs_backward=True
+-            # )
+-            
+-            # For general volume rendering:
+-            # rgb, opacity, depth, ws, total_samples = _fvdb_cpp.volume_render_fwd(
+-            #     inputs..., needs_backward=True
+-            # )
+-            
+-            # Note: The actual C++ call structure is abstracted here.
+-            # The key is that intermediates are saved and the kernel knows to prepare for backward.
+-            pass 
++            outputs = _fvdb_cpp.volume_render_fwd(*inputs, needs_backward=True)
+         else:
+-            # Inference fast path
+-            # Call C++ forward with needsBackward=False
+-            # Returns size-0 placeholders for depth, ws, total_samples
+-            pass
+-
++            # Inference fast path: call C++ forward with needsBackward=False
++            outputs = _fvdb_cpp.volume_render_fwd(*inputs, needs_backward=False)
++            # Replace depth, ws, total_samples with size-0 placeholders matching dtype/device
++            if len(outputs) >= 3:
++                base_dtype = outputs[0].dtype
++                base_device = outputs[0].device
++                outputs = (outputs[0], outputs[1],
++                           torch.empty(0, dtype=base_dtype, device=base_device),
++                           torch.empty(0, dtype=base_dtype, device=base_device),
++                           torch.empty(0, dtype=base_dtype, device=base_device))
+         return outputs
+ 
+     @staticmethod
+-    def backward(ctx, grad_output):
++    def backward(ctx, *grad_outputs):
++        # Coerce None gradients to zero tensors with matching shape, dtype, device [S2, unofficial]
++        zero_grads = tuple(
++            torch.zeros_like(saved) if g is None else g
++            for g, saved in zip(grad_outputs, ctx.saved_tensors)
++        )
+         # Retrieve saved tensors
+         saved_tensors = ctx.saved_tensors
+-        
+-        # Handle None gradients from upstream
+-        # Coerce None to zero tensors with matching shape, dtype, device
+-        if grad_output is None:
+-            # Create zero tensor matching the expected gradient shape
+-            # This step is critical for compatibility with autograd
+-            pass
+-
+         # Call C++ backward kernel
+-        # grad_inputs = _fvdb_cpp.volume_render_bwd(saved_tensors, grad_output)
+-        
+-        return grad_inputs
++        grad_inputs = _fvdb_cpp.volume_render_bwd(saved_tensors, zero_grads)
++        # Pad with None for unused inputs [S1, unofficial]
++        return tuple(grad_inputs) + (None,) * (len(ctx.saved_tensors) - len(grad_inputs))
+ ```
+ 
+ ### Parameters and Edge Cases
+-*   **`needsBackward` flag:** Controls whether the C++ kernel saves intermediates. Crucial for performance in inference [S2, unofficial].
++*   **`needsBackward` flag:** Controls whether the C++ kernel saves intermediates [S2, unofficial].
+ *   **`transmittanceThresh`:** Early termination threshold for ray marching. If $T \le \text{transmittanceThresh}$, the ray is terminated [S2, unofficial].
+ *   **Channel Limit:** $1 \le C \le \text{MAX\_VOLUME\_RENDER\_CHANNELS}$ [S2, unofficial].
+-*   **Inference Fast Path Pitfall:** The inference path returns size-0 placeholders for `depth`, `ws`, and `total_samples`. Tests asserting these values must force the backward-aware path (by setting `requires_grad=True` on an input) to be observationally equivalent [S2, unofficial].
++*   **Inference Fast Path Pitfall:** The inference path returns size-0 placeholders for `depth`, `ws`, and `total_samples` [S2, unofficial]. Callers consuming only `rgb` and `opacity` are observationally equivalent, but tests asserting `ws`/`total_samples` must force the backward-aware path by setting `requires_grad=True` on an input [S2, unofficial].
+ 
+ ## Subtopics
+@@ -133,3 +108,4 @@
+ [S1] ldyken53/VEG, https://github.com/ldyken53/VEG, fetched 2026-10-26 (unofficial)
+ [S2] Optimizations for `volume_render` and move its autograd layer to Python, https://github.com/openvdb/fvdb-core/pull/640, fetched 2026-10-27 (unofficial)
+-[S3] Moment Bounds are Differentiable: Efficiently Approximating Measures in Inverse Rendering, https://doi.org/10.1145/3730899, fetched 2026-10-27+[S3] Moment Bounds are Differentiable: Efficiently Approximating Measures in Inverse Rendering, https://doi.org/10.1145/3730899, fetched 2026-10-27
++[S4] YaourtB/GPS_plus, https://github.com/YaourtB/GPS_plus, fetched 2026-10-27 (unofficial)

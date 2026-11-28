@@ -1,0 +1,26 @@
+# Splitting Mechanics and Density Preservation
+
+Also called: Density-preserving Gaussian splitting
+
+## Overview
+Splitting Mechanics and Density Preservation is a family of densification strategies for 3D Gaussian Splatting that modifies child parameters to ensure the sum of their densities approximates the parent's density, thereby preventing loss function perturbations and Gaussian clustering . Unlike standard 3DGS splitting which may cause instability, this approach discards cloning operations entirely and relies solely on splitting with learned opacity and size adaptations .
+
+## Shared principles
+The family shares a core mechanism where a parent Gaussian is replaced by two children along its principal axis, with parameters adapted to preserve local density.
+
+1.  **Axis Selection:** Identify the principal axis with the largest scale value $\sigma_{max}$ of the parent Gaussian [Parent].
+2.  **Mean Shift:** Calculate the shift distance $\Delta = \alpha \cdot \sigma_{max}$ . Create two new means $\mu_{c1}$ and $\mu_{c2}$ by shifting the parent mean $\mu_{p}$ along the selected axis by $+\Delta$ and $-\Delta$ respectively .
+3.  **Parameter Adaptation:** Compute the child scale $\sigma_{c}$ and opacity $o_{c}$ using a learned offline function:
+    $$(\sigma_{c}, o_{c}) = SplitAdaptation(\sigma_{p}, o_{p})$$
+    This function ensures the resulting density of the sum of the two children is close to the density of the mother Gaussian .
+4.  **Inheritance:** Copy the parent's rotation $R_{p}$ and spherical harmonic coefficients $C_{p}$ to both children [Parent].
+5.  **Cloning Discard:** Do not perform cloning operations; rely exclusively on splitting for densification .
+
+## Subtopics
+
+### [Density-preserving Gaussian splitting](9290-density-preserving-gaussian-splitting.md)
+A specific implementation that uses a fixed splitting constant $\alpha = 0.3$. It explicitly accounts for opacity variations during adaptation to prevent clusters of Gaussians. Choose this when stability and density preservation are prioritized over the complexity of cloning-based methods. See [Density-preserving Gaussian splitting](9290-density-preserving-gaussian-splitting.md).
+
+## Background
+Not given in the sources.
+

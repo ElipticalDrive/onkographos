@@ -1,0 +1,310 @@
+--- v011.md
++++ v012.md
+@@ -4,146 +4,188 @@
+ 
+ ## Overview
+-Forward Warping for Novel View Synthesis is a method for rendering dynamic scenes by modeling a static "canonical" radiance field and differentially warping this field to target time steps [S1]. It solves the many-to-one and one-to-many mapping ambiguities inherent in dynamic scene reconstruction by using average splatting for forward warping and an inpaint network to fill occluded regions [S1]. Unlike backward-flow methods such as NDVG, it maintains a clear advantage in rendering quality, particularly for canonical frames, by explicitly predicting deformation flows from a static reference [S1].
++Forward Warping for Novel View Synthesis is a method for rendering dynamic scenes by modeling a static "canonical" radiance field and differentially warping this field to target time steps [S1]. It addresses the many-to-one and one-to-many mapping ambiguities inherent in dynamic scene reconstruction by using average splatting for forward warping and an inpaint network to fill occluded regions [S1]. Unlike backward-flow methods such as NDVG, this approach leverages a coarse-to-fine training strategy with explicit voxel grids for canonical features, achieving state-of-the-art performance on canonical frames and generalizing well to unseen times [S1].
+ 
+ ## How it works
+-The method employs a coarse-to-fine training strategy. The canonical field is defined at a specific time step (first frame for D-NeRF, middle frame for HyperNeRF) [S1]. The pipeline consists of voxel grids for features, MLPs for local predictions, and a UNet-based inpaint network [S1].
+ 
+ ### Inputs and Outputs
+-*   **Inputs:** Training images with known camera poses and time steps $t$; canonical time $t_{can}$.
+-*   **Outputs:** Rendered RGB images for arbitrary views and time steps; deformation flow fields.
++**Inputs:**
++*   A set of multi-view images $\{I_t\}$ captured at various time steps $t$.
++*   Camera poses and intrinsics for each image.
++*   A canonical time step $t_{can}$ (first frame for D-NeRF, middle frame for HyperNeRF) [S1].
++
++**Outputs:**
++*   A rendered RGB image $\mathbf{C}(\mathbf{r})$ for a query ray $\mathbf{r}$ at a target time $t$.
++*   Trained parameters for the canonical voxel grids and MLP networks.
+ 
+ ### Data Structures
+-The method relies on several voxel grids and MLPs. All voxel grids are 3D structures indexed by spatial coordinates.
++The method relies on several voxel grids and neural networks. All voxel grids are 3D structures indexed by spatial coordinates.
+ 
+-1.  **Canonical Radiance Feature Grid ($VR_f$):** Stores radiance features. Dimension: 12.
+-2.  **Canonical Coordinate Grid ($VR_{Can}$):** Stores the 3D coordinate of each voxel center.
+-3.  **Canonical Density Grid ($V_{\sigma}^{Can}$):** Stores volume density $\sigma$.
+-4.  **Canonical Color Feature Grid ($V_{cf}^{Can}$):** Stores color features. Dimension: 3 (coarse stage) or 12 (fine stage).
+-5.  **Canonical Deformation Feature Grid ($VD_f^{Can}$):** Stores deformation features. Dimension: 0 for D-NeRF, 12 for HyperNeRF.
+-6.  **Trajectory Grid ($VT_t$):** Stores DCT parameters for trajectory modeling.
+-7.  **Deformation Flow Grid ($V_{flow}$):** Stores the deformation flow vector from canonical position to position at time $t$.
+-8.  **Warped Radiance Field ($VR_t$):** The radiance field at time $t$, obtained by warping $VR_f$ using $V_{flow}$.
+-9.  **Inpainted Radiance Field ($VR_t^{Inp}$):** The field after inpainting holes in $VR_t$.
+-10. **Upsampled Radiance Field ($VR_t^{Up}$):** The field after upsampling $VR_t^{Inp}$.
++1.  **Canonical Radiance Feature Grid ($V_{Rf}$):** Stores radiance features. Dimension: 12 [S1].
++2.  **Canonical Coordinate Grid ($V_{rCan}$):** Stores the 3D coordinate of each voxel center [S1].
++3.  **Canonical Density Grid ($V_{\sigma}^{Can}$):** Stores volume density $\sigma$ [S1].
++4.  **Canonical Color Feature Grid ($V_{cf}^{Can}$):** Stores color features. Dimension: 3 (coarse stage) or 12 (fine stage) [S1].
++5.  **Canonical Deformation Feature Grid ($V_{Df}^{Can}$):** Stores deformation features. Dimension: 0 for D-NeRF, 12 for HyperNeRF [S1].
++6.  **Trajectory Grid ($V_{Tt}$):** Stores DCT (Discrete Cosine Transform) parameters for each voxel's trajectory [S1].
++7.  **Deformation Flow Grid ($V_{flow}$):** Stores the deformation flow vector from canonical position to position at time $t$ [S1].
++8.  **Warped Radiance Field ($V_{Rt}$):** The radiance field at time $t$ after warping [S1].
++9.  **Inpainted Radiance Field ($V_{Rt}^{Inp}$):** The radiance field after inpainting [S1].
++10. **Upsampled Radiance Field ($V_{Rt}^{Up}$):** The radiance field after upsampling [S1].
+ 
+-**Networks:**
+-*   **Canonical Radiance Network ($F_{\theta_1}$):** 3-layer MLP, width 128, ReLU activation.
+-    *   Input: Radiance feature from $VR_f$ (dim 12) concatenated with embedded position $\gamma(\mathbf{x})$ (dim 33).
+-    *   Output: Density (dim 1) and color feature (dim 3 or 12).
+-*   **Canonical Deformation Network ($F_{\theta_2}$):** 4-layer MLP, width 64.
+-    *   Input: Deformation feature from $VD_f^{Can}$ concatenated with embedded position $\gamma(\mathbf{x})$ (dim 33).
+-    *   Output: Trajectory parameters or flow components.
+-*   **View Dependent Color Network ($F_{\theta_4}$):** 2-layer MLP, width 64.
+-    *   Input: Embedded view direction $\gamma(\mathbf{d})$ (dim 27) concatenated with color feature from $V_{cf}^{Can}$ (dim 12).
+-    *   Output: RGB color (dim 3).
+-*   **Inpaint Network ($F_{\theta_3}$):** UNet structure with 4 encode layers and 3 decode layers, plus an upsample layer.
+-    *   Encode layers: Max pooling + two convolution layers (Instance Norm + Conv + ReLU).
+-    *   Decode layers: Up-sample interpolation + two convolution layers (Instance Norm + Conv + ReLU).
+-    *   Input: Warped radiance field features.
+-    *   Output: Inpainted radiance field features.
++### Neural Networks
++1.  **Canonical Radiance Network ($F_{\theta_1}$):**
++    *   **Structure:** 3-layer MLP, width 128, ReLU activation [S1].
++    *   **Input:** Concatenation of radiance feature sampled from $V_{Rf}$ (dim 12) and embedded position $\gamma(\mathbf{x})$ (dim 33) [S1].
++    *   **Output:** Density $\sigma$ (dim 1) and color feature $\mathbf{c}_{feat}$ (dim 3 or 12) [S1].
++2.  **Canonical Deformation Network ($F_{\theta_2}$):**
++    *   **Structure:** 4-layer MLP, width 64 [S1].
++    *   **Input:** Concatenation of deformation feature sampled from $V_{Df}^{Can}$ (dim 0 or 12) and embedded position $\gamma(\mathbf{x})$ (dim 33) [S1].
++    *   **Output:** DCT coefficients for trajectory modeling [S1].
++3.  **View Dependent Color Network ($F_{\theta_4}$):**
++    *   **Structure:** 2-layer MLP, width 64 [S1].
++    *   **Input:** Concatenation of embedded view direction $\gamma(\mathbf{d})$ (dim 27) and color feature $\mathbf{c}_{feat}$ (dim 12) [S1].
++    *   **Output:** RGB color $\mathbf{c}$ (dim 3) [S1].
++4.  **Inpaint Network ($F_{\theta_3}$):**
++    *   **Structure:** UNet with 4 encode layers and 3 decode layers, plus an upsample layer [S1]. Each encode layer has one max pooling and two convolutions (Instance Norm + Conv + ReLU). Each decode layer has one up-sample interpolation and two convolutions [S1].
++    *   **Input:** Warped radiance field features [S1].
++    *   **Output:** Inpainted radiance field features [S1].
+ 
+-### Numbered Steps
++### Positional Encoding
++The positional encoding $\gamma(\mathbf{x})$ for a 3D position $\mathbf{x}$ and view direction $\mathbf{d}$ is defined as [Parent]:
++$$
++\gamma(\mathbf{x}, d_1, d_2) = [\mathbf{x}, \sin(2^{d_1}\pi\mathbf{x}), \cos(2^{d_1}\pi\mathbf{x}), \dots, \sin(2^{d_2-1}\pi\mathbf{x}), \cos(2^{d_2-1}\pi\mathbf{x})]
++$$
++Specific dimensions used: position dim 33, view direction dim 27 [S1].
+ 
+-**1. Canonical Field Initialization (Coarse Stage)**
+-1.  Initialize voxel grids $VR_f$, $VR_{Can}$, $V_{\sigma}^{Can}$, $V_{cf}^{Can}$, $VD_f^{Can}$, $VT_t$, $V_{flow}$ with zeros or small random values.
+-2.  For each training ray $r$ at time $t$:
+-    a. Sample $K$ points $w_k$ along the ray.
+-    b. Query $VR_f$ and $VR_{Can}$ to get radiance features and coordinates.
+-    c. Compute embedded position $\gamma(\mathbf{x})$ for each point.
+-    d. Pass features and $\gamma(\mathbf{x})$ to $F_{\theta_1}$ to get density $\sigma(w_k)$ and color feature $\mathbf{c}_{feat}(w_k)$.
+-    e. Store $\sigma(w_k)$ in $V_{\sigma}^{Can}$ (if optimizing grid directly) or use for rendering.
+-    f. Render color $\mathbf{C}_{coarse}(r)$ using standard volume rendering with $\sigma$ and $\mathbf{c}_{feat}$ (passed through $F_{\theta_4}$ if needed, though coarse stage often uses grid features directly or simplified heads). *Note: The source specifies $F_{\theta_1}$ outputs color feature, and $F_{\theta_4}$ is used for final color. In coarse stage, the inpaint network is NOT used.*
+-    g. Compute loss $\mathcal{L}_{photo}$ and auxiliary losses.
+-    h. Update voxel grids and $F_{\theta_1}$ parameters.
++### Algorithm Steps
+ 
+-**2. Forward Warping to Time $t$**
+-1.  For a target time $t$:
+-    a. For each voxel in the canonical grid, query $VD_f^{Can}$ and $VT_t$.
+-    b. Use $F_{\theta_2}$ to predict deformation flow $\mathbf{v}_{flow}$ from canonical position $\mathbf{x}_{can}$ to $\mathbf{x}_t$.
+-    c. Store $\mathbf{v}_{flow}$ in $V_{flow}$.
+-    d. **Average Splatting:** Warp the canonical radiance features from $VR_f$ to the new positions defined by $\mathbf{x}_{can} + \mathbf{v}_{flow}$.
+-        *   For each target voxel in the warped grid $VR_t$, gather contributions from canonical voxels that map to it.
+-        *   Average the features from all contributing canonical voxels. This handles the one-to-many mapping (multiple canonical points mapping to one target) and many-to-one mapping (multiple target points mapping to one canonical point) by averaging.
+-        *   *Note:* Softmax splatting was tested but average splatting was chosen for simplicity and comparable performance [S1].
++#### 1. Canonical Field Initialization (Coarse Stage)
++The coarse stage learns a proxy geometry to define the bounding box for the fine stage.
++1.  Initialize voxel grids $V_{Rf}, V_{rCan}, V_{\sigma}^{Can}, V_{cf}^{Can}, V_{Df}^{Can}, V_{Tt}$ with random or zero values.
++2.  For each training iteration:
++    a. Sample rays $\mathbf{r}$ from input images.
++    b. Sample points $w_k$ along rays.
++    c. Query $V_{Rf}$ and $V_{Df}^{Can}$ for features at $w_k$.
++    d. Compute density $\sigma$ and color feature $\mathbf{c}_{feat}$ using $F_{\theta_1}$ [S1].
++    e. Render color $\mathbf{C}$ using standard volume rendering [Parent].
++    f. Compute loss $\mathcal{L}$ (see Losses below).
++    g. Update voxel grids and $F_{\theta_1}$ using Adam optimizer (LR $10^{-1}$ for grids, $10^{-3}$ for networks) [S1].
++3.  Parameters: Voxel number $6^3$, iterations 20,000, inpaint scale 1.5. Inpaint network is **not** used in coarse stage [S1].
+ 
+-**3. Inpainting**
+-1.  The warped field $VR_t$ contains holes where no canonical voxels mapped (occlusions) or sparse regions.
+-2.  Pass $VR_t$ through the Inpaint Network $F_{\theta_3}$.
+-3.  Output the inpainted field $VR_t^{Inp}$.
+-4.  Upsample $VR_t^{Inp}$ to get $VR_t^{Up}$ (resolution enhancement).
++#### 2. Forward Warping and Fine Stage Training
++The fine stage refines the field and handles dynamic warping.
+ 
+-**4. Rendering and Loss Computation**
+-1.  For each training ray $r$ at time $t$:
+-    a. Sample points $w_k$ along the ray in the warped/inpainted space.
+-    b. Query $VR_t^{Up}$ (or $VR_t^{Inp}$) to get density $\sigma(w_k)$ and color feature $\mathbf{c}_{feat}(w_k)$.
+-    c. Pass $\mathbf{c}_{feat}(w_k)$ and embedded view direction $\gamma(\mathbf{d})$ to $F_{\theta_4}$ to get RGB color $\mathbf{c}(w_k)$.
+-    d. Render color $\mathbf{C}_{Inp}(r)$ from $VR_t^{Inp}$ and $\mathbf{C}_{Up}(r)$ from $VR_t^{Up}$.
+-    e. Compute Point-wise Color Loss $\mathcal{L}_{ptc}$:
+-       $$
+-       \mathcal{L}_{ptc} = \frac{1}{|\mathcal{R}|} \sum_{r \in \mathcal{R}} \mathcal{L}(\mathbf{C}_{\text{Inp}}(\mathbf{r})) + \frac{1}{|\mathcal{R}|} \sum_{r \in \mathcal{R}} \mathcal{L}(\mathbf{C}_{\text{Up}}(\mathbf{r}))
+-       $$
+-       where
+-       $$
+-       \mathcal{L}(\mathbf{C}(\mathbf{r})) = \frac{1}{K} \sum_{k=1}^{K} A_{\text{accum}}(k) \|\mathbf{c}(w_k) - \mathbf{C}_{\text{gt}}(\mathbf{r})\|_2^2
+-       $$
+-       and
+-       $$
+-       A_{\text{accum}}(k) = T(w_k) \, \sigma(w_k) \delta_k
+-       $$
+-       Here, $T(w_k)$ is the transmittance up to point $w_k$, $\sigma(w_k)$ is the density, and $\delta_k$ is the distance between samples. This loss weights the pixel error by the contribution of each sample to the final color [S1].
+-    f. Compute Background Entropy Loss $\mathcal{L}_{bg}$:
+-       $$
+-       \mathcal{L}_{bg} = \frac{1}{|\mathcal{R}|} \sum_{r \in \mathcal{R}} \mathcal{L}(\mathbf{A}_{\text{Inp}}(\mathbf{r})) + \frac{1}{|\mathcal{R}|} \sum_{r \in \mathcal{R}} \mathcal{L}(\mathbf{A}_{\text{Up}}(\mathbf{r}))
+-       $$
+-       where
+-       $$
+-       \mathcal{L}(\mathbf{A}(\mathbf{r})) = -\frac{1}{K-1} \sum_{k=1}^{K-1} \left[ A_{\text{accum}}(k)\log(A_{\text{accum}}(k)) + (1-A_{\text{accum}}(k))\log(1-A_{\text{accum}}(k)) \right]
+-       $$
+-       This encourages densities to be either 0 or 1 (foreground/background) [S1].
+-    g. Compute Total Loss:
+-       $$
+-       \mathcal{L} = \mathcal{L}_{photo} + w_1\mathcal{L}_{ptc} + w_2\mathcal{L}_{bg} + w_3\mathcal{L}_{flow} + w_4\mathcal{L}_{vdiff} + w_5\mathcal{L}_{tv}(\mathbf{V}_{\sigma}^{\text{Can}}) + w_6\mathcal{L}_{tv}(\mathbf{V}_{\text{flow}}^t) + w_7\mathcal{L}_{tv}(\mathbf{D})
+-       $$
+-       where $\mathcal{L}_{photo}$ is the standard pixel-wise MSE, $\mathcal{L}_{flow}$ and $\mathcal{L}_{vdiff}$ are flow consistency and video diffusion losses (if applicable), and $\mathcal{L}_{tv}$ is Total Variation loss on density, flow, and deformation features $\mathbf{D}$ [S1].
++**A. Deformation and Trajectory Modeling**
++1.  For a target time $t$, query $V_{Df}^{Can}$ for deformation feature $\mathbf{f}_{def}$ at canonical position $\mathbf{x}_{can}$.
++2.  Pass $\mathbf{f}_{def}$ and $\gamma(\mathbf{x}_{can})$ to $F_{\theta_2}$ to get DCT coefficients [S1].
++3.  Compute the trajectory $\mathbf{T}(t)$ using DCT basis functions and coefficients.
++4.  Compute deformation flow $\mathbf{V}_{flow} = \mathbf{T}(t) - \mathbf{x}_{can}$ [S1].
++5.  Store $\mathbf{V}_{flow}$ in $V_{flow}$ [S1].
+ 
+-**5. Fine Stage Training**
+-1.  Start with the coarse stage model.
+-2.  Progressive Training: Begin with 10 images closest to the canonical time step. Add one image with the closest remaining time step every 60 iterations [S1].
+-3.  Increase voxel resolution (e.g., from $6^3$ to $8^3$ or $7^3$).
+-4.  Enable the inpaint network (scale factor 2.0).
+-5.  Continue optimization with updated weights.
++**B. Differentiable Forward Warping (Average Splatting)**
++1.  For each voxel in $V_{Rf}$ at canonical position $\mathbf{x}_{can}$ with feature $\mathbf{f}_{can}$:
++    a. Compute warped position $\mathbf{x}_t = \mathbf{x}_{can} + \mathbf{V}_{flow}(\mathbf{x}_{can}, t)$ [S1].
++    b. Project $\mathbf{x}_t$ to 2D image coordinates for the target view.
++    c. Splat $\mathbf{f}_{can}$ to the 2D grid at $\mathbf{x}_t$ using **average splatting** (not softmax) [S1].
++    d. Accumulate features into $V_{Rt}$ [S1].
++    *Note: Average splatting is used because softmax splatting with predicted weights showed no obvious improvement and introduced complexity [S1].*
+ 
+-### Parameters
+-*   **Coarse Stage:**
+-    *   Voxel Number: $6^3$.
+-    *   Inpaint Scale: 1.5 (Inpaint network not used).
+-    *   Iterations: 20,000.
+-    *   Weights: $w_1=10^{-1}, w_2=10^{-2}, w_3=10^{-5}, w_4=0, w_5=10^{-6}, w_6=10^{-3}, w_7=10^{-1}$.
+-*   **Fine Stage:**
+-    *   Voxel Number: $8^3$ (D-NeRF), $7^3$ (HyperNeRF).
+-    *   Inpaint Scale: 2.0.
+-    *   Iterations: 100,000.
+-    *   Weights: $w_1=10^{-2}, w_2=10^{-3}, w_3=10^{-5}, w_4=10^{-5}, w_5=10^{-6}, w_6=10^{-3}, w_7=10^{-1}$.
+-*   **Learning Rate:** $10^{-1}$ for voxel grids, $10^{-3}$ for MLPs.
+-*   **Canonical Time:** First frame (D-NeRF), Middle frame (HyperNeRF) [S1].
++**C. Inpainting**
++1.  Pass $V_{Rt}$ through the Inpaint Network $F_{\theta_3}$ to produce $V_{Rt}^{Inp}$ [S1].
++2.  Upsample $V_{Rt}^{Inp}$ to produce $V_{Rt}^{Up}$ [S1].
++
++**D. Rendering**
++1.  For each ray $\mathbf{r}$ at time $t$:
++    a. Sample points $w_k$ in the warped space.
++    b. Query $V_{Rt}^{Up}$ for features at $w_k$.
++    c. Compute density $\sigma$ and color feature $\mathbf{c}_{feat}$ using $F_{\theta_1}$ (if not pre-computed in grid) or directly from grid if density is stored [S1]. *Note: The paper states $F_{\theta_1}$ estimates the canonical radiance field, implying density/color features are derived from canonical queries, but warping moves them. The rendering uses the warped field $V_{Rt}^{Up}$.*
++    d. Compute RGB color $\mathbf{c}$ using $F_{\theta_4}$ with view direction $\mathbf{d}$ and $\mathbf{c}_{feat}$ [S1].
++    e. Render $\mathbf{C}_{Inp}(\mathbf{r})$ and $\mathbf{C}_{Up}(\mathbf{r})$ using volume rendering [S1].
++
++**E. Progressive Training**
++1.  Start fine stage with 10 images closest to $t_{can}$ [S1].
++2.  Every 60 iterations, add the image with the next closest time step [S1].
++3.  Parameters: Voxel number $8^3$ (D-NeRF) or $7^3$ (HyperNeRF), iterations 100,000, inpaint scale 2.0 [S1].
++
++### Loss Functions
++The total loss is a weighted sum [S1]:
++$$
++\mathcal{L} = \mathcal{L}_{photo} + w_1\mathcal{L}_{ptc} + w_2\mathcal{L}_{bg} + w_3\mathcal{L}_{flow} + w_4\mathcal{L}_{vdiff} + w_5\mathcal{L}_{tv}(\mathbf{V}_{\sigma}^{Can}) + w_6\mathcal{L}_{tv}(\mathbf{V}_{flow}^t) + w_7\mathcal{L}_{tv}(\mathbf{D})
++$$
++
++1.  **Point-wise Color Loss ($\mathcal{L}_{ptc}$):** Supervises sampled points weighted by accumulation [S1].
++    $$
++    \mathcal{L}_{ptc} = \frac{1}{|\mathcal{R}|} \sum_{r \in \mathcal{R}} \mathcal{L}(\mathbf{C}_{\text{Inp}}(\mathbf{r})) + \frac{1}{|\mathcal{R}|} \sum_{r \in \mathcal{R}} \mathcal{L}(\mathbf{C}_{\text{Up}}(\mathbf{r}))
++    $$
++    $$
++    \mathcal{L}(\mathbf{C}(\mathbf{r})) = \frac{1}{K} \sum_{k=1}^{K} A_{\text{accum}}(k) \|\mathbf{c}(w_k) - \mathbf{C}_{\text{gt}}(\mathbf{r})\|_2^2
++    $$
++    $$
++    A_{\text{accum}}(k) = T(w_k) \, \sigma(w_k) \delta_k
++    $$
++    Where $T(w_k)$ is transmittance, $\sigma(w_k)$ is density, and $\delta_k$ is segment length [S1].
++
++2.  **Background Entropy Loss ($\mathcal{L}_{bg}$):** Encourages density concentration on foreground/background [S1].
++    $$
++    \mathcal{L}_{bg} = \frac{1}{|\mathcal{R}|} \sum_{r \in \mathcal{R}} \mathcal{L}(\mathbf{A}_{\text{Inp}}(\mathbf{r})) + \frac{1}{|\mathcal{R}|} \sum_{r \in \mathcal{R}} \mathcal{L}(\mathbf{A}_{\text{Up}}(\mathbf{r}))
++    $$
++    $$
++    \mathcal{L}(\mathbf{A}(\mathbf{r})) = -\frac{1}{K-1} \sum_{k=1}^{K-1} [ A_{\text{accum}}(k)\log(A_{\text{accum}}(k)) + (1-A_{\text{accum}}(k))\log(1-A_{\text{accum}}(k)) ]
++    $$
++
++3.  **Total Variation Losses ($\mathcal{L}_{tv}$):** Applied to density grid, flow grid, and deformation features $\mathbf{D}$ [S1].
++
++### Hyperparameters
++**Coarse Stage:**
++*   $w_1=10^{-1}, w_2=10^{-2}, w_3=10^{-5}, w_4=0, w_5=10^{-6}, w_6=10^{-3}, w_7=10^{-1}$ [S1].
++*   Voxel number: $6^3$ [S1].
++*   Inpaint scale: 1.5 [S1].
++*   Iterations: 20,000 [S1].
++
++**Fine Stage:**
++*   $w_1=10^{-2}, w_2=10^{-3}, w_3=10^{-5}, w_4=10^{-5}, w_5=10^{-6}, w_6=10^{-3}, w_7=10^{-1}$ [S1].
++*   Voxel number: $8^3$ (D-NeRF), $7^3$ (HyperNeRF) [S1].
++*   Inpaint scale: 2.0 [S1].
++*   Iterations: 100,000 [S1].
++*   Learning Rate: $10^{-1}$ for voxel grids, $10^{-3}$ for networks [S1].
+ 
+ ### Edge Cases and Pitfalls
+-*   **Memory Consumption:** High, especially for real-world scenes [S1].
+-*   **Training Speed:** Slow, approximately one day per scene on an RTX 3090 [S1].
+-*   **Coarse Stage Necessity:** Removing the coarse stage causes significant performance drops because the voxel grid covers a larger space without proxy geometry filtering [S1].
++*   **Memory Consumption:** High memory usage, especially for real scenes [S1].
++*   **Training Speed:** Slow training speed (~1 day per scene on RTX 3090) [S1].
++*   **Coarse Stage Necessity:** Removing coarse stage causes significant performance drop because the voxel grid covers a larger space without proxy geometry filtering [S1].
+ *   **Inpainting Importance:** Removing the inpaint network significantly reduces performance (e.g., Hell Warrior PSNR drops from 27.71 to 27.15) [S1].
+-*   **Softmax Splatting:** Using softmax splatting instead of average splatting did not show obvious improvement and added complexity [S1].
++*   **Canonical Time Selection:** Setting canonical time to the middle frame improves performance for HyperNeRF as geometry is closer to other time steps, but first frame is used for D-NeRF to match baselines [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Training is slow (~1 day per scene) [S1]. Rendering is slow (7s/image for D-NeRF, 15s/image for HyperNeRF) [S1].
+-*   **Memory Complexity:** High, due to multiple voxel grids and large model sizes (260M params for D-NeRF, 440M for HyperNeRF) [S1].
+-*   **Strengths:** SOTA performance on public datasets, especially for canonical frames. Clear advantage over backward-flow methods like NDVG [S1].
+-*   **Limitations:** High memory usage, slow training and rendering speeds [S1].
+-*   **When to use:** When high-quality novel view synthesis for dynamic scenes is required, and computational resources are sufficient.
+-*   **When not to use:** When real-time rendering or low-memory constraints are critical.
++
++### Time and Memory Complexity
++*   **Training Time:** Approximately 1 day per scene on a GeForce RTX 3090 [S1].
++*   **Model Size:** 260M parameters for D-NeRF, 440M for HyperNeRF [S1].
++*   **Rendering Speed:** 7 seconds per image for D-NeRF, 15 seconds per image for HyperNeRF [S1].
++*   **Memory:** High consumption due to multiple voxel grids ($V_{Rf}, V_{\sigma}^{Can}, V_{cf}^{Can}, V_{Df}^{Can}, V_{Tt}, V_{flow}$) and the UNet inpaint network [S1].
++
++### Strengths and Limitations
++*   **Strengths:** Achieves SOTA performance on public datasets, especially for canonical frames. Forward warping design provides clear advantages over backward flow methods like NDVG [S1]. Handles many-to-one and one-to-many mappings effectively via average splatting and inpainting [S1].
++*   **Limitations:** Slow training speed. High memory footprint. Rendering speed is slower than implicit NeRFs due to voxel grid querying and warping overhead [S1].
++
++### When to Use
++*   Use when high-quality novel view synthesis of dynamic scenes is required, particularly for canonical frames.
++*   Use when the scene has complex deformations that benefit from explicit trajectory modeling via DCT [S1].
++
++### When Not to Use
++*   Use when training time or memory resources are severely constrained [S1].
++*   Use when real-time rendering is required (7-15s per image is too slow) [S1].
+ 
+ ## Background
+-The method was proposed in "Forward Flow for Novel View Synthesis of Dynamic Scenes" [S1]. It builds on the concept of canonical representations for dynamic scenes, addressing the limitations of previous methods that struggled with occlusions and complex motions. The forward warping approach contrasts with backward flow methods (e.g., NDVG) by explicitly predicting the deformation from a static canonical frame [S1].
++
++### Origin
++Forward Warping for Novel View Synthesis was proposed in the paper "Forward Flow for Novel View Synthesis of Dynamic Scenes" [S1]. The method builds on the canonical field representation introduced in D-NeRF and HyperNeRF [S1].
++
++### History and Development
++The method addresses limitations in backward-flow approaches (e.g., NDVG) by using forward warping. It introduces a coarse-to-fine training strategy and an inpaint network to handle occlusions and holes created by the warping process. The use of average splatting simplifies the warping process compared to softmax splatting [S1].
++
++### Usage
++The method is used for novel view synthesis of dynamic scenes, evaluated on datasets like D-NeRF and HyperNeRF, as well as a newly built "Lego Complete Dataset" [S1].
+ 
+ ## Sources
++
+ [S1] Forward Flow for Novel View Synthesis of Dynamic Scenes, https://doi.org/10.1109/iccv51070.2023.01468, fetched 2026-10-26

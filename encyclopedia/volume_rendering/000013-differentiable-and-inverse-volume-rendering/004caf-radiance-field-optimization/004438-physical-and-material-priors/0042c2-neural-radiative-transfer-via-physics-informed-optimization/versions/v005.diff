@@ -1,0 +1,119 @@
+--- v004.md
++++ v005.md
+@@ -7,11 +7,11 @@
+ 
+ ## How it works
+-**Inputs:** A set of posed RGB images $\{I_k\}$ providing multi-view observations. Known and fixed environment illumination is assumed [S1, S2].
++**Inputs:** A set of posed RGB images $\{I_k\}$ providing multi-view observations [S1]. Known and fixed environment illumination is assumed [S1, S2].
+ 
+ **Outputs:** Neural field parameters $\theta$ for the light field $L_\theta$ and $\phi$ for the medium field $M_\phi$ [S1].
+ 
+ **Data Structures:**
+-1.  **Neural Light Field ($L_\theta$):** A function $L_\theta: (\mathbf{x}, \boldsymbol{\omega}) \rightarrow \mathbb{R}^3$ encoding spatio-angular radiance. Implemented as a SIREN network [S1, S2].
+-2.  **Neural Medium Field ($M_\phi$):** A function $M_\phi: \mathbf{x} \rightarrow (\sigma_a, \sigma_s, g)$ encoding absorption $\sigma_a(\mathbf{x})$, scattering $\sigma_s(\mathbf{x})$, and the Henyey-Greenstein anisotropy parameter $g(\mathbf{x})$. Implemented as a SIREN network [S1, S2].
++1.  **Neural Light Field ($L_\theta$):** A function $L_\theta: (\mathbf{x}, \boldsymbol{\omega}) \rightarrow \mathbb{R}^3$ encoding spatio-angular radiance [S2]. Implemented as a SIREN network [S1, S2].
++2.  **Neural Medium Field ($M_\phi$):** A function $M_\phi: \mathbf{x} \rightarrow (\sigma_a, \sigma_s, g)$ encoding absorption $\sigma_a(\mathbf{x})$, scattering $\sigma_s(\mathbf{x})$, and the Henyey-Greenstein anisotropy parameter $g(\mathbf{x})$ [S2]. Implemented as a SIREN network [S1, S2].
+ 3.  **Phase Function ($f_p$):** Spatially varying Henyey-Greenstein function parameterized by $g$ from $M_\phi$ [S1].
+ 4.  **Initialization Model ($F_\xi$):** A neural hash grid architecture used in Stage 1 to provide high-frequency initialization for density [S1].
+@@ -65,5 +65,5 @@
+ **Pitfalls and Edge Cases:**
+ *   **Low-Frequency Bias:** Neural networks exhibit a bias toward low-frequency solutions, causing overly smooth results [S1, S2]. This is mitigated by the VRE term and the high-frequency initialization from $F_\xi$ [S1].
+-*   **Gradient Bias:** Stochastic sampling of in-scattering directions can cause optimization gradient bias. This is handled by drawing independent samples for forward and backward passes [S1].
++*   **Gradient Bias:** Stochastic sampling of in-scattering directions can cause optimization gradient bias [S1]. This is handled by drawing independent samples for forward and backward passes [S1].
+ *   **Boundary Definition:** The boundary $\partial B$ must be well-defined to compute $\mathbf{n}_B(\mathbf{x})$ for $L_{BC}$ [S1].
+ 
+@@ -110,4 +110,23 @@
+     return t[:-1] + jitter
+ 
++def sample_aabb_boundary(n, bounds):
++    """Sample points and outward normals on an AABB boundary [G]."""
++    min_b, max_b = bounds[0], bounds[1]
++    # Randomly pick one of 6 faces
++    face = torch.randint(0, 6, (n, 1))
++    x = torch.rand(n, 3) * (max_b - min_b) + min_b
++    n_b = torch.zeros(n, 3)
++    for i in range(6):
++        mask = (face == i).squeeze()
++        if mask.any():
++            if i == 0: x[mask, 0] = min_b[0]
++            elif i == 1: x[mask, 0] = max_b[0]
++            elif i == 2: x[mask, 1] = min_b[1]
++            elif i == 3: x[mask, 1] = max_b[1]
++            elif i == 4: x[mask, 2] = min_b[2]
++            elif i == 5: x[mask, 2] = max_b[2]
++            n_b[mask, i % 3] = 1.0 if i % 2 == 0 else -1.0
++    return x, n_b
++
+ class SIRENNetwork(nn.Module):
+     """Simple SIREN network for spatial/angular fields [G]."""
+@@ -123,10 +142,9 @@
+ 
+ class NeuralRadiativeTransfer:
+-    def __init__(self, images, cameras, boundary_mesh, bounds):
++    def __init__(self, images, cameras, bounds, t_max=10.0):
+         self.images = images
+         self.cameras = cameras
+-        self.boundary_mesh = boundary_mesh
+         self.bounds = bounds
+-        self.F_xi = None # Stage 1 model placeholder
++        self.t_max = t_max
+         self.L_theta = SIRENNetwork(6) # (x, w) -> R3
+         self.M_phi = SIRENNetwork(3)   # x -> (sigma_a, sigma_s, g)
+@@ -158,12 +176,14 @@
+         cos_theta = torch.sum(w_out.unsqueeze(0) * w_in.unsqueeze(1), dim=-1) # [N, M]
+         f_p = self.henney_greenstein(g.unsqueeze(1), cos_theta) # [N, M]
+-        L_in = self.L_theta(torch.cat([x.unsqueeze(1).expand(-1, self.num_dir_samples, -1), w_in.unsqueeze(0).expand(x.shape[0], -1, -1)], dim=2)) # [N, M, 3]
++        x_exp = x.unsqueeze(1).expand(-1, self.num_dir_samples, -1)
++        w_in_exp = w_in.unsqueeze(0).expand(x.shape[0], -1, -1)
++        L_in = self.L_theta(torch.cat([x_exp, w_in_exp], dim=2)) # [N, M, 3]
+         integral = torch.sum(f_p.unsqueeze(2) * L_in, dim=1) * (4.0 * np.pi / self.num_dir_samples)
+         return sigma_s.unsqueeze(1) * integral # [N, 3]
+ 
+     def compute_rte_residual(self, x, w):
+-        x.requires_grad_(True)
+-        L_val = self.L_theta(torch.cat([x, w], dim=1))
+-        grad_L = torch.autograd.grad(L_val.sum(), x, create_graph=True)[0]
++        x_grad = x.clone().requires_grad_(True)
++        L_val = self.L_theta(torch.cat([x_grad, w], dim=1))
++        grad_L = torch.autograd.grad(L_val.sum(), x_grad, create_graph=True)[0]
+         directional_deriv = torch.sum(w * grad_L, dim=1)
+         sigma_a, sigma_s, sigma_t, g = self.get_medium_properties(x)
+@@ -173,5 +193,5 @@
+ 
+     def compute_boundary_loss(self):
+-        x_b, n_b = self.boundary_mesh.sample_boundary(self.num_boundary_samples)
++        x_b, n_b = sample_aabb_boundary(self.num_boundary_samples, self.bounds)
+         w_b = sample_sphere(self.num_boundary_samples)
+         dot_prod = torch.sum(w_b * n_b, dim=1)
+@@ -208,5 +228,5 @@
+             for i in range(pixels.shape[0]):
+                 d = directions[i]
+-                t_samples = jittered_stratified_sample(self.num_vre_samples, 0.0, 10.0) # t_b approx
++                t_samples = jittered_stratified_sample(self.num_vre_samples, 0.0, self.t_max)
+                 x_t = o_k + t_samples.unsqueeze(1) * d.unsqueeze(0)
+                 sigma_a, sigma_s, sigma_t, g = self.get_medium_properties(x_t)
+@@ -238,6 +258,6 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The runtime is dominated by the evaluation of the four loss terms. On an A100 GPU, $L_{VRE}$ accounts for 53% of the time, $L_{RTE}$ for 38%, $L_{BC}$ for 7%, and $L_{obs}$ for 2% [S1].
+-*   **Memory Complexity:** Not given in the sources.
++*   **Time Complexity:** The runtime is dominated by the evaluation of the four loss terms [S1]. On an A100 GPU, $L_{VRE}$ accounts for 53% of the time, $L_{RTE}$ for 38%, $L_{BC}$ for 7%, and $L_{obs}$ for 2% [S1].
++*   **Memory Complexity:** Not given in the sources [S1].
+ *   **Performance:** Evaluated on 50 synthetic scenes from the Disney Clouds dataset with 500 viewpoints each [S1]. For anisotropic scenes, the method achieves MSE($\sigma_a$) 1.99, MSE($\sigma_s$) 2.37, MSE($\sigma_t$) 1.33, and MSE($g$) 1.21 (values $\times 10^2$) [S1].
+ *   **Strengths:** Handles heterogeneous media without strong assumptions like homogeneity [S1]. Enforces light transport locally throughout the volume, supporting soft geometry optimization naturally [S2]. Amortizes global illumination costs in generative settings [S1].
+@@ -247,15 +267,4 @@
+ The method was introduced by Nsampi et al. in "Volumetric Inverse Rendering via Neural Radiative Transfer" (Eurographics 2026) [S1, S2]. It builds on the concept of Physics-Informed Neural Networks (PINNs) [RPK19] and applies it to the Radiative Transfer Equation (RTE) for volumetric scenes [S1]. Previous work often relied on homogeneous media assumptions or simplified light transport [S1]. This method addresses the lack of real multi-view datasets for volumetric scenes by using synthetic data from the Disney Clouds dataset [S1].
+ 
+-## Subtopics
+-
+-### [Refractive Index Tomography using Neural Fields](4146-refractive-index-tomography-using-neural-fields.md)
+-Reconstructs refractive index fields. Chooses this when the medium is transparent and refraction is the dominant effect, rather than scattering.
+-
+-### [Inverse Rendering and Optical Properties](7914-inverse-rendering-and-optical-properties.md)
+-General inverse rendering for optical properties. Chooses this when the scene is surface-based or when a simpler model than full RTE is sufficient.
+-
+-### [Multi-Sensor and Physical Priors](11031-multi-sensor-and-physical-priors.md)
+-Uses multiple sensor types. Chooses this when multi-modal data (e.g., LiDAR + RGB) is available to constrain the solution further.
+-
+ ## Sources
+ [S1] Volumetric Inverse Rendering via Neural Radiative Transfer, https://doi.org/10.1111/cgf.70541, fetched 2026-10-27

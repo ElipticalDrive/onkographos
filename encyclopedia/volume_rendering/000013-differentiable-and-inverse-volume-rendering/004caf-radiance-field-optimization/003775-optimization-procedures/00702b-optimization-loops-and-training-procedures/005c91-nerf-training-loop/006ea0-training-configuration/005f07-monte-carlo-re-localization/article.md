@@ -1,0 +1,195 @@
+# Monte Carlo Re-localization
+
+Also called: MC Re-localization
+
+## Overview
+Monte Carlo re-localization is a strategy for handling outlier camera poses by employing a particle-based optimization method to find better initializations during the training phase of neural radiance fields [S1]. It specifically addresses mirror-symmetry ambiguities and other intractable cases where standard geometry constraints fail [S1]. Unlike standard pose optimization which updates all poses jointly, this method isolates outlier poses, samples candidate poses (particles) around a coarse scene axis, and selects the best candidate based on a signal-to-noise ratio (SNR) derived from color loss [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** The current outlier pose $(R_o, t_o)$, the set of inlier poses, the fixed NeuS backbone network, and the number of particles $N_p$ [S1].
+*   **Outputs:** The optimized pose $(R_{best}, t_{best})$ for the outlier, which replaces $(R_o, t_o)$ if it yields a better SNR score [S1].
+
+**Data Structures:**
+*   **Particles:** A list of $N_p$ pose candidates. Each particle $i$ has a rotation $R_{p_i}$ and translation $t_{p_i}$ [S1].
+*   **SNR List ($P^{SNR}_n$):** A list tracking the SNR values for each particle over recent iterations [S1].
+*   **Sampling Distribution ($P_n$):** A normalized probability distribution derived from the SNR values [S1].
+
+**Steps:**
+1.  **Identify Outliers:** Detect outlier poses using a confidence estimation strategy based on a dedicated color network [S1].
+2.  **Estimate Scene Axis:** Estimate a coarse main axis of the scene using the inlier poses [S1]. Define rotation around this axis as $R_{axis}(\theta)$ [S1].
+3.  **Initialize Particles:** Distribute $N_p$ initial particles uniformly around the main axis relative to the outlier pose [S1]. The pose of the $i$-th particle is calculated as:
+    $$ R_{p_i} = R_{axis}\left(\frac{i \cdot 2\pi}{N_p}\right) \cdot R_o, \quad i \in \{1, 2, \dots, N_p\} $$
+    $$ t_{p_i} = R_{axis}\left(\frac{i \cdot 2\pi}{N_p}\right) \cdot t_o, \quad i \in \{1, 2, \dots, N_p\} $$
+    [S1]
+4.  **Fix Network:** Fix all components of the NeuS backbone network. Only optimize the pose parameters of the particles [S1].
+5.  **Optimize Particles:**
+    *   **Sampling:** Initially, sample each particle with equal probability [S1].
+    *   **Loss:** Use the color loss $L_{color}(C_n)$ to optimize the pose parameters [S1].
+    *   **Gradient Flow:** Ensure the detach flag is removed from the confidence network's output during this stage to allow gradients to backpropagate to the pose parameters [S1].
+    *   **SNR Tracking:** Maintain a $P^{SNR}_n$ list for each particle. Approximate the current SNR score $P^{SNR}_n$ for a particle by the mean value of the last 10 elements in its list [S1].
+    *   **Weighted Sampling:** Compute the distribution of particles $P_n$ according to the current $P^{SNR}_n$ values. Compute the sampling probability $P(p_i)$ for a specific particle $p_i$ using exponential weighting:
+        $$ P(p_i) = \frac{\exp(P_n(p_i) - \min P_n)}{\sum_{p \in \{p_1, p_2, \dots, p_{N_p}\}} \exp(P_n(p) - \min P_n)} $$
+        where $P_n(p)$ is the SNR-derived score for particle $p$, and $\min P_n$ is the minimum score across all particles [S1].
+6.  **Select Best Pose:** At the end of the re-localization stage, if the maximum $P^{SNR}_n$ of the particles exceeds that of the current outlier, replace $(R_o, t_o)$ with the pose of the best particle [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import random
+
+def monte_carlo_relocalization(outlier_pose, inlier_poses, backbone, N_p=24, window_size=10, num_steps=100):
+    # 1. Estimate coarse main axis from inliers [G]
+    # [G] Standard PCA on inlier camera centers to find principal axis
+    axis = estimate_main_axis(inlier_poses)
+
+    R_o, t_o = outlier_pose
+    particles = []
+    for i in range(1, N_p + 1):
+        theta = (i * 2 * math.pi) / N_p
+        R_axis_theta = rotation_matrix(axis, theta)
+        R_p = matrix_multiply(R_axis_theta, R_o)
+        t_p = matrix_multiply(R_axis_theta, t_o)
+        particles.append({'R': R_p, 't': t_p, 'snr_history': []})
+
+    # 2. Optimization loop [S1]
+    for step in range(num_steps):
+        # Compute current SNR scores for all particles [S1]
+        snr_scores = []
+        for p in particles:
+            history = p['snr_history']
+            if len(history) >= window_size:
+                current_snr = sum(history[-window_size:]) / window_size
+            else:
+                current_snr = sum(history) / len(history) if history else 0.0
+            snr_scores.append(current_snr)
+
+        # Compute sampling probabilities [S1]
+        # Initially sample equally, then use weighted distribution [S1]
+        if step == 0:
+            probs = [1.0 / N_p] * N_p
+        else:
+            min_snr = min(snr_scores)
+            weights = [math.exp(s - min_snr) for s in snr_scores]
+            total_weight = sum(weights)
+            probs = [w / total_weight for w in weights]
+
+        # Sample particle [S1]
+        # [G] Inverse transform sampling for discrete distribution
+        r = random.random()
+        cumsum = 0.0
+        idx = 0
+        for i, p in enumerate(probs):
+            cumsum += p
+            if r <= cumsum:
+                idx = i
+                break
+
+        selected = particles[idx]
+
+        # Render and compute loss [S1]
+        # [G] Assume backbone.forward(R, t, rays) returns rendered color C_n
+        rendered_color = backbone.forward(selected['R'], selected['t'])
+        gt_color = get_ground_truth_color()
+        color_loss = mse_loss(rendered_color, gt_color)
+
+        # Backpropagate to pose parameters [S1]
+        # [G] Standard optimizer step (e.g., Adam) updates R and t
+        gradients = compute_gradients(color_loss, selected['R'], selected['t'])
+        update_pose(selected['R'], selected['t'], gradients)
+
+        # Update SNR history [S1]
+        # [G] SNR is derived from color loss; source uses PSNR_n or SNR_n
+        snr_value = compute_snr_from_loss(color_loss)
+        selected['snr_history'].append(snr_value)
+        if len(selected['snr_history']) > window_size:
+            selected['snr_history'].pop(0)
+
+    # 3. Select best pose [S1]
+    best_particle = None
+    best_snr = -float('inf')
+    for p in particles:
+        history = p['snr_history']
+        current_snr = sum(history[-window_size:]) / window_size if len(history) >= window_size else (sum(history)/len(history) if history else 0.0)
+        if current_snr > best_snr:
+            best_snr = current_snr
+            best_particle = p
+
+    # Compare with outlier [S1]
+    outlier_snr = compute_snr_from_loss(backbone.forward(R_o, t_o))
+    if best_snr > outlier_snr:
+        return best_particle['R'], best_particle['t']
+    return R_o, t_o
+
+# Helper functions [G]
+def estimate_main_axis(inlier_poses):
+    # [G] Compute principal component of inlier camera centers
+    centers = [t for _, t in inlier_poses]
+    mean = sum(centers) / len(centers)
+    cov = sum([(c - mean) @ (c - mean).T for c in centers])
+    # [G] Return eigenvector corresponding to largest eigenvalue
+    return eigenvector(cov)
+
+def rotation_matrix(axis, theta):
+    # [G] Standard Rodrigues' rotation formula
+    axis = axis / math.linalg.norm(axis)
+    a = math.cos(theta / 2.0)
+    b, c, d = -axis * math.sin(theta / 2.0)
+    return [[a*a+b*b-c*c-d*d, 2*(b*c-a*d), 2*(b*d+a*c)],
+            [2*(b*c+a*d), a*a+c*c-b*b-d*d, 2*(c*d-a*b)],
+            [2*(b*d-a*c), 2*(c*d+a*b), a*a+d*d-b*b-c*c]]
+
+def matrix_multiply(A, B):
+    # [G] Standard 3x3 matrix multiplication
+    return [[sum(A[i][k]*B[k][j] for k in range(3)) for j in range(3)] for i in range(3)]
+
+def mse_loss(rendered, ground_truth):
+    # [G] Mean squared error
+    return sum((r - g)**2 for r, g in zip(rendered, ground_truth)) / len(rendered)
+
+def compute_gradients(loss, R, t):
+    # [G] Standard automatic differentiation or finite differences
+    return {'R': R, 't': t} # Placeholder for gradient tensors
+
+def update_pose(R, t, gradients):
+    # [G] Standard optimizer step (e.g., gradient descent)
+    pass
+
+def compute_snr_from_loss(loss):
+    # [G] SNR approximation from loss; typically inverse or log-transformed
+    return -loss
+
+def get_ground_truth_color():
+    # [G] Standard data loader call
+    return [0.0, 0.0, 0.0]
+```
+
+**Parameters:**
+*   $N_p$: Number of particles. Set to 24 for efficiency [S1].
+*   Window size: 10. The current $P^{SNR}_n$ is approximated by the mean of the last 10 elements in the list [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Mirror-symmetry ambiguity:** This is a primary motivation for the method, as geometry constraints alone may fail [S1].
+*   **Gradient Flow:** If the detach flag is not removed from the confidence network during re-localization, gradients will not backpropagate to the pose parameters, breaking the optimization [S1].
+*   **Initialization:** The method relies on a coarse main axis estimated from inliers. If inliers are also poor, the axis estimation may be inaccurate [S1].
+
+## Subtopics
+
+### IR-MCL
+IR-MCL achieves global localization in NeRF maps built from 2D radar scans through Monte Carlo localization [S2]. It samples several candidate camera poses in space, calculates their differences with observed values, generates weights, eliminates candidate poses with low weights, iteratively updates poses, and finally, when converging near the true pose, weights the remaining poses to obtain the final pose [S2].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:** In experiments on the SG-NeRF dataset, the method runs an average of 13 hours for 150k iterations on NVIDIA RTX 3090 GPUs [S1]. On the DTU dataset, it runs for 22 hours for 300k iterations [S1].
+*   **Strengths:** Improves robustness and accuracy for outlier poses, particularly those suffering from mirror-symmetry ambiguity [S1].
+*   **Limitations:** Requires a reliable estimation of the scene axis from inliers [S1].
+
+## Background
+Monte Carlo re-localization was introduced in the context of Robust SG-NeRF (Scene Graph Aided Neural Surface Reconstruction) [S1]. The method leverages existing Monte Carlo re-localization techniques [13, 36] adapted for the training phase of neural radiance fields [S1]. It addresses issues identified in prior work such as NeRFmm [62] and LU-NeRF [8] regarding mirror-symmetry ambiguity [S1]. The implementation follows the approach described in the supplementary materials of the Robust SG-NeRF paper [S1].
+
+## Sources
+[S1] Robust SG-NeRF: Robust Scene Graph Aided Neural Surface Reconstruction, https://arxiv.org/abs/2411.13620v1, fetched 2026-10-26
+[S2] Advancement in Neural Radiance Fields Propulsion for SLAM: A Novel Upgrade, https://www.atlantis-press.com/proceedings/icaic-24/126003439, fetched 2026-10-28

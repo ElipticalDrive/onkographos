@@ -1,0 +1,57 @@
+--- v004.md
++++ v005.md
+@@ -1,32 +1,43 @@
+ # Rasterization Variant
++
++
+ ## Overview
+-This family defines the specific algorithmic variations of the differentiable rasterization pipeline used to render 3D Gaussians, extending the standard alpha-compositing logic of [3D Gaussian Splatting Differentiable Rasterizer](2813-3d-gaussian-splatting-differentiable-rasterizer.md) [S1, unofficial]. It addresses specialized requirements such as dynamic pruning gradients, X-ray physics, hybrid sigma fallbacks, importance scoring, vertex-shader-driven projection, and unified mesh-Gaussian blending, which the base rasterizer does not natively support [S1, unofficial].
++This article defines the family of differentiable rasterization methods that project 3D Gaussians to 2D screen space and accumulate color per pixel using alpha compositing, allowing gradients to flow back to Gaussian parameters (position, scale, rotation, opacity, color). It builds on [3D Gaussian Splatting Differentiable Rasterizer](2813-3d-gaussian-splatting-differentiable-rasterizer.md). The family is distinguished by variations in how the projection, culling, blending, and auxiliary outputs are handled to support specific rendering pipelines (e.g., X-ray, hybrid 3D/2D, or mixed geometry).
++
+ ## Shared principles
+-All variants in this family operate on the same fundamental data structures: a set of 3D Gaussians defined by mean $\boldsymbol{\mu}$, covariance $\boldsymbol{\Sigma}$, opacity $\alpha$, and color/features [S1, unofficial]. They share the initial projection step, transforming 3D parameters to 2D screen space using extrinsic/intrinsic matrices and Jacobian transformations to compute 2D covariances [S1, unofficial]. They all utilize a tile-based sorting and accumulation strategy to ensure depth ordering and correct alpha blending [S1, unofficial]. The core divergence lies in how the alpha value $\alpha_i$ is computed, how the blending loop modifies the transmittance $T$ and color $C$, and what auxiliary data (masks, counts, or physics parameters) is propagated [S1, unofficial].
++All variants in this family share the core mechanism of differentiable rasterization for 3D Gaussians. The common mathematical foundation involves:
++1.  **Projection:** Transforming 3D Gaussian parameters (mean $\boldsymbol{\mu}$, covariance $\boldsymbol{\Sigma}$) into 2D screen-space ellipses using the Jacobian of the projection transformation.
++2.  **Sorting:** Sorting Gaussians by depth within tiles to ensure correct front-to-back rendering order.
++3.  **Alpha Compositing:** Accumulating color $C$ and transmittance $T$ for each pixel using the standard alpha blending equations:
++    $$ T_{i+1} = T_i (1 - \alpha_i) $$
++    $$ C_{i+1} = C_i + \alpha_i T_i \mathbf{c}_i $$
++    where $\alpha_i$ is the 2D alpha value derived from the projected Gaussian's covariance and opacity, and $\mathbf{c}_i$ is the color.
++4.  **Differentiability:** The entire pipeline is differentiable with respect to Gaussian attributes, enabling gradient-based optimization.
++
+ ## Subtopics
+ 
+ ### [Gaussian Splat Rasterization (Vertex Shader)](3253-gaussian-splat-rasterization-vertex-shader.md)
+-Implements the vertex shader stage of a GPU-based rasterizer, transforming 3D Gaussian primitives into 2D screen-space ellipses for instanced rendering. It differs from fragment-based or compute-shader approaches by performing all geometric projection, covariance transformation, and ellipse basis computation within the vertex shader, passing only final vertex positions and attributes to the rasterizer. Choose this method when leveraging GPU vertex-driven instancing for efficient splatting with built-in frustum culling.
++Implements the vertex shader stage of a GPU-accelerated rasterizer. It computes 2D screen-space projections and basis vectors for instanced quad rendering. It differs from CUDA-based variants by executing calculations in the vertex shader, relying on subsequent geometry/fragment shaders for accumulation. Choose this when using a traditional graphics pipeline with vertex/geometry shaders rather than a custom CUDA kernel.
+ 
+ ### [Masked-Rasterization](4366-masked-rasterization.md)
+-Allows "masked" (probabilistically inactive) 3D Gaussians to participate in the rasterization pipeline and receive gradient updates, rather than being permanently filtered out. It solves the problem of outdated Gaussians in dynamic pruning scenarios where standard alpha-filtering prevents unsampled Gaussians from adjusting their existence probability. Choose this method when training requires dynamic Gaussian culling without breaking gradient flow to pruned primitives.
++Allows "masked" (probabilistically inactive) 3D Gaussians to participate in the rasterization pipeline and receive gradient updates. It solves the problem of outdated Gaussians in dynamic pruning by integrating binary existence masks into the transmittance and color accumulation steps. Choose this when performing dynamic Gaussian pruning or training with probabilistic existence masks.
+ 
+ ### [Differentiable Radiative Rasterization](4526-differentiable-radiative-rasterization.md)
+-A GPU-accelerated rasterization method designed to render novel X-ray projections from radiative 3D Gaussian point clouds. It adapts the splatting pipeline to model radiation intensity rather than visible light color, using a specific Jacobian for X-ray projection and radiative intensity accumulation. Choose this method for differentiable volume rendering in X-ray imaging or non-visible spectrum applications.
++A GPU-accelerated method for rendering novel X-ray projections from radiative 3D Gaussian point clouds. It models radiation intensity rather than visible light color, computing scalar intensity values based on the probability density of Gaussians along the X-ray path. Choose this for X-ray imaging or volume rendering applications requiring differentiable X-ray synthesis.
+ 
+ ### [3D/2D Hybrid Gaussian Rasterization with Fallback Sigma](4812-3d-2d-hybrid-gaussian-rasterization-with-fallback-sigma.md)
+-Renders 3D Gaussians by combining a screen-space 2D Gaussian approximation with a ray-surfel 3D sigma calculation to determine the tighter bounding sigma for alpha attenuation. It computes a fallback 2D sigma based on pre-computed screen-space means and selects the minimum of the 3D and 2D sigmas. Choose this method when numerical stability or approximation accuracy is critical for distant or degenerate Gaussians.
++Computes alpha attenuation using a hybrid sigma metric that combines a 3D ray-surfel distance estimate with a 2D screen-space fallback bound. It solves inaccurate alpha estimation in standard rasterization when the 2D covariance projection is ill-conditioned or the Gaussian is far from the camera. Choose this when robust alpha estimation is required for distant or poorly conditioned Gaussians.
+ 
+ ### [Gaussian Rasterization with F-Count](17250-gaussian-rasterization-with-f-count.md)
+-Extends the standard differentiable rasterizer to output the number of times each 3D Gaussian is activated during the forward pass, alongside standard color and radii tensors. It invokes a specialized backend kernel to track per-Gaussian activation counts and importance scores. Choose this method when implementing Gaussian pruning, compression, or importance sampling based on rendering frequency.
++Computes an auxiliary output: the number of times each 3D Gaussian is activated (rendered) during the forward pass, alongside standard color and radii. It sets itself apart by providing explicit per-Gaussian activation counts (`gaussians_count`) and an `important_score`. Choose this for Gaussian pruning or importance sampling tasks that require tracking Gaussian visibility.
+ 
+ ### [Single-Pass Rasterization with Alpha-Blending](19202-single-pass-rasterization-with-alpha-blending.md)
+-Provides a unified rendering pipeline that rasterizes both 3D Gaussians and triangle meshes in a single pass using alpha-blending, ensuring correct spatial occlusion and color blending without dropping rendering rates. It treats depth-adjacent triangles as a single entity for transmittance calculation, preventing color overflow artifacts when Gaussians are present between overlapping triangles. Choose this method when integrating mesh-based geometry with Gaussian Splatting in a single depth-sorted pass.
++Provides a unified rendering pipeline that rasterizes both 3D Gaussians and triangle meshes in a single pass using alpha-blending. It ensures correct spatial occlusion and color blending without dropping rendering rates. Choose this when rendering mixed scenes containing both Gaussian splats and triangle meshes.
+ 
+-### Analytic Tau Rasterization
+-A rasterization branch (`use_analytic_tau`) that computes the per-pixel accumulated analytic line-integral optical thickness $\tau$ along the view ray [S1, unofficial]. Alpha is derived physically as $\text{alpha} = 1 - \text{exp}(-\tau)$ using Beer-Lambert extinction, rather than using heuristic alpha values [S1, unofficial]. Choose this method when physically accurate alpha compositing based on optical thickness is required over standard heuristic splatting [S1, unofficial].
++#### Analytic Tau Rasterization
++A rasterization branch (`use_analytic_tau`) that computes the per-pixel accumulated analytic line-integral optical thickness $\tau$ along the view ray. Alpha is derived physically as $\text{alpha} = 1 - \text{exp}(-\tau)$ using Beer-Lambert extinction, rather than using heuristic alpha values [S1, unofficial].
+ 
+ ## Background
+-The base differentiable rasterizer for 3D Gaussian Splatting was introduced by Kerbl et al. in 2023 [G]. The variants described here emerge from subsequent research into optimizing training dynamics (Masked-Rasterization, F-Count), extending the representation to non-visible spectra (DRR), and improving numerical stability or approximation accuracy (Hybrid Sigma, Analytic Tau) [S1, unofficial]. The codebase structure, particularly the CUDA extensions in `diff-gaussian-rasterization`, supports these variants through conditional compilation or runtime flags, as seen in the `4DGS-Volume-Cloud` repository which integrates analytic-tau and other channels [S1, unofficial].
++The family originates from the 3D Gaussian Splatting (3DGS) framework, which introduced differentiable rasterization for 3D Gaussians [G]. The specific variants listed here have been developed to address limitations in the original 3DGS rasterizer, such as handling dynamic pruning (Masked-Rasterization), supporting different modalities like X-rays (DRR), improving robustness (Hybrid Sigma), and enabling mixed geometry rendering (Single-Pass). The "Analytic Tau" variant is associated with the 4DGS-Volume-Cloud project, which extends 3DGS to volumetric rendering with analytic optical thickness [S1, unofficial].
+ 
+ ## Sources

@@ -1,0 +1,263 @@
+--- v018.md
++++ v019.md
+@@ -4,75 +4,184 @@
+ 
+ ## Overview
+-Dynamic Sampling Step Adjustment is a ray marching optimization that accelerates traversal through empty or homogeneous regions by exponentially increasing the step size when no density is detected [S2, unofficial]. It solves the problem of redundant sampling in sparse areas by skipping large distances until a feature is encountered [S2, unofficial]. It distinguishes itself from sibling methods like [Adaptive Step Size Ray Marching](2312-adaptive-step-size-ray-marching.md) by using a binary empty/non-empty heuristic rather than continuous gradient or variance metrics to drive step changes, and from [Variance-based Step Size Adaptation](13161-variance-based-step-size-adaptation.md) by relying on mip-level offsets rather than statistical error bounds [S2, unofficial].
++Dynamic Sampling Step Adjustment is a volume rendering technique where the distance between sampled points along projection rays is explicitly controlled to balance image quality, resolution, and rendering performance [S1]. It solves the problem of excessive rendering time caused by uniform high-density sampling in homogeneous or empty regions, while maintaining high resolution in areas with significant features [S1]. Unlike fixed-step ray marching, it dynamically trades off between rendering time and profile smoothness/full-width at half-maximum (FWHM) by adjusting the sampling distance parameter [S1].
+ 
+ ## How it works
++The method operates by initializing a ray cast with a base sampling distance and iteratively adjusting this distance based on the local content of the volume (density or SDF values).
++
+ **Inputs and Outputs:**
+-*   **Input:** Ray origin $\mathbf{o}$, normalized direction $\mathbf{d}$, base step size $\Delta t_{\text{base}}$, initial mip level $m_{\text{base}}$, empty threshold $N_{\text{empty}}$, maximum distance $t_{\text{max}}$, maximum iterations $N_{\text{max}}$, and a scene function $V(\mathbf{p}, m)$ returning density and opacity [G].
+-*   **Output:** Final ray parameter $t$, hit status, and accumulated opacity $\alpha_{\text{acc}}$ [G].
++*   **Input:** Ray origin $\mathbf{o}$, normalized direction $\mathbf{d}$, volume data (density field or SDF), base sampling distance $\Delta t_{base}$, maximum distance $t_{max}$, maximum iterations $N_{max}$.
++*   **Output:** Composed color/opacity for the pixel, final ray distance $t$.
+ 
+ **Data Structures:**
+-*   `current_step`: Float, current step size $\Delta t$ [G].
+-*   `current_mip`: Integer, current texture mip level $m$ [G].
+-*   `consecutive_empty`: Integer, counter for consecutive empty samples [G].
+-*   `threshold`: Integer, number of consecutive empty samples required to trigger doubling (typically 2–4 [G]).
+-
+-**Numbered Steps:**
+-1.  Initialize $t = 0$, $\Delta t = \Delta t_{\text{base}}$, $m = m_{\text{base}}$, `consecutive_empty` = 0, and $\alpha_{\text{acc}} = 0$ [G].
+-2.  Evaluate density $d$ and opacity $\alpha$ at $\mathbf{p} = \mathbf{o} + t\mathbf{d}$ using $V(\mathbf{p}, m)$ [G].
+-3.  If $d < \epsilon$ (empty): increment `consecutive_empty` [S2, unofficial]. If `consecutive_empty` $\ge N_{\text{empty}}$, double the step size ($\Delta t \leftarrow 2 \cdot \Delta t$) and increase the mip level ($m \leftarrow m + 1$), then reset `consecutive_empty` to 0 [S2, unofficial]. Advance the ray: $t \leftarrow t + \Delta t$ [G].
+-4.  If $d \ge \epsilon$ (non-empty): step back one step ($t \leftarrow t - \Delta t$), restore the step size ($\Delta t \leftarrow \Delta t_{\text{base}}$) and mip level ($m \leftarrow m_{\text{base}}$), reset `consecutive_empty` to 0, advance the ray ($t \leftarrow t + \Delta t_{\text{base}}$), and update accumulated opacity $\alpha_{\text{acc}} \leftarrow \alpha_{\text{acc}} + \alpha(1 - \alpha_{\text{acc}})$ [S2, unofficial].
+-5.  Repeat until $t \ge t_{\text{max}}$, $\alpha_{\text{acc}} \ge 1 - \epsilon$, or the iteration count reaches $N_{\text{max}}$ [G].
+-
+-**Formulas:**
+-*   Step update: $\Delta t_{\text{new}} = 2 \cdot \Delta t_{\text{old}}$ [S2, unofficial].
+-*   Mip update: $m_{\text{new}} = m_{\text{old}} + 1$ [S2, unofficial].
+-*   Position update: $\mathbf{p}_{\text{new}} = \mathbf{o} + (t + \Delta t)\mathbf{d}$ [G].
+-*   Opacity accumulation: $\alpha_{\text{acc}} \leftarrow \alpha_{\text{acc}} + \alpha(1 - \alpha_{\text{acc}})$ [G].
++*   **Ray State:** Current distance $t$, accumulated opacity $\alpha_{acc}$, current step size $\Delta t$.
++*   **Volume Access:** Function `sample(p)` returning density $\rho$ or SDF value $f$.
+ 
+ **Parameters:**
+-*   $\Delta t_{\text{base}}$: Base step size, typically determined by voxel size or desired resolution (default 1.0 mm, optimal 0.025 mm for clinical data [S1]).
+-*   $m_{\text{base}}$: Initial mip level, usually 0 or the highest resolution level [G].
+-*   $N_{\text{empty}}$: Number of consecutive empty samples to trigger doubling, not explicitly given in sources but typically 2–4 [G].
+-
+-**Edge Cases and Pitfalls:**
+-*   **Artifacts:** The method may cause visual artifacts, particularly if doubling skips over thin features or if mip-level changes introduce texture aliasing [S2, unofficial].
+-*   **Performance Gains:** The optimization provides small performance gains, as state management overhead may outweigh savings in moderately dense volumes [S2, unofficial].
+-*   **Boundary Precision:** Stepping back one step when density is found ensures features are not missed, but requires careful floating-point handling to avoid infinite loops or jittering near boundaries [G].
++*   **Base Sampling Distance ($\Delta t_{base}$):** The initial step size. Typical values tested include 0.010, 0.025, 0.050, 0.100, 0.170, 0.195, and 1.0 mm [S1]. An optimal value for clinical data was found to be 0.025 mm [S1].
++*   **Empty Space Threshold:** A density threshold below which a voxel is considered "empty" or "transparent" [S2, unofficial].
++*   **Doubling Factor:** The multiplier applied to the step size when empty space is detected (typically 2) [S2, unofficial].
++
++**Algorithm Steps:**
++1.  Initialize $t = 0$, $\alpha_{acc} = 0$, $\Delta t = \Delta t_{base}$.
++2.  For each iteration $i$ from 0 to $N_{max}$:
++    a.  **Escape Check:** If $t \ge t_{max}$, terminate.
++    b.  **Evaluate:** Compute position $\mathbf{p} = \mathbf{o} + t\mathbf{d}$. Sample the volume at $\mathbf{p}$ to get density $\rho$ (or SDF $f$).
++    c.  **Termination Check:** If $\alpha_{acc} \ge 1 - \epsilon$ (early exit) or surface hit ($|f| < \epsilon$), terminate.
++    d.  **Adaptive Step Logic:**
++        i.  **Empty Space Detection:** If $\rho$ is empty (below threshold) for multiple consecutive samples:
++            *   Double the step size: $\Delta t \leftarrow \Delta t \times 2$.
++            *   [G] Optionally increase mip-map offset to sample lower-resolution textures, reducing memory bandwidth [S2, unofficial].
++        ii. **Non-Empty Detection:** If $\rho$ is non-empty (above threshold):
++            *   Step back one step: $t \leftarrow t - \Delta t_{previous}$ (where $\Delta t_{previous}$ is the step size used in the previous iteration before any doubling).
++            *   Restore step size: $\Delta t \leftarrow \Delta t_{base}$.
++            *   [G] Restore mip-map offset if used [S2, unofficial].
++    e.  **Advance:** $t \leftarrow t + \Delta t$.
++    f.  **Composite:** Accumulate opacity and color contribution from the sample at $\mathbf{p}$ using standard front-to-back or back-to-front compositing.
+ 
+ **Pseudocode:**
+ ```python
+-def dynamic_sampling_step_adjustment(ray_origin, ray_direction, scene_func, max_dist, max_steps, base_step, base_mip, empty_threshold, epsilon=1e-4):
++def dynamic_sampling_step_adjustment(ray_origin, ray_direction, volume_sampler, 
++                                     max_dist, max_steps, base_step, 
++                                     empty_threshold, epsilon=1e-4):
++    """
++    Implements Dynamic Sampling Step Adjustment.
++    volume_sampler(p) returns density value.
++    """
+     t = 0.0
++    alpha_acc = 0.0
++    current_step = base_step
++    prev_step = base_step
++    consecutive_empty = 0
++    
++    for i in range(max_steps):
++        # Escape check
++        if t >= max_dist:
++            break
++            
++        # Evaluate scene
++        p = ray_origin + ray_direction * t
++        density = volume_sampler(p)
++        
++        # Early termination for volume opacity
++        if alpha_acc >= 1.0 - epsilon:
++            break
++            
++        # Adaptive Step Logic
++        if density < empty_threshold:
++            # Empty space: double step size
++            consecutive_empty += 1
++            current_step = prev_step * (2 ** consecutive_empty)
++        else:
++            # Non-empty space: reset
++            # Step back to the start of the last "empty" block to ensure no feature is skipped
++            # Note: The source describes stepping back one step and restoring base step.
++            # To implement "step back one step" correctly after doubling:
++            # We must revert t to where we were before the last step that led to the empty detection.
++            # However, the source says "step back one step and restore... to original values".
++            # This implies we undo the last advancement.
++            
++            # If we just detected non-empty, we need to re-sample the point we skipped over
++            # or the point immediately preceding the empty block.
++            # Standard interpretation: revert the last step.
++            t -= current_step # Undo the large step
++            current_step = base_step
++            prev_step = base_step
++            consecutive_empty = 0
++            
++            # Re-evaluate at the reverted position to ensure we capture the feature
++            # In a real loop, this might require a flag or restructuring to avoid infinite loops
++            # if the logic is simplistic. Here we assume the loop continues.
++            # To strictly follow "step back one step":
++            # We need to know the step size used to get to the current 'p'.
++            # Let's track 'last_step_used'.
++            pass 
++        
++        # Guard against zero or negative steps
++        if current_step <= 0:
++            current_step = base_step
++            
++        # Advance
++        # We need to store the step used for the next iteration's potential rollback
++        last_step_used = current_step
++        t += current_step
++        prev_step = last_step_used # For next iteration's rollback reference if needed
++        
++        # Composite sample at NEW position t (or previous if rolled back)
++        # Note: The pseudocode structure above is simplified. 
++        # A robust implementation requires careful state management for the "step back".
++        # Below is a more concrete implementation of the "step back" logic:
++        
++        # Re-evaluating the logic from [S2, unofficial]:
++        # "When density is non-empty, step back one step and restore step size"
++        # This implies the sample at the current 'p' (which was non-empty) was reached 
++        # via a doubled step. We must go back to the start of that step.
++        
++        # Corrected Loop Logic for Implementation:
++        # 1. Sample at t.
++        # 2. If empty: increase step.
++        # 3. If non-empty: 
++        #    a. If previous step was doubled, we overshot the feature boundary.
++        #    b. We must retreat to the point before the doubled step.
++        #    c. Reset step to base.
++        #    d. Re-sample.
++        
++        # Due to the complexity of "stepping back" in a forward-only loop, 
++        # the following is a direct translation of the intent:
++        
++        # [G] Implementation detail: To avoid infinite loops, we track if we just stepped back.
++        pass
++
++    # Simplified robust version based on [S2, unofficial] intent:
++    t = 0.0
++    alpha_acc = 0.0
+     step = base_step
+-    mip = base_mip
+-    consecutive_empty = 0
+-    alpha_acc = 0.0
++    prev_step = base_step
+     
+     for i in range(max_steps):
+         if t >= max_dist:
+-            return False, t, alpha_acc
++            break
+             
+         p = ray_origin + ray_direction * t
+-        density, alpha = scene_func(p, mip)
+-        
+-        if density < epsilon:
+-            consecutive_empty += 1
+-            if consecutive_empty >= empty_threshold:
+-                step *= 2.0
+-                mip += 1
+-                consecutive_empty = 0
+-            t += step
++        density = volume_sampler(p)
++        
++        if alpha_acc >= 1.0 - epsilon:
++            break
++            
++        if density < empty_threshold:
++            # Empty: accelerate
++            step = prev_step * 2
+         else:
++            # Non-empty: decelerate
++            # If we are here, we might have arrived via a large step.
++            # We need to ensure we don't skip the feature.
++            # The source says "step back one step".
++            # This means we undo the last 'step' addition.
+             t -= step
+             step = base_step
+-            mip = base_mip
+-            consecutive_empty = 0
+-            t += step
+-            alpha_acc += alpha * (1.0 - alpha_acc)
+-            if alpha_acc >= 1.0 - epsilon:
+-                return False, t, alpha_acc
+-                
+-    return False, t, alpha_acc
++            prev_step = base_step
++            # Re-evaluate p at the new t
++            p = ray_origin + ray_direction * t
++            density = volume_sampler(p) # Re-sample
++            
++        # Safety clamp
++        if step <= 0:
++            step = base_step
++            
++        # Advance
++        t += step
++        prev_step = step # Store for next iteration's potential doubling base
++        
++        # Composite
++        # [G] Standard compositing logic would go here
++        alpha = 1.0 - exp(-density * step) # Example Beer-Lambert
++        alpha_acc += alpha * (1.0 - alpha_acc)
++        
++    return alpha_acc
+ ```
++
++**Edge Cases and Pitfalls:**
++*   **Artifacts:** The optimization provides small performance gains but may cause artifacts in some cases, particularly if the step doubling skips over thin features or if the "step back" logic is not precisely implemented [S2, unofficial].
++*   **Precision:** Rapid changes in step size can lead to aliasing if the minimum step size is not constrained [S1].
++*   **Convergence:** The "step back" mechanism must be carefully managed to prevent infinite loops if the density oscillates near the threshold at the boundary of a doubled step.
+ 
+ ## Subtopics
+@@ -82,5 +191,5 @@
+ 
+ ### [Dynamic Texture Slice Resampling](6101-dynamic-texture-slice-resampling.md)
+-Dynamic Texture Slice Resampling is a technique for volume rendering that dynamically updates slicing steps according to viewing directions to maintain a constant step size during the Direct Volume Rendering (DVR) process. It solves the problem of striping artifacts caused by non-uniform sampling steps. The method adapts the sampling density to the viewing geometry to maintain high rendering performance.
++Dynamic Texture Slice Resampling is a texturing technique that adjusts sampling frequency to yield approximately constant image-space pattern density, compensating for highly anisotropic stretching of integral surface parameterization. It solves the problem of visual artifacts (gaps, obscured flow) caused by strong surface distortion where natural parameterization stretches the surface by factors of 1000 or greater. Unlike Gradient-driven Sampling which adapts step size based on data gradients, or Dynamic Adaptive Sampling Ray-Casting which adapts to volume density, this method adapts texture frequency to maintain visual consistency of surface features (like stripes) regardless of geometric distortion.
+ 
+ ### [Dynamic Adaptive Sampling Ray-Casting](7687-dynamic-adaptive-sampling-ray-casting.md)
+@@ -91,14 +200,10 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Reduces the number of samples in empty regions by doubling the step size after consecutive empty detections, but adds overhead for state management and mip-level switching [S2, unofficial].
+-*   **Memory Complexity:** Requires minimal storage for the current step size, mip level, and empty counter [G].
+-*   **Measured Performance:** Rendering time for clinical data is 3.4 s with default sampling distance (1.0 mm) and 3.05 s with optimized parameters (0.025 mm) [S1]. Performance gains are described as small and may be negligible in scenes with significant density [S2, unofficial].
+-*   **Strengths:** Simple to implement, effective for sparse volumes [S2, unofficial].
+-*   **Limitations:** Can introduce artifacts, especially with mip-level changes; less effective in moderately dense volumes [S2, unofficial].
+-*   **When to Use:** Best for scenes with large empty regions or when trading speed for acceptable resolution [S1][S2, unofficial].
+-*   **When Not to Use:** Avoid in scenes with thin, high-frequency features or where artifact sensitivity is high [S2, unofficial].
++*   **Performance:** Decreasing sampling distance (increasing voxel count) significantly increases rendering time but improves resolution (narrower profiles, lower FWHM) [S1]. For clinical data, rendering time was 3.4 s with a default sampling distance of 1.0 mm, reduced to 3.05 s with an optimized distance of 0.025 mm and Hamming BF(z)=2 interpolation [S1].
++*   **Quality:** Smaller sampling distances result in narrower profiles, confirming improved image resolution [S1]. Interpolation method choice has less impact on time than sampling distance/voxel count [S1].
++*   **Limitations:** The dynamic adjustment (specifically empty space doubling) provides only small performance gains and may introduce artifacts [S2, unofficial].
+ 
+ ## Background
+-Dynamic Sampling Step Adjustment originated in the context of real-time volume rendering, particularly for atmospheric effects like clouds in game engines [S2, unofficial]. It was discussed in the context of implementing volume clouds in Unity, leveraging techniques similar to those used in HDRP and other high-end renderers [S2, unofficial]. The method is part of a broader set of optimizations for real-time rendering, including blue noise dithering and temporal upsampling [S2, unofficial]. It is also applied to optimize breast tomosynthesis visualization by explicitly controlling sampling distance to balance image quality, resolution, and rendering performance [S1].
++Dynamic Sampling Step Adjustment is a fundamental optimization in volume rendering, particularly in medical imaging and real-time graphics. It evolved from the need to handle large volumetric datasets efficiently. The specific parameter optimization for breast tomosynthesis (DBT) data was detailed in 2020, highlighting the trade-off between sampling distance and interpolation quality [S1]. The "empty space doubling" variant is also employed in real-time graphics for volume clouds, as noted in 2023 implementations [S2, unofficial].
+ 
+ ## Sources

@@ -1,0 +1,60 @@
+# Instance Data Layout
+
+Also called: ShapeInstance Struct Layout
+
+## Overview
+A tightly packed data structure used to pass instance data (position, texture, tint, shape ID, orientation) to the GPU for instanced rendering of voxel shapes [S1, unofficial]. It builds on [Global Uniform Data Layout](2955-global-uniform-data-layout.md) by defining the specific memory layout for individual shape instances rather than global rendering parameters [G]. It differs from [Camera Uniform Layout](3619-camera-uniform-layout.md) and [Appearance Frame Uniform Layout](12147-appearance-frame-uniform-layout.md) by focusing on per-instance geometric and material properties rather than view or frame-level state [G].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Instance parameters including 3D position, texture index, shape identifier, rotation state, and color tint [S1, unofficial].
+*   **Output:** A 32-byte binary blob suitable for GPU buffer binding (e.g., `GL_ARRAY_BUFFER` or `GL_SHADER_STORAGE_BUFFER`) [S1, unofficial].
+
+**Data Structures:**
+The core structure is `ShapeInstance`, defined with `LayoutKind.Explicit` and `Pack = 1` to ensure no padding bytes are inserted by the compiler [S1, unofficial].
+
+| Field | Type | Size | Offset | Description |
+| :--- | :--- | :--- | :--- | :--- |
+| `position` | `Vector3` (float[3]) | 12 bytes | 0 | World position of the instance. |
+| `texture` | `int` | 4 bytes | 12 | Index into the texture array. |
+| `shape` | `ushort` | 2 bytes | 16 | Unique shape identifier. |
+| `rotation` | `ushort` | 2 bytes | 18 | Encoded rotation state. |
+| `tint` | `Vector3` (float[3]) | 12 bytes | 20 | Color tint applied to the instance. |
+
+Total size is 32 bytes [S1, unofficial].
+
+**Rotation Encoding:**
+The `rotation` field uses a compact encoding scheme [S1, unofficial]:
+$$ \text{rotation} = (\text{up} \times 4) + \text{forward} $$
+Where `up` is a `Direction` enum and `forward` is an integer in the range $[0, 3]$ representing clockwise rotation perpendicular to the `up` axis [S1, unofficial].
+
+**Shader Integration:**
+In shader code, the `shape` (2 bytes) and `rotation` (2 bytes) fields are combined into a single 32-bit unsigned integer (`uint`) to optimize sampling or indexing [S1, unofficial].
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def combine_shape_rotation(shape: ushort, rotation: ushort) -> uint:
+    return (shape << 16) | rotation
+```
+
+**Edge Cases and Pitfalls:**
+The `shape` field is truncated to `ushort` (2 bytes), limiting the number of unique shapes to 65,535 [S1, unofficial]. Although the constructor may accept an `int`, values exceeding 65535 will wrap or truncate, causing incorrect shape assignment [S1, unofficial].
+
+## Subtopics
+
+### ShapeInfo Data Layout
+A more detailed structure containing full geometric parameters for various primitive types [S2, unofficial]. Layout: `struct ShapeInfo` contains: `position` (Vector3), `shape` (int), `color` (Vector3), `sphereRadius` (float), `boxDimensions` (Vector3), `roundBoxDimensions` (Vector3), `roundBoxFactor` (float), `torusOuterRadius` (float), `torusInnerRadius` (float), `coneHeight` (float), `coneRatio` (Vector2) [S2, unofficial]. Size: Total size is 80 bytes, calculated as 19 floats ($19 \times 4 = 76$ bytes) + 1 int (4 bytes) [S2, unofficial]. Packing: Fields are packed in declaration order, where `Vector3` uses 3 floats and `Vector2` uses 2 floats [S2, unofficial]. Usage: Used in volumetric ray casting to define the geometry of individual shapes during ray intersection tests [S2, unofficial].
+
+### Packed mesh data layout
+Stores mesh and square data in tightly packed GPU buffers to minimize memory bandwidth and simplify compute shader access [S3, unofficial]. Step: 1. `addMeshes` iterates over input meshes, creates `MeshData(mesh, startSquare)`, and updates `startSquare`. 2. `prepareRender` pads `meshData` with empty `MeshData` entries until its size is a multiple of `threadGroupSize` (64). 3. Buffers `squaresBuffer`, `commandsBuffer`, `meshDataBuffer`, and `paramsBuffer` are created and populated [S3, unofficial]. Parameter: `quadsInterleaving = 0.05f`, a floating-point constant used to remove small (1 pixel) gaps between triangles during rendering [S3, unofficial]. Layout: `MeshData` is 32 bytes per mesh, containing mesh position, size, rectangle indices, and square count. Squares are 8 bytes per rectangle, stored in separate GPU buffers (`meshDataBuffer`, `squaresBuffer`) [S3, unofficial].
+
+## Operating characteristics
+Memory: 32 bytes per instance [S1, unofficial]. Performance: The compact size reduces memory bandwidth usage during instanced draw calls [G]. The combined `shapeRotation` uint allows for efficient bit-field extraction in shaders [S1, unofficial]. Limitations: The 16-bit shape ID limit (65,535 shapes) may be insufficient for highly complex scenes requiring many distinct voxel shapes [S1, unofficial]. The rotation encoding is limited to 12 discrete orientations (3 up directions $\times$ 4 forward rotations), which may not support arbitrary continuous rotation without additional data [S1, unofficial].
+
+## Background
+This layout originates from the `Cubic-Grid_Voxel_Renderer` project [S1, unofficial]. It was designed to efficiently pass instance data to the GPU for rendering voxel-based shapes using instanced rendering techniques [S1, unofficial]. The explicit packing ensures compatibility with OpenGL buffer objects [G].
+
+## Sources
+[S1] rarefushion/Cubic-Grid_Voxel_Renderer, https://github.com/rarefushion/Cubic-Grid_Voxel_Renderer, fetched 2026-10-27 (unofficial)
+[S2] Kobakat/VolumetricRayCasting, https://github.com/Kobakat/VolumetricRayCasting, fetched 2026-10-26 (unofficial)
+[S3] Gamengineer314/GLVoxelTerrain, https://github.com/Gamengineer314/GLVoxelTerrain, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,104 @@
+# RasterizeTile
+
+
+## Overview
+RasterizeTile is the core kernel for processing a single screen tile in tiled parallel compositing architectures, specifically designed to decouple variable-rate mask compaction from fixed-rate blending [S1, unofficial]. It solves the bottleneck where irregular gaussian overlap distributions cause load imbalance and memory thrashing by using a scheduling buffer to batch work [S1, unofficial]. Unlike sibling methods that may process gaussians in a fixed order or without explicit buffering, RasterizeTile ensures that blending always consumes a fixed batch size $B_d$ from local shared memory, stabilizing performance across varying scene densities [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Tile index $t$, scheduling buffer capacity $2B_d$, batch size $B_d$, number of mini-batches $K$, number of threads $P$, and the scene data structure $\mathcal{S}$ containing masks.
+*   **Output:** Partially composited color $(R, G, B)$ and opacity $(T)$ for all pixels in tile $t$, stored in `tile_buf[t]`.
+
+**Data Structures:**
+*   **Scheduling Buffer $\mathcal{R}$:** A per-warp ring buffer in shared memory with capacity $2B_d$ elements. It stores gaussian indices to be blended.
+*   **Accumulators:** Per-pixel-pair accumulators $(R, G, B, T)$. Each thread $p$ owns $tile\_size^2/(2P)$ pixel-pairs.
+
+**Parameters:**
+*   $P$: Number of threads in the worker group.
+*   $B_d$: Drain batch size (number of gaussians processed per blend step).
+*   $K$: Number of mini-batches per batch.
+*   $\varepsilon$: Saturation threshold for early-out.
+
+**Algorithm Steps:**
+1.  Initialize accumulators: $(R, G, B, T) \leftarrow (0, 0, 0, 1)$ for all pixels.
+2.  Initialize scheduling buffer: $\mathcal{R} \leftarrow \emptyset$.
+3.  Iterate $k$ from $0$ to $K-1$:
+    a. Retrieve mask $m \leftarrow \mathcal{S}.masks[k \cdot M + t]$. Bit $g$ in $m$ is set if gaussian $g$ overlaps tile $t$.
+    b. Compact mask $m$ to extract valid gaussian indices.
+    c. Enqueue compacted indices into $\mathcal{R}$: $\mathcal{R}.\text{EnqueueAll}(k \cdot P + \text{Compact}(m))$.
+    d. While $\mathcal{R}$ contains at least $B_d$ elements:
+        i. Dequeue a batch of size $B_d$ from $\mathcal{R}$.
+        ii. Perform front-to-back blending: `FrontToBackBlend(dequeued_batch, $\mathcal{S}$, $R, G, B, T$)`.
+        iii. Check for early-out: If all pixels are saturated ($\forall p: T[p] < \varepsilon$), break the loop.
+4.  Flush remaining elements in $\mathcal{R}$ via `FrontToBackBlend($\mathcal{R}.\text{Flush}(), \mathcal{S}, R, G, B, T$)`.
+5.  Store results to `tile_buf[t]`.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def RasterizeTile(t, S, P, Bd, K, epsilon):
+    # Initialize accumulators for all pixels owned by this thread group
+    # Each thread owns tile_size^2 / (2*P) pixel-pairs
+    R, G, B, T = initialize_accumulators(P)
+    
+    # Scheduling buffer in shared memory, capacity 2*Bd
+    R_buffer = RingBuffer(capacity=2*Bd)
+    
+    for k in range(K):
+        # Retrieve mask for current mini-batch and tile
+        # M is total number of mini-batches per batch? Or stride? 
+        # Source says: S.masks[k * M + t]
+        mask = S.masks[k * M + t]
+        
+        # Compact mask to get gaussian indices
+        # Compact(m) returns list of indices g where bit g is set
+        compacted_indices = Compact(mask)
+        
+        # Enqueue into scheduling buffer
+        # Offset by k * P? Source says: k * P + Compact(m)
+        # Assuming Compact(m) returns indices relative to the batch start
+        R_buffer.EnqueueAll(k * P + compacted_indices)
+        
+        # Drain full batches
+        while R_buffer.size() >= Bd:
+            batch = R_buffer.Dequeue(Bd)
+            
+            # Front-to-back blending using local storage
+            FrontToBackBlend(batch, S, R, G, B, T)
+            
+            # Early-out check
+            if Unanimous(lambda p: T[p] < epsilon):
+                goto FlushAndStore
+        
+    FlushAndStore:
+    # Flush remaining elements
+    if R_buffer.size() > 0:
+        FrontToBackBlend(R_buffer.Flush(), S, R, G, B, T)
+        
+    # Store results
+    StreamStore(tile_buf[t], R, G, B, T)
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The method is noted to use half-precision for memory efficiency, though arithmetic precision details are deferred to implementation sections [S1, unofficial].
+*   **Saturation:** The early-out condition relies on $T[p] < \varepsilon$. If $\varepsilon$ is too large, premature termination may cause visible artifacts; if too small, performance gain is minimal.
+*   **Buffer Overflow:** The scheduling buffer capacity is fixed at $2B_d$. If the compacted mask size exceeds this, the algorithm as described may fail unless `EnqueueAll` handles overflow or the input is guaranteed to fit. The source implies the buffer decouples compaction from blending, suggesting it absorbs bursts.
+
+## Subtopics
+
+### [Macro-tile Rasterization](23036-macro-tile-rasterization.md)
+A GPU-accelerated technique for 3D Gaussian Splatting that replaces standard per-tile gaussian list materialization with inline visibility determination during the gaussian load phase. It groups render tiles into macro-tiles (8x4 or 8x8) to decouple work distribution from screen area, reducing the partitioning bottleneck at high resolutions.
+
+## Operating characteristics
+*   **Time Complexity:** The complexity is dominated by the number of gaussians overlapping the tile and the cost of mask compaction and blending. The scheduling buffer helps amortize the cost of variable-rate compaction.
+*   **Memory Complexity:** Requires shared memory for the scheduling buffer $\mathcal{R}$ of size $2B_d$ and per-pixel accumulators.
+*   **Performance:** HiGS (which uses this method) reaches 67.0 dB PSNR without SH compression and 55.6 dB with 32-byte SH-compression, with no observable image-quality loss compared to baselines [S1, unofficial].
+*   **Strengths:** Decouples variable-rate mask compaction from fixed-rate blending, stabilizing performance. Early-out optimization skips remaining mini-batches when pixels are saturated.
+*   **Limitations:** Requires careful tuning of $B_d$ and buffer size. Relies on efficient mask compaction.
+
+## Background
+RasterizeTile is part of the HiGS (Hierarchical Rendering Architecture for Real-Time 3D Gaussian Splatting) framework [S1, unofficial]. It was introduced to address performance bottlenecks in tiled parallel compositing, specifically the load imbalance caused by irregular gaussian distributions. The method targets NVIDIA Blackwell GPUs and uses half-precision arithmetic for memory efficiency [S1, unofficial].
+
+## Sources
+[S1] HiGS: A Hierarchical Rendering Architecture for Real-Time 3D Gaussian Splatting, https://doi.org/10.48550/arXiv.2606.00352, fetched 2026-10-29 (unofficial)

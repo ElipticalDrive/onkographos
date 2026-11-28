@@ -1,0 +1,215 @@
+--- v001.md
++++ v002.md
+@@ -4,33 +4,26 @@
+ 
+ ## Overview
+-Robust SIRT is an algebraic reconstruction technique that modifies the standard Simultaneous Iterative Reconstruction Technique (SIRT) to be resilient to outliers in projection data by employing a Student's t-distribution likelihood model [S1, unofficial]. It builds on [Forward Projection](18234-forward-projection.md) by enabling specific robust weighting within the ASTRA projector framework [S1, unofficial]. Unlike standard SIRT, which minimizes the L2-norm of residuals and is sensitive to noise spikes, Robust SIRT down-weights large residuals, making it suitable for data with impulsive noise or artifacts [S1, unofficial].
++Robust SIRT is an iterative reconstruction method that uses ASTRA's projector with a `student` flag enabled to apply robust weighting during updates [S1, unofficial]. It builds on [Forward Projection](18234-forward-projection.md) by leveraging subset processing for memory efficiency [S1, unofficial]. Unlike standard SIRT, it down-weights large residuals to handle impulsive noise or artifacts [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- **Inputs:** `proj` (projection data), `vol_rec` (initial volume estimate, often zero), `geom` (geometry object defining ray paths and voxel grid), `iterations` (number of SIRT steps, $K$).
+-- **Outputs:** `vol_rec` (reconstructed volume).
++- **Inputs:** `proj` (projection data), `vol_rec` (initial volume estimate), `geom` (geometry object defining ray paths and voxel grid), `iterations` (number of SIRT steps, $K$) [S1, unofficial].
++- **Outputs:** `vol_rec` (reconstructed volume) [S1, unofficial].
+ 
+ **Data Structures:**
+-The method relies on the ASTRA projectors' internal settings object. Key fields include:
+-- `subsets`: Integer controlling the number of subsets for memory efficiency.
+-- `student`: Boolean flag enabling the Student's t-distribution robust weighting.
++The method relies on the ASTRA projectors' internal settings object [S1, unofficial]. Key fields include:
++- `subsets`: Integer controlling the number of subsets for memory efficiency [S1, unofficial].
++- `student`: Boolean flag enabling the robust weighting mode [S1, unofficial].
+ 
+ **Parameters:**
+-- `subsets`: Typically set to 10 for balanced memory and convergence speed [S1, unofficial].
+-- `iterations` ($K$): Number of update steps. Not given in the sources for Robust SIRT specifically, but [S2, unofficial] uses $N=1000$ for comparable iterative methods.
++- `subsets`: Set to 10 [S1, unofficial].
++- `iterations` ($K$): Number of update steps [S1, unofficial].
+ - `student`: Set to `True` [S1, unofficial].
+ 
+ **Steps:**
+-1. Initialize the volume reconstruction `vol_rec` (e.g., to zeros or a prior estimate).
+-2. Configure the projector settings:
+-   - Set `projector.settings.subsets = 10` [S1, unofficial].
+-   - Enable robust mode by setting `projector.settings.student = True` [S1, unofficial].
+-3. Execute the SIRT update loop for $K$ iterations:
+-   - For each iteration, compute the forward projection of the current volume estimate.
+-   - Calculate the residual between the measured projections and the forward projection.
+-   - Apply the robust weighting based on the Student's t-distribution to the residuals.
+-   - Back-project the weighted residuals.
+-   - Update the volume estimate by adding the back-projected weighted residuals, normalized by the system matrix norms.
+-   - [G] Apply non-negativity constraints if the physical quantity (e.g., density, attenuation) cannot be negative.
++1. Set `projector.settings.subsets = 10` [S1, unofficial].
++2. Enable robust mode: `projector.settings.student = True` [S1, unofficial].
++3. Call `projector.SIRT(proj, vol_rec, geom, iterations=K)` [S1, unofficial].
++The projector handles the internal forward projection, residual calculation, robust weighting, back-projection, and normalization [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -42,5 +35,5 @@
+     Args:
+         proj: Array of projection measurements.
+-        vol_rec: Initial volume estimate (numpy array).
++        vol_rec: Initial volume estimate.
+         geom: Geometry object containing ray definitions and voxel grid.
+         iterations: Number of SIRT iterations.
+@@ -49,120 +42,68 @@
+         vol_rec: Reconstructed volume.
+     """
+-    # Initialize projector settings
+-    # Note: In a real ASTRA implementation, these are set on the projector object.
+-    # Here we simulate the configuration step described in [S1, unofficial].
+-    projector_settings = {
+-        'subsets': 10,
+-        'student': True
+-    }
+-    
+     # Initialize volume if not provided
+     if vol_rec is None:
+-        vol_rec = np.zeros(geom.volume_size)
++        vol_rec = [0.0] * geom.volume_size
+         
+-    # Pre-calculate normalization factors for SIRT
+-    # SIRT normalizes by the sum of weights in the row (forward) and column (backprojection)
+-    # This requires access to the system matrix F or its norms.
+-    # Since ASTRA handles this internally when 'student' is True, we simulate the loop.
++    # Step 1: Set projector settings
++    projector_settings = {'subsets': 10, 'student': True}
+     
+-    for i in range(iterations):
+-        # 1. Forward Project
+-        # F * vol_rec
+-        proj_est = forward_project(vol_rec, geom)
++    # Step 2: Enable robust mode
++    projector_settings['student'] = True
++    
++    # Step 3: Execute SIRT loop
++    # The projector handles forward projection, robust weighting, back-projection, and normalization internally.
++    for _ in range(iterations):
++        # Forward project current volume estimate
++        proj_est = [0.0] * len(proj)
++        for i in range(len(proj)):
++            for j in range(len(vol_rec)):
++                proj_est[i] += geom.ray_weights[i][j] * vol_rec[j]
+         
+-        # 2. Compute Residuals
+-        # r = proj - proj_est
+-        residuals = proj - proj_est
++        # Compute residuals
++        residuals = [proj[i] - proj_est[i] for i in range(len(proj))]
+         
+-        # 3. Apply Robust Weighting (Student's t)
+-        # The ASTRA projector handles this internally when settings.student is True.
+-        # Conceptually, this scales residuals by a factor w(r) derived from the 
+-        # Student's t-distribution PDF/CDF, reducing the influence of large |r|.
+-        # w_i = f(|r_i|; nu) where nu is the degrees of freedom parameter.
+-        # [G] The exact degrees of freedom (nu) is not specified in [S1, unofficial]. 
+-        # Standard implementations often use nu=1 (Cauchy) or nu=4.
+-        weighted_residuals = apply_student_t_weighting(residuals)
++        # Apply robust weighting (Student's t)
++        # [G] ASTRA applies weighting based on the 'student' flag.
++        weighted_residuals = [r / (1.0 + r**2) for r in residuals]
+         
+-        # 4. Back Project
+-        # F^T * weighted_residuals
+-        back_proj = back_project(weighted_residuals, geom)
++        # Back-project weighted residuals
++        vol_update = [0.0] * len(vol_rec)
++        for j in range(len(vol_rec)):
++            for i in range(len(proj)):
++                vol_update[j] += geom.ray_weights[i][j] * weighted_residuals[i]
+         
+-        # 5. Normalize by SIRT factors
+-        # vol_rec_new = vol_rec + alpha * (F^T * w * r) / (F^T * 1)
+-        # [G] The relaxation parameter alpha and the column sum normalization 
+-        # are standard SIRT components. ASTRA handles the normalization internally.
+-        # We assume the projector object performs the full SIRT step.
+-        
+-        # Simulate the projector's internal SIRT step which combines forward, 
+-        # robust weighting, backprojection, and normalization.
+-        vol_rec = projector_sirt_step(proj, vol_rec, geom, settings=projector_settings)
++        # Normalize by column sums (standard SIRT)
++        # [G] ASTRA stores normalization factors in geom.
++        norm = [sum(geom.ray_weights[i][j] for i in range(len(proj))) + 1e-8 for j in range(len(vol_rec))]
++        vol_rec = [vol_rec[j] + vol_update[j] / norm[j] for j in range(len(vol_rec))]
+         
+     return vol_rec
+-
+-def projector_sirt_step(proj, vol, geom, settings):
+-    """
+-    Simulates the internal ASTRA SIRT step with robust settings.
+-    """
+-    # Forward projection
+-    proj_est = forward_project(vol, geom)
+-    
+-    # Residuals
+-    res = proj - proj_est
+-    
+-    # Robust weighting (Student's t)
+-    # ASTRA's 'student' flag applies this automatically.
+-    # We assume a standard implementation where large residuals are down-weighted.
+-    if settings['student']:
+-        # Approximate Student's t weighting for demonstration
+-        # In practice, this is handled by the C++ backend of ASTRA.
+-        # w = (nu + 1) / (nu + (res/sigma)^2)  (simplified Cauchy-like behavior)
+-        # [G] Exact weighting formula depends on ASTRA's internal implementation details not in [S1, unofficial].
+-        weights = 1.0 / (1.0 + res**2) # Placeholder for robust weighting
+-        weighted_res = res * weights
+-    else:
+-        weighted_res = res
+-        
+-    # Backprojection
+-    back_proj = back_project(weighted_res, geom)
+-    
+-    # SIRT Normalization
+-    # Divide by the number of rays intersecting each voxel (column sum of F)
+-    # ASTRA stores this normalization factor.
+-    # [G] Assuming geom provides a precomputed normalization vector.
+-    norm_factor = get_column_norms(geom)
+-    
+-    # Update
+-    # vol = vol + lambda * (back_proj / norm_factor)
+-    # [G] Relaxation parameter lambda is not specified in [S1, unofficial]. Default is often 1.0 or 0.5.
+-    lambda_param = 1.0
+-    vol = vol + lambda_param * (back_proj / norm_factor)
+-    
+-    return vol
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+ - **Precision:** The Student's t-distribution weighting can lead to numerical instability if residuals are extremely large or small. [G] Clipping residuals or using a minimum threshold for weights is recommended.
+-- **Boundaries:** Ray tracing artifacts at the volume boundaries can create outliers. Robust SIRT mitigates this, but extreme boundary effects may still require masking.
+-- **Degenerate Input:** If projection data is entirely zero or constant, the robust weighting may not converge to a meaningful solution. [G] Check for zero-variance projections.
++- **Boundaries:** Ray tracing artifacts at the volume boundaries can create outliers. Robust SIRT mitigates this, but extreme boundary effects may still require masking. [G] Apply a boundary mask if the geometry supports it.
++- **Degenerate Input:** If projection data is entirely zero or constant, the robust weighting may not converge to a meaningful solution. [G] Check for zero-variance projections before iteration.
+ 
+ ## Subtopics
+ 
+ ### Component Averaging Method (CAV)
+-A SIRT variant using a diagonal sparsity scaling matrix to scale updates based on the intersection density of line-of-sight rays [S2, unofficial]. It defines the modified row norm as $||S_M F_{i,*}||^2_2 = \sum_j s_j F_{i,j}^2$, where $s_j$ is the number of non-zero elements in the $j$-th column of the forward operator $F$ [S2, unofficial]. The weighting matrix $M$ has diagonal elements $M_{i,i} = ||S_M F_{i,*}||^{-2}_2$, while $T$ is the identity matrix [S2, unofficial]. Choose this when ray intersection density varies significantly across voxels to improve convergence stability [S2, unofficial].
++A SIRT variant using a diagonal sparsity scaling matrix to scale updates based on the intersection density of line-of-sight rays [S2, unofficial]. The modified row norm for the weighting is defined as $||S_M F_{i,*}||^2_2 = \sum_j s_j F_{i,j}^2$, where $s_j$ is the number of non-zero elements in the $j$-th column of the forward operator $F$ [S2, unofficial]. Weighting matrices: $T$ is the identity matrix ($T_{j,j} = 1$), and $M$ has diagonal elements $M_{i,i} = ||S_M F_{i,*}||^{-2}_2$ [S2, unofficial].
+ 
+ ### Cimmino Method
+-A SIRT variant where the weighting depends on the number of measurements related to the spray layer [S2, unofficial]. The weighting matrix $T$ is the identity matrix ($T_{j,j} = 1$), and $M$ has diagonal elements $M_{i,i} = m^{-1} ||F_{i,*}||^{-2}_2$, where $m$ is the number of measurements and $||F_{i,*}||_2$ is the L2-norm of the $i$-th row of $F$ [S2, unofficial]. Choose this when the number of measurements per voxel is uniform or when a simple inverse norm weighting is sufficient [S2, unofficial].
++A SIRT variant where the weighting depends on the number of measurements related to the spray layer [S2, unofficial]. Weighting matrices: $T$ is the identity matrix ($T_{j,j} = 1$), and $M$ has diagonal elements $M_{i,i} = m^{-1} ||F_{i,*}||^{-2}_2$, where $m$ is the number of measurements and $||F_{i,*}||_2$ is the L2-norm of the $i$-th row of $F$ [S2, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(K \cdot N_r \cdot N_v)$, where $K$ is iterations, $N_r$ is rays, $N_v$ is voxels. Robust weighting adds a constant factor per residual calculation.
+-- **Memory Complexity:** $O(N_r + N_v)$ for projections and volume. ASTRA's subset mode reduces peak memory usage by processing subsets of rays [S1, unofficial].
+-- **Measured Performance:** Not given in the sources for Robust SIRT specifically. [S2, unofficial] reports 1000 iterations for convergence in similar iterative methods.
++- **Time Complexity:** Not given in the sources.
++- **Memory Complexity:** ASTRA's subset mode reduces peak memory usage by processing subsets of rays [S1, unofficial].
++- **Measured Performance:** Not given in the sources for Robust SIRT specifically. [S2, unofficial] reports 1000 iterations for convergence in comparable iterative methods.
+ - **Strengths:** Resilient to outliers and impulsive noise; better convergence in noisy environments compared to standard SIRT [S1, unofficial].
+-- **Limitations:** Slower convergence than non-robust methods in clean data scenarios; requires careful tuning of robustness parameters (e.g., degrees of freedom) if exposed [G].
+-- **When to Use:** Noisy projection data, data with artifacts, or sparse views with outliers.
+-- **When Not to Use:** Clean data where standard SIRT or FBP is sufficient and speed is critical.
++- **Limitations:** Slower convergence than non-robust methods in clean data scenarios; requires careful tuning of robustness parameters if exposed [G].
++- **When to Use:** Noisy projection data, data with artifacts, or sparse views with outliers [G].
++- **When Not to Use:** Clean data where standard SIRT or FBP is sufficient and speed is critical [G].
+ 
+ ## Background
+-Robust SIRT is an extension of the Simultaneous Algebraic Reconstruction Technique (SIRT) [S2, unofficial]. SIRT was introduced by Andersen and Kak in 1984 [S2, unofficial]. The robust variant using Student's t-distribution is implemented in the ASTRA toolbox and utilized in frameworks like flexTOMO [S1, unofficial]. It is used in tomographic applications where data quality is compromised by noise or artifacts, such as in infrared radiance reconstruction from axisymmetric sprays [S2, unofficial].
++The method is implemented in the ASTRA toolbox and utilized in frameworks like flexTOMO [S1, unofficial]. It is applied in tomographic reconstruction where robust weighting is required [S1, unofficial]. The variants CAV and Cimmino are discussed in the context of axisymmetric spray tomography [S2, unofficial].
+ 
+ ## Sources

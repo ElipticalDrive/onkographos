@@ -1,0 +1,231 @@
+# Voxel Volume Configuration
+
+Also called: VXGI Voxel Volume Configuration & Resolution Management, VoxelVolumeConfig, octant configuration, volume octant, volume octant / volume ~octant
+
+## Overview
+Voxel Volume Configuration defines the spatial domain, resolution, and data layout of a voxel grid, serving as the foundational step before geometry is mapped into voxels [S1, S3, unofficial][S2]. It establishes the bounding box, voxel spacing, and resolution hierarchy (mipmaps) required for efficient rendering and storage [S3, unofficial]. Unlike raw voxelization methods that focus on filling cells, this method manages the *structure* of the volume, including dynamic resolution scaling and octant-based data masking [S2][S3, unofficial]. It is distinct from [Sparse and Hierarchical Structures](4391-sparse-and-hierarchical-structures.md) by often employing fixed-resolution 3D textures for the base layer, and from [Scene Geometry and Scalar Range Initialization](1679-scene-geometry-and-scalar-range-initialization.md) by explicitly handling the geometric bounds and coordinate transforms [S3, unofficial].
+
+## How it works
+The method configures the voxel volume through three main phases: domain definition, buffer/texture allocation, and runtime resolution management. It supports both static configuration (e.g., scientific visualization octants) and dynamic runtime configuration (e.g., VXGI mipmap chains) [S2][S3, unofficial].
+
+### Inputs and Outputs
+**Inputs:**
+- `bound`: World-space size of the volume (float, default 10.0) [S3, unofficial].
+- `center`: World-space center of the volume (Vector3) [S3, unofficial].
+- `resolution`: Base resolution (int or enum: Low=32, Medium=64, High=128, VeryHigh=256) [S3, unofficial].
+- `voxelSpacing`: Physical spacing between voxels (float, min 0.25, default 1.0) [S1, unofficial].
+- `numberOfVoxelsAlongAxis`: Number of voxels per axis (int, range 67–131, default 67) [S1, unofficial].
+- `octantCenter`: Center for octant masking (physical units or grid indices) [S2].
+- `fillValue`: Value assigned to erased octant regions (float, default 0) [S2].
+
+**Outputs:**
+- `_resolution`: Active resolution (int) [S3, unofficial].
+- `_voxelBuffer`: Compute buffer containing voxel data [S3, unofficial].
+- `_radiances`: Array of 3D textures for mipmap levels [S3, unofficial].
+- `voxelSize`: Computed physical size of a single voxel [S3, unofficial].
+
+### Data Structures
+
+**1. Voxel Buffer Layout (`_voxelBuffer`)**
+- Type: `ComputeBuffer` (Append type) [S3, unofficial].
+- Element Size: `VoxelData.size` (implementation-specific, typically 16–32 bytes per voxel) [S3, unofficial].
+- Total Size: `bufferScale * volume` elements [S3, unofficial].
+- `bufferScale`: Scaling factor for memory alignment or padding.
+  $$ \text{bufferScale} = \frac{64}{\text{_resolution} - (\text{_resolution} \pmod 2)} $$
+- `volume`: Total voxel count.
+  $$ \text{volume} = \text{_resolution}^3 $$
+
+**2. Radiance Mipmap Array (`_radiances`)**
+- Type: Array of `RenderTexture` (3D, `Tex3D`) [S3, unofficial].
+- Length: $\log_2(\text{_resolution})$ [S3, unofficial].
+- Format: `ARGBHalf` (16-bit floating point per channel) [S3, unofficial].
+- Flags: `enableRandomWrite=true`, `msaaSamples=1`, `sRGB=false` [S3, unofficial].
+- Resolution per Level $i$:
+  Let $R_0 = \text{_resolution}$.
+  For $i > 0$:
+  $$ R_i = \left\lfloor \frac{R_{i-1} - \text{resolutionModifier}}{2} \right\rfloor + \text{resolutionModifier} $$
+  Where `resolutionModifier` is typically 1 or 2 depending on the anti-aliasing mode [S3, unofficial].
+
+**3. Octant Masking Data (Scientific Visualization)**
+- Used in commands like `volume octant` [S2].
+- Defines a sub-region of the volume where values are either kept or erased based on a center point [S2].
+
+### Numbered Steps
+
+1. **Initialize Domain Parameters**
+   - Set `bound` (world size) and `center` (world position) [S3, unofficial].
+   - Set `numberOfVoxelsAlongAxis` or `resolution` [S1, S3, unofficial].
+   - If `numberOfVoxelsAlongAxis` is used, adjust it to the closest power of two plus 3:
+     $$ N_{adj} = \text{round\_to\_pow2}(N) + 3 $$ [S1, unofficial].
+
+2. **Calculate Voxel Size and Grid Dimensions**
+   - Compute `voxelSize`:
+     $$ \text{voxelSize} = \frac{\text{bound}}{\text{_resolution} - (\text{_resolution} \pmod 2)} $$ [S3, unofficial].
+   - Alternatively, if using `m_voxelSpacing`:
+     $$ \text{voxelSize} = \text{m\_voxelSpacing} $$ [S1, unofficial].
+   - Calculate `NumberOfCellsAlongAxis`:
+     $$ N_{cells} = N_{voxels} - 1 $$ [S1, unofficial].
+   - Calculate `VoxelVolumeDimensions`:
+     $$ D = \text{voxelSize} \times N_{cells} $$ [S1, unofficial].
+
+3. **Allocate Buffers and Textures**
+   - Compute `bufferScale`:
+     $$ \text{bufferScale} = \frac{64}{\text{_resolution} - (\text{_resolution} \pmod 2)} $$ [S3, unofficial].
+   - Create `_voxelBuffer` with size `(int)(bufferScale * _resolution^3)` [S3, unofficial].
+   - Create `_radiances` array of length $\log_2(\text{_resolution})$ [S3, unofficial].
+   - For each level $i$ in `_radiances`:
+     - Set width/height/depth to $R_i$ (calculated in Data Structures).
+     - Set format to `ARGBHalf`, `enableRandomWrite=true` [S3, unofficial].
+     - Assign to shader global `ShaderIDs.Radiance[i]` [S3, unofficial].
+
+4. **Configure Octant Masking (Optional)**
+   - If using octant configuration [S2]:
+     - Define `center` (physical) or `iCenter` (grid indices, 0-based) [S2].
+     - `iCenter` overrides `center` if both provided [S2].
+     - Set `fillValue` for erased regions (default 0) [S2].
+     - Apply mask: Erase values inside/outside the positive octant relative to the center [S2].
+
+5. **Runtime Resolution Management (VXGI Specific)**
+   - Check `limitRefreshRate` and `refreshRate` (default 30 Hz) [S3, unofficial].
+   - If time since last refresh > $1/\text{refreshRate}$:
+     - Call `UpdateResolution()` [S3, unofficial].
+     - If `mipmapFilterMode` is `Gaussian3x3x3`, increment `newResolution` by 1 [S3, unofficial].
+     - If `newResolution` != `_resolution`:
+       - Update `_resolution` [S3, unofficial].
+       - Call `ResizeBuffers()` and `ResizeTextures()` [S3, unofficial].
+   - If `followCamera` is true:
+     - Set volume center to camera position [S3, unofficial].
+     - Calculate displacement in voxel space:
+       $$ \text{displacement} = \frac{\text{voxelSpaceCenter} - \text{lastVoxelSpaceCenter}}{\text{voxelSize}} $$ [S3, unofficial].
+     - If `displacement.sqrMagnitude > 0`:
+       - Call `_mipmapper.Shift()` to handle grid alignment [S3, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def configure_voxel_volume(bound, center, resolution, follow_camera=False, 
+                           mipmap_filter_mode='Box', resolution_modifier=1):
+    """
+    Configures the voxel volume structure, buffers, and runtime parameters.
+    """
+    # 1. Validate and Adjust Resolution
+    # Ensure resolution is even for buffer scaling
+    if resolution % 2 != 0:
+        resolution += 1
+        
+    # 2. Calculate Derived Dimensions
+    voxel_size = bound / (resolution - (resolution % 2))
+    volume_count = resolution ** 3
+    
+    # Buffer scaling factor for memory alignment
+    buffer_scale = 64.0 / (resolution - (resolution % 2))
+    buffer_element_count = int(buffer_scale * volume_count)
+    
+    # 3. Allocate Data Structures
+    # _voxelBuffer: ComputeBuffer of size buffer_element_count, type Append
+    voxel_buffer = allocate_compute_buffer(buffer_element_count)
+    
+    # _radiances: Array of 3D textures
+    mipmap_levels = int(log2(resolution))
+    radiances = []
+    
+    current_res = resolution
+    for i in range(mipmap_levels):
+        # Calculate resolution for this mipmap level
+        # Formula: (current - modifier) / 2 + modifier
+        next_res = (current_res - resolution_modifier) // 2 + resolution_modifier
+        
+        # Create 3D texture
+        tex = create_3d_texture(
+            width=next_res,
+            height=next_res,
+            depth=next_res,
+            format='ARGBHalf',
+            enable_random_write=True,
+            msaa_samples=1,
+            srgb=False
+        )
+        radiances.append(tex)
+        
+        # Prepare for next level
+        current_res = next_res
+        
+    # 4. Setup Shader Globals
+    set_shader_global('Resolution', resolution)
+    set_shader_global('WorldToVoxel', compute_world_to_voxel_matrix(center, voxel_size))
+    set_shader_global('Radiance', radiances)
+    
+    return {
+        'voxel_buffer': voxel_buffer,
+        'radiances': radiances,
+        'voxel_size': voxel_size,
+        'resolution': resolution
+    }
+
+def update_resolution(current_resolution, mipmap_filter_mode, resolution_modifier):
+    """
+    Determines if resolution needs to change based on filter mode.
+    """
+    new_resolution = current_resolution
+    
+    # Gaussian 3x3x3 filter requires odd dimensions for symmetry
+    if mipmap_filter_mode == 'Gaussian3x3x3':
+        new_resolution += 1
+        
+    return new_resolution
+
+def compute_voxel_space_center(world_center, voxel_size):
+    """
+    Converts world center to voxel grid coordinates.
+    """
+    pos = world_center / voxel_size
+    # Floor to nearest grid index
+    pos_x = floor(pos.x)
+    pos_y = floor(pos.y)
+    pos_z = floor(pos.z)
+    
+    # Convert back to world space for displacement calculation
+    voxel_space_center = Vector3(pos_x, pos_y, pos_z) * voxel_size
+    return voxel_space_center
+```
+
+### Parameters and Typical Values
+- `resolution`: Low=32, Medium=64, High=128, VeryHigh=256 [S3, unofficial].
+- `bound`: 10.0 (World Space units) [S3, unofficial].
+- `center`: (0, 0, 0) or Camera Position if `followCamera` is true [S3, unofficial].
+- `voxelSpacing`: 1.0 (min 0.25) [S1, unofficial].
+- `refreshRate`: 30 Hz [S3, unofficial].
+- `antiAliasing`: X1=1, X2=2, X4=4, X8=8 [S3, unofficial].
+- `mipmapFilterMode`: Box, Gaussian 3x3x3, Gaussian 4x4x4 [S3, unofficial].
+- `fillValue`: 0 (for octant erasure) [S2].
+
+### Edge Cases and Pitfalls
+- **Resolution Parity**: Buffer scaling and mipmap generation assume even resolutions or specific odd adjustments (e.g., +1 for Gaussian 3x3x3) [S3, unofficial]. Failure to adjust causes misalignment.
+- **Octant Center Precision**: `iCenter` (integer grid indices) overrides `center` (float physical units) [S2]. Using fractional `center` values requires careful floor/ceil handling to avoid off-by-one errors in masking [S2].
+- **Large Negative Fill Values**: Using large negative values for `fillValue` in octant erasure can flatten contour surfaces if the surrounding data is positive [S2].
+- **Memory Scaling**: `bufferScale` grows as resolution decreases (due to the denominator), potentially wasting memory at low resolutions [S3, unofficial].
+
+## Subtopics
+
+### [General Volume Pipeline](21590-general-volume-pipeline.md)
+A dynamic architecture that separates data allocation, attribute definition, and format transformation, allowing multiple voxel formats within a single engine. Choose this when static layouts are too rigid for varying rendering tasks.
+
+### [Voxel Volume Rendering](6488-voxel-volume-rendering.md)
+The rendering stage that consumes the configured volume. Choose this when the volume is fully configured and ready for ray marching or ray casting.
+
+## Operating characteristics
+- **Time Complexity**: Configuration is $O(1)$ for static setups. Runtime resolution updates are $O(\log N)$ for mipmap texture recreation [S3, unofficial].
+- **Memory Complexity**: $O(N^3)$ for the base volume, plus $O(N^3)$ for mipmap chain (geometric series sum $\approx \frac{1}{7} N^3$) [S3, unofficial]. The `bufferScale` factor increases memory usage for lower resolutions [S3, unofficial].
+- **Performance**: High-resolution volumes (256³) require significant VRAM (~256MB for half-float RGB) [S3, unofficial]. Dynamic updates (`followCamera`) incur CPU overhead for displacement calculation and buffer resizing [S3, unofficial].
+- **Strengths**: Efficient hierarchical access via mipmaps; flexible domain definition via `bound` and `center`; supports dynamic resolution scaling [S3, unofficial].
+- **Limitations**: Fixed-resolution base layers may waste memory in sparse scenes (unlike [Sparse and Hierarchical Structures](4391-sparse-and-hierarchical-structures.md)); octant masking is static per frame unless re-applied [S2].
+
+## Background
+The method originates from voxel-based global illumination systems, specifically the Virtual Voxel Global Illumination (VXGI) architecture [S3, S1, unofficial]. It was adapted for real-time rendering in Unity via SRP (Scriptable Render Pipeline) implementations [S3, unofficial]. The octant configuration syntax is derived from scientific visualization tools like UCSF ChimeraX, which use similar commands for volume data manipulation [S2].
+
+## Sources
+[S1] Tantenfisch/Voxels, https://github.com/Tantenfisch/Voxels, fetched 2026-10-26 (unofficial)
+[S2] Command: volume, https://www.rbvi.ucsf.edu/chimerax/docs/user/commands/volume.html, fetched 2026-10-27
+[S3] Looooong/Unity-SRP-VXGI, https://github.com/Looooong/Unity-SRP-VXGI, fetched 2026-10-28 (unofficial)

@@ -1,0 +1,1026 @@
+An efficient header-only C++ package for bounding volume hierarchies, implicit functions, signed distance fields, surface meshes, point clouds, and more! - PackedBVH: named static builds, pack() by value (BVH-10) by rmrsk · Pull Request #196 · rmrsk/EBGeometry
+
+PackedBVH: named static builds, pack() by value (BVH-10) by rmrsk · Pull Request #196 · rmrsk/EBGeometry · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+rmrsk
+commented
+Oct 17, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Summary
+Background
+This PR fixes audit finding BVH-10 [MINOR] from PORTING.md. PackedBVH had four constructors that build from a primitive list, and the argument types alone decided which one ran:
+Trailing argument
+Build it selected
+size_t (plus an SFC::X{} tag value to pick the curve, since a constructor template cannot take explicit template arguments)
+SFC
+partitioner
+top-down
+ClusterSpec
+ClusterSAH
+none
+default top-down
+So PackedBVH(pool, prims, K) and PackedBVH(pool, prims, BinnedSAHPartitioner<...>) were completely different builds that read alike. Separately, TreeBVH::pack()/packWith() returned a shared_ptr, even though PackedBVH is a trivially copyable handle into its pool. The mesh SDFs only ever dereferenced and copied it.
+Solution
+Named static builds: each one returns the PackedBVH by value.
+buildBottomUp<S = SFC::Morton>(pool, prims, targetLeafSize) names the curve as a template argument; there is no tag value.
+buildTopDown(pool, prims, partitioner[, stopCrit]).
+buildClusterSAH(pool, prims, spec).
+PackedBVH::build(pool, prims, Construction, options = defaultConstructionOptions()): calls the matching named build for every BVH::Construction value. It checks the chosen method's leaf setting and aborts on an unknown value. BVHUnion/BVHSmoothUnion now call it, so their own copy of that dispatch (CSGDetail::buildBoundedBVH) is gone.
+defaultConstructionOptions(): {K - 1, K, ClusterSpec{}}. A top-down leaf therefore stops where DefaultLeafPredicate stops.
+pack()/packWith(): return PackedBVH<T, P, K>/PackedBVH<T, Q, K> by value.
+Unchanged: the constructors that pack a TreeBVH, the adopt constructor and the layout constructor keep their signatures.
+Callers: tests, the BuildBVH example, the mesh SDFs and the BVH unions all moved to the new names. Every tree they build is unchanged.
+New test: for every Construction value, build() makes the same nodes as the named build it should call. With no options it matches buildTopDown() with the default leaf predicate, and a zero setting for the chosen method aborts.
+Docs:
+ImplemBVH.rst: the direct-construction section, the presets section (which now shows build()), and the pool and index notes.
+ExampleBuildBVH.rst, the BuildBVH README and its comments, and CLAUDE.md's header-layout note.
+The TestingLocally.rst row for the new test.
+PORTING.md: the BVH-10 bullet is removed, and the "What is not" row and the index note are updated.
+Test titles that said "constructor" now name the build function.
+Side-effects
+Source-incompatible for direct PackedBVH builders:
+PackedBVH(pool, prims, …) becomes PackedBVH::buildX(pool, prims, …) or PackedBVH::build(…).
+tree.pack(pool)-> becomes tree.pack(pool)., and *tree.pack(pool) becomes tree.pack(pool).
+Nothing in Integrations/ used either.
+Abort message: an unknown Construction passed to a BVH union now aborts with PackedBVH: unknown BVH::Construction value, the function that checks it, instead of BVHUnion: …. TestCSG expects the new text.
+Rebased onto dev after PackedBVH: store every box once (BVH-8) #194, Performance harness: time builds as a first build; visible acceptance; no receipt with skipped cases (#212) #219 and TreeBVH: fold interior boxes with merged(), no vector per union (BVH-11, host part) #195 (acdd07f): the builders now return PackedBVH(a_pool, nodes, boxes, prims) (PackedBVH: store every box once (BVH-8) #194's boxes with this PR's named builds); PackedBVH: store every box once (BVH-8) #194's box-storage test builds through Packed::buildBottomUp (the same tree); PORTING.md drops BVH-8, BVH-10 and BVH-11 (all fixed); the ImplemBVH.rst and TestBVH-row conflicts keep both PRs' text.
+Alternative solutions
+Only build(Construction), with no named builds: this would leave no way to pass a custom partitioner or a curve outside the enum without going through TreeBVH.
+Keep the constructors, make them private, and forward: this would keep the tag value internally. Named static functions say what each call does at the call site.
+Tested locally:
+the debug preset passes 493/493;
+TestBVH and TestCSG also pass with both precisions;
+the BuildBVH example runs;
+the HIP device compile of TestBVH and TestCSG passes;
+Doxygen and the pre-commit hooks pass;
+the Sphinx HTML build is clean except for the 8 TikZ figures, which need pdflatex (not installed in this environment; CI renders them).
+Performance
+Receipt: Performance/receipt.md, host section, green. Scripts/run-performance.sh compare origin/dev --record on acdd07f, 3 rounds x 5 repetitions, one pinned core, quiet desktop; both sides time builds with #219's allocation policy. No regression across 88 cases, no answer differs, no case is lost, and every build lands within ±1.5%: the named builds build the same trees as the constructors they replace (PackedBVH::build reproduces the unions' former dispatch exactly). No device run: the change is host-only build code.
+Host comparison against dev (the receipt's table): no regression, 88 cases
+VERDICT: no regression (0 major, 0 minor across 88 cases)
+Performance comparison: 0 major, 0 minor, 0 faster, 0 differ, 0 lost, 88 cases
+base: f3836bd (gcc 13.3.0, simd avx2, gpu host, allocator glibc, heap only, freed memory returned before each repetition)
+head: acdd07f (gcc 13.3.0, simd avx2, gpu host, allocator glibc, heap only, freed memory returned before each repetition)
+CPU: 12th Gen Intel(R) Core(TM) i9-12900K
+Thresholds: minor >= 3%, major >= 10% slower, and outside the 95% bootstrap interval over the runs
+case
+base
+head
+change
+95% interval
+pool
+verdict
+note
+BVHUnion/spheres/build/float/host
+54.7 ms
+55.1 ms
++0.8%
+[-0.8%, +2.2%]
++0.0%
+~
+BVHUnion/spheres/query-random/float/host
+49.0 ms
+49.0 ms
+-0.0%
+[-0.1%, +0.5%]
++0.0%
+~
+BVHUnion/spheres/build/double/host
+64.6 ms
+64.3 ms
+-0.5%
+[-2.1%, +0.6%]
++0.0%
+~
+BVHUnion/spheres/query-random/double/host
+53.6 ms
+53.9 ms
++0.4%
+[-0.9%, +0.6%]
++0.0%
+~
+BVHUnion/capsules-diagonal/build/float/host
+60.4 ms
+59.8 ms
+-1.0%
+[-1.5%, +0.1%]
++0.0%
+~
+BVHUnion/capsules-diagonal/query-random/float/host
+70.8 ms
+70.9 ms
++0.1%
+[-0.3%, +0.3%]
++0.0%
+~
+BVHUnion/capsules-diagonal/build/double/host
+73.5 ms
+73.5 ms
++0.0%
+[-0.7%, +0.3%]
++0.0%
+~
+BVHUnion/capsules-diagonal/query-random/double/host
+79.1 ms
+80.1 ms
++1.2%
+[+0.0%, +2.0%]
++0.0%
+~
+BVHUnion/cylinders-random/build/float/host
+67.4 ms
+66.6 ms
+-1.1%
+[-1.5%, +0.1%]
++0.0%
+~
+BVHUnion/cylinders-random/query-random/float/host
+97.4 ms
+98.1 ms
++0.8%
+[+0.5%, +1.0%]
++0.0%
+~
+BVHUnion/cylinders-random/build/double/host
+82.1 ms
+82.6 ms
++0.7%
+[+0.3%, +0.9%]
++0.0%
+~
+BVHUnion/cylinders-random/query-random/double/host
+108 ms
+109 ms
++0.5%
+[-0.5%, +0.8%]
++0.0%
+~
+TriMeshSDF/w4/build/float/host
+81.7 ms
+81.5 ms
+-0.3%
+[-0.5%, -0.0%]
++0.0%
+~
+TriMeshSDF/w4/query-random/float/host
+241 ms
+241 ms
++0.2%
+[-0.4%, +0.3%]
++0.0%
+~
+TriMeshSDF/w4/build/double/host
+113 ms
+113 ms
+-0.3%
+[-0.7%, -0.0%]
++0.0%
+~
+TriMeshSDF/w4/query-random/double/host
+282 ms
+278 ms
+-1.4%
+[-2.8%, +0.6%]
++0.0%
+~
+TriMeshSDF/w8/build/float/host
+69.9 ms
+69.8 ms
+-0.1%
+[-1.0%, +1.3%]
++0.0%
+~
+TriMeshSDF/w8/query-random/float/host
+212 ms
+211 ms
+-0.8%
+[-1.6%, +1.5%]
++0.0%
+~
+MeshSDF/build/float/host
+95.7 ms
+96.2 ms
++0.6%
+[+0.3%, +1.0%]
++0.0%
+~
+MeshSDF/refit/float/host
+29.6 ms
+29.6 ms
++0.3%
+[-2.9%, +0.4%]
+-
+~
+MeshSDF/query-random/float/host
+753 ms
+751 ms
+-0.2%
+[-0.6%, +0.2%]
++0.0%
+~
+MeshSDF/build/double/host
+117 ms
+117 ms
+-0.4%
+[-0.6%, -0.2%]
++0.0%
+~
+MeshSDF/refit/double/host
+41.1 ms
+42.2 ms
++2.9%
+[-0.6%, +3.0%]
+-
+~
+MeshSDF/query-random/double/host
+838 ms
+837 ms
+-0.1%
+[-0.7%, +0.4%]
++0.0%
+~
+PointCloudBVH/uniform/build/float/host
+67.7 ms
+67.8 ms
++0.2%
+[+0.1%, +0.3%]
++0.0%
+~
+PointCloudBVH/uniform/all1nn/float/host
+147 ms
+147 ms
++0.0%
+[-0.4%, +0.7%]
+-
+~
+PointCloudBVH/uniform/all8nn/float/host
+366 ms
+367 ms
++0.3%
+[-1.5%, +1.2%]
+-
+~
+PointCloudBVH/uniform/closest-random/float/host
+77.2 ms
+77.4 ms
++0.3%
+[-1.9%, +1.1%]
+-
+~
+PointCloudBVH/uniform/closest-outside-random/float/host
+6.60 ms
+6.64 ms
++0.5%
+[-2.1%, +1.3%]
+-
+~
+PointCloudBVH/uniform/neighbor-morton/float/host
+145 ms
+144 ms
+-0.9%
+[-3.4%, +0.7%]
+-
+~
+PointCloudBVH/uniform/neighbors8-morton/float/host
+333 ms
+333 ms
+-0.0%
+[-2.0%, +2.2%]
+-
+~
+PointCloudBVH/uniform/closest8-morton/float/host
+183 ms
+182 ms
+-0.1%
+[-0.5%, +0.1%]
+-
+~
+PointCloudBVH/uniform/build/double/host
+80.5 ms
+80.6 ms
++0.1%
+[-3.1%, +2.0%]
++0.0%
+~
+PointCloudBVH/uniform/all1nn/double/host
+164 ms
+164 ms
++0.1%
+[-0.3%, +1.6%]
+-
+~
+PointCloudBVH/uniform/all8nn/double/host
+407 ms
+408 ms
++0.1%
+[-1.0%, +1.0%]
+-
+~
+PointCloudBVH/uniform/closest-random/double/host
+86.6 ms
+87.0 ms
++0.5%
+[-1.8%, +2.0%]
+-
+~
+PointCloudBVH/uniform/closest-outside-random/double/host
+7.02 ms
+7.00 ms
+-0.3%
+[-0.9%, +2.0%]
+-
+~
+PointCloudBVH/uniform/neighbor-morton/double/host
+156 ms
+157 ms
++0.4%
+[-3.2%, +1.6%]
+-
+~
+PointCloudBVH/uniform/neighbors8-morton/double/host
+356 ms
+356 ms
++0.1%
+[-1.6%, +2.2%]
+-
+~
+PointCloudBVH/uniform/closest8-morton/double/host
+191 ms
+190 ms
+-0.3%
+[-0.8%, +1.0%]
+-
+~
+PointCloudHashGrid/uniform/build/float/host
+11.5 ms
+11.3 ms
+-1.5%
+[-2.6%, +0.3%]
++0.0%
+~
+PointCloudHashGrid/uniform/all1nn/float/host
+124 ms
+124 ms
+-0.1%
+[-1.4%, +1.2%]
+-
+~
+PointCloudHashGrid/uniform/all8nn/float/host
+530 ms
+530 ms
++0.1%
+[-0.9%, +0.8%]
+-
+~
+PointCloudHashGrid/uniform/closest-random/float/host
+152 ms
+152 ms
+-0.0%
+[-0.5%, +1.7%]
+-
+~
+PointCloudHashGrid/uniform/closest-outside-random/float/host
+856 ms
+863 ms
++0.8%
+[-1.8%, +1.6%]
+-
+~
+PointCloudHashGrid/uniform/neighbor-morton/float/host
+121 ms
+121 ms
+-0.4%
+[-1.5%, +2.2%]
+-
+~
+PointCloudHashGrid/uniform/neighbors8-morton/float/host
+509 ms
+513 ms
++0.9%
+[-0.7%, +1.2%]
+-
+~
+PointCloudHashGrid/uniform/closest8-morton/float/host
+360 ms
+363 ms
++0.7%
+[-0.4%, +1.2%]
+-
+~
+PointCloudHashGrid/uniform/build/double/host
+14.9 ms
+14.9 ms
+-0.4%
+[-2.3%, +1.7%]
++0.0%
+~
+PointCloudHashGrid/uniform/all1nn/double/host
+128 ms
+126 ms
+-1.1%
+[-3.6%, +3.1%]
+-
+~
+PointCloudHashGrid/uniform/all8nn/double/host
+558 ms
+557 ms
+-0.1%
+[-0.3%, +0.4%]
+-
+~
+PointCloudHashGrid/uniform/closest-random/double/host
+154 ms
+155 ms
++0.5%
+[-1.4%, +1.5%]
+-
+~
+PointCloudHashGrid/uniform/closest-outside-random/double/host
+952 ms
+962 ms
++1.1%
+[-1.0%, +2.5%]
+-
+~
+PointCloudHashGrid/uniform/neighbor-morton/double/host
+122 ms
+121 ms
+-0.6%
+[-3.0%, +1.9%]
+-
+~
+PointCloudHashGrid/uniform/neighbors8-morton/double/host
+514 ms
+515 ms
++0.0%
+[-1.7%, +0.8%]
+-
+~
+PointCloudHashGrid/uniform/closest8-morton/double/host
+363 ms
+363 ms
+-0.1%
+[-0.3%, +1.0%]
+-
+~
+PointCloudBVH/sphere/build/float/host
+67.6 ms
+67.1 ms
+-0.6%
+[-1.0%, +0.9%]
++0.0%
+~
+PointCloudBVH/sphere/all1nn/float/host
+111 ms
+110 ms
+-0.4%
+[-2.9%, +3.7%]
+-
+~
+PointCloudBVH/sphere/all8nn/float/host
+264 ms
+265 ms
++0.1%
+[-1.4%, +2.1%]
+-
+~
+PointCloudBVH/sphere/closest-random/float/host
+112 ms
+111 ms
+-0.7%
+[-2.4%, +0.9%]
+-
+~
+PointCloudBVH/sphere/closest-outside-random/float/host
+105 ms
+105 ms
++0.2%
+[-1.3%, +0.4%]
+-
+~
+PointCloudBVH/sphere/neighbor-morton/float/host
+108 ms
+107 ms
+-0.3%
+[-2.0%, +1.2%]
+-
+~
+PointCloudBVH/sphere/neighbors8-morton/float/host
+235 ms
+235 ms
+-0.2%
+[-2.3%, +2.1%]
+-
+~
+PointCloudBVH/sphere/closest8-morton/float/host
+192 ms
+192 ms
++0.0%
+[-0.6%, +1.6%]
+-
+~
+PointCloudBVH/sphere/build/double/host
+80.4 ms
+79.8 ms
+-0.7%
+[-2.4%, +1.9%]
++0.0%
+~
+PointCloudBVH/sphere/all1nn/double/host
+125 ms
+125 ms
+-0.7%
+[-3.7%, +1.2%]
+-
+~
+PointCloudBVH/sphere/all8nn/double/host
+303 ms
+303 ms
+-0.0%
+[-1.6%, +0.5%]
+-
+~
+PointCloudBVH/sphere/closest-random/double/host
+126 ms
+126 ms
+-0.1%
+[-1.5%, +0.7%]
+-
+~
+PointCloudBVH/sphere/closest-outside-random/double/host
+121 ms
+121 ms
++0.3%
+[-0.2%, +3.4%]
+-
+~
+PointCloudBVH/sphere/neighbor-morton/double/host
+118 ms
+118 ms
+-0.2%
+[-6.2%, +1.1%]
+-
+~
+PointCloudBVH/sphere/neighbors8-morton/double/host
+251 ms
+252 ms
++0.3%
+[-4.2%, +5.6%]
+-
+~
+PointCloudBVH/sphere/closest8-morton/double/host
+200 ms
+200 ms
++0.2%
+[-1.3%, +0.9%]
+-
+~
+PointCloudHashGrid/sphere/build/float/host
+8.79 ms
+8.86 ms
++0.8%
+[-2.3%, +2.8%]
++0.0%
+~
+PointCloudHashGrid/sphere/all1nn/float/host
+143 ms
+143 ms
++0.0%
+[-4.5%, +0.9%]
+-
+~
+PointCloudHashGrid/sphere/all8nn/float/host
+397 ms
+396 ms
+-0.2%
+[-1.8%, +1.4%]
+-
+~
+PointCloudHashGrid/sphere/closest-random/float/host
+254 ms
+255 ms
++0.2%
+[-1.1%, +2.0%]
+-
+~
+PointCloudHashGrid/sphere/closest-outside-random/float/host
+333 ms
+332 ms
+-0.2%
+[-0.9%, +1.1%]
+-
+~
+PointCloudHashGrid/sphere/neighbor-morton/float/host
+147 ms
+147 ms
++0.2%
+[-5.9%, +6.2%]
+-
+~
+PointCloudHashGrid/sphere/neighbors8-morton/float/host
+387 ms
+387 ms
+-0.1%
+[-3.4%, +2.0%]
+-
+~
+PointCloudHashGrid/sphere/closest8-morton/float/host
+356 ms
+356 ms
+-0.1%
+[-2.6%, +2.9%]
+-
+~
+PointCloudHashGrid/sphere/build/double/host
+12.3 ms
+12.3 ms
++0.7%
+[+0.4%, +1.2%]
++0.0%
+~
+PointCloudHashGrid/sphere/all1nn/double/host
+147 ms
+147 ms
++0.3%
+[-4.8%, +4.7%]
+-
+~
+PointCloudHashGrid/sphere/all8nn/double/host
+421 ms
+423 ms
++0.3%
+[-2.3%, +2.8%]
+-
+~
+PointCloudHashGrid/sphere/closest-random/double/host
+287 ms
+286 ms
+-0.2%
+[-0.6%, +2.1%]
+-
+~
+PointCloudHashGrid/sphere/closest-outside-random/double/host
+373 ms
+372 ms
+-0.3%
+[-0.8%, +0.1%]
+-
+~
+PointCloudHashGrid/sphere/neighbor-morton/double/host
+141 ms
+141 ms
+-0.1%
+[-4.2%, +5.3%]
+-
+~
+PointCloudHashGrid/sphere/neighbors8-morton/double/host
+373 ms
+373 ms
++0.1%
+[-0.9%, +0.9%]
+-
+~
+PointCloudHashGrid/sphere/closest8-morton/double/host
+345 ms
+345 ms
++0.1%
+[-1.0%, +1.2%]
+-
+~
+Reviewer checklist (to be completed by a human)
+The test suite compiles and runs to completion without warnings or errors.
+All relevant new features are documented in the user documentation (Sphinx).
+This contribution does not break existing sections in the user documentation.
+All relevant APIs are documented in the doxygen documentation.
+Appropriate labels have been assigned to this PR.
+New or revised proper licensing and copyright information is in place.
+A PR review has been run using @claude review.
+The continuous integration and testing hooks at GitHub run to completion.
+Generated by Claude Code
+rmrsk
+marked this pull request as ready for review
+October 17, 2026 16:15
+rmrsk
+commented
+Oct 17, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+@claude review
+Generated by Claude Code
+github-actions
+Bot
+commented
+Oct 17, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Claude finished @rmrsk's task in 27s —— View job
+Review of PR #196 (BVH-10)
+I read the Source/ diff in full. I did not build or run anything. The checks below are by inspection and grep.
+Verdict: no correctness problems found. Two small nits.
+What I checked
+Dispatch in PackedBVH::build (Source/EBGeometry_BVHBuildImplem.hpp:~322):
+All 7 Construction values map to the same builds as the removed CSGDetail::buildBoundedBVH.
+The leaf-setting check happens first, so a zero setting for the chosen method aborts before any work.
+An unknown value reaches the EBGEOMETRY_REQUIRE(false, …) after the switch. The trailing return only keeps the compiler quiet.
+buildBottomUp<SFC::Morton>(…) needs no template keyword here, because it is a member of the current instantiation.
+Move semantics: each case moves a_primsAndBVs once and returns straight away, so nothing is used after a move.
+pack()/packWith() by value: PackedBVH is a trivially copyable handle, so returning it by value is fine. The ->pack(a_pool) calls in buildBVH stay because buildDCELTreeBVH and buildTriTreeBVH still return shared_ptr<TreeBVH>.
+Stale references: a grep over Source, the Sphinx sources, README, Examples, Integrations, Tests, CLAUDE.md and PORTING.md found no leftover SFC::X{} tag values, pack(...)->, buildBoundedBVH or "SFC-build constructor" wording.
+InstantiateAll.cpp: the PackedBVH explicit instantiations (lines 91–92) are whole-class, so the new static members are covered for both precisions. No new class was added.
+Docs: the Doxygen @param/@return comments were updated alongside the signatures, and the parameter order is now consistent (a_pool first).
+Nits (non-blocking)
+Duplicated defaults. defaultConstructionOptions() is now defined three times with the same body: PackedBVH (EBGeometry_PackedBVH.hpp:~282), BVHUnion and BVHSmoothUnion (EBGeometry_BVHUnion.hpp:~149 and ~441). Since BVHUnion now calls PackedBVH::build, it could forward to PackedBVH<…>::defaultConstructionOptions(). That way the "top-down leaf stops where DefaultLeafPredicate stops" rule lives in one place.
+K == 1 default. K - 1 is 0 for K == 1, so build() with default options would abort for any top-down method. This is probably unreachable, since K >= 2 is presumably already required for a K-ary tree. If it is not enforced, a static_assert(K >= 2) would make the failure clear.
+Merge note
+You already noted the overlap with #194 (BVH-8). I agree the resolution is small: the builds now end in return PackedBVH(a_pool, nodes, prims).
+The reviewer checklist is yours to tick. I left it alone.
+rmrsk
+commented
+Oct 17, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+ed79c0f fixes the red CI and the first nit.
+CI: the clang++-14 unit-test and sanitizer jobs and the Intel examples job failed on -Wunused-variable. Clang and icpx warn about a local that is initialised from a call and never read. GCC does not, so this didn't show up locally. Two kinds of locals had this:
+the death-test locals in TestBVH;
+the timing-only builds in BuildBVH.
+Both now discard the result with (void). The whole project builds clean with clang now, and the BuildBVH example compiles clean under -Wall -Werror.
+Review nits:
+Duplicated defaults: done. BVHUnion/BVHSmoothUnion::defaultConstructionOptions() and the tape's union now return PackedBVH::defaultConstructionOptions(). CSGDetail::defaultUnionOptions is gone.
+K == 1: this is already enforced. PackedBVH has static_assert(K >= 2).
+@claude review
+Generated by Claude Code
+github-actions
+Bot
+commented
+Oct 17, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Claude finished @rmrsk's task in 22s —— View job
+Review of ed79c0f (PR #196, BVH-10)
+I read the ed79c0f diff and grepped for leftovers. I did not build or run anything.
+Verdict: no problems found. Both items from the earlier round are resolved.
+Clang -Wunused-variable:
+The (void) casts in TestBVH (the death tests) and BuildBVH (the timing-only builds) are correct. A cast to void also suppresses any [[nodiscard]] warning.
+The Pool locals in the death tests are still used, so they don't trigger the warning.
+The (void)tree->pack(packPool) calls in BuildBVH still run the pack into the pool, so the timings measure the same work as before.
+Duplicated defaults:
+BVHUnion and BVHSmoothUnion both define Root as BVH::PackedBVH<T, Stored<P>, K>, so Root::defaultConstructionOptions() is the same function the tape now calls directly.
+CSGDetail::defaultUnionOptions is gone, and a repo-wide grep finds no remaining reference.
+The {K - 1, K, ClusterSpec{}} rule now lives only in PackedBVH::defaultConstructionOptions().
+K == 1: the static_assert(K >= 2) you point to settles it.
+Formatting: the changed TapeImplem.hpp line is within the 120-column limit, and so are the other edited lines I checked in that file.
+Nothing else to add. The checklist is yours to tick.
+rmrsk
+mentioned this pull request
+Oct 17, 2026
+GPU port
+#115
+Closed
+15 tasks
+claude
+and others
+added 3 commits
+October 22, 2026 22:18
+PackedBVH: named static builds, pack() by value (BVH-10)
+…
+669fa9c
+```
+The builds from a primitive list were four overloaded constructors told
+apart by argument type: a trailing size_t picked the SFC build (with a
+tag value for the curve, since a constructor template cannot take
+explicit template arguments), a partitioner the top-down build, and a
+ClusterSpec the ClusterSAH build. They are now static functions named
+for what they do: buildBottomUp<S>(), buildTopDown() and
+buildClusterSAH(), each returning the PackedBVH by value.
+
+PackedBVH::build() takes a BVH::Construction and ConstructionOptions
+and calls the matching one, replacing the dispatch the BVH unions kept
+for themselves. defaultConstructionOptions() gives K - 1 per top-down
+leaf (the default leaf predicate), K for the curves and the default
+ClusterSpec.
+
+TreeBVH::pack() and packWith() return the PackedBVH by value instead of
+a shared_ptr: it is a trivially copyable handle into the pool, and the
+mesh SDFs only ever copied it out of the pointer.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Re4VjUqjBtfzYiBfYTEUms
+```
+PackedBVH: discard unused build results (clang -Wunused-variable), fo…
+…
+e346f40
+```
+…rward the unions' default options
+
+Clang and icpx warn about a local initialised from a call and never read,
+which GCC does not: the death tests and the BuildBVH timings now discard
+the result with (void). BVHUnion, BVHSmoothUnion and the tape's union
+call PackedBVH::defaultConstructionOptions() instead of a copy of it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Re4VjUqjBtfzYiBfYTEUms
+```
+TestBVH: the box-storage test (from #194) builds through Packed::buil…
+…
+acdd07f
+```
+…dBottomUp
+
+#194 added a test that built its BVH with the bottom-up constructor this PR
+replaces with named static builds; rebased onto dev, it would not compile.
+It now builds the same tree (Morton, target leaf size 4) by name.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FnaeZk1ThKVcT9ypbex2Vt
+```
+rmrsk
+force-pushed
+the
+claude/bvh-10
+branch
+from
+ed79c0f to
+acdd07f
+Compare
+October 22, 2026 20:29
+Performance receipt for BVH-10: green
+…
+11808b6
+```
+Scripts/run-performance.sh compare origin/dev --record on acdd07f: no
+regression across 88 host cases, no answer differing, no case lost; every
+build within +-1.5%: the named static builds build the same trees as the
+constructors they replace.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FnaeZk1ThKVcT9ypbex2Vt
+```
+rmrsk
+commented
+Oct 23, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+@claude review
+github-actions
+Bot
+commented
+Oct 23, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Claude finished @rmrsk's task in 22s —— View job
+Review of PR #196 (BVH-10), head 11808b6
+I read the Source/ diff and checked the dispatch and leaf-setting paths. I did not build or run anything.
+Verdict: no problems found. The two earlier review items were resolved in ed79c0f. The commits since then only touch a test and the receipt.
+PackedBVH::build (Source/EBGeometry_BVHBuildImplem.hpp:~328):
+All 7 Construction values reach a named build, and each case moves a_primsAndBVs once and returns.
+requireLeafSetting runs first, so a zero setting aborts before any work. It deliberately leaves unknown values alone (TreeBVH.hpp:~133).
+An unknown value therefore reaches EBGEOMETRY_REQUIRE(false, "PackedBVH: unknown …"). This matches the new text TestCSG expects.
+BVHUnion double check: BVHUnion checks the leaf setting under its own name (BVHUnionImplem.hpp:111), then build() checks it again. This is harmless. The union's message still names BVHUnion for a zero setting, and only the unknown-value text changed.
+Stale [[nodiscard]]/unused results: the (void) discards from ed79c0f are in place.
+Commit acdd07f only moves the box-storage test onto Packed::buildBottomUp. It adds no new behaviour.
+Housekeeping (not blocking):
+Per CLAUDE.md, Performance/receipt.md records host results only. If you consider this PR to touch device-run code (pack() returning by value, which the mesh SDFs use), a --gpu receipt section may be worth adding. You know better than I do whether that applies.
+The receipt is green. It will go stale if you push any further library change, so re-record it then.
+The reviewer checklist is yours to tick. I left it alone.
+· branch claude/bvh-10
+rmrsk
+commented
+Oct 23, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+@claude review
+github-actions
+Bot
+commented
+Oct 23, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Claude finished @rmrsk's task in 17s —— View job
+Review of PR #196 (BVH-10), head 11808b6
+I read the Source/ diff for PackedBVH, BVHUnionImplem and the build implementations. I did not build or run anything.
+Verdict: no problems found. The two earlier items were resolved in ed79c0f. The commits since then only touch a test and the receipt.
+PackedBVH::build (Source/EBGeometry_BVHBuildImplem.hpp):
+All 7 Construction values reach a named build. The dispatch matches the removed CSGDetail::buildBoundedBVH.
+Each case moves a_primsAndBVs once and returns, so nothing is read after the move.
+requireLeafSetting runs first, so a zero setting aborts before any work.
+An unknown value falls out of the switch to EBGEOMETRY_REQUIRE(false, "PackedBVH: unknown …"). This matches the text TestCSG now expects. The trailing return only keeps the compiler quiet.
+Named builds:
+buildBottomUp<S>, buildTopDown and buildClusterSAH now end in return PackedBVH(a_pool, nodes, boxes, prims). That is the adopt constructor from PackedBVH: store every box once (BVH-8) #194.
+They are [[nodiscard]], and the (void) discards from ed79c0f are in place.
+The doxygen @param/@return blocks were updated and the a_pool-first order is consistent.
+Remaining "constructor" wording in the comments was reworded.
+BVHUnion:
+It checks the leaf setting under its own name, then build() checks it again. This is harmless. Only the unknown-value text changed.
+CSGDetail::buildBoundedBVH and its SFC include are gone with no remaining references.
+defaultConstructionOptions(): {K - 1, K, ClusterSpec{}} now lives only in PackedBVH. K >= 2 is enforced by the class's static_assert, so K - 1 is never 0.
+Housekeeping (not blocking):
+The receipt records host results only. pack() returning by value is host build code, so a device section looks unnecessary. The HIP compile of TestBVH and TestCSG in your notes covers the device side.
+The receipt is green and is stale only if a later commit changes the library or the probes.
+The reviewer checklist is yours to tick. I left it alone.
+· branch claude/bvh-10
+rmrsk
+self-assigned this
+Oct 23, 2026
+rmrsk
+added
+the
+bvh
+Affects the bounding volume hierarchies functionalities
+label
+Oct 23, 2026
+Hide details
+View details
+rmrsk
+merged commit ecb6340
+into
+dev
+Oct 23, 2026
+30 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+rmrsk
+added a commit
+that referenced
+this pull request
+Oct 23, 2026
+Merge dev (#196) into claude/tape-grid-constant
+…
+ba71ee0
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EEgm1Bkd2jnCzivvZozRJT
+```
+rmrsk
+mentioned this pull request
+Oct 23, 2026
+Triangles: one signed-distance kernel for every SIMD width and the scalar paths (MESH-8)
+#197
+Merged
+8 tasks done
+rmrsk
+added a commit
+that referenced
+this pull request
+Oct 23, 2026
+BVH-11 device: build the refit tests through PackedBVH::buildBottomUp
+…
+d2bc584
+```
+The builder constructors are gone since #196; the rebased tests and the
+InstantiateAll entry now use the named static build.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FnaeZk1ThKVcT9ypbex2Vt
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+bvh
+Affects the bounding volume hierarchies functionalities
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,35 @@
+# Image Filtering and Quality Control
+
+Also called: Median filtering, Noise Reduction
+
+## Overview
+Image filtering and quality control removes unwanted artifacts, distortions, and noise from acquired data to improve the accuracy of downstream 3D reconstruction and volume rendering [S1, unofficial]. It solves the problem of degraded reconstruction quality caused by transient objects, motion blur, or sensor noise in input imagery. It differs from sibling pipelines by focusing specifically on the removal of visual artifacts and normalization of intensity values rather than semantic segmentation, partitioning, or format conversion.
+
+## Shared principles
+The family relies on two core mechanisms: normalization and filtering.
+
+**Normalization** scales scalar values into a standard range, typically $[0, 1]$, to mitigate variations across different acquisitions and sensors [S3, unofficial]. This ensures that intensity differences are preserved numerically, which is critical for the stability of deep learning models [S1, unofficial].
+
+**Filtering** applies low-pass kernels, such as Gaussian or sinc functions, to suppress high-frequency noise and aliasing while preserving essential frequencies as defined by the Nyquist theorem [S3, unofficial]. Median filtering is also employed to remove specific artifacts like salt-and-pepper noise without blurring edges [S1, unofficial].
+
+## Subtopics
+
+### [Wild Scene Preprocessing & Test Set Selection](13103-wild-scene-preprocessing-test-set-selection.md)
+A coarse pre-filtering pipeline to remove low-quality images dominated by transient objects from unconstrained photo collections, ensuring robust training and evaluation for view synthesis systems. It differs from standard LDR preprocessing by explicitly reconstructing linear radiance values and preserving relative intensity differences through uniform scaling rather than quantization, ensuring numerical stability during deep learning training. Choose this when dealing with unconstrained, "wild" photo collections where transient objects (people, vehicles) and varying focus levels are prevalent. See [Wild Scene Preprocessing & Test Set Selection](13103-wild-scene-preprocessing-test-set-selection.md).
+
+### [TripoSR Image Preprocessing](16289-triposr-image-preprocessing.md)
+This method prepares single-view images for the TripoSR 3D reconstruction model by removing backgrounds, centering the subject, and converting the image to a normalized 50% gray background format. It solves the problem of inconsistent object scales and distracting backgrounds that degrade the performance of diffusion-based inverse rendering models. Choose this when using the TripoSR model which requires a consistent, centered subject on a neutral background. See [TripoSR Image Preprocessing](16289-triposr-image-preprocessing.md).
+
+### Dataset Preprocessing (Denoising & Background Prior)
+A preprocessing strategy for training images that applies a simple threshold-based denoising to alleviate noise in large black background regions, and optionally uses zero-RGB black backgrounds as a dataset prior to encourage empty geometry predictions in those regions [S2]. Parameters include specific resolutions for training ($512 \times 640$), testing ($600 \times 800$), and fine-tuning ($768 \times 576$) [S2].
+
+### Preprocessing (Normalization and Filtering)
+Standard normalization scales values to $[0, 1]$ to mitigate acquisition variations [S3, unofficial]. Filtering uses low-pass kernels (Gaussian, sinc) to suppress noise and aliasing while preserving essential frequencies per the Nyquist theorem [S3, unofficial].
+
+## Background
+The concept of removing artifacts to improve 3D reconstruction accuracy is foundational to volume scanning and rendering [S1, unofficial]. Techniques like Gaussian and median filtering have long been used for noise reduction in acquired data [S1, unofficial]. In medical contexts, preprocessing is essential for converting DICOM files (CT/MRI) into normalized arrays for analysis [S3, unofficial]. Scientific applications include filtering confocal microscopy volumes and normalizing CFD outputs to ensure artifact-free input for visualization pipelines [S3, unofficial].
+
+## Sources
+[S1] Llama version of Ct Volume Rendering, https://www.flyriver.com/l/ct-volume-rendering, fetched 2026-10-29 (unofficial)
+[S2] SparseNeuS: Fast Generalizable Neural Surface Reconstruction from Sparse Views, https://doi.org/10.1007/978-3-031-19824-3_13, fetched 2026-10-26
+[S3] volume rendering, https://grokipedia.com/page/Volume_rendering, fetched 2026-10-26 (unofficial)

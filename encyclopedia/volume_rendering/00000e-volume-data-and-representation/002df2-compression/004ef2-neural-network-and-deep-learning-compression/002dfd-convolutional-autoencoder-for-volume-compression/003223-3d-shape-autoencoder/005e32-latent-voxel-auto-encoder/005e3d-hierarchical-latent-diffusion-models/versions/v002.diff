@@ -1,0 +1,201 @@
+--- v001.md
++++ v002.md
+@@ -7,5 +7,5 @@
+ 
+ ## How it works
+-The method consists of four main phases: compression, decomposition, diffusion training, and decoding.
++The method consists of four main phases: compression, decomposition, diffusion training, and decoding [S1].
+ 
+ ### Inputs and Outputs
+@@ -14,19 +14,13 @@
+ 
+ ### Data Structures
+-The scene voxels are decomposed into a tri-latent representation [S1]:
+-1.  **1D Global Latent ($g$):** Captures global scene structure and camera trajectory context.
+-2.  **3D Coarse Latent ($c$):** Captures coarse 3D spatial structure.
+-3.  **2D Fine Latent ($f$):** Captures fine-grained 2D details.
+-
+-The specific voxel dimensions depend on the dataset: $32 \times 128 \times 128$ ($Z \times X \times Y$) for VizDoom, Replica, and Carla, with varying physical voxel sizes per dataset [S1]. AVD uses non-uniform voxel sizes [S1].
++The scene voxels are decomposed into a tri-latent representation: a 1D global latent, a 3D coarse latent, and a 2D fine latent [S1]. The specific voxel dimensions depend on the dataset: $32 \times 128 \times 128$ ($Z \times X \times Y$) for VizDoom, Replica, and Carla, with varying physical voxel sizes per dataset [S1]. AVD uses non-uniform voxel sizes [S1].
+ 
+ ### Algorithm Steps
+-
+ 1.  **Compression:** Compress the explicit voxel grids into the set of latent representations ($g, c, f$) using the trained latent-autoencoder [S1].
+ 2.  **Decomposition:** The latent-autoencoder explicitly decomposes the scene voxels into the 3D coarse latent, 2D fine latent, and 1D global latent [S1].
+ 3.  **Diffusion Training:** Train separate conditional DDMs on the tri-latent representation to model the distribution and generate novel latents [S1].
+-    *   **Global Model ($\psi_g$):** Trained on the global latent $g$ and camera trajectory.
+-    *   **Coarse/Fine Models:** Trained on $c$ and $f$ respectively (conditional on global context).
+-4.  **Sampling:** Sample the latents from the trained diffusion models.
++    *   **Global Model ($\psi_g$):** Trained on the global latent $g$ and camera trajectory [S1].
++    *   **Coarse/Fine Models:** Trained on $c$ and $f$ respectively (conditional on global context) [S1].
++4.  **Sampling:** Sample the latents from the trained diffusion models [S1].
+ 5.  **Decoding:** Decode the sampled latents back into a neural field (density and feature voxel grids) using the decoder from the Latent Voxel Auto-Encoder [S1].
+ 
+@@ -70,5 +64,5 @@
+ 
+ **U-Net Connectivity:**
+-The model consists of $N$ such linear blocks. The inputs to the second half of the linear blocks are the concatenation of the previous block’s output and the output of the corresponding first half of the linear block in a U-Net fashion [S1].
++The model consists of $N$ such linear blocks [S1]. The inputs to the second half of the linear blocks are the concatenation of the previous block’s output and the output of the corresponding first half of the linear block in a U-Net fashion [S1].
+ 
+ ### Pseudocode
+@@ -78,5 +72,4 @@
+ import torch
+ import torch.nn as nn
+-import torch.nn.functional as F
+ 
+ class TimestepEmbedding(nn.Module):
+@@ -85,5 +78,4 @@
+         super().__init__()
+         self.dim = dim
+-
+     def forward(self, t):
+         device = t.device
+@@ -94,105 +86,51 @@
+         emb = torch.cat([torch.sin(emb), torch.cos(emb)], dim=1)
+         if self.dim % 2 == 1:
+-            emb = F.pad(emb, (0, 1))
++            emb = nn.functional.pad(emb, (0, 1))
+         return emb
+ 
+ class LinearBlock(nn.Module):
+-    """
+-    A single linear block for the Global Latent Diffusion Model.
+-    Implements the residual structure with timestep embedding.
+-    """
+-    def __init__(self, input_dim, hidden_dim):
++    """Implements Eq. 9: residual block with timestep embedding."""
++    def __init__(self, in_dim, out_dim):
+         super().__init__()
+-        self.linear1 = nn.Linear(input_dim, hidden_dim)
+-        self.linear2 = nn.Linear(hidden_dim, hidden_dim)
+-        self.linear3 = nn.Linear(input_dim, hidden_dim) # For skip connection
+-        self.timestep_linear = nn.Linear(hidden_dim, hidden_dim) # For t_emb projection
++        self.linear1 = nn.Linear(in_dim, out_dim)
++        self.linear2 = nn.Linear(out_dim, out_dim)
++        self.linear3 = nn.Linear(in_dim, out_dim)
++        self.timestep_linear = nn.Linear(out_dim, out_dim)
+         self.act = nn.ReLU()
+-
+     def forward(self, x, t_emb):
+-        # h = linear(x)
+-        h = self.linear1(x)
+-        h = self.act(h)
+-        
+-        # h_emb = linear(t_emb)
++        h = self.act(self.linear1(x))
+         h_emb = self.timestep_linear(t_emb)
+-        
+-        # h = h + h_emb
+         h = h + h_emb
+-        
+-        # h = linear(h)
+-        h = self.linear2(h)
+-        h = self.act(h)
+-        
+-        # return linear(x) + h
+-        skip = self.linear3(x)
+-        return skip + h
++        h = self.act(self.linear2(h))
++        return self.linear3(x) + h
+ 
+ class GlobalLatentDiffusionModel(nn.Module):
+-    """
+-    Global Latent Diffusion Model (psi_g).
+-    Consists of N linear blocks with U-Net style skip connections.
+-    """
++    """Global Latent Diffusion Model (ψg) with U-Net connectivity [S1]."""
+     def __init__(self, latent_dim, trajectory_dim, num_blocks, channel_dim):
+         super().__init__()
+-        # Input is concatenation of global latent g and trajectory info
+         self.input_dim = latent_dim + trajectory_dim
+         self.num_blocks = num_blocks
+-        
+-        # Initial projection to channel_dim
+         self.input_proj = nn.Linear(self.input_dim, channel_dim)
+-        
+-        # Timestep embedding
+-        self.t_emb_dim = channel_dim
+-        self.timestep_embedder = TimestepEmbedding(self.t_emb_dim)
+-        self.timestep_proj = nn.Linear(self.t_emb_dim, channel_dim)
+-        
+-        # Linear blocks
+-        self.blocks = nn.ModuleList([
+-            LinearBlock(channel_dim, channel_dim) for _ in range(num_blocks)
+-        ])
+-        
+-        # Final projection back to latent_dim
++        self.timestep_embedder = TimestepEmbedding(channel_dim)
++        self.timestep_proj = nn.Linear(channel_dim, channel_dim)
++        # Split blocks into encoder and decoder halves
++        half = num_blocks // 2
++        self.encoder_blocks = nn.ModuleList([LinearBlock(channel_dim, channel_dim) for _ in range(half)])
++        self.decoder_blocks = nn.ModuleList([LinearBlock(channel_dim, channel_dim) for _ in range(half)])
+         self.output_proj = nn.Linear(channel_dim, latent_dim)
+ 
+     def forward(self, x, t):
+-        """
+-        Args:
+-            x: Input tensor of shape (batch, latent_dim + trajectory_dim)
+-            t: Time step tensor of shape (batch,)
+-        Returns:
+-            Predicted noise component v of shape (batch, latent_dim)
+-        """
+-        # Project input to channel dimension
+         h = self.input_proj(x)
+-        
+-        # Get timestep embedding
+-        t_emb = self.timestep_embedder(t)
+-        t_emb = self.timestep_proj(t_emb)
+-        
+-        # U-Net style forward pass
+-        # Note: The source describes "inputs to the second half... are concatenation...
+-        # of previous block's output and output of corresponding first half".
+-        # Since LinearBlock is defined as a single unit in Eq 9, we interpret the
+-        # "U-Net fashion" as standard skip connections between encoder/decoder halves
+-        # or simply sequential blocks if the "first half/second half" refers to
+-        # the internal structure of a larger U-Net not fully detailed in Eq 9.
+-        # However, Eq 9 defines a self-contained block. The text says "N such linear blocks".
+-        # And "inputs to the second half... concatenation...".
+-        # Given the ambiguity of "first half/second half" of a linear block vs U-Net layers,
+-        # and the explicit Eq 9, we implement the sequential blocks.
+-        # If a true U-Net is required, the architecture would be more complex.
+-        # Based on "1D analogous version of the 2D Unet", we assume the blocks
+-        # are arranged in an encoder-decoder structure.
+-        # But Eq 9 is a simple residual block.
+-        # Let's stick to the explicit Eq 9 implementation for the block,
+-        # and assume the "U-Net fashion" refers to the overall architecture
+-        # connecting these blocks, which is not fully specified in pseudocode form
+-        # other than the concatenation detail.
+-        # For implementation completeness based on Eq 9:
+-        
+-        for i, block in enumerate(self.blocks):
++        t_emb = self.timestep_proj(self.timestep_embedder(t))
++        # Encoder path
++        skips = []
++        for block in self.encoder_blocks:
+             h = block(h, t_emb)
+-            
++            skips.append(h)
++        # Decoder path with U-Net skip connections [S1]
++        for i, block in enumerate(self.decoder_blocks):
++            # Concatenate previous block's output and corresponding first half output
++            h = torch.cat([h, skips.pop()], dim=1)
++            h = block(h, t_emb)
+         return self.output_proj(h)
+ ```
+@@ -217,6 +155,6 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** Not given in the sources.
++*   **Time Complexity:** Not given in the sources [S1].
++*   **Memory Complexity:** Not given in the sources [S1].
+ *   **Measured Performance:** The method achieves state-of-the-art scene generation results on four challenging datasets (VizDoom, Replica, Carla, AVD) [S1].
+ *   **Strengths:** Substantial improvement over existing state-of-the-art scene generation models; enables conditional scene generation, scene inpainting, and style manipulation [S1].
+@@ -225,5 +163,5 @@
+ 
+ ## Background
+-The method was introduced in "NeuralField-LDM: Scene Generation with Hierarchical Latent Diffusion Models" [S1]. It builds upon Denoising Diffusion Models (DDMs) [23, 24, 60, 70, 72] and Latent Diffusion Models (LDM) [60]. The authors note that DDMs avoid mode dropping behaviors of GANs but require ground-truth 3D data, which is not readily available at scale. By operating in the latent space of a neural field, the method focuses generative capacity on core scene parts [S1]. The work was done during an internship at NVIDIA [S1].
++The method was introduced in "NeuralField-LDM: Scene Generation with Hierarchical Latent Diffusion Models" [S1]. It builds upon Denoising Diffusion Models (DDMs) and Latent Diffusion Models (LDM) [S1]. The authors note that DDMs avoid mode dropping behaviors of GANs but require ground-truth 3D data, which is not readily available at scale [S1]. By operating in the latent space of a neural field, the method focuses generative capacity on core scene parts [S1]. The work was done during an internship at NVIDIA [S1].
+ 
+ ## Sources

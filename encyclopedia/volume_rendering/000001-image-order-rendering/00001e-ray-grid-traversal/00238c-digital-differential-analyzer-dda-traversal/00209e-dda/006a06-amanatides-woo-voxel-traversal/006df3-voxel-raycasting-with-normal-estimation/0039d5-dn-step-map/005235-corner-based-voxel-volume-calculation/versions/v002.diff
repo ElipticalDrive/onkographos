@@ -1,0 +1,155 @@
+--- v001.md
++++ v002.md
+@@ -4,97 +4,80 @@
+ 
+ ## Overview
+-A technique to compute voxel volume values at corners for smooth terrain rendering, replacing side-based volume storage with corner-based values to better represent surface geometry during raymarching [S1, unofficial]. It sets apart from sibling methods by explicitly handling diagonal neighbors (NW, NE, SW, SE) and applying "surface block maxing" to clamp volumes at surface boundaries, whereas siblings like [Midpoint UV Calculation](14669-midpoint-uv-calculation.md) focus on interpolation precision or [Voxel DDA Raymarching with Adaptive Edge Smoothing](14664-voxel-dda-raymarching-with-adaptive-edge-smoothing.md) focus on edge artifacts without the specific corner-maxing logic.
++A technique to compute voxel volume values at corners for smooth terrain rendering, replacing side-based volume storage with corner-based values to better represent surface geometry during raymarching [S1, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- `WX`: Current voxel x-coordinate index.
+-- `Walls`: Total width of the volume in voxels (dimension size).
+-- `Volume`: The 3D voxel grid data structure.
+-- `ColorIndex`: A value associated with each voxel indicating its material type (0 for air, non-zero for solid).
+-- `SurfaceBoxHeight`: The maximum height/depth value for a surface block.
++- `WX`: Current voxel x-coordinate index [S1, unofficial].
++- `Walls`: Total width of the volume in voxels (dimension size) [S1, unofficial].
++- `Volume`: The 3D voxel grid data structure [S1, unofficial].
++- `ColorIndex`: A value associated with each voxel indicating its material type (0 for air, non-zero for solid) [S1, unofficial].
++- `SurfaceBoxHeight`: The maximum height/depth value for a surface block [S1, unofficial].
+ 
+ **Outputs:**
+-- Updated `Volume` values at the current corner/voxel position.
++- Updated `Volume` values at the current corner/voxel position [S1, unofficial].
+ 
+ **Data Structures:**
+-- `Volume[x][y][z]`: Stores the volume/height value.
+-- `ColorIndex[x][y][z]`: Stores the material identifier.
++- `Volume[x][y][z]`: Stores the volume/height value [S1, unofficial].
++- `ColorIndex[x][y][z]`: Stores the material identifier [S1, unofficial].
+ 
+ **Steps:**
+-1. **Boundary Check:** Verify if `WX == 0` or `WX == Walls - 1`. If true, skip complex neighbor averaging to prevent edge corruption at x=0 and x=63 (assuming a 64-width volume) [S1, unofficial].
+-2. **Non-Surface Tile Handling:** If the current voxel is not a surface tile (i.e., it is a full block), set its volume directly to the tile's volume. Do not average with neighbors [S1, unofficial].
++1. **Boundary Check:** Verify if `WX == 0` or `WX == Walls - 1` [S1, unofficial]. If true, skip complex neighbor averaging to prevent edge corruption at x=0 and x=63 [S1, unofficial].
++2. **Non-Surface Tile Handling:** If the current voxel is not a surface tile (i.e., it is a full block), set its volume directly to the tile's volume instead of averaging with neighbors [S1, unofficial].
+ 3. **Surface Block Maxing:** If any adjacent voxel is a surface block, clamp or max out the volume to the `SurfaceBoxHeight` [S1, unofficial].
+-4. **Neighbor Summation:** Sum the `ColorIndex` values of the checked neighbors (Left, Right, Front, Back, and diagonals NW, NE, SW, SE) [S1, unofficial].
+-5. **Solid Check:** If the sum of `ColorIndex` values is greater than zero, set the volume content to 7. This indicates that at least one wall is not air [S1, unofficial].
++4. **Neighbor Summation:** Sum the `ColorIndex` values of the checked neighbors (Left, Right, Front, Back, NW, NE, SW, SE) [S1, unofficial].
++5. **Solid Check:** If the sum of `ColorIndex` values is greater than zero, set the volume content to 7, indicating that at least one wall is not air [S1, unofficial].
+ 6. **Air Handling:** If the sum is zero, set the volume content to 0 [S1, unofficial].
+-7. **Average Calculation:** If none of the sidewalls are surface blocks, calculate a float average: `(Sum of indices) * 0.5 / 4` [S1, unofficial].
+-8. **Shader Deferment:** Defer complex intersection depth calculations along angled lines to the shader, as CPU-side generation does not fully derive the exact mathematical intersection point [S1, unofficial].
++7. **Average Calculation:** If none of the sidewalls are surface blocks, compute a float average using the formula $V_{avg} = (V_{sum} \times 0.5) / 4$, where $V_{sum}$ is the sum of neighbor color indices [S1, unofficial].
++8. **Shader Deferment:** Defer complex intersection depth calculations along angled lines to the shader, as the CPU-side volume generation does not fully derive the exact mathematical intersection point [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+ def calculate_corner_volume(WX, Walls, Volume, ColorIndex, SurfaceBoxHeight):
+-    # Step 1: Boundary handling
++    # Step 1: Boundary Check
+     if WX == 0 or WX == Walls - 1:
+-        # Skip complex neighbor averaging to prevent edge corruption
+-        # [G] Implementation detail: Return current volume or handle edge case specifically
++        return Volume[WX] # Skip complex averaging to prevent edge corruption at x=0 and x=63
++
++    # Step 2: Non-Surface Tile Handling
++    # [G] Check if current voxel is a surface tile; exact flag not specified in sources
++    if Volume[WX].type != "surface":
++        Volume[WX] = Volume[WX] # Set directly to tile's volume
+         return Volume[WX]
+ 
+-    # Step 2: Non-surface tile handling
+-    if not is_surface_tile(Volume[WX]):
+-        # Set volume directly to tile's volume (full block)
+-        Volume[WX] = get_tile_volume(Volume[WX])
++    # Step 3 & 4: Check neighbors and sum color indices
++    # Neighbors: Left, Right, Front, Back, NW, NE, SW, SE
++    neighbor_offsets = [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (1, -1), (-1, 1), (1, 1)]
++    has_surface_neighbor = False
++    color_sum = 0
++
++    for dx, dz in neighbor_offsets:
++        nx = WX + dx # [G] Z-coordinate assumed constant for this slice; exact 3D layout not specified
++        n_vol = Volume[nx] # [G] Access neighbor data; sources do not specify exact array indexing
++        n_color = ColorIndex[nx]
++
++        if n_vol.type == "surface": # [G] Surface block check
++            has_surface_neighbor = True
++        color_sum += n_color
++
++    # Step 3: Surface Block Maxing
++    if has_surface_neighbor:
++        Volume[WX] = max(Volume[WX], SurfaceBoxHeight)
+         return Volume[WX]
+ 
+-    # Step 3: Surface block maxing
+-    # Check adjacent voxels (Left, Right, Front, Back, NW, NE, SW, SE)
+-    neighbors = get_neighbor_indices(WX)
+-    for neighbor in neighbors:
+-        if is_surface_block(Volume[neighbor]):
+-            # Clamp to surface box height
+-            Volume[WX] = max(Volume[WX], SurfaceBoxHeight)
+-            return Volume[WX]
+-
+-    # Step 4 & 5: Sum color indices and check for solid
+-    color_sum = 0
+-    for neighbor in neighbors:
+-        color_sum += ColorIndex[neighbor]
+-
++    # Step 5 & 6: Solid/Air Check
+     if color_sum > 0:
+-        # At least one wall is not air
+         Volume[WX] = 7
+     else:
+-        # All walls are air
+         Volume[WX] = 0
+ 
+-    # Step 7: Average calculation if no surface blocks
+-    # Note: This step is mutually exclusive with Step 3 in the source logic
+-    # "if none of the sidewalls is not a surface" -> if no surface blocks
+-    if not any(is_surface_block(Volume[n]) for n in neighbors):
+-        # Multiply by 0.5 and divide by 4
++    # Step 7: Average Calculation
++    if not has_surface_neighbor:
+         Volume[WX] = (color_sum * 0.5) / 4.0
+ 
+     return Volume[WX]
+-
+-def is_surface_tile(volume_data):
+-    # [G] Placeholder for specific tile type check
+-    return volume_data.type == "surface"
+-
+-def is_surface_block(volume_data):
+-    # [G] Placeholder for surface block check
+-    return volume_data.is_surface
+-
+-def get_neighbor_indices(WX):
+-    # [G] Returns indices for Left, Right, Front, Back, NW, NE, SW, SE
+-    # Exact neighbor coordinates depend on 3D grid layout
+-    return []
+-
+-def get_tile_volume(volume_data):
+-    # [G] Returns the volume value of the tile
+-    return volume_data.volume
+ ```
+ 
+ **Parameters:**
+ - `SurfaceBoxHeight`: Not given in the sources.
+-- `ColorIndex` values: 0 for air, non-zero for solid. Specific non-zero values are not given.
++- `ColorIndex` values: 0 for air, non-zero for solid [S1, unofficial]. Specific non-zero values are not given [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+@@ -103,7 +86,7 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Not given in the sources.
+-- **Memory Complexity:** Not given in the sources.
+-- **Measured Performance:** Not given in the sources.
++- **Time Complexity:** Not given in the sources [S1, unofficial].
++- **Memory Complexity:** Not given in the sources [S1, unofficial].
++- **Measured Performance:** Not given in the sources [S1, unofficial].
+ - **Strengths:** Better representation of surface geometry during raymarching by using corner-based values [S1, unofficial].
+ - **Limitations:** Requires shader-side calculations for precise intersection points [S1, unofficial]. Boundary handling is critical and prone to corruption if not implemented correctly [S1, unofficial].

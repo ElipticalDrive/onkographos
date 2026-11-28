@@ -1,0 +1,103 @@
+# Occupancy Ground Truth Computation
+Also called: Computing ground truth occupancy
+## Overview
+This method computes the binary occupancy value (inside or outside) for arbitrary 3D coordinates by ray casting against a watertight mesh [S1]. It serves as the ground truth generator for training neural implicit representations, distinguishing itself from sibling methods like [Mask Cache Lookup](6434-mask-cache-lookup.md) by operating on continuous geometric primitives (meshes) rather than discrete voxel grids [S1, 6434]. It is primarily used to create training datasets for 3D neural field generation [S1].
+
+## How it works
+**Inputs:**
+- A watertight mesh representing the 3D shape [S1].
+- A set of 3D query points $\mathbf{p} = (x, y, z)$ [S1].
+
+**Outputs:**
+- Binary occupancy values $o \in \{0, 1\}$ for each query point [S1].
+
+**Data Structures:**
+- The watertight mesh is represented as a collection of triangles (faces) and vertices, extracted via the marching cubes algorithm [S1, 4].
+
+**Steps:**
+1. **Mesh Extraction:** Generate a watertight mesh from the target shape using the marching cubes algorithm [S1, 4].
+2. **Query Point Sampling:** Generate the set of query points $\mathbf{P}$ using two strategies:
+   - Draw 50% of the points uniformly at random from the bounding volume of the mesh [S1].
+   - Draw the remaining 50% of the points via importance sampling near the surface of the watertight mesh [S1].
+3. **Ray Casting:** For each query point $\mathbf{p}_i$:
+   - Cast a ray starting at $\mathbf{p}_i$ along the positive z-axis direction $\mathbf{d} = (0, 0, 1)$ [S1].
+   - Compute the intersection count $N$ between this ray and the triangles of the watertight mesh [S1].
+4. **Occupancy Determination:**
+   - If $N$ is odd, the point is inside the shape; set occupancy $o_i = 1$ [S1].
+   - If $N$ is even, the point is outside the shape; set occupancy $o_i = 0$ [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_occupancy(mesh, query_points):
+    """
+    Compute occupancy for query points by ray casting along the z-axis.
+    
+    Args:
+        mesh: A watertight mesh object containing triangles.
+        query_points: A list of 3D coordinates (x, y, z).
+        
+    Returns:
+        A list of binary occupancy values (0 or 1).
+    """
+    occupancies = []
+    
+    # Pre-compute mesh triangles for intersection testing
+    triangles = mesh.get_triangles()
+    
+    for point in query_points:
+        # Cast ray along positive z-axis
+        ray_origin = point
+        ray_direction = (0.0, 0.0, 1.0)
+        
+        # Count intersections with mesh triangles
+        intersection_count = 0
+        for triangle in triangles:
+            if ray_triangle_intersect(ray_origin, ray_direction, triangle):
+                intersection_count += 1
+        
+        # Determine occupancy based on parity of intersections
+        if intersection_count % 2 == 1:
+            occupancies.append(1) # Inside
+        else:
+            occupancies.append(0) # Outside
+            
+    return occupancies
+
+def ray_triangle_intersect(origin, direction, triangle):
+    """
+    Standard ray-triangle intersection test.
+    Returns True if the ray intersects the triangle, False otherwise.
+    """
+    # Implementation details for ray-triangle intersection (e.g., Möller–Trumbore algorithm)
+    # are assumed to be available as standard geometric primitives [G].
+    # This function returns a boolean indicating intersection.
+    pass
+```
+
+**Parameters:**
+- Ray direction: Fixed to the z-axis $(0, 0, 1)$ [S1].
+- Sampling ratio: 50% uniform, 50% importance sampled near surface [S1].
+
+**Edge Cases and Pitfalls:**
+- The mesh must be watertight; non-watertight meshes may yield incorrect parity counts [S1].
+- Precision issues in ray-triangle intersection tests near vertices or edges may affect the intersection count [G].
+- The method assumes the mesh is correctly oriented for consistent inside/outside determination [G].
+
+## Subtopics
+
+## Operating characteristics
+- **Time Complexity:** $O(N \cdot F)$, where $N$ is the number of query points and $F$ is the number of triangles in the mesh [S1].
+- **Memory Complexity:** $O(F)$ to store the mesh geometry [S1].
+- **Performance:** The method is computationally expensive for large meshes and high numbers of query points due to the per-point ray casting [S1].
+- **Strengths:** Provides exact geometric ground truth for arbitrary coordinates [S1].
+- **Limitations:** Does not scale well to very high-resolution meshes or massive query sets compared to voxel-based methods [S1].
+- **When to use:** When generating training data for neural implicit representations where exact geometric occupancy is required [S1].
+- **When not to use:** When real-time inference or large-scale voxel-based lookups are needed [S1].
+
+## Background
+This method was implemented in the context of "3D Neural Field Generation Using Triplane Diffusion" [S1]. It follows the implementation details described in Mescheder et al. [5] (cited within [S1]). The watertight mesh is extracted using the marching cubes algorithm [4] (cited within [S1]). The approach is used to generate ground truth occupancy labels for training triplane-based neural fields [S1].
+
+## Sources
+[S1] 3D Neural Field Generation Using Triplane Diffusion, https://doi.org/10.1109/cvpr52729.2023.02000, fetched 2026-10-26

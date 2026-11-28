@@ -1,0 +1,161 @@
+--- v002.md
++++ v003.md
+@@ -4,76 +4,110 @@
+ 
+ ## Overview
+-This method applies rigid body transformations (rotation and translation) to Signed Distance Field (SDF) primitives by transforming the sample point using the inverse of the object's model matrix before evaluation [S1, unofficial][S2, unofficial]. It solves the problem of animating or positioning individual SDF objects independently without modifying the underlying distance function definitions [S1, unofficial]. Unlike direct geometry transformation, it preserves the analytical nature of the SDF by operating in the object's local coordinate space [S2, unofficial]. It differs from [Motion-Compensated Block Warping](4613-motion-compensated-block-warping.md) which estimates per-block warps for temporal compression, and from [Mesh Transformation via Embree RTC](5669-mesh-transformation-via-embree-rtc.md) which transforms explicit mesh primitives rather than implicit distance fields.
++This method enables the application of rigid transformations (rotation, translation, and uniform scaling) to Signed Distance Field (SDF) primitives during ray marching by evaluating the base distance function in the primitive's local coordinate space rather than the world space [S1, S2, unofficial]. It solves the problem of animating or positioning individual scene objects without modifying the underlying geometric definitions or voxel grids [S1, S2, unofficial]. Unlike methods that transform the geometry data itself, this approach transforms the query point using the inverse of the object's model matrix, ensuring the distance metric remains valid for Euclidean distance fields [S2, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: Sample point $\mathbf{p}$ in world space, inverse model matrix $M^{-1}$.
+-- Output: Distance value $d$ from the base SDF primitive.
++*   **Input:** A query point $\mathbf{p}$ in world/camera space; a $4 \times 4$ inverse model matrix $M^{-1}$ representing the object's transformation (Translation, Rotation, Scale) [S2, unofficial].
++*   **Output:** The signed distance value $d$ at point $\mathbf{p}$ for the transformed object [S1, S2, unofficial].
+ 
+ **Data Structures:**
+-- $M^{-1}$: A $4 \times 4$ matrix of floating-point values representing the inverse model transformation [S2, unofficial].
+-- $\mathbf{p}$: A 3D vector $(p_x, p_y, p_z)$ [S2, unofficial].
+-- Homogeneous point: A 4D vector $(p_x, p_y, p_z, 1.0)$ used for affine transformation [S2, unofficial].
++*   **Inverse Model Matrix ($M^{-1}$):** A $4 \times 4$ homogeneous transformation matrix. In implementation, this is typically passed as a uniform variable to the shader or kernel [S2, unofficial]. The matrix encodes rotation, translation, and potentially uniform scaling [S2, unofficial].
+ 
+ **Steps:**
+-1. Construct the model matrix $M$ for the object in the host application using translation, rotation, and scale components [S2, unofficial].
+-2. Compute the inverse of the model matrix $M^{-1}$ [S2, unofficial].
+-3. Pass $M^{-1}$ to the rendering shader as a uniform variable [S2, unofficial].
+-4. Receive the world-space sample point $\mathbf{p}$ in the SDF evaluation function [S2, unofficial].
+-5. Transform $\mathbf{p}$ into the object's local space by multiplying the homogeneous point by $M^{-1}$:
+-   $$ \mathbf{q} = M^{-1} \begin{bmatrix} p_x \\ p_y \\ p_z \\ 1 \end{bmatrix} $$
+-   where $\mathbf{q}$ is the resulting 4D vector [S2, unofficial].
+-6. Extract the 3D local point $\mathbf{q}_{xyz}$ from $\mathbf{q}$ [S2, unofficial].
+-7. Evaluate the base SDF primitive using $\mathbf{q}_{xyz}$:
+-   $$ d = f_{\text{base}}(\mathbf{q}_{xyz}) $$
+-8. Return $d$ [S2, unofficial].
++1.  **Construct Model Matrix:** On the host side (e.g., CPU/scripting environment), construct the model matrix $M$ for the object using its current translation $\mathbf{t}$, rotation quaternion $\mathbf{q}$, and scale $s$ [S2, unofficial].
++2.  **Compute Inverse:** Calculate the inverse of the model matrix $M^{-1}$ [S2, unofficial].
++3.  **Transform Point:** In the distance evaluation function, transform the world-space query point $\mathbf{p}$ into the local space $\mathbf{q}$ by multiplying $\mathbf{p}$ (homogenized to $\mathbf{p}' = [\mathbf{p}, 1]^T$) by $M^{-1}$ [S2, unofficial]:
++    $$ \mathbf{q} = M^{-1} \begin{bmatrix} \mathbf{p} \\ 1 \end{bmatrix} $$
++    The resulting local point is $\mathbf{q}_{xyz}$ [S2, unofficial].
++4.  **Evaluate Base SDF:** Pass $\mathbf{q}_{xyz}$ to the base, untransformed SDF function $f_{base}$ [S1, S2, unofficial]:
++    $$ d = f_{base}(\mathbf{q}_{xyz}) $$
++5.  **Handle Scaling:** If the model matrix includes uniform scaling by factor $s$, the distance value must be scaled to preserve the Euclidean distance property [S1, unofficial]:
++    $$ d_{final} = s \cdot d $$
++    If non-uniform scaling is used, the Euclidean distance property is distorted unless the metric is adjusted, which is generally avoided in standard SDF ray marching [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def evaluate_transformed_sdf(p, inv_model_matrix, base_sdf):
+-    # p: tuple (x, y, z) in world space
+-    # inv_model_matrix: 4x4 list of lists, column-major layout (row i, col j)
+-    # base_sdf: callable taking (x, y, z) and returning distance
+-    x, y, z = p
+-    w = 1.0
+-    # Explicit matrix-vector multiplication: q = M^-1 * [x, y, z, 1]^T
+-    qx = inv_model_matrix[0][0]*x + inv_model_matrix[1][0]*y + inv_model_matrix[2][0]*z + inv_model_matrix[3][0]*w
+-    qy = inv_model_matrix[0][1]*x + inv_model_matrix[1][1]*y + inv_model_matrix[2][1]*z + inv_model_matrix[3][1]*w
+-    qz = inv_model_matrix[0][2]*x + inv_model_matrix[1][2]*y + inv_model_matrix[2][2]*z + inv_model_matrix[3][2]*w
+-    # qw is typically 1.0 for affine transforms; SDF evaluation uses only xyz
+-    q_local = (qx, qy, qz)
+-    return base_sdf(q_local)
++# Host-side (e.g., C# / Python)
++def compute_inverse_model_matrix(translation, rotation, scale):
++    """
++    Constructs the model matrix M and returns its inverse.
++    Assumes uniform scale for valid SDF distance preservation.
++    """
++    # Construct M = T * R * S
++    # Note: Order of operations depends on convention (pre/post-multiply).
++    # Standard Unity/OpenGL: M = Translation * Rotation * Scale
++    M = translate(translation) @ rotate(rotation) @ scale_matrix(scale)
++    
++    # Compute inverse
++    M_inv = inverse(M)
++    return M_inv
++
++# Shader-side (e.g., GLSL / HLSL / Shadertoy)
++uniform float4x4 _MatTorus_InvModel; # Passed from host
++
++float sdTorus(vec3 p, float2 torus_params) {
++    // Base SDF implementation for a torus
++    vec2 q = vec2(length(p.xz) - torus_params.x, p.y);
++    return length(q) - torus_params.y;
++}
++
++float map(float3 p) {
++    // Step 3: Transform point to local space
++    // Homogeneous coordinate w=1 for translation/rotation
++    float4 q_homogeneous = mul(_MatTorus_InvModel, float4(p, 1.0));
++    vec3 q_local = q_homogeneous.xyz;
++    
++    // Step 4: Evaluate base SDF
++    float dist = sdTorus(q_local, float2(1.0, 0.2));
++    
++    // Step 5: Scale distance if uniform scale was applied in M
++    // Note: If M included scale 's', M_inv includes 1/s.
++    // The distance in local space is correct, but must be scaled back to world space metric.
++    // However, if M_inv is pre-computed, the scaling factor 's' must be known separately
++    // or extracted from M_inv to scale the final distance value.
++    // For uniform scale s, d_world = s * d_local.
++    float scale_factor = ...; // Extracted from original M or passed separately
++    return dist * scale_factor;
++}
+ ```
+ 
+ **Parameters:**
+-- `inv_model_matrix`: A $4 \times 4$ uniform matrix representing the inverse of the object's model transformation [S2, unofficial].
++*   `_MatTorus_InvModel` (or generic `M_inv`): A uniform $4 \times 4$ matrix representing the inverse model transformation [S2, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-- **Scaling:** Uniform scaling by factor $s$ requires scaling the distance return value to preserve Euclidean properties: $f'(\mathbf{p}) = s \cdot f(\mathbf{p}/s)$ [G]. Non-uniform scaling distorts the distance field unless the metric is adjusted or the scale is baked into the inverse matrix [G].
+-- **Precision:** Floating-point precision errors in matrix inversion can cause slight artifacts, especially with large translation values or extreme rotations [G].
+-- **Non-uniform Scale:** If non-uniform scaling is used, the inverse matrix must be correctly computed; naive inversion may distort the distance field if the metric adjustment is omitted [G].
++*   **Non-Uniform Scaling:** Applying non-uniform scaling distorts the distance field, breaking the Euclidean distance property. The resulting field is no longer a true SDF, leading to incorrect ray marching steps [S1, unofficial].
++*   **Precision:** Computing the inverse matrix on the host side is preferred for performance and precision stability compared to inverting in the shader per-fragment [S2, unofficial].
++*   **Homogeneous Coordinates:** Ensure the point is treated as a position (w=1) when multiplying by the transformation matrix, not a direction (w=0), to correctly apply translation [S2, unofficial].
+ 
+ ## Subtopics
+ 
+-### Inverse Viewing Transformations for Volumes
+-This variant applies the inverse transformation to the viewing geometry (eye position, light sources, pixel coordinates) rather than the object, keeping the volume data fixed [S3, unofficial]. It is chosen when the volume data is large (e.g., $>1$ million voxels) and direct per-voxel transformation is computationally prohibitive [S3, unofficial].
+-- **Steps:**
+-  1. Store X, Y, and Z ordinates in separate 1D arrays rather than per-voxel coordinates [S3, unofficial].
+-  2. Center the coordinate arrays by subtracting half the volume's span from each ordinate value [S3, unofficial].
+-  3. Apply scaling by multiplying each ordinate value by the user-specified scaling factor [S3, unofficial].
+-  4. For rotation/translation, transform the eye, lights, and pixels instead of the voxels [S3, unofficial].
+-- **Complexity:** Reduces complexity from $O(N_{\text{voxels}})$ to $O(N_{\text{pixels}} + N_{\text{lights}})$ for rotation/translation [S3, unofficial].
+-- **Pitfall:** Directly transforming voxel positions for rotation/translation requires $\sim 9$ multiplications and $\sim 9$ additions per voxel, which is too slow for large volumes [S3, unofficial].
++### [Inverse Viewing Transformations for Volumes](2390-inverse-viewing-transformations-for-volumes.md)
++Applies the inverse transform to the entire viewing ray system (camera, lights) rather than individual sample points, reducing complexity for large volumetric datasets.
++
++### [Motion-Compensated Block Warping](4613-motion-compensated-block-warping.md)
++Estimates rigid transforms per-block for temporal compression of TSDFs, minimizing prediction error between frames.
++
++### [Mesh Transformation via Embree RTC](5669-mesh-transformation-via-embree-rtc.md)
++Uses Embree's ray tracing kernel to handle mesh transformations, distinct from SDF evaluation.
++
++### [Incremental Scaling Algorithm](7792-incremental-scaling-algorithm.md)
++Handles scaling in distance fields through incremental adjustments.
++
++### [Per-fragment Deformation Evaluation](9846-per-fragment-deformation-evaluation.md)
++Evaluates deformations directly on fragments, potentially using vertex data.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(1)$ per sample point for the transformation step [S2, unofficial]. The overall ray marching complexity remains dominated by the number of steps per ray.
+-- **Strengths:** Allows independent animation of SDF parts without recomputing distance functions [S1, unofficial]. Simple to implement [S2, unofficial].
+-- **Limitations:** Does not naturally handle non-rigid deformations [G]. Scaling requires careful handling [G].
++*   **Time Complexity:** $O(1)$ per sample point evaluation, as it involves a single matrix-vector multiplication and one base SDF call [S1, S2, unofficial].
++*   **Memory Complexity:** $O(1)$ additional memory for the inverse matrix uniform [S2, unofficial].
++*   **Performance:** Highly efficient for rigid transformations. The cost is dominated by the base SDF evaluation and matrix multiplication, which are negligible compared to the ray marching loop [S1, S2, unofficial].
++*   **Strengths:** Simple to implement; allows independent animation of scene parts; preserves the static nature of base SDF definitions [S1, S2, unofficial].
++*   **Limitations:** Only supports rigid transformations (rotation, translation) and uniform scaling effectively. Non-rigid deformations require different approaches (e.g., [Per-fragment Deformation Evaluation](9846-per-fragment-deformation-evaluation.md)) [S1, S2, unofficial].
++*   **When to use:** Ideal for animating rigid objects in SDF scenes [S1, S2, unofficial].
++*   **When not to use:** For non-rigid deformations or non-uniform scaling where metric preservation is critical [S1, unofficial].
+ 
+ ## Background
+-The technique was popularized in the context of real-time ray marching and SDF rendering, notably by Jamie Wong and Adrian Booth [S1, unofficial][S2, unofficial]. It is a standard technique in computer graphics for transforming implicit surfaces [S1, unofficial]. The inverse viewing transformation variant for volumes was described in early volumetric rendering research for aerodynamic flow field data [S3, unofficial].
++The technique originates from the foundational principles of ray marching and Signed Distance Functions, popularized by tutorials such as those by Jamie Wong and Adrian Booth [S1, S2, unofficial]. It is a standard practice in real-time graphics and procedural modeling to decouple geometry definition from scene layout [S1, S2, unofficial].
+ 
+ ## Sources
+ [S1] Ray Marching and Signed Distance Functions, http://jamie-wong.com/2016/07/15/ray-marching-signed-distance-functions/, fetched 2026-10-26 (unofficial)
+-[S2] Raymarching Distance Fields: Concepts and Implementation ..., https://adrianb.io/2016/10/01/raymarching.html, fetched 2026-10-27 (unofficial)
+-[S3] DTIC ADA202661: Volumetric Rendering Techniques for the Display of Three-Dimensional Aerodynamic Flow Field Data, https://archive.org/details/DTIC_ADA202661, fetched 2026-10-26 (unofficial)+[S2] Raymarching Distance Fields: Concepts and Implementation ..., https://adrianb.io/2016/10/01/raymarching.html, fetched 2026-10-27 (unofficial)

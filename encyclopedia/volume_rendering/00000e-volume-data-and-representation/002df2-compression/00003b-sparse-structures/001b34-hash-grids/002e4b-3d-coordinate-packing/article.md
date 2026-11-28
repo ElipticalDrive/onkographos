@@ -1,0 +1,102 @@
+# 3D Coordinate Packing
+
+Also called: Voxel Key Generation, coordToKey, getKey
+
+## Overview
+This method converts three 3D voxel coordinates $(x, y, z)$ into a unique single integer key for hash map indexing [S2, unofficial]. It is designed for sparse voxel grids where dimensions fit within specific bit limits, providing a compact key for direct addressing [S2, unofficial].
+
+## How it works
+**Inputs:** Three integer coordinates $x, y, z$ [S2, unofficial].
+**Outputs:** A single 64-bit integer key [S2, unofficial].
+
+**Data Structures:**
+The method relies on a memory-overlap structure (union) containing a 64-bit integer and a struct with three 16-bit signed integer fields [S2, unofficial]. The layout assumes little-endian byte order and no padding between fields [S2, unofficial].
+
+**Steps:**
+1. Define a union type that contains a 64-bit integer (`__int64` or `uint64_t`) and a struct containing three 16-bit signed integers (`short` or `int16_t`) [S2, unofficial].
+2. Assign the input coordinates $x, y, z$ to the struct fields [S2, unofficial].
+3. Read the 64-bit integer from the union to obtain the packed key [S2, unofficial].
+
+**Formula:**
+$$ \text{key} = (z \ll 32) \mid (y \ll 16) \mid x $$
+Where:
+*   $x$ occupies bits 0–15 [S2, unofficial].
+*   $y$ occupies bits 16–31 [S2, unofficial].
+*   $z$ occupies bits 32–47 [S2, unofficial].
+*   Bits 48–63 are zero for 16-bit signed inputs [S2, unofficial].
+
+**Parameters:**
+*   Coordinate width: 16 bits per axis [S2, unofficial].
+*   Key width: 64 bits [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Endianness:** The method relies on little-endian architecture [S2, unofficial].
+*   **Struct Alignment:** The method assumes no padding between the `short` fields; compiler-specific packing directives may be required [S2, unofficial].
+*   **Range Limitation:** Coordinates are limited to the 16-bit signed range (-32768 to 32767) [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def pack_3d_coordinate(x: int, y: int, z: int) -> int:
+    """
+    Packs three 16-bit signed coordinates into a 64-bit integer key.
+    Assumes little-endian logic: x is LSB, z is MSB of the used bits.
+    """
+    if not (-32768 <= x <= 32767):
+        raise ValueError("x out of 16-bit signed range")
+    if not (-32768 <= y <= 32767):
+        raise ValueError("y out of 16-bit signed range")
+    if not (-32768 <= z <= 32767):
+        raise ValueError("z out of 16-bit signed range")
+
+    x_masked = x & 0xFFFF
+    y_masked = y & 0xFFFF
+    z_masked = z & 0xFFFF
+
+    key = (z_masked << 32) | (y_masked << 16) | x_masked
+    return key
+
+def unpack_3d_coordinate(key: int) -> tuple:
+    """
+    Unpacks a 64-bit integer key back into three 16-bit signed coordinates.
+    """
+    x = key & 0xFFFF
+    y = (key >> 16) & 0xFFFF
+    z = (key >> 32) & 0xFFFF
+
+    if x >= 32768:
+        x -= 65536
+    if y >= 32768:
+        y -= 65536
+    if z >= 32768:
+        z -= 65536
+
+    return (x, y, z)
+```
+
+## Subtopics
+
+### [Grid Index Packing & Unpacking](12913-grid-index-packing-unpacking.md)
+This method converts three 3D voxel coordinates $(x, y, z)$ into a unique single integer ID and reverses the operation using bit shifting and addition. It is designed for sparse voxel grids where dimensions fit within specific bit limits, providing a compact key for hash map indexing. Unlike general space-filling curves (e.g., Z-order), this method relies on fixed bit-width allocations, making it faster but dimensionally constrained.
+
+### [Sparse Voxel Key Packing and Unpacking](20132-sparse-voxel-key-packing-and-unpacking.md)
+Sparse Voxel Key Packing and Unpacking converts 3D integer voxel coordinates into a single 64-bit integer key to enable efficient sorting, deduplication, and set operations on sparse voxel sets. It builds on [3D Coordinate Packing](5755-3d-coordinate-packing.md) by enforcing a specific bit layout and shift strategy that guarantees neighbor offsets can be applied via simple integer addition without field carry corruption. Unlike [Grid Index Packing & Unpacking](12913-grid-index-packing-unpacking.md), which may use different stride calculations, this method explicitly reserves 21 bits per axis to isolate coordinate fields, ensuring that stepping one voxel along an axis corresponds to a constant addition on the key.
+
+### Coordinate to Key Conversion with Boundary Checking
+Converts a 3D coordinate into a 3D OcTreeKey, with boundary checking [S1]. It checks if the point is within the octree bounds and returns true if valid, false otherwise [S1]. For 3D coordinates, the output key is an array of fixed size 3; for single coordinates, it is a discrete 16-bit addressing key [S1].
+
+## Operating characteristics
+*   **Time Complexity:** $O(1)$ for packing and unpacking, involving only bitwise operations and shifts [G].
+*   **Memory Complexity:** $O(1)$, storing three coordinates in a single 64-bit integer [G].
+*   **Strengths:** Extremely fast; minimal memory overhead compared to storing three separate integers; simple implementation [G].
+*   **Limitations:** Strictly limited to 16-bit coordinate ranges; dependent on endianness and struct alignment; does not provide spatial locality (unlike Z-order or Hilbert curves), which may lead to poor cache performance for spatially adjacent voxels if used as a direct hash key without further hashing [S2, unofficial].
+*   **When to use:** When coordinate ranges are small and known in advance, and maximum packing/unpacking speed is required [G].
+*   **When not to use:** When coordinates exceed 16 bits, when spatial locality is critical for cache performance, or on big-endian architectures without adaptation [S2, unofficial].
+
+## Background
+The method is derived from implementations found in unofficial source code repositories, specifically utilizing C/C++ union structures for type-punning to pack coordinates [S2, unofficial]. It is a common technique in graphics programming for generating hash keys from 3D positions [G]. The naming convention `coordToKey` originates from the Octomap library, which provides overloaded functions for converting 3D coordinates into discrete addressing keys at various depths [S1].
+
+## Sources
+[S1] octomap: octomap::OcTree Class Reference, https://octomap.github.io/octomap/doc/classoctomap_1_1OcTree.html, fetched 2026-10-24
+[S2] nustxujun/AfterHumanDeclined, https://github.com/nustxujun/AfterHumanDeclined, fetched 2026-10-26 (unofficial)

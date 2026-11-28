@@ -1,0 +1,167 @@
+Problem WriteAvizoRectilinearCoordinateFilter writes the lower cell corner for each scalar sample instead of its physical center. The ASCII export shifts the measured field by negative half a voxel along each axis. The binary coordinate ...
+
+BUG: Avizo rectilinear export shifts samples by half a voxel · Issue #1824 · BlueQuartzSoftware/simplnx · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+BUG: Avizo rectilinear export shifts samples by half a voxel #1824
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+BUG: Avizo rectilinear export shifts samples by half a voxel#1824
+Copy link
+Labels
+FilterAdds a new filterAdds a new filterbugSomething isn't workingSomething isn't working
+Description
+jmarquisbq
+opened on Oct 15, 2026
+Issue body actions
+Problem
+WriteAvizoRectilinearCoordinateFilter writes the lower cell corner for each scalar sample instead of its physical center. The ASCII export shifts the measured field by negative half a voxel along each axis. The binary coordinate formula has the same defect, independently of its serialization issue.
+Reproduced at fe6c4a15e5a5bffef2523f52cec01be33b1e62a9 using Windows x64, MSVC 19.44, Release, in-memory stores.
+Expected coordinate arrays: X [11,13,15], Y [-3.5,-0.5], Z [4]. Actual ASCII arrays: X [10,12,14], Y [-5,-2], Z [2]. The shift is [-1,-1.5,-2].
+Steps to Reproduce
+Create an ImageGeom with dimensions [3,2,1], origin [10,-5,2], and spacing [2,3,4].
+Attach scalar Int32 cell labels [101,102,103,104,105,106] in X-fastest order, with tuple shape [1,2,3].
+Preflight and execute the writer with units microns. The test below selects the required encoding(s).
+Inspect the coordinate metadata/payload against the expectations above. Preflight and execution both succeed.
+Cause
+src/Plugins/SimplnxCore/src/SimplnxCore/Filters/Algorithms/WriteAvizoRectilinearCoordinate.cpp, lines 151 and 163 uses origin + spacing * index. The ImageGeom center calculation adds half a spacing. The AmiraMesh rectilinear specification, printed page 199 / PDF page 201 stores the X, Y, and Z sample positions in successive arrays, with one coordinate per lattice sample.
+Verification Unit Test
+Add this case and its local helpers to src/Plugins/SimplnxCore/test/WriteAvizoRectilinearCoordinateTest.cpp. It creates its own input and requires no dataset download. The following complete source was compiled and run in an isolated Catch2 harness linked to the matching Release simplnx and SimplnxCore libraries. No production source was changed.
+```
+#include "SimplnxCore/Filters/WriteAvizoRectilinearCoordinateFilter.hpp"
+#include "SimplnxCore/Filters/WriteAvizoUniformCoordinateFilter.hpp"
+#include "simplnx/Common/Bit.hpp"
+#include "simplnx/DataStructure/AttributeMatrix.hpp"
+#include "simplnx/DataStructure/DataArray.hpp"
+#include "simplnx/DataStructure/Geometry/ImageGeom.hpp"
+#include "simplnx/Parameters/FileSystemPathParameter.hpp"
+#include "simplnx/UnitTest/UnitTestCommon.hpp"
+
+#include <catch2/catch.hpp>
+
+#include <array>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <sstream>
+
+using namespace nx::core;
+
+namespace
+{
+template <class FilterT>
+std::string writeFixture(bool binary, const std::string& name)
+{
+  UnitTest::LoadPlugins();
+  DataStructure dataStructure;
+  auto* image = ImageGeom::Create(dataStructure, "Image");
+  REQUIRE(image != nullptr);
+  image->setDimensions({3, 2, 1});
+  image->setOrigin({10.0f, -5.0f, 2.0f});
+  image->setSpacing({2.0f, 3.0f, 4.0f});
+  auto* cells = AttributeMatrix::Create(dataStructure, "Cells", {1, 2, 3}, image->getId());
+  REQUIRE(cells != nullptr);
+  image->setCellData(*cells);
+  auto* labels = Int32Array::CreateWithStore<Int32DataStore>(dataStructure, "FeatureIds", {1, 2, 3}, {1}, cells->getId());
+  REQUIRE(labels != nullptr);
+  for(usize index = 0; index < 6; ++index)
+  {
+    (*labels)[index] = static_cast<int32>(101 + index);
+  }
+  UnitTest::CheckArraysInheritTupleDims(dataStructure);
+  const auto path = std::filesystem::current_path() / name;
+  FilterT filter;
+  auto args = filter.getDefaultArguments();
+  args.insertOrAssign(FilterT::k_OutputFile_Key, std::make_any<FileSystemPathParameter::ValueType>(path));
+  args.insertOrAssign(FilterT::k_WriteBinaryFile_Key, std::make_any<bool>(binary));
+  args.insertOrAssign(FilterT::k_GeometryPath_Key, std::make_any<DataPath>(DataPath({"Image"})));
+  args.insertOrAssign(FilterT::k_FeatureIdsArrayPath_Key, std::make_any<DataPath>(DataPath({"Image", "Cells", "FeatureIds"})));
+  args.insertOrAssign(FilterT::k_Units_Key, std::make_any<std::string>("microns"));
+  const auto preflight = filter.preflight(dataStructure, args);
+  SIMPLNX_RESULT_REQUIRE_VALID(preflight.outputActions);
+  const auto execution = filter.execute(dataStructure, args);
+  SIMPLNX_RESULT_REQUIRE_VALID(execution.result);
+  std::ifstream stream(path, std::ios::binary);
+  REQUIRE(stream.is_open());
+  return {std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>()};
+}
+
+usize payloadOffset(const std::string& contents, const std::string& marker)
+{
+  const auto position = contents.find("\n" + marker);
+  REQUIRE(position != std::string::npos);
+  const auto newline = contents.find('\n', position + 1);
+  REQUIRE(newline != std::string::npos);
+  return newline + 1;
+}
+
+} // namespace
+
+TEST_CASE("Avizo rectilinear coordinates preserve sample centers", "[AvizoRectilinearCenters]")
+{
+  const auto contents = writeFixture<WriteAvizoRectilinearCoordinateFilter>(false, "rect_ascii.am");
+  const auto offset = payloadOffset(contents, "@2");
+  std::istringstream values(contents.substr(offset));
+  const std::array<double, 6> expected = {11.0, 13.0, 15.0, -3.5, -0.5, 4.0};
+  for(usize component = 0; component < expected.size(); ++component)
+  {
+    double actual = 0.0;
+    REQUIRE(static_cast<bool>(values >> actual));
+    CAPTURE(component);
+    CHECK(actual == Approx(expected[component]).margin(1.0e-6));
+  }
+}
+```
+The executed harness registered AvizoRectilinearCenters with the Catch2 selector [AvizoRectilinearCenters] and ran:
+```
+ctest --test-dir <AvizoContractRepro-build> -C Release -j 1 -R "^AvizoRectilinearCenters$" --output-on-failure
+```
+For a standard plugin test build, register the same selector if it is not discovered automatically:
+```
+add_test(NAME AvizoRectilinearCenters COMMAND SimplnxCoreUnitTest "[AvizoRectilinearCenters]" --reporter compact)
+```
+Observed failure excerpt:
+```
+actual == Approx(expected[component]): 10.0 == Approx(11.0)
+actual == Approx(expected[component]): -5.0 == Approx(-3.5)
+Failed 1 test case, failed 6 assertions.
+```
+An independent native control passed for all four writer/encoding combinations: every label, dimension and units string was preserved. Output-overwrite warnings occurred because cases shared their generated filenames; the failures above are numeric assertions, not preflight or file-open failures.
+Proposed Fix
+In WriteAvizoRectilinearCoordinate::writeData, calculate sample centers as origin + (index + 0.5) * spacing in both encodings. Preserve the current sample counts and X-fastest label ordering. Validate the center coordinates independently of legacy exemplar files; handle binary block serialization in its separate issue.
+Notes
+Fixes belong on a separate source branch. No fix was applied or tested. Actual Avizo application behavior, other platforms and OOC storage were not tested. This defect blocks a proposed faithful-coordinate export comparison using the existing measured Gille LabDCT ROI.
+Activity
+jmarquisbq
+added
+bugSomething isn't workingSomething isn't working
+FilterAdds a new filterAdds a new filter
+on Oct 15, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+FilterAdds a new filterAdds a new filterbugSomething isn't workingSomething isn't working
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

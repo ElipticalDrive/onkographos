@@ -1,0 +1,118 @@
+--- v002.md
++++ v003.md
+@@ -28,46 +28,65 @@
+ 
+ def create_fur_volume(geometry, params):
+-    """Creates a volumetric fur model by sampling geometry and generating hair shells."""
+-    volume = [[0.0 for _ in range(geometry.z)] for _ in range(geometry.y)]
+-    base_points = sample_geometry_with_box_filter(geometry)
++    """Step 1: Create a realistic volumetric fur model."""
++    # Initialize 3D density grid
++    volume = [[[0.0 for _ in range(geometry.z)] for _ in range(geometry.y)] for _ in range(geometry.x)]
++    # [G] Sample target geometry surface points using a 3D box filter
++    base_points = [geometry.sample_point(i) for i in range(geometry.num_points)]
+     for point in base_points:
+-        layer = determine_layer(point)
++        # [G] Classify point into undercoat (short, dense, small width) or overcoat (long, thick, large width)
++        layer = classify_layer(point)
+         base_width = random.uniform(layer.width_min, layer.width_max)
++        # Parabolic trajectory with random direction
+         trajectory = generate_parabolic_curl(point, layer.falloff)
+-        hair = generate_hair(point, base_width, trajectory)
+-        for voxel in hair.intersected_voxels:
+-            planes = slice_voxel(voxel)
+-            total_area = 0.0
+-            for plane in planes:
+-                area = calculate_intersection_area(hair, plane)
+-                total_area += area
+-            voxel.density = total_area / len(planes)
++        for t in range(0, layer.max_length, params.step):
++            pos = trajectory(t)
++            # Linear falloff
++            width_at_t = base_width * (1.0 - t / layer.max_length)
++            # Restrict width to at most 1 pixel equivalent
++            width_at_t = min(width_at_t, params.max_pixel_width)
++            # [G] Map 3D position to voxel indices
++            vx, vy, vz = int(pos[0]), int(pos[1]), int(pos[2])
++            if 0 <= vx < geometry.x and 0 <= vy < geometry.y and 0 <= vz < geometry.z:
++                # Antialiasing: slice voxel with horizontal planes
++                planes = slice_voxel(0, 0, 0, params.antialias_slices)
++                total_area = 0.0
++                for plane in planes:
++                    # [G] Compute intersection area using circle, wedge, and chord formulas
++                    area = calculate_intersection_area(width_at_t, plane)
++                    total_area += area
++                volume[vx][vy][vz] = total_area / len(planes)
+     return volume
+ 
+-def precompute_illumination(volume, light_direction, density_factor):
+-    """Precomputes light attenuation for each voxel in the fur volume."""
+-    illumination = [[0.0 for _ in range(volume.z)] for _ in range(volume.y)]
+-    for voxel in volume.voxels:
+-        ray_origin = voxel.center
+-        ray_direction = light_direction
+-        density_sum = 0.0
+-        t = 0.0
+-        step = 0.01  # Not given in the sources.
+-        while t < volume.max_distance:
+-            current_pos = [ray_origin[i] + ray_direction[i] * t for i in range(3)]
+-            current_voxel = get_voxel_at(volume, current_pos)
+-            if current_voxel is not None:
+-                ray_length = get_ray_length_through_voxel(ray_origin, ray_direction, current_voxel)
+-                density_sum += current_voxel.density * ray_length
+-            t += step
+-        transparency = math.exp(-density_factor * density_sum)
+-        illumination[voxel] = transparency
++def precompute_illumination(volume, light_direction, density_factor, params):
++    """Step 2: Precompute illumination of the fur volume."""
++    illumination = [[[0.0 for _ in range(len(volume[0][0]))] for _ in range(len(volume[0]))] for _ in range(len(volume))]
++    for x in range(len(volume)):
++        for y in range(len(volume[0])):
++            for z in range(len(volume[0][0])):
++                ray_origin = [x, y, z]
++                density_sum = 0.0
++                t = 0.0
++                # March ray from voxel center in light direction until leaving volume
++                while t < params.max_ray_length:
++                    current_pos = [ray_origin[i] + light_direction[i] * t for i in range(3)]
++                    # [G] Check bounds and compute ray length inside current voxel
++                    if 0 <= current_pos[0] < len(volume) and 0 <= current_pos[1] < len(volume[0]) and 0 <= current_pos[2] < len(volume[0][0]):
++                        ray_length = compute_ray_box_intersection_length(ray_origin, light_direction, current_pos)
++                        density_sum += volume[int(current_pos[0])][int(current_pos[1])][int(current_pos[2])] * ray_length
++                    t += params.step_size
++                # Texel attenuation formula: T = e^{-r * sum(rho * dt)}
++                transparency = math.exp(-density_factor * density_sum)
++                illumination[x][y][z] = transparency
+     return illumination
+ 
+-def render_fur(volume, illumination, camera):
+-    """Renders the fur volume using shell textures and alpha blending."""
++def render_and_reconstruct(volume, illumination, camera, surface_lighting):
++    """Steps 3 & 4: Render the volume and reconstruct lighting."""
+     image = empty_image(camera.resolution)
+-    for shell in volume.shells:
+-        shell_image = render_shell(shell, camera)
++    # Render shells back-to-front for correct alpha blending
++    for shell in sorted(volume.shells, key=lambda s: s.depth, reverse=True):
++        shell_image = render_shell_geometry(shell, camera)
++        # Step 3: Attenuation from surface to eye via alpha blending
++        # Step 4: Reconstruct lighting (deferred illuminance to luminous exitance)
++        # Basic implementation: apply precomputed transparency to shell color
+         final_shell = apply_illumination(shell_image, illumination, shell)
+         image = alpha_blend(image, final_shell)
+@@ -77,11 +96,11 @@
+ ### Parameters and Edge Cases
+ *   **Hair Width:** Restricted to at most 1 pixel to simplify intersection calculations to 1, 2, 3, or 4 adjacent pixels [S1, unofficial].
+-*   **Density Factor ($r$):** A scaling factor for the density function. Not given in the sources.
++*   **Density Factor ($r$):** A scaling factor for the density function [S1, unofficial].
+ *   **Scattering:** The method currently ignores scattering. Adding a scattering term could increase realism [S1, unofficial].
+-*   **Lighting Model:** The current implementation does not take advantage of heterogeneous lighting models, simply displaying light reaching each voxel. This is a limitation of the specific implementation described, not necessarily the method itself [S1, unofficial].
++*   **Lighting Model:** The current implementation does not take advantage of heterogeneous lighting models, simply displaying light reaching each voxel [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** Not given in the sources.
++*   **Time Complexity:** Not given in the sources [S1, unofficial].
++*   **Memory Complexity:** Not given in the sources [S1, unofficial].
+ *   **Performance:** Capable of real-time frame rates for microgeometry rendering [S1, unofficial].
+ *   **Strengths:** Captures microgeometric self-shadowing; real-time performance; supports heterogeneous lighting models in reconstruction [S1, unofficial].

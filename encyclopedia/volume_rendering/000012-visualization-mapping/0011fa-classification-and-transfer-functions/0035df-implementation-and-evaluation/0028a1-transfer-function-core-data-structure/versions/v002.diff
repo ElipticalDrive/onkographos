@@ -1,0 +1,377 @@
+--- v001.md
++++ v002.md
+@@ -1,66 +1,67 @@
+ # Transfer Function Core Data Structure
+ 
+-Also called: TransferFunctionCore
++Also called: Transfer Function Management
+ 
+ ## Overview
+-The Transfer Function Core Data Structure is a concrete implementation of the classification and transfer function mechanism that manages the mapping from scalar volume data to optical properties (color and opacity) [S1, unofficial]. It solves the problem of efficiently storing, updating, and serializing transfer function definitions by maintaining a pre-computed RGBA lookup table and a separate alpha array, driven by control points and Gaussian objects [S1, unofficial]. It sets itself apart from generic shader-based evaluation by using a fixed-resolution table for fast GPU sampling, while allowing dynamic updates via control point manipulation [S1, unofficial].
++The Transfer Function Core Data Structure is an in-memory representation that manages the control points and parameters defining a volume rendering transfer function, mapping scalar voxel values to optical properties (color and opacity) [S1, S2, unofficial]. It solves the problem of maintaining a consistent, editable state for complex transfer functions composed of piecewise linear segments and Gaussian distributions, distinct from the runtime evaluation mechanisms used by [Real-time transfer function evaluation](1551-real-time-transfer-function-evaluation.md) or the [Fast Classification Algorithm](5289-fast-classification-algorithm.md). It is distinguished by its explicit separation of color controls, alpha controls, and Gaussian objects, which are aggregated into lookup tables for rendering [S1, S2, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Scalar data values (implicitly mapped to $[0, 1]$ via normalization), control points for color and opacity, and Gaussian objects for opacity modulation.
+-*   **Output:** A pre-computed `m_rgbaTable` of size `resolution` containing RGBA values, and an `m_alphaArray` of size `resolution` containing opacity values [S1, unofficial].
++*   **Input:** User-defined control points (position, color/opacity), Gaussian parameters (mean, sigma, height), and a resolution parameter.
++*   **Output:** Two primary data structures: `m_rgbaTable` (a lookup table of RGBA values) and `m_alphaArray` (a lookup table of opacity values), both indexed by normalized scalar value $v \in [0, 1]$.
+ 
+ **Data Structures:**
+-The core class maintains the following internal state [S1, unofficial]:
+-*   `m_rgbaTable`: `std::vector<vec4f>` of size `resolution`. Stores the final RGBA output for each bin.
+-*   `m_alphaArray`: `std::vector<float>` of size `resolution`. Stores the opacity component, potentially modified by Gaussian objects.
+-*   `m_colorControls`: `std::vector<ColorControl>`. Sorted by `position`.
+-*   `m_alphaControls`: `std::vector<AlphaControl>`.
+-*   `m_gaussianObjects`: `std::vector<GaussianObject>`.
+-
+-**Struct Layouts:**
+-*   `vec2f`: `x` (float), `y` (float). Size: `sizeof(vec2f)` [S1, unofficial].
+-*   `vec3f`: `x` (float), `y` (float), `z` (float). Size: `sizeof(vec3f)` [S1, unofficial].
+-*   `vec4f`: `x` (float), `y` (float), `z` (float), `w` (float). Size: `sizeof(vec4f)` [S1, unofficial].
+-*   `ColorControl`: `position` (float), `color` (vec3f). Size must equal `sizeof(vec4f)` [S1, unofficial].
+-*   `AlphaControl`: `pos` (vec2f). Size must equal `sizeof(vec2f)` [S1, unofficial].
+-*   `GaussianObject`: `mean` (float), `sigma` (float), `heightFactor` (float), `alphaArray` (std::vector<float>) [S1, unofficial].
+-
+-**Parameters:**
+-*   `resolution`: Integer, default 1024. Determines the size of `m_rgbaTable` and `m_alphaArray` [S1, unofficial]. Must be greater than 0 [S1, unofficial].
+-
+-**Algorithm Steps:**
++The core structure maintains the following fields [S1, unofficial]:
++
++1.  **`m_rgbaTable`**: `std::vector<vec4f>` of size `resolution`. Stores pre-computed RGBA values.
++    *   `vec4f` layout: `x` (r), `y` (g), `z` (b), `w` (a).
++    *   Size: `sizeof(vec4f)` bytes per entry.
++2.  **`m_alphaArray`**: `std::vector<float>` of size `resolution`. Stores pre-computed opacity values.
++3.  **`m_colorControls`**: `std::vector<ColorControl>`. Stores color control points.
++    *   `ColorControl` layout: `position` (float), `color` (vec3f).
++    *   Constraint: `sizeof(ColorControl)` must equal `sizeof(vec4f)` [S1, unofficial].
++    *   Entries are maintained in sorted order by `position` [S1, unofficial].
++4.  **`m_alphaControls`**: `std::vector<AlphaControl>`. Stores alpha control points.
++    *   `AlphaControl` layout: `pos` (vec2f).
++    *   `vec2f` layout: `x` (position), `y` (opacity).
++    *   Constraint: `sizeof(AlphaControl)` must equal `sizeof(vec2f)` [S1, unofficial].
++5.  **`m_gaussianObjects`**: `std::vector<GaussianObject>`. Stores Gaussian distribution parameters for opacity.
++    *   `GaussianObject` fields: `mean` (float), `sigma` (float), `heightFactor` (float), `alphaArray` (internal buffer, not part of core lookup).
++
++**Numbered Steps:**
+ 
+ 1.  **Initialization:**
+-    *   Allocate `m_rgbaTable` and `m_alphaArray` of size `resolution` [S1, unofficial].
+-    *   Clear all control vectors and Gaussian objects [S1, unofficial].
+-    *   Clear `m_alphaArray` by setting all entries to 0.0f [S1, unofficial].
+-
+-2.  **Adding Color Control Points:**
+-    *   When adding a color control point at `pos` with `color` (vec3f):
+-        *   Create a `ColorControl` with `position = pos` and `color`.
+-        *   Insert into `m_colorControls` maintaining sorted order by `position` [S1, unofficial].
+-        *   Call `updateColorMap()` [S1, unofficial].
+-
+-3.  **Updating Color Map:**
+-    *   Iterate through each bin index $i$ from 0 to `resolution - 1`.
+-    *   Calculate normalized position $x = i / (\text{resolution} - 1)$ [S1, unofficial].
+-    *   Find the two surrounding color controls: `left` (largest position $\le x$) and `right` (smallest position $> x$) [S1, unofficial].
+-    *   If $x$ is outside the range of controls, clamp to the nearest control's color [S1, unofficial].
+-    *   Calculate interpolation weight $w = \frac{x - \text{left.position}}{\text{right.position} - \text{left.position}}$ [S1, unofficial].
+-    *   Interpolate color: $\text{result.color} = \text{mix}(\text{left.color}, \text{right.color}, w)$ [S1, unofficial].
+-    *   Set `m_rgbaTable[i].rgb` to `result.color` [S1, unofficial].
+-
+-4.  **Updating Alpha Array:**
+-    *   Call `updateFromAlphaControls()` [S1, unofficial].
+-    *   Initialize `m_alphaArray` based on `m_alphaControls` (linear interpolation between control points) [S1, unofficial].
+-    *   For each `GaussianObject` in `m_gaussianObjects`:
+-        *   Compute Gaussian contribution for each bin $i$: $G_i = \text{heightFactor} \cdot e^{-\frac{(x - \text{mean})^2}{2 \cdot \text{sigma}^2}}$ where $x = i / (\text{resolution} - 1)$ [S1, unofficial].
+-        *   Add $G_i$ to `m_alphaArray[i]` [S1, unofficial].
+-    *   Update `m_rgbaTable[i].a` with the final `m_alphaArray[i]` [S1, unofficial].
+-
+-5.  **Removal and Clearing:**
+-    *   Removing a control point or Gaussian object requires removing it from the respective vector and calling `updateColorMap()` [S1, unofficial].
+-    *   `clear()` resets all internal structures [S1, unofficial].
++    *   Allocate `m_rgbaTable` and `m_alphaArray` with size `resolution` (default 1024) [S1, unofficial].
++    *   Initialize `window_left` to 0 and `window_width` to 1 [S2, unofficial].
++    *   If no controls are provided, call `randomize()` or default constructors [S2, unofficial].
++    *   **Pitfall:** `resolution` must be greater than 0 [S1, unofficial].
++
++2.  **Adding Controls:**
++    *   **Color Control:** Add a `ColorControl` to `m_colorControls`. The `position` is a normalized float in $[0, 1]$. The `color` is a `vec3f` (RGB).
++    *   **Alpha Control:** Add an `AlphaControl` to `m_alphaControls`. The `pos` is a `vec2f` where `x` is position and `y` is opacity.
++    *   **Gaussian Object:** Add a `GaussianObject` with `mean`, `sigma`, and `heightFactor`.
++
++3.  **Updating the Lookup Tables:**
++    *   **Update Color Map (`updateColorMap`):**
++        *   Iterate through `m_rgbaTable` indices $i$ from 0 to `resolution - 1`.
++        *   Calculate normalized position $v = i / (\text{resolution} - 1)$.
++        *   Determine color $C(v)$ by interpolating between `ColorControl` points in `m_colorControls`. If only one control point exists, use its color. If multiple, perform linear interpolation between the surrounding control points [S1, unofficial].
++        *   Set `m_rgbaTable[i] = vec4f(C(v).r, C(v).g, C(v).b, 1.0f)` (alpha is handled separately or set to 1.0 here, depending on implementation specifics; typically RGBA table stores color, alpha array stores opacity). *Note: The source implies `m_rgbaTable` stores RGBA, but `m_alphaArray` is separate. The update function likely sets RGB from color controls and leaves A or combines them. Based on `updateFromAlphaControls`, alpha is likely managed via `m_alphaArray`.*
++    *   **Update Alpha Array (`updateFromAlphaControls`):**
++        *   Iterate through `m_alphaArray` indices $i$.
++        *   Calculate normalized position $v = i / (\text{resolution} - 1)$.
++        *   Determine opacity $\alpha(v)$ by interpolating between `AlphaControl` points in `m_alphaControls`.
++        *   Add contributions from `GaussianObject` in `m_gaussianObjects`. For each Gaussian $G_j$ with mean $\mu_j$, sigma $\sigma_j$, and height factor $h_j$:
++            $$ \alpha_{gauss}(v) = h_j \cdot \exp\left(-\frac{(v - \mu_j)^2}{2\sigma_j^2}\right) $$
++        *   Combine base alpha from controls and Gaussian contributions (typically additive or max, source implies additive combination for Gaussian bumps on top of base alpha).
++        *   Set `m_alphaArray[i] = \alpha(v)`.
++
++4.  **Removal and Modification:**
++    *   Remove a control point by index from the respective vector (`m_colorControls`, `m_alphaControls`, or `m_gaussianObjects`).
++    *   Call `updateColorMap()` and/or `updateFromAlphaControls()` to regenerate the lookup tables [S1, unofficial].
++
++5.  **Clearing:**
++    *   Clear all internal data structures (`m_rgbaTable`, `m_alphaArray`, `m_colorControls`, `m_alphaControls`, `m_gaussianObjects`) [S1, unofficial].
++    *   Reset alpha table to 0.0f [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -72,122 +73,92 @@
+             raise ValueError("Resolution must be greater than 0")
+         self.resolution = resolution
+-        self.m_rgba_table = [Vec4f(0, 0, 0, 0) for _ in range(resolution)]
+-        self.m_alpha_array = [0.0] * resolution
+-        self.m_color_controls = []  # List of ColorControl
+-        self.m_alpha_controls = []  # List of AlphaControl
+-        self.m_gaussian_objects = []  # List of GaussianObject
+-
+-    def add_color_control(self, position, color):
+-        control = ColorControl(position, color)
+-        # Insert maintaining sorted order by position
+-        self.m_color_controls.append(control)
+-        self.m_color_controls.sort(key=lambda c: c.position)
++        self.m_rgbaTable = [vec4f(0, 0, 0, 1) for _ in range(resolution)]
++        self.m_alphaArray = [0.0] * resolution
++        self.m_colorControls = []  # List of ColorControl
++        self.m_alphaControls = []  # List of AlphaControl
++        self.m_gaussianObjects = [] # List of GaussianObject
++        self.window_left = 0.0
++        self.window_width = 1.0
++        self.randomize() # Initialize with random defaults if needed
++
++    def add_color_control(self, position, r, g, b):
++        control = ColorControl(position, vec3f(r, g, b))
++        self.m_colorControls.append(control)
++        self.m_colorControls.sort(key=lambda c: c.position)
+         self.update_color_map()
+ 
++    def add_alpha_control(self, position, opacity):
++        control = AlphaControl(vec2f(position, opacity))
++        self.m_alphaControls.append(control)
++        self.update_alpha_array()
++
++    def add_gaussian_object(self, mean, sigma, height_factor):
++        gauss = GaussianObject(mean, sigma, height_factor)
++        self.m_gaussianObjects.append(gauss)
++        self.update_alpha_array()
++
+     def update_color_map(self):
+-        self.update_from_alpha_controls()
+         for i in range(self.resolution):
+-            x = i / (self.resolution - 1)
+-            color = self._interpolate_color(x)
+-            self.m_rgba_table[i].r = color.x
+-            self.m_rgba_table[i].g = color.y
+-            self.m_rgba_table[i].b = color.z
+-            self.m_rgba_table[i].a = self.m_alpha_array[i]
+-
+-    def _interpolate_color(self, x):
+-        controls = self.m_color_controls
+-        if not controls:
+-            return Vec3f(0, 0, 0)
+-        
++            v = i / (self.resolution - 1)
++            color = self.interpolate_color(v)
++            self.m_rgbaTable[i] = vec4f(color.x, color.y, color.z, 1.0)
++
++    def update_alpha_array(self):
++        for i in range(self.resolution):
++            v = i / (self.resolution - 1)
++            alpha = self.interpolate_alpha(v)
++            for gauss in self.m_gaussianObjects:
++                alpha += gauss.height_factor * math.exp(-((v - gauss.mean)**2) / (2 * gauss.sigma**2))
++            self.m_alphaArray[i] = alpha
++
++    def interpolate_color(self, v):
++        if not self.m_colorControls:
++            return vec3f(0, 0, 0)
++        if len(self.m_colorControls) == 1:
++            return self.m_colorControls[0].color
+         # Find surrounding controls
+-        left = None
+-        right = None
+-        for i in range(len(controls)):
+-            if controls[i].position <= x:
+-                left = controls[i]
+-            else:
+-                right = controls[i]
+-                break
+-        
+-        if left is None:
+-            return right.color
+-        if right is None:
+-            return left.color
+-        
+-        # Linear interpolation
+-        w = (x - left.position) / (right.position - left.position)
+-        return mix(left.color, right.color, w)
+-
+-    def update_from_alpha_controls(self):
+-        # Initialize alpha array from alpha controls (linear interpolation)
+-        # [G] Implementation details for alpha control interpolation are not fully specified in sources
+-        # Assuming linear interpolation between AlphaControl.pos.x (value) and AlphaControl.pos.y (opacity)
+-        # If no controls, default to 0
+-        if not self.m_alpha_controls:
+-            self.m_alpha_array = [0.0] * self.resolution
+-            return
+-        
+-        # Sort controls by position
+-        sorted_controls = sorted(self.m_alpha_controls, key=lambda c: c.pos.x)
+-        
+-        for i in range(self.resolution):
+-            x = i / (self.resolution - 1)
+-            alpha = self._interpolate_alpha(x, sorted_controls)
+-            self.m_alpha_array[i] = alpha
+-        
+-        # Apply Gaussian objects
+-        for gauss in self.m_gaussian_objects:
+-            for i in range(self.resolution):
+-                x = i / (self.resolution - 1)
+-                exponent = -((x - gauss.mean) ** 2) / (2 * gauss.sigma ** 2)
+-                gaussian_val = gauss.height_factor * math.exp(exponent)
+-                self.m_alpha_array[i] += gaussian_val
+-
+-    def _interpolate_alpha(self, x, controls):
+-        if not controls:
++        for j in range(len(self.m_colorControls) - 1):
++            c1 = self.m_colorControls[j]
++            c2 = self.m_colorControls[j+1]
++            if c1.position <= v <= c2.position:
++                t = (v - c1.position) / (c2.position - c1.position) if c2.position != c1.position else 0
++                return c1.color + t * (c2.color - c1.color)
++        # Fallback to last control
++        return self.m_colorControls[-1].color
++
++    def interpolate_alpha(self, v):
++        if not self.m_alphaControls:
+             return 0.0
+-        left = None
+-        right = None
+-        for i in range(len(controls)):
+-            if controls[i].pos.x <= x:
+-                left = controls[i]
+-            else:
+-                right = controls[i]
+-                break
+-        
+-        if left is None:
+-            return right.pos.y
+-        if right is None:
+-            return left.pos.y
+-        
+-        w = (x - left.pos.x) / (right.pos.x - left.pos.x)
+-        return mix(left.pos.y, right.pos.y, w)
+-
+-class Vec2f:
+-    def __init__(self, x, y):
+-        self.x = x
+-        self.y = y
+-
+-class Vec3f:
+-    def __init__(self, x, y, z):
+-        self.x = x
+-        self.y = y
+-        self.z = z
+-
+-class Vec4f:
+-    def __init__(self, r, g, b, a):
+-        self.r = r
+-        self.g = g
+-        self.b = b
+-        self.a = a
++        if len(self.m_alphaControls) == 1:
++            return self.m_alphaControls[0].pos.y
++        # Find surrounding controls
++        for j in range(len(self.m_alphaControls) - 1):
++            c1 = self.m_alphaControls[j]
++            c2 = self.m_alphaControls[j+1]
++            if c1.pos.x <= v <= c2.pos.x:
++                t = (v - c1.pos.x) / (c2.pos.x - c1.pos.x) if c2.pos.x != c1.pos.x else 0
++                return c1.pos.y + t * (c2.pos.y - c1.pos.y)
++        # Fallback to last control
++        return self.m_alphaControls[-1].pos.y
++
++    def clear(self):
++        self.m_rgbaTable = []
++        self.m_alphaArray = []
++        self.m_colorControls = []
++        self.m_alphaControls = []
++        self.m_gaussianObjects = []
++
++    def randomize(self):
++        # Implementation details not fully specified, assumes default initialization
++        pass
+ 
+ class ColorControl:
+     def __init__(self, position, color):
+         self.position = position
+-        self.color = color
++        self.color = color # vec3f
+ 
+ class AlphaControl:
+     def __init__(self, pos):
+-        self.pos = pos
++        self.pos = pos # vec2f
+ 
+ class GaussianObject:
+@@ -196,27 +167,41 @@
+         self.sigma = sigma
+         self.height_factor = height_factor
+-        self.alpha_array = [] # Populated during update
+-
+-def mix(a, b, w):
+-    return a + (b - a) * w
++        self.alphaArray = [] # Internal buffer, not part of core lookup
++
++class vec2f:
++    def __init__(self, x, y):
++        self.x = x
++        self.y = y
++
++class vec3f:
++    def __init__(self, x, y, z):
++        self.x = x
++        self.y = y
++        self.z = z
++
++class vec4f:
++    def __init__(self, x, y, z, w):
++        self.x = x
++        self.y = y
++        self.z = z
++        self.w = w
+ ```
+ 
+ ## Subtopics
+ 
+-### Transfer Function Serialization
+-Serializes and deserializes a transfer function to/from JSON format [S1, unofficial]. It stores the resolution, base64-encoded alpha array, color controls, opacity controls, and Gaussian objects [S1, unofficial]. The JSON structure is: `{"resolution": int, "alphaArray": {"encoding": "BASE64", "data": string}, "colorControls": [{"position": float, "color": vec3f}], "opacityControl": [{"position": vec2f}], "gaussianObjects": [{"mean": float, "sigma": float, "heightFactor": float}]}` [S1, unofficial]. Pitfall: Missing JSON keys are silently skipped. If 'position' or 'color' is missing in colorControls, the control is skipped. If 'mean', 'sigma', or 'heightFactor' is missing in gaussianObjects, it is skipped [S1, unofficial].
++### [Transfer Function Serialization](4343-transfer-function-serialization.md)
++Converts the in-memory structure to JSON for persistence. Chosen when saving/loading configurations.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Initialization is $O(\text{resolution})$. Adding/removing control points is $O(N \log N)$ for sorting and $O(\text{resolution})$ for updating the map, where $N$ is the number of controls. Serialization is $O(\text{resolution})$ due to base64 encoding.
+-*   **Memory Complexity:** $O(\text{resolution})$ for the RGBA table and alpha array. Additional $O(N)$ for control points and Gaussian objects.
+-*   **Performance:** Fast GPU sampling due to pre-computed LUT. Dynamic updates require CPU-side recomputation of the table.
+-*   **Strengths:** Efficient for real-time rendering; supports complex opacity modulation via Gaussians; easy serialization.
+-*   **Limitations:** Fixed resolution limits precision; CPU-side update cost for frequent changes; no support for multi-dimensional transfer functions directly in the core structure.
+-*   **When to use:** When a fixed-resolution LUT is acceptable and dynamic control point manipulation is needed.
+-*   **When not to use:** When high-precision, resolution-independent evaluation is required, or for multi-dimensional transfer functions.
++*   **Time Complexity:** Update operations are $O(R)$ where $R$ is the resolution, as the entire lookup table must be regenerated when controls change. Interpolation during rendering is $O(1)$ per sample.
++*   **Memory Complexity:** $O(R)$ for the lookup tables. Control points are $O(N)$ where $N$ is the number of controls.
++*   **Strengths:** Fast runtime evaluation via texture lookup; flexible composition of linear and Gaussian segments.
++*   **Limitations:** Regenerating the LUT on every control change can be costly if done frequently; resolution limits the precision of the mapping.
++*   **When to use:** When real-time evaluation is required and the transfer function is relatively static between user interactions.
+ 
+ ## Background
+-The Transfer Function Core Data Structure is part of the OSPRay sample applications and related modules, specifically designed to convert and manage ParaView transfer function formats [S1, unofficial]. It provides a standardized way to handle color and opacity control points and Gaussian objects for volume rendering [S1, unofficial].
++The structure originates from implementations in volume rendering frameworks such as OSPRay and related research projects [S1, S2, unofficial]. It is designed to bridge the gap between user interaction (adding control points) and GPU rendering (sampling LUTs).
+ 
+ ## Sources
+-[S1] wilsonCernWq/TransferFunctionModule, https://github.com/wilsonCernWq/TransferFunctionModule, fetched 2026-10-27 (unofficial)+[S1] wilsonCernWq/TransferFunctionModule, https://github.com/wilsonCernWq/TransferFunctionModule, fetched 2026-10-27 (unofficial)
++[S2] nihofm/volren: Simple OpenGL-based renderer for ..., https://github.com/nihofm/volren, fetched 2026-10-29 (unofficial)

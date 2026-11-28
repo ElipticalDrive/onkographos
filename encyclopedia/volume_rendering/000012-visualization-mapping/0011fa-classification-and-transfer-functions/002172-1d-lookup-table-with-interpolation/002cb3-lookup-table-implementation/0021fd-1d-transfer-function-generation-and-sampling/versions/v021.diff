@@ -1,0 +1,304 @@
+--- v020.md
++++ v021.md
+@@ -4,190 +4,175 @@
+ 
+ ## Overview
+-1D Transfer Function Generation and Sampling maps scalar volume data values to RGBA color and opacity properties using a one-dimensional lookup table (LUT) [S1, book]. It solves the problem of visualizing quantitative scalar fields by assigning optical properties based on intensity alone [S4, unofficial]. Unlike [Parametric Function Generation](5349-parametric-function-generation.md) which computes values analytically, or [2D Transfer Function](7592-2d-transfer-function.md) which incorporates gradient magnitude, this method relies on piecewise linear interpolation between user-defined control points [S5, unofficial]. It differs from [3D Color Cube Interpolation](13036-bipolar-scalar-to-color-mapping-with-level-set-support.md) by interpolating color *indices* (texture coordinates) rather than RGB values directly, ensuring all sampled colors remain within the defined colorbar and avoiding artifacts like purple hues between red and blue regions [S3, unofficial].
++1D Transfer Function Generation and Sampling maps scalar volume data values to RGBA color and opacity properties using a one-dimensional lookup table (LUT) [S1, book]. It solves the problem of quantitative data visualization by converting numerical voxel intensities into visual appearance (color and transparency) [S4, unofficial]. Unlike [Parametric Function Generation](5349-parametric-function-generation.md) which computes values analytically, or [Color Blending](5150-color-blending.md) which composites final pixels, this method performs a deterministic, per-voxel assignment based on a pre-computed 1D LUT [S1, book]. It builds on [Lookup Table Implementation](5347-lookup-table-implementation.md) by defining the specific algorithm for constructing the LUT from user-defined control points and sampling it during rendering.
+ 
+ ## How it works
+-**Inputs:**
+-*   Scalar volume data values $v$ (typically normalized to $[0, 1]$ or mapped to integer indices).
+-*   A set of control points $P = \{(x_i, c_i, \alpha_i)\}$, where $x_i$ is the scalar position, $c_i$ is the RGBA color, and $\alpha_i$ is the opacity.
+-*   Optional Gaussian objects for opacity modulation [S9, unofficial].
+-*   LUT resolution $N$ (typically 256, 1024, or 65536) [S2, unofficial][S9, unofficial].
++**Inputs and Outputs**
++*   **Inputs:** A set of control points defining the transfer function. Each control point consists of a scalar value (position) and an RGBA color vector. Optional inputs include Gaussian opacity objects or separate alpha control points [S9, unofficial].
++*   **Outputs:** A 1D texture (LUT) containing $N$ entries of RGBA values, typically stored as a contiguous array of 4-component vectors [S2, unofficial].
+ 
+-**Outputs:**
+-*   A 1D texture (or array) of size $N$ containing RGBA values, uploaded to GPU memory [S1, book][S2, unofficial].
+-*   Sampled color $C$ and opacity $\alpha$ for each voxel value.
++**Data Structures**
++The LUT is stored as a contiguous array of size $N$ (where $N$ is a power of two, e.g., 256, 1024, 4096) [S1, book][S9, unofficial].
++*   **Format:** Typically `float4` (32-bit floats per component) or 8-bit integers (`uint8_t[4]`) [S1, book][S2, unofficial].
++*   **Layout:** A 1D array where index $i$ corresponds to the normalized value mapping to entry $i$. In some hardware implementations, the LUT may be 4096 entries deep with 36-bit entries (8-bit RGB, 12-bit alpha) [S3, unofficial].
++*   **Control Point Structure:**
++    *   `ControlPoint`: Fields `value` (scalar/int), `color` (TFColor).
++    *   `TFColor`: Fields `r`, `g`, `b`, `a` (all float, range [0.0, 1.0]) [S5, unofficial].
++    *   `AlphaControl`: Fields `pos` (vec2f) where `pos.x` is value and `pos.y` is alpha [S9, unofficial].
+ 
+-**Data Structures:**
+-*   **Control Point:** A structure containing `value` (scalar position, float), `color` (RGBA, float4), and optionally `alpha` (float) [S5, unofficial][S9, unofficial].
+-*   **LUT Array:** A contiguous array of $N$ vectors, typically `float4` (RGBA) or `uint8_t[4]` [S1, book][S2, unofficial].
+-*   **Texture:** A 1D or 2D texture (width $N$, height 1) with format `GL_RGBA32F` or `GL_RGBA8` [S2, unofficial][S4, unofficial].
+-
+-**Steps:**
+-
+-1.  **Initialize Control Points:**
+-    *   If no control points are defined, insert default points (e.g., $(0, [0,0,0,0])$ and $(1, [1,1,1,1])$) [S9, unofficial].
+-    *   Sort control points by scalar position $x_i$ in ascending order [S9, unofficial].
+-    *   Normalize RGB components from $[0, 255]$ to $[0, 1]$ if necessary [S5, unofficial].
+-    *   Round alpha values to two decimal places for precision consistency [S5, unofficial].
+-
+-2.  **Generate LUT Entries:**
+-    *   Iterate through each index $i$ from $0$ to $N-1$.
+-    *   Compute the normalized scalar value $p$ for this index. Two common binning strategies exist:
+-        *   **Edge-aligned:** $p = \frac{i}{N-1}$ [S9, unofficial].
+-        *   **Center-aligned:** $p = \frac{i + 0.5}{N}$ [S9, unofficial].
+-        *   *Note: Inconsistent binning between color and alpha generation can cause boundary misalignment [S9, unofficial].*
+-    *   Clamp $p$ to $[0, 1]$ [S9, unofficial].
+-    *   Find the interval $[x_L, x_R]$ in the sorted control points such that $x_L \le p \le x_R$.
++**Algorithm Steps**
++1.  **Initialization:** Create an empty list of control points. If no control points are provided, insert default points (e.g., at boundaries with zero color/alpha) [S9, unofficial].
++2.  **Sorting:** Sort the control points by their scalar value (position) in ascending order [S9, unofficial].
++3.  **LUT Construction:** Iterate through the LUT indices $i$ from $0$ to $N-1$.
++    *   Compute the normalized domain value $p$ for index $i$. Two common binning strategies exist:
++        *   Center-aligned: $p = \frac{i + 0.5}{N}$ [S9, unofficial].
++        *   Edge-aligned: $p = \frac{i}{N-1}$ [S9, unofficial].
++    *   Find the interval $[p_L, p_R]$ in the sorted control points such that $p_L \le p < p_R$.
+     *   Calculate the interpolation weight $w$:
+-        $$ w = \frac{|p - x_L|}{|x_R - x_L|} $$
+-        If $x_R = x_L$, set $w = 0$ [S9, unofficial].
+-    *   Interpolate color $c$ and opacity $\alpha$:
++        $$ w = \frac{|p - p_L|}{|p_R - p_L|} $$
++    *   Interpolate the color components $c$ and alpha $\alpha$ between the left ($L$) and right ($R$) control points:
+         $$ c = \text{mix}(c_L, c_R, w) $$
+         $$ \alpha = \text{mix}(\alpha_L, \alpha_R, w) $$
+-        where $\text{mix}(a, b, w) = a(1-w) + b w$ [S9, unofficial].
+-    *   If Gaussian opacity objects are present, compute their contribution $\alpha_G$ at $p$ and update the final alpha:
+-        $$ \alpha_{final} = \max(\alpha, \alpha_G) $$
+-        This uses maximum compositing rather than multiplication [S9, unofficial].
+-    *   Store the result in the LUT at index $i$: $LUT[i] = (c.r, c.g, c.b, \alpha_{final})$.
++    *   Store the result in the LUT at index $i$: `LUT[i] = (c.r, c.g, c.b, alpha)` [S9, unofficial].
++    *   **Boundary Conditions:** If $p$ is below the first control point, clamp to the first point's color/alpha. If $p$ is above the last control point, clamp to the last point's color/alpha [S9, unofficial].
++4.  **Gaussian Opacity Integration (Optional):** If Gaussian opacity objects are defined, for each LUT entry $i$, update the alpha channel:
++    $$ \alpha_{final}[i] = \max(\alpha_{final}[i], \alpha_{gaussian}[i]) $$
++    This uses maximum compositing rather than multiplication [S9, unofficial].
++5.  **Upload:** Upload the LUT array to GPU memory as a 1D or 2D texture (width $N$, height 1) with `LINEAR` filtering and `CLAMP_TO_EDGE` wrap mode [S1, book][S2, unofficial].
+ 
+-3.  **Handle Boundaries:**
+-    *   If $p < x_0$ (first control point), use $c_0, \alpha_0$ [S9, unofficial].
+-    *   If $p > x_{last}$ (last control point), use $c_{last}, \alpha_{last}$ [S9, unofficial].
+-    *   Fill any remaining entries after the last control point with the last control point's color [S10, unofficial].
+-
+-4.  **Upload to GPU:**
+-    *   Convert float RGBA values to 8-bit integers if using `GL_RGBA8`: $val_{byte} = \text{clamp}(\text{round}(val_{float} \times 255), 0, 255)$ [S8, unofficial][S4, unofficial].
+-    *   Create a 1D texture (or 2D texture with height 1) [S2, unofficial].
+-    *   Set wrap mode to `CLAMP_TO_EDGE` and filter mode to `LINEAR` (for hardware interpolation) or `NEAREST` (for direct lookup) [S1, book][S4, unofficial].
+-    *   Upload data using `glTexImage1D` or `glTexImage2D` [S2, unofficial][S9, unofficial].
+-    *   Mark the LUT as "clean" to avoid redundant uploads [S2, unofficial].
+-
+-5.  **Sampling (Runtime):**
+-    *   For each voxel with value $v$, normalize it to $x \in [0, 1]$ based on the data range $[v_{min}, v_{max}]$:
+-        $$ x = \frac{v - v_{min}}{v_{max} - v_{min}} $$
+-    *   Clamp $x$ to $[0, 1]$ [S2, unofficial].
+-    *   Sample the texture at coordinate $x$ (and $y=0.5$ for 2D textures) to retrieve $C$ and $\alpha$ [S1, book].
+-    *   Multiply color components by opacity for correct rendering (opacity-weighted color):
+-        $$ C_{final} = C \times \alpha $$
+-        [S1, book].
+-
+-**Pseudocode:**
+-
++**Pseudocode**
+ ```python
+-def generate_1d_lut(control_points, resolution=256):
++def generate_1d_lut(control_points: List[ControlPoint], resolution: int = 256) -> List[vec4]:
+     """
+     Generates a 1D LUT from control points.
+-    control_points: list of (x, r, g, b, a) tuples, sorted by x.
+-    resolution: N, number of entries.
+-    Returns: list of (r, g, b, a) tuples.
++    control_points: List of (value, r, g, b, a) tuples, sorted by value.
++    resolution: Number of entries in the LUT (power of 2).
++    Returns: List of vec4 (r, g, b, a) with values in [0.0, 1.0].
+     """
+     if not control_points:
+-        control_points = [(0.0, 0.0, 0.0, 0.0, 0.0), (1.0, 1.0, 1.0, 1.0, 1.0)]
++        # Default to black with zero alpha if empty
++        control_points = [(0.0, 0.0, 0.0, 0.0, 0.0), (1.0, 0.0, 0.0, 0.0, 0.0)]
+     
+-    # Sort by x position
+-    control_points.sort(key=lambda p: p[0])
++    # Ensure sorted
++    control_points.sort(key=lambda cp: cp.value)
+     
+-    lut = []
+-    n = len(control_points)
++    lut = [vec4(0.0, 0.0, 0.0, 0.0)] * resolution
+     
+     for i in range(resolution):
+-        # Edge-aligned sampling
+-        p = i / (resolution - 1) if resolution > 1 else 0.0
+-        p = max(0.0, min(1.0, p))
++        # Center-aligned binning
++        p = (i + 0.5) / resolution
+         
+         # Find interval
+-        # Find first point with x >= p
+-        idx = 0
+-        for k in range(n):
+-            if control_points[k][0] >= p:
+-                idx = k
++        # Find the first control point with value >= p
++        left_idx = 0
++        for j in range(len(control_points) - 1):
++            if control_points[j].value <= p < control_points[j+1].value:
++                left_idx = j
+                 break
+         else:
+-            idx = n - 1
++            # p is beyond the last control point
++            left_idx = len(control_points) - 1
+             
+-        if idx == 0:
+-            # Before first point
+-            r, g, b, a = control_points[0][1], control_points[0][2], control_points[0][3], control_points[0][4]
+-        elif idx == n:
+-            # After last point (should not happen due to clamp)
+-            r, g, b, a = control_points[-1][1], control_points[-1][2], control_points[-1][3], control_points[-1][4]
++        left = control_points[left_idx]
++        right = control_points[min(left_idx + 1, len(control_points) - 1)]
++        
++        # Handle edge case where left and right are the same (single point or boundary)
++        if left.value == right.value:
++            color = vec4(left.r, left.g, left.b, left.a)
+         else:
+-            # Interpolate between idx-1 and idx
+-            p_left = control_points[idx-1]
+-            p_right = control_points[idx]
++            # Interpolation weight
++            w = (p - left.value) / (right.value - left.value)
+             
+-            x_l, x_r = p_left[0], p_right[0]
+-            if x_r == x_l:
+-                w = 0.0
+-            else:
+-                w = (p - x_l) / (x_r - x_l)
+-                
+-            r = p_left[1] * (1 - w) + p_right[1] * w
+-            g = p_left[2] * (1 - w) + p_right[2] * w
+-            b = p_left[3] * (1 - w) + p_right[3] * w
+-            a = p_left[4] * (1 - w) + p_right[4] * w
++            # Linear interpolation for each component
++            r = left.r + w * (right.r - left.r)
++            g = left.g + w * (right.g - left.g)
++            b = left.b + w * (right.b - left.b)
++            a = left.a + w * (right.a - left.a)
+             
+-        lut.append((r, g, b, a))
++            color = vec4(r, g, b, a)
++            
++        lut[i] = color
+         
+     return lut
+ 
+-def sample_lut(lut, value, v_min, v_max):
++def sample_lut(lut: List[vec4], value: float, domain_min: float, domain_max: float) -> vec4:
+     """
+     Samples the LUT for a given scalar value.
++    value: Scalar input from volume data.
++    domain_min, domain_max: Range of the transfer function.
+     """
+-    if v_max == v_min:
++    # Normalize value to [0, 1]
++    if domain_max == domain_min:
+         x = 0.0
+     else:
+-        x = (value - v_min) / (v_max - v_min)
+-    
++        x = (value - domain_min) / (domain_max - domain_min)
++        
++    # Clamp to [0, 1]
+     x = max(0.0, min(1.0, x))
+     
+-    # Hardware interpolation or direct lookup
+-    # Direct lookup approximation:
+-    idx = int(x * (len(lut) - 1))
++    # Map to LUT index
++    # Using edge-aligned mapping for sampling consistency with generation if edge-aligned
++    # Or center-aligned if generation used center-aligned. 
++    # Standard hardware sampling uses linear interpolation between indices.
++    # Index calculation for nearest neighbor or linear sampling:
++    idx_float = x * (len(lut) - 1)
++    idx = int(idx_float)
++    
++    # Clamp index
+     idx = max(0, min(len(lut) - 1, idx))
+     
+-    r, g, b, a = lut[idx]
+-    
+-    # Opacity-weighted color
+-    return (r * a, g * a, b * a, a)
++    # For hardware linear interpolation, the GPU handles the fractional part.
++    # For software nearest neighbor:
++    return lut[idx]
+ ```
++
++**Parameters**
++*   `resolution`: Size of the LUT. Default 256, but can be 1024, 4096, or 65536 depending on input bit depth (8-bit -> 256, 16-bit -> 65536) [S8, unofficial][S9, unofficial].
++*   `brightness_factor`: Multiplier for RGB channels, default 1.0 [S12, unofficial].
++*   `domain_min`, `domain_max`: The scalar range mapped to [0, 1] [S2, unofficial].
++
++**Edge Cases and Pitfalls**
++*   **Division by Zero:** If adjacent control points have the same scalar value, the interpolation weight calculation divides by zero. Guard against this by clamping or skipping [S8, unofficial].
++*   **Alpha Normalization:** Alpha values should be normalized to [0.0, 1.0] if input is 0-255. Some implementations round alpha to two decimal places [S5, unofficial].
++*   **Color Interpolation Artifacts:** Interpolating colors directly in RGB space (3D color cube) can produce unintended colors (e.g., purple between red and blue) that are not in the defined colorbar. Using 1D texture maps ensures interpolated colors remain within the defined colorbar [S3, unofficial].
++*   **Dirty Flag:** The LUT must be marked "dirty" when control points change and uploaded to the GPU only when dirty to avoid redundant uploads [S2, unofficial].
++*   **Binning Misalignment:** Inconsistent binning between color and alpha generation (e.g., center-aligned vs edge-aligned) can cause slight misalignment at boundaries [S9, unofficial].
+ 
+ ## Subtopics
+ 
+ ### Hounsfield Scale Color Mapping
+-A method to assign color values to voxels based on attenuation coefficients (e.g., from CT scans) using the Hounsfield scale [S14, unofficial]. It implements the mapping as a LUT where a color value is read out for a given HU value [S14, unofficial]. The Hounsfield unit is calculated as $HU = \frac{\mu_{tissue} - \mu_{water}}{\mu_{water}} \times 1000$ [S14, unofficial]. Water has a HU value of 0, and bone ranges from 500 to 1500 HU [S14, unofficial].
++A method to assign color values to voxels based on attenuation coefficients (e.g., from CT scans) using the Hounsfield scale [S14, unofficial]. It is implemented as a LUT where a color value is read out for a given HU value [S14, unofficial]. The Hounsfield Unit is calculated as $HU = \frac{\mu_{tissue} - \mu_{water}}{\mu_{water}} \times 1000$, where water is 0 HU and bone is 500-1500 HU [S14, unofficial].
+ 
+ ### 3D Color Cube Interpolation
+-An interpolation method used in Smokeview version 4 and earlier where colors are interpolated directly within the 3D RGB color space [S3, unofficial]. The interpolated color is calculated as the average of two colors: $interpolated\ color = (f(c_1) + f(c_2))/2$, where $c_1$ and $c_2$ are integer indices [S3, unofficial]. This causes artifacts near large gradients (e.g., fire) because interpolating between red (1,0,0) and blue (0,0,1) yields purple (0.5,0.0,0.5), which is not in the colorbar and has no physical meaning [S3, unofficial].
++An interpolation method used in older versions of Smokeview where colors are interpolated directly within the 3D RGB color space [S3, unofficial]. The interpolated color is calculated as the average of two colors: $interpolated\ color = \frac{f(c_1) + f(c_2)}{2}$, where $c_1$ and $c_2$ are integer indices [S3, unofficial]. This causes artifacts near large gradients (e.g., fire) because the interpolated color (e.g., purple between red and blue) is not in the colorbar and has no physical meaning [S3, unofficial].
+ 
+ ### Gradient/Color Ramp Sampling
+-Reads luminance in float and truncates each channel for the colour ramp shared with NoiseTexture2D, as Godot does [S15, unofficial]. It runs Gradient sampler and channelToByte in float, as Gradient::get_color_at_offset and Color::get_r8 do [S15, unofficial]. A pitfall is that a GradientTexture2D with use_hdr keeps a channel above 1 [S15, unofficial]. Godot-measured ramp bytes off by one drop from 1212 to 0 of 2244 [S15, unofficial]. Golden 'noisetexture2d': Max error reduces by 1/255 from ramp fix, mean error 0.776/255 → 0.735/255 [S15, unofficial].
++Reads luminance in float and truncates each channel for the color ramp shared with NoiseTexture2D, as Godot does [S15, unofficial]. It runs Gradient sampler and channelToByte in float [S15, unofficial]. A pitfall is that a GradientTexture2D with use_hdr keeps a channel above 1 [S15, unofficial].
+ 
+ ### Bilinear Image Sampling
+-Samples colors from a batch of images at specified 2D pixel coordinates. Takes `images` tensor of shape `[batch_size, H, W, C]` and `xy_grid` of shape `[N, 2]`. Flips `xy_grid` sign, reshapes to `[batch_size, N, 1, 2]`. Permutes images to `[batch_size, C, H, W]`. Uses `torch.nn.functional.grid_sample` with `align_corners=True` and `mode="bilinear"` [S16, unofficial]. `align_corners=True` ensures corner pixels align with grid boundaries during interpolation, preventing coordinate scaling artifacts at image edges [S16, unofficial].
++Samples colors from a batch of images at specified 2D pixel coordinates. Takes `images` tensor of shape `[batch_size, H, W, C]` and `xy_grid` of shape `[N, 2]`. Flips `xy_grid` sign, reshapes, permutes images, and uses `torch.nn.functional.grid_sample` with `align_corners=True` and `mode="bilinear"` [S16, unofficial]. `align_corners=True` ensures corner pixels align with grid boundaries [S16, unofficial].
+ 
+ ### Labelmap Transfer Function LUT Construction
+-Constructs two 1D LUT textures (soft and hard) for labelmap transfer functions [S4, unofficial]. The soft LUT uses float precision and bilinear filtering; the hard LUT uses byte precision and point filtering [S4, unofficial]. It initializes floatPixels and bytePixels arrays of size 256 [S4, unofficial]. If data.tf.entries is not null, it iterates over each entry, calculates the index, extracts RGBA, and stores in floatPixels [S4, unofficial]. It converts float RGBA to byte RGBA by multiplying by 255, rounding, and clamping [S4, unofficial]. It creates lutSoft as Texture2D(lutSize, 1, RGBAFloat, false) with Clamp/Bilinear and lutHard as Texture2D(lutSize, 1, RGBA32, false) with Clamp/Point [S4, unofficial]. lutSize is 256 [S4, unofficial].
++Constructs two 1D LUT textures (soft and hard) for labelmap transfer functions [S4, unofficial]. The soft LUT uses float precision and bilinear filtering; the hard LUT uses byte precision and point filtering [S4, unofficial]. It initializes float and byte pixel arrays, maps label indices to colors/alphas, converts float [0,1] to byte [0,255], and uploads to GPU textures with appropriate wrap/filter modes [S4, unofficial].
+ 
+ ### Material Synchronization LUT Adjustment
+-An algorithm to adjust a 1D Look-Up Table (LUT) mapping sample values to material indices, ensuring that the distribution of sample values across materials is synchronized with the frame number and material centers [S17, unofficial]. It calculates the common base allocation range `d` as `frameNumber / colorKind` [S17, unofficial]. It initializes material center positions `indexM[i]` to `d*i + d / 2` for each material `i` from 0 to `colorKind - 1` [S17, unofficial]. It decrements the count for the selected material `minIndex` and stores `minIndex` in `temp[i]` [S17, unofficial].
++An algorithm to adjust a 1D LUT mapping sample values to material indices, ensuring synchronization with frame number and material centers [S17, unofficial]. It calculates a base allocation range and initializes material center positions, then decrements counts for selected materials [S17, unofficial].
+ 
+ ### BuildFunctionFromTable
+-Constructs a color transfer function from a pre-existing table of colors [S18]. After calling this method, the function range will be [x1, x2] [S18]. The function will have size nodes [S18]. Function values will be regularly spaced between x1 and x2 [S18]. The table parameter's layout is assumed to be [R1, G1, B1, R2, G2, B2, ..., Rn, Gn, Bn], and it is assumed to be a block of memory of size [3*size] [S18].
++Constructs a color transfer function from a pre-existing table of colors [S18]. The function range becomes [x1, x2], size is `nodes`, and values are regularly spaced [S18]. The table layout is assumed to be [R1, G1, B1, R2, G2, B2, ..., Rn, Gn, Bn] in a block of memory of size [3*size] [S18].
+ 
+ ### Scalar Mapping Output Formats
+-The output format for mapped scalars can be set to specific component counts [S18]. Default output format is RGBA if not supplied [S18].
++The output format for mapped scalars can be set to specific component counts. The default output format is RGBA if not supplied [S18].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** LUT generation is $O(N \cdot K)$ where $N$ is the LUT size and $K$ is the number of control points (or $O(N \log K)$ if using binary search for interval finding) [S9, unofficial]. Sampling is $O(1)$ per voxel [S1, book].
+-*   **Memory Complexity:** $O(N)$ for the LUT storage [S1, book].
+-*   **Performance:** Hardware interpolation using 1D textures is efficient and widely supported [S1, book]. Direct lookup is faster but lacks smoothness [S3, unofficial].
+-*   **Strengths:** Simple to implement, intuitive user interface (control points), efficient GPU sampling [S1, book].
+-*   **Limitations:** Cannot capture correlations between multiple scalar fields (unlike 2D TF) [S1, book]. Linear interpolation may not capture complex feature boundaries [S5, unofficial]. Color interpolation artifacts if 3D color cube method is used instead of 1D texture [S3, unofficial].
+-*   **When to use:** Single scalar field visualization, real-time rendering, interactive exploration [S1, book].
+-*   **When not to use:** Multivariate data visualization requiring correlation analysis [S1, book].
++*   **Time Complexity:** LUT construction is $O(N \cdot C)$ where $N$ is LUT size and $C$ is number of control points (due to sorting and interval search). Sampling is $O(1)$ per voxel.
++*   **Memory Complexity:** $O(N)$ for the LUT storage. For 8-bit data, $N=256$; for 16-bit, $N=65536$ [S8, unofficial].
++*   **Performance:** Hardware interpolation using 1D textures is very fast, requiring only a single texture fetch per sample [S1, book].
++*   **Strengths:** Simple to implement, efficient, allows smooth transitions between materials [S1, book].
++*   **Limitations:** Cannot capture correlations between multiple scalar fields (requires 2D TF) [S1, book]. Linear interpolation may not capture complex feature boundaries as well as higher-order methods [S5, unofficial].
++*   **When to Use:** Single scalar field visualization, real-time rendering, simple material classification.
++*   **When Not to Use:** Multivariate data requiring joint classification, complex non-linear mappings requiring cubic splines [S5, unofficial].
+ 
+ ## Background
+-The 1D transfer function was introduced as a fundamental technique in volume rendering to map scalar data to optical properties [S1, book]. It is widely used in medical imaging and scientific visualization [S6, unofficial]. The method evolved from simple color tables to interactive control point-based editors [S5, unofficial]. The distinction between interpolating color indices (1D texture) and color values (3D cube) was highlighted in Smokeview documentation to avoid artifacts [S3, unofficial].
++The 1D transfer function is the simplest and most widely used type of transfer function in volume rendering [S1, book]. It maps the range of data values to color and opacity, typically implemented with 1D texture lookup tables [S1, book]. The technique was popularized in the early days of GPU volume rendering, with examples in the NVIDIA GPU Gems book [S1, book]. It is used in various visualization tools, including Smokeview for fire dynamics [S3, unofficial], medical imaging software [S12, unofficial], and game engines like Godot [S15, unofficial].
+ 
+ ## Sources

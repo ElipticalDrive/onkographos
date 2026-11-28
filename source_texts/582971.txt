@@ -1,0 +1,329 @@
+Hi I have a question about slicing image across a user-defined depth from the surface boundary. I usually work with images that are curved like the below example or cylindrical objects. Example curved image stack Workflow I've been using...
+
+extract slices along curved plane · Issue #154 · pyvista/pyvista-support · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+This repository was archived by the owner on Apr 17, 2026. It is now read-only.
+This repository was archived by the owner on Apr 17, 2026. It is now read-only.
+extract slices along curved plane #154
+Copy link
+Copy link
+Open
+Open
+extract slices along curved plane#154
+Copy link
+Assignees
+Labels
+filteringGeneral topics around filtering and usage of filtersGeneral topics around filtering and usage of filters
+Description
+pr4deepr
+opened on Apr 12, 2020
+Issue body actions
+Hi
+I have a question about slicing image across a user-defined depth from the surface boundary. I usually work with images that are curved like the below example or cylindrical objects.
+Example curved image stack
+Workflow I've been using to generate the mesh
+```
+import pyvista as pv
+pyvista_image=pv.read("D:\\Hypocotyl_GFP-MBD.tif")
+#gaussian smoothing
+smoothened=pyvista_image.gaussian_smooth(std_dev=3.)
+#threshold 
+thresh=smoothened.threshold([20,255]) #threshold determined using imagej
+thresh.plot(clim=[20,255])
+#adding another scalar based on elevation
+thresh=thresh.elevation()
+
+# Get the out surface as PolyData
+surf = thresh.extract_geometry()
+# Smooth the surface
+smooth = surf.smooth(n_iter=50)
+#Didn't know how to fit a surface to the curvature
+```
+Depending on the datasets, the structures I am interested in are usually a certain depth below the boundary or edges.
+For example, I would like to extract a surface 8 pixels thick, 5 pixels below the surface. Does that make sense? Apologies, this is not to scale, but its an example of what I am after, but along the length of the surface:
+Also, another question I have is, is it possible to straighten the curved surface?, so the dimensions are kept?
+Thank you so much.
+Activity
+banesullivan
+self-assigned this
+on Apr 12, 2020
+banesullivan commented on Apr 12, 2020
+banesullivan
+on Apr 12, 2020
+Member
+More actions
+This is a really cool challenge, thanks for posting! I'm curious if you have the 3D coordinates for the picked lines shown in the image you shared?:
+If so, we could use those lines to slice the input mesh with the .slice_along_line filter.
+Flattening out those slices would be a bit challenging as there isn't any perfect way of doing it that I know of - all methods will have drawbacks.
+You could skip all the slicing and go directly to creating a 3D structured grid of a semi-cylinder and resample the image to that structured grid. Then you can extract each layer of the semi-cylinder and "flatten" it to a plane.
+While we have a convenient method to create cylinder structured grids with pyvista.CylinderStructured, you may want to do it manually, only creating a semi-cylinder and warping it to be more oval-like. To do this, you'd need to define an ellipse/oval that fits the data's structure. To do so, I'd recommend manually picking a line to fit the structure and fitting the equation of an ellipse to those points via some linear regression.
+Once you have a nice model of an ellipse from linear regression or whatever, you can use those terms to create an elliptical structured grid like so (I arbitrarily chose terms for the oval that looked "decent" and I included a helper method for you to be able to easily create this kind of mesh).
+Simply replace a the a and b terms with ranges around what you fit. Also, replace the center term to something that works better... the center here is not the same as in the equation.
+```
+import numpy as np
+
+def EllipseStructured(a, b,
+                      theta_resolution=32, min_theta=0.0, max_theta=np.pi,
+                      nh=3, min_h=0.0, max_h=10.0,
+                      direction=(1.,0.,0.)):
+    """Create an elliptical StructuredGrid."""
+    assert len(a) == len(b)
+
+    # Equation in polar coordinates
+    # https://en.wikipedia.org/wiki/Ellipse#Polar_form_relative_to_center
+    def R(theta):
+        r = []
+        for A, B in list(zip(a, b)):
+            r.append(A*B/np.sqrt((B*np.cos(theta))**2 + (A*np.sin(theta))**2))
+        return np.array(r)
+
+    # Polar
+    theta = np.linspace(min_theta, max_theta, num=theta_resolution)
+    r = R(theta)
+
+    # Cartesion
+    x = r * np.cos(theta)
+    y = r * np.sin(theta)
+    
+    # Now extrude in Z-direction
+    levels = np.linspace(min_h, max_h, nh)
+    x = np.repeat(x.reshape((*x.shape, -1)), nh, axis=-1)
+    y = np.repeat(y.reshape((*y.shape, -1)), nh, axis=-1)
+    z = np.repeat(levels.reshape((1,1,nh)), np.product(r.shape)).reshape(x.shape)
+    
+    # Create the grid!
+    grid = pv.StructuredGrid()
+    grid.points = np.c_[x.ravel(order="f"), y.ravel(order="f"), z.ravel()]
+    grid.dimensions = [len(a), theta_resolution, nh]
+    
+    # Orient properly in user direction
+    vx = np.array([0., 0., 1.])
+    if not np.allclose(vx, direction):
+        direction /= np.linalg.norm(direction)
+        vx -= vx.dot(direction) * direction
+        vx /= np.linalg.norm(vx)
+        vy = np.cross(direction, vx)
+        rmtx = np.array([vx, vy, direction])
+        grid.points = grid.points.dot(rmtx)
+
+    # Translate to origin
+    grid.points -= np.array(grid.center)
+
+    return grid
+
+
+
+# User definitions of ellipse levels
+nr = 10
+a = np.linspace(170, 200, nr)
+b = np.linspace(20, 60, nr)
+center = thresh.center
+
+# Make the ellipse
+grid = EllipseStructured(a, b,
+                         theta_resolution=64,
+                         nh=500, min_h=0, max_h=1000, direction=(0,1,0))
+grid.rotate_y(90)
+grid.points += np.array(center)
+```
+From there, you could then interpolate or resample the image to that structured grid.
+```
+sampled = grid.sample(pyvista_image)
+```
+Then you could unroll each level of the structured grid to flat planar surfaces - however, it will be a bit distorted because the cylinder wasn't uniformly created. However, it will look better with better-fitting terms and center location.
+```
+slices = sampled["Tiff Scalars"].reshape(grid.dimensions, order="f")
+
+import matplotlib.pyplot as plt
+
+plt.pcolormesh(slices[75,:,:])
+```
+I hope this helps in some way!
+banesullivan commented on Apr 12, 2020
+banesullivan
+on Apr 12, 2020
+Member
+More actions
+Also, what is this an image of?
+pr4deepr commented on Apr 16, 2020
+pr4deepr
+on Apr 16, 2020
+Author
+More actions
+Hi @banesullivan
+Thank you so much for your reply.
+I'm curious if you have the 3D coordinates for the picked lines shown in the image you shared? <
+I do not, I made a random drawing to illustrate what I was after.
+Also, what is this an image of?
+Its a stem of a germinating plant, in this case: Arabidopsis thaliana, commonly used model for studying plant growth. Although, my area is in gut biology. Interestingly, the problems are quite similar, i.e., having a curved cylindrical surface (gut wall) and interested in extracting defined regions along the curvature while keeping the topography in mind. I used this image as it is a clean example and a good starting point.
+Thanks for the code and I really like this approach. I'm still getting my head around it and working on it now. I'll post here for any questions.
+Other approaches/thoughts for now, (without straightening):
+Is it possible to just use a scalar that is generated based on height from a certain location? For example, a scalar that is based on distance "r" from a line along thresh.center?
+Use this scalar to then get layers at different depths? Is this a viable approach?
+Thanks
+Pradeep
+banesullivan commented on Jun 21, 2020
+banesullivan
+on Jun 21, 2020
+Last edited by banesullivan
+Member
+More actions
+Apologies for the delay...
+Is it possible to just use a scalar that is generated based on height from a certain location? For example, a scalar that is based on distance "r" from a line along thresh.center? Use this scalar to then get layers at different depths? Is this a viable approach?
+I think that would work... You'd need to define a line along your mesh, then query the mesh's points inline with that line to get there distance from the line. Then you could do clipping/extraction based on different radii in a cylidrical fashion.
+Here's a really basic implementation for you to take further:
+```
+import pyvista as pv
+import numpy as np
+
+pyvista_image = pv.read("Hypocotyl_GFP-MBD.tif")
+
+#gaussian smoothing
+smoothened = pyvista_image.gaussian_smooth(std_dev=3.)
+
+# The function for computing distances
+compute = lambda a, b: np.sqrt(np.sum((b - a)**2, axis=1))
+
+dims = smoothened.dimensions
+
+radii = np.empty(dims)
+
+for j in range(dims[1]):
+    # NOTE: there is a weird issue with this filter that I just fixed
+    #       see https://github.com/pyvista/pyvista/pull/809
+    slc = smoothened.extract_subset((0,dims[0]-1, j,j, 0,dims[2]-1))
+    node = slc.center
+    # Pluss a bunch to make the curve wider
+    node[-1] = slc.bounds[-1] + 200.
+    # set origin AFTER getting center to avoid issue I mentioned and properly fetch points in PyVista
+    slc.origin = [0, j, 0]
+    radii[:,j,:] = compute(slc.points, node).reshape((dims[0], dims[2]), order='F')
+
+smoothened["radii"] = radii.ravel(order="F")
+
+# Dummy to add to scene which will be overwritten by slider
+slc = smoothened.contour(3, scalars="radii")
+
+p = pv.Plotter(notebook=0)
+p.add_mesh(slc, scalars="Tiff Scalars", name="slice", clim=[20, 255], log_scale=True)
+p.add_mesh(smoothened.outline(), color="k")
+# p.add_mesh(thresh, scalars="Tiff Scalars", clim=[20, 255], opacity=0.5)
+
+def callback(value):
+    slc.overwrite(smoothened.contour([value,], scalars="radii"))
+    slc.set_active_scalars("Tiff Scalars")
+    return
+
+p.add_slider_widget(callback, smoothened.get_data_range("radii"))
+p.show()
+```
+banesullivan commented on Jun 21, 2020
+banesullivan
+on Jun 21, 2020
+Member
+More actions
+Here is another version that gets fancy allowing you to update the arc of the slice with another slider. This is messy but it gets the job done (you have to intermix code calling back to VTK)
+```
+import pyvista as pv
+import numpy as np
+
+pyvista_image = pv.read("Hypocotyl_GFP-MBD.tif")
+
+#gaussian smoothing
+smoothened = pyvista_image.gaussian_smooth(std_dev=3.)
+
+# The function for computing distances
+compute = lambda a, b: np.sqrt(np.sum((b - a)**2, axis=1))
+
+dims = smoothened.dimensions
+
+def compute_radii(shifter=200.0):
+    radii = np.empty(dims)
+
+    for j in range(dims[1]):
+        # NOTE: there is a weird issue with this filter that I just fixed
+        #       see https://github.com/pyvista/pyvista/pull/809
+        slc = smoothened.extract_subset((0,dims[0]-1, j,j, 0,dims[2]-1))
+        node = slc.center
+        # Pluss a bunch to make the curve wider
+        node[-1] = slc.bounds[-1] + shifter
+        # set origin AFTER getting center to avoid issue I mentioned and properly fetch points in PyVista
+        slc.origin = [0, j, 0]
+        radii[:,j,:] = compute(slc.points, node).reshape((dims[0], dims[2]), order='F')
+    smoothened["radii"] = radii.ravel(order="F")
+
+compute_radii()
+
+# Dummy to add to scene which will be overwritten by slider
+slc = smoothened.contour(3, scalars="radii")
+
+p = pv.Plotter(notebook=0)
+p.add_mesh(slc, scalars="Tiff Scalars", name="slice", clim=[20, 255], log_scale=True)
+p.add_mesh(smoothened.outline(), color="k")
+# p.add_mesh(thresh, scalars="Tiff Scalars", clim=[20, 255], opacity=0.5)
+
+def move_slice(value):
+    slc.overwrite(smoothened.contour([value,], scalars="radii"))
+    slc.set_active_scalars("Tiff Scalars")
+    return
+
+sw = p.add_slider_widget(move_slice, smoothened.get_data_range("radii"),
+                    title="Move slice",
+                    pointa=(0.1,0.9), pointb=(0.4,0.9))
+
+def adjust_arc(value):
+    compute_radii(value)
+    # Now adjust the other slider
+    mi, ma = smoothened.get_data_range("radii")
+    s = sw.GetRepresentation()
+    s.SetMinimumValue(mi)
+    s.SetMaximumValue(ma)
+    c = ((ma-mi) / 2) + mi
+    s.SetValue(c)
+    move_slice(c)
+    
+
+p.add_slider_widget(adjust_arc, [75.0, 750.0], 
+                    title="Adjust Arc - this is expensive",
+                    pointa=(0.5,0.9), pointb=(0.9,0.9))
+p.show()
+```
+❤️React with ❤️2Reacted by Alex Kaszynski and Sassan Ostvar
+banesullivan
+added
+filteringGeneral topics around filtering and usage of filtersGeneral topics around filtering and usage of filters
+on Jun 23, 2020
+pr4deepr commented on Jun 26, 2020
+pr4deepr
+on Jun 26, 2020
+Author
+More actions
+Thanks heaps for this..
+This is beautiful!!!
+I will definitely been using this..
+Apologies for the delay as well. I will post an update at some point.. Hope you are well!
+👍React with 👍1Reacted by Bane Sullivan
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+banesullivan
+Labels
+filteringGeneral topics around filtering and usage of filtersGeneral topics around filtering and usage of filters
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

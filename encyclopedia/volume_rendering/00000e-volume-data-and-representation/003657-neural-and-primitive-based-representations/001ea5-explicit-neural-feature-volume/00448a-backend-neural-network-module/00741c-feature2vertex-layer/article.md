@@ -1,0 +1,77 @@
+# Feature2Vertex Layer
+Also called: Displacement Prediction Layer, Voxel2Mesh Vertex Update Layer
+
+## Overview
+The Feature2Vertex Layer maps latent features associated with mesh vertices to vertex displacement vectors ($\Delta V$), which are used to update vertex positions in the Voxel2Mesh decoder [S1, unofficial]. It serves as the final geometric refinement step in the explicit neural feature volume pipeline, transforming high-level semantic features into precise 3D coordinates [S1, unofficial]. Unlike the Features2Features Layer, which preserves topology while transforming feature representations, this layer explicitly outputs geometric deltas [S1, unofficial].
+
+## How it works
+**Inputs:**
+1. `latent_features`: Tensor of shape $(N, C_{in})$, where $N$ is the number of vertices and $C_{in}$ is the input channel count (e.g., 32) [S1, unofficial].
+2. `A`: Adjacency matrix of the mesh graph [S1, unofficial].
+3. `D`: Degree matrix of the mesh graph [S1, unofficial].
+4. `vertices`: Current vertex positions tensor of shape $(N, 3)$ [S1, unofficial].
+5. `faces`: Face connectivity tensor [S1, unofficial].
+
+**Outputs:**
+1. `deltaV`: Displacement vector tensor of shape $(N, 3)$, representing the $(x, y, z)$ offset for each vertex [S1, unofficial].
+
+**Parameters:**
+- Input channels: `self.latent_features_count[i]` (e.g., 32) [S1, unofficial].
+- Output channels: 3 (corresponding to x, y, z dimensions) [S1, unofficial].
+
+**Steps:**
+1. The layer receives the latent feature vector for each vertex.
+2. A neural network module (typically a linear projection or small MLP within the `BackEnd Neural Network Module`) processes these features.
+3. The output is a 3-dimensional vector per vertex, interpreted as a displacement $\Delta V_i$ from the current position $V_i$ [S1, unofficial].
+4. The new vertex position is computed as $V'_i = V_i + \Delta V_i$ [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+
+class Feature2VertexLayer(nn.Module):
+    def __init__(self, latent_features_count):
+        super(Feature2VertexLayer, self).__init__()
+        # Input channels: latent_features_count (e.g., 32)
+        # Output channels: 3 (x, y, z displacement)
+        self.displacement_head = nn.Linear(latent_features_count, 3)
+
+    def forward(self, latent_features, vertices):
+        """
+        Args:
+            latent_features: Tensor of shape (N, latent_features_count)
+            vertices: Tensor of shape (N, 3)
+        Returns:
+            deltaV: Tensor of shape (N, 3)
+        """
+        # Project latent features to 3D displacement
+        deltaV = self.displacement_head(latent_features)
+        return deltaV
+```
+
+**Edge Cases and Pitfalls:**
+- The input `latent_features` must have the correct channel dimension matching `latent_features_count` [S1, unofficial].
+- The output `deltaV` is added to the input `vertices`; if the features are not normalized, large displacements may cause mesh distortion [G].
+- The adjacency matrix `A` and degree matrix `D` are passed as inputs but are not explicitly used in the final displacement calculation of this specific layer, suggesting they may be used in preceding feature transformation steps within the parent module [S1, unofficial].
+
+## Subtopics
+
+### Features2Features Layer
+A graph convolutional layer that transforms latent features while preserving mesh topology, used in the Voxel2Mesh decoder's feature processing [S1, unofficial]. It takes `latent_features`, `A`, `D`, `vertices`, and `faces` as input and outputs updated `latent_features` [S1, unofficial]. Input channels are `self.skip_count[i] + dim` (or `self.skip_count[i] + self.latent_features_count[i-1] + dim` for $i>0$), and output channels are `self.latent_features_count[i]` (e.g., 32) [S1, unofficial]. It is chosen when feature refinement without geometric change is required, unlike the Feature2Vertex Layer which produces geometry [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** Linear with respect to the number of vertices $N$, as it involves a linear projection per vertex [G].
+- **Memory Complexity:** $O(N \cdot C_{in})$ for input features and $O(N)$ for output displacements [G].
+- **Strengths:** Directly outputs geometric corrections, allowing for fine-tuning of mesh topology [S1, unofficial].
+- **Limitations:** Relies on the quality of the input latent features; if features are noisy, displacements may be inaccurate [G].
+- **When to use:** Final stage of mesh generation from voxel data [S1, unofficial].
+- **When not to use:** When only feature representation is needed, not geometry [S1, unofficial].
+
+## Background
+The Feature2Vertex Layer is part of the Voxel2Mesh architecture, which converts 3D voxel data into triangular meshes [S1, unofficial]. It was introduced in the context of deep learning for medical image segmentation and mesh reconstruction, specifically for structures like the hippocampus [S1, unofficial]. The method builds on the BackEnd Neural Network Module, which processes point features using PointTransformerV3, downsampling, and zero-convolution blocks [S1, unofficial].
+
+## Sources
+[S1] cvlab-epfl/voxel2mesh, https://github.com/cvlab-epfl/voxel2mesh, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,108 @@
+# Interactive Editing with Proxy Plane Manipulation
+
+Also called: Intrinsic Field Selection and Albedo Editing via Proxy Planes, Proxy Plane Manipulation
+
+## Overview
+This method enables interactive editing of volumetric data by mapping 2D user input to 3D space using a proxy plane. It solves the ambiguity of depth selection in volumetric displays or 3D Gaussian splatting where a fixed projection plane is not naturally available or intuitive. It sets itself apart from [Focus Marker with Smooth Interpolation](22729-focus-marker-with-smooth-interpolation.md) by using an explicit geometric proxy for input rather than implicit field interpolation, and from [Omniview View Volume Control](22730-omniview-view-volume-control.md) by focusing on editing operations rather than view volume navigation.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** User 2D screen coordinates (mouse/touch), current camera/viewpoint parameters, and the 3D scene data (volumetric voxels or 3D Gaussians).
+*   **Output:** Modified 3D scene data (e.g., updated albedo values, added/removed primitives).
+
+**Data Structures:**
+*   **Proxy Plane:** A 2D plane defined in 3D space. In 3D Gaussian splatting contexts, this is often a textured plane used to initialize new Gaussians [S1].
+*   **Scene Data:**
+    *   *Volumetric:* Voxel grid or point cloud.
+    *   *Gaussian Splatting:* Set of 3D Gaussians, each with position, covariance, color/albedo, and opacity.
+
+**Steps:**
+1.  **Define Proxy Plane:** Establish the proxy plane relative to the user's line of sight or a fixed reference frame.
+    *   *Dynamic Approach:* Update the plane orientation to remain orthogonal to the user's line of sight as the viewpoint changes [S2].
+    *   *Fixed Approach:* Keep the plane fixed but make it highly visible to aid user understanding [S2].
+2.  **Map Input:** Project the user's 2D screen coordinates onto the proxy plane to determine the 3D interaction point.
+    *   If using a dynamic plane, recalculate the projection matrix based on the current viewpoint [S2].
+3.  **Select/Modify Data:**
+    *   *For Volumetric Displays:* Identify the voxel or point at the intersection of the interaction ray and the proxy plane. Apply edits (e.g., color change, deletion) [S2].
+    *   *For 3D Gaussian Splats:*
+        a. Identify the target Gaussian or region on the proxy plane [S1].
+        b. Initialize new Gaussians on the textured proxy plane with user-defined properties (e.g., albedo) [S1].
+        c. Place these new Gaussians in 3D space using the proxy depth information [S1].
+        d. Add the new Gaussians to the existing set [S1].
+4.  **Optimize/Update:**
+    *   Re-optimize the scene parameters to match the edited state.
+    *   In Gaussian splatting, re-optimize albedo values of the augmented set [S1].
+    *   Remove primitives with high counter values (indicating redundancy or error) before densification steps [S1].
+
+**Parameters:**
+*   **Proxy Plane Visibility:** High visibility is recommended for fixed planes to prevent confusion [S2].
+*   **Optimization Iterations:** Densification steps may occur every 100 iterations from iteration 500 to 15000 [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Viewpoint Change During Drag:** Fixing the input mapping at the start of a drag becomes confusing if the user's viewpoint changes significantly. Solutions include dynamic plane updates or high visibility of the fixed plane [S2].
+*   **Lack of Fixed Projection Plane:** Volumetric displays lack an explicit projection plane, requiring careful definition of the input plane [S2].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def edit_with_proxy_plane(scene, user_input_2d, viewpoint):
+    # Define proxy plane based on strategy
+    if strategy == "dynamic":
+        # Plane orthogonal to user's line of sight
+        proxy_plane = Plane.orthogonal_to(viewpoint.direction)
+    else:
+        # Fixed plane, ensure high visibility
+        proxy_plane = get_fixed_proxy_plane()
+        highlight(proxy_plane)
+
+    # Map 2D input to 3D point on proxy plane
+    interaction_point_3d = project_2d_to_3d(user_input_2d, proxy_plane, viewpoint)
+
+    if scene_type == "gaussian_splatting":
+        # Initialize new Gaussians on the proxy plane
+        new_gaussians = []
+        for edit in user_edits:
+            g = Gaussian()
+            g.position = interaction_point_3d + edit.offset
+            g.albedo = edit.color
+            g.opacity = edit.opacity
+            new_gaussians.append(g)
+
+        # Add to scene
+        scene.gaussians.extend(new_gaussians)
+
+        # Re-optimize albedo
+        reoptimize_albedo(scene.gaussians)
+
+        # Remove redundant primitives if necessary
+        remove_high_counter_primitives(scene.gaussians)
+
+    elif scene_type == "volumetric":
+        # Identify voxel/point at interaction_point_3d
+        target = find_voxel_at(interaction_point_3d)
+        if target:
+            apply_edit(target, user_edits)
+
+    return scene
+```
+
+## Subtopics
+
+### Dynamic Input Plane for 3D Manipulators
+A technique to handle 3D manipulators on volumetric displays by defining the input plane relative to the user's line of sight [S2]. It sets itself apart by adapting to viewpoint changes, preventing confusion when the user moves [S2]. Choose this when the user frequently changes their viewing angle during interaction [S2]. Pitfall: Fixing the input mapping at the start of a drag becomes confusing if the viewpoint changes significantly [S2].
+
+## Operating characteristics
+*   **Time Complexity:** Depends on the optimization step. For Gaussian splatting, re-optimization can be costly, occurring every 100 iterations from 500 to 15000 [S1].
+*   **Memory Complexity:** Increases with the number of added Gaussians or modified voxels [S1].
+*   **Strengths:** Intuitive editing in 3D space without a fixed projection plane [S2]. Effective for intrinsic decomposition and editing of 3D Gaussian splats [S1].
+*   **Limitations:** Confusion if viewpoint changes during drag without dynamic updates [S2]. Requires careful handling of volumetric display constraints [S2].
+*   **When to Use:** Interactive editing on volumetric displays or 3D Gaussian splatting where 2D GUI techniques are insufficient [S1, S2].
+*   **When Not to Use:** When the user's viewpoint is static and a fixed projection plane is sufficient [S2].
+
+## Background
+Originated from research into user interfaces for volumetric displays and intrinsic decomposition of 3D Gaussian splats. The concept of using a proxy plane for editing in 3D Gaussian splatting was implemented in an interactive viewer by Shah et al. [S1]. The challenge of input mapping on volumetric displays, which lack a fixed projection plane, was addressed by defining input planes relative to the user's line of sight [S2].
+
+## Sources
+[S1] Intrinsic decomposition and editing of 3D Gaussian splats, https://doi.org/10.1145/3804495, fetched 2026-10-27
+[S2] User interfaces for volumetric displays, https://doi.org/10.1109/2.910892, fetched 2026-10-26

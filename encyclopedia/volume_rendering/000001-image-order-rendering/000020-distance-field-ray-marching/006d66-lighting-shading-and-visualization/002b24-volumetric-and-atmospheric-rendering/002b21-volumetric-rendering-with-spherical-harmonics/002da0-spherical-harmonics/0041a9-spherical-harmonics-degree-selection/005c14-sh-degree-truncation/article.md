@@ -1,0 +1,65 @@
+# SH Degree Truncation
+
+Also called: SH Capping, Spherical Harmonics Degree Reduction
+
+## Overview
+SH Degree Truncation is a preprocessing step that reduces the spherical harmonics (SH) degree of loaded splats to match a target parameter, lowering memory and compute requirements [S1, unofficial]. It performs a static, in-place reduction of the SH coefficients at load time rather than during rendering or training [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A splat data structure containing SH coefficients up to a maximum loaded degree, and a target degree parameter $L_{\text{target}}$ (where $L_{\text{target}} \ge 0$) [S1, unofficial].
+*   **Output:** The same splat data structure with SH coefficients truncated to degree $L_{\text{target}}$ [S1, unofficial].
+
+**Data Structures:**
+The splat data structure stores SH coefficients. Not given in the sources. [G] Standard implementations store coefficients in a flat array or tensor, typically ordered by degree $l$ and order $m$, with $(L+1)^2$ coefficients per color channel for degree $L$.
+
+**Steps:**
+1.  Check if the target parameter `params.sh_degree` is $\ge 0$ and differs from the loaded splat's `get_max_sh_degree()` [S1, unofficial].
+2.  If the condition is met, call `truncateSHDegree(*splat, params.sh_degree)` to modify the splat data in-place [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def truncate_sh_degree(splat, target_degree):
+    """
+    Truncates the spherical harmonics coefficients of a splat to a target degree.
+    
+    Args:
+        splat: Object containing SH coefficients and metadata.
+        target_degree: Integer, the desired maximum SH degree.
+    """
+    # Check conditions from source [S1, unofficial]
+    if target_degree >= 0 and target_degree != splat.get_max_sh_degree():
+        # Modify splat data in-place as per source [S1, unofficial]
+        truncateSHDegree(splat, target_degree)
+    return splat
+```
+
+**Parameters:**
+*   `target_degree`: The maximum SH degree to retain. Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   The method preserves the majority of radiance energy in an $L_2$ sense, but the discarded residual energy is highly correlated with intrinsic Gaussian attributes such as spatial position and anisotropic scale [S2, unofficial].
+*   Not given in the sources.
+
+## Subtopics
+
+### Monte Carlo Specular Energy Aggregation
+A variant approach for reducing SH degree (specifically from 3rd to 1st order) by aggregating the residual energy of higher-order terms into a compact latent representation rather than simply discarding coefficients [S2, unofficial]. It samples $K$ unit direction vectors $d_k$ on the sphere using spherical coordinates: $\phi_k \sim U(0, 2\pi)$, $\theta_k = \arccos(1 - 2\xi_k)$, $\xi_k \sim U(0, 1)$, then converts to Cartesian $d_k = [\sin \theta_k \cos \phi_k, \sin \theta_k \sin \phi_k, \cos \theta_k]$ [S2, unofficial]. It evaluates the photometric residual $c_{\text{res}}(d_k) = c_i(d_k) - c^2_i(d_k)$ between the 3rd-order SH radiance $c_i$ and 2nd-order SH radiance $c^2_i$ [S2, unofficial]. The energy magnitude is $E_{\text{mag}} = \max(0, c_{\text{res}}(d_k))$ and the directional energy is $E_{\text{dir}} = \frac{1}{K} \sum_{k=1}^{K} d_k \otimes E_{\text{mag}}$ [S2, unofficial]. The Gaussian position $\hat{\mu}$ is normalized via $f(\hat{\mu}) = \hat{\mu}$ if $\|\hat{\mu}\|_2 \le 1$, else $f(\hat{\mu}) = \frac{2-1}{\|\hat{\mu}\|_2} \frac{\hat{\mu}}{\|\hat{\mu}\|_2}$ [S2, unofficial]. A Multi-Layer Perceptron (MLP) $\Psi$ maps the base color $c_{\text{dc}}$, $E_{\text{dir}}$, and $f(\hat{\mu})$ to first-order SH coefficients $c'$ [S2, unofficial]. This eliminates expensive distillation and reduces SH storage memory overhead compared to 3rd-order baselines, with no per-frame decoding overhead as coefficients are decoded once before inference [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Reduces SH storage memory overhead compared to third-order baselines [S2, unofficial].
+*   **Measured Performance:** Not given in the sources.
+*   **Strengths:** Eliminates expensive distillation; achieves significant compression in SH storage memory overhead; no per-frame decoding overhead [S2, unofficial].
+*   **Limitations:** Projecting higher-order bands inevitably degrades overall color fidelity and scene structure [S2, unofficial].
+*   **When to use:** When memory or compute is constrained and high-frequency details are not critical [G].
+*   **When not to use:** When high-fidelity view-dependent effects are required [G].
+
+## Background
+SH Degree Truncation is a standard technique in Gaussian Splatting and radiance field rendering to manage the computational cost of spherical harmonics [G]. A more advanced variant, Monte Carlo Specular Energy Aggregation, is proposed in Mobile-4DGS to preserve high-frequency details while reducing degree [S2, unofficial].
+
+## Sources
+[S1] MrNeRF/LichtFeld-Studio, https://github.com/MrNeRF/LichtFeld-Studio, fetched 2026-10-27 (unofficial)
+[S2] Mobile-4DGS: Unified Static-Dynamic Real-time Mobile Gaussian Splatting, https://arxiv.org/abs/2610.05289, fetched 2026-10-29 (unofficial)

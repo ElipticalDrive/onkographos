@@ -1,0 +1,146 @@
+# AMR Volume Rendering via VTK Tetrahedralization
+
+Also called: AMR Volume Rendering, Complementing adaptive wavelet grid to a correspondent AMR grid, Tetrahedral AMR Rendering, Unstructured mesh VTK rendering, VTK AMR Rendering, VTK-based AMR Grid Rendering
+
+## Overview
+This method renders Adaptive Mesh Refinement (AMR) volume data by converting structured cubic cells into an unstructured tetrahedral mesh and utilizing the Visualization Toolkit (VTK) library for rendering [S1][S2, unofficial]. It solves the problem of visualizing non-regular, hierarchically refined data by mapping it to a format compatible with standard VTK renderers like Projected Tetrahedra and ZSweep [S1][S2, unofficial]. It differs from direct wavelet summation by requiring significant memory for the unstructured mesh, making it less suitable for very large datasets, whereas direct summation is memory-efficient [S2, unofficial].
+
+## How it works
+**Inputs:** AMR grid data (node positions and scalar values).
+**Outputs:** Rendered image via VTK.
+
+**Data Structures:**
+The method converts the AMR grid into a VTK Unstructured Grid format.
+1.  **Nodes:** Defined by 3D coordinates $(x, y, z)$.
+2.  **Cells:** Each cubic cell from the AMR grid is subdivided into 6 tetrahedra (`VTK_TETRA`).
+3.  **Node Numbering:** Nodes within a cubic cell are numbered according to the `VTK_VOXEL` convention [S1][S2, unofficial]. The standard `VTK_VOXEL` numbering for a cube with corners $(0,0,0)$ to $(1,1,1)$ is:
+    *   0: $(0,0,0)$
+    *   1: $(1,0,0)$
+    *   2: $(0,1,0)$
+    *   3: $(1,1,0)$
+    *   4: $(0,0,1)$
+    *   5: $(1,0,1)$
+    *   6: $(0,1,1)$
+    *   7: $(1,1,1)$
+4.  **Tetrahedron Definition:** Each cubic cell generates 6 tetrahedra defined by the following node indices (using the numbering above) [S1][S2, unofficial]:
+    *   $T_1$: Nodes 0, 1, 2, 5
+    *   $T_2$: Nodes 1, 3, 2, 5
+    *   $T_3$: Nodes 0, 2, 4, 5
+    *   $T_4$: Nodes 2, 6, 4, 5
+    *   $T_5$: Nodes 3, 7, 2, 5
+    *   $T_6$: Nodes 7, 6, 2, 5
+
+**Steps:**
+1.  **Tetrahedralization:** Iterate through each cubic cell in the AMR grid. Subdivide the cube into the 6 tetrahedra listed above using the `VTK_VOXEL` node numbering [S1][S2, unofficial].
+2.  **File Generation:** Write the resulting unstructured mesh to a VTK file format (specifically supporting `VTK_TETRA` cells) [S1][S2, unofficial]. This file is readable by Paraview, VisIt, and VTK [S1][S2, unofficial].
+3.  **Rendering:** Load the VTK file into a VTK-based renderer (e.g., Projected Tetrahedra or ZSweep) [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def generate_vtk_tetrahedral_mesh(amr_grid):
+    """
+    Converts AMR grid data into a VTK-compatible unstructured tetrahedral mesh.
+    
+    Args:
+        amr_grid: A data structure containing cubic cells. 
+                  Each cell has 8 vertices (nodes) and scalar values.
+                  Nodes are assumed to be ordered according to VTK_VOXEL convention.
+                  
+    Returns:
+        vtk_data: A dictionary or object containing nodes and cells for VTK.
+    """
+    nodes = []
+    cells = []
+    
+    # Map global node index to local node index within a cell for VTK_VOXEL numbering
+    # 0:(0,0,0), 1:(1,0,0), 2:(0,1,0), 3:(1,1,0)
+    # 4:(0,0,1), 5:(1,0,1), 6:(0,1,1), 7:(1,1,1)
+    
+    tetra_definitions = [
+        [0, 1, 2, 5],
+        [1, 3, 2, 5],
+        [0, 2, 4, 5],
+        [2, 6, 4, 5],
+        [3, 7, 2, 5],
+        [7, 6, 2, 5]
+    ]
+    
+    for cell in amr_grid.cells:
+        # Extract the 8 vertices of the current cubic cell
+        # Assuming cell.vertices is a list of 8 (x,y,z) tuples
+        # ordered according to VTK_VOXEL numbering
+        cell_vertices = cell.vertices 
+        
+        # Add vertices to global node list if not already present
+        # Note: In a real implementation, a hash map or spatial index 
+        # would be used to share vertices between adjacent cells to avoid duplicates.
+        # For this method description, we assume unique node generation per cell 
+        # or a pre-existing shared node list. 
+        # [G] To ensure mesh continuity, adjacent cells must share the same node 
+        # coordinates at shared faces/edges. The source notes do not specify 
+        # the exact node-sharing algorithm, only the tetrahedral subdivision.
+        
+        local_node_indices = []
+        for v in cell_vertices:
+            # Find or create global node index for vertex v
+            global_idx = nodes.add_or_get(v)
+            local_node_indices.append(global_idx)
+            
+        # Generate 6 tetrahedra for this cell
+        for tetra in tetra_definitions:
+            # Map local VTK_VOXEL indices to the local_node_indices of this cell
+            t_nodes = [local_node_indices[i] for i in tetra]
+            cells.append(t_nodes)
+            
+    return {
+        'nodes': nodes,
+        'cells': cells,
+        'cell_type': 'VTK_TETRA'
+    }
+
+def render_with_vtk(vtk_file_path):
+    """
+    Renders the VTK unstructured mesh using VTK library.
+    """
+    # [G] Standard VTK Python binding usage
+    reader = vtk.vtkUnstructuredGridReader()
+    reader.SetFileName(vtk_file_path)
+    reader.Update()
+    
+    # Example: Projected Tetrahedra Renderer
+    # renderer = vtk.vtkProjectedTetrahedraMapper()
+    # renderer.SetInputConnection(reader.GetOutputPort())
+    
+    # Example: ZSweep Renderer
+    # renderer = vtk.vtkZSweepMapper()
+    # renderer.SetInputConnection(reader.GetOutputPort())
+    
+    # Render and display
+    pass
+```
+
+**Parameters:**
+*   **Memory Limit:** On a system with Pentium 4 (3.2 GHz), 2GB RAM, and Nvidia GeForce Fx5200-TD128, the maximum renderable tetrahedra count is approximately $5 \times 10^7$ [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **T-Junctions:** The triangulation method (0125, 1325, etc.) is not compatible across neighboring cells [S1][S2, unofficial]. This causes T-junctions at shared faces/edges, leading to rendering artifacts such as gaps (empty space) during isosurface generation [S1][S2, unofficial].
+*   **Memory Usage:** VTK rendering requires significant memory. It is not appropriate for very large datasets compared to direct wavelet summation [S2, unofficial].
+*   **File Format:** If file size is a concern, data can be saved in `VTK_VOXEL` format, but VTK volume rendering still requires tetrahedralization, so the memory overhead for the tetrahedra remains [S1][S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Rendering time is linear with respect to the number of tetrahedra in the unstructured mesh [S2, unofficial].
+*   **Memory Complexity:** High. The method requires storing the full unstructured tetrahedral mesh in memory [S2, unofficial].
+*   **Performance:** On the tested hardware (Pentium 4, 3.2 GHz, 2GB RAM, Nvidia GeForce Fx5200-TD128), the maximum number of tetrahedra renderable is $\sim 5 \times 10^7$ [S2, unofficial].
+*   **Strengths:** Compatible with standard VTK tools (Paraview, VisIt); Projected Tetrahedra renderer provides fast rendering with adequate quality [S2, unofficial].
+*   **Limitations:** High memory consumption makes it unsuitable for large datasets; T-junctions cause artifacts in isosurface generation [S1][S2, unofficial].
+*   **When to use:** When using VTK-based pipelines (Paraview, VisIt) and dataset size is within memory limits.
+*   **When not to use:** For very large datasets where memory is constrained; when direct wavelet summation is preferred for memory efficiency [S2, unofficial].
+
+## Background
+This method was described in the context of volumetric rendering on wavelet-based adaptive grids [S1][S2, unofficial]. It was developed to address the limitations of other tools like ChomboVis, which provided low-quality volume rendering for cell-centered AMR data [S1]. The approach leverages the VTK library's ability to handle unstructured grids, specifically using the `VTK_TETRA` cell type [S1][S2, unofficial].
+
+## Sources
+[S1] Volumetric Rendering on Wavelet-Based Adaptive Grid, https://doi.org/10.3390/fluids7070245, fetched 2026-10-26
+[S2] Volumetric Rendering on Wavelet-Based Adaptive Grid - MDPI, https://www.mdpi.com/2311-5521/7/7/245, fetched 2026-10-28 (unofficial)

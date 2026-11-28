@@ -1,0 +1,173 @@
+--- v002.md
++++ v003.md
+@@ -1,98 +1,96 @@
+ # Random Large-Variance Initialization
++Also called: RAIN-GS Initialization, Sparse-Large-Variance Init
++## Overview
++Random Large-Variance Initialization is a method for initializing 3D Gaussian primitives that relaxes the assumption of using only Structure-from-Motion (SfM) point cloud data. It addresses the problem of generating a geometrically plausible starting configuration when SfM data is sparse or absent by sampling Gaussians randomly with large variance. It sets itself apart from [SfM-Based Triangle Initialization](9766-sfm-based-triangle-initialization.md) by relying on stochastic sampling rather than deterministic SfM-derived positions and local density scaling.
++## How it works
++Inputs: A scene bounding box or volume definition; a target number of Gaussians $N$.
++Outputs: A set of $N$ 3D Gaussians with initial parameters.
+ 
+-Also called: RAIN-GS, RAIN-GS Initialization, Sparse-Large-Variance Init
++Data Structures:
++Each Gaussian $i$ is defined by:
++- Position $\mu_i \in \mathbb{R}^3$
++- Covariance $\Sigma_i \in \mathbb{R}^{3 \times 3}$ (parameterized via scale $s_i \in \mathbb{R}^3$ and rotation $q_i \in \mathbb{R}^4$)
++- Opacity $\alpha_i \in [0, 1]$
++- Spherical Harmonics coefficients $c_{i, l}$ for color features.
+ 
+-## Overview
+-Random Large-Variance Initialization (RAIN-GS) relaxes the strict Structure-from-Motion (SfM) point cloud assumption required by standard 3D Gaussian Splatting by introducing sparse, large-variance random initialization [S1, unofficial]. Unlike standard methods that rely solely on dense SfM points, this approach allows optimization to proceed even when SfM data is sparse or absent, serving as a fallback or complementary initialization strategy [S1, unofficial].
++Steps:
++1. Define the spatial bounds of the scene (e.g., the bounding box of the available sparse point cloud or the camera frustum).
++2. Sample $N$ positions $\mu_i$ uniformly at random within these bounds.
++3. Initialize scales $s_i$ to large values. The "large-variance" aspect implies that the initial Gaussians are significantly larger than the typical final converged size, covering a broad area of the scene to ensure coverage.
++4. Initialize rotations $q_i$ to identity or random unit quaternions.
++5. Initialize opacities $\alpha_i$ to a small constant (e.g., 0.1) or derived from the initial coverage.
++6. Initialize SH coefficients $c_{i, l}$ to zero or average color values if RGB is available.
+ 
+-## How it works
+-**Inputs:**
+-- A set of $N$ 3D points $Q = \{q_1, \dots, q_N\}$ from a SfM reconstruction, where each $q_i \in \mathbb{R}^3$ [S2].
+-- A scaling constant $k$ [S2].
++Parameters:
++- $N$: Number of Gaussians. Not given in the sources.
++- Scale magnitude: Large relative to the average inter-point distance in SfM data. Not given in the sources.
+ 
+-**Outputs:**
+-- A set of 3D triangles, each defined by three vertices $\{v_1, v_2, v_3\}$, centered around each SfM point [S2].
++Edge cases:
++- If the scene bounds are undefined, the initialization may place Gaussians in empty space, wasting compute. [G]
++- Large initial variances may lead to slow convergence or require careful learning rate scheduling to avoid instability. [G]
+ 
+-**Data Structures:**
+-- Each triangle is represented by three 3D vertex positions $v_i \in \mathbb{R}^3$ [S2].
+-- Additional learnable parameters per triangle include sharpness $\sigma$, opacity $o$, and spherical harmonic color coefficients $c$ [S2].
+-
+-**Steps:**
+-1. For each SfM point $q \in Q$:
+-   a. Identify the three nearest neighbors of $q$ in the point cloud [S2].
+-   b. Calculate $d$, the average Euclidean distance from $q$ to these three nearest neighbors [S2].
+-   c. Sample three vertices $\{u_1, u_2, u_3\}$ uniformly at random from the unit sphere ($\|u_i\| = 1$) [S2].
+-   d. Scale the sampled vertices by $d$ and translate them by $q$ to create the triangle vertices:
+-      $$v_i = q + k \cdot d \cdot u_i, \quad i \in \{1, 2, 3\}$$
+-   e. This results in an approximately equilateral, randomly oriented triangle centered at $q$ with size proportional to local point density $d$ [S2].
+-
+-**Parameters:**
+-- $k$: Scaling constant determining triangle size relative to neighbor distance $d$. Typical values are not given in the sources.
+-
+-**Edge Cases and Pitfalls:**
+-- If $d=0$ (e.g., duplicate points), the triangle collapses [G]. A guard should handle $d \approx 0$ by using a minimum distance threshold or skipping the point [G].
+-- Uniform sampling on the unit sphere must be done correctly (e.g., using spherical coordinates with $\cos \theta$ uniform) to avoid clustering at poles [G].
+-
+-**Pseudocode:**
++Pseudocode:
+ ```python
+ import numpy as np
+ 
+-def sample_uniform_sphere(n):
+-    """Sample n points uniformly on the unit sphere."""
+-    phi = np.random.uniform(0, 2 * np.pi, n)
+-    cos_theta = np.random.uniform(-1, 1, n)
+-    sin_theta = np.sqrt(1 - cos_theta**2)
+-    return np.stack([sin_theta * np.cos(phi), sin_theta * np.sin(phi), cos_theta], axis=-1)
+-
+-def random_large_variance_init(points, k=1.0):
++def random_large_variance_init(num_gaussians, scene_bounds):
+     """
+-    Initialize triangles around SfM points using sparse large-variance random init.
++    Initialize Gaussians with random positions and large variances.
+     
+     Args:
+-        points: Array of shape (N, 3) containing SfM 3D points.
+-        k: Scaling constant for triangle size.
++        num_gaussians (int): Number of Gaussians to create.
++        scene_bounds (tuple): (min_xyz, max_xyz) defining the bounding box.
+         
+     Returns:
+-        triangles: Array of shape (N, 3, 3) containing vertices for each triangle.
++        dict: Dictionary containing initialized Gaussian parameters.
+     """
+-    N = points.shape[0]
+-    triangles = np.zeros((N, 3, 3))
++    min_xyz, max_xyz = scene_bounds
++    bounds_size = max_xyz - min_xyz
+     
+-    for i, q in enumerate(points):
+-        # Compute distances to all other points
+-        dists = np.linalg.norm(points - q, axis=1)
+-        # Exclude self from nearest neighbor search
+-        dists[i] = np.inf
+-        # Get indices of the 3 nearest neighbors
+-        nn_idx = np.argsort(dists)[:3]
+-        # Calculate average distance d
+-        d = np.mean(dists[nn_idx])
+-        
+-        # Guard against degenerate triangles when d is near zero
+-        if d < 1e-6:
+-            triangles[i] = q
+-            continue
+-            
+-        # Sample 3 vertices from unit sphere
+-        u = sample_uniform_sphere(3)
+-        
+-        # Scale and translate to form triangle
+-        triangles[i] = q + k * d * u
+-        
+-    return triangles
++    # Sample positions uniformly within bounds
++    positions = np.random.uniform(min_xyz, max_xyz, size=(num_gaussians, 3))
++    
++    # Initialize scales to large values
++    # The exact magnitude of "large" is not specified in sources [S1, unofficial]
++    # [G] A heuristic is to use a fraction of the scene diagonal or a fixed large value
++    scale_magnitude = np.linalg.norm(bounds_size) / 10.0 
++    scales = np.full((num_gaussians, 3), scale_magnitude)
++    
++    # Initialize rotations to identity (or random)
++    # [G] Using identity for simplicity, though random is also valid
++    rotations = np.tile([1.0, 0.0, 0.0, 0.0], (num_gaussians, 1))
++    
++    # Initialize opacities to a small value
++    opacities = np.full(num_gaussians, 0.1)
++    
++    # Initialize SH coefficients to zero
++    # [G] Assuming degree 0 for simplicity, or average color if available
++    sh_coeffs = np.zeros((num_gaussians, 3)) 
++    
++    return {
++        'positions': positions,
++        'scales': scales,
++        'rotations': rotations,
++        'opacities': opacities,
++        'sh_coeffs': sh_coeffs
++    }
+ ```
+-
+ ## Subtopics
+ 
+-### SfM-Based Triangle Initialization
+-This variant explicitly uses the SfM point cloud to define the initial geometry [S2]. It creates triangles centered at each SfM point, with size proportional to the local point density (average distance to nearest neighbors) [S2]. It is chosen when SfM data is available but sparse, allowing the model to explore a larger initial volume than point-based initialization [G]. It differs from pure random initialization by anchoring the geometry to known scene structure [G].
++### [SfM-Based Triangle Initialization](9766-sfm-based-triangle-initialization.md)
++Uses deterministic SfM data for position and local density for scale, rather than purely random sampling with large variance. Choose when high-quality SfM data is available and geometric accuracy is prioritized over robustness to sparse input.
+ 
+ ## Operating characteristics
+-Not given in the sources.
+-
++Time and memory complexity: $O(N)$ for initialization, where $N$ is the number of Gaussians.
++Measured performance: Not given in the sources.
++Scaling: Linear with the number of Gaussians.
++Strengths: Robust to sparse or missing SfM data; ensures broad coverage of the scene.
++Limitations: May require more optimization steps to converge to fine details compared to SfM-based initialization; initial Gaussians are large and may blur fine structures.
++When to use: When SfM data is sparse, noisy, or unavailable.
++When not: When high-precision geometric initialization is critical and dense SfM data is available.
+ ## Background
+-The method originated in the RAIN-GS approach, which relaxes the SfM-only initialization assumption [S1, unofficial]. The triangle-based initialization variant is detailed in "Triangle Splatting for Real-Time Radiance Field Rendering" [S2]. It is part of the broader effort to make Gaussian Splatting more robust to varying input data quality [G].
+-
++Origin: Introduced in the context of RAIN-GS, as cited in [S1, unofficial].
++History: It relaxes the traditional assumption that initialization must be strictly based on SfM point clouds, allowing for more flexible initialization strategies.
++Usage: Used in differentiable Gaussian splatting pipelines where robust initialization is needed.
+ ## Sources
+-[S1] Gaussian Splatting — All Variants Cheat Sheet, https://www.chengjianglong.com/ml/3D-Gaussian_Splatting_SOTA_Updated.html, fetched 2026-10-27 (unofficial)
+-[S2] Triangle Splatting for Real-Time Radiance Field Rendering, https://doi.org/10.1109/3DV69130.2026.00123, fetched 2026-10-27+[S1] Gaussian Splatting — All Variants Cheat Sheet, https://www.chengjianglong.com/ml/3D-Gaussian_Splatting_SOTA_Updated.html, fetched 2026-10-27 (unofficial)

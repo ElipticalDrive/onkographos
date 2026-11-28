@@ -1,0 +1,160 @@
+# Hybrid kd-tree/Uniform Grid
+Also called: Hybrid kd-tree/uniform grid structure (Zellmann et al.), Zellmann et al. Hybrid Structure
+
+## Overview
+This method accelerates volume rendering by combining a kd-tree at the root level with a uniform grid at the leaf-node level to perform empty-space skipping [S1, unofficial]. It is designed for large datasets where coarse skipping granularity and deep tree construction costs are concerns [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D volume dataset and a transfer function defining opacity/density thresholds for active regions [S1, unofficial].
+*   **Output:** A rendered image and a sorted list of non-empty leaf nodes for GPU iteration [S1, unofficial].
+
+**Data Structures:**
+1.  **Hybrid Structure:**
+    *   **Root:** A kd-tree where each internal node stores splitting planes and bounding boxes [G].
+    *   **Leaves:** Uniform grids where each leaf node contains a regular 3D grid of cells [S1, unofficial].
+    *   **Layout:** The kd-tree nodes are stored in a flat array or pointer-based structure [G]. Leaf nodes point to their respective uniform grid arrays [G]. Cells store occupancy metadata indicating whether they are empty or active [G].
+
+**Steps:**
+1.  **Construction:**
+    *   Build a kd-tree over the volume data using summed-volume tables for splitting criteria [S1, unofficial].
+    *   At each leaf node of the kd-tree, subdivide the corresponding volume region into a uniform grid [S1, unofficial].
+    *   Populate the uniform grid cells with occupancy metadata by comparing maximum scalar values against a threshold [G].
+2.  **CPU Traversal (Pre-processing):**
+    *   Traverse the kd-tree on the CPU to identify all non-empty leaf nodes [S1, unofficial].
+    *   Generate a sorted list of these non-empty leaf nodes for GPU iteration [S1, unofficial].
+3.  **GPU Rendering (Ray Casting):**
+    *   For each ray, iterate through the sorted list of non-empty leaf nodes [S1, unofficial].
+    *   Within each leaf node, traverse the uniform grid along the ray direction [S1, unofficial].
+    *   Sample the primary volume texture only within active cells [S1, unofficial].
+
+**Formulas:**
+*   **Coordinate Mapping:** Map ray position $u_{\text{vol}}$ to grid index $u_{\text{occ}}$ via $u_{\text{occ}} = \lfloor u_{\text{vol}} / B \rfloor$, where $B$ is the block size [G].
+*   **Activity Check:** A cell is active if its maximum scalar value exceeds the transfer function threshold $\tau$ [G].
+
+**Parameters:**
+*   **Threshold $\tau$:** Density/opacity threshold for activity. Typical value: Not given in the sources.
+*   **Leaf Grid Resolution:** Resolution of the uniform grid within each kd-tree leaf. Typical value: Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Floating-point precision errors in ray-plane intersections during kd-tree traversal may cause missed nodes or double-sampling [G].
+*   **Boundary Conditions:** Rays entering or exiting the volume must be correctly clamped to avoid out-of-bounds memory access in the uniform grid [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Pseudocode for Hybrid kd-tree/Uniform Grid Traversal
+import math
+
+class Ray:
+    def __init__(self, origin, direction):
+        self.origin = origin
+        self.direction = direction
+        self.inv_dir = [1.0 / d if d != 0 else float('inf') for d in direction]
+
+class KdTreeNode:
+    def __init__(self, is_leaf, split_axis, split_value, left, right, leaf_grid=None):
+        self.is_leaf = is_leaf
+        self.split_axis = split_axis
+        self.split_value = split_value
+        self.left = left
+        self.right = right
+        self.leaf_grid = leaf_grid
+
+class UniformGrid:
+    def __init__(self, origin, size, resolution, data):
+        self.origin = origin
+        self.size = size
+        self.resolution = resolution
+        self.cell_size = size / resolution
+        self.data = data  # 3D array of occupancy flags
+
+def ray_intersects_bbox(ray, bbox_min, bbox_max):
+    t_min = [(bbox_min[i] - ray.origin[i]) * ray.inv_dir[i] for i in range(3)]
+    t_max = [(bbox_max[i] - ray.origin[i]) * ray.inv_dir[i] for i in range(3)]
+    t_enter = max(min(t_min[i], t_max[i]) for i in range(3))
+    t_exit = min(max(t_min[i], t_max[i]) for i in range(3))
+    return t_enter <= t_exit
+
+def traverse_kd_tree(ray, node, active_leaves):
+    if node is None or not ray_intersects_bbox(ray, node.bbox_min, node.bbox_max):
+        return
+    if node.is_leaf:
+        if node.leaf_grid.has_active_cells():
+            active_leaves.append(node.leaf_grid)
+    else:
+        if ray.direction[node.split_axis] >= 0:
+            traverse_kd_tree(ray, node.left, active_leaves)
+            traverse_kd_tree(ray, node.right, active_leaves)
+        else:
+            traverse_kd_tree(ray, node.right, active_leaves)
+            traverse_kd_tree(ray, node.left, active_leaves)
+
+def render_ray(ray, active_leaves, volume_texture):
+    color = [0.0, 0.0, 0.0]
+    alpha = 0.0
+    t = 0.0
+    for leaf in active_leaves:
+        # Standard 3D DDA traversal for uniform grid [G]
+        t_max = [leaf.origin[i] + leaf.cell_size * (0.5 - ray.inv_dir[i] * (ray.origin[i] - leaf.origin[i])) for i in range(3)]
+        step = [1 if ray.direction[i] > 0 else -1 for i in range(3)]
+        t_delta = [leaf.cell_size * abs(ray.inv_dir[i]) for i in range(3)]
+        cell = [max(0, min(int((ray.origin[i] - leaf.origin[i]) / leaf.cell_size), leaf.resolution - 1)) for i in range(3)]
+        
+        while t < 1.0:
+            if leaf.data[cell[0]][cell[1]][cell[2]]:
+                density = sample_volume(ray.origin + ray.direction * t, volume_texture)
+                opacity = transfer_function(density)
+                color[0] += (1.0 - alpha) * opacity * color_map(density)[0]
+                color[1] += (1.0 - alpha) * opacity * color_map(density)[1]
+                color[2] += (1.0 - alpha) * opacity * color_map(density)[2]
+                alpha += (1.0 - alpha) * opacity
+                if alpha >= 1.0:
+                    return color
+            t_enter = min(t_max[i] for i in range(3))
+            t_exit = max(t_max[i] for i in range(3))
+            if t_enter > t:
+                t = t_enter
+            else:
+                break
+            axis = t_max.index(t_enter)
+            cell[axis] += step[axis]
+            t_max[axis] += t_delta[axis]
+            if not (0 <= cell[0] < leaf.resolution and 0 <= cell[1] < leaf.resolution and 0 <= cell[2] < leaf.resolution):
+                break
+    return color
+
+def sample_volume(pos, texture):
+    return texture[pos[0]][pos[1]][pos[2]]
+
+def transfer_function(density):
+    return min(1.0, density * 0.5)
+
+def color_map(density):
+    return [density, density * 0.8, density * 0.6]
+```
+
+## Subtopics
+
+### [Hybrid Grids](11219-hybrid-grids.md)
+Hybrid Grids is a volume rendering strategy that combines a shallow k-d tree with a global grid of macro cells to perform empty-space skipping. It decouples tree depth from skipping granularity to enable faster construction while maintaining rendering efficiency in large datasets.
+
+### Uniform Buffer
+A combination of hierarchical and regular grid advantages where uniformity information decoded by an octree is stored in the empty space of a regular 3D raster to skip empty space without tree search overhead [S2, unofficial]. When a ray encounters a voxel containing 'uniformity information', instruct the ray to perform a leap forward to the first voxel beyond the uniform region [S2, unofficial]. Voxels in the uniform buffer contain either a data value or information indicating to which size empty octant they belong [S2, unofficial]. Traversing a hierarchical data structure is inefficient compared to regular grids; the uniform buffer avoids the time-consuming tree search for appropriate neighbors [S2, unofficial]. The approach saves the need to perform a tree search for the appropriate neighbor, which is the most time-consuming operation and major disadvantage of hierarchical structures [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** Not given in the sources.
+*   **Strengths:** Efficient empty-space skipping via hybrid structure traversal [S1, unofficial]. Avoids time-consuming tree searches for neighbors in the uniform buffer variant [S2, unofficial].
+*   **Limitations:** Requires CPU-GPU synchronization for sorted leaf node lists [S1, unofficial].
+*   **When to Use:** Large datasets with significant empty space where coarse skipping is beneficial [S1, unofficial].
+*   **When Not to Use:** Small datasets where acceleration structure overhead dominates [S1, unofficial].
+
+## Background
+The hybrid kd-tree/uniform grid structure was presented by Zellmann et al. [ZML19] as a method for empty-space skipping in volume rendering [S1, unofficial]. Zellmann et al. [ZSL21] previously adapted a summed-volume table construction scheme for GPU-based architectures [S1, unofficial]. The uniform buffer variant is described in tutorials on volume visualization techniques, highlighting the inefficiency of hierarchical structure traversal compared to regular grids [S2, unofficial].
+
+## Sources
+[S1] Skalierbares Webbasiertes Volume Rendering großer biomedizinischer Datensätze, https://doi.org/10.34726/hss.2023.106203, fetched 2026-10-26 (unofficial)
+[S2] Volume Visualization and Volume Rendering Techniques, https://www.cs.unh.edu/~cs880/visualization/Meissner-VolRenderingEGTutorial-rdb.pdf, fetched 2026-10-27 (unofficial)

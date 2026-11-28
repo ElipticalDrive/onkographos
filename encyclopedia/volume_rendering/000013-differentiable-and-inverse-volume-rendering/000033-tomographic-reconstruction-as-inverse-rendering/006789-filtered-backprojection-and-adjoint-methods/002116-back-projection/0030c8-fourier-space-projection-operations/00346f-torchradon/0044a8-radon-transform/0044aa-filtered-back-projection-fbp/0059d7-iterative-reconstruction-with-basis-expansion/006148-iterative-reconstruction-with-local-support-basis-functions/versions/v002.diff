@@ -1,0 +1,153 @@
+--- v001.md
++++ v002.md
+@@ -8,19 +8,19 @@
+ ## How it works
+ **Inputs:**
+-- A set of $N$ images from different camera viewpoints.
+-- Camera calibration data (intrinsics and extrinsics) for each viewpoint.
+-- A 3D voxel grid defining the spatial domain.
+-- A visual hull mask indicating regions where density is known to be zero.
++- A set of $N$ images from different camera viewpoints [S1].
++- Camera calibration data (intrinsics and extrinsics) for each viewpoint [S1].
++- A 3D voxel grid defining the spatial domain [S1].
++- A visual hull mask indicating regions where density is known to be zero [S1].
+ 
+ **Outputs:**
+-- A vector of coefficients $\mathbf{a}$ representing the density field.
+-- The reconstructed 3D density field $\phi$.
++- A vector of coefficients $\mathbf{a}$ representing the density field [S1].
++- The reconstructed 3D density field $\phi$ [S1].
+ 
+ **Data Structures:**
+-- **Voxel Grid:** A regular 3D grid of resolution $R_x \times R_y \times R_z$.
++- **Voxel Grid:** A regular 3D grid defining the spatial domain [S1].
+ - **Basis Functions:** Defined on the voxel grid. Two types are described:
+-    1.  **Box Basis:** Defined on a single voxel $i$.
+-    2.  **Trilinear Basis:** Defined on a $2 \times 2 \times 2$ block of voxels, centered at the voxel corner, with one-voxel overlap in every dimension to ensure smooth blending [S1].
+-- **System Matrix $S$:** A sparse matrix of size $N_{pixels} \times N_{basis}$. Rows correspond to pixels, columns to basis functions. Entry $s_{ni}$ is the integral of the $i$-th basis function along the backprojected ray of pixel $p$.
++    1. **Box Basis:** Defined on a single voxel $i$ [S1].
++    2. **Trilinear Basis:** Arranged on the voxel grid with a one-voxel overlap in every dimension to ensure smooth blending [S1].
++- **System Matrix $S$:** A sparse matrix where rows correspond to pixels and columns to basis functions. Entry $s_{ni}$ is the integral of the $i$-th basis function along the backprojected ray of pixel $p$ [S1].
+ 
+ **Steps:**
+@@ -45,86 +45,64 @@
+         Let $x_1$ and $x_2$ be the intersection points of ray $c_n$ with voxel $i$. The entry is the distance between these points [S1]:
+         $$ s_{ni} = \|x_2 - x_1\| \quad (4) $$
+-    -   **Trilinear Basis:** Arranged on the voxel grid with one-voxel overlap in every dimension [S1]. The intersection of the ray with the support is a cubic polynomial. This polynomial is integrated analytically [S1].
++    -   **Trilinear Basis:** Arranged on the voxel grid with one-voxel overlap in every dimension [S1]. The intersection of the ray with the support is a cubic polynomial, which is integrated analytically [S1].
+ 
+ 4.  **Restrict Solution Space (Visual Hull):**
+-    Discard variables (coefficients $a_i$) corresponding to basis functions entirely outside the visual hull (known to be zero) [S1]. This reduces the size of $\mathbf{a}$ and $S$ [S1].
++    Discard variables (coefficients $a_i$) corresponding to basis functions entirely outside the visual hull (known to be zero) [S1]. This restricts the solution space by keeping only coefficients that need to be computed [S1].
+ 
+ 5.  **Solve Linear System:**
+-    Solve for $\mathbf{a}$ using a least-squares approach [S1]:
+-    $$ \mathbf{a} = (S^T S)^{-1} S^T \mathbf{p} \quad (5) $$
+-    Note: The matrix $S$ is often ill-conditioned with a large condition number (quotient of largest to smallest singular value), making direct inversion difficult [S1]. Iterative solvers or regularization may be required in practice, though the source specifies the least-squares formulation [S1].
++    Compute a least-squares solution $\mathbf{a} = (S^T S)^{-1} S^T \mathbf{p}$, but solve it via an iterative method due to ill-conditioning [S1]. The matrix $S$ is often ill-conditioned with a large condition number (quotient of largest to smallest singular value), making direct inversion difficult [S1].
+ 
+ **Pseudocode:**
+ 
+ ```python
++import math
++
+ def reconstruct_density(pixels, cameras, voxel_grid, visual_hull_mask, basis_type='box'):
+-    """
+-    Reconstructs density field using iterative reconstruction with local support basis functions.
+-    
+-    Args:
+-        pixels: List of pixel intensities for all cameras.
+-        cameras: List of camera objects with projection matrices.
+-        voxel_grid: 3D grid defining voxel boundaries.
+-        visual_hull_mask: 3D boolean array, True where density may exist.
+-        basis_type: 'box' or 'trilinear'.
+-        
+-    Returns:
+-        a: Vector of basis coefficients.
+-    """
+     # 1. Identify active basis functions based on visual hull
+-    active_basis_indices = []
+-    for i, basis in enumerate(voxel_grid.basis_functions(basis_type)):
+-        if basis.intersects(visual_hull_mask):
+-            active_basis_indices.append(i)
+-            
++    active_indices = []
++    for i, bounds in enumerate(voxel_grid.basis_bounds(basis_type)):
++        if bounds.intersects(visual_hull_mask):
++            active_indices.append(i)
++
+     num_pixels = len(pixels)
+-    num_active_basis = len(active_basis_indices)
+-    
+-    # 2. Construct sparse matrix S
+-    # S is num_pixels x num_active_basis
+-    S = sparse_matrix(num_pixels, num_active_basis)
+-    
++    num_active = len(active_indices)
++
++    # 2. Construct matrix S using standard lists
++    S = [[0.0] * num_active for _ in range(num_pixels)]
++
+     for p_idx, pixel in enumerate(pixels):
+-        # Get backprojected ray for this pixel
+         ray = cameras[pixel.camera_id].backproject_ray(pixel.u, pixel.v)
+-        
+-        for basis_col, basis_idx in enumerate(active_basis_indices):
+-            basis = voxel_grid.basis_functions(basis_type)[basis_idx]
+-            
+-            # Compute integral of basis function along ray
+-            # For box: distance between intersection points
+-            # For trilinear: analytical integral of cubic polynomial
++        for col, basis_idx in enumerate(active_indices):
+             if basis_type == 'box':
+-                x1, x2 = ray.intersect_voxel(basis.voxel_bounds)
+-                s_val = norm(x2 - x1)
++                x1, x2 = ray.intersect_voxel(voxel_grid.basis_bounds(basis_idx))
++                # Euclidean distance ||x2 - x1||
++                S[p_idx][col] = math.sqrt(sum((x2[j] - x1[j])**2 for j in range(3)))
+             elif basis_type == 'trilinear':
+-                # Intersection is cubic polynomial; integrate analytically
+-                poly = ray.intersect_trilinear_support(basis.grid_position)
+-                s_val = integrate_analytically(poly)
++                # Intersection is a cubic polynomial c0 + c1*t + c2*t^2 + c3*t^3
++                poly_coeffs = ray.intersect_trilinear_support(voxel_grid.basis_position(basis_idx))
++                # Analytical integral from 0 to 1: c0 + c1/2 + c2/3 + c3/4
++                S[p_idx][col] = poly_coeffs[0] + poly_coeffs[1]/2 + poly_coeffs[2]/3 + poly_coeffs[3]/4
+             else:
+                 raise ValueError("Unknown basis type")
+-                
+-            S[p_idx, basis_col] = s_val
+-            
++
+     # 3. Solve least squares system: a = (S^T S)^-1 S^T p
+-    # Note: S^T S may be ill-conditioned [S1]
+-    StS = S.transpose() @ S
+-    StP = S.transpose() @ pixels
+-    
+-    # Use a stable solver (e.g., conjugate gradient or SVD) due to ill-conditioning [S1]
+-    # Direct inversion is discouraged due to large condition number [S1]
+-    a = solve_linear_system(StS, StP)
+-    
++    # Compute S^T S and S^T p
++    StS = [[sum(S[r][c] * S[r][k] for r in range(num_pixels)) for k in range(num_active)] for c in range(num_active)]
++    StP = [sum(S[r][c] * pixels[r] for r in range(num_pixels)) for c in range(num_active)]
++
++    # The source specifies solving via an iterative method due to ill-conditioning [S1].
++    # Standard iterative solver (e.g., Conjugate Gradient) implementation omitted.
++    a = [0.0] * num_active
+     return a
+ ```
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Matrix construction is $O(3n)$ per ray/basis pair due to voxel-aligned intersection optimization, where $n$ is the number of planes intersected [S1]. Solving the linear system depends on the solver; direct inversion is $O(N^3)$ but unstable due to ill-conditioning [S1].
++- **Time Complexity:** Matrix construction is $O(3n)$ per ray/basis pair due to voxel-aligned intersection optimization, where $n$ is the number of planes intersected [S1]. Solving the linear system uses an iterative method due to ill-conditioning [S1].
+ - **Memory Complexity:** The matrix $S$ is sparse, requiring memory proportional to the number of non-zero entries, which is significantly less than the full matrix required by Fourier basis functions [S1].
+-- **Strengths:** Allows high-quality reconstruction from a small number of camera images (sparse-view) by restricting the solution space with a visual hull [S1]. Handles perspective projection correctly [S1]. Trilinear basis functions allow smooth blending and hardware-accelerated visualization [S1].
++- **Strengths:** Allows high-quality reconstruction from a small number of camera images (sparse-view) by restricting the solution space with a visual hull [S1]. Handles perspective projection correctly [S1]. Trilinear basis functions are arranged with a one-voxel overlap in every dimension to ensure smooth blending during rendering and are well suited for graphics hardware visualization [S1].
+ - **Limitations:** The system matrix $S$ is ill-conditioned, making inversion difficult [S1]. Requires a static camera setup for dynamic flames [S1]. Assumes negligible absorption/scattering and proportional self-emission [S1].
+ 
+ ## Background
+-Originated in the paper "Image-based tomographic reconstruction of flames" [S1]. It was developed to address the difficulty of generating convincing computer-animated fire, which is chaotic and hard to simulate. The method adapts algebraic reconstruction techniques (ART) to tomography, differing from Radon transform methods by using local support basis functions and a visual hull constraint [S1]. It is applicable to static camera setups observing dynamic flames, enabling fast processing of multi-video sequences for time-varying models [S1].
++Originated in the paper "Image-based tomographic reconstruction of flames" [S1]. It was developed to address the difficulty of generating convincing computer-animated fire, which is chaotic and hard to simulate [S1]. The method adapts algebraic reconstruction techniques (ART) to tomography, differing from Radon transform methods by using local support basis functions and a visual hull constraint [S1]. It is applicable to static camera setups observing dynamic flames, enabling fast processing of multi-video sequences for time-varying models [S1].
+ 
+ ## Sources

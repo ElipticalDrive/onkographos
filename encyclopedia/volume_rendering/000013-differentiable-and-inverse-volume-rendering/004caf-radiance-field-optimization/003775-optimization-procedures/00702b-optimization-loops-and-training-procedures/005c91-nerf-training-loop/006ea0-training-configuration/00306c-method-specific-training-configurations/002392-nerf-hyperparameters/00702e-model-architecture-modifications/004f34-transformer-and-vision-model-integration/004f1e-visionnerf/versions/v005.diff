@@ -1,0 +1,312 @@
+--- v004.md
++++ v005.md
+@@ -4,212 +4,116 @@
+ 
+ ## Overview
+-VisionNeRF is a novel view synthesis method that infers a 3D radiance field representation from a single unposed input image, addressing the degradation in rendering quality caused by self-occlusion when target views are distant from the source [S1]. It distinguishes itself from sibling methods like [ViT-NeRF](13878-vit-nerf.md) and [TransNeRF](13907-transnerf.md) by explicitly combining global semantic features from a Vision Transformer (ViT) with local appearance features from a 2D CNN, enabling the retrieval of relevant features for occluded regions via self-attention rather than relying on geometric alignment or canonical coordinate systems [S1].
++VisionNeRF is a novel view synthesis method that infers a 3D representation from a single unposed input image by combining global features learned from a Vision Transformer (ViT) and local appearance features extracted from a 2D CNN, rendered via a NeRF-based MLP [S1]. It addresses the degradation of rendering quality in occluded regions caused by self-occlusion in standard image-conditioned models, which incorrectly query features from visible surfaces when the target view pixel is invisible from the input view [S1]. Unlike [ViT-NeRF](13878-vit-nerf.md) which focuses on multi-view consistency or [TransNeRF](13907-transnerf.md) which may use different transformer architectures for scene encoding, VisionNeRF explicitly constructs a hybrid 3D representation using global ViT tokens and local CNN features to enable long-range dependency modeling for unseen regions without requiring camera pose information [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A single unposed image $I_s$ captured at camera $s$. No camera pose information is required [S1].
+-*   **Output:** A rendered novel view image for a target viewpoint defined by a camera pose and intrinsic parameters.
++*   Input: A single unposed image $I_s$ at camera $s$. No camera pose information is required [S1].
++*   Output: A rendered novel view image for a target camera position and orientation [S1].
+ 
+ **Data Structures:**
+-1.  **Feature Tokens:** A sequence of vectors resulting from the ViT encoder. If the input image is $H \times W$ and patch size is $P \times P$, the number of tokens is $N = (H/P) \times (W/P)$. Each token has dimension $D$ (the ViT embedding dimension) [S1].
+-2.  **Multi-level Feature Maps:** A set of 2D feature maps at different resolutions (coarse-to-fine) derived from the unflattened and resampled tokens. These maps store global information aligned with spatial coordinates [S1].
+-3.  **Local Feature Maps:** 2D feature maps extracted directly from a CNN backbone, capturing high-frequency local details [S1].
+-4.  **Radiance Field MLP:** A multi-layer perceptron that takes concatenated global and local features as input and outputs volume density $\sigma$ and view-dependent color $\mathbf{c}$ [S1].
++1.  **Feature Tokens:** A sequence of vectors produced by the ViT encoder. If the input image is $H \times W$ and the ViT uses patches of size $P \times P$, the number of tokens is $N = (H/P) \times (W/P)$. Each token is a vector of dimension $D_{vit}$ [S1].
++2.  **Multi-level Feature Maps:** A set of 2D feature maps at different resolutions, derived from unflattening and resampling the ViT tokens [S1].
++3.  **Local Feature Maps:** 2D feature maps extracted by the CNN backbone, capturing local details [S1].
++4.  **Radiance Field MLP:** A multi-layer perceptron that takes 3D coordinates, viewing directions, and fused features as input to predict density $\sigma$ and color $\mathbf{c}$ [S1].
+ 
+-**Numbered Steps:**
++**Steps:**
++1.  **Global Feature Extraction:** Lift the input 2D image $I_s$ into feature tokens and apply a Vision Transformer (ViT) to learn global information [S1].
++2.  **Global Feature Resampling:** Unflatten the feature tokens and resample them into multi-level feature maps to capture global information in a coarse-to-fine manner [S1].
++3.  **Local Feature Extraction:** Extract local features from the input image using a 2D convolutional neural network (CNN) to capture details and appearance [S1].
++4.  **Feature Fusion and Conditioning:** For a 3D point $\mathbf{x}$ sampled along a ray, project it to the input image plane to get $\pi(\mathbf{x})$. Query the global multi-level feature maps and local CNN feature maps at $\pi(\mathbf{x})$. Fuse these features.
++5.  **Volume Rendering:** Pass the 3D point $\mathbf{x}$, viewing direction $\mathbf{d}$, and the fused features into the Radiance Field MLP to predict density $\sigma$ and color $\mathbf{c}$. Perform standard volumetric rendering to produce the final pixel color [S1].
+ 
+-1.  **Global Feature Extraction:**
+-    *   Divide the input image $I_s$ into non-overlapping patches of size $P \times P$.
+-    *   Linearly embed each patch into a $D$-dimensional vector.
+-    *   Add positional embeddings to the patch embeddings.
+-    *   Pass the sequence of embedded patches through a Vision Transformer (ViT) encoder consisting of $L$ transformer blocks. Each block applies multi-head self-attention and a feed-forward network.
+-    *   The output is a sequence of feature tokens $\mathbf{T} \in \mathbb{R}^{N \times D}$, where $N$ is the number of patches [S1].
+-
+-2.  **Feature Resampling:**
+-    *   Unflatten the feature tokens $\mathbf{T}$ into a 2D grid of shape $(H/P, W/P, D)$.
+-    *   Resample these features into multi-level feature maps $\{\mathbf{F}_g^k\}$ at various resolutions (e.g., $1/4, 1/8, 1/16$ of the original image size) using interpolation or learned upsampling layers. This creates a coarse-to-fine global representation [S1].
+-
+-3.  **Local Feature Extraction:**
+-    *   Pass the input image $I_s$ through a 2D Convolutional Neural Network (CNN) backbone (e.g., ResNet).
+-    *   Extract feature maps $\mathbf{F}_l$ at corresponding resolutions to the global feature maps. These maps capture local appearance details and high-frequency textures [S1].
+-
+-4.  **Volume Rendering:**
+-    *   For a target viewpoint, sample points $\mathbf{x}_i$ along each camera ray.
+-    *   For each point $\mathbf{x}_i$, query the global feature maps $\mathbf{F}_g$ and local feature maps $\mathbf{F}_l$ at the 2D projection of $\mathbf{x}_i$ onto the input image plane. Note: Since the input is unposed, the projection is implicit or handled via the learned correspondence established by the transformer's attention mechanism during training [S1, G]. *Note: The source states the method uses an "explicit mapping between the input image and the 3D point query" via per-pixel information from feature maps, but does not specify the exact geometric projection formula for unposed inputs. It relies on the learned global-local conditioning.*
+-    *   Concatenate the sampled global features $\mathbf{f}_g$ and local features $\mathbf{f}_l$.
+-    *   Feed the concatenated vector $[\mathbf{f}_g; \mathbf{f}_l]$ into the Radiance Field MLP.
+-    *   The MLP outputs density $\sigma_i$ and color $\mathbf{c}_i$ for each point.
+-    *   Compute the final pixel color $C$ using standard differentiable volume rendering integration:
+-        $$ C = \sum_{i=1}^{N} T_i (1 - \exp(-\sigma_i \delta_i)) \mathbf{c}_i $$
+-        where $T_i = \exp(-\sum_{j=1}^{i-1} \sigma_j \delta_j)$ is the accumulated transmittance, and $\delta_i$ is the distance between adjacent samples [S1, G].
++**Pseudocode:**
++```python
++def vision_nerf_render(ray_origins, ray_directions, input_image):
++    # Step 1: Global Feature Extraction
++    # Lift image to tokens and apply ViT
++    # Assume ViT processes patches of size P x P
++    H, W, C = input_image.shape
++    P = 16  # Example patch size
++    num_patches_h = H // P
++    num_patches_w = W // P
++    
++    # Extract patches and linear projection to get tokens
++    patches = extract_patches(input_image, patch_size=P) # Shape: (N, P*P*C)
++    tokens = linear_projection(patches) # Shape: (N, D_vit)
++    
++    # Apply Vision Transformer encoder layers (Self-Attention + MLP)
++    global_tokens = vit_encoder(tokens) # Shape: (N, D_vit)
++    
++    # Step 2: Global Feature Resampling
++    # Reshape tokens back to spatial grid
++    global_grid = reshape_tokens_to_grid(global_tokens, num_patches_h, num_patches_w, D_vit)
++    
++    # Resample to multiple levels (coarse-to-fine)
++    # This creates a pyramid of feature maps
++    global_features_pyramid = resample_to_levels(global_grid, levels=[1, 2, 4]) 
++    # Each level is a feature map of shape (H_i, W_i, D_vit)
++    
++    # Step 3: Local Feature Extraction
++    # Extract local features using a CNN backbone
++    local_features = cnn_backbone(input_image) # Shape: (H, W, D_cnn)
++    
++    # Step 4: Feature Fusion and Conditioning
++    # For each ray, sample points and query features
++    num_samples = 128
++    z_vals = sample_z_vals(ray_origins, ray_directions, num_samples)
++    points_3d = ray_origins + ray_directions * z_vals[:, None] # Shape: (Batch, N_samples, 3)
++    
++    # Project 3D points to 2D image plane to get 2D coordinates
++    # This requires the intrinsic matrix K of the input camera
++    # Since input is unposed, we assume the input image corresponds to a known 
++    # canonical view or the projection is done relative to the input view's 
++    # coordinate system. The method assumes an explicit mapping between 
++    # input image pixels and 3D points.
++    uv_coords = project_to_2d(points_3d, K) # Shape: (Batch, N_samples, 2)
++    
++    # Query global features from pyramid
++    # Interpolate from the appropriate level based on depth or fixed strategy
++    global_feat = interpolate_features(uv_coords, global_features_pyramid)
++    
++    # Query local features
++    local_feat = interpolate_features(uv_coords, local_features)
++    
++    # Fuse features (e.g., concatenation or addition)
++    fused_feat = concatenate(global_feat, local_feat)
++    
++    # Step 5: Volume Rendering
++    # Pass points, directions, and fused features to MLP
++    # Directions are normalized ray directions
++    density_and_color = radiance_field_mlp(points_3d, ray_directions, fused_feat)
++    
++    sigma = density_and_color[..., 0] # Density
++    color = density_and_color[..., 1:] # Color
++    
++    # Standard volumetric rendering
++    weights = compute_weights(sigma, z_vals)
++    rendered_color = sum(weights * color)
++    
++    return rendered_color
++```
+ 
+ **Parameters:**
+-*   **Input Image Resolution:** Not given in the sources.
+-*   **Patch Size ($P$):** Not given in the sources.
+-*   **ViT Depth ($L$):** Not given in the sources.
+-*   **Embedding Dimension ($D$):** Not given in the sources.
+-*   **MLP Layers:** Not given in the sources.
++*   Input: A single unposed image $I_s$ [S1].
++*   Coordinate System: Viewer-centered coordinate system. The method does not enforce constraints like symmetry or canonical coordinate systems [S1].
++*   Dataset: ShapeNet dataset including 13 object categories, as well as real-world images [S1].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Self-occlusion:** Standard image-conditioned models (e.g., PixelNeRF) query features along the ray corresponding to the visible surface in the input view. If a target view pixel is invisible from the input view (e.g., a car's wheel occluded by the car body), the model incorrectly uses features from other visible surfaces (e.g., the car's window) [S1]. VisionNeRF mitigates this by using self-attention to find long-range dependencies, retrieving relevant features from distant parts of the source view for occluded regions [S1].
+-*   **Coordinate System:** The method uses a viewer-centered coordinate system and does not enforce constraints like symmetry or canonical coordinate systems [S1].
+-
+-**Pseudocode:**
+-
+-```python
+-import torch
+-import torch.nn as nn
+-import torch.nn.functional as F
+-
+-class VisionNeRF:
+-    def __init__(self, vit_model, cnn_backbone, mlp, patch_size=16):
+-        """
+-        Initialize VisionNeRF.
+-        :param vit_model: Pre-trained or initialized Vision Transformer encoder.
+-        :param cnn_backbone: 2D CNN backbone for local features.
+-        :param mlp: Radiance field MLP.
+-        :param patch_size: Size of patches for ViT.
+-        """
+-        self.vit = vit_model
+-        self.cnn = cnn_backbone
+-        self.mlp = mlp
+-        self.patch_size = patch_size
+-        # Resampling layers for global features to multi-level maps
+-        self.global_resampler = GlobalFeatureResampler()
+-        # Resampling layers for local features to match global levels
+-        self.local_resampler = LocalFeatureResampler()
+-
+-    def extract_global_features(self, image):
+-        """
+-        Lift 2D image to feature tokens and apply ViT.
+-        :param image: Input image tensor of shape (B, C, H, W).
+-        :return: Global feature maps at multiple levels.
+-        """
+-        # 1. Patch Embedding
+-        # Assuming ViT expects (B, N, D)
+-        patches = image.unfold(2, self.patch_size, self.patch_size).unfold(3, self.patch_size, self.patch_size)
+-        patches = patches.permute(0, 2, 3, 1, 4, 5).reshape(image.shape[0], -1, self.patch_size * self.patch_size * image.shape[1])
+-        # Linear projection to D dimensions (simplified)
+-        tokens = self.vit.patch_embedding(patches)
+-        
+-        # 2. ViT Encoder
+-        tokens = self.vit.encoder(tokens)
+-        
+-        # 3. Unflatten and Resample
+-        # Unflatten to (B, H/P, W/P, D)
+-        h, w = image.shape[2] // self.patch_size, image.shape[3] // self.patch_size
+-        grid_tokens = tokens.reshape(image.shape[0], h, w, -1)
+-        
+-        # Resample to multi-level feature maps (e.g., 1/4, 1/8, 1/16)
+-        global_maps = self.global_resampler(grid_tokens)
+-        return global_maps
+-
+-    def extract_local_features(self, image):
+-        """
+-        Extract local features using CNN.
+-        :param image: Input image tensor.
+-        :return: Local feature maps at multiple levels.
+-        """
+-        local_maps = self.cnn(image)
+-        # Resample to match global map levels
+-        local_maps_resampled = self.local_resampler(local_maps)
+-        return local_maps_resampled
+-
+-    def render(self, global_maps, local_maps, ray_origins, ray_directions, near, far):
+-        """
+-        Render novel view using volume rendering.
+-        :param global_maps: List of global feature maps at different levels.
+-        :param local_maps: List of local feature maps at different levels.
+-        :param ray_origins: Tensor of ray origins (B, N, 3).
+-        :param ray_directions: Tensor of ray directions (B, N, 3).
+-        :param near: Near plane distance.
+-        :param far: Far plane distance.
+-        :return: Rendered image colors.
+-        """
+-        # Sample points along rays
+-        t_vals = torch.linspace(0., 1., 128) # 128 samples per ray
+-        z_vals = near * (1. - t_vals) + far * t_vals
+-        points = ray_origins.unsqueeze(1) + ray_directions.unsqueeze(1) * z_vals.unsqueeze(2)
+-        
+-        # Query features at points
+-        # Note: The exact projection from 3D points to 2D feature maps for unposed input is implicit
+-        # in the training process via the learned correspondence. Here we assume a query function
+-        # that retrieves features based on the learned mapping.
+-        global_features = self.query_features(global_maps, points)
+-        local_features = self.query_features(local_maps, points)
+-        
+-        # Concatenate features
+-        combined_features = torch.cat([global_features, local_features], dim=-1)
+-        
+-        # MLP to predict density and color
+-        density, color = self.mlp(combined_features)
+-        
+-        # Volume rendering
+-        weights = density * torch.sigmoid(-density) # Approximation for alpha
+-        transmittance = torch.cumprod(torch.cat([torch.ones_like(weights[..., :1]), 1. - weights + 1e-10], dim=-1)[:, :-1], dim=-1)
+-        colors = (weights * transmittance * color).sum(dim=-2)
+-        
+-        return colors
+-
+-    def query_features(self, feature_maps, points):
+-        """
+-        Query feature maps at 3D points.
+-        This is a placeholder for the specific projection logic used in VisionNeRF
+-        which maps 3D points to 2D input image coordinates implicitly via the transformer's attention.
+-        """
+-        # [G] In practice, this involves projecting 3D points to the 2D input image plane
+-        # and sampling from the feature maps. Since the input is unposed, the projection
+-        # is learned or approximated. For implementation, one might use a learned
+-        # projection head or assume a canonical view during training.
+-        # Here we assume a simple trilinear interpolation for demonstration.
+-        # The actual VisionNeRF paper does not provide the explicit projection formula
+-        # for unposed inputs, relying on the end-to-end training of the MLP with the
+-        # feature maps as conditioning.
+-        pass
+-
+-class GlobalFeatureResampler(nn.Module):
+-    def __init__(self):
+-        super().__init__()
+-        # Define upsampling layers for coarse-to-fine maps
+-        self.upsample1 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
+-        self.upsample2 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
+-
+-    def forward(self, tokens):
+-        # tokens: (B, H, W, D)
+-        f1 = self.upsample1(tokens.permute(0, 3, 1, 2)).permute(0, 2, 3, 1)
+-        f2 = self.upsample2(f1.permute(0, 3, 1, 2)).permute(0, 2, 3, 1)
+-        return [tokens, f1, f2]
+-
+-class LocalFeatureResampler(nn.Module):
+-    def __init__(self):
+-        super().__init__()
+-        self.upsample1 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
+-        self.upsample2 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
+-
+-    def forward(self, features):
+-        # features: list of CNN feature maps at different scales
+-        # Resample to match global map levels
+-        f1 = self.upsample1(features[0])
+-        f2 = self.upsample2(f1)
+-        return [features[0], f1, f2]
+-```
++*   **Self-occlusion:** When a target view pixel is invisible from the input view, standard image-conditioned models incorrectly use features from other visible surfaces (e.g., using window features to render a wheel). VisionNeRF mitigates this by using self-attention to find long-range dependencies, allowing it to retrieve relevant features from distant parts of the source view for occluded regions [S1].
++*   **Precision:** Not given in the sources.
++*   **Boundaries:** Not given in the sources.
++*   **Degenerate Input:** Not given in the sources.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** Not given in the sources.
+-*   **Measured Performance:** On the ShapeNet dataset, VisionNeRF achieves LPIPS: 0.09 and PSNR: 21.03 for novel views. This compares to PixelNeRF's LPIPS: 0.20 and PSNR: 21.85 [S1].
+-*   **Strengths:**
+-    *   Handles self-occlusion better than local-feature-only models by using global attention to retrieve features from distant parts of the source view [S1].
+-    *   Renders richer details and more accurate structure in unseen regions [S1].
+-    *   Generalizes across multiple object categories using a single model [S1].
+-    *   Works on real-world images [S1].
+-*   **Limitations:**
+-    *   PSNR is slightly lower than PixelNeRF (21.03 vs 21.85), though LPIPS is significantly better (0.09 vs 0.20), indicating better perceptual quality [S1].
+-    *   Does not enforce geometric constraints like symmetry, which might limit performance in highly symmetric scenes if not learned from data [S1].
+-*   **When to use:** When novel view synthesis is required from a single unposed image, especially when occluded regions are present and perceptual quality is prioritized over raw PSNR.
+-*   **When not to use:** When camera poses are known and high-precision geometric alignment is possible, or when PSNR is the primary metric and occlusion is minimal.
++*   **Time and Memory Complexity:** Not given in the sources.
++*   **Measured Performance:** On the ShapeNet dataset, the method achieves LPIPS: 0.09 and PSNR: 21.03 for novel views, compared to PixelNeRF's LPIPS: 0.20 and PSNR: 21.85 [S1].
++*   **Scaling:** Not given in the sources.
++*   **Strengths:** Renders richer details in occluded regions compared to existing approaches like PixelNeRF [S1]. Generalizes across multiple object categories using a single model [S1]. Works well on real-world images [S1].
++*   **Limitations:** Not given in the sources.
++*   **When to use it:** When novel view synthesis from a single unposed image is required, especially for scenes with significant self-occlusion where local features alone are insufficient [S1].
++*   **When not:** When camera pose information is available and multi-view consistency is already well-handled by other methods, or when computational resources are extremely limited and the overhead of ViT is prohibitive (though specific metrics are not provided).
+ 
+ ## Background
+-VisionNeRF was proposed by Wei-Sheng Lai, Ravi Ramamoorthi, and Tsung-Yi Lin, with work done while interning at Google and at NVIDIA [S1]. It was published in the IEEE Winter Conference on Applications of Computer Vision (WACV) in 2023 [S1]. The method builds on the principles of Neural Radiance Fields (NeRF) [31] and Vision Transformers (ViT) [11], addressing the limitations of existing image-conditioned models like PixelNeRF [59] and SRT [42] in handling self-occlusion and generalizing from single unposed images. It was trained and evaluated on the ShapeNet dataset [6] including 13 object categories, as well as real-world images [S1].
++VisionNeRF was proposed by Wei-Sheng Lai, Ravi Ramamoorthi, and Tsung-Yi Lin, with work done while interning at Google and at Google respectively [S1]. It was published in 2023 [S1]. The method addresses the problem of novel view synthesis from a single unposed image, building on the limitations of existing approaches that use local image features to reconstruct 3D objects, which often render blurry predictions at viewpoints distant from the source view [S1]. It combines advances in Vision Transformers (ViT) and Neural Radiance Fields (NeRF) [S1].
+ 
+ ## Sources

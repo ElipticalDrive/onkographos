@@ -1,0 +1,169 @@
+# JPEG-Clear for 3D voxmaps
+
+Also called: scale-0 approximation, top-down pyramid encoding, top-down storage paradigm
+
+## Overview
+JPEG-Clear is a storage and retrieval method for volumetric data that replaces the original full-resolution dataset with a set of difference (diff) files derived from a multi-resolution pyramid, allowing visualization tools to access approximations without loading the full-resolution data [S1, unofficial]. Unlike bottom-up approaches where pyramids are derived from primary data for progressive refinement, this top-down approach allows access to approximations without needing the full-resolution dataset at all [S1, unofficial]. It builds on [Voxel Mipmap Generation](12422-voxel-mipmap-generation.md) by inverting the dependency: instead of generating lower resolutions from higher ones for caching, it stores the lowest resolution as the base and reconstructs higher resolutions via upsampling and difference addition.
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** Original full-resolution volumetric data (e.g., byte-valued voxels).
+- **Output:** A set of files containing the scale-0 approximation and scale-n diffs for $n=1 \dots N$, where $N$ is the scale corresponding to the original resolution.
+
+**Data Structures:**
+- **Scale-0 Approximation:** A single voxel (or minimal grid) representing the spatial average of the original dataset. Stored in its own file.
+- **Scale-n Diff:** A 3D grid of voxels at resolution $R_n$. Stored in its own file.
+- **File System Partitioning:** For high scales, diffs are partitioned into subcubes (e.g., $1024 \times 1024 \times 1024$) stored in separate files to enable efficient subvolume loading [S1, unofficial].
+
+**Algorithm Steps:**
+1. **Downsampling (Pyramid Generation):**
+   Generate the multi-resolution pyramid by successively downsampling the original full-resolution volume data using the Magic Kernel Sharp algorithm [S1, unofficial]. Dimensions are rounded up when halved.
+   - Let $V_0$ be the original volume at scale $N$.
+   - For $k = N$ down to 1:
+     - $V_{k-1} = \text{Downsample}(V_k, \text{MagicKernelSharp})$
+   - The lowest resolution level (e.g., $1 \times 1 \times 1$) is identified as the 'scale-0 representation' or 'fundamental voxel', which is the spatial average value of the original dataset [S1, unofficial].
+
+2. **Scale-0 Approximation Storage:**
+   - Store the scale-0 representation in its own data file as the 'scale-0 approximation' [S1, unofficial].
+   - This may be lossily encoded to save space. Note that due to round-off in each downsampling step, the stored value is an approximation of the true spatial average, depending on the number of bits per voxel used [S1, unofficial].
+   - In practice, the minimum scale stored is not scale 0, but a higher scale (e.g., scale 5) aligned with the minimum efficient file size of the file system [S1, unofficial].
+
+3. **Upsampling and Difference Computation:**
+   - For each scale $k$ from 1 to $N$:
+     - Upsample the scale-$(k-1)$ approximation to the resolution of scale $k$ using Magic Kernel Sharp to create the 'upsampled scale-$(k-1)$ approximation' [S1, unofficial].
+     - Compute the difference between the actual scale-$k$ representation ($V_k$) and the upsampled scale-$(k-1)$ approximation to create the 'scale-$k$ diff' [S1, unofficial].
+     - Store the scale-$k$ diff in its own file. This diff may be lossily encoded [S1, unofficial].
+
+4. **Reconstruction:**
+   - To reconstruct the volume at any scale $k$:
+     - Reload and decode the diff files from scale 1 up to scale $k$.
+     - Start with the scale-0 approximation.
+     - Upsample the current approximation to the next scale using Magic Kernel Sharp.
+     - Add the corresponding diff file to the upsampled approximation.
+     - Repeat until scale $k$ is reached [S1, unofficial].
+   - If lossless recovery of the original dataset is required despite lossy encoding of diffs, store an additional 'final diff' between the final-scale representation and the final-scale approximation [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def generate_pyramid_diffs(original_volume, magic_kernel_sharp_downsample, magic_kernel_sharp_upsample):
+    """
+    Generates the scale-0 approximation and scale-n diffs for JPEG-Clear encoding.
+    
+    Args:
+        original_volume: 3D array of the full-resolution volume data.
+        magic_kernel_sharp_downsample: Function to downsample a 3D volume by factor of 2.
+        magic_kernel_sharp_upsample: Function to upsample a 3D volume by factor of 2.
+        
+    Returns:
+        scale_0_approx: The fundamental voxel (spatial average).
+        diffs: List of diff arrays, where diffs[i] is the diff for scale i+1.
+    """
+    # Step 1: Generate the full pyramid via downsampling
+    # We store all levels of the pyramid temporarily to compute diffs
+    pyramid = [original_volume]
+    current_vol = original_volume
+    
+    # Continue downsampling until we reach a 1x1x1 volume or minimal practical scale
+    while current_vol.shape[0] > 1 or current_vol.shape[1] > 1 or current_vol.shape[2] > 1:
+        # Round up dimensions when halved is handled by the downsampling function
+        next_vol = magic_kernel_sharp_downsample(current_vol)
+        pyramid.append(next_vol)
+        current_vol = next_vol
+        
+    # pyramid[0] is original (scale N), pyramid[-1] is scale 0 (1x1x1)
+    num_scales = len(pyramid)
+    scale_0_repr = pyramid[-1]
+    
+    # Step 2: Store scale-0 approximation
+    # In practice, this might be lossily encoded. Here we assume raw storage for clarity.
+    scale_0_approx = scale_0_repr
+    
+    # Step 3: Compute diffs from bottom-up (scale 0 to N)
+    diffs = []
+    
+    # Iterate from scale 1 up to scale N
+    # pyramid indices: scale 0 is at index -1, scale 1 is at index -2, etc.
+    # We need to process from the smallest volume up to the largest
+    for i in range(len(pyramid) - 2, -1, -1):
+        # Current scale representation (higher resolution)
+        current_scale_repr = pyramid[i]
+        
+        # Previous scale representation (lower resolution)
+        prev_scale_repr = pyramid[i + 1]
+        
+        # Upsample the previous scale representation to match current scale
+        # Note: In the top-down paradigm, we conceptually upsample the stored approximation
+        # Here, we use the exact pyramid value for the "upsampled" version to compute the diff
+        # against the exact pyramid value. In a real implementation, the "upsampled" version
+        # would be derived from the stored scale-0 approx and previous diffs.
+        # However, for generation, we compare the actual downsampled data.
+        upsampled_prev = magic_kernel_sharp_upsample(prev_scale_repr)
+        
+        # Compute difference
+        diff = current_scale_repr - upsampled_prev
+        
+        diffs.append(diff)
+        
+    # Reverse diffs so diffs[0] corresponds to scale 1, diffs[1] to scale 2, etc.
+    diffs.reverse()
+    
+    return scale_0_approx, diffs
+
+def reconstruct_volume(scale_0_approx, diffs, magic_kernel_sharp_upsample, target_scale_index):
+    """
+    Reconstructs the volume at a specific scale using the top-down paradigm.
+    
+    Args:
+        scale_0_approx: The stored scale-0 approximation.
+        diffs: List of diff arrays.
+        magic_kernel_sharp_upsample: Function to upsample a 3D volume by factor of 2.
+        target_scale_index: The index of the scale to reconstruct (0 for scale 0, 1 for scale 1, etc.)
+        
+    Returns:
+        reconstructed_volume: The volume at the target scale.
+    """
+    current_approx = scale_0_approx
+    
+    # Iterate from scale 1 up to target_scale_index
+    for i in range(target_scale_index):
+        # Upsample current approximation to next scale
+        current_approx = magic_kernel_sharp_upsample(current_approx)
+        
+        # Add the diff for this scale
+        # diffs[i] corresponds to the diff between scale i and scale i+1
+        # Wait, let's align indices.
+        # If target_scale_index is 1, we need scale 1.
+        # We start with scale 0 approx.
+        # We upsample to scale 1 resolution.
+        # We add diffs[0] (which is the diff for scale 1).
+        current_approx = current_approx + diffs[i]
+        
+    return current_approx
+```
+
+**Parameters:**
+- **Magic Kernel Sharp:** The specific interpolation kernel used for both downsampling and upsampling. It is not the ideal sinc function, which leads to spectrum leakage [S1, unofficial].
+- **Bits per Voxel:** Can vary at each scale. The scale-0 approximation may use fewer bits, introducing round-off error [S1, unofficial].
+- **Minimum Scale:** In practice, storage often starts at a scale aligned with file system efficiency (e.g., scale 5) rather than scale 0 [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Round-off Error:** The stored scale-0 approximation is an approximation of the true spatial average due to round-off in each downsampling step [S1, unofficial].
+- **Spectrum Non-Zero:** The lower half of the Fourier spectrum of the scale-n diff is not exactly zero due to edge effects and the difference between Magic Kernel Sharp and the ideal sinc function, though it is approximately zero [S1, unofficial].
+- **Non-Linearity of Rendering:** Upsampling the rendered 2D image is not equivalent to rendering the upsampled 3D volume data because 3D rendering engines are generally non-linear operations [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** Generation requires $O(N)$ downsampling steps and $O(N)$ upsampling/difference steps, where $N$ is the number of scales. Reconstruction at scale $k$ requires $k$ upsampling and addition steps.
+- **Memory Complexity:** Storage is proportional to the sum of the sizes of the diff files. If lossless encoding is used, the total storage is roughly equal to the original dataset size [S1, unofficial]. Lossy encoding can reduce this significantly.
+- **Measured Performance:** In the example of a stag beetle scan ($494 \times 832 \times 832$ voxels, 342 MB uncompressed), the gzipped diff file set was 15.8 MB (lossless) or less with lossy encoding [S1, unofficial].
+- **Strengths:** Allows access to approximations without loading the full-resolution dataset. Enables "gigavoxel file" model where higher-scale diffs are partitioned into subcubes, allowing efficient subvolume loading [S1, unofficial].
+- **Limitations:** Requires Magic Kernel Sharp for both upsampling and downsampling. Reconstruction is sequential from the base scale.
+- **When to Use:** When visualization tools need to access multiple resolutions efficiently without loading the entire high-resolution dataset. Suitable for time-varying data if time is kept isolated from spatial directions [S1, unofficial].
+
+## Background
+JPEG-Clear was proposed by John Costella. It was implemented in ANSI C and demonstrated using the Drishti volume rendering application [S1, unofficial]. The method is applicable to time-varying (3+1D) volume data, where temporal upsampling and downsampling can be used for slow motion and cue-and-review, respectively, while keeping the time direction isolated from spatial directions [S1, unofficial].
+
+## Sources
+[S1] JPEG-Clear for 3D voxmaps, https://johncostella.com/volume/, fetched 2026-10-29 (unofficial)

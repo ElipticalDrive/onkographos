@@ -1,0 +1,225 @@
+# Volume Preparation & Canonical Resampling
+
+Also called: DICOM to NIfTI conversion pipeline, NIfTI cache preparation
+
+## Overview
+This method converts a source medical volume into a canonical NIfTI format, downsamples it to a maximum dimension of 320 per axis, and computes a display range for visualization [S1, unofficial]. It differs from sibling pipelines by focusing on geometric normalization and display-range calculation rather than segmentation, partitioning, or video extraction. It serves as the foundational step for creating immutable, standardized volume caches [S1, unofficial].
+
+## How it works
+**Inputs:** A source volume (typically DICOM series or raw 3D image data).
+**Outputs:** A canonical NIfTI file (`.nii` or `.nii.gz`) and associated metadata including display range parameters.
+
+**Data Structures:**
+The output is a NIfTI-1 or NIfTI-2 object containing:
+- `data`: 3D array of `float32` values.
+- `affine`: 4x4 transformation matrix mapping voxel indices to world coordinates.
+- `display_range`: Tuple `(lo, hi)` of `float32` values.
+
+**Steps:**
+
+1.  **Load and Validate:**
+    Load the source volume. Validate that:
+    - The volume is 3-dimensional.
+    - The minimum dimension size is at least 2.
+    - The total number of voxels does not exceed $512^3 \times 2$ [S1, unofficial].
+
+2.  **Canonical Orientation:**
+    Convert the volume to the closest canonical orientation (RAS+ for NIfTI) using `nibabel.as_closest_canonical` [S1, unofficial]. This ensures consistent spatial orientation across different source formats.
+
+3.  **Downsampling:**
+    Downsample the volume to a target dimension where no axis exceeds `max_dimension` (320) [S1, unofficial].
+    - Let $S$ be the current shape $(D, H, W)$ and $T$ be the target shape $(D', H', W')$.
+    - For each axis $i \in \{0, 1, 2\}$, if $S_i > 320$, set $T_i = 320$. Otherwise, $T_i = S_i$.
+    - Compute the scaling ratio for each axis to preserve voxel-center geometry:
+      $$ r_i = \frac{S_i - 1}{T_i - 1} $$
+    - Update the affine matrix scaling component. If $A$ is the current affine, the new affine $A'$ scales the rotation/translation part by $r_i$ in the respective column. Specifically, update $A'[:3, :3]$ such that the physical field of view is preserved [S1, unofficial].
+    - Resample the volume data from the original grid to the target grid using linear interpolation (`order=1`) [S1, unofficial].
+
+4.  **Data Cleaning and Display Range Calculation:**
+    - Convert the resampled data to `float32`.
+    - Replace any `NaN` values with `0` [S1, unofficial].
+    - Sample the data to compute percentiles efficiently. Determine a stride:
+      $$ \text{stride} = \max\left(1, \left\lfloor \frac{\text{total\_voxels}}{500,000} \right\rfloor \right) $$
+    - Extract samples at this stride. Filter for positive values only.
+    - If the number of positive samples is less than 100, fall back to using the full dataset for percentile calculation [S1, unofficial].
+    - Compute the 0.5th percentile ($p_{low}$) and 99.5th percentile ($p_{high}$) of the selected values [S1, unofficial].
+    - If $p_{high} \le p_{low}$, set $p_{high} = p_{low} + 1$ to ensure a valid display range [S1, unofficial].
+    - Store $(p_{low}, p_{high})$ as the display range.
+
+5.  **Save:**
+    Save the processed volume and metadata to an immutable cache file in NIfTI format [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+import nibabel as nib
+
+def prepare_volume(source_data, source_affine, max_dimension=320, max_voxels=512**3 * 2,
+                   percentile_low=0.5, percentile_high=99.5, resample_order=1):
+    # 1. Load and Validate
+    if source_data.ndim != 3:
+        raise ValueError("Volume must be 3D")
+    if min(source_data.shape) < 2:
+        raise ValueError("Minimum dimension must be >= 2")
+    if source_data.size > max_voxels:
+        raise ValueError(f"Total voxels {source_data.size} exceeds limit {max_voxels}")
+
+    # 2. Canonical Orientation
+    # nibabel's as_closest_canonical returns (img, affine)
+    # Assuming source_data is numpy array and source_affine is 4x4
+    img = nib.Nifti1Image(source_data, source_affine)
+    canonical_img = nib.as_closest_canonical(img)
+    canonical_data = canonical_img.get_fdata()
+    canonical_affine = canonical_img.affine
+
+    # 3. Downsample
+    shape = canonical_data.shape
+    target_shape = []
+    ratios = []
+    
+    for i, dim in enumerate(shape):
+        if dim > max_dimension:
+            target_dim = max_dimension
+        else:
+            target_dim = dim
+        target_shape.append(target_dim)
+        # Compute ratio to preserve voxel-center geometry
+        if target_dim > 1:
+            ratio = (dim - 1) / (target_dim - 1)
+        else:
+            ratio = 1.0
+        ratios.append(ratio)
+
+    target_shape = tuple(target_shape)
+    
+    # Update affine scaling
+    # The affine matrix maps voxel indices to world coordinates.
+    # We need to scale the spatial part of the affine to reflect the new voxel sizes.
+    # However, since we are resampling, we typically resample the data and keep the 
+    # physical extent. The ratio here is used to determine the new voxel spacing 
+    # if we were just scaling, but for resampling, we generate new data.
+    # The source notes specify updating affine scaling matrix. 
+    # In nibabel, if we resample, we usually create a new affine for the target grid.
+    # Let's assume we resample the data first, then adjust affine.
+    
+    # Resample data using linear interpolation
+    # We need to map from target grid to canonical grid
+    # Create coordinate grids
+    target_coords = np.mgrid[0:target_shape[0], 0:target_shape[1], 0:target_shape[2]]
+    target_coords = target_coords.reshape(3, -1).T
+    
+    # Map target coordinates to canonical coordinates using the inverse of the scaling
+    # The scaling factor from canonical to target is 1/ratio.
+    # So canonical_coord = target_coord * ratio + offset?
+    # Actually, the ratio is (old-1)/(new-1).
+    # To map a point in the new grid (0..new-1) to the old grid (0..old-1):
+    # old_idx = new_idx * ratio
+    # This preserves the center of the first and last voxels.
+    
+    mapped_coords = target_coords * np.array(ratios) # Element-wise multiplication per axis?
+    # No, ratios is a list [rx, ry, rz].
+    mapped_coords = np.column_stack([
+        target_coords[:, 0] * ratios[0],
+        target_coords[:, 1] * ratios[1],
+        target_coords[:, 2] * ratios[2]
+    ])
+    
+    # Use scipy.ndimage.map_coordinates for resampling
+    from scipy.ndimage import map_coordinates
+    # map_coordinates expects coordinates in the order of axes
+    # We need to transpose mapped_coords to (3, N)
+    coords = mapped_coords.T
+    
+    # Ensure coordinates are within bounds
+    coords[0] = np.clip(coords[0], 0, shape[0] - 1)
+    coords[1] = np.clip(coords[1], 0, shape[1] - 1)
+    coords[2] = np.clip(coords[2], 0, shape[2] - 1)
+    
+    resampled_data = map_coordinates(canonical_data, coords, order=resample_order, mode='nearest')
+    resampled_data = resampled_data.reshape(target_shape)
+
+    # 4. Data Cleaning and Display Range
+    data_float = resampled_data.astype(np.float32)
+    data_float[np.isnan(data_float)] = 0.0
+    
+    total_voxels = data_float.size
+    stride = max(1, total_voxels // 500000)
+    
+    # Sample data
+    # Flatten and sample
+    flat_data = data_float.flatten()[::stride]
+    
+    # Filter positive values
+    positive_values = flat_data[flat_data > 0]
+    
+    if positive_values.size < 100:
+        # Fall back to full sample
+        percentiles = np.percentile(data_float, [percentile_low, percentile_high])
+    else:
+        percentiles = np.percentile(positive_values, [percentile_low, percentile_high])
+        
+    lo, hi = percentiles
+    
+    if hi <= lo:
+        hi = lo + 1.0
+        
+    display_range = (lo, hi)
+    
+    # 5. Save
+    # Create new NIfTI image with resampled data and updated affine
+    # The affine needs to be updated to reflect the new voxel dimensions
+    # Original affine: A
+    # New affine: A' such that A' * [x, y, z, 1]^T = A * [x*ratio, y*ratio, z*ratio, 1]^T ?
+    # Actually, the physical coordinates of the voxel centers should remain consistent.
+    # If we downsample, the voxel size increases.
+    # Let's assume the affine is updated by scaling the rotation/scale part by the inverse of the ratio?
+    # The source notes say "update affine scaling matrix".
+    # Let's construct a new affine that maps the new grid to the same world space.
+    # The new grid has fewer voxels. The physical extent is the same.
+    # So the voxel size is larger.
+    # New affine = Old affine * diag(1/ratios) ? No.
+    # Let's just save with the canonical affine for now, noting that the data is resampled.
+    # In practice, nibabel's resample_to_img or similar handles this.
+    # For this implementation, we will create a new affine that scales the voxel dimensions.
+    
+    new_affine = canonical_affine.copy()
+    # Scale the first 3 columns of the affine by the inverse of the ratio?
+    # If ratio = (old-1)/(new-1), then new_voxel_size = old_voxel_size * ratio?
+    # No, ratio is how many old voxels fit in one new voxel step?
+    # If old=100, new=50, ratio = 99/49 ~ 2.
+    # So new voxel is 2x larger.
+    # So we scale the affine's spatial part by ratio.
+    for i in range(3):
+        new_affine[:3, i] *= ratios[i]
+        
+    new_img = nib.Nifti1Image(data_float, new_affine)
+    
+    return new_img, display_range
+```
+
+**Parameters:**
+- `max_dimension`: 320. Maximum allowed dimension per axis after downsampling [S1, unofficial].
+- `max_voxels`: $512^3 \times 2$. Hard limit on total voxel count for input validation [S1, unofficial].
+- `percentile_low`: 0.5. Lower bound for display range calculation [S1, unofficial].
+- `percentile_high`: 99.5. Upper bound for display range calculation [S1, unofficial].
+- `resample_order`: 1. Linear interpolation order for downsampling [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Affine Misalignment:** Downsampling without adjusting the affine scaling matrix causes spatial misalignment. This is handled by computing the ratio based on $(S_i - 1) / (T_i - 1)$ and updating the affine matrix accordingly [S1, unofficial].
+- **Display Range Failure:** Volumes with no positive values or flat distributions may result in invalid display ranges (e.g., $hi \le lo$). This is handled by falling back to the full sample if positive values are fewer than 100, and enforcing $hi = lo + 1$ if percentiles are equal [S1, unofficial].
+
+## Operating characteristics
+**Time Complexity:** Dominated by the resampling step, which is $O(N)$ where $N$ is the number of voxels in the target volume. The percentile calculation is $O(M)$ where $M$ is the number of sampled voxels.
+**Memory Complexity:** Requires memory for the source volume, the resampled volume, and the sampled data for percentile calculation.
+**Performance:** The method is optimized for speed by sampling data for percentile calculation rather than sorting the entire volume. The hard limit on input voxels ($512^3 \times 2$) prevents excessive memory usage on very large inputs.
+**Strengths:** Ensures consistent orientation and resolution across different source volumes, facilitating standardized visualization.
+**Limitations:** The fixed maximum dimension of 320 may lose detail for high-resolution volumes. The reliance on percentiles may not be suitable for all types of medical data (e.g., data with significant background noise).
+
+## Background
+This method is part of the preprocessing pipeline for medical volume visualization, specifically designed for the OpenMRI project [S1, unofficial]. It addresses the need for standardized, cacheable volume formats that can be efficiently rendered in web-based viewers. The use of NIfTI format ensures compatibility with a wide range of medical imaging tools.
+
+## Sources
+[S1] lev1nson/OpenMRI, https://github.com/lev1nson/OpenMRI, fetched 2026-10-26 (unofficial)

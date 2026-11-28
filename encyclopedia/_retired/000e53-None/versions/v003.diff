@@ -1,0 +1,322 @@
+--- v002.md
++++ v003.md
+@@ -1,130 +1,224 @@
+ # Plenoxels Interpolation Methods
+ 
+-Also called: Plenoxel Grid with Trilinear Interpolation, Trilinear Plenoxel
++Also called: Plenoxel Grid with Trilinear Interpolation, Plenoxel Trilinear Interpolation, Trilinear Plenoxel, Trilinear Plenoxel Interpolation
+ 
+ ## Overview
+-Plenoxels interpolation methods define a continuous radiance field over a sparse 3D voxel grid by storing spherical harmonic (SH) coefficients and opacity at voxel centers, enabling stable optimization and higher effective resolution than discrete voxel assumptions [S1]. It distinguishes itself from nearest-neighbor Plenoxels by providing a continuous function approximation that is critical for successful gradient-based optimization, and from tricubic methods by offering a favorable trade-off between smoothness and computational cost [S1].
++Plenoxels Interpolation Methods define a continuous plenoptic function throughout a sparse 3D voxel grid by trilinearly interpolating density and spherical harmonic (SH) coefficients stored at voxel centers [S1][S2, unofficial]. Unlike its sibling [Trilinear Interpolation](1531-trilinear-interpolation.md) which handles general rectilinear grids, this method specifically targets the optimization stability and effective resolution of radiance field representations [S1][S2, unofficial]. It distinguishes itself from [Multi-Texture Trilinear Estimation](1164-multi-texture-trilinear-estimation.md) and [Semi-Analytical Volume Rendering with Trilinear Interpolation](1312-semi-analytical-volume-rendering-with-trilinear-interpolatio.md) by integrating SH-based view-dependent color directly into the interpolation weights, and from [Radial Basis Function Interpolation](16091-radial-basis-function-interpolation.md) by using a structured grid rather than scattered points [S1][S2, unofficial]. The primary advantage is that trilinear interpolation produces a continuous function approximation critical for stable gradient-based optimization, outperforming nearest-neighbor approaches even at lower resolutions [S1][S2, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: A sparse 3D voxel grid containing optimized parameters; a 3D sample point $\mathbf{p}$; a viewing direction $\mathbf{v}$ [S1].
+-- Output: Radiance color $\mathbf{c}(\mathbf{p}, \mathbf{v})$ and opacity $\sigma(\mathbf{p})$ [S1].
++*   **Input:** A sparse 3D voxel grid containing optimized parameters; a ray origin $\mathbf{o}$ and direction $\mathbf{d}$; the viewing direction $\mathbf{d}$ for SH evaluation.
++*   **Output:** Transmittance $T$, density $\sigma$, and color $\mathbf{c}$ at sample points along the ray.
+ 
+ **Data Structures:**
+-The grid stores data at voxel centers. For each active voxel, the layout is:
+-- Opacity: 1 scalar value ($\sigma$) [S1].
+-- Spherical Harmonics Coefficients: 27 values (9 coefficients per color channel for degree 2 SH) [S1].
+-- Note: The sources specify storing RGB channels (zero-order SH) for background spheres to conserve memory [S1].
++The grid stores values at voxel centers. For each active voxel, the following data is stored:
++1.  **Density ($\sigma$):** A single scalar value.
++2.  **Spherical Harmonic Coefficients:** For each of the 3 color channels (RGB), 9 coefficients are stored (Degree 2 SH). Total: 27 coefficients per voxel.
++    *   Layout: A flat array of 28 floats per voxel (1 density + 27 SH coefficients).
++    *   Bit packing: Not specified in sources; typically stored as standard 32-bit floats [S1][S2, unofficial].
+ 
+ **Parameters:**
+-- Spherical Harmonics Degree: 2 [S1]. This requires 9 coefficients per color channel, totaling 27 harmonic coefficients per voxel plus 1 opacity coefficient [S1].
+-- Resolution: Typical synthetic scenes use $128^3$ to $512^3$ [S1].
+-
+-**Steps:**
+-1. **Locate Neighbors:** Identify the 8 nearest voxel centers surrounding the sample point $\mathbf{p}$ [S1]. Let these centers be $\mathbf{c}_i$ for $i \in \{0, \dots, 7\}$ [S1].
+-2. **Compute Weights:** Calculate trilinear interpolation weights $w_i$ based on the relative position of $\mathbf{p}$ within the unit cube defined by the 8 neighbors [S1].
+-3. **Interpolate Opacity:** Compute the opacity $\sigma(\mathbf{p})$ by trilinearly interpolating the opacity values $\sigma_i$ from the 8 neighbors:
+-   $$ \sigma(\mathbf{p}) = \sum_{i=0}^{7} w_i \sigma_i $$
+-4. **Interpolate SH Coefficients:** For each color channel $k \in \{R, G, B\}$, trilinearly interpolate the 9 SH coefficients $C_{i,j,k}$ (where $j$ indexes the 9 coefficients) from the 8 neighbors to obtain the interpolated coefficients $\hat{C}_{j,k}$:
+-   $$ \hat{C}_{j,k} = \sum_{i=0}^{7} w_i C_{i,j,k} $$
+-5. **Evaluate Radiance:** Evaluate the spherical harmonic basis functions $Y_j(\mathbf{v})$ for the viewing direction $\mathbf{v}$ [S1]. Compute the radiance for channel $k$ as:
+-   $$ c_k(\mathbf{p}, \mathbf{v}) = \sum_{j=0}^{8} \hat{C}_{j,k} Y_j(\mathbf{v}) $$
+-   The final color is $\mathbf{c} = [c_R, c_G, c_B]$ [S1].
++*   **Spherical Harmonics Degree:** 2. This requires 9 coefficients per color channel, totaling 27 harmonic coefficients per voxel [S1][S2, unofficial]. Higher orders confer minimal benefit [S1][S2, unofficial].
++*   **Grid Resolution:** Variable (e.g., $128^3$, $256^3$). Coarse-to-fine strategies may start at lower resolutions and upsample [S1].
++
++**Numbered Steps:**
++1.  **Ray Marching Setup:** Define sample points along the ray.
++2.  **Voxel Lookup:** For a sample point $\mathbf{p}$, identify the 8 nearest voxel centers surrounding $\mathbf{p}$ in the 3D grid.
++3.  **Barycentric Weights:** Compute the trilinear interpolation weights based on the relative position of $\mathbf{p}$ within the unit cube defined by the 8 voxels. Let $\mathbf{w} = (w_x, w_y, w_z)$ be the fractional coordinates of $\mathbf{p}$ within the voxel cell, where $0 \le w_i < 1$. The weight for a corner voxel at offset $(i, j, k)$ where $i,j,k \in \{0,1\}$ is:
++    $$
++    W_{ijk} = \begin{cases} 
++    (1-w_x)(1-w_y)(1-w_z) & \text{if } i=0, j=0, k=0 \\
++    w_x(1-w_y)(1-w_z) & \text{if } i=1, j=0, k=0 \\
++    (1-w_x)w_y(1-w_z) & \text{if } i=0, j=1, k=0 \\
++    w_x w_y (1-w_z) & \text{if } i=1, j=1, k=0 \\
++    (1-w_x)(1-w_y)w_z & \text{if } i=0, j=0, k=1 \\
++    w_x(1-w_y)w_z & \text{if } i=1, j=0, k=1 \\
++    (1-w_x)w_y w_z & \text{if } i=0, j=1, k=1 \\
++    w_x w_y w_z & \text{if } i=1, j=1, k=1 
++    \end{cases}
++    $$
++4.  **Interpolate Density:** Compute the density $\sigma(\mathbf{p})$ by summing the weighted density values $\sigma_v$ of the 8 neighbors:
++    $$
++    \sigma(\mathbf{p}) = \sum_{v \in \text{neighbors}} W_v \cdot \sigma_v
++    $$
++5.  **Interpolate SH Coefficients:** For each color channel $c \in \{R, G, B\}$, compute the interpolated SH coefficients $\mathbf{a}_{c}$ by summing the weighted SH coefficient vectors $\mathbf{a}_{c,v}$ of the 8 neighbors:
++    $$
++    \mathbf{a}_{c}(\mathbf{p}) = \sum_{v \in \text{neighbors}} W_v \cdot \mathbf{a}_{c,v}
++    $$
++    where $\mathbf{a}_{c,v}$ is the vector of 9 SH coefficients for channel $c$ at voxel $v$.
++6.  **Evaluate Color:** Compute the color $\mathbf{c}(\mathbf{p})$ by evaluating the spherical harmonic basis functions $\mathbf{Y}(\mathbf{d})$ for the viewing direction $\mathbf{d}$ and dotting with the interpolated coefficients:
++    $$
++    \mathbf{c}(\mathbf{p}) = \sum_{c \in \{R,G,B\}} \left( \mathbf{a}_{c}(\mathbf{p}) \cdot \mathbf{Y}(\mathbf{d}) \right) \hat{e}_c
++    $$
++    where $\hat{e}_c$ is the basis vector for the color channel.
++7.  **Volume Rendering:** Use $\sigma(\mathbf{p})$ and $\mathbf{c}(\mathbf{p})$ in the standard volume rendering integral (e.g., front-to-back compositing) to compute the final pixel color.
+ 
+ **Pseudocode:**
+ ```python
+-def trilinear_plenoxel_sample(grid, p, v):
+-    # grid: sparse dict mapping (i, j, k) -> (opacity, sh_coeffs[27])
+-    # p: 3D sample point, v: 3D viewing direction
+-    # Assume grid spacing is 1.0 and origin is (0,0,0)
+-    
+-    # 1. Compute grid coordinates and fractional offsets
+-    gx, gy, gz = p[0], p[1], p[2]
+-    ix, iy, iz = int(gx), int(gy), int(gz)
+-    fx, fy, fz = gx - ix, gy - iy, gz - iz
+-    
+-    # 2. Gather 8 neighbors and compute trilinear weights
+-    neighbors = []
+-    weights = []
+-    for dx in (0, 1):
+-        for dy in (0, 1):
+-            for dz in (0, 1):
+-                idx = (ix + dx, iy + dy, iz + dz)
+-                if idx in grid:
+-                    neighbors.append(grid[idx])
+-                    w = (1.0 if dx == 0 else fx) * (1.0 if dy == 0 else fy) * (1.0 if dz == 0 else fz)
+-                    weights.append(w)
+-                else:
+-                    neighbors.append((0.0, [0.0]*27)) # Default to zero outside bounds [G]
+-                    weights.append(0.0)
+-    
+-    # 3. Interpolate opacity
+-    sigma = sum(w * n[0] for w, n in zip(weights, neighbors))
+-    
+-    # 4. Interpolate SH coefficients (Degree 2 -> 9 coeffs per channel)
+-    # sh_coeffs layout: [R0..R8, G0..G8, B0..B8]
+-    interp_sh = [0.0] * 27
+-    for w, n in zip(weights, neighbors):
+-        for k in range(27):
+-            interp_sh[k] += w * n[1][k]
++import numpy as np
++
++def evaluate_plenoxel_trilinear(voxel_grid, ray_origin, ray_direction, sample_points):
++    """
++    Evaluates the plenoptic function at sample points along a ray using trilinear interpolation.
++    
++    Args:
++        voxel_grid: Sparse grid structure. 
++                    grid.values: array of shape (N, 28), where N is number of active voxels.
++                    grid.coords: array of shape (N, 3), voxel center coordinates.
++                    grid.active: boolean mask or list of active indices.
++        ray_origin: (3,) array, ray origin.
++        ray_direction: (3,) array, ray direction.
++        sample_points: (M, 3) array, M sample points along the ray.
++        
++    Returns:
++        densities: (M,) array of interpolated densities.
++        colors: (M, 3) array of interpolated colors.
++    """
++    # Precompute SH basis functions for the viewing direction
++    # Degree 2 SH has 9 basis functions. 
++    # Y(d) is a vector of shape (9,)
++    Y_d = compute_sh_basis_degree_2(ray_direction)
++    
++    densities = np.zeros(len(sample_points))
++    colors = np.zeros((len(sample_points), 3))
++    
++    for i, p in enumerate(sample_points):
++        # 1. Find the 8 nearest voxel centers surrounding point p
++        # In a dense grid, this is O(1) via integer division. 
++        # In a sparse grid, a spatial hash or k-d tree is needed.
++        # Assuming we have a function to get the 8 neighbors and their weights:
++        neighbors, weights = get_trilinear_neighbors(p, voxel_grid)
++        
++        if not neighbors:
++            densities[i] = 0.0
++            colors[i] = 0.0
++            continue
+             
+-    # 5. Evaluate SH basis functions for direction v [G]
+-    vx, vy, vz = v[0], v[1], v[2]
+-    norm = (vx**2 + vy**2 + vz**2)**0.5
+-    vx, vy, vz = vx/norm, vy/norm, vz/norm
+-    y_vals = [
+-        0.282095,
+-        0.488603 * vz,
+-        1.092548 * vx * vy,
+-        0.488603 * vz,
+-        0.315392 * (3 * vz**2 - 1),
+-        1.092548 * vy * vz,
+-        0.546274 * (vx**2 - vy**2),
+-        1.092548 * vx * vz,
+-        0.282095
+-    ]
+-    
+-    # 6. Compute radiance per channel
+-    color = [0.0, 0.0, 0.0]
+-    for channel in range(3):
+-        channel_offset = channel * 9
+-        radiance = sum(interp_sh[channel_offset + j] * y_vals[j] for j in range(9))
+-        color[channel] = radiance
+-        
+-    return color, sigma
++        # 2. Extract data from neighbors
++        # Each neighbor has 28 values: 1 density + 27 SH coeffs (9 per channel)
++        neighbor_data = np.array([voxel_grid.values[v] for v in neighbors])
++        
++        # 3. Interpolate Density
++        # neighbor_data[:, 0] is the density column
++        densities[i] = np.dot(weights, neighbor_data[:, 0])
++        
++        # 4. Interpolate SH Coefficients
++        # neighbor_data[:, 1:28] contains the 27 SH coefficients
++        # Reshape to (8 neighbors, 3 channels, 9 coeffs)
++        sh_coeffs = neighbor_data[:, 1:].reshape(-1, 3, 9)
++        
++        # Interpolate weights for each channel
++        # weights is shape (8,)
++        # interpolated_sh is shape (3, 9)
++        interpolated_sh = np.einsum('n,ncm->cm', weights, sh_coeffs)
++        
++        # 5. Evaluate Color
++        # Dot product of interpolated SH coeffs with SH basis Y_d
++        # Y_d is shape (9,)
++        # color_channel = sum(interpolated_sh[c, :] * Y_d)
++        colors[i, 0] = np.dot(interpolated_sh[0, :], Y_d)
++        colors[i, 1] = np.dot(interpolated_sh[1, :], Y_d)
++        colors[i, 2] = np.dot(interpolated_sh[2, :], Y_d)
++        
++    return densities, colors
++
++def compute_sh_basis_degree_2(direction):
++    """
++    Computes the 9 spherical harmonic basis functions for degree 2
++    given a normalized direction vector.
++    """
++    x, y, z = direction
++    # Standard SH basis functions for l=0,1,2
++    # Y0_0 = 1/sqrt(4pi)
++    # Y1_-1, Y1_0, Y1_1
++    # Y2_-2, Y2_-1, Y2_0, Y2_1, Y2_2
++    # Note: Exact normalization constants depend on the convention used.
++    # The sources do not specify the exact SH normalization, but standard 
++    # orthonormal SH is assumed.
++    sqrt_4pi = np.sqrt(4 * np.pi)
++    sqrt_3pi = np.sqrt(3 * np.pi)
++    sqrt_12pi = np.sqrt(12 * np.pi)
++    sqrt_5pi = np.sqrt(5 * np.pi)
++    sqrt_15pi = np.sqrt(15 * np.pi)
++    
++    # Basis functions (unnormalized for brevity, assuming optimization handles scaling)
++    # Or using standard orthonormal basis:
++    # Y0 = 1 / sqrt(4pi)
++    # Y1 = sqrt(3/4pi) * z
++    # Y2 = sqrt(3/4pi) * x
++    # Y3 = sqrt(3/4pi) * y
++    # Y4 = sqrt(15/4pi) * x * z
++    # Y5 = sqrt(15/4pi) * y * z
++    # Y6 = sqrt(5/16pi) * (3*z^2 - 1)
++    # Y7 = sqrt(15/4pi) * (x^2 - y^2)
++    # Y8 = sqrt(15/4pi) * 2*x*y
++    
++    # Using standard real SH basis for l=0,1,2
++    y0 = 1.0 / np.sqrt(4 * np.pi)
++    y1 = np.sqrt(3.0 / (4 * np.pi)) * z
++    y2 = np.sqrt(3.0 / (4 * np.pi)) * x
++    y3 = np.sqrt(3.0 / (4 * np.pi)) * y
++    y4 = np.sqrt(15.0 / (4 * np.pi)) * x * z
++    y5 = np.sqrt(15.0 / (4 * np.pi)) * y * z
++    y6 = np.sqrt(5.0 / (16 * np.pi)) * (3 * z**2 - 1)
++    y7 = np.sqrt(15.0 / (4 * np.pi)) * (x**2 - y**2)
++    y8 = np.sqrt(15.0 / (4 * np.pi)) * 2 * x * y
++    
++    return np.array([y0, y1, y2, y3, y4, y5, y6, y7, y8])
++
++def get_trilinear_neighbors(point, voxel_grid):
++    """
++    Finds the 8 nearest voxel centers and trilinear weights.
++    This is a placeholder for the specific spatial indexing implementation.
++    In a dense grid, this involves integer division of the point coordinate 
++    by the voxel size to find the grid cell, then accessing the 8 corners.
++    """
++    # Implementation detail: [G]
++    # 1. Determine voxel size from grid bounds and resolution.
++    # 2. Compute grid coordinates: idx = floor((point - origin) / voxel_size)
++    # 3. Compute fractional part: frac = (point - origin) / voxel_size - idx
++    # 4. Identify the 8 corner indices: (idx_x, idx_y, idx_z) + (0/1, 0/1, 0/1)
++    # 5. Retrieve voxel data for these indices.
++    # 6. Compute weights based on frac.
++    # If a voxel is inactive/empty, its contribution is 0.
++    pass
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-- **Nearest Neighbor Instability:** Using nearest-neighbor interpolation produces a discontinuous model that is difficult to optimize and less stable with respect to learning rate variations [S1].
+-- **Tricubic Cost:** Tricubic interpolation offers continuous and smooth approximation but incurs substantial computation with negligible quality gain compared to trilinear [S1].
+-- **Initialization:** Coefficients are optimized directly without special initialization or pretraining with a neural network [S1].
+-- **Boundary Handling:** Queries outside the active voxel grid return zero radiance and opacity [G].
++*   **Nearest Neighbor Instability:** Using nearest neighbor interpolation creates a discontinuous model that is difficult to optimize and less stable with respect to learning rate variations [S1][S2, unofficial].
++*   **Tricubic Cost:** Tricubic interpolation offers continuous and smooth approximation but incurs substantial computation with negligible quality gain compared to trilinear [S1].
++*   **Boundary Conditions:** The method assumes a bounded grid. Handling unbounded scenes requires extensions like NDC or Multisphere Images (see Subtopics) [S1][S2, unofficial].
+ 
+ ## Subtopics
+ 
+-### Unbounded Scene Handling (NDC and Background Model)
+-This variant extends Plenoxels to real, unbounded scenes, including forward-facing and 360° settings [S1]. For forward-facing scenes, it uses normalized device coordinates (NDC) for the sparse voxel grid structure [S1]. For 360° scenes, it augments the foreground with a multisphere image (MSI) background model using learned voxel colors and opacities with trilinear interpolation [S1]. It places 64 spheres linearly in inverse radius from 1 to $\infty$, pre-scaling the inner scene to be approximately contained in the unit sphere [S1]. To conserve memory, the background stores only RGB channels (zero-order SH) and uses opacity thresholding for sparse storage [S1].
++### [Unbounded Scene Handling (NDC and Background Model)](1391-unbounded-scene-handling-ndc-and-background-model.md)
++Extends Plenoxels to unbounded scenes using NDC for forward-facing views or Multisphere Images for 360° scenes. Choose this when rendering outside the bounded voxel grid.
++*   (No other children listed in sources)
+ 
+ ## Operating characteristics
+ **Time and Memory Complexity:**
+-- Memory: Scales with the number of active voxels. Each voxel stores 28 scalars (1 opacity + 27 SH coefficients) [S1]. Background spheres store only 3 scalars (RGB) per voxel [S1].
+-- Time: Trilinear interpolation is significantly faster than tricubic, which incurs substantial computation [S1].
++*   **Memory:** Scales linearly with the number of active voxels. Each voxel stores 28 floats (1 density + 27 SH coefficients) [S1][S2, unofficial].
++*   **Time:** Per sample point, the cost is dominated by the lookup of 8 neighbors and the dot product of 9-element vectors. It is $O(1)$ per sample point given efficient spatial indexing [S1][S2, unofficial].
+ 
+ **Measured Performance:**
+-- On 8 NeRF synthetic scenes, Trilinear Plenoxels at $128^3$ resolution (PSNR 28.46, SSIM 0.926, LPIPS 0.100) outperform Nearest Neighbor at $256^3$ resolution (PSNR 27.17, SSIM 0.914, LPIPS 0.119) [S1].
+-- Trilinear interpolation at $256^3$ achieves PSNR 30.57, SSIM 0.950, LPIPS 0.065 [S1].
++*   On 8 NeRF synthetic scenes, Trilinear Plenoxels at $128^3$ resolution achieves PSNR 28.46, SSIM 0.926, LPIPS 0.100 [S1][S2, unofficial].
++*   Trilinear at $256^3$ achieves PSNR 30.57, SSIM 0.950, LPIPS 0.065 [S1][S2, unofficial].
++*   Nearest Neighbor at $256^3$ achieves PSNR 27.17, SSIM 0.914, LPIPS 0.119 [S1][S2, unofficial].
++*   Nearest Neighbor at $128^3$ achieves PSNR 23.73, SSIM 0.866, LPIPS 0.176 [S1][S2, unofficial].
++*   Trilinear interpolation at $128^3$ outperforms Nearest Neighbor at $256^3$ [S1][S2, unofficial].
+ 
+ **Strengths and Limitations:**
+-- **Strengths:** Increases effective resolution by representing sub-voxel variations; produces a continuous function approximation critical for successful optimization; more stable with respect to learning rate variations than nearest neighbor [S1].
+-- **Limitations:** Tricubic offers smoother approximation but with negligible quality gain and higher cost [S1].
++*   **Strengths:** Increases effective resolution by representing sub-voxel variations; produces a continuous function approximation critical for successful optimization; more stable with respect to learning rate variations than nearest neighbor [S1][S2, unofficial].
++*   **Limitations:** Tricubic interpolation, while smoother, is computationally expensive with negligible quality gain [S1]. Requires careful handling of unbounded scenes [S1][S2, unofficial].
+ 
+ **When to Use:**
+-- Use trilinear interpolation for stable optimization and higher quality than nearest neighbor at lower resolutions [S1].
+-- Avoid nearest neighbor if optimization stability is a concern [S1].
+-- Avoid tricubic unless smoothness is strictly required and computational budget allows, as quality gain is negligible [S1].
++*   Use when optimizing a radiance field representation and stability/convergence is a concern.
++*   Use when higher effective resolution is needed without increasing the grid size significantly.
++*   Do not use if computational resources are extremely limited and nearest neighbor is acceptable (though quality will suffer).
+ 
+ ## Background
+-Plenoxels were introduced in the paper "Plenoxels: Radiance Fields without Neural Networks" [S1]. The method builds on PlenOctrees but replaces the constant-voxel assumption with trilinear interpolation to enable direct optimization of opacity and SH coefficients without neural networks [S1]. The use of degree 2 spherical harmonics was adopted from PlenOctrees, as higher orders confer minimal benefit [S1]. The method supports coarse-to-fine optimization strategies, resizing grids between arbitrary resolutions using trilinear interpolation [S1].
++Plenoxels were introduced by Fridovich-Keil et al. in 2022 [S1][S2, unofficial]. The method was developed as a sparse voxel-based alternative to Neural Radiance Fields (NeRF), aiming to eliminate the need for neural networks in radiance field representation [S1][S2, unofficial]. It builds on the concept of PlenOctrees but uses a regular grid with trilinear interpolation to define a continuous plenoptic function, contrasting with PlenOctrees which assumes constant values inside each voxel [S1][S2, unofficial]. The use of Spherical Harmonics (SH) for view-dependent color was inspired by PlenOctrees, but the trilinear interpolation of SH coefficients is a key innovation of Plenoxels [S1][S2, unofficial].
+ 
+ ## Sources
+-[S1] Plenoxels: Radiance Fields without Neural Networks, https://doi.org/10.1109/cvpr52688.2022.00542, fetched 2026-10-26+[S1] Plenoxels: Radiance Fields without Neural Networks, https://doi.org/10.1109/cvpr52688.2022.00542, fetched 2026-10-26
++[S2] CVPR 2022 Open Access Repository, https://openaccess.thecvf.com/content/CVPR2022/html/Fridovich-Keil_Plenoxels_Radiance_Fields_Without_Neural_Networks_CVPR_2022_paper.html, fetched 2026-10-27 (unofficial)

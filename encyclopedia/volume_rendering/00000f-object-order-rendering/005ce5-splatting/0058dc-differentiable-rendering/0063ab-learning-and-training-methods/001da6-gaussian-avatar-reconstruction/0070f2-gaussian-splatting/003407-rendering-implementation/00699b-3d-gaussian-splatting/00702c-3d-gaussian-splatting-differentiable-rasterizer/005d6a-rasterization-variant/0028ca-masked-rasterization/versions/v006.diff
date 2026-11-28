@@ -1,0 +1,167 @@
+--- v005.md
++++ v006.md
+@@ -1,26 +1,25 @@
+ # Masked-Rasterization
+ 
+-
+ ## Overview
+-Masked-Rasterization is a differentiable rendering technique that allows "masked" (probabilistically inactive) 3D Gaussians to participate in the rasterization pipeline and receive gradient updates, rather than being permanently filtered out. It solves the problem of outdated Gaussians in dynamic pruning scenarios, where standard alpha-filtering prevents unsampled Gaussians from adjusting their existence probability. It differs from sibling methods like [Differentiable Radiative Rasterization](4526-differentiable-radiative-rasterization.md) by explicitly integrating binary existence masks into the transmittance and color accumulation steps, enabling dynamic assessment of Gaussian contribution without zeroing out their physical attributes.
++Masked-Rasterization is a differentiable rendering technique that allows "masked" (probabilistically inactive) 3D Gaussians to participate in the rasterization pipeline and receive gradient updates, rather than being permanently filtered out [S1]. It solves the problem of outdated Gaussians in dynamic pruning scenarios, where standard alpha-filtering prevents unsampled Gaussians from adjusting their existence probability [S1]. It differs from sibling methods like [Differentiable Radiative Rasterization](4526-differentiable-radiative-rasterization.md) by explicitly integrating binary existence masks into the transmittance and color accumulation steps, enabling dynamic assessment of Gaussian contribution without zeroing out their physical attributes [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A set of $N$ 3D Gaussians, each defined by mean $\boldsymbol{\mu}_i$, covariance $\boldsymbol{\Sigma}_i$, opacity $\alpha_i$, color/features $\mathbf{c}_i$, and a learned binary mask $m_i \in \{0, 1\}$ representing its probability of existence.
+-*   **Output:** The final pixel color $C$ and gradients for Gaussian attributes and masks.
++*   **Input:** A set of $N$ 3D Gaussians, each defined by mean $\boldsymbol{\mu}_i$, covariance $\boldsymbol{\Sigma}_i$, opacity $\alpha_i$, color/features $\mathbf{c}_i$, and a learned binary mask $m_i \in \{0, 1\}$ representing its probability of existence [S1].
++*   **Output:** The final pixel color $C$ and gradients for Gaussian attributes and masks [S1].
+ 
+ **Data Structures:**
+-*   **Gaussian Attributes:** Standard 3DGS parameters.
+-*   **Mask:** A scalar value $m_i$ per Gaussian. Unlike previous methods that multiply $m_i$ into opacity or scale, here $m_i$ is applied during the blending loop.
++*   **Gaussian Attributes:** Standard 3DGS parameters [S1].
++*   **Mask:** A scalar value $m_i$ per Gaussian [S1]. Unlike previous methods that multiply $m_i$ into opacity or scale, here $m_i$ is applied during the blending loop [S1].
+ 
+ **Numbered Steps:**
+-1.  **Projection and Splatting:** Transform 3D Gaussians to 2D screen space. Compute the 2D covariance matrix $\boldsymbol{\Sigma}'_i$ using the Jacobian of the projection. Compute the 2D alpha value $\alpha_i$ for each splat based on its center, scale, and rotation [S1].
+-2.  **Alpha Filtering:** Filter out splats where $\alpha_i = 0$. All remaining splats, along with their associated masks $m_i$, are passed to the masked-rasterization stage [S1].
+-3.  **Tile Sorting:** Sort the remaining splats by depth within tiles, following the standard shared principles of the parent [Rasterization Variant](17388-rasterization-variant.md).
+-4.  **Masked Blending Loop:** For each pixel, iterate through the sorted splats. Update the transmittance $T$ and accumulated color $C$ using the mask $m_i$ [S1]:
+-    *   **Transmittance Attenuation:** The transmittance is attenuated by the mask. If $m_i=0$, the transmittance is not reduced (the Gaussian is "invisible" but present for gradient flow). If $m_i=1$, it behaves normally.
+-    *   **Color Accumulation:** The color contribution is scaled by the mask. If $m_i=0$, no color is added.
++1.  **Projection and Splatting:** Transform 3D Gaussians to 2D screen space [G]. Compute the 2D covariance matrix $\boldsymbol{\Sigma}'_i$ using the Jacobian of the projection [G]. Compute the 2D alpha value $\alpha_i$ for each splat based on its center, scale, and rotation [S1].
++2.  **Alpha Filtering:** Filter out splats where $\alpha_i = 0$ [S1]. All remaining splats, along with their associated masks $m_i$, are passed to the masked-rasterization stage [S1].
++3.  **Tile Sorting:** Sort the remaining splats by depth within tiles, following the standard shared principles of the parent [Rasterization Variant](17388-rasterization-variant.md) [G].
++4.  **Masked Blending Loop:** For each pixel, iterate through the sorted splats [G]. Update the transmittance $T$ and accumulated color $C$ using the mask $m_i$ [S1]:
++    *   **Transmittance Attenuation:** The transmittance is attenuated by the mask [S1]. If $m_i=0$, the transmittance is not reduced (the Gaussian is "invisible" but present for gradient flow) [S1]. If $m_i=1$, it behaves normally [S1].
++    *   **Color Accumulation:** The color contribution is scaled by the mask [S1]. If $m_i=0$, no color is added [S1].
+ 5.  **Gradient Propagation:**
+-    *   Gaussians with $m_i=0$ do **not** receive gradients for their geometric attributes ($\boldsymbol{\mu}, \boldsymbol{\Sigma}, \alpha$) because they do not affect the final pixel color or transmittance in the forward pass.
++    *   Gaussians with $m_i=0$ do **not** receive gradients for their geometric attributes ($\boldsymbol{\mu}, \boldsymbol{\Sigma}, \alpha$) because they do not affect the final pixel color or transmittance in the forward pass [S1].
+     *   However, they **do** receive gradients for their mask $m_i$ (and thus their existence probability) based on the loss, allowing them to "learn" when they should become active ($m_i \to 1$) [S1].
+ 
+@@ -33,28 +32,24 @@
+ 
+ **Parameters:**
+-*   **Mask Sampling:** Masks are sampled from a probability distribution derived from the Gaussian's current importance/existence probability. Typical pruning ratios reported are 62.4%–75.3% [S1].
++*   **Mask Sampling:** Masks are sampled from a probability distribution derived from the Gaussian's current importance/existence probability [S1]. Typical pruning ratios reported are 62.4%–75.3% [S1].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Zero Alpha Filtering:** If a Gaussian's opacity or scale is set to zero, $\alpha_i$ becomes zero. This causes the Gaussian to be filtered out *before* rasterization, preventing it from receiving any gradient updates, including for its mask. This hinders the ability to recover such Gaussians [S1].
+-*   **Unsampled Gaussians:** If a Gaussian is not sampled (masked out), it must still be processed in the rasterization loop to receive gradients for its mask. If it is skipped entirely, it remains unchanged, becomes outdated, and risks inaccurate evaluation when eventually sampled in later iterations [S1].
++*   **Zero Alpha Filtering:** If a Gaussian's opacity or scale is set to zero, $\alpha_i$ becomes zero [S1]. This causes the Gaussian to be filtered out *before* rasterization, preventing it from receiving any gradient updates, including for its mask [S1]. This hinders the ability to recover such Gaussians [S1].
++*   **Unsampled Gaussians:** If a Gaussian is not sampled (masked out), it must still be processed in the rasterization loop to receive gradients for its mask [S1]. If it is skipped entirely, it remains unchanged, becomes outdated, and risks inaccurate evaluation when eventually sampled in later iterations [S1].
+ *   **Gradient Disconnection:** Applying the mask to the geometric attributes (opacity/scale) instead of the blending loop causes the Gaussian to be filtered out, breaking the gradient path for the mask [S1].
+ 
+ **Pseudocode:**
+ ```python
++import math
++
+ def masked_rasterization(gaussians, masks, image_width, image_height):
+-    """
+-    gaussians: List of Gaussian objects with attributes:
+-               - mu: (2,) mean in screen space
+-               - cov2d: (2,2) 2D covariance
+-               - alpha: scalar opacity
+-               - color: (3,) color
+-    masks: List of scalar masks m_i in {0, 1}
+-    """
+-    # 1. Project and compute alpha (Standard 3DGS step)
++    # 1. Project and compute alpha (Standard 3DGS step) [G]
+     splats = []
+     for i, g in enumerate(gaussians):
+-        alpha_i = compute_2d_alpha(g.mu, g.cov2d, g.alpha)
++        # Evaluate 2D Gaussian PDF at pixel center relative to mean [G]
++        # Simplified diagonal covariance evaluation for pseudocode clarity [G]
++        alpha_i = g.alpha * math.exp(-0.5 * ((g.mu[0]**2) / g.cov2d[0][0] + (g.mu[1]**2) / g.cov2d[1][1]))
+         if alpha_i == 0:
+-            continue # Filter out zero alpha splats
++            continue
+         splats.append({
+             'index': i,
+@@ -62,32 +57,38 @@
+             'color': g.color,
+             'mask': masks[i],
+-            'mu': g.mu
++            'z': g.z
+         })
+ 
+-    # 2. Sort splats by depth (Standard tile-based sorting)
+-    splats = sort_by_depth(splats)
++    # 2. Sort splats by depth within tiles [G]
++    splats.sort(key=lambda s: s['z'])
+ 
+     # 3. Initialize output buffers
+-    final_color = zeros((image_height, image_width, 3))
+-    final_transmittance = zeros((image_height, image_width))
++    final_color = [[0.0, 0.0, 0.0] for _ in range(image_height * image_width)]
++    final_transmittance = [1.0] * (image_height * image_width)
+ 
+     # 4. Rasterize with Masked Blending
+-    for pixel in pixels:
+-        T = 1.0
+-        C = zeros(3)
+-        for splat in splats_intersecting_pixel(pixel):
+-            m = splat['mask']
+-            a = splat['alpha']
+-            c = splat['color']
+-            
+-            # Apply mask to transmittance and color accumulation
+-            # If m=0, T remains unchanged, C adds nothing
+-            # If m=1, standard blending occurs
+-            contribution = m * a * T
+-            C += contribution * c
+-            T *= (1.0 - contribution)
+-            
+-        final_color[pixel] = C
+-        final_transmittance[pixel] = T
++    for y in range(image_height):
++        for x in range(image_width):
++            idx = y * image_width + x
++            T = 1.0
++            C = [0.0, 0.0, 0.0]
++            for splat in splats:
++                # Standard tile/pixel bounding box intersection check [G]
++                if not (abs(splat['mu'][0] - x) < 2 * math.sqrt(splat['cov2d'][0][0]) or 
++                        abs(splat['mu'][1] - y) < 2 * math.sqrt(splat['cov2d'][1][1])):
++                    continue
++                m = splat['mask']
++                a = splat['alpha']
++                c = splat['color']
++
++                # Apply mask to transmittance and color accumulation [S1]
++                contribution = m * a * T
++                C[0] += contribution * c[0]
++                C[1] += contribution * c[1]
++                C[2] += contribution * c[2]
++                T *= (1.0 - contribution)
++
++            final_color[idx] = C
++            final_transmittance[idx] = T
+ 
+     return final_color, final_transmittance
+@@ -97,17 +98,17 @@
+ 
+ ### MaskGaussian
+-The primary implementation of this method, which uses probabilistic masks to prune Gaussians dynamically. It sets itself apart by allowing masked Gaussians to receive gradients for their existence probability, preventing them from becoming outdated. Choose this when dynamic pruning and efficient memory usage are priorities. [S1]
++The primary implementation of this method, which uses probabilistic masks to prune Gaussians dynamically [S1]. It sets itself apart by allowing masked Gaussians to receive gradients for their existence probability, preventing them from becoming outdated [S1]. Choose this when dynamic pruning and efficient memory usage are priorities [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Similar to standard 3D Gaussian Splatting rasterization, as the mask application is a simple scalar multiplication per splat. The overhead is negligible.
+-*   **Memory Complexity:** Requires storing an additional mask value per Gaussian.
++*   **Time Complexity:** Similar to standard 3D Gaussian Splatting rasterization, as the mask application is a simple scalar multiplication per splat [S1]. The overhead is negligible [S1].
++*   **Memory Complexity:** Requires storing an additional mask value per Gaussian [S1].
+ *   **Measured Performance:** On Mip-NeRF360, Tanks & Temples, and Deep Blending datasets, the method achieves pruning ratios of 62.4%, 67.7%, and 75.3% respectively, with rendering speedups of 2.05×, 2.19×, and 3.16×, while sacrificing only 0.02 PSNR on the first two datasets and improving quality on Deep Blending [S1].
+-*   **Strengths:** Enables dynamic pruning without losing gradient information for inactive Gaussians; outperforms methods that multiply masks with opacity/scale.
+-*   **Limitations:** Requires careful handling of the mask sampling distribution to ensure stable training.
+-*   **When to use:** When training 3DGS with aggressive pruning or dynamic scene evolution where Gaussians need to be reactivated.
+-*   **When not to use:** For static scenes where a fixed set of Gaussians is sufficient, as the overhead of mask management is unnecessary.
++*   **Strengths:** Enables dynamic pruning without losing gradient information for inactive Gaussians; outperforms methods that multiply masks with opacity/scale [S1].
++*   **Limitations:** Requires careful handling of the mask sampling distribution to ensure stable training [S1].
++*   **When to use:** When training 3DGS with aggressive pruning or dynamic scene evolution where Gaussians need to be reactivated [S1].
++*   **When not to use:** For static scenes where a fixed set of Gaussians is sufficient, as the overhead of mask management is unnecessary [S1].
+ 
+ ## Background
+-Masked-Rasterization was introduced in the paper "MaskGaussian: Adaptive 3D Gaussian Representation from Probabilistic Masks" by [S1]. It addresses limitations in previous pruning methods (such as those by [4, 17, 34] cited in [S1]) that multiplied masks with Gaussian attributes, leading to zero alpha values and broken gradient paths. The method is part of the broader effort to optimize 3D Gaussian Splatting for efficiency and dynamic scenes.
++Masked-Rasterization was introduced in the paper "MaskGaussian: Adaptive 3D Gaussian Representation from Probabilistic Masks" by [S1]. It addresses limitations in previous pruning methods (such as those by [4, 17, 34] cited in [S1]) that multiplied masks with Gaussian attributes, leading to zero alpha values and broken gradient paths [S1]. The method is part of the broader effort to optimize 3D Gaussian Splatting for efficiency and dynamic scenes [S1].
+ 
+ ## Sources

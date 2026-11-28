@@ -1,0 +1,113 @@
+--- v004.md
++++ v005.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Early Ray Termination (ERT) is an acceleration technique for image-order volume rendering that halts the front-to-back ray integration loop when the accumulated opacity exceeds a predefined threshold, thereby skipping the computation of voxels that are occluded by the foreground [S1][S5, S12, unofficial]. Unlike sibling methods such as [Low Opacity Skipping](3608-low-opacity-skipping.md), which culls samples based on low local density, ERT culls based on global occlusion, exploiting the fact that once a ray becomes sufficiently opaque, subsequent samples contribute negligibly to the final pixel color [S1][S6, unofficial]. This method reduces memory bandwidth and arithmetic intensity by avoiding unnecessary traversal through the background or occluded regions of the volume [S15, unofficial].
++Early Ray Termination (ERT) is an acceleration technique for image-order volume rendering that halts the front-to-back ray integration loop when the accumulated opacity exceeds a predefined threshold, thereby skipping the computation of voxels that are occluded by the foreground [S1][S5, S12, unofficial]. Unlike sibling methods such as [Low Opacity Skipping](3608-low-opacity-skipping.md), which culls samples based on low local density, ERT culls based on global occlusion, exploiting the fact that once a ray becomes sufficiently opaque, subsequent samples contribute negligibly to the final pixel color [S1][S6, unofficial]. This method reduces memory bandwidth by avoiding unnecessary traversal through the background or occluded regions of the volume [S15, unofficial].
+ 
+ ## How it works
+@@ -13,23 +13,23 @@
+ **Data Structures:**
+ *   **Ray State:** Accumulated color $C_{acc}$ (RGB, float), accumulated opacity $\alpha_{acc}$ (float, range $[0, 1]$), and current ray position $\mathbf{p}$ [S13].
+-*   **Volume Data:** Voxel values accessed via trilinear or nearest-neighbor interpolation to retrieve density $\sigma$ and color $c$ [S16].
++*   **Volume Data:** Voxel values accessed via equidistant sampling [S16].
+ 
+ **Algorithm:**
+-The method modifies the standard front-to-back compositing loop. For each pixel, a ray is cast through the volume. In each step $i$, the sample color $c_i$ and opacity $\alpha_i$ are computed. The state is updated as follows:
++The method modifies the standard front-to-back compositing loop [S23, unofficial]. For each pixel, a ray is cast through the volume [S15, unofficial]. In each step $i$, the sample color $c_i$ and opacity $\alpha_i$ are computed [G]. The state is updated as follows:
+ 
+ $$ C_{acc} \leftarrow C_{acc} + c_i \cdot \alpha_i \cdot (1 - \alpha_{acc}) $$
+ $$ \alpha_{acc} \leftarrow \alpha_{acc} + \alpha_i \cdot (1 - \alpha_{acc}) $$
+ 
+-After the update, the termination condition is checked. If $\alpha_{acc} \ge \tau$, the loop breaks immediately [S1, S13]. The final color is then composited with the background color $C_{bg}$:
++After the update, the termination condition is checked [S1]. If $\alpha_{acc} \ge \tau$, the loop breaks immediately [S1, S13]. The final color is then composited with the background color $C_{bg}$:
+ 
+ $$ C_{final} = C_{acc} + C_{bg} \cdot (1 - \alpha_{acc}) $$
+ 
+ **Parameters:**
+-*   **Threshold ($\tau$):** The opacity value at which termination occurs. Common values are $0.95$ [S23, unofficial], $0.98$ [S14, unofficial], $0.99$ [S8, S39], or $1.0$ [S9, unofficial][S13]. A lower threshold yields higher performance but introduces more visual bias; a higher threshold preserves quality but offers less speedup [S22, unofficial].
++*   **Threshold ($\tau$):** The opacity value at which termination occurs. Common values are $0.95$ [S23, unofficial], $0.98$ [S14, unofficial], $0.99$ [S8, S39], or $1.0$ [S9, unofficial][S13]. Higher thresholds reduce rendering time but increase image artifacts; lower thresholds reduce artifacts and produce higher quality images [S22, unofficial].
+ *   **Step Size:** The distance between samples. Equidistant sampling is common, e.g., $0.5$ voxels [S16].
+ 
+ **Pseudocode:**
+ ```python
+-def early_ray_termination(ray_origin, ray_direction, volume_data, transfer_function, threshold=0.99):
++def early_ray_termination(ray_origin, ray_direction, volume_bounds, volume_data, transfer_function, threshold=0.99, step_size=0.5):
+     """
+     Renders a single ray using Early Ray Termination.
+@@ -38,7 +38,9 @@
+         ray_origin: vec3, start of the ray.
+         ray_direction: vec3, normalized direction of the ray.
+-        volume_data: Volume structure providing sample() method.
++        volume_bounds: tuple of (min_corner, max_corner), AABB of the volume.
++        volume_data: Object providing sample_density(pos) method.
+         transfer_function: Function mapping density to (color, opacity).
+         threshold: float, opacity threshold for termination (default 0.99).
++        step_size: float, distance between samples (default 0.5).
+         
+     Returns:
+@@ -50,12 +52,10 @@
+     acc_alpha = 0.0
+     
+-    # Determine ray bounds (simplified: assume unit cube [0,1]^3 for demonstration)
+-    # In practice, compute intersection with volume bounding box.
+-    t_min = 0.0
+-    t_max = 1.0 # Placeholder for actual bbox intersection
+-    
+-    step_size = 0.01 # Typical step size, e.g., 1/100th of bbox diagonal
++    # Compute ray-AABB intersection [G]
++    t_min, t_max = compute_ray_aabb_intersection(ray_origin, ray_direction, volume_bounds)
++    if t_max < 0.0:
++        return vec3(0.0), 0.0 # Ray misses volume
++        
+     t = t_min
+-    
+     while t < t_max:
+         # 1. Sample the volume at current position
+@@ -67,6 +67,4 @@
+         
+         # 3. Front-to-back compositing
+-        # Contribution of current sample: color * opacity * transmittance
+-        # Transmittance = 1 - acc_alpha
+         contribution = color * opacity * (1.0 - acc_alpha)
+         acc_color += contribution
+@@ -85,9 +83,27 @@
+     
+     return final_color, acc_alpha
++
++def compute_ray_aabb_intersection(origin, direction, bounds):
++    """Standard ray-AABB intersection [G]. Returns (t_min, t_max)."""
++    min_corner, max_corner = bounds
++    t_min = -float('inf')
++    t_max = float('inf')
++    for i in range(3):
++        if direction[i] == 0.0:
++            if origin[i] < min_corner[i] or origin[i] > max_corner[i]:
++                return -1.0, -1.0 # Parallel and outside
++        else:
++            t1 = (min_corner[i] - origin[i]) / direction[i]
++            t2 = (max_corner[i] - origin[i]) / direction[i]
++            t_min = max(t_min, min(t1, t2))
++            t_max = min(t_max, max(t1, t2))
++    if t_max < 0.0 or t_min > t_max:
++        return -1.0, -1.0
++    return t_min, t_max
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Bias:** ERT introduces a systematic bias because it discards valid samples behind the threshold [S12, S32, unofficial]. The rendered image may appear slightly darker or less detailed in semi-transparent regions compared to full integration.
+-*   **Divergence:** On GPUs, divergent execution occurs when some threads in a warp terminate early while others continue. This can reduce performance if the threshold is set too low or the volume is highly transparent [S36, S44, unofficial].
++*   **Bias:** The use of a predefined threshold introduces a systematic bias in the rendered image [S12, S32, unofficial]. The rendered image may appear slightly darker or less detailed in semi-transparent regions compared to full integration [S12, unofficial].
++*   **Divergence:** On GPUs, divergent execution occurs when some threads in a warp terminate early while others continue [S36, unofficial][S44, unofficial].
+ *   **MIP Incompatibility:** ERT cannot be used with Maximum Intensity Projection (MIP) because MIP requires scanning the entire ray path to find the maximum value, regardless of opacity [S47, unofficial].
+ *   **Additive Compositing:** In additive models, opacity changes after reaching maximum opacity are ignored, which is physically incorrect for some light transport simulations [S26, unofficial].
+@@ -109,6 +125,6 @@
+ ## Operating characteristics
+ **Time and Memory Complexity:**
+-*   **Time:** The complexity is $O(N \cdot K)$ in the worst case (no termination), where $N$ is the number of pixels and $K$ is the number of samples per ray. With ERT, the average number of samples per ray is reduced to $K_{eff} \le K$. The speedup is proportional to the area of the volume intersected by opaque objects and their proximity to the camera [S13].
+-*   **Memory:** No additional memory is required beyond the standard ray state accumulators [S1].
++*   **Time:** The complexity is $O(N \cdot K)$ in the worst case (no termination), where $N$ is the number of pixels and $K$ is the number of samples per ray [G]. With ERT, the average number of samples per ray is reduced to $K_{eff} \le K$ [G]. The speedup is proportional to the area of the volume intersected by opaque objects and their proximity to the camera [S13].
++*   **Memory:** Memory overhead is minimal, requiring only standard ray state accumulators [G].
+ 
+ **Measured Performance:**

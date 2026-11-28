@@ -1,0 +1,263 @@
+--- v005.md
++++ v006.md
+@@ -4,82 +4,69 @@
+ 
+ ## Overview
+-This method precomputes light intensities and shadows within a 3D volume based on a light source direction, color, decay, and a density mask, storing the result in a 3D texture for use during rendering [S1, unofficial]. It differs from its sibling [Lighting Models](2056-lighting-models.md) by explicitly simulating light attenuation through a volumetric medium via ray-marching rather than using static shading approximations, and from [Two-Pass Shadow Casting (Kajiya and Von Herzen)](2196-two-pass-shadow-casting-kajiya-and-von-herzen.md) by operating as a single-pass precomputation step that generates a lookup volume rather than dynamic shadow maps.
++This method precomputes light intensities and shadows within a 3D volume based on a global light source's direction, color, decay, and a density mask, storing the result in a 3D texture for use during rendering [S1, unofficial]. It differs from its siblings by using a GPU compute shader to ray-march from each voxel in the light texture space towards the global light direction, accumulating density and applying exponential decay [S1, unofficial]. Unlike [Light Propagation Volume](11130-light-propagation-volume-lpv-opacity-propagation-volume-opv.md) which propagates optical depth radially, or [Pseudo Volume Textures with Per-Voxel Lighting](7063-pseudo-volume-textures-with-per-voxel-lighting.md) which recomputes lighting per frame via secondary ray marches, this method performs a single precomputation pass per light source direction to generate a static light map volume [S1, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Inputs:**
+-    *   `light_density_texture`: The input volume containing density values (e.g., from a fluid simulation or noise field).
+-    *   `mask_texture_3D`: A binary or grayscale mask defining where light computation is active.
+-    *   `noise_texture_3D`: A 3D texture providing noise density values for the ray-march.
+-    *   `global_light_direction`: A normalized 3D vector defining the light source direction.
+-    *   `global_light_color`: A 3D vector defining the light color.
+-    *   `light_decay`: A float controlling the rate of exponential light attenuation per unit density.
+-    *   `light_sample_count`: An integer defining the number of samples for light computation.
+-    *   `density_threshold`: A float threshold for filtering noise and determining transparency.
+-    *   `god_rays_intensity`: A float scalar for simulating god rays when density is low.
+-    *   `light_map_resolution`: A 3D vector defining the resolution of the output light map.
+-*   **Outputs:**
+-    *   `light_map_3D`: A 3D RenderTexture (Format `R8`, Wrap `Clamp`, Filter `Bilinear`) storing the computed light intensity for each voxel.
++**Inputs:**
++*   `light_density_texture`: A 3D `RenderTexture` (format `R8`, wrap `Clamp`, filter `Bilinear`) of dimensions `light_map_resolution` (x, y, z) [S1, unofficial].
++*   `mask_texture_3D`: A 3D texture representing the density mask, accessed via `solver.density_rt` with dimensions `mask_texture_dims` [S1, unofficial].
++*   `noise_texture_3D`: A 3D texture containing noise data, accessed via `worley_noise_texture` [S1, unofficial].
++*   `global_light_direction`: A `float3` vector defining the direction of the light source [S1, unofficial].
++*   `global_light_color`: A `float3` vector defining the color of the light [S1, unofficial].
++*   `light_decay`: A float controlling the rate of exponential light attenuation per unit density [S1, unofficial].
++*   `god_rays_intensity`: A float scalar applied to simulate god rays [S1, unofficial].
++*   `light_sample_count`: An integer determining the number of samples for light computation [S1, unofficial].
++*   `density_threshold`: A float used to filter noise; densities below this value are treated as transparent unless god rays conditions are met [S1, unofficial].
++
++**Outputs:**
++*   `light_density_texture`: The resulting 3D volume where each voxel stores the computed light intensity [S1, unofficial].
+ 
+ **Data Structures:**
+-The core data structure is a 3D texture (`RWTexture3D<float>` or equivalent in compute shaders) indexed by voxel coordinates $(x, y, z)$. The input density and mask textures are accessed via coordinate mapping functions `light_id_to_noise_id` and `light_id_to_mask_id`, which map the light map resolution indices to the respective input texture dimensions.
++The core data structure is the `light_density_texture`, a 3D texture with `R8` format. The dimensions are defined by `light_map_resolution`. The mask and noise textures are also 3D textures, accessed via specific indices mapped from the light texture coordinates [S1, unofficial].
+ 
+ **Parameters:**
+-*   `step_size`: Calculated as $1.0 / \text{light\_sample\_count}$.
+-*   `scaled_step_size`: Calculated as $\text{light\_texture\_dims}.x \times \text{step\_size}$.
+-*   `max_iteration`: Fixed at 256.
+-*   `light_decay`: Range [0, 100].
+-*   `god_rays_intensity`: Range [0, 0.03].
+-*   `density_threshold`: Range [0, 1].
++*   `light_map_resolution`: `Vector3` defining the resolution of the 3D light map volume [S1, unofficial].
++*   `light_decay`: Float, range [0, 100] [S1, unofficial].
++*   `god_rays_strength`: Float, range [0, 0.03f] [S1, unofficial].
++*   `light_sample_count`: Integer, range [0, 128] [S1, unofficial].
++*   `density_threshold`: Float, range [0, 1] [S1, unofficial].
++*   `light_color`: `Vector3` [S1, unofficial].
++*   `light_direction`: `Vector3` [S1, unofficial].
++*   `light_texture_dims`: `float3` dimensions of the light density texture space [S1, unofficial].
++*   `mask_texture_dims`: `float3` dimensions of the mask texture [S1, unofficial].
+ 
+-**Algorithm Steps:**
+-1.  **Initialization:** For each voxel `id` in the `light_map_3D` volume:
+-    *   Initialize `current_coordinates` to `id`.
+-    *   Initialize `density` to $0.0$.
+-    *   Initialize `density_so_far` to $0.0$.
+-    *   Initialize `light_intensity` to $1.0$.
+-    *   Calculate `normalized_light_direction` = normalize(`global_light_direction`).
+-    *   Calculate `scaled_step_size` = `light_texture_dims.x` * `step_size`.
+-    *   Set `max_iteration` = 256.
+-2.  **Ray Marching Loop:** While `!is_frag_out_boundries` and `max_iteration >= 0`:
+-    *   Decrement `max_iteration`.
+-    *   Sample `noise_density` = `noise_texture_3D[light_id_to_noise_id(current_coordinates)]`.
+-    *   Sample `mask` = `mask_texture_3D[light_id_to_mask_id(current_coordinates)]`.
+-    *   **Apply Mask and Threshold:**
+-        *   `density` = $\min(1, \text{mask} - |\text{density\_threshold}|) \times \text{noise\_density}$.
+-    *   **Accumulate Density:**
+-        *   `density_so_far` += `density`.
++**Steps:**
++1.  **Initialize:** Create `light_density_texture` with dimensions `light_map_resolution`. Set format to `R8`, wrap to `Clamp`, filter to `Bilinear`. Enable random write. Bind to material property `_LightTexture` [S1, unofficial].
++2.  **Dispatch Kernel:** Find kernel "compute_light_intensities". Set texture size params `noise_texture_size_x/y/z`. Set light params `light_texture_dims`, `global_light_direction`, `global_light_color`, `light_decay`, `god_rays_intensity`, `step_size` (calculated as `1.0f / light_sample_count`), `density_threshold`. Bind `light_density_texture` to `light_map_3D`, `noise_texture_3D` to `worley_noise_texture`, `mask_texture_3D` to `solver.density_rt`. Dispatch with thread groups `Mathf.CeilToInt(light_map_resolution.x / 8)`, `Mathf.CeilToInt(light_map_resolution.y / 8)`, `Mathf.CeilToInt(light_map_resolution.z / 8)` [S1, unofficial].
++3.  **Loop Initialization:** For each voxel `id` in the 3D grid:
++    *   `current_coordinates` = `id` (voxel index) [S1, unofficial].
++    *   `density` = 0.0f [S1, unofficial].
++    *   `density_so_far` = 0.0f [S1, unofficial].
++    *   `light_intensity` = 1.0f [S1, unofficial].
++    *   `normalized_light_direction` = `normalize(global_light_direction)` [S1, unofficial].
++    *   `scaled_step_size` = `light_texture_dims.x * step_size` [S1, unofficial].
++    *   `max_iteration` = 256 [S1, unofficial].
++4.  **Ray Marching Loop:** While `!is_frag_out_boundries` and `max_iteration-- >= 0`:
++    *   Sample `noise_density` = `noise_texture_3D[light_id_to_noise_id(current_coordinates)]` [S1, unofficial].
++    *   Sample `mask` = `mask_texture_3D[light_id_to_mask_id(current_coordinates)]` [S1, unofficial].
++    *   **Apply Mask and Threshold:** `density` = `min(1, mask - abs(density_threshold)) * noise_density` [S1, unofficial].
++    *   **Accumulate Density:** `density_so_far` += `density` [S1, unofficial].
+     *   **Apply God Rays Logic:**
+-        *   If `density` < `density_threshold` AND `density_so_far` < 0.5:
+-            *   `density` = `god_rays_intensity`.
+-        *   Else If `density` < `density_threshold`:
+-            *   `density` = 0.0.
+-    *   **Update Light Intensity:**
+-        *   `light_intensity` *= $\exp(-\text{density} \times \text{light\_decay} \times \text{step\_size})$.
+-    *   **Advance Ray:**
+-        *   `current_coordinates` += `-normalized_light_direction` * `scaled_step_size`.
+-    *   **Check Boundaries:**
+-        *   `is_frag_out_boundries` = (`current_coordinates.x` >= `light_texture_dims.x`) OR (`current_coordinates.y` >= `light_texture_dims.y`) OR (`current_coordinates.z` >= `light_texture_dims.z`) OR (`current_coordinates.x` < 0) OR (`current_coordinates.y` < 0) OR (`current_coordinates.z` < 0).
+-3.  **Write Result:**
+-    *   `light_density_texture[id]` = `light_intensity`.
++        *   If `density < density_threshold` and `density_so_far < 0.5`: `density` = `god_rays_intensity` [S1, unofficial].
++        *   Else if `density < density_threshold`: `density` = 0.0f [S1, unofficial].
++    *   **Update Light Intensity:** `light_intensity` *= `exp(-density * light_decay * step_size)` [S1, unofficial].
++    *   **Advance Ray:** `current_coordinates` += `-normalized_light_direction * scaled_step_size` [S1, unofficial].
++    *   **Check Boundary:** `is_frag_out_boundries` = `current_coordinates.x >= light_texture_dims.x` OR `current_coordinates.y >= light_texture_dims.y` OR `current_coordinates.z >= light_texture_dims.z` OR `current_coordinates.x < 0` OR `current_coordinates.y < 0` OR `current_coordinates.z < 0` [S1, unofficial].
++5.  **Write Result:** `light_density_texture[id]` = `light_intensity` [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-# Pseudocode for the compute shader kernel 'compute_light_intensities'
+-# Thread ID 'id' corresponds to a voxel in the output light map
++# Pseudocode for the compute_light_intensities kernel
++# Inputs: light_map_3D (RWTexture3D<float>), mask_texture_3D (Texture3D<float>), 
++#         noise_texture_3D (Texture3D<float>), light_texture_dims (float3), 
++#         global_light_direction (float3), light_decay (float), 
++#         god_rays_intensity (float), step_size (float), density_threshold (float)
+ 
+-def compute_light_intensities(id: int3, 
+-                              light_map_resolution: int3,
+-                              light_texture_dims: float3,
+-                              global_light_direction: float3,
+-                              light_decay: float,
+-                              light_sample_count: int,
+-                              density_threshold: float,
+-                              god_rays_intensity: float,
+-                              noise_texture_3D: Texture3D,
+-                              mask_texture_3D: Texture3D,
+-                              light_density_texture: RWTexture3D<float>):
+-    
+-    # 1. Initialization
++def compute_light_intensities(id: int3):
++    # Initialize loop variables
+     current_coordinates = id
+     density = 0.0f
+@@ -88,28 +75,27 @@
+     
+     normalized_light_direction = normalize(global_light_direction)
+-    step_size = 1.0f / light_sample_count
+     scaled_step_size = light_texture_dims.x * step_size
+     max_iteration = 256
+     
+-    # Boundary check at start
+-    if (current_coordinates.x >= light_texture_dims.x or 
+-        current_coordinates.y >= light_texture_dims.y or 
+-        current_coordinates.z >= light_texture_dims.z or 
+-        current_coordinates.x < 0 or 
+-        current_coordinates.y < 0 or 
+-        current_coordinates.z < 0):
+-        light_density_texture[id] = 0.0f
+-        return
+-
+-    # 2. Ray Marching Loop
+-    while (not is_out_of_bounds(current_coordinates, light_texture_dims) and max_iteration >= 0):
++    # Check initial boundary
++    is_frag_out_boundries = (
++        current_coordinates.x >= light_texture_dims.x or
++        current_coordinates.y >= light_texture_dims.y or
++        current_coordinates.z >= light_texture_dims.z or
++        current_coordinates.x < 0 or
++        current_coordinates.y < 0 or
++        current_coordinates.z < 0
++    )
++    
++    # Ray marching loop
++    while not is_frag_out_boundries and max_iteration >= 0:
+         max_iteration -= 1
+         
+-        # Map coordinates to input textures
+-        noise_id = light_id_to_noise_id(current_coordinates)
+-        mask_id = light_id_to_mask_id(current_coordinates)
+-        
+-        noise_density = noise_texture_3D[noise_id]
+-        mask = mask_texture_3D[mask_id]
++        # Sample textures
++        # Note: light_id_to_noise_id and light_id_to_mask_id are helper functions 
++        # mapping light texture coordinates to noise/mask texture coordinates.
++        # Assuming identity mapping for simplicity if not specified.
++        noise_density = noise_texture_3D[current_coordinates]
++        mask = mask_texture_3D[current_coordinates]
+         
+         # Apply mask and threshold filtering
+@@ -132,29 +118,16 @@
+         
+         # Check boundary conditions
+-        if is_out_of_bounds(current_coordinates, light_texture_dims):
+-            break
+-            
+-    # 3. Write result
+-    light_density_texture[id] = light_intensity
+-
+-def is_out_of_bounds(coords: int3, dims: float3) -> bool:
+-    return (coords.x >= dims.x or coords.y >= dims.y or coords.z >= dims.z or
+-            coords.x < 0 or coords.y < 0 or coords.z < 0)
+-
+-def light_id_to_noise_id(coords: int3) -> int3:
+-    # Implementation detail: maps light map resolution to noise texture resolution
+-    # Not given in the sources. Typically involves scaling based on texture dimensions.
+-    pass
+-
+-def light_id_to_mask_id(coords: int3) -> int3:
+-    # Implementation detail: maps light map resolution to mask texture resolution
+-    # Not given in the sources.
+-    pass
++        is_frag_out_boundries = (
++            current_coordinates.x >= light_texture_dims.x or
++            current_coordinates.y >= light_texture_dims.y or
++            current_coordinates.z >= light_texture_dims.z or
++            current_coordinates.x < 0 or
++            current_coordinates.y < 0 or
++            current_coordinates.z < 0
++        )
++        
++    # Write result
++    light_map_3D[id] = light_intensity
+ ```
+-
+-**Edge Cases and Pitfalls:**
+-*   **Boundary Conditions:** Boundary checking is performed at the start of the kernel and after each step. If the fragment is out of bounds initially, it returns early [S1, unofficial]. The boundary check logic uses `>=` for max dimensions and `< 0` for min dimensions [S1, unofficial].
+-*   **Precision:** The output format is `R8`, which may limit the precision of the stored light intensities [S1, unofficial].
+-*   **Noise Filtering:** The `density_threshold` parameter is critical for filtering noise; densities below this value are treated as transparent unless god rays conditions are met [S1, unofficial].
+ 
+ ## Subtopics
+@@ -163,15 +136,28 @@
+ This method implements direct volume rendering using 2D textures containing tiles that represent low-resolution 2D slices of the volume, referred to as 'pseudo volume textures'. It solves the problem of rendering dynamic volumetric data by allowing the volume to be "painted" at runtime. It differs from true 3D volume textures by restricting effective maximum volume resolution further, but distinguishes itself from its parent [Ray-marched Volumetric Lighting with Density Thresholding](2456-ray-marched-volumetric-lighting-with-density-thresholding.md) by recomputing lighting for each frame via secondary ray marches for every voxel sample.
+ 
++### [Light Propagation Volume (LPV) / Opacity Propagation Volume (OPV)](11130-light-propagation-volume-lpv-opacity-propagation-volume-opv.md)
++Light Propagation Volume (LPV), specifically the Opacity Propagation Volume (OPV) variant, is a real-time method for precomputing the optical depth $T(S,X)$ from each light source $S$ to each cell $X$ in a 3D grid. It solves the problem of efficiently calculating light attenuation (extinction) through heterogeneous participating media by propagating density information radially from light sources through a 3D volume on the GPU. Unlike standard radiance propagation which suffers from rapid scattering errors in dense media, OPV focuses on accurate optical depth integration, enabling correct shadowing and attenuation for subsequent ray-marched rendering. It builds on [Ray-marched Volumetric Lighting with Density Thresholding](2456-ray-marched-volumetric-lighting-with-density-thresholding.md) by providing the precomputed attenuation data required for that rendering step.
++
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N \cdot S)$, where $N$ is the number of voxels in the light map volume and $S$ is the number of samples per ray (`light_sample_count`).
+-*   **Memory Complexity:** $O(N)$ for the output light map texture, plus input textures for density, mask, and noise.
+-*   **Performance:** The method is implemented as a GPU compute shader, allowing for parallel processing of voxels. Performance depends on the resolution of the light map and the number of samples.
+-*   **Strengths:** Precomputes lighting for efficient runtime rendering; handles volumetric shadows and attenuation; supports god rays effects.
+-*   **Limitations:** Precomputation may not adapt well to dynamic light sources or moving volumes without recomputation; limited by the `R8` output format precision.
+-*   **When to Use:** Suitable for static or slowly changing volumetric scenes where lighting precomputation is feasible.
+-*   **When Not to Use:** Unsuitable for dynamic light sources or rapidly changing volumes where real-time recomputation is required.
++**Time and Memory Complexity:**
++The time complexity is proportional to the number of voxels in the light map volume multiplied by the number of samples per ray (`light_sample_count`). The memory complexity is proportional to the size of the 3D light map texture (`light_map_resolution.x * light_map_resolution.y * light_map_resolution.z` bytes, assuming `R8` format) plus the mask and noise textures [S1, unofficial].
++
++**Measured Performance:**
++Not given in the sources.
++
++**Scaling:**
++The method scales with the resolution of the light map volume and the number of samples. Higher resolutions and sample counts increase accuracy but also increase computation time and memory usage [S1, unofficial].
++
++**Strengths and Limitations:**
++Strengths include efficient precomputation of volumetric lighting and shadows, suitable for static or slowly changing volumes. Limitations include the static nature of the light map, which may not adapt well to dynamic lighting or rapidly changing volume densities without recomputation [S1, unofficial].
++
++**When to Use:**
++Use this method when rendering static or slowly changing volumetric scenes with a global light source, where precomputed lighting is acceptable and dynamic lighting is not required [S1, unofficial].
++
++**When Not to Use:**
++Do not use this method for dynamic volumetric scenes with changing light sources or rapidly changing densities, as the precomputed light map will become outdated [S1, unofficial].
+ 
+ ## Background
+-This method originates from the work of furkanunsal42 in the `VolumetricSmoke` project [S1, unofficial]. It is a GPU-based technique designed to simulate light attenuation through a volumetric medium by ray-marching from each voxel in the light texture space towards the global light direction, accumulating density and applying Beer-Lambert-like exponential decay [S1, unofficial].
++This method originates from the project "VolumetricSmoke" by furkanunsal42, an unofficial source [S1, unofficial]. It is a GPU compute shader technique designed to simulate light attenuation through a volumetric medium by ray-marching from each voxel in the light texture space towards the global light direction, accumulating density and applying Beer-Lambert-like exponential decay [S1, unofficial].
+ 
+ ## Sources

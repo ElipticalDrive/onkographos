@@ -1,0 +1,40 @@
+# Acceleration Structures and Traversal
+
+
+## Overview
+This family encompasses the algorithmic strategies for navigating volumetric data structures and the spatial metadata used to skip empty or occluded regions during ray casting [G]. It solves the problem of mapping continuous ray paths to discrete data elements while minimizing memory bandwidth and computation [G]. It sets itself apart from sibling methods like [GL-NeRF](803-gl-nerf.md) and [Occlusion Clipping with Orthogonal Opacity Map](990-occlusion-clipping-with-orthogonal-opacity-map.md) by focusing on the topology of the data access path and explicit hierarchical culling rather than neural approximation or rasterized proxies [G].
+
+## Shared principles
+The core mechanism shared by all children is the determination of the sequence of data elements (voxels, cells, or bricks) intersected by a ray, and the retrieval of values from those elements [G]. This involves:
+1. **Path Parameterization:** Representing the ray as $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$ and computing intersection intervals $[t_{entry}, t_{exit}]$ with data boundaries [G].
+2. **Coordinate Mapping:** Transforming the continuous ray parameter $t$ into discrete data indices (e.g., voxel coordinates, cell IDs, or brick IDs) [G].
+3. **Data Retrieval:** Fetching the value at the mapped index from the appropriate memory structure (texture, buffer, or mesh) [G].
+
+Mathematically, for a uniform grid, this is often a Digital Differential Analyzer (DDA) step [G]. For irregular grids, it involves explicit boundary intersection tests [G]. For hierarchical data, it involves Level of Detail (LoD) selection and cache residency checks [G].
+
+## Subtopics
+
+### [Acceleration Structure Rebuild](3266-acceleration-structure-rebuild.md)
+Discards the previous frame's acceleration structure and constructs a new one from scratch every frame for animated scenes [3266-acceleration-structure-rebuild.md]. It supports arbitrary, unrestricted animation types by avoiding the complexity and limitations of incremental or hierarchical update schemes [3266-acceleration-structure-rebuild.md]. It differs from siblings like [Adaptive Multi-Step Empty Voxel Skipping](6289-adaptive-multi-step-empty-voxel-skipping.md) or [Temporal Coherence and Caching](6372-temporal-coherence-and-caching.md) by rejecting temporal reuse of the structure itself, relying instead on full reconstruction speed and parallel processing [3266-acceleration-structure-rebuild.md].
+
+### [Traversal and Data Access](13739-traversal-and-data-access.md)
+Covers the algorithmic strategies for moving a ray through a volume dataset and retrieving scalar values for compositing [13739-traversal-and-data-access.md]. It sets itself apart from siblings like [GL-NeRF](803-gl-nerf.md) and [Space Skipping and Empty Volume Culling](10063-space-skipping-and-empty-volume-culling.md) by focusing on the topology of the data access path and memory availability [13739-traversal-and-data-access.md].
+
+### [LLO-based Ray-casting](16481-llo-based-ray-casting.md)
+A volume rendering technique that accelerates image-order rendering by utilizing a Linear Level Octree (LLO) spatial data structure to skip empty space and facilitate early ray termination [16481-llo-based-ray-casting.md]. It differs from brute-force ray-casting by replacing uniform voxel traversal with hierarchical octree traversal, and from other acceleration structures by encoding the octree in a linear array to optimize cache residency and memory access patterns [16481-llo-based-ray-casting.md].
+
+### [Empty Space Skipping via Acceleration Structures](17387-empty-space-skipping-via-acceleration-structures.md)
+Accelerates volume rendering by identifying and bypassing transparent or empty regions of the volume data before expensive sampling and compositing occur [17387-empty-space-skipping-via-acceleration-structures.md]. Unlike sibling methods that may rely on geometric proxies [16346-progressive-ray-casting-for-volumetric-models-on-mobile-devi.md], this family constructs explicit hierarchical or grid-based metadata structures (e.g., octrees, BVHs, min/max grids) to determine ray visibility [13062-empty-space-skipping-via-acceleration-structure.md]. It sets itself apart from [SparseLeap](5152-sparseleap.md) by typically using scalar min/max values or occupancy flags rather than rasterized segment lists, and from [Hierarchical Bounding Box Tree for Empty-Space Skipping](8182-hierarchical-bounding-box-tree-for-empty-space-skipping.md) by employing fixed-grid brick structures or specific tree traversals rather than generic bounding box hierarchies [13062-empty-space-skipping-via-acceleration-structure.md].
+
+### Two-level Data Structures for Articulated Bodies
+A structure for scenes with dynamic parts. Uses a global grid/structure where articulated bodies (rigid parts) are inserted as elementary objects. Each rigid part has its own local grid or data structure [S1, unofficial]. It is a technique for accelerating ray tracing in scenes with articulated bodies (rigid parts connected by joints) by separating static and dynamic components into different acceleration structures [S1, unofficial]. Implementation uses a separate grid or data structure for each self-contained rigid part of the articulated body [S1, unofficial]. It uses a global grid to store the individual parts as elementary objects [S1, unofficial]. When the figure moves, only update the global grid; the local structures for rigid parts do not need updating [S1, unofficial].
+
+### Hash-based subvolume skipping
+Approximate the hash table for a subtile by taking the union of the hash tables at the 4 surrounding corners and send it to the corresponding SPE [S2]. The SPE skips a sampling point if it belongs to an empty subvolume by checking the hash table [S2]. The hash key is computed as $key = (ranX \cdot x + ranY \cdot y + ranZ \cdot z) \pmod{PR}$ [S2]. Parameters: PR is a prime number equal to the hash table size; ranX, ranY, ranZ are random numbers strictly less than PR; x, y, z are the smallest coordinates of the subvolume [S2]. Pitfall: False positives are possible (an empty subvolume may be recognized as non-empty), but false negatives never occur. The false alarm rate can be significantly reduced by setting the hash table size large enough [S2].
+
+## Background
+Not given in the sources.
+
+## Sources
+[S1] Advanced Computer Graphics, https://cgvr.cs.uni-bremen.de/teaching/cg2_13/folien/03%20-%20Acceleration%20data%20structures.pdf, fetched 2026-10-24 (unofficial)
+[S2] Streaming Model Based Volume Ray Casting Implementation ..., http://users.umiacs.umd.edu/~josephj/Streaming-model-ray-casting.pdf, fetched 2026-10-29

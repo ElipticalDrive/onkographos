@@ -1,0 +1,115 @@
+# Segment Coalescing Compositing
+
+Also called: Coalesced Ray Marching, Segment-based Volume Rendering, Volume Rendering with Segment Coalescing
+
+## Overview
+Segment Coalescing Compositing aggregates per-sample ray contributions (RGB, alpha weights, and depth) into final pixel values during direct volume ray casting [S1, unofficial]. It differs from standard sequential accumulation by explicitly grouping scattered samples by `ray_id` and reducing them via indexed summation, which allows flexible handling of variable-length rays and explicit background blending [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Inputs: `rgb` (shape `[M, 3]`), `weights` (shape `[M]`), `ray_id` (shape `[M]`), `t` (shape `[M]`, accumulated distance), `alphainv_last` (shape `[N]`, inverse alpha of the last segment per ray), `render_kwargs` (dictionary containing `rand_bkgd`, `bg`, `render_depth`), and `inner_mask` (shape `[M]`, boolean mask identifying non-last segments) [S1, unofficial].
+- Outputs: `rgb_marched` (shape `[N, 3]`), `wsum_mid` (shape `[N]`), `depth` (shape `[N]`, optional), and a return dictionary `ret_dict` containing all intermediate and final values [S1, unofficial].
+
+**Data Structures:**
+The method uses dense PyTorch tensors [S1, unofficial]. The core operation is an indexed scatter-add reduction: initialize a zero tensor of shape `[N, ...]` and add `weights.unsqueeze(-1) * rgb` at indices specified by `ray_id` [S1, unofficial].
+
+**Steps:**
+1. **Compute Weighted RGB:** Calculate the contribution of each sample to its ray's color by broadcasting weights to match the RGB dimension: `weights.unsqueeze(-1) * rgb` [S1, unofficial].
+2. **Coalesce RGB:** Sum the weighted RGB contributions for all samples belonging to the same ray [S1, unofficial]. Initialize a zero tensor of shape `[N, 3]` and perform an indexed addition of the weighted RGB values using `ray_id` as indices [S1, unofficial].
+3. **Add Background:** Blend the background into the marched RGB [S1, unofficial]. If `rand_bkgd` is true during training, add `alphainv_last.unsqueeze(-1) * torch.rand_like(rgb_marched)` [S1, unofficial]. Otherwise, add `alphainv_last.unsqueeze(-1) * render_kwargs['bg']` [S1, unofficial].
+4. **Compute Middle Weight Sum:** Calculate the sum of weights for all segments except the last one [S1, unofficial]. Use the boolean mask `inner_mask` to select samples that are not the last segment of their ray [S1, unofficial]. Initialize a zero tensor of shape `[N]` and perform an indexed addition of `weights[inner_mask]` using `ray_id[inner_mask]` as indices [S1, unofficial].
+5. **Compute Normalized Depth Parameter $s$:** For each sample, compute the normalized depth parameter from the accumulated distance $t$ using the formula $s = 1 - \frac{1}{1+t}$, which maps $t \in [0, \infty)$ to $s \in [0, 1)$ [S1, unofficial].
+6. **Compute Depth (Optional):** If `render_depth` is enabled, compute the depth value for each ray [S1, unofficial]. Initialize a zero tensor of shape `[N]` and perform an indexed addition of `weights * s` using `ray_id` as indices [S1, unofficial]. This step is performed within `torch.no_grad()` to avoid storing gradients [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+
+def segment_coalescing_compositing(
+    rgb: torch.Tensor,          # [M, 3]
+    weights: torch.Tensor,      # [M]
+    ray_id: torch.Tensor,       # [M]
+    t: torch.Tensor,            # [M]
+    alphainv_last: torch.Tensor,# [N]
+    render_kwargs: dict,
+    inner_mask: torch.Tensor    # [M], boolean mask for non-last segments
+) -> dict:
+    N = alphainv_last.shape[0]
+    
+    # 1. Compute weighted RGB contributions
+    weighted_rgb = weights.unsqueeze(-1) * rgb
+    
+    # 2. Coalesce RGB by ray_id
+    rgb_marched = torch.zeros(N, 3, dtype=rgb.dtype, device=rgb.device)
+    rgb_marched.index_add_(0, ray_id, weighted_rgb)
+    
+    # 3. Add background
+    if render_kwargs.get('rand_bkgd', False):
+        bkgd = torch.rand_like(rgb_marched)
+    else:
+        bkgd = render_kwargs['bg']
+    rgb_marched = rgb_marched + alphainv_last.unsqueeze(-1) * bkgd
+    
+    # 4. Compute sum of weights for middle segments
+    wsum_mid = torch.zeros(N, dtype=weights.dtype, device=weights.device)
+    if inner_mask.any():
+        wsum_mid.index_add_(0, ray_id[inner_mask], weights[inner_mask])
+        
+    # 5. Compute normalized depth parameter s
+    s = 1.0 - 1.0 / (1.0 + t)
+    
+    # 6. Compute depth if enabled
+    depth = None
+    if render_kwargs.get('render_depth', False):
+        with torch.no_grad():
+            depth = torch.zeros(N, dtype=weights.dtype, device=weights.device)
+            depth.index_add_(0, ray_id, weights * s)
+            
+    ret_dict = {
+        'alphainv_last': alphainv_last,
+        'weights': weights,
+        'wsum_mid': wsum_mid,
+        'rgb_marched': rgb_marched,
+        'raw_density': None,          # Not computed in this snippet [G]
+        'raw_alpha': None,            # Not computed in this snippet [G]
+        'raw_rgb': rgb,
+        'ray_id': ray_id,
+        'step_id': None,              # Not computed in this snippet [G]
+        'n_max': None,                # Not computed in this snippet [G]
+        't': t,
+        's': s,
+        'density': None,              # Not computed in this snippet [G]
+        'ray_pts': None,              # Not computed in this snippet [G]
+    }
+    
+    if depth is not None:
+        ret_dict['depth'] = depth
+            
+    return ret_dict
+```
+
+**Parameters:**
+- `rand_bkgd`: Boolean flag in `render_kwargs` that determines if random background noise is added during training instead of the specified background color [S1, unofficial].
+- `render_depth`: Boolean flag in `render_kwargs` that enables the computation and inclusion of depth in the returned dictionary [S1, unofficial].
+- `bg`: Background color tensor, used if `rand_bkgd` is false [S1, unofficial].
+- Typical values: Not given in the sources [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Precision:** The calculation of $s$ involves division by $1+t$ [S1, unofficial]. Since $t \ge 0$, $1+t \ge 1$, so division by zero is avoided [S1, unofficial].
+- **Boundary Conditions:** The `inner_mask` must correctly identify the last segment of each ray [G]. Including the last segment in the middle weight sum would incorrectly double-count its contribution relative to the background blending term [G].
+- **Memory/Contiguity:** The `index_add_` operation requires the output tensor to be contiguous [G]. Initializing with `torch.zeros` ensures this [G].
+
+## Operating characteristics
+- **Time Complexity:** $O(M)$ for element-wise operations and indexed scatter-add reductions, where $M$ is the total number of samples [S1, unofficial].
+- **Memory Complexity:** $O(N)$ for the output tensors, where $N$ is the number of rays [S1, unofficial]. Intermediate tensors scale with $M$ [S1, unofficial].
+- **Measured Performance:** Not given in the sources [S1, unofficial].
+- **Strengths:** Efficiently handles variable-length rays and parallelizes well on GPUs via indexed reduction [S1, unofficial].
+- **Limitations:** Requires correct construction of `inner_mask` to separate middle segments from the last segment [G]. Assumes `ray_id` indices are valid and within `[0, N)` [G].
+
+## Background
+Not given in the sources [S1, unofficial].
+
+## Sources
+[S1] Jumpat/SegmentAnythingin3D, https://github.com/Jumpat/SegmentAnythingin3D, fetched 2026-10-26 (unofficial)

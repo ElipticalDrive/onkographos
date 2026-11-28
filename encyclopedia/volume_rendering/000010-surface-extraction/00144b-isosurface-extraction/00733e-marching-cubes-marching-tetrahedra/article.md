@@ -1,0 +1,143 @@
+# Marching Cubes / Marching Tetrahedra
+
+
+## Overview
+Marching Cubes (MC) and Marching Tetrahedra (MT) are isosurface extraction algorithms that convert a discrete scalar field into a polygonal mesh by determining where the field intersects the edges of a voxel grid [S1]. They solve the problem of surface reconstruction from volumetric data by decomposing the domain into cells (cubes or tetrahedra) and applying a lookup table to determine the local topology of the isosurface [G]. Unlike methods that allow grid vertex deformation, standard MC/MT vertices are restricted to a sparse lattice of grid edges, which prevents fitting sharp features and creates poor-quality sliver triangles when the isosurface passes near a vertex [S1]. However, the resulting mesh is always self-intersection-free and manifold [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A scalar field $V$ defined on a 3D grid of vertices, and a scalar isovalue $I$.
+*   **Output:** A set of triangles (vertices and indices) representing the isosurface $V(x) = I$.
+
+**Data Structures:**
+The method relies on the precomputed structures from [Marching Cubes Lookup and Configuration](2518-marching-cubes-lookup-and-configuration.md):
+1.  **Edge Intersection Table (`edgeTable`)**: 256 entries, 12-bit bitmask. Bit $k$ is 1 if the isosurface intersects edge $k$.
+2.  **Triangle Connection Table (`triangleTable`)**: $256 \times 16$ array. Rows are case indices $C$. Columns store edge indices grouped in triplets, terminated by `-1`.
+
+**Vertex Ordering and Case Index:**
+The 8 vertices of a cube are indexed $0..7$. The standard ordering is:
+*   Bottom face ($z=0$): $v_0, v_1, v_2, v_3$
+*   Top face ($z=1$): $v_4, v_5, v_6, v_7$
+The case index $C$ is an 8-bit integer where bit $i$ is set if $V(v_i) < I$ (or $> I$, depending on convention) [G].
+
+**Edge Intersections:**
+For each edge $e_k = (v_a, v_b)$ where the sign of $(V(v_a) - I)$ differs from $(V(v_b) - I)$, the intersection point $u_e$ is computed via linear interpolation. The standard formula is:
+$$u_e = \frac{x_a \cdot s(x_b) - x_b \cdot s(x_a)}{s(x_b) - s(x_a)} \quad (1)$$
+where $x_a, x_b$ are the 3D coordinates of the vertices, and $s(x)$ is the scalar field value at that vertex [S1]. Note: Liao et al. [2018] and Remelli et al. [2020] observe that this expression contains a singularity when $s(x_a) = s(x_b)$, which might obstruct differential optimization, although Shen et al. [2021] note that Equation 1 is never evaluated under the singular condition during extraction [S1].
+
+**Algorithm Steps:**
+1.  Iterate over every voxel in the grid.
+2.  Compute the case index $C$ by comparing the 8 vertex scalar values to the isovalue.
+3.  Check `edgeTable[C]` to identify which of the 12 edges are intersected.
+4.  For each intersected edge, compute the intersection point using linear interpolation (Equation 1).
+5.  Look up `triangleTable[C]` to find the sequence of edge indices forming triangles.
+6.  Generate triangles by connecting the precomputed intersection points.
+7.  Handle ambiguous cases (46, 47, 98, 99, 210, 213, 214, 215) using fixed triangulations from the LUT, which may cause cracks if adjacent voxels resolve ambiguities inconsistently [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_case_index(values, isovalue):
+    """
+    values: list of 8 scalar field values at cube vertices
+    isovalue: scalar threshold
+    Returns: 8-bit case index C
+    """
+    case_index = 0
+    for i in range(8):
+        if values[i] < isovalue:
+            case_index |= (1 << i)
+    return case_index
+
+def interpolate_edge_intersection(va, vb, sa, sb):
+    """
+    va, vb: 3D coordinates of edge endpoints
+    sa, sb: scalar field values at endpoints
+    Returns: 3D intersection point
+    """
+    # Equation 1 from [S1]
+    # Singularity occurs if sa == sb, but this case is excluded by sign check
+    numerator_x = va[0] * sb - vb[0] * sa
+    numerator_y = va[1] * sb - vb[1] * sa
+    numerator_z = va[2] * sb - vb[2] * sa
+    denominator = sb - sa
+    return (numerator_x / denominator, numerator_y / denominator, numerator_z / denominator)
+
+def extract_triangles(case_index, triangle_table, edge_intersections):
+    """
+    case_index: 8-bit integer
+    triangle_table: 256x16 array of edge indices
+    edge_intersections: dict mapping edge index (0-11) to 3D point
+    Returns: list of triangles, each triangle is a tuple of 3 points
+    """
+    triangles = []
+    tri_indices = triangle_table[case_index]
+    
+    i = 0
+    while i < 16:
+        if tri_indices[i] == -1:
+            break
+        
+        e1 = tri_indices[i]
+        e2 = tri_indices[i+1]
+        e3 = tri_indices[i+2]
+        
+        p1 = edge_intersections[e1]
+        p2 = edge_intersections[e2]
+        p3 = edge_intersections[e3]
+        
+        triangles.append((p1, p2, p3))
+        i += 3
+        
+    return triangles
+
+def marching_cubes_step(cube_vertices, cube_scalars, isovalue, triangle_table):
+    """
+    Process a single cube.
+    cube_vertices: list of 8 (x,y,z) tuples
+    cube_scalars: list of 8 scalar values
+    Returns: list of triangles
+    """
+    case_index = compute_case_index(cube_scalars, isovalue)
+    
+    edge_intersections = {}
+    # Edge definitions: (vertex_index_a, vertex_index_b)
+    edges = [
+        (0,1), (1,2), (2,3), (3,0), # Bottom
+        (4,5), (5,6), (6,7), (7,4), # Top
+        (0,4), (1,5), (2,6), (3,7)  # Vertical
+    ]
+    
+    # Check edgeTable for intersections (bitmask logic implied)
+    # For brevity, assume we iterate edges and check sign change
+    for k, (va_idx, vb_idx) in enumerate(edges):
+        sa = cube_scalars[va_idx]
+        sb = cube_scalars[vb_idx]
+        # Check if signs differ relative to isovalue
+        if (sa < isovalue) != (sb < isovalue):
+            edge_intersections[k] = interpolate_edge_intersection(
+                cube_vertices[va_idx], cube_vertices[vb_idx], sa, sb
+            )
+            
+    return extract_triangles(case_index, triangle_table, edge_intersections)
+```
+
+## Subtopics
+
+### [Cage-Building Algorithm](23033-cage-building-algorithm.md)
+The Cage-Building Algorithm is an automated pipeline that generates a simple, tight, and artifact-free deformation cage enclosing a 3D Gaussian Splatting (3DGS) scene.
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ where $N$ is the number of voxels, as each voxel is processed independently with constant-time lookup and interpolation.
+*   **Memory Complexity:** $O(N)$ for the output mesh, plus constant space for LUTs.
+*   **Strengths:** Simple to implement; produces manifold, self-intersection-free meshes; deterministic.
+*   **Limitations:** Vertices are constrained to grid edges, leading to "sliver triangles" and poor approximation of sharp features [S1]. Ambiguous cases (e.g., 46, 47) can cause topological errors if not handled consistently across adjacent voxels [G].
+*   **When to use:** When a quick, robust, manifold mesh is needed from a scalar field and high-fidelity feature preservation is not critical.
+*   **When not to use:** When the scalar field contains sharp features that do not align with the grid edges, or when differentiable optimization of the mesh geometry is required (due to the singularity in interpolation gradients) [S1].
+
+## Background
+Marching Cubes was introduced by Lorensen and Cline in 1987 [G]. Marching Tetrahedra was proposed by Doi and Koide in 1991 as an alternative to resolve topological ambiguities inherent in the cube-based approach [S1]. The methods are foundational in medical imaging and scientific visualization for surface reconstruction.
+
+## Sources
+[S1] Flexible Isosurface Extraction for Gradient-Based Mesh Optimization, https://arxiv.org/abs/2308.05371v1, fetched 2026-10-26

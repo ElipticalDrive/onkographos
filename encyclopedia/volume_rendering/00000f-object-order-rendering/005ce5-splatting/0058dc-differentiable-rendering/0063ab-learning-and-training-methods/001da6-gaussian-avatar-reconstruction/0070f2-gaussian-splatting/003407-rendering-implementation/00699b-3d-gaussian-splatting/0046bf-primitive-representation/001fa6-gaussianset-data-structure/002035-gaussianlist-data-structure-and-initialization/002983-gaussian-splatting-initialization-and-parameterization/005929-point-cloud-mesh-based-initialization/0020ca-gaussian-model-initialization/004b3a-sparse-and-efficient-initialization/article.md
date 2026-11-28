@@ -1,0 +1,103 @@
+# Sparse and Efficient Initialization
+
+
+## Overview
+Sparse and Efficient Initialization establishes a computationally lightweight starting state for 3D Gaussian Splatting by initializing primitives within the visible camera frustum with low opacity and small scales [G]. It solves the problem of slow convergence and sub-optimal local minima caused by poor initial placement or high initial reflectivity [G]. It sets itself apart from its siblings by focusing on the initial placement and static pre-training phase rather than iterative refinement or uniform density generation [G]. It builds on [Gaussian Model Initialization](2349-gaussian-model-initialization.md).
+
+## Shared principles
+The family shares the mechanism of initializing a set of $N$ 3D Gaussians with parameters $\mu_i, \Sigma_i, \alpha_i, C_i$ to facilitate stable optimization in differentiable volume rendering [G]. Common steps include sampling means within the camera frustum, initializing opacity to low values ($0.01$–$0.1$) to prevent inverse-square falloff interference, and running a static warm-up phase for $2,000$ iterations [Gaussian Initialization and Warm-up](9657-gaussian-initialization-and-warm-up.md). Voxel-based variants average attributes within voxels and use the largest volume covariance [Gaussian Initialization and Warm-up](9657-gaussian-initialization-and-warm-up.md). Motion-blur variants dynamically calculate supplementing point counts based on bounding box volume and interpolate colors from nearest neighbors [Supplementing Points for Camera Motion Blur](12327-supplementing-points-for-camera-motion-blur.md).
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def initialize_gaussians(num_gaussians, near_plane, far_plane, voxel_data=None, use_deformation_mlp=False, unambiguous_depth_range=None):
+    gaussians = []
+    for _ in range(num_gaussians):
+        # 1. Spatial Initialization: sample uniformly within camera frustum
+        depth = np.random.uniform(near_plane, far_plane)
+        ndc_x, ndc_y = np.random.uniform(-1.0, 1.0), np.random.uniform(-1.0, 1.0)
+        mu = np.array([ndc_x * depth, ndc_y * depth, depth])
+
+        if use_deformation_mlp and unambiguous_depth_range is not None:
+            # Rescale coordinates to [0, 1] range
+            scale = unambiguous_depth_range[1] - unambiguous_depth_range[0]
+            mu = (mu - unambiguous_depth_range[0]) / scale
+
+        # 2. Attribute Initialization
+        alpha = np.random.uniform(0.01, 0.1)
+
+        if voxel_data is not None:
+            voxel = voxel_data.get_spatial_hash(mu)
+            sigma = voxel.largest_volume_covariance
+            C_dc, C_ac = voxel.average_color_attributes
+        else:
+            sigma = np.eye(3)
+            C_dc = np.array([1.0, 1.0, 1.0])
+            C_ac = np.zeros(12)
+
+        gaussians.append({'mu': mu, 'sigma': sigma, 'alpha': alpha, 'C_dc': C_dc, 'C_ac': C_ac})
+    return gaussians
+
+def supplement_points(existing_gaussians, c=1.1, n_max=200000):
+    positions = np.array([g['mu'] for g in existing_gaussians])
+    if len(positions) == 0:
+        return existing_gaussians
+
+    q_max = np.max(positions, axis=0)
+    q_min = np.min(positions, axis=0)
+    extent = q_max - q_min
+    volume = np.prod(extent)
+    n_p = int(volume / (c ** 3))
+    n_p = min(n_p, n_max)
+
+    if n_p == 0:
+        return existing_gaussians
+
+    # 3. Generate New Positions: uniform sampling within bounding box [G]
+    new_positions = np.random.uniform(low=q_min, high=q_max, size=(n_p, 3))
+
+    # 4. Initialize Color Features: interpolate from nearest neighbors [S1, unofficial]
+    existing_positions = positions
+    existing_colors = np.array([g['C_dc'] for g in existing_gaussians])
+    dists = np.sqrt(np.sum((new_positions[:, np.newaxis, :] - existing_positions[np.newaxis, :, :]) ** 2, axis=2))
+    nearest_indices = np.argmin(dists, axis=1)
+    new_colors = existing_colors[nearest_indices]
+
+    # 5. Initialize Other Attributes: standard sparse initialization [G]
+    new_gaussians = []
+    for i in range(n_p):
+        new_g = {'mu': new_positions[i], 'sigma': np.eye(3), 'alpha': 0.01, 'C_dc': new_colors[i], 'C_ac': np.zeros(12)}
+        new_gaussians.append(new_g)
+
+    return existing_gaussians + new_gaussians
+```
+
+## Subtopics
+
+### [Gaussian Initialization and Warm-up](9657-gaussian-initialization-and-warm-up.md)
+Combines spatial sampling, attribute biasing, and a static optimization phase to prepare the Gaussian set for dynamic or complex scene reconstruction. It distinguishes itself by focusing on the initial placement and static pre-training phase rather than iterative refinement or uniform density generation.
+
+### [Supplementing Points for Camera Motion Blur](12327-supplementing-points-for-camera-motion-blur.md)
+Supplements an initial sparse point cloud with additional 3D Gaussian points to enable the representation of tiny objects and handle camera motion blur. It distinguishes itself by dynamically calculating the number of extra points based on the spatial extent of the existing cloud and explicitly interpolating color features for these new points.
+
+#### Shorter Gaussian Lists
+- [S1, unofficial] Investigates training from a tiny initial set of Gaussians to achieve comparable quality and accelerated pipeline.
+
+#### Mixed-Primitive Initialization Strategy
+- [S2, unofficial] An initialization method for mixed-primitive Gaussian Splatting that groups points with similar colors to form initial primitives, rather than initializing one primitive per point with random types.
+- [S2, unofficial] Identify subsets of points where the maximum pairwise L2 color distance is below $\omega_{color}$.
+- [S2, unofficial] $\omega_{color}$: The threshold for color similarity during initialization. Default value: $5$.
+
+#### Default Value Initialization
+- [S3, unofficial] Provides default values for missing splat fields.
+- [S3, unofficial] Rotations: `[1.0, 0.0, 0.0, 0.0]`. Log scales: `-4.0`. SH coeffs: `0.5`. Opacities: `inverse_sigmoid(0.5)`.
+
+## Background
+The "Shorter Gaussian Lists" approach [S1, unofficial] specifically investigates training from a tiny initial set, showing that careful initialization and regularization help achieve comparable quality and accelerated pipelines. The "Mixed-Primitive" approach [S2, unofficial] extends this by grouping points based on color similarity to form initial primitives, reducing the initial count while preserving structural information. The "Default Value" approach [S3, unofficial] provides a baseline for engines like Brush, ensuring consistent initialization for missing fields.
+
+## Sources
+[S1] 3D Gaussian Splatting Rasterization: A Survey, https://doi.org/10.20944/preprints202607.0776.v2, fetched 2026-10-26 (unofficial)
+[S2] A Mixed-Primitive-based Gaussian Splatting Method for Surface Reconstruction, https://core.ac.uk/works/308836756, fetched 2026-10-30 (unofficial)
+[S3] Brush – A new compatible Gaussian splatting engine, https://github.com/ArthurBrussee/brush, fetched 2026-10-26 (unofficial)

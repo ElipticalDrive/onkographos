@@ -1,0 +1,97 @@
+--- v013.md
++++ v014.md
+@@ -4,20 +4,17 @@
+ 
+ ## Overview
+-Hardware-Accelerated Volume Rendering is a family of direct volume rendering techniques that offload the computationally intensive ray-marching, sampling, and compositing operations from the CPU to the GPU [S1, unofficial]. It solves the performance bottleneck of CPU-driven ray casting by leveraging graphics hardware for parallel execution [S1, unofficial]. It differs from [Direct volume ray casting](19-direct-volume-ray-casting.md) by utilizing GPU-specific mechanisms such as 3D texture mapping, proxy geometry activation, or custom hardware units to achieve real-time or near-real-time frame rates [S2][S4].
++Hardware-Accelerated Volume Rendering is a family of direct volume rendering techniques that offload the computationally intensive tasks of ray traversal, sampling, and compositing to the graphics processing unit (GPU) [S1, unofficial]. It solves the performance bottleneck of CPU-based ray casting by exploiting the intrinsic parallelism of fragment processors and dedicated texture hardware [S1, unofficial]. It differs from software-based implementations by utilizing 3D texture mapping, framebuffer objects (FBOs), and programmable shaders to achieve interactive frame rates [S2][S4].
+ 
+ ## Shared principles
+-The family implements the emission-absorption optical model, computing the light intensity reaching the eye by integrating radiative energy along a ray through the scalar volume [S1, S5, S9, unofficial]. The process follows a strict pipeline for each pixel: ray generation, sampling, classification (transfer function application), shading, and compositing [S4, S34, unofficial].
++The family implements the emission-absorption optical model, building on the pipeline defined in [Direct volume ray casting](19-direct-volume-ray-casting.md). The core mechanism involves mapping the volumetric data into 3D texture memory and using the GPU's fragment shader to execute the ray-marching loop [S2][S4].
+ 
+-### Ray Generation and Discretization
+-For each pixel, a ray $r(t) = \mathbf{o} + t\mathbf{d}$ is defined, where $\mathbf{o}$ is the camera origin and $\mathbf{d}$ is the direction [S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39, S40, S41, S42, S43, S44, S45, S46, S47, S48, S49, S50, S51, S52, S53, S54, S55, S56, S57, S58, S59, S60, S61, S62, S63, S64, S65, S66, S67, S68, S69, S70, S71, S72, S73, S74, S75, S76, S77, S78, S79, S80, S81, S82, S83, S84, S85, S86, S87, S88, S89, S90, S91, S92, S93, S94, S95, S96, S97, S98, S99, S100]. The ray is intersected with the volume domain (typically an axis-aligned bounding box) to determine the entry parameter $t_{start}$ and exit parameter $t_{end}$ [S1, S7, S15, S22, S33, S55, unofficial]. The segment $[t_{start}, t_{end}]$ is discretized into $N$ samples at equidistant intervals $\Delta t$ [S4, S8, S9, S16, S33, S40, unofficial]. The step size $\Delta t$ is often chosen to ensure at least one sample per voxel along the fastest axis to minimize aliasing, though adaptive stepping is also used [S36, unofficial][S46, abstract only, unofficial].
++### Texture Mapping and Sampling
++The scalar volume $V(\mathbf{x})$ is stored as a 3D texture object (`sampler3D`) or a 2D texture array [S1, S4, unofficial]. The GPU hardware performs trilinear interpolation of the volume data at each sample point on the ray, effectively replacing the software-based reconstruction filter [S2][S4]. For high-performance engines, 8-way interleaved texture memory allows fetching any tri-linear cell (8 adjacent voxels) in a single memory access [S1, unofficial].
+ 
+-### Sampling and Interpolation
+-At each sample point $\mathbf{p}_i = r(t_i)$, the scalar volume value $V(\mathbf{p}_i)$ is reconstructed from the discrete voxel grid [S6, S7, S33, unofficial][S44, book]. Trilinear interpolation is the standard reconstruction filter for high-quality rendering, combining the eight surrounding voxels [S6, S7, S33, S40, unofficial]. Nearest-neighbor interpolation is used for performance or specific artifact styles [S43, unofficial][S44, book]. The interpolated value represents the local density or material property [S9, S18, unofficial].
++### Ray Generation and Traversal
++Ray generation is typically handled by rendering proxy geometry (such as the volume's bounding box) to activate the fragment shader [S2]. The fragment shader computes the ray origin, direction, and entry/exit points for each pixel [S1, S4, unofficial]. The ray is discretized into $N$ samples, and the shader iterates through these samples, advancing the position along the ray direction $\mathbf{d}$ by a step size $\Delta t$ or $\mathbf{s}$ [S1, S4, unofficial].
+ 
+-### Classification (Transfer Function)
+-The scalar value $d_i = V(\mathbf{p}_i)$ is mapped to optical properties: color $C_i$ and opacity $\alpha_i$ [S2, S5, S11, S12, S25, S29, S31, S34, unofficial]. This mapping is defined by a transfer function $T(d_i)$ [S2, S5, S2789]. Pre-classification maps scalar values to RGBA before interpolation, while post-classification interpolates scalars first and then applies the transfer function [S4, unofficial][S44, book]. The opacity $\alpha_i$ determines the fraction of light absorbed or scattered at the sample [S18, S23, S51, unofficial].
+-
+-### Compositing (Front-to-Back Integration)
+-The final pixel color $C_{final}$ is computed by integrating contributions from all samples along the ray from front to back ($t_{start}$ to $t_{end}$) [S1, S12, S16, S23, S24, S43, S50, S51, unofficial]. The standard compositing equation (over operator) updates the accumulated color $C'$ and accumulated opacity $\alpha'$ for each sample $i$:
++### Classification and Compositing
++At each sample point, the interpolated scalar value is mapped to color $C_i$ and opacity $\alpha_i$ using a transfer function, often stored as a 1D or 2D texture (`sampler1D`) [S1, S2, S4, unofficial]. The final pixel color is computed via front-to-back compositing (the over operator) within the fragment shader:
+ 
+ $$
+@@ -28,40 +25,52 @@
+ $$
+ 
+-where $C'_0 = 0$ and $\alpha'_0 = 0$ [S12, S43, S50, unofficial]. The term $(1 - \alpha'_{i-1})$ represents the transmittance (light reaching the current sample) [S1, S51, unofficial]. If $\alpha'$ reaches 1 (or a threshold close to it), the ray can be terminated early, as subsequent samples are fully occluded [S9, S12, S27, unofficial].
++where $C'_0 = 0$ and $\alpha'_0 = 0$ [S1, S4, unofficial].
+ 
+-### Shading
+-Shading models are applied to enhance depth perception. Common techniques include Phong or Blinn-Phong shading, which use the gradient of the volume data $\nabla V$ to compute surface normals for lighting calculations [S14, S15, S30, unofficial][S54]. The gradient is typically estimated using central differences or Sobel operators on the interpolated scalar field [S14, S30, unofficial][S54].
++### Early Ray Termination
++To optimize performance, the method supports early ray termination. If the accumulated opacity $\alpha'$ reaches a threshold (typically 1.0 or 0.95), the ray marching loop is broken, as subsequent samples are fully occluded [S1, unofficial][S2][S3, unofficial]. In multi-pass implementations, this is often managed by manipulating the depth buffer to skip fragments that have reached full opacity [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Back-face rasterized volume rendering](1296-back-face-rasterized-volume-rendering.md)
+-Uses a two-pass approach where the first pass rasterizes the back face of the bounding box to capture entry points into a texture, and the second pass uses these points to define ray endpoints for front-to-back compositing.
++A GPU-accelerated technique that determines ray entry and exit points by rasterizing the volume's bounding box geometry rather than computing intersections analytically. It uses a two-pass approach: the first pass renders back faces to a texture to capture entry coordinates, and the second pass uses these coordinates to define ray endpoints for front-to-back compositing. It differs from [Bounding Box Raymarching](2071-bounding-box-raymarching.md) by explicitly utilizing this two-pass FBO mechanism.
+ 
+ ### [GPU Multi-Volume Ray Casting Mapper](2461-gpu-multi-volume-ray-casting-mapper.md)
+-Renders multiple 3D scalar fields simultaneously by compositing them along a single ray using coordinate transformation matrices to align samples from different volumes to a common ray space.
++A technique that renders multiple 3D scalar fields simultaneously along a single ray. It extends single-volume rendering by managing coordinate transformations between disparate volume datasets to align samples in a common ray space, enabling the visualization of registered or unregistered multi-modal data. It sets itself apart by explicitly handling multiple `vtkImageData` inputs and transformation matrices within the shader.
+ 
+ ### [Hardware-Accelerated Volume Rendering via 3D Texturing](2799-hardware-accelerated-volume-rendering-via-3d-texturing.md)
+-Leverages 3D texture mapping hardware to perform reconstruction and resampling of volumetric data in a ray-parallel fashion, embedding resampling polygons in the 3D texture.
++This method leverages 3D texture mapping hardware to perform reconstruction and resampling in a ray-parallel fashion. It solves the performance bottleneck of software-based ray casting by offloading trilinear interpolation to the graphics pipeline. Unlike [Shear-Warp](5616-hardware-accelerated-volume-rendering.md), which performs classification before bilinear resampling, the Planar Texture Resampling variant performs trilinear interpolation followed by classification, resulting in higher image quality for perspective projections.
+ 
+ ### [Triton-accelerated Volume Raycasting](3379-triton-accelerated-volume-raycasting.md)
+-Uses the Triton compiler to perform volume raycasting, avoiding the materialization of intermediate ray-sample tensors in High Bandwidth Memory (HBM) to reduce memory footprint and increase speed.
++A fused GPU rendering technique that uses the Triton compiler to perform volume raycasting, avoiding the materialization of intermediate ray-sample tensors in High Bandwidth Memory (HBM). It sets itself apart by fusing the ray-marching loop into a single CUDA kernel, eliminating memory bandwidth bottlenecks and cache thrashing associated with non-fused PyTorch implementations at high resolutions.
+ 
+ ### [3D Pixel Texture Classification](6055-3d-pixel-texture-classification.md)
+-Maps voxel attributes (Data Value, Gradient Magnitude, Second Derivative) to color and opacity using a 3D texture lookup, enabling real-time interactive classification via multi-dimensional transfer functions.
++A hardware-accelerated method that maps multi-dimensional scalar attributes to optical properties using a 3D texture lookup. It differs from standard 1D or 2D transfer functions by incorporating gradient magnitude and second derivative information directly into the texture coordinate generation, allowing for boundary-aware classification without explicit shader computation for every sample.
+ 
+ ### [Hardware Shading via Pixel Texture](6056-hardware-shading-via-pixel-texture.md)
+-Adds surface shading to texture-memory based volume rendering by encoding surface normals into a 2D pixel texture using a specific quantization scheme and nearest-neighbor interpolation.
++A technique for applying surface shading to volume rendering results by encoding surface normals into a 2D pixel texture, which is then used to modulate the rendered volume slices. It sets itself apart by avoiding hardware interpolation of normals, which causes redundancy and truncation errors, by instead using nearest-neighbor interpolation on quantized normal data.
+ 
+ ### [GPU Ray Casting for Light Field Display](6503-gpu-ray-casting-for-light-field-display.md)
+-Designed for interactive light field displays, computing rays from projector positions through screen pixels into the volume using a custom MCOP projection model and depth-dependent mipmap level selection.
++This method performs interactive direct volume rendering on an interactive light field display by computing rays from projector positions through screen pixels into the volume using Multi-Camera Optical Projection (MCOP). It differs from standard GPU ray casting by using a coarsely tessellated proxy geometry to compute correct per-pixel ray parameters, avoiding interpolation errors inherent in the fixed-function pipeline, and employs depth-dependent mipmap level selection.
++
++### [VStudio Framework Volume Rendering Pipeline](6916-vstudio-framework-volume-rendering-pipeline.md)
++An interactive volume visualization environment that implements single-pass GPU ray casting, allowing for real-time shader editing and pipeline customization. It distinguishes itself by exposing the entire rendering pipeline (vertex and fragment shaders) for interactive modification, supporting features such as early ray termination, stochastic ray shifting, and brute-force shadow ray traversal within a single pass.
+ 
+ ### [Entry Point Adjustment](7406-entry-point-adjustment.md)
+-Enables the camera to move inside the volume's bounding box without clipping artifacts by dynamically shifting the ray entry point forward along the ray direction based on a scale coefficient.
++A hardware-accelerated technique that enables the camera to move inside the volume's bounding box without the view disappearing or clipping artifacts. It solves this by dynamically shifting the ray's entry point forward along the ray direction based on a scale coefficient, allowing for a "flowing through" experience.
++
++### [Volume Ray-Casting on Graphics Hardware](7443-volume-ray-casting-on-graphics-hardware.md)
++This method implements direct volume ray casting on programmable graphics hardware (specifically DirectX 9-level architectures) using a multi-pass stream model. It solves the performance bottleneck of CPU-based ray casting by exploiting the intrinsic parallelism of fragment processors and efficient inter-pass communication via texture render targets. It differs from single-pass rasterization techniques by decoupling the ray integration steps into discrete, communicable passes.
+ 
+ ### [Custom Hardware Units](8284-custom-hardware-units.md)
+-Uses dedicated hardware units for volume rendering operations.
++Not given in the sources.
++
++### MCOP GPU Ray-Casting Pipeline
++A GPU-based volume rendering pipeline that uses a Mixed Camera and Object Perspective (MCOP) projection to render light fields for displays with holographic screens, bypassing rasterizer interpolation limitations [S2]. It differs from standard single-pass GPU ray-casters because it cannot rely on rasterizer interpolation to pass combined 3D and projected data from vertex to fragment shader due to MCOP perspective [S2].
++
++### CUDAVolumetricRender
++A hardware-accelerated volumetric rendering function provided by CUDALink for CUDA-capable graphics cards, performing real volume rendering [S3, unofficial]. It requires data to be repartitioned specifically (h×w×d from d×h×w) rather than transposed, and may throw memory allocation errors if not handled correctly [S3, unofficial]. This is a 'real deal' volumetric renderer with a transfer function, unlike the polygon-based method which mimics the effect [S3, unofficial].
+ 
+ ## Background
+-The method originated as a response to the computational demands of direct volume rendering, which was previously too slow for interactive applications on CPUs [S1, unofficial]. Early implementations utilized texture mapping hardware, such as the SGI Reality Engine, to perform trilinear interpolation and accumulation in hardware [S1, unofficial][S2]. The term "Texture Mapping Hardware Assisted Rendering" was used to describe these early techniques [S1, unofficial]. With the advent of programmable GPUs, the technique evolved to use fragment shaders for ray marching, becoming the dominant approach for real-time volume rendering [S2]. It is widely used in medical imaging, scientific visualization, and interactive 3D displays [S1, unofficial][S2].
++Hardware-accelerated volume rendering emerged as GPUs became programmable and powerful enough to handle the massive parallelism required for ray casting. Early implementations relied on fixed-function 3D texture mapping hardware, such as the SGI Reality Engine, which used 8-way interleaved memory to accelerate trilinear interpolation [S1, unofficial]. As programmable shaders (Vertex and Fragment Shaders) became available (e.g., DirectX 9, OpenGL 2.0+), techniques evolved to use fragment shaders for the ray-marching loop, allowing for more flexible transfer functions and shading models [S1, unofficial]. The field has since expanded to include specialized compilers like Triton for differentiable rendering and specific applications like light field displays [S1, unofficial][S2].
+ 
+ ## Sources

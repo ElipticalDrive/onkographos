@@ -1,0 +1,198 @@
+--- v001.md
++++ v002.md
+@@ -8,24 +8,24 @@
+ ## How it works
+ **Inputs:**
+-- A subset of training images with known camera poses and intrinsics.
+-- Ground-truth depth maps for the training images.
+-- Threshold parameter $\tau$.
++- A subset of training images with known camera poses and intrinsics [G].
++- Ground-truth depth maps for the training images [S1].
++- Threshold parameter $\tau$ [S1].
+ 
+ **Outputs:**
+-- A refined 3D point cloud in absolute coordinates.
++- A refined 3D point cloud in absolute coordinates [S1].
+ 
+ **Data Structures:**
+ - `Point`: A 3D vector $(x, y, z)$ representing a point in space.
+ - `PointCloud`: A list or array of `Point` objects.
+-- `DepthMap`: A 2D array where each element is a float representing depth $d_{GT}$ at pixel coordinates $(u, v)$.
++- `DepthMap`: A 2D array where each element is a float representing depth $d_{GT}$ at pixel coordinates $(u, v)$ [S1].
+ 
+ **Steps:**
+ 1. **Initialization:** Select a subset of training views with sufficient and uniform distance between adjacent viewpoints to ensure efficiency [S1]. Initialize an empty `PointCloud`.
+ 2. **Iterative Generation:** For each viewpoint $V_i$ in the subset (sequentially following the trajectory):
+-    a. **Generate Initial Points:** Back-project the depth map of $V_i$ using its camera intrinsics to create an initial set of 3D points. Add these to `PointCloud`.
++    a. **Generate Initial Points:** Back-project the depth map of $V_i$ using its camera intrinsics to create an initial set of 3D points. Add these to `PointCloud` [G].
+     b. **Projection:** For each 3D point $P$ in `PointCloud`, project it onto the image plane of the next viewpoint $V_{i+1}$ in the subset using multiple view geometry [S1].
+-    c. **Distance Calculation:** Calculate the distance $\tilde{d}$ between the projected 3D point $P$ and the camera location of $V_{i+1}$ [S1].
++    c. **Distance Calculation:** Calculate the distance $\tilde{d}$ between the 3D point $P$ and the camera location of $V_{i+1}$ [S1].
+     d. **Validation:** Retrieve the ground-truth depth value $d_{GT}$ at the pixel location where $P$ was projected in $V_{i+1}$'s depth map. Check if the condition $|\tilde{d} - d_{GT}| \le \tau$ is satisfied [S1].
+-    e. **Refinement:** If the condition is **NOT** satisfied, generate a new 3D point by back-projecting the pixel with value $d_{GT}$ from $V_{i+1}$ into 3D space. Add this new point to `PointCloud`.
++    e. **Refinement:** If the condition is **NOT** satisfied, generate a new 3D point by back-projecting the pixel with value $d_{GT}$ from $V_{i+1}$ into 3D space. Add this new point to `PointCloud` [S1].
+ 3. **Completion:** Repeat steps 2a-2e for all viewpoints in the subset. The resulting `PointCloud` is saved for inference [S1].
+ 
+@@ -50,13 +50,13 @@
+ **Pseudocode:**
+ ```python
+-def generate_and_refine_point_cloud(training_views, ground_truth_depths, tau):
++def generate_and_refine_point_cloud(training_views, depth_maps, intrinsics_list, poses_list, tau):
+     """
+     Generate and refine a 3D point cloud from a subset of training images.
+-    
+     Args:
+         training_views: List of view indices in sequential order.
+-        ground_truth_depths: Dict mapping view index to DepthMap.
++        depth_maps: Dict mapping view index to DepthMap (2D array of floats).
++        intrinsics_list: List of [fx, fy, cx, cy] for each view.
++        poses_list: List of (R, t) tuples, where R is 3x3 rotation and t is 3x1 translation.
+         tau: Threshold for depth validation.
+-        
+     Returns:
+         point_cloud: List of 3D points.
+@@ -65,90 +65,61 @@
+     
+     # Step 1: Initialize with first view
+-    first_view = training_views[0]
+-    initial_points = back_project_depth(ground_truth_depths[first_view], 
+-                                        get_camera_intrinsics(first_view))
+-    point_cloud.extend(initial_points)
+-    
++    first_idx = training_views[0]
++    for v in range(depth_maps[first_idx].height):
++        for u in range(depth_maps[first_idx].width):
++            d = depth_maps[first_idx][v][u]
++            if d > 0:
++                fx, fy, cx, cy = intrinsics_list[first_idx]
++                cam_x = (u - cx) * d / fx
++                cam_y = (v - cy) * d / fy
++                cam_z = d
++                R, t = poses_list[first_idx]
++                world_x = R[0][0]*cam_x + R[0][1]*cam_y + R[0][2]*cam_z + t[0]
++                world_y = R[1][0]*cam_x + R[1][1]*cam_y + R[1][2]*cam_z + t[1]
++                world_z = R[2][0]*cam_x + R[2][1]*cam_y + R[2][2]*cam_z + t[2]
++                point_cloud.append([world_x, world_y, world_z])
++                
+     # Step 2: Iterate through subsequent views
+     for i in range(len(training_views) - 1):
+-        current_view_idx = training_views[i]
+-        next_view_idx = training_views[i + 1]
++        next_idx = training_views[i + 1]
++        next_intrinsics = intrinsics_list[next_idx]
++        next_R, next_t = poses_list[next_idx]
+         
+-        next_camera_intrinsics = get_camera_intrinsics(next_view_idx)
+-        next_camera_pose = get_camera_pose(next_view_idx)
+-        
+-        # Step 2b: Project existing points to next view
+-        projected_points = []
++        new_points = []
+         for point in point_cloud:
+-            # Project 3D point to 2D pixel coordinates in next view
+-            pixel_u, pixel_v = project_point_to_image(point, next_camera_intrinsics, next_camera_pose)
++            # Step 2b & 2c: Project to next view and calculate distance
++            # Transform to camera coordinates
++            px, py, pz = point
++            cam_x = next_R[0][0]*(px - next_t[0]) + next_R[0][1]*(py - next_t[1]) + next_R[0][2]*(pz - next_t[2])
++            cam_y = next_R[1][0]*(px - next_t[0]) + next_R[1][1]*(py - next_t[1]) + next_R[1][2]*(pz - next_t[2])
++            cam_z = next_R[2][0]*(px - next_t[0]) + next_R[2][1]*(py - next_t[1]) + next_R[2][2]*(pz - next_t[2])
+             
+-            # Step 2c: Calculate distance from point to next camera center
+-            # Distance in 3D space between point and camera center
+-            camera_center = get_camera_center(next_camera_pose)
+-            distance = calculate_distance(point, camera_center)
++            # Distance to camera center (origin in camera coords)
++            distance = (cam_x**2 + cam_y**2 + cam_z**2)**0.5
+             
+-            projected_points.append({
+-                'point': point,
+-                'pixel': (pixel_u, pixel_v),
+-                'distance': distance
+-            })
+-            
+-        # Step 2d & 2e: Validate and refine
+-        new_points = []
+-        for proj in projected_points:
+-            pixel_u, pixel_v = proj['pixel']
+-            distance = proj['distance']
+-            
+-            # Get ground truth depth at projected pixel
+-            depth_map = ground_truth_depths[next_view_idx]
+-            if is_valid_pixel(pixel_u, pixel_v, depth_map):
+-                d_gt = depth_map[pixel_v][pixel_u]
++            # Project to pixel
++            fx, fy, cx, cy = next_intrinsics
++            if cam_z > 0:
++                u = int(fx * (cam_x / cam_z) + cx)
++                v = int(fy * (cam_y / cam_z) + cy)
+                 
+-                # Check condition |d_tilde - d_GT| <= tau
+-                if abs(distance - d_gt) > tau:
+-                    # Generate new point by back-projecting d_GT
+-                    new_point = back_project_pixel(next_view_idx, pixel_u, pixel_v, d_gt)
+-                    new_points.append(new_point)
+-        
++                # Step 2d: Validation
++                if 0 <= u < depth_maps[next_idx].width and 0 <= v < depth_maps[next_idx].height:
++                    d_gt = depth_maps[next_idx][v][u]
++                    
++                    # Step 2e: Refinement
++                    if abs(distance - d_gt) > tau:
++                        # Back-project d_GT to world coordinates
++                        new_cam_x = (u - cx) * d_gt / fx
++                        new_cam_y = (v - cy) * d_gt / fy
++                        new_cam_z = d_gt
++                        new_world_x = next_R[0][0]*new_cam_x + next_R[0][1]*new_cam_y + next_R[0][2]*new_cam_z + next_t[0]
++                        new_world_y = next_R[1][0]*new_cam_x + next_R[1][1]*new_cam_y + next_R[1][2]*new_cam_z + next_t[1]
++                        new_world_z = next_R[2][0]*new_cam_x + next_R[2][1]*new_cam_y + next_R[2][2]*new_cam_z + next_t[2]
++                        new_points.append([new_world_x, new_world_y, new_world_z])
++                        
+         point_cloud.extend(new_points)
+         
+     return point_cloud
+-
+-def back_project_depth(depth_map, intrinsics):
+-    """Back-project a depth map to 3D points."""
+-    points = []
+-    for v in range(depth_map.height):
+-        for u in range(depth_map.width):
+-            d = depth_map[v][u]
+-            if d > 0: # Valid depth
+-                point = unproject_pixel(u, v, d, intrinsics)
+-                points.append(point)
+-    return points
+-
+-def project_point_to_image(point, intrinsics, pose):
+-    """Project a 3D point to 2D image coordinates."""
+-    # Transform point to camera coordinates
+-    cam_point = transform_point(point, pose.inverse())
+-    # Project to pixel coordinates
+-    u, v = project_cam_to_pixel(cam_point, intrinsics)
+-    return u, v
+-
+-def calculate_distance(point, camera_center):
+-    """Calculate Euclidean distance between two 3D points."""
+-    return sqrt(sum((p - c)**2 for p, c in zip(point, camera_center)))
+-
+-def is_valid_pixel(u, v, depth_map):
+-    """Check if pixel coordinates are within bounds."""
+-    return 0 <= u < depth_map.width and 0 <= v < depth_map.height
+-
+-def back_project_pixel(view_idx, u, v, d_gt):
+-    """Back-project a pixel with known depth to 3D."""
+-    intrinsics = get_camera_intrinsics(view_idx)
+-    pose = get_camera_pose(view_idx)
+-    cam_point = unproject_pixel(u, v, d_gt, intrinsics)
+-    # Transform back to world coordinates
+-    world_point = transform_point(cam_point, pose)
+-    return world_point
+ ```
+ 
+@@ -156,5 +127,5 @@
+ 
+ ### Projected Depth Refining
+-A method to obtain accurate depth images for novel views by refining a rough depth image projected from a 3D point cloud, specifically by removing unnecessary points and filling holes [S1]. It projects the saved 3D point cloud onto a novel view to generate a rough depth image, removes unnecessary 3D points to refine depth estimation, fills holes in the projected depth image, and uses the refined depth image for surface-based sampling during novel view rendering [S1].
++A method to obtain accurate depth images for novel views by refining a rough depth image projected from a 3D point cloud, specifically by removing unnecessary points and filling holes [S1]. It projects the saved point cloud onto a novel view to generate a rough depth image, removes unnecessary 3D points to refine depth estimation, fills holes in the projected depth image, and uses the refined depth image for surface-based sampling during novel view rendering [S1].
+ 
+ ## Operating characteristics

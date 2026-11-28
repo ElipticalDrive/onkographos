@@ -1,0 +1,245 @@
+--- v011.md
++++ v012.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-This method converts OpenVDB volumetric datasets into a set of non-overlapping 3D Gaussian particles to enable memory-efficient, lossy representation with Level of Detail (LOD) support [S1, unofficial]. It solves the problem of rendering large sparse volumetric datasets in real-time by replacing dense voxel grids with hardware-accelerated ray tracing of Gaussian primitives [S1, unofficial]. Unlike standard Gaussian Splatting which often uses overlapping primitives for photorealism, this approach strictly maintains non-overlapping Gaussians derived from OpenVDB's non-overlapping leaf nodes, limiting the model to specific refinement levels but ensuring compatibility with traditional volume rendering pipelines via transfer functions [S1, unofficial].
++This method converts OpenVDB volumetric datasets into a set of non-overlapping 3D Gaussian particles to enable memory-efficient, lossy representation with Level of Detail (LOD) support [S1, unofficial]. It renders volumetric and level-set data using forward ray marching through Gaussian primitives via NVIDIA OptiX [S1, unofficial]. Unlike standard Gaussian Splatting which often uses overlapping primitives for photorealism, this approach strictly maintains non-overlapping Gaussians derived from OpenVDB's non-overlapping leaf nodes, limiting the model to specific refinement levels but ensuring compatibility with traditional volume rendering pipelines via transfer functions [S1, unofficial].
+ 
+ ## How it works
+@@ -22,5 +22,5 @@
+ **GaussianModel**
+ A parent class containing device-side pointers to contiguous arrays for each Gaussian property [S1, unofficial]:
+-*   `opacity`: Scalar array. For volumes, this reflects the average scalar value of the voxel region. For level sets, opacity is uniform and may not require per-particle storage [S1, unofficial].
++*   `opacity`: Scalar array. For volumes, this reflects the average scalar value of the voxel region [S1, unofficial]. For level sets, opacity is uniform and may not require per-particle storage [S1, unofficial].
+ *   `world_position`: 3D vector array. The center in world space, derived from the centroid of the voxel region or its bounding box [S1, unofficial].
+ *   `covariance`: 3D vector array (for ellipsoids) or scalar array (for spheres). Represents the diagonal of the 3x3 covariance matrix, defining spatial extent along axes [S1, unofficial].
+@@ -40,5 +40,5 @@
+     *   Apply LOD logic to determine Gaussian properties for each leaf node or cluster:
+         *   **Low LOD:** Each leaf node is represented by a single Gaussian reflecting the distribution of active voxels [S1, unofficial].
+-        *   **Medium LOD:** Dense leaf nodes are merged into 4x4x4 groups; sparse nodes into 2x2x2 groups. Remaining voxels become individual Gaussians [S1, unofficial].
++        *   **Medium LOD:** Dense leaf nodes are merged into 4x4x4 groups; sparse nodes into 2x2x2 groups. Remaining active voxels are added as individual voxel-sized Gaussians [S1, unofficial].
+         *   **High LOD:** Sparse leaf nodes contribute one Gaussian per active voxel; dense leaf nodes are merged into 2x2x2 blocks [S1, unofficial].
+     *   For each Gaussian, compute:
+@@ -54,5 +54,5 @@
+ 
+ 3.  **Acceleration Structure Build (GPU):**
+-    *   Build the GAS using the CUDA device-side array of AABBs derived from Gaussian extents in Index Space [S1, unofficial].
++    *   Build the GAS using the CUDA device-side array of AABBs derived from Gaussian extents in OpenVDB Index Space [S1, unofficial].
+     *   Build the IAS with the OpenVDB Grid transform [S1, unofficial].
+ 
+@@ -70,5 +70,5 @@
+ 
+ 6.  **Ray Marching and Density Evaluation:**
+-    *   Step along the ray within the interval $[t_0, t_1]$ using a predefined step size $\Delta t$ based on the distance between entry and exit points [S1, unofficial].
++    *   Step along the ray using a predefined step size based on the distance between entry and exit points [S1, unofficial].
+     *   For each sample point $x_k$:
+         *   Compute difference $\delta = x_k - \mu$ [S1, unofficial].
+@@ -89,126 +89,86 @@
+ 
+ ```python
+-# GaussianModel contains device pointers to arrays:
+-# opacity: float[]
+-# position: vec3[]
+-# covariance: vec3[] (diagonal elements) or float[] (scalar for spheres)
+-
+-def compute_gaussian_density(sample_point, gaussian_center, inverse_covariance):
+-    """
+-    Computes the density of a Gaussian at a specific point.
+-    """
+-    delta = sample_point - gaussian_center
+-    # Mahalanobis distance squared
+-    d_squared = dot(delta, multiply_matrix_vector(inverse_covariance, delta))
+-    density = exp(-d_squared / 2.0)
+-    return density
+-
+-def ray_intersect_gaussian(ray_origin, ray_direction, gaussian_center, inverse_covariance):
+-    """
+-    Solves for entry (t0) and exit (t1) distances of a ray intersecting a Gaussian ellipsoid.
+-    Transforms ray into Gaussian local space.
+-    """
+-    # Transform ray origin and direction into local space defined by inverse covariance
+-    # Note: The source describes transforming the ray using the inverse covariance matrix.
+-    # In standard ellipsoid intersection, this typically involves scaling the ray by the inverse of the square root of covariance,
+-    # but we follow the source's description of using inverse covariance for transformation.
+-    local_origin = multiply_matrix_vector(inverse_covariance, ray_origin - gaussian_center)
+-    local_direction = multiply_matrix_vector(inverse_covariance, ray_direction)
+-    
+-    # Solve quadratic equation for unit sphere intersection in local space:
+-    # |local_origin + t * local_direction|^2 = 1
+-    a = dot(local_direction, local_direction)
+-    b = 2.0 * dot(local_origin, local_direction)
+-    c = dot(local_origin, local_origin) - 1.0
+-    
+-    discriminant = b*b - 4*a*c
+-    if discriminant < 0:
+-        return None, None
+-    
+-    sqrt_disc = sqrt(discriminant)
++def ray_aabb_intersect(origin, direction, min_pt, max_pt):
++    """Returns (t0, t1) for ray-box intersection, or (None, None) if no hit."""
++    t0 = (min_pt[0] - origin[0]) / direction[0]
++    t1 = (max_pt[0] - origin[0]) / direction[0]
++    if t0 > t1: t0, t1 = t1, t0
++    for i in range(1, 3):
++        t_near = (min_pt[i] - origin[i]) / direction[i]
++        t_far = (max_pt[i] - origin[i]) / direction[i]
++        if t_near > t_far: t_near, t_far = t_far, t_near
++        if t_near > t0: t0 = t_near
++        if t_far < t1: t1 = t_far
++    return (t0, t1) if t0 <= t1 else (None, None)
++
++def gaussian_aabb(center, cov_diag):
++    """Computes AABB from center and diagonal covariance (3 floats or 1 float)."""
++    if isinstance(cov_diag, (int, float)):
++        cov_diag = [cov_diag, cov_diag, cov_diag]
++    half_extents = [sqrt(c) for c in cov_diag]
++    min_pt = [center[i] - half_extents[i] for i in range(3)]
++    max_pt = [center[i] + half_extents[i] for i in range(3)]
++    return min_pt, max_pt
++
++def solve_ellipsoid_intersection(origin, direction, center, inv_cov_diag):
++    """Solves quadratic for ray-ellipsoid intersection. Returns (t0, t1) or (None, None)."""
++    p = [origin[i] - center[i] for i in range(3)]
++    v = direction
++    a = sum(v[i]**2 * inv_cov_diag[i] for i in range(3))
++    b = 2.0 * sum(p[i] * v[i] * inv_cov_diag[i] for i in range(3))
++    c = sum(p[i]**2 * inv_cov_diag[i] for i in range(3)) - 1.0
++    disc = b*b - 4*a*c
++    if disc < 0: return None, None
++    sqrt_disc = sqrt(disc)
+     t0 = (-b - sqrt_disc) / (2.0 * a)
+     t1 = (-b + sqrt_disc) / (2.0 * a)
+-    
+     return t0, t1
+ 
+-def render_gaussian_particles(ray_origin, ray_direction, gaussian_model, max_depth, current_depth=0):
+-    """
+-    Recursive ray marching through Gaussian particles.
+-    """
++def compute_density(sample, center, inv_cov_diag):
++    delta = [sample[i] - center[i] for i in range(3)]
++    d2 = sum(delta[i]**2 * inv_cov_diag[i] for i in range(3))
++    return exp(-0.5 * d2)
++
++def render_gaussian_particles(ray_origin, ray_direction, gaussians, max_depth, current_depth=0, step_size=0.5, epsilon=1e-4):
+     if current_depth >= max_depth:
+-        return background_color, 1.0
+-    
+-    accumulated_color = vec3(0.0)
++        return [0.0, 0.0, 0.0], 1.0
++    
++    accumulated_color = [0.0, 0.0, 0.0]
+     transmittance = 1.0
+     
+-    # 1. Intersect with World AABB (GAS/IAS structure)
+-    t_min, t_max = intersect_world_aabb(ray_origin, ray_direction)
+-    if t_min is None:
+-        return background_color, transmittance
+-    
+-    # 2. Iterate through Gaussians in the AABB
+-    # Note: In OptiX, this is handled by the intersection/closest-hit programs.
+-    # Here we simulate the logic described in the recursive loop.
+-    
+-    # Find the closest Gaussian intersection within [t_min, t_max]
+-    closest_t0 = None
+-    closest_t1 = None
+-    closest_gaussian_idx = None
+-    
+-    for i in range(gaussian_model.num_gaussians):
+-        center = gaussian_model.position[i]
+-        inv_cov = inverse(gaussian_model.covariance[i]) # Assuming 3x3 matrix construction from diagonal
+-        
+-        t0, t1 = ray_intersect_gaussian(ray_origin, ray_direction, center, inv_cov)
+-        
+-        if t0 is not None and t0 >= t_min and t0 < t_max:
+-            if closest_t0 is None or t0 < closest_t0:
+-                closest_t0 = t0
+-                closest_t1 = t1
+-                closest_gaussian_idx = i
+-                
++    # Find closest Gaussian intersection
++    closest_t0, closest_t1, closest_idx = None, None, None
++    for i, g in enumerate(gaussians):
++        min_pt, max_pt = gaussian_aabb(g['pos'], g['cov'])
++        t0, t1 = ray_aabb_intersect(ray_origin, ray_direction, min_pt, max_pt)
++        if t0 is not None and (closest_t0 is None or t0 < closest_t0):
++            closest_t0, closest_t1, closest_idx = t0, t1, i
++            
+     if closest_t0 is None:
+-        return background_color, transmittance
+-        
+-    # 3. March within the Gaussian
+-    gaussian = gaussian_model.gaussians[closest_gaussian_idx]
+-    step_size = (closest_t1 - closest_t0) / num_samples # Predefined step size logic
+-    
+-    for k in range(num_samples):
+-        t_sample = closest_t0 + k * step_size
+-        sample_point = ray_origin + ray_direction * t_sample
+-        
+-        density = compute_gaussian_density(sample_point, gaussian.center, gaussian.inverse_covariance)
+-        
+-        # Volume factor
+-        volume_factor = 1.0 / determinant(gaussian.covariance_matrix)
+-        
+-        # Absorption
++        return [0.0, 0.0, 0.0], transmittance
++        
++    g = gaussians[closest_idx]
++    inv_cov = [1.0/c for c in g['cov']] if isinstance(g['cov'], (int, float)) else [1.0/c for c in g['cov']]
++    det_sigma = prod(g['cov']) if isinstance(g['cov'], (int, float)) else prod(g['cov'])
++    volume_factor = 1.0 / det_sigma
++    
++    t = closest_t0
++    while t < closest_t1:
++        sample_pt = [ray_origin[i] + ray_direction[i] * t for i in range(3)]
++        density = compute_density(sample_pt, g['pos'], inv_cov)
+         absorption = density * step_size * volume_factor
+         
+-        # Color accumulation (using transfer function for scattering color)
+-        scattering_color = transfer_function(gaussian.opacity)
+-        accumulated_color += transmittance * scattering_color * absorption
+-        
+-        # Transmittance update
++        scattering_color = [g['opacity'], g['opacity'], g['opacity']] # Placeholder for transfer function lookup
++        accumulated_color = [accumulated_color[i] + transmittance * scattering_color[i] * absorption for i in range(3)]
+         transmittance *= exp(-absorption)
+         
+         if transmittance < epsilon:
+             break
+-            
+-    # 4. Ray Continuation and Recursion
+-    # Advance ray origin to exit point of current Gaussian
+-    new_ray_origin = ray_origin + ray_direction * closest_t1
+-    
+-    # Recursive trace for next Gaussian
+-    next_color, next_transmittance = render_gaussian_particles(
+-        new_ray_origin, 
+-        ray_direction, 
+-        gaussian_model, 
+-        max_depth, 
+-        current_depth + 1
+-    )
+-    
+-    final_color = accumulated_color + transmittance * next_color
++        t += step_size
++        
++    new_origin = [ray_origin[i] + ray_direction[i] * closest_t1 for i in range(3)]
++    next_color, next_trans = render_gaussian_particles(new_origin, ray_direction, gaussians, max_depth, current_depth + 1, step_size, epsilon)
++    
++    final_color = [accumulated_color[i] + transmittance * next_color[i] for i in range(3)]
+     return final_color, transmittance
+ ```
+@@ -234,5 +194,5 @@
+     *   High LOD: 546MB, 23.3M Gaussians [S1, unofficial].
+     *   Low LOD: 174.4MB, 7.4M Gaussians [S1, unofficial].
+-*   Time complexity is driven by the number of Gaussians and the ray tracing overhead. The use of AABB acceleration structures reduces intersection tests [S1, unofficial].
++*   Time complexity is driven by the number of Gaussians and the ray tracing overhead [S1, unofficial].
+ 
+ **Measured Performance:**
+@@ -248,5 +208,4 @@
+ **When Not to Use:**
+ *   Photorealistic rendering requiring overlapping Gaussian mixtures for soft shadows and complex light transport [S1, unofficial].
+-*   Scenarios where NanoVDB is the only available format for data generation [S1, unofficial].
+ 
+ ## Background

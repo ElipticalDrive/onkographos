@@ -1,0 +1,98 @@
+# Ray Marching Jittering
+
+Also called: Dithering Offset, Jittered Ray Marching, Randomized Step Size Ray Marching
+
+## Overview
+Ray Marching Jittering is a technique to reduce aliasing artifacts, specifically banding, in volume rendering by introducing random variation to the ray marching step size [S2, unofficial]. It solves the problem of clearly defined intensity bands caused by fixed step sizes in participating media [S2, unofficial]. Unlike fixed stepping, which causes banding, jittering removes these artifacts while keeping features like god rays sharp and focused [S2, unofficial].
+
+## How it works
+**Inputs:**
+- `stepSize`: The fixed base step size for ray marching [S1, unofficial].
+- `dithering`: A scalar parameter controlling the magnitude of jitter (typically $> 0.0$) [S1, unofficial].
+- `v_tex_coord`: The texture coordinate or ray origin parameter used for hashing [S1, unofficial].
+- `tMin`: The starting distance along the ray [S1, unofficial].
+
+**Outputs:**
+- `tStart`: The perturbed starting distance for the ray march [S1, unofficial].
+
+**Data Structures:**
+- The method requires only scalar parameters and a deterministic hash function [S1, unofficial].
+
+**Steps:**
+1. Calculate a jitter offset based on the texture coordinate and dithering strength [S1, unofficial].
+2. Determine the start time for the ray march by adding the jitter offset to the minimum distance [S1, unofficial].
+3. March the ray using a step size that varies randomly between $0.5 \times \text{stepSize}$ and $1.5 \times \text{stepSize}$ [S2, unofficial].
+
+**Formulas:**
+The jitter offset is calculated as:
+$$ \text{jitter} = \begin{cases} \text{hash}(\text{v\_tex\_coord}) \times \text{stepSize} \times \text{dithering} & \text{if } \text{dithering} > 0.0 \\ 0.0 & \text{otherwise} \end{cases} $$
+
+The start time is:
+$$ t_{\text{Start}} = t_{\text{Min}} + \text{jitter} $$
+
+The step size for each march is a random value $s$ such that:
+$$ s \in [0.5 \times \text{stepSize}, 1.5 \times \text{stepSize}] $$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def deterministic_hash(v):
+    # Standard deterministic hash returning a float in [0.0, 1.0) [G]
+    h = 0
+    for c in v:
+        h = (h * 31 + int(c * 1000)) & 0xFFFFFFFF
+    return (h & 0x7FFFFFFF) / 0x7FFFFFFF
+
+def calculate_jittered_start(t_min, step_size, dithering, v_tex_coord):
+    """Calculate the jittered start position for ray marching [S1, unofficial]."""
+    if dithering > 0.0:
+        hash_value = deterministic_hash(v_tex_coord)
+        jitter = hash_value * step_size * dithering
+        t_start = t_min + jitter
+    else:
+        t_start = t_min
+    return t_start
+
+def march_with_jittered_step(step_size, v_tex_coord, t_start):
+    """Perform a single ray march step with jittered size [S2, unofficial]."""
+    hash_value = deterministic_hash(v_tex_coord)
+    step_variation = 0.5 + 1.0 * hash_value  # Range [0.5, 1.5]
+    current_step = step_size * step_variation
+    return t_start + current_step
+```
+
+**Edge Cases and Pitfalls:**
+- Fixed step sizes introduce aliasing in the form of clearly defined bands of intensity in the volume region [S2, unofficial].
+- Without dithering, adapting step sizes for performance can cause juddering [S3].
+
+## Subtopics
+
+### Adaptive Dithering
+A rendering technique using dithering without temporal accumulation (TAA) to break up slicing artifacts from undersampling, ensuring stability in VR where HMD movement causes smearing in TAA [S3]. It adapts the raymarch step size based on varying performance conditions to maintain frame targets [S3]. Adapted step counts can vary by a factor of 4; without dithering, this causes juddering, but with dithering, the image remains stable with only small noise [S3]. In tested scenarios (Smoke Rings, Dust Devil, Wall of Fire), raymarch stage times were 3.69ms, 4.77ms, and 3.82ms respectively [S3].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+Not given in the sources.
+
+**Measured Performance:**
+In VR scenarios using an NVIDIA RTX 3080 and Valve Index HMD at 2016 x 2240 x 2 resolution, raymarch stage times were 3.69ms (Smoke Rings), 4.77ms (Dust Devil), and 3.82ms (Wall of Fire) [S3]. Total frame times were around 9.6-9.7ms [S3].
+
+**Scaling:**
+Adaptive dithering allows step counts to vary by a factor of 4 to meet frame targets without visual artifacts like juddering [S3].
+
+**Strengths and Limitations:**
+- Removes banding while keeping god rays sharp and focused [S2, unofficial].
+- Provides temporally stable images in VR without the smearing artifacts associated with TAA [S3].
+- Introduces a small amount of noise [S3].
+
+**When to use it and when not:**
+Use when rendering volumes with fixed step sizes that exhibit banding artifacts, especially in VR where TAA is problematic [S3].
+
+## Background
+Originating from techniques to handle aliasing in ray marching through participating media, jittering was identified as a solution to banding in underwater scene rendering [S2, unofficial]. Adaptive dithering was later developed for real-time volumetric lighting in VR to avoid TAA smearing [S3].
+
+## Sources
+[S1] xwghua/clearvolume-plus, https://github.com/xwghua/clearvolume-plus, fetched 2026-10-26 (unofficial)
+[S2] CS348b Final Project - Rendering Underwater Scenes, http://www.graphics.stanford.edu/courses/cs348b-competition/cs348b-04/underwater/index.html, fetched 2026-10-30 (unofficial)
+[S3] Ignis: Eulerian Fluid Simulation and Rendering at VR Frame Rates, https://doi.org/10.1145/3610542.3626120, fetched 2026-10-30

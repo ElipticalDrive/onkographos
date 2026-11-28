@@ -1,0 +1,210 @@
+# Directional Parallel Thinning
+
+Also called: 6 sub-iteration parallel approach, Directional parallel approach
+
+## Overview
+Directional Parallel Thinning is a parallel thinning algorithm that processes boundary voxels in specific spatial directions (North, South, East, West, Front, Back) across six sub-iterations to skeletonize a 3D volume [S1, unofficial]. It addresses the connectivity loss and "annihilation" (complete deletion of an object) inherent in true parallel thinning by restricting simultaneous deletions to voxels of a single border type per sub-cycle [S1, unofficial]. Unlike its sibling [3-D Thinning Skeleton](20389-3-d-thinning-skeleton.md), which may use sequential checks or complete parallelism, this method introduces a hybrid processing order and over-shrinking prevention to mitigate boundary noise and topological errors [S1, unofficial].
+
+## How it works
+**Inputs:** A binary voxel volume $V$ where object voxels are 1 and background voxels are 0. A distance transform map $D$ (optional, used for over-shrinking prevention) where $D(v)$ is the distance from voxel $v$ to the nearest background voxel.
+**Outputs:** A thinned skeleton $S \subseteq V$.
+
+**Data Structures:**
+- `BorderList`: A set of voxels identified as boundary voxels.
+- `ProcessedSet`: A set of voxels marked for retention or deletion in the current iteration to prevent double-processing.
+- `DirectionTypes`: The set $\{N, S, E, W, F, B\}$ representing the six cardinal directions.
+
+**Definitions:**
+- A voxel $P$ is a **North border voxel** if $P \in V$ and $N(P) \notin V$ (where $N(P)$ is the neighbor in the +Z direction, assuming standard indexing).
+- A voxel $P$ is a **South border voxel** if $P \in V$ and $S(P) \notin V$.
+- Similarly for East ($E$), West ($W$), Front ($F$), and Back ($B$).
+- A voxel is a **simple point** if its deletion preserves the topology (connectivity) of the object.
+- A voxel is an **end point** if it satisfies specific geometric criteria (e.g., having only one neighbor in the object, or meeting a local neighborhood condition defined by the parent method).
+
+**Algorithm Steps:**
+
+1. **Initialization:**
+   Compute the initial set of border voxels $B_0 = \{v \in V \mid v \text{ is a border voxel}\}$.
+   Initialize `ProcessedSet` as empty.
+
+2. **Over-Shrinking Prevention (Pre-Processing per Direction):**
+   For each major direction pair (North-South, East-West, Front-Back):
+   - Identify pairs of adjacent border voxels $(P, Q)$ where $P$ is a border voxel of type $T$ and $Q$ is the neighbor of $P$ in the opposite direction $-T$.
+   - Specifically, check if $P$ is a North border voxel and $S(S(P))$ is white (background). This implies $S(P)$ is a South border voxel.
+   - If such a two-voxel-thick pattern is found, compare $D(P)$ and $D(S(P))$.
+   - Remove the voxel with the **larger** distance value from the `BorderList` for the current sub-iteration, retaining the one with the smaller distance value (closer to the medial axis).
+   - Mark the removed voxel as processed so it is not considered for deletion in this sub-cycle.
+   - Repeat for East-West and Front-Back pairs.
+
+3. **Hybrid Processing Loop:**
+   For each sub-iteration $k \in \{N, S, E, W, F, B\}$:
+   a. **Parallel End-Point Detection:**
+      - Identify all voxels in the current `BorderList` that satisfy the **end-point condition**.
+      - Mark these voxels as **retained**. They are removed from the candidate deletion set.
+      - Note: End-point conditions retain geometric features but do not guarantee connectivity [S1, unofficial].
+   
+   b. **Sequential Simple Point Deletion:**
+      - From the remaining candidates (non-end-points), identify **simple points**.
+      - Delete these simple points from the volume $V$.
+      - **Crucial Constraint:** Once a voxel is recognized as an endpoint in step (a), it is retained and no further testing is performed on it. This prevents the deletion of endpoints that might be critical for connectivity in the sequential phase [S1, unofficial].
+   
+   c. **Multi-Type Border Handling:**
+      - If a voxel is classified as multiple border types (e.g., both North and West), it must be processed in the **earliest** direction possible in the current sub-iteration sequence to avoid incorrect end-point identification [S1, unofficial]. For example, if processing order is N, S, E, W..., a voxel that is both N and W should be handled in the N-phase.
+
+4. **Termination:**
+   Repeat steps 2-3 until no voxels are deleted in a full cycle of 6 sub-iterations.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def directional_parallel_thinning(volume, distance_map=None):
+    """
+    volume: 3D boolean array (True for object, False for background)
+    distance_map: 3D float array (optional, for over-shrinking prevention)
+    """
+    # Initialize border list
+    border_list = set()
+    for v in all_voxels(volume):
+        if is_border(v, volume):
+            border_list.add(v)
+            
+    processed = set()
+    
+    directions = ['N', 'S', 'E', 'W', 'F', 'B']
+    
+    while border_list:
+        deleted_in_cycle = False
+        
+        for direction in directions:
+            # Step 2: Over-shrinking prevention for the current direction pair
+            # Example for N-S pair
+            if direction in ['N', 'S']:
+                ns_pairs = find_ns_pairs(border_list, volume)
+                for p, s in ns_pairs:
+                    # Check if S(S(P)) is background
+                    if not volume[s]: # S(P) is background, so P is N-border, S(P) is S-border?
+                        # Correction based on source: P is N-border, S(P) is S-border.
+                        # Condition: P is N-border AND S(S(P)) is white.
+                        # This implies S(P) is a voxel in the object? No, S(S(P)) is background.
+                        # So S(P) is a border voxel.
+                        pass 
+                    
+                    # Re-reading source: "if P is a north border voxel and if S(S(P)) is white"
+                    # P is in object. N(P) is background.
+                    # S(P) is in object. S(S(P)) is background.
+                    # So P and S(P) form a 2-voxel thick slab in N-S direction.
+                    
+                    if is_north_border(p, volume) and is_south_border(s, volume):
+                        if not volume[s]: # Wait, if S(P) is south border, it must be in object.
+                            # Source says: "S(S(P)) is white". S(P) is the neighbor.
+                            # If S(P) is in object, it is a south border voxel.
+                            # We compare P and S(P).
+                            pass
+                        
+                        # Logic from source:
+                        # If P is N-border and S(S(P)) is white (background), then S(P) is S-border.
+                        # We have a 2-voxel thick region: P and S(P).
+                        # Remove the one with larger distance value.
+                        
+                        if distance_map is not None:
+                            if distance_map[p] > distance_map[s]:
+                                border_list.remove(p)
+                                processed.add(p)
+                            else:
+                                border_list.remove(s)
+                                processed.add(s)
+                        else:
+                            # Fallback if no distance map: arbitrary or based on index?
+                            # Source implies distance map is used.
+                            # [G] If distance map is not provided, this step cannot be fully implemented as described.
+                            pass
+
+            # Step 3a: Parallel End-Point Detection
+            endpoints = set()
+            for v in border_list:
+                if v in processed:
+                    continue
+                if is_endpoint(v, volume):
+                    endpoints.add(v)
+            
+            # Retain endpoints
+            for v in endpoints:
+                border_list.remove(v)
+                processed.add(v) # Mark as processed so not deleted in sequential phase
+            
+            # Step 3b: Sequential Simple Point Deletion
+            # Note: Source says "deleting simple points from the non-end-point set sequentially"
+            # In a true parallel implementation, this is tricky. The source notes mention
+            # "Since a parallel machine is generally not available, a sequential algorithm is used".
+            # We simulate the sequential deletion on the remaining candidates.
+            
+            candidates = [v for v in border_list if v not in processed]
+            # Sort candidates to ensure deterministic order (e.g., by coordinate)
+            candidates.sort(key=lambda v: (v.x, v.y, v.z))
+            
+            for v in candidates:
+                if v in processed:
+                    continue
+                if is_simple_point(v, volume):
+                    volume[v] = False # Delete voxel
+                    border_list.remove(v)
+                    processed.add(v)
+                    deleted_in_cycle = True
+                    # Update neighbors' border status? 
+                    # [G] In a full implementation, neighbor border types must be updated.
+                    # The source does not specify the update mechanism, only the deletion logic.
+                    # We assume a standard border update routine exists.
+                    update_border_status(v, volume, border_list)
+
+        if not deleted_in_cycle:
+            break
+            
+    return volume
+
+def is_north_border(v, volume):
+    return volume[v] and not volume[neighbor(v, 'N')]
+
+def is_south_border(v, volume):
+    return volume[v] and not volume[neighbor(v, 'S')]
+
+def is_endpoint(v, volume):
+    # Placeholder for specific end-point condition from parent method
+    # [G] The specific topological condition for "endpoint" is defined in the parent article.
+    return check_endpoint_condition(v, volume)
+
+def is_simple_point(v, volume):
+    # Placeholder for simple point condition from parent method
+    # [G] The specific topological condition for "simple point" is defined in the parent article.
+    return check_simple_point_condition(v, volume)
+
+def update_border_status(deleted_v, volume, border_list):
+    # [G] Standard procedure: Check all neighbors of deleted_v.
+    # If a neighbor was not a border voxel before, check if it is now a border voxel.
+    # If it was a border voxel, it remains in the list unless deleted.
+    for n in neighbors(deleted_v):
+        if volume[n]:
+            if not is_border(n, volume):
+                border_list.add(n)
+```
+
+**Edge Cases and Pitfalls:**
+- **Annihilation:** If all voxels in an object are N-type border voxels, they may all be deleted in the N-sub-iteration, annihilating the object [S1, unofficial]. End-point conditions do not prevent this [S1, unofficial].
+- **Multi-type Ambiguity:** A voxel classified as multiple border types (e.g., N and W) must be processed in the earliest direction in the sub-iteration sequence to avoid incorrect end-point identification [S1, unofficial].
+- **Unintentional End Points:** Voxels in 2-voxel wide protrusions may be incorrectly identified as end points in the directional approach, creating unwanted skeleton branches [S1, unofficial].
+- **Two-Voxel Thick Surfaces:** The algorithm may fail to recognize voxels in a two-voxel thick surface, leaving a single voxel instead of the medial surface if the thickness is even [S1, unofficial]. The over-shrinking prevention procedure mitigates this by retaining the voxel with the smaller distance value [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** Not explicitly given in the sources. The algorithm involves multiple passes over the border voxels. The sequential deletion phase within each sub-iteration suggests a complexity dependent on the number of voxels and the order of processing.
+- **Memory Complexity:** Requires storage for the volume, distance map (optional), and border lists.
+- **Strengths:** Reduces the risk of connectivity loss compared to true parallel thinning by subdividing deletions into directional sub-cycles [S1, unofficial]. The over-shrinking prevention helps preserve medial surfaces in thick regions [S1, unofficial].
+- **Limitations:** Cannot completely solve connectivity problems; annihilation is still possible [S1, unofficial]. Sensitive to processing order and multi-type border voxel classification [S1, unofficial]. May produce unwanted branches due to unintentional end-point detection [S1, unofficial].
+- **When to Use:** When a parallel thinning approach is desired for speed, but connectivity preservation is critical. Suitable for volumes where over-shrinking is a concern.
+- **When Not to Use:** When the object has many 2-voxel thick protrusions or even-thickness surfaces, as the algorithm may produce artifacts. When absolute connectivity preservation is required without post-processing.
+
+## Background
+Directional Parallel Thinning was proposed as an improvement over true parallel thinning algorithms, which suffer from connectivity loss and annihilation [S1, unofficial]. The approach of subdividing parallel algorithms into 6 sub-iterations was introduced by Morgenthaler (1981) and Tsao and Fu (1982) [S1, unofficial]. Ma (1994) proposed a two-phase parallel thinning algorithm to address the remaining connectivity issues, and Lee et al. (1994) used a sequential re-checking approach [S1, unofficial]. The specific hybrid processing order and over-shrinking prevention described in the notes are attributed to the work presented in [S1, unofficial].
+
+## Sources
+[S1] Simple visualization techniques for die casting part and die design. Final report, July 1, 1995--September 30, 1997, https://digital.library.unt.edu/ark:/67531/metadc690873/?q=voxelization triangle mesh, fetched 2026-10-28 (unofficial)

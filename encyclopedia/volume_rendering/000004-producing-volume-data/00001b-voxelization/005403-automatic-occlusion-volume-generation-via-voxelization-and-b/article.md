@@ -1,0 +1,158 @@
+# Automatic Occlusion Volume Generation via Voxelization and Box Expansion
+
+Also called: Automatic Occlusion Volume Generation, HZB-OC Volume Generation, Voxel-based Occluder Generation, Voxel-based Occlusion Volume Generation
+
+## Overview
+This method automatically generates conservative, simplified occlusion volumes for Hierarchical Z-Buffer Occlusion Culling (HZB-OC) by voxelizing a mesh, identifying dense internal regions, and expanding axis-aligned boxes to cover them [S1, unofficial]. It differs from sibling methods like [VoxelGrid from Mesh (Fill Method)](1013-voxelgrid-from-mesh-fill-method.md) by approximating the solid geometry with a minimal set of merged boxes to reduce overdraw and draw calls, rather than merely filling the volume [S1, unofficial].
+
+## How it works
+**Inputs:** A watertight triangular mesh $M$, a target volume consumption percentage $P_{target}$ (typically 90%), and a voxel grid resolution derived from the mesh bounding box [S1, unofficial].
+**Outputs:** A single merged mesh representing the occlusion volume, generated via Constructive Solid Geometry (CSG) [S1, unofficial].
+
+**Data Structures:**
+1. **Solid Voxel Set ($V_{solid}$):** A set of voxel coordinates $(x,y,z)$ representing voxels completely inside the mesh [S1, unofficial].
+2. **Surface Voxel Set ($V_{surf}$):** A set of voxel coordinates representing voxels intersected by the mesh surface [S1, unofficial].
+3. **Empty Voxel List ($L_{empty}$):** A set of voxel coordinates outside the mesh, used for distance optimization [S1, unofficial].
+4. **Box List ($B_{list}$):** A collection of Axis-Aligned Bounding Boxes (AABBs), each defined by minimum and maximum voxel coordinates $(min_x, min_y, min_z)$ and $(max_x, max_y, max_z)$ [S1, unofficial].
+
+**Steps:**
+
+1. **Voxelization:** Determine $V_{solid}$ and $V_{surf}$ using the solid and surface voxelization algorithms from Schwarz 2010 [S1, unofficial]. For each voxel column, cast a ray against $M$ and apply XOR logic to toggle inside/outside status based on triangle intersections [S1, unofficial]. A voxel is in $V_{solid}$ if its center is inside the mesh and it is not in $V_{surf}$ (ensuring the entire voxel is inside) [S1, unofficial]. Define $L_{empty}$ as all voxels within the grid bounds not in $V_{solid}$ [S1, unofficial].
+2. **Find Highest Density Voxel:** Identify the voxel $v_{dense}$ in $V_{solid}$ that is furthest from any voxel in $L_{empty}$, excluding voxels already enclosed by boxes in $B_{list}$ [S1, unofficial]. Optimize by testing against a pre-filtered list of empty voxels adjacent to the solid volume rather than computing distance to all empty voxels [S1, unofficial].
+3. **Box Expansion:** Initialize a box $B$ at $v_{dense}$ with a base size of 13 voxels [S1, unofficial]. Iteratively expand each of the 6 faces of $B$ in voxel space until expansion would enter a voxel in $L_{empty}$ or an already-placed box in $B_{list}$ [S1, unofficial]. Mark all newly enclosed voxels as "covered" to exclude them from future density calculations [S1, unofficial].
+4. **Repeat:** Repeat Steps 2 and 3 until a stopping condition is met: the consumed volume reaches $P_{target}$ of the total volume of $V_{solid}$, or the last box created consumed a negligible percentage of the total volume [S1, unofficial].
+5. **Filter Boxes (Optional):** Remove small or redundant boxes from $B_{list}$ to reduce the final triangle count [S1, unofficial]. (Note: This step was noted as unimplemented by the author) [S1, unofficial].
+6. **Merge with CSG:** Combine all boxes in $B_{list}$ into a single mesh using Constructive Solid Geometry (CSG) union operations to eliminate internal faces and reduce overdraw [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def generate_occlusion_volume(mesh, target_percentage=0.9):
+    # Step 1: Voxelization (Schwarz 2010)
+    solid_voxels = set()
+    surface_voxels = set()
+    # [G] Iterate over grid cells within mesh bounding box
+    for x in range(min_x, max_x):
+        for y in range(min_y, max_y):
+            for z in range(min_z, max_z):
+                if raycast_column_intersects_surface(mesh, x, y, z):
+                    surface_voxels.add((x, y, z))
+                if raycast_column_center_inside(mesh, x, y, z) and (x, y, z) not in surface_voxels:
+                    solid_voxels.add((x, y, z))
+    empty_voxels = set()
+    for x in range(min_x, max_x):
+        for y in range(min_y, max_y):
+            for z in range(min_z, max_z):
+                if (x, y, z) not in solid_voxels:
+                    empty_voxels.add((x, y, z))
+
+    boxes = []
+    covered_voxels = set()
+    total_solid_volume = len(solid_voxels)
+    covered_volume = 0
+
+    while covered_volume < total_solid_volume * target_percentage:
+        available_voxels = solid_voxels - covered_voxels
+        if not available_voxels:
+            break
+
+        # Step 2: Find densest voxel
+        densest_voxel = find_furthest_from_empty(available_voxels, empty_voxels)
+
+        # Step 3: Box Expansion
+        box = create_initial_box(densest_voxel, size=13)
+        expand_box(box, empty_voxels, covered_voxels)
+
+        new_voxels = get_voxels_in_box(box)
+        covered_voxels.update(new_voxels)
+        covered_volume += len(new_voxels)
+        boxes.append(box)
+
+        if len(new_voxels) < 1:
+            break
+
+    # Step 6: Merge with CSG
+    final_mesh = csg_union(boxes)
+    return final_mesh
+
+def raycast_column_intersects_surface(mesh, x, y, z):
+    # [G] Standard raycast along Z-axis through voxel column
+    return len(mesh.intersect_ray((x, y, z), (x, y, z + 1))) > 0
+
+def raycast_column_center_inside(mesh, x, y, z):
+    # [G] Raycast through voxel center, count intersections. Odd = inside.
+    intersections = mesh.intersect_ray((x, y, z), (x, y, z + 100))
+    return len(intersections) % 2 == 1
+
+def find_furthest_from_empty(voxels, empty_voxels):
+    max_dist = -1
+    best_voxel = None
+    for v in voxels:
+        dist = min_distance_to_set(v, empty_voxels)
+        if dist > max_dist:
+            max_dist = dist
+            best_voxel = v
+    return best_voxel
+
+def min_distance_to_set(point, voxel_set):
+    # [G] Manhattan distance to nearest voxel in set
+    min_d = float('inf')
+    for ev in voxel_set:
+        d = abs(point[0]-ev[0]) + abs(point[1]-ev[1]) + abs(point[2]-ev[2])
+        if d < min_d:
+            min_d = d
+    return min_d
+
+def create_initial_box(center, size=13):
+    half = size // 2
+    return {'min': (center[0]-half, center[1]-half, center[2]-half),
+            'max': (center[0]+half, center[1]+half, center[2]+half)}
+
+def expand_box(box, empty_voxels, covered_voxels):
+    directions = [(1,0,0), (-1,0,0), (0,1,0), (0,-1,0), (0,0,1), (0,0,-1)]
+    for dx, dy, dz in directions:
+        while True:
+            next_v = (box['max'][0]+dx, box['max'][1]+dy, box['max'][2]+dz) if dx==1 else \
+                     (box['min'][0]+dx, box['min'][1]+dy, box['min'][2]+dz) if dx==-1 else \
+                     (box['max'][0], box['max'][1]+dy, box['max'][2]+dz) if dy==1 else \
+                     (box['min'][0], box['min'][1]+dy, box['min'][2]+dz) if dy==-1 else \
+                     (box['max'][0], box['max'][1], box['max'][2]+dz) if dz==1 else \
+                     (box['min'][0], box['min'][1], box['min'][2]+dz)
+            if next_v in empty_voxels or next_v in covered_voxels:
+                break
+            if dx > 0: box['max'] = (box['max'][0]+1, box['max'][1], box['max'][2])
+            elif dx < 0: box['min'] = (box['min'][0]-1, box['min'][1], box['min'][2])
+            elif dy > 0: box['max'] = (box['max'][0], box['max'][1]+1, box['max'][2])
+            elif dy < 0: box['min'] = (box['min'][0], box['min'][1]-1, box['min'][2])
+            elif dz > 0: box['max'] = (box['max'][0], box['max'][1], box['max'][2]+1)
+            elif dz < 0: box['min'] = (box['min'][0], box['min'][1], box['min'][2]-1)
+
+def get_voxels_in_box(box):
+    voxels = set()
+    for x in range(box['min'][0], box['max'][0]+1):
+        for y in range(box['min'][1], box['max'][1]+1):
+            for z in range(box['min'][2], box['max'][2]+1):
+                voxels.add((x, y, z))
+    return voxels
+
+def csg_union(box_list):
+    # [G] Standard CSG union operation to merge AABB meshes into a single watertight mesh
+    return merge_meshes_into_single_watertight_mesh(box_list)
+```
+
+## Operating characteristics
+*   **Time Complexity:** Dominated by voxelization and the iterative box expansion [S1, unofficial]. A CPU C++ implementation took ~20 seconds on a mesh with ~10,000 triangles and 503 voxel volume; a C# implementation took ~60 seconds; a GPU OpenCL implementation took ~6 seconds on an Nvidia 540M [S1, unofficial].
+*   **Memory Complexity:** Proportional to the voxel grid resolution and the number of boxes generated [S1, unofficial].
+*   **Strengths:** Generates conservative occluders that do not extend beyond the mesh surface; simple box geometry reduces rendering cost; automated pipeline avoids manual authoring [S1, unofficial].
+*   **Limitations:** Requires watertight meshes, as holes break the XOR raycasting logic; Axis-Aligned Bounding Boxes (AABBs) are inefficient for models at non-right angles, leading to volume overestimation compared to Oriented Bounding Boxes (OBBs) [S1, unofficial].
+*   **When to use:** When automatic generation of HZB-OC occluders is needed and input meshes are watertight [S1, unofficial].
+*   **When not to use:** For non-watertight meshes without pre-processing; when tight-fitting occluders are critical for non-axis-aligned objects [S1, unofficial].
+
+## Background
+The method was described by Nick Darnell in a blog post detailing the generation of occlusion volumes for Hierarchical Z-Buffer Occlusion Culling (HZB-OC) [S1, unofficial]. It builds on the voxelization techniques from Schwarz 2010 and uses CSG algorithms similar to those described by Sander van Rossen and Matthew Baranowski in *Game Development Tools* [S1, unofficial]. The technique is intended to be generated at export time and merged during the level editor cook stage to reduce draw calls [S1, unofficial]. The author noted that while AABBs are simple, OBBs might offer better fitting for angled models [S1, unofficial].
+
+## Sources
+[S1] Hierarchical Z-Buffer Occlusion Culling - Generating Occlusion Volumes - Nick Darnell’s Blog, https://www.nickdarnell.com/hierarchical-z-buffer-occlusion-culling-generating-occlusion-volumes/, fetched 2026-10-29 (unofficial)
+[S2] #AltDevBlogADay » Hierarchical Z-Buffer Occlusion Culling – Generating Occlusion Volumes, https://jahej.com/alt/2011_06_26_hierarchical-z-buffer-occlusion-culling-generating-occlusion-volumes.html, fetched 2026-10-29 (unofficial)

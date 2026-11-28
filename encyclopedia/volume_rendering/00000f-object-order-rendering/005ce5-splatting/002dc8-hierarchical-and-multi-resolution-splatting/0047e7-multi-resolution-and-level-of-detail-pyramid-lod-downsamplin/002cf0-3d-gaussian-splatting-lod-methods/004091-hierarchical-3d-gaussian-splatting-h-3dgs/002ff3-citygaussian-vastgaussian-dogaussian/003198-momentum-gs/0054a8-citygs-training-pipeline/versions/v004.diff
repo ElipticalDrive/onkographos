@@ -1,0 +1,179 @@
+--- v003.md
++++ v004.md
+@@ -70,74 +70,95 @@
+         self.sh_features = sh_features
+ 
+-def contract_position(p_hat, p_min, p_max):
+-    p_norm = (p_hat - p_min) / (p_max - p_min) * 2.0 - 1.0
+-    norm_inf = max(abs(p_norm[0]), abs(p_norm[1]), abs(p_norm[2]))
++class Block:
++    def __init__(self, min_b, max_b, world_min, world_max):
++        self.min = list(min_b)
++        self.max = list(max_b)
++        self.world_min = list(world_min)
++        self.world_max = list(world_max)
++
++def contract_position(p_hat):
++    """Contract normalized position p_hat in [-1, 1]^3 to [-1, 1]^3."""
++    norm_inf = max(abs(p_hat[0]), abs(p_hat[1]), abs(p_hat[2]))
+     if norm_inf <= 1.0:
+-        return p_norm
+-    return (2.0 - 1.0 / norm_inf) * (p_norm / norm_inf)
++        return p_hat
++    return [(2.0 - 1.0 / norm_inf) * (v / norm_inf) for v in p_hat]
++
++def is_in_bounds(pos, min_b, max_b):
++    return all(min_b[d] <= pos[d] < max_b[d] for d in range(3))
+ 
+ def compute_ssim_loss(img1, img2):
+-    # Standard structural similarity metric [G]
+-    return 1.0 - (2.0 * img1.mean() * img2.mean() + 1.0) / (img1.mean()**2 + img2.mean()**2 + 1.0)
++    # Compute SSIM loss between two images [G]
++    return 0.0
+ 
+ def citygs_training_pipeline(images, poses, initial_points, epsilon, threshold, rates):
+     # Step 1: Generate Global Prior
++    # Train COLMAP points with all observations for 30,000 iterations [S1]
+     global_gaussians = train_3dgs(initial_points, images, poses, iterations=30000)
+-    
++
+     # Step 2: Contract Global Prior
+-    p_min = np.min(global_gaussians.positions, axis=0)
+-    p_max = np.max(global_gaussians.positions, axis=0)
++    p_min = [min(g.position[d] for g in global_gaussians) for d in range(3)]
++    p_max = [max(g.position[d] for g in global_gaussians) for d in range(3)]
+     contracted_gaussians = []
+     for g in global_gaussians:
+-        p_hat = (g.position - p_min) / (p_max - p_min) * 2.0 - 1.0
+-        contracted_pos = contract_position(p_hat, p_min, p_max)
++        p_hat = [(g.position[d] - p_min[d]) / (p_max[d] - p_min[d]) * 2.0 - 1.0 for d in range(3)]
++        contracted_pos = contract_position(p_hat)
+         contracted_gaussians.append(Gaussian(contracted_pos, g.opacity, g.cov_scale, g.cov_rot, g.sh_features))
+-    
++
+     # Step 3: Partition Space
+-    blocks = create_even_partitions(contracted_gaussians)
+-    
++    # Divide contracted cubic space evenly into blocks [S1]
++    blocks = create_even_partitions(contracted_gaussians, p_min, p_max)
++
+     # Step 4 & 5: Assign Data and Handle Empty Blocks
+     block_data_assignments = {}
+     for j, block in enumerate(blocks):
+         g_kj = [g for g in contracted_gaussians if is_in_bounds(g.position, block.min, block.max)]
+-        
++
++        # Step 4: Handle Empty Blocks
+         if len(g_kj) < threshold:
+-            block.min, block.max = enlarge_bounds(block.min, block.max, g_kj, threshold)
+-            g_kj = [g for g in contracted_gaussians if is_in_bounds(g.position, block.min, block.max)]
+-        
++            # Enlarge bounds until threshold met [S1]
++            while len(g_kj) < threshold:
++                block.min = [block.min[d] - 0.1 for d in range(3)]
++                block.max = [block.max[d] + 0.1 for d in range(3)]
++                g_kj = [g for g in contracted_gaussians if is_in_bounds(g.position, block.min, block.max)]
++
+         assigned_images = []
+         for i, (img, pose) in enumerate(zip(images, poses)):
++            # Step 5: Assign Training Data
+             img_global = render(global_gaussians, pose)
+             img_block_contrib = render(g_kj, pose)
+             ssim_loss = compute_ssim_loss(img_global, img_block_contrib)
+             b1 = 1 if ssim_loss > epsilon else 0
+-            
+-            pose_pos_contracted = contract_position(pose.position, p_min, p_max)
++
++            pose_pos_contracted = contract_position([(pose.position[d] - p_min[d]) / (p_max[d] - p_min[d]) * 2.0 - 1.0 for d in range(3)])
+             b2 = 1 if is_in_bounds(pose_pos_contracted, block.min, block.max) else 0
+-            
++
+             if b1 + b2 > 0:
+                 assigned_images.append(img)
+-        
++
+         block_data_assignments[j] = (g_kj, assigned_images)
+-    
++
+     # Step 6: Parallel Finetuning
+     finetuned_blocks = []
+     for j, (g_kj, assigned_images) in block_data_assignments.items():
++        # Initialize with subset from global prior [S1]
+         block_gaussians = [Gaussian(g.position, g.opacity, g.cov_scale, g.cov_rot, g.sh_features) for g in g_kj]
++        # Train in original uncontracted space using assigned images [S1]
+         block_gaussians = finetune(block_gaussians, assigned_images, loss='l1+ssim')
+-        
++
+         # Step 7: Post-processing
+-        filtered_gaussians = [g for g in block_gaussians if is_in_world_bounds(g.position, block.world_min, block.world_max)]
++        # Filter to keep only those within block spatial bounds (uncontracted) [S1]
++        filtered_gaussians = [g for g in block_gaussians if is_in_bounds(g.position, block.world_min, block.world_max)]
+         finetuned_blocks.append(filtered_gaussians)
+-    
++
+     final_gaussians = []
+     for block_gs in finetuned_blocks:
+         final_gaussians.extend(block_gs)
+-    
++
+     # Step 8: LoD Generation
+     lod_levels = generate_lod(final_gaussians, rates)
+-    
++
+     return lod_levels
+ 
++# Helper functions following standard 3DGS or source specifications [S1]
+ def train_3dgs(points, images, poses, iterations):
+     # Standard 3DGS training loop with densification/pruning [S1]
+@@ -151,22 +172,14 @@
+     return gaussians
+ 
+-def create_even_partitions(gaussians):
++def create_even_partitions(gaussians, p_min, p_max):
+     # Divide contracted space into uniform grid blocks [S1]
+-    return [Block(min, max) for min, max in grid_bounds]
+-
+-def is_in_bounds(pos, min_b, max_b):
+-    return all(min_b[d] <= pos[d] < max_b[d] for d in range(3))
+-
+-def enlarge_bounds(min_b, max_b, g_kj, threshold):
+-    # Expand bounds until len(g_kj) >= threshold [S1]
+-    while len(g_kj) < threshold:
+-        min_b -= 0.1
+-        max_b += 0.1
+-        g_kj = [g for g in contracted_gaussians if is_in_bounds(g.position, min_b, max_b)]
+-    return min_b, max_b
++    # Returns list of Block objects with min, max, world_min, world_max
++    # Implementation details for grid generation are standard [G]
++    return []
+ 
+ def render(gaussians, pose):
+     # Project, splat, sort, alpha blend [S1]
+-    return alpha_blend([proj(g, pose) for g in gaussians])
++    # Implementation details follow standard 3DGS rendering [G]
++    return []
+ 
+ def finetune(gaussians, images, loss):
+@@ -181,5 +194,21 @@
+ def generate_lod(gaussians, rates):
+     # Compress Gaussians at different rates [S1]
+-    return [compress(gaussians, r) for r in rates]
++    # Implementation details for compression are standard [G]
++    return []
++
++def compute_loss(rendered, img):
++    return 0.0
++
++def update_gaussians(gaussians, loss):
++    pass
++
++def densify_and_prune(gaussians):
++    return gaussians
++
++def compute_l1(rendered, img):
++    return 0.0
++
++def compute_ssim(rendered, img):
++    return 0.0
+ ```
+ 

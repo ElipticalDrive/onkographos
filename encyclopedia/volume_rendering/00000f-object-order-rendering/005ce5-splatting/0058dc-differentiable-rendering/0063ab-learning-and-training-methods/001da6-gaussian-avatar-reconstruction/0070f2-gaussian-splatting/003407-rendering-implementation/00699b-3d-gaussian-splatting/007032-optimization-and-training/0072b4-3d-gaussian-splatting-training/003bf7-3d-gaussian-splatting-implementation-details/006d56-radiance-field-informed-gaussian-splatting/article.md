@@ -1,0 +1,213 @@
+# Radiance Field-Informed Gaussian Splatting
+
+Also called: RadSplat
+
+## Overview
+Radiance Field-Informed Gaussian Splatting (RadSplat) is a training method that uses a trained Neural Radiance Field (NeRF) to initialize and supervise a 3D Gaussian Splatting (3DGS) representation, improving robustness to lighting variations and geometry artifacts [S1]. Unlike standard 3DGS which assumes a pinhole camera model, this method leverages NeRF's flexible ray casting, allowing training from arbitrary camera lens types (e.g., fisheye) without modifying the 3DGS gradient formulation [S1].
+
+## How it works
+**Inputs:** Posed input images of a scene; a pre-trained NeRF model $f_\theta$ with GLO embeddings.
+**Outputs:** A set of 3D Gaussians $\mathcal{P}$ with positions $\mathbf{p}$, opacities $o$, spherical harmonic coefficients $\mathbf{k}$, scales $\mathbf{s}$, and rotations $\mathbf{q}$.
+
+**Data Structures:**
+*   **NeRF Model ($f_\theta$):** A neural network that takes a 3D position $\mathbf{x}$, viewing direction $\mathbf{d}$, and GLO embedding $\mathbf{l}$ to predict color $\mathbf{c}$ and density $\sigma$.
+*   **3D Gaussian Primitive:** Defined by position $\mathbf{p} \in \mathbb{R}^3$, opacity $o \in [0, 1]$, 16 spherical harmonic coefficients $\mathbf{k} \in \mathbb{R}^{16}$ (3 coefficients per color channel for degree 1, or 16 for degree 3 as per standard 3DGS [S1]), scale $\mathbf{s} \in \mathbb{R}^3$, and rotation $\mathbf{q} \in \mathbb{R}^4$ (unit quaternion).
+*   **Ray:** Defined by origin $\mathbf{r}_0$ and normalized direction $\mathbf{d}_r$.
+
+**Steps:**
+
+1.  **Train NeRF:** Train a robust NeRF on the input images. The NeRF uses GLO embeddings to handle lighting variations [S1].
+2.  **Compute Median Depth:** For each pixel/ray $\mathbf{r}$ in the input images, compute the median depth $z_{\text{median}}$. This is the distance to the first sample along the ray where the accumulated transmittance $\tau_i > 0.5$ [S1].
+3.  **Initialize Points:** Unproject pixels to 3D space to form the initial point set $\mathcal{P}_{\text{init}}$. Select $N_{\text{init}} = 1,000,000$ points by uniformly sampling indices $\mathcal{K}_{\text{rnd}}$ from all rays/pixels [S1].
+    $$ \mathbf{p}_i = \mathbf{r}_0(i) + \mathbf{d}_{r(i)} \cdot z_{\text{median}}(\mathbf{r}(i)) \quad \text{for } i \in \mathcal{K}_{\text{rnd}} \quad (5) $$
+4.  **Initialize Scales:** Set the scale $\mathbf{s}_i$ for each point to be isotropic, where $s_i$ is the distance to the nearest neighbor in the initial point set (excluding the point itself) [S1]:
+    $$ \mathbf{s}_i = (s_i, s_i, s_i), \quad s_i = \min_{p \in \{p \neq p_i | p \in \mathcal{P}_{\min}\}} \|\mathbf{p}_i - \mathbf{p}\|_2 $$
+    *Note: The source notation $\mathcal{P}_{\min}$ refers to the initial point set $\mathcal{P}_{\text{init}}$ [S1].*
+5.  **Initialize SH Coefficients:** Initialize the spherical harmonic coefficients $\mathbf{k}_i$. The first 3 coefficients (RGB) are set to the color predicted by the NeRF for that ray. The remaining 13 coefficients are set to zero [S1]:
+    $$ \mathbf{k}_i = (\mathbf{k}_i^{1:3}, \mathbf{k}_i^{4:16}), \quad \mathbf{k}_i^{1:3} = \mathbf{c}_{\text{NeRF}}(\mathbf{r}(i)), \quad \mathbf{k}_i^{4:16} = \mathbf{0}^{\mathbf{1}} \quad (6) $$
+    *Note: The source mentions progressively optimizing $\mathbf{k}_{4:16}$ leads to better results [S1].*
+6.  **Initialize Opacity and Rotation:** Set initial opacity $o_i = 0.1$ and rotation $\mathbf{q}_i$ to the identity quaternion [S1].
+7.  **Generate Clean Supervision Images:** Render the input images using the trained NeRF $f_\theta$ with a constant zero GLO vector $\mathbf{l}_{\text{zero}}$ to generate clean supervision images $\mathcal{I}_f$. This removes exposure and lighting noise from the input data [S1]:
+    $$ I_f^j = \{\mathbf{c}_{\text{Nerf}}^{j,l}(\mathbf{r}_j(i))\}_{i=1}^W \quad \text{where } \mathbf{l} = \mathbf{l}_{\text{zero}} \quad (8) $$
+8.  **Optimize 3D Gaussians:** Optimize the 3D Gaussian parameters $\phi$ by minimizing the loss between the rendered Gaussian image $I_\phi$ and the clean NeRF-rendered image $I_f$. The loss is a combination of L2 and SSIM [S1]:
+    $$ \mathcal{L}(\phi) = (1 - \lambda)\|I_f^* - I_\phi^*\|_2^2 + \lambda \text{SSIM}(I_f^*, I_\phi^*) \quad (9) $$
+    where $*$ denotes sampled pixels from the uniform distribution $\mathcal{U}$, and $\lambda = 0.2$ [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def radiance_field_informed_gaussian_splatting(input_images, camera_intrinsics, camera_poses, nerf_model):
+    """
+    Initialize and train 3D Gaussians using a NeRF prior.
+    
+    Args:
+        input_images: List of input images.
+        camera_intrinsics: Camera intrinsic parameters.
+        camera_poses: List of camera pose matrices.
+        nerf_model: Pre-trained NeRF model.
+        
+    Returns:
+        gaussians: Dictionary containing 3D Gaussian parameters.
+    """
+    
+    # Step 1: Generate rays for all input images
+    rays = generate_rays(input_images, camera_intrinsics, camera_poses)
+    
+    # Step 2: Compute median depth for each ray using NeRF
+    # NeRF returns density and color along the ray. 
+    # We compute accumulated transmittance to find median depth.
+    median_depths = []
+    for ray in rays:
+        samples = nerf_model.sample_along_ray(ray)
+        # samples: list of (position, density, color, transmittance)
+        # Find first sample where accumulated transmittance > 0.5
+        acc_transmittance = 1.0
+        z_median = 0.0
+        for pos, density, color, trans in samples:
+            acc_transmittance *= (1.0 - density)
+            if acc_transmittance < 0.5: # Note: transmittance decreases as density increases
+                # Actually, standard definition: tau_i = exp(-sum(sigma * delta))
+                # If tau_i > 0.5, we are before the median.
+                # The source says: "first sample along the ray with accumulated transmittance tau_i > 0.5"
+                # This implies we look for the transition point.
+                # Let's assume standard ray marching where we check tau at each step.
+                pass 
+        
+        # Simplified median depth calculation based on source description:
+        # Find index i where tau_i > 0.5. 
+        # In practice, this is often done by integrating density.
+        # For implementation, we assume nerf_model.get_median_depth(ray) exists or is computed.
+        z_median = compute_median_depth_from_nerf(ray, nerf_model)
+        median_depths.append(z_median)
+        
+    # Step 3: Initialize Points
+    N_init = 1000000
+    num_rays = len(rays)
+    # Uniformly sample indices
+    indices = np.random.choice(num_rays, N_init, replace=False)
+    
+    positions = []
+    for idx in indices:
+        ray = rays[idx]
+        z = median_depths[idx]
+        p = ray.origin + ray.direction * z
+        positions.append(p)
+    positions = np.array(positions)
+    
+    # Step 4: Initialize Scales
+    # Compute nearest neighbor distance for each point
+    # This is computationally expensive, often approximated or done on a subset.
+    # Source says: min distance to any other point in the initial set.
+    scales = np.zeros((N_init, 3))
+    # [G] Using a simple KD-tree for nearest neighbor search
+    from scipy.spatial import KDTree
+    tree = KDTree(positions)
+    distances, _ = tree.query(positions, k=2) # k=2 to exclude self
+    # distances[:, 1] is the distance to the nearest neighbor
+    s_i = distances[:, 1]
+    scales[:, 0] = s_i
+    scales[:, 1] = s_i
+    scales[:, 2] = s_i
+    
+    # Step 5: Initialize SH Coefficients
+    # Get NeRF color for each ray
+    nerf_colors = []
+    for idx in indices:
+        ray = rays[idx]
+        # NeRF color prediction at the median depth point
+        c_nerf = nerf_model.predict_color(positions[idx], ray.direction, np.zeros(3)) # Zero GLO
+        nerf_colors.append(c_nerf)
+    nerf_colors = np.array(nerf_colors)
+    
+    # SH coefficients: first 3 are color, rest are zero
+    sh_coeffs = np.zeros((N_init, 16))
+    sh_coeffs[:, :3] = nerf_colors
+    
+    # Step 6: Initialize Opacity and Rotation
+    opacities = np.full(N_init, 0.1)
+    rotations = np.tile([1.0, 0.0, 0.0, 0.0], (N_init, 1)) # Identity quaternion
+    
+    # Step 7: Generate Clean Supervision Images
+    # Render all input images using NeRF with zero GLO
+    clean_images = []
+    for i, (image, pose) in enumerate(zip(input_images, camera_poses)):
+        rays_j = generate_rays_for_image(image, camera_intrinsics, pose)
+        rendered_image = np.zeros_like(image)
+        for j, ray in enumerate(rays_j):
+            c = nerf_model.predict_color(ray, np.zeros(3)) # Zero GLO
+            rendered_image[j] = c
+        clean_images.append(rendered_image)
+        
+    # Step 8: Optimize 3D Gaussians
+    # This step involves rendering the Gaussians and minimizing the loss.
+    # The optimization loop is standard 3DGS but with clean images as target.
+    # Loss: (1 - 0.2) * L2 + 0.2 * SSIM
+    lambda_param = 0.2
+    
+    # [G] Placeholder for the actual optimization loop using an optimizer like Adam
+    # and a differentiable rasterizer for 3D Gaussians.
+    # The core contribution is the initialization and supervision signal, not the rasterizer.
+    
+    gaussians = {
+        'positions': positions,
+        'scales': scales,
+        'sh_coeffs': sh_coeffs,
+        'opacities': opacities,
+        'rotations': rotations
+    }
+    
+    return gaussians
+
+def compute_median_depth_from_nerf(ray, nerf_model):
+    """
+    Computes the median depth for a ray using the NeRF model.
+    Median depth is the distance to the first sample where accumulated transmittance > 0.5.
+    """
+    # Sample points along the ray
+    t_vals = np.linspace(0.02, 1.0, 128) # Standard 3DGS/NeRF sampling range
+    points = ray.origin + ray.direction * t_vals
+    
+    densities = nerf_model.predict_density(points)
+    
+    # Compute transmittance
+    # tau_i = exp(-sum_{j=1}^{i-1} sigma_j * delta_j)
+    # We need to find the first i where tau_i > 0.5.
+    # Note: tau_0 = 1.0. As we go deeper, tau decreases.
+    # So we look for the transition from > 0.5 to <= 0.5?
+    # Source: "first sample along the ray with accumulated transmittance tau_i > 0.5"
+    # This phrasing is slightly ambiguous. Usually, median depth is where tau = 0.5.
+    # If tau_i > 0.5, we are still "transparent". The surface is where it becomes opaque.
+    # Let's assume we find the sample where tau drops below 0.5, or interpolate.
+    # However, the source says "first sample ... with tau_i > 0.5".
+    # If tau_0 = 1.0 > 0.5, then the first sample is always t=0? That doesn't make sense.
+    # Re-reading: "distance to the first sample along the ray with accumulated transmittance tau_i > 0.5"
+    # This might mean the sample *index* i where the condition holds, but typically we want the depth.
+    # Let's assume it means the depth at which the accumulated opacity reaches 0.5 (tau=0.5).
+    # Or, it could mean the sample *before* the median.
+    # Given the context of "median depth", it is standardly defined as the depth where 50% of light is blocked.
+    
+    # Implementation of standard median depth:
+    deltas = np.diff(t_vals, prepend=0.0)
+    alpha = 1.0 - torch.exp(-torch.from_numpy(densities) * torch.from_numpy(deltas))
+    transmittance = torch.cumprod(1.0 - alpha, dim=0)
+    # Find where transmittance crosses 0.5
+    # [G] Interpolate to find exact depth
+    return interpolate_median_depth(t_vals, transmittance)
+```
+
+## Operating characteristics
+*   **Time Complexity:** Initialization requires $O(N \log N)$ for nearest neighbor search if using a KD-tree, where $N$ is the number of initial points. The NeRF training is a prerequisite. The optimization step is similar to standard 3DGS but may require more iterations if the NeRF prior is not perfectly aligned.
+*   **Memory Complexity:** Stores $N$ Gaussians. $N$ is fixed at 1 million [S1]. NeRF model weights are also stored during initialization.
+*   **Performance:** The method enables real-time rendering (900+ FPS reported in the source title [S1]) after optimization.
+*   **Strengths:** Robust to lighting variations and exposure noise due to NeRF supervision. Supports arbitrary camera lens types (e.g., fisheye) [S1].
+*   **Limitations:** Requires training a NeRF first, adding an initial computational cost. The fixed number of initial points (1 million) may not be optimal for all scenes [S1].
+
+## Background
+Radiance Field-Informed Gaussian Splatting, also known as RadSplat, was introduced in the paper "RadSplat: Radiance Field-Informed Gaussian Splatting for Robust Real-Time Rendering with 900+ FPS" [S1]. It addresses the limitations of standard 3DGS initialization and sensitivity to lighting conditions by leveraging the robustness of neural radiance fields.
+
+## Sources
+[S1] RadSplat: Radiance Field-Informed Gaussian Splatting for Robust Real- Time Rendering with 900+ FPS, https://doi.org/10.1109/3dv66043.2025.00018, fetched 2026-10-26

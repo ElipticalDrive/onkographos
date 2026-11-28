@@ -1,0 +1,228 @@
+--- v001.md
++++ v002.md
+@@ -4,28 +4,13 @@
+ 
+ ## Overview
+-HoloINR solves the coupled inverse problem of near-field holotomography by combining holographic phase retrieval with tomographic reconstruction using Implicit Neural Representations (INRs) [S1, unofficial]. Unlike standard tomography that assumes far-field (Fraunhofer) propagation, HoloINR explicitly models near-field physics via Fresnel propagation between the object and the detector [S1, unofficial]. It differs from sibling methods like NeAT or DuDoTrans by replacing discrete voxel grids with a continuous neural field, allowing for resolution-independent reconstruction and natural integration of wave-optics effects [S1, unofficial].
++HoloINR solves the coupled inverse problem of near-field holotomography using Implicit Neural Representations (INRs) [S1, unofficial]. It explicitly models near-field physics via Fresnel propagation between the object and the detector, rather than assuming far-field propagation [S1, unofficial].
+ 
+ ## How it works
+ **Inputs:** Holographic measurement data stored in HDF5 format containing `angles` (list of floating-point numbers in $[0, \pi)$) and `data` (holographic intensity measurements, where the first axis corresponds to angles and the last two axes correspond to the detector image) [S1, unofficial].
+ 
+-**Outputs:** A trained Implicit Neural Representation (INR) model that maps 3D spatial coordinates to complex-valued scattering potential (or absorption/density), representing the reconstructed volume [S1, unofficial].
++**Outputs:** A trained Implicit Neural Representation (INR) model that maps 3D spatial coordinates to complex-valued scattering potential or density, representing the reconstructed volume [S1, unofficial].
+ 
+ **Data Structures:**
+-The geometry is defined by a `ParallelGeometry` class (or `ConeBeam` for specific setups) with the following fields [S1, unofficial]:
+-*   `DSO` (float): Source-Origin distance.
+-*   `DSD` (float): Source-Detector distance.
+-*   `nDetector` (2x1 array): Pixel count per dimension.
+-*   `dDetector` (2x1 array): Pixel size per dimension.
+-*   `sDetector` (2x1 array): Total detector size.
+-*   `nVoxel` (3x1 array): Voxel count (used for reference grid, not storage).
+-*   `dVoxel` (3x1 array): Voxel size.
+-*   `sVoxel` (3x1 array): Total image size.
+-*   `offOrigin` (3x1 array): Image center offset.
+-*   `offDetector` (2x1 array): Detector center offset.
+-*   `rotDetector` (3x1 array): Detector rotation.
+-*   `mode` (string): 'parallel' or 'cone'.
+-*   `filter` (string): Reconstruction filter type.
+-
+-For cone-beam setups, a `ConeBeam` class manages physics parameters [S1, unofficial]:
++The geometry and physics parameters are managed by a `ConeBeam` class with the following fields [S1, unofficial]:
+ *   `energy` (float): X-ray energy.
+ *   `_px_size` (float): Base pixel size.
+@@ -36,19 +21,12 @@
+ **Algorithm Steps:**
+ 
+-1.  **Ray Generation:** For each projection angle, generate rays originating from the source and passing through the detector pixels. Compute normalized t-values along the ray, interpolate between near and far bounds to get z-values, and compute 3D points as $pts = rays_o + rays_d \cdot z\_vals$. Clamp points to the bounding box $[-bound, bound]$ [S1, unofficial].
+-
+-2.  **Chunked Network Evaluation:** Split the rays into batches of size `netchunk` to manage VRAM usage. For each chunk, pass the 3D points to the INR model. The INR typically uses a multi-layer perceptron (MLP) with skip connections (e.g., as in NeRF) [S1, unofficial]. The output is summed over the z-dimension (`dim=-2`) and concatenated along the ray dimension [S1, unofficial].
+-
+-3.  **Segment Distance Weighting:** Compute the physical distance between sample points along the ray to weight the integration. Calculate segment distances as $dists = (z\_vals[..., 1:] - z\_vals[..., :-1]) \cdot ||rays_d||$. Append a small constant $1e-10$ to the last segment to prevent zero-length division errors [S1, unofficial].
+-
+-4.  **Accumulation:** Compute the accumulated projection (line integral) as $acc = \sum (raw \cdot dists, dim=-2)$, where `raw` is the network output (density/absorption) at each sample point [S1, unofficial].
+-
+-5.  **Fresnel Propagation (Near-Field):** If using near-field holography, propagate the complex field from the object plane to the detector plane using the Fresnel propagator. This involves calculating the Fresnel number $Fr = \frac{dx_{eff}^2}{\lambda z_{eff}}$ and applying the appropriate phase shift in the frequency domain [S1, unofficial]. The effective pixel size $dx_{eff}$ and effective distance $z_{eff}$ are derived from magnification $M = \frac{z_{12} + z_{01}}{z_{01}}$ where $z_{12} = z_{02} - z_{01}$ [S1, unofficial].
+-
+-6.  **Loss Computation:** Compare the simulated hologram (after propagation) with the measured holographic data. The loss function typically includes a data fidelity term (e.g., MSE between simulated and measured intensity) and a regularization term [S1, unofficial].
+-
+-7.  **Regularization:** Apply Isotropic Total Variation (TV) regularization to the volume representation. Compute finite differences $dx, dy, dz$ along the x, y, and z axes. The TV loss is calculated as $TV = \text{mean}(\sqrt{dx^2 + dy^2 + dz^2 + 1e-6})$ [S1, unofficial].
+-
+-8.  **Optimization:** Update the INR weights using an optimizer (e.g., Adam) to minimize the total loss. Use `downsampling` factors (typically 4 or 8) on the number of samples or rays to reduce computational cost during optimization [S1, unofficial].
++1.  **Ray point sampling:** Compute normalized t-values along the ray, interpolate between near and far bounds to get z-values, then compute 3D points as $pts = rays_o + rays_d \cdot z\_vals$ [S1, unofficial]. Clamp points to the bounding box $[-bound, bound]$ [S1, unofficial].
++2.  **Chunked network evaluation:** Split rays into batches of size `netchunk` [S1, unofficial]. For each chunk, pass points to the INR model, sum the output over the z-dimension (`dim=-2`), and concatenate results along the ray dimension [S1, unofficial].
++3.  **Segment distance weighting:** Compute segment distances as $dists = (z\_vals[..., 1:] - z\_vals[..., :-1]) \cdot ||rays_d||$ [S1, unofficial]. Append $1e-10$ to the last segment to prevent zero-length division [S1, unofficial].
++4.  **Accumulation:** Compute the accumulated projection as $acc = \sum (raw \cdot dists, dim=-2)$, where `raw` is the network output at each sample point [S1, unofficial].
++5.  **Fresnel propagation:** Propagate the complex field from the object plane to the detector plane [S1, unofficial]. Calculate the Fresnel number $Fr = \frac{dx_{eff}^2}{\lambda z_{eff}}$ where $dx_{eff} = \frac{active\_px\_size}{M}$, $z_{eff} = \frac{z_{12}}{M}$, $M = \frac{z_{12} + z_{01}}{z_{01}}$, and $z_{12} = z_{02} - z_{01}$ [S1, unofficial].
++6.  **Loss computation:** Compare the simulated hologram with the measured holographic data [S1, unofficial].
++7.  **Regularization:** Apply Isotropic Total Variation (TV) regularization to the volume representation [S1, unofficial]. Compute finite differences $dx, dy, dz$ along the x, y, and z axes [S1, unofficial]. The TV loss is calculated as $TV = \text{mean}(\sqrt{dx^2 + dy^2 + dz^2 + 1e-6})$ [S1, unofficial].
++8.  **Optimization:** Update the INR weights using an optimizer (e.g., Adam) to minimize the total loss [S1, unofficial]. Apply `downsampling` factors (typically 4 or 8) to `n_samples` during optimization to reduce computation [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -57,5 +35,4 @@
+ import torch
+ import torch.nn as nn
+-import numpy as np
+ 
+ class HoloINRModel(nn.Module):
+@@ -63,17 +40,13 @@
+         super().__init__()
+         self.bound = bound
+-        self.encoder = None # Placeholder for positional encoding if used
+-        self.input_cat_dims = 0 # Placeholder
+         self.in_dim = in_dim
+-        
+-        # Linear layers with skip connections
++        self.skips = set(skips)
+         self.layers = nn.ModuleList([nn.Linear(self.in_dim, hidden_dim)])
+         for i in range(1, num_layers - 1):
+-            if i in skips:
++            if i in self.skips:
+                 self.layers.append(nn.Linear(hidden_dim + self.in_dim, hidden_dim))
+             else:
+                 self.layers.append(nn.Linear(hidden_dim, hidden_dim))
+-        self.layers.append(nn.Linear(hidden_dim, 1)) # Output: density/absorption
+-        
++        self.layers.append(nn.Linear(hidden_dim, 1))
+         self.activations = nn.ModuleList([nn.LeakyReLU() for _ in range(num_layers - 1)])
+         self.last_activation = last_activation
+@@ -81,8 +54,4 @@
+     def forward(self, x):
+         x = x / self.bound
+-        # Assuming encoder is handled externally or x is already encoded
+-        # x = self.encoder(x) 
+-        # if cat_args: x = torch.cat((x, cat_args), dim=-1)
+-        
+         h = x
+         for i, layer in enumerate(self.layers):
+@@ -93,84 +62,61 @@
+                 h = self.activations[i](h)
+             else:
+-                if self.last_activation:
++                if self.last_activation is not None:
+                     h = self.last_activation(h)
+         return h
+ 
+ def render_rays(rays_o, rays_d, z_vals, model, netchunk=1024):
+-    """
+-    Render rays through the INR volume.
+-    """
+-    # Clamp points to bound
+-    pts = rays_o + rays_d.unsqueeze(-1) * z_vals.unsqueeze(-2)
++    pts = rays_o.unsqueeze(-2) + rays_d.unsqueeze(-2) * z_vals.unsqueeze(-1)
+     pts = torch.clamp(pts, -model.bound, model.bound)
+-    
+-    # Chunked evaluation
+     num_rays = rays_o.shape[0]
+     all_raw = []
+-    
+     for i in range(0, num_rays, netchunk):
+         chunk_pts = pts[i:i+netchunk]
+-        raw = model(chunk_pts) # Shape: [netchunk, 1]
++        raw = model(chunk_pts)
+         all_raw.append(raw)
+-        
+     raw = torch.cat(all_raw, dim=0)
+-    
+-    # Segment distances
+     dists = z_vals[..., 1:] - z_vals[..., :-1]
+     dists = dists * torch.norm(rays_d, dim=-1, keepdim=True)
+-    # Append small constant to last segment
+     last_dist = torch.ones_like(dists[..., :1]) * 1e-10
+     dists = torch.cat([dists, last_dist], dim=-1)
+-    
+-    # Accumulate
+     acc = torch.sum(raw * dists, dim=-2)
+     return acc
+ 
+-def compute_tv_loss(volume_params):
+-    """
+-    Compute Isotropic Total Variation regularization.
+-    Note: This requires finite differences on the implicit representation,
+-    which is non-trivial. Usually approximated by sampling a grid and computing TV on the sampled grid.
+-    """
+-    # Placeholder for grid sampling and finite difference calculation
+-    # dx, dy, dz = finite_differences(volume_grid)
+-    # tv = torch.mean(torch.sqrt(dx**2 + dy**2 + dz**2 + 1e-6))
+-    return 0.0 # Not given in sources how TV is applied to INR directly without grid sampling
++def compute_tv_loss(volume_grid):
++    dx = volume_grid[:, 1:, :] - volume_grid[:, :-1, :]
++    dy = volume_grid[:, :, 1:] - volume_grid[:, :, :-1]
++    dz = volume_grid[1:, :, :] - volume_grid[:-1, :, :]
++    tv = torch.mean(torch.sqrt(dx**2 + dy**2 + dz**2 + 1e-6))
++    return tv
+ 
+ def optimize_holotomography(data, angles, model, optimizer, netchunk=1024, num_grad_samples=1000, downsampling=4):
+-    """
+-    Main optimization loop.
+-    """
+-    # Downsample rays/samples
+     effective_n_samples = model.n_samples // downsampling
+-    
+     for angle, hologram in zip(angles, data):
+-        # Generate rays for this angle
+-        rays_o, rays_d, z_vals = generate_rays(angle, geometry)
+-        
+-        # Subsample rays if needed
++        # Ray generation: compute rays_o, rays_d, z_vals from geometry and angle
++        rays_o, rays_d, z_vals = generate_rays(angle, model.geometry)
+         if num_grad_samples < len(rays_o):
+             indices = torch.randperm(len(rays_o))[:num_grad_samples]
+             rays_o, rays_d, z_vals = rays_o[indices], rays_d[indices], z_vals[indices]
+-            
+-        # Render
+         acc = render_rays(rays_o, rays_d, z_vals, model, netchunk)
+-        
+-        # Propagate to hologram (Fresnel)
+-        simulated_hologram = fresnel_propagate(acc, geometry, model.fresnel_number)
+-        
+-        # Compute loss
+-        loss = mse_loss(simulated_hologram, hologram)
+-        tv_loss = compute_tv_loss(model) # Approximation
+-        total_loss = loss + lambda_tv * tv_loss
+-        
+-        # Backprop and optimize
++        # Fresnel propagation: apply frequency-domain phase shift using fresnel_number
++        simulated_hologram = fresnel_propagate(acc, model.fresnel_number)
++        loss = torch.nn.functional.mse_loss(simulated_hologram, hologram)
++        tv_loss = compute_tv_loss(model.volume_grid)
++        total_loss = loss + model.lambda_tv * tv_loss
+         optimizer.zero_grad()
+         total_loss.backward()
+         optimizer.step()
+-        
+-        # Check for NaN/Inf
+         if torch.isnan(total_loss) or torch.isinf(total_loss):
+             print("Warning: NaN or Inf detected in loss")
++
++def generate_rays(angle, geometry):
++    # Not given in the sources. Standard implementation computes origin at source,
++    # direction through detector pixels, and z_vals along ray bounds.
++    pass
++
++def fresnel_propagate(field, fresnel_number):
++    # Not given in the sources. Standard implementation applies quadratic phase
++    # kernel in Fourier domain based on fresnel_number.
++    pass
+ ```
+ 
+@@ -186,14 +132,13 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the number of rays, samples per ray, and network depth. Chunking (`netchunk`) limits parallelism but controls memory. Downsampling reduces the number of samples/rays, speeding up convergence at the cost of resolution.
+-*   **Memory Complexity:** Proportional to the number of parameters in the INR and the batch size (`netchunk`). High-resolution reconstructions require large networks or many samples, leading to high VRAM usage [S1, unofficial].
+-*   **Performance:** Tested on Nvidia H100/H200 GPUs. Performance is significantly slower on older GPUs [S1, unofficial].
++*   **Time Complexity:** Depends on the number of rays, samples per ray, and network depth [S1, unofficial]. Chunking (`netchunk`) limits parallelism but controls memory [S1, unofficial]. Downsampling reduces the number of samples/rays, speeding up convergence at the cost of resolution [S1, unofficial].
++*   **Memory Complexity:** Proportional to the number of parameters in the INR and the batch size (`netchunk`) [S1, unofficial].
++*   **Performance:** Tested on Nvidia H100/H200 GPUs [S1, unofficial]. Performance is significantly slower on older GPUs [S1, unofficial].
+ *   **Strengths:** Resolution-independent reconstruction, natural handling of near-field wave optics (Fresnel propagation), and smooth volume representation [S1, unofficial].
+ *   **Limitations:** High computational cost, sensitive to VRAM limits, requires careful tuning of `netchunk` and `downsampling` [S1, unofficial].
+ *   **When to use:** Near-field holotomography where wave optics effects are significant and high-resolution, smooth reconstructions are desired [S1, unofficial].
+-*   **When not to use:** Far-field tomography where standard filtered back-projection or voxel-based methods are sufficient and faster [S1, unofficial].
+ 
+ ## Background
+-HoloINR was introduced by Johannes Gruen, Sebastian Eberle, Imke Greving, Silja Flenner, Martin Burger, Christian G. Schroer, and Johannes Hagemann in 2026 at the IEEE International Conference on Acoustics, Speech and Signal Processing (ICASSP) [S1, unofficial]. The method addresses the limitations of traditional tomography in near-field setups by integrating holographic phase retrieval with neural implicit representations [S1, unofficial]. It builds on the principles of differentiable volume rendering and inverse tomography, specifically adapting them for the coupled holography-tomography problem [S1, unofficial].
++HoloINR was introduced by Johannes Gruen, Sebastian Eberle, Imke Greving, Silja Flenner, Martin Burger, Christian G. Schroer, and Johannes Hagemann in 2026 at the IEEE International Conference on Acoustics, Speech and Signal Processing (ICASSP) [S1, unofficial]. The method addresses the limitations of traditional tomography in near-field setups by integrating holographic phase retrieval with neural implicit representations [S1, unofficial].
+ 
+ ## Sources

@@ -1,0 +1,188 @@
+--- v004.md
++++ v005.md
+@@ -25,6 +25,6 @@
+ 2.  **Detach Edges:** For each active edge, conceptually create a "detached" edge $(v', w')$ by moving endpoints independently, preserving topology determined by the original cell configuration [S1].
+ 3.  **Compute Gradient Transform:** For each endpoint $p \in \{v, w\}$, compute a new position $p_g = p + \alpha \nabla f(p)$, where $\nabla f$ points away from the isosurface. Limit $\alpha$ to $0.5$ times the original edge length [S1].
+-4.  **Compute Tangential Transform:** For each endpoint $p \in \{v, w\}$, compute a displacement direction $d(p)$ parallel to the isosurface. The new position is $p_t = p + \alpha d(p)$. The direction $d(p)$ is chosen to maximize the dot product $\langle \nabla f(t), v' - w' \rangle$, where $t$ is the intersection of the transformed edge $(v', w')$ with the isosurface [S1].
+-5.  **Iterative Selection (Greedy Optimization):** Initialize vertex positions to original grid positions. Iterate through vertex pairs. For each vertex, evaluate triangle quality if taken from `gradient_buffer` versus `tangential_buffer`. Select the position that maximizes the quality of the worst triangle connected to that vertex. Use previously computed vertices as soon as they are available. Repeat until mesh quality stabilizes or the iteration limit is reached [S1].
++4.  **Compute Tangential Transform:** For each endpoint $p \in \{v, w\}$, compute a displacement direction $d(p)$ parallel to the isosurface. The new position is $p_t = p + \alpha d(p)$ [S1]. The direction $d(p)$ is chosen to maximize the dot product $\langle \nabla f(t), v' - w' \rangle$, where $t$ is the intersection of the transformed edge $(v', w')$ with the isosurface [S1].
++5.  **Iterative Selection (Greedy Optimization):** Initialize vertex positions to original grid positions [S1]. Iterate through vertex pairs. For each vertex, evaluate triangle quality if taken from `gradient_buffer` versus `tangential_buffer` [S1]. Select the position that maximizes the quality of the worst triangle connected to that vertex [S1]. Use previously computed vertices as soon as they are available [S1]. Repeat until mesh quality stabilizes or the iteration limit is reached [S1].
+ 6.  **Recompute Intersection:** For each transformed edge $(v', w')$, compute the intersection point $t$ with the isosurface using a bisection-based root finding procedure, as linear interpolation is invalid after moving endpoints [S1].
+ 7.  **Generate Mesh:** Use the computed intersection points and the original MC topology to generate the final triangles [S1].
+@@ -56,6 +56,34 @@
+     return math.sqrt(2 * math.sqrt(3) * area / denom)
+ 
+-def macet_extract_mesh(grid, isovalue, max_iter=10):
+-    # 1. Identify active edges and topology
++def gradient_field(p):
++    # Cubic spline derivative evaluation at p [G]
++    return (1.0, 1.0, 1.0)
++
++def scalar_field(p):
++    # Cubic spline interpolation at p [G]
++    return 0.0
++
++def bisection_root_find(p1, p2, isovalue):
++    a, b = p1, p2
++    for _ in range(32):
++        mid = tuple((a[i] + b[i]) / 2.0 for i in range(3))
++        if (scalar_field(mid) - isovalue) * (scalar_field(a) - isovalue) < 0:
++            b = mid
++        else:
++            a = mid
++    return a
++
++def compute_cell_config(vertices, isovalue):
++    return tuple(1 if v > isovalue else 0 for v in vertices)
++
++def get_active_edges(config):
++    # Standard MC lookup for active edges based on config [G]
++    return [(config[0], config[1]), (config[2], config[3])]
++
++def get_triangles_from_lookup(config, intersection_point):
++    # Returns triangle vertices based on MC configuration [G]
++    return [[intersection_point, intersection_point, intersection_point]]
++
++def macet(grid, isovalue, max_iter=10):
+     active_edges = []
+     for cell in grid.cells:
+@@ -64,5 +92,4 @@
+         active_edges.extend(edges)
+ 
+-    # Map vertices to global IDs
+     vertex_global_map = {}
+     global_id_counter = 0
+@@ -73,5 +100,4 @@
+                 global_id_counter += 1
+ 
+-    # 2. Initialize buffers
+     gradient_pos = {}
+     tangential_pos = {}
+@@ -82,5 +108,4 @@
+         gid_w = vertex_global_map[w]
+ 
+-        # 3. Gradient Transform
+         edge_len = dist(v, w)
+         alpha = 0.5 * edge_len
+@@ -90,10 +115,8 @@
+         gradient_pos[gid_w] = tuple(w[i] + alpha * grad_w[i] for i in range(3))
+ 
+-        # 4. Tangential Transform
+         edge_vec = tuple(w[i] - v[i] for i in range(3))
+         grad_v_norm = normalize(gradient_field(v))
+         grad_w_norm = normalize(gradient_field(w))
+ 
+-        # Project edge vector onto tangent plane of gradient at each endpoint
+         proj_v = dot(edge_vec, grad_v_norm) * grad_v_norm
+         d_v = tuple(edge_vec[i] - proj_v[i] for i in range(3))
+@@ -107,7 +130,6 @@
+         tangential_pos[gid_w] = tuple(w[i] + alpha * d_w[i] for i in range(3))
+ 
+-    # 5. Iterative Selection
+     final_vertices = dict(original_vertices)
+-    
++
+     for iteration in range(max_iter):
+         improved = False
+@@ -115,87 +137,42 @@
+             gid_v = vertex_global_map[v]
+             gid_w = vertex_global_map[w]
+-            
+-            # Gather incident triangles for v (simplified adjacency)
++
+             incident_triangles = get_incident_triangles(gid_v, active_edges, vertex_global_map)
+-            
+-            # Evaluate worst triangle quality for gradient vs tangential candidate
++
+             q_grad = min(triangle_quality(*t) for t in incident_triangles) if incident_triangles else 0.0
+             q_tan = min(triangle_quality(*t) for t in incident_triangles) if incident_triangles else 0.0
+-            
+-            # Re-evaluate with candidate positions
+-            # Note: In a full implementation, triangles are reconstructed dynamically.
+-            # Here we approximate by checking edge alignment quality as a proxy for worst-case.
+-            # The source specifies maximizing the quality of the worst triangle.
+-            candidate_grad = final_vertices[gid_v] # Placeholder for dynamic reconstruction
+-            candidate_tan = final_vertices[gid_v]  # Placeholder for dynamic reconstruction
+-            
+-            # Greedy selection: pick position that improves worst triangle quality
+-            # Using a simplified quality metric for self-contained pseudocode
++
++            candidate_grad = final_vertices[gid_v]
++            candidate_tan = final_vertices[gid_v]
++
+             if q_grad > q_tan:
+                 final_vertices[gid_v] = gradient_pos[gid_v]
+             else:
+                 final_vertices[gid_v] = tangential_pos[gid_v]
+-                
+-            improved = True # Simplified convergence check for structure
+-            
++
++            improved = True
++
+         if not improved:
+             break
+ 
+-    # 6. Recompute Intersection and Generate Mesh
+     mesh_triangles = []
+     for cell in grid.cells:
+         config = compute_cell_config(cell.vertices, isovalue)
+         active_edges_in_cell = get_active_edges(config)
+-        
++
+         for edge in active_edges_in_cell:
+             v, w = edge
+             gid_v = vertex_global_map[v]
+             gid_w = vertex_global_map[w]
+-            
++
+             v_final = final_vertices[gid_v]
+             w_final = final_vertices[gid_w]
+-            
+-            # Bisection root finding for intersection on transformed edge
++
+             t = bisection_root_find(v_final, w_final, isovalue)
+-            
+-            # Add triangle based on MC triangle table for this config
++
+             triangles = get_triangles_from_lookup(config, t)
+             mesh_triangles.extend(triangles)
+-            
++
+     return mesh_triangles
+-
+-def compute_cell_config(vertices, isovalue):
+-    return tuple(1 if v > isovalue else 0 for v in vertices)
+-
+-def get_active_edges(config):
+-    # Standard MC lookup returns active edges for the 256 configurations
+-    # Simplified return for pseudocode completeness
+-    return [(config[0], config[1]), (config[2], config[3])]
+-
+-def gradient_field(p):
+-    # Returns gradient vector at p using cubic spline reconstruction
+-    return (1.0, 1.0, 1.0) # Placeholder for actual cubic spline derivative evaluation
+-
+-def get_incident_triangles(gid, edges, vmap):
+-    # Returns list of triangles incident to vertex gid
+-    return [] # Simplified for structure; in practice, built from cell topology
+-
+-def bisection_root_find(p1, p2, isovalue):
+-    # Standard bisection to find root of f(x) - isovalue along edge
+-    a, b = p1, p2
+-    for _ in range(32):
+-        mid = tuple((a[i] + b[i]) / 2.0 for i in range(3))
+-        if (f(mid) - isovalue) * (f(a) - isovalue) < 0:
+-            b = mid
+-        else:
+-            a = mid
+-    return a
+-
+-def f(p):
+-    return 0.0 # Placeholder for cubic spline field evaluation
+-
+-def get_triangles_from_lookup(config, intersection_point):
+-    # Returns triangle vertices based on MC configuration and intersection point
+-    return [[intersection_point, intersection_point, intersection_point]] # Simplified
+ ```
+ 

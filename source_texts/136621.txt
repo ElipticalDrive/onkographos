@@ -1,0 +1,185 @@
+Tellusim Technologies Inc. GPU texture encoder
+
+GPU texture encoder - Tellusim Technologies Inc.
+Core
+Engine
+Services
+Projects
+Blog
+Docs
+Forum
+November 11, 2024
+GPU texture encoder
+Creating fast, real-time 3D applications always involves balancing quality and performance, especially when targeting platforms without top-tier GPUs. One of the main bottlenecks in these scenarios is memory throughput, which can significantly impact performance. The amount of texture data used directly affects memory bandwidth, and hardware texture compression helps alleviate this issue by reducing the required memory bandwidth and footprint.
+All GPUs support block compression formats; however, there is no universal standard that works seamlessly across all platforms. Currently, different GPUs support three major compression formats:
+BC1-5 (also known as DXT or S3TC) – Supported by all desktop GPUs.
+BC6-7 – Supported by D3D11+ desktop GPUs.
+ASTC – Supported by modern mobile GPUs.
+There are also older mobile compression formats that are still in use today, such as ETC, ETC2, EAC, ATC, and PVRTC. Unfortunately, using BC formats on mobile devices and ASTC on desktops is not feasible, necessitating different data packs for various platforms.
+Compressing textures to BC1-5 formats was relatively straightforward using either the CPU or GPU, as the encoding algorithm was simple. However, the introduction of BC6-7 increased the complexity due to additional compression modes, making the encoding process significantly slower. ASTC formats further increased complexity due to the vast number of modes and the use of integer coding with trits and quints.
+Compressing textures offline and shipping them with the project is common but often suboptimal, especially for dynamic or procedural textures. For instance, GLTF and USD resources typically include embedded JPEG images to reduce asset size, while some algorithms generate procedural textures at runtime. In such cases, fast, real-time compression is necessary.
+Tellusim SDK provides real-time compression for BC1-5, BC6-7, and ASTC formats on all platforms. BC1 texture compression remains a viable option for PCs because BC formats do not have variable block sizes and BC1 is twice as compact as BC7, with excellent compression speed. A practical use case for BC1 compression is in real-time applications like Google Maps or XYZ tile compression, where it helps minimize memory overhead and reduce compression stalls.
+Our SDK provides GPU encoders via the EncoderBC15, EncoderBC67, and EncoderASTC interfaces. Each encoder has specific flags and can be initialized for required formats only since initial kernel compilation can take some time.
+The encoder input is a standard texture, and the output is an integer texture in RGBAu16/RGBAu32 format, with one pixel per block dimension. The application must copy this intermediate integer texture into the final block texture because direct copying to block-compressed formats is typically unsupported. (RGBAu16 is required only for BC1 and BC4 formats).
+Integer textures cannot fully represent all required mipmap levels due to size truncation. This issue needs to be managed manually, either by reducing the number of mipmaps being compressed or by increasing the size of the integer texture. The truncation occurs because the final 1×1 mipmap level in the integer texture represents a 4×4 (or 5×4, 5×5) pixel block, leaving no space for the smallest mipmaps (2×2 and 1×1).
+Below is an example of GPU ASTC 5×5 texture compression using the Tellusim SDK:
+```
+// texture format
+Format format = FormatASTC44RGBAu8n;
+
+// create intermediate image
+uint32_t width = src_texture.getWidth();
+uint32_t height = src_texture.getHeight();
+uint32_t block_width = getFormatBlockWidth(format);
+uint32_t block_height = getFormatBlockHeight(format);
+Image dest_image = Image(Image::Type2D, FormatRGBAu32, Size(udiv(width, block_width), udiv(height, block_height)));
+
+// create intermediate texture
+Texture dest_texture = device.createTexture(dest_image, Texture::FlagSurface | Texture::FlagSource);
+if(!dest_texture) return 1;
+
+// dispatch encoder
+{
+    Compute compute = device.createCompute();
+    encoder.dispatch(compute, EncoderASTC::ModeASTC44RGBAu8n, dest_texture, src_texture);
+}
+
+// flush context
+context.flush();
+
+// get intermediate image data
+if(!device.getTexture(dest_texture, dest_image)) return 1;
+
+// copy image data
+Image image = Image(Image::Type2D, format, Size(width, height));
+memcpy(image.getData(), dest_image.getData(), min(image.getDataSize(), dest_image.getDataSize()));
+
+// save encoded image
+image.save("texture.astc");
+```
+Additionally, the SDK includes a fast GPU JPEG decompression interface, which significantly accelerates JPEG to BC or ASTC conversions.
+Of course, achieving real-time compression speeds involves quality trade-offs, which can reduce the resulting texture quality. Below are tables with PSNR and time values for compressing a test 1024×512 RGB image on Apple M1 Max:
+PSNR RGB (db)
+CPU Fast
+CPU Default
+CPU Best
+GPU
+BC1
+39.83
+39.85
+39.69
+BC7
+48.27
+48.53
+44.85
+ASTC 4×4
+48.13
+48.29
+48.50
+44.97
+ASTC 5×4
+46.18
+46.34
+46.50
+42.74
+ASTC 5×5
+44.48
+44.61
+44.73
+40.96
+PSNR RG (db)
+CPU Fast
+CPU Default
+CPU Best
+GPU
+BC1
+49.52
+49.62
+40.11
+BC7
+50.14
+50.38
+46.28
+ASTC 4×4
+51.07
+51.18
+51.37
+47.43
+ASTC 5×4
+48.65
+48.77
+48.92
+44.02
+ASTC 5×5
+46.41
+46.54
+46.67
+41.85
+Time RGB (ms)
+CPU Fast
+CPU Default
+CPU Best
+GPU
+BC1
+28
+43
+0.4
+BC7
+105
+186
+1.0
+ASTC 4×4
+100
+157
+386
+2.2
+ASTC 5×4
+117
+175
+464
+4.8
+ASTC 5×5
+138
+212
+542
+3.1
+Reducing the number of input texture components improves PSNR values, which is beneficial for normal maps and luminance-only textures. ASTC encoding performance can be further optimized by limiting the number of compression modes if needed. However, the current performance is satisfactory for applications using JPEG input textures.
+The latest version of the reference astcenc compressor demonstrates excellent CPU encoding performance, while we stopped our CPU ASTC encoder optimizations at BC7 performance level:
+PSNR RGB (db)
+Fast
+Medium
+Thorough
+ASTC 4×4
+47.31
+48.19
+48.50
+ASTC 5×4
+45.58
+46.34
+46.63
+ASTC 5×5
+43.56
+44.61
+44.97
+Time RGB (ms)
+Fast
+Medium
+Thorough
+ASTC 4×4
+22
+28
+65
+ASTC 5×4
+20
+26
+64
+ASTC 5×5
+21
+25
+67
+All textures and metrics were taken by Tellusim Image Processing Tool from Core SDK using this script:
+encoder.sh
+« 11 Hello Bindless
+10 Hello Image »
+Copyright © 2026, Tellusim Technologies Inc. All rights reserved.
+All product names, logos and brands are trademarks of their respective owners.

@@ -1,0 +1,135 @@
+# Perspective-Correct Point Splatting Vertex Shader
+
+Also called: Point Splatting with Perspective Correction, Point Sprite Sizing
+
+## Overview
+This method renders 3D point clouds as 2D splats in a vertex shader, ensuring that the visual size of the points attenuates correctly according to perspective projection [G]. It solves the problem of points appearing unnaturally large or small at different depths by scaling the point size inversely with the depth coordinate [G]. It differs from siblings like [Centralized Conics Approach](1243-centralized-conics-approach.md) by relying on standard vertex shader outputs rather than computing complex screen-space conics in the fragment shader [G], and from [Exact Half-Space Clipping](3395-exact-half-space-clipping.md) by using hardware-accelerated point primitives rather than explicit geometry clipping [S3, unofficial].
+
+## How it works
+**Inputs:**
+- `in_position`: 3D world-space or view-space position of the point center [G].
+- `particle_radius`: World-space radius of the point splat [G].
+- `in_color`: Color data for the point [G].
+- `view_proj_matrix`: Combined view and projection matrix [G].
+- `fov_y`: Vertical field of view in radians [G].
+- `viewport_size`: Viewport dimensions, specifically height [G].
+
+**Outputs:**
+- `gl_Position`: Clip-space position [G].
+- `gl_PointSize`: Screen-space point diameter in pixels [G].
+- `VertOut`: Struct passing `particle_radius` and `in_color` to the fragment shader [G].
+
+**Data Structures:**
+- `VertOut`:
+  - `radius`: float representing the world-space radius [G].
+  - `color`: vec3 or vec4 representing the fragment color [G].
+
+**Steps:**
+1. Transform `in_position` to clip space using `view_proj_matrix` and assign to `gl_Position` [G].
+2. Calculate the perspective-correct point size using the formula below [G].
+3. Pass `particle_radius` and `in_color` to the fragment shader via `VertOut` [G].
+
+**Formula:**
+The standard perspective-correct point size is calculated as [G]:
+
+$$
+gl\_PointSize = viewport\_size[1] \times \left(\frac{1}{\tan(\frac{fov\_y}{2})}\right) \times \frac{particle\_radius}{gl\_Position.w}
+$$
+
+Where:
+- $viewport\_size[1]$ is the viewport height in pixels [G].
+- $fov\_y$ is the vertical field of view in radians [G].
+- $particle\_radius$ is the world-space radius of the point [G].
+- $gl\_Position.w$ is the clip-space depth component, which corresponds to view-space depth for perspective projections [G].
+
+**Alternative Formulations:**
+Some implementations compute the projected corner components explicitly to derive the size [S2, unofficial]:
+
+$$
+gl\_PointSize = uScreenWidth \times 0.5 \times \frac{projectedCornerX}{projectedCornerW} \times 2.0 \times smoothstep(0., 1., \frac{data.a}{4.})
+$$
+
+Or using a power function for opacity-based sizing [S2, unofficial]:
+
+$$
+gl\_PointSize = uScreenWidth \times 0.5 \times \frac{projectedCornerX}{projectedCornerW} \times 2.0 \times pow(\frac{data.a}{4.}, 0.1)
+$$
+
+**Parameters:**
+- `fov_y`: Vertical field of view in radians [G].
+- `viewport_size`: Viewport dimensions, specifically height (`viewport_size[1]`) [G].
+- `particle_radius`: World-space radius of the point splat [G].
+
+**Edge Cases and Pitfalls:**
+- **Precision:** Division by $gl\_Position.w$ causes numerical instability if points approach the near clipping plane [G]. Ensure points are clipped before the near plane to avoid division by zero or extreme scaling [G].
+- **Boundary:** Points partially outside the view frustum are handled by the graphics pipeline's built-in clipping routines [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def perspective_correct_point_splat(in_position, particle_radius, in_color, view_proj_matrix, fov_y, viewport_height):
+    # 1. Transform to clip space and extract w-component
+    # Compute clip-space w from the fourth row of the projection matrix
+    clip_w = (view_proj_matrix[3][0] * in_position[0] +
+              view_proj_matrix[3][1] * in_position[1] +
+              view_proj_matrix[3][2] * in_position[2] +
+              view_proj_matrix[3][3])
+    gl_Position_w = clip_w
+
+    # 2. Calculate perspective-correct point size
+    cot_fov_half = 1.0 / math.tan(fov_y / 2.0)
+    point_size = viewport_height * cot_fov_half * particle_radius / gl_Position_w
+
+    # 3. Prepare output struct for fragment shader
+    vert_out = {"color": in_color, "radius": particle_radius}
+
+    return {"gl_Position": (0.0, 0.0, 0.0, gl_Position_w), "gl_PointSize": point_size, "VertOut": vert_out}
+```
+
+## Subtopics
+
+### [Particle Sprite Rendering](14226-particle-sprite-rendering.md)
+Particle Sprite Rendering displays 3D data points as members of a particle system without surface fitting or interpolation, using animation for depth cues. It differs from surface rendering by not mapping data points onto a surface, avoiding surface fitting overhead and interpolation bias.
+
+### Point Scaling via OpenGL Point Parameter
+A technique to scale points automatically according to distance from the eye point using the OpenGL point parameter extension, overcoming the limitation of standard `glPointSize` which does not support perspective scaling [S3, unofficial].
+
+**Definition:**
+Uses `glPointParameter` to scale points based on distance $d$ from the eye [S3, unofficial].
+
+**Formula:**
+The conservative point diameter $D$ as a function of distance $d$ is [S3, unofficial]:
+
+$$
+D = \frac{H}{2 \sqrt{2} d k \tan(\frac{\theta}{2})}
+$$
+
+Where $k = (1 + 2 \tan^2(\frac{\theta}{2}))^{-1}$ [S3, unofficial].
+
+The OpenGL point size formula is [S3, unofficial]:
+
+$$
+D = D_0 \sqrt{\frac{1}{a + b d + c d^2}}
+$$
+
+Where $D_0$ is user-defined diameter, and $a, b, c$ are constants [S3, unofficial].
+
+**Parameters:**
+To match the derived diameter $D$, set $D_0 = 1$, $a = 0$, $b = 0$, and $c = \frac{2 k \tan^2(\frac{\theta}{2})}{H^2}$ [S3, unofficial].
+
+**Pitfall:**
+The point parameter extension scales according to distance $d$, not the $z$-coordinate [S3, unofficial]. Using a lower bound for $z$ ensures the point size is never smaller than the true size, preventing holes [S3, unofficial].
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+Originating from early point cloud rendering techniques, this method leverages OpenGL's point sprite capabilities to render 3D data as 2D projections [S3, unofficial]. It was developed to address the visual artifacts caused by naive point sizing in perspective views [S3, unofficial]. It is commonly used in particle systems, point cloud visualization, and volume rendering approximations [S1, unofficial][S3, unofficial].
+
+## Sources
+[S1] arminkz/PointCloudRendering, https://github.com/arminkz/PointCloudRendering, fetched 2026-10-28 (unofficial)
+[S2] GitHub - zk8085454/VolumeParticleShadows: Half angle slicing technique ..., https://github.com/zk8085454/VolumeParticleShadows/, fetched 2026-10-28 (unofficial)
+[S3] Hardware Accelerated Point Rendering of Isosurfaces, http://wscg.zcu.cz/wscg2003/Papers_2003/J61.pdf, fetched 2026-10-26 (unofficial)

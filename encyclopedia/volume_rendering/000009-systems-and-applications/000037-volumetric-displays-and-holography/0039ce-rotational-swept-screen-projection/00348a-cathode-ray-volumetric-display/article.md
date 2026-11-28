@@ -1,0 +1,165 @@
+# Cathode Ray Volumetric Display
+
+Also called: Blundell implementation, Cathode Ray Sphere, Hirsch 1958 design, ITT Labs 1960 system, Ketchpel concept, Rotating Screen 3D Display with CRT
+
+## Overview
+The Cathode Ray Volumetric Display (CRVD), also known as the Cathode Ray Sphere (CRS), is a volumetric 3D display that generates voxels by irradiating a fluorescent screen coated on a rotating plane with an electron beam [S2, unofficial]. It addresses the problem of creating a true 3D volume of light without requiring the viewer to wear special glasses, by using temporal integration of discrete 2D slices projected onto a rapidly rotating surface [S1, unofficial]. It differs from sibling swept-screen systems (e.g., [Rotating Rigid Screen with Projector](22705-rotating-rigid-screen-with-projector.md)) by using direct electron beam excitation of phosphor rather than optical projection of light, allowing for high-intensity, high-contrast voxels in a vacuum environment [S1, unofficial][S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D voxel grid (or point cloud) defining the desired image; rotation speed $\omega$ of the screen; electron beam deflection coordinates $(x, y)$; beam intensity $I$.
+*   **Output:** A visible 3D volume of light emitted from the rotating phosphor screen.
+
+**Data Structures:**
+*   **Voxel Grid:** A 3D array $V[x, y, z]$ where $x, y$ are screen coordinates and $z$ is the radial distance from the rotation axis. Not given in the sources.
+*   **Beam Control Signal:** A time-varying signal mapping rotation angle $\theta(t)$ to beam deflection $(x(t), y(t))$ and intensity $I(t)$.
+
+**Numbered Steps:**
+1.  **Screen Rotation:** A flat, phosphor-coated screen rotates around a central axis at a constant angular velocity $\omega$ [S1, unofficial][S2, unofficial]. The screen is enclosed in a vacuum chamber [S1, unofficial].
+2.  **Beam Deflection:** An electron gun generates a beam that is deflected by magnetic or electrostatic fields to strike a specific point $(x, y)$ on the rotating screen [S2, unofficial].
+3.  **Synchronization:** The beam deflection and intensity are synchronized with the screen's angular position $\theta(t) = \omega t$ [S1, unofficial]. The beam must hit the target $(x, y)$ at the precise moment the screen rotates into the correct radial position $z$ corresponding to the desired voxel depth [S1, unofficial].
+4.  **Voxel Generation:** The electron beam excites the phosphor coating, causing it to emit light at the struck location, creating a single voxel [S2, unofficial].
+5.  **Temporal Integration:** As the screen rotates, the beam addresses multiple 2D slices at different radial distances. The persistence of vision blends these discrete slices into a continuous 3D volume [S1, unofficial][S2, unofficial].
+
+**Formulas:**
+*   **Angular Position:** $\theta(t) = \omega t$
+*   **Radial Mapping:** The radial distance $r$ of a voxel from the center is fixed by the physical placement of the screen or the beam focus. For a flat screen rotating around its center, the radial distance $r$ corresponds to the distance from the axis. The $z$-coordinate in the world frame is mapped to $r$ on the screen. Not given in the sources.
+*   **Beam Timing:** The beam must be deflected to $(x, y)$ when the screen angle $\theta$ places the physical point $(x, y)$ at the desired radial depth. Not given in the sources.
+
+**Parameters:**
+*   **Rotation Speed:** The screen rotates at high speed. Blundell's implementation used 15 Hz [S2, unofficial].
+*   **Phosphor Decay Rate:** Must be short enough to prevent blurring between slices but long enough to maintain brightness. Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Phosphor Decay vs. Rotation Speed:** Image quality is affected by the interaction between the phosphor decay rate and the speed of rotation. If decay is too slow, adjacent slices blur; if too fast, brightness is insufficient [S1, unofficial].
+*   **Vacuum Integrity:** The system requires a vacuum to allow electron beam travel. Clarity of the glass enclosure affects viewability [S1, unofficial].
+*   **Screen Translucency:** The view depends on the translucency of the rotating screen. If too opaque, internal voxels are obscured; if too transparent, contrast is lost [S1, unofficial].
+*   **Dead Zones:** Electron beams cannot be emitted in all directions simultaneously; blind spots may exist depending on the number of electron guns. Multiple guns can mitigate this [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Cathode Ray Volumetric Display Control
+# Assumes a single electron gun and a flat screen rotating around its center.
+# The screen is in a vacuum.
+
+def crvd_render(voxel_grid, rotation_speed_hz, phosphor_decay_time_ms):
+    """
+    Generates the control signals for the electron beam to render a 3D volume.
+    
+    Args:
+        voxel_grid: 3D array [x, y, z] representing the desired image.
+                    x, y are screen coordinates. z is radial distance from axis.
+        rotation_speed_hz: Rotation speed in Hz.
+        phosphor_decay_time_ms: Phosphor persistence in milliseconds.
+    """
+    omega = 2 * math.pi * rotation_speed_hz  # Angular velocity in rad/s
+    
+    # Determine the time for one full rotation
+    T = 1.0 / rotation_speed_hz
+    
+    # Initialize beam control signals
+    beam_deflection_x = []
+    beam_deflection_y = []
+    beam_intensity = []
+    
+    # Time resolution for simulation/control
+    dt = 0.0001  # 100 microseconds
+    
+    t = 0
+    while t < T:
+        # Current angular position
+        theta = omega * t
+        
+        # Map angular position to screen coordinates
+        # For a flat screen rotating around its center, the physical point
+        # at angle theta corresponds to a specific radial distance r.
+        # However, the beam must hit a specific (x, y) on the screen.
+        # The synchronization requires that when the screen point (x, y)
+        # is at the correct radial depth, the beam is active.
+        
+        # Simplified model: The beam scans the screen surface.
+        # The 'z' depth is determined by the radial distance of the hit point.
+        # For a flat disk, all points are at the same radial distance from the center?
+        # No, the screen is a plane. The rotation axis is perpendicular to the plane?
+        # Or parallel? The sources say "flat rotating screen" and "vertical rotating screen".
+        # If vertical, the axis is horizontal. The screen rotates like a wheel.
+        # The radial distance r from the axis varies with the position on the screen.
+        
+        # Let's assume the screen is a disk rotating around its center axis.
+        # The electron beam hits a point (x, y) on the disk.
+        # The radial distance r = sqrt(x^2 + y^2).
+        # The voxel grid's z-coordinate maps to r.
+        
+        # To render a voxel at (x_v, y_v, z_v):
+        # The beam must hit (x_v, y_v) when the screen is at the correct angle?
+        # No, the screen is rotating. The physical point (x_v, y_v) on the screen
+        # moves in a circle. The radial distance r is constant for a given (x_v, y_v).
+        # So, z_v must equal r = sqrt(x_v^2 + y_v^2).
+        # This implies that for a flat disk rotating around its center,
+        # the z-depth is determined by the radial distance from the center.
+        # This is a limitation: you cannot have two voxels at the same (x, y) but different z.
+        # Unless the screen is not a flat disk but a curved surface or the axis is different.
+        # The sources mention "flat rotating screen".
+        # If the screen is flat and rotates around an axis perpendicular to it (like a record),
+        # then all points are at the same distance from the axis? No, r varies.
+        # But the z-axis of the volume is usually the axis of rotation.
+        # So, a point (x, y) on the screen corresponds to a specific r.
+        # The beam hits (x, y). The light is emitted.
+        # The viewer sees the light from all angles as the screen rotates.
+        # The depth z is perceived as the radial distance r.
+        
+        # Therefore, the voxel grid must be mapped such that z = sqrt(x^2 + y^2).
+        # This is a significant constraint.
+        
+        # Let's assume the beam can be deflected to any (x, y) on the screen.
+        # The intensity is set based on the voxel value at (x, y, z=sqrt(x^2+y^2)).
+        
+        x_screen = x_v
+        y_screen = y_v
+        r = math.sqrt(x_screen**2 + y_screen**2)
+        z_voxel = r
+        
+        # Check if there is a voxel at this (x, y, z)
+        if voxel_grid.has_voxel(x_screen, y_screen, z_voxel):
+            intensity = voxel_grid.get_intensity(x_screen, y_screen, z_voxel)
+        else:
+            intensity = 0
+            
+        beam_deflection_x.append(x_screen)
+        beam_deflection_y.append(y_screen)
+        beam_intensity.append(intensity)
+        
+        t += dt
+        
+    return beam_deflection_x, beam_deflection_y, beam_intensity
+```
+
+## Subtopics
+
+### Cathode Ray Sphere (CRS)
+The specific implementation by Ketchpel and Blundell using a spherical or cylindrical phosphor screen? The sources say "flat rotating screen" for Hirsch/ITT and "phosphor-coated target screen" for CRS. The term "Sphere" might be metaphorical or refer to the volume. The sources do not clarify if the screen is spherical or flat for CRS. It is linked to the same family. [S1, unofficial]
+
+### Hirsch 1958 Design
+The original proposal using a relay mirror/prism system. [S1, unofficial]
+
+### ITT Labs 1960 System
+The first reported implementation. [S1, unofficial]
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of voxels and rotation speed. The beam must be updated at a high frequency to match the rotation. Not given in the sources.
+*   **Memory Complexity:** Depends on the voxel grid size. Not given in the sources.
+*   **Measured Performance:** Blundell's system operated at 15 Hz [S2, unofficial].
+*   **Scaling:** Limited by the size of the vacuum chamber and the precision of the electron beam deflection. Not given in the sources.
+*   **Strengths:** High brightness and contrast due to direct phosphor excitation; true volumetric display without glasses. [S1, unofficial][S2, unofficial]
+*   **Limitations:** Requires vacuum; complex synchronization; limited depth resolution due to radial mapping constraint; phosphor decay issues; safety hazards from high voltage and X-rays. [S1, unofficial][S2, unofficial]
+*   **When to use:** For high-end visualization where true 3D light is required and cost/complexity is not a barrier. [S1, unofficial]
+*   **When not:** For consumer applications due to complexity and safety. [S1, unofficial]
+
+## Background
+The concept was proposed by Hirsch in 1958 [S1, unofficial]. It was reported by Aviation Week as developed by ITT Labs in 1960 [S1, unofficial]. The Cathode Ray Sphere (CRS) concept was originally developed by Ketchpel in the 1960s and later implemented by Blundell [S1, unofficial][S2, unofficial]. Blundell et al. provided a comprehensive classification of volumetric display systems in 2000, including this method [S2, unofficial].
+
+## Sources
+[S1] Three-dimensional display technologies, https://pmc.ncbi.nlm.nih.gov/articles/PMC4269274, fetched 2026-10-29 (unofficial)
+[S2] ボリュメトリックディスプレイ, https://www.jstage.jst.go.jp/article/jvrsj/29/3/29_27/_pdf/-char/ja, fetched 2026-10-30 (unofficial)

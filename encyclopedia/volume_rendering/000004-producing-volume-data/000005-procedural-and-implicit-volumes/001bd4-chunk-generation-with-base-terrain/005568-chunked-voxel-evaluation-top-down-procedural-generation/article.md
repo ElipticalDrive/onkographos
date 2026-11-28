@@ -1,0 +1,125 @@
+# Chunked Voxel Evaluation (Top-Down Procedural Generation)
+
+Also called: Chunked Evaluation, Top-Down Procedural Generation
+
+## Overview
+This method generates voxel data on-demand by evaluating procedural object definitions within GPU shaders, driven by high-level parameters computed on the CPU [S1, unofficial]. It renders large, continuous procedural structures that span multiple discrete chunks without requiring explicit meshing or pre-computed voxel storage for the entire world [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A deterministic seed, camera position, and a list of high-level object parameters (bounds, control points, thicknesses) computed in C++ [S1, unofficial].
+*   **Output:** A voxel grid for the current chunk, generated in the shader [S1, unofficial].
+
+**Data Structures:**
+*   **Object Definition (CPU):** Structs containing start/end coordinates, control points, start/end thicknesses, and a computed bounding box [S1, unofficial].
+*   **Shader Input:** A list of active objects and their parameters, passed per chunk [S1, unofficial].
+*   **Chunk Context:** Start and end world-space coordinates defining the chunk's bounding box [S1, unofficial].
+
+**Steps:**
+1.  **High-Level Generation (CPU):** Generate world structures (e.g., world map, cities, roads) deterministically based on a seed [S1, unofficial]. For each object (e.g., tree branch), compute its bounding box in world space [S1, unofficial].
+2.  **Chunk Selection:** Identify which chunks intersect with the bounding boxes of active objects [S1, unofficial].
+3.  **Parameter Passing (CPU to GPU):** For each chunk to be rendered, compile a list of objects whose bounding boxes intersect the chunk [S1, unofficial]. Pass these object parameters to the shader [S1, unofficial].
+4.  **Bounding Box Derivation (Shader):** For each chunk, define the start and end world coordinates (the chunk's bounding box) [S1, unofficial].
+5.  **Coordinate Transformation (Shader):** For each voxel in the chunk, derive its relative (object) coordinates by subtracting the chunk's start coordinates from the voxel's world coordinates [S1, unofficial].
+6.  **Voxel Evaluation (Shader):** Evaluate each passed object against the voxel's relative coordinates [S1, unofficial]. Determine if the voxel lies within the object's geometric definition (e.g., within a cylinder defined by control points and thickness) [S1, unofficial].
+7.  **Redundant Generation:** Generate voxels in a domain larger than the renderable chunk area (e.g., 1.25x the dimensions) to ensure seamless normal calculation at boundaries [S1, unofficial].
+
+**Formulas:**
+*   **Relative Coordinate:** $v_{rel} = v_{world} - c_{start}$
+    *   $v_{world}$: World-space coordinate of the voxel.
+    *   $c_{start}$: Start coordinate of the chunk's bounding box.
+*   **Object Containment:** Determined by evaluating the voxel against the object's geometric primitive (e.g., distance to line segment for branches) using $v_{rel}$ [G].
+
+**Parameters:**
+*   **Redundancy Factor:** 1.25 (current value, subject to change) [S1, unofficial].
+*   **Generation Order:** Top-down (world -> cities -> neighborhoods -> objects) [S1, unofficial].
+*   **Determinism:** All generation is deterministic based on a seed [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Seams:** Without redundant generation, normal vectors will be discontinuous at chunk boundaries [S1, unofficial].
+*   **Performance:** Evaluating all objects for every chunk can be expensive; culling by bounding box is essential [S1, unofficial].
+*   **Precision:** Floating-point precision in shader calculations may affect boundary accuracy for very large worlds [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def generate_world(seed):
+    """CPU: Generate high-level structures deterministically."""
+    world_map = generate_map(seed)
+    cities = place_cities(world_map, seed)
+    active_objects = []
+    for city in cities:
+        neighborhoods = generate_neighborhoods(city, seed)
+        for neighborhood in neighborhoods:
+            streets = generate_streets(neighborhood, seed)
+            for street in streets:
+                buildings = generate_buildings(street, seed)
+                for building in buildings:
+                    building.compute_bounding_box()
+                    active_objects.append(building)
+    return active_objects
+
+def prepare_chunk(chunk_min, chunk_max, active_objects):
+    """CPU: Select objects intersecting the chunk and pass parameters."""
+    relevant_params = []
+    for obj in active_objects:
+        if bbox_intersects(obj.bbox_min, obj.bbox_max, chunk_min, chunk_max):
+            relevant_params.append(obj.params)
+    return relevant_params
+
+def bbox_intersects(min1, max1, min2, max2):
+    """Standard AABB intersection check."""
+    return min1.x <= max2.x and max1.x >= min2.x and \
+           min1.y <= max2.y and max1.y >= min2.y and \
+           min1.z <= max2.z and max1.z >= min2.z
+
+def evaluate_chunk(chunk_min, chunk_max, voxel_size, object_params):
+    """GPU/Shader simulation: Evaluate voxels per chunk."""
+    chunk_voxels = []
+    # Redundant generation: expand bounds slightly for seamless normals
+    expansion = voxel_size * 0.25
+    start = vec3(chunk_min.x - expansion, chunk_min.y - expansion, chunk_min.z - expansion)
+    end = vec3(chunk_max.x + expansion, chunk_max.y + expansion, chunk_max.z + expansion)
+    
+    x = start.x
+    while x < end.x:
+        y = start.y
+        while y < end.y:
+            z = start.z
+            while z < end.z:
+                voxel_world = vec3(x, y, z)
+                voxel_rel = voxel_world - chunk_min
+                is_voxel = False
+                for obj in object_params:
+                    # [G] Evaluate voxel against object geometry (e.g., distance to line segment for branches)
+                    if is_inside_object(voxel_rel, obj):
+                        is_voxel = True
+                        break
+                if is_voxel:
+                    chunk_voxels.append(voxel_world)
+                z += voxel_size
+            y += voxel_size
+        x += voxel_size
+    return chunk_voxels
+```
+
+## Subtopics
+
+### [Chunk Redundancy for Seamless Normals](15485-chunk-redundancy-for-seamless-normals.md)
+Solves normal discontinuities at chunk boundaries by generating voxels in a domain larger than the renderable area. Choose this when visual continuity of surface normals is critical and global data structures are undesirable.
+
+## Operating characteristics
+*   **Time Complexity:** $O(N \cdot M)$ where $N$ is the number of voxels in the chunk and $M$ is the number of active objects per chunk. Evaluation is parallelizable per voxel [S1, unofficial].
+*   **Memory Complexity:** $O(N)$ for the current chunk's voxel data. No global voxel storage required [S1, unofficial].
+*   **Performance:** Highly dependent on the number of active objects per chunk. Bounding box culling is critical to reduce $M$ [S1, unofficial].
+*   **Strengths:** Seamless normals, deterministic regeneration, no pre-computed storage, easy parallelization [S1, unofficial].
+*   **Limitations:** High GPU load if many objects overlap a chunk; requires careful culling [S1, unofficial].
+*   **When to use:** Procedural worlds with large, continuous structures where memory bandwidth is a constraint [S1, unofficial].
+*   **When not to use:** Scenes with static, pre-computed geometry where storage is cheap [G].
+
+## Background
+Originating from the VoxelQuest project (2014), this method was developed to handle procedural generation of large voxel worlds without pre-computing the entire world data [S1, unofficial]. It emphasizes a top-down approach where high-level structures are defined in C++ and evaluated at the voxel level in GLSL shaders based on camera locality [S1, unofficial].
+
+## Sources
+[S1] How Does It Work?, https://www.voxelquest.com/news/how-does-it-work, fetched 2026-10-29 (unofficial)

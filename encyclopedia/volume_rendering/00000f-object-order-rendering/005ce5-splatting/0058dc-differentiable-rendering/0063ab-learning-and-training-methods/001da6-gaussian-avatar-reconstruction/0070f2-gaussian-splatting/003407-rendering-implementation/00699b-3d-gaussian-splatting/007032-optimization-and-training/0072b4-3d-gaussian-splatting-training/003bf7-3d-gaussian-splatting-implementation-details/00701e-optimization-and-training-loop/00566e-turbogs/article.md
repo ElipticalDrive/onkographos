@@ -1,0 +1,237 @@
+# TurboGS
+
+Also called: Error-guided training framework for 3DGS
+
+## Overview
+TurboGS is an error-guided training framework for 3D Gaussian Splatting (3DGS) that accelerates optimization by dynamically focusing computation on perceptually informative pixels, addressing redundant computation in well-reconstructed regions and loss of fine details [S1, unofficial]. It sets itself apart from standard 3DGS by replacing dense rasterization with tile-wise sparse pixel sampling guided by persistent error and age maps, while introducing a tile-level structure-aware loss and a moment-damped Levenberg-Marquardt solver to stabilize convergence under sparse supervision [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Ground-truth images $\{I_v\}$, camera poses $\{C_v\}$, initial Gaussian primitives $\mathcal{G}_0$ derived from Structure-from-Motion (SfM), total training iterations $T$, view budget range $[K_{min}, K_{max}]$, and hyperparameters $\Theta$ [S1, unofficial].
+*   **Outputs:** Optimized Gaussian primitives $\mathcal{G}$ [S1, unofficial].
+
+**Data Structures:**
+*   **Error Map ($E_v$):** Stored in contiguous GPU memory with half precision (float16). Initialized by densely evaluating per-pixel reconstruction error for initial Gaussians $\mathcal{G}_0$ [S1, unofficial].
+*   **Age Map ($A_v$):** Stored in contiguous GPU memory with `uint16` precision. Tracks the number of iterations since a pixel was last sampled [S1, unofficial].
+*   **View Stack:** A shuffled list of candidate view indices used for geometry-aware sampling [S1, unofficial].
+
+**Parameters:**
+*   Tile size $S$: Typically $16 \times 16$ pixels [S1, unofficial].
+*   Pixel sampling rate $r_t$: Dynamic rate queried from a schedule [S1, unofficial].
+*   Number of pixels per tile $N_{pix}$: $N_{pix} = \max(1, \lfloor r_t \cdot S^2 \rfloor)$ [S1, unofficial].
+*   Hard pixel fraction $r_{hard}$ and stable pixel fraction $r_{stable}$: $N_{hard} = \lceil r_{hard} \cdot N_{pix} \rceil$, $N_{stable} = \lfloor r_{stable} \cdot N_{pix} \rfloor$ [S1, unofficial].
+*   EMA decay $\beta$: For error map updates [S1, unofficial].
+*   Geometry-aware weights $\lambda_d, \lambda_\theta$: For view selection [S1, unofficial].
+*   Effective learning rate scaling $\lambda_{base}$: Used in difficulty scoring [S1, unofficial].
+
+**Numbered Steps:**
+
+1.  **Initialization:** Initialize error maps $E$ using $\mathcal{G}_0$, cameras $C$, and images $I$. Initialize age maps $A$ to zero [S1, unofficial].
+2.  **Progress Coefficient:** Compute $\rho_t = \min(1, t/\tau_{until})$ [S1, unofficial].
+3.  **Sampling Schedule:** Query the sampling schedule to obtain the view budget $K_t$ and pixel sampling rate $r_t$ based on $K_{max}, K_{min}, E_{init}, \Theta$, and $t$ [S1, unofficial].
+4.  **View Selection (GVS):**
+    *   Select an anchor view $v^*$ by maximizing the average error: $v^* = \arg \max_v \bar{E}_v$, where $\bar{E}_v = \frac{1}{|\Omega|} \sum_{p \in \Omega} E_v(p)$ [S1, unofficial].
+    *   Sample $K-1$ remaining views from a candidate stack without replacement using the geometry-aware distribution:
+        $$ \pi(u | v^*) \propto \exp(-\lambda_d \|c_u - c_{v^*}\|^2 - \lambda_\theta (1 - \langle d_u, d_{v^*} \rangle)) $$
+        where $c_u, d_u$ are the camera center and viewing direction of view $u$ [S1, unofficial].
+    *   Maintain a shuffled view stack; refill and reshuffle when fewer than $K$ views remain [S1, unofficial].
+5.  **Tile-Wise Sparse Pixel Sampling (EPS):**
+    *   Partition the image into tiles of size $S \times S$.
+    *   For each tile $\tau$ in each selected view $v$, sample $N_{pix}$ pixels.
+    *   **Hard Pixels:** Select $N_{hard}$ pixels with the highest error probability within tile $\tau$:
+        $$ \pi_E(p | \tau, v) = \frac{E_v(p)}{\sum_{q \in \tau} E_v(q) + \epsilon} $$
+        [S1, unofficial].
+    *   **Stable Pixels:** From the remaining pixels $\tau \setminus H_{t,v}(\tau)$, select $N_{stable}$ pixels with the largest ages using $TopK(A_v(p), N_{stable})$ [S1, unofficial].
+    *   The final sampled set for tile $\tau$ is $P_{t,v}(\tau) = H_{t,v}(\tau) \cup S_{t,v}(\tau)$. The full set is $P_{t,v} = \bigcup_\tau P_{t,v}(\tau)$ [S1, unofficial].
+6.  **Sparse Forward Rasterization (FWD):**
+    *   Output sampled pixels in tile order.
+    *   Compute tile-wise pixel offsets via prefix-sum.
+    *   Each CUDA block (tile) accesses only the sparse pixels $P_{t,v}$ [S1, unofficial].
+    *   Render colors $\hat{I}_{t,v}(p)$ and depth $d$ [S1, unofficial].
+7.  **Sparse Loss and Gradients (L):**
+    *   Compute per-pixel L1 error: $e_{t,v}(p) = \|\hat{I}_{t,v}(p) - I_v(p)\|_1$ [S1, unofficial].
+    *   Compute tile-level Sparse Normalized Cross-Correlation (S-NCC) loss:
+        $$ \mathcal{L}_{\tau}^{S-NCC} = 1 - NCC(\hat{I}_{t,v}(P_{t,v}(\tau)), I_v(P_{t,v}(\tau))) $$
+        [S1, unofficial].
+    *   Compute gradient-balanced weighting for the tile:
+        $$ \bar{g}_{\ell_1}^\tau = E_{p \in P_{t,v}(\tau)} \|\nabla_{\hat{I}}(p) \mathcal{L}_{\ell_1}(p)\|_1, \quad \bar{g}_{S-NCC}^\tau = E_{p \in P_{t,v}(\tau)} \|\nabla_{\hat{I}}(p) \mathcal{L}_{S-NCC}(p)\|_1 $$
+        $$ \lambda_{\tau}^{ncc} = \text{clip}\left( \frac{\bar{g}_{\ell_1}^\tau}{\bar{g}_{S-NCC}^\tau + \epsilon}, 0, 1 \right) $$
+        [S1, unofficial].
+    *   Calculate total pixel loss $\mathcal{L}_{pix}$ and gradients $\nabla_c, \nabla_d$ [S1, unofficial].
+8.  **EMA Error-Map Update (E):**
+    *   Update error map only at sampled locations:
+        $$ E_v(p) \leftarrow (1 - \beta) E_v(p) + \beta e_{t,v}(p) \quad \text{for } p \in P_{t,v} $$
+        [S1, unofficial].
+    *   Update age map:
+        $$ A_v(p) \leftarrow \begin{cases} 0 & p \in P_{t,v} \\ A_v(p) + 1 & \text{otherwise} \end{cases} $$
+        [S1, unofficial].
+9.  **Gaussian Backward Pass (BWD):**
+    *   Retrieve sparse pixels within each tile through tile-pixel indexing.
+    *   Propagate gradients via warp shuffle only over sampled pixels to avoid dense rasterization replay [S1, unofficial].
+    *   Obtain Gaussian gradients $\nabla \mathcal{G}$ and screen radii $r$ [S1, unofficial].
+10. **Solve Gaussian Updates ($\Delta \mathcal{G}$):**
+    *   Back-project pixel properties to Gaussians to get per-Gaussian error $e_G$, distance $D_G$, and alpha $\alpha_G$ [S1, unofficial].
+    *   Compute difficulty score:
+        $$ e_i(t) = E_i(t) / (W_i(t) + \epsilon), \quad d_i(t) = D_i(t) / (W_i(t) + \epsilon) $$
+        $$ s_i = e_i(t) + \lambda_{eff} d_i(t), \quad \lambda_{eff} = \lambda_{base} (1 - \rho_t) $$
+        [S1, unofficial].
+    *   Form local equation for each Gaussian $g$ using Adam moments $m_g, v_g$ and local Jacobian $J_g$:
+        $$ (J_g^T J_g + \text{diag}(\sqrt{v_g} + \epsilon)) \Delta g = -m_g $$
+        [S1, unofficial].
+11. **Apply Gaussian Update:** Update $\mathcal{G}$ with $\Delta \mathcal{G}$ [S1, unofficial].
+12. **Error-Driven Density Control (EDC):**
+    *   Perform densification and pruning on $\mathcal{G}$ using screen radii, back-projected properties ($e_G, D_G, \alpha_G$), iteration $t$, and hyperparameters $\Theta$ [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def turbogs_train(images, cameras, initial_gaussians, T, K_max, K_min, theta):
+    # Initialization
+    E = initialize_error_maps(initial_gaussians, cameras, images) # float16
+    A = zeros_like(E, dtype=uint16) # uint16
+    view_stack = shuffle_indices(len(images))
+    G = initial_gaussians
+    
+    for t in range(T):
+        # 1. Progress and Scheduling
+        rho = min(1.0, t / tau_until)
+        K_t, r_t = query_sampling_schedule(K_max, K_min, E, theta, t)
+        
+        # 2. View Selection
+        if len(view_stack) < K_t:
+            view_stack = shuffle_indices(len(images))
+        
+        # Anchor selection
+        avg_errors = [mean(E[v]) for v in range(len(images))]
+        v_star = argmax(avg_errors)
+        
+        # Neighbor sampling
+        V_t = [v_star]
+        candidates = [v for v in view_stack if v != v_star]
+        for _ in range(K_t - 1):
+            if not candidates:
+                break
+            # Sample without replacement based on geometry-aware distribution
+            # pi(u|v*) proportional to exp(-lambda_d * ||c_u - c_v*||^2 - lambda_theta * (1 - <d_u, d_v*>))
+            u = sample_from_distribution(candidates, v_star, lambda_d, lambda_theta)
+            V_t.append(u)
+            candidates.remove(u)
+            
+        # 3. Tile-Wise Sparse Pixel Sampling
+        P_t_v = {} # Map view -> list of sampled pixels
+        for v in V_t:
+            P_t_v[v] = []
+            for tile in tiles:
+                # Sample N_pix pixels
+                N_pix = max(1, floor(r_t * S * S))
+                N_hard = ceil(r_hard * N_pix)
+                N_stable = floor(r_stable * N_pix)
+                
+                # Hard pixels: highest error probability
+                probs = E[v][tile] / (sum(E[v][tile]) + epsilon)
+                H = top_k_indices(probs, N_hard)
+                
+                # Stable pixels: highest age from remaining
+                remaining = set(tile) - set(H)
+                ages = [A[v][p] for p in remaining]
+                S = top_k_indices_with_values(remaining, ages, N_stable)
+                
+                P_t_v[v].extend(H + S)
+                
+        # 4. Sparse Forward Rendering
+        # Output sampled pixels in tile order
+        # Compute tile-wise pixel offsets via prefix-sum
+        rendered_colors, depth = sparse_rasterize_forward(G, cameras, P_t_v)
+        
+        # 5. Sparse Loss and Gradients
+        pixel_losses = []
+        for v in V_t:
+            for p in P_t_v[v]:
+                e_p = l1_loss(rendered_colors[v][p], images[v][p])
+                pixel_losses.append(e_p)
+                
+            # Tile-level S-NCC and Gradient Balancing
+            for tile in tiles:
+                sampled_in_tile = [p for p in P_t_v[v] if p in tile]
+                if not sampled_in_tile: continue
+                
+                L_s_ncc = 1 - ncc(rendered_colors[v][sampled_in_tile], images[v][sampled_in_tile])
+                
+                # Compute gradient norms for balancing
+                g_l1 = mean([norm(grad(rendered_colors[v][p], L_l1)) for p in sampled_in_tile])
+                g_s_ncc = mean([norm(grad(rendered_colors[v][p], L_s_ncc)) for p in sampled_in_tile])
+                
+                lambda_ncc = clip(g_l1 / (g_s_ncc + epsilon), 0, 1)
+                
+        # 6. EMA Error-Map Update
+        for v in V_t:
+            for p in P_t_v[v]:
+                e_p = l1_loss(rendered_colors[v][p], images[v][p])
+                E[v][p] = (1 - beta) * E[v][p] + beta * e_p
+                A[v][p] = 0
+            # Age increment for unsampled pixels is handled implicitly or explicitly
+            # Explicitly: A[v][p] += 1 for p not in P_t_v[v]
+            
+        # 7. Gaussian Backward Pass
+        # Retrieve sparse pixels, propagate gradients via warp shuffle
+        grad_G = sparse_rasterize_backward(rendered_colors, images, P_t_v, lambda_ncc)
+        screen_radii = get_screen_radii(grad_G, G)
+        
+        # 8. Solve Gaussian Updates (Moment-Damped LM)
+        # Back-project properties
+        e_G, D_G, alpha_G = back_project_properties(G, P_t_v, pixel_losses)
+        
+        # Compute difficulty score
+        lambda_eff = lambda_base * (1 - rho)
+        for g in G:
+            W_g = sum(alpha_G[g]) # Visibility weight
+            e_i = e_G[g] / (W_g + epsilon)
+            d_i = D_G[g] / (W_g + epsilon)
+            s_i = e_i + lambda_eff * d_i
+            
+            # Local LM equation
+            # J_g is local Jacobian, m_g, v_g are Adam moments
+            delta_g = solve_linear_system(
+                J_g.T @ J_g + diag(sqrt(v_g) + epsilon),
+                -m_g
+            )
+            G[g] += delta_g
+            
+        # 9. Error-Driven Density Control
+        G = densify_and_prune(G, screen_radii, e_G, D_G, alpha_G, t, theta)
+        
+    return G
+```
+
+**Edge Cases and Pitfalls:**
+*   **Sparse Supervision Artifacts:** Sparse supervision may introduce subtle rippling artifacts in low-frequency regions with weak texture variations (e.g., walls or ceilings) [S1, unofficial].
+*   **Over-focusing:** The age map prevents over-focusing on a small set of persistently high-error locations by encouraging periodic revisiting of neglected pixels [S1, unofficial].
+*   **Precision:** Error maps use float16 and age maps use uint16 to balance memory and precision [S1, unofficial].
+
+## Subtopics
+
+### Error-Guided Sparse Pixel Sampling
+A method that prioritizes challenging regions and skips well-reconstructed ones to avoid redundant gradient computation, driven by multi-view reconstruction errors. See [Error-Guided Sparse Pixel Sampling](15708-error-guided-sparse-pixel-sampling.md).
+
+### Frequency Guided Resolution Scheduler
+A method that adjusts resolution based on frequency content, distinct from TurboGS's error-guided approach. See [Frequency Guided Resolution Scheduler](15751-frequency-guided-resolution-scheduler.md).
+
+### Local 3DGS Optimization
+Focuses on optimizing subsets of Gaussians locally, whereas TurboGS optimizes globally but sparsely. See [Local 3DGS Optimization](20073-local-3dgs-optimization.md).
+
+## Operating characteristics
+*   **Time Complexity:** TurboGS significantly reduces rasterization cost by only processing a sparse subset of pixels per tile. It completes training in approximately 80 seconds on the Mip-NeRF 360 Bicycle scene, compared to 891 seconds for vanilla 3DGS [S1, unofficial].
+*   **Memory Complexity:** Uses contiguous GPU memory for error (float16) and age (uint16) maps, adding minimal overhead to the Gaussian primitives [S1, unofficial].
+*   **Performance:** Achieves 27.57 PSNR on Mip-NeRF 360 Bicycle, matching vanilla 3DGS (27.57 PSNR) and Taming-3DGS (27.99 PSNR) while being up to 10x faster than vanilla 3DGS [S1, unofficial].
+*   **Strengths:** Accelerates optimization, reduces redundant computation, preserves fine details via structure-aware loss, and stabilizes convergence with a hybrid solver [S1, unofficial].
+*   **Limitations:** May introduce rippling artifacts in low-frequency regions; sparse supervision can amplify gradient variance across views and tiles [S1, unofficial].
+*   **When to use:** When training time is a critical constraint and the scene has sufficient texture to guide error-based sampling.
+*   **When not to use:** For scenes with large uniform regions where error signals are weak, leading to potential artifacts.
+
+## Background
+TurboGS was introduced as an error-guided training framework for 3D Gaussian Splatting to address the high computational cost of dense rasterization in standard 3DGS training [S1, unofficial]. It builds on the observation that only a small subset of pixels remains difficult to reconstruct as training progresses [S1, unofficial]. The method was published in 2026 [S1, unofficial].
+
+## Sources
+[S1] TurboGS: Accelerating 3D Gaussian Splatting via Error-Guided Sparse Pixel Sampling and Optimization, https://doi.org/10.48550/arXiv.2606.15924, fetched 2026-10-29 (unofficial)

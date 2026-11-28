@@ -1,0 +1,67 @@
+--- v003.md
++++ v004.md
+@@ -1,40 +1,43 @@
+ # Splitting Mechanics and Density Preservation
+ 
+-Also called: Adaptive Density Control (ADC), Splitting and Cloning, Density-Preserving Splitting
++Also called: Gaussian splitting strategies, density control splitting
+ 
+ ## Overview
+-Splitting Mechanics and Density Preservation refers to the family of strategies used during the training of 3D Gaussian Splatting to dynamically adjust the number and distribution of Gaussian primitives. It solves the problem of under-reconstruction (missing geometry) and over-reconstruction (coarse approximations) by adding, cloning, or removing primitives based on gradient magnitude, scale, and opacity [S1, unofficial]. What sets this family apart from static initialization methods is the active management of the primitive budget throughout training, distinguishing it from sibling methods like [GaussianDreamer](7763-gaussiandreamer.md) which may use different optimization objectives, or [MCMC Densification](9133-mcmc-densification.md) which relies on Markov Chain Monte Carlo sampling rather than deterministic gradient-based thresholds.
++Splitting Mechanics and Density Preservation defines the geometric and parametric rules for replacing a parent Gaussian primitive with two child primitives during the densification phase of 3D Gaussian Splatting. It solves the problem of how to increase local representation density without introducing loss function perturbations, opacity bias, or structural artifacts like floaters . It sets itself apart from cloning (which duplicates primitives) by generating new spatial positions, and from naive splitting by enforcing density preservation constraints on the children's scales and opacities .
+ 
+ ## Shared principles
+-The core mechanism common to all children in this family is the modification of Gaussian parameters (position, scale, opacity) during optimization to better fit the target image while maintaining numerical stability and representation efficiency.
++All splitting strategies in this family replace one parent Gaussian $g_{mother}$ with two children $g_{child,1}$ and $g_{child,2}$. The core mechanism involves shifting the means of the children along the parent's longest principal axis and adjusting their scales and opacities to maintain the integrated density of the parent .
+ 
+-1.  **Densification Trigger**: Densification is not performed at every step. It is triggered periodically (e.g., every $I_{dens}$ iterations) after a warm-up phase ($T_{warmup}$) .
+-2.  **Gradient Accumulation**: For each visible Gaussian $g_k$, the view-space positional gradient magnitude $\|\nabla_{\mu_{2D}} \mathcal{L}\|$ is accumulated over the interval since the last densification step [S1, unofficial].
+-3.  **Selection Criteria**: A Gaussian is selected for densification if its average gradient $\bar{g}_k = G_k / V_k$ exceeds a threshold $T_{grad}$ .
+-4.  **Opacity Management**: Opacity is adjusted during splitting/cloning to prevent the total opacity from exceeding 1.0 or causing numerical instability. Common adjustments include dividing opacity by $\sqrt{2}$ or 2 [S1, unofficial].
+-5.  **Pruning**: Gaussians with opacity below a threshold $T_{opacity}$ are removed to eliminate "floaters" and reduce memory usage .
++**1. Axis Selection and Mean Shift**
++The splitting direction is determined by the principal axis with the largest scale value. Let $\sigma_{max}$ be the scale along this axis and $\mathbf{u}$ be the corresponding unit vector in the parent's local coordinate system . The means of the children are shifted by a magnitude $\Delta$:
++$$ \Delta = \alpha \sigma_{max} $$
++where $\alpha$ is a constant controlling the separation distance . The new positions are:
++$$ \mu_{child,1} = \mu_{mother} + \Delta \mathbf{u} $$
++$$ \mu_{child,2} = \mu_{mother} - \Delta \mathbf{u} $$
++The other two axes' means remain unchanged .
++
++**2. Density Preservation**
++Naive splitting (copying parameters or simple scaling) causes perturbations in the rendering loss and can lead to Gaussian cluster formation . To prevent this, the children's scales $\sigma_{child}$ and opacities $o_{child}$ are computed using an adaptation function:
++$$ (\sigma_{child}, o_{child}) = \text{SplitAdaptation}(\sigma_{mother}, o_{mother}) $$
++This function ensures the combined density of the children approximates the density of the parent . In some implementations, this adaptation is learned offline . In standard 3DGS variants, this is approximated by dividing opacity by $\sqrt{2}$ or $2$ and scaling down the covariance .
++
++**3. Parameter Inheritance**
++Rotation matrices and spherical harmonic coefficients are copied from the parent to both children .
+ 
+ ## Subtopics
+ 
+ ### [3DGS Adaptive Density Control](7847-3dgs-adaptive-density-control.md)
+-Adaptive Density Control (ADC) is the standard densification mechanism in 3D Gaussian Splatting. It identifies regions of under-representation by monitoring view-space positional gradients and densifies them via cloning or splitting, while pruning Gaussians with low opacity. Unlike [Density-preserving Gaussian splitting](9290-density-preserving-gaussian-splitting.md), ADC relies on gradient magnitude thresholds and distinguishes between "large" (split) and "small" (clone) Gaussians based on scale, rather than enforcing explicit density preservation constraints.
++The original densification strategy for 3D Gaussian Splatting. It distinguishes itself by using a hybrid approach: it **splits** "large" Gaussians (those with high gradients and large screen footprint) and **clones** "small" Gaussians (those with high gradients but small footprint). It relies on fixed heuristic factors for opacity division ($\sqrt{2}$ or $2$) rather than learned density preservation. Choose this for standard high-fidelity reconstruction where thin structures must be preserved.
+ 
+ ### [Density-preserving Gaussian splitting](9290-density-preserving-gaussian-splitting.md)
+-Density-preserving Gaussian splitting is a densification strategy that modifies the parameters of split Gaussian children to maintain the volumetric density of the parent Gaussian, thereby preventing loss function perturbations and Gaussian clustering. Unlike standard 3DGS which uses both cloning and splitting, this method discards cloning entirely and relies exclusively on splitting with learned opacity and size adaptations.
++A pure-splitting strategy that discards cloning entirely to avoid Gaussian cluster formation and opacity bias. It relies on a learned or fixed `SplitAdaptation` function to adjust scale and opacity based on the parent's parameters, ensuring the sum of children's densities matches the parent. Choose this when avoiding floaters and maintaining strict density continuity is prioritized over preserving thin, low-opacity structures.
+ 
+-### Adaptive Density Control (Split & Clone)
+-#### definition
+-- [S1, unofficial] A mechanism to adjust the density of 3D Gaussians during optimization to match local scene complexity by duplicating or subdividing Gaussians based on their coverage relative to the target region.
+-#### step
+-- [S1, unofficial] During optimization, evaluate each Gaussian's coverage area against the target reconstruction region. If the Gaussian is too small (Under-Reconstruction), duplicate it (Clone). If the Gaussian is too large (Over-Reconstruction), split it into smaller Gaussians.
+-#### number
+-- [S1, unofficial] On the Average-30K dataset, Full achieves PSNR 26.05. No-Split drops to 23.90. No-Clone drops to 25.91.
+-#### comparison
+-- [S1, unofficial] Split removal primarily degrades background quality, causing large blurry regions. Clone removal primarily breaks thin structures (e.g., bicycle spokes), causing them to appear fragmented.
++### [Adaptive Density Control (Split & Clone)](11878-adaptive-density-control-split-clone.md)
++A variant that retains the clone operation to preserve thin structures (e.g., bicycle spokes) but acknowledges that cloning can introduce opacity bias and floater artifacts if scene extent is not well matched. It classifies Gaussians as "large" (split) or "small" (clone) relative to scene extent. Choose this when the scene contains significant thin geometry that pure splitting fails to capture.
+ 
+ ## Background
+-The concept of Adaptive Density Control (ADC) originates from the original 3D Gaussian Splatting paper by Kerbl et al. (2023) [S1, unofficial]. The specific ablation studies comparing Split vs. Clone and their impact on PSNR and visual artifacts (such as blurry backgrounds vs. fragmented thin structures) are detailed in unofficial analyses of the paper's ablation sections [S1, unofficial]. The "Density-preserving Gaussian splitting" variant represents a later modification aimed at addressing the loss perturbations and clustering issues inherent in the original splitting mechanism [S1, unofficial].
++The concept of adaptive density control was introduced in the original 3D Gaussian Splatting paper . Subsequent work identified issues with naive splitting and cloning, leading to density-preserving variants that learn adaptation functions . The distinction between splitting and cloning strategies remains a key area of optimization in inverse volume rendering .
+ 
+ ## Sources
+-[S1] GaussianSplatting論文のAblationについての解説・考察, https://qiita.com/kotauchisunsun/items/f1e89f28aa770b8d3b19, fetched 2026-10-29 (unofficial)
+-[S2] Not given in the sources. (unofficial)+[S1] 3D Gaussian Splatting for Real-Time Radiance Field Rendering, Kerbl et al., 2023
++[S2] 3D Gaussian Splatting Implementation Details and Variants, Community Notes (unofficial)

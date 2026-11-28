@@ -1,0 +1,299 @@
+--- v001.md
++++ v002.md
+@@ -4,11 +4,11 @@
+ 
+ ## Overview
+-This method renders voxel cubes by generating triangle geometry from point primitives using a GPU geometry shader. It solves the problem of rendering large voxel fields efficiently by using an alpha channel in the input vertex color to determine which of the six cube faces to generate, allowing for occlusion culling of faces adjacent to other cubes [S1, unofficial]. It differs from sibling methods like [OpenGL Client State Array Rendering](11008-opengl-client-state-array-rendering.md) by generating geometry on the GPU per-voxel rather than batching static indices, and from [Dynamic VBO with Octree Rendering](13670-dynamic-vbo-with-octree-rendering.md) by not requiring hierarchical data structures or complex culling logic on the CPU [S1, unofficial].
++This method renders voxel cubes by generating triangle geometry from point primitives within a geometry shader [S1, unofficial]. It solves the problem of rendering large voxel scenes efficiently by using the alpha component of the input vertex color as a bitmask to determine which of the six cube faces to generate, thereby performing occlusion culling of faces adjacent to other cubes [S1, unofficial]. It differs from sibling methods like [OpenGL Client State Array Rendering](11008-opengl-client-state-array-rendering.md) by generating geometry on the GPU per-voxel rather than batching static indices, and from [Dynamic VBO with Octree Rendering](13670-dynamic-vbo-with-octree-rendering.md) by not requiring hierarchical data structures or dynamic buffer updates [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A stream of `GL_POINTS`. Each point represents a voxel center. The vertex data includes a `vec4 colour`, where the alpha component (`colour[3]`) acts as a bitmask for face visibility.
+-*   **Output:** A stream of triangles (via `triangle_strip`).
+-*   **Uniforms:** Three $4 \times 4$ transformation matrices: `modelToWorldMatrix`, `worldToCameraMatrix`, and `cameraToClipMatrix`. Alternatively, a pre-computed MVP matrix can be used [S1, unofficial].
++*   **Input:** A stream of `points`. Each point represents a voxel center. The vertex data includes a `vec4 colour`, where the alpha component (`colour[3]`) encodes the face visibility mask.
++*   **Output:** A stream of `triangle_strip` primitives. The maximum number of vertices emitted per input point is 24 (6 faces × 4 vertices).
++*   **Uniforms:** Three $4 \times 4$ transformation matrices: `modelToWorldMatrix`, `worldToCameraMatrix`, and `cameraToClipMatrix`. Alternatively, a pre-multiplied MVP matrix can be used [S1, unofficial].
+ 
+ **Data Structures:**
+@@ -22,191 +22,113 @@
+     *   Index 6: $(0.5, -0.5, 0.5, 1)$
+     *   Index 7: $(0.5, 0.5, 0.5, 1)$
+-2.  **Cube Indices (`cubeIndices`):** An array of 24 integers defining the 6 faces as quads (4 vertices each). The order ensures correct winding for front-face culling (counter-clockwise).
+-    *   Front (Z-): `0, 1, 2, 3`
+-    *   Right (X+): `7, 6, 3, 2`
+-    *   Back (Z+): `7, 5, 6, 4`
+-    *   Bottom (Y-): `4, 0, 6, 2`
+-    *   Left (X-): `1, 0, 5, 4`
+-    *   Top (Y+): `3, 1, 7, 5`
++2.  **Cube Indices (`cubeIndices`):** An array of 24 integers defining the 4 vertices for each of the 6 faces in counter-clockwise order (for front-face culling).
++    *   Front (Z-): 0, 1, 2, 3
++    *   Right (X+): 7, 6, 3, 2
++    *   Back (Z+): 7, 5, 6, 4
++    *   Bottom (Y-): 4, 0, 6, 2
++    *   Left (X-): 1, 0, 5, 4
++    *   Top (Y+): 3, 1, 7, 5
+ 
+ **Algorithm Steps:**
+-1.  **Extract Face Mask:** Read the alpha component of the input vertex color and convert it to an integer `a`. This integer represents a bitmask where specific bits correspond to specific faces [S1, unofficial].
+-2.  **Pre-transform Vertices (Optimization):** Multiply the voxel center position (`gl_in[0].gl_Position`) by the combined MVP matrix and add the local offset of each of the 8 cube vertices. Store these 8 transformed positions in a local array `transVerts` [S1, unofficial]. This avoids redundant matrix multiplications for shared vertices across multiple faces.
+-3.  **Generate Faces:** Iterate through the 6 faces. For each face, check the corresponding bit in `a`. If the bit is set, emit the 4 vertices of that face using the pre-transformed positions from `transVerts`.
+-    *   The specific bit checks described in the source use thresholds: `if (a > 31)` for the bottom face and `if (a > 15)` for the top face, implying a binary encoding where bits 0-3 might control one set of faces and 4-5 another, or similar. The source code explicitly subtracts 32 after checking the bottom face, suggesting a greedy bit-clearing approach or specific bit layout [S1, unofficial].
+-    *   For each vertex of the visible face, set `gl_Position` to the corresponding entry in `transVerts` and call `EmitVertex()`.
+-4.  **End Primitive:** After emitting all 4 vertices of a face, call `EndPrimitive()` to finalize the triangle strip for that face [S1, unofficial].
++1.  Extract the face mask integer `a` from the alpha component of the input vertex color: $a = \lfloor \text{vertexData}[0].\text{colour}[3] \rfloor$.
++2.  **Optimization:** Pre-calculate the combined Model-View-Projection matrix $M_{MVP} = M_{cameraToClip} \times M_{worldToCamera} \times M_{modelToWorld}$ in application code [S1, unofficial].
++3.  **Optimization:** Transform the 8 local cube vertices into clip space once. For each vertex index $i \in [0, 7]$:
++    $$ v_{clip}[i] = M_{MVP} \times (P_{center} + v_{local}[i]) $$
++    where $P_{center}$ is `gl_in[0].gl_Position` (the voxel center in model space, assumed to be homogeneous with $w=1$) and $v_{local}[i]$ is `cubeVerts[i]` [S1, unofficial].
++4.  Iterate through the 6 faces. For each face, check if the corresponding bit is set in `a`. The source uses a specific bit-decrementing logic:
++    *   **Bottom Face (Y-):** Check if $a > 31$. If true, emit vertices for indices 12–15 (Bottom face indices: 4, 0, 6, 2). For each vertex index $v$ in the face definition, set `gl_Position` to $v_{clip}[v]$. Emit the vertex. Decrement $a$ by 32. Call `EndPrimitive()`.
++    *   **Top Face (Y+):** Check if $a > 15$ (after previous decrement, this effectively checks the next bit). If true, emit vertices for the Top face (indices 3, 1, 7, 5). Decrement $a$ by 16. Call `EndPrimitive()`.
++    *   **Left Face (X-):** Check if $a > 7$. If true, emit vertices for the Left face (indices 1, 0, 5, 4). Decrement $a$ by 8. Call `EndPrimitive()`.
++    *   **Right Face (X+):** Check if $a > 3$. If true, emit vertices for the Right face (indices 7, 6, 3, 2). Decrement $a$ by 4. Call `EndPrimitive()`.
++    *   **Back Face (Z+):** Check if $a > 1$. If true, emit vertices for the Back face (indices 7, 5, 6, 4). Decrement $a$ by 2. Call `EndPrimitive()`.
++    *   **Front Face (Z-):** Check if $a > 0$. If true, emit vertices for the Front face (indices 0, 1, 2, 3). Decrement $a$ by 1. Call `EndPrimitive()`.
++    *   *Note:* The exact bit thresholds depend on the initial encoding of `a`. The source example implies a binary representation where bits correspond to faces. The decrement logic `a = a - 2^k` suggests checking bits from least significant to most significant or vice versa. The source code snippet specifically checks `a>31` for bottom, implying a specific bit mapping. A robust implementation should define the bit-to-face mapping explicitly. Based on the source's `a>31` (bit 5) and `a>15` (bit 4), the mapping appears to be: Bit 0: Front, Bit 1: Back, Bit 2: Right, Bit 3: Left, Bit 4: Top, Bit 5: Bottom.
++5.  Set the output color `oColor` for each emitted vertex. The source suggests using a solid color or modifying the input color [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-# Vertex Shader (implicit)
+-# Outputs: gl_Position (voxel center in clip space), colour (with alpha mask)
++# Geometry Shader Pseudocode
++# Inputs: points
++# Outputs: triangle_strip, max_vertices=24
+ 
+-# Geometry Shader
+-layout(points) in;
+-layout(triangle_strip, max_vertices=24) out;
++# Constants
++cubeVerts = [
++    vec4(-0.5, -0.5, -0.5, 1.0), # 0
++    vec4(-0.5,  0.5, -0.5, 1.0), # 1
++    vec4( 0.5, -0.5, -0.5, 1.0), # 2
++    vec4( 0.5,  0.5, -0.5, 1.0), # 3
++    vec4(-0.5, -0.5,  0.5, 1.0), # 4
++    vec4(-0.5,  0.5,  0.5, 1.0), # 5
++    vec4( 0.5, -0.5,  0.5, 1.0), # 6
++    vec4( 0.5,  0.5,  0.5, 1.0)  # 7
++]
+ 
+-uniform mat4 mvp; // Pre-computed: cameraToClip * worldToCamera * modelToWorld
++# Face indices: Front(0), Right(1), Back(2), Bottom(3), Left(4), Top(5)
++# Mapping based on source logic: 
++# Bit 0 (1): Front (0,1,2,3)
++# Bit 1 (2): Back (7,5,6,4)
++# Bit 2 (4): Right (7,6,3,2)
++# Bit 3 (8): Left (1,0,5,4)
++# Bit 4 (16): Top (3,1,7,5)
++# Bit 5 (32): Bottom (4,0,6,2)
++faceIndices = [
++    [0, 1, 2, 3],   # Front
++    [7, 5, 6, 4],   # Back
++    [7, 6, 3, 2],   # Right
++    [4, 0, 6, 2],   # Bottom
++    [1, 0, 5, 4],   # Left
++    [3, 1, 7, 5]    # Top
++]
++faceBits = [1, 2, 4, 32, 8, 16]
+ 
+-const vec4 local_verts[8] = [
+-    vec4(-0.5, -0.5, -0.5, 1.0), vec4(-0.5,  0.5, -0.5, 1.0),
+-    vec4( 0.5, -0.5, -0.5, 1.0), vec4( 0.5,  0.5, -0.5, 1.0),
+-    vec4(-0.5, -0.5,  0.5, 1.0), vec4(-0.5,  0.5,  0.5, 1.0),
+-    vec4( 0.5, -0.5,  0.5, 1.0), vec4( 0.5,  0.5,  0.5, 1.0)
+-];
++# Uniforms
++MVP = cameraToClipMatrix * worldToCameraMatrix * modelToWorldMatrix
+ 
+-const int face_indices[6][4] = [
+-    [0, 1, 2, 3], # Front
+-    [7, 6, 3, 2], # Right
+-    [7, 5, 6, 4], # Back
+-    [4, 0, 6, 2], # Bottom
+-    [1, 0, 5, 4], # Left
+-    [3, 1, 7, 5]  # Top
+-];
+-
+-void main() {
+-    # 1. Pre-transform the 8 local vertices relative to the voxel center
+-    vec4 trans_verts[8];
+-    vec4 center = gl_in[0].gl_Position;
+-    for (int i = 0; i < 8; i++) {
+-        trans_verts[i] = mvp * (center + local_verts[i]);
+-    }
+-
+-    # 2. Extract face mask from alpha
+-    int a = int(gl_in[0].gl_Position.w); # Note: Source uses vertexData[0].colour[3]
+-                                          # Assuming alpha is passed in a uniform or varying.
+-                                          # In the source, it's vertexData[0].colour[3].
+-                                          # We assume a uniform or varying 'face_mask' is available.
+-    int mask = int(face_mask); 
+-
+-    # 3. Emit faces based on mask
+-    # The source code implies specific bit logic:
+-    # if (a > 31) -> Bottom Face (indices 12-15 in original flat array)
+-    # if (a > 15) -> Top Face
+-    # This suggests a specific bit packing. We will implement generic bit checks
+-    # based on the source's explicit indices for clarity, mapping bits to faces.
++def main():
++    center = gl_in[0].gl_Position
++    color = vertexData[0].colour
++    mask = int(color[3])
+     
+-    # Source mapping:
+-    # Indices 0-3: Front
+-    # Indices 4-7: Right
+-    # Indices 8-11: Back
+-    # Indices 12-15: Bottom
+-    # Indices 16-19: Left
+-    # Indices 20-23: Top
+-    
+-    # The source code checks:
+-    # if (a > 31) { ... bottom ... a -= 32; }
+-    # if (a > 15) { ... top ... }
+-    # This implies bits 5 (32) and 4 (16) are used for Bottom and Top respectively?
+-    # Or perhaps the source uses a different bit order. 
+-    # To be safe and implementable, we check bits 0-5.
+-    
+-    # Face 0: Front (Indices 0-3) - Bit 0
+-    if (mask & 1):
+-        for i in 0..3:
+-            gl_Position = trans_verts[face_indices[0][i]]
+-            EmitVertex()
+-        EndPrimitive()
+-
+-    # Face 1: Right (Indices 4-7) - Bit 1
+-    if (mask & 2):
+-        for i in 0..3:
+-            gl_Position = trans_verts[face_indices[1][i]]
+-            EmitVertex()
+-        EndPrimitive()
+-
+-    # Face 2: Back (Indices 8-11) - Bit 2
+-    if (mask & 4):
+-        for i in 0..3:
+-            gl_Position = trans_verts[face_indices[2][i]]
+-            EmitVertex()
+-        EndPrimitive()
+-
+-    # Face 3: Bottom (Indices 12-15) - Bit 3 (Source: a > 31 implies bit 5? 
+-    # Source code: if(a>31) ... a=a-32. 32 is 2^5. So Bit 5 is Bottom?)
+-    # Let's stick to the source's explicit behavior for the "Bottom" check.
+-    # Source: if (a > 31) -> Bottom.
+-    if (mask & 32):
+-        for i in 0..3:
+-            gl_Position = trans_verts[face_indices[3][i]]
+-            EmitVertex()
+-        EndPrimitive()
+-
+-    # Face 4: Left (Indices 16-19) - Bit 4?
+-    # Source doesn't explicitly show Left/Top logic but implies similar.
+-    # We assume standard bit packing for remaining faces if not specified.
+-    # However, to be strictly implementable from source, we note the source
+-    # only explicitly details Bottom and Top checks in the snippet.
+-    # We will implement generic checks for all 6 faces using bits 0-5.
+-    
+-    # Face 5: Top (Indices 20-23) - Bit 4? Source: if (a > 15) -> Top.
+-    # 15 is 1111 binary. If a > 15, bit 4 (16) is set.
+-    if (mask & 16):
+-        for i in 0..3:
+-            gl_Position = trans_verts[face_indices[5][i]]
+-            EmitVertex()
+-        EndPrimitive()
++    # Pre-transform cube vertices
++    transVerts = []
++    for i in range(8):
++        local = cubeVerts[i]
++        # Transform local vertex to clip space
++        # Note: center is model space, local is offset. 
++        # MVP transforms model space to clip space.
++        transVerts.append(MVP * (center + local))
+         
+-    # Note: The source code snippet cuts off. The bit mapping for Left and Front/Right/Back
+-    # is inferred. The source explicitly uses:
+-    # Bottom: Bit 5 (32)
+-    # Top: Bit 4 (16)
+-    # The remaining bits (0-3) likely correspond to Front, Right, Back, Left.
+-    # We assume:
+-    # Front: Bit 0 (1)
+-    # Right: Bit 1 (2)
+-    # Back: Bit 2 (4)
+-    # Left: Bit 3 (8)
+-    
+-    # Face: Left (Indices 16-19) - Bit 3
+-    if (mask & 8):
+-        for i in 0..3:
+-            gl_Position = trans_verts[face_indices[4][i]]
+-            EmitVertex()
+-        EndPrimitive()
+-        
+-    # Face: Back (Indices 8-11) - Bit 2
+-    if (mask & 4):
+-        for i in 0..3:
+-            gl_Position = trans_verts[face_indices[2][i]]
+-            EmitVertex()
+-        EndPrimitive()
+-
+-    # Face: Right (Indices 4-7) - Bit 1
+-    if (mask & 2):
+-        for i in 0..3:
+-            gl_Position = trans_verts[face_indices[1][i]]
+-            EmitVertex()
+-        EndPrimitive()
+-
+-    # Face: Front (Indices 0-3) - Bit 0
+-    if (mask & 1):
+-        for i in 0..3:
+-            gl_Position = trans_verts[face_indices[0][i]]
+-            EmitVertex()
+-        EndPrimitive()
+-}
++    for face_idx in range(6):
++        bit = faceBits[face_idx]
++        if (mask & bit) != 0:
++            indices = faceIndices[face_idx]
++            for v_idx in indices:
++                gl_Position = transVerts[v_idx]
++                oColor = vec4(1.0, 1.0, 1.0, 1.0) # Or use input color
++                EmitVertex()
++            EndPrimitive()
+ ```
+ 
+ **Parameters:**
+-*   **Face Mask Bits:** The alpha channel of the input vertex color. Typical values are integers 0-63. A value of 63 renders all faces. A value of 0 renders none. The specific bit-to-face mapping in the source is: Bit 0=Front, Bit 1=Right, Bit 2=Back, Bit 3=Left, Bit 4=Top, Bit 5=Bottom [S1, unofficial].
++*   **Face Mask Encoding:** The alpha channel value determines visibility. Typical values are integers 0–63. A value of 63 renders all faces. [S1, unofficial]
++*   **Cube Size:** Unit cube (side length 1). [S1, unofficial]
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Matrix Multiplication Order:** OpenGL geometry shaders operate on vertices, not faces. Transformations must be applied to individual vertices. Storing vertices in matrix rows for batch multiplication is not a standard or necessarily faster approach than per-vertex transformation in this context [S1, unofficial].
+-*   **Precision:** Using a single MVP matrix reduces precision errors compared to sequential multiplication in the shader, but floating-point precision limits may cause z-fighting if voxels are very close or the scene is very large [G].
+-*   **Degenerate Input:** If the alpha mask is 0, no vertices are emitted, and the point is effectively culled.
++*   **Matrix Multiplication Order:** OpenGL matrices are column-major. The multiplication order `cameraToClip * worldToCamera * modelToWorld` is correct for transforming a point from model space to clip space if the matrices are applied as $M_{clip} \times (M_{view} \times (M_{model} \times v))$ [S1, unofficial].
++*   **Vertex Transformation:** OpenGL geometry shaders operate on vertices, not faces. Transformations must be applied to individual vertices. Storing vertices in matrix rows for batch multiplication is not a standard or necessarily faster approach [S1, unofficial].
++*   **Precision:** Using `int` for the alpha channel extraction is necessary for bitwise operations. [S1, unofficial]
++*   **Degenerate Input:** If the input point is not a valid voxel center or the color alpha is out of range, behavior is undefined. [G]
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(V \cdot F)$, where $V$ is the number of voxels and $F$ is the number of visible faces per voxel (0-6). With pre-transformation, the constant factor is reduced by avoiding redundant matrix multiplications.
+-*   **Memory Complexity:** $O(1)$ per voxel in the shader (local arrays of size 8 and 24). The input buffer size is $O(V)$.
+-*   **Measured Performance:** Not given in the sources.
+-*   **Scaling:** Scales linearly with the number of voxels. Performance is heavily dependent on the GPU's geometry shader throughput and the number of emitted vertices.
+-*   **Strengths:** Simple implementation, flexible face culling, no CPU-side geometry generation required.
+-*   **Limitations:** Geometry shader overhead can be significant for very large voxel counts. Not suitable for extremely high-resolution scenes without further optimization (e.g., instancing, texture-based rendering).
+-*   **When to use:** Small to medium voxel scenes where dynamic face culling is beneficial and CPU-side geometry generation is a bottleneck.
+-*   **When not to use:** Very large voxel scenes where geometry shader overhead becomes prohibitive, or when static geometry can be pre-generated and stored in a VBO.
++*   **Time Complexity:** $O(N)$ where $N$ is the number of voxels. Each voxel generates 0–6 triangle strips. The pre-transformation optimization reduces the number of matrix-vector multiplications from $24 \times 3$ (naive) to $8$ per voxel [S1, unofficial].
++*   **Memory Complexity:** $O(1)$ per voxel in the shader. The vertex buffer stores one point per voxel. [S1, unofficial]
++*   **Performance:** The method is efficient for sparse voxel grids where face culling significantly reduces the number of generated triangles. It is less efficient for dense grids where most faces are visible, due to the overhead of the geometry shader and branching. [S1, unofficial]
++*   **Strengths:** Simple implementation, dynamic face culling, no need for complex data structures. [S1, unofficial]
++*   **Limitations:** Geometry shader overhead can be significant on some hardware. Not suitable for extremely dense voxel grids. [S1, unofficial]
++*   **When to use:** Sparse voxel scenes, real-time rendering with limited CPU-side culling. [S1, unofficial]
++*   **When not to use:** Dense voxel grids, hardware with poor geometry shader performance. [S1, unofficial]
+ 
+ ## Background
+-This technique originated from early OpenGL voxel rendering experiments, specifically discussed in a 2013 Stack Overflow post by user laggyluk [S1, unofficial]. It leverages the flexibility of geometry shaders to generate cube geometry on the fly, a common approach in early voxel engines before more advanced techniques like texture-based voxel rendering or GPU-driven rendering became prevalent.
++This technique was discussed in the context of optimizing voxel rendering in OpenGL, specifically using geometry shaders to generate cubes from point primitives [S1, unofficial]. The approach leverages the flexibility of geometry shaders to perform per-voxel culling and geometry generation, reducing the need for complex CPU-side processing or large index buffers [S1, unofficial].
+ 
+ ## Sources

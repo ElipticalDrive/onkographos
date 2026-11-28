@@ -1,0 +1,624 @@
+A GPU-driven game engine written in Rust, with meshlet-based rendering and an editor. - feat(sdf): scale sparse SDF root grid to 32³ via large-root-grid feature · lobinuxsoft/kooch@11c86dc
+
+feat(sdf): scale sparse SDF root grid to 32³ via large-root-grid feature · lobinuxsoft/kooch@11c86dc · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+File tree
+Expand file treeCollapse file tree
+Open diff view settings
+Filter options
+crates/ome_sdf
+Cargo.toml
+shaders
+sparse_classify.wgsl
+sparse_downsample.wgsl
+sparse_lookup_body.wgsl
+sparse_populate.wgsl
+src/sparse
+classify.rs
+classify
+tests.rs
+downsample.rs
+grid
+tests.rs
+lod.rs
+lookup.rs
+lookup/tests
+sampling.rs
+wgsl.rs
+metrics
+tests.rs
+mod.rs
+populate.rs
+populate
+tests.rs
+Expand file treeCollapse file tree
+Open diff view settings
+Collapse file
+‎crates/ome_sdf/Cargo.toml‎
+Copy file name to clipboardExpand all lines: crates/ome_sdf/Cargo.toml
++9Lines changed: 9 additions & 0 deletions
+Original file line numberDiff line numberDiff line change
+@@ -16,6 +16,15 @@ glam.workspace = true
+1616
+bytemuck.workspace = true
+1717
+tracing.workspace = true
+1818
+19+
+[features]
+20+
+default = []
+21+
+# Scale chunk-local sparse SDF root grid from 16³ → 32³ (cells 4096 →
+22+
+# 32768). Bumps `ATLAS_TILES_Y` 1 → 2 so `MAX_SUBGRIDS_PER_ATLAS` lands
+23+
+# at 2048, leaving 25% headroom over the 5% sparsity estimate (1638
+24+
+# active subgrids per chunk). Closes AC4 of #136 — see issue #347 for
+25+
+# the budget rationale.
+26+
+large-root-grid = []
+27+
+1928
+[dev-dependencies]
+2029
+naga = { version = "29", features = ["wgsl-in"] }
+2130
+pollster.workspace = true
+Collapse file
+‎crates/ome_sdf/shaders/sparse_classify.wgsl‎
+Copy file name to clipboardExpand all lines: crates/ome_sdf/shaders/sparse_classify.wgsl
++5-2Lines changed: 5 additions & 2 deletions
+Original file line numberDiff line numberDiff line change
+@@ -32,12 +32,15 @@
+3232
+// to `1` (1 workgroup per marked cell); other consumers pin their
+3333
+// own divisor.
+3434
+35-
+const CLASSIFY_ROOT_DIM: u32 = 16u;
+36-
+const CLASSIFY_ROOT_CELLS: u32 = 4096u;
+3735
+const CLASSIFY_EMPTY_ROOT_SENTINEL: u32 = 0xFFFFFFFFu;
+3836
+const CLASSIFY_ALLOC_FAILED_SENTINEL: u32 = 0xFFFFFFFEu;
+3937
+4038
+override CLASSIFY_LOD_IDX: u32 = 0u;
+39+
+// Default values match the no-feature build (`ROOT_DIM = 16`,
+40+
+// `ROOT_CELLS = 4096`). Pinned per pipeline by `ClassifyPass::new`
+41+
+// to follow `crate::sparse::ROOT_DIM` and `crate::sparse::ROOT_CELLS`.
+42+
+override CLASSIFY_ROOT_DIM: u32 = 16u;
+43+
+override CLASSIFY_ROOT_CELLS: u32 = 4096u;
+4144
+4245
+struct ClassifyUniform {
+4346
+// `xyz` = chunk-local bounds_min (post-`ActiveOrigin`).
+Collapse file
+‎crates/ome_sdf/shaders/sparse_downsample.wgsl‎
+Copy file name to clipboardExpand all lines: crates/ome_sdf/shaders/sparse_downsample.wgsl
++21-7Lines changed: 21 additions & 7 deletions
+Original file line numberDiff line numberDiff line change
+@@ -36,10 +36,12 @@
+3636
+// # Override constants
+3737
+//
+3838
+// ```
+39-
+// LOD 0→1: DST=(8, 9, 729, 32), SRC=(17, 32)
+40-
+// LOD 1→2: DST=(4, 5, 125, 32), SRC=(9, 32)
+41-
+// LOD 2→3: DST=(2, 3, 27, 32), SRC=(5, 32)
+39+
+// LOD 0→1: DST=(8, 9, 729, 32, Y), SRC=(17, 32, Y)
+40+
+// LOD 1→2: DST=(4, 5, 125, 32, Y), SRC=(9, 32, Y)
+41+
+// LOD 2→3: DST=(2, 3, 27, 32, Y), SRC=(5, 32, Y)
+4242
+// ```
+43+
+//
+44+
+// `Y` matches `ATLAS_TILES_Y` (default `1`, `2` with `large-root-grid`).
+4345
+4446
+const DOWNSAMPLE_WORKGROUP_SIZE: u32 = 64u;
+4547
+const DOWNSAMPLE_EMPTY_ROOT_SENTINEL: u32 = 0xFFFFFFFFu;
+@@ -49,8 +51,10 @@ override DOWNSAMPLE_DST_SUBGRID_DIM: u32 = 8u;
+4951
+override DOWNSAMPLE_DST_TILE_DIM: u32 = 9u;
+5052
+override DOWNSAMPLE_DST_TILE_VOXELS: u32 = 729u;
+5153
+override DOWNSAMPLE_DST_ATLAS_TILES_X: u32 = 32u;
+54+
+override DOWNSAMPLE_DST_ATLAS_TILES_Y: u32 = 1u;
+5255
+override DOWNSAMPLE_SRC_TILE_DIM: u32 = 17u;
+5356
+override DOWNSAMPLE_SRC_ATLAS_TILES_X: u32 = 32u;
+57+
+override DOWNSAMPLE_SRC_ATLAS_TILES_Y: u32 = 1u;
+5458
+5559
+struct DownsampleNeedsCount {
+5660
+value: u32,
+@@ -80,18 +84,28 @@ fn downsample_main(
+8084
+return;
+8185
+}
+8286
+87+
+// Standard 3D index decode. Both src and dst share `subgrid_idx`
+88+
+// as the canonical atlas pointer (cascade invariant), so the
+89+
+// (x, y, z) tile coordinates only differ by tile dim — never by
+90+
+// tile-count, which is identical across LODs.
+8391
+let src_tile_x = subgrid_idx % DOWNSAMPLE_SRC_ATLAS_TILES_X;
+84-
+let src_tile_z = subgrid_idx / DOWNSAMPLE_SRC_ATLAS_TILES_X;
+92+
+let src_tile_y = (subgrid_idx / DOWNSAMPLE_SRC_ATLAS_TILES_X)
+93+
+% DOWNSAMPLE_SRC_ATLAS_TILES_Y;
+94+
+let src_tile_z = subgrid_idx
+95+
+/ (DOWNSAMPLE_SRC_ATLAS_TILES_X * DOWNSAMPLE_SRC_ATLAS_TILES_Y);
+8596
+let src_tile_origin = vec3<i32>(
+8697
+i32(src_tile_x * DOWNSAMPLE_SRC_TILE_DIM),
+87-
+0,
+98+
+i32(src_tile_y * DOWNSAMPLE_SRC_TILE_DIM),
+8899
+i32(src_tile_z * DOWNSAMPLE_SRC_TILE_DIM),
+89100
+);
+90101
+let dst_tile_x = subgrid_idx % DOWNSAMPLE_DST_ATLAS_TILES_X;
+91-
+let dst_tile_z = subgrid_idx / DOWNSAMPLE_DST_ATLAS_TILES_X;
+102+
+let dst_tile_y = (subgrid_idx / DOWNSAMPLE_DST_ATLAS_TILES_X)
+103+
+% DOWNSAMPLE_DST_ATLAS_TILES_Y;
+104+
+let dst_tile_z = subgrid_idx
+105+
+/ (DOWNSAMPLE_DST_ATLAS_TILES_X * DOWNSAMPLE_DST_ATLAS_TILES_Y);
+92106
+let dst_tile_origin = vec3<i32>(
+93107
+i32(dst_tile_x * DOWNSAMPLE_DST_TILE_DIM),
+94-
+0,
+108+
+i32(dst_tile_y * DOWNSAMPLE_DST_TILE_DIM),
+95109
+i32(dst_tile_z * DOWNSAMPLE_DST_TILE_DIM),
+96110
+);
+97111
+Collapse file
+‎crates/ome_sdf/shaders/sparse_lookup_body.wgsl‎
+Copy file name to clipboardExpand all lines: crates/ome_sdf/shaders/sparse_lookup_body.wgsl
++21-10Lines changed: 21 additions & 10 deletions
+Original file line numberDiff line numberDiff line change
+@@ -63,10 +63,17 @@ struct LookupChunkLodMask {
+6363
+}
+6464
+6565
+const LOOKUP_LOD_COUNT: u32 = 4u;
+66-
+const LOOKUP_ROOT_DIM: u32 = 16u;
+6766
+const LOOKUP_EMPTY_ROOT_SENTINEL: u32 = 0xFFFFFFFFu;
+6867
+const LOOKUP_ALLOC_FAILED_SENTINEL: u32 = 0xFFFFFFFEu;
+6968
+69+
+// `LOOKUP_ROOT_DIM` and `LOOKUP_ATLAS_TILES_{X,Y,Z}` are prepended by
+70+
+// the host helper `crate::sparse::lookup_wgsl` so consumers do not
+71+
+// need to know the chunk-local sparse geometry to compile their
+72+
+// pipeline. The values mirror `crate::sparse::ROOT_DIM`,
+73+
+// `ATLAS_TILES_X`, `ATLAS_TILES_Y`, `ATLAS_TILES_Z` at the time the
+74+
+// fragment is built — switching the `large-root-grid` feature
+75+
+// reshapes the const values without touching this body.
+76+
+7077
+// Per-LOD geometry tables. Mirror `crate::sparse::LOD_LEVELS` on the
+7178
+// host. Materialised as helper functions so the shader switches over
+7279
+// `lod_chosen` once per lookup, rather than indexing constexpr arrays
+@@ -85,13 +92,13 @@ fn lookup_tile_dim(lod: u32) -> u32 {
+8592
+return lookup_subgrid_dim(lod) + 1u;
+8693
+}
+8794
+88-
+fn lookup_atlas_tiles_x(lod: u32) -> u32 {
+89-
+return 32u;
+90-
+}
+91-
+9295
+fn lookup_atlas_dim(lod: u32) -> vec3<f32> {
+9396
+let tile = f32(lookup_tile_dim(lod));
+94-
+return vec3<f32>(32.0 * tile, tile, 32.0 * tile);
+97+
+return vec3<f32>(
+98+
+f32(LOOKUP_ATLAS_TILES_X) * tile,
+99+
+f32(LOOKUP_ATLAS_TILES_Y) * tile,
+100+
+f32(LOOKUP_ATLAS_TILES_Z) * tile,
+101+
+);
+95102
+}
+96103
+97104
+// LOD voxel-size factor: `2^lod`. Materialised as a switch so the
+@@ -219,12 +226,16 @@ fn sparse_sdf_lookup(world_pos: vec3<f32>, target_voxel_size: f32) -> f32 {
+219226
+);
+220227
+221228
+let tile_dim = lookup_tile_dim(lod_chosen);
+222-
+let atlas_tiles_x = lookup_atlas_tiles_x(lod_chosen);
+223-
+let tile_x = subgrid_idx % atlas_tiles_x;
+224-
+let tile_z = subgrid_idx / atlas_tiles_x;
+229+
+// Standard 3D index decode: `subgrid_idx = x + y * X + z * X * Y`.
+230+
+// With `LOOKUP_ATLAS_TILES_Y == 1u` (default) this collapses to
+231+
+// the historical `(x, 0, z)` layout; with Y > 1 (large-root-grid)
+232+
+// the Y axis carries the second slab of tiles.
+233+
+let tile_x = subgrid_idx % LOOKUP_ATLAS_TILES_X;
+234+
+let tile_y = (subgrid_idx / LOOKUP_ATLAS_TILES_X) % LOOKUP_ATLAS_TILES_Y;
+235+
+let tile_z = subgrid_idx / (LOOKUP_ATLAS_TILES_X * LOOKUP_ATLAS_TILES_Y);
+225236
+let tile_origin = vec3<f32>(
+226237
+f32(tile_x * tile_dim),
+227-
+0.0,
+238+
+f32(tile_y * tile_dim),
+228239
+f32(tile_z * tile_dim),
+229240
+);
+230241
+let atlas_dim = lookup_atlas_dim(lod_chosen);
+Collapse file
+‎crates/ome_sdf/shaders/sparse_populate.wgsl‎
+Copy file name to clipboardExpand all lines: crates/ome_sdf/shaders/sparse_populate.wgsl
++15-8Lines changed: 15 additions & 8 deletions
+Original file line numberDiff line numberDiff line change
+@@ -32,24 +32,27 @@
+3232
+//
+3333
+// # Atlas tile addressing
+3434
+//
+35-
+// Tiles are laid out `ATLAS_TILES_X × 1 × ATLAS_TILES_X` (the Y axis
+36-
+// stays at 1 across LODs). Tile origin for `subgrid_idx` is
+37-
+// `(subgrid_idx % ATLAS_TILES_X, 0, subgrid_idx / ATLAS_TILES_X) * TILE_DIM`.
+35+
+// Tiles are laid out `ATLAS_TILES_X × ATLAS_TILES_Y × ATLAS_TILES_Z`
+36+
+// (default `(32, 1, 32)`; with `large-root-grid` the Y axis bumps to
+37+
+// 2 so the atlas holds 2048 tiles). Tile origin for `subgrid_idx`
+38+
+// follows the standard 3D index decode `(x + y · X + z · X · Y)`.
+3839
+// Voxel `(vx, vy, vz)` inside the tile lives at world position
+3940
+// `cell_min + (vx, vy, vz) / SUBGRID_DIM * cell_size`. The skirt
+4041
+// voxel at `vx == SUBGRID_DIM` therefore evaluates the sampler at
+4142
+// `cell_min + cell_size`, i.e. the corner of the neighbouring root
+4243
+// cell — analytically coherent with the neighbour's own voxel(0,0,0)
+4344
+// by sampler construction.
+4445
+45-
+const POPULATE_ROOT_DIM: u32 = 16u;
+4646
+const POPULATE_ALLOC_FAILED_SENTINEL: u32 = 0xFFFFFFFEu;
+4747
+const POPULATE_WORKGROUP_SIZE: u32 = 256u;
+4848
+4949
+override POPULATE_SUBGRID_DIM: u32 = 16u;
+5050
+override POPULATE_TILE_DIM: u32 = 17u;
+5151
+override POPULATE_TILE_VOXELS: u32 = 4913u;
+5252
+override POPULATE_ATLAS_TILES_X: u32 = 32u;
+53+
+override POPULATE_ATLAS_TILES_Y: u32 = 1u;
+54+
+// Default matches the no-feature build (`ROOT_DIM = 16`).
+55+
+override POPULATE_ROOT_DIM: u32 = 16u;
+5356
+5457
+struct PopulateUniform {
+5558
+// `xyz` = chunk-local `bounds_min` (post-`ActiveOrigin`).
+@@ -111,13 +114,17 @@ fn populate_main(
+111114
+let cell_min_world = bounds_min
+112115
++ vec3<f32>(f32(cx), f32(cy), f32(cz)) * cell_size;
+113116
+114-
+// Atlas tile origin in texel coordinates. `Y = 0` because the
+115-
+// atlas only stacks one row of tiles along Y.
+117+
+// Atlas tile origin in texel coordinates. With
+118+
+// `POPULATE_ATLAS_TILES_Y == 1u` (default) the Y component
+119+
+// collapses to `0` and this matches the historical layout; with
+120+
+// `Y > 1` (large-root-grid) the second slab of tiles lives at
+121+
+// `tile_y == 1`.
+116122
+let tile_x = subgrid_idx % POPULATE_ATLAS_TILES_X;
+117-
+let tile_z = subgrid_idx / POPULATE_ATLAS_TILES_X;
+123+
+let tile_y = (subgrid_idx / POPULATE_ATLAS_TILES_X) % POPULATE_ATLAS_TILES_Y;
+124+
+let tile_z = subgrid_idx / (POPULATE_ATLAS_TILES_X * POPULATE_ATLAS_TILES_Y);
+118125
+let tile_origin = vec3<i32>(
+119126
+i32(tile_x * POPULATE_TILE_DIM),
+120-
+0,
+127+
+i32(tile_y * POPULATE_TILE_DIM),
+121128
+i32(tile_z * POPULATE_TILE_DIM),
+122129
+);
+123130
+let inv_subgrid_dim = 1.0 / f32(POPULATE_SUBGRID_DIM);
+Collapse file
+‎crates/ome_sdf/src/sparse/classify.rs‎
+Copy file name to clipboardExpand all lines: crates/ome_sdf/src/sparse/classify.rs
++6-3Lines changed: 6 additions & 3 deletions
+Original file line numberDiff line numberDiff line change
+@@ -27,7 +27,7 @@
+2727
+2828
+use bytemuck::{Pod, Zeroable};
+2929
+30-
+use super::{LOD_COUNT, ROOT_CELLS, SparseGrid};
+30+
+use super::{LOD_COUNT, ROOT_CELLS, ROOT_DIM, SparseGrid};
+3131
+3232
+/// WGSL source of the classify pass body — `classify_main` plus the
+3333
+/// `@group(0)` binding declarations. Concatenated with the sampler
+@@ -98,8 +98,11 @@ impl ClassifyPass {
+9898
+9999
+let classify_pipelines = std::array::from_fn(|lod_idx| {
+100100
+let label = format!("ome_sdf::sparse::classify::classify_pipeline_lod{lod_idx}");
+101-
+let constants: &[(&str, f64)] =
+102-
+&[("CLASSIFY_LOD_IDX", lod_idx as f64)];
+101+
+let constants: &[(&str, f64)] = &[
+102+
+("CLASSIFY_LOD_IDX", lod_idx as f64),
+103+
+("CLASSIFY_ROOT_DIM", ROOT_DIM as f64),
+104+
+("CLASSIFY_ROOT_CELLS", ROOT_CELLS as f64),
+105+
+];
+103106
+device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+104107
+label: Some(&label),
+105108
+layout: Some(&classify_layout),
+Collapse file
+‎crates/ome_sdf/src/sparse/classify/tests.rs‎
+Copy file name to clipboardExpand all lines: crates/ome_sdf/src/sparse/classify/tests.rs
++8-2Lines changed: 8 additions & 2 deletions
+Original file line numberDiff line numberDiff line change
+@@ -114,11 +114,17 @@ fn classify_concat_parses_and_validates() {
+114114
+115115
+#[test]
+116116
+fn classify_wgsl_constants_match_host() {
+117+
+// Defaults are the no-feature-flag values (`ROOT_DIM = 16`,
+118+
+// `ROOT_CELLS = 4096`) — the WGSL declares them as `override`
+119+
+// constants so each `ClassifyPass` pipeline can pin the
+120+
+// host-visible values at compile time.
+117121
+assert!(
+118-
+CLASSIFY_WGSL.contains(&format!("CLASSIFY_ROOT_DIM: u32 = {ROOT_DIM}u")),
+122+
+CLASSIFY_WGSL.contains("override CLASSIFY_ROOT_DIM: u32 = 16u"),
+123+
+"CLASSIFY_ROOT_DIM must remain an override defaulting to 16u",
+119124
+);
+120125
+assert!(
+121-
+CLASSIFY_WGSL.contains(&format!("CLASSIFY_ROOT_CELLS: u32 = {ROOT_CELLS}u")),
+126+
+CLASSIFY_WGSL.contains("override CLASSIFY_ROOT_CELLS: u32 = 4096u"),
+127+
+"CLASSIFY_ROOT_CELLS must remain an override defaulting to 4096u",
+122128
+);
+123129
+}
+124130
+Collapse file
+‎crates/ome_sdf/src/sparse/downsample.rs‎
+Copy file name to clipboardExpand all lines: crates/ome_sdf/src/sparse/downsample.rs
++2Lines changed: 2 additions & 0 deletions
+Original file line numberDiff line numberDiff line change
+@@ -74,8 +74,10 @@ impl DownsamplePass {
+7474
+("DOWNSAMPLE_DST_TILE_DIM", dst.tile_dim as f64),
+7575
+("DOWNSAMPLE_DST_TILE_VOXELS", dst.tile_voxels() as f64),
+7676
+("DOWNSAMPLE_DST_ATLAS_TILES_X", dst.atlas_tiles_x as f64),
+77+
+("DOWNSAMPLE_DST_ATLAS_TILES_Y", dst.atlas_tiles_y as f64),
+7778
+("DOWNSAMPLE_SRC_TILE_DIM", src.tile_dim as f64),
+7879
+("DOWNSAMPLE_SRC_ATLAS_TILES_X", src.atlas_tiles_x as f64),
+80+
+("DOWNSAMPLE_SRC_ATLAS_TILES_Y", src.atlas_tiles_y as f64),
+7981
+];
+8082
+device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+8183
+label: Some(&label),
+Collapse file
+‎crates/ome_sdf/src/sparse/grid/tests.rs‎
+Copy file name to clipboardExpand all lines: crates/ome_sdf/src/sparse/grid/tests.rs
++11-3Lines changed: 11 additions & 3 deletions
+Original file line numberDiff line numberDiff line change
+@@ -92,7 +92,10 @@ fn atlas_constants_consistent() {
+9292
+assert_eq!(ATLAS_DIM_Z, super::super::ATLAS_TILES_Z * SUBGRID_TILE_DIM);
+9393
+assert_eq!(SUBGRID_TILE_DIM, SUBGRID_DIM + 1);
+9494
+95-
+// Total cascade VRAM under the issue's 15 MB chunk AC.
+95+
+// Total cascade VRAM. AC1 (#136) caps default at 15 MB / chunk;
+96+
+// AC4 (#347) caps the `large-root-grid` build at 100 MB / chunk.
+97+
+// Lod-level test `total_atlas_vram_under_*` covers the strict
+98+
+// budget — the floor here just guarantees we built four atlases.
+9699
+let total: u64 = LOD_LEVELS
+97100
+.iter()
+98101
+.map(|lod| {
+@@ -102,9 +105,14 @@ fn atlas_constants_consistent() {
+102105
+* 2
+103106
+})
+104107
+.sum();
+108+
+let cap_bytes: u64 = if cfg!(feature = "large-root-grid") {
+109+
+100 * 1024 * 1024
+110+
+} else {
+111+
+15 * 1024 * 1024
+112+
+};
+105113
+assert!(
+106-
+total < 15 * 1024 * 1024,
+107-
+"cascade pool atlas size {total} bytes exceeds 15 MiB AC",
+114+
+total < cap_bytes,
+115+
+"cascade pool atlas size {total} bytes exceeds cap {cap_bytes}",
+108116
+);
+109117
+}
+110118
+0 commit comments
+Comments
+0 (0)
+You can’t perform that action at this time.

@@ -1,0 +1,182 @@
+# GPU Backprojection
+
+Also called: Blended Backprojection, FDK Backprojection CUDA Kernel, Scale field rendering, Scale-Space Backprojection, Weighted blob blending
+
+## Overview
+GPU Backprojection is a rendering pass that visualizes detected scale-space blobs by mapping projection data back into a 3D reconstruction volume [S1, unofficial][S2][S3]. It solves the problem of efficiently computing weighted contributions of scale-space features to image pixels by parallelizing the accumulation over the output space (voxels or pixels) on NVIDIA GPUs [S1, unofficial][S2][S3]. It is distinguished from its siblings by its specific application to scale-space blob visualization [S3] and its implementation as a CUDA kernel that decouples the expensive scale-space computation from the frequent backprojection step [S3], unlike [Ray Segment Projection to Image](7631-ray-segment-projection-to-image.md) which projects geometric primitives, or [Cone Beam Forward Projection with Trilinear Interpolation](8247-cone-beam-forward-projection-with-trilinear-interpolation.md) which performs the forward mapping.
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:**
+    *   `projections`: A tensor of shape `[batch, views, rows, columns]` containing the projection data [S1, unofficial][S2][S3].
+    *   `matrices`: A contiguous float tensor containing the projection transformation coefficients [S1, unofficial].
+    *   `volume_shape`: A tuple `(depth, height, width)` defining the 3D reconstruction volume dimensions [S1, unofficial][S3].
+    *   `blob_data`: Information about detected scale-space blobs, including their radii and positions, used to generate slices [S2][S3].
+*   **Outputs:**
+    *   `out`: A tensor of shape `[batch, 1, depth, height, width]` containing the backprojected volume [S1, unofficial][S3].
+
+**Data Structures:**
+*   **PanelStencil:** A structure used in the CUDA kernel to store the 4 pixels (indices) and their corresponding weights for a voxel's projection onto the 2D panel [S1, unofficial].
+    *   `index[4]`: Unsigned integers representing the pixel indices in the flattened projection array.
+    *   `weight[4]`: Floats representing the interpolated weights for each pixel.
+*   **ViewColumn:** A structure storing linear coefficients for projecting a voxel's x, y, z coordinates to the 2D panel [S1, unofficial].
+    *   `column, column_z`: Linear coefficients for the column coordinate.
+    *   `row, row_z`: Linear coefficients for the row coordinate.
+    *   `depth, depth_z`: Linear coefficients for the depth (distance along panel normal).
+
+**Steps:**
+1.  **Preprocessing:**
+    *   Detach and convert `matrices` to a contiguous float tensor [S1, unofficial].
+    *   Reshape `projections` to a flat tensor `flat` of shape `[batch, -1]` [S1, unofficial].
+    *   Create the output tensor `out` with shape `[batch, 1, *volume_shape]` [S1, unofficial][S3].
+    *   Load the kernel library containing the FDK backprojection kernels [S1, unofficial].
+2.  **Batch Iteration:**
+    *   Iterate over batches in groups of size `_GROUP` [S1, unofficial].
+    *   For each group, select the appropriate kernel function (e.g., `fdk_backproject_c{group}`) [S1, unofficial].
+3.  **Kernel Execution (Per Voxel):**
+    *   Launch a CUDA kernel with grid `_volume_grid(volume_shape)` and block `_VOLUME_BLOCK` [S1, unofficial].
+    *   Each thread processes a voxel at `(x, y, z)` in the volume [S1, unofficial].
+    *   **View Projection:** Compute the `ViewColumn` for the voxel using the transformation coefficients [S1, unofficial].
+    *   **Panel Stencil:** Calculate the 2D panel coordinates and weights [S1, unofficial]:
+        *   Compute depth $w = d_z z + d$. If $w \le 0$, the voxel is behind the panel; skip [S1, unofficial].
+        *   Compute inverse $1/w$ [S1, unofficial].
+        *   Compute column $u = (c_z z + c) / w$ and row $v = (r_z z + r) / w$ [S1, unofficial].
+        *   Determine the bounding pixel indices $(c_0, r_0)$ and fractional parts $dc, dr$ [S1, unofficial].
+        *   Compute weights using bilinear interpolation factors scaled by $1/w^2$ [S1, unofficial].
+        *   Store the 4 pixel indices and weights in a `PanelStencil` [S1, unofficial].
+4.  **Accumulation (Scale-Space Specific):**
+    *   For each detected scale-space blob, generate a series of small slices with dimensions proportional to the blob's radius [S2][S3].
+    *   Compute the weighted contribution of the blob for each pixel covered by its slices [S2][S3].
+    *   Use alpha blending to accumulate the sum of weighted contributions from all blobs into the output volume [S1, unofficial][S3].
+5.  **Normalization:**
+    *   In a separate pass, normalize the accumulated result by dividing by the sum of weights, which is stored in a separate channel [S2][S3].
+
+**Formulas:**
+*   Output is weighted by $(D / l)^2$, where $l$ is voxel depth along panel normal and $D$ is panel depth [S1, unofficial].
+*   Projected depth: $w = d_z z + d$ [S1, unofficial].
+*   Panel coordinates: $u = (c_z z + c) / w$, $v = (r_z z + r) / w$ [S1, unofficial].
+*   Interpolation weights: $w_{00} = \max(c_0, 0) \ge 0 ? (1-dc) : 0$, $w_{10} = c_0+1 < \text{cols} ? dc : 0$, $w_{01} = \max(r_0, 0) \ge 0 ? (1-dr) \cdot (1/w)^2 : 0$, $w_{11} = r_0+1 < \text{rows} ? dr \cdot (1/w)^2 : 0$ [S1, unofficial].
+
+**Parameters:**
+*   `GROUP_SIZE`: The number of batches processed together by a single kernel launch. Not given in the sources.
+*   `TT_FDK_DEPTH`: Number of voxels along z processed per thread. Set to 4 in the source [S1, unofficial].
+*   `VOLUME_BLOCK`: CUDA block dimension. Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Behind Panel:** If the projected depth $w \le 0$, the voxel is behind the projection panel and should be skipped [S1, unofficial].
+*   **Boundary Checks:** Pixel indices must be clamped to the valid range $[0, \text{rows}-1]$ and $[0, \text{columns}-1]$ to avoid out-of-bounds memory access [S1, unofficial].
+*   **Precision:** The use of `float32` for addition order may cause slight differences between forward and backprojection due to non-associativity [S1, unofficial].
+*   **Scale-Space Decoupling:** The scale-space computation is expensive and done once, while backprojection is faster and done frequently. Mixing these steps incorrectly can lead to performance degradation [S3].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def gpu_backprojection(projections, matrices, volume_shape, blob_data):
+    batch_size = projections.shape[0]
+    views, rows, columns = projections.shape[2:]
+    depth, height, width = volume_shape
+
+    flat_projections = projections.reshape(batch_size, -1)
+    matrices = matrices.detach().float().contiguous()
+    out = [[0.0] * (depth * height * width) for _ in range(batch_size)]
+    weight_accum = [[0.0] * (depth * height * width) for _ in range(batch_size)]
+
+    GROUP_SIZE = 32 # Not given in sources
+    for start in range(0, batch_size, GROUP_SIZE):
+        count = min(GROUP_SIZE, batch_size - start)
+        group = count
+        execute_backprojection_kernel(flat_projections, start, count, group, matrices, out, weight_accum, width, height, depth, views, rows, columns)
+
+    for blob in blob_data:
+        slice_radius = blob.radius
+        for z in range(max(0, blob.z - slice_radius), min(depth, blob.z + slice_radius)):
+            for y in range(max(0, blob.y - slice_radius), min(height, blob.y + slice_radius)):
+                for x in range(max(0, blob.x - slice_radius), min(width, blob.x + slice_radius)):
+                    weight = compute_blob_weight(blob, x, y, z)
+                    idx = (blob.batch * depth * height * width) + z * height * width + y * width + x
+                    out[blob.batch][idx] += weight
+                    weight_accum[blob.batch][idx] += 1.0
+
+    for b in range(batch_size):
+        for i in range(len(out[b])):
+            if weight_accum[b][i] > 0:
+                out[b][i] /= weight_accum[b][i]
+
+    return out
+
+def fma(a, b, c):
+    return a * b + c
+
+def execute_backprojection_kernel(flat_projections, start, count, group, matrices, out, weight_accum, width, height, depth, views, rows, columns):
+    # Simulates CUDA kernel launch: grid=_volume_grid(volume_shape), block=_VOLUME_BLOCK
+    for b in range(start, start + count):
+        for z in range(depth):
+            for y in range(height):
+                for x in range(width):
+                    c = fma(matrices[b * 16 + 0], x, fma(matrices[b * 16 + 1], y, matrices[b * 16 + 3]))
+                    r = fma(matrices[b * 16 + 4], x, fma(matrices[b * 16 + 5], y, matrices[b * 16 + 7]))
+                    d = fma(matrices[b * 16 + 8], x, fma(matrices[b * 16 + 9], y, matrices[b * 16 + 11]))
+                    c_z = matrices[b * 16 + 12]
+                    r_z = matrices[b * 16 + 13]
+                    d_z = matrices[b * 16 + 14]
+
+                    w = fma(d_z, z, d)
+                    if w <= 0.0:
+                        continue
+
+                    inverse = 1.0 / w
+                    col_proj = fma(c_z, z, c) * inverse
+                    row_proj = fma(r_z, z, r) * inverse
+
+                    col_floor = int(col_proj)
+                    row_floor = int(row_proj)
+                    dc = col_proj - col_floor
+                    dr = row_proj - row_floor
+
+                    scale = inverse * inverse
+                    wc0 = (1.0 - dc) if col_floor >= 0 else 0.0
+                    wc1 = dc if col_floor + 1 < columns else 0.0
+                    wr0 = (1.0 - dr) * scale if row_floor >= 0 else 0.0
+                    wr1 = dr * scale if row_floor + 1 < rows else 0.0
+
+                    left = max(col_floor, 0)
+                    right = min(col_floor + 1, columns - 1)
+                    top = max(row_floor, 0) * columns
+                    bottom = min(row_floor + 1, rows - 1) * columns
+
+                    indices = [top + left, top + right, bottom + left, bottom + right]
+                    weights = [wr0 * wc0, wr0 * wc1, wr1 * wc0, wr1 * wc1]
+
+                    for k in range(4):
+                        proj_idx = b * views * rows * columns + indices[k]
+                        out[b][proj_idx] += flat_projections[proj_idx] * weights[k]
+                        weight_accum[b][proj_idx] += weights[k]
+
+def compute_blob_weight(blob, x, y, z):
+    # Not given in the sources.
+    return 1.0
+```
+
+## Subtopics
+
+### [CUDA Backprojection Implementation](9790-cuda-backprojection-implementation.md)
+Implements the backprojection step of differentiable X-ray computed tomography on NVIDIA GPUs using CUDA. It solves the problem of efficiently mapping projection data back into a 3D reconstruction volume by parallelizing computation over the output space (reconstruction voxels). It is distinguished from CPU implementations by its use of 3D thread blocks and 3D texture memory for input data access, and it supports both Siddon and SF projector models. It builds on [GPU Backprojection](5843-gpu-backprojection.md).
+
+## Operating characteristics
+*   **Time Complexity:** The backprojection step is $O(N \cdot V)$, where $N$ is the number of views and $V$ is the number of voxels, but optimized by the stencil approach which limits writes to 4 pixels per voxel [S1, unofficial]. The scale-space computation is $O(S)$, where $S$ is the number of scale-space iterations, but is decoupled and done once [S3].
+*   **Memory Complexity:** Requires storage for the projection data, the volume, and temporary buffers for the stencil and weights [S3]. The source mentions using 768 MB of texture memory for a 256^3 volume [S3].
+*   **Measured Performance:** On an Intel Core 2 Duo 2.4 GHz with 2GB RAM and an nVidia GeForce 8800 GTX with 768 MB texture memory, the GPU implementation showed an improvement of about two orders of magnitude over the CPU version for data set sizes of 64^3, 128^3, and 256^3 [S3].
+*   **Strengths:** Interactive visualization is possible due to the speedup over CPU implementations [S3]. The decoupling of scale-space computation allows for frequent updates of smoothness and visibility parameters [S3].
+*   **Limitations:** Relies on a temporary volume to compute the scale field, which may limit real-time embedding in the volume rendering process as GPUs improve [S3].
+*   **When to Use:** When interactive visualization of scale-space blobs is required, and the scale-space computation can be decoupled from the backprojection [S3].
+*   **When Not to Use:** When the scale-space computation needs to be updated frequently with every parameter change, or when the hardware does not support the required CUDA features [S3].
+
+## Background
+GPU Backprojection was introduced in the context of Size-based Transfer Functions for volume exploration [S2][S3]. The method was developed to address the computational cost of visualizing scale-space blobs, which are detected maxima in a scale-space representation of the volume data [S2][S3]. The GPU implementation was evaluated on an nVidia GeForce 8800 GTX, demonstrating the feasibility of interactive visualization for large volume datasets [S3]. The approach decouples the expensive scale-space computation from the backprojection, allowing for efficient user interaction with smoothness and visibility parameters [S3].
+
+## Sources
+[S1] itu-biai/torchtomo, https://github.com/itu-biai/torchtomo, fetched 2026-10-27 (unofficial)
+[S2] PDF Size-based Transfer Functions: A New Volume Exploration Technique, http://vis.cs.ucdavis.edu/papers/correa_ma_stf_2008.pdf, fetched 2026-10-29
+[S3] PDF Size-based Transfer Functions: A New Volume Exploration Technique, http://carloscorrea.com/docs/vis08.pdf, fetched 2026-10-29
+[S4] Size-based Transfer Functions: A New Volume Exploration Technique, https://www.researchgate.net/publication/23456199_Size-based_Transfer_Functions_A_New_Volume_Exploration_Technique, fetched 2026-10-30 (unofficial)

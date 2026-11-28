@@ -1,0 +1,146 @@
+John Whigham's Blog: Sparse Voxel Octrees: A New Beginning
+Sunday, October 7, 2012
+Sparse Voxel Octrees: A New Beginning
+There’s been quite a lot of interest lately in the realtime graphics world to do with Sparse Voxel Octrees (SVOs), so I thought it was about time I had a look at them. Although I’ve experimented with voxels before, in particular in the Geo project I worked on a few years ago (http://jwhigham.wordpress.com/category/geo) I didn’t really make use of octrees in those cases and more significantly I converted the voxel data to geometry prior to rendering using the classic Marching Cubes algorithm - now generally superseded by better techniques such as Dual Contouring.
+Having been down that route before I wanted to try something new so this time I’m endeavouring to render by ray-casting directly against the SVO rather than converting to geometry and rasterising. I don’t believe that ray-casting (or ray-tracing if you want to consider more than one bounce) is going to replace rasterisation any time soon as the genesis of GPUs has left them understandably specialised for that particular problem and therefore very efficient at it. I do believe however that when used in conjunction with rasterisation ray casting or tracing is a tool too powerful to ignore and can be an ideal solution for effects such as reflection, refraction, shadows and global illumination that are difficult to simulate with rasterisation, especially at a global scale.
+128x128x128 SVO ray-cast on the GPU with simple dot-product lighting
+There have been numerous articles published in recent years postulating that rasterisation is dead and raytracing is the next big thing and just as many countenancing the opposite, the truth of course as I see it is somewhere in the middle – both have compelling strengths and weaknesses so surely the best solution is to combine them, using each where best suited to maximise their strengths.
+So while it’s technically perfectly possible to convert the voxels to geometry and then intersect rays against the resulting polygonal soup it flies in the face of this belief and doesn’t strike me as a particularly sensible thing to do. I also want to see if ray casting against the voxel structures directly can help alleviate some of the more challenging problems with geometry based voxelisation, particularly transitions between multiple levels of detail which I struggled with on Geo. Also like I say, it’s not something I’ve done before which is really reason enough.
+128x128x128 Sphere rendered with linear distance filtering
+The same sphere rendered with point distance sampling to make the individual voxels clearer
+The Aim
+Ultimately I would like to recreate my virtual planet out of landscape blocks of varying resolutions right down from global scale viewed from orbit to standing on the surface with reasonable fidelity. I’ll also need to have a think about how to procedurally generate the data as the flexibility to have full 3D makes the problem far more interesting than just the heightfield used by Isis (http://jwhigham.wordpress.com/tag/isis/) and Osiris (http://johnwhigham.blogspot.co.uk/search/label/Osiris). I want to avoid if possible having the floating blobs of landscape that plagued Geo’s simplistic 3D noise based solution while still having features that make the 3D nature of the data obvious such as realistic overhangs and caves.
+First Steps
+As with most new experiments the first thing to do is investigate the existing body of work on the subject, which as I mentioned earlier is quite active at the moment with the dramatic increase in GPU performance and especially their flexibility in recent years. See the references section at the end for a few links to papers and videos I discovered in my internet SVO safari, it’s by no means an exhaustive list but they are some of the more interesting items I found.
+Once I felt I had a sufficient understanding of current techniques I jumped in with both feet and embarked on a bit of coding. While the aim is to produce a real time GPU based solution my experience of the somewhat patchy tools available for GPU debugging steered me towards producing a reference implementation in C++ on the CPU first. While it would run far more slowly this would let me debug the code effectively and help me verify that my algorithm and data structures were correct before sending them down to the GPU.
+This turned out to be a really useful process and with modern CPUs being pretty powerful themselves (and ray casting being a parallel friendly technique) it was possible to produce a C++ implementation that ran acceptably quickly even in debug builds. Having it render a quarter resolution version during camera movements and a full resolution one once the camera stopped also helped.
+The first technique I attempted was the Laine & Karras one. While there was sample source code available for this I am of the belief that to properly understand a technique you have to at least have a go at coding it up from first principles so that’s what I did. After a while though my spider sense started to tell me that storing down to the individual voxel level wasn’t going to be best suited to planetary scales so I switched to the Cyril Crassin paper where he stores an octree down to a certain level then stores bricks of voxels rather than individual ones for the final few levels.
+The 16x16x16 grid of voxel "bricks" that make up the actual Octree
+The algorithm traverses the octree until it arrives at a suitable level of detail or a leaf node then ray-marches through the chosen brick (8x8x8 in my implementation) to find the accurate intersection. Written well it's trivial to alter the size of the bricks to compare performance and memory use in different configurations.
+This system felt more scalable and better suited to GPU application, plus there were advantages to do with cone tracing through the structure for shadows and global illumination applications that felt worth having available for the future.
+Storage
+It’s pretty clear that a voxel is a cube shaped blob of space, games such as MineCraft have made the voxel pretty famous these days, but there are a couple of key considerations when rendering them. Primarily is what each voxel represents, in it’s most simplisitic form a voxel could be considered to be either solid or empty which is easy to understand but limits rendering to producing blocky effects dependent entirely on the size of the voxels in use. Rather than storing a flag indicating solid or empty with a voxel a better way is to store a distance value representing how far the centre of the voxel is from the surface that is to be rendered.
+Under this representation for a landscape voxels above the ground would have increasingly positive values while those underground would have increasingly negative ones. Rendering the isosurface where the distance is zero would produce the intended surface. The primary benefit of this scheme is that the distance value can be interpolated accurately between voxels to produce a better approximation of the surface. The quality of the output is still highly dependent upon the resolution of the data but undersampling artifacts show up as lumpy blobs rather than hard square edges which I think look generally better.
+The images below show the progression from highest detail to lowest through the four levels of octree produced by my 128x128x128 noise-blob data. Note that I've turned off the linear filtering of distance here in all but the final image to make the individual voxels clearer:
+The 128x128x128 noise-blob at octree level 4 (highest detail)
+The same 128x128x128 blob at octree level 3, each voxel is effectively twice the size
+Down to octree level 2 and while the shape remains the detail is largely gone
+Finally at the lowest detail level on the crude outline remains. The 128x128x128 original data is now effectively being rendered at 16x16x16 resolution.
+The same lowest detail level but with linear distance filtering - not a terrible approximation of the blob considering it's only using 1/512th of the data
+Normals for shading and procedural texturing can either be pre-calculated and stored in the voxels or calculated at runtime from the gradient of the distance field – empirical testing will show which is faster in practice although my current thoughts are that it's probably better to store higher precision distance values and calculate the normal when needed. Although many steps are taken through the distance field only the normal at the closest intersection is needed so it only needs to be calculated once before shading.
+On top of the distance value there are also other required fields such as material types which I have some ideas for but I’ll get in to that in later posts.
+From CPU to GPU
+Once I was happy that everything seemed to be working on the CPU I set about converting the code to run on the GPU using a pixel shader. I toyed briefly with using a compute shader instead as I've heard there are some benefits to converting some traditionally pixel based tasks to the more flexible compute pipeline but I'll save that for a rainy day. Ray casting seems a natural fit for per-pixel so I'm sticking with a pixel shader for now.
+Thankfully as it had always been my intent to run it on the GPU I had written it with that in mind so storing the data structures in textures and moving the code to HLSL was fairly straight forwards. It did take a few hours to work out the inevitable teething problems compounded by the typically unstable nature of GPU debugging tools but considering what it's doing it didn't take too long.
+The benefit of course is that instead of taking a couple of hundred milliseconds to render it now rendered in just a few milliseconds giving me true real-time frame rates. Being able to dynamically reload the HLSL code and GPU states also meant I could make changes and see the results virtually instantly without having to re-run the program, saving a considerably amount of time. If you are creating a graphics framework for your own projects I strongly recommend adding this ability!
+Two-sphere distance field showing the geometry that is actually sent to the GPU (i.e. 12 triangles). The back-faces of the cube are rendered instead of the front to allow the viewpoint to move inside the cube and still render
+Next Steps
+So I have a single sparse voxel octree I can render via ray casting on the GPU complete with surface normals, what's next? Well the first thing to do is to be able to render multiple SVOs at different points in space, also to have them abut neatly with continuous surface normals so there are no shading seams.
+After this I want to add some automatic level of detail control so the tree is traversed less deeply as the voxel bricks become smaller on screen, having this controllable from the user interface would also be useful to allow performance to be measured against visual fidelity. Next I want to add a new distance generation function to produce blocks that are a bit more landscape-like plus having the materials to go with them.
+So, plenty to do then!
+References:
+As mentioned above, this is a fairly arbitrary collection of some of the links I came across while researching SVOs. I am sure there are many more so do feel free to report any good ones you find in the comments!
+http://www.tml.tkk.fi/~samuli/publications/laine2010tr1_paper.pdf
+Efficient Sparse Voxel Octrees – Analysis, Extensions, and Implementation, Samuli Laine Tero Karras, NVIDIA Research
+http://en.wikipedia.org/wiki/Sparse_voxel_octree
+Sparse voxel octree
+http://www.daimi.au.dk/~aquak/MasterThesisKristofRoemisch.pdf
+Sparse Voxel Octree Ray Tracing on the GPU, Kristof Römisch, Masters Thesis
+http://maverick.inria.fr/Publications/2011/Cra11/
+GigaVoxels: A Voxel-Based Rendering Pipeline For Efficient Exploration Of Large And Detailed Scenes, Cyril Crassin, PhD thesis
+http://www.youtube.com/watch?v=VpEpAFGplnI
+Sparse Voxel Octree (SVO) Demo by Jon Olick
+http://procworld.blogspot.co.uk/
+Procedural World
+Labels:
+Graphics,
+Octrees,
+Programming,
+Voxels,
+Voxelus
+Posted by
+John Whigham
+at
+3:53 PM
+Email ThisBlogThis!Share to XShare to FacebookShare to Pinterest
+10 comments:
+Scott RichmondOctober 8, 2012 at 12:44 AM
+Very interesting article! I've not actually seen too much work on this method of voxelization before in my travels. Can this method of distance-based isosurface extraction produce both sharp and smoothed surfaces?
+One of the biggest problems I see people face is less about the pure rendering of the volume but the painting that must be done afterwards. I realize its quite early to discuss in depth, but do you have any thoughts about how texturing will work?
+ReplyDelete
+Replies
+John WhighamOctober 8, 2012 at 8:57 AM
+Thanks Scott. I don't think it's really possible to do properly sharp surfaces (such as a cube with sharp edges) as the normals are calculated from the distance field and all data samples including normals represent an area of space equivalent to at least a single voxel.
+Using high resolution data would produce sharper edges but they would never be truly sharp the way polygonal geometry can produce.
+As for texturing, my current thoughts revolve around storing a material ID with each voxel and using some sort of probability based blending between them to give per-pixel material IDs from which I can shade. Texture co-ordinates will probably be produced using the blended tri-planar mapping technique I used in earlier projects using world space co-ordinates as the basis.
+It's one of the next things I want to try anyway, I'll post the results once I have something I'm happy with.
+Delete
+Replies
+Reply
+Scott RichmondOctober 9, 2012 at 12:55 AM
+Can one have a non-uniform resolution throughout the volume? What I mean is, can I have a higher resolution of voxels surrounding an area with sharp edges than an area where its smooth within the same volume?
+Regarding texturing - Material IDs work for the storage aspect. But what I see many run into are the limits around how many textures you can use in a single shader pass in older versions. Prior to methods such as 3D texture arrays most people sought after texture atlas's, which in my opinion are fairly hacky and come with their own set of limitations.
+I'm excited to see what you can come up with. :)
+Delete
+Replies
+Reply
+John WhighamOctober 9, 2012 at 11:32 AM
+You certainly can have a non-uniform resolution as bricks of voxels are stored at all non-empty octree nodes not just the leafs. This is primarily so the level of detail code can stop traversing down the tree when the voxels at the level it's at are small enough on screen to not need further subdivision. This helps prevent aliasing due to oversampling and improves performance.
+The tree itself need not be equally deep on all branches though so you could explicitly store more levels of detail where required rather than just relying on the octree construction code. You would need voxels approaching pixel size though to get your sharp edges.
+Texturing is certainly a challenge especially at high performance - I am also interested to see what I come up with!
+Delete
+Replies
+Reply
+Reply
+MartinOctober 8, 2012 at 11:12 AM
+Thanks for blogging
+I don't see this technology as a replacement for rasterization at the moment so while solving problems relating to texturing and sharpness is interesting I'd be more interesting in alternative storage, tracing radiance is of couse the obvious choice for global illumination or perhaps the tracing of soft shadows where the octree can be used to pre-filter the percentage visibility
+ReplyDelete
+Replies
+Reply
+UnknownFebruary 16, 2013 at 8:11 AM
+I am trying to do the very thing you are, which is render a planet that is made up of larger less detailed voxels from space, but then as you approach the planet's surface, more voxels are rendered, until at the surface you have a scene that you would see in minecraft, where you would be capable of building or destroying voxels. Do you think this is possible using this method? My other approach was to have a planet made up of many large blocks, and have 1 octree for each block, so that I can have more detail in each octree, instead of trying to use 1 octree for the entire planet(as I don't see how you would store enough detail with 1 octree)
+ReplyDelete
+Replies
+John WhighamFebruary 16, 2013 at 10:51 AM
+That's interesting Matthew, I spent some time experimenting with using the block approach you describe as that was my initial plan; each individual octree would have say eight levels of data then as you approached the top level would split into eight child octrees each with eight levels thus adding an additional effective level of data and so on. In this way the depth of each tree is bounded to make data storage more manageable and traversal performance more predictable.
+By indexing bricks from parent trees the actual voxel brick data could be shared by all trees using that level eliminating most data duplication.
+The main problem I found though was after the first level each octree had to be drawn using it's own cube of geometry so the pixel shader knew what it was working with but at the boundaries of the cube it really wanted to filter into the adjacent octree data to prevent seams but that data wasn't available to the pixel shader.
+I thought about storing larger borders with the octrees to enable this but decided instead to change tack more drastically. I haven't been very happy with the rigidity of the octree structure for a while so I'm experimenting with 3D clipmaps to store the voxel bricks; I've used clipmaps before in 2D for height fields and they should extend logically to 3D without great problem:
+http://www.cs.virginia.edu/~gfx/Courses/2002/BigData/papers/Texturing/Clipmap.pdf
+This should allow me greater flexibility on data structure granularity while providing an essentially infinite data field around the viewpoint. I'll still need to limit the number of levels being drawn at one time (currently I'm looking at 10 from a 22 level set) but it completely eliminates the sub-octree border problem.
+I hope to have something running soon I can post about.
+Delete
+Replies
+Reply
+Reply
+DejayMarch 30, 2013 at 9:06 PM
+Hello John, thanks for the very interesting article!
+But I haven't been able to figure out or google what you mean by "linear distance filtering" and "point distance sampling". Is this related to dual contouring of distance fields, e.g. tessellation from your previous projects? Or is this some method for raycasting the iso surface in an undersampled voxel (raymarching)? Thanks.
+ReplyDelete
+Replies
+John WhighamApril 10, 2013 at 5:41 PM
+Thanks Dejay, those terms simply relate to the filtering mode set on the GPU when sampling the distance field volume texture while ray-casting the pixels - the only geometry here is the enclosing box visible in the last screenshot that's used simply to restrict which pixels have the ray-casting pixel shader run on them. It could just as easily be done with a single screen covering quad and all pixels ray-casted.
+"Linear Distance Filtering" is using trilinear filtering to blend between the distance values read from the eight neighbouring volume texture texels while "Point Distance Sampling" is just reading one distance value from the single texel the point falls within - hence the blockier result.
+While trilinear filtering is conceptually far more expensive GPUs are designed to be really good at that sort of work so there isn't really an appreciable slow down that I've noticed. I guess it could happen though if the scene was complex enough as it is having to access more texture memory.
+Delete
+Replies
+Reply
+Reply
+zarfouboNovember 12, 2015 at 6:39 PM
+FYI:
+We finally launched the GigaVoxels release !
+Information, galeries, bins & sources, doc, papers, all is here : http://gigavoxels.imag.fr/
+( for Windows/Linux, CUDA/GLSL, in BSD3 - for academics & industry ).
+enjoy !
+ReplyDelete
+Replies
+Reply
+Add comment
+Load more...
+Comments, questions or feedback? Here's your chance...
+Newer Post
+Older Post
+Home
+Subscribe to:
+Post Comments (Atom)

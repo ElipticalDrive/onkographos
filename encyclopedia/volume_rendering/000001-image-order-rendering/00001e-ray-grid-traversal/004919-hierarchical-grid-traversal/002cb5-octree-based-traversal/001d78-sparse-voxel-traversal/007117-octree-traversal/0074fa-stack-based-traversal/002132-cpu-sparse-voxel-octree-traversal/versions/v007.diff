@@ -1,0 +1,362 @@
+--- v006.md
++++ v007.md
+@@ -1,198 +1,160 @@
+ # CPU Sparse Voxel Octree Traversal
+ 
+-Also called: SVO Traversal, Sparse Voxel Octree Ray Casting, Sparse Voxel Octree Tracing, Stack-based Sparse Voxel Octree Traversal
++Also called: SVO Traversal, Sparse Voxel Octree (SVO) Ray Tracing with Stack-Based Traversal, Sparse Voxel Octree Tracing, Stack-based Sparse Voxel Octree Traversal
+ 
+ ## Overview
+-CPU Sparse Voxel Octree Traversal is a real-time ray traversal algorithm for sparse voxel octrees that uses a stack-based approach to navigate from the root to leaf voxels, calculating intersections with node boundaries to determine the next octant [S1, unofficial]. It solves the problem of efficiently rendering large sparse voxel datasets on the CPU by avoiding the overhead of recursive function calls and leveraging explicit state management for cache-friendly memory access [S2, unofficial]. It sets itself apart from [Recursive Octree Traversal](2632-recursive-octree-traversal.md) by using an explicit stack instead of the call stack, and from [Parametric Octree Traversal](2361-parametric-octree-traversal.md) by relying on discrete slab boundaries or DDA steps rather than parametric intervals for child selection [S2, unofficial].
++CPU Sparse Voxel Octree Traversal is a real-time ray traversal algorithm for 3D sparse voxel octrees (SVO) that uses a stack-based approach to navigate from the root to leaf voxels, calculating intersections with node boundaries to determine the next octant [S1, S2, S3, unofficial]. It solves the problem of efficiently locating and sampling occupied voxels in a hierarchical spatial structure without relying on recursive function calls, thereby avoiding stack overflow risks and satisfying hardware constraints [S2, unofficial]. It sets itself apart from its siblings by using a linear block structure and explicit stack management to handle valid internal nodes, leaf nodes, and empty space, often optimizing for CPU cache locality and avoiding the sorting of children by distance required by other hierarchical methods [S1, S2, S3, unofficial].
+ 
+ ## How it works
+-The method traverses a Sparse Voxel Octree (SVO) stored in a linear block structure [S2, unofficial]. It initializes a ray for each pixel, pushes the root node onto a stack, and iteratively processes nodes until a leaf voxel is hit or the stack is empty [S1, S2, unofficial].
++The method traverses an SVO stored in a linear block structure. The core mechanism involves maintaining a stack of traversal states, where each state contains the node index or pointer, and intersection parameters relative to the ray [Parent].
+ 
+ ### Inputs and Outputs
+-*   **Input**: A Sparse Voxel Octree root node; a camera position; per-pixel ray directions; screen dimensions (`WIDTH`, `HEIGHT`); field of view factor (`fov`) [S2, unofficial].
+-*   **Output**: A rendered pixel color buffer.
++*   **Inputs**:
++    *   Ray: Origin $O$, Direction $D$ (normalized).
++    *   SVO: Root node, containing a hierarchy of `Voxel` and `Leaf` structures.
++    *   Camera parameters: Screen width $W$, height $H$, field of view $fov$ [S3, unofficial].
++*   **Outputs**:
++    *   Pixel color (e.g., RGB or RGBA) for the ray's corresponding screen coordinate.
++    *   Default color (e.g., background) if the ray misses all occupied voxels [S2, S3, unofficial].
+ 
+ ### Data Structures
+-The SVO nodes are stored in a linear array [S2, unofficial]. Two primary structures are used:
++The SVO nodes are stored in a linear array (block). The specific layout varies by implementation, but common fields include:
+ 
+-1.  **Voxel Node** (Internal Node):
+-    *   `leaf_mask`: `uint32_t`, 8-bit bitmask indicating which children are leaf voxels [S1, unofficial].
+-    *   `valid_masks`: `uint32_t`, 8-bit bitmask indicating which children exist (are not empty) [S1, unofficial].
+-    *   `child_pointers`: `uint32_t[8]`, indices into the root array for the 8 children [S1, unofficial].
+-2.  **Stack Entry** (for Iterative/Stack-based traversal):
+-    *   `voxel`: Pointer or index to the current node in the linear block [S2, unofficial].
+-    *   `octant`: The octant index (0-7) of the child being visited within the parent node [S2, unofficial].
+-    *   `ray_origin`: `float[3]`, current ray origin [S2, unofficial].
+-    *   `ray_direction`: `float[3]`, current ray direction [S2, unofficial].
+-    *   `box_size`: `float`, size of the bounding box at the current stack level [S2, unofficial].
+-    *   `corner`: `float[3]`, corner coordinate of the current bounding box [S2, unofficial].
+-    *   *Note*: The stack itself is an array of `StackEntry` with a `top` index tracking depth [S2, unofficial].
++**Node Structure (`vx_node` or `Voxel`)** [S2, S3, unofficial]:
++*   `valid_masks` (uint32_t): Bitmask of 8 bits indicating which children exist (are non-empty).
++*   `leaf_mask` (uint32_t): Bitmask of 8 bits indicating which children are leaf voxels.
++*   `child_pointers` (uint32_t[8]): Indices into the root array for children.
++*   `is_leaf` (bool): Indicates if the current node is a leaf.
++*   `is_valid` (bool): Indicates if the node contains data.
++
++**Stack Entry Structure** [S2, S3, unofficial]:
++*   `voxel`: Pointer or index to the current node in the linear block.
++*   `box`: Bounding box (AABB) of the current node, defined by `min` and `max` coordinates.
++*   `half_size`: Half the side length of the current node's bounding box.
++*   `octant`: The octant index (0-7) of the child being traversed.
++*   `planes`: Intersection planes or distances for the current node boundaries.
+ 
+ ### Numbered Steps
+ 
+-1.  **Initialize Ray**: For each pixel $(i, j)$, compute screen coordinates and ray direction [S2, unofficial].
+-    *   $screen\_x = (i \times fov) / WIDTH - 0.5$
+-    *   $screen\_y = (j \times fov) / HEIGHT - 0.5$
+-    *   $direction = (screen\_x \times scale.x, -1 \times scale.y, screen\_y \times scale.z)$ [S2, unofficial].
+-    *   Set ray origin to camera position.
+-2.  **Push Root**: Push the root node of the octree onto the stack [S2, unofficial].
+-    *   Set initial `box_size` to the root box size [S2, unofficial].
+-    *   Set initial `corner` to the root box corner (e.g., $(-1, -1, -1)$) [S2, unofficial].
+-    *   Set initial `octant` to 0.
+-3.  **Traversal Loop**: While the stack is not empty:
+-    a.  **Peek**: Get the current stack entry. Let `node` be the current voxel, `oct` be the current octant [S1, unofficial].
+-    b.  **Check Validity**: Check if the child at `oct` exists [S1, unofficial].
+-        *   `valid = (node.valid_masks >> oct) & 1` [S1, unofficial].
+-    c.  **If Invalid**:
+-        *   Compute `child_size = box_size * 0.5` [S2, unofficial].
+-        *   Compute `child_corner` by adjusting `corner` by `child_size` and `oct` [S2, unofficial].
+-        *   Mirror ray and corner for intersection: `mask = octant_mask(oct)`, `mirror_origin = mirror(ray.origin, mask)`, `mirror_direction = mirror(ray.direction, mask)`, `mirror_corner = mirror(child_corner, mask)`, `mirror_corner.adjust_corner(-child_size, mask)` [S2, unofficial].
+-        *   Compute intersection distances: $t_x = (mirror\_corner.x - mirror\_origin.x) / mirror\_direction.x$, $t_y = (mirror\_corner.y - mirror\_origin.y) / mirror\_direction.y$, $t_z = (mirror\_corner.z - mirror\_origin.z) / mirror\_direction.z$ [S2, unofficial].
+-        *   Find smallest positive $t$ and hit face: Initialize $t = \infty$, $hit\_face = 0$. If $t_x > 0$, $t = t_x$, $hit\_face = 4$. If $t_y > 0$ and $t_y < t$, $t = t_y$, $hit\_face = 2$. If $t_z > 0$ and $t_z < t$, $t = t_z$, $hit\_face = 1$ [S2, unofficial].
+-        *   March ray: `ray_origin += ray_direction * t` [S2, unofficial].
+-        *   Transfer to sibling: `octant ^= hit_face` [S2, unofficial].
+-        *   Continue loop.
+-    d.  **If Valid**:
+-        *   Check if Leaf: `is_leaf = (node.leaf_mask >> oct) & 1` [S1, unofficial].
+-        *   **If Leaf**:
+-            *   Retrieve leaf data.
+-            *   Compute lighting: `lightness = 1.0 / (ray.square_distance() + 1.0)` [S2, unofficial].
+-            *   Set pixel color: `pixel[1] += (0xff - pixel[1]) / 64` [S2, unofficial].
+-            *   Break loop.
+-        *   **If Internal Node**:
+-            *   Push child node to stack.
+-            *   Update `box_size *= 0.5`.
+-            *   Update `corner` by adding `half_size` if `octant` bit is set [S1, unofficial].
+-            *   Set `octant` to 0.
+-            *   Continue loop.
+-4.  **Exit Condition**:
+-    *   If stack is empty and no voxel hit, return default color `0xFF000000` [S1, unofficial].
++1.  **Initialization**:
++    *   Compute ray direction for each pixel $(i, j)$:
++        $$ screen\_x = \frac{i \cdot fov}{W} - 0.5 $$
++        $$ screen\_y = \frac{j \cdot fov}{H} - 0.5 $$
++        $$ direction = (screen\_x \cdot scale.x, -scale.y, screen\_y \cdot scale.z) $$ [S3, unofficial]
++    *   Initialize the stack with the root node and the ray's entry/exit distances for the root bounding volume. The root bounding box is typically the axis-aligned bounding box (AABB) of the entire scene [S1, S3, unofficial].
++    *   Set `stack_pos = 0` [S2, unofficial].
+ 
+-### Formulas
+-*   **Ray-Box Intersection**:
+-    *   $t_x = (mirror\_corner.x - mirror\_origin.x) / mirror\_direction.x$
+-    *   $t_y = (mirror\_corner.y - mirror\_origin.y) / mirror\_direction.y$
+-    *   $t_z = (mirror\_corner.z - mirror\_origin.z) / mirror\_direction.z$
+-    *   $t = \min(t_x, t_y, t_z)$ where $t > 0$ [S2, unofficial].
+-*   **Octant Masking**:
+-    *   $mask = ray.octant\_mask()$ [S2, unofficial].
+-    *   Used to mirror ray components for slab intersection tests [S2, unofficial].
++2.  **Traversal Loop**:
++    *   While `stack_pos >= 0`:
++        *   Pop the top state from the stack (implicitly by decrementing `stack_pos` after processing or managing it via index) [S2, S3, unofficial].
++        *   **Check Validity**: Check if the current node has the target child (octant) using `valid_masks`:
++            ```python
++            if not (node.valid_masks & (1 << octant)):
++                # Child does not exist, skip to next stack item
++                continue
++            ``` [S2, unofficial]
++        *   **Check Leaf**: If the child is a leaf voxel:
++            ```python
++            if node.leaf_mask & (1 << octant):
++                # Retrieve voxel struct
++                voxel = octree.root[child_ptr]
++                # Compute lighting/color
++                color = compute_lighting(voxel, ray)
++                return color
++            ``` [S2, unofficial]
++        *   **Traverse Internal Node**:
++            *   Compute intersection distances for the children. This is often done by determining the first intersecting plane of the current node's boundaries [S2, S3, unofficial].
++            *   Calculate $t$ values for the planes:
++                $$ t = \frac{planes - ray\_origin}{ray\_direction} $$ [S2, unofficial]
++            *   Determine the first intersecting plane:
++                $$ intersection\_plane = \arg\min(t[0], t[1], t[2]) $$ [S2, unofficial]
++            *   Identify the octant of the child the ray enters.
++            *   Push the child node onto the stack in reverse order of distance (farthest first) to ensure the closest child is popped next. In many SVO implementations, this is handled by pushing only the relevant children (up to 4) based on grid traversal order, avoiding full sorting [S1, S2, unofficial].
++            *   Update the bounding box and half-size for the child:
++                $$ box_{child} = box_{parent} + \text{IfThenElseZero}(octant, half\_size) $$
++                $$ half\_size_{child} = half\_size_{parent} \times 0.5 $$ [S2, unofficial]
++            *   Increment `stack_pos` and update the octant and planes for the new level [S2, unofficial].
+ 
+-### Parameters
+-*   `MAX_DETAIL_LEVEL`: Maximum recursion depth, typically 20 [S1, unofficial].
+-*   `WIDTH`: Screen width, e.g., 1280 [S2, unofficial].
+-*   `HEIGHT`: Screen height, e.g., 720 [S2, unofficial].
+-*   `fov`: Field of view factor, 1.0 corresponds to 90 degrees, default 1.2 [S2, unofficial].
++3.  **Backtracking**:
++    *   If the ray exits a node (i.e., $t > t_{max}$ for the current node's bounds), pop the stack.
++    *   When popping, update the parent's state:
++        $$ half\_size_{parent} *= 2.0 $$
++        $$ box_{parent} -= \text{IfThenElseZero}(octant, half\_size_{parent}) $$
++        $$ octant_{parent} \oplus= hit\_face $$ [S2, S3, unofficial]
++    *   Continue to the next item on the stack.
+ 
+-### Edge Cases and Pitfalls
+-*   **Empty Stack**: If the stack becomes empty before a leaf is hit, the ray has exited the octree. Return a default background color [S1, S2, unofficial].
+-*   **Precision**: Floating-point precision issues may cause rays to miss voxels or intersect incorrectly. Use epsilon values for comparisons if necessary [G].
+-*   **Zero Direction Components**: Division by zero in ray-box intersection occurs if a ray direction component is exactly zero. Clamp or add a small epsilon to the denominator [G].
++4.  **Termination**:
++    *   If the stack is empty and no leaf was hit, return the default background color (e.g., opaque red `0xFF000000` or a specific blue channel value) [S2, S3, unofficial].
+ 
+ ### Pseudocode
+ ```python
+-def cpu_svo_traversal(root, camera_pos, width, height, fov):
+-    buffer = [0] * (width * height)
+-    scale = (1.0, 1.0, 1.0)
++def traverse_svo(ray, octree, width, height, fov):
++    # Initialize screen coordinates
++    screen_x = (ray.pixel_i * fov) / width - 0.5
++    screen_y = (ray.pixel_j * fov) / height - 0.5
++    direction = Vector(screen_x * scale.x, -scale.y, screen_y * scale.z)
+     
+-    for j in range(height):
+-        for i in range(width):
+-            screen_x = (i * fov) / width - 0.5
+-            screen_y = (j * fov) / height - 0.5
+-            direction = (screen_x * scale[0], -scale[1], screen_y * scale[2])
+-            ray_origin = list(camera_pos)
+-            ray_direction = list(direction)
++    # Initialize stack
++    stack = []
++    stack.push(RootNode, ray.origin, direction, root_box)
++    
++    while stack is not empty:
++        node, origin, dir, box = stack.pop()
++        
++        # Check if node is valid and has children
++        if not node.is_valid:
++            continue
+             
+-            stack = [{'voxel': root, 'octant': 0, 'ray_origin': ray_origin, 'ray_direction': ray_direction, 'box_size': 2.0, 'corner': (-1.0, -1.0, -1.0)}]
++        # Determine octant
++        octant = get_octant(origin, dir, box)
++        
++        # Check if child exists
++        if not (node.valid_masks & (1 << octant)):
++            continue
+             
+-            hit = False
+-            while stack:
+-                entry = stack[-1]
+-                node = entry['voxel']
+-                oct = entry['octant']
+-                ray_origin = entry['ray_origin']
+-                ray_direction = entry['ray_direction']
+-                box_size = entry['box_size']
+-                corner = list(entry['corner'])
++        # Check if child is a leaf
++        if node.leaf_mask & (1 << octant):
++            child_ptr = node.child_pointers[octant]
++            leaf = octree.get_leaf(child_ptr)
++            return compute_color(leaf, origin, dir)
++        
++        # Internal node: compute children intersections
++        # Calculate intersection t values for planes
++        t = (planes - origin) / dir
++        hit_plane = argmin(t)
++        
++        # Identify next octant and push children
++        # Only push up to 4 children to avoid sorting
++        for child_octant in get_relevant_children(octant, hit_plane):
++            if node.valid_masks & (1 << child_octant):
++                child_box = update_box(box, child_octant)
++                child_half_size = box.half_size * 0.5
++                stack.push(node.child_pointers[child_octant], origin, dir, child_box)
+                 
+-                valid = (node['valid_masks'] >> oct) & 1
+-                if not valid:
+-                    child_size = box_size * 0.5
+-                    child_corner = list(corner)
+-                    if oct & 1: child_corner[0] += child_size
+-                    if oct & 2: child_corner[1] += child_size
+-                    if oct & 4: child_corner[2] += child_size
+-                    
+-                    mask = oct
+-                    mirror_origin = [ray_origin[k] if not (mask & (1<<k)) else -ray_origin[k] for k in range(3)]
+-                    mirror_direction = [ray_direction[k] if not (mask & (1<<k)) else -ray_direction[k] for k in range(3)]
+-                    mirror_corner = [child_corner[k] if not (mask & (1<<k)) else -child_corner[k] for k in range(3)]
+-                    for k in range(3):
+-                        if mask & (1<<k):
+-                            mirror_corner[k] -= child_size
+-                    
+-                    # Guard against zero direction components
+-                    tx = float('inf') if mirror_direction[0] == 0 else (mirror_corner[0] - mirror_origin[0]) / mirror_direction[0]
+-                    ty = float('inf') if mirror_direction[1] == 0 else (mirror_corner[1] - mirror_origin[1]) / mirror_direction[1]
+-                    tz = float('inf') if mirror_direction[2] == 0 else (mirror_corner[2] - mirror_origin[2]) / mirror_direction[2]
+-                    
+-                    t = float('inf')
+-                    hit_face = 0
+-                    if tx > 0:
+-                        t = tx
+-                        hit_face = 4
+-                    if ty > 0 and ty < t:
+-                        t = ty
+-                        hit_face = 2
+-                    if tz > 0 and tz < t:
+-                        t = tz
+-                        hit_face = 1
+-                    
+-                    if t == float('inf'):
+-                        stack.pop()
+-                        continue
+-                    
+-                    ray_origin[0] += ray_direction[0] * t
+-                    ray_origin[1] += ray_direction[1] * t
+-                    ray_origin[2] += ray_direction[2] * t
+-                    
+-                    entry['octant'] ^= hit_face
+-                    continue
+-                
+-                is_leaf = (node['leaf_mask'] >> oct) & 1
+-                if is_leaf:
+-                    leaf = node['child_pointers'][oct]
+-                    dist_sq = sum((ray_origin[k] - leaf['pos'][k])**2 for k in range(3))
+-                    lightness = 1.0 / (dist_sq + 1.0)
+-                    pixel_idx = j * width + i
+-                    buffer[pixel_idx] = (0, int((0xff - buffer[pixel_idx]) / 64 + buffer[pixel_idx]), 0, 0xff)
+-                    hit = True
+-                    break
+-                else:
+-                    half_size = box_size * 0.5
+-                    new_corner = list(corner)
+-                    if oct & 1: new_corner[0] += half_size
+-                    if oct & 2: new_corner[1] += half_size
+-                    if oct & 4: new_corner[2] += half_size
+-                    
+-                    child_node = node['child_pointers'][oct]
+-                    stack.append({'voxel': child_node, 'octant': 0, 'ray_origin': ray_origin, 'ray_direction': ray_direction, 'box_size': half_size, 'corner': new_corner})
+-            
+-            if not hit:
+-                pixel_idx = j * width + i
+-                buffer[pixel_idx] = 0xFF000000
+-    return buffer
++    return default_color
+ ```
++
++### Parameters
++*   **MAX_DETAIL_LEVEL**: Maximum recursion depth for the octree traversal, typically set to 20 [S2, unofficial].
++*   **SVO Resolution**: The base resolution of the voxel grid, e.g., 256 [S1, unofficial].
++*   **Screen Dimensions**: Width and Height in pixels, e.g., 1280x720 [S3, unofficial].
++*   **Field of View (fov)**: Factor where 1.0 corresponds to 90 degrees, default 1.2 [S3, unofficial].
++
++### Edge Cases and Pitfalls
++*   **Empty Stack**: If the stack becomes empty before a leaf is hit, the ray has exited the scene. Return a default color [S2, S3, unofficial].
++*   **Invalid Nodes**: Skip nodes where `valid_masks` does not include the current octant [S2, unofficial].
++*   **Precision**: Handle zero direction components in ray-box intersection tests by clamping $d_i$ to $\epsilon$ or using infinity for $t$ calculations to avoid division by zero [Parent].
++*   **Stack Overflow**: Using an explicit stack prevents stack overflow issues associated with recursive traversal [S2, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Parametric Octree Traversal](2361-parametric-octree-traversal.md)
+-Parametric Octree Traversal is a top-down recursive algorithm for finding all voxels in a sparse voxel octree intersected by a ray. It solves the problem of efficiently traversing non-uniform octrees without maintaining neighbor pointers or sorting potentially visited sub-voxels. It sets itself apart from bottom-up methods like Samet by avoiding neighbor finding, and from HERO by computing the sequence of visited sub-voxels sequentially using simple parametric comparisons rather than sorting.
++Parametric Octree Traversal is a top-down algorithm for finding the subset of voxels in an octree intersected by a straight line (ray). It computes parameter values at which the ray intersects voxel boundary planes incrementally using additions and divisions by two, and selects child sub-voxels via comparisons on these parameter values to avoid neighbor finding. It sets itself apart from its siblings and nearest alternatives by using simple comparisons on ray parameters to determine the first sub-voxel and subsequent transitions, thereby avoiding the neighbor-finding overhead of bottom-up methods like Samet and the sorting of potentially visited sub-voxels required by the HERO algorithm.
+ 
+ ### [Iterative Octree Traversal](2618-iterative-octree-traversal.md)
+-Iterative Octree Traversal is a method for raycasting against a 3D Sparse Voxel Octree (SVO) that replaces recursive function calls with an explicit stack to comply with hardware constraints (such as HLSL recursion limits) or to optimize CPU cache behavior. It solves the problem of unbounded call stack depth by simulating the traversal state using fixed-size arrays or dynamic stacks, employing a greedy approach that prioritizes the closest node while handling false positives via backtracking. It sets itself apart from [Recursive Octree Traversal](2632-recursive-octree-traversal.md) by explicitly managing the call stack and from [Parametric Octree Traversal](2361-parametric-octree-traversal.md) by often using discrete slab boundaries or DDA steps rather than parametric intervals for child selection.
++Iterative Octree Traversal is a method for raycasting against a Sparse Voxel Octree (SVO) that replaces recursive function calls with an explicit stack-based data structure, primarily to satisfy hardware constraints such as HLSL recursion limits or CPU stack size restrictions. It solves the problem of traversing hierarchical spatial data without risking stack overflow or violating shader model restrictions, using a greedy approach that prioritizes the closest node and backtracks on false positives. Unlike [Recursive Octree Traversal](2632-recursive-octree-traversal.md), which relies on the call stack, this method explicitly manages traversal state and parent pointers to navigate the tree hierarchy.
+ 
+ ### [Recursive Octree Traversal](2632-recursive-octree-traversal.md)
+-Recursive Octree Traversal is a depth-first algorithm that processes a 3D sparse voxel octree by visiting nodes to either render them as geometry or process them for mesh generation. It differs from [Iterative Octree Traversal](2618-iterative-octree-traversal.md) by using the call stack instead of an explicit stack, and from [Parametric Octree Traversal](2361-parametric-octree-traversal.md) by relying on hierarchical node masks rather than parametric ray-marching. It builds on [CPU Sparse Voxel Octree Traversal](2455-cpu-sparse-voxel-octree-traversal.md) by replacing the stack-based state machine with direct recursive function calls.
++Recursive octree traversal is a standard algorithm for ray casting against a 3D sparse voxel octree, where the traversal logic is implemented via a recursive function that visits nodes in depth-first order. It solves the problem of efficiently locating and sampling leaf nodes (or specific depth levels) along a ray by recursively descending into child nodes only when the ray intersects their axis-aligned bounding boxes (AABBs). It differs from its siblings by relying on the call stack for state management rather than an explicit stack or parametric surface equations.
+ 
+ ### [Compact Voxel Octree Raycasting](2980-compact-voxel-octree-raycasting.md)
+@@ -200,19 +162,25 @@
+ 
+ ### [Sparse Voxel Octree Path Tracing](2988-sparse-voxel-octree-path-tracing.md)
+-Sparse Voxel Octree Path Tracing is a rendering technique that traverses a Sparse Voxel Octree (SVO) structure on the CPU to perform path tracing, writing results to a texture displayed via OpenGL. It differs from GPU-based SVO rendering by performing all ray marching and shading calculations on the host processor, using a linear block structure for the octree and a stack-based traversal mechanism. It builds on [CPU Sparse Voxel Octree Traversal](2455-cpu-sparse-voxel-octree-traversal.md) by integrating the traversal logic into a full path tracing loop that handles light bounces and material reflectivity.
++Sparse Voxel Octree (SVO) Path Tracing is a CPU-based rendering technique that traverses a sparse voxel octree (or DAG) structure to compute physically based lighting via recursive path tracing. It solves the problem of rendering complex, high-resolution voxel-based scenes efficiently by skipping empty space and only processing occupied nodes, writing the accumulated radiance to a texture for display. Unlike its siblings which focus on specific traversal optimizations (e.g., parametric or iterative steps), this method integrates the traversal directly into a Monte Carlo path tracer with Russian roulette termination, diffuse/specular bounces, and material properties (metalness, roughness, emission) stored in the leaf nodes.
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: $O(N)$ where $N$ is the number of nodes visited along the ray path. In sparse scenes, this is significantly less than dense voxel traversal.
+-*   **Memory Complexity**: $O(D)$ where $D$ is the depth of the octree, for the stack.
+-*   **Performance**: Real-time performance is achievable on CPU for moderate resolution scenes [S1, unofficial]. Performance scales with the sparsity of the voxel data.
+-*   **Strengths**: Efficient for sparse data; no need for neighbor pointers; explicit stack allows for easy optimization and debugging.
+-*   **Limitations**: Stack management overhead; potential for cache misses if node layout is not optimized.
+-*   **When to Use**: CPU-based rendering of large sparse voxel datasets; when GPU recursion limits are a concern.
+-*   **When Not to Use**: Dense voxel data; when GPU acceleration is available and preferred.
++*   **Time Complexity**: $O(N)$ where $N$ is the number of nodes visited along the ray path. In practice, this is much less than the total number of voxels due to the sparsity of the octree.
++*   **Memory Complexity**: $O(D)$ where $D$ is the depth of the octree, for the stack. The SVO itself requires $O(V)$ memory where $V$ is the number of voxels.
++*   **Measured Performance**: A 256 resolution SVO of the Sponza scene renders at 200 ms per frame on a GTX 1070 [S1, unofficial].
++*   **Strengths**:
++    *   Avoids sorting children by distance, unlike methods that check all 8 children [S1, unofficial].
++    *   Explicit stack management prevents stack overflow [S2, unofficial].
++    *   Efficient for sparse scenes by skipping empty space [S1, S2, unofficial].
++*   **Limitations**:
++    *   Performance can degrade if the scene is dense or the ray passes through many small nodes.
++    *   Requires careful handling of precision and boundary conditions [Parent].
++*   **When to Use**: Suitable for real-time rendering of large, sparse voxel-based scenes on CPU or GPU where memory bandwidth and cache locality are critical [S2, unofficial].
++*   **When Not to Use**: Not ideal for dense, uniform voxel grids where a simple 3D texture lookup might be faster [S1, unofficial].
+ 
+ ## Background
+-CPU Sparse Voxel Octree Traversal was developed as part of real-time voxel rendering experiments, notably in the `voxl` project by Robert Olsson [S1, unofficial] and the `zazen` engine by Gabriel Muller [S2, unofficial]. These projects aimed to bring real-time sparse voxel rendering to the CPU, inspired by commercial solutions like Euclideon [S1, unofficial]. The method has been used in academic projects and open-source engines to demonstrate efficient CPU-based voxel rendering.
++CPU Sparse Voxel Octree Traversal originated from the need to render high-resolution, complex 3D scenes efficiently. The method is inspired by the work of Euclideon and has been implemented in various open-source projects such as `voxl` and `zazen` [S2, S3, unofficial]. The use of a stack-based approach allows for efficient traversal without the overhead of recursion, making it suitable for both CPU and GPU implementations [S2, unofficial]. The algorithm has been optimized for real-time performance, with techniques such as limiting the number of children checked per voxel and avoiding sorting [S1, unofficial].
+ 
+ ## Sources
+-[S1] rools/voxl, https://github.com/rools/voxl, fetched 2026-10-26 (unofficial)
+-[S2] gabrielmuller/zazen, https://github.com/gabrielmuller/zazen, fetched 2026-10-26 (unofficial)+[S1] Sparse voxel oct tree tracing, optimization tricks?, https://computergraphics.stackexchange.com/questions/12459/sparse-voxel-oct-tree-tracing-optimization-tricks, fetched 2026-10-24 (unofficial)
++[S2] rools/voxl, https://github.com/rools/voxl, fetched 2026-10-26 (unofficial)
++[S3] gabrielmuller/zazen, https://github.com/gabrielmuller/zazen, fetched 2026-10-26 (unofficial)

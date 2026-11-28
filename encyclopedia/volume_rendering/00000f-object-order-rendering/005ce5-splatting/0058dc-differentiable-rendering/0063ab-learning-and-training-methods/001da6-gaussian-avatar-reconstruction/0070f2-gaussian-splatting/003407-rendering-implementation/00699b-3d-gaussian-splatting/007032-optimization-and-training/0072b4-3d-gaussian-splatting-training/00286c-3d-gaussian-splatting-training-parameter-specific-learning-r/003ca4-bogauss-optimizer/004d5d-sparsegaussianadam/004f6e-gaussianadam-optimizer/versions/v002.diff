@@ -1,0 +1,144 @@
+--- v001.md
++++ v002.md
+@@ -1,5 +1,4 @@
+ # GaussianAdam Optimizer
+ 
+-Also called: GaussianAdam
+ 
+ ## Overview
+@@ -8,14 +7,14 @@
+ ## How it works
+ **Inputs and Outputs:**
+-- **Input:** Parameter tensor `param`, gradient tensor `param.grad`, hyperparameters `lr` (base learning rate), `eps` (numerical stability epsilon), `feature_width` (number of contiguous scalar values per Gaussian), `max_steps` (buffer size), `current_step` (optimization iteration).
+-- **Output:** Updated `param` tensor and updated state dictionary.
++- **Input:** Parameter tensor `param`, gradient tensor `param.grad`, hyperparameters `lr` (base learning rate) [S1, unofficial], `eps` (numerical stability epsilon) [S1, unofficial], `feature_width` (number of contiguous scalar values per Gaussian) [S1, unofficial], `max_steps` (buffer size) [S1, unofficial], `current_step` (optimization iteration) [S1, unofficial].
++- **Output:** Updated `param` tensor and updated state dictionary [S1, unofficial].
+ 
+ **Data Structures:**
+-The state dictionary contains the following fields with exact layouts:
++The state dictionary contains the following fields with exact layouts [S1, unofficial]:
+ - `step`: `int64` scalar, tracking the current optimization step.
+ - `exp_avg`: `float32` tensor, shape matches `param`, storing the first moment estimate.
+ - `exp_avg_sq`: `float32` tensor, shape matches `param`, storing the second moment estimate.
+-- `last_seen_step`: `int32` tensor, shape `(N,)`, where `N` is the number of Gaussians, storing the last step each Gaussian was visible.
+-- `lr_history`: `float32` tensor, shape `(max_steps,)`, storing the learning rate history for adaptive scheduling.
++- `last_seen_step`: `int32` tensor, shape `(N,)`, where `N` is the number of Gaussians, storing the last step each Gaussian was visible [S1, unofficial].
++- `lr_history`: `float32` tensor, shape `(max_steps,)`, storing the learning rate history for adaptive scheduling [S1, unofficial].
+ 
+ **Parameters:**
+@@ -32,29 +31,16 @@
+ 5. Compute `visible` mask based on Gaussian visibility (e.g., radii or rendering contribution) [S1, unofficial].
+ 6. Resolve `feature_width` [S1, unofficial].
+-7. Call the C++/CUDA kernel `_C.adamUpdateTorch` with the following arguments:
+-   - `param`: Parameter tensor.
+-   - `param.grad`: Gradient tensor.
+-   - `state["exp_avg"]`: First moment buffer.
+-   - `state["exp_avg_sq"]`: Second moment buffer.
+-   - `state["last_seen_step"]`: Last seen step buffer.
+-   - `lr_history`: Learning rate history buffer.
+-   - `visible`: Visibility mask.
+-   - `0.9`: Beta1 hyperparameter.
+-   - `0.999`: Beta2 hyperparameter.
+-   - `eps`: Epsilon for numerical stability.
+-   - `current_step`: Current optimization step.
+-   - `N`: Number of Gaussians.
+-   - `feature_width`: Feature width per Gaussian.
++7. Apply the Adam update using hyperparameters 0.9, 0.999, and `eps`, masking updates to visible Gaussians and using `last_seen_step` for visibility tracking [S1, unofficial].
+ 8. Update `state['step'].fill_(current_step)` [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def gaussian_adam_update(param, param_grad, state, lr, eps, feature_width, max_steps, current_step, N, visible):
++def gaussian_adam_update(param, grad, state, lr, eps, feature_width, max_steps, current_step, N, visible):
+     # Guard: Skip update if gradient is None
+-    if param_grad is None:
++    if grad is None:
+         return
+ 
+     # Guard: feature_width must evenly divide param.numel()
+-    if param.numel() % feature_width != 0:
++    if len(param) % feature_width != 0:
+         raise ValueError("feature_width must evenly divide param.numel()")
+ 
+@@ -65,14 +51,13 @@
+     # Initialize state buffers if not present
+     if "exp_avg" not in state:
+-        state["exp_avg"] = torch.zeros_like(param, dtype=torch.float32)
+-        state["exp_avg_sq"] = torch.zeros_like(param, dtype=torch.float32)
+-        state["last_seen_step"] = torch.zeros(N, dtype=torch.int32)
+-        state["lr_history"] = torch.zeros(max_steps, dtype=torch.float32)
+-        state["step"] = torch.tensor(0, dtype=torch.int64)
++        state["exp_avg"] = [0.0] * len(param)
++        state["exp_avg_sq"] = [0.0] * len(param)
++        state["last_seen_step"] = [0] * N
++        state["lr_history"] = [0.0] * max_steps
++        state["step"] = 0
+ 
+     # Ensure lr_history capacity
+-    if current_step >= state["lr_history"].numel():
+-        # Extend buffer if necessary, or clamp current_step
+-        # Note: Implementation detail for buffer management not fully specified in sources [G]
++    if current_step >= len(state["lr_history"]):
++        # Extend buffer if necessary, or clamp current_step [G]
+         pass
+ 
+@@ -80,24 +65,25 @@
+     state["lr_history"][current_step] = lr
+ 
+-    # Call the optimized C++/CUDA kernel for the actual update
+-    # This kernel handles the Adam update logic, visibility masking, and per-Gaussian LR scheduling
+-    _C.adamUpdateTorch(
+-        param,
+-        param_grad,
+-        state["exp_avg"],
+-        state["exp_avg_sq"],
+-        state["last_seen_step"],
+-        state["lr_history"],
+-        visible,
+-        0.9,
+-        0.999,
+-        eps,
+-        current_step,
+-        N,
+-        feature_width,
+-    )
++    beta1, beta2 = 0.9, 0.999
++    # Update first and second moment estimates
++    for i in range(len(param)):
++        state["exp_avg"][i] = beta1 * state["exp_avg"][i] + (1 - beta1) * grad[i]
++        state["exp_avg_sq"][i] = beta2 * state["exp_avg_sq"][i] + (1 - beta2) * grad[i] ** 2
+ 
+-    # Update step counter
+-    state["step"].fill_(current_step)
++    # Bias correction
++    bias_correction1 = 1 - beta1 ** current_step
++    bias_correction2 = 1 - beta2 ** current_step
++    step_size = lr * (bias_correction2 ** 0.5) / bias_correction1
++
++    # Apply update only to visible Gaussians
++    for i in range(len(param)):
++        denom = (state["exp_avg_sq"][i] ** 0.5) + eps
++        update = step_size * state["exp_avg"][i] / denom
++        if visible[i // feature_width]:
++            param[i] -= update
++
++    # Update last_seen_step and step counter
++    state["last_seen_step"] = [current_step] * N
++    state["step"] = current_step
+ ```
+ 
+@@ -106,4 +92,9 @@
+ - `feature_width` must evenly divide `param.numel()`, otherwise a `ValueError` is raised [S1, unofficial].
+ - `N` (number of Gaussians) cannot be negative [S1, unofficial].
++
++## Subtopics
++
++### Thread for CPU Adam Update
++A dedicated CPU thread for executing Adam updates on a subset of Gaussians, releasing the Python GIL to allow concurrent processing [S2]. It extends the Zero-offload implementation to allow updating a subset of Gaussians that have completed gradients at each call [S2]. A signal buffer in CPU pinned memory is used to synchronize the GPU communication stream and the CPU Adam thread [S2]. The GPU communication stream sets the gradient completion signal via DMA after the gradient transfer kernel finishes, while the CPU Adam thread waits on the signal buffer before performing the Adam update after the microbatch [S2].
+ 
+ ## Operating characteristics
+@@ -114,3 +105,4 @@
+ 
+ ## Sources
+-[S1] XiaoBin2001/Improved-GS, https://github.com/XiaoBin2001/Improved-GS, fetched 2026-10-27 (unofficial)+[S1] XiaoBin2001/Improved-GS, https://github.com/XiaoBin2001/Improved-GS, fetched 2026-10-27 (unofficial)
++[S2] CLM: Removing the GPU Memory Barrier for 3D Gaussian Splatting, https://doi.org/10.1145/3779212.3790140, fetched 2026-10-31

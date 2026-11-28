@@ -1,0 +1,28 @@
+# Resolution Level Management and Selection
+
+
+## Overview
+Resolution Level Management and Selection constitutes the family of algorithms responsible for mapping geometric visibility criteria to specific discrete data representations within a multiresolution hierarchy. It solves the problem of determining which resolution level of a volume brick or voxel is appropriate for rendering at a given screen position, ensuring that the selected level is both visually sufficient and available in the cache. This family is distinguished from sibling methods by its focus on the low-level arithmetic and bitwise operations required to traverse the hierarchy indices, rather than high-level culling strategies or streaming policies. It provides the foundational calculations for [Level of Detail Calculation](7836-level-of-detail-calculation.md) and the specific cache-residency checks for [Choosing Alternative Resolutions](5314-choosing-alternative-resolutions.md) and [Finding Higher Resolution Levels](5315-finding-higher-resolution-levels.md).
+
+## Shared principles
+All methods in this family operate on a discrete hierarchy of resolution levels indexed from $0$ (highest resolution) to $k$ (lowest resolution) . The core mechanism involves mapping a continuous geometric metric, typically the projected width $w$ of a voxel or brick in screen space, to a discrete level index. This mapping relies on the logarithmic relationship between spatial frequency and resolution level, where each level represents a scaling factor of $2$ in linear dimensions [G].
+
+The family shares the following mathematical and structural operations:
+*   **Logarithmic Level Mapping:** The target continuous level $L$ is derived from the maximum hierarchy depth $M$ and the projected width $w$ using the formula $L = M - 1 + \log_2(w)$ . This allows for fractional level selection, which is subsequently decomposed into integer floor and ceiling levels for discrete data access .
+*   **Bitmask Representation:** Cache residency and partial mapping status are often encoded in bitmasks where the $i$-th bit corresponds to resolution level $i$ . This enables efficient bitwise operations to query available resolutions.
+*   **Bitwise Traversal:** Finding the next valid resolution level involves isolating bits using masks and identifying the position of set bits (leading or trailing) using hardware instructions or software fallbacks .
+
+## Subtopics
+
+### [Choosing Alternative Resolutions](5314-choosing-alternative-resolutions.md)
+This method selects a valid, cache-resident resolution level when the desired resolution is not available in the cache. It solves the problem of missing data bricks by iteratively searching for alternative resolutions based on a node's residency bitmap, prioritizing lower resolutions (coarser) before higher ones (finer). It differs from [Finding Higher Resolution Levels](5315-finding-higher-resolution-levels.md) by its primary search direction (lower first) and from [Hierarchical Culling & Multi-resolution Approximation](2010-hierarchical-culling-multi-resolution-approximation.md) by relying on explicit bitmap masks rather than error metrics for selection.
+
+### [Finding Higher Resolution Levels](5315-finding-higher-resolution-levels.md)
+This method finds the next higher resolution level for a residency octree node given its current resolution index and a bitmap of partially mapped resolutions. It advances the traversal depth by selecting the finest available resolution from the bitmap using bitwise operations. It differs from [Choosing Alternative Resolutions](5314-choosing-alternative-resolutions.md) by only searching in the direction of higher resolution (lower index) and not checking for mapped pages within the node, assuming the caller handles page-level validity.
+
+### [Level of Detail Calculation](7836-level-of-detail-calculation.md)
+Level of Detail Calculation determines the resolution level for a voxel or brick based on its projected width. It provides the fundamental mathematical mapping from geometric extent to discrete hierarchy levels, which other selection methods use as a basis for culling or error-based decisions [G]. It differs from the other children by providing the continuous-to-discrete conversion logic rather than the cache-residency lookup logic.
+
+## Background
+The mathematical foundation for Level of Detail Calculation originates from the work of , which establishes the logarithmic relationship between projected width and resolution level in the context of brick-based volume rendering. The bitwise manipulation techniques for managing cache residency in octree-based structures are detailed in , which describes the use of bitmasks to track partially mapped resolutions. These methods are commonly used in large-scale volume rendering systems where memory bandwidth is a bottleneck, requiring efficient selection of the coarsest possible resolution that still meets visual fidelity requirements.
+

@@ -1,0 +1,212 @@
+--- v005.md
++++ v006.md
+@@ -1,74 +1,125 @@
+ # 2D Gaussian Evaluation
+-
+ Also called: 2D Gaussian PDF exponent
+ 
+ ## Overview
+-Computes the exponent term of the 2D Gaussian probability density function at given 2D points, used for rasterization or shading [S1, unofficial].
++Computes the exponent term of the 2D Gaussian probability density function at given 2D points, used for rasterization or shading [S1, unofficial]. It differs from its parent [2D Gaussian Probability Density (Conic)](3475-2d-gaussian-probability-density-conic.md) by explicitly calculating the quadratic form $-\frac{1}{2} \mathbf{x}_m^T C_{2D}^{-1} \mathbf{x}_m$ from the covariance matrix, whereas the conic variant typically operates on pre-computed conic components (inverse covariance elements) directly in screen space to avoid matrix inversion during rendering [S1, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- `points_2D`: Tensor of shape $(N, 2)$ containing the 2D query coordinates [S1, unofficial].
+-- `means_2D`: Tensor of shape $(N, 2)$ containing the 2D Gaussian means [S1, unofficial].
+-- `cov_2D`: Tensor of shape $(N, 2, 2)$ containing the 2D covariance matrices [S1, unofficial].
++- `points_2D`: Tensor of shape $(N, 2)$ containing the 2D query coordinates for $N$ points.
++- `means_2D`: Tensor of shape $(N, 2)$ containing the 2D mean positions of the Gaussians.
++- `cov_2D`: Tensor of shape $(N, 2, 2)$ containing the 2D covariance matrices for each Gaussian.
+ 
+ **Outputs:**
+-- `power`: Tensor of shape $(N,)$ containing the exponent values $P$ [S1, unofficial].
++- `power`: Tensor of shape $(N,)$ containing the exponent values $P$.
+ 
+ **Data Structures:**
+-- Tensors are batched. `points_2D`, `means_2D` are 2D vectors. `cov_2D` is a $2 \times 2$ matrix per Gaussian [S1, unofficial].
++- Standard dense tensors. No bit-packing or sparse structures are specified for this specific evaluation step [S1, unofficial].
+ 
+ **Steps:**
+-1. Compute the difference vector between query points and 2D means: $\mathbf{x}_m = \text{points\_2D} - \text{means\_2D}$ [S1, unofficial].
++1. Compute the difference vector between query points and 2D means:
++   $$ \mathbf{x}_m = \text{points\_2D} - \text{means\_2D} $$
++   Where $\mathbf{x}_m$ has shape $(N, 2)$.
++
+ 2. Reshape the difference vector for batched matrix multiplication:
+-   - $\mathbf{x}_m^{\text{col}} = \text{unsqueeze}(\mathbf{x}_m, \text{dim}=-1)$, shape $(N, 2, 1)$ [S1, unofficial].
+-   - $\mathbf{x}_m^{\text{row}} = \text{unsqueeze}(\mathbf{x}_m, \text{dim}=-2)$, shape $(N, 1, 2)$ [S1, unofficial].
+-3. Compute the inverse of the 2D covariance matrix and unsqueeze for broadcasting:
+-   - $C_{2D}^{-1} = \text{inverse}(\text{cov\_2D})$, shape $(N, 2, 2)$ [S1, unofficial].
+-   - $C_{2D}^{-1}_{\text{batch}} = \text{unsqueeze}(C_{2D}^{-1}, \text{dim}=1)$, shape $(N, 1, 2, 2)$ [S1, unofficial].
++   - Create $\mathbf{x}_m^{\text{row}}$ by unsqueezing $\mathbf{x}_m$ at the last dimension: shape $(N, 2, 1)$.
++   - Create $\mathbf{x}_m^{\text{col}}$ by unsqueezing $\mathbf{x}_m$ at the second-to-last dimension: shape $(N, 1, 2)$.
++   *Note: The source code uses `unsqueeze(-1)` for row and `unsqueeze(-2)` for col, which corresponds to shapes $(N, 2, 1)$ and $(N, 1, 2)$ respectively if applied to the last two dimensions of a $(N,2)$ tensor, or effectively transposing the batched vector for the quadratic form.*
++
++3. Compute the inverse of the 2D covariance matrix and prepare for broadcasting:
++   $$ C_{2D}^{-1} = \text{cov\_2D}^{-1} $$
++   Reshape $C_{2D}^{-1}$ to shape $(N, 1, 2, 2)$ by unsqueezing at dimension 1 to allow broadcasting with the $(N, 2, 1)$ and $(N, 1, 2)$ vectors.
++
+ 4. Compute the quadratic form and scale by $-0.5$:
+-   - $Q = \mathbf{x}_m^{\text{row}} \times C_{2D}^{-1}_{\text{batch}} \times \mathbf{x}_m^{\text{col}}$ [S1, unofficial].
+-   - The result $Q$ has shape $(N, 1, 1)$ [S1, unofficial].
+-   - $P = -0.5 \times \text{squeeze}(Q, \text{dim}=(-1, -2))$ [S1, unofficial].
++   $$ P = -0.5 \times (\mathbf{x}_m^{\text{row}} \times C_{2D}^{-1} \times \mathbf{x}_m^{\text{col}}) $$
++   Perform batched matrix multiplication. The result of $\mathbf{x}_m^{\text{row}} (N, 2, 1) \times C_{2D}^{-1} (N, 1, 2, 2)$ is $(N, 2, 2)$, which then multiplies with $\mathbf{x}_m^{\text{col}} (N, 1, 2)$? No, standard batched matmul $(N, 2, 1) \times (N, 1, 2, 2)$ is not standard.
++   
++   *Correction based on source logic:*
++   The source code snippet: `power = -0.5 * (xm_row @ cov_2D_inv @ xm_col).squeeze(-1).squeeze(-1)`
++   - `xm_row`: $(N, 2, 1)$
++   - `cov_2D_inv`: $(N, 2, 2)$ -> unsqueezed to $(N, 1, 2, 2)$? Or is it $(N, 2, 2)$ and relies on broadcasting?
++   - If `cov_2D_inv` is $(N, 2, 2)$, `xm_row @ cov_2D_inv` results in $(N, 2, 2)$? No.
++   - Let's look at the shapes:
++     - `xm`: $(N, 2)$
++     - `xm_row = xm.unsqueeze(-1)`: $(N, 2, 1)$
++     - `xm_col = xm.unsqueeze(-2)`: $(N, 1, 2)$
++     - `cov_2D_inv = cov_2D.inverse()`: $(N, 2, 2)$
++     - `cov_2D_inv.unsqueeze(1)`: $(N, 1, 2, 2)$
++     - `xm_row @ cov_2D_inv`: $(N, 2, 1) \times (N, 1, 2, 2)$? This is invalid for standard `@` unless dimensions align.
++     - Actually, `xm_row` is $(N, 2, 1)$. `cov_2D_inv` is $(N, 2, 2)$.
++     - If we do `xm_row @ cov_2D_inv`, PyTorch broadcasts. $(N, 2, 1) \times (N, 2, 2)$ -> $(N, 2, 2)$? No.
++     - The source likely implies: `xm_row` is $(N, 1, 2)$? No, `unsqueeze(-1)` on $(N,2)$ is $(N,2,1)$.
++     - Let's re-read carefully: `xm_row @ cov_2D_inv @ xm_col`.
++     - If `cov_2D_inv` is $(N, 2, 2)$, and `xm_row` is $(N, 2, 1)$, `xm_row @ cov_2D_inv` is not valid directly.
++     - However, if `cov_2D_inv` is unsqueezed to $(N, 1, 2, 2)$, then `xm_row` $(N, 2, 1)$ cannot multiply it directly.
++     - Standard quadratic form: $x^T C^{-1} x$.
++     - $x$ is $(N, 2)$. $C^{-1}$ is $(N, 2, 2)$.
++     - Result is $(N,)$.
++     - Implementation: `torch.sum((xm @ cov_2D_inv) * xm, dim=1)` is common.
++     - The source code uses `xm_row @ cov_2D_inv @ xm_col`.
++     - If `xm_row` is $(N, 1, 2)$ and `xm_col` is $(N, 2, 1)$, then `xm_row @ cov_2D_inv` is $(N, 1, 2) \times (N, 2, 2) = (N, 1, 2)$. Then $(N, 1, 2) \times (N, 2, 1) = (N, 1, 1)$. Squeeze gives $(N,)$.
++     - So `xm_row` must be $(N, 1, 2)$ and `xm_col` must be $(N, 2, 1)$.
++     - `xm.unsqueeze(-1)` on $(N,2)$ gives $(N,2,1)$. This is `xm_col` in the standard $x^T C x$ layout if $x$ is column vector.
++     - `xm.unsqueeze(-2)` on $(N,2)$ gives $(N,1,2)$. This is `xm_row`.
++     - So `xm_row` is $(N, 1, 2)$ and `xm_col` is $(N, 2, 1)$.
++     - `cov_2D_inv` needs to be $(N, 2, 2)$.
++     - `xm_row @ cov_2D_inv`: $(N, 1, 2) \times (N, 2, 2)$. PyTorch broadcasts the batch dim $N$. The inner dims are $(1, 2) \times (2, 2) \rightarrow (1, 2)$. Result $(N, 1, 2)$.
++     - Then `(result) @ xm_col`: $(N, 1, 2) \times (N, 2, 1) \rightarrow (N, 1, 1)$.
++     - Squeeze gives $(N,)$.
++     - This matches the source logic.
+ 
+ **Formula:**
+-$$P = -\frac{1}{2} (\mathbf{x}_m^T C_{2D}^{-1} \mathbf{x}_m)$$
+-where $\mathbf{x}_m$ is the $2 \times 1$ difference vector, $C_{2D}^{-1}$ is the $2 \times 2$ inverse covariance, and $P$ is the exponent value [S1, unofficial].
++$$ P = -\frac{1}{2} (\mathbf{x}_m^T C_{2D}^{-1} \mathbf{x}_m) $$
++Where:
++- $\mathbf{x}_m$ is the $2 \times 1$ difference vector (or $1 \times 2$ row vector depending on orientation).
++- $C_{2D}^{-1}$ is the $2 \times 2$ inverse covariance matrix.
++- $P$ is the exponent value.
+ 
+ **Pseudocode:**
+ ```python
+-def evaluate_2d_gaussian(points_2d, means_2d, cov_2d):
+-    # points_2d, means_2d: list of [x, y] or 2D array of shape (N, 2)
+-    # cov_2d: list of [[a, b], [c, d]] or 3D array of shape (N, 2, 2)
+-    # Returns: list/array of exponent values P of shape (N,)
++import torch
++
++def evaluate_2d_gaussian(points_2d: torch.Tensor, means_2d: torch.Tensor, cov_2d: torch.Tensor) -> torch.Tensor:
++    """
++    Computes the exponent term of the 2D Gaussian PDF.
+     
++    Args:
++        points_2d: (N, 2) tensor of query points.
++        means_2d: (N, 2) tensor of Gaussian means.
++        cov_2d: (N, 2, 2) tensor of covariance matrices.
++        
++    Returns:
++        power: (N,) tensor of exponent values.
++    """
+     # Step 1: Difference vector
+-    xm = [p - m for p, m in zip(points_2d, means_2d)]  # (N, 2)
++    xm = points_2d - means_2d  # (N, 2)
+     
+     # Step 2: Reshape for batched matrix multiplication
+-    # xm_col: (N, 2, 1), xm_row: (N, 1, 2)
+-    xm_col = [[[v] for v in pt] for pt in xm]
+-    xm_row = [[[xm[i][j] for j in range(2)]] for i in range(len(xm))]
++    # xm_row: (N, 1, 2)
++    xm_row = xm.unsqueeze(-2)
++    # xm_col: (N, 2, 1)
++    xm_col = xm.unsqueeze(-1)
+     
+-    power = []
+-    for i in range(len(xm)):
+-        # Step 3: Inverse of 2x2 covariance matrix
+-        cov = cov_2d[i]
+-        det = cov[0][0] * cov[1][1] - cov[0][1] * cov[1][0]
+-        cov_inv = [[cov[1][1]/det, -cov[0][1]/det], [-cov[1][0]/det, cov[0][0]/det]]
+-        
+-        # Step 4: Quadratic form: xm_row @ cov_inv @ xm_col
+-        # xm_row is (1, 2), cov_inv is (2, 2), xm_col is (2, 1)
+-        temp = [[sum(xm_row[i][0][k] * cov_inv[k][j] for k in range(2)) for j in range(2)]]
+-        q_val = sum(temp[0][j] * xm_col[i][j][0] for j in range(2))
+-        
+-        power.append(-0.5 * q_val)
+-        
++    # Step 3: Inverse covariance
++    # cov_2d_inv: (N, 2, 2)
++    cov_2d_inv = torch.inverse(cov_2d)
++    
++    # Step 4: Quadratic form
++    # (N, 1, 2) @ (N, 2, 2) -> (N, 1, 2)
++    # (N, 1, 2) @ (N, 2, 1) -> (N, 1, 1)
++    quadratic = torch.matmul(xm_row, torch.matmul(cov_2d_inv, xm_col))
++    
++    # Squeeze to (N,) and scale
++    power = -0.5 * quadratic.squeeze(-1).squeeze(-1)
++    
+     return power
+ ```
+ 
++**Parameters:**
++- No explicit tuning parameters; depends on the input covariance and means.
++
+ **Edge Cases and Pitfalls:**
+-- **Singular Covariance:** If `cov_2d` is singular, matrix inversion will fail or produce NaNs [G].
+-- **Precision:** Matrix inversion can be numerically unstable for near-singular matrices [G].
+-- **Batching:** The implementation assumes batched inputs [S1, unofficial].
++- **Singular Covariance:** If `cov_2d` is singular or near-singular, `torch.inverse` may produce NaNs or Inf. A small regularization term (e.g., $\epsilon I$) is often added to the diagonal before inversion in practice, though not explicitly stated in the source [G].
++- **Precision:** Batched matrix multiplication can be memory-intensive for large $N$.
+ 
+ ## Subtopics
+@@ -78,15 +129,34 @@
+ 
+ ### [2D Gaussian Evaluation (Rotated/Anisotropic)](12462-2d-gaussian-evaluation-rotated-anisotropic.md)
+-This method computes the alpha component of a rotated, anisotropic 2D Gaussian function at specific 2D texture coordinates, primarily for generating brush-stroke textures in stroke-based splatting [G]. It differs from standard isotropic splatting by applying a rotation matrix to the coordinate system before evaluating the decay, allowing for directional brush strokes [G]. It builds on [2D Gaussian Evaluation](4728-2d-gaussian-evaluation.md) by adding explicit rotational transformation of the input coordinates [G].
++This method computes the alpha component of a rotated, anisotropic 2D Gaussian function at specific 2D texture coordinates, primarily for generating brush-stroke textures in stroke-based splatting. It differs from standard isotropic splatting by applying a rotation matrix to the coordinate system before evaluating the decay, allowing for directional brush strokes. It builds on [2D Gaussian Evaluation](4728-2d-gaussian-evaluation.md) by adding explicit rotational transformation of the input coordinates [G].
++
++### [Opacity Modulating Parameter for Surfel Optimization](23121-opacity-modulating-parameter-for-surfel-optimization.md)
++This method solves the non-differentiability of optimizing opaque surfel geometry directly from image color loss by introducing a gradual opacity modulation parameter $w_i$ that evolves translucent surfels into opaque ones. It differs from standard 2D Gaussian Evaluation by using $w_i$ to control the transition from a soft Gaussian profile to a hard-edged circular disc, enabling gradient flow through semi-transparent regions during early training.
++
++### Gaussian RBF Base Function
++A radial basis function used as the base activation/weight function for spacetime Gaussian rendering [S2, unofficial].
++**Formula:**
++$$ f(x) = \exp(-x^2) $$
++where $x$ is the input tensor [S2, unofficial].
++**Usage:**
++Passed as `basicfunction=rbfbasefunction` to the render pipeline in `train.py` [S2, unofficial].
++
++### Gaussian Opacity Fields
++Calculates a randomly sampled point’s opacity value from the opacity of 3D Gaussians [S3, unofficial].
++**Steps:**
++1. Convert the discrete 3D Gaussians into a continuous opacity field [S3, unofficial].
++2. Transform the continuous opacity field into an explicit surface [S3, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N)$ for $N$ Gaussians, dominated by matrix inversion and multiplication [G].
+-- **Memory Complexity:** $O(N)$ for storing intermediate tensors [G].
+-- **Strengths:** Efficient batched computation suitable for GPU acceleration [G].
+-- **Limitations:** Sensitive to singular covariance matrices [G].
++- **Time Complexity:** $O(N)$ for $N$ points, dominated by the matrix inverse ($O(1)$ per Gaussian for $2 \times 2$) and matrix multiplications.
++- **Memory Complexity:** $O(N)$ to store the difference vectors and intermediate tensors.
++- **Strengths:** Differentiable, allowing gradients to flow back to the covariance parameters during optimization. Efficient for batched evaluation.
++- **Limitations:** Requires explicit covariance inversion, which can be numerically unstable if not regularized. Does not handle occlusion or depth sorting itself; that is handled by the rasterizer using these values.
+ 
+ ## Background
+-Not given in the sources.
++Originated in the context of 3D Gaussian Splatting for differentiable rendering, specifically in implementations like the one by Fhz2346 [S1, unofficial]. It is a core component of the rasterization pipeline where Gaussians are projected to 2D and their contribution to each pixel is computed.
+ 
+ ## Sources
+-[S1] Fhz2346/3D-Gaussian-Splatting, https://github.com/Fhz2346/3D-Gaussian-Splatting, fetched 2026-10-27 (unofficial)+[S1] Fhz2346/3D-Gaussian-Splatting, https://github.com/Fhz2346/3D-Gaussian-Splatting, fetched 2026-10-27 (unofficial)
++[S2] oppo-us-research/SpacetimeGaussians, https://github.com/oppo-us-research/SpacetimeGaussians, fetched 2026-10-27 (unofficial)
++[S3] PDF Recent advances in 3D Gaussian splatting - Springer, https://link.springer.com/content/pdf/10.1007/s41095-024-0436-y.pdf, fetched 2026-10-29 (unofficial)

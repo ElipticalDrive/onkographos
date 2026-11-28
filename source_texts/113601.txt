@@ -1,0 +1,241 @@
+Contribute to typeshade/typecv development by creating an account on GitHub.
+
+Dense quality overhaul step 3: GPU TSDF fusion with voxel hashing by Seungup · Pull Request #181 · typeshade/typecv · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Seungup
+commented
+Oct 21, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Implements step 3 of the dense quality overhaul (docs/dense-mvs.md 10.4, accepted 2026-10-21): a TSDF fusion with voxel hashing, free-space carving and voxel levels by distance. It is the option fusion: 'tsdf' of reconstructDenseGpu, and the lab's default fusion from now on. The step record is in 10.8 ("Step 3 record").
+What was built
+Kernels: src/gpu/tsdf.shade.ts (tsdfAllocate, tsdfAssign, tsdfIntegrate, tsdfCarve, tsdfExtract). Blocks of 8×8×8 voxels sit in an open-addressing table, at 4 levels (v_L = v_0·2^L). The sums are integer atomicAdds, so their result does not depend on the order of the invocations. The layout is in 4.1.
+Host: src/gpu/tsdf.ts (fuseTsdfGpu). It counts the blocks with a dry run and cuts the volume into boxes that fit the budget (Every GPU stage runs within any device budget: size changes speed, not success #160). Each box has a margin of one block. The budget changes the speed and never the points.
+CPU reference and planner: src/reconstruction/tsdf.ts (fuseTsdf, planTsdfVolume, planTsdfBoxes).
+The confidence of 10.3 is the integration weight. The filter writes it to mvsCost when the run asks for it, in window mode and in streamed mode.
+scripts/eth3d-dense.mjs: --save-maps writes the filtered maps after a run. --maps fuses saved maps without the depth stage.
+Lab: TSDF is the default fusion. ?denseFusion=pixel selects 3.10. The 3.12 cleanup runs by default after the pixel fusion only. ?denseClean=1|0 overrides that. The run record has a new field, dense.options.fusion.
+The library default stays 'pixel'.
+ETH3D pipes (SwiftShader, 14 views, scale 8, the same saved depth maps)
+Cloud
+Points
+F 1/2/5/10 cm
+Acc 2 cm
+Compl 2 cm
+Landmarks uncovered
+Pixel fusion, raw (baseline)
+156,751
+33.7 / 45.9 / 59.6 / 67.4
+83.3
+31.7
+42.1 %
+Pixel + lab cleanup
+70,302
+27.2 / 34.5 / 41.7 / 47.7
+87.6
+21.5
+61.3 %
+TSDF, raw
+99,674
+40.6 / 54.0 / 67.3 / 74.6
+69.0
+44.4
+27.0 %
+TSDF + lab cleanup
+60,140
+39.2 / 51.8 / 62.7 / 67.8
+72.7
+40.2
+36.2 %
+Fusion stage time and dispatches:
+Pixel fusion: 97 to 118 s with about 16,000 dispatches (the baseline record had 173 s).
+TSDF: 20.5 s with 343 dispatches, in 2 passes.
+The container is shared with other agents, so these times are noisy (±30 % or more). The TSDF fusion's peak device bytes are 136.8 MB at a 256 MiB budget, and 59.4 MB at a quarter of the blocks per pass. Both give the same cloud.
+Proof criterion of 10.4: met. The accuracy is lower than the pixel fusion's (69.0 against 83.3 at 2 cm), and this is recorded as open.
+Checks run (2026-10-21, at 05a9adf or an earlier commit with the same source)
+npm run format:check: pass.
+npm run typecheck: pass.
+cd website && npx tsc --noEmit: pass.
+npm test: 224/224.
+npm run build: pass.
+npm run build:website: pass.
+npm run test:shade: 193/193, including tests/typeshade/tsdf.test.mjs.
+npm run test:webgpu: 46/46, including tests/typeshade/tsdf-webgpu.test.mjs.
+npm run test:website:
+159/161 in the full run, under load.
+The two failures passed when run alone: the 3D card layout test (6 px, which depends on the load) and the public UI test, after its expected options were updated for the new lab default in 05a9adf.
+Open
+The TSDF accuracy gap. Candidates: a minWeight that counts views, and step 4 (10.5).
+Carving takes 62 % of the kernel time.
+The pixel fusion's dispatch count comes from the same chunk-sizing effect. It is not changed here.
+Not run: a physical GPU, and the lab on a device.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_01QSKafSKGFRvfBus88MLp49
+claude
+added 5 commits
+October 21, 2026 16:53
+dense: GPU TSDF fusion with voxel hashing (fusion: 'tsdf'), CPU refer…
+…
+837f52f
+```
+…ence
+
+Adds the TSDF fusion of docs/dense-mvs.md 10.4 as the option fusion: 'tsdf'
+of reconstructDenseGpu. The kernels (src/gpu/tsdf.shade.ts) claim blocks of
+8 x 8 x 8 voxels in an open-addressing table, integrate each depth sample
+with its confidence (10.3) as the weight, count free space along each ray,
+and extract the zero crossings. The voxel size adapts to distance in levels.
+The host cuts the volume into boxes within the device budget (#160).
+src/reconstruction/tsdf.ts is the CPU reference and the shared planner.
+
+The filter writes the confidence to mvsCost when the run asks for it. The
+pixel fusion (3.10) stays the default. scripts/eth3d-dense.mjs can save the
+filtered maps and fuse saved maps without the depth stage.
+
+Change: none, design record (docs/dense-mvs.md 10.4, accepted 2026-10-21)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QSKafSKGFRvfBus88MLp49
+```
+dense: TSDF tests on the CPU tier and on WebGPU
+…
+23731b7
+```
+tests/typeshade/tsdf.test.mjs holds the kernels on the CPU tier to the CPU
+reference on the synthetic scene, the carving of a floater, the passes of a
+small budget against one pass, and reconstructDense with fusion 'tsdf' (the
+confidence maps and the points). tests/typeshade/tsdf-webgpu.test.mjs holds
+the WebGPU kernels to the CPU reference.
+
+Change: none, design record (docs/dense-mvs.md 10.4, accepted 2026-10-21)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QSKafSKGFRvfBus88MLp49
+```
+dense: TSDF carving within the pass box, chunk floor, layout in 4.1
+…
+fcd4abe
+```
+tsdfCarve walks only the part of a ray inside the pass's box and margin,
+so a pass of a cut volume no longer walks the whole ray. The TSDF chunks
+hold at least 16,384 elements: on pipes the fusion of the saved maps took
+1,030 s with 127,000 dispatches before and 45 s with 543 after, with the
+same points but one. The extraction reads its own voxel before any lookup.
+Section 4.1 records the arrays of the TSDF fusion. A test holds the
+streamed mode's confidence maps and points to the window mode's.
+
+Change: none, design record (docs/dense-mvs.md 10.4, accepted 2026-10-21)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QSKafSKGFRvfBus88MLp49
+```
+dense: TSDF defaults from pipes, lab default fusion, step 3 record
+…
+b8cb2f8
+```
+The TSDF defaults are voxelScale 2 and truncation 3, from a sweep on the
+saved maps of ETH3D pipes. On those maps the TSDF cloud scores F 54.0 at
+2 cm and 67.3 at 5 cm with 27.0 % of landmarks uncovered, against 45.9,
+59.6 and 42.1 % for the pixel fusion, at 99,674 points against 156,751.
+Its accuracy is lower (69.0 against 83.3 at 2 cm).
+
+The lab fuses with the TSDF by default (?denseFusion=pixel for 3.10) and
+cleans after the pixel fusion only (?denseClean=1 or 0 overrides it). The
+run record carries dense.options.fusion. reconstructDense posts the TSDF
+cloud as one points event (viewId -1). docs/dense-mvs.md gets the step 3
+record in 10.8 and the choices of 10.4. The synthetic TSDF tests pin
+their own options (128 x 96 px scene).
+
+Change: none, design record (docs/dense-mvs.md 10.4, accepted 2026-10-21)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QSKafSKGFRvfBus88MLp49
+```
+lab: the site test expects the TSDF fusion and no cleanup by default
+…
+05a9adf
+```
+The cancelled dense run's record now carries fusion 'tsdf' and denseClean
+false, the lab defaults of the step 3 record (docs/dense-mvs.md 10.8).
+
+Change: none, design record (docs/dense-mvs.md 10.4, accepted 2026-10-21)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QSKafSKGFRvfBus88MLp49
+```
+Seungup
+marked this pull request as ready for review
+October 21, 2026 20:42
+claude
+added 2 commits
+October 21, 2026 20:44
+Merge origin/main (2b8ec55) into feat/dense-tsdf
+…
+cab0ef7
+```
+Brings in #179 (depth previews that grow from the start, Amendment 5) and
+#178 (occupancy floors). Conflicts resolved:
+- src/gpu/mvs.ts: the depth stage keeps #179's previews (onPhotometricDepth,
+  onGeometricDepth) and this branch's depthMaps path, onDepthMaps and the
+  confidence read. depthPixels is counted after the stage on both paths.
+- package.json: main's test lists with tsdf.test.mjs and tsdf-webgpu.test.mjs.
+- website/dense-run.test.mjs: both sides' imports and tests.
+
+Change: none, merge of main (docs/dense-mvs.md 10.4, accepted 2026-10-21)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QSKafSKGFRvfBus88MLp49
+```
+dense: TSDF chunks declare the occupancy floor of #178
+…
+cba849e
+```
+The TSDF's chunk floor is now the minUnits of ShadeDevice.chunkSize
+(TSDF_OCCUPANCY_FLOOR, 16,384), so a hardware adapter lowers it after a
+dispatch over GPU_CEILING_MS. A software adapter honors no occupancy floor,
+and there the floor is the chunk's min: without it the pipes fusion took
+226 s with 26,215 dispatches, with it 20.1 s with 342 and the same cloud.
+
+Change: none, design record (docs/dense-mvs.md 10.4, accepted 2026-10-21)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QSKafSKGFRvfBus88MLp49
+```
+Hide details
+View details
+Seungup
+merged commit 92156b2
+into
+main
+Oct 21, 2026
+3 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+Seungup
+mentioned this pull request
+Oct 21, 2026
+Record the owner's confirmation of the TSDF lab defaults
+#183
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

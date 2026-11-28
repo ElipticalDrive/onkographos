@@ -1,0 +1,259 @@
+# Voxel Hashing with Mean Aggregation
+
+Also called: BEVFusion Voxelization, Hard Voxelization (Deterministic) with Feature Aggregation, Hash Voxelization, Hash-based Point Cloud Voxelization, Hash-based Voxelization, Scatter Mean Voxelization, Voxel Hashing and Mean Aggregation
+
+## Overview
+A GPU-accelerated voxelization pipeline for LiDAR point clouds that converts 3D points into a fixed-size voxel grid using a hash table for coordinate mapping, scatter operations for feature accumulation, and a `reduce_mean` kernel for feature aggregation [S1, unofficial]. It sets itself apart from sibling methods by using open-addressing hash tables with linear probing to handle collisions and deduplicate points within the same voxel, followed by a two-pass feature reduction (scatter then mean) rather than simple max-pooling or fixed-array accumulation [S1, unofficial].
+
+## How it works
+**Inputs:**
+*   `points`: Array of shape $(N, F)$, where $N$ is the number of points and $F$ is the number of features per point (e.g., $x, y, z, intensity$). Data type: `half` (16-bit float) [S1, unofficial].
+*   `param`: Configuration object containing:
+    *   `min_range`: 3D vector $(min\_x, min\_y, min\_z)$ defining the minimum bounds of the voxel grid in world coordinates [S1, unofficial].
+    *   `max_range`: 3D vector $(max\_x, max\_y, max\_z)$ defining the maximum bounds [S1, unofficial].
+    *   `voxel_size`: 3D vector $(v\_x, v\_y, v\_z)$ defining the physical size of each voxel [S1, unofficial].
+    *   `grid_size`: 3D integer vector $(G\_x, G\_y, G\_z)$, computed as $\lceil (max\_range - min\_range) / voxel\_size \rceil$ [S1, unofficial].
+    *   `max_voxels`: Maximum number of voxels allowed in the output [S1, unofficial].
+    *   `max_points_per_voxel`: Maximum number of points stored per voxel [S1, unofficial].
+    *   `num_feature`: Number of features per point $F$ [S1, unofficial].
+    *   `CoordinateOrder`: Enum, either `XYZ` or `ZYX`, determining the storage order of voxel indices [S1, unofficial].
+
+**Outputs:**
+*   `d_voxel_features`: Array of shape $(M, F)$, where $M$ is the number of valid voxels created. Data type: `half` [S1, unofficial].
+*   `d_voxel_indices`: Array of shape $(M, 4)$. Each element is a 4-tuple. For `XYZ` order: $\{0, x, y, z\}$. For `ZYX` order: $\{0, z, y, x\}$, where $x, y, z$ are the voxel coordinates [S1, unofficial].
+*   `d_real_num_voxels`: Scalar, the total number of voxels created [S1, unofficial].
+
+**Data Structures:**
+1.  `hash_table`: Array of `uint32_t` of size $H = N \times 8$. The first half ($0$ to $H/2 - 1$) stores voxel offsets (keys). The second half ($H/2$ to $H - 1$) stores corresponding voxel IDs (values). Initialized to `UINT32_MAX` (0xff) for keys [S1, unofficial].
+2.  `voxels_temp`: Array of `float` of size $max\_voxels \times max\_points\_per\_voxel \times num\_feature$. Layout: `[voxel_id][point_idx][feature_idx]`. Stores temporary float features before reduction [S1, unofficial].
+3.  `num_points_per_voxel`: Array of `uint32_t` of size $max\_voxels$. Stores the count of points currently in each voxel [S1, unofficial].
+4.  `voxel_indices`: Array of `uint32_t` of size $max\_voxels \times 4$. Stores voxel coordinates as `uint4` [S1, unofficial].
+
+**Hash Function:**
+The hash function maps a 32-bit integer key $k$ to a 32-bit hash value:
+$$
+\begin{aligned}
+k &= k \oplus (k \gg 16) \\
+k &= k \times 0x85ebca6b \\
+k &= k \oplus (k \gg 13) \\
+k &= k \times 0xc2b2ae35 \\
+k &= k \oplus (k \gg 16) \\
+\text{return } k
+\end{aligned}
+$$
+[S1, unofficial]
+
+**Steps:**
+
+1.  **Initialization:**
+    *   Allocate device memory for `hash_table`, `voxels_temp`, `d_voxel_features`, `d_voxel_num`, `d_voxel_indices`, `d_real_num_voxels`, and `h_real_num_voxels` [S1, unofficial].
+    *   Reset `hash_table` keys to `UINT32_MAX` and `num_points_per_voxel` to 0 using `memset` [S1, unofficial].
+
+2.  **Build Hash Table (Kernel 1):**
+    *   Launch a kernel with one thread per point ($N$ threads).
+    *   For each point $i$, extract coordinates $(px, py, pz)$ from `points[i]` [S1, unofficial].
+    *   Compute voxel indices:
+        $$
+        \begin{aligned}
+        voxel\_idx &= \lfloor (px - min\_range.x) / voxel\_size.x \rfloor \\
+        voxel\_idy &= \lfloor (py - min\_range.y) / voxel\_size.y \rfloor \\
+        voxel\_idz &= \lfloor (pz - min\_range.z) / voxel\_size.z \rfloor
+        \end{aligned}
+        $$
+        [S1, unofficial]
+    *   **Boundary Check:** If any index is $< 0$ or $\ge$ corresponding `grid_size` dimension, discard the point [S1, unofficial].
+    *   Compute linear voxel offset:
+        $$
+        voxel\_offset = (voxel\_idz \times grid\_size.y + voxel\_idy) \times grid\_size.x + voxel\_idx
+        $$
+        [S1, unofficial]
+    *   **Hash Table Insertion:**
+        *   Calculate slot: $slot = hash(voxel\_offset) \% (H / 2)$ [S1, unofficial].
+        *   Use open addressing with linear probing:
+            *   Load key $k$ from `hash_table[slot]`.
+            *   If $k == voxel\_offset$: Key exists. Break (point is a duplicate in this voxel) [S1, unofficial].
+            *   If $k == UINT32\_MAX$: Slot is empty.
+                *   Atomically increment `real_voxel_num` to get a new unique `voxel_id`.
+                *   Atomically store `voxel_offset` in `hash_table[slot]` and `voxel_id` in `hash_table[slot + H/2]` [S1, unofficial].
+            *   Else: Probe next slot: $slot = (slot + 1) \% (H / 2)$ [S1, unofficial].
+
+3.  **Voxelization and Feature Scattering (Kernel 2):**
+    *   Launch a kernel with one thread per point ($N$ threads).
+    *   For each point $i$, compute `voxel_offset` and `voxel_id` as in Step 2 [S1, unofficial].
+    *   **Lookup:** Call `lookup_hash_table(voxel_offset, H, hash_table)`. If result is `UINT32_MAX` or $\ge max\_voxels$, discard point [S1, unofficial].
+    *   **Atomic Count:** Atomically increment `num_points_per_voxel[voxel_id]`. Let `current_num` be the returned value [S1, unofficial].
+    *   **Feature Storage:** If `current_num < max_points_per_voxel`:
+        *   Calculate destination offset in `voxels_temp`:
+            $$
+            dst\_offset = voxel\_id \times (num\_feature \times max\_points\_per\_voxel) + current\_num \times num\_feature
+            $$
+            [S1, unofficial]
+        *   Copy features from `points[i]` to `voxels_temp[dst_offset : dst_offset + num_feature]` [S1, unofficial].
+        *   Write voxel coordinates to `voxel_indices[voxel_id]` based on `CoordinateOrder` (e.g., `{0, x, y, z}` for XYZ) [S1, unofficial].
+
+4.  **Reduce Mean (Kernel 3):**
+    *   Launch a kernel with one thread per possible voxel ($max\_voxels$ threads).
+    *   For each voxel $j$:
+        *   Read `valid_points_num = num_points_per_voxel[j]`.
+        *   Clamp `valid_points_num` to `max_points_per_voxel` [S1, unofficial].
+        *   If `valid_points_num <= 0`, skip (avoid division by zero) [S1, unofficial].
+        *   Initialize accumulator array `acc` of size `num_feature` to 0.
+        *   Sum features:
+            $$
+            acc[f] = \sum_{p=0}^{valid\_points\_num - 1} voxels\_temp[j \times max\_points\_per\_voxel \times num\_feature + p \times num\_feature + f]
+            $$
+            for $f \in [0, num\_feature)$ [S1, unofficial].
+        *   Compute mean:
+            $$
+            d\_voxel\_features[j \times num\_feature + f] = (sycl::half)(acc[f] / valid\_points\_num)
+            $$
+            [S1, unofficial]
+
+5.  **Finalization:**
+    *   Asynchronously copy `d_real_num_voxels` to host `h_real_num_voxels` [S1, unofficial].
+    *   The output `d_voxel_features` contains the aggregated voxel features in half-precision [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Pseudocode for the core logic, assuming standard GPU primitives are available.
+# This is a conceptual representation of the SYCL/CUDA kernels described in [S1, unofficial].
+
+def voxel_hashing_mean_aggregation(points, param):
+    N = points.shape[0]
+    F = param.num_feature
+    H = N * 8  # Hash table size
+    max_voxels = param.max_voxels
+    max_ppv = param.max_points_per_voxel
+    
+    # 1. Initialization
+    hash_table = array_uint32(H, fill=UINT32_MAX)
+    num_points_per_voxel = array_uint32(max_voxels, fill=0)
+    voxels_temp = array_float(max_voxels * max_ppv * F, fill=0.0) # Stale data safe
+    voxel_indices = array_uint32(max_voxels * 4, fill=0)
+    real_voxel_num = 0
+    
+    # 2. Build Hash Table Kernel
+    # Launch N threads
+    for i in range(N):
+        px, py, pz = points[i, 0], points[i, 1], points[i, 2]
+        
+        # Voxel Index Calculation
+        voxel_idx = floor((px - param.min_range.x) / param.voxel_size.x)
+        voxel_idy = floor((py - param.min_range.y) / param.voxel_size.y)
+        voxel_idz = floor((pz - param.min_range.z) / param.voxel_size.z)
+        
+        # Boundary Check
+        if not (0 <= voxel_idx < param.grid_size.x and
+                0 <= voxel_idy < param.grid_size.y and
+                0 <= voxel_idz < param.grid_size.z):
+            continue
+            
+        voxel_offset = (voxel_idz * param.grid_size.y + voxel_idy) * param.grid_size.x + voxel_idx
+        
+        # Hash Table Insertion
+        slot = hash(voxel_offset) % (H // 2)
+        while True:
+            k = atomic_load(hash_table, slot)
+            if k == voxel_offset:
+                break # Duplicate
+            elif k == UINT32_MAX:
+                # Empty slot, assign new voxel ID
+                voxel_id = atomic_add(real_voxel_num, 1)
+                atomic_store(hash_table, slot, voxel_offset)
+                atomic_store(hash_table, slot + H // 2, voxel_id)
+                break
+            else:
+                slot = (slot + 1) % (H // 2) # Linear probing
+                
+    # 3. Voxelization and Feature Scattering Kernel
+    # Launch N threads
+    for i in range(N):
+        px, py, pz = points[i, 0], points[i, 1], points[i, 2]
+        
+        # Recompute voxel_offset (or cache it)
+        voxel_idx = floor((px - param.min_range.x) / param.voxel_size.x)
+        voxel_idy = floor((py - param.min_range.y) / param.voxel_size.y)
+        voxel_idz = floor((pz - param.min_range.z) / param.voxel_size.z)
+        voxel_offset = (voxel_idz * param.grid_size.y + voxel_idy) * param.grid_size.x + voxel_idx
+        
+        # Lookup
+        voxel_id = lookup_hash_table(voxel_offset, H, hash_table)
+        if voxel_id == UINT32_MAX or voxel_id >= param.max_voxels:
+            continue
+            
+        # Atomic Count
+        current_num = atomic_add(num_points_per_voxel, voxel_id, 1)
+        
+        if current_num < max_ppv:
+            dst_offset = voxel_id * (F * max_ppv) + current_num * F
+            src_offset = i * F
+            for f in range(F):
+                voxels_temp[dst_offset + f] = float(points[i, f])
+                
+            # Save indices
+            if param.CoordinateOrder == XYZ:
+                voxel_indices[voxel_id * 4 : voxel_id * 4 + 4] = [0, voxel_idx, voxel_idy, voxel_idz]
+            else: # ZYX
+                voxel_indices[voxel_id * 4 : voxel_id * 4 + 4] = [0, voxel_idz, voxel_idy, voxel_idx]
+
+    # 4. Reduce Mean Kernel
+    # Launch max_voxels threads
+    d_voxel_features = array_half(max_voxels * F)
+    for j in range(max_voxels):
+        valid_points_num = num_points_per_voxel[j]
+        if valid_points_num > max_ppv:
+            valid_points_num = max_ppv
+        if valid_points_num <= 0:
+            continue
+            
+        acc = [0.0] * F
+        offset = j * max_ppv * F
+        for p in range(valid_points_num):
+            pt_offset = offset + p * F
+            for f in range(F):
+                acc[f] += voxels_temp[pt_offset + f]
+                
+        inv = 1.0 / valid_points_num
+        for f in range(F):
+            d_voxel_features[j * F + f] = half(acc[f] * inv)
+            
+    return d_voxel_features, voxel_indices, real_voxel_num
+
+def hash(k):
+    k = k ^ (k >> 16)
+    k = k * 0x85ebca6b
+    k = k ^ (k >> 13)
+    k = k * 0xc2b2ae35
+    k = k ^ (k >> 16)
+    return k
+
+def lookup_hash_table(key, hash_size, hash_table):
+    slot = hash(key) % (hash_size // 2)
+    while True:
+        k = atomic_load(hash_table, slot)
+        if k == key:
+            return atomic_load(hash_table, slot + hash_size // 2)
+        elif k == UINT32_MAX:
+            return UINT32_MAX
+        else:
+            slot = (slot + 1) % (hash_size // 2)
+    return UINT32_MAX
+```
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ for hash table construction and scattering, $O(M \times max\_points\_per\_voxel \times F)$ for reduction, where $N$ is points, $M$ is voxels, $F$ is features.
+*   **Memory Complexity:** $O(N)$ for hash table, $O(M \times max\_points\_per\_voxel \times F)$ for temporary storage.
+*   **Performance:** The method is optimized for GPU execution using atomic operations and coalesced memory access patterns. The use of `half` precision for output reduces memory bandwidth [S1, unofficial].
+*   **Strengths:** Handles variable point density efficiently; deterministic output; supports feature aggregation beyond simple coordinates.
+*   **Limitations:** Hash table collisions can lead to probing overhead; load factor is kept low (0.25) to minimize collisions, increasing memory usage [S1, unofficial].
+*   **When to use:** LiDAR point cloud processing for autonomous driving (e.g., BEVFusion, CenterPoint) where deterministic voxelization with feature aggregation is required [S1, unofficial].
+*   **When not to use:** When memory is extremely constrained (due to hash table size) or when non-deterministic aggregation is acceptable (e.g., max pooling).
+
+## Background
+Originated from NVIDIA's Lidar_AI_Solution CUDA-BEVFusion implementation [S1, unofficial]. It has been ported to SYCL for Intel GPUs [S1, unofficial]. The method is widely used in 3D object detection pipelines for autonomous vehicles, particularly in Bird's Eye View (BEV) feature extraction [S1, unofficial].
+
+## Sources
+[S1] wall1688/bevfusion-voxelization-sycl, https://github.com/wall1688/bevfusion-voxelization-sycl, fetched 2026-10-26 (unofficial)
+[S2] Zhaoyibinn/VGVGGT, https://github.com/Zhaoyibinn/VGVGGT, fetched 2026-10-27 (unofficial)

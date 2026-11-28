@@ -1,0 +1,269 @@
+--- v001.md
++++ v002.md
+@@ -8,11 +8,11 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** The current outlier pose $(R_o, t_o)$, the set of inlier poses, the NeuS backbone network (fixed), and the number of particles $N_p$.
+-*   **Outputs:** The optimized pose $(R_{best}, t_{best})$ for the outlier, which replaces $(R_o, t_o)$ if it yields a better SNR score.
++*   **Inputs:** The current outlier pose $(R_o, t_o)$, the set of inlier poses, the fixed NeuS backbone network, and the number of particles $N_p$ [S1].
++*   **Outputs:** The optimized pose $(R_{best}, t_{best})$ for the outlier, which replaces $(R_o, t_o)$ if it yields a better SNR score [S1].
+ 
+ **Data Structures:**
+-*   **Particles:** A list of $N_p$ pose candidates. Each particle $i$ has a rotation $R_{p_i}$ and translation $t_{p_i}$.
+-*   **SNR List ($P^{SNR}_n$):** A list tracking the SNR values for each particle over recent iterations.
+-*   **Sampling Distribution ($P_n$):** A normalized probability distribution derived from the SNR values.
++*   **Particles:** A list of $N_p$ pose candidates. Each particle $i$ has a rotation $R_{p_i}$ and translation $t_{p_i}$ [S1].
++*   **SNR List ($P^{SNR}_n$):** A list tracking the SNR values for each particle over recent iterations [S1].
++*   **Sampling Distribution ($P_n$):** A normalized probability distribution derived from the SNR values [S1].
+ 
+ **Steps:**
+@@ -36,118 +36,131 @@
+ **Pseudocode:**
+ ```python
+-def monte_carlo_relocalization(outlier_pose, inlier_poses, backbone, N_p=24, window_size=10):
+-    """
+-    Re-localize an outlier pose using Monte Carlo sampling.
+-    
+-    Args:
+-        outlier_pose: Tuple (R_o, t_o) representing the current outlier pose.
+-        inlier_poses: List of inlier poses used to estimate the scene axis.
+-        backbone: The fixed NeuS network.
+-        N_p: Number of particles (default 24).
+-        window_size: Size of the sliding window for SNR approximation (default 10).
+-        
+-    Returns:
+-        Tuple (R_best, t_best) if the best particle is better than the outlier, 
+-        else the original outlier_pose.
+-    """
+-    # 1. Estimate coarse main axis from inliers [S1]
+-    # [G] Implementation detail: Compute the principal component of inlier camera centers
+-    # or fit a line to inlier camera positions. Let this be the 'axis'.
++import math
++import random
++
++def monte_carlo_relocalization(outlier_pose, inlier_poses, backbone, N_p=24, window_size=10, num_steps=100):
++    # 1. Estimate coarse main axis from inliers [G]
++    # [G] Standard PCA on inlier camera centers to find principal axis
+     axis = estimate_main_axis(inlier_poses)
+-    
++
+     R_o, t_o = outlier_pose
+-    
+-    # 2. Initialize particles uniformly around the axis [S1]
+     particles = []
+     for i in range(1, N_p + 1):
+         theta = (i * 2 * math.pi) / N_p
+         R_axis_theta = rotation_matrix(axis, theta)
+-        
+         R_p = matrix_multiply(R_axis_theta, R_o)
+         t_p = matrix_multiply(R_axis_theta, t_o)
+-        
+-        particles.append({
+-            'R': R_p,
+-            't': t_p,
+-            'snr_history': [] # List to store SNR values
+-        })
+-        
+-    # 3. Optimization Loop [S1]
+-    # [G] The number of iterations for this re-localization stage is not specified.
+-    # Assume a fixed number of steps or convergence criterion.
+-    num_iterations = 1000 
+-    
+-    for step in range(num_iterations):
+-        # Compute sampling probabilities based on current SNR scores [S1]
++        particles.append({'R': R_p, 't': t_p, 'snr_history': []})
++
++    # 2. Optimization loop [S1]
++    for step in range(num_steps):
++        # Compute current SNR scores for all particles [S1]
+         snr_scores = []
+         for p in particles:
+-            if len(p['snr_history']) >= window_size:
+-                # Approximate current SNR by mean of last window_size elements [S1]
+-                current_snr = sum(p['snr_history'][-window_size:]) / window_size
++            history = p['snr_history']
++            if len(history) >= window_size:
++                current_snr = sum(history[-window_size:]) / window_size
+             else:
+-                # [G] If history is short, use mean of available history
+-                current_snr = sum(p['snr_history']) / len(p['snr_history']) if p['snr_history'] else 0.0
++                current_snr = sum(history) / len(history) if history else 0.0
+             snr_scores.append(current_snr)
+-            
+-        min_snr = min(snr_scores)
+-        
+-        # Compute exponential weights [S1]
+-        weights = []
+-        for s in snr_scores:
+-            weights.append(math.exp(s - min_snr))
+-            
+-        total_weight = sum(weights)
+-        probs = [w / total_weight for w in weights]
+-        
+-        # Sample a particle based on probabilities [S1]
+-        # [G] Use inverse transform sampling or numpy.random.choice
+-        particle_idx = sample_with_probs(probs)
+-        selected_particle = particles[particle_idx]
+-        
+-        # 4. Optimize selected particle's pose [S1]
+-        # Fix backbone, optimize pose parameters
+-        # Remove detach flag to allow gradient flow [S1]
+-        rendered_color = render_with_pose(backbone, selected_particle['R'], selected_particle['t'])
+-        color_loss = compute_color_loss(rendered_color, ground_truth_color)
+-        
++
++        # Compute sampling probabilities [S1]
++        # Initially sample equally, then use weighted distribution [S1]
++        if step == 0:
++            probs = [1.0 / N_p] * N_p
++        else:
++            min_snr = min(snr_scores)
++            weights = [math.exp(s - min_snr) for s in snr_scores]
++            total_weight = sum(weights)
++            probs = [w / total_weight for w in weights]
++
++        # Sample particle [S1]
++        # [G] Inverse transform sampling for discrete distribution
++        r = random.random()
++        cumsum = 0.0
++        idx = 0
++        for i, p in enumerate(probs):
++            cumsum += p
++            if r <= cumsum:
++                idx = i
++                break
++
++        selected = particles[idx]
++
++        # Render and compute loss [S1]
++        # [G] Assume backbone.forward(R, t, rays) returns rendered color C_n
++        rendered_color = backbone.forward(selected['R'], selected['t'])
++        gt_color = get_ground_truth_color()
++        color_loss = mse_loss(rendered_color, gt_color)
++
+         # Backpropagate to pose parameters [S1]
+-        gradients = compute_gradients(color_loss, selected_particle['R'], selected_particle['t'])
+-        update_pose(selected_particle['R'], selected_particle['t'], gradients)
+-        
+-        # 5. Update SNR history [S1]
+-        # [G] SNR is derived from color loss. A common definition is Signal/Noise.
+-        # Here, we assume the inverse of loss or a normalized metric is used as SNR.
+-        # The source states "estimated PSNR_n" and "SNR-derived score".
+-        # We approximate SNR as the negative loss or a related metric.
+-        # Let's assume SNR is inversely proportional to loss for optimization purposes.
+-        # [G] Specific SNR formula is not given, but it drives the probability.
+-        # We store the loss value or a transformed version.
+-        snr_value = -color_loss # Placeholder for SNR calculation
+-        selected_particle['snr_history'].append(snr_value)
+-        if len(selected_particle['snr_history']) > window_size:
+-            selected_particle['snr_history'].pop(0)
+-            
+-    # 6. Select best particle [S1]
++        # [G] Standard optimizer step (e.g., Adam) updates R and t
++        gradients = compute_gradients(color_loss, selected['R'], selected['t'])
++        update_pose(selected['R'], selected['t'], gradients)
++
++        # Update SNR history [S1]
++        # [G] SNR is derived from color loss; source uses PSNR_n or SNR_n
++        snr_value = compute_snr_from_loss(color_loss)
++        selected['snr_history'].append(snr_value)
++        if len(selected['snr_history']) > window_size:
++            selected['snr_history'].pop(0)
++
++    # 3. Select best pose [S1]
+     best_particle = None
+     best_snr = -float('inf')
+-    
+     for p in particles:
+-        if len(p['snr_history']) >= window_size:
+-            current_snr = sum(p['snr_history'][-window_size:]) / window_size
+-        else:
+-            current_snr = sum(p['snr_history']) / len(p['snr_history']) if p['snr_history'] else 0.0
+-            
++        history = p['snr_history']
++        current_snr = sum(history[-window_size:]) / window_size if len(history) >= window_size else (sum(history)/len(history) if history else 0.0)
+         if current_snr > best_snr:
+             best_snr = current_snr
+             best_particle = p
+-            
+-    # Compare best particle SNR with outlier SNR [S1]
+-    # [G] Outlier SNR needs to be computed similarly
+-    outlier_snr = compute_outlier_snr(outlier_pose, backbone)
+-    
++
++    # Compare with outlier [S1]
++    outlier_snr = compute_snr_from_loss(backbone.forward(R_o, t_o))
+     if best_snr > outlier_snr:
+-        return (best_particle['R'], best_particle['t'])
+-    else:
+-        return outlier_pose
++        return best_particle['R'], best_particle['t']
++    return R_o, t_o
++
++# Helper functions [G]
++def estimate_main_axis(inlier_poses):
++    # [G] Compute principal component of inlier camera centers
++    centers = [t for _, t in inlier_poses]
++    mean = sum(centers) / len(centers)
++    cov = sum([(c - mean) @ (c - mean).T for c in centers])
++    # [G] Return eigenvector corresponding to largest eigenvalue
++    return eigenvector(cov)
++
++def rotation_matrix(axis, theta):
++    # [G] Standard Rodrigues' rotation formula
++    axis = axis / math.linalg.norm(axis)
++    a = math.cos(theta / 2.0)
++    b, c, d = -axis * math.sin(theta / 2.0)
++    return [[a*a+b*b-c*c-d*d, 2*(b*c-a*d), 2*(b*d+a*c)],
++            [2*(b*c+a*d), a*a+c*c-b*b-d*d, 2*(c*d-a*b)],
++            [2*(b*d-a*c), 2*(c*d+a*b), a*a+d*d-b*b-c*c]]
++
++def matrix_multiply(A, B):
++    # [G] Standard 3x3 matrix multiplication
++    return [[sum(A[i][k]*B[k][j] for k in range(3)) for j in range(3)] for i in range(3)]
++
++def mse_loss(rendered, ground_truth):
++    # [G] Mean squared error
++    return sum((r - g)**2 for r, g in zip(rendered, ground_truth)) / len(rendered)
++
++def compute_gradients(loss, R, t):
++    # [G] Standard automatic differentiation or finite differences
++    return {'R': R, 't': t} # Placeholder for gradient tensors
++
++def update_pose(R, t, gradients):
++    # [G] Standard optimizer step (e.g., gradient descent)
++    pass
++
++def compute_snr_from_loss(loss):
++    # [G] SNR approximation from loss; typically inverse or log-transformed
++    return -loss
++
++def get_ground_truth_color():
++    # [G] Standard data loader call
++    return [0.0, 0.0, 0.0]
+ ```
+ 
+@@ -161,10 +174,15 @@
+ *   **Initialization:** The method relies on a coarse main axis estimated from inliers. If inliers are also poor, the axis estimation may be inaccurate [S1].
+ 
++## Subtopics
++
++### IR-MCL
++IR-MCL achieves global localization in NeRF maps built from 2D radar scans through Monte Carlo localization [S2]. It samples several candidate camera poses in space, calculates their differences with observed values, generates weights, eliminates candidate poses with low weights, iteratively updates poses, and finally, when converging near the true pose, weights the remaining poses to obtain the final pose [S2].
++
+ ## Operating characteristics
+-*   **Time Complexity:** The method adds overhead proportional to $N_p \times \text{iterations}$ per outlier pose. With $N_p=24$, this is a constant factor increase relative to standard optimization [S1].
+-*   **Memory Complexity:** Requires storing $N_p$ particle poses and their SNR histories. Memory usage is $O(N_p \times \text{window\_size})$ per outlier [S1].
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
+ *   **Performance:** In experiments on the SG-NeRF dataset, the method runs an average of 13 hours for 150k iterations on NVIDIA RTX 3090 GPUs [S1]. On the DTU dataset, it runs for 22 hours for 300k iterations [S1].
+ *   **Strengths:** Improves robustness and accuracy for outlier poses, particularly those suffering from mirror-symmetry ambiguity [S1].
+-*   **Limitations:** Requires a reliable estimation of the scene axis from inliers. Computationally more expensive than direct optimization due to particle sampling [S1].
++*   **Limitations:** Requires a reliable estimation of the scene axis from inliers [S1].
+ 
+ ## Background
+@@ -172,3 +190,4 @@
+ 
+ ## Sources
+-[S1] Robust SG-NeRF: Robust Scene Graph Aided Neural Surface Reconstruction, https://arxiv.org/abs/2411.13620v1, fetched 2026-10-26+[S1] Robust SG-NeRF: Robust Scene Graph Aided Neural Surface Reconstruction, https://arxiv.org/abs/2411.13620v1, fetched 2026-10-26
++[S2] Advancement in Neural Radiance Fields Propulsion for SLAM: A Novel Upgrade, https://www.atlantis-press.com/proceedings/icaic-24/126003439, fetched 2026-10-28

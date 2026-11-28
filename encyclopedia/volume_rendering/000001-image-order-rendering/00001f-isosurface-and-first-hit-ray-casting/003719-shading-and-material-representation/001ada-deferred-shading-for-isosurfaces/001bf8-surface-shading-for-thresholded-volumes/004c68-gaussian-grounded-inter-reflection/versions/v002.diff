@@ -1,0 +1,302 @@
+--- v001.md
++++ v002.md
+@@ -4,22 +4,22 @@
+ 
+ ## Overview
+-Gaussian Grounded Inter-Reflection is a technique for modeling indirect illumination in reflective scenes by separating direct light $L_{\text{dir}}$ and indirect light $L_{\text{ind}}$ [S1, unofficial][S2]. It approximates visibility $V$ via ray tracing on an extracted mesh to determine occlusion, allowing the indirect component to account for light bouncing off other surfaces [S1, unofficial][S2]. It differs from standard Phong or simple environment map shading by explicitly computing self-occlusion and secondary bounces using either mesh-based ray tracing [S1, unofficial] or SDF-based ray marching [S2].
++Gaussian Grounded Inter-Reflection models indirect illumination in reflective scenes by separating direct light $L_{\text{dir}}$ and indirect light $L_{\text{ind}}$ [S1, unofficial][S2]. It approximates visibility $V$ via ray tracing on an extracted mesh or SDF-based ray marching to determine occlusion, allowing the indirect component to account for light bouncing off other surfaces [S1, unofficial][S2]. It differs from standard Phong or simple environment map shading by explicitly computing self-occlusion and secondary bounces using either mesh-based ray tracing [S1, unofficial] or SDF-based ray marching [S2]. It builds on [Surface shading for thresholded volumes](1159-surface-shading-for-thresholded-volumes.md) and contrasts with [Shading for Isosurfaces (Single-Pass Multi-Stage)](2094-shading-for-isosurfaces-single-pass-multi-stage.md), [Fast Shaded Isosurfaces](2105-fast-shaded-isosurfaces.md), [Volume Raycasting with Surface Extraction and Phong Shading](3662-volume-raycasting-with-surface-extraction-and-phong-shading.md), [Interval Shading](6414-interval-shading.md), [IsosurfaceClassifier Lighting Model](6676-isosurfaceclassifier-lighting-model.md), and [Boundary Shader](14912-boundary-shader.md) by grounding visibility checks in either explicit mesh BVH traversal or differentiable SDF sampling rather than baked lighting or single-pass approximations.
+ 
+ ## How it works
+ **Inputs:**
+-*   Surface normal $N$ at the shading point.
+-*   View direction $\omega_o$ (or $\omega_i$ in [S2] notation).
+-*   Incoming light direction $\omega_i$ (for direct light calculation).
+-*   Material properties: albedo, roughness, specular reflectance $f_s$.
+-*   Geometry representation: Either a periodically extracted triangular mesh with BVH [S1, unofficial] or a Signed Distance Function (SDF) field [S2].
+-*   For [S1, unofficial]: View-dependent spherical harmonic coefficients for indirect color $l_{\text{ind}}$.
+-*   For [S2]: Light source position and incoming radiance.
++*   Surface normal $N$ at the shading point [S1, unofficial][S2].
++*   View direction $\omega_o$ (denoted as $w_i$ in [S2] notation) [S1, unofficial][S2].
++*   Incoming light direction $\omega_i$ for direct light calculation [S1, unofficial].
++*   Material properties including specular reflectance $f_s$ [S1, unofficial].
++*   Geometry representation: either a periodically extracted triangular mesh with BVH [S1, unofficial] or a differentiable SDF field [S2].
++*   For [S1, unofficial]: view-dependent spherical harmonic coefficients for indirect color $l_{\text{ind}}$ and per-Gaussian alpha values $\alpha_i$ [S1, unofficial].
++*   For [S2]: light source position and incoming radiance [S2].
+ 
+ **Outputs:**
+-*   Modified specular radiance $L'_s(\omega_o)$ including inter-reflection effects.
++*   Modified specular radiance $L'_s(\omega_o)$ including inter-reflection effects [S1, unofficial].
+ 
+ **Data Structures:**
+-*   **Mesh (S1):** Triangular mesh extracted via Truncated Signed Distance Function (TSDF) fusion. Stored with a Bounding Volume Hierarchy (BVH) for acceleration [S1, unofficial].
+-*   **Gaussian Attributes (S1):** Each Gaussian primitive stores view-dependent color coefficients modeled by spherical harmonics [S1, unofficial].
++*   **Mesh (S1):** Triangular mesh extracted via Truncated Signed Distance Function (TSDF) fusion, stored with a Bounding Volume Hierarchy (BVH) for acceleration [S1, unofficial].
++*   **Gaussian Attributes (S1):** Each Gaussian primitive stores view-dependent color coefficients modeled by spherical harmonics and an alpha value $\alpha_i$ [S1, unofficial].
+ *   **SDF Field (S2):** A differentiable SDF representation of the scene geometry [S2].
+ 
+@@ -27,7 +27,7 @@
+ 
+ 1.  **Calculate Reflected Direction:**
+-    Compute the reflection vector $R$ (or $w_r$) based on the surface normal $N$ and the view direction $\omega_o$ (or incoming direction $\omega_i$).
++    Compute the reflection vector $R$ (or $w_r$) based on the surface normal $N$ and the view direction.
+     $$ R = 2(\omega_o \cdot N)N - \omega_o $$
+-    [S1, unofficial] uses $\omega_o$ as the incident direction for reflection calculation in this context, while [S2] uses $w_r = 2(n \cdot w_i)n - w_i$ [S2]. Note: [S2] text contains a typo "2 x n - wi" but the formula context implies the standard reflection vector.
++    [S1, unofficial] uses $\omega_o$ as the incident direction in this formula. [S2] uses $w_r = 2(n \cdot w_i)n - w_i$ (the source text contains a typo "2 × n − wi", but the context implies the standard reflection formula) [S2].
+ 
+ 2.  **Determine Visibility ($V$):**
+@@ -46,144 +46,117 @@
+     $$ L'_s(\omega_o) \approx \left( \int_{\Omega} f_s(\omega_i, \omega_o) (\omega_i \cdot \mathbf{N}) d\omega_i \right) \cdot [L_{\text{dir}} \cdot V + L_{\text{ind}} \cdot (1 - V)] $$
+     [S1, unofficial]
+-    Here, $L_{\text{dir}}$ is the direct light component, and $L_{\text{ind}}$ is the computed indirect light. The integral term represents the environment lighting estimation [S1, unofficial].
++    Here, $L_{\text{dir}}$ is the direct light component (the second term in Eq. 8 of [S1, unofficial]), and $L_{\text{ind}}$ is the computed indirect light. The integral term represents the environment lighting estimation [S1, unofficial].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def gaussian_ground_inter_reflection(N, omega_o, omega_i, material, geometry_type, mesh=None, bvh=None, sh_coeffs=None, alpha=None, sdf_field=None, light_pos=None):
+-    """
+-    Computes inter-reflection for a shading point.
+-    
+-    Args:
+-        N: Surface normal vector.
+-        omega_o: View direction (outgoing).
+-        omega_i: Incoming light direction.
+-        material: Object containing specular reflectance f_s and roughness.
+-        geometry_type: 'mesh' or 'sdf'.
+-        mesh: Triangular mesh (if geometry_type is 'mesh').
+-        bvh: Bounding Volume Hierarchy for mesh (if geometry_type is 'mesh').
+-        sh_coeffs: Spherical Harmonic coefficients for indirect color (if geometry_type is 'mesh').
+-        alpha: Alpha values for Gaussians (if geometry_type is 'mesh').
+-        sdf_field: SDF function (if geometry_type is 'sdf').
+-        light_pos: Light source position (if geometry_type is 'sdf').
+-        
+-    Returns:
+-        L_prime_s: Modified specular radiance.
+-    """
++def dot(a, b): return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
++def normalize(v): s = dot(v, v)**0.5; return (v[0]/s, v[1]/s, v[2]/s)
++def lerp(a, b, t): return (a[0]+t*(b[0]-a[0]), a[1]+t*(b[1]-a[1]), a[2]+t*(b[2]-a[2]))
++def reflect(incident, normal): return 2*dot(incident, normal)*normal - incident
++
++def gaussian_ground_inter_reflection(origin, N, omega_o, omega_i, material, geometry_type, mesh=None, bvh=None, sh_coeffs=None, alphas=None, sdf_func=None, light_pos=None):
+     # Step 1: Calculate Reflected Direction
+-    # Note: [S1, unofficial] uses omega_o as incident for reflection in Eq 9 context, 
+-    # while [S2] uses omega_i (w_i). We follow [S1, unofficial] for the primary formula structure.
+-    R = 2 * dot(omega_o, N) * N - omega_o
+-    
+-    # Step 2: Determine Visibility V
++    # [S1, unofficial] uses omega_o as the incident direction in its reflection formula.
++    # [S2] uses omega_i (denoted w_i) for the same purpose.
++    incident_dir = omega_o if geometry_type == 'mesh' else omega_i
++    R = reflect(incident_dir, N)
++
+     V = 1.0
+-    
++    L_ind = 0.0
++
+     if geometry_type == 'mesh':
+-        # Method A: Ray trace against mesh
+-        hit = ray_trace_mesh(R, origin=shading_point, bvh=bvh)
+-        if hit is None:
+-            V = 0.0
++        # Step 2a: Mesh-based visibility check [S1, unofficial]
++        # [G] Standard BVH ray tracing implementation
++        hit_point = None
++        stack = [bvh.root]
++        while stack:
++            node = stack.pop()
++            if not node.aabb.intersects(origin, R): continue
++            if node.is_leaf:
++                for tri in node.triangles:
++                    t = ray_triangle_intersect(origin, R, tri)
++                    if t > 1e-4:
++                        hit_point = origin + R * t
++                        break
++            else:
++                stack.extend(node.children)
++            if hit_point: break
++        V = 0.0 if hit_point is None else 1.0
++
++        # Step 3a: Gaussian indirect lighting aggregation [S1, unofficial]
++        l_ind_agg = 0.0
++        prod_alpha = 1.0
++        for i in range(len(sh_coeffs)):
++            l_ind_i = evaluate_sh(sh_coeffs[i], R)
++            alpha_i = alphas[i]
++            l_ind_agg += l_ind_i * alpha_i * prod_alpha
++            prod_alpha *= (1.0 - alpha_i)
++        L_ind = l_ind_agg
++
++    elif geometry_type == 'sdf':
++        # Step 2b: SDF-based visibility check [S2]
++        # [G] Standard SDF ray marching to find x'
++        x_prime = origin
++        for step in range(100):
++            dist = sdf_func(x_prime)
++            if dist < 1e-3: break
++            if dist > 10.0: break
++            x_prime = x_prime + R * dist
++        else:
++            x_prime = None
++
++        if x_prime is not None:
++            occluded = False
++            # [S2] Uniformly sample 20 points between light and x'
++            for k in range(20):
++                t = k / 19.0
++                sample_pt = lerp(light_pos, x_prime, t)
++                if sdf_func(sample_pt) < 0:
++                    occluded = True
++                    break
++            V = 0.0 if occluded else 1.0
++
++            if not occluded:
++                # [S2] Compute outgoing radiance at x' using light's incoming radiance
++                # [G] Simplified direct lighting at x'
++                L_ind = compute_radiance_at(x_prime, light_pos, material)
+         else:
+             V = 1.0
+-            
+-        # Step 3a: Compute Indirect Lighting via Gaussian Aggregation
+-        # Evaluate SH coefficients in direction R
+-        l_ind_local = evaluate_sh(sh_coeffs, R)
+-        
+-        # Aggregate via alpha blending (assuming pre-sorted Gaussians along ray)
+-        # Note: This assumes l_ind_local is per-Gaussian and alpha is per-Gaussian
+-        # The formula sums over N Gaussians. In a renderer, this is done during rasterization.
+-        # Here we simulate the aggregation for a single pixel's contribution from a set of Gaussians.
+-        l_ind_agg = 0.0
+-        accumulated_alpha = 0.0
+-        for i in range(len(sh_coeffs)):
+-            alpha_i = alpha[i]
+-            l_ind_i = evaluate_sh(sh_coeffs[i], R)
+-            # Contribution: l_ind * alpha * product(1-alpha_prev)
+-            # product(1-alpha_prev) is equivalent to (1 - accumulated_alpha) before adding current alpha
+-            contribution = l_ind_i * alpha_i * (1.0 - accumulated_alpha)
+-            l_ind_agg += contribution
+-            accumulated_alpha += alpha_i * (1.0 - accumulated_alpha) # Standard alpha blending update
+-            
+-        L_ind = l_ind_agg
+-        
+-    elif geometry_type == 'sdf':
+-        # Method B: SDF Ray Marching
+-        # Ray march in direction R to find secondary intersection x'
+-        x_prime = ray_march_sdf(R, shading_point, sdf_field)
+-        
+-        if x_prime is not None:
+-            # Check occlusion from light source
+-            occluded = False
+-            # Sample 20 points between light_pos and x_prime
+-            for k in range(20):
+-                t = k / 19.0 # Uniform sampling
+-                sample_point = lerp(light_pos, x_prime, t)
+-                if sdf_field(sample_point) < 0:
+-                    occluded = True
+-                    break
+-            
+-            if not occluded:
+-                # Compute outgoing radiance at x'
+-                # Note: [S2] mentions using flashlight's incoming radiance
+-                # This requires knowing the light's radiance and geometry at x'
+-                # Simplified: assume direct light contribution at x'
+-                L_ind = compute_outgoing_radiance(x_prime, light_pos, sdf_field, material)
+-            else:
+-                L_ind = 0.0
+-        else:
+             L_ind = 0.0
+-    else:
+-        L_ind = 0.0
+ 
+-    # Step 4: Combine Direct and Indirect Light
+-    # Compute direct light term (environment integral)
+-    # Note: [S1, unofficial] defines L_dir as the second term in Eq 8, handled in previous section.
+-    # We approximate the integral term here.
+-    env_light = integrate_environment_light(material.f_s, omega_i, omega_i, N)
+-    
+-    L_dir = env_light # Simplified mapping to [S1, unofficial] Eq 9 structure
+-    
+-    # Final formula
+-    L_prime_s = env_light * (L_dir * V + L_ind * (1 - V))
+-    
++    # Step 4: Combine direct and indirect light [S1, unofficial]
++    # [G] Approximate environment integral term
++    env_integral = integrate_specular(N, omega_i, omega_o, material.f_s)
++    L_dir = material.direct_light # [S1, unofficial] Eq. 8 term
++    L_prime_s = env_integral * (L_dir * V + L_ind * (1.0 - V))
+     return L_prime_s
+ 
+-def ray_trace_mesh(ray_dir, origin, bvh):
+-    """
+-    [G] Standard BVH ray tracing implementation.
+-    Returns hit point or None.
+-    """
+-    # Implementation details omitted for brevity, assumed standard BVH traversal
+-    pass
+-
+-def ray_march_sdf(ray_dir, origin, sdf_field):
+-    """
+-    [G] Standard ray marching using SDF.
+-    Returns intersection point or None.
+-    """
+-    # Implementation details omitted for brevity
+-    pass
++def ray_triangle_intersect(origin, dir, tri):
++    # [G] Möller–Trumbore algorithm
++    v1, v2, v3 = tri.v0, tri.v1, tri.v2
++    e1, e2 = (v1[0]-v2[0], v1[1]-v2[1], v1[2]-v2[2]), (v3[0]-v2[0], v3[1]-v2[1], v3[2]-v2[2])
++    p, q, r = (dir[1]*e2[2]-dir[2]*e2[1], dir[2]*e2[0]-dir[0]*e2[2], dir[0]*e2[1]-dir[1]*e2[0]), \
++              (origin[0]-v2[0], origin[1]-v2[1], origin[2]-v2[2]), \
++              dot(dir, e1)
++    if abs(r) < 1e-8: return -1.0
++    inv_r = 1.0 / r
++    u, v, t = dot(p, q)*inv_r, dot(q, e2)*inv_r, dot(p, e2)*inv_r
++    if u < 0 or u > 1 or v < 0 or u + v > 1: return -1.0
++    return t
+ 
+ def evaluate_sh(coeffs, direction):
+-    """
+-    [G] Evaluate spherical harmonics at a given direction.
+-    """
+-    # Implementation details omitted for brevity
+-    pass
++    # [G] Standard spherical harmonic evaluation
++    x, y, z = direction
++    return coeffs[0] + coeffs[1]*x + coeffs[2]*y + coeffs[3]*z
+ 
+-def integrate_environment_light(f_s, omega_i, omega_o, N):
+-    """
+-    [G] Approximate the integral of specular reflectance over the hemisphere.
+-    """
+-    # Implementation details omitted for brevity
+-    pass
++def integrate_specular(N, omega_i, omega_o, f_s):
++    # [G] Approximate hemisphere integral for environment lighting
++    return f_s * max(0.0, dot(omega_i, N))
+ 
+-def compute_outgoing_radiance(point, light_pos, sdf_field, material):
+-    """
+-    [G] Compute radiance at a point given a light source.
+-    """
+-    # Implementation details omitted for brevity
+-    pass
++def compute_radiance_at(point, light_pos, material):
++    # [G] Standard direct lighting computation
++    to_light = normalize((light_pos[0]-point[0], light_pos[1]-point[1], light_pos[2]-point[2]))
++    return material.albedo * max(0.0, dot(to_light, material.normal_at(point)))
+ ```
+ 
+@@ -194,10 +167,10 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** Ray tracing on meshes requires accurate BVH construction [S1, unofficial]. SDF ray marching requires careful step size control to avoid missing thin geometry [S2].
+-*   **Boundaries:** The visibility check $V$ is binary (0 or 1) in [S1, unofficial], which may cause aliasing at grazing angles [S1, unofficial]. [S2] uses a soft occlusion check via SDF sampling [S2].
+-*   **Degenerate Input:** If the mesh extraction fails or the SDF is invalid, the inter-reflection calculation may fail. [S1, unofficial] notes that efficient computation is non-trivial and relies on on-the-fly mesh extraction [S1, unofficial].
++*   **Precision:** Ray tracing on meshes requires correct BVH construction to avoid missed intersections [S1, unofficial]. SDF ray marching requires careful step size control to avoid missing thin geometry [S2].
++*   **Boundaries:** The visibility check $V$ is binary (0 or 1) in both [S1, unofficial] and [S2], which may cause aliasing at grazing angles [S1, unofficial][S2].
++*   **Degenerate Input:** If the mesh extraction fails or the SDF is invalid, the inter-reflection calculation may fail [S1, unofficial]. Efficient computation is non-trivial and relies on on-the-fly mesh extraction [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the visibility check method. Mesh-based ray tracing with BVH is $O(\log N)$ per ray on average [S1, unofficial]. SDF ray marching is $O(K)$ where $K$ is the number of steps, plus $O(M)$ for occlusion sampling (20 points) [S2].
++*   **Time Complexity:** Depends on the visibility check method. Mesh-based ray tracing requires BVH traversal per ray [S1, unofficial]. SDF ray marching requires $O(K)$ steps for marching plus $O(M)$ for occlusion sampling (20 points) [S2].
+ *   **Memory Complexity:** Mesh-based approach requires storing the mesh and BVH [S1, unofficial]. SDF-based approach requires storing the SDF field [S2]. Gaussian-based approach requires storing SH coefficients per Gaussian [S1, unofficial].
+ *   **Performance:** [S1, unofficial] reports that on-the-fly mesh extraction adds overhead but enables accurate self-occlusion [S1, unofficial]. [S2] notes that importance sampling and differentiable layers allow for efficient optimization [S2].

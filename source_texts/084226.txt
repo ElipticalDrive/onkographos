@@ -1,0 +1,235 @@
+Oakleaff shows us how he handled volumetric fog and shadows in GM
+
+GM Shaders Guest: Volume Shadows - by Xor and Oakleaff
+GM Shaders
+SubscribeSign in
+Guest: Volume Shadows
+Oakleaff shows us how he handled volumetric fog and shadows in GM
+Xor and Oakleaff
+Apr 05, 2024
+3
+Share
+Hello everybody, I’m Oakleaff (with two f’s because ‘Oakleaf’ is usually already taken everywhere). I’ve been using Game Maker since ‘04 as a hobby and a lot of that time I’ve been banging my head against the wall with GM’s 3d functionality.
+I do not entirely disagree
+Recently I showcased my implementation of (simple) volumetric fog and shadows in Game Maker. Here’s a simple breakdown/tutorial of the effect and how it’s achieved. I also made an open-source demo project which is available on my Github.
+End result with a bunch of post processing added
+The effect relies on two basic techniques: raymarching and (cascaded) shadow mapping. I’m not going to go very deep into either of these techniques, since both of them have a lot of information available online. The main focus in this tutorial is on the fog effect, but my implementation of cascaded shadows is also available in the demo.
+SETUP
+The basic building blocks needed for the effect are:
+Screen space depth buffer - needed to properly fade objects in and out of fog
+Shadow maps (cascaded or not)
+Noise textures (Perlin noise, blue noise)
+The four corners of the camera’s view frustum far plane (in world space)
+1. Depth buffer
+Just a regular screen space depth buffer. I’m packing the depth of each fragment into the RGB channels and then unpacking the value in the screen space fog shader.
+2. (Cascaded) Shadow maps
+For shadowing, the scene is rendered from the light’s perspective and depth information is written to shadow maps. The idea behind cascaded shadow maps is that the scene is rendered to multiple shadow maps of varying accuracy, so that geometry close to the camera gets more accurate shadows while farther-off shadows are less accurate. The above image shows the rendered shadow maps (top left).
+The good thing with this approach is that you can get accurate shadows where they’re needed without having your shadow maps be too large (the above example uses 2048px shadow maps). The downside is needing to render depth information for multiple shadow maps, which can quickly double, triple or quadruple the needed draw calls. The ‘material’ shaders also need to decide which shadow map to use - basically just a coordinate check per shadow map.
+Splitting the camera frustum into shadow maps https://learn.microsoft.com/en-us/windows/win32/dxtecharts/cascaded-shadow-maps
+For basic cascaded shadow maps, I’m splitting the game camera’s view frustum into three subfrusta and rendering a separate shadow map for each. The shadow maps are sampled in the material and fog shaders to add the shadowing effect.
+3. Noise textures
+Perlin noise is used to define the fog density
+Blue noise is used to offset the raymarching samples
+Noise textures used. Perlin noise (left), blue noise (right)
+4. Camera view frustum
+I’m calculating the four corners of the camera’s view frustum far plane in world space on the CPU side (with GML) and passing those to the vertex shader. The corner positions are used to calculate the ray direction from the camera position to each fragment. The ray direction is then used in the raymarching step to get the worldspace position for each sample.
+The camera frustum corners are also used when calculating the shadow map coordinates for the cascaded shadow maps. When we know the camera’s position and the positions of the view frustum’s far-plane corners in world space, calculating the corners of the ‘subfrusta’ (segments of the view frustum) is just a matter of lerping from the camera origin to the far-plane corners.
+THE FOG SHADER
+Since this is a (fullscreen) screen space effect, it’s drawn using a fullscreen quad. In my case, I’m just drawing the depth buffer surface to the screen using the fog shader, like so:
+```
+// Draw event
+shader_set( shdScreenSpaceFog );
+draw_surface_ext( DrawController.depthSurface, 0, 0, 1.0, 1.0, 0, c_white, 1 );	
+shader_reset();
+```
+(The needed uniforms are passed elsewhere in the code.)
+The vertex shader is really simple. All it does is read the worldspace positions for each of the quad’s corners and uses that to calculate v_vViewRay, which is the normalized world space vector from the camera’s position to that corner. This vector is then interpolated in the fragment shader to get the (worldspace) vector to each fragment.
+```
+//
+// Screen space volumetric fog shader
+//
+attribute vec3 in_Position;                  // (x,y,z)
+attribute vec4 in_Colour;                    // (r,g,b,a)
+attribute vec2 in_TextureCoord;              // (u,v)
+
+varying vec2 v_vTexCoord;
+varying vec4 v_vColour;
+varying vec3 v_vCamPosition;
+varying vec3 v_vViewRay;
+
+uniform vec3	uCamPosition;			// Camera position in world space
+uniform vec3	uFrustumPoints[4];		// Frustum corner positions in world space
+
+void main()
+{
+    vec4 object_space_pos = vec4( in_Position.x, in_Position.y, in_Position.z, 1.0);
+    gl_Position = gm_Matrices[MATRIX_WORLD_VIEW_PROJECTION] * object_space_pos;
+    
+	int n = 0;
+	n += int( in_TextureCoord.x );
+	n += int( in_TextureCoord.y ) * 2;
+	vec3 frustumPoint	= uFrustumPoints[n];			// Corner position in world space
+	v_vViewRay		= normalize( frustumPoint - uCamPosition );
+	
+	v_vTexCoord		= in_TextureCoord;
+	v_vColour		= in_Colour;
+	v_vCamPosition	= uCamPosition;
+
+}
+```
+The fragment shader does the heavy lifting. The overall quality of the shader is controlled by the sample count:
+```
+const int cSampleCount		= 24;
+const float cSampleStep		= 1.0 / float( cSampleCount );
+```
+cSampleCount controls the amount of raymarch samples per fragment. More samples = more accuracy but also less performance.
+Another very important thing to consider is the render resolution. Since the shader runs for each rendered fragment, halving the render resolution means the shader needs to be run for 1/4th of the fragments. (I’m rendering the fog at 1/4th of the game’s resolution, so 24 samples is not too heavy).
+For each fragment, the following steps are taken:
+Calculate the fragment’s position in world space using the v_vViewVector, camera position, depth buffer value and the camera’s far plane distance.
+```
+vec4 fragColour = texture2D( gm_BaseTexture, v_vTexCoord );
+float fragDepth = get_depth( fragColour.rgb );
+	
+vec3 viewRay		= normalize( v_vViewRay );
+float fragDistance	= mix( uCamNear, uCamFar, fragDepth );
+vec3 rayEndPosition     = v_vCamPosition + viewRay * fragDistance;
+
+// Calculate base fog value for the fragment - normal linear fog equation
+float baseFogValue = clamp( ( fragDistance - uFogStart ) / ( uFogEnd - uFogStart ), 0.0, 1.0 );
+	
+```
+v_vViewRay needs to be renormalized for each fragment, otherwise rayEndPosition is calculated incorrectly. The rayEndPosition is camera draw distance units away from the camera along the v_vViewRay direction.
+Raymarch from the camera towards the fragment world position and sample the noise texture for each position to accumulate fog
+```
+float sampleStep = 1.0 / float( cSampleCount );
+	
+float n = 0.0;
+	
+for ( int i = 0; i < cSampleCount; i ++ ) {
+		
+	vec3 worldPos = mix( v_vCamPosition, rayEndPosition, min( n, 1.0 ));
+	n += cSampleStep;
+		
+	sample_value = baseSampleValue;
+
+  // Noise sampling
+  xy_value = texture2D( uNoiseTexture, get_texture_coord( vec2( worldPos.x, worldPos.y ) * 0.00051, uTexCoord )).r;
+  xz_value = texture2D( uNoiseTexture, get_texture_coord( vec2( worldPos.x, worldPos.z ) * 0.00063, uTexCoord )).r;
+  yz_value = texture2D( uNoiseTexture, get_texture_coord( vec2( worldPos.y, worldPos.z ) * 0.00047, uTexCoord )).r;
+  	
+  noise_value	= xy_value * xz_value * yz_value;
+  sample_value	*= noise_value;
+  	
+        ///////////////////////
+        // SHADOWING GOES HERE
+        ///////////////////////
+
+  total_value += sample_value;
+}
+```
+Here we take a maximum of cSampleCount steps from the camera position towards rayEndPosition, exiting early if we exceed the fragDepth value. This gives us a position in world space (worldPos) that is then used to sample the noise texture.
+The noise texture uNoiseTexture gets sampled three times, once for each plane (xy, xz, yz) to simulate a 3d fog volume. The UV coordinates for each sample are based on the world position of the raymarch.
+Note: This adds 3 texture samples per raymarch sample, (24 x 3 in this case), which can be quite expensive. If you don’t need the fog to have any “shape”, the noise sampling is not necessary.
+get_texture_coord remaps the given coordinates to a given texture UV space. I use this because I try to avoid having textures on separate texture pages, instead I supply the shader with the UVs of the texture on a larger texture atlas (uTexCoord).
+Results of the above raymarch
+Add shadows by sampling the shadow maps along the ray
+At this point we have the raymarch working, and we have the world space position of each step along the ray. To add shadows to the fog, we just need to sample the (correct) shadow map and see whether the current world position is in shadow or not. This is no different than ‘regular’ shadow mapping and doesn’t require any additional shadow maps.
+Simplified:
+```
+// Multiply world position of the sample by the view projection matrix of the shadow map camera
+vec4 shadow_coord	= uShadowMatrix * vec4( worldPos, 1.0 );
+			
+// Get coordinate in shadow map space
+vec4 shadowMapCoord;
+shadowMapCoord.xy = shadow_coord.xy / shadow_coord.w * 0.5 + 0.5;
+shadowMapCoord.z = shadow_coord.z;
+shadowMapCoord.w = shadow_coord.w;
+
+// Sample's depth in shadow map space
+float linear_depth = ( shadowMapCoord.z / shadowMapCoord.w );
+
+// Get depth from shadow map
+shadow_depth = get_depth( texture2D( uShadowMap, shadowMapCoord.xy ).rgb );
+						
+float shadow = shadow_depth < linear_depth ? 1.0 : 0.0;
+
+// Subtract shadow value from the total fog value
+float shadow = shadow_depth < linear_depth ? 1.0 : 0.0;			
+shadowedSamples += shadow;
+```
+```
+// Percentage of shadowed samples out of all <cSampleCount> samples
+float shadowedValue = shadowedSamples * cSampleStep;
+
+// Subtract shadow value from total value
+total_value *= 1.0 - shadowedValue
+```
+Note: the demo project includes cascaded shadow maps and how to handle those shader-side
+Adding the code to the above raymarch gets us the first look at shadows within the fog:
+Looks horrible
+Doesn’t look right at all. The effect is caused by the samples being so far apart in world space, that for some rays, none of the sampled points along the ray happen to be in a shadowed spot.
+The above example is using 24 samples per ray. Increasing the sample count helps, but only a bit:
+Same scene, 48 samples
+Offset the samples by blue noise
+Luckily the solution is simple. We can offset the starting position of each ray by some random amount (0-1) so each ray sample is distributed more evenly in world space, instead of uniformly in 1.0 / cSampleCount increments. Blue noise works very well for this case. The blue noise texture I’m using can be found above.
+```
+// Sample blue noise
+vec2 blueNoiseUv = mod( gl_FragCoord.xy, 128.0 ) / 128.0;
+float blueNoise = texture2D( uNoiseTexture, get_texture_coord( blueNoiseUv, uTexCoord )).b;
+```
+```
+...
+// Offset ray start position by blue noise
+n = cSampleStep * blueNoise;
+	
+for ( int i = 0; i < cSampleCount; i ++ ) {
+		
+  vec3 worldPos = mix( v_vCamPosition, rayEndPosition, min( n, 1.0 ));
+  n += cSampleStep;
+
+....
+```
+Adding these bits of code to the shader gets us a much better result:
+24 samples with blue noise added
+And that’s the basic volumetric shadow effect right there. Adding simple colouring gets us something like this:
+The effect is still pretty rough. Adding a bit of blur helps.
+24 samples, rendered at 1/2 resolution, blur radius 5
+Post-processing
+The volumetric shadow effect we get this way is pretty rough. A lot depends on how the fog gets processed afterwards.
+Blurring + additive blending
+In my project I solved the ‘low quality’ of the fog shader’s output by
+Rendering the fog at 1/4th of the resolution
+Multiplying the fog value with a fog colour (it’s not white)
+Drawing the fog shader’s output to a separate (emission) surface, upscaled with texture filtering
+Blurring that surface with a 2-pass blur and
+Drawing that surface to the screen with additive blending
+At this point, I have something like this (24 samples):
+The shadow amount is actually subtracted from the fog value here, so instead of having a ‘lit fog colour’ and a ‘shadowed fog colour’, the fog is just less ‘dense’ in shadowed areas. The low resolution of the fog surface is apparent when moving the camera, since the blue noise jittering effect becomes more pronounced with movement. Halving the fog strength (total_value *= 0.5) makes the jittering so subtle that it’s negligible - but that’s just with my setup.
+Conclusion
+That’s pretty much it. I simplified the shadow mapping step by a lot, because it’s no different here than it would be for any ‘material’ shader which can receive shadows.
+Some notes about the implementation:
+The shadow mapping could definitely be improved, at least by implementing better biasing
+No light scattering is taken into account, only the accumulation of fog along the ray. This isn’t simulating or even approximating the fog physically.
+The noise texture and the UVs used to define fog density play a large part on how the fog actually looks. The example code+texture results in large ‘clouds’ of fog, but different textures give you different outcomes.
+The blue noise could be animated and/or take advantage of temporal anti aliasing (TAA) to reduce the noisiness
+Bonus: modifying the shadow strength by the sample’s distance from the shadow caster’s surface to fade out the shadow ‘beams’. This effect is also seen in the previous screenshot.
+Sources and more:
+https://blog.demofox.org/2020/05/10/ray-marching-fog-with-blue-noise
+https://blog.demofox.org/2018/08/07/tiled-blue-noise
+Note from Xor
+Hey everybody, Xor here! I just wanted to give a warm thank you to Oakleaff for sharing his work and to all of you for reading. Please check out his socials and give him a follow. He’s made several cool 3D games with GameMaker!
+Twitter: @Oakleaff_
+Itch games: Oakleaff.itch.io
+If you want to see more tutorials like this, please consider subscribing!
+Have a good one! See ya later!
+3
+Share
+PreviousNext
+Discussion about this post
+CommentsRestacks
+TopLatestDiscussions
+No posts
+Ready for more?
+© 2026 Xor · Privacy ∙ Terms ∙ Collection notice
+Start your SubstackGet the app
+Substack is the home for great culture

@@ -1,0 +1,82 @@
+# RMSE Loss for Constant Model
+
+Also called: RMSE for Constant Model
+
+## Overview
+Calculates the Root Mean Squared Error between predicted and observed intensities for a given sigma and q [S1, unofficial]. It serves as a photometric consistency loss in differentiable volume rendering, specifically fitting a constant radiance assumption along a ray [S1, unofficial].
+
+## How it works
+**Inputs:**
+- `intensity`: Array of observed intensity values $I_k$ for $k=0 \dots N-1$.
+- `sigma`: Volume density $\sigma$ (scalar).
+- `q`: Integration parameter or scaling factor (scalar).
+- `ds`: Distance step between samples (scalar).
+
+**Outputs:**
+- `rmse`: The Root Mean Squared Error (scalar).
+
+**Data Structures:**
+- `intensity`: Array of floats.
+- `squared`: Accumulator for squared errors (float).
+
+**Steps:**
+1. **Validation**: Check if `intensity` is empty or `ds <= 0`. If invalid, return infinity [S1, unofficial].
+2. **Initialization**: Set `squared = 0` [S1, unofficial].
+3. **Iteration**: For each sample index $k$ from $0$ to `intensity.size() - 1`:
+   a. Calculate predicted intensity: $I_{pred} = \text{constant\_intensity}(I_0, \sigma, q, k \cdot ds)$, where $I_0 = \text{intensity}[0]$ [S1, unofficial].
+   b. Calculate error: $error = I_{pred} - intensity[k]$ [S1, unofficial].
+   c. Update accumulator: `squared += error^2` [S1, unofficial].
+4. **Finalize**: Return $\sqrt{\frac{squared}{N}}$, where $N$ is `intensity.size()` [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def rmse_loss_constant_model(intensity, sigma, q, ds):
+    if not intensity or ds <= 0:
+        return float('inf')
+    
+    n = len(intensity)
+    squared = 0.0
+    i0 = intensity[0]
+    
+    for k in range(n):
+        t = k * ds
+        # [G] Standard constant radiance accumulation for density sigma over distance t
+        predicted = i0 * (1.0 - math.exp(-sigma * t))
+        
+        error = predicted - intensity[k]
+        squared += error * error
+        
+    return math.sqrt(squared / n)
+```
+
+**Parameters:**
+- `sigma`: Volume density. Typical values depend on the scene scale [G].
+- `q`: Integration parameter. Value not explicitly defined in the source notes beyond being passed to the model function [S1, unofficial].
+- `ds`: Distance step. Must be $> 0$ [S1, unofficial].
+
+**Edge Cases:**
+- Empty `intensity` list: Returns infinity [S1, unofficial].
+- Non-positive `ds`: Returns infinity [S1, unofficial].
+
+## Subtopics
+
+### [Depth RMSE and L1 Calculation](17549-depth-rmse-and-l1-calculation.md)
+Computes the error between rasterized depth and ground truth depth, optionally masking by silhouette and valid depth masks depending on training state. It provides accuracy and completeness metrics between two depth maps, supporting absolute, relative, and log-squared error variants.
+
+## Operating characteristics
+**Time Complexity:** $O(N)$, where $N$ is the number of intensity samples [G].
+**Memory Complexity:** $O(1)$ auxiliary space, excluding input storage [G].
+**Strengths:** Simple to implement; provides a direct metric for constant-radiance assumption validity [S1, unofficial].
+**Limitations:** Assumes constant radiance along the ray, which may not hold for complex scenes [S1, unofficial]. Sensitive to invalid depth or empty inputs [S1, unofficial].
+**When to use:** When optimizing for scenes or ray segments where constant radiance is a valid approximation, or as a baseline loss component [S1, unofficial].
+**When not to use:** For scenes with high dynamic range or complex lighting variations where constant intensity is a poor model [S1, unofficial].
+
+## Background
+Originated in the context of HPC foundational demos and differentiable volume rendering optimization [S1, unofficial]. The depth variant is part of the SplaTAM framework for Gaussian Splatting-based SLAM .
+
+## Sources
+[S1] wyh1309/hpc_foundational_demos, https://github.com/wyh1309/hpc_foundational_demos, fetched 2026-10-26 (unofficial)

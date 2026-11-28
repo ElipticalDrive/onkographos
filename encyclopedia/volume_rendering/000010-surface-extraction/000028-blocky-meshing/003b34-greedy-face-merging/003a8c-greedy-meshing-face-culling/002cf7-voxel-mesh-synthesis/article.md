@@ -1,0 +1,93 @@
+# Voxel Mesh Synthesis
+
+## Overview
+Voxel Mesh Synthesis is a post-processing step that converts validated leaf voxels from an octree into standard 3D cube meshes for export [S1, unofficial]. It serves as a bridge between volumetric data structures and standard polygonal formats like Wavefront .obj [S1, unofficial].
+
+## How it works
+**Inputs:** A set of validated leaf voxels from an octree, each defined by its spatial bounds (min and max coordinates) [S1, unofficial].
+**Outputs:** A standard Wavefront .obj file containing triangle meshes [S1, unofficial].
+
+**Data Structures:**
+The method generates geometry for a single cube, defined by 8 unique corner vertices [S1, unofficial].
+
+**Steps:**
+1. **Vertex Generation:** For a cube defined by minimum coordinates $(x_{min}, y_{min}, z_{min})$ and maximum coordinates $(x_{max}, y_{max}, z_{max})$, generate 8 vertices [S1, unofficial]. Each vertex is a 3D vector $(x, y, z)$ corresponding to one of the 8 combinations of min/max for each axis [S1, unofficial].
+2. **Face Construction:** Construct 12 triangular faces, representing 2 triangles per cube face [S1, unofficial].
+3. **Normal Orientation:** Ensure that the winding order of the vertices for each triangle results in outward-pointing surface normals [S1, unofficial]. This is achieved by using counter-clockwise (CCW) winding order when viewed from the outside [S1, unofficial].
+4. **Export:** Output the vertices and indices in Wavefront .obj format, which is compatible with external 3D software [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def generate_cube_mesh(min_coord, max_coord):
+    """
+    Generates a mesh for a single voxel cube.
+    
+    Args:
+        min_coord: Tuple (x, y, z) of the cube's minimum corner.
+        max_coord: Tuple (x, y, z) of the cube's maximum corner.
+        
+    Returns:
+        vertices: List of 8 vertex tuples.
+        indices: List of 36 integer indices (12 triangles * 3 vertices).
+    """
+    x0, y0, z0 = min_coord
+    x1, y1, z1 = max_coord
+    
+    # Step 1: Generate 8 unique corner vertices
+    # 0: (x0, y0, z0)
+    # 1: (x1, y0, z0)
+    # 2: (x1, y1, z0)
+    # 3: (x0, y1, z0)
+    # 4: (x0, y0, z1)
+    # 5: (x1, y0, z1)
+    # 6: (x1, y1, z1)
+    # 7: (x0, y1, z1)
+    vertices = [
+        (x0, y0, z0), (x1, y0, z0), (x1, y1, z0), (x0, y1, z0),
+        (x0, y0, z1), (x1, y0, z1), (x1, y1, z1), (x0, y1, z1)
+    ]
+    
+    # Step 2 & 3: Construct 12 triangles (2 per face) with CCW winding for outward normals
+    # Face z = z_min (outward normal -z): 0, 3, 2 and 0, 2, 1
+    # Face z = z_max (outward normal +z): 4, 5, 6 and 4, 6, 7
+    # Face y = y_min (outward normal -y): 0, 1, 5 and 0, 5, 4
+    # Face y = y_max (outward normal +y): 3, 2, 6 and 3, 6, 7
+    # Face x = x_min (outward normal -x): 0, 4, 7 and 0, 7, 3
+    # Face x = x_max (outward normal +x): 1, 0, 3 and 1, 3, 2
+    indices = [
+        0, 3, 2, 0, 2, 1,
+        4, 5, 6, 4, 6, 7,
+        0, 1, 5, 0, 5, 4,
+        3, 2, 6, 3, 6, 7,
+        0, 4, 7, 0, 7, 3,
+        1, 0, 3, 1, 3, 2
+    ]
+    
+    return vertices, indices
+```
+
+**Edge Cases:**
+*   **Degenerate Input:** If `min_coord` equals `max_coord`, the cube has zero volume [G]. Implementers should check for this condition and skip mesh generation or handle it as a point/invalid voxel [G].
+*   **Precision:** Floating-point precision issues may arise if voxel coordinates are very large or very small [G]. Use double precision if necessary to maintain vertex accuracy [G].
+
+## Subtopics
+
+### Hybrid Scene Static Merging
+Optimizes static voxel models by merging subtrees without animated transforms into a single mesh, with inner face culling [S2, unofficial]. It rasterizes these subtrees into a single mesh, culling inner faces between merged components [S2, unofficial]. If the volume of the merged mesh exceeds a specified limit, it falls back to keeping the meshes separate [S2, unofficial]. It is controlled by a boolean setting `mergeStatic` in `VoxelImportSettings` [S2, unofficial]. The volume limit threshold is not specified in the sources [S2, unofficial].
+
+## Operating characteristics
+**Time Complexity:** Not given in the sources.
+**Memory Complexity:** Not given in the sources.
+**Strengths:** Produces clean, standard Wavefront .obj data compatible with external 3D software [S1, unofficial].
+**Limitations:** Not given in the sources.
+**When to use:** Not given in the sources.
+**When not to use:** Not given in the sources.
+
+## Background
+Voxel Mesh Synthesis is described in the context of a 3D object surface voxelizer project [S1, unofficial]. It is also referenced in the context of the AdaEngine's voxel graphics system, specifically regarding hybrid scene optimization and static merging [S2, unofficial].
+
+## Sources
+[S1] Joji0/3D-Object-Surface-Voxelizer, https://github.com/Joji0/3D-Object-Surface-Voxelizer, fetched 2026-10-27 (unofficial)
+[S2] Voxel graphics: MagicaVoxel import, animation, dynamic world and physics (ADR-0025), https://github.com/AdaEngine/Ada/pull/136, fetched 2026-10-26 (unofficial)

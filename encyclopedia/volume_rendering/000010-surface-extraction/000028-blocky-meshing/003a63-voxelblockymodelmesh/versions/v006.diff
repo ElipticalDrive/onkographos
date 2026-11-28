@@ -1,0 +1,182 @@
+--- v005.md
++++ v006.md
+@@ -31,9 +31,9 @@
+ 4. **Rotation:** If `mesh_ortho_rotation_index` is non-zero, the mesh is rotated according to the GridMap tile convention before baking [S2].
+ 5. **Placement:** The mesh is instantiated at each voxel position in the grid [S2].
+-6. **Side Classification:** For each voxel, triangles are classified as belonging to one of the 6 sides of the unit cube [S2]. A triangle is considered to be on a specific side if its vertices are within `side_vertex_tolerance` of that side's plane [S2].
++6. **Side Classification:** For each voxel, triangles are classified as belonging to one of the 6 sides of the unit cube. A triangle is considered to be on a specific side if its vertices are within `side_vertex_tolerance` of that side's plane [S2].
+ 7. **Culling:**
+-    * **Neighbor Culling:** If `side_cutout_enabled` is true, the mesher checks neighboring voxels [S2]. If a neighbor partially covers a side of the current voxel, the occluded geometry on that side is cut away [S2].
++    * **Neighbor Culling:** If `side_cutout_enabled` is true, the mesher checks neighboring voxels. If a neighbor partially covers a side of the current voxel, the occluded geometry on that side is cut away [S2].
+     * **Constraint:** Side cutout only functions if the shape of both interacting sides is a rectangle [S2].
+-    * **Transparency:** Face culling uses the model's overall transparency properties [S1]. If a model is defined as non-transparent, its sides will be culled even if the middle is transparent [S1].
++    * **Transparency:** Face culling uses the model's overall transparency properties. If a model is defined as non-transparent, its sides will be culled even if the middle is transparent [S1].
+ 8. **Assembly:** The remaining visible geometry is assembled into the final mesh [S2].
+ 
+@@ -59,6 +59,25 @@
+     surfaces = source_mesh.surfaces[:2]
+ 
++    # Apply orthogonal rotation if specified
+     if rotation_idx != 0:
+-        source_mesh = apply_gridmap_rotation(source_mesh, rotation_idx)
++        # Standard orthogonal rotation matrices for GridMap convention
++        rotations = [
++            [[1,0,0],[0,1,0],[0,0,1]], [[0,0,1],[0,1,0],[-1,0,0]],
++            [[-1,0,0],[0,1,0],[0,0,-1]], [[0,0,-1],[0,1,0],[1,0,0]],
++            [[1,0,0],[0,0,-1],[0,1,0]], [[1,0,0],[0,0,1],[0,-1,0]],
++            [[-1,0,0],[0,0,-1],[0,-1,0]], [[-1,0,0],[0,0,1],[0,1,0]]
++        ]
++        mat = rotations[rotation_idx % len(rotations)]
++        transformed_surfaces = []
++        for surf in surfaces:
++            new_verts = []
++            for v in surf.vertices:
++                new_verts.append([
++                    mat[0][0]*v[0] + mat[0][1]*v[1] + mat[0][2]*v[2],
++                    mat[1][0]*v[0] + mat[1][1]*v[1] + mat[1][2]*v[2],
++                    mat[2][0]*v[0] + mat[2][1]*v[1] + mat[2][2]*v[2]
++                ])
++            transformed_surfaces.append(type(surf)(vertices=new_verts, indices=surf.indices, normals=surf.normals, uvs=surf.uvs))
++        surfaces = transformed_surfaces
+ 
+     instances = []
+@@ -67,76 +86,51 @@
+             continue
+ 
+-        instance = copy_mesh(source_mesh)
+-        classified = classify_triangles_by_side(surfaces, tolerance)
++        # Create instance by copying vertices and indices
++        instance_verts = []
++        instance_indices = []
++        offset_idx = 0
++        for surf in surfaces:
++            for v in surf.vertices:
++                instance_verts.append(v)
++            for idx in surf.indices:
++                instance_indices.append(idx + offset_idx)
++            offset_idx += len(surf.vertices)
+ 
++        # Classify triangles by proximity to unit cube sides
++        side_triangles = {'left': [], 'right': [], 'bottom': [], 'top': [], 'front': [], 'back': []}
++        side_checks = {
++            'left': lambda v: v[0] < tolerance, 'right': lambda v: v[0] > 1.0 - tolerance,
++            'bottom': lambda v: v[1] < tolerance, 'top': lambda v: v[1] > 1.0 - tolerance,
++            'front': lambda v: v[2] < tolerance, 'back': lambda v: v[2] > 1.0 - tolerance
++        }
++        tri_idx = 0
++        for surf in surfaces:
++            for i in range(0, len(surf.indices), 3):
++                tri_verts = [surf.vertices[surf.indices[i+j]] for j in range(3)]
++                for side, check in side_checks.items():
++                    if all(check(v) for v in tri_verts):
++                        side_triangles[side].append((tri_idx, tri_verts))
++                        break
++                tri_idx += 1
++
++        # Apply side cutout if enabled
+         if cutout_enabled:
+-            for side in ['left', 'right', 'bottom', 'top', 'front', 'back']:
+-                neighbor_pos = voxel_pos + get_side_offset(side)
+-                if voxel_grid[neighbor_pos].occupied:
+-                    # Sources do not specify the exact geometric cutout algorithm.
+-                    # It removes occluded geometry on the side if both sides are rectangular.
+-                    instance = cut_occluded_geometry(instance, side, tolerance)
++            # Sources do not specify the exact geometric cutout algorithm.
++            # It removes occluded geometry on the side if both sides are rectangular.
++            # Implementation would require raycasting or polygon clipping against neighbor bounds.
++            pass
+ 
+-        instances.append(instance)
++        instances.append({'verts': instance_verts, 'indices': instance_indices})
+ 
+-    return merge_mesh_instances(instances)
+-
+-def apply_gridmap_rotation(mesh, index):
+-    # Standard orthogonal rotation matrices for GridMap convention
+-    rotations = [
+-        [[1,0,0],[0,1,0],[0,0,1]], [[0,0,1],[0,1,0],[-1,0,0]],
+-        [[-1,0,0],[0,1,0],[0,0,-1]], [[0,0,-1],[0,1,0],[1,0,0]],
+-        [[1,0,0],[0,0,-1],[0,1,0]], [[1,0,0],[0,0,1],[0,-1,0]],
+-        [[-1,0,0],[0,0,-1],[0,-1,0]], [[-1,0,0],[0,0,1],[0,1,0]]
+-    ]
+-    mat = rotations[index % len(rotations)]
+-    return transform_mesh_vertices(mesh, mat)
+-
+-def transform_mesh_vertices(mesh, mat):
+-    new_verts = []
+-    for v in mesh.vertices:
+-        new_verts.append([
+-            mat[0][0]*v[0] + mat[0][1]*v[1] + mat[0][2]*v[2],
+-            mat[1][0]*v[0] + mat[1][1]*v[1] + mat[1][2]*v[2],
+-            mat[2][0]*v[0] + mat[2][1]*v[1] + mat[2][2]*v[2]
+-        ])
+-    return Mesh(vertices=new_verts, indices=mesh.indices, surfaces=mesh.surfaces)
+-
+-def classify_triangles_by_side(surfaces, tolerance):
+-    sides = {
+-        'left': lambda v: v[0] < tolerance, 'right': lambda v: v[0] > 1.0 - tolerance,
+-        'bottom': lambda v: v[1] < tolerance, 'top': lambda v: v[1] > 1.0 - tolerance,
+-        'front': lambda v: v[2] < tolerance, 'back': lambda v: v[2] > 1.0 - tolerance
+-    }
+-    classified = {s: [] for s in sides}
+-    for surf in surfaces:
+-        for tri in surf.triangles:
+-            for side, check in sides.items():
+-                if all(check(v) for v in tri.vertices):
+-                    classified[side].append(tri)
+-                    break
+-    return classified
+-
+-def cut_occluded_geometry(mesh, side, tolerance):
+-    # Sources do not specify the exact geometric cutout algorithm.
+-    # It removes occluded geometry on the side if both sides are rectangular.
+-    return mesh
+-
+-def get_side_offset(side):
+-    offsets = {'left': (-1, 0, 0), 'right': (1, 0, 0), 'bottom': (0, -1, 0), 'top': (0, 1, 0), 'front': (0, 0, -1), 'back': (0, 0, 1)}
+-    return offsets[side]
+-
+-def copy_mesh(mesh):
+-    return Mesh(vertices=list(mesh.vertices), indices=list(mesh.indices), surfaces=list(mesh.surfaces))
+-
+-def merge_mesh_instances(instances):
+-    merged_verts = []
+-    merged_indices = []
++    # Merge instances into final mesh
++    final_verts = []
++    final_indices = []
+     offset = 0
+     for inst in instances:
+-        merged_verts.extend(inst.vertices)
+-        merged_indices.extend([idx + offset for idx in inst.indices])
+-        offset += len(inst.vertices)
+-    return Mesh(vertices=merged_verts, indices=merged_indices, surfaces=[])
++        final_verts.extend(inst['verts'])
++        final_indices.extend([i + offset for i in inst['indices']])
++        offset += len(inst['verts'])
++
++    return {'vertices': final_verts, 'indices': final_indices}
+ ```
+ 
+@@ -151,5 +145,5 @@
+ * **Performance:** Faces lying on the sides of the $1\times1\times1$ unit cube are the only faces that can be culled. They must line up perfectly; otherwise, dramatic slowdowns occur due to unculled geometry [S1].
+ * **Complexity:** Keep models low-poly. Performance decreases quickly if complex models appear frequently [S1].
+-* **Transparency:** A second material can be used for meshes with both transparent and opaque parts (two surfaces). However, face culling uses model properties regardless [S1]. If a model is defined as non-transparent, its sides will be culled even if the middle is transparent [S1].
++* **Transparency:** A second material can be used for meshes with both transparent and opaque parts (two surfaces). However, face culling uses model properties regardless. If a model is defined as non-transparent, its sides will be culled even if the middle is transparent [S1].
+ * **Physics Export:** If using mesh-based physics and exporting with 'Export as dedicated server', ensure meshes in VoxelBlockyModelMesh are not stripped, as mesh data is required at runtime to generate colliders [S1].
+ * **Side Cutout Overhead:** Enabling `side_cutout_enabled` can result in a higher triangle count compared to when it is disabled [S2].
+@@ -160,10 +154,10 @@
+ * **Memory Complexity:** Not given in the sources.
+ * **Strengths:** Versatile workflow allowing assignment of a mesh resource instead of cube geometry. Allows creation of complex shapes using standard 3D editor meshes with UV-mapping [S1, S2].
+-* **Limitations:** Requires manual UV assignment in a 3D modeler. Performance degrades with high-poly meshes. Side cutout optimization has constraints (rectangular sides only) and can increase triangle count [S1, S2].
+-* **When to use:** Not given in the sources.
+-* **When not to use:** Not given in the sources.
++* **Limitations:** Requires manual UV assignment in a 3D modeler [S1]. Performance degrades with high-poly meshes [S1]. Side cutout optimization has constraints (rectangular sides only) and can increase triangle count [S2].
++* **When to use:** When voxel shapes need to be non-cubic and complex (e.g., trees, furniture) [G].
++* **When not to use:** When simple cubic voxels are sufficient, or when high-poly meshes are required and performance is critical [G].
+ 
+ ## Background
+-VoxelBlockyModelMesh is part of the Voxel Tools suite for the Godot Engine [S1]. It was developed to provide a more versatile workflow for voxel terrain and object creation, moving beyond simple cube-based geometry [S2]. The method leverages Godot's mesh resource system and integrates with the existing blocky meshing infrastructure, including face culling and greedy merging [G].
++VoxelBlockyModelMesh is part of the Voxel Tools suite for the Godot Engine [S1, S2]. It was developed to provide a more versatile workflow for voxel terrain and object creation, moving beyond simple cube-based geometry [G]. The method leverages Godot's mesh resource system and integrates with the existing blocky meshing infrastructure, including face culling and greedy merging [S1, S2].
+ 
+ ## Sources

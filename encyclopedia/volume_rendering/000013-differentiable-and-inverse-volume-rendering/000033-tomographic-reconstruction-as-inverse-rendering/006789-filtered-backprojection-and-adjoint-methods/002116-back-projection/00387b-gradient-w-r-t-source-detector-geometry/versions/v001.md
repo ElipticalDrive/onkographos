@@ -1,0 +1,114 @@
+# Gradient w.r.t Source/Detector Geometry
+
+Also called: Cone Beam Geometry Gradient, Cone Beam Geometry Gradient CUDA Kernel, Gradient of Projection Error w.r.t Source and Detector Positions
+
+## Overview
+Computes the gradient of the projection error (or forward projection loss) with respect to the 3D positions of the X-ray source and detector elements in a cone-beam geometry [S1, unofficial]. It differs from standard back-projection by applying the chain rule through the trilinear interpolation derivatives, scattering gradients back to the camera parameters rather than the volume [S1, unofficial]. It is the adjoint operation required for differentiable tomographic reconstruction where geometry is optimized [S1, unofficial].
+
+## How it works
+**Inputs:**
+- `volume`: 3D volume data in a bricked layout with a 1-voxel zero border [S1, unofficial].
+- `sources`: Array of source positions, shape `[V, 3]` where $V$ is the number of views [S1, unofficial].
+- `detectors`: Array of detector element positions, shape `[R, 3]` where $R$ is the total number of rays (batch $\times$ views $\times$ width $\times$ height) [S1, unofficial].
+- `box`: 12 floats defining volume center (3), half-extent (3), inverse voxel spacing (3), and stored center coordinate (3) [S1, unofficial].
+- `grad`: Gradient of the loss w.r.t. the projection values, shape `[R, C]` where $C$ is the number of channels [S1, unofficial].
+- `n`: Number of sample points along each ray [S1, unofficial].
+
+**Outputs:**
+- `grad_sources`: Gradient w.r.t. source positions, shape `[V, 3]` [S1, unofficial].
+- `grad_detectors`: Gradient w.r.t. detector positions, shape `[R, 3]` [S1, unofficial].
+
+**Data Structures:**
+- `ConeRay`: Struct containing ray origin (source), direction components (`ex, ey, ez`), length, entry/exit distances along the ray (`entry, exit`), entry/exit axes (`entry_axis, exit_axis`), and sample step parameters in stored coordinates (`px, py, pz, sx, sy, sz`) [S1, unofficial].
+- `Layout`: Defines volume dimensions (`X, Y, Z`) and brick tiling parameters (`bricks_x, row, plane`) [S1, unofficial].
+
+**Algorithm Steps:**
+
+1.  **Initialization**: For each thread handling a ray (or group of rays in a batch), initialize `F=0` (accumulated value), `G[3]={0}` (accumulated spatial gradients), `M[3]={0}` (accumulated weighted spatial gradients), and `loaded=0xffffffff` (cache invalidation flag) [S1, unofficial].
+
+2.  **Ray Setup**: Construct the `ConeRay` from source and detector positions.
+    - Compute direction vector $\vec{e} = \text{detector} - \text{source}$ and length $L = \|\vec{e}\|$ [S1, unofficial].
+    - If $L \le 0$, skip [S1, unofficial].
+    - Normalize direction $\vec{u} = \vec{e}/L$ [S1, unofficial].
+    - Clip the ray against the volume box defined by `box` to find `entry`, `exit`, and the axes of intersection (`entry_axis`, `exit_axis`) [S1, unofficial].
+    - If the ray misses the volume, skip [S1, unofficial].
+    - Compute step size in stored coordinates: `weight` = $(\text{exit} - \text{entry}) / n$ [S1, unofficial].
+    - Compute starting position in stored coordinates for the first sample midpoint [S1, unofficial].
+
+3.  **Sampling Loop**: Iterate $k$ from $0$ to $n-1$:
+    - Calculate the current sample position in stored coordinates using `px, py, pz` and steps `sx, sy, sz` [S1, unofficial].
+    - Determine the 8 neighboring voxel indices (trilinear stencil) [S1, unofficial].
+    - If the stencil index has not been loaded (`s.index != loaded`):
+        - Fetch the 8 voxel values from the volume for all channels [S1, unofficial].
+        - Compute trilinear interpolation weights based on fractional coordinates [S1, unofficial].
+        - Store the weighted values in a temporary buffer `v[q]` [S1, unofficial].
+        - Set `loaded = s.index` [S1, unofficial].
+    - Compute the interpolated value $f$ and its spatial derivatives $f_x, f_y, f_z$ using the precomputed trilinear derivatives [S1, unofficial].
+    - Accumulate:
+        - $F \leftarrow F + f$
+        - $G[0] \leftarrow G[0] + f_x$, $G[1] \leftarrow G[1] + f_y$, $G[2] \leftarrow G[2] + f_z$
+        - $M[0] \leftarrow M[0] + w \cdot f_x$, $M[1] \leftarrow M[1] + w \cdot f_y$, $M[2] \leftarrow M[2] + w \cdot f_z$
+        - Where $w = (k + 0.5) / n$ [S1, unofficial].
+
+4.  **Gradient Accumulation**:
+    - Let $E = [e_x, e_y, e_z]$ be the ray direction vector [S1, unofficial].
+    - Let $\tau_e = \text{entry} / L$ and $\tau_x = \text{exit} / L$ be the normalized entry and exit positions [S1, unofficial].
+    - Let $\delta = \tau_x - \tau_e$ be the normalized ray span [S1, unofficial].
+    - Compute:
+        - $\text{along} = \delta \cdot F / n$
+        - $\text{ends} = L \cdot F / n$
+    - For each axis $a \in \{0, 1, 2\}$:
+        - $H = \tau_e \cdot G[a] + \delta \cdot M[a]$
+        - $\text{gd}[a] = \text{along} \cdot E[a] / L + \text{step} \cdot H$
+        - $\text{gs}[a] = \text{step} \cdot G[a] - \text{gd}[a]$
+        - Where `step` is the ray weight (step length) [S1, unofficial].
+
+5.  **Boundary Corrections**:
+    - If $a == \text{exit\_axis}$:
+        - $c = (\text{ends} + \text{step} \cdot M[a]) / E[a]$
+        - $\text{gs}[a] \leftarrow \text{gs}[a] - c \cdot (1 - \tau_x)$
+        - $\text{gd}[a] \leftarrow \text{gd}[a] - c \cdot \tau_x$
+    - If $a == \text{entry\_axis}$:
+        - $c = (-\text{ends} + \text{step} \cdot (G[a] - M[a])) / E[a]$
+        - $\text{gs}[a] \leftarrow \text{gs}[a] - c \cdot (1 - \tau_e)$
+        - $\text{gd}[a] \leftarrow \text{gd}[a] - c \cdot \tau_e$
+    - Note: The sources mention `GE` in the entry axis correction formula in the notes, but the code logic implies using the accumulated gradient components. The note formula is: $c = (-\text{ends} + \text{step} \cdot (GE - ME)) / E[a]$. However, $GE$ and $ME$ are defined as dot products in the notes but not used in the axis-specific loop in the same way. The note explicitly states: `c = (-ends + step * (GE - ME)) / E[a]`. We follow the note's explicit formula for the entry axis correction [S1, unofficial].
+    - Correction for Entry Axis using Dot Products:
+        - $GE = \sum_{a} G[a] \cdot E[a]$
+        - $ME = \sum_{a} M[a] \cdot E[a]$
+        - If $a == \text{entry\_axis}$:
+            - $c = (-\text{ends} + \text{step} \cdot (GE - ME)) / E[a]$
+            - $\text{gs}[a] \leftarrow \text{gs}[a] - c \cdot (1 - \tau_e)$
+            - $\text{gd}[a] \leftarrow \text{gd}[a] - c \cdot \tau_e$ [S1, unofficial].
+
+6.  **Writing Results**:
+    - Write $\text{gd}[a]$ to `grad_detectors[3*r + a]` for active rays [S1, unofficial].
+    - Reduce $\text{gs}[a]$ across the warp using warp shuffle instructions [S1, unofficial].
+    - If the thread is the first in the warp and the total gradient is non-zero, `atomicAdd` to `grad_sources[3*view + a]` [S1, unofficial].
+
+**Python Wrapper Logic:**
+1.  Convert volume to bricked layout [S1, unofficial].
+2.  Initialize `detectors` gradient tensor with `torch.empty_like(detectors)` [S1, unofficial].
+3.  Load the CUDA kernel library [S1, unofficial].
+4.  Iterate over batches in groups defined by `_groups(batch, _GROUP)` [S1, unofficial].
+5.  For each group:
+    - Extract the volume brick [S1, unofficial].
+    - Pack the gradient tensor for the group [S1, unofficial].
+    - Initialize `group_detectors` (reuse if start==0, else new tensor) [S1, unofficial].
+    - Retrieve kernel `cone_geometry_grad_c{group}` [S1, unofficial].
+    - Launch kernel with grid `_grid(projection_shape)`, block `_BLOCK` (32, 4, 1), and arguments [S1, unofficial].
+    - If `start > 0`, accumulate `group_detectors` into `grad_detectors` [S1, unofficial].
+6.  Return `grad_sources` and `grad_detectors` [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity**: Linear with respect to the number of rays $R$ and samples $n$. The kernel launch overhead is minimized by batching [S1, unofficial].
+- **Memory Complexity**: Requires storage for `grad_sources` and `grad_detectors`. The kernel uses shared memory/cache for voxel fetching, leveraging the bricked layout to keep 8 voxels in 1-2 cache lines [S1, unofficial].
+- **Performance**: On an RTX 2080 Ti, PyTorch 2.4.0, for a 512x512 projection with 360 views and batch 4, the CUDA exact backend performs the adjoint (geometry gradient) in ~1.963 ms (Parallel) or ~2.983 ms (Fan) [S1, unofficial]. This is significantly faster than the pure PyTorch implementation (37.426 ms and 50.901 ms respectively) [S1, unofficial].
+- **Strengths**: Exact adjoint of the forward projection; efficient GPU implementation using NVRTC and warp-level primitives; handles cone-beam geometry explicitly [S1, unofficial].
+- **Limitations**: Requires volume to be in a specific bricked layout with a 1-voxel border; precision limited to float32 as per the arithmetic description [S1, unofficial].
+
+## Background
+The method is part of the `torchtomo` library, which provides differentiable tomographic reconstruction operators [S1, unofficial]. It was developed to enable end-to-end training of tomographic pipelines where camera geometry is a learnable parameter [S1, unofficial]. The implementation uses NVRTC to compile CUDA kernels at runtime, allowing for template specialization on the number of channels $C$ [S1, unofficial].
+
+## Sources
+[S1] itu-biai/torchtomo, https://github.com/itu-biai/torchtomo, fetched 2026-10-27 (unofficial)

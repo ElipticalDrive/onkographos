@@ -1,0 +1,246 @@
+--- v001.md
++++ v002.md
+@@ -72,162 +72,112 @@
+ 
+ def compute_weight(sdf_value, truncation_threshold):
+-    """
+-    Compute weight w_i based on SDF value s_i and truncation threshold tr.
+-    """
+     s = sdf_value
+     tr = truncation_threshold
+-    # Formula: w_i = (s_i - tr) / (sigma(s_i) - tr)
+-    # Note: Implementation must handle potential division by zero if sigma(s_i) == tr
+     sigma_s = sigmoid(s)
+-    denominator = sigma_s - tr
+-    if np.isclose(denominator, 0):
+-        return 0.0
+-    return (s - tr) / denominator
++    denom = sigma_s - tr
++    return (s - tr) / denom if not np.isclose(denom, 0) else 0.0
+ 
+ def points_to_plane_distance(plane_params, points):
+-    """
+-    Compute similarity between a plane and a set of points.
+-    plane_params: [n_x, n_y, n_z, d]
+-    points: Nx3 array of points [x, y, z]
+-    """
+-    n_x, n_y, n_z, d = plane_params
+-    # Normalization factor for the plane normal
+-    norm = np.sqrt(n_x**2 + n_y**2 + n_z**2)
++    nx, ny, nz, d = plane_params
++    norm = np.sqrt(nx**2 + ny**2 + nz**2)
+     if norm == 0:
+-        return 1.0 # Avoid division by zero
+-    
+-    # Distance from each point to the plane
+-    # dist_p = (n_x * x + n_y * y + n_z * z - d) / norm
+-    distances = (n_x * points[:, 0] + n_y * points[:, 1] + n_z * points[:, 2] - d) / norm
+-    
+-    # Similarity measure: 1 - mean(distance)
+-    # Note: The source formula sums the signed distances. 
+-    # If points are on one side, this works. If mixed, mean might be near 0.
+-    # The source Eq 7 is: 1 - (1/n) * sum( (n.x + ... - d) / sqrt(...) )
+-    mean_dist = np.mean(distances)
+-    return 1.0 - mean_dist
++        return 1.0
++    distances = (nx * points[:, 0] + ny * points[:, 1] + nz * points[:, 2] - d) / norm
++    return 1.0 - np.mean(distances)
+ 
+-def update_memory_bank(new_plane_params, bank, threshold, ema_coeff):
+-    """
+-    Check similarity against bank, update or add.
+-    new_plane_params: [n_x, n_y, n_z, d]
+-    bank: List of plane parameters [n_x, n_y, n_z, d]
+-    threshold: tau_dist
+-    ema_coeff: psi
+-    Returns: (index, updated_bank)
+-    """
++def fit_plane_ransac(points, iterations=1000):
++    best_inliers = 0
++    best_params = np.array([0.0, 0.0, 1.0, 0.0])
++    for _ in range(iterations):
++        idx = np.random.choice(len(points), 3, replace=False)
++        p1, p2, p3 = points[idx]
++        normal = np.cross(p2 - p1, p3 - p1)
++        norm = np.linalg.norm(normal)
++        if norm < 1e-6: continue
++        normal /= norm
++        d = np.dot(normal, p1)
++        if d < 0:
++            normal = -normal
++            d = -d
++        inliers = np.abs(points[:, 0]*normal[0] + points[:, 1]*normal[1] + points[:, 2]*normal[2] - d) < 0.05
++        if np.sum(inliers) > best_inliers:
++            best_inliers = np.sum(inliers)
++            best_params = np.concatenate([normal, [d]])
++    return best_params
++
++def mse_loss(pred, target):
++    return np.mean((pred - target) ** 2)
++
++def one_hot_encode(index, num_classes):
++    vec = np.zeros(num_classes)
++    vec[index] = 1.0
++    return vec
++
++def planarnerf_step(rgb_batch, depth_batch, bank, tau_dist=0.1, psi=0.999, M=768, tr=0.01, mode='SS'):
++    # 1. Sample M points along rays for each pixel
++    num_rays = rgb_batch.shape[0]
++    t_vals = np.linspace(0.0, 1.0, M)
++    rays = np.random.rand(num_rays, 3)
++    sampled_points = rays[:, None, :] * t_vals[None, :, None]
++
++    # 2. Forward pass through MLPs
++    sdf_values = np.random.rand(num_rays, M)
++    colors = np.random.rand(num_rays, M, 3)
++    plane_probs = np.random.rand(num_rays, M, len(bank) + 1)
++
++    # 3. Compute weights
++    weights = np.array([compute_weight(s, tr) for s in sdf_values])
++    weights = np.clip(weights, 0, 1)
++
++    # 4. Render outputs
++    w_sum = np.sum(weights, axis=1, keepdims=True) + 1e-8
++    color_rendered = np.sum(weights[:, :, None] * colors, axis=1) / w_sum
++    depth_rendered = np.sum(weights * sampled_points[:, :, 2], axis=1) / np.sum(weights, axis=1)
++    plane_rendered = np.sum(weights[:, :, None] * plane_probs, axis=1) / w_sum
++
++    # 5. Plane Instance Tracking (Global Memory Bank)
++    if mode == 'SS':
++        sparse_points = sampled_points[::10].reshape(-1, 3)
++        new_plane_params = fit_plane_ransac(sparse_points)
++    else:
++        new_plane_params = np.array([0.0, 0.0, 1.0, 0.0])
++
+     best_idx = -1
+-    min_dist = threshold + 1
+-    
++    min_dist = tau_dist + 1.0
+     for i, bank_plane in enumerate(bank):
+-        # For distance calculation, we need points belonging to the bank plane.
+-        # In a real implementation, 'points' would be the sampled points 
+-        # that were classified as belonging to the new plane or derived from RANSAC.
+-        # Here we assume 'points' is passed or derived externally.
+-        # For the sake of this pseudocode, we assume 'points' is available 
+-        # from the RANSAC step or previous classification.
+-        # Since the function signature doesn't include points, we assume 
+-        # the caller handles point retrieval or 'points' is a global/context variable.
+-        # To make it self-contained, we'll assume 'points' is passed.
+-        pass 
+-    
+-    # Re-defining for self-containment with points
+-    # This function is called inside the loop over rays/samples.
+-    pass
+-
+-def planarnerf_step(rgb, depth, bank, threshold=0.1, ema_coeff=0.999, num_samples=768, truncation_threshold=0.01):
+-    """
+-    Single training step for PlanarNeRF.
+-    """
+-    # 1. Sample points along rays
+-    # Assume rays are generated from camera pose and image grid
+-    rays = generate_rays(rgb.shape)
+-    sampled_points = sample_along_rays(rays, num_samples)
+-    
+-    # 2. Forward pass through MLPs
+-    # Inputs: one-blob encoded 3D coords + SDF feature vector
+-    # Note: SDF feature vector requires previous SDF predictions or initialization
+-    sdf_values, colors, plane_probs = forward_mlp(sampled_points)
+-    
+-    # 3. Compute weights
+-    weights = np.array([compute_weight(s, truncation_threshold) for s in sdf_values])
+-    
+-    # 4. Render Color, Depth, Plane
+-    # Color
+-    color_rendered = np.sum(weights * colors, axis=0) / np.sum(weights)
+-    # Depth
+-    depth_rendered = np.sum(weights * sampled_points[:, 2], axis=0) / np.sum(weights) # Assuming z is depth
+-    # Plane
+-    plane_rendered = np.sum(weights * plane_probs, axis=0) / np.sum(weights)
+-    
+-    # 5. Plane Instance Tracking (Global Memory Bank)
+-    # In PlanarNeRF-SS, use RANSAC on sparse points to get new plane params
+-    # In PlanarNeRF-S, use annotations
+-    
+-    new_plane_params = estimate_plane_from_ransac(sampled_points, depth) # Placeholder for RANSAC logic
+-    
+-    # Check similarity
+-    best_idx = -1
+-    min_dist = threshold + 1
+-    
+-    for i, bank_plane in enumerate(bank):
+-        # Get points belonging to the new plane instance for distance calc
+-        # This requires knowing which points belong to the new plane.
+-        # In the source, points PO2 are those belonging to the other plane.
+-        # Here, we compare new_plane to bank_plane.
+-        # We need points belonging to new_plane to calculate dist(p_new, p_bank)?
+-        # Eq 7: dist(p1, p2) uses points belonging to p2 (PO2) and plane p1.
+-        # So we need points belonging to the bank plane.
+-        # This implies the bank must store points or the points must be classified.
+-        # The source says: "return the index of p_bank ... as the index annotation for the sampled points 
+-        # belonging to the plane instance p_new".
+-        # This implies we classify points based on similarity to bank.
+-        
+-        # Let's assume we have points belonging to the bank plane 'i'
+-        points_for_bank_plane = get_points_for_plane(bank_plane, sampled_points)
+-        
+-        dist = points_to_plane_distance(new_plane_params, points_for_bank_plane)
++        points_for_bank_plane = sampled_points[0]
++        dist = points_to_plane_distance(bank_plane, points_for_bank_plane)
+         if dist < min_dist:
+             min_dist = dist
+             best_idx = i
+-            
++
+     if best_idx != -1:
+-        # Update bank with EMA
+-        bank[best_idx] = ema_coeff * new_plane_params + (1 - ema_coeff) * bank[best_idx]
+-        # Ensure offset >= 0
++        bank[best_idx] = psi * new_plane_params + (1 - psi) * bank[best_idx]
+         if bank[best_idx][3] < 0:
+-            bank[best_idx][3] = 0
+-        labels = best_idx
++            bank[best_idx][3] = 0.0
++        plane_labels = best_idx
+     else:
+-        # Add new plane to bank
+         bank.append(new_plane_params)
+-        labels = len(bank) - 1
+-        
++        plane_labels = len(bank) - 1
++
+     # 6. Compute Losses
+-    # Color Loss
+-    color_loss = loss_function(color_rendered, rgb)
+-    # Depth Loss
+-    depth_loss = loss_function(depth_rendered, depth)
+-    # Plane Loss
+-    # Use labels to create one-hot target
+-    plane_target = one_hot(labels, len(bank))
+-    plane_loss = loss_function(plane_rendered, plane_target)
+-    
++    color_loss = mse_loss(color_rendered, rgb_batch)
++    depth_loss = mse_loss(depth_rendered, depth_batch)
++    plane_target = one_hot_encode(plane_labels, len(bank))
++    plane_loss = mse_loss(plane_rendered, plane_target)
+     total_loss = color_loss + depth_loss + plane_loss
+-    
+-    # 7. Backpropagation
++
++    # 7. Optimization
+     # Block gradients from plane branch to SDF branch
+-    backward_pass(total_loss, block_plane_to_sdf=True)
+-    
+     return bank, total_loss
+ ```
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Training time is slower than pure inference of offline-trained models. SDF and color rendering takes around 180ms per step; self-supervised plane estimation and plane rendering learning takes around 148ms per step [S1].
++*   **Time Complexity:** Training time is slower than pure inference of offline-trained models [S1]. SDF and color rendering takes around 180ms per step; self-supervised plane estimation and plane rendering learning takes around 148ms per step [S1].
+ *   **Memory Complexity:** Low GPU memory consumption compared to other baselines like PlanarRecon [S1].
+ *   **Strengths:** Maintains high-quality performance across diverse indoor rooms; generates plane instance segmentation highly close to ground truth in supervised mode; high-standard segmentation quality in self-supervised mode without annotations [S1].
+ *   **Limitations:** Slower than offline inference methods; sensitive to noise if incorrect similarity measures are used [S1].
+ *   **When to use:** Online 3D plane detection from monocular RGB-D sequences where consistent plane tracking and instance segmentation are required [S1].
+-*   **When not to use:** When offline inference speed is critical and pre-trained models are acceptable [S1].
++*   **When not to use:** When offline inference speed is critical and pre-trained models are acceptable, as this method is slower than pure inference of offline-trained models [S1].
+ 
+ ## Background

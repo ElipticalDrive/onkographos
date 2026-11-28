@@ -1,0 +1,190 @@
+# Cone Intersection
+
+Also called: Cone Tracing, Antialiased Ray Intersection, Cone Tracing with Covers, Cone-object intersection
+
+## Overview
+Cone intersection is an antialiasing technique for sphere tracing that represents a pixel as a viewing cone rather than a point ray, allowing symbolic prefiltering to eliminate aliasing artifacts at grazing angles [S1, S3]. It differs from standard sphere tracing by detecting intersections with an "inner cover" surface and computing the fractional coverage of the pixel by the implicit surface, whereas siblings like [Segment Tracing](1675-segment-tracing.md) or [Quadric Tracing](1866-quadric-tracing.md) focus on varying step sizes or bounding volumes without necessarily computing area-based coverage fractions [S1][S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A signed distance function (SDF) $f(x)$ defining the implicit surface, a ray origin $o$ and direction $d$, and camera parameters (field of view $\theta$, resolution $N_h, N_v$) [S1][S2, unofficial][S3].
+*   **Output:** A final pixel color and opacity, computed by compositing shading values from representative samples along the ray [S1][S2, unofficial][S3].
+
+**Data Structures:**
+*   **Ray State:** Current position $x$, accumulated opacity $\alpha_{acc}$, accumulated color $c_{acc}$ [G].
+*   **Sample List:** A bounded list (max 4 samples) storing representative points $(x_i)$, their distances $t_i$, their pixel radii $r_{p,i}$, and their coverage fractions $\alpha_i$ [S2, unofficial].
+
+**Parameters:**
+*   $r_p$: Pixel radius. Defined as half the diameter of a pixel [S1, S3].
+*   $\theta$: Field of view angle [S2, unofficial].
+*   $N_h, N_v$: Horizontal and vertical resolution [S2, unofficial].
+
+**Step-by-Step Method:**
+
+1.  **Calculate Pixel Radius:** Determine the radius of the pixel $r_p$ at the current traversal distance $t$ [S2, unofficial]. The sources provide an approximation using the maximum resolution dimension:
+    $$ r_p(t) = t \cdot \frac{2 \tan(\theta/2)}{\max(N_h, N_v)} $$
+    Note that $r_p$ grows linearly with distance $t$ [S2, unofficial].
+
+2.  **Define Inner Cover:** Construct the inner cover surface $f_{inner}(x)$ by offsetting the SDF by the pixel radius:
+    $$ f_{inner}(x) = f(x) + r_p $$
+    Sphere tracing is performed on this inner cover surface instead of the original surface $f(x)$ [S1, S3].
+
+3.  **Ray Traversal (Sphere Tracing):** Iterate along the ray starting from $t=0$ [S1, S3]. At each step, evaluate $f(x)$ at the current point $x$ [S1, S3].
+    *   **Step Size:** The step size $S_{next}$ is determined by the radius of the unbounding sphere, defined as the sum of the pixel radius and the SDF value: $S_{next} = r_p + f(x)$ [S1][S2, unofficial]. (Note: [S3] describes a comparable traversal step that may take the ray through the surface).
+    *   **Update Position:** $x \leftarrow x + S_{next} \cdot d$ [S1, S3].
+    *   **Convergence Test:** If $f(x) \le 0$ (or a small epsilon), the ray has intersected the original surface [S3]. Terminate traversal for this ray.
+
+4.  **Identify Representative Samples:** During traversal, track unbounding spheres (spheres of radius $r_p + f(x)$ centered at $x$) that fall within the cone bounds [S3]. A cone intersection is indicated if the ray intersects the inner cover, which corresponds to the condition $f(x) \le r_p$ [S2, unofficial].
+    *   The "representative" point for a cone intersection is the center of the smallest unbounding sphere (with respect to pixel size) among those inside the cone [S1][S2, unofficial][S3].
+    *   This point is the location along the ray section closest to the surface [S2, unofficial][S3].
+    *   Keep track of up to four such representative points to maintain performance [S2, unofficial].
+
+5.  **Calculate Coverage Fraction ($\alpha$):** For each representative point $x$, calculate the fraction of the pixel covered by the surface [S1, S3]. Assuming local planarity, the surface intersects the cone's cross-section (a disk of radius $r_p$) with a straight edge at signed distance $f(x)$ from the center [S1, S3].
+    The coverage fraction $\alpha$ is given by the formula derived by Thompson (1990) [S1, S3]:
+    $$ \alpha = \frac{1}{2} + \frac{1}{\pi} \left( \frac{f(x)}{r_p} \sqrt{1 - \left(\frac{f(x)}{r_p}\right)^2} + \arcsin\left(\frac{f(x)}{r_p}\right) \right) $$
+    *   If $f(x) > r_p$, $\alpha = 0$.
+    *   If $f(x) < -r_p$, $\alpha = 1$.
+    *   This $\alpha$ represents the opacity of the surface at this intersection [S1, S3].
+
+6.  **Shading and Compositing:**
+    *   Shade the representative point $x$ to get color $c_{shade}$ and alpha $\alpha_{shade}$ (if the surface has material properties) [G].
+    *   Accumulate the coverage $\alpha$ as opacity [S2, unofficial].
+    *   Composite the colors using the Porter-Duff "over" operator [S1][S2, unofficial][S3]:
+        $$ c_{out} = c_{in} + c_{shade} \cdot (1 - \alpha_{in}) $$
+        $$ \alpha_{out} = \alpha_{in} + \alpha_{shade} \cdot (1 - \alpha_{in}) $$
+    *   For intersection edges involving multiple surfaces, keep track of all SDFs whose unbounding spheres fit within the cone bounds [S1, S3]. Use the SDFs of each intersecting surface to provide proportions for combining their shading properties [S1, S3].
+
+7.  **Final Output:** The final pixel color is the accumulated color after processing all representative samples and the background [S2, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def cone_intersection_ray_trace(ray_origin, ray_direction, sdf, fov, resolution):
+    """
+    Performs cone intersection ray tracing for a single pixel.
+    
+    Args:
+        ray_origin: (x, y, z) tuple
+        ray_direction: (x, y, z) tuple (normalized)
+        sdf: function f(x, y, z) returning signed distance
+        fov: field of view in radians
+        resolution: (width, height) tuple
+        
+    Returns:
+        (final_color, final_alpha)
+    """
+    nh, nv = resolution
+    max_res = max(nh, nv)
+    
+    t = 0.0
+    max_steps = 100
+    accumulated_color = (0.0, 0.0, 0.0)
+    accumulated_alpha = 0.0
+    
+    # List to store representative samples: (t, f_val, rp, shade_color, shade_alpha)
+    # Limit to 4 samples for performance [S2, unofficial]
+    samples = []
+    
+    for step in range(max_steps):
+        x = (ray_origin[0] + t * ray_direction[0],
+             ray_origin[1] + t * ray_direction[1],
+             ray_origin[2] + t * ray_direction[2])
+             
+        rp = t * (2.0 * math.tan(fov / 2.0)) / max_res
+        f_val = sdf(x[0], x[1], x[2])
+        
+        if f_val <= 0.0:
+            shade_color, shade_alpha = shade_surface(x, sdf)
+            new_r = accumulated_color[0] + shade_color[0] * (1.0 - accumulated_alpha)
+            new_g = accumulated_color[1] + shade_color[1] * (1.0 - accumulated_alpha)
+            new_b = accumulated_color[2] + shade_color[2] * (1.0 - accumulated_alpha)
+            new_a = accumulated_alpha + shade_alpha * (1.0 - accumulated_alpha)
+            accumulated_color = (new_r, new_g, new_b)
+            accumulated_alpha = new_a
+            break
+            
+        if f_val <= rp:
+            shade_color, shade_alpha = shade_surface(x, sdf)
+            samples.append((t, f_val, rp, shade_color, shade_alpha))
+            
+        step_size = rp + f_val
+        if step_size <= 1e-6:
+            step_size = 1e-6
+        t += step_size
+        if t > 1000.0:
+            break
+            
+    # Composite samples back-to-front
+    for i in range(len(samples) - 1, -1, -1):
+        t_s, f_s, rp_s, shade_color, shade_alpha = samples[i]
+        ratio = f_s / rp_s
+        ratio = max(-1.0, min(1.0, ratio))
+        
+        if ratio >= 1.0:
+            alpha_cov = 0.0
+        elif ratio <= -1.0:
+            alpha_cov = 1.0
+        else:
+            term1 = ratio * math.sqrt(1.0 - ratio * ratio)
+            term2 = math.asin(ratio)
+            alpha_cov = 0.5 + (1.0 / math.pi) * (term1 + term2)
+            
+        effective_alpha = alpha_cov * shade_alpha
+        new_r = accumulated_color[0] + shade_color[0] * (1.0 - accumulated_alpha)
+        new_g = accumulated_color[1] + shade_color[1] * (1.0 - accumulated_alpha)
+        new_b = accumulated_color[2] + shade_color[2] * (1.0 - accumulated_alpha)
+        new_a = accumulated_alpha + effective_alpha * (1.0 - accumulated_alpha)
+        accumulated_color = (new_r, new_g, new_b)
+        accumulated_alpha = new_a
+        
+    return accumulated_color, accumulated_alpha
+
+def shade_surface(point, sdf):
+    """
+    Computes surface normal via finite differences [G] and returns a simple diffuse color.
+    Actual shading logic is application-specific.
+    """
+    eps = 1e-4
+    dx = sdf(point[0]+eps, point[1], point[2]) - sdf(point[0]-eps, point[1], point[2])
+    dy = sdf(point[0], point[1]+eps, point[2]) - sdf(point[0], point[1]-eps, point[2])
+    dz = sdf(point[0], point[1], point[2]+eps) - sdf(point[0], point[1], point[2]-eps)
+    normal = (dx, dy, dz)
+    len_n = math.sqrt(normal[0]**2 + normal[1]**2 + normal[2]**2)
+    if len_n > 0:
+        normal = (normal[0]/len_n, normal[1]/len_n, normal[2]/len_n)
+    else:
+        normal = (0.0, 0.0, 1.0)
+    light_dir = (1.0, 1.0, -1.0)
+    len_l = math.sqrt(light_dir[0]**2 + light_dir[1]**2 + light_dir[2]**2)
+    light_dir = (light_dir[0]/len_l, light_dir[1]/len_l, light_dir[2]/len_l)
+    diff = max(0.0, normal[0]*light_dir[0] + normal[1]*light_dir[1] + normal[2]*light_dir[2])
+    color = (diff, diff, diff)
+    alpha = 1.0
+    return color, alpha
+```
+
+**Edge Cases and Pitfalls:**
+*   **Premature Shrinking:** If the SDF is expensive or approximated by a bound, the unbounding sphere radius may shrink below the pixel radius prematurely, leading to incorrect cone intersections [S1, S3].
+*   **Distance Approximation:** If the SDF is inaccurate, use the first-order approximation $d(x) \approx f(x) / \|\nabla f(x)\|$ for distance estimation, which is asymptotic to geometric distance [S1, S3].
+*   **Representative Point Off-Surface:** The representative sample is off the implicit surface [S1, S3]. A usable surface normal must be defined by assuming continuity in the gradient of the distance function [S1, S3].
+*   **Performance:** Tracking sample lists becomes expensive at higher resolutions, causing frame rates to drop significantly [S2, unofficial].
+*   **Ellipsoid Scaling:** For non-uniformly scaled objects (e.g., ellipsoids), signed distance bounds may return underestimated distances (as low as 1% of actual distance), affecting cone intersection accuracy [S3].
+
+## Operating characteristics
+*   **Time Complexity:** Linear in the number of steps, but the number of steps depends on the accuracy of the distance estimate [S3]. Halving the distance estimate doubles the number of steps [S3].
+*   **Memory Complexity:** Low, but requires storing a list of representative samples (limited to 4) per pixel [S2, unofficial].
+*   **Performance:** Achieves around 60 fps for 512x512 resolution, but drops considerably for larger resolutions due to the cost of tracking sample lists [S2, unofficial]. Sphere tracing rendered a complex scene in 12:47 at 256x256 resolution [S3].
+*   **Strengths:** Eliminates aliasing artifacts from point sampling, especially at silhouette edges and grazing angles [S1, S3]. Can also prefilter texture aliasing [S1, S3].
+*   **Limitations:** Does not antialias edges projected from the camera perspective onto the object itself (maintains interactive frame rates) [S2, unofficial]. Convergence is entirely linear, unlike interval analysis which has a quadratically convergent refinement stage [S3].
+
+## Background
+Cone intersection was introduced as an antialiasing method by Amanatides (1984) for computing intersections of cones with spheres, planes, and polygons [S1, S3]. Hart and DeFanti (1991) extended this to implicit surfaces using sphere tracing and the concept of "covers" (offset surfaces) [S1, S3]. The technique is implemented in the zeno rendering system [S1, S3].
+
+## Sources
+[S1] Sphere Tracing: A Geometric Method for the Antialiased Ray Tracing of Implicit Surfaces, https://www.researchgate.net/publication/2792108_Sphere_Tracing_A_Geometric_Method_for_the_Antialiased_Ray_Tracing_of_Implicit_Surfaces, fetched 2026-10-27
+[S2] GPU Ray Marching for Ambient Occlusion, https://www.scribd.com/document/520755804/imm6392, fetched 2026-10-28 (unofficial)
+[S3] Sphere tracing: a geometric method for the antialiased ray tracing of implicit surfaces, http://graphics.cs.illinois.edu/sites/default/files/zeno.pdf, fetched 2026-10-29

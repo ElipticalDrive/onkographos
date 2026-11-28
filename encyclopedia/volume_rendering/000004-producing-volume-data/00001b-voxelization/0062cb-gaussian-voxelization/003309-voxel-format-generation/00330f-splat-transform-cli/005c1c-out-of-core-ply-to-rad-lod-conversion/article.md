@@ -1,0 +1,115 @@
+# Out-of-Core PLY to RAD LOD Conversion
+
+Also called: Bucketed RAD Export, Streaming LOD Pipeline
+
+## Overview
+A file conversion pipeline that processes large PLY Gaussian splat files into tiled, chunked RAD LOD format using an out-of-core bucketed builder to avoid RAM exhaustion [S1, unofficial]. It distinguishes itself from in-memory converters by dynamically selecting a streaming architecture based on estimated memory footprint, ensuring scalability for datasets exceeding available system RAM [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A PLY file containing 3D Gaussian splats.
+- Output: A RAD LOD file structure (tiled/chunked).
+- Parameters: `tiles_x`, `tiles_y`, `chunk_size` (derived from `rad_export_mode`), and `builder` selection (Octree or Bhattacharyya) [S1, unofficial].
+
+**Data Structures:**
+- `PlyToRadLodOptions`: Configuration object holding tile dimensions, chunk size, builder type, and memory budget settings [S1, unofficial].
+- Progress Callback: A function interface accepting stage names (string) and progress values (float 0.0–1.0) [S1, unofficial].
+
+**Steps:**
+1.  **Probe Input:** Determine the vertex count and spherical harmonic (SH) degree of the input PLY file using `probe_ply_gaussians` [S1, unofficial].
+2.  **Decision Logic:** Evaluate whether to use a monolithic in-memory builder or a streaming/bucketed converter based on estimated memory vs. available RAM (see *Streaming LOD Conversion Decision Logic*) [S1, unofficial].
+3.  **Initialize Options:** Construct `PlyToRadLodOptions` with the determined builder type, tile dimensions (`tiles_x`, `tiles_y`), and chunk size [S1, unofficial].
+4.  **Attach Callback:** Register a progress callback to report conversion stages and completion percentages [S1, unofficial].
+5.  **Execute Conversion:** Call `convert_ply_to_rad_lod(input_path, output_path, options)` [S1, unofficial].
+6.  **Error Handling:** If the conversion fails, abort the progress bar, log the formatted error, and return `false` to prevent the creation of partial output files [S1, unofficial].
+
+**Formulas:**
+The memory estimation logic uses the following calculations [S1, unofficial]:
+
+$$
+rest\_coeffs = \begin{cases} 
+(sh\_degree + 1)^2 - 1 & \text{if } sh\_degree > 0 \\
+0 & \text{otherwise}
+\end{cases}
+$$
+
+$$
+per\_splat = 360 + rest\_coeffs \times 40
+$$
+
+$$
+estimated = vertex\_count \times per\_splat
+$$
+
+**Parameters:**
+- Default memory budget: $8\text{ GB}$ ($8 \ll 30$ bytes) [S1, unofficial].
+- Threshold: Streaming is triggered if $estimated > budget \times 0.7$ [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def convert_ply_to_rad_lod(input_path: str, output_path: str) -> bool:
+    # 1. Probe input file to get vertex count and SH degree
+    vertex_count, sh_degree = probe_ply_gaussians(input_path)
+    
+    # 2. Calculate memory footprint
+    rest_coeffs = ((sh_degree + 1) ** 2 - 1) if sh_degree > 0 else 0
+    per_splat = 360 + rest_coeffs * 40
+    estimated_memory = vertex_count * per_splat
+    
+    # 3. Determine memory budget
+    # On Linux, read /proc/meminfo for MemAvailable in kB, convert to bytes
+    # Default budget is 8 GB if OS detection fails or on non-Linux
+    budget = get_available_memory_bytes() 
+    threshold = budget * 0.7
+    
+    # 4. Decide builder type
+    use_streaming = (estimated_memory > threshold) or (vertex_count > target_bucket_splats)
+    builder_type = "Streaming" if use_streaming else "Monolithic"
+    
+    # 5. Initialize options
+    options = PlyToRadLodOptions(
+        tiles_x=...,      # Derived from scene bounds or fixed
+        tiles_y=...,      # Derived from scene bounds or fixed
+        chunk_size=...,   # Derived from rad_export_mode
+        builder=builder_type
+    )
+    
+    # 6. Attach progress callback
+    options.progress_callback = lambda stage, progress: print(f"[{stage}] {progress*100}%")
+    
+    # 7. Execute conversion
+    try:
+        success = convert_ply_to_rad_lod_impl(input_path, output_path, options)
+        if not success:
+            raise ConversionError("Conversion returned failure status")
+        return True
+    except Exception as e:
+        # Abort progress bar, log error, return false
+        log_error(f"Conversion failed: {e}")
+        return False
+```
+
+## Subtopics
+
+### Streaming LOD Conversion Decision Logic
+A heuristic decision routine that determines whether to use a monolithic in-memory LOD builder or a streaming/bucketed converter based on estimated memory footprint versus available system RAM [S1, unofficial]. It probes the input PLY file to retrieve vertex count and SH degree via `probe_ply_gaussians` [S1, unofficial]. If the vertex count exceeds `target_bucket_splats`, it immediately returns true to trigger streaming [S1, unofficial]. On Linux, it overrides the budget by reading `/proc/meminfo`, parsing the `MemAvailable:` line in kB, and converting to bytes [S1, unofficial]. It returns true if $estimated > budget \times 0.7$ (70% of budget), otherwise it returns false [S1, unofficial].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+- Memory: Out-of-core operation ensures memory usage scales with tile/chunk size rather than total scene size, preventing RAM exhaustion [S1, unofficial].
+- Time: Linear with respect to the number of splats, plus overhead for bucketing and I/O operations [S1, unofficial].
+
+**Strengths and Limitations:**
+- Strength: Handles arbitrarily large PLY files that exceed system RAM by streaming data in chunks [S1, unofficial].
+- Limitation: Requires careful tuning of tile and chunk sizes for optimal I/O performance; streaming introduces overhead compared to in-memory processing for small scenes [S1, unofficial].
+
+**When to Use:**
+- Use for large-scale Gaussian splat datasets where total memory footprint exceeds available system RAM or approaches the 70% threshold of available memory [S1, unofficial].
+
+## Background
+Originated in the LichtFeld-Studio project by MrNeRF as an unofficial tool for converting Gaussian splat formats [S1, unofficial]. It addresses the need for scalable export pipelines for high-resolution 3D Gaussian Splatting data into the RAD LOD format, which is optimized for efficient rendering and level-of-detail management.
+
+## Sources
+[S1] MrNeRF/LichtFeld-Studio, https://github.com/MrNeRF/LichtFeld-Studio, fetched 2026-10-27 (unofficial)

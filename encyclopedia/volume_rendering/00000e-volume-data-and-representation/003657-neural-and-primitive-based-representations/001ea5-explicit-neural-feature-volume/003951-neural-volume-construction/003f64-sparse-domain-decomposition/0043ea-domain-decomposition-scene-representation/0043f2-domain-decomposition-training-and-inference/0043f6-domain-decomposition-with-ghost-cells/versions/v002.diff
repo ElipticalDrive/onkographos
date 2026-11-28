@@ -1,0 +1,148 @@
+--- v001.md
++++ v002.md
+@@ -4,48 +4,47 @@
+ 
+ ## Overview
+-This method extends the Domain Decomposition Training and Inference strategy by introducing overlapping "ghost cells" at the boundaries of spatially partitioned neural volume bricks. It solves the problem of visible seams and boundary artifacts that arise when adjacent networks, trained independently on disjoint data subsets, produce discontinuous outputs at their interfaces. It is distinguished from the parent method by the explicit extension of network extents to include redundant boundary layers, trading a slight reduction in learning capacity for improved visual continuity.
++This method extends the Domain Decomposition Training and Inference strategy by extending each network's spatial extent with overlapping ghost cells to mitigate boundary artifacts and visible seams during visualization [S1]. It distinguishes itself from the parent method by explicitly adding redundant boundary layers, which trades a slight reduction in learning capacity for improved visual continuity [S1].
+ 
+ ## How it works
+-The method operates on a set of independent Scene Representation Networks (SRNs), each responsible for a specific sub-volume (brick) of the total domain.
+-
+ **Inputs and Outputs:**
+-- **Input:** The global volume domain dimensions, the target grid resolution for the decomposition ($I, J, K$), the internal resolution of the feature grids for each SRN, and the number of ghost cells ($G$).
+-- **Output:** A set of trained SRN models and their associated feature grids, where each model's effective domain includes ghost cell extensions.
++- **Input:** Global volume domain dimensions, decomposition grid resolution ($I, J, K$), internal feature grid resolution per SRN, and ghost cell count ($G$) [S1].
++- **Output:** A set of trained SRN models and feature grids, where each model's effective domain includes ghost cell extensions [S1].
+ 
+ **Data Structures:**
+-Each SRN maintains its own feature grid. If the global domain is divided into an $I \times J \times K$ grid, each SRN $n$ is assigned a local coordinate range. The feature grid for each SRN is typically cubic (e.g., $32^3$). The "effective" volume processed by an SRN includes the core volume plus the ghost cells.
++Each SRN maintains its own decoder and feature grids [S1]. The global domain is divided into an $I \times J \times K$ grid of bricks [S1]. Each SRN's feature grid is typically cubic (e.g., $32^3$) [S1]. The effective volume processed by an SRN comprises its core assigned brick plus $G$ overlapping ghost cells along each axis [S1].
++
++**Numbered Steps:**
++1. **Determine Decomposition Grid:** Choose integers $I, J, K$ for the number of networks along width, height, and depth [S1]. Select $I, J, K$ so the aspect ratio of the volume assigned to each network matches the aspect ratio of the SRN's internal feature grids (e.g., if feature grids are $32^3$, assign roughly cube-shaped volumes) [S1].
++2. **Calculate Extents with Ghost Cells:** Pre-calculate the spatial extent for each network within the global volume, extending the boundaries of each assigned brick by $G$ cells along each axis to create overlaps with adjacent networks [S1].
++3. **Data Partitioning:** Assign volumetric data to each network based on its extended extent, duplicating data within ghost cell regions across adjacent networks [S1].
++4. **Parallel Training:** Train each SRN independently on its assigned data partition (including ghost cells) in parallel across available GPUs [S1].
++5. **Inference/Rendering:** Query the appropriate SRN for a given 3D coordinate [S1]. If a coordinate falls within the ghost cell region of multiple networks, the implementation must define a resolution strategy (e.g., using the network whose core volume contains the point) [G]. Ghost cells ensure adjacent network outputs are more similar at boundaries, reducing visible seams [S1].
++
++**Formulas:**
++- Core extent per axis: $E_{core} = \frac{D}{N}$, where $D$ is the global dimension and $N$ is the grid count ($I, J, K$) [S1].
++- Effective extent per axis: $E_{eff} = E_{core} + 2G$, where $G$ is the number of ghost cells along that axis [S1].
+ 
+ **Parameters:**
+-- **Ghost Cell Count ($G$):** The number of overlapping cells along each axis.
+-    - **Default:** 1 ghost cell, sufficient for corner alignment [S1].
+-    - **Isosurface Extraction:** Up to 16 ghost cells may be used to reduce seams during surface extraction [S1].
++- **Ghost Cell Count ($G$):** Number of overlapping cells along each axis [S1].
++    - **Default:** 1 ghost cell for corner alignment [S1].
++    - **Isosurface Extraction:** Up to 16 ghost cells to reduce seams [S1].
+     - **Experimental Range:** 1 to 16 ghost cells [S1].
+ 
+-**Steps:**
+-1.  **Determine Decomposition Grid:** Choose integers $I, J, K$ representing the number of networks along the width, height, and depth, respectively. Select these values such that the aspect ratio of the volume assigned to each network matches the aspect ratio of the SRN's internal feature grids (e.g., if feature grids are $32^3$, assign roughly cube-shaped volumes to each network) [S1].
+-2.  **Calculate Extents with Ghost Cells:** For each network, calculate its spatial extent. Extend the boundaries of each network's assigned volume by $G$ cells along each axis. This creates an overlap region between adjacent networks [S1].
+-3.  **Data Partitioning:** Assign the volumetric data to each network. The data within the ghost cell regions is duplicated across adjacent networks. Each network receives the full extent of its assigned brick, including the ghost cells [S1].
+-4.  **Parallel Training:** Train each SRN independently on its assigned data partition (including ghost cells) in parallel across available GPUs. The networks learn the data within their extended extents, which helps smooth the transition at the boundaries [S1].
+-5.  **Inference/Rendering:** During rendering, query the appropriate SRN for a given 3D coordinate. If a coordinate falls within the ghost cell region of multiple networks, the implementation must define a resolution strategy (e.g., using the network whose core volume contains the point, or averaging). The ghost cells ensure that the outputs of adjacent networks are more similar at the boundaries, reducing visible seams [S1].
++**Edge Cases and Pitfalls:**
++- **Learning Capacity Reduction:** Increasing ghost cells increases the redundant volume each network must learn (e.g., from $256^3$ to $288^3$), reducing effective learning capacity and causing a PSNR drop of -1 dB when increasing from 1 to 16 ghost cells [S1].
++- **Seam Removal:** Ghost cells do not guarantee complete seam removal; they only tend to reduce their effect by ensuring networks learn beyond the actual boundary [S1].
+ 
+ **Pseudocode:**
+ ```python
+-def setup_domain_decomposition(global_dims, feature_grid_size, I, J, K, ghost_cells):
++def setup_domain_decomposition(global_dims, I, J, K, ghost_cells):
+     """
+     Sets up the domain decomposition with ghost cells.
+-    
+     Args:
+         global_dims: Tuple (W, H, D) of the global volume dimensions.
+-        feature_grid_size: Integer, side length of the cubic feature grid per network (e.g., 32).
+         I, J, K: Integers, number of networks along width, height, depth.
+         ghost_cells: Integer, number of overlapping cells per axis.
+-        
+     Returns:
+-        A list of network configurations, each containing its assigned extent and ghost cell count.
++        List of network configurations with core and effective extents.
+     """
+-    # Calculate the base resolution per network without ghost cells
+-    # Note: The source recommends matching the aspect ratio of the assigned volume 
+-    # to the feature grid. We assume a uniform grid division for simplicity 
+-    # as per the recommendation to pick I,J,K for cube-shaped volumes.
+     base_res_w = global_dims[0] / I
+     base_res_h = global_dims[1] / J
+@@ -53,9 +52,7 @@
+     
+     networks = []
+-    
+     for i in range(I):
+         for j in range(J):
+             for k in range(K):
+-                # Calculate the core extent for this network
+                 x_start = i * base_res_w
+                 x_end = (i + 1) * base_res_w
+@@ -65,6 +62,4 @@
+                 z_end = (k + 1) * base_res_d
+                 
+-                # Extend extents by ghost cells
+-                # The ghost cells overlap with adjacent networks
+                 effective_x_start = x_start - ghost_cells
+                 effective_x_end = x_end + ghost_cells
+@@ -74,5 +69,5 @@
+                 effective_z_end = z_end + ghost_cells
+                 
+-                network_config = {
++                networks.append({
+                     'id': (i, j, k),
+                     'core_extent': (x_start, x_end, y_start, y_end, z_start, z_end),
+@@ -81,10 +76,8 @@
+                                          effective_z_start, effective_z_end),
+                     'ghost_cells': ghost_cells
+-                }
+-                networks.append(network_config)
+-                
++                })
+     return networks
+ 
+-def query_network(networks, point, ghost_cells):
++def query_network(networks, point):
+     """
+     Queries the appropriate network for a given point.
+@@ -94,26 +87,22 @@
+     network that contains the point.
+     """
+-    # Implementation detail [G]: Determine which network owns the point.
+-    # If the point is in the ghost cell region of multiple networks,
+-    # a consistent rule (e.g., lowest index) must be applied.
+     for network in networks:
+-        if is_inside_extent(point, network['effective_extent']):
++        ext = network['effective_extent']
++        if (ext[0] <= point[0] < ext[1] and
++            ext[2] <= point[1] < ext[3] and
++            ext[4] <= point[2] < ext[5]):
+             return network
+     return None
+ ```
+ 
+-**Edge Cases and Pitfalls:**
+-- **Learning Capacity Reduction:** Increasing the number of ghost cells increases the volume each network must learn (e.g., from $256^3$ to $288^3$). This redundancy reduces the effective learning capacity per unit of unique data, leading to a drop in reconstruction quality (e.g., a 1 dB PSNR drop when increasing from 1 to 16 ghost cells) [S1].
+-- **Seam Removal:** Ghost cells do not guarantee the complete removal of seams; they only tend to reduce their effect by ensuring networks learn beyond the actual boundary [S1].
+-
+ ## Operating characteristics
+-- **Time Complexity:** Training time is proportional to the number of networks ($I \cdot J \cdot K$). If trained on a single GPU, it is slower than a single large model due to serial execution overhead. On multiple GPUs, it scales with the number of available GPUs [S1].
+-- **Memory Complexity:** Each network stores its own feature grids and decoder weights. The total memory usage is the sum of the memory for all individual networks. The ghost cells do not significantly increase the storage size of the model parameters, but they increase the amount of data each network must process during training [S1].
+-- **Performance:** The domain decomposition approach outperforms a single large model of the same storage size because each sub-model has its own decoder and feature grids, allowing for more specialized representation [S1].
+-- **Strengths:** Efficiently handles data that cannot fit in a single GPU's memory. Reduces boundary artifacts compared to non-overlapping decomposition.
+-- **Limitations:** Training may be slower on a single GPU. Increasing ghost cells to reduce seams can degrade reconstruction quality (PSNR) due to reduced learning capacity [S1].
++- **Time Complexity:** Training time scales with the number of networks ($I \cdot J \cdot K$) [S1]. Training is slower on a single GPU due to serial execution, but scales efficiently across multiple GPUs [S1].
++- **Memory Complexity:** Total memory is the sum of feature grids and decoder weights for all networks [S1]. Ghost cells increase the data volume each network processes during training, which reduces effective learning capacity per unique voxel [S1].
++- **Performance:** Outperforms a single large model at the same storage size because each sub-model has its own decoder and feature grids [S1].
++- **Strengths:** Handles data exceeding single-GPU memory without out-of-core I/O overhead; reduces boundary artifacts [S1].
++- **Limitations:** Serial training on one GPU is slower; increasing ghost cells degrades PSNR due to reduced learning capacity [S1].
+ 
+ ## Background
+-This method is part of the "Adaptively Placed Multi-Grid Scene Representation Networks" framework. It was introduced to address the limitations of single large SRNs for large-scale data visualization, where memory constraints prevent training a single model on the entire dataset. The approach was developed by the authors of the TVCG 2023 paper "Adaptively Placed Multi-Grid Scene Representation Networks for Large-Scale Data Visualization" [S1]. It is particularly useful for datasets like "rotstrat" (250GB) and "channel" (450GB) which exceed the memory capacity of standard GPUs [S1].
++Introduced in the TVCG 2023 paper "Adaptively Placed Multi-Grid Scene Representation Networks for Large-Scale Data Visualization" [S1]. Developed to enable training on large-scale datasets (e.g., rotstrat at 250GB and channel at 450GB) that exceed standard GPU memory limits [S1]. Provides an efficient alternative to out-of-core training routines by partitioning data into bricks trained in parallel [S1].
+ 
+ ## Sources

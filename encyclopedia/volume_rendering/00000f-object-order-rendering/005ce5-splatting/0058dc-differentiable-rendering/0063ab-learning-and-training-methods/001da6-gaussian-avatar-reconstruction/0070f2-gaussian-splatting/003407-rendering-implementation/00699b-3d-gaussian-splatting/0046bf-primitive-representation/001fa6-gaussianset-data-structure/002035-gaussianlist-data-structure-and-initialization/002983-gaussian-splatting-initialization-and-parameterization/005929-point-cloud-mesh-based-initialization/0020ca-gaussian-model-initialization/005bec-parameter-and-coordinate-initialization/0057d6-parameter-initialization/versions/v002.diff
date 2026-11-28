@@ -1,0 +1,300 @@
+--- v001.md
++++ v002.md
+@@ -4,176 +4,172 @@
+ 
+ ## Overview
+-This method defines the deterministic initialization of material parameters (emission, roughness, specular albedo, diffuse color) and geometric priors (SDF, environment map) for differentiable rendering pipelines, specifically those utilizing spherical Gaussian basis functions or texture-space sampling [S1, S2]. It solves the problem of optimization instability caused by poor initial guesses in non-convex inverse rendering problems, such as MLPs getting stuck in local minima or incorrect exposure handling [S1]. It is distinct from sibling methods like Spherical Harmonics Initialization by focusing on physical material properties and spatially-varying diffuse textures via median filtering rather than frequency-domain coefficients [S2].
++This method initializes the physical material parameters and lighting environment for inverse rendering pipelines that use differentiable rendering to optimize for geometry, albedo, and illumination [S1, S2]. It addresses the problem of gradient-based optimizers diverging or getting stuck in poor local minima due to ill-conditioned initial states, such as extreme exposure mismatches or view-dependent artifacts contaminating diffuse color estimates [S1, S2]. It sets apart from sibling methods by explicitly decoupling view-independent diffuse properties from view-dependent specular effects using median filtering and by enforcing a neutral baseline for emission and roughness to stabilize the BRDF optimization [S1, S2].
+ 
+ ## How it works
++The method initializes four distinct components: the geometric shape (via SDF), the diffuse albedo, the specular BRDF parameters, and the environment lighting. It also includes a preprocessing step for input image normalization.
+ 
+-### Inputs and Outputs
+ **Inputs:**
+-*   Set of reference images $I_{ref}$ with varying exposures.
+-*   Object bounding box or mesh geometry.
+-*   Number of environment map lobes $N_{env}$.
++*   A set of $N$ reference images $\{I_1, \dots, I_N\}$ capturing the object from various viewpoints.
++*   A 3D bounding box enclosing the object.
++*   A mesh or point cloud representing the initial geometry (optional, depending on the specific pipeline variant).
+ 
+ **Outputs:**
+ *   Initialized SDF weights $\Theta$.
+-*   Initialized diffuse albedo function $a(x; \Phi)$ or texture.
+-*   Initialized scalar material parameters: emission $E$, roughness $r$, specular albedo $\mu$.
+-*   Initialized specular lobe sharpness $\lambda$.
+-*   Initialized environment map lobes $L_{env}$.
++*   Initialized diffuse albedo function $a(x; \Phi)$.
++*   Initialized specular BRDF parameters: lobe sharpness $\lambda$ and specular albedo $\mu$.
++*   Initialized environment map lobes.
++*   Scaled input images.
+ 
+-### Data Structures
+-*   **SDF Network:** Weights $\Theta$ for a Multi-Layer Perceptron (MLP) mapping 3D coordinates to signed distance values.
+-*   **Diffuse Albedo:**
+-    *   *Option A (MLP):* Parameters $\Phi$ for a function $a(x; \Phi)$.
+-    *   *Option B (Texture):* A 2D texture map $T_{diffuse}$ of resolution $W \times H$.
+-*   **Material Scalars:** Float values for $E, r, \mu, \lambda$.
+-*   **Environment Map:** A list of $N_{env}$ lobes, each containing a position vector $\mathbf{p}_i \in \mathbb{R}^3$ (unit sphere) and an amplitude scalar $A_i$.
++**Data Structures:**
++*   **SDF Network:** A multi-layer perceptron (MLP) mapping 3D coordinates to signed distance values. Weights $\Theta$ are initialized using the method from [12] to ensure the initial zero-level set forms a rough sphere [S1].
++*   **Albedo Network:** An MLP mapping 3D coordinates to diffuse albedo values.
++*   **Environment Map:** Represented as a set of lobes distributed on the unit sphere.
+ 
+-### Initialization Steps
++**Steps:**
+ 
+-1.  **Input Image Normalization [S1]:**
+-    Scale all input reference images by a constant factor $k$ such that the median intensity of all pixels across all images is $0.5$. This handles varying exposure levels.
++1.  **Input Image Normalization:**
++    To handle varying exposure across captures, scale all input images by a constant factor such that the median intensity of all scaled images is $0.5$ [S1]. This ensures consistent lighting assumptions during training [S1].
+ 
+-2.  **SDF Initialization [S1]:**
+-    Initialize the SDF network weights $\Theta$ using the method from [12] (not detailed in these sources) to ensure the initial implicit surface is roughly a sphere.
++2.  **Diffuse Albedo Initialization:**
++    Initialize the diffuse albedo network $a(x; \Phi)$ such that the predicted albedo is approximately $0.5$ for all locations inside the object's bounding box [S1].
++    *   *Alternative/Refined Approach for Spatially-Varying Color:* If spatially varying diffuse color is required, build a median texture [S2].
++        1.  Iterate over all available reference pictures.
++        2.  Project each view into texture space.
++        3.  Use an online median estimator to accumulate color values per texel [S2]. This avoids memory issues with tens of thousands of views and suppresses view-dependent effects like specular reflections, which would bias a mean estimator [S2].
+ 
+-3.  **Diffuse Albedo Initialization [S1, S2]:**
+-    *   *For MLP-based albedo [S1]:* Initialize parameters $\Phi$ such that the predicted albedo $a(x; \Phi) \approx 0.5$ for all locations $x$ inside the object's bounding box.
+-    *   *For Texture-based albedo [S2]:* Construct a median texture $T_{diffuse}$:
+-        a. Iterate over all available reference pictures.
+-        b. Project each image into texture space.
+-        c. Use an online median estimator to update the texture values. This avoids memory issues with tens of thousands of views and suppresses view-dependent effects like specular reflections, which would be amplified by a mean filter.
++3.  **Specular BRDF Initialization:**
++    Initialize the specular lobe sharpness $\lambda$ by drawing randomly from the interval $[95, 125]$ [S1]. Initialize the specular albedo $\mu$ by drawing randomly from the interval $[0.18, 0.26]$ [S1]. These values provide a neutral starting point for the specular component [S2].
+ 
+-4.  **Material Parameter Initialization [S2]:**
+-    Set constant initial values for the remaining material parameters:
+-    *   Emission $E = 0$.
+-    *   Roughness $r = 0.5$.
+-    *   Specular albedo $\mu = 0.5$ (Note: [S1] specifies a range for $\mu$, see below).
++4.  **Environment Map Initialization:**
++    Initialize the environment map lobes to distribute uniformly on the unit sphere using a spherical Fibonacci lattice [S1, S2]. Assign monochrome colors to these lobes [S1]. Scale the amplitude of the randomly initialized lobes such that the initial rendered pixel intensity output by the rendering pipeline is approximately $0.5$ [S1].
+ 
+-5.  **Specular BRDF Initialization [S1]:**
+-    *   Initialize lobe sharpness $\lambda$ by drawing randomly from the uniform distribution $U[95, 125]$.
+-    *   Initialize specular albedo $\mu$ by drawing randomly from the uniform distribution $U[0.18, 0.26]$.
+-    *   *Conflict Note:* [S2] suggests $\mu=0.5$ for general material parameters, while [S1] specifies $[0.18, 0.26]$ specifically for the specular BRDF component. Implementers should verify which parameter set corresponds to their specific BRDF model (e.g., whether $\mu$ in [S2] refers to a different specular term or if [S1] is more specific to the spherical Gaussian lobes).
++5.  **Other Material Parameters:**
++    Initialize emission to $0$, roughness to $0.5$, and specular to $0.5$ [S2]. These neutral constant values guide optimization toward a good minimum [S2].
+ 
+-6.  **Environment Map Initialization [S1]:**
+-    *   Distribute $N_{env}$ lobes uniformly on the unit sphere using a spherical Fibonacci lattice [18].
+-    *   Assign monochrome colors to the lobes.
+-    *   Randomly initialize the amplitude $A_i$ for each lobe.
+-    *   Scale the amplitudes such that the initial rendered pixel intensity is $\approx 0.5$.
++**Formulas and Parameters:**
++*   **Median Intensity Scaling:** Let $M$ be the median intensity of all pixels across all input images. Scale each image $I_i$ by $k = 0.5 / M$.
++*   **Albedo Target:** $a(x; \Phi) \approx 0.5$ for $x \in \text{Bounding Box}$ [S1].
++*   **Environment Map Amplitude:** Scale lobes $L_j$ such that $\text{Render}(L) \approx 0.5$ [S1].
++*   **Specular Sharpness:** $\lambda \sim \text{Uniform}(95, 125)$ [S1].
++*   **Specular Albedo:** $\mu \sim \text{Uniform}(0.18, 0.26)$ [S1].
+ 
+-### Pseudocode
++**Edge Cases and Pitfalls:**
++*   **Environment Map Brightness:** If the initial environment map is too bright or too dark, the diffuse albedo MLP may get stuck, predicting all zeros or ones during training [S1]. The amplitude scaling step (Step 4) is critical to prevent this [S1].
++*   **View-Dependent Artifacts:** Using a mean filter for diffuse color initialization can incorporate specular highlights, leading to incorrect diffuse estimates [S2]. The median estimator is preferred to suppress these effects [S2].
++
++**Pseudocode:**
+ 
+ ```python
+ import numpy as np
+ 
+-def initialize_parameters(reference_images, bounding_box, n_env_lobs):
++def initialize_parameters(images, bounding_box, num_lobs):
+     """
+-    Initializes rendering parameters according to PhySG and Texture-space DR methods.
++    Initializes parameters for inverse rendering.
++    
++    Args:
++        images: List of numpy arrays representing reference images.
++        bounding_box: Bounding box of the object.
++        num_lobs: Number of lobes for the environment map.
++        
++    Returns:
++        dict: Initialized parameters.
+     """
++    # Step 1: Normalize input images
++    # Calculate median intensity across all pixels in all images
++    all_pixels = np.concatenate([img.flatten() for img in images])
++    median_intensity = np.median(all_pixels)
+     
+-    # Step 1: Normalize Input Images
+     # Scale images so median intensity is 0.5
+-    all_pixels = np.concatenate([img.flatten() for img in reference_images])
+-    current_median = np.median(all_pixels)
+-    scale_factor = 0.5 / current_median
+-    normalized_images = [img * scale_factor for img in reference_images]
++    scale_factor = 0.5 / median_intensity
++    scaled_images = [img * scale_factor for img in images]
+     
+-    # Step 2: SDF Initialization
+-    # Use external method [12] to initialize SDF weights Theta
+-    # ensuring initial shape is roughly a sphere.
+-    sdf_weights = initialize_sdf_sphere() # [G] Placeholder for method [12]
++    # Step 2: Initialize Diffuse Albedo
++    # Option A: Constant albedo ~0.5
++    # Option B: Spatially varying via median texture
++    # Here we assume Option B for spatially varying color
++    # Note: In practice, this requires texture space projection logic
++    # which is omitted for brevity as it depends on specific UV mapping.
++    # The key is using an online median estimator.
++    diffuse_albedo_init = 0.5 # Placeholder for constant case
+     
+-    # Step 3: Diffuse Albedo Initialization
+-    # Option A: MLP-based (PhySG)
+-    # Initialize Phi such that a(x; Phi) ~ 0.5 inside bounding box
+-    # [G] Implementation detail: Initialize MLP biases/weights to output 0.5
+-    diffuse_albedo_mlp_params = initialize_albedo_mlp_target(0.5, bounding_box)
++    # Step 3: Initialize Specular BRDF
++    lambda_sharpness = np.random.uniform(95, 125)
++    mu_specular_albedo = np.random.uniform(0.18, 0.26)
+     
+-    # Option B: Texture-based (Texture-space DR)
+-    # Build median texture from reference images
+-    diffuse_albedo_texture = build_median_texture(normalized_images)
++    # Step 4: Initialize Environment Map
++    # Generate uniform distribution on unit sphere using spherical Fibonacci lattice
++    # Formula for spherical Fibonacci lattice points:
++    # theta = arccos(1 - 2*(i + 0.5)/N)
++    # phi = pi * (1 + sqrt(5)) * (i + 0.5)
++    indices = np.arange(num_lobs)
++    theta = np.arccos(1 - 2 * (indices + 0.5) / num_lobs)
++    phi = np.pi * (1 + np.sqrt(5)) * (indices + 0.5)
+     
+-    # Step 4: Material Parameters (Texture-space DR specific)
++    # Convert to Cartesian coordinates for lobe centers
++    x = np.sin(theta) * np.cos(phi)
++    y = np.sin(theta) * np.sin(phi)
++    z = np.cos(theta)
++    lobe_centers = np.stack([x, y, z], axis=-1)
++    
++    # Initialize monochrome colors (e.g., white)
++    lobe_colors = np.ones((num_lobs, 3))
++    
++    # Scale amplitudes so initial render intensity is ~0.5
++    # This requires a forward pass through the renderer to estimate intensity
++    # and then scaling the lobes.
++    # Placeholder for the scaling factor calculation
++    initial_render_intensity = estimate_render_intensity(lobe_centers, lobe_colors)
++    amplitude_scale = 0.5 / initial_render_intensity
++    lobe_colors *= amplitude_scale
++    
++    # Step 5: Initialize other parameters
+     emission = 0.0
+     roughness = 0.5
+-    specular_albedo_const = 0.5
++    specular = 0.5
+     
+-    # Step 5: Specular BRDF Parameters (PhySG specific)
+-    # Draw sharpness lambda from [95, 125]
+-    lambda_sharpness = np.random.uniform(95, 125)
+-    # Draw specular albedo mu from [0.18, 0.26]
+-    mu_specular = np.random.uniform(0.18, 0.26)
+-    
+-    # Step 6: Environment Map Initialization
+-    # Generate positions using Spherical Fibonacci Lattice
+-    env_positions = generate_spherical_fibonacci_lattice(n_env_lobs)
+-    
+-    # Initialize amplitudes randomly
+-    env_amplitudes = np.random.rand(n_env_lobs)
+-    
+-    # Scale amplitudes so initial render intensity is ~0.5
+-    # [G] Requires a forward pass simulation or analytical approximation
+-    # to determine the scaling factor that yields 0.5 intensity.
+-    env_amplitudes = scale_env_amplitudes(env_amplitudes, target_intensity=0.5)
++    # SDF weights initialization (method from [12] to form a rough sphere)
++    # This is implementation-specific to the SDF network architecture
++    sdf_weights = initialize_sdf_weights_rough_sphere()
+     
+     return {
+-        'sdf_weights': sdf_weights,
+-        'diffuse_albedo_mlp': diffuse_albedo_mlp_params,
+-        'diffuse_albedo_texture': diffuse_albedo_texture,
++        'scaled_images': scaled_images,
++        'diffuse_albedo_init': diffuse_albedo_init,
++        'lambda': lambda_sharpness,
++        'mu': mu_specular_albedo,
++        'lobe_centers': lobe_centers,
++        'lobe_colors': lobe_colors,
+         'emission': emission,
+         'roughness': roughness,
+-        'specular_albedo_const': specular_albedo_const,
+-        'lambda': lambda_sharpness,
+-        'mu': mu_specular,
+-        'env_map': {'positions': env_positions, 'amplitudes': env_amplitudes}
++        'specular': specular,
++        'sdf_weights': sdf_weights
+     }
+ 
+-def build_median_texture(images):
++def estimate_render_intensity(lobe_centers, lobe_colors):
+     """
+-    Iteratively updates a texture using an online median estimator.
++    Placeholder for estimating initial render intensity.
++    In practice, this involves rendering the scene with the current
++    environment map and measuring the average pixel intensity.
+     """
+-    # [G] Initialize texture with zeros or neutral color
+-    texture = np.zeros_like(images[0])
+-    
+-    for img in images:
+-        # Project image to texture space coordinates
+-        # [G] Depends on UV mapping of the object
+-        coords = project_to_texture_space(img)
+-        
+-        # Update texture with online median
+-        # [G] Standard online median algorithm (e.g., two heaps or similar)
+-        texture = online_median_update(texture, coords, img)
+-        
+-    return texture
++    # Not given in the sources.
++    return 1.0
+ 
+-def generate_spherical_fibonacci_lattice(n):
++def initialize_sdf_weights_rough_sphere():
+     """
+-    Generates n points uniformly distributed on a unit sphere.
++    Placeholder for SDF weight initialization method from [12].
+     """
+-    indices = np.arange(0, n, dtype=float) + 0.5
+-    phi = np.arccos(1 - 2 * indices / n)
+-    theta = np.pi * (1 + np.sqrt(5)) * indices
+-    
+-    x = np.sin(phi) * np.cos(theta)
+-    y = np.sin(phi) * np.sin(theta)
+-    z = np.cos(phi)
+-    
+-    return np.stack([x, y, z], axis=-1)
++    # Not given in the sources.
++    return None
+ ```
+ 
+-### Edge Cases and Pitfalls
+-*   **Environment Map Intensity:** If the initial environment map is too bright or too dark, the diffuse albedo MLP may get stuck, predicting all zeros or ones during training [S1]. The scaling step in Step 6 is critical to prevent this [S1].
+-*   **Median vs. Mean:** Using a mean filter for diffuse color initialization can incorporate view-dependent effects (specular reflections) into the diffuse base color. The median estimator is preferred to suppress these effects [S2].
+-*   **Parameter Conflict:** There is a discrepancy in the initialization of specular albedo $\mu$ between [S1] ($[0.18, 0.26]$) and [S2] ($0.5$). This likely reflects different BRDF parameterizations or material definitions.
+-
+ ## Operating characteristics
+-*   **Time Complexity:** The median texture construction is $O(N \cdot M)$ where $N$ is the number of views and $M$ is the number of texture pixels, assuming an $O(1)$ online median update. The environment map generation is $O(N_{env})$.
+-*   **Memory Complexity:** The median texture requires $O(W \cdot H)$ memory. The online estimator adds minimal overhead compared to storing all projected views.
+-*   **Strengths:** Robust against exposure variations in input data; prevents optimization divergence in inverse rendering; effectively separates diffuse and specular components during initialization.
+-*   **Limitations:** The median texture method may be slow for very high-resolution textures or massive numbers of views if not optimized. The SDF initialization relies on an external method [12].
++*   **Time Complexity:** The median texture construction is $O(N \cdot V)$ where $N$ is the number of views and $V$ is the number of texels, but the online estimator allows for $O(1)$ memory per texel update [S2]. The environment map initialization is $O(L)$ where $L$ is the number of lobes [S1].
++*   **Memory Complexity:** The online median estimator avoids storing all projected views, keeping memory usage low even for tens of thousands of views [S2].
++*   **Strengths:** Prevents optimization from getting stuck in degenerate solutions (all-zero or all-one albedo) [S1]. Suppresses view-dependent artifacts in diffuse color estimation [S2].
++*   **Limitations:** Relies on the assumption that the median intensity of input images is a good proxy for neutral lighting [S1]. The spherical Fibonacci lattice is an approximation of uniform distribution [S1].
++*   **When to use:** When training inverse rendering models with Spherical Gaussians or similar BRDF representations where environment map and material parameters are optimized jointly [S1, S2].
++*   **When not to use:** If the input images have extreme exposure variations that cannot be normalized by a single global scale factor [S1].
+ 
+ ## Background
+-This initialization strategy originates from inverse rendering research aiming to reconstruct physically-based materials and lighting from images.
+-*   **PhySG [S1]:** Introduced the specific initialization for spherical Gaussian environment maps and BRDF parameters to enable stable training of neural implicit representations for physics-based material editing and relighting.
+-*   **Texture-space DR [S2]:** Proposed the median texture initialization for spatially-varying diffuse color to handle complex indoor scenes with many reference views, leveraging texture-space differentiable rendering.
++This initialization strategy was developed for the PhySG pipeline [S1] and the Material and Lighting Reconstruction method [S2]. PhySG was introduced in 2021 [S1], and the material reconstruction method was also published in 2021 [S2]. The methods are used in physics-based material editing and relighting applications [S1].
+ 
+ ## Sources

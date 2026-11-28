@@ -1,0 +1,256 @@
+--- v009.md
++++ v010.md
+@@ -4,140 +4,105 @@
+ 
+ ## Overview
+-This method uploads dense 3D voxel data from host memory to GPU memory as a `GL_TEXTURE_3D` object, preparing it for ray marching or volume rendering [S1, S2, S3, S4, unofficial]. It solves the problem of mapping discrete volumetric data, which often resides in host-memory structures with varying strides or non-contiguous layouts, into the contiguous memory layout required by OpenGL texture upload functions like `glTexImage3D` or `glTexSubImage3D` [S1, S2, unofficial]. Unlike sparse storage methods that suffer from pointer overhead or out-of-core streaming that incurs decoding latency, this method packs data into dense 3D texture slices, trading memory efficiency for hardware compatibility and sampling speed [S1, unofficial]. It differs from its parent [Volume Texture Setup](4055-volume-texture-setup.md) by handling the actual data transformation and buffer transfer, and from [3D Texture Initialization](13158-3d-texture-initialization.md) by focusing on the data layout rather than the full lifecycle of texture object creation and mipmap generation [S1, S5, S7, unofficial].
++This method uploads a 3D voxel volume buffer from host memory to GPU memory as a `GL_TEXTURE_3D` object, preparing it for ray marching or volume rendering [S1, S2, S3, S4, unofficial]. It solves the problem of mapping discrete volumetric data, which often resides in host-memory structures with varying strides or non-contiguous layouts, into the contiguous memory layout required by OpenGL texture upload functions like `glTexImage3D` or `glTexSubImage3D` [S1, S2, unofficial]. Unlike sparse storage methods that suffer from pointer overhead or out-of-core streaming that incurs decoding latency, this method packs data into dense 3D texture slices, trading memory efficiency for hardware compatibility and sampling speed [S1, S2, unofficial]. It differs from its parent [Volume Texture Setup](4055-volume-texture-setup.md) by handling the actual data transformation and buffer upload, and from [3D Texture Initialization](13158-3d-texture-initialization.md) by focusing on the data layout and content population rather than the lifecycle of texture object creation and parameter configuration [S1, S5, S7, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A 3D voxel volume buffer (host memory), typically a nested array or flat buffer. Dimensions are $Z \times Y \times X$ (slices, rows, columns).
+-*   **Output:** A bound `GL_TEXTURE_3D` object on the GPU containing the volume data.
++- **Input:** A 3D array of voxel data (dimensions $Z \times Y \times X$), typically stored as a nested array or flat buffer in host memory. The data type is usually `float32` or `uint8` [S2, S3, S7, unofficial].
++- **Output:** A bound `GL_TEXTURE_3D` object in GPU memory containing the volume data, configured with specific internal formats, filtering, and wrapping modes [S1, S2, S3, S7, unofficial].
+ 
+-**Data Structures and Layout:**
+-The host data must be contiguous in memory. If the source is a nested array (e.g., `data[z][y][x]`), it must be flattened or copied into a contiguous buffer. The standard layout for OpenGL 3D textures is Z-slices, where each slice is a 2D image with rows (Y) and columns (X) [S2, S7, unofficial].
+-*   **Pixel Store Alignment:** Must be set to 1 byte (`GL_UNPACK_ALIGNMENT = 1`) to ensure that each row of pixels starts at a byte boundary, regardless of the data type width [S2, S7, unofficial].
+-*   **Formats:** Common internal formats include `GL_R8` (8-bit unsigned integer), `GL_R16F` (16-bit float), `GL_R32F` (32-bit float), or `GL_RGBA` for classified color data [S3, S4, S6, S7, unofficial].
++**Data Structures:**
++The host-side data structure is a contiguous buffer. If the input is a nested array (e.g., `data[z][y][x]`), it must be flattened or converted to a contiguous memory layout.
++- **Layout:** The data is assumed to be in Z-Y-X order (or X-Y-Z depending on the specific implementation's coordinate system, but typically Z is the slice index, Y is the row, X is the column) [S2, S5, unofficial].
++- **Alignment:** Pixel store alignment must be set to 1 byte to match the host array's byte alignment, preventing stride errors during upload [S2, S7, unofficial].
+ 
+-**Numbered Steps:**
++**Parameters:**
++- **Dimensions:** $Width$ ($X$), $Height$ ($Y$), $Depth$ ($Z$) [S2, S7, unofficial].
++- **Internal Format:** Depends on the data type and color requirements. Common formats include `GL_R32F` for 32-bit floats, `GL_R8` for 8-bit unsigned integers, `GL_R16F` for 16-bit floats, or `GL_RGBA` for classified color data [S2, S3, S4, S6, S7, unofficial].
++- **Format:** `GL_RED` for single-channel data, `GL_RGBA` for four-channel data [S2, S3, S4, S7, unofficial].
++- **Type:** `GL_FLOAT`, `GL_UNSIGNED_BYTE`, `GL_HALF_FLOAT`, or `GL_UNSIGNED_SHORT_5_6_5` [S1, S2, S3, S4, S6, S7, unofficial].
++- **Filtering:** `GL_NEAREST` for discrete voxel sampling, `GL_LINEAR` for smooth interpolation [S1, S2, S3, S6, S7, unofficial].
++- **Wrapping:** `GL_CLAMP_TO_EDGE` or `GL_CLAMP` to prevent sampling artifacts at boundaries [S2, S3, S4, S6, S7, unofficial].
++- **Compile-time Flags:** Some implementations use flags like `HIGH_COLOUR` to switch between 16-bit RGB565 and 8-bit single-channel R8UI formats [S1, unofficial].
+ 
+-1.  **Prepare Host Data:** Ensure the volume data is contiguous and in the correct data type (e.g., `float32` or `uint8`). If the data is not contiguous, copy it to a new contiguous buffer [S2, unofficial].
+-    *   *Pitfall:* On Windows D3D11/ANGLE, using a second sampler3D pointing to an uninitialized texture can cause draw-call failures. Ensure all channels are populated or use single-channel render paths for RGB volumes [S2, unofficial].
+-
+-2.  **Generate and Bind Texture:** Generate a texture ID and bind it to `GL_TEXTURE_3D` [S1, S3, S4, unofficial].
+-
+-3.  **Set Pixel Store Parameters:** Set the unpack alignment to 1 to match the host array byte alignment [S2, S7, unofficial].
+-    ```python
+-    gl.glPixelStorei(gl.GL_UNPACK_ALIGNMENT, 1)
+-    ```
+-
+-4.  **Configure Texture Parameters:** Set wrapping modes and filtering.
+-    *   **Wrapping:** Set `GL_TEXTURE_WRAP_S`, `GL_TEXTURE_WRAP_T`, and `GL_TEXTURE_WRAP_R` to `GL_CLAMP_TO_EDGE` or `GL_CLAMP` to prevent sampling artifacts at volume boundaries [S4, S6, S7, unofficial].
+-    *   **Filtering:** Set `GL_TEXTURE_MIN_FILTER` and `GL_TEXTURE_MAG_FILTER`. `GL_NEAREST` is common for voxel-based rendering to preserve sharp edges, while `GL_LINEAR` provides smooth interpolation [S1, S2, S6, S7, unofficial].
+-    *   **Mipmapping:** If mipmaps are required, set the base and max levels and generate them after upload [S4, unofficial].
+-
+-5.  **Upload Data:** Call `glTexImage3D` (for initial upload) or `glTexSubImage3D` (for updates).
+-    *   **Syntax:** `glTexImage3D(target, level, internalFormat, width, height, depth, border, format, type, data)`
+-    *   **Parameters:**
+-        *   `target`: `GL_TEXTURE_3D`
+-        *   `level`: 0 (base level)
+-        *   `internalFormat`: e.g., `GL_R8`, `GL_R32F`, `GL_RGBA`
+-        *   `width`: $X$ dimension
+-        *   `height`: $Y$ dimension
+-        *   `depth`: $Z$ dimension (number of slices)
+-        *   `border`: 0
+-        *   `format`: e.g., `GL_RED`, `GL_RGBA`
+-        *   `type`: e.g., `GL_UNSIGNED_BYTE`, `GL_FLOAT`, `GL_HALF_FLOAT`
+-        *   `data`: Pointer to the contiguous host memory buffer [S3, S6, S7, unofficial].
+-
+-    *   *Example (8-bit unsigned):*
+-        ```python
+-        gl.glTexImage3D(
+-            gl.GL_TEXTURE_3D, 0, gl.GL_R8,
+-            width, height, depth, 0,
+-            gl.GL_RED, gl.GL_UNSIGNED_BYTE,
+-            data_buffer
+-        )
+-        ```
+-
+-    *   *Example (32-bit float):*
+-        ```python
+-        gl.glTexImage3D(
+-            gl.GL_TEXTURE_3D, 0, gl.GL_R32F,
+-            width, height, depth, 0,
+-            gl.GL_RED, gl.GL_FLOAT,
+-            data_buffer
+-        )
+-        ```
+-
+-6.  **Bind to Shader:** Bind the texture to a specific texture unit (e.g., unit 0) and pass the uniform location to the shader [S6, unofficial].
+-
+-**Formulas:**
+-*   **Linear Index Calculation (for Compute Shader Repacking):** If repacking from a flat buffer in a compute shader, the linear index `src_index` for a 3D coordinate $(x, y, z)$ in a grid of resolution $R$ is:
+-    $$ \text{src\_index} = (z \cdot R + y) \cdot R + x $$
+-    where $R$ is the grid resolution (assuming a cubic grid) [S5, unofficial].
+-
+-**Parameters with Typical Values:**
+-*   `GL_UNPACK_ALIGNMENT`: 1 [S2, S7, unofficial]
+-*   `GL_TEXTURE_WRAP_S/T/R`: `GL_CLAMP_TO_EDGE` [S2, S3, S7, unofficial]
+-*   `GL_TEXTURE_MIN/MAG_FILTER`: `GL_NEAREST` or `GL_LINEAR` [S1, S2, S6, S7, unofficial]
+-*   `HIGH_COLOUR` (Compile-time flag): If defined, use `GL_RGB565` (`GL_UNSIGNED_SHORT_5_6_5`) with internal format `GL_RGB`; otherwise, use `GL_R8UI` (`GL_UNSIGNED_BYTE`) with internal format `GL_RED_INTEGER` [S1, unofficial].
+-
+-**Edge Cases and Pitfalls:**
+-*   **Non-Contiguous Data:** Passing a non-contiguous array to `glTexImage3D` can lead to memory corruption or incorrect rendering. Always ensure data is contiguous [S2, unofficial].
+-*   **Alignment:** Failure to set `GL_UNPACK_ALIGNMENT` to 1 can cause misalignment errors, especially with data types larger than 1 byte [S7, unofficial].
+-*   **Format Mismatch:** Ensure the `format` and `type` arguments match the host data layout. For example, `GL_RED` format with `GL_FLOAT` type expects 32-bit floats [S3, S6, unofficial].
+-*   **Windows D3D11/ANGLE:** RGB volumes stored as 3 separate R/G/B greyscale channels may cause issues if a second sampler3D points to an uninitialized texture. Use single-channel render paths or ensure all textures are initialized [S2, unofficial].
++**Steps:**
++1. **Prepare Data:** Ensure the volume data is contiguous and in the correct data type (e.g., `float32` or `uint8`). If the input is a nested array, flatten it or use a contiguous array view [S2, S7, unofficial].
++   - *Pitfall:* RGB volumes are sometimes stored as 3 separate R/G/B greyscale channels in a single-channel render path to avoid draw-call failures on Windows D3D11/ANGLE when using a second sampler3D pointing to an uninitialized texture [S2, unofficial].
++2. **Generate and Bind Texture:** Generate a texture ID and bind it to `GL_TEXTURE_3D` [S1, S3, S4, unofficial].
++3. **Set Pixel Store Alignment:** Call `glPixelStorei(GL_UNPACK_ALIGNMENT, 1)` to ensure the data is uploaded with 1-byte alignment [S2, S7, unofficial].
++4. **Upload Data:** Call `glTexImage3D` (or `glTexSubImage3D` for updates) with the appropriate parameters:
++   - Target: `GL_TEXTURE_3D`
++   - Level: 0
++   - Internal Format: e.g., `GL_R32F`, `GL_R8`, `GL_RGBA` [S2, S3, S4, S6, S7, unofficial]
++   - Width, Height, Depth: $X, Y, Z$ [S2, S3, S4, S7, unofficial]
++   - Border: 0
++   - Format: `GL_RED` or `GL_RGBA` [S2, S3, S4, S7, unofficial]
++   - Type: `GL_FLOAT`, `GL_UNSIGNED_BYTE`, etc. [S2, S3, S4, S7, unofficial]
++   - Data: Pointer to the contiguous host memory buffer [S2, S3, S7, unofficial]
++5. **Set Texture Parameters:**
++   - **Wrapping:** Set `GL_TEXTURE_WRAP_S`, `GL_TEXTURE_WRAP_T`, and `GL_TEXTURE_WRAP_R` to `GL_CLAMP_TO_EDGE` or `GL_CLAMP` [S2, S3, S4, S6, S7, unofficial].
++   - **Filtering:** Set `GL_TEXTURE_MIN_FILTER` and `GL_TEXTURE_MAG_FILTER` to `GL_NEAREST` or `GL_LINEAR` [S1, S2, S3, S6, S7, unofficial].
++   - **Mipmapping:** If mipmaps are required, set the base and max levels and generate mipmaps using `glGenerateMipmap` [S4, unofficial].
++6. **Bind to Shader:** Bind the texture to a specific texture unit (e.g., unit 0) and pass the uniform location to the shader [S6, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def upload_3d_texture(gl, data, width, height, depth, internal_format, format, data_type):
++def upload_3d_texture(volume_data, width, height, depth, internal_format, format, gl_type, filter_mode=GL_LINEAR, wrap_mode=GL_CLAMP_TO_EDGE):
+     """
+     Uploads a 3D volume buffer to a GL_TEXTURE_3D.
+     
+     Args:
+-        gl: OpenGL context object.
+-        data: Contiguous numpy array or buffer of volume data.
++        volume_data: Contiguous numpy array or buffer of shape (depth, height, width) or (width, height, depth) depending on layout.
+         width: X dimension.
+         height: Y dimension.
+         depth: Z dimension.
+-        internal_format: OpenGL internal format (e.g., GL_R8, GL_R32F).
++        internal_format: OpenGL internal format (e.g., GL_R32F, GL_R8).
+         format: OpenGL format (e.g., GL_RED, GL_RGBA).
+-        data_type: OpenGL data type (e.g., GL_UNSIGNED_BYTE, GL_FLOAT).
++        gl_type: OpenGL data type (e.g., GL_FLOAT, GL_UNSIGNED_BYTE).
++        filter_mode: Filtering mode (GL_NEAREST or GL_LINEAR).
++        wrap_mode: Wrapping mode (GL_CLAMP_TO_EDGE or GL_CLAMP).
+     """
+-    # Step 1: Ensure data is contiguous
+-    if not data.flags['C_CONTIGUOUS']:
+-        data = np.ascontiguousarray(data, dtype=data.dtype)
+-    
++    import OpenGL.GL as gl
++    import numpy as np
++
++    # Step 1: Ensure data is contiguous and correct type
++    # Note: The layout (Z, Y, X) vs (X, Y, Z) depends on the specific implementation.
++    # Here we assume the data is already in the correct contiguous layout.
++    if not volume_data.flags['C_CONTIGUOUS']:
++        volume_data = np.ascontiguousarray(volume_data, dtype=np.float32) # [S2, unofficial]
++
+     # Step 2: Generate and bind texture
+-    tex_id = gl.glGenTextures(1)
+-    gl.glBindTexture(gl.GL_TEXTURE_3D, tex_id)
+-    
++    texture_id = gl.glGenTextures(1)
++    gl.glBindTexture(gl.GL_TEXTURE_3D, texture_id)
++
+     # Step 3: Set pixel store alignment
+-    gl.glPixelStorei(gl.GL_UNPACK_ALIGNMENT, 1)
+-    
+-    # Step 4: Set texture parameters
+-    gl.glTexParameteri(gl.GL_TEXTURE_3D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE)
+-    gl.glTexParameteri(gl.GL_TEXTURE_3D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE)
+-    gl.glTexParameteri(gl.GL_TEXTURE_3D, gl.GL_TEXTURE_WRAP_R, gl.GL_CLAMP_TO_EDGE)
+-    
+-    # Choose filter based on application needs (Nearest for voxels, Linear for smooth)
+-    gl.glTexParameteri(gl.GL_TEXTURE_3D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR)
+-    gl.glTexParameteri(gl.GL_TEXTURE_3D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)
+-    
+-    # Step 5: Upload data
++    gl.glPixelStorei(gl.GL_UNPACK_ALIGNMENT, 1) # [S2, S7, unofficial]
++
++    # Step 4: Upload data
++    # glTexImage3D(target, level, internalFormat, width, height, depth, border, format, type, pixels)
+     gl.glTexImage3D(
+         gl.GL_TEXTURE_3D,
+-        0,                  # level
+-        internal_format,    # internalformat
+-        width,              # width
+-        height,             # height
+-        depth,              # depth
+-        0,                  # border
+-        format,             # format
+-        data_type,          # type
+-        data                # data
++        0,
++        internal_format,
++        width,
++        height,
++        depth,
++        0,
++        format,
++        gl_type,
++        volume_data
+     )
++
++    # Step 5: Set texture parameters
++    gl.glTexParameteri(gl.GL_TEXTURE_3D, gl.GL_TEXTURE_WRAP_S, wrap_mode) # [S2, S3, S4, S6, S7, unofficial]
++    gl.glTexParameteri(gl.GL_TEXTURE_3D, gl.GL_TEXTURE_WRAP_T, wrap_mode) # [S2, S3, S4, S6, S7, unofficial]
++    gl.glTexParameteri(gl.GL_TEXTURE_3D, gl.GL_TEXTURE_WRAP_R, wrap_mode) # [S2, S3, S4, S6, S7, unofficial]
+     
+-    # Step 6: Generate mipmaps if needed
+-    # gl.glGenerateMipmap(gl.GL_TEXTURE_3D)
+-    
+-    return tex_id
++    gl.glTexParameteri(gl.GL_TEXTURE_3D, gl.GL_TEXTURE_MIN_FILTER, filter_mode) # [S1, S2, S3, S6, S7, unofficial]
++    gl.glTexParameteri(gl.GL_TEXTURE_3D, gl.GL_TEXTURE_MAG_FILTER, filter_mode) # [S1, S2, S3, S6, S7, unofficial]
++
++    # Optional: Generate mipmaps if required
++    # gl.glGenerateMipmap(gl.GL_TEXTURE_3D) # [S4, unofficial]
++
++    return texture_id
+ ```
+ 
+@@ -154,24 +119,23 @@
+ 
+ ### [Volume Texture Ping-Pong Swap](13951-volume-texture-ping-pong-swap.md)
+-Manages dynamic 3D scalar fields in GPU memory using a double-buffered ping-pong swap to avoid full re-uploads on field updates.
++Manages dynamic 3D scalar fields in GPU memory using a double-buffered ping-pong swap to avoid full re-uploads on field updates. It differs from [3D Texture Initialization](13158-3d-texture-initialization.md) by handling subsequent updates efficiently, and from [Volume Atlas Texture Update](7157-volume-atlas-texture-update.md) by operating on single 3D textures rather than atlas layouts.
+ 
+ ### Brick Grid Texture Upload
+-Creates multiple 3D textures for a brick grid structure: an indirection texture (`GL_RGB10_A2UI`), a range texture (`GL_RG16F`), and an atlas texture (`GL_COMPRESSED_RED`). It sets wrap modes to `GL_CLAMP_TO_BORDER` and filters to `GL_NEAREST`. Mipmaps are generated for the range texture by iterating through levels and calling `glTexImage3D` for each [S8, unofficial].
++This variant uploads multiple auxiliary textures for a brick-based volume rendering system. It creates an indirection texture (`GL_RGB10_A2UI`), a range texture (`GL_RG16F`), and an atlas texture (`GL_COMPRESSED_RED`), each with specific dimensions and data. Mipmaps are generated for the range texture. Wrap modes are set to `GL_CLAMP_TO_BORDER` and filters to `GL_NEAREST` [S8, unofficial].
+ 
+ ### 3D Volume Texture Population
+-Populates a 3D volume texture with procedural data: R channel stores noise, G channel stores local AO, B channel stores noise-driven height-based baseline albedo, and A channel stores procedural cloud physical density. This allows for consistent retrieval of density and albedo during raymarching [S9, unofficial].
++This variant populates a 3D volume texture with procedural data, specifically for cloud rendering. The R channel stores noise, the G channel stores local ambient occlusion (AO), the B channel stores a noise-driven height-based baseline albedo, and the A channel stores procedural cloud physical density [S9, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$ where $N$ is the total number of voxels ($X \times Y \times Z$), as each voxel must be copied from host to device memory.
+-*   **Memory Complexity:** $O(N)$ for the GPU texture storage. The host memory requirement depends on whether a contiguous copy is made.
+-*   **Measured Performance:** Upload speed is limited by PCIe bandwidth. For a $256^3$ volume with 32-bit floats, the data size is ~512 MB. On a typical PCIe 3.0 x16 link (theoretical 16 GB/s), the upload takes approximately 32 ms, though actual performance may vary due to driver overhead and system load [S2, S7, unofficial].
+-*   **Scaling:** Performance scales linearly with volume size. For very large volumes, consider chunking or streaming [S1, S8, unofficial].
+-*   **Strengths:** Simple to implement, hardware-accelerated sampling, compatible with standard OpenGL pipelines.
+-*   **Limitations:** Inefficient for sparse data, limited by GPU memory capacity, upload latency can be significant for large volumes.
+-*   **When to Use:** Dense volumes with moderate size, static or infrequently updated data.
+-*   **When Not to Use:** Sparse volumes (use sparse textures or grid-based methods), extremely large volumes requiring out-of-core streaming, or real-time updates with high-frequency changes (consider ping-pong or compute shader repacking).
++- **Time Complexity:** $O(N)$ where $N$ is the number of voxels, as the entire volume must be copied to GPU memory.
++- **Memory Complexity:** $O(N)$ for the GPU texture storage. The host memory must also hold a contiguous copy of the data.
++- **Performance:** Upload speed is limited by the PCIe bandwidth and the size of the volume. For large volumes, this can be a bottleneck. Using `glTexSubImage3D` for updates can be faster if only a portion of the volume changes.
++- **Strengths:** Simple to implement, hardware-accelerated sampling, compatible with standard OpenGL volume rendering pipelines.
++- **Limitations:** Inefficient for sparse data, requires contiguous memory allocation, limited by GPU memory size.
++- **When to use:** Dense volumes, small to medium-sized datasets, real-time rendering where sampling speed is critical.
++- **When not to use:** Very large sparse volumes (use sparse methods), out-of-core rendering (use streaming methods).
+ 
+ ## Background
+-The method originates from standard OpenGL volume rendering techniques, where 3D textures are used to store volumetric data for ray marching. Early implementations used `GL_TEXTURE_3D` with `GL_LUMINANCE` or `GL_RED` formats. Modern implementations leverage `GL_R8`, `GL_R16F`, and `GL_R32F` for better precision and performance. The technique is widely used in medical imaging, scientific visualization, and real-time volume rendering applications [S1, S2, S3, S4, S7, unofficial].
++The method originates from standard OpenGL volume rendering techniques, where 3D textures are used to store volumetric data for ray marching. It has been implemented in various open-source projects such as Multivox, ClearVolume-Plus, and others [S1, S2, S3, S4, S5, S6, S7, S8, S9, unofficial].
+ 
+ ## Sources

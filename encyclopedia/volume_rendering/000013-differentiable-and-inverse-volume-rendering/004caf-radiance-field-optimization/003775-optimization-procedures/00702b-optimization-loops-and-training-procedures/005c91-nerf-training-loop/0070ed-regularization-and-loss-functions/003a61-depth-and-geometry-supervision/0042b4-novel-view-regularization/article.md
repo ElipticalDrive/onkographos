@@ -1,0 +1,96 @@
+# Novel View Regularization
+
+Also called: Novel view rays regularization, Novel view supervision
+
+## Overview
+Novel View Regularization mitigates the shape-radiance ambiguity in Neural Radiance Fields (NeRF) by incorporating rays from unobserved viewpoints into the training loop [S1]. Unlike methods that rely solely on observed image supervision, this approach adds geometric guidance to prevent overfitting to sparse input views [S1]. It sets itself apart by explicitly sampling and rendering novel views during optimization to enforce geometric consistency, whereas siblings like [Depth and Geometry Supervision](8727-depth-and-geometry-supervision.md) may rely on external depth priors or structural constraints without necessarily synthesizing new viewpoints [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Current NeRF parameters $\theta$ (density $\sigma$ and color $\mathbf{c}$), observed camera rays, and novel view rays $\mathbf{r}_{novel}$ [S1, G].
+*   **Outputs:** Updated parameters $\theta'$ after gradient descent [G].
+
+**Data Structures:**
+*   **Ray Set:** A collection of rays $\mathbf{r} = (o, d)$ combining observed and novel view rays [S1, G].
+*   **Sample Points:** Along each ray, points $t_i$ are sampled using the primary rendering strategy [G].
+
+**Numbered Steps:**
+1.  **Ray Sampling:** Construct a batch of rays including observed rays and novel view rays $\mathbf{r}_{novel}$ [S1].
+2.  **Volume Rendering:** For each ray $\mathbf{r}$, compute rendered color $\hat{\mathbf{C}}(\mathbf{r})$ and depth $\hat{\mathbf{D}}(\mathbf{r})$ using differentiable volume rendering [7475-geometric-baseline-regularization.md].
+3.  **Loss Computation:** Compute the total loss $\mathcal{L}$, which combines standard supervision with geometric adaptation loss $\mathcal{L}_{geo}$ to guide geometry [S1].
+4.  **Backpropagation:** Compute gradients $\nabla_\theta \mathcal{L}$ flowing back through the rendered outputs to the network parameters [S1, 8582-regnerf.md].
+5.  **Update:** Update $\theta$ using gradient descent [G].
+
+**Formulas:**
+The rendering process computes expected color and depth along rays $r(t) = o + td$ using sample points $t_i$ with weights $w_i = T(t_i)\rho(t_i)$, where $\rho(t_i) = 1 - \exp(-\sigma(\mathbf{r}(t_i))(t_{i+1} - t_i))$ and $T(t_i) = \prod_{j=1}^{i-1} (1 - \rho(t_j))$ [7475-geometric-baseline-regularization.md]. The rendered depth is typically the expected distance along the ray:
+$$ \hat{D}(\mathbf{r}) = \sum_{i=1}^N w_i t_i $$
+where $w_i = T_i (1 - \exp(-\sigma_i \delta_i))$ are the rendering weights, $t_i$ are sample depths, and $T_i$ is the accumulated transmittance [7475-geometric-baseline-regularization.md].
+
+**Parameters:**
+*   **Number of Novel Views:** Not given in the sources.
+*   **Sampling Strategy:** Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Local Minima:** Omitting novel view rays risks converging to local minima, causing incorrect geometry [S1].
+*   **Overfitting:** Without novel view supervision, the model may overfit to the observed views, leading to poor generalization [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def sample_rays(cameras):
+    rays = []
+    for cam in cameras:
+        for u in range(cam.width):
+            for v in range(cam.height):
+                origin = cam.origin + u * cam.dx + v * cam.dy
+                rays.append((origin, cam.direction))
+    return rays
+
+def volume_render(rays, model):
+    C_hat, D_hat = [], []
+    for o, d in rays:
+        t = uniform_sample_points(o, d)
+        sigma, c = model(o, d, t)
+        delta = t[1:] - t[:-1]
+        alpha = 1.0 - exp(-sigma * delta)
+        T = cumprod(concat([ones_like(alpha[:1]), 1.0 - alpha[:-1]]))
+        w = T * alpha
+        C_hat.append(sum(w * c))
+        D_hat.append(sum(w * t))
+    return C_hat, D_hat
+
+def novel_view_regularization_step(model, obs_cameras, novel_cameras, gt_colors_obs, optimizer):
+    rays_obs = sample_rays(obs_cameras)
+    rays_novel = sample_rays(novel_cameras)
+
+    C_hat_obs, D_hat_obs = volume_render(rays_obs, model)
+    C_hat_novel, D_hat_novel = volume_render(rays_novel, model)
+
+    loss_obs = mean((C_hat_obs - gt_colors_obs) ** 2)
+    loss_novel = mean(D_hat_novel ** 2)  # [G] Geometric loss placeholder; exact form not in sources
+    total_loss = loss_obs + loss_novel
+
+    optimizer.zero_grad()
+    total_loss.backward()
+    optimizer.step()
+    return total_loss
+```
+
+## Subtopics
+**Few-View Reconstruction via Regularization:** A family of approaches that mitigate shape-radiance ambiguity in sparse-input settings by applying geometric or semantic priors to prevent overfitting and reduce floaters [S1, G]. Choose it when supervision from multiple viewpoints is limited and explicit regularization is preferred over progressive capacity restraint [S1, G]. [Few-View Reconstruction via Regularization](12946-few-view-reconstruction-via-regularization.md)
+
+**NGP-ERGAS:** A regularization strategy for Instant Neural Graphics Primitives that improves fine detail reconstruction by incorporating nonlocal structural information via thread-based global error computation [S1, G]. Choose it when training Instant-NGP and standard per-pixel losses fail to capture fine structural details [S1, G]. [NGP-ERGAS](21717-ngp-ergas.md)
+
+## Operating characteristics
+*   **Performance:** Reduces overfitting and enhances geometry accuracy compared to training without novel view supervision [S1]. It significantly reduces floaters and improves cross-scale geometric adaptation [S1].
+*   **Strengths:** Improves rendering quality and geometric consistency in few-shot scenarios [S1].
+*   **Limitations:** Omitting novel view rays risks converging to local minima, causing incorrect geometry [S1].
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+
+## Background
+Novel View Regularization is used in the context of FrugalNeRF, a method for fast convergence in extreme few-shot novel view synthesis [S1]. It addresses the challenge of reconstructing 3D scenes from very limited input views by leveraging geometric priors through novel view supervision [S1].
+
+## Sources
+[S1] FrugalNeRF: Fast Convergence for Extreme Few-shot Novel View Synthesis without Learned Priors, https://doi.org/10.1109/cvpr52734.2025.01049, fetched 2026-10-29

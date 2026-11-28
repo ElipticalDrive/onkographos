@@ -1,0 +1,103 @@
+# Dense Depth Estimation via Plane Sweep
+
+Also called: GPU Plane Sweep Depth Estimation, Live Image Capturing and Dense Depth Estimation (Woetzel and Koch), WoeKoch04, Woetzel and Koch
+
+## Overview
+Dense Depth Estimation via Plane Sweep estimates per-pixel depth by projecting a series of depth planes into multiple camera views and evaluating photometric consistency across views [S1, unofficial]. It solves the problem of recovering dense 3D geometry from multi-view imagery by combining rendering and reconstruction in a single step without producing an explicit intermediate volume [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Inputs: A set of $N$ images $I_1, \dots, I_N$ with known camera projection matrices [G].
+- Outputs: A dense depth map $D$ for a reference view [G].
+
+**Data Structures:**
+- Depth planes: Defined by a minimum depth $d_{min}$, maximum depth $d_{max}$, and step size $\Delta d$ [G].
+- Cost accumulation: Per-pixel scalar values; no explicit 3D volume is stored [S1, unofficial].
+
+**Steps:**
+1. Initialize a cost accumulator $C(u, v) = \infty$ and a depth map $D(u, v) = 0$ for each pixel $(u, v)$ in the reference image [G].
+2. Iterate through depth values $d$ from $d_{min}$ to $d_{max}$ with step $\Delta d$ [G]:
+   a. Construct a depth plane at distance $d$ in the reference camera coordinate system [G].
+   b. For each pixel $(u, v)$ and each other camera $k \in \{2, \dots, N\}$:
+      i. Project the 3D point corresponding to $(u, v, d)$ from the reference view into camera $k$'s image plane to obtain coordinates $(u_k, v_k)$ [G].
+      ii. Sample the intensity or color value $I_k(u_k, v_k)$ from image $k$ [G].
+      iii. Compute a photometric consistency cost between $I_k(u_k, v_k)$ and the reference pixel value $I_1(u, v)$ [G].
+      iv. If the accumulated cost for depth $d$ is lower than $C(u, v)$, update $C(u, v)$ and set $D(u, v) = d$ [G].
+3. The photo-consistency check is performed on each fragment regardless of whether it was rejected by a silhouette or background test [S1, unofficial].
+
+**Formulas:**
+- Projection: $\mathbf{x}_k = P_k \mathbf{X}_1$, where $\mathbf{X}_1$ is the 3D point at depth $d$ for pixel $(u,v)$ in camera 1, and $P_k$ is the projection matrix of camera $k$ [G].
+- Depth Selection: $D(u, v) = \arg\min_{d} C(u, v, d)$ [G].
+
+**Parameters:**
+- $d_{min}, d_{max}$: Depth range [G].
+- $\Delta d$: Depth resolution [G].
+- $N$: Number of views [G].
+
+**Edge Cases:**
+- The original implementation is limited to only four camera views [S1, unofficial].
+- Not given in the sources.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def plane_sweep_depth_estimation(images, cameras, d_min, d_max, d_step):
+    height, width = len(images[0]), len(images[0][0])
+    depth_map = [[0.0] * width for _ in range(height)]
+    min_cost = [[float('inf')] * width for _ in range(height)]
+    
+    d = d_min
+    while d < d_max:
+        for y in range(height):
+            for x in range(width):
+                X_ref = unproject(x, y, d, cameras[0])
+                
+                cost = 0.0
+                for k in range(1, len(images)):
+                    X_k = [cameras[k][i][0]*X_ref[0] + cameras[k][i][1]*X_ref[1] + cameras[k][i][2]*X_ref[2] + cameras[k][i][3]*X_ref[3] for i in range(4)]
+                    if X_k[2] <= 0:
+                        continue
+                    u_k = X_k[0] / X_k[2]
+                    v_k = X_k[1] / X_k[2]
+                    
+                    if not (0 <= u_k < width and 0 <= v_k < height):
+                        continue
+                        
+                    I_ref = images[0][y][x]
+                    I_k = images[k][int(v_k)][int(u_k)]
+                    cost += abs(I_ref - I_k)
+                
+                if cost < min_cost[y][x]:
+                    min_cost[y][x] = cost
+                    depth_map[y][x] = d
+        d += d_step
+    return depth_map
+
+def unproject(u, v, d, K):
+    x = (u - K[0][2]) * d / K[0][0]
+    y = (v - K[1][2]) * d / K[1][1]
+    return [x, y, d, 1.0]
+```
+
+## Subtopics
+
+### [Binocular Depth Estimation (Stereo Matching)](15014-binocular-depth-estimation-stereo-matching.md)
+Binocular depth estimation estimates scene depth from a pair of left and right images by computing a disparity map. It solves the problem of recovering 3D structure from 2D imagery using geometric constraints between two viewpoints [G]. It builds on [Dense Depth Estimation via Plane Sweep](10850-dense-depth-estimation-via-plane-sweep.md) by providing the foundational cost-volume-based approach that plane sweep generalizes to multiple views [G].
+
+## Operating characteristics
+- Performance: Dense depth maps are computed with up to 20 frames per second [S1, unofficial].
+- Limitations: Limited to only four camera views in the original implementation [S1, unofficial].
+- Time Complexity: Not given in the sources.
+- Memory Complexity: Not given in the sources.
+- Strengths: Not given in the sources.
+- When to use: Not given in the sources.
+- When not to use: Not given in the sources.
+
+## Background
+Woetzel and Koch proposed a live system for image capturing and dense depth estimation in [WoeKoch04] [S1, unofficial]. Their plane-sweep algorithm runs almost entirely on the GPU, leaving the main CPU free for other tasks such as image capture and higher level recognition [S1, unofficial].
+
+## Sources
+[S1] Accelerated volumetric reconstruction from uncalibrated camera views, http://doras.dcu.ie/157/, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,63 @@
+# Learning-based and Generative Initialization
+
+Also called: Neural initialization, VAE-based initialization, Volume-prior initialization
+
+## Overview
+This family of methods initializes 3D Gaussian splats using learned priors, generative models, or volume-based constraints rather than simple geometric heuristics. It solves the problem of poor convergence and artifacts in scenes with limited observations or complex geometry by providing a structurally sound starting point for optimization. It differs from sibling methods like [Angle-pose Cuboid Uniform Initialization](4503-angle-pose-cuboid-uniform-initialization-acui.md) by relying on data-driven or differentiable volume representations instead of fixed spatial distributions, and from [Spherical Harmonics Initialization](3163-spherical-harmonics-initialization.md) by focusing on spatial/structural initialization rather than appearance parameterization.
+
+## Shared principles
+All methods in this family share the goal of producing an initial set of Gaussian parameters $\mathcal{G}_{init} = \{\mathbf{p}_i, \mathbf{s}_i, \mathbf{q}_i, \alpha_i, \mathbf{c}_i\}$ that minimizes a reconstruction or consistency loss before the main differentiable rendering optimization begins. The core mechanism involves either:
+1.  **Latent Space Decoding:** Encoding scene data into a latent vector and decoding it into Gaussian parameters via a neural network [S1, unofficial][S2].
+2.  **Volume Supervision:** Using a ground-truth or estimated volume (e.g., from SLAM or CT) to supervise the placement and shape of Gaussians via voxelization and loss functions [S2].
+3.  **Pre-computed Properties:** Leveraging parameters from a related generalized model to initialize the Gaussian field [S3, unofficial].
+
+The optimization typically minimizes a composite loss function $\mathcal{L}$ involving photometric terms $E_{pho}$, geometric terms $E_{geo}$, and regularization terms $E_{iso}$ or $E_{reg}$ [S1, unofficial][S2].
+
+## Subtopics
+
+### [SF-VAE (Spherical Folding Variational Autoencoder)](14701-sf-vae-spherical-folding-variational-autoencoder.md)
+A neural network architecture that encodes 3D Gaussian parameters into a latent space and decodes them using a spherical folding grid to reconstruct the geometry and color of the Gaussians [14701-sf-vae-spherical-folding-variational-autoencoder.md]. It sets itself apart by using a spherical folding mechanism to handle the anisotropic nature of Gaussians, ensuring topological consistency in the decoded parameters. Choose this when scene topology is complex and standard latent decoders fail to capture sharp geometric features.
+
+### Convergence Basin Analysis Training (With Depth)
+A method that initializes the Gaussian map using RGB-D data to constrain both photometry and geometry [S1, unofficial]. It sets itself apart by incorporating depth supervision, which stabilizes the optimization in ambiguous regions. Choose this when depth sensors are available and accurate depth alignment is critical for the initial structure.
+#### step
+- [S1, unofficial] Train the Gaussian map by minimizing the same cost function as the RGB-D SLAM system.
+#### formula
+- [S1, unofficial] Find $G_{init}$ by minimizing:
+  $$ \mathcal{G}_{init} = \arg \min_{\mathcal{G}} \sum_{\forall k \in \mathcal{W}} (\lambda_{pho} E_{pho}^k + (1 - \lambda_{pho}) E_{geo}^k) + \lambda_{iso} E_{iso} $$
+#### parameter
+- [S1, unofficial] Photometric loss weight $\lambda_{pho} = 0.9$.
+- [S1, unofficial] Isotropic regularization weight $\lambda_{iso} = 10$.
+
+### Convergence Basin Analysis Training (With Depth)
+A method that initializes the Gaussian map without depth supervision, relying solely on monocular cues and fixed camera poses [S1, unofficial]. It sets itself apart by requiring no depth input, making it suitable for RGB-only sequences, but requires random initialization of positions. Choose this when depth data is unavailable or unreliable.
+#### step
+- [S1, unofficial] Train initial 3D Gaussian map $G_{init}$ without depth supervision. Randomly initialize 3D Gaussians' positions. Keep camera poses fixed during optimization.
+#### formula
+- [S1, unofficial] Find $G_{init}$ by minimizing:
+  $$ \mathcal{G}_{init} = \arg \min_{\mathcal{G}} \sum_{\forall k \in \mathcal{W}} E_{pho}^k + \lambda_{iso} E_{iso} $$
+#### parameter
+- [S1, unofficial] Training iterations: 30,000 iterations using training views.
+
+### Volume Prior Initialization
+A method that initializes Gaussians by extracting gradients from a ground-truth volume and optimizing the Gaussian representation against it [S2]. It sets itself apart by using a voxel-based evaluation loop, making it effective for CT reconstruction or scenarios with explicit volumetric ground truth. Choose this when a high-quality volume representation (e.g., from CT or dense SLAM) is available.
+#### step
+- [S2] Extract gradients from the ground-truth volume ($\mathbf{V}_{gt}$) using a variant of gradient-based Gaussian initialization.
+- [S2] At each step, voxelize the current Gaussian representation ($\mathbf{V}_r$) and evaluate against $\mathbf{V}_{gt}$ using L1 and 3D SSIM loss.
+#### formula
+- [S2] $\mathcal{L}_{\text{total}} = \mathcal{L}_1(\mathbf{V}_r, \mathbf{V}_{\text{gt}}) + \alpha_{\text{SSIM}} \mathcal{L}_{\text{SSIM}}(\mathbf{V}_r, \mathbf{V}_{\text{gt}})$, where $\alpha_{\text{SSIM}}$ is the weight for the 3D SSIM loss.
+
+### Generalized Gaussian Splatting Initialization
+A method that initializes Gaussians using pre-computed properties from a generalized Gaussian splatting model [S3, unofficial]. It sets itself apart by leveraging a prior model to alleviate quality decline when Gaussian shapes deviate from actual surface geometry, particularly in scenes with limited observations. Choose this when rendering from novel viewpoints with sparse input data.
+#### definition
+- [S3, unofficial] Initializing Gaussians using pre-computed properties $\theta$ from a generalized Gaussian splatting model to alleviate quality decline when Gaussian shapes deviate from actual surface geometry, especially in scenarios with limited scene observations.
+#### parameter
+- [S3, unofficial] Pre-computed properties $\theta$ from a generalized Gaussian splatting model are used for initialization.
+
+## Background
+The need for learning-based initialization arises from the sensitivity of 3D Gaussian Splatting to initial parameters, particularly in inverse rendering and SLAM contexts where the optimization landscape is non-convex. Early methods relied on uniform or heuristic distributions, which often led to slow convergence or local minima. The introduction of VAE-based approaches (e.g., SF-VAE) and volume-prior methods (e.g., FaCT-GS) allowed for more robust initialization by incorporating structural priors. Convergence basin analysis training (Gaussian Splatting SLAM) demonstrated that initializing with SLAM-derived constraints significantly improves the stability of the Gaussian map [S1, unofficial]. Generalized initialization strategies (GauStudio) further refined this by using pre-computed properties to handle geometric deviations [S3, unofficial].
+
+## Sources
+[S1] Gaussian Splatting SLAM, https://arxiv.org/abs/2312.06741, fetched 2026-10-27 (unofficial)
+[S2] FaCT-GS: Fast and Scalable CT Reconstruction with Gaussian Splatting, https://doi.org/10.1007/978-3-032-37464-6_13, fetched 2026-10-26
+[S3] GauStudio: A Modular Framework for 3D Gaussian Splatting and Beyond, https://doi.org/10.48550/arXiv.2403.19632, fetched 2026-10-30 (unofficial)

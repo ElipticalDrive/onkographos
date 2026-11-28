@@ -1,0 +1,183 @@
+--- v002.md
++++ v003.md
+@@ -41,9 +41,16 @@
+     stride_y = chunk_size
+     stride_z = chunk_size * chunk_size
+-    face_stride = chunk_size ** 3
+-    # Face indices: 0=Z+, 1=Z-, 2=X+, 3=X-, 4=Y+, 5=Y-
+-    face_dirs = [(0, 0, 1), (0, 0, -1), (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0)]
+-    face_normals = [(0, 0, 1), (0, 0, -1), (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0)]
+-
++    
++    # Face definitions: (dx, dy, dz, nx, ny, nz, plane_offset, axis_a, axis_b)
++    # axis_a corresponds to length_a, axis_b to length_b
++    faces = [
++        (0, 0, 1, 0, 0, 1, 1, 'y', 'x'), # Z+
++        (0, 0, -1, 0, 0, -1, 0, 'y', 'x'), # Z-
++        (1, 0, 0, 1, 0, 0, 1, 'y', 'z'), # X+
++        (-1, 0, 0, -1, 0, 0, 0, 'z', 'y'), # X-
++        (0, 1, 0, 0, 1, 0, 1, 'x', 'z'), # Y+
++        (0, -1, 0, 0, -1, 0, 0, 'z', 'x') # Y-
++    ]
++    
+     for i in range(chunk_size):
+         for j in range(chunk_size):
+@@ -51,66 +58,98 @@
+                 voxel_idx = i * stride_z + j * stride_y + k
+                 index = voxels[voxel_idx].index
+-
+-                for f in range(6):
+-                    visit_ptr = visit_array[voxel_idx * 6 + f]
+-                    if visit_ptr != comparison:
+-                        if is_face_visible(voxels, chunk_size, i, j, k, f, should_mesh_between_chunks, neighbor_chunks):
+-                            visit_array[voxel_idx * 6 + f] = comparison
++                
++                for face in faces:
++                    dx, dy, dz, nx, ny, nz, plane_offset, axis_a, axis_b = face
++                    face_idx = faces.index(face)
++                    visit_ptr_idx = voxel_idx * 6 + face_idx
++                    
++                    if visit_array[visit_ptr_idx] != comparison:
++                        ni, nj, nk = i + dx, j + dy, k + dz
++                        is_boundary = (ni < 0 or ni >= chunk_size or nj < 0 or nj >= chunk_size or nk < 0 or nk >= chunk_size)
++                        
++                        visible = False
++                        if is_boundary:
++                            if should_mesh_between_chunks:
++                                visible = True
++                            else:
++                                neighbor = neighbor_chunks.get((i, j, k), face_idx)
++                                if neighbor is None or not neighbor.allocated:
++                                    visible = True
++                                else:
++                                    visible = neighbor.voxel.index == 0
++                        else:
++                            neighbor_idx = ni * stride_z + nj * stride_y + nk
++                            visible = voxels[neighbor_idx].index == 0
+                             
+-                            # Combine along the two axes parallel to the face plane
+-                            if f == 0: # Front Z+
+-                                length_a = combine_axis(voxels, chunk_size, i, j, k, f, index, visit_array, comparison, should_mesh_between_chunks, neighbor_chunks, axis='y')
+-                                length_b = combine_axis(voxels, chunk_size, i, j, k, f, index, visit_array, comparison, should_mesh_between_chunks, neighbor_chunks, axis='x')
+-                                add_quad(mesh_data, i, j, k + 1, length_a, length_b, face_normals[f], index)
+-                            elif f == 1: # Back Z-
+-                                length_a = combine_axis(voxels, chunk_size, i, j, k, f, index, visit_array, comparison, should_mesh_between_chunks, neighbor_chunks, axis='x')
+-                                length_b = combine_axis(voxels, chunk_size, i, j, k, f, index, visit_array, comparison, should_mesh_between_chunks, neighbor_chunks, axis='y')
+-                                add_quad(mesh_data, i, j, k, length_a, length_b, face_normals[f], index)
+-                            # Other faces follow the same pattern with adjusted axes and normals
+-                            else:
+-                                length_a = combine_axis(voxels, chunk_size, i, j, k, f, index, visit_array, comparison, should_mesh_between_chunks, neighbor_chunks, axis='y')
+-                                length_b = combine_axis(voxels, chunk_size, i, j, k, f, index, visit_array, comparison, should_mesh_between_chunks, neighbor_chunks, axis='x')
+-                                add_quad(mesh_data, i, j, k, length_a, length_b, face_normals[f], index)
+-
++                        if visible:
++                            visit_array[visit_ptr_idx] = comparison
++                            
++                            # Combine along axis_a
++                            length_a = 1
++                            ptr_a = voxel_idx
++                            for _ in range(chunk_size - 1):
++                                if axis_a == 'y': ptr_a += stride_y
++                                elif axis_a == 'z': ptr_a += stride_z
++                                else: ptr_a += 1
++                                
++                                if ptr_a >= len(voxels): break
++                                if (voxels[ptr_a].index == index and 
++                                    visible and
++                                    visit_array[ptr_a * 6 + face_idx] != comparison):
++                                    visit_array[ptr_a * 6 + face_idx] = comparison
++                                    length_a += 1
++                                else:
++                                    break
++                                    
++                            # Combine along axis_b
++                            length_b = 1
++                            ptr_b = voxel_idx
++                            for _ in range(chunk_size - 1):
++                                if axis_b == 'y': ptr_b += stride_y
++                                elif axis_b == 'z': ptr_b += stride_z
++                                else: ptr_b += 1
++                                
++                                if ptr_b >= len(voxels): break
++                                if (voxels[ptr_b].index == index and 
++                                    visible and
++                                    visit_array[ptr_b * 6 + face_idx] != comparison):
++                                    visit_array[ptr_b * 6 + face_idx] = comparison
++                                    length_b += 1
++                                else:
++                                    break
++                                    
++                            # Generate quad vertices
++                            x, y, z = i, j, k
++                            if face_idx == 0: # Z+
++                                mesh_data.append((x, y, z + 1, nx, ny, nz, 0, 0, index))
++                                mesh_data.append((x + length_b, y, z + 1, nx, ny, nz, 1, 0, index))
++                                mesh_data.append((x, y + length_a, z + 1, nx, ny, nz, 0, 1, index))
++                                mesh_data.append((x + length_b, y + length_a, z + 1, nx, ny, nz, 1, 1, index))
++                            elif face_idx == 1: # Z-
++                                mesh_data.append((x, y, z, nx, ny, nz, 0, 0, index))
++                                mesh_data.append((x + length_b, y, z, nx, ny, nz, 1, 0, index))
++                                mesh_data.append((x, y + length_a, z, nx, ny, nz, 0, 1, index))
++                                mesh_data.append((x + length_b, y + length_a, z, nx, ny, nz, 1, 1, index))
++                            elif face_idx == 2: # X+
++                                mesh_data.append((x + 1, y, z, nx, ny, nz, 0, 0, index))
++                                mesh_data.append((x + 1, y + length_a, z, nx, ny, nz, 1, 0, index))
++                                mesh_data.append((x + 1, y, z + length_b, nx, ny, nz, 0, 1, index))
++                                mesh_data.append((x + 1, y + length_a, z + length_b, nx, ny, nz, 1, 1, index))
++                            elif face_idx == 3: # X-
++                                mesh_data.append((x, y, z, nx, ny, nz, 0, 0, index))
++                                mesh_data.append((x, y + length_a, z, nx, ny, nz, 1, 0, index))
++                                mesh_data.append((x, y, z + length_b, nx, ny, nz, 0, 1, index))
++                                mesh_data.append((x, y + length_a, z + length_b, nx, ny, nz, 1, 1, index))
++                            elif face_idx == 4: # Y+
++                                mesh_data.append((x, y + 1, z, nx, ny, nz, 0, 0, index))
++                                mesh_data.append((x + length_b, y + 1, z, nx, ny, nz, 1, 0, index))
++                                mesh_data.append((x, y + 1, z + length_a, nx, ny, nz, 0, 1, index))
++                                mesh_data.append((x + length_b, y + 1, z + length_a, nx, ny, nz, 1, 1, index))
++                            elif face_idx == 5: # Y-
++                                mesh_data.append((x, y, z, nx, ny, nz, 0, 0, index))
++                                mesh_data.append((x + length_b, y, z, nx, ny, nz, 1, 0, index))
++                                mesh_data.append((x, y, z + length_a, nx, ny, nz, 0, 1, index))
++                                mesh_data.append((x + length_b, y, z + length_a, nx, ny, nz, 1, 1, index))
+     return mesh_data
+-
+-def is_face_visible(voxels, chunk_size, i, j, k, face_idx, should_mesh_between_chunks, neighbor_chunks):
+-    dx, dy, dz = face_dirs[face_idx]
+-    ni, nj, nk = i + dx, j + dy, k + dz
+-    is_boundary = (ni < 0 or ni >= chunk_size or nj < 0 or nj >= chunk_size or nk < 0 or nk >= chunk_size)
+-    
+-    if is_boundary:
+-        if should_mesh_between_chunks:
+-            return True
+-        neighbor = neighbor_chunks.get((i, j, k), face_idx)
+-        if neighbor is None or not neighbor.allocated:
+-            return True
+-        return neighbor.voxel.index == 0
+-    else:
+-        neighbor_idx = ni * chunk_size * chunk_size + nj * chunk_size + nk
+-        return voxels[neighbor_idx].index == 0
+-
+-def combine_axis(voxels, chunk_size, i, j, k, face_idx, index, visit_array, comparison, should_mesh_between_chunks, neighbor_chunks, axis):
+-    length = 1
+-    stride = chunk_size if axis == 'y' else chunk_size * chunk_size
+-    base_idx = i * chunk_size * chunk_size + j * chunk_size + k
+-    current_idx = base_idx + stride
+-    
+-    while current_idx < len(voxels):
+-        if (voxels[current_idx].index == index and
+-            is_face_visible(voxels, chunk_size, i, j, k, face_idx, should_mesh_between_chunks, neighbor_chunks) and
+-            visit_array[current_idx * 6 + face_idx] != comparison):
+-            visit_array[current_idx * 6 + face_idx] = comparison
+-            length += 1
+-            current_idx += stride
+-        else:
+-            break
+-    return length
+-
+-def add_quad(mesh_data, i, j, k, length_a, length_b, normal, texture_id):
+-    mesh_data.append((i, j, k, normal[0], normal[1], normal[2], 0, 0, texture_id))
+-    mesh_data.append((i + length_b, j, k, normal[0], normal[1], normal[2], 1, 0, texture_id))
+-    mesh_data.append((i, j + length_a, k, normal[0], normal[1], normal[2], 0, 1, texture_id))
+-    mesh_data.append((i + length_b, j + length_a, k, normal[0], normal[1], normal[2], 1, 1, texture_id))
+ ```
+ 
